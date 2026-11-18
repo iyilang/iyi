@@ -31,7 +31,9 @@
 #      expected order exits 1).
 #   5. On Windows, the switch's xmm6-xmm15 restore taken out of a copy of
 #      the runtime fails the exercise's doubles check by name, in the
-#      --release build that keeps doubles in those registers.
+#      --release build that keeps doubles in those registers; and a copy
+#      whose stop keeps the volatile registers of a thread stopped inside
+#      a system call fails 16f's retention check by name.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -684,6 +686,58 @@ case "$(uname -s)" in
     ;;
 esac
 
+# ── 5b. Failure proof: a thread stopped in a system call, on Windows ─────
+# A stop reads every other thread's registers with GetThreadContext, and
+# for a thread inside a system call the volatile ones - rax, rcx, rdx and
+# r8 to r11 - are not the thread's: the kernel did not save them when it
+# was entered, and the context hands back whatever its trap frame last
+# held. `capture_thread_registers` (prelude.iyi) asks with
+# CONTEXT_EXCEPTION_REQUEST and drops them when the answer says the
+# thread is in a system service. The copy keeps them. It was first seen
+# by chance: an idle worker stopped in NtWaitForMultipleObjects kept 16e's
+# rendezvous string through a stale r8 (tssh: 5 runs of 5 at af4b87c91),
+# which the partitioned heap's v2 no longer provokes (0 of 19). The
+# exercise's 16f now sets it up on purpose: a thread takes a page fault
+# with every volatile register naming a 64 MB string, then calls
+# NtWaitForSingleObject with r9 and r11 still naming it, and the main
+# thread collects once the thread's own context, read first, shows the
+# string in a volatile register; 16f runs ahead of 16e's checks, which
+# the copy can fail first by chance. Its first setup cleared them all
+# before a WaitForSingleObject, and GitHub's Windows Server 2025 runners
+# passed the copy (2 runs of 2) where tssh caught it in 60 of 60. Only
+# Windows answers a context that way.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "failure proof: a stop that keeps a system call's volatile registers is caught"
+    mkdir -p volatile/iyi
+    cp -R "$REPO/src/iyi/." volatile/iyi/
+    awk '{ if ($0 == "          in_call = flags & 0x80000000_u64 != 0_u64 && flags & 0x10000000_u64 != 0_u64") { print "          in_call = false"; found = found + 1; next } print }
+         END { if (found != 1) exit 3 }' \
+      "$REPO/src/iyi/prelude.iyi" > volatile/iyi/prelude.iyi
+    if [ $? -ne 0 ]; then
+      echo "the test this proof takes out is not in capture_thread_registers any more; update the proof"
+      exit 1
+    fi
+    if ! IYI_PATH="$WORK/volatile;$REPO/src" "$IYI" build -Dheap_partitions "$REPO/bench/concurrency_exercise.iyi" \
+         -o volatile-exercise > build-volatile.log 2>&1; then
+      echo "the patched runtime did not build:"
+      tail -5 build-volatile.log
+      exit 1
+    fi
+    timeout 120 ./volatile-exercise > volatile.txt 2>&1
+    if [ $? -ne 1 ] || ! grep -Eq 'FAIL: (a thread stopped in a system call kept|channel: 64 MB received through a rendezvous left)' volatile.txt; then
+      echo "a stop that keeps a system call's volatile registers passed the exercise's checks, so they check nothing:"
+      grep -m1 '^a thread stopped in a system call' volatile.txt
+      tail -5 volatile.txt
+      exit 1
+    fi
+    echo "  caught: $(grep -m1 'FAIL: ' volatile.txt)"
+    ;;
+  *)
+    step "failure proof: a stop that keeps a system call's volatile registers is caught: not here, because only Windows answers a thread's context with registers the kernel did not save"
+    ;;
+esac
+
 # ── 6. Failure proof: a stack mapped at spawn is caught ─────────────────
 step "failure proof: a stack mapped when a task is spawned is caught"
 mkdir -p eager/iyi
@@ -737,7 +791,7 @@ sleep_proof() { # sleep_proof <label> <dir> <awk program> <phrase>
   echo "  caught: $(grep -m1 "$4" "$2.txt")"
 }
 sleep_proof "a sleep queue walked on every insertion" walked \
-  '/^    fiber.sleep_seq = st.sleep_seq$/ { print; print "    walk = st.sleep_head"; print "    walk = walk.sleep_child if walk.is_a?(IyiFiber)"; print "    while walk.is_a?(IyiFiber)"; print "      @@sleep_steps = @@sleep_steps &+ 1_u64"; print "      walk = walk.next_sleep"; print "    end"; found = 1; next }
+  '/^    fiber.sleep_seq = st.sleep_seq$/ { print; print "    walk = st.sleep_head"; print "    walk = walk.sleep_child if walk.is_a?(IyiFiber)"; print "    while walk.is_a?(IyiFiber)"; print "      IyiStat.bump(IyiStat::SLEEP_STEPS, 1_u64)"; print "      walk = walk.next_sleep"; print "    end"; found = 1; next }
    { print } END { if (!found) exit 3 }' \
   'FAIL: sleep: 32000 sleepers took'
 sleep_proof "a sleep queue that puts the latest first" latest \

@@ -724,9 +724,17 @@ else
     echo "  the shared-scratch patch did not apply"
     status=1
   elif ! IYI_PATH="$WORK/scratch${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/shared-scratch" "$WORK/shared.iyi" > "$WORK/scratch.build" 2>&1; then
-    echo "  the shared-scratch copy did not build:"
-    tail -12 "$WORK/scratch.build"
-    status=1
+    # The reach rule (SPEC.md III.4.5, heap22) sees the class variable a
+    # parallel unit reaches through the match, and refuses the build: the
+    # copy is caught before it runs, but only by that sentence, naming the
+    # state and the path to it.
+    if grep -qF 'reaches `@@last : (Std::Regex::RxRun | Nil)` (not Share) through `share` → `answer` → `Regex#match` → `RxNfa#capture` → `RxRun.reused` → `@@last`' "$WORK/scratch.build"; then
+      echo "  scratch shared across matches is refused by the reach rule: @@last, through RxRun.reused"
+    else
+      echo "  the shared-scratch copy did not build, and not for its @@last:"
+      tail -12 "$WORK/scratch.build"
+      status=1
+    fi
   else
     for attempt in 1 2 3 4 5; do
       timeout 120 "$WORK/shared-scratch" > "$WORK/scratch.out" 2>&1

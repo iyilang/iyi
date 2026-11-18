@@ -910,18 +910,19 @@ broken() { # name, awk program[, file in src/iyi[, program in bench]]
 # through and exited 0 in 2 on one prelude and 1 on the next. A run that
 # ends any way but exit 1 at the sentence is run again, up to five times;
 # one ending there is the proof, and none in five is a failure of the gate.
+# CAUGHT_RUNS raises the five for one proof (`CAUGHT_RUNS=60 caught ...`).
 caught() { # name, expected FAIL text, step arguments...
   local name="$1" want="$2" code attempt
   shift 2
-  for attempt in 1 2 3 4 5; do
+  for (( attempt = 1; attempt <= ${CAUGHT_RUNS:-5}; attempt++ )); do
     timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
     code=$?
     [ "$code" -eq 1 ] && grep -qF "$want" "$name.txt" && break
   done
   if [ "$code" -ne 1 ] || ! grep -qF "$want" "$name.txt"; then
-    echo "the broken copy $name was not caught at \"$want\" (exit $code):"; tail -20 "$name.txt"; exit 1
+    echo "the broken copy $name was not caught at \"$want\" in ${CAUGHT_RUNS:-5} runs (the last: exit $code):"; tail -20 "$name.txt"; exit 1
   fi
-  echo "  exits 1 at \"$(grep -m1 -F "$want" "$name.txt" | sed 's/^FAIL: //; s/^iyi: panic: //')\""
+  echo "  exits 1 at \"$(grep -m1 -F "$want" "$name.txt" | sed 's/^FAIL: //; s/^iyi: panic: //')\" (run $attempt)"
 }
 
 step "failure proof: a cross-thread wake that does not ring is a lost wakeup"
@@ -1014,7 +1015,12 @@ else
   broken lostcancel '/^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; next } { print }'
   caught lostcancel 'wakes, cancels: still waiting after 5000 ms' wakes --only=cancels --watch=5000
   broken lostword '/def self.park_on\(/ { inpark = 1 } inpark && held == "" && /^    IyiChanLock.lock\(lock\)$/ { held = $0; next } inpark && held != "" && /^      IyiChanLock.unlock\(lock\)$/ { next } inpark && held != "" && /^    end$/ { print; print held; held = ""; inpark = 0; next } { print }'
-  caught lostword 'wakes, words: turn' wakes --only=words --watch=5000
+  # On Namespace's macOS 15 VM (6 vCPUs) the copy handed all 40,000 turns
+  # in 5 runs of 5 in two of nine jobs (134616549649, 134738824347), each
+  # run a quarter of a second, where an M5 Max caught it in 99 runs of 100,
+  # each at the 5000 ms watch: the race is rarer there, not gone, so the
+  # copy gets up to 60 runs, at most about 15 s on that VM.
+  CAUGHT_RUNS=60 caught lostword 'wakes, words: turn' wakes --only=words --watch=5000
 fi
 
 step "failure proof: a plain add loses counts when tasks run at the same instant"

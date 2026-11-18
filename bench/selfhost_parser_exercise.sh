@@ -796,6 +796,96 @@ done
 
 echo "  Parity summary: $((fixture_count - diverged))/$fixture_count syntax fixtures match ($total_matched_nodes total nodes)"
 
+echo "== Require and empty-array locations against the hosted parser"
+cat > "$WORK/require_locations.iyi" <<'IYI_LOCATIONS'
+import compiler/syntax/ast::{ASTNode, ArrayLiteral, Require}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/visitor::{Visitor}
+class RequireLocations < Visitor
+  def visit(node : Require) : Bool
+    if loc = node.location
+      puts "#{loc.line_number}:#{loc.column_number}"
+    else
+      puts "missing"
+    end
+    false
+  end
+  def visit(node : ArrayLiteral) : Bool
+    if loc = node.location
+      puts "#{loc.line_number}:#{loc.column_number}"
+    else
+      puts "missing"
+    end
+    false
+  end
+end
+node = Parser.new(File.read(Program.args[0]), Program.args[0]).parse
+node.accept(RequireLocations.new)
+IYI_LOCATIONS
+cat > "$WORK/require_locations.cr" <<'HOSTED_LOCATIONS'
+require "compiler/iyi/syntax"
+class RequireLocations < Iyi::Visitor
+  def visit(node)
+    true
+  end
+  def visit(node : Iyi::Require)
+    if loc = node.location
+      puts "#{loc.line_number}:#{loc.column_number}"
+    else
+      puts "missing"
+    end
+    false
+  end
+  def visit(node : Iyi::ArrayLiteral)
+    if loc = node.location
+      puts "#{loc.line_number}:#{loc.column_number}"
+    else
+      puts "missing"
+    end
+    false
+  end
+end
+parser = Iyi::Parser.new(File.read(ARGV[0]))
+parser.filename = ARGV[0]
+parser.parse.accept(RequireLocations.new)
+HOSTED_LOCATIONS
+# The input is written here rather than kept as a fixture. Its second and third lines are
+# indented on purpose, so that the expected columns are not 1, and the repository's format
+# check straightens every tracked .iyi file.
+cat > "$WORK/require_input.iyi" <<'REQUIRE_INPUT'
+require "./first"
+  require "./second"
+  [] of Int32
+REQUIRE_INPUT
+CRYSTAL_PATH="$REPO_NATIVE/src" "$HOSTED_COMPILER" build -o "$WORK_NATIVE/require_hosted$EXE" "$WORK_NATIVE/require_locations.cr"
+"$WORK/require_hosted$EXE" "$WORK_NATIVE/require_input.iyi" > "$WORK/require_hosted.out"
+printf '1:1\n2:3\n3:3\n' > "$WORK/require_expected.out"
+if ! cmp -s "$WORK/require_expected.out" "$WORK/require_hosted.out"; then
+  echo "  hosted require locations differ from the expected 1:1, 2:3, 3:3"
+  status=1
+fi
+check_require_locations() {
+  if ! "$IYI" build -o "$WORK_NATIVE/require_port$EXE" "$WORK_NATIVE/require_locations.iyi" > "$WORK/require_build.log" 2>&1; then
+    invalid_mutant "require location probe did not build"
+    return $?
+  fi
+  if ! "$WORK/require_port$EXE" "$WORK_NATIVE/require_input.iyi" > "$WORK/require_port.out"; then
+    invalid_mutant "require location probe did not run"
+    return $?
+  fi
+  cmp -s "$WORK/require_hosted.out" "$WORK/require_port.out"
+}
+if ! check_require_locations; then
+  echo "  port require locations differ from hosted parser"
+  status=1
+fi
+prove_mutation "require loses its source location" "$PARSER" \
+  'node = Require.new(literal.as(StringLiteral).value).at(location)' \
+  'node = Require.new(literal.as(StringLiteral).value)' -- check_require_locations || status=1
+prove_mutation "empty array loses its source location" "$PARSER" \
+  'ArrayLiteral.new([] of ASTNode, of_type).at(location)' \
+  'ArrayLiteral.new([] of ASTNode, of_type)' -- check_require_locations || status=1
+
 echo
 echo "== 4. Malformed-input and boundary rejection checks"
 for bad in \

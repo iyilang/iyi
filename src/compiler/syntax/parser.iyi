@@ -2225,11 +2225,12 @@ pub class Parser < Lexer
   end
 
   def parse_empty_array_literal : ASTNode
+    location = @token.location
     next_token_skip_space
     if @token.keyword == Keyword::OF
       next_token_skip_space_or_newline
       of_type = parse_type_spec
-      ArrayLiteral.new([] of ASTNode, of_type)
+      ArrayLiteral.new([] of ASTNode, of_type).at(location)
     else
       syntax_error("for empty arrays use '[] of ElementType'")
     end
@@ -3253,6 +3254,7 @@ pub class Parser < Lexer
 
   # iyi: `require "path"` loads a file at file level, a node of its own.
   def parse_require : ASTNode
+    location = @token.location
     if @type_nest > 0
       syntax_error("can't require inside type declarations", @token.location)
     end
@@ -3262,7 +3264,7 @@ pub class Parser < Lexer
       syntax_error("expected a string literal after require", @token.location)
     end
     skip_space
-    node = Require.new(literal.as(StringLiteral).value)
+    node = Require.new(literal.as(StringLiteral).value).at(location)
     node.end_location = literal.end_location
     node
   end

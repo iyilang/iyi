@@ -19,6 +19,7 @@ end
 import std/file
 import std/random::{Random}
 import std/static_array
+import std/mutex::{Mutex}
 
 # Every expected value below is what Crystal 1.21's `Random.new(seed)`
 # answers for the same call: a seeded program ported from there prints
@@ -217,5 +218,36 @@ assert_str "tK75H3c=", s.base64(5), "base64(5)"
 assert_str "k_Cb82s", s.urlsafe_base64(5), "urlsafe_base64(5)"
 assert_str "h6fnSEg=", s.urlsafe_base64(5, padding: true), "urlsafe_base64(5, padding: true)"
 puts "  a seeded generator draws Int64, UInt64, ranges, floats and bytes as the other library does"
+
+puts "\n== a stream a thread"
+# Class-level draws from four parallel units at once, on up to four
+# threads: every thread draws from its own stream, so no two of the
+# 80,000 64-bit draws are equal. One generator every thread shared
+# answered two threads that read one state the same number, and a
+# parallel unit reaching it is refused by the reach rule (SPEC.md
+# III.4.5), which is how the broken copy that shares one is caught.
+IyiWorkers.count = 4
+drawn_by_units = Mutex.new { [] of UInt64 }
+group do |g|
+  4.times do
+    g.spawn(unit: :new) do
+      20000.times do
+        v = Random.rand(18446744073709551615_u64)
+        drawn_by_units.lock { |all| all << v }.or_panic
+      end
+      0
+    end
+  end
+end
+drawn_count = drawn_by_units.get { |all| all.size }.or_panic
+distinct_count = drawn_by_units.get do |all|
+  distinct = {} of UInt64 => Bool
+  all.each { |v| distinct[v] = true }
+  distinct.size
+end.or_panic
+assert_true drawn_count == 80000, "four units drew 20,000 each: #{drawn_count}"
+assert_true distinct_count == 80000, "80,000 draws from four threads hold #{distinct_count} distinct values"
+assert_true Random.rand(10) < 10, "the main thread draws after them"
+puts "  four parallel units draw 80,000 distinct 64-bit values, each thread from its own stream"
 
 puts "\nALL CHECKS PASSED"

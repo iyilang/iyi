@@ -105,7 +105,7 @@ for src in "$REPO"/src/iyi/*.iyi; do
   input="$src"
   if [ "$name" = "concurrency.iyi" ]; then
     input="$WORK/concurrency-with-atomic.iyi"
-    printf 'require "%s/src/iyi/atomic"\nrequire "%s/src/iyi/concurrency"\n' "$REPO_NATIVE" "$REPO_NATIVE" > "$input"
+    printf 'require "iyi/atomic"\nrequire "iyi/concurrency"\n' > "$input"
   fi
   got="$(verify_one "$input")"
   checked=$((checked + 1))

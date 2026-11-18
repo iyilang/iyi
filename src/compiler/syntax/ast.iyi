@@ -3188,7 +3188,7 @@ pub class Call < ASTNode
       return
     end
     if o = @obj
-      o.to_s(sb)
+      print_expression_operand(o, sb)
       sb << "."
     end
     sb << @name

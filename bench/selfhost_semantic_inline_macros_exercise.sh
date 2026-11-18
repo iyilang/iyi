@@ -444,6 +444,13 @@ check_lib_parser_mode() {
   fi
   "$probe" "$fixture" > "$WORK/lib_mut.port" 2>"$WORK/lib_mut.err" || rc=$?
   if [ "$rc" -ne 0 ]; then
+    # The mutant parses every lib body with an inline site as an ordinary body, the prelude's included,
+    # so it can fail while loading. The unmutated driver loaded this fixture above, so a parse failure
+    # here belongs to the mutation.
+    if grep -Eq '^iyi: panic: Syntax error in .*\.iyi:[0-9]+:[0-9]+: ' "$WORK/lib_mut.err"; then
+      echo "decisive: a lib body no longer parses: $(grep -E -m 1 '^iyi: panic: Syntax error in ' "$WORK/lib_mut.err" | sed "s#$REPO_NATIVE/##")"
+      return 1
+    fi
     echo "INVALID: lib parser mutant exited $rc"
     cat "$WORK/lib_mut.err"
     return 2

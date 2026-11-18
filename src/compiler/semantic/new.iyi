@@ -164,8 +164,11 @@ pub def argless_initialize(location : Location?) : Def
   init
 end
 
-# The types the hosted pass never gives a `new` (Object, Value, Number, Int, Float,
-# Struct, Enum, Tuple, Proc): a builtin has its own construction.
+# The types the hosted pass never gives a `new` (new.cr:31-39). Object, Value, Number, Int, Float,
+# Struct, Enum, Tuple, NamedTuple and Proc are named there. The primitives (Bool, Char, Symbol and the
+# integer and float types) are left out there by their class: the hosted compiler holds them as
+# primitive types, which are neither NonGenericClassType nor GenericClassType, and this port holds
+# them as ordinary struct types.
 pub def builtin_for_new?(program : SemanticProgram, type : Type) : Bool
   return true if type == program.object_type
   return true if type == program.value_type
@@ -173,7 +176,10 @@ pub def builtin_for_new?(program : SemanticProgram, type : Type) : Bool
   return true if type == program.enum_type
   return true if type == program.tuple_type
   return true if type == program.proc_type
-  ["Number", "Int", "Float"].any? do |name|
+  names = ["Number", "Int", "Float", "NamedTuple", "Bool", "Char", "Symbol",
+           "Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128",
+           "Float32", "Float64"]
+  names.any? do |name|
     other = program.types[name]?
     other.nil? ? false : type == other.as(Type)
   end

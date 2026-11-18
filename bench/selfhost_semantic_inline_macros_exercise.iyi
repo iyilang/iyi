@@ -82,10 +82,6 @@ module BenchSelfhostInlineMacrosExercise
       node.accept(visitor)
       visitor.finish
     end
-    # The oracle dumps after the hosted top_level_semantic, whose `new` stage gives a type with no
-    # initialize in its ancestry an argless `new` and `initialize`. The port makes them when its main
-    # visitor starts (main_visitor.iyi), so the dump runs that step here and stands at the same phase.
-    define_new_methods(prog)
     {prog, entry}
   end
 
@@ -130,6 +126,11 @@ module BenchSelfhostInlineMacrosExercise
 
   def self.dump_file(path : String) : String
     prog, entry = load_program(path)
+    # The oracle dumps after the hosted top_level_semantic, whose `new` stage gives a type with no
+    # initialize in its ancestry an argless `new` and `initialize`. The port makes them when its main
+    # visitor starts (main_visitor.iyi), so the declaration dump runs that step here and stands at the
+    # same phase. The other modes go on to the main visitor, which runs it itself.
+    define_new_methods(prog)
     sb = String::Builder.new
     sb << dump_program_declarations(prog, entry)
     prog.types.keys.sorted.each do |name|

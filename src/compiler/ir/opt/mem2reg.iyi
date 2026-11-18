@@ -159,7 +159,7 @@ def place_slot_phis(slot : PromotedSlot, id : Int32, cfg : Cfg, dom : DomTree, e
         phi_slot[phi] = id
         editor.add_phi(cfg.block(y), phi)
         unless queued.has_key?(y)
-        work << y # iterate: phi blocks define the slot too
+          work << y # iterate: phi blocks define the slot too
           queued[y] = true
         end
       end

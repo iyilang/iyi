@@ -291,8 +291,8 @@ fi
 
 echo '== 6. mutation proofs, each rebuilding iyi-opt'
 prove_mutation 'M1: iterated phi frontier' src/compiler/ir/opt/mem2reg.iyi \
-  '        work << y # iterate: phi blocks define the slot too' \
-  '        work << y if false # iterate: phi blocks define the slot too' \
+  '          work << y # iterate: phi blocks define the slot too' \
+  '          work << y if false # iterate: phi blocks define the slot too' \
   -- mutation_check M1 mem2reg nested_loops || fail 'M1 was not caught'
 mutation_result M1
 prove_mutation 'M2: stores have side effects' src/compiler/ir/opt/effects.iyi \

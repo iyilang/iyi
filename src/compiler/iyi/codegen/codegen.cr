@@ -848,6 +848,13 @@ module Iyi
       # pool neither calls it nor carries it (`iyi_preempt_on?`).
       return false if node.name == PREEMPT_NAME && !iyi_preempt_on?
 
+      # The JSPI host entry and its wrappers are runtime-only exports. Keep
+      # them only when a freestanding program has a path that can park.
+      if @program.has_flag?("wasm32") && !@program.has_flag?("wasi") && !@program.iyi_wasm_tasks_reached? &&
+         node.name.in?("iyi_fiber_entry", "__iyi_wasm_swap", "__iyi_wasm_idle", "__iyi_wasm_fiber_exit")
+        return false
+      end
+
       unless node.external.dead?
         # Mark as dead so we don't generate it twice
         # (can happen with well known functions like __crystal_raise)

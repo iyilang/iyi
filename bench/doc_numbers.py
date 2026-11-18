@@ -329,21 +329,18 @@ def unsafe_marked(paths) -> int:
 def targets() -> int:
     """Distinct targets CI type-checks the library for.
 
-    Read out of the workflow rather than counted by hand, which is how the docs
-    came to say eight while the workflow listed nine. `x86_64-w64-mingw32` and
-    `x86_64-windows-gnu` are the same platform spelled by two vendors, so the
-    audit list adds nothing the type-check list does not already name.
+    Read both the Crystal type-check list and iyi's own-prelude audit list.
+    `x86_64-w64-mingw32` and `x86_64-windows-gnu` name the same platform.
     """
     text = (REPO / ".github/workflows/iyi.yml").read_text()
-    m = re.search(
-        r"Type-check the standard library.*?for target in (.*?); do", text, re.S
-    )
-    if not m:
-        raise SystemExit(
-            "doc_numbers: the workflow's type-check target list moved; "
-            "this check cannot find it and so is not checking anything"
-        )
-    return len([t for t in m.group(1).replace("\\", "").split() if t])
+    targets = set()
+    for step in ("Type-check the standard library", "What an iyi program asks each platform for"):
+        match = re.search(re.escape(step) + r".*?for target in (.*?); do", text, re.S)
+        if not match:
+            raise SystemExit(f"doc_numbers: the workflow's {step} target list moved")
+        targets.update(match.group(1).replace("\\", "").split())
+    return len({"x86_64-windows-gnu" if target == "x86_64-w64-mingw32" else target
+                for target in targets})
 
 
 def iyimod_format() -> int:
@@ -381,7 +378,7 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("library_with_floor", r"([\d,]+) with every platform's floor", "SPEC.md", 1),
     ("library_with_floor", r"pening `src/iyi/` counts ([\d,]+)", "SPEC.md", 1),
     ("prelude_library", r"of which the library is ([\d,]+)", "SPEC.md", 1),
-    ("prelude_library", r"the library:\n\*\*([\d,]+) lines\*\* of the", "SPEC.md", 1),
+    ("prelude_library", r"the library:\n\*\*([\d,]+) lines\*\*, measured", "SPEC.md", 1),
     ("prelude", r"still true of iyi's own ([\d,]+) lines", "SPEC.md", 1),
     ("prelude", r"Done: ([\d,]+) lines", "SPEC.md", 1),
     ("prelude", r"\| ([\d,]+)-line own prelude", "SPEC.md", 1),
@@ -426,8 +423,8 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     # figure was right while the seven sentences above it were wrong.
     ("generated", r"30 modules of 10 types, ([\d,]+) lines", "SPEC.md", 1),
     ("targets", r"compiles for \*\*(\w+) targets\*\*", "README.md", 1),
-    ("targets", r"for (\w+) targets and was tested on one", "SPEC.md", 1),
-    ("targets", r"Four of the (\w+) now", "SPEC.md", 1),
+    ("targets", r"for (\w+) targets; initially", "SPEC.md", 1),
+    ("targets", r"Six of the (\w+) now", "SPEC.md", 1),
     # The count of sample programs was quoted as a word and drifted by three
     # before anything noticed, because the digit patterns above cannot see a
     # spelled-out number.

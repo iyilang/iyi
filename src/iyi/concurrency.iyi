@@ -64,6 +64,30 @@
 # otherwise inlines the body and the push/ret discipline corrupts the
 # caller — measured, not feared: the release build faulted until it said so.
 @[Unsafe("the scheduler: fiber stacks, context switches and the runtime's C entry points")]
+{% if flag?(:wasm32) %}
+  @[Link(wasm_import_module: "iyi")]
+  lib LibIyiWasmTasks
+    fun swap(from : Int32, to : Int32, to_stack_top : Int32) : Void
+    fun idle(timeout_ms : Int32) : Void
+    fun fiber_exit(next_fiber : Int32, next_stack_top : Int32) : NoReturn
+  end
+
+  fun __iyi_wasm_swap(from : Int32, to : Int32, top : Int32) : Nil
+    LibIyiWasmTasks.swap(from, to, top)
+  end
+
+  fun __iyi_wasm_idle(timeout : Int32) : Nil
+    LibIyiWasmTasks.idle(timeout)
+  end
+
+  fun __iyi_wasm_fiber_exit(next_fiber : Int32, top : Int32) : NoReturn
+    LibIyiWasmTasks.fiber_exit(next_fiber, top)
+  end
+
+  fun iyi_fiber_entry(fiber : Int32) : Nil
+    IyiScheduler.run_spawned_fiber
+  end
+{% else %}
 @[NoInline]
 @[Naked]
 fun __iyi_ctx_swap(current : Pointer(UInt64), target : Pointer(UInt64)) : Nil
@@ -204,6 +228,7 @@ fun __iyi_fiber_entry_address : UInt64
   {% end %}
   0_u64
 end
+{% end %}
 
 # ── The poller's syscalls ──────────────────────────────────────────────
 #
@@ -295,7 +320,7 @@ end
   end
 {% elsif flag?(:win32) %}
   # Windows uses kernel32 APIs directly via LibC
-{% else %}
+{% elsif flag?(:linux) %}
   fun __iyi_conc_syscall3(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
     result = uninitialized Int64
     {% if flag?(:x86_64) %}
@@ -347,6 +372,8 @@ def __iyi_monotonic_ns : Int64
     sec * 1000000000_i64 + (rem * 1000000000_i64) // freq
   {% elsif flag?(:darwin) %}
     LibC.clock_gettime_nsec_np(4).to_i64
+  {% elsif flag?(:wasm32) %}
+    LibIyiHost.clock_ns(1)
   {% else %}
     # Through the vDSO (`IyiClock`), with the syscall behind it. The
     # timespec is in that frame: a heap block here was an allocation
@@ -420,6 +447,48 @@ enum IyiFiberState : Int32
   Done      = 6 # never scheduled again; its stack is never reused
   Pooled    = 7 # a pool worker's own fiber, which waits for nothing
 end
+
+{% if flag?(:wasm32) %}
+  # Pooled stacks remain atomic heap objects. The scanned slot buffer roots
+  # them without treating stale stack contents as roots. Each stack takes
+  # five 64 KiB pages, so wasm32 can hold at most 65,536 / 5 of them.
+  class IyiWasmStackPool
+    MAX_CAPACITY = 13107
+    @[UnsafeReach("the wasm scheduler's stack pool is accessed only on its single thread")]
+    @@slots : Pointer(Pointer(UInt8)) = Pointer(Pointer(UInt8)).new(0_u64)
+    @@count : Int32 = 0
+    @@capacity : Int32 = 0
+
+    def self.size : Int32
+      @@count
+    end
+
+    def self.take : Pointer(UInt8)
+      return Pointer(UInt8).new(0_u64) if @@count == 0
+      index = @@count - 1
+      stack = @@slots[index]
+      @@slots[index] = Pointer(UInt8).new(0_u64)
+      @@count = index
+      stack
+    end
+
+    def self.put(stack : Pointer(UInt8)) : Nil
+      return if stack.address == 0_u64 || @@count >= MAX_CAPACITY
+      if @@count == @@capacity
+        capacity = @@capacity == 0 ? 16 : @@capacity * 2
+        capacity = MAX_CAPACITY if capacity > MAX_CAPACITY
+        if @@slots.address == 0_u64
+          @@slots = Pointer(Pointer(UInt8)).malloc(capacity.to_u64)
+        else
+          @@slots = @@slots.realloc(capacity.to_u64)
+        end
+        @@capacity = capacity
+      end
+      @@slots[@@count] = stack
+      @@count = @@count + 1
+    end
+  end
+{% end %}
 
 class IyiFiber
   property state : IyiFiberState
@@ -502,6 +571,10 @@ class IyiFiber
 
   # The saved stack pointer, meaningful only while suspended.
   @sp : UInt64
+  {% if flag?(:wasm32) %}
+    @wasm_stack : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
+    WASM_STACK_CANARY = 0x3C6EF372FE94F82B_u64
+  {% end %}
 
   # The spawned body. The main fiber has none. Set only by the runtime's
   # own spawns: a body set from outside would run on whatever thread takes
@@ -791,12 +864,21 @@ class IyiFiber
   # next (`IyiScheduler.reap_dying`), because nothing can free the stack
   # it is standing on.
   def prepare_stack : Nil
-    base = IyiScheduler.take_stack
-    if base != 0
-      settle_stack(base)
-      return
-    end
-    settle_stack(map_stack)
+    {% if flag?(:wasm32) %}
+      stack = IyiWasmStackPool.take
+      stack = IyiHeap.alloc_atomic(STACK_BYTES).as(Pointer(UInt8)) if stack.address == 0_u64
+      @wasm_stack = stack
+      base = @wasm_stack.address
+      Pointer(UInt64).new(base).value = WASM_STACK_CANARY
+      @stack_top = base + STACK_BYTES
+    {% else %}
+      base = IyiScheduler.take_stack
+      if base != 0
+        settle_stack(base)
+        return
+      end
+      settle_stack(map_stack)
+    {% end %}
   end
 
   def map_stack : UInt64
@@ -944,8 +1026,25 @@ class IyiFiber
     {% end %}
     @stack_top = 0_u64
     @sp = 0_u64
-    IyiScheduler.give_stack(top - STACK_BYTES)
+    {% if flag?(:wasm32) %}
+      IyiWasmStackPool.put(@wasm_stack)
+      @wasm_stack = Pointer(UInt8).new(0_u64)
+    {% else %}
+      IyiScheduler.give_stack(top - STACK_BYTES)
+    {% end %}
   end
+
+  {% if flag?(:wasm32) %}
+    def check_stack : Nil
+      base = @wasm_stack.address
+      return if base == 0_u64
+      if Pointer(UInt64).new(base).value != WASM_STACK_CANARY
+        message = "iyi: fiber shadow stack overflow\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(1)
+      end
+    end
+  {% end %}
 
   def sp_slot : Pointer(UInt64)
     pointerof(@sp)
@@ -1356,6 +1455,19 @@ class IyiSchedulerState
   property watch_ticks : UInt64
   property looks : UInt64
 
+  {% if flag?(:wasm32) %}
+    # Wasm has one scheduler and no native IyiStat page.
+    @wasm_sleep_steps : UInt64 = 0_u64
+
+    def wasm_sleep_steps : UInt64
+      @wasm_sleep_steps
+    end
+
+    def count_wasm_sleep_step : Nil
+      @wasm_sleep_steps = @wasm_sleep_steps &+ 1_u64
+    end
+  {% end %}
+
   {% if flag?(:win32) %}
     # Windows' deadline: the timer this thread arms for the nearest
     # sleeper, which its poller waits on beside its doorbell and, when it
@@ -1627,6 +1739,9 @@ class IyiChanLock
   end
 
   private def self.contend(word : Pointer(Atomic(UInt64)), wait : Int32) : Nil
+    {% if flag?(:wasm32) %}
+      raise "iyi: scheduler lock contention on single-threaded wasm"
+    {% else %}
     turns = 0
     spinner = false
     while true
@@ -1665,6 +1780,7 @@ class IyiChanLock
         pauses = pauses &- 1
       end
     end
+    {% end %}
   end
 
   def self.lock(word : Pointer(Atomic(UInt64)), wait : Int32 = 1) : Nil
@@ -1894,7 +2010,9 @@ class IyiScheduler
     fiber = state.current
     return fiber if fiber.is_a?(IyiFiber)
     main = IyiFiber.main
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    {% if flag?(:wasm32) %}
+      main.stack_top = pointerof(LibSymbols.__heap_base).address
+    {% elsif !flag?(:gc_none) && !flag?(:gc_boehm) %}
       top = IyiThread.current_stack_top
       {% if flag?(:win32) %}
         top = IyiRoots.stack_base if top == 0
@@ -2288,7 +2406,7 @@ class IyiScheduler
     fiber.state = IyiFiberState::Runnable
     fiber.next_run = nil
     state = self.state
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && !flag?(:wasm32) %}
       if state.worker && fiber.unit.is_a?(IyiUnit)
         fiber.unlist(state.object_id)
         unless fiber.homebound
@@ -2328,6 +2446,9 @@ class IyiScheduler
   # channel's waker does not, and the lock is taken here only for an
   # inbox or the shared queue.
   def self.ready(fiber : IyiFiber, held : Bool = true) : Nil
+    {% if flag?(:wasm32) %}
+      enqueue(fiber)
+    {% else %}
     home = fiber.home
     if !@@shared || !home.is_a?(IyiSchedulerState)
       enqueue(fiber)
@@ -2359,6 +2480,7 @@ class IyiScheduler
     IyiSchedLock.lock unless held
     send_home(home, fiber)
     IyiSchedLock.unlock unless held
+    {% end %}
   end
 
   # *fiber*, runnable, into the inbox of *home*, another thread, which is
@@ -2754,20 +2876,25 @@ class IyiScheduler
     parks = st.parks &+ 1_u64
     st.parks = parks
     poll_now(st) if parks % POLL_EVERY == 0_u64
-    if st.worker
-      fiber = worker_next(st)
-      if fiber.is_a?(IyiFiber)
-        switch_to(fiber)
+    fiber = nil.as(IyiFiber?) if false
+    {% unless flag?(:wasm32) %}
+      if st.worker
+        fiber = worker_next(st)
+        if fiber.is_a?(IyiFiber)
+          switch_to(fiber)
+          return
+        end
+        root = st.root
+        raise "a pool worker with no fiber of its own" unless root.is_a?(IyiFiber)
+        release_unit(st)
+        switch_to(root)
         return
       end
-      root = st.root
-      raise "a pool worker with no fiber of its own" unless root.is_a?(IyiFiber)
-      release_unit(st)
-      switch_to(root)
-      return
-    end
+    {% end %}
     while true
-      take_mail(st) if st.mail?
+      {% unless flag?(:wasm32) %}
+        take_mail(st) if st.mail?
+      {% end %}
       {% if flag?(:iyi_chaos) %}
         fiber = IyiChaos.pick(st)
       {% else %}
@@ -2785,11 +2912,15 @@ class IyiScheduler
       {% if flag?(:iyi_chaos) %}
         IyiChaos.at_idle
       {% end %}
-      if @@shared
-        wait_shared(st)
-      else
+      {% if flag?(:wasm32) %}
         wait_for_events(true)
-      end
+      {% else %}
+        if @@shared
+          wait_shared(st)
+        else
+          wait_for_events(true)
+        end
+      {% end %}
     end
   end
 
@@ -2921,7 +3052,10 @@ class IyiScheduler
     # the next switch knows what is in place.
     def self.install_alloc(st : IyiSchedulerState, record : UInt64) : Nil
       st.alloc = record
-      IyiHeap.install(record)
+      # Wasm has one heap and no partition cache to install.
+      {% unless flag?(:wasm32) %}
+        IyiHeap.install(record)
+      {% end %}
     end
 
     # The running *fiber*'s `alloc` in place, after a bracket changed it
@@ -3023,7 +3157,7 @@ class IyiScheduler
       maker = @@stack_maker
       maker.call(fiber) unless maker.is_a?(Nil)
     end
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && !flag?(:wasm32) %}
       if st.worker
         spins = 0
         while fiber.on_cpu?
@@ -3045,8 +3179,21 @@ class IyiScheduler
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       install_alloc(st, fiber.alloc) if fiber.alloc != st.alloc
     {% end %}
-    st.current = fiber
-    __iyi_ctx_swap(previous.sp_slot, fiber.sp_slot)
+    {% if flag?(:wasm32) %}
+      previous.check_stack
+      fiber.check_stack
+      st.current = fiber
+      target = fiber.sp_slot.address.unsafe_to_i32
+      top = fiber.stack_top.unsafe_to_i32
+      if previous.state == IyiFiberState::Done
+        __iyi_wasm_fiber_exit(target, top)
+      else
+        __iyi_wasm_swap(previous.sp_slot.address.unsafe_to_i32, target, top)
+      end
+    {% else %}
+      st.current = fiber
+      __iyi_ctx_swap(previous.sp_slot, fiber.sp_slot)
+    {% end %}
     # Running from here, on its own stack, and not before: the collector's
     # fiber walk skips the running fiber, whose stack the thread's own scan
     # covers from its sp, and a fiber marked running before the switch got
@@ -4073,19 +4220,23 @@ class IyiScheduler
     return if fiber.cancelled
     fiber.cancelled = true
     home = fiber.home
-    if home.is_a?(IyiSchedulerState)
-      if !@@shared
-        cancel_wait(fiber)
-      elsif fiber.unit.is_a?(IyiUnit)
-        cancel_moving(fiber)
-      elsif home.object_id == state.object_id
-        cancel_wait(fiber)
-      elsif fiber.claim_any
-        ready(fiber)
-      elsif fiber.state != IyiFiberState::Joining
-        post_cancel(home, fiber)
+    {% if flag?(:wasm32) %}
+      cancel_wait(fiber) if home.is_a?(IyiSchedulerState)
+    {% else %}
+      if home.is_a?(IyiSchedulerState)
+        if !@@shared
+          cancel_wait(fiber)
+        elsif fiber.unit.is_a?(IyiUnit)
+          cancel_moving(fiber)
+        elsif home.object_id == state.object_id
+          cancel_wait(fiber)
+        elsif fiber.claim_any
+          ready(fiber)
+        elsif fiber.state != IyiFiberState::Joining
+          post_cancel(home, fiber)
+        end
       end
-    end
+    {% end %}
     # And it reaches what the fiber started: the tasks of every group it
     # holds open, so a join it waits in - a park no wake above ends - ends
     # as they do. A task joining a group of its own was left to wait, and
@@ -4110,7 +4261,9 @@ class IyiScheduler
       sleep_remove(fiber)
       enqueue(fiber)
     elsif fiber.state == IyiFiberState::WaitingIo
-      {% if flag?(:win32) %}
+      {% if flag?(:wasm32) %}
+        raise "iyi: I/O wait is unavailable on wasm32-unknown-unknown"
+      {% elsif flag?(:win32) %}
         # `CancelIoEx` is a request, and on a handle tied to a completion
         # port it does not finish the operation here: measured, the
         # OVERLAPPED's status stays STATUS_PENDING (0x103) after a
@@ -4223,6 +4376,23 @@ class IyiScheduler
   # Waits for the next event when *blocking*, and otherwise takes what has
   # arrived already (`poll_now`).
   def self.wait_for_events(blocking : Bool) : Nil
+    {% if flag?(:wasm32) %}
+      if !blocking
+        wake_expired_sleepers
+        return
+      end
+      sleeper = state.sleep_head
+      unless sleeper.is_a?(IyiFiber)
+        deadlock_found
+        return
+      end
+      gap = sleeper.deadline - __iyi_monotonic_ns
+      gap = 0_i64 if gap < 0_i64
+      timeout = (gap + 999999_i64) // 1000000_i64
+      timeout = 2147483647_i64 if timeout > 2147483647_i64
+      __iyi_wasm_idle(timeout.to_i32)
+      wake_expired_sleepers
+    {% else %}
     st = state
     # The heap's root and its deadline read together, under the lock: on
     # Windows another thread may take the root out of it meanwhile
@@ -4383,8 +4553,8 @@ class IyiScheduler
     while index < count
       entry = events_buffer + (index * IYI_POLL_EVENT_BYTES).to_u64
       fd = Pointer(UInt64).new(entry + IYI_POLL_DATA_OFFSET).value.to_i64
-      # Declared out here: a local born inside the `{% if %}` dies at its
-      # `{% end %}`.
+      # Declared out here: a local born inside a macro conditional dies
+      # at its end.
       ready = event_ready(entry)
       {% if !flag?(:darwin) && !flag?(:win32) %}
         # The doorbell's eventfd, read back to zero; what it rang for is
@@ -4412,6 +4582,7 @@ class IyiScheduler
       # interleaved); taking the monitor's call to `take_held` away,
       # alone or with the lists lock or the poll's time, left it as slow.
       end_idle(st) if blocking && @@shared
+    {% end %}
     {% end %}
   end
 
@@ -4554,6 +4725,7 @@ class IyiScheduler
   # its core away, as the scheduler's lock's does. With one scheduler
   # thread it is nothing.
   def self.lists_lock(st : IyiSchedulerState) : Nil
+    {% unless flag?(:wasm32) %}
     return unless @@shared
     spins = 0
     while true
@@ -4568,6 +4740,7 @@ class IyiScheduler
         asm("yield" :::: "volatile")
       {% end %}
     end
+    {% end %}
   end
 
   def self.lists_unlock(st : IyiSchedulerState) : Nil
@@ -4882,6 +5055,7 @@ class IyiScheduler
         return
       end
       heap_remove(st, head)
+      {% unless flag?(:wasm32) %}
       if head.io_timed
         # An io wait whose deadline came first.
         head.io_timed = false
@@ -4911,6 +5085,7 @@ class IyiScheduler
           io_remove(st, head)
         {% end %}
       end
+      {% end %}
       lists_unlock(st)
       # A select with a timeout arm is in this heap and a channel's queues
       # at once, and either can wake it: a channel's from any thread, under
@@ -5008,12 +5183,20 @@ class IyiScheduler
   # Melds the sleep heap has made, in all: what an insertion and a removal
   # cost, counted, which the exercises read rather than a clock.
   def self.sleep_steps : UInt64
-    IyiStat.get(IyiStat::SLEEP_STEPS)
+    {% if flag?(:wasm32) %}
+      state.wasm_sleep_steps
+    {% else %}
+      IyiStat.get(IyiStat::SLEEP_STEPS)
+    {% end %}
   end
 
   # Two roots into one: the later becomes the earlier's first child.
   private def self.sleep_meld(a : IyiFiber, b : IyiFiber) : IyiFiber
-    IyiStat.bump(IyiStat::SLEEP_STEPS, 1_u64)
+    {% if flag?(:wasm32) %}
+      state.count_wasm_sleep_step
+    {% else %}
+      IyiStat.bump(IyiStat::SLEEP_STEPS, 1_u64)
+    {% end %}
     first = sleep_before?(b, a) ? b : a
     second = first.object_id == a.object_id ? b : a
     older = first.sleep_child
@@ -6651,7 +6834,7 @@ class IyiWorkers
   end
 end
 
-{% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && !flag?(:wasm32) %}
   # The back-edge's slow half, called by name from the check the compiler
   # emits (`codegen.cr#iyi_back_edge`) and emitted only into a program
   # that has a pool (`iyi_preempt_on?`). Out of line, so a loop carries a
@@ -6911,6 +7094,7 @@ end
   end
 {% end %}
 
+{% unless flag?(:wasm32) %}
 # `defer`'s runtime half on the concurrency targets: the registry is
 # the current fiber's, so interleaved tasks never share cleanups. The
 # normalizer emits the push on entry and the pop on every normal exit;
@@ -6982,6 +7166,7 @@ def exit(status : Int32 = 0) : NoReturn
   __iyi_flush_std
   __iyi_exit(status)
 end
+{% end %}
 
 # ── The public primitives ──────────────────────────────────────────────
 
@@ -7320,7 +7505,7 @@ class IyiGroup
   # (`CleanupTransformer#check_spawn_placement`). `in: u` runs the task in
   # the `Unit` *u* (std/unit).
   def spawn(&block : -> T) : IyiTask(T) forall T
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && !flag?(:wasm32) %}
       # Never taken. The line is here so that `spawn_pooled` is typed for
       # every `T` this def is, which is what lets the compiler point an
       # eligible call at it after typing (`CleanupTransformer#
@@ -7355,7 +7540,7 @@ class IyiGroup
   # block is what it asks of a thread's (III.4.4): its captures must be
   # `Share`, and module state a call reaches is warned about.
   def spawn(*, unit : Symbol, &block : -> T) : IyiTask(T) forall T
-    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && !flag?(:wasm32) %}
       return spawn_new(&block) if false
       {% if flag?(:heap_partitions) %}
         # Never taken: types the pinned instance the cleanup points a call at when its crossing must run in the shared heap (heap22 `pinned:`).
@@ -7391,7 +7576,7 @@ class IyiGroup
     # is not captured.
     IyiCross.publish(block)
     work = IyiCross.shared { unit_work(block, owner, pinned) }
-    {% if flag?(:gc_none) || flag?(:gc_boehm) %}
+    {% if flag?(:gc_none) || flag?(:gc_boehm) || flag?(:wasm32) %}
       # One thread: every task is a unit-mate of every other already.
       in_unit(&work)
     {% else %}
@@ -7431,6 +7616,15 @@ class IyiGroup
   # `g.spawn(unit: :new) { raise "boom" }` stopped compiling.
   private def in_unit(&block : -> T) : IyiTask(T) forall T
     raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
+    {% if flag?(:wasm32) %}
+      if IyiWasmFibers.current.is_a?(Nil)
+        IyiScheduler.current.defers = IyiDefers.take_all
+        IyiWasmFibers.install(-> { IyiScheduler.current }, -> { IyiScheduler.first_fiber })
+      end
+      if IyiPanic.fiber_handler.is_a?(Nil)
+        IyiPanic.fiber_handler = ->(message : String) { IyiScheduler.panic_current(message) }
+      end
+    {% end %}
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     # Fibers are the shared heap's whatever unit they run (heap22 row 14),
     # born there by codegen (`__iyi_new_shared`); the rest of a same-unit
@@ -7453,7 +7647,7 @@ class IyiGroup
     task
   end
 
-  {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) && !flag?(:wasm32) %}
     # :nodoc: — a `spawn` the compiler found eligible (SPEC.md III.4.15):
     # a parallel task of its own unit, on a pool of more than one worker.
     # On one worker, `IYI_WORKERS=1` or `IyiWorkers.count = 1`, it stays in
@@ -8697,7 +8891,7 @@ end
 # page or two, and a fault farther than 256 KiB above the pointer is not
 # a frame. Linux by raw syscall and darwin by libSystem, the same split
 # the rest of this file makes; Windows keeps its own report.
-{% unless flag?(:win32) %}
+{% unless flag?(:win32) || flag?(:wasm32) %}
   # Linux by name, not "not Windows": the numbers below are Linux syscall
   # numbers and the `SA_RESTORER` flag and the `rt_sigreturn` trampoline
   # beside them are Linux's signal ABI. darwin x86_64 is excluded by the

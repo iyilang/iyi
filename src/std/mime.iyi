@@ -22,10 +22,12 @@
 
 @[Unsafe("types and extensions are matched by walking the bytes of their strings through a raw pointer")]
 module std/mime
+import std/lazy::{Lazy}
 
 pub struct MIME
   # Extension without its dot, lowercase, then the media type. The first
   # entry of a type is not special; `extensions` sorts them.
+  @[SafeReach("set before the first parallel task starts, then only read")]
   TABLE = [
     {"html", "text/html"}, {"htm", "text/html"},
     {"css", "text/css"},
@@ -110,28 +112,37 @@ pub struct MIME
     {"jar", "application/java-archive"},
   ]
 
-  @@by_extension : Hash(String, String)?
-  @@by_type : Hash(String, Array(String))?
+  # Built whole at the first lookup that reads one (std/lazy); a lookup is
+  # a hash probe. `extensions` answers a copy of a list, never the list
+  # itself.
+  @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@by_extension = Lazy(Hash(String, String)).new
 
-  # Built on the first lookup, once; a lookup after that is a hash probe.
   private def self.by_extension : Hash(String, String)
-    @@by_extension ||= begin
-      map = Hash(String, String).new
-      TABLE.each { |entry| map[entry[0]] = entry[1] }
-      map
-    end
+    @@by_extension.get { build_by_extension }
   end
 
+  @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read, and its lists are answered as copies")]
+  @@by_type = Lazy(Hash(String, Array(String))).new
+
   private def self.by_type : Hash(String, Array(String))
-    @@by_type ||= begin
-      map = Hash(String, Array(String)).new
-      TABLE.each do |entry|
-        list = map[entry[1]]? || (map[entry[1]] = Array(String).new)
-        list << "." + entry[0]
-      end
-      map.each_value(&.sort_in_place)
-      map
+    @@by_type.get { build_by_type }
+  end
+
+  private def self.build_by_extension : Hash(String, String)
+    map = Hash(String, String).new
+    TABLE.each { |entry| map[entry[0]] = entry[1] }
+    map
+  end
+
+  private def self.build_by_type : Hash(String, Array(String))
+    map = Hash(String, Array(String)).new
+    TABLE.each do |entry|
+      list = map[entry[1]]? || (map[entry[1]] = Array(String).new)
+      list << "." + entry[0]
     end
+    map.each_value(&.sort_in_place)
+    map
   end
 
   # The text lowercased, and the text itself when it has no uppercase

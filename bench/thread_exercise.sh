@@ -3197,11 +3197,22 @@ case "$(uname -s)" in
       if ! IYI_PATH="$WORK/hinted${PSEP}$REPO/src" "$IYI" build asleep.iyi -o hinted-run > build-hinted.log 2>&1; then
         cat build-hinted.log; exit 1
       fi
-      rates hinted-run
-      echo "  with the hint: alone $alone threads a second, beside $cores busy processes $beside"
-      if [ $((beside * 2)) -ge "$alone" ]; then
-        echo "with the hint back, the storm beside the busy processes kept $beside threads a second of $alone alone"; exit 1
-      fi
+      # On Namespace's macOS 15 VM (6 vCPUs) the hint kept 37 to 52 per cent
+      # of the alone rate beside the busy processes (runs 44271652334,
+      # 44292915166, 44358208505), where the switch kept 64 to 70: the two
+      # stay apart, but one try of the hint came back at 52. Up to five
+      # tries, the first under half the proof, as the race proofs stop at
+      # their catch.
+      try=1
+      while :; do
+        rates hinted-run
+        echo "  with the hint, try $try: alone $alone threads a second, beside $cores busy processes $beside"
+        [ $((beside * 2)) -lt "$alone" ] && break
+        if [ "$try" -ge 5 ]; then
+          echo "with the hint back, the storm beside the busy processes kept $beside threads a second of $alone alone, in 5 tries of 5"; exit 1
+        fi
+        try=$((try + 1))
+      done
     fi
     ;;
 esac

@@ -243,17 +243,28 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
           "make its fields Share (`Atomic`, `Mutex`, `List`) and `#{type}` is Share without it (SPEC.md III.4.4), ",
           "trusts @[Share] on `#{type}`")
         unless ann.args.empty?
-          ann.raise "Share annotation can't have positional arguments, only named arguments: 'owns'"
+          ann.raise "Share annotation can't have positional arguments, only named arguments: 'owns', 'lends'"
         end
+        lends = nil
         ann.named_args.try &.each do |named_arg|
-          unless named_arg.name == "owns"
-            named_arg.raise "unknown Share named argument, valid arguments are: 'owns'"
+          unless named_arg.name.in?("owns", "lends")
+            named_arg.raise "unknown Share named argument, valid arguments are: 'owns', 'lends'"
           end
           value = named_arg.value
           unless value.is_a?(BoolLiteral)
-            named_arg.raise "Share's 'owns' is true or false"
+            named_arg.raise "Share's '#{named_arg.name}' is true or false"
           end
-          type.iyi_share_owns = value.value
+          if named_arg.name == "owns"
+            type.iyi_share_owns = value.value
+          else
+            lends = named_arg
+            type.iyi_share_lends = value.value
+          end
+        end
+        # `lends:` is a promise about the graph an owning type hands out,
+        # and a type that owns nothing hands out nothing (SPEC.md III.4.19).
+        if lends && type.iyi_share_lends? && !type.iyi_share_owns?
+          lends.raise "Share's 'lends: true' promises the lend protocol for the graph an owning type hands its units, and `#{type}` owns nothing: write `@[Share(owns: true, lends: true)]`, or leave 'lends' out (SPEC.md III.4.19)"
         end
       end
 

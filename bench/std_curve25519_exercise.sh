@@ -608,39 +608,48 @@ else
 fi
 
 echo
-echo "== how the table's address reaches a second thread, read off the IR"
+echo "== how the table reaches a second thread, read off the IR"
 # The fixed-base table is worked out by the first thread that wants it,
 # and a second thread must never read it part written: a wrong multiple
 # gives a signature a wrong point under the right nonce, which beside the
 # right signature of the same message gives the key away. On x86_64 a
-# plain store of the table's address after its entries is seen in that
-# order by every thread; on a machine that orders its stores loosely it is
-# not, and no run on this one would show it. So it is read off the IR of
-# the program built above (x86_64's, the orderings being the module's
-# request and the same for every target): every read of the word the
-# address is kept in has to be an acquire load and its one write a release
-# store.
+# plain store of the table after its entries is seen in that order by
+# every thread; on a machine that orders its stores loosely it is not,
+# and no run on this one would show it. So it is read off the IR of the
+# program built above (x86_64's, the orderings being the module's request
+# and the same for every target): the table is kept by std/lazy, whose
+# mark is the class variable's first word, and every read of the mark has
+# to be an acquire load, its claim an exchange and its one write the
+# release store that comes after the table's.
 # published <file.ll> <class variable>: what in the IR reads or writes the
-# word a table's address is kept in other than by an acquire load and a
-# release store, a line each; 1 if anything does, or if either is missing.
-# The zero the word starts from is a plain store, made before the
-# program's first line.
+# mark of the `Lazy` the table is kept in other than by an acquire load,
+# the claim's exchange and a release store, a line each; 1 if anything
+# does, or if any of the three is missing. The value past the mark (an
+# offset into the variable) is read and written only behind it; the
+# zeroing before the program's first line and the collector's write
+# barrier name the variable without reading it.
 published() {
   awk -v name="$2" '
-    !(index($0, "@\"" name "\"") || index($0, "@\"" name ".")) || /^@/ || /store i64 0, ptr @/ { next }
-    / = load atomic i64, ptr @[^ ]* acquire,/ { loads++; next }
-    /store atomic i64 [^,]*, ptr @[^ ]* release,/ { stores++; next }
-    { print name ": neither an acquire load nor a release store:" $0; other++ }
+    {
+      s = $0
+      gsub(/getelementptr inbounds (nuw )?\(i8, ptr @"[^"]*", i64 [1-9][0-9]*\)/, "", s)
+    }
+    !index(s, "@\"" name "\"") || /^@/ || /@llvm\.memset/ || /IyiMark::barrier/ { next }
+    / = load atomic i32, ptr @[^ ]* acquire,/ { loads++; next }
+    / = cmpxchg ptr @[^ ]*, i32 0, i32 1 acquire monotonic,/ { claims++; next }
+    /store atomic i32 2, ptr @[^ ]* release,/ { stores++; next }
+    { print name ": neither the mark'"'"'s acquire load, its claim nor its release store:" $0; other++ }
     END {
       if (!loads) print name ": no acquire load of it"
+      if (!claims) print name ": no claim of it"
       if (!stores) print name ": no release store to it"
-      exit (other || !loads || !stores) ? 1 : 0
+      exit (other || !loads || !claims || !stores) ? 1 : 0
     }' "$1"
 }
 if [ -z "$PY" ]; then
   echo "  no python here, so the program above was not built and its IR goes unread"
 elif published "$WORK/machine/x86_64-unknown-linux-gnu.ll" 'Std::Curve25519::CurveBaseTable::table' >"$WORK/published.out"; then
-  echo "  the table's address is read by an acquire load and written, once the table is whole, by a release store"
+  echo "  the table is kept by std/lazy: its mark is read by an acquire load and written, once the table is whole, by a release store"
 else
   sed 's/^/  /' "$WORK/published.out"
   status=1
@@ -789,8 +798,16 @@ prove_unpublished() {
     status=1
   fi
 }
-prove_unpublished "a table's address read with no ordering" "no acquire load of it" \
-  '    ready = @@table.get_acquire' '    ready = @@table.get_relaxed'
+prove_unpublished "the table in a class variable read and filled with no ordering, as before std/lazy" "no acquire load of it" \
+  '  @@table = Lazy(Pointer(CurvePrecomp)).new
+
+  def self.precomputed : Pointer(CurvePrecomp)
+    @@table.get { build }
+  end' '  @@table = Pointer(CurvePrecomp).new(0_u64)
+
+  def self.precomputed : Pointer(CurvePrecomp)
+    @@table.address == 0_u64 ? (@@table = build) : @@table
+  end'
 
 echo
 if [ "$status" -eq 0 ]; then

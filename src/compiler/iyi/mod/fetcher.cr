@@ -85,14 +85,6 @@ module Iyi::Mod
       cache_target(path, version)
     end
 
-    # The manifest of *path* at *version* — the resolver's fetch seam,
-    # bound to git.
-    def self.manifest(path : String, version : SemanticVersion) : ModFile
-      dir = checkout(path, version)
-      file = File.join(dir, "iyi.mod")
-      ModFile.parse(File.read(file), file)
-    end
-
     # The versions *path* has, from its repository's tags: every `vX.Y.Z`
     # (with or without a pre-release), highest last. A tag that is not a
     # version is some other tag, and is not one to choose.

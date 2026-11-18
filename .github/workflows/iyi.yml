@@ -34,6 +34,8 @@ name: iyi
 #                    exercises read for other platforms in std-platforms (and
 #                    the windows- and darwin- shards and windows-std-platforms
 #                    beside their own jobs)
+#   heap22           the partitions' gates (`-Dheap_partitions`), here and in
+#                    darwin-heap22 and windows-heap22
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -44,13 +46,13 @@ name: iyi
 # Which jobs run is decided by `plan` (scripts/ci_plan.py, whose header says
 # it in full). A pull request runs the fast tier - the Linux build and what
 # answers within the compiler specs' twenty-odd minutes - narrowed further
-# when it touches only docs or only bench files. A push to master or to
-# mt/next, the branch a release is integrated on before it reaches master,
-# a `v*` tag, the nightly schedule and a manual dispatch run every job -
-# except a nightly run of a commit that passed the full set on master in
-# the last week, which runs none. A push to any other branch runs nothing:
-# open a pull request, or dispatch the workflow on the branch for the full
-# set.
+# when it touches only docs or only bench files. A push to master, to
+# mt/next or to mt/next-two, the branches a release is integrated on before
+# it reaches master (mt/next-two carries 0.22.0's work), a `v*` tag, the
+# nightly schedule and a manual dispatch run every job - except a nightly
+# run of a commit that passed the full set on master in the last week,
+# which runs none. A push to any other branch runs nothing: open a pull
+# request, or dispatch the workflow on the branch for the full set.
 #
 # The free plan ran twenty jobs at once, five of them on macOS, and the
 # full set was thirty-nine jobs and about twenty runner-hours a run (runs of
@@ -60,10 +62,18 @@ name: iyi
 # what a full run waits on longest.
 on:
   push:
-    branches: [master, mt/next]
+    branches: [master, mt/next, mt/next-two]
     tags: ["v*", "editor-v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      # The darwin jobs that run on the project's Mac (darwin, darwin-std,
+      # darwin-heap22) on GitHub's macos-15 instead: for a Mac that is off,
+      # and to exercise the path a fork's pull request takes.
+      darwin_github_hosted:
+        description: "darwin, darwin-std and darwin-heap22 on GitHub's macos-15, not the project's Mac"
+        type: boolean
+        default: false
   schedule:
     # 02:17 UTC: off the hour, when every other scheduled workflow starts.
     - cron: "17 2 * * *"
@@ -327,7 +337,7 @@ jobs:
   # that way and nothing had asked. A job of its own: it grows with the
   # library, and took 22 to 41 of the samples job's 90 minutes.
   #
-  # In four shards (`lsp_positions.py --shard`), dealt by each module's
+  # In five shards (`lsp_positions.py --shard`), dealt by each module's
   # measured weight. Whole, the sweep took 37 to 71 minutes in ten green
   # runs of 2026-10-23 to 10-25 and was cut off past 72 of the job's 75
   # then in four (master's 120891621408 among them), on runners of uneven
@@ -356,6 +366,14 @@ jobs:
   # dealt the same way would take 33 (73%). At the cut-off job's 2.1 it
   # would end in about 41, inside the limit, and forty-five still ends a
   # hang.
+  #
+  # Five since heap22 and master met (2026-11-18): the library's sweep
+  # grew to 5,725 s on a median runner, std/autocert about 900 and
+  # std/acme about 625 of it (lsp_positions.py's weights say where), and
+  # dealt four ways a shard held 1,434 s, 31 minutes at 1.24 with setup;
+  # two shards with both grown modules' old weights were cut off at 45
+  # (jobs 134257615300, 134616844992). Five hold 1,145 to 1,152 s: 27
+  # minutes at 1.24 with setup, 60% of forty-five, and 43 at 2.1.
   lsp-positions:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'lsp-positions') }}
@@ -364,10 +382,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     container:
       image: crystallang/crystal:1.21.0-build
-    name: "Every cursor question, everywhere in the library, shard ${{ matrix.shard }} of 4"
+    name: "Every cursor question, everywhere in the library, shard ${{ matrix.shard }} of 5"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -383,7 +401,7 @@ jobs:
       - name: Every cursor question, everywhere in the library
         env:
           PYTHONUNBUFFERED: "1"
-        run: python3 bench/lsp_positions.py 200 --shard ${{ matrix.shard }}/4
+        run: python3 bench/lsp_positions.py 200 --shard ${{ matrix.shard }}/5
 
   samples:
     needs: [plan, build]
@@ -552,6 +570,13 @@ jobs:
       - name: SafeReach is proven, not trusted (III.4.4)
         run: bash bench/safe_reach.sh
 
+      # III.4.5: a parallel unit's block may not reach module state that is
+      # not Share - followed through procs, std's and the prelude's state,
+      # and the pins heap22 adds - each refusal and its broken copy named;
+      # compiled only (`--no-codegen`).
+      - name: The reach rule (III.4.5)
+        run: bash bench/reach_rule.sh
+
       # III.13: every way out of the checked language - a Pointer however
       # it is reached, uninitialized, lib, fun, asm, @[Primitive],
       # @[Extern], a caller contract, @[Share] and @[UnsafeReach] - refused
@@ -709,6 +734,13 @@ jobs:
           bash bench/format_exercise.sh
           bash bench/io_exercise.sh
           bash bench/socket_exercise.sh
+
+      # A union stored through a smaller arm writes zeros past the arm and
+      # in its tag's padding, and every padded value its padding: the raw
+      # words of an array's buffer and a field hold no stale word, and the
+      # `IYI_SPAWN_BROKEN=holes` compiler, which leaves them, is caught.
+      - name: Union holes are written as zero
+        run: bash bench/union_holes.sh
 
       # The collector's own gates (GC_DESIGN.md Stages 2, 3, 5, 6, 10 and the
       # allocation-pressure trigger). Each drives its exercise plain and
@@ -1201,6 +1233,57 @@ jobs:
         if: matrix.shard == 4
         run: bash bench/tls_speed.sh
 
+  # heap22's gates (`-Dheap_partitions`, SPEC.md III.4.19), on each of its
+  # three platforms: this job, `darwin-heap22` and `windows-heap22`. They
+  # held on the three machines that wrote them and were named by nothing
+  # here when heap22 merged (bench/gates_reachable.py, CI job
+  # 133281127556) - heap_local, heap_crossings and heap_verify only by each
+  # other, which the check counts as reached. Each gate builds with the
+  # flags it is about and its flag-off control where it has one; the
+  # cost's row is its smallest, since a runner's numbers measure nothing
+  # and the rows are what it checks; the fuzzer runs three programs.
+  heap22:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'heap22') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "heap22's partitions, their gates"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build iyi binary
+        run: make -o .build/crystal iyi
+      - name: The partitions' plumbing, without the flag and with it
+        run: |
+          bash bench/heap_partition.sh
+          IYI_OPTS=-Dheap_partitions bash bench/heap_partition.sh
+      - name: Local collections, crossings and the verifier
+        run: |
+          bash bench/heap_local.sh
+          bash bench/heap_crossings.sh
+          FLAGS= bash bench/heap_crossings.sh
+          bash bench/heap_verify.sh
+      - name: The compiler's side, the lend protocol and the runs given back
+        run: |
+          bash bench/heap_codegen.sh
+          FLAGS= bash bench/heap_codegen.sh
+          bash bench/heap_lend.sh
+          bash bench/heap_drain.sh
+      - name: A partition's cost, its rows
+        run: bash bench/heap_local_cost.sh 1000 2 8 40
+      - name: The crossings, fuzzed
+        env:
+          FUZZ_HEAVY: "0"
+        run: python3 bench/heap_verify_fuzz.py run --programs 3 --seeds 2 --workers 1,4 --tmp "$RUNNER_TEMP/fuzz"
+
   targets:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'targets') }}
@@ -1555,7 +1638,18 @@ jobs:
     # before then (job 124229745795). The numbers that name macos-14 in
     # these comments and the documents were measured there: a three-core
     # M1 virtual machine on macOS 14.8.9, building with Xcode 15.4.
-    runs-on: macos-15
+    # On the project's own Mac since 2026-11-17 (labels self-hosted, macOS,
+    # ARM64; three runners on one M2 Pro), with every other darwin job:
+    # darwin-std, darwin-heap22 and the four darwin-std-siblings shards
+    # (their comment says why they came back from macos-15). The static
+    # LLVM there is keyed on its SDK and Xcode build, not an image.
+    # A pull request from a fork runs here on GitHub's macos-15 instead: the
+    # Mac is the owner's own machine, and a fork's code does not run on it
+    # (the repository also holds every outside contributor's run for
+    # approval, so a fork cannot edit this line back unseen). A dispatch
+    # with darwin_github_hosted does the same. The steps that differ read
+    # runner.environment.
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
     # A runner builds for its own major version, which on macos-15 is 15.0:
     # the tarball's `iyi` would refuse every Mac on 14, where 0.19.1's,
     # built on macos-14, says `minos` 14.0. 14.4 is iyi's floor, the
@@ -1593,12 +1687,25 @@ jobs:
       # What the runner is, in every log: the jobs' times and the gates'
       # numbers are this machine's.
       - name: Install the bootstrap toolchain
+        id: tools
         run: |
           sw_vers
           sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
           xcodebuild -version
           python3 --version
-          brew install crystal coreutils pkgconf
+          # Only what is missing: on the self-hosted Mac, `brew install` of an
+          # installed formula would upgrade the machine's own copy.
+          for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+          # The self-hosted runner's service can inherit a TMPDIR that no
+          # longer exists (an installer's sandbox); every later step uses
+          # the job's own temporary directory instead.
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          # The service also carries its owner's shell flags: LDFLAGS naming
+          # brew's LLVM 23 put its static libraries ahead of the recipe's in
+          # the link. Every job starts with none, and the static LLVM lives
+          # in a directory of CI's own (below), never the machine's ~/llvm-static.
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
       # Run these compiler primitives on macOS itself; the other compiler
@@ -1614,22 +1721,36 @@ jobs:
       # Now it links a static minimal LLVM, and with the collector off the
       # binaries `lib/` is empty rather than libgc alone. Built
       # on this runner because a static archive is bound to the libc++ and
-      # SDK it was compiled against; cached on the recipe's hash, the
-      # platform, the image and the deployment target, so the build is paid
-      # once per recipe or image change (28 minutes on macos-14, job
-      # 115861374075; 25 to 37 in the six darwin jobs of macos-15's first
-      # run, 41131916587). `$HOME`
-      # rather than `/tmp`: darwin's `/tmp` is a symlink into `/private`,
-      # and a cache path should not depend on how a symlink is archived.
-      - name: Restore the static LLVM
+      # SDK it was compiled against; built once per recipe hash, SDK and
+      # deployment target and kept on the machine, in a directory those name.
+      # The Mac has three runners: one job builds it while the others wait
+      # on the lock, and a run with another recipe gets a directory of its
+      # own instead of deleting the one a running job links against. A
+      # `.stamp` is written last, so a build cut short is built again.
+      - name: Restore the static LLVM (GitHub's runner)
+        if: runner.environment == 'github-hosted'
         id: llvm-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: Build the static LLVM (cache miss)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: The static LLVM on GitHub's runner, built on a cache miss
+        if: runner.environment == 'github-hosted'
+        run: |
+          [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+          echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
+      - name: The static LLVM, built once per recipe and SDK on this machine
+        if: runner.environment == 'self-hosted'
+        run: |
+          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
+          dir="$HOME/iyi-ci/llvm-static-$stamp"
+          mkdir -p "$HOME/iyi-ci"
+          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
+            [ -f "$1/.stamp" ] && exit 0
+            rm -rf "$1"
+            bash scripts/build-static-llvm.sh "$1"
+            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
+          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
 
       # `iyi-tarball` builds `iyi` and its daemon in release mode, refuses an
       # unoptimised binary (`check_iyi_is_release`), and packages them — one
@@ -1639,7 +1760,10 @@ jobs:
       # libLLVM, and `otool -L` must name nothing outside the package but
       # `/usr/lib` and `/System`.
       - name: Build `iyi`, its daemon, and the tarball
-        run: make iyi-tarball LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+        run: make iyi-tarball LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
+
+      - name: Manifest and tree checksum specs
+        run: LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config" ./bin/crystal spec spec/compiler/mod_sum_spec.cr
 
       - name: Samples
         run: |
@@ -1701,7 +1825,7 @@ jobs:
       # which was true and had nothing to do with the collector.
       - name: The collector-free floor (III.9)
         run: |
-          COLLECTOR_FREE_RUNS=1 LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" \
+          COLLECTOR_FREE_RUNS=1 LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config" \
             bash bench/collector_free_floor.sh
 
       # What a thread costs *this* floor, where every call is libSystem's:
@@ -1834,15 +1958,19 @@ jobs:
       # programs — iyi's own prelude with its kqueue runtime, `--crystal` with
       # Crystal's library, and the daemon serving builds. Nothing here may
       # need this checkout, a IYI_PATH, or a Crystal on the machine.
+      # Somewhere else is the job's own temporary directory, not /tmp: the
+      # project's Mac keeps /tmp between jobs, and three runners share it -
+      # a socket a cancelled job left at /tmp/iyi.sock passed the wait below
+      # before this job's daemon listened (job 134256482927).
       - name: Unpack the tarball somewhere else and run from it
         run: |
-          mkdir -p /tmp/unpacked
-          tar -xzf .build/iyi-*-darwin-*.tar.gz -C /tmp/unpacked
-          cd /tmp
-          env -u IYI_PATH -u CRYSTAL_PATH /tmp/unpacked/bin/iyi run /tmp/unpacked/share/iyi/samples/hello.iyi
-          env -u IYI_PATH -u CRYSTAL_PATH /tmp/unpacked/bin/iyi version
+          mkdir -p "$RUNNER_TEMP/unpacked"
+          tar -xzf .build/iyi-*-darwin-*.tar.gz -C "$RUNNER_TEMP/unpacked"
+          cd "$RUNNER_TEMP"
+          env -u IYI_PATH -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" run "$RUNNER_TEMP/unpacked/share/iyi/samples/hello.iyi"
+          env -u IYI_PATH -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" version
           printf 'order = ""\nch = Channel(Int32).new\ngroup do |g|\n  g.spawn do\n    value = ch.receive\n    order = order + (value.is_a?(Int32) ? value.to_s : "?")\n    0\n  end\n  g.spawn do\n    sleep(10)\n    order = order + "a"\n    ch.send(7)\n    0\n  end\nend\nputs order\n' > conc.iyi
-          test "$(env -u IYI_PATH -u CRYSTAL_PATH /tmp/unpacked/bin/iyi run conc.iyi)" = "a7"
+          test "$(env -u IYI_PATH -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" run conc.iyi)" = "a7"
           echo "the kqueue runtime runs out of the tarball"
 
       # Built for the floor, and the check has its broken copy: the same
@@ -1852,14 +1980,14 @@ jobs:
         run: |
           minos() { otool -l "$1" | awk '$1 == "minos" { print $2; exit }'; }
           for bin in iyi iyi-daemon; do
-            got=$(minos "/tmp/unpacked/bin/$bin")
+            got=$(minos "$RUNNER_TEMP/unpacked/bin/$bin")
             [ "$got" = "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "bin/$bin says minos '$got', not $MACOSX_DEPLOYMENT_TARGET"; exit 1; }
             echo "bin/$bin runs on macOS $got and later"
           done
-          cd /tmp
+          cd "$RUNNER_TEMP"
           env -u MACOSX_DEPLOYMENT_TARGET -u IYI_PATH -u CRYSTAL_PATH \
-            /tmp/unpacked/bin/iyi build -o /tmp/host_minos /tmp/unpacked/share/iyi/samples/hello.iyi
-          got=$(minos /tmp/host_minos)
+            "$RUNNER_TEMP/unpacked/bin/iyi" build -o "$RUNNER_TEMP/host_minos" "$RUNNER_TEMP/unpacked/share/iyi/samples/hello.iyi"
+          got=$(minos "$RUNNER_TEMP/host_minos")
           [ -n "$got" ] && [ "$got" != "$MACOSX_DEPLOYMENT_TARGET" ] || { echo "a build without the target says minos '$got': the check above tells nothing apart"; exit 1; }
           echo "a build without the target says minos $got, which the check refuses"
 
@@ -1871,12 +1999,12 @@ jobs:
       # aside and requires the failure, so a package that carries std twice
       # cannot pass by accident.
       - name: The native standard library, out of the tarball
-        run: bash bench/tarball_std.sh /tmp/unpacked
+        run: bash bench/tarball_std.sh "$RUNNER_TEMP/unpacked"
 
       - name: The other library, out of the tarball
         run: |
-          env -u IYI_PATH -u CRYSTAL_PATH /tmp/unpacked/bin/iyi run --crystal \
-            /tmp/unpacked/share/iyi/samples/crystal/stdlib.iyi
+          env -u IYI_PATH -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" run --crystal \
+            "$RUNNER_TEMP/unpacked/share/iyi/samples/crystal/stdlib.iyi"
 
       # The daemon, out of the same tarball, serving two builds from another
       # directory — the shape everything broken about it was about (IV.1d),
@@ -1884,19 +2012,19 @@ jobs:
       # port supplied it.
       - name: The daemon, out of the tarball
         run: |
-          cd /tmp/unpacked
-          env -u CRYSTAL_PATH ./bin/iyi daemon start --socket /tmp/iyi.sock &
-          for _ in $(seq 1 120); do [ -S /tmp/iyi.sock ] && break; sleep 1; done
-          mkdir -p /tmp/app && cd /tmp/app
-          cp /tmp/unpacked/share/iyi/samples/hello.iyi .
-          env -u CRYSTAL_PATH /tmp/unpacked/bin/iyi daemon build \
-            --socket /tmp/iyi.sock -o served hello.iyi
+          cd "$RUNNER_TEMP/unpacked"
+          env -u CRYSTAL_PATH ./bin/iyi daemon start --socket "$RUNNER_TEMP/iyi.sock" &
+          for _ in $(seq 1 120); do [ -S "$RUNNER_TEMP/iyi.sock" ] && break; sleep 1; done
+          mkdir -p "$RUNNER_TEMP/app" && cd "$RUNNER_TEMP/app"
+          cp "$RUNNER_TEMP/unpacked/share/iyi/samples/hello.iyi" .
+          env -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" daemon build \
+            --socket "$RUNNER_TEMP/iyi.sock" -o served hello.iyi
           ./served > served.txt
-          env -u CRYSTAL_PATH /tmp/unpacked/bin/iyi build -o normal hello.iyi
+          env -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" build -o normal hello.iyi
           ./normal > normal.txt
           diff normal.txt served.txt
-          env -u CRYSTAL_PATH /tmp/unpacked/bin/iyi daemon build \
-            --socket /tmp/iyi.sock -o served2 hello.iyi
+          env -u CRYSTAL_PATH "$RUNNER_TEMP/unpacked/bin/iyi" daemon build \
+            --socket "$RUNNER_TEMP/iyi.sock" -o served2 hello.iyi
           echo "the daemon served two builds from another directory"
 
       # Staged out of `.build` for the reason the linux job's own copy
@@ -1921,7 +2049,17 @@ jobs:
   darwin-std-siblings:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std-siblings') }}
-    runs-on: macos-15
+    # On the project's Mac with the other three darwin jobs (a fork's pull
+    # request, or darwin_github_hosted: GitHub's macos-15, as the darwin
+    # job's comment says). They ran on macos-15 for a day (2026-11-17/18)
+    # so the seven would not queue behind each other on three runners, and
+    # GitHub's macOS was the slower queue and the slower machine: master's
+    # push run 44280407780 had shards 2 and 4 waiting 4 hours for a runner,
+    # and its shard 1 had std/http stopped at the 35 minutes
+    # bench/std_siblings.sh gives a sibling (job 134720033700), where it
+    # took 25.7 to 29.6 minutes on macos-15 and a whole shard 35 to 37 on
+    # the Mac. Seven jobs on three runners end in about 100 minutes.
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 105
@@ -1935,26 +2073,69 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
+        id: tools
         run: |
-          brew install crystal coreutils pkgconf
+          for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM
+      - name: Restore the static LLVM (GitHub's runner)
+        if: runner.environment == 'github-hosted'
         id: llvm-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: Build the static LLVM (cache miss)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: The static LLVM on GitHub's runner, built on a cache miss
+        if: runner.environment == 'github-hosted'
+        run: |
+          [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+          echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
+      - name: The static LLVM, built once per recipe and SDK on this machine
+        if: runner.environment == 'self-hosted'
+        run: |
+          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
+          dir="$HOME/iyi-ci/llvm-static-$stamp"
+          mkdir -p "$HOME/iyi-ci"
+          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
+            [ -f "$1/.stamp" ] && exit 0
+            rm -rf "$1"
+            bash scripts/build-static-llvm.sh "$1"
+            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
+          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
       - name: Build `iyi`
-        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+        run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       # Python 3.14, as on Linux: the oracles' modules answer as 3.14's do.
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      # setup-python's macOS builds install under /Users/runner, which the
+      # project's Mac has not, so there it is brew's, in a virtual
+      # environment of the job's own (brew's Python refuses a pip install
+      # outside one).
+      - if: runner.environment == 'github-hosted'
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
+      - name: Python 3.14, in the job's own virtual environment (the project's Mac)
+        if: runner.environment == 'self-hosted'
+        run: |
+          brew list --versions python@3.14 >/dev/null || brew install python@3.14
+          "$(brew --prefix python@3.14)/bin/python3.14" -m venv "$RUNNER_TEMP/py"
+          echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
       - name: Python's cryptography and Pillow, for the oracles
         run: python3 -m pip install -q cryptography pillow
+      # Go, as on Linux: std/http's NO_PROXY table is held against Go's
+      # net/http, std/user's reader against Go's os/user, and std/acme and
+      # std/autocert build Pebble with it. Pinned to setup-go's stable rather
+      # than whatever Go a machine carries: on the project's Mac the job took
+      # the owner's /usr/local/go at go1.25.2, whose net/url refused an
+      # IPv4-mapped IPv6 literal in brackets (golang/go#75815, put right in
+      # 1.25.4): it said "unparsed" for http://[::ffff:127.0.0.1], where
+      # proxy_for and Linux's go1.27.4 say direct (job 133974766871). No
+      # `go.sum` here to key a cache on.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
       - name: The module exercises of this shard, on darwin
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 
@@ -1990,7 +2171,9 @@ jobs:
   darwin-std:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std') }}
-    runs-on: macos-15
+    # A fork's pull request, or darwin_github_hosted: GitHub's macos-15 (the
+    # darwin job's comment says why).
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 120
@@ -2000,24 +2183,119 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
+        id: tools
         run: |
-          brew install crystal coreutils pkgconf
+          for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM
+      - name: Restore the static LLVM (GitHub's runner)
+        if: runner.environment == 'github-hosted'
         id: llvm-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: Build the static LLVM (cache miss)
-        if: steps.llvm-cache.outputs.cache-hit != 'true'
-        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: The static LLVM on GitHub's runner, built on a cache miss
+        if: runner.environment == 'github-hosted'
+        run: |
+          [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+          echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
+      - name: The static LLVM, built once per recipe and SDK on this machine
+        if: runner.environment == 'self-hosted'
+        run: |
+          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
+          dir="$HOME/iyi-ci/llvm-static-$stamp"
+          mkdir -p "$HOME/iyi-ci"
+          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
+            [ -f "$1/.stamp" ] && exit 0
+            rm -rf "$1"
+            bash scripts/build-static-llvm.sh "$1"
+            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
+          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
       - name: Build `iyi`
-        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+        run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       - name: The native standard library's foundation
         env:
           STD_SIBLINGS: "0"
         run: bash bench/std_exercise.sh
+
+  # heap22's gates on darwin arm64, as the `heap22` job runs them on Linux
+  # (its comment says why they are here). A job of its own on the project's
+  # Mac, beside darwin, darwin-std and the four shards: the darwin job's 67
+  # minutes of 120 in run 43610237136 leave no room for them, and
+  # darwin-std's runs reach 75.
+  darwin-heap22:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-heap22') }}
+    # A fork's pull request, or darwin_github_hosted: GitHub's macos-15 (the
+    # darwin job's comment says why).
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+    timeout-minutes: 105
+    name: "heap22's partitions, their gates, on darwin"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the bootstrap toolchain
+        id: tools
+        run: |
+          for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM (GitHub's runner)
+        if: runner.environment == 'github-hosted'
+        id: llvm-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: The static LLVM on GitHub's runner, built on a cache miss
+        if: runner.environment == 'github-hosted'
+        run: |
+          [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+          echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
+      - name: The static LLVM, built once per recipe and SDK on this machine
+        if: runner.environment == 'self-hosted'
+        run: |
+          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
+          dir="$HOME/iyi-ci/llvm-static-$stamp"
+          mkdir -p "$HOME/iyi-ci"
+          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
+            [ -f "$1/.stamp" ] && exit 0
+            rm -rf "$1"
+            bash scripts/build-static-llvm.sh "$1"
+            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
+          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
+      - name: Build `iyi`
+        run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
+      - name: The partitions' plumbing, without the flag and with it
+        run: |
+          bash bench/heap_partition.sh
+          IYI_OPTS=-Dheap_partitions bash bench/heap_partition.sh
+      - name: Local collections, crossings and the verifier
+        run: |
+          bash bench/heap_local.sh
+          bash bench/heap_crossings.sh
+          FLAGS= bash bench/heap_crossings.sh
+          bash bench/heap_verify.sh
+      - name: The compiler's side, the lend protocol and the runs given back
+        run: |
+          bash bench/heap_codegen.sh
+          FLAGS= bash bench/heap_codegen.sh
+          bash bench/heap_lend.sh
+          bash bench/heap_drain.sh
+      - name: A partition's cost, its rows
+        run: bash bench/heap_local_cost.sh 1000 2 8 40
+      - name: The crossings, fuzzed
+        env:
+          FUZZ_HEAVY: "0"
+        run: python3 bench/heap_verify_fuzz.py run --programs 3 --seeds 2 --workers 1,4 --tmp "$RUNNER_TEMP/fuzz"
 
   # A Windows binary, run twenty times, and every run held to the right
   # answer. Three things used to happen: it printed the right answer, it
@@ -2610,6 +2888,10 @@ jobs:
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
 
+      - name: Manifest and tree checksum specs
+        shell: cmd
+        run: .\bin\crystal spec --no-color spec\compiler\mod_sum_spec.cr
+
       # Every exercise under bench/, run by the compiler built above. The
       # exclusions are named one by one, because a list nobody has to
       # justify is how a target quietly stops being tested:
@@ -2725,10 +3007,83 @@ jobs:
           bash bench/parallel_exercise.sh
           bash bench/spawn_eligible.sh
           bash bench/safe_reach.sh
+          bash bench/reach_rule.sh
           bash bench/unsafe.sh
           bash bench/chaos_exercise.sh
           bash bench/library_boundaries.sh
           bash bench/up_to_date.sh
+
+  # heap22's gates on Windows x86_64, as the `heap22` job runs them on
+  # Linux (its comment says why they are here). The same setup as
+  # `windows-native-gates`, whose 52 minutes of 75 in run 43610237136 leave
+  # no room for them.
+  windows-heap22:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-heap22') }}
+    runs-on: windows-2025
+    timeout-minutes: 90
+    name: "heap22's partitions, their gates, on Windows"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          if (-not (Test-Path "$lib\llvm_VERSION")) {
+            Write-Host "no llvm_VERSION beside the Crystal package's libraries, at $lib"
+            exit 1
+          }
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          Write-Host "bootstrap libraries: $lib"
+          Write-Host "llvm: $llvm"
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      - name: The partitions' plumbing, without the flag and with it
+        shell: bash
+        run: |
+          bash bench/heap_partition.sh
+          IYI_OPTS=-Dheap_partitions bash bench/heap_partition.sh
+      - name: Local collections, crossings and the verifier
+        shell: bash
+        run: |
+          bash bench/heap_local.sh
+          bash bench/heap_crossings.sh
+          FLAGS= bash bench/heap_crossings.sh
+          bash bench/heap_verify.sh
+      - name: The compiler's side, the lend protocol and the runs given back
+        shell: bash
+        run: |
+          bash bench/heap_codegen.sh
+          FLAGS= bash bench/heap_codegen.sh
+          bash bench/heap_lend.sh
+          bash bench/heap_drain.sh
+      - name: A partition's cost, its rows
+        shell: bash
+        run: bash bench/heap_local_cost.sh 1000 2 8 40
+      - name: The crossings, fuzzed
+        shell: bash
+        env:
+          FUZZ_HEAVY: "0"
+        run: IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/heap_verify_fuzz.py run --programs 3 --seeds 2 --workers 1,4 --tmp "$(cygpath -m "$RUNNER_TEMP")/fuzz"
 
   # The editor and agent surfaces, out of `windows-native` for the same
   # reason: 28 of its 105 minutes in run 42144468184, the longest step.
@@ -3813,7 +4168,7 @@ jobs:
             wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-siblings, windows-std-platforms, windows-gates, windows-compiler-specs,
-            wasm32-collector, docs]
+            wasm32-collector, docs, heap22, darwin-heap22, windows-heap22]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # `contents` to create the release; `id-token` and `attestations` for
@@ -3997,7 +4352,7 @@ jobs:
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
-            wasi-run, wasm32-collector, binary, clean-room, vscode]
+            wasi-run, wasm32-collector, binary, clean-room, vscode, heap22, darwin-heap22, windows-heap22]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

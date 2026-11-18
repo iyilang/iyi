@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 29,037 lines, of which 4,738 are the library held to the 4,738 ceiling (7,177 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 139,278 lines, none of it written in iyi |
+| compiler | 139,284 lines, none of it written in iyi |
 | artifact format | `.iyimod` v62, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets on which Crystal's library is type-checked, eight whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1062,7 +1062,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 139,278 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 139,284 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 29,037-line own prelude + 127,854 in std |
 | Specs | 21,146 lines | 17,214 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -9033,6 +9033,12 @@ compiler-rt. Only referenced host functions are imported, all from module
 | `exit(code: i32)` | Stop execution without returning. |
 | `clock_ns(clock: i32) -> i64` | Clock 0 is nanoseconds since the Unix epoch; clock 1 is monotonic nanoseconds. |
 | `random(ptr: i32, len: i32) -> i32` | Fill bytes from a cryptographically secure source; return 0 or -1 on error. |
+
+On this target `--release` passes `--strip-debug` to `wasm-ld`, removing
+DWARF from the linked module while retaining its function name section for
+host stack traces. Add `-d` to keep full symbolic debug information instead.
+The same rule applies to `--release -O z`; the latter asks LLVM to optimize
+for size. Plain builds and `wasm32-wasi` keep their existing debug policy.
 
 The module exports `memory`, `iyi_start() -> i32`, `iyi_alloc(size: i32) ->
 i32`, and `iyi_free(ptr: i32)`. The host calls `iyi_start` before any other

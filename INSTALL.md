@@ -127,6 +127,12 @@ clang). A `wasm32-unknown-unknown` build links directly with `wasm-ld` on
 `share/iyi/src/iyi/wasm/iyi.mjs`. The import and export contract is in
 SPEC.md III.12.1. Neither wasm target has a concurrency runtime.
 
+For a browser release, `--release` omits DWARF but keeps function names for
+stack traces. Add `-d` to retain full debugging information. The optional
+`-O z` mode produces smaller code but, in the wasm collector exercises,
+retained objects those exercises expected to reclaim. Use the default release
+mode when the collector's precision matters.
+
 ## What a program depends on
 
 A plain build with iyi's own prelude links the platform's C library and

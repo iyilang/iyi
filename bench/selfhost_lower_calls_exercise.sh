@@ -53,6 +53,20 @@ summary_check() {
   esac
 }
 
+calls_run_lower() {
+  local driver="$1" fixture="$2" out="$3" err="$4" site="${5:-}" message="${6:-}" result=0
+  "$driver" lower "$REPO_NATIVE/bench/fixtures/$fixture.iyi" "$WORK_NATIVE/$fixture.oracle.ll" > "$out" 2>"$err" || result=$?
+  if [ "$result" -eq 0 ]; then return 0; fi
+  if [ -n "$message" ] && summary_check "$WORK/$fixture.port.out" >/dev/null &&
+     expected_refusal "$result" "$err" "$site" "$message"; then
+    echo "decisive: $fixture: $(refusal_note "$result" "$err")"
+    return 1
+  fi
+  echo "INVALID: $fixture failed outside its expected refusal"
+  cat "$out" "$err"
+  return 2
+}
+
 normalize_switches() {
   awk '
     in_switch {
@@ -614,6 +628,7 @@ for name in lowcallrun_named_new lowcallrun_new_default_shapes lowcallrun_new_ov
     continue
   fi
   if [ "$HOST_ID" != darwin-arm64 ]; then
+    : > "$WORK/$name.validated"
     host_limited "$name: AArch64 Mach-O signature and execution require macOS arm64"
     continue
   fi
@@ -629,6 +644,7 @@ for name in lowcallrun_named_new lowcallrun_new_default_shapes lowcallrun_new_ov
     status=1
   else
     echo "  $name: hosted and native output '$want_output', status $want_status"
+    : > "$WORK/$name.validated"
   fi
 done
 
@@ -827,7 +843,7 @@ driver_assertion_result() {
 }
 
 lower_calls_check() {
-  local expected_mutant_refusal="${1:-}" result
+  local expected_mutant_refusal="${1:-}" expected_fixture="${2:-}" expected_site="${3:-src/compiler/lower/pending.iyi}" expected_source_line="${4:-}" result
   if ! "$IYI" build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/mut.build.log" 2>&1; then
     invalid_mutation "$WORK/mut.build.log"
     return $?
@@ -844,8 +860,17 @@ lower_calls_check() {
     result=$?
     if [ "$result" -ne 0 ]; then
       if [ -n "$expected_mutant_refusal" ] &&
+         { [ -z "$expected_fixture" ] || [ "$name" = "$expected_fixture" ]; } &&
          summary_check "$WORK/$name.port.out" >/dev/null &&
-         expected_refusal "$result" "$WORK/mut.err" src/compiler/lower/pending.iyi "$expected_mutant_refusal"; then
+         expected_refusal "$result" "$WORK/mut.err" "$expected_site" "$expected_mutant_refusal"; then
+        if [ "$expected_site" = refuse_port ]; then
+          if [ -z "$expected_source_line" ] ||
+             ! awk -v prefix="  source: $(native_path "$fixture"):$expected_source_line:" 'index($0, prefix) == 1 && substr($0, length(prefix) + 1) ~ /^[0-9]+$/ { found=1 } END { exit !found }' "$WORK/mut.err"; then
+            echo "INVALID: $name lacks the required localized source diagnostic"
+            cat "$WORK/mut.err"
+            return 2
+          fi
+        fi
         echo "decisive: $name: $(refusal_note "$result" "$WORK/mut.err")"
         return 1
       fi
@@ -869,9 +894,16 @@ overload_dispatch_check() {
     invalid_mutation "$WORK/overload.check.build.log"
     return 2
   fi
-  if ! "$WORK/overload.check.tool$EXE" "$REPO_NATIVE/bench/fixtures/lowcallrun_new_overload_dispatch.iyi" -o "$WORK_NATIVE/overload.check.ir" --pipeline typed --emit ir > "$WORK/overload.check.log" 2>&1; then
+  local result=0
+  [ -f "$WORK/lowcallrun_new_overload_dispatch.validated" ] || { echo 'INVALID: overload fixture has no passing baseline'; return 2; }
+  "$WORK/overload.check.tool$EXE" "$REPO_NATIVE/bench/fixtures/lowcallrun_new_overload_dispatch.iyi" -o "$WORK_NATIVE/overload.check.ir" --pipeline typed --emit ir > "$WORK/overload.check.log" 2>"$WORK/overload.check.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if expected_refusal "$result" "$WORK/overload.check.err" src/compiler/lower/pending.iyi '^lower: visit\(downcast String to Int32 \(hosted cast\.cr downcast_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$'; then
+      echo "decisive: overload dispatch: $(refusal_note "$result" "$WORK/overload.check.err")"
+      return 1
+    fi
     echo 'INVALID MUTANT: overload fixture did not emit IR'
-    cat "$WORK/overload.check.log"
+    cat "$WORK/overload.check.log" "$WORK/overload.check.err"
     return 2
   fi
   if [ "$HOST_ID" != darwin-arm64 ]; then
@@ -959,7 +991,7 @@ block_decl_check() {
     return $?
   fi
   for name in lowdecl_typedecl_block lowdecl_typedecl_block_widen lowdecl_typedecl_block_nested lowdecl_typedecl_block_later_nil lowdecl_typedecl_reference; do
-    "$WORK/block-decl-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/block-decl-mut.out" 2>"$WORK/block-decl-mut.err" || { cat "$WORK/block-decl-mut.err"; return 2; }
+    calls_run_lower "$WORK/block-decl-mut$EXE" "$name" "$WORK/block-decl-mut.out" "$WORK/block-decl-mut.err" src/compiler/semantic/main_visitor.iyi "^argument 'status' of 'LibC#exit' must be Int32, not \\(Int32 \\| Nil\\)$" || return $?
     summary_check "$WORK/block-decl-mut.out" || return $?
   done
 }
@@ -972,7 +1004,7 @@ block_storage_check() {
     invalid_mutation "$WORK/block-storage-mut.build.log"
     return $?
   fi
-  "$WORK/block-storage-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowdecl_block_branch_storage.iyi" "$WORK_NATIVE/lowdecl_block_branch_storage.oracle.ll" > "$WORK/block-storage-mut.out" 2>"$WORK/block-storage-mut.err" || { cat "$WORK/block-storage-mut.err"; return 2; }
+  calls_run_lower "$WORK/block-storage-mut$EXE" lowdecl_block_branch_storage "$WORK/block-storage-mut.out" "$WORK/block-storage-mut.err" src/compiler/lower/pending.iyi '^lower: visit\(assign First to Int32 \(hosted assign_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' || return $?
   summary_check "$WORK/block-storage-mut.out"
 }
 prove_mutation "block locals retain only the first assignment type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -1006,22 +1038,77 @@ block_lexical_locals_check() {
     invalid_mutation "$WORK/block-lexical-mut.build.log"
     return $?
   fi
-  "$WORK/block-lexical-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_lexical_locals.iyi" "$WORK_NATIVE/lowcall_block_lexical_locals.oracle.ll" > "$WORK/block-lexical-mut.out" 2> "$WORK/block-lexical-mut.err" || { cat "$WORK/block-lexical-mut.err"; return 2; }
+  calls_run_lower "$WORK/block-lexical-mut$EXE" lowcall_block_lexical_locals "$WORK/block-lexical-mut.out" "$WORK/block-lexical-mut.err" src/compiler/lower/pending.iyi "${1:-}" || return $?
   summary_check "$WORK/block-lexical-mut.out"
 }
 prove_mutation "a block inherits later caller locals" "$REPO/src/compiler/lower/call.iyi" \
   '      block_vars[name] = var if name == "self" || writer_vars.has_key?(name)' \
-  '      block_vars[name] = var' -- block_lexical_locals_check || status=1
-prove_mutation "a fun visitor loses block writer ownership" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '    inner.block_owners = @block_owners' \
-  '    inner.block_owners = NodeMap(BlockOwner).new' -- block_lexical_locals_check || status=1
+  '      block_vars[name] = var' -- block_lexical_locals_check '^lower: visit\(assign Int32 to Bool \(hosted assign_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
+cat > "$WORK/writer-owner-probe.iyi" <<'IYI'
+import bench/lib/lower_gate::{analyse}
+import compiler/syntax/ast::{Block}
+import compiler/syntax/visitor::{Visitor}
+
+class WriterBlockWalk < Visitor
+  getter blocks : Array(Block)
+  def initialize
+    @blocks = [] of Block
+  end
+  def visit(node : Block) : Bool
+    @blocks << node
+    true
+  end
+end
+
+fixture = Program.args[0]
+analysis = analyse(File.read(fixture), fixture, true)
+walk = WriterBlockWalk.new
+analysis.root.accept(walk)
+walk.blocks.each do |block|
+  if loc = block.location
+    if loc.line_number == 86
+      puts "WRITER-OWNER=#{analysis.visitor.block_owners[block]?.nil? ? "missing" : "present"}"
+    end
+  end
+end
+IYI
+writer_owner_check() {
+  if ! "$IYI" build -o "$WORK_NATIVE/writer-owner$EXE" "$WORK_NATIVE/writer-owner-probe.iyi" > "$WORK/writer-owner.build.log" 2>&1; then
+    echo 'INVALID: writer-owner semantic probe did not build'
+    cat "$WORK/writer-owner.build.log"
+    return 2
+  fi
+  if ! "$WORK/writer-owner$EXE" "$REPO_NATIVE/bench/fixtures/lowcall_block_lexical_locals.iyi" > "$WORK/writer-owner.out" 2>"$WORK/writer-owner.err"; then
+    echo 'INVALID: writer-owner semantic probe failed'
+    cat "$WORK/writer-owner.out" "$WORK/writer-owner.err"
+    return 2
+  fi
+  if grep -Fxq 'WRITER-OWNER=present' "$WORK/writer-owner.out" &&
+     ! grep -Fxq 'WRITER-OWNER=missing' "$WORK/writer-owner.out"; then return 0; fi
+  if [ -f "$WORK/writer-owner.baseline" ] && grep -Fxq 'WRITER-OWNER=missing' "$WORK/writer-owner.out"; then
+    echo 'decisive: via_fun block at line 86 lost its writer ownership'
+    return 1
+  fi
+  echo 'INVALID: writer-owner probe did not find the expected block'
+  cat "$WORK/writer-owner.out"
+  return 2
+}
+if writer_owner_check; then
+  : > "$WORK/writer-owner.baseline"
+  prove_mutation "a fun visitor loses block writer ownership" "$REPO/src/compiler/semantic/main_visitor.iyi" \
+    '    inner.block_owners = @block_owners' \
+    '    inner.block_owners = NodeMap(BlockOwner).new' -- writer_owner_check || status=1
+else
+  echo 'FAIL: via_fun block writer ownership baseline was not recorded'
+  status=1
+fi
 
 block_nested_storage_check() {
   if ! "$IYI" build -o "$WORK_NATIVE/block-nested-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/block-nested-mut.build.log" 2>&1; then
     invalid_mutation "$WORK/block-nested-mut.build.log"
     return $?
   fi
-  "$WORK/block-nested-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_nested_local_writes.iyi" "$WORK_NATIVE/lowcall_block_nested_local_writes.oracle.ll" > "$WORK/block-nested-mut.out" 2> "$WORK/block-nested-mut.err" || { cat "$WORK/block-nested-mut.err"; return 2; }
+  calls_run_lower "$WORK/block-nested-mut$EXE" lowcall_block_nested_local_writes "$WORK/block-nested-mut.out" "$WORK/block-nested-mut.err" src/compiler/lower/pending.iyi '^lower: visit\(assign \(Answer\+ \| Nil\) to Nil \(union into a non-mixed target, hosted assign_distinct\)\) \(hosted codegen\.cr\) is not ported yet$' || return $?
   summary_check "$WORK/block-nested-mut.out"
 }
 prove_mutation "a block local misses its nested blocks' writes" "$REPO/src/compiler/lower/call.iyi" \
@@ -1037,7 +1124,7 @@ block_cache_check() {
     invalid_mutation "$WORK/block-cache-mut.build.log"
     return $?
   fi
-  "$WORK/block-cache-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/block-cache-mut.out" 2> "$WORK/block-cache-mut.err" || { cat "$WORK/block-cache-mut.err"; return 2; }
+  calls_run_lower "$WORK/block-cache-mut$EXE" "$name" "$WORK/block-cache-mut.out" "$WORK/block-cache-mut.err" src/compiler/lower/pending.iyi "${2:-}" || return $?
   summary_check "$WORK/block-cache-mut.out"
 }
 prove_mutation "a reused block instance drops its writes" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -1046,7 +1133,7 @@ prove_mutation "a reused block instance ignores its entry flow" "$REPO/src/compi
   '    block_entry_holds?(flow)' '    true' -- block_cache_check lowcall_block_cached_entry || status=1
 prove_mutation "a reused block instance ignores its writer storage" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '    return false unless flow.storage.object_id == @var_unions.object_id' \
-  '    return false unless true' -- block_cache_check lowcall_block_cached_entry || status=1
+  '    return false unless true' -- block_cache_check lowcall_block_cached_entry '^lower: visit\(assign Int32 to Nil \(hosted assign_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 prove_mutation "a while next carries no flow to its loop head" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '      @while_next_vars.last << @vars.dup unless @while_next_vars.empty?' '      nil' -- block_cache_check lowcall_while_next_flow || status=1
 prove_mutation "a revisited literal is expanded again" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -1093,7 +1180,11 @@ free_dispatch_check() {
     cat "$WORK/free-mut-$label.build.log" | tee "$WORK/free-dispatch.invalid"
     return 2
   fi
-  "$WORK/free-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_dispatch_free_vars.iyi" "$WORK_NATIVE/lowcall_dispatch_free_vars.oracle.ll" > "$WORK/free-mut-$label.out" 2> "$WORK/free-mut-$label.err" || { cat "$WORK/free-mut-$label.err"; return 2; }
+  if [ "$label" = binding ]; then
+    calls_run_lower "$WORK/free-mut$EXE" lowcall_dispatch_free_vars "$WORK/free-mut-$label.out" "$WORK/free-mut-$label.err" src/compiler/semantic/main_visitor.iyi "^undefined method 'value' for Int32$" || return $?
+  else
+    calls_run_lower "$WORK/free-mut$EXE" lowcall_dispatch_free_vars "$WORK/free-mut-$label.out" "$WORK/free-mut-$label.err" || return $?
+  fi
   summary_check "$WORK/free-mut-$label.out"
 }
 if free_dispatch_check; then
@@ -1118,7 +1209,7 @@ super_check() {
     cat "$WORK/super_mut.build.log" | tee "$WORK/super.invalid"
     return 2
   fi
-  "$WORK/super_mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_super.iyi" "$WORK_NATIVE/lowcall_super.oracle.ll" > "$WORK/super_mut.out" 2> "$WORK/super_mut.err" || { cat "$WORK/super_mut.err"; return 2; }
+  calls_run_lower "$WORK/super_mut$EXE" lowcall_super "$WORK/super_mut.out" "$WORK/super_mut.err" "${1:-}" "${2:-}" || return $?
   summary_check "$WORK/super_mut.out" || return $?
   super_refusal_checks "$WORK/super_mut$EXE"
 }
@@ -1129,13 +1220,13 @@ else
   prove_mutation "virtual receivers skip subtype groups" "$REPO/src/compiler/semantic/main_visitor.iyi" \
     '    if receiver.is_a?(VirtualType)' '    if false' -- lower_calls_check || status=1
   prove_mutation "super uses dynamic scope instead of lexical owner" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-    '    super_ancestors(owner_module, parents)' '    super_ancestors(scope.as(ModuleType), parents)' -- super_check || status=1
+    '    super_ancestors(owner_module, parents)' '    super_ancestors(self_base.as(ModuleType), parents)' -- super_check || status=1
   prove_mutation "super recursion key loses defining owner" "$REPO/src/compiler/semantic/main_visitor.iyi" \
     '      key = key + "^#{owner.full_name}"' '      key = "#{rec_type.full_name}##{target_def.name}(#{parts.join(",")})"' -- super_check || status=1
   prove_mutation "super symbol loses recorded owner" "$REPO/src/compiler/lower/fun.iyi" \
     '    found = recorded if start.as(Type).object_id == recorded.object_id || walk_reaches?(start.as(Type), recorded, [] of UInt64)' '    found = start if start.as(Type).object_id == recorded.object_id || walk_reaches?(start.as(Type), recorded, [] of UInt64)' -- super_check || status=1
   prove_mutation "bare super stops forwarding arguments" "$REPO/src/compiler/semantic/normalizer.iyi" \
-    '                node.args << Var.new(arg.name)' '                node.args.size' -- super_check || status=1
+    '                node.args << Var.new(arg.name)' '                node.args.size' -- super_check src/compiler/semantic/main_visitor.iyi "^wrong number of arguments for 'Child#pick' \\(given 0, expected 1\\)$" || status=1
   prove_mutation "missing super loses its method diagnostic" "$REPO/src/compiler/semantic/main_visitor.iyi" \
     '      unless pinned.nil?' '      unless true' -- super_check || status=1
   prove_mutation "super types its body with static self" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -1145,7 +1236,7 @@ else
   prove_mutation "an expansion call dispatches on self" "$REPO/src/compiler/semantic/main_visitor.iyi" \
     '    if node.expansion && node.obj.nil?' '    if false' -- super_check || status=1
   prove_mutation "lowering refuses super as previous_def" "$REPO/src/compiler/lower/call.iyi" \
-    '  if node.previous_def?' '  if node.previous_def? || node.super?' -- super_check || status=1
+    '  if node.previous_def?' '  if node.previous_def? || node.super?' -- super_check src/compiler/lower/pending.iyi '^lower: visit\(previous_def \(hosted call\.cr: lookup_previous_def_matches\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 fi
 if [ -e "$WORK/super.invalid" ]; then
   echo "  FAIL: a super mutation did not compile; no behavioral detection was proved"
@@ -1158,7 +1249,7 @@ block_nil_if_read_check() {
     cat "$WORK/block-nil.build.log" | tee "$WORK/block-nil.invalid"
     return 2
   fi
-  "$WORK/block-nil$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_block_nil_if_read.iyi" "$WORK_NATIVE/lowcall_block_nil_if_read.oracle.ll" > "$WORK/block-nil.out" 2> "$WORK/block-nil.err" || { cat "$WORK/block-nil.err"; return 2; }
+  calls_run_lower "$WORK/block-nil$EXE" lowcall_block_nil_if_read "$WORK/block-nil.out" "$WORK/block-nil.err" src/compiler/lower/pending.iyi '^lower: visit\(downcast Int32 to \(Int32 \| Nil\) \(hosted cast\.cr downcast_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' || return $?
   summary_check "$WORK/block-nil.out"
 }
 if block_nil_if_read_check; then
@@ -1180,7 +1271,7 @@ lexical_owner_check() {
     cat "$WORK/lexical-mut.build.log" | tee "$WORK/lexical.invalid"
     return 2
   fi
-  "$WORK/lexical-mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcall_inherited_lexical_owner.iyi" "$WORK_NATIVE/lowcall_inherited_lexical_owner.oracle.ll" > "$WORK/lexical-mut.out" 2> "$WORK/lexical-mut.err" || { cat "$WORK/lexical-mut.err"; return 2; }
+  calls_run_lower "$WORK/lexical-mut$EXE" lowcall_inherited_lexical_owner "$WORK/lexical-mut.out" "$WORK/lexical-mut.err" src/compiler/semantic/main_visitor.iyi "^undefined method 'code' for Scanner\\.class$" || return $?
   summary_check "$WORK/lexical-mut.out"
 }
 if lexical_owner_check; then
@@ -1272,7 +1363,7 @@ prove_mutation "a function's linkage is external" "$REPO/src/compiler/lower/fun.
 prove_mutation "a mangled argument list has no separator" "$REPO/src/compiler/lower/fun.iyi" \
   'text = text + "<" + names.join(", ") + ">"' 'text = text + "<" + names.join(",") + ">"' -- lower_calls_check || status=1
 prove_mutation "a call's result is discarded for nil" "$REPO/src/compiler/lower/call.iyi" \
-  "    low.last = inst" "    low.last = llvm_nil(low)" -- lower_calls_check || status=1
+  "    low.last = inst" "    low.last = llvm_nil(low)" -- lower_calls_check '^lower: visit\(binary &\+ with operand IR types %Nil and %Nil inconsistent with Int32 and Int32 \(hosted codegen_binary_op\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_bare_splat_new || status=1
 prove_mutation "a lib call omits the unreachable after NoReturn" "$REPO/src/compiler/lower/call.iyi" \
   "    low.builder.unreachable" "    low.last = llvm_nil(low)" -- lower_calls_check || status=1
 prove_mutation "the return after a terminated block is not skipped" "$REPO/src/compiler/lower/fun.iyi" \
@@ -1297,10 +1388,11 @@ prove_mutation "a block argument is never stored at a yield" "$REPO/src/compiler
   "        store_local(low, var.as(LowerVar), exp_types[i], exp_values[i])" "        low.last = low.last" -- lower_calls_check || status=1
 prove_mutation "a block call's value is merged as a non-final branch" "$REPO/src/compiler/lower/call.iyi" \
   "  phi.add(low, low.last, true)" "  phi.add(low, low.last, false)" -- lower_calls_check || status=1
-prove_mutation "a block call allocates none of the block's variables" "$REPO/src/compiler/lower/call.iyi" \
-  "  allocate_block_vars(low, block, block_ctx.vars, captured)" "  block_ctx.vars.size" -- lower_calls_check || status=1
+prove_mutation "a block call allocates an extra variable" "$REPO/src/compiler/lower/call.iyi" \
+  '  allocate_block_vars(low, block, block_ctx.vars, captured)' '  allocate_block_vars(low, block, block_ctx.vars, captured)
+  alloca_local(low, block_ctx.vars, "__extra_mutant", low.analysed.program.int32_type)' -- lower_calls_check || status=1
 prove_mutation "an inlined def's argument is allocated with the nil type" "$REPO/src/compiler/lower/call.iyi" \
-  "      alloca_local(low, vars, arg.name, storage)" "      alloca_local(low, vars, arg.name, low.analysed.program.nil_type)" -- lower_calls_check || status=1
+  "      alloca_local(low, vars, arg.name, storage)" "      alloca_local(low, vars, arg.name, low.analysed.program.nil_type)" -- lower_calls_check '^lower: visit\(assign Int32 to Nil \(hosted assign_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_block_args || status=1
 prove_mutation "a block branch's value is merged as the last branch" "$REPO/src/compiler/lower/block.iyi" \
   "  phi.add_branch(low, value, false)" "  phi.add_branch(low, value, true)" -- lower_calls_check || status=1
 prove_mutation "a block branch's value is dropped" "$REPO/src/compiler/lower/block.iyi" \
@@ -1308,9 +1400,9 @@ prove_mutation "a block branch's value is dropped" "$REPO/src/compiler/lower/blo
 prove_mutation "a block break skips its by-value join conversion" "$REPO/src/compiler/lower/block.iyi" \
   '        value = join_pointer(low, branch, got, join_t)' '        value = branch' -- lower_calls_check || status=1
 prove_mutation "a break from a block drops its value" "$REPO/src/compiler/lower/lower.iyi" \
-  "    branch_to_phi(low, block_phi.as(BranchPhi), node.exp, jump_target(node, low.current_context.break_target))" "    branch_to_phi(low, block_phi.as(BranchPhi), nil, jump_target(node, low.current_context.break_target))" -- lower_calls_check || status=1
+  "    branch_to_phi(low, block_phi.as(BranchPhi), node.exp, jump_target(node, low.current_context.break_target))" "    branch_to_phi(low, block_phi.as(BranchPhi), nil, jump_target(node, low.current_context.break_target))" -- lower_calls_check '^lower: visit\(upcast Nil to Int32 \(hosted cast\.cr: upcast_distinct\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_block_break || status=1
 prove_mutation "a return from an inlined def drops its value" "$REPO/src/compiler/lower/lower.iyi" \
-  "    branch_to_phi(low, rp.as(BranchPhi), node.exp, jump_target(node, low.current_context.return_target))" "    branch_to_phi(low, rp.as(BranchPhi), nil, jump_target(node, low.current_context.return_target))" -- lower_calls_check || status=1
+  "    branch_to_phi(low, rp.as(BranchPhi), node.exp, jump_target(node, low.current_context.return_target))" "    branch_to_phi(low, rp.as(BranchPhi), nil, jump_target(node, low.current_context.return_target))" -- lower_calls_check '^lower: visit\(upcast Nil to Int32 \(hosted cast\.cr: upcast_distinct\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_block_return_def || status=1
 prove_mutation "a method's receiver is not passed to the call" "$REPO/src/compiler/lower/call.iyi" \
   "    out << sv.as(Value)" "    out.size" -- lower_calls_check || status=1
 prove_mutation "a method's mangled name has no owner" "$REPO/src/compiler/lower/fun.iyi" \
@@ -1324,7 +1416,7 @@ prove_mutation "a lib call passes no arguments" "$REPO/src/compiler/lower/call.i
 prove_mutation "a lib fun is declared with the iyi calling convention" "$REPO/src/compiler/lower/call.iyi" \
   'made = low.module.add_function(real, fn_type, CallConv::C)' 'made = low.module.add_function(real, fn_type, CallConv::Iyi)' -- lower_calls_check || status=1
 prove_mutation "a lib call's function type returns nil" "$REPO/src/compiler/lower/call.iyi" \
-  'fn_type = low.module.types.func(params, low.typer.llvm_return_type(ret), lib_fun.varargs?)' 'fn_type = low.module.types.func(params, low.typer.llvm_return_type(low.analysed.program.nil_type), lib_fun.varargs?)' -- lower_calls_check || status=1
+  'fn_type = low.module.types.func(params, low.typer.llvm_return_type(ret), lib_fun.varargs?)' 'fn_type = low.module.types.func(params, low.typer.llvm_return_type(low.analysed.program.nil_type), lib_fun.varargs?)' -- lower_calls_check '^lower: visit\(binary &\+ with operand IR types i32 and void inconsistent with Int32 and Int32 \(hosted codegen_binary_op\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_block_lexical_locals || status=1
 prove_mutation "a lib call's result is declared as an integer (a pointer result is caught)" "$REPO/src/compiler/lower/call.iyi" \
   'fn_type = low.module.types.func(params, low.typer.llvm_return_type(ret), lib_fun.varargs?)' 'fn_type = low.module.types.func(params, low.module.types.int32, lib_fun.varargs?)' -- lower_calls_check || status=1
 
@@ -1378,8 +1470,48 @@ prove_mutation "a def is emitted with the C calling convention (a struct result 
   'return CallConv::Iyi if name.starts_with?("*")' 'return CallConv::C if name.starts_with?("*")' -- lower_calls_check || status=1
 prove_mutation "a struct call result is returned as the aggregate, not its spill address (hosted call.cr:707-713)" "$REPO/src/compiler/lower/call.iyi" \
   '        low.last = temp' '        low.last = inst' -- lower_calls_check || status=1
-prove_mutation "a module-level build constant is kept in the module (the module check catches it)" "$REPO/bench/lib/lower_gate.iyi" \
-  'next if stripped.starts_with?("@") && build_constant?(stripped, builds) || stripped.starts_with?("%Nil = type")' 'next if stripped.starts_with?("%Nil = type")' -- lower_calls_check || status=1
+cat > "$WORK/build-filter-probe.iyi" <<'IYI'
+import bench/lib/lower_gate::{build_names, normalised_lines}
+build = %(@"Crystal::BUILD_COMMIT" = internal global ptr null)
+program = %(@"User::VALUE" = internal global ptr null)
+text = %(  store ptr @"'compiler'", ptr @"Crystal::BUILD_COMMIT", align 8\n) + build + "\n" + program + "\n"
+lines = normalised_lines(text, build_names(text, "::"))
+puts "BUILD-GLOBAL=#{lines.includes?(build) ? "present" : "filtered"}"
+puts "PROGRAM-GLOBAL=#{lines.includes?(program) ? "kept" : "missing"}"
+IYI
+build_filter_check() {
+  if ! "$IYI" build -o "$WORK_NATIVE/build-filter-probe$EXE" "$WORK_NATIVE/build-filter-probe.iyi" > "$WORK/build-filter.build.log" 2>&1; then
+    echo 'INVALID: build-constant filter probe did not build'
+    cat "$WORK/build-filter.build.log"
+    return 2
+  fi
+  if ! "$WORK/build-filter-probe$EXE" > "$WORK/build-filter.out" 2>"$WORK/build-filter.err"; then
+    echo 'INVALID: build-constant filter probe failed'
+    cat "$WORK/build-filter.out" "$WORK/build-filter.err"
+    return 2
+  fi
+  if ! grep -Fxq 'PROGRAM-GLOBAL=kept' "$WORK/build-filter.out"; then
+    echo 'INVALID: ordinary program global was not preserved'
+    cat "$WORK/build-filter.out"
+    return 2
+  fi
+  if grep -Fxq 'BUILD-GLOBAL=filtered' "$WORK/build-filter.out"; then return 0; fi
+  if [ -f "$WORK/build-filter.baseline" ] && grep -Fxq 'BUILD-GLOBAL=present' "$WORK/build-filter.out"; then
+    echo 'decisive: hosted BUILD_COMMIT global was retained by the module filter'
+    return 1
+  fi
+  echo 'INVALID: build-constant filter probe returned an unexpected result'
+  cat "$WORK/build-filter.out"
+  return 2
+}
+if build_filter_check; then
+  : > "$WORK/build-filter.baseline"
+  prove_mutation "a build identity global is kept by the module filter" "$REPO/bench/lib/lower_gate.iyi" \
+    'next if stripped.starts_with?("@") && build_constant?(stripped, builds) || stripped.starts_with?("%Nil = type")' 'next if stripped.starts_with?("%Nil = type")' -- build_filter_check || status=1
+else
+  echo 'FAIL: build-constant filter baseline did not pass'
+  status=1
+fi
 noreturn_phi_check() {
   if ! "$IYI" build -o "$WORK_NATIVE/noreturn_phi$EXE" "$REPO_NATIVE/bench/selfhost_lower_calls_exercise.iyi" > "$WORK/noreturn_phi.build.log" 2>&1; then
     invalid_mutation "$WORK/noreturn_phi.build.log"
@@ -1410,18 +1542,18 @@ prove_mutation "generic allocation skips preparing its metaclass receiver" "$REP
 prove_mutation "a computed metaclass receiver is not evaluated" "$REPO/src/compiler/lower/call.iyi" \
   '      unless node.obj.as(ASTNode).is_a?(Path)' '      if false' -- lower_calls_check || status=1
 prove_mutation "an inherited call loses its defining owner" "$REPO/src/compiler/lower/call.iyi" \
-  '    if defining = low.analysed.program.def_owner(target)' '    if defining = nil' -- lower_calls_check || status=1
+  '    if defining = low.analysed.program.def_owner(target)' '    if defining = nil' -- lower_calls_check '^lower: visit\(a call to identity inherited from a superclass of Child \(hosted call\.cr: target_def\.owner is the defining type\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_inherited_owner || status=1
 prove_mutation "an inherited dispatch arm loses its defining owner" "$REPO/src/compiler/lower/call.iyi" \
-  '        return owner if low.analysed.program.def_owner(target)' '        return owner if false' -- lower_calls_check || status=1
+  '        return owner if low.analysed.program.def_owner(target)' '        return owner if false' -- lower_calls_check '^lower: visit\(a call to in\? inherited from a superclass of String \(hosted call\.cr: target_def\.owner is the defining type\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_dispatch_free_vars || status=1
 prove_mutation "a recursive named call targets an untyped clone" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '@call_target_defs[call] = frame.definition' '@call_target_defs[call] = target_def' -- lower_calls_check || status=1
+  '@call_target_defs[call] = frame.definition' '@call_target_defs[call] = target_def' -- lower_calls_check '^lower: visit\(an untyped instantiated parameter 0 of recursive_named_mixed \(hosted call\.cr: prepare_call_args\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_recursive_named_mixed || status=1
 prove_mutation "a named argument key drops its name" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '        entries << "#{arg_name.bytesize}:#{arg_name}=#{text.bytesize}:#{text}"' \
   '        entries << "#{text.bytesize}:#{text}"' -- lower_calls_check || status=1
 prove_mutation "a yielded block loses its writer's narrowed-out locals" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '@untyped_locals = writer_untyped.dup' '@untyped_locals = Hash(String, String).new' -- lower_calls_check || status=1
+  '@untyped_locals = writer_untyped.dup' '@untyped_locals = Hash(String, String).new' -- lower_calls_check "^undefined local variable or method 'other' for main$" lowcall_narrowed_block_capture src/compiler/semantic/main_visitor.iyi || status=1
 prove_mutation "a repeated block loses its narrowed-out entry locals" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '@untyped_locals = entry_untyped_locals.dup' '@untyped_locals = Hash(String, String).new' -- lower_calls_check || status=1
+  '@untyped_locals = entry_untyped_locals.dup' '@untyped_locals = Hash(String, String).new' -- lower_calls_check "^undefined local variable or method 'other' for main$" lowcall_narrowed_block_capture src/compiler/semantic/main_visitor.iyi || status=1
 prove_mutation "a nil receiver is not accepted" "$REPO/src/compiler/lower/call.iyi" \
   '  return owner if owner.is_a?(NilType)' '  pending_visit_node("nil receiver") if owner.is_a?(NilType)' -- lower_calls_check '^lower: visit\(nil receiver\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 prove_mutation "an aggregate dispatch argument remains a pointer" "$REPO/src/compiler/lower/call.iyi" \
@@ -1453,15 +1585,15 @@ prove_mutation "a typed block declaration is refused" "$REPO/src/compiler/lower/
     pending_visit_node("typed block declaration")
   end' -- lower_calls_check '^lower: visit\(typed block declaration\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 prove_mutation "primitive dispatch loses its receiver" "$REPO/src/compiler/lower/call.iyi" \
-  '      prim_values = [self_value.as(Value)] of Value' '      prim_values = [] of Value' -- lower_calls_check || status=1
+  '      prim_values = [self_value.as(Value)] of Value' '      prim_values = [] of Value' -- lower_calls_check '^lower: visit\(binary primitive with 0 arguments \(hosted codegen_primitive_binary\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_dispatch_primitive || status=1
 prove_mutation "enum dispatch receivers are refused" "$REPO/src/compiler/lower/call.iyi" \
   '  if owner.is_a?(MetaclassType) || (owner.is_a?(ModuleType) && !owner.is_a?(ClassType) && !owner.is_a?(EnumType))' \
-  '  if owner.is_a?(MetaclassType) || (owner.is_a?(ModuleType) && !owner.is_a?(ClassType))' -- lower_calls_check || status=1
+  '  if owner.is_a?(MetaclassType) || (owner.is_a?(ModuleType) && !owner.is_a?(ClassType))' -- lower_calls_check '^lower: visit\(a dispatched call on unsupported receiver Kind\) \(hosted codegen\.cr\) is not ported yet$' lowcall_dispatch_enum || status=1
 prove_mutation "global dispatch arms are repeated for virtual subtypes" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '      return base_matches.matches if global_only' '      return base_matches.matches if false' -- lower_calls_check || status=1
 prove_mutation "global dispatch arms are treated as runtime receivers" "$REPO/src/compiler/lower/call.iyi" \
   '    checked_dispatch_receiver(low, node, arm.receiver, arm.definition) if receiver_dynamic && !arm.receiver.is_a?(VirtualType) && !global_arm' \
-  '    checked_dispatch_receiver(low, node, arm.receiver, arm.definition) if receiver_dynamic && !arm.receiver.is_a?(VirtualType)' -- lower_calls_check || status=1
+  '    checked_dispatch_receiver(low, node, arm.receiver, arm.definition) if receiver_dynamic && !arm.receiver.is_a?(VirtualType)' -- lower_calls_check '^lower: visit\(a dispatched call on unsupported receiver main\) \(hosted codegen\.cr\) is not ported yet$' lowcall_dispatch_virtual_global || status=1
 prove_mutation "dispatch drops the argument type test" "$REPO/src/compiler/lower/call.iyi" \
   '        matches = low.builder.bitwise_and(matches, match_type_id(low, arg_types[i], params[i], arg_tids[i]))' \
   '        matches = int1(low, 1_i64)' -- lower_calls_check || status=1
@@ -1472,9 +1604,9 @@ prove_mutation "dispatch evaluates an argument in every arm" "$REPO/src/compiler
   '      passed = values[i]' '      visit_node(low, arguments[i])
       passed = values[i]' -- lower_calls_check || status=1
 prove_mutation "named arguments lose written order" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '      named.each { |arg| arguments << arg.value }' '      named.reverse_each { |arg| arguments << arg.value }' -- lower_calls_check || status=1
+  '      named.each { |arg| arguments << arg.value }' '      named.reverse_each { |arg| arguments << arg.value }' -- lower_calls_check '^lower: visit\(downcast Int32 to Bool \(hosted cast\.cr downcast_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_dispatch_named_arg || status=1
 prove_mutation "generic bindings ignore matched argument types" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '          call_arg_type = matched[index] if index < matched.size' '          call_arg_type = matched[index] if false' -- lower_calls_check || status=1
+  '          call_arg_type = matched[index] if index < matched.size' '          call_arg_type = matched[index] if false' -- lower_calls_check '^undefined constant T$' lowcall_named_generic_widen refuse_port 5 || status=1
 prove_mutation "numeric arguments ignore their matched type" "$REPO/src/compiler/lower/call.iyi" \
   '      converted = lib_number_value(low, arg_node.as(NumberLiteral), target_type)' \
   '      converted = downcast(low, passed, target_type, at, true)' -- lower_calls_check || status=1
@@ -1492,13 +1624,13 @@ prove_mutation "magic arguments precede named arguments" "$REPO/src/compiler/sem
 prove_mutation "lowering ignores recorded argument order" "$REPO/src/compiler/lower/call.iyi" \
   '  low.analysed.call_arguments[node]? || node.args' '  node.args' -- lower_calls_check || status=1
 prove_mutation "recursion keys omit the written overload signature" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '    key = key + "|signature(" + restrictions.join(",") + ")"' '    key = key + ""' -- lower_calls_check || status=1
+  '    key = key + "|signature(" + restrictions.join(",") + ")"' '    key = key + ""' -- lower_calls_check '^lower: visit\(downcast B to A \(hosted cast\.cr downcast_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 prove_mutation "virtual field reads lose their base scope" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '    target_type = target_type.as(VirtualType).base_type if target_type.is_a?(VirtualType)' \
-  '    target_type = target_type.as(VirtualType).base_type if false' -- lower_calls_check || status=1
+  '    target_type = target_type.as(VirtualType).base_type if false' -- lower_calls_check "^can't infer the type of instance variable '@value' of Base\\+$" '' src/compiler/semantic/main_visitor.iyi || status=1
 prove_mutation "virtual field writes lose their base scope" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '      target_type = target_type.as(VirtualType).base_type if target_type.is_a?(VirtualType)' \
-  '      target_type = target_type.as(VirtualType).base_type if false' -- lower_calls_check || status=1
+  '      target_type = target_type.as(VirtualType).base_type if false' -- lower_calls_check "^can't use instance variables in Base\\+$" '' src/compiler/semantic/main_visitor.iyi || status=1
 prove_mutation "virtual class primitive loses its metaclass" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '        if sc.is_a?(VirtualType)' '        if false' -- lower_calls_check || status=1
 prove_mutation "virtual methods lose priority over global functions" "$REPO/src/compiler/semantic/main_visitor.iyi" \
@@ -1508,17 +1640,17 @@ prove_mutation "virtual methods lose priority over global functions" "$REPO/src/
       collect_candidate_defs(rec_type.as(VirtualType).base_type, name, result, visited)' -- lower_calls_check || status=1
 prove_mutation "subtype groups use the base match" "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '      groups[i].each { |match| result << match }' \
-  '      base_matches.matches.each { |match| result << match }' -- lower_calls_check || status=1
+  '      base_matches.matches.each { |match| result << match }' -- lower_calls_check "^no overload matches 'Answer\\+#code' with type $" lowcall_block_cached_writes src/compiler/semantic/main_visitor.iyi || status=1
 prove_mutation "a nil argument is passed as the visit left it, not as the nil value (hosted zeroinitializer)" "$REPO/src/compiler/lower/call.iyi" \
   'passed = at.is_a?(NilType) ? low.builder.const_zero(low.typer.nil_type).as(Value) : value.as(Value)' 'passed = value.as(Value)' -- lower_calls_check || status=1
 prove_mutation "an unqualified class-method call loses its class owner" "$REPO/src/compiler/lower/call.iyi" \
-  '          class_owner = ct' '          class_owner = nil' -- lower_calls_check || status=1
+  '          class_owner = ct' '          class_owner = nil' -- lower_calls_check '^lower: visit\(a class method native inherited from a superclass of Choice::Kind \(hosted call\.cr: target_def\.owner is the defining type\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_enum_class_methods || status=1
 prove_mutation "a generic metaclass call passes no self type id" "$REPO/src/compiler/lower/call.iyi" \
   '      self_value = type_id_value(low, recv_type)' '      self_value = nil' -- lower_calls_check || status=1
 prove_mutation "a builtin metaclass receiver is refused" "$REPO/src/compiler/lower/call.iyi" \
   '    unless (inst.is_a?(NonGenericClassType) || inst.is_a?(NonGenericModuleType) || inst.is_a?(EnumType)) && !inst.is_a?(NilType)' '    unless (inst.is_a?(NonGenericClassType) || inst.is_a?(NonGenericModuleType) || inst.is_a?(EnumType)) && !inst.is_a?(NilType) && primitive_kind(inst) == ""' -- lower_calls_check '^lower: visit\(a class method call on Int32\.class \(hosted call\.cr: prepare_call_args, a generic or builtin metaclass\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 prove_mutation "an implicit builtin class call is refused" "$REPO/src/compiler/lower/call.iyi" \
-  '      if (ct.is_a?(NonGenericClassType) || ct.is_a?(NonGenericModuleType) || ct.is_a?(EnumType)) && !ct.is_a?(NilType)' '      if (ct.is_a?(NonGenericClassType) || ct.is_a?(NonGenericModuleType) || ct.is_a?(EnumType)) && !ct.is_a?(NilType) && primitive_kind(ct) == ""' -- lower_calls_check || status=1
+  '      if (ct.is_a?(NonGenericClassType) || ct.is_a?(NonGenericModuleType) || ct.is_a?(EnumType)) && !ct.is_a?(NilType)' '      if (ct.is_a?(NonGenericClassType) || ct.is_a?(NonGenericModuleType) || ct.is_a?(EnumType)) && !ct.is_a?(NilType) && primitive_kind(ct) == ""' -- lower_calls_check '^lower: visit\(a call to identity with no receiver inside a generic or builtin class method \(hosted call\.cr: prepare_call_args, the metaclass owner\)\) \(hosted codegen\.cr\) is not ported yet$' lowcall_meta_builtin_implicit || status=1
 prove_mutation "a computed metaclass receiver is not evaluated" "$REPO/src/compiler/lower/call.iyi" \
   '      unless node.obj.as(ASTNode).is_a?(Path)' '      if false' -- lower_calls_check || status=1
 prove_mutation "a captured block precedes self in the call" "$REPO/src/compiler/lower/call.iyi" \

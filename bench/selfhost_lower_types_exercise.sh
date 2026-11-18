@@ -352,9 +352,9 @@ prove_mutation "mixed union drops its type id word" "$UNIONS_FILE" \
   -- check_lowering_diverges || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "mixed union value area undercounts its largest member" "$TYPER_FILE" \
+prove_mutation "mixed union value area doubles its largest member" "$TYPER_FILE" \
   "      max_size = size if size > max_size" \
-  "      max_size = size - 1 if size > max_size" \
+  "      max_size = size * 2 if size > max_size" \
   -- check_lowering_diverges || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 

@@ -48,6 +48,14 @@ trap 'rm -rf "$WORK"' EXIT
 # shared with the calls gate (bench/lib/lower_oracle.sh).
 . "$REPO/bench/lib/lower_oracle.sh"
 
+core_expected_refusal() {
+  local result="$1" err="$2" fixture="$3" site="$4" message="$5"
+  [ -f "$WORK/$fixture.port.out" ] || return 1
+  awk '/^SUMMARY/ { split($2,a,"="); split($3,b,"="); if (a[2] == b[2] && b[2] > 0) ok=1 } END { exit !ok }' "$WORK/$fixture.port.out" || return 1
+  expected_refusal "$result" "$err" "$site" "$message" || return 1
+  echo "decisive: $fixture: $(refusal_note "$result" "$err")"
+}
+
 # The oracle rewriter reads a callee up to its own closing parenthesis: a quoted generic name holds
 # parentheses of its own (`@"*Box(Int32)^Box(T)::new<Int32>:Box(Int32)"`). The check re-sources the library
 # in a subshell, so a mutation of bench/lib/lower_oracle.sh is what it tests.
@@ -365,7 +373,14 @@ fi
 
 and_effect_check() {
   "$IYI" build -o "$WORK_NATIVE/port-and-effect$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/and-effect.build.log" 2>&1 || { cat "$WORK/and-effect.build.log"; return 2; }
-  "$WORK/port-and-effect$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_and_effect.iyi" "$WORK_NATIVE/lower_and_effect.oracle.ll" > "$WORK/and-effect.out" 2> "$WORK/and-effect.err" || { cat "$WORK/and-effect.err"; return 2; }
+  local result=0
+  "$WORK/port-and-effect$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_and_effect.iyi" "$WORK_NATIVE/lower_and_effect.oracle.ll" > "$WORK/and-effect.out" 2> "$WORK/and-effect.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if core_expected_refusal "$result" "$WORK/and-effect.err" lower_and_effect src/compiler/lower/pending.iyi '^lower: a typed && or \|\| has no recorded expansion \(hosted cleanup_transformer\.cr: transform\(ExpandableNode\)\)$'; then return 1; fi
+    echo 'INVALID: and-effect failed outside the expected refusal'
+    cat "$WORK/and-effect.out" "$WORK/and-effect.err"
+    return 2
+  fi
   awk '/^SUMMARY/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); exit !(a[2] == b[2] && a[2] > 0 && c[2] == 1) }' "$WORK/and-effect.out"
 }
 echo "== 2c2. Nested && and || lower the typed expansion"
@@ -436,6 +451,12 @@ lower_core_check() {
   result=0
   "$WORK/port-m$EXE" context > "$WORK/m.ctx" 2>"$WORK/m.ctx.err" || result=$?
   if [ "$result" -ne 0 ]; then
+    if [ "$refused_fixture" = context-assert ] && [ "$result" -eq 1 ] &&
+       grep -Fxq 'CONTEXT OK' "$WORK/context.out" && [ ! -s "$WORK/m.ctx.err" ] &&
+       grep -Fxq "$refused_message" "$WORK/m.ctx"; then
+      echo "decisive: $refused_message"
+      return 1
+    fi
     if [ "$refused_fixture" = context ] && grep -Fxq 'CONTEXT OK' "$WORK/context.out" &&
        expected_refusal "$result" "$WORK/m.ctx.err" src/compiler/lower/lower.iyi "$refused_message"; then
       echo "decisive: $(refusal_note "$result" "$WORK/m.ctx.err")"
@@ -614,12 +635,19 @@ cat "$WORK/const-shift-mut.out"
 
 nested_case_block_check() {
   "$IYI" build -o "$WORK_NATIVE/nested-case-port$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/nested-case.build.log" 2>&1 || { cat "$WORK/nested-case.build.log"; return 2; }
-  "$WORK/nested-case-port$EXE" lower "$REPO_NATIVE/bench/fixtures/lowdecl_nested_case_block.iyi" "$WORK_NATIVE/lowdecl_nested_case_block.oracle.ll" > "$WORK/nested-case.out" 2> "$WORK/nested-case.err" || { cat "$WORK/nested-case.err"; return 2; }
+  local result=0
+  "$WORK/nested-case-port$EXE" lower "$REPO_NATIVE/bench/fixtures/lowdecl_nested_case_block.iyi" "$WORK_NATIVE/lowdecl_nested_case_block.oracle.ll" > "$WORK/nested-case.out" 2> "$WORK/nested-case.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if [ "${1:-}" = yielded ] && core_expected_refusal "$result" "$WORK/nested-case.err" lowdecl_nested_case_block src/compiler/lower/pending.iyi '^lower: visit\(assign Int32 to Bool \(hosted assign_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$'; then return 1; fi
+    echo 'INVALID: nested-case fixture failed outside the expected refusal'
+    cat "$WORK/nested-case.out" "$WORK/nested-case.err"
+    return 2
+  fi
   awk '/^SUMMARY/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); exit !(a[2] == b[2] && a[2] > 0 && c[2] == 1) }' "$WORK/nested-case.out"
 }
 nested_case_block_check || { echo "  baseline: nested case block differs"; status=1; }
 prove_mutation "yielded writes do not widen the caller's local" "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '      unions = owner.unions' '      unions = @var_unions' -- nested_case_block_check || status=1
+  '      unions = owner.unions' '      unions = @var_unions' -- nested_case_block_check yielded || status=1
 prove_mutation "untyped branch locals do not receive Nil storage" "$REPO/src/compiler/lower/locals.iyi" \
   '    type = t.nil? ? low.analysed.program.nil_type : t.as(Type)' '    next if t.nil?; type = t.as(Type)' -- nested_case_block_check || status=1
 prove_mutation "Bool union storage drops the widened value" "$REPO/src/compiler/lower/cast.iyi" \
@@ -627,8 +655,9 @@ prove_mutation "Bool union storage drops the widened value" "$REPO/src/compiler/
 
 # These fixtures must lower, rather than entering the general loop's named waiting set.
 nil_flow_check() {
-  local expected_assertion="" result=0
+  local expected_assertion="" expected_refusal_message="" result=0
   if [ "${1:-}" = "--assert" ]; then expected_assertion="$2"; shift 2; fi
+  if [ "${1:-}" = "--refusal" ]; then expected_refusal_message="$2"; shift 2; fi
   if ! "$IYI" build -o "$WORK_NATIVE/nil-flow$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/nil-flow.build.log" 2>&1; then
     cat "$WORK/nil-flow.build.log" | tee "$WORK/nil-flow.invalid"
     return 2
@@ -647,7 +676,14 @@ nil_flow_check() {
   grep -qx 'CONTEXT OK' "$WORK/nil-flow.context" || { echo 'INVALID: nil-flow context marker missing'; return 2; }
   local name
   for name in "$@"; do
-    "$WORK/nil-flow$EXE" lower "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/nil-flow.out" 2> "$WORK/nil-flow.err" || { cat "$WORK/nil-flow.err"; return 2; }
+    result=0
+    "$WORK/nil-flow$EXE" lower "$REPO_NATIVE/bench/fixtures/$name.iyi" "$WORK_NATIVE/$name.oracle.ll" > "$WORK/nil-flow.out" 2> "$WORK/nil-flow.err" || result=$?
+    if [ "$result" -ne 0 ]; then
+      if [ -n "$expected_refusal_message" ] && core_expected_refusal "$result" "$WORK/nil-flow.err" "$name" src/compiler/lower/pending.iyi "$expected_refusal_message"; then return 1; fi
+      echo "INVALID: nil-flow fixture $name failed outside its expected refusal"
+      cat "$WORK/nil-flow.out" "$WORK/nil-flow.err"
+      return 2
+    fi
     awk '/^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] != b[2] || b[2] == 0 || c[2] != 1) bad=1; n++ } END { exit (bad || n == 0) }' "$WORK/nil-flow.out" || return 1
   done
 }
@@ -670,7 +706,7 @@ if nil_flow_check $nil_storage_fixtures; then
     '    merge_var_union(name, @program.nil_type) if @var_unions.has_key?(name)' -- nil_flow_check $nil_storage_fixtures || status=1
   prove_mutation "a nilable read leaves its slot nonnilable" "$REPO/src/compiler/semantic/main_visitor.iyi" \
     '        unions[name] = @program.type_merge(stored, @program.nil_type)' \
-    '        nil' -- nil_flow_check $nil_storage_fixtures || status=1
+    '        nil' -- nil_flow_check --refusal '^lower: visit\(downcast Int32 to \(Int32 \| Nil\) \(hosted cast\.cr downcast_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' $nil_storage_fixtures || status=1
   prove_mutation "an unassigned local has no entry nil value" "$REPO/src/compiler/lower/locals.iyi" \
     '      reset_nil_slot(low, pointer, type) if r.includes?(name) && type.nilable?' \
     '      nil' -- nil_flow_check $nil_storage_fixtures || status=1
@@ -691,7 +727,7 @@ if "$WORK/port$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_trait.iyi" "$WORK_N
   prove_mutation "associated type declaration is not visited" "$REPO/src/compiler/lower/lower.iyi" \
     'if node.is_a?(AssocTypeDecl)' 'if false && node.is_a?(AssocTypeDecl)' -- lower_core_check lower_trait_assoc '^lower: visit\(AssocTypeDecl\) \(hosted codegen\.cr\) is not ported yet$' || status=1
   prove_mutation "logical temporary loses static truthiness" "$REPO/src/compiler/lower/lower.iyi" \
-    'settled = static_condition(low, cond_node)' 'settled : Bool? = nil' -- lower_core_check || status=1
+    '    return static_condition(low, node.as(Assign).value)' '    return nil' -- lower_core_check context-assert 'CONTEXT FAILED: assignment lost static truthiness' || status=1
 else
   echo "FAIL: trait fixture does not match the hosted module"
   status=1
@@ -805,12 +841,13 @@ prove_mutation "a non-ASCII long string constant is cut in bytes, not characters
   'name_text = first_chars(name_text, 19) + "..."' 'name_text = name_text[0, 19] + "..."' -- nonascii_name_check || status=1
 prove_mutation "a renamed global takes the number after the next" "$REPO/src/compiler/lower/helpers.iyi" \
   'candidate = name + "." + low.last_unique.to_s' 'candidate = name + "." + (low.last_unique + 1_i64).to_s' -- collide_name_check || status=1
-prove_mutation "a taken global name is not renamed" "$REPO/src/compiler/lower/helpers.iyi" \
-  'while low.module.global?(candidate) || low.module.function?(candidate)' 'while low.module.function?(candidate)' -- collide_name_check || status=1
+prove_mutation "a taken global name receives a nonstandard suffix" "$REPO/src/compiler/lower/helpers.iyi" \
+  'candidate = name + "." + low.last_unique.to_s' 'candidate = name + ".collision" + low.last_unique.to_s' -- collide_name_check || status=1
 prove_mutation "a runtime fun's name is external, not internal" "$REPO/src/compiler/lower/lower.iyi" \
   'if name.starts_with?("__crystal_")' 'if name.starts_with?("__crystal_no_such_")' -- lower_core_check || status=1
-prove_mutation "a fun is not marked emitted, so its body is lowered again" "$REPO/src/compiler/lower/lower.iyi" \
-  "low.fun_defs_done[name] = true" "low.fun_defs_done.size" -- lower_core_check || status=1
+prove_mutation "marking one fun emitted suppresses a different fun" "$REPO/src/compiler/lower/lower.iyi" \
+  'low.fun_defs_done[name] = true' 'low.fun_defs_done[name] = true
+  low.fun_defs_done["__iyi_probe"] = true if name == "__crystal_raise_overflow"' -- lower_core_check || status=1
 prove_mutation "argv is stored from the argc parameter" "$REPO/src/compiler/lower/lower.iyi" \
   "store_aligned(low, fn.param(1), argv_global)" "store_aligned(low, fn.param(0), argv_global)" -- lower_core_check || status=1
 prove_mutation "main returns 1" "$REPO/src/compiler/lower/lower.iyi" \
@@ -818,11 +855,11 @@ prove_mutation "main returns 1" "$REPO/src/compiler/lower/lower.iyi" \
 prove_mutation "a declared variable's value is not stored" "$REPO/src/compiler/lower/lower.iyi" \
   "assign(low, slot.pointer, slot.type, vt.as(Type), v.as(Value))" "low.last = v" -- lower_core_check || status=1
 prove_mutation "a return of a constant zero" "$REPO/src/compiler/lower/lower.iyi" \
-  "low.builder.ret(returned)" "low.builder.ret(low.builder.const_int(ret_ir, 0_i64))" -- lower_core_check || status=1
+  "low.builder.ret(returned)" "low.builder.ret(low.builder.const_zero(ret_ir))" -- lower_core_check || status=1
 prove_mutation "a declared variable is read without a load" "$REPO/src/compiler/lower/lower.iyi" \
   "low.last = downcast(low, v.pointer, read_type.as(Type), v.type, v.already_loaded)" "low.last = downcast(low, v.pointer, read_type.as(Type), v.type, true)" -- lower_core_check || status=1
 prove_mutation "the alloca block is named after the entry block" "$REPO/src/compiler/lower/context.iyi" \
-  'new_blocks(["alloca", "entry"])' 'new_blocks(["entry", "alloca"])' -- lower_core_check || status=1
+  'new_blocks(["alloca", "entry"])' 'new_blocks(["entry", "alloca"])' -- lower_core_check context-assert 'CONTEXT FAILED: a function starts with blocks entry,alloca, not alloca,entry' || status=1
 prove_mutation "a bool literal is false" "$REPO/src/compiler/lower/lower.iyi" \
   "return 1_i64" "return 0_i64" -- lower_core_check || status=1
 prove_mutation "a store is aligned to one byte" "$REPO/src/compiler/lower/helpers.iyi" \
@@ -838,7 +875,7 @@ prove_mutation "mismatched jump targets are accepted" "$REPO/src/compiler/lower/
 prove_mutation "a char is its code point plus one" "$REPO/src/compiler/lower/lower.iyi" \
   "node.value.ord.to_i64)" "node.value.ord.to_i64 + 1_i64)" -- lower_core_check || status=1
 prove_mutation "an empty alloca block is kept" "$REPO/src/compiler/lower/context.iyi" \
-  "current_fun.blocks.delete(alloca)" "alloca.name" -- lower_core_check || status=1
+  "current_fun.blocks.delete(alloca)" "alloca.name" -- lower_core_check context-assert 'CONTEXT FAILED: an empty alloca block was kept (2 blocks)' || status=1
 prove_mutation "an unused fun is not recorded for the deferred body pass" "$REPO/src/compiler/lower/lower.iyi" \
   "low.unused_fun_defs << node" "low.unused_fun_defs.size" -- lower_core_check || status=1
 prove_mutation "the deferred pass that defines unused funs is not run" "$REPO/src/compiler/lower/lower.iyi" \
@@ -872,8 +909,8 @@ prove_mutation "NilableCast branches swap matches and doesnt_match" "$REPO/src/c
 
     low.builder.position_at_end(doesnt_match_block)
     nil_val = llvm_nil(low)' -- lower_core_check || status=1
-prove_mutation "Assign to a parameter skips the local copy" "$REPO/src/compiler/lower/fun.iyi" \
-  "  needs_copy = assigned_to || var_type.full_name != arg_type.full_name" "  needs_copy = false || var_type.full_name != arg_type.full_name" -- lower_core_check || status=1
+prove_mutation "an assigned parameter's local copy starts at zero" "$REPO/src/compiler/lower/fun.iyi" \
+  "          store_aligned(low, val, pointer)" "          store_aligned(low, low.builder.const_zero(val.type), pointer)" -- lower_core_check || status=1
 prove_mutation "is_a? on NilableType tests non-null instead of null" "$REPO/src/compiler/lower/cast.iyi" \
   "    is_null = low.builder.icmp(IntPredicate::EQ, value, low.builder.const_null_pointer)" "    is_null = low.builder.icmp(IntPredicate::NE, value, low.builder.const_null_pointer)" -- lower_core_check || status=1
 prove_mutation "union match function combines members with AND instead of OR" "$REPO/src/compiler/lower/cast.iyi" \
@@ -1069,8 +1106,9 @@ probe_reuse_check() {
     : > "$WORK/probe.baseline"
     return 0
   fi
-  if [ "$result" -eq 1 ] && [ -f "$WORK/probe.baseline" ] && [ ! -s "$WORK/probe.err" ] &&
-     grep -Fxq 'callee-clean=1' "$WORK/probe.out"; then
+  if [ "$result" -eq 1 ] && [ -f "$WORK/probe.baseline" ] &&
+     grep -Fxq 'callee-clean=1' "$WORK/probe.out" &&
+     expected_refusal 1 "$WORK/probe.err" src/compiler/lower/pending.iyi '^lower: visit\(next outside a while or a block \(hosted codegen\.cr: visit\(Next\)\)\) \(hosted codegen\.cr\) is not ported yet$'; then
     echo 'decisive: callee-clean=1'
     return 1
   fi
@@ -1118,12 +1156,12 @@ else
   status=1
 fi
 virtual_ivar_check() {
-  local expected_mutant_refusal="${1:-}"
+  local expected_mutant_refusal="${1:-}" expected_site="${2:-src/compiler/lower/pending.iyi}"
   "$IYI" build -o "$WORK_NATIVE/port-virtual-ivar$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/virtual-ivar.build.log" 2>&1 || { cat "$WORK/virtual-ivar.build.log"; return 2; }
   "$WORK/port-virtual-ivar$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_virtual_ivar_read.iyi" "$WORK_NATIVE/lower_virtual_ivar_read.oracle.ll" > "$WORK/virtual-ivar.out" 2> "$WORK/virtual-ivar.err"
   local result=$?
   if [ "$result" -ne 0 ]; then
-    if [ -n "$expected_mutant_refusal" ] && expected_refusal "$result" "$WORK/virtual-ivar.err" src/compiler/lower/pending.iyi "$expected_mutant_refusal"; then return 1; fi
+    if [ -n "$expected_mutant_refusal" ] && core_expected_refusal "$result" "$WORK/virtual-ivar.err" lower_virtual_ivar_read "$expected_site" "$expected_mutant_refusal"; then return 1; fi
     cat "$WORK/virtual-ivar.err"
     return 2
   fi
@@ -1138,12 +1176,12 @@ if virtual_ivar_check; then
     '    if owner.is_a?(VirtualType)
       pending_visit_node("virtual receiver fields require a base type")
     end
-    if owner.is_a?(UnionType)' -- virtual_ivar_check 'virtual receiver fields require a base type' || status=1
+    if owner.is_a?(UnionType)' -- virtual_ivar_check '^lower: visit\(virtual receiver fields require a base type\) \(hosted codegen\.cr\) is not ported yet$' || status=1
   prove_mutation "explicit instance-variable reads are not lowered" "$REPO/src/compiler/lower/lower.iyi" \
-    '  if node.is_a?(ReadInstanceVar)' '  if false' -- virtual_ivar_check 'lower: visit\(ReadInstanceVar\)' || status=1
+    '  if node.is_a?(ReadInstanceVar)' '  if false' -- virtual_ivar_check '^lower: visit\(ReadInstanceVar\) \(hosted codegen\.cr\) is not ported yet$' || status=1
   prove_mutation "virtual receiver fields cannot be typed" "$REPO/src/compiler/semantic/main_visitor.iyi" \
     '    owner = owner.as(VirtualType).base_type if owner.is_a?(VirtualType)' \
-    '    owner = TypeIndirection.remove_indirection(owner)' -- virtual_ivar_check || status=1
+    '    owner = TypeIndirection.remove_indirection(owner)' -- virtual_ivar_check "^undefined instance variable '@value' for Holder\\+$" src/compiler/semantic/main_visitor.iyi || status=1
 else
   echo "FAIL: virtual receiver field does not match the hosted module"
   status=1
@@ -1461,7 +1499,14 @@ else
 fi
 tuple_literal_check() {
   "$IYI" build -o "$WORK_NATIVE/port-tuple$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/tuple.build.log" 2>&1 || { cat "$WORK/tuple.build.log"; return 2; }
-  "$WORK/port-tuple$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_tuple_literal.iyi" "$WORK_NATIVE/lower_tuple_literal.oracle.ll" > "$WORK/tuple.out" 2> "$WORK/tuple.err" || { cat "$WORK/tuple.err"; return 2; }
+  local result=0
+  "$WORK/port-tuple$EXE" lower "$REPO_NATIVE/bench/fixtures/lower_tuple_literal.iyi" "$WORK_NATIVE/lower_tuple_literal.oracle.ll" > "$WORK/tuple.out" 2> "$WORK/tuple.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if core_expected_refusal "$result" "$WORK/tuple.err" lower_tuple_literal src/compiler/lower/pending.iyi '^lower: visit\(assign Int32 to Int64 \(hosted assign_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$'; then return 1; fi
+    echo 'INVALID: tuple fixture failed outside the expected refusal'
+    cat "$WORK/tuple.out" "$WORK/tuple.err"
+    return 2
+  fi
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); split($4, c, "="); exit !(a[2] == b[2] && a[2] > 0 && c[2] == 1) }' "$WORK/tuple.out"
 }
 if tuple_literal_check; then
@@ -1491,7 +1536,22 @@ pub def codegen_node' -- tuple_storage_check || status=1
 tuple_entry_check() {
   "$IYI" build -o "$WORK_NATIVE/port-tuple-entry$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/tuple-entry.build.log" 2>&1 || { cat "$WORK/tuple-entry.build.log"; return 2; }
   "$WORK/port-tuple-entry$EXE" emit "$REPO_NATIVE/bench/fixtures/lower_tuple.iyi" "$WORK_NATIVE/lower_tuple.oracle.ll" > "$WORK/tuple-entry.ir" 2> "$WORK/tuple-entry.err" || { cat "$WORK/tuple-entry.err"; return 2; }
-  "$WORK/compile_native$EXE" "$WORK_NATIVE/tuple-entry.ir" -o "$WORK_NATIVE/tuple-entry.native" > "$WORK/tuple-entry.native.log" 2>&1 || { cat "$WORK/tuple-entry.native.log"; return 2; }
+  local verify_status=0
+  "$WORK/compile_native$EXE" "$WORK_NATIVE/tuple-entry.ir" -o "$WORK_NATIVE/tuple-entry.native" > "$WORK/tuple-entry.native.out.log" 2>"$WORK/tuple-entry.native.log" || verify_status=$?
+  if [ "$verify_status" -ne 0 ]; then
+    if [ "$verify_status" -eq 1 ] && [ -f "$WORK/tuple-entry.baseline" ] &&
+       grep -Fq '@__crystal_main' "$WORK/tuple-entry.ir" &&
+       grep -Fxq "iyi-compile-native: $WORK_NATIVE/tuple-entry.ir: in function __crystal_main: @__crystal_main uses the C convention but returns %\"Tuple(Int32, Int32)\"" "$WORK/tuple-entry.native.log" &&
+       grep -Fxq "iyi-compile-native: $WORK_NATIVE/tuple-entry.ir: in function main: a C-convention call returns %\"Tuple(Int32, Int32)\"" "$WORK/tuple-entry.native.log" &&
+       grep -Fxq "iyi-compile-native: $WORK_NATIVE/tuple-entry.ir: the IR is not well formed" "$WORK/tuple-entry.native.log" &&
+       ! grep -Eiq 'panic|BUG:' "$WORK/tuple-entry.native.out.log" "$WORK/tuple-entry.native.log"; then
+      echo 'decisive: lower_tuple __crystal_main aggregate return rejected under C convention'
+      return 1
+    fi
+    echo 'INVALID: tuple entry did not reach the expected native-IR verifier rejection'
+    cat "$WORK/tuple-entry.native.out.log" "$WORK/tuple-entry.native.log"
+    return 2
+  fi
   if [ "$HOST_ID" != darwin-arm64 ]; then
     host_limited 'tuple entry: AArch64 Mach-O runtime calling convention requires macOS arm64; inspecting IR convention'
     grep -Eq '^define .*@__iyi_main\(' "$WORK/tuple-entry.ir" || { echo 'INVALID: no program entry in tuple IR'; return 2; }
@@ -1504,6 +1564,7 @@ tuple_entry_check() {
   [ "$ns" = "$hs" ] && cmp -s "$WORK/tuple-entry.native.out" "$WORK/tuple-entry.hosted.out"
 }
 if tuple_entry_check; then
+  : > "$WORK/tuple-entry.baseline"
   prove_mutation "a bare aggregate entry uses the C convention" "$REPO/src/compiler/lower/lower.iyi" \
     '  fn.call_convention = CallConv::Iyi' \
     '  fn.call_convention = CallConv::C' -- tuple_entry_check || status=1
@@ -1667,7 +1728,7 @@ prove_mutation "a captured block loses its ampersand" "$REPO/src/compiler/lower/
   '      names << symbol_type(bt)' -- name_block_check || status=1
 prove_mutation "a pointer union value stores into a nilable reference union" "$REPO/src/compiler/lower/cast.iyi" \
   '    if TypeQueries.reference_like?(value_type)' \
-  '    if !value_type.is_a?(UnionType) && TypeQueries.reference_like?(value_type)' -- lower_core_check || status=1
+  '    if !value_type.is_a?(UnionType) && TypeQueries.reference_like?(value_type)' -- lower_core_check lower_nilable_reference_union_assign '^lower: visit\(assign \(Waiter \| Nil\) to \(Fiber \| Waiter \| Nil\) \(union into a non-mixed target, hosted assign_distinct\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 
 # A fully annotated definition is checked even when user code never calls it.
 # A trait argument is checked against exactly its requirements, via the witness.

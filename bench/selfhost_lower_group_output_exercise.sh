@@ -45,9 +45,19 @@ check_group_output() {
     echo 'INVALID: group-output compiler signature verification failed'
     return 2
   fi
-  if ! "$WORK/stage$EXE" "$fixture" -o "$WORK_NATIVE/port.ir" --pipeline typed --prelude --probe-phase --emit ir > "$WORK/stage.log" 2>&1; then
-    echo 'INVALID: group-output compiler did not emit IR'
-    cat "$WORK/stage.log"
+  local result=0
+  "$WORK/stage$EXE" "$fixture" -o "$WORK_NATIVE/port.ir" --pipeline typed --prelude --probe-phase --emit ir > "$WORK/stage.log" 2>"$WORK/stage.err" || result=$?
+  if [ "$result" -ne 0 ]; then
+    if [ -f "$WORK/group.baseline" ] &&
+       expected_refusal "$result" "$WORK/stage.err" refuse_port '^undefined constant T$' &&
+       grep -Fxq '[phase] bodies: start' "$WORK/stage.log" &&
+       ! grep -Fxq '[phase] bodies: pass' "$WORK/stage.log" &&
+       awk -v prefix="  source: $fixture:7:" 'index($0, prefix) == 1 && substr($0, length(prefix) + 1) ~ /^[0-9]+$/ { found=1 } END { exit !found }' "$WORK/stage.err"; then
+      echo "decisive: $fixture:7: captured-block type T was not bound"
+      return 1
+    fi
+    echo 'INVALID: group-output compiler did not emit IR or reach the localized captured-block refusal'
+    cat "$WORK/stage.log" "$WORK/stage.err"
     return 2
   fi
   [ -s "$WORK/port.ir" ] || { echo 'INVALID: group-output IR is empty'; return 2; }
@@ -72,6 +82,7 @@ if [ "$HOST_ID" != darwin-arm64 ]; then
   host_limited "group output: AArch64 Mach-O signature and execution require macOS arm64 ($HOST_ID checks typed IR and emits Mach-O)"
 fi
 check_group_output || { echo 'FAIL: nested group generic output does not match hosted'; exit 1; }
+: > "$WORK/group.baseline"
 prove_mutation 'a reused captured block does not bind the free output' "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '                if captured_block_type.is_a?(ProcInstanceType)' \
   '                if false && captured_block_type.is_a?(ProcInstanceType)' -- check_group_output || exit 1

@@ -446,12 +446,176 @@ prove_mutation 'unit call incorrectly captures self' "$REPO/src/compiler/semanti
 prove_mutation 'primitive self is not refused' "$REPO/src/compiler/lower/closure.iyi" \
   'refuse_port("closure over self of #{st.full_name}: only a class or a struct passed by pointer is ported (hosted malloc_closure, codegen.cr:2661-2668)")' \
   'return st' -- check_primitive_refusal_mutant || status=1
-prove_mutation 'typing-stack recursion answers NoReturn' "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  'return frame.estimating ? frame.estimate : nil' 'return @program.no_return_type' -- check_mutant lowcall_recursive_named_mixed_inferred || status=1
-prove_mutation 'abandoned instance keeps its provisional NoReturn' "$REPO/src/compiler/semantic/main_visitor.iyi" \
-  '@def_instances.delete(abandoned)' 'nil' -- check_refusal_mutant noreturn_dead_instance_refuse "undefined method 'missing_method' for Int32" || status=1
+cat > "$WORK/recursive-estimate-probe.iyi" <<'IYI'
+import bench/lib/lower_gate::{analyse}
+import compiler/syntax/ast::{Call}
+import compiler/syntax/visitor::{Visitor}
+
+class RecursiveCallWalk < Visitor
+  getter calls : Array(Call)
+  def initialize
+    @calls = [] of Call
+  end
+  def visit(node : Call) : Bool
+    @calls << node
+    true
+  end
+end
+
+fixture = Program.args[0]
+analysis = analyse(File.read(fixture), fixture, true)
+walk = RecursiveCallWalk.new
+analysis.visitor.typed_instances.each do |instance|
+  instance.definition.accept(walk) if instance.definition.name == "mixed_receiver"
+end
+walk.calls.each do |call|
+  next unless call.name == "mixed_receiver"
+  if type = analysis.visitor.type_of?(call)
+    puts "RECURSIVE-CALL type=#{type.full_name}"
+  else
+    puts "RECURSIVE-CALL type=missing"
+  end
+end
+IYI
+recursive_estimate_check() {
+  if ! "$IYI" build -o "$WORK_NATIVE/recursive-estimate$EXE" "$WORK_NATIVE/recursive-estimate-probe.iyi" > "$WORK/recursive-estimate.build.log" 2>&1; then
+    echo 'INVALID: recursion-estimate semantic probe did not build'
+    cat "$WORK/recursive-estimate.build.log"
+    return 2
+  fi
+  if ! "$WORK/recursive-estimate$EXE" "$REPO_NATIVE/bench/fixtures/lowcall_recursive_named_mixed_inferred.iyi" > "$WORK/recursive-estimate.out" 2>"$WORK/recursive-estimate.err"; then
+    echo 'INVALID: recursion-estimate semantic probe failed'
+    cat "$WORK/recursive-estimate.out" "$WORK/recursive-estimate.err"
+    return 2
+  fi
+  if grep -Fxq 'RECURSIVE-CALL type=Int32' "$WORK/recursive-estimate.out" &&
+     ! grep -Eq '^RECURSIVE-CALL type=(NoReturn|missing)$' "$WORK/recursive-estimate.out"; then return 0; fi
+  if [ -f "$WORK/recursive-estimate.baseline" ] && grep -Fxq 'RECURSIVE-CALL type=NoReturn' "$WORK/recursive-estimate.out"; then
+    echo 'decisive: mixed_receiver recursive call was typed NoReturn instead of Int32'
+    return 1
+  fi
+  echo 'INVALID: recursion-estimate probe has no expected recursive call type'
+  cat "$WORK/recursive-estimate.out"
+  return 2
+}
+if recursive_estimate_check; then
+  : > "$WORK/recursive-estimate.baseline"
+  prove_mutation 'typing-stack recursion answers NoReturn' "$REPO/src/compiler/semantic/main_visitor.iyi" \
+    'return frame.estimating ? frame.estimate : nil' 'return @program.no_return_type' -- recursive_estimate_check || status=1
+else
+  echo 'FAIL: recursive-call semantic baseline was not Int32'
+  status=1
+fi
+cat > "$WORK/abandoned-probe.iyi" <<'IYI'
+import bench/lib/lower_gate::{analyse}
+fixture = Program.args[0]
+analyse(File.read(fixture), fixture, true)
+puts "ABANDONED-CACHE ACCEPTED"
+IYI
+abandoned_semantic_check() {
+  if ! "$IYI" build -o "$WORK_NATIVE/abandoned-probe$EXE" "$WORK_NATIVE/abandoned-probe.iyi" > "$WORK/abandoned.build.log" 2>&1; then
+    echo 'INVALID: abandoned-cache semantic probe did not build'
+    cat "$WORK/abandoned.build.log"
+    return 2
+  fi
+  local result=0
+  "$WORK/abandoned-probe$EXE" "$REPO_NATIVE/bench/fixtures/noreturn_dead_instance_refuse.iyi" > "$WORK/abandoned.out" 2>"$WORK/abandoned.err" || result=$?
+  if expected_refusal "$result" "$WORK/abandoned.err" src/compiler/semantic/main_visitor.iyi "^undefined method 'missing_method' for Int32$"; then return 0; fi
+  if [ -f "$WORK/abandoned.baseline" ] && [ "$result" -eq 0 ] && [ ! -s "$WORK/abandoned.err" ] &&
+     grep -Fxq 'ABANDONED-CACHE ACCEPTED' "$WORK/abandoned.out"; then
+    echo 'decisive: dead-branch cache suppressed the live missing_method refusal'
+    return 1
+  fi
+  echo 'INVALID: abandoned-cache probe did not reach the expected semantic result'
+  cat "$WORK/abandoned.out" "$WORK/abandoned.err"
+  return 2
+}
+if abandoned_semantic_check; then
+  : > "$WORK/abandoned.baseline"
+  prove_mutation 'abandoned instance keeps its provisional NoReturn' "$REPO/src/compiler/semantic/main_visitor.iyi" \
+    '@def_instances.delete(abandoned)' 'nil' -- abandoned_semantic_check || status=1
+else
+  echo 'FAIL: abandoned-cache semantic baseline did not refuse missing_method'
+  status=1
+fi
 prove_mutation 'call on a NoReturn receiver is looked up' "$REPO/src/compiler/semantic/main_visitor.iyi" \
   'return true if !node.obj.nil? && rec_type.is_a?(NoReturnType)' 'nil' -- check_specific_refusal lowcall_noreturn_operand src/compiler/semantic/main_visitor.iyi "^undefined method '&\\+' for NoReturn$" || status=1
-prove_mutation 'never-made call lowered as a call' "$REPO/src/compiler/lower/call.iyi" \
-  '    lower_never_made_call(low, node)' '    nil' -- check_mutant lowcall_noreturn_operand || status=1
+cat > "$WORK/never-operand.iyi" <<'IYI'
+lib LibC
+  fun putchar(c : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def mark : Int32
+  LibC.putchar(65)
+  3
+end
+
+def stop : NoReturn
+  LibC.exit(0)
+end
+
+def consume(left : Int32, right : Int32) : Int32
+  left &+ right
+end
+
+consume(mark, stop)
+IYI
+printf A > "$WORK/never-expected.out"
+check_never_operand() {
+  if ! build_compiler; then
+    echo 'INVALID: never-made-call compiler did not build'
+    cat "$WORK/build.log"
+    return 2
+  fi
+  if ! "$WORK/stage1$EXE" "$WORK_NATIVE/never-operand.iyi" -o "$WORK_NATIVE/never-operand.ir" --pipeline typed --prelude --emit ir > "$WORK/never-emit.out" 2>"$WORK/never-emit.err"; then
+    echo 'INVALID: never-made-call fixture did not emit IR'
+    cat "$WORK/never-emit.out" "$WORK/never-emit.err"
+    return 2
+  fi
+  [ -s "$WORK/never-operand.ir" ] || { echo 'INVALID: never-made-call IR is empty'; return 2; }
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    if [ ! -f "$WORK/never-baseline.ir" ]; then
+      cp "$WORK/never-operand.ir" "$WORK/never-baseline.ir"
+      return 0
+    fi
+    cmp -s "$WORK/never-baseline.ir" "$WORK/never-operand.ir"
+    return $?
+  fi
+  if ! "$WORK/stage1$EXE" "$WORK_NATIVE/never-operand.iyi" -o "$WORK_NATIVE/never-operand.native" --pipeline typed --prelude > "$WORK/never-native.out" 2>"$WORK/never-native.err" ||
+     ! codesign -v --strict "$WORK/never-operand.native"; then
+    echo 'INVALID: never-made-call fixture did not link and sign'
+    cat "$WORK/never-native.out" "$WORK/never-native.err"
+    return 2
+  fi
+  run_fixture "$WORK/never-operand.native" "$WORK/never-run.out" "$WORK/never-run.status" || return 2
+  if [ "$(< "$WORK/never-run.status")" != 0 ]; then
+    echo 'INVALID: never-made-call fixture did not exit normally with status 0'
+    return 2
+  fi
+  if cmp -s "$WORK/never-expected.out" "$WORK/never-run.out"; then return 0; fi
+  if [ -f "$WORK/never.baseline" ] && [ ! -s "$WORK/never-run.out" ]; then
+    echo 'decisive: never-made call skipped the prior mark operand'
+    return 1
+  fi
+  echo 'INVALID: never-made-call output was neither the baseline nor the expected mutation'
+  cat "$WORK/never-run.out"
+  return 2
+}
+if "$IYI" build -o "$WORK_NATIVE/never-host$EXE" "$WORK_NATIVE/never-operand.iyi" > "$WORK/never-host.build.log" 2>&1 &&
+   run_fixture "$WORK/never-host$EXE" "$WORK/never-host.out" "$WORK/never-host.status" &&
+   [ "$(< "$WORK/never-host.status")" = 0 ] && cmp -s "$WORK/never-expected.out" "$WORK/never-host.out" &&
+   check_never_operand; then
+  : > "$WORK/never.baseline"
+  prove_mutation 'a never-made call skips preceding operand side effects' "$REPO/src/compiler/lower/call.iyi" \
+    '  node.args.each do |arg|
+    return if lower_never_made_operand(low, arg)' \
+    '  node.args.each do |arg|
+    next if node.name == "consume" && !low.analysed.type_of?(arg).is_a?(NoReturnType)
+    return if lower_never_made_operand(low, arg)' -- check_never_operand || status=1
+else
+  echo 'FAIL: never-made-call operand baseline did not match hosted output A'
+  [ ! -f "$WORK/never-host.build.log" ] || cat "$WORK/never-host.build.log"
+  status=1
+fi
 exit "$status"

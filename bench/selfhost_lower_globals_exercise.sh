@@ -415,9 +415,54 @@ prove_mutation "a class variable read is not a load of its global" "$REPO/src/co
   "  low.last = to_lhs(low, class_var_pointer(low, cvar), cvar.type)" "  low.last = llvm_nil(low)" -- lowglob_check || status=1
 prove_mutation "a literal class variable is initialised by a function, not stored at its declaration" "$REPO/src/compiler/lower/class_var.iyi" \
   "  if simple_literal?(node)" "  if false" -- lowglob_check || status=1
-prove_mutation "a string constant's global is not emitted at the program's start" "$REPO/src/compiler/lower/const.iyi" \
-  "initialize_simple_const(low, const)" \
-  "low.last = llvm_nil(low)" -- lowglob_check || status=1
+cat > "$WORK/startup-only.iyi" <<'IYI'
+STARTUP_ONLY = "boot"
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+LibC.exit(0)
+IYI
+startup_target=()
+startup_output="$WORK_NATIVE/startup-host$EXE"
+if [ "$HOST_ID" != darwin-arm64 ]; then
+  startup_target=(--cross-compile --target aarch64-apple-darwin)
+  startup_output="$WORK_NATIVE/startup-host.o"
+fi
+startup_string_check() {
+  if ! "$IYI" build -o "$WORK_NATIVE/startup-mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_globals_exercise.iyi" > "$WORK/startup-mut.build.log" 2>&1; then
+    echo 'INVALID: startup-string driver did not build'
+    cat "$WORK/startup-mut.build.log"
+    return 2
+  fi
+  if ! "$WORK/startup-mut$EXE" emit "$WORK_NATIVE/startup-only.iyi" "$WORK_NATIVE/startup.oracle.ll" > "$WORK/startup-mut.ir" 2>"$WORK/startup-mut.err"; then
+    echo 'INVALID: startup-string fixture did not lower'
+    cat "$WORK/startup-mut.err"
+    return 2
+  fi
+  [ -s "$WORK/startup-mut.ir" ] || { echo 'INVALID: startup-string IR is empty'; return 2; }
+  if grep -Eq '^@("?STARTUP_ONLY"?) =' "$WORK/startup-mut.ir"; then return 0; fi
+  if [ -f "$WORK/startup.baseline" ]; then
+    echo 'decisive: STARTUP_ONLY global is absent from startup IR'
+    return 1
+  fi
+  echo 'INVALID: the clean startup-string global is absent'
+  return 2
+}
+if "$IYI" build "${startup_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$startup_output" "$WORK_NATIVE/startup-only.iyi" > "$WORK/startup-host.log" 2>&1 &&
+   [ -s "$WORK/startup-host.ll" ] &&
+   awk "$CALL_TYPES" "$WORK/startup-host.ll" > "$WORK/startup.oracle.ll" &&
+   "$WORK/port$EXE" lower "$WORK_NATIVE/startup-only.iyi" "$WORK_NATIVE/startup.oracle.ll" > "$WORK/startup-baseline.out" 2>"$WORK/startup-baseline.err" &&
+   awk '/^SUMMARY/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); if (a[2] == b[2] && b[2] > 0 && c[2] == 1) ok=1 } END { exit !ok }' "$WORK/startup-baseline.out" &&
+   startup_string_check; then
+  : > "$WORK/startup.baseline"
+  prove_mutation "a string constant's global is not emitted at the program's start" "$REPO/src/compiler/lower/const.iyi" \
+    '        initialize_simple_const(low, const)' \
+    '        initialize_simple_const(low, const) unless string_const?(const)' -- startup_string_check || status=1
+else
+  echo 'FAIL: unused startup-string baseline does not match the hosted module'
+  cat "$WORK/startup-host.log" "$WORK/startup-baseline.err" 2>/dev/null
+  status=1
+fi
 prove_mutation "a string constant's global is initialised with null, not its address" "$REPO/src/compiler/lower/const.iyi" \
   "global.initializer = str.as(Value)" \
   "global.initializer = low.builder.const_null(ir)" -- lowglob_check || status=1
@@ -439,12 +484,38 @@ prove_mutation "a UInt64 literal above Int64 max loses its sign bit" "$REPO/src/
   ".to_i64 &- 9223372036854775807_i64 &- 1_i64" ".to_i64" -- lowglob_check || status=1
 prove_mutation "a namespaced constant is named by its bare name, not its full name" "$REPO/src/compiler/lower/const.iyi" \
   "  return const.full_name" "  return const.name" -- lowglob_check || status=1
-prove_mutation "a required file's class variable literal ignores its declared type" "$REPO/src/compiler/lower/class_var.iyi" \
-  "    value = literal_of_type(low, node, declared)" \
-  "    value = nil" -- lowglob_check || status=1
+cvar_literal_type_check() {
+  if ! "$IYI" build -o "$WORK_NATIVE/cvar-type$EXE" "$REPO_NATIVE/bench/selfhost_lower_core_exercise.iyi" > "$WORK/cvar-type.build.log" 2>&1; then
+    echo 'INVALID: class-variable type probe did not build'
+    cat "$WORK/cvar-type.build.log"
+    return 2
+  fi
+  if ! "$WORK/cvar-type$EXE" cvar-initializer-types "$REPO_NATIVE/bench/fixtures/lowglob_const_uint64.iyi" "$WORK_NATIVE/lowglob_const_uint64.oracle.ll" > "$WORK/cvar-type.out" 2>"$WORK/cvar-type.err"; then
+    echo 'INVALID: class-variable type probe failed'
+    cat "$WORK/cvar-type.out" "$WORK/cvar-type.err"
+    return 2
+  fi
+  if grep -Fxq 'CVAR-TYPES global=i64 initializer=i64' "$WORK/cvar-type.out"; then return 0; fi
+  if [ -f "$WORK/cvar-type.baseline" ] && grep -Fxq 'CVAR-TYPES global=i64 initializer=i128' "$WORK/cvar-type.out"; then
+    echo 'decisive: UInt64 class variable was initialized with an i128 literal'
+    return 1
+  fi
+  echo 'INVALID: class-variable type probe did not produce an expected type pair'
+  cat "$WORK/cvar-type.out"
+  return 2
+}
+if cvar_literal_type_check; then
+  : > "$WORK/cvar-type.baseline"
+  prove_mutation "a typed class variable's literal ignores its declared type" "$REPO/src/compiler/lower/class_var.iyi" \
+    '    value = literal_of_type(low, node, declared)' \
+    '    value = literal_of_type(low, node, cvar.name == "@@big" ? low.analysed.program.lookup_type("Int128").as(Type) : declared)' -- cvar_literal_type_check || status=1
+else
+  echo 'FAIL: class-variable initializer type baseline differs'
+  status=1
+fi
 prove_mutation "pointerof of a class variable is refused" "$REPO/src/compiler/lower/lower.iyi" \
   "    if exp.is_a?(ClassVar)" \
-  "    if false" -- lowglob_check || status=1
+  "    if false" -- lowglob_check lowglob_cvar_pointer '^lower: visit\(pointerof of a ClassVar \(hosted codegen\.cr: visit\(PointerOf\), only a local variable is ported\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 prove_mutation "a float class-variable literal is not stored" "$REPO/src/compiler/lower/const.iyi" \
   "    return low.builder.const_float(low.typer.llvm_type(typ), text.to_f)" \
   "    return nil" -- lowglob_check lowglob_cvar_float '^lower: class variable @@f has a literal initialiser that is not an integer, Bool or Char \(hosted class_var\.cr: initialize_class_var\)$' || status=1

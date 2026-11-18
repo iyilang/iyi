@@ -283,6 +283,233 @@ def sort_by_start(list : Array(Int32), starts : Array(Int32)) : Array(Int32)
   acc
 end
 
+# A path-compressed representative of a collapsed inner loop.
+def loop_root(parent : Array(Int32), v : Int32) : Int32
+  root = v
+  while parent[root] != root
+    root = parent[root]
+  end
+  while parent[v] != v
+    next_v = parent[v]
+    parent[v] = root
+    v = next_v
+  end
+  root
+end
+
+def dfs_ancestor?(number : Array(Int32), last : Array(Int32), a : Int32, b : Int32) : Bool
+  number[a] <= number[b] && number[b] <= last[a]
+end
+
+# Lengauer-Tarjan eval with path compression. `scratch` is reused for every
+# edge so a large function does not allocate a traversal stack per query.
+def dom_eval(v : Int32, ancestor : Array(Int32), semi : Array(Int32), label : Array(Int32), scratch : Array(Int32)) : Int32
+  x = v
+  while ancestor[x] >= 0 && ancestor[ancestor[x]] >= 0
+    scratch << x
+    x = ancestor[x]
+  end
+  while scratch.size > 0
+    x = scratch.pop
+    a = ancestor[x]
+    label[x] = label[a] if semi[label[a]] < semi[label[x]]
+    ancestor[x] = ancestor[a]
+  end
+  label[v]
+end
+
+# Dominator-tree intervals for each DFS component. Unreachable components
+# cannot affect the entry component's dominators.
+def dominator_intervals(succs : Array(Array(Int32)), order : Array(Int32), number : Array(Int32), tree_parent : Array(Int32), component : Array(Int32)) : {Array(Int32), Array(Int32)}
+  n = succs.size
+  preds = [] of Array(Int32)
+  bucket = [] of Array(Int32)
+  children = [] of Array(Int32)
+  label = [] of Int32
+  semi = int_row(n, 0)
+  ancestor = int_row(n, -1)
+  idom = int_row(n, -1)
+  b = 0
+  while b < n
+    preds << ([] of Int32)
+    bucket << ([] of Int32)
+    children << ([] of Int32)
+    label << b
+    semi[b] = number[b]
+    b = b + 1
+  end
+  b = 0
+  while b < n
+    succs[b].each do |s|
+      next if s < 0 || s >= n || component[s] != component[b]
+      preds[s] << b
+    end
+    b = b + 1
+  end
+  scratch = [] of Int32
+  i = order.size - 1
+  while i >= 0
+    w = order[i]
+    p = tree_parent[w]
+    if p >= 0
+      preds[w].each do |v|
+        u = dom_eval(v, ancestor, semi, label, scratch)
+        semi[w] = semi[u] if semi[u] < semi[w]
+      end
+      bucket[order[semi[w]]] << w
+      ancestor[w] = p
+      bucket[p].each do |v|
+        u = dom_eval(v, ancestor, semi, label, scratch)
+        idom[v] = semi[u] < semi[v] ? u : p
+      end
+      bucket[p].clear
+    end
+    i = i - 1
+  end
+  order.each do |w|
+    next if tree_parent[w] < 0
+    idom[w] = idom[idom[w]] if idom[w] != order[semi[w]]
+    children[idom[w]] << w
+  end
+  first = int_row(n, -1)
+  last = int_row(n, -1)
+  cursor = int_row(n, 0)
+  stack = [] of Int32
+  count = 0
+  order.each do |root|
+    next unless tree_parent[root] < 0
+    first[root] = count
+    count = count + 1
+    stack << root
+    while stack.size > 0
+      v = stack[stack.size - 1]
+      if cursor[v] < children[v].size
+        child = children[v][cursor[v]]
+        cursor[v] = cursor[v] + 1
+        first[child] = count
+        count = count + 1
+        stack << child
+      else
+        last[v] = count - 1
+        stack.pop
+      end
+    end
+  end
+  {first, last}
+end
+
+# Collapse natural loops from inner to outer. Dominator filtering excludes
+# irreducible retreating edges; union-find compresses the collapsed paths.
+def block_loop_depths(succs : Array(Array(Int32))) : Array(Int32)
+  n = succs.size
+  depth = int_row(n, 0)
+  number = int_row(n, -1)
+  last = int_row(n, -1)
+  tree_parent = int_row(n, -1)
+  component = int_row(n, -1)
+  cursor = int_row(n, 0)
+  order = [] of Int32
+  stack = [] of Int32
+  start = 0
+  while start < n
+    if number[start] < 0
+      number[start] = order.size
+      component[start] = start
+      order << start
+      stack << start
+      while stack.size > 0
+        b = stack[stack.size - 1]
+        if cursor[b] < succs[b].size
+          s = succs[b][cursor[b]]
+          cursor[b] = cursor[b] + 1
+          if s >= 0 && s < n && number[s] < 0
+            number[s] = order.size
+            tree_parent[s] = b
+            component[s] = start
+            order << s
+            stack << s
+          end
+        else
+          last[b] = order.size - 1
+          stack.pop
+        end
+      end
+    end
+    start = start + 1
+  end
+  dom = dominator_intervals(succs, order, number, tree_parent, component)
+  back = [] of Array(Int32)
+  forward = [] of Array(Int32)
+  parent = [] of Int32
+  b = 0
+  while b < n
+    back << ([] of Int32)
+    forward << ([] of Int32)
+    parent << b
+    b = b + 1
+  end
+  b = 0
+  while b < n
+    succs[b].each do |s|
+      next if s < 0 || s >= n
+      next if component[s] != component[b]
+      if dfs_ancestor?(number, last, s, b) && dfs_ancestor?(dom[0], dom[1], s, b)
+        back[s] << b
+      else
+        forward[s] << b
+      end
+    end
+    b = b + 1
+  end
+  owner = int_row(n, -1)
+  seen = int_row(n, -1)
+  header = bool_row(n)
+  i = order.size - 1
+  while i >= 0
+    h = order[i]
+    pending = [] of Int32
+    self_loop = false
+    back[h].each do |p|
+      r = loop_root(parent, p)
+      if r == h
+        self_loop = true
+      elsif seen[r] != h
+        seen[r] = h
+        pending << r
+      end
+    end
+    j = 0
+    while j < pending.size
+      x = pending[j]
+      forward[x].each do |p|
+        r = loop_root(parent, p)
+        return int_row(n, 0) unless dfs_ancestor?(number, last, h, r)
+        if r != h && seen[r] != h
+          seen[r] = h
+          pending << r
+        end
+      end
+      j = j + 1
+    end
+    if self_loop || pending.size > 0
+      header[h] = true
+      pending.each do |x|
+        owner[x] = h
+        parent[x] = h
+      end
+    end
+    i = i - 1
+  end
+  order.each do |v|
+    depth[v] = (owner[v] >= 0 ? depth[owner[v]] : 0) + (header[v] ? 1 : 0)
+  end
+  depth
+end
+
+def spill_weight_limit : Int64
+  1152921504606846976_i64
+end
+
 class LinearScan
   property fn : MFunction
   property vcount : Int32
@@ -298,6 +525,7 @@ class LinearScan
   property has_interval : Array(Bool)
   property crossing : Array(Bool)
   property pointer : Array(Bool)
+  property weights : Array(Int64)
   property res_start : Array(Array(Int32))
   property res_end : Array(Array(Int32))
   property homes : Array(Int32)
@@ -323,6 +551,7 @@ class LinearScan
     @has_interval = [] of Bool
     @crossing = [] of Bool
     @pointer = [] of Bool
+    @weights = [] of Int64
     @res_start = [] of Array(Int32)
     @res_end = [] of Array(Int32)
     r = 0
@@ -346,6 +575,7 @@ class LinearScan
     assert_pools(@caller_pool + @callee_pool, @fpr_pool)
     number_positions
     build_successors
+    measure_weights
     solve_liveness
     build_intervals
     collect_hints
@@ -353,6 +583,35 @@ class LinearScan
     assign
     assert_assignment
     finish_frame
+  end
+
+  # The cost of spilling is the sum of 8^loop-depth for every use. Saturation
+  # makes both deeply nested loops and very large functions overflow-safe.
+  def measure_weights : Nil
+    v = 0
+    while v < @vcount
+      @weights << 0_i64
+      v = v + 1
+    end
+    depths = block_loop_depths(@succs)
+    limit = spill_weight_limit
+    b = 0
+    while b < @fn.blocks.size
+      factor = 1_i64
+      d = depths[b]
+      while d > 0 && factor < limit
+        factor = factor * 8_i64
+        d = d - 1
+      end
+      @fn.blocks[b].insts.each do |inst|
+        inst.uses.each do |op|
+          next unless op.kind == OperandKind::Virtual
+          old = @weights[op.reg]
+          @weights[op.reg] = old > limit - factor ? limit : old + factor
+        end
+      end
+      b = b + 1
+    end
   end
 
   def number_positions : Nil
@@ -691,16 +950,17 @@ class LinearScan
     -1
   end
 
-  # The active interval to evict for `iv`: one in a usable register that ends after `iv`, the furthest end
-  # wins, the earliest in the active list breaks ties. Its register must be free of reservations over iv.
+  # Evict the lowest-weight active interval only if it is cheaper to spill
+  # than the new interval. Longer intervals break equal-weight ties.
   def find_victim(iv : Int32, pool : Array(Int32)) : Int32
     best = -1
     k = 0
     while k < @active.size
       a = @active[k]
       reg = @homes[a]
-      if member?(pool, reg) && @ends[a] > @ends[iv] && !reserved?(reg, @starts[iv], @ends[iv])
-        if best < 0 || @ends[a] > @ends[best]
+      cheaper = @weights[a] < @weights[iv] || (@weights[a] == @weights[iv] && @ends[a] > @ends[iv])
+      if member?(pool, reg) && cheaper && !reserved?(reg, @starts[iv], @ends[iv])
+        if best < 0 || @weights[a] < @weights[best] || (@weights[a] == @weights[best] && @ends[a] > @ends[best])
           best = a
         end
       end

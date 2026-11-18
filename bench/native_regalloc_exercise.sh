@@ -649,7 +649,43 @@ check_fpr_output() {
   check_fixture_output "$1" "$FIX_RA/fp_callee_saved.ir"
 }
 
+check_spill_weights() {
+  local ignored=$1 exe="$WORK/spill-weights-$RANDOM$EXE" values
+  if ! ./bin/iyi build -o "$(native_path "$exe")" "$(native_path "$FIX_RA/spill_weights.iyi")" >"$WORK/spill-weights.log" 2>&1; then
+    cat "$WORK/spill-weights.log"
+    return 2
+  fi
+  if ! values=$("$exe"); then
+    echo "spill weight fixture could not run"
+    return 2
+  fi
+  "$PY" - "$values" <<'PY'
+import sys
+try:
+    hot, cold, nested_hot, warm, cycle_hot, cycle_cold = map(int, sys.argv[1].split())
+except ValueError:
+    print("invalid spill weight fixture output")
+    sys.exit(2)
+if hot < 0 or cold != -1 or nested_hot < 0 or warm != -1 or cycle_hot < 0 or cycle_cold != -1:
+    print("a hotter interval spilled instead of a colder one")
+    sys.exit(1)
+print("spill weights: hot and inner-loop values stay in registers")
+PY
+}
+
 echo "== 6. mutation proofs"
+prove_mutation "spill weights: evict by furthest end instead of weight" \
+  src/compiler/native/regalloc_linear.iyi check_spill_weights \
+  '      cheaper = @weights[a] < @weights[iv] || (@weights[a] == @weights[iv] && @ends[a] > @ends[iv])' \
+  '      cheaper = @ends[a] > @ends[iv]'
+prove_mutation "spill weights: discard nesting depth" \
+  src/compiler/native/regalloc_linear.iyi check_spill_weights \
+  '    depth[v] = (owner[v] >= 0 ? depth[owner[v]] : 0) + (header[v] ? 1 : 0)' \
+  '    depth[v] = header[v] || owner[v] >= 0 ? 1 : 0'
+prove_mutation "spill weights: mistake irreducible edges for natural backedges" \
+  src/compiler/native/regalloc_linear.iyi check_spill_weights \
+  '      if dfs_ancestor?(number, last, s, b) && dfs_ancestor?(dom[0], dom[1], s, b)' \
+  '      if dfs_ancestor?(number, last, s, b)'
 prove_mutation "floating-point frame: omit callee-saved FPR stores" \
   src/compiler/native/frame.iyi check_fpr_frame \
   '    acc << m

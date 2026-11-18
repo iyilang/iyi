@@ -362,8 +362,6 @@ def plan(jobs, event, ref, files, bench, ci_jobs=None):
         selected |= set(FAST) | ci_jobs
     if any(is_stale(f) for f in files):
         selected |= STALE_JOBS
-    if ci_change:
-        selected |= set(FAST) | ci_jobs
     if any(f.startswith("editors/vscode/") for f in files):
         selected.add("vscode")
     if not code_files:

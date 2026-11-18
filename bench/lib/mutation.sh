@@ -169,8 +169,9 @@ _prove_mutation_run() {
   else
     echo "    FAIL: mutation check exited $rc instead of 0 or 1: $label"
   fi
-  echo "    check output (last lines):"
-  tail -n 20 "$log" | sed 's/^/      /'
+  echo "    check exit: $rc"
+  echo "    check output:"
+  sed 's/^/      /' "$log"
   rm -f "$log"
   return 1
 }

@@ -111,32 +111,35 @@ ASSIGNMENT = re.compile(r"^\s*[\w, ]+ = [^=]")
 # modules of one weight by name, so every shard computes the same deal).
 #
 # A weight is the seconds the module's sweep took at stride 200 on GitHub's
-# ubuntu-24.04 runners, read from the per-module lines of 39 green shard
-# jobs, 13 master runs of 2026-10-26 to 10-30 (a98f03fe6 to 1ae9e94db).
-# The runners differ in speed by a factor, the same for every module of a
-# job (0.57 to 1.24 of the median job), so each job's seconds are divided
-# by its factor first and the weight is the median of what is left: the
-# seconds on a median runner, 4,286 for all 118 modules, std/http 442 of
-# them. A module not here weighs 7, the mean of the 54 under 15 s (1.1 to
-# 14.7). Dealt four ways, the shards hold 1,079, 1,072, 1,072 and 1,078 s
-# by these weights and 1,079, 1,069, 1,063 and 1,075 by every module's own.
-# The weights before these were one Linux workstation's (eab791d5b, std/http
-# 258 s), and its ratio to a runner is not one number: 1.7 for std/http,
-# 2.0 for std/autocert.
+# ubuntu-24.04 runners, read from the per-module lines of 12 shard jobs of
+# 3 runs of 2026-11-17 and 11-18 on the tree with heap22 and master merged
+# (021cedcee, 4fa41885b, bdb6f6943), the two cut off at their 45 counted
+# for the modules they finished. Each job's seconds are divided by its
+# runner's factor first (0.89 to 1.23 of the median job) and the weight is
+# the median of what is left: the seconds on a median runner, 5,725 for
+# all 121 modules. A module not here weighs 7, the mean of the 62 under
+# 15 s (0.9 to 14.2). Dealt five ways, the shards hold 1,145 to 1,152 s by
+# these weights and 1,137 to 1,153 by every module's own.
+# The weights before these were master's (2026-10-26 to 11-17), and on
+# this tree two modules outgrew them: std/autocert 158 s against about
+# 900, std/acme about 110 against about 625 (619 to 1,055 s on this tree,
+# 110 to 165 on master's and mt/next-two's, at about a quarter of the
+# resident megabytes - 160 against 600 - where both are 22 to 24 s and
+# 573 to 592 MB on a Linux workstation). Their shards ran to 45 minutes and
+# were cut off there (jobs 134257615300 and 134616844992).
 WEIGHTS = {
-    "http": 442, "math": 302, "tls": 286, "websocket": 168, "autocert": 158,
-    "big": 148, "socket": 135, "xml": 122, "json": 105, "acme": 100,
-    "time": 93, "file": 77, "mail": 75, "unicode": 68, "router": 62,
-    "secure_dns": 61, "yaml": 61, "debug": 60, "process": 58, "zstd": 58,
-    "sse": 51, "regex": 50, "compress": 47, "cookie": 47, "udp": 44,
-    "x509": 43, "aead": 42, "tar": 42, "dir": 40, "p256": 39, "toml": 39,
-    "bzip2": 36, "digest": 36, "smtp": 36, "ecdsa": 34, "zip": 34, "dns": 33,
-    "curve25519": 29, "format": 29, "text": 29, "xz": 29, "ocsp": 27,
-    "png": 26, "system_roots": 26, "user": 25, "http_proxy": 24, "netip": 24,
-    "p384": 23, "float": 22, "hpack": 22, "fileserver": 21, "int": 21,
-    "mlkem": 21, "password": 21, "uri": 20, "io": 19, "path": 19,
-    "enumerable": 17, "random": 17, "term": 17, "asn1": 16, "csv": 16,
-    "system": 16, "hpke": 15,
+    "autocert": 895, "http": 626, "acme": 625, "tls": 387, "websocket": 241,
+    "math": 198, "big": 166, "json": 122, "xml": 108, "secure_dns": 98,
+    "socket": 84, "sse": 82, "router": 81, "file": 78, "time": 75, "mail": 72,
+    "compress": 65, "debug": 64, "cookie": 61, "unicode": 60, "smtp": 55,
+    "x509": 50, "process": 49, "zstd": 47, "udp": 43, "p256": 41,
+    "http_proxy": 40, "png": 40, "yaml": 37, "curve25519": 34, "toml": 33,
+    "aead": 32, "ecdsa": 32, "regex": 31, "text": 30, "dir": 29, "zip": 29,
+    "xz": 28, "system_roots": 27, "digest": 26, "tar": 26, "dns": 25,
+    "fileserver": 25, "ocsp": 25, "format": 24, "bzip2": 23, "float": 23,
+    "term": 23, "password": 22, "int": 21, "user": 21, "p384": 19, "uri": 19,
+    "hpack": 17, "indexable": 17, "netip": 17, "capsule": 15, "io": 15,
+    "system": 15,
 }
 UNWEIGHED = 7
 

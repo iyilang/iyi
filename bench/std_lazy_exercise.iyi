@@ -1,0 +1,83 @@
+# Exercises `std/lazy`: a value worked out the first time it is asked for,
+# and kept.
+#
+# Run via:
+#     ./bin/iyi run bench/std_lazy_exercise.iyi
+
+@[Unsafe("it keeps a Lazy in a class variable every unit reads, claimed @[UnsafeReach] as std's tables are")]
+module bench/std_lazy_exercise
+
+import std/lazy::{Lazy, LazyBuilds}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+class Table
+  @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy) and kept once; then only read")]
+  @@rows = Lazy(Array(Int32)).new
+  @[UnsafeReach("built whole in the shared heap by its first reader (std/lazy) and kept once; then only read")]
+  @@other = Lazy(String).new
+
+  def self.rows : Array(Int32)
+    @@rows.get { Array(Int32).new(256) { |i| i * 3 } }
+  end
+
+  def self.other : String
+    @@other.get { "other" }
+  end
+end
+
+puts "== lazy"
+counted = Lazy(Array(Int32)).new
+builds = 0
+before = LazyBuilds.count
+first = counted.get do
+  builds += 1
+  [1, 2, 3]
+end
+assert_true builds == 1, "the first get builds"
+assert_true LazyBuilds.count == before + 1_u64, "LazyBuilds.count counts the build (#{LazyBuilds.count - before})"
+again = counted.get do
+  builds += 1
+  [9]
+end
+assert_true builds == 1, "a second get builds nothing (#{builds} builds)"
+assert_true again.object_id == first.object_id, "a second get answers the kept value itself"
+assert_true LazyBuilds.count == before + 1_u64, "a read adds nothing to LazyBuilds.count"
+puts "  built at the first get, kept, and counted once"
+
+text = Lazy(String).new
+assert_true text.get { "kept" } == "kept", "a String kept"
+assert_true text.get { "other" } == "kept", "a String kept answers the first build"
+assert_true counted.get { [0] }.object_id == first.object_id, "another Lazy's build leaves the first one's value"
+puts "  each Lazy keeps its own value"
+
+puts "== lazy, from parallel units"
+WORKERS = 8
+sums = [] of Int64
+group do |g|
+  handles = [] of IyiTask(Int64)
+  WORKERS.times do
+    handles << g.spawn(unit: :new) do
+      total = 0_i64
+      Table.rows.each { |v| total += v }
+      total + Table.other.size
+    end
+  end
+  handles.each do |handle|
+    value = handle.value
+    sums << (value.is_a?(Int64) ? value : -1_i64)
+  end
+end
+want = 0_i64
+256.times { |i| want += i * 3 }
+want += 5
+assert_true sums.all? { |s| s == want }, "every unit read the whole table (#{sums})"
+kept = Table.rows
+after = LazyBuilds.count
+assert_true Table.rows.object_id == kept.object_id, "after the race one value is kept"
+assert_true LazyBuilds.count == after, "after the race a read builds nothing"
+puts "  #{WORKERS} units read one table, and one value is kept"
+
+puts "\nALL CHECKS PASSED"

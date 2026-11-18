@@ -183,7 +183,7 @@ prove_fails "an append that copies twice" no_owning "list.iyi" "list: an append 
 # 12. And the constructor that stops copying: the caller's array becomes the
 #     list's, and the caller's next push lands in the list.
 prove_fails "a list that keeps the caller's array" no_copy "list.iyi" "list: the caller's array is not the list's" \
-  's/@items = items.dup/@items = items/'
+  's/@items = IyiCross.shared { items.dup }/@items = items/'
 
 # 12b. A list's iterator copied into the adaptor built on it (a struct again).
 prove_fails "a list iterator copied into its adaptor" copied_list_iter "list.iyi" "list: an adaptor shares its iterator" \

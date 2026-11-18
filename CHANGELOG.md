@@ -4,6 +4,17 @@
 
 ### Added
 
+- **Wasm SIMD128 speeds up AES-GCM.** `UInt64x2` processes two independent
+  64-bit lanes, and `--mattr +simd128` uses them for eight AES counter
+  blocks at a time. On Apple M5 Max, opening 16 and 64 MiB in headless
+  Chrome went from 204 and 203 MB/s scalar to 257 and 266 MB/s SIMD;
+  WebCrypto measured 3,290 and 3,424 MB/s. SPEC.md III.12.1 has the
+  spreads and the slower GHASH experiment.
+
+- **The prelude ceiling rises from 4,738 to 4,802 lines**, the 64 lines
+  for the predefined `UInt64x2` primitive. It is available on every
+  target; an external ABI cannot accept it.
+
 - **Checksum database verification primitives.** The compiler source has
   Ed25519 signed-note verification, checkpoint and record parsing,
   height-8 Merkle tile proofs, and a persistent consistency-checked
@@ -11,6 +22,7 @@
   settings, and cache writes replace an existing checkpoint through an
   exclusive same-directory file. Package downloads do not use them yet.
   Independent cryptographic review is required before anything depends on them.
+
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.
@@ -169,6 +181,12 @@
 
 ### Fixed
 
+- **Vector unions use the heap's eight-byte alignment.** A mixed union
+  represents its payload as wide integers, so treating only visible LLVM
+  vectors as eight-aligned left nil stores, closure captures and copies
+  promising sixteen-byte alignment on eight-aligned heap addresses.
+  `UInt64x2` is also shareable across threads, including in immutable
+  records and `@[Share]` generic values.
 - **`iyi lsp` no longer recompiles a large module for every question.** A
   worker is replaced at 512 MB, and one compile of std/autocert (527 MB)
   or std/acme (514 MB) reaches that by itself. So each successor was over
@@ -28771,7 +28789,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,399-line library and nothing else. Every other
+  written against iyi's own 36,620-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

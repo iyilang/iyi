@@ -82,6 +82,19 @@ describe "Semantic: lib" do
       CODE
   end
 
+  it "refuses UInt64x2 in an external argument or return" do
+    [
+      "lib LibFoo; fun foo(x : UInt64x2); end",
+      "lib LibFoo; fun foo : UInt64x2; end",
+      "fun foo(x : UInt64x2) : Int32; 0; end",
+    ].each do |source|
+      program = Iyi::Program.new
+      program.iyi_prelude = true
+      node = program.normalize(Iyi::Parser.parse(source))
+      expect_raises(Iyi::TypeException, /UInt64x2 has no C ABI/) { program.semantic(node) }
+    end
+  end
+
   it "reports error on fun argument type not primitive like" do
     assert_error "lib LibFoo; fun foo(x : Reference); end",
       "only primitive types"

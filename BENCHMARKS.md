@@ -103,6 +103,47 @@ collector masks part of that.
 iyi's collector, Boehm and Go's; [GC_DESIGN.md](GC_DESIGN.md) records the
 machine and every figure.
 
+## AES-GCM in a browser
+
+The SIMD path processes eight AES counter blocks at once; WebCrypto still
+leads it. `ctr` and `ghash` are iyi-only component measurements.
+
+Apple M5 Max, 128 GiB memory, HeadlessChrome/156.0.8078.4, Node
+v26.7.0, wasi-sdk 24. The programs target `wasm32-unknown-unknown` with
+`--release`; the second also uses `--mattr +simd128`. AES-256-GCM uses a
+12-byte nonce, 25 bytes of additional data and a 16-byte tag. Numbers are
+decimal MB/s: best of five followed by the full [minimum, maximum] range.
+Setup and output comparisons are outside the timed calls. Every timed seal,
+open and CTR result was compared byte by byte with WebCrypto; the two GHASH
+outputs matched each other. All three implementations refused a flipped tag.
+
+```sh
+PATH=/opt/homebrew/bin:/usr/bin:/bin \
+LIBRARY_PATH=/opt/homebrew/opt/bdw-gc/lib \
+WASI_SDK_PATH="$TMPDIR/iyi-spike/sdk" \
+IYI_CHROME="$HOME/Library/Caches/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-mac-arm64/chrome-headless-shell" \
+bash bench/wasm_aead_speed.sh
+```
+
+| MiB | Operation | iyi scalar | iyi SIMD128 | WebCrypto |
+|---:|---|---:|---:|---:|
+| 1 | open | 201.6 [197.8, 201.6] | 262.1 [243.9, 262.1] | 5242.9 [2621.4, 5242.9] |
+| 1 | seal | 205.6 [194.2, 205.6] | 262.1 [187.2, 262.1] | 3495.3 [2621.4, 3495.3] |
+| 1 | ctr | 262.1 [243.9, 262.1] | 419.4 [388.4, 419.4] | n/a |
+| 1 | ghash | 1165.1 [953.3, 1165.1] | 806.6 [749.0, 806.6] | n/a |
+| 16 | open | 204.4 [194.9, 204.4] | 256.9 [244.6, 256.9] | 3289.7 [2892.6, 3289.7] |
+| 16 | seal | 203.4 [198.8, 203.4] | 262.6 [246.7, 262.6] | 2943.4 [2621.4, 2943.4] |
+| 16 | ctr | 256.1 [245.3, 256.1] | 405.2 [388.4, 405.2] | n/a |
+| 16 | ghash | 1023.0 [981.1, 1023.0] | 795.1 [759.2, 795.1] | n/a |
+| 64 | open | 203.0 [190.8, 203.0] | 266.4 [256.6, 266.4] | 3423.9 [3036.6, 3423.9] |
+| 64 | seal | 201.5 [196.7, 201.5] | 267.9 [187.2, 267.9] | 3322.2 [2982.6, 3322.2] |
+| 64 | ctr | 259.5 [251.5, 259.5] | 402.8 [383.0, 402.8] | n/a |
+| 64 | ghash | 1032.4 [1027.7, 1032.4] | 803.7 [776.7, 803.7] | n/a |
+
+At 16 and 64 MiB open, SIMD is 1.26x and 1.31x scalar; WebCrypto is 12.8x
+and 12.9x SIMD. SPEC.md III.12.1 records the earlier baseline's unit correction,
+the slower SIMD GHASH trial and the constant-time inspection.
+
 ## A web server's cores (issue #145)
 
 Issue #145 ported a web API to iyi and found it never used more than 1.8

@@ -1,3 +1,9 @@
+{% unless flag?(:without_llvm) %}
+  lib LibLLVM
+    fun get_target_machine_feature_string = LLVMGetTargetMachineFeatureString(t : TargetMachineRef) : Char*
+  end
+{% end %}
+
 class Iyi::Program
   @flags : Set(String)?
   @host_flags : Set(String)?
@@ -74,9 +80,17 @@ class Iyi::Program
     flags.add "bits#{target.pointer_bit_width}"
 
     flags.add "armhf" if target.armhf?
+    {% unless flag?(:without_llvm) %}
+      if target.architecture == "wasm32" && target.to_s == codegen_target.to_s
+        features = LLVM.string_and_dispose(LibLLVM.get_target_machine_feature_string(target_machine))
+        feature = features.split(',').reverse_each.find { |entry| entry == "+simd128" || entry == "-simd128" }
+        flags.add "simd128" if feature == "+simd128"
+      end
+    {% end %}
 
     flags.add "unix" if target.unix?
     flags.add "win32" if target.win32?
+    flags.add "wasi" if target.wasi?
 
     flags.add "darwin" if target.macos?
     if target.freebsd?

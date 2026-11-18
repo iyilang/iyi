@@ -114,6 +114,10 @@ module Iyi
         type.signed? ? LLVM::DwarfTypeEncoding::Signed : LLVM::DwarfTypeEncoding::Unsigned)
     end
 
+    def create_debug_type(type : UInt64x2Type, original_type : Type)
+      di_builder.create_basic_type(type.to_s, 128, 128, LLVM::DwarfTypeEncoding::Unsigned)
+    end
+
     def create_debug_type(type : SymbolType, original_type : Type)
       di_builder.create_basic_type(type.to_s, 32, 32, LLVM::DwarfTypeEncoding::Unsigned)
     end

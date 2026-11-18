@@ -63,10 +63,10 @@ BENCH = ROOT / "bench"
 # where it has one. `*`, `${VAR}` and `$VAR` in it stand for any name, which
 # is how `std_siblings.sh` finds the module exercises and `module_test.sh`
 # names a module's test.
-FILE_NAME = re.compile(r"((?:bench[/\\])?)([A-Za-z0-9_*${}]+\.(?:sh|py|iyi|eiy|cr|c|go))\b")
+FILE_NAME = re.compile(r"((?:bench[/\\])?)([A-Za-z0-9_*${}]+\.(?:sh|py|iyi|eiy|cr|c|go|mjs))\b")
 # What can run, build or read another file here: a script, and a program
-# that reads its own template or fixture. Their comments start with `#`.
-CALLER_SUFFIXES = (".sh", ".py", ".iyi")
+# that reads its own template or fixture.
+CALLER_SUFFIXES = (".sh", ".py", ".iyi", ".mjs")
 VARIABLE = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 
 # The jobs a pull request runs whatever it touches. `docs` and `vscode` take

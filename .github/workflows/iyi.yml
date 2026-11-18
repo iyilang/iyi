@@ -1341,7 +1341,7 @@ jobs:
           status=0
           for target in x86_64-linux-gnu aarch64-linux-gnu x86_64-darwin \
                         aarch64-darwin x86_64-windows-msvc x86_64-windows-gnu \
-                        wasm32-wasi; do
+                        wasm32-wasi wasm32-unknown-unknown; do
             # `io`, `socket` and `format` are here for a reason a shorter list
             # would have hidden: each carries per-platform branches, and a
             # branch only its own platform compiles is a branch nobody checks.
@@ -2903,6 +2903,9 @@ jobs:
       #                      bench/arena_exercise.sh asserts and a tally
       #                      cannot
       #   wasm32_exercise    a wasm32 program
+      #   wasm_aead_speed   a freestanding browser benchmark whose hooks
+      #                      exist only with -Diyi_aead_bench
+      #   wasm_freestanding_exercise  a freestanding wasm host-contract program
       #   std_debug_cross    its pass is a panic, whose trace cross-run
       #                      reads on aarch64 and musl; Windows' own trace
       #                      is bench/panics.sh's
@@ -2920,7 +2923,8 @@ jobs:
           # it - a line two seconds in - and an empty stdin is its failure.
           $skip = @(
             "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
-            "stdin_park.iyi", "std_debug_cross.iyi"
+            "wasm_freestanding_exercise.iyi", "stdin_park.iyi",
+            "std_debug_cross.iyi", "wasm_aead_speed.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
           $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"
@@ -3795,6 +3799,57 @@ jobs:
           eval "$command"
           "$HOME/.wasmtime/bin/wasmtime" barrier | grep -qx "ValueBarrier's fallback holds on wasm32"
 
+  wasm-freestanding:
+    needs: [plan, binary]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'wasm-freestanding') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    name: "Freestanding wasm in Node and headless Chrome"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: iyi-linux-x86_64
+          path: dist/
+      - name: Restore the wasm toolchain
+        id: wasm-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/wasm-toolchain
+          key: wasm-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-wasm-toolchain.sh') }}
+      - name: Install wasi-sdk and wasmtime (cache miss)
+        if: steps.wasm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/install-wasm-toolchain.sh "$HOME/wasm-toolchain"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Put the toolchain where the driver looks
+        run: |
+          sudo ln -sfn "$HOME/wasm-toolchain/wasi-sdk" /opt/wasi-sdk
+          mkdir -p "$HOME/.wasmtime"
+          ln -sfn "$HOME/wasm-toolchain/wasmtime/bin" "$HOME/.wasmtime/bin"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - name: Exercise the host contract
+        run: |
+          mkdir -p room && tar -xzf dist/*.tar.gz -C room
+          cmp src/iyi/wasm/iyi.mjs room/share/iyi/src/iyi/wasm/iyi.mjs
+          export PATH="/opt/wasi-sdk/bin:$HOME/.wasmtime/bin:$PATH"
+          export IYI="$PWD/room/bin/iyi"
+          export IYI_CHROME="$(command -v google-chrome)"
+          bash bench/wasm_freestanding_exercise.sh
+      - name: SIMD128 and browser AES-GCM
+        run: |
+          python3 -m pip install --user --break-system-packages -q cryptography
+          export PATH="/opt/wasi-sdk/bin:$HOME/.wasmtime/bin:$PATH"
+          export IYI="$PWD/room/bin/iyi"
+          export IYI_CHROME="$(command -v google-chrome)"
+          bash bench/uint64x2_exercise.sh
+          bash bench/wasm_aead_exercise.sh
+          IYI_AEAD_MIB=1 bash bench/wasm_aead_speed.sh
+
   # GC Stage 10: wasm32-wasi collector exercise under wasmtime.
   #
   # The driver rather than a transcription of it. This job used to link and
@@ -4168,7 +4223,7 @@ jobs:
             wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-siblings, windows-std-platforms, windows-gates, windows-compiler-specs,
-            wasm32-collector, docs, heap22, darwin-heap22, windows-heap22]
+            wasm32-collector, wasm-freestanding, docs, heap22, darwin-heap22, windows-heap22]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # `contents` to create the release; `id-token` and `attestations` for
@@ -4352,7 +4407,7 @@ jobs:
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
-            wasi-run, wasm32-collector, binary, clean-room, vscode, heap22, darwin-heap22, windows-heap22]
+            wasi-run, wasm32-collector, wasm-freestanding, binary, clean-room, vscode, heap22, darwin-heap22, windows-heap22]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

@@ -360,6 +360,21 @@ check_unsupported_options() {
   refuse_build --x86-asm-syntax --x86-asm-syntax intel || failed=1
   refuse_build --debug --debug || failed=1
   refuse_build --release --release || failed=1
+  local flag flag_file
+  for flag in stale-key stale-accept stale-block stale-dump-elements stale-inputs; do
+    flag_file="$WORK/out/$flag"
+    rm -f "$WORK/out/refused" "$WORK/out/refused.o" "$flag_file"
+    invoke_stage1 build -o "$WORK/out/refused" "--$flag" "$flag_file" "$REPO/samples/iyi/hello.iyi"
+    printf 'Error: --%s is not in the self-hosted compiler yet\n' "$flag" >"$WORK/stale.expected"
+    if [ "$RC" -eq 1 ] && [ ! -s "$WORK/stdout" ] &&
+       [ ! -e "$WORK/out/refused" ] && [ ! -e "$WORK/out/refused.o" ] && [ ! -e "$flag_file" ] &&
+       cmp -s "$WORK/stale.expected" "$WORK/stderr"; then
+      echo "  --$flag refused without creating output"
+    else
+      show_failure "--$flag did not refuse exactly or created output (exit $RC)"
+      failed=1
+    fi
+  done
   refuse_build -O -O 2 || failed=1
   refuse_build -D -D CUSTOM || failed=1
   refuse_build --mcpu --mcpu generic || failed=1

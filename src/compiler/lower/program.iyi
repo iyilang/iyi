@@ -267,6 +267,7 @@ pub def typed_owner(reason : String) : String
   return "macros" if reason.includes?("macro control")
   return "calls" if reason.includes?("undefined method") || reason.includes?("cannot resolve the call") || reason.includes?("expected argument") || reason.includes?("no target def") || reason.includes?("wrong number of arguments for 'String.interpolation'")
   return "declarations" if reason.includes?("undefined constant") || reason.includes?("without a declared return type")
+  return "bodies" if reason.starts_with?("body typing refused ")
   return "bodies" if reason.includes?("no type") || reason.includes?("cannot be typed") || reason.includes?("undefined local variable") || reason.includes?("pointerof") || reason.includes?("the body of the Proc literal was not typed")
   return "lowering core" if reason.includes?("is not ported")
   return "lowering" if reason.includes?("port limitation") || reason.includes?("string constant")
@@ -304,94 +305,6 @@ pub class DeepNodeIds < Visitor
     end
     true
   end
-end
-
-# Call bindings point to typed def clones. Follow expanded trees as lowering
-# does, recording both single and virtual-dispatch targets for the census.
-class BodyDependencies < Visitor
-  getter targets : Array(UInt64)
-  getter refusal : String?
-
-  def initialize(@types : MainVisitor, @refused_nodes : Hash(UInt64, String))
-    @targets = [] of UInt64
-    @refusal = nil
-    @seen = Hash(UInt64, Bool).new
-  end
-
-  def visit_any(node : ASTNode) : Bool
-    return false if @seen.has_key?(node.node_id)
-    @seen[node.node_id] = true
-    if reason = @refused_nodes[node.node_id]?
-      @refusal = reason if @refusal.nil?
-    end
-    if target = @types.call_target_defs[node]?
-      @targets << target.node_id
-    end
-    if arms = @types.call_dispatch_targets[node]?
-      arms.each { |arm| @targets << arm.definition.node_id }
-    end
-    if expanded = @types.expansions[node]?
-      expanded.accept(self)
-    end
-    if node.is_a?(Call)
-      if expanded = node.as(Call).expanded
-        expanded.accept(self)
-      end
-    end
-    true
-  end
-end
-
-# A probe must not enter an incompletely typed body, even through a nested
-# call. Compute reverse dependencies only for total-mode refusal tables.
-def bodies_blocking_lowering(typed : TypedProgram) : Hash(UInt64, String)
-  blocked = Hash(UInt64, String).new
-  return blocked if typed.visitor.refusals.empty?
-  nodes = Hash(UInt64, String).new
-  typed.visitor.refusals.each { |r| nodes[r.node.node_id] = first_line(r.reason) }
-  callers = Hash(UInt64, Array(UInt64)).new
-  labels = Hash(UInt64, String).new
-  queue = [] of UInt64
-  seen = Hash(UInt64, Bool).new
-  typed.visitor.typed_instances.each do |inst|
-    d = inst.definition
-    id = d.node_id
-    next if seen.has_key?(id)
-    seen[id] = true
-    labels[id] = lowering_example(d, inst.self_type)
-    next unless primitive_name(d.body).nil?
-    finder = BodyDependencies.new(typed.visitor, nodes)
-    d.body.accept(finder)
-    if reason = finder.refusal
-      blocked[id] = "body typing refused: #{reason}"
-      queue << id
-    elsif typed.visitor.type_of?(d.body).nil?
-      blocked[id] = "body typing did not produce a type"
-      queue << id
-    end
-    finder.targets.each do |target|
-      if parents = callers[target]?
-        parents << id
-      else
-        callers[target] = [id] of UInt64
-      end
-    end
-  end
-  index = 0
-  while index < queue.size
-    target = queue[index]
-    if parents = callers[target]?
-      parents.each do |parent|
-        unless blocked.has_key?(parent)
-          dependency = labels[target]? || "an untyped body"
-          blocked[parent] = "depends on #{dependency}, whose body could not be typed"
-          queue << parent
-        end
-      end
-    end
-    index += 1
-  end
-  blocked
 end
 
 # The expressions under a def body, expansions included, that the body typer left without a type, of the kinds a
@@ -487,6 +400,25 @@ def first_line(text : String) : String
     i = i + 1
   end
   text
+end
+
+# lower_def_probe reads this type before entering the function. Only replace
+# its invariant failure when a recorded refusal belongs to this body itself.
+def refused_probe_body(typed : TypedProgram, definition : Def) : String?
+  return nil unless typed.visitor.total
+  return nil unless typed.visitor.type_of?(definition.body).nil?
+  return nil if typed.visitor.refusals.empty?
+  nodes = DeepNodeIds.new(typed.visitor)
+  definition.body.accept(nodes)
+  typed.visitor.refusals.each do |refusal|
+    next unless nodes.ids.has_key?(refusal.node.node_id)
+    site = "no location"
+    if file = refusal.file
+      site = "#{file}:#{refusal.line}:#{refusal.column}"
+    end
+    return "body typing refused body #{definition.name} at #{site}: #{first_line(refusal.reason)}"
+  end
+  nil
 end
 
 # The index of a reason in the list, or -1.
@@ -631,7 +563,6 @@ pub def lowering_table(typed : TypedProgram, triple : String, root : String, nam
   m = made.as(Module)
   typer = LowerTyper.new(m.types, m.layout, iyi_object_layout?(typed.prog))
   bad = Hash(UInt64, Bool).new
-  blocked_bodies = bodies_blocking_lowering(typed)
   sites = Hash(String, Bool).new
   reasons = [] of String
   counts = [] of Int32
@@ -673,32 +604,20 @@ pub def lowering_table(typed : TypedProgram, triple : String, root : String, nam
     next unless primitive_name(d.body).nil?
     next if noncapturing_yield?(d)
     refused << "reached\t#{lowering_example(d, inst.self_type)}\t-\t-"
-    if reason = blocked_bodies[d.node_id]?
-      bad[d.node_id] = true
-      key = "#{d.node_id}|#{reason}"
-      unless sites.has_key?(key)
-        sites[key] = true
-        example = lowering_example(d, inst.self_type)
-        refused << "lowering\t#{example}\tbodies\t#{reason}\t#{example}"
-        i = reason_index(reasons, reason)
-        if i < 0
-          reasons << reason
-          counts << 1
-          examples << example
-        else
-          counts[i] = counts[i] + 1
-        end
-      end
-      next
-    end
     before = [] of String
     m.functions.each { |fn| before << fn.name }
     probe_lowerer = Lowerer.new(m, typer, typed.visitor)
     probe_lowerer.spawn_analysis = spawn_analysis
-    outcome = group do |g|
-      task = g.spawn { lower_def_probe(d, inst.self_type, inst.arg_types, typed.visitor, typer, m, probe_lowerer, base_ids.fork) }
-      task.value
-    end
+    probe_lowerer.probe_untyped_refusals = typed.visitor.total
+    body_refusal = refused_probe_body(typed, d)
+    outcome = if body_refusal
+                body_refusal
+              else
+                group do |g|
+                  task = g.spawn { lower_def_probe(d, inst.self_type, inst.arg_types, typed.visitor, typer, m, probe_lowerer, base_ids.fork) }
+                  task.value
+                end
+              end
     failed = false
     message = ""
     if outcome.is_a?(Panicked)

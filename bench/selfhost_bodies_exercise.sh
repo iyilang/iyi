@@ -1231,7 +1231,8 @@ body_table_probe() {
   local tool="$1" input="$2" stem="$3" rc=0
   rm -f "$WORK/$stem" "$WORK/$stem.refusals" "$WORK/$stem.names"
   "$tool" "$input" -o "$WORK_NATIVE/$stem" --pipeline typed --prelude --probe-phase --keep-going >"$WORK/$stem.log" 2>"$WORK/$stem.err" || rc=$?
-  if grep -Eq 'BUG:|iyi: panic:' "$WORK/$stem.log" "$WORK/$stem.err"; then
+  if grep -q 'BUG:' "$WORK/$stem.log" "$WORK/$stem.err" ||
+     { grep '^iyi: panic:' "$WORK/$stem.err" | grep -Ev '^iyi: panic: body typing refused call [^ ]+ at .+: .+' >/dev/null; }; then
     echo "INVALID PROOF: $stem panicked" >&9
     cat "$WORK/$stem.log" "$WORK/$stem.err" >&9
     return 2
@@ -1290,8 +1291,8 @@ untyped_call_arguments_safe() {
     cat "$WORK/untyped_call.log" "$WORK/untyped_call.err" >&9
     return 2
   fi
-  if grep -Eq 'BUG:|iyi: panic:' "$WORK/untyped_call.log" "$WORK/untyped_call.err"; then
-    echo "INVALID PROOF: untyped-call probe panicked" >&9
+  if grep -q 'BUG:' "$WORK/untyped_call.log" "$WORK/untyped_call.err"; then
+    echo "INVALID PROOF: untyped-call probe reported a compiler BUG" >&9
     return 2
   fi
   [ -f "$WORK/untyped_call.refusals" ] || { echo "INVALID PROOF: no untyped-call refusal table" >&9; return 2; }

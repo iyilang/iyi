@@ -93,7 +93,8 @@ env:
 permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # TEST: a group of its own, so this run does not wait behind the stuck queued run in the old one.
+  group: ${{ github.workflow }}-${{ github.ref }}-namespace-test
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:

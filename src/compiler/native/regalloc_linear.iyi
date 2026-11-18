@@ -436,6 +436,7 @@ def block_loop_depths(succs : Array(Array(Int32))) : Array(Int32)
   cursor = int_row(n, 0)
   order = [] of Int32
   stack = [] of Int32
+  cyclic = false
   start = 0
   while start < n
     if number[start] < 0
@@ -448,12 +449,16 @@ def block_loop_depths(succs : Array(Array(Int32))) : Array(Int32)
         if cursor[b] < succs[b].size
           s = succs[b][cursor[b]]
           cursor[b] = cursor[b] + 1
-          if s >= 0 && s < n && number[s] < 0
-            number[s] = order.size
-            tree_parent[s] = b
-            component[s] = start
-            order << s
-            stack << s
+          if s >= 0 && s < n
+            if number[s] < 0
+              number[s] = order.size
+              tree_parent[s] = b
+              component[s] = start
+              order << s
+              stack << s
+            elsif last[s] < 0
+              cyclic = true
+            end
           end
         else
           last[b] = order.size - 1
@@ -463,6 +468,7 @@ def block_loop_depths(succs : Array(Array(Int32))) : Array(Int32)
     end
     start = start + 1
   end
+  return depth unless cyclic
   dom = dominator_intervals(succs, order, number, tree_parent, component)
   back = [] of Array(Int32)
   forward = [] of Array(Int32)

@@ -473,6 +473,30 @@ prove_mutation "number literals lose non-default kind suffixes" "$REPO/src/compi
   "    if false" \
   -- check_inline_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+prove_mutation "generic instance variables lose their arguments" "$REPO/bench/selfhost_semantic_inline_macros_exercise.iyi" \
+  "    type_node_system(prog)" \
+  "    nil" \
+  -- check_inline_fixtures_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation_all "virtual instance variable types lose their marker" "$MUT_SEM" \
+  "        return hook.virtual_of(resolved)" \
+  "        return resolved" \
+  -- check_inline_fixtures_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "macro elsif prints as if" "$REPO/src/compiler/syntax/ast.iyi" \
+  '      sb << (first ? "{% if " : "{% elsif ")' \
+  '      sb << "{% if "' \
+  -- check_inline_fixtures_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "string literal escapes are omitted" "$REPO/src/compiler/syntax/ast.iyi" \
+  "    sb << @value.inspect" \
+  "    sb << '\"' << @value << '\"'" \
+  -- check_inline_fixtures_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
 
 prove_mutation "an empty expansion is kept and a non-empty one dropped" "$MUT_INL" \
   "return nil if text.bytesize == 0" \

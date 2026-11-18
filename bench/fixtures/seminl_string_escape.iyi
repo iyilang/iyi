@@ -1,0 +1,3 @@
+class SeminlStringEscape
+  VALUE = "line\r\nquoted \"text\"\\end"
+end

@@ -1,0 +1,6 @@
+class SeminlMacroText
+  VALUE = {% if flag?(:darwin) %}1{% elsif flag?(:linux) || flag?(:windows) %}2{% else %}3{% end %}
+
+  def initialize(@value = {{ "x" + ("y") }})
+  end
+end

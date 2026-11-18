@@ -635,7 +635,7 @@ pub class StringLiteral < ASTNode
   end
 
   def to_s(sb : StringBuilder) : Nil
-    sb << '"' << @value << '"'
+    sb << @value.inspect
   end
 end
 
@@ -2496,9 +2496,9 @@ pub class And < BinaryOp
   end
 
   def to_s(sb : StringBuilder) : Nil
-    @left.to_s(sb)
+    print_expression_operand(@left, sb)
     sb << " && "
-    @right.to_s(sb)
+    print_expression_operand(@right, sb)
   end
 end
 
@@ -2512,9 +2512,9 @@ pub class Or < BinaryOp
   end
 
   def to_s(sb : StringBuilder) : Nil
-    @left.to_s(sb)
+    print_expression_operand(@left, sb)
     sb << " || "
-    @right.to_s(sb)
+    print_expression_operand(@right, sb)
   end
 end
 
@@ -3041,6 +3041,18 @@ pub class Block < ASTNode
 end"
   end
 end
+def print_expression_operand(node : ASTNode, sb : StringBuilder) : Nil
+  parens = if node.is_a?(Call)
+             call = node.as(Call)
+             call.args.size > 0 && !["[]", "[]?", "<", "<=", ">", ">="].includes?(call.name)
+           else
+             !(node.is_a?(Var) || node.is_a?(NilLiteral) || node.is_a?(BoolLiteral) || node.is_a?(CharLiteral) || node.is_a?(NumberLiteral) || node.is_a?(StringLiteral) || node.is_a?(StringInterpolation) || node.is_a?(Path) || node.is_a?(Generic) || node.is_a?(InstanceVar) || node.is_a?(ClassVar))
+           end
+  sb << "(" if parens
+  node.to_s(sb)
+  sb << ")" if parens
+end
+
 
 pub class Call < ASTNode
   property obj : ASTNode?
@@ -3169,6 +3181,12 @@ pub class Call < ASTNode
   end
 
   def to_s(sb : StringBuilder) : Nil
+    if (o = @obj) && @args.size == 1 && @named_args.nil? && @block_arg.nil? && @block.nil? && ["+", "-", "*", "/", "//", "%", "**", "==", "!=", "<", "<=", ">", ">=", "&", "|", "^", "<<", ">>", "&+", "&-", "&*"].includes?(@name)
+      print_expression_operand(o, sb)
+      sb << " " << @name << " "
+      print_expression_operand(@args[0], sb)
+      return
+    end
     if o = @obj
       o.to_s(sb)
       sb << "."
@@ -5322,19 +5340,26 @@ pub class MacroIf < ASTNode
   end
 
   def to_s(sb : StringBuilder) : Nil
-    sb << "{% if "
-    @cond.to_s(sb)
-    sb << " %}
-  "
-    @then.to_s(sb)
-    unless @else.is_a?(Nop)
-      sb << "
-{% else %}
-  "
-      @else.to_s(sb)
+    current = self
+    first = true
+    loop do
+      sb << (first ? "{% if " : "{% elsif ")
+      current.cond.to_s(sb)
+      sb << " %}"
+      current.then.to_s(sb)
+      otherwise = current.else
+      if otherwise.is_a?(MacroIf)
+        current = otherwise.as(MacroIf)
+        first = false
+      else
+        unless otherwise.is_a?(Nop)
+          sb << "{% else %}"
+          otherwise.to_s(sb)
+        end
+        break
+      end
     end
-    sb << "
-{% end %}"
+    sb << "{% end %}"
   end
 end
 

@@ -1,0 +1,9 @@
+class SeminlAnimal
+end
+
+class SeminlDog < SeminlAnimal
+end
+
+class SeminlOwner
+  @animal : SeminlAnimal
+end

@@ -54,6 +54,27 @@ PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" "$IYI" build -o "$WORK/hel
   "$REPO/samples/iyi/hello.iyi" > "$WORK/hello-build.log" 2>&1
 "$WORK/hello-native" > "$WORK/hello.stdout"
 build_wasm hello "$REPO/samples/iyi/hello.iyi" "$REPO/src"
+cat > "$WORK/unsafe-unit-capture.iyi" <<'IYI'
+import std/unit::{Unit}
+outside = [] of Int32
+owner = Unit.new { 42 }
+group do |g|
+  g.spawn(in: owner) do |value|
+    outside << value
+    0
+  end
+end
+IYI
+if IYI_PATH="$REPO/src" "$IYI" build --cross-compile --target wasm32-unknown-unknown \
+  -o "$WORK/unsafe-unit-capture" "$WORK/unsafe-unit-capture.iyi" > "$WORK/unsafe-unit-capture.log" 2>&1; then
+  echo "wasm accepted a mutable array captured across a Unit boundary" >&2
+  exit 1
+fi
+grep -q 'captures .*outside.*which is not Share' "$WORK/unsafe-unit-capture.log" || {
+  cat "$WORK/unsafe-unit-capture.log" >&2
+  exit 1
+}
+echo "wasm Unit: mutable external capture refused"
 printf 'group do |g|\n  puts "empty"\nend\n' > "$WORK/empty-group.iyi"
 printf 'sleep(1)\nputs "slept"\n' > "$WORK/sleep-only.iyi"
 printf 'channel = Channel(Int32).new\nselect\nwhen value = channel.receive\n  puts "unexpected"\nwhen timeout(1)\n  puts "timeout"\nend\n' > "$WORK/select-only.iyi"

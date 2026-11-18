@@ -454,6 +454,7 @@ end
   # five 64 KiB pages, so wasm32 can hold at most 65,536 / 5 of them.
   class IyiWasmStackPool
     MAX_CAPACITY = 13107
+    @[UnsafeReach("the wasm scheduler's stack pool is accessed only on its single thread")]
     @@slots : Pointer(Pointer(UInt8)) = Pointer(Pointer(UInt8)).new(0_u64)
     @@count : Int32 = 0
     @@capacity : Int32 = 0

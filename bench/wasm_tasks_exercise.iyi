@@ -1,5 +1,6 @@
 # JSPI gate: the host parks two iyi calls and traces their shadow stacks.
 @[Unsafe("the probe scans host-supplied shadow-stack bounds during a forced collection")]
+import std/unit::{Unit}
 
 {% if flag?(:wasm32) && !flag?(:wasi) %}
   @[Link(wasm_import_module: "jspi_probe")]
@@ -248,6 +249,26 @@ def task_exercise : Nil
   task_check(order == "bababa", "channel interleaving")
   puts "channels interleaved: bababa"
 
+  tally = Unit.new { 42 }
+  group do |g|
+    task = g.spawn(in: tally) { |value| value }
+    answer = task.value
+    task_check(answer.is_a?(Int32) && answer == 42, "spawn(in:) lost its unit value")
+  end
+
+  array_tally = Unit.new { [] of Int32 }
+  group do |g|
+    task = g.spawn(in: array_tally) do |value|
+      value << 41
+      sleep(1)
+      value << 1
+      value[0] + value[1]
+    end
+    answer = task.value
+    task_check(answer.is_a?(Int32) && answer == 42, "spawn(in:) lost its array across sleep")
+  end
+
+  steps_before = IyiScheduler.sleep_steps
   deadlines = [] of Int64
   group do |g|
     g.spawn(unit: :same) do
@@ -264,6 +285,7 @@ def task_exercise : Nil
     end
   end
   task_check(deadlines.size == 3 && deadlines[0] <= deadlines[1] && deadlines[1] <= deadlines[2], "sleeper order")
+  task_check(IyiScheduler.sleep_steps > steps_before, "sleep heap step counter did not increase")
   puts "sleepers woke in deadline order"
 
   marks = [0_i64, 0_i64, 0_i64, 0_i64]

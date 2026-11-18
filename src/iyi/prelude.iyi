@@ -10424,6 +10424,7 @@ require "./file"
         @@chunks_kept : UInt64 = 0_u64
         @@bytes_marked : UInt64 = 0_u64
 
+        @[UnsafeReach("the wasm collector's mark queue is accessed only on its single thread")]
         @@queue : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
         @@queue_cap : UInt64 = 0_u64
         @@queue_len : UInt64 = 0_u64
@@ -12012,7 +12013,9 @@ end
   # Installed when the first task is spawned; until then the main stack and
   # the one defer list suffice without linking the task scheduler.
   class IyiWasmFibers
+    @[UnsafeReach("installed by the first wasm task on the single scheduler thread")]
     @@current : Proc(IyiFiber)? = nil
+    @[UnsafeReach("installed by the first wasm task on the single scheduler thread")]
     @@first : Proc(IyiFiber?)? = nil
 
     def self.current : Proc(IyiFiber)?
@@ -12032,6 +12035,7 @@ end
 {% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
   # No fibers on this target, so one global stack is exact.
   class IyiDefers
+    @[UnsafeReach("the single-threaded main defer list is handed to the first wasm fiber")]
     @@head : IyiDeferNode?
 
     def self.push(node : IyiDeferNode) : Nil
@@ -12143,6 +12147,7 @@ class IyiPanic
   @[UnsafeReach("set once, by std/debug's module initializer before any task starts, then only read")]
   @@capturer : Proc(Pointer(Void*), Int32, UInt64, Int32)? = nil
   {% if flag?(:wasm32) && !flag?(:wasi) %}
+    @[UnsafeReach("installed by the first wasm task on the single scheduler thread")]
     @@fiber_handler : Proc(String, Nil)? = nil
 
     def self.fiber_handler=(handler : Proc(String, Nil)?) : Nil

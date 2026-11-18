@@ -3696,9 +3696,14 @@ jobs:
         run: |
           # stdin_park.iyi reads the pipe bench/concurrency_exercise.sh feeds
           # it - a line two seconds in - and an empty stdin is its failure.
+          # These CLI probes need the fixtures and search paths supplied by
+          # selfhost_arg_arms_exercise.sh and selfhost_bodies_exercise.sh.
           $skip = @(
             "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
-            "stdin_park.iyi", "std_debug_cross.iyi"
+            "stdin_park.iyi", "std_debug_cross.iyi",
+            "selfhost_abstract_requirement_probe.iyi", "selfhost_arg_arms_probe.iyi",
+            "selfhost_proc_scope_probe.iyi", "selfhost_program_owner_probe.iyi",
+            "selfhost_recursion_target_probe.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
           $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"

@@ -19,6 +19,19 @@ The integration merge changes the hello root-driven floor from 810 reached, 737 
 to 814, 742, and 243. The lowering count falls because a probe now counts as clean only when its own body finishes
 and its function verifies. This one floor reduction is authorized for the integration merge. These are not census counts.
 
+## Host-specific paths and probes
+
+The Windows loader splits search paths on semicolons and converts backslashes
+to slashes before expanding `$ORIGIN` or resolving imports. Separator conversion
+uses the iyi string builder and preserves other bytes, including UTF-8.
+POSIX loading preserves literal backslashes.
+
+The argument-arm, abstract-requirement, procedure-scope, program-owner and
+recursion-target probes require fixture and search-path arguments.
+`selfhost_arg_arms_exercise.sh` and `selfhost_bodies_exercise.sh` supply those
+arguments and check their semantic results on each selected native host.
+The no-argument Windows runtime sweep leaves these probes to those gates.
+
 ## Strict bootstrap checks
 
 At `33f36d5da2` on macOS arm64, hosted `bin/iyi` builds the real

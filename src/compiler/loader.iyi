@@ -48,7 +48,7 @@ pub class IyiPath
       expanded = [] of String
       @entries.each do |part|
         {% if flag?(:win32) %}
-          part = part.gsub('\\', '/') if part.includes?('\\')
+          part = Loader.windows_separators(part)
         {% end %}
         if part == "$ORIGIN"
           expanded << Loader.clean_path(base)
@@ -414,10 +414,19 @@ pub class Loader
     end
   end
 
+  def self.windows_separators(path : String) : String
+    return path unless path.includes?("\\")
+    String.build(path.bytesize) do |io|
+      path.each_byte do |byte|
+        io.write_byte(byte == 92_u8 ? 47_u8 : byte)
+      end
+    end
+  end
+
   def self.clean_path(path : String) : String
     s = path
     {% if flag?(:win32) %}
-      s = s.gsub('\\', '/') if s.includes?('\\')
+      s = windows_separators(s)
     {% end %}
     while s.starts_with?("./")
       s = s[2, s.size - 2]

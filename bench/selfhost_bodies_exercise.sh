@@ -262,6 +262,38 @@ body_build_failed() {
   cat "$1" >&9
   return 2
 }
+# Keep the check's actual assertion in the mutation result. An unrecognized
+# failure is invalid: an exit status by itself is not a behavioral observation.
+body_mutation_check() {
+  local label="$1" rc=0 detail
+  shift
+  ( set -x; "$@" ) > "$WORK/body_check.out" 2> "$WORK/body_check.trace" || rc=$?
+  if [ "$rc" -eq 1 ] && grep -q '^decisive: ' "$WORK/body_check.out"; then
+    awk -v label="$label" '/^decisive: / { sub(/^decisive: /, ""); print "decisive: " label "; " $0; next } { print }' "$WORK/body_check.out"
+    return 1
+  fi
+  cat "$WORK/body_check.out"
+  [ "$rc" -eq 1 ] || return "$rc"
+  detail=$(awk '
+    /^[+]+ / {
+      line = $0
+      sub(/^[+]+ /, "", line)
+      if (line ~ /^(return |local |rc=|set [+-]x)/) next
+      last = line
+    }
+    END { print last }
+  ' "$WORK/body_check.trace")
+  case "$detail" in
+    "'[' "*|"["\ *|"grep "*|"diff "*|"awk "*)
+      echo "decisive: $label; failed assertion: $detail"
+      return 1
+      ;;
+  esac
+  echo "INVALID PROOF: $label did not report a behavioral assertion" >&9
+  cat "$WORK/body_check.trace" >&9
+  return 2
+}
+
 
 # Mutation callbacks are only evidence after their clean assertion passes.
 body_prove() {
@@ -272,7 +304,8 @@ body_prove() {
     "$prover" "${original[@]}"
     return $?
   fi
-  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+  local prefix=()
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do prefix+=("$1"); shift; done
   [ "$#" -gt 1 ] || { echo "INVALID PROOF: missing callback" >&9; return 1; }
   shift
   if ! ( "$@" ) > "$WORK/body_baseline.log" 2>&1; then
@@ -280,7 +313,7 @@ body_prove() {
     cat "$WORK/body_baseline.log" >&9
     return 1
   fi
-  "$prover" "${original[@]}"
+  "$prover" "${prefix[@]}" -- body_mutation_check "${original[0]}" "$@"
 }
 
 # Probe assertions are caught only for their own named assertion and source
@@ -293,6 +326,7 @@ body_assertion_probe() {
   if [ "$rc" -eq 1 ] &&
      grep -Eq "^iyi: panic: ($message)$" "$WORK/body_assertion.log" &&
      grep -Eq "$site" "$WORK/body_assertion.log"; then
+    echo "decisive: $(awk 'NR == 1 { sub(/^iyi: panic: /, ""); print; exit }' "$WORK/body_assertion.log")"
     return 1
   fi
   echo "INVALID MUTANT: probe failed outside its assertion" >&9
@@ -317,7 +351,10 @@ bodies_at_floor() {
     "$MUT_TD" "$(native_path "$fixture")" "$REPO_NATIVE/src" 2>"$WORK/body_mut_run.err" | sort > "$WORK/mp.txt" || { cat "$WORK/body_mut_run.err" >&9; return 2; }
     matched=$(comm -12 "$WORK/mo.txt" "$WORK/mp.txt" | wc -l | tr -d ' ')
     floor=$(awk -v r="$rel" '$1 == r { print $2 }' "$FLOOR_FILE" 2>/dev/null)
-    [ "$matched" -ge "${floor:-0}" ] || return 1
+    if [ "$matched" -lt "${floor:-0}" ]; then
+      echo "decisive: $rel matched $matched records, below $floor"
+      return 1
+    fi
   done
   fixture="$REPO/bench/fixtures/sem_bodies_class_var_initializer.iyi"
   rel="bench/fixtures/sem_bodies_class_var_initializer.iyi"
@@ -325,7 +362,10 @@ bodies_at_floor() {
   "$MUT_TD" "$(native_path "$fixture")" "$REPO_NATIVE/src" 2>"$WORK/body_mut_run.err" | sort > "$WORK/mp.txt" || { cat "$WORK/body_mut_run.err" >&9; return 2; }
   matched=$(comm -12 "$WORK/mo.txt" "$WORK/mp.txt" | wc -l | tr -d ' ')
   floor=$(awk -v r="$rel" '$1 == r { print $2 }' "$FLOOR_FILE" 2>/dev/null)
-  [ "$matched" -ge "${floor:-0}" ] || return 1
+  if [ "$matched" -lt "${floor:-0}" ]; then
+    echo "decisive: $rel matched $matched records, below $floor"
+    return 1
+  fi
   count=$("$MUT_TD" --instances "$REPO_NATIVE/bench/fixtures/sem_bodies_instance_cache.iyi" "$REPO_NATIVE/src" 2>"$WORK/body_mut_run.err" | awk '/^typed instances:/ { print $3 }') || { cat "$WORK/body_mut_run.err" >&9; return 2; }
   [ "${count:-}" = 3 ] || return 1
   fsc=$("$MUT_TD" --instances "$REPO_NATIVE/bench/fixtures/sem_bodies_fun_splice.iyi" "$REPO_NATIVE/src" 2>"$WORK/body_mut_run.err" | awk '/^typed instances:/ { print $3 }') || { cat "$WORK/body_mut_run.err" >&9; return 2; }
@@ -443,6 +483,28 @@ typed_fixture_at_floor() {
   fi
   return 0
 }
+# This fixture is separate from the floored corpus so the existing floor file
+# stays unchanged. Its impossible else branch leaves the final read untyped.
+dead_return_tail_at_expected() {
+  "$IYI" build -o "$(native_path "$MUT_TD")" "$REPO_NATIVE/src/compiler/tools/typed_dump.iyi" > "$WORK/mut_build.log" 2>&1 || { body_build_failed "$WORK/mut_build.log"; return $?; }
+  local fixture="$REPO/bench/fixtures/bodies_dead_return_tail.iyi"
+  "$ORACLE" "$(native_path "$fixture")" > "$WORK/dead_tail.hosted" 2>"$WORK/dead_tail.err" || { cat "$WORK/dead_tail.err" >&9; return 2; }
+  "$MUT_TD" "$(native_path "$fixture")" "$REPO_NATIVE/src" > "$WORK/dead_tail.port" 2>"$WORK/dead_tail.err" || { cat "$WORK/dead_tail.err" >&9; return 2; }
+  if ! grep -Fxq '8:10 Call Int32' "$WORK/dead_tail.hosted"; then
+    echo "INVALID PROOF: hosted dead-tail call is not Int32" >&9
+    return 2
+  fi
+  if ! grep -Fxq '8:10 Call Int32' "$WORK/dead_tail.port"; then
+    echo "decisive: the untyped unreachable tail erased dead_tail's Int32 return"
+    return 1
+  fi
+  if ! diff -q "$WORK/dead_tail.hosted" "$WORK/dead_tail.port" >/dev/null; then
+    echo "INVALID PROOF: dead-tail records differ outside the return call" >&9
+    diff -u "$WORK/dead_tail.hosted" "$WORK/dead_tail.port" >&9
+    return 2
+  fi
+}
+
 
 strict_typing_at_expected() {
   "$IYI" build -o "$WORK_NATIVE/strict_mutant$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/strict_mut_build.log" 2>&1 || {
@@ -474,10 +536,9 @@ body_prove prove_mutation "virtual metaclass calls dispatch to concrete metaclas
   "    if receiver.is_a?(VirtualMetaclassType)" \
   "    if false" -- strict_typing_at_expected "^undefined method 'new' for VirtualCopy\+\.class$" \
   '^bodies: refused at .*sem_bodies_virtual_metaclass\.iyi:3:5 in VirtualCopy\+#dup$' || status=1
-strict_fixture="$REPO/bench/fixtures/sem_bodies_dead_return_tail.iyi"
 body_prove prove_mutation "an untyped unreachable tail does not erase returns" "$MAIN_VISITOR" \
   "      last_type = @program.no_return_type if dead_here && last_type.nil?" \
-  "      nil" -- typed_fixture_at_floor "$strict_fixture" || status=1
+  "      nil" -- dead_return_tail_at_expected || status=1
 strict_fixture="$REPO/bench/fixtures/sem_bodies_digest_reach.iyi"
 body_prove prove_mutation "an unnameable virtual Self probe stays caller-typed" "$REPO/src/compiler/semantic/definition_typing.iyi" \
   "    written.is_a?(Self) && TypeQueries.virtual_type(scope).is_a?(VirtualType)" \
@@ -1248,14 +1309,35 @@ body_table_probe() {
 }
 
 atomic_free_at_floor() {
-  "$IYI" build -o "$WORK_NATIVE/atomic_tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/mut_build.log" 2>&1 || { body_build_failed "$WORK/mut_build.log"; return $?; }
-  body_table_probe "$WORK/atomic_tool$EXE" "$REPO_NATIVE/bench/fixtures/sem_bodies_match_atomics.iyi" atomic || return 2
-  [ -f "$WORK/atomic.refusals" ] || { echo "INVALID MUTANT: no refusal table" >&9; return 2; }
+  "$IYI" build -o "$WORK_NATIVE/atomic_body_probe$EXE" "$REPO_NATIVE/bench/selfhost_bodies_atomic_probe.iyi" > "$WORK/mut_build.log" 2>&1 || { body_build_failed "$WORK/mut_build.log"; return $?; }
+  if ! "$WORK/atomic_body_probe$EXE" "$REPO_NATIVE/bench/fixtures/sem_bodies_match_atomics.iyi" > "$WORK/atomic.body" 2>"$WORK/atomic.err"; then
+    echo "INVALID PROOF: atomic body analysis did not finish" >&9
+    cat "$WORK/atomic.body" "$WORK/atomic.err" >&9
+    return 2
+  fi
+  if ! grep -Fxq 'bodies: pass' "$WORK/atomic.body" || [ -s "$WORK/atomic.err" ]; then
+    echo "INVALID PROOF: atomic body analysis did not complete cleanly" >&9
+    cat "$WORK/atomic.body" "$WORK/atomic.err" >&9
+    return 2
+  fi
   awk -F '\t' '
-    $1 == "body" && $2 ~ /^MatchAtomic\((UInt64|Int64)\)#(get|set|add|compare_and_set)$/ { bad = 1 }
+    $1 == "body" && $2 ~ /^MatchAtomic\((UInt64|Int64)\)#(get|set|add|compare_and_set)$/ {
+      bad = 1
+      if ($3 ~ /(undefined constant T|<unresolved T>)/ && !evidence) evidence = $2 ": " $3
+    }
     $1 == "reached" && $2 ~ /^MatchAtomic\((UInt64|Int64)\)#(get|set|add|compare_and_set)$/ { seen[$2] = 1 }
-    END { for (name in seen) count++; exit bad || count != 8 }
-  ' "$WORK/atomic.refusals"
+    END {
+      for (name in seen) count++
+      if (evidence) {
+        print "decisive: pointer restriction failed to bind T in " evidence
+        exit 1
+      }
+      if (bad || count != 8) {
+        print "INVALID PROOF: unexpected atomic refusal or reach count " count > "/dev/stderr"
+        exit 2
+      }
+    }
+  ' "$WORK/atomic.body"
 }
  # A block call must not match the generated initialize new. Returns non-zero
  # when that filter is gone and the fixture no longer matches the hosted dump.

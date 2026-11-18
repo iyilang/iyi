@@ -1,0 +1,41 @@
+# Run the typed pipeline through bodies only. A mutation that breaks a free
+# variable must be observed here, before lowering encounters incomplete types.
+module bench/selfhost_bodies_atomic_probe
+
+import compiler/compiler::{Compiler}
+import compiler/loader::{Loader}
+import compiler/macros/engine::{MacroEngine}
+import compiler/macros/target_flags::{MacroTargetFlags}
+import compiler/lower/program::{type_bodies}
+
+IyiFiber.stack_bytes = 1073741824_u64
+
+def atomic_body_census(path : String) : Nil
+  # compile_native's typed pipeline uses this target even on another host.
+  flags = MacroTargetFlags.for_triple("aarch64-apple-darwin", [] of String)
+  loader = Loader.new
+  loader.load_prelude = true
+  loader.macro_engine = MacroEngine.new(flags)
+  typed = Compiler.typed_declare(loader.resolve(path), flags, loader, true)
+  typed.visitor.total = true
+  typed.prog.total_mode = true
+  type_bodies(typed)
+  typed.visitor.typed_instances.each do |inst|
+    if owner = inst.self_type
+      puts "reached\t#{owner.full_name}##{inst.definition.name}"
+    end
+  end
+  typed.visitor.refusals.each do |refusal|
+    name = refusal.def_name || "top level"
+    puts "body\t#{name}\t#{refusal.reason.split("\n").first}"
+  end
+  puts "bodies: pass"
+end
+
+result = group do |g|
+  task = g.spawn { atomic_body_census(Program.args[0]) }
+  task.value
+end
+if result.is_a?(Panicked)
+  raise result.message
+end

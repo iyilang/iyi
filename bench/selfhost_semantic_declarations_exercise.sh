@@ -128,6 +128,21 @@ for fixture in "$REPO"/bench/fixtures/semdecl_*.iyi "$REPO"/bench/fixtures/semde
 done
 echo "  Parity summary: $((fixture_count - fixture_bad))/$fixture_count fixtures identical ($total_matched declarations compared)"
 
+echo "== Entry class-variable types are still checked in the declaration phase"
+missing_cvar="$REPO_NATIVE/bench/fixtures/cvar_import/missing_entry.iyi"
+oracle_rc=0
+port_rc=0
+"$ORACLE" "$missing_cvar" > "$WORK/cvar_missing_o" 2> "$WORK/cvar_missing_oe" || oracle_rc=$?
+"$PORT" "$missing_cvar" > "$WORK/cvar_missing_p" 2> "$WORK/cvar_missing_pe" || port_rc=$?
+if [ "$oracle_rc" -ne 2 ] || [ "$port_rc" -eq 0 ] ||
+   ! grep -q '^ERROR: undefined constant MissingClassVarType' "$WORK/cvar_missing_oe" ||
+   ! grep -q 'undefined constant MissingClassVarType' "$WORK/cvar_missing_pe"; then
+  echo "  entry class variable: oracle and port did not both reject the missing type"
+  status=1
+else
+  echo "  entry class variable: both reject the missing type"
+fi
+
 echo "== 2b. Lib fun records once the type system is installed: generic argument types resolved"
 echo "  (a port-side pin: the oracle has no dump of lib fun types, so the expected lines are the types the fixture declares, written by hand)"
 lib_types_expected="$REPO/bench/selfhost_semantic_declarations_lib_types.expected"
@@ -698,6 +713,12 @@ if [ "$fixture_bad" -ne 0 ] || [ "$link_oracle_ok" -ne 1 ] || ! grep -qx 'class 
   echo "  mutation proofs not run: the fixtures or the prelude chains do not agree with the oracle"
   status=1
 else
+
+prove_mutation "imported class variables resolve eagerly" "$MUT_SEM" \
+  "if @imported_unit || @defer_class_vars" \
+  "if @defer_class_vars" \
+  -- check_decl_fixtures_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation_all "struct default superclass switches to Reference" "$MUT_SEM" \
   "superclass = node.struct ? @program.struct_type : @program.reference_type" \

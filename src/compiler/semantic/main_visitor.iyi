@@ -525,6 +525,7 @@ pub class MainVisitor < TypeNodeHost
   @literal_expander : LiteralExpander
 
   def initialize(@program : SemanticProgram, @speculation : SpeculationLedger = SpeculationLedger.new)
+    @program.resolve_deferred_class_vars
     @literal_expander = LiteralExpander.new(@program.normalizer)
     # The generated `new` methods are completed before any body is typed: the
     # declarations pass has recorded the expansions, and this consumes them (idempotent).

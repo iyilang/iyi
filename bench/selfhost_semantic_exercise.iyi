@@ -12,9 +12,10 @@ module BenchSelfhostSemanticExercise
     prog = SemanticProgram.new
     prog.entry_dir = dir_of(filename)
     visitor = TopLevelVisitor.new(prog, filename)
+    visitor.defer_class_vars = true
+    visitor.defer_instance_vars = true
     node.accept(visitor)
     visitor.finish
-    declare_guessed_instance_vars(prog)
     dump_program_declarations(prog)
   end
 

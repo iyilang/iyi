@@ -47,15 +47,16 @@ pub class IyiPath
     if base = origin
       expanded = [] of String
       @entries.each do |part|
+        normalized = part
         {% if flag?(:win32) %}
-          part = Loader.windows_separators(part)
+          normalized = Loader.windows_separators(part)
         {% end %}
-        if part == "$ORIGIN"
+        if normalized == "$ORIGIN"
           expanded << Loader.clean_path(base)
-        elsif part.starts_with?("$ORIGIN/")
-          expanded << Loader.clean_path(Loader.join(base, part[8, part.size - 8]))
+        elsif normalized.starts_with?("$ORIGIN/")
+          expanded << Loader.clean_path(Loader.join(base, normalized[8, normalized.size - 8]))
         else
-          cleaned = Loader.clean_path(part)
+          cleaned = Loader.clean_path(normalized)
           expanded << cleaned unless cleaned.empty?
         end
       end
@@ -426,7 +427,7 @@ pub class Loader
   def self.clean_path(path : String) : String
     s = path
     {% if flag?(:win32) %}
-      s = windows_separators(s)
+      s = windows_separators(path)
     {% end %}
     while s.starts_with?("./")
       s = s[2, s.size - 2]

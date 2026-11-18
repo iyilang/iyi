@@ -849,11 +849,19 @@ parser = Iyi::Parser.new(File.read(ARGV[0]))
 parser.filename = ARGV[0]
 parser.parse.accept(RequireLocations.new)
 HOSTED_LOCATIONS
+# The input is written here rather than kept as a fixture. Its second and third lines are
+# indented on purpose, so that the expected columns are not 1, and the repository's format
+# check straightens every tracked .iyi file.
+cat > "$WORK/require_input.iyi" <<'REQUIRE_INPUT'
+require "./first"
+  require "./second"
+  [] of Int32
+REQUIRE_INPUT
 CRYSTAL_PATH="$REPO_NATIVE/src" "$HOSTED_COMPILER" build -o "$WORK_NATIVE/require_hosted$EXE" "$WORK_NATIVE/require_locations.cr"
-"$WORK/require_hosted$EXE" "$REPO_NATIVE/bench/fixtures/syntax_require_locations.iyi" > "$WORK/require_hosted.out"
+"$WORK/require_hosted$EXE" "$WORK_NATIVE/require_input.iyi" > "$WORK/require_hosted.out"
 printf '1:1\n2:3\n3:3\n' > "$WORK/require_expected.out"
 if ! cmp -s "$WORK/require_expected.out" "$WORK/require_hosted.out"; then
-  echo "  hosted require locations differ from fixture"
+  echo "  hosted require locations differ from the expected 1:1, 2:3, 3:3"
   status=1
 fi
 check_require_locations() {
@@ -861,7 +869,7 @@ check_require_locations() {
     invalid_mutant "require location probe did not build"
     return $?
   fi
-  if ! "$WORK/require_port$EXE" "$REPO_NATIVE/bench/fixtures/syntax_require_locations.iyi" > "$WORK/require_port.out"; then
+  if ! "$WORK/require_port$EXE" "$WORK_NATIVE/require_input.iyi" > "$WORK/require_port.out"; then
     invalid_mutant "require location probe did not run"
     return $?
   fi

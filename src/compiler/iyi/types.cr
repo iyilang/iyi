@@ -40,6 +40,15 @@ module Iyi
     # travels in an artifact as the same annotation.
     property? iyi_share_owns = false
 
+    # iyi: `@[Share(owns: true, lends: true)]` (heap22, SPEC.md III.4.19):
+    # the owning type keeps the lend protocol - every method that hands its
+    # owned graph to a unit calls `IyiHeap.lend_in(graph)`, and every
+    # hand-back `IyiHeap.lend_out(graph)` - so a unit that reaches it keeps
+    # its own heap. A crossing that reaches an owning type outside std
+    # without it runs pinned, in the shared heap (`pinned: true`). Only
+    # with `owns`, and travels in an artifact on the same annotation.
+    property? iyi_share_lends = false
+
     def initialize(@program : Program)
     end
 
@@ -1274,6 +1283,14 @@ module Iyi
           # `class variable '@@bit_fields' of ASN1::BER is not nilable so it
           # must have an initializer`.
           var.iyi_initialiser_source = class_var.iyi_initialiser_source
+          # iyi: and the ancestor's reach claim (SPEC.md III.4.4). The copy is
+          # declared by the same line, set by the same initialiser and written
+          # by the same defs, typed again for the subclass, so the claim speaks
+          # of it as of the original; a `SafeReach` is proven for each copy on
+          # its own. Without this `SHA224 < SHA256` reached its own copy of
+          # SHA-256's round constants with no claim on it, and the reach rule
+          # refused every program hashing SHA-224 in a parallel unit.
+          program.iyi_inherit_reach_claim(class_var, var)
           var.bind_to(class_var)
           self.class_vars[name] = var
           return var
@@ -3717,6 +3734,10 @@ module Iyi
 
     property fake_def : Def?
     property? used = false
+    # iyi: whether code that runs reads it, not only a definition-site
+    # probe (`Program#iyi_mark_reached_constants`); `codegen_assign`
+    # initialises a constant at its declaration only then.
+    property? iyi_reached = false
     property? visited = false
 
     # Was this const's value cleaned up by CleanupTransformer yet?

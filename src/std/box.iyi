@@ -16,8 +16,12 @@ pub class Box(T)
 
   # Turns object into a Void*.
   #
-  # Copies object to the heap inside a Box container if needed.
+  # Copies object to the heap inside a Box container if needed. C carries
+  # the pointer where no collection looks, so with `-Dheap_partitions`
+  # the running unit is pinned first (heap22 row 9): the box and what it
+  # holds are the shared heap's from then on.
   def self.box(object : T) : Void*
+    IyiCross.pin
     new(object).as(Void*)
   end
 

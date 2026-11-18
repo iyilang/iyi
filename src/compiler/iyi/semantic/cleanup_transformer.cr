@@ -14,12 +14,18 @@ module Iyi
   # `headers` reads a function from an artifact as reaching nothing,
   # `robust` writes an artifact that leaves out state under any claim its
   # build proved, as if every claim held for every importer, `callbacks`
-  # walks no def std calls back (`ShareReach#exits_of`), and `claimed`
+  # walks no def of std or the prelude (`ShareReach#enqueue`), `claimed`
   # leaves a module's spawn in parallel on a claim proven for its producer
-  # alone (`Program#iyi_settle_claimed_spawns`). And `bench/std_unit_exercise.sh`'s
+  # alone (`Program#iyi_settle_claimed_spawns`), `modulereach` stores a std
+  # module's claim its proof did not cover every def of, and `modulepass`
+  # takes a stored one past an importer's override (`reach_module_proof.cr`).
+  # And `bench/std_unit_exercise.sh`'s
   # (SPEC.md III.4.18): `unit-capture` lets `spawn(in: u)`'s block capture
   # what is not Share, and `unit-answer` lets its task answer what is not.
-  # Read once; empty in every other run.
+  # And `bench/std_lazy_tables_exercise.sh`'s `probeused` counts a
+  # definition probe's statements as code that runs
+  # (`Program#iyi_mark_reached_constants`). Read once; empty in every
+  # other run.
   SPAWN_BROKEN = (ENV["IYI_SPAWN_BROKEN"]? || "").split(',')
 
   # iyi: a `g.spawn` the cleanup classified (SPEC.md III.4.15): where its
@@ -31,12 +37,22 @@ module Iyi
   # def the spawn is written in, as a reader names it (`App::Work.crunch`;
   # empty at a module's top level), and *digest* the block's text, hashed:
   # the spawn's name in a module's artifact (`IyiMod::SpawnRecord`).
+  # *pinned*, in a `-Dheap_partitions` build, says why the spawn's unit
+  # runs in the shared heap rather than a heap of its own: its block
+  # reaches an owning type that does not keep the lend protocol (heap22
+  # `pinned:`, SPEC.md III.4.19); nil when it does not.
   record SpawnSite, location : Location, reason : String?, std : Bool,
-    asked : Bool = false, owner : String = "", digest : String = "", into : String? = nil do
+    asked : Bool = false, owner : String = "", digest : String = "", into : String? = nil,
+    pinned : String? = nil do
     def parallel? : Bool
       reason.nil?
     end
   end
+
+  # iyi: a `Unit.new` or `SharedProc.of` the cleanup pointed at its
+  # `pinned: true` instance (heap22), with why, for the artifact's pin
+  # bits and the note.
+  record PinSite, location : Location, call : String, reason : String
 
   # iyi: a spawn the cleanup moved to the pool on the strength of a
   # `@[SafeReach]` its block reaches through a call, in a build that writes
@@ -50,6 +66,9 @@ module Iyi
     # Every spawn site the cleanup classified, in the order it met them;
     # one per instantiation of the def the call is in.
     getter iyi_spawn_sites = [] of SpawnSite
+
+    # Every `Unit.new` and `SharedProc.of` the cleanup pinned (`PinSite`).
+    getter iyi_pin_sites = [] of PinSite
 
     # The spawns placed in parallel on a claim, in a build that writes
     # artifacts (`ClaimedSpawn`).
@@ -78,7 +97,11 @@ module Iyi
         held = claimed.claims.find { |(key, _)| !@iyi_reach_robust.includes?(key) }
         next unless held
         claimed.node.target_defs = [claimed.spawn_def]
-        @iyi_spawn_sites[claimed.site] = site.copy_with(reason: held[1])
+        # A plain spawn takes nothing but its block: the `pinned: true` a
+        # pinned crossing passed `spawn_pooled` goes with it (heap22).
+        claimed.node.args.clear
+        claimed.node.named_args = nil
+        @iyi_spawn_sites[claimed.site] = site.copy_with(reason: held[1], pinned: nil)
       end
     end
 
@@ -729,6 +752,7 @@ module Iyi
           check_share_boundary(node, target_defs[0])
           original = target_defs[0]
           classify_spawn(node, original)
+          pin_constructor(node, original)
           # An eligible spawn now names `spawn_pooled`, whose body is the
           # one to transform below; one placed there on a claim may go
           # back to `spawn` once the claim is proven
@@ -903,6 +927,11 @@ module Iyi
         check_share_reach(block, a_def, thread)
       end
       check_block_captures(node, block, a_def, subject, consequence, thread, owning)
+      note_kept_pin(node, target_def) if thread && placement.nil? && target_def.iyi_share_block?
+      # The block crosses into another unit or thread: its closure gets a
+      # context of its own (heap22 C1), its struct captures boxed. A block
+      # behind a lock does not cross, and may assign what it captures.
+      fun_literal.iyi_cross if thread && @program.has_flag?("heap_partitions")
     end
 
     # The captures of a block crossing a boundary: each variable it closed
@@ -991,12 +1020,18 @@ module Iyi
       in .placed?
         pooled = typed_beside(target_def, "spawn_pooled")
         reason = pooled ? spawn_serial_reason(node) : NO_THREADS
-        node.target_defs = [pooled] if pooled && reason.nil?
+        if pooled && reason.nil?
+          node.target_defs = [pooled]
+          # In a unit of its own: a crossing, so C1 too.
+          mark_crossing(node)
+          pinned = pin_spawn(node, target_def, "spawn_pooled")
+        end
         asked = false
       in .own_unit?
         if new_unit = typed_beside(target_def, "spawn_new")
           node.target_defs = [new_unit]
           node.named_args = nil
+          pinned = pin_spawn(node, target_def, "spawn_new")
         end
         reason = nil
         asked = true
@@ -1007,13 +1042,14 @@ module Iyi
         into = node.named_args.try(&.find(&.name.==("in"))).try(&.value.to_s)
         reason = nil
         asked = true
+        pinned = pin_in_unit(node, target_def)
       end
       return unless location
       if placement.placed? && reason.nil? && !@spawn_claims.empty? && @program.iyi_rewrites_artifacts
         @program.iyi_claimed_spawns << ClaimedSpawn.new(node, target_def, @program.iyi_spawn_sites.size, @spawn_claims.dup)
       end
       @program.iyi_spawn_sites << SpawnSite.new(location, reason, @program.iyi_share_reach.std_at?(location),
-        asked, spawn_owner_label, @program.iyi_rewrites_artifacts ? spawn_digest(node) : "", into)
+        asked, spawn_owner_label, @program.iyi_rewrites_artifacts ? spawn_digest(node) : "", into, pinned)
     end
 
     # The claims the spawn being classified stood on, as `ClaimedSpawn`
@@ -1182,26 +1218,35 @@ module Iyi
     # The instance of *name* - `spawn_pooled`, `spawn_new` - that a spawn
     # def's never-taken line typed beside *spawn_def*, read before the
     # cleanup drops that line, and kept per instance; nil under `-Dgc_none`
-    # and `-Dgc_boehm`, where the def has no such line.
-    private def typed_beside(spawn_def : Def, name : String) : Def?
-      @pooled_spawns.fetch(spawn_def) do
+    # and `-Dgc_boehm`, where the def has no such line. With *pinned*, the
+    # instance a `-Dheap_partitions` line typed for `name(pinned: true)`
+    # (heap22): both are read in the one walk, since the line is gone once
+    # the def's body is cleaned, and a later call may need the other.
+    private def typed_beside(spawn_def : Def, name : String, pinned : Bool = false) : Def?
+      found = @pooled_spawns.fetch(spawn_def) do
         finder = TypedBesideFinder.new(name)
         spawn_def.body.accept finder
-        @pooled_spawns[spawn_def] = finder.found
+        @pooled_spawns[spawn_def] = {finder.found, finder.found_pinned}
       end
+      pinned ? found[1] : found[0]
     end
 
     class TypedBesideFinder < Visitor
       getter found : Def?
+      getter found_pinned : Def?
 
       def initialize(@name : String)
       end
 
       def visit(node : Call) : Bool
         if node.name == @name && (targets = node.target_defs) && targets.size == 1
-          @found = targets.first
+          if node.named_args.try(&.any? { |arg| arg.name == "pinned" && arg.value.is_a?(BoolLiteral) && arg.value.as(BoolLiteral).value })
+            @found_pinned ||= targets.first if node.obj.nil?
+          elsif !node.named_args.try(&.any?(&.name.==("pinned")))
+            @found ||= targets.first
+          end
         end
-        @found.nil?
+        !done?
       end
 
       # The line sits in `{% if %}`, whose typed code is its expansion.
@@ -1211,7 +1256,175 @@ module Iyi
       end
 
       def visit(node : ASTNode) : Bool
-        @found.nil?
+        !done?
+      end
+
+      private def done? : Bool
+        !@found.nil? && !@found_pinned.nil?
+      end
+    end
+
+    # heap22 C1: the block a plain spawn placed in a unit of its own runs
+    # there, so its closure gets a context of its own, as every crossing
+    # block's does (`check_share_boundary`).
+    private def mark_crossing(node : Call) : Nil
+      return unless @program.has_flag?("heap_partitions")
+      node.block.try(&.fun_literal).as?(ProcLiteral).try &.iyi_cross
+    end
+
+    # heap22 pin codegen (contract §5, §6): a spawn whose block reaches an
+    # owning type outside std that does not keep the lend protocol runs in
+    # the shared heap, since that type hands its units a graph no publication
+    # sees. The call is pointed at *name*'s `pinned: true` instance, typed
+    # beside *spawn_def* on a never-taken `-Dheap_partitions` line, and
+    # passes it `true`. Answers why, or nil.
+    private def pin_spawn(node : Call, spawn_def : Def, name : String) : String?
+      return nil unless @program.has_flag?("heap_partitions")
+      return nil if SPAWN_BROKEN.includes?("pin")
+      reason = pin_reason(node)
+      return nil unless reason
+      pinned = typed_beside(spawn_def, name, pinned: true)
+      return nil unless pinned
+      pass_pinned(node, pinned)
+      if location = node.name_location || node.location
+        location = location.expanded_location || location
+        @program.warnings.add_note(location, "this spawn runs in the shared heap because #{reason} (SPEC.md III.4.19)") if @pin_noted.add?(pin_key(node))
+      end
+      reason
+    end
+
+    # The same for the two std calls that start a unit's or a proc's
+    # crossing, `Unit.new { }` and `SharedProc.of { }`: their defs carry the
+    # never-taken `pinned: true` line themselves. Asked at every call, so
+    # the line is read before the def's body is cleaned.
+    private def pin_constructor(node : Call, target_def : Def) : Nil
+      return unless @program.has_flag?("heap_partitions")
+      call = CleanupTransformer.pinnable_call(target_def)
+      return unless call
+      pinned = typed_beside(target_def, target_def.name.partition(':').first, pinned: true)
+      return if SPAWN_BROKEN.includes?("pin")
+      return unless pinned && !pinned.same?(target_def)
+      reason = pin_reason(node)
+      return unless reason
+      pass_pinned(node, pinned)
+      location = node.name_location || node.location
+      return unless location
+      location = location.expanded_location || location
+      return unless @pin_noted.add?(pin_key(node))
+      @program.iyi_pin_sites << PinSite.new(location, call, reason)
+      @program.warnings.add_note(location, "#{call} runs its block in the shared heap because #{reason} (SPEC.md III.4.19)")
+    end
+
+    # The places a pin was noted at, once each: a def typed twice meets its
+    # spawn twice.
+    @pin_noted = Set(String).new
+
+    # heap22 S6 (contract §5 amendment): `g.spawn(in: u) { }` runs its
+    # block in *u*'s unit, which may have a heap of its own. When the block
+    # reaches an owning type without `lends:`, the call is pointed at the
+    # `spawn_in(owner, pinned: true)` instance the def types beside itself
+    # on a never-taken `-Dheap_partitions` line, and its task pins *u*'s
+    # unit before it runs the block, for good. Answers why, or nil.
+    # `IYI_SPAWN_BROKEN=pin-in` leaves every such call unpinned.
+    private def pin_in_unit(node : Call, spawn_def : Def) : String?
+      return nil unless @program.has_flag?("heap_partitions")
+      return nil if SPAWN_BROKEN.includes?("pin") || SPAWN_BROKEN.includes?("pin-in")
+      owner = node.named_args.try(&.find(&.name.==("in"))).try(&.value)
+      return nil unless owner
+      reason = pin_reason(node)
+      return nil unless reason
+      pinned = typed_beside(spawn_def, "spawn_in", pinned: true)
+      return nil unless pinned
+      node.args = [owner] of ASTNode
+      pass_pinned(node, pinned)
+      if location = node.name_location || node.location
+        location = location.expanded_location || location
+        @program.warnings.add_note(location, "this spawn pins the unit it runs in, `#{owner}`, to the shared heap for good, because #{reason} (SPEC.md III.4.19)") if @pin_noted.add?(pin_key(node))
+      end
+      reason
+    end
+
+    # The note at a call handing a block to a `@[Share]` def that keeps it
+    # (`get "/" { }` on iyi-web's router): the crossing the def makes of the
+    # block, `SharedProc.of` around it, is pinned for that block
+    # (`pin_constructor`, through `ShareReach#bound`), and that crossing's
+    # note names the def's own line, one for every block of the def's
+    # instance; this one names the block's.
+    private def note_kept_pin(node : Call, target_def : Def) : Nil
+      return unless @program.has_flag?("heap_partitions")
+      return if SPAWN_BROKEN.includes?("pin") || CleanupTransformer.pinnable_call(target_def)
+      reason = pin_reason(node)
+      return unless reason
+      location = node.name_location || node.location
+      return unless location
+      location = location.expanded_location || location
+      return unless @pin_noted.add?(pin_key(node))
+      @program.warnings.add_note(location, "`#{ShareReach.called(target_def)}` keeps this block for other units, and the crossing that runs it runs in the shared heap because #{reason} (SPEC.md III.4.19)")
+    end
+
+    # The key a pin is noted once under: the call as written, not where a
+    # macro's expansion of it is said to be, so that two crossings one
+    # `{% if %}` or `{% for %}` expands are noted apart.
+    private def pin_key(node : Call) : String
+      (node.name_location || node.location).to_s
+    end
+
+    # `Unit.new` or `SharedProc.of` when *target_def* is std's, else nil:
+    # the calls besides a spawn that take the compiler's `pinned:`
+    # (contract §5), and which no other module may pass it. Asked of the
+    # type's own name in std's module of that name (`Std::Unit::Unit`,
+    # `Std::SharedProc::SharedProc`): the full name compared before S6
+    # never matched, so neither call was ever pinned, nor a module's own
+    # `pinned:` on it called unsafe.
+    def self.pinnable_call(target_def : Def) : String?
+      owner = target_def.owner
+      return nil unless owner.metaclass?
+      type = owner.instance_type
+      type = type.generic_type.as(Type) if type.is_a?(GenericClassInstanceType)
+      return nil unless type.is_a?(NamedType) && std_module_type?(type)
+      name = target_def.name.partition(':').first
+      case {type.name, name}
+      when {"Unit", "new"}      then "Unit.new"
+      when {"SharedProc", "of"} then "SharedProc.of"
+      end
+    end
+
+    # Whether *type* is the type of its own name in std's module of that
+    # name, as codegen's `iyi_born_shared_home?` reads it.
+    def self.std_module_type?(type : NamedType) : Bool
+      namespace = type.namespace
+      return false unless namespace.is_a?(NamedType) && namespace.name == type.name
+      std = namespace.namespace
+      std.is_a?(NamedType) && std.name == "Std" && std.namespace.is_a?(Program)
+    end
+
+    private def pass_pinned(node : Call, pinned : Def) : Nil
+      node.target_defs = [pinned]
+      value = BoolLiteral.new(true)
+      value.set_type(@program.bool)
+      node.named_args = [NamedArgument.new("pinned", value)]
+    end
+
+    # Why the crossing at *node* must run in the shared heap, or nil
+    # (`ShareReach#pin_reason`): the first owning type outside std without
+    # `lends:` that its block, or any block it may run - a `@[Share]` def's
+    # block it wraps, as iyi-web's router wraps every route's - captures,
+    # names or reaches. A block forwarded as a proc, `SharedProc.of(&block)`,
+    # which only the `@[Share]` def's own block may be
+    # (`check_forwarded_block`), is asked for every block that parameter
+    # may be bound to; one the walk cannot bind pins.
+    private def pin_reason(node : Call) : String?
+      reach = @program.iyi_share_reach
+      if (fun_literal = node.block.try(&.fun_literal)).is_a?(ProcLiteral)
+        return reach.pin_reason([fun_literal.def], true, @current_def.try(&.owner))
+      end
+      forwarded = node.block_arg
+      return nil unless forwarded
+      current = @current_def
+      if forwarded.is_a?(Var) && current && reach.param?(current, forwarded.name)
+        reach.pin_reason(reach.bound_literals(current, forwarded.name), false, nil)
+      else
+        "its block is a proc, `&#{forwarded}`, and nothing says which blocks it may run"
       end
     end
 
@@ -1275,7 +1488,6 @@ module Iyi
         return refusal_text(refused, node)
       end
       reach = @program.iyi_share_reach
-      return nil if reach.std?(block)
       reach.reach(a_def).each do |found|
         named = found.named
         path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
@@ -1716,28 +1928,26 @@ module Iyi
       end
     end
 
-    # iyi: module state the block reaches through the defs it calls, which
-    # the checks above, reading the block's own text, do not see: a
-    # parallel block calling `ask`, which ran `DATABASE.query_one` on a pool
-    # that assumes one thread, compiled silently, and at 12 workers a
-    # request was answered another's rows (#148). A warning rather than a
-    # refusal: whether a call is really made, or the state is set once and
-    # only read after, is not something the walk can tell, and a program
-    # that knows says so on the constant or class variable with
-    # `@[SafeReach("why")]`. The walk is `ShareReach`'s.
+    # iyi: a parallel unit may not reach module state that is not Share
+    # (SPEC.md III.4.5): the module state the block reaches through the defs
+    # it calls, std's and the prelude's included, which the checks above,
+    # reading the block's own text, do not see. A parallel block calling
+    # `ask`, which ran `DATABASE.query_one` on a pool that assumes one
+    # thread, compiled silently, and at 12 workers a request was answered
+    # another's rows (#148); 0.22 refuses it, where 0.21 warned, because a
+    # unit's own heap (III.4.19) holds only where the module state its code
+    # reaches never receives a pointer into it. State a proven
+    # `@[SafeReach("why")]` covers is reached as Share state is. The walk is
+    # `ShareReach`'s.
     #
-    # Each piece of state is one warning, at the first block that reaches
+    # Each piece of state is gathered once, at the first block that reaches
     # it, by that block's shortest path, counting the other blocks that
-    # reach it too; `report_share_reach` writes them once every block is
-    # checked. Warned once per block, iyiturkiye's 91 warned blocks gave
-    # 1251 warnings about 37 constants (`iyi check`, Linux): iyi-db's `LOG`
-    # was 88 of them, and the app's own pool, `SQL`, 88 more; gathered,
-    # they are 37. A block where warnings are not reported
-    # (`--exclude-warnings`, `lib`) is not counted either.
+    # reach it too; `report_share_reach` refuses them once every block is
+    # checked. Refused once per block, iyiturkiye's 91 blocks would have
+    # given 1251 refusals about 37 constants (`iyi check`, Linux): iyi-db's
+    # `LOG` 88 of them, and the app's own pool, `SQL`, 88 more.
     def check_share_reach(block : Block, a_def : Def, boundary : ShareBoundary) : Nil
       reach = @program.iyi_share_reach
-      return if reach.std?(block)
-      return if @program.warnings.ignore_warning_due_to_location?(block.location)
       reach.reach(a_def).each do |found|
         named = found.named
         if named.is_a?(IyiMod::ReachRecord)
@@ -1761,23 +1971,23 @@ module Iyi
           instead = "If it is only read, make it a `#{list}` (std/list), which is Share. #{instead}"
         end
         # A package's state is changed in the package, which the program
-        # cannot do: the warning says whose it is and where.
+        # cannot do: the refusal says whose it is and where.
         if (package = reach.package_at(named.declared, @program.iyi_mod_table))
           prefix, file = package
           at = named.state.is_a?(Const) ? named.declared.try { |declared| " at #{file}:#{declared.line_number}" } : nil
           instead = "`#{named.label}` is the package #{prefix}'s#{at}, so the change goes there. #{instead}"
         end
-        head = "#{boundary.subject} reaches `#{named.label} : #{named.type}` (not Share) through #{path.join(" → ")}"
-        tail = ": #{why}. #{instead} (SPEC.md III.4.4)"
-        @share_reach_gathered[named.key] = ShareReachWarning.new(block, head, tail, Set{block.location.to_s})
+        head = "#{boundary.subject} (#{block_place(block)}) reaches `#{named.label} : #{named.type}` (not Share) through #{path.join(" → ")}"
+        tail = ": #{why}. A parallel unit may not reach module state that is not Share (SPEC.md III.4.5). #{instead}"
+        @share_reach_gathered[named.key] = ShareReachRefusal.new(block, head, tail, Set{block.location.to_s}, named)
       end
     end
 
-    # The warning for state a function read from an artifact reaches, as
+    # The refusal for state a function read from an artifact reaches, as
     # its artifact recorded it (SPEC.md III.4.15); gathered by the state,
     # as the others are. Not for a function whose artifact recorded
     # nothing, an `iyi bind` boundary's: that keeps a plain spawn in its
-    # unit, and warning every parallel block that calls into a bound shard
+    # unit, and refusing every parallel block that calls into a bound shard
     # would say only that nothing is known.
     private def gather_remote_reach(block : Block, boundary : ShareBoundary, found : ShareReach::Found, record : IyiMod::ReachRecord) : Nil
       return if record.kind.empty?
@@ -1789,31 +1999,108 @@ module Iyi
       path = found.path.map { |target| "`#{ShareReach.called(target)}`" }
       path.concat record.path.map { |step| "`#{step}`" }
       path << "`#{record.use}`"
-      head = "#{boundary.subject} reaches `#{record.label} : #{record.type}` (not Share; module `#{record.module_name}`) through #{path.join(" → ")}"
-      tail = ": #{record.why}. The change goes in #{record.module_name}, whose artifact recorded it: keep the value behind a `Mutex` (std/mutex), or say why every thread may reach it with `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4, III.4.15)"
-      @share_reach_gathered[key] = ShareReachWarning.new(block, head, tail, Set{block.location.to_s})
+      head = "#{boundary.subject} (#{block_place(block)}) reaches `#{record.label} : #{record.type}` (not Share; module `#{record.module_name}`) through #{path.join(" → ")}"
+      tail = ": #{record.why}. A parallel unit may not reach module state that is not Share (SPEC.md III.4.5). The change goes in #{record.module_name}, whose artifact recorded it: keep the value behind a `Mutex` (std/mutex), or say why every thread may reach it with `@[SafeReach(\"...\")]`, which the compiler proves (SPEC.md III.4.4, III.4.15)"
+      @share_reach_gathered[key] = ShareReachRefusal.new(block, head, tail, Set{block.location.to_s}, nil)
     end
 
-    # One warning being gathered: the first block to reach the state, the
-    # text either side of the count of the others, and every block, by its
-    # location, that reaches it - one block typed for two instantiations is
-    # one block.
-    record ShareReachWarning, block : Block, head : String, tail : String, blocks : Set(String)
+    # Where a block is written, as a refusal raised at the state names it:
+    # `app.iyi:22`.
+    private def block_place(block : Block) : String
+      at = block.location
+      at = at.try(&.expanded_location) || at
+      at ? "#{File.basename(at.filename.to_s)}:#{at.line_number}" : "a block"
+    end
 
-    # The gathered warnings, one per piece of state, in the order their
-    # first blocks were checked. Called once every block is checked
-    # (`Program#semantic_after_top_level`); a warning is never written twice.
-    def report_share_reach : Nil
-      @share_reach_gathered.each_value do |gathered|
-        others = gathered.blocks.size - 1
-        count = case others
-                when 0 then ""
-                when 1 then ", as does 1 other parallel block"
-                else        ", as do #{others} other parallel blocks"
-                end
-        @program.warnings.add_warning(gathered.block, "#{gathered.head}#{count}#{gathered.tail}")
-      end
+    # One refusal being gathered: the first block to reach the state, the
+    # text either side of the count of the others, every block, by its
+    # location, that reaches it - one block typed for two instantiations is
+    # one block - and the state, when the program has its declaration.
+    record ShareReachRefusal, block : Block, head : String, tail : String, blocks : Set(String), named : ShareReach::Named?
+
+    # The gathered refusals, raised once every block is checked
+    # (`Program#semantic_after_top_level`), as one error: the front end
+    # stops at its first. It is raised at the state's declaration, with
+    # the others listed after it, so `iyi fix` can make the one edit that
+    # is safe there: a state a `@[SafeReach]` claim would be proven for -
+    # nothing writes it once a parallel task may start - gets the claim
+    # (`ReachProof.provable`). The first such state is the one raised, so
+    # each round of `iyi fix` takes one; a state no claim would be proven
+    # for is raised with the write that breaks the claim, and needs a
+    # hand: a `Mutex`, an `Atomic`, a `List`, or a race fixed.
+    def report_share_reach(root : ASTNode) : Nil
+      return if @share_reach_gathered.empty?
+      gathered = @share_reach_gathered.values
       @share_reach_gathered.clear
+      states = gathered.compact_map(&.named.try(&.state))
+      verdicts = ReachProof.provable(@program, root, states)
+      chosen_at = gathered.index { |refusal| (state = refusal.named.try(&.state)) && verdicts[state.object_id]?.nil? && fix_edit(state) } || 0
+      chosen = gathered[chosen_at]
+      others = chosen.blocks.size - 1
+      count = case others
+              when 0 then ""
+              when 1 then ", as does 1 other parallel block"
+              else        ", as do #{others} other parallel blocks"
+              end
+      message = "#{chosen.head}#{count}#{chosen.tail}"
+      edit = nil
+      at = chosen.block.location
+      if state = chosen.named.try(&.state)
+        refusal = verdicts[state.object_id]?
+        edit = fix_edit(state) unless refusal
+        message += if refusal
+                     ". A claim here would not be proven, so `iyi fix` leaves it to a hand: #{refusal}"
+                   elsif edit
+                     ". Nothing writes it once a parallel task may start, so a claim is proven: `iyi fix` adds `#{SAFE_REACH_FIX}`"
+                   else
+                     ". Nothing writes it once a parallel task may start, so a claim is proven: write `#{SAFE_REACH_FIX}` on its declaration"
+                   end
+        at = declaration_of(state) || at if edit
+      end
+      rest = gathered.each_with_index.reject { |(_, index)| index == chosen_at }.map(&.[0]).to_a
+      unless rest.empty?
+        listed = rest.map do |refusal|
+          label = refusal.head.partition(" reaches ")[2].partition(" (not Share")[0]
+          fixed = (state = refusal.named.try(&.state)) && verdicts[state.object_id]?.nil? && fix_edit(state)
+          fixed ? "#{label} (`iyi fix` claims it)" : label
+        end
+        message += ". #{rest.size} more #{rest.size == 1 ? "piece" : "pieces"} of module state #{rest.size == 1 ? "is" : "are"} reached by parallel units the same way: #{listed.join(", ")}"
+      end
+      ex = at ? TypeException.new(message, at) : TypeException.new(message)
+      if edit
+        ex.edit_at, ex.suggestion = edit
+      end
+      raise ex
+    end
+
+    # What `iyi fix` writes above a state no write reaches once a parallel
+    # task may start: the claim, which the compiler then proves.
+    SAFE_REACH_FIX = %(@[SafeReach("set before the first parallel task starts, then only read")])
+
+    # Where the claim goes and what is written: above the line that
+    # declares the state - a constant's assignment, a class variable's
+    # initializer - by replacing that line's first character with the claim,
+    # a line break, the line's indentation and that character. Nil when the
+    # declaration is not in a source file the program has, or a class
+    # variable has no initializer to place it by.
+    private def fix_edit(state : Const | MetaTypeVar) : { {Int32, Int32, Int32}, String }?
+      at = declaration_of(state)
+      return nil unless at
+      return nil if at.original_artifact
+      file = at.filename
+      return nil unless file.is_a?(String) && File.file?(file)
+      line = File.read_lines(file)[at.line_number - 1]?
+      return nil unless line
+      indent = line.size - line.lstrip.size
+      first = line[indent]?
+      return nil unless first
+      { {at.line_number, indent + 1, 1}, "#{SAFE_REACH_FIX}\n#{line[0, indent]}#{first}" }
+    end
+
+    # The line a state is declared on: a constant's assignment, a class
+    # variable's initializer.
+    private def declaration_of(state : Const | MetaTypeVar) : Location?
+      state.is_a?(Const) ? (state.locations.try(&.first?) || state.value.location) : state.initializer.try(&.node.location)
     end
 
     # `List(String)` for an `Array(String)` whose elements are Share: the
@@ -1825,10 +2112,11 @@ module Iyi
       "List(#{element})"
     end
 
-    @share_reach_gathered = {} of UInt64 => ShareReachWarning
+    @share_reach_gathered = {} of UInt64 => ShareReachRefusal
     # `spawn_pooled` or `spawn_new` by the spawn def instance it was typed
-    # beside (`typed_beside`); by identity, since a def's `==` compares its text.
-    @pooled_spawns = ({} of Def => Def?).compare_by_identity
+    # beside (`typed_beside`), and the `pinned: true` instance beside it;
+    # by identity, since a def's `==` compares its text.
+    @pooled_spawns = ({} of Def => {Def?, Def?}).compare_by_identity
 
     # The assignments to one variable in a body, each with the loops,
     # blocks and procs around it and whether it comes after the call that

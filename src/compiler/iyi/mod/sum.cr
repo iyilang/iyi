@@ -3,9 +3,10 @@
 # "and its only job is to notice that what arrived is not what arrived
 # last time."
 #
-# One line per requirement the build actually used:
+# One line per selected checkout and per manifest the resolver read:
 #
 #     example.test/user/liba v1.1.0 h2:9f2a…
+#     example.test/user/liba v1.0.0/iyi.mod h2:8d4b…
 #
 # The hash is a tree hash of the checkout, in two steps so that no byte of
 # one file can be read as part of another. Each file is digested on its
@@ -69,75 +70,92 @@ module Iyi::Mod
     PREFIX = "h2:"
     LEGACY = "s1:"
 
-    # Verifies *selections* against the manifest directory's `iyi.sum`,
-    # appending what is new. *checkout* answers a selection's directory,
-    # and what is said about `s1:` lines is said on *notices*.
-    def self.check(dir : String, selections : Array(Selection), notices : IO = STDERR, &checkout : Selection -> String) : Nil
+    # A single resolution verifies manifests before the resolver reads their
+    # requirements, then checks selected trees. Nothing is written until
+    # every check and the caller's policy checks have succeeded.
+    def self.checker(dir : String, notices : IO = STDERR) : Checker
       sum_path = File.join(dir, FILE)
       known = File.file?(sum_path) ? parse(File.read(sum_path), sum_path) : {} of String => String
-      added = 0
-      restated = 0
-      # A checkout is read-only. A build whose entry sits inside the module
-      # cache — a tool compiling a dependency in place — verifies but never
-      # writes, or the write would change the very tree a *user's* sum pins,
-      # which is the mutation this file exists to notice, self-inflicted.
-      read_only = in_cache?(dir)
-
-      selections.each do |selection|
-        key = "#{selection.path} v#{selection.version}"
-        tree = checkout.call(selection)
-        actual = tree_hash(tree)
-        if expected = known[key]?
-          if expected.starts_with?(LEGACY)
-            # Held to the hash it was written with, wherever it is read.
-            # Where it cannot be written again it stays as it is.
-            was = legacy_tree_hash(tree)
-            raise changed(key, sum_path, expected, was) unless expected == was
-            next if read_only
-            restated += 1
-          else
-            next if expected == actual
-            raise changed(key, sum_path, expected, actual)
-          end
-        else
-          added += 1
-        end
-        known[key] = actual
-      end
-
-      return if read_only
-
-      return if added == 0 && restated == 0
-      said = "#{sum_path}: #{restated} #{restated == 1 ? "entry" : "entries"} said `#{LEGACY}`, a hash " \
-             "that could not tell two different trees apart; #{restated == 1 ? "it" : "each"} matched its checkout"
-      begin
-        File.write(sum_path, String.build do |io|
-          known.to_a.sort_by!(&.first).each do |(key, hash)|
-            io << key << ' ' << hash << '\n'
-          end
-        end)
-      rescue ex : IO::Error
-        # A new entry that cannot be recorded is the failure it was: the
-        # next build would have nothing to hold the checkout to. A line
-        # that only could not be written *again* was compared a moment
-        # ago, and matched; a checkout with `iyi.sum` read-only - a
-        # mounted source tree, a build as another user - built under
-        # `s1:` and builds still. It is said every time, since every
-        # build compares the weaker hash until the file can be written.
-        raise ex if added > 0
-        reason = (ex.os_error.try(&.message) || ex.message || "").rchop('.')
-        notices.puts "#{said} and could not be recorded again as `#{PREFIX}`: the file could not be " \
-                     "written (#{reason}). The build goes on under the `#{LEGACY}` " \
-                     "#{restated == 1 ? "line" : "lines"}"
-        return
-      end
-      notices.puts "#{said} and is recorded again as `#{PREFIX}`" if restated > 0
+      Checker.new(sum_path, known, in_cache?(dir), notices)
     end
 
-    private def self.changed(key : String, sum_path : String, expected : String, actual : String) : ModError
+    class Checker
+      getter manifests = [] of Selection
+
+      def initialize(@sum_path : String, @known : Hash(String, String), @read_only : Bool, @notices : IO)
+        @added = 0
+        @restated = 0
+      end
+
+      # Hash exactly the bytes that will be parsed, before their requirements
+      # can affect the graph. Replacements are local policy, not pinned facts.
+      def manifest(selection : Selection, text : String) : Nil
+        key = "#{selection.path} v#{selection.version}/iyi.mod"
+        actual = Sum.manifest_hash(text)
+        if expected = @known[key]?
+          raise Sum.changed(key, @sum_path, expected, actual) unless expected == actual
+        else
+          @known[key] = actual
+          @added += 1
+        end
+        @manifests << selection
+      end
+
+      def trees(selections : Array(Selection), &checkout : Selection -> String) : Nil
+        selections.each do |selection|
+          key = "#{selection.path} v#{selection.version}"
+          tree = checkout.call(selection)
+          actual = Sum.tree_hash(tree)
+          if expected = @known[key]?
+            if expected.starts_with?(LEGACY)
+              was = Sum.legacy_tree_hash(tree)
+              raise Sum.changed(key, @sum_path, expected, was) unless expected == was
+              next if @read_only
+              @restated += 1
+            else
+              next if expected == actual
+              raise Sum.changed(key, @sum_path, expected, actual)
+            end
+          else
+            @added += 1
+          end
+          @known[key] = actual
+        end
+      end
+
+      def pending? : Bool
+        !@read_only && (@added > 0 || @restated > 0)
+      end
+
+      def write : Nil
+        return unless pending?
+        said = "#{@sum_path}: #{@restated} #{@restated == 1 ? "entry" : "entries"} said `#{LEGACY}`, a hash " \
+               "that could not tell two different trees apart; #{@restated == 1 ? "it" : "each"} matched its checkout"
+        begin
+          File.write(@sum_path, String.build do |io|
+            @known.to_a.sort_by!(&.first).each do |(key, hash)|
+              io << key << ' ' << hash << '\n'
+            end
+          end)
+        rescue ex : IO::Error
+          # A missing fact must be recorded. An s1 line already matched,
+          # so a failed rewrite alone does not prevent the build.
+          raise ex if @added > 0
+          reason = (ex.os_error.try(&.message) || ex.message || "").rchop('.')
+          @notices.puts "#{said} and could not be recorded again as `#{PREFIX}`: the file could not be " \
+                        "written (#{reason}). The build goes on under the `#{LEGACY}` " \
+                        "#{@restated == 1 ? "line" : "lines"}"
+          return
+        end
+        @notices.puts "#{said} and is recorded again as `#{PREFIX}`" if @restated > 0
+      end
+    end
+
+    def self.changed(key : String, sum_path : String, expected : String, actual : String) : ModError
+      subject = key.ends_with?("/iyi.mod") ? "manifest" : "checkout"
       ModError.new(
         "#{key} is not what it was: #{sum_path} says #{expected}, " \
-        "the checkout hashes to #{actual}. Something between the tag " \
+        "the #{subject} hashes to #{actual}. Something between the tag " \
         "and this machine changed; that is the one thing this file " \
         "exists to notice (SPEC.md III.7)")
     end
@@ -145,11 +163,11 @@ module Iyi::Mod
     # Drops every entry that is not one of *keep*, the selections a build
     # of the manifest in *dir* now uses, and answers how many went: a sum
     # line for a version nothing builds is a fact about another program.
-    def self.prune(dir : String, keep : Array(Selection)) : Int32
+    def self.prune(dir : String, keep : Array(Selection), manifests : Array(Selection) = [] of Selection) : Int32
       sum_path = File.join(dir, FILE)
       return 0 unless File.file?(sum_path)
       known = parse(File.read(sum_path), sum_path)
-      wanted = keep.map { |selection| "#{selection.path} v#{selection.version}" }.to_set
+      wanted = wanted_keys(keep, manifests)
       kept = known.select { |key, _| wanted.includes?(key) }
       dropped = known.size - kept.size
       return 0 if dropped == 0 || in_cache?(dir)
@@ -163,11 +181,17 @@ module Iyi::Mod
 
     # Which entries of the sum in *dir* are not one of *keep*, without
     # writing anything.
-    def self.stale(dir : String, keep : Array(Selection)) : Array(String)
+    def self.stale(dir : String, keep : Array(Selection), manifests : Array(Selection) = [] of Selection) : Array(String)
       sum_path = File.join(dir, FILE)
       return [] of String unless File.file?(sum_path)
-      wanted = keep.map { |selection| "#{selection.path} v#{selection.version}" }.to_set
+      wanted = wanted_keys(keep, manifests)
       parse(File.read(sum_path), sum_path).keys.reject { |key| wanted.includes?(key) }.sort!
+    end
+
+    private def self.wanted_keys(keep : Array(Selection), manifests : Array(Selection)) : Set(String)
+      wanted = keep.map { |selection| "#{selection.path} v#{selection.version}" }.to_set
+      manifests.each { |selection| wanted << "#{selection.path} v#{selection.version}/iyi.mod" }
+      wanted
     end
 
     # Whether *dir* is inside the module cache, asked the way the file
@@ -185,6 +209,13 @@ module Iyi::Mod
     private def self.in_cache?(dir : String) : Bool
       cache = Iyi.file_key(File.expand_path(Iyi::CacheDir.instance.join("mod")))
       !Iyi.path_under?(Iyi.file_key(File.expand_path(dir)), cache).nil?
+    end
+
+    # The manifest hash is the tree-hash list containing only iyi.mod.
+    # Use the same bytes the parser reads, not a second read of the file.
+    def self.manifest_hash(text : String) : String
+      digest = ::Crystal::Digest::SHA256.hexdigest(text)
+      "#{PREFIX}#{::Crystal::Digest::SHA256.hexdigest("#{digest} f iyi.mod\n")}"
     end
 
     # The checkout's content, as one line-friendly token: files only, each
@@ -232,7 +263,7 @@ module Iyi::Mod
     # every file in path order. Only for holding an `s1:` line to its
     # checkout one last time before the line is written again (`check`);
     # nothing is recorded with it.
-    private def self.legacy_tree_hash(dir : String) : String
+    def self.legacy_tree_hash(dir : String) : String
       digest = ::Crystal::Digest::SHA1.new
       files = [] of String
       collect_files(dir, "", files)
@@ -273,8 +304,9 @@ module Iyi::Mod
         next if stripped.empty?
         fields = stripped.split
         unless fields.size == 3 && (fields[2].starts_with?(PREFIX) || fields[2].starts_with?(LEGACY))
-          raise ModError.new("#{source}:#{line_number}: not a sum line; the shape is `<path> v<version> #{PREFIX}<hash>`")
+          raise ModError.new("#{source}:#{line_number}: not a sum line; the shape is `<path> v<version>[/iyi.mod] #{PREFIX}<hash>`")
         end
+        # The suffix is part of the key, distinct from the checkout line.
         known["#{fields[0]} #{fields[1]}"] = fields[2]
       end
       known

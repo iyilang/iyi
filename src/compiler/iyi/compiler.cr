@@ -811,6 +811,7 @@ module Iyi
 
         path = File.join(dir, "#{module_name}.iyimod")
         artifact.spawns = collect_iyi_spawns(program, filename)
+        artifact.pins = collect_iyi_pins(program, filename)
         note_iyi_spawn_moves(program, path, artifact) unless module_name.includes?('.')
 
         {path, artifact}
@@ -847,11 +848,25 @@ module Iyi
         key = {location.line_number, location.column_number}
         reason = site.reason || ""
         if known = by_place[key]?
+          known = known.copy_with(pinned: true) if site.pinned
+          by_place[key] = known
           next unless known.parallel && !site.parallel?
           by_place[key] = known.copy_with(parallel: false, reason: reason)
         else
-          by_place[key] = IyiMod::SpawnRecord.new(site.owner, site.digest, key[0], key[1], site.parallel?, site.asked, reason)
+          by_place[key] = IyiMod::SpawnRecord.new(site.owner, site.digest, key[0], key[1], site.parallel?, site.asked, reason, !site.pinned.nil?)
         end
+      end
+      by_place.keys.sort!.map { |key| by_place[key] }
+    end
+
+    # iyi: the `Unit.new` and `SharedProc.of` calls written in *filename*
+    # that the cleanup pinned (heap22), one record per place.
+    private def collect_iyi_pins(program : Program, filename : String) : Array(IyiMod::PinRecord)
+      by_place = {} of {Int32, Int32} => IyiMod::PinRecord
+      program.iyi_pin_sites.each do |site|
+        next unless site.location.filename == filename
+        key = {site.location.line_number, site.location.column_number}
+        by_place[key] ||= IyiMod::PinRecord.new(site.call, key[0], key[1], site.reason)
       end
       by_place.keys.sort!.map { |key| by_place[key] }
     end
@@ -2521,8 +2536,17 @@ module Iyi
       return [] of String unless type.is_a?(ClassType) && Iyi::Share.shareable?(type)
       # An owning type says so, or its consumer would read it as trusted
       # only when its arguments are, and `Mutex(Array(Int32))` would stop
-      # being Share at the artifact's edge.
-      [type.iyi_share_owns? ? "@[Share(owns: true)]" : "@[Share]"]
+      # being Share at the artifact's edge; and one that keeps the lend
+      # protocol says that too, or every crossing that reaches it in a
+      # consumer would run pinned (heap22, `.iyimod` v63).
+      marker = if type.iyi_share_owns? && type.iyi_share_lends?
+                 "@[Share(owns: true, lends: true)]"
+               elsif type.iyi_share_owns?
+                 "@[Share(owns: true)]"
+               else
+                 "@[Share]"
+               end
+      [marker]
     end
 
     # One side of a type's methods — its own, or its metaclass's.

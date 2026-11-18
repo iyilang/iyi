@@ -521,6 +521,15 @@ class IyiFiber
   # parallel task's, its own or the one whose block spawned it, or a
   # `Unit`'s (std/unit); nil for a fiber that never moves.
   property unit : IyiUnit?
+  # The partition record this fiber allocates in (heap22): its unit's
+  # (`IyiUnit#heap`), or the one a bracket installed (`IyiHeap.within`,
+  # `IyiHeap.shared`); 0 for the shared heap, through the thread's own
+  # cache. The switch into the fiber installs it (`IyiScheduler.switch_to`).
+  property alloc : UInt64
+  # The links of its unit's fiber list (`IyiUnit#fibers`), under the
+  # runtime lock as the registry's are.
+  property next_in_unit : IyiFiber?
+  property prev_in_unit : IyiFiber?
   # Woken onto its home only: a `select` with a timeout arm is in its
   # home's sleep heap while a channel may wake it from any thread, and it
   # must leave that heap on the thread that owns it. Set under the locks
@@ -566,8 +575,15 @@ class IyiFiber
     WASM_STACK_CANARY = 0x3C6EF372FE94F82B_u64
   {% end %}
 
-  # The spawned body. The main fiber has none.
-  property proc : Proc(Nil)?
+  # The spawned body. The main fiber has none. Set only by the runtime's
+  # own spawns: a body set from outside would run on whatever thread takes
+  # the fiber, with captures nothing checked or published (heap22).
+  getter proc : Proc(Nil)?
+
+  @[Unsafe(call: "the proc's captures are Share and published, and it runs where the fiber's unit allows")]
+  def proc=(proc : Proc(Nil)?) : Proc(Nil)?
+    @proc = proc
+  end
 
   # Intrusive links. A fiber waits on at most one thing at a time, so one
   # link per queue kind is enough, and none of them allocate on the wait
@@ -714,6 +730,9 @@ class IyiFiber
     @home = nil
     @parallel = false
     @unit = nil
+    @alloc = 0_u64
+    @next_in_unit = nil
+    @prev_in_unit = nil
     @homebound = false
     @next_cancel = nil
     @cancel_posted = false
@@ -755,8 +774,10 @@ class IyiFiber
     # runtime's, the id of the thread whose io list the fiber parks on
     # while the operation is posted, written when it is armed: whichever
     # thread takes the packet finds the fiber there
-    # (`IyiScheduler.complete_packet`).
-    @wait_overlapped = Pointer(UInt8).malloc(40_u64)
+    # (`IyiScheduler.complete_packet`). Made in the shared heap, as the
+    # fiber is (`__iyi_new_shared` makes the fiber alone, not what its
+    # constructor allocates, heap22 row 14).
+    @wait_overlapped = IyiCross.shared { Pointer(UInt8).malloc(40_u64) }
     @io_bytes_read = 0_i64
     @io_pending = false
   end
@@ -1057,12 +1078,49 @@ class IyiUnit
   @waiting : Atomic(UInt64)
   property deferred_head : IyiFiber?
   property deferred_tail : IyiFiber?
+  # The partition record its fibers allocate in (heap22), 0 for the shared
+  # heap: a pool unit's own under `-Dheap_partitions` unless it is made
+  # pinned, and 0 again once it is pinned or dead.
+  property heap : UInt64
+  # Its live fibers, linked when they join the registry and unlinked when
+  # they leave it (`IyiScheduler.register`), under the runtime lock: what a
+  # collection of the unit's partition alone scans for stacks.
+  property fibers : IyiFiber?
+  # A `Unit`'s unit: the address of the handle's value slot, which its
+  # partition's local collection roots, and while the handle lives the
+  # partition outlives the unit's fibers (heap22, std/unit). 0 otherwise.
+  property value_slot : UInt64
 
-  def initialize
+  # *pinned*: the unit allocates in the shared heap for its whole life
+  # (a crossing the compiler could not prove, heap22's `pinned:`).
+  def initialize(pinned : Bool = false)
     @active = Atomic(UInt64).new(0_u64)
     @waiting = Atomic(UInt64).new(0_u64)
     @deferred_head = nil
     @deferred_tail = nil
+    @heap = 0_u64
+    @fibers = nil
+    @value_slot = 0_u64
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      unless pinned
+        record = IyiHeap.partition_new
+        IyiHeap.write64(record + IyiHeap::REC_UNIT, self.object_id)
+        @heap = record
+      end
+    {% end %}
+  end
+
+  # Its live fibers, counted under the runtime lock.
+  def fiber_count : Int32
+    IyiRuntimeLock.lock
+    count = 0
+    fiber = @fibers
+    while fiber.is_a?(IyiFiber)
+      count = count + 1
+      fiber = fiber.next_in_unit
+    end
+    IyiRuntimeLock.unlock
+    count
   end
 
   # No worker's id: a state's object id is an address. A fiber preempted
@@ -1331,6 +1389,11 @@ class IyiSchedulerState
   # The unit this worker holds (`IyiUnit`), while it runs a fiber of it
   # and until it switches to a fiber of another or to none.
   property unit : IyiUnit?
+  # The partition record whose cache this thread has installed (heap22,
+  # `IyiHeap.install`), 0 for its own: what the switch compares a fiber's
+  # `alloc` with, so that a switch between two fibers of the shared heap
+  # writes nothing.
+  property alloc : UInt64
   # Rung by a worker with a fiber for another to run, and looking for it
   # (`IyiWorkers.wake_one`), under the scheduler's lock.
   property spinning : Bool
@@ -1391,6 +1454,19 @@ class IyiSchedulerState
   property watch_ticks : UInt64
   property looks : UInt64
 
+  {% if flag?(:wasm32) %}
+    # Wasm has one scheduler and no native IyiStat page.
+    @wasm_sleep_steps : UInt64 = 0_u64
+
+    def wasm_sleep_steps : UInt64
+      @wasm_sleep_steps
+    end
+
+    def count_wasm_sleep_step : Nil
+      @wasm_sleep_steps = @wasm_sleep_steps &+ 1_u64
+    end
+  {% end %}
+
   {% if flag?(:win32) %}
     # Windows' deadline: the timer this thread arms for the nearest
     # sleeper, which its poller waits on beside its doorbell and, when it
@@ -1429,6 +1505,7 @@ class IyiSchedulerState
     @watch_seen = 0_u64
     @watch_ticks = 0_u64
     @looks = 0_u64
+    @alloc = 0_u64
     @handoff_last = 0_u64
     @handoff_skip = 0_u64
     @handoff_backoff = 0_u64
@@ -1802,6 +1879,7 @@ class IyiScheduler
 
   @[ThreadLocal]
   @@state : IyiSchedulerState?
+  @[UnsafeReach("the runtime's list of scheduler states, linked and unlinked under IyiRuntimeLock; each state is born in the shared heap")]
   @@states_head : IyiSchedulerState?
 
   # Whether a second scheduler thread has ever been started (III.4.13):
@@ -1858,6 +1936,7 @@ class IyiScheduler
     IyiSchedLock.unlock
   end
 
+  @[UnsafeReach("set once by the main thread before any task starts, then only read")]
   @@main_state : IyiSchedulerState?
 
   # The main thread's state: this thread's while no other has started.
@@ -1946,6 +2025,15 @@ class IyiScheduler
     main
   end
 
+  # The running fiber, or nil on a thread that has never touched the
+  # scheduler - which has no fiber to switch, so whatever it allocates in
+  # is its thread's own cache.
+  def self.current? : IyiFiber?
+    state = @@state
+    return nil unless state.is_a?(IyiSchedulerState)
+    state.current
+  end
+
   # Every *live* fiber, intrusively linked, for the collector's root
   # walk (GC_DESIGN.md Stage 3). The queues cannot serve that walk: a
   # channel-parked fiber lives in the channel's own node list, which the
@@ -1957,8 +2045,11 @@ class IyiScheduler
   # collection walk every request the process ever served. A fiber
   # leaves when its stack does, which is one step with the back link.
   # Under the runtime lock, for the reason the states are.
+  @[UnsafeReach("the runtime's fiber registry, written under IyiRuntimeLock; every IyiFiber is born in the shared heap")]
   @@all_head : IyiFiber?
 
+  # A fiber of a unit joins the unit's list too, and its heap (heap22):
+  # its `alloc` is the unit's partition from here, for its whole life.
   def self.register(fiber : IyiFiber) : Nil
     IyiRuntimeLock.lock
     head = @@all_head
@@ -1966,10 +2057,22 @@ class IyiScheduler
     fiber.prev_fiber = nil
     head.prev_fiber = fiber if head.is_a?(IyiFiber)
     @@all_head = fiber
+    unit = fiber.unit
+    if unit.is_a?(IyiUnit)
+      first = unit.fibers
+      fiber.next_in_unit = first
+      fiber.prev_in_unit = nil
+      first.prev_in_unit = fiber if first.is_a?(IyiFiber)
+      unit.fibers = fiber
+      fiber.alloc = unit.heap
+    end
     IyiRuntimeLock.unlock
   end
 
   def self.unregister(fiber : IyiFiber) : Nil
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %} dead = 0_u64 {% end %}
+    # A test's switch holds a unit's last fiber here (`IyiHeap.hold_death`).
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %} IyiHeap.hold_death(fiber) if IyiStat.get(IyiHeap::STAT_TAKE_HOLD) == 1_u64 {% end %}
     IyiRuntimeLock.lock
     following = fiber.next_fiber
     previous = fiber.prev_fiber
@@ -1981,7 +2084,47 @@ class IyiScheduler
     following.prev_fiber = previous if following.is_a?(IyiFiber)
     fiber.next_fiber = nil
     fiber.prev_fiber = nil
+    unit = fiber.unit
+    if unit.is_a?(IyiUnit)
+      after = fiber.next_in_unit
+      before = fiber.prev_in_unit
+      first = unit.fibers
+      if before.is_a?(IyiFiber)
+        before.next_in_unit = after
+      elsif first.is_a?(IyiFiber) && first.object_id == fiber.object_id
+        unit.fibers = after
+      end
+      after.prev_in_unit = before if after.is_a?(IyiFiber)
+      fiber.next_in_unit = nil
+      fiber.prev_in_unit = nil
+      # Off the list the fiber is no root of its unit's (R(u)), but the
+      # shared fiber outlives it through its task's handle: its group and
+      # its block's context may be the unit's own, which the next local
+      # sweep or the unit's death frees, so the dead fiber stops naming
+      # them and the global mark never follows it into a freed run
+      # (heap22). Nothing reads a reaped fiber's group or proc: the
+      # trampoline reads the proc once, and a panic only the running
+      # fiber's.
+      {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        fiber.group = nil
+        fiber.proc = nil
+      {% end %}
+      # The unit's death (heap22 S1, design section 4.4): its last fiber
+      # gone and no `Unit`'s handle holding it, nothing will allocate in
+      # its partition again. Taken off the unit under the lock and freed
+      # after, or left to a takeover holding it (`IyiHeap.taken_release`).
+      {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        if !unit.fibers.is_a?(IyiFiber) && unit.heap != 0_u64 && unit.value_slot == 0_u64 && IyiHeap.read64(unit.heap + IyiHeap::REC_STATE) & IyiHeap::REC_BUSY == 0_u64
+          dead = unit.heap
+          unit.heap = 0_u64
+          IyiHeap.write64(dead + IyiHeap::REC_UNIT, 0_u64)
+        end
+      {% end %}
+    end
     IyiRuntimeLock.unlock
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiHeap.unit_died(dead) if dead != 0_u64
+    {% end %}
   end
 
   # A stack for a new fiber out of this thread's pool (0 when it is
@@ -2041,6 +2184,24 @@ class IyiScheduler
     @@all_head
   end
 
+  # Whether the registry holds *fiber*: it is the head or has a fiber
+  # before it. Asked under the lock, because both words are other threads'
+  # to rewrite as they link and unlink their own fibers. Read without it,
+  # the head before a neighbour's unregister made this fiber the head and
+  # the back link after that unregister cleared it, the answer was no for
+  # a fiber the registry held, and `retire_thread` left the main fiber on
+  # the list, naming a stack that was gone: on an M2 Pro, waves of 16
+  # threads ending together left one in 59 of 8,000 waves (0.21.0), and
+  # `thread_exercise` named it in 1 of 24 runs. Only the asking thread
+  # links or unlinks the fiber it asks about, so the answer holds after.
+  def self.registered?(fiber : IyiFiber) : Bool
+    IyiRuntimeLock.lock
+    head = @@all_head
+    held = fiber.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == fiber.object_id)
+    IyiRuntimeLock.unlock
+    held
+  end
+
   # A thread's last act with the scheduler: its main fiber leaves the
   # registry, because its stack is about to. A spawned fiber leaves when
   # it is reaped; the main fiber was made by the first `current` on the
@@ -2053,7 +2214,8 @@ class IyiScheduler
   # collector, which no handler of ours claims, and the process died of
   # it with nothing printed (`thread_exercise`, once in sixty runs there).
   # Only a fiber the registry holds is unlinked - `unregister` of one it
-  # does not would rewrite the head.
+  # does not would rewrite the head - and whether it does is asked under
+  # the lock (`registered?`).
   #
   # And what the scheduler made for the thread goes with it: the poller,
   # Windows' deadline timer, the stacks in the pool, and the state on the
@@ -2067,9 +2229,7 @@ class IyiScheduler
     return if state.is_a?(Nil)
     main = state.current
     if main.is_a?(IyiFiber)
-      head = @@all_head
-      linked = main.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == main.object_id)
-      unregister(main) if linked
+      unregister(main) if registered?(main)
     end
     reap_dying
     # Off the roots' list first, under the scheduler's lock as well as the
@@ -2240,6 +2400,7 @@ class IyiScheduler
   # any other - a `homebound` one included - into the thread's own list.
   # A fiber this thread woke out of its sleep heap or io list leaves them
   # here, so it is no longer listed on this thread (`IyiFiber#unlist`).
+  @[Unsafe(call: "the fiber is the runtime's, registered with its unit, and runnable on this thread")]
   def self.enqueue(fiber : IyiFiber) : Nil
     fiber.state = IyiFiberState::Runnable
     fiber.next_run = nil
@@ -2294,6 +2455,12 @@ class IyiScheduler
     end
     me = state
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      # A simulated parallel task's unit runs on the simulation's thread
+      # alone (heap22, chaos.iyi `IyiGroup#chaos_task`): woken onto its home
+      # only, as a fiber of no unit is.
+      {% if flag?(:iyi_chaos) %}
+        fiber.homebound = true if IyiChaos.kept?(fiber)
+      {% end %}
       if fiber.unit.is_a?(IyiUnit) && !fiber.homebound
         if me.worker
           enqueue(fiber)
@@ -2694,6 +2861,17 @@ class IyiScheduler
   def self.reschedule : Nil
     raise "a fiber parked holding the scheduler's lock" if IyiSchedLock.held_here?
     st = state
+    # A partitioned fiber's park is its partition's quiet point (heap22
+    # S1, design section 4.1, trigger 2): collected here, the token still
+    # held, when half its budget is owed.
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiHeap.at_park(st.alloc) if st.alloc != 0_u64
+    {% end %}
+    # The scheduler allocates in the shared heap (heap22): what a park
+    # makes for itself is the runtime's, whichever unit parked.
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      install_alloc(st, 0_u64) if st.alloc != 0_u64
+    {% end %}
     parks = st.parks &+ 1_u64
     st.parks = parks
     poll_now(st) if parks % POLL_EVERY == 0_u64
@@ -2728,6 +2906,11 @@ class IyiScheduler
         switch_to(fiber)
         return
       end
+      # Nothing to run here: a thread held to link itself late may now
+      # (`IYI_CHAOS_LATE_THREADS`).
+      {% if flag?(:iyi_chaos) %}
+        IyiChaos.at_idle
+      {% end %}
       {% if flag?(:wasm32) %}
         wait_for_events(true)
       {% else %}
@@ -2862,6 +3045,26 @@ class IyiScheduler
     end
   end
 
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    # Partition *record*'s cache installed on thread *st*, 0 for the
+    # thread's own (heap22, `IyiHeap.install`), and noted on the state, so
+    # the next switch knows what is in place.
+    def self.install_alloc(st : IyiSchedulerState, record : UInt64) : Nil
+      st.alloc = record
+      # Wasm has one heap and no partition cache to install.
+      {% unless flag?(:wasm32) %}
+        IyiHeap.install(record)
+      {% end %}
+    end
+
+    # The running *fiber*'s `alloc` in place, after a bracket changed it
+    # (`IyiHeap.within`, `IyiHeap.shared`).
+    def self.reinstall(fiber : IyiFiber) : Nil
+      st = state
+      install_alloc(st, fiber.alloc) if fiber.alloc != st.alloc
+    end
+  {% end %}
+
   # The expired sleepers and, when its time has come, the poller's news,
   # without waiting; nothing at all when nobody waits on either. On
   # Windows the port is the process's, so a fiber waiting on any thread
@@ -2890,6 +3093,7 @@ class IyiScheduler
   # switches too, and naming `prepare_stack` in the switch put the stack
   # mapping's `mprotect` into every such program, one more name on
   # darwin's floor for a stack it never makes.
+  @[UnsafeReach("set once, at startup, by the platform's stack setup, then only read")]
   @@stack_maker : Proc(IyiFiber, Nil)?
 
   def self.make_stacks_with(&maker : IyiFiber -> Nil) : Nil
@@ -2942,6 +3146,9 @@ class IyiScheduler
     st = state
     previous = current
     if fiber.sp_slot.address == previous.sp_slot.address
+      {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        install_alloc(st, fiber.alloc) if fiber.alloc != st.alloc
+      {% end %}
       fiber.state = IyiFiberState::Running
       return
     end
@@ -2964,6 +3171,12 @@ class IyiScheduler
         raised = Pointer(Atomic(UInt64)).new(st.preempt_word)
         raised.value.set(0_u64) if raised.value.get != 0_u64
       end
+    {% end %}
+    # The fiber's partition installed as the last step before the switch
+    # into it (heap22): a load and a compare, and nothing written, while
+    # both fibers allocate in the shared heap.
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      install_alloc(st, fiber.alloc) if fiber.alloc != st.alloc
     {% end %}
     {% if flag?(:wasm32) %}
       previous.check_stack
@@ -3165,9 +3378,9 @@ class IyiScheduler
     # close is not one this file can see.
     PORT_JOINED = 1_u64
     @@port_records : UInt64 = 0_u64
+
     # Calls to join a handle, in all: what `bench/socket_exercise.iyi` reads
     # to know a wait on a socket std made makes none.
-    @@port_joins : UInt64 = 0_u64
 
     def self.join_port(handle : Void*) : Nil
       word = port_word(handle, false)
@@ -3179,7 +3392,7 @@ class IyiScheduler
     # the port: without it, 50 reads that answered at once left 50
     # completions that woke the next read.
     def self.join_handle(handle : Void*) : Bool
-      Pointer(Atomic(UInt64)).new(pointerof(@@port_joins).address).value.add(1_u64)
+      IyiStat.add(IyiStat::PORT_JOINS, 1_u64)
       return false if LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32).address == 0_u64
       LibC.SetFileCompletionNotificationModes(handle, 1_u8)
       true
@@ -3211,7 +3424,7 @@ class IyiScheduler
     end
 
     def self.port_joins : UInt64
-      Pointer(Atomic(UInt64)).new(pointerof(@@port_joins).address).value.get
+      IyiStat.atomic(IyiStat::PORT_JOINS).value.get
     end
 
     # A park for standard input's reader thread: off the io list, which is
@@ -3582,7 +3795,9 @@ class IyiScheduler
     slots = st.io_slots
     size = slots.is_a?(Array(IyiFiber?)) ? slots.size : 0
     return if size >= need
-    grown = Array(IyiFiber?).new(need > size * 2 ? need : size * 2, nil)
+    # In the shared heap: the waiting fiber may be a pool unit's, and only
+    # the scheduler state holds the array (heap22).
+    grown = IyiCross.shared { Array(IyiFiber?).new(need > size * 2 ? need : size * 2, nil) }
     lists_lock(st)
     if slots.is_a?(Array(IyiFiber?))
       index = 0
@@ -3845,8 +4060,11 @@ class IyiScheduler
   # mutexes on two cores contended for it whenever either parked.
   LOT        = 64
   LOT_STRIDE =  8
+  @[UnsafeReach("the parking lot, made once by the first park on the program's one thread or before a second thread starts, then written only under its bucket locks; waiters are born in the shared heap")]
   @@lot_heads : Array(IyiWaiter?)?
+  @[UnsafeReach("the parking lot, made once by the first park on the program's one thread or before a second thread starts, then written only under its bucket locks; waiters are born in the shared heap")]
   @@lot_tails : Array(IyiWaiter?)?
+  @[UnsafeReach("the parking lot's bucket locks, made once with the lot, then only read and swapped atomically")]
   @@lot_locks : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
 
   def self.park_on(word : Pointer(Atomic(UInt64)), seen : UInt64, cancellable : Bool = true) : Nil | Cancelled
@@ -3868,7 +4086,9 @@ class IyiScheduler
     if waiter.is_a?(IyiWaiter) && !waiter.linked
       waiter.renew(nonce, word.address)
     else
-      waiter = IyiWaiter.new(fiber, nonce, word.address)
+      # The shared heap's, as park_receive_node's: the fiber (shared) keeps
+      # it as its spare past the unit's death (heap22).
+      waiter = IyiCross.shared { IyiWaiter.new(fiber, nonce, word.address) }
       fiber.spare_waiter = waiter
     end
     waiter.linked = true
@@ -3942,15 +4162,19 @@ class IyiScheduler
   # second thread starts (`expect_thread`): never by two threads at once.
   private def self.make_lot : Nil
     return if @@lot_heads.is_a?(Array(IyiWaiter?))
-    locks = Pointer(UInt64).malloc((LOT * LOT_STRIDE).to_u64)
-    index = 0
-    while index < LOT * LOT_STRIDE
-      locks[index] = 0_u64
-      index = index + 1
+    # Made by the first park, which may be a pool unit's: in the shared
+    # heap, since only class variables hold it (heap22).
+    IyiCross.shared do
+      locks = Pointer(UInt64).malloc((LOT * LOT_STRIDE).to_u64)
+      index = 0
+      while index < LOT * LOT_STRIDE
+        locks[index] = 0_u64
+        index = index + 1
+      end
+      @@lot_locks = locks
+      @@lot_tails = Array(IyiWaiter?).new(LOT, nil)
+      @@lot_heads = Array(IyiWaiter?).new(LOT, nil)
     end
-    @@lot_locks = locks
-    @@lot_tails = Array(IyiWaiter?).new(LOT, nil)
-    @@lot_heads = Array(IyiWaiter?).new(LOT, nil)
   end
 
   private def self.lot_lock(bucket : Int32) : Pointer(Atomic(UInt64))
@@ -4204,6 +4428,15 @@ class IyiScheduler
         gap_ns = gap
       {% end %}
     end
+    # A pool worker with nothing to run wakes at the idle clock's tick
+    # while a parked unit's partition may be waiting for it, and at the
+    # pool's turn while pooled runs still hold their pages (heap22 S6,
+    # `IyiHeap.take_over_quiet`, `IyiHeap.turn_pools`): the wake finds no
+    # news, and the worker's `take_over_idle` gives the pages back and
+    # looks for a partition to collect before it waits again.
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      timeout = IyiHeap.idle_wait_ms(timeout) if blocking && st.worker
+    {% end %}
 
     count = 0_i64
     {% if flag?(:win32) %}
@@ -4784,12 +5017,18 @@ class IyiScheduler
       while other.is_a?(IyiSchedulerState)
         id = other.object_id
         if id != me && (id == reader || id == writer)
-          closed = other.closed_fds
-          unless closed.is_a?(Array(Int32))
-            closed = [] of Int32
-            other.closed_fds = closed
+          # The list is the other thread's, read there when it takes its
+          # mail, so it and its growth are the shared heap's (heap22): made
+          # in the closer's partition, the closer's next local collection
+          # freed it while it waited in the other thread's state.
+          IyiCross.shared do
+            closed = other.closed_fds
+            unless closed.is_a?(Array(Int32))
+              closed = [] of Int32
+              other.closed_fds = closed
+            end
+            closed << fd
           end
-          closed << fd
           other.post_mail
           ring(other)
         end
@@ -4940,17 +5179,23 @@ class IyiScheduler
     a.deadline < b.deadline || (a.deadline == b.deadline && a.sleep_seq < b.sleep_seq)
   end
 
-  @@sleep_steps : UInt64 = 0_u64
-
   # Melds the sleep heap has made, in all: what an insertion and a removal
   # cost, counted, which the exercises read rather than a clock.
   def self.sleep_steps : UInt64
-    @@sleep_steps
+    {% if flag?(:wasm32) %}
+      state.wasm_sleep_steps
+    {% else %}
+      IyiStat.get(IyiStat::SLEEP_STEPS)
+    {% end %}
   end
 
   # Two roots into one: the later becomes the earlier's first child.
   private def self.sleep_meld(a : IyiFiber, b : IyiFiber) : IyiFiber
-    @@sleep_steps = @@sleep_steps &+ 1_u64
+    {% if flag?(:wasm32) %}
+      state.count_wasm_sleep_step
+    {% else %}
+      IyiStat.bump(IyiStat::SLEEP_STEPS, 1_u64)
+    {% end %}
     first = sleep_before?(b, a) ? b : a
     second = first.object_id == a.object_id ? b : a
     older = first.sleep_child
@@ -5137,7 +5382,8 @@ class IyiScheduler
     st = state
     buffer = st.events
     return buffer.address if buffer.address != 0_u64
-    buffer = Pointer(UInt8).malloc((EVENTS * IYI_POLL_EVENT_BYTES).to_u64)
+    # In the shared heap: only the scheduler state holds it (heap22).
+    buffer = IyiCross.shared { Pointer(UInt8).malloc((EVENTS * IYI_POLL_EVENT_BYTES).to_u64) }
     st.events = buffer
     buffer.address
   end
@@ -5209,6 +5455,8 @@ class IyiScheduler
     # deferred `g.join`, above all — must see that its owner is already
     # dying and keep quiet rather than re-raise into the unwind.
     fiber.panicked = true
+    # Read by whoever joins the task, from any unit (heap22 row 7).
+    IyiCross.publish(message)
     fiber.panic_message = message
     # A deadlock found while this fiber waited in a group's join: that join
     # is a cleanup already off the list, and it is finished here as a
@@ -5217,12 +5465,7 @@ class IyiScheduler
     fiber.joining = nil
     group.join(true) if group.is_a?(IyiGroup) && !again
 
-    while true
-      node = fiber.defers
-      break unless node.is_a?(IyiDeferNode)
-      fiber.defers = node.next_node
-      node.run
-    end
+    drain_defers(fiber)
 
     body = fiber.proc
     if body.is_a?(Nil)
@@ -5246,6 +5489,27 @@ class IyiScheduler
     __iyi_exit(1)
   end
 
+  # The fiber's cleanups run innermost first, each taken off the list
+  # before it runs: a panic's path, a cancelled task's stop, `exit`. Under
+  # `-Dheap_partitions` each node's link is taken down as it leaves, as
+  # `__iyi_defer_pop_run` does: a node may be the shared heap's - a
+  # `Mutex`'s release node, one a lock block's `defer` made - over a
+  # cleanup made in the unit's partition, and its link named that cleanup
+  # after the drain had made it garbage and the unit's collection or death
+  # freed it, with the Mutex still live (bench/heap_crossings `defer_drain`,
+  # `defer_stop`: `-Dheap_verify`'s death check, exit 86).
+  def self.drain_defers(fiber : IyiFiber) : Nil
+    while true
+      node = fiber.defers
+      break unless node.is_a?(IyiDeferNode)
+      fiber.defers = node.next_node
+      {% if flag?(:heap_partitions) %}
+        node.next_node = nil
+      {% end %}
+      node.run
+    end
+  end
+
   # III.4.2's other ending: a cancelled task stopped where no answer can
   # carry its `Cancelled`, `Channel.select` with no bound arm for one. Its
   # pending defers run innermost first, as a panic's do, and its group
@@ -5257,12 +5521,7 @@ class IyiScheduler
   # group's join waited forever.
   def self.stop_current : NoReturn
     fiber = current
-    while true
-      node = fiber.defers
-      break unless node.is_a?(IyiDeferNode)
-      fiber.defers = node.next_node
-      node.run
-    end
+    drain_defers(fiber)
     g = fiber.group
     IyiSchedLock.lock
     if g.is_a?(IyiGroup)
@@ -5318,24 +5577,29 @@ class IyiWorkers
   # Worker threads started so far, at most `@@started` (`grow`); 1 when
   # one was wanted where none could be started, on a thread holding a
   # lock `IyiThread.start` takes or on the monitor's (`pay`); and how many
-  # times that happened.
+  # times that happened (`IyiStat::OWES`).
   @@launched : Int64 = 0_i64
   @@owed : Int64 = 0_i64
-  @@owes : UInt64 = 0_u64
+  @[UnsafeReach("the pool's inject queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@inject_head : IyiFiber?
+  @[UnsafeReach("the pool's inject queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@inject_tail : IyiFiber?
   # Started fibers that may move, runnable and in no worker's ring: woken
   # by a thread outside the pool, or pushed out of a full ring. Under the
   # lock.
+  @[UnsafeReach("the pool's shared run queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@shared_head : IyiFiber?
+  @[UnsafeReach("the pool's shared run queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@shared_tail : IyiFiber?
   # Every worker's state, as each comes up; and where the next steal or
   # ring starts looking, so no worker is always asked first.
+  @[UnsafeReach("made once by `IyiWorkers.start` under IyiSchedLock, on a thread outside every pool unit, then grown only under the lock; states are born in the shared heap")]
   @@workers : Array(IyiSchedulerState)?
   @@turn : Int32 = 0
   # The same states by address, for a steal from a ring, which takes no
   # lock: written before the count that makes them visible, and never
   # moved, as an array's buffer may be when it grows.
+  @[UnsafeReach("made once by `IyiWorkers.start` under IyiSchedLock, then written slot by slot by the worker that owns the slot")]
   @@listed : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
   @@listed_count : Int64 = 0_i64
   # Fibers in the queues behind the lock - the shared queue, the
@@ -5346,10 +5610,9 @@ class IyiWorkers
   @@idle : Int64 = 0_i64
   @@spinning : Int64 = 0_i64
   # Unstarted tasks taken from another worker's queue, and started fibers
-  # taken from another worker's ring, in all: what the exercise reads to
-  # know each steal ran.
-  @@steals : UInt64 = 0_u64
-  @@grabs : UInt64 = 0_u64
+  # taken from another worker's ring, in all (`IyiStat::STEALS`,
+  # `GRABS`): what the exercise reads to know each steal ran.
+  #
   # Preemption at loop back-edges (SPEC.md III.4.13, part 9). `@@preempt`
   # is each worker's own word, which the code the compiler emits at every
   # loop's back-edge in a program with a pool loads through the thread
@@ -5361,8 +5624,9 @@ class IyiWorkers
   # idle; its page holds the tick's timespec on Linux and darwin, on
   # darwin the kevent its kqueue answers into, and on Windows the tick as
   # a relative due time for its waitable timer (`monitor_wait`), whose
-  # handle `@@monitor_timer` is. `@@looks` counts the monitor's looks, which
-  # is what the exercise reads its period from.
+  # handle `@@monitor_timer` is. `IyiStat::LOOKS` counts the monitor's
+  # looks, which is what the exercise reads its period from, and
+  # `PREEMPTS` the tasks it preempted.
   #
   # On x86-64 Windows the word is not `@@preempt` but a slot of the TEB's
   # own: `@@preempt_slot` is its offset from `%gs`, which the compiler's
@@ -5382,15 +5646,15 @@ class IyiWorkers
   @[ThreadLocal]
   @@preempt : UInt64 = 0_u64
   @@preempt_slot : UInt64 = 0x28_u64
+  @[UnsafeReach("the preempted queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@preempted_head : IyiFiber?
+  @[UnsafeReach("the preempted queue, written under IyiSchedLock; every IyiFiber is born in the shared heap")]
   @@preempted_tail : IyiFiber?
   @@preempted : Int64 = 0_i64
-  @@preempts : UInt64 = 0_u64
   @@monitor_parked : UInt64 = 0_u64
   @@monitor_page : UInt64 = 0_u64
   @@monitor_handle : UInt64 = 0_u64
   @@monitor_timer : UInt64 = 0_u64
-  @@looks : UInt64 = 0_u64
   # Workers marked with news in their pollers (`held_io?`), not yet taken.
   @@held_io : Int64 = 0_i64
 
@@ -5420,11 +5684,11 @@ class IyiWorkers
   end
 
   def self.steals : UInt64
-    @@steals
+    IyiStat.get(IyiStat::STEALS)
   end
 
   def self.grabs : UInt64
-    Pointer(Atomic(UInt64)).new(pointerof(@@grabs).address).value.get
+    IyiStat.atomic(IyiStat::GRABS).value.get
   end
 
   # Whether the pool has started (`start`).
@@ -5502,8 +5766,12 @@ class IyiWorkers
         return
       end
       @@started = workers
-      @@workers = Array(IyiSchedulerState).new(workers)
-      @@listed = Pointer(UInt64).malloc(workers.to_u64)
+      # In the shared heap whoever starts the pool: only class variables
+      # hold these (heap22).
+      IyiCross.shared do
+        @@workers = Array(IyiSchedulerState).new(workers)
+        @@listed = Pointer(UInt64).malloc(workers.to_u64)
+      end
       # The first worker comes up looking, as every worker `grow` starts
       # does: the pushes behind the first start no other until it finds
       # a task and calls for the next (`stop_spinning`), or has counted
@@ -5580,6 +5848,12 @@ class IyiWorkers
           IyiScheduler.switch_to(fiber)
         else
           IyiScheduler.release_unit(st)
+          # An idle worker collects a parked unit's partition that owes a
+          # quarter of its budget, after a global collection (heap22 S1,
+          # design section 4.1, trigger 3), and looks for work again.
+          {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+            next if IyiHeap.take_over_idle(st)
+          {% end %}
           IyiScheduler.idle_worker(st)
         end
       end
@@ -5592,6 +5866,7 @@ class IyiWorkers
   # or, from a thread outside the pool, the injection queue; and one idle
   # worker rung to come and take it, or with none to ring, one more
   # started (`grow`). Lock held.
+  @[Unsafe(call: "the fiber is the runtime's, its body's captures are Share and published, and the scheduler's lock is held")]
   def self.push(fiber : IyiFiber) : Nil
     fiber.state = IyiFiberState::Runnable
     fiber.next_run = nil
@@ -5695,7 +5970,7 @@ class IyiWorkers
           victim.pool_head = fiber.next_run
           victim.pool_tail = nil if victim.pool_head.is_a?(Nil)
           fiber.next_run = nil
-          @@steals = @@steals &+ 1_u64
+          IyiStat.bump(IyiStat::STEALS, 1_u64)
           return fiber
         end
       end
@@ -5890,7 +6165,7 @@ class IyiWorkers
         end
         fiber = grab(victim, st)
         if fiber.is_a?(IyiFiber)
-          Pointer(Atomic(UInt64)).new(pointerof(@@grabs).address).value.add(1_u64)
+          IyiStat.add(IyiStat::GRABS, 1_u64)
           # More than this worker can run next came with it.
           wake_one if st.ring_size > 0_u64
           return fiber
@@ -6011,7 +6286,7 @@ class IyiWorkers
     if IyiSchedLock.held_here? || IyiScheduler.state_id == 0_u64 || !runtime_lock_free?
       word(pointerof(@@spinning)).value.sub(1_i64)
       word(pointerof(@@owed)).value.set(1_i64)
-      Pointer(Atomic(UInt64)).new(pointerof(@@owes).address).value.add(1_u64)
+      IyiStat.add(IyiStat::OWES, 1_u64)
       return
     end
     word(pointerof(@@launched)).value.add(1_i64)
@@ -6034,7 +6309,7 @@ class IyiWorkers
   # Starts `grow` owed rather than made, in all: what the exercise names
   # when the pool did not grow.
   def self.owes : UInt64
-    Pointer(Atomic(UInt64)).new(pointerof(@@owes).address).value.get
+    IyiStat.atomic(IyiStat::OWES).value.get
   end
 
   # A start `grow` owed, called for again: an idle worker rung if one has
@@ -6096,13 +6371,13 @@ class IyiWorkers
   # Tasks that gave their worker up at a back-edge, in all: what the
   # exercise reads to know a preemption ran.
   def self.preempts : UInt64
-    Pointer(Atomic(UInt64)).new(pointerof(@@preempts).address).value.get
+    IyiStat.atomic(IyiStat::PREEMPTS).value.get
   end
 
   # The monitor's looks, in all: what the exercise divides a busy
   # stretch by to know the monitor's period.
   def self.looks : UInt64
-    Pointer(Atomic(UInt64)).new(pointerof(@@looks).address).value.get
+    IyiStat.atomic(IyiStat::LOOKS).value.get
   end
 
   # x86-64 Windows: a `TlsAlloc` slot for the preemption word, as its
@@ -6228,7 +6503,7 @@ class IyiWorkers
       @@preempted_tail = fiber
       word(pointerof(@@preempted)).value.add(1_i64)
       IyiSchedLock.unlock
-      Pointer(Atomic(UInt64)).new(pointerof(@@preempts).address).value.add(1_u64)
+      IyiStat.add(IyiStat::PREEMPTS, 1_u64)
       IyiScheduler.switch_to(following)
     {% end %}
   end
@@ -6261,9 +6536,12 @@ class IyiWorkers
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
       page = __iyi_mmap(4096_u64).address
       {% if flag?(:linux) || flag?(:darwin) %}
-        # The tick, as a timespec: no seconds, PREEMPT_TICK_NS.
+        # The tick, as a timespec: no seconds, PREEMPT_TICK_NS. And at
+        # +16 the parked monitor's first wait (`monitor_wait_idle`).
         Pointer(UInt64).new(page).value = 0_u64
         Pointer(UInt64).new(page &+ 8_u64).value = PREEMPT_TICK_NS
+        Pointer(UInt64).new(page &+ 16_u64).value = IDLE_WAIT_NS // 1000000000_u64
+        Pointer(UInt64).new(page &+ 24_u64).value = IDLE_WAIT_NS % 1000000000_u64
       {% end %}
       {% if flag?(:darwin) %}
         kq = LibC.kqueue
@@ -6305,7 +6583,7 @@ class IyiWorkers
   # The monitor's whole life.
   def self.monitor(page : UInt64) : Nil
     while true
-      Pointer(Atomic(UInt64)).new(pointerof(@@looks).address).value.add(1_u64)
+      IyiStat.add(IyiStat::LOOKS, 1_u64)
       if look
         monitor_wait(false)
       else
@@ -6445,6 +6723,12 @@ class IyiWorkers
   # worker started has come up: one that finds a task the moment it
   # starts never waits, so never leaves a wait to wake the monitor - the
   # unit step's task was never preempted that way, on a pool of one.
+  #
+  # The first waits are timed: a pool that stays idle for IDLE_WAIT_NS,
+  # with no collection in it, has the heap's warm pages handed back
+  # (`IyiMark.trim_idle` says why), once, and the monitor parks for good
+  # after it. A collection meanwhile - a thread outside the pool
+  # allocating - starts the wait again.
   private def self.park_monitor : Nil
     IyiSchedLock.lock
     count = word(pointerof(@@listed_count)).value.get
@@ -6457,6 +6741,21 @@ class IyiWorkers
     monitor_word.value.set(1_u64) if quiet
     IyiSchedLock.unlock
     return unless quiet
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32)) %}
+      epoch = IyiMark.epoch
+      since = __iyi_monotonic_ns
+      trimmed = false
+      while !trimmed && monitor_word.value.get != 0_u64
+        monitor_wait_idle
+        now = __iyi_monotonic_ns
+        if IyiMark.epoch != epoch
+          epoch = IyiMark.epoch
+          since = now
+        elsif monitor_word.value.get != 0_u64 && now - since >= IDLE_WAIT_NS.to_i64
+          trimmed = IyiMark.trim_idle
+        end
+      end
+    {% end %}
     while monitor_word.value.get != 0_u64
       monitor_wait(true)
     end
@@ -6515,6 +6814,21 @@ class IyiWorkers
         end
       end
       LibC.WaitForSingleObject(Pointer(Void).new(@@monitor_handle), parked ? -1_i32 : PREEMPT_TICK_MS)
+    {% end %}
+  end
+
+  # The parked monitor's first waits (`park_monitor`): as `monitor_wait`
+  # parked, but for IDLE_WAIT_NS at most.
+  IDLE_WAIT_NS = 1000000000_u64
+
+  private def self.monitor_wait_idle : Nil
+    {% if flag?(:linux) %}
+      __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@@monitor_parked).address.to_i64, IYI_FUTEX_WAIT, 1_i64, (@@monitor_page &+ 16_u64).to_i64, 0_i64, 0_i64)
+    {% elsif flag?(:darwin) %}
+      page = @@monitor_page
+      LibC.kevent(@@monitor_handle.to_i32, Pointer(Void).new(0_u64), 0, Pointer(Void).new(page &+ 64_u64), 1, Pointer(Void).new(page &+ 16_u64))
+    {% elsif flag?(:win32) %}
+      LibC.WaitForSingleObject(Pointer(Void).new(@@monitor_handle), (IDLE_WAIT_NS // 1000000_u64).to_i32)
     {% end %}
   end
 end
@@ -6797,7 +7111,9 @@ end
 # at a lock, with nothing registered below it, read the node and never
 # write it: written each time, it was one more line passed between their
 # cores with the lock's own. A panic's drain leaves the link, which the
-# next push puts right.
+# next push puts right - without `-Dheap_partitions`: with them the drain
+# takes it down (`IyiScheduler.drain_defers`), since the node may be the
+# shared heap's and the one below it the unit's.
 def __iyi_defer_push_node(node : IyiDeferNode) : Nil
   fiber = IyiScheduler.current
   below = fiber.defers
@@ -6845,12 +7161,7 @@ end
 def exit(status : Int32 = 0) : NoReturn
   fiber = IyiScheduler.current
   IyiScheduler.exiting = true
-  while true
-    node = fiber.defers
-    break unless node.is_a?(IyiDeferNode)
-    fiber.defers = node.next_node
-    node.run
-  end
+  IyiScheduler.drain_defers(fiber)
   __iyi_flush_std
   __iyi_exit(status)
 end
@@ -6918,6 +7229,118 @@ def iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64 | Cancelled
   {% end %}
 end
 
+# ── heap22: the partition API the trusted modules call ─────────────────
+#
+# One heap per pool unit is a prototype (branch h22/heap-partition): a
+# unit allocates in a partition of its own and an object becomes shared
+# only at a crossing the compiler names. This is the API that crossing
+# code calls. In this tree every unit allocates in the shared heap, so a
+# bracket around the shared heap is already in place, and nothing is ever
+# local to a partition to publish, lend or merge.
+#
+# The brackets restore what they saved when the block returns. A block
+# that leaves them another way - a `return`, `break` or `next` out of it,
+# or a panic, which ends the fiber - leaves the fiber's `alloc` as the
+# bracket set it: callers are the trusted modules, which do not.
+class IyiHeap
+  # The block, run with this fiber allocating in the shared heap; a park
+  # inside is safe, since the switch back installs the fiber's `alloc`.
+  def self.shared(&)
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      fiber = IyiScheduler.current?
+      return yield unless fiber.is_a?(IyiFiber)
+      saved = fiber.alloc
+      return yield if saved == 0_u64
+      fiber.alloc = 0_u64
+      IyiScheduler.reinstall(fiber)
+      answer = yield
+      fiber.alloc = saved
+      IyiScheduler.reinstall(fiber)
+      answer
+    {% else %}
+      yield
+    {% end %}
+  end
+
+  # The block, run with this fiber allocating in partition *record*
+  # (`IyiHeap.partition_new`), 0 meaning the shared heap.
+  def self.within(record : UInt64, &)
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      fiber = IyiScheduler.current
+      saved = fiber.alloc
+      fiber.alloc = record
+      IyiScheduler.reinstall(fiber)
+      answer = yield
+      fiber.alloc = saved
+      IyiScheduler.reinstall(fiber)
+      answer
+    {% else %}
+      yield
+    {% end %}
+  end
+
+  # A task's answer into the slot its spawner reads (`IyiTask#finish`),
+  # on the task's own stack: where a partitioned build merges or frees the
+  # dying unit's partition. Without partitions, the store. With them
+  # (S1), the store, and a look at the stored words: one that names a
+  # chunk of the dying fiber's own partition detaches it, and the shared
+  # heap adopts it at the unit's death instead of its runs going back
+  # whole (`IyiHeap.answered`; contract section 4, amendment 4).
+  def self.answer(box : Array(T), value : T) : Nil forall T
+    box << value
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      answered(box.object_id, box.to_unsafe.address + (box.size - 1).to_u64 * sizeof(T).to_u64, sizeof(T).to_u64)
+    {% end %}
+  end
+
+  # The lend protocol of an owning type (`lends: true`): *graph* taken by
+  # the running unit (once, however often lent), and handed back - walked
+  # and published if lent, nothing to do if not (checked: -Dheap_verify).
+  def self.lend_in(graph) : Nil
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      lend_in_address(graph.object_id)
+    {% end %}
+  end
+
+  def self.lend_out(graph) : Nil
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      lend_out_address(graph.object_id)
+    {% end %}
+  end
+
+  # The running unit made to allocate in the shared heap for the rest of
+  # its life: a pointer handed where no collector looks (`Box`,
+  # `GC.malloc`, a C callback's context). Its partition becomes the
+  # shared heap's, every run at once.
+  def self.pin : Nil
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      pin_running
+    {% end %}
+  end
+
+  # Without partitions in the runtime, the rest of the API has nothing to
+  # do: nothing is local to a partition, published, merged or collected
+  # apart (heap_partition.iyi has the bodies).
+  {% unless flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+    def self.publish(address : UInt64) : Nil
+    end
+
+    def self.owner_of(address : UInt64) : UInt64
+      0_u64
+    end
+
+    def self.local?(address : UInt64) : Bool
+      false
+    end
+
+    def self.collect_local(record : UInt64) : Nil
+    end
+
+    def self.merge(from : UInt64, into : UInt64) : Nil
+    end
+  {% end %}
+end
+
 # ── Tasks and groups — III.4.1 ─────────────────────────────────────────
 
 # What `g.spawn` answers. `value` joins, then repeats what the task's
@@ -6938,7 +7361,7 @@ class IyiTask(T)
   end
 
   def finish(value : T) : Nil
-    @box << value
+    IyiHeap.answer(@box, value)
   end
 
   def done? : Bool
@@ -6959,6 +7382,11 @@ class IyiTask(T)
       return Panicked.new(@fiber.panic_message)
     end
     return Panicked.new("a task stopped by its cancellation has no value") if @box.empty?
+    # A reader in a partitioned unit that takes a graph not its own is
+    # pinned first (heap22, `IyiHeap.adopt_answer`).
+    {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+      IyiHeap.adopt_answer(@box.to_unsafe.address, sizeof(T).to_u64)
+    {% end %}
     @box.first
   end
 end
@@ -6992,6 +7420,14 @@ class IyiGroup
     protected def initialize(@value : T)
       @unit = IyiUnit.new
       @placed = Atomic(UInt64).new(UNPLACED)
+    end
+
+    # heap22 row 4: the unit, made first so the value is born in its
+    # partition (std/unit's `Unit.new`), with the placement settled then
+    # rather than at the first task: a `Unit` on the main thread
+    # (`MAIN`) runs its tasks in the shared heap, so its unit is pinned.
+    protected def initialize(@value : T, @unit : IyiUnit, placed : UInt64)
+      @placed = Atomic(UInt64).new(placed)
     end
 
     protected def iyi_value : T
@@ -7074,6 +7510,10 @@ class IyiGroup
       # eligible call at it after typing (`CleanupTransformer#
       # classify_spawn`); a branch on `false` is dropped before codegen.
       return spawn_pooled(&block) if false
+      {% if flag?(:heap_partitions) %}
+        # Never taken: types the pinned instance the cleanup points a call at when its crossing must run in the shared heap (heap22 `pinned:`).
+        return spawn_pooled(pinned: true, &block) if false
+      {% end %}
     {% end %}
     in_unit(&block)
   end
@@ -7101,6 +7541,10 @@ class IyiGroup
   def spawn(*, unit : Symbol, &block : -> T) : IyiTask(T) forall T
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) && !flag?(:wasm32) %}
       return spawn_new(&block) if false
+      {% if flag?(:heap_partitions) %}
+        # Never taken: types the pinned instance the cleanup points a call at when its crossing must run in the shared heap (heap22 `pinned:`).
+        return spawn_new(pinned: true, &block) if false
+      {% end %}
     {% end %}
     in_unit(&block)
   end
@@ -7113,10 +7557,24 @@ class IyiGroup
   # `Share`) and its answer to what `Mutex#get`'s is (`Share`, since it
   # leaves the unit while the unit lives on).
   def spawn(*, in owner : Unit(S), &block : S -> T) : IyiTask(T) forall S, T
-    value = owner.iyi_value
+    {% if flag?(:heap_partitions) %}
+      # Never taken: types the pinned instance the cleanup points a call at when its block must run in the shared heap (heap22 `pinned:`, S6).
+      return spawn_in(owner, pinned: true, &block) if false
+    {% end %}
+    spawn_in(owner, pinned: false, &block)
+  end
+
+  # `spawn(in:)`'s body. *pinned*: the compiler's, when the block reaches
+  # an owning type without `lends:` (heap22 `pinned:`, contract §5 S6
+  # amendment): the task pins *owner*'s unit before it runs the block, and
+  # the unit allocates in the shared heap for the rest of its life.
+  private def spawn_in(owner : Unit(S), *, pinned : Bool, &block : S -> T) : IyiTask(T) forall S, T
+    # The block's captures cross into the Unit's unit (heap22 row 1d), and
+    # `work`, which another unit's fiber runs, is made in the shared heap.
     # Named outside the `{% if %}`: a block parameter read only inside one
     # is not captured.
-    work = -> { block.call(value) }
+    IyiCross.publish(block)
+    work = IyiCross.shared { unit_work(block, owner, pinned) }
     {% if flag?(:gc_none) || flag?(:gc_boehm) || flag?(:wasm32) %}
       # One thread: every task is a unit-mate of every other already.
       in_unit(&work)
@@ -7127,6 +7585,21 @@ class IyiGroup
         on_main(owner, &work)
       end
     {% end %}
+  end
+
+  # A `Unit` task's body, made where `spawn(in:)` says. Its answer leaves
+  # the unit while the unit lives on, so it is published here, before
+  # `IyiTask#finish` stores it (heap22 row 2b). It names the handle, never
+  # the value: a body kept past a dead handle would name the freed value.
+  # A pinned one pins the unit first (`IyiHeap.pin`, a no-op without
+  # partitions or once the unit is pinned).
+  private def unit_work(block : S -> T, owner : Unit(S), pinned : Bool) : Proc(T) forall S, T
+    -> {
+      IyiHeap.pin if pinned
+      answer = block.call(owner.iyi_value)
+      IyiCross.publish(answer)
+      answer
+    }
   end
 
   # Both placements at once, which the compiler refuses at the call
@@ -7152,6 +7625,9 @@ class IyiGroup
       end
     {% end %}
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
+    # Fibers are the shared heap's whatever unit they run (heap22 row 14),
+    # born there by codegen (`__iyi_new_shared`); the rest of a same-unit
+    # task stays in its unit, since nothing crosses.
     fiber = IyiFiber.new
     fiber.home = IyiScheduler.state
     fiber.unit = IyiScheduler.current.unit
@@ -7177,12 +7653,15 @@ class IyiGroup
     # its spawner's unit, so a program held to one worker runs its spawns
     # on one thread, as before. Private: nothing but the compiler, which
     # has checked the block, may call it.
-    private def spawn_pooled(&block : -> T) : IyiTask(T) forall T
+    #
+    # *pinned*: the compiler's, when the crossing could not be proven and
+    # the new unit allocates in the shared heap (heap22 `pinned:`).
+    private def spawn_pooled(*, pinned : Bool = false, &block : -> T) : IyiTask(T) forall T
       {% if flag?(:iyi_chaos) %}
-        return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
+        return chaos_task(pinned, &block) if IyiChaos.simulated?
       {% end %}
       return in_unit(&block) unless IyiWorkers.parallel?
-      on_pool(&block)
+      on_pool(pinned, &block)
     end
 
     # :nodoc: — `g.spawn(unit: :new) { }`, which the compiler points here
@@ -7194,26 +7673,51 @@ class IyiGroup
     # policy, the answer through `value`. Named `spawn_` so that the proof
     # of `@[SafeReach]`, which runs after the call is pointed here, counts
     # its block as a parallel start (`ReachProof#parallel_start?`).
-    private def spawn_new(&block : -> T) : IyiTask(T) forall T
-      on_pool(&block)
+    private def spawn_new(*, pinned : Bool = false, &block : -> T) : IyiTask(T) forall T
+      on_pool(pinned, &block)
     end
 
-    private def on_pool(&block : -> T) : IyiTask(T) forall T
+    # The block's captures published as they cross (heap22 row 1), and
+    # the unit made in the shared heap.
+    private def on_pool(pinned : Bool, &block : -> T) : IyiTask(T) forall T
       {% if flag?(:iyi_chaos) %}
-        return IyiChaos.parallel_task(in_unit(&block)) if IyiChaos.simulated?
+        return chaos_task(pinned, &block) if IyiChaos.simulated?
       {% end %}
-      pooled(IyiUnit.new, &block)
+      IyiCross.publish(block)
+      pooled(IyiUnit.new(pinned: pinned), &block)
     end
 
     # A task of *unit* on the pool: a new unit's first, or a `Unit`'s.
+    # The caller has published what the block captures.
     private def pooled(unit : IyiUnit, &block : -> T) : IyiTask(T) forall T
       raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
       IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
       IyiWorkers.start
-      fiber = IyiFiber.new
-      fiber.parallel = true
-      fiber.unit = unit
-      task = IyiTask(T).new(fiber)
+      # The group is told of the task's end on the task's thread.
+      IyiCross.publish(self)
+      task = IyiCross.shared do
+        fiber = IyiFiber.new
+        fiber.parallel = true
+        fiber.unit = unit
+        crossing_task(fiber, block)
+      end
+      IyiSchedLock.lock
+      IyiWorkers.push(task.fiber)
+      IyiSchedLock.unlock
+      # A worker the push found none idle for, started now the lock is let
+      # go (`IyiWorkers.grow`).
+      IyiWorkers.pay
+      task
+    end
+
+    # The task, its box and the closure its fiber runs, for a task another
+    # unit runs: made in the shared heap by the caller's bracket (heap22
+    # row 14), and the fiber adopted. The task's type is the block's call's:
+    # a `-> T` restriction binds nothing for a block that never returns
+    # (`Proc(NoReturn)`, a task that panics), where the spawn's own `&block
+    # : -> T` does.
+    private def crossing_task(fiber : IyiFiber, block : B) forall B
+      task = IyiTask(typeof(block.call)).new(fiber)
       runner = self
       install(fiber) do
         value = block.call
@@ -7221,12 +7725,6 @@ class IyiGroup
         runner.finished(fiber, value.is_a?(::Error))
       end
       adopt(fiber)
-      IyiSchedLock.lock
-      IyiWorkers.push(fiber)
-      IyiSchedLock.unlock
-      # A worker the push found none idle for, started now the lock is let
-      # go (`IyiWorkers.grow`).
-      IyiWorkers.pay
       task
     end
 
@@ -7240,19 +7738,16 @@ class IyiGroup
     private def on_main(owner : Unit(S), &block : -> T) : IyiTask(T) forall S, T
       raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
       IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
-      fiber = IyiFiber.new
-      fiber.home = IyiScheduler.main_state
-      {% if flag?(:iyi_chaos) %}
-        IyiChaos.adopt_into(fiber, owner)
-      {% end %}
-      task = IyiTask(T).new(fiber)
-      runner = self
-      install(fiber) do
-        value = block.call
-        task.finish(value)
-        runner.finished(fiber, value.is_a?(::Error))
+      IyiCross.publish(self)
+      task = IyiCross.shared do
+        fiber = IyiFiber.new
+        fiber.home = IyiScheduler.main_state
+        {% if flag?(:iyi_chaos) %}
+          IyiChaos.adopt_into(fiber, owner)
+        {% end %}
+        crossing_task(fiber, block)
       end
-      adopt(fiber)
+      fiber = task.fiber
       IyiScheduler.ready(fiber, false)
       {% if flag?(:iyi_chaos) %}
         IyiChaos.point
@@ -7368,6 +7863,16 @@ class IyiGroup
     end
     @ended = true
     me.open_group = @outer
+    {% if flag?(:heap_partitions) %}
+      # Taken down now that the owner's list is past it: a group opened in
+      # a bracket - a lock block, a constant's initializer - is the shared
+      # heap's, its `outer` the unit's own group, and kept it named that
+      # group after its scope had ended and the unit's collection freed it
+      # (bench/heap_crossings `group_outer`: exit 86). A cancel walks the
+      # owner's list under this lock, from `open_group`, which no longer
+      # leads here.
+      @outer = nil
+    {% end %}
     # The boundary owes a re-raise for any panic *nobody read*: a bug
     # observed through its handle already became a `Panicked` value
     # there, and re-raising it too would report one bug twice. The
@@ -7441,6 +7946,58 @@ struct IyiMissed
   end
 end
 
+# ── Crossings — heap22 ─────────────────────────────────────────────────
+#
+# What the crossing code of the runtime and std calls (design B, SPEC.md
+# III.4.19 PROPOSED): a value made reachable from another unit is
+# published first, and glue another unit reads is made in the shared
+# heap. Without `-Dheap_partitions` both compile to nothing but the
+# block, so a default build is the build it was.
+module IyiCross
+  # *value* published (`__iyi_publish`) before it crosses: each word of
+  # it, so a reference, a struct, a union and a proc's closure are all
+  # one walk; a word that is no heap address is nobody's and stops at
+  # once. A pointer-free `T` compiles to nothing.
+  def self.publish(value : T) : Nil forall T
+    {% if flag?(:heap_partitions) && T.has_inner_pointers? %}
+      words = Pointer(UInt64).new(pointerof(value).address)
+      index = 0_u64
+      count = sizeof(T).to_u64 // 8_u64
+      while index < count
+        word = (words + index.to_i64).value
+        __iyi_publish(Pointer(Void).new(word)) if word != 0_u64
+        index = index + 1_u64
+      end
+    {% end %}
+  end
+
+  # The block, allocating in the shared heap (`IyiHeap.shared`).
+  #
+  # `IyiOnce.run` runs a constant's initializer first run by a read here
+  # (heap22, contract amendment 6b): the first read may be a pool unit's,
+  # and the graph the initializer builds is held by a global its
+  # partition's local collection never scans, so built in the unit's
+  # partition it was nobody's to keep. An initializer run at its
+  # declaration runs on the main fiber, which allocates in the shared heap
+  # already. An initializer that panics ends its fiber still allocating in
+  # the shared heap, which is sound.
+  def self.shared(&)
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.shared { yield }
+    {% else %}
+      yield
+    {% end %}
+  end
+
+  # The running unit pinned (`IyiHeap.pin`): a pointer handed where no
+  # collector looks.
+  def self.pin : Nil
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.pin
+    {% end %}
+  end
+end
+
 # ── Channel — III.4.6 ──────────────────────────────────────────────────
 #
 # `Channel(T).new` is a rendezvous, as Crystal's is: a send completes when
@@ -7503,7 +8060,9 @@ class Channel(T)
   def initialize(capacity : Int32)
     raise "a channel's capacity is not negative" if capacity < 0
     @slots = capacity < 1 ? 1 : capacity
-    @ring = Pointer(T).malloc(@slots.to_u64)
+    # The ring is read by every unit that sends or receives, so it is
+    # the shared heap's, as its growth and the send nodes are.
+    @ring = IyiCross.shared { Pointer(T).malloc(@slots.to_u64) }
     @first = 0
     @count = 0
     @capacity = capacity
@@ -7548,6 +8107,8 @@ class Channel(T)
     {% if flag?(:iyi_chaos) %}
       IyiChaos.point
     {% end %}
+    # Published before another unit can take it (heap22 row 3).
+    IyiCross.publish(value)
     fiber = IyiScheduler.current
     lock
     if fiber.cancelled
@@ -7743,6 +8304,7 @@ class Channel(T)
     {% if flag?(:iyi_chaos) %}
       IyiChaos.point
     {% end %}
+    IyiCross.publish(value)
     lock
     answer = put_held(value)
     woken = take_woken
@@ -7779,6 +8341,7 @@ class Channel(T)
   end
 
   def send_select_action(value : T) : IyiSendSelect(T)
+    IyiCross.publish(value)
     IyiSendSelect(T).new(self, value)
   end
 
@@ -7787,7 +8350,7 @@ class Channel(T)
   # them ran have all those values in hand, so a full ring doubles.
   private def push_item(value : T) : Nil
     if @count == @slots
-      grown = Pointer(T).malloc((@slots * 2).to_u64)
+      grown = IyiCross.shared { Pointer(T).malloc((@slots * 2).to_u64) }
       index = 0
       while index < @count
         grown[index] = @ring[(@first + index) % @slots]

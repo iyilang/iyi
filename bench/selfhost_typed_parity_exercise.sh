@@ -43,6 +43,10 @@ CHILD="${TYPED_PARITY_CHILD:-0}"
 BARE="${TYPED_PARITY_BARE:-0}"
 RAISE="${TYPED_PARITY_RAISE:-0}"
 FILES_LIST="${TYPED_PARITY_FILES:-}"
+ARTIFACT_DIR="${TYPED_PARITY_ARTIFACT_DIR:-}"
+if [ -n "$ARTIFACT_DIR" ]; then
+  mkdir -p "$ARTIFACT_DIR" || exit 1
+fi
 WORK="$(mktemp -d)"
 REPO_NATIVE="$(native_path "$REPO")"
 WORK_NATIVE="$(native_path "$WORK")"
@@ -116,6 +120,10 @@ fi
 measure() {
   corpus="$1"
   rel="$2"
+  local artifact=""
+  if [ -n "$ARTIFACT_DIR" ]; then
+    artifact="$ARTIFACT_DIR/$(printf '%s' "$rel" | tr '/\\' '__')"
+  fi
   flag=""
   if [ "$BARE" = 1 ]; then
     flag="--bare"
@@ -125,6 +133,10 @@ measure() {
   if "$ORACLE" $flag "$REPO_NATIVE/$rel" > "$WORK/o.txt" 2> "$WORK/o.err"; then
     sort "$WORK/o.txt" > "$WORK/o.sorted"
     nodes=$(wc -l < "$WORK/o.sorted" | tr -d ' ')
+    if [ -n "$artifact" ]; then
+      cp "$WORK/o.txt" "$artifact.oracle"
+      cp "$WORK/o.sorted" "$artifact.oracle.records"
+    fi
     if [ "$corpus" = samples ]; then
       set -- "$REPO_NATIVE/samples/iyi" "$REPO_NATIVE/src"
     else
@@ -133,15 +145,23 @@ measure() {
     if "$TYPED" "$REPO_NATIVE/$rel" "$@" > "$WORK/p.txt" 2> "$WORK/p.err"; then
       sort "$WORK/p.txt" > "$WORK/p.sorted"
       matched=$(comm -12 "$WORK/o.sorted" "$WORK/p.sorted" | wc -l | tr -d ' ')
+      if [ -n "$artifact" ]; then
+        cp "$WORK/p.txt" "$artifact.port"
+        cp "$WORK/p.sorted" "$artifact.port.records"
+        comm -23 "$WORK/o.sorted" "$WORK/p.sorted" > "$artifact.oracle-only.records"
+        comm -13 "$WORK/o.sorted" "$WORK/p.sorted" > "$artifact.port-only.records"
+      fi
       note="-"
       grep '^untyped: ' "$WORK/p.txt" | sed 's/^untyped: //' | awk -v c="$corpus" '{ print c "\t" $0 }' >> "$UNTYPED"
     else
       matched=0
+      [ -z "$artifact" ] || cp "$WORK/p.err" "$artifact.port.err"
       note="PORT: $(head -n 1 "$WORK/p.err" | tr '\t' ' ')"
     fi
   else
     nodes=0
     matched=0
+    [ -z "$artifact" ] || cp "$WORK/o.err" "$artifact.oracle.err"
     note="ORACLE: $(head -n 1 "$WORK/o.err" | tr '\t' ' ')"
   fi
   printf '%s\t%s\t%s\t%s\t%s\n' "$corpus" "$rel" "$nodes" "$matched" "$note" >> "$RESULTS"

@@ -1,8 +1,9 @@
 import compiler/syntax/parser::{Parser}
-import compiler/syntax/ast::{ASTNode, Def, Expressions, ModuleHeader}
+import compiler/syntax/ast::{ASTNode, Call, Def, Expressions, ModuleHeader, NumberLiteral, Var}
 import compiler/foundation/location::{Location}
 import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type, ModuleType, NamedType, EnumType, dump_def, dump_program_declarations, dump_tree_declared, dir_of, normalize_path}
-import compiler/semantic/inline_macros::{InlineMacroLedger}
+import compiler/semantic/inline_macros::{InlineMacroLedger, splice_body_node, splice_inline_sites}
+import compiler/semantic/normalizer::{NormalizerProgram}
 import compiler/macros/site_scan::{MacroSiteScan}
 import compiler/macros/methods::{MacroMethods}
 
@@ -161,6 +162,50 @@ module BenchSelfhostInlineMacrosExercise
     end
     sb
   end
+
+  # A bare two-file fixture isolates pending ivars from prelude declarations.
+  def self.pending_ivar_type(path : String) : String
+    entry = entry_of(path)
+    node = Parser.new(File.read(entry), entry).parse
+    prog = SemanticProgram.new
+    prog.search_path = search_path
+    visitor = TopLevelVisitor.new(prog, entry)
+    node.accept(visitor)
+    visitor.finish
+    owner = prog.types["S3PendingOwner"].as(ModuleType)
+    owner.instance_vars["@value"].type.full_name
+  end
+
+  def self.spliced_body(path : String) : String
+    entry = entry_of(path)
+    node = Parser.new(File.read(entry), entry).parse
+    result = splice_body_node(node, "S3Probe", entry, false, NormalizerProgram.new)
+    unless result.is_a?(Expressions)
+      return "node:#{MacroMethods.node_class_name(result)}"
+    end
+    expressions = result.as(Expressions).expressions
+    return "empty" if expressions.empty?
+    if expressions.size == 1 && expressions[0].is_a?(NumberLiteral)
+      return "expanded:#{expressions[0].as(NumberLiteral).value}"
+    end
+    "other"
+  end
+
+  def self.spliced_local(path : String) : String
+    entry = entry_of(path)
+    node = Parser.new(File.read(entry), entry).parse
+    nodes = node.is_a?(Expressions) ? node.as(Expressions).expressions : [node] of ASTNode
+    result = splice_inline_sites(nodes, "S3Probe", entry, false, NormalizerProgram.new)
+    names = [] of String
+    result.each do |item|
+      if item.is_a?(Var)
+        names << "var:#{item.as(Var).name}"
+      elsif item.is_a?(Call)
+        names << "call:#{item.as(Call).name}"
+      end
+    end
+    names.join("\n")
+  end
 end
 
 if Program.args.empty?
@@ -171,6 +216,12 @@ elsif Program.args[0] == "--ledger"
   print BenchSelfhostInlineMacrosExercise.dump_ledger(Program.args[1])
 elsif Program.args[0] == "--sites"
   print BenchSelfhostInlineMacrosExercise.dump_sites(Program.args[1])
+elsif Program.args[0] == "--pending-ivar"
+  puts BenchSelfhostInlineMacrosExercise.pending_ivar_type(Program.args[1])
+elsif Program.args[0] == "--spliced-body"
+  puts BenchSelfhostInlineMacrosExercise.spliced_body(Program.args[1])
+elsif Program.args[0] == "--spliced-local"
+  puts BenchSelfhostInlineMacrosExercise.spliced_local(Program.args[1])
 else
   print BenchSelfhostInlineMacrosExercise.dump_file(Program.args[0])
 end

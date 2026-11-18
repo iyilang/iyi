@@ -7,7 +7,7 @@ import compiler/macros/ast
 import compiler/macros/methods::{MacroMethods}
 import compiler/macros/target_flags::{MacroTargetFlags}
 import compiler/macros/interpreter::{MacroInterpreter, MacroFailure, MacroFreeBinding}
-import compiler/macros/type_facts::{MacroTypeFacts}
+import compiler/macros/type_facts::{MacroPathLookup, MacroTypeFacts}
 import compiler/macros/macro_parser::{MacroParser}
 
 # One `{% %}` or `{{ }}` site at the top of a macro body that ran to its end,
@@ -132,9 +132,10 @@ pub class MacroEngine
   # variables of the def the site is written in (hosted macros.cr 143-147:
   # expand_macro(node, scope, path_lookup, free_vars, a_def)). None at the top
   # level and in a type body.
-  def site_report(site : ASTNode, scope_name : String = "<Program>", bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil) : MacroReport
+  def site_report(site : ASTNode, scope_name : String = "<Program>", bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, path_lookup : MacroPathLookup? = nil) : MacroReport
     interp = MacroInterpreter.new(nil, flags, scope_name, host_flags_now)
     interp.type_facts = facts
+    interp.path_lookup = path_lookup
     if bound = bindings
       interp.bind_free_vars(bound)
     end

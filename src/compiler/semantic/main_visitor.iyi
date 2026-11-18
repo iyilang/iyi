@@ -10,7 +10,7 @@ import compiler/macros/interpreter::{MacroFailure, MacroFreeBinding}
 import compiler/semantic/inline_macros::{InlineMacroLedger, expand_inline_macro, splice_body_node, splice_inline_sites}
 import compiler/semantic/macro_bindings::{MacroBindings}
 import compiler/semantic/top_level::{AliasType, ClassType, Const, EnumType, GenericClassType, GenericModuleType, GenericTraitType, MetaTypeVar, MetaclassType, ModuleType, NamedType, NonGenericClassType, NonGenericModuleType, SemanticProgram, TopLevelVisitor, TraitType, Type, UnionType, UnresolvedType}
-import compiler/semantic/top_level::{InstanceVarInitializer}
+import compiler/semantic/top_level::{InstanceVarInitializer, SemanticMacroPathLookup}
 import compiler/semantic/top_level::{NoReturnType}
 import compiler/semantic/top_level::{LibFun, LibType}
 import compiler/semantic/top_level::{VoidType}
@@ -970,7 +970,7 @@ pub class MainVisitor < TypeNodeHost
   def visit(node : MacroIf) : Bool
     expanded = @expansions[node]?
     if expanded.nil?
-      expanded = expand_inline_macro(node, def_inline_scope_name, def_inline_file, false, @program.normalizer, @vars.keys, def_inline_bindings, MacroBindings.facts(@scope))
+      expanded = expand_inline_macro(node, def_inline_scope_name, def_inline_file, false, @program.normalizer, @vars.keys, def_inline_bindings, MacroBindings.facts(@scope), inline_path_lookup)
       if expanded.nil?
         if reason = InlineMacroLedger.sites.last.reason
           return untyped(node, "macro control expansion: #{reason}")
@@ -989,7 +989,7 @@ pub class MainVisitor < TypeNodeHost
   def visit(node : MacroFor) : Bool
     expanded = @expansions[node]?
     if expanded.nil?
-      expanded = expand_inline_macro(node, def_inline_scope_name, def_inline_file, false, @program.normalizer, @vars.keys, def_inline_bindings, MacroBindings.facts(@scope))
+      expanded = expand_inline_macro(node, def_inline_scope_name, def_inline_file, false, @program.normalizer, @vars.keys, def_inline_bindings, MacroBindings.facts(@scope), inline_path_lookup)
       if expanded.nil?
         if reason = InlineMacroLedger.sites.last.reason
           return untyped(node, "macro control expansion: #{reason}")
@@ -1008,7 +1008,7 @@ pub class MainVisitor < TypeNodeHost
   def visit(node : MacroExpression) : Bool
     expanded = @expansions[node]?
     if expanded.nil?
-      expanded = expand_inline_macro(node, def_inline_scope_name, def_inline_file, false, @program.normalizer, @vars.keys, def_inline_bindings, MacroBindings.facts(@scope))
+      expanded = expand_inline_macro(node, def_inline_scope_name, def_inline_file, false, @program.normalizer, @vars.keys, def_inline_bindings, MacroBindings.facts(@scope), inline_path_lookup)
       if expanded.nil?
         if reason = InlineMacroLedger.sites.last.reason
           return untyped(node, "macro control expansion: #{reason}")
@@ -1027,7 +1027,7 @@ pub class MainVisitor < TypeNodeHost
   def visit(node : MacroVerbatim) : Bool
     expanded = @expansions[node]?
     if expanded.nil?
-      expanded = expand_inline_macro(node, def_inline_scope_name, def_inline_file, false, @program.normalizer, @vars.keys, def_inline_bindings, MacroBindings.facts(@scope))
+      expanded = expand_inline_macro(node, def_inline_scope_name, def_inline_file, false, @program.normalizer, @vars.keys, def_inline_bindings, MacroBindings.facts(@scope), inline_path_lookup)
       if expanded.nil?
         if reason = InlineMacroLedger.sites.last.reason
           return untyped(node, "macro control expansion: #{reason}")
@@ -2146,6 +2146,17 @@ pub class MainVisitor < TypeNodeHost
     ""
   end
 
+  # Inline controls resolve paths in their lexical owner, including while a type
+  # body is visited with no method receiver in @scope.
+  def inline_path_lookup : SemanticMacroPathLookup
+    owner = TypeQueries.instance_type(@scope || @current_type).devirtualize
+    if owner.is_a?(GenericInstanceType)
+      owner = owner.as(GenericInstanceType).generic_type
+    end
+    scope = owner.is_a?(ModuleType) ? owner.as(ModuleType) : @current_type
+    SemanticMacroPathLookup.new(@program, scope)
+  end
+
   def def_inline_file : String
     if cd = @current_def
       if loc = cd.location
@@ -2195,14 +2206,14 @@ pub class MainVisitor < TypeNodeHost
   def splice_def_inline_sites(node : Expressions) : Nil
     return nil if @current_def.nil?
     return nil unless node.expressions.any? { |exp| inline_site?(exp) }
-    node.expressions = splice_inline_sites(node.expressions, def_inline_scope_name, def_inline_file, false, @program.normalizer, def_inline_locals, def_inline_bindings, MacroBindings.facts(@scope), true)
+    node.expressions = splice_inline_sites(node.expressions, def_inline_scope_name, def_inline_file, false, @program.normalizer, def_inline_locals, def_inline_bindings, MacroBindings.facts(@scope), true, inline_path_lookup)
     nil
   end
 
   def splice_def_body(node : ASTNode) : ASTNode
     return node if @current_def.nil?
     return node unless inline_site?(node)
-    splice_body_node(node, def_inline_scope_name, def_inline_file, false, @program.normalizer, def_inline_locals, def_inline_bindings, MacroBindings.facts(@scope), true)
+    splice_body_node(node, def_inline_scope_name, def_inline_file, false, @program.normalizer, def_inline_locals, def_inline_bindings, MacroBindings.facts(@scope), true, inline_path_lookup)
   end
 
   # An inline macro site that is the whole value of a constant (`CHANNEL_WAIT = {% if ... %}512{% else %}2048{% end %}`)
@@ -2221,7 +2232,8 @@ pub class MainVisitor < TypeNodeHost
         file = first_loc.filename
       end
     end
-    spliced = splice_body_node(value, scope_name, file, c.namespace.is_a?(LibType), @program.normalizer)
+    scope = c.namespace || @program
+    spliced = splice_body_node(value, scope_name, file, c.namespace.is_a?(LibType), @program.normalizer, [] of String, nil, nil, false, SemanticMacroPathLookup.new(@program, scope))
     if spliced.is_a?(Expressions)
       only = spliced.as(Expressions).expressions
       spliced = only[0] if only.size == 1

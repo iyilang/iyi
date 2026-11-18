@@ -3,7 +3,7 @@ module compiler/macros/interpreter
 import compiler/syntax/ast::{ASTNode, And, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, DoubleSplat, Expressions, Generic, Global, HashLiteral, If, ImplicitObj, InstanceVar, IsA, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, RangeLiteral, Return, Self, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, Underscore, Unless, Until, Var, While, Yield, StringBuilder}
 import compiler/syntax/token::{NumberKind}
 import compiler/macros/ast::{MacroId, TypeNode}
-import compiler/macros/type_facts::{MacroTypeFacts}
+import compiler/macros/type_facts::{MacroPathLookup, MacroTypeFacts}
 import compiler/macros/target_flags::{MacroTargetFlags}
 import compiler/macros/methods::{MacroMethods}
 import compiler/macros/answers::{MacroAnswers}
@@ -52,6 +52,7 @@ pub class MacroInterpreter
   property skipped : Bool
   property free_bindings : Hash(String, MacroFreeBinding)
   property type_facts : MacroTypeFacts? = nil
+  property path_lookup : MacroPathLookup? = nil
   property host_flags : Array(String)? = nil
 
   # `flags` is the flag set `flag?` answers from. Left out, it is the host's,
@@ -540,6 +541,11 @@ pub class MacroInterpreter
       if path.names.size == 1
         if bound = @free_bindings[path.names[0]]?
           return resolve_free_binding(bound)
+        end
+      end
+      if lookup = @path_lookup
+        if constant = lookup.resolve(path)
+          return constant
         end
       end
       if facts = @type_facts

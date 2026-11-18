@@ -6,7 +6,7 @@ import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
 import compiler/syntax/visitor::{Visitor}
 import compiler/macros/engine::{MacroEngine}
 import compiler/macros/interpreter::{MacroFreeBinding}
-import compiler/macros/type_facts::{MacroTypeFacts}
+import compiler/macros/type_facts::{MacroPathLookup, MacroTypeFacts}
 
 # One inline macro site the declarations pass visited: the file it is written in,
 # its kind and place, and why the engine refused it (nil when it expanded, an empty
@@ -62,8 +62,8 @@ end
 # `bindings` are the type parameters a site in a def body sees (macro_bindings.iyi): the receiver's
 # and the def's free variables. A site at the top level or in a type body has none.
 # `flag?` reads normalizer.macro_flags, or the host's flags when none were supplied.
-pub def expand_inline_macro(site : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil) : ASTNode?
-  report = MacroEngine.new(normalizer.macro_flags, normalizer.host_flags).site_report(site, scope_name, bindings, facts)
+pub def expand_inline_macro(site : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, path_lookup : MacroPathLookup? = nil) : ASTNode?
+  report = MacroEngine.new(normalizer.macro_flags, normalizer.host_flags).site_report(site, scope_name, bindings, facts, path_lookup)
   first = report.sites.first
   kind = first.kind
   line = first.line
@@ -168,15 +168,20 @@ end
 # expansion (macros.cr 2128-2143) and expand_inline_macro binds that tree to the site
 # (semantic_visitor.cr 2221-2226), so a site that writes nothing is still an expression, typed Nil.
 # `locals` names what is declared before the first node, and grows with each node that declares one.
-pub def splice_inline_sites(nodes : Array(ASTNode), scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, keep_empty : Bool = false) : Array(ASTNode)
+# A declarations visitor, when supplied, visits each ordinary node before the next site is
+# expanded. The lookup then sees constants declared earlier, including in an expansion.
+pub def splice_inline_sites(nodes : Array(ASTNode), scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, keep_empty : Bool = false, path_lookup : MacroPathLookup? = nil, declarations : Visitor? = nil) : Array(ASTNode)
   out = [] of ASTNode
   nodes.each do |n|
     unless n.is_a?(MacroIf) || n.is_a?(MacroFor) || n.is_a?(MacroExpression)
       collect_local_names(n, locals)
+      if visitor = declarations
+        n.accept(visitor)
+      end
       out << n
       next
     end
-    expanded = expand_inline_macro(n, scope_name, filename, in_lib, normalizer, locals, bindings, facts)
+    expanded = expand_inline_macro(n, scope_name, filename, in_lib, normalizer, locals, bindings, facts, path_lookup)
     if expanded.nil?
       sites = InlineMacroLedger.sites
       last = sites[sites.size - 1]
@@ -195,7 +200,7 @@ pub def splice_inline_sites(nodes : Array(ASTNode), scope_name : String, filenam
       out << n
       next
     end
-    out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty))
+    out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty, path_lookup, declarations))
   end
   out
 end
@@ -203,7 +208,7 @@ end
 # A body that is one inline macro node (a class, module or lib body) has no Expressions around it,
 # so splice_inline_sites is never asked about it. Wrap it in an Expressions and splice it as a body
 # of several nodes is spliced. A site the engine refuses stays. `keep_empty` is the def-body rule above.
-pub def splice_body_node(body : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, keep_empty : Bool = false) : ASTNode
+pub def splice_body_node(body : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, keep_empty : Bool = false, path_lookup : MacroPathLookup? = nil) : ASTNode
   return body unless body.is_a?(MacroIf) || body.is_a?(MacroFor) || body.is_a?(MacroExpression)
-  Expressions.new(splice_inline_sites([body] of ASTNode, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty))
+  Expressions.new(splice_inline_sites([body] of ASTNode, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty, path_lookup))
 end

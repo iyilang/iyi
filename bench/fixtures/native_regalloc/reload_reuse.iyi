@@ -1,0 +1,117 @@
+module reload_reuse
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass, Role}
+import compiler/native/target::{is_role?}
+import compiler/native/regalloc_linear::{rewrite_spills}
+
+fn = MFunction.new("reload")
+entry = MBlock.new(0, "entry")
+body = MBlock.new(1, "body")
+fn.blocks << entry
+fn.blocks << body
+v = fn.new_vreg(RegClass::Gpr)
+fn.vreg_home << -1
+fn.vreg_slot << fn.frame.add_slot(8_i64, 8)
+initial = MInst.new(MOp::MovImm.value.to_i32)
+initial.defs << Operand.new(OperandKind::Virtual, v)
+entry.insts << initial
+i = 0
+while i < 2
+  use = MInst.new(MOp::CmpImm.value.to_i32)
+  use.uses << Operand.new(OperandKind::Virtual, v)
+  body.insts << use
+  i = i + 1
+end
+clobber = MInst.new(MOp::MovImm.value.to_i32)
+clobber.defs << Operand.new(OperandKind::Physical, 9)
+body.insts << clobber
+use = MInst.new(MOp::CmpImm.value.to_i32)
+use.uses << Operand.new(OperandKind::Virtual, v)
+body.insts << use
+redefine = MInst.new(MOp::MovImm.value.to_i32)
+redefine.defs << Operand.new(OperandKind::Physical, 9)
+redefine.defs << Operand.new(OperandKind::Virtual, v)
+body.insts << redefine
+use_after_def = MInst.new(MOp::CmpImm.value.to_i32)
+use_after_def.uses << Operand.new(OperandKind::Virtual, v)
+body.insts << use_after_def
+call = MInst.new(MOp::Bl.value.to_i32)
+call.call = true
+call.clobbers << 9
+call.clobbers << 10
+body.insts << call
+last = MInst.new(MOp::CmpImm.value.to_i32)
+last.uses << Operand.new(OperandKind::Virtual, v)
+body.insts << last
+rewrite_spills(fn)
+loads = 0
+body.insts.each do |m|
+  loads = loads + 1 if is_role?(fn.isa, m, Role::SlotLoad)
+end
+puts "#{loads} #{redefine.defs[1].reg} #{use_after_def.uses[0].reg}"
+
+# The same rule applies to floating-point scratch registers.
+float_fn = MFunction.new("float_reload")
+float_entry = MBlock.new(0, "entry")
+float_body = MBlock.new(1, "body")
+float_fn.blocks << float_entry
+float_fn.blocks << float_body
+f = float_fn.new_vreg(RegClass::Fpr)
+float_fn.vreg_home << -1
+float_fn.vreg_slot << float_fn.frame.add_slot(8_i64, 8)
+initial = MInst.new(MOp::FMov.value.to_i32)
+initial.defs << Operand.new(OperandKind::Virtual, f)
+float_entry.insts << initial
+i = 0
+while i < 2
+  use = MInst.new(MOp::FCmp.value.to_i32)
+  use.uses << Operand.new(OperandKind::Virtual, f)
+  float_body.insts << use
+  i = i + 1
+end
+clobber = MInst.new(MOp::FMov.value.to_i32)
+clobber.defs << Operand.new(OperandKind::Physical, 48)
+float_body.insts << clobber
+use = MInst.new(MOp::FCmp.value.to_i32)
+use.uses << Operand.new(OperandKind::Virtual, f)
+float_body.insts << use
+call = MInst.new(MOp::Bl.value.to_i32)
+call.call = true
+call.clobbers << 48
+float_body.insts << call
+use = MInst.new(MOp::FCmp.value.to_i32)
+use.uses << Operand.new(OperandKind::Virtual, f)
+float_body.insts << use
+rewrite_spills(float_fn)
+loads = 0
+float_body.insts.each do |m|
+  loads = loads + 1 if is_role?(float_fn.isa, m, Role::SlotLoad)
+end
+puts loads
+
+# A second cached copy must be invalidated when the vreg is redefined.
+copies = MFunction.new("copies")
+block = MBlock.new(0, "entry")
+copies.blocks << block
+v = copies.new_vreg(RegClass::Gpr)
+copies.vreg_home << -1
+copies.vreg_slot << copies.frame.add_slot(8_i64, 8)
+first = MInst.new(MOp::CmpImm.value.to_i32)
+first.uses << Operand.new(OperandKind::Virtual, v)
+block.insts << first
+second = MInst.new(MOp::Cmp.value.to_i32)
+second.uses << Operand.new(OperandKind::Physical, 9)
+second.uses << Operand.new(OperandKind::Virtual, v)
+block.insts << second
+defn = MInst.new(MOp::MovImm.value.to_i32)
+defn.defs << Operand.new(OperandKind::Virtual, v)
+block.insts << defn
+third = MInst.new(MOp::Cmp.value.to_i32)
+third.uses << Operand.new(OperandKind::Physical, 9)
+third.uses << Operand.new(OperandKind::Virtual, v)
+block.insts << third
+rewrite_spills(copies)
+loads = 0
+block.insts.each do |m|
+  loads = loads + 1 if is_role?(copies.isa, m, Role::SlotLoad)
+end
+puts loads

@@ -673,7 +673,47 @@ print("spill weights: hot and inner-loop values stay in registers")
 PY
 }
 
+check_reload_reuse() {
+  local ignored=$1 exe="$WORK/reload-reuse-$RANDOM$EXE" values
+  if ! ./bin/iyi build -o "$(native_path "$exe")" "$(native_path "$FIX_RA/reload_reuse.iyi")" >"$WORK/reload-reuse.log" 2>&1; then
+    cat "$WORK/reload-reuse.log"
+    return 2
+  fi
+  if ! values=$("$exe"); then
+    echo "reload reuse fixture could not run"
+    return 2
+  fi
+  "$PY" - "$values" <<'PY'
+import sys
+try:
+    gpr_loads, defined, used, fpr_loads, copies_loads = map(int, sys.argv[1].split())
+except ValueError:
+    print("invalid reload reuse fixture output")
+    sys.exit(2)
+if (gpr_loads, fpr_loads, copies_loads) != (3, 3, 3) or defined != used:
+    print("reload reuse or invalidation is incorrect")
+    sys.exit(1)
+print("reload reuse: GPR and FPR caches respect redefinitions and clobbers")
+PY
+}
+
 echo "== 6. mutation proofs"
+prove_mutation "reload reuse: reload each use instead of reusing a scratch register" \
+  src/compiler/native/regalloc_linear.iyi check_reload_reuse \
+  '    return r if cache[r] == v && (blocked & mask) == 0_u64' \
+  '    return r if false && cache[r] == v && (blocked & mask) == 0_u64'
+prove_mutation "reload reuse: ignore explicit physical definitions" \
+  src/compiler/native/regalloc_linear.iyi check_reload_reuse \
+  '        cache[op.reg] = -1 # physical-def-invalidates-reload' \
+  '        cache[op.reg] = cache[op.reg] # physical-def-invalidates-reload'
+prove_mutation "reload reuse: ignore call clobbers" \
+  src/compiler/native/regalloc_linear.iyi check_reload_reuse \
+  '      cache[reg] = -1 if reg >= 0 && reg < 64 # call-clobber-invalidates-reload' \
+  '      cache[reg] = cache[reg] if reg >= 0 && reg < 64 # call-clobber-invalidates-reload'
+prove_mutation "reload reuse: keep stale copies after a redefinition" \
+  src/compiler/native/regalloc_linear.iyi check_reload_reuse \
+  '          cache[r] = -1 if r != reg && cache[r] == v' \
+  '          cache[r] = cache[r] if r != reg && cache[r] == v'
 prove_mutation "spill weights: evict by furthest end instead of weight" \
   src/compiler/native/regalloc_linear.iyi check_spill_weights \
   '      cheaper = @weights[a] < @weights[iv] || (@weights[a] == @weights[iv] && @ends[a] > @ends[iv])' \
@@ -717,7 +757,7 @@ if [ "$HOST_ID" = darwin-arm64 ]; then
     '      return reg unless reserved?(reg, @starts[iv], @ends[iv])'
   prove_mutation "rewrite: a spilled operand is read without its reload" \
     src/compiler/native/regalloc_linear.iyi check_linear_outputs \
-    '        reloads << slot_access(fn.isa, true, reg, fn.vreg_slot[v], fp)' \
+    '          reloads << slot_access(fn.isa, true, reg, fn.vreg_slot[v], fp)' \
     '        # the reload is dropped'
   prove_mutation "linear: a value that crosses a call may take a caller-saved register" \
     src/compiler/native/regalloc_linear.iyi check_linear_outputs \

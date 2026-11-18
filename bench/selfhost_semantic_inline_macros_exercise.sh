@@ -487,7 +487,7 @@ prove_mutation "the expansion is parsed with no file, so its declarations are no
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation_all "no spliced inline macro expansion is ever declared (top-level and type-body sites)" "$MUT_INL" \
-  "out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty))" \
+  "out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty, path_lookup, declarations))" \
   "out.concat([] of ASTNode)" \
   -- check_inline_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
@@ -898,13 +898,166 @@ check_splice_probe() {
   return 2
 }
 
+# A false guard must compile and run like the hosted compiler; a true guard must
+# be rejected by both with its own message. The globals deliberately disagree
+# with the type's TAKEN so a lookup in the wrong namespace changes the branch.
+check_type_const_guards() {
+  local style good bad forward expected message host_rc port_rc
+  for style in direct escaped; do
+    good="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_guard_${style}.iyi"
+    bad="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_raise_${style}.iyi"
+    forward="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_forward_${style}.iyi"
+    if [ "$style" = direct ]; then
+      expected=A
+    else
+      expected=B
+    fi
+    message="$style type guard caught invalid layout"
+    rm -f "$WORK/guard_${style}.ir" "$WORK/guard_${style}.ok"
+    if ! "$IYI" build --prelude empty -o "$WORK_NATIVE/guard_${style}_host$EXE" "$good" > "$WORK/guard_${style}_host.build" 2>&1; then
+      echo "INVALID: hosted $style guard did not build"; cat "$WORK/guard_${style}_host.build"; return 2
+    fi
+    host_rc=0
+    "$WORK/guard_${style}_host$EXE" > "$WORK/guard_${style}_host.out" 2>&1 || host_rc=$?
+    if [ "$host_rc" -ne 0 ] || [ "$(cat "$WORK/guard_${style}_host.out")" != "$expected" ]; then
+      echo "INVALID: hosted $style guard did not print $expected (status $host_rc)"; return 2
+    fi
+    if ! "$WORK/reach_tool$EXE" "$good" -o "$WORK_NATIVE/guard_${style}.ir" \
+         --pipeline typed --probe-phase --emit ir > "$WORK/guard_${style}.out" 2> "$WORK/guard_${style}.err" ||
+       [ ! -s "$WORK/guard_${style}.ir" ] || ! grep -Fxq '[phase] verify: pass' "$WORK/guard_${style}.out"; then
+      echo "INVALID: port $style guard did not produce verified IR"
+      cat "$WORK/guard_${style}.out" "$WORK/guard_${style}.err"; return 2
+    fi
+    if [ "$HOST_ID" = darwin-arm64 ]; then
+      if ! "$WORK/reach_tool$EXE" "$good" -o "$WORK_NATIVE/guard_${style}_port$EXE" \
+           --pipeline typed --probe-phase > "$WORK/guard_${style}_port.build" 2>&1; then
+        echo "INVALID: port $style guard did not link"; cat "$WORK/guard_${style}_port.build"; return 2
+      fi
+      port_rc=0
+      "$WORK/guard_${style}_port$EXE" > "$WORK/guard_${style}_port.out" 2>&1 || port_rc=$?
+      if [ "$port_rc" -ne "$host_rc" ] || ! cmp -s "$WORK/guard_${style}_host.out" "$WORK/guard_${style}_port.out"; then
+        echo "INVALID: port $style guard differs from the hosted run"; return 2
+      fi
+    else
+      host_limited "inline macros: type constant guard native execution requires Darwin arm64"
+    fi
+    host_rc=0
+    "$IYI" build --prelude empty -o "$WORK_NATIVE/raise_${style}_host$EXE" "$bad" > "$WORK/raise_${style}_host.log" 2>&1 || host_rc=$?
+    if [ "$host_rc" -ne 1 ] || ! grep -Fxq "Error: $message" "$WORK/raise_${style}_host.log"; then
+      echo "INVALID: hosted $style raise did not report its message (status $host_rc)"
+      cat "$WORK/raise_${style}_host.log"; return 2
+    fi
+    port_rc=0
+    "$WORK/reach_tool$EXE" "$bad" -o "$WORK_NATIVE/raise_${style}.ir" \
+      --pipeline typed --probe-phase --emit ir > "$WORK/raise_${style}.out" 2> "$WORK/raise_${style}.err" || port_rc=$?
+    if ! expected_refusal "$port_rc" "$WORK/raise_${style}.err" src/compiler/semantic/main_visitor.iyi \
+         "^macro control expansion: $message$" ||
+       ! grep -Fxq "bodies: fail: macro control expansion: $message" "$WORK/raise_${style}.out"; then
+      echo "INVALID: port $style raise did not report the hosted message (status $port_rc)"
+      cat "$WORK/raise_${style}.out" "$WORK/raise_${style}.err"; return 2
+    fi
+    host_rc=0
+    "$IYI" build --prelude empty -o "$WORK_NATIVE/forward_${style}_host$EXE" "$forward" > "$WORK/forward_${style}_host.log" 2>&1 || host_rc=$?
+    if [ "$host_rc" -ne 1 ] || ! grep -Fxq 'Error: undefined constant TAKEN' "$WORK/forward_${style}_host.log"; then
+      echo "INVALID: hosted $style forward reference did not report undefined TAKEN (status $host_rc)"
+      cat "$WORK/forward_${style}_host.log"; return 2
+    fi
+    port_rc=0
+    "$WORK/reach_tool$EXE" "$forward" -o "$WORK_NATIVE/forward_${style}.ir" \
+      --pipeline typed --probe-phase --emit ir > "$WORK/forward_${style}.out" 2> "$WORK/forward_${style}.err" || port_rc=$?
+    if ! expected_refusal "$port_rc" "$WORK/forward_${style}.err" src/compiler/semantic/main_visitor.iyi \
+         '^macro control expansion: undefined constant TAKEN$' ||
+       ! grep -Fxq 'bodies: fail: macro control expansion: undefined constant TAKEN' "$WORK/forward_${style}.out"; then
+      echo "INVALID: port $style forward reference did not report the hosted error (status $port_rc)"
+      cat "$WORK/forward_${style}.out" "$WORK/forward_${style}.err"; return 2
+    fi
+    : > "$WORK/guard_${style}.ok"
+    echo "  $style type guard: false prints $expected, true raises '$message', forward TAKEN is undefined on both compilers"
+  done
+}
+
+# A mutant is caught only by the predicted result on both forms. A crash, a
+# build failure, or a different refusal is not evidence of either defect.
+check_type_const_mutation() {
+  local mutation="$1" style fixture message rc caught=0 probe="$WORK/mut_type_const$EXE"
+  for style in direct escaped; do
+    if [ ! -f "$WORK/guard_${style}.ok" ]; then
+      echo "INVALID MUTATION: missing $style hosted/port baseline"; return 2
+    fi
+  done
+  if ! "$IYI" build -o "$WORK_NATIVE/mut_type_const$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/mut_type_const.build" 2>&1; then
+    echo "INVALID MUTATION: type-constant compiler failed to build"; cat "$WORK/mut_type_const.build"; return 2
+  fi
+  for style in direct escaped; do
+    if [ "$mutation" = lookup ]; then
+      fixture="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_guard_${style}.iyi"
+      message="$style guard must not raise"
+    elif [ "$mutation" = forward ]; then
+      fixture="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_forward_${style}.iyi"
+    else
+      fixture="$REPO_NATIVE/bench/fixtures/seminl_reach/type_const_raise_${style}.iyi"
+    fi
+    rm -f "$WORK/mut_guard_${style}.ir"
+    rc=0
+    "$probe" "$fixture" -o "$WORK_NATIVE/mut_guard_${style}.ir" \
+      --pipeline typed --probe-phase --emit ir > "$WORK/mut_guard_${style}.out" 2> "$WORK/mut_guard_${style}.err" || rc=$?
+    if [ "$mutation" = lookup ]; then
+      if expected_refusal "$rc" "$WORK/mut_guard_${style}.err" src/compiler/semantic/main_visitor.iyi \
+           "^macro control expansion: $message$" &&
+         grep -Fxq "bodies: fail: macro control expansion: $message" "$WORK/mut_guard_${style}.out"; then
+        caught=$((caught + 1))
+      elif [ "$rc" -ne 0 ] || [ ! -s "$WORK/mut_guard_${style}.ir" ] ||
+           ! grep -Fxq '[phase] verify: pass' "$WORK/mut_guard_${style}.out"; then
+        echo "INVALID MUTATION: $style lookup produced a different failure (status $rc)"
+        cat "$WORK/mut_guard_${style}.out" "$WORK/mut_guard_${style}.err"; return 2
+      fi
+    elif [ "$rc" -eq 0 ] && [ -s "$WORK/mut_guard_${style}.ir" ] &&
+         grep -Fxq '[phase] verify: pass' "$WORK/mut_guard_${style}.out"; then
+      caught=$((caught + 1))
+    elif [ "$mutation" = forward ] &&
+         expected_refusal "$rc" "$WORK/mut_guard_${style}.err" src/compiler/lower/pending.iyi \
+           '^lower: visit\(an unexpanded MacroIf after body typing\)' &&
+         grep -Fxq 'reached: bodies' "$WORK/mut_guard_${style}.out"; then
+      caught=$((caught + 1))
+    elif expected_refusal "$rc" "$WORK/mut_guard_${style}.err" src/compiler/semantic/main_visitor.iyi \
+           "^macro control expansion: $([ "$mutation" = forward ] && echo 'undefined constant TAKEN' || echo "$style type guard caught invalid layout")$"; then
+      :
+    else
+      echo "INVALID MUTATION: $style dropped-raise probe failed differently (status $rc)"
+      cat "$WORK/mut_guard_${style}.out" "$WORK/mut_guard_${style}.err"; return 2
+    fi
+  done
+  if [ "$caught" -eq 2 ]; then
+    echo "decisive: $mutation changed the direct and escaped type-constant guards"
+    return 1
+  fi
+  if [ "$caught" -eq 0 ]; then return 0; fi
+  echo "INVALID MUTATION: $mutation changed only one guard form"; return 2
+}
+
 if [ -x "$WORK/reach_tool$EXE" ]; then
   check_refusals "$WORK/reach_tool$EXE" || status=1
   check_body_lowering "$WORK/reach_tool$EXE" || { echo "  FAIL: single macro body did not lower and run"; status=1; }
   check_macro_mixed_temps "$WORK/reach_tool$EXE" || { echo "  FAIL: macro mixed-temp and prelude regression failed"; status=1; }
+  check_type_const_guards || { echo "  FAIL: type-constant guards differ from the hosted compiler"; status=1; }
 else
   status=1
 fi
+
+prove_mutation "type-body macro paths ignore the enclosing type's constants" "$MUT_TOP" \
+  "found = @program.lookup_type_path?(path, scope)" \
+  "found = @program.lookup_type_path?(path, @program)" -- check_type_const_mutation lookup || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "a raise in a taken type-body macro branch is dropped" "$REPO/src/compiler/macros/interpreter.iyi" \
+  "fail_at(node, raise_message(node.args))" \
+  "nil" -- check_type_const_mutation raise || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "a declaration-time failure is forgotten before a later constant is declared" "$MUT_INL" \
+  "@@declaration_failures[node] = site" \
+  "nil" -- check_type_const_mutation forward || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "a single macro node body is left unspliced" "$MUT_INL" \
   "return body unless body.is_a?(MacroIf) || body.is_a?(MacroFor) || body.is_a?(MacroExpression)" \
@@ -913,7 +1066,7 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 # Not "wrapped but not spliced": visit(Expressions) splices the wrapper again, so that mutant is equivalent.
 prove_mutation "a single macro node body loses its expansion: the wrapper is empty" "$MUT_INL" \
-  "Expressions.new(splice_inline_sites([body] of ASTNode, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty))" \
+  "Expressions.new(splice_inline_sites([body] of ASTNode, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty, path_lookup))" \
   "Expressions.new([] of ASTNode)" -- check_splice_probe --spliced-body splice_body.iyi expanded:42 empty || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
@@ -933,8 +1086,8 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 # The recursive splice must return names an expansion declared to later sites.
 prove_mutation "a recursive splice drops names an earlier expansion declared" "$MUT_INL" \
-  "out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty))" \
-  "out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals.dup, bindings, facts, keep_empty))" -- check_splice_probe --spliced-local splice_expanded_local.iyi var:s3_local call:s3_local || status=1
+  "out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals, bindings, facts, keep_empty, path_lookup, declarations))" \
+  "out.concat(splice_inline_sites(inner, scope_name, filename, in_lib, normalizer, locals.dup, bindings, facts, keep_empty, path_lookup, declarations))" -- check_splice_probe --spliced-local splice_expanded_local.iyi var:s3_local call:s3_local || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 echo "  $MUTATIONS_RUN mutation proofs run"

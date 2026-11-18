@@ -1,6 +1,6 @@
 module compiler/macros/engine
 
-import compiler/syntax/ast::{ASTNode, Call, Expressions, Macro, MacroLiteral}
+import compiler/syntax/ast::{ASTNode, Call, Expressions, Macro, MacroLiteral, Path}
 import compiler/syntax/parser::{Parser}
 import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
 import compiler/macros/ast
@@ -132,8 +132,8 @@ pub class MacroEngine
   # variables of the def the site is written in (hosted macros.cr 143-147:
   # expand_macro(node, scope, path_lookup, free_vars, a_def)). None at the top
   # level and in a type body.
-  def site_report(site : ASTNode, scope_name : String = "<Program>", bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil) : MacroReport
-    interp = MacroInterpreter.new(nil, flags, scope_name, host_flags_now)
+  def site_report(site : ASTNode, scope_name : String = "<Program>", bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, path_lookup : Proc(Path, ASTNode?)? = nil) : MacroReport
+    interp = MacroInterpreter.new(nil, flags, scope_name, host_flags_now, path_lookup)
     interp.type_facts = facts
     if bound = bindings
       interp.bind_free_vars(bound)

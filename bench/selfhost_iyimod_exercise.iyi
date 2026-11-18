@@ -14,7 +14,7 @@ module BenchSelfhostIyimodExercise
   def self.test_constants
     print "testing format constants (MAGIC, FORMAT_VERSION, Section count)... "
     assert(IyiMod::MAGIC == "IYIMOD\0\0", "MAGIC matches")
-    assert(IyiMod::FORMAT_VERSION == 62_u32, "FORMAT_VERSION matches")
+    assert(IyiMod::FORMAT_VERSION == 64_u32, "FORMAT_VERSION matches")
     assert(Section::Header.value == 1_u16, "Header section id")
     assert(Section::Hashes.value == 2_u16, "Hashes section id")
     assert(Section::Imports.value == 3_u16, "Imports section id")

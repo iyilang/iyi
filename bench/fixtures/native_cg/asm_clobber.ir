@@ -5,12 +5,20 @@ target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:
 declare external i32 @printf(ptr, ...)
 @fmt = private constant [5 x i8] c"%ld\0A\00"
 
-; The template overwrites x0, x1 and x2 with 99. The value %a is live across it and must not sit in one of them.
+; The callee must spill its live value and preserve the caller's x19..x28.
+define internal i64 @clobbered(i64 %seed) {
+entry:
+  %a = add i64 %seed, 1
+  call void () asm sideeffect "mov x19, #99; mov x20, #99; mov x21, #99; mov x22, #99; mov x23, #99; mov x24, #99; mov x25, #99; mov x26, #99; mov x27, #99; mov x28, #99", "~{x19},~{x20},~{x21},~{x22},~{x23},~{x24},~{x25},~{x26},~{x27},~{x28}"()
+  ret i64 %a
+}
+
 define i32 @main() {
 entry:
   %a = add i64 1, 100
-  call void () asm sideeffect "mov x0, #99; mov x1, #99; mov x2, #99", "~{x0},~{x1},~{x2}"()
-  %s = add i64 %a, 0
-  %p = call i32 (ptr, ...) @printf(ptr @fmt, i64 %s)
+  %v = call i64 (i64) @clobbered(i64 100)
+  %sum = add i64 %a, %v
+  %result = sub i64 %sum, 101
+  %p = call i32 (ptr, ...) @printf(ptr @fmt, i64 %result)
   ret i32 0
 }

@@ -641,6 +641,20 @@ check_fpr_output() {
   check_fixture_output "$1" "$FIX_RA/fp_callee_saved.ir"
 }
 
+check_asm_callee_saved() {
+  local drv=$1 prefix="$WORK/asm-callee" result
+  [ -f "$WORK/expect.native_cg.asm_clobber.out" ] || return 2
+  native_run "$drv" linear "$FIX_CG/asm_clobber.ir" "$prefix"
+  result=$?
+  [ "$result" -eq 0 ] || return 2
+  cmp -s "$prefix.status" "$WORK/expect.native_cg.asm_clobber.status" || return 2
+  if ! cmp -s "$prefix.out" "$WORK/expect.native_cg.asm_clobber.out"; then
+    echo "callee clobber changed the caller's output"
+    return 1
+  fi
+  echo "callee-saved asm clobber preserves the caller's output"
+}
+
 check_pointer_boundary() {
   local drv=$1 name=$2 boundary=$3 out="$WORK/$2.boundary.mir"
   if ! "$drv" mir "$FIX_RA/$name.ir" hold >"$out" 2>&1; then
@@ -686,8 +700,8 @@ check_fixed_staging() {
   native_run "$drv" pin "$FIX_RA/fixed_staging.ir" "$prefix"
   result=$?
   [ "$result" -eq 0 ] || return 2
-  if ! cmp -s "$prefix.out" "$WORK/expect.native_regalloc.fixed_staging.out" ||
-     ! cmp -s "$prefix.status" "$WORK/expect.native_regalloc.fixed_staging.status"; then
+  cmp -s "$prefix.status" "$WORK/expect.native_regalloc.fixed_staging.status" || return 2
+  if ! cmp -s "$prefix.out" "$WORK/expect.native_regalloc.fixed_staging.out"; then
     echo "staged physical operands were clobbered"
     return 1
   fi
@@ -813,11 +827,21 @@ prove_mutation "floating-point frame: remove one matched d9 save and restore" \
         i = i + 1' \
   '        acc << m unless m.fp && f.callee_saved[i] == 41
         i = i + 1'
+prove_mutation "floating-point frame: restore FPRs from the wrong offsets" \
+  src/compiler/native/frame.iyi check_fpr_frame \
+  '        m.imm = f.saves_offset + 8_i64 * i.to_i64' \
+  '        m.imm = f.saves_offset + 8_i64 * i.to_i64 + 8_i64'
 prove_mutation "floating-point frame: omit alignment for an odd save" \
   src/compiler/native/frame.iyi check_odd_fpr_frame \
   '  f.frame_size = round_up(offset, stack_align)' \
   '  f.frame_size = offset'
 if [ "$HOST_ID" = darwin-arm64 ]; then
+  prove_mutation "asm: do not save the caller's x19 before a callee clobbers it" \
+    src/compiler/native/frame.iyi check_asm_callee_saved \
+    '    acc << m
+    i = i + 1' \
+    '    acc << m unless fn.name == "clobbered" && f.callee_saved[i] == 19
+    i = i + 1'
   prove_mutation "spill reload: overwrite a staged physical operand" \
     src/compiler/native/regalloc_linear.iyi check_fixed_staging \
     '    blocked = fixed[index] # protect-staged-physical' \

@@ -93,8 +93,7 @@ env:
 permissions: {}
 
 concurrency:
-  # TEST: a group of its own, so this run does not wait behind the stuck queued run in the old one.
-  group: ${{ github.workflow }}-${{ github.ref }}-namespace-test
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
@@ -1968,11 +1967,11 @@ jobs:
           cat /usr/share/zoneinfo/+VERSION 2>/dev/null || echo 'no +VERSION in /usr/share/zoneinfo'
           ls -l /usr/share/zoneinfo | head -3
           tail -c 60 /usr/share/zoneinfo/Africa/Casablanca | od -c | tail -4
-      - name: Node 24, as the editor job has it, for the HTTP/2 oracle
+      - name: Node 22, for the HTTP/2 oracle
         run: |
-          brew list node@24 >/dev/null 2>&1 || brew install node@24
-          echo "$(brew --prefix node@24)/bin" >> "$GITHUB_PATH"
-          "$(brew --prefix node@24)/bin/node" --version
+          brew list node@22 >/dev/null 2>&1 || brew install node@22
+          echo "$(brew --prefix node@22)/bin" >> "$GITHUB_PATH"
+          "$(brew --prefix node@22)/bin/node" --version
       - name: Python's cryptography and Pillow, for the oracles
         run: python3 -m pip install -q --break-system-packages cryptography pillow tzdata
       # The image's database is tzdata 2024a, whose Morocco rule (XXX-2<+01>-1,0/0,J365/23) std/time and
@@ -2064,7 +2063,7 @@ jobs:
   windows-probe:
     needs: [plan, cross-objects]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-probe') }}
-    runs-on: namespace-profile-windows
+    runs-on: windows-2022
     timeout-minutes: 30
     name: "What a Windows binary does, twenty times"
     steps:
@@ -2128,7 +2127,7 @@ jobs:
   windows-collector:
     needs: [plan, cross-objects]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-collector') }}
-    runs-on: namespace-profile-windows
+    runs-on: windows-2022
     timeout-minutes: 30
     name: "The collector on Windows x86_64"
     steps:
@@ -2171,7 +2170,7 @@ jobs:
   windows-runtime:
     needs: [plan, cross-objects]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-runtime') }}
-    runs-on: namespace-profile-windows
+    runs-on: windows-2022
     timeout-minutes: 30
     name: "The concurrency runtime on Windows x86_64"
     steps:
@@ -2247,7 +2246,7 @@ jobs:
   windows-native:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native') }}
-    runs-on: namespace-profile-windows
+    runs-on: windows-2025
     timeout-minutes: 150
     name: "iyi, built and run on Windows"
     steps:
@@ -2597,7 +2596,7 @@ jobs:
   windows-native-gates:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native-gates') }}
-    runs-on: namespace-profile-windows
+    runs-on: windows-2025
     timeout-minutes: 75
     name: "The runtime's exercises and the gates that carry Windows code, on Windows"
     steps:
@@ -2765,7 +2764,7 @@ jobs:
   windows-native-surfaces:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native-surfaces') }}
-    runs-on: namespace-profile-windows
+    runs-on: windows-2025
     timeout-minutes: 75
     name: "The editor and agent surfaces, on Windows"
     steps:
@@ -2839,7 +2838,7 @@ jobs:
   windows-std:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std') }}
-    runs-on: namespace-profile-windows
+    runs-on: windows-2025
     timeout-minutes: 150
     name: "The standard library foundation, gated on Windows"
     steps:
@@ -2896,7 +2895,7 @@ jobs:
   windows-std-platforms:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std-platforms') }}
-    runs-on: namespace-profile-windows
+    runs-on: windows-2025
     timeout-minutes: 90
     name: "Every std exercise from its artifacts, for the platforms this runner is not, on Windows"
     steps:
@@ -2979,7 +2978,7 @@ jobs:
   windows-std-siblings:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-std-siblings') }}
-    runs-on: namespace-profile-windows
+    runs-on: windows-2022
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -3053,7 +3052,7 @@ jobs:
   windows-gates:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-gates') }}
-    runs-on: namespace-profile-windows
+    runs-on: windows-2025
     timeout-minutes: 90
     name: "The language and collector gates, on Windows"
     steps:
@@ -3277,7 +3276,7 @@ jobs:
   windows-compiler-specs:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-compiler-specs') }}
-    runs-on: namespace-profile-windows
+    runs-on: windows-2025
     timeout-minutes: 180
     name: "Crystal's compiler specs, on Windows"
     steps:

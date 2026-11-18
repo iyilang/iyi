@@ -169,6 +169,19 @@
 
 ### Fixed
 
+- **`iyi lsp` no longer recompiles a large module for every question.** A
+  worker is replaced at 512 MB, and one compile of std/autocert (527 MB)
+  or std/acme (514 MB) reaches that by itself. So each successor was over
+  the bound the moment it answered and was replaced after one question,
+  and the next question paid the whole compile again: 2 s a hover, and
+  the CI cursor sweep over those two modules took 620 to 1,400 s. The
+  proxy now learns what a worker costs by its first answer and replaces
+  it only once it has also grown 64 MB past that, which a successor
+  would not save. std/acme's 379 questions take 56 s instead of 486, on
+  18 workers instead of 230. Modules under the bound retire as before.
+  `bench/lsp_memory.py` holds it: 40 hovers in std/autocert may take at
+  most 4 workers (the old proxy took 41).
+
 - **`iyi.sum` now pins every manifest MVS reads.** A version outbid by
   another minimum can still introduce requirements, but previously only
   the selected checkout was checked. Manifest lines are recorded as

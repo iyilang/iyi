@@ -459,6 +459,21 @@ end
     puts "ok"
   end
 
+  def self.test_site_path_lookup
+    print "testing inline macro constant lookup... "
+    refs = MacroSiteScan.scan(Parser.new("{% if TAKEN == 1 %}ok{% end %}").parse)
+    assert(refs.size == 1, "one macro control")
+    lookup = ->(path : Path) : ASTNode? do
+      path.names == ["TAKEN"] ? NumberLiteral.new("1") : nil
+    end
+    engine = MacroEngine.new
+    found = engine.site_report(refs[0].node, "<Program>", nil, nil, lookup)
+    assert(found.failure.nil? && found.output == "ok", "the lookup supplies the constant")
+    missing = engine.site_report(refs[0].node)
+    assert(!missing.failure.nil?, "an unresolved constant still fails")
+    puts "ok"
+  end
+
   # A macro call's expansion is in the file of the call: a def the macro writes is typed with the names
   # that file imports. The fixture is the shape of `getter table : TypeTable`.
   def self.test_expansion_file
@@ -536,6 +551,7 @@ emit_defer_and_chain
     test_fresh_vars
     test_code_generation
     test_type_node
+    test_site_path_lookup
     test_expansion_file
     test_shared_normalizer
     puts "============================================================="

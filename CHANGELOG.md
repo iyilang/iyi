@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Checksum database verification primitives.** The compiler source has
+  Ed25519 signed-note verification, checkpoint and record parsing,
+  height-8 Merkle tile proofs, and a persistent consistency-checked
+  checkpoint cache. Fixture bytes are kept unchanged across Git line-ending
+  settings, and cache writes replace an existing checkpoint through an
+  exclusive same-directory file. Package downloads do not use them yet.
+  Independent cryptographic review is required before anything depends on them.
+- **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
+  The package path and compiler identity accompany its modules, ordered by
+  path, each carrying the same API and doc comments as `iyi mod dump --json`.
+  DIR defaults to the current directory; a missing manifest or an empty
+  package is refused.
+
 - **`iyi test` runs tests at once, says what each named case came to, and
   can run some of them.** Half as many tests build and run together as the
   machine has cores, `-p N` says how many, and the report stays in file
@@ -74,6 +87,20 @@
   `IYI_RELEASE_URL` that is `https://` or `file://` and no other.
 
 ### Fixed
+
+- **`iyi.sum` now pins every manifest MVS reads.** A version outbid by
+  another minimum can still introduce requirements, but previously only
+  the selected checkout was checked. Manifest lines are recorded as
+  `<path> v<version>/iyi.mod h2:<hash>` and checked before the resolver
+  uses their requirements. `mod tidy` retains the manifests the final
+  graph reads, including outbid versions, and `--check` stays read-only.
+  Existing projects outside the module cache have no manifest lines for
+  fetched requirements: the first successful build records them. Until they
+  are recorded, `iyi mod tidy --check` exits 1; run `iyi mod tidy` and
+  commit its resulting `iyi.sum` and any `iyi.mod` changes before upgrading
+  a CI check. If `iyi.sum` cannot be created or written there, the build
+  fails instead of proceeding without the missing lines. Update the sum
+  while it is writable before building read-only.
 
 - **std/big: every mask that picks by a secret goes through
   `ValueBarrier`.** `pow_mod_secret`'s table scan, Montgomery's final

@@ -284,6 +284,9 @@ jobs:
           path: .build
       - run: chmod +x .build/crystal
 
+      - name: Sumdb vectors, on Linux
+        run: ./bin/crystal spec -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv spec/compiler/mod_sumdb_spec.cr
+
       # `-o .build/crystal` is make's "take this as up to date": the compiler
       # came from the job above and its timestamp is younger than the checkout.
       - name: Compiler specs
@@ -781,6 +784,11 @@ jobs:
       # network is not a dependency of the gate.
       - name: Packages resolve by minimal version selection
         run: bash bench/packages_resolve.sh
+
+      # The same pinned package and bytes are hashed on Linux, macOS and
+      # Windows, so the JSON can be compared across the three native hosts.
+      - name: Package doc JSON for iyilang/db v0.5.0
+        run: bash bench/doc_package_db.sh
 
       - name: iyi get writes a requirement
         run: bash bench/packages_get.sh
@@ -1593,6 +1601,11 @@ jobs:
           brew install crystal coreutils pkgconf
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
+      # Run these compiler primitives on macOS itself; the other compiler
+      # spec jobs run on Linux and Windows.
+      - name: Sumdb vectors, on macOS
+        run: CRYSTAL_PATH="lib:$PWD/src" crystal spec -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv spec/compiler/mod_sumdb_spec.cr
+
       # The same diet the Linux tarball went on, from the same recipe file
       # (`scripts/build-static-llvm.sh`): 0.8.0's darwin package carried
       # brew's shared libLLVM in `lib/` and, by the bundler's fixed point,
@@ -1627,6 +1640,9 @@ jobs:
       # `/usr/lib` and `/System`.
       - name: Build `iyi`, its daemon, and the tarball
         run: make iyi-tarball LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+
+      - name: Manifest and tree checksum specs
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" ./bin/crystal spec spec/compiler/mod_sum_spec.cr
 
       - name: Samples
         run: |
@@ -1772,6 +1788,9 @@ jobs:
         run: |
           bash bench/packages_resolve.sh
           bash bench/packages_get.sh
+
+      - name: Package doc JSON for iyilang/db v0.5.0
+        run: bash bench/doc_package_db.sh
 
       - name: The test verb (III.8)
         run: bash bench/test_verb.sh
@@ -2594,6 +2613,10 @@ jobs:
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
 
+      - name: Manifest and tree checksum specs
+        shell: cmd
+        run: .\bin\crystal spec --no-color spec\compiler\mod_sum_spec.cr
+
       # Every exercise under bench/, run by the compiler built above. The
       # exclusions are named one by one, because a list nobody has to
       # justify is how a target quietly stops being tested:
@@ -2692,6 +2715,10 @@ jobs:
       # consumer could not name and so never emitted. And SafeReach's
       # proof, whose refusals spelled the places they name in full on
       # Windows while the header beside them spelled them relative.
+      - name: Package doc JSON for iyilang/db v0.5.0
+        shell: bash
+        run: bash bench/doc_package_db.sh
+
       - name: The gates that carry Windows code, on Windows
         shell: bash
         run: |
@@ -3261,6 +3288,10 @@ jobs:
       - name: Build the fork's compiler
         shell: cmd
         run: make -f Makefile.win crystal
+
+      - name: Sumdb vectors, on Windows
+        shell: cmd
+        run: .\bin\crystal.bat spec -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv spec\compiler\mod_sumdb_spec.cr
 
       # A spec that builds a program runs the compiler by the name below;
       # `bin/crystal` is a shell script.

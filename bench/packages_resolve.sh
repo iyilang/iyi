@@ -35,6 +35,10 @@ case "$(uname -s)" in
     WORK="$(cygpath -m "$WORK")"
     ;;
 esac
+# The fixture repositories must not inherit a user's signing or URL
+# rewrite configuration. Each test supplies its own config when needed.
+printf '[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n' > "$WORK/fixture.gitconfig"
+export GIT_CONFIG_GLOBAL="$WORK/fixture.gitconfig" GIT_CONFIG_NOSYSTEM=1
 export IYI_CACHE_DIR="$WORK/cache"
 export IYI_MOD_MIRROR="$WORK/mirror"
 
@@ -45,7 +49,9 @@ mkrepo() { git init -q "$1" && git -C "$1" config user.email t@t && git -C "$1" 
 
 # ── The fixture: two packages, three versions, one raise ─────────────────
 mkrepo work/liba
-printf 'module example.test/user/liba\n' > work/liba/iyi.mod
+# Preserve committed CRLF bytes even when the caller's git asks for LF.
+printf 'iyi.mod -text\n' > work/liba/.gitattributes
+printf 'module example.test/user/liba\r\n' > work/liba/iyi.mod
 printf 'module liba\n\npub def greeting : String\n  "hello from liba v1.0.0"\nend\n' > work/liba/liba.iyi
 # A package module that uses the standard library: `std/file` is iyi's,
 # found where every program finds it, and never the consuming project's
@@ -81,7 +87,10 @@ IYI
 
 # ── 1. MVS: the highest of the minimums, observably ──────────────────────
 step "MVS picks the raised version"
-if ! (cd app && "$IYI" build main.iyi -o app) > build.log 2>&1; then
+# Git normally rewrites text under this configuration. The manifest in the
+# tag is explicitly binary, so its CRLF bytes must reach the hash intact.
+printf '[core]\n\tautocrlf = true\n\teol = crlf\n' > crlf.gitconfig
+if ! (cd app && GIT_CONFIG_GLOBAL="$WORK/crlf.gitconfig" "$IYI" build main.iyi -o app) > build.log 2>&1; then
   echo "build failed:"
   tail -8 build.log
   exit 1
@@ -90,6 +99,158 @@ fi
 grep -q 'hello from liba v1.1.0' answers.txt || { echo "v1.1.0 never ran:"; cat answers.txt; exit 1; }
 grep -q 'v1.0.0' answers.txt && { echo "the version MVS discarded still ran:"; cat answers.txt; exit 1; }
 grep -q 'green' answers.txt || { echo "the sub-module import lost:"; cat answers.txt; exit 1; }
+
+# The older liba manifest is read by MVS even though libb raises the
+# selected tree to v1.1.0. Move only that older tag to a manifest that
+# introduces libc, then clear the cache. Without a manifest sum the build
+# silently adds libc while the selected liba tree still matches.
+step "an outbid manifest moved to add a requirement is refused"
+if command -v sha256sum > /dev/null 2>&1; then
+  sha256() { sha256sum | cut -c1-64; }
+else
+  sha256() { shasum -a 256 | cut -c1-64; }
+fi
+manifest_h2() {
+  inner="$(sha256)"
+  printf '%s f iyi.mod\n' "$inner" | sha256 | awk '{ print "h2:" $0 }'
+}
+old_commit="$(git -C work/liba rev-parse v1.0.0)"
+git -C work/liba show "$old_commit:iyi.mod" > manifest-crlf
+tr -d '\r' < manifest-crlf > manifest-lf
+cmp -s manifest-crlf manifest-lf && { echo "the tag does not contain CRLF bytes"; exit 1; }
+old_hash="$(manifest_h2 < manifest-crlf)"
+lf_hash="$(manifest_h2 < manifest-lf)"
+[ "$old_hash" != "$lf_hash" ] || { echo "CRLF and LF have the same manifest hash"; exit 1; }
+grep -Fx "example.test/user/liba v1.0.0/iyi.mod $old_hash" app/iyi.sum > /dev/null || {
+  echo "the CRLF manifest was not recorded from its exact bytes:"; cat app/iyi.sum; exit 1;
+}
+# A falsely normalized pin must be refused, not accepted as the CRLF file.
+cp app/iyi.sum app/iyi.sum.crlf
+awk -v hash="$lf_hash" '$1 == "example.test/user/liba" && $2 == "v1.0.0/iyi.mod" { $3 = hash } { print }' app/iyi.sum.crlf > app/iyi.sum
+cp app/iyi.sum app/iyi.sum.lf
+(cd app && "$IYI" build main.iyi -o app) > normalized-manifest.log 2>&1
+if [ "$?" -eq 0 ] ||
+   ! grep -F "example.test/user/liba v1.0.0/iyi.mod is not what it was" normalized-manifest.log > /dev/null ||
+   ! grep -F "$lf_hash" normalized-manifest.log > /dev/null ||
+   ! grep -F "$old_hash" normalized-manifest.log > /dev/null; then
+  echo "a normalized manifest pin was not refused with both hashes:"
+  cat normalized-manifest.log
+  exit 1
+fi
+cmp -s app/iyi.sum app/iyi.sum.lf || { echo "a refused normalized pin changed iyi.sum"; exit 1; }
+mv app/iyi.sum.crlf app/iyi.sum
+echo "  LF pin $lf_hash refused against CRLF bytes $old_hash"
+cp app/iyi.sum app/iyi.sum.before-move
+mkrepo work/libc
+printf 'module example.test/user/libc\n' > work/libc/iyi.mod
+printf 'module libc\n' > work/libc/libc.iyi
+git -C work/libc add -A && git -C work/libc commit -qm one && git -C work/libc tag v1.0.0
+git clone -q --bare work/libc mirror/example.test/user/libc
+git -C work/liba checkout -q --detach "$old_commit"
+printf 'require example.test/user/libc v1.0.0\n' >> work/liba/iyi.mod
+new_hash="$(manifest_h2 < work/liba/iyi.mod)"
+[ "$old_hash" != "$new_hash" ] || { echo "the fixture did not change the manifest hash"; exit 1; }
+git -C work/liba commit -qam moved && git -C work/liba tag -f v1.0.0 > /dev/null
+git -C work/liba push -q -f "$WORK/mirror/example.test/user/liba" refs/tags/v1.0.0
+rm -rf "$IYI_CACHE_DIR"
+(cd app && "$IYI" build main.iyi -o app) > moved-manifest.log 2>&1
+moved_status=$?
+if [ "$moved_status" -eq 0 ]; then
+  echo "the moved outbid manifest was accepted:"
+  grep -F 'example.test/user/libc v1.0.0' app/iyi.sum || cat app/iyi.sum
+  exit 1
+fi
+grep -F "example.test/user/liba v1.0.0/iyi.mod is not what it was" moved-manifest.log > /dev/null &&
+  grep -F "$old_hash" moved-manifest.log > /dev/null &&
+  grep -F "$new_hash" moved-manifest.log > /dev/null || {
+  echo "the moved manifest was not refused naming both hashes:"
+  cat moved-manifest.log
+  exit 1
+}
+cmp -s app/iyi.sum app/iyi.sum.before-move || { echo "a refused build changed iyi.sum"; exit 1; }
+git -C work/liba tag -f v1.0.0 "$old_commit" > /dev/null
+git -C work/liba push -q -f "$WORK/mirror/example.test/user/liba" refs/tags/v1.0.0
+rm -rf "$IYI_CACHE_DIR"
+(cd app && "$IYI" build main.iyi -o app) > restored-manifest.log 2>&1 || {
+  echo "the restored graph failed:"; cat restored-manifest.log; exit 1;
+}
+grep -Fx "example.test/user/liba v1.0.0/iyi.mod $old_hash" app/iyi.sum > /dev/null || {
+  echo "no independently computed sum for the outbid manifest:"; cat app/iyi.sum; exit 1;
+}
+for entry in 'example.test/user/liba v1.1.0' 'example.test/user/liba v1.1.0/iyi.mod' 'example.test/user/libb v1.0.0/iyi.mod'; do
+  grep -F "$entry h2:" app/iyi.sum > /dev/null || { echo "missing $entry:"; cat app/iyi.sum; exit 1; }
+done
+
+# A cache spelled as a native, mixed-case drive path must address the same
+# checkout without changing the portable module and manifest keys.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    native_cache="$(cygpath -w "$IYI_CACHE_DIR" | tr '[:upper:]' '[:lower:]')"
+    cp app/iyi.sum app/iyi.sum.before-native
+    (cd app && IYI_CACHE_DIR="$native_cache" IYI_MOD_MIRROR="$WORK/no-mirror" "$IYI" build main.iyi -o app) > native-cache.log 2>&1 || {
+      echo "a native mixed-case cache path did not reuse the checkout:"; cat native-cache.log; exit 1;
+    }
+    cmp -s app/iyi.sum app/iyi.sum.before-native || {
+      echo "a native mixed-case cache path changed portable sum keys:"; cat app/iyi.sum; exit 1;
+    }
+    echo "  native backslashes and mixed case reused the cache without changing sum keys"
+    ;;
+esac
+echo "  $old_hash -> $new_hash refused; the old graph and sum remain"
+
+step "tidy keeps an outbid manifest and --check writes nothing"
+printf 'example.test/user/gone v1.0.0 h2:0000000000000000000000000000000000000000000000000000000000000000\n' >> app/iyi.sum
+cp app/iyi.mod app/iyi.mod.before-tidy
+cp app/iyi.sum app/iyi.sum.before-tidy
+(cd app && "$IYI" mod tidy --check) > tidy-check.log 2>&1
+[ "$?" -eq 1 ] || { echo "tidy --check did not report the stale entry:"; cat tidy-check.log; exit 1; }
+cmp -s app/iyi.mod app/iyi.mod.before-tidy && cmp -s app/iyi.sum app/iyi.sum.before-tidy || {
+  echo "tidy --check wrote to the project"; exit 1;
+}
+(cd app && "$IYI" mod tidy) > tidy.log 2>&1 || { echo "tidy failed:"; cat tidy.log; exit 1; }
+grep -Fx "example.test/user/liba v1.0.0/iyi.mod $old_hash" app/iyi.sum > /dev/null || {
+  echo "tidy dropped the outbid manifest:"; cat app/iyi.sum; exit 1;
+}
+grep -qF 'example.test/user/gone ' app/iyi.sum && { echo "tidy kept the stale entry"; exit 1; }
+cmp -s app/iyi.mod app/iyi.mod.before-tidy || { echo "tidy changed the fixture's requirements"; exit 1; }
+
+# A project predating manifest lines must get them without changing its
+# content pins. The check-only command reports the change without writing.
+cp app/iyi.sum app/iyi.sum.with-manifests
+awk '$2 !~ /\/iyi\.mod$/ { print }' app/iyi.sum.with-manifests > app/iyi.sum
+cp app/iyi.sum app/iyi.sum.old-format
+(cd app && "$IYI" mod tidy --check) > tidy-old-check.log 2>&1
+[ "$?" -eq 1 ] || { echo "tidy --check did not report missing manifests:"; cat tidy-old-check.log; exit 1; }
+cmp -s app/iyi.sum app/iyi.sum.old-format || { echo "tidy --check recorded manifests"; exit 1; }
+(cd app && "$IYI" mod tidy) > tidy-old.log 2>&1 || { echo "tidy did not record manifests:"; cat tidy-old.log; exit 1; }
+cmp -s app/iyi.sum app/iyi.sum.with-manifests || { echo "tidy changed content pins while recording manifests"; exit 1; }
+cp app/iyi.sum.old-format app/iyi.sum
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "  (read-only sum permissions need a Windows ACL; covered by the checksum spec where enforced)"
+    ;;
+  *)
+    chmod a-w app/iyi.sum
+    if [ -w app/iyi.sum ]; then
+      echo "  (this user can write the read-only sum; permission refusal is not asked)"
+    else
+      (cd app && "$IYI" build main.iyi -o app) > readonly-sum.log 2>&1
+      readonly_status=$?
+      chmod u+w app/iyi.sum
+      if [ "$readonly_status" -eq 0 ] || ! grep -qi 'iyi.sum' readonly-sum.log; then
+        echo "a read-only old sum did not refuse the build:"; cat readonly-sum.log; exit 1;
+      fi
+      cmp -s app/iyi.sum app/iyi.sum.old-format || { echo "a refused build changed the read-only sum"; exit 1; }
+      echo "  a read-only old sum refuses a build that needs manifest pins"
+    fi
+    chmod u+w app/iyi.sum
+    ;;
+esac
+(cd app && "$IYI" build main.iyi -o app) > build-old.log 2>&1 || {
+  echo "a build did not upgrade the old sum:"; cat build-old.log; exit 1;
+}
+cmp -s app/iyi.sum app/iyi.sum.with-manifests || { echo "the first build did not add exactly the missing manifest pins"; exit 1; }
+echo "  old sum: tidy --check exits 1, then tidy or build records the manifest pins"
 
 # ── 2. The cache is the second build's source ────────────────────────────
 step "a fetched checkout is read, not refetched"
@@ -165,7 +326,7 @@ step "a mutated checkout is refused while iyi.sum is honest"
 # ordinary answer. Asking the sum file ties the tree this mutates to the
 # entry this expects the refusal about, whatever MVS chose. The layout is
 # the fetcher's: `<cache>/mod/<path>@v<version>`.
-pinned="$(awk '$1 == "example.test/user/liba" { print $2 }' app/iyi.sum)"
+pinned="$(awk '$1 == "example.test/user/liba" && $2 !~ /\/iyi\.mod$/ { print $2 }' app/iyi.sum)"
 [ -n "$pinned" ] || { echo "iyi.sum pins no version for liba:"; cat app/iyi.sum; exit 1; }
 checkout="$(find "$IYI_CACHE_DIR" -path "*liba@$pinned*" -name liba.iyi | head -1)"
 [ -n "$checkout" ] || { echo "no liba@$pinned checkout under $IYI_CACHE_DIR"; exit 1; }
@@ -307,7 +468,10 @@ s1_of() {
 }
 cp app/iyi.sum app/iyi.sum.good
 : > app/iyi.sum.s1
-while read -r path version _; do
+while read -r path version hash; do
+  case "$version" in
+    */iyi.mod) continue ;;
+  esac
   tree="$IYI_CACHE_DIR/mod/$path@$version"
   [ -f "$tree/iyi.mod" ] || { echo "no checkout at $tree for the line $path $version"; exit 1; }
   printf '%s %s s1:%s\n' "$path" "$version" "$(s1_of "$tree")" >> app/iyi.sum.s1
@@ -343,7 +507,7 @@ if [ $? -ne 0 ] || grep -q 's1:' restated2.log; then
   exit 1
 fi
 # And the line a checkout does not match: liba's, with one digit moved.
-liba_s1="$(awk '$1 == "example.test/user/liba" { print $3 }' app/iyi.sum.s1)"
+liba_s1="$(awk '$1 == "example.test/user/liba" && $2 == "v1.1.0" { print $3 }' app/iyi.sum.s1)"
 case "$liba_s1" in
   s1:0*) wrong_s1="s1:1${liba_s1#s1:0}" ;;
   *) wrong_s1="s1:0${liba_s1#s1:?}" ;;
@@ -790,6 +954,161 @@ rm docmods/app/twice.iyi
   echo "the module in mods was not documented:"; cat mods-doc.txt; exit 1; }
 diff -u twice-doc.txt mods-doc.txt > mods-diff.txt 2>&1 || {
   echo "the artifact in mods and the source answered differently:"; head -10 mods-diff.txt; exit 1; }
+
+# Package JSON is the registry's data, not a second rendering of the API.
+# The documented modules are made in a different order from their paths;
+# private files, tests, lib and nested packages do not belong to the array.
+step "iyi doc --json lists the package's artifact APIs in path order"
+mkdir -p "doc package/extra" "doc package/lib" "doc package/other"
+printf 'module example.test/user/docpkg\r\n' > "doc package/iyi.mod"
+printf 'module first\n\n# The first answer.\npub def answer : Int32\n  42\nend\n' > "doc package/first.iyi"
+printf 'module a0\n\n# The zero answer.\npub def answer : Int32\n  0\nend\n' > "doc package/a0.iyi"
+printf 'module extra/second\n\n# The second answer.\npub def answer : Int32\n  7\nend\n' > "doc package/extra/second.iyi"
+printf 'module private_only\n\ndef hidden : Int32\n  1\nend\n' > "doc package/private_only.iyi"
+printf 'module ignored_test\n\npub def ignored : Int32\n  1\nend\n' > "doc package/ignored_test.iyi"
+printf 'module foreign\n\npub def ignored : Int32\n  1\nend\n' > "doc package/lib/foreign.iyi"
+printf 'module example.test/user/other\n' > "doc package/other/iyi.mod"
+printf 'module other/foreign\n\npub def ignored : Int32\n  1\nend\n' > "doc package/other/foreign.iyi"
+printf 'import first\nimport extra/second\nimport a0\n' > "doc package/entry.iyi"
+# A same-named module in the calling directory must not replace DIR's own.
+printf 'module first\n\npub def wrong : Int32\n  0\nend\n' > first.iyi
+
+"$IYI" doc --json "$WORK/doc package" > package-doc.json 2> package-doc.err || {
+  echo "package documentation failed:"; cat package-doc.err; exit 1; }
+(cd "doc package" && "$IYI" doc --json) > package-doc-again.json 2> package-doc-again.err || {
+  echo "documentation from the package failed:"; cat package-doc-again.err; exit 1; }
+diff -u package-doc.json package-doc-again.json > package-doc-diff.txt || {
+  echo "package documentation changed between runs:"; cat package-doc-diff.txt; exit 1; }
+"$IYI" doc "$WORK/doc package" --json > package-doc-flag-last.json 2> package-doc-flag-last.err || {
+  echo "documentation with --json last failed:"; cat package-doc-flag-last.err; exit 1; }
+diff -u package-doc.json package-doc-flag-last.json > package-doc-flag-diff.txt || {
+  echo "the position of --json changed the output:"; cat package-doc-flag-diff.txt; exit 1; }
+# A CRLF manifest and an LF manifest name the same package. The output's
+# own line ending must remain LF on every host.
+printf 'module example.test/user/docpkg\n' > "doc package/iyi.mod"
+"$IYI" doc --json "$WORK/doc package" > package-doc-lf.json 2> package-doc-lf.err || {
+  echo "documentation with an LF manifest failed:"; cat package-doc-lf.err; exit 1; }
+diff -u package-doc.json package-doc-lf.json > package-doc-line-diff.txt || {
+  echo "manifest line endings changed the output:"; cat package-doc-line-diff.txt; exit 1; }
+printf 'module example.test/user/docpkg\r\n' > "doc package/iyi.mod"
+
+# Windows paths include a drive and may be given with native backslashes.
+# POSIX hosts instead exercise a symlink to the package, including macOS's
+# /var and /private/var spelling of its temporary directory.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    native_package="$(cygpath -w "$WORK/doc package")"
+    "$IYI" doc --json "$native_package" > package-doc-alias.json 2> package-doc-alias.err || {
+      echo "documentation through a native drive path failed:"; cat package-doc-alias.err; exit 1; }
+    ;;
+  *)
+    ln -s "$WORK/doc package" "alias package" || exit 1
+    "$IYI" doc --json "$WORK/alias package" > package-doc-alias.json 2> package-doc-alias.err || {
+      echo "documentation through a symlink failed:"; cat package-doc-alias.err; exit 1; }
+    ;;
+esac
+diff -u package-doc.json package-doc-alias.json > package-doc-alias-diff.txt || {
+  echo "the package path spelling changed the output:"; cat package-doc-alias-diff.txt; exit 1; }
+(cd "doc package" && "$IYI" build --no-codegen --emit-iyimod artifacts entry.iyi) > package-emit.log 2>&1 || {
+  echo "building the comparison artifacts failed:"; cat package-emit.log; exit 1; }
+"$IYI" mod dump --json "doc package/artifacts/a0.iyimod" > package-a0.json || exit 1
+"$IYI" mod dump --json "doc package/artifacts/extra/second.iyimod" > package-second.json || exit 1
+"$IYI" mod dump --json "doc package/artifacts/first.iyimod" > package-first.json || exit 1
+
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) PYTHON=python ;;
+  *) PYTHON=python3 ;;
+esac
+cat > package-doc-check.py <<'PY'
+import json
+import pathlib
+import sys
+
+def read(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+raw = pathlib.Path(sys.argv[1]).read_bytes()
+assert raw.endswith(b"\n") and b"\r" not in raw, "JSON must use LF, not CRLF"
+data = json.loads(raw)
+assert set(data) == {"package", "compiler", "modules"}, "package schema changed"
+assert data["package"] == "example.test/user/docpkg"
+assert isinstance(data["compiler"], str) and data["compiler"]
+modules = data["modules"]
+names = [entry["module"] for entry in modules]
+assert all("\\" not in name for name in names), "module paths must use /"
+assert names == sorted(names, key=lambda name: name.encode("utf-8")), "modules not in byte order"
+assert names == ["a0", "extra/second", "first"]
+for entry, filename, doc in zip(
+    modules,
+    ["package-a0.json", "package-second.json", "package-first.json"],
+    ["The zero answer.", "The second answer.", "The first answer."],
+):
+    assert set(entry) == {"module", "api"}, "module schema changed"
+    assert entry["api"] == read(filename), "API differs from mod dump"
+    assert entry["api"]["module"] == entry["module"]
+    assert entry["api"]["functions"][0]["doc"] == doc
+PY
+"$PYTHON" package-doc-check.py package-doc.json || exit 1
+"$PYTHON" - <<'PY'
+import json
+from pathlib import Path
+
+raw = Path("package-doc.json").read_bytes()
+Path("package-doc-bad-eol.json").write_bytes(raw[:-1] + b"\r\n")
+data = json.loads(raw)
+del data["compiler"]
+Path("package-doc-bad-schema.json").write_bytes((json.dumps(data) + "\n").encode("utf-8"))
+data = json.loads(raw)
+data["modules"][1]["module"] = "extra\\second"
+Path("package-doc-bad-slash.json").write_bytes((json.dumps(data) + "\n").encode("utf-8"))
+data = json.loads(raw)
+data["modules"].reverse()
+Path("package-doc-bad-order.json").write_bytes((json.dumps(data) + "\n").encode("utf-8"))
+PY
+for defect in eol schema slash order; do
+  if "$PYTHON" package-doc-check.py "package-doc-bad-$defect.json" > package-doc-broken.log 2>&1; then
+    echo "the package JSON gate accepted broken $defect"; exit 1
+  fi
+  case "$defect" in
+    eol) expected="JSON must use LF" ;;
+    schema) expected="package schema changed" ;;
+    slash) expected="module paths must use /" ;;
+    order) expected="modules not in byte order" ;;
+  esac
+  grep -Fq "$expected" package-doc-broken.log || {
+    echo "broken $defect failed for the wrong reason:"; cat package-doc-broken.log; exit 1; }
+  echo "package JSON gate refused broken $defect"
+done
+
+mkdir -p doc-empty doc-no-manifest
+printf 'module example.test/user/empty\n' > doc-empty/iyi.mod
+printf 'module empty\n\ndef hidden : Int32\n  1\nend\n' > doc-empty/empty.iyi
+for dir in doc-empty doc-no-manifest; do
+  if "$IYI" doc --json "$WORK/$dir" > "$dir.out" 2>&1; then
+    echo "$dir was accepted as an exporting package"; exit 1
+  fi
+  if grep -Ei 'unhandled exception|backtrace' "$dir.out" >/dev/null; then
+    echo "$dir produced a trace:"; cat "$dir.out"; exit 1
+  fi
+done
+grep -q 'no exporting modules' doc-empty.out || { cat doc-empty.out; exit 1; }
+grep -q 'no iyi.mod' doc-no-manifest.out || { cat doc-no-manifest.out; exit 1; }
+
+# A mixed-case module is outside the module grammar, including on a
+# case-insensitive filesystem. It must be refused rather than documented
+# under a differently cased path.
+mkdir -p doc-invalid-case
+printf 'module example.test/user/case\n' > doc-invalid-case/iyi.mod
+printf 'module Mixed\n\npub def answer : Int32\n  1\nend\n' > doc-invalid-case/Mixed.iyi
+if "$IYI" doc --json "$WORK/doc-invalid-case" > doc-invalid-case.out 2>&1; then
+  echo "a mixed-case module was accepted"; exit 1
+fi
+if grep -Ei 'unhandled exception|backtrace' doc-invalid-case.out >/dev/null; then
+  echo "mixed-case module produced a trace:"; cat doc-invalid-case.out; exit 1
+fi
+grep -q 'Mixed' doc-invalid-case.out || {
+  echo "the mixed-case refusal did not name the invalid path:"; cat doc-invalid-case.out; exit 1; }
 
 echo "workdir $WORK"
 echo "packages gate: every step held"

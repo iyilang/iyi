@@ -11,7 +11,7 @@ import compiler/syntax/visitor::{Visitor}
 #
 # This file is the port of the hosted format in src/compiler/iyi/iyimod.cr and
 # follows it version for version. The change log below is the port's record of
-# what moved, from v50 (the version this port was written against) to v62, in
+# what moved, from v50 (the version this port was written against) to v64, in
 # the order the hosted compiler made each change (`git log -S'FORMAT_VERSION'`
 # on the hosted file):
 #
@@ -28,8 +28,10 @@ import compiler/syntax/visitor::{Visitor}
 #        entered the file on 2026-11-04 (39cd0511d) with no bump of its own.
 #   v61  No layout change: symbols are spelled without `@`.
 #   v62  Header: unsafe, the reason of the @[Unsafe] mark, a string last.
+#   v63  Spawns: pinned bit and pin records. Share annotations carry lends.
+#   v64  Reaches: owning type for pin records.
 #
-# Section numbers in use at v62: 1-19 as before, 20 Inputs, 21 SymbolLiterals,
+# Section numbers in use at v64: 1-19 as before, 20 Inputs, 21 SymbolLiterals,
 # 64 Layouts, 65 SourcePositions, 66 Spawns, 67 Reaches. 22 to 63 are free.
 #
 # Container layout:
@@ -40,7 +42,7 @@ import compiler/syntax/visitor::{Visitor}
 #   payloads:       in table order
 
 pub MAGIC          = "IYIMOD\0\0"
-pub FORMAT_VERSION = 62_u32
+pub FORMAT_VERSION = 64_u32
 
 pub enum Section : UInt16
   Header          =  1_u16
@@ -316,9 +318,20 @@ pub class SpawnRecord
   property parallel : Bool
   property asked : Bool
   property reason : String
+  property pinned : Bool
 
   def initialize(@owner : String, @digest : String, @line : Int32, @column : Int32,
-                 @parallel : Bool, @asked : Bool, @reason : String)
+                 @parallel : Bool, @asked : Bool, @reason : String, @pinned : Bool = false)
+  end
+end
+
+pub class PinRecord
+  property call : String
+  property line : Int32
+  property column : Int32
+  property reason : String
+
+  def initialize(@call : String, @line : Int32, @column : Int32, @reason : String)
   end
 end
 
@@ -332,9 +345,10 @@ pub class ReachRecord
   property path : Array(String)
   property why : String
   property module_name : String
+  property owning : String
 
   def initialize(@function : String, @label : String, @type : String, @kind : String,
-                 @use : String, @path : Array(String), @why : String, @module_name : String)
+                 @use : String, @path : Array(String), @why : String, @module_name : String, @owning : String = "")
   end
 end
 
@@ -381,6 +395,7 @@ pub class Artifact
   property unsafe : String
   # Where each `g.spawn` in the module runs (`Section::Spawns`).
   property spawns : Array(SpawnRecord)
+  property pins : Array(PinRecord)
   # What each function reaches of module state. Nil when the section is absent (`Section::Reaches`).
   property reaches : Array(ReachRecord)?
   # Where the nodes of each body in `mono_bodies`, and of the initialiser, were written (`Section::SourcePositions`).
@@ -427,6 +442,7 @@ pub class Artifact
     @initialiser_positions : Array(SourcePosition) = [] of SourcePosition,
   )
     @spawns = [] of SpawnRecord
+    @pins = [] of PinRecord
     @reaches = nil
   end
 
@@ -742,7 +758,7 @@ end
 
 pub class IyiMod
   MAGIC               = "IYIMOD\0\0"
-  FORMAT_VERSION      = 62_u32
+  FORMAT_VERSION      = 64_u32
   TOP_LEVEL_CONTAINER = "::"
   MACRO_HOOKS         = ["included", "extended", "inherited", "method_added", "finished"]
 
@@ -923,6 +939,7 @@ pub class IyiMod
     inputs = [] of String
     symbol_literals = [] of String
     spawns = [] of SpawnRecord
+    pins = [] of PinRecord
     reaches : Array(ReachRecord)? = nil
     source_positions : SourcePositionsDecoded? = nil
     body_positions = {} of String => Array(SourcePosition)
@@ -972,7 +989,10 @@ pub class IyiMod
       when 20_u16 then inputs = decode_strings(payload, path)
       when 21_u16 then symbol_literals = decode_strings(payload, path)
       when 65_u16 then source_positions = decode_source_positions(payload, path)
-      when 66_u16 then spawns = decode_spawns(payload, path)
+      when 66_u16
+        decoded_spawns = decode_spawns(payload, path)
+        spawns = decoded_spawns[0]
+        pins = decoded_spawns[1]
       when 67_u16 then reaches = decode_reaches(payload, path)
       else
         # Unknown section skipped
@@ -1033,6 +1053,7 @@ pub class IyiMod
       initialiser_positions,
     )
     artifact.spawns = spawns
+    artifact.pins = pins
     artifact.reaches = reaches
     artifact
   end
@@ -1108,7 +1129,7 @@ pub class IyiMod
     sections << {11_u16, encode_requires(artifact)} unless artifact.requires.empty?
     sections << {20_u16, encode_strings(artifact.inputs)} unless artifact.inputs.empty?
     sections << {4_u16, encode_exports(artifact)}
-    sections << {66_u16, encode_spawns(artifact.spawns)} unless artifact.spawns.empty?
+    sections << {66_u16, encode_spawns(artifact.spawns, artifact.pins)} unless artifact.spawns.empty? && artifact.pins.empty?
     if reaches = artifact.reaches
       sections << {67_u16, encode_reaches(reaches)}
     end
@@ -1266,7 +1287,7 @@ pub class IyiMod
   end
 
   # `Section::Spawns`: where each `g.spawn` ran, and whether it was asked to.
-  def self.encode_spawns(records : Array(SpawnRecord)) : String
+  def self.encode_spawns(records : Array(SpawnRecord), pins : Array(PinRecord)) : String
     w = IOBuffer.new
     w.write_u32_le(records.size.to_u64.to_u32)
     i = 0
@@ -1276,14 +1297,24 @@ pub class IyiMod
       w.write_string(record.digest)
       w.write_i32_le(record.line)
       w.write_i32_le(record.column)
-      w.write_byte((record.parallel ? 1_u8 : 0_u8) | (record.asked ? 2_u8 : 0_u8))
+      w.write_byte((record.parallel ? 1_u8 : 0_u8) | (record.asked ? 2_u8 : 0_u8) | (record.pinned ? 4_u8 : 0_u8))
       w.write_string(record.reason)
+      i = i + 1
+    end
+    w.write_u32_le(pins.size.to_u64.to_u32)
+    i = 0
+    while i < pins.size
+      pin = pins[i]
+      w.write_string(pin.call)
+      w.write_i32_le(pin.line)
+      w.write_i32_le(pin.column)
+      w.write_string(pin.reason)
       i = i + 1
     end
     w.to_s
   end
 
-  def self.decode_spawns(payload : String, path : String = "") : Array(SpawnRecord)
+  def self.decode_spawns(payload : String, path : String = "") : {Array(SpawnRecord), Array(PinRecord)}
     r = BinaryReader.new(payload, path)
     count = r.read_count(21)
     res = [] of SpawnRecord
@@ -1295,10 +1326,20 @@ pub class IyiMod
       column = r.read_i32_le
       bits = r.read_u8
       reason = r.read_string
-      res << SpawnRecord.new(owner, digest, line, column, (bits & 1_u8) != 0_u8, (bits & 2_u8) != 0_u8, reason)
+      res << SpawnRecord.new(owner, digest, line, column, (bits & 1_u8) != 0_u8, (bits & 2_u8) != 0_u8, reason, (bits & 4_u8) != 0_u8)
       i = i + 1
     end
-    res
+    pins = [] of PinRecord
+    count = r.read_count(16)
+    i = 0
+    while i < count
+      call = r.read_string
+      line = r.read_i32_le
+      column = r.read_i32_le
+      pins << PinRecord.new(call, line, column, r.read_string)
+      i = i + 1
+    end
+    {res, pins}
   end
 
   # `Section::Reaches`: what each function reaches of module state.
@@ -1316,6 +1357,7 @@ pub class IyiMod
       w.write_strings(record.path)
       w.write_string(record.why)
       w.write_string(record.module_name)
+      w.write_string(record.owning)
       i = i + 1
     end
     w.to_s
@@ -1335,7 +1377,7 @@ pub class IyiMod
       path = r.read_strings
       why = r.read_string
       module_name = r.read_string
-      res << ReachRecord.new(fn_name, label, type_name, kind, use_site, path, why, module_name)
+      res << ReachRecord.new(fn_name, label, type_name, kind, use_site, path, why, module_name, r.read_string)
       i = i + 1
     end
     res
@@ -2666,7 +2708,16 @@ pub class IyiMod
         record = artifact.spawns[i]
         where = record.owner.empty? ? "(top level)" : record.owner
         verdict = record.parallel ? "parallel" : "in its spawner's unit: " + record.reason
-        res = res + "  " + where + " " + record.line.to_s + ":" + record.column.to_s + " " + verdict + (record.asked ? " (asked)" : "") + "\n"
+        res = res + "  " + where + " " + record.line.to_s + ":" + record.column.to_s + " " + verdict + (record.asked ? " (asked)" : "") + (record.pinned ? " (pinned)" : "") + "\n"
+        i = i + 1
+      end
+    end
+    unless artifact.pins.empty?
+      res = res + "pins\n"
+      i = 0
+      while i < artifact.pins.size
+        pin = artifact.pins[i]
+        res = res + "  " + pin.call + " " + pin.line.to_s + ":" + pin.column.to_s + " " + pin.reason + "\n"
         i = i + 1
       end
     end
@@ -2690,7 +2741,11 @@ pub class IyiMod
             end
             steps << "`" + record.use + "`"
             through = steps.join(" → ")
-            res = res + "  " + record.function + " reaches " + record.kind + " `" + record.label + " : " + record.type + "` (module `" + record.module_name + "`) through " + through + "\n"
+            res = res + "  " + record.function + " reaches " + record.kind + " `" + record.label + " : " + record.type + "` (module `" + record.module_name + "`) through " + through
+            unless record.owning.empty?
+              res = res + ", which holds `" + record.owning + "`, an owning type without `lends:` (a crossing calling it is pinned)"
+            end
+            res = res + "\n"
           end
           i = i + 1
         end

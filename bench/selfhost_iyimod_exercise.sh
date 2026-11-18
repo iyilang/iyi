@@ -107,6 +107,12 @@ when "write"
   out_path = ARGV[2]
   art = Iyi::IyiMod.read(in_path, want_object_code: true)
   Iyi::IyiMod.write(art, out_path)
+when "write-pins"
+  art = Iyi::IyiMod.read(ARGV[1], want_object_code: true)
+  art.spawns = [Iyi::IyiMod::SpawnRecord.new("owner", "digest", 12, 7, true, true, "reason", true)]
+  art.pins = [Iyi::IyiMod::PinRecord.new("Unit.new", 14, 9, "owning capture")]
+  art.reaches = [Iyi::IyiMod::ReachRecord.new("owner", "state", "Box", "the constant", "read", ["call"], "", "example", "Box")]
+  Iyi::IyiMod.write(art, ARGV[2])
 end
 HOSTED_ORACLE_SCRIPT
 if ! LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config || true)}" \
@@ -152,6 +158,11 @@ for sample in \
   "$IYI" build --emit-iyimod "$CORPUS_NATIVE" --no-codegen "$sample_native" \
     > "$WORK/emit/$sample_name.log" 2>&1 || true
 done
+mkdir -p "$CORPUS_DIR/format"
+if ! "$WORK/oracle$EXE" write-pins "$CORPUS_NATIVE/calc/lexer.iyimod" "$CORPUS_NATIVE/format/pins.iyimod"; then
+  echo "  FAILED to generate v63 and v64 fixture"
+  exit 1
+fi
 
 CORPUS_FILES=(
   "calc/ast"
@@ -169,6 +180,7 @@ CORPUS_FILES=(
   "boot/config"
   "boot/registry"
   "app/greeter"
+  "format/pins"
   "app/formal"
 )
 
@@ -465,7 +477,7 @@ check_refusal() {
 
 check_refusal "truncated header" "$REFUSAL_NATIVE/short.iyimod" "too short to be a .iyimod"
 check_refusal "invalid magic bytes" "$REFUSAL_NATIVE/bad_magic.iyimod" "is not a .iyimod"
-check_refusal "mismatched format version" "$REFUSAL_NATIVE/bad_version.iyimod" "format v99, this compiler writes v62"
+check_refusal "mismatched format version" "$REFUSAL_NATIVE/bad_version.iyimod" "format v99, this compiler writes v64"
 check_refusal "damaged section payload" "$REFUSAL_NATIVE/corrupt_payload.iyimod" "Header section is damaged, its checksum does not match"
 check_refusal "truncated section payload" "$REFUSAL_NATIVE/truncated_payload.iyimod" "bytes follow the table"
 check_refusal "table count" "$REFUSAL_NATIVE/table_count.iyimod" "its table names 2147483647 sections and 0 bytes follow it, which is room for 0"
@@ -579,8 +591,8 @@ run_proof "altering magic bytes breaks container verification" \
   'MAGIC               = "BADMOD\0\0"'
 
 run_proof "altering format version allows or writes wrong version" \
-  'FORMAT_VERSION      = 62_u32' \
-  'FORMAT_VERSION      = 63_u32'
+  'FORMAT_VERSION      = 64_u32' \
+  'FORMAT_VERSION      = 65_u32'
 
 run_proof "bypassing section checksum verification accepts damaged payload" \
   'return if checksum(payload) == sum' \
@@ -603,7 +615,7 @@ check_oracle_refuses_written_version() {
   build_mutant || return 0
   "$WORK/mut-exercise$EXE" write "$CORPUS_NATIVE/calc/lexer.iyimod" "$WORK_NATIVE/mut_version.iyimod" > "$WORK/mut-run.log" 2>&1 || return 1
   verdict=$("$WORK/oracle$EXE" read "$WORK_NATIVE/mut_version.iyimod" 2>&1) || rc=$?
-  if [ "$rc" -ne 0 ] && printf '%s\n' "$verdict" | grep -qF "is .iyimod format v61, this compiler writes v62"; then
+  if [ "$rc" -ne 0 ] && printf '%s\n' "$verdict" | grep -qF "is .iyimod format v61, this compiler writes v64"; then
     return 1
   fi
   return 0
@@ -614,6 +626,19 @@ run_mutation "writing format v61 is refused by the hosted reader" "$IYIMOD" \
   'w.write_u32_le(61_u32)' \
   -- check_oracle_refuses_written_version
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+check_pin_format() {
+  build_mutant || return 0
+  "$WORK/mut-exercise$EXE" write "$CORPUS_NATIVE/format/pins.iyimod" "$WORK_NATIVE/mut-pins.iyimod" > "$WORK/mut-run.log" 2>&1 || return 1
+  cmp -s "$CORPUS_DIR/format/pins.iyimod" "$WORK/mut-pins.iyimod"
+}
+run_mutation "v63 pinned spawn bit" "$IYIMOD" \
+  '(record.pinned ? 4_u8 : 0_u8)' '(record.pinned ? 0_u8 : 0_u8)' \
+  -- check_pin_format
+run_mutation "v64 reaches owning type" "$IYIMOD" \
+  'w.write_string(record.owning)' 'w.write_string("")' \
+  -- check_pin_format
+MUTATIONS_RUN=$((MUTATIONS_RUN + 2))
 
 check_macro_type_projection() {
   rm -f "$WORK/mut-iyi-mod$EXE"

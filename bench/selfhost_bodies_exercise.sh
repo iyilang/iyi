@@ -424,6 +424,26 @@ body_prove prove_mutation "a constant assignment has type Nil" "$MAIN_VISITOR" \
       set_type(node, @program.nil_type)" \
   "      # Hosted main_visitor.cr:1084-1087: the assignment itself is Nil.
       set_type(node, val_type)" -- const_owner_at_expected || status=1
+# Check one fixture's typed records rather than letting an unrelated prelude
+# body make a semantic mutation panic before the fixture is observed.
+typed_fixture_at_floor() {
+  "$IYI" build -o "$(native_path "$MUT_TD")" "$REPO_NATIVE/src/compiler/tools/typed_dump.iyi" > "$WORK/mut_build.log" 2>&1 || { body_build_failed "$WORK/mut_build.log"; return $?; }
+  local fixture="$1" rel floor matched
+  rel="bench/fixtures/$(basename "$fixture")"
+  "$ORACLE" "$(native_path "$fixture")" >"$WORK/typed_fixture.hosted" 2>"$WORK/typed_fixture.hosted.err" || { cat "$WORK/typed_fixture.hosted.err" >&9; return 2; }
+  "$MUT_TD" "$(native_path "$fixture")" "$REPO_NATIVE/src" >"$WORK/typed_fixture.port" 2>"$WORK/typed_fixture.port.err" || { cat "$WORK/typed_fixture.port.err" >&9; return 2; }
+  sort "$WORK/typed_fixture.hosted" >"$WORK/typed_fixture.hosted.sorted"
+  sort "$WORK/typed_fixture.port" >"$WORK/typed_fixture.port.sorted"
+  matched=$(comm -12 "$WORK/typed_fixture.hosted.sorted" "$WORK/typed_fixture.port.sorted" | wc -l | tr -d ' ')
+  floor=$(awk -v r="$rel" '$1 == r { print $2 }' "$FLOOR_FILE")
+  if [ -z "$floor" ]; then echo "INVALID PROOF: missing fixture floor for $rel" >&9; return 2; fi
+  if [ "$matched" -lt "$floor" ]; then
+    echo "decisive: $rel matched $matched records, below $floor"
+    return 1
+  fi
+  return 0
+}
+
 strict_typing_at_expected() {
   "$IYI" build -o "$WORK_NATIVE/strict_mutant$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/strict_mut_build.log" 2>&1 || {
     body_build_failed "$WORK/strict_mut_build.log"
@@ -433,9 +453,18 @@ strict_typing_at_expected() {
     echo "  INVALID MUTANT: compiler signature failed" >&9
     return 2
   fi
-  if ! "$WORK/strict_mutant$EXE" "$(native_path "$strict_fixture")" -o "$WORK_NATIVE/strict_native.ll" --pipeline typed --prelude --probe-phase --emit ir > "$WORK/strict_mut.log" 2>&1; then
+  local rc=0 expected_message="${1:-}" expected_site="${2:-}"
+  rm -f "$WORK/strict_native.ll"
+  "$WORK/strict_mutant$EXE" "$(native_path "$strict_fixture")" -o "$WORK_NATIVE/strict_native.ll" --pipeline typed --prelude --probe-phase --emit ir > "$WORK/strict_mut.log" 2>"$WORK/strict_mut.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "${_PM_ARMED:-0}" = 1 ] && [ ! -e "$WORK/strict_native.ll" ] &&
+       grep -Eq "$expected_site" "$WORK/strict_mut.log" &&
+       expected_refusal "$rc" "$WORK/strict_mut.err" src/compiler/semantic/main_visitor.iyi "$expected_message"; then
+      echo "decisive: strict typing refused the expected fixture call"
+      return 1
+    fi
     echo "INVALID MUTANT: strict typing did not complete" >&9
-    cat "$WORK/strict_mut.log" >&9
+    cat "$WORK/strict_mut.log" "$WORK/strict_mut.err" >&9
     return 2
   fi
   grep -Fq '[phase] bodies: pass' "$WORK/strict_mut.log"
@@ -443,15 +472,17 @@ strict_typing_at_expected() {
 strict_fixture="$REPO/bench/fixtures/sem_bodies_virtual_metaclass.iyi"
 body_prove prove_mutation "virtual metaclass calls dispatch to concrete metaclasses" "$MAIN_VISITOR" \
   "    if receiver.is_a?(VirtualMetaclassType)" \
-  "    if false" -- strict_typing_at_expected || status=1
+  "    if false" -- strict_typing_at_expected "^undefined method 'new' for VirtualCopy\+\.class$" \
+  '^bodies: refused at .*sem_bodies_virtual_metaclass\.iyi:3:5 in VirtualCopy\+#dup$' || status=1
 strict_fixture="$REPO/bench/fixtures/sem_bodies_dead_return_tail.iyi"
 body_prove prove_mutation "an untyped unreachable tail does not erase returns" "$MAIN_VISITOR" \
   "      last_type = @program.no_return_type if dead_here && last_type.nil?" \
-  "      nil" -- strict_typing_at_expected || status=1
+  "      nil" -- typed_fixture_at_floor "$strict_fixture" || status=1
 strict_fixture="$REPO/bench/fixtures/sem_bodies_digest_reach.iyi"
 body_prove prove_mutation "an unnameable virtual Self probe stays caller-typed" "$REPO/src/compiler/semantic/definition_typing.iyi" \
   "    written.is_a?(Self) && TypeQueries.virtual_type(scope).is_a?(VirtualType)" \
-  "    false" -- strict_typing_at_expected || status=1
+  "    false" -- strict_typing_at_expected "^undefined method 'new' for BodiesDigestReachHelper::DigestBase\+\.class$" \
+  '^bodies: refused at .*bodies_digest_reach_helper\.iyi:8:12 in BodiesDigestReachHelper::DigestBase\+#dup$' || status=1
 # A leaf Self remains nameable, so its incorrect return must still be checked.
 leaf_bad="$REPO/bench/fixtures/bodies_digest_leaf_bad.iyi"
 if "$IYI" build --no-codegen "$(native_path "$leaf_bad")" > "$WORK/leaf_bad.hosted.log" 2>&1 ||
@@ -725,7 +756,8 @@ body_prove prove_mutation "a call body is not typed in the scope of its owner" "
   "    nil" -- bodies_at_floor || status=1
 body_prove prove_mutation "a block whose declared output is _ is checked against a type" "$MAIN_VISITOR" \
   "unless out_node.is_a?(Underscore)" \
-  "unless false" -- bodies_at_floor || status=1
+  $'if out_node.is_a?(Underscore)\n                    set_type(node, @program.nil_type)\n                  else' -- typed_fixture_at_floor \
+  "$REPO/bench/fixtures/sem_bodies_block_output.iyi" || status=1
 body_prove prove_mutation "a call-site __LINE__ expands as a string" "$MAIN_VISITOR" \
   'literal = magic.expand_node(node.location, node.end_location).at(node)' \
   'literal = StringLiteral.new("?").at(node)' -- bodies_at_floor || status=1
@@ -1193,15 +1225,31 @@ captured_input_at_floor() {
 body_prove prove_mutation "captured block parameters use restriction inputs" "$MAIN_VISITOR" \
   "                    @vars[arg.name] = input_types[index]" \
   "                    @vars[arg.name] = @program.nil_type" -- captured_input_at_floor || status=1
-atomic_free_at_floor() {
-  "$IYI" build -o "$WORK_NATIVE/atomic_tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/mut_build.log" 2>&1 || { body_build_failed "$WORK/mut_build.log"; return $?; }
-  rm -f "$WORK/atomic.refusals"
-  if ! "$WORK/atomic_tool$EXE" "$REPO_NATIVE/bench/fixtures/sem_bodies_match_atomics.iyi" \
-    -o "$WORK_NATIVE/atomic" --pipeline typed --probe-phase --keep-going > "$WORK/atomic.log" 2>&1; then
-    echo "INVALID MUTANT: atomic probe did not complete" >&9
-    cat "$WORK/atomic.log" >&9
+# A total-mode probe with refused bodies must write its table and exit 1,
+# rather than reaching whole-program lowering with incomplete types.
+body_table_probe() {
+  local tool="$1" input="$2" stem="$3" rc=0
+  rm -f "$WORK/$stem" "$WORK/$stem.refusals" "$WORK/$stem.names"
+  "$tool" "$input" -o "$WORK_NATIVE/$stem" --pipeline typed --prelude --probe-phase --keep-going >"$WORK/$stem.log" 2>"$WORK/$stem.err" || rc=$?
+  if grep -q 'BUG:' "$WORK/$stem.log" "$WORK/$stem.err" ||
+     { grep '^iyi: panic:' "$WORK/$stem.err" | grep -Ev '^iyi: panic: body typing refused call [^ ]+ at .+: .+' >/dev/null; }; then
+    echo "INVALID PROOF: $stem panicked" >&9
+    cat "$WORK/$stem.log" "$WORK/$stem.err" >&9
     return 2
   fi
+  if [ "$rc" -eq 1 ] && [ ! -e "$WORK/$stem" ] &&
+     grep -Eq '^iyi-compile-native: lower: body typing recorded [1-9][0-9]* refusal\(s\); whole-program lowering is unavailable$' "$WORK/$stem.err"; then
+    return 0
+  fi
+  if [ "$rc" -eq 0 ] && [ -f "$WORK/$stem" ]; then return 0; fi
+  echo "INVALID PROOF: $stem did not produce a valid output or the expected body refusal (exit $rc)" >&9
+  cat "$WORK/$stem.log" "$WORK/$stem.err" >&9
+  return 2
+}
+
+atomic_free_at_floor() {
+  "$IYI" build -o "$WORK_NATIVE/atomic_tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/mut_build.log" 2>&1 || { body_build_failed "$WORK/mut_build.log"; return $?; }
+  body_table_probe "$WORK/atomic_tool$EXE" "$REPO_NATIVE/bench/fixtures/sem_bodies_match_atomics.iyi" atomic || return 2
   [ -f "$WORK/atomic.refusals" ] || { echo "INVALID MUTANT: no refusal table" >&9; return 2; }
   awk -F '\t' '
     $1 == "body" && $2 ~ /^MatchAtomic\((UInt64|Int64)\)#(get|set|add|compare_and_set)$/ { bad = 1 }
@@ -1237,14 +1285,24 @@ untyped_call_arguments_safe() {
     return $?
   fi
   if [ "$HOST_OS" = darwin ] && ! codesign -v --strict "$WORK/untyped_call_tool$EXE"; then return 2; fi
-  if ! "$WORK/untyped_call_tool$EXE" "$REPO_NATIVE/bench/fixtures/sem_bodies_untyped_call_argument.iyi" \
-    -o "$WORK_NATIVE/untyped_call" --pipeline typed --prelude --probe-phase --keep-going > "$WORK/untyped_call.log" 2>&1; then
-    echo "INVALID MUTANT: untyped-call probe did not complete" >&9
-    cat "$WORK/untyped_call.log" >&9
+  body_table_probe "$WORK/untyped_call_tool$EXE" "$REPO_NATIVE/bench/fixtures/sem_bodies_untyped_call_argument.iyi" untyped_call || return 2
+  if [ -e "$WORK/untyped_call" ] || ! grep -Eq '^iyi-compile-native: lower: body typing recorded [1-9][0-9]* refusal\(s\); whole-program lowering is unavailable$' "$WORK/untyped_call.err"; then
+    echo "INVALID PROOF: untyped-call probe did not refuse whole-program lowering" >&9
+    cat "$WORK/untyped_call.log" "$WORK/untyped_call.err" >&9
     return 2
   fi
+  if grep -q 'BUG:' "$WORK/untyped_call.log" "$WORK/untyped_call.err"; then
+    echo "INVALID PROOF: untyped-call probe reported a compiler BUG" >&9
+    return 2
+  fi
+  [ -f "$WORK/untyped_call.refusals" ] || { echo "INVALID PROOF: no untyped-call refusal table" >&9; return 2; }
   grep -Fq '[phase] bodies: pass' "$WORK/untyped_call.log" || return 1
-  grep -Eq '^table: sem_bodies_untyped_call_argument refusal 4 owner=.* reason=an argument was not typed: fresh ' "$WORK/untyped_call.log"
+  grep -Eq '^table: sem_bodies_untyped_call_argument refusal 4 owner=.* reason=an argument was not typed: fresh ' "$WORK/untyped_call.log" || return 1
+  awk -F '\t' '
+    $1 == "lowering" && $2 == "CensusDerived+#compute" && $4 ~ /^(body typing|depends on )/ { derived = 1 }
+    $1 == "lowering" && $2 == "CensusLeaf#compute" && $4 ~ /^(body typing|depends on )/ { leaf = 1 }
+    END { exit !(derived && leaf) }
+  ' "$WORK/untyped_call.refusals"
 }
 if ! untyped_call_arguments_safe; then
   echo "  UNTYPED CALL: positional and named arguments must be refused without a bodies panic"
@@ -1252,10 +1310,10 @@ if ! untyped_call_arguments_safe; then
 fi
 body_prove prove_mutation "an untyped positional argument stops before call matching" "$MAIN_VISITOR" \
   'return untyped(node, "an argument was not typed: #{arg}") if child_type(arg).nil?' \
-  'nil' -- untyped_call_arguments_safe || status=1
+  'set_type(arg, @program.nil_type) if child_type(arg).nil?' -- untyped_call_arguments_safe || status=1
 body_prove prove_mutation "an untyped named argument stops before call matching" "$MAIN_VISITOR" \
   'return untyped(node, "an argument was not typed: #{arg.value}") if child_type(arg.value).nil?' \
-  'nil' -- untyped_call_arguments_safe || status=1
+  'set_type(arg.value, @program.nil_type) if child_type(arg.value).nil?' -- untyped_call_arguments_safe || status=1
 generic_alias_restriction_safe() {
   if ! "$IYI" build -o "$WORK_NATIVE/alias_tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/alias_build.log" 2>&1; then
     body_build_failed "$WORK/alias_build.log"
@@ -1369,7 +1427,7 @@ restriction_scope_at_floor() {
   if [ "$rc" -ne 0 ]; then
     if [ "${_PM_ARMED:-0}" = 1 ] &&
        grep -Eq 'bodies: refused at .*t6_scope[/\\]call\.iyi:7:' "$WORK/scope_phase.log" &&
-       expected_refusal "$rc" "$WORK/scope_build.log" refuse_port "^bodies: no overload matches 'T6Scope::Visitor::Visitor#check' with type T6Scope::Types::Call$"; then
+       expected_refusal "$rc" "$WORK/scope_build.log" src/compiler/semantic/main_visitor.iyi "^no overload matches 'T6Scope::Visitor::Visitor#check' with type T6Scope::Types::Call$"; then
       return 1
     fi
     echo "INVALID MUTANT: scope fixture failed for an unexpected reason" >&9

@@ -52,8 +52,8 @@ pub struct CompilerConfig
   property probe_verify : Bool
   # The typed pipeline (compile_typed): declarations, bodies and typed lowering, with no LLVM. Off unless asked for.
   property typed_pipeline : Bool
-  # Keep going past a refusal where the phase allows: the body typer records each refusal on its node in total
-  # mode and the probe's table reports them. The lowering still stops at its first refusal.
+  # Total body typing records refusals for the probe. Whole-program lowering
+  # refuses rather than entering any body left incomplete by that pass.
   property keep_going : Bool
   property stub_refused : Bool
   property stub_also : Array(String)
@@ -368,6 +368,10 @@ pub class Compiler
       File.write(@config.output_filename + ".names", names.uniq.join("\n") + "\n")
       File.write(@config.output_filename + ".refusals", refused.join("\n") + "\n")
       STDOUT.flush
+      unless typed.visitor.refusals.empty?
+        count = typed.visitor.refusals.size
+        return typed_refuse("lower", reached, "body typing recorded #{count} refusal(s); whole-program lowering is unavailable")
+      end
     end
 
     stub_defs = Hash(String, String).new

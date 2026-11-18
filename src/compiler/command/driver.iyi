@@ -97,6 +97,11 @@ pub class CompilerOptions
   property arguments : Array(String)
   property single_file : Bool
   property force : Bool = false
+  property stale_key : String? = nil
+  property stale_accept : String? = nil
+  property stale_block : String? = nil
+  property stale_dump_elements : String? = nil
+  property stale_inputs : String? = nil
 
   def initialize
     @cross_compile = false
@@ -2517,6 +2522,21 @@ pub class CommandDriver
     if command == "build"
       parser.on("--force", "Build even when nothing the output was built from has changed") do
         opts.force = true
+      end
+      parser.on("--stale-key FILE", "iyi: write stale key output to FILE") do |file|
+        opts.stale_key = file
+      end
+      parser.on("--stale-accept FILE", "iyi: stale accept file") do |file|
+        opts.stale_accept = file
+      end
+      parser.on("--stale-block FILE", "iyi: stale block file") do |file|
+        opts.stale_block = file
+      end
+      parser.on("--stale-dump-elements FILE", "iyi: stale dump elements file") do |file|
+        opts.stale_dump_elements = file
+      end
+      parser.on("--stale-inputs FILE", "iyi: write the inputs this build read to FILE") do |file|
+        opts.stale_inputs = file
       end
     end
 

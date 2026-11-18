@@ -267,6 +267,7 @@ pub def typed_owner(reason : String) : String
   return "macros" if reason.includes?("macro control")
   return "calls" if reason.includes?("undefined method") || reason.includes?("cannot resolve the call") || reason.includes?("expected argument") || reason.includes?("no target def") || reason.includes?("wrong number of arguments for 'String.interpolation'")
   return "declarations" if reason.includes?("undefined constant") || reason.includes?("without a declared return type")
+  return "bodies" if reason.starts_with?("body typing refused ")
   return "bodies" if reason.includes?("no type") || reason.includes?("cannot be typed") || reason.includes?("undefined local variable") || reason.includes?("pointerof") || reason.includes?("the body of the Proc literal was not typed")
   return "lowering core" if reason.includes?("is not ported")
   return "lowering" if reason.includes?("port limitation") || reason.includes?("string constant")
@@ -399,6 +400,25 @@ def first_line(text : String) : String
     i = i + 1
   end
   text
+end
+
+# lower_def_probe reads this type before entering the function. Only replace
+# its invariant failure when a recorded refusal belongs to this body itself.
+def refused_probe_body(typed : TypedProgram, definition : Def) : String?
+  return nil unless typed.visitor.total
+  return nil unless typed.visitor.type_of?(definition.body).nil?
+  return nil if typed.visitor.refusals.empty?
+  nodes = DeepNodeIds.new(typed.visitor)
+  definition.body.accept(nodes)
+  typed.visitor.refusals.each do |refusal|
+    next unless nodes.ids.has_key?(refusal.node.node_id)
+    site = "no location"
+    if file = refusal.file
+      site = "#{file}:#{refusal.line}:#{refusal.column}"
+    end
+    return "body typing refused body #{definition.name} at #{site}: #{first_line(refusal.reason)}"
+  end
+  nil
 end
 
 # The index of a reason in the list, or -1.
@@ -588,10 +608,16 @@ pub def lowering_table(typed : TypedProgram, triple : String, root : String, nam
     m.functions.each { |fn| before << fn.name }
     probe_lowerer = Lowerer.new(m, typer, typed.visitor)
     probe_lowerer.spawn_analysis = spawn_analysis
-    outcome = group do |g|
-      task = g.spawn { lower_def_probe(d, inst.self_type, inst.arg_types, typed.visitor, typer, m, probe_lowerer, base_ids.fork) }
-      task.value
-    end
+    probe_lowerer.probe_untyped_refusals = typed.visitor.total
+    body_refusal = refused_probe_body(typed, d)
+    outcome = if body_refusal
+                body_refusal
+              else
+                group do |g|
+                  task = g.spawn { lower_def_probe(d, inst.self_type, inst.arg_types, typed.visitor, typer, m, probe_lowerer, base_ids.fork) }
+                  task.value
+                end
+              end
     failed = false
     message = ""
     if outcome.is_a?(Panicked)

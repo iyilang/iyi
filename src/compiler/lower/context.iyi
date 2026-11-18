@@ -215,6 +215,8 @@ pub class Lowerer
   property ensure_nodes : Array(ExceptionHandler)
   property ensure_contexts : Array(LowerContext)
   property ensure_boundaries : Hash(UInt64, Int32)
+  # Only per-def total-mode probes may classify a recorded body refusal here.
+  property probe_untyped_refusals : Bool = false
 
   def initialize(@module : Module, @typer : LowerTyper, @analysed : MainVisitor)
     @builder = Builder.new(@module)

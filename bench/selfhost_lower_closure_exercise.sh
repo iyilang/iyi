@@ -356,7 +356,6 @@ if [ "$HOST_ID" != darwin-arm64 ]; then
 fi
 for fixture in lower_closure_top_level lower_closure_nested_block lower_proc_yielded_blocks lowcall_recursive_named_mixed_inferred lowcall_noreturn_operand lower_pointerof_arg lower_pointerof_proc_arg lower_macro_closure lower_macro_proc_locations lower_closure_self_class lower_closure_self_struct lower_closure_self_nested lower_closure_self_unit_call closure_forward_recursion; do
   host_flags=(--prelude empty)
-  [ "$fixture" = lower_proc_yielded_blocks ] && host_flags=()
   "$IYI" build "${host_flags[@]}" -o "$WORK_NATIVE/host$EXE" "$REPO_NATIVE/bench/fixtures/$fixture.iyi" > "$WORK/host.build.log" 2>&1 || { cat "$WORK/host.build.log"; exit 1; }
   "$WORK/host$EXE" > "$WORK/host.out" 2>&1 || exit 1
   cp "$WORK/host.out" "$WORK/host-$fixture.out"

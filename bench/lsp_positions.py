@@ -110,34 +110,35 @@ ASSIGNMENT = re.compile(r"^\s*[\w, ]+ = [^=]")
 # modules of one weight by name, so every shard computes the same deal).
 #
 # A weight is the seconds the module's sweep took at stride 200 on GitHub's
-# ubuntu-24.04 runners, read from the per-module lines of 27 green shard
-# jobs, 7 runs of 2026-11-14 to 11-17 on master, mt/next-two and the merge
-# of the two (928f85565 to 4fa41885b). The runners differ in speed by a
-# factor, the same for every module of a job (0.67 to 1.67 of the median
-# job), so each job's seconds are divided by its factor first and the
-# weight is the median of what is left: the seconds on a median runner,
-# 4,874 for all 121 modules, std/autocert 910 of them. A module not here
-# weighs 7, the mean of the 66 under 15 s (0.9 to 15.0). Dealt four ways,
-# the shards hold 1,220, 1,222, 1,222 and 1,221 s by these weights and
-# 1,222, 1,220, 1,238 and 1,194 by every module's own.
-# The weights before these (13 master runs of 2026-10-26 to 10-30) had
-# std/autocert at 158 s, and its sweep had grown to 880 to 1,400: the
-# shard it was dealt to took 30 to 34 minutes against the others' 14 to
-# 27, and on the merge's first run it was cut off at its 45 (job
-# 134257615300, std/autocert 1,404 s of it on a runner at 1.4).
+# ubuntu-24.04 runners, read from the per-module lines of 12 shard jobs of
+# 3 runs of 2026-11-17 and 11-18 on the tree with heap22 and master merged
+# (021cedcee, 4fa41885b, bdb6f6943), the two cut off at their 45 counted
+# for the modules they finished. Each job's seconds are divided by its
+# runner's factor first (0.89 to 1.23 of the median job) and the weight is
+# the median of what is left: the seconds on a median runner, 5,725 for
+# all 121 modules. A module not here weighs 7, the mean of the 62 under
+# 15 s (0.9 to 14.2). Dealt five ways, the shards hold 1,145 to 1,152 s by
+# these weights and 1,137 to 1,153 by every module's own.
+# The weights before these were master's (2026-10-26 to 11-17), and on
+# this tree two modules outgrew them: std/autocert 158 s against about
+# 900, std/acme about 110 against about 625 (619 to 1,055 s on this tree,
+# 110 to 165 on master's and mt/next-two's, at about a quarter of the
+# resident megabytes - 160 against 600 - where both are 22 to 24 s and
+# 573 to 592 MB on a Linux workstation). Their shards ran to 45 minutes and
+# were cut off there (jobs 134257615300 and 134616844992).
 WEIGHTS = {
-    "autocert": 910, "http": 647, "tls": 293, "websocket": 201, "math": 193,
-    "big": 158, "acme": 111, "xml": 97, "json": 94, "socket": 84,
-    "router": 79, "time": 75, "secure_dns": 73, "sse": 73, "file": 70,
-    "cookie": 69, "mail": 62, "compress": 59, "zstd": 54, "unicode": 53,
-    "x509": 52, "debug": 46, "process": 44, "smtp": 42, "yaml": 37,
-    "ecdsa": 34, "p256": 34, "zip": 34, "udp": 33, "dir": 32,
-    "http_proxy": 31, "regex": 31, "aead": 29, "png": 29, "toml": 29,
-    "xz": 29, "curve25519": 27, "digest": 26, "tar": 26, "dns": 25,
-    "user": 25, "fileserver": 24, "bzip2": 23, "format": 23,
-    "system_roots": 22, "text": 22, "ocsp": 21, "int": 19, "p384": 19,
-    "float": 17, "hpack": 17, "password": 17, "term": 17, "uri": 17,
-    "log": 15,
+    "autocert": 895, "http": 626, "acme": 625, "tls": 387, "websocket": 241,
+    "math": 198, "big": 166, "json": 122, "xml": 108, "secure_dns": 98,
+    "socket": 84, "sse": 82, "router": 81, "file": 78, "time": 75, "mail": 72,
+    "compress": 65, "debug": 64, "cookie": 61, "unicode": 60, "smtp": 55,
+    "x509": 50, "process": 49, "zstd": 47, "udp": 43, "p256": 41,
+    "http_proxy": 40, "png": 40, "yaml": 37, "curve25519": 34, "toml": 33,
+    "aead": 32, "ecdsa": 32, "regex": 31, "text": 30, "dir": 29, "zip": 29,
+    "xz": 28, "system_roots": 27, "digest": 26, "tar": 26, "dns": 25,
+    "fileserver": 25, "ocsp": 25, "format": 24, "bzip2": 23, "float": 23,
+    "term": 23, "password": 22, "int": 21, "user": 21, "p384": 19, "uri": 19,
+    "hpack": 17, "indexable": 17, "netip": 17, "capsule": 15, "io": 15,
+    "system": 15,
 }
 UNWEIGHED = 7
 

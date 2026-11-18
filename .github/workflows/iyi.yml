@@ -337,7 +337,7 @@ jobs:
   # that way and nothing had asked. A job of its own: it grows with the
   # library, and took 22 to 41 of the samples job's 90 minutes.
   #
-  # In four shards (`lsp_positions.py --shard`), dealt by each module's
+  # In five shards (`lsp_positions.py --shard`), dealt by each module's
   # measured weight. Whole, the sweep took 37 to 71 minutes in ten green
   # runs of 2026-10-23 to 10-25 and was cut off past 72 of the job's 75
   # then in four (master's 120891621408 among them), on runners of uneven
@@ -366,6 +366,14 @@ jobs:
   # dealt the same way would take 33 (73%). At the cut-off job's 2.1 it
   # would end in about 41, inside the limit, and forty-five still ends a
   # hang.
+  #
+  # Five since heap22 and master met (2026-11-18): the library's sweep
+  # grew to 5,725 s on a median runner, std/autocert about 900 and
+  # std/acme about 625 of it (lsp_positions.py's weights say where), and
+  # dealt four ways a shard held 1,434 s, 31 minutes at 1.24 with setup;
+  # two shards with both grown modules' old weights were cut off at 45
+  # (jobs 134257615300, 134616844992). Five hold 1,145 to 1,152 s: 27
+  # minutes at 1.24 with setup, 60% of forty-five, and 43 at 2.1.
   lsp-positions:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'lsp-positions') }}
@@ -374,10 +382,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     container:
       image: crystallang/crystal:1.21.0-build
-    name: "Every cursor question, everywhere in the library, shard ${{ matrix.shard }} of 4"
+    name: "Every cursor question, everywhere in the library, shard ${{ matrix.shard }} of 5"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -393,7 +401,7 @@ jobs:
       - name: Every cursor question, everywhere in the library
         env:
           PYTHONUNBUFFERED: "1"
-        run: python3 bench/lsp_positions.py 200 --shard ${{ matrix.shard }}/4
+        run: python3 bench/lsp_positions.py 200 --shard ${{ matrix.shard }}/5
 
   samples:
     needs: [plan, build]

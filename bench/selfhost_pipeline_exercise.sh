@@ -26,6 +26,10 @@ status=0
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/lib/host.sh" || exit 1
 require_test_host || exit 1
+if [ -z "$PY" ]; then
+  echo "  FAIL: a functional Python interpreter is required for fixture termination status" >&2
+  exit 1
+fi
 REPO_NATIVE="$(native_path "$REPO")" || exit 1
 export IYI_PATH="$REPO_NATIVE/src"
 . "$REPO/bench/floor_base.sh" || exit 1
@@ -93,6 +97,74 @@ build_tool() {
     return 2
   fi
 }
+
+# A shell status alone cannot distinguish exit 145 from signal 17 or a
+# deliberate exit 124 from timeout. Record the child termination separately.
+run_fixture() {
+  local executable="$1" stem="$2" seconds="${RUN_FIXTURE_TIMEOUT:-30}"
+  shift 2
+  RUN_KIND=error
+  RUN_STATUS=
+  if ! "$PY" - "$(native_path "$executable")" "$(native_path "$WORK/$stem")" "$seconds" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+executable, stem, seconds = sys.argv[1:4]
+with open(stem + ".out", "wb") as out, open(stem + ".err", "wb") as err:
+    try:
+        child = subprocess.Popen([executable] + sys.argv[4:], stdout=out, stderr=err,
+                                 start_new_session=(os.name != "nt"))
+        try:
+            rc = child.wait(timeout=float(seconds))
+            result = f"exit {rc}" if rc >= 0 else f"signal {-rc}"
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                child.kill()
+            else:
+                os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+            result = "timeout"
+    except OSError as exc:
+        result = f"error {exc}"
+with open(stem + ".status", "w", encoding="utf-8") as status_file:
+    print(result, file=status_file)
+PY
+  then
+    echo "  INVALID: fixture runner failed for $executable" >&2
+    return 1
+  fi
+  read -r RUN_KIND RUN_STATUS <"$WORK/$stem.status"
+  case "$RUN_KIND" in exit|signal|timeout) return 0 ;; esac
+  echo "  INVALID: could not execute $executable: $(cat "$WORK/$stem.status")" >&2
+  return 1
+}
+
+# Keep normal high statuses distinct from signals and timeouts in the runner
+# itself, independently of any particular compiler fixture.
+runner_python="$(command -v "$PY")"
+for runner_exit in 124 127 145 230 255; do
+  if ! run_fixture "$runner_python" "runner.exit.$runner_exit" -c \
+      'import sys; sys.exit(int(sys.argv[1]))' "$runner_exit" ||
+     [ "$RUN_KIND" != exit ] || [ "$RUN_STATUS" != "$runner_exit" ]; then
+    echo "  FAIL: runner misclassified normal exit $runner_exit as $RUN_KIND $RUN_STATUS" >&2
+    exit 1
+  fi
+done
+if [ "$HOST_OS" != windows ]; then
+  if ! run_fixture "$runner_python" runner.signal -c \
+      'import os, signal; os.kill(os.getpid(), signal.SIGTERM)' ||
+     [ "$RUN_KIND" != signal ] || [ "$RUN_STATUS" != 15 ]; then
+    echo "  FAIL: runner did not identify SIGTERM ($RUN_KIND $RUN_STATUS)" >&2
+    exit 1
+  fi
+fi
+if ! RUN_FIXTURE_TIMEOUT=0.25 run_fixture "$runner_python" runner.timeout -c 'import time; time.sleep(5)' ||
+   [ "$RUN_KIND" != timeout ]; then
+  echo "  FAIL: runner did not identify timeout ($RUN_KIND $RUN_STATUS)" >&2
+  exit 1
+fi
 
 echo "== 1. The tool builds from source with bin/iyi and links no LLVM"
 if ! build_tool "$TOOL_SRC" "$WORK/tool"; then
@@ -162,13 +234,19 @@ for fixture in $fixtures; do
       echo "  $name: FAILED, native signature invalid"
       failed=$((failed + 1)); record_phase "$rel" link; continue
     fi
-    timeout 30 "$out" > "$WORK/$name.typed.out" 2>&1; tstat=$?
-    timeout 30 "$WORK/$name.hosted$EXE" > "$WORK/$name.hosted.out" 2>&1; hstat=$?
-    if [ "$tstat" -lt 124 ] && [ "$hstat" -lt 124 ] && [ "$tstat" = "$hstat" ] && cmp -s "$WORK/$name.typed.out" "$WORK/$name.hosted.out"; then
-      echo "  $name: run-equal (status $hstat, stdout identical)"
+    run_fixture "$out" "$name.typed" || :
+    tkind="$RUN_KIND"; tstat="$RUN_STATUS"
+    run_fixture "$WORK/$name.hosted$EXE" "$name.hosted" || :
+    hkind="$RUN_KIND"; hstat="$RUN_STATUS"
+    if [ "$tkind" = exit ] && [ "$hkind" = exit ] &&
+       pipeline_outputs_equal "$tstat" "$hstat" "$WORK/$name.typed.out" "$WORK/$name.hosted.out" &&
+       cmp -s "$WORK/$name.typed.err" "$WORK/$name.hosted.err"; then
+      echo "  $name: run-equal (status $hstat, stdout and stderr identical)"
       run_equal=$((run_equal + 1)); record_phase "$rel" run-equal
     else
-      echo "  $name: FAILED, the typed executable exits $tstat, the hosted $hstat, or the stdout differs"
+      echo "  $name: FAILED, typed $tkind $tstat, hosted $hkind $hstat, or output differs"
+      echo "  typed stdout/stderr:"; cat "$WORK/$name.typed.out" "$WORK/$name.typed.err"
+      echo "  hosted stdout/stderr:"; cat "$WORK/$name.hosted.out" "$WORK/$name.hosted.err"
       failed=$((failed + 1)); record_phase "$rel" link
     fi
   elif [ "$ts" -eq 1 ] && [ "$reached" != "link" ] && [ ! -e "$out" ] &&
@@ -211,13 +289,19 @@ for root in $ROOTS; do
       echo "  $root: FAILED, native signature invalid"
       failed=$((failed + 1))
     else
-      timeout 30 "$WORK/$name.root$EXE" > "$WORK/$name.root.typed.out" 2>&1; tstat=$?
-      timeout 30 "$WORK/$name.root.hosted$EXE" > "$WORK/$name.root.hosted.out" 2>&1; hstat=$?
-      if [ "$tstat" -lt 124 ] && [ "$hstat" -lt 124 ] && pipeline_outputs_equal "$tstat" "$hstat" "$WORK/$name.root.typed.out" "$WORK/$name.root.hosted.out"; then
+      run_fixture "$WORK/$name.root$EXE" "$name.root.typed" || :
+      tkind="$RUN_KIND"; tstat="$RUN_STATUS"
+      run_fixture "$WORK/$name.root.hosted$EXE" "$name.root.hosted" || :
+      hkind="$RUN_KIND"; hstat="$RUN_STATUS"
+      if [ "$tkind" = exit ] && [ "$hkind" = exit ] &&
+         pipeline_outputs_equal "$tstat" "$hstat" "$WORK/$name.root.typed.out" "$WORK/$name.root.hosted.out" &&
+         cmp -s "$WORK/$name.root.typed.err" "$WORK/$name.root.hosted.err"; then
         rphase="run-equal"
-        echo "  $root: run-equal (status $hstat, stdout identical)"
+        echo "  $root: run-equal (status $hstat, stdout and stderr identical)"
       else
-        echo "  $root: FAILED, typed status $tstat, hosted status $hstat, or stdout differs"
+        echo "  $root: FAILED, typed $tkind $tstat, hosted $hkind $hstat, or output differs"
+        echo "  typed stdout/stderr:"; cat "$WORK/$name.root.typed.out" "$WORK/$name.root.typed.err"
+        echo "  hosted stdout/stderr:"; cat "$WORK/$name.root.hosted.out" "$WORK/$name.root.hosted.err"
         failed=$((failed + 1))
       fi
     fi
@@ -298,9 +382,12 @@ for root in $ROOTS; do
   name="$(basename "$root" .iyi)"
   "$WORK/tool$EXE" "$REPO_NATIVE/$root" -o "$WORK_NATIVE/$name.table$EXE" --pipeline typed --prelude --probe-phase --keep-going > "$WORK/$name.table.probe" 2> "$WORK/$name.table.err"
   table_rc=$?
-  if [ "$table_rc" -ge 126 ]; then
-    echo "  $root: table probe crashed (exit $table_rc)"
-    cat "$WORK/$name.table.err"
+  if grep -q 'BUG:' "$WORK/$name.table.probe" "$WORK/$name.table.err" ||
+     { [ "$table_rc" -eq 0 ] && [ ! -f "$WORK/$name.table$EXE" ]; } ||
+     { [ "$table_rc" -eq 1 ] && { [ -e "$WORK/$name.table$EXE" ] || ! grep -q '^iyi-compile-native: ' "$WORK/$name.table.err"; }; } ||
+     { [ "$table_rc" -ne 0 ] && [ "$table_rc" -ne 1 ]; }; then
+    echo "  $root: invalid table probe (exit $table_rc)"
+    cat "$WORK/$name.table.probe" "$WORK/$name.table.err"
     table_ok=0
   fi
   for sidecar in names refusals; do [ ! -f "$WORK/$name.table$EXE.$sidecar" ] || cp "$WORK/$name.table$EXE.$sidecar" "$ARTIFACT_DIR/"; done
@@ -400,17 +487,17 @@ fi
 echo
 echo "== 4b. Imported unit class-variable array"
 target_fixture_check() {
-  local tool="$1" fixture="$2" stem="$3" expected_refusal_message="${4:-}" rc=0
+  local tool="$1" fixture="$2" stem="$3" expected_site="${4:-}" expected_refusal_message="${5:-}" rc=0
   rm -f "$WORK/$stem$EXE"
-  "$tool" "$REPO_NATIVE/bench/fixtures/$fixture.iyi" -o "$WORK_NATIVE/$stem$EXE" --pipeline typed --prelude --probe-phase >"$WORK/$stem.log" 2>"$WORK/$stem.err" || rc=$?
+  "$tool" "$REPO_NATIVE/bench/fixtures/$fixture.iyi" -o "$WORK_NATIVE/$stem$EXE" --pipeline typed --prelude --probe-phase >"$WORK/$stem.log" 2>"$WORK/$stem.build.err" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    if [ "${_PM_ARMED:-0}" = 1 ] && [ -n "$expected_refusal_message" ] && [ ! -e "$WORK/$stem$EXE" ] &&
-       expected_refusal "$rc" "$WORK/$stem.err" refuse_port "$expected_refusal_message"; then
+    if [ "${_PM_ARMED:-0}" = 1 ] && [ -n "$expected_site" ] && [ -n "$expected_refusal_message" ] && [ ! -e "$WORK/$stem$EXE" ] &&
+       expected_refusal "$rc" "$WORK/$stem.build.err" "$expected_site" "$expected_refusal_message"; then
       echo "decisive: compiler produced the expected injected refusal"
       return 1
     fi
     echo "  INVALID: compiler could not build $fixture (exit $rc)" >&2
-    cat "$WORK/$stem.log" "$WORK/$stem.err" >&2
+    cat "$WORK/$stem.log" "$WORK/$stem.build.err" >&2
     return 2
   fi
   if [ ! -f "$WORK/$stem$EXE" ]; then
@@ -422,38 +509,38 @@ target_fixture_check() {
     echo "  INVALID: $fixture has an invalid native signature" >&2
     return 2
   fi
-  rc=0
-  timeout 30 "$WORK/$stem$EXE" >"$WORK/$stem.out" 2>&1 || rc=$?
-  [ "$rc" -eq 0 ] && return 0
-  if [ "$rc" -ge 124 ]; then
-    echo "  INVALID: $fixture crashed or timed out (exit $rc)" >&2
-    cat "$WORK/$stem.out" >&2
+  run_fixture "$WORK/$stem$EXE" "$stem.run" || return 2
+  if [ "$RUN_KIND" != exit ]; then
+    echo "  INVALID: $fixture terminated by $RUN_KIND $RUN_STATUS" >&2
+    cat "$WORK/$stem.run.out" "$WORK/$stem.run.err" >&2
     return 2
   fi
+  rc="$RUN_STATUS"
+  [ "$rc" -eq 0 ] && return 0
   case "$stem:$rc" in
     unit_array:1|unit_array:2|unit_array:3)
-      if [ ! -s "$WORK/$stem.out" ]; then
+      if [ ! -s "$WORK/$stem.run.out" ] && [ ! -s "$WORK/$stem.run.err" ]; then
         echo "decisive: imported array assertion exited $rc"
         return 1
       fi ;;
     virtual_ivar:*)
-      if grep -Eq 'wrong constructor value|wrong initialized value' "$WORK/$stem.out"; then
+      if grep -Eq 'wrong constructor value|wrong initialized value' "$WORK/$stem.run.out" "$WORK/$stem.run.err"; then
         echo "decisive: virtual instance-variable assertion failed"
         return 1
       fi ;;
     nested_import:*)
-      if grep -Fq 'wrong imported initializer' "$WORK/$stem.out"; then
+      if grep -Fq 'wrong imported initializer' "$WORK/$stem.run.out" "$WORK/$stem.run.err"; then
         echo "decisive: nested import initializer assertion failed"
         return 1
       fi ;;
   esac
   echo "  INVALID: $fixture failed without its expected assertion (exit $rc)" >&2
-  cat "$WORK/$stem.out" >&2
+  cat "$WORK/$stem.run.out" "$WORK/$stem.run.err" >&2
   return 2
 }
-imported_array_check() { target_fixture_check "$1" pipeline_unit_cvar_array unit_array; }
-virtual_ivar_check() { target_fixture_check "$1" pipeline_virtual_ivar virtual_ivar; }
-nested_import_check() { target_fixture_check "$1" pipeline_import_nested nested_import "${2:-}"; }
+imported_array_check() { target_fixture_check "$1" pipeline_unit_cvar_array unit_array "${2:-}" "${3:-}"; }
+virtual_ivar_check() { target_fixture_check "$1" pipeline_virtual_ivar virtual_ivar "${2:-}" "${3:-}"; }
+nested_import_check() { target_fixture_check "$1" pipeline_import_nested nested_import "${2:-}" "${3:-}"; }
 array_baseline=0
 virtual_baseline=0
 nested_baseline=0
@@ -531,12 +618,13 @@ pipeline_check() {
       echo "  INVALID: lower_exit has an invalid signature" >&2
       return 2
     fi
-    timeout 30 "$WORK/mut_a$EXE" >"$WORK/mut_a.out" 2>&1 || run_status=$?
-    if [ "$run_status" -ge 124 ] || grep -Eqi 'panic|segmentation fault|abort trap' "$WORK/mut_a.out"; then
-      echo "  INVALID: lower_exit crashed or timed out (exit $run_status)" >&2
-      cat "$WORK/mut_a.out" >&2
+    run_fixture "$WORK/mut_a$EXE" mut_a.run || return 2
+    if [ "$RUN_KIND" != exit ] || grep -Eqi 'panic|segmentation fault|abort trap' "$WORK/mut_a.run.out" "$WORK/mut_a.run.err"; then
+      echo "  INVALID: lower_exit terminated by $RUN_KIND $RUN_STATUS or panicked" >&2
+      cat "$WORK/mut_a.run.out" "$WORK/mut_a.run.err" >&2
       return 2
     fi
+    run_status="$RUN_STATUS"
     if [ "$run_status" -ne 42 ]; then
       echo "decisive: lower_exit returned $run_status instead of 42"
       return 1
@@ -572,44 +660,50 @@ pipeline_check() {
 
 imported_array_mutation_check() {
   build_tool "$TOOL_SRC" "$WORK/unit_array_tool" || return 2
-  imported_array_check "$WORK/unit_array_tool$EXE"
+  imported_array_check "$WORK/unit_array_tool$EXE" "${1:-}" "${2:-}"
 }
 virtual_ivar_mutation_check() {
   build_tool "$TOOL_SRC" "$WORK/virtual_ivar_tool" || return 2
-  virtual_ivar_check "$WORK/virtual_ivar_tool$EXE"
+  virtual_ivar_check "$WORK/virtual_ivar_tool$EXE" "${1:-}" "${2:-}"
 }
 nested_import_mutation_check() {
   build_tool "$TOOL_SRC" "$WORK/nested_import_tool" || return 2
-  nested_import_check "$WORK/nested_import_tool$EXE" "${1:-}"
+  nested_import_check "$WORK/nested_import_tool$EXE" "${1:-}" "${2:-}"
 }
 if [ "$CAN_RUN_MACHO" -eq 1 ]; then
   if [ "$array_baseline" -eq 1 ]; then
     prove_mutation "an existing allocator declaration is defined a second time" "$LOWER_SRC" \
       'fn = declared_or_defined_fun(low, name, fun_def_type(low, rec, ret))' \
-      'fn = low.module.define_function(name, fun_def_type(low, rec, ret))' -- imported_array_mutation_check || status=1
+      'fn = low.module.define_function(name, fun_def_type(low, rec, ret))' -- imported_array_mutation_check \
+      src/compiler/ir/module.iyi '^a function or global named __iyi_new already exists$' || status=1
     prove_mutation "a unit module wrapper does not type its class-variable initializer" "$REPO/src/compiler/semantic/main_visitor.iyi" \
       $'    # semantic_visitor.cr:1811-1828 visits either resolved module body.\n    if t && t.is_a?(ModuleType)' \
-      $'    # semantic_visitor.cr:1811-1828 visits either resolved module body.\n    if t && t.is_a?(ClassType)' -- imported_array_mutation_check || status=1
+      $'    # semantic_visitor.cr:1811-1828 visits either resolved module body.\n    if t && t.is_a?(ClassType)' -- imported_array_mutation_check \
+      src/compiler/lower/pending.iyi '^lower: visit\(ArrayLiteral\) \(hosted codegen\.cr\) is not ported yet$' || status=1
   else
     echo "  INVALID: imported array mutations have no passing baseline" >&2; status=1
   fi
   if [ "$virtual_baseline" -eq 1 ]; then
     prove_mutation "an initialized instance variable loses its virtual type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
       $'          # including its virtual type; visiting its initializer must retain it.\n          ivar = mod_type.instance_vars[ivar_node.name]?' \
-      $'          # including its virtual type; visiting its initializer must retain it.\n          ivar = nil' -- virtual_ivar_mutation_check || status=1
+      $'          # including its virtual type; visiting its initializer must retain it.\n          ivar = nil' -- virtual_ivar_mutation_check \
+      src/compiler/lower/pending.iyi '^lower: visit\(assign Circle to Shape \(hosted assign_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
     prove_mutation "an uninitialized instance variable loses its virtual type" "$REPO/src/compiler/semantic/main_visitor.iyi" \
       $'          # Preserve the declaration pass\047s virtualized field type and metadata.\n          ivar = mod_type.instance_vars[ivar_node.name]?' \
-      $'          # Preserve the declaration pass\047s virtualized field type and metadata.\n          ivar = nil' -- virtual_ivar_mutation_check || status=1
+      $'          # Preserve the declaration pass\047s virtualized field type and metadata.\n          ivar = nil' -- virtual_ivar_mutation_check \
+      src/compiler/lower/pending.iyi '^lower: visit\(assign Circle to Shape \(hosted assign_distinct, not ported\)\) \(hosted codegen\.cr\) is not ported yet$' || status=1
   else
     echo "  INVALID: virtual ivar mutations have no passing baseline" >&2; status=1
   fi
   if [ "$nested_baseline" -eq 1 ]; then
     prove_mutation "the loader omits class-scoped imports" "$REPO/src/compiler/loader.iyi" \
       'collect_import_paths(node.as(ClassDef).body, into, engine, filename, user_imports)' \
-      'nil' -- nested_import_mutation_check || status=1
+      'nil' -- nested_import_mutation_check \
+      src/compiler/lower/pending.iyi '^lower: visit\(import pipeline_import_leaf_b without its resolved unit\) \(hosted codegen\.cr\) is not ported yet$' || status=1
     prove_mutation "the loader omits module-scoped imports" "$REPO/src/compiler/loader.iyi" \
       'collect_import_paths(node.as(ModuleDef).body, into, engine, filename, user_imports)' \
-      'nil' -- nested_import_mutation_check || status=1
+      'nil' -- nested_import_mutation_check \
+      src/compiler/lower/pending.iyi '^lower: visit\(import pipeline_import_leaf without its resolved unit\) \(hosted codegen\.cr\) is not ported yet$' || status=1
   else
     echo "  INVALID: nested import mutations have no passing baseline" >&2; status=1
   fi
@@ -619,7 +713,7 @@ fi
 if [ "$nested_baseline" -eq 1 ]; then
   prove_mutation "a resolved import is refused during lowering" "$LOWER_SRC" \
     'if node.is_a?(ImportDecl)' 'if false && node.is_a?(ImportDecl)' -- nested_import_mutation_check \
-    '^lower: visit\(ImportDecl\) \(hosted codegen\.cr\) is not ported yet$' || status=1
+    src/compiler/lower/pending.iyi '^lower: visit\(ImportDecl\) \(hosted codegen\.cr\) is not ported yet$' || status=1
 else
   echo "  INVALID: import-refusal mutation has no passing baseline" >&2
   status=1
@@ -639,15 +733,23 @@ run_table_probe() {
   else
     "$tool" "$input" -o "$WORK_NATIVE/$stem$EXE" --pipeline typed --probe-phase --keep-going >"$WORK/$stem.log" 2>"$WORK/$stem.err" || rc=$?
   fi
-  if [ "$rc" -eq 0 ]; then
+  if grep -q 'BUG:' "$WORK/$stem.log" "$WORK/$stem.err"; then
+    echo "  INVALID: $stem table probe reported a compiler BUG" >&2
+    cat "$WORK/$stem.log" "$WORK/$stem.err" >&2
+    return 2
+  fi
+  if [ "$rc" -eq 0 ] && [ -f "$WORK/$stem$EXE" ]; then
     return 0
   fi
-  if [ "$rc" -eq 1 ] && { expected_refusal "$rc" "$WORK/$stem.err" refuse_port '^.+$' || grep -q '^iyi-compile-native: ' "$WORK/$stem.err"; }; then
-    if [ "${_PM_ARMED:-0}" = 0 ]; then
-      cp "$WORK/$stem.err" "$WORK/$stem.baseline-refusal"
-      return 0
-    elif [ -f "$WORK/$stem.baseline-refusal" ] && cmp -s "$WORK/$stem.err" "$WORK/$stem.baseline-refusal"; then
-      return 0
+  if [ "$rc" -eq 1 ] && [ ! -e "$WORK/$stem$EXE" ]; then
+    awk '/^iyi-compile-native: / { print; exit }' "$WORK/$stem.err" >"$WORK/$stem.refusal"
+    if [ -s "$WORK/$stem.refusal" ] && ! grep -Eq 'BUG:|iyi: panic:' "$WORK/$stem.refusal"; then
+      if [ "${_PM_ARMED:-0}" = 0 ]; then
+        cp "$WORK/$stem.refusal" "$WORK/$stem.baseline-refusal"
+        return 0
+      elif [ -f "$WORK/$stem.baseline-refusal" ] && cmp -s "$WORK/$stem.refusal" "$WORK/$stem.baseline-refusal"; then
+        return 0
+      fi
     fi
   fi
   echo "  INVALID: $stem table probe failed without the baseline refusal (exit $rc)" >&2
@@ -725,13 +827,20 @@ root_comparison_check() {
   fi
   if [ "$CAN_RUN_MACHO" -eq 1 ]; then
     codesign -v --strict "$WORK/root_test$EXE" > /dev/null 2>&1 || { echo "  INVALID: native signature" >&2; return 2; }
-    timeout 30 "$WORK/root_test$EXE" > "$WORK/root_test.out" 2>&1 || ts=$?
-    timeout 30 "$WORK/root_hosted$EXE" > "$WORK/root_hosted.out" 2>&1 || hs=$?
-    if [ "$ts" -ge 124 ] || [ "$hs" -ge 124 ]; then
-      echo "  INVALID: root execution crashed or timed out (typed $ts, hosted $hs)" >&2
-      cat "$WORK/root_test.out" "$WORK/root_hosted.out" >&2
+    run_fixture "$WORK/root_test$EXE" root_test.run || return 2
+    local tkind="$RUN_KIND"
+    ts="$RUN_STATUS"
+    run_fixture "$WORK/root_hosted$EXE" root_hosted.run || return 2
+    local hkind="$RUN_KIND"
+    hs="$RUN_STATUS"
+    if [ "$tkind" != exit ] || [ "$hkind" != exit ]; then
+      echo "  INVALID: root execution terminated typed $tkind $ts, hosted $hkind $hs" >&2
+      cat "$WORK/root_test.run.out" "$WORK/root_test.run.err" "$WORK/root_hosted.run.out" "$WORK/root_hosted.run.err" >&2
       return 2
     fi
+    cp "$WORK/root_test.run.out" "$WORK/root_test.out"
+    cp "$WORK/root_hosted.run.out" "$WORK/root_hosted.out"
+    cmp -s "$WORK/root_test.run.err" "$WORK/root_hosted.run.err" || return 1
   else
     # lower_exit specifies exit 42 and no stdout. This checks only the helper,
     # not target execution or run-equal parity.
@@ -798,8 +907,17 @@ entry_check() {
   if ! "$WORK/entry_tool$EXE" "$REPO_NATIVE/bench/fixtures/lower_exit.iyi" -o "$WORK_NATIVE/entry_exit.ll" --pipeline typed --emit ir >"$WORK/entry_exit.log" 2>&1; then
     echo "  INVALID: entry exit IR did not compile" >&2; cat "$WORK/entry_exit.log" >&2; return 2
   fi
-  if ! "$WORK/entry_tool$EXE" "$REPO_NATIVE/bench/fixtures/lower_fun_main.iyi" -o "$WORK_NATIVE/entry_fm.ll" --pipeline typed --emit ir >"$WORK/entry_fm.log" 2>&1; then
-    echo "  INVALID: entry main IR did not compile" >&2; cat "$WORK/entry_fm.log" >&2; return 2
+  local rc=0
+  "$WORK/entry_tool$EXE" "$REPO_NATIVE/bench/fixtures/lower_fun_main.iyi" -o "$WORK_NATIVE/entry_fm.ll" --pipeline typed --emit ir >"$WORK/entry_fm.log" 2>"$WORK/entry_fm.err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "${_PM_ARMED:-0}" = 1 ] && [ ! -e "$WORK/entry_fm.ll" ] &&
+       expected_refusal "$rc" "$WORK/entry_fm.err" src/compiler/ir/module.iyi '^a function or global named main already exists$'; then
+      echo "decisive: defining another main was rejected"
+      return 1
+    fi
+    echo "  INVALID: entry main IR did not compile" >&2
+    cat "$WORK/entry_fm.log" "$WORK/entry_fm.err" >&2
+    return 2
   fi
   [ -f "$WORK/entry_exit.ll" ] && [ -f "$WORK/entry_fm.ll" ] || { echo "  INVALID: entry IR was not written" >&2; return 2; }
   local f
@@ -915,13 +1033,14 @@ pipeline_loader_if_check() {
   [ -f "$WORK/loader_entry$EXE" ] || { echo "  INVALID: loader entry was not written" >&2; return 2; }
   [ "$CAN_RUN_MACHO" -eq 1 ] || return 0
   codesign -v --strict "$WORK/loader_entry$EXE" > /dev/null 2>&1 || { echo "  INVALID: loader entry signature" >&2; return 2; }
-  timeout 30 "$WORK/loader_entry$EXE" > "$WORK/loader_entry.out" 2>&1 || rc=$?
-  if [ "$rc" -ge 124 ] || grep -Eqi 'panic|segmentation fault|abort trap' "$WORK/loader_entry.out"; then
-    echo "  INVALID: loader entry crashed or timed out (exit $rc)" >&2
-    cat "$WORK/loader_entry.out" >&2
+  run_fixture "$WORK/loader_entry$EXE" loader_entry.run || return 2
+  if [ "$RUN_KIND" != exit ] || grep -Eqi 'panic|segmentation fault|abort trap' "$WORK/loader_entry.run.out" "$WORK/loader_entry.run.err"; then
+    echo "  INVALID: loader entry terminated by $RUN_KIND $RUN_STATUS or panicked" >&2
+    cat "$WORK/loader_entry.run.out" "$WORK/loader_entry.run.err" >&2
     return 2
   fi
-  [ "$rc" -eq 2 ] && [ "$(awk '1' "$WORK/loader_entry.out")" = "b" ]
+  rc="$RUN_STATUS"
+  [ "$rc" -eq 2 ] && [ "$(awk '1' "$WORK/loader_entry.run.out")" = "b" ]
 }
 echo "  the selected loader branch compiles through the typed pipeline:"
 if pipeline_loader_if_check; then

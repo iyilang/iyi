@@ -137,23 +137,27 @@ pub class Linker
     res.join(" ")
   end
 
-  # Match the link.exe basename case-insensitively for either Windows separator.
-  pub def self.direct_msvc_linker?(path : String) : Bool
-    start = path.bytesize - 8
+  # Compare a Windows or POSIX basename without allocating a lowercase copy.
+  private def self.msvc_basename?(path : String, name : String) : Bool
+    start = path.bytesize - name.bytesize
     return false if start < 0
     if start > 0
       separator = path.byte_at(start - 1)
       return false if separator != 47_u8 && separator != 92_u8
     end
-    name = "link.exe"
     i = 0
-    while i < 8
+    while i < name.bytesize
       byte = path.byte_at(start + i)
       byte = byte + 32_u8 if byte >= 65_u8 && byte <= 90_u8
       return false if byte != name.byte_at(i)
       i = i + 1
     end
     true
+  end
+
+  pub def self.direct_msvc_linker?(path : String) : Bool
+    msvc_basename?(path, "link.exe") || msvc_basename?(path, "link") ||
+      msvc_basename?(path, "lld-link.exe") || msvc_basename?(path, "lld-link")
   end
 
   # Builds library and search path flags for linking.
@@ -228,6 +232,10 @@ pub class Linker
     if target.msvc?
       # Discovery belongs to the caller. The formatter only uses its result.
       direct = direct_msvc_linker?(msvc_linker)
+      reproducible = direct || msvc_basename?(msvc_linker, "cl.exe") ||
+                     msvc_basename?(msvc_linker, "cl") ||
+                     msvc_basename?(msvc_linker, "clang-cl.exe") ||
+                     msvc_basename?(msvc_linker, "clang-cl")
       linker = quote_windows(msvc_linker)
       obj_arg = quote_windows(object_names)
       out_arg = quote_windows(direct ? "/OUT:#{output_filename}" : "/Fe#{output_filename}")
@@ -238,6 +246,7 @@ pub class Linker
       if debug
         link_args << "/DEBUG:FULL /PDBALTPATH:%_PDB%"
       end
+      link_args << "/Brepro" if reproducible
       link_args << "/INCREMENTAL:NO /STACK:0x800000"
       if !lib_flags.empty?
         link_args << lib_flags

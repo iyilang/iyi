@@ -610,7 +610,58 @@ print("copy preference: source and destination share a register")
 PY
 }
 
+check_fpr_frame() {
+  local drv=$1 out="$WORK/fpr-frame.mir"
+  [ -x "$drv" ] || return 2
+  if ! "$drv" mir "$FIX_RA/fp_callee_saved.ir" probe >"$out" 2>&1; then
+    echo "could not emit the floating-point frame fixture"
+    return 2
+  fi
+  "$PY" - "$out" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text()
+if not text.startswith("function probe\n"):
+    print("invalid floating-point frame MIR")
+    sys.exit(2)
+blocks = re.split(r"^block \d+ [^\n]+\n", text, flags=re.M)
+if len(blocks) < 4 or text.count("  Ret/64\n") < 2:
+    print("invalid floating-point return paths")
+    sys.exit(2)
+saves = set(re.findall(r"^  SpStore/64f (d(?:8|9|1[0-5]))(?: #imm=(\d+))?$", text, re.M))
+if not saves:
+    print("no used callee-saved FPR was saved")
+    sys.exit(1)
+for block in blocks:
+    if "  Ret/64\n" not in block:
+        continue
+    restores = set(re.findall(r"^  SpLoad/64f (d(?:8|9|1[0-5]))(?: #imm=(\d+))?$", block, re.M))
+    if not saves <= restores:
+        print("a return does not restore every saved FPR")
+        sys.exit(1)
+print(f"floating-point frame: {len(saves)} registers saved on {text.count('  Ret/64') } return paths")
+PY
+}
+
+check_fpr_output() {
+  check_fixture_output "$1" "$FIX_RA/fp_callee_saved.ir"
+}
+
 echo "== 6. mutation proofs"
+prove_mutation "floating-point frame: omit callee-saved FPR stores" \
+  src/compiler/native/frame.iyi check_fpr_frame \
+  '    acc << m
+    i = i + 1' \
+  '    acc << m unless m.fp
+    i = i + 1'
+prove_mutation "floating-point frame: omit the FPR restore on the early return" \
+  src/compiler/native/frame.iyi check_fpr_frame \
+  '        acc << m
+        i = i + 1' \
+  '        acc << m unless m.fp && block.name == "negative"
+        i = i + 1'
 prove_mutation "coalescing: ignore virtual-register copy hints" \
   src/compiler/native/regalloc_linear.iyi check_copy_hint \
   '    preferred = @homes[other] if other >= 0 && @homes[other] >= 0' \
@@ -636,10 +687,14 @@ if [ "$HOST_ID" = darwin-arm64 ]; then
     src/compiler/native/regalloc_linear.iyi check_linear_outputs \
     '      return @callee_pool' \
     '      return @caller_pool + @callee_pool'
+  prove_mutation "floating-point call: assign a caller-saved register across the call" \
+    src/compiler/native/regalloc_linear.iyi check_fpr_output \
+    '        return @callee_fpr_pool' \
+    '        return @fpr_pool'
   prove_mutation "collector: a floating-point value across a call may take an fp register, and the assertion is off" \
     src/compiler/native/regalloc_linear.iyi check_pointer_output \
-    '        return [] of Int32' \
-    '        return @fpr_pool' \
+    '        return [] of Int32 if @pointer[iv]' \
+    '        return @fpr_pool if @pointer[iv]' \
     '        if fp && @crossing[v] && @pointer[v]' \
     '        if false && fp && @crossing[v] && @pointer[v]'
 else
@@ -650,14 +705,12 @@ else
 fi
 prove_mutation "collector: a floating-point value across a call may take an fp register; the assertion catches it" \
   src/compiler/native/regalloc_linear.iyi check_pointer_collector \
-  '        return [] of Int32' \
-  '        return @fpr_pool'
+  '        return [] of Int32 if @pointer[iv]' \
+  '        return @callee_fpr_pool if @pointer[iv]'
 prove_mutation "collector: a flagged value may take a floating-point register across a call; the assertion catches it" \
   src/compiler/native/regalloc_linear.iyi check_pointer_flag_collector \
-  '      if @crossing[iv]
-        return [] of Int32' \
-  '      if @crossing[iv] && !@pointer[iv]
-        return [] of Int32'
+  '        return [] of Int32 if @pointer[iv]' \
+  '        return @callee_fpr_pool if @pointer[iv]'
 if [ "$HOST_ID" = darwin-arm64 ]; then
   prove_mutation "linear: a value live into a block that starts with a call is not counted as crossing it" \
     src/compiler/native/regalloc_linear.iyi check_linear_outputs \

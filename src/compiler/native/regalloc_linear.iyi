@@ -12,9 +12,9 @@ module compiler/native/regalloc_linear
 # result up to the move that takes it, an incoming argument from function entry, and a return value up to
 # the return or branch. These reservations are the pre-coloured intervals: no virtual interval overlaps one.
 #
-# Calls. A call clobbers every caller-saved register. An interval that crosses a call takes a callee-saved
-# general register (x19..x28) or lives in a frame slot. No floating-point register is callee-saved, so a
-# floating-point interval that crosses a call always lives in a slot.
+# Calls. A call-crossing interval takes a callee-saved GPR or an 8-byte
+# callee-saved FPR, or lives in a frame slot. Pointer-carrying FPR intervals
+# must spill even when a callee-saved floating register is available.
 #
 # Spills. A spilled interval has one 8-byte frame slot for the whole function. Each instruction reloads the
 # spilled operands it reads into scratch registers and stores the spilled value it writes from one.
@@ -33,7 +33,7 @@ module compiler/native/regalloc_linear
 
 import compiler/native/mir::{MFunction, MBlock, MInst, Operand, OperandKind, RegClass, Role}
 import compiler/native/target::{new_inst, is_role?, terminator?, leaves_block?, block_branch?, table_branch?, distinct_inputs_and_defs?}
-import compiler/native/aarch64/regs::{callee_saved_gprs, caller_saved_gprs, caller_saved_fprs, scratch_gprs, scratch_fprs, probe_reg, fp_reg, lr_reg, integer_arg_regs, fp_arg_regs}
+import compiler/native/aarch64/regs::{callee_saved_gprs, callee_saved_fprs, caller_saved_gprs, caller_saved_fprs, scratch_gprs, scratch_fprs, probe_reg, fp_reg, lr_reg, integer_arg_regs, fp_arg_regs}
 
 # x17: the encoder's veneer scratch. regs.iyi names it in a comment and has no accessor for it.
 def veneer_reg : Int32
@@ -133,7 +133,7 @@ pub def caller_gpr_pool : Array(Int32)
   acc
 end
 
-# The floating-point pool. Every fp register is caller-saved, so only values that do not cross a call use it.
+# The caller-saved floating-point registers available to the allocator.
 pub def fp_allocatable_pool : Array(Int32)
   acc = [] of Int32
   caller_saved_fprs.each do |r|
@@ -307,6 +307,7 @@ class LinearScan
   property hint_vreg : Array(Int32)
   property hint_reg : Array(Int32)
   property fpr_pool : Array(Int32)
+  property callee_fpr_pool : Array(Int32)
 
   def initialize(@fn : MFunction)
     @vcount = fn.vreg_count
@@ -336,7 +337,8 @@ class LinearScan
     @callee_pool = callee_saved_gprs
     @hint_vreg = [] of Int32
     @hint_reg = [] of Int32
-    @fpr_pool = fp_allocatable_pool
+    @callee_fpr_pool = callee_saved_fprs
+    @fpr_pool = fp_allocatable_pool + @callee_fpr_pool
   end
 
   # Runs every stage and leaves the homes and the frame slots on the function.
@@ -659,13 +661,14 @@ class LinearScan
   end
 
   # The candidate registers for one interval, in the order they are tried.
-  #   - A floating-point interval that crosses a call gets no register: every fp register is caller-saved.
+  #   - A non-pointer floating-point interval crossing a call may use d8..d15.
   #   - A general-purpose interval that crosses a call gets a callee-saved register.
   #   - Any other general-purpose interval tries the caller-saved registers, then the callee-saved ones.
   def pool_for(iv : Int32) : Array(Int32)
     if @fn.vreg_classes[iv] == RegClass::Fpr
       if @crossing[iv]
-        return [] of Int32
+        return [] of Int32 if @pointer[iv]
+        return @callee_fpr_pool
       end
       return @fpr_pool
     end

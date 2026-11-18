@@ -17,7 +17,7 @@ module compiler/native/frame
 
 import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, Role}
 import compiler/native/target::{new_inst, is_role?}
-import compiler/native/aarch64/regs::{fp_reg}
+import compiler/native/aarch64/regs::{fp_reg, is_fpr?, callee_saved_fprs}
 
 def round_up(n : Int64, to : Int64) : Int64
   ((n + to - 1_i64) // to) * to
@@ -26,6 +26,22 @@ end
 # Lays acc the frame, then inserts the prologue at the start of the entry block and an epilogue before every return.
 pub def lay_out(fn : MFunction, stack_align : Int64) : Nil
   f = fn.frame
+  # Physical definitions include explicit inline-assembly clobbers as well as
+  # allocator homes. Preserve every callee-saved floating register they write.
+  fp_saves = callee_saved_fprs
+  written = [] of Int32
+  fn.blocks.each do |block|
+    block.insts.each do |inst|
+      inst.defs.each do |op|
+        if op.kind == OperandKind::Physical && fp_saves.includes?(op.reg) && !written.includes?(op.reg)
+          written << op.reg
+        end
+      end
+    end
+  end
+  fp_saves.each do |reg|
+    f.callee_saved << reg if written.includes?(reg) && !f.callee_saved.includes?(reg)
+  end
   offset = round_up(f.outgoing_bytes, 8_i64)
   f.saves_offset = offset
   offset = offset + 8_i64 * f.callee_saved.size.to_i64
@@ -68,6 +84,7 @@ def prologue_insts(fn : MFunction) : Array(MInst)
   while i < f.callee_saved.size
     m = new_inst(fn.isa, Role::SaveReg)
     m.size = 64
+    m.fp = is_fpr?(f.callee_saved[i])
     m.imm = f.saves_offset + 8_i64 * i.to_i64
     m.uses << Operand.new(OperandKind::Physical, f.callee_saved[i])
     acc << m
@@ -92,6 +109,7 @@ def insert_epilogues(fn : MFunction, block : MBlock) : Nil
       while i < f.callee_saved.size
         m = new_inst(fn.isa, Role::RestoreReg)
         m.size = 64
+        m.fp = is_fpr?(f.callee_saved[i])
         m.imm = f.saves_offset + 8_i64 * i.to_i64
         m.defs << Operand.new(OperandKind::Physical, f.callee_saved[i])
         acc << m

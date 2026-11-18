@@ -189,6 +189,7 @@ module Iyi
     # one LLVM module is created for each type in a program.
     # --release automatically enable this option
     property? single_module = false
+    @release_requested = false
 
     # A `ProgressTracker` object which tracks compilation progress.
     property progress_tracker = ProgressTracker.new
@@ -573,7 +574,7 @@ module Iyi
       cleanup cross_compile dependency_printer dump_ll emit_base_filename
       emit_bind emit_targets frame_pointers iyi_direct_link iyi_keep
       iyi_link_driver_only link_flags mattr mcmodel mcpu n_threads no_cleanup
-      program progress_tracker single_module stderr target_machine verbose
+      program progress_tracker release_requested single_module stderr target_machine verbose
     )
 
     # Everything that changes what the prelude analyses *to*. Macros branch on
@@ -3322,6 +3323,7 @@ module Iyi
 
     # Set maximum level of optimization.
     def release!
+      @release_requested = true
       @optimization_mode = OptimizationMode::O3
       @single_module = true
     end
@@ -3759,8 +3761,16 @@ module Iyi
         # where its sysroot keeps that object, so naming the driver is the only
         # way to print a command that produces a program.
         link_flags = @link_flags || ""
-        link_flags += " --target=wasm32-wasi"
-        {DEFAULT_LINKER, %(#{DEFAULT_LINKER} "${@}" -o #{Process.quote_posix(output_filename)} #{link_flags} #{program.lib_flags(@cross_compile)}), object_names}
+        if program.has_flag? "wasi"
+          link_flags += " --target=wasm32-wasi"
+          {DEFAULT_LINKER, %(#{DEFAULT_LINKER} "${@}" -o #{Process.quote_posix(output_filename)} #{link_flags} #{program.lib_flags(@cross_compile)}), object_names}
+        else
+          # A browser does not use DWARF at runtime. Preserve function names for
+          # host stack traces, and keep full debug information when -d is asked.
+          # Track --release itself so "--release -O z" gets the same policy.
+          link_flags += " --strip-debug" if @release_requested && @debug == Debug::Default
+          {"wasm-ld", %(wasm-ld "${@}" -o #{Process.quote_posix(output_filename)} --no-entry #{link_flags}), object_names}
+        end
       elsif program.has_flag? "avr"
         link_flags = @link_flags || ""
         link_flags += " --target=avr-unknown-unknown -mmcu=#{@mcpu} -Wl,--gc-sections"

@@ -61,11 +61,15 @@ class Iyi::Program
     # deferred union/generic matches strictly before typing consumer bodies.
     Prof.span("restored artifact references") { resolve_iyi_artifact_refs }
 
+    # iyi: the reach walk's index of literals starts at the typed top
+    # level (SPEC.md III.4.5).
+    iyi_share_reach.main = node if cleanup
     result = @progress_tracker.stage("Semantic (main)") do
       Prof.span("main: visit_main") do
         visit_main(node, process_finished_hooks: true, cleanup: cleanup, visitor: main_visitor)
       end
     end
+    Prof.span("main: reached constants") { iyi_mark_reached_constants }
 
     @progress_tracker.stage("Semantic (cleanup)") do
       Prof.span("cleanup: types + files") do
@@ -74,10 +78,10 @@ class Iyi::Program
       end
     end
 
-    # iyi: every shared block is checked by now, so each piece of state
-    # they reach is warned about once, with how many blocks reach it
-    # (SPEC.md III.4.4).
-    @cleanup_transformer.try &.report_share_reach
+    # iyi: every parallel block is checked by now, so the module state they
+    # reach that is not Share is refused, each piece once, with how many
+    # blocks reach it (SPEC.md III.4.5).
+    @cleanup_transformer.try &.report_share_reach(result)
     # And every `@[SafeReach]` is proven, or refused naming the write that
     # breaks it (`ReachProof`, SPEC.md III.4.4): the whole typed program is
     # final only once the cleanup has met every def.

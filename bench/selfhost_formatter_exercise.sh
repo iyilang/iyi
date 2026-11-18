@@ -39,7 +39,7 @@ exec 3>&1
 CORPUS=(
   "bench/fixtures/formatter_macro_if.iyi"
   "bench/fixtures/formatter_macro_if_def.iyi"
-  "bench/fixtures/formatter_macro_if_branches.iyi"
+  "bench/fixtures/formatter_macro_if_branches.fixture"
   "bench/fixtures/formatter_macro_if_nested.iyi"
   "bench/fixtures/formatter_macro_expression.iyi"
   "samples/iyi/calc.iyi"
@@ -343,12 +343,12 @@ run_fixture_proof "macro-if visitor bypassed" \
 run_fixture_proof "macro-if literal body formatting bypassed" \
   'if @inside_macro == 0 && value && value.includes?("\n")' \
   'if false && value && value.includes?("\n")' \
-  "bench/fixtures/formatter_macro_if_branches.iyi"
+  "bench/fixtures/formatter_macro_if_branches.fixture"
 
 run_fixture_proof "macro-unless branch reversal bypassed" \
   "a_then = node.else" \
   "a_then = node.then" \
-  "bench/fixtures/formatter_macro_if_branches.iyi"
+  "bench/fixtures/formatter_macro_if_branches.fixture"
 
 run_fixture_proof "nested macro expression opening token mishandled" \
   "check(@inside_macro == 0 ? TokenKind::OP_LCURLY_LCURLY : TokenKind::MACRO_EXPRESSION_START)" \

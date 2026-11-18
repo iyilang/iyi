@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every random section reported"
-for phrase in "== seed" "== array" "== static array" "== secure" "== bounds" "== seeded draws"; do
+for phrase in "== seed" "== array" "== static array" "== secure" "== bounds" "== seeded draws" "== a stream a thread"; do
   if ! grep -q "$phrase" "$WORK/random-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -257,6 +257,49 @@ else
 fi
 
 echo
+echo "== the class-level draws' stream is the thread's"
+# `Random.rand(...)` and the rest draw from `Random::PerThread`, whose
+# PCG state is two `@[ThreadLocal]` integers. One stream every thread
+# shared raced, and a race on it is no deterministic failure "a stream a
+# thread" could rest on, so the check is the generated code's: both
+# globals carry `thread_local` in the IR.
+# thread_streams <dir before src or ""> <label>: the verdict in
+# $WORK/<label>.check; fails unless both are thread-local.
+cat >"$WORK/streams.iyi" <<'IYI'
+module streams
+
+import std/random::{Random}
+
+puts Random.rand(10) < 10
+IYI
+thread_streams() {
+  local search="$REPO/src${PSEP}$REPO/samples/iyi"
+  [ -n "$1" ] && search="$1${PSEP}$search"
+  if ! IYI_PATH="$search" "$IYI" build --release --emit llvm-ir -o "$WORK/streams-$2" "$WORK/streams.iyi" >"$WORK/streams-$2.build" 2>&1; then
+    echo "the probe did not build: $(sed -n '1,3p' "$WORK/streams-$2.build" | tr '\n' ' ')" >"$WORK/$2.check"
+    return 1
+  fi
+  local word
+  for word in state inc; do
+    if ! grep -qE "^@\"?[^ =]*PerThread::${word}\"? = " "$WORK/streams-$2.ll"; then
+      echo "Random::PerThread's @@$word is not in the IR" >"$WORK/$2.check"
+      return 1
+    fi
+    if ! grep -E "^@\"?[^ =]*PerThread::${word}\"? = " "$WORK/streams-$2.ll" | grep -q "thread_local"; then
+      echo "Random::PerThread's @@$word is not thread-local: $(grep -m1 -E "^@\"?[^ =]*PerThread::${word}\"? = " "$WORK/streams-$2.ll" | cut -c1-120)" >"$WORK/$2.check"
+      return 1
+    fi
+  done
+  echo "Random::PerThread's @@state and @@inc are thread-local globals" >"$WORK/$2.check"
+}
+if thread_streams "" module; then
+  echo "  $(cat "$WORK/module.check")"
+else
+  echo "  FAIL: $(cat "$WORK/module.check")"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when the module is broken"
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
@@ -311,6 +354,26 @@ PY
       echo "  $label: caught - $(grep -m1 'panic' "$WORK/mut.out" | sed 's/^iyi: panic: //')"
     fi
   done
+  # The class-level stream's state taken off its thread, one stream every
+  # thread shares: caught where its global must be thread-local.
+  rm -rf "$WORK/patched" && mkdir -p "$WORK/patched/std"
+  "$PY" - "$REPO/src/std/random.iyi" "$WORK/patched/std/random.iyi" <<'PY'
+import sys
+src = open(sys.argv[1], encoding="utf-8").read()
+old = "  @[ThreadLocal]\n  @@state : UInt64 = 0_u64\n"
+if src.count(old) != 1:
+    raise SystemExit("patch site missing or not unique")
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(old, "  @@state : UInt64 = 0_u64\n", 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  threadlocal: the patch did not apply"
+    status=1
+  elif ! thread_streams "$WORK/patched" threadlocal >/dev/null 2>&1 && grep -q "not thread-local" "$WORK/threadlocal.check"; then
+    echo "  threadlocal: caught - $(cat "$WORK/threadlocal.check")"
+  else
+    echo "  threadlocal: one stream every thread shares was not caught: $(cat "$WORK/threadlocal.check" 2>/dev/null)"
+    status=1
+  fi
   # The fallback's two checks, each broken in a copy: the device's kind
   # not asked (the module before the check), caught where a regular file
   # must be refused; and st_mode read at the other architecture's offset,

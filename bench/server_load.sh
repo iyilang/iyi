@@ -101,7 +101,7 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     step "failure proof: the fiber's OVERLAPPED as a number is an OVERLAPPED nobody keeps"
     sed -e 's/^  property wait_overlapped : Pointer(UInt8)$/  property wait_overlapped_word : UInt64\n\n  def wait_overlapped : Pointer(UInt8)\n    Pointer(UInt8).new(@wait_overlapped_word)\n  end/' \
-        -e 's/^    @wait_overlapped = Pointer(UInt8)\.malloc(\([0-9]*\)_u64)$/    @wait_overlapped_word = Pointer(UInt8).malloc(\1_u64).address/' \
+        -e 's/^    @wait_overlapped = IyiCross\.shared { Pointer(UInt8)\.malloc(\([0-9]*\)_u64) }$/    @wait_overlapped_word = IyiCross.shared { Pointer(UInt8).malloc(\1_u64) }.address/' \
         "$REPO/src/iyi/concurrency.iyi" > patched/iyi/concurrency.iyi
     [ "$(diff "$REPO/src/iyi/concurrency.iyi" patched/iyi/concurrency.iyi | grep -c '^>')" -eq 6 ] || {
       echo "the sed did not find both lines it changes"; exit 1; }
@@ -121,11 +121,14 @@ case "$(uname -s)" in
     sed -e 's/^  property events : Pointer(UInt8)$/  property events : UInt64/' \
         -e 's/^    @events = Pointer(UInt8)\.new(0_u64)$/    @events = 0_u64/' \
         -e 's/^    return buffer\.address if buffer\.address != 0_u64$/    return buffer if buffer != 0_u64/' \
-        -e 's/^    buffer = Pointer(UInt8)\.malloc((EVENTS \* IYI_POLL_EVENT_BYTES)\.to_u64)$/    buffer = Pointer(UInt8).malloc((EVENTS * IYI_POLL_EVENT_BYTES).to_u64).address/' \
+        -e 's/^    buffer = IyiCross\.shared { Pointer(UInt8)\.malloc((EVENTS \* IYI_POLL_EVENT_BYTES)\.to_u64) }$/    buffer = IyiCross.shared { Pointer(UInt8).malloc((EVENTS * IYI_POLL_EVENT_BYTES).to_u64) }.address/' \
         -e 's/^    buffer\.address$/    buffer/' \
         "$REPO/src/iyi/concurrency.iyi" > patched/iyi/concurrency.iyi
-    cmp -s patched/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && {
-      echo "the sed found nothing to change"; exit 1; }
+    # Every one of the five lines, counted: a sed that found four of them left
+    # the buffer a pointer, and the copy failed to compile instead of failing
+    # the run (heap22 put the malloc inside `IyiCross.shared { ... }`).
+    [ "$(diff "$REPO/src/iyi/concurrency.iyi" patched/iyi/concurrency.iyi | grep -c '^>')" -eq 5 ] || {
+      echo "the sed did not find all five lines it changes"; exit 1; }
     # The one arm here whose defect arrives by timing rather than by counting:
     # the freed chunk has to be handed to a canary *and* the kernel has to write
     # events into it before the run ends. Two hundred connections is enough on

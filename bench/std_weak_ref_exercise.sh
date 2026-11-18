@@ -315,14 +315,16 @@ else
     'a target still answered is intact'
   breaks "the end of the mark never asked, answering freed memory" never_asked \
     '        IyiWeak.clear
-        # Every free list dropped first' \
-    '        # Every free list dropped first' \
+        # Partitions (heap22)' \
+    '        # Partitions (heap22)' \
     'a target still answered is intact'
   breaks "a cell the collector scans" scanned \
-    '      cell = __iyi_malloc_atomic64(8_u64).as(Pointer(UInt64))
+    '        cell = __iyi_malloc_atomic64(8_u64).as(Pointer(UInt64))
+      {% end %}
       cell.value = address
       register(cell.address)' \
-    '      cell = __iyi_malloc64(8_u64).as(Pointer(UInt64))
+    '        cell = __iyi_malloc64(8_u64).as(Pointer(UInt64))
+      {% end %}
       cell.value = address
       register(cell.address)' \
     'a target nothing holds is cleared by the next collection'

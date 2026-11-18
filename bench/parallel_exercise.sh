@@ -26,8 +26,10 @@
 #      cancel and a close from a sibling or the main thread that find it,
 #      frames 120 KiB deep; tasks parked on one worker finish in under
 #      twice the ideal, woken from the main thread and from a worker; a
-#      task woken by a task that then computes with preemption off starts
-#      on an idle worker within 1 ms, and within 50 ms after a ping-pong
+#      task woken by a task that then computes with preemption off has an
+#      idle worker called for it, runs on another worker, and starts
+#      within 1 ms (not judged on a host loaded past its cores), and
+#      within 50 ms after a ping-pong
 #      left its waker's worker calling nobody, where the monitor calls; on
 #      Linux and darwin a connection's answer, sent while the worker its
 #      reader parked on is held 100 ms with preemption off, is read on
@@ -59,10 +61,12 @@
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
 #   4. The speedup, measured: CPU-bound tasks on one worker and on several,
-#      release build, best of three, and the ratio held to a floor of 0.6
-#      per worker - a pool that is parallel only in name cannot pass it.
-#      The table for 1, 2, 4 and 8 workers (as far as the cores go) is
-#      printed for the record.
+#      release build, best of three. K workers must hold their tasks on
+#      0.6 x K threads at once on average, at any load; and where the host
+#      leaves K cores free, finish 0.6 x K times faster than one - a pool
+#      that is parallel only in name cannot pass either. The table for 1,
+#      2, 4 and 8 workers (as far as the cores go) is printed for the
+#      record.
 #   5. A deadlock across threads - a parallel task waiting on a channel
 #      nobody sends on - is named, not hung. And bench/panic_exit.iyi
 #      ends the process with tasks parked on the poller, on twelve
@@ -72,12 +76,12 @@
 #   6. `Share` gates the parallel block at compile time: a captured
 #      `Array`, a `Channel` of arrays, a local assigned after the spawn, and
 #      a loop's local are refused, each by name. A block that reaches a
-#      constant that is not Share through a def it calls is warned about
-#      with the path, a failed build under `--error-on-warnings`; its
-#      copy with the constant marked `@[SafeReach]` builds clean under it,
-#      the constant built at startup and only read, which the compiler
-#      proves (bench/safe_reach.sh holds what it refuses).
-#      Two blocks reaching it are one warning, counting the other.
+#      constant that is not Share through a def it calls is refused with
+#      the path (SPEC.md III.4.5), and told the claim the compiler would
+#      prove; its copy with the constant marked `@[SafeReach]` builds
+#      clean, the constant built at startup and only read, which the
+#      compiler proves (bench/safe_reach.sh holds what it refuses).
+#      Two blocks reaching it are one refusal, counting the other.
 #   7. Failure proofs against broken copies of the runtime, each caught at
 #      the named check: a cross-thread wake that does not ring (a lost
 #      wakeup), a steal that leaves the task in its victim's queue (a task
@@ -97,13 +101,14 @@
 #      find, a close posted to nobody, a read made on the thread that
 #      closes its socket, a pool that never steals a started task, tasks
 #      woken back onto the worker they parked on as they were before tasks
-#      moved, a hand-off that calls no idle worker, a monitor that calls
-#      nobody for a held worker's ring, a monitor that calls nobody for a
-#      held worker's poller, and a join held in the kernel; and on Windows
+#      moved, a hand-off that calls no idle worker, one that marks its call
+#      and rings nobody, a monitor that calls nobody for a held worker's
+#      ring, a monitor that calls nobody for a held worker's poller, and a
+#      join held in the kernel; and on Windows
 #      a port whose packets only the worker their task parked on runs, and
 #      a pool that leaves the priority boost on.
 #   8. Failure proof: the pool held to one worker whatever it was asked
-#      for, and step 4's floor refuses the ratio that comes out.
+#      for, and step 4's floors refuse what comes out.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -160,8 +165,37 @@ done
 # ── 2. What a move keeps, twice ───────────────────────────────────────────
 # Its balance step is timed against four workers' ideal, which a machine
 # with fewer cores than that cannot keep; there the other steps run.
-MIGRATE_STEPS="channels sockets cancel closes deep loops balance handoff backstop heldio join"
-[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops handoff backstop heldio join"
+MIGRATE_STEPS="channels sockets cancel closes deep loops balance backstop heldio join"
+[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops backstop heldio join"
+# The handoff step runs by itself after the others, its host's load read
+# the second before it. Its 1 ms median is a sleeping thread's wake,
+# which Linux and Windows do not owe a machine with more runnable threads
+# than cores: Linux on 12 vCPUs at one-minute loads of 18 to 34 failed it
+# in 74 of 80 runs, the medians near its 2.9 ms slice, and Windows on 12
+# vCPUs beside 12 and 24 busy loops in 32 of 80, at 0.1 to 6.2 ms.
+# So a run whose load is at or past the cores is told so (`--loaded=`),
+# and the step holds there only what no clock blurs: an idle worker
+# called at each hand-off, the woken task run on another worker, within
+# 40 ms. Linux's load is its threads runnable, `procs_running` in
+# /proc/stat less the one reading it, ten looks over the second: the
+# one-minute average lags it, and a run begun at an average of 8.4 on
+# those 12 vCPUs failed the median. Windows keeps none, so its load is
+# the busy share of the cores plus the ready queue over the second,
+# which read 0.1 to 1.2 idle, 6.1 to 7.3 beside 6 busy loops (no run
+# failed) and 20 to 45 beside 12 to 24. darwin woke the tasks in 7 to
+# 218 us at loads of 4 to 44 on 10 cores (tmac, 160 runs), and is always
+# judged.
+host_load() {
+  case "$(uname -s)" in
+    Linux)
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        grep '^procs_running ' /proc/stat
+        sleep 0.1
+      done | awk '{ sum += $2 - 1 } END { if (NR) printf "%.1f\n", sum / NR }' ;;
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      powershell -NoProfile -Command '$c = (Get-Counter "\Processor(_Total)\% Processor Time","\System\Processor Queue Length" -SampleInterval 1 -MaxSamples 1).CounterSamples; [string]::Format([cultureinfo]::InvariantCulture, "{0:F1}", $c[0].CookedValue * [Environment]::ProcessorCount / 100 + $c[1].CookedValue)' 2> /dev/null | tr -d '\r' ;;
+  esac
+}
 for build in plain release; do
   step "what a task keeps when it resumes on another worker, $build build"
   flag=""
@@ -176,6 +210,20 @@ for build in plain release; do
     echo "the migration exercise failed (exit $code):"; cat "migrated-$build.txt"; exit 1
   fi
   sed 's/^/  /' "migrated-$build.txt"
+  load="$(host_load)"
+  loaded=""
+  judged=""
+  if [ -n "$load" ] && awk -v l="$load" -v c="$CORES" 'BEGIN { exit !(l >= c) }'; then
+    loaded="a load of $load on $CORES cores"
+  elif [ -n "$load" ]; then
+    judged="; judged at a load of $load on $CORES cores"
+  fi
+  timeout -k 5 300 "./migrate-$build" handoff ${loaded:+"--loaded=$loaded"} > "handed-$build.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q 'every property held' "handed-$build.txt"; then
+    echo "the hand-off step failed${load:+ at a load of $load on $CORES cores} (exit $code):"; cat "handed-$build.txt"; exit 1
+  fi
+  grep -v 'every property held' "handed-$build.txt" | sed "s/^/  /; s/\$/$judged/"
 done
 # ── 2a. Windows' one completion port, twice ──────────────────────────────
 # bench/completions_taken.iyi at twelve workers: a task's socket answered
@@ -578,43 +626,84 @@ esac
 # Sixteen tasks of integer work with nothing to allocate, so the ratio is
 # the scheduler's and not the collector's. Best of three, because a
 # shared machine's clock is weather.
+#
+# The wall-clock ratio is a host's as much as the pool's: Linux on 12
+# vCPUs beside 12 busy loops (`procs_running` 17) gave 4 workers 2.10x
+# one worker's time, where an idle run gives 3.4 to 3.9x, and 8 workers
+# 4.72x in the same run. So the ratio is judged only where the host has
+# the K workers' cores free - its load, read as the hand-off step reads
+# it, at most the cores less K before the runs and after them - and is
+# printed with the reason otherwise. What no load blurs is held at every
+# load: how many threads held a task at once, on average over the run
+# (`at_once` in hundredths, each task looking at its thread and the clock
+# every 65536 rounds): a thread holds its task whether or not the kernel
+# has it on a core, and a pool that runs its tasks one thread at a time
+# cannot pass 1.00, so K workers are held to 0.6 x K there too.
 TASKS=16
 ROUNDS=40000000
-best_ms() { # workers binary
-  local best="" run ms
+best_ms() { # workers binary -> "fastest_ms most_at_once"
+  local best="" most="" run line ms at
   for run in 1 2 3; do
-    ms="$(timeout -k 5 300 "./$2" speed "$1" "$TASKS" "$ROUNDS" | sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p')"
-    [ -n "$ms" ] || { echo "the speed run at $1 workers printed no time" >&2; return 1; }
+    line="$(timeout -k 5 300 "./$2" speed "$1" "$TASKS" "$ROUNDS")"
+    ms="$(echo "$line" | sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p')"
+    at="$(echo "$line" | sed -n 's/.*at_once=\([0-9]*\).*/\1/p')"
+    [ -n "$ms" ] && [ -n "$at" ] || { echo "the speed run at $1 workers printed no time: $line" >&2; return 1; }
     if [ -z "$best" ] || [ "$ms" -lt "$best" ]; then best="$ms"; fi
+    if [ -z "$most" ] || [ "$at" -gt "$most" ]; then most="$at"; fi
   done
-  echo "$best"
+  echo "$best $most"
 }
 # The floor: k workers must finish at least 0.6 * k times faster than one.
 holds_floor() { # one_ms k_ms k
   awk -v one="$1" -v many="$2" -v k="$3" 'BEGIN { exit !(many > 0 && one / many >= 0.6 * k) }'
 }
+# The same floor on the threads that held a task at once.
+holds_at_once() { # at_once_hundredths k
+  [ "$1" -ge $((60 * $2)) ]
+}
+at_once() { awk -v a="$1" 'BEGIN { printf "%.2f", a / 100 }'; }
 K=4
 [ "$CORES" -lt "$K" ] && K="$CORES"
 step "the speedup: $TASKS CPU-bound tasks, release build, best of three, $CORES cores here"
 if [ "$CORES" -lt 2 ]; then
   echo "  one core here: nothing to scale onto, so the ratio is not held"
 else
-  ONE="$(best_ms 1 exercise-release)" || exit 1
-  printf '  %2s worker(s): %6s ms\n' 1 "$ONE"
+  SPEED_LOAD="$(host_load)"
+  got="$(best_ms 1 exercise-release)" || exit 1
+  ONE="${got% *}"
+  printf '  %2s worker(s): %6s ms, %s at once\n' 1 "$ONE" "$(at_once "${got#* }")"
   MANY=""
+  MANY_AT=""
   for w in 2 4 8; do
     [ "$w" -gt "$CORES" ] && break
-    ms="$(best_ms "$w" exercise-release)" || exit 1
+    got="$(best_ms "$w" exercise-release)" || exit 1
+    ms="${got% *}"
     ratio="$(awk -v a="$ONE" -v b="$ms" 'BEGIN { printf "%.2f", a / b }')"
-    printf '  %2s worker(s): %6s ms, %sx one worker\n' "$w" "$ms" "$ratio"
-    [ "$w" -eq "$K" ] && MANY="$ms"
+    printf '  %2s worker(s): %6s ms, %sx one worker, %s at once\n' "$w" "$ms" "$ratio" "$(at_once "${got#* }")"
+    [ "$w" -eq "$K" ] && { MANY="$ms"; MANY_AT="${got#* }"; }
   done
-  [ -n "$MANY" ] || MANY="$(best_ms "$K" exercise-release)" || exit 1
-  if ! holds_floor "$ONE" "$MANY" "$K"; then
-    echo "$K workers took $MANY ms against one worker's $ONE ms: under 0.6 x $K, which is not parallel"
+  if [ -z "$MANY" ]; then
+    got="$(best_ms "$K" exercise-release)" || exit 1
+    MANY="${got% *}"; MANY_AT="${got#* }"
+  fi
+  after="$(host_load)"
+  [ -n "$after" ] && { [ -z "$SPEED_LOAD" ] || awk -v a="$after" -v b="$SPEED_LOAD" 'BEGIN { exit !(a > b) }'; } && SPEED_LOAD="$after"
+  if ! holds_at_once "$MANY_AT" "$K"; then
+    echo "$K workers held their tasks $(at_once "$MANY_AT") at once on average: under 0.6 x $K, which is not parallel"
     exit 1
   fi
-  echo "  $K workers: $(awk -v a="$ONE" -v b="$MANY" 'BEGIN { printf "%.2f", a / b }')x one worker, over the floor of $(awk -v k="$K" 'BEGIN { printf "%.1f", 0.6 * k }')x"
+  # Judged where the load leaves K cores free, or where none is read.
+  SPEED_JUDGED=yes
+  [ -n "$SPEED_LOAD" ] && awk -v l="$SPEED_LOAD" -v c="$CORES" -v k="$K" 'BEGIN { exit !(l > c - k) }' && SPEED_JUDGED=""
+  if [ -n "$SPEED_JUDGED" ]; then
+    if ! holds_floor "$ONE" "$MANY" "$K"; then
+      echo "$K workers took $MANY ms against one worker's $ONE ms: under 0.6 x $K, which is not parallel${SPEED_LOAD:+ (a load of $SPEED_LOAD on $CORES cores)}"
+      exit 1
+    fi
+    echo "  $K workers: $(awk -v a="$ONE" -v b="$MANY" 'BEGIN { printf "%.2f", a / b }')x one worker, over the floor of $(awk -v k="$K" 'BEGIN { printf "%.1f", 0.6 * k }')x${SPEED_LOAD:+, judged at a load of $SPEED_LOAD on $CORES cores}; $(at_once "$MANY_AT") at once"
+  else
+    echo "  $K workers: $(at_once "$MANY_AT") at once, over the floor of $(awk -v k="$K" 'BEGIN { printf "%.1f", 0.6 * k }'); the time's ratio not judged, a load of $SPEED_LOAD on $CORES cores leaving fewer than $K free"
+  fi
 fi
 
 # ── 4. A deadlock across threads is named ────────────────────────────────
@@ -719,20 +808,20 @@ group do |g|
 end'
 
 # #148: the issue's shape, a pool in a constant read through `ask`. The
-# block names no constant, so nothing above refuses it; it is warned
-# about at the block, with the path, by a build and by `check`, and
-# `--error-on-warnings` makes the warning a failure. The broken copy is
-# the clean one with the mark taken off, and the check that passes the
-# marked copy catches it. Two blocks reach `DATABASE`, and that is one
-# warning at the first, counting the second: iyiturkiye's routes gave
-# 1251 warnings about 37 constants, each once per route that reached
-# it, on Linux; gathered they are 37. Its broken copy
-# has the second block left out, and says nothing of another block.
-# The clean copy's `Database` is built at startup and only read: its
-# claim is one the compiler proves. This copy once assigned a field in
-# `query_one`, from both tasks, under the claim that one task asked,
-# and passed; that claim is refused now (bench/safe_reach.sh).
-step "a parallel block reaching a constant through a call is warned about"
+# block names no constant, so nothing above refuses it; it is refused at
+# the constant it reaches, with the block and the path, by a build and by
+# `check` (SPEC.md III.4.5; 0.21 warned). The broken copy is the clean
+# one with the mark taken off, and the build that passes the marked copy
+# catches it. Two blocks reach `DATABASE`, and that is one refusal,
+# counting the second: iyiturkiye's routes gave 1251 warnings about 37
+# constants, each once per route that reached it, on Linux; gathered they
+# are 37. Its broken copy has the second block left out, and says nothing
+# of another block. The clean copy's `Database` is built at startup and
+# only read: its claim is one the compiler proves, and the refusal of the
+# bare copy says so. This copy once assigned a field in `query_one`, from
+# both tasks, under the claim that one task asked, and passed; that claim
+# is refused now (bench/safe_reach.sh).
+step "a parallel block reaching a constant through a call is refused"
 cat > reaches.iyi <<'IYI'
 module reaches
 
@@ -767,36 +856,37 @@ if ! "$IYI" check --error-on-warnings reaches.iyi > check-reaches.log 2>&1; then
   echo "a constant marked @[SafeReach] failed the check under --error-on-warnings:"; cat check-reaches.log; exit 1
 fi
 echo "  checks under --error-on-warnings: DATABASE marked @[SafeReach]"
-if ! "$IYI" build reaches_bare.iyi -o reaches_bare > build-reaches-bare.log 2>&1; then
-  echo "a warning stopped a build without --error-on-warnings:"; cat build-reaches-bare.log; exit 1
+if "$IYI" build reaches_bare.iyi -o reaches_bare > build-reaches-bare.log 2>&1; then
+  echo "the build passed a block reaching DATABASE unmarked:"; cat build-reaches-bare.log; exit 1
 fi
-want='the block spawn(unit: :new) runs in a unit of its own, on another thread reaches `DATABASE : ReachesBare::Database` (not Share) through `ask` → `DATABASE.query_one`, as does 1 other parallel block: '
+want='reaches `DATABASE : ReachesBare::Database` (not Share) through `ask` → `DATABASE.query_one`, as does 1 other parallel block: '
+claim='Nothing writes it once a parallel task may start, so a claim is proven: `iyi fix` adds `@[SafeReach("set before the first parallel task starts, then only read")]`'
 if [ "$(grep -c 'reaches `DATABASE' build-reaches-bare.log)" != 1 ]; then
-  echo "two blocks reaching DATABASE were not one warning:"; cat build-reaches-bare.log; exit 1
+  echo "two blocks reaching DATABASE were not one refusal:"; cat build-reaches-bare.log; exit 1
 fi
-if ! grep -qF "$want" build-reaches-bare.log; then
-  echo "the block reaching DATABASE through ask was not warned about:"; cat build-reaches-bare.log; exit 1
+if ! grep -qF "$want" build-reaches-bare.log || ! grep -qF "$claim" build-reaches-bare.log; then
+  echo "the build was refused, but not for the block reaching DATABASE through ask, with the claim:"; cat build-reaches-bare.log; exit 1
 fi
-if "$IYI" check --error-on-warnings reaches_bare.iyi > check-reaches-strict.log 2>&1; then
-  echo "--error-on-warnings passed the program the warning names:"; cat check-reaches-strict.log; exit 1
+if "$IYI" check reaches_bare.iyi > check-reaches-bare.log 2>&1; then
+  echo "check passed the program the build refuses:"; cat check-reaches-bare.log; exit 1
 fi
-if ! grep -qF "$want" check-reaches-strict.log; then
-  echo "check failed the program, but not for the warning:"; cat check-reaches-strict.log; exit 1
+if ! grep -qF "$want" check-reaches-bare.log; then
+  echo "check failed the program, but not for the block reaching DATABASE:"; cat check-reaches-bare.log; exit 1
 fi
-echo "  broken copy, the mark taken off: warned by the build, and failed by check --error-on-warnings"
-echo "  warned once for two blocks: $(grep -m1 -F "$want" build-reaches-bare.log | sed 's/^Warning: //' | cut -c1-190)"
+echo "  broken copy, the mark taken off: refused by the build and by check, the claim offered"
+echo "  refused once for two blocks: $(grep -m1 -oF "$want" build-reaches-bare.log | cut -c1-150)"
 awk '/ask\(2_i64\)/ { next } /^module reaches_bare$/ { print "module reaches_lone"; next } { print }' reaches_bare.iyi > reaches_lone.iyi
 if cmp -s reaches_bare.iyi reaches_lone.iyi; then
   echo "the awk for reaches_lone found nothing to change"; exit 1
 fi
-if ! "$IYI" check reaches_lone.iyi > check-reaches-lone.log 2>&1; then
-  echo "check failed a program it only warns about:"; cat check-reaches-lone.log; exit 1
+if "$IYI" check reaches_lone.iyi > check-reaches-lone.log 2>&1; then
+  echo "check passed one block reaching DATABASE:"; cat check-reaches-lone.log; exit 1
 fi
 if grep -qF "$want" check-reaches-lone.log || grep -qF 'other parallel block' check-reaches-lone.log \
   || ! grep -qF 'through `ask` → `DATABASE.query_one`: ' check-reaches-lone.log; then
-  echo "one block reaching DATABASE was not warned about alone:"; cat check-reaches-lone.log; exit 1
+  echo "one block reaching DATABASE was not refused alone:"; cat check-reaches-lone.log; exit 1
 fi
-echo "  broken copy, the second block left out: warned with no other block counted"
+echo "  broken copy, the second block left out: refused with no other block counted"
 
 # ── 7. Failure proofs: broken copies of the runtime ──────────────────────
 # Each a copy of src/iyi with one file changed - concurrency.iyi unless
@@ -843,6 +933,12 @@ broken duplicate '/^          victim.pool_head = fiber.next_run$/ { next } /^   
 caught duplicate 'the pool handed one parallel task to a worker twice' steal
 
 step "failure proof: a cancel never delivered to a sleeping task's thread"
+# The copy posts no cancel to another thread, so the sleeper on a worker
+# and the task asleep on the main thread sleep their 10 s out past the
+# watchdog. The step cued its failure by a 100 ms sleep once, and beside
+# 12 busy loops on Linux's 12 vCPUs the copy passed it in 19 runs of 20,
+# the cancel finding sleeps not yet begun, which end themselves; the
+# failure now waits until each is where the step says (`cancel`).
 broken undelivered '/^    return if fiber.cancel_posted$/ { print "    return"; next } { print }'
 caught undelivered 'cancel: still waiting after 5000 ms' cancel --watch=5000
 
@@ -914,11 +1010,11 @@ if [ "$CORES" -lt 2 ]; then
   echo "  one core here: no two wakers race, so the proofs are not run"
 else
   broken unhanded '/^      head.handed = true$/ { next } { print }'
-  caught unhanded 'wakes: selects over two channels received' wakes --watch=5000
+  caught unhanded 'wakes: selects over two channels received' wakes --only=selects --watch=5000
   broken lostcancel '/^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; next } { print }'
-  caught lostcancel 'wakes, cancels: still waiting after 5000 ms' wakes --watch=5000
+  caught lostcancel 'wakes, cancels: still waiting after 5000 ms' wakes --only=cancels --watch=5000
   broken lostword '/def self.park_on\(/ { inpark = 1 } inpark && held == "" && /^    IyiChanLock.lock\(lock\)$/ { held = $0; next } inpark && held != "" && /^      IyiChanLock.unlock\(lock\)$/ { next } inpark && held != "" && /^    end$/ { print; print held; held = ""; inpark = 0; next } { print }'
-  caught lostword 'wakes, words: turn' wakes --watch=5000
+  caught lostword 'wakes, words: turn' wakes --only=words --watch=5000
 fi
 
 step "failure proof: a plain add loses counts when tasks run at the same instant"
@@ -989,9 +1085,24 @@ else
   step "failure proof: a task woken by a task that computes on waits for that computation"
   # Measured with the handoff step, Linux, 12 vCPUs, release: the woken
   # task started 50.0 ms after its send in each of 20 wakes without the
-  # call, beside a 50 ms hold, and 23 to 28 us with it.
+  # call, beside a 50 ms hold, and 23 to 28 us with it. The step names the
+  # call it finds missing before it reads a clock, so a loaded host
+  # catches the copy too: 15 of 15 runs at Linux loads of 18 to 33, 20 of
+  # 20 on tmac at loads of 4 to 41, and 15 of 15 on Windows, 12 vCPUs,
+  # beside up to 24 busy loops.
   broken nohandoff '/^    elsif handed_on\?\(st, fiber\)$/ { print "    elsif false"; next } { print }' concurrency.iyi parallel_migrate
-  caught nohandoff 'handoff: tasks woken onto a worker held 50 ms' handoff
+  caught nohandoff 'were handed over with no idle worker called' handoff
+
+  step "failure proof: a hand-off that marks its call and rings nobody waits for the monitor"
+  # The copy keeps `handoff_last` and drops the call, so only the clock
+  # can tell: the monitor calls for the fiber a look or two into the
+  # hold (`look`), and its wakes waited 5.1 to 10.2 ms at the median
+  # (Linux, loads 18 to 33, 15 of 15 runs), 6.3 on tmac (20 of 20) and
+  # 1.2 to 12.5 on Windows (15 of 15), the 1.2 beside 24 busy loops; there
+  # some wakes start within 30 us even without the call (4 of 10 in one
+  # run), so the median, not the fastest, is what tells.
+  broken nocall '/^        st.handoff_last = fiber.object_id$/ { print; drop = 1; next } drop && /^        wake_one$/ { drop = 0; next } { print }' concurrency.iyi parallel_migrate
+  caught nocall 'handoff: tasks woken onto a worker held 50 ms' handoff
 
   step "failure proof: a monitor that calls nobody for a held worker's ring leaves a hand-off its back-off skipped behind the hold"
   broken nobackstop '/^    wake_one if stuck$/ { next } { print }' concurrency.iyi parallel_migrate
@@ -1113,6 +1224,11 @@ step "failure proof: a word the monitor raised for the task before preempts the 
 # processors and held to 4, on Linux here and on macOS 26.6, Apple M2
 # Pro, 10 cores (the user's machine), and the fresh step held 10 rounds
 # with no preemption, plain and release, on each.
+# The step now judges each round from the task before's end to the end
+# of the slice the give-up came in (`fresh_round`), and the copy was
+# caught at round 1 within 55 to 3075 us of that end on Linux (8 runs, 16
+# to 48 threads runnable), 64 us in a gate run beside 12 busy loops, and
+# 34 to 50 us on tmac.
 broken stale '/^        raised.value.set\(0_u64\) if raised.value.get != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
 caught stale 'fresh: round ' fresh --workers=1
 
@@ -1213,6 +1329,9 @@ else
 fi
 
 # ── 8. Failure proof: one worker, whatever was asked for ──────────────────
+# Refused at any load by the threads that held a task at once, which one
+# worker holds at 1.00 at most; and where step 3 judged the time's ratio,
+# by that too.
 step "failure proof: a pool held to one worker fails the speedup floor"
 if [ "$CORES" -lt 2 ]; then
   echo "  one core here: the floor is not held, so there is nothing to fail"
@@ -1225,11 +1344,16 @@ else
   if ! IYI_PATH="$WORK/oneworker${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/parallel_exercise.iyi" -o oneworker-run > build-oneworker.log 2>&1; then
     echo "the one-worker copy failed to build:"; tail -20 build-oneworker.log; exit 1
   fi
-  SLOW="$(best_ms "$K" oneworker-run)" || exit 1
-  if holds_floor "$ONE" "$SLOW" "$K"; then
+  got="$(best_ms "$K" oneworker-run)" || exit 1
+  SLOW="${got% *}"
+  SLOW_AT="${got#* }"
+  if holds_at_once "$SLOW_AT" "$K"; then
+    echo "a pool of one worker asked for $K held its tasks $(at_once "$SLOW_AT") at once and passed the floor"; exit 1
+  fi
+  if [ -n "$SPEED_JUDGED" ] && holds_floor "$ONE" "$SLOW" "$K"; then
     echo "a pool of one worker asked for $K took $SLOW ms against $ONE ms and passed the floor"; exit 1
   fi
-  echo "  asked for $K, ran on 1: $SLOW ms against $ONE ms, $(awk -v a="$ONE" -v b="$SLOW" 'BEGIN { printf "%.2f", a / b }')x, refused"
+  echo "  asked for $K, ran on 1: $(at_once "$SLOW_AT") at once, $SLOW ms against $ONE ms, $(awk -v a="$ONE" -v b="$SLOW" 'BEGIN { printf "%.2f", a / b }')x, refused"
 fi
 
 echo "parallel gate: every property held"

@@ -326,7 +326,7 @@ def selftest(compiler: str | None = None, repo: str | None = None) -> None:
     def check_syntax(src_code: str, label: str) -> None:
         if not compiler_bin:
             return
-        with tempfile.NamedTemporaryFile("w", suffix=".iyi", delete=False) as tf:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", suffix=".iyi", delete=False) as tf:
             tf.write(src_code)
             tpath = tf.name
         try:
@@ -341,7 +341,7 @@ def selftest(compiler: str | None = None, repo: str | None = None) -> None:
     def check_negative(src_code: str, expected_err: str, label: str) -> None:
         if not compiler_bin:
             return
-        with tempfile.NamedTemporaryFile("w", suffix=".iyi", delete=False) as tf:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", suffix=".iyi", delete=False) as tf:
             tf.write(src_code)
             tpath = tf.name
         try:
@@ -380,7 +380,7 @@ def selftest(compiler: str | None = None, repo: str | None = None) -> None:
         "\n"
         "puts 1\n"
     )
-    with tempfile.NamedTemporaryFile("w", suffix=".iyi", delete=False) as f:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", suffix=".iyi", delete=False) as f:
         f.write(src_with_unsafe)
         path1 = f.name
     try:
@@ -407,7 +407,7 @@ def selftest(compiler: str | None = None, repo: str | None = None) -> None:
         "\n"
         "puts 2\n"
     )
-    with tempfile.NamedTemporaryFile("w", suffix=".iyi", delete=False) as f:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", suffix=".iyi", delete=False) as f:
         f.write(src_no_unsafe)
         path2 = f.name
     try:

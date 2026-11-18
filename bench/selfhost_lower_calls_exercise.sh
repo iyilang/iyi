@@ -691,6 +691,65 @@ else
   fi
 fi
 
+constructor_allocation_ir_check() {
+  [ -n "$PY" ] || { echo 'INVALID: Python is required for the allocation IR check'; return 2; }
+  "$PY" - "$(native_path "$1")" "$(native_path "$2")" <<'PY'
+import re
+import sys
+
+ssa = r'%[-A-Za-z0-9$._]+'
+alloc_re = re.compile(r'^\s*(' + ssa + r')\s*=\s*call\b.*\bptr\b.*@malloc\(')
+load_re = re.compile(r'^\s*(' + ssa + r')\s*=\s*load\s+ptr\s*,\s*ptr\s+(' + ssa + r')(?:,|\s*$)')
+store_re = re.compile(r'^\s*store\s+ptr\s+(' + ssa + r')\s*,\s*ptr\s+' + ssa + r'(?:,|\s*$)')
+
+def allocation_flow(path):
+    with open(path, encoding="utf-8") as source:
+        lines = source.read().splitlines()
+    flows = []
+    active = False
+    allocations = set()
+    loads = {}
+    stores = set()
+    for line in lines:
+        if line.startswith("define "):
+            active = "Box(" in line and "::new" in line
+            allocations, loads, stores = set(), {}, set()
+        elif active and line == "}":
+            for allocated in allocations:
+                indirect = any(origin == allocated and loaded in stores for loaded, origin in loads.items())
+                flows.append((allocated in stores, indirect))
+            active = False
+        elif active:
+            alloc = alloc_re.match(line)
+            if alloc and "Box(" in line:
+                allocations.add(alloc.group(1))
+            load = load_re.match(line)
+            if load:
+                loads[load.group(1)] = load.group(2)
+            store = store_re.match(line)
+            if store:
+                stores.add(store.group(1))
+    return flows
+
+try:
+    baseline = allocation_flow(sys.argv[1])
+    mutant = allocation_flow(sys.argv[2])
+except (OSError, UnicodeError) as error:
+    print("INVALID: cannot inspect allocation IR:", error)
+    sys.exit(2)
+if not baseline or not all(direct and not indirect for direct, indirect in baseline):
+    print("INVALID: baseline Box constructor does not store its allocated pointer directly")
+    sys.exit(2)
+if any(indirect and not direct for direct, indirect in mutant):
+    print("decisive: Box constructor loads from its allocation before storing the result")
+    sys.exit(1)
+if mutant and all(direct and not indirect for direct, indirect in mutant):
+    sys.exit(0)
+print("INVALID: mutant Box constructor has no expected allocation flow")
+sys.exit(2)
+PY
+}
+
 # A mutant that cannot build is invalid, not a caught regression. The marker
 # crosses the mutation helper's subprocess boundary and makes that case red.
 generic_constructor_check() {
@@ -714,6 +773,15 @@ generic_constructor_check() {
       echo "INVALID MUTANT: constructor $name did not emit IR"
       cat "$WORK/constructor.check.log" "$WORK/constructor.check.err"
       return 2
+    fi
+    if [ "${CONSTRUCTOR_REFUSAL:-}" = class-load ] && [ "$name" = lowcallinfer_generic_new ]; then
+      if [ ! -f "$WORK/constructor.baseline" ]; then
+        echo 'INVALID: class-allocation mutation has no passing baseline'
+        return 2
+      fi
+      constructor_allocation_ir_check "$WORK/$name.baseline.ir" "$WORK/constructor.check.ir"
+      result=$?
+      if [ "$result" -ne 0 ]; then return "$result"; fi
     fi
     if ! "$WORK/constructor.check.tool$EXE" "$fixture" -o "$WORK_NATIVE/constructor.check.exe" --pipeline typed > "$WORK/constructor.check.log" 2>&1; then
       echo "INVALID MUTANT: constructor $name did not emit Mach-O"
@@ -771,7 +839,7 @@ if generic_constructor_check && [ ! -e "$WORK/constructor.invalid" ]; then
     '  if recorded = (node.obj.nil? ? low.analysed.call_receiver?(node) : nil)' || status=1
   # Leaving a struct address is indistinguishable in the exercised callers:
   # their stores and returns load it. Force the opposite classification instead.
-  constructor_prove "class allocation is loaded as a struct" "$REPO/src/compiler/lower/call.iyi" \
+  CONSTRUCTOR_REFUSAL=class-load constructor_prove "class allocation is loaded as a struct" "$REPO/src/compiler/lower/call.iyi" \
     '      if passed_by_value?(allocated_type)' '      if true' || status=1
 else
   echo "  constructor mutation baseline failed or did not build"

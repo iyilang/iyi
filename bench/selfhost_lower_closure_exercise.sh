@@ -542,6 +542,7 @@ fi
 prove_mutation 'call on a NoReturn receiver is looked up' "$REPO/src/compiler/semantic/main_visitor.iyi" \
   'return true if !node.obj.nil? && rec_type.is_a?(NoReturnType)' 'nil' -- check_specific_refusal lowcall_noreturn_operand src/compiler/semantic/main_visitor.iyi "^undefined method '&\\+' for NoReturn$" || status=1
 cat > "$WORK/never-operand.iyi" <<'IYI'
+@[Unsafe("uses C putchar and exit to observe evaluated operand order")]
 lib LibC
   fun putchar(c : Int32) : Int32
   fun exit(status : Int32) : NoReturn

@@ -128,6 +128,52 @@ passed=0
 # The pointer-union fixture's allocator also differs in its metaclass type-id load;
 # its hosted symbol and the naming mutation are checked independently below.
 KNOWN_DIVERGED="lower_string_nonascii lower_name_pointer_union"
+
+# Bare-prelude oracles that cannot exist today. Each entry must keep failing
+# for its named reason and remain in the closure gate's full-prelude fixture list.
+bare_oracle_reason() {
+  case "$1" in
+    lower_proc_yielded_blocks) printf '%s\n' "uses defer; the hosted compiler needs the prelude's personality" ;;
+  esac
+}
+closure_full_prelude_covers() {
+  local name="$1" script="$2"
+  [ -r "$script" ] || return 1
+  awk -v name="$name" '
+    /^[[:space:]]*for fixture in / { in_list=1; sub(/^[[:space:]]*for fixture in /, "") }
+    in_list {
+      for (i=1; i<=NF; i++) {
+        word=$i
+        sub(/;$/, "", word)
+        if (word == name) found=1
+      }
+      if ($0 ~ /;[[:space:]]*do[[:space:]]*$/) in_list=0
+    }
+    END { exit !found }
+  ' "$script" || return 1
+  grep -Fq -- "[ \"\$fixture\" = $name ] && host_flags=()" "$script"
+}
+covered_bare_oracle_failure() {
+  local name="$1" log="$2" result="$3" closure_script="$4"
+  [ -n "$(bare_oracle_reason "$name")" ] || return 1
+  [ "$result" -eq 1 ] || return 1
+  grep -Fq 'BUG: __crystal_personality is not defined' "$log" || return 1
+  closure_full_prelude_covers "$name" "$closure_script"
+}
+# The same classifier used below must reject an unlisted failed oracle and
+# a listed fixture removed from the closure gate.
+printf '%s\n' 'BUG: __crystal_personality is not defined (Exception)' > "$WORK/oracle-control.log"
+printf '%s\n' 'for fixture in unrelated; do' '[ "$fixture" = unrelated ] && host_flags=()' > "$WORK/no-closure-fixture.sh"
+if ! covered_bare_oracle_failure lower_proc_yielded_blocks "$WORK/oracle-control.log" 1 "$REPO/bench/selfhost_lower_closure_exercise.sh"; then
+  echo 'FAIL: bare-oracle exception did not recognize its listed, covered diagnostic'
+  status=1
+elif covered_bare_oracle_failure lower_unlisted_fixture "$WORK/oracle-control.log" 1 "$REPO/bench/selfhost_lower_closure_exercise.sh" ||
+     covered_bare_oracle_failure lower_proc_yielded_blocks "$WORK/oracle-control.log" 1 "$WORK/no-closure-fixture.sh"; then
+  echo 'FAIL: bare-oracle exception accepted an uncovered failing fixture'
+  status=1
+else
+  echo '  negative control: uncovered failing bare-prelude oracles remain failures'
+fi
 e2e=""
 required_wide="lowconst_wide_unsigned lowconst_wide_fold lowconst_wide_signed lower_wide_literal"
 required_proc_self="lower_closure_self_class lower_closure_self_struct lower_closure_self_nested lower_closure_self_unit_call lower_closure_counter lowprim_proc_call"
@@ -151,9 +197,21 @@ for fixture in "$REPO"/bench/fixtures/lower_*.iyi "$REPO"/bench/fixtures/lowdecl
     oracle_target=(--cross-compile --target aarch64-apple-darwin)
     oracle_output="$WORK_NATIVE/$name.o"
   fi
-  if ! "$IYI" build "${oracle_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
+  oracle_status=0
+  "$IYI" build "${oracle_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || oracle_status=$?
+  reason="$(bare_oracle_reason "$name")"
+  if [ "$oracle_status" -ne 0 ] || [ ! -s "$WORK/$name.ll" ]; then
+    if [ ! -s "$WORK/$name.ll" ] && covered_bare_oracle_failure "$name" "$WORK/$name.oracle.log" "$oracle_status" "$REPO/bench/selfhost_lower_closure_exercise.sh"; then
+      echo "  $name: covered by the closure gate: $reason"
+      continue
+    fi
     echo "  $name: the hosted compiler did not emit its module (see $WORK/$name.oracle.log)"
     awk 'NR<=3' "$WORK/$name.oracle.log"
+    diverged=$((diverged + 1))
+    continue
+  fi
+  if [ -n "$reason" ]; then
+    echo "  $name: FAIL: bare-prelude oracle now builds; remove its closure-gate exception"
     diverged=$((diverged + 1))
     continue
   fi

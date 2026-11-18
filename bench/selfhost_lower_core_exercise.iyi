@@ -16,7 +16,7 @@ module bench/selfhost_lower_core_exercise
 # holding their text, and the stores into them), the `declare` of printf that the hosted
 # constant printing emits, the attribute groups, comments and the source header.
 
-import compiler/syntax/ast::{ASTNode, Break, Def, Next, Nop, Return, Var}
+import compiler/syntax/ast::{ASTNode, Assign, BoolLiteral, Break, Def, Next, Nop, Return, Var}
 import compiler/syntax/parser::{Parser}
 import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, normalize_path}
 import compiler/semantic/main_visitor::{MainVisitor, TypedInstance}
@@ -30,8 +30,9 @@ import compiler/ir/printer::{print}
 import compiler/ir/types::{IrType}
 import compiler/platform/target::{Target}
 import compiler/lower/typer::{LowerTyper}
-import compiler/lower/lower::{codegen_program, jump_target, lower_def_probe}
-import compiler/ir/function::{Function}
+import compiler/lower/lower::{codegen_program, jump_target, lower_def_probe, static_condition}
+import compiler/ir/function::{Function, Global}
+import compiler/ir/values::{Value}
 import compiler/lower/context::{Lowerer}
 import bench/lib/lower_gate::{attach_attrs, oracle_attr_map, printed_attr_map}
 import bench/lib/primitive_stand_in::{stand_in_primitive_types}
@@ -257,7 +258,10 @@ def check_context : Nil
   reason = probe.narrowed_out_reason("narrowed")
   probe.untyped_locals["narrowed"] = reason
   narrowed.accept(probe)
-  raise "CONTEXT FAILED: narrowed variable recorded a refusal" unless probe.refusals.empty?
+  unless probe.refusals.empty?
+    puts "CONTEXT FAILED: narrowed variable recorded a refusal"
+    exit(1)
+  end
   raise "CONTEXT FAILED: narrowed variable lost its reason" unless probe.untyped_reasons[narrowed]? == reason
   ordinary = Var.new("ordinary")
   probe.untyped_locals["ordinary"] = "ordinary untyped value"
@@ -265,16 +269,28 @@ def check_context : Nil
   raise "CONTEXT FAILED: ordinary untyped variable lost its refusal" unless probe.refusals.size == 1
   named = ["@\"'a'.2\" = private constant i32 1", "@\"'b'.3\" = private constant i32 2", "use @\"'a'.2\", @\"'b'.3\", @other.2"] of String
   shifted = ["@\"'a'.1\" = private constant i32 1", "@\"'b'.2\" = private constant i32 2", "use @\"'a'.1\", @\"'b'.2\", @other.2"] of String
-  raise "CONTEXT FAILED: hidden global suffix offset" unless normalise_hidden_uniques(named, ["'build'.1"] of String) == shifted
+  unless normalise_hidden_uniques(named, ["'build'.1"] of String) == shifted
+    puts "CONTEXT FAILED: hidden global suffix offset"
+    exit(1)
+  end
   raise "CONTEXT FAILED: suffixes changed without hidden collisions" unless normalise_hidden_uniques(named, ["'build'"] of String) == named
   m = ir_module("aarch64-apple-darwin27.0.0")
   typer = LowerTyper.new(m.types, m.layout, analysis.iyi)
   low = Lowerer.new(m, typer, analysis.visitor)
+  truthy_assignment = Assign.new(Var.new("truth"), BoolLiteral.new(true))
+  false_assignment = Assign.new(Var.new("falsehood"), BoolLiteral.new(false))
+  unless static_condition(low, truthy_assignment) == true && static_condition(low, false_assignment) == false
+    puts "CONTEXT FAILED: assignment lost static truthiness"
+    exit(1)
+  end
   void_fn_type = m.types.func([] of IrType, m.types.void)
 
   fn = low.begin_main_function("kept", void_fn_type, true)
   names = fn.blocks.map { |b| b.name }
-  raise "CONTEXT FAILED: a function starts with blocks #{names.join(",")}, not alloca,entry" unless names == ["alloca", "entry"]
+  unless names == ["alloca", "entry"]
+    puts "CONTEXT FAILED: a function starts with blocks #{names.join(",")}, not alloca,entry"
+    exit(1)
+  end
   low.alloca(m.types.int32, "x")
   raise "CONTEXT FAILED: the alloca is not in the alloca block" unless low.current_alloca_block.insts.size == 1
   raise "CONTEXT FAILED: the alloca block is not the first block" unless low.current_alloca_block.name == "alloca"
@@ -286,7 +302,10 @@ def check_context : Nil
   empty = low.begin_main_function("empty", void_fn_type, true)
   low.builder.ret_void
   low.finish_main_function
-  raise "CONTEXT FAILED: an empty alloca block was kept (#{empty.blocks.size} blocks)" unless empty.blocks.size == 1
+  unless empty.blocks.size == 1
+    puts "CONTEXT FAILED: an empty alloca block was kept (#{empty.blocks.size} blocks)"
+    exit(1)
+  end
   puts "CONTEXT OK"
 end
 
@@ -409,7 +428,7 @@ def run_probe_reuse(fixture : String) : Nil
   callee = probe_message(analysis, typer, m, "callee")
   if callee.nil?
     puts "callee-clean=1"
-    raise "the callee was recorded clean"
+    exit(1)
   end
   puts "callee-clean=0"
 end
@@ -444,6 +463,18 @@ def run_probe_required(runtime : String, entry : String, oracle : String, names 
   puts print(m)
 end
 
+def class_var_initializer_types(fixture : String, oracle : String) : Nil
+  analysis = analyse(File.read(fixture), fixture)
+  m = ir_module(triple_of(File.read(oracle)))
+  typer = LowerTyper.new(m.types, m.layout, analysis.iyi)
+  codegen_program(analysis.root, analysis.visitor, typer, m)
+  global = m.get_global?("Big::big")
+  raise "class variable Big::big missing" if global.nil?
+  initializer = global.as(Global).initializer
+  raise "class variable Big::big has no initializer" if initializer.nil?
+  puts "CVAR-TYPES global=#{global.as(Global).value_type} initializer=#{initializer.as(Value).type}"
+end
+
 def run : Nil
   args = Program.args
   if args.empty?
@@ -457,6 +488,8 @@ def run : Nil
     run_lower(args[1], args[2])
   elsif mode == "emit"
     run_emit(args[1], args[2])
+  elsif mode == "cvar-initializer-types"
+    class_var_initializer_types(args[1], args[2])
   elsif mode == "context"
     check_context
   elsif mode == "jump-mismatch"

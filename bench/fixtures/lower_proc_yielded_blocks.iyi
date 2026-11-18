@@ -3,6 +3,20 @@ lib LibC
   fun exit(status : Int32) : NoReturn
 end
 
+macro exception_runtime
+  fun {{ ("__cry" + "stal_personality").id }}(version : Int32, actions : Int32, exception_class : UInt64, exception_object : Void*, context : Void*) : Int32
+    0
+  end
+  fun {{ ("__cry" + "stal_get_exception").id }}(exception : Void*) : UInt64
+    0_u64
+  end
+  fun {{ ("__cry" + "stal_raise").id }}(exception : Void*) : NoReturn
+    LibC.exit(99)
+  end
+end
+
+exception_runtime
+
 def once(value : Int32, &)
   yield value
 end

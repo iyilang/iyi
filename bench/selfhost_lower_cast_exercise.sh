@@ -361,6 +361,27 @@ new_cast_check() {
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); exit !(a[2] == b[2] && a[2] > 0) }' "$WORK/mut.out"
 }
 
+cast_refusal_check() {
+  local fixture="$1" message="$2" built_marker="${3:-}" result=0 first
+  if ! awk '/^SUMMARY/ { split($2,a,"="); split($3,b,"="); if (a[2] == b[2] && b[2] > 0) ok=1 } END { exit !ok }' "$WORK/lowcast_$fixture.port.out"; then
+    echo "INVALID: lowcast_$fixture has no passing comparison baseline"
+    return 2
+  fi
+  cast_build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 2
+  [ -z "$built_marker" ] || : > "$WORK/$built_marker"
+  "$WORK/mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowcast_$fixture.iyi" "$WORK_NATIVE/lowcast_$fixture.oracle.ll" > "$WORK/mut.out" 2>"$WORK/mut.err" || result=$?
+  if [ "$result" -eq 0 ]; then return 0; fi
+  first="$(awk 'NR == 1 { print; exit }' "$WORK/mut.err")"
+  if [ "$result" -eq 1 ] && [ "$first" = "iyi: panic: $message" ] &&
+     [ "$(refusal_site "$WORK/mut.err")" = "src/compiler/lower/pending.iyi:15" ]; then
+    echo "decisive: lowcast_$fixture: $message"
+    return 1
+  fi
+  echo "INVALID: lowcast_$fixture failed outside its expected refusal"
+  cat "$WORK/mut.out" "$WORK/mut.err"
+  return 2
+}
+
 checked_downcast_check() {
   cast_build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 2
   "$WORK/mut$EXE" lower "$REPO_NATIVE/bench/fixtures/lowdowncast_checked_oracle.iyi" "$WORK_NATIVE/lowdowncast_checked_oracle.oracle.ll" > "$WORK/mut.out" 2> "$WORK/mut.err" || { cat "$WORK/mut.err"; return 2; }
@@ -409,17 +430,19 @@ prove_mutation "plain union loses mixed specialization" "$REPO/src/compiler/lowe
 cast_fixture=compatible_virtual
 new_cast_check || { echo "  baseline: compatible virtual union differs"; status=1; }
 prove_mutation "compatible virtual union member is refused" "$REPO/src/compiler/lower/cast.iyi" \
-  '  if !member && TypeQueries.reference_like?(value_type)' '  if false' -- new_cast_check || status=1
+  '  if !member && TypeQueries.reference_like?(value_type)' '  if false' -- cast_refusal_check compatible_virtual 'lower: visit(assign Sub to (Base+ | Other): not a member (hosted cast.cr, compatible type)) (hosted codegen.cr) is not ported yet' || status=1
 cast_fixture=tuple_upcast
 new_cast_check || { echo "  baseline: tuple widening differs"; status=1; }
 prove_mutation "tuple widening is refused" "$REPO/src/compiler/lower/cast.iyi" \
-  '  if target.is_a?(TupleInstanceType) && value_type.is_a?(TupleInstanceType)' '  if false' -- new_cast_check || status=1
+  '  if target.is_a?(TupleInstanceType) && value_type.is_a?(TupleInstanceType)' '  if false' -- cast_refusal_check tuple_upcast 'lower: visit(assign Tuple(Int32, String) to Tuple(Int32, String | Nil) (hosted assign_distinct, not ported)) (hosted codegen.cr) is not ported yet' || status=1
 cast_fixture=named_tuple_upcast
 new_cast_check || { echo "  baseline: named tuple widening differs"; status=1; }
 prove_mutation "named tuple widening is refused" "$REPO/src/compiler/lower/cast.iyi" \
-  '  if target.is_a?(NamedTupleInstanceType) && value_type.is_a?(NamedTupleInstanceType)' '  if false' -- new_cast_check || status=1
+  '  if target.is_a?(NamedTupleInstanceType) && value_type.is_a?(NamedTupleInstanceType)' '  if false' -- cast_refusal_check named_tuple_upcast 'lower: visit(assign NamedTuple(count: Int32, text: String) to NamedTuple(count: Int32, text: String | Nil) (hosted assign_distinct, not ported)) (hosted codegen.cr) is not ported yet' || status=1
+cast_fixture=tuple_upcast
+new_cast_check || { echo "  baseline: tuple widening differs"; status=1; }
 prove_mutation "tuple upcast is refused" "$REPO/src/compiler/lower/cast.iyi" \
-  '  if (t.is_a?(TupleInstanceType) && f.is_a?(TupleInstanceType)) || (t.is_a?(NamedTupleInstanceType) && f.is_a?(NamedTupleInstanceType))' '  if false' -- new_cast_check || status=1
+  '  if (t.is_a?(TupleInstanceType) && f.is_a?(TupleInstanceType)) || (t.is_a?(NamedTupleInstanceType) && f.is_a?(NamedTupleInstanceType))' '  if false' -- cast_refusal_check tuple_upcast 'lower: visit(upcast Tuple(Int32, String) to Tuple(Int32, String | Nil) (hosted cast.cr: upcast_distinct)) (hosted codegen.cr) is not ported yet' || status=1
 cast_fixture=tuple_narrow
 new_cast_check || { echo "  baseline: tuple narrowing differs"; status=1; }
 if ! awk '/^SUMMARY/ { split($4, a, "="); if (a[2] == 1) ok=1 } END { exit !ok }' "$WORK/mut.out"; then
@@ -444,19 +467,19 @@ fi
 cast_fixture=virtual_store
 new_cast_check || { echo "  baseline: virtual assignment differs"; status=1; }
 prove_mutation "virtual target assignment is refused" "$REPO/src/compiler/lower/cast.iyi" \
-  '  if target.is_a?(VirtualType) || target.is_a?(VirtualMetaclassType)' '  if false' -- new_cast_check || status=1
+  '  if target.is_a?(VirtualType) || target.is_a?(VirtualMetaclassType)' '  if false' -- cast_refusal_check virtual_store 'lower: visit(assign Leaf to Node+ (hosted assign_distinct, not ported)) (hosted codegen.cr) is not ported yet' || status=1
 cast_fixture=nilable_mixed
 new_cast_check || { echo "  baseline: nilable union assignment differs"; status=1; }
 prove_mutation "nullable union stores a constant type id" "$REPO/src/compiler/lower/cast.iyi" \
   '    return low.builder.select(is_null, nil_id, other_id)' '    return other_id' -- new_cast_check || status=1
 prove_mutation "nullable union assignment is refused" "$REPO/src/compiler/lower/cast.iyi" \
-  '  if target.is_a?(MixedUnionType) && (value_type.is_a?(NilableType) || value_type.is_a?(ReferenceUnionType) || value_type.is_a?(NilableReferenceUnionType))' '  if false' -- new_cast_check || status=1
+  '  if target.is_a?(MixedUnionType) && (value_type.is_a?(NilableType) || value_type.is_a?(ReferenceUnionType) || value_type.is_a?(NilableReferenceUnionType))' '  if false' -- cast_refusal_check nilable_mixed 'lower: visit(assign (Box | Nil) to (Bool | Box | Nil) (union into a non-mixed target, hosted assign_distinct)) (hosted codegen.cr) is not ported yet' || status=1
 prove_mutation "nullable mixed read drops the stored pointer" "$REPO/src/compiler/lower/cast.iyi" \
   '  to_lhs(low, value_ptr, to_type)' '  low.builder.const_null(low.module.types.ptr)' -- new_cast_check || status=1
 cast_fixture=enum_mixed
 new_cast_check || { echo "  baseline: enum union assignment differs"; status=1; }
 prove_mutation "enum union stores are refused" "$REPO/src/compiler/lower/cast.iyi" \
-  '  if kind == "int" || kind == "char" || kind == "symbol" || kind == "float" || value_type.is_a?(EnumType)' '  if kind == "int" || kind == "char" || kind == "symbol" || kind == "float"' -- new_cast_check || status=1
+  '  if kind == "int" || kind == "char" || kind == "symbol" || kind == "float" || value_type.is_a?(EnumType)' '  if kind == "int" || kind == "char" || kind == "symbol" || kind == "float"' -- cast_refusal_check enum_mixed 'lower: visit(store of Vis in (Int32 | Vis) (hosted store_value, not ported)) (hosted codegen.cr) is not ported yet' || status=1
 cast_fixture=union_to_subunion
 new_cast_check || { echo "  baseline: mixed subunion downcast differs"; status=1; }
 prove_mutation "mixed subunion reads its payload as the union" "$REPO/src/compiler/lower/cast.iyi" \
@@ -546,7 +569,7 @@ else
   proc_result_check || { echo "  baseline: proc result assignment fixture differs"; status=1; }
   rm -f "$WORK/proc_mutant_built"
   prove_mutation "a proc result assignment is refused" "$REPO/src/compiler/lower/cast.iyi" \
-    '  if target.is_a?(ProcInstanceType) && value_type.is_a?(ProcInstanceType)' '  if false' -- proc_result_check || status=1
+    '  if target.is_a?(ProcInstanceType) && value_type.is_a?(ProcInstanceType)' '  if false' -- cast_refusal_check proc_result 'lower: visit(assign Proc(Int32) to Proc(Nil) (hosted assign_distinct, not ported)) (hosted codegen.cr) is not ported yet' proc_mutant_built || status=1
   if [ ! -f "$WORK/proc_mutant_built" ]; then
     echo "  NOT PROVEN: proc result mutant failed to build"
     status=1
@@ -560,8 +583,8 @@ nil_proc_check() {
 }
 nil_proc_check || { echo "  baseline: nilable proc assignment fixture differs"; status=1; }
 rm -f "$WORK/nil_proc_mutant_built"
-prove_mutation "a nil stored into a nilable proc is a real proc" "$REPO/src/compiler/lower/cast.iyi" \
-  '  if target.is_a?(NilableProcType) && value_type.nil_type?' '  if false' -- nil_proc_check || status=1
+prove_mutation "nil stored into a nilable proc is refused" "$REPO/src/compiler/lower/cast.iyi" \
+  '  if target.is_a?(NilableProcType) && value_type.nil_type?' '  if false' -- cast_refusal_check nil_proc 'lower: visit(assign Nil to (Proc(Nil) | Nil) (hosted assign_distinct, not ported)) (hosted codegen.cr) is not ported yet' nil_proc_mutant_built || status=1
 if [ ! -f "$WORK/nil_proc_mutant_built" ]; then
   echo "  NOT PROVEN: nilable proc mutant failed to build"
   status=1

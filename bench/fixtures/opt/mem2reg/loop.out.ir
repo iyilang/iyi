@@ -1,0 +1,24 @@
+; iyi-ir 1
+source_filename = "loop"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i64 @sum(i64 %n) {
+alloca:
+  br label %entry
+entry:
+  br label %head
+head:
+  %0 = phi i64 [ 0, label %entry ], [ %i2, label %body ]
+  %1 = phi i64 [ 0, label %entry ], [ %a2, label %body ]
+  %more = icmp slt i64 %0, %n
+  br i1 %more, label %body, label %done
+body:
+  %a2 = add i64 %1, %0
+  %i2 = add i64 %0, 1
+  br label %head
+done:
+  br label %exit
+exit:
+  %out = phi i64 [ %1, label %done ]
+  ret i64 %out
+}

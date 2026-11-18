@@ -1,0 +1,625 @@
+module compiler/ir/opt/analysis
+
+import compiler/ir/values::{Value, Param}
+import compiler/ir/inst::{Op, Inst, Block, AsmAux}
+import compiler/ir/function::{Function}
+
+pub struct Use
+  getter user : Inst
+  getter index : Int32
+
+  def initialize(@user : Inst, @index : Int32)
+  end
+end
+
+pub def local_value?(v : Value) : Bool
+  return true if v.is_a?(Param)
+  return false unless v.is_a?(Inst)
+  return false if v.as(Inst).aux.is_a?(AsmAux)
+  case v.as(Inst).op
+  when Op::ConstInt, Op::ConstFloat, Op::ConstNull, Op::ConstUndef, Op::ConstPoison, Op::ConstZero, Op::ConstAggregate, Op::ConstBytes, Op::ConstExpr, Op::GlobalAddr, Op::FunctionAddr
+    false
+  else
+    true
+  end
+end
+
+# Slots can be removed without shifting an entire value's use list. A later query
+# compacts the list, and sorts it only when edits changed its program order.
+class UseEntry
+  getter user : Inst
+  getter index : Int32
+  getter order : Int32
+  property active : Bool
+
+  def initialize(@user : Inst, @index : Int32, @order : Int32)
+    @active = true
+  end
+end
+
+pub class DefUse
+  def initialize(fn : Function)
+    @lists = Hash(Value, Array(UseEntry)).new
+    @slots = Hash(Inst, Array(UseEntry?)).new
+    @counts = Hash(Value, Int32).new
+    @order = Hash(Inst, Int32).new
+    @dirty = Hash(Value, Bool).new
+    @next_order = 0
+    rebuild(fn)
+  end
+
+  # Rebuild in place so a pass holding the DefUse passed to an Editor sees the
+  # post-flush lists as well as the Editor's getter.
+  def rebuild(fn : Function) : Nil
+    @lists = Hash(Value, Array(UseEntry)).new
+    @slots = Hash(Inst, Array(UseEntry?)).new
+    @counts = Hash(Value, Int32).new
+    @order = Hash(Inst, Int32).new
+    @dirty = Hash(Value, Bool).new
+    @next_order = 0
+    fn.blocks.each do |b|
+      b.insts.each do |i|
+        @order[i] = @next_order
+        @next_order = @next_order + 1
+      end
+    end
+    fn.blocks.each do |b|
+      b.insts.each do |i|
+        k = 0
+        while k < i.args.size
+          add(i, k)
+          k = k + 1
+        end
+      end
+    end
+  end
+
+  def uses(v : Value) : Array(Use)
+    result = [] of Use
+    list = @lists[v]?
+    return result unless list
+    if list.size != use_count(v)
+      entries = [] of UseEntry
+      list.each { |entry| entries << entry if entry.active }
+      list = entries
+      @lists[v] = list
+    end
+    if @dirty[v]?
+      list.sort_in_place do |a, b|
+        if a.order < b.order
+          -1
+        elsif a.order > b.order
+          1
+        elsif a.index < b.index
+          -1
+        elsif a.index > b.index
+          1
+        else
+          0
+        end
+      end
+    end
+    @dirty[v] = false
+    list.each { |entry| result << Use.new(entry.user, entry.index) }
+    result
+  end
+
+  def use_count(v : Value) : Int32
+    count = @counts[v]?
+    count ? count : 0
+  end
+
+  def users(v : Value) : Array(Inst)
+    result = [] of Inst
+    seen = Hash(Inst, Bool).new
+    uses(v).each do |use|
+      unless seen.has_key?(use.user)
+        seen[use.user] = true
+        result << use.user
+      end
+    end
+    result
+  end
+
+  def add(user : Inst, index : Int32) : Nil
+    value = user.args[index]
+    return unless local_value?(value)
+    slots = @slots[user]?
+    unless slots
+      slots = [] of UseEntry?
+      @slots[user] = slots
+    end
+    while slots.size <= index
+      slots << nil
+    end
+    previous = slots[index]
+    raise "BUG: operand use already registered" if previous && previous.active
+    order = @order[user]?
+    unless order
+      order = @next_order
+      @order[user] = order
+      @next_order = @next_order + 1
+    end
+    entry = UseEntry.new(user, index, order)
+    slots[index] = entry
+    list = @lists[value]?
+    unless list
+      list = [] of UseEntry
+      @lists[value] = list
+    end
+    unless list.empty?
+      last = list.last
+      if last.order > order || (last.order == order && last.index > index)
+        @dirty[value] = true
+      end
+    end
+    list << entry
+    @counts[value] = use_count(value) + 1
+  end
+
+  def remove(user : Inst, index : Int32) : Nil
+    value = user.args[index]
+    return unless local_value?(value)
+    slots = @slots[user]?
+    return unless slots && index < slots.size
+    entry = slots[index]
+    return unless entry && entry.active
+    entry.active = false
+    slots[index] = nil
+    @counts[value] = use_count(value) - 1
+  end
+end
+
+pub class FunctionIndex
+  def initialize(@fn : Function)
+    @blocks = Hash(Block, Int32).new
+    @inst_blocks = Hash(Inst, Int32).new
+    @positions = Hash(Inst, Int32).new
+    bi = 0
+    while bi < @fn.blocks.size
+      b = @fn.blocks[bi]
+      @blocks[b] = bi
+      k = 0
+      while k < b.insts.size
+        i = b.insts[k]
+        @inst_blocks[i] = bi
+        @positions[i] = k
+        k = k + 1
+      end
+      bi = bi + 1
+    end
+  end
+
+  def block_id(b : Block) : Int32
+    id = @blocks[b]?
+    return id if id
+    raise "BUG: block #{b.name} is not in @#{@fn.name}"
+  end
+
+  def block_id?(b : Block) : Int32?
+    @blocks[b]?
+  end
+
+  def block_of(i : Inst) : Int32
+    id = @inst_blocks[i]?
+    id ? id : -1
+  end
+
+  def position(i : Inst) : Int32
+    pos = @positions[i]?
+    pos ? pos : -1
+  end
+end
+
+pub class Cfg
+  getter fn : Function
+
+  def initialize(@fn : Function)
+    @index = FunctionIndex.new(@fn)
+    @blocks = @fn.blocks[0, @fn.blocks.size]
+    @succs = [] of Array(Int32)
+    @preds = [] of Array(Int32)
+    @rpo = [] of Int32
+    @rpo_numbers = [] of Int32
+    k = 0
+    while k < @fn.blocks.size
+      @succs << [] of Int32
+      @preds << [] of Int32
+      @rpo_numbers << -1
+      k = k + 1
+    end
+    bi = 0
+    while bi < @fn.blocks.size
+      b = @fn.blocks[bi]
+      if b.terminated?
+        seen = Hash(Int32, Bool).new
+        b.terminator.targets.each do |target|
+          si = @index.block_id(target)
+          unless seen.has_key?(si)
+            seen[si] = true
+            @succs[bi] << si
+          end
+        end
+      end
+      b.preds.each { |pred| @preds[bi] << @index.block_id(pred) }
+      bi = bi + 1
+    end
+    unless @fn.blocks.empty?
+      seen = [] of Bool
+      @fn.blocks.each { |_| seen << false }
+      nodes = [0] of Int32
+      next_edge = [0] of Int32
+      postorder = [] of Int32
+      seen[0] = true
+      while !nodes.empty?
+        top = nodes.size - 1
+        current = nodes[top]
+        edge = next_edge[top]
+        if edge < @succs[current].size
+          next_edge[top] = edge + 1
+          successor = @succs[current][edge]
+          unless seen[successor]
+            seen[successor] = true
+            nodes << successor
+            next_edge << 0
+          end
+        else
+          postorder << current
+          nodes.pop
+          next_edge.pop
+        end
+      end
+      @rpo = postorder.reversed
+      r = 0
+      while r < @rpo.size
+        @rpo_numbers[@rpo[r]] = r
+        r = r + 1
+      end
+    end
+  end
+
+  def size : Int32
+    @blocks.size
+  end
+
+  def block(i : Int32) : Block
+    @blocks[i]
+  end
+
+  def index(b : Block) : Int32
+    @index.block_id(b)
+  end
+
+  def succs(i : Int32) : Array(Int32)
+    @succs[i]
+  end
+
+  def preds(i : Int32) : Array(Int32)
+    @preds[i]
+  end
+
+  def rpo : Array(Int32)
+    @rpo
+  end
+
+  def rpo_number(i : Int32) : Int32
+    @rpo_numbers[i]
+  end
+
+  def reachable?(i : Int32) : Bool
+    @rpo_numbers[i] >= 0
+  end
+end
+
+pub class DomTree
+  def initialize(@cfg : Cfg)
+    @idom = [] of Int32
+    @children = [] of Array(Int32)
+    @preorder = [] of Int32
+    @tin = [] of Int32
+    @tout = [] of Int32
+    @frontiers = [] of Array(Int32)
+    @frontiers_ready = false
+    k = 0
+    while k < @cfg.size
+      @idom << -1
+      @children << [] of Int32
+      @tin << -1
+      @tout << -1
+      @frontiers << [] of Int32
+      k = k + 1
+    end
+    return if @cfg.rpo.empty?
+    @idom[0] = 0
+    changed = true
+    while changed
+      changed = false
+      r = 1
+      while r < @cfg.rpo.size
+        b = @cfg.rpo[r]
+        next_idom = -1
+        @cfg.preds(b).each do |pred|
+          next if @idom[pred] < 0
+          next_idom = next_idom < 0 ? pred : intersect(pred, next_idom)
+        end
+        if next_idom >= 0 && @idom[b] != next_idom
+          @idom[b] = next_idom
+          changed = true
+        end
+        r = r + 1
+      end
+    end
+    r = 1
+    while r < @cfg.rpo.size
+      b = @cfg.rpo[r]
+      @children[@idom[b]] << b
+      r = r + 1
+    end
+    nodes = [0] of Int32
+    next_child = [0] of Int32
+    @preorder << 0
+    @tin[0] = 0
+    clock = 1
+    while !nodes.empty?
+      top = nodes.size - 1
+      b = nodes[top]
+      at = next_child[top]
+      if at < @children[b].size
+        child = @children[b][at]
+        next_child[top] = at + 1
+        @tin[child] = clock
+        clock = clock + 1
+        @preorder << child
+        nodes << child
+        next_child << 0
+      else
+        @tout[b] = clock
+        nodes.pop
+        next_child.pop
+      end
+    end
+  end
+
+  private def intersect(first : Int32, second : Int32) : Int32
+    a = first
+    b = second
+    while a != b
+      while @cfg.rpo_number(a) > @cfg.rpo_number(b)
+        a = @idom[a] # mutation M4: advance the first finger
+      end
+      while @cfg.rpo_number(b) > @cfg.rpo_number(a)
+        b = @idom[b]
+      end
+    end
+    a
+  end
+
+  def idom(i : Int32) : Int32
+    i == 0 ? -1 : @idom[i]
+  end
+
+  def dominates?(a : Int32, b : Int32) : Bool
+    return false unless @cfg.reachable?(a) && @cfg.reachable?(b)
+    @tin[a] <= @tin[b] && @tout[b] <= @tout[a]
+  end
+
+  def strictly_dominates?(a : Int32, b : Int32) : Bool
+    a != b && dominates?(a, b)
+  end
+
+  def children(i : Int32) : Array(Int32)
+    @children[i]
+  end
+
+  def preorder : Array(Int32)
+    @preorder
+  end
+
+  def frontier(i : Int32) : Array(Int32)
+    compute_frontiers unless @frontiers_ready
+    @frontiers[i]
+  end
+
+  private def compute_frontiers : Nil
+    b = 0
+    while b < @cfg.size
+      if @cfg.reachable?(b)
+        reachable_preds = 0
+        @cfg.preds(b).each { |p| reachable_preds = reachable_preds + 1 if @cfg.reachable?(p) }
+        if reachable_preds >= 2
+          stop = @idom[b]
+          @cfg.preds(b).each do |p|
+            next unless @cfg.reachable?(p)
+            runner = p
+            while runner != stop
+              row = @frontiers[runner]
+              row << b if row.empty? || row.last != b
+              runner = @idom[runner]
+            end
+          end
+        end
+      end
+      b = b + 1
+    end
+    @frontiers_ready = true
+  end
+end
+
+pub class Loop
+  getter header : Int32
+  getter blocks : Array(Int32)
+  getter latches : Array(Int32)
+  getter exits : Array(Int32)
+  getter depth : Int32
+  getter parent : Loop?
+
+  def initialize(@header : Int32, @blocks : Array(Int32), @latches : Array(Int32), @exits : Array(Int32), @members : Array(Bool))
+    @parent = nil
+    @depth = 1
+  end
+
+  def contains?(i : Int32) : Bool
+    i >= 0 && i < @members.size && @members[i]
+  end
+
+  def set_parent(parent : Loop?) : Nil
+    @parent = parent
+  end
+
+  def calculate_depth : Nil
+    @depth = 1
+    p = @parent
+    while p
+      @depth = @depth + 1
+      p = p.parent
+    end
+  end
+end
+
+pub class LoopInfo
+  def initialize(@cfg : Cfg, dom : DomTree)
+    @loops = [] of Loop
+    @irreducible = false
+    latches = [] of Array(Int32)
+    k = 0
+    while k < @cfg.size
+      latches << [] of Int32
+      k = k + 1
+    end
+    find_retreating_edges(dom)
+    tail = 0
+    while tail < @cfg.size
+      if @cfg.reachable?(tail)
+        @cfg.succs(tail).each do |header|
+          latches[header] << tail if dom.dominates?(header, tail)
+        end
+      end
+      tail = tail + 1
+    end
+    @cfg.rpo.each do |header|
+      next if latches[header].empty?
+      members = [] of Bool
+      k = 0
+      while k < @cfg.size
+        members << false
+        k = k + 1
+      end
+      members[header] = true
+      work = [] of Int32
+      latches[header].each do |latch|
+        unless members[latch]
+          members[latch] = true
+          work << latch
+        end
+      end
+      while !work.empty?
+        b = work.pop
+        @cfg.preds(b).each do |pred|
+          if @cfg.reachable?(pred) && !members[pred]
+            members[pred] = true
+            work << pred
+          end
+        end
+      end
+      blocks = [] of Int32
+      exit_flags = [] of Bool
+      k = 0
+      while k < @cfg.size
+        blocks << k if members[k]
+        exit_flags << false
+        k = k + 1
+      end
+      blocks.each do |b|
+        @cfg.succs(b).each { |s| exit_flags[s] = true unless members[s] }
+      end
+      exits = [] of Int32
+      k = 0
+      while k < @cfg.size
+        exits << k if exit_flags[k]
+        k = k + 1
+      end
+      @loops << Loop.new(header, blocks, latches[header], exits, members)
+    end
+    @loops.each do |child|
+      parent = nil.as(Loop?)
+      @loops.each do |candidate|
+        next if candidate.blocks.size <= child.blocks.size
+        next if parent && candidate.blocks.size >= parent.blocks.size
+        contains_all = true
+        child.blocks.each { |b| contains_all = false unless candidate.contains?(b) }
+        parent = candidate if contains_all
+      end
+      child.set_parent(parent)
+    end
+    @loops.each { |loop| loop.calculate_depth }
+  end
+
+  private def find_retreating_edges(dom : DomTree) : Nil
+    return if @cfg.size == 0
+    color = [] of Int32
+    k = 0
+    while k < @cfg.size
+      color << 0
+      k = k + 1
+    end
+    nodes = [0] of Int32
+    edges = [0] of Int32
+    color[0] = 1
+    while !nodes.empty?
+      top = nodes.size - 1
+      b = nodes[top]
+      at = edges[top]
+      if at < @cfg.succs(b).size
+        s = @cfg.succs(b)[at]
+        edges[top] = at + 1
+        if color[s] == 0
+          color[s] = 1
+          nodes << s
+          edges << 0
+        elsif color[s] == 1 && !dom.dominates?(s, b)
+          @irreducible = true
+        end
+      else
+        color[b] = 2
+        nodes.pop
+        edges.pop
+      end
+    end
+  end
+
+  def loops : Array(Loop)
+    @loops
+  end
+
+  def innermost(i : Int32) : Loop?
+    best = nil.as(Loop?)
+    @loops.each do |loop|
+      if loop.contains?(i) && (best.nil? || loop.depth > best.as(Loop).depth)
+        best = loop
+      end
+    end
+    best
+  end
+
+  def depth(i : Int32) : Int32
+    loop = innermost(i)
+    loop ? loop.depth : 0
+  end
+
+  def irreducible? : Bool
+    @irreducible
+  end
+
+  def preheader(l : Loop) : Int32
+    outside = -1
+    @cfg.preds(l.header).each do |pred|
+      next if l.contains?(pred)
+      return -1 if outside >= 0
+      outside = pred
+    end
+    return -1 if outside < 0
+    block = @cfg.block(outside)
+    return -1 unless block.terminated? && block.terminator.op == Op::Br
+    outside
+  end
+end

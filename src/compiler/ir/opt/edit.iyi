@@ -1,0 +1,271 @@
+module compiler/ir/opt/edit
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, InstAux, Block, terminator_op?}
+import compiler/ir/function::{Function}
+import compiler/ir/opt/analysis::{DefUse}
+
+pub class Editor
+  getter fn : Function
+  getter du : DefUse
+
+  def initialize(@fn : Function, @du : DefUse)
+    @owners = Hash(Inst, Block).new
+    @blocks = Hash(Block, Bool).new
+    @before = Hash(Inst, Array(Inst)).new
+    @appended = Hash(Block, Array(Inst)).new
+    @phis = Hash(Block, Array(Inst)).new
+    @terminators = Hash(Block, Inst).new
+    @terminator_order = Hash(Block, Array(Inst)).new
+    @inserted = Hash(Block, Array(Inst)).new
+    @erased = Hash(Inst, Bool).new
+    @removed = Hash(Block, Bool).new
+    @touched = Hash(Block, Bool).new
+    @fn.blocks.each do |b|
+      @blocks[b] = true
+      b.insts.each { |i| @owners[i] = b }
+    end
+  end
+
+  def replace_all_uses(old : Value, value : Value) : Nil
+    return if old == value
+    uses = @du.uses(old)
+    uses.each do |use|
+      set_operand(use.user, use.index, value) # mutation M3: phi uses too
+    end
+  end
+
+  def set_operand(user : Inst, index : Int32, value : Value) : Nil
+    return if user.args[index] == value
+    raise "BUG: edit of an erased instruction" if @erased.has_key?(user)
+    @du.remove(user, index)
+    user.args[index] = value
+    @du.add(user, index)
+  end
+
+  def erase(i : Inst) : Nil
+    return if @erased.has_key?(i)
+    raise "BUG: erase of a used value" if @du.use_count(i) > 0
+    owner = @owners[i]?
+    raise "BUG: erase of an unplaced instruction" unless owner
+    remove_operands(i)
+    @erased[i] = true
+    @touched[owner] = true
+  end
+
+  def insert_before(anchor : Inst, i : Inst) : Nil
+    block = @owners[anchor]?
+    raise "BUG: insertion anchor is not in the function" unless block
+    register(block, i)
+    list = @before[anchor]?
+    unless list
+      list = [] of Inst
+      @before[anchor] = list
+    end
+    list << i
+  end
+
+  def append(b : Block, i : Inst) : Nil
+    register(b, i)
+    list = @appended[b]?
+    unless list
+      list = [] of Inst
+      @appended[b] = list
+    end
+    list << i
+  end
+
+  def add_phi(b : Block, phi : Inst) : Nil
+    raise "BUG: add_phi requires a phi" unless phi.op == Op::Phi
+    register(b, phi)
+    list = @phis[b]?
+    unless list
+      list = [] of Inst
+      @phis[b] = list
+    end
+    list << phi
+  end
+
+  def add_incoming(phi : Inst, value : Value, from : Block) : Nil
+    raise "BUG: add_incoming requires a phi" unless phi.op == Op::Phi
+    raise "BUG: incoming on an erased phi" if @erased.has_key?(phi)
+    raise "BUG: duplicate phi predecessor" if phi.targets.includes?(from)
+    phi.add_incoming(value, from)
+    @du.add(phi, phi.args.size - 1)
+  end
+
+  def set_terminator(b : Block, t : Inst) : Nil
+    raise "BUG: not a terminator" unless terminator_op?(t.op)
+    raise "BUG: block is not in the function" unless @blocks.has_key?(b) && !@removed.has_key?(b)
+    previous = @terminators[b]?
+    if previous
+      return if previous == t
+      erase(previous)
+    elsif b.terminated?
+      return if b.terminator == t
+      erase(b.terminator)
+    end
+    register(b, t)
+    @terminators[b] = t
+    order = @terminator_order[b]?
+    unless order
+      order = [] of Inst
+      @terminator_order[b] = order
+    end
+    order << t
+  end
+
+  def remove_block(b : Block) : Nil
+    raise "BUG: block is not in the function" unless @blocks.has_key?(b)
+    return if @removed.has_key?(b)
+    raise "BUG: cannot remove the entry block" if !@fn.blocks.empty? && @fn.blocks[0] == b
+    @removed[b] = true
+    b.insts.each do |i|
+      unless @erased.has_key?(i)
+        remove_operands(i)
+        @erased[i] = true
+      end
+    end
+    inserted = @inserted[b]?
+    if inserted
+      inserted.each do |i|
+        unless @erased.has_key?(i)
+          remove_operands(i)
+          @erased[i] = true
+        end
+      end
+    end
+  end
+
+  def flush : Nil
+    kept = [] of Block
+    @fn.blocks.each do |b|
+      next if @removed.has_key?(b)
+      if @touched.has_key?(b)
+        rebuilt = [] of Inst
+        added_phis = false
+        added_appends = false
+        old_terminator = b.terminated? ? b.terminator : nil
+        k = 0
+        while k < b.insts.size
+          i = b.insts[k]
+          if !added_phis && i.op != Op::Phi
+            emit_phis(b, rebuilt)
+            added_phis = true
+          end
+          if old_terminator && i == old_terminator
+            emit_appends(b, rebuilt)
+            added_appends = true
+          end
+          emit_tree(i, rebuilt)
+          k = k + 1
+        end
+        emit_phis(b, rebuilt) unless added_phis
+        emit_appends(b, rebuilt) unless added_appends
+        if order = @terminator_order[b]?
+          order.each { |t| emit_tree(t, rebuilt) }
+        end
+        b.insts[0, b.insts.size] = rebuilt
+      end
+      kept << b
+    end
+    @fn.blocks[0, @fn.blocks.size] = kept
+    @fn.relink
+    @fn.blocks.each do |b|
+      b.insts.each { |i| i.keep_incoming(b.preds) if i.op == Op::Phi }
+    end
+    @du.rebuild(@fn)
+    clear_edits
+  end
+
+  private def register(b : Block, i : Inst) : Nil
+    raise "BUG: block is not in the function" unless @blocks.has_key?(b) && !@removed.has_key?(b)
+    raise "BUG: instruction is already placed" if @owners.has_key?(i)
+    @owners[i] = b
+    @touched[b] = true
+    list = @inserted[b]?
+    unless list
+      list = [] of Inst
+      @inserted[b] = list
+    end
+    list << i
+    k = 0
+    while k < i.args.size
+      @du.add(i, k)
+      k = k + 1
+    end
+  end
+
+  private def remove_operands(i : Inst) : Nil
+    k = 0
+    while k < i.args.size
+      @du.remove(i, k)
+      k = k + 1
+    end
+  end
+
+  # An insertion may itself be an anchor. Visiting its children before it
+  # preserves each anchor's call order without recursive stack growth.
+  private def emit_tree(root : Inst, out : Array(Inst)) : Nil
+    unless @before.has_key?(root)
+      out << root unless @erased.has_key?(root)
+      return
+    end
+    nodes = [root] of Inst
+    next_child = [0] of Int32
+    while !nodes.empty?
+      top = nodes.size - 1
+      i = nodes[top]
+      children = @before[i]?
+      at = next_child[top]
+      if children && at < children.size
+        next_child[top] = at + 1
+        nodes << children[at]
+        next_child << 0
+      else
+        out << i unless @erased.has_key?(i)
+        nodes.pop
+        next_child.pop
+      end
+    end
+  end
+
+  private def emit_phis(b : Block, out : Array(Inst)) : Nil
+    if list = @phis[b]?
+      list.each { |i| emit_tree(i, out) }
+    end
+  end
+
+  private def emit_appends(b : Block, out : Array(Inst)) : Nil
+    if list = @appended[b]?
+      list.each { |i| emit_tree(i, out) }
+    end
+  end
+
+  private def clear_edits : Nil
+    @owners = Hash(Inst, Block).new
+    @blocks = Hash(Block, Bool).new
+    @before = Hash(Inst, Array(Inst)).new
+    @appended = Hash(Block, Array(Inst)).new
+    @phis = Hash(Block, Array(Inst)).new
+    @terminators = Hash(Block, Inst).new
+    @terminator_order = Hash(Block, Array(Inst)).new
+    @inserted = Hash(Block, Array(Inst)).new
+    @erased = Hash(Inst, Bool).new
+    @removed = Hash(Block, Bool).new
+    @touched = Hash(Block, Bool).new
+    @fn.blocks.each do |b|
+      @blocks[b] = true
+      b.insts.each { |i| @owners[i] = b }
+    end
+  end
+end
+
+pub def new_inst(op : Op, type : IrType, args : Array(Value), aux_int : Int64 = 0_i64, aux : InstAux = nil, targets : Array(Block) = [] of Block) : Inst
+  Inst.new(op, type, args, aux_int, aux, targets, [] of Int64, "")
+end
+
+pub def new_phi(type : IrType) : Inst
+  new_inst(Op::Phi, type, [] of Value)
+end

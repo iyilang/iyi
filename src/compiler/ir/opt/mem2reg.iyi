@@ -1,0 +1,306 @@
+module compiler/ir/opt/mem2reg
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, Block, GepAux, MemAux, Ordering}
+import compiler/ir/function::{Function}
+import compiler/ir/module::{Module}
+import compiler/ir/builder::{Builder}
+import compiler/ir/opt/analysis::{DefUse, FunctionIndex, Cfg, DomTree}
+import compiler/ir/opt/edit::{Editor, new_phi}
+
+# All maps are lookup tables only. Traversal order comes from uses, blocks, and RPO.
+class PromotedSlot
+  getter alloca : Inst
+  getter type : IrType
+  getter zero : Value
+  getter values : Array(Value)
+  getter defs : Hash(Int32, Bool)
+  getter def_order : Array(Int32)
+  getter live : Hash(Int32, Bool)
+  getter phis : Hash(Int32, Inst)
+
+  def initialize(@alloca : Inst, @type : IrType, @zero : Value)
+    @values = [@zero] of Value
+    @defs = Hash(Int32, Bool).new
+    @def_order = [] of Int32
+    @live = Hash(Int32, Bool).new
+    @phis = Hash(Int32, Inst).new
+  end
+end
+
+class RenameFrame
+  getter block : Int32
+  getter mark : Int32
+  property entered : Bool
+  property child : Int32
+
+  def initialize(@block : Int32, @mark : Int32)
+    @entered = false
+    @child = 0
+  end
+end
+
+# Only direct ordinary loads and stores of one scalar type can be promoted.
+def allocated_scalar(alloca : Inst) : IrType?
+  return nil unless alloca.op == Op::Alloca && alloca.args.empty?
+  aux = alloca.aux
+  return nil unless aux.is_a?(GepAux)
+  type = aux.as(GepAux).source_type
+  return type if type.int? || type.float? || type.pointer?
+  nil
+end
+
+def ordinary_memory?(inst : Inst) : Bool
+  aux = inst.aux
+  return false unless aux.is_a?(MemAux)
+  memory = aux.as(MemAux)
+  !memory.volatile && memory.ordering == Ordering::NotAtomic
+end
+
+def promotable?(alloca : Inst, type : IrType, du : DefUse, positions : FunctionIndex, cfg : Cfg) : Bool
+  uses = du.uses(alloca)
+  k = 0
+  while k < uses.size
+    use = uses[k]
+    inst = use.user
+    block = positions.block_of(inst)
+    return false if block < 0 || !cfg.reachable?(block)
+    return false unless ordinary_memory?(inst)
+    if inst.op == Op::Load
+      return false unless use.index == 0 && inst.args.size == 1 && inst.type == type
+    elsif inst.op == Op::Store
+      return false unless use.index == 1 && inst.args.size == 2 && inst.args[0].type == type
+      value = inst.args[0]
+      if value.is_a?(Inst)
+        op = value.as(Inst).op
+        return false if op == Op::ThreadLocalAddr || op == Op::ThreadPointer
+      end
+    else
+      return false
+    end
+    k = k + 1
+  end
+  true
+end
+
+def zero_value(builder : Builder, type : IrType) : Value
+  return builder.const_int(type, 0_i64) if type.int?
+  return builder.const_float(type, 0.0) if type.float?
+  builder.const_null(type)
+end
+
+# The first access determines liveness on entry; definitions stop its backward walk.
+def collect_slot_blocks(slot : PromotedSlot, du : DefUse, positions : FunctionIndex, cfg : Cfg) : Nil
+  first = Hash(Int32, Bool).new
+  work = [] of Int32
+  uses = du.uses(slot.alloca)
+  k = 0
+  while k < uses.size
+    inst = uses[k].user
+    block = positions.block_of(inst)
+    unless first.has_key?(block)
+      first[block] = true
+      if inst.op == Op::Load
+        slot.live[block] = true
+        work << block
+      end
+    end
+    if inst.op == Op::Store && !slot.defs.has_key?(block)
+      slot.defs[block] = true
+      slot.def_order << block
+    end
+    k = k + 1
+  end
+  head = 0
+  while head < work.size
+    block = work[head]
+    head = head + 1
+    preds = cfg.preds(block)
+    p = 0
+    while p < preds.size
+      pred = preds[p]
+      if cfg.reachable?(pred) && !slot.defs.has_key?(pred) && !slot.live.has_key?(pred)
+        slot.live[pred] = true
+        work << pred
+      end
+      p = p + 1
+    end
+  end
+end
+
+# Iterated dominance frontiers, pruned by liveness. Slots are visited in alloca order.
+def place_slot_phis(slot : PromotedSlot, id : Int32, cfg : Cfg, dom : DomTree, editor : Editor, block_phis : Hash(Int32, Array(Inst)), phi_slot : Hash(Inst, Int32)) : Nil
+  work = [] of Int32
+  queued = Hash(Int32, Bool).new
+  k = 0
+  while k < slot.def_order.size
+    block = slot.def_order[k]
+    work << block
+    queued[block] = true
+    k = k + 1
+  end
+  head = 0
+  while head < work.size
+    block = work[head]
+    head = head + 1
+    frontier = dom.frontier(block)
+    k = 0
+    while k < frontier.size
+      y = frontier[k]
+      if slot.live.has_key?(y) && !slot.phis.has_key?(y)
+        phi = new_phi(slot.type)
+        slot.phis[y] = phi
+        if phis = block_phis[y]?
+          phis << phi
+        else
+          block_phis[y] = [phi]
+        end
+        phi_slot[phi] = id
+        editor.add_phi(cfg.block(y), phi)
+        unless queued.has_key?(y)
+        work << y # iterate: phi blocks define the slot too
+          queued[y] = true
+        end
+      end
+      k = k + 1
+    end
+  end
+end
+
+def promoted_id(value : Value, slots : Hash(Inst, Int32)) : Int32?
+  return nil unless value.is_a?(Inst)
+  slots[value.as(Inst)]?
+end
+
+# One iterative dominator-tree walk renames all slots, so a large block is scanned once.
+def rename_slots(cfg : Cfg, dom : DomTree, editor : Editor, slots : Array(PromotedSlot), slot_ids : Hash(Inst, Int32), block_phis : Hash(Int32, Array(Inst)), phi_slot : Hash(Inst, Int32)) : Nil
+  frames = [RenameFrame.new(0, 0)]
+  pushed = [] of Int32
+  while !frames.empty?
+    frame = frames.last
+    block_id = frame.block
+    block = cfg.block(block_id)
+    unless frame.entered
+      frame.entered = true
+      if phis = block_phis[block_id]?
+        k = 0
+        while k < phis.size
+          phi = phis[k]
+          id = phi_slot[phi]
+          slots[id].values << phi
+          pushed << id
+          k = k + 1
+        end
+      end
+      k = 0
+      while k < block.insts.size
+        inst = block.insts[k]
+        if inst.op == Op::Load
+          if id = promoted_id(inst.args[0], slot_ids)
+            editor.replace_all_uses(inst, slots[id].values.last)
+            editor.erase(inst)
+          end
+        elsif inst.op == Op::Store
+          if id = promoted_id(inst.args[1], slot_ids)
+            slots[id].values << inst.args[0]
+            pushed << id
+            editor.erase(inst)
+          end
+        end
+        k = k + 1
+      end
+      successors = cfg.succs(block_id)
+      s = 0
+      while s < successors.size
+        if next_phis = block_phis[successors[s]]?
+          p = 0
+          while p < next_phis.size
+            phi = next_phis[p]
+            id = phi_slot[phi]
+            editor.add_incoming(phi, slots[id].values.last, block)
+            p = p + 1
+          end
+        end
+        s = s + 1
+      end
+    end
+    children = dom.children(block_id)
+    if frame.child < children.size
+      child = children[frame.child]
+      frame.child = frame.child + 1
+      frames << RenameFrame.new(child, pushed.size)
+    else
+      while pushed.size > frame.mark
+        slots[pushed.pop].values.pop
+      end
+      frames.pop
+    end
+  end
+
+  # Unreachable predecessors still count as predecessors in the verifier. They
+  # carry the initial value, since no promoted slot has a use in such a block.
+  block_id = 0
+  while block_id < cfg.size
+    unless cfg.reachable?(block_id)
+      successors = cfg.succs(block_id)
+      s = 0
+      while s < successors.size
+        if phis = block_phis[successors[s]]?
+          p = 0
+          while p < phis.size
+            phi = phis[p]
+            editor.add_incoming(phi, slots[phi_slot[phi]].zero, cfg.block(block_id))
+            p = p + 1
+          end
+        end
+        s = s + 1
+      end
+    end
+    block_id = block_id + 1
+  end
+end
+
+pub def run_mem2reg(mod : Module, fn : Function) : Bool
+  return false if fn.declaration?
+  fn.relink
+  cfg = Cfg.new(fn)
+  positions = FunctionIndex.new(fn)
+  du = DefUse.new(fn)
+  builder = Builder.new(mod)
+  slots = [] of PromotedSlot
+  slot_ids = Hash(Inst, Int32).new
+  entry = fn.blocks[0]
+  k = 0
+  while k < entry.insts.size
+    alloca = entry.insts[k]
+    if type = allocated_scalar(alloca)
+      if promotable?(alloca, type, du, positions, cfg)
+        slot_ids[alloca] = slots.size
+        slots << PromotedSlot.new(alloca, type, zero_value(builder, type))
+      end
+    end
+    k = k + 1
+  end
+  return false if slots.empty?
+
+  dom = DomTree.new(cfg)
+  editor = Editor.new(fn, du)
+  block_phis = Hash(Int32, Array(Inst)).new
+  phi_slot = Hash(Inst, Int32).new
+  k = 0
+  while k < slots.size
+    slot = slots[k]
+    collect_slot_blocks(slot, du, positions, cfg)
+    place_slot_phis(slot, k, cfg, dom, editor, block_phis, phi_slot)
+    k = k + 1
+  end
+  rename_slots(cfg, dom, editor, slots, slot_ids, block_phis, phi_slot)
+  k = 0
+  while k < slots.size
+    editor.erase(slots[k].alloca)
+    k = k + 1
+  end
+  editor.flush
+  true
+end

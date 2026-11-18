@@ -1,0 +1,11 @@
+; iyi-ir 1
+source_filename = "fold_icmp_signed"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @fold_icmp_signed() {
+entry:
+  %signed_result = icmp slt i32 -1, 1
+  %unsigned_result = icmp ult i32 -1, 1
+  %different = xor i1 %signed_result, %unsigned_result
+  ret i1 %different
+}

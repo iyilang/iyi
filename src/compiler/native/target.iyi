@@ -77,22 +77,35 @@ pub def distinct_inputs_and_defs?(isa : Int32, inst : MInst) : Bool
   raise "target: no operand constraints for isa #{isa}"
 end
 
-# Only arithmetic over proven-safe floating inputs is itself proven safe.
-pub def pure_fpr_value?(isa : Int32, inst : MInst) : Bool
+# Bit-preserving transfers through the integer register file, including the
+# integer select used to implement floating-point select.
+pub def bitwise_gpr_value?(isa : Int32, inst : MInst) : Bool
   if isa == isa_aarch64
     op = aarch64_op(inst.opcode)
-    return op == MOp::FAdd || op == MOp::FSub || op == MOp::FMul || op == MOp::FDiv ||
-           op == MOp::FNeg || op == MOp::FAbs || op == MOp::FSqrt || op == MOp::FRint ||
-           op == MOp::FMinNm || op == MOp::FMaxNm || op == MOp::FCvt
+    return op == MOp::FMovToGp || op == MOp::Csel
   end
-  raise "target: no floating provenance rules for isa #{isa}"
+  raise "target: no bitwise provenance rules for isa #{isa}"
 end
 
-pub def integer_zero?(isa : Int32, inst : MInst) : Bool
+pub def integer_literal?(isa : Int32, inst : MInst) : Bool
   if isa == isa_aarch64
-    return inst.opcode == MOp::MovImm.value.to_i32 && inst.imm == 0_i64
+    return inst.opcode == MOp::MovImm.value.to_i32
   end
-  raise "target: no integer provenance rules for isa #{isa}"
+  raise "target: no integer literal rules for isa #{isa}"
+end
+
+# These instructions produce typed floating values rather than bit-preserving
+# copies. An acquire float load currently travels through a GPR instead.
+pub def typed_fpr_value?(isa : Int32, inst : MInst) : Bool
+  if isa == isa_aarch64
+    op = aarch64_op(inst.opcode)
+    return true if op == MOp::Ldr || op == MOp::LdrFrame # typed-fpr-load
+    return op == MOp::FAdd || op == MOp::FSub || op == MOp::FMul || op == MOp::FDiv ||
+           op == MOp::FNeg || op == MOp::FAbs || op == MOp::FSqrt || op == MOp::FRint ||
+           op == MOp::FMinNm || op == MOp::FMaxNm || op == MOp::FCvt ||
+           op == MOp::Scvtf || op == MOp::Ucvtf
+  end
+  raise "target: no typed floating provenance rules for isa #{isa}"
 end
 
 # An opcode's name in the MIR dump.

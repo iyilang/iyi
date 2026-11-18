@@ -641,6 +641,51 @@ check_fpr_output() {
   check_fixture_output "$1" "$FIX_RA/fp_callee_saved.ir"
 }
 
+check_typed_float_load() {
+  local drv=$1 out="$WORK/fp-load-call.mir"
+  if ! "$drv" mir "$FIX_RA/fp_load_call.ir" loaded >"$out" 2>&1; then
+    echo "invalid typed floating-load MIR"
+    return 2
+  fi
+  "$PY" - "$out" <<'PY'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+if not text.startswith("function loaded\n") or "  Bl/" not in text:
+    print("invalid loaded-double fixture")
+    sys.exit(2)
+before, after = text.split("  Bl/", 1)
+load = re.search(r"^  Ldr/64f (d(?:8|9|1[0-5])),", before, re.M)
+if (not load or re.search(r"^  (?:StrFrame|LdrFrame)/64f", text, re.M)
+        or not re.search(r"^  FAdd/64f \w+, " + load.group(1) + r",", after, re.M)):
+    print("typed floating load was not kept in a callee-saved FPR")
+    sys.exit(1)
+print("typed floating load stays in a callee-saved FPR across the call")
+PY
+}
+
+check_typed_fpr_provenance() {
+  local ignored=$1 exe="$WORK/typed-provenance-$RANDOM$EXE" values
+  if ! ./bin/iyi build -o "$(native_path "$exe")" "$(native_path "$FIX_RA/fpr_typed_provenance.iyi")" >"$WORK/typed-provenance.log" 2>&1; then
+    cat "$WORK/typed-provenance.log"
+    return 2
+  fi
+  values=$("$exe") || return 2
+  "$PY" - "$values" <<'PY'
+import sys
+try:
+    pointer, select, phi, arithmetic, load, constant, conversion = map(int, sys.argv[1].split())
+except ValueError:
+    print("invalid typed provenance fixture output")
+    sys.exit(2)
+if (pointer, select, phi) != (-1, -1, -1) or any(not 40 <= r <= 47 for r in (arithmetic, load, constant, conversion)):
+    print("typed floating provenance did not distinguish bit copies from numeric values")
+    sys.exit(1)
+print("pointer copies and selects spill; typed float results keep callee-saved FPRs")
+PY
+}
+
 check_asm_callee_saved() {
   local drv=$1 prefix="$WORK/asm-callee" result
   [ -f "$WORK/expect.native_cg.asm_clobber.out" ] || return 2
@@ -785,6 +830,21 @@ PY
 }
 
 echo "== 6. mutation proofs"
+prove_mutation "floating arithmetic: flag numeric results as possible pointers" \
+  src/compiler/native/target.iyi check_typed_fpr_provenance \
+  '    return op == MOp::FAdd || op == MOp::FSub || op == MOp::FMul || op == MOp::FDiv ||' \
+  '    return false if op == MOp::FAdd
+    return op == MOp::FAdd || op == MOp::FSub || op == MOp::FMul || op == MOp::FDiv ||'
+prove_mutation "collector: lose pointer provenance through integer selects" \
+  src/compiler/native/regalloc_linear.iyi check_typed_fpr_provenance \
+  '                     (@fn.vreg_classes[v] == RegClass::Gpr && bitwise_gpr_value?(@fn.isa, inst))' \
+  '                     false' \
+  '          elsif !unknown && ((@fn.vreg_classes[v] == RegClass::Fpr && typed_fpr_value?(@fn.isa, inst)) || integer_literal?(@fn.isa, inst))' \
+  '          elsif !unknown && ((@fn.vreg_classes[v] == RegClass::Fpr && typed_fpr_value?(@fn.isa, inst)) || @fn.vreg_classes[v] == RegClass::Gpr)'
+prove_mutation "floating load: flag typed memory values as possible pointers" \
+  src/compiler/native/target.iyi check_typed_float_load \
+  '    return true if op == MOp::Ldr || op == MOp::LdrFrame # typed-fpr-load' \
+  '    return false if op == MOp::Ldr || op == MOp::LdrFrame # typed-fpr-load'
 prove_mutation "reload reuse: retain GPR scratch across inline asm" \
   src/compiler/native/regalloc_linear.iyi check_reload_reuse \
   '      gprs.each { |r| cache[r] = -1 } # asm-clears-scratch-cache' \

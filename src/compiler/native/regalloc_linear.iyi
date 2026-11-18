@@ -32,7 +32,7 @@ module compiler/native/regalloc_linear
 # No hash table decides anything.
 
 import compiler/native/mir::{MFunction, MBlock, MInst, Operand, OperandKind, RegClass, Role}
-import compiler/native/target::{new_inst, is_role?, terminator?, leaves_block?, block_branch?, table_branch?, distinct_inputs_and_defs?, pure_fpr_value?, integer_zero?}
+import compiler/native/target::{new_inst, is_role?, terminator?, leaves_block?, block_branch?, table_branch?, distinct_inputs_and_defs?, bitwise_gpr_value?, integer_literal?, typed_fpr_value?}
 import compiler/native/aarch64/regs::{callee_saved_gprs, callee_saved_fprs, caller_saved_gprs, caller_saved_fprs, scratch_gprs, scratch_fprs, probe_reg, fp_reg, lr_reg, integer_arg_regs, fp_arg_regs}
 
 # x17: the encoder's veneer scratch. regs.iyi names it in a comment and has no accessor for it.
@@ -864,24 +864,11 @@ class LinearScan
     end
   end
 
-  # A floating value is safe across a collector boundary only when every
-  # definition is proven to derive from safe floating inputs or literal zero.
-  # Physical registers, memory, conversions, and asm outputs are unknown.
+  # Propagate possible pointer bits only through bit-preserving copies and
+  # selects. Typed floating loads, constants, arithmetic, and numeric
+  # conversions start safe; untyped and fixed-register sources do not.
   def pointer_fprs : Array(Bool)
     n = @vcount
-    zero = bool_row(n)
-    defined = bool_row(n)
-    @fn.blocks.each do |block|
-      block.insts.each do |inst|
-        inst.defs.each do |op|
-          next unless op.kind == OperandKind::Virtual && @fn.vreg_classes[op.reg] == RegClass::Gpr
-          v = op.reg
-          zero[v] = true unless defined[v]
-          defined[v] = true
-          zero[v] = false unless integer_zero?(@fn.isa, inst) && !@fn.vreg_pointer[v]
-        end
-      end
-    end
     flags = bool_row(n)
     has_def = bool_row(n)
     dep_head = int_row(n, -1)
@@ -893,25 +880,16 @@ class LinearScan
     @fn.blocks.each do |block|
       block.insts.each do |inst|
         inst.defs.each do |dst|
-          next unless dst.kind == OperandKind::Virtual && @fn.vreg_classes[dst.reg] == RegClass::Fpr
+          next unless dst.kind == OperandKind::Virtual
           v = dst.reg
           has_def[v] = true
           unknown = @fn.vreg_pointer[v] || !inst.asm.nil?
-          if !unknown && is_role?(@fn.isa, inst, Role::GprToFpr)
-            if inst.uses.size != 1
-              unknown = true
-            else
-              src = inst.uses[0]
-              unknown = src.kind != OperandKind::Virtual || !zero[src.reg]
-              if !unknown && !safe_root_seen[v]
-                safe_root_seen[v] = true
-                safe_roots << v
-              end
-            end
-          elsif !unknown && (is_role?(@fn.isa, inst, Role::Copy) || pure_fpr_value?(@fn.isa, inst))
+          transfer = is_role?(@fn.isa, inst, Role::Copy) || is_role?(@fn.isa, inst, Role::GprToFpr) ||
+                     (@fn.vreg_classes[v] == RegClass::Gpr && bitwise_gpr_value?(@fn.isa, inst))
+          if !unknown && transfer
             unknown = true if inst.uses.empty?
             inst.uses.each do |src|
-              if src.kind == OperandKind::Virtual && @fn.vreg_classes[src.reg] == RegClass::Fpr
+              if src.kind == OperandKind::Virtual
                 dep_dst << v
                 dep_next << dep_head[src.reg]
                 dep_head[src.reg] = dep_dst.size - 1
@@ -920,6 +898,11 @@ class LinearScan
               else
                 unknown = true
               end
+            end
+          elsif !unknown && ((@fn.vreg_classes[v] == RegClass::Fpr && typed_fpr_value?(@fn.isa, inst)) || integer_literal?(@fn.isa, inst))
+            unless safe_root_seen[v]
+              safe_root_seen[v] = true
+              safe_roots << v
             end
           else
             unknown = true
@@ -933,7 +916,7 @@ class LinearScan
     end
     v = 0
     while v < n
-      if @fn.vreg_classes[v] == RegClass::Fpr && !has_def[v] && !flags[v]
+      if !has_def[v] && !flags[v]
         flags[v] = true
         queue << v
       end
@@ -975,7 +958,7 @@ class LinearScan
     end
     v = 0
     while v < n
-      if @fn.vreg_classes[v] == RegClass::Fpr && !reachable[v] && !flags[v]
+      if !reachable[v] && !flags[v]
         flags[v] = true
         queue << v
       end

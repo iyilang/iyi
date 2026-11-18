@@ -1,0 +1,127 @@
+define void @copy_zero(ptr %d, ptr %s) {
+entry:
+  intrinsic llvm.memcpy.p0.p0.i64(ptr %d, ptr %s, i64 0, i1 false)
+  ret void
+}
+define void @copy_small(ptr %d, ptr %s) {
+entry:
+  intrinsic llvm.memcpy.p0.p0.i64(ptr %d, ptr %s, i64 64, i1 false)
+  ret void
+}
+define void @copy_large(ptr %d, ptr %s) {
+entry:
+  intrinsic llvm.memcpy.p0.p0.i64(ptr %d, ptr %s, i64 65, i1 false)
+  ret void
+}
+define void @copy_dynamic(ptr %d, ptr %s, i64 %n) {
+entry:
+  intrinsic llvm.memcpy.p0.p0.i64(ptr %d, ptr %s, i64 %n, i1 false)
+  ret void
+}
+define void @move_zero(ptr %d, ptr %s) {
+entry:
+  intrinsic llvm.memmove.p0.p0.i64(ptr %d, ptr %s, i64 0, i1 false)
+  ret void
+}
+define void @move_small(ptr %d, ptr %s) {
+entry:
+  intrinsic llvm.memmove.p0.p0.i64(ptr %d, ptr %s, i64 64, i1 false)
+  ret void
+}
+define void @move_large(ptr %d, ptr %s) {
+entry:
+  intrinsic llvm.memmove.p0.p0.i64(ptr %d, ptr %s, i64 100, i1 false)
+  ret void
+}
+define void @move_dynamic(ptr %d, ptr %s, i64 %n) {
+entry:
+  intrinsic llvm.memmove.p0.p0.i64(ptr %d, ptr %s, i64 %n, i1 false)
+  ret void
+}
+define void @set_zero(ptr %d) {
+entry:
+  intrinsic llvm.memset.p0.i64(ptr %d, i8 -1, i64 0, i1 false)
+  ret void
+}
+define void @set_small(ptr %d) {
+entry:
+  intrinsic llvm.memset.p0.i64(ptr %d, i8 -91, i64 64, i1 false)
+  ret void
+}
+define void @set_large(ptr %d) {
+entry:
+  intrinsic llvm.memset.p0.i64(ptr %d, i8 -61, i64 65, i1 false)
+  ret void
+}
+define void @set_dynamic(ptr %d, i8 %byte, i64 %n) {
+entry:
+  intrinsic llvm.memset.p0.i64(ptr %d, i8 %byte, i64 %n, i1 false)
+  ret void
+}
+
+define i32 @main() {
+entry:
+  %src = alloca [256 x i8], align 8
+  %a = alloca [512 x i8], align 8
+  %b = alloca [256 x i8], align 8
+  br label %init
+init:
+  %i = phi i64 [ 0, label %entry ], [ %in, label %init_body ]
+  %im = icmp ult i64 %i, 256
+  br i1 %im, label %init_body, label %work
+init_body:
+  %sp = getelementptr i8, ptr %src, i64 %i
+  %ap = getelementptr i8, ptr %a, i64 %i
+  %bp = getelementptr i8, ptr %b, i64 %i
+  %mul = mul i64 %i, 37
+  %raw = add i64 %mul, 11
+  %byte = trunc i64 %raw to i8
+  store i8 %byte, ptr %sp, align 1
+  store i8 0, ptr %ap, align 1
+  store i8 0, ptr %bp, align 1
+  %in = add i64 %i, 1
+  br label %init
+work:
+  %a64 = getelementptr i8, ptr %a, i64 64
+  %a129 = getelementptr i8, ptr %a, i64 129
+  %s64 = getelementptr i8, ptr %src, i64 64
+  %s129 = getelementptr i8, ptr %src, i64 129
+  %b64 = getelementptr i8, ptr %b, i64 64
+  %b129 = getelementptr i8, ptr %b, i64 129
+  %b1 = getelementptr i8, ptr %b, i64 1
+  %b110 = getelementptr i8, ptr %b, i64 110
+  %b111 = getelementptr i8, ptr %b, i64 111
+  call void (ptr) @set_small(ptr %a)
+  call void (ptr) @set_large(ptr %a64)
+  call void (ptr, i8, i64) @set_dynamic(ptr %a129, i8 -31, i64 127)
+  call void (ptr, ptr) @copy_small(ptr %b, ptr %src)
+  call void (ptr, ptr) @copy_large(ptr %b64, ptr %s64)
+  call void (ptr, ptr, i64) @copy_dynamic(ptr %b129, ptr %s129, i64 127)
+  call void (ptr, ptr) @move_small(ptr %b1, ptr %b)
+  call void (ptr, ptr) @move_large(ptr %b1, ptr %b)
+  call void (ptr, ptr) @move_large(ptr %b110, ptr %b111)
+  call void (ptr, ptr) @copy_zero(ptr %b, ptr %a)
+  call void (ptr, ptr) @move_zero(ptr %b, ptr %a)
+  call void (ptr) @set_zero(ptr %a)
+  call void (ptr, ptr, i64) @copy_dynamic(ptr %b, ptr %a, i64 0)
+  call void (ptr, ptr, i64) @move_dynamic(ptr %b, ptr %a, i64 0)
+  call void (ptr, i8, i64) @set_dynamic(ptr %a, i8 -1, i64 0)
+  br label %output
+output:
+  %j = phi i64 [ 0, label %work ], [ %jn, label %output_body ]
+  %jm = icmp ult i64 %j, 256
+  br i1 %jm, label %output_body, label %done
+output_body:
+  %oa = getelementptr i8, ptr %a, i64 %j
+  %ob = getelementptr i8, ptr %b, i64 %j
+  %av = load i8, ptr %oa, align 1
+  %bv = load i8, ptr %ob, align 1
+  %aw = zext i8 %av to i32
+  %bw = zext i8 %bv to i32
+  %pa = call i32 (ptr, ...) @printf(ptr @fmt, i32 %aw)
+  %pb = call i32 (ptr, ...) @printf(ptr @fmt, i32 %bw)
+  %jn = add i64 %j, 1
+  br label %output
+done:
+  ret i32 0
+}

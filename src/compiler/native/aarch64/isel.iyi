@@ -115,6 +115,7 @@ class Isel
   property sret_vreg : Int32
 
   def initialize(module_ref : Module, @fn : Function, @syms : Hash(String, Int32), @darwin : Bool)
+    @module_ref = module_ref
     @layout = module_ref.layout
     @mf = MFunction.new(@fn.name)
     @values = [] of Value
@@ -2795,8 +2796,7 @@ class Isel
     end
   end
 
-  # Calls a native runtime helper with three integer arguments. The helper is declared by the module and defined
-  # by the runtime, not here.
+  # Calls a three-scalar memory routine or runtime helper. A returned pointer is not used by the intrinsic.
   def call_helper(name : String, a : Int32, b : Int32, c : Int32) : Nil
     @mf.frame.has_calls = true
     regs = [a, b, c]
@@ -2816,7 +2816,16 @@ class Isel
     emit(call)
   end
 
-  # memcpy and memmove: inline for a constant length up to 64 bytes, otherwise a call to the native helper.
+  # The memory routines can contain intrinsics themselves. Keep their bodies on the native helpers to avoid cycles.
+  def memory_target(name : String, fallback : String) : String
+    return fallback if @fn.name == "memcpy" || @fn.name == "memmove" || @fn.name == "memset" # copy-fill-cycle-guard
+    if target = @module_ref.function?(name)
+      return name unless target.declaration?
+    end
+    fallback
+  end
+
+  # memcpy and memmove: inline for a constant length up to 64 bytes, otherwise call the selected routine.
   def lower_transfer(i : Inst, overlap : Bool) : Nil
     dst = first_leaf(i.args[0])
     src = first_leaf(i.args[1])
@@ -2826,10 +2835,11 @@ class Isel
       return
     end
     len = zext(first_leaf(i.args[2]), i.args[2].type)
-    call_helper(overlap ? "__iyi_native_memmove" : "__iyi_native_memcpy", dst, src, len)
+    name = memory_target(overlap ? "memmove" : "memcpy", overlap ? "__iyi_native_memmove" : "__iyi_native_memcpy") # copy-fill-transfer-target
+    call_helper(name, dst, src, len)
   end
 
-  # memset: inline for a constant length up to 64 bytes, otherwise a call to the native helper.
+  # memset: inline for a constant length up to 64 bytes, otherwise call the selected routine.
   def lower_memset(i : Inst) : Nil
     dst = first_leaf(i.args[0])
     value = zext(first_leaf(i.args[1]), i.args[1].type)
@@ -2839,7 +2849,8 @@ class Isel
       return
     end
     len = zext(first_leaf(i.args[2]), i.args[2].type)
-    call_helper("__iyi_native_memset", dst, value, len)
+    name = memory_target("memset", "__iyi_native_memset")
+    call_helper(name, dst, value, len) # copy-fill-argument-order
   end
 
   def lower_intrinsic(i : Inst) : Nil

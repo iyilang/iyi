@@ -14,9 +14,13 @@ module Iyi::Stale
     getter file : String?
     getter line : Int32?
     getter end_line : Int32?
+    # The explain bucket the element's file landed in (`src:lib/util.iyi`,
+    # `toolchain:...`, or `*` when it matched no root): where a file that
+    # should have been named went when an explanation names none.
+    getter mapped : String?
 
     def initialize(@kind : String, @key : String, @digest : String, @encoded_bytes : Int64,
-                   @file : String?, @line : Int32?, @end_line : Int32?)
+                   @file : String?, @line : Int32?, @end_line : Int32?, @mapped : String? = nil)
     end
   end
 
@@ -438,6 +442,16 @@ module Iyi::Stale
         loc_line = loc.try(&.line_number)
         loc_end_line = elem.node.try(&.end_location.try(&.line_number)) || loc_line
 
+        file_key = "*"
+        mapped_name : String? = nil
+        if loc && (fn = loc.filename) && fn.is_a?(String)
+          mapped = roots.map(fn)
+          mapped_name = mapped.to_s
+          if mapped.root == "src" || mapped.root == "toolchain" || mapped.root == "pkg"
+            file_key = "#{mapped.root}:#{mapped.path}"
+          end
+        end
+
         dump_rows << DumpRow.new(
           kind: elem.kind.to_s.underscore,
           key: elem.key,
@@ -445,16 +459,9 @@ module Iyi::Stale
           encoded_bytes: element_sizes[{elem.kind, elem.key, dig}],
           file: loc_file,
           line: loc_line,
-          end_line: loc_end_line
+          end_line: loc_end_line,
+          mapped: mapped_name
         )
-
-        file_key = "*"
-        if loc && (fn = loc.filename) && fn.is_a?(String)
-          mapped = roots.map(fn)
-          if mapped.root == "src" || mapped.root == "toolchain" || mapped.root == "pkg"
-            file_key = "#{mapped.root}:#{mapped.path}"
-          end
-        end
 
         (elements_by_file[file_key] ||= [] of Digest) << dig
       end

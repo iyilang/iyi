@@ -107,6 +107,25 @@ run_json() {
   fi
   return "$status"
 }
+# In keep-going mode a run whose miss is the question runs with --explain: its
+# decision lines (`miss: <why>`) go to stderr and its document to stdout, so a
+# failed expectation on it says why the run missed. Elsewhere it is run_json.
+run_json_explained() {
+  local out status=0
+  out="$(cd "$1" && "$IYI" test --cached --json --explain "${@:2}")" || status=$?
+  printf '  run_json --explain in %s %s\n' "$(basename "$1")" "${*:2}" >&2
+  printf '%s\n' "$out" | python3 -c '
+import sys
+lines = sys.stdin.read().splitlines()
+for line in lines[:-1]:
+    print("    [decision] " + line[:500], file=sys.stderr)
+print(lines[-1] if lines else "")
+'
+  return "$status"
+}
+run_json_diag() {
+  if [ "$KEEP_GOING" = 1 ]; then run_json_explained "$@"; else run_json "$@"; fi
+}
 json_field() { python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
 json_cached() { json_field cached; }
 json_failed() { json_field failed; }
@@ -314,9 +333,10 @@ for line in open(sys.argv[1]):
     row = json.loads(line)
     file = row.get("file") or "(none)"
     if file.endswith("util.iyi") or "r3" in file or file == "(none)":
-        seen[file] = seen.get(file, 0) + 1
-for file, count in sorted(seen.items()):
-    print(f"    {count:4d}  {file}")
+        key = (file, row.get("mapped"))
+        seen[key] = seen.get(key, 0) + 1
+for (file, mapped), count in sorted(seen.items(), key=lambda item: (item[0][0], str(item[0][1]))):
+    print(f"    {count:4d}  {file}  ->  {mapped}")
 print(f"    work dir: {sys.argv[2]}")
 PY
 fi
@@ -741,7 +761,7 @@ r26_run2="$(run_json "$WORK/r26" r26_test.iyi)"
 expect_eq "$(printf '%s' "$r26_run2" | json_cached)" 0 "r26 run 2 cached 0 (disk T1 does not match receipt)"
 
 printf '%s\n' "$T0" > "$WORK/r26/r26_test.iyi"
-r26_run3="$(run_json "$WORK/r26" r26_test.iyi)"
+r26_run3="$(run_json_diag "$WORK/r26" r26_test.iyi)"
 expect_eq "$(printf '%s' "$r26_run3" | json_cached)" 1 "r26 run 3 cached 1 (restored T0 hits receipt)"
 (cd "$WORK/r26" && "$IYI" test --cached --explain r26_test.iyi) > "$WORK/r26/explain.txt" 2>&1
 expect_contains "$(cat "$WORK/r26/explain.txt")" "hit from local" "r26 run 3 hit from local"
@@ -1456,7 +1476,7 @@ raise "macro run lost" unless ({{ run("./helper") }}) == 42
 IYI
 rm -rf "$CACHE"
 run_json "$WORK/macro-run" run_test.iyi >/dev/null
-row50_hit="$(run_json "$WORK/macro-run" run_test.iyi)"
+row50_hit="$(run_json_diag "$WORK/macro-run" run_test.iyi)"
 if [ "$KEEP_GOING" = 1 ] && [ "$(printf '%s' "$row50_hit" | json_cached)" != 1 ]; then
   echo "    [row 50 explain]" >&2
   (cd "$WORK/macro-run" && "$IYI" test --cached --explain run_test.iyi) >&2 || true
@@ -1617,7 +1637,7 @@ raise "macro run lost" unless ({{ run("./helper") }}) == 42
 IYI
 rm -rf "$CACHE/tests-v1"
 run_json "$WORK/r55" run_test.iyi >/dev/null
-row55="$(run_json "$WORK/r55" run_test.iyi)"
+row55="$(run_json_diag "$WORK/r55" run_test.iyi)"
 expect_eq "$(printf '%s' "$row55" | json_cached)" 1 "the macro run test still hits"
 expect_eq "$(printf '%s' "$row55" | json_test run_test.iyi check)" compiler "the macro run is checked by the compiler"
 expect_contains "$(printf '%s' "$row55" | json_test run_test.iyi check_reason)" "a macro ran a program" "the reason names the macro run"
@@ -1703,6 +1723,11 @@ mkdir -p "$r58_ctl"
 for name in quick_a quick_b; do
   printf 'assert 1 + 1 == 2\n' > "$r58/${name}_test.iyi"
 done
+# The slow tests wait on a `release` file that never comes; their `sleep` takes
+# milliseconds, so 3,000 steps of 100 ms is the five minutes the guard is meant
+# to be. At 300 steps of 1 ms the test died in a third of a second, before a slow
+# build (Windows) had recorded the quick receipts. The heredoc below is not
+# quoted, so nothing in it may be a backtick or a dollar sign it does not mean.
 for name in slow_a slow_b; do
   cat > "$r58/${name}_test.iyi" <<IYI
 import std/file::{File}
@@ -1714,9 +1739,6 @@ File.write(File.join(ctl, "pid-$name"), "#{Process.pid}")
 File.write(File.join(ctl, "started-$name"), "1")
 waited = 0
 while !File.exists?(File.join(ctl, "release"))
-  # `sleep` takes milliseconds: 3,000 steps of 100 ms is the five minutes this
-  # guard is meant to be. At 300 steps of 1 ms the test died in a third of a
-  # second, before a slow build (Windows) had recorded the quick receipts.
   raise "never released" if waited >= 3000
   sleep(100)
   waited += 1
@@ -1761,6 +1783,13 @@ with open(os.path.join(root, "interrupted.json"), "wb") as out, \
                 except Exception as problem:
                     print("  runner stdout (unparsed, %s): %s" % (problem, raw[-3000:]), file=sys.stderr)
                 print("  runner stderr: %s" % open(os.path.join(root, "interrupted.err"), "rb").read().decode("utf-8", errors="replace")[-3000:], file=sys.stderr)
+                listed = 0
+                for base, _, names in os.walk(cache):
+                    for name in sorted(names):
+                        if listed < 80:
+                            print("  cache file: %s" % os.path.relpath(os.path.join(base, name), cache), file=sys.stderr)
+                        listed += 1
+                print("  cache files: %d, receipts matched by the poll: %d" % (listed, len(receipts)), file=sys.stderr)
                 raise RuntimeError(f"runner exited before interrupt: {runner.returncode}")
             time.sleep(.1)
         else:

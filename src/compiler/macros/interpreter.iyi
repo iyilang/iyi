@@ -52,11 +52,12 @@ pub class MacroInterpreter
   property skipped : Bool
   property free_bindings : Hash(String, MacroFreeBinding)
   property type_facts : MacroTypeFacts? = nil
+  @path_lookup : Proc(Path, ASTNode?)?
 
   # `flags` is the flag set `flag?` answers from. Left out, it is the host's,
   # as the hosted interpreter's default is. `scope_name` is what `@type` and
   # `@top_level` name: the type the macro is expanded in.
-  def initialize(@block : Block? = nil, flags : Array(String)? = nil, scope_name : String = "<Program>")
+  def initialize(@block : Block? = nil, flags : Array(String)? = nil, scope_name : String = "<Program>", @path_lookup : Proc(Path, ASTNode?)? = nil)
     @vars = Hash(String, ASTNode).new
     @str = StringBuilder.new
     @macro_vars = Hash(String, String).new
@@ -529,6 +530,11 @@ pub class MacroInterpreter
       if path.names.size == 1
         if bound = @free_bindings[path.names[0]]?
           return resolve_free_binding(bound)
+        end
+      end
+      if lookup = @path_lookup
+        if constant = lookup.call(path)
+          return constant
         end
       end
       if facts = @type_facts

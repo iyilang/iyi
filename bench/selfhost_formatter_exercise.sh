@@ -37,6 +37,11 @@ exec 3>&1
 # if any listed file regresses.
 # Other .iyi files in the tree are not included in this corpus.
 CORPUS=(
+  "bench/fixtures/formatter_macro_if.iyi"
+  "bench/fixtures/formatter_macro_if_def.iyi"
+  "bench/fixtures/formatter_macro_if_branches.iyi"
+  "bench/fixtures/formatter_macro_if_nested.iyi"
+  "bench/fixtures/formatter_macro_expression.iyi"
   "samples/iyi/calc.iyi"
   "samples/iyi/collections.iyi"
   "samples/iyi/derive.iyi"
@@ -232,6 +237,64 @@ check_formatter_parity() {
   fi
   return 1
 }
+# Check a particular reduced input, not whichever corpus file fails first.
+# Exit 1 means this fixture detected the mutant; exit 2 means the check could
+# not run. The adapter below makes an invalid check fail the proof because the
+# shared mutation helper treats any nonzero status as "caught".
+check_formatter_fixture() {
+  local rel="$1" src="$REPO/$1" native_src compare_rc=0 driver_rc=0
+  if [ ! -f "$src" ] || ! native_src="$(native_path "$src")"; then
+    echo "INVALID MUTANT: fixture unavailable: $rel" >&3
+    return 2
+  fi
+  rm -f "$WORK/mut-exercise$EXE"
+  if ! "$IYI" build -o "$WORK_NATIVE/mut-exercise$EXE" "$REPO_NATIVE/bench/selfhost_formatter_exercise.iyi" > "$WORK/mut-build.log" 2>&1; then
+    echo "INVALID MUTANT: formatter exercise failed to build for $rel" >&3
+    cat "$WORK/mut-build.log" >&3
+    return 2
+  fi
+  if [ ! -x "$WORK/mut-exercise$EXE" ]; then
+    echo "INVALID MUTANT: formatter exercise executable is missing for $rel" >&3
+    return 2
+  fi
+  if ! "$IYI" tool format - < "$src" > "$WORK/hosted.out" 2>"$WORK/hosted.err"; then
+    echo "INVALID MUTANT: hosted formatter failed on $rel" >&3
+    cat "$WORK/hosted.err" >&3
+    return 2
+  fi
+  "$WORK/mut-exercise$EXE" "$native_src" > "$WORK/port_pass1.out" 2>"$WORK/port.err" || driver_rc=$?
+  if [ "$driver_rc" -ne 0 ]; then
+    case "$driver_rc" in
+      126|127|137|143)
+        echo "INVALID MUTANT: formatter could not run on $rel (exit $driver_rc)" >&3
+        return 2 ;;
+      *)
+        echo "  DETECTED: $rel: mutated formatter failed (exit $driver_rc)" >&3
+        return 1 ;;
+    esac
+  fi
+  cmp -s "$WORK/hosted.out" "$WORK/port_pass1.out" || compare_rc=$?
+  case "$compare_rc" in
+    0) return 0 ;;
+    1) echo "  DETECTED: $rel: mutated output differs from hosted formatter" >&3; return 1 ;;
+    *) echo "INVALID MUTANT: cannot compare output on $rel" >&3; return 2 ;;
+  esac
+}
+
+check_fixture_mutation() {
+  local check_rc=0
+  check_formatter_fixture "$1" || check_rc=$?
+  if [ "$check_rc" -eq 2 ]; then
+    return 0
+  fi
+  return "$check_rc"
+}
+
+run_fixture_proof() {
+  prove_mutation "$1" "$FMT" "$2" "$3" -- check_fixture_mutation "$4" || status=1
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+}
+
 
 MUTATIONS_RUN=0
 run_proof() {
@@ -270,6 +333,32 @@ run_proof "method def receiver formatting bypassed in Def visitor" \
 run_proof "proc notation arrow omitted in ProcNotation visitor" \
   "write_token(TokenKind::OP_MINUS_GT)" \
   "# write_token(TokenKind::OP_MINUS_GT)"
+
+run_fixture_proof "macro-if visitor bypassed" \
+  "def visit(node : MacroIf) : Bool" \
+  "def visit(node : MacroIf) : Bool
+    return true" \
+  "bench/fixtures/formatter_macro_if.iyi"
+
+run_fixture_proof "macro-if literal body formatting bypassed" \
+  'if @inside_macro == 0 && value && value.includes?("\n")' \
+  'if false && value && value.includes?("\n")' \
+  "bench/fixtures/formatter_macro_if_branches.iyi"
+
+run_fixture_proof "macro-unless branch reversal bypassed" \
+  "a_then = node.else" \
+  "a_then = node.then" \
+  "bench/fixtures/formatter_macro_if_branches.iyi"
+
+run_fixture_proof "nested macro expression opening token mishandled" \
+  "check(@inside_macro == 0 ? TokenKind::OP_LCURLY_LCURLY : TokenKind::MACRO_EXPRESSION_START)" \
+  "check(TokenKind::OP_LCURLY_LCURLY)" \
+  "bench/fixtures/formatter_macro_if_nested.iyi"
+
+run_fixture_proof "macro expression opening spacing forced" \
+  'write(" ") if has_space || !node.output' \
+  'write(" ")' \
+  "bench/fixtures/formatter_macro_expression.iyi"
 echo "  $MUTATIONS_RUN mutation proofs run"
 
 echo

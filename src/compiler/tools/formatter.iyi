@@ -2,9 +2,10 @@
 module compiler/tools/formatter
 
 import compiler/foundation/location::{Location}
-import compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState}
+import compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState, MacroState}
 import compiler/syntax/lexer::{Lexer}
-import compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, ProcPointer, ProcLiteral, Union, Metaclass, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, Visibility, MacroExpression}
+import compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, ProcPointer, ProcLiteral, Union, Metaclass, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, Visibility, MacroExpression, MacroIf, MacroLiteral}
+import compiler/syntax/ast::{StringBuilder}
 import compiler/syntax/visitor::{Visitor}
 import compiler/syntax/parser::{Parser}
 
@@ -113,6 +114,8 @@ pub class Formatter < Visitor
   @wrote_comment : Bool
   @inside_cond : Int32
   @inside_lib : Int32
+  @inside_macro : Int32
+  @macro_state : MacroState
   @inside_enum : Int32
   @inside_struct_or_union : Int32
   @implicit_exception_handler_indent : Int32
@@ -168,6 +171,8 @@ pub class Formatter < Visitor
     @inside_cond = 0
     @inside_lib = 0
     @inside_enum = 0
+    @inside_macro = 0
+    @macro_state = MacroState.default
     @inside_struct_or_union = 0
     @implicit_exception_handler_indent = 0
     @last_write = ""
@@ -1723,31 +1728,235 @@ pub class Formatter < Visitor
     false
   end
 
+  def visit(node : MacroIf) : Bool
+    @macro_state = MacroState.default if @inside_macro == 0
+    check(@inside_macro == 0 ? TokenKind::OP_LCURLY_PERCENT : TokenKind::MACRO_CONTROL_START)
+    write("{% ")
+    next_token_skip_space_or_newline
+
+    a_then = node.then
+    a_else = node.else
+    if @token.keyword?(Keyword::BEGIN)
+      write_keyword(Keyword::BEGIN)
+    elsif @token.keyword?(Keyword::UNLESS)
+      a_then = node.else
+      a_else = node.then
+      write_keyword(Keyword::UNLESS, " ")
+      format_macro_condition(node.cond)
+    else
+      write_keyword(Keyword::IF, " ")
+      format_macro_condition(node.cond)
+    end
+    format_macro_if_epilogue(a_then, a_else, @macro_state)
+    false
+  end
+
+  private def format_macro_condition(cond : ASTNode) : Nil
+    old_inside = @inside_macro
+    old_indent = @indent
+    @inside_macro = 0
+    @indent = @column
+    accept(cond)
+    @indent = old_indent
+    @inside_macro = old_inside
+  end
+
+  private def format_macro_if_epilogue(a_then : ASTNode, a_else : ASTNode, macro_state : MacroState, check_end : Bool = true) : Nil
+    skip_space_or_newline
+    check(TokenKind::OP_PERCENT_RCURLY)
+    write(" %}")
+    @macro_state = macro_state
+    @macro_state.control_nest = @macro_state.control_nest + 1
+    check_macro_whitespace
+    next_macro_token
+    format_macro_contents(a_then)
+
+    unless a_else.is_a?(Nop)
+      check(TokenKind::MACRO_CONTROL_START)
+      next_token_skip_space_or_newline
+      if @token.keyword?(Keyword::ELSIF)
+        sub_if = a_else.as(MacroIf)
+        next_token_skip_space_or_newline
+        write("{% elsif ")
+        format_macro_condition(sub_if.cond)
+        format_macro_if_epilogue(sub_if.then, sub_if.else, macro_state, false)
+      else
+        check_keyword(Keyword::ELSE)
+        next_token_skip_space_or_newline
+        check(TokenKind::OP_PERCENT_RCURLY)
+        write("{% else %}")
+        @macro_state = macro_state
+        @macro_state.control_nest = @macro_state.control_nest + 1
+        check_macro_whitespace
+        next_macro_token
+        format_macro_contents(a_else)
+      end
+    end
+
+    @macro_state = macro_state
+    if check_end
+      check(TokenKind::MACRO_CONTROL_START)
+      next_token_skip_space_or_newline
+      if @token.type == TokenKind::OP_SEMICOLON
+        next_token_skip_space_or_newline
+      end
+      check_keyword(Keyword::END)
+      next_token_skip_space_or_newline
+      check(TokenKind::OP_PERCENT_RCURLY)
+      write("{% end %}")
+      if @inside_macro > 0
+        check_macro_whitespace
+        next_macro_token
+      else
+        next_token
+      end
+    end
+  end
+
+  def visit(node : MacroLiteral) : Bool
+    write(@token.raw)
+    next_macro_token
+    false
+  end
+
+  private def format_macro_contents(node : ASTNode) : Nil
+    value = macro_literal_contents(node)
+    if @inside_macro == 0 && value && value.includes?("\n")
+      parser = Parser.new(value, @filename)
+      parser.iyi_source_only = true
+      nodes = parser.parse
+      formatter = Formatter.new(value)
+      formatter.filename = @filename
+      formatter.indent = @indent + 2
+      formatter.skip_space_or_newline
+      formatter.write_indent(formatter.indent)
+      nodes.accept(formatter)
+      write_line
+      write(formatter.finish)
+      write_indent(@indent)
+      while @token.type == TokenKind::MACRO_LITERAL
+        next_macro_token
+      end
+    else
+      old_indent = @indent
+      @indent = 0
+      @inside_macro = @inside_macro + 1
+      if node.is_a?(Expressions)
+        node.expressions.each { |exp| accept(exp) }
+      else
+        accept(node)
+      end
+      @inside_macro = @inside_macro - 1
+      @indent = old_indent
+    end
+  end
+
+  private def macro_literal_contents(node : ASTNode) : String?
+    return nil unless only_macro_literal?(node)
+    builder = StringBuilder.new
+    append_macro_literal_contents(node, builder)
+    builder.to_s
+  end
+
+  private def only_macro_literal?(node : ASTNode) : Bool
+    if node.is_a?(MacroLiteral)
+      true
+    elsif node.is_a?(Expressions)
+      node.expressions.all? { |exp| only_macro_literal?(exp) }
+    else
+      false
+    end
+  end
+
+  private def append_macro_literal_contents(node : ASTNode, builder : StringBuilder) : Nil
+    if node.is_a?(MacroLiteral)
+      builder << node.value
+    else
+      node.as(Expressions).expressions.each { |exp| append_macro_literal_contents(exp, builder) }
+    end
+  end
+
+  private def next_macro_token : Nil
+    char = @lexer.current_char
+    @token = @lexer.next_macro_token(@macro_state)
+    @macro_state = @token.macro_state
+    if char == '\\' && !@token.raw.starts_with?("\\")
+      @token.raw = "\\" + @token.raw
+    end
+  end
+
+  private def check_macro_whitespace : Nil
+    if @lexer.current_char == '\\' && @lexer.peek_next_char.ascii_whitespace?
+      @lexer.next_char
+      write("\\")
+      start = @lexer.current_pos
+      @lexer.skip_macro_whitespace
+      write(@lexer.string_range(start))
+      @macro_state.whitespace = true
+    end
+  end
+
   def visit(node : MacroExpression) : Bool
+    @macro_state = MacroState.default if @inside_macro == 0
+    old_column = @column
     if node.output
-      check(TokenKind::OP_LCURLY_LCURLY)
+      check(@inside_macro == 0 ? TokenKind::OP_LCURLY_LCURLY : TokenKind::MACRO_EXPRESSION_START)
       write("{{")
-      next_token
-      skip_space
-      write(" ")
-      accept(node.exp)
-      skip_space
-      write(" ")
+    else
+      unless @token.type == TokenKind::MACRO_CONTROL_START || @token.type == TokenKind::OP_LCURLY_PERCENT
+        check(TokenKind::MACRO_CONTROL_START)
+      end
+      write("{%")
+    end
+    macro_state = @macro_state
+    next_token
+    has_space = @token.type == TokenKind::SPACE
+    skip_space
+    has_newline = @token.type == TokenKind::NEWLINE
+    old_indent = @indent
+    @indent = @column
+    if has_newline
+      write_line
+      write_indent(@indent)
+      skip_space_or_newline
+    else
+      skip_space_or_newline
+      write(" ") if has_space || !node.output
+    end
+    @indent = @column
+    accept(node.exp)
+    @indent = old_indent
+    skip_space_or_newline
+    @macro_state = macro_state
+    if node.output
+      if @wrote_newline
+        write_indent(old_column)
+      elsif has_space && !has_newline
+        write(" ")
+      elsif has_newline
+        write_line
+        write_indent(old_column)
+      end
       check(TokenKind::OP_RCURLY)
       next_token
       check(TokenKind::OP_RCURLY)
       write("}}")
-      next_token
     else
-      check(TokenKind::OP_LCURLY_PERCENT)
-      write("{%")
-      next_token
-      skip_space
-      write(" ")
-      accept(node.exp)
-      skip_space
       check(TokenKind::OP_PERCENT_RCURLY)
+      if @wrote_newline
+        write_indent(old_column)
+      elsif has_newline
+        write_line
+        write_indent(old_column)
+      else
+        write(" ")
+      end
       write("%}")
+    end
+    if @inside_macro > 0
+      check_macro_whitespace
+      next_macro_token
+    else
       next_token
     end
     false

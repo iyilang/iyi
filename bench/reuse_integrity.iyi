@@ -64,7 +64,27 @@ WANT = [0.5, 4.841431442464721, 8.34336671824458, 12.894369562139131, 15.3796971
 # run meets a listed chunk. `Int32#to_s` built that array itself until it
 # wrote its digits straight into the string, and with it gone the proof
 # below caught its defect in 1 run of 20; with the array here, 16.
-def round_of(size : Int32) : Int32
+def spelled_wrong(table : Hash(String, Int32)) : Int32
+  wrong = 0
+  table.each { |key, value| wrong = wrong + 1 if key != value.to_s }
+  wrong
+end
+
+# Every key is read twice: when its round ends, and again two collections
+# later. A chunk the pop handed out under slot 0's entry (the straddler's
+# defect) keeps the free flag and the epoch parity of its last life, the
+# first sweep after the pop leaves it, and the second lists it again -
+# its link and its slot written over the key that lives in it. A
+# collection called by hand sweeps the whole heap in its pause, so after
+# two of them that sweep has reached every chunk the round was handed.
+# Read only when its round ended, a key was dropped before that sweep in
+# most runs: on Linux a run handed out 9 to 25 chunks under slot 0's
+# entry, the read saw 0 to 2 of them, and the proof below caught its
+# defect in 14 runs of 40 (darwin 16 of 40, Windows 5 of 20) - five runs
+# on a darwin runner passed every time. Read again two collections on,
+# 40 of 40 on each, with 7 to 21 keys wrong in a run on Linux, 3 to 12 on
+# darwin and 5 to 24 on Windows.
+def round_of(size : Int32) : Tuple(Int32, Int32)
   table = {} of String => Int32
   i = 0
   while i < size
@@ -77,24 +97,32 @@ def round_of(size : Int32) : Int32
     table[i.to_s] = i + digits.size - digits.size
     i = i + 1
   end
-  wrong = 0
-  table.each { |key, value| wrong = wrong + 1 if key != value.to_s }
-  wrong
+  wrong = spelled_wrong(table)
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+    IyiMark.collect
+    IyiMark.collect
+    {wrong, spelled_wrong(table)}
+  {% else %}
+    {wrong, 0}
+  {% end %}
 end
 
 wrong = 0
+late = 0
 rounds = 60
 round = 0
 while round < rounds
-  wrong = wrong + round_of(20000 + round * 1000)
+  spelled = round_of(20000 + round * 1000)
+  wrong = wrong + spelled[0]
+  late = late + spelled[1]
   round = round + 1
 end
 
 bodies_wrong = 0
 BODIES.each_with_index { |body, index| bodies_wrong = bodies_wrong + 1 if body.x != WANT[index] }
 
-if wrong != 0 || bodies_wrong != 0
-  raise "reuse integrity: #{wrong} key(s) no longer spell their value and #{bodies_wrong} of #{BODIES.size} startup bodies changed, after #{rounds} rounds"
+if wrong != 0 || late != 0 || bodies_wrong != 0
+  raise "reuse integrity: #{wrong} key(s) no longer spelled their value as their round ended and #{late} two collections later, and #{bodies_wrong} of #{BODIES.size} startup bodies changed, after #{rounds} rounds"
 end
 puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup constant intact"
 

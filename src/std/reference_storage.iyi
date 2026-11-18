@@ -16,8 +16,11 @@ class ::Reference
     {% @type %}
   end
 
+  # The storage may be memory no collection looks in, so with
+  # `-Dheap_partitions` the running unit is pinned first (heap22 row 9).
   @[Unsafe(call: "address is memory the caller owns, sized and aligned for the type, and nothing else holds")]
   def self.unsafe_construct(address : Pointer, *args, **opts) : self
+    IyiCross.pin
     obj = pre_initialize(address)
     obj.initialize(*args, **opts)
     obj

@@ -992,4 +992,124 @@ EOF
   step "a panic resolver hook formats frames when installed"
 fi
 
+# ── 13. two threads panic at once and each trace is resolved whole ─────────
+# std/debug's Windows reader kept the PDB, its directory, the DBI and
+# `/names` streams and a module's stream in class variables: two threads
+# that panicked together shared them, and one's `pdb_close` freed the
+# buffers the other was walking. The reader is now one per trace. Two
+# units panic in turn, each panic caught at its task's boundary so its
+# thread goes on to the next while the other side's is resolved, and every
+# frame either side prints must name its own function at its own line.
+cat > "$work/pdb_threads.iyi" <<'EOF'
+module pdbthreads
+
+import std/debug
+
+def left_depth3(x : Int32) : Int32
+  raise "left boom" if x > 0
+  x
+end
+
+def left_depth2(x : Int32) : Int32
+  left_depth3(x)
+  x + 2
+end
+
+def right_depth3(x : Int32) : Int32
+  raise "right boom" if x > 0
+  x
+end
+
+def right_depth2(x : Int32) : Int32
+  right_depth3(x)
+  x + 2
+end
+
+def rounds(left : Bool, n : Int32) : Int32
+  caught = 0
+  i = 0
+  while i < n
+    group do |g|
+      t = left ? g.spawn { left_depth2(i + 1) } : g.spawn { right_depth2(i + 1) }
+      caught = caught + 1 if t.value.is_a?(Panicked)
+    end
+    i = i + 1
+  end
+  caught
+end
+
+n = Program.args[0].to_i
+left = 0
+right = 0
+group do |g|
+  a = g.spawn(unit: :new) { rounds(true, n) }
+  b = g.spawn(unit: :new) { rounds(false, n) }
+  va = a.value
+  vb = b.value
+  left = va if va.is_a?(Int32)
+  right = vb if vb.is_a?(Int32)
+end
+puts "caught #{left} #{right}"
+EOF
+# darwin names a frame by its linkage symbol (`dladdr`), so the names below
+# are spelled otherwise there, and its reader holds nothing between frames
+# that a thread could share; the program runs where the reader is the PDB's
+# or DWARF's own.
+if [ "$(uname -s)" != Darwin ]; then
+  "$IYI" build -o "$work/pdb_threads" "$work/pdb_threads.iyi" > "$work/pdb_threads.log" 2>&1 ||
+    fail "two threads' panics did not build: $(cat "$work/pdb_threads.log")"
+  traces=40
+  set +e
+  "$work/pdb_threads" "$traces" > "$work/pdb_threads.out" 2> "$work/pdb_threads.err"
+  code=$?
+  set -e
+  [ "$code" = 0 ] || fail "two threads' panics exited $code: $(tail -20 "$work/pdb_threads.err")"
+  [ "$(tr -d '\r' < "$work/pdb_threads.out")" = "caught $traces $traces" ] ||
+    fail "two threads' panics were not all caught: $(cat "$work/pdb_threads.out")"
+  tr '\\' '/' < "$work/pdb_threads.err" | tr -d '\r' > "$work/pdb_threads.trace"
+  # Each function at the line it is on in this file, once per trace, and
+  # nowhere else. A frame line is std/debug's one write and ends its line,
+  # but it is matched wherever it starts: `raise` prints its message and
+  # its site in several writes (prelude.iyi, `__iyi_say` piece by piece),
+  # so two threads that panic at once can put one's frame inside the
+  # other's site - "  at …/pdb_threads.iyi:  at …/pdb_threads.iyi:6" then
+  # "16" alone, 1 trace in 40 on Windows. That tearing is the prelude's,
+  # older than this reader and a separate issue; this checks the frames.
+  for frame in left_depth3:6 left_depth2:11 right_depth3:16 right_depth2:21; do
+    name=${frame%%:*}
+    at=$(grep -cE "[0-9]+   $name at .*/pdb_threads\.iyi:${frame#*:}(:[0-9]+)?$" "$work/pdb_threads.trace" || true)
+    [ "$at" = "$traces" ] || fail "$name was resolved at its line in $at traces of $traces: $(head -40 "$work/pdb_threads.trace")"
+    all=$(grep -cE "[0-9]+ +$name( |$)" "$work/pdb_threads.trace" || true)
+    [ "$all" = "$traces" ] || fail "$name was printed $all times, $at of them at its line, for $traces traces: $(grep -E "[0-9]+ +$name( |$)" "$work/pdb_threads.trace" | sort | uniq -c)"
+  done
+fi
+# The reader back in module state is what the reach rule refuses, on
+# every host, read for Windows: the module stream in a class variable as
+# it was, and a reader kept between traces to save its reading.
+for broken in modvar cached; do
+  mkdir -p "$work/$broken/std"
+  case $broken in
+    modvar) sed -E 's/@mod([^_a-z]|$)/@@mod\1/g' src/std/debug.iyi > "$work/$broken/std/debug.iyi"
+            want='reaches `@@mod : Pointer(UInt8)` (not Share)' ;;
+    cached) awk '$0 == "    class PdbReader" { print "    @@reader : PdbReader? = nil"; found++ }
+                 $0 == "      pdb = PdbReader.new" { print "      pdb = (@@reader ||= PdbReader.new)"; found++; next }
+                 { print } END { if (found != 2) exit 3 }' src/std/debug.iyi > "$work/$broken/std/debug.iyi" ||
+              fail "the reader this copy keeps between traces is not made where it was in debug.iyi"
+            want='reaches `@@reader : (Std::Debug::DwarfResolver::PdbReader | Nil)` (not Share)' ;;
+  esac
+  ! cmp -s src/std/debug.iyi "$work/$broken/std/debug.iyi" || fail "the $broken copy changed nothing in debug.iyi"
+  printf 'import std/debug\nputs 1\n' > "$work/$broken/main.iyi"
+  path="$work/$broken:$PWD/src"
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT) path="$(cygpath -m "$work/$broken");$(cygpath -m "$PWD/src")" ;;
+  esac
+  set +e
+  IYI_PATH="$path" "$IYI" build --no-codegen --target x86_64-windows-msvc -o "$work/$broken/main" "$work/$broken/main.iyi" > "$work/$broken.log" 2>&1
+  code=$?
+  set -e
+  [ "$code" != 0 ] || fail "the reach rule let the $broken copy of std/debug build for Windows"
+  grep -qF "$want" "$work/$broken.log" || fail "the $broken copy was refused, but not by the reach rule: $(grep -m1 Error "$work/$broken.log")"
+done
+step "two threads' panics resolve each trace whole, and the reader in module state is refused"
+
 echo "panics gate: every step held"

@@ -226,6 +226,13 @@ import std/socket::{IyiSocket, SocketError}
   # 32 tasks, each holding a list on its own stack, park on a channel 30
   # times; the main thread sends, so each wake goes to the pool's shared
   # queue and whichever worker is free resumes it. Each round allocates.
+  #
+  # With partitions in the runtime (`-Dheap_partitions`) each task's
+  # rounds allocate in its unit's own partition, which never feeds the
+  # global trigger (heap22 design, section 4.2) and collects itself with
+  # no worker stopped (section 4.1): there the main thread asks for a
+  # global collection after every eighth send, while the task it just woke
+  # is on its way to a worker, and the tasks' own collections must run.
   def channels(watch : Int32) : Nil
     watched("channels", watch) do
       tasks = 32
@@ -233,6 +240,9 @@ import std/socket::{IyiSocket, SocketError}
       feed = Channel(Int32).new
       moves = Tally.new
       stops = IyiThread.stops
+      {% if flag?(:heap_partitions) %}
+        locals = IyiHeap.local_collections
+      {% end %}
       group do |g|
         tasks.times do |t|
           g.spawn(unit: :new) do
@@ -248,13 +258,26 @@ import std/socket::{IyiSocket, SocketError}
             0
           end
         end
-        (tasks * rounds).times { feed.send(1) }
+        {% if flag?(:heap_partitions) %}
+          (tasks * rounds).times do |i|
+            feed.send(1)
+            IyiMark.collect if i % 8 == 7
+          end
+        {% else %}
+          (tasks * rounds).times { feed.send(1) }
+        {% end %}
       end
       fail("channels: no collection stopped a worker while the tasks moved") if IyiThread.stops == stops
       if IyiWorkers.count > 1 && moves.count == 0_i64
         fail("channels: none of #{tasks * rounds} parks on a channel resumed on another worker")
       end
-      puts "channels: #{tasks} tasks parked #{rounds} times each, #{moves.count} resumed on another worker, lists whole through #{IyiThread.stops - stops} stops"
+      {% if flag?(:heap_partitions) %}
+        held = IyiHeap.local_collections - locals
+        fail("channels: no local collection ran while #{tasks} tasks allocated in partitions of their own") if IyiWorkers.count > 1 && held == 0_u64
+        puts "channels: #{tasks} tasks parked #{rounds} times each, #{moves.count} resumed on another worker, lists whole through #{held} local collections and #{IyiThread.stops - stops} stops"
+      {% else %}
+        puts "channels: #{tasks} tasks parked #{rounds} times each, #{moves.count} resumed on another worker, lists whole through #{IyiThread.stops - stops} stops"
+      {% end %}
     end
   end
 
@@ -264,80 +287,102 @@ import std/socket::{IyiSocket, SocketError}
   # answer to a writer - a task of its own on the same socket, which may
   # run on another worker and, on Windows, moves the socket to that
   # worker's port while the reader's next read is posted on its own.
+  #
+  # A read moves only when another worker takes its socket's news, which
+  # a host loaded past its cores makes rarer: Linux on 12 vCPUs moved 12
+  # to 92 of the 192 reads a run, and beside 12 busy loops, at a load of
+  # 34, one run moved none. A run that moves none holds nothing of what a
+  # move keeps, so it is run again, up to SOCKET_RUNS times; one in which
+  # no read ever moves fails.
+  SOCKET_RUNS = 5
+
   def sockets(watch : Int32) : Nil
     watched("sockets", watch) do
       conns = 16
       rounds = 12
-      listener = IyiSocket.listen("127.0.0.1", 0)
-      port = listener.local_port
-      moves = Tally.new
-      answered = Tally.new
       stops = IyiThread.stops
-      group do |g|
-        g.spawn do
-          conns.times do |c|
-            client = listener.accept
-            fail("sockets: accept answered #{client}") unless client.is_a?(IyiSocket)
-            fd = client.fd
-            family = client.family
-            g.spawn(unit: :new) do
-              socket = IyiSocket.new(fd, family)
-              kept = build(2000, c.to_i64 + 100_i64)
-              answers = Channel(Int32).new(rounds)
-              group do |inner|
-                inner.spawn do
-                  rounds.times do
-                    n = answers.receive
-                    fail("sockets: the writer's channel answered #{n}") unless n.is_a?(Int32)
-                    wrote = socket.write("#{n}.")
-                    fail("sockets: a write answered #{wrote}") unless wrote.is_a?(Int32)
-                  end
-                  0
-                end
-                rounds.times do |r|
-                  os = os_thread
-                  st = IyiScheduler.state.object_id
-                  got = socket.read(64)
-                  moves.add(1_i64) if moved?("sockets", os, st)
-                  fail("sockets: connection #{c} read #{got} where request #{r} was sent") unless got == "q#{c}.#{r};"
-                  churn(3000)
-                  spin(200000_i64, r.to_u64)
-                  fail("sockets: connection #{c}'s list was not whole after request #{r}") unless whole?(kept, 2000, c.to_i64 + 100_i64)
-                  answered.add(1_i64)
-                  answers.send(r)
-                end
-              end
-              socket.close
-              0
-            end
-          end
-          0
-        end
-        clients = [] of IyiSocket
-        conns.times do
-          c = IyiSocket.connect("127.0.0.1", port, 5000)
-          fail("sockets: connect answered #{c}") unless c.is_a?(IyiSocket)
-          clients << c
-        end
-        rounds.times do |r|
-          clients.each_with_index do |client, c|
-            wrote = client.write("q#{c}.#{r};")
-            fail("sockets: a client's write answered #{wrote}") unless wrote.is_a?(Int32)
-          end
-          clients.each do |client|
-            got = client.read(16)
-            fail("sockets: a client read #{got} where the answer to #{r} was due") unless got == "#{r}."
-          end
-        end
-        clients.each(&.close)
+      runs = 0
+      moved = 0_i64
+      while moved == 0_i64 && runs < SOCKET_RUNS
+        runs += 1
+        moved = socket_run(conns, rounds)
+        break if IyiWorkers.count <= 1
       end
-      listener.close
-      fail("sockets: #{answered.count} of #{conns * rounds} requests answered") unless answered.count == (conns * rounds).to_i64
-      if IyiWorkers.count > 1 && moves.count == 0_i64
-        fail("sockets: none of #{conns * rounds} reads parked on a socket resumed on another worker")
+      if IyiWorkers.count > 1 && moved == 0_i64
+        fail("sockets: none of #{conns * rounds} reads parked on a socket resumed on another worker, in #{runs} runs")
       end
-      puts "sockets: #{conns} connections, #{rounds} requests each read and answered in order, #{moves.count} reads resumed on another worker, through #{IyiThread.stops - stops} stops"
+      again = runs > 1 ? " (run #{runs}; the #{runs - 1} before moved none)" : ""
+      puts "sockets: #{conns} connections, #{rounds} requests each read and answered in order, #{moved} reads resumed on another worker#{again}, through #{IyiThread.stops - stops} stops"
     end
+  end
+
+  # One run of the sockets step: the reads that resumed on another worker.
+  def socket_run(conns : Int32, rounds : Int32) : Int64
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    moves = Tally.new
+    answered = Tally.new
+    group do |g|
+      g.spawn do
+        conns.times do |c|
+          client = listener.accept
+          fail("sockets: accept answered #{client}") unless client.is_a?(IyiSocket)
+          fd = client.fd
+          family = client.family
+          g.spawn(unit: :new) do
+            socket = IyiSocket.new(fd, family)
+            kept = build(2000, c.to_i64 + 100_i64)
+            answers = Channel(Int32).new(rounds)
+            group do |inner|
+              inner.spawn do
+                rounds.times do
+                  n = answers.receive
+                  fail("sockets: the writer's channel answered #{n}") unless n.is_a?(Int32)
+                  wrote = socket.write("#{n}.")
+                  fail("sockets: a write answered #{wrote}") unless wrote.is_a?(Int32)
+                end
+                0
+              end
+              rounds.times do |r|
+                os = os_thread
+                st = IyiScheduler.state.object_id
+                got = socket.read(64)
+                moves.add(1_i64) if moved?("sockets", os, st)
+                fail("sockets: connection #{c} read #{got} where request #{r} was sent") unless got == "q#{c}.#{r};"
+                churn(3000)
+                spin(200000_i64, r.to_u64)
+                fail("sockets: connection #{c}'s list was not whole after request #{r}") unless whole?(kept, 2000, c.to_i64 + 100_i64)
+                answered.add(1_i64)
+                answers.send(r)
+              end
+            end
+            socket.close
+            0
+          end
+        end
+        0
+      end
+      clients = [] of IyiSocket
+      conns.times do
+        c = IyiSocket.connect("127.0.0.1", port, 5000)
+        fail("sockets: connect answered #{c}") unless c.is_a?(IyiSocket)
+        clients << c
+      end
+      rounds.times do |r|
+        clients.each_with_index do |client, c|
+          wrote = client.write("q#{c}.#{r};")
+          fail("sockets: a client's write answered #{wrote}") unless wrote.is_a?(Int32)
+        end
+        clients.each do |client|
+          got = client.read(16)
+          fail("sockets: a client read #{got} where the answer to #{r} was due") unless got == "#{r}."
+        end
+      end
+      clients.each(&.close)
+    end
+    listener.close
+    fail("sockets: #{answered.count} of #{conns * rounds} requests answered") unless answered.count == (conns * rounds).to_i64
+    moves.count
   end
 
   # ── cancel ───────────────────────────────────────────────────────────
@@ -561,33 +606,55 @@ import std/socket::{IyiSocket, SocketError}
   # Windows the pages under the committed top are committed by the
   # kernel as the probes reach the guard page, against the stack bounds
   # in the TEB of the thread now running the fiber.
+  #
+  # A wake moves only when another worker takes it, which a loaded host
+  # makes rarer, as for the sockets: earlier gate runs here moved 19 to
+  # 150 of the 160, and beside 12 busy loops (`procs_running` 17) one
+  # release run moved none. A run that moves none holds nothing of what a
+  # move keeps, so it is run again, up to DEEP_RUNS times; one in which
+  # no wake ever moves fails.
+  DEEP_RUNS = 5
+
   def deep_step(watch : Int32) : Nil
     watched("deep", watch) do
       tasks = 16
       rounds = 10
-      feed = Channel(Int32).new
-      moves = Tally.new
-      group do |g|
-        tasks.times do |t|
-          g.spawn(unit: :new) do
-            rounds.times do |r|
-              os = os_thread
-              st = IyiScheduler.state.object_id
-              feed.receive
-              moves.add(1_i64) if moved?("deep", os, st)
-              deep(200)
-              churn(2000)
-            end
-            0
-          end
-        end
-        (tasks * rounds).times { feed.send(1) }
+      runs = 0
+      moved = 0_i64
+      while moved == 0_i64 && runs < DEEP_RUNS
+        runs += 1
+        moved = deep_run(tasks, rounds)
+        break if IyiWorkers.count <= 1
       end
-      if IyiWorkers.count > 1 && moves.count == 0_i64
-        fail("deep: no task resumed on another worker before its deep frames")
+      if IyiWorkers.count > 1 && moved == 0_i64
+        fail("deep: no task resumed on another worker before its deep frames, in #{runs} runs")
       end
-      puts "deep: #{tasks * rounds} frames 120 KiB deep, #{moves.count} of them after a move"
+      again = runs > 1 ? " (run #{runs}; the #{runs - 1} before moved none)" : ""
+      puts "deep: #{tasks * rounds} frames 120 KiB deep, #{moved} of them after a move#{again}"
     end
+  end
+
+  # One run of the deep step: the wakes that resumed on another worker.
+  def deep_run(tasks : Int32, rounds : Int32) : Int64
+    feed = Channel(Int32).new
+    moves = Tally.new
+    group do |g|
+      tasks.times do |t|
+        g.spawn(unit: :new) do
+          rounds.times do |r|
+            os = os_thread
+            st = IyiScheduler.state.object_id
+            feed.receive
+            moves.add(1_i64) if moved?("deep", os, st)
+            deep(200)
+            churn(2000)
+          end
+          0
+        end
+      end
+      (tasks * rounds).times { feed.send(1) }
+    end
+    moves.count
   end
 
   # ── loops ────────────────────────────────────────────────────────────
@@ -776,10 +843,24 @@ import std/socket::{IyiSocket, SocketError}
   # and the waker computes on: here a `@[NoPreempt]` loop, as the
   # runtime's own code is, which no back-edge check gives up. The worker
   # comes back for the woken task only when the loop ends, so an idle
-  # worker must be called to take it then and there. Each of ten wakes is
-  # timed from the send to the woken task's first statement after its
+  # worker must be called to take it then and there. Each of ten wakes
+  # is timed from the send to the woken task's first statement after its
   # receive, beside a 50 ms hold: half must start within 1 ms, and none
   # may wait the hold out.
+  #
+  # The 1 ms is a sleeping kernel thread's wake, which Linux and Windows
+  # do not owe on a machine with more runnable threads than cores: Linux
+  # on 12 vCPUs at one-minute loads of 18 to 34 failed this step in 74 of
+  # 80 runs, its medians 0.8 to 4.3 ms and most near 2.9, and Windows on
+  # 12 vCPUs beside 12 and 24 busy loops in 32 of 80, while tmac (macOS
+  # 26, 10 cores) at loads of 4 to 44 failed none of 160, at 7 to 218 us.
+  # So the hand-off is also held where no clock can blur it: right after
+  # its send, the waker's worker has called an idle worker for the woken
+  # fiber (`handoff_last`, which only that worker writes and only its own
+  # `pop` clears), and the woken task then runs on another worker. Those
+  # hold on every machine; the median is judged unless
+  # bench/parallel_exercise.sh passes `--loaded=`, its reading of a Linux
+  # or Windows load at or past the cores, and the run then says so.
   @[NoInline]
   @[NoPreempt]
   def hold_np(ns : Int64) : Nil
@@ -789,19 +870,62 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  def handoff(watch : Int32) : Nil
+  # What a hand-off's two tasks saw: the woken fiber, the worker it ran
+  # on, its waker's worker and whether that worker called for it.
+  class Handed
+    @fiber : Atomic(UInt64)
+    @woken_on : Atomic(UInt64)
+    @held_on : Atomic(UInt64)
+    @called : Atomic(UInt64)
+
+    def initialize
+      @fiber = Atomic(UInt64).new(0_u64)
+      @woken_on = Atomic(UInt64).new(0_u64)
+      @held_on = Atomic(UInt64).new(0_u64)
+      @called = Atomic(UInt64).new(0_u64)
+    end
+
+    def note_fiber(id : UInt64) : Nil
+      @fiber.set(id)
+    end
+
+    def note_woken_on(worker : UInt64) : Nil
+      @woken_on.set(worker)
+    end
+
+    def note_held_on(worker : UInt64, called : UInt64) : Nil
+      @held_on.set(worker)
+      @called.set(called == @fiber.get ? 1_u64 : 0_u64)
+    end
+
+    def called? : Bool
+      @called.get == 1_u64
+    end
+
+    def stayed? : Bool
+      @woken_on.get == @held_on.get
+    end
+  end
+
+  def handoff(watch : Int32, loaded : String) : Nil
     watched("handoff", watch) do
       rounds = 10
       waits = [] of Int64
+      uncalled = 0
+      stayed = 0
       rounds.times do
         gate = Channel(Int64).new(1)
         arrived = Tally.new
+        handed = Handed.new
         sleeper = nil.as(IyiTask(Int64)?)
         group do |g|
           sleeper = g.spawn(unit: :new) do
+            handed.note_fiber(IyiScheduler.current.object_id)
             arrived.add(1_i64)
             sent = gate.receive
-            sent.is_a?(Int64) ? __iyi_monotonic_ns - sent : -1_i64
+            took = sent.is_a?(Int64) ? __iyi_monotonic_ns - sent : -1_i64
+            handed.note_woken_on(IyiScheduler.state.object_id)
+            took
           end
           g.spawn(unit: :new) do
             while arrived.count < 1_i64
@@ -809,6 +933,8 @@ import std/socket::{IyiSocket, SocketError}
             end
             sleep(5)
             gate.send(__iyi_monotonic_ns)
+            st = IyiScheduler.state
+            handed.note_held_on(st.object_id, st.handoff_last)
             hold_np(50_000_000_i64)
             0
           end
@@ -816,15 +942,24 @@ import std/socket::{IyiSocket, SocketError}
         task = sleeper
         got = task.is_a?(IyiTask(Int64)) ? task.value : -1_i64
         waits << (got.is_a?(Int64) ? got : -1_i64)
+        uncalled += 1 unless handed.called?
+        stayed += 1 if handed.stayed?
       end
       fail("handoff: a woken task answered no wait: #{waits}") if waits.any? { |w| w < 0_i64 }
+      if uncalled > 0
+        fail("handoff: #{uncalled} of #{rounds} tasks woken onto a worker held 50 ms with preemption off were handed over with no idle worker called")
+      end
       sorted = waits.sorted
+      if stayed > 0
+        fail("handoff: #{stayed} of #{rounds} tasks woken onto a worker held 50 ms with preemption off ran on that worker, after #{sorted.map { |w| w // 1000_i64 }} us")
+      end
       median = sorted[rounds // 2]
       longest = sorted[rounds - 1]
-      if median > 1_000_000_i64 || longest >= 40_000_000_i64
+      if longest >= 40_000_000_i64 || (loaded.empty? && median > 1_000_000_i64)
         fail("handoff: tasks woken onto a worker held 50 ms with preemption off started after #{sorted.map { |w| w // 1000_i64 }} us, while other workers were idle")
       end
-      puts "handoff: #{rounds} tasks woken onto a worker held 50 ms with preemption off started in #{median // 1000_i64} us at the median, #{longest // 1000_i64} us at most"
+      judged = loaded.empty? ? "" : "; the 1 ms median not judged, #{loaded}"
+      puts "handoff: #{rounds} tasks woken onto a worker held 50 ms with preemption off, each with an idle worker called and run on another, started in #{median // 1000_i64} us at the median, #{longest // 1000_i64} us at most#{judged}"
     end
   end
 
@@ -1080,10 +1215,13 @@ import std/socket::{IyiSocket, SocketError}
   STEPS = ["channels", "sockets", "cancel", "closes", "deep", "loops", "balance", "handoff", "backstop", "heldio", "join"]
 
   watch = 60000
+  loaded = ""
   chosen = [] of String
   Program.args.each do |argument|
     if argument.starts_with?("--watch=")
       watch = argument[8, argument.size - 8].to_i
+    elsif argument.starts_with?("--loaded=")
+      loaded = argument[9, argument.size - 9]
     else
       fail("no step named #{argument}") unless STEPS.includes?(argument)
       chosen << argument
@@ -1100,7 +1238,7 @@ import std/socket::{IyiSocket, SocketError}
     when "deep"     then deep_step(watch)
     when "loops"    then loops(watch)
     when "balance"  then balance(watch)
-    when "handoff"  then handoff(watch)
+    when "handoff"  then handoff(watch, loaded)
     when "backstop" then backstop(watch)
     when "heldio"   then heldio(watch)
     when "join"     then join(watch)

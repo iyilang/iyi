@@ -18,8 +18,8 @@
 #   in at a lower version is the program raising it, and that is kept and
 #   said. Go spells that line `// indirect`; here it is decided by asking
 #   the resolver, so there is no second kind of line to keep in step.
-# - `iyi.sum` keeps an entry for each module that builds, and none for a
-#   version nothing builds.
+# - `iyi.sum` keeps each selected tree and every manifest the final graph
+#   reads, including versions outbid by another minimum.
 #
 # `--check` answers the same question and writes nothing: exit 1 when a
 # change is due, which is what a CI step wants.
@@ -71,6 +71,7 @@ class Iyi::Command
     end
 
     text = File.read(manifest_path)
+    original = text
     added = [] of {String, SemanticVersion, String}
     removed = [] of {String, SemanticVersion}
     kept = [] of {String, SemanticVersion, SemanticVersion}
@@ -114,9 +115,10 @@ class Iyi::Command
       end
 
       final = Mod::ModFile.parse(text, manifest_path)
-      final_selections = Mod::Installer.selections(dir, final)
+      checks = Mod::Sum.checker(dir)
+      final_selections = Mod::Installer.selections(dir, final, checks)
       fetched = final_selections.reject { |s| final.replacements.has_key?(s.path) }
-      stale = Mod::Sum.stale(dir, fetched)
+      stale = Mod::Sum.stale(dir, fetched, checks.manifests)
 
       added.each { |(path, version, file)| puts "#{check_only ? "would add" : "added"} #{path} v#{version}: #{Iyi.relative_filename(file)} imports it" }
       removed.each { |(path, version)| puts "#{check_only ? "would remove" : "removed"} #{path} v#{version}: nothing imports it" }
@@ -126,18 +128,21 @@ class Iyi::Command
       unless stale.empty?
         puts "#{check_only ? "would drop" : "dropped"} #{stale.size} iyi.sum #{stale.size == 1 ? "entry" : "entries"} for a version nothing builds"
       end
+      if checks.pending?
+        puts "#{check_only ? "would record" : "recorded"} missing iyi.sum manifest entries"
+      end
 
-      changed = !added.empty? || !removed.empty? || !stale.empty?
+      changed = !added.empty? || !removed.empty? || !stale.empty? || checks.pending?
       unless changed
         puts "iyi.mod and iyi.sum say what the source imports"
         return
       end
       exit 1 if check_only
 
-      File.write(manifest_path, text)
-      # What builds now is fetched and recorded, and then only that stays.
+      File.write(manifest_path, text) unless text == original
+      # Record the final graph, including every manifest it read, then prune.
       Mod::Installer.resolve(dir, final)
-      Mod::Sum.prune(dir, fetched)
+      Mod::Sum.prune(dir, fetched, checks.manifests)
     rescue ex : Mod::ModError
       abort! "mod tidy: #{ex.message}", :USAGE_ERROR
     end
@@ -192,7 +197,8 @@ class Iyi::Command
     `require` for each package imported without one - at the version the
     build already selects, or the latest release - none for a package
     nothing imports, unless the line raises a version another module pulls
-    in, and no iyi.sum entry for a version nothing builds.
+    in, and no iyi.sum entry for a version neither selected nor read
+    during resolution.
 
     The source is every .iyi file under this directory, tests included,
     except hidden directories, lib/, and directories with an iyi.mod of

@@ -1,0 +1,77 @@
+# Integer folding must preserve the IR width and leave poison-sensitive operations to the backend.
+import compiler/ir/builder::{Builder}
+import compiler/ir/inst::{Inst, Op}
+import compiler/ir/layout::{LayoutError}
+import compiler/ir/module::{Module}
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Param}
+import compiler/platform/target::{Target}
+
+module BenchIrFold
+  def self.instruction(value : Inst, op : Op) : Nil
+    raise "expected retained #{op}, got #{value.op}" unless value.op == op
+  end
+
+  def self.run : Nil
+    target = Target.parse?("aarch64-apple-darwin")
+    raise "missing target" unless target
+    built = Module.for_target("integer-folds", target)
+    raise built.to_s if built.is_a?(LayoutError)
+    mod = built.as(Module)
+    b = Builder.new(mod)
+    t = mod.types
+    cases = [
+      {Op::Add, 32, 41_i64, 1_i64, 42_i64},
+      {Op::Add, 8, 127_i64, 1_i64, -128_i64},
+      {Op::Sub, 32, 0_i64, 1_i64, -1_i64},
+      {Op::Mul, 32, 65536_i64, 65536_i64, 0_i64},
+      {Op::Add, 32, 4294967295_i64, 0_i64, -1_i64},
+      {Op::Add, 17, 65535_i64, 1_i64, -65536_i64},
+      {Op::Add, 64, 9223372036854775807_i64, 1_i64, -9223372036854775807_i64 - 1_i64},
+      {Op::And, 8, -2_i64, 1_i64, 0_i64},
+      {Op::Or, 8, -128_i64, 1_i64, -127_i64},
+      {Op::Xor, 1, 1_i64, 1_i64, 0_i64},
+      {Op::And, 1, 1_i64, 1_i64, 1_i64},
+      {Op::LShr, 8, -1_i64, 1_i64, 127_i64},
+      {Op::AShr, 8, 248_i64, 1_i64, -4_i64},
+      {Op::Shl, 32, 1_i64, 31_i64, -2147483648_i64},
+      {Op::LShr, 64, -1_i64, 1_i64, 9223372036854775807_i64},
+      {Op::AShr, 1, 1_i64, 0_i64, 1_i64},
+    ]
+    # No insertion point: these results must also work as global initializers.
+    cases.each do |row|
+      type = t.int(row[1])
+      result = b.binop(row[0], b.const_int(type, row[2]), b.const_int(type, row[3]))
+      unless result.op == Op::ConstInt && result.type == type && result.aux_int == row[4]
+        raise "#{row[0]} i#{row[1]} #{row[2]}, #{row[3]}: expected #{row[4]}, got #{result.op} #{result.aux_int}"
+      end
+    end
+
+    fn = mod.add_function("unfolded", t.func([t.int32], t.int32))
+    param = Param.new(t.int32, "value", 0)
+    fn.add_param(param)
+    b.position_at_end(fn.append_basic_block("entry"))
+    instruction(b.add(param, b.const_int(t.int32, 1_i64)), Op::Add)
+    instruction(b.add(b.const_int(t.int32, 1_i64), b.const_int(t.int64, 1_i64)), Op::Add)
+    instruction(b.add(b.const_int(t.int128, 1_i64), b.const_int(t.int128, 1_i64)), Op::Add)
+    instruction(b.binop(Op::Add, b.const_int(t.int8, 255_i64), b.const_int(t.int8, 1_i64), 1_i64), Op::Add)
+    instruction(b.binop(Op::Add, b.const_int(t.int8, 127_i64), b.const_int(t.int8, 1_i64), 2_i64), Op::Add)
+    instruction(b.binop(Op::LShr, b.const_int(t.int32, 3_i64), b.const_int(t.int32, 1_i64), 4_i64), Op::LShr)
+    negatives = 6
+    [Op::Shl, Op::LShr, Op::AShr].each do |op|
+      [-1_i64, 32_i64].each do |count|
+        instruction(b.binop(op, b.const_int(t.int32, 1_i64), b.const_int(t.int32, count)), op)
+        negatives += 1
+      end
+    end
+    [Op::SDiv, Op::UDiv, Op::SRem, Op::URem].each do |op|
+      instruction(b.binop(op, b.const_int(t.int32, 1_i64), b.const_int(t.int32, 0_i64)), op)
+      instruction(b.binop(op, b.const_int(t.int32, -2147483648_i64), b.const_int(t.int32, -1_i64)), op)
+      negatives += 2
+    end
+    b.ret(param)
+    puts "Integer folding: #{cases.size} exact constants, #{negatives} retained instructions"
+  end
+end
+
+BenchIrFold.run

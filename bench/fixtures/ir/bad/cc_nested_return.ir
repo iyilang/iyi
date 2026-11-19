@@ -1,0 +1,10 @@
+; iyi-ir 1
+; expect: cc-lowered
+source_filename = "bad"
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+define internal { i64, [2 x i64] } @nest(i64 %a) {
+entry:
+  %x = insertvalue { i64, [2 x i64] } zeroinitializer, i64 %a, 0
+  ret { i64, [2 x i64] } %x
+}

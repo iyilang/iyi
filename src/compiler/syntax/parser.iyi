@@ -491,10 +491,8 @@ pub class Parser < Lexer
           end
 
           if atomic.is_a?(Call)
-            if atomic.name.ends_with?('?') || atomic.name.ends_with?('!')
-              unexpected_token("site_11")
-            end
             if atomic.obj
+              # Hosted parser.cr 1215-1248: a receiver's `name=` is accepted whatever the name ends with (`cfg.limit? = 2`).
               next_token_skip_space_or_newline
               atomic.name = "#{atomic.name}="
               arg = parse_op_assign_no_control
@@ -502,6 +500,10 @@ pub class Parser < Lexer
               atomic.end_location = arg.end_location
               return atomic
             else
+              # Hosted parser.cr 777: a bare name ending in ? or ! is refused as the target of `=`.
+              if atomic.name.ends_with?('?') || atomic.name.ends_with?('!')
+                unexpected_token("site_11")
+              end
               iyi_refuse_global_local(atomic)
               atomic = Var.new(atomic.name).at(atomic)
             end
@@ -572,14 +574,17 @@ pub class Parser < Lexer
     atomic
   end
 
+  # Hosted parser.cr 8324-8336: what an operator assignment or `=` may assign. A receiver's name is assignable when it
+  # is an identifier (`cfg.limit?` too) with no arguments, parentheses or block; an index is assignable as `a[i]` or `a[]`.
   def can_be_assigned?(node : ASTNode) : Bool
     case node
     when Var, InstanceVar, ClassVar, Path, Global, Underscore
       true
     when Call
+      return false if node.has_parentheses
       no_args = node.args.empty? && node.named_args.nil? && node.block.nil? && node.block_arg.nil?
-      return true if no_args
-      node.name == "[]"
+      return true if Lexer.ident?(node.name) && no_args
+      node.name == "[]" && (node.args_in_brackets || no_args)
     else
       false
     end
@@ -940,6 +945,22 @@ pub class Parser < Lexer
           space_consumed = true
         end
 
+        # Hosted parser.cr 1249-1261: `receiver.name op= value` is an operator assignment, built here. The receiver form
+        # never reaches the bare-name check in parse_op_assign, which refuses `x += 1` for an undeclared x.
+        if @token.type.assignment_operator?
+          call = Call.new(res, name)
+          unexpected_token unless can_be_assigned?(call)
+          op_str = @token.type.to_s
+          method = op_str[0, op_str.bytesize - 1]
+          op_loc = @token.location
+          next_token_skip_space_or_newline
+          value = parse_op_assign
+          call.at(location)
+          call.name_location = name_location
+          res = OpAssign.new(call, method, value).at(location)
+          res.name_location = op_loc
+          next
+        end
         call_args = preserve_stop_on_do { space_consumed ? parse_call_args_space_consumed : parse_call_args }
         args = call_args ? (call_args.args || [] of ASTNode) : [] of ASTNode
         block = call_args ? call_args.block : nil
@@ -955,6 +976,14 @@ pub class Parser < Lexer
       when TokenKind::OP_BANG
         res = Propagate.new(res).at(location)
         next_token
+      when TokenKind::OP_LSQUARE_RSQUARE
+        # Hosted parser.cr 1284-1295: `a[]` is a call to `[]` with no arguments.
+        name_location = @token.location
+        end_location = token_end_location
+        next_token_skip_space
+        res = Call.new(res, "[]").at(location)
+        res.name_location = name_location
+        res.end_location = end_location
       when TokenKind::OP_LSQUARE
         next_token_skip_space_or_newline
         call_args = preserve_stop_on_do { parse_call_args_space_consumed(true, true, true) }
@@ -976,6 +1005,7 @@ pub class Parser < Lexer
         end
 
         res = Call.new(res, method_name, args, nil, nil, named_args).at(location)
+        res.args_in_brackets = true
         res.end_location = end_location
       when TokenKind::OP_LCURLY
         if res.is_a?(Call) && res.block.nil?

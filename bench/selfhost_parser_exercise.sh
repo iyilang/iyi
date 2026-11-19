@@ -727,6 +727,26 @@ class Counter < Iyi::Visitor
   end
 end
 
+if ARGV.size == 2 && ARGV[0] == "--verdicts"
+  # One verdict per file in the list: ACCEPT, or REFUSE with the error's line and column and its message.
+  File.read_lines(ARGV[1]).each do |path|
+    next if path.empty?
+    begin
+      parser = Iyi::Parser.new(File.read(path))
+      parser.filename = path
+      parser.parse
+      puts "ACCEPT #{path}"
+    rescue e : Iyi::SyntaxException
+      text = e.message.to_s.split('\n').join(" ")
+      puts "REFUSE #{path} Syntax error in #{path}:#{e.line_number}:#{e.column_number}: #{text}"
+    rescue e : Exception
+      text = e.message.to_s.split('\n').join(" ")
+      puts "REFUSE #{path} #{text}"
+    end
+  end
+  exit 0
+end
+
 filename = ARGV[0]
 src = File.read(filename)
 parser = Iyi::Parser.new(src)
@@ -790,6 +810,7 @@ for fixture in \
   "$REPO"/bench/fixtures/syntax_named_forward_block.iyi \
   "$REPO"/bench/fixtures/syntax_call_spans.iyi \
   "$REPO"/bench/fixtures/syntax_begin_shorthand_and_comma_lines.iyi \
+  "$REPO"/bench/fixtures/syntax_op_assign_targets.iyi \
   "$REPO"/bench/fixtures/syntax_implicit_rescue.iyi; do
   fixture_name="${fixture#"$REPO/"}"
   fixture_native="$(native_path "$fixture")"
@@ -1361,6 +1382,105 @@ else
   status=1
 fi
 
+echo "== Operator assignment targets: both parsers give each row the same verdict and the hosted first error line"
+# Each row is a source and its expectation: ACCEPT, or REFUSE with the hosted line and message (parser.cr 732-861 for a bare
+# name, 1113-1262 for a receiver, 1284-1295 for a[], 8324-8336 for what may be assigned). One process per parser runs the list.
+opa_sources=(
+  $'def apply_config(cfg : Config, table : Hash(String, Int32), key : String) : Nil\n  cfg.limit += 10\n  cfg.fallback ||= 100\n  cfg.active &&= true\n  table[key] += 1\n  table[key] ||= 0\nend\n'
+  $'cfg = 1\ncfg.limit? += 2\n'
+  $'Foo.bar += 1\n'
+  $'self.name += 1\n'
+  $'cfg = 1\ncfg.limit.other += 1\n'
+  $'a = [1]\na[] += 1\n'
+  $'a = [1]\na[] = 2\n'
+  $'a = [1]\nx = a[]\n'
+  $'cfg = 1\ncfg.limit? = 2\n'
+  $'self.name = 1\n'
+  $'x = 1\nx += 1\n'
+  $'@x += 1\n'
+  $'@@x += 1\n'
+  $'a = [1]\na.b[0] += 1\n'
+  $'x += 1\n'
+  $'x ||= 1\n'
+  $'foo(1) += 2\n'
+  $'foo() += 2\n'
+  $'self += 1\n'
+  $'Foo += 1\n'
+  $'cfg.limit(1) += 2\n'
+  $'cfg.limit() += 2\n'
+  $'cfg.limit { 1 } += 2\n'
+  $'a = [1]\na[0]? += 1\n'
+  $'cfg.limit() = 2\n'
+  $'foo? = 1\n'
+  $'x? += 1\n'
+)
+opa_expect=(
+  ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT
+  "REFUSE 1 '+=' before definition of 'x'"
+  "REFUSE 1 '||=' before definition of 'x'"
+  "REFUSE 1 unexpected token: \"+=\""
+  "REFUSE 1 unexpected token: \"+=\""
+  "REFUSE 1 can't change the value of self"
+  "REFUSE 1 can't reassign to constant"
+  "REFUSE 1 unexpected token: \"+=\""
+  "REFUSE 1 unexpected token: \"+=\""
+  "REFUSE 1 unexpected token: \"+=\""
+  "REFUSE 2 unexpected token: \"+=\""
+  "REFUSE 1 unexpected token: \"=\""
+  "REFUSE 1 unexpected token: \"=\""
+  "REFUSE 1 '+=' before definition of 'x?'"
+)
+# verdict_matches OUTPUT EXPECTATION: one verdict line says what its expectation says (ACCEPT, or REFUSE with line and message).
+verdict_matches() {
+  local out="$1" want="$2" n msg loc
+  if [ "$want" = ACCEPT ]; then
+    case "$out" in "ACCEPT "*) return 0 ;; esac
+    return 1
+  fi
+  n="${want#REFUSE }"
+  n="${n%% *}"
+  msg="${want#REFUSE $n }"
+  case "$out" in "REFUSE "*) ;; *) return 1 ;; esac
+  loc=$(printf '%s' "$out" | sed -n 's/.*Syntax error in [^ ]*:\([0-9][0-9]*\):[0-9][0-9]*: .*/\1/p')
+  [ "$loc" = "$n" ] || return 1
+  case "$out" in *"$msg"*) return 0 ;; esac
+  return 1
+}
+# opa_check VERDICTS: every row's verdict line matches its expectation. Each row that does not is printed.
+opa_check() {
+  local file="$1" i line bad=0
+  for i in "${!opa_sources[@]}"; do
+    line=$(sed -n "$((i + 1))p" "$file")
+    if ! verdict_matches "$line" "${opa_expect[$i]}"; then
+      echo "  row $((i + 1)) disagrees with '${opa_expect[$i]}': $line"
+      bad=$((bad + 1))
+    fi
+  done
+  [ "$bad" -eq 0 ]
+}
+opa_dir="$WORK/opa"
+rm -rf "$opa_dir" && mkdir -p "$opa_dir"
+: > "$opa_dir/list.txt"
+for i in "${!opa_sources[@]}"; do
+  printf '%s\n' "${opa_sources[$i]}" > "$opa_dir/row_$i.iyi"
+  echo "$WORK_NATIVE/opa/row_$i.iyi" >> "$opa_dir/list.txt"
+done
+"$WORK/exercise-plain$EXE" --verdicts "$WORK_NATIVE/opa/list.txt" > "$opa_dir/port.all" 2> "$opa_dir/port.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$opa_dir/port.all" > "$opa_dir/port.txt"
+"$WORK/dump_hosted$EXE" --verdicts "$WORK_NATIVE/opa/list.txt" > "$opa_dir/hosted.txt" 2> "$opa_dir/hosted.err" || true
+if opa_check "$opa_dir/port.txt"; then
+  echo "  port: each of ${#opa_sources[@]} rows has its expected verdict and first error line"
+else
+  echo "  port rows disagree with the expectations"
+  status=1
+fi
+if opa_check "$opa_dir/hosted.txt"; then
+  echo "  hosted: the same rows hold"
+else
+  echo "  hosted rows do not hold: the expectations are wrong"
+  status=1
+fi
+
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
@@ -1800,6 +1920,24 @@ prove_mutation "mutation 58: a handler's else body is dropped" "$PARSER" \
 prove_mutation "mutation 59: a handler's ensure body is dropped" "$PARSER" \
   '      a_ensure = parse_expressions' \
   '      a_ensure = nil' -- implicit_rescue_hold || status=1
+# opassign_hold: the operator-assignment rows, checked on a mutant's verdicts. A mutant that disagrees with a row is caught.
+opassign_hold() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  "$WORK/mut-exercise$EXE" --verdicts "$WORK_NATIVE/opa/list.txt" > "$WORK/opa-mut.all" 2> "$WORK/opa-mut.err" || true
+  awk '/^(ACCEPT|REFUSE) /' "$WORK/opa-mut.all" > "$WORK/opa-mut.txt"
+  opa_check "$WORK/opa-mut.txt"
+}
+# Mutation 60: a receiver's `name op= value` is no longer built by the method suffix, so it reaches the bare-name check.
+prove_mutation "mutation 60: a receiver's operator assignment is not built by the method suffix" "$PARSER" \
+  $'        if @token.type.assignment_operator?\n          call = Call.new(res, name)' \
+  $'        if false\n          call = Call.new(res, name)' -- opassign_hold || status=1
+# Mutation 61: a call written with parentheses is assignable, so `cfg.limit() = 2` and `cfg.limit() += 2` are accepted.
+prove_mutation "mutation 61: a call with parentheses is assignable" "$PARSER" \
+  '      return false if node.has_parentheses' \
+  '      return false if false' -- opassign_hold || status=1
 
 echo
 echo "== Rebuilding and running restored parser exercise"

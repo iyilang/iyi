@@ -322,7 +322,28 @@ import std/int
     puts "grows: one eligible spawn started 1 of #{IyiWorkers.count} workers, #{LIGHT_ROUNDS} joined one at a time #{light}, and #{TOGETHER} running at one instant all #{loaded}"
   end
 
-  STEPS = ["together", "nested", "unit", "serial", "asked", "one", "askedone", "grows"]
+{% if flag?(:growth_force) %}
+  def growth : Nil
+    decision = -3
+    group do |g|
+      g.spawn { IyiWorkers.forced_growth_holder; 0 }
+      IyiWorkers.forced_growth_ready
+      IyiWorkers.forced_growth_arm
+      g.spawn { 0 }
+      decision = IyiWorkers.forced_growth_decision
+      IyiWorkers.forced_growth_release
+    end
+    fail("growth: fixture did not present queued work with no idle worker and room to grow") if decision < 0
+    fail("growth: queued work did not start another worker") if decision == 0
+    puts "growth: queued work started another worker"
+  end
+{% end %}
+
+  {% if flag?(:growth_force) %}
+    STEPS = ["together", "nested", "unit", "serial", "asked", "one", "askedone", "grows", "growth"]
+  {% else %}
+    STEPS = ["together", "nested", "unit", "serial", "asked", "one", "askedone", "grows"]
+  {% end %}
 
   workers = 4
   chosen = [] of String
@@ -346,6 +367,9 @@ import std/int
     when "one"      then one
     when "askedone" then askedone
     when "grows"    then grows
+{% if flag?(:growth_force) %}
+    when "growth"   then growth
+{% end %}
     end
   end
   puts "spawn eligibility: every property held on #{IyiWorkers.count} workers"

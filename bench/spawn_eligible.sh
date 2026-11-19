@@ -692,6 +692,58 @@ cat > "$WORK/forced_words.iyi" <<'IYI'
   @@forced_pushed : UInt64 = 0_u64
   @[UnsafeReach("forced by the copy alone: how many tasks have reached the meet, read and set through a word")]
   @@forced_met : UInt64 = 0_u64
+  @[UnsafeReach("counted atomically by each task that exercises the placement hook")]
+  @@forced_seen : UInt64 = 0_u64
+  @[UnsafeReach("copy-only growth fixture words, accessed atomically")]
+  @@forced_growth_hold : UInt64 = 0_u64
+  @[UnsafeReach("copy-only growth fixture words, accessed atomically")]
+  @@forced_growth_ready : UInt64 = 0_u64
+  @[UnsafeReach("copy-only growth fixture words, accessed atomically")]
+  @@forced_growth_armed : UInt64 = 0_u64
+
+  @[NoInline]
+  @[NoPreempt]
+  def self.forced_growth_holder : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_growth_ready).address).value.set(1_u64)
+    hold = Pointer(Atomic(UInt64)).new(pointerof(@@forced_growth_hold).address)
+    deadline = __iyi_monotonic_ns + 10_000_000_000_i64
+    while hold.value.get == 0_u64
+      if __iyi_monotonic_ns >= deadline
+        print "FAIL: growth fixture holder was not released\n"
+        __iyi_exit(1)
+      end
+      IyiThread.spin_pause
+    end
+  end
+
+  def self.forced_growth_ready : Nil
+    forced_wait(pointerof(@@forced_growth_ready).address, "growth fixture holder did not start")
+  end
+
+  def self.forced_growth_arm : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_growth_armed).address).value.set(1_u64)
+  end
+
+  def self.forced_growth_armed? : Bool
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_growth_armed).address).value.get != 0_u64
+  end
+
+  def self.forced_growth_release : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_growth_hold).address).value.set(1_u64)
+  end
+
+  def self.forced_growth_decision : Int32
+    before = word(pointerof(@@launched)).value.get
+    queued = word(pointerof(@@queued)).value.get
+    idle = word(pointerof(@@idle)).value.get
+    spinning = word(pointerof(@@spinning)).value.get
+    return -1 unless queued > 0_i64 && idle == 0_i64 && spinning == 0_i64 && before < @@started.to_i64
+    grow
+    after = word(pointerof(@@launched)).value.get
+    return 1 if after == before + 1_i64
+    return 0 if after == before
+    -2
+  end
 
   def self.forced_enter : Nil
     Pointer(Atomic(UInt64)).new(pointerof(@@forced_entered).address).value.set(1_u64)
@@ -807,8 +859,15 @@ broken wholepool '/^  def self.start : Nil$/ { inside = 1; defs++ } inside && /^
 caught wholepool "grows: one eligible spawn started 4 of the pool's 4 workers" grows --workers=4
 
 step "failure proof: a pool that never starts a second worker"
-broken nevergrows '/^  def self.grow : Nil$/ { print; print "    return"; next } { print }'
-caught nevergrows "grows: 4 eligible spawns running at one instant started 1 of the pool's 4 workers, with 0 starts owed" grows --workers=4
+broken nevergrows '/^  def self.grow : Nil$/ { print; print "    return if forced_growth_armed? && IyiSchedLock.held_here?"; print "    return"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dgrowth_force
+caught nevergrows "growth: queued work did not start another worker" growth --workers=4
+broken growth_control '/^  def self.grow : Nil$/ { print; print "    return if forced_growth_armed? && IyiSchedLock.held_here?"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dgrowth_force
+timeout -k 5 120 ./growth_control-run growth --workers=4 > growth_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'growth: queued work started another worker' growth_control.txt; then
+  echo "the sound growth control failed (exit $code):"; tail -20 growth_control.txt; exit 1
+fi
+echo "  sound growth control: queued work started another worker"
 
 # A worker the pool starts holds the token of the one out looking until its
 # look finds a task or it has counted itself idle (`IyiScheduler.idle_worker`),

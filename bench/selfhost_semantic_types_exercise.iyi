@@ -1,0 +1,375 @@
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/top_level::{AliasType, GenericClassType, ModuleType, SemanticProgram, TopLevelVisitor, Type}
+import compiler/types/types::{TypeQueries}
+import compiler/types/merge::{TypeMerge}
+import compiler/types/intersect::{TypeIntersect}
+import compiler/types/indirection::{TypeIndirection}
+import compiler/types/filters::{TypeFilter, TypeFilterSpec}
+import compiler/types/type_system::{TypeSystem}
+import compiler/types/unification::{TypeUnification}
+import compiler/types/lookup::{LookupError, TypeLookup}
+import compiler/types/to_restriction::{TypeToRestriction}
+import compiler/syntax/ast::{ASTNode}
+
+# Type-model driver for bench/selfhost_semantic_types_exercise.sh.
+#
+#   selfhost_semantic_types_exercise <fixture.iyi>
+#
+# Builds the fixture's declarations into a SemanticProgram, then evaluates each
+# `# op <op>` line and prints `<op> => <result>`, the same lines the hosted
+# oracle (bench/selfhost_semantic_types_oracle.cr) prints. The operations are
+# listed in the oracle's header, and the operand syntax is the same: generic
+# instances and procs may be written with arguments, and commas inside
+# parentheses do not separate operands. One TypeSystem serves a whole fixture,
+# so that every spelling of an instance is the same object.
+module BenchSelfhostSemanticTypesExercise
+  # Splits operands at the commas outside every parenthesis, trimmed.
+  def self.split_top(text : String) : Array(String)
+    parts = [] of String
+    depth = 0
+    start = 0
+    i = 0
+    while i < text.bytesize
+      c = text[i, 1]
+      if c == "("
+        depth = depth + 1
+      elsif c == ")"
+        depth = depth - 1
+      elsif c == "," && depth == 0
+        parts << text[start, i - start].strip
+        start = i + 1
+      end
+      i = i + 1
+    end
+    last = text[start, text.bytesize - start].strip
+    parts << last unless last.bytesize == 0
+    parts
+  end
+
+  # The position of the last dot outside parentheses, or -1.
+  def self.member_dot(op : String) : Int32
+    depth = 0
+    found = -1
+    i = 0
+    while i < op.bytesize
+      c = op[i, 1]
+      if c == "("
+        depth = depth + 1
+      elsif c == ")"
+        depth = depth - 1
+      elsif c == "." && depth == 0
+        found = i
+      end
+      i = i + 1
+    end
+    found
+  end
+
+  def self.resolve(prog : SemanticProgram, ts : TypeSystem, name : String) : Type
+    if name.ends_with?(".class")
+      inner = resolve(prog, ts, name[0, name.bytesize - 6])
+      m = TypeUnification.metaclass_of(inner)
+      raise "no metaclass for #{name}" if m.nil?
+      return m
+    end
+    if open = name.index("(")
+      base_name = name[0, open]
+      inner_text = name[open + 1, name.bytesize - open - 2]
+      args = [] of Type
+      split_top(inner_text).each do |arg|
+        args << resolve(prog, ts, arg)
+      end
+      if base_name == "Proc"
+        arg_types = [] of Type
+        i = 0
+        while i < args.size - 1
+          arg_types << args[i]
+          i = i + 1
+        end
+        return ts.proc_of(arg_types, args[args.size - 1])
+      end
+      base = resolve(prog, ts, base_name)
+      raise "#{base_name} takes no type arguments" unless base.is_a?(GenericClassType)
+      return ts.instantiate_generic(base.as(GenericClassType), args)
+    end
+    if idx = name.index("::")
+      found = prog.lookup_path_names(name.split("::"), prog)
+      raise "unknown type #{name}" if found.nil?
+      return found.as(Type)
+    end
+    t = prog.types[name]?
+    raise "unknown type #{name}" if t.nil?
+    t
+  end
+
+  def self.type_text(t : Type?) : String
+    return "nil" if t.nil?
+    # The hosted to_s prints an unbound generic with its type variables, as in
+    # Pair(A, B). The port's to_s prints the name alone, so the driver adds them.
+    if t.is_a?(GenericClassType)
+      gt = t.as(GenericClassType)
+      return "#{gt.name}(#{gt.type_vars.join(", ")})"
+    end
+    t.to_s
+  end
+
+  def self.bool_text(b : Bool) : String
+    b ? "true" : "false"
+  end
+
+  def self.list_text(types : Array(Type)) : String
+    parts = [] of String
+    types.each do |t|
+      parts << type_text(t)
+    end
+    "[#{parts.join(", ")}]"
+  end
+
+  def self.apply(t : Type, member : String) : String
+    if member == "nil_type?"
+      return bool_text(t.nil_type?)
+    end
+    if member == "struct?"
+      return bool_text(t.struct?)
+    end
+    if member == "pointer?"
+      return bool_text(TypeQueries.pointer?(t))
+    end
+    if member == "proc?"
+      return bool_text(TypeQueries.proc?(t))
+    end
+    if member == "void?"
+      return bool_text(TypeQueries.void?(t))
+    end
+    if member == "no_return?"
+      return bool_text(TypeQueries.no_return?(t))
+    end
+    if member == "virtual?"
+      return bool_text(TypeQueries.virtual?(t))
+    end
+    if member == "virtual_metaclass?"
+      return bool_text(TypeQueries.virtual_metaclass?(t))
+    end
+    if member == "metaclass?"
+      return bool_text(TypeQueries.metaclass?(t))
+    end
+    if member == "leaf?"
+      return bool_text(TypeQueries.leaf?(t))
+    end
+    if member == "reference_like?"
+      return bool_text(TypeQueries.reference_like?(t))
+    end
+    if member == "subclasses"
+      return list_text(TypeQueries.subclasses(t))
+    end
+    if member == "all_subclasses"
+      return list_text(TypeQueries.all_subclasses(t))
+    end
+    if member == "instance_type"
+      return type_text(TypeQueries.instance_type(t))
+    end
+    if member == "virtual_type"
+      return type_text(TypeQueries.virtual_type(t))
+    end
+    if member == "virtual_type_made?"
+      return bool_text(TypeQueries.virtual_type_made?(t))
+    end
+    if member == "virtual_identical"
+      return bool_text(TypeQueries.virtual_type(t).object_id == TypeQueries.virtual_type(t).object_id)
+    end
+    if member == "remove_alias"
+      return type_text(TypeMerge.remove_alias(t))
+    end
+    if member == "remove_typedef"
+      return type_text(t.remove_typedef)
+    end
+    if member == "unbound?"
+      return bool_text(TypeQueries.unbound?(t))
+    end
+    if member == "remove_indirection"
+      return type_text(TypeIndirection.remove_indirection(t))
+    end
+    if member == "extern?"
+      return bool_text(TypeQueries.extern?(t))
+    end
+    if member == "extern_union?"
+      return bool_text(TypeQueries.extern_union?(t))
+    end
+    if member == "packed?"
+      return bool_text(TypeQueries.packed?(t))
+    end
+    if member == "including_types"
+      return type_text(TypeIntersect.including_union(t.program, t))
+    end
+    if member == "simple?"
+      return bool_text(t.as(AliasType).simple?)
+    end
+    if member == "splat_index"
+      idx = TypeQueries.splat_index(t)
+      return "nil" if idx.nil?
+      return idx.to_s
+    end
+    raise "unknown operation #{member}"
+  end
+
+  def self.evaluate_merge(prog : SemanticProgram, ts : TypeSystem, op : String) : String
+    parts = split_top(op[6, op.bytesize - 7])
+    if parts.size == 2
+      return type_text(TypeMerge.merge(prog, resolve(prog, ts, parts[0]), resolve(prog, ts, parts[1])))
+    end
+    if parts.size == 3
+      types = [resolve(prog, ts, parts[0]), resolve(prog, ts, parts[1]), resolve(prog, ts, parts[2])] of Type
+      return type_text(TypeMerge.merge_all(prog, types))
+    end
+    raise "merge takes two or three types: #{op}"
+  end
+
+  def self.evaluate_same_merge(prog : SemanticProgram, ts : TypeSystem, op : String) : String
+    parts = split_top(op[11, op.bytesize - 12])
+    raise "same_merge takes four types: #{op}" unless parts.size == 4
+    first = TypeMerge.merge(prog, resolve(prog, ts, parts[0]), resolve(prog, ts, parts[1]))
+    second = TypeMerge.merge(prog, resolve(prog, ts, parts[2]), resolve(prog, ts, parts[3]))
+    bool_text(first.object_id == second.object_id)
+  end
+
+  def self.evaluate_intersect(prog : SemanticProgram, ts : TypeSystem, op : String) : String
+    parts = split_top(op[10, op.bytesize - 11])
+    raise "intersect takes two types: #{op}" unless parts.size == 2
+    type_text(TypeIntersect.common_descendent(prog, resolve(prog, ts, parts[0]), resolve(prog, ts, parts[1])))
+  end
+
+  def self.is_a_spec(prog : SemanticProgram, ts : TypeSystem, name : String) : TypeFilterSpec
+    TypeFilterSpec.new("is_a", resolve(prog, ts, name))
+  end
+
+  def self.build_filter(prog : SemanticProgram, ts : TypeSystem, parts : Array(String)) : TypeFilterSpec
+    kind = parts[1]
+    if kind == "is_a"
+      return is_a_spec(prog, ts, parts[2])
+    end
+    if kind == "nil?"
+      return is_a_spec(prog, ts, "Nil")
+    end
+    if kind == "not_is_a"
+      return TypeFilter.negate(is_a_spec(prog, ts, parts[2]))
+    end
+    if kind == "not_nil?"
+      return TypeFilter.negate(is_a_spec(prog, ts, "Nil"))
+    end
+    if kind == "truthy"
+      return TypeFilterSpec.new("truthy")
+    end
+    if kind == "not_truthy"
+      return TypeFilter.negate(TypeFilterSpec.new("truthy"))
+    end
+    if kind == "responds_to"
+      return TypeFilterSpec.new("responds_to", nil, parts[2])
+    end
+    if kind == "or_is_a"
+      return TypeFilterSpec.new("or", nil, "", is_a_spec(prog, ts, parts[2]), is_a_spec(prog, ts, parts[3]))
+    end
+    if kind == "and_is_a"
+      return TypeFilterSpec.new("and", nil, "", is_a_spec(prog, ts, parts[2]), is_a_spec(prog, ts, parts[3]))
+    end
+    raise "unknown filter #{kind}"
+  end
+
+  def self.evaluate_filter(prog : SemanticProgram, ts : TypeSystem, op : String) : String
+    parts = split_top(op[7, op.bytesize - 8])
+    t = resolve(prog, ts, parts[0])
+    spec = build_filter(prog, ts, parts)
+    type_text(TypeFilter.apply(prog, spec, t))
+  end
+
+  # The scope a lookup starts in: `program`, or a type's path such as `Outer::Inner`.
+  def self.scope_of(prog : SemanticProgram, name : String) : ModuleType
+    return prog if name == "program"
+    found = prog.lookup_path_names(name.split("::"), prog)
+    raise "unknown scope #{name}" if found.nil?
+    found.as(ModuleType)
+  end
+
+  # `lookup(scope, written)`: the type the written type names, or `error: <message>`.
+  def self.evaluate_lookup(prog : SemanticProgram, ts : TypeSystem, op : String) : String
+    parts = split_top(op[7, op.bytesize - 8])
+    scope = scope_of(prog, parts[0])
+    written = ""
+    i = 1
+    while i < parts.size
+      written = i == 1 ? parts[i] : "#{written}, #{parts[i]}"
+      i = i + 1
+    end
+    node = Parser.new(written, "lookup").parse
+    found = TypeLookup.new(ts.instances).lookup(scope, node)
+    if found.is_a?(LookupError)
+      return "error: #{found.as(LookupError).message}"
+    end
+    type_text(found.as(Type))
+  end
+
+  # `restriction(scope, written)`: the restriction the written type converts to in
+  # the scope, or `nil` when it has none. A metaclass is written `T.class`, which
+  # the parser reads as a call in expression position, so it is resolved by name.
+  def self.evaluate_restriction(prog : SemanticProgram, ts : TypeSystem, op : String) : String
+    parts = split_top(op[12, op.bytesize - 13])
+    scope = scope_of(prog, parts[0])
+    written = ""
+    i = 1
+    while i < parts.size
+      written = i == 1 ? parts[i] : "#{written}, #{parts[i]}"
+      i = i + 1
+    end
+    if written.ends_with?(".class")
+      return restriction_text(scope, resolve(prog, ts, written))
+    end
+    node = Parser.new(written, "restriction").parse
+    found = TypeLookup.new(ts.instances).lookup(scope, node)
+    if found.is_a?(LookupError)
+      return "error: #{found.as(LookupError).message}"
+    end
+    restriction_text(scope, found.as(Type))
+  end
+
+  # The restriction of *t* in *scope* as hosted writes it, or `nil`.
+  def self.restriction_text(scope : ModuleType, t : Type) : String
+    restriction = TypeToRestriction.new(scope).convert(t)
+    return "nil" if restriction.nil?
+    restriction.as(ASTNode).to_s
+  end
+
+  def self.evaluate(prog : SemanticProgram, ts : TypeSystem, op : String) : String
+    return evaluate_merge(prog, ts, op) if op.starts_with?("merge(")
+    return evaluate_intersect(prog, ts, op) if op.starts_with?("intersect(")
+    return evaluate_filter(prog, ts, op) if op.starts_with?("filter(")
+    return evaluate_lookup(prog, ts, op) if op.starts_with?("lookup(")
+    return evaluate_restriction(prog, ts, op) if op.starts_with?("restriction(")
+    return evaluate_same_merge(prog, ts, op) if op.starts_with?("same_merge(")
+    dot = member_dot(op)
+    raise "malformed operation #{op}" if dot < 0
+    t = resolve(prog, ts, op[0, dot])
+    apply(t, op[dot + 1, op.bytesize - dot - 1])
+  end
+
+  def self.run(src : String, filename : String) : String
+    parser = Parser.new(src, filename)
+    node = parser.parse
+    prog = SemanticProgram.new
+    # The type system is installed before the visitor runs, so that the class
+    # declarations resolve generic superclasses through it.
+    ts = TypeSystem.new(prog)
+    node.accept(TopLevelVisitor.new(prog))
+    out = [] of String
+    src.split("\n").each do |line|
+      if line.starts_with?("# op ")
+        op = line[5, line.bytesize - 5].strip
+        out << "#{op} => #{evaluate(prog, ts, op)}"
+      end
+    end
+    out.join("\n") + "\n"
+  end
+end
+
+if Program.args.size > 0
+  filename = Program.args[0]
+  print BenchSelfhostSemanticTypesExercise.run(File.read(filename), filename)
+end

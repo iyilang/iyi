@@ -1,0 +1,9 @@
+module t6_scope/visitor
+
+import t6_scope/types::{Call}
+
+pub class Visitor
+  def check(node : Call) : Int32
+    42
+  end
+end

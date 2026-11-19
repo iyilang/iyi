@@ -1,0 +1,4 @@
+require "./holder"
+
+class Holder
+end

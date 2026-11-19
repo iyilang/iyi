@@ -1,0 +1,146 @@
+module compiler/types/instances
+
+import compiler/semantic/top_level::{GenericClassType, GenericModuleType, GenericTraitType, NonGenericModuleType, SemanticProgram, Type, VoidType}
+import compiler/semantic/top_level::{ClassType}
+import compiler/types/types::{GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceType, GenericTraitInstanceType, NamedArgumentType, NamedTupleInstanceType, PointerInstanceType, ProcInstanceType, StaticArrayInstanceType, TupleInstanceType, TypeQueries}
+
+# The instances of the type model, one object per spelling. The lookup of
+# written types (lookup.iyi) and the TypeSystem both create instances here, so
+# a spelling is the same object wherever it is written. It is its own class
+# because lookup.iyi cannot import TypeSystem (type_system.iyi imports the
+# lookup), the cycle SemanticProgram breaks with TypeHook.
+pub class TypeInstances
+  getter program : SemanticProgram
+  @generic_cache : Hash(String, GenericInstanceType)
+
+  def initialize(@program : SemanticProgram)
+    @generic_cache = Hash(String, GenericInstanceType).new
+  end
+
+  def instantiate_generic(generic_type : GenericClassType, type_args : Array(Type)) : GenericClassInstanceType
+    key = "#{generic_type.full_name}(#{type_args.map(&.full_name).join(", ")})"
+    if cached = @generic_cache[key]?
+      return cached.as(GenericClassInstanceType)
+    end
+
+    tv_map = Hash(String, Type).new
+    i = 0
+    while i < type_args.size
+      name = i < generic_type.type_vars.size ? generic_type.type_vars[i] : "T#{i}"
+      tv_map[name] = type_args[i]
+      i = i + 1
+    end
+
+    # Cache the child before resolving its generic parent: substitution can
+    # instantiate another type and must see this same child on re-entry.
+    inst = GenericClassInstanceType.new(@program, generic_type, tv_map, type_args)
+    @generic_cache[key] = inst
+    if superclass = generic_type.superclass
+      resolved = TypeQueries.replace_type_parameters(superclass, tv_map)
+      inst.superclass = resolved
+      if resolved.is_a?(GenericClassInstanceType)
+        resolved.as(GenericClassInstanceType).subclasses << inst
+      elsif resolved.is_a?(ClassType)
+        resolved.as(ClassType).subclasses << inst
+      end
+    end
+    # The instance includes what its generic type includes, so each such module
+    # records the instance as an includer (the hosted instance's `include`).
+    inst.parents.each do |parent|
+      if parent.is_a?(NonGenericModuleType)
+        inst.included_modules << parent
+        parent.as(NonGenericModuleType).add_including_type(inst)
+      elsif parent.is_a?(GenericModuleInstanceType) || parent.is_a?(GenericTraitInstanceType)
+        inst.included_modules << parent
+      end
+    end
+    generic_type.instantiated_types << inst
+    inst
+  end
+
+  def instantiate_generic_module(generic_type : GenericModuleType, type_args : Array(Type)) : GenericModuleInstanceType
+    key = "#{generic_type.full_name}(#{type_args.map(&.full_name).join(", ")})"
+    if cached = @generic_cache[key]?
+      return cached.as(GenericModuleInstanceType)
+    end
+
+    tv_map = Hash(String, Type).new
+    i = 0
+    while i < type_args.size
+      name = i < generic_type.type_vars.size ? generic_type.type_vars[i] : "T#{i}"
+      tv_map[name] = type_args[i]
+      i = i + 1
+    end
+
+    inst = GenericModuleInstanceType.new(@program, generic_type, tv_map, type_args)
+    @generic_cache[key] = inst
+    inst
+  end
+
+  def instantiate_generic_trait(generic_type : GenericTraitType, type_args : Array(Type)) : GenericTraitInstanceType
+    key = "#{generic_type.full_name}(#{type_args.map(&.full_name).join(", ")})"
+    if cached = @generic_cache[key]?
+      return cached.as(GenericTraitInstanceType)
+    end
+    vars = Hash(String, Type).new
+    type_args.each_with_index do |arg, i|
+      name = i < generic_type.type_vars.size ? generic_type.type_vars[i] : "T#{i}"
+      vars[name] = arg
+    end
+    inst = GenericTraitInstanceType.new(@program, generic_type, vars, type_args)
+    @generic_cache[key] = inst
+    inst
+  end
+
+  # iyi: one Tuple instance per spelling, recorded in Tuple's instantiated types as the hosted
+  # `Tuple#instantiate` does, so the type-id walk numbers it.
+  def tuple_of(elements : Array(Type)) : TupleInstanceType
+    key = "Tuple*(#{elements.map(&.full_name).join(", ")})"
+    if cached = @generic_cache[key]?
+      return cached.as(TupleInstanceType)
+    end
+    inst = TupleInstanceType.new(@program, elements)
+    @generic_cache[key] = inst
+    @program.types["Tuple"].as(GenericClassType).instantiated_types << inst
+    inst
+  end
+
+  def named_tuple_of(entries : Array(NamedArgumentType)) : NamedTupleInstanceType
+    NamedTupleInstanceType.new(@program, entries)
+  end
+
+  # iyi: one Proc instance per spelling, recorded in Proc's instantiated types as hosted `Proc#instantiate`.
+  def proc_of(arg_types : Array(Type), return_type : Type) : ProcInstanceType
+    ret = return_type
+    ret = @program.nil_type if return_type.is_a?(VoidType)
+    key = "Proc*(#{arg_types.map(&.full_name).join(", ")} -> #{ret.full_name})"
+    if cached = @generic_cache[key]?
+      return cached.as(ProcInstanceType)
+    end
+    # iyi: hosted ProcInstanceType makes the Tuple of its argument types first (types.cr 2759), so a
+    # Tuple instance is numbered by the id walk even when no written type names it.
+    tuple_of(arg_types)
+    inst = ProcInstanceType.new(@program, arg_types, ret)
+    @generic_cache[key] = inst
+    @program.types["Proc"].as(GenericClassType).instantiated_types << inst
+    inst
+  end
+
+  # iyi: a pointer type is one instance of Pointer per spelling, recorded in Pointer's instantiated
+  # types as the hosted `Pointer.instantiate` does, so the type-id walk numbers it. Its own cache key
+  # keeps it apart from a Pointer(T) that instantiate_generic makes.
+  def pointer_of(element_type : Type) : PointerInstanceType
+    key = "Pointer*(#{element_type.full_name})"
+    if cached = @generic_cache[key]?
+      return cached.as(PointerInstanceType)
+    end
+    inst = PointerInstanceType.new(@program, element_type)
+    @generic_cache[key] = inst
+    @program.types["Pointer"].as(GenericClassType).instantiated_types << inst
+    inst
+  end
+
+  def static_array_of(element_type : Type, size : Int64) : StaticArrayInstanceType
+    StaticArrayInstanceType.new(@program, element_type, size)
+  end
+end

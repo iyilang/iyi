@@ -1,0 +1,8 @@
+macro checked(n)
+  ok
+  {% if n > 1 %}
+    {% raise "too big", n %}
+  {% end %}
+end
+
+checked(5)

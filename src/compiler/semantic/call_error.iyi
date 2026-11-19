@@ -1,0 +1,356 @@
+module compiler/semantic/call_error
+
+import compiler/syntax/ast::{ASTNode, Def, Path, Splat}
+import compiler/semantic/top_level::{MetaclassType, ModuleType, SemanticProgram, Type}
+import compiler/types/type_system::{TypeSystem}
+import compiler/semantic/restrictions::{ArgRestriction, FreeBindings}
+
+# The messages the hosted call pass raises when a call has no match, first line
+# only (the oracle compares first lines).
+#
+# Ported: "undefined method" (raise_undefined_method in call_error.cr), which the
+# hosted pass reaches when no def of the name exists on the receiver or its
+# parents; "wrong number of arguments for <name> (given N, expected M)"
+# (raise_matches_not_found_named_args), which it reaches when every def of the
+# name takes some other number of positional arguments; and, for the rest, the
+# argument-type messages: "expected argument #N to '<name>' to be T, not A" when
+# one positional argument fails in every overload that is not an arity failure
+# (check_arguments_type_mismatch), and "no overload matches '<name>' with type(s)
+# A, B" otherwise (no_overload_matches_message).
+#
+# Named-argument mismatches remain outside this port, except for the hosted
+# single-def missing-name message when a positional arity failure reaches it.
+pub class CallError
+  # The first line of the undefined-method error for *name* on *owner*. The
+  # program's own calls name their owner "top-level"; a metaclass prints Foo.class.
+  def self.undefined_method(owner : ModuleType, name : String) : String
+    owner_name = owner.is_a?(SemanticProgram) ? "top-level" : owner.to_s
+    "undefined method '#{name}' for #{owner_name}"
+  end
+
+  # The name a message gives a method: Owner#name for an instance, Owner.name for
+  # a metaclass, and the bare name for the program's own defs (hosted Call.full_name).
+  def self.full_name(owner : ModuleType, name : String) : String
+    return name if owner.is_a?(SemanticProgram)
+    if owner.is_a?(MetaclassType)
+      return "#{owner.as(MetaclassType).instance_type.to_s}.#{name}"
+    end
+    "#{owner.to_s}##{name}"
+  end
+
+  # The hosted Def#min_max_args_sizes counts a named splat as unbounded,
+  # while a bare splat terminates positional arguments.
+  def self.required(d : Def) : Int32
+    minimum = d.args.size
+    d.args.each_with_index do |arg, index|
+      if arg.default_value && index < minimum
+        minimum = index
+      end
+    end
+    if splat = d.splat_index
+      minimum = splat if splat < minimum
+      arg = d.args[splat]
+      if !arg.name.empty?
+        if restriction = arg.restriction
+          if !restriction.is_a?(Splat) && minimum == splat
+            minimum += 1
+          end
+        end
+      end
+    end
+    minimum
+  end
+
+  def self.arity_mismatch(d : Def, given : Int32) : Bool
+    return true if given < required(d)
+    if splat = d.splat_index
+      return given > splat if d.args[splat].name.empty?
+      return false
+    end
+    given > d.args.size
+  end
+
+  # The first line of the wrong-number-of-arguments error for *name* on *owner*
+  # given *given* positional arguments, when every def in *defs* takes some other
+  # number of arguments. Nil when some def takes this many, or when there are none.
+  def self.wrong_number(owner : ModuleType, name : String, given : Int32, defs : Array(Def)) : String?
+    wrong_number_for(full_name(owner, name), given, defs)
+  end
+
+  # The visitor may diagnose a virtual or generic receiver rather than a
+  # ModuleType, so it supplies the displayed method name after lookup.
+  def self.wrong_number_for(method_name : String, given : Int32, defs : Array(Def), total_defs : Int32 = -1) : String?
+    return nil if defs.empty?
+    top = 0
+    min_splat : Int32? = nil
+    defs.each do |d|
+      return nil if !arity_mismatch(d, given)
+      if splat = d.splat_index
+        if !d.args[splat].name.empty?
+          min = required(d)
+          min_splat = min if min_splat.nil? || min < min_splat.as(Int32)
+          top = min if min > top
+        elsif splat > top
+          top = splat
+        end
+      elsif d.args.size > top
+        top = d.args.size
+      end
+    end
+    # The hosted formatter prefers missing names for a single def with
+    # parameters after a splat, even when the positional count is also wrong.
+    if defs.size == 1 && (total_defs < 0 || total_defs == 1)
+      d = defs[0]
+      if splat = d.splat_index
+        if splat < d.args.size - 1
+          missing = [] of String
+          d.args.each_with_index do |arg, index|
+            supplied = index < splat ? index < given : index == splat && given > splat
+            if !supplied && arg.default_value.nil? && !arg.external_name.empty?
+              missing << arg.external_name
+            end
+          end
+          unless missing.empty?
+            label = missing.size == 1 ? "missing argument" : "missing arguments"
+            return "#{label}: #{missing.join(", ")}"
+          end
+        end
+      end
+    end
+    sizes = [] of Int32
+    i = 0
+    while i <= top
+      takes = false
+      defs.each do |d|
+        if splat = d.splat_index
+          if d.args[splat].name.empty?
+            takes = true if !arity_mismatch(d, i)
+          else
+            takes = true if i == required(d)
+          end
+        else
+          takes = true if !arity_mismatch(d, i)
+        end
+      end
+      sizes << i if takes
+      i += 1
+    end
+    expected = expected_text(sizes)
+    expected += "+" if min_splat
+    "wrong number of arguments for '#{method_name}' (given #{given}, expected #{expected})"
+  end
+
+  # The sizes as the hosted message writes them: a run of consecutive sizes as
+  # first..last, anything else as a list.
+  def self.expected_text(sizes : Array(Int32)) : String
+    if sizes.size > 1 && sizes[sizes.size - 1] - sizes[0] == sizes.size - 1
+      return "#{sizes[0]}..#{sizes[sizes.size - 1]}"
+    end
+    parts = [] of String
+    sizes.each do |size|
+      parts << size.to_s
+    end
+    parts.join(", ")
+  end
+
+  # The first line of the error for a call with positional argument types
+  # *arg_types* that no def in *defs* accepts, when no def fails on arity alone.
+  # Nil when the call has named arguments, which are not ported here.
+  def self.no_match(owner : ModuleType, ts : TypeSystem, name : String, arg_types : Array(Type), defs : Array(Def)) : String?
+    flat_def = [] of Int32
+    flat_index = [] of Int32
+    flat_expected = [] of Type
+    flat_actual = [] of Type
+    selected = [] of Int32
+    di = 0
+    while di < defs.size
+      d = defs[di]
+      # The hosted mismatch formatter does not inspect splat restrictions.
+      if d.splat_index
+        di += 1
+        next
+      end
+      if !arity_mismatch(d, arg_types.size)
+        before = flat_def.size
+        i = 0
+        if d.free_vars
+          CallError.record_free(ts, owner, d, arg_types, di, flat_def, flat_index, flat_expected, flat_actual)
+        else
+          while i < arg_types.size
+            restriction = ArgRestriction.of(ts, owner, d.args[i])
+            return nil if restriction.error
+            allowed = restriction.type
+            if allowed
+              restricted = ts.restrict(arg_types[i], allowed.as(Type))
+              if restricted.nil?
+                flat_def << di
+                flat_index << i
+                flat_expected << allowed.as(Type)
+                flat_actual << arg_types[i]
+              end
+            end
+            i += 1
+          end
+        end
+        selected << di if flat_def.size > before
+      end
+      di += 1
+    end
+
+    chosen = -1
+    if !selected.empty?
+      k = 0
+      while k < flat_def.size && chosen < 0
+        candidate = flat_index[k]
+        every = true
+        selected.each do |sel|
+          found = false
+          j = 0
+          while j < flat_def.size
+            found = true if flat_def[j] == sel && flat_index[j] == candidate
+            j += 1
+          end
+          every = false if !found
+        end
+        chosen = candidate if every
+        k += 1
+      end
+    end
+
+    if chosen >= 0
+      return mismatch_text(owner, name, chosen, flat_def, flat_index, flat_expected, flat_actual, selected)
+    end
+    no_overload_text(owner, name, arg_types)
+  end
+
+  # A `forall` def that does not match: bind each argument in order, and record
+  # the first later argument that disagrees with a name already bound. The
+  # expected type is that bound type, not the written name.
+  def self.record_free(ts : TypeSystem, owner : ModuleType, d : Def, arg_types : Array(Type), di : Int32, flat_def : Array(Int32), flat_index : Array(Int32), flat_expected : Array(Type), flat_actual : Array(Type)) : Nil
+    free = d.free_vars.as(Array(String))
+    bound = Hash(String, Type).new
+    i = 0
+    limit = arg_types.size
+    limit = d.args.size if d.args.size < limit
+    while i < limit
+      node = d.args[i].restriction
+      if node
+        if !FreeBindings.bind(node, arg_types[i], free, bound)
+          expected = CallError.bound_name(node, bound)
+          if expected
+            flat_def << di
+            flat_index << i
+            flat_expected << expected.as(Type)
+            flat_actual << arg_types[i]
+          end
+        else
+          restriction = ArgRestriction.of_bound(ts, owner, d.args[i], nil, bound)
+          allowed = restriction.type
+          if allowed
+            restricted = ts.restrict(arg_types[i], allowed.as(Type))
+            if restricted.nil?
+              flat_def << di
+              flat_index << i
+              flat_expected << allowed.as(Type)
+              flat_actual << arg_types[i]
+            end
+          end
+        end
+      end
+      i += 1
+    end
+    nil
+  end
+
+  def self.bound_name(node : ASTNode, bound : Hash(String, Type)) : Type?
+    return nil if !node.is_a?(Path)
+    names = node.as(Path).names
+    return nil if names.size != 1
+    found = bound[names[0]]?
+    return nil if found.nil?
+    found.as(Type)
+  end
+
+  # "expected argument #N to '<name>' to be T or U, not A": the expected types of
+  # the chosen argument over the selected overloads, sorted and unique, and the
+  # actual type of its first mismatch.
+  def self.mismatch_text(owner : ModuleType, name : String, chosen : Int32, flat_def : Array(Int32), flat_index : Array(Int32), flat_expected : Array(Type), flat_actual : Array(Type), selected : Array(Int32)) : String
+    names = [] of String
+    actual = ""
+    k = 0
+    while k < flat_def.size
+      if flat_index[k] == chosen && selected.includes?(flat_def[k])
+        text = flat_expected[k].to_s
+        names << text if !names.includes?(text)
+        actual = flat_actual[k].to_s if actual == ""
+      end
+      k += 1
+    end
+    names = sorted_strings(names)
+    "expected argument ##{chosen + 1} to '#{full_name(owner, name)}' to be #{to_sentence(names)}, not #{actual}"
+  end
+
+  # "no overload matches '<name>' with type A, B" (or "with type A" for one, and
+  # nothing when the call has no arguments).
+  def self.no_overload_text(owner : ModuleType, name : String, arg_types : Array(Type)) : String
+    text = "no overload matches '#{full_name(owner, name)}'"
+    if !arg_types.empty?
+      text = text + (arg_types.size > 1 ? " with types " : " with type ")
+      parts = [] of String
+      arg_types.each do |t|
+        parts << t.to_s
+      end
+      text = text + parts.join(", ")
+    end
+    text
+  end
+
+  # The names as "A", "A or B", or "A, B or C".
+  def self.to_sentence(names : Array(String)) : String
+    text = ""
+    i = 0
+    while i < names.size
+      if i == 0
+        text = names[0]
+      elsif i == names.size - 1
+        text = text + " or " + names[i]
+      else
+        text = text + ", " + names[i]
+      end
+      i += 1
+    end
+    text
+  end
+
+  # The strings in ascending order (a plain insertion sort, for the few names an
+  # error lists).
+  def self.sorted_strings(names : Array(String)) : Array(String)
+    out = [] of String
+    names.each do |name|
+      placed = false
+      out.each_with_index do |other, index|
+        if !placed && name < other
+          out.insert(index, name)
+          placed = true
+        end
+      end
+      out << name if !placed
+    end
+    out
+  end
+end
+
+# The first line of the error a call with no matching target raises, as the
+# hosted call pass chooses it: undefined method, then wrong number of arguments,
+# then the argument-type message. Shared by the driver's `# error` lines and by
+# CallRecalculation.recalculate, so that both answer from one rule.
+pub class CallFailure
+  def self.first_line(owner : ModuleType, ts : TypeSystem, name : String, arg_types : Array(Type), defs : Array(Def), defined : Bool) : String
+    return CallError.undefined_method(owner, name) if !defined
+    wrong = CallError.wrong_number(owner, name, arg_types.size, defs)
+    return wrong.as(String) if wrong
+    message = CallError.no_match(owner, ts, name, arg_types, defs)
+    return message.as(String) if message
+    "not ported: restriction message"
+  end
+end

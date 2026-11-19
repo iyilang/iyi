@@ -1,0 +1,10 @@
+enum Color
+  Red   = 1
+  Green = 2
+
+  def self.first
+    Red
+  end
+end
+
+x = 1

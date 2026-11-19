@@ -1,0 +1,18 @@
+# Identical closure fact lines, one row per fixture. Counts never decrease after a green head.
+# semclos_local's initial unvalidated WIP count included an external lib fun, which owns no frame.
+bench/fixtures/semclos_block.iyi 6
+bench/fixtures/semclos_hello_proc.iyi 5
+bench/fixtures/semclos_hello_thread.iyi 4
+bench/fixtures/semclos_implicit_self.iyi 17
+bench/fixtures/semclos_install.iyi 6
+bench/fixtures/semclos_literal.iyi 3
+bench/fixtures/semclos_literal_block.iyi 5
+bench/fixtures/semclos_literal_changing.iyi 3
+bench/fixtures/semclos_literal_loop.iyi 3
+bench/fixtures/semclos_literal_mutable.iyi 3
+bench/fixtures/semclos_literal_order.iyi 5
+bench/fixtures/semclos_literal_self.iyi 5
+bench/fixtures/semclos_local.iyi 3
+bench/fixtures/semclos_macro_capture.iyi 1
+bench/fixtures/semclos_self.iyi 6
+bench/fixtures/semclos_shadow.iyi 4

@@ -1,0 +1,55 @@
+class Animal
+end
+
+class Dog < Animal
+end
+
+class Cat < Animal
+end
+
+class Puppy < Dog
+end
+
+class Shape
+end
+
+class Circle < Shape
+end
+
+class Holder
+end
+
+struct Point
+  @x : Int32
+end
+
+# op merge(Int32, String)
+# op merge(Int32, Int32)
+# op merge(Int32, Int64)
+# op merge(Nil, Int32)
+# op merge(Int32, Nil)
+# op merge(Nil, Nil)
+# op merge(Void, Int32)
+# op merge(NoReturn, Int32)
+# op merge(Int32, NoReturn)
+# op merge(Dog, Cat)
+# op merge(Dog, Puppy)
+# op merge(Puppy, Dog)
+# op merge(Dog, Circle)
+# op merge(Animal, Dog)
+# op merge(Dog, Animal)
+# op merge(Holder, Nil)
+# op merge(Holder, Dog)
+# op merge(Point, Point)
+# op merge(Point, Int32)
+# op merge(Animal.class, Dog.class)
+# op merge(Dog.class, Cat.class)
+# op merge(Dog, Dog.class)
+# op merge(Dog, Holder)
+# op merge(NoReturn, Dog, Cat)
+# op merge(Dog, Cat, Holder)
+# op merge(Dog, Holder, Cat)
+# op merge(Dog, Cat, Puppy)
+# op merge(Dog, Cat, Cat)
+# op merge(Dog, Puppy, Cat)
+# op merge(Int32, String, Nil)

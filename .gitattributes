@@ -34,6 +34,15 @@
 # GC_DESIGN.md CRLF, and a one-line change came in as 1,929.
 *.md text eol=lf
 
+# Compiler parity fixtures are compared byte for byte on every host.
+*.ir text eol=lf
+*.ll text eol=lf
+bench/fixtures/**/*.in text eol=lf
+bench/fixtures/**/*.expected text eol=lf
+bench/fixtures/**/*.txt text eol=lf
+bench/*.floor text eol=lf
+bench/*.expected text eol=lf
+
 # A module artifact is binary. Without this GitHub tries to render one and git
 # tries to diff it.
 *.iyimod binary

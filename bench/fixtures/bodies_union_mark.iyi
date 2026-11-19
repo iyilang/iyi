@@ -1,0 +1,4 @@
+module bodies_union_mark
+
+pub struct Mark
+end

@@ -1,0 +1,58 @@
+@[Unsafe("the fixture exercises pointer-based atomic operation signatures")]
+struct MatchAtomicOps
+  def self.load(pointer : Pointer(T)) : T forall T
+    pointer.value
+  end
+
+  def self.store(pointer : Pointer(T), value : T) : Nil forall T
+    pointer.value = value
+    nil
+  end
+
+  def self.rmw(pointer : Pointer(T), value : T) : T forall T
+    value
+  end
+
+  def self.cmpxchg(pointer : Pointer(T), expected : T, desired : T) : Tuple(T, Bool) forall T
+    {expected, true}
+  end
+end
+
+struct MatchAtomic(T)
+  def initialize(@value : T)
+  end
+
+  def get : T
+    MatchAtomicOps.load(pointerof(@value))
+  end
+
+  def set(value : T) : Nil
+    MatchAtomicOps.store(pointerof(@value), value)
+  end
+
+  def add(value : T) : T
+    MatchAtomicOps.rmw(pointerof(@value), value)
+  end
+
+  def compare_and_set(expected : T, desired : T) : Tuple(T, Bool)
+    MatchAtomicOps.cmpxchg(pointerof(@value), expected, desired)
+  end
+end
+
+unsigned_word = 1_u64
+signed_word = 1_i64
+unsigned_read = MatchAtomicOps.load(pointerof(unsigned_word))
+signed_read = MatchAtomicOps.load(pointerof(signed_word))
+
+# Both instantiated owners bind the callee's forall T independently.
+u = MatchAtomic(UInt64).new(1_u64)
+u_read = u.get
+u.set(2_u64)
+u_old = u.add(3_u64)
+u_exchange = u.compare_and_set(5_u64, 6_u64)
+
+i = MatchAtomic(Int64).new(1_i64)
+i_read = i.get
+i.set(2_i64)
+i_old = i.add(3_i64)
+i_exchange = i.compare_and_set(5_i64, 6_i64)

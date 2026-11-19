@@ -1,0 +1,9 @@
+struct A
+  def initialize(@b : B)
+  end
+end
+
+struct B
+  def initialize(@a : A)
+  end
+end

@@ -1,0 +1,23 @@
+class ForwardValue
+end
+
+class ForwardParent
+  def choose(value : ForwardValue)
+    "broad"
+  end
+
+  def choose(value : ForwardSpecific)
+    42
+  end
+end
+
+class ForwardSpecific < ForwardValue
+end
+
+class ForwardChild < ForwardParent
+  def choose(value : ForwardSpecific)
+    super(value)
+  end
+end
+
+ForwardChild.new.choose(ForwardSpecific.new)

@@ -1,0 +1,24 @@
+alias Num = Int32
+
+# An instance variable whose written type is an alias: the declaration takes the type the alias
+# names (hosted remove_alias on the declared type), so Holder's @n is Int32 and the alias itself
+# never reaches the variable. Typed, so the type system is installed when the alias is resolved.
+class Holder
+  @n : Num
+
+  def initialize(n : Num)
+    @n = n
+  end
+end
+
+class Pair(T)
+  @first : T
+  @second : Num
+
+  def initialize(@first : T)
+    @second = 0
+  end
+end
+
+h = Holder.new(1)
+p1 = Pair(String).new("s")

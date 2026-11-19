@@ -1,0 +1,18 @@
+class VirtualCopy
+  def dup : self
+    self.class.new
+  end
+end
+
+class VirtualCopyA < VirtualCopy
+end
+
+class VirtualCopyB < VirtualCopy
+end
+
+def copy_one(value : VirtualCopy) : VirtualCopy
+  value.dup
+end
+
+copy_one(VirtualCopyA.new)
+copy_one(VirtualCopyB.new)

@@ -1,0 +1,11 @@
+enum MatchVisibility
+  Public
+  Private
+end
+
+def match_visibility(value : MatchVisibility?) : Nil
+end
+
+# call match_visibility(instance(MatchVisibility))
+# call match_visibility(nil)
+# call match_visibility(instance(Int32))

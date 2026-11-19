@@ -1,0 +1,15 @@
+class NamedValue
+end
+
+def named_choose(*, value : NamedValue)
+  "broad"
+end
+
+def named_choose(*, value : NamedSpecific)
+  42
+end
+
+class NamedSpecific < NamedValue
+end
+
+puts named_choose(value: NamedSpecific.new)

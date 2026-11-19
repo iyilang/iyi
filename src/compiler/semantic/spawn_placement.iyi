@@ -1,0 +1,975 @@
+module compiler/semantic/spawn_placement
+
+import compiler/syntax/ast::{ASTNode, Assign, Block, BoolLiteral, Break, Call, Cast, CharLiteral, ClassDef, Def, Expressions, FunDef, If, InstanceVar, LibDef, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, ModuleDef, Next, NilableCast, NilLiteral, NodeMap, Nop, Not, NumberLiteral, Path, Primitive, ProcLiteral, Return, Self, StringLiteral, SymbolLiteral, Var, While, Yield}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/top_level::{MetaclassType, ModuleType, NilType, NoReturnType, SemanticProgram, Type}
+import compiler/semantic/main_visitor::{MainVisitor, node_class_name}
+import compiler/semantic/closures::{ClosureFacts, ClosureFrame}
+import compiler/semantic/share::{ShareFacts}
+import compiler/types/types::{VirtualMetaclassType}
+
+pub enum SpawnTarget
+  AsWritten
+  Pooled
+  Unproven
+  Refused
+end
+
+pub class SpawnVerdict
+  getter target : SpawnTarget
+  getter placement : String
+  getter reason : String
+  getter site : String
+
+  def initialize(@target : SpawnTarget, @placement : String, @reason : String, @site : String)
+  end
+end
+
+# The receiver, rather than a same-named method on another type, must be an
+# IyiGroup. Virtual instance types are printed with a suffix by the typer.
+def group_type?(type : Type?) : Bool
+  return false unless type
+  return false if type.is_a?(MetaclassType) || type.is_a?(VirtualMetaclassType)
+  type.devirtualize.to_s == "IyiGroup"
+end
+
+def spawn_target?(visitor : MainVisitor, definition : Def, receiver : Type?) : Bool
+  return false unless definition.name.split(':')[0] == "spawn"
+  return true if group_type?(receiver)
+  group_type?(visitor.program.def_owner(definition))
+end
+
+pub def spawn_call?(visitor : MainVisitor, call : Call) : Bool
+  receiver = visitor.call_receiver?(call)
+  if receiver.nil?
+    if obj = call.obj
+      receiver = visitor.type_of?(obj)
+    end
+  end
+  if definition = visitor.target_def?(call)
+    return true if spawn_target?(visitor, definition, receiver)
+  end
+  if targets = visitor.dispatch_targets?(call)
+    targets.each do |target|
+      return true if spawn_target?(visitor, target.definition, receiver || target.receiver)
+    end
+  end
+  false
+end
+
+# Missing call bindings cannot establish either hosted's target or placement.
+def unresolved_group_spawn?(visitor : MainVisitor, call : Call) : Bool
+  return false unless call.name.split(':')[0] == "spawn"
+  return false if visitor.target_def?(call)
+  if targets = visitor.dispatch_targets?(call)
+    return false unless targets.empty?
+  end
+  receiver = visitor.call_receiver?(call)
+  if receiver.nil?
+    if obj = call.obj
+      receiver = visitor.type_of?(obj)
+    end
+  end
+  group_type?(receiver)
+end
+
+def placement_text(call : Call) : String
+  named = call.named_args
+  return "spawn" if named.nil? || named.empty?
+  placement = "spawn(unit: :same)"
+  named.each do |arg|
+    return "spawn(in: #{arg.value})" if arg.name == "in"
+    if arg.name == "unit" && arg.value.is_a?(SymbolLiteral) && arg.value.as(SymbolLiteral).value == "new"
+      placement = "spawn(unit: :new)"
+    end
+  end
+  placement
+end
+
+def spawn_site(call : Call) : String
+  if loc = call.name_location || call.location
+    return loc.to_s
+  end
+  ""
+end
+
+def call_target(visitor : MainVisitor, call : Call) : Def?
+  if target = visitor.target_def?(call)
+    return target
+  end
+  if targets = visitor.dispatch_targets?(call)
+    return targets.first.definition unless targets.empty?
+  end
+  nil
+end
+
+def literal_truthiness(node : ASTNode) : Int32
+  if node.is_a?(BoolLiteral)
+    return node.as(BoolLiteral).value ? 1 : -1
+  elsif node.is_a?(NilLiteral) || node.is_a?(Nop)
+    return -1
+  elsif node.is_a?(Not)
+    return 0 - literal_truthiness(node.as(Not).exp)
+  end
+  0
+end
+
+# Hosted cleanup and native lowering both discard the then arm when the
+# condition's value is exactly Nil. Assignment conditions take their value's
+# truthiness, not the assignment node's type.
+def static_truthiness(visitor : MainVisitor, node : ASTNode) : Int32
+  literal = literal_truthiness(node)
+  return literal unless literal == 0
+  if node.is_a?(Assign)
+    return static_truthiness(visitor, node.as(Assign).value)
+  end
+  if type = visitor.type_of?(node)
+    return -1 if type.is_a?(NilType)
+  end
+  0
+end
+
+# Find a target typed alongside a spawn, including calls in typed macro
+# expansions. A name without a typed target is not evidence of that target.
+class BesideFinder < Visitor
+  getter found : Def? = nil
+
+  def initialize(@visitor : MainVisitor, @name : String)
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    return false if @found
+    if expanded = @visitor.expansions[node]?
+      expanded.accept(self)
+      return false
+    end
+    if node.is_a?(Call)
+      if expanded = node.as(Call).expanded
+        expanded.accept(self)
+        return false
+      end
+    end
+    true
+  end
+
+  def visit(node : Call) : Bool
+    if node.name == @name
+      @found = @visitor.target_def?(node)
+    end
+    @found.nil?
+  end
+
+  def visit(node : Def) : Bool
+    false
+  end
+
+  def visit(node : Macro) : Bool
+    false
+  end
+
+  def visit(node : MacroExpression) : Bool
+    false
+  end
+
+  def visit(node : MacroFor) : Bool
+    false
+  end
+
+  def visit(node : MacroIf) : Bool
+    false
+  end
+
+  def visit(node : MacroLiteral) : Bool
+    false
+  end
+
+  def visit(node : MacroVar) : Bool
+    false
+  end
+
+  def visit(node : MacroVerbatim) : Bool
+    false
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    node.def.body.accept(self)
+    false
+  end
+
+  def visit(node : Block) : Bool
+    node.body.accept(self)
+    if literal = node.fun_literal
+      if literal.is_a?(ProcLiteral)
+        literal.as(ProcLiteral).def.body.accept(self)
+      end
+    end
+    false
+  end
+end
+
+def typed_beside(visitor : MainVisitor, definition : Def, name : String) : Def?
+  finder = BesideFinder.new(visitor, name)
+  definition.body.accept(finder)
+  finder.found
+end
+
+pub class SpawnAnalysis
+  getter verdicts : NodeMap(SpawnVerdict)
+  getter ordered : Array(SpawnVerdict)
+  getter pool_site : String?
+  getter pool_proven : Bool
+
+  def initialize
+    @verdicts = NodeMap(SpawnVerdict).new
+    @ordered = [] of SpawnVerdict
+    @pool_site = nil
+    @pool_proven = false
+  end
+
+  def reached? : Bool
+    !@pool_site.nil?
+  end
+
+  def record(call : Call, verdict : SpawnVerdict) : Nil
+    return if @verdicts.has_key?(call)
+    @verdicts[call] = verdict
+    @ordered << verdict
+  end
+
+  def unproven(site : String) : Nil
+    @pool_site = site if @pool_site.nil?
+  end
+
+  def proven(site : String) : Nil
+    unless @pool_proven
+      @pool_site = site
+      @pool_proven = true
+    end
+  end
+
+  def self.analyse(visitor : MainVisitor, root : ASTNode) : SpawnAnalysis
+    analysis = SpawnAnalysis.new
+    share = ShareFacts.new
+    threads = false
+    if group = visitor.program.types["IyiGroup"]?
+      if group.is_a?(ModuleType)
+        threads = group.as(ModuleType).defs.has_key?("spawn_pooled")
+      end
+    end
+
+    root.accept(SpawnSiteCollector.new(visitor, analysis, share, root, nil, nil, threads, true))
+    seen = Set(UInt64).new
+    visitor.typed_instances.each do |instance|
+      definition = instance.definition
+      next if seen.includes?(definition.node_id)
+      seen.add(definition.node_id)
+      definition.body.accept(SpawnSiteCollector.new(visitor, analysis, share, root, definition, instance.self_type, threads, false))
+    end
+    # Constants used from imported units need not occur in the entry tree.
+    constants = visitor.target_consts.values
+    seen_constants = Set(UInt64).new
+    constants.each do |constant|
+      value = constant.value
+      next if seen_constants.includes?(value.node_id)
+      seen_constants.add(value.node_id)
+      value.accept(SpawnSiteCollector.new(visitor, analysis, share, value, nil, nil, threads, true))
+    end
+    analysis.sort_sites
+
+    if visitor.program.types.has_key?("IyiChaos")
+      analysis.proven("-Diyi_chaos: every loop checks for preemption (hosted codegen.cr 2999)")
+    end
+    reach = PoolReachWalk.new(visitor, analysis)
+    root.accept(reach)
+    constants.each do |constant|
+      reach.visit_constant(constant.value)
+    end
+    analysis
+  end
+
+  def sort_sites : Nil
+    @ordered = @ordered.sorted_by { |verdict| verdict.site }
+  end
+end
+
+# Collect sites from typed bodies, not just the bodies reachable from the
+# entry point. The reach walk below decides which verdicts affect lowering.
+class SpawnSiteCollector < Visitor
+  @facts : ClosureFacts? = nil
+
+  def initialize(@visitor : MainVisitor, @analysis : SpawnAnalysis, @share : ShareFacts, @root : ASTNode, @in_def : Def?, @self_type : Type?, @threads : Bool, @root_scope : Bool)
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    if expanded = @visitor.expansions[node]?
+      expanded.accept(self)
+      return false
+    end
+    if node.is_a?(Call)
+      if expanded = node.as(Call).expanded
+        expanded.accept(self)
+        return false
+      end
+    end
+    true
+  end
+
+  def visit(node : Call) : Bool
+    unless @analysis.verdicts.has_key?(node)
+      if spawn_call?(@visitor, node)
+        @analysis.record(node, classify(node))
+      elsif unresolved_group_spawn?(@visitor, node)
+        @analysis.record(node, SpawnVerdict.new(SpawnTarget::Unproven, placement_text(node), "the spawn target was not typed", spawn_site(node)))
+      end
+    end
+    true
+  end
+
+  def visit(node : If) : Bool
+    node.cond.accept(self)
+    truth = static_truthiness(@visitor, node.cond)
+    node.then.accept(self) unless truth == -1
+    node.else.accept(self) unless truth == 1
+    false
+  end
+
+  def visit(node : Def) : Bool
+    false
+  end
+
+  def visit(node : Macro) : Bool
+    false
+  end
+
+  def visit(node : MacroExpression) : Bool
+    false
+  end
+
+  def visit(node : MacroFor) : Bool
+    false
+  end
+
+  def visit(node : MacroIf) : Bool
+    false
+  end
+
+  def visit(node : MacroLiteral) : Bool
+    false
+  end
+
+  def visit(node : MacroVar) : Bool
+    false
+  end
+
+  def visit(node : MacroVerbatim) : Bool
+    false
+  end
+
+  def visit(node : LibDef) : Bool
+    false
+  end
+
+  def visit(node : ClassDef) : Bool
+    node.body.accept(self) if @root_scope
+    false
+  end
+
+  def visit(node : ModuleDef) : Bool
+    node.body.accept(self) if @root_scope
+    false
+  end
+
+  def visit(node : FunDef) : Bool
+    if body = node.body
+      body.accept(self)
+    end
+    false
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    node.def.body.accept(self)
+    false
+  end
+
+  def visit(node : Block) : Bool
+    node.body.accept(self)
+    if literal = node.fun_literal
+      if literal.is_a?(ProcLiteral)
+        literal.as(ProcLiteral).def.body.accept(self)
+      end
+    end
+    false
+  end
+
+  def classify(call : Call) : SpawnVerdict
+    site = spawn_site(call)
+    named = call.named_args
+    placement = placement_text(call)
+
+    if targets = @visitor.dispatch_targets?(call)
+      if targets.size > 1
+        return SpawnVerdict.new(SpawnTarget::AsWritten, placement, "hosted classifies only a call with one target def", site)
+      end
+    end
+
+    if named && !named.empty?
+      if named.size > 1
+        return SpawnVerdict.new(SpawnTarget::Refused, placement, "a spawn is placed one way: `in: u` runs it in the `Unit` u's unit, `unit: :same` in its spawner's and `unit: :new` in one of its own. Write one of them, or none and let the compiler place it (SPEC.md III.4.16)", site)
+      end
+      if named.first.name == "in"
+        return SpawnVerdict.new(SpawnTarget::AsWritten, placement, "`in:` keeps the target as written", site)
+      end
+      value = named.first.value
+      unless value.is_a?(SymbolLiteral)
+        return SpawnVerdict.new(SpawnTarget::Refused, placement, "`unit:` takes `:same` or `:new` as written: where a task runs is settled when the program compiles, and `#{value}` is known only when it runs. Write `unit: :same` or `unit: :new`, or leave it out and let the compiler place the task (SPEC.md III.4.16)", site)
+      end
+      symbol = value.as(SymbolLiteral).value
+      if symbol == "same"
+        return SpawnVerdict.new(SpawnTarget::AsWritten, placement, "`unit: :same` keeps it there (SPEC.md III.4.16)", site)
+      elsif symbol == "new"
+        unless @threads
+          return SpawnVerdict.new(SpawnTarget::Refused, placement, "`unit: :new` needs threads, and a build under -Dgc_none or -Dgc_boehm has none: a thread would race the bump pointer, or be one Boehm never heard of (SPEC.md III.4.13)", site)
+        end
+        return SpawnVerdict.new(SpawnTarget::Pooled, placement, "`unit: :new` asks for a unit of its own", site)
+      end
+      return SpawnVerdict.new(SpawnTarget::Refused, placement, "`unit: #{value}` names no unit: `unit: :same` keeps the task in its spawner's unit, and `unit: :new` runs it in a unit of its own; or leave it out and let the compiler place the task (SPEC.md III.4.16)", site)
+    end
+
+    unless @threads
+      return SpawnVerdict.new(SpawnTarget::AsWritten, placement, "a build under -Dgc_none or -Dgc_boehm has no threads (SPEC.md III.4.13)", site)
+    end
+    target = call_target(@visitor, call)
+    if target.nil? || typed_beside(@visitor, target.as(Def), "spawn_pooled").nil?
+      return SpawnVerdict.new(SpawnTarget::Unproven, placement, "the spawn_pooled target typed beside this spawn is unavailable", site)
+    end
+    if forwarded = call.block_arg
+      return SpawnVerdict.new(SpawnTarget::AsWritten, placement, "the block is a proc, `&#{forwarded}`, and what a proc captured is not written in its type", site)
+    end
+    block = call.block
+    if block.nil?
+      return SpawnVerdict.new(SpawnTarget::Unproven, placement, "the spawn has no typed block", site)
+    end
+    literal = block.as(Block).fun_literal
+    unless literal.is_a?(ProcLiteral)
+      return SpawnVerdict.new(SpawnTarget::Unproven, placement, "the spawn block has no typed proc literal", site)
+    end
+    facts = @facts
+    if facts.nil?
+      facts = ClosureFacts.new(@visitor)
+      if definition = @in_def
+        facts.analyse_def(definition, @self_type)
+      else
+        facts.analyse_program(@root)
+      end
+      @facts = facts
+    end
+    frame = facts.as(ClosureFacts).frame?(literal.as(ProcLiteral).def)
+    if frame.nil?
+      return SpawnVerdict.new(SpawnTarget::Unproven, placement, "the spawn block has no closure frame", site)
+    end
+    walk = SpawnWitnessWalk.new(@visitor, facts.as(ClosureFacts), @share, frame.as(ClosureFrame), @in_def, @self_type)
+    walk.walk(literal.as(ProcLiteral).def.body)
+    if reason = walk.reason
+      return SpawnVerdict.new(SpawnTarget::AsWritten, placement, reason, site)
+    end
+    reason = "no capture is proven non-Share"
+    if unsupported = walk.unsupported
+      reason = "#{reason}; unsupported AST path #{unsupported}"
+    end
+    SpawnVerdict.new(SpawnTarget::Unproven, placement, reason, site)
+  end
+end
+
+# This whitelist follows references retained by hosted cleanup. Its Cast and
+# NilableCast transforms keep the runtime operand, not the target type syntax.
+# A missing witness is not a Share proof.
+class SpawnWitnessWalk
+  getter reason : String? = nil
+  getter unsupported : String? = nil
+  @frames : Array(ClosureFrame)
+  @allow_expansions : Bool = true
+
+  def initialize(@visitor : MainVisitor, @facts : ClosureFacts, @share : ShareFacts, @proc_frame : ClosureFrame, @in_def : Def?, @self_type : Type?)
+    @frames = [@proc_frame] of ClosureFrame
+  end
+
+  def no_return?(node : ASTNode) : Bool
+    type = @visitor.type_of?(node)
+    !type.nil? && type.as(Type).is_a?(NoReturnType)
+  end
+
+  def unavailable(description : String) : Nil
+    @unsupported = description if @unsupported.nil?
+  end
+
+  def walk_block(block : Block) : Nil
+    literal = block.fun_literal
+    if literal.is_a?(ProcLiteral)
+      proc_def = literal.as(ProcLiteral).def
+      if frame = @facts.frame?(proc_def)
+        @frames << frame
+        walk(proc_def.body)
+        @frames.pop
+      else
+        unavailable("missing proc frame")
+      end
+    elsif frame = @facts.frame?(block)
+      @frames << frame
+      walk(block.body)
+      @frames.pop
+    else
+      unavailable("missing block frame")
+    end
+  end
+
+  def trusted_argument?(name : String) : Bool
+    definition = @in_def
+    return false unless definition && definition.share_annotated
+    if block_arg = definition.block_arg
+      return true if block_arg.name == name
+    end
+    definition.args.any? { |arg| arg.name == name }
+  end
+
+  def variable(node : Var) : Nil
+    if node.name == "self"
+      capture_self
+      return
+    end
+    return unless @proc_frame.closure
+    return if trusted_argument?(node.name)
+    @frames.each do |frame|
+      return if frame.local?(node.name)
+    end
+    if parent = @proc_frame.parent
+      if binding = parent.resolve?(node.name)
+        return unless binding.captured
+        type = binding.variable.type
+        if witness = @share.witness(type)
+          @reason = "the block captures `#{node.name} : #{type}`, which is not Share: #{witness}"
+        end
+      end
+    end
+  end
+
+  def capture_self : Nil
+    definition = @in_def
+    type = @self_type
+    return unless @proc_frame.closure
+    return unless definition && type
+    return if type.is_a?(MetaclassType) || type.is_a?(VirtualMetaclassType)
+    return if @visitor.program.def_owner(definition).is_a?(SemanticProgram)
+    if witness = @share.witness_for_self(type)
+      @reason = "the block captures `self : #{type}`, which is not Share: #{witness}"
+    end
+  end
+
+  def walk_call(node : Call) : Nil
+    unless @visitor.type_of?(node)
+      unavailable("untyped Call")
+      return
+    end
+    # Hosted replaces a call with an untyped operand before it can retain any
+    # reference inside the call. Check all written operands before using one.
+    if obj = node.obj
+      unless @visitor.type_of?(obj)
+        unavailable("untyped call receiver")
+        return
+      end
+    end
+    node.args.each do |arg|
+      unless @visitor.type_of?(arg)
+        unavailable("untyped call argument")
+        return
+      end
+    end
+    if named = node.named_args
+      named.each do |arg|
+        unless @visitor.type_of?(arg.value)
+          unavailable("untyped named argument")
+          return
+        end
+      end
+    end
+    if arguments = @visitor.call_arguments[node]?
+      arguments.each do |arg|
+        unless @visitor.type_of?(arg)
+          unavailable("untyped expanded argument")
+          return
+        end
+      end
+    end
+    if obj = node.obj
+      walk(obj)
+      return if @reason || no_return?(obj)
+    end
+    if arguments = @visitor.call_arguments[node]?
+      arguments.each do |arg|
+        walk(arg)
+        return if @reason || no_return?(arg)
+      end
+    else
+      node.args.each do |arg|
+        walk(arg)
+        return if @reason || no_return?(arg)
+      end
+      if named = node.named_args
+        named.each do |arg|
+          walk(arg.value)
+          return if @reason || no_return?(arg.value)
+        end
+      end
+    end
+    targets = @visitor.dispatch_targets?(node)
+    return unless @visitor.target_def?(node) || (targets && !targets.empty?) || @visitor.lib_call_target?(node)
+    if block = node.block
+      walk_block(block)
+    end
+  end
+
+  def walk(node : ASTNode) : Nil
+    return if @reason
+    if expanded = @visitor.expansions[node]?
+      if @allow_expansions
+        walk(expanded)
+      else
+        unavailable("conditionally retained expansion")
+      end
+      return
+    end
+    if node.is_a?(Call)
+      if expanded = node.as(Call).expanded
+        if @allow_expansions
+          walk(expanded)
+        else
+          unavailable("conditionally retained call expansion")
+        end
+        return
+      end
+      walk_call(node.as(Call))
+    elsif node.is_a?(Expressions)
+      node.as(Expressions).expressions.each do |child|
+        unless @visitor.type_of?(child)
+          unavailable("untyped #{node_class_name(child)}")
+          break
+        end
+        walk(child)
+        break if @reason || child.is_a?(Return) || child.is_a?(Break) || child.is_a?(Next) || no_return?(child)
+      end
+    elsif node.is_a?(If)
+      branch = node.as(If)
+      unless @visitor.type_of?(branch.cond)
+        unavailable("untyped If condition")
+        return
+      end
+      walk(branch.cond)
+      unless @reason || no_return?(branch.cond)
+        truth = literal_truthiness(branch.cond)
+        if truth == 1
+          walk(branch.then)
+          unavailable("literal-dead If branch") unless branch.else.is_a?(Nop)
+        elsif truth == -1
+          walk(branch.else)
+          unavailable("literal-dead If branch") unless branch.then.is_a?(Nop)
+        else
+          # Hosted may fold a typed nonliteral condition and leave its dead
+          # branch untransformed. An expansion there is not a kept reference.
+          previous = @allow_expansions
+          @allow_expansions = false
+          walk(branch.then)
+          walk(branch.else)
+          @allow_expansions = previous
+        end
+      end
+    elsif node.is_a?(While)
+      loop_node = node.as(While)
+      unless @visitor.type_of?(loop_node.cond)
+        unavailable("untyped While condition")
+        return
+      end
+      walk(loop_node.cond)
+      walk(loop_node.body) unless @reason || no_return?(loop_node.cond)
+    elsif node.is_a?(Assign)
+      assign = node.as(Assign)
+      unless @visitor.type_of?(assign.value)
+        unavailable("untyped assignment value")
+        return
+      end
+      if no_return?(assign.value)
+        walk(assign.value)
+      else
+        walk(assign.target) if assign.target.is_a?(Var)
+        walk(assign.value)
+      end
+    elsif node.is_a?(Return)
+      if exp = node.as(Return).exp
+        walk(exp)
+      end
+    elsif node.is_a?(Break)
+      if exp = node.as(Break).exp
+        walk(exp)
+      end
+    elsif node.is_a?(Next)
+      if exp = node.as(Next).exp
+        walk(exp)
+      end
+    elsif node.is_a?(Yield)
+      node.as(Yield).exps.each do |exp|
+        unless @visitor.type_of?(exp)
+          unavailable("untyped Yield expression")
+          break
+        end
+        walk(exp)
+        break if @reason || no_return?(exp)
+      end
+    elsif node.is_a?(ProcLiteral)
+      proc_def = node.as(ProcLiteral).def
+      if frame = @facts.frame?(proc_def)
+        @frames << frame
+        walk(proc_def.body)
+        @frames.pop
+      else
+        unavailable("missing proc frame")
+      end
+    elsif node.is_a?(Cast)
+      walk(node.as(Cast).obj)
+    elsif node.is_a?(NilableCast)
+      walk(node.as(NilableCast).obj)
+    elsif node.is_a?(Not)
+      walk(node.as(Not).exp)
+    elsif node.is_a?(Path)
+      path = node.as(Path)
+      if @visitor.target_const?(path)
+        if type = @visitor.type_of?(path)
+          if witness = @share.witness(type)
+            @reason = "the block names the constant `#{path} : #{type}`, which is not Share: #{witness}"
+          end
+        end
+      end
+    elsif node.is_a?(Var)
+      variable(node.as(Var))
+    elsif node.is_a?(InstanceVar) || node.is_a?(Self)
+      capture_self
+    elsif node.is_a?(BoolLiteral) || node.is_a?(NilLiteral) || node.is_a?(Nop) || node.is_a?(NumberLiteral) || node.is_a?(StringLiteral) || node.is_a?(CharLiteral) || node.is_a?(SymbolLiteral) || node.is_a?(Primitive)
+      # These leaves do not contain a captured reference.
+    else
+      if @unsupported.nil?
+        @unsupported = node_class_name(node)
+      end
+    end
+  end
+end
+
+# This conservative graph walk prunes only statically false or true branches.
+# Defs and typed-used constants are visited once, and a proven pool call wins
+# over any earlier unproven placement.
+class PoolReachWalk < Visitor
+  @seen_defs : Set(UInt64)
+  @seen_constants : Set(UInt64)
+  @cause : Call? = nil
+
+  def initialize(@visitor : MainVisitor, @analysis : SpawnAnalysis)
+    @seen_defs = Set(UInt64).new
+    @seen_constants = Set(UInt64).new
+  end
+
+  def visit_constant(value : ASTNode) : Nil
+    return if @seen_constants.includes?(value.node_id)
+    @seen_constants.add(value.node_id)
+    value.accept(self)
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    if expanded = @visitor.expansions[node]?
+      expanded.accept(self)
+      return false
+    end
+    if node.is_a?(Call)
+      if expanded = node.as(Call).expanded
+        expanded.accept(self)
+        return false
+      end
+    end
+    true
+  end
+
+  def visit(node : Def) : Bool
+    false
+  end
+
+  def visit(node : Macro) : Bool
+    false
+  end
+
+  def visit(node : MacroExpression) : Bool
+    false
+  end
+
+  def visit(node : MacroFor) : Bool
+    false
+  end
+
+  def visit(node : MacroIf) : Bool
+    false
+  end
+
+  def visit(node : MacroLiteral) : Bool
+    false
+  end
+
+  def visit(node : MacroVar) : Bool
+    false
+  end
+
+  def visit(node : MacroVerbatim) : Bool
+    false
+  end
+
+  def visit(node : LibDef) : Bool
+    false
+  end
+
+  def visit(node : ClassDef) : Bool
+    node.body.accept(self)
+    false
+  end
+
+  def visit(node : ModuleDef) : Bool
+    node.body.accept(self)
+    false
+  end
+
+  def visit(node : FunDef) : Bool
+    if body = node.body
+      body.accept(self)
+    end
+    false
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    node.def.body.accept(self)
+    false
+  end
+
+  def visit(node : Block) : Bool
+    if literal = node.fun_literal
+      if literal.is_a?(ProcLiteral)
+        literal.as(ProcLiteral).def.body.accept(self)
+        return false
+      end
+    end
+    node.body.accept(self)
+    false
+  end
+
+  def visit(node : If) : Bool
+    node.cond.accept(self)
+    truth = static_truthiness(@visitor, node.cond)
+    node.then.accept(self) unless truth == -1
+    node.else.accept(self) unless truth == 1
+    false
+  end
+
+  def visit(node : Path) : Bool
+    if constant = @visitor.target_const?(node)
+      visit_constant(constant.value)
+    end
+    false
+  end
+
+  def worker_metaclass?(type : Type?) : Bool
+    return false unless type
+    if type.is_a?(MetaclassType)
+      return type.as(MetaclassType).instance_type.to_s == "IyiWorkers"
+    elsif type.is_a?(VirtualMetaclassType)
+      return type.as(VirtualMetaclassType).instance_type.base_type.to_s == "IyiWorkers"
+    end
+    false
+  end
+
+  def follow(definition : Def, receiver : Type?, call : Call, cause : Call?) : Nil
+    if definition.name == "start" && (worker_metaclass?(receiver) || worker_metaclass?(@visitor.program.def_owner(definition)))
+      if origin = cause
+        placement = if verdict = @analysis.verdicts[origin]?
+                      verdict.placement
+                    else
+                      "spawn"
+                    end
+        @analysis.proven("#{spawn_site(origin)} in #{placement}")
+      elsif loc = call.name_location || call.location
+        @analysis.proven("#{loc.filename}:#{loc.line_number} in IyiWorkers.start")
+      else
+        @analysis.proven("in IyiWorkers.start")
+      end
+    end
+    return if @seen_defs.includes?(definition.node_id)
+    @seen_defs.add(definition.node_id)
+    previous = @cause
+    @cause = cause
+    definition.body.accept(self)
+    @cause = previous
+  end
+
+  def follow_targets(call : Call, cause : Call?) : Nil
+    receiver = @visitor.call_receiver?(call)
+    if receiver.nil?
+      if obj = call.obj
+        receiver = @visitor.type_of?(obj)
+      end
+    end
+    if call.name == "start" && worker_metaclass?(receiver) && call_target(@visitor, call).nil?
+      @analysis.unproven("#{spawn_site(call)} in IyiWorkers.start (target unavailable)")
+    end
+    if definition = @visitor.target_def?(call)
+      follow(definition, receiver, call, cause)
+    end
+    if targets = @visitor.dispatch_targets?(call)
+      targets.each do |target|
+        follow(target.definition, target.receiver, call, cause)
+      end
+    end
+  end
+
+  def visit(node : Call) : Bool
+    if obj = node.obj
+      obj.accept(self)
+    end
+    if arguments = @visitor.call_arguments[node]?
+      arguments.each { |arg| arg.accept(self) }
+    else
+      node.args.each { |arg| arg.accept(self) }
+      if named = node.named_args
+        named.each { |arg| arg.value.accept(self) }
+      end
+    end
+    if block_arg = node.block_arg
+      block_arg.accept(self)
+    end
+    if block = node.block
+      block.accept(self)
+    end
+
+    if verdict = @analysis.verdicts[node]?
+      if verdict.target == SpawnTarget::Unproven
+        @analysis.unproven(verdict.site)
+      elsif verdict.target == SpawnTarget::Pooled
+        # A missing or incomplete reachable body is not proof that this
+        # explicitly pooled placement avoids preemption.
+        @analysis.unproven(verdict.site)
+        if target = call_target(@visitor, node)
+          if beside = typed_beside(@visitor, target, "spawn_new")
+            follow(beside, nil, node, node)
+          end
+        end
+      elsif verdict.target == SpawnTarget::AsWritten
+        follow_targets(node, node)
+      end
+    elsif spawn_call?(@visitor, node) || unresolved_group_spawn?(@visitor, node)
+      # A missed site is not evidence that hosted leaves the target alone.
+      @analysis.unproven(spawn_site(node))
+    else
+      follow_targets(node, @cause)
+    end
+    false
+  end
+end

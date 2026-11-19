@@ -1,0 +1,7 @@
+module helper
+
+pub class Only
+  def weight : Int32
+    1
+  end
+end

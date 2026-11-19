@@ -1,0 +1,21 @@
+class MacroAncestor
+  def marker
+    1
+  end
+end
+
+class MacroDescendant < MacroAncestor
+  def local_marker
+    1
+  end
+
+  def value
+    {% if @type.methods.any? { |m| m.name == "local_marker" } && ([@type] + @type.ancestors).any? { |t| t.methods.any? { |m| m.name == "marker" } } %}
+      1
+    {% else %}
+      0
+    {% end %}
+  end
+end
+
+puts MacroDescendant.new.value

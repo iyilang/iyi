@@ -1,0 +1,8 @@
+trait T1
+end
+
+trait T2
+end
+
+impl T1 for T2
+end

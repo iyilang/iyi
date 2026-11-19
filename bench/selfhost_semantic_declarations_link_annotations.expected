@@ -1,0 +1,4 @@
+link lib=m ldflags=- static=false framework=- pkg_config=- dll=-
+link lib=- ldflags=- static=false framework=Security pkg_config=- dll=-
+link lib=z ldflags=-L/x static=true framework=- pkg_config=- dll=-
+link lib=q ldflags=-L/y static=false framework=- pkg_config=- dll=-

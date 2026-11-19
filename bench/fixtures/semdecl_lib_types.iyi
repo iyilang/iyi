@@ -1,0 +1,7 @@
+lib LibTypes
+  fun get(p : Pointer(Int32)) : Int32
+  fun name(s : UInt8*) : UInt8*
+  fun width(n : UInt64) : UInt64
+  fun nothing(n : Int32)
+  $layouts : Void*
+end

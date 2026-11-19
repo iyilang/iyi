@@ -1,0 +1,70 @@
+module compiler/semantic/type_node_host
+
+# The visitor the type-node functions (type_nodes.iyi) work through. MainVisitor
+# is its one subclass and overrides every method here. It is a module of its own
+# because type_nodes.iyi cannot import main_visitor.iyi: that would be an import
+# cycle, and iyi keeps the import graph a DAG. The methods raise here so a
+# caller that reaches the base by mistake fails loudly.
+
+import compiler/syntax/ast::{ASTNode, FunDef}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/top_level::{ModuleType, SemanticProgram, Type}
+
+pub class TypeNodeHost < Visitor
+  def program : SemanticProgram
+    raise("TypeNodeHost#program is implemented by MainVisitor")
+  end
+
+  def current_type : ModuleType
+    raise("TypeNodeHost#current_type is implemented by MainVisitor")
+  end
+
+  def scope_type : Type?
+    raise("TypeNodeHost#scope_type is implemented by MainVisitor")
+  end
+
+  def bracket_type_args(delta : Int32) : Nil
+    raise("TypeNodeHost#bracket_type_args is implemented by MainVisitor")
+  end
+
+  # Whether the node being visited is inside a type argument (hosted
+  # `@in_type_args > 0`).
+  def in_type_args? : Bool
+    raise("TypeNodeHost#in_type_args? is implemented by MainVisitor")
+  end
+
+  # The local variables in scope (hosted `@vars`). A typeof puts them back.
+  def vars : Hash(String, Type)
+    raise("TypeNodeHost#vars is implemented by MainVisitor")
+  end
+
+  # How deep the node is inside type-argument brackets (hosted `@in_type_args`).
+  def type_args_depth : Int32
+    raise("TypeNodeHost#type_args_depth is implemented by MainVisitor")
+  end
+
+  # Records the analysed signature of a fun: its argument types in declared order
+  # and its declared return type (hosted external.args and return_type).
+  def record_fun_signature(node : FunDef, arg_types : Array(Type), return_type : Type?) : Nil
+    raise("TypeNodeHost#record_fun_signature is implemented by MainVisitor")
+  end
+
+  def set_type(node : ASTNode, type : Type) : Type
+    raise("TypeNodeHost#set_type is implemented by MainVisitor")
+  end
+
+  def child_type(node : ASTNode) : Type?
+    raise("TypeNodeHost#child_type is implemented by MainVisitor")
+  end
+
+  def refuse(node : ASTNode, message : String) : Bool
+    raise("TypeNodeHost#refuse is implemented by MainVisitor")
+  end
+
+  # A visitor for the body of a fun, with *vars* as its locals and the program
+  # as its scope. It shares the node types of this visitor, as the hosted pass
+  # gives a fun body its own MainVisitor (main_visitor.cr 2346).
+  def sub_visitor(vars : Hash(String, Type)) : TypeNodeHost
+    raise("TypeNodeHost#sub_visitor is implemented by MainVisitor")
+  end
+end

@@ -1,0 +1,6 @@
+class ClassVarGeneric
+  @@resolver : Proc(Pointer(Void*), Int32, Nil)? = nil
+  @@value : Int32 = 3
+  @@pointer : Pointer(Int32) = pointerof(@@value)
+  @@maybe : Pointer(Int32)? = nil
+end

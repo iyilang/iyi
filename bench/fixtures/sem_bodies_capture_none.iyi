@@ -1,0 +1,21 @@
+@[Unsafe("calls C exit to make the captured result observable")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Grp
+  def spawn(&block : -> T) : T forall T
+    block.call
+  end
+
+  def each_fresh(&maker : Int32 -> Nil) : Nil
+    maker.call(3)
+  end
+end
+
+g = Grp.new
+x = g.spawn { 7 }
+g.each_fresh { |fresh| fresh }
+LibC.exit(x)
+
+# The port still omits FunDef Nil inside LibDef and Expressions Nil in the class body.

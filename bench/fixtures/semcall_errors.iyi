@@ -1,0 +1,68 @@
+# Calls that the hosted call pass answers as ok, as "undefined method", as
+# "wrong number of arguments", or as an argument-type message, with the first
+# line of the message the hosted compile raises. Read by
+# bench/selfhost_semantic_calls_exercise.sh: `# error` lines are compiled by the
+# hosted oracle as a whole program, and answered by the port's call rules.
+
+class Foo
+  def bar(x : Int32) : String
+    "a"
+  end
+
+  def dflt(x : Int32, y : String = "a") : Int32
+    x
+  end
+
+  def self.make(x : Int32) : Foo
+    Foo.new
+  end
+end
+
+class Bar < Foo
+  def bool(x : Bool) : Bool
+    x
+  end
+
+  def self.make2(x : Int32) : Bar
+    Bar.new
+  end
+end
+
+def two(x : Int32, y : String) : Nil
+  nil
+end
+
+def pick(x : Int32) : Nil
+  nil
+end
+
+def pick(x : String) : Nil
+  nil
+end
+
+def diff(x : Int32, y : Bool) : Nil
+  nil
+end
+
+def diff(x : Bool, y : Int32) : Nil
+  nil
+end
+
+# error Foo.nope(1)
+# error Foo.bar(1)
+# error Bar.nope(1)
+# error nope(1)
+# error Foo.make(1).nope(1)
+# error Foo.make(1).bar(1)
+# error Bar.make2(1).bool(true)
+# error Foo.make(1).dflt(1)
+# error Foo.make(1).bar(1, 2)
+# error Foo.make(1).dflt()
+# error Foo.make(1).dflt(1, "b", 2)
+# error Foo.make(1, 2)
+# error two(true, "a")
+# error two(1, 2)
+# error two(true, 2)
+# error pick(true)
+# error diff(true, true)
+# error Foo.make(true)

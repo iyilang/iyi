@@ -1,0 +1,11 @@
+struct OverrideGeneric(T)
+  def add(value : T) : T
+    value
+  end
+end
+
+struct OverrideGeneric(T)
+  def add(value : T) : T
+    value
+  end
+end

@@ -1,0 +1,11 @@
+module bodies_const_owner_lib
+
+pub struct ForeignMaker
+  struct Inner
+    def value : Int32
+      7
+    end
+  end
+
+  VALUE = Inner.new
+end

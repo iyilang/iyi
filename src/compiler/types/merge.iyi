@@ -1,0 +1,334 @@
+module compiler/types/merge
+
+import compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType, NonGenericClassType, NonGenericModuleType, SemanticProgram, Type, UnionType}
+import compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, NamedArgumentType, NamedTupleInstanceType, TupleInstanceType, TypeQueries, VirtualMetaclassType, VirtualType}
+import compiler/types/unification::{TypeUnification}
+
+# Port of src/compiler/iyi/semantic/type_merge.cr: the merge of two or more
+# types into one type (Program#type_merge), the least common ancestor of two
+# types, and type_combine, which folds the members of a union into their
+# virtual roots.
+#
+# Where the port differs from the hosted code, and why:
+# - An empty merge is NoReturn. The hosted Program answers nil, but no caller
+#   in the port merges an empty list, and the port has always answered NoReturn.
+# - type_combine searches every earlier member in order. The hosted code keeps
+#   a hash of virtual roots and visits the same first member, so the answer is
+#   the same; the search is linear here because a hash keyed by Type would rely
+#   on a hash method the port does not define.
+# - The hosted Program's `depth` is 0 for a generic class instance (it inherits
+#   Type#depth); class_depth keeps that, so the superclass path is taken for two
+#   instances of the same generic class, as the hosted code takes it.
+pub class TypeMerge
+  # Program#type_merge(first, second): the merge of two types.
+  def self.merge(program : SemanticProgram, first : Type, second : Type) : Type
+    return first if first == second
+    return second if TypeQueries.no_return?(first)
+    return first if TypeQueries.no_return?(second)
+
+    if first.nil_type? && second.is_a?(UnionType) && union_includes?(second.as(UnionType), first)
+      return second
+    end
+    if second.nil_type? && first.is_a?(UnionType) && union_includes?(first.as(UnionType), second)
+      return first
+    end
+
+    combined_union_of(program, compact_types(program, [first, second] of Type))
+  end
+
+  # Program#type_merge(types): the merge of any number of types.
+  def self.merge_all(program : SemanticProgram, types : Array(Type)) : Type
+    return program.no_return_type if types.empty?
+    return types.first if types.size == 1
+    return merge(program, types[0], types[1]) if types.size == 2
+    combined_union_of(program, compact_types(program, types))
+  end
+
+  # Program#compact_types: the distinct members of the merge, in the order
+  # they came, with NoReturn dropped when another member remains.
+  def self.compact_types(program : SemanticProgram, types : Array(Type)) : Array(Type)
+    distinct = [] of Type
+    types.each do |t|
+      add_type(program, distinct, t)
+    end
+    if distinct.size > 1
+      kept = [] of Type
+      distinct.each do |t|
+        kept << t unless TypeQueries.no_return?(t)
+      end
+      return kept
+    end
+    distinct
+  end
+
+  private def self.add_type(program : SemanticProgram, distinct : Array(Type), t : Type) : Nil
+    if t.is_a?(UnionType)
+      t.as(UnionType).union_types.each do |member|
+        add_type(program, distinct, member)
+      end
+    elsif t.is_a?(AliasType)
+      aliased = remove_alias(t)
+      if aliased == t
+        add_distinct(distinct, t)
+      else
+        add_type(program, distinct, aliased)
+      end
+    elsif TypeQueries.void?(t)
+      # Void becomes Nil inside a union: users never hold a Void value.
+      add_type(program, distinct, program.nil_type)
+    else
+      add_distinct(distinct, t)
+    end
+  end
+
+  private def self.add_distinct(distinct : Array(Type), t : Type) : Nil
+    distinct << t unless includes_type?(distinct, t)
+  end
+
+  # Type#remove_alias: the type an alias stands for, through any chain of aliases.
+  def self.remove_alias(t : Type) : Type
+    return t unless t.is_a?(AliasType)
+    aliased = t.as(AliasType).process_value
+    return t if aliased == t
+    remove_alias(aliased)
+  end
+
+  # Program#combined_union_of: one type stands for itself; more are combined
+  # and unioned.
+  def self.combined_union_of(program : SemanticProgram, types : Array(Type)) : Type
+    return program.no_return_type if types.empty?
+    return types.first if types.size == 1
+    TypeUnification.union_of(program, type_combine(program, types))
+  end
+
+  # Program#type_combine: each type that has a virtual root as a common
+  # ancestor with an earlier member is replaced by that root's virtual type.
+  def self.type_combine(program : SemanticProgram, types : Array(Type)) : Array(Type)
+    return types if types.size <= 1
+
+    all_types = [] of Type
+    all_types << types[0]
+    i = 1
+    while i < types.size
+      t2 = types[i]
+      d2 = devirtualize(t2)
+      merged = false
+      j = 0
+      while j < all_types.size && !merged
+        t1 = all_types[j]
+        ancestor = merge_partner(t1, d2)
+        unless ancestor.nil?
+          k = all_types.size - 1
+          while k >= 0
+            all_types.delete_at(k) if all_types[k] == t1
+            k -= 1
+          end
+          all_types << TypeQueries.virtual_type(ancestor)
+          merged = true
+        end
+        j += 1
+      end
+      all_types << t2 unless merged
+      i += 1
+    end
+
+    all_types
+  end
+
+  # The common ancestor of an earlier member and a new one, when it can root a
+  # virtual type.
+  private def self.merge_partner(t1 : Type, t2 : Type) : Type?
+    ancestor = least_common_ancestor(devirtualize(t1), t2)
+    if ancestor && virtual_root?(ancestor)
+      return ancestor
+    end
+    nil
+  end
+
+  # Type#least_common_ancestor: for two non-union types, the type both are
+  # subtypes of, never a union and never virtual, or nil.
+  def self.least_common_ancestor(t1 : Type, t2 : Type) : Type?
+    if metaclass_like?(t1) && metaclass_like?(t2)
+      return nil unless unifiable_metaclass?(t1) && unifiable_metaclass?(t2)
+      common = least_common_ancestor(instance_of(t1), instance_of(t2))
+      return nil if common.nil?
+      return TypeUnification.metaclass_of(common)
+    end
+
+    if t1.is_a?(GenericClassType) && class_like?(t2)
+      return t2 if t1.implements?(t2)
+      return t1 if t2.implements?(t1)
+      return nil
+    end
+    if class_like?(t1) && t2.is_a?(GenericClassType)
+      return t1 if t2.implements?(t1)
+      return t2 if t1.implements?(t2)
+      return nil
+    end
+
+    if module_like?(t1) && module_like?(t2)
+      return t2 if t1.implements?(t2)
+      return t1 if t2.implements?(t1)
+      return nil
+    end
+    if module_like?(t1)
+      return t1 if t2.implements?(t1)
+      return nil
+    end
+    if module_like?(t2)
+      return t2 if t1.implements?(t2)
+      return nil
+    end
+
+    if t1.is_a?(TupleInstanceType) && t2.is_a?(TupleInstanceType)
+      tup1 = t1.as(TupleInstanceType)
+      tup2 = t2.as(TupleInstanceType)
+      return nil unless tup1.size == tup2.size
+      merged = [] of Type
+      i = 0
+      while i < tup1.size
+        merged << merge(t1.program, tup1.tuple_types[i], tup2.tuple_types[i])
+        i += 1
+      end
+      return TupleInstanceType.new(t1.program, merged)
+    end
+
+    if t1.is_a?(NamedTupleInstanceType) && t2.is_a?(NamedTupleInstanceType)
+      nt1 = t1.as(NamedTupleInstanceType)
+      nt2 = t2.as(NamedTupleInstanceType)
+      return nil if nt1.size != nt2.size
+      merged_entries = [] of NamedArgumentType
+      i = 0
+      while i < nt1.entries.size
+        entry = nt1.entries[i]
+        other = nt2.name_type(entry.name)
+        return nil if other.nil?
+        merged_entries << NamedArgumentType.new(entry.name, merge(t1.program, entry.type, other))
+        i += 1
+      end
+      return NamedTupleInstanceType.new(t1.program, merged_entries)
+    end
+
+    if class_like?(t1) && class_like?(t2)
+      return t1 if t1 == t2
+
+      d1 = class_depth(t1)
+      d2 = class_depth(t2)
+      if d1 == d2
+        sc1 = superclass_of(t1)
+        sc2 = superclass_of(t2)
+        if sc1 && sc2
+          return least_common_ancestor(sc1, sc2)
+        end
+      elsif d1 > d2
+        sc1 = superclass_of(t1)
+        return least_common_ancestor(sc1, t2) if sc1
+      elsif d1 < d2
+        sc2 = superclass_of(t2)
+        return least_common_ancestor(t1, sc2) if sc2
+      end
+      return nil
+    end
+
+    nil
+  end
+
+  # Type#virtual_root?: whether a type may root a virtual type. Object, Reference
+  # and Value are never roots (depth at most 1), nor are Struct, Number, Int or
+  # Float; every other type is.
+  def self.virtual_root?(t : Type) : Bool
+    if t.is_a?(VirtualType)
+      return virtual_root?(t.as(VirtualType).base_type)
+    end
+    if t.is_a?(VirtualMetaclassType)
+      return virtual_root?(t.as(VirtualMetaclassType).instance_type.base_type)
+    end
+    if t.is_a?(MetaclassType)
+      return virtual_root?(t.as(MetaclassType).instance_type)
+    end
+    if t.is_a?(NonGenericClassType) && class_depth(t) <= 1
+      return false
+    end
+
+    program = t.program
+    return false if t == program.struct_type
+    return false if t == program.types["Number"]
+    return false if t == program.types["Int"]
+    return false if t == program.types["Float"]
+    true
+  end
+
+  # The type a virtual type stands for, or the type itself.
+  def self.devirtualize(t : Type) : Type
+    if t.is_a?(VirtualType)
+      return t.as(VirtualType).base_type
+    end
+    if t.is_a?(VirtualMetaclassType)
+      m = TypeUnification.metaclass_of(t.as(VirtualMetaclassType).instance_type.base_type)
+      return t if m.nil?
+      return m
+    end
+    t
+  end
+
+  # Type#depth for the classes the merge walks: a class is one deeper than its
+  # superclass, and a generic class instance is at depth 0 (the hosted code
+  # never sets one).
+  def self.class_depth(t : Type) : Int32
+    return 0 if t.is_a?(GenericClassInstanceType)
+    if t.is_a?(ClassType)
+      if sc = t.as(ClassType).superclass
+        return 1 + class_depth(sc)
+      end
+    end
+    0
+  end
+
+  def self.superclass_of(t : Type) : Type?
+    return t.as(ClassType).superclass if t.is_a?(ClassType)
+    return t.as(GenericClassInstanceType).superclass if t.is_a?(GenericClassInstanceType)
+    nil
+  end
+
+  # A class the merge compares by its ancestors: a plain class, or an instance
+  # of a generic class. The generic class itself is compared as a module.
+  def self.class_like?(t : Type) : Bool
+    return true if t.is_a?(GenericClassInstanceType)
+    t.is_a?(ClassType) && !t.is_a?(GenericClassType)
+  end
+
+  # Types whose common ancestor is found by implements?, not by superclasses.
+  def self.module_like?(t : Type) : Bool
+    t.is_a?(NonGenericModuleType) || t.is_a?(GenericModuleInstanceType) || t.is_a?(GenericClassType)
+  end
+
+  def self.metaclass_like?(t : Type) : Bool
+    t.is_a?(MetaclassType) && !t.is_a?(GenericModuleInstanceMetaclassType)
+  end
+
+  def self.instance_of(t : Type) : Type
+    t.as(MetaclassType).instance_type
+  end
+
+  # Metaclasses of modules and of union, tuple and named tuple instances are
+  # never unified.
+  def self.unifiable_metaclass?(t : Type) : Bool
+    inst = instance_of(t)
+    return false if inst.is_a?(NonGenericModuleType) || inst.is_a?(GenericModuleInstanceType) || inst.is_a?(GenericModuleInstanceMetaclassType)
+    return false if inst.is_a?(UnionType) || inst.is_a?(TupleInstanceType) || inst.is_a?(NamedTupleInstanceType)
+    true
+  end
+
+  private def self.union_includes?(union : UnionType, t : Type) : Bool
+    includes_type?(union.union_types, t)
+  end
+
+  private def self.includes_type?(types : Array(Type), t : Type) : Bool
+    i = 0
+    while i < types.size
+      return true if types[i] == t
+      i += 1
+    end
+    false
+  end
+end

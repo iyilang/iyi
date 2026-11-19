@@ -1,0 +1,69 @@
+# Calls resolved by receiver, name, arity and declared restrictions, with literal
+# arguments. Read by bench/selfhost_semantic_calls_exercise.sh: each `# call`
+# line is one call site, printed by the hosted oracle and by the port.
+
+def top(x : Int32) : Int32
+  x
+end
+
+def top(x : String) : String
+  x
+end
+
+def either(x : Int32 | String) : Nil
+  nil
+end
+
+def amb(x : Int32) : Int32
+  x
+end
+
+def amb(x : Int32 | String) : Nil
+  nil
+end
+
+class Foo
+  def bar(x : Int32) : String
+    "a"
+  end
+
+  def bar(x : String) : Int32
+    1
+  end
+
+  def bar(x : Int32, y : String) : Nil
+    nil
+  end
+
+  def any(x) : Nil
+    nil
+  end
+
+  def self.make(x : Int32) : Foo
+    Foo.new
+  end
+end
+
+class Bar < Foo
+  def baz(x : Bool) : Bool
+    x
+  end
+end
+
+# call top(1)
+# call top("a")
+# call top(true)
+# call top(1, 2)
+# call either(1)
+# call either(true)
+# call amb(1)
+# call amb("a")
+# call Foo.bar(1)
+# call Foo.make(1)
+# call Foo.make("a")
+# call Foo.any(nil)
+# call Bar.make(1)
+# call Bar.baz(true)
+# call Bar.baz(1)
+# call Bar.nope(1)
+# call Foo.bar(1, 2)

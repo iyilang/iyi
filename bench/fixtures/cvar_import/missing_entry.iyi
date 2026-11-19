@@ -1,0 +1,3 @@
+class MissingClassVarEntry
+  @@value : MissingClassVarType
+end

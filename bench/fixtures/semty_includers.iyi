@@ -1,0 +1,27 @@
+module Walkable
+end
+
+class Crate(T)
+  include Walkable
+end
+
+class Plain
+  include Walkable
+end
+
+class Other
+end
+
+alias Walker = Walkable
+
+# op intersect(Walkable, Crate(Int32))
+# op intersect(Walkable, Crate(String))
+# op intersect(Walkable, Plain)
+# op intersect(Walkable, Other)
+# op intersect(Crate(Int32), Walkable)
+# op intersect(Crate(Int32), Crate(Int32))
+# op intersect(Crate(Int32), Crate(String))
+# op intersect(Plain, Walkable)
+# op Walkable.including_types
+# waiting generic class including_types: Crate.including_types (the hosted generic type reports its instances)
+# op Walker.simple?

@@ -1,0 +1,8 @@
+macro sum_items(*items)
+  def sum_pair(a : Int32, b : Int32)
+    a + b
+  end
+  puts sum_pair({{ items.map { |item| item }.splat(" + 0") }})
+end
+
+sum_items(1, 2)

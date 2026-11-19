@@ -1,0 +1,22 @@
+enum HostSignal
+  {% if flag?(:linux) %}
+    A = 1
+  {% else %}
+    USR1 = 10
+    USR2 = 12
+    CHLD = 17
+  {% end %}
+end
+
+enum HostErrno
+  {% if flag?(:linux) %}
+    LINUX = 1
+    # The last content of this branch is a comment.
+    # Keep it before the alternate branch.
+  {% else %}
+    AGAIN          = 35
+    WOULD_BLOCK    = 35
+    DEADLOCK       = 11
+    DEADLOCK_ALIAS = 11
+  {% end %}
+end

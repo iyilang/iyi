@@ -1,0 +1,17 @@
+def choose(flag : Bool) : Int32 | String
+  if flag
+    42
+  else
+    "value"
+  end
+end
+
+def consume(value : Int32) : Int32
+  value
+end
+
+def consume(value : String) : Int32
+  value.size
+end
+
+puts consume(choose(true))

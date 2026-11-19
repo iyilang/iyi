@@ -1,0 +1,16 @@
+import compiler/syntax/ast::{ASTNode, Arg, Call, Def, Nop, Path, Var}
+import compiler/semantic/top_level::{SemanticProgram}
+import compiler/semantic/main_visitor::{MainVisitor}
+
+program = SemanticProgram.new
+visitor = MainVisitor.new(program)
+visitor.total = true
+arg = Var.new("fresh")
+call = Call.new(nil, "consume", [arg] of ASTNode)
+param = Arg.new("value", nil, Path.new("String"))
+definition = Def.new("consume", [param], Nop.new)
+visitor.refuse_uncovered_with_defs(call, program, "consume", [arg] of ASTNode, [definition])
+puts visitor.refusals.last.reason
+visitor.set_type(arg, program.int32_type)
+visitor.refuse_uncovered_with_defs(call, program, "consume", [arg] of ASTNode, [definition])
+puts visitor.refusals.last.reason

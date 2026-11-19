@@ -1,0 +1,7 @@
+@[Unsafe("declares the compiler's proc call primitive")]
+struct Proc
+  @[Primitive(:proc_call)]
+  @[Raises]
+  def call(*args : *T) : R
+  end
+end

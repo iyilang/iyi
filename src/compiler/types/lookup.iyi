@@ -1,0 +1,498 @@
+module compiler/types/lookup
+
+import compiler/syntax/ast::{ASTNode, Generic, Metaclass, NumberLiteral, Path, ProcNotation, Self, Splat, TypeOf, Underscore, Union}
+import compiler/semantic/top_level::{AliasType, GenericClassType, GenericModuleType, GenericTraitType, MetaclassType, ModuleType, SemanticProgram, Type, TypeParameterType}
+import compiler/types/types::{NamedArgumentType, TupleInstanceType, TypeQueries, TypeSplat}
+import compiler/types/instances::{TypeInstances}
+import compiler/types/merge::{TypeMerge}
+import compiler/types/unification::{TypeUnification}
+
+# A written type that does not resolve. Its message is the one the hosted
+# compiler raises for the same written type, so the two can be compared.
+pub class LookupError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+# Looks up the type a written type names, relative to a scope. The port of
+# `Type#lookup_type` (type_lookup.cr) and `Type#lookup_path` (path_lookup.cr).
+#
+# A result is a Type or a LookupError. Nothing here raises: the caller decides
+# whether an error is a compile error (TypeSystem#resolve_node raises it) or an
+# answer (the gate compares the message).
+#
+# Not ported, and refused by name where they can be written: `typeof` (it needs
+# typed bodies), `_`, a constant size of StaticArray, the import wall
+# (`iyi_check_import_reach`), `using` modules, private types, and a type
+# parameter solved through an inherited generic. Walking the parents of a
+# generic instance is not ported either: the parents searched are the
+# parents of the scope's own type, as the simplified lookup does. The gate's
+# fixtures do not write any of these.
+pub class TypeLookup
+  getter instances : TypeInstances
+
+  def initialize(@instances : TypeInstances)
+  end
+
+  def program : SemanticProgram
+    @instances.program
+  end
+
+  # The type *node* names in *scope*, or the error that says why it names none.
+  def lookup(scope : ModuleType, node : ASTNode) : Type | LookupError
+    if node.is_a?(Path)
+      return lookup_path_node(scope, node.as(Path))
+    end
+    if node.is_a?(Generic)
+      return lookup_generic(scope, node.as(Generic))
+    end
+    if node.is_a?(Union)
+      return lookup_union(scope, node.as(Union))
+    end
+    if node.is_a?(Metaclass)
+      return lookup_metaclass(scope, node.as(Metaclass))
+    end
+    if node.is_a?(ProcNotation)
+      return lookup_proc(scope, node.as(ProcNotation))
+    end
+    if node.is_a?(Self)
+      return lookup_self(scope)
+    end
+    if node.is_a?(TypeOf)
+      return LookupError.new("typeof is not ported yet: it needs typed bodies")
+    end
+    if node.is_a?(Underscore)
+      return LookupError.new("can't use underscore as generic type argument")
+    end
+    LookupError.new("expected type, got #{node.to_s}")
+  end
+
+  # ---- paths ----
+
+  def lookup_path_node(scope : ModuleType, path : Path) : Type | LookupError
+    lexical = instance_scope(scope)
+    found = find_path(lexical, path, path.iyi_synthetic)
+    if found.nil?
+      hidden = find_path(lexical, path, true)
+      if hidden
+        return LookupError.new("private constant #{hidden.as(Type).full_name} referenced")
+      end
+      return LookupError.new("undefined constant #{path.to_s}")
+    end
+    expand(found.as(Type))
+  end
+
+  # A name written in a def owned by a metaclass (the generated `new`, a class method) is looked up in the scope of
+  # the instance type, where the class's own nested types (`Suffix` in `Generic::Suffix`) are visible. The
+  # program-level lookup (SemanticProgram#lookup_type_path?) does the same.
+  def instance_scope(scope : ModuleType) : ModuleType
+    if scope.is_a?(MetaclassType)
+      instance = scope.as(MetaclassType).instance_type
+      if instance.is_a?(ModuleType)
+        return instance.as(ModuleType)
+      end
+    end
+    scope
+  end
+
+  # The item a path names, or nil. A global path starts at the program; any other
+  # starts at *scope* and walks out through its namespaces for the first item only
+  # (path_lookup.cr, `Type#lookup_path`). A later item that is private is not found
+  # unless *include_private* is set: the hosted lookup refuses it, and
+  # `lookup_path_node` reports it as a private constant.
+  def find_path(scope : ModuleType, path : Path, include_private : Bool) : Type?
+    root : ModuleType = scope
+    curr : Type? = nil
+    if path.global
+      root = program
+      curr = find_item(root, path.names[0], true, true)
+    else
+      # Hosted path_lookup.cr:121-170: local types and parents precede the
+      # importing file's names, which in turn precede enclosing namespaces.
+      name = path.names[0]
+      curr = find_item(root, name, true, false)
+      if found = curr
+        curr = program.imported_over_shell(found, name)
+      else
+        curr = program.current_imports[name]?
+      end
+      if curr.nil?
+        if ns = root.namespace
+          curr = unit_loses_to_program(find_item(ns, name, false, true), name)
+        end
+      end
+    end
+    i = 1
+    while i < path.names.size
+      owner = curr
+      return nil unless owner.is_a?(ModuleType)
+      curr = find_item(owner.as(ModuleType), path.names[i], false, false)
+      if item = curr
+        return nil if !include_private && item.private?
+      end
+      i = i + 1
+    end
+    curr
+  end
+
+  # One item of *scope*: its own types, then (for the first item) its own name,
+  # then its parents, then (for the first item) the namespaces outward
+  # (`Type#lookup_path_item`). A type parameter of a generic scope is one of its
+  # own types (`GenericClassType#lookup_type`).
+  def find_item(scope : ModuleType, name : String, lookup_self : Bool, lookup_in_namespace : Bool) : Type?
+    if found = scope.lookup_type(name)
+      return found
+    end
+    if lookup_self && !scope.is_a?(SemanticProgram) && scope.name == name
+      return scope
+    end
+    scope.parents.each do |parent|
+      if parent.is_a?(ModuleType)
+        if match = find_item(parent.as(ModuleType), name, false, false)
+          return match
+        end
+      end
+    end
+    if lookup_in_namespace && !scope.is_a?(SemanticProgram)
+      if ns = scope.namespace
+        return unit_loses_to_program(find_item(ns, name, false, lookup_in_namespace), name)
+      end
+    end
+    nil
+  end
+
+  # A sibling unit module found by walking out through a namespace loses to the program's type of the same name
+  # (hosted path_lookup.cr:177-187): inside `Compiler::Lower::Asm`, `Compiler` is the program's module and not the
+  # unit `Compiler::Compiler`. A real type declared in the namespace keeps its place.
+  def unit_loses_to_program(match : Type?, name : String) : Type?
+    if match.is_a?(ModuleType) && match.as(ModuleType).iyi_unit
+      if top = program.lookup_type(name)
+        return top
+      end
+    end
+    match
+  end
+
+  # An alias stands for the type its value names, through any chain of aliases
+  # (`Type#remove_alias_if_simple`: every alias the port models is simple).
+  def expand(type : Type) : Type | LookupError
+    if type.is_a?(AliasType)
+      target = alias_target(type.as(AliasType))
+      return target if target.is_a?(LookupError)
+      return expand(target.as(Type))
+    end
+    type
+  end
+
+  # The type an alias value names, resolved once and kept. It is resolved here,
+  # not through AliasType#process_value, which reads the simplified lookup and
+  # loses the arguments of a generic instance (`alias A = Box(Int32)` is `Box`).
+  def alias_target(alias_type : AliasType) : Type | LookupError
+    if known = alias_type.aliased_type
+      return known
+    end
+    scope : ModuleType = program
+    if ns = alias_type.namespace
+      scope = ns
+    end
+    resolved = lookup(scope, alias_type.value)
+    return resolved if resolved.is_a?(LookupError)
+    alias_type.aliased_type = resolved.as(Type)
+    resolved.as(Type)
+  end
+
+  # ---- unions, metaclasses, procs, self ----
+
+  def lookup_union(scope : ModuleType, node : Union) : Type | LookupError
+    types = [] of Type
+    i = 0
+    while i < node.types.size
+      member = lookup(scope, node.types[i])
+      return member if member.is_a?(LookupError)
+      stored = member.as(Type)
+      unless can_be_stored?(stored)
+        return LookupError.new("can't use #{shown(stored)} in unions yet, use a more specific type")
+      end
+      types << TypeQueries.virtual_type(stored)
+      i = i + 1
+    end
+    TypeMerge.merge_all(program, types)
+  end
+
+  def lookup_metaclass(scope : ModuleType, node : Metaclass) : Type | LookupError
+    base = lookup(scope, node.name)
+    return base if base.is_a?(LookupError)
+    base_type = base.as(Type)
+    meta = TypeUnification.metaclass_of(TypeQueries.virtual_type(base_type))
+    if meta.nil?
+      return LookupError.new("#{base_type.full_name} doesn't have a metaclass")
+    end
+    TypeQueries.virtual_type(meta.as(Type))
+  end
+
+  def lookup_proc(scope : ModuleType, node : ProcNotation) : Type | LookupError
+    inputs = [] of Type
+    if ins = node.inputs
+      i = 0
+      while i < ins.size
+        input = ins[i]
+        if input.is_a?(Splat)
+          spliced = lookup(scope, input.as(Splat).exp)
+          return spliced if spliced.is_a?(LookupError)
+          spliced_type = spliced.as(Type)
+          unless spliced_type.is_a?(TupleInstanceType)
+            return LookupError.new("can only splat tuple type, not #{spliced_type.full_name}")
+          end
+          tuple_types = spliced_type.as(TupleInstanceType).tuple_types
+          j = 0
+          while j < tuple_types.size
+            inputs << tuple_types[j]
+            j = j + 1
+          end
+        else
+          arg = lookup(scope, input)
+          return arg if arg.is_a?(LookupError)
+          arg_type = arg.as(Type)
+          unless can_be_stored?(arg_type)
+            return LookupError.new("can't use #{shown(arg_type)} as proc argument yet, use a more specific type")
+          end
+          inputs << TypeQueries.virtual_type(arg_type)
+        end
+        i = i + 1
+      end
+    end
+
+    ret : Type = program.nil_type
+    if output_node = node.output
+      result = lookup(scope, output_node)
+      return result if result.is_a?(LookupError)
+      ret_type = result.as(Type)
+      unless can_be_stored?(ret_type)
+        return LookupError.new("can't use #{shown(ret_type)} as proc return type yet, use a more specific type")
+      end
+      ret = TypeQueries.virtual_type(ret_type)
+    end
+    @instances.proc_of(inputs, ret)
+  end
+
+  # `self` in a generic is the generic instantiated with its own type
+  # parameters; elsewhere it is the scope's virtual type.
+  def lookup_self(scope : ModuleType) : Type | LookupError
+    if scope.is_a?(SemanticProgram)
+      return LookupError.new("there's no self in this scope")
+    end
+    if scope.is_a?(GenericClassType)
+      generic = scope.as(GenericClassType)
+      params = [] of Type
+      generic.type_vars.each do |type_var|
+        if param = generic.lookup_type(type_var)
+          params << param
+        end
+      end
+      return @instances.instantiate_generic(generic, params)
+    end
+    TypeQueries.virtual_type(scope)
+  end
+
+  # Whether a type may be written in a union or a type argument (hosted
+  # `Type#can_be_stored?`): an unbound generic may not.
+  def can_be_stored?(type : Type) : Bool
+    if type.is_a?(GenericClassType) || type.is_a?(GenericModuleType)
+      return false
+    end
+    true
+  end
+
+  # The type as the hosted compiler writes it in a message: an unbound generic
+  # with its type variables (`Box(T)`), anything else by its full name.
+  def shown(type : Type) : String
+    if type.is_a?(GenericClassType) || type.is_a?(GenericModuleType)
+      return generic_text(type)
+    end
+    type.full_name
+  end
+
+  # ---- generics ----
+
+  def lookup_generic(scope : ModuleType, node : Generic) : Type | LookupError
+    base = lookup(scope, node.name)
+    return base if base.is_a?(LookupError)
+    base_type = base.as(Type)
+
+    if base_type.is_a?(GenericClassType) && base_type.full_name == "NamedTuple"
+      return lookup_named_tuple(scope, node)
+    end
+
+    unless base_type.is_a?(GenericClassType) || base_type.is_a?(GenericModuleType)
+      return LookupError.new("#{base_type.full_name} is not a generic type, it's a #{base_type.type_desc}")
+    end
+
+    if named = node.named_args
+      if named.size > 0
+        return LookupError.new("can only use named arguments with NamedTuple")
+      end
+    end
+
+    type_vars = generic_type_vars(base_type)
+    given = node.type_vars.size
+    if splat_index?(base_type)
+      min_needed = type_vars.size - 1
+      if given < min_needed
+        return LookupError.new("wrong number of type vars for #{generic_text(base_type)} (given #{given}, expected #{min_needed}+)")
+      end
+    elsif given != type_vars.size
+      return LookupError.new("wrong number of type vars for #{generic_text(base_type)} (given #{given}, expected #{type_vars.size})")
+    end
+
+    if base_type.is_a?(GenericClassType) && base_type.full_name == "StaticArray"
+      return lookup_static_array(scope, node)
+    end
+
+    args = lookup_type_args(scope, node)
+    return args if args.is_a?(LookupError)
+    type_args = args.as(Array(Type))
+
+    instantiate(base_type, type_args)
+  end
+
+  # The instance of *base_type* with its type arguments resolved: the tail of lookup_generic. The type
+  # system calls it for the type nodes the declaration pass resolves.
+  def instantiate(base_type : Type, type_args : Array(Type)) : Type
+    if base_type.is_a?(GenericTraitType)
+      return @instances.instantiate_generic_trait(base_type.as(GenericTraitType), type_args)
+    end
+    if base_type.is_a?(GenericModuleType)
+      return @instances.instantiate_generic_module(base_type.as(GenericModuleType), type_args)
+    end
+    generic = base_type.as(GenericClassType)
+    if generic.full_name == "Tuple"
+      return @instances.tuple_of(type_args)
+    end
+    if generic.full_name == "Union"
+      return TypeMerge.merge_all(program, type_args)
+    end
+    if generic.full_name == "Proc"
+      ret = type_args[type_args.size - 1]
+      inputs = [] of Type
+      i = 0
+      while i < type_args.size - 1
+        inputs << type_args[i]
+        i = i + 1
+      end
+      return @instances.proc_of(inputs, ret)
+    end
+    if generic.full_name == "Pointer"
+      return @instances.pointer_of(type_args[0])
+    end
+    @instances.instantiate_generic(generic, type_args)
+  end
+
+  # `NamedTuple(a: T, ...)`: named arguments only.
+  def lookup_named_tuple(scope : ModuleType, node : Generic) : Type | LookupError
+    unless node.type_vars.empty?
+      return LookupError.new("can only instantiate NamedTuple with named arguments")
+    end
+    entries = [] of NamedArgumentType
+    if named = node.named_args
+      i = 0
+      while i < named.size
+        na = named[i]
+        if na.value.is_a?(NumberLiteral)
+          return LookupError.new("can't use number as type for NamedTuple")
+        end
+        found = lookup(scope, na.value)
+        return found if found.is_a?(LookupError)
+        found_type = found.as(Type)
+        unless can_be_stored?(found_type)
+          return LookupError.new("can't use #{shown(found_type)} as a generic type argument yet, use a more specific type")
+        end
+        entries << NamedArgumentType.new(na.name, TypeQueries.virtual_type(found_type))
+        i = i + 1
+      end
+    end
+    @instances.named_tuple_of(entries)
+  end
+
+  # `StaticArray(T, N)`: N is a number literal. A constant size is not ported.
+  # Check and virtualize the element like lookup_type_args and the body's
+  # `uninitialized` path, so both produce the same StaticArray instance.
+  def lookup_static_array(scope : ModuleType, node : Generic) : Type | LookupError
+    elem = lookup(scope, node.type_vars[0])
+    return elem if elem.is_a?(LookupError)
+    size_node = node.type_vars[1]
+    unless size_node.is_a?(NumberLiteral)
+      return LookupError.new("a constant size of StaticArray is not ported yet")
+    end
+    elem_type = elem.as(Type)
+    unless can_be_stored?(elem_type)
+      return LookupError.new("can't use #{shown(elem_type)} as a generic type argument yet, use a more specific type")
+    end
+    size = size_node.as(NumberLiteral).value.to_i64
+    @instances.static_array_of(TypeQueries.virtual_type(elem_type), size)
+  end
+
+  # The type arguments of a generic written in *scope*. A splat of a tuple
+  # spreads its types; a splat of a type parameter stays a splat.
+  def lookup_type_args(scope : ModuleType, node : Generic) : Array(Type) | LookupError
+    args = [] of Type
+    i = 0
+    while i < node.type_vars.size
+      type_var = node.type_vars[i]
+      if type_var.is_a?(NumberLiteral)
+        return LookupError.new("argument to #{node.name.to_s} must be a type, not #{type_var.to_s}")
+      end
+      if type_var.is_a?(Splat)
+        spliced = lookup(scope, type_var.as(Splat).exp)
+        return spliced if spliced.is_a?(LookupError)
+        spliced_type = spliced.as(Type)
+        if spliced_type.is_a?(TupleInstanceType)
+          tuple_types = spliced_type.as(TupleInstanceType).tuple_types
+          j = 0
+          while j < tuple_types.size
+            args << tuple_types[j]
+            j = j + 1
+          end
+        elsif spliced_type.is_a?(TypeParameterType)
+          args << TypeSplat.new(program, spliced_type)
+        else
+          return LookupError.new("can only splat tuple type, not #{spliced_type.full_name}")
+        end
+      else
+        found = lookup(scope, type_var)
+        return found if found.is_a?(LookupError)
+        found_type = found.as(Type)
+        unless can_be_stored?(found_type)
+          return LookupError.new("can't use #{shown(found_type)} as a generic type argument yet, use a more specific type")
+        end
+        args << TypeQueries.virtual_type(found_type)
+      end
+      i = i + 1
+    end
+    args
+  end
+
+  def generic_type_vars(base : Type) : Array(String)
+    if base.is_a?(GenericClassType)
+      return base.as(GenericClassType).type_vars
+    end
+    base.as(GenericModuleType).type_vars
+  end
+
+  def splat_index?(base : Type) : Bool
+    if base.is_a?(GenericClassType)
+      return !base.as(GenericClassType).splat_index.nil?
+    end
+    !base.as(GenericModuleType).splat_index.nil?
+  end
+
+  # The unbound generic as hosted prints it: `Box(T)`.
+  def generic_text(base : Type) : String
+    "#{base.full_name}(#{generic_type_vars(base).join(", ")})"
+  end
+end

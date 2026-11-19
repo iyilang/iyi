@@ -1,0 +1,7 @@
+@[Unsafe("a C function is not checked by the compiler")]
+fun probe(argc : Int32) : Int32
+  (callstack = uninitialized Int32
+  p = pointerof(callstack).as(Pointer(Int32))
+  q = pointerof(callstack)
+  argc)
+end

@@ -1,0 +1,16 @@
+# Builtin generic instances named by signatures: Tuple, Proc, Range, Slice, Array, Hash and Pointer.
+# Each instance is recorded in its generic's instantiated types, so the type-id walk numbers it.
+def tuple_arg(t : Tuple(Int32, String)) : Nil
+end
+
+def proc_arg(f : Proc(Int32, Int32)) : Nil
+end
+
+def range_arg(r : Range(Int32, Int32), s : Slice(Int32)) : Nil
+end
+
+def container_arg(a : Array(Int32), h : Hash(Int32, Int32)) : Nil
+end
+
+def pointer_arg(p : Pointer(Pointer(UInt8)), q : Pointer(Int32)) : Nil
+end

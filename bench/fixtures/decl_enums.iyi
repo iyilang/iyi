@@ -1,0 +1,32 @@
+enum Color
+  Red
+  Green
+  Blue
+end
+
+enum StatusCode : UInt16
+  Ok          = 200
+  NotFound    = 404
+  ServerError = 500
+end
+
+enum Permissions
+  None    = 0
+  Read    = 1 << 0
+  Write   = 1 << 1
+  Execute = 1 << 2
+end
+
+enum Priority
+  Low
+  High
+
+  def urgent? : Bool
+    self == High
+  end
+end
+
+enum ConfigOption
+  Default
+  @@counter = 0
+end

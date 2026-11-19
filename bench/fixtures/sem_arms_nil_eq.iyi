@@ -1,0 +1,6 @@
+def pick(flag : Bool) : String | Nil
+  flag ? "a" : nil
+end
+
+s = "a"
+puts(s == pick(true))

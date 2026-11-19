@@ -1,0 +1,16 @@
+class Cell(T)
+  def value : T
+    nil
+  end
+end
+
+def make_cell : Cell(Int32)
+  nil
+end
+
+def make_pointer : Pointer(Int32)
+  nil
+end
+
+# call make_cell.value()
+# call make_pointer.value()

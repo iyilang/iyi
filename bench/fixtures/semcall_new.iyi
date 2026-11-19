@@ -1,0 +1,35 @@
+# `T.new(args)` resolved to the initialize overloads of T, and overridden by an
+# explicit `self.new`. Read by bench/selfhost_semantic_calls_exercise.sh.
+#
+# `Baz.new(1)` is an `# error` line only: the lookup oracle runs right after the
+# declarations, before the hosted main pass generates the `new` of a subclass
+# that declares no initialize, so only the whole compile sees its overload.
+
+class Foo
+  def initialize(x : Int32)
+  end
+
+  def initialize(s : String)
+  end
+end
+
+class Baz < Foo
+end
+
+class Solo
+  def initialize(b : Bool)
+  end
+
+  def self.new(x : Int32) : Solo
+    Solo.new(true)
+  end
+end
+
+# call Foo.new(1)
+# call Foo.new("a")
+# call Foo.new(true)
+# call Solo.new(1)
+# call Solo.new(true)
+# error Foo.new(1)
+# error Baz.new(1)
+# error Foo.new(1, 2)

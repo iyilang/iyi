@@ -1,0 +1,10 @@
+enum E : Int32
+  A
+  B
+end
+
+def accept(value : E) : Nil
+end
+
+accept(E::B)
+equal = E::A == E::B

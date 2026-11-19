@@ -10,7 +10,7 @@ ran `windows-std-platforms` - which never runs it - and passed. And it did
 not see a gate another script runs: 483 of the 590 files under bench/ were
 run by no job it knew of, so a change to a module exercise ran none of them.
 
-Three parts. The first runs the planner as CI does, on this tree, and names
+Four parts. The first runs the planner as CI does, on this tree, and names
 the jobs each change must and must not select. It takes the planner's path,
 so it can be pointed at an older one: the planner before this fix fails the
 first three checks, and has no `Reach` for the second part. The second
@@ -21,12 +21,21 @@ comment above the next job. The third holds `bench/gates_reachable.py`'s
 stricter reading - what a line *runs*, not what it names - to a command, a
 comment, a message, a `$( )` in quotes, a loop, a function and Python's
 strings, reads and subprocesses.
+
+The fourth holds the self-host gates' shard deal to the same standard. Each
+self-host job must run the shards of the count the driver deals, and
+`bench/selfhost_gates.sh --list` must put every gate on disk in exactly one
+shard. A deal that drops a gate or puts one in two is refused by the same
+check. It runs no gate.
 """
 import importlib.util
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -98,12 +107,54 @@ reason, jobs = planned(".github/workflows/iyi.yml")
 check("a change to CI whose base workflow cannot be read runs everything",
       reason.startswith("the change is to CI itself") and "darwin" in jobs, f"{reason}: {sorted(jobs)}")
 
+# Each compiler component change selects macOS, Linux and Windows.
+for files, what in [
+    (["src/compiler/codegen/codegen.iyi"], "a self-host compiler source"),
+    (["bench/selfhost_lexer_exercise.sh"], "a self-host gate"),
+    (["bench/native_ir_exercise.sh"], "a native compiler gate"),
+    (["bench/lib/host.sh"], "the shared test-host helper"),
+    (["bench/fixtures/compile_stdout.iyi"], "a fixture the self-host gates read"),
+    (["bench/selfhost_gates.sh", "src/compiler/syntax/lexer.iyi"], "a mixed change to the self-host gates and the compiler"),
+]:
+    reason, jobs = planned(*files)
+    check(f"{what} selects all three self-host jobs",
+          {"selfhost", "selfhost-darwin", "selfhost-windows"} <= jobs,
+          f"{reason}: {sorted(jobs)}")
+
+reason, jobs = planned("src/iyi/string.iyi")
+check("an ordinary prelude change does not select component-only jobs",
+      not {"selfhost", "selfhost-darwin", "selfhost-windows"} & jobs,
+      f"{reason}: {sorted(jobs)}")
+
 print()
 print("== a workflow and a bench directory of this exercise's own")
 
 spec = importlib.util.spec_from_file_location("ci_plan_under_test", PLANNER)
 planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
+
+# Execute the workflow's result command: selected jobs must have actually run.
+actual_jobs = planner.parse_jobs((ROOT / ".github" / "workflows" / "iyi.yml").read_text(encoding="utf-8"))
+result_lines = actual_jobs["result"]["text"].splitlines()
+command_lines = []
+for line in result_lines[result_lines.index("        run: |") + 1:]:
+    if line.strip() and not line.startswith("          "):
+        break
+    command_lines.append(line[10:])
+result_command = "\n".join(command_lines)
+for what, selected, verdicts, passes in [
+    ("selected success permits unselected skips", ["probe"], {"probe": "success", "unused": "skipped"}, True),
+    ("a selected skip blocks the result", ["probe"], {"probe": "skipped"}, False),
+    ("a missing selected job blocks the result", ["probe"], {}, False),
+    ("a skipped plan blocks the result", ["probe"], {"plan": "skipped", "probe": "success"}, False),
+    ("an intentionally empty plan can pass", [], {"unused": "skipped"}, True),
+]:
+    results = {name: {"result": verdict} for name, verdict in verdicts.items()}
+    results.setdefault("plan", {"result": "success"})["outputs"] = {"jobs": json.dumps(selected)}
+    ran = subprocess.run(["bash", "-c", result_command], cwd=ROOT, capture_output=True, text=True,
+                         env={**os.environ, "RESULTS": json.dumps(results)})
+    check(what, (ran.returncode == 0) == passes, ran.stdout + ran.stderr)
+
 if not hasattr(planner, "Reach"):
     check("the planner reads what runs what (`Reach`)", False, f"{PLANNER} has no Reach")
 else:
@@ -184,6 +235,65 @@ for text, python, expected, what in [
 ]:
     found = gates.runs(text, names, python)
     check(f"{what} -> {sorted(expected) or 'nothing'}", found == expected, f"got {sorted(found)}")
+
+
+print()
+print("== the self-host gates' shard deal: every gate in exactly one shard")
+
+
+def job_block(text, job_id):
+    """The lines of one job of the workflow, from its header to the next job's."""
+    lines = text.splitlines()
+    start = lines.index(f"  {job_id}:")
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"^  [A-Za-z0-9_-]+:\s*$", lines[i])), len(lines))
+    return "\n".join(lines[start:end])
+
+
+def deal_problems(rows, gates, shards):
+    """What is wrong with a deal, as *rows* of (shard, weight, gate) say it: a gate in
+    no shard or in more than one, a name that is not a gate on disk, a shard out of range."""
+    problems = []
+    seen = Counter(name for _, _, name in rows)
+    problems += [f"{name} is in {seen[name]} shards" for name in gates if seen[name] != 1]
+    problems += [f"{name} is not a gate on disk" for name in seen if name not in gates]
+    problems += [f"{name} is in shard {shard}, not 1 to {shards}" for shard, _, name in rows
+                 if not 1 <= shard <= shards]
+    return problems
+
+
+driver = ROOT / "bench" / "selfhost_gates.sh"
+default = re.search(r"^DEFAULT_SHARDS=(\d+)$", driver.read_text(encoding="utf-8"), re.M)
+shards = int(default.group(1)) if default else 0
+for job in ["selfhost", "selfhost-darwin", "selfhost-windows"]:
+    block = job_block(workflow_text, job)
+    matrix = re.search(r"^        shard: \[([0-9, ]+)\]$", block, re.M)
+    listed = [int(n) for n in matrix.group(1).split(",")] if matrix else []
+    run = re.search(r"bash bench/selfhost_gates\.sh --shard \$\{\{ matrix\.shard \}\}/(\d+)", block)
+    check(f"{job} runs shard K of N for each shard of its matrix, with N the driver's default",
+          shards >= 1 and listed == list(range(1, shards + 1)) and run is not None and int(run.group(1)) == shards,
+          f"matrix {listed}, run {run.group(0) if run else 'none'}, driver default {shards}")
+
+listing = subprocess.run(["bash", str(driver), "--list", str(shards)], cwd=ROOT,
+                         capture_output=True, text=True, encoding="utf-8")
+rows = []
+for line in listing.stdout.splitlines():
+    found = re.match(r"^(\d+) (\d+) (\S+)( unweighted)?$", line)
+    if found:
+        rows.append((int(found.group(1)), int(found.group(2)), found.group(3)))
+on_disk = sorted(p.name[:-3] for p in (ROOT / "bench").iterdir()
+                 if p.is_file() and re.match(r"^(selfhost|native)_.*_exercise\.sh$", p.name))
+problems = deal_problems(rows, on_disk, shards)
+check(f"the deal puts each of the {len(on_disk)} gates in exactly one of {shards} shards",
+      listing.returncode == 0 and bool(rows) and not problems,
+      "\n".join(problems) or f"exit {listing.returncode}: {listing.stderr.strip()}")
+check("a deal that drops one gate is refused", bool(deal_problems(rows[1:], on_disk, shards)),
+      "the check accepted a deal with a gate dropped")
+check("a deal that puts one gate in two shards is refused", bool(deal_problems(rows + rows[:1], on_disk, shards)),
+      "the check accepted a gate in two shards")
+for args, named in [(["--shard", "5/4"], "--shard 5/4"), (["--shard", "x"], "--shard x"), (["--frob"], "'--frob'")]:
+    refused = subprocess.run(["bash", str(driver), *args], cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+    check(f"bash bench/selfhost_gates.sh {' '.join(args)} is refused by name, with exit 2",
+          refused.returncode == 2 and named in refused.stderr, refused.stdout + refused.stderr)
 
 print()
 if failures:

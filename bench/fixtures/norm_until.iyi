@@ -1,0 +1,14 @@
+def drain_queue(count : Int32) : Int32
+  total = 0
+  until count == 0
+    total = total + count
+    count = count - 1
+  end
+  total
+end
+
+def wait_ready(ready : Bool, attempts : Int32) : Nil
+  until ready || attempts <= 0
+    attempts = attempts - 1
+  end
+end

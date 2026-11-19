@@ -1,0 +1,14 @@
+def swap_pair(x : Int32, y : Int32) : Tuple(Int32, Int32)
+  x, y = y, x
+  {x, y}
+end
+
+def unpack_coordinates(point : Tuple(Int32, Int32, Int32)) : Int32
+  a, b, c = point
+  a + b + c
+end
+
+def unpack_first_last(items : Array(Int32)) : Tuple(Int32, Int32)
+  first, *middle, last = items
+  {first, last}
+end

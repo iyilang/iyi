@@ -1,0 +1,9 @@
+def block_control(x : Int32, y : Int32, &) : Int32
+  yield x
+end
+
+def block_control(x : String, y : String, &) : String
+  yield x
+end
+
+block_control(1, "a") { |x| x }

@@ -1,0 +1,7 @@
+def yield_num(&)
+  yield 42
+end
+
+res = yield_num do |n|
+  n
+end

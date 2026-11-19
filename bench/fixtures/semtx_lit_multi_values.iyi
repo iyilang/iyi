@@ -1,0 +1,5 @@
+# Several values, one per target: each goes to its own temporary first.
+a, b = 1, "two"
+c, d, e = b, a, 3
+f, g = [1, 2], {3 => 4}
+h, i = a + 1, c

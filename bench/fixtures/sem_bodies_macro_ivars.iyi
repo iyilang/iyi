@@ -1,0 +1,17 @@
+class MacroFactsPair
+  def initialize(@left : Int32, @right : Int64)
+  end
+
+  def fields
+    {% for ivar in @type.instance_vars %}
+      {{ ivar.name.id }} = @{{ ivar.name.id }}
+    {% end %}
+    {% if @type.instance_vars.size == 2 %}
+      1
+    {% else %}
+      "wrong"
+    {% end %}
+  end
+end
+
+value = MacroFactsPair.new(1, 2_i64).fields

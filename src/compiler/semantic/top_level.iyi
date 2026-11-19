@@ -1,0 +1,4556 @@
+module compiler/semantic/top_level
+
+import compiler/foundation/location::{Location}
+import compiler/foundation/errors::{refuse_port}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/token::{NumberKind}
+import compiler/syntax/ast::{ASTNode, Alias, And, Annotation, Arg, Assign, AssocTypeDecl, BoolLiteral, Call, CStructOrUnionDef, ClassDef, ClassVar, Def, EnumDef, Expressions, Extend, ExternalVar, FunDef, Generic, ImplDef, Include, ImportDecl, InstanceVar, LibDef, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, Metaclass, ModuleDef, ModuleHeader, Nop, Not, NumberLiteral, Or, Path, Primitive, ProcNotation, Require, Self, StringLiteral, SymbolLiteral, TraitDef, TypeDeclaration, TypeDef, Union, Var, Visibility, VisibilityModifier}
+import compiler/syntax/ast::{Splat, Underscore, Yield}
+import compiler/syntax/visitor::{Visitor}
+import compiler/macros/engine::{MacroEngine}
+import compiler/macros/target_flags::{MacroTargetFlags}
+import compiler/semantic/inline_macros::{expand_inline_macro, splice_body_node, splice_inline_sites}
+import compiler/semantic/normalizer::{NormalizerProgram}
+
+pub class TypeException
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+module TypeNameEpoch
+  @@value : UInt64 = 0_u64
+
+  def self.current : UInt64
+    @@value
+  end
+
+  def self.changed : Nil
+    @@value = @@value &+ 1_u64
+  end
+end
+
+pub abstract class Type
+  property program : SemanticProgram
+  getter namespace : ModuleType?
+  getter name : String
+  @cached_base_name : String? = nil
+  @cached_base_epoch : UInt64 = 0_u64
+  @cached_composed_part : String? = nil
+  @cached_composed_prefix : String? = nil
+  @cached_composed_suffix : String? = nil
+  @cached_composed_name : String? = nil
+  property visibility : Visibility
+  property abstract : Bool
+  property struct : Bool
+  property locations : Array(Location)? = nil
+  # Hosted Type includes Annotatable (types.cr:5-6, annotatable.cr:3-25).
+  property annotations : Hash(AnnotationType, Array(Annotation))? = nil
+  property share_trusted : Bool = false
+  property share_owns : Bool = false
+
+  def add_annotation(annotation_type : AnnotationType, value : Annotation) : Nil
+    annotations = @annotations
+    if annotations.nil?
+      annotations = Hash(AnnotationType, Array(Annotation)).new
+      @annotations = annotations
+    end
+    values = annotations[annotation_type]?
+    if values.nil?
+      values = [] of Annotation
+      annotations[annotation_type] = values
+    end
+    values << value
+    nil
+  end
+
+  def annotation(annotation_type : AnnotationType) : Annotation?
+    if annotations = @annotations
+      if values = annotations[annotation_type]?
+        return values.last?
+      end
+    end
+    nil
+  end
+
+  def initialize(@program : SemanticProgram, @namespace : ModuleType?, @name : String)
+    @visibility = Visibility::Public
+    @abstract = false
+    @struct = false
+  end
+
+  # A rename can affect nested types too, so invalidate their cached names.
+  def name=(name : String) : String
+    @name = name
+    TypeNameEpoch.changed
+    name
+  end
+
+  def namespace=(namespace : ModuleType?) : ModuleType?
+    @namespace = namespace
+    TypeNameEpoch.changed
+    namespace
+  end
+
+  # The name as a type argument. The hosted printer passes skip_union_parens to
+  # a type argument, so a union loses its outer parentheses.
+  def arg_full_name : String
+    full_name
+  end
+
+  # The type with a virtual wrapper removed. The hosted printer calls this unless
+  # it is printing an IR name. A type that is not virtual is itself.
+  def devirtualize : Type
+    self
+  end
+
+  # A concrete generic class instance is not a ModuleType, but its metaclass
+  # is still the parent of a subclass's metaclass.
+  def superclass_metaclass : ModuleType
+    raise "BUG: #{full_name} has no superclass metaclass"
+  end
+
+  # Generic instances live outside ModuleType but can contribute fields through
+  # an instantiated superclass or included module.
+  def lookup_instance_var?(var_name : String) : MetaTypeVar?
+    nil
+  end
+
+  def all_instance_vars? : Hash(String, MetaTypeVar)?
+    nil
+  end
+
+  # Records a place this type is declared, as the hosted pass does (`attach_doc`).
+  def add_location(location : Location) : Nil
+    if @locations.nil?
+      @locations = [] of Location
+    end
+    @locations.as(Array(Location)) << location
+    nil
+  end
+
+  def base_full_name : String
+    if @cached_base_epoch == TypeNameEpoch.current
+      if cached = @cached_base_name
+        return cached
+      end
+    end
+    result = if ns = @namespace
+               ns.is_a?(SemanticProgram) ? @name : "#{ns.base_full_name}::#{@name}"
+             else
+               @name
+             end
+    @cached_base_name = result
+    @cached_base_epoch = TypeNameEpoch.current
+    result
+  end
+
+  # Cache composite spellings by their actual component, so renames and
+  # mutable wrapped-type references cannot leave a stale name behind.
+  def composed_name(prefix : String, part : String, suffix : String) : String
+    if value = @cached_composed_name
+      if @cached_composed_part == part && @cached_composed_prefix == prefix && @cached_composed_suffix == suffix
+        return value
+      end
+    end
+    value = prefix + part + suffix
+    @cached_composed_part = part
+    @cached_composed_prefix = prefix
+    @cached_composed_suffix = suffix
+    @cached_composed_name = value
+    value
+  end
+
+  def full_name : String
+    base_full_name
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  # The name this type takes inside a union. The hosted printer devirtualizes
+  # union members, so a virtual type prints its base type.
+  def member_name : String
+    full_name
+  end
+
+  # Registers a direct subclass. Only a class keeps a list of them.
+  def register_subclass(sub : Type) : Nil
+    nil
+  end
+
+  def ==(other : Type) : Bool
+    return true if object_id == other.object_id
+    full_name == other.full_name
+  end
+
+  def type_desc : String
+    "type"
+  end
+
+  def abstract? : Bool
+    @abstract
+  end
+
+  def struct? : Bool
+    @struct
+  end
+
+  def class? : Bool
+    false
+  end
+
+  def module? : Bool
+    false
+  end
+
+  def trait? : Bool
+    false
+  end
+
+  def enum? : Bool
+    false
+  end
+
+  def alias? : Bool
+    false
+  end
+
+  def const? : Bool
+    false
+  end
+
+  def lookup_macro?(name : String) : Macro?
+    nil
+  end
+
+  def nil_type? : Bool
+    full_name == "Nil"
+  end
+
+  def nilable? : Bool
+    if nil_type?
+      true
+    elsif self.is_a?(UnionType)
+      self.as(UnionType).union_types.any?(&.nilable?)
+    else
+      false
+    end
+  end
+
+  def private? : Bool
+    @visibility == Visibility::Private
+  end
+
+  def public? : Bool
+    @visibility == Visibility::Public
+  end
+
+  # The type with every typedef removed. Only a typedef changes it.
+  def remove_typedef : Type
+    self
+  end
+
+  def union? : Bool
+    false
+  end
+
+  def subtype_of?(other : Type) : Bool
+    return true if self == other
+    # Hosted types.cr:421-433 unwraps virtual restriction types before checking parents.
+    target = other.devirtualize
+    return subtype_of?(target) unless target == other
+    if self.is_a?(UnionType)
+      sut = self.as(UnionType)
+      i = 0
+      while i < sut.union_types.size
+        return false unless sut.union_types[i].subtype_of?(other)
+        i = i + 1
+      end
+      return true
+    end
+    if other.is_a?(UnionType)
+      ut = other.as(UnionType)
+      i = 0
+      while i < ut.union_types.size
+        return true if self.subtype_of?(ut.union_types[i])
+        i = i + 1
+      end
+      return false
+    end
+    if self.is_a?(ModuleType)
+      mod = self.as(ModuleType)
+      p_idx = 0
+      while p_idx < mod.parents.size
+        return true if mod.parents[p_idx].subtype_of?(other)
+        p_idx = p_idx + 1
+      end
+    end
+    false
+  end
+
+  def implements?(other : Type) : Bool
+    subtype_of?(other)
+  end
+end
+
+pub abstract class NamedType < Type
+  getter types : Hash(String, Type)
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+    @types = Hash(String, Type).new
+  end
+
+  def add_type(name : String, type : Type) : Nil
+    @types[name] = type
+  end
+
+  def lookup_type(name : String) : Type?
+    @types[name]?
+  end
+end
+
+pub class MetaTypeVar
+  property name : String
+  property var_type : Type?
+  property initializer : ASTNode?
+  property location : Location?
+  # iyi: the type a variable is declared in (hosted MetaTypeVar#owner); nil for a built-in one.
+  property owner : Type? = nil
+  # iyi: a class variable declared `@[ThreadLocal]` (hosted MetaTypeVar#thread_local?).
+  property thread_local : Bool = false
+
+  def initialize(@name : String, @var_type : Type? = nil, @initializer : ASTNode? = nil, @location : Location? = nil)
+  end
+
+  def type : Type
+    if t = @var_type
+      t
+    else
+      raise("untyped MetaTypeVar: #{@name}")
+    end
+  end
+
+  def type? : Type?
+    @var_type
+  end
+end
+
+pub abstract class ModuleType < NamedType
+  property iyi_unit : Bool = false
+  getter defs : Hash(String, Array(Def))
+  getter parents : Array(Type)
+  getter including_types : Array(Type)
+  getter instance_vars : Hash(String, MetaTypeVar)
+  getter class_vars : Hash(String, MetaTypeVar)
+  getter macros : Hash(String, Array(Macro))
+  @metaclass : ModuleType?
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+    @defs = Hash(String, Array(Def)).new
+    @parents = [] of Type
+    @including_types = [] of Type
+    @instance_vars = Hash(String, MetaTypeVar).new
+    @class_vars = Hash(String, MetaTypeVar).new
+    @macros = Hash(String, Array(Macro)).new
+  end
+
+  def lookup_instance_var?(var_name : String) : MetaTypeVar?
+    if iv = @instance_vars[var_name]?
+      return iv
+    end
+    if self.is_a?(ClassType)
+      if sc = self.as(ClassType).superclass
+        if iv = sc.lookup_instance_var?(var_name)
+          return iv
+        end
+      end
+    end
+    @parents.each do |p|
+      if iv = p.lookup_instance_var?(var_name)
+        return iv
+      end
+    end
+    nil
+  end
+
+  def lookup_class_var?(var_name : String) : MetaTypeVar?
+    if self.is_a?(MetaclassType)
+      if it = self.as(MetaclassType).instance_type
+        if it.is_a?(ModuleType)
+          return it.as(ModuleType).lookup_class_var?(var_name)
+        end
+      end
+    end
+    if cv = @class_vars[var_name]?
+      return cv
+    end
+    if self.is_a?(ClassType)
+      if sc = self.as(ClassType).superclass
+        if sc.is_a?(ModuleType)
+          if cv = sc.as(ModuleType).lookup_class_var?(var_name)
+            return cv
+          end
+        end
+      end
+    end
+    @parents.each do |p|
+      if p.is_a?(ModuleType)
+        if cv = p.as(ModuleType).lookup_class_var?(var_name)
+          return cv
+        end
+      end
+    end
+    nil
+  end
+
+  def all_instance_vars : Hash(String, MetaTypeVar)
+    all_ivars = Hash(String, MetaTypeVar).new
+    if self.is_a?(ClassType)
+      if sc = self.as(ClassType).superclass
+        if sc.is_a?(ModuleType)
+          sc.as(ModuleType).all_instance_vars.each do |k, v|
+            all_ivars[k] = v
+          end
+        elsif vars = sc.all_instance_vars?
+          vars.each { |k, v| all_ivars[k] = v }
+        end
+      end
+    end
+    @parents.each do |p|
+      if p.is_a?(ModuleType)
+        p.as(ModuleType).all_instance_vars.each do |k, v|
+          all_ivars[k] = v
+        end
+      elsif vars = p.all_instance_vars?
+        vars.each { |k, v| all_ivars[k] = v }
+      end
+    end
+    @instance_vars.each do |k, v|
+      all_ivars[k] = v
+    end
+    all_ivars
+  end
+
+  def all_class_vars : Hash(String, MetaTypeVar)
+    all_cvars = Hash(String, MetaTypeVar).new
+    if self.is_a?(ClassType)
+      if sc = self.as(ClassType).superclass
+        if sc.is_a?(ModuleType)
+          sc.as(ModuleType).all_class_vars.each do |k, v|
+            all_cvars[k] = v
+          end
+        end
+      end
+    end
+    @parents.each do |p|
+      if p.is_a?(ModuleType)
+        p.as(ModuleType).all_class_vars.each do |k, v|
+          all_cvars[k] = v
+        end
+      end
+    end
+    @class_vars.each do |k, v|
+      all_cvars[k] = v
+    end
+    all_cvars
+  end
+
+  def module? : Bool
+    true
+  end
+
+  def type_desc : String
+    "module"
+  end
+
+  # A def of a name and parameter restrictions the type already has replaces that one, as
+  # the hosted pass does (a user's `def begin_array?` replaces the enum's generated one).
+  # Overloads that differ in a restriction are kept side by side.
+  def add_def(a_def : Def) : Nil
+    @program.record_def_owner(a_def, self)
+    list = @defs[a_def.name]?
+    if list.nil?
+      list = [] of Def
+      @defs[a_def.name] = list
+    end
+    if l = list
+      replaced = false
+      i = 0
+      while i < l.size
+        if same_def_signature?(l[i], a_def)
+          old = l[i]
+          a_def.previous = old
+          old.next = a_def
+          l[i] = a_def
+          replaced = true
+          break
+        end
+        i = i + 1
+      end
+      unless replaced
+        if l.empty?
+          l << a_def
+        else
+          yields = DeclarationOrder.yields?(a_def)
+          at = 0
+          while at < l.size
+            break if DeclarationOrder.before?(a_def, l[at], self, yields)
+            at += 1
+          end
+          l.insert(at, a_def)
+        end
+      end
+    end
+  end
+
+  def same_def_signature?(a : Def, b : Def) : Bool
+    # A splat is a different overload: `push(value)` does not replace `push(*values)`.
+    # Hosted compare_strictness keeps both. Text of the restriction is not enough.
+    return false unless a.splat_index == b.splat_index
+    a_double = a.double_splat
+    b_double = b.double_splat
+    return false if a_double.nil? != b_double.nil?
+    return false unless a.args.size == b.args.size
+    i = 0
+    while i < a.args.size
+      return false unless restrictions_match?(a.args[i].restriction, b.args[i].restriction, a.free_vars, b.free_vars)
+      i = i + 1
+    end
+    # A block parameter is part of the signature: `fetch(key)` and `fetch(key, &block)` are two overloads.
+    ab = a.block_arg
+    bb = b.block_arg
+    if ab.nil? || bb.nil?
+      return ab.nil? && bb.nil?
+    end
+    restrictions_match?(ab.restriction, bb.restriction, a.free_vars, b.free_vars)
+  end
+
+  # Hosted Path#restriction_of? first compares whether each path is a free
+  # variable, including the distinction between no free-variable list and a
+  # present list. Equal paths with equal free-variable status replace each other.
+  def restrictions_match?(ra : ASTNode?, rb : ASTNode?, a_vars : Array(String)?, b_vars : Array(String)?) : Bool
+    if ra.nil? || rb.nil?
+      return ra.nil? && rb.nil?
+    end
+    if unbound_owner_type_var?(ra) || unbound_owner_type_var?(rb)
+      a_free = a_vars ? a_vars.includes?(ra.to_s) : nil
+      b_free = b_vars ? b_vars.includes?(rb.to_s) : nil
+      return false unless a_free == b_free
+    end
+    ra.to_s == rb.to_s
+  end
+
+  def unbound_owner_type_var?(node : ASTNode) : Bool
+    return false unless node.is_a?(Path)
+    path = node.as(Path)
+    return false unless path.names.size == 1
+    return false if path.global
+    if vars = generic_type_vars
+      return vars.includes?(path.names[0])
+    end
+    false
+  end
+
+  # Type variables of the generic this def is added to. Nil on a non-generic.
+  # A metaclass answers its instance type's variables, because `self.new` is
+  # added there (hosted add_def of the expanded new).
+  def generic_type_vars : Array(String)?
+    nil
+  end
+
+  def add_macro(a_macro : Macro) : Nil
+    list = @macros[a_macro.name]?
+    if list.nil?
+      list = [] of Macro
+      @macros[a_macro.name] = list
+    end
+    if l = list
+      l << a_macro
+    end
+  end
+
+  # A local def stops implicit enclosing macro lookup, including at a parent.
+  def lookup_call_macro?(call : Call) : Macro?
+    found = lookup_call_macro_in_scope?(call)
+    return found.as(Macro) if found.is_a?(Macro)
+    return nil if found == true
+    if self != @program
+      found = @program.lookup_call_macro_in_scope?(call)
+      return found.as(Macro) if found.is_a?(Macro)
+    end
+    nil
+  end
+
+  def macro_matches_call?(a_macro : Macro, call : Call) : Bool
+    count = a_macro.args.size
+    splat = a_macro.splat_index
+    min = count
+    i = 0
+    while i < count
+      if a_macro.args[i].default_value
+        min = i
+        break
+      end
+      i = i + 1
+    end
+    max = count
+    if index = splat
+      if a_macro.args[index].external_name.empty?
+        min = index
+        max = index
+      else
+        min = min - 1
+        max = 2147483647
+      end
+      if count > index + 1 && call.named_args.nil?
+        j = index + 1
+        while j < count
+          return false if a_macro.args[j].default_value.nil?
+          j = j + 1
+        end
+      end
+    end
+    return false if call.args.size > max
+    named = call.named_args
+    return false if named.nil? && call.args.size < min
+    if names = named
+      matched = [] of Bool
+      i = 0
+      while i < count
+        matched << false
+        i = i + 1
+      end
+      i = 0
+      while i < call.args.size && i < count
+        if splat.nil? || i < splat.as(Int32)
+          matched[i] = true
+        end
+        i = i + 1
+      end
+      names.each do |arg|
+        index = 0
+        while index < count && a_macro.args[index].external_name != arg.name
+          index = index + 1
+        end
+        if index == count
+          return false if a_macro.double_splat.nil?
+        else
+          return false if splat == index || matched[index]
+          matched[index] = true
+        end
+      end
+      i = 0
+      while i < count
+        if splat != i && a_macro.args[i].default_value.nil? && !matched[i]
+          return false
+        end
+        i = i + 1
+      end
+    end
+    true
+  end
+
+  def lookup_call_macro_in_scope?(call : Call) : Macro | Bool | Nil
+    if list = @macros[call.name]?
+      i = 0
+      while i < list.size
+        return list[i] if macro_matches_call?(list[i], call)
+        i = i + 1
+      end
+    end
+    return true if @defs.has_key?(call.name)
+    @parents.each do |parent|
+      if parent.is_a?(ModuleType)
+        found = parent.as(ModuleType).lookup_call_macro_in_scope?(call)
+        return found unless found.nil?
+      end
+    end
+    nil
+  end
+
+  def include(mod : Type) : Nil
+    @parents.insert(0, mod)
+    if mod.is_a?(NonGenericModuleType) || (mod.is_a?(TraitType) && !mod.is_a?(GenericTraitType))
+      mod.as(ModuleType).add_including_type(self)
+    end
+  end
+
+  # Records a type that includes this module, for including_types.
+  def add_including_type(type : Type) : Nil
+    return nil if type.is_a?(GenericClassType) || type.is_a?(GenericModuleType)
+    @including_types << type
+    nil
+  end
+
+  def metaclass : ModuleType
+    if meta = @metaclass
+      meta
+    else
+      meta = MetaclassType.new(@program, @namespace, "#{@name}:Class", self)
+      @metaclass = meta
+      # The hosted rule: a non-generic class's metaclass has `allocate`, a primitive
+      # (types.cr NonGenericClassType#initialize_metaclass).
+      if self.is_a?(NonGenericClassType)
+        meta.add_def(Def.new("allocate", [] of Arg, Primitive.new("allocate")))
+      end
+      meta
+    end
+  end
+
+  def metaclass? : ModuleType?
+    @metaclass
+  end
+end
+
+# The metadata recorded by the hosted DefWithMetadata at declaration time.
+class DeclarationYieldFinder < Visitor
+  getter found : Bool = false
+
+  def visit(node : Yield) : Bool
+    @found = true
+    false
+  end
+
+  def visit(node : Def) : Bool
+    false
+  end
+end
+
+# Hosted types.cr:1129-1155 inserts each overload before the first one that
+# compare_strictness_old calls less strict. Compare at insertion, not dump time:
+# an unresolved type or a later include must not change an earlier decision.
+class DeclarationOrder
+  def self.before?(first : Def, second : Def, owner : ModuleType, first_yields : Bool) : Bool
+    return false unless first_yields == yields?(second)
+    stricter?(first, second, owner) && !stricter?(second, first, owner)
+  end
+
+  def self.yields?(definition : Def) : Bool
+    return true if definition.block_arg || definition.macro_yields
+    finder = DeclarationYieldFinder.new
+    definition.body.accept(finder)
+    finder.found
+  end
+
+  def self.min_size(definition : Def) : Int32
+    default = definition.args.size
+    definition.args.each_with_index do |arg, i|
+      default = i if arg.default_value && i < default
+    end
+    if splat = definition.splat_index
+      if !definition.args[splat].name.empty?
+        minimum = default
+        minimum -= 1 unless default < splat
+        return minimum
+      end
+      return default < splat ? default : splat
+    end
+    default
+  end
+
+  def self.max_size(definition : Def) : Int32
+    if splat = definition.splat_index
+      return splat if definition.args[splat].name.empty?
+      return 2147483647
+    end
+    definition.args.size
+  end
+
+  def self.named_args(definition : Def) : Array(Arg)?
+    splat = definition.splat_index
+    return nil if splat.nil? || splat.as(Int32) == definition.args.size - 1
+    names = [] of Arg
+    i = splat.as(Int32) + 1
+    while i < definition.args.size
+      arg = definition.args[i]
+      names << arg if arg.default_value.nil?
+      i += 1
+    end
+    names.sorted_by(&.external_name)
+  end
+
+  def self.stricter?(first : Def, second : Def, owner : ModuleType) : Bool
+    first_min = min_size(first)
+    second_min = min_size(second)
+    first_max = max_size(first)
+    second_max = max_size(second)
+    return true if first_min > second_max
+    return false if second_min > first_max
+    return false if first.double_splat && !second.double_splat
+    return true if second.double_splat && !first.double_splat
+    first_splat = first.splat_index
+    second_splat = second.splat_index
+    return false if first_splat && !second_splat
+    return true if second_splat && !first_splat
+
+    limit = if first_splat && second_splat
+              first_min < second_min ? first_min : second_min
+            else
+              first_max < second_max ? first_max : second_max
+            end
+    i = 0
+    while i < limit
+      first_restriction = first.args[i].restriction
+      second_restriction = second.args[i].restriction
+      return false if first_restriction.nil? && !second_restriction.nil?
+      if first_restriction && second_restriction
+        return false if first_splat == i
+        unless restriction_of?(first_restriction, second_restriction, owner, first.free_vars, second.free_vars)
+          return false
+        end
+      end
+      i += 1
+    end
+
+    if first_splat && second_splat
+      if first_splat == second_splat
+        first_restriction = first.args[first_splat].restriction
+        second_restriction = second.args[second_splat].restriction
+        if first_restriction && second_restriction
+          unless restriction_of?(first_restriction, second_restriction, owner, first.free_vars, second.free_vars)
+            return false
+          end
+        elsif first_restriction
+          return true
+        elsif second_restriction
+          return false
+        end
+      else
+        return first_splat > second_splat
+      end
+    end
+
+    first_named = named_args(first)
+    second_named = named_args(second)
+    if first_named && second_named
+      return false unless first_named.size == second_named.size
+      i = 0
+      while i < first_named.size
+        a = first_named[i]
+        b = second_named[i]
+        return false unless a.external_name == b.external_name
+        return false if a.restriction.nil? && !b.restriction.nil?
+        if ar = a.restriction
+          if br = b.restriction
+            return false unless restriction_of?(ar, br, owner, first.free_vars, second.free_vars)
+          end
+        end
+        i += 1
+      end
+      return true
+    end
+    return false if first_named || second_named
+    first_double = first.double_splat
+    second_double = second.double_splat
+    if first_double && second_double
+      ar = first_double.restriction
+      br = second_double.restriction
+      return false if ar.nil? && br
+      if ar && br
+        return false unless restriction_of?(ar, br, owner, first.free_vars, second.free_vars)
+      end
+    end
+    true
+  end
+
+  def self.free_flag(path : Path, names : Array(String)?) : Bool?
+    return nil if names.nil?
+    return nil unless path.names.size == 1 && !path.global
+    names.as(Array(String)).includes?(path.names[0])
+  end
+
+  def self.path_type(path : Path, owner : ModuleType) : Type?
+    found = owner.program.lookup_type_path?(path, owner)
+    return nil if found.nil?
+    owner.program.remove_alias?(found.as(Type))
+  end
+
+  def self.restriction_of?(first : ASTNode, second : ASTNode, owner : ModuleType, first_vars : Array(String)?, second_vars : Array(String)?) : Bool
+    return true if second.is_a?(Underscore)
+    if first.is_a?(Union)
+      first.as(Union).types.each do |member|
+        return false unless restriction_of?(member, second, owner, first_vars, second_vars)
+      end
+      return true
+    end
+    if first.is_a?(Path)
+      path = first.as(Path)
+      first_free = free_flag(path, first_vars)
+      if second.is_a?(Path)
+        other = second.as(Path)
+        second_free = free_flag(other, second_vars)
+        return true if first_free == second_free && path == other
+        return false if first_free
+        first_type = path_type(path, owner)
+        return false if first_type.nil?
+        return true if second_free
+        second_type = path_type(other, owner)
+        return true if second_type.nil?
+        return first_type.as(Type).subtype_of?(second_type.as(Type))
+      end
+      if second.is_a?(Union)
+        return false if first_free
+        second.as(Union).types.each do |member|
+          return true if restriction_of?(first, member, owner, first_vars, second_vars)
+        end
+        return false
+      end
+      if second.is_a?(Generic)
+        return false if first_free
+        first_type = path_type(path, owner)
+        generic_name = second.as(Generic).name
+        return false if first_type.nil? || !generic_name.is_a?(Path)
+        base = path_type(generic_name.as(Path), owner)
+        return false if base.nil? || first_type.as(Type) == base.as(Type)
+        return first_type.as(Type).subtype_of?(base.as(Type))
+      end
+      return false
+    end
+    if first.is_a?(Generic)
+      generic = first.as(Generic)
+      if second.is_a?(Generic)
+        other = second.as(Generic)
+        return true if generic == other && first_vars == second_vars
+        return false unless generic.name == other.name && generic.type_vars.size == other.type_vars.size
+        i = 0
+        while i < generic.type_vars.size
+          return false unless restriction_of?(generic.type_vars[i], other.type_vars[i], owner, first_vars, second_vars)
+          i += 1
+        end
+        return true
+      end
+      if second.is_a?(Path)
+        other = second.as(Path)
+        other_free = free_flag(other, second_vars)
+        unless other_free
+          base_node = generic.name
+          if base_node.is_a?(Path)
+            base = path_type(base_node.as(Path), owner)
+            other_type = path_type(other, owner)
+            if base && other_type && (base.is_a?(GenericClassType) || base.is_a?(GenericModuleType) || base.is_a?(GenericTraitType))
+              return base.as(Type).subtype_of?(other_type.as(Type))
+            end
+          end
+        end
+        return true
+      end
+      return false
+    end
+    if first.is_a?(Metaclass)
+      if second.is_a?(Metaclass)
+        return restriction_of?(first.as(Metaclass).name, second.as(Metaclass).name, owner, first_vars, second_vars)
+      end
+      if second.is_a?(Path)
+        other_type = path_type(second.as(Path), owner)
+        return true if other_type && owner.program.types["Class"].subtype_of?(other_type.as(Type))
+      end
+      return false
+    end
+    first == second
+  end
+end
+
+pub abstract class ClassType < ModuleType
+  property superclass : Type?
+  property superclass_display : String?
+  getter subclasses : Array(Type)
+
+  def register_subclass(sub : Type) : Nil
+    @subclasses << sub
+    nil
+  end
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @superclass : Type? = nil)
+    super(program, namespace, name)
+    @subclasses = [] of Type
+    if sc = @superclass
+      @parents << sc
+      @superclass_display = sc.full_name
+      sc.register_subclass(self)
+    end
+  end
+
+  def class? : Bool
+    !@struct
+  end
+
+  def struct? : Bool
+    @struct
+  end
+
+  def type_desc : String
+    @struct ? "struct" : "class"
+  end
+
+  def set_superclass(sc : Type?, display_name : String? = nil) : Nil
+    @superclass = sc
+    @superclass_display = display_name || (sc ? sc.to_s : nil)
+    if sc
+      @parents << sc
+      sc.register_subclass(self)
+    end
+  end
+end
+
+pub class MetaclassType < ClassType
+  getter instance_type : Type
+
+  # iyi: as the hosted MetaclassType is a ClassType (types.cr), the metaclass records its superclass too.
+  # iyi: a metaclass is abstract when its instance type is (hosted MetaclassType delegates abstract?, types.cr 3310).
+  def abstract? : Bool
+    if @instance_type.is_a?(ModuleType)
+      return @instance_type.as(ModuleType).abstract?
+    end
+    false
+  end
+
+  # iyi: a module's or trait's metaclass is not a class (hosted: a trait's metaclass takes the module rule, SPEC II.6).
+  def class? : Bool
+    @instance_type.is_a?(ClassType) && !@struct
+  end
+
+  def generic_type_vars : Array(String)?
+    inst = @instance_type
+    if inst.is_a?(ModuleType)
+      return inst.as(ModuleType).generic_type_vars
+    end
+    nil
+  end
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @instance_type : Type)
+    super(program, namespace, name)
+    # The hosted rule: a class's metaclass inherits from its superclass's metaclass, an
+    # enum's from Enum's, and anything else (a class with no superclass, Object) from Class.
+    # iyi: Class itself is the metaclass of Value (program.cr 1423). Its parent, Object's metaclass,
+    # is set by the program once Class is registered, since building it needs types["Class"].
+    if name == "Class"
+      # superclass and parent set after registration
+    elsif @instance_type.is_a?(ClassType)
+      sc = @instance_type.as(ClassType).superclass
+      if sc
+        meta_sc = sc.is_a?(ModuleType) ? sc.as(ModuleType).metaclass : sc.superclass_metaclass
+        @superclass = meta_sc
+        @parents << meta_sc
+      else
+        @superclass = program.types["Class"]
+        @parents << program.types["Class"]
+      end
+    elsif @instance_type.is_a?(EnumType)
+      @superclass = program.enum_type.metaclass
+      @parents << program.enum_type.metaclass
+    else
+      @superclass = program.types["Class"]
+      @parents << program.types["Class"]
+    end
+  end
+
+  def full_name : String
+    return "Class" if @name == "Class"
+    composed_name("", @instance_type.to_s, ".class")
+  end
+
+  def to_s : String
+    full_name
+  end
+
+  def type_desc : String
+    "metaclass"
+  end
+end
+
+pub class NonGenericClassType < ClassType
+  property virtual_type_cache : Type? = nil
+end
+
+# Built-ins the hosted Program creates as their own kinds. They live here, not in
+# types.iyi, because types.iyi imports this module and an import cycle is refused.
+pub class NilType < NonGenericClassType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, superclass : Type?)
+    super(program, namespace, name, superclass)
+    @struct = true
+  end
+end
+
+pub class VoidType < NamedType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+    @struct = true
+  end
+
+  def void? : Bool
+    true
+  end
+end
+
+pub class NoReturnType < NamedType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+  end
+
+  def no_return? : Bool
+    true
+  end
+
+  def subtype_of?(other : Type) : Bool
+    true
+  end
+end
+
+pub class AnnotationType < NamedType
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+  end
+end
+
+pub class TypeParameterType < Type
+  def initialize(program : SemanticProgram, name : String)
+    super(program, nil, name)
+  end
+end
+
+pub class GenericClassType < ClassType
+  getter type_vars : Array(String)
+  getter instantiated_types : Array(Type)
+  property splat_index : Int32?
+
+  # The unbound generic with its type variables, `Box(T)`: the hosted
+  # `to_s_with_options` (2204-2215). `full_name` is the name without them.
+  def to_s : String
+    "#{base_full_name}(#{@type_vars.join(", ")})"
+  end
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @type_vars : Array(String), @splat_index : Int32? = nil, superclass : Type? = nil)
+    super(program, namespace, name, superclass)
+    @instantiated_types = [] of Type
+  end
+
+  def lookup_type(name : String) : Type?
+    if @type_vars.includes?(name)
+      return TypeParameterType.new(@program, name)
+    end
+    super(name)
+  end
+
+  def generic_type_vars : Array(String)?
+    @type_vars
+  end
+end
+
+pub class NonGenericModuleType < ModuleType
+end
+
+# One fun of a lib, as the top-level pass records it. The argument types and the
+# call resolution are filled by the later pass; this is what the declaration says.
+pub class LibFun
+  property location : Location? = nil
+  getter name : String
+  getter real_name : String
+  getter args : Array(String)
+  getter varargs : Bool
+  getter return_type : ASTNode?
+  # iyi: the fun's node, its argument types and return type as this pass resolved them (hosted
+  # External, ast.cr 756). `SemanticProgram#lib_fun_of` finds the record from its node.
+  property node : FunDef? = nil
+  getter arg_types : Array(Type)
+  property resolved_return : Type? = nil
+  # A qualified lib call used this binding (hosted External#used); a receiverless fun stays deferred.
+  property used : Bool = false
+  # iyi: the scope and the file's imports the pass declared the fun in, so a re-resolution finds the
+  # same names (`resolve_declared_types`).
+  property owner : ModuleType? = nil
+  property imports : Hash(String, Type)? = nil
+  # iyi: an external variable's getter or setter (hosted External#external_var?).
+  # The primitive name is external_var_get or external_var_set. The dump does not
+  # print these; body typing and primitives lowering read them.
+  property external_var : Bool = false
+  property external_type_spec : ASTNode? = nil
+  property thread_local : Bool = false
+  # Hosted External's function annotations (fun.cr:842-855).
+  property naked : Bool = false
+  property no_inline : Bool = false
+  property always_inline : Bool = false
+  property returns_twice : Bool = false
+  property primitive : String? = nil
+  property previous : LibFun? = nil
+
+  def varargs? : Bool
+    @varargs
+  end
+
+  def initialize(@name : String, @real_name : String, @args : Array(String), @varargs : Bool, @return_type : ASTNode?)
+    @arg_types = [] of Type
+  end
+end
+
+# iyi: a `@[Link]` annotation a lib records (hosted LinkAnnotation, codegen/link.cr): the library
+# names and flags as written. The positional arguments come in the hosted order: library,
+# ldflags, static, framework. `wasm_import_module` is not recorded: a lib's wasm module is not a
+# target here. (The fields are not named `lib` or `static`: those words are keywords here.)
+pub class LinkAnnotationRecord
+  property library : String? = nil
+  property ldflags : String? = nil
+  property is_static : Bool = false
+  property framework : String? = nil
+  property pkg_config : String? = nil
+  property dll : String? = nil
+
+  def self.from(ann : Annotation) : LinkAnnotationRecord
+    record = LinkAnnotationRecord.new
+    if ann.args.empty? && ann.named_args.nil?
+      raise("missing link arguments: must at least specify a library name")
+    end
+    i = 0
+    while i < ann.args.size
+      arg = ann.args[i]
+      if i == 2
+        if b = arg.as?(BoolLiteral)
+          record.is_static = b.value
+        else
+          raise("'static' link argument must be a Bool")
+        end
+      else
+        if s = arg.as?(StringLiteral)
+          if i == 0
+            record.library = s.value
+          elsif i == 1
+            record.ldflags = s.value
+          elsif i == 3
+            record.framework = s.value
+          else
+            raise("too many link arguments")
+          end
+        else
+          raise("link argument #{i + 1} must be a String")
+        end
+      end
+      i = i + 1
+    end
+    if named = ann.named_args
+      named.each do |na|
+        value = na.value
+        if na.name == "static"
+          if b = value.as?(BoolLiteral)
+            record.is_static = b.value
+          else
+            raise("'static' link argument must be a Bool")
+          end
+        elsif s = value.as?(StringLiteral)
+          if na.name == "lib"
+            record.library = s.value
+          elsif na.name == "ldflags"
+            record.ldflags = s.value
+          elsif na.name == "framework"
+            record.framework = s.value
+          elsif na.name == "pkg_config"
+            record.pkg_config = s.value
+          elsif na.name == "dll"
+            record.dll = s.value
+          elsif na.name == "wasm_import_module"
+            # not recorded (see above)
+          else
+            raise("unknown link argument: '#{na.name}'")
+          end
+        else
+          raise("'#{na.name}' link argument must be a String")
+        end
+      end
+    end
+    record
+  end
+end
+
+# A lib type, like `lib LibC`.
+pub class LibType < NonGenericModuleType
+  getter funs : Array(LibFun)
+  # iyi: the `@[Link]` annotations of the lib, in declaration order, one per annotation on each
+  # reopening (LibType#link_annotations, the hosted lib's link annotations).
+  getter link_annotations : Array(LinkAnnotationRecord)
+  # iyi: whether a call to one of this lib's funs was typed (hosted lib `used`). False until the
+  # call pass sets it.
+  property used : Bool = false
+
+  def lookup_fun(name : String) : LibFun?
+    i = 0
+    while i < @funs.size
+      if @funs[i].name == name
+        return @funs[i]
+      end
+      i = i + 1
+    end
+    nil
+  end
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+    @funs = [] of LibFun
+    @link_annotations = [] of LinkAnnotationRecord
+  end
+
+  def type_desc : String
+    "lib"
+  end
+end
+
+pub class GenericModuleType < ModuleType
+  getter type_vars : Array(String)
+  property splat_index : Int32?
+
+  # The unbound generic with its type variables, `Box(T)`: the hosted
+  # `to_s_with_options` (2204-2215). `full_name` is the name without them.
+  def to_s : String
+    "#{base_full_name}(#{@type_vars.join(", ")})"
+  end
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @type_vars : Array(String), @splat_index : Int32? = nil)
+    super(program, namespace, name)
+  end
+
+  def lookup_type(name : String) : Type?
+    if @type_vars.includes?(name)
+      return TypeParameterType.new(@program, name)
+    end
+    super(name)
+  end
+
+  def generic_type_vars : Array(String)?
+    @type_vars
+  end
+end
+
+pub class TraitType < ModuleType
+  getter supertraits : Array(Type)
+  getter assoc_types : Array(String)
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String)
+    super(program, namespace, name)
+    @supertraits = [] of Type
+    @assoc_types = [] of String
+  end
+
+  def trait? : Bool
+    true
+  end
+
+  def type_desc : String
+    "trait"
+  end
+end
+
+pub class GenericTraitType < TraitType
+  getter type_vars : Array(String)
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @type_vars : Array(String))
+    super(program, namespace, name)
+  end
+
+  def generic_type_vars : Array(String)?
+    @type_vars
+  end
+end
+
+pub class Const < NamedType
+  property value : ASTNode
+  getter initializer_id : UInt64
+  property declared_type : ASTNode?
+  property value_source : String?
+  # Enum member constants have the enum's type, not their integer storage type.
+  property enum_value_type : Type? = nil
+  # iyi: whether a read of this constant was typed, and whether a pointerof of it was lowered (hosted
+  # Const#used and pointer_read). The analysis and the lowering set them.
+  property used : Bool = false
+  property pointer_read : Bool = false
+
+  def used? : Bool
+    @used
+  end
+
+  def pointer_read? : Bool
+    @pointer_read
+  end
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @value : ASTNode)
+    @initializer_id = @value.object_id
+    super(program, namespace, name)
+  end
+
+  def const? : Bool
+    true
+  end
+
+  def type_desc : String
+    "constant"
+  end
+end
+
+pub class EnumType < ModuleType
+  property base_type : Type
+  getter members : Hash(String, Const)
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @base_type : Type)
+    super(program, namespace, name)
+    @members = Hash(String, Const).new
+    @parents << program.enum_type
+    value_def = Def.new("value", body: Primitive.new("enum_value"))
+    add_def(value_def)
+    program.record_primitive_return_type(value_def, @base_type)
+    value_arg = Arg.new("value", restriction: Path.new([@base_type.full_name], true))
+    new_def = Def.new("new", [value_arg] of Arg, body: Primitive.new("enum_new"))
+    metaclass.add_def(new_def)
+    program.record_primitive_return_type(new_def, self)
+  end
+
+  def enum? : Bool
+    true
+  end
+
+  def type_desc : String
+    "enum"
+  end
+
+  def add_member(name : String, val_node : ASTNode) : Const
+    c = Const.new(@program, self, name, val_node)
+    c.enum_value_type = self
+    @types[name] = c
+    @members[name] = c
+    c
+  end
+end
+
+pub class AliasType < NamedType
+  property value : ASTNode
+  property aliased_type : Type?
+  property aliased_type_display : String?
+  @resolving_value : Bool = false
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @value : ASTNode)
+    super(program, namespace, name)
+  end
+
+  def alias? : Bool
+    true
+  end
+
+  # The hosted `simple` flag is cleared only for an alias that names no type. Every
+  # alias the port models names one (`process_value`), so the flag stays set.
+  def simple? : Bool
+    true
+  end
+
+  def type_desc : String
+    "alias"
+  end
+
+  def process_value : Type
+    if @resolving_value
+      refuse_port("infinite recursive definition of alias #{@name}")
+    end
+    @resolving_value = true
+    defer @resolving_value = false
+    if at = @aliased_type
+      at
+    else
+      scope = @namespace || @program
+      if @value.is_a?(Generic) && @program.merge_hook.nil?
+        # Before the type system is installed this is only a display name, not
+        # a resolved alias: caching the generic base loses its arguments.
+        g = @value.as(Generic)
+        base = @program.lookup_type_node(g.name, scope)
+        args_strs = g.type_vars.map { |tv| @program.lookup_type_node(tv, scope).full_name }
+        @aliased_type_display = "#{base.full_name}(#{args_strs.join(", ")})"
+        base
+      else
+        t = @program.lookup_type_node(@value, scope)
+        @aliased_type_display = t.full_name
+        @aliased_type = t
+        t
+      end
+    end
+  end
+end
+
+# A `type` (typedef) inside a `lib` declaration, such as `type Handle = Int32`.
+# It names its typedef's type; `remove_typedef` gives that type.
+pub class TypeDefType < NamedType
+  getter typedef : Type
+
+  def initialize(program : SemanticProgram, namespace : ModuleType?, name : String, @typedef : Type)
+    super(program, namespace, name)
+  end
+
+  def remove_typedef : Type
+    @typedef.remove_typedef
+  end
+
+  def type_desc : String
+    "type def"
+  end
+end
+
+pub class UnionType < Type
+  getter union_types : Array(Type)
+  @cached_union_members : Array(String)? = nil
+  @cached_union_arg : String? = nil
+  @cached_union_full : String? = nil
+
+  def initialize(program : SemanticProgram, @union_types : Array(Type))
+    super(program, nil, "Union")
+  end
+
+  def union? : Bool
+    true
+  end
+
+  def arg_full_name : String
+    cached = @cached_union_members
+    if result = @cached_union_arg
+      if cached && cached.size == @union_types.size
+        same = true
+        i = 0
+        while i < @union_types.size
+          if cached[i] != @union_types[i].full_name
+            same = false
+            break
+          end
+          i += 1
+        end
+        return result if same
+      end
+    end
+    names = [] of String
+    non_nil_names = [] of String
+    has_nil = false
+    @union_types.each do |type|
+      name = type.full_name
+      names << name
+      if name == "Nil"
+        has_nil = true
+      else
+        non_nil_names << name
+      end
+    end
+    sorted = non_nil_names.sorted
+    sorted << "Nil" if has_nil
+    result = sorted.join(" | ")
+    @cached_union_members = names
+    @cached_union_arg = result
+    @cached_union_full = nil
+    result
+  end
+
+  def full_name : String
+    arg = arg_full_name
+    if result = @cached_union_full
+      return result
+    end
+    result = "(#{arg})"
+    @cached_union_full = result
+    result
+  end
+
+  def to_s : String
+    non_nil_names = [] of String
+    has_nil = false
+    i = 0
+    while i < @union_types.size
+      t = @union_types[i]
+      if t.full_name == "Nil"
+        has_nil = true
+      else
+        non_nil_names << t.member_name
+      end
+      i = i + 1
+    end
+    sorted = non_nil_names.sorted
+    if has_nil
+      sorted << "Nil"
+    end
+    "(#{sorted.join(" | ")})"
+  end
+
+  def ==(other : Type) : Bool
+    if other.union?
+      full_name == other.full_name
+    else
+      false
+    end
+  end
+end
+
+# Resolves written types and merges types for the semantic program. The type
+# system installs itself here, so the program resolves written types and merges
+# unions the way the hosted Program does. Until one is installed, the program
+# keeps its plain builders.
+pub abstract class TypeHook
+  abstract def merge_members(types : Array(Type)) : Type
+  abstract def resolve_node(node : ASTNode, current_type : ModuleType) : Type
+  # The same lookup without raising or creating an UnresolvedType on failure.
+  abstract def resolve_node?(node : ASTNode, current_type : ModuleType) : Type?
+  abstract def instantiate_type(base : Type, type_args : Array(Type)) : Type
+  # The virtual type of a type, as the hosted `Type#virtual_type` (an explicit instance variable
+  # is typed by it: hosted declare_instance_var).
+  abstract def virtual_of(type : Type) : Type
+end
+
+pub class ImplRecord
+  getter trait_type : Type
+  getter target_type : Type
+  getter type_vars : Array(String)?
+  getter declaration : ImplDef?
+  getter imports : Hash(String, Type)?
+  getter scope : ModuleType?
+
+  def initialize(@trait_type : Type, @target_type : Type, @type_vars : Array(String)? = nil, @declaration : ImplDef? = nil, @imports : Hash(String, Type)? = nil, @scope : ModuleType? = nil)
+  end
+end
+
+pub class SemanticProgram < NonGenericModuleType
+  getter new_expansions : Array(NewExpansion)
+  @new_expansions : Array(NewExpansion) = [] of NewExpansion
+
+  @object_type : ClassType?
+  # Non-raising alias probes can recurse through generic arguments.
+  @optional_aliases : Hash(UInt64, Bool) = Hash(UInt64, Bool).new
+  property optional_alias_probe : Bool = false
+  property merge_hook : TypeHook?
+  # The explicit instance variables the top-level passes declared, for `resolve_declared_types`.
+  getter declared_ivars : Array(DeclaredIvar)
+  getter pending_ivars : Array(PendingIvar) = [] of PendingIvar
+  getter declared_cvars : Array(DeclaredIvar)
+  getter deferred_cvars : Array(DeferredClassVar) = [] of DeferredClassVar
+  getter instance_var_initializers : Array(InstanceVarInitializer)
+  getter pending_generic_superclasses : Array(PendingGenericSuperclass)
+  getter pending_generic_includes : Array(PendingGenericInclude)
+  # iyi: the typed dump's mode. Strict (the default) refuses a name the program
+  # cannot resolve, as it always has; total mode records it and goes on.
+  property total_mode : Bool = false
+  # The program's normalizer holds the counters and prelude flag every generated-name
+  # pass draws on, as hosted Program#new_temp_var_name does.
+  getter normalizer : NormalizerProgram
+
+  def iyi_prelude : Bool
+    @normalizer.iyi_prelude
+  end
+
+  def iyi_prelude=(value : Bool) : Nil
+    @normalizer.iyi_prelude = value
+  end
+
+  def iyi_prelude? : Bool
+    @normalizer.iyi_prelude
+  end
+
+  @value_type : ClassType?
+  @reference_type : ClassType?
+  @struct_type : ClassType?
+  @enum_type : ClassType?
+  @int32_type : ClassType?
+  @initial_type_names : Set(String)
+  @impls : Array(ImplRecord)
+  @global_funs : Array(LibFun)
+  # The constants with an initializer, in declaration order (hosted program.const_initializers).
+  @const_initializers : Array(Const)
+  # The records of the funs the pass declared, by the node's id (`lib_fun_of`).
+  @lib_funs_by_node : Hash(UInt64, LibFun)
+  # External variables have no FunDef node, but their written type also needs
+  # resolution after the type system is installed.
+  getter external_var_funs : Array(LibFun) = [] of LibFun
+  # Defining scope, kept outside syntax nodes to avoid a semantic dependency in the AST.
+  # These are keyed by the def's object id, which is its address: a def that was collected would hand its id to a
+  # later def, and the later def would read the earlier one's owner, `new` flag or primitive result type. So every
+  # def a table records is kept in `@recorded_defs`, and no recorded id can name another object.
+  @def_owners : Hash(UInt64, ModuleType)
+  @generated_news : Set(UInt64)
+  @primitive_return_types : Hash(UInt64, Type)
+  @recorded_defs : Array(Def)
+  # All unions the program made, keyed by the sorted object ids of their members (hosted program.unions).
+  getter unions : Hash(Array(UInt64), Type)
+  # The names this file imports, name to type: `import a/b::{Name}` adds one. The
+  # hosted pass keeps a scope per file; the port keeps the importing file's table here.
+  property current_imports : Hash(String, Type)
+  # The lowercase names the importing file imports (`import a/b::{refuse_port}`), as
+  # the defs they name. Swapped per file like current_imports.
+  property current_import_defs : Hash(String, Array(Def))
+  # iyi: each file's two import tables, by the file name its nodes carry (`import` records them).
+  # The body typing reads them: a def's body is typed long after its file was declared, and the
+  # names it may write are its own file's (the hosted pass keeps a scope per file).
+  getter file_imports : Hash(String, Hash(String, Type)) = Hash(String, Hash(String, Type)).new
+  getter file_import_defs : Hash(String, Hash(String, Array(Def))) = Hash(String, Hash(String, Array(Def))).new
+  # Where an import is looked for: the project root, then IYI_PATH's entries.
+  property project_root : String?
+  # iyi: the directory of the entry file: the first root an import is resolved from, as
+  # Program#iyi_import_root (the entry's directory). A driver sets it; nil leaves the
+  # project root and IYI_PATH.
+  property entry_dir : String?
+  # Whether a refusal the pass can carry on past (an impl of an unresolved target) is
+  # skipped instead of raised. The typed dump of a whole program sets it.
+  property total_mode : Bool
+  # The refusals the pass carried past in total mode, by message: a file that completes
+  # with one of these did not declare what it refused, so the gate counts them apart.
+  getter carried_refusals : Array(String)
+  property search_path : Array(String)
+  # The files read so far (absolute paths), and the module each one declared.
+  getter loaded_files : Set(String)
+  getter loaded_units : Hash(String, ModuleType)
+  # The normalised tree the pipeline holds for each unit, by normalised path. It is registered before any unit is
+  # declared, so a require that reaches a unit before its own turn reads this tree, not a second parse of the file.
+  getter unit_trees : Hash(String, ASTNode)
+
+  def object_type : ClassType
+    @object_type.as(ClassType)
+  end
+
+  # The tree the pipeline holds for a unit file, or a fresh parse of the file when the pipeline holds none.
+  def unit_tree_or_parse(file : String) : ASTNode
+    if tree = @unit_trees[file]?
+      return tree
+    end
+    Parser.new(File.read(file), file).parse
+  end
+
+  def value_type : ClassType
+    @value_type.as(ClassType)
+  end
+
+  def reference_type : ClassType
+    @reference_type.as(ClassType)
+  end
+
+  def struct_type : ClassType
+    @struct_type.as(ClassType)
+  end
+
+  def enum_type : ClassType
+    @enum_type.as(ClassType)
+  end
+
+  def int32_type : ClassType
+    @int32_type.as(ClassType)
+  end
+
+  def nil_type : Type
+    @types["Nil"]
+  end
+
+  def bool_type : Type
+    @types["Bool"]
+  end
+
+  def char_type : Type
+    @types["Char"]
+  end
+
+  def string_type : Type
+    @types["String"]
+  end
+
+  def symbol_type : Type
+    @types["Symbol"]
+  end
+
+  def no_return_type : Type
+    @types["NoReturn"]
+  end
+
+  def proc_type : Type
+    @types["Proc"]
+  end
+
+  def tuple_type : Type
+    @types["Tuple"]
+  end
+
+  def type_merge(t1 : Type, t2 : Type) : Type
+    if hook = @merge_hook
+      merged : Type = hook.merge_members([t1, t2] of Type)
+      return merged
+    end
+    return t1 if t1 == t2
+
+    types = [] of Type
+    if t1.union?
+      t1.as(UnionType).union_types.each { |ut| types << ut }
+    else
+      types << t1
+    end
+
+    if t2.union?
+      t2.as(UnionType).union_types.each { |ut| types << ut }
+    else
+      types << t2
+    end
+
+    unique = [] of Type
+    types.each do |t|
+      already = false
+      unique.each do |u|
+        if u == t
+          already = true
+          break
+        end
+      end
+      unless already
+        unique << t
+      end
+    end
+
+    i = 0
+    while i < unique.size
+      j = i + 1
+      while j < unique.size
+        if unique[j].full_name < unique[i].full_name
+          tmp = unique[i]
+          unique[i] = unique[j]
+          unique[j] = tmp
+        end
+        j = j + 1
+      end
+      i = i + 1
+    end
+
+    if unique.size == 1
+      unique.first
+    else
+      UnionType.new(self, unique)
+    end
+  end
+
+  def type_merge(types : Array(Type)) : Type
+    if hook = @merge_hook
+      merged : Type = hook.merge_members(types)
+      return merged
+    end
+    if types.empty?
+      return nil_type
+    end
+    res = types.first
+    i = 1
+    while i < types.size
+      res = type_merge(res, types[i])
+      i = i + 1
+    end
+    res
+  end
+
+  def nilable_type(t : Type) : Type
+    type_merge(t, nil_type)
+  end
+
+  def initial_type_names : Set(String)
+    @initial_type_names
+  end
+
+  def impls : Array(ImplRecord)
+    @impls
+  end
+
+  # The `fun`s declared at the top level of the program, as LibFun records.
+  def global_funs : Array(LibFun)
+    @global_funs
+  end
+
+  # The constants with an initializer, in declaration order (hosted program.const_initializers).
+  def const_initializers : Array(Const)
+    @const_initializers
+  end
+
+  # The predefined constant named (ARGC_UNSAFE, ARGV_UNSAFE), or nil for any other name.
+  def predefined_const(name : String) : Const?
+    if name == "ARGC_UNSAFE" || name == "ARGV_UNSAFE"
+      t = @types[name]?
+      if t.is_a?(Const)
+        return t.as(Const)
+      end
+    end
+    nil
+  end
+
+  # The record the pass made for a fun node (lib funs and top-level funs alike), or nil.
+  def lib_fun_of(node : FunDef) : LibFun?
+    @lib_funs_by_node[node.node_id]?
+  end
+
+  # Registers the record made for *node*. Called by the top-level pass when it declares a fun.
+  def record_lib_fun(node : FunDef, record : LibFun) : Nil
+    @lib_funs_by_node[node.node_id] = record
+  end
+
+  # The scope which registered a definition (hosted Def#owner).
+  def def_owner(definition : Def) : ModuleType?
+    @def_owners[definition.node_id]?
+  end
+
+  def record_def_owner(definition : Def, owner : ModuleType) : Nil
+    keep_recorded(definition)
+    @def_owners[definition.node_id] = owner
+    nil
+  end
+
+  def record_generated_new(definition : Def) : Nil
+    keep_recorded(definition)
+    @generated_news.add(definition.node_id)
+    nil
+  end
+
+  def generated_new?(definition : Def) : Bool
+    @generated_news.includes?(definition.node_id)
+  end
+
+  # Result types carried by generated primitive definitions, independent of written annotations.
+  def primitive_return_type(definition : Def) : Type?
+    @primitive_return_types[definition.node_id]?
+  end
+
+  def record_primitive_return_type(definition : Def, result : Type) : Nil
+    keep_recorded(definition)
+    @primitive_return_types[definition.node_id] = result
+    nil
+  end
+
+  # Keeps *definition* reachable for as long as a table holds its id.
+  private def keep_recorded(definition : Def) : Nil
+    @recorded_defs << definition
+    nil
+  end
+
+  # A typed clone gets a new node id; copy the original's defining scope explicitly.
+  def copy_def_owner(original : Def, clone : Def) : Nil
+    if owner = def_owner(original)
+      record_def_owner(clone, owner)
+    end
+    if result = primitive_return_type(original)
+      record_primitive_return_type(clone, result)
+    end
+    nil
+  end
+
+  # Imported units are spliced into the program after the top-level pass. Resolve
+  # their class variables at the type-declaration phase, with their own imports.
+  def resolve_deferred_class_vars : Nil
+    saved = @current_imports
+    @deferred_cvars.each do |dc|
+      @current_imports = dc.imports
+      resolved = lookup_type_node(dc.restriction, dc.owner)
+      mv = MetaTypeVar.new(dc.name, resolved, dc.initializer)
+      mv.owner = dc.owner
+      mv.thread_local = dc.thread_local
+      dc.owner.class_vars[dc.name] = mv
+      @declared_cvars << DeclaredIvar.new(dc.owner, dc.name, dc.restriction, dc.initializer, true, dc.imports)
+    end
+    @deferred_cvars.clear
+    @current_imports = saved
+    nil
+  end
+
+  # iyi: the declaration pass resolves a generic type node to its base only, since no type system is
+  # installed while the program is declared. Installing one (TypeSystem.new) calls this to resolve the
+  # lib funs again through it, in the scope and imports of the file that declared each one, so
+  # `fun get(p : Pointer(Int32))` takes `Pointer(Int32)`, as the hosted pass has it.
+  def resolve_declared_types : Nil
+    resolve_impl_traits
+    saved = @current_imports
+    @lib_funs_by_node.each_value do |f|
+      if owner = f.owner
+        if node = f.node
+          if imports = f.imports
+            @current_imports = imports
+            # A name the bare program cannot see (Set, with no prelude loaded) keeps the
+            # type finish already stored. Raising here turns a measured file into a refusal.
+            resolved_args = [] of Type
+            failed = false
+            node.args.each do |arg|
+              if restriction = arg.restriction
+                if found = lookup_type_node?(restriction, owner)
+                  resolved_args << found
+                else
+                  failed = true
+                end
+              end
+            end
+            unless failed
+              f.arg_types.clear
+              resolved_args.each { |arg_type| f.arg_types << arg_type }
+              if rt = node.return_type
+                if found = lookup_type_node?(rt, owner)
+                  f.resolved_return = found
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    @external_var_funs.each do |f|
+      if owner = f.owner
+        if imports = f.imports
+          @current_imports = imports
+          if spec = f.external_type_spec
+            if found = lookup_type_node?(spec, owner)
+              f.resolved_return = found
+              if f.primitive == "external_var_set"
+                f.arg_types.clear
+                f.arg_types << found
+              end
+            end
+          end
+        end
+      end
+    end
+    # The explicit instance variables are typed again through the type system: a generic type
+    # keeps its arguments, and a class with subclasses is typed by its virtual type. A name
+    # this program cannot see keeps the type already recorded.
+    @declared_ivars.each do |di|
+      @current_imports = di.imports
+      if t = declared_ivar_type?(di.restriction, di.owner, di.virtual)
+        mv = MetaTypeVar.new(di.name, t, di.initializer)
+        mv.owner = di.owner
+        di.owner.instance_vars[di.name] = mv
+      end
+    end
+    # Class variables use the same written-type resolution, but retain their existing
+    # record so annotations, owner and initializer survive installation of the type system.
+    @declared_cvars.each do |dc|
+      @current_imports = dc.imports
+      if t = declared_ivar_type?(dc.restriction, dc.owner, true)
+        if mv = dc.owner.class_vars[dc.name]?
+          mv.var_type = t
+        end
+      end
+    end
+    @current_imports = saved
+    nil
+  end
+
+  # Re-resolve impl parents once the type system is installed. Hosted
+  # top_level_visitor.cr:900-921 appends associated answers to trait arguments.
+  def resolve_impl_traits : Nil
+    hook = @merge_hook
+    return nil if hook.nil?
+    saved = @current_imports
+    @impls.each do |record|
+      trait_type = record.trait_type
+      node = record.declaration
+      target = record.target_type
+      next unless trait_type.is_a?(GenericTraitType) && node && target.is_a?(ModuleType)
+      generic = trait_type.as(GenericTraitType)
+      if imports = record.imports
+        @current_imports = imports
+      end
+      outer = record.scope || self
+      scope = NonGenericModuleType.new(self, outer, "__impl_scope")
+      target_vars = target.as(ModuleType).generic_type_vars
+      if target_vars
+        target_vars.each { |name| scope.add_type(name, TypeParameterType.new(self, name)) }
+      end
+      args = [] of Type
+      if trait_args = node.trait_args
+        trait_args.each { |arg| args << remove_alias(lookup_type_node(arg, scope)) }
+      end
+      answers = node.assoc_types || [] of AssocTypeDecl
+      generic.assoc_types.each do |name|
+        answer : ASTNode? = nil
+        answers.each { |item| answer = item.value if item.name == name }
+        raise("impl #{generic.full_name} does not answer associated type #{name}") if answer.nil?
+        args << remove_alias(lookup_type_node(answer.as(ASTNode), scope))
+      end
+      next if args.empty?
+      resolved = hook.as(TypeHook).instantiate_type(generic, args)
+      parents = target.as(ModuleType).parents
+      i = 0
+      while i < parents.size
+        if parents[i] == trait_type
+          parents[i] = resolved
+          break
+        end
+        i += 1
+      end
+    end
+    @current_imports = saved
+    nil
+  end
+
+  # The type an instance variable's written type gives it. With a type system installed, an explicit
+  # declaration takes the virtual type of its class (hosted declare_instance_var); without one, the
+  # plain lookup stands.
+  def declared_ivar_type(restriction : ASTNode, owner : ModuleType, virtual : Bool) : Type
+    if hook = @merge_hook
+      resolved = remove_alias(lookup_type_node(restriction, owner))
+      if virtual
+        return hook.virtual_of(resolved)
+      end
+      return resolved
+    end
+    remove_alias(lookup_type_node(restriction, owner))
+  end
+
+  # The same lookup, or nil when a name is not in this program. Re-resolution uses it so a bare
+  # file that names a prelude type keeps the type it already recorded instead of refusing.
+  def declared_ivar_type?(restriction : ASTNode, owner : ModuleType, virtual : Bool) : Type?
+    found = lookup_type_node?(restriction, owner)
+    return nil unless found
+    resolved = remove_alias(found)
+    if virtual
+      if hook = @merge_hook
+        return hook.virtual_of(resolved)
+      end
+    end
+    resolved
+  end
+
+  # The type an alias names, through any chain of aliases (hosted Type#remove_alias): a declared
+  # instance variable takes the type the alias stands for, not the alias.
+  def remove_alias(type : Type) : Type
+    return type unless type.is_a?(AliasType)
+    first = type.as(AliasType)
+    current = first.process_value
+    return current unless current.is_a?(AliasType)
+    seen = Set(UInt64).new
+    seen.add(first.object_id)
+    while current.is_a?(AliasType)
+      id = current.object_id
+      if seen.includes?(id)
+        refuse_port("infinite recursive definition of alias #{current.name}")
+      end
+      seen.add(id)
+      current = current.as(AliasType).process_value
+    end
+    current
+  end
+
+  # Bare-file declaration re-resolution must not force an unresolved alias:
+  # a file can name external types from a prelude or another unit not loaded
+  # by the probe. This is probe tolerance, not hosted alias semantics.
+  def remove_alias?(type : Type) : Type?
+    return type unless type.is_a?(AliasType)
+    alias_type = type.as(AliasType)
+    id = alias_type.object_id
+    return nil if @optional_aliases[id]?
+    @optional_aliases[id] = true
+    defer @optional_aliases.delete(id)
+    if cached = alias_type.aliased_type
+      return remove_alias?(cached)
+    end
+    scope = alias_type.namespace || self
+    target = lookup_type_node?(alias_type.value, scope)
+    return nil if target.nil?
+    remove_alias?(target.as(Type))
+  end
+
+  # Each class body the top-level pass visited, in order, with its type.
+  def type_bodies : Array(TypeBody)
+    @type_bodies
+  end
+
+  def initialize
+    @type_bodies = [] of TypeBody
+    @initial_type_names = Set(String).new
+    @merge_hook = nil
+    @impls = [] of ImplRecord
+    @global_funs = [] of LibFun
+    @const_initializers = [] of Const
+    @lib_funs_by_node = Hash(UInt64, LibFun).new
+    @def_owners = Hash(UInt64, ModuleType).new
+    @generated_news = Set(UInt64).new
+    @primitive_return_types = Hash(UInt64, Type).new
+    @recorded_defs = [] of Def
+    @unions = Hash(Array(UInt64), Type).new
+    @declared_ivars = [] of DeclaredIvar
+    @declared_cvars = [] of DeclaredIvar
+    @instance_var_initializers = [] of InstanceVarInitializer
+    @pending_generic_superclasses = [] of PendingGenericSuperclass
+    @pending_generic_includes = [] of PendingGenericInclude
+    @current_imports = Hash(String, Type).new
+    @current_import_defs = Hash(String, Array(Def)).new
+    @project_root = nil
+    @entry_dir = nil
+    @total_mode = false
+    @normalizer = NormalizerProgram.new(false)
+    @carried_refusals = [] of String
+    @search_path = [] of String
+    @loaded_files = Set(String).new
+    @loaded_units = Hash(String, ModuleType).new
+    @unit_trees = Hash(String, ASTNode).new
+    @object_type = nil
+    @value_type = nil
+    @reference_type = nil
+    @struct_type = nil
+    @enum_type = nil
+    @int32_type = nil
+
+    super(self, nil, "main")
+
+    obj = NonGenericClassType.new(self, self, "Object", nil)
+    obj.abstract = true
+    @object_type = obj
+    @types["Object"] = obj
+
+    ref = NonGenericClassType.new(self, self, "Reference", obj)
+    @reference_type = ref
+    @types["Reference"] = ref
+
+    val = NonGenericClassType.new(self, self, "Value", obj)
+    val.struct = true
+    val.abstract = true
+    @value_type = val
+    @types["Value"] = val
+
+    num = NonGenericClassType.new(self, self, "Number", val)
+    num.struct = true
+    num.abstract = true
+    @types["Number"] = num
+    nil_t = NilType.new(self, self, "Nil", val)
+    @types["Nil"] = nil_t
+    bool_t = NonGenericClassType.new(self, self, "Bool", val)
+    bool_t.struct = true
+    @types["Bool"] = bool_t
+    char_t = NonGenericClassType.new(self, self, "Char", val)
+    char_t.struct = true
+    @types["Char"] = char_t
+
+    int_t = NonGenericClassType.new(self, self, "Int", num)
+    int_t.struct = true
+    int_t.abstract = true
+    @types["Int"] = int_t
+
+    ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128"].each do |tname|
+      t = NonGenericClassType.new(self, self, tname, int_t)
+      t.struct = true
+      @types[tname] = t
+      if tname == "Int32"
+        @int32_type = t
+      end
+    end
+
+    flt = NonGenericClassType.new(self, self, "Float", num)
+    flt.struct = true
+    flt.abstract = true
+    @types["Float"] = flt
+    f32 = NonGenericClassType.new(self, self, "Float32", flt)
+    f32.struct = true
+    @types["Float32"] = f32
+    f64 = NonGenericClassType.new(self, self, "Float64", flt)
+    f64.struct = true
+    @types["Float64"] = f64
+
+    sym_t = NonGenericClassType.new(self, self, "Symbol", val)
+    sym_t.struct = true
+    @types["Symbol"] = sym_t
+    ptr = GenericClassType.new(self, self, "Pointer", ["T"], nil, val)
+    ptr.struct = true
+    @types["Pointer"] = ptr
+    tup = GenericClassType.new(self, self, "Tuple", ["T"], 0, val)
+    tup.struct = true
+    @types["Tuple"] = tup
+    named_tup = GenericClassType.new(self, self, "NamedTuple", ["T"], nil, val)
+    named_tup.struct = true
+    @types["NamedTuple"] = named_tup
+    static_array = GenericClassType.new(self, self, "StaticArray", ["T", "N"], nil, val)
+    static_array.struct = true
+    @types["StaticArray"] = static_array
+
+    @types["String"] = NonGenericClassType.new(self, self, "String", ref)
+
+    @types["Void"] = VoidType.new(self, self, "Void")
+
+    @types["NoReturn"] = NoReturnType.new(self, self, "NoReturn")
+
+    st = NonGenericClassType.new(self, self, "Struct", val)
+    st.abstract = true
+    st.struct = true
+    @struct_type = st
+    @types["Struct"] = st
+
+    en = NonGenericClassType.new(self, self, "Enum", val)
+    en.abstract = true
+    en.struct = true
+    @enum_type = en
+    @types["Enum"] = en
+
+    # iyi: Class is the metaclass of Value, as the hosted program makes it (program.cr 1423). Its parent
+    # is Value itself: the hosted chain prints Object.class under Class under Value (bench oracle --chain).
+    klass = MetaclassType.new(self, self, "Class", val)
+    @types["Class"] = klass
+    klass.superclass = val
+    klass.superclass_display = val.full_name
+    klass.abstract = true
+    klass.parents << val
+    @types["Array"] = GenericClassType.new(self, self, "Array", ["T"], nil, ref)
+    @types["Hash"] = GenericClassType.new(self, self, "Hash", ["K", "V"], nil, ref)
+    proc_t = GenericClassType.new(self, self, "Proc", ["T", "R"], 0, val)
+    proc_t.struct = true
+    @types["Proc"] = proc_t
+    # iyi: Range before Slice, as the hosted program creates them (program.cr 1435, 1437): the
+    # order of Struct's subclasses is the order the type-id walk numbers them.
+    range_t = GenericClassType.new(self, self, "Range", ["B", "E"], nil, st)
+    range_t.struct = true
+    @types["Range"] = range_t
+    slice_t = GenericClassType.new(self, self, "Slice", ["T"], nil, st)
+    slice_t.struct = true
+    @types["Slice"] = slice_t
+    @types["Enumerable"] = GenericModuleType.new(self, self, "Enumerable", ["T"])
+    @types["Indexable"] = GenericModuleType.new(self, self, "Indexable", ["T"])
+    @types["Crystal"] = NonGenericModuleType.new(self, self, "Crystal")
+    @types["Regex"] = NonGenericClassType.new(self, self, "Regex", ref)
+    @types["Exception"] = NonGenericClassType.new(self, self, "Exception", ref)
+    union_t = GenericClassType.new(self, self, "Union", ["T"], 0, val)
+    union_t.struct = true
+    @types["Union"] = union_t
+    ["AlwaysInline", "CallConvention", "Extern", "Flags", "Link", "Naked", "NoInline", "Packed", "Primitive", "Raises", "ReturnsTwice", "ThreadLocal", "Deprecated", "Experimental", "TargetFeature", "Share", "NoPreempt", "SafeReach", "UnsafeReach", "Unsafe"].each do |aname|
+      @types[aname] = AnnotationType.new(self, self, aname)
+    end
+    error_trait = TraitType.new(self, self, "Error")
+    error_message = Def.new("message")
+    error_message.abstract = true
+    error_message.return_type = Path.new(["String"], true)
+    error_trait.add_def(error_message)
+    @types["Error"] = error_trait
+    gc = NonGenericModuleType.new(self, self, "GC")
+    gc.metaclass.add_def(Def.new("add_finalizer", [Arg.new("object")], Nop.new))
+    @types["GC"] = gc
+    # The hosted Program holds these as `Primitive` nodes, which the port has no node
+    # for. A MacroLiteral carries the same text the hosted dump prints for them.
+    @types["ARGC_UNSAFE"] = Const.new(self, self, "ARGC_UNSAFE", MacroLiteral.new("# primitive: argc"))
+    @types["ARGV_UNSAFE"] = Const.new(self, self, "ARGV_UNSAFE", MacroLiteral.new("# primitive: argv"))
+    # The hosted Program declares these instance variables of its built-in types
+    # (String#@bytesize, @length, @c; StaticArray#@buffer : T), once every built-in
+    # type exists.
+    string_t = @types["String"].as(NonGenericClassType)
+    string_t.instance_vars["@bytesize"] = MetaTypeVar.new("@bytesize", @types["Int32"])
+    string_t.instance_vars["@length"] = MetaTypeVar.new("@length", @types["Int32"])
+    string_t.instance_vars["@c"] = MetaTypeVar.new("@c", @types["UInt8"])
+    static_array_t = @types["StaticArray"].as(GenericClassType)
+    static_array_t.instance_vars["@buffer"] = MetaTypeVar.new("@buffer", TypeParameterType.new(self, "T"))
+    @initial_type_names = @types.keys.to_set
+  end
+
+  def lookup_path(path : Path) : Type?
+    lookup_path_names(path.names, self)
+  end
+
+  def lookup_path_names(names : Array(String), root : Type) : Type?
+    curr : Type? = root
+    i = 0
+    while i < names.size
+      name = names[i]
+      if c = curr
+        # When walking the target of an optional alias probe, a missing
+        # intermediate alias must remain a miss instead of exiting the process.
+        if @optional_aliases.empty?
+          c = remove_alias(c)
+        else
+          resolved = remove_alias?(c)
+          return nil if resolved.nil?
+          c = resolved.as(Type)
+        end
+        if c.is_a?(NamedType)
+          curr = c.as(NamedType).lookup_type(name)
+        else
+          return nil
+        end
+      else
+        return nil
+      end
+      i = i + 1
+    end
+    curr
+  end
+
+  # The superclass a class declares. A type system installed in the program
+  # resolves a generic superclass to its instance (`class IntBox < Box(Int32)`),
+  # which the lookup below does not.
+  def lookup_superclass_node(node : ASTNode, current_type : ModuleType) : Type
+    if hook = @merge_hook
+      resolved : Type = hook.resolve_node(node, current_type)
+      return resolved
+    end
+    lookup_type_node(node, current_type)
+  end
+
+  # Resolve the base in the enclosing scope, but the arguments in the
+  # subclass, where that class's type parameters are visible.
+  def lookup_generic_superclass(node : Generic, base : Type, owner : ModuleType) : Type
+    if hook = @merge_hook
+      if plain_generic?(node, base)
+        args = node.type_vars.map { |arg| lookup_type_node(arg, owner) }
+        return hook.instantiate_type(base, args)
+      end
+      return lookup_superclass_node(node, owner)
+    end
+    base
+  end
+
+  def resolve_pending_generic_superclasses : Nil
+    saved_imports = @current_imports
+    @pending_generic_superclasses.each do |pending|
+      owner = pending.owner
+      old = owner.superclass
+      @current_imports = pending.imports
+      resolved = lookup_generic_superclass(pending.node, pending.base, owner)
+      if old && old != resolved
+        owner.parents.delete(old)
+        if old.is_a?(ClassType)
+          old.as(ClassType).subclasses.delete(owner)
+        end
+      end
+      owner.set_superclass(resolved, owner.superclass_display) unless old == resolved
+      if meta = owner.metaclass?
+        if old != resolved
+          class_meta = meta.as(ClassType)
+          if previous = class_meta.superclass
+            class_meta.parents.delete(previous)
+            previous.as(ClassType).subclasses.delete(class_meta) if previous.is_a?(ClassType)
+          end
+          parent_meta = resolved.is_a?(ModuleType) ? resolved.as(ModuleType).metaclass : resolved.superclass_metaclass
+          class_meta.set_superclass(parent_meta)
+        end
+      end
+    end
+    @current_imports = saved_imports
+    @pending_generic_superclasses.clear
+    nil
+  end
+
+  # Includes are prepended, so replace repeated template inclusions in reverse
+  # declaration order, retaining each inclusion's own type arguments.
+  def resolve_pending_generic_includes : Nil
+    saved_imports = @current_imports
+    @pending_generic_includes.reversed.each do |pending|
+      @current_imports = pending.imports
+      resolved = lookup_generic_superclass(pending.node, pending.base, pending.owner)
+      parents = pending.owner.parents
+      index = 0
+      while index < parents.size
+        if parents[index].object_id == pending.base.object_id
+          parents[index] = resolved
+          break
+        end
+        index += 1
+      end
+      raise "BUG: pending generic include is missing from #{pending.owner.full_name}" if index == parents.size
+    end
+    @current_imports = saved_imports
+    @pending_generic_includes.clear
+    nil
+  end
+
+  def lookup_type_node(node : ASTNode, current_type : ModuleType) : Type
+    if node.is_a?(Path)
+      lookup_type_path(node.as(Path), current_type)
+    elsif node.is_a?(Generic)
+      g = node.as(Generic)
+      base_type = lookup_type_node(g.name, current_type)
+      if hook = @merge_hook
+        # iyi: only a real generic base is instantiated or handed to the hook. A base that does not
+        # resolve (a total-mode placeholder) keeps the base-only answer: the hook's lookup cannot see
+        # this file's imports, and would raise on a name the total pass has already recorded.
+        if base_type.is_a?(GenericClassType) || base_type.is_a?(GenericModuleType)
+          if plain_generic?(g, base_type)
+            type_args = g.type_vars.map { |t| lookup_type_node(t, current_type) }
+            return hook.instantiate_type(base_type, type_args)
+          end
+          return hook.resolve_node(node, current_type)
+        end
+      end
+      base_type
+    elsif node.is_a?(Union)
+      u = node.as(Union)
+      # Hosted type_lookup.cr:217-229 virtualizes each member before merging.
+      types = u.types.map do |t|
+        member = lookup_type_node(t, current_type)
+        if hook = @merge_hook
+          hook.virtual_of(member)
+        else
+          member
+        end
+      end
+      type_merge(types)
+    elsif node.is_a?(Metaclass)
+      m = node.as(Metaclass)
+      base = lookup_type_node(m.name, current_type)
+      if base.is_a?(ModuleType)
+        base.as(ModuleType).metaclass
+      else
+        raise("#{base.full_name} doesn't have a metaclass")
+      end
+    elsif node.is_a?(Self)
+      current_type
+    elsif node.is_a?(ProcNotation)
+      proc_type
+    else
+      raise("expected type, got #{node.to_s}")
+    end
+  end
+
+  # A generic the type system instantiates here: a plain class or module, with the arity written and
+  # type nodes for its arguments. Anything else (named arguments, numbers, splats, NamedTuple,
+  # StaticArray, a wrong arity) is left to the hook's own lookup, which answers as the hosted does.
+  def plain_generic?(g : Generic, base : Type) : Bool
+    if named = g.named_args
+      return false if named.size > 0
+    end
+    if base.is_a?(GenericClassType)
+      gc = base.as(GenericClassType)
+      return false if gc.full_name == "NamedTuple" || gc.full_name == "StaticArray"
+      # iyi: Tuple's splat takes every argument it is written with. Its arguments resolve through
+      # lookup_type_node, which sees this file's imports; the hook's own lookup does not, so a
+      # Tuple(String, IrType, Bool) named in an imported file stays unresolved there (codegen.iyi 651).
+      if !gc.splat_index.nil?
+        return (gc.full_name == "Tuple" || (gc.full_name == "Proc" && !g.type_vars.empty?)) && g.type_vars.all? { |t| type_node?(t) }
+      end
+      return gc.type_vars.size == g.type_vars.size && g.type_vars.all? { |t| type_node?(t) }
+    end
+    if base.is_a?(GenericModuleType)
+      gm = base.as(GenericModuleType)
+      return false unless gm.splat_index.nil?
+      return gm.type_vars.size == g.type_vars.size && g.type_vars.all? { |t| type_node?(t) }
+    end
+    false
+  end
+
+  # A written type that lookup_type_node resolves: a path, generic, union, metaclass, Self or proc.
+  def type_node?(node : ASTNode) : Bool
+    node.is_a?(Path) || node.is_a?(Generic) || node.is_a?(Union) || node.is_a?(Metaclass) || node.is_a?(Self) || node.is_a?(ProcNotation)
+  end
+
+  def lookup_type_node?(node : ASTNode, current_type : ModuleType) : Type?
+    if node.is_a?(Path)
+      lookup_type_path?(node.as(Path), current_type)
+    elsif node.is_a?(Generic)
+      g = node.as(Generic)
+      base_type = lookup_type_node?(g.name, current_type)
+      return nil unless base_type
+      if hook = @merge_hook
+        if base_type.is_a?(GenericClassType) || base_type.is_a?(GenericModuleType)
+          if plain_generic?(g, base_type)
+            type_args = [] of Type
+            g.type_vars.each do |t|
+              arg = lookup_type_node?(t, current_type)
+              return nil unless arg
+              # Only bare-file probes defer unresolved external aliases.
+              if @optional_alias_probe
+                resolved = remove_alias?(arg)
+                return nil if resolved.nil?
+                type_args << resolved.as(Type)
+              else
+                type_args << remove_alias(arg)
+              end
+            end
+            return hook.instantiate_type(base_type, type_args)
+          end
+          # Non-plain generics need the hook's lookup, just as on the strict path.
+          # Preserve the base-only answer for unresolved free splats such as Tuple(*U).
+          if resolved = hook.resolve_node?(node, current_type)
+            return resolved
+          end
+        end
+      end
+      base_type
+    elsif node.is_a?(Union)
+      u = node.as(Union)
+      resolved = [] of Type
+      u.types.each do |subnode|
+        t = lookup_type_node?(subnode, current_type)
+        return nil if t.nil?
+        if hook = @merge_hook
+          resolved << hook.virtual_of(t)
+        else
+          resolved << t
+        end
+      end
+      type_merge(resolved)
+    elsif node.is_a?(Metaclass)
+      m = node.as(Metaclass)
+      if base = lookup_type_node?(m.name, current_type)
+        if base.is_a?(ModuleType)
+          base.as(ModuleType).metaclass
+        else
+          nil
+        end
+      else
+        nil
+      end
+    elsif node.is_a?(Self)
+      current_type
+    elsif node.is_a?(ProcNotation)
+      if hook = @merge_hook
+        notation = node.as(ProcNotation)
+        args = [] of Type
+        if inputs = notation.inputs
+          inputs.each do |input|
+            found = lookup_type_node?(input, current_type)
+            return nil unless found
+            args << found
+          end
+        end
+        result : Type = nil_type
+        if output = notation.output
+          found = lookup_type_node?(output, current_type)
+          return nil unless found
+          result = found
+        end
+        args << result
+        return hook.instantiate_type(proc_type, args)
+      end
+      proc_type
+    else
+      nil
+    end
+  end
+
+  # A type the compiler declared and no source has written (no locations) is a name, not a
+  # definition. An import of that name wins (hosted path_lookup.cr: `import x::{Array}` beats
+  # the empty Array). A type a file has reopened keeps its locations and is not replaced.
+  def imported_over_shell(found : Type, name : String) : Type
+    if found.locations.nil?
+      if imported = @current_imports[name]?
+        return imported
+      end
+    end
+    found
+  end
+
+  def lookup_type_path?(path : Path, current_type : ModuleType) : Type?
+    # A metaclass resolves names in its instance type's scope.
+    if current_type.is_a?(MetaclassType)
+      instance = current_type.as(MetaclassType).instance_type
+      if instance.is_a?(ModuleType)
+        return lookup_type_path?(path, instance.as(ModuleType))
+      end
+    end
+    if path.global
+      return lookup_path_names(path.names, self)
+    end
+
+    first_name = path.names.first
+    t = current_type.lookup_type(first_name)
+    if t
+      t = imported_over_shell(t, first_name)
+    end
+    if t.nil? && current_type.name == first_name
+      t = current_type
+    end
+    if t.nil?
+      p_idx = 0
+      while p_idx < current_type.parents.size
+        p = current_type.parents[p_idx]
+        if p.is_a?(NamedType)
+          match = p.as(NamedType).lookup_type(first_name)
+          if match
+            t = match
+            break
+          end
+        end
+        p_idx = p_idx + 1
+      end
+    end
+    if t.nil?
+      t = @current_imports[first_name]?
+    end
+    if t.nil?
+      ns = current_type.namespace
+      while ns
+        break if ns.is_a?(SemanticProgram)
+        match = ns.lookup_type(first_name)
+        if match
+          # iyi: a sibling unit module found by walking out loses to the program's type of the same name
+          # (hosted path_lookup.cr:177-187): inside `Compiler::Lower::Asm`, `Compiler` is the program's.
+          if match.is_a?(ModuleType) && match.as(ModuleType).iyi_unit
+            if top = lookup_type(first_name)
+              match = top
+            end
+          end
+          t = match
+          break
+        end
+        ns = ns.namespace
+      end
+    end
+    if t.nil?
+      t = lookup_type(first_name)
+    end
+    if t.nil?
+      return nil
+    end
+    if path.names.size > 1
+      sub_names = [] of String
+      sn_i = 1
+      while sn_i < path.names.size
+        sub_names << path.names[sn_i]
+        sn_i = sn_i + 1
+      end
+      lookup_path_names(sub_names, t)
+    else
+      t
+    end
+  end
+
+  # Both lookups follow the same path; only the treatment of a miss differs.
+  def lookup_type_path(path : Path, current_type : ModuleType) : Type
+    if found = lookup_type_path?(path, current_type)
+      return found
+    end
+    refuse_constant(path)
+  end
+
+  # iyi: a name the program cannot resolve. Strict mode refuses it as the port
+  # always has. Total mode answers an UnresolvedType, so the nodes that name it
+  # are recorded untyped with the reason and the pass goes on.
+  def refuse_constant(path : Path) : Type
+    message = "undefined constant #{path.to_s}"
+    refuse_port(message) unless @total_mode
+    UnresolvedType.new(self, path.to_s)
+  end
+end
+
+# iyi: the type of a name the program cannot resolve (see refuse_constant). Its
+# full name cannot equal the name of a type the program declares.
+pub class UnresolvedType < Type
+  def initialize(program : SemanticProgram, name : String)
+    super(program, nil, name)
+  end
+
+  def full_name : String
+    "<unresolved #{@name}>"
+  end
+
+  def type_desc : String
+    "unresolved"
+  end
+end
+
+# A class body the top-level pass visited: the type it reopens or creates, and
+# the body node. The instance-variable pass walks these after the top-level pass.
+pub class TypeBody
+  getter type : ModuleType
+  getter body : ASTNode
+  getter imports : Hash(String, Type)
+
+  def initialize(@type : ModuleType, @body : ASTNode, @imports : Hash(String, Type))
+  end
+end
+
+# A generic subclass declared before the type system is installed resolves its
+# superclass arguments once the declaration pass has installed that system.
+pub class PendingGenericSuperclass
+  getter owner : ClassType
+  getter node : Generic
+  getter base : Type
+  getter imports : Hash(String, Type)
+
+  def initialize(@owner : ClassType, @node : Generic, @base : Type, @imports : Hash(String, Type))
+  end
+end
+
+pub class PendingGenericInclude
+  getter owner : ModuleType
+  getter node : Generic
+  getter base : Type
+  getter imports : Hash(String, Type)
+
+  def initialize(@owner : ModuleType, @node : Generic, @base : Type, @imports : Hash(String, Type))
+  end
+end
+
+# One initializer written in a type body, in declaration order.
+pub class InstanceVarInitializer
+  getter owner : ModuleType
+  getter name : String
+  getter value : ASTNode
+
+  def initialize(@owner : ModuleType, @name : String, @value : ASTNode)
+  end
+end
+
+pub class PendingIvar
+  property owner : ModuleType
+  property name : String
+  property restriction : ASTNode
+  property initializer : ASTNode?
+  # An explicit `@x : T` or initialize-arg `@x` is typed by T's virtual type (hosted
+  # declare_instance_var / type_guess_visitor check_can_be_stored).
+  property virtual : Bool
+  # Only an explicit `@x : T` declaration overrides an initialize-argument guess for the same ivar.
+  property explicit : Bool
+  property imports : Hash(String, Type)? = nil
+
+  def initialize(@owner : ModuleType, @name : String, @restriction : ASTNode, @initializer : ASTNode? = nil, @virtual : Bool = false, @explicit : Bool = false)
+  end
+end
+
+# An explicit instance variable as the file declared it, kept with the file's import table so
+# `resolve_declared_types` can resolve it again once a type system is installed.
+pub class DeclaredIvar
+  property owner : ModuleType
+  property name : String
+  property restriction : ASTNode
+  property initializer : ASTNode?
+  property virtual : Bool
+  property imports : Hash(String, Type)
+
+  def initialize(@owner : ModuleType, @name : String, @restriction : ASTNode, @initializer : ASTNode?, @virtual : Bool, @imports : Hash(String, Type))
+  end
+end
+
+pub class DeferredClassVar
+  getter owner : ModuleType
+  getter name : String
+  getter restriction : ASTNode
+  getter initializer : ASTNode?
+  getter imports : Hash(String, Type)
+  getter thread_local : Bool
+
+  def initialize(@owner : ModuleType, @name : String, @restriction : ASTNode, @initializer : ASTNode?, @imports : Hash(String, Type), @thread_local : Bool)
+  end
+end
+
+# A `self.new` the declarations pass added for an instance `initialize` (the hosted
+# new_expansions table). `expanded` is the new on the metaclass, `original` the
+# initialize it came from, `owner` the instance type. define_new_methods fills the
+# body of `expanded`.
+pub class NewExpansion
+  getter original : Def
+  getter expanded : Def
+  getter owner : ModuleType
+
+  def initialize(@original : Def, @expanded : Def, @owner : ModuleType)
+  end
+end
+
+pub class TopLevelVisitor < Visitor
+  property program : SemanticProgram
+  property current_type : ModuleType
+  property exp_nest : Int32
+  getter pending_ivars : Array(PendingIvar)
+  @file : String?
+  property unit : ModuleType? = nil
+  property imported_unit : Bool = false
+  property defer_class_vars : Bool = false
+  property defer_instance_vars : Bool = false
+  @enum_flags : Bool = false
+  @pending_flags : Bool = false
+  # The annotations written since the last declaration (hosted process_annotations).
+  @pending_annotations : Array(Annotation) = [] of Annotation
+
+  # Every explicit instance variable is recorded here, in the order the source
+  # declares it. A restriction may name a type a later file declares (`concurrency.iyi`
+  # restricts an ivar to `IyiDeferNode`, declared in `prelude.iyi`), so it resolves only
+  # once, after every file it read is declared, with the imports of the file that wrote it.
+  # Resolving at the visit would move every later offset (the hosted declarations pass
+  # keeps declaration order: TypeDeclarationVisitor).
+  def finish : Nil
+    saved = @program.current_imports
+    @pending_ivars.each do |pi|
+      pi.imports = saved if pi.imports.nil?
+      @program.pending_ivars << pi
+    end
+    if @defer_instance_vars
+      @pending_ivars.clear
+      return nil
+    end
+    # An explicit `@x : T` decides the type of `@x`. An inferred record for the same name (an
+    # initialize argument's restriction) does not replace it, as the hosted pass skips a guess for a
+    # variable that exists.
+    explicit = [] of String
+    @pending_ivars.each do |found|
+      explicit << "#{found.owner.full_name} #{found.name}" if found.explicit
+    end
+    # The hosted processor declares explicit variables before guessed ones for each owner.
+    [true, false].each do |explicit_pass|
+      @pending_ivars.each do |pi|
+        next if pi.explicit != explicit_pass
+        next if !pi.explicit && explicit.includes?("#{pi.owner.full_name} #{pi.name}")
+        if imports = pi.imports
+          @program.current_imports = imports
+        else
+          @program.current_imports = saved
+        end
+        arg_type = @program.declared_ivar_type(pi.restriction, pi.owner, pi.virtual)
+        mv = MetaTypeVar.new(pi.name, arg_type, pi.initializer)
+        mv.owner = pi.owner
+        pi.owner.instance_vars[pi.name] = mv
+        @program.declared_ivars << DeclaredIvar.new(pi.owner, pi.name, pi.restriction, pi.initializer, pi.virtual, @program.current_imports)
+      end
+    end
+    @program.current_imports = saved
+    @pending_ivars.clear
+  end
+
+  # A file that `load_file` reads hands its pending instance variables to the file that
+  # reads it. Each keeps the imports of the file that wrote it.
+  def take_pending_ivars : Array(PendingIvar)
+    taken = @pending_ivars
+    taken.each do |pi|
+      if pi.imports.nil?
+        pi.imports = @program.current_imports
+      end
+    end
+    @pending_ivars = [] of PendingIvar
+    taken
+  end
+
+  def initialize(@program : SemanticProgram, @file : String? = nil)
+    @current_type = @program
+    @exp_nest = 0
+    @pending_ivars = [] of PendingIvar
+    @pending_annotations = [] of Annotation
+    if file = @file
+      @program.file_imports[file] = @program.current_imports
+      @program.file_import_defs[file] = @program.current_import_defs
+    end
+  end
+
+  # `@[Primitive(:name)]` makes a def's body the compiler's own primitive, located at
+  # the def: the hosted process_def_primitive_annotation (top_level_visitor.cr). The
+  # `@[Unsafe]` site note that pass also records is not ported yet.
+  def primitive_body(node : Def, ann : Annotation) : Nil
+    if ann.args.size != 1
+      raise("expected Primitive annotation to have one argument")
+    end
+    arg = ann.args[0]
+    unless arg.is_a?(SymbolLiteral)
+      raise("expected Primitive argument to be a symbol literal")
+    end
+    primitive = Primitive.new(arg.as(SymbolLiteral).value)
+    primitive.location = node.location
+    node.body = primitive
+    nil
+  end
+
+  def visit(node : Expressions) : Bool
+    @exp_nest = @exp_nest + 1
+    has_inline = node.expressions.any? { |exp| exp.is_a?(MacroIf) || exp.is_a?(MacroFor) || exp.is_a?(MacroExpression) }
+    if has_inline
+      # Resolve constants in the site's lexical scope, in declaration order.
+      scope = @current_type
+      lookup = ->(path : Path) : ASTNode? do
+        found = @program.lookup_type_path?(path, scope)
+        found.is_a?(Const) ? found.as(Const).value : nil
+      end
+      node.expressions = splice_inline_sites(node.expressions, @current_type.full_name, @file || "", @current_type.is_a?(LibType), @program.normalizer, [] of String, nil, nil, false, lookup, self)
+    else
+      i = 0
+      while i < node.expressions.size
+        node.expressions[i].accept(self)
+        i = i + 1
+      end
+    end
+    @exp_nest = @exp_nest - 1
+    if @exp_nest == 0
+      finish
+    end
+    false
+  end
+
+  def visit(node : VisibilityModifier) : Bool
+    node.exp.visibility = node.modifier
+    node.exp.accept(self)
+    false
+  end
+
+  # A `require "./x"` reads that file, relative to this one, as the hosted pass
+  # does. A library name is not part of this unit and is refused.
+  def visit(node : Require) : Bool
+    name = node.string
+    unless name.starts_with?(".")
+      refuse_port("require \"#{name}\" names a library; a unit reaches its files with a relative require or an import")
+    end
+    base = "."
+    if here = @file
+      base = dir_of(here)
+    end
+    load_file(normalize_path("#{base}/#{name}.iyi"), @imported_unit)
+    false
+  end
+
+  # `import a/b` reads `a/b.iyi` from the project root, then from IYI_PATH (the
+  # order the hosted pass tries), and brings the listed types into this file.
+  def visit(node : ImportDecl) : Bool
+    written = node.path.join("/")
+    if loc = node.location
+      @program.file_imports[loc.filename] = @program.current_imports
+      @program.file_import_defs[loc.filename] = @program.current_import_defs
+    end
+    file = import_file(written)
+    unless file
+      refuse_port("can't find module '#{written}'")
+    end
+    unit = load_file(file.as(String), true)
+    if names = node.names
+      if unit.nil?
+        refuse_port("import '#{written}' names types of a file that is still being read")
+      end
+      names.each do |name|
+        found = unit.as(ModuleType).types[name]?
+        if found
+          @program.current_imports[name] = found.as(Type)
+        else
+          # A lowercase name is a def the file declares (`import a/b::{refuse_port}`):
+          # the calls slice resolves calls to it, so the pass records it here.
+          defs = unit.as(ModuleType).defs[name]?
+          unless defs
+            refuse_port("undefined constant #{name} in '#{written}'")
+          end
+          @program.current_import_defs[name] = defs.as(Array(Def))
+        end
+      end
+    end
+    false
+  end
+
+  # iyi: `import a/b` resolved as the hosted build resolves it (Program#iyi_import_candidates):
+  # the entry file's directory first, then the root its header names (only when the entry's
+  # path ends with that header), then IYI_PATH. A `.cr` file found at a root is Crystal's
+  # library, which this pass does not read, so it is refused by name.
+  def import_file(written : String) : String?
+    roots = [] of String
+    if dir = @program.entry_dir
+      roots << dir
+    end
+    if root = @program.project_root
+      roots << root
+    end
+    @program.search_path.each do |entry|
+      roots << entry
+    end
+    i = 0
+    while i < roots.size
+      candidate = "#{roots[i]}/#{written}.iyi"
+      if File.exists?(candidate)
+        return normalize_path(candidate)
+      end
+      crate = "#{roots[i]}/#{written}.cr"
+      if File.exists?(crate)
+        refuse_port("`#{written}` is Crystal's library (#{crate}), which this pass does not read")
+      end
+      i = i + 1
+    end
+    nil
+  end
+
+  # Reads, parses and declares one file into this program, once. Returns the module
+  # the file declares with its `module` header, or nil for a file with none. The
+  # file's imports belong to the file, so the program's import table is swapped for
+  # the visit and restored after it.
+  def load_file(file : String, imported : Bool = false) : ModuleType?
+    if @program.loaded_files.includes?(file)
+      return @program.loaded_units[file]?
+    end
+    @program.loaded_files.add(file)
+    # The pipeline holds the file's normalised tree when it declared the units. Reading that tree keeps one tree per file.
+    nodes = @program.unit_tree_or_parse(file)
+    inner = TopLevelVisitor.new(@program, file)
+    inner.imported_unit = imported
+    inner.defer_class_vars = @defer_class_vars
+    inner.defer_instance_vars = @defer_instance_vars
+    saved = @program.current_imports
+    saved_defs = @program.current_import_defs
+    @program.current_imports = Hash(String, Type).new
+    # A required file never finishes its own pending instance variables. It hands them to
+    # the file that reads it, and the root that read them finishes once, after every file
+    # it read is declared (the hosted pass resolves them after all top-level declarations).
+    inner.exp_nest = 1
+    @program.current_import_defs = Hash(String, Array(Def)).new
+    @program.file_imports[file] = @program.current_imports
+    @program.file_import_defs[file] = @program.current_import_defs
+    nodes.accept(inner)
+    inner.take_pending_ivars.each { |pi| @pending_ivars << pi }
+    @program.current_imports = saved
+    @program.current_import_defs = saved_defs
+    if unit = inner.unit
+      @program.loaded_units[file] = unit
+    end
+    inner.unit
+  end
+
+  def lookup_type_def_scope(node : ASTNode, path : Path) : ModuleType
+    if path.names.size == 1
+      path.global ? @program : @current_type
+    else
+      prefix_names = [] of String
+      p_i = 0
+      while p_i < path.names.size - 1
+        prefix_names << path.names[p_i]
+        p_i = p_i + 1
+      end
+      base = path.global ? @program : @current_type
+      i = 0
+      while i < prefix_names.size
+        pname = prefix_names[i]
+        sub = base.lookup_type(pname)
+        if sub.nil?
+          mod = NonGenericModuleType.new(@program, base, pname)
+          base.add_type(pname, mod)
+          if ploc = path.location
+            mod.add_location(ploc)
+          end
+          base = mod
+        elsif sub.is_a?(ModuleType)
+          base = sub.as(ModuleType)
+        else
+          raise("#{sub.full_name} can't be used as a namespace")
+        end
+        i = i + 1
+      end
+      base
+    end
+  end
+
+  def lookup_type_def(node : ASTNode, path : Path) : Tuple(ModuleType, String, Type?)
+    scope = lookup_type_def_scope(node, path)
+    name = path.names.last
+    type = scope.lookup_type(name)
+    {scope, name, type}
+  end
+
+  pub def declare_class(node : ClassDef) : Nil
+    scope, name, existing = lookup_type_def(node, node.name)
+    if existing.nil?
+      type : ClassType
+      if tv = node.type_vars
+        type = GenericClassType.new(@program, scope, name, tv, node.splat_index)
+      else
+        type = NonGenericClassType.new(@program, scope, name)
+      end
+      type.abstract = node.abstract
+      type.struct = node.struct
+      if vis = node.visibility
+        type.visibility = vis
+      end
+      scope.add_type(name, type)
+    end
+  end
+
+  pub def declare_types(classes : Array(ClassDef)) : Nil
+    classes.each do |cd|
+      declare_class(cd)
+    end
+  end
+
+  def visit(node : ClassDef) : Bool
+    annotations = @pending_annotations
+    @pending_annotations = [] of Annotation
+    scope, name, existing = lookup_type_def(node, node.name)
+
+    created_new_type = false
+    type : ClassType
+
+    if ex = existing
+      if ex.is_a?(AliasType)
+        ex = ex.as(AliasType).process_value
+      end
+      # iyi: `class Class` reopens the metaclass of Value (primitives.iyi; hosted program.cr 1423), so
+      # its methods (==, ===, self.|) are added to that metaclass, as the hosted program adds them.
+      if ex.is_a?(MetaclassType) && name == "Class"
+        meta = ex.as(MetaclassType)
+        if loc = node.location
+          meta.add_location(loc)
+        end
+        old_meta_scope = @current_type
+        @program.type_bodies << TypeBody.new(meta, node.body, @program.current_imports)
+        process_class_annotations(meta, annotations)
+        @current_type = meta
+        node.body.accept(self)
+        @current_type = old_meta_scope
+        return false
+      end
+
+      unless ex.is_a?(ClassType)
+        raise("#{name} is not a #{node.struct ? "struct" : "class"}, it's a #{ex.type_desc}")
+      end
+
+      cls = ex.as(ClassType)
+      if node.struct != cls.struct?
+        raise("#{name} is not a #{node.struct ? "struct" : "class"}, it's a #{cls.type_desc}")
+      end
+
+      if tv = node.type_vars
+        if cls.is_a?(GenericClassType)
+          gen = cls.as(GenericClassType)
+          if tv != gen.type_vars
+            raise("type var#{gen.type_vars.size > 1 ? "s" : ""} must be #{gen.type_vars.join(", ")}, not #{tv.join(", ")}")
+          end
+        else
+          raise("#{name} is not a generic #{cls.type_desc}")
+        end
+      end
+      type = cls
+    else
+      created_new_type = true
+      if tv = node.type_vars
+        type = GenericClassType.new(@program, scope, name, tv, node.splat_index)
+      else
+        type = NonGenericClassType.new(@program, scope, name)
+      end
+      type.abstract = node.abstract
+      type.struct = node.struct
+    end
+
+    if loc = node.location
+      type.add_location(loc)
+    end
+    if vis = node.visibility
+      type.visibility = vis
+    end
+    if iyi_unexported?(scope, node.visibility)
+      type.visibility = Visibility::Private
+    end
+
+    # Superclass handling
+    superclass : Type? = nil
+    superclass_display : String? = nil
+    if sc_node = node.superclass
+      if sc_node.is_a?(Generic)
+        g = sc_node.as(Generic)
+        base_sc = @program.lookup_type_node(g.name, @current_type)
+        superclass_display = "#{base_sc.full_name}(#{g.type_vars.map(&.to_s).join(", ")})"
+        if type.is_a?(GenericClassType)
+          superclass = @program.lookup_generic_superclass(g, base_sc, type)
+        else
+          superclass = @program.lookup_superclass_node(sc_node, @current_type)
+        end
+      else
+        superclass = @program.lookup_superclass_node(sc_node, @current_type)
+        superclass_display = superclass.full_name
+      end
+
+      if superclass == @program.enum_type
+        raise("can't inherit Enum. Use the enum keyword to define enums")
+      end
+      if superclass.is_a?(UnresolvedType) && @program.total_mode
+        # iyi: total mode carries an unresolved superclass past, as an unresolved constant: the class
+        # takes the default superclass it would have had without one, and the file is counted with the refusal.
+        @program.carried_refusals << "undefined constant #{superclass.name}"
+        superclass = node.struct ? @program.struct_type : @program.reference_type
+        superclass_display = superclass.full_name
+      end
+      unless superclass.is_a?(ClassType) || superclass.class?
+        raise("#{superclass.full_name} is not a class, it's a #{superclass.type_desc}")
+      end
+    elsif created_new_type
+      superclass = node.struct ? @program.struct_type : @program.reference_type
+      superclass_display = superclass.full_name
+    end
+
+    if node.superclass && !created_new_type && !type.superclass.nil? && type.superclass != superclass
+      sc_str = superclass ? superclass.full_name : "nil"
+      type_sc_str = if prev_sc = type.superclass
+                      prev_sc.full_name
+                    else
+                      "nil"
+                    end
+      raise("superclass mismatch for class #{type.full_name} (#{sc_str} for #{type_sc_str})")
+    end
+
+    if superclass && (created_new_type || type.superclass.nil?)
+      sc_cls = superclass
+      if node.struct != sc_cls.struct?
+        raise("can't make #{node.struct ? "struct" : "class"} '#{node.name.names.last}' inherit #{sc_cls.type_desc} '#{sc_cls.full_name}'")
+      end
+
+      if sc_cls.struct? && !sc_cls.abstract?
+        raise("can't extend non-abstract struct #{sc_cls.full_name}")
+      end
+
+      type.set_superclass(superclass, superclass_display)
+      if type.is_a?(GenericClassType) && node.superclass.is_a?(Generic) && @program.merge_hook.nil?
+        generic = node.superclass.as(Generic)
+        base = @program.lookup_type_node(generic.name, @current_type)
+        # Total mode already carried a missing base and chose the default parent.
+        # Only a resolved base can have its generic arguments bound later.
+        unless base.is_a?(UnresolvedType)
+          @program.pending_generic_superclasses << PendingGenericSuperclass.new(type, generic, base, @program.current_imports)
+        end
+      end
+    end
+
+    if created_new_type
+      scope.add_type(name, type)
+    end
+    process_class_annotations(type, annotations)
+
+    old_type = @current_type
+    @current_type = type
+    @program.type_bodies << TypeBody.new(type, node.body, @program.current_imports)
+    node.body.accept(self)
+    @current_type = old_type
+    false
+  end
+
+  def process_class_annotations(type : Type, annotations : Array(Annotation)) : Nil
+    annotations.each do |ann|
+      annotation_type = @program.lookup_type_path(ann.path, @current_type)
+      unless annotation_type.is_a?(AnnotationType)
+        raise("#{ann.path} is not an annotation")
+      end
+      type.add_annotation(annotation_type.as(AnnotationType), ann)
+      if annotation_type.object_id == @program.types["Share"].object_id
+        type.share_trusted = true
+        unless ann.args.empty?
+          raise("Share annotation can't have positional arguments, only named arguments: 'owns'")
+        end
+        if named_args = ann.named_args
+          named_args.each do |named_arg|
+            unless named_arg.name == "owns"
+              raise("unknown Share named argument, valid arguments are: 'owns'")
+            end
+            value = named_arg.value
+            unless value.is_a?(BoolLiteral)
+              raise("Share's 'owns' is true or false")
+            end
+            type.share_owns = value.as(BoolLiteral).value
+          end
+        end
+      end
+    end
+    nil
+  end
+
+  # A module header (`module compiler/foundation/enums`) names the unit its file is.
+  # The parser has already wrapped the file in the `ModuleDef` that header makes
+  # (`iyi_unit`: the path camel-cased, the rest of the file as its body), so the
+  # namespace is built there, from the root. Building it here as well nested every
+  # type twice (`Semdecl::Nested::Tools::Semdecl::Nested::Tools::Helpers`).
+  def visit(node : ModuleHeader) : Bool
+    false
+  end
+
+  def visit(node : ModuleDef) : Bool
+    scope, name, existing = lookup_type_def(node, node.name)
+
+    type : ModuleType
+
+    if ex = existing
+      unless ex.module?
+        raise("#{name} is not a module, it's a #{ex.type_desc}")
+      end
+      mod = ex.as(ModuleType)
+      if tv = node.type_vars
+        if mod.is_a?(GenericModuleType)
+          gen = mod.as(GenericModuleType)
+          if tv != gen.type_vars
+            raise("type var#{gen.type_vars.size > 1 ? "s" : ""} must be #{gen.type_vars.join(", ")}, not #{tv.join(", ")}")
+          end
+        else
+          raise("#{name} is not a generic module")
+        end
+      end
+      type = mod
+    else
+      if tv = node.type_vars
+        type = GenericModuleType.new(@program, scope, name, tv, node.splat_index)
+      else
+        type = NonGenericModuleType.new(@program, scope, name)
+      end
+      scope.add_type(name, type)
+    end
+
+    if node.iyi_unit
+      @unit = type
+      type.iyi_unit = true
+    end
+    if loc = node.location
+      type.add_location(loc)
+    end
+    if vis = node.visibility
+      type.visibility = vis
+    end
+
+    old_type = @current_type
+    @current_type = type
+    @program.type_bodies << TypeBody.new(type, node.body, @program.current_imports)
+    node.body.accept(self)
+    @current_type = old_type
+
+    false
+  end
+
+  def visit(node : TraitDef) : Bool
+    scope, name, existing = lookup_type_def(node, node.name)
+
+    type : TraitType
+
+    if ex = existing
+      unless ex.trait?
+        raise("#{name} is not a trait, it's a #{ex.type_desc}")
+      end
+      type = ex.as(TraitType)
+    else
+      tv = node.type_vars
+      at = node.assoc_types
+
+      if tv && at
+        clashing = [] of String
+        tv.each do |v|
+          if at.includes?(v)
+            clashing << v
+          end
+        end
+        unless clashing.empty?
+          clashing = clashing.sorted
+          raise("#{name} declares #{clashing.join(", ")} both as a parameter and as an associated type")
+        end
+      end
+
+      if tv || at
+        params = tv ? tv.as(Array(String)).dup : [] of String
+        params.concat(at.as(Array(String))) if at
+        generic = GenericTraitType.new(@program, scope, name, params)
+        if at
+          at.each { |a| generic.assoc_types << a }
+        end
+        type = generic
+      else
+        type = TraitType.new(@program, scope, name)
+      end
+      scope.add_type(name, type)
+    end
+
+    if loc = node.location
+      type.add_location(loc)
+    end
+    if vis = node.visibility
+      type.visibility = vis
+    end
+    if iyi_unexported?(scope, node.visibility)
+      type.visibility = Visibility::Private
+    end
+
+    # Supertraits
+    if sts = node.supertraits
+      sts.each do |st_node|
+        st = @program.lookup_type_node(st_node, @current_type)
+        unless st.trait?
+          raise("can't require #{st.full_name}, it's a #{st.type_desc}. A trait can only require another trait")
+        end
+        if st == type
+          raise("#{type.full_name} can't require itself")
+        end
+        if type.supertraits.includes?(st)
+          raise("#{type.full_name} already requires #{st.full_name}")
+        end
+        type.supertraits << st
+      end
+    end
+
+    old_type = @current_type
+    @current_type = type
+    node.body.accept(self)
+    @current_type = old_type
+
+    false
+  end
+
+  def visit(node : ImplDef) : Bool
+    trait_type = @program.lookup_type_node(node.trait, @current_type)
+    unless trait_type.trait?
+      message = "can't implement #{trait_type.full_name}, it's a #{trait_type.type_desc}. Only a trait can be implemented"
+      raise(message) unless @program.total_mode
+      @program.carried_refusals << message
+      return false
+    end
+
+    target_type = @program.lookup_type_node(node.target, @current_type)
+    if target_type.trait?
+      message = "can't implement #{trait_type.full_name} for #{target_type.full_name}, it's a trait. A trait is implemented for a type, and a trait is not one \u{2014} to give every implementer of #{target_type.full_name} a default #{trait_type.full_name}, iyi has no blanket impls (SPEC.md II.7)"
+      raise(message) unless @program.total_mode
+      @program.carried_refusals << message
+      return false
+    end
+
+    unless target_type.is_a?(ModuleType)
+      message = "can't implement a trait for #{target_type.full_name}, it's a #{target_type.type_desc}"
+      raise(message) unless @program.total_mode
+      @program.carried_refusals << message
+      return false
+    end
+
+    target_mod = target_type.as(ModuleType)
+
+    old_type = @current_type
+    @current_type = target_mod
+    node.body.accept(self)
+    @current_type = old_type
+
+    target_mod.include(trait_type)
+    @program.impls << ImplRecord.new(trait_type, target_mod, node.type_vars, node, @program.current_imports.dup, old_type)
+    @program.resolve_impl_traits unless @program.merge_hook.nil?
+
+    false
+  end
+
+  # `@[Flags]` marks the enum that follows it: its members are bits, and it gets None and All.
+  # Every annotation is also kept for the declaration after it (hosted process_annotations).
+  def visit(node : Annotation) : Bool
+    if node.path.names.last == "Flags"
+      @pending_flags = true
+    end
+    @pending_annotations << node
+    false
+  end
+
+  def visit(node : EnumDef) : Bool
+    annotations = @pending_annotations
+    @pending_annotations = [] of Annotation
+    scope, name, existing = lookup_type_def(node, node.name)
+
+    enum_type : EnumType
+    if ex = existing
+      unless ex.is_a?(EnumType)
+        raise("#{name} is not a enum, it's a #{ex.type_desc}")
+      end
+      enum_type = ex.as(EnumType)
+    else
+      base = @program.int32_type.as(Type)
+      if bt = node.base_type
+        base = @program.lookup_type_node(bt, @current_type)
+        valid_base = ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128"].includes?(base.name)
+        unless valid_base
+          raise("enum base type must be an integer type")
+        end
+      end
+      enum_type = EnumType.new(@program, scope, name, base)
+      scope.add_type(name, enum_type)
+    end
+
+    if loc = node.location
+      enum_type.add_location(loc)
+    end
+    if vis = node.visibility
+      enum_type.visibility = vis
+    end
+    if iyi_unexported?(scope, node.visibility)
+      enum_type.visibility = Visibility::Private
+    end
+    annotations.each do |ann|
+      annotation_type = @program.lookup_type_path(ann.path, @current_type)
+      unless annotation_type.is_a?(AnnotationType)
+        raise("#{ann.path} is not an annotation")
+      end
+      enum_type.add_annotation(annotation_type.as(AnnotationType), ann)
+    end
+
+    @enum_flags = @pending_flags
+    @pending_flags = false
+    counter = @enum_flags ? 1_i64 : 0_i64
+    direct_names = [] of String
+    counter = add_enum_members(enum_type, node.members, counter, direct_names, false)
+
+    if enum_type.members.empty?
+      raise("enum #{node.name.names.last} must have at least one member")
+    end
+
+    if @enum_flags
+      if enum_type.members["None"]?.nil?
+        enum_type.add_member("None", NumberLiteral.new("0"))
+        body = Call.new(Call.new(nil, "value"), "==", NumberLiteral.new("0")).at(node)
+        none_def = Def.new("none?", body: body, return_type: Path.new("Bool"))
+        none_def.location = node.location
+        enum_type.add_def(none_def)
+      elsif user_none = enum_type.defs["none?"]?
+        # Hosted generates none? first. The user's def then replaces it and
+        # add_def keeps the generated def as previous. The body was visited
+        # first here, so link that generated def onto the one already recorded.
+        body = Call.new(Call.new(nil, "value"), "==", NumberLiteral.new("0")).at(node)
+        generated_none = Def.new("none?", body: body, return_type: Path.new("Bool"))
+        generated_none.location = node.location
+        i = 0
+        while i < user_none.size
+          user = user_none[i]
+          user.previous = generated_none
+          generated_none.next = user
+          i = i + 1
+        end
+      end
+      if enum_type.members["All"]?.nil?
+        all_value = 0_i64
+        enum_type.members.each_value do |member|
+          all_value = all_value | member.value.as(NumberLiteral).value.to_i64
+        end
+        enum_type.add_member("All", NumberLiteral.new(all_value.to_s))
+      end
+    end
+    direct_names.each do |mname|
+      pname = "#{underscore(mname)}?"
+      method_name = @enum_flags ? "includes?" : "=="
+      body = Call.new(Var.new("self"), method_name, Path.new(mname)).at(node)
+      if enum_type.defs[pname]?.nil?
+        predicate = Def.new(pname, body: body, return_type: Path.new("Bool"))
+        predicate.location = node.location
+        enum_type.add_def(predicate)
+      else
+        if user_preds = enum_type.defs[pname]?
+          generated = Def.new(pname, body: body, return_type: Path.new("Bool"))
+          generated.location = node.location
+          i = 0
+          while i < user_preds.size
+            user = user_preds[i]
+            user.previous = generated
+            generated.next = user
+            i = i + 1
+          end
+        end
+      end
+    end
+
+    false
+  end
+
+  # The members of an enum body. A `{% if %}` in the body takes the branch its flags
+  # choose, as the hosted pass expands it. Implicit values go on across the branches in
+  # the order they are written, and an explicit value starts a new run.
+  def add_enum_members(enum_type : EnumType, nodes : Array(ASTNode), counter : Int64, direct_names : Array(String), in_macro : Bool) : Int64
+    i = 0
+    while i < nodes.size
+      node = nodes[i]
+      if node.is_a?(Arg)
+        arg = node.as(Arg)
+        mname = arg.name
+        if def_val = arg.default_value
+          if def_val.is_a?(NumberLiteral)
+            counter = def_val.as(NumberLiteral).value.to_i64
+          end
+        end
+        enum_type.add_member(mname, NumberLiteral.new(counter.to_s))
+        direct_names << mname unless in_macro
+        if @enum_flags
+          counter = counter == 0 ? 1_i64 : counter * 2_i64
+        else
+          counter = counter + 1
+        end
+      elsif node.is_a?(MacroIf)
+        mi = node.as(MacroIf)
+        branch = iyi_flag_cond?(mi.cond) ? mi.then : mi.else
+        counter = add_enum_members(enum_type, enum_branch_members(branch, node.location), counter, direct_names, true)
+      elsif node.is_a?(Expressions)
+        counter = add_enum_members(enum_type, node.as(Expressions).expressions, counter, direct_names, in_macro)
+      else
+        old_type = @current_type
+        @current_type = enum_type
+        node.accept(self)
+        @current_type = old_type
+      end
+      i = i + 1
+    end
+    counter
+  end
+
+  def expressions_of(node : ASTNode) : Array(ASTNode)
+    if node.is_a?(Expressions)
+      return node.as(Expressions).expressions
+    end
+    [node] of ASTNode
+  end
+
+  # The members a macro branch of an enum body writes. The parser keeps such a branch as
+  # the text it is written in, so the text is parsed again as the body of an enum, which
+  # gives the members the same nodes they have outside a macro. A branch that holds code
+  # the port does not expand is refused.
+  def enum_branch_members(branch : ASTNode, location : Location?) : Array(ASTNode)
+    text = String::Builder.new
+    expressions_of(branch).each do |piece|
+      if piece.is_a?(MacroLiteral)
+        text << piece.as(MacroLiteral).value
+      elsif !piece.is_a?(Nop)
+        refuse_port("an enum body's macro branch that holds code, which the port does not expand")
+      end
+    end
+    file = ""
+    if loc = location
+      file = loc.filename
+    end
+    wrapped = Parser.new("enum Branch\n#{text.to_s}\nend\n", file).parse
+    wrapped_def = expressions_of(wrapped)[0].as(EnumDef)
+    wrapped_def.members
+  end
+
+  # Use the same target flags as the macro engine for the compiler's host.
+  def iyi_host_flag?(name : String) : Bool
+    MacroTargetFlags.for_triple(MacroTargetFlags.compile_time_triple, [] of String).includes?(name)
+  end
+
+  # `flag?(:name)` joined by `!`, `&&` and `||`: every condition an enum body in the
+  # library writes. Any other condition is refused rather than guessed.
+  def iyi_flag_cond?(cond : ASTNode) : Bool
+    if cond.is_a?(Not)
+      return !iyi_flag_cond?(cond.as(Not).exp)
+    end
+    if cond.is_a?(And)
+      both = cond.as(And)
+      return iyi_flag_cond?(both.left) && iyi_flag_cond?(both.right)
+    end
+    if cond.is_a?(Or)
+      either = cond.as(Or)
+      return iyi_flag_cond?(either.left) || iyi_flag_cond?(either.right)
+    end
+    if cond.is_a?(Expressions) && cond.as(Expressions).expressions.size == 1
+      return iyi_flag_cond?(cond.as(Expressions).expressions[0])
+    end
+    if cond.is_a?(Call)
+      call = cond.as(Call)
+      if call.name == "flag?" && call.args.size == 1 && call.args[0].is_a?(SymbolLiteral)
+        return iyi_host_flag?(call.args[0].as(SymbolLiteral).value)
+      end
+    end
+    refuse_port("a macro condition in an enum body that the port does not evaluate")
+  end
+
+  # A lib, like `lib LibC`. Its funs are recorded as LibFun records. The hosted pass also
+  # reads the lib's `@[Link]` libraries and call convention here, which are not ported yet.
+  def visit(node : LibDef) : Bool
+    annotations = @pending_annotations
+    @pending_annotations = [] of Annotation
+    scope, name, existing = lookup_type_def(node, node.name)
+
+    lib_type : LibType
+    if ex = existing
+      unless ex.is_a?(LibType)
+        raise("#{name} is not a lib, it's a #{ex.type_desc}")
+      end
+      lib_type = ex.as(LibType)
+    else
+      lib_type = LibType.new(@program, scope, name)
+      scope.add_type(name, lib_type)
+    end
+
+    if loc = node.location
+      lib_type.add_location(loc)
+    end
+    if vis = node.visibility
+      lib_type.visibility = vis
+    end
+    # iyi: the `@[Link]` annotations written before this reopening, in declaration order (the
+    # hosted process_annotations of a lib); the others are not lib records.
+    annotations.each do |ann|
+      if ann.path.names.last == "Link"
+        lib_type.link_annotations << LinkAnnotationRecord.from(ann)
+      end
+    end
+
+    old_type = @current_type
+    @current_type = lib_type
+    node.body.accept(self)
+    @current_type = old_type
+
+    false
+  end
+
+  # Lib and global funs share the resolved signature read by call typing and
+  # lowering. A global fun may also carry a body.
+  def visit(node : FunDef) : Bool
+    annotations = @pending_annotations
+    @pending_annotations = [] of Annotation
+    if node.body && !@current_type.is_a?(SemanticProgram)
+      raise("can only declare fun at lib or global scope")
+    end
+    if @current_type.is_a?(LibType) || @current_type.is_a?(SemanticProgram)
+      arg_names = node.args.map { |arg| arg.name }
+      real = node.real_name || node.name
+      record = LibFun.new(node.name, real, arg_names, node.varargs, node.return_type)
+      record.location = node.location
+      record.node = node
+      record.owner = @current_type
+      record.imports = @program.current_imports
+      annotations.each do |ann|
+        annotation_type = @program.lookup_type_path?(ann.path, @current_type)
+        if annotation_type
+          record.naked = true if annotation_type == @program.types["Naked"]
+          record.no_inline = true if annotation_type == @program.types["NoInline"]
+          record.always_inline = true if annotation_type == @program.types["AlwaysInline"]
+          record.returns_twice = true if annotation_type == @program.types["ReturnsTwice"]
+        end
+      end
+      # iyi: the argument and return types resolved here, as the hosted pass resolves them when it
+      # visits a fun (top_level_visitor.cr 2628-2680): the call typing and the lowering read them.
+      node.args.each do |arg|
+        if restriction = arg.restriction
+          record.arg_types << @program.lookup_type_node(restriction, @current_type)
+        else
+          raise("a lib fun argument needs a type: #{arg.name} of #{node.name}")
+        end
+      end
+      if rt = node.return_type
+        record.resolved_return = @program.lookup_type_node(rt, @current_type)
+      else
+        # Hosted TypeDeclarationVisitor uses Nil when the return is omitted.
+        record.resolved_return = @program.nil_type
+      end
+      @program.record_lib_fun(node, record)
+      if @current_type.is_a?(LibType)
+        funs = @current_type.as(LibType).funs
+        replaced = false
+        i = 0
+        while i < funs.size
+          old = funs[i]
+          if old.name == record.name && old.args.size == record.args.size && old.varargs == record.varargs
+            record.previous = old
+            funs[i] = record
+            replaced = true
+            break
+          end
+          i = i + 1
+        end
+        funs << record unless replaced
+      else
+        @program.global_funs << record
+      end
+    end
+    false
+  end
+
+  # A C struct or union inside a lib. Hosted, it is an extern struct of the lib; its fields
+  # and layout are read by the later type-declaration pass, which this one does not reach.
+  # A union is also a struct here: the hosted dump does not tell them apart.
+  def visit(node : CStructOrUnionDef) : Bool
+    if @current_type.types[node.name]?
+      raise("#{node.name} is already defined")
+    end
+    type = NonGenericClassType.new(@program, @current_type, node.name, @program.struct_type)
+    type.struct = true
+    if loc = node.location
+      type.add_location(loc)
+    end
+    @current_type.add_type(node.name, type)
+    declare_c_struct_fields(type, node.body)
+    false
+  end
+
+  # Each field of a C struct or union is an instance variable of the declared type,
+  # with a getter `name` and a setter `name=`, as the hosted pass declares them. The
+  # field's type is resolved in `finish`, so a field may name a struct declared
+  # later in the lib. Not ported yet: the void check, `check_allowed_in_lib`, and a
+  # field that includes another C struct (refused).
+  def declare_c_struct_fields(type : NonGenericClassType, body : ASTNode) : Nil
+    nodes = body.is_a?(Expressions) ? body.as(Expressions).expressions : [body]
+    nodes.each do |field|
+      if field.is_a?(Include)
+        refuse_port("include in a C struct or union is not ported yet")
+      end
+      next unless field.is_a?(TypeDeclaration)
+      decl = field.as(TypeDeclaration)
+      next unless decl.var.is_a?(Var)
+      field_name = decl.var.as(Var).name
+      var_name = "@" + field_name
+      if type.lookup_instance_var?(var_name)
+        raise("#{type.type_desc} #{type.full_name} already defines a field named '#{field_name}'")
+      end
+      @pending_ivars << PendingIvar.new(type, var_name, decl.declared_type)
+
+      setter = Def.new("#{field_name}=", [Arg.new("value")], Nop.new)
+      setter.visibility = Visibility::Public
+      setter.location = decl.location
+      type.add_def(setter)
+
+      getter = Def.new(field_name, [] of Arg, InstanceVar.new(var_name))
+      getter.visibility = Visibility::Public
+      getter.location = decl.location
+      type.add_def(getter)
+    end
+    nil
+  end
+
+  def visit(node : Alias) : Bool
+    scope, name, existing = lookup_type_def(node, node.name)
+
+    if ex = existing
+      if ex.is_a?(AliasType)
+        raise("alias #{node.name.names.last} is already defined")
+      else
+        raise("can't alias #{node.name.names.last} because it's already defined as a #{ex.type_desc}")
+      end
+    end
+
+    alias_type = AliasType.new(@program, scope, name, node.value)
+    if loc = node.location
+      alias_type.add_location(loc)
+    end
+    if vis = node.visibility
+      alias_type.visibility = vis
+    end
+    if iyi_unexported?(scope, node.visibility)
+      alias_type.visibility = Visibility::Private
+    end
+    scope.add_type(name, alias_type)
+
+    false
+  end
+
+  # A lib external variable `$v : T` (hosted type_declaration_visitor.cr:95-120).
+  # The lib type gains a getter `v` and a setter `v=`, both External defs there.
+  # Recorded as LibFun so the declaration dump prints them the way the oracle
+  # prints an External (real_name, varargs, no body). Not ported: check_allowed_in_lib
+  # and the Void refusal, the same skip as a C struct field.
+  def visit(node : ExternalVar) : Bool
+    unless @current_type.is_a?(LibType)
+      raise("can only declare an external variable inside a lib")
+    end
+    lib_type = @current_type.as(LibType)
+    annotations = @pending_annotations
+    @pending_annotations = [] of Annotation
+    thread_local = false
+    annotations.each do |ann|
+      thread_local = true if ann.path.names.last == "ThreadLocal"
+    end
+    real = node.real_name || node.name
+    var_type = @program.lookup_type_node(node.type_spec, lib_type)
+
+    getter_fun = LibFun.new(node.name, real, [] of String, false, nil)
+    getter_fun.location = node.location
+    getter_fun.owner = lib_type
+    getter_fun.imports = @program.current_imports
+    getter_fun.external_var = true
+    getter_fun.external_type_spec = node.type_spec
+    getter_fun.thread_local = thread_local
+    getter_fun.primitive = "external_var_get"
+    getter_fun.resolved_return = var_type
+
+    setter_fun = LibFun.new("#{node.name}=", real, ["value"], false, nil)
+    setter_fun.location = node.location
+    setter_fun.owner = lib_type
+    setter_fun.imports = @program.current_imports
+    setter_fun.external_var = true
+    setter_fun.external_type_spec = node.type_spec
+    setter_fun.thread_local = thread_local
+    setter_fun.primitive = "external_var_set"
+    setter_fun.resolved_return = var_type
+    setter_fun.arg_types << var_type
+
+    lib_type.funs << getter_fun
+    lib_type.funs << setter_fun
+    @program.external_var_funs << getter_fun
+    @program.external_var_funs << setter_fun
+    false
+  end
+
+  # Only the typedefs of a lib are registered here. Its funs and C structs are
+  # recorded by visit(FunDef) and visit(CStructOrUnionDef); an external variable
+  # by visit(ExternalVar).
+  def visit(node : TypeDef) : Bool
+    if @current_type.types[node.name]?
+      raise("#{node.name} is already defined")
+    end
+    typed = @program.lookup_type_node(node.type_spec, @current_type)
+    typedef = TypeDefType.new(@program, @current_type, node.name, typed)
+    if loc = node.location
+      typedef.add_location(loc)
+    end
+    @current_type.add_type(node.name, typedef)
+    false
+  end
+
+  def visit(node : Def) : Bool
+    # iyi: an annotation before a def belongs to the def, not to a later class variable.
+    @pending_annotations.each do |ann|
+      primitive_body(node, ann) if ann.path.names.last == "Primitive"
+      if ann.path.names.last == "NoInline" || ann.path.names.last == "AlwaysInline"
+        annotation_type = @program.lookup_type_path(ann.path, @current_type)
+        node.no_inline = true if annotation_type == @program.types["NoInline"]
+        node.always_inline = true if annotation_type == @program.types["AlwaysInline"]
+      end
+      if annotation_type = @program.lookup_type_path?(ann.path, @current_type)
+        if annotation_type.is_a?(AnnotationType) && annotation_type.object_id == @program.types["Share"].object_id
+          node.share_annotated = true
+        end
+      end
+    end
+    @pending_annotations = [] of Annotation
+    target_type : ModuleType
+
+    if rec = node.receiver
+      if rec.is_a?(Var) && rec.as(Var).name == "self"
+        target_type = @current_type.metaclass
+      else
+        rec_type = @program.lookup_type_node(rec, @current_type)
+        target_type = rec_type.as(ModuleType).metaclass
+      end
+    else
+      target_type = @current_type
+    end
+
+    if node.abstract
+      if (target_type.class? || target_type.struct?) && !target_type.abstract?
+        raise("can't define abstract def on non-abstract #{target_type.type_desc}")
+      end
+    end
+
+    if iyi_unexported?(@current_type, node.visibility)
+      node.visibility = Visibility::Private
+    elsif node.visibility.nil?
+      node.visibility = Visibility::Public
+    end
+
+    if node.name == "initialize"
+      node.args.each do |arg|
+        if arg.name.starts_with?("@")
+          if r = arg.restriction
+            @pending_ivars << PendingIvar.new(@current_type, arg.name, r, nil, true)
+          end
+        end
+      end
+      assigns = [] of Assign
+      if b = node.body
+        if b.is_a?(Assign)
+          assigns << b.as(Assign)
+        elsif b.is_a?(Expressions)
+          b.as(Expressions).expressions.each do |e|
+            assigns << e.as(Assign) if e.is_a?(Assign)
+          end
+        end
+      end
+      assigns.each do |asgn|
+        if asgn.target.is_a?(InstanceVar)
+          ivar_name = asgn.target.as(InstanceVar).name
+          if asgn.value.is_a?(Var)
+            vname = asgn.value.as(Var).name
+            node.args.each do |arg|
+              if arg.name == vname
+                if r = arg.restriction
+                  @pending_ivars << PendingIvar.new(@current_type, ivar_name, r, nil, true)
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
+    target_type.add_def(node)
+
+    # An instance `initialize` makes a `self.new` with the same arguments, added now
+    # so a later `def self.new` finds it through `previous_def`. Its body is filled
+    # by define_new_methods once the file is declared (see finish).
+    if node.name == "initialize" && node.receiver.nil?
+      new_def = Def.new("new", node.args.map { |a| a.clone.as(Arg) }, Nop.new)
+      new_def.location = node.location
+      new_def.splat_index = node.splat_index
+      new_def.double_splat = node.double_splat
+      new_def.block_arg = node.block_arg
+      new_def.visibility = Visibility::Public
+      target_type.metaclass.add_def(new_def)
+      @program.record_generated_new(new_def)
+      @program.new_expansions << NewExpansion.new(node, new_def, target_type)
+    end
+
+    false
+  end
+
+  def visit(node : Assign) : Bool
+    if node.target.is_a?(InstanceVar)
+      if @current_type.is_a?(SemanticProgram)
+        raise("can't use instance variables at the top level")
+      end
+    end
+    if node.target.is_a?(ClassVar)
+      if @current_type.is_a?(SemanticProgram)
+        raise("can't use class variables at the top level")
+      end
+    end
+    if node.target.is_a?(Path)
+      path = node.target.as(Path)
+      scope = lookup_type_def_scope(node, path)
+      name = path.names.last
+      existing = scope.lookup_type(name)
+      if existing
+        raise("already initialized constant #{existing.full_name}")
+      end
+
+      const = Const.new(@program, scope, name, node.value)
+      @program.const_initializers << const
+      if loc = node.location
+        const.add_location(loc)
+      end
+      if vis = node.visibility
+        const.visibility = vis
+      end
+      if iyi_unexported?(scope, node.visibility)
+        const.visibility = Visibility::Private
+      end
+      scope.add_type(name, const)
+    end
+    false
+  end
+
+  def visit(node : TypeDeclaration) : Bool
+    # iyi: the annotations written before this declaration (hosted process_annotations): a
+    # class variable takes @[ThreadLocal] from them, and each declaration consumes them.
+    annotations = @pending_annotations
+    @pending_annotations = [] of Annotation
+    if node.var.is_a?(InstanceVar)
+      if @current_type.is_a?(SemanticProgram)
+        raise("can only declare instance variables of a non-generic class, not a main (<Program>)")
+      end
+      ivar_name = node.var.as(InstanceVar).name
+      @pending_ivars << PendingIvar.new(@current_type, ivar_name, node.declared_type, node.value, true, true)
+    elsif node.var.is_a?(ClassVar)
+      if @current_type.is_a?(SemanticProgram)
+        raise("can't use class variables at the top level")
+      end
+      if @imported_unit || @defer_class_vars
+        thread_local = annotations.any? { |ann| ann.path.names.last == "ThreadLocal" }
+        @program.deferred_cvars << DeferredClassVar.new(@current_type, node.var.as(ClassVar).name, node.declared_type, node.value, @program.current_imports, thread_local)
+        return false
+      end
+      decl_type = @program.lookup_type_node(node.declared_type, @current_type)
+      cvar_name = node.var.as(ClassVar).name
+      mv = MetaTypeVar.new(cvar_name, decl_type, node.value)
+      mv.owner = @current_type
+      annotations.each do |ann|
+        mv.thread_local = true if ann.path.names.last == "ThreadLocal"
+      end
+      @current_type.class_vars[cvar_name] = mv
+      @program.declared_cvars << DeclaredIvar.new(@current_type, cvar_name, node.declared_type, node.value, true, @program.current_imports)
+    end
+    false
+  end
+
+  def visit(node : Include) : Bool
+    type = @program.lookup_type_node(node.name, @current_type)
+    if type.trait?
+      raise("can't include #{type.full_name}, it's a trait. A type implements a trait by having an `impl #{type.full_name} for #{@current_type.full_name}`, which is what lets the orphan rule check it — see SPEC.md R-3")
+    end
+
+    unless type.module?
+      raise("#{type.full_name} is not a module, it's a #{type.type_desc}")
+    end
+
+    @current_type.include(type)
+    if node.name.is_a?(Generic) && @program.merge_hook.nil?
+      @program.pending_generic_includes << PendingGenericInclude.new(@current_type, node.name.as(Generic), type, @program.current_imports)
+    end
+    refuse_unported_hook(node.name, type, "included")
+    false
+  end
+
+  def visit(node : Extend) : Bool
+    type = @program.lookup_type_node(node.name, @current_type)
+    if type.trait?
+      raise("can't extend #{type.full_name}, it's a trait. A type implements a trait by having an `impl #{type.full_name} for #{@current_type.full_name}`, which is what lets the orphan rule check it — see SPEC.md R-3")
+    end
+
+    unless type.module?
+      raise("#{type.full_name} is not a module, it's a #{type.type_desc}")
+    end
+
+    @current_type.metaclass.include(type)
+    refuse_unported_hook(node.name, type, "extended")
+    false
+  end
+
+  # Hosted run_hooks uses only the module's own hooks, or the generic holder's.
+  # The port cannot retain their expansions yet. Refuse them here so accepted
+  # include/extend nodes have no runtime payload (hosted codegen.cr:1311-1327).
+  def refuse_unported_hook(written : ASTNode, type : Type, kind : String) : Nil
+    holder = type
+    if written.is_a?(Generic)
+      holder = @program.lookup_type_node(written.as(Generic).name, @current_type)
+    end
+    unless holder.is_a?(ModuleType)
+      refuse_port("the '#{kind}' hooks of #{type.full_name} (hosted top_level_visitor.cr hook_type) are not ported yet")
+    end
+    if holder.as(ModuleType).macros[kind]?
+      refuse_port("the '#{kind}' hook of #{holder.full_name} (hosted top_level_visitor.cr run_hooks) is not ported yet")
+    end
+  end
+
+  def visit(node : Macro) : Bool
+    @current_type.add_macro(node)
+    false
+  end
+
+  def visit(node : Call) : Bool
+    if node.obj.nil?
+      if a_macro = @current_type.lookup_call_macro?(node)
+        engine = MacroEngine.new
+        expanded_ast = engine.expand(a_macro, node, @program.normalizer)
+        node.expanded = expanded_ast
+        expanded_ast.accept(self)
+        return false
+      end
+    end
+    false
+  end
+
+  def visit(node : MacroIf) : Bool
+    Expressions.new([node] of ASTNode).accept(self)
+    false
+  end
+
+  def visit(node : MacroFor) : Bool
+    Expressions.new([node] of ASTNode).accept(self)
+    false
+  end
+
+  def visit(node : MacroExpression) : Bool
+    Expressions.new([node] of ASTNode).accept(self)
+    false
+  end
+
+  def visit(node : MacroLiteral) : Bool
+    false
+  end
+end
+
+# The hosted rule for an unmarked declaration (SPEC R-2): inside a module unit, a name
+# that is not `pub` (its visibility is nil or private) is the unit's own, so no other
+# module may reach it. A declaration outside a unit, or in a class or struct within one,
+# is not governed by it.
+pub def iyi_unexported?(scope : ModuleType, visibility : Visibility?) : Bool
+  return false unless scope.iyi_unit
+  return true if visibility.nil?
+  visibility.as(Visibility) != Visibility::Public
+end
+
+# The hosted `underscore`: a capital takes an `_` before it when the letter before is a
+# lower-case letter or a digit, or when it ends an acronym (`HTTPServer` is `http_server`,
+# `ALRM` is `alrm`, `E2BIG` is `e2_big`).
+def underscore(s : String) : String
+  sb = String::Builder.new
+  i = 0
+  while i < s.bytesize
+    b = s.byte_at(i)
+    if b >= 65_u8 && b <= 90_u8
+      if i > 0
+        prev = s.byte_at(i - 1)
+        after_lower = (prev >= 97_u8 && prev <= 122_u8) || (prev >= 48_u8 && prev <= 57_u8)
+        ends_acronym = prev >= 65_u8 && prev <= 90_u8 && i + 1 < s.bytesize && s.byte_at(i + 1) >= 97_u8 && s.byte_at(i + 1) <= 122_u8
+        if after_lower || ends_acronym
+          sb << '_'
+        end
+      end
+      sb << (b + 32_u8).unsafe_chr
+    else
+      sb << b.unsafe_chr
+    end
+    i = i + 1
+  end
+  sb.to_s
+end
+
+# Path helpers for the import closure, on plain strings. The prelude's File has no
+# dirname, join or expand_path (those are std's), so the closure builds paths itself.
+# A path is normalised by dropping `.` segments and resolving `..`, so two spellings
+# of one file compare equal.
+pub def normalize_path(path : String) : String
+  parts = [] of String
+  path.split("/").each do |seg|
+    if seg == ".."
+      parts.pop unless parts.empty?
+    elsif !(seg.empty? || seg == ".")
+      parts << seg
+    end
+  end
+  joined = parts.join("/")
+  path.starts_with?("/") ? "/#{joined}" : joined
+end
+
+# The directory a file lives in.
+pub def dir_of(path : String) : String
+  parts = path.split("/")
+  parts.pop unless parts.empty?
+  joined = parts.join("/")
+  if joined.empty?
+    return path.starts_with?("/") ? "/" : "."
+  end
+  joined
+end
+
+# Whether a declaration with these locations belongs to the entry file, which is the
+# oracle's rule: a declaration is printed when one of its locations is the file. With
+# no entry (the built-in types) everything belongs.
+pub def declared_in?(locations : Array(Location)?, entry : String?) : Bool
+  return true if entry.nil?
+  return false if locations.nil?
+  list = locations.as(Array(Location))
+  i = 0
+  while i < list.size
+    if normalize_path(list[i].filename) == entry.as(String)
+      return true
+    end
+    i = i + 1
+  end
+  false
+end
+
+pub def lib_fun_declared?(f : LibFun, entry : String?) : Bool
+  return true if entry.nil?
+  loc = f.location
+  return false if loc.nil?
+  normalize_path(loc.as(Location).filename) == entry.as(String)
+end
+
+pub def def_declared?(d : Def, entry : String?) : Bool
+  return true if entry.nil?
+  loc = d.location
+  return false if loc.nil?
+  normalize_path(loc.as(Location).filename) == entry.as(String)
+end
+
+# A default value as the hosted printer writes it: a number keeps its kind as a suffix
+# (`0_i64`), an `Int32` has none.
+def default_text(node : ASTNode) : String
+  if node.is_a?(NumberLiteral)
+    nl = node.as(NumberLiteral)
+    if nl.kind == NumberKind::I32
+      return nl.value
+    end
+    return "#{nl.value}_#{nl.kind.to_s.downcase}"
+  end
+  node.to_s
+end
+
+pub def dump_def(d : Def, io : String::Builder, indent : String) : Nil
+  io << indent << "Def: " << (d.receiver ? "self." : "") << d.name << "\n"
+  vis_str = case d.visibility
+            when Visibility::Private then "private"
+            else                          "public"
+            end
+  io << indent << "  visibility: " << vis_str << "\n"
+  io << indent << "  abstract: " << (d.abstract ? "true" : "false") << "\n"
+  args_strs = d.args.map do |arg|
+    s = arg.name
+    if r = arg.restriction
+      s = "#{s} : #{r.to_s}"
+    end
+    if dv = arg.default_value
+      s = "#{s} = #{default_text(dv)}"
+    end
+    s
+  end
+  io << indent << "  args: [" << args_strs.join(", ") << "]\n"
+  ret_str = if rt = d.return_type
+              rts = rt.to_s
+              if rts.starts_with?("::")
+                rts[2, rts.bytesize - 2]
+              else
+                rts
+              end
+            else
+              "nil"
+            end
+  io << indent << "  return_type: " << ret_str << "\n"
+  if prev = d.previous
+    io << indent << "  previous: " << prev.name << "\n"
+  end
+end
+
+pub def dump_lib_fun(f : LibFun, io : String::Builder, indent : String) : Nil
+  io << indent << "Def: " << f.name << "\n"
+  io << indent << "  visibility: public\n"
+  io << indent << "  real_name: " << f.real_name << "\n"
+  io << indent << "  varargs: " << (f.varargs ? "true" : "false") << "\n"
+  io << indent << "  abstract: false\n"
+  io << indent << "  args: [" << f.args.join(", ") << "]\n"
+  ret_str = if rt = f.return_type
+              rts = rt.to_s
+              if rts.starts_with?("::")
+                rts[2, rts.bytesize - 2]
+              else
+                rts
+              end
+            else
+              "nil"
+            end
+  io << indent << "  return_type: " << ret_str << "\n"
+  if previous = f.previous
+    io << indent << "  previous: " << previous.name << "\n"
+  end
+end
+
+pub def dump_type(t : Type, io : String::Builder, indent : String, entry : String? = nil) : Nil
+  # iyi: the kind a dump prints follows the class, as the hosted dump does (a MetaclassType is a ClassType there).
+  kind = t.is_a?(ClassType) ? (t.as(ClassType).struct? ? "struct" : "class") : t.type_desc
+  io << indent << "Type: " << t.full_name << " (" << kind << ")\n"
+  vis_str = t.private? ? "private" : "public"
+  io << indent << "  visibility: " << vis_str << "\n"
+  io << indent << "  abstract: " << (t.abstract? ? "true" : "false") << "\n"
+
+  if t.is_a?(GenericClassType)
+    io << indent << "  type_vars: [" << t.as(GenericClassType).type_vars.join(", ") << "]\n"
+  elsif t.is_a?(GenericModuleType)
+    io << indent << "  type_vars: [" << t.as(GenericModuleType).type_vars.join(", ") << "]\n"
+  elsif t.is_a?(GenericTraitType)
+    io << indent << "  type_vars: [" << t.as(GenericTraitType).type_vars.join(", ") << "]\n"
+  end
+
+  if t.is_a?(ClassType)
+    cls = t.as(ClassType)
+    if sc_disp = cls.superclass_display
+      io << indent << "  superclass: " << sc_disp << "\n"
+    end
+    cls.instance_vars.keys.each do |ivar_name|
+      ivar = cls.instance_vars[ivar_name]
+      io << indent << "  Ivar: " << t.full_name << "#" << ivar_name << "\n"
+      io << indent << "    type: " << ivar.type.to_s << "\n"
+    end
+    unless cls.instance_vars.empty?
+      names = [] of String
+      cls.instance_vars.keys.each do |ivar_name|
+        names << ivar_name
+      end
+      io << indent << "  IvarOrder: [" << names.join(", ") << "]\n"
+    end
+  end
+
+  if t.is_a?(ModuleType)
+    mod = t.as(ModuleType)
+    unless mod.parents.empty?
+      parents_strs = [] of String
+      mod.parents.each do |p|
+        if t.is_a?(ClassType) && (disp = t.as(ClassType).superclass_display) && (sc = t.as(ClassType).superclass) && (p.name == sc.name)
+          parents_strs << disp
+        else
+          parents_strs << p.full_name
+        end
+      end
+      parents_strs = parents_strs.sorted
+      io << indent << "  parents: [" << parents_strs.join(", ") << "]\n"
+    end
+  end
+
+  if t.is_a?(TraitType)
+    tr = t.as(TraitType)
+    unless tr.supertraits.empty?
+      st_strs = tr.supertraits.map(&.full_name).sorted
+      io << indent << "  supertraits: [" << st_strs.join(", ") << "]\n"
+    end
+    unless tr.assoc_types.empty?
+      at_strs = tr.assoc_types.dup.sorted
+      io << indent << "  assoc_types: [" << at_strs.join(", ") << "]\n"
+    end
+  end
+
+  if t.is_a?(EnumType)
+    en = t.as(EnumType)
+    members_keys = en.members.keys.dup.sorted
+    members_strs = members_keys.map { |k| "#{k}=#{en.members[k].value.to_s}" }
+    io << indent << "  enum_members: [" << members_strs.join(", ") << "]\n"
+  end
+
+  if t.is_a?(AliasType)
+    al = t.as(AliasType)
+    seen = [] of AliasType
+    target = al.process_value
+    while target.is_a?(AliasType)
+      raise("infinite recursive definition of alias #{al.full_name}") if seen.includes?(al)
+      seen << al
+      al = target.as(AliasType)
+      target = al.process_value
+    end
+    disp = al.aliased_type_display || target.to_s
+    io << indent << "  aliased_type: " << disp << "\n"
+  end
+
+  if t.is_a?(Const)
+    co = t.as(Const)
+    io << indent << "  const_value: " << co.value.to_s << "\n"
+  end
+
+  # defs
+  if t.is_a?(ModuleType)
+    mod = t.as(ModuleType)
+    all_defs = [] of Def
+    mod.defs.each_value do |list|
+      list.each { |d| all_defs << d }
+    end
+    if meta = mod.metaclass?
+      meta.defs.each_value do |list|
+        list.each do |d|
+          next if d.name == "allocate"
+          all_defs << d
+        end
+      end
+    end
+    all_defs = all_defs.sorted_by { |d| "#{d.receiver ? "self." : ""}#{d.name}" }
+    all_defs = all_defs.select { |d| def_declared?(d, entry) }
+    all_defs.each do |d|
+      dump_def(d, io, "#{indent}  ")
+    end
+  end
+
+  # lib funs: a lib keeps its funs as LibFun records (see visit(FunDef)), not as defs.
+  if t.is_a?(LibType)
+    lib_type = t.as(LibType)
+    lib_type.funs.sorted_by { |f| f.name }.each do |f|
+      dump_lib_fun(f, io, "#{indent}  ")
+    end
+  end
+
+  # nested types
+  if t.is_a?(NamedType) && !t.is_a?(EnumType)
+    nt = t.as(NamedType)
+    sub_names = nt.types.keys.dup.sorted
+    sub_names.each do |sname|
+      sub = nt.types[sname]
+      dump_tree_declared(sub, io, "#{indent}  ", entry)
+    end
+  end
+end
+
+# A type the entry declares is printed with its nested types. One it does not declare (a
+# namespace another file made, such as `Std` for a header `std/file` whose import made
+# it first) is not, but the types inside it that the entry declares still are, one level
+# deeper, as the hosted pass prints them.
+pub def dump_tree_declared(t : Type, io : String::Builder, indent : String, entry : String?) : Nil
+  if declared_in?(t.locations, entry)
+    dump_type(t, io, indent, entry)
+    return
+  end
+  if t.is_a?(NamedType) && !t.is_a?(EnumType)
+    nt = t.as(NamedType)
+    nt.types.keys.sorted.each do |sname|
+      dump_tree_declared(nt.types[sname], io, "#{indent}  ", entry)
+    end
+  end
+end
+
+pub def dump_program_declarations(program : SemanticProgram, entry : String? = nil) : String
+  sb = String::Builder.new
+
+  # Top level defs
+  top_defs = [] of Def
+  program.defs.each_value do |list|
+    list.each { |d| top_defs << d }
+  end
+  top_defs = top_defs.sorted_by(&.name)
+  top_defs = top_defs.select { |d| def_declared?(d, entry) }
+  global_funs = program.global_funs.select { |f| lib_fun_declared?(f, entry) }.sorted_by { |f| f.name }
+  di = 0
+  gi = 0
+  while di < top_defs.size || gi < global_funs.size
+    if gi >= global_funs.size || (di < top_defs.size && top_defs[di].name <= global_funs[gi].name)
+      dump_def(top_defs[di], sb, "")
+      di += 1
+    else
+      dump_lib_fun(global_funs[gi], sb, "")
+      gi += 1
+    end
+  end
+
+  # With an entry, every top-level type is walked: the entry filter prints what the entry
+  # declares, and a namespace the entry shares a name with a built-in (`module enum/x` under
+  # the built-in Enum) holds declarations the built-in set would have hidden. With no entry
+  # (a whole-program dump), the built-in types are not user types and are left out.
+  user_type_names = [] of String
+  program.types.keys.sorted.each do |name|
+    if !entry.nil? || !program.initial_type_names.includes?(name)
+      user_type_names << name
+    end
+  end
+
+  user_type_names.each do |name|
+    # With no entry, a built-in name is not the program's own declaration (the typed dump
+    # prints what a program declares); with an entry, the location filter decides.
+    unless entry.nil? && program.initial_type_names.includes?(name)
+      dump_tree_declared(program.types[name], sb, "", entry)
+    end
+  end
+
+  sb.to_s
+end

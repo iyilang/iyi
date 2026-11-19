@@ -1,0 +1,6 @@
+# Mixed signedness at a width larger than the dividend, with nonzero
+# narrowed divisors so the wrong-width mutation produces numeric differences.
+100_i8 // 300_u16
+100_i8 % 300_u16
+200_u8 // -56_i16
+200_u8 % -56_i16

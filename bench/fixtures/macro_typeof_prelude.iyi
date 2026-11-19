@@ -1,0 +1,9 @@
+# macro-sites
+values = [1, 2]
+number = 3
+items = Array(typeof(values[0])).new
+items << 7
+other = Array(typeof(number = "text")).new
+other << "ok"
+puts items[0] + number
+puts other[0]

@@ -1,0 +1,17 @@
+b = true
+n = !b
+while true
+  break
+end
+m = !n
+unless b
+  b = false
+end
+until b
+  break
+end
+while b
+  next
+end
+t = {1, "x"}
+u = {name: 1, other: "y"}

@@ -1,0 +1,12 @@
+def bare_required(size : Int32, *, flag : Bool = false) : Int32
+  size
+end
+
+def bare_default(size : Int32 = 7, *, flag : Bool = false) : Int32
+  size
+end
+
+first = bare_required(4)
+second = bare_default
+third = bare_default(3)
+fourth = bare_required(5, flag: true)

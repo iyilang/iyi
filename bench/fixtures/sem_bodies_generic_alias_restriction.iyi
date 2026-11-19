@@ -1,0 +1,13 @@
+@[Unsafe("the values exercise type restrictions without reading them")]
+struct AliasBag(T)
+end
+
+alias AliasBytes = AliasBag(UInt8)
+
+def alias_accept(value : AliasBag(UInt8), values : Hash(String, AliasBytes)) : Int32
+  1
+end
+
+value = uninitialized AliasBag(UInt8)
+values = uninitialized Hash(String, AliasBag(UInt8))
+alias_accept(value, values)

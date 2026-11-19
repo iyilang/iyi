@@ -1,0 +1,19 @@
+@count : Int32
+@total : Int32 = 100
+@@global_id : String
+@@shared_total : Int32 = 500
+
+x : Int32
+y : String = "initialized"
+uninit_buf = uninitialized String
+
+MAX_LIMIT = 1000
+BUFFER_SIZE : Int32 = 4096
+
+alias IntList = Array(Int32)
+alias Result = Int32 | String
+alias Callback = (Int32, String) -> Bool
+alias NilableString = String?
+alias RawPtr = UInt8*
+alias Matrix = Int32[16]
+alias MetaType = Int32.class

@@ -1,0 +1,5 @@
+def splat_control(first : Int32, *rest) : Int32
+  first
+end
+
+splat_control("wrong")

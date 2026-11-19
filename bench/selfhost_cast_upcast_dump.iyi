@@ -1,0 +1,73 @@
+# The port's cast upcast dump for bench/selfhost_semantic_type_nodes_exercise.sh.
+#
+#   selfhost_cast_upcast_dump <file.iyi>
+#
+# Analyses the file as the typed dump does (total mode, no prelude) and prints one
+# line per cast node it typed, "<line>:<col> <Kind> <type> upcast=<true|false>", the
+# lines bench/selfhost_cast_upcast_oracle.cr prints for the same file. With no
+# argument it checks itself on a small source and exits 0.
+
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/ast::{ASTNode, Cast, NilableCast}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/top_level::{NamedType, SemanticProgram, TopLevelVisitor}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/semantic/recursive_struct_checker::{RecursiveStructChecker}
+import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
+
+pub class CastUpcastWalk < Visitor
+  getter lines : Array(String)
+
+  def initialize(@visitor : MainVisitor, @file : String, @root : ASTNode)
+    @lines = Array(String).new
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    return true if node.node_id == @root.node_id
+    if node.is_a?(Cast) || node.is_a?(NilableCast)
+      if loc = node.location
+        if loc.filename == @file
+          if t = @visitor.type_of?(node)
+            label = if t.is_a?(NamedType)
+                      t.full_name
+                    else
+                      t.to_s
+                    end
+            kind = node.is_a?(NilableCast) ? "NilableCast" : "Cast"
+            upcast = node.is_a?(NilableCast) ? node.as(NilableCast).upcast : node.as(Cast).upcast
+            @lines << "#{loc.line_number}:#{loc.column_number} #{kind} #{label} upcast=#{upcast}"
+          end
+        end
+      end
+    end
+    true
+  end
+end
+
+def cast_upcast_lines(source : String, filename : String) : Array(String)
+  parser = Parser.new(source, filename)
+  node = Normalizer.new(NormalizerProgram.new(false)).normalize(parser.parse)
+  prog = SemanticProgram.new
+  prog.total_mode = true
+  tl = TopLevelVisitor.new(prog, filename)
+  node.accept(tl)
+  tl.finish
+  mv = MainVisitor.new(prog)
+  mv.total = true
+  node.accept(mv)
+  RecursiveStructChecker.new(prog).run
+  walk = CastUpcastWalk.new(mv, filename, node)
+  node.accept(walk)
+  walk.lines
+end
+
+if Program.args.empty?
+  checked = cast_upcast_lines("class Foo\nend\nclass Bar < Foo\nend\nx = Bar.new.as(Foo)\n", "inline.iyi")
+  if checked.size != 1 || !checked[0].ends_with?("upcast=true")
+    raise "self-check: expected one upcast cast, got #{checked.size}"
+  end
+  puts "selfhost_cast_upcast_dump: self-check ok"
+else
+  source = File.read(Program.args[0])
+  cast_upcast_lines(source, Program.args[0]).each { |line| puts line }
+end

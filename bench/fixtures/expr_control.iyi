@@ -1,0 +1,43 @@
+# Control flow as expressions fixture: if, unless, while, until, case
+x = 10
+
+val1 = if x > 5
+         100
+       else
+         200
+       end
+
+val2 = if x < 0
+         -1
+       elsif x == 0
+         0
+       else
+         1
+       end
+
+val3 = unless x == 10
+  "not ten"
+else
+  "is ten"
+end
+
+i = 0
+while i < 10
+  i += 1
+end
+
+count = 5
+until count == 0
+  count -= 1
+end
+
+matched = case x
+          when 1
+            "one"
+          when 2, 3
+            "two or three"
+          when 10
+            "ten"
+          else
+            "unknown"
+          end

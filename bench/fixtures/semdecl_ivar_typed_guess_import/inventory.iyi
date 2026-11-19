@@ -1,0 +1,4 @@
+module inventory
+
+pub class Item
+end

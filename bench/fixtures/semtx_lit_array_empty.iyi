@@ -1,0 +1,3 @@
+a = [] of Int32
+c = [] of String
+d = [] of Int32

@@ -1,0 +1,6 @@
+class Box(T)
+  def initialize(@value : T)
+  end
+end
+
+Box(UInt64).new("wrong")

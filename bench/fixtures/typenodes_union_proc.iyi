@@ -1,0 +1,5 @@
+class Box(T)
+end
+
+x = Box(Int32 | String)
+y = Pointer(Int32 -> Int32)

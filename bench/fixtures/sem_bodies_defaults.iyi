@@ -1,0 +1,5 @@
+def pick(a : Int32, b : Bool = true) : Bool
+  b
+end
+
+pick(2)

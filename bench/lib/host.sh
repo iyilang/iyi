@@ -60,13 +60,15 @@ _llvm_trim() {
 # per built target, and --link-flags with the libraries to link. Every build of a program that imports the bridge
 # passes them. The inputs are the ones the bridge's macro used to read, in the same order: LLVM_VERSION, LLVM_TARGETS
 # and LLVM_LDFLAGS when set and not blank; on Windows, the three lines of the llvm_VERSION file in the first directory
-# of IYI_LIBRARY_PATH (or CRYSTAL_LIBRARY_PATH) that has one; otherwise ${LLVM_CONFIG:-llvm-config} with --version,
-# --targets-built and --libs --system-libs --ldflags. It returns 1 with one sentence on stderr when it cannot read them.
+# of IYI_LIBRARY_PATH (or, when that is unset, of the bootstrap package's search path) that has one; otherwise
+# ${LLVM_CONFIG:-llvm-config} with --version, --targets-built and --libs --system-libs --ldflags. It returns 1 with
+# one sentence on stderr when it cannot read them.
 llvm_bridge_build_args() {
   local cfg="${LLVM_CONFIG:-llvm-config}" version="" targets="" ldflags="" dir search line1="" line2="" line3=""
   local major="" minor="" patch="" rest="" word lower
   local -a dirs=()
   if [ "$HOST_OS" = windows ]; then
+    # The Windows job's environment carries only the bootstrap package's variable (iyi.yml); ours wins when it is set.
     if [ -n "${IYI_LIBRARY_PATH+set}" ]; then search=$IYI_LIBRARY_PATH; else search=${CRYSTAL_LIBRARY_PATH:-}; fi
     IFS=';' read -r -a dirs <<< "$search"
     for dir in "${dirs[@]+"${dirs[@]}"}"; do
@@ -100,7 +102,7 @@ llvm_bridge_build_args() {
   fi
   if [ -z "$major" ] || [ -z "$targets" ]; then
     if [ "$HOST_OS" = windows ]; then
-      echo "Cannot read LLVM's version and targets: set LLVM_VERSION and LLVM_TARGETS, or put an llvm_VERSION file in a directory of IYI_LIBRARY_PATH or CRYSTAL_LIBRARY_PATH." >&2
+      echo "Cannot read LLVM's version and targets: set LLVM_VERSION and LLVM_TARGETS, or put an llvm_VERSION file in a directory of IYI_LIBRARY_PATH." >&2
     else
       echo "Cannot read LLVM's version and targets: set LLVM_CONFIG to an llvm-config on PATH, or set LLVM_VERSION and LLVM_TARGETS." >&2
     fi

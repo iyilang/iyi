@@ -15,6 +15,11 @@ require_test_host || exit 1
 command -v perl >/dev/null 2>&1 || { echo "FAIL: perl is required for mutation proofs" >&2; exit 1; }
 . "$REPO/bench/lib/mutation.sh" || exit 1
 
+# The LLVM bridge reads its version, targets and link flags from build arguments this host supplies: read them once.
+LLVM_BRIDGE_ARGS=()
+llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED: no LLVM build arguments for this host, see the sentence above"; exit 1; }
+while IFS= read -r llvm_arg; do LLVM_BRIDGE_ARGS+=("$llvm_arg"); done <<< "$llvm_bridge_text"
+
 IYI="$REPO/bin/iyi"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/selfhost-llvm.XXXXXX") || exit 1
 trap 'rm -rf "$WORK"' EXIT
@@ -26,7 +31,7 @@ status=0
 mkdir -p "$WORK/plain_out" "$WORK/release_out" "$WORK/mut_out" "$WORK/final_out" || exit 1
 
 echo "== 1. Building and running selfhost LLVM exercise (plain mode)"
-if ! "$IYI" build -o "$WORK_NATIVE/exercise-plain$EXE" \
+if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/exercise-plain$EXE" \
   "$REPO_NATIVE/bench/selfhost_llvm_exercise.iyi" > "$WORK/plain-build.log" 2>&1; then
   echo "FAILED: the plain exercise did not build"
   cat "$WORK/plain-build.log"
@@ -60,7 +65,7 @@ done
 
 echo
 echo "== 2. Building and running selfhost LLVM exercise (--release mode)"
-if ! "$IYI" build --release -o "$WORK_NATIVE/exercise-release$EXE" \
+if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" --release -o "$WORK_NATIVE/exercise-release$EXE" \
   "$REPO_NATIVE/bench/selfhost_llvm_exercise.iyi" > "$WORK/release-build.log" 2>&1; then
   echo "FAILED: the release exercise did not build"
   cat "$WORK/release-build.log"
@@ -140,7 +145,7 @@ llvm_exercise_mutant() {
     echo "INVALID MUTANT: could not remove the previous LLVM exercise executable"
     return 0
   fi
-  if ! "$IYI" build -o "$WORK_NATIVE/mut-exercise$EXE" \
+  if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/mut-exercise$EXE" \
     "$REPO_NATIVE/bench/selfhost_llvm_exercise.iyi" > "$WORK/mut-build.log" 2>&1; then
     echo "INVALID MUTANT: LLVM exercise did not build"
     cat "$WORK/mut-build.log"
@@ -195,7 +200,7 @@ prove_mutation "corrupting build_xor in builder.iyi" \
 
 echo
 echo "== 5. Confirming clean state verification"
-if ! "$IYI" build --release -o "$WORK_NATIVE/exercise-final$EXE" \
+if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" --release -o "$WORK_NATIVE/exercise-final$EXE" \
   "$REPO_NATIVE/bench/selfhost_llvm_exercise.iyi" > "$WORK/final-build.log" 2>&1; then
   echo "FAILED: the restored LLVM exercise did not build"
   cat "$WORK/final-build.log"

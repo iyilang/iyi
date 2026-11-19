@@ -16,6 +16,11 @@ require_test_host || exit 1
 command -v perl >/dev/null 2>&1 || { echo "FAIL: perl is required for mutation proofs" >&2; exit 1; }
 . "$REPO/bench/lib/mutation.sh" || exit 1
 
+# The LLVM bridge reads its version, targets and link flags from build arguments this host supplies: read them once.
+LLVM_BRIDGE_ARGS=()
+llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED: no LLVM build arguments for this host, see the sentence above"; exit 1; }
+while IFS= read -r llvm_arg; do LLVM_BRIDGE_ARGS+=("$llvm_arg"); done <<< "$llvm_bridge_text"
+
 IYI="$REPO/bin/iyi"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/native-llvm.XXXXXX") || exit 1
 trap 'rm -rf "$WORK"' EXIT
@@ -41,7 +46,7 @@ rebuild_tool() {
     echo "cannot remove the previous iyi-ir executable"
     return 1
   fi
-  if "$IYI" build -o "$WORK_NATIVE/iyi-ir$EXE" "$REPO_NATIVE/$SRC" > "$WORK/iyi-ir-build.log" 2>&1; then
+  if "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/iyi-ir$EXE" "$REPO_NATIVE/$SRC" > "$WORK/iyi-ir-build.log" 2>&1; then
     if [ -f "$TOOL" ]; then
       return 0
     fi

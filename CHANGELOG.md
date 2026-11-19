@@ -15,8 +15,12 @@
 - Add the LLVM bindings and `iyi-ir` import, translation and round-trip tool in iyi.
   Same-host gates cover fixtures, refusals and mutations; the full corpus round
   trip remains unmeasured. Existing hosted commands are unchanged.
-  Windows metadata discovery interpolates the library-path variable name
-  without adding quotes, so the bundled LLVM targets and link flags are read.
+  The bridge reads no environment and runs no command itself. Its LLVM version,
+  built targets and link flags are build arguments (`-Dllvm_major_N`,
+  `-Dllvm_minor_N`, `-Dllvm_patch_N`, `-Dllvm_target_<name>`, `--link-flags`),
+  which `bench/lib/host.sh`'s `llvm_bridge_build_args` prints for each host. On
+  Windows it reads the bundled `llvm_VERSION` from the library path, in the
+  directories the macro used to search.
 
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by

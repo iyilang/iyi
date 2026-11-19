@@ -16,6 +16,11 @@ Makes a test CA and a server certificate for `dns.test` and 127.0.0.1
   * plain DNS over UDP, for the resolver's opt-in fallback; WORKDIR/udp.port.
 
 WORKDIR/ready is written last. Runs until killed, a thread per connection.
+WORKDIR/stage names the step it has reached (pki, dot, doh, h2, udp), and
+every thread's Python stack goes to stderr if ready is not written within
+15 s: the exercise's 20 s wait once ran out with neither (iyilang/iyi run
+44329905718, Namespace's macOS VM), while 300 starts there alone were all
+ready within 2 s, so the next stall says where it is.
 
 The zone is ZONE below. A few names misbehave on purpose, the way a broken
 or hostile server would, so the client's refusals have something to refuse:
@@ -44,6 +49,7 @@ query that was not padded, and starts the counts again.
 """
 import base64
 import datetime as dt
+import faulthandler
 import http.server
 import ipaddress
 import os
@@ -489,6 +495,13 @@ class TlsHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
         self.ctx = ctx
         super().__init__(address, DohHandler)
 
+    # HTTPServer's server_bind also asks for the address's fully qualified
+    # name, a reverse lookup these servers never use: readiness depends on
+    # nothing outside the process.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
     def get_request(self):
         raw, peer = self.socket.accept()
         raw.settimeout(10)
@@ -582,16 +595,21 @@ def listen_tcp():
 
 def main():
     work = sys.argv[1]
+    faulthandler.dump_traceback_later(15, exit=False)
+    write(work, "stage", "pki\n")
     make_pki(work)
 
+    write(work, "stage", "dot\n")
     dot = listen_tcp()
     threading.Thread(target=serve_dot, args=(dot, context(work, None)), daemon=True).start()
     write(work, "dot.port", str(dot.getsockname()[1]))
 
+    write(work, "stage", "doh\n")
     doh = TlsHTTPServer(("127.0.0.1", 0), context(work, ["http/1.1"]))
     threading.Thread(target=doh.serve_forever, daemon=True).start()
     write(work, "doh.port", str(doh.server_address[1]))
 
+    write(work, "stage", "h2\n")
     try:
         import h2.connection  # noqa: F401
         have_h2 = True
@@ -603,11 +621,13 @@ def main():
         threading.Thread(target=serve_h2, args=(h2_listener, context(work, ["h2"])), daemon=True).start()
         write(work, "h2.port", str(h2_listener.getsockname()[1]))
 
+    write(work, "stage", "udp\n")
     udp = socketserver.ThreadingUDPServer(("127.0.0.1", 0), UdpHandler)
     threading.Thread(target=udp.serve_forever, daemon=True).start()
     write(work, "udp.port", str(udp.server_address[1]))
 
     write(work, "ready", "ready\n")
+    faulthandler.cancel_dump_traceback_later()
     threading.Event().wait()
 
 

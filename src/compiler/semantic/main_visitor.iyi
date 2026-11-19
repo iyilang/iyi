@@ -2182,7 +2182,11 @@ pub class MainVisitor < TypeNodeHost
     !@current_def.nil? || !@fun_inline_file.nil?
   end
 
-  # The names a def's arguments declare: the locals its body sees before the first statement (inline_macros.iyi).
+  # The names a site in the body being typed sees before that body's first statement: the def's
+  # arguments, and every local typed so far. Hosted seeds the expansion's parser with the visitor's
+  # variables (semantic_visitor.cr expand_macro: local_vars from @vars), so a site in a loop's or a
+  # branch's body knows the locals the enclosing bodies declared before it (inline_macros.iyi adds
+  # the ones this body declares before the site).
   def def_inline_locals : Array(String)
     names = [] of String
     if cd = @current_def
@@ -2191,6 +2195,7 @@ pub class MainVisitor < TypeNodeHost
         names << ba.name
       end
     end
+    @vars.keys.each { |name| names << name unless names.includes?(name) }
     names
   end
 

@@ -389,6 +389,12 @@ prove_mutation "a missing named argument of a lib call is not reported" "$LIB_FI
   -- check_calls_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
+prove_mutation "a named argument of a lib call may repeat a positional one" "$LIB_FILE" \
+  "      return LibCallTarget.failed(\"argument for parameter '#{named_name}' already specified\") if covered[at]" \
+  "      return LibCallTarget.failed(\"argument for parameter '#{named_name}' already specified\") if false && covered[at]" \
+  -- check_calls_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
 prove_mutation "a fixed lib fun takes extra arguments as if it were variadic" "$LIB_FILE" \
   '    if count < lib_fun.args.size || (!lib_fun.varargs? && count > lib_fun.args.size)' \
   '    if count < lib_fun.args.size || (false && count > lib_fun.args.size)' \

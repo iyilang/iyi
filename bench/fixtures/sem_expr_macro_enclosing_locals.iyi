@@ -1,0 +1,16 @@
+# A macro site beside another statement in a loop's body reads locals the def's body declared
+# before the loop. The expansion is parsed knowing them, so `since` there is the variable and
+# not a call to a method named `since`.
+def enclosing_locals(flag : Bool) : Int32
+  spins = 1
+  since = 2
+  while flag
+    {% if true %}
+      spins = since
+    {% end %}
+    flag = false
+  end
+  spins
+end
+
+res = enclosing_locals(true)

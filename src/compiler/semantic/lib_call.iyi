@@ -111,13 +111,6 @@ pub class LibCall
       i += 1
     end
     named_index = [] of Int32
-    named.each_with_index do |na, n|
-      named.each_with_index do |other, m|
-        if m < n && other.name.as(String) == na.name.as(String)
-          return LibCallTarget.failed("duplicated named argument: #{na.name.as(String)}")
-        end
-      end
-    end
     named.each do |na|
       named_name = na.name.as(String)
       at = LibCall.param_index(lib_fun, named_name)

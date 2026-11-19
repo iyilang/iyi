@@ -592,6 +592,19 @@
 
 ### Gates
 
+- **`bench/spawn_eligible.iyi`'s `grows` keeps its four tasks wanting
+  to run until the pool has answered them.** The pool starts one worker
+  at a time, and while one is on its way the tasks take turns on the
+  workers already up. Tasks that waited only for each other could all
+  arrive by turns and end before that worker looked, so it found nothing
+  to call the next for: "started 3 of the pool's 4 workers" on a Windows
+  CI runner (job 135727245245), in 1 of 1,900 runs on Windows 11 without
+  a turn's start and none of 1,900 with it. The tasks now spin, within
+  the same two seconds, until the pool has launched every worker too, and
+  the count of four is unchanged. `bench/spawn_eligible.sh` holds it on a
+  runtime whose workers each start 50 ms late, and the step as it was
+  fails there 30 runs of 30 on Windows and on Linux.
+
 - **`bench/lsp_memory.py` holds a workspace pull to what the design
   promises, not to a fixed 760 MB.** A worker stops a pull between
   files once it holds 512 MB, so it can pass that by the one compile it

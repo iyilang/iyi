@@ -384,7 +384,14 @@ if [ -n "$readelf_tool" ]; then
   fi
 fi
 iyi_ir="$work/bin/iyi-ir$EXE"
-if ! "$HOSTED_COMPILER" build -o "$(native_path "$iyi_ir")" "$(native_path "$root/src/compiler/tools/ir.iyi")" >"$work/iyi-ir.build" 2>&1; then
+# iyi-ir imports the LLVM bridge, which is told its LLVM by build arguments (bench/lib/host.sh).
+llvm_bridge_args=()
+if llvm_bridge_text=$(llvm_bridge_build_args); then
+  while IFS= read -r llvm_arg; do llvm_bridge_args+=("$llvm_arg"); done <<< "$llvm_bridge_text"
+else
+  fail "no LLVM build arguments for this host, see the sentence above"
+fi
+if ! "$HOSTED_COMPILER" build ${llvm_bridge_args[@]+"${llvm_bridge_args[@]}"} -o "$(native_path "$iyi_ir")" "$(native_path "$root/src/compiler/tools/ir.iyi")" >"$work/iyi-ir.build" 2>&1; then
   fail "iyi-ir does not build, the LLVM bridge that translates the start code; its log ends:"
   tail -n 20 "$work/iyi-ir.build" | sed 's/^/     /'
 fi

@@ -143,6 +143,12 @@ cores() {
 }
 CORES="$(cores)"
 
+# A host with fewer cores than a proof needs fails the gate: a proof skipped
+# there proves nothing, and every CI shape has four cores.
+need_cores() { # cores, what the proof needs
+  if [ "$CORES" -lt "$1" ]; then echo "this host has $CORES cores, and the proof needs $1: $2"; exit 1; fi
+}
+
 # ── 1. The exercise, twice ────────────────────────────────────────────────
 for build in plain release; do
   step "every property, $build build"
@@ -166,7 +172,7 @@ done
 # Its balance step is timed against four workers' ideal, which a machine
 # with fewer cores than that cannot keep; there the other steps run.
 MIGRATE_STEPS="channels sockets cancel closes deep loops balance backstop heldio join"
-[ "$CORES" -lt 4 ] && MIGRATE_STEPS="channels sockets cancel closes deep loops backstop heldio join"
+need_cores 4 "the balance step is timed against four workers' ideal"
 # The handoff step runs by itself after the others, its host's load read
 # the second before it. Its 1 ms median is a sleeping thread's wake,
 # which Linux and Windows do not owe a machine with more runnable threads
@@ -554,13 +560,11 @@ for candidate in python3 python; do
   fi
 done
 step "the runtime reaches no preemption check, release build"
-if [ -z "$PY" ]; then
-  echo "  no python here to read the IR with, so the audit is not run"
-elif ! "$PY" "$REPO/bench/preempt_audit.py" preemptlib-release.ll > audit.txt 2>&1; then
+[ -n "$PY" ] || { echo "no python here to read the IR with: the audit cannot run"; exit 1; }
+if ! "$PY" "$REPO/bench/preempt_audit.py" preemptlib-release.ll > audit.txt 2>&1; then
   echo "the audit failed:"; cat audit.txt; exit 1
-else
-  sed 's/^/  /' audit.txt
 fi
+sed 's/^/  /' audit.txt
 
 # ── 2. The floor ──────────────────────────────────────────────────────────
 # What the pool costs each platform, by name. Its workers are the
@@ -921,31 +925,167 @@ broken() { # name, awk program[, file in src/iyi[, program in bench[, build flag
     echo "the broken copy $1 failed to build:"; tail -20 "build-$1.log"; exit 1
   fi
 }
-# A broken copy is a race the gate makes on purpose, and its run can lose
-# the race some other way first: the intransit copy died of SIGSEGV in 2 of
-# 180 runs rather than failing by name, and in 60 runs each it slipped
-# through and exited 0 in 2 on one prelude and 1 on the next. A run that
-# ends any way but exit 1 at the sentence is run again, up to five times;
-# one ending there is the proof, and none in five is a failure of the gate.
-# CAUGHT_RUNS sets the runs for one proof: `CAUGHT_RUNS=1 caught ...` is
-# a copy forced to fail on its single run, as the lostword proof is.
+# A broken copy is a race the gate makes on purpose, so each proof is forced
+# instead: the copy holds the interleaving in place, and the run's ending is
+# the proof, on one run. `caught` passes only on exit 1 at the sentence. Any
+# other ending (exit 0, another sentence, a fault, a signal, a hang the timeout
+# ends) fails the gate and prints the tail. A timeout only limits a hang.
 caught() { # name, expected FAIL text, step arguments...
-  local name="$1" want="$2" code attempt
+  local name="$1" want="$2" code
   shift 2
-  for (( attempt = 1; attempt <= ${CAUGHT_RUNS:-5}; attempt++ )); do
-    timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
-    code=$?
-    [ "$code" -eq 1 ] && grep -qF "$want" "$name.txt" && break
-  done
+  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
+  code=$?
   if [ "$code" -ne 1 ] || ! grep -qF "$want" "$name.txt"; then
-    echo "the broken copy $name was not caught at \"$want\" in ${CAUGHT_RUNS:-5} runs (the last: exit $code):"; tail -20 "$name.txt"; exit 1
+    echo "the broken copy $name was not caught at \"$want\" on its one run (exit $code):"; tail -20 "$name.txt"; exit 1
   fi
-  echo "  exits 1 at \"$(grep -m1 -F "$want" "$name.txt" | sed 's/^FAIL: //; s/^iyi: panic: //')\" (run $attempt)"
+  echo "  exits 1 at \"$(grep -m1 -F "$want" "$name.txt" | sed 's/^FAIL: //; s/^iyi: panic: //')\""
 }
+# A hook-only control is the copy with the forcing and without the bug. It
+# must pass on its one run, at the sentence the healthy step prints.
+held() { # name, sentence, step arguments...
+  local name="$1" want="$2" code
+  shift 2
+  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -qF "$want" "$name.txt"; then
+    echo "the hook-only control $name did not pass at \"$want\" (exit $code):"; tail -20 "$name.txt"; exit 1
+  fi
+  echo "  hook-only control $name passes: \"$want\""
+}
+# The copy-only definitions the forced proofs add to the runtime's files, in
+# awk output only: nothing reaches src/iyi. Each is reached through a -D flag
+# the program sets, so no healthy build sees it. An awk that misses an anchor
+# exits 3, which fails the gate through broken().
+WAKE_RING_RULES='/^  def self.send_home\(home : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { insend = 1 }
+insend && /^    ring\(home\)$/ { print "    # the doorbell, not rung"; insend = 0; did_ring = 1; next }'
+WAKE_RING_END='END { if (!did_ring) exit 3 }'
+WAKE_HOOK_RULES='/^  def self.wait_shared\(st : IyiSchedulerState\) : Nil$/ { inws = 1 }
+inws && /^    st.idle = true$/ { print; print "    IyiScheduler.force_idle_mark"; inws = 0; did_mark = 1; next }
+/^  def self.reschedule : Nil$/ {
+  print "  # Copy only, for the home step of bench/parallel_exercise.iyi: the root thread marks itself"
+  print "  # idle here, once its mail is read and it is about to sleep in its poller."
+  print "  @[UnsafeReach(\"set once by the root thread when it goes idle, then only loaded by the forced step\")]"
+  print "  @@forced_idle : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_idle_mark : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_idle).address).value.set(1_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_idle_seen? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_idle).address).value.get == 1_u64"
+  print "  end"
+  print ""
+  print
+  did_defs = 1
+  next
+}'
+WAKE_HOOK_END='END { if (!(did_mark && did_defs)) exit 3 }'
+WAKE_BUG="$WAKE_RING_RULES
+$WAKE_HOOK_RULES
+{ print }
+$WAKE_RING_END
+$WAKE_HOOK_END"
+WAKE_HOOK="$WAKE_HOOK_RULES
+{ print }
+$WAKE_HOOK_END"
+NOW_LOCK_RULES='/^  def (take_now|put_now)/ { inside = 1 }
+inside && /^    (lock|unlock)$/ { locks = locks + 1; next }
+/^  end$/ { inside = 0 }'
+NOW_SHIFT_BUG='/^  private def shift_item : T$/ { inshift = 1 }
+inshift && /^    @count = @count - 1$/ { print "    seen_count = @count"; print "    IyiScheduler.force_yield_here"; print "    @count = seen_count - 1"; inshift = 0; did_shift = 1; next }'
+NOW_SHIFT_HOOK='/^  private def shift_item : T$/ { inshift = 1 }
+inshift && /^    @count = @count - 1$/ { print "    IyiScheduler.force_yield_here"; print "    @count = @count - 1"; inshift = 0; did_shift = 1; next }'
+NOW_DEFS='/^  def self.reschedule : Nil$/ {
+  print "  # Copy only, for the now_forced step of bench/parallel_exercise.iyi: armed by the program,"
+  print "  # then the first take to read the count yields between that read and its store."
+  print "  @[UnsafeReach(\"armed by the forced step before its takes, then read and cleared by the take that yields: atomics only\")]"
+  print "  @@forced_yield : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_yield_arm : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_yield).address).value.set(1_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_yield_here : Nil"
+  print "    armed = Pointer(Atomic(UInt64)).new(pointerof(@@forced_yield).address)"
+  print "    return unless armed.value.get == 1_u64"
+  print "    armed.value.set(0_u64)"
+  print "    enqueue(current)"
+  print "    reschedule"
+  print "  end"
+  print ""
+  print
+  did_defs = 1
+  next
+}'
+NOW_END='END { if (locks != 4 || !did_shift || !did_defs) exit 3 }'
+NOW_BUG="$NOW_LOCK_RULES
+$NOW_SHIFT_BUG
+$NOW_DEFS
+{ print }
+$NOW_END"
+NOW_HOOK="$NOW_LOCK_RULES
+$NOW_SHIFT_HOOK
+$NOW_DEFS
+{ print }
+$NOW_END"
+CANCEL_SUSPEND='/^  def self.suspend\(fiber : IyiFiber, nonce : UInt64\) : Nil$/ { insus = 1 }
+insus && /^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; insus = 0; did_suspend = 1; next }'
+CANCEL_PARK='/^  def self.park\(fiber : IyiFiber\) : UInt64$/ { inpark = 1 }
+inpark && /^    fiber.wait_for_wake\(nonce\)$/ { print "    IyiScheduler.force_window_hold"; print; inpark = 0; did_hold = 1; next }'
+CANCEL_DEFS='/^  def self.reschedule : Nil$/ {
+  print "  # Copy only, for the lostcancel step of bench/parallel_exercise.iyi: the one park that finds"
+  print "  # the arm set holds between its look and its wait until the step has cancelled the task."
+  print "  @[UnsafeReach(\"armed by the forced step, cleared by the park it holds: atomics only\")]"
+  print "  @@forced_window_armed : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by the parked task in its window, then only loaded by the forced step\")]"
+  print "  @@forced_window_held : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by the forced step after its cancel, then only loaded by the parked task\")]"
+  print "  @@forced_window_release : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_window_arm : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_armed).address).value.set(1_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_window_held? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_held).address).value.get == 1_u64"
+  print "  end"
+  print ""
+  print "  def self.force_window_release : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_release).address).value.set(1_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_window_hold : Nil"
+  print "    armed = Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_armed).address)"
+  print "    return unless armed.value.get == 1_u64"
+  print "    armed.value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_held).address).value.set(1_u64)"
+  print "    released = Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_release).address)"
+  print "    started = __iyi_monotonic_ns"
+  print "    while released.value.get == 0_u64"
+  print "      IyiThread.spin_pause"
+  print "      raise \"copy window hold ran past 10 s\" if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "    end"
+  print "  end"
+  print ""
+  print
+  did_defs = 1
+  next
+}'
+CANCEL_BUG="$CANCEL_SUSPEND
+$CANCEL_PARK
+$CANCEL_DEFS
+{ print }
+END { if (!(did_suspend && did_hold && did_defs)) exit 3 }"
+CANCEL_HOOK="$CANCEL_PARK
+$CANCEL_DEFS
+{ print }
+END { if (!(did_hold && did_defs)) exit 3 }"
 
 step "failure proof: a cross-thread wake that does not ring is a lost wakeup"
-broken lostwake '/def self.send_home\(home/ { inhome = 1 } inhome && /^    ring\(home\)$/ { print "    # the doorbell, not rung"; inhome = 0; next } { print }'
-caught lostwake 'placement: still waiting after 5000 ms' placement --watch=5000
+broken lostwake "$WAKE_BUG" concurrency.iyi parallel_exercise -Dlostwake_force
+caught lostwake 'home: still waiting after 5000 ms' home --watch=5000
+broken lostwake_hook "$WAKE_HOOK" concurrency.iyi parallel_exercise -Dlostwake_force
+held lostwake_hook 'home: a task finished on a worker and woke the main thread it was joined by' home --watch=5000
 
 step "failure proof: a steal that leaves the task in its victim's queue hands it out twice"
 broken duplicate '/^          victim.pool_head = fiber.next_run$/ { next } /^          victim.pool_tail = nil if victim.pool_head.is_a\?\(Nil\)$/ { next } { print }'
@@ -963,7 +1103,7 @@ caught undelivered 'cancel: still waiting after 5000 ms' cancel --watch=5000
 
 step "failure proof: a cancel that skips tasks waiting in the pool runs them uncancelled"
 broken unflagged '/def self.cancel\(fiber/ { incancel = 1 } incancel && /^    fiber.cancelled = true$/ { print "    fiber.cancelled = true unless fiber.home.is_a?(Nil)"; incancel = 0; next } { print }'
-caught unflagged 'tasks waiting in the pool ran uncancelled' cancel --watch=60000
+caught unflagged 'cancel: 32 tasks waiting in the pool ran uncancelled' cancel_unstarted --watch=5000
 
 step "failure proof: a cancel that leaves an io wait parked keeps a panicking program running"
 # The cancel ends no io wait, so a task parked on a read nobody answers is
@@ -975,37 +1115,18 @@ broken parkedio '/^    elsif fiber.state == IyiFiberState::WaitingIo$/ { print "
 caught parkedio 'task-panic: still running 5000 ms after it started' task-panic --workers=12
 caught parkedio 'task-panic: still running 5000 ms after it started' task-panic --workers=0
 
-step "failure proof: take_now and put_now without their channel's lock lose and repeat values across workers"
-# Two threads changing one channel's ring and queues at once end the step
-# by name most runs - a place still held, a value out of order, a take of
-# an empty channel, a wake lost - and some by a fault, or by a hang the
-# step's own watchdog does not end, with a channel's queues torn: 10 of 12
-# runs ended by name here and 2 hung, and a fault was seen in an earlier
-# set. The proof is the step's own sentence, and nothing else: a fault is
-# the race too, but one a copy that broke anything else could end in, so
-# a run that ends any other way - a fault, a signal, a hang, exit 0 - is
-# run again, up to ten times. The loop ended at the first run that was
-# not a hang, and a soak on Windows 11, 12 logical processors (the user's
-# machine), at IYI_WORKERS=2 found the gate failed by a run that died of
-# a memory fault (master 7d4d4a137). With each channel's own lock, 10
-# runs of 10 ended by name on Linux x86_64, and on that Windows machine
-# at IYI_WORKERS=2 19 of 20, the other a memory fault (48c31c427).
-if [ "$CORES" -lt 2 ]; then
-  echo "  one core here: two workers cannot change a channel at the same instant, so the proof is not run"
-else
-  broken unlocked '/^  def (take_now|put_now)/ { inside = 1 } inside && /^    (lock|unlock)$/ { next } /^  end$/ { inside = 0 } { print }'
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    timeout -k 5 30 ./unlocked-run now --watch=5000 > unlocked.txt 2>&1
-    code=$?
-    [ "$code" -eq 1 ] && grep -q 'FAIL: now: ' unlocked.txt && break
-  done
-  # Not anchored at the line's start: other workers' panics are printed
-  # beside it, and one landed in front of the FAIL in a run of this proof.
-  if [ "$code" -ne 1 ] || ! grep -q 'FAIL: now: ' unlocked.txt; then
-    echo "the copy without the lock was not caught by the now step in 10 runs (the last: exit $code):"; tail -20 unlocked.txt; exit 1
-  fi
-  echo "  exits 1 at \"$(grep -m1 -o 'FAIL: now: .*' unlocked.txt | sed 's/^FAIL: //')\" (run $attempt)"
-fi
+step "failure proof: take_now without its channel's lock loses a place when two takes overlap"
+# take_now without the channel's lock reads the count, yields, and stores it
+# again. The forced copy yields inside shift_item, armed by -Dnow_force, so the
+# first take the step makes yields between its read and its store; the second
+# take runs and stores in that gap, and the first then stores the count it read
+# before. Both takes are tasks on this thread, so the forcing needs no second
+# core and no run count: one run, at its sentence. The hook-only copy yields
+# with its store kept fresh and passes on its one run.
+broken unlocked "$NOW_BUG" concurrency.iyi parallel_exercise -Dnow_force
+caught unlocked 'now: a place is still held after both takes' now_forced
+broken unlocked_hook "$NOW_HOOK" concurrency.iyi parallel_exercise -Dnow_force
+held unlocked_hook 'now: two takes from one full channel on one thread left no place held' now_forced
 
 step "failure proof: a hand that never marks its select, a cancel lost as a task parks, a word's wake lost before the link"
 # Each channel and each list `park_on` waits in has a lock of its own, so
@@ -1025,13 +1146,12 @@ step "failure proof: a hand that never marks its select, a cancel lost as a task
 # sampled had a worker in `take_mail` holding the scheduler's lock and
 # every other thread waiting for it, its watchdog's among them, so it is
 # not one of the proofs.
-if [ "$CORES" -lt 2 ]; then
-  echo "  one core here: no two wakers race, so the proofs are not run"
-else
-  broken unhanded '/^      head.handed = true$/ { next } { print }'
-  caught unhanded 'wakes: selects over two channels received' wakes --only=selects --watch=5000
-  broken lostcancel '/^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; next } { print }'
-  caught lostcancel 'wakes, cancels: still waiting after 5000 ms' wakes --only=cancels --watch=5000
+broken unhanded '/^      head.handed = true$/ { next } { print }'
+caught unhanded 'wakes, selects: a value handed to a parked select was not received' wakes --only=handed --watch=5000
+broken lostcancel "$CANCEL_BUG" concurrency.iyi parallel_exercise -Dlostcancel_force
+caught lostcancel 'wakes, cancels: still waiting after 5000 ms' wakes --only=cancels --watch=5000
+broken lostcancel_hook "$CANCEL_HOOK" concurrency.iyi parallel_exercise -Dlostcancel_force
+held lostcancel_hook '; 1 tasks cancelled as they parked;' wakes --only=cancels --watch=5000
   # The copy looks at the word outside its list's lock, and unforced that
   # is a race: in two of nine Namespace macOS jobs it handed all 40,000
   # turns in 5 runs of 5 (134616549649, 134738824347), each run a quarter
@@ -1091,31 +1211,21 @@ inwake && /^    IyiChanLock.unlock\(lock\)$/ {
 END { if (!(did_park && did_wake && did_defs)) exit 3 }
 '
   broken lostword "$forced_lostword" concurrency.iyi parallel_exercise -Dlostword_force
-  CAUGHT_RUNS=1 caught lostword 'wakes, words: turn 2 was not taken in 5000 ms' wakes --only=words --watch=5000
-fi
+  caught lostword 'wakes, words: turn 2 was not taken in 5000 ms' wakes --only=words --watch=5000
 
-step "failure proof: a plain add loses counts when tasks run at the same instant"
-if [ "$CORES" -lt 2 ]; then
-  echo "  one core here: two tasks cannot be at the same instant, so the proof is not run"
-else
-  if ! "$IYI" build --release -Dparallel_plain_add "$REPO/bench/parallel_exercise.iyi" -o plainadd > build-plainadd.log 2>&1; then
-    echo "the plain-add build failed:"; tail -20 build-plainadd.log; exit 1
-  fi
-  timeout -k 5 120 ./plainadd race > plainadd.txt 2>&1
-  code=$?
-  if [ "$code" -ne 1 ] || ! grep -q 'increments lost' plainadd.txt; then
-    echo "a plain add lost nothing (exit $code), so the race step proves nothing:"; cat plainadd.txt; exit 1
-  fi
-  echo "  exits 1 at \"$(grep -m1 'increments lost' plainadd.txt | sed 's/^FAIL: //')\""
+step "failure proof: a plain add loses counts when two tasks add at once"
+# The plain add is a load and a store. race_forced puts one task's add between
+# another's load and its store, so the build without atomic adds loses a count
+# on its one run; the atomic build keeps both (step 1 runs race_forced there).
+if ! "$IYI" build --release -Dparallel_plain_add "$REPO/bench/parallel_exercise.iyi" -o plainadd-run > build-plainadd.log 2>&1; then
+  echo "the plain-add build failed:"; tail -20 build-plainadd.log; exit 1
 fi
+caught plainadd 'race: increments lost' race_forced
 
 # What a move keeps, broken one way each, and the migration exercise's
 # step that names it. A move needs two workers on two cores.
-if [ "$CORES" -lt 2 ]; then
-  step "failure proofs for tasks that move"
-  echo "  one core here: a task resumes where it parked, so the proofs are not run"
-else
-  step "failure proof: a thread-local read before a park and kept after it names the thread the task left"
+need_cores 2 "a move needs two workers on two cores"
+step "failure proof: a thread-local read before a park and kept after it names the thread the task left"
   if ! "$IYI" build --release -Dparallel_stale_tls "$REPO/bench/parallel_migrate.iyi" -o staletls-run > build-staletls.log 2>&1; then
     echo "the stale thread-local build failed:"; tail -20 build-staletls.log; exit 1
   fi
@@ -1197,10 +1307,7 @@ else
       ;;
   esac
 
-  if [ "$CORES" -lt 4 ]; then
-    step "failure proofs for stealing"
-    echo "  $CORES cores here: the balance step is not timed, so there is nothing to fail"
-  else
+  need_cores 4 "the balance step is timed against four workers' ideal, so the stealing proofs need four cores"
     # Both without preemption: a preempted task waits in a queue any worker
     # takes from, which spreads the parked tasks as a steal would, and a
     # pool that never steals took 1.88x the ideal with it on.
@@ -1212,8 +1319,6 @@ else
     step "failure proof: tasks woken back onto the worker they parked on, as before tasks moved"
     broken pinned "$NOPREEMPT"'/^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; next } /^  def self.grab\(victim/ { print; print "    return nil"; next } { print }' concurrency.iyi parallel_migrate
     caught pinned 'woken from the main thread, took' balance
-  fi
-fi
 
 step "failure proof: a loop marked @[NoPreempt] holds its worker for its whole computation"
 if ! "$IYI" build --release -Dpreempt_off "$REPO/bench/parallel_preempt.iyi" -o preemptoff-run > build-preemptoff.log 2>&1; then
@@ -1233,7 +1338,7 @@ caught noflag 'slice: a short task waited' slice --workers=1
 step "failure proof: a Windows monitor that waits on the system timer looks too seldom"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    broken coarse '/^        @@monitor_timer = timer.address$/ { print "        @@monitor_timer = 0_u64"; next } { print }' concurrency.iyi parallel_preempt
+    broken coarse '/^        @@monitor_timer = timer.address$/ { print "        @@monitor_timer = 0_u64"; did_timer = 1; next } /^      LibC.WaitForSingleObject\(Pointer\(Void\).new\(@@monitor_handle\), parked \? -1_i32 : PREEMPT_TICK_MS\)$/ { print; print "      if !parked"; print "        spun = __iyi_monotonic_ns"; print "        while __iyi_monotonic_ns - spun < 16000000_i64"; print "          IyiThread.spin_pause"; print "        end"; print "      end"; did_spin = 1; next } { print } END { if (!(did_timer && did_spin)) exit 3 }' concurrency.iyi parallel_preempt
     caught coarse 'period: the monitor looked every' period --workers=1 ;;
   *)
     echo "  the monitor's tick here is the kernel's own timeout, and there is no system timer for it to fall back to" ;;
@@ -1383,9 +1488,7 @@ fi
 caught recursionoff 'fib: a short task waited' fib --workers=1
 
 step "failure proof: a scheduler the compiler takes for a library's checks, and the audit names where"
-if [ -z "$PY" ]; then
-  echo "  no python here to read the IR with, so the audit is not run"
-else
+[ -n "$PY" ] || { echo "no python here to read the IR with: the audit cannot run"; exit 1; }
   # `concurrency.iyi` renamed `scheduler.iyi`: the compiler's runtime is
   # the prelude's files of three names (`codegen.cr#IYI_RUNTIME_FILES`),
   # and the audit's is wherever the scheduler is written.
@@ -1403,16 +1506,13 @@ else
   fi
   grep -q 'hold a preemption check' rtout.txt || { echo "the audit failed some other way:"; cat rtout.txt; exit 1; }
   echo "  $(head -1 rtout.txt | sed 's/^preempt audit: //'), the first of them $(sed -n 2p rtout.txt | sed 's/^ *//')"
-fi
 
 # ── 8. Failure proof: one worker, whatever was asked for ──────────────────
 # Refused at any load by the threads that held a task at once, which one
 # worker holds at 1.00 at most; and where step 3 judged the time's ratio,
 # by that too.
 step "failure proof: a pool held to one worker fails the speedup floor"
-if [ "$CORES" -lt 2 ]; then
-  echo "  one core here: the floor is not held, so there is nothing to fail"
-else
+need_cores 2 "the floor is not held on one core, so there is nothing to fail"
   mkdir -p oneworker/iyi
   cp "$REPO"/src/iyi/*.iyi oneworker/iyi/
   awk '/^      workers = resolved$/ { print "      workers = 1"; next } { print }' \
@@ -1431,6 +1531,5 @@ else
     echo "a pool of one worker asked for $K took $SLOW ms against $ONE ms and passed the floor"; exit 1
   fi
   echo "  asked for $K, ran on 1: $(at_once "$SLOW_AT") at once, $SLOW ms against $ONE ms, $(awk -v a="$ONE" -v b="$SLOW" 'BEGIN { printf "%.2f", a / b }')x, refused"
-fi
 
 echo "parallel gate: every property held"

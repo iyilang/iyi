@@ -1408,15 +1408,17 @@ if grep -q "^FAIL:" pinned.txt || ! grep -q "^wake: the program's thread woke th
   echo "the shipped build, held to two processors beside a spinner:"; tail -3 pinned.txt; exit 1
 fi
 echo "  the shipped build, held to two processors beside a spinner: $(grep -m1 '^wake: the program' pinned.txt)"
-caught=""
-for try in 1 2 3; do
-  pinned_run boosted-run boosted.txt
-  if grep -q "^FAIL: wake: waking the helpers held the program's thread" boosted.txt; then
-    caught="$try"; break
-  fi
-done
-[ -n "$caught" ] || { echo "the wake check did not fire in 3 runs held to two processors beside a spinner:"; tail -3 boosted.txt; exit 1; }
-printf '  exits 1 on run %s at "%s"\n' "$caught" "$(grep -m1 'waking the helpers' boosted.txt)"
+# The decider is the structural check: a copy that drops the boost leaves the
+# runtime's threads with it on, and the program fails by name on its one run,
+# which the wake's timing cannot change. The pinned effect copy is not run:
+# the structural check fails before the wake is reached, so it would only
+# repeat the same run.
+timeout -k 5 300 ./boosted-run > boosted.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q '^FAIL: wake boost: [0-9]* threads of this process have the priority boost off, the mark asked for [0-9]* helpers$' boosted.txt; then
+  echo "the boost check did not fire (exit $code):"; tail -3 boosted.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: wake boost' boosted.txt)"
 
 step "failure proof: a mark beside a busy program that asks for every helper is caught"
 mkdir -p greedy/iyi

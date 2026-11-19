@@ -298,6 +298,49 @@
     end
   end
 
+  {% if flag?(:win32) %}
+    lib LibBoost
+      fun GetCurrentProcessId : UInt32
+      fun CreateToolhelp32Snapshot(flags : UInt32, process : UInt32) : Void*
+      fun Thread32First(snapshot : Void*, entry : UInt32*) : Int32
+      fun Thread32Next(snapshot : Void*, entry : UInt32*) : Int32
+      fun OpenThread(access : UInt32, inherit : Int32, thread_id : UInt32) : Void*
+      fun GetThreadPriorityBoost(thread : Void*, disabled : Int32*) : Int32
+      fun CloseHandle(handle : Void*) : Int32
+    end
+
+    class ThreadBoost
+      # The threads of this process whose priority boost is off, from a snapshot
+      # of every thread on the machine (TH32CS_SNAPTHREAD = 4). Each entry is a
+      # THREADENTRY32 of seven 32-bit words: dwSize, cntUsage, th32ThreadID,
+      # th32OwnerProcessID, tpBasePri, tpDeltaPri, dwFlags. The size goes in
+      # first, and the owner is word 3.
+      def self.count_boost_off : UInt64
+        snapshot = LibBoost.CreateToolhelp32Snapshot(4_u32, 0_u32)
+        fail("wake boost: no snapshot of the threads") if snapshot.address == 0xFFFFFFFFFFFFFFFF_u64
+        entry = uninitialized UInt32[7]
+        words = pointerof(entry).as(UInt32*)
+        words[0] = 28_u32
+        pid = LibBoost.GetCurrentProcessId
+        count = 0_u64
+        more = LibBoost.Thread32First(snapshot, words) != 0
+        while more
+          if words[3] == pid
+            thread = LibBoost.OpenThread(0x00000040_u32, 0_i32, words[2])
+            if thread.address != 0_u64
+              disabled = 0_i32
+              count = count + 1_u64 if LibBoost.GetThreadPriorityBoost(thread, pointerof(disabled)) != 0 && disabled != 0_i32
+              LibBoost.CloseHandle(thread)
+            end
+          end
+          more = LibBoost.Thread32Next(snapshot, words) != 0
+        end
+        LibBoost.CloseHandle(snapshot)
+        count
+      end
+    end
+  {% end %}
+
   def busy_until_stopped : Nil
     while Busy.stop.value.get == 0_u64
       block = Pointer(UInt8).malloc(64_u64)
@@ -512,9 +555,24 @@
     kept_large = kept_large + 1 if IyiHeap.containing_large(Pointer(Void).new(outgrown[index] ^ 0x5a5a5a5a5a5a5a5a_u64)) != 0_u64
     index = index + 1
   end
-  fail("large: #{kept_large} of #{large_round} outgrown blocks were never freed, #{large_under_mark} of them outgrown under a mark") if kept_large >= large_under_mark
+  {% if flag?(:unmapped_force) %}
+    fail("large: #{large_under_mark} of #{large_round} held rounds reached the check, not 2") unless large_under_mark == 2
+  {% end %}
+  fail("large: #{kept_large} of #{large_round} outgrown blocks were never freed, #{large_under_mark} of them outgrown under a mark") if large_under_mark >= 2 && kept_large >= large_under_mark
   puts "large: #{large_under_mark} of #{large_round} blocks outgrown under a running mark stayed mapped beside the helpers, and #{large_round - kept_large} were freed after"
-  end
+  # The helpers' priority boost is off. thread.iyi's start_helper turns it off
+  # for each helper the runtime starts on Windows, and a helper woken with the
+  # boost on runs above the thread that woke it, which the effect check below
+  # can only sample. Counted over the process's own threads instead: at least
+  # as many with the boost off as the helpers the last mark beside the program
+  # asked for, and such a mark must have asked for some.
+  {% if flag?(:win32) %}
+    asked_helpers = IyiMark.beside_helpers
+    fail("wake boost: no mark beside the program asked for helpers") if asked_helpers == 0_u64
+    boost_off = ThreadBoost.count_boost_off
+    fail("wake boost: #{boost_off.to_i64} threads of this process have the priority boost off, the mark asked for #{asked_helpers.to_i64} helpers") if boost_off < asked_helpers
+    puts "wake boost: #{boost_off.to_i64} threads of this process have the priority boost off, the mark asked for #{asked_helpers.to_i64} helpers"
+  {% end %}
   # The helpers for each mark beside the program are woken by the
   # program's own thread, and the wake is the program's time. On Linux it
   # is one futex call; on Windows a woken helper ran above the thread that

@@ -570,6 +570,17 @@
 
 ### Gates
 
+- **The hand-off step reads darwin's load too.** Its 1 ms median is a
+  sleeping thread's wake, which `bench/parallel_exercise.sh` already
+  stopped judging on Linux and Windows hosts loaded at or past their
+  cores. darwin was always judged, because 160 runs beside busy loops woke
+  in 7 to 218 us. Beside two other CI jobs on the project's Mac (three
+  runners, 10 cores) it woke in 11 to 2,925 us, median 2,150 (job
+  135122969351). darwin's load is now its runnable threads (`ps -axM`
+  rows in state R), ten looks over a second, and the rule is the same.
+  What no clock blurs is still held everywhere: an idle worker called at
+  each hand-off, the woken task run on another worker, within 40 ms.
+
 - **heap22's "large mapping widens the bounds" copy can no longer pass
   by where Windows puts a mapping.** The arena directory's bounds are
   one range of slots, and a 40 MiB object that lands between two

@@ -459,8 +459,20 @@
   outgrown = Pointer(UInt64).malloc(64_u64)
   large_under_mark = 0
   large_round = 0
-  while large_round < 8 || (large_under_mark < 2 && large_round < 48)
+  {% if flag?(:unmapped_force) %}
+    large_rounds = 2
+  {% else %}
+    large_rounds = 8
+  {% end %}
+  while large_round < large_rounds
     IyiMark.auto = false
+    {% if flag?(:unmapped_force) %}
+      # The copy's closer for this round's mark waits before it finishes, so
+      # the mark is still running when the old block is freed. Settle first:
+      # the hold must be in place before any mark this round starts.
+      IyiMark.settle
+      IyiMark.hold_mark
+    {% end %}
     # Four chains, so the assist the grown block's allocation pays does
     # not finish the mark before the old block is freed.
     chains = [build_chain(3_u64), build_chain(4_u64), build_chain(5_u64), build_chain(6_u64)]
@@ -468,11 +480,16 @@
     block.value = 5_u8
     IyiMark.auto = true
     marking = allocate_until_marking
+    IyiMark.auto = false
     grown = block.realloc(2_200_000_u64)
     if marking && IyiMark.marking?
       large_under_mark = large_under_mark + 1
       fail("large: a block outgrown under a mark was unmapped beside the helpers") if IyiHeap.containing_large(block.as(Void*)) == 0_u64
     end
+    {% if flag?(:unmapped_force) %}
+      fail("large: the held round's mark was not running when its block was outgrown") unless marking && IyiMark.marking?
+      IyiMark.release_mark
+    {% end %}
     fail("large: the grown block lost its first byte") unless grown.value == 5_u8
     outgrown[large_round] = block.address ^ 0x5a5a5a5a5a5a5a5a_u64
     block = Pointer(UInt8).new(0_u64)
@@ -482,16 +499,8 @@
     large_round = large_round + 1
   end
   IyiMark.auto = false
-  # Where the grown block's assist or the helpers finish the mark before
-  # the old block is freed - darwin arm64 did, every round - the race is
-  # not this machine's to arrange, and it says so; the shell's proof is
-  # then not run either. Linux and Windows arrange it.
-  if large_under_mark < 2
-    puts "large: #{large_under_mark} of #{large_round} blocks were outgrown under a running mark here, too few to check"
-  else
-  # One more outgrown outside any mark and not counted, so the last
-  # counted block's address is in no register or slot a stale word could
-  # keep it by.
+  # One more outgrown outside any mark and not counted, so the last counted
+  # block's address is in no register or slot a stale word could keep it by.
   spare = Pointer(UInt8).malloc(1_100_000_u64).realloc(2_200_000_u64)
   spare.value = 1_u8
   spare = Pointer(UInt8).new(0_u64)

@@ -579,46 +579,63 @@ if [ "$code" -ne 1 ] || ! grep -q "stray: a barrier run after its mark" stray.tx
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'stray: a barrier run after' stray.txt)"
 
-step "failure proof: a large block outgrown under a mark is unmapped beside the helpers"
-if ! grep -q "stayed mapped beside the helpers" answers.txt; then
-  echo "  not run: the program outgrew too few blocks under a mark here to check"
-else
+step "failure proof: a large block outgrown under a mark, the mark held open by the copy's closer, is unmapped beside the helpers"
+mkdir -p held/iyi
+cp "$REPO"/src/iyi/*.iyi held/iyi/
+# The closer of a concurrent mark is the only thing that finishes one (the
+# `finish_concurrent` call in helper_main). The hook holds it while the
+# program says so, so the mark is still running when the program's realloc
+# frees the old block. The copy's only change is the hold: with the guard
+# in place the block stays mapped, and the held rounds say so.
+awk 'function forced() {
+    print "      # Copy only (concurrent_mark: the unmapped proof): the closer waits while a proof holds its mark open."
+    print "      @[UnsafeReach(\"copy-only: the closer hold word, set and read through its address\")]"
+    print "      @@forced_hold : UInt64 = 0_u64"
+    print ""
+    print "      def self.hold_mark : Nil"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_hold).address).value.set(1_u64)"
+    print "      end"
+    print ""
+    print "      def self.release_mark : Nil"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_hold).address).value.set(0_u64)"
+    print "      end"
+    print ""
+    print "      def self.forced_hold? : Bool"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_hold).address).value.get != 0_u64"
+    print "      end"
+    print ""
+  }
+  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared = 1 }
+  /^              seen = finish_concurrent$/ {
+    print "              while IyiMark.forced_hold?"
+    print "                IyiThread.park_if_requested"
+    print "                spin_pause"
+    print "              end"
+    hooked = 1 }
+  { print } END { if (!declared || !hooked) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held/iyi/prelude.iyi || { echo "the closer's finish or helper_main is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force "$REPO/bench/concurrent_mark.iyi" -o held-run > build-held.log 2>&1; then
+  cat build-held.log; exit 1
+fi
+timeout -k 5 300 ./held-run > held.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -q "^large: 2 of 2 blocks outgrown under a running mark stayed mapped beside the helpers, and [0-2] were freed after$" held.txt; then
+  echo "the held rounds did not keep the block mapped (exit $code):"; tail -3 held.txt; exit 1
+fi
+echo "  the hook alone, exits 0: $(grep -m1 '^large: 2 of 2' held.txt)"
 mkdir -p unmapped/iyi
-cp "$REPO"/src/iyi/*.iyi unmapped/iyi/
+cp held/iyi/*.iyi unmapped/iyi/
 awk '{ if (sub(/free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8/, "free_large(pointer.address - HEADER)")) found = 1; print } END { if (!found) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > unmapped/iyi/prelude.iyi || { echo "the look at the mark this proof removes is not in the prelude any more"; exit 1; }
-cmp -s unmapped/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk found nothing to change"; exit 1; }
-if ! IYI_PATH="$WORK/unmapped${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o unmapped-run > build-unmapped.log 2>&1; then
+  held/iyi/prelude.iyi > unmapped/iyi/prelude.iyi || { echo "the look at the mark this proof removes is not in the prelude any more"; exit 1; }
+cmp -s unmapped/iyi/prelude.iyi held/iyi/prelude.iyi && { echo "the awk found nothing to change"; exit 1; }
+if ! IYI_PATH="$WORK/unmapped${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force "$REPO/bench/concurrent_mark.iyi" -o unmapped-run > build-unmapped.log 2>&1; then
   cat build-unmapped.log; exit 1
 fi
-# The broken copy reaches its check only in a run that outgrows a block
-# under a mark, and darwin's CI runner seldom does: its program run said
-# "0 of 48" (run 42045629555) and "1 of 48" (run 41921220664). In run
-# 42171849010 the program reached 3 of 8 and the copy after it passed,
-# which a copy does only when no block is outgrown under a mark, since
-# its first such block fails it. The M2 (macOS 26.6, Apple M2 Pro, 10
-# cores, the user's machine) reached 0 of 48 in 20 runs of the copy and
-# 5 of the program. A run of the copy that says it reached too few proves
-# nothing either way, so it is run again, three runs in all; if none
-# reaches the check the proof is said to be unmeasured here, as it is
-# when the program itself reaches too few, and a run that reaches it and
-# passes fails the gate.
-unmapped_runs=0
-code=0
-while [ "$unmapped_runs" -lt 3 ]; do
-  timeout -k 5 300 ./unmapped-run > unmapped.txt 2>&1
-  code=$?
-  unmapped_runs=$((unmapped_runs + 1))
-  [ "$code" -eq 0 ] && grep -q "too few to check" unmapped.txt || break
-done
-if [ "$code" -eq 0 ] && grep -q "too few to check" unmapped.txt; then
-  echo "  not run: the broken copy outgrew too few blocks under a mark here in $unmapped_runs runs, $(grep -m1 'too few to check' unmapped.txt | sed 's/^large: //')"
-elif [ "$code" -ne 1 ] || ! grep -q "large: a block outgrown under a mark was unmapped" unmapped.txt; then
-  echo "the large block check did not fire (exit $code, run $unmapped_runs):"; tail -3 unmapped.txt; exit 1
-else
-  printf '  exits 1 on run %s at "%s"\n' "$unmapped_runs" "$(grep -m1 'large: a block outgrown' unmapped.txt)"
+timeout -k 5 300 ./unmapped-run > unmapped.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: large: a block outgrown under a mark was unmapped beside the helpers" unmapped.txt; then
+  echo "the large block check did not fire (exit $code):"; tail -3 unmapped.txt; exit 1
 fi
-fi
+printf '  exits 1 at "%s"\n' "$(grep -Fx 'FAIL: large: a block outgrown under a mark was unmapped beside the helpers' unmapped.txt)"
 
 step "failure proof: a small live set given the thousand-object bound goes beside the program"
 mkdir -p thousand/iyi

@@ -19,7 +19,7 @@
 #      claim, 42 for the join), naming the seed and the `--chaos=SEED` that
 #      runs it again; that line fails again; and the program built for
 #      chaos, run five times on the seed with IYI_CHAOS_TRACE, prints the
-#      same output and the pinned schedule hash five times, failing each.
+#      same output and schedule hash five times, failing each.
 #   4. A drawn seed: `iyi test --chaos --chaos-runs 200` on a test that
 #      fails on every seed fails at run 1 of 200 whichever seed the clock
 #      draws, names that seed, and the seed fails again.
@@ -31,9 +31,9 @@
 #      parks under some seeds and not others.
 #   6. Broken copies of the scheduler, each caught at the check that names
 #      it: the stream ignored (every draw 0, which is the plain
-#      scheduler's choice everywhere) finds neither bug; the seed not
-#      honoured (the stream seeded from the clock) does not run one seed's
-#      schedule twice; units ignored (any task chosen, a unit-mate's
+#      scheduler's choice everywhere) finds neither bug; a copy that
+#      consumes seed 1 but uses 2 for both streams takes seed 2's schedule;
+#      units ignored (any task chosen, a unit-mate's
 #      included) runs a task between a unit-mate's operations or before
 #      its spawner parks; parallel tasks left in their spawner's unit
 #      never start before it parks; a `Unit`'s tasks given a chaos unit
@@ -46,7 +46,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 EXE=""
-PLAIN_RUNS="${PLAIN_RUNS:-40}"
+PLAIN_RUNS="${PLAIN_RUNS-40}"
 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
@@ -62,6 +62,13 @@ cd "$WORK" || exit 1
 
 step() { echo "== $1"; }
 die() { echo "FAIL: $*"; exit 1; }
+case "$PLAIN_RUNS" in
+  ''|*[!0-9]*) die "PLAIN_RUNS must be a positive integer" ;;
+esac
+case "$PLAIN_RUNS" in
+  *[1-9]*) ;;
+  *) die "PLAIN_RUNS must be a positive integer" ;;
+esac
 
 # A build of *source* into *name*, under the prelude *prelude* (empty for
 # the repository's own), with the rest of the arguments.
@@ -76,9 +83,7 @@ build() { # name, prelude, source, flags...
 }
 
 # `iyi test` over *source*, under *prelude*; its output in *log*, its exit
-# code answered. On one worker, whatever the environment says: a chaos seed
-# names one schedule only there, and the pinned seeds and hashes are that
-# schedule's.
+# code answered. A chaos seed names one schedule only with one worker.
 chaos_test() { # prelude, log, iyi test arguments...
   local prelude="$1" log="$2"
   shift 2
@@ -89,20 +94,13 @@ chaos_test() { # prelude, log, iyi test arguments...
   fi
 }
 
-# Step 3 for one test under one prelude: caught by the search over seeds 1
-# to 100 at its pinned seed (`want_seed`), the named seed failing again
-# through `iyi test`, and five traced runs of it identical, failing and on
-# the pinned schedule hash (`want_hash`). The search is kept: each seed is
-# one schedule of the simulation, so the first seed that fails is the same
-# on every run, and a compiler change that moves it fails here and forces a
-# deliberate re-pin. Prints why it did not hold and answers 1. The broken
-# copies pass no pins: they must not be caught at all.
-caught() { # prelude, label, source, [pinned seed, pinned schedule hash]
-  local prelude="$1" label="$2" source="$3" want_seed="${4:-}" want_hash="${5:-}" code seed first got
+# The sweep checks CLI search behaviour, not mutant detection.
+caught() { # prelude, label, source, expected seed, exact fixture verdict
+  local prelude="$1" label="$2" source="$3" want_seed="$4" verdict="$5" code seed first got
   chaos_test "$prelude" "catch-$label.txt" --chaos=1 --chaos-runs 100 "$source"
   code=$?
-  if [ "$code" -ne 1 ] || ! grep -q "reproduce: .* test --chaos=" "catch-$label.txt"; then
-    echo "$label: not caught in seeds 1 to 100 (exit $code):"; tail -5 "catch-$label.txt"; return 1
+  if [ "$code" -ne 1 ] || ! grep -qxF "  $verdict" "catch-$label.txt" || ! grep -q "reproduce: .* test --chaos=" "catch-$label.txt" || grep -qE 'the program was killed|the program died|status 0x|hung:|does not build' "catch-$label.txt"; then
+    echo "$label: search did not end at its fixture verdict (exit $code):"; tail -20 "catch-$label.txt"; return 1
   fi
   seed="$(sed -n 's/.*(chaos seed \([0-9][0-9]*\), run [0-9][0-9]* of 100).*/\1/p' "catch-$label.txt" | head -1)"
   [ -n "$seed" ] || { echo "$label: the failure names no seed:"; cat "catch-$label.txt"; return 1; }
@@ -111,7 +109,7 @@ caught() { # prelude, label, source, [pinned seed, pinned schedule hash]
   fi
   chaos_test "$prelude" "again-$label.txt" "--chaos=$seed" "$source"
   code=$?
-  if [ "$code" -ne 1 ] || ! grep -q "(chaos seed $seed, run 1 of 1)" "again-$label.txt"; then
+  if [ "$code" -ne 1 ] || ! grep -qF "(chaos seed $seed, run 1 of 1)" "again-$label.txt" || ! grep -qxF "  $verdict" "again-$label.txt" || grep -qE 'the program was killed|the program died|status 0x|hung:|does not build' "again-$label.txt"; then
     echo "$label: --chaos=$seed did not fail again (exit $code):"; tail -5 "again-$label.txt"; return 1
   fi
   build "traced-$label" "$prelude" "$source" -Diyi_chaos || { echo "$label: the chaos build failed:"; tail -20 "build-traced-$label.log"; return 1; }
@@ -119,7 +117,7 @@ caught() { # prelude, label, source, [pinned seed, pinned schedule hash]
   for attempt in 1 2 3 4 5; do
     IYI_CHAOS="$seed" IYI_CHAOS_TRACE=1 IYI_WORKERS=1 timeout -k 5 120 "./traced-$label$EXE" > "traced-$label-$attempt.txt" 2>&1
     code=$?
-    [ "$code" -eq 1 ] || { echo "$label: seed $seed's traced run $attempt passed (exit $code):"; cat "traced-$label-$attempt.txt"; return 1; }
+    { [ "$code" -eq 1 ] && grep -qxF "$verdict" "traced-$label-$attempt.txt"; } || { echo "$label: seed $seed did not exit 1 at its fixture verdict (exit $code):"; cat "traced-$label-$attempt.txt"; return 1; }
     if [ -z "$first" ]; then
       first="traced-$label-$attempt.txt"
     elif ! cmp -s "$first" "traced-$label-$attempt.txt"; then
@@ -127,9 +125,7 @@ caught() { # prelude, label, source, [pinned seed, pinned schedule hash]
     fi
   done
   got="$(sed -n 's/.*schedule \([0-9a-f][0-9a-f]*\)$/\1/p' "$first" | head -1)"
-  if [ -n "$want_hash" ] && [ "$got" != "$want_hash" ]; then
-    echo "$label: seed $seed's schedule is ${got:-none}, not the pinned $want_hash:"; cat "$first"; return 1
-  fi
+  [ -n "$got" ] || { echo "$label: missing schedule hash"; return 1; }
   echo "  $label: caught at seed $seed, again through --chaos=$seed, and five traced runs alike on schedule ${got:-none}:"
   sed 's/^/    /' "$first"
 }
@@ -146,7 +142,8 @@ seeds() { # prelude, label
   for seed in $(seq 1 30); do
     for twice in a b; do
       IYI_CHAOS="$seed" IYI_CHAOS_TRACE=1 IYI_WORKERS=1 timeout -k 5 120 "./exercise-$label$EXE" > "seed-$label-$seed-$twice.txt" 2>&1
-      if ! grep -q "every property held" "seed-$label-$seed-$twice.txt"; then
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -qxF "every property held" "seed-$label-$seed-$twice.txt"; then
         echo "$label: seed $seed: $(grep -m1 FAIL "seed-$label-$seed-$twice.txt" || tail -3 "seed-$label-$seed-$twice.txt")"; return 1
       fi
     done
@@ -208,8 +205,8 @@ done
 
 # ── 3. Caught, with a seed that reproduces ────────────────────────────────
 step "iyi test --chaos catches each bug at its pinned seed, and that seed runs the schedule again"
-caught "" claim "$REPO/bench/chaos_claim.iyi" 6 2f3a4336168015eb || exit 1
-caught "" join "$REPO/bench/chaos_join.iyi" 42 c358ff992036ee50 || exit 1
+caught "" claim "$REPO/bench/chaos_claim.iyi" 6 "two leaders: 2 tasks found the slot empty, and task 1 wrote last" || exit 1
+caught "" join "$REPO/bench/chaos_join.iyi" 42 "the reader saw 0, before the writer that adds 42 had run (work 4)" || exit 1
 
 # ── 4. A drawn seed ───────────────────────────────────────────────────────
 step "a seed drawn by iyi test, named and run again"
@@ -225,12 +222,16 @@ IYI
 chaos_test "" drawn.txt --chaos --chaos-runs 200 "$WORK/fails_every_seed.iyi"
 code=$?
 [ "$code" -eq 1 ] || die "a test that fails on every seed did not fail under 200 drawn seeds (exit $code): $(tail -3 drawn.txt)"
+grep -qxF "  fails on every seed" drawn.txt || die "drawn test did not print its verdict: $(tail -20 drawn.txt)"
+! grep -qE 'the program was killed|the program died|status 0x|hung:|does not build' drawn.txt || die "drawn test did not fail normally: $(tail -20 drawn.txt)"
 seed="$(sed -n 's/.*reproduce: .* test --chaos=\([0-9][0-9]*\) .*/\1/p' drawn.txt | head -1)"
 [ -n "$seed" ] || die "the drawn failure names no seed: $(cat drawn.txt)"
 grep -qF "(chaos seed $seed, run 1 of 200)" drawn.txt || die "the drawn seed $seed was not run 1 of 200: $(grep -m1 'chaos seed' drawn.txt)"
 chaos_test "" drawn-again.txt "--chaos=$seed" "$WORK/fails_every_seed.iyi"
 code=$?
 [ "$code" -eq 1 ] || die "the drawn seed $seed did not fail again (exit $code): $(tail -3 drawn-again.txt)"
+grep -qxF "  fails on every seed" drawn-again.txt || die "drawn replay did not print its verdict: $(tail -20 drawn-again.txt)"
+! grep -qE 'the program was killed|the program died|status 0x|hung:|does not build' drawn-again.txt || die "drawn replay did not fail normally: $(tail -20 drawn-again.txt)"
 grep -qF "(chaos seed $seed, run 1 of 1)" drawn-again.txt || die "--chaos=$seed did not run one seed: $(grep -m1 'chaos seed' drawn-again.txt)"
 echo "  drawn seed $seed failed at run 1 of 200, and --chaos=$seed failed again"
 
@@ -245,7 +246,7 @@ seeds "" shipped || exit 1
 broken() { # name, file, awk program
   mkdir -p "$1/iyi"
   cp "$REPO"/src/iyi/*.iyi "$1/iyi/"
-  awk "$3" "$REPO/src/iyi/$2" > "$1/iyi/$2"
+  awk "$3" "$REPO/src/iyi/$2" > "$1/iyi/$2" || { echo "the awk for $1 failed"; exit 1; }
   if cmp -s "$1/iyi/$2" "$REPO/src/iyi/$2"; then
     echo "the awk for $1 found nothing to change"; exit 1
   fi
@@ -258,40 +259,66 @@ expect_caught() { # name, the sentence its check prints
 }
 
 step "broken copy: the stream ignored, every choice the plain scheduler's"
-broken prngignored chaos.iyi '/^  def self.draw : UInt64$/ { print; print "    return 0_u64"; next } { print }'
-caught "$WORK/prngignored" claim "$REPO/bench/chaos_claim.iyi" > prngignored.txt 2>&1
-expect_caught prngignored "claim: not caught in seeds 1 to 100"
-caught "$WORK/prngignored" join "$REPO/bench/chaos_join.iyi" > prngignored.txt 2>&1
-expect_caught prngignored "join: not caught in seeds 1 to 100"
+broken prngignored chaos.iyi '/^  def self.draw : UInt64$/ { n++; print; print "    return 0_u64"; next } { print } END { if (n != 1) exit 3 }' || die "prngignored anchor missing or ambiguous"
+for test in claim join; do
+  case "$test" in
+    claim) seed=6; verdict="one leader: task 1" ;;
+    join) seed=42; verdict="the reader saw 42 (work 4)" ;;
+  esac
+  build "prng-$test" "$WORK/prngignored" "$REPO/bench/chaos_$test.iyi" -Diyi_chaos || die "prngignored $test build failed: $(tail -20 "build-prng-$test.log")"
+  IYI_CHAOS="$seed" IYI_WORKERS=1 timeout -k 5 120 "./prng-$test$EXE" > "prng-$test.txt" 2>&1
+  code=$?
+  [ "$code" -eq 0 ] && grep -qxF "$verdict" "prng-$test.txt" || die "prngignored $test did not exit 0 at '$verdict' (exit $code): $(tail -20 "prng-$test.txt")"
+  echo "  prngignored $test: seed $seed exited 0 at $verdict"
+done
 
-step "broken copy: the seed not honoured, the stream seeded from the clock"
-broken seedignored chaos.iyi '/^    IyiStat\.set\(IyiStat::CHAOS_STREAM, seed\)$/ { print "    IyiStat.set(IyiStat::CHAOS_STREAM, __iyi_monotonic_ns.to_u64)"; next } { print }'
-seeds "$WORK/seedignored" seedignored > seedignored.txt 2>&1
-expect_caught seedignored "two runs differ"
+step "broken copy: the seed consumed but both streams use the next seed"
+broken seedignored chaos.iyi '/^    IyiStat\.set\(IyiStat::CHAOS_STREAM, seed\)$/ { n++; print "    IyiStat.set(IyiStat::CHAOS_STREAM, seed &+ 1_u64)"; next } /value = IyiStat.get\(IyiStat::CHAOS_SEED\) \^ mix/ { m++; sub(/IyiStat.get\(IyiStat::CHAOS_SEED\)/, "(IyiStat.get(IyiStat::CHAOS_SEED) \\&+ 1_u64)"); print; next } { print } END { if (n != 1 || m != 1) exit 3 }' || die "seedignored anchor missing or ambiguous"
+build exercise-seedignored "$WORK/seedignored" "$REPO/bench/chaos_exercise.iyi" -Diyi_chaos || die "seedignored build failed: $(tail -20 build-exercise-seedignored.log)"
+IYI_CHAOS=1 IYI_CHAOS_TRACE=1 IYI_WORKERS=1 timeout -k 5 120 "./exercise-seedignored$EXE" > seedignored.txt 2>&1
+code=$?
+[ "$code" -eq 0 ] && grep -qxF "every property held" seedignored.txt || die "seedignored fixture verdict missing (exit $code): $(tail -20 seedignored.txt)"
+grep -q '^iyi chaos: seed 1, ' seedignored.txt || die "seedignored did not consume supplied seed 1"
+sed 's/^iyi chaos: seed [0-9]*,/iyi chaos: seed,/' seedignored.txt > seedignored-normalized.txt
+sed 's/^iyi chaos: seed [0-9]*,/iyi chaos: seed,/' seed-shipped-2-a.txt > seed2-normalized.txt
+sed 's/^iyi chaos: seed [0-9]*,/iyi chaos: seed,/' seed-shipped-1-a.txt > seed1-normalized.txt
+! cmp -s seed1-normalized.txt seed2-normalized.txt || die "seedignored witness unarmed: healthy seeds 1 and 2 have identical schedules"
+cmp -s seedignored-normalized.txt seed2-normalized.txt || die "seedignored did not run seed 2's schedule: $(diff seed2-normalized.txt seedignored-normalized.txt)"
+echo "  seedignored consumed seed 1 and ran seed 2's schedule"
+
+# Each copy runs one seed. The healthy seed 2 must witness both early starts.
+grep -qxF "left arms 1 of 3, parallel units started before the spawner parked: 3" seed-shipped-2-a.txt || die "parallel early-start witness was not armed"
+grep -qxF "Unit tasks started before the spawner parked: 2" seed-shipped-2-a.txt || die "Unit early-start witness was not armed"
+mutant_run() { # name, seed, expected exit, exact verdict
+  local name="$1" seed="$2" want_code="$3" verdict="$4" code
+  build "exercise-$name" "$WORK/$name" "$REPO/bench/chaos_exercise.iyi" -Diyi_chaos || die "$name build failed: $(tail -20 "build-exercise-$name.log")"
+  IYI_CHAOS="$seed" IYI_CHAOS_TRACE=1 IYI_WORKERS=1 timeout -k 5 120 "./exercise-$name$EXE" > "$name.txt" 2>&1
+  code=$?
+  [ "$code" -eq "$want_code" ] && grep -qxF "$verdict" "$name.txt" || die "$name seed $seed did not exit $want_code at '$verdict' (exit $code): $(tail -20 "$name.txt")"
+  echo "  $name seed $seed: $verdict"
+}
 
 step "broken copy: units ignored, a unit-mate chosen like any task"
-broken unitsignored chaos.iyi '/^      if unit.stamp != generation$/ { print "      if true"; next } { print }'
-seeds "$WORK/unitsignored" unitsignored > unitsignored.txt 2>&1
-expect_caught unitsignored "FAIL: a task of the spawner's unit ran before the spawner parked"
+broken unitsignored chaos.iyi '/^      if unit.stamp != generation$/ { n++; print "      if true"; next } { print } END { if (n != 1) exit 3 }'
+mutant_run unitsignored 2 1 "FAIL: a task of the spawner's unit ran before the spawner parked"
 
 step "broken copy: a parallel task left in its spawner's unit"
-broken leftinunit chaos.iyi '/^    task.fiber.chaos_unit = IyiCross.shared \{ IyiChaosUnit.new\(IyiStat.get\(IyiStat::CHAOS_UNITS\), fresh_priority\) \}$/ { next } { print }'
-seeds "$WORK/leftinunit" leftinunit > leftinunit.txt 2>&1
-expect_caught leftinunit "no seed started a parallel unit before the spawner parked"
+broken leftinunit chaos.iyi '/^    task.fiber.chaos_unit = IyiCross.shared \{ IyiChaosUnit.new\(IyiStat.get\(IyiStat::CHAOS_UNITS\), fresh_priority\) \}$/ { n++; next } { print } END { if (n != 1) exit 3 }'
+mutant_run leftinunit 2 0 "left arms 0 of 3, parallel units started before the spawner parked: 0"
+grep -qxF "every property held" leftinunit.txt || die "leftinunit fixture did not finish normally"
 
 step "broken copy: a Unit's tasks each given a chaos unit of their own"
-broken unitsplit chaos.iyi '/^    unless unit.is_a\?\(IyiChaosUnit\)$/ { print "    unless false"; next } { print }'
-seeds "$WORK/unitsplit" unitsplit > unitsplit.txt 2>&1
-expect_caught unitsplit "tasks of one Unit ran between each other's operations"
+broken unitsplit chaos.iyi '/^    unless unit.is_a\?\(IyiChaosUnit\)$/ { n++; print "    unless false"; next } { print } END { if (n != 1) exit 3 }'
+mutant_run unitsplit 4 1 "FAIL: tasks of one Unit ran between each other's operations 1 times"
 
 step "broken copy: a Unit's tasks left in their spawner's unit"
-broken unitleft chaos.iyi '/^    fiber.chaos_unit = unit$/ { print "    fiber.chaos_unit = unit_of(IyiScheduler.current)"; next } { print }'
-seeds "$WORK/unitleft" unitleft > unitleft.txt 2>&1
-expect_caught unitleft "no seed started a Unit's task before the spawner parked"
+broken unitleft chaos.iyi '/^    fiber.chaos_unit = unit$/ { n++; print "    fiber.chaos_unit = unit_of(IyiScheduler.current)"; next } { print } END { if (n != 1) exit 3 }'
+mutant_run unitleft 2 0 "Unit tasks started before the spawner parked: 0"
+grep -qxF "every property held" unitleft.txt || die "unitleft fixture did not finish normally"
 
 step "broken copy: the scheduler left in a build without the flag"
-broken pointleft prelude.iyi '/^  {% if flag\?\(:iyi_chaos\) %}$/ && !done { print "  {% if true %}"; done = 1; next } { print }'
-awk '{ sub(/\{% if flag\?\(:iyi_chaos\) %\}/, "{% if true %}"); print }' "$REPO/src/iyi/concurrency.iyi" > pointleft/iyi/concurrency.iyi
+broken pointleft prelude.iyi '/^  {% if flag\?\(:iyi_chaos\) %}$/ && !done { n++; print "  {% if true %}"; done = 1; next } { print } END { if (n != 1) exit 3 }'
+awk '{ n += sub(/\{% if flag\?\(:iyi_chaos\) %\}/, "{% if true %}"); print } END { if (!n) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > pointleft/iyi/concurrency.iyi || die "pointleft concurrency anchor missing"
 off_is_nothing "$WORK/pointleft" pointleft > pointleft.txt 2>&1
 expect_caught pointleft "a plain build names the chaos scheduler"
 

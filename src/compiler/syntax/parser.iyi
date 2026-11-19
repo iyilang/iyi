@@ -491,10 +491,8 @@ pub class Parser < Lexer
           end
 
           if atomic.is_a?(Call)
-            if atomic.name.ends_with?('?') || atomic.name.ends_with?('!')
-              unexpected_token("site_11")
-            end
             if atomic.obj
+              # Hosted parser.cr 1215-1248: a receiver's `name=` is accepted whatever the name ends with (`cfg.limit? = 2`).
               next_token_skip_space_or_newline
               atomic.name = "#{atomic.name}="
               arg = parse_op_assign_no_control
@@ -502,6 +500,10 @@ pub class Parser < Lexer
               atomic.end_location = arg.end_location
               return atomic
             else
+              # Hosted parser.cr 777: a bare name ending in ? or ! is refused as the target of `=`.
+              if atomic.name.ends_with?('?') || atomic.name.ends_with?('!')
+                unexpected_token("site_11")
+              end
               iyi_refuse_global_local(atomic)
               atomic = Var.new(atomic.name).at(atomic)
             end
@@ -572,14 +574,17 @@ pub class Parser < Lexer
     atomic
   end
 
+  # Hosted parser.cr 8324-8336: what an operator assignment or `=` may assign. A receiver's name is assignable when it
+  # is an identifier (`cfg.limit?` too) with no arguments, parentheses or block; an index is assignable as `a[i]` or `a[]`.
   def can_be_assigned?(node : ASTNode) : Bool
     case node
     when Var, InstanceVar, ClassVar, Path, Global, Underscore
       true
     when Call
+      return false if node.has_parentheses
       no_args = node.args.empty? && node.named_args.nil? && node.block.nil? && node.block_arg.nil?
-      return true if no_args
-      node.name == "[]"
+      return true if Lexer.ident?(node.name) && no_args
+      node.name == "[]" && (node.args_in_brackets || no_args)
     else
       false
     end
@@ -940,6 +945,22 @@ pub class Parser < Lexer
           space_consumed = true
         end
 
+        # Hosted parser.cr 1249-1261: `receiver.name op= value` is an operator assignment, built here. The receiver form
+        # never reaches the bare-name check in parse_op_assign, which refuses `x += 1` for an undeclared x.
+        if @token.type.assignment_operator?
+          call = Call.new(res, name)
+          unexpected_token unless can_be_assigned?(call)
+          op_str = @token.type.to_s
+          method = op_str[0, op_str.bytesize - 1]
+          op_loc = @token.location
+          next_token_skip_space_or_newline
+          value = parse_op_assign
+          call.at(location)
+          call.name_location = name_location
+          res = OpAssign.new(call, method, value).at(location)
+          res.name_location = op_loc
+          next
+        end
         call_args = preserve_stop_on_do { space_consumed ? parse_call_args_space_consumed : parse_call_args }
         args = call_args ? (call_args.args || [] of ASTNode) : [] of ASTNode
         block = call_args ? call_args.block : nil
@@ -955,6 +976,14 @@ pub class Parser < Lexer
       when TokenKind::OP_BANG
         res = Propagate.new(res).at(location)
         next_token
+      when TokenKind::OP_LSQUARE_RSQUARE
+        # Hosted parser.cr 1284-1295: `a[]` is a call to `[]` with no arguments.
+        name_location = @token.location
+        end_location = token_end_location
+        next_token_skip_space
+        res = Call.new(res, "[]").at(location)
+        res.name_location = name_location
+        res.end_location = end_location
       when TokenKind::OP_LSQUARE
         next_token_skip_space_or_newline
         call_args = preserve_stop_on_do { parse_call_args_space_consumed(true, true, true) }
@@ -976,6 +1005,7 @@ pub class Parser < Lexer
         end
 
         res = Call.new(res, method_name, args, nil, nil, named_args).at(location)
+        res.args_in_brackets = true
         res.end_location = end_location
       when TokenKind::OP_LCURLY
         if res.is_a?(Call) && res.block.nil?
@@ -1529,6 +1559,13 @@ pub class Parser < Lexer
         end
 
         arg = parse_call_arg
+        # Hosted parser.cr 6819-6820: a string literal that a colon follows is the name of a named argument.
+        if @token.type == TokenKind::OP_COLON && arg.is_a?(StringLiteral)
+          named_args = parse_named_args(allow_newline: true, first_name: arg.value)
+          next if @token.type == TokenKind::OP_AMP
+          check(TokenKind::OP_RPAREN)
+          break
+        end
         args << arg
 
         skip_space
@@ -1572,7 +1609,8 @@ pub class Parser < Lexer
          TokenKind::INSTANCE_VAR, TokenKind::CLASS_VAR, TokenKind::CONST, TokenKind::GLOBAL,
          TokenKind::OP_DOLLAR_TILDE, TokenKind::OP_DOLLAR_QUESTION, TokenKind::GLOBAL_MATCH_DATA_INDEX,
          TokenKind::OP_LPAREN, TokenKind::OP_BANG, TokenKind::OP_LSQUARE, TokenKind::OP_LSQUARE_RSQUARE,
-         TokenKind::OP_TILDE, TokenKind::UNDERSCORE, TokenKind::OP_MINUS_GT
+         TokenKind::OP_TILDE, TokenKind::UNDERSCORE, TokenKind::OP_MINUS_GT, TokenKind::OP_LCURLY_LCURLY,
+         TokenKind::MAGIC_DIR, TokenKind::MAGIC_END_LINE, TokenKind::MAGIC_FILE, TokenKind::MAGIC_LINE
       # valid argument start
     when TokenKind::OP_STAR, TokenKind::OP_STAR_STAR
       return nil if current_char.ascii_whitespace?
@@ -1627,6 +1665,13 @@ pub class Parser < Lexer
       end
 
       arg = parse_call_arg
+      # Hosted parser.cr 6819-6820: a string literal that a colon follows is the name of a named argument.
+      if @token.type == TokenKind::OP_COLON && arg.is_a?(StringLiteral)
+        named_args = parse_named_args(allow_newline: false, first_name: arg.value)
+        next if @token.type == TokenKind::OP_AMP
+        end_location = named_args.last.value.end_location || token_end_location
+        break
+      end
       args << arg
       end_location = arg.end_location
 
@@ -1704,16 +1749,54 @@ pub class Parser < Lexer
     false
   end
 
-  def parse_named_args(allow_newline : Bool = false) : Array(NamedArgument)
+  # Hosted parser.cr 4182-4184: a string literal that begins a key.
+  def string_literal_start? : Bool
+    @token.type == TokenKind::DELIMITER_START && @token.delimiter_state.kind == DelimiterKind::STRING
+  end
+
+  # Hosted parser.cr 3882-3899: the text of a plain string used as a key. An interpolated string is refused.
+  def parse_string_without_interpolation(context : String, want_skip_space : Bool = true) : String
+    location = @token.location
+    unless string_literal_start?
+      syntax_error("expected string literal for #{context}, not #{token_text}", location)
+    end
+    node = parse_delimiter(want_skip_space)
+    if node.is_a?(StringLiteral)
+      node.value
+    else
+      syntax_error("interpolation not allowed in #{context}", location)
+    end
+  end
+
+  # The byte before the current token is a space, a tab or a line break, so the token is not joined to what precedes it.
+  def space_before_token? : Bool
+    return false if @token.start < 1
+    byte = @source.byte_at(@token.start - 1)
+    byte == 32_u8 || byte == 9_u8 || byte == 10_u8 || byte == 13_u8
+  end
+
+  def parse_named_args(allow_newline : Bool = false, first_name : String? = nil) : Array(NamedArgument)
     named_args = [] of NamedArgument
     location = @token.location
 
     while true
-      if named_tuple_start?
+      if first_name
+        name = first_name
+        first_name = nil
+      elsif named_tuple_start?
         name = @token.value
         next_token_never_a_symbol
+      elsif string_literal_start?
+        name = parse_string_without_interpolation("named argument")
       else
-        unexpected_token("site_13")
+        syntax_error("expected named argument, not #{token_text}", @token.location)
+      end
+
+      if name.empty?
+        syntax_error("named argument cannot have an empty name", location)
+      end
+      if named_args.any? { |arg| arg.name == name }
+        syntax_error("duplicated named argument: #{name}", location)
       end
 
       check(TokenKind::OP_COLON)
@@ -2458,7 +2541,7 @@ pub class Parser < Lexer
     end
 
     if named_tuple_start?
-      return parse_named_tuple(location)
+      return parse_named_tuple(location, @token.value)
     end
 
     first_is_splat = false
@@ -2481,6 +2564,19 @@ pub class Parser < Lexer
     when TokenKind::OP_RCURLY
       next_token_skip_space
       return TupleLiteral.new([first_key] of ASTNode).at(location)
+    when TokenKind::OP_COLON
+      unexpected_token if first_is_splat
+      # Hosted parser.cr 4084-4099: a colon glued to its key. A string key names a named tuple; any other key is refused.
+      if space_before_token?
+        syntax_error("space not allowed between named argument name and ':'", @token.location)
+      end
+      if first_key.is_a?(StringLiteral)
+        if first_key.value.empty?
+          syntax_error("named tuple name cannot be empty", first_key.location || @token.location)
+        end
+        return parse_named_tuple(location, first_key.value)
+      end
+      syntax_error("expecting token '=>', not '#{token_text}'", @token.location)
     when TokenKind::OP_EQ_GT
       set_slash_is_regex(true)
       next_token_skip_space_or_newline
@@ -2514,9 +2610,10 @@ pub class Parser < Lexer
     TupleLiteral.new(exps).at(location)
   end
 
-  def parse_named_tuple(location : Location) : ASTNode
+  # Hosted parser.cr 4246-4302: the named tuple whose first name is `first_key`. The current token is the colon after the
+  # first name, or the identifier itself (a name read by named_tuple_start?): the colon is passed either way.
+  def parse_named_tuple(location : Location, first_key : String) : ASTNode
     entries = [] of NamedTupleLiteral::Entry
-    first_key = @token.value
     next_token_never_a_symbol
     set_slash_is_regex(true)
     next_token_skip_space
@@ -2528,14 +2625,33 @@ pub class Parser < Lexer
     if @token.type == TokenKind::OP_COMMA
       next_token_skip_space_or_newline
       while @token.type != TokenKind::OP_RCURLY
-        key = @token.value
-        next_token_never_a_symbol
+        key_location = @token.location
+        key = ""
+        if named_tuple_start?
+          key = @token.value
+          next_token_never_a_symbol
+        elsif string_literal_start?
+          key = parse_string_without_interpolation("named tuple name", false)
+        else
+          syntax_error("expected '}' or named tuple name, not #{token_text}", @token.location)
+        end
+
+        if key.empty?
+          syntax_error("named tuple name cannot be empty", key_location)
+        end
+        if @token.type == TokenKind::SPACE
+          syntax_error("space not allowed between named argument name and ':'", @token.location)
+        end
+        check(TokenKind::OP_COLON)
+        if entries.any? { |entry| entry.key == key }
+          syntax_error("duplicated key: #{key}", @token.location)
+        end
+
         set_slash_is_regex(true)
         next_token_skip_space
-
-        val = parse_op_assign
+        val = parse_op_assign_no_control
+        skip_space
         entries << NamedTupleLiteral::Entry.new(key, val)
-        skip_space_or_newline
         if @token.type == TokenKind::OP_COMMA
           next_token_skip_space_or_newline
         else
@@ -2543,6 +2659,8 @@ pub class Parser < Lexer
         end
       end
     end
+
+    skip_space_or_newline
     check(TokenKind::OP_RCURLY)
     next_token_skip_space
     NamedTupleLiteral.new(entries).at(location)

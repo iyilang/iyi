@@ -319,6 +319,11 @@ pub class Lexer
     ident_start?(char) || char.ascii_number?
   end
 
+  # Hosted lexer.cr 3053: a name is an identifier when its first character starts one, so `limit` and `limit?` both are.
+  def self.ident?(name : String) : Bool
+    !name.empty? && ident_start?(name[0])
+  end
+
   def ident_part_or_end?(char : Char) : Bool
     Lexer.ident_part?(char) || char == '?' || char == '!'
   end

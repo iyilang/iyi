@@ -1602,7 +1602,8 @@ pub class Parser < Lexer
          TokenKind::INSTANCE_VAR, TokenKind::CLASS_VAR, TokenKind::CONST, TokenKind::GLOBAL,
          TokenKind::OP_DOLLAR_TILDE, TokenKind::OP_DOLLAR_QUESTION, TokenKind::GLOBAL_MATCH_DATA_INDEX,
          TokenKind::OP_LPAREN, TokenKind::OP_BANG, TokenKind::OP_LSQUARE, TokenKind::OP_LSQUARE_RSQUARE,
-         TokenKind::OP_TILDE, TokenKind::UNDERSCORE, TokenKind::OP_MINUS_GT
+         TokenKind::OP_TILDE, TokenKind::UNDERSCORE, TokenKind::OP_MINUS_GT, TokenKind::OP_LCURLY_LCURLY,
+         TokenKind::MAGIC_DIR, TokenKind::MAGIC_END_LINE, TokenKind::MAGIC_FILE, TokenKind::MAGIC_LINE
       # valid argument start
     when TokenKind::OP_STAR, TokenKind::OP_STAR_STAR
       return nil if current_char.ascii_whitespace?

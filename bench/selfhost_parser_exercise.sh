@@ -811,6 +811,7 @@ for fixture in \
   "$REPO"/bench/fixtures/syntax_call_spans.iyi \
   "$REPO"/bench/fixtures/syntax_begin_shorthand_and_comma_lines.iyi \
   "$REPO"/bench/fixtures/syntax_op_assign_targets.iyi \
+  "$REPO"/bench/fixtures/syntax_call_arg_starts.iyi \
   "$REPO"/bench/fixtures/syntax_implicit_rescue.iyi; do
   fixture_name="${fixture#"$REPO/"}"
   fixture_native="$(native_path "$fixture")"
@@ -1481,6 +1482,53 @@ else
   status=1
 fi
 
+echo "== Call arguments that start with a doubled brace or a magic constant: both parsers accept them, and agree on the tree"
+# verdict_rows_check FILE SOURCES EXPECTATIONS: each row's verdict line in FILE matches its expectation (the arrays by name).
+verdict_rows_check() {
+  local file="$1" i line bad=0
+  local -n srcs="$2"
+  local -n exps="$3"
+  for i in "${!srcs[@]}"; do
+    line=$(sed -n "$((i + 1))p" "$file")
+    if ! verdict_matches "$line" "${exps[$i]}"; then
+      echo "  row $((i + 1)) disagrees with '${exps[$i]}': $line"
+      bad=$((bad + 1))
+    fi
+  done
+  [ "$bad" -eq 0 ]
+}
+arg_sources=(
+  $'assert_true {{ 1 == 1 }}, "x"\n'
+  $'f {{ 1 == 1 }}\n'
+  $'f __LINE__\n'
+  $'f __FILE__\n'
+  $'f(1, __LINE__)\n'
+)
+arg_expect=(ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT)
+arg_dir="$WORK/argstart"
+rm -rf "$arg_dir" && mkdir -p "$arg_dir"
+: > "$arg_dir/list.txt"
+for i in "${!arg_sources[@]}"; do
+  printf '%s\n' "${arg_sources[$i]}" > "$arg_dir/row_$i.iyi"
+  echo "$WORK_NATIVE/argstart/row_$i.iyi" >> "$arg_dir/list.txt"
+done
+"$WORK/exercise-plain$EXE" --verdicts "$WORK_NATIVE/argstart/list.txt" > "$arg_dir/port.all" 2> "$arg_dir/port.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$arg_dir/port.all" > "$arg_dir/port.txt"
+"$WORK/dump_hosted$EXE" --verdicts "$WORK_NATIVE/argstart/list.txt" > "$arg_dir/hosted.all" 2> "$arg_dir/hosted.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$arg_dir/hosted.all" > "$arg_dir/hosted.txt"
+if verdict_rows_check "$arg_dir/port.txt" arg_sources arg_expect; then
+  echo "  port: each of ${#arg_sources[@]} call-argument rows is accepted"
+else
+  echo "  port call-argument rows disagree with the expectations"
+  status=1
+fi
+if verdict_rows_check "$arg_dir/hosted.txt" arg_sources arg_expect; then
+  echo "  hosted: the same rows hold"
+else
+  echo "  hosted call-argument rows do not hold: the expectations are wrong"
+  status=1
+fi
+
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
@@ -1938,6 +1986,19 @@ prove_mutation "mutation 60: a receiver's operator assignment is not built by th
 prove_mutation "mutation 61: a call with parentheses is assignable" "$PARSER" \
   '      return false if node.has_parentheses' \
   '      return false if false' -- opassign_hold || status=1
+# arg_starts_hold: the call-argument rows, checked on a mutant's verdicts.
+arg_starts_hold() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  "$WORK/mut-exercise$EXE" --verdicts "$WORK_NATIVE/argstart/list.txt" > "$WORK/argstart-mut.all" 2> "$WORK/argstart-mut.err" || true
+  awk '/^(ACCEPT|REFUSE) /' "$WORK/argstart-mut.all" > "$WORK/argstart-mut.txt"
+  verdict_rows_check "$WORK/argstart-mut.txt" arg_sources arg_expect
+}
+# Mutation 62: a doubled brace does not start a call argument, so `f {{ 1 == 1 }}` is refused.
+prove_mutation "mutation 62: a doubled brace does not start a call argument" "$PARSER" \
+  ', TokenKind::OP_LCURLY_LCURLY,' ',' -- arg_starts_hold || status=1
 
 echo
 echo "== Rebuilding and running restored parser exercise"

@@ -948,12 +948,10 @@ jobs:
       - name: A real shard, built and served
         run: |
           # The crystal docker image is a compiler toolchain. It ships `shards`,
-          # and it does not ship `curl` — the reason the identity gate below
-          # installs Python. Asking for a page is the point of this step, so
-          # the client it asks with cannot be assumed.
-          if ! command -v curl >/dev/null; then
-            apt-get update -qq && apt-get install -y -qq curl
-          fi
+          # and it ships neither `curl` nor Python. The page is asked for with
+          # bash's own `/dev/tcp` where there is no `curl`
+          # (bench/loopback_get.sh): installing one put this step on whether
+          # Ubuntu's archives answered, and they did not for 11 minutes.
           bash bench/shard_serves.sh
 
       # The same application, through four boundaries instead of from source.
@@ -965,11 +963,7 @@ jobs:
       # library owns — arriving with it. Each of those failed quietly once, and
       # a gate that stopped at "it compiles" was green through all of them.
       - name: A kemal application, served through four boundaries
-        run: |
-          if ! command -v curl >/dev/null; then
-            apt-get update -qq && apt-get install -y -qq curl
-          fi
-          bash bench/kemal_serves.sh
+        run: bash bench/kemal_serves.sh
 
       # And a shard of a different kind, because the one above reaches nothing
       # outside Crystal's own library. `jwt` reaches OpenSSL through a reopened
@@ -4034,13 +4028,38 @@ jobs:
           mkdir -p room && tar -xzf dist/*.tar.gz -C room
           bash scripts/bundle-runtime-libs.sh room --verify-only
 
+      # The C toolchain's packages are cached whole, the .debs and the package
+      # lists, and installed from the cache when it is there: this step used to
+      # `apt-get update` and fetch gcc every run, and run 44514733307 lost it
+      # to Ubuntu's archives not answering for 3 minutes (the shard job's curl
+      # install lost 11 to the same). The first run, or one whose key changed,
+      # fetches them and fills the cache.
+      - name: The C toolchain's packages, from the cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/focal-gcc
+          key: focal-gcc-1
+
       - name: Unpack it in a bare image and build a program there
         run: |
+          mkdir -p "$HOME/focal-gcc/archives" "$HOME/focal-gcc/lists"
           printf 'module hi\n\nputs "hello from a machine with nothing on it"\n' \
             > room/hi.iyi
-          docker run --rm -v "$PWD/room:/iyi" ubuntu:20.04 sh -c '
+          docker run --rm -v "$PWD/room:/iyi" \
+            -v "$HOME/focal-gcc/archives:/var/cache/apt/archives" \
+            -v "$HOME/focal-gcc/lists:/var/lib/apt/lists" ubuntu:20.04 sh -c '
             set -e
-            apt-get update -qq && apt-get install -y -qq gcc > /dev/null
+            # The image deletes what it downloads, and its lists.
+            rm -f /etc/apt/apt.conf.d/docker-clean
+            echo "APT::Keep-Downloaded-Packages \"true\";" > /etc/apt/apt.conf.d/keep
+            apt-get install -y -qq gcc > /dev/null 2>&1 || {
+              echo "gcc is not in the cache: fetching it"
+              apt-get update -qq && apt-get install -y -qq gcc > /dev/null
+            }
+            # apt ran as root: the cache is saved by the runner user, who
+            # cannot read its `partial` directories or lock files.
+            rm -rf /var/cache/apt/archives/partial /var/lib/apt/lists/partial
+            chmod -R a+rwX /var/cache/apt/archives /var/lib/apt/lists
             /iyi/bin/iyi version
             cd /tmp
             /iyi/bin/iyi run /iyi/hi.iyi

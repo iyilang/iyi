@@ -723,6 +723,12 @@ prove_mutation "macro expansion in semantic traversal is bypassed" "$SEM_MAIN" \
   "if false && expand_macro(node)" \
   -- check_expr_outputs_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "a macro site in a nested body forgets the locals typed before it" "$SEM_MAIN" \
+  "    @vars.keys.each { |name| names << name unless names.includes?(name) }" \
+  "    nil" \
+  -- check_expr_outputs_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 echo "  $MUTATIONS_RUN mutation proofs run"
 
 echo

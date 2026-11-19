@@ -97,8 +97,9 @@ src/compiler/lower/typer.iyi 56
 src/compiler/lower/unions.iyi 7
 src/compiler/macros/answers.iyi 16
 src/compiler/macros/ast.iyi 37
-src/compiler/macros/engine.iyi 45
-src/compiler/macros/interpreter.iyi 70
+src/compiler/macros/confinement.iyi 31
+src/compiler/macros/engine.iyi 51
+src/compiler/macros/interpreter.iyi 81
 src/compiler/macros/macro_parser.iyi 34
 src/compiler/macros/methods.iyi 42
 src/compiler/macros/site_scan.iyi 46
@@ -154,9 +155,9 @@ src/compiler/semantic/definition_typing.iyi 50
 src/compiler/semantic/inline_macros.iyi 57
 src/compiler/semantic/instance_vars.iyi 76
 src/compiler/semantic/lib_call.iyi 54
-src/compiler/semantic/literal_expander.iyi 72
+src/compiler/semantic/literal_expander.iyi 75
 src/compiler/semantic/macro_bindings.iyi 22
-src/compiler/semantic/main_visitor.iyi 493
+src/compiler/semantic/main_visitor.iyi 495
 src/compiler/semantic/match.iyi 73
 src/compiler/semantic/math_interpreter.iyi 65
 src/compiler/semantic/method_lookup.iyi 44
@@ -171,9 +172,9 @@ src/compiler/semantic/type_node_host.iyi 23
 src/compiler/semantic/type_nodes.iyi 42
 src/compiler/semantic/typed.iyi 4
 src/compiler/stage1.iyi 8
-src/compiler/syntax/ast.iyi 1265
-src/compiler/syntax/lexer.iyi 173
-src/compiler/syntax/parser.iyi 318
+src/compiler/syntax/ast.iyi 1268
+src/compiler/syntax/lexer.iyi 174
+src/compiler/syntax/parser.iyi 332
 src/compiler/syntax/token.iyi 77
 src/compiler/syntax/transformer.iyi 116
 src/compiler/syntax/visitor.iyi 337

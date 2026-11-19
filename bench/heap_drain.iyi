@@ -528,9 +528,49 @@ module bench/heap_drain
   # DIR_RESIDENT_MAX of the directory's pages are resident after, and on
   # every platform when a large object lost its bytes. Windows reads the
   # pages' residency through QueryWorkingSetEx, the others mincore.
+  #
+  # Where a large object lands is the kernel's choice, and an object that
+  # lands between two arenas' slots needs no widening: the bounds already
+  # hold it, and a copy that never widens passes. On Windows 1 run in 10
+  # began with arenas 126 slots (2 GiB) apart, and all eight objects
+  # landed in that gap (tssh, 2026-11-18): the broken copy that skips the
+  # widening was missed once on a GitHub runner (job 134651603528). So
+  # each object's slots are held against the bounds as they were just
+  # before it was made (read through `IyiHeap.dir_outside?`), and with the
+  # flag on a run in which none landed outside them exits DIR_UNASKED:
+  # it asked nothing, and bench/heap_drain.sh runs it again.
   #   ./heap_drain dir [LARGE]                    # default 8
   DIR_RESIDENT_MAX = 32_u64
   DIR_LARGE_BYTES  = 41943040_u64
+  DIR_UNASKED      = 75
+
+  # The bounds `IyiHeap.dir_outside?` answers by, as slots: the
+  # contiguous run of slots it calls inside around *anchor*, an arena's
+  # slot, found by halving.
+  def dir_bounds(anchor : UInt64) : {UInt64, UInt64}
+    low = 0_u64
+    high = anchor
+    while low < high
+      mid = low + (high - low) // 2_u64
+      if IyiHeap.dir_outside?(mid)
+        low = mid + 1_u64
+      else
+        high = mid
+      end
+    end
+    first = low
+    low = anchor
+    high = IyiHeap::DIR_SLOTS - 1_u64
+    while low < high
+      mid = low + (high - low + 1_u64) // 2_u64
+      if IyiHeap.dir_outside?(mid)
+        high = mid - 1_u64
+      else
+        low = mid
+      end
+    end
+    {first, low}
+  end
 
   {% if flag?(:darwin) %}
     lib LibDirResident
@@ -605,10 +645,21 @@ module bench/heap_drain
   def dir_main(arguments : Array(String)) : Nil
     large = arguments.size > 1 ? arguments[1].to_i : 8
     buffers = [] of Pointer(UInt8)
+    # An arena's slot: inside the bounds from the first arena on.
+    anchor = Pointer(UInt8).malloc(64_u64).address.unsafe_shr(24_u64)
+    outside = 0
     large.times do |i|
+      {% if flag?(:heap_partitions) %}
+        low, high = dir_bounds(anchor)
+      {% end %}
       buffer = Pointer(UInt8).malloc(DIR_LARGE_BYTES)
       buffer[0] = (i & 0xFF).to_u8
       buffer[DIR_LARGE_BYTES.to_i32 - 1] = (i & 0xFF).to_u8
+      {% if flag?(:heap_partitions) %}
+        first = buffer.address.unsafe_shr(24_u64)
+        last = (buffer.address + DIR_LARGE_BYTES - 1_u64).unsafe_shr(24_u64)
+        outside = outside + 1 if first < low || last > high
+      {% end %}
       fail("dir: large object #{i} at 0x#{buffer.address.to_s(16)} is no heap pointer the moment it is made") unless heap_pointer?(buffer.address)
       buffers << buffer
     end
@@ -633,6 +684,11 @@ module bench/heap_drain
     {% if flag?(:heap_partitions) %}
       fail("dir: #{resident} of the arena directory's #{pages} pages resident after the mark read a word for each (at most #{DIR_RESIDENT_MAX})") if resident > DIR_RESIDENT_MAX.to_i64
       print "dir: the mark read no directory page outside the arenas' slots\n"
+      if outside == 0
+        print "dir: none of the #{large} large objects landed outside the arenas' slots, so the bounds' widening went unasked\n"
+        __iyi_exit(DIR_UNASKED)
+      end
+      print "dir: #{outside} of the #{large} large objects landed outside the slots before them, each a heap pointer\n"
     {% end %}
   end
 

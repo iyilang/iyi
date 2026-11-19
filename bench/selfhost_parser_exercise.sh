@@ -812,6 +812,7 @@ for fixture in \
   "$REPO"/bench/fixtures/syntax_begin_shorthand_and_comma_lines.iyi \
   "$REPO"/bench/fixtures/syntax_op_assign_targets.iyi \
   "$REPO"/bench/fixtures/syntax_call_arg_starts.iyi \
+  "$REPO"/bench/fixtures/syntax_string_keys.iyi \
   "$REPO"/bench/fixtures/syntax_implicit_rescue.iyi; do
   fixture_name="${fixture#"$REPO/"}"
   fixture_native="$(native_path "$fixture")"
@@ -1529,6 +1530,68 @@ else
   status=1
 fi
 
+echo "== String keys: a string glued to its colon names a named tuple's member or a named argument, as the hosted parser reads it"
+# Each row: a source and its expectation (ACCEPT, or REFUSE with the hosted line and message). The refusals are hosted's:
+# parser.cr 4084-4099 (a space, an empty name, the arrow), 4261-4302 (later names, duplicates), 3882-3899 and 6866-6900
+# (named arguments), 6819-6820 (a call's string name).
+strkey_sources=(
+  $'a = {"a-b": 7, x: 1}\n'
+  $'b = {x: 1, "b c": 2}\n'
+  $'c = {"a": 1, "b c": 2, d: 3}\n'
+  $'d = {"a" => 1}\n'
+  $'f("a": 1)\n'
+  $'f "a": 1\n'
+  $'f("a": 1, b: 2)\n'
+  $'f(x: 1, "b": 2)\n'
+  $'f("a" : 1)\n'
+  $'h = {"a":1}\n'
+  $'h = {"": 1}\n'
+  $'h = {"a" : 1}\n'
+  $'h = {"a#{1}": 2}\n'
+  $'h = {"a": 1, "a": 2}\n'
+  $'h = {x: 1, x: 2}\n'
+  $'h = {"a": 1,\n  "b" : 2}\n'
+  $'f("": 1)\n'
+  $'f("a": 1, "a": 2)\n'
+  $'f("a#{1}": 1)\n'
+)
+strkey_expect=(
+  ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT
+  "REFUSE 1 unexpected token: \"}\""
+  "REFUSE 1 named tuple name cannot be empty"
+  "REFUSE 1 space not allowed between named argument name and ':'"
+  "REFUSE 1 expecting token '=>', not ':'"
+  "REFUSE 1 duplicated key: a"
+  "REFUSE 1 duplicated key: x"
+  "REFUSE 2 space not allowed between named argument name and ':'"
+  "REFUSE 1 named argument cannot have an empty name"
+  "REFUSE 1 duplicated named argument: a"
+  "REFUSE 1 expecting token ')', not ':'"
+)
+strkey_dir="$WORK/strkey"
+rm -rf "$strkey_dir" && mkdir -p "$strkey_dir"
+: > "$strkey_dir/list.txt"
+for i in "${!strkey_sources[@]}"; do
+  printf '%s\n' "${strkey_sources[$i]}" > "$strkey_dir/row_$i.iyi"
+  echo "$WORK_NATIVE/strkey/row_$i.iyi" >> "$strkey_dir/list.txt"
+done
+"$WORK/exercise-plain$EXE" --verdicts "$WORK_NATIVE/strkey/list.txt" > "$strkey_dir/port.all" 2> "$strkey_dir/port.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$strkey_dir/port.all" > "$strkey_dir/port.txt"
+"$WORK/dump_hosted$EXE" --verdicts "$WORK_NATIVE/strkey/list.txt" > "$strkey_dir/hosted.all" 2> "$strkey_dir/hosted.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$strkey_dir/hosted.all" > "$strkey_dir/hosted.txt"
+if verdict_rows_check "$strkey_dir/port.txt" strkey_sources strkey_expect; then
+  echo "  port: each of ${#strkey_sources[@]} string-key rows has its expected verdict and first error line"
+else
+  echo "  port string-key rows disagree with the expectations"
+  status=1
+fi
+if verdict_rows_check "$strkey_dir/hosted.txt" strkey_sources strkey_expect; then
+  echo "  hosted: the same rows hold"
+else
+  echo "  hosted string-key rows do not hold: the expectations are wrong"
+  status=1
+fi
+
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
@@ -1999,6 +2062,28 @@ arg_starts_hold() {
 # Mutation 62: a doubled brace does not start a call argument, so `f {{ 1 == 1 }}` is refused.
 prove_mutation "mutation 62: a doubled brace does not start a call argument" "$PARSER" \
   ', TokenKind::OP_LCURLY_LCURLY,' ',' -- arg_starts_hold || status=1
+# strkey_hold: the string-key rows, checked on a mutant's verdicts.
+strkey_hold() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  "$WORK/mut-exercise$EXE" --verdicts "$WORK_NATIVE/strkey/list.txt" > "$WORK/strkey-mut.all" 2> "$WORK/strkey-mut.err" || true
+  awk '/^(ACCEPT|REFUSE) /' "$WORK/strkey-mut.all" > "$WORK/strkey-mut.txt"
+  verdict_rows_check "$WORK/strkey-mut.txt" strkey_sources strkey_expect
+}
+# Mutation 63: a string key after the first name is refused (parse_named_tuple, parser.cr 4261-4270).
+prove_mutation "mutation 63: a string key after the first name is refused" "$PARSER" \
+  $'        elsif string_literal_start?\n          key = parse_string_without_interpolation("named tuple name", false)' \
+  $'        elsif false\n          key = parse_string_without_interpolation("named tuple name", false)' -- strkey_hold || status=1
+# Mutation 64: a string glued to its colon is not a named tuple's first name (parser.cr 4088-4096).
+prove_mutation "mutation 64: a string glued to its colon is not a named tuple's first name" "$PARSER" \
+  '        return parse_named_tuple(location, first_key.value)' \
+  '        syntax_error("a named tuple has no string name", @token.location)' -- strkey_hold || status=1
+# Mutation 65: a string literal a colon follows is not a named argument in a call (parser.cr 6819-6820).
+prove_mutation "mutation 65: a call's string name is not a named argument" "$PARSER" \
+  $'        if @token.type == TokenKind::OP_COLON && arg.is_a?(StringLiteral)\n          named_args = parse_named_args(allow_newline: true, first_name: arg.value)' \
+  $'        if false && @token.type == TokenKind::OP_COLON && arg.is_a?(StringLiteral)\n          named_args = parse_named_args(allow_newline: true, first_name: arg.value)' -- strkey_hold || status=1
 
 echo
 echo "== Rebuilding and running restored parser exercise"

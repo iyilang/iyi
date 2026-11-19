@@ -213,15 +213,26 @@ caught "" join "$REPO/bench/chaos_join.iyi" 42 c358ff992036ee50 || exit 1
 
 # ── 4. A drawn seed ───────────────────────────────────────────────────────
 step "a seed drawn by iyi test, named and run again"
-chaos_test "" drawn.txt --chaos --chaos-runs 200 "$REPO/bench/chaos_claim.iyi"
+# A test that fails on every seed: the drawn seed fails at run 1 of 200
+# whichever seed the clock draws, so what is checked is that the seed is
+# named and fails again.
+cat > "$WORK/fails_every_seed.iyi" <<'IYI'
+module chaos_fails_every_seed
+
+print "fails on every seed\n"
+exit(1)
+IYI
+chaos_test "" drawn.txt --chaos --chaos-runs 200 "$WORK/fails_every_seed.iyi"
 code=$?
-[ "$code" -eq 1 ] || die "200 drawn seeds did not catch chaos_claim (exit $code): $(tail -3 drawn.txt)"
+[ "$code" -eq 1 ] || die "a test that fails on every seed did not fail under 200 drawn seeds (exit $code): $(tail -3 drawn.txt)"
 seed="$(sed -n 's/.*reproduce: .* test --chaos=\([0-9][0-9]*\) .*/\1/p' drawn.txt | head -1)"
 [ -n "$seed" ] || die "the drawn failure names no seed: $(cat drawn.txt)"
-chaos_test "" drawn-again.txt "--chaos=$seed" "$REPO/bench/chaos_claim.iyi"
+grep -qF "(chaos seed $seed, run 1 of 200)" drawn.txt || die "the drawn seed $seed was not run 1 of 200: $(grep -m1 'chaos seed' drawn.txt)"
+chaos_test "" drawn-again.txt "--chaos=$seed" "$WORK/fails_every_seed.iyi"
 code=$?
 [ "$code" -eq 1 ] || die "the drawn seed $seed did not fail again (exit $code): $(tail -3 drawn-again.txt)"
-echo "  $(grep -m1 'chaos seed' drawn.txt | sed 's/^.*: //'), and --chaos=$seed failed again"
+grep -qF "(chaos seed $seed, run 1 of 1)" drawn-again.txt || die "--chaos=$seed did not run one seed: $(grep -m1 'chaos seed' drawn-again.txt)"
+echo "  drawn seed $seed failed at run 1 of 200, and --chaos=$seed failed again"
 
 # ── 5. One seed, one schedule; many seeds, many ───────────────────────────
 step "bench/chaos_exercise.iyi under 30 seeds, twice each"

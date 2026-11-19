@@ -1036,30 +1036,135 @@ else
   let_go_late bounded-late 10 bounded
 fi
 
-# Windows only: a suspended thread stops at any instruction there, the
-# window measured. darwin's runner kept every chunk in ten runs without the
-# bracket, its stop landing elsewhere; Linux died of SIGSEGV.
-if [ "$PSEP" = ":" ]; then
-  echo "  the free bracket's failure proof is measured on Windows, where a stop lands mid-free"
-else
+# The free's bracket, and the list it guards. A free links the chunk onto its
+# cache's list, and a pause drops every cache's list: a link to a list read
+# before a collection and written after it puts back what the collection
+# dropped, and the chunks it links are the ones its sweep had already put on
+# the centre. A collection inside the free is what the bracket keeps from
+# happening (the stop waits for a free inside the bracket), so the copy with
+# the bracket removed runs one there, at the one free the program arms. The
+# control keeps the bracket and the link, and no collection. Single thread:
+# a deterministic sequence, not a timing race.
 step "failure proof: a free outside the allocator's bracket puts a dropped list back"
+mkdir -p bracketed/iyi
+cp "$REPO"/src/iyi/*.iyi bracketed/iyi/
+cat > unbracketed.iyi <<'IYI'
+@[Unsafe("frees raw 16-byte chunks with GC.free and allocates them with Pointer#malloc, reading the words it wrote into each to see whether two live chunks share one")]
+module unbracketed
+
+import std/gc::{GC}
+
+live = Pointer(Pointer(UInt64)).malloc(64_u64)
+i = 0
+while i < 64
+  chunk = Pointer(UInt64).malloc(2_u64)
+  chunk[0] = (i + 1).to_u64
+  chunk[1] = (i + 1).to_u64 &+ 7_u64
+  live[i] = chunk
+  i += 1
+end
+# One collection, so every chunk above is kept and carries the current parity:
+# a free of one of them takes the path with no lock.
+IyiMark.collect
+# The first free puts a chunk on this thread's cache list, and the second is
+# the one the program arms: its link reads that list, and a collection inside
+# the free (copy only) drops it.
+GC.free(live[0].as(Void*))
+{% if flag?(:unbracketed_force) %}
+  IyiHeap.arm_drop
+{% end %}
+GC.free(live[1].as(Void*))
+got = Pointer(Pointer(UInt64)).malloc(64_u64)
+k = 0
+while k < 64
+  fresh = Pointer(UInt64).malloc(2_u64)
+  m = 0
+  while m < k
+    if got[m].address == fresh.address
+      print "freed: a free outside the allocator's bracket put a dropped list back\n"
+      __iyi_exit(1)
+    end
+    m += 1
+  end
+  i = 2
+  while i < 64
+    if live[i].address == fresh.address
+      print "freed: a free outside the allocator's bracket put a dropped list back\n"
+      __iyi_exit(1)
+    end
+    i += 1
+  end
+  got[k] = fresh
+  got[k][0] = 1000_u64 + k.to_u64
+  k += 1
+end
+bad = 0
+k = 0
+while k < 64
+  bad += 1 if got[k][0] != 1000_u64 + k.to_u64
+  m = 0
+  while m < k
+    bad += 1 if got[m].address == got[k].address
+    m += 1
+  end
+  k += 1
+end
+i = 2
+while i < 64
+  bad += 1 if live[i][0] != (i + 1).to_u64 || live[i][1] != (i + 1).to_u64 &+ 7_u64
+  i += 1
+end
+if bad > 0
+  print "freed: a free outside the allocator's bracket put a dropped list back\n"
+  __iyi_exit(1)
+end
+puts "unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole"
+IYI
+awk 'function forced() {
+    print "      # Copy only (concurrent_mark bracket proof): the one-shot word the program arms before its free."
+    print "      @[UnsafeReach(\"copy-only: the one-shot word, set and read through its address\")]"
+    print "      @@drop_armed : UInt64 = 0_u64"
+    print ""
+    print "      def self.arm_drop : Nil"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@drop_armed).address).value.set(1_u64)"
+    print "      end"
+    print ""
+    print "      def self.take_drop : Bool"
+    print "        armed = Pointer(Atomic(UInt64)).new(pointerof(@@drop_armed).address).value.get != 0_u64"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@drop_armed).address).value.set(0_u64) if armed"
+    print "        armed"
+    print "      end"
+    print ""
+  }
+  /^      def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared = 1 }
+  /^        write64\(head \+ OFF_LINK, table\[index\]\)$/ { print "        stale = table[index]"; print "        write64(head + OFF_LINK, stale)"; linked = 1; next }
+  { print } END { if (!declared || !linked) exit 3 }' "$REPO/src/iyi/prelude.iyi" > bracketed/iyi/prelude.iyi || { echo "the list link or the free this proof changes is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/bracketed${PSEP}$REPO/src" "$IYI" build unbracketed.iyi -Dunbracketed_force -o bracketed-run > build-bracketed.log 2>&1; then
+  cat build-bracketed.log; exit 1
+fi
+timeout -k 5 120 ./bracketed-run > bracketed.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -q '^unbracketed: ' bracketed.txt; then
+  echo "the control, bracket kept and no collection, did not pass (exit $code):"; tail -3 bracketed.txt; exit 1
+fi
+echo "  the control, bracket kept, exits 0: $(grep -m1 '^unbracketed: ' bracketed.txt)"
 mkdir -p unbracketed/iyi
-cp "$REPO"/src/iyi/*.iyi unbracketed/iyi/
+cp bracketed/iyi/*.iyi unbracketed/iyi/
+awk '/^        stale = table\[index\]$/ { print; print "        IyiMark.collect if IyiHeap.take_drop"; hooked = 1; next }
+  { print } END { if (!hooked) exit 3 }' bracketed/iyi/prelude.iyi > unbracketed/iyi/prelude.iyi || { echo "the link this proof collects inside is not in the prelude any more"; exit 1; }
 awk '/^          write64\(table\.address &\+ CACHE_INSIDE, read64\(table\.address &\+ CACHE_INSIDE\) &\+ 1_u64\)$/ { entered = 1; next }
   prev ~ /^          end$/ && /^          leave\(table\)$/ { left = 1; prev = $0; next }
-  { prev = $0; print } END { if (!entered || !left) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > unbracketed/iyi/prelude.iyi || { echo "the bracket this proof removes from free is not in the prelude any more"; exit 1; }
-if ! IYI_PATH="$WORK/unbracketed${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-unbracketed > build-unbracketed.log 2>&1; then
+  { prev = $0; print } END { if (!entered || !left) exit 3 }' unbracketed/iyi/prelude.iyi > unbracketed/iyi/prelude.iyi.new || { echo "the bracket this proof removes from free is not in the prelude any more"; exit 1; }
+mv unbracketed/iyi/prelude.iyi.new unbracketed/iyi/prelude.iyi
+if ! IYI_PATH="$WORK/unbracketed${PSEP}$REPO/src" "$IYI" build unbracketed.iyi -Dunbracketed_force -o unbracketed-run > build-unbracketed.log 2>&1; then
   cat build-unbracketed.log; exit 1
 fi
-caught=""
-for try in 1 2 3 4 5 6 7 8 9 10; do
-  timeout -k 5 120 ./freed-unbracketed > unbracketed.txt 2>&1
-  if [ "$?" -eq 1 ]; then caught="$try"; break; fi
-done
-[ -n "$caught" ] || { echo "ten runs of the free outside its bracket kept every chunk:"; tail -3 unbracketed.txt; exit 1; }
-echo "  exits 1 within ten runs: a kept chunk lost, or a memory fault"
+timeout -k 5 120 ./unbracketed-run > unbracketed.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -Fxq "freed: a free outside the allocator's bracket put a dropped list back" unbracketed.txt; then
+  echo "the dropped list was not put back (exit $code):"; tail -3 unbracketed.txt; exit 1
 fi
+printf '  exits 1 at "%s"\n' "freed: a free outside the allocator's bracket put a dropped list back"
 
 # The idle pool's step fills the pool before it asks anything of it, and
 # the pool grows one worker at a time, each started by the last to find a

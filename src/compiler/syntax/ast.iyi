@@ -3464,11 +3464,10 @@ pub class ProcPointer < ASTNode
 
   def to_s(sb : StringBuilder) : Nil
     sb << "->"
+    sb << "::" if @global
     if o = @obj
       o.to_s(sb)
       sb << "."
-    elsif @global
-      sb << "::"
     end
     sb << @name
     if @args.size > 0

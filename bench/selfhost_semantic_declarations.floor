@@ -98,6 +98,7 @@ src/compiler/lower/typer.iyi 0
 src/compiler/lower/unions.iyi 4
 src/compiler/macros/answers.iyi 9
 src/compiler/macros/ast.iyi 33
+src/compiler/macros/confinement.iyi 27
 src/compiler/macros/engine.iyi 0
 src/compiler/macros/interpreter.iyi 11
 src/compiler/macros/macro_parser.iyi 23

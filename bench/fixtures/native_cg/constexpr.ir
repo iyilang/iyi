@@ -1,0 +1,18 @@
+; iyi-ir 1
+module "constexpr"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [4 x i8] c"%d\0A\00"
+@arr = internal global [4 x i64] [ i64 10, i64 20, i64 30, i64 40 ]
+; A pointer into the middle of the array: the symbol arr with addend 16.
+@mid = internal global ptr getelementptr (i64, ptr @arr, i64 2)
+
+define i32 @main() {
+entry:
+  %p = load ptr, ptr @mid, align 8
+  %v = load i64, ptr %p, align 8
+  %t = trunc i64 %v to i32
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i32 %t)
+  ret i32 0
+}

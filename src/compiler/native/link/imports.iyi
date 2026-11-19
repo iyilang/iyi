@@ -1,0 +1,62 @@
+module compiler/native/link/imports
+
+# The dynamic libraries an executable loads, and the one each import binds to.
+#
+# libSystem is always loaded, as ordinal 1. A framework is loaded only when the
+# link names it and some import is attributed to it, so an executable never
+# loads a framework its program does not call. An import belongs to a framework
+# by the C prefix that framework's API uses, because this platform keeps no
+# export list on disk to read from. The native floor allows CoreFoundation and
+# Security (SPEC 2.3); any other framework is refused by name.
+
+pub class MachOLibs
+  LIBSYSTEM_PATH    = "/usr/lib/libSystem.B.dylib"
+  LIBSYSTEM_ORDINAL = 1_i64
+end
+
+# True for a framework the native floor allows.
+pub def framework_allowed(name : String) : Bool
+  name == "CoreFoundation" || name == "Security"
+end
+
+# The first name in `names` the native floor does not allow, or nil.
+def unsupported_framework(names : Array(String)) : String?
+  i = 0
+  while i < names.size
+    return names[i] unless framework_allowed(names[i])
+    i = i + 1
+  end
+  nil
+end
+
+# The install name of an allowed framework.
+pub def framework_path(name : String) : String
+  "/System/Library/Frameworks/#{name}.framework/#{name}"
+end
+
+# The C prefixes an allowed framework's API uses.
+def framework_prefixes(name : String) : Array(String)
+  if name == "CoreFoundation"
+    return ["CF", "kCF"]
+  end
+  if name == "Security"
+    return ["Sec", "kSec"]
+  end
+  [] of String
+end
+
+# The framework among `frameworks` that `symbol` (undecorated) belongs to, or ""
+# when none does, which means libSystem.
+pub def owner_of(symbol : String, frameworks : Array(String)) : String
+  i = 0
+  while i < frameworks.size
+    prefixes = framework_prefixes(frameworks[i])
+    j = 0
+    while j < prefixes.size
+      return frameworks[i] if symbol.starts_with?(prefixes[j])
+      j = j + 1
+    end
+    i = i + 1
+  end
+  ""
+end

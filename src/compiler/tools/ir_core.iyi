@@ -1,0 +1,387 @@
+# The IR core driver used by bench/native_ir_exercise.sh: prints, round-trips, verifies and lays out the IR.
+#
+#   ir_core print FILE       parse FILE and print it again
+#   ir_core roundtrip FILE   parse FILE and check that printing it gives back the same bytes
+#   ir_core verify FILE      parse FILE and report every rule it breaks
+#   ir_core drop-unwind FILE parse FILE, drop every unwind edge (Module#drop_unwind_edges), verify and print it
+#   ir_core layout TRIPLE    print the target's DataLayout string
+#   ir_core structs FILE     parse FILE and print each named struct's size, alignment and field offsets
+#   ir_core emit NAME        build the NAME fixture module with the Builder and print it
+
+@[Unsafe("declares the C library exit to set the process status; the tool handles no raw memory")]
+module compiler/tools/ir_core
+
+import compiler/ir/printer::{print}
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/verifier::{verify, IrError}
+import compiler/ir/module::{Module}
+import compiler/ir/builder::{Builder}
+import compiler/ir/layout::{DataLayout, LayoutError}
+import compiler/ir/types::{IrType, TypeTable}
+import compiler/ir/values::{Value, Param}
+import compiler/ir/inst::{Op, Inst, Block, CallConv, Ordering, IntPredicate, RealPredicate, AsmDialect, ThreadPointerKind, Attribute, CallAux}
+import compiler/ir/function::{Function, Global, Linkage, TlsModel}
+import compiler/ir/intrinsics::{IntrinsicId, all_intrinsic_ids, intrinsic_candidates, intrinsic_signature, intrinsic_name}
+import compiler/platform/target::{Target}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+module IrCore
+  def self.run : Nil
+    args = Program.args
+    if args.empty?
+      STDERR.puts "usage: ir_core print|roundtrip|verify|drop-unwind|layout|structs FILE | emit NAME | intrinsics"
+      LibC.exit(2)
+    end
+    command = args[0]
+    if command == "intrinsics"
+      intrinsic_names
+      return
+    end
+    if args.size < 2
+      STDERR.puts "usage: ir_core print|roundtrip|verify|drop-unwind|layout|structs FILE | emit NAME | intrinsics"
+      LibC.exit(2)
+    end
+    argument = args[1]
+    if command == "emit"
+      emit(argument)
+    elsif command == "layout"
+      layout(argument)
+    elsif command == "print" || command == "roundtrip" || command == "verify" || command == "drop-unwind" || command == "structs"
+      unless File.exists?(argument)
+        STDERR.puts "ir_core: no such file: #{argument}"
+        LibC.exit(2)
+      end
+      text = File.read(argument)
+      parsed = parse(text)
+      if parsed.is_a?(IrParseError)
+        STDERR.puts "ir_core: #{argument}: #{parsed.to_s}"
+        LibC.exit(1)
+      end
+      mod = parsed.as(Module)
+      if command == "print"
+        STDOUT.print(print(mod))
+      elsif command == "roundtrip"
+        printed = print(mod)
+        if printed == text
+          STDOUT.puts "identical"
+        else
+          STDOUT.puts "differs: #{argument}"
+          LibC.exit(1)
+        end
+      elsif command == "verify"
+        errors = verify(mod)
+        errors.each { |e| STDOUT.puts e.to_s }
+        LibC.exit(1) unless errors.empty?
+        STDOUT.puts "verified"
+      elsif command == "drop-unwind"
+        if reason = mod.drop_unwind_edges
+          STDOUT.puts "refused: #{reason}"
+          LibC.exit(1)
+        end
+        errors = verify(mod)
+        errors.each { |e| STDOUT.puts e.to_s }
+        LibC.exit(1) unless errors.empty?
+        STDOUT.print(print(mod))
+      else
+        structs(mod)
+      end
+    else
+      STDERR.puts "ir_core: unknown command #{command}"
+      LibC.exit(2)
+    end
+  end
+
+  def self.layout(triple : String) : Nil
+    found = Target.parse?(triple)
+    unless found
+      STDERR.puts "ir_core: unknown target #{triple}"
+      LibC.exit(1)
+    end
+    built = DataLayout.for(found)
+    if built.is_a?(LayoutError)
+      STDERR.puts "ir_core: #{built.to_s}"
+      LibC.exit(1)
+    end
+    STDOUT.puts "target datalayout = " + "\"" + built.as(DataLayout).llvm_string + "\""
+  end
+
+  # Every intrinsic the IR accepts, one LLVM name per line, at each width its family accepts.
+  def self.intrinsic_names : Nil
+    t = TypeTable.new
+    all_intrinsic_ids.each do |id|
+      intrinsic_candidates(id, t).each do |overload|
+        STDOUT.puts intrinsic_name(id, overload)
+      end
+    end
+  end
+
+  # A call of every accepted intrinsic at every width its family accepts, with operands of the
+  # signature's types. Pointers are the function's parameter; integers and floats are constants.
+  def self.intrinsics_module : Module
+    mod = new_module("intrinsics", "x86_64-unknown-linux-gnu")
+    b = Builder.new(mod)
+    t = mod.types
+    fn = mod.add_function("every", t.func([t.ptr(0)], t.void), CallConv::Iyi)
+    fn.add_param(Param.new(t.ptr(0), "p", 0))
+    entry = fn.append_basic_block("entry")
+    b.position_at_end(entry)
+    all_intrinsic_ids.each do |id|
+      intrinsic_candidates(id, t).each do |overload|
+        signature = intrinsic_signature(id, overload, t)
+        args = [] of Value
+        signature[1].each { |pt| args << intrinsic_argument(b, pt, fn.param(0)) }
+        b.intrinsic(id, overload, args, "")
+      end
+    end
+    b.ret_void
+    mod
+  end
+
+  def self.intrinsic_argument(b : Builder, t : IrType, pointer : Value) : Value
+    if t.pointer?
+      pointer
+    elsif t.float?
+      b.const_float(t, 1.5)
+    elsif t.int?
+      b.const_int(t, t.bits == 1 ? 1_i64 : 2_i64)
+    else
+      raise "no argument for #{t}"
+    end
+  end
+
+  # One line per named struct: `struct NAME size=N align=A` then `field I offset=O size=S` for each field.
+  def self.structs(mod : Module) : Nil
+    layout = mod.layout
+    mod.types.named.each do |t|
+      next if t.opaque?
+      STDOUT.puts "struct #{t.name} size=#{layout.size_of(t)} align=#{layout.abi_align(t)}"
+      t.struct_element_types.each_with_index do |f, i|
+        STDOUT.puts "field #{i} offset=#{layout.offset_of(t, i)} size=#{layout.store_size(f)}"
+      end
+    end
+  end
+
+  def self.new_module(name : String, triple : String) : Module
+    found = Target.parse?(triple)
+    unless found
+      STDERR.puts "ir_core: unknown target #{triple}"
+      LibC.exit(1)
+    end
+    built = Module.for_target(name, found)
+    if built.is_a?(LayoutError)
+      STDERR.puts "ir_core: #{built.to_s}"
+      LibC.exit(1)
+    end
+    built.as(Module)
+  end
+
+  def self.emit(name : String) : Nil
+    if name == "arith"
+      mod = arith_module
+    elsif name == "memory"
+      mod = memory_module
+    elsif name == "control"
+      mod = control_module
+    elsif name == "calls"
+      mod = calls_module
+    elsif name == "runtime"
+      mod = runtime_module
+    elsif name == "intrinsics"
+      mod = intrinsics_module
+    else
+      STDERR.puts "ir_core: no fixture named #{name}"
+      LibC.exit(2)
+    end
+    STDOUT.print(print(mod))
+  end
+
+  # Integer and floating-point arithmetic, comparisons, conversions, select, aggregates and intrinsics.
+  def self.arith_module : Module
+    mod = new_module("arith", "x86_64-unknown-linux-gnu")
+    b = Builder.new(mod)
+    t = mod.types
+    i32 = t.int32
+    f64 = t.double
+    fn = mod.add_function("sum", t.func([i32, i32], i32), CallConv::Iyi)
+    a = Param.new(i32, "a", 0)
+    c = Param.new(i32, "c", 1)
+    fn.add_param(a)
+    fn.add_param(c)
+    entry = fn.append_basic_block("entry")
+    b.position_at_end(entry)
+    s = b.add(a, c, "s")
+    m = b.binop(Op::Mul, s, b.const_int(i32, 3_i64), 2_i64, "m")
+    d = b.sdiv(m, b.const_int(i32, 2_i64), "d")
+    r = b.srem(d, b.const_int(i32, 7_i64), "r")
+    x = b.build_xor(r, b.const_int(i32, -1_i64), "x")
+    sh = b.shl(x, b.const_int(i32, 1_i64), "sh")
+    lt = b.icmp(IntPredicate::SLT, sh, b.const_int(i32, 100_i64), "lt")
+    pick = b.select(lt, sh, r, "pick")
+    wide = b.sext(pick, t.int64, "wide")
+    narrow = b.trunc(wide, i32, "narrow")
+    b.ret(narrow)
+
+    g = mod.add_function("scale", t.func([f64], f64), CallConv::Iyi)
+    x2 = Param.new(f64, "x", 0)
+    g.add_param(x2)
+    gentry = g.append_basic_block("entry")
+    b.position_at_end(gentry)
+    half = b.fmul(x2, b.const_float(f64, 0.5), "half")
+    neg = b.fneg(half, "neg")
+    sum = b.fadd(neg, b.const_float(f64, 2.25), "sum")
+    flt = b.fcmp(RealPredicate::OLT, sum, b.const_float(f64, 0.0), "flt")
+    chosen = b.select(flt, b.const_float(f64, 0.0), sum, "chosen")
+    as_int = b.fp_to_si(chosen, i32, "asint")
+    back = b.si_to_fp(as_int, f64, "back")
+    root = b.intrinsic(IntrinsicId::Sqrt, [f64], [back] of Value, "root")
+    b.ret(root)
+
+    h = mod.add_function("pair", t.func([i32], t.struct_of([i32, t.int8])), CallConv::Iyi)
+    h.add_param(Param.new(i32, "v", 0))
+    hentry = h.append_basic_block("entry")
+    b.position_at_end(hentry)
+    tup = b.insert_value(b.const_zero(t.struct_of([i32, t.int8])), h.param(0), 0, "tup")
+    done = b.insert_value(tup, b.const_int(t.int8, 9_i64), 1, "done")
+    b.ret(done)
+    mod
+  end
+
+  # Globals with relocations and byte strings, allocas, loads and stores, GEPs, atomics and fences.
+  def self.memory_module : Module
+    mod = new_module("memory", "aarch64-apple-darwin")
+    b = Builder.new(mod)
+    t = mod.types
+    i64 = t.int64
+    counter = mod.add_global("counter", i64)
+    counter.alignment = 8
+    counter.initializer = b.const_int(i64, 0_i64)
+    message = mod.add_global("message", t.array_of(t.int8, 6))
+    message.linkage = Linkage::Private
+    message.global_constant = true
+    message.initializer = b.const_string("hello", true)
+    table = mod.add_global("table", t.array_of(t.ptr(0), 2))
+    table.linkage = Linkage::Internal
+    table.initializer = b.const_array(t.ptr(0), [b.const_global_addr(counter), b.const_global_addr(message)] of Value)
+    slots = mod.add_global("slots", t.struct_of([t.int8, i64, t.int32]))
+    slots.initializer = b.const_struct([b.const_int(t.int8, 1_i64), b.const_int(i64, 2_i64), b.const_int(t.int32, 3_i64)] of Value)
+    slots.unnamed_addr = true
+    fn = mod.add_function("touch", t.func([t.ptr(0)], i64), CallConv::Iyi)
+    fn.add_param(Param.new(t.ptr(0), "p", 0))
+    entry = fn.append_basic_block("entry")
+    b.position_at_end(entry)
+    slot = b.alloca(i64, "slot")
+    slot.alignment = 8
+    b.store(b.const_int(i64, 41_i64), slot)
+    loaded = b.load(i64, slot, "loaded")
+    loaded.alignment = 8
+    bumped = b.add(loaded, b.const_int(i64, 1_i64), "bumped")
+    element = b.gep(i64, fn.param(0), [b.const_int(i64, 2_i64)] of Value, "element")
+    b.store(bumped, element)
+    old = b.atomicrmw("add", counter, b.const_int(i64, 1_i64), Ordering::SeqCst, false, "old")
+    pair = b.cmpxchg(counter, old, bumped, Ordering::AcqRel, Ordering::Acquire, "pair")
+    won = b.extract_value(pair, 1, "won")
+    seen = b.atomic_load(i64, counter, Ordering::Acquire, false, "seen")
+    seen.alignment = 8
+    b.atomic_store(seen, counter, Ordering::Release, true).alignment = 8
+    b.fence(Ordering::SeqCst, false)
+    b.fence(Ordering::Acquire, true)
+    b.ret(b.add(bumped, b.const_int(i64, 0_i64), "result"))
+    mod
+  end
+
+  # Blocks, conditional and switch branches, a phi, a loop with a back-edge, and unreachable.
+  def self.control_module : Module
+    mod = new_module("control", "wasm32-unknown-wasi")
+    b = Builder.new(mod)
+    t = mod.types
+    i32 = t.int32
+    fn = mod.add_function("classify", t.func([i32], i32), CallConv::Iyi)
+    fn.add_param(Param.new(i32, "n", 0))
+    entry = fn.append_basic_block("entry")
+    loop_block = fn.append_basic_block("loop")
+    body = fn.append_basic_block("body")
+    done = fn.append_basic_block("done")
+    other = fn.append_basic_block("other")
+    b.position_at_end(entry)
+    b.br(loop_block)
+    b.position_at_end(loop_block)
+    acc = b.phi(i32, "acc")
+    count = b.phi(i32, "count")
+    more = b.icmp(IntPredicate::SGT, count, fn.param(0), "more")
+    b.cond_br(more, done, body)
+    b.position_at_end(body)
+    next_acc = b.add(acc, count, "next_acc")
+    next_count = b.add(count, b.const_int(i32, 1_i64), "next_count")
+    b.br(loop_block)
+    acc.add_incoming(b.const_int(i32, 0_i64), entry)
+    acc.add_incoming(next_acc, body)
+    count.add_incoming(b.const_int(i32, 0_i64), entry)
+    count.add_incoming(next_count, body)
+    b.position_at_end(done)
+    b.switch(acc, other, [{b.const_int(i32, 0_i64), other}, {b.const_int(i32, 1_i64), other}] of {Value, Block})
+    b.position_at_end(other)
+    b.ret(acc)
+    mod
+  end
+
+  # Calls with attributes, an invoke with a landing pad, an inline asm callee, varargs, and overflow arithmetic.
+  def self.calls_module : Module
+    mod = new_module("calls", "x86_64-unknown-linux-gnu")
+    b = Builder.new(mod)
+    t = mod.types
+    i32 = t.int32
+    puts_type = t.func([t.ptr(0)], i32)
+    puts_fn = mod.add_function("puts", puts_type, CallConv::C)
+    puts_fn.linkage = Linkage::External
+    personality = mod.add_function("__crystal_personality", t.func([i32, i32], i32), CallConv::C)
+    personality.linkage = Linkage::External
+    raiser = mod.add_function("raise_error", t.func([] of IrType, t.void), CallConv::Iyi)
+    raiser.linkage = Linkage::External
+    fn = mod.add_function("run", t.func([t.ptr(0)], i32), CallConv::Iyi)
+    fn.add_param(Param.new(t.ptr(0), "msg", 0))
+    fn.personality = personality
+    fn.attrs = [Attribute.new("noinline"), Attribute.new("frame-pointer", 0_u64, "all")]
+    fn.param_attrs = [[Attribute.new("noundef")]]
+    entry = fn.append_basic_block("entry")
+    landing = fn.append_basic_block("landing")
+    after = fn.append_basic_block("after")
+    b.position_at_end(entry)
+    printed = b.call_aux(CallAux.new(puts_type, CallConv::C, false, [] of Attribute, [[Attribute.new("noundef")]] of Array(Attribute), [] of Attribute), puts_fn, [fn.param(0)] of Value, "printed")
+    b.invoke(t.func([] of IrType, t.void), raiser, [] of Value, after, landing, "")
+    b.position_at_end(landing)
+    pad = b.landing_pad(t.struct_of([t.ptr(0), i32]), personality, [] of Value, "pad", true)
+    b.resume(pad)
+    b.position_at_end(after)
+    asm_type = t.func([] of IrType, t.void)
+    asm_callee = b.inline_asm(asm_type, "nop", "", true, false, AsmDialect::Att)
+    b.call(asm_type, asm_callee, [] of Value, "")
+    sum = b.intrinsic(IntrinsicId::SAddOverflow, [i32], [b.const_int(i32, 1_i64), b.const_int(i32, 2_i64)] of Value, "sum")
+    value = b.extract_value(sum, 0, "value")
+    b.ret(value)
+    mod
+  end
+
+  # Thread-local storage through the thread pointer, and the thread-local address across no call.
+  def self.runtime_module : Module
+    mod = new_module("runtime", "x86_64-unknown-linux-gnu")
+    b = Builder.new(mod)
+    t = mod.types
+    i32 = t.int32
+    local = mod.add_global("errno_slot", i32)
+    local.tls = TlsModel::LocalExec
+    local.initializer = b.const_int(i32, 0_i64)
+    fn = mod.add_function("current", t.func([] of IrType, i32), CallConv::Iyi)
+    entry = fn.append_basic_block("entry")
+    b.position_at_end(entry)
+    tp = b.thread_pointer(ThreadPointerKind::Fs, "tp")
+    addr = b.thread_local_addr(local, "addr")
+    value = b.load(i32, addr, "value")
+    b.ret(value)
+    mod
+  end
+end
+
+IrCore.run

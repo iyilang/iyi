@@ -1,0 +1,25 @@
+module tls_loop
+
+class Acc
+  @[ThreadLocal]
+  @@acc = 0_i64
+
+  def self.acc
+    @@acc
+  end
+
+  def self.bump(by : Int64) : Int64
+    @@acc = @@acc + by
+    @@acc
+  end
+end
+
+total = 0_i64
+i = 0_i64
+while i < 5_i64
+  seen = Acc.acc
+  Acc.bump(i)
+  total = total + seen
+  i = i + 1_i64
+end
+puts "#{total} #{Acc.acc}"

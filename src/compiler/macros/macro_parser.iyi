@@ -523,8 +523,9 @@ pub class MacroParser
     {a_macro, scanner.pos}
   end
 
-  def self.parse_fixture(source : String) : {Macro, Call}
+  def self.parse_fixture(source : String, file : String = "") : {Macro, Call}
     a_macro, end_pos = parse_macro_definition(source)
+    a_macro.location = Location.new(file, 1, 1) unless file.empty?
 
     call_source = source[end_pos, source.bytesize - end_pos].strip
     # Skip any comments

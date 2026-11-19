@@ -2255,6 +2255,9 @@ pub class ExceptionHandler < ASTNode
   property ensure : ASTNode?
   property suffix : Bool
   property implicit : Bool = false
+  # Hosted syntax/ast.cr 2935-2938: where this handler's `else` and `ensure` are written.
+  property else_location : Location? = nil
+  property ensure_location : Location? = nil
   # The handler a `defer` is normalized to (hosted syntax/ast.cr 2967). iyi refuses a written `ensure`;
   # this one is the defer registry's pop and is not refused.
   property iyi_defer : Bool = false

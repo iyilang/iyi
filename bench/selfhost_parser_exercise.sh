@@ -789,7 +789,8 @@ for fixture in \
   "$REPO"/bench/fixtures/syntax_block_unpacks.iyi \
   "$REPO"/bench/fixtures/syntax_named_forward_block.iyi \
   "$REPO"/bench/fixtures/syntax_call_spans.iyi \
-  "$REPO"/bench/fixtures/syntax_begin_shorthand_and_comma_lines.iyi; do
+  "$REPO"/bench/fixtures/syntax_begin_shorthand_and_comma_lines.iyi \
+  "$REPO"/bench/fixtures/syntax_implicit_rescue.iyi; do
   fixture_name="${fixture#"$REPO/"}"
   fixture_native="$(native_path "$fixture")"
   "$WORK/exercise-plain$EXE" "$fixture_native" > "$WORK/iyi.ast"
@@ -1233,33 +1234,41 @@ declaration_accepted_sources=(
   $'alias A = B\n'
   $'def f\nend\n'
 )
-# Runs one parser binary on every row: each refusal source must fail with a text containing the wanted text, and each
-# accepted source must parse. Returns 1 at the first row that is wrong.
-declaration_rows_run() {
-  local exe="$1" i bad want
-  for i in "${!declaration_refusal_sources[@]}"; do
-    bad="${declaration_refusal_sources[$i]}"
-    want="${declaration_refusal_texts[$i]}"
-    printf '%s\n' "$bad" > "$WORK/declaration.iyi"
-    if "$exe" "$WORK_NATIVE/declaration.iyi" > "$WORK/declaration.log" 2>&1; then
-      echo "  accepted a declaration that must be refused: $bad"
+# Runs one parser binary on rows named by array: each refusal source must fail with a text containing its wanted text,
+# and each accepted source must parse. Returns 1 at the first row that is wrong.
+refusal_rows_run() {
+  local exe="$1"
+  local -n refusals="$2"
+  local -n texts="$3"
+  local -n accepted="$4"
+  local i bad want
+  for i in "${!refusals[@]}"; do
+    bad="${refusals[$i]}"
+    want="${texts[$i]}"
+    printf '%s\n' "$bad" > "$WORK/rows.iyi"
+    if "$exe" "$WORK_NATIVE/rows.iyi" > "$WORK/rows.log" 2>&1; then
+      echo "  accepted a source that must be refused: $bad"
       return 1
     fi
-    if ! grep -qF "$want" "$WORK/declaration.log"; then
+    if ! grep -qF "$want" "$WORK/rows.log"; then
       echo "  refusal text differs from: $want (source: $bad)"
-      cat "$WORK/declaration.log"
+      cat "$WORK/rows.log"
       return 1
     fi
   done
-  for bad in "${declaration_accepted_sources[@]}"; do
-    printf '%s\n' "$bad" > "$WORK/declaration.iyi"
-    if ! "$exe" "$WORK_NATIVE/declaration.iyi" > "$WORK/declaration.log" 2>&1; then
-      echo "  refused a declaration that must be accepted: $bad"
-      cat "$WORK/declaration.log"
+  for bad in "${accepted[@]}"; do
+    printf '%s\n' "$bad" > "$WORK/rows.iyi"
+    if ! "$exe" "$WORK_NATIVE/rows.iyi" > "$WORK/rows.log" 2>&1; then
+      echo "  refused a source that must be accepted: $bad"
+      cat "$WORK/rows.log"
       return 1
     fi
   done
   return 0
+}
+# The declaration rows above, checked through the same runner.
+declaration_rows_run() {
+  refusal_rows_run "$1" declaration_refusal_sources declaration_refusal_texts declaration_accepted_sources
 }
 if declaration_rows_run "$WORK/exercise-plain$EXE"; then
   echo "  port: ${#declaration_refusal_sources[@]} refusals carry the hosted text, ${#declaration_accepted_sources[@]} valid sources parse"
@@ -1271,6 +1280,55 @@ if declaration_rows_run "$WORK/dump_hosted$EXE"; then
   echo "  hosted: the same rows hold"
 else
   echo "  hosted declaration rows do not hold: the row wants are wrong"
+  status=1
+fi
+
+echo "== Implicit rescue, else and ensure: both parsers refuse with the hosted text, and the fixture matches the hosted tree"
+# Each refusal row is a source and the text both refusals carry (parser.cr 2044-2109, 2114-2167, 3449-3468). The row for a
+# valid handler is accepted by both.
+handler_refusal_sources=(
+  $'def f\n  1\nelse\n  2\nend\n'
+  $'def f\n  1\nrescue\n  2\nrescue ArgumentError\n  3\nend\n'
+  $'def f\n  1\nrescue\n  2\nrescue\n  3\nend\n'
+  $'def f\n  1\nensure\n  2\nelse\n  3\nend\n'
+  $'def f\n  1\nensure\n  2\nensure\n  3\nend\n'
+  $'def f\n  1\nrescue\n  2\nelse\n  3\nrescue\n  4\nend\n'
+  $'def f\n  1\nrescue 1\n  2\nend\n'
+  $'def f\n  1\nrescue e : 1\n  2\nend\n'
+  $'def f\n  1\nrescue ArgumentError 2\nend\n'
+  $'f = ->(x : Int32) do |y|\n  x\nend\n'
+  $'f = ->(x : Int32) { |y| x }\n'
+)
+handler_refusal_texts=(
+  "'else' is useless without 'rescue'"
+  "specific rescue must come before catch-all rescue"
+  "catch-all rescue can only be specified once"
+  "expecting identifier 'end', not 'else'"
+  "expecting identifier 'end', not 'ensure'"
+  "expecting identifier 'end', not 'rescue'"
+  "expecting any of these tokens: ;, NEWLINE (not '1')"
+  "expecting any of these tokens: CONST, :: (not '1')"
+  "expecting any of these tokens: ;, NEWLINE (not '2')"
+  "unexpected token: \"|\", proc literals specify their parameters like this: ->(y : Type) { ... }"
+  "unexpected token: \"|\", proc literals specify their parameters like this: ->(y : Type) { ... }"
+)
+handler_accepted_sources=(
+  $'def f\n  1\nrescue\n  2\nensure\n  3\nend\n'
+)
+if refusal_rows_run "$WORK/exercise-plain$EXE" handler_refusal_sources handler_refusal_texts handler_accepted_sources; then
+  echo "  port: ${#handler_refusal_sources[@]} refusals carry the hosted text, and the valid handler parses"
+else
+  echo "  port handler rows differ from the hosted parser"
+  status=1
+fi
+if refusal_rows_run "$WORK/dump_hosted$EXE" handler_refusal_sources handler_refusal_texts handler_accepted_sources; then
+  echo "  hosted: the same rows hold"
+else
+  echo "  hosted handler rows do not hold: the row wants are wrong"
+  status=1
+fi
+if ! "$WORK/dump_hosted$EXE" "$REPO_NATIVE/bench/fixtures/syntax_implicit_rescue.iyi" > "$WORK/implicit-hosted.ast"; then
+  echo "  hosted refused the implicit rescue fixture"
   status=1
 fi
 
@@ -1659,6 +1717,60 @@ declaration_rows_hold() {
 prove_mutation "mutation 53: a declaration inside a fun is accepted, as before the fun case" "$PARSER" \
   '    if @def_nest == 0 && @fun_nest == 0' \
   '    if @def_nest == 0' -- declaration_rows_hold || status=1
+
+# Implicit rescue, else and ensure: a mutant is caught when it refuses the fixture or when its tree differs from the hosted
+# tree of the fixture, which the plain block above writes.
+implicit_rescue_hold() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  if ! "$WORK/mut-exercise$EXE" "$REPO_NATIVE/bench/fixtures/syntax_implicit_rescue.iyi" > "$WORK/implicit-mut.ast" 2> "$WORK/implicit-mut.err"; then
+    return 1
+  fi
+  cmp -s "$WORK/implicit-mut.ast" "$WORK/implicit-hosted.ast"
+}
+# Mutation 54: a def body takes no implicit handler, so its rescue, else and ensure are refused.
+prove_mutation "mutation 54: a def body takes no implicit rescue handler" "$PARSER" \
+  '        body, end_location, _ = parse_exception_handler(body, true)' \
+  '        check_keyword(Keyword::END)
+        end_location = token_end_location
+        next_token_skip_space' -- implicit_rescue_hold || status=1
+# Mutation 55: a fun body takes no implicit handler.
+prove_mutation "mutation 55: a fun body takes no implicit rescue handler" "$PARSER" \
+  '          body, fun_end, _ = parse_exception_handler(parsed, true)' \
+  '          check_keyword(Keyword::END)
+          fun_end = token_end_location
+          next_token_skip_space
+          body = parsed' -- implicit_rescue_hold || status=1
+# Mutation 56: a do-block body takes no implicit handler.
+prove_mutation "mutation 56: a do-block body takes no implicit rescue handler" "$PARSER" \
+  '        handled, end_location, _ = parse_exception_handler(parsed, true)' \
+  '        check_keyword(Keyword::END)
+        end_location = token_end_location
+        next_token_skip_space
+        handled = parsed' -- implicit_rescue_hold || status=1
+# Mutation 57: a do proc literal body takes no implicit handler.
+prove_mutation "mutation 57: a do proc literal body takes no implicit rescue handler" "$PARSER" \
+  '        body, end_location, _ = parse_exception_handler(parsed, true)' \
+  '        check_keyword(Keyword::END)
+        end_location = token_end_location
+        next_token_skip_space
+        body = parsed' -- implicit_rescue_hold || status=1
+# Mutation 58: a handler's else body is dropped, so the else keyword is refused.
+prove_mutation "mutation 58: a handler's else body is dropped" "$PARSER" \
+  '      else_location = @token.location
+      start = start || @token.location
+      next_token_skip_statement_end
+      a_else = parse_expressions' \
+  '      else_location = @token.location
+      start = start || @token.location
+      next_token_skip_statement_end
+      a_else = nil' -- implicit_rescue_hold || status=1
+# Mutation 59: a handler's ensure body is dropped, so the ensure keyword is refused.
+prove_mutation "mutation 59: a handler's ensure body is dropped" "$PARSER" \
+  '      a_ensure = parse_expressions' \
+  '      a_ensure = nil' -- implicit_rescue_hold || status=1
 
 echo
 echo "== Rebuilding and running restored parser exercise"

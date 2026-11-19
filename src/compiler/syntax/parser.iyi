@@ -1795,20 +1795,20 @@ pub class Parser < Lexer
       skip_statement_end
     end
 
+    end_location : Location? = nil
     body = with_lexical_var_scope do
       all_names.each { |name| push_var_name(name) }
       parsed = parse_expressions
       skip_statement_end
-      parsed
-    end
-
-    end_location = token_end_location
-    if curly
-      check(TokenKind::OP_RCURLY)
-      next_token_skip_space
-    else
-      check_keyword(Keyword::END)
-      next_token_skip_space
+      if curly
+        end_location = token_end_location
+        check(TokenKind::OP_RCURLY)
+        next_token_skip_space
+        parsed
+      else
+        handled, end_location, _ = parse_exception_handler(parsed, true)
+        handled
+      end
     end
 
     Block.new(block_params, body, splat_index, unpacks).at(location).at_end(end_location)
@@ -2096,89 +2096,137 @@ pub class Parser < Lexer
     end
   end
 
+  # Hosted parser.cr 2028-2042: begin takes the explicit form of the handler, then wraps a body that has no handler.
   def parse_begin : ASTNode
-    location = @token.location
+    begin_location = @token.location
     set_slash_is_regex(true)
     next_token_skip_statement_end
 
-    body = parse_expressions
-    skip_statement_end
+    exps = parse_expressions
+    node, end_location, found_handler = parse_exception_handler(exps, false, begin_location)
+    if !found_handler && (!node.is_a?(Expressions) || node.keyword != Expressions::Keyword::None)
+      node = Expressions.new([node] of ASTNode)
+    end
+    node.at(begin_location).at_end(end_location)
+    if node.is_a?(Expressions)
+      node.keyword = Expressions::Keyword::Begin
+    end
+    node
+  end
 
+  # Hosted parser.cr 2044-2109: the rescue, else and ensure clauses that end a body, and the `end` that closes them. A def,
+  # a fun, a do-block and a do proc literal take the implicit form (parser.cr 5400, 7959, 6488, 3430).
+  def parse_exception_handler(exp : ASTNode, implicit : Bool = false, begin_location : Location? = nil) : {ASTNode, Location, Bool}
     rescues : Array(Rescue)? = nil
     a_else : ASTNode? = nil
     a_ensure : ASTNode? = nil
+    else_location : Location? = nil
+    ensure_location : Location? = nil
+    start : Location? = begin_location || exp.location
 
     if @token.keyword == Keyword::RESCUE
       res_list = [] of Rescue
-      while @token.keyword == Keyword::RESCUE
-        res_list << parse_rescue
+      found_catch_all = false
+      while true
+        start = start || @token.location
+        location = @token.location
+        a_rescue = parse_rescue
+        if a_rescue.types
+          syntax_error("specific rescue must come before catch-all rescue", location) if found_catch_all
+        else
+          syntax_error("catch-all rescue can only be specified once", location) if found_catch_all
+          found_catch_all = true
+        end
+        res_list << a_rescue
+        break unless @token.keyword == Keyword::RESCUE
       end
       rescues = res_list
     end
 
     if @token.keyword == Keyword::ELSE
+      syntax_error("'else' is useless without 'rescue'", @token.location) if rescues.nil?
+      else_location = @token.location
+      start = start || @token.location
       next_token_skip_statement_end
       a_else = parse_expressions
       skip_statement_end
     end
 
     if @token.keyword == Keyword::ENSURE
+      ensure_location = @token.location
+      start = start || @token.location
       next_token_skip_statement_end
       a_ensure = parse_expressions
       skip_statement_end
     end
 
-    check_keyword(Keyword::END)
+    end_location = token_end_location
+    unless @token.keyword == Keyword::END
+      syntax_error("expecting identifier 'end', not '#{token_text}'", @token.location)
+    end
+    set_slash_is_regex(false)
     next_token_skip_space
 
-    if rescues || a_ensure || a_else
-      ExceptionHandler.new(body, rescues, a_else, a_ensure).at(location)
-    else
-      if body.is_a?(Expressions)
-        body.keyword = Expressions::Keyword::Begin
-        body
-      else
-        node = Expressions.new([body] of ASTNode).at(location)
-        node.keyword = Expressions::Keyword::Begin
-        node
-      end
+    handler : ASTNode = exp
+    found = false
+    if rescues || a_ensure
+      ex = ExceptionHandler.new(exp, rescues, a_else, a_ensure)
+      ex.implicit = implicit
+      ex.else_location = else_location
+      ex.ensure_location = ensure_location
+      ex.at(start).at_end(end_location)
+      handler = ex
+      found = true
     end
+    {handler, end_location, found}
   end
 
+  # Hosted parser.cr 2114-2152: one rescue clause. Its header is a name, a type list, or both, then a newline or `;`.
   def parse_rescue : Rescue
     location = @token.location
+    end_location : Location? = token_end_location
     next_token_skip_space
 
     name : String? = nil
     types : Array(ASTNode)? = nil
 
     if @token.type == TokenKind::IDENT
-      name = @token.value.to_s
-      push_var_name(name)
+      ident = @token.value
+      push_var_name(ident)
+      name = ident
+      end_location = token_end_location
       next_token_skip_space
       if @token.type == TokenKind::OP_COLON
         next_token_skip_space_or_newline
-        types = parse_rescue_types
+        check_any([TokenKind::CONST, TokenKind::OP_COLON_COLON])
+        listed = parse_rescue_types
+        types = listed
+        end_location = listed.last.end_location
       end
     elsif @token.type == TokenKind::CONST || @token.type == TokenKind::OP_COLON_COLON
-      types = parse_rescue_types
+      listed = parse_rescue_types
+      types = listed
+      end_location = listed.last.end_location
     end
 
-    skip_statement_end
-    body = if @token.keyword == Keyword::END || @token.keyword == Keyword::RESCUE || @token.keyword == Keyword::ELSE || @token.keyword == Keyword::ENSURE
-             Nop.new
-           else
-             b = parse_expressions
-             skip_statement_end
-             b
-           end
-    Rescue.new(body, types, name).at(location)
+    check_any([TokenKind::OP_SEMICOLON, TokenKind::NEWLINE])
+    next_token_skip_space_or_newline
+
+    body : ASTNode? = nil
+    if @token.keyword != Keyword::END
+      parsed = parse_expressions
+      body = parsed
+      end_location = parsed.end_location
+      skip_statement_end
+    end
+    Rescue.new(body, types, name).at(location).at_end(end_location)
   end
 
+  # Hosted parser.cr 2154-2167: the types of a rescue clause, separated by `|`.
   def parse_rescue_types : Array(ASTNode)
     types = [] of ASTNode
     while true
-      types << parse_path
+      types << parse_generic
       skip_space
       if @token.type == TokenKind::OP_BAR
         next_token_skip_space
@@ -2187,6 +2235,34 @@ pub class Parser < Lexer
       end
     end
     types
+  end
+
+  # Hosted parser.cr 8471-8475: the current token must be one of these kinds.
+  def check_any(kinds : Array(TokenKind)) : Nil
+    i = 0
+    while i < kinds.size
+      return if @token.type == kinds[i]
+      i = i + 1
+    end
+    names = [] of String
+    kinds.each { |kind| names << kind.to_s }
+    joined = names.join(", ")
+    syntax_error("expecting any of these tokens: #{joined} (not '#{token_text}')", @token.location)
+  end
+
+  # The current token as hosted's Token#to_s renders it inside a message (token.cr 400): a keyword or its text, else its kind.
+  def token_text : String
+    if @token.type == TokenKind::EOF || @token.type == TokenKind::NEWLINE
+      return @token.type.to_s
+    end
+    if kw = @token.keyword
+      return kw.to_s
+    end
+    if @token.value.empty?
+      @token.type.to_s
+    else
+      @token.value
+    end
   end
 
   def when_expression_end : Bool
@@ -4556,9 +4632,7 @@ pub class Parser < Lexer
           end
           body = Expressions.from(exps).at(body)
         end
-        check_keyword(Keyword::END)
-        end_location = token_end_location
-        next_token_skip_space
+        body, end_location, _ = parse_exception_handler(body, true)
       end
     end
 
@@ -4568,6 +4642,25 @@ pub class Parser < Lexer
     node.at(location).at_end(end_location)
     set_visibility(node)
     node
+  end
+
+  # Hosted parser.cr 3449-3468: a proc literal's body that opens with `|` is refused, with the parenthesised form to write.
+  def check_not_pipe_before_proc_literal_body : Nil
+    if @token.type == TokenKind::OP_BAR
+      location = @token.location
+      next_token_skip_space
+
+      msg = "unexpected token: \"|\", proc literals specify their parameters like this: ->("
+      if @token.type == TokenKind::IDENT
+        msg = msg + @token.value + " : Type"
+        next_token_skip_space_or_newline
+        msg = msg + ", ..." if @token.type == TokenKind::OP_COMMA
+      else
+        msg = msg + "param : Type"
+      end
+      msg = msg + ") { ... }"
+      syntax_error(msg, location)
+    end
   end
 
   def parse_fun_literal : ASTNode
@@ -4613,12 +4706,12 @@ pub class Parser < Lexer
       body : ASTNode? = nil
       if @token.keyword == Keyword::DO
         next_token_skip_statement_end
-        body = parse_expressions
-        end_location = token_end_location
-        check_keyword(Keyword::END)
-        next_token_skip_space
+        check_not_pipe_before_proc_literal_body
+        parsed = parse_expressions
+        body, end_location, _ = parse_exception_handler(parsed, true)
       elsif @token.type == TokenKind::OP_LCURLY
         next_token_skip_statement_end
+        check_not_pipe_before_proc_literal_body
         body = preserve_stop_on_do { parse_expressions }
         end_location = token_end_location
         check(TokenKind::OP_RCURLY)
@@ -5779,20 +5872,21 @@ pub class Parser < Lexer
 
       skip_statement_end
       body : ASTNode? = nil
+      fun_end : Location? = nil
       if require_body
         @fun_nest = @fun_nest + 1
         if @token.keyword == Keyword::END
           body = Nop.new
+          fun_end = token_end_location
           next_token
         else
-          body = parse_expressions
-          check_keyword(Keyword::END)
-          next_token_skip_space
+          parsed = parse_expressions
+          body, fun_end, _ = parse_exception_handler(parsed, true)
         end
         @fun_nest = @fun_nest - 1
       end
 
-      fun_def = FunDef.new(name, params, return_type, body, real_name).at(location)
+      fun_def = FunDef.new(name, params, return_type, body, real_name).at(location).at_end(fun_end)
       fun_def.varargs = varargs
       fun_def
     end

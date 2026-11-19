@@ -1,0 +1,16 @@
+# Variables and paths fixture
+x = 10
+y = x
+@instance_field = 20
+@instance_field
+@@class_field = 30
+@@class_field
+$?
+_ = 50
+self
+MyConstant  = 100
+MyConstant
+Outer::Inner::Target = 200
+Outer::Inner::Target
+::TopLevel::Constant
+::GlobalConst

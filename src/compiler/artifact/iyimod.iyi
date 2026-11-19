@@ -1,0 +1,3469 @@
+@[Unsafe("The .iyimod writer and reader pack and unpack the container in raw byte buffers (Pointer(UInt8) from malloc, pointer reads through to_unsafe). The compiler does not check those pointers or their bounds, and the container layout is the point of the module.")]
+module compiler/artifact/iyimod
+
+import std/int
+import std/digest::{MD5}
+import std/json::{Builder}
+import compiler/syntax/ast::{ASTNode, Def, Arg, Path, Nop}
+import compiler/syntax/visitor::{Visitor}
+
+# iyi: `.iyimod`, the module artifact — SPEC.md Part IV.
+#
+# This file is the port of the hosted format in src/compiler/iyi/iyimod.cr and
+# follows it version for version. The change log below is the port's record of
+# what moved, from v50 (the version this port was written against) to v64, in
+# the order the hosted compiler made each change (`git log -S'FORMAT_VERSION'`
+# on the hosted file):
+#
+#   v51  Inputs (20): the files a boundary was written from, `<md5> <path>`.
+#   v52  Signature carries the annotations written above its def.
+#   v53  TypeDecl carries the `using` directives written inside its body.
+#   v54  SymbolLiterals (21): the symbols a unit reads the value of by name.
+#   v55  Header: declarations_only, a byte after the flag bytes.
+#   v56  Signature carries its forall bounds and its where bounds.
+#   v57  Header: package_name, a string after the flag bytes.
+#   v58  No layout change: object code passes values over 128 bytes in memory.
+#   v59  SourcePositions (65): where each node of a travelling text was written.
+#   v60  Reaches (67): what each function reaches of module state. Spawns (66)
+#        entered the file on 2026-11-04 (39cd0511d) with no bump of its own.
+#   v61  No layout change: symbols are spelled without `@`.
+#   v62  Header: unsafe, the reason of the @[Unsafe] mark, a string last.
+#   v63  Spawns: pinned bit and pin records. Share annotations carry lends.
+#   v64  Reaches: owning type for pin records.
+#
+# Section numbers in use at v64: 1-19 as before, 20 Inputs, 21 SymbolLiterals,
+# 64 Layouts, 65 SourcePositions, 66 Spawns, 67 Reaches. 22 to 63 are free.
+#
+# Container layout:
+#   magic:          "IYIMOD\0\0" (8 bytes)
+#   format version: u32 (little endian)
+#   section count:  u32 (little endian)
+#   section table:  { kind u16, padding u16, length u32, checksum u64 } * count
+#   payloads:       in table order
+
+pub MAGIC          = "IYIMOD\0\0"
+pub FORMAT_VERSION = 64_u32
+
+pub enum Section : UInt16
+  Header          =  1_u16
+  Hashes          =  2_u16
+  Imports         =  3_u16
+  Exports         =  4_u16
+  MacroBodies     =  5_u16
+  MonoBodies      =  6_u16
+  ObjectCode      =  7_u16
+  Initialiser     =  8_u16
+  TypeIds         =  9_u16
+  Constants       = 10_u16
+  Requires        = 11_u16
+  Regexes         = 12_u16
+  ClassVars       = 13_u16
+  MatchTypes      = 14_u16
+  Symbols         = 15_u16
+  TopLevel        = 16_u16
+  Reopened        = 17_u16
+  Libs            = 18_u16
+  TopLevelFuns    = 19_u16
+  Inputs          = 20_u16
+  SymbolLiterals  = 21_u16
+  Layouts         = 64_u16
+  SourcePositions = 65_u16
+  Spawns          = 66_u16
+  Reaches         = 67_u16
+end
+
+pub TOP_LEVEL_CONTAINER = "::"
+pub MACRO_HOOKS         = ["included", "extended", "inherited", "method_added", "finished"]
+
+pub class Error
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+pub class RegexConst
+  property name : String
+  property pattern : String
+  property options : UInt32
+
+  def initialize(@name : String, @pattern : String, @options : UInt32)
+  end
+end
+
+pub class ClassVarRef
+  property name : String
+  property lazy : Bool
+
+  def initialize(@name : String, @lazy : Bool)
+  end
+end
+
+pub class ClassVarDecl
+  property name : String
+  property type : String
+  property value : String
+  property annotations : Array(String)
+
+  def initialize(@name : String, @type : String, @value : String, @annotations : Array(String) = [] of String)
+  end
+end
+
+pub class Signature
+  property name : String
+  property receiver : String
+  property parameters : Array(String)
+  property block_parameter : String
+  property return_type : String
+  property free_variables : Array(String)
+  property required : Bool
+  property visibility : String
+  property doc : String
+  # The annotations written above the `def`, as source text (v52).
+  property annotations : Array(String)
+  # `forall T : Show`'s bounds, as `{name, trait}` pairs, as written (v56).
+  property free_variable_bounds : Array({String, String})
+  # `where Elem : Show`'s bounds, as written (v56).
+  property where_bounds : Array({String, String})
+
+  def initialize(
+    @name : String,
+    @receiver : String = "",
+    @parameters : Array(String) = [] of String,
+    @block_parameter : String = "",
+    @return_type : String = "",
+    @free_variables : Array(String) = [] of String,
+    @required : Bool = false,
+    @visibility : String = "",
+    @doc : String = "",
+    @annotations : Array(String) = [] of String,
+    @free_variable_bounds : Array({String, String}) = [] of {String, String},
+    @where_bounds : Array({String, String}) = [] of {String, String},
+  )
+  end
+end
+
+pub class TypeLayout
+  property type_id : Int32
+  property alloc_size : UInt32
+  property scan_cap : UInt32
+  property scan_offsets : Array(UInt32)
+  property noscan_offsets : Array(UInt32)
+
+  def initialize(
+    @type_id : Int32,
+    @alloc_size : UInt32,
+    @scan_cap : UInt32,
+    @scan_offsets : Array(UInt32) = [] of UInt32,
+    @noscan_offsets : Array(UInt32) = [] of UInt32,
+  )
+  end
+end
+
+pub class TypeDecl
+  property name : String
+  property kind : String
+  property type_parameters : Array(String)
+  property assoc_types : Array(String)
+  property supertraits : Array(String)
+  property fields : Array({String, String, String})
+  property methods : Array(Signature)
+  property visibility : String
+  property types : Array(TypeDecl)
+  property value : String
+  property macros : Array(String)
+  property members : Array({String, String})
+  property class_vars : Array(ClassVarDecl)
+  property superclass : String
+  property includes : Array(String)
+  property funs : Array(String)
+  property annotations : Array(String)
+  property doc : String
+  property extends_self : Bool
+  property usings : Array(String)
+
+  def initialize(
+    @name : String,
+    @kind : String,
+    @type_parameters : Array(String) = [] of String,
+    @assoc_types : Array(String) = [] of String,
+    @supertraits : Array(String) = [] of String,
+    @fields : Array({String, String, String}) = [] of {String, String, String},
+    @methods : Array(Signature) = [] of Signature,
+    @visibility : String = "pub",
+    @types : Array(TypeDecl) = [] of TypeDecl,
+    @value : String = "",
+    @macros : Array(String) = [] of String,
+    @members : Array({String, String}) = [] of {String, String},
+    @class_vars : Array(ClassVarDecl) = [] of ClassVarDecl,
+    @superclass : String = "",
+    @includes : Array(String) = [] of String,
+    @funs : Array(String) = [] of String,
+    @annotations : Array(String) = [] of String,
+    @doc : String = "",
+    @extends_self : Bool = false,
+    @usings : Array(String) = [] of String,
+  )
+  end
+end
+
+pub class ImplRecord
+  property trait_name : String
+  property type_name : String
+  property trait_arguments : Array(String)
+  property free_variables : Array(String)
+  property free_variable_bounds : Array({String, String})
+  property assoc_types : Array({String, String})
+  property methods : Array(Signature)
+
+  def initialize(
+    @trait_name : String,
+    @type_name : String,
+    @trait_arguments : Array(String) = [] of String,
+    @free_variables : Array(String) = [] of String,
+    @free_variable_bounds : Array({String, String}) = [] of {String, String},
+    @assoc_types : Array({String, String}) = [] of {String, String},
+    @methods : Array(Signature) = [] of Signature,
+  )
+  end
+end
+
+pub class Exports
+  property functions : Array(Signature)
+  property types : Array(TypeDecl)
+  property impls : Array(ImplRecord)
+  property carried_functions : Array(Signature)
+  property class_vars : Array(ClassVarDecl)
+
+  def initialize(
+    @functions : Array(Signature) = [] of Signature,
+    @types : Array(TypeDecl) = [] of TypeDecl,
+    @impls : Array(ImplRecord) = [] of ImplRecord,
+    @carried_functions : Array(Signature) = [] of Signature,
+    @class_vars : Array(ClassVarDecl) = [] of ClassVarDecl,
+  )
+  end
+
+  def self.empty : Exports
+    Exports.new
+  end
+
+  def empty? : Bool
+    @functions.empty? && @types.empty? && @impls.empty? && @carried_functions.empty? && @class_vars.empty?
+  end
+end
+
+pub class ObjectUnit
+  property name : String
+  property code : String
+
+  def initialize(@name : String, @code : String)
+  end
+end
+
+pub class Hashes
+  property interface : String
+  property implementation : String
+  property source : String
+
+  def initialize(@interface : String = "", @implementation : String = "", @source : String = "")
+  end
+
+  def self.empty : Hashes
+    Hashes.new
+  end
+
+  def empty? : Bool
+    @interface.empty? && @implementation.empty? && @source.empty?
+  end
+end
+
+pub class ImportEdge
+  property module_name : String
+  property interface : String
+  property implementation : String
+  property exported : Bool
+
+  def initialize(
+    @module_name : String,
+    @interface : String = "",
+    @implementation : String = "",
+    @exported : Bool = false,
+  )
+  end
+end
+
+# Where one node of a travelling text was written (`Section::SourcePositions`):
+# the byte the node starts at in the text, and its place in the module's source.
+pub class SourcePosition
+  property offset : Int32
+  property filename : String
+  property line : Int32
+  property column : Int32
+
+  def initialize(@offset : Int32, @filename : String, @line : Int32, @column : Int32)
+  end
+end
+
+# One `g.spawn` written in a module and where the build placed it (`Section::Spawns`).
+pub class SpawnRecord
+  property owner : String
+  property digest : String
+  property line : Int32
+  property column : Int32
+  property parallel : Bool
+  property asked : Bool
+  property reason : String
+  property pinned : Bool
+
+  def initialize(@owner : String, @digest : String, @line : Int32, @column : Int32,
+                 @parallel : Bool, @asked : Bool, @reason : String, @pinned : Bool = false)
+  end
+end
+
+pub class PinRecord
+  property call : String
+  property line : Int32
+  property column : Int32
+  property reason : String
+
+  def initialize(@call : String, @line : Int32, @column : Int32, @reason : String)
+  end
+end
+
+# What one function reaches of module state (`Section::Reaches`).
+pub class ReachRecord
+  property function : String
+  property label : String
+  property type : String
+  property kind : String
+  property use : String
+  property path : Array(String)
+  property why : String
+  property module_name : String
+  property owning : String
+
+  def initialize(@function : String, @label : String, @type : String, @kind : String,
+                 @use : String, @path : Array(String), @why : String, @module_name : String, @owning : String = "")
+  end
+end
+
+pub class Artifact
+  property module_name : String
+  property source_path : String
+  property compiler_version : String
+  property target_triple : String
+  property flags : Array(String)
+  property imports : Array(ImportEdge)
+  property usings : Array(String)
+  property exports : Exports
+  property object_code : Array(ObjectUnit)
+  property has_initialiser : Bool
+  property mono_bodies : Hash(String, String)
+  property initialiser : String
+  property type_ids : Array(String)
+  property hashes : Hashes
+  property constants : Array(String)
+  property macro_bodies : Array(String)
+  property requires : Array(String)
+  property crystal_library : Bool
+  property class_root : Bool
+  property filled : Bool
+  property module_extends_self : Bool
+  property regexes : Array(RegexConst)
+  property class_vars : Array(ClassVarRef)
+  property match_types : Array(String)
+  property symbols : Array(String)
+  property top_level : Array(Signature)
+  property top_level_funs : Array(String)
+  property reopened : Array(TypeDecl)
+  property libs : Array(String)
+  property layouts : Array({String, TypeLayout})
+  # The files a boundary was written from, `<md5> <path>` each (`Section::Inputs`).
+  property inputs : Array(String)
+  # The symbols this module's object code reads the value of (`Section::SymbolLiterals`).
+  property symbol_literals : Array(String)
+  # Whether the build that wrote this artifact generated no code (v55).
+  property declarations_only : Bool
+  # The package name the module's types live under, empty for none (v57).
+  property package_name : String
+  # The reason of the module's `@[Unsafe("why")]`, empty when not marked (v62).
+  property unsafe : String
+  # Where each `g.spawn` in the module runs (`Section::Spawns`).
+  property spawns : Array(SpawnRecord)
+  property pins : Array(PinRecord)
+  # What each function reaches of module state. Nil when the section is absent (`Section::Reaches`).
+  property reaches : Array(ReachRecord)?
+  # Where the nodes of each body in `mono_bodies`, and of the initialiser, were written (`Section::SourcePositions`).
+  property body_positions : Hash(String, Array(SourcePosition))
+  property initialiser_positions : Array(SourcePosition)
+
+  def initialize(
+    @module_name : String,
+    @source_path : String,
+    @compiler_version : String,
+    @target_triple : String,
+    @flags : Array(String),
+    @imports : Array(ImportEdge) = [] of ImportEdge,
+    @usings : Array(String) = [] of String,
+    @exports : Exports = Exports.empty,
+    @object_code : Array(ObjectUnit) = [] of ObjectUnit,
+    @has_initialiser : Bool = false,
+    @mono_bodies : Hash(String, String) = {} of String => String,
+    @initialiser : String = "",
+    @type_ids : Array(String) = [] of String,
+    @hashes : Hashes = Hashes.empty,
+    @constants : Array(String) = [] of String,
+    @macro_bodies : Array(String) = [] of String,
+    @requires : Array(String) = [] of String,
+    @crystal_library : Bool = false,
+    @class_root : Bool = false,
+    @filled : Bool = true,
+    @module_extends_self : Bool = true,
+    @regexes : Array(RegexConst) = [] of RegexConst,
+    @class_vars : Array(ClassVarRef) = [] of ClassVarRef,
+    @match_types : Array(String) = [] of String,
+    @symbols : Array(String) = [] of String,
+    @top_level : Array(Signature) = [] of Signature,
+    @top_level_funs : Array(String) = [] of String,
+    @reopened : Array(TypeDecl) = [] of TypeDecl,
+    @libs : Array(String) = [] of String,
+    @layouts : Array({String, TypeLayout}) = [] of {String, TypeLayout},
+    @inputs : Array(String) = [] of String,
+    @symbol_literals : Array(String) = [] of String,
+    @declarations_only : Bool = false,
+    @package_name : String = "",
+    @unsafe : String = "",
+    @body_positions : Hash(String, Array(SourcePosition)) = {} of String => Array(SourcePosition),
+    @initialiser_positions : Array(SourcePosition) = [] of SourcePosition,
+  )
+    @spawns = [] of SpawnRecord
+    @pins = [] of PinRecord
+    @reaches = nil
+  end
+
+  def import_names : Array(String)
+    @imports.map { |e| e.module_name }
+  end
+end
+
+pub class Summary
+  property module_name : String
+  property source_path : String
+  property compiler_version : String
+  property target_triple : String
+  property flags : Array(String)
+  property hashes : Hashes
+  property imports : Array(ImportEdge)
+  property inputs : Array(String)
+  property crystal_library : Bool
+  property package_name : String
+
+  def initialize(
+    @module_name : String,
+    @source_path : String,
+    @compiler_version : String,
+    @target_triple : String,
+    @flags : Array(String),
+    @hashes : Hashes,
+    @imports : Array(ImportEdge),
+    @inputs : Array(String) = [] of String,
+    @crystal_library : Bool = false,
+    @package_name : String = "",
+  )
+  end
+end
+
+pub class SectionEntry
+  property kind : UInt16
+  property length : UInt32
+  property checksum : UInt64
+
+  def initialize(@kind : UInt16, @length : UInt32, @checksum : UInt64)
+  end
+end
+
+# High-performance in-memory Little-Endian binary writer
+pub class IOBuffer
+  @buffer : Pointer(UInt8)
+  @capacity : Int32
+  @size : Int32
+
+  def initialize(initial_capacity : Int32 = 1024)
+    @capacity = initial_capacity
+    @size = 0
+    @buffer = Pointer(UInt8).malloc(initial_capacity.to_u64)
+  end
+
+  def size : Int32
+    @size
+  end
+
+  def to_s : String
+    String.new(@size) do |buf|
+      buf.copy_from(@buffer, @size)
+    end
+  end
+
+  private def ensure_capacity(needed : Int32) : Nil
+    return if @size + needed <= @capacity
+    new_cap = @capacity * 2
+    new_cap = @size + needed if new_cap < @size + needed
+    new_buf = Pointer(UInt8).malloc(new_cap.to_u64)
+    new_buf.copy_from(@buffer, @size)
+    @buffer = new_buf
+    @capacity = new_cap
+  end
+
+  def write_byte(b : UInt8) : Nil
+    ensure_capacity(1)
+    @buffer[@size] = b
+    @size = @size + 1
+  end
+
+  def write_u16_le(v : UInt16) : Nil
+    ensure_capacity(2)
+    val = v.to_u64
+    @buffer[@size] = (val & 0xff_u64).to_u8
+    @buffer[@size + 1] = ((val.unsafe_shr(8_u64)) & 0xff_u64).to_u8
+    @size = @size + 2
+  end
+
+  def write_u32_le(v : UInt32) : Nil
+    ensure_capacity(4)
+    val = v.to_u64
+    @buffer[@size] = (val & 0xff_u64).to_u8
+    @buffer[@size + 1] = ((val.unsafe_shr(8_u64)) & 0xff_u64).to_u8
+    @buffer[@size + 2] = ((val.unsafe_shr(16_u64)) & 0xff_u64).to_u8
+    @buffer[@size + 3] = ((val.unsafe_shr(24_u64)) & 0xff_u64).to_u8
+    @size = @size + 4
+  end
+
+  def write_i32_le(v : Int32) : Nil
+    write_u32_le(v.to_u64.to_u32)
+  end
+
+  def write_u64_le(v : UInt64) : Nil
+    ensure_capacity(8)
+    i = 0
+    while i < 8
+      @buffer[@size + i] = ((v.unsafe_shr((i * 8).to_u64)) & 0xff_u64).to_u8
+      i = i + 1
+    end
+    @size = @size + 8
+  end
+
+  def write_raw(s : String) : Nil
+    len = s.bytesize
+    return if len == 0
+    ensure_capacity(len)
+    (@buffer + @size).copy_from(s.to_unsafe, len)
+    @size = @size + len
+  end
+
+  def write_string(s : String) : Nil
+    write_u32_le(s.bytesize.to_u64.to_u32)
+    write_raw(s)
+  end
+
+  def write_strings(values : Array(String)) : Nil
+    write_u32_le(values.size.to_u64.to_u32)
+    i = 0
+    while i < values.size
+      write_string(values[i])
+      i = i + 1
+    end
+  end
+
+  def write_pairs(values : Array({String, String})) : Nil
+    write_u32_le(values.size.to_u64.to_u32)
+    i = 0
+    while i < values.size
+      pair = values[i]
+      write_string(pair[0])
+      write_string(pair[1])
+      i = i + 1
+    end
+  end
+
+  def write_triples(values : Array({String, String, String})) : Nil
+    write_u32_le(values.size.to_u64.to_u32)
+    i = 0
+    while i < values.size
+      triple = values[i]
+      write_string(triple[0])
+      write_string(triple[1])
+      write_string(triple[2])
+      i = i + 1
+    end
+  end
+end
+
+# High-performance Little-Endian binary reader
+pub class BinaryReader
+  @buffer : Pointer(UInt8)
+  @size : Int32
+  @pos : Int32
+  @claimed : UInt64
+  @path : String
+
+  def initialize(str : String, @path : String = "")
+    @buffer = str.to_unsafe
+    @size = str.bytesize
+    @pos = 0
+    @claimed = 0_u64
+  end
+
+  def pos : Int32
+    @pos
+  end
+
+  def size : Int32
+    @size
+  end
+
+  def remaining : Int32
+    @size - @pos
+  end
+
+  def read_u8 : UInt8
+    raise Error.new("unexpected EOF").to_s if @pos >= @size
+    b = @buffer[@pos]
+    @pos = @pos + 1
+    b
+  end
+
+  def read_u16_le : UInt16
+    raise Error.new("unexpected EOF").to_s if @pos + 2 > @size
+    b0 = @buffer[@pos].to_u64
+    b1 = @buffer[@pos + 1].to_u64
+    @pos = @pos + 2
+    (b0 | (b1.unsafe_shl(8_u64))).to_u16
+  end
+
+  def read_u32_le : UInt32
+    raise Error.new("unexpected EOF").to_s if @pos + 4 > @size
+    b0 = @buffer[@pos].to_u64
+    b1 = @buffer[@pos + 1].to_u64
+    b2 = @buffer[@pos + 2].to_u64
+    b3 = @buffer[@pos + 3].to_u64
+    @pos = @pos + 4
+    (b0 | (b1.unsafe_shl(8_u64)) | (b2.unsafe_shl(16_u64)) | (b3.unsafe_shl(24_u64))).to_u32
+  end
+
+  def read_i32_le : Int32
+    read_u32_le.to_i64.to_i32
+  end
+
+  def read_u64_le : UInt64
+    raise Error.new("unexpected EOF").to_s if @pos + 8 > @size
+    val = 0_u64
+    i = 0
+    while i < 8
+      val = val | (@buffer[@pos + i].to_u64.unsafe_shl((i * 8).to_u64))
+      i = i + 1
+    end
+    @pos = @pos + 8
+    val
+  end
+
+  def refuse(why : String) : Nil
+    if @path.empty?
+      raise Error.new(why).to_s
+    end
+    raise Error.new(@path + " is not a readable .iyimod: " + why + ". It is damaged, or was written by something that is not this compiler; rebuild it with `--emit-iyimod`").to_s
+  end
+
+  # Match the hosted reader's per-section, cumulative allocation bounds.
+  def read_count(least : Int32) : Int32
+    count = read_u32_le.to_u64
+    left = remaining.to_u64
+    claim = count * least.to_u64
+    if claim > left
+      unit = least == 1 ? "byte" : "bytes"
+      refuse("a section counts " + count.to_s + " of something that takes " + least.to_s + " " + unit + " or more each, and has " + left.to_s + " bytes left")
+    end
+    @claimed = @claimed + claim
+    if @claimed > @size.to_u64
+      refuse("a section's counts claim " + @claimed.to_s + " bytes between them, and it is " + @size.to_s + " bytes long")
+    end
+    count.to_i64.to_i32
+  end
+
+  def read_string : String
+    len = read_count(1)
+    s_ptr = @buffer + @pos
+    @pos = @pos + len
+    String.new(len) do |buf|
+      buf.copy_from(s_ptr, len)
+    end
+  end
+
+  def read_strings : Array(String)
+    count = read_count(4)
+    res = [] of String
+    i = 0
+    while i < count
+      res << read_string
+      i = i + 1
+    end
+    res
+  end
+
+  def read_pairs : Array({String, String})
+    count = read_count(8)
+    res = [] of {String, String}
+    i = 0
+    while i < count
+      s1 = read_string
+      s2 = read_string
+      res << {s1, s2}
+      i = i + 1
+    end
+    res
+  end
+
+  def read_triples : Array({String, String, String})
+    count = read_count(12)
+    res = [] of {String, String, String}
+    i = 0
+    while i < count
+      s1 = read_string
+      s2 = read_string
+      s3 = read_string
+      res << {s1, s2, s3}
+      i = i + 1
+    end
+    res
+  end
+
+  def read_bytes(len : Int32) : String
+    raise Error.new("unexpected EOF").to_s if @pos + len > @size
+    s_ptr = @buffer + @pos
+    @pos = @pos + len
+    String.new(len) do |buf|
+      buf.copy_from(s_ptr, len)
+    end
+  end
+
+  def skip(len : Int32) : Nil
+    raise Error.new("unexpected EOF").to_s if @pos + len > @size
+    @pos = @pos + len
+  end
+end
+
+pub class IyiMod
+  MAGIC               = "IYIMOD\0\0"
+  FORMAT_VERSION      = 64_u32
+  TOP_LEVEL_CONTAINER = "::"
+  MACRO_HOOKS         = ["included", "extended", "inherited", "method_added", "finished"]
+
+  # 64-bit checksum computed from MD5 of payload (first 8 bytes, big endian)
+  def self.checksum(payload : String) : UInt64
+    bytes = MD5.digest(payload)
+    val = 0_u64
+    i = 0
+    while i < 8
+      val = (val.unsafe_shl(8_u64)) | bytes[i].to_u64
+      i = i + 1
+    end
+    val
+  end
+
+  def self.digest(value : String) : String
+    MD5.hexdigest(value)
+  end
+
+  # IV.3's hashes for an artifact and its source
+  def self.hashes_for(artifact : Artifact, source : String) : Hashes
+    iface_buf = IOBuffer.new
+    iface_buf.write_raw(encode_exports(artifact, false))
+    iface_buf.write_strings(artifact.usings)
+
+    formatted_imports = [] of String
+    i = 0
+    while i < artifact.imports.size
+      edge = artifact.imports[i]
+      formatted_imports << (edge.exported ? "pub " + edge.module_name : edge.module_name)
+      i = i + 1
+    end
+    iface_buf.write_strings(formatted_imports)
+    iface_buf.write_strings(artifact.requires)
+
+    impl_buf = IOBuffer.new
+    impl_buf.write_raw(encode_mono_bodies(artifact))
+    impl_buf.write_raw(encode_macro_bodies(artifact))
+    impl_buf.write_string(artifact.initialiser)
+    impl_buf.write_byte(artifact.has_initialiser ? 1_u8 : 0_u8)
+
+    Hashes.new(
+      digest(iface_buf.to_s),
+      digest(impl_buf.to_s),
+      digest(source),
+    )
+  end
+
+  def self.mono_body_key(container : String, signature : Signature, ordinal : Int32 = 0) : String
+    res = container + "#"
+    res = res + signature.receiver + "." unless signature.receiver.empty?
+    res = res + signature.name
+    res = res + "(" + signature.parameters.join(", ") + ")"
+    res = res + signature.block_parameter
+    res = res + "#" + ordinal.to_s if ordinal > 0
+    res
+  end
+
+  def self.mono_body_ordinals(methods : Array(Signature)) : Array(Int32)
+    seen = {} of String => Int32
+    ordinals = [] of Int32
+    i = 0
+    while i < methods.size
+      key = mono_body_key("", methods[i])
+      ord = seen.has_key?(key) ? seen[key] : 0
+      seen[key] = ord + 1
+      ordinals << ord
+      i = i + 1
+    end
+    ordinals
+  end
+
+  def self.mono_body_container(trait_name : String, type_name : String) : String
+    trait_name + " for " + type_name
+  end
+
+  def self.section_name(kind : UInt16) : String
+    case kind
+    when  1_u16 then "Header"
+    when  2_u16 then "Hashes"
+    when  3_u16 then "Imports"
+    when  4_u16 then "Exports"
+    when  5_u16 then "MacroBodies"
+    when  6_u16 then "MonoBodies"
+    when  7_u16 then "ObjectCode"
+    when  8_u16 then "Initialiser"
+    when  9_u16 then "TypeIds"
+    when 10_u16 then "Constants"
+    when 11_u16 then "Requires"
+    when 12_u16 then "Regexes"
+    when 13_u16 then "ClassVars"
+    when 14_u16 then "MatchTypes"
+    when 15_u16 then "Symbols"
+    when 16_u16 then "TopLevel"
+    when 17_u16 then "Reopened"
+    when 18_u16 then "Libs"
+    when 19_u16 then "TopLevelFuns"
+    when 20_u16 then "Inputs"
+    when 21_u16 then "SymbolLiterals"
+    when 64_u16 then "Layouts"
+    when 65_u16 then "SourcePositions"
+    when 66_u16 then "Spawns"
+    when 67_u16 then "Reaches"
+    else             "an unknown"
+    end
+  end
+
+  def self.verify(path : String, section : UInt16?, payload : String, sum : UInt64) : Nil
+    return if checksum(payload) == sum
+    name = section ? section_name(section) : "an unknown"
+    raise Error.new(path + ": the " + name + " section is damaged, its checksum does not match what was written. Rebuild it with `--emit-iyimod`").to_s
+  end
+
+  def self.read_table(r : BinaryReader, path : String) : Array(SectionEntry)
+    if r.remaining < 16
+      raise Error.new(path + " is too short to be a .iyimod").to_s
+    end
+    magic = r.read_bytes(8)
+    unless magic == MAGIC
+      raise Error.new(path + " is not a .iyimod").to_s
+    end
+
+    format_version = r.read_u32_le
+    unless format_version == FORMAT_VERSION
+      raise Error.new(path + " is .iyimod format v" + format_version.to_u64.to_s + ", this compiler writes v" + FORMAT_VERSION.to_u64.to_s).to_s
+    end
+
+    count = r.read_u32_le.to_u64
+    room = r.remaining.to_u64
+    if count * 16_u64 > room
+      raise Error.new(path + " is truncated: its table names " + count.to_s + " sections and " + room.to_s + " bytes follow it, which is room for " + (room // 16_u64).to_s).to_s
+    end
+    entries = [] of SectionEntry
+    claimed = 0_u64
+    i = 0_u64
+    while i < count
+      kind = r.read_u16_le
+      r.skip(2) # padding
+      length = r.read_u32_le
+      sum = r.read_u64_le
+      claimed = claimed + length.to_u64
+      entries << SectionEntry.new(kind, length, sum)
+      i = i + 1_u64
+    end
+    room = r.remaining.to_u64
+    if claimed > room
+      raise Error.new(path + " is truncated: its table says its sections are " + claimed.to_s + " bytes together and " + room.to_s + " bytes follow the table").to_s
+    end
+    entries
+  end
+
+  # Reads a .iyimod artifact at path
+  def self.read(path : String, want_object_code : Bool = false) : Artifact
+    content = File.read(path)
+    r = BinaryReader.new(content)
+    entries = read_table(r, path)
+
+    header_data : HeaderDecoded? = nil
+    imports_data : ImportsDecoded? = nil
+    exports_data : Exports? = nil
+    object_code = [] of ObjectUnit
+    mono_bodies = {} of String => String
+    macro_bodies = [] of String
+    initialiser = ""
+    type_ids = [] of String
+    constants = [] of String
+    regexes = [] of RegexConst
+    class_vars = [] of ClassVarRef
+    match_types = [] of String
+    symbols = [] of String
+    libs = [] of String
+    top_level = [] of Signature
+    top_level_funs = [] of String
+    reopened = [] of TypeDecl
+    requires = [] of String
+    hashes = Hashes.empty
+    layouts = [] of {String, TypeLayout}
+    inputs = [] of String
+    symbol_literals = [] of String
+    spawns = [] of SpawnRecord
+    pins = [] of PinRecord
+    reaches : Array(ReachRecord)? = nil
+    source_positions : SourcePositionsDecoded? = nil
+    body_positions = {} of String => Array(SourcePosition)
+    initialiser_positions = [] of SourcePosition
+
+    i = 0
+    while i < entries.size
+      entry = entries[i]
+      len = entry.length.to_i64.to_i32
+
+      if entry.kind == Section::ObjectCode.value && !want_object_code
+        if r.remaining < len
+          raise Error.new(path + " is truncated: it ends in the middle of a .iyimod").to_s
+        end
+        r.skip(len)
+        i = i + 1
+        next
+      end
+
+      if r.remaining < len
+        raise Error.new(path + " ends inside a section").to_s
+      end
+      payload = r.read_bytes(len)
+      verify(path, entry.kind, payload, entry.checksum)
+
+      case entry.kind
+      when  1_u16 then header_data = decode_header(payload, path)
+      when  2_u16 then hashes = decode_hashes(payload, path)
+      when  3_u16 then imports_data = decode_imports(payload, path)
+      when  4_u16 then exports_data = decode_exports(payload, path)
+      when  5_u16 then macro_bodies = decode_macro_bodies(payload, path)
+      when  6_u16 then mono_bodies = decode_mono_bodies(payload, path)
+      when  7_u16 then object_code = decode_object_code(payload, path)
+      when  8_u16 then initialiser = payload
+      when  9_u16 then type_ids = decode_type_ids(payload, path)
+      when 10_u16 then constants = decode_constants(payload, path)
+      when 11_u16 then requires = decode_requires(payload, path)
+      when 12_u16 then regexes = decode_regexes(payload, path)
+      when 13_u16 then class_vars = decode_class_vars(payload, path)
+      when 14_u16 then match_types = decode_match_types(payload, path)
+      when 15_u16 then symbols = decode_symbols(payload, path)
+      when 16_u16 then top_level = decode_top_level(payload, path)
+      when 17_u16 then reopened = decode_reopened(payload, path)
+      when 18_u16 then libs = decode_libs(payload, path)
+      when 19_u16 then top_level_funs = decode_top_level_funs(payload, path)
+      when 64_u16 then layouts = decode_layouts(payload, path)
+      when 20_u16 then inputs = decode_strings(payload, path)
+      when 21_u16 then symbol_literals = decode_strings(payload, path)
+      when 65_u16 then source_positions = decode_source_positions(payload, path)
+      when 66_u16
+        decoded_spawns = decode_spawns(payload, path)
+        spawns = decoded_spawns[0]
+        pins = decoded_spawns[1]
+      when 67_u16 then reaches = decode_reaches(payload, path)
+      else
+        # Unknown section skipped
+      end
+      i = i + 1
+    end
+
+    if positioned = source_positions
+      body_positions = positioned.bodies
+      initialiser_positions = positioned.initialiser
+    end
+
+    unless h = header_data
+      raise Error.new(path + " has no header section").to_s
+    end
+
+    imp_edges = imports_data ? imports_data.edges : [] of ImportEdge
+    imp_usings = imports_data ? imports_data.usings : [] of String
+    exp = exports_data ? exports_data : Exports.empty
+
+    artifact = Artifact.new(
+      h.module_name,
+      h.source_path,
+      h.compiler_version,
+      h.target_triple,
+      h.flags,
+      imp_edges,
+      imp_usings,
+      exp,
+      object_code,
+      h.has_initialiser,
+      mono_bodies,
+      initialiser,
+      type_ids,
+      hashes,
+      constants,
+      macro_bodies,
+      requires,
+      h.crystal_library,
+      h.class_root,
+      h.filled,
+      h.module_extends_self,
+      regexes,
+      class_vars,
+      match_types,
+      symbols,
+      top_level,
+      top_level_funs,
+      reopened,
+      libs,
+      layouts,
+      inputs,
+      symbol_literals,
+      h.declarations_only,
+      h.package_name,
+      h.unsafe,
+      body_positions,
+      initialiser_positions,
+    )
+    artifact.spawns = spawns
+    artifact.pins = pins
+    artifact.reaches = reaches
+    artifact
+  end
+
+  # Fast summary reader (reads Header, Hashes, Imports; skips the rest)
+  def self.read_summary(path : String) : Summary
+    content = File.read(path)
+    r = BinaryReader.new(content)
+    entries = read_table(r, path)
+
+    header_data : HeaderDecoded? = nil
+    hashes = Hashes.empty
+    imports = [] of ImportEdge
+    inputs = [] of String
+
+    i = 0
+    while i < entries.size
+      entry = entries[i]
+      len = entry.length.to_i64.to_i32
+
+      unless entry.kind == 1_u16 || entry.kind == 2_u16 || entry.kind == 3_u16 || entry.kind == 20_u16
+        if r.remaining < len
+          raise Error.new(path + " is truncated: it ends in the middle of a .iyimod").to_s
+        end
+        r.skip(len)
+        i = i + 1
+        next
+      end
+
+      if r.remaining < len
+        raise Error.new(path + " ends inside a section").to_s
+      end
+      payload = r.read_bytes(len)
+      verify(path, entry.kind, payload, entry.checksum)
+
+      case entry.kind
+      when 1_u16 then header_data = decode_header(payload, path)
+      when 2_u16 then hashes = decode_hashes(payload, path)
+      when 3_u16
+        imp = decode_imports(payload, path)
+        imports = imp.edges
+      when 20_u16
+        inputs = decode_strings(payload, path)
+      end
+      i = i + 1
+    end
+
+    unless h = header_data
+      raise Error.new(path + " has no header section").to_s
+    end
+
+    Summary.new(
+      h.module_name,
+      h.source_path,
+      h.compiler_version,
+      h.target_triple,
+      h.flags,
+      hashes,
+      imports,
+      inputs,
+      h.crystal_library,
+      h.package_name,
+    )
+  end
+
+  # Writes artifact to path atomically
+  def self.write(artifact : Artifact, path : String) : Nil
+    sections = [] of {UInt16, String}
+
+    sections << {1_u16, encode_header(artifact)}
+    sections << {2_u16, encode_hashes(artifact)} unless artifact.hashes.empty?
+    sections << {3_u16, encode_imports(artifact)}
+    sections << {11_u16, encode_requires(artifact)} unless artifact.requires.empty?
+    sections << {20_u16, encode_strings(artifact.inputs)} unless artifact.inputs.empty?
+    sections << {4_u16, encode_exports(artifact)}
+    sections << {66_u16, encode_spawns(artifact.spawns, artifact.pins)} unless artifact.spawns.empty? && artifact.pins.empty?
+    if reaches = artifact.reaches
+      sections << {67_u16, encode_reaches(reaches)}
+    end
+    sections << {5_u16, encode_macro_bodies(artifact)} unless artifact.macro_bodies.empty?
+    sections << {6_u16, encode_mono_bodies(artifact)} unless artifact.mono_bodies.empty?
+    sections << {8_u16, encode_initialiser(artifact)} unless artifact.initialiser.empty?
+    unless artifact.body_positions.empty? && artifact.initialiser_positions.empty?
+      sections << {65_u16, encode_source_positions(artifact)}
+    end
+    sections << {9_u16, encode_type_ids(artifact)} unless artifact.type_ids.empty?
+    sections << {10_u16, encode_constants(artifact)} unless artifact.constants.empty?
+    sections << {64_u16, encode_layouts(artifact)} unless artifact.layouts.empty?
+    sections << {12_u16, encode_regexes(artifact)} unless artifact.regexes.empty?
+    sections << {13_u16, encode_class_vars(artifact)} unless artifact.class_vars.empty?
+    sections << {14_u16, encode_match_types(artifact)} unless artifact.match_types.empty?
+    sections << {21_u16, encode_strings(artifact.symbol_literals)} unless artifact.symbol_literals.empty?
+    sections << {15_u16, encode_symbols(artifact)} unless artifact.symbols.empty?
+    sections << {18_u16, encode_libs(artifact)} unless artifact.libs.empty?
+    sections << {17_u16, encode_reopened(artifact)} unless artifact.reopened.empty?
+    sections << {19_u16, encode_top_level_funs(artifact)} unless artifact.top_level_funs.empty?
+    sections << {16_u16, encode_top_level(artifact)} unless artifact.top_level.empty?
+    sections << {7_u16, encode_object_code(artifact)} unless artifact.object_code.empty?
+
+    w = IOBuffer.new
+    w.write_raw(MAGIC)
+    w.write_u32_le(FORMAT_VERSION)
+    w.write_u32_le(sections.size.to_u64.to_u32)
+
+    i = 0
+    while i < sections.size
+      sec = sections[i]
+      payload = sec[1]
+      w.write_u16_le(sec[0])
+      w.write_u16_le(0_u16) # padding
+      w.write_u32_le(payload.bytesize.to_u64.to_u32)
+      w.write_u64_le(checksum(payload))
+      i = i + 1
+    end
+
+    i = 0
+    while i < sections.size
+      w.write_raw(sections[i][1])
+      i = i + 1
+    end
+
+    File.write(path, w.to_s)
+  end
+
+  # ===========================================================================
+  # Section encoders and decoders
+  # ===========================================================================
+
+  def self.encode_header(artifact : Artifact) : String
+    w = IOBuffer.new
+    w.write_string(artifact.module_name)
+    w.write_string(artifact.source_path)
+    w.write_string(artifact.compiler_version)
+    w.write_string(artifact.target_triple)
+    w.write_strings(artifact.flags)
+    w.write_byte(artifact.has_initialiser ? 1_u8 : 0_u8)
+    w.write_byte(artifact.crystal_library ? 1_u8 : 0_u8)
+    w.write_byte(artifact.class_root ? 1_u8 : 0_u8)
+    w.write_byte(artifact.filled ? 1_u8 : 0_u8)
+    w.write_byte(artifact.module_extends_self ? 1_u8 : 0_u8)
+    w.write_byte(artifact.declarations_only ? 1_u8 : 0_u8)
+    w.write_string(artifact.package_name)
+    w.write_string(artifact.unsafe)
+    w.to_s
+  end
+
+  # The last two strings are read the way the flag bytes are: a header that ends
+  # before one of them, a hand-written one, names nothing there.
+  def self.decode_header(payload : String, path : String = "") : HeaderDecoded
+    r = BinaryReader.new(payload, path)
+    mod_name = r.read_string
+    src_path = r.read_string
+    comp_ver = r.read_string
+    target = r.read_string
+    flags = r.read_strings
+    has_init = r.read_u8 == 1_u8
+    c_lib = r.read_u8 == 1_u8
+    c_root = r.read_u8 == 1_u8
+    filled = r.read_u8 == 1_u8
+    m_ext = r.read_u8 == 1_u8
+    decl_only = r.read_u8 == 1_u8
+    pkg = r.remaining > 0 ? r.read_string : ""
+    reason = r.remaining > 0 ? r.read_string : ""
+    HeaderDecoded.new(mod_name, src_path, comp_ver, target, flags, has_init, c_lib, c_root, filled, m_ext, decl_only, pkg, reason)
+  end
+
+  def self.encode_hashes(artifact : Artifact) : String
+    w = IOBuffer.new
+    w.write_string(artifact.hashes.interface)
+    w.write_string(artifact.hashes.implementation)
+    w.write_string(artifact.hashes.source)
+    w.to_s
+  end
+
+  def self.decode_hashes(payload : String, path : String = "") : Hashes
+    r = BinaryReader.new(payload, path)
+    Hashes.new(r.read_string, r.read_string, r.read_string)
+  end
+
+  def self.encode_imports(artifact : Artifact) : String
+    w = IOBuffer.new
+    w.write_u32_le(artifact.imports.size.to_u64.to_u32)
+    i = 0
+    while i < artifact.imports.size
+      edge = artifact.imports[i]
+      w.write_string(edge.module_name)
+      w.write_string(edge.interface)
+      w.write_string(edge.implementation)
+      w.write_byte(edge.exported ? 1_u8 : 0_u8)
+      i = i + 1
+    end
+    w.write_strings(artifact.usings)
+    w.to_s
+  end
+
+  def self.decode_imports(payload : String, path : String = "") : ImportsDecoded
+    r = BinaryReader.new(payload, path)
+    count = r.read_count(13)
+    edges = [] of ImportEdge
+    i = 0
+    while i < count
+      name = r.read_string
+      iface = r.read_string
+      impl_hash = r.read_string
+      exp = r.read_u8 == 1_u8
+      edges << ImportEdge.new(name, iface, impl_hash, exp)
+      i = i + 1
+    end
+    usings = r.read_strings
+    ImportsDecoded.new(edges, usings)
+  end
+
+  def self.encode_requires(artifact : Artifact) : String
+    w = IOBuffer.new
+    w.write_strings(artifact.requires)
+    w.to_s
+  end
+
+  def self.decode_requires(payload : String, path : String = "") : Array(String)
+    BinaryReader.new(payload, path).read_strings
+  end
+
+  def self.encode_strings(values : Array(String)) : String
+    w = IOBuffer.new
+    w.write_strings(values)
+    w.to_s
+  end
+
+  def self.decode_strings(payload : String, path : String = "") : Array(String)
+    BinaryReader.new(payload, path).read_strings
+  end
+
+  # `Section::Spawns`: where each `g.spawn` ran, and whether it was asked to.
+  def self.encode_spawns(records : Array(SpawnRecord), pins : Array(PinRecord)) : String
+    w = IOBuffer.new
+    w.write_u32_le(records.size.to_u64.to_u32)
+    i = 0
+    while i < records.size
+      record = records[i]
+      w.write_string(record.owner)
+      w.write_string(record.digest)
+      w.write_i32_le(record.line)
+      w.write_i32_le(record.column)
+      w.write_byte((record.parallel ? 1_u8 : 0_u8) | (record.asked ? 2_u8 : 0_u8) | (record.pinned ? 4_u8 : 0_u8))
+      w.write_string(record.reason)
+      i = i + 1
+    end
+    w.write_u32_le(pins.size.to_u64.to_u32)
+    i = 0
+    while i < pins.size
+      pin = pins[i]
+      w.write_string(pin.call)
+      w.write_i32_le(pin.line)
+      w.write_i32_le(pin.column)
+      w.write_string(pin.reason)
+      i = i + 1
+    end
+    w.to_s
+  end
+
+  def self.decode_spawns(payload : String, path : String = "") : {Array(SpawnRecord), Array(PinRecord)}
+    r = BinaryReader.new(payload, path)
+    count = r.read_count(21)
+    res = [] of SpawnRecord
+    i = 0
+    while i < count
+      owner = r.read_string
+      digest = r.read_string
+      line = r.read_i32_le
+      column = r.read_i32_le
+      bits = r.read_u8
+      reason = r.read_string
+      res << SpawnRecord.new(owner, digest, line, column, (bits & 1_u8) != 0_u8, (bits & 2_u8) != 0_u8, reason, (bits & 4_u8) != 0_u8)
+      i = i + 1
+    end
+    pins = [] of PinRecord
+    count = r.read_count(16)
+    i = 0
+    while i < count
+      call = r.read_string
+      line = r.read_i32_le
+      column = r.read_i32_le
+      pins << PinRecord.new(call, line, column, r.read_string)
+      i = i + 1
+    end
+    {res, pins}
+  end
+
+  # `Section::Reaches`: what each function reaches of module state.
+  def self.encode_reaches(records : Array(ReachRecord)) : String
+    w = IOBuffer.new
+    w.write_u32_le(records.size.to_u64.to_u32)
+    i = 0
+    while i < records.size
+      record = records[i]
+      w.write_string(record.function)
+      w.write_string(record.label)
+      w.write_string(record.type)
+      w.write_string(record.kind)
+      w.write_string(record.use)
+      w.write_strings(record.path)
+      w.write_string(record.why)
+      w.write_string(record.module_name)
+      w.write_string(record.owning)
+      i = i + 1
+    end
+    w.to_s
+  end
+
+  def self.decode_reaches(payload : String, path : String = "") : Array(ReachRecord)
+    r = BinaryReader.new(payload, path)
+    count = r.read_count(32)
+    res = [] of ReachRecord
+    i = 0
+    while i < count
+      fn_name = r.read_string
+      label = r.read_string
+      type_name = r.read_string
+      kind = r.read_string
+      use_site = r.read_string
+      path = r.read_strings
+      why = r.read_string
+      module_name = r.read_string
+      res << ReachRecord.new(fn_name, label, type_name, kind, use_site, path, why, module_name, r.read_string)
+      i = i + 1
+    end
+    res
+  end
+
+  # The index of *filename* in *filenames*, which it joins when it is new.
+  def self.filename_index(filenames : Array(String), filename : String) : UInt32
+    i = 0
+    while i < filenames.size
+      return i.to_i64.to_u32 if filenames[i] == filename
+      i = i + 1
+    end
+    filenames << filename
+    (filenames.size - 1).to_i64.to_u32
+  end
+
+  def self.write_positions(w : IOBuffer, positions : Array(SourcePosition), filenames : Array(String)) : Nil
+    w.write_u32_le(positions.size.to_u64.to_u32)
+    i = 0
+    while i < positions.size
+      position = positions[i]
+      w.write_u32_le(position.offset.to_i64.to_u32)
+      w.write_u32_le(filename_index(filenames, position.filename))
+      w.write_u32_le(position.line.to_i64.to_u32)
+      w.write_u32_le(position.column.to_i64.to_u32)
+      i = i + 1
+    end
+  end
+
+  def self.read_positions(r : BinaryReader, filenames : Array(String)) : Array(SourcePosition)
+    count = r.read_count(16)
+    res = [] of SourcePosition
+    i = 0
+    while i < count
+      offset = r.read_u32_le.to_i64.to_i32
+      index = r.read_u32_le.to_i64.to_i32
+      line = r.read_u32_le.to_i64.to_i32
+      column = r.read_u32_le.to_i64.to_i32
+      res << SourcePosition.new(offset, filenames[index], line, column)
+      i = i + 1
+    end
+    res
+  end
+
+  # `Section::SourcePositions`: the filenames once, then each body's positions
+  # by key and the initialiser's, each position naming its file by index.
+  def self.encode_source_positions(artifact : Artifact) : String
+    filenames = [] of String
+    lists = IOBuffer.new
+    keys = artifact.body_positions.keys.sorted
+    lists.write_u32_le(keys.size.to_u64.to_u32)
+    i = 0
+    while i < keys.size
+      lists.write_string(keys[i])
+      write_positions(lists, artifact.body_positions[keys[i]], filenames)
+      i = i + 1
+    end
+    write_positions(lists, artifact.initialiser_positions, filenames)
+
+    io = IOBuffer.new
+    io.write_strings(filenames)
+    io.write_raw(lists.to_s)
+    io.to_s
+  end
+
+  def self.decode_source_positions(payload : String, path : String = "") : SourcePositionsDecoded
+    r = BinaryReader.new(payload, path)
+    filenames = r.read_strings
+    bodies = {} of String => Array(SourcePosition)
+    count = r.read_count(8)
+    i = 0
+    while i < count
+      key = r.read_string
+      bodies[key] = read_positions(r, filenames)
+      i = i + 1
+    end
+    initialiser = read_positions(r, filenames)
+    SourcePositionsDecoded.new(bodies, initialiser)
+  end
+
+  def self.encode_initialiser(artifact : Artifact) : String
+    artifact.initialiser
+  end
+
+  def self.encode_mono_bodies(artifact : Artifact) : String
+    w = IOBuffer.new
+    bodies = artifact.mono_bodies
+    w.write_u32_le(bodies.size.to_u64.to_u32)
+    keys = bodies.keys.sorted
+    i = 0
+    while i < keys.size
+      key = keys[i]
+      w.write_string(key)
+      w.write_string(bodies[key])
+      i = i + 1
+    end
+    w.to_s
+  end
+
+  def self.decode_mono_bodies(payload : String, path : String = "") : Hash(String, String)
+    r = BinaryReader.new(payload, path)
+    count = r.read_count(8)
+    bodies = {} of String => String
+    i = 0
+    while i < count
+      key = r.read_string
+      body = r.read_string
+      bodies[key] = body
+      i = i + 1
+    end
+    bodies
+  end
+
+  def self.encode_macro_bodies(artifact : Artifact) : String
+    w = IOBuffer.new
+    w.write_strings(artifact.macro_bodies)
+    w.to_s
+  end
+
+  def self.decode_macro_bodies(payload : String, path : String = "") : Array(String)
+    BinaryReader.new(payload, path).read_strings
+  end
+
+  def self.encode_type_ids(artifact : Artifact) : String
+    w = IOBuffer.new
+    w.write_strings(artifact.type_ids)
+    w.to_s
+  end
+
+  def self.decode_type_ids(payload : String, path : String = "") : Array(String)
+    BinaryReader.new(payload, path).read_strings
+  end
+
+  def self.encode_constants(artifact : Artifact) : String
+    w = IOBuffer.new
+    w.write_strings(artifact.constants)
+    w.to_s
+  end
+
+  def self.decode_constants(payload : String, path : String = "") : Array(String)
+    BinaryReader.new(payload, path).read_strings
+  end
+
+  def self.encode_layouts(artifact : Artifact) : String
+    w = IOBuffer.new
+    layouts = artifact.layouts
+    w.write_u32_le(layouts.size.to_u64.to_u32)
+    i = 0
+    while i < layouts.size
+      pair = layouts[i]
+      name = pair[0]
+      layout = pair[1]
+      w.write_string(name)
+      w.write_i32_le(layout.type_id)
+      w.write_u32_le(layout.alloc_size)
+      w.write_u32_le(layout.scan_cap)
+      w.write_u32_le(layout.scan_offsets.size.to_u64.to_u32)
+      j = 0
+      while j < layout.scan_offsets.size
+        w.write_u32_le(layout.scan_offsets[j])
+        j = j + 1
+      end
+      w.write_u32_le(layout.noscan_offsets.size.to_u64.to_u32)
+      j = 0
+      while j < layout.noscan_offsets.size
+        w.write_u32_le(layout.noscan_offsets[j])
+        j = j + 1
+      end
+      i = i + 1
+    end
+    w.to_s
+  end
+
+  def self.decode_layouts(payload : String, path : String = "") : Array({String, TypeLayout})
+    r = BinaryReader.new(payload, path)
+    count = r.read_count(24)
+    res = [] of {String, TypeLayout}
+    i = 0
+    while i < count
+      name = r.read_string
+      type_id = r.read_i32_le
+      alloc_size = r.read_u32_le
+      scan_cap = r.read_u32_le
+      scan_count = r.read_count(4)
+      scan_offsets = [] of UInt32
+      j = 0
+      while j < scan_count
+        scan_offsets << r.read_u32_le
+        j = j + 1
+      end
+      noscan_count = r.read_count(4)
+      noscan_offsets = [] of UInt32
+      j = 0
+      while j < noscan_count
+        noscan_offsets << r.read_u32_le
+        j = j + 1
+      end
+      res << {name, TypeLayout.new(type_id, alloc_size, scan_cap, scan_offsets, noscan_offsets)}
+      i = i + 1
+    end
+    res
+  end
+
+  def self.encode_regexes(artifact : Artifact) : String
+    w = IOBuffer.new
+    regexes = artifact.regexes
+    w.write_u32_le(regexes.size.to_u64.to_u32)
+    i = 0
+    while i < regexes.size
+      rx = regexes[i]
+      w.write_string(rx.name)
+      w.write_string(rx.pattern)
+      w.write_u32_le(rx.options)
+      i = i + 1
+    end
+    w.to_s
+  end
+
+  def self.decode_regexes(payload : String, path : String = "") : Array(RegexConst)
+    r = BinaryReader.new(payload, path)
+    count = r.read_count(12)
+    res = [] of RegexConst
+    i = 0
+    while i < count
+      name = r.read_string
+      pattern = r.read_string
+      options = r.read_u32_le
+      res << RegexConst.new(name, pattern, options)
+      i = i + 1
+    end
+    res
+  end
+
+  def self.encode_class_vars(artifact : Artifact) : String
+    w = IOBuffer.new
+    refs = artifact.class_vars
+    w.write_u32_le(refs.size.to_u64.to_u32)
+    i = 0
+    while i < refs.size
+      ref = refs[i]
+      w.write_string(ref.name)
+      w.write_byte(ref.lazy ? 1_u8 : 0_u8)
+      i = i + 1
+    end
+    w.to_s
+  end
+
+  def self.decode_class_vars(payload : String, path : String = "") : Array(ClassVarRef)
+    r = BinaryReader.new(payload, path)
+    count = r.read_count(5)
+    res = [] of ClassVarRef
+    i = 0
+    while i < count
+      name = r.read_string
+      lazy = r.read_u8 == 1_u8
+      res << ClassVarRef.new(name, lazy)
+      i = i + 1
+    end
+    res
+  end
+
+  def self.encode_match_types(artifact : Artifact) : String
+    w = IOBuffer.new
+    w.write_strings(artifact.match_types)
+    w.to_s
+  end
+
+  def self.decode_match_types(payload : String, path : String = "") : Array(String)
+    BinaryReader.new(payload, path).read_strings
+  end
+
+  def self.encode_symbols(artifact : Artifact) : String
+    w = IOBuffer.new
+    w.write_strings(artifact.symbols)
+    w.to_s
+  end
+
+  def self.decode_symbols(payload : String, path : String = "") : Array(String)
+    BinaryReader.new(payload, path).read_strings
+  end
+
+  def self.encode_libs(artifact : Artifact) : String
+    w = IOBuffer.new
+    w.write_strings(artifact.libs)
+    w.to_s
+  end
+
+  def self.decode_libs(payload : String, path : String = "") : Array(String)
+    BinaryReader.new(payload, path).read_strings
+  end
+
+  def self.encode_reopened(artifact : Artifact) : String
+    w = IOBuffer.new
+    write_type_declarations(w, artifact.reopened, true)
+    w.to_s
+  end
+
+  def self.decode_reopened(payload : String, path : String = "") : Array(TypeDecl)
+    read_type_declarations(BinaryReader.new(payload, path))
+  end
+
+  def self.encode_top_level_funs(artifact : Artifact) : String
+    w = IOBuffer.new
+    w.write_strings(artifact.top_level_funs)
+    w.to_s
+  end
+
+  def self.decode_top_level_funs(payload : String, path : String = "") : Array(String)
+    BinaryReader.new(payload, path).read_strings
+  end
+
+  def self.encode_top_level(artifact : Artifact) : String
+    w = IOBuffer.new
+    write_signatures(w, artifact.top_level, true)
+    w.to_s
+  end
+
+  def self.decode_top_level(payload : String, path : String = "") : Array(Signature)
+    read_signatures(BinaryReader.new(payload, path))
+  end
+
+  def self.encode_object_code(artifact : Artifact) : String
+    w = IOBuffer.new
+    units = artifact.object_code
+    w.write_u32_le(units.size.to_u64.to_u32)
+    i = 0
+    while i < units.size
+      unit = units[i]
+      w.write_string(unit.name)
+      w.write_string(unit.code)
+      i = i + 1
+    end
+    w.to_s
+  end
+
+  def self.decode_object_code(payload : String, path : String = "") : Array(ObjectUnit)
+    r = BinaryReader.new(payload, path)
+    count = r.read_count(8)
+    res = [] of ObjectUnit
+    i = 0
+    while i < count
+      name = r.read_string
+      code = r.read_string
+      res << ObjectUnit.new(name, code)
+      i = i + 1
+    end
+    res
+  end
+
+  def self.encode_exports(artifact : Artifact, docs : Bool = true) : String
+    w = IOBuffer.new
+    write_signatures(w, artifact.exports.functions, docs)
+    write_type_declarations(w, artifact.exports.types, docs)
+
+    impls = artifact.exports.impls
+    w.write_u32_le(impls.size.to_u64.to_u32)
+    i = 0
+    while i < impls.size
+      rec = impls[i]
+      w.write_string(rec.trait_name)
+      w.write_string(rec.type_name)
+      w.write_strings(rec.trait_arguments)
+      w.write_strings(rec.free_variables)
+      w.write_pairs(rec.free_variable_bounds)
+      w.write_pairs(rec.assoc_types)
+      write_signatures(w, rec.methods, docs)
+      i = i + 1
+    end
+
+    write_signatures(w, artifact.exports.carried_functions, docs)
+    write_class_vars(w, artifact.exports.class_vars)
+    w.to_s
+  end
+
+  def self.decode_exports(payload : String, path : String = "") : Exports
+    r = BinaryReader.new(payload, path)
+    funcs = read_signatures(r)
+    types = read_type_declarations(r)
+
+    impl_count = r.read_count(28)
+    impls = [] of ImplRecord
+    i = 0
+    while i < impl_count
+      trait_name = r.read_string
+      type_name = r.read_string
+      trait_args = r.read_strings
+      free_vars = r.read_strings
+      free_var_bounds = r.read_pairs
+      assoc_types = r.read_pairs
+      methods = read_signatures(r)
+      impls << ImplRecord.new(trait_name, type_name, trait_args, free_vars, free_var_bounds, assoc_types, methods)
+      i = i + 1
+    end
+
+    carried = read_signatures(r)
+    cvs = read_class_vars(r)
+    Exports.new(funcs, types, impls, carried, cvs)
+  end
+
+  def self.write_signatures(w : IOBuffer, signatures : Array(Signature), docs : Bool = true) : Nil
+    w.write_u32_le(signatures.size.to_u64.to_u32)
+    i = 0
+    while i < signatures.size
+      sig = signatures[i]
+      w.write_string(sig.name)
+      w.write_string(sig.receiver)
+      w.write_strings(sig.parameters)
+      w.write_string(sig.block_parameter)
+      w.write_string(sig.return_type)
+      w.write_strings(sig.free_variables)
+      w.write_byte(sig.required ? 1_u8 : 0_u8)
+      w.write_string(docs ? sig.doc : "")
+      w.write_string(sig.visibility)
+      w.write_strings(sig.annotations)
+      w.write_pairs(sig.free_variable_bounds)
+      w.write_pairs(sig.where_bounds)
+      i = i + 1
+    end
+  end
+
+  def self.read_signatures(r : BinaryReader) : Array(Signature)
+    count = r.read_count(45)
+    res = [] of Signature
+    i = 0
+    while i < count
+      name = r.read_string
+      receiver = r.read_string
+      params = r.read_strings
+      block_param = r.read_string
+      ret_type = r.read_string
+      free_vars = r.read_strings
+      required = r.read_u8 == 1_u8
+      doc = r.read_string
+      visibility = r.read_string
+      annotations = r.read_strings
+      free_var_bounds = r.read_pairs
+      where_bounds = r.read_pairs
+      res << Signature.new(name, receiver, params, block_param, ret_type, free_vars, required, visibility, doc, annotations, free_var_bounds, where_bounds)
+      i = i + 1
+    end
+    res
+  end
+
+  def self.write_class_vars(w : IOBuffer, cvs : Array(ClassVarDecl)) : Nil
+    w.write_u32_le(cvs.size.to_u64.to_u32)
+    i = 0
+    while i < cvs.size
+      cv = cvs[i]
+      w.write_string(cv.name)
+      w.write_string(cv.type)
+      w.write_string(cv.value)
+      w.write_strings(cv.annotations)
+      i = i + 1
+    end
+  end
+
+  def self.read_class_vars(r : BinaryReader) : Array(ClassVarDecl)
+    count = r.read_count(16)
+    res = [] of ClassVarDecl
+    i = 0
+    while i < count
+      name = r.read_string
+      type = r.read_string
+      value = r.read_string
+      annotations = r.read_strings
+      res << ClassVarDecl.new(name, type, value, annotations)
+      i = i + 1
+    end
+    res
+  end
+
+  def self.write_type_declarations(w : IOBuffer, types : Array(TypeDecl), docs : Bool = true, depth : Int32 = 0) : Nil
+    if depth > 200 && !types.empty?
+      raise Error.new(types[0].name + " is declared more than 200 types deep, which is deeper than a .iyimod holds").to_s
+    end
+    w.write_u32_le(types.size.to_u64.to_u32)
+    i = 0
+    while i < types.size
+      decl = types[i]
+      w.write_string(decl.name)
+      w.write_string(decl.kind)
+      w.write_string(decl.value)
+      w.write_string(decl.visibility)
+      w.write_strings(decl.type_parameters)
+      w.write_strings(decl.assoc_types)
+      w.write_strings(decl.supertraits)
+      w.write_triples(decl.fields)
+      w.write_pairs(decl.members)
+      write_class_vars(w, decl.class_vars)
+      w.write_string(decl.superclass)
+      w.write_strings(decl.includes)
+      w.write_strings(decl.macros)
+      w.write_strings(decl.funs)
+      w.write_strings(decl.annotations)
+      w.write_string(docs ? decl.doc : "")
+      w.write_byte(decl.extends_self ? 1_u8 : 0_u8)
+      w.write_strings(decl.usings)
+      write_signatures(w, decl.methods, docs)
+      write_type_declarations(w, decl.types, docs, depth + 1)
+      i = i + 1
+    end
+  end
+
+  def self.read_type_declarations(r : BinaryReader, depth : Int32 = 0) : Array(TypeDecl)
+    count = r.read_count(77)
+    if depth > 200 && count > 0
+      r.refuse("a section declares types more than 200 deep inside one another, which is deeper than a .iyimod holds")
+    end
+    res = [] of TypeDecl
+    i = 0
+    while i < count
+      name = r.read_string
+      kind = r.read_string
+      value = r.read_string
+      vis = r.read_string
+      params = r.read_strings
+      assoc = r.read_strings
+      supertraits = r.read_strings
+      fields = r.read_triples
+      members = r.read_pairs
+      class_vars = read_class_vars(r)
+      superclass = r.read_string
+      includes = r.read_strings
+      macros = r.read_strings
+      funs = r.read_strings
+      annotations = r.read_strings
+      doc = r.read_string
+      extends_self = r.read_u8 == 1_u8
+      usings = r.read_strings
+      methods = read_signatures(r)
+      nested_types = read_type_declarations(r, depth + 1)
+      res << TypeDecl.new(
+        name, kind, params, assoc, supertraits, fields, methods, vis,
+        nested_types, value, macros, members, class_vars, superclass,
+        includes, funs, annotations, doc, extends_self, usings,
+      )
+      i = i + 1
+    end
+    res
+  end
+
+  # ===========================================================================
+  # Text rendering / surface / dump / declarations
+  # ===========================================================================
+
+  # Names written with their bounds, `T : Show`, as a `forall` writes them.
+  def self.bounded_names(names : Array(String), bounds : Array({String, String})) : String
+    parts = [] of String
+    i = 0
+    while i < names.size
+      bound = bound_for(bounds, names[i])
+      parts << (bound.empty? ? names[i] : names[i] + " : " + bound)
+      i = i + 1
+    end
+    parts.join(", ")
+  end
+
+  # The last bound written for *name*: a later pair for the same name wins, as
+  # it does in the hash the oracle builds from the pairs.
+  def self.bound_for(bounds : Array({String, String}), name : String) : String
+    found = ""
+    i = 0
+    while i < bounds.size
+      found = bounds[i][1] if bounds[i][0] == name
+      i = i + 1
+    end
+    found
+  end
+
+  def self.pairs_text(pairs : Array({String, String})) : String
+    parts = [] of String
+    i = 0
+    while i < pairs.size
+      parts << pairs[i][0] + " : " + pairs[i][1]
+      i = i + 1
+    end
+    parts.join(", ")
+  end
+
+  # Text with its prefix removed, when it has that prefix.
+  def self.drop_prefix(text : String, prefix : String) : String
+    text.starts_with?(prefix) ? text[prefix.bytesize, text.bytesize - prefix.bytesize] : text
+  end
+
+  # An array of numbers written as Crystal writes one, `[0, 8]`.
+  def self.array_text(values : Array(UInt32)) : String
+    parts = [] of String
+    i = 0
+    while i < values.size
+      parts << values[i].to_u64.to_s
+      i = i + 1
+    end
+    "[" + parts.join(", ") + "]"
+  end
+
+  # The lines of *text*, each keeping its line break, so that the joined lines
+  # are *text* again (`undocumented_macro`).
+  def self.lines_keeping_breaks(text : String) : Array(String)
+    out = [] of String
+    start = 0
+    i = 0
+    while i < text.bytesize
+      if text.byte_at(i) == 10_u8
+        out << text[start, i + 1 - start]
+        start = i + 1
+      end
+      i = i + 1
+    end
+    out << text[start, text.bytesize - start] if start < text.bytesize
+    out
+  end
+
+  # The exported form of a macro: `pub` goes on its line, after its doc comment,
+  # and a macro the other language already marked, or one of the hooks, is left.
+  def self.exported_macro(source : String) : String
+    written = macro_line(source)
+    return source if written.starts_with?("pub ")
+    return source unless written.starts_with?("macro ")
+
+    name = macro_name(source)
+    return source if name.empty? || MACRO_HOOKS.includes?(name)
+    doc = source.bytesize - undocumented_macro(source).bytesize
+    source[0, doc] + "pub " + source[doc, source.bytesize - doc]
+  end
+
+  def self.exported_macros(artifact : Artifact) : Array(String)
+    sources = [] of String
+    i = 0
+    while i < artifact.macro_bodies.size
+      source = artifact.macro_bodies[i]
+      sources << source if macro_line(source).starts_with?("pub macro ")
+      i = i + 1
+    end
+    sources
+  end
+
+  # A carried macro's first line, `pub macro twice(x)`, past its doc.
+  def self.macro_line(source : String) : String
+    lines = source.lines
+    i = 0
+    while i < lines.size
+      text = lines[i].strip
+      return text unless text.starts_with?("#")
+      i = i + 1
+    end
+    ""
+  end
+
+  # The name a call writes: `twice` for `pub macro twice(x)`.
+  def self.macro_name(source : String) : String
+    rest = drop_prefix(drop_prefix(macro_line(source), "pub "), "macro ").strip
+    res = ""
+    i = 0
+    while i < rest.bytesize
+      c = rest.byte_at(i).unsafe_chr
+      break if c.whitespace? || c == '('
+      res = res + c.to_s
+      i = i + 1
+    end
+    res
+  end
+
+  # A carried macro's doc comment, as `Signature#doc` holds a def's.
+  def self.macro_doc(source : String) : String
+    out = [] of String
+    lines = source.lines
+    i = 0
+    while i < lines.size && lines[i].starts_with?("#")
+      out << drop_prefix(drop_prefix(lines[i], "#"), " ")
+      i = i + 1
+    end
+    out.join("\n")
+  end
+
+  # A carried macro without its doc comment, with its line breaks kept.
+  def self.undocumented_macro(source : String) : String
+    res = ""
+    skipping = true
+    lines = lines_keeping_breaks(source)
+    i = 0
+    while i < lines.size
+      line = lines[i]
+      unless skipping && line.starts_with?("#")
+        skipping = false
+        res = res + line
+      end
+      i = i + 1
+    end
+    res
+  end
+
+  # `import a/b::{X}` for a scope directive that names something, or
+  # `import a/b::*` for every name the module brings.
+  def self.scoped_import(directive : String) : String
+    directive.includes?("::") ? "import " + directive : "import " + directive + "::*"
+  end
+
+  # One signature as the declaration it came from. `mod dump` prints this, and
+  # so does the reconstruction a consumer compiles against.
+  def self.render_signature(signature : Signature) : String
+    res = ""
+    res = res + signature.visibility + " " unless signature.visibility.empty?
+    res = res + "abstract " if signature.required
+    res = res + "def "
+    res = res + signature.receiver + "." unless signature.receiver.empty?
+    res = res + signature.name
+
+    params = signature.parameters
+    block_parameter = signature.block_parameter
+    unless params.empty? && block_parameter.empty?
+      res = res + "(" + params.join(", ")
+      res = res + ", " unless params.empty? || block_parameter.empty?
+      res = res + block_parameter + ")"
+    end
+
+    res = res + " : " + signature.return_type unless signature.return_type.empty?
+
+    free_variables = signature.free_variables
+    unless free_variables.empty?
+      res = res + " forall " + bounded_names(free_variables, signature.free_variable_bounds)
+    end
+
+    where_bounds = signature.where_bounds
+    unless where_bounds.empty?
+      res = res + " where " + pairs_text(where_bounds)
+    end
+    res
+  end
+
+  def self.render_type_header(decl : TypeDecl) : String
+    kind = decl.kind.starts_with?("generic ") ? decl.kind[8, decl.kind.bytesize - 8] : decl.kind
+    res = kind + " " + decl.name
+
+    params = decl.type_parameters
+    unless params.empty?
+      res = res + "(" + params.join(", ") + ")"
+    end
+
+    unless decl.superclass.empty?
+      res = res + " < "
+      res = res + "::" if decl.superclass == decl.name
+      res = res + decl.superclass
+    end
+
+    supertraits = decl.supertraits
+    unless supertraits.empty?
+      res = res + " : " + supertraits.join(", ")
+    end
+
+    if decl.kind == "alias" || decl.kind == "type"
+      res = res + " = " + decl.value
+    end
+
+    if decl.kind == "enum" && !decl.value.empty?
+      res = res + " : " + decl.value
+    end
+    res
+  end
+
+  # Whether the byte at *index* of *text* is an ASCII capital letter.
+  def self.upper_at?(text : String, index : Int32) : Bool
+    byte = text.byte_at(index)
+    byte >= 65_u8 && byte <= 90_u8
+  end
+
+  # A resolved type's name, written so that it names that type wherever it is
+  # read: each path in it is made global, `::Tuple(::Int32)`, except a single
+  # name that is one of the type parameters in scope. A path already global is
+  # kept as it is.
+  def self.absolute_type(text : String, parameters : Array(String)) : String
+    return text if text.empty? || text == "?"
+    res = ""
+    i = 0
+    n = text.bytesize
+    while i < n
+      c = text.byte_at(i).unsafe_chr
+      prev = i > 0 ? text.byte_at(i - 1).unsafe_chr : ' '
+      starts_path = upper_at?(text, i) && !prev.alphanumeric? && prev != '_' && prev != ':'
+      unless starts_path
+        res = res + c.to_s
+        i = i + 1
+        next
+      end
+
+      j = i
+      while j < n
+        d = text.byte_at(j).unsafe_chr
+        if d.alphanumeric? || d == '_'
+          j = j + 1
+        elsif d == ':' && j + 2 < n && text.byte_at(j + 1) == 58_u8 && upper_at?(text, j + 2)
+          j = j + 2
+        else
+          break
+        end
+      end
+      path = text[i, j - i]
+      if !path.includes?("::") && parameters.includes?(path)
+        res = res + path
+      else
+        res = res + "::" + path
+      end
+      i = j
+    end
+    res
+  end
+
+  # The part of *text* before its first *stop* byte, or all of it.
+  def self.text_before(text : String, stop : Char) : String
+    res = ""
+    i = 0
+    while i < text.bytesize
+      c = text.byte_at(i).unsafe_chr
+      break if c == stop
+      res = res + c.to_s
+      i = i + 1
+    end
+    res
+  end
+
+  # The segments of a path written `A::B::C`.
+  def self.path_segments(text : String) : Array(String)
+    out = [] of String
+    current = ""
+    i = 0
+    while i < text.bytesize
+      if text.byte_at(i) == 58_u8 && i + 1 < text.bytesize && text.byte_at(i + 1) == 58_u8
+        out << current
+        current = ""
+        i = i + 2
+      else
+        current = current + text.byte_at(i).unsafe_chr.to_s
+        i = i + 1
+      end
+    end
+    out << current
+    out
+  end
+
+  # An impl's declaration line, `impl Enumerable for List(T) forall T`. The trait
+  # and the target are written as the consumer reads them when *absolute*, and
+  # as the module wrote them when not.
+  def self.render_impl_header(record : ImplRecord, absolute : Bool = true) : String
+    parameters = [] of String
+    i = 0
+    while i < record.free_variables.size
+      parameters << drop_prefix(record.free_variables[i], "*")
+      i = i + 1
+    end
+    arguments = record.trait_arguments
+
+    named = arguments.empty? ? record.trait_name : text_before(record.trait_name, '(')
+    res = "impl " + (absolute ? absolute_type(named, parameters) : named)
+
+    unless arguments.empty?
+      res = res + "(" + arguments.join(", ") + ")"
+    end
+
+    res = res + " for " + (absolute ? absolute_type(record.type_name, parameters) : record.type_name)
+
+    unless record.free_variables.empty?
+      res = res + " forall " + bounded_names(record.free_variables, record.free_variable_bounds)
+    end
+    res
+  end
+
+  def self.render_class_var(class_var : ClassVarDecl) : String
+    name = class_var.name
+    type = class_var.type
+    value = class_var.value
+    return name + " = " + value if value.starts_with?("uninitialized ")
+    value.empty? ? name + " : " + type : name + " : " + type + " = " + value
+  end
+
+  # The same line for a dump, where the annotations go beside it rather than
+  # above it: one line per class variable is what makes a dump readable.
+  def self.dump_class_var(class_var : ClassVarDecl) : String
+    line = render_class_var(class_var)
+    class_var.annotations.empty? ? line : class_var.annotations.join(" ") + " " + line
+  end
+
+  # The body *text*, one line at a time, each behind *prefix*.
+  def self.write_body(text : String, prefix : String) : String
+    res = ""
+    lines = text.lines
+    i = 0
+    while i < lines.size
+      res = res + prefix + lines[i] + "\n"
+      i = i + 1
+    end
+    res
+  end
+
+  # One declaration, with the body the key names when one travelled. An empty
+  # body is written `nil`, which is what an empty body answers.
+  def self.render_declaration(signature : Signature, bodies : Hash(String, String), key : String, exported : Bool = false, indent : String = "") : String
+    res = ""
+    unless signature.doc.empty?
+      lines = signature.doc.lines
+      i = 0
+      while i < lines.size
+        res = res + indent + "# " + lines[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    i = 0
+    while i < signature.annotations.size
+      res = res + indent + signature.annotations[i] + "\n"
+      i = i + 1
+    end
+
+    res = res + indent
+    res = res + "pub " if exported
+    res = res + render_signature(signature) + "\n"
+    return res if signature.required
+
+    if bodies.has_key?(key)
+      body = bodies[key]
+      if body.strip.empty?
+        res = res + indent + "  nil\n"
+      else
+        res = res + write_body(body, indent + "  ")
+      end
+    end
+    res = res + indent + "end\n"
+    res
+  end
+
+  def self.render_type_declaration(decl : TypeDecl, bodies : Hash(String, String), indent : String = "", path : String = "", in_lib : Bool = false) : String
+    res = ""
+    unless decl.doc.empty?
+      lines = decl.doc.lines
+      i = 0
+      while i < lines.size
+        res = res + indent + "# " + lines[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    i = 0
+    while i < decl.annotations.size
+      res = res + indent + decl.annotations[i] + "\n"
+      i = i + 1
+    end
+
+    res = res + indent
+    res = res + decl.visibility + " " unless decl.visibility.empty?
+    res = res + render_type_header(decl) + "\n"
+
+    return res if decl.kind == "alias" || decl.kind == "type"
+
+    inner = indent + "  "
+    i = 0
+    while i < decl.usings.size
+      res = res + inner + scoped_import(decl.usings[i]) + "\n"
+      i = i + 1
+    end
+
+    res = res + inner + "extend self\n" if decl.extends_self
+
+    i = 0
+    while i < decl.macros.size
+      m_lines = decl.macros[i].lines
+      j = 0
+      while j < m_lines.size
+        res = res + inner + m_lines[j] + "\n"
+        j = j + 1
+      end
+      i = i + 1
+    end
+
+    i = 0
+    while i < decl.assoc_types.size
+      res = res + inner + "type " + decl.assoc_types[i] + "\n"
+      i = i + 1
+    end
+
+    i = 0
+    while i < decl.fields.size
+      f = decl.fields[i]
+      name = in_lib ? drop_prefix(f[0], "@") : f[0]
+      line = inner + name + " : " + f[1]
+      line = line + " = " + f[2] unless f[2].empty?
+      res = res + line + "\n"
+      i = i + 1
+    end
+
+    i = 0
+    while i < decl.class_vars.size
+      cv = decl.class_vars[i]
+      j = 0
+      while j < cv.annotations.size
+        res = res + inner + cv.annotations[j] + "\n"
+        j = j + 1
+      end
+      res = res + inner + render_class_var(cv) + "\n"
+      i = i + 1
+    end
+
+    i = 0
+    while i < decl.members.size
+      m = decl.members[i]
+      res = res + inner + m[0] + " = " + m[1] + "\n"
+      i = i + 1
+    end
+
+    here = path.empty? ? decl.name : path
+    ordered_types = inheritance_order(decl.types)
+    i = 0
+    while i < ordered_types.size
+      res = res + render_type_declaration(ordered_types[i], bodies, inner, here + "::" + ordered_types[i].name, decl.kind == "lib")
+      i = i + 1
+    end
+
+    i = 0
+    while i < decl.includes.size
+      res = res + inner + "include " + decl.includes[i] + "\n"
+      i = i + 1
+    end
+
+    i = 0
+    while i < decl.funs.size
+      res = res + inner + decl.funs[i] + "\n"
+      i = i + 1
+    end
+
+    ordinals = mono_body_ordinals(decl.methods)
+    i = 0
+    while i < decl.methods.size
+      res = res + render_declaration(decl.methods[i], bodies, mono_body_key(here, decl.methods[i], ordinals[i]), false, inner)
+      i = i + 1
+    end
+
+    res = res + indent + "end\n"
+    res
+  end
+
+  def self.dump_type_declaration(decl : TypeDecl, indent : String) : String
+    prefix = decl.visibility.empty? ? "" : decl.visibility + " "
+    res = indent + prefix + render_type_header(decl) + "\n"
+    return res if decl.kind == "alias"
+
+    inner = indent + "  "
+    i = 0
+    while i < decl.macros.size
+      res = res + inner + macro_line(decl.macros[i]) + "\n"
+      i = i + 1
+    end
+    i = 0
+    while i < decl.assoc_types.size
+      res = res + inner + "type " + decl.assoc_types[i] + "\n"
+      i = i + 1
+    end
+    i = 0
+    while i < decl.fields.size
+      f = decl.fields[i]
+      res = res + inner + f[0] + " : " + f[1] + "\n"
+      i = i + 1
+    end
+    i = 0
+    while i < decl.class_vars.size
+      res = res + inner + dump_class_var(decl.class_vars[i]) + "\n"
+      i = i + 1
+    end
+    i = 0
+    while i < decl.types.size
+      res = res + dump_type_declaration(decl.types[i], inner)
+      i = i + 1
+    end
+    i = 0
+    while i < decl.methods.size
+      res = res + inner + render_signature(decl.methods[i]) + "\n"
+      i = i + 1
+    end
+    res
+  end
+
+  # Every name in a piece of declaration text, `Foo::Bar` counted whole.
+  def self.iyi_names_in(text : String) : Array(String)
+    names = [] of String
+    current = ""
+    i = 0
+    while i < text.bytesize
+      c = text.byte_at(i).unsafe_chr
+      if c.alphanumeric? || c == '_' || c == ':'
+        current = current + c.to_s
+      else
+        names << current unless current.empty?
+        current = ""
+      end
+      i = i + 1
+    end
+    names << current unless current.empty?
+    names
+  end
+
+  # Every alias written in *decl*, its own and those of the types inside it.
+  def self.aliased_in(decl : TypeDecl) : Array(String)
+    values = [] of String
+    values << decl.value if decl.kind == "alias" || decl.kind == "type"
+    i = 0
+    while i < decl.types.size
+      inner = aliased_in(decl.types[i])
+      j = 0
+      while j < inner.size
+        values << inner[j]
+        j = j + 1
+      end
+      i = i + 1
+    end
+    values
+  end
+
+  # Places a type after the siblings its declaration is written in terms of:
+  # its superclass, its includes, its annotations, and every alias it holds.
+  def self.place_type(decl : TypeDecl, by_name : Hash(String, TypeDecl), placed : Set(String), ordered : Array(TypeDecl)) : Nil
+    return if placed.includes?(decl.name)
+    placed.add(decl.name)
+
+    needed = [decl.superclass]
+    i = 0
+    while i < decl.includes.size
+      needed << decl.includes[i]
+      i = i + 1
+    end
+    i = 0
+    while i < decl.annotations.size
+      needed << decl.annotations[i]
+      i = i + 1
+    end
+
+    k = 0
+    while k < needed.size
+      names = iyi_names_in(needed[k])
+      n_idx = 0
+      while n_idx < names.size
+        name = names[n_idx]
+        if by_name.has_key?(name)
+          first = by_name[name]
+          place_type(first, by_name, placed, ordered) if first.name != decl.name
+        end
+        n_idx = n_idx + 1
+      end
+      k = k + 1
+    end
+
+    aliased = aliased_in(decl)
+    a = 0
+    while a < aliased.size
+      names = iyi_names_in(aliased[a])
+      n_idx = 0
+      while n_idx < names.size
+        segments = path_segments(drop_prefix(names[n_idx], "::"))
+        s_idx = 0
+        while s_idx < segments.size
+          segment = segments[s_idx]
+          if by_name.has_key?(segment)
+            first = by_name[segment]
+            place_type(first, by_name, placed, ordered) if first.name != decl.name
+          end
+          s_idx = s_idx + 1
+        end
+        n_idx = n_idx + 1
+      end
+      a = a + 1
+    end
+
+    ordered << decl
+  end
+
+  # The declarations reordered so what a type is written in terms of comes first.
+  def self.inheritance_order(types : Array(TypeDecl)) : Array(TypeDecl)
+    has_dep = false
+    i = 0
+    while i < types.size
+      if !types[i].superclass.empty? || !types[i].includes.empty? || !types[i].annotations.empty? || !aliased_in(types[i]).empty?
+        has_dep = true
+        break
+      end
+      i = i + 1
+    end
+    return types unless has_dep
+
+    by_name = {} of String => TypeDecl
+    i = 0
+    while i < types.size
+      by_name[types[i].name] = types[i]
+      i = i + 1
+    end
+
+    ordered = [] of TypeDecl
+    placed = Set(String).new
+    i = 0
+    while i < types.size
+      place_type(types[i], by_name, placed, ordered)
+      i = i + 1
+    end
+    ordered
+  end
+
+  # Text for `mod dump`: what the artifact holds, named.
+  def self.dump_to_s(artifact : Artifact) : String
+    res = ""
+    res = res + "module        " + artifact.module_name + "\n"
+    res = res + "package       " + artifact.package_name + "\n" unless artifact.package_name.empty?
+    res = res + "source        " + artifact.source_path + "\n"
+    res = res + "compiler      " + artifact.compiler_version + "\n"
+    res = res + "target        " + artifact.target_triple + "\n"
+    res = res + "flags         " + (artifact.flags.empty? ? "(none)" : artifact.flags.join(", ")) + "\n"
+
+    if artifact.has_initialiser
+      res = res + "initialiser   has code this file cannot carry — cannot be linked against\n"
+    elsif artifact.initialiser.empty?
+      res = res + "initialiser   none\n"
+    else
+      res = res + "initialiser   " + artifact.initialiser.lines.size.to_s + " line(s)\n"
+    end
+
+    hashes = artifact.hashes
+    unless hashes.empty?
+      res = res + "hashes\n"
+      res = res + "  interface      " + hashes.interface + "\n"
+      res = res + "  implementation " + hashes.implementation + "\n"
+      res = res + "  source         " + hashes.source + "\n"
+    end
+
+    unless artifact.inputs.empty?
+      res = res + "inputs        " + artifact.inputs.size.to_s + " file(s) the boundary was written from\n"
+      i = 0
+      while i < artifact.inputs.size
+        res = res + "  " + artifact.inputs[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    if artifact.imports.empty?
+      res = res + "imports       (none)\n"
+    else
+      res = res + "imports\n"
+      i = 0
+      while i < artifact.imports.size
+        edge = artifact.imports[i]
+        if edge.interface.empty?
+          res = res + "  " + edge.module_name + "\n"
+        else
+          res = res + "  " + edge.module_name + " — interface " + edge.interface + ", implementation " + edge.implementation + "\n"
+        end
+        i = i + 1
+      end
+    end
+
+    res = res + "library       " + (artifact.crystal_library ? "Crystal's standard library (--crystal)" : "iyi's prelude") + "\n"
+    res = res + "unsafe        " + artifact.unsafe + "\n" unless artifact.unsafe.empty?
+    res = res + "extend self   " + (artifact.module_extends_self ? "true" : "false") + "\n" if artifact.module_extends_self
+
+    unless artifact.requires.empty?
+      res = res + "requires\n"
+      i = 0
+      while i < artifact.requires.size
+        res = res + "  " + artifact.requires[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.usings.empty?
+      res = res + "names imported\n"
+      i = 0
+      while i < artifact.usings.size
+        res = res + "  " + scoped_import(artifact.usings[i]) + "\n"
+        i = i + 1
+      end
+    end
+
+    exports = artifact.exports
+    if exports.empty?
+      res = res + "exports       (none)\n"
+    else
+      res = res + "exports\n"
+      i = 0
+      while i < exports.class_vars.size
+        res = res + "  " + dump_class_var(exports.class_vars[i]) + "\n"
+        i = i + 1
+      end
+      i = 0
+      while i < exports.functions.size
+        res = res + "  " + render_signature(exports.functions[i]) + "\n"
+        i = i + 1
+      end
+
+      unless exports.carried_functions.empty?
+        res = res + "  # not exported, carried for the bodies that travel\n"
+        i = 0
+        while i < exports.carried_functions.size
+          res = res + "  " + render_signature(exports.carried_functions[i]) + "\n"
+          i = i + 1
+        end
+      end
+
+      i = 0
+      while i < exports.types.size
+        res = res + dump_type_declaration(exports.types[i], "  ")
+        i = i + 1
+      end
+
+      i = 0
+      while i < exports.impls.size
+        record = exports.impls[i]
+        res = res + "  " + render_impl_header(record) + "\n"
+        j = 0
+        while j < record.assoc_types.size
+          pair = record.assoc_types[j]
+          res = res + "    type " + pair[0] + " = " + pair[1] + "\n"
+          j = j + 1
+        end
+        j = 0
+        while j < record.methods.size
+          res = res + "    " + render_signature(record.methods[j]) + "\n"
+          j = j + 1
+        end
+        i = i + 1
+      end
+    end
+
+    unless artifact.spawns.empty?
+      res = res + "spawns\n"
+      i = 0
+      while i < artifact.spawns.size
+        record = artifact.spawns[i]
+        where = record.owner.empty? ? "(top level)" : record.owner
+        verdict = record.parallel ? "parallel" : "in its spawner's unit: " + record.reason
+        res = res + "  " + where + " " + record.line.to_s + ":" + record.column.to_s + " " + verdict + (record.asked ? " (asked)" : "") + (record.pinned ? " (pinned)" : "") + "\n"
+        i = i + 1
+      end
+    end
+    unless artifact.pins.empty?
+      res = res + "pins\n"
+      i = 0
+      while i < artifact.pins.size
+        pin = artifact.pins[i]
+        res = res + "  " + pin.call + " " + pin.line.to_s + ":" + pin.column.to_s + " " + pin.reason + "\n"
+        i = i + 1
+      end
+    end
+
+    if reaches = artifact.reaches
+      if reaches.empty?
+        res = res + "reaches       (nothing unsafe)\n"
+      else
+        res = res + "reaches\n"
+        i = 0
+        while i < reaches.size
+          record = reaches[i]
+          if record.kind.empty?
+            res = res + "  " + record.function + " calls into " + record.module_name + ", whose artifact does not record what it reaches\n"
+          else
+            steps = [] of String
+            j = 0
+            while j < record.path.size
+              steps << "`" + record.path[j] + "`"
+              j = j + 1
+            end
+            steps << "`" + record.use + "`"
+            through = steps.join(" → ")
+            res = res + "  " + record.function + " reaches " + record.kind + " `" + record.label + " : " + record.type + "` (module `" + record.module_name + "`) through " + through
+            unless record.owning.empty?
+              res = res + ", which holds `" + record.owning + "`, an owning type without `lends:` (a crossing calling it is pinned)"
+            end
+            res = res + "\n"
+          end
+          i = i + 1
+        end
+      end
+    else
+      res = res + "reaches       (not recorded)\n"
+    end
+
+    macros = artifact.macro_bodies
+    if macros.empty?
+      res = res + "macros        (none)\n"
+    else
+      res = res + "macros\n"
+      i = 0
+      while i < macros.size
+        res = res + "  " + macro_line(macros[i]) + "\n"
+        i = i + 1
+      end
+    end
+
+    bodies = artifact.mono_bodies
+    if bodies.empty?
+      res = res + "mono bodies   (none)\n"
+    else
+      res = res + "mono bodies\n"
+      sorted_keys = bodies.keys.sorted
+      i = 0
+      while i < sorted_keys.size
+        res = res + "  " + sorted_keys[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.type_ids.empty?
+      res = res + "type ids\n"
+      i = 0
+      while i < artifact.type_ids.size
+        res = res + "  " + artifact.type_ids[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.constants.empty?
+      res = res + "constants\n"
+      i = 0
+      while i < artifact.constants.size
+        res = res + "  " + artifact.constants[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    layouts = artifact.layouts
+    if layouts.empty?
+      res = res + "layouts       (none)\n"
+    else
+      res = res + "layouts\n"
+      i = 0
+      while i < layouts.size
+        name = layouts[i][0]
+        layout = layouts[i][1]
+        res = res + "  " + name + ": type id " + layout.type_id.to_s + ", " + layout.alloc_size.to_u64.to_s + " bytes (scan cap " + layout.scan_cap.to_u64.to_s + "), scan " + array_text(layout.scan_offsets) + ", noscan " + array_text(layout.noscan_offsets) + "\n"
+        i = i + 1
+      end
+    end
+
+    res = res + "object code   never filled: the fill step did not finish\n" unless artifact.filled
+    res = res + "object code   none: written by a --no-codegen build\n" if artifact.declarations_only
+
+    unless artifact.symbols.empty?
+      res = res + "symbols       " + artifact.symbols.size.to_s + " defined by this module's units\n"
+      i = 0
+      while i < artifact.symbols.size
+        res = res + "  " + artifact.symbols[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.libs.empty?
+      res = res + "libs\n"
+      i = 0
+      while i < artifact.libs.size
+        res = res + "  " + artifact.libs[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.reopened.empty?
+      res = res + "reopened\n"
+      i = 0
+      while i < artifact.reopened.size
+        decl = artifact.reopened[i]
+        res = res + "  " + decl.name + " (" + decl.fields.size.to_s + " fields, " + decl.methods.size.to_s + " methods)\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.top_level_funs.empty?
+      res = res + "top-level funs\n"
+      i = 0
+      while i < artifact.top_level_funs.size
+        first_lines = artifact.top_level_funs[i].lines
+        res = res + "  " + (first_lines.empty? ? "" : first_lines[0]) + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.top_level.empty?
+      res = res + "top-level defs\n"
+      i = 0
+      while i < artifact.top_level.size
+        res = res + "  " + render_signature(artifact.top_level[i]) + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.match_types.empty?
+      res = res + "match types\n"
+      i = 0
+      while i < artifact.match_types.size
+        res = res + "  " + artifact.match_types[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.symbol_literals.empty?
+      res = res + "symbol literals\n"
+      i = 0
+      while i < artifact.symbol_literals.size
+        res = res + "  :" + artifact.symbol_literals[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.class_vars.empty?
+      res = res + "class variables\n"
+      i = 0
+      while i < artifact.class_vars.size
+        ref = artifact.class_vars[i]
+        res = res + "  " + ref.name + (ref.lazy ? " (through its read function)" : "") + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.regexes.empty?
+      res = res + "regex constants\n"
+      i = 0
+      while i < artifact.regexes.size
+        regex = artifact.regexes[i]
+        res = res + "  " + regex.name + " = /" + regex.pattern + "/ (" + regex.options.to_u64.to_s + ")\n"
+        i = i + 1
+      end
+    end
+
+    if artifact.object_code.empty?
+      res = res + "object code   (none)\n"
+    else
+      res = res + "object code\n"
+      i = 0
+      while i < artifact.object_code.size
+        unit = artifact.object_code[i]
+        res = res + "  " + unit.name + " — " + unit.code.bytesize.to_s + " bytes\n"
+        i = i + 1
+      end
+    end
+
+    res = res + "\n"
+    res = res + "note          format v" + FORMAT_VERSION.to_u64.to_s + " carries declarations,\n"
+    res = res + "              signatures, field lists in declaration order, the\n"
+    res = res + "              constants and class variables this module's\n"
+    res = res + "              own code reads, the macros and\n"
+    res = res + "              bodies a consumer has to compile for itself and\n"
+    res = res + "              where each was written, the\n"
+    res = res + "              object code of this module's own non-generic\n"
+    res = res + "              types, and the pointer maps of the types this\n"
+    res = res + "              module owns (SPEC.md IV.2, GC_DESIGN.md Stage 1).\n"
+    res
+  end
+
+  def self.dump(artifact : Artifact, io : IyiIO) : Nil
+    io.print(dump_to_s(artifact))
+  end
+
+  # The artifact as the iyi declarations it was built from: the text `import`
+  # reads instead of the module's source (R-1).
+  def self.declarations_to_s(artifact : Artifact) : String
+    res = ""
+    res = res + "module " + artifact.module_name + "\n" unless artifact.class_root
+
+    unless artifact.imports.empty?
+      res = res + "\n"
+      i = 0
+      while i < artifact.imports.size
+        edge = artifact.imports[i]
+        res = res + (edge.exported ? "pub import " : "import ") + edge.module_name + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.requires.empty?
+      res = res + "\n"
+      i = 0
+      while i < artifact.requires.size
+        res = res + "require \"" + artifact.requires[i] + "\"\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.usings.empty?
+      res = res + "\n"
+      i = 0
+      while i < artifact.usings.size
+        res = res + scoped_import(artifact.usings[i]) + "\n"
+        i = i + 1
+      end
+    end
+
+    res = res + "\nextend self\n" if artifact.module_extends_self && !artifact.class_root
+
+    exports = artifact.exports
+    bodies = artifact.mono_bodies
+
+    i = 0
+    while i < artifact.macro_bodies.size
+      source = artifact.macro_bodies[i]
+      res = res + "\n" + (artifact.crystal_library ? exported_macro(source) : source) + "\n"
+      i = i + 1
+    end
+
+    unless exports.class_vars.empty?
+      res = res + "\n"
+      i = 0
+      while i < exports.class_vars.size
+        class_var = exports.class_vars[i]
+        j = 0
+        while j < class_var.annotations.size
+          res = res + class_var.annotations[j] + "\n"
+          j = j + 1
+        end
+        res = res + render_class_var(class_var) + "\n"
+        i = i + 1
+      end
+    end
+
+    i = 0
+    while i < exports.functions.size
+      res = res + "\n"
+      res = res + render_declaration(exports.functions[i], bodies, mono_body_key(artifact.module_name, exports.functions[i]), true)
+      i = i + 1
+    end
+
+    i = 0
+    while i < exports.carried_functions.size
+      res = res + "\n"
+      res = res + render_declaration(exports.carried_functions[i], bodies, mono_body_key(artifact.module_name, exports.carried_functions[i]))
+      i = i + 1
+    end
+
+    ordered = inheritance_order(exports.types)
+    i = 0
+    while i < ordered.size
+      res = res + "\n"
+      res = res + render_type_declaration(ordered[i], bodies)
+      i = i + 1
+    end
+
+    i = 0
+    while i < exports.impls.size
+      record = exports.impls[i]
+      container = mono_body_container(record.trait_name, record.type_name)
+      res = res + "\n" + render_impl_header(record) + "\n"
+      j = 0
+      while j < record.assoc_types.size
+        pair = record.assoc_types[j]
+        res = res + "  type " + pair[0] + " = " + pair[1] + "\n"
+        j = j + 1
+      end
+      j = 0
+      while j < record.methods.size
+        res = res + render_declaration(record.methods[j], bodies, mono_body_key(container, record.methods[j]), false, "  ")
+        j = j + 1
+      end
+      res = res + "end\n"
+      i = i + 1
+    end
+
+    i = 0
+    while i < artifact.reopened.size
+      res = res + "\n"
+      res = res + render_type_declaration(artifact.reopened[i], bodies)
+      i = i + 1
+    end
+
+    unless artifact.initialiser.empty?
+      res = res + "\n" + artifact.initialiser + "\n"
+    end
+    res
+  end
+
+  def self.declarations(artifact : Artifact, io : IyiIO) : Nil
+    io.print(declarations_to_s(artifact))
+  end
+
+  # The shard's top-level `def`s, as their own text: the `fun`s first, then the
+  # defs, each keyed by the top-level container.
+  def self.top_level_declarations_to_s(artifact : Artifact) : String
+    res = ""
+    i = 0
+    while i < artifact.top_level_funs.size
+      res = res + artifact.top_level_funs[i] + "\n"
+      i = i + 1
+    end
+
+    bodies = artifact.mono_bodies
+    i = 0
+    while i < artifact.top_level.size
+      res = res + "\n" if i > 0
+      res = res + render_declaration(artifact.top_level[i], bodies, mono_body_key(TOP_LEVEL_CONTAINER, artifact.top_level[i]))
+      i = i + 1
+    end
+    res
+  end
+
+  def self.top_level_declarations(artifact : Artifact, io : IyiIO) : Nil
+    io.print(top_level_declarations_to_s(artifact))
+  end
+
+  def self.surface_to_s(artifact : Artifact, docs : Bool = true) : String
+    res = "module " + artifact.module_name + "\n"
+
+    i = 0
+    while i < artifact.exports.functions.size
+      sig = artifact.exports.functions[i]
+      res = res + "\n"
+      if docs && !sig.doc.empty?
+        lines = sig.doc.lines
+        j = 0
+        while j < lines.size
+          res = res + "# " + lines[j] + "\n"
+          j = j + 1
+        end
+      end
+      res = res + "pub " + render_signature(sig) + "\n"
+      i = i + 1
+    end
+
+    i = 0
+    while i < artifact.exports.types.size
+      decl = artifact.exports.types[i]
+      if decl.visibility == "pub"
+        res = res + "\n"
+        if docs && !decl.doc.empty?
+          lines = decl.doc.lines
+          j = 0
+          while j < lines.size
+            res = res + "# " + lines[j] + "\n"
+            j = j + 1
+          end
+        end
+        res = res + "pub " + render_type_header(decl) + "\n"
+        j = 0
+        while j < decl.methods.size
+          m = decl.methods[j]
+          unless m.visibility == "private"
+            if docs && !m.doc.empty?
+              lines = m.doc.lines
+              k = 0
+              while k < lines.size
+                res = res + "  # " + lines[k] + "\n"
+                k = k + 1
+              end
+            end
+            res = res + "  " + render_signature(m) + "\n"
+          end
+          j = j + 1
+        end
+        res = res + "end\n"
+      end
+      i = i + 1
+    end
+
+    i = 0
+    while i < artifact.exports.impls.size
+      rec = artifact.exports.impls[i]
+      res = res + "impl " + rec.trait_name + " for " + rec.type_name + "\n"
+      i = i + 1
+    end
+    res
+  end
+
+  def self.surface(artifact : Artifact, io : IyiIO, docs : Bool = true) : Nil
+    io.print(surface_to_s(artifact, docs))
+  end
+
+  # JSON API from iyimod_json.cr
+  def self.api_signature(signature : Signature, json : Builder) : Nil
+    json.object do
+      json.field("name", signature.name)
+      json.field("receiver", signature.receiver) unless signature.receiver.empty?
+      json.field("parameters") do
+        json.array do
+          i = 0
+          while i < signature.parameters.size
+            json.string(signature.parameters[i])
+            i = i + 1
+          end
+        end
+      end
+      json.field("block", signature.block_parameter) unless signature.block_parameter.empty?
+      json.field("returns", signature.return_type) unless signature.return_type.empty?
+      unless signature.free_variables.empty?
+        json.field("free_variables") do
+          json.array do
+            i = 0
+            while i < signature.free_variables.size
+              json.string(signature.free_variables[i])
+              i = i + 1
+            end
+          end
+        end
+      end
+      json.field("required", true) if signature.required
+      json.field("visibility", signature.visibility) unless signature.visibility.empty?
+      json.field("doc", signature.doc) unless signature.doc.empty?
+      json.field("rendered", render_signature(signature))
+    end
+  end
+
+  def self.api_macros(sources : Array(String), json : Builder) : Nil
+    json.array do
+      i = 0
+      while i < sources.size
+        source = sources[i]
+        json.object do
+          json.field("name", macro_name(source))
+          doc = macro_doc(source)
+          json.field("doc", doc) unless doc.empty?
+          json.field("rendered", macro_line(source))
+        end
+        i = i + 1
+      end
+    end
+  end
+
+  def self.api_type(decl : TypeDecl, json : Builder) : Nil
+    json.object do
+      json.field("name", decl.name)
+      json.field("kind", decl.kind)
+      json.field("doc", decl.doc) unless decl.doc.empty?
+      json.field("visibility", decl.visibility)
+      unless decl.type_parameters.empty?
+        json.field("type_parameters") do
+          json.array do
+            i = 0
+            while i < decl.type_parameters.size
+              json.string(decl.type_parameters[i])
+              i = i + 1
+            end
+          end
+        end
+      end
+      unless decl.assoc_types.empty?
+        json.field("assoc_types") do
+          json.array do
+            i = 0
+            while i < decl.assoc_types.size
+              json.string(decl.assoc_types[i])
+              i = i + 1
+            end
+          end
+        end
+      end
+      unless decl.supertraits.empty?
+        json.field("supertraits") do
+          json.array do
+            i = 0
+            while i < decl.supertraits.size
+              json.string(decl.supertraits[i])
+              i = i + 1
+            end
+          end
+        end
+      end
+      json.field("alias_of", decl.value) unless decl.value.empty?
+      unless decl.fields.empty?
+        json.field("fields") do
+          json.array do
+            i = 0
+            while i < decl.fields.size
+              f = decl.fields[i]
+              json.object do
+                json.field("name", f[0])
+                json.field("type", f[1])
+                json.field("default", f[2]) unless f[2].empty?
+              end
+              i = i + 1
+            end
+          end
+        end
+      end
+      unless decl.members.empty?
+        json.field("members") do
+          json.array do
+            i = 0
+            while i < decl.members.size
+              m = decl.members[i]
+              json.object do
+                json.field("name", m[0])
+                json.field("value", m[1]) unless m[1].empty?
+              end
+              i = i + 1
+            end
+          end
+        end
+      end
+      unless decl.methods.empty?
+        json.field("methods") do
+          json.array do
+            i = 0
+            while i < decl.methods.size
+              api_signature(decl.methods[i], json)
+              i = i + 1
+            end
+          end
+        end
+      end
+      unless decl.macros.empty?
+        json.field("macros") { api_macros(decl.macros, json) }
+      end
+      unless decl.types.empty?
+        json.field("types") do
+          json.array do
+            i = 0
+            while i < decl.types.size
+              api_type(decl.types[i], json)
+              i = i + 1
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def self.api_json(artifact : Artifact, json : Builder) : Nil
+    json.object do
+      json.field("module", artifact.module_name)
+      json.field("interface_hash", artifact.hashes.interface)
+      json.field("functions") do
+        json.array do
+          i = 0
+          while i < artifact.exports.functions.size
+            api_signature(artifact.exports.functions[i], json)
+            i = i + 1
+          end
+        end
+      end
+      json.field("types") do
+        json.array do
+          i = 0
+          while i < artifact.exports.types.size
+            api_type(artifact.exports.types[i], json)
+            i = i + 1
+          end
+        end
+      end
+      macros = exported_macros(artifact)
+      unless macros.empty?
+        json.field("macros") { api_macros(macros, json) }
+      end
+      json.field("impls") do
+        json.array do
+          i = 0
+          while i < artifact.exports.impls.size
+            rec = artifact.exports.impls[i]
+            json.object do
+              json.field("trait", rec.trait_name)
+              json.field("type", rec.type_name)
+              unless rec.trait_arguments.empty?
+                json.field("trait_arguments") do
+                  json.array do
+                    j = 0
+                    while j < rec.trait_arguments.size
+                      json.string(rec.trait_arguments[j])
+                      j = j + 1
+                    end
+                  end
+                end
+              end
+            end
+            i = i + 1
+          end
+        end
+      end
+    end
+  end
+
+  def self.to_json(artifact : Artifact) : String
+    b = Builder.new
+    api_json(artifact, b)
+    b.to_s
+  end
+
+  # ===========================================================================
+  # AST extraction bridge
+  # ===========================================================================
+
+  def self.signature(a_def : Def, check_block : Bool = true) : Signature
+    params = [] of String
+    i = 0
+    while i < a_def.args.size
+      arg = a_def.args[i]
+      if a_def.splat_index == i
+        params << "*" + arg.to_s
+      else
+        params << arg.to_s
+      end
+      i = i + 1
+    end
+
+    if ds = a_def.double_splat
+      params << "**" + ds.to_s
+    end
+
+    rec_str = ""
+    if rec = a_def.receiver
+      rec_str = rec.to_s
+    end
+
+    blk_str = ""
+    if ba = a_def.block_arg
+      blk_str = "&" + ba.to_s
+    end
+
+    ret_str = ""
+    if rt = a_def.return_type
+      ret_str = rt.to_s
+    end
+
+    Signature.new(
+      a_def.name,
+      rec_str,
+      params,
+      blk_str,
+      ret_str,
+      a_def.free_vars || [] of String,
+      a_def.abstract,
+      "",
+      "",
+    )
+  end
+end
+
+class DeclarationMarker < Visitor
+  property bodies_travelled : Set(String)
+
+  def initialize
+    @bodies_travelled = Set(String).new
+  end
+
+  def visit(node : Def) : Bool
+    unless node.body.is_a?(Nop)
+      @bodies_travelled.add(node.name)
+      return false
+    end
+    false
+  end
+
+  def visit(node : ASTNode) : Bool
+    true
+  end
+end
+
+class HeaderDecoded
+  property module_name : String
+  property source_path : String
+  property compiler_version : String
+  property target_triple : String
+  property flags : Array(String)
+  property has_initialiser : Bool
+  property crystal_library : Bool
+  property class_root : Bool
+  property filled : Bool
+  property module_extends_self : Bool
+  property declarations_only : Bool
+  property package_name : String
+  property unsafe : String
+
+  def initialize(
+    @module_name : String,
+    @source_path : String,
+    @compiler_version : String,
+    @target_triple : String,
+    @flags : Array(String),
+    @has_initialiser : Bool,
+    @crystal_library : Bool,
+    @class_root : Bool,
+    @filled : Bool,
+    @module_extends_self : Bool,
+    @declarations_only : Bool,
+    @package_name : String,
+    @unsafe : String,
+  )
+  end
+end
+
+class ImportsDecoded
+  property edges : Array(ImportEdge)
+  property usings : Array(String)
+
+  def initialize(@edges : Array(ImportEdge), @usings : Array(String))
+  end
+end
+
+# What `Section::SourcePositions` decodes to: the positions of each travelling
+# body, by its key, and of the initialiser.
+class SourcePositionsDecoded
+  property bodies : Hash(String, Array(SourcePosition))
+  property initialiser : Array(SourcePosition)
+
+  def initialize(@bodies : Hash(String, Array(SourcePosition)), @initialiser : Array(SourcePosition))
+  end
+end

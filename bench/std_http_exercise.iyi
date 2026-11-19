@@ -761,20 +761,24 @@ group do |g|
     slow.close
     assert_true slow_answer.starts_with?("HTTP/1.1 204 "), "a head in 256 pieces is answered: #{slow_answer.inspect}"
     assert_true slow_bytes < 8388608_u64, "a 256 KB head in 1 KB pieces costs the server #{slow_bytes} bytes, under 8 MB"
-    # A body is held at what has arrived of it, not at the length its head
-    # declares: a builder of that length was made at the second read, and a
-    # head that declared 64 MB and two bytes after it cost the server 64 MB.
+    # read_all takes at most 64 KiB per piece. Send one byte more so the
+    # declared-length allocation mutant reaches its second piece even
+    # when TCP combines the writes. EOF and the server's close establish
+    # completion before measuring; a fixed sleep establishes neither.
     big = IyiSocket.connect("127.0.0.1", sport).or_panic
-    big.write("POST /size HTTP/1.1\r\nHost: x\r\nContent-Length: 67108864\r\n\r\nx").or_panic
-    sleep(20)
+    big.read_timeout_ms = 5000
+    big_body = "x" * 65537
     GC.disable
     big_before = GC.stats.bytes_since_collection
-    big.write("y").or_panic
-    sleep(20)
+    big.write("POST /size HTTP/1.1\r\nHost: x\r\nContent-Length: 67108864\r\n\r\n").or_panic
+    big.write(big_body).or_panic
+    assert_true big.close_write.nil?, "the short request body ends its sending half"
+    big_end = big.read(1).or_panic
     big_bytes = GC.stats.bytes_since_collection - big_before
     GC.enable
     big.close
-    assert_true big_bytes < 1048576_u64, "a head that declares 64 MB and sends two bytes costs the server #{big_bytes} bytes, under 1 MB"
+    assert_true big_end.empty?, "the server closes after consuming the short request body"
+    assert_true big_bytes < 1048576_u64, "a head that declares 64 MiB and sends 65537 bytes costs the server #{big_bytes} bytes, under 1 MiB"
     # A client that asks to be told before it sends its body is told:
     # without the `100 Continue`, curl waits a second before every upload
     # past a megabyte.
@@ -827,7 +831,7 @@ end
 assert_true seen_paths.size == 1217, "the block ran 1217 times, not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, a block that panicked, 201 lean requests, a thousand written at once, a 256 KB head in pieces, a 64 MB body declared and not sent, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, a block that panicked, 201 lean requests, a thousand written at once, a 256 KB head in pieces, a 64 MiB body with a 65537-byte prefix, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
 
 puts "\n== the block's own close"
 # An answer whose `Connection` says `close` closes the connection after

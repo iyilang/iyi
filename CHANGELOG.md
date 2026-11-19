@@ -17,6 +17,11 @@
   DIR defaults to the current directory; a missing manifest or an empty
   package is refused.
 
+- **The x86-64 encoder and ABI tables are written in iyi.**
+  `compiler/native/amd64` encodes instruction forms and relocations and
+  supplies the System V and Win64 argument and return conventions.
+  Its gate compares bytes with LLVM's assembler and ABI rows with the
+  published conventions. The compiler's default backend is unchanged.
 - **`iyi test` runs tests at once, says what each named case came to, and
   can run some of them.** Half as many tests build and run together as the
   machine has cores, `-p N` says how many, and the report stays in file

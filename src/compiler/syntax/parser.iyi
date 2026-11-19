@@ -22,7 +22,7 @@ import compiler/foundation/enums
 import compiler/foundation/string_pool::{StringPool}
 import compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState, MacroState}
 import compiler/syntax/lexer::{Lexer}
-import compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Out, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, Visibility, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, ProcLiteral, Macro, MacroExpression, MacroLiteral, MacroIf, MacroFor, MacroVar, MacroVerbatim, MagicConstant, StringBuilder, ReadInstanceVar, Require, Asm, AsmOperand, Select}
+import compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Out, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, Visibility, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, ProcLiteral, ProcPointer, Macro, MacroExpression, MacroLiteral, MacroIf, MacroFor, MacroVar, MacroVerbatim, MagicConstant, StringBuilder, ReadInstanceVar, Require, Asm, AsmOperand, Select}
 
 pub struct CallArgs
   property args : Array(ASTNode)?
@@ -391,6 +391,7 @@ pub class Parser < Lexer
 
     if exp.is_a?(Call)
       if exp.obj.nil? && exp.args.empty?
+        iyi_refuse_global_local(exp)
         exp = Var.new(exp.name).at(exp)
       end
     end
@@ -501,6 +502,7 @@ pub class Parser < Lexer
               atomic.end_location = arg.end_location
               return atomic
             else
+              iyi_refuse_global_local(atomic)
               atomic = Var.new(atomic.name).at(atomic)
             end
           end
@@ -517,7 +519,17 @@ pub class Parser < Lexer
             atomic = UninitializedVar.new(atomic, type).at(location).at_end(type)
             return atomic
           else
-            atomic_value = parse_op_assign_no_control
+            needs_new_scope = atomic.is_a?(Path) || ((atomic.is_a?(InstanceVar) || atomic.is_a?(ClassVar)) && !inside_def?)
+            atomic_value = with_isolated_var_scope(needs_new_scope) do
+              if atomic.is_a?(Var) && !var?(atomic.name)
+                @assigned_vars.push(atomic.name)
+                assigned = parse_op_assign_no_control
+                @assigned_vars.pop
+                assigned
+              else
+                parse_op_assign_no_control
+              end
+            end
             push_var(atomic)
             atomic = Assign.new(atomic, atomic_value).at(location)
           end
@@ -534,6 +546,11 @@ pub class Parser < Lexer
 
           if atomic.is_a?(Var) && atomic.name == "self"
             syntax_error("can't change the value of self", location)
+          end
+
+          iyi_refuse_global_local(atomic)
+          if atomic.is_a?(Call) && atomic.name != "[]" && !var_in_scope?(atomic.name)
+            syntax_error("'#{@token.type}' before definition of '#{atomic.name}'", @token.location)
           end
 
           op_loc = @token.location
@@ -769,6 +786,19 @@ pub class Parser < Lexer
         next_token_skip_space_or_newline
         right = parse_mul_or_div
         left = Call.new(left, method, [right] of ASTNode).at(location).at_end(right)
+      when TokenKind::NUMBER
+        # hosted parser.cr 1027-1039: a number whose text starts with a sign after an operand is that sign and the
+        # number, so `x -1` is a subtraction. The number is read again from the character after the sign.
+        sign = @token.value[0, 1]
+        if sign == "+" || sign == "-"
+          method = sign
+          self.current_pos = @token.start + 1
+          next_token
+          right = parse_mul_or_div
+          left = Call.new(left, method, [right] of ASTNode).at(location).at_end(right)
+        else
+          return left
+        end
       else
         return left
       end
@@ -1110,10 +1140,16 @@ pub class Parser < Lexer
       parse_symbol_array
     when TokenKind::SYMBOL
       node_and_next_token(SymbolLiteral.new(@token.value).at(location))
-    when TokenKind::OP_DOLLAR_QUESTION
-      node_and_next_token(Global.new("$?").at(location))
-    when TokenKind::OP_DOLLAR_TILDE
-      node_and_next_token(Global.new("$~").at(location))
+    when TokenKind::OP_DOLLAR_QUESTION, TokenKind::OP_DOLLAR_TILDE
+      dollar_name = "$?"
+      dollar_name = "$~" if @token.type == TokenKind::OP_DOLLAR_TILDE
+      if next_comes_assign_after_space?
+        dollar_var = Var.new(dollar_name).at(location)
+        push_var(dollar_var)
+        node_and_next_token(dollar_var)
+      else
+        node_and_next_token(Global.new(dollar_name).at(location))
+      end
     when TokenKind::GLOBAL_MATCH_DATA_INDEX
       val = @token.value
       method = "[]"
@@ -1211,6 +1247,7 @@ pub class Parser < Lexer
             parse_macro
           end
         when Keyword::DEF
+          check_iyi_bodiless_trait_def
           check_not_inside_def("can't define def") do
             parse_def
           end
@@ -1231,7 +1268,7 @@ pub class Parser < Lexer
             parse_import
           end
         when Keyword::USING
-          check_not_inside_def("can't use using") do
+          check_not_inside_def("can't import") do
             parse_using
           end
         when Keyword::ENUM
@@ -1302,7 +1339,9 @@ pub class Parser < Lexer
           end
         when Keyword::TYPE
           if @inside_trait_or_impl
-            parse_assoc_type
+            check_not_inside_def("can't declare an associated type") do
+              parse_assoc_type
+            end
           else
             check_type_declaration { parse_var_or_call(location) }
           end
@@ -1326,7 +1365,21 @@ pub class Parser < Lexer
     name_end = token_end_location
     is_var = !global && var?(name)
 
+    # hosted parser.cr 6248: a local followed by `+` or `-` is not a call, so `x -1` is a subtraction.
+    if is_var && next_comes_plus_or_minus?
+      var = Var.new(name).at(location).at_end(name_end)
+      next_token
+      return var
+    end
+
+    # hosted parser.cr 6257-6272: the name is read with the regex flag off, and a local's name followed by a
+    # space keeps `/` a division.
+    @wants_regex = false
+    set_slash_is_regex(false)
     next_token
+    if @token.type == TokenKind::SPACE
+      @wants_regex = !is_var
+    end
     # hosted parser.cr 6275-6284
     if name == "super"
       @calls_super = true
@@ -1364,6 +1417,9 @@ pub class Parser < Lexer
         note_block_arg_read(name)
         Var.new(name).at(location).at_end(name_end)
       else
+        if !call_only && !global && @assigned_vars.includes?(name)
+          syntax_error("can't use variable name '#{name}' inside assignment to variable '#{name}'", location)
+        end
         c = Call.new(nil, name).at(location)
         c.end_location = name_end
         c.global = global
@@ -1375,12 +1431,46 @@ pub class Parser < Lexer
   def var?(name : String) : Bool
     return true if @in_macro_expression
     return true if name == "self"
-    i = @var_scopes.size - 1
-    while i >= 0
-      return true if @var_scopes[i].includes?(name)
-      i = i - 1
+    var_in_scope?(name)
+  end
+
+  # hosted parser.cr 8442: a local is a name of the innermost scope. A lexical scope starts with a copy of the
+  # outer names, and an isolated scope starts empty.
+  def var_in_scope?(name : String) : Bool
+    @var_scopes.last.includes?(name)
+  end
+
+  # hosted parser.cr 727: `::name` is a method at the top level, never a local to assign.
+  def iyi_refuse_global_local(atomic : ASTNode) : Nil
+    return unless atomic.is_a?(Call) && atomic.global && atomic.obj.nil? && atomic.args.empty?
+    syntax_error("`::#{atomic.name}` is not a variable: `::` looks a method up at the top level, and a local variable is assigned without it, `#{atomic.name} = ...`", atomic.location)
+  end
+
+  # hosted parser.cr 6464: whether the next non-blank character is `+` or `-`.
+  def next_comes_plus_or_minus? : Bool
+    pos = current_pos
+    while current_char == ' ' || current_char == '\t' || current_char == '\n' || current_char == '\r'
+      next_char_no_column_increment
     end
-    false
+    comes = current_char == '+' || current_char == '-'
+    self.current_pos = pos
+    comes
+  end
+
+  # hosted parser.cr 1594: `$~` or `$?` is a local when a space run and an assignment `=` follow it (not `==`,
+  # `=~` or `=>`).
+  def next_comes_assign_after_space? : Bool
+    pos = current_pos
+    while current_char == ' ' || current_char == '\t'
+      next_char_no_column_increment
+    end
+    comes = current_char == '='
+    if comes
+      next_char_no_column_increment
+      comes = current_char != '=' && current_char != '~' && current_char != '>'
+    end
+    self.current_pos = pos
+    comes
   end
 
   def push_var(node : ASTNode) : Nil
@@ -1705,22 +1795,20 @@ pub class Parser < Lexer
       skip_statement_end
     end
 
-    new_scope = Set(String).new
-    all_names.each { |name| new_scope.add(name) }
-    @var_scopes << new_scope
-
-    body = parse_expressions
-    skip_statement_end
-
-    @var_scopes.pop
-
-    end_location = token_end_location
-    if curly
-      check(TokenKind::OP_RCURLY)
-      next_token_skip_space
-    else
-      check_keyword(Keyword::END)
-      next_token_skip_space
+    end_location : Location? = nil
+    body = with_lexical_var_scope do
+      all_names.each { |name| push_var_name(name) }
+      parsed = parse_expressions
+      skip_statement_end
+      if curly
+        end_location = token_end_location
+        check(TokenKind::OP_RCURLY)
+        next_token_skip_space
+        parsed
+      else
+        handled, end_location, _ = parse_exception_handler(parsed, true)
+        handled
+      end
     end
 
     Block.new(block_params, body, splat_index, unpacks).at(location).at_end(end_location)
@@ -2008,89 +2096,137 @@ pub class Parser < Lexer
     end
   end
 
+  # Hosted parser.cr 2028-2042: begin takes the explicit form of the handler, then wraps a body that has no handler.
   def parse_begin : ASTNode
-    location = @token.location
+    begin_location = @token.location
     set_slash_is_regex(true)
     next_token_skip_statement_end
 
-    body = parse_expressions
-    skip_statement_end
+    exps = parse_expressions
+    node, end_location, found_handler = parse_exception_handler(exps, false, begin_location)
+    if !found_handler && (!node.is_a?(Expressions) || node.keyword != Expressions::Keyword::None)
+      node = Expressions.new([node] of ASTNode)
+    end
+    node.at(begin_location).at_end(end_location)
+    if node.is_a?(Expressions)
+      node.keyword = Expressions::Keyword::Begin
+    end
+    node
+  end
 
+  # Hosted parser.cr 2044-2109: the rescue, else and ensure clauses that end a body, and the `end` that closes them. A def,
+  # a fun, a do-block and a do proc literal take the implicit form (parser.cr 5400, 7959, 6488, 3430).
+  def parse_exception_handler(exp : ASTNode, implicit : Bool = false, begin_location : Location? = nil) : {ASTNode, Location, Bool}
     rescues : Array(Rescue)? = nil
     a_else : ASTNode? = nil
     a_ensure : ASTNode? = nil
+    else_location : Location? = nil
+    ensure_location : Location? = nil
+    start : Location? = begin_location || exp.location
 
     if @token.keyword == Keyword::RESCUE
       res_list = [] of Rescue
-      while @token.keyword == Keyword::RESCUE
-        res_list << parse_rescue
+      found_catch_all = false
+      while true
+        start = start || @token.location
+        location = @token.location
+        a_rescue = parse_rescue
+        if a_rescue.types
+          syntax_error("specific rescue must come before catch-all rescue", location) if found_catch_all
+        else
+          syntax_error("catch-all rescue can only be specified once", location) if found_catch_all
+          found_catch_all = true
+        end
+        res_list << a_rescue
+        break unless @token.keyword == Keyword::RESCUE
       end
       rescues = res_list
     end
 
     if @token.keyword == Keyword::ELSE
+      syntax_error("'else' is useless without 'rescue'", @token.location) if rescues.nil?
+      else_location = @token.location
+      start = start || @token.location
       next_token_skip_statement_end
       a_else = parse_expressions
       skip_statement_end
     end
 
     if @token.keyword == Keyword::ENSURE
+      ensure_location = @token.location
+      start = start || @token.location
       next_token_skip_statement_end
       a_ensure = parse_expressions
       skip_statement_end
     end
 
-    check_keyword(Keyword::END)
+    end_location = token_end_location
+    unless @token.keyword == Keyword::END
+      syntax_error("expecting identifier 'end', not '#{token_text}'", @token.location)
+    end
+    set_slash_is_regex(false)
     next_token_skip_space
 
-    if rescues || a_ensure || a_else
-      ExceptionHandler.new(body, rescues, a_else, a_ensure).at(location)
-    else
-      if body.is_a?(Expressions)
-        body.keyword = Expressions::Keyword::Begin
-        body
-      else
-        node = Expressions.new([body] of ASTNode).at(location)
-        node.keyword = Expressions::Keyword::Begin
-        node
-      end
+    handler : ASTNode = exp
+    found = false
+    if rescues || a_ensure
+      ex = ExceptionHandler.new(exp, rescues, a_else, a_ensure)
+      ex.implicit = implicit
+      ex.else_location = else_location
+      ex.ensure_location = ensure_location
+      ex.at(start).at_end(end_location)
+      handler = ex
+      found = true
     end
+    {handler, end_location, found}
   end
 
+  # Hosted parser.cr 2114-2152: one rescue clause. Its header is a name, a type list, or both, then a newline or `;`.
   def parse_rescue : Rescue
     location = @token.location
+    end_location : Location? = token_end_location
     next_token_skip_space
 
     name : String? = nil
     types : Array(ASTNode)? = nil
 
     if @token.type == TokenKind::IDENT
-      name = @token.value.to_s
-      push_var_name(name)
+      ident = @token.value
+      push_var_name(ident)
+      name = ident
+      end_location = token_end_location
       next_token_skip_space
       if @token.type == TokenKind::OP_COLON
         next_token_skip_space_or_newline
-        types = parse_rescue_types
+        check_any([TokenKind::CONST, TokenKind::OP_COLON_COLON])
+        listed = parse_rescue_types
+        types = listed
+        end_location = listed.last.end_location
       end
     elsif @token.type == TokenKind::CONST || @token.type == TokenKind::OP_COLON_COLON
-      types = parse_rescue_types
+      listed = parse_rescue_types
+      types = listed
+      end_location = listed.last.end_location
     end
 
-    skip_statement_end
-    body = if @token.keyword == Keyword::END || @token.keyword == Keyword::RESCUE || @token.keyword == Keyword::ELSE || @token.keyword == Keyword::ENSURE
-             Nop.new
-           else
-             b = parse_expressions
-             skip_statement_end
-             b
-           end
-    Rescue.new(body, types, name).at(location)
+    check_any([TokenKind::OP_SEMICOLON, TokenKind::NEWLINE])
+    next_token_skip_space_or_newline
+
+    body : ASTNode? = nil
+    if @token.keyword != Keyword::END
+      parsed = parse_expressions
+      body = parsed
+      end_location = parsed.end_location
+      skip_statement_end
+    end
+    Rescue.new(body, types, name).at(location).at_end(end_location)
   end
 
+  # Hosted parser.cr 2154-2167: the types of a rescue clause, separated by `|`.
   def parse_rescue_types : Array(ASTNode)
     types = [] of ASTNode
     while true
-      types << parse_path
+      types << parse_generic
       skip_space
       if @token.type == TokenKind::OP_BAR
         next_token_skip_space
@@ -2099,6 +2235,34 @@ pub class Parser < Lexer
       end
     end
     types
+  end
+
+  # Hosted parser.cr 8471-8475: the current token must be one of these kinds.
+  def check_any(kinds : Array(TokenKind)) : Nil
+    i = 0
+    while i < kinds.size
+      return if @token.type == kinds[i]
+      i = i + 1
+    end
+    names = [] of String
+    kinds.each { |kind| names << kind.to_s }
+    joined = names.join(", ")
+    syntax_error("expecting any of these tokens: #{joined} (not '#{token_text}')", @token.location)
+  end
+
+  # The current token as hosted's Token#to_s renders it inside a message (token.cr 400): a keyword or its text, else its kind.
+  def token_text : String
+    if @token.type == TokenKind::EOF || @token.type == TokenKind::NEWLINE
+      return @token.type.to_s
+    end
+    if kw = @token.keyword
+      return kw.to_s
+    end
+    if @token.value.empty?
+      @token.type.to_s
+    else
+      @token.value
+    end
   end
 
   def when_expression_end : Bool
@@ -2225,11 +2389,12 @@ pub class Parser < Lexer
   end
 
   def parse_empty_array_literal : ASTNode
+    location = @token.location
     next_token_skip_space
     if @token.keyword == Keyword::OF
       next_token_skip_space_or_newline
       of_type = parse_type_spec
-      ArrayLiteral.new([] of ASTNode, of_type)
+      ArrayLiteral.new([] of ASTNode, of_type).at(location)
     else
       syntax_error("for empty arrays use '[] of ElementType'")
     end
@@ -2488,12 +2653,20 @@ pub class Parser < Lexer
     @fun_nest > 0
   end
 
+  # Hosted parser.cr 1970-1977: a declaration inside a def or a fun is refused, and the message names which.
   def check_not_inside_def(msg : String, &) : ASTNode
-    if inside_def?
-      syntax_error(msg, @token.location)
-    else
+    if @def_nest == 0 && @fun_nest == 0
       yield
+    else
+      suffix = @def_nest > 0 ? " inside def" : " inside fun"
+      syntax_error(msg + suffix, @token.location)
     end
+  end
+
+  # Hosted parser.cr 5493-5503: a def with no body inside a trait or impl, followed by another def.
+  def check_iyi_bodiless_trait_def : Nil
+    return unless @inside_trait_or_impl && @def_nest > 0
+    syntax_error("can't define def inside def: the `def` above it has no `end`\n\nA method a trait requires of its implementers has no body and says\nso - `abstract def name : Type` (SPEC.md II.6). A `def` with a body\nends with `end`.", @token.location)
   end
 
   def set_visibility(node : ASTNode) : ASTNode
@@ -2568,12 +2741,14 @@ pub class Parser < Lexer
     end
   end
 
-  def consume_def_or_macro_name : String
+  # hosted parser.cr 8348-8368: a name is needed after `what`, and the refusal says what came instead.
+  def consume_def_or_macro_name(what : String = "def") : String
     @wants_def_or_macro_name = true
     next_token_skip_space_or_newline
     @wants_def_or_macro_name = false
     unless def_or_macro_check1?(@token.type)
-      unexpected_token("expected def or macro name")
+      not_what = @token.type == TokenKind::EOF ? "the end of the file" : "'#{@token.value.empty? ? @token.type.to_s : @token.value}'"
+      syntax_error("expecting a name after '#{what}', not #{not_what}", @token.location)
     end
     @token.type == TokenKind::IDENT || @token.type == TokenKind::CONST ? @token.value : @token.type.to_s
   end
@@ -2588,6 +2763,12 @@ pub class Parser < Lexer
     else
       {false, end_loc}
     end
+  end
+
+  def consume_def_equals_sign_skip_space : {Bool, Location}
+    result = consume_def_equals_sign
+    skip_space
+    result
   end
 
   def check_valid_def_name : Nil
@@ -3181,18 +3362,37 @@ pub class Parser < Lexer
     res
   end
 
+  # The hosted parser's `type_start?`: an opening parenthesis or brace decides
+  # nothing, the token after it does, so `[] of Arg, (a + b)` and
+  # `[] of Arg, {x: 1}` leave the next argument an expression.
   def type_start_check : Bool
+    while @token.type == TokenKind::OP_LPAREN || @token.type == TokenKind::OP_LCURLY
+      next_token_skip_space_or_newline
+    end
+
     case @token.type
+    when TokenKind::IDENT
+      return false if named_tuple_start?
+      kw = @token.keyword
+      if kw == Keyword::TYPEOF
+        true
+      elsif kw == Keyword::SELF || @token.value == "self?"
+        next_token_skip_space
+        delimiter_or_type_suffix?
+      else
+        false
+      end
     when TokenKind::CONST
       return false if named_tuple_start?
       type_path_start?
-    when TokenKind::OP_COLON_COLON, TokenKind::UNDERSCORE, TokenKind::OP_LCURLY, TokenKind::OP_MINUS_GT
+    when TokenKind::OP_COLON_COLON
+      next_token
+      type_path_start?
+    when TokenKind::UNDERSCORE, TokenKind::OP_MINUS_GT
       true
-    when TokenKind::OP_LPAREN
-      true
-    when TokenKind::IDENT
-      kw = @token.keyword
-      kw == Keyword::SELF || kw == Keyword::TYPEOF || @token.value == "self?"
+    when TokenKind::OP_STAR
+      next_token_skip_space_or_newline
+      type_start_check
     else
       false
     end
@@ -3236,15 +3436,18 @@ pub class Parser < Lexer
     if @token.type == TokenKind::OP_RPAREN
       syntax_error("missing typeof argument", @token.location)
     end
-    exps = [] of ASTNode
-    while @token.type != TokenKind::OP_RPAREN
-      exps << parse_op_assign
-      if @token.type == TokenKind::OP_COMMA
-        next_token_skip_space_or_newline
-      else
-        skip_space_or_newline
-        check(TokenKind::OP_RPAREN)
+    exps = with_lexical_var_scope do
+      args = [] of ASTNode
+      while @token.type != TokenKind::OP_RPAREN
+        args << parse_op_assign
+        if @token.type == TokenKind::OP_COMMA
+          next_token_skip_space_or_newline
+        else
+          skip_space_or_newline
+          check(TokenKind::OP_RPAREN)
+        end
       end
+      args
     end
     end_location = token_end_location
     next_token_skip_space
@@ -3253,6 +3456,7 @@ pub class Parser < Lexer
 
   # iyi: `require "path"` loads a file at file level, a node of its own.
   def parse_require : ASTNode
+    location = @token.location
     if @type_nest > 0
       syntax_error("can't require inside type declarations", @token.location)
     end
@@ -3262,7 +3466,7 @@ pub class Parser < Lexer
       syntax_error("expected a string literal after require", @token.location)
     end
     skip_space
-    node = Require.new(literal.as(StringLiteral).value)
+    node = Require.new(literal.as(StringLiteral).value).at(location)
     node.end_location = literal.end_location
     node
   end
@@ -3877,7 +4081,7 @@ pub class Parser < Lexer
 
   def parse_macro : ASTNode
     location = @token.location
-    consume_def_or_macro_name
+    consume_def_or_macro_name("macro")
 
     name = ""
     if @token.type == TokenKind::CONST
@@ -4428,9 +4632,7 @@ pub class Parser < Lexer
           end
           body = Expressions.from(exps).at(body)
         end
-        check_keyword(Keyword::END)
-        end_location = token_end_location
-        next_token_skip_space
+        body, end_location, _ = parse_exception_handler(body, true)
       end
     end
 
@@ -4442,9 +4644,38 @@ pub class Parser < Lexer
     node
   end
 
+  # Hosted parser.cr 3449-3468: a proc literal's body that opens with `|` is refused, with the parenthesised form to write.
+  def check_not_pipe_before_proc_literal_body : Nil
+    if @token.type == TokenKind::OP_BAR
+      location = @token.location
+      next_token_skip_space
+
+      msg = "unexpected token: \"|\", proc literals specify their parameters like this: ->("
+      if @token.type == TokenKind::IDENT
+        msg = msg + @token.value + " : Type"
+        next_token_skip_space_or_newline
+        msg = msg + ", ..." if @token.type == TokenKind::OP_COMMA
+      else
+        msg = msg + "param : Type"
+      end
+      msg = msg + ") { ... }"
+      syntax_error(msg, location)
+    end
+  end
+
   def parse_fun_literal : ASTNode
     location = @token.location
     next_token_skip_space_or_newline
+
+    case @token.type
+    when TokenKind::SYMBOL
+      # -> :T { }
+      syntax_error("a space is mandatory between ':' and return type", @token.location)
+    when TokenKind::OP_LPAREN, TokenKind::OP_LCURLY, TokenKind::OP_COLON
+      nil
+    else
+      return parse_fun_pointer unless @token.keyword == Keyword::DO
+    end
 
     params = [] of Arg
     return_type : ASTNode? = nil
@@ -4458,24 +4689,29 @@ pub class Parser < Lexer
       next_token_skip_space_or_newline
     end
 
-    if @token.type == TokenKind::OP_COLON
+    # hosted parser.cr 3406-3414: after the parameters, a symbol is `:T` with no space before the return type.
+    case @token.type
+    when TokenKind::SYMBOL
+      # ->() :T { }
+      syntax_error("a space is mandatory between ':' and return type", @token.location)
+    when TokenKind::OP_COLON
       next_token_skip_space_or_newline
       return_type = parse_bare_proc_type
       skip_space_or_newline
     end
 
-    with_isolated_var_scope do
+    with_lexical_var_scope do
       params.each { |p| push_var_name(p.name) }
       end_location : Location? = nil
       body : ASTNode? = nil
       if @token.keyword == Keyword::DO
         next_token_skip_statement_end
-        body = parse_expressions
-        end_location = token_end_location
-        check_keyword(Keyword::END)
-        next_token_skip_space
+        check_not_pipe_before_proc_literal_body
+        parsed = parse_expressions
+        body, end_location, _ = parse_exception_handler(parsed, true)
       elsif @token.type == TokenKind::OP_LCURLY
         next_token_skip_statement_end
+        check_not_pipe_before_proc_literal_body
         body = preserve_stop_on_do { parse_expressions }
         end_location = token_end_location
         check(TokenKind::OP_RCURLY)
@@ -4510,6 +4746,83 @@ pub class Parser < Lexer
     end
 
     Arg.new(name, nil, param_type, name).at(location).at_end(end_location)
+  end
+
+  def parse_fun_pointer : ASTNode
+    location = @token.location
+
+    global = false
+    if @token.type == TokenKind::OP_COLON_COLON
+      next_token_skip_space_or_newline
+      global = true
+    end
+
+    obj : ASTNode? = nil
+    name = ""
+    global_call = false
+    equals_sign = false
+    end_location : Location? = nil
+
+    case @token.type
+    when TokenKind::IDENT
+      name = @token.value
+      var_location = @token.location
+      var_end_location = token_end_location
+      global_call = global
+      equals_sign, end_location = consume_def_equals_sign_skip_space
+      if equals_sign
+        name = "#{name}="
+      elsif @token.type == TokenKind::OP_PERIOD
+        syntax_error("ProcPointer of local variable cannot be global", location) if global
+        if name != "self" && !@var_scopes.last.includes?(name)
+          syntax_error("undefined variable '#{name}'", location)
+        end
+        obj = Var.new(name).at(var_location).at_end(var_end_location)
+        name = consume_def_or_macro_name
+        equals_sign, end_location = consume_def_equals_sign_skip_space
+        name = "#{name}=" if equals_sign
+      end
+    when TokenKind::CONST
+      obj = parse_generic(global, location, false)
+      skip_space
+      check(TokenKind::OP_PERIOD)
+      name = consume_def_or_macro_name
+      equals_sign, end_location = consume_def_equals_sign_skip_space
+      name = "#{name}=" if equals_sign
+    when TokenKind::INSTANCE_VAR
+      syntax_error("ProcPointer of instance variable cannot be global", location) if global
+      obj = InstanceVar.new(@token.value).at(location).at_end(token_end_location)
+      next_token_skip_space
+      check(TokenKind::OP_PERIOD)
+      name = consume_def_or_macro_name
+      equals_sign, end_location = consume_def_equals_sign_skip_space
+      name = "#{name}=" if equals_sign
+    when TokenKind::CLASS_VAR
+      syntax_error("ProcPointer of class variable cannot be global", location) if global
+      obj = ClassVar.new(@token.value).at(location).at_end(token_end_location)
+      next_token_skip_space
+      check(TokenKind::OP_PERIOD)
+      name = consume_def_or_macro_name
+      equals_sign, end_location = consume_def_equals_sign_skip_space
+      name = "#{name}=" if equals_sign
+    else
+      unexpected_token
+    end
+
+    if @token.type == TokenKind::OP_PERIOD
+      unexpected_token
+    end
+
+    types = [] of ASTNode
+    if @token.type == TokenKind::OP_LPAREN
+      next_token_skip_space
+      types = parse_union_types(TokenKind::OP_RPAREN)
+      check(TokenKind::OP_RPAREN)
+      end_location = token_end_location
+      next_token_skip_space
+    end
+
+    ProcPointer.new(obj, name, types, global_call).at_end(end_location)
   end
 
   def parse_param(params : Array(Arg), extra_assigns : Array(ASTNode)?, parentheses : Bool, found_default_value : Bool, found_splat : Bool, found_double_splat : Arg?, allow_restrictions : Bool) : ArgExtras
@@ -5559,20 +5872,21 @@ pub class Parser < Lexer
 
       skip_statement_end
       body : ASTNode? = nil
+      fun_end : Location? = nil
       if require_body
         @fun_nest = @fun_nest + 1
         if @token.keyword == Keyword::END
           body = Nop.new
+          fun_end = token_end_location
           next_token
         else
-          body = parse_expressions
-          check_keyword(Keyword::END)
-          next_token_skip_space
+          parsed = parse_expressions
+          body, fun_end, _ = parse_exception_handler(parsed, true)
         end
         @fun_nest = @fun_nest - 1
       end
 
-      fun_def = FunDef.new(name, params, return_type, body, real_name).at(location)
+      fun_def = FunDef.new(name, params, return_type, body, real_name).at(location).at_end(fun_end)
       fun_def.varargs = varargs
       fun_def
     end
@@ -6151,15 +6465,16 @@ pub class Parser < Lexer
       # A closer that is missing names what it would close and where that
       # began, as a missing `end` does. The head sentence stays as it was.
       if (unclosed = @unclosed_stack.last?) && closes_unclosed?(kind, unclosed.name)
-        syntax_error("expecting token '#{kind}', not '#{@token.type}'; the #{unclosed.name} that began at line #{unclosed.location.line_number} is still open", @token.location)
+        syntax_error("expecting token '#{kind}', not '#{token_text}'; the #{unclosed.name} that began at line #{unclosed.location.line_number} is still open", @token.location)
       end
-      syntax_error("expecting token '#{kind}', not '#{@token.type}'", @token.location)
+      syntax_error("expecting token '#{kind}', not '#{token_text}'", @token.location)
     end
   end
 
   def check_keyword(kw : Keyword) : Nil
     if @token.keyword != kw
-      syntax_error("expecting keyword '#{kw}', not '#{@token.type}'", @token.location)
+      # Hosted check_ident (parser.cr 8517-8535): the keyword is named as an identifier, and the token by its text.
+      syntax_error("expecting identifier '#{kw}', not '#{token_text}'", @token.location)
     end
   end
 
@@ -6182,7 +6497,8 @@ pub class Parser < Lexer
     if @token.type == TokenKind::EOF && (unclosed = @unclosed_stack.last?)
       syntax_error("unterminated #{unclosed.name}", unclosed.location)
     end
-    token_str = @token.type == TokenKind::EOF ? "EOF" : @token.type.to_s
+    quoted = "\"" + token_text + "\""
+    token_str = @token.type == TokenKind::EOF ? "EOF" : quoted
     if m = msg
       syntax_error("unexpected token: #{token_str} (#{m})", @token.location)
     else

@@ -4245,16 +4245,31 @@ jobs:
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
 
 
+  # The self-host gates, four shards on each host (bench/selfhost_gates.sh
+  # --shard K/4): one job per shard, so no job holds all 22 gates. PR #217's
+  # Linux job ran 17 of them in 86 minutes and was cancelled at its 90-minute
+  # limit. semantic_calls alone took 2,151.5 s of that: its mutation proofs each
+  # rebuild the port driver. The shards are dealt by weight, heaviest first into
+  # the lightest shard, so semantic_calls runs alone in its shard. The weights
+  # are the seconds each gate took on the slowest host, where a run finished, and
+  # an estimate where none did (bench/selfhost_gates.weights says which). Four is
+  # the fewest shards that keep the heaviest at semantic_calls' own time: with
+  # three, the other two would hold 8,533 s between them, more than its 4,162 s.
+  # The limits stay until a run dealt this way has been measured.
   selfhost:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       SELFHOST_HOST: linux-x86_64
     container:
       image: crystallang/crystal:1.21.0-build
-    name: "The self-host gates, on Linux"
+    name: "The self-host gates, on Linux, shard ${{ matrix.shard }} of 4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4284,10 +4299,11 @@ jobs:
       - name: Build `iyi` and its daemon
         run: make -o .build/crystal iyi iyi-daemon
 
-      # One driver runs every selfhost gate (bench/selfhost_*_exercise.sh) in order,
-      # each with its own log, and exits non-zero when any of them fails.
+      # One driver runs this host's shard of the self-host gates
+      # (bench/selfhost_*_exercise.sh, dealt across four shards), each gate in
+      # order with its own log, and exits non-zero when one of them fails.
       - name: The self-host gates
-        run: bash bench/selfhost_gates.sh
+        run: bash bench/selfhost_gates.sh --shard ${{ matrix.shard }}/4
 
   selfhost-darwin:
     needs: plan
@@ -4298,7 +4314,11 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
       SELFHOST_HOST: darwin-arm64
     timeout-minutes: 120
-    name: "The self-host gates, on darwin arm64"
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    name: "The self-host gates, on darwin arm64, shard ${{ matrix.shard }} of 4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4325,19 +4345,25 @@ jobs:
       - name: Build `iyi`, its daemon, and the tarball
         run: make iyi-tarball LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
 
-      # The same driver as the Linux job. The gates read LLVM_CONFIG from the
-      # environment before they look for llvm-config on the PATH.
+      # The same driver and shards as the Linux job. The gates read LLVM_CONFIG
+      # from the environment before they look for llvm-config on the PATH. Each
+      # shard restores the static LLVM from the cache, and a cache miss builds it
+      # in every shard.
       - name: The self-host gates
-        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/selfhost_gates.sh
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/selfhost_gates.sh --shard ${{ matrix.shard }}/4
 
   selfhost-windows:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-windows') }}
     runs-on: windows-2025
     timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
       SELFHOST_HOST: windows-x86_64
-    name: "The self-host gates, on Windows x86_64"
+    name: "The self-host gates, on Windows x86_64, shard ${{ matrix.shard }} of 4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -4380,7 +4406,7 @@ jobs:
 
       - name: The self-host gates
         shell: bash
-        run: bash bench/selfhost_gates.sh
+        run: bash bench/selfhost_gates.sh --shard ${{ matrix.shard }}/4
 
   # The editor client is the only artifact here that is published somewhere
   # else, so it is proven the same way as the rest: every run packages it,

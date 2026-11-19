@@ -2591,6 +2591,12 @@ pub class Parser < Lexer
     end
   end
 
+  def consume_def_equals_sign_skip_space : {Bool, Location}
+    result = consume_def_equals_sign
+    skip_space
+    result
+  end
+
   def check_valid_def_name : Nil
     if kw = @token.keyword
       case kw
@@ -4467,6 +4473,16 @@ pub class Parser < Lexer
     location = @token.location
     next_token_skip_space_or_newline
 
+    case @token.type
+    when TokenKind::SYMBOL
+      # -> :T { }
+      syntax_error("a space is mandatory between ':' and return type", @token.location)
+    when TokenKind::OP_LPAREN, TokenKind::OP_LCURLY, TokenKind::OP_COLON
+      nil
+    else
+      return parse_fun_pointer unless @token.keyword == Keyword::DO
+    end
+
     params = [] of Arg
     return_type : ASTNode? = nil
 
@@ -4531,6 +4547,83 @@ pub class Parser < Lexer
     end
 
     Arg.new(name, nil, param_type, name).at(location).at_end(end_location)
+  end
+
+  def parse_fun_pointer : ASTNode
+    location = @token.location
+
+    global = false
+    if @token.type == TokenKind::OP_COLON_COLON
+      next_token_skip_space_or_newline
+      global = true
+    end
+
+    obj : ASTNode? = nil
+    name = ""
+    global_call = false
+    equals_sign = false
+    end_location : Location? = nil
+
+    case @token.type
+    when TokenKind::IDENT
+      name = @token.value
+      var_location = @token.location
+      var_end_location = token_end_location
+      global_call = global
+      equals_sign, end_location = consume_def_equals_sign_skip_space
+      if equals_sign
+        name = "#{name}="
+      elsif @token.type == TokenKind::OP_PERIOD
+        syntax_error("ProcPointer of local variable cannot be global", location) if global
+        if name != "self" && !@var_scopes.last.includes?(name)
+          syntax_error("undefined variable '#{name}'", location)
+        end
+        obj = Var.new(name).at(var_location).at_end(var_end_location)
+        name = consume_def_or_macro_name
+        equals_sign, end_location = consume_def_equals_sign_skip_space
+        name = "#{name}=" if equals_sign
+      end
+    when TokenKind::CONST
+      obj = parse_generic(global, location, false)
+      skip_space
+      check(TokenKind::OP_PERIOD)
+      name = consume_def_or_macro_name
+      equals_sign, end_location = consume_def_equals_sign_skip_space
+      name = "#{name}=" if equals_sign
+    when TokenKind::INSTANCE_VAR
+      syntax_error("ProcPointer of instance variable cannot be global", location) if global
+      obj = InstanceVar.new(@token.value).at(location).at_end(token_end_location)
+      next_token_skip_space
+      check(TokenKind::OP_PERIOD)
+      name = consume_def_or_macro_name
+      equals_sign, end_location = consume_def_equals_sign_skip_space
+      name = "#{name}=" if equals_sign
+    when TokenKind::CLASS_VAR
+      syntax_error("ProcPointer of class variable cannot be global", location) if global
+      obj = ClassVar.new(@token.value).at(location).at_end(token_end_location)
+      next_token_skip_space
+      check(TokenKind::OP_PERIOD)
+      name = consume_def_or_macro_name
+      equals_sign, end_location = consume_def_equals_sign_skip_space
+      name = "#{name}=" if equals_sign
+    else
+      unexpected_token
+    end
+
+    if @token.type == TokenKind::OP_PERIOD
+      unexpected_token
+    end
+
+    types = [] of ASTNode
+    if @token.type == TokenKind::OP_LPAREN
+      next_token_skip_space
+      types = parse_union_types(TokenKind::OP_RPAREN)
+      check(TokenKind::OP_RPAREN)
+      end_location = token_end_location
+      next_token_skip_space
+    end
+
+    ProcPointer.new(obj, name, types, global_call).at_end(end_location)
   end
 
   def parse_param(params : Array(Arg), extra_assigns : Array(ASTNode)?, parentheses : Bool, found_default_value : Bool, found_splat : Bool, found_double_splat : Arg?, allow_restrictions : Bool) : ArgExtras

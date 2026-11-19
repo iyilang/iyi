@@ -80,13 +80,38 @@ whole() {
   echo "  $label: $(head -1 "$WORK/$name.out")"
 }
 
+# The directory mode's exit when none of its large objects landed outside
+# the arenas' slots: the widening went unasked (bench/heap_drain.iyi,
+# DIR_UNASKED). Where the kernel puts a mapping changes from run to run,
+# so such a run is run again, up to UNASKED_TRIES times; a run that never
+# asks is a failure, not a pass. On Windows (tssh, 20 runs each) the
+# sound build asked nothing in 1 run and the copy without the widening in
+# 8, the other 12 caught and none passed: 0.4 a run, so twelve tries
+# leave it unasked about once in 60,000 gates.
+UNASKED=75
+UNASKED_TRIES=12
+
+# runs OUT ERR PROGRAM [ARGS...]: PROGRAM run until it exits anything but
+# UNASKED or UNASKED_TRIES times; its last exit, and in `tries` how many.
+runs() {
+  local out="$1" err="$2" code
+  shift 2
+  tries=0
+  while :; do
+    tries=$((tries + 1))
+    timeout 600 "$@" >"$out" 2>"$err"
+    code=$?
+    [ "$code" -eq "$UNASKED" ] && [ "$tries" -lt "$UNASKED_TRIES" ] || return "$code"
+  done
+}
+
 # again LABEL NAME OUT [ARGS...]: NAME, built by `whole`, run again with
 # ARGS into OUT; exit 0, no report.
 again() {
   local label="$1" name="$2" out="$3"
   shift 3
   [ -x "$WORK/$name" ] || return
-  timeout 600 "$WORK/$name" "$@" >"$WORK/$out.out" 2>"$WORK/$out.err"
+  runs "$WORK/$out.out" "$WORK/$out.err" "$WORK/$name" "$@"
   local code=$?
   if [ "$code" -ne 0 ] || grep -q "^iyi: heap_verify: partition" "$WORK/$out.err"; then
     echo "  $label: exit $code"
@@ -94,7 +119,7 @@ again() {
     status=1
     return
   fi
-  echo "  $label: $(head -1 "$WORK/$out.out")"
+  echo "  $label: $(head -1 "$WORK/$out.out")$([ "$tries" -gt 1 ] && echo " (run $tries times: the earlier landed inside the bounds)")"
 }
 
 if [ "$PART" = all ] || [ "$PART" = sound ]; then
@@ -161,7 +186,7 @@ copy() {
   build "$name-bin" "$flags" "$dir${PSEP}$REPO/src" || return
   local only=""
   [ "$want" = 86 ] && only=1
-  env ${only:+HEAP22_PRINT_ONLY=1} timeout 600 "$WORK/$name-bin" "$@" >"$dir/run.out" 2>"$dir/run.err"
+  runs "$dir/run.out" "$dir/run.err" env ${only:+HEAP22_PRINT_ONLY=1} "$WORK/$name-bin" "$@"
   local code=$?
   if [ "$code" -ne "$want" ]; then
     echo "  $label: missed (exit $code, wanted $want)"

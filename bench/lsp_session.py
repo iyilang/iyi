@@ -1210,12 +1210,12 @@ def orphan_steps():
     written into the dead one's stdin, unanswered for the 180 s the
     watchdog waited (Windows CI, the step after 73b).
 
-    The hold is a macro's `system` that writes a file the gate names and
-    then waits on a pipe the gate keeps open until the step is over: on
-    Windows `cmd`, which holds the worker's pipes by inheritance from the
-    start, reading a named pipe; on Linux a shell that opens the worker's
-    two pipes through /proc before it writes the file, reading a FIFO. The
-    file is the gate's proof that the worker is inside that compile, and
+    The hold is a `.cr` helper's macro `system`, reached by `run` from the
+    `.iyi` file. It writes a file the gate names and then waits on a pipe
+    the gate keeps open until the step is over: on Windows `cmd`, which
+    holds the worker's pipes by inheritance from the start, reading a named
+    pipe; on Linux a shell that opens the worker's two pipes through /proc.
+    The file is the gate's proof that the worker is inside that compile, and
     nothing else compiles that text. The step used to take a `ping` or
     `sleep` found under the worker as that proof, and hold an outline
     queued behind a buffer's compile: a Windows run (39222552559) found
@@ -1274,7 +1274,10 @@ def orphan_steps():
             fifos.append(os.open(fifo, os.O_RDWR))
             hold = (f"exec </proc/$PPID/fd/0 >/proc/$PPID/fd/1 2>/dev/null; "
                     f"touch '{mark}'; read held < '{fifo}'")
-        return mark, f"module {name}\n\n{{% system({json.dumps(hold)}) %}}\nputs 1\n"
+        helper = os.path.join(own, f"{name}_hold.cr")
+        with open(helper, "w", encoding="utf-8") as f:
+            f.write(f"{{% system({json.dumps(hold)}) %}}\n")
+        return mark, f"module {name}\n\n{{{{ run({json.dumps(helper)}) }}}}\nputs 1\n"
 
     def inside(mark):
         """Wait for *mark*: the worker is then inside the compile that

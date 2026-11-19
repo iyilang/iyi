@@ -38,6 +38,15 @@
 
 ### Changed
 
+- **Compile-time macros in `.iyi` files refuse shell commands.** `system`
+  and backticks fail with the source location. `read_file`, `read_file?` and
+  `file_exists?` stay within the defining package and the standard library,
+  including paths through symbolic links or Windows junctions. Only the root package
+  may read the build environment with `env`. A `run` helper must be in the
+  defining package, but it still executes without a sandbox and can run
+  arbitrary code. A macro defined and called in `.cr` keeps its existing
+  behavior; a `.cr` macro called from `.iyi` follows the same restrictions.
+
 - **`iyi test` in a directory no longer runs other projects' tests.** It
   walks the tree as `fix` and `mod tidy` do: not into `lib` (the installed
   dependencies, whose failing test failed the run of the project that
@@ -168,6 +177,19 @@
   Windows 11 and on macOS 26.6, and on run 1 on this Linux machine.
 
 ### Fixed
+
+- **`iyi lsp` no longer recompiles a large module for every question.** A
+  worker is replaced at 512 MB, and one compile of std/autocert (527 MB)
+  or std/acme (514 MB) reaches that by itself. So each successor was over
+  the bound the moment it answered and was replaced after one question,
+  and the next question paid the whole compile again: 2 s a hover, and
+  the CI cursor sweep over those two modules took 620 to 1,400 s. The
+  proxy now learns what a worker costs by its first answer and replaces
+  it only once it has also grown 64 MB past that, which a successor
+  would not save. std/acme's 379 questions take 56 s instead of 486, on
+  18 workers instead of 230. Modules under the bound retire as before.
+  `bench/lsp_memory.py` holds it: 40 hovers in std/autocert may take at
+  most 4 workers (the old proxy took 41).
 
 - **`iyi.sum` now pins every manifest MVS reads.** A version outbid by
   another minimum can still introduce requirements, but previously only
@@ -556,6 +578,20 @@
   run again, up to five times.
 
 ### Gates
+
+- **heap22's "large mapping widens the bounds" copy can no longer pass
+  by where Windows puts a mapping.** The arena directory's bounds are
+  one range of slots, and a 40 MiB object that lands between two
+  arenas' slots needs no widening. In 1 run in 10 on Windows the first
+  arenas were 2 GiB apart and all eight objects landed in that gap, so
+  the copy that never widens passed on a GitHub runner (job
+  134651603528). bench/heap_drain.iyi's directory mode now holds each
+  object against the bounds just before it was made and, with the flag
+  on, exits 75 when none landed outside them. bench/heap_drain.sh runs
+  such a run again, up to 12 times, and counts a run that never asks as
+  a failure. On tssh over 20 runs each, the sound build asked nothing
+  once and the broken copy was caught 12 times, asked nothing 8 times
+  and never passed.
 
 - **std/digest's `ValueBarrier` fallback is built and held.** The
   barrier is an empty inline asm on x86_64 and aarch64 and a volatile

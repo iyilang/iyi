@@ -46,13 +46,14 @@ name: iyi
 # Which jobs run is decided by `plan` (scripts/ci_plan.py, whose header says
 # it in full). A pull request runs the fast tier - the Linux build and what
 # answers within the compiler specs' twenty-odd minutes - narrowed further
-# when it touches only docs or only bench files. A push to master, to
-# mt/next or to mt/next-two, the branches a release is integrated on before
-# it reaches master (mt/next-two carries 0.22.0's work), a `v*` tag, the
-# nightly schedule and a manual dispatch run every job - except a nightly
-# run of a commit that passed the full set on master in the last week,
-# which runs none. A push to any other branch runs nothing: open a pull
-# request, or dispatch the workflow on the branch for the full set.
+# when it touches only docs or only bench files. A push to master, the one
+# line work lands on (mt/next and mt/next-two, where releases were
+# integrated before, were merged into it and removed on 2026-11-18), a
+# `v*` tag, the nightly schedule and a manual dispatch run every job -
+# except a nightly run of a commit that passed the full set on master in
+# the last week, which runs none. A push to any other branch runs nothing:
+# open a pull request, or dispatch the workflow on the branch for the full
+# set.
 #
 # The free plan ran twenty jobs at once, five of them on macOS, and the
 # full set was thirty-nine jobs and about twenty runner-hours a run (runs of
@@ -63,7 +64,7 @@ name: iyi
 # macOS 15 (namespace-profile-macos-15), a fresh VM per job.
 on:
   push:
-    branches: [master, mt/next, mt/next-two]
+    branches: [master]
     tags: ["v*", "editor-v*"]
   pull_request:
   workflow_dispatch:
@@ -837,7 +838,9 @@ jobs:
       # context pack over the wire, and an unsaved sibling buffer seen
       # through an import while the disk stays untouched.
       - name: The language server holds its session
-        run: python3 bench/lsp_session.py
+        run: |
+          python3 bench/lsp_session.py
+          python3 bench/lsp_orphan_negative.py
 
       # And the same session in the workspace R-1 exists for: the
       # dependency is a `.iyimod` and its source is gone. The build has
@@ -1731,6 +1734,12 @@ jobs:
 
       - name: Manifest and tree checksum specs
         run: LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config" ./bin/crystal spec spec/compiler/mod_sum_spec.cr
+
+      - name: Package macro path boundaries (macOS)
+        run: |
+          set -o pipefail
+          LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config" ./bin/crystal spec spec/compiler/macro/iyi_package_security_spec.cr spec/compiler/macro/iyi_macro_provenance_spec.cr | tee macro-boundaries.txt
+          grep -F "0 failures, 0 errors, 0 pending" macro-boundaries.txt
 
       - name: Samples
         run: |
@@ -2895,6 +2904,7 @@ jobs:
         shell: bash
         run: |
           IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_session.py
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_orphan_negative.py
           IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_artifacts.py
           IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_memory.py
 
@@ -3340,6 +3350,12 @@ jobs:
         run: |
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
+
+      - name: Package macro path boundaries (Windows)
+        shell: cmd
+        env:
+          CRYSTAL_SPEC_COMPILER_BIN: ${{ github.workspace }}\.build\crystal.exe
+        run: .\bin\crystal.bat spec spec\compiler\macro\iyi_package_security_spec.cr spec\compiler\macro\iyi_macro_provenance_spec.cr
 
       # The command surface, which the Linux job's `cli_spec` holds and no
       # Windows job ran. The daemon's examples are pending here (its server

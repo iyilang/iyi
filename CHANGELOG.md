@@ -592,6 +592,30 @@
 
 ### Gates
 
+- **`bench/heap_local.iyi`'s `filter` check holds the owning unit's
+  token while it looks, so the copy without the local mark's owner filter
+  fails every run.** The check reads the `OWN` byte of an object of unit
+  B, has unit A collect with the object's address on A's stack, and reads
+  the byte again. B sat parked meanwhile, dirty, and once two ticks of
+  the idle clock had passed an idle worker collected it. B's mark gave
+  the object B's parity, the same as A's, since both partitions were on
+  their first collection. The check took B's collection for the reason
+  the byte moved, so the copy, whose A had written that byte, passed: on
+  a Windows CI runner (job 135882647822), once in 62 such jobs since
+  2026-11-18. On Linux and Windows 11 the copy failed 300 runs of 300
+  and 100 of 100, but with A held 250 ms after its collection it passed
+  16 runs of 20 on Linux and 2 of 10 on Windows 11. The check now takes
+  B's token once B has parked and keeps it until A has read the byte the
+  second time, so no collection of B's comes between the reads, and the
+  byte must not move at all. A also collects until a collection that
+  counted wears the parity the object does not: a mark leaves a chunk
+  already wearing its own parity as it is. The copy as
+  `bench/heap_local.sh` builds it now fails 300 runs of 300 on Linux and
+  100 of 100 on Windows 11. It also fails every run with A held 250 or
+  400 ms before its second read, and with the token taken 250 or 400 ms
+  late, after an idle worker has collected B: 20 of 20 each on Linux,
+  10 of 10 on Windows 11.
+
 - **`bench/spawn_eligible.iyi`'s `grows` keeps its four tasks wanting
   to run until the pool has answered them.** The pool starts one worker
   at a time, and while one is on its way the tasks take turns on the

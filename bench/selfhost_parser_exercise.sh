@@ -52,7 +52,7 @@ for phrase in \
   "testing call and block parsing... ok (calls and blocks verified)" \
   "testing control expressions (if, unless, while, until, case, modifiers)... ok (control expressions verified)" \
   "testing declaration parsing... ok (declarations verified)" \
-  "testing real syntax fixtures parsing... ok (2318 nodes across 36 fixtures)" \
+  "testing real syntax fixtures parsing... ok (2453 nodes across 37 fixtures)" \
   "ALL SELFHOST PARSER CHECKS PASSED SUCCESSFULLY!"; do
   if ! grep -qF "$phrase" "$WORK/plain.out"; then
     echo "  MISSING REPORTED CHECK: '$phrase'"
@@ -768,6 +768,7 @@ for fixture in \
   "$REPO"/bench/fixtures/syntax_macro_text_splits.iyi \
   "$REPO"/bench/fixtures/syntax_macro_keywords_and_escapes.iyi \
   "$REPO"/bench/fixtures/syntax_proc_literals.iyi \
+  "$REPO"/bench/fixtures/syntax_proc_pointers.iyi \
   "$REPO"/bench/fixtures/syntax_index_tuples_and_keyword_names.iyi \
   "$REPO"/bench/fixtures/syntax_control_keyword_names.iyi \
   "$REPO"/bench/fixtures/syntax_type_list_then_call.iyi \
@@ -965,6 +966,63 @@ for bad in \
   fi
 done
 
+echo "== Proc pointer rejection parity"
+# Each source is refused by both parsers. The mutation proofs below run the same list.
+proc_pointer_refusals=(
+  '->x.foo'
+  $'x = 1\n->::x.foo'
+  '->::@x.foo'
+  '->::@@x.foo'
+  '->@x.foo.bar'
+  '->foo()'
+  '->:Int32 { 1 }'
+  '->1'
+  '->Foo.'
+  '->@x'
+  '->Foo'
+  $'x = 1\ndef foo\n  ->x.bar\nend'
+)
+for bad in "${proc_pointer_refusals[@]}"; do
+  printf '%s\n' "$bad" > "$WORK/invalid-pointer.iyi"
+  if "$WORK/exercise-plain$EXE" "$WORK_NATIVE/invalid-pointer.iyi" > "$WORK/invalid-pointer-port.log" 2>&1; then
+    echo "  native accepted invalid: $bad"
+    status=1
+  elif ! grep -qF "Syntax error" "$WORK/invalid-pointer-port.log"; then
+    echo "  native failed without a parser syntax error: $bad"
+    cat "$WORK/invalid-pointer-port.log"
+    status=1
+  elif "$WORK/dump_hosted$EXE" "$WORK_NATIVE/invalid-pointer.iyi" > "$WORK/invalid-pointer-hosted.log" 2>&1; then
+    echo "  hosted accepted invalid: $bad"
+    status=1
+  elif ! grep -qF "Iyi::SyntaxException" "$WORK/invalid-pointer-hosted.log"; then
+    echo "  hosted failed without a parser syntax exception: $bad"
+    cat "$WORK/invalid-pointer-hosted.log"
+    status=1
+  else
+    echo "  both rejected: $bad"
+  fi
+done
+
+# A check for the refusal mutations: a mutant that accepts a refused source is caught.
+proc_pointer_refusals_hold() {
+  local bad
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  for bad in "${proc_pointer_refusals[@]}"; do
+    printf '%s\n' "$bad" > "$WORK/mut-pointer.iyi"
+    if "$WORK/mut-exercise$EXE" "$WORK_NATIVE/mut-pointer.iyi" > "$WORK/mut-pointer.log" 2>&1; then
+      return 1
+    fi
+    if ! grep -qF "Syntax error" "$WORK/mut-pointer.log"; then
+      invalid_mutant "a refused pointer failed without a syntax error: $bad"
+      return $?
+    fi
+  done
+  return 0
+}
+
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
@@ -1121,6 +1179,7 @@ new_fixtures_match() {
     "$REPO"/bench/fixtures/syntax_macro_text_splits.iyi \
     "$REPO"/bench/fixtures/syntax_macro_keywords_and_escapes.iyi \
     "$REPO"/bench/fixtures/syntax_proc_literals.iyi \
+    "$REPO"/bench/fixtures/syntax_proc_pointers.iyi \
     "$REPO"/bench/fixtures/syntax_index_tuples_and_keyword_names.iyi \
     "$REPO"/bench/fixtures/syntax_type_list_then_call.iyi \
     "$REPO"/bench/fixtures/syntax_control_keyword_names.iyi \
@@ -1205,6 +1264,34 @@ run_proof_in "mutation 31: self after a type list starts a type whatever follows
 run_proof_in "mutation 32: a global path after a type list starts a type whatever follows it" "$PARSER" \
   $'    when TokenKind::OP_COLON_COLON\n      next_token\n      type_path_start?\n' \
   $'    when TokenKind::OP_COLON_COLON\n      true\n'
+
+# Mutations 33-38: the proc pointer rules. The refused sources are run by the check
+# proc_pointer_refusals_hold; the parser fixture trees by new_fixtures_match.
+# Mutation 33: an arrow followed by an identifier goes back to the proc-literal path,
+# which refuses it for want of `do` or `{`.
+run_proof_in "mutation 33: an arrow followed by an identifier goes back to the proc-literal path" "$PARSER" \
+  "      return parse_fun_pointer unless @token.keyword == Keyword::DO" \
+  "      nil"
+# Mutation 34: a proc pointer drops its argument type list, so the typed pointers lose their args.
+run_proof_in "mutation 34: a proc pointer drops its argument type list" "$PARSER" \
+  "    ProcPointer.new(obj, name, types, global_call).at_end(end_location)" \
+  "    ProcPointer.new(obj, name, [] of ASTNode, global_call).at_end(end_location)"
+# Mutation 35: a receiver that names no variable in scope is accepted.
+prove_mutation "mutation 35: a proc pointer accepts an undefined variable as its receiver" "$PARSER" \
+  '        if name != "self" && !@var_scopes.last.includes?(name)' \
+  '        if false && name != "self" && !@var_scopes.last.includes?(name)' -- proc_pointer_refusals_hold || status=1
+# Mutation 36: a global prefix on a local receiver is accepted.
+prove_mutation "mutation 36: a proc pointer accepts a global prefix on a local receiver" "$PARSER" \
+  '        syntax_error("ProcPointer of local variable cannot be global", location) if global' \
+  '        nil' -- proc_pointer_refusals_hold || status=1
+# Mutation 37: a setter name loses its equals sign, so `->reset=` names `reset`.
+run_proof_in "mutation 37: a proc pointer setter loses its equals sign" "$PARSER" \
+  $'        name = "#{name}="\n      elsif @token.type == TokenKind::OP_PERIOD' \
+  $'        name = name\n      elsif @token.type == TokenKind::OP_PERIOD'
+# Mutation 38: a top-level proc pointer loses its global prefix.
+run_proof_in "mutation 38: a top-level proc pointer loses its global flag" "$PARSER" \
+  "      global_call = global" \
+  "      global_call = false"
 
 echo
 echo "== Rebuilding and running restored parser exercise"

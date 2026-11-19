@@ -845,7 +845,9 @@ jobs:
       # context pack over the wire, and an unsaved sibling buffer seen
       # through an import while the disk stays untouched.
       - name: The language server holds its session
-        run: python3 bench/lsp_session.py
+        run: |
+          python3 bench/lsp_session.py
+          python3 bench/lsp_orphan_negative.py
 
       # And the same session in the workspace R-1 exists for: the
       # dependency is a `.iyimod` and its source is gone. The build has
@@ -1765,6 +1767,12 @@ jobs:
 
       - name: Manifest and tree checksum specs
         run: LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config" ./bin/crystal spec spec/compiler/mod_sum_spec.cr
+
+      - name: Package macro path boundaries (macOS)
+        run: |
+          set -o pipefail
+          LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config" ./bin/crystal spec spec/compiler/macro/iyi_package_security_spec.cr spec/compiler/macro/iyi_macro_provenance_spec.cr | tee macro-boundaries.txt
+          grep -F "0 failures, 0 errors, 0 pending" macro-boundaries.txt
 
       - name: Samples
         run: |
@@ -2971,6 +2979,7 @@ jobs:
         shell: bash
         run: |
           IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_session.py
+          IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_orphan_negative.py
           IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_artifacts.py
           IYI="$(cygpath -m "$PWD")/.build/iyi.exe" python bench/lsp_memory.py
 
@@ -3416,6 +3425,12 @@ jobs:
         run: |
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
+
+      - name: Package macro path boundaries (Windows)
+        shell: cmd
+        env:
+          CRYSTAL_SPEC_COMPILER_BIN: ${{ github.workspace }}\.build\crystal.exe
+        run: .\bin\crystal.bat spec spec\compiler\macro\iyi_package_security_spec.cr spec\compiler\macro\iyi_macro_provenance_spec.cr
 
       # The command surface, which the Linux job's `cli_spec` holds and no
       # Windows job ran. The daemon's examples are pending here (its server

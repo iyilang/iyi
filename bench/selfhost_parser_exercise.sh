@@ -52,7 +52,7 @@ for phrase in \
   "testing call and block parsing... ok (calls and blocks verified)" \
   "testing control expressions (if, unless, while, until, case, modifiers)... ok (control expressions verified)" \
   "testing declaration parsing... ok (declarations verified)" \
-  "testing real syntax fixtures parsing... ok (2453 nodes across 37 fixtures)" \
+  "testing real syntax fixtures parsing... ok (2549 nodes across 38 fixtures)" \
   "ALL SELFHOST PARSER CHECKS PASSED SUCCESSFULLY!"; do
   if ! grep -qF "$phrase" "$WORK/plain.out"; then
     echo "  MISSING REPORTED CHECK: '$phrase'"
@@ -769,6 +769,7 @@ for fixture in \
   "$REPO"/bench/fixtures/syntax_macro_keywords_and_escapes.iyi \
   "$REPO"/bench/fixtures/syntax_proc_literals.iyi \
   "$REPO"/bench/fixtures/syntax_proc_pointers.iyi \
+  "$REPO"/bench/fixtures/syntax_scope_locals.iyi \
   "$REPO"/bench/fixtures/syntax_index_tuples_and_keyword_names.iyi \
   "$REPO"/bench/fixtures/syntax_control_keyword_names.iyi \
   "$REPO"/bench/fixtures/syntax_type_list_then_call.iyi \
@@ -796,6 +797,31 @@ for fixture in \
 done
 
 echo "  Parity summary: $((fixture_count - diverged))/$fixture_count syntax fixtures match ($total_matched_nodes total nodes)"
+
+echo "== Unspaced sign and regex forms after a local, against the hosted parser"
+# Written here, not kept as a fixture: the repository's format check rewrites `x -1` as `x - 1` in every tracked
+# .iyi file, which would take away the form under test.
+cat > "$WORK/unspaced_forms.iyi" <<'UNSPACED_FORMS'
+x = 1
+minus = x -1
+divided = x /2
+number_minus = 1 -1
+UNSPACED_FORMS
+# check_unspaced_forms EXERCISE: succeeds when the exercise's tree for the input equals the hosted tree.
+check_unspaced_forms() {
+  if ! "$1" "$WORK_NATIVE/unspaced_forms.iyi" > "$WORK/unspaced_port.ast" 2> "$WORK/unspaced_port.err"; then
+    return 1
+  fi
+  "$WORK/dump_hosted$EXE" "$WORK_NATIVE/unspaced_forms.iyi" > "$WORK/unspaced_hosted.ast"
+  cmp -s "$WORK/unspaced_port.ast" "$WORK/unspaced_hosted.ast"
+}
+if check_unspaced_forms "$WORK/exercise-plain$EXE"; then
+  echo "  unspaced sign and regex forms match the hosted parser"
+else
+  echo "  unspaced sign and regex forms differ from the hosted parser"
+  cat "$WORK/unspaced_port.err"
+  status=1
+fi
 
 echo "== Require and empty-array locations against the hosted parser"
 cat > "$WORK/require_locations.iyi" <<'IYI_LOCATIONS'
@@ -1023,6 +1049,33 @@ proc_pointer_refusals_hold() {
   return 0
 }
 
+echo "== Variable scope refusal parity"
+scope_refusals=(
+  'x = x'
+  'x += 1'
+  '::x = 1'
+)
+for bad in "${scope_refusals[@]}"; do
+  printf '%s\n' "$bad" > "$WORK/invalid-scope.iyi"
+  if "$WORK/exercise-plain$EXE" "$WORK_NATIVE/invalid-scope.iyi" > "$WORK/invalid-scope-port.log" 2>&1; then
+    echo "  native accepted invalid: $bad"
+    status=1
+  elif ! grep -qF "Syntax error" "$WORK/invalid-scope-port.log"; then
+    echo "  native failed without a parser syntax error: $bad"
+    cat "$WORK/invalid-scope-port.log"
+    status=1
+  elif "$WORK/dump_hosted$EXE" "$WORK_NATIVE/invalid-scope.iyi" > "$WORK/invalid-scope-hosted.log" 2>&1; then
+    echo "  hosted accepted invalid: $bad"
+    status=1
+  elif ! grep -qF "Iyi::SyntaxException" "$WORK/invalid-scope-hosted.log"; then
+    echo "  hosted failed without a parser syntax exception: $bad"
+    cat "$WORK/invalid-scope-hosted.log"
+    status=1
+  else
+    echo "  both rejected: $bad"
+  fi
+done
+
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
@@ -1180,6 +1233,7 @@ new_fixtures_match() {
     "$REPO"/bench/fixtures/syntax_macro_keywords_and_escapes.iyi \
     "$REPO"/bench/fixtures/syntax_proc_literals.iyi \
     "$REPO"/bench/fixtures/syntax_proc_pointers.iyi \
+    "$REPO"/bench/fixtures/syntax_scope_locals.iyi \
     "$REPO"/bench/fixtures/syntax_index_tuples_and_keyword_names.iyi \
     "$REPO"/bench/fixtures/syntax_type_list_then_call.iyi \
     "$REPO"/bench/fixtures/syntax_control_keyword_names.iyi \
@@ -1292,6 +1346,85 @@ run_proof_in "mutation 37: a proc pointer setter loses its equals sign" "$PARSER
 run_proof_in "mutation 38: a top-level proc pointer loses its global flag" "$PARSER" \
   "      global_call = global" \
   "      global_call = false"
+
+# A mutant of the variable scope rules is caught by the scope fixture, or by the unspaced forms against the hosted tree,
+# or by a refused source that it accepts.
+scope_refusals_hold() {
+  local bad
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  for bad in "${scope_refusals[@]}"; do
+    printf '%s\n' "$bad" > "$WORK/mut-scope.iyi"
+    if "$WORK/mut-exercise$EXE" "$WORK_NATIVE/mut-scope.iyi" > "$WORK/mut-scope.log" 2>&1; then
+      return 1
+    fi
+    if ! grep -qF "Syntax error" "$WORK/mut-scope.log"; then
+      invalid_mutant "a refused variable form failed without a syntax error: $bad"
+      return $?
+    fi
+  done
+  return 0
+}
+unspaced_forms_hold() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  if check_unspaced_forms "$WORK/mut-exercise$EXE"; then
+    return 0
+  fi
+  return 1
+}
+# Mutation 39: var? searches every enclosing scope, as it did before the innermost-scope rule.
+run_proof_in "mutation 39: var? searches every enclosing scope, not only the innermost" "$PARSER" \
+  "    var_in_scope?(name)" \
+  $'    i = @var_scopes.size - 1\n    while i >= 0\n      return true if @var_scopes[i].includes?(name)\n      i = i - 1\n    end\n    false'
+# Mutation 40: a proc literal is isolated, so an outer local inside it is a call.
+run_proof_in "mutation 40: a proc literal is isolated, so an outer local is a call" "$PARSER" \
+  $'    with_lexical_var_scope do\n      params.each' \
+  $'    with_isolated_var_scope do\n      params.each'
+# Mutation 41: a block is isolated, so an outer local inside it is a call.
+run_proof_in "mutation 41: a block is isolated, so an outer local is a call" "$PARSER" \
+  $'    body = with_lexical_var_scope do\n      all_names' \
+  $'    body = with_isolated_var_scope do\n      all_names'
+# Mutation 42: a constant's value shares the enclosing scope.
+run_proof_in "mutation 42: a constant's value parses in the enclosing scope" "$PARSER" \
+  "            needs_new_scope = atomic.is_a?(Path) || (" \
+  "            needs_new_scope = false || ("
+# Mutation 43: a local followed by a plus or minus is a call, so `x -1` is a call with an argument.
+prove_mutation "mutation 43: a local followed by a plus or minus is a call" "$PARSER" \
+  "    if is_var && next_comes_plus_or_minus?" \
+  "    if false && next_comes_plus_or_minus?" -- unspaced_forms_hold || status=1
+# Mutation 44: a number that begins with a sign after an operand is not a binary operator.
+prove_mutation "mutation 44: a signed number after an operand is not a binary operator" "$PARSER" \
+  '        if sign == "+" || sign == "-"' \
+  '        if false' -- unspaced_forms_hold || status=1
+# Mutation 45: $~ and $? are globals even when an assignment follows them.
+run_proof_in "mutation 45: \$~ and \$? are globals even when assigned" "$PARSER" \
+  "      if next_comes_assign_after_space?" \
+  "      if false"
+# Mutation 46: typeof reads the enclosing locals as calls, as an isolated scope would.
+run_proof_in "mutation 46: typeof reads the enclosing locals as calls" "$PARSER" \
+  "    exps = with_lexical_var_scope do" \
+  "    exps = with_isolated_var_scope do"
+# Mutation 47: a name used inside its own assignment is accepted.
+prove_mutation "mutation 47: a name used inside its own assignment is accepted" "$PARSER" \
+  "        if !call_only && !global && @assigned_vars.includes?(name)" \
+  "        if false" -- scope_refusals_hold || status=1
+# Mutation 48: an operator assignment to a name that is not yet defined is accepted.
+prove_mutation "mutation 48: an operator assignment to an undefined name is accepted" "$PARSER" \
+  '          if atomic.is_a?(Call) && atomic.name != "[]" && !var_in_scope?(atomic.name)' \
+  '          if false' -- scope_refusals_hold || status=1
+# Mutation 49: a global name is assigned as a local.
+prove_mutation "mutation 49: a ::name is assigned as a local" "$PARSER" \
+  '    return unless atomic.is_a?(Call) && atomic.global && atomic.obj.nil? && atomic.args.empty?' \
+  '    return' -- scope_refusals_hold || status=1
+# Mutation 50: a local followed by a space reads / as a regex.
+prove_mutation "mutation 50: a local followed by a space reads / as a regex" "$PARSER" \
+  '      @wants_regex = !is_var' \
+  '      @wants_regex = true' -- unspaced_forms_hold || status=1
 
 echo
 echo "== Rebuilding and running restored parser exercise"

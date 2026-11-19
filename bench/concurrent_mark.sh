@@ -396,6 +396,28 @@ class Node
   end
 end
 
+# Frees the aged chunks, the one at `first` before the rest (when it is 0 or
+# more), and returns how many of their words the program left wrong.
+def free_aged(aged : Pointer(Pointer(UInt64)), generation : UInt64, first : Int32) : Int32
+  lost = 0
+  if first >= 0
+    chunk = aged[first]
+    tag = generation.unsafe_shl(8_u64) | first.to_u64
+    lost += 1 if chunk[0] != tag || chunk[255] != tag ^ 0x5A5A_u64
+    GC.free(chunk.as(Void*))
+  end
+  j = 64
+  while j > 0
+    j -= 1
+    next if j == first
+    chunk = aged[j]
+    tag = generation.unsafe_shl(8_u64) | j.to_u64
+    lost += 1 if chunk[0] != tag || chunk[255] != tag ^ 0x5A5A_u64
+    GC.free(chunk.as(Void*))
+  end
+  lost
+end
+
 # Past the stop's bound, so every mark goes beside the program and a
 # helper's stop ends it, wherever this thread stands.
 chain = nil.as(Node?)
@@ -420,6 +442,55 @@ while j < 64
 end
 lost = 0
 round = 0
+{% if flag?(:freed_force) %}
+  # The copy's sweep answers the armed arena's first look with the kept chunk
+  # it looks at, and holds that look until this program frees the chunk. Nothing
+  # is allocated from the moment the concurrent mark starts until the look is
+  # answered: a collection this program triggered in that window would wait for
+  # the held sweep. A settle and an eager collection first leave no lazy sweep
+  # of an older mark pending.
+  forced_arena = IyiHeap.arena_of(aged[0].address)
+  IyiMark.settle
+  IyiMark.collect
+  IyiHeap.arm_look(forced_arena)
+  forced_limit = IyiMark.now_ns + 5000000000_u64
+  while !IyiMark.marking? && IyiMark.now_ns < forced_limit
+    block = Pointer(UInt8).malloc(64_u64)
+    block.value = 1_u8
+  end
+  if !IyiMark.marking?
+    print "FAIL: freed: no concurrent mark started within five seconds\n"
+    __iyi_exit(1)
+  end
+  while IyiHeap.forced_look == 0_u64 && IyiMark.now_ns < forced_limit
+    IyiThread.spin_pause
+  end
+  if IyiHeap.forced_look == 0_u64
+    print "FAIL: freed: no sweep looked at a chunk the last mark kept within five seconds\n"
+    __iyi_exit(1)
+  end
+  look = IyiHeap.forced_look
+  first = -1
+  j = 0
+  while j < 64
+    first = j if IyiHeap.head_of(forced_arena, aged[j].address) == look
+    j += 1
+  end
+  if first < 0
+    print "FAIL: freed: the sweep looked at a chunk the last mark kept that is not one of the aged ones\n"
+    __iyi_exit(1)
+  end
+  lost += free_aged(aged, generation, first)
+  generation = generation &+ 1_u64
+  j = 0
+  while j < 64
+    chunk = Pointer(UInt64).malloc(256_u64)
+    chunk[0] = generation.unsafe_shl(8_u64) | j.to_u64
+    chunk[255] = chunk[0] ^ 0x5A5A_u64
+    aged[j] = chunk
+    j += 1
+  end
+{% end %}
 while round < 200000
   j = 0
   while j < 64
@@ -442,14 +513,7 @@ while round < 200000
     arena = IyiHeap.arena_of(aged[0].address)
     while IyiMark.now_ns < watch_ns && IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) != IyiMark.epoch
     end
-    j = 64
-    while j > 0
-      j -= 1
-      chunk = aged[j]
-      tag = generation.unsafe_shl(8_u64) | j.to_u64
-      lost += 1 if chunk[0] != tag || chunk[255] != tag ^ 0x5A5A_u64
-      GC.free(chunk.as(Void*))
-    end
+    lost += free_aged(aged, generation, -1)
     while IyiMark.now_ns < until_ns
     end
     generation = generation &+ 1_u64
@@ -518,17 +582,74 @@ fi
 # release alike, and with the lock in 0 of 1,000 of each. Small classes
 # are left alone: a slice meets thousands of kept chunks there, and a
 # wait at each stalls the sweep.
-if [ "$(uname -s)" = "Darwin" ]; then
-  echo "  the sweep's widened look is measured on Windows and Linux, as the bursts are"
-else
 step "chunks the last mark kept, freed beside a sweep that waits at each, ten runs"
 mkdir -p widened/iyi
 cp "$REPO"/src/iyi/*.iyi widened/iyi/
-awk '/^          word = IyiHeap\.read8\(byte\)$/ { print
+# The sweep's look at a kept chunk of a kilobyte or more. Unarmed (the plain
+# runs), the look waits 100 us for the entry to change. Armed by the program
+# (`IyiHeap.arm_look`, on the aged chunks' arena), the first such look publishes
+# its chunk and holds it by words until the program's free of that chunk
+# announces itself on the slice's claim (`note_free_waiting`, at the top of
+# free_unswept), or the entry changes. Five seconds without either is named.
+awk 'function forced() {
+    print "      # Copy only (concurrent_mark freed proof): the first kept chunk a sweep looks at in the armed arena is published"
+    print "      # here, and the look holds until its free says it is waiting, or the entry of that chunk changes."
+    print "      @[UnsafeReach(\"copy-only: the look words, set and read through their addresses\")]"
+    print "      @@forced_on : UInt64 = 0_u64"
+    print "      @[UnsafeReach(\"copy-only: the look words, set and read through their addresses\")]"
+    print "      @@forced_arena : UInt64 = 0_u64"
+    print "      @[UnsafeReach(\"copy-only: the look words, set and read through their addresses\")]"
+    print "      @@forced_look : UInt64 = 0_u64"
+    print "      @[UnsafeReach(\"copy-only: the look words, set and read through their addresses\")]"
+    print "      @@forced_waiting : UInt64 = 0_u64"
+    print ""
+    print "      def self.arm_look(arena : UInt64) : Nil"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_arena).address).value.set(arena)"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_on).address).value.set(1_u64)"
+    print "      end"
+    print ""
+    print "      def self.look_armed_in?(arena : UInt64) : Bool"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_on).address).value.get != 0_u64 && Pointer(Atomic(UInt64)).new(pointerof(@@forced_arena).address).value.get == arena"
+    print "      end"
+    print ""
+    print "      def self.forced_look : UInt64"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_look).address).value.get"
+    print "      end"
+    print ""
+    print "      def self.publish_look(chunk : UInt64) : Nil"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_look).address).value.set(chunk)"
+    print "      end"
+    print ""
+    print "      def self.forced_waiting : UInt64"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_waiting).address).value.get"
+    print "      end"
+    print ""
+    print "      def self.note_free_waiting(head : UInt64) : Nil"
+    print "        if Pointer(Atomic(UInt64)).new(pointerof(@@forced_on).address).value.get != 0_u64"
+    print "          Pointer(Atomic(UInt64)).new(pointerof(@@forced_waiting).address).value.set(head)"
+    print "        end"
+    print "      end"
+    print ""
+  }
+  /^      def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared = 1 }
+  /^      def self\.free_unswept\(/ { print; print "        note_free_waiting(head)"; noted = 1; next }
+  /^          word = IyiHeap\.read8\(byte\)$/ { print
     print "          if chunk >= 1024_u64 && word & IyiHeap::EPOCH_FLAG != epoch && word & IyiHeap::FREE_FLAG == 0 && IyiHeap.read8(mark) != WHITE"
-    print "            window_end = IyiMark.now_ns &+ 100000_u64"
-    print "            while IyiHeap.read8(byte) == word && IyiMark.now_ns < window_end"
-    print "              spin_pause"
+    print "            if IyiHeap.look_armed_in?(arena) && IyiHeap.forced_look == 0_u64"
+    print "              IyiHeap.publish_look(cursor)"
+    print "              look_limit = IyiMark.now_ns &+ 5000000000_u64"
+    print "              while IyiHeap.read8(byte) == word && IyiHeap.forced_waiting != cursor && IyiMark.now_ns < look_limit"
+    print "                spin_pause"
+    print "              end"
+    print "              if IyiHeap.read8(byte) == word && IyiHeap.forced_waiting != cursor"
+    print "                __iyi_write(2, \"freed: the sweep held a chunk the last mark kept for five seconds, and no free came\\n\".to_unsafe.as(Void*), 84_u64)"
+    print "                __iyi_exit(1)"
+    print "              end"
+    print "            else"
+    print "              window_end = IyiMark.now_ns &+ 100000_u64"
+    print "              while IyiHeap.read8(byte) == word && IyiMark.now_ns < window_end"
+    print "                spin_pause"
+    print "              end"
     print "            end"
     print "            if IyiHeap.read8(byte) != word"
     print "              __iyi_write(2, \"freed: a chunk the last mark kept was freed while the sweep looked at it\\n\".to_unsafe.as(Void*), 73_u64)"
@@ -536,7 +657,7 @@ awk '/^          word = IyiHeap\.read8\(byte\)$/ { print
     print "            end"
     print "          end"
     found = 1; next }
-  { print } END { if (!found) exit 3 }' "$REPO/src/iyi/prelude.iyi" > widened/iyi/prelude.iyi || { echo "the sweep's two reads this step widens are not in the prelude any more"; exit 1; }
+  { print } END { if (!declared || !noted || !found) exit 3 }' "$REPO/src/iyi/prelude.iyi" > widened/iyi/prelude.iyi || { echo "the sweep's look or the free this step arms is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-widened > build-widened.log 2>&1; then
   cat build-widened.log; exit 1
 fi
@@ -549,25 +670,31 @@ for run in 1 2 3 4 5 6 7 8 9 10; do
 done
 echo "  ten runs, no free inside the sweep's look at a kept chunk, every chunk intact"
 
+step "failure proof: the armed look held for the program's free of its chunk, with that free made by the locked path"
+if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build freed.iyi -Dfreed_force -o freed-armed > build-armed.log 2>&1; then
+  cat build-armed.log; exit 1
+fi
+timeout -k 5 120 ./freed-armed > armed.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qx "lost 0" armed.txt; then
+  echo "the hook alone, armed, did not keep every chunk (exit $code):"; tail -3 armed.txt; exit 1
+fi
+echo "  the hook alone, armed, exits 0: $(grep -m1 '^lost' armed.txt)"
+
 step "failure proof: a chunk the sweep has not reached, freed with no lock, is freed inside the sweep's look"
 mkdir -p unlocked/iyi
 cp "$REPO"/src/iyi/*.iyi unlocked/iyi/
 awk '{ if (sub(/^            free_unswept\(arena, head, slot, table, index\)$/, "            list_freed(arena, head, slot, table, index)")) found = 1; print } END { if (!found) exit 3 }' \
   widened/iyi/prelude.iyi > unlocked/iyi/prelude.iyi || { echo "the free this proof puts back is not in the prelude any more"; exit 1; }
-if ! IYI_PATH="$WORK/unlocked${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-unlocked > build-unlocked.log 2>&1; then
+if ! IYI_PATH="$WORK/unlocked${PSEP}$REPO/src" "$IYI" build freed.iyi -Dfreed_force -o freed-unlocked > build-unlocked.log 2>&1; then
   cat build-unlocked.log; exit 1
 fi
-caught=""
-for try in 1 2 3 4 5 6 7 8 9 10; do
-  timeout -k 5 120 ./freed-unlocked > unlocked.txt 2>&1
-  code=$?
-  if [ "$code" -eq 1 ] && grep -q "^freed: a chunk the last mark kept was freed while the sweep looked at it$" unlocked.txt; then
-    caught="$try"; break
-  fi
-done
-[ -n "$caught" ] || { echo "ten runs of the free with no lock saw no free inside the sweep's look:"; tail -3 unlocked.txt; exit 1; }
-printf '  exits 1 on run %s at "%s"\n' "$caught" "$(grep -m1 '^freed: a chunk the last mark kept' unlocked.txt)"
+timeout -k 5 120 ./freed-unlocked > unlocked.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -Fxq "freed: a chunk the last mark kept was freed while the sweep looked at it" unlocked.txt; then
+  echo "the free with no lock was not seen inside the sweep's look (exit $code):"; tail -3 unlocked.txt; exit 1
 fi
+printf '  exits 1 at "%s"\n' "freed: a chunk the last mark kept was freed while the sweep looked at it"
 
 step "failure proof: a barrier that shades nothing loses the moved payload"
 mkdir -p patched/iyi

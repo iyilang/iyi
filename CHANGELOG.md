@@ -592,6 +592,19 @@
 
 ### Gates
 
+- **`bench/lsp_memory.py` holds a workspace pull to what the design
+  promises, not to a fixed 760 MB.** A worker stops a pull between
+  files once it holds 512 MB, so it can pass that by the one compile it
+  started just under it. samples/iyi/cores.iyi (std/http with TLS
+  under it) costs a fresh worker 441 MB in one compile, up from 467 before
+  heap22 and master met to 503 after. The pull reached 761 and 764 MB on
+  CI against 760 (jobs 135393771372, 135394235741). The bound is now
+  measured on each run, owner's decision of 2026-11-19: 512 MB budget +
+  the costliest sample's one compile + the 32 MB footprint step + the
+  proxy's own, 1,049 MB on a Linux workstation, where the pull peaked at
+  750. The typing (760 MB) and paced (300 MB) bounds are unchanged, and
+  `--direct`, which never hands a pull on, still fails the step.
+
 - **The hand-off step reads darwin's load too.** Its 1 ms median is a
   sleeping thread's wake, which `bench/parallel_exercise.sh` already
   stopped judging on Linux and Windows hosts loaded at or past their

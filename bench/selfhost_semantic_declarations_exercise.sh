@@ -92,6 +92,18 @@ LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config || true)}" CRYSTAL_PATH="$R
   || { cat "$WORK/port_build.log"; echo "FAILED to build the port's declaration driver"; exit 1; }
 echo "  built: oracle, port driver"
 
+echo "== 1b. The absolute-path rule: a drive path is read as given, never prefixed with the working directory"
+ABS_EXPECT="$WORK/absolute_path.expect"
+printf '%s\n' "/x => true" "bench/x => false" "D:/a/b => true" 'D:\a => true' "d:/a => true" "D:x => false" "C: => false" " => false" "9:/a => false" "/ => true" > "$ABS_EXPECT"
+"$WORK/port$EXE" --absolute-path "/x" "bench/x" "D:/a/b" 'D:\a' "d:/a" "D:x" "C:" "" "9:/a" "/" > "$WORK/absolute_path.out" 2>&1
+if cmp -s "$ABS_EXPECT" "$WORK/absolute_path.out"; then
+  echo "  absolute path rule: 10 of 10 cases"
+else
+  echo "  absolute path rule: DIVERGED from the expected answers"
+  diff -u "$ABS_EXPECT" "$WORK/absolute_path.out"
+  status=1
+fi
+
 echo
 echo "== 2. Fixtures: every declaration dumped identically by both sides"
 fixture_count=0

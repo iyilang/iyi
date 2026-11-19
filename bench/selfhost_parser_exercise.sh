@@ -1082,10 +1082,16 @@ echo "== Refusal text parity: both parsers refuse each source with the same mess
 refusal_text_sources=(
   '->(x):Int32 { 1 }'
   '-> :Int32 { 1 }'
+  '->Foo.'
+  'def 1'
+  'macro 1'
 )
 refusal_texts=(
   "a space is mandatory between ':' and return type"
   "a space is mandatory between ':' and return type"
+  "expecting a name after 'def', not the end of the file"
+  "expecting a name after 'def', not '1'"
+  "expecting a name after 'macro', not '1'"
 )
 for i in "${!refusal_text_sources[@]}"; do
   bad="${refusal_text_sources[$i]}"
@@ -1485,6 +1491,10 @@ old_sym=$'      # ->() :T { }\n      syntax_error("a space is mandatory between 
 new_sym=$'      # ->() :T { }\n      nil'
 prove_mutation "mutation 51: a proc literal's second case drops the symbol refusal" "$PARSER" \
   "$old_sym" "$new_sym" -- refusal_text_hold || status=1
+# Mutation 52: a name missing after def or macro falls back to the old unexpected-token wording.
+prove_mutation "mutation 52: a missing name after def or macro is refused with the old wording" "$PARSER" \
+  "      syntax_error(\"expecting a name after '#{what}', not #{not_what}\", @token.location)" \
+  "      unexpected_token(\"expected def or macro name\")" -- refusal_text_hold || status=1
 
 echo
 echo "== Rebuilding and running restored parser exercise"

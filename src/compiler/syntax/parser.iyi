@@ -2654,12 +2654,14 @@ pub class Parser < Lexer
     end
   end
 
-  def consume_def_or_macro_name : String
+  # hosted parser.cr 8348-8368: a name is needed after `what`, and the refusal says what came instead.
+  def consume_def_or_macro_name(what : String = "def") : String
     @wants_def_or_macro_name = true
     next_token_skip_space_or_newline
     @wants_def_or_macro_name = false
     unless def_or_macro_check1?(@token.type)
-      unexpected_token("expected def or macro name")
+      not_what = @token.type == TokenKind::EOF ? "the end of the file" : "'#{@token.value.empty? ? @token.type.to_s : @token.value}'"
+      syntax_error("expecting a name after '#{what}', not #{not_what}", @token.location)
     end
     @token.type == TokenKind::IDENT || @token.type == TokenKind::CONST ? @token.value : @token.type.to_s
   end
@@ -3992,7 +3994,7 @@ pub class Parser < Lexer
 
   def parse_macro : ASTNode
     location = @token.location
-    consume_def_or_macro_name
+    consume_def_or_macro_name("macro")
 
     name = ""
     if @token.type == TokenKind::CONST

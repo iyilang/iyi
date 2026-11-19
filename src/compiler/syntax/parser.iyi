@@ -391,6 +391,7 @@ pub class Parser < Lexer
 
     if exp.is_a?(Call)
       if exp.obj.nil? && exp.args.empty?
+        iyi_refuse_global_local(exp)
         exp = Var.new(exp.name).at(exp)
       end
     end
@@ -501,6 +502,7 @@ pub class Parser < Lexer
               atomic.end_location = arg.end_location
               return atomic
             else
+              iyi_refuse_global_local(atomic)
               atomic = Var.new(atomic.name).at(atomic)
             end
           end
@@ -517,7 +519,17 @@ pub class Parser < Lexer
             atomic = UninitializedVar.new(atomic, type).at(location).at_end(type)
             return atomic
           else
-            atomic_value = parse_op_assign_no_control
+            needs_new_scope = atomic.is_a?(Path) || ((atomic.is_a?(InstanceVar) || atomic.is_a?(ClassVar)) && !inside_def?)
+            atomic_value = with_isolated_var_scope(needs_new_scope) do
+              if atomic.is_a?(Var) && !var?(atomic.name)
+                @assigned_vars.push(atomic.name)
+                assigned = parse_op_assign_no_control
+                @assigned_vars.pop
+                assigned
+              else
+                parse_op_assign_no_control
+              end
+            end
             push_var(atomic)
             atomic = Assign.new(atomic, atomic_value).at(location)
           end
@@ -534,6 +546,11 @@ pub class Parser < Lexer
 
           if atomic.is_a?(Var) && atomic.name == "self"
             syntax_error("can't change the value of self", location)
+          end
+
+          iyi_refuse_global_local(atomic)
+          if atomic.is_a?(Call) && atomic.name != "[]" && !var_in_scope?(atomic.name)
+            syntax_error("'#{@token.type}' before definition of '#{atomic.name}'", @token.location)
           end
 
           op_loc = @token.location
@@ -769,6 +786,19 @@ pub class Parser < Lexer
         next_token_skip_space_or_newline
         right = parse_mul_or_div
         left = Call.new(left, method, [right] of ASTNode).at(location).at_end(right)
+      when TokenKind::NUMBER
+        # hosted parser.cr 1027-1039: a number whose text starts with a sign after an operand is that sign and the
+        # number, so `x -1` is a subtraction. The number is read again from the character after the sign.
+        sign = @token.value[0, 1]
+        if sign == "+" || sign == "-"
+          method = sign
+          self.current_pos = @token.start + 1
+          next_token
+          right = parse_mul_or_div
+          left = Call.new(left, method, [right] of ASTNode).at(location).at_end(right)
+        else
+          return left
+        end
       else
         return left
       end
@@ -1110,10 +1140,16 @@ pub class Parser < Lexer
       parse_symbol_array
     when TokenKind::SYMBOL
       node_and_next_token(SymbolLiteral.new(@token.value).at(location))
-    when TokenKind::OP_DOLLAR_QUESTION
-      node_and_next_token(Global.new("$?").at(location))
-    when TokenKind::OP_DOLLAR_TILDE
-      node_and_next_token(Global.new("$~").at(location))
+    when TokenKind::OP_DOLLAR_QUESTION, TokenKind::OP_DOLLAR_TILDE
+      dollar_name = "$?"
+      dollar_name = "$~" if @token.type == TokenKind::OP_DOLLAR_TILDE
+      if next_comes_assign_after_space?
+        dollar_var = Var.new(dollar_name).at(location)
+        push_var(dollar_var)
+        node_and_next_token(dollar_var)
+      else
+        node_and_next_token(Global.new(dollar_name).at(location))
+      end
     when TokenKind::GLOBAL_MATCH_DATA_INDEX
       val = @token.value
       method = "[]"
@@ -1326,7 +1362,21 @@ pub class Parser < Lexer
     name_end = token_end_location
     is_var = !global && var?(name)
 
+    # hosted parser.cr 6248: a local followed by `+` or `-` is not a call, so `x -1` is a subtraction.
+    if is_var && next_comes_plus_or_minus?
+      var = Var.new(name).at(location).at_end(name_end)
+      next_token
+      return var
+    end
+
+    # hosted parser.cr 6257-6272: the name is read with the regex flag off, and a local's name followed by a
+    # space keeps `/` a division.
+    @wants_regex = false
+    set_slash_is_regex(false)
     next_token
+    if @token.type == TokenKind::SPACE
+      @wants_regex = !is_var
+    end
     # hosted parser.cr 6275-6284
     if name == "super"
       @calls_super = true
@@ -1364,6 +1414,9 @@ pub class Parser < Lexer
         note_block_arg_read(name)
         Var.new(name).at(location).at_end(name_end)
       else
+        if !call_only && !global && @assigned_vars.includes?(name)
+          syntax_error("can't use variable name '#{name}' inside assignment to variable '#{name}'", location)
+        end
         c = Call.new(nil, name).at(location)
         c.end_location = name_end
         c.global = global
@@ -1375,12 +1428,46 @@ pub class Parser < Lexer
   def var?(name : String) : Bool
     return true if @in_macro_expression
     return true if name == "self"
-    i = @var_scopes.size - 1
-    while i >= 0
-      return true if @var_scopes[i].includes?(name)
-      i = i - 1
+    var_in_scope?(name)
+  end
+
+  # hosted parser.cr 8442: a local is a name of the innermost scope. A lexical scope starts with a copy of the
+  # outer names, and an isolated scope starts empty.
+  def var_in_scope?(name : String) : Bool
+    @var_scopes.last.includes?(name)
+  end
+
+  # hosted parser.cr 727: `::name` is a method at the top level, never a local to assign.
+  def iyi_refuse_global_local(atomic : ASTNode) : Nil
+    return unless atomic.is_a?(Call) && atomic.global && atomic.obj.nil? && atomic.args.empty?
+    syntax_error("`::#{atomic.name}` is not a variable: `::` looks a method up at the top level, and a local variable is assigned without it, `#{atomic.name} = ...`", atomic.location)
+  end
+
+  # hosted parser.cr 6464: whether the next non-blank character is `+` or `-`.
+  def next_comes_plus_or_minus? : Bool
+    pos = current_pos
+    while current_char == ' ' || current_char == '\t' || current_char == '\n' || current_char == '\r'
+      next_char_no_column_increment
     end
-    false
+    comes = current_char == '+' || current_char == '-'
+    self.current_pos = pos
+    comes
+  end
+
+  # hosted parser.cr 1594: `$~` or `$?` is a local when a space run and an assignment `=` follow it (not `==`,
+  # `=~` or `=>`).
+  def next_comes_assign_after_space? : Bool
+    pos = current_pos
+    while current_char == ' ' || current_char == '\t'
+      next_char_no_column_increment
+    end
+    comes = current_char == '='
+    if comes
+      next_char_no_column_increment
+      comes = current_char != '=' && current_char != '~' && current_char != '>'
+    end
+    self.current_pos = pos
+    comes
   end
 
   def push_var(node : ASTNode) : Nil
@@ -1705,14 +1792,12 @@ pub class Parser < Lexer
       skip_statement_end
     end
 
-    new_scope = Set(String).new
-    all_names.each { |name| new_scope.add(name) }
-    @var_scopes << new_scope
-
-    body = parse_expressions
-    skip_statement_end
-
-    @var_scopes.pop
+    body = with_lexical_var_scope do
+      all_names.each { |name| push_var_name(name) }
+      parsed = parse_expressions
+      skip_statement_end
+      parsed
+    end
 
     end_location = token_end_location
     if curly
@@ -3262,15 +3347,18 @@ pub class Parser < Lexer
     if @token.type == TokenKind::OP_RPAREN
       syntax_error("missing typeof argument", @token.location)
     end
-    exps = [] of ASTNode
-    while @token.type != TokenKind::OP_RPAREN
-      exps << parse_op_assign
-      if @token.type == TokenKind::OP_COMMA
-        next_token_skip_space_or_newline
-      else
-        skip_space_or_newline
-        check(TokenKind::OP_RPAREN)
+    exps = with_lexical_var_scope do
+      args = [] of ASTNode
+      while @token.type != TokenKind::OP_RPAREN
+        args << parse_op_assign
+        if @token.type == TokenKind::OP_COMMA
+          next_token_skip_space_or_newline
+        else
+          skip_space_or_newline
+          check(TokenKind::OP_RPAREN)
+        end
       end
+      args
     end
     end_location = token_end_location
     next_token_skip_space
@@ -4501,7 +4589,7 @@ pub class Parser < Lexer
       skip_space_or_newline
     end
 
-    with_isolated_var_scope do
+    with_lexical_var_scope do
       params.each { |p| push_var_name(p.name) }
       end_location : Location? = nil
       body : ASTNode? = nil

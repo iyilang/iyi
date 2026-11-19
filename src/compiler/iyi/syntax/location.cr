@@ -15,8 +15,12 @@ class Iyi::Location
   # made of its own source (`read_from`).
   getter artifact : String?
 
+  # The source being parsed when a textual location pragma changed filename.
+  # Unlike the displayed filename, source provenance cannot be chosen by it.
+  getter origin : String | VirtualFile | Nil
+
   def initialize(@filename : String | VirtualFile | Nil, @line_number : Int32, @column_number : Int32,
-                 @artifact : String? = nil)
+                 @artifact : String? = nil, @origin : String | VirtualFile | Nil = nil)
   end
 
   # iyi: the `artifact` of `expanded_location`: what a node a macro wrote

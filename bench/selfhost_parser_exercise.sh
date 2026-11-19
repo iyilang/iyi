@@ -1298,6 +1298,7 @@ handler_refusal_sources=(
   $'def f\n  1\nrescue ArgumentError 2\nend\n'
   $'f = ->(x : Int32) do |y|\n  x\nend\n'
   $'f = ->(x : Int32) { |y| x }\n'
+  $'[1].each { |x|\n  x\nrescue\n  2\n}\n'
 )
 handler_refusal_texts=(
   "'else' is useless without 'rescue'"
@@ -1311,6 +1312,7 @@ handler_refusal_texts=(
   "expecting any of these tokens: ;, NEWLINE (not '2')"
   "unexpected token: \"|\", proc literals specify their parameters like this: ->(y : Type) { ... }"
   "unexpected token: \"|\", proc literals specify their parameters like this: ->(y : Type) { ... }"
+  "expecting token '}', not 'rescue'"
 )
 handler_accepted_sources=(
   $'def f\n  1\nrescue\n  2\nensure\n  3\nend\n'
@@ -1329,6 +1331,33 @@ else
 fi
 if ! "$WORK/dump_hosted$EXE" "$REPO_NATIVE/bench/fixtures/syntax_implicit_rescue.iyi" > "$WORK/implicit-hosted.ast"; then
   echo "  hosted refused the implicit rescue fixture"
+  status=1
+fi
+
+echo "== Generic refusals: the token is named by its text, as the hosted parser names it (parser.cr 8570-8574, 8477-8489, 8517-8535)"
+generic_refusal_sources=(
+  $'->1\n'
+  $'[1, 2 3]\n'
+  $'class A\n  1\nensure\n  2\nend\n'
+)
+generic_refusal_texts=(
+  "unexpected token: \"1\""
+  "expecting token ']', not '3'; the array literal that began at line 1 is still open"
+  "expecting identifier 'end', not 'ensure'"
+)
+generic_accepted_sources=(
+  $'def f\nend\n'
+)
+if refusal_rows_run "$WORK/exercise-plain$EXE" generic_refusal_sources generic_refusal_texts generic_accepted_sources; then
+  echo "  port: ${#generic_refusal_sources[@]} refusals name the token as hosted does"
+else
+  echo "  port generic rows differ from the hosted parser"
+  status=1
+fi
+if refusal_rows_run "$WORK/dump_hosted$EXE" generic_refusal_sources generic_refusal_texts generic_accepted_sources; then
+  echo "  hosted: the same rows hold"
+else
+  echo "  hosted generic rows do not hold: the row wants are wrong"
   status=1
 fi
 

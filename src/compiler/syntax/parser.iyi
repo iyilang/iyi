@@ -6465,15 +6465,16 @@ pub class Parser < Lexer
       # A closer that is missing names what it would close and where that
       # began, as a missing `end` does. The head sentence stays as it was.
       if (unclosed = @unclosed_stack.last?) && closes_unclosed?(kind, unclosed.name)
-        syntax_error("expecting token '#{kind}', not '#{@token.type}'; the #{unclosed.name} that began at line #{unclosed.location.line_number} is still open", @token.location)
+        syntax_error("expecting token '#{kind}', not '#{token_text}'; the #{unclosed.name} that began at line #{unclosed.location.line_number} is still open", @token.location)
       end
-      syntax_error("expecting token '#{kind}', not '#{@token.type}'", @token.location)
+      syntax_error("expecting token '#{kind}', not '#{token_text}'", @token.location)
     end
   end
 
   def check_keyword(kw : Keyword) : Nil
     if @token.keyword != kw
-      syntax_error("expecting keyword '#{kw}', not '#{@token.type}'", @token.location)
+      # Hosted check_ident (parser.cr 8517-8535): the keyword is named as an identifier, and the token by its text.
+      syntax_error("expecting identifier '#{kw}', not '#{token_text}'", @token.location)
     end
   end
 
@@ -6496,7 +6497,8 @@ pub class Parser < Lexer
     if @token.type == TokenKind::EOF && (unclosed = @unclosed_stack.last?)
       syntax_error("unterminated #{unclosed.name}", unclosed.location)
     end
-    token_str = @token.type == TokenKind::EOF ? "EOF" : @token.type.to_s
+    quoted = "\"" + token_text + "\""
+    token_str = @token.type == TokenKind::EOF ? "EOF" : quoted
     if m = msg
       syntax_error("unexpected token: #{token_str} (#{m})", @token.location)
     else

@@ -773,10 +773,12 @@ cat > "$WORK/forced_words.iyi" <<'IYI'
     end
   end
 
-  # The meet: each of two tasks counts itself in and waits until two have
-  # counted, so two tasks of one unit, or of one spawner, run at one instant
-  # only in a copy that runs them at once. False when the second never comes.
+  # A sound same-unit fiber must not wait for a unit-mate: its placement
+  # decision is already recorded in fiber.parallel. A wrongly pooled fiber
+  # waits for another wrongly pooled fiber, making overlap observable.
   def self.forced_meet : Bool
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_seen).address).value.add(1_u64)
+    return true unless IyiScheduler.current.parallel
     cell = Pointer(Atomic(UInt64)).new(pointerof(@@forced_met).address)
     cell.value.add(1_u64)
     until_ns = __iyi_monotonic_ns + 10_000_000_000_i64
@@ -785,6 +787,10 @@ cat > "$WORK/forced_words.iyi" <<'IYI'
       IyiThread.spin_pause
     end
     true
+  end
+
+  def self.forced_seen : UInt64
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_seen).address).value.get
   end
 
 IYI
@@ -840,10 +846,24 @@ caught leftserial 'together: eligible spawns waited 2000 ms for the others and l
 step "failure proof: an ineligible spawn sent to the pool"
 broken madeparallel '/^  def spawn\(&block/ { inside = 1; defs++ } inside && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; hits++; next } inside && /^  end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }' -Dmadeparallel_force
 caught madeparallel 'unit: tasks of one unit were running at one instant' unit --workers=4
+broken madeparallel_control '/^  def spawn\(&block/ { print; print "    # placement hook control"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dmadeparallel_force
+timeout -k 5 120 ./madeparallel_control-run unit --workers=4 > madeparallel_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'unit: placement hook saw 4 tasks' madeparallel_control.txt; then
+  echo "the sound placement hook control failed (exit $code):"; tail -20 madeparallel_control.txt; exit 1
+fi
+echo "  sound placement hook: unit saw 4 tasks"
 
 step "failure proof: unit: :same sent to the pool"
 broken optoutignored '/^  def spawn\(\*, unit : Symbol, &block/ { inside = 1; defs++ } inside && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; hits++; next } inside && /^  end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }' -Doptoutignored_force
 caught optoutignored 'serial: spawn(unit: :same) tasks were running at one instant inside a parallel task' serial --workers=4
+broken optout_control '/^  def spawn\(\*, unit : Symbol, &block/ { print; print "    # placement hook control"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Doptoutignored_force
+timeout -k 5 120 ./optout_control-run serial --workers=4 > optout_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'serial: placement hook saw 8 tasks' optout_control.txt; then
+  echo "the sound placement hook control failed (exit $code):"; tail -20 optout_control.txt; exit 1
+fi
+echo "  sound placement hook: serial saw 8 tasks"
 
 step "failure proof: unit: :new left in its unit"
 broken askedignored '/^    private def spawn_new\(/ { inside = 1; defs++ } inside && /^      on_pool\(pinned, &block\)$/ { print "      in_unit(&block)"; hits++; next } inside && /^    end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }'

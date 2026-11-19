@@ -142,6 +142,10 @@ import std/int
       fail("unit: tasks of one unit were running at one instant")
     end
     fail("unit: the unit's array holds #{total.get} of #{TOGETHER} appends") if total.get != TOGETHER
+{% if flag?(:madeparallel_force) %}
+    fail("unit: placement hook missed a task") unless IyiWorkers.forced_seen == 4_u64
+    puts "unit: placement hook saw 4 tasks"
+{% end %}
     puts "unit: #{TOGETHER} spawns appending to their parent's array ran one at a time in its unit"
   end
 
@@ -200,6 +204,10 @@ import std/int
       puts "serial: #{outside} spawn(unit: :same) tasks were running at one instant on the main thread"
       fail("serial: spawn(unit: :same) tasks were running at one instant on the main thread")
     end
+{% if flag?(:optoutignored_force) %}
+    fail("serial: placement hook missed a task") unless IyiWorkers.forced_seen == 8_u64
+    puts "serial: placement hook saw 8 tasks"
+{% end %}
     puts "serial: spawn(unit: :same) kept #{TOGETHER} tasks that capture only atomics in their unit, one at a time, inside a parallel task and on the main thread"
   end
 

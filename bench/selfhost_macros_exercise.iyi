@@ -10,6 +10,10 @@ import compiler/macros/target_flags::{MacroTargetFlags}
 import compiler/syntax/parser::{Parser}
 import compiler/macros/site_scan::{MacroSiteScan}
 import compiler/semantic/normalizer::{NormalizerProgram}
+import compiler/macros/confinement::{MacroConfinement}
+import compiler/foundation/location::{Location}
+import std/file::{File}
+import std/dir::{Dir}
 
 class MacroNormalizerProbe < Visitor
   getter temp_assigns : Array(String) = [] of String
@@ -250,9 +254,11 @@ module BenchSelfhostMacrosExercise
 
   # The engine's report, with the instantiated owner's type parameters bound
   # before the body runs.
-  def self.report_bound(a_macro : Macro, call : Call, flags : Array(String), bindings : Array(MacroFreeBinding), facts : MacroTypeFacts?) : MacroReport
+  def self.report_bound(a_macro : Macro, call : Call, flags : Array(String), bindings : Array(MacroFreeBinding), facts : MacroTypeFacts?, confinement : MacroConfinement?) : MacroReport
     interp = MacroInterpreter.new(call.block, flags, facts.nil? ? "<Program>" : "MacroFactScope")
     interp.type_facts = facts
+    interp.confinement = confinement
+    interp.macro_file = MacroEngine.file_of(a_macro.location)
     interp.bind_args(a_macro, call)
     interp.bind_free_vars(bindings)
     body = a_macro.body
@@ -539,6 +545,57 @@ emit_defer_and_chain
     puts "ok"
   end
 
+  # The search path the compiler reads from IYI_PATH, split as the compiler splits it.
+  def self.search_path_from_env : Array(String)
+    raw = ENV["IYI_PATH"]? || ""
+    raw.split(':')
+  end
+
+  # The confinement a fixture is expanded under: the fixture's own directory is
+  # the compiling package, and its standard library roots come from IYI_PATH.
+  def self.fixture_confinement(filename : String) : MacroConfinement
+    base = Dir.current
+    MacroConfinement.new(File.dirname(File.expand_path(filename, base)), MacroConfinement.library_roots_of(search_path_from_env, base), base)
+  end
+
+  # One confinement case of the parity table, as key=value lines.
+  def self.case_fields(path : String) : Hash(String, String)
+    fields = Hash(String, String).new
+    lines = File.read(path).split('\n')
+    i = 0
+    while i < lines.size
+      line = lines[i]
+      if eq = line.index('=')
+        fields[line[0, eq]] = line[eq + 1, line.bytesize - eq - 1]
+      end
+      i = i + 1
+    end
+    fields
+  end
+
+  # One confinement case as the hosted oracle prints it: `value=` the
+  # expansion, or `error L:C message=` the refusal.
+  def self.confine_dump(case_path : String) : String
+    fields = case_fields(case_path)
+    root = fields["root"]? || ""
+    dir = fields["dir"]? || ""
+    body = fields["body"]? || ""
+    definition = fields["definition"]? || ""
+    caller_file = fields["caller"]? || ""
+    conf = nil
+    unless root.empty?
+      conf = MacroConfinement.new(root, MacroConfinement.library_roots_of(search_path_from_env, dir), dir)
+    end
+    a_macro, a_call = MacroParser.parse_fixture("macro check\n#{body}\nend\ncheck\n", definition)
+    a_call.location = Location.new(caller_file, 1, 1)
+    rep = MacroEngine.new(MacroTargetFlags.host([] of String), conf).report(a_macro, a_call)
+    if f = rep.failure
+      "error #{f.line}:#{f.column} message=#{escape_s(f.message)}\n"
+    else
+      "value=#{escape_s(rep.output.chomp)}\n"
+    end
+  end
+
   def self.run_all : Nil
     puts "Running Selfhost Macro Engine Verification Suite (pure iyi stage 0)"
     puts "============================================================="
@@ -562,6 +619,8 @@ end
 
 if Program.args.size == 1 && Program.args[0] == "--host-target"
   puts MacroTargetFlags.host_triple
+elsif Program.args.size == 2 && Program.args[0] == "--confine"
+  print BenchSelfhostMacrosExercise.confine_dump(Program.args[1])
 elsif Program.args.size > 0
   filename = ""
   count = false
@@ -595,13 +654,14 @@ elsif Program.args.size > 0
   if sites
     print BenchSelfhostMacrosExercise.site_dump(source, flags)
   else
-    the_macro, the_call = MacroParser.parse_fixture(source)
+    conf = BenchSelfhostMacrosExercise.fixture_confinement(filename)
+    the_macro, the_call = MacroParser.parse_fixture(source, filename)
     bindings = BenchSelfhostMacrosExercise.parse_free_bindings(source)
     facts = BenchSelfhostMacrosExercise.parse_type_facts(source)
     if bindings.size > 0 || !facts.nil?
-      rep = BenchSelfhostMacrosExercise.report_bound(the_macro, the_call, flags, bindings, facts)
+      rep = BenchSelfhostMacrosExercise.report_bound(the_macro, the_call, flags, bindings, facts, conf)
     else
-      engine = MacroEngine.new(flags)
+      engine = MacroEngine.new(flags, conf)
       rep = engine.report(the_macro, the_call)
     end
     if count

@@ -27,7 +27,7 @@ end
 # error LibTest.pair(b: 2, a: 1)
 # error LibTest.pair(a: 1)
 # error LibTest.pair(c: 1)
-# error LibTest.pair(a: 1, a: 2)
+# error LibTest.pair(1, a: 2)
 # error LibTest.nothing(1)
 # error LibTest.nothing()
 # error LibTest.dbl(1)

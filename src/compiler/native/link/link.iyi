@@ -1,0 +1,1094 @@
+module compiler/native/link/link
+
+# The own linker for arm64 Mach-O executables (SPEC 2.3, slice C2). It takes
+# the in-memory objects (compiler/native/obj/object, read by C1's reader or built
+# by hand) and writes the executable directly: no ld, no cc, no codesign.
+#
+# The steps: note every import (a symbol no object defines), so the dylib list
+# is final; merge each output section's input sections; lay the sections out;
+# build the GOT and the import stubs; apply every relocation; and hand the
+# tables to macho_exe, which writes the bytes and the signature.
+#
+# Position independence: an absolute pointer in __DATA is recorded as a rebase,
+# and an import's pointer as an eager bind through __got. A TLS descriptor's
+# offset word is the offset into the thread-local template, not an address.
+# Debug and unwind sections from the objects are dropped: nothing unwinds on
+# darwin, and named frames come from the symbol table.
+
+import compiler/native/obj/object::{ObjectFile, ObjFormat, Section, SectionKind, SymbolKind, SymbolBinding, Reloc, RelocKind}
+import compiler/native/link/imports::{MachOLibs, framework_allowed, framework_path, owner_of}
+import compiler/native/link/host_exports::{libsystem_exports?}
+import compiler/native/link/macho_exe::{MachOExe, Executable, ExeSection, ExeSymbol, ExeBind, ExeExport, ExeDataInCode, align_to}
+import std/slice::{Slice, Bytes}
+import compiler/native/link/elf_exe::{link_elf}
+
+class LinkConst
+  # A relocation's target code: a symbol (code >= 0), an import (code < 0), or a
+  # section (code >= SECTION_BASE, plus the global section index).
+  SECTION_BASE       =    1000000000000_i64
+  UNKNOWN            = 2000000000000000_i64
+  ABSOLUTE           =               -2_i64
+  NO_OUTPUT          =               -1_i64
+  PAGE_MASK          =            0xfff_i64
+  STUB_SIZE          =               12_i64
+  GOT_SLOT           =                8_i64
+  STUB_ALIGN         =                4_i64
+  GOT_ALIGN          =                8_i64
+  STUB_FLAGS         =       0x80000400_i64
+  DEFAULT_TEXT_FLAGS =       0x80000400_i64
+  STUB_RANK          =                1_i64
+  GOT_RANK           =                0_i64
+  ADRP_X16           =       0x90000010_i64
+  LDR_X16_BASE       =       0xf9400210_i64
+  BR_X16             =       0xd61f0200_i64
+  LDR_MASK           =       0xffc00000_i64
+  LDR_BASE           =       0xf9400000_i64
+  ADD_IMM_BASE       =       0x91000000_i64
+  ADRP_MASK          =       0x60ffffe0_i64
+  IMM12_MASK         =         0x3ffc00_i64
+  IMM26_MASK         =        0x3ffffff_i64
+  BRANCH_REACH       =        134217728_i64
+end
+
+# A link that cannot finish. The message names the symbol, section or object.
+pub class LinkError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+# The linked executable, and the companion files (none on darwin in this slice:
+# the debug companion comes with the debug-information slice).
+pub class LinkedImage
+  getter executable : Bytes
+  getter companions : Hash(String, Bytes)
+
+  def initialize(@executable : Bytes, @companions : Hash(String, Bytes))
+  end
+end
+
+pub class LinkOptions
+  getter identifier : String
+  getter entry : String
+  getter frameworks : Array(String)
+  getter native_only : Bool
+
+  def initialize(@identifier : String, @entry : String, @frameworks : Array(String), @native_only : Bool = false)
+  end
+end
+
+def read_u32(bytes : Bytes, at : Int64) : Int64
+  v = 0_i64
+  i = 3
+  while i >= 0
+    v = v.unsafe_shl(8_i64) | bytes[(at + i.to_i64).to_i32].to_i64
+    i = i - 1
+  end
+  v
+end
+
+# Writes the low `width` bytes of `value`, little-endian.
+def write_num(bytes : Bytes, at : Int64, value : Int64, width : Int32) : Nil
+  i = 0
+  while i < width
+    bytes[(at + i.to_i64).to_i32] = (value.unsafe_shr(i.to_i64 * 8_i64) & 0xff_i64).to_u8
+    i = i + 1
+  end
+end
+
+# The 4 KiB page of an address.
+def page_of(addr : Int64) : Int64
+  addr - (addr & LinkConst::PAGE_MASK)
+end
+
+# ADRP: its immhi and immlo fields hold the page delta `imm`, in pages.
+def patch_adrp(word : Int64, imm : Int64) : Int64
+  clear = word & LinkConst::ADRP_MASK
+  immlo = imm & 3_i64
+  immhi = imm.unsafe_shr(2_i64) & 0x7ffff_i64
+  (word - clear) | immlo.unsafe_shl(29_i64) | immhi.unsafe_shl(5_i64)
+end
+
+# A load, store or add with an unsigned 12-bit immediate in bits 10 to 21.
+def patch_imm12(word : Int64, imm12 : Int64) : Int64
+  clear = word & LinkConst::IMM12_MASK
+  (word - clear) | (imm12 & LinkConst::PAGE_MASK).unsafe_shl(10_i64)
+end
+
+# A branch with its signed 26-bit word offset in bits 0 to 25.
+def patch_branch(word : Int64, imm26 : Int64) : Int64
+  clear = word & LinkConst::IMM26_MASK
+  (word - clear) | (imm26 & LinkConst::IMM26_MASK)
+end
+
+# The Mach-O segment and section name an input section's name is written under.
+def macho_name(name : String) : String
+  return "__TEXT,__text" if name == ".text"
+  return "__TEXT,__const" if name == ".rodata"
+  return "__DATA,__data" if name == ".data"
+  return "__DATA,__bss" if name == ".bss"
+  return "__DATA,__thread_data" if name == ".tdata"
+  return "__DATA,__thread_bss" if name == ".tbss"
+  return "__DATA,__thread_vars" if name == ".tlv"
+  parts = name.split(',')
+  if parts.size == 2 && parts[0] == "__DATA_CONST"
+    return "__DATA,#{parts[1]}"
+  end
+  name
+end
+
+def zero_fill_kind(kind : SectionKind) : Bool
+  kind == SectionKind::ZeroFill || kind == SectionKind::TlsZeroFill
+end
+
+def dropped_kind(kind : SectionKind) : Bool
+  kind == SectionKind::Unwind || kind == SectionKind::Other
+end
+
+def default_section_flags(kind : SectionKind) : Int64
+  return LinkConst::DEFAULT_TEXT_FLAGS if kind == SectionKind::Text
+  return 1_i64 if kind == SectionKind::ZeroFill
+  return 0x11_i64 if kind == SectionKind::TlsData
+  return 0x12_i64 if kind == SectionKind::TlsZeroFill
+  return 0x13_i64 if kind == SectionKind::TlsVars
+  0_i64
+end
+
+# Output order within a segment (lower first). The thread-local data comes
+# before its zero-fill part, and the zero-fill sections come last, so each
+# segment's file bytes are one run.
+def section_rank(name : String, zero : Bool) : Int64
+  return 0_i64 if name == "__TEXT,__text"
+  return 2_i64 if name == "__TEXT,__const"
+  return 3_i64 if name == "__TEXT,__cstring"
+  return 1_i64 if name == "__DATA,__data"
+  return 6_i64 if name == "__DATA,__thread_vars"
+  return 7_i64 if name == "__DATA,__thread_data"
+  return 8_i64 if name == "__DATA,__thread_bss"
+  return 9_i64 if name == "__DATA,__bss"
+  return 10_i64 if zero
+  5_i64
+end
+
+class Linker
+  property objects : Array(ObjectFile)
+  property options : LinkOptions
+  property frameworks : Array(String)
+  property failure : String?
+  property sec_base : Array(Int64)
+  property sym_base : Array(Int64)
+  property gsec_out : Array(Int64)
+  property gsec_off : Array(Int64)
+  property out_name : Array(String)
+  property out_kind : Array(SectionKind)
+  property out_flags : Array(Int64)
+  property out_align : Array(Int64)
+  property out_size : Array(Int64)
+  property out_sec : Array(ExeSection)
+  property out_pos : Array(Int64)
+  property gsym_obj : Array(Int64)
+  property gsym_idx : Array(Int64)
+  property gsym_out : Array(Int64)
+  property gsym_off : Array(Int64)
+  property gsym_code : Array(Int64)
+  property weak_def : Array(Bool)
+  property defs : Hash(String, Int64)
+  property import_names : Array(String)
+  property import_owner : Array(String)
+  property import_index : Hash(String, Int64)
+  property framework_order : Array(String)
+  property framework_ordinal : Hash(String, Int64)
+  property got_codes : Array(Int64)
+  property got_index : Hash(Int64, Int64)
+  property stub_codes : Array(Int64)
+  property stub_index : Hash(Int64, Int64)
+  property got_sec : ExeSection
+  property stub_sec : ExeSection
+  property exe : Executable
+  property tls_base : Int64
+
+  def initialize(@objects : Array(ObjectFile), @options : LinkOptions)
+    @frameworks = [] of String
+    @failure = nil
+    @sec_base = [] of Int64
+    @sym_base = [] of Int64
+    @gsec_out = [] of Int64
+    @gsec_off = [] of Int64
+    @out_name = [] of String
+    @out_kind = [] of SectionKind
+    @out_flags = [] of Int64
+    @out_align = [] of Int64
+    @out_size = [] of Int64
+    @out_sec = [] of ExeSection
+    @out_pos = [] of Int64
+    @gsym_obj = [] of Int64
+    @gsym_idx = [] of Int64
+    @gsym_out = [] of Int64
+    @gsym_off = [] of Int64
+    @gsym_code = [] of Int64
+    @weak_def = [] of Bool
+    @defs = Hash(String, Int64).new
+    @import_names = [] of String
+    @import_owner = [] of String
+    @import_index = Hash(String, Int64).new
+    @framework_order = [] of String
+    @framework_ordinal = Hash(String, Int64).new
+    @got_codes = [] of Int64
+    @got_index = Hash(Int64, Int64).new
+    @stub_codes = [] of Int64
+    @stub_index = Hash(Int64, Int64).new
+    @got_sec = ExeSection.new("__DATA", "__got", 0_i64, LinkConst::GOT_ALIGN, 0_i64, Slice(UInt8).new(0), false, 0_i64)
+    @stub_sec = ExeSection.new("__TEXT", "__stubs", LinkConst::STUB_FLAGS, LinkConst::STUB_ALIGN, 0_i64, Slice(UInt8).new(0), false, LinkConst::STUB_SIZE)
+    @exe = Executable.new(@options.identifier)
+    @tls_base = 0_i64
+  end
+
+  def fail(message : String) : Nil
+    if @failure.nil?
+      @failure = message
+    end
+  end
+
+  def failure_text : String
+    msg = @failure
+    return "" if msg.nil?
+    msg
+  end
+
+  def run : LinkedImage | LinkError
+    check_inputs
+    return LinkError.new(failure_text) unless @failure.nil?
+    collect_sections
+    return LinkError.new(failure_text) unless @failure.nil?
+    index_symbols
+    return LinkError.new(failure_text) unless @failure.nil?
+    classify_relocs
+    return LinkError.new(failure_text) unless @failure.nil?
+    make_layout
+    return LinkError.new(failure_text) unless @failure.nil?
+    patch_all
+    return LinkError.new(failure_text) unless @failure.nil?
+    fill_metadata
+    return LinkError.new(failure_text) unless @failure.nil?
+    bytes = @exe.write
+    LinkedImage.new(bytes, Hash(String, Bytes).new)
+  end
+
+  def add_framework(name : String) : Nil
+    unless framework_allowed(name)
+      fail("the native floor does not provide the framework #{name}")
+      return
+    end
+    unless @frameworks.includes?(name)
+      @frameworks << name
+    end
+  end
+
+  # Every object is Mach-O arm64, and the frameworks it or the link names are
+  # ones the native floor allows.
+  def check_inputs : Nil
+    if @objects.size == 0
+      fail("no objects to link")
+      return
+    end
+    @options.frameworks.each do |name|
+      add_framework(name)
+    end
+    i = 0
+    while i < @objects.size && @failure.nil?
+      obj = @objects[i]
+      if obj.format != ObjFormat::MachO
+        fail("object #{i} is not a Mach-O object")
+        return
+      end
+      if @options.native_only && obj.producer != "iyi-native"
+        fail("object #{i} was produced by #{obj.producer}: a native program links only objects from the iyi-native backend")
+        return
+      end
+      if obj.target.architecture != "aarch64"
+        fail("object #{i} is for #{obj.target.architecture}, and this linker writes arm64 executables")
+        return
+      end
+      opts = obj.linker_options
+      j = 0
+      while j < opts.size && @failure.nil?
+        if opts[j] == "-framework" && j + 1 < opts.size
+          add_framework(opts[j + 1])
+          j = j + 2
+        elsif opts[j] == "-lSystem"
+          j = j + 1
+        else
+          fail("object #{i} asks for #{opts[j]}, which the native floor does not provide")
+        end
+      end
+      i = i + 1
+    end
+  end
+
+  # The global index of every section and symbol, and the output section each
+  # kept input section lands in, at the offset it lands at.
+  def collect_sections : Nil
+    total_secs = 0_i64
+    total_syms = 0_i64
+    i = 0
+    while i < @objects.size
+      @sec_base << total_secs
+      @sym_base << total_syms
+      total_secs = total_secs + @objects[i].sections.size.to_i64
+      total_syms = total_syms + @objects[i].symbols.size.to_i64
+      i = i + 1
+    end
+    j = 0_i64
+    while j < total_secs
+      @gsec_out << LinkConst::NO_OUTPUT
+      @gsec_off << 0_i64
+      j = j + 1_i64
+    end
+    j = 0_i64
+    while j < total_syms
+      @gsym_obj << 0_i64
+      @gsym_idx << 0_i64
+      @gsym_out << LinkConst::NO_OUTPUT
+      @gsym_off << 0_i64
+      @gsym_code << LinkConst::UNKNOWN
+      @weak_def << false
+      j = j + 1_i64
+    end
+    i = 0
+    while i < @objects.size
+      obj = @objects[i]
+      s = 0
+      while s < obj.sections.size
+        sec = obj.sections[s]
+        g = (@sec_base[i] + s.to_i64).to_i32
+        if !dropped_kind(sec.kind)
+          oidx = output_for(macho_name(sec.name), sec)
+          len = sec.bytes.size.to_i64
+          if zero_fill_kind(sec.kind)
+            len = sec.size
+          end
+          align = sec.align.to_i64
+          if align < 1_i64
+            align = 1_i64
+          end
+          off = align_to(@out_size[oidx.to_i32], align)
+          @gsec_out[g] = oidx
+          @gsec_off[g] = off
+          @out_size[oidx.to_i32] = off + len
+          if align > @out_align[oidx.to_i32]
+            @out_align[oidx.to_i32] = align
+          end
+        end
+        s = s + 1
+      end
+      i = i + 1
+    end
+  end
+
+  # The output section named `name`, created from the first input that names it.
+  def output_for(name : String, sec : Section) : Int64
+    k = 0
+    while k < @out_name.size
+      return k.to_i64 if @out_name[k] == name
+      k = k + 1
+    end
+    flags = sec.flags
+    if flags == 0_i64
+      flags = default_section_flags(sec.kind)
+    end
+    @out_name << name
+    @out_kind << sec.kind
+    @out_flags << flags
+    @out_align << 1_i64
+    @out_size << 0_i64
+    (@out_name.size - 1).to_i64
+  end
+
+  # One winning definition per global name. Two strong definitions of one name
+  # are an error; a weak one never beats a strong one.
+  def index_symbols : Nil
+    i = 0
+    while i < @objects.size
+      obj = @objects[i]
+      s = 0
+      while s < obj.symbols.size
+        sym = obj.symbols[s]
+        g = (@sym_base[i] + s.to_i64).to_i32
+        @gsym_obj[g] = i.to_i64
+        @gsym_idx[g] = s.to_i64
+        if sym.kind != SymbolKind::Undefined
+          if sym.kind == SymbolKind::Absolute
+            @gsym_out[g] = LinkConst::ABSOLUTE
+            @gsym_off[g] = sym.value
+          elsif sym.section < 0 || sym.section >= obj.sections.size
+            fail("symbol #{sym.name} in object #{i} names section #{sym.section}, which does not exist")
+            return
+          else
+            gi = (@sec_base[i] + sym.section.to_i64).to_i32
+            @gsym_out[g] = @gsec_out[gi]
+            @gsym_off[g] = @gsec_off[gi] + sym.value
+          end
+          @weak_def[g] = sym.binding == SymbolBinding::Weak
+          if sym.binding != SymbolBinding::Local
+            existing = @defs[sym.name]?
+            if existing.nil?
+              @defs[sym.name] = g.to_i64
+            else
+              prev = existing.as(Int64)
+              if @weak_def[g]
+                nil
+              elsif @weak_def[prev.to_i32]
+                @defs[sym.name] = g.to_i64
+              else
+                fail("symbol #{sym.name} is defined in object #{@gsym_obj[prev.to_i32]} and in object #{i}")
+                return
+              end
+            end
+          end
+        end
+        s = s + 1
+      end
+      i = i + 1
+    end
+  end
+
+  def winner_of(name : String) : Int64
+    known = @defs[name]?
+    return -1_i64 if known.nil?
+    known.as(Int64)
+  end
+
+  # The code a global symbol resolves to: itself when local, the winning
+  # definition when one exists, and an import otherwise.
+  def code_of(g : Int64) : Int64
+    cached = @gsym_code[g.to_i32]
+    return cached if cached != LinkConst::UNKNOWN
+    sym = @objects[@gsym_obj[g.to_i32].to_i32].symbols[@gsym_idx[g.to_i32].to_i32]
+    code = g
+    if sym.binding != SymbolBinding::Local
+      winner = winner_of(sym.name)
+      if winner >= 0
+        code = winner
+      elsif sym.kind == SymbolKind::Undefined
+        code = import_code(sym.name)
+      end
+    elsif sym.kind == SymbolKind::Undefined
+      code = import_code(sym.name)
+    end
+    @gsym_code[g.to_i32] = code
+    code
+  end
+
+  def import_code(name : String) : Int64
+    if @options.native_only && name.starts_with?("__iyi_")
+      fail("undefined symbol #{name}: the native runtime defines every __iyi_ name, and no object defines it")
+    end
+    known = @import_index[name]?
+    if known.nil?
+      n = @import_names.size.to_i64
+      owner = owner_of(name, @frameworks)
+      if owner == "" && !libsystem_exports?(name)
+        fail("undefined symbol #{name}: no object defines it, and this system's libSystem does not export it")
+      end
+      @import_names << name
+      @import_owner << owner
+      @import_index[name] = n
+      return 0_i64 - (n + 1_i64)
+    end
+    0_i64 - (known.as(Int64) + 1_i64)
+  end
+
+  # The code a relocation names: a symbol, an import, or a section.
+  def reloc_code(obj_index : Int64, r : Reloc) : Int64
+    if r.symbol >= 0
+      return code_of(@sym_base[obj_index.to_i32] + r.symbol.to_i64)
+    end
+    LinkConst::SECTION_BASE + @sec_base[obj_index.to_i32] + (0_i64 - r.symbol.to_i64) - 1_i64
+  end
+
+  def ensure_got(code : Int64) : Nil
+    known = @got_index[code]?
+    if known.nil?
+      @got_index[code] = @got_codes.size.to_i64
+      @got_codes << code
+    end
+  end
+
+  def ensure_stub(code : Int64) : Nil
+    ensure_got(code)
+    known = @stub_index[code]?
+    if known.nil?
+      @stub_index[code] = @stub_codes.size.to_i64
+      @stub_codes << code
+    end
+  end
+
+  # Every relocation's target is resolved here, so every import exists before
+  # the dylib list and the header size are fixed. A branch to an import needs a
+  # stub; an address taken through the GOT needs a GOT slot.
+  def classify_relocs : Nil
+    i = 0
+    while i < @objects.size
+      obj = @objects[i]
+      s = 0
+      while s < obj.sections.size
+        if @gsec_out[(@sec_base[i] + s.to_i64).to_i32] >= 0
+          relocs = obj.sections[s].relocs
+          k = 0
+          while k < relocs.size
+            r = relocs[k]
+            code = reloc_code(i.to_i64, r)
+            if r.kind == RelocKind::Sub64
+              if k + 1 < relocs.size
+                reloc_code(i.to_i64, relocs[k + 1])
+              end
+              k = k + 2
+            else
+              if r.kind == RelocKind::A64Call26 || r.kind == RelocKind::A64Jump26
+                if code < 0
+                  ensure_stub(code)
+                end
+              elsif r.kind == RelocKind::A64GotPage21 || r.kind == RelocKind::A64GotLo12 || r.kind == RelocKind::A64PointerToGot
+                ensure_got(code)
+              end
+              k = k + 1
+            end
+          end
+        end
+        s = s + 1
+      end
+      i = i + 1
+    end
+  end
+
+  # The dylib list. libSystem is first, and each framework an import is bound to
+  # follows in the order its first import is bound.
+  def fill_dylibs : Nil
+    @exe.dylibs << MachOLibs::LIBSYSTEM_PATH
+    k = 0
+    while k < @import_names.size
+      ordinal_of_owner(@import_owner[k])
+      k = k + 1
+    end
+    @framework_order.each do |owner|
+      @exe.dylibs << framework_path(owner)
+    end
+  end
+
+  # The ordinal of an owner: libSystem is MachOLibs::LIBSYSTEM_ORDINAL, and a
+  # framework takes the next one as it is first used.
+  def ordinal_of_owner(owner : String) : Int64
+    if owner == ""
+      return MachOLibs::LIBSYSTEM_ORDINAL
+    end
+    known = @framework_ordinal[owner]?
+    if known.nil?
+      @framework_order << owner
+      ordinal = @framework_order.size.to_i64 + 1_i64
+      @framework_ordinal[owner] = ordinal
+      return ordinal
+    end
+    known.as(Int64)
+  end
+
+  def ordinal_of_import(code : Int64) : Int64
+    ordinal_of_owner(@import_owner[(0_i64 - code - 1_i64).to_i32])
+  end
+
+  def import_name(code : Int64) : String
+    @import_names[(0_i64 - code - 1_i64).to_i32]
+  end
+
+  def mach_name(name : String) : String
+    "_" + name
+  end
+
+  # The output sections in executable order, with the generated __stubs and
+  # __got, then their addresses. The dylib list is fixed first, because the
+  # header (and so every address) depends on its size.
+  def make_layout : Nil
+    fill_dylibs
+    o = 0
+    while o < @out_name.size
+      zero = zero_fill_kind(@out_kind[o])
+      size = @out_size[o]
+      bytes = Slice(UInt8).new(0)
+      if !zero
+        bytes = Slice(UInt8).new(size.to_i32)
+        bytes.fill(0_u8)
+      end
+      parts = @out_name[o].split(',')
+      @out_sec << ExeSection.new(parts[0], parts[1], @out_flags[o], @out_align[o], size, bytes, zero, 0_i64)
+      @out_pos << LinkConst::NO_OUTPUT
+      o = o + 1
+    end
+
+    stub_size = @stub_codes.size.to_i64 * LinkConst::STUB_SIZE
+    stub_bytes = Slice(UInt8).new(stub_size.to_i32)
+    stub_bytes.fill(0_u8)
+    @stub_sec = ExeSection.new("__TEXT", "__stubs", LinkConst::STUB_FLAGS, LinkConst::STUB_ALIGN, stub_size, stub_bytes, false, LinkConst::STUB_SIZE)
+    got_size = @got_codes.size.to_i64 * LinkConst::GOT_SLOT
+    got_bytes = Slice(UInt8).new(got_size.to_i32)
+    got_bytes.fill(0_u8)
+    @got_sec = ExeSection.new("__DATA", "__got", 0_i64, LinkConst::GOT_ALIGN, got_size, got_bytes, false, 0_i64)
+
+    secs = [] of ExeSection
+    r = 0_i64
+    while r <= 10_i64
+      if r == LinkConst::STUB_RANK && @stub_codes.size > 0
+        secs << @stub_sec
+      end
+      o = 0
+      while o < @out_name.size
+        if @out_name[o].starts_with?("__TEXT,") && section_rank(@out_name[o], zero_fill_kind(@out_kind[o])) == r
+          @out_pos[o] = secs.size.to_i64
+          secs << @out_sec[o]
+        end
+        o = o + 1
+      end
+      r = r + 1_i64
+    end
+    r = 0_i64
+    while r <= 10_i64
+      if r == LinkConst::GOT_RANK && @got_codes.size > 0
+        secs << @got_sec
+      end
+      o = 0
+      while o < @out_name.size
+        if @out_name[o].starts_with?("__DATA,") && section_rank(@out_name[o], zero_fill_kind(@out_kind[o])) == r
+          @out_pos[o] = secs.size.to_i64
+          secs << @out_sec[o]
+        end
+        o = o + 1
+      end
+      r = r + 1_i64
+    end
+    @exe.sections = secs
+    @exe.assign_addresses
+    @tls_base = 0_i64
+    tdata = find_section("__DATA,__thread_data")
+    if !tdata.nil?
+      @tls_base = tdata.as(ExeSection).addr
+    else
+      tbss = find_section("__DATA,__thread_bss")
+      if !tbss.nil?
+        @tls_base = tbss.as(ExeSection).addr
+      end
+    end
+  end
+
+  def find_section(label : String) : ExeSection?
+    o = 0
+    while o < @out_name.size
+      return @out_sec[o] if @out_name[o] == label
+      o = o + 1
+    end
+    nil
+  end
+
+  # The address of a code, once the layout is fixed.
+  def addr_of(code : Int64) : Int64
+    if code >= LinkConst::SECTION_BASE
+      gi = (code - LinkConst::SECTION_BASE).to_i32
+      oidx = @gsec_out[gi]
+      if oidx < 0
+        fail("a relocation names a section the linker drops")
+        return 0_i64
+      end
+      return @out_sec[oidx.to_i32].addr + @gsec_off[gi]
+    end
+    if code < 0
+      fail("the import #{import_name(code)} has no address until it is bound")
+      return 0_i64
+    end
+    oidx = @gsym_out[code.to_i32]
+    if oidx == LinkConst::ABSOLUTE
+      return @gsym_off[code.to_i32]
+    end
+    if oidx < 0
+      fail("symbol #{symbol_name(code)} is defined in a section the linker drops")
+      return 0_i64
+    end
+    @out_sec[oidx.to_i32].addr + @gsym_off[code.to_i32]
+  end
+
+  def symbol_name(g : Int64) : String
+    @objects[@gsym_obj[g.to_i32].to_i32].symbols[@gsym_idx[g.to_i32].to_i32].name
+  end
+
+  # The output section a code lands in, or -1 for an import or an absolute.
+  def target_out(code : Int64) : Int64
+    if code >= LinkConst::SECTION_BASE
+      return @gsec_out[(code - LinkConst::SECTION_BASE).to_i32]
+    end
+    if code < 0
+      return LinkConst::NO_OUTPUT
+    end
+    oidx = @gsym_out[code.to_i32]
+    if oidx == LinkConst::ABSOLUTE
+      return LinkConst::NO_OUTPUT
+    end
+    oidx
+  end
+
+  def got_addr(code : Int64) : Int64
+    @got_sec.addr + @got_index[code].as(Int64) * LinkConst::GOT_SLOT
+  end
+
+  def stub_addr(code : Int64) : Int64
+    @stub_sec.addr + @stub_index[code].as(Int64) * LinkConst::STUB_SIZE
+  end
+
+  # The section bytes, the GOT and the stubs, then every relocation.
+  def patch_all : Nil
+    i = 0
+    while i < @objects.size
+      obj = @objects[i]
+      s = 0
+      while s < obj.sections.size
+        g = (@sec_base[i] + s.to_i64).to_i32
+        oidx = @gsec_out[g]
+        if oidx >= 0 && !zero_fill_kind(obj.sections[s].kind)
+          src = obj.sections[s].bytes
+          dst = @out_sec[oidx.to_i32].bytes
+          off = @gsec_off[g]
+          j = 0
+          while j < src.size
+            dst[(off + j.to_i64).to_i32] = src[j]
+            j = j + 1
+          end
+        end
+        s = s + 1
+      end
+      i = i + 1
+    end
+    fill_got
+    fill_stubs
+    i = 0
+    while i < @objects.size && @failure.nil?
+      obj = @objects[i]
+      s = 0
+      while s < obj.sections.size && @failure.nil?
+        g = (@sec_base[i] + s.to_i64).to_i32
+        oidx = @gsec_out[g]
+        if oidx >= 0
+          relocs = obj.sections[s].relocs
+          k = 0
+          while k < relocs.size && @failure.nil?
+            r = relocs[k]
+            off = @gsec_off[g] + r.offset
+            if r.kind == RelocKind::Sub64
+              if k + 1 >= relocs.size || relocs[k + 1].offset != r.offset || (relocs[k + 1].kind != RelocKind::Abs64 && relocs[k + 1].kind != RelocKind::Abs32)
+                fail("section #{@out_sec[oidx.to_i32].label} has a Sub64 at offset #{r.offset} with no absolute reloc after it")
+                return
+              end
+              patch_difference(oidx, off, relocs[k + 1], reloc_code(i.to_i64, r), reloc_code(i.to_i64, relocs[k + 1]))
+              k = k + 2
+            else
+              patch_one(oidx, off, r, reloc_code(i.to_i64, r))
+              k = k + 1
+            end
+          end
+        end
+        s = s + 1
+      end
+      i = i + 1
+    end
+  end
+
+  # Each GOT slot holds its target's address (rebased) or is bound to an import.
+  def fill_got : Nil
+    k = 0
+    while k < @got_codes.size && @failure.nil?
+      code = @got_codes[k]
+      at = k.to_i64 * LinkConst::GOT_SLOT
+      slot = @got_sec.addr + at
+      if code < 0
+        @exe.binds << ExeBind.new(slot, ordinal_of_import(code), mach_name(import_name(code)), 0_i64)
+      else
+        write_num(@got_sec.bytes, at, addr_of(code), 8)
+        @exe.rebases << slot
+      end
+      k = k + 1
+    end
+  end
+
+  # Each stub loads its import's GOT slot and branches to it. The slot is bound
+  # at launch, so no lazy-binding helper is needed.
+  def fill_stubs : Nil
+    k = 0
+    while k < @stub_codes.size && @failure.nil?
+      code = @stub_codes[k]
+      at = k.to_i64 * LinkConst::STUB_SIZE
+      here = @stub_sec.addr + at
+      slot = got_addr(code)
+      adrp = patch_adrp(LinkConst::ADRP_X16, (page_of(slot) - page_of(here)).unsafe_shr(12_i64))
+      ldr = LinkConst::LDR_X16_BASE | (slot & LinkConst::PAGE_MASK).unsafe_shr(3_i64).unsafe_shl(10_i64)
+      write_num(@stub_sec.bytes, at, adrp, 4)
+      write_num(@stub_sec.bytes, at + 4_i64, ldr, 4)
+      write_num(@stub_sec.bytes, at + 8_i64, LinkConst::BR_X16, 4)
+      k = k + 1
+    end
+  end
+
+  # An absolute pointer. An import is bound. A thread-local target is an offset
+  # into the template and is not rebased. Any other target is rebased. The
+  # addend is Reloc#addend alone: the reader folds in-place values into it and
+  # the site bytes are zero in the model, so the bytes are never read here.
+  def patch_abs64(dst_out : Int64, off : Int64, code : Int64, addend : Int64) : Nil
+    sec = @out_sec[dst_out.to_i32]
+    p = sec.addr + off
+    if code < 0
+      @exe.binds << ExeBind.new(p, ordinal_of_import(code), mach_name(import_name(code)), addend)
+      write_num(sec.bytes, off, 0_i64, 8)
+      return
+    end
+    tout = target_out(code)
+    if tout >= 0 && (@out_kind[tout.to_i32] == SectionKind::TlsData || @out_kind[tout.to_i32] == SectionKind::TlsZeroFill)
+      write_num(sec.bytes, off, addr_of(code) + addend - @tls_base, 8)
+      return
+    end
+    if sec.segment == "__TEXT"
+      fail("an absolute pointer in read-only #{sec.label} cannot be rebased")
+      return
+    end
+    write_num(sec.bytes, off, addr_of(code) + addend, 8)
+    @exe.rebases << p # rebase: dyld slides this pointer by the load slide
+  end
+
+  # A difference a - b. The minuend's Reloc#addend is the whole addend.
+  def patch_difference(dst_out : Int64, off : Int64, minuend : Reloc, sub_code : Int64, min_code : Int64) : Nil
+    sec = @out_sec[dst_out.to_i32]
+    if sub_code < 0 || min_code < 0
+      fail("a difference in #{sec.label} names an import, which has no link-time address")
+      return
+    end
+    value = addr_of(min_code) + minuend.addend - addr_of(sub_code)
+    if minuend.kind == RelocKind::Abs32
+      write_num(sec.bytes, off, value, 4)
+    else
+      write_num(sec.bytes, off, value, 8)
+    end
+  end
+
+  # The one place a relocation's kind decides how its instruction or word is
+  # patched. A branch to an import goes through the import's stub.
+  def patch_one(dst_out : Int64, off : Int64, r : Reloc, code : Int64) : Nil
+    sec = @out_sec[dst_out.to_i32]
+    bytes = sec.bytes
+    p = sec.addr + off
+    kind = r.kind
+    if kind == RelocKind::Abs64
+      patch_abs64(dst_out, off, code, r.addend)
+    elsif kind == RelocKind::Abs32
+      fail("a 32-bit absolute relocation in #{sec.label}: this linker writes position-independent executables")
+    elsif kind == RelocKind::A64Call26 || kind == RelocKind::A64Jump26
+      target = 0_i64
+      if code < 0
+        if r.addend != 0_i64
+          fail("a branch to the import #{import_name(code)} in #{sec.label} carries an addend")
+          return
+        end
+        target = stub_addr(code)
+      else
+        target = addr_of(code) + r.addend
+      end
+      delta = target - p
+      if delta < 0_i64 - LinkConst::BRANCH_REACH || delta >= LinkConst::BRANCH_REACH
+        fail("a branch in #{sec.label} reaches #{delta} bytes, past the 128 MiB range")
+        return
+      end
+      write_num(bytes, off, patch_branch(read_u32(bytes, off), delta.unsafe_shr(2_i64)), 4)
+    elsif kind == RelocKind::A64GotPage21
+      imm = (page_of(got_addr(code)) - page_of(p)).unsafe_shr(12_i64)
+      write_num(bytes, off, patch_adrp(read_u32(bytes, off), imm), 4)
+    elsif kind == RelocKind::A64AdrpPage21 || kind == RelocKind::A64TlvpPage21
+      if code < 0
+        fail("#{sec.label} addresses the import #{import_name(code)} with an ADRP; it must go through the GOT")
+        return
+      end
+      target = addr_of(code) + r.addend
+      imm = (page_of(target) - page_of(p)).unsafe_shr(12_i64)
+      write_num(bytes, off, patch_adrp(read_u32(bytes, off), imm), 4)
+    elsif kind == RelocKind::A64AddLo12 || kind == RelocKind::A64Ldst8Lo12 || kind == RelocKind::A64Ldst16Lo12 || kind == RelocKind::A64Ldst32Lo12 || kind == RelocKind::A64Ldst64Lo12 || kind == RelocKind::A64Ldst128Lo12
+      if code < 0
+        fail("#{sec.label} addresses the import #{import_name(code)} with a page offset; it must go through the GOT")
+        return
+      end
+      t = addr_of(code) + r.addend
+      shift = 0_i64
+      if kind == RelocKind::A64Ldst16Lo12
+        shift = 1_i64
+      elsif kind == RelocKind::A64Ldst32Lo12
+        shift = 2_i64
+      elsif kind == RelocKind::A64Ldst64Lo12
+        shift = 3_i64
+      elsif kind == RelocKind::A64Ldst128Lo12
+        shift = 4_i64
+      end
+      write_num(bytes, off, patch_imm12(read_u32(bytes, off), (t & LinkConst::PAGE_MASK).unsafe_shr(shift)), 4)
+    elsif kind == RelocKind::A64GotLo12
+      word = read_u32(bytes, off)
+      unless (word & LinkConst::LDR_MASK) == LinkConst::LDR_BASE
+        fail("#{sec.label} loads a GOT slot with an instruction that is not a 64-bit LDR")
+        return
+      end
+      write_num(bytes, off, patch_imm12(word, (got_addr(code) & LinkConst::PAGE_MASK).unsafe_shr(3_i64)), 4)
+    elsif kind == RelocKind::A64PointerToGot
+      write_num(bytes, off, got_addr(code) - p, 4)
+    elsif kind == RelocKind::A64TlvpLo12
+      # The object loads the descriptor's thunk through an LDR from the
+      # descriptor's address. The descriptor's address is what the code needs,
+      # so the LDR becomes the ADD that yields that address (ld64 does the same
+      # for a descriptor defined in the executable).
+      word = read_u32(bytes, off)
+      unless (word & LinkConst::LDR_MASK) == LinkConst::LDR_BASE
+        fail("#{sec.label} reads a TLV descriptor with an instruction that is not a 64-bit LDR")
+        return
+      end
+      if code < 0
+        fail("#{sec.label} addresses the imported thread-local #{import_name(code)}, which this linker cannot place")
+        return
+      end
+      rn = word.unsafe_shr(5_i64) & 0x1f_i64
+      rd = word & 0x1f_i64
+      imm = addr_of(code) & LinkConst::PAGE_MASK
+      write_num(bytes, off, LinkConst::ADD_IMM_BASE | imm.unsafe_shl(10_i64) | rn.unsafe_shl(5_i64) | rd, 4)
+    else
+      fail("relocation kind #{kind} in #{sec.label} has no arm64 Mach-O executable form")
+    end
+  end
+
+  # The symbols, function starts, data in code, exports and entry, from the
+  # final addresses.
+  def fill_metadata : Nil
+    locals = [] of ExeSymbol
+    externals = [] of ExeSymbol
+    g = 0_i64
+    total = @gsym_out.size.to_i64
+    while g < total && @failure.nil?
+      sym = @objects[@gsym_obj[g.to_i32].to_i32].symbols[@gsym_idx[g.to_i32].to_i32]
+      oidx = @gsym_out[g.to_i32]
+      if sym.kind != SymbolKind::Undefined && sym.kind != SymbolKind::Section && oidx != LinkConst::NO_OUTPUT
+        n_type = MachOExe::N_SECT
+        n_sect = 0_i64
+        if oidx == LinkConst::ABSOLUTE
+          n_type = MachOExe::N_ABS
+        else
+          n_sect = @out_pos[oidx.to_i32] + 1_i64
+        end
+        if sym.binding == SymbolBinding::Local
+          locals << ExeSymbol.new(mach_name(sym.name), n_type, n_sect, 0_i64, addr_of(g))
+        elsif winner_of(sym.name) == g
+          externals << ExeSymbol.new(mach_name(sym.name), n_type | MachOExe::N_EXT, n_sect, 0_i64, addr_of(g))
+        end
+      end
+      g = g + 1_i64
+    end
+    @exe.nlocal = locals.size.to_i64
+    @exe.nextdef = externals.size.to_i64
+    @exe.symbols = locals
+    externals.each do |s|
+      @exe.symbols << s
+    end
+    k = 0
+    while k < @import_names.size
+      ordinal = ordinal_of_owner(@import_owner[k])
+      @exe.symbols << ExeSymbol.new(mach_name(@import_names[k]), MachOExe::N_UNDF | MachOExe::N_EXT, 0_i64, ordinal.unsafe_shl(8_i64), 0_i64)
+      k = k + 1
+    end
+    @exe.nundef = @import_names.size.to_i64
+
+    fill_function_starts
+    fill_data_in_code
+    fill_exports
+    return unless @failure.nil?
+
+    entry = winner_of(@options.entry)
+    if entry < 0
+      fail("no #{@options.entry} to start from")
+      return
+    end
+    @exe.entry = addr_of(entry)
+  end
+
+  def fill_function_starts : Nil
+    starts = [] of Int64
+    g = 0_i64
+    total = @gsym_out.size.to_i64
+    while g < total
+      sym = @objects[@gsym_obj[g.to_i32].to_i32].symbols[@gsym_idx[g.to_i32].to_i32]
+      oidx = @gsym_out[g.to_i32]
+      if sym.kind == SymbolKind::Func && oidx >= 0 && @out_name[oidx.to_i32] == "__TEXT,__text"
+        starts << addr_of(g)
+      end
+      g = g + 1_i64
+    end
+    starts = starts.sorted
+    k = 0
+    while k < starts.size
+      if k == 0 || starts[k] != starts[k - 1]
+        @exe.function_starts << starts[k]
+      end
+      k = k + 1
+    end
+  end
+
+  # The data-in-code entries of each object, by the address of its text section.
+  def fill_data_in_code : Nil
+    i = 0
+    while i < @objects.size
+      obj = @objects[i]
+      if obj.data_in_code.size > 0
+        text = -1_i64
+        s = 0
+        while s < obj.sections.size && text < 0
+          if obj.sections[s].kind == SectionKind::Text && @gsec_out[(@sec_base[i] + s.to_i64).to_i32] >= 0
+            text = @sec_base[i] + s.to_i64
+          end
+          s = s + 1
+        end
+        if text < 0
+          fail("object #{i} has data in code but no text section")
+          return
+        end
+        base = addr_of(LinkConst::SECTION_BASE + text)
+        obj.data_in_code.each do |d|
+          @exe.data_in_code << ExeDataInCode.new(base + d.offset.to_i64, d.length.to_i64, d.kind.to_i64)
+        end
+      end
+      i = i + 1
+    end
+  end
+
+  def fill_exports : Nil
+    g = 0_i64
+    total = @gsym_out.size.to_i64
+    while g < total
+      sym = @objects[@gsym_obj[g.to_i32].to_i32].symbols[@gsym_idx[g.to_i32].to_i32]
+      oidx = @gsym_out[g.to_i32]
+      if sym.binding == SymbolBinding::Global && (sym.kind == SymbolKind::Func || sym.kind == SymbolKind::Object) && oidx >= 0 && winner_of(sym.name) == g
+        @exe.exports << ExeExport.new(mach_name(sym.name), addr_of(g))
+      end
+      g = g + 1_i64
+    end
+  end
+end
+
+# Links the objects into an arm64 Mach-O executable. Deterministic: the same
+# objects and options give the same bytes.
+pub def link(objects : Array(ObjectFile), options : LinkOptions) : LinkedImage | LinkError
+  if objects.size > 0 && objects[0].format == ObjFormat::Elf
+    linked = link_elf(objects, options.entry)
+    if linked.is_a?(String)
+      return LinkError.new(linked.as(String))
+    end
+    return LinkedImage.new(linked.as(Bytes), Hash(String, Bytes).new)
+  end
+  Linker.new(objects, options).run
+end

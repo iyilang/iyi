@@ -1,0 +1,97 @@
+module compiler/native/target
+
+# The per-target description (SPEC 2.2, 3.1). The legalizer (lower.iyi), the calling convention, the selector, the
+# frame and the module driver read a target through this record and never name a register or a platform directly.
+# Each target fills one in: aarch64 darwin and aarch64 linux today, in compiler/native/aarch64/abi.iyi.
+
+import compiler/native/obj/object::{ObjFormat}
+import compiler/native/mir::{MInst, Role}
+import compiler/native/aarch64/opcodes::{aarch64_op, aarch64_role, aarch64_new}
+
+# How a thread-local variable is reached. Darwin goes through a TLV descriptor in __DATA,__thread_vars, bound to
+# _tlv_bootstrap, and calls the descriptor's thunk. Linux reads the thread pointer and adds a local-exec offset.
+pub enum TlsForm
+  TlvDescriptor
+  LocalExec
+  WindowsTlsIndex # Windows: the TEB's thread-local index slot (gs:[0x58]), the x86_64-windows-msvc form
+end
+
+pub class TargetDesc
+  getter name : String
+  getter darwin : Bool
+  getter object_format : ObjFormat
+  getter pointer_bits : Int32
+  getter stack_align : Int64         # bytes; the stack pointer is kept aligned to this at every call
+  getter integer_args : Array(Int32) # physical registers that carry integer and pointer arguments, in order
+  getter fp_args : Array(Int32)      # physical registers that carry floating-point arguments, in order
+  getter indirect_result : Int32     # the register that carries an sret pointer
+  getter aggregate_reg_bytes : Int64 # an aggregate up to this many bytes may be passed in registers
+  getter fp_aggregate_max : Int32    # a homogeneous floating-point aggregate up to this many elements is in fp registers
+  getter variadic_on_stack : Bool    # every variadic argument goes on the stack (darwin)
+  getter callee_saved : Array(Int32)
+  getter caller_saved : Array(Int32)
+  getter scratch_gprs : Array(Int32)
+  getter scratch_fprs : Array(Int32)
+  getter frame_pointer : Int32
+  getter link_register : Int32
+  getter tls : TlsForm
+
+  def initialize(@name : String, @darwin : Bool, @object_format : ObjFormat, @pointer_bits : Int32, @stack_align : Int64, @integer_args : Array(Int32), @fp_args : Array(Int32), @indirect_result : Int32, @aggregate_reg_bytes : Int64, @fp_aggregate_max : Int32, @variadic_on_stack : Bool, @callee_saved : Array(Int32), @caller_saved : Array(Int32), @scratch_gprs : Array(Int32), @scratch_fprs : Array(Int32), @frame_pointer : Int32, @link_register : Int32, @tls : TlsForm)
+  end
+end
+
+# The isa numbers. MFunction#isa names the target whose opcode enum a function's MInsts carry; the hooks below
+# dispatch on it. aarch64 is 0, the isa that every function had before the hooks existed.
+pub def isa_aarch64 : Int32
+  0
+end
+
+# The role of an instruction's opcode in its target's enum. The shared passes ask for roles, never for opcodes.
+pub def role_of(isa : Int32, inst : MInst) : Role
+  if isa == isa_aarch64
+    return aarch64_role(aarch64_op(inst.opcode))
+  end
+  raise "target: no opcode enum for isa #{isa}"
+end
+
+pub def is_role?(isa : Int32, inst : MInst, role : Role) : Bool
+  role_of(isa, inst) == role
+end
+
+# A new instruction of a role, with its opcode set and no operands. The caller sets the rest.
+pub def new_inst(isa : Int32, role : Role) : MInst
+  if isa == isa_aarch64
+    return MInst.new(aarch64_new(role).value.to_i32)
+  end
+  raise "target: no opcode enum for isa #{isa}"
+end
+
+# An opcode's name in the MIR dump.
+pub def op_name(isa : Int32, opcode : Int32) : String
+  if isa == isa_aarch64
+    return "#{aarch64_op(opcode)}"
+  end
+  raise "target: no opcode enum for isa #{isa}"
+end
+
+# Whether control may leave a block through this instruction: a branch, a return or a trap.
+pub def terminator?(isa : Int32, inst : MInst) : Bool
+  r = role_of(isa, inst)
+  r == Role::Branch || r == Role::CondBranch || r == Role::IndirectBranch || r == Role::TableBranch || r == Role::Return || r == Role::Trap
+end
+
+# Whether control never falls through this instruction to the next one.
+pub def leaves_block?(isa : Int32, inst : MInst) : Bool
+  r = role_of(isa, inst)
+  r == Role::Branch || r == Role::IndirectBranch || r == Role::TableBranch || r == Role::Return || r == Role::Trap
+end
+
+# Whether the instruction names block targets: an unconditional or a conditional branch.
+pub def block_branch?(isa : Int32, inst : MInst) : Bool
+  r = role_of(isa, inst)
+  r == Role::Branch || r == Role::CondBranch
+end
+
+pub def table_branch?(isa : Int32, inst : MInst) : Bool
+  role_of(isa, inst) == Role::TableBranch
+end

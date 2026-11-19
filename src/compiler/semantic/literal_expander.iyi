@@ -50,6 +50,7 @@ module compiler/semantic/literal_expander
 
 import compiler/semantic/normalizer::{NormalizerProgram}
 import compiler/syntax/ast::{ASTNode, Arg, And, ArrayLiteral, Assign, BoolLiteral, Block, Call, Case, Cast, CharLiteral, ClassVar, Def, EnumDef, Expressions, Generic, HashLiteral, If, InstanceVar, IsA, MacroExpression, MacroFor, MacroIf, Metaclass, MultiAssign, NilLiteral, Nop, Not, NumberLiteral, Or, Path, RangeLiteral, Select, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, TypeOf, Underscore, Var, When}
+import compiler/syntax/ast::{ProcLiteral, ProcPointer}
 import compiler/syntax/transformer::{Transformer}
 
 pub class LiteralExpander < Transformer
@@ -923,6 +924,34 @@ pub class LiteralExpander < Transformer
     a_if = or_if(node)
     a_if.from_or = true
     a_if
+  end
+
+  # `->obj.name(A, B)`, expanded as the hosted LiteralExpander does (literal_expander.cr 1225-1251): a receiver
+  # that is not a path is bound to a temporary first, each pointer argument becomes a typed parameter of the
+  # proc literal, and the literal's body calls `name` on the receiver with those parameters. A nil receiver
+  # calls the top-level def. The hosted back-link from the literal to its pointer is not kept: only the closure
+  # refusals read it, and those are not ported.
+  def expand_proc_pointer(node : ProcPointer) : ASTNode
+    obj = node.obj
+    assign : Assign? = nil
+    if obj && !obj.is_a?(Path)
+      temp = temp_var
+      assign = Assign.new(temp.clone, obj)
+      obj = temp.clone
+    end
+    def_args = [] of Arg
+    call_args = [] of ASTNode
+    node.args.each do |restriction|
+      name = @program.new_temp_var_name
+      def_args << Arg.new(name, nil, restriction)
+      call_args << Var.new(name)
+    end
+    body = Call.new(obj, node.name, call_args, nil, nil, nil, false, nil, node.global)
+    literal = ProcLiteral.new(Def.new("->", def_args, body))
+    if a = assign
+      return Expressions.new([a, literal] of ASTNode)
+    end
+    literal
   end
 
   def select_has_else?(node : Select) : Bool

@@ -379,6 +379,7 @@ PY
     bench/fixtures/sem_expr_literals.iyi \
     bench/fixtures/sem_expr_control.iyi \
     bench/fixtures/sem_expr_vars.iyi \
+    bench/fixtures/sem_parity_proc_pointers.iyi \
     bench/fixtures/sem_expr_calls.iyi > "$PROOF_LIST"
   PROOF_FLOOR="$WORK/proof.floor"
   child_gate "$PROOF_FLOOR" TYPED_PARITY_RAISE=1 > "$WORK/proof_raise.log" 2>&1
@@ -398,6 +399,28 @@ PY
   else
     t.full_name
   end' \
+    "BELOW FLOOR" -- child_gate "$PROOF_FLOOR" || status=1
+
+  prove_mutation "a proc pointer on a path is refused, not expanded (main_visitor.cr 1496-1499)" \
+    "$REPO/src/compiler/semantic/main_visitor.iyi" \
+    '      return proc_pointer_expansion(node)
+    end
+    refuse(node, "a proc pointer on this receiver is not ported yet: #{node.name}")' \
+    '      return refuse(node, "a proc pointer on a path is not ported yet: #{node.name}")
+    end
+    refuse(node, "a proc pointer on this receiver is not ported yet: #{node.name}")' \
+    "BELOW FLOOR" -- child_gate "$PROOF_FLOOR" || status=1
+
+  prove_mutation "a proc pointer's expansion calls the top-level def, not its receiver (literal_expander.cr 1242)" \
+    "$REPO/src/compiler/semantic/literal_expander.iyi" \
+    '    body = Call.new(obj, node.name, call_args, nil, nil, nil, false, nil, node.global)' \
+    '    body = Call.new(nil, node.name, call_args, nil, nil, nil, false, nil, node.global)' \
+    "BELOW FLOOR" -- child_gate "$PROOF_FLOOR" || status=1
+
+  prove_mutation "a proc pointer's expansion loses an argument type (literal_expander.cr 1235)" \
+    "$REPO/src/compiler/semantic/literal_expander.iyi" \
+    '      def_args << Arg.new(name, nil, restriction)' \
+    '      def_args << Arg.new(name)' \
     "BELOW FLOOR" -- child_gate "$PROOF_FLOOR" || status=1
 
   LOWERED="$WORK/lowered.floor"

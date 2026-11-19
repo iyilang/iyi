@@ -41,6 +41,15 @@
 - Pass the selected static LLVM configuration to the macOS frontend comparisons,
   including the semantic, inference and code-generation oracles.
 
+- **Compile-time macros in `.iyi` files refuse shell commands.** `system`
+  and backticks fail with the source location. `read_file`, `read_file?` and
+  `file_exists?` stay within the defining package and the standard library,
+  including paths through symbolic links or Windows junctions. Only the root package
+  may read the build environment with `env`. A `run` helper must be in the
+  defining package, but it still executes without a sandbox and can run
+  arbitrary code. A macro defined and called in `.cr` keeps its existing
+  behavior; a `.cr` macro called from `.iyi` follows the same restrictions.
+
 - **`iyi test` in a directory no longer runs other projects' tests.** It
   walks the tree as `fix` and `mod tidy` do: not into `lib` (the installed
   dependencies, whose failing test failed the run of the project that

@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 36,399 lines, of which 4,737 are the library held to the 4,738 ceiling (7,155 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 36,421 lines, of which 4,737 are the library held to the 4,738 ceiling (7,155 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 142,150 lines, none of it written in iyi |
 | artifact format | `.iyimod` v64, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 36,399 lines
+> "No standard library worth the name" is still true of iyi's own 36,421 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 36,399 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 36,421 lines,
 primitives included, of which the library is 4,737.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1064,7 +1064,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 142,150 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 36,399-line own prelude + 128,413 in std |
+| Library | 8,161 lines (3,551 of it core) | 36,421-line own prelude + 128,413 in std |
 | Specs | 21,146 lines | 17,691 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -5511,6 +5511,14 @@ nobody, and the look after the count finds its task; a worker that finds
 one there takes a token again, so that it calls the next. Given back before
 the count, as it first was, the token was free while the worker was not yet
 idle, and that spawn started a second worker for one task.
+A task that gives its worker up at a back-edge, because a task waits and
+no worker is idle, starts one too (`IyiWorkers.turn_wanted?`). A find that
+took the last task it saw called nobody, and a task halfway through its
+own give-up is not seen waiting: without that start, a pool of ten tasks
+spinning on nine workers took turns and never started the tenth worker.
+That happened on macOS (Apple M2 Pro, 10 cores) beside two other CI jobs,
+and in 1 of 150 runs beside 20 busy loops (`bench/concurrent_mark.sh`
+holds it).
 `IyiThread.start` takes the scheduler's lock and allocates, so a thread
 holding that lock, or the monitor's own thread, owes the start instead, and
 the next worker to look, task to give its worker up at a back-edge, or spawn
@@ -13720,7 +13728,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 36,399-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 36,421-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

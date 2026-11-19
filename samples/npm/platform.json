@@ -1,0 +1,7 @@
+{
+  "name": "hello-OS-CPU",
+  "version": "1.0.0",
+  "os": ["OS"],
+  "cpu": ["CPU"],
+  "files": ["bin"]
+}

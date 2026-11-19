@@ -183,8 +183,14 @@ MIGRATE_STEPS="channels sockets cancel closes deep loops balance backstop heldio
 # the busy share of the cores plus the ready queue over the second,
 # which read 0.1 to 1.2 idle, 6.1 to 7.3 beside 6 busy loops (no run
 # failed) and 20 to 45 beside 12 to 24. darwin woke the tasks in 7 to
-# 218 us at loads of 4 to 44 on 10 cores (tmac, 160 runs), and is always
-# judged.
+# 218 us at loads of 4 to 44 on 10 cores (tmac, 160 runs) of busy loops,
+# and was always judged until it failed beside two other CI jobs on the
+# project's Mac, three runners on those 10 cores: 11 to 2,925 us, the
+# median 2,150 (job 135122969351; its other runs there 14 to 45 at the
+# median). A busy loop is not what those jobs run - compilers and gates
+# that sleep, fork and touch memory - so darwin is read the way Linux is:
+# its threads runnable, a `ps -axM` thread row whose state is R, less the
+# one reading it, ten looks over the second.
 host_load() {
   case "$(uname -s)" in
     Linux)
@@ -192,6 +198,11 @@ host_load() {
         grep '^procs_running ' /proc/stat
         sleep 0.1
       done | awk '{ sum += $2 - 1 } END { if (NR) printf "%.1f\n", sum / NR }' ;;
+    Darwin)
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        ps -axM | awk 'NR > 1 { for (i = 1; i < NF; i++) if ($i ~ /^R/ && $(i + 1) ~ /^[0-9]+T?$/) { n++; break } } END { print n - 1 }'
+        sleep 0.1
+      done | awk '{ sum += $1 } END { if (NR) printf "%.1f\n", sum / NR }' ;;
     MINGW* | MSYS* | CYGWIN* | Windows_NT)
       powershell -NoProfile -Command '$c = (Get-Counter "\Processor(_Total)\% Processor Time","\System\Processor Queue Length" -SampleInterval 1 -MaxSamples 1).CounterSamples; [string]::Format([cultureinfo]::InvariantCulture, "{0:F1}", $c[0].CookedValue * [Environment]::ProcessorCount / 100 + $c[1].CookedValue)' 2> /dev/null | tr -d '\r' ;;
   esac

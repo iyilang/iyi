@@ -1,0 +1,21 @@
+; iyi-ir 1
+module "tls_two"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [13 x i8] c"%ld %ld %ld\0A\00"
+@ta = internal thread_local(localexec) global i64 10, align 8
+@tb = internal thread_local(localexec) global i64 0, align 8
+
+define i32 @main() {
+entry:
+  %pa = threadlocaladdr ptr @ta
+  %pb = threadlocaladdr ptr @tb
+  %a = load i64, ptr %pa, align 8
+  %before = load i64, ptr %pb, align 8
+  %twice = mul i64 %a, 2
+  store i64 %twice, ptr %pb, align 8
+  %after = load i64, ptr %pb, align 8
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i64 %a, i64 %before, i64 %after)
+  ret i32 0
+}

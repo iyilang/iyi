@@ -1,0 +1,54 @@
+def greet
+  "hello"
+end
+
+def add(x : Int32, y : Int32) : Int32
+  x + y
+end
+
+def compute(base : Float64, multiplier : Float64 = 1.0) : Float64
+  base * multiplier
+end
+
+def gather(*items : String, **options : Int32) : Array(String)
+  items
+end
+
+def process(&block : Int32 -> String) : String
+  yield 42
+end
+
+def run_simple(&)
+  yield
+end
+
+def configured(mode, *, verbose : Bool = false, retries : Int32 = 3)
+  mode
+end
+
+def transfer(from src : String, to dst : String)
+  src
+end
+
+def self.factory : String
+  "created"
+end
+
+def empty? : Bool
+  true
+end
+
+def count=(val : Int32)
+  val
+end
+
+abstract def serialize : String
+abstract def self.category : String
+
+def identity(x : T) : T forall T
+  x
+end
+
+def min_elem : Elem forall Elem : Comparable
+  Elem
+end

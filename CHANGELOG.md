@@ -11,12 +11,38 @@
   settings, and cache writes replace an existing checkpoint through an
   exclusive same-directory file. Package downloads do not use them yet.
   Independent cryptographic review is required before anything depends on them.
+
+- **The inline-assembly inventory and driver are written in iyi.**
+  The component accounts for assembly expressions per target and compares
+  AArch64 bytes and relocations with hosted cross-compilation on Darwin and
+  Linux targets. Constraint refusals and mutation checks guard those comparisons.
+  The hosted backend remains the default.
+
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.
   DIR defaults to the current directory; a missing manifest or an empty
   package is refused.
 
+- **The native linker writes executables without a system linker.**
+  `compiler/native/link` writes Mach-O and ELF images, resolves relocations
+  and imports, and generates Mach-O code signatures. The Mach-O gate runs
+  linked sample programs, checks their signatures and library dependencies,
+  and compares repeated links byte for byte. The default backend is unchanged.
+- **The native AArch64 backend selects instructions, allocates registers and emits Mach-O objects in iyi.**
+  Its component gates compare instruction bytes, object metadata, allocation
+  and spill behavior on Linux, macOS and Windows. macOS arm64 also runs the
+  emitted programs against hosted builds; other hosts name those execution
+  limits. CI retains each gate's full log with its source and checkout
+  revisions. The hosted LLVM backend remains the default, and this component
+  does not establish a stage2/stage3 fixed point or LLVM-free PE/COFF output.
+  The Linux driver's dependency check includes libc's thread setup, which its
+  C `exit` call makes the collector use.
+- **The x86-64 encoder and ABI tables are written in iyi.**
+  `compiler/native/amd64` encodes instruction forms and relocations and
+  supplies the System V and Win64 argument and return conventions.
+  Its gate compares bytes with LLVM's assembler and ABI rows with the
+  published conventions. The compiler's default backend is unchanged.
 - **`iyi test` runs tests at once, says what each named case came to, and
   can run some of them.** Half as many tests build and run together as the
   machine has cores, `-p N` says how many, and the report stays in file

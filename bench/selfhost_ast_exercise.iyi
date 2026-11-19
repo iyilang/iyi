@@ -1,0 +1,2440 @@
+import compiler/foundation/location::{Location}
+import compiler/foundation/enums
+import compiler/syntax/token::{Keyword, TokenKind, NumberKind}
+import compiler/syntax/ast::{Primitive}
+import compiler/syntax/ast::{Alias, AlignOf, And, Annotation, AnnotationDef, Arg, ArrayLiteral, Asm, AsmOperand, Assign, AssocTypeDecl, Block, BoolLiteral, Break, CStructOrUnionDef, Call, Case, Cast, CharLiteral, ClassDef, ClassVar, Def, Defer, DoubleSplat, EnumDef, ExceptionHandler, Expressions, Extend, ExternalVar, FunDef, Generic, Global, HashLiteral, If, ImplDef, ImplicitObj, ImportDecl, Include, InstanceAlignOf, InstanceSizeOf, InstanceVar, IsA, LibDef, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MagicConstant, Metaclass, ModuleDef, ModuleHeader, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, NilableCast, Nop, Not, NumberLiteral, OffsetOf, OpAssign, Or, Out, Path, PointerOf, ProcLiteral, ProcNotation, ProcPointer, Propagate, RangeLiteral, ReadInstanceVar, Recover, RegexLiteral, Require, Rescue, RespondsTo, Return, Select, Self, SizeOf, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TraitDef, TupleLiteral, TypeDeclaration, TypeDef, TypeOf, Underscore, UninitializedVar, Unless, Until, UsingDecl, Var, VisibilityModifier, When, While, Yield, ASTNode, BinaryOp, UnaryExpression, ControlExpression, NodeMap, StringBuilder, Visibility, RegexOptions}
+import compiler/syntax/visitor::{Visitor, ToSVisitor, NodeCounterVisitor}
+import compiler/syntax/transformer::{Transformer}
+
+alias ASTUnion = Compiler::Syntax::Ast::Union
+
+module BenchSelfhostAstExercise
+  class ConstantFolder < Transformer
+    def transform(node : NumberLiteral) : ASTNode
+      val = node.value.to_i
+      NumberLiteral.new((val * 2).to_s, node.kind)
+    end
+
+    def transform(node : Var) : ASTNode
+      Var.new(node.name + "_renamed")
+    end
+  end
+
+  def self.assert(cond : Bool, msg : String)
+    unless cond
+      puts "Assertion failed: " + msg
+      raise "Assertion failed: " + msg
+    end
+  end
+
+  def self.test_node_construction
+    puts "testing construction of all 104 concrete AST node kinds..."
+    nodes = [] of ASTNode
+    n_Alias = Alias.new(Path.new("MyInt"), Path.new("Int32"))
+    assert(n_Alias.is_a?(Alias), "construction of Alias")
+    nodes << n_Alias
+    n_AlignOf = AlignOf.new(Path.new("Int64"))
+    assert(n_AlignOf.is_a?(AlignOf), "construction of AlignOf")
+    nodes << n_AlignOf
+    n_And = And.new(BoolLiteral.new(true), BoolLiteral.new(false))
+    assert(n_And.is_a?(And), "construction of And")
+    nodes << n_And
+    n_Annotation = Annotation.new(Path.new("AlwaysInline"))
+    assert(n_Annotation.is_a?(Annotation), "construction of Annotation")
+    nodes << n_Annotation
+    n_AnnotationDef = AnnotationDef.new(Path.new("MyAnno"))
+    assert(n_AnnotationDef.is_a?(AnnotationDef), "construction of AnnotationDef")
+    nodes << n_AnnotationDef
+    n_Arg = Arg.new("x", NumberLiteral.new("0"), Path.new("Int32"))
+    assert(n_Arg.is_a?(Arg), "construction of Arg")
+    nodes << n_Arg
+    n_ArrayLiteral = ArrayLiteral.new(([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    assert(n_ArrayLiteral.is_a?(ArrayLiteral), "construction of ArrayLiteral")
+    nodes << n_ArrayLiteral
+    n_Asm = Asm.new("nop", [AsmOperand.new("=r", Var.new("o"))], [AsmOperand.new("r", Var.new("i"))], ["memory"])
+    assert(n_Asm.is_a?(Asm), "construction of Asm")
+    nodes << n_Asm
+    n_AsmOperand = AsmOperand.new("=r", Var.new("out_val"))
+    assert(n_AsmOperand.is_a?(AsmOperand), "construction of AsmOperand")
+    nodes << n_AsmOperand
+    n_Assign = Assign.new(Var.new("x"), NumberLiteral.new("100"))
+    assert(n_Assign.is_a?(Assign), "construction of Assign")
+    nodes << n_Assign
+    n_AssocTypeDecl = AssocTypeDecl.new("Item", Path.new("String"))
+    assert(n_AssocTypeDecl.is_a?(AssocTypeDecl), "construction of AssocTypeDecl")
+    nodes << n_AssocTypeDecl
+    n_Block = Block.new([Var.new("item")], NumberLiteral.new("1"))
+    assert(n_Block.is_a?(Block), "construction of Block")
+    nodes << n_Block
+    n_BoolLiteral = BoolLiteral.new(true)
+    assert(n_BoolLiteral.is_a?(BoolLiteral), "construction of BoolLiteral")
+    nodes << n_BoolLiteral
+    n_Break = Break.new(NumberLiteral.new("0"))
+    assert(n_Break.is_a?(Break), "construction of Break")
+    nodes << n_Break
+    n_CStructOrUnionDef = CStructOrUnionDef.new("Point", NumberLiteral.new("0"), false)
+    assert(n_CStructOrUnionDef.is_a?(CStructOrUnionDef), "construction of CStructOrUnionDef")
+    nodes << n_CStructOrUnionDef
+    n_Call = Call.new(Var.new("math"), "add", ([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    assert(n_Call.is_a?(Call), "construction of Call")
+    nodes << n_Call
+    n_Case = Case.new(Var.new("x"), [When.new(([NumberLiteral.new("1")] of ASTNode), StringLiteral.new("one"))])
+    assert(n_Case.is_a?(Case), "construction of Case")
+    nodes << n_Case
+    n_Cast = Cast.new(Var.new("x"), Path.new("String"))
+    assert(n_Cast.is_a?(Cast), "construction of Cast")
+    nodes << n_Cast
+    n_CharLiteral = CharLiteral.new('z')
+    assert(n_CharLiteral.is_a?(CharLiteral), "construction of CharLiteral")
+    nodes << n_CharLiteral
+    n_ClassDef = ClassDef.new(Path.new("MyClass"), NumberLiteral.new("1"), Path.new("Object"))
+    assert(n_ClassDef.is_a?(ClassDef), "construction of ClassDef")
+    nodes << n_ClassDef
+    n_ClassVar = ClassVar.new("@@my_cvar")
+    assert(n_ClassVar.is_a?(ClassVar), "construction of ClassVar")
+    nodes << n_ClassVar
+    n_Def = Def.new("my_func", [Arg.new("a")], NumberLiteral.new("99"))
+    assert(n_Def.is_a?(Def), "construction of Def")
+    nodes << n_Def
+    n_Defer = Defer.new(Call.new(nil, "cleanup"))
+    assert(n_Defer.is_a?(Defer), "construction of Defer")
+    nodes << n_Defer
+    n_DoubleSplat = DoubleSplat.new(Var.new("kwargs"))
+    assert(n_DoubleSplat.is_a?(DoubleSplat), "construction of DoubleSplat")
+    nodes << n_DoubleSplat
+    n_EnumDef = EnumDef.new(Path.new("Color"), ([Var.new("Red"), Var.new("Green")] of ASTNode))
+    assert(n_EnumDef.is_a?(EnumDef), "construction of EnumDef")
+    nodes << n_EnumDef
+    n_ExceptionHandler = ExceptionHandler.new(NumberLiteral.new("1"), [Rescue.new(NumberLiteral.new("2"))])
+    assert(n_ExceptionHandler.is_a?(ExceptionHandler), "construction of ExceptionHandler")
+    nodes << n_ExceptionHandler
+    n_Expressions = Expressions.new(([Var.new("a"), Var.new("b")] of ASTNode), Expressions::Keyword::None)
+    assert(n_Expressions.is_a?(Expressions), "construction of Expressions")
+    nodes << n_Expressions
+    n_Extend = Extend.new(Path.new("ClassMethods"))
+    assert(n_Extend.is_a?(Extend), "construction of Extend")
+    nodes << n_Extend
+    n_ExternalVar = ExternalVar.new("errno", Path.new("Int32"))
+    assert(n_ExternalVar.is_a?(ExternalVar), "construction of ExternalVar")
+    nodes << n_ExternalVar
+    n_FunDef = FunDef.new("puts", [Arg.new("s", nil, Path.new("String"))], Path.new("Int32"))
+    assert(n_FunDef.is_a?(FunDef), "construction of FunDef")
+    nodes << n_FunDef
+    n_Generic = Generic.new(Path.new("Array"), ([Path.new("Int32")] of ASTNode))
+    assert(n_Generic.is_a?(Generic), "construction of Generic")
+    nodes << n_Generic
+    n_Global = Global.new("$my_global")
+    assert(n_Global.is_a?(Global), "construction of Global")
+    nodes << n_Global
+    n_HashLiteral = HashLiteral.new([HashLiteral::Entry.new(StringLiteral.new("k"), NumberLiteral.new("1"))])
+    assert(n_HashLiteral.is_a?(HashLiteral), "construction of HashLiteral")
+    nodes << n_HashLiteral
+    n_If = If.new(BoolLiteral.new(true), NumberLiteral.new("1"), NumberLiteral.new("2"))
+    assert(n_If.is_a?(If), "construction of If")
+    nodes << n_If
+    n_ImplDef = ImplDef.new(Path.new("MyTrait"), Path.new("MyClass"), NumberLiteral.new("1"))
+    assert(n_ImplDef.is_a?(ImplDef), "construction of ImplDef")
+    nodes << n_ImplDef
+    n_ImplicitObj = ImplicitObj.new
+    assert(n_ImplicitObj.is_a?(ImplicitObj), "construction of ImplicitObj")
+    nodes << n_ImplicitObj
+    n_ImportDecl = ImportDecl.new(["compiler", "foundation", "location"], true)
+    assert(n_ImportDecl.is_a?(ImportDecl), "construction of ImportDecl")
+    nodes << n_ImportDecl
+    n_Include = Include.new(Path.new("Enumerable"))
+    assert(n_Include.is_a?(Include), "construction of Include")
+    nodes << n_Include
+    n_InstanceAlignOf = InstanceAlignOf.new(Path.new("Bar"))
+    assert(n_InstanceAlignOf.is_a?(InstanceAlignOf), "construction of InstanceAlignOf")
+    nodes << n_InstanceAlignOf
+    n_InstanceSizeOf = InstanceSizeOf.new(Path.new("Foo"))
+    assert(n_InstanceSizeOf.is_a?(InstanceSizeOf), "construction of InstanceSizeOf")
+    nodes << n_InstanceSizeOf
+    n_InstanceVar = InstanceVar.new("@my_ivar")
+    assert(n_InstanceVar.is_a?(InstanceVar), "construction of InstanceVar")
+    nodes << n_InstanceVar
+    n_IsA = IsA.new(Var.new("x"), Path.new("Int32"))
+    assert(n_IsA.is_a?(IsA), "construction of IsA")
+    nodes << n_IsA
+    n_LibDef = LibDef.new(Path.new("LibC"), NumberLiteral.new("0"))
+    assert(n_LibDef.is_a?(LibDef), "construction of LibDef")
+    nodes << n_LibDef
+    n_Macro = Macro.new("my_macro", [Arg.new("x")], StringLiteral.new("code"))
+    assert(n_Macro.is_a?(Macro), "construction of Macro")
+    nodes << n_Macro
+    n_MacroExpression = MacroExpression.new(Var.new("x"), true)
+    assert(n_MacroExpression.is_a?(MacroExpression), "construction of MacroExpression")
+    nodes << n_MacroExpression
+    n_MacroFor = MacroFor.new([Var.new("i")], ArrayLiteral.new(([NumberLiteral.new("1")] of ASTNode)), Var.new("i"))
+    assert(n_MacroFor.is_a?(MacroFor), "construction of MacroFor")
+    nodes << n_MacroFor
+    n_MacroIf = MacroIf.new(Var.new("flag"), NumberLiteral.new("1"), NumberLiteral.new("2"))
+    assert(n_MacroIf.is_a?(MacroIf), "construction of MacroIf")
+    nodes << n_MacroIf
+    n_MacroLiteral = MacroLiteral.new("hello macro")
+    assert(n_MacroLiteral.is_a?(MacroLiteral), "construction of MacroLiteral")
+    nodes << n_MacroLiteral
+    n_MacroVar = MacroVar.new("temp_var")
+    assert(n_MacroVar.is_a?(MacroVar), "construction of MacroVar")
+    nodes << n_MacroVar
+    n_MacroVerbatim = MacroVerbatim.new(StringLiteral.new("verbatim code"))
+    assert(n_MacroVerbatim.is_a?(MacroVerbatim), "construction of MacroVerbatim")
+    nodes << n_MacroVerbatim
+    n_MagicConstant = MagicConstant.new(TokenKind::MAGIC_LINE)
+    assert(n_MagicConstant.is_a?(MagicConstant), "construction of MagicConstant")
+    nodes << n_MagicConstant
+    n_Metaclass = Metaclass.new(Path.new("String"))
+    assert(n_Metaclass.is_a?(Metaclass), "construction of Metaclass")
+    nodes << n_Metaclass
+    n_ModuleDef = ModuleDef.new(Path.new("MyMod"), NumberLiteral.new("1"))
+    assert(n_ModuleDef.is_a?(ModuleDef), "construction of ModuleDef")
+    nodes << n_ModuleDef
+    n_ModuleHeader = ModuleHeader.new(["compiler", "syntax", "ast"])
+    assert(n_ModuleHeader.is_a?(ModuleHeader), "construction of ModuleHeader")
+    nodes << n_ModuleHeader
+    n_MultiAssign = MultiAssign.new(([Var.new("a"), Var.new("b")] of ASTNode), ([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    assert(n_MultiAssign.is_a?(MultiAssign), "construction of MultiAssign")
+    nodes << n_MultiAssign
+    n_NamedArgument = NamedArgument.new("limit", NumberLiteral.new("10"))
+    assert(n_NamedArgument.is_a?(NamedArgument), "construction of NamedArgument")
+    nodes << n_NamedArgument
+    n_NamedTupleLiteral = NamedTupleLiteral.new([NamedTupleLiteral::Entry.new("key", NumberLiteral.new("10"))])
+    assert(n_NamedTupleLiteral.is_a?(NamedTupleLiteral), "construction of NamedTupleLiteral")
+    nodes << n_NamedTupleLiteral
+    n_Next = Next.new(nil)
+    assert(n_Next.is_a?(Next), "construction of Next")
+    nodes << n_Next
+    n_NilLiteral = NilLiteral.new
+    assert(n_NilLiteral.is_a?(NilLiteral), "construction of NilLiteral")
+    nodes << n_NilLiteral
+    n_NilableCast = NilableCast.new(Var.new("x"), Path.new("String"))
+    assert(n_NilableCast.is_a?(NilableCast), "construction of NilableCast")
+    nodes << n_NilableCast
+    n_Nop = Nop.new
+    assert(n_Nop.is_a?(Nop), "construction of Nop")
+    nodes << n_Nop
+    n_Not = Not.new(BoolLiteral.new(true))
+    assert(n_Not.is_a?(Not), "construction of Not")
+    nodes << n_Not
+    n_NumberLiteral = NumberLiteral.new("42", NumberKind::I32)
+    assert(n_NumberLiteral.is_a?(NumberLiteral), "construction of NumberLiteral")
+    nodes << n_NumberLiteral
+    n_OffsetOf = OffsetOf.new(Path.new("Foo"), NumberLiteral.new("0"))
+    assert(n_OffsetOf.is_a?(OffsetOf), "construction of OffsetOf")
+    nodes << n_OffsetOf
+    n_OpAssign = OpAssign.new(Var.new("x"), "+", NumberLiteral.new("1"))
+    assert(n_OpAssign.is_a?(OpAssign), "construction of OpAssign")
+    nodes << n_OpAssign
+    n_Or = Or.new(BoolLiteral.new(true), BoolLiteral.new(false))
+    assert(n_Or.is_a?(Or), "construction of Or")
+    nodes << n_Or
+    n_Out = Out.new(Var.new("buf"))
+    assert(n_Out.is_a?(Out), "construction of Out")
+    nodes << n_Out
+    n_Path = Path.new(["Foo", "Bar"], false)
+    assert(n_Path.is_a?(Path), "construction of Path")
+    nodes << n_Path
+    n_PointerOf = PointerOf.new(Var.new("p"))
+    assert(n_PointerOf.is_a?(PointerOf), "construction of PointerOf")
+    nodes << n_PointerOf
+    n_ProcLiteral = ProcLiteral.new(Def.new("->", [Arg.new("i")], NumberLiteral.new("42")))
+    assert(n_ProcLiteral.is_a?(ProcLiteral), "construction of ProcLiteral")
+    nodes << n_ProcLiteral
+    n_ProcNotation = ProcNotation.new(([Path.new("Int32")] of ASTNode), Path.new("String"))
+    assert(n_ProcNotation.is_a?(ProcNotation), "construction of ProcNotation")
+    nodes << n_ProcNotation
+    n_ProcPointer = ProcPointer.new(nil, "print", ([Path.new("String")] of ASTNode), false)
+    assert(n_ProcPointer.is_a?(ProcPointer), "construction of ProcPointer")
+    nodes << n_ProcPointer
+    n_Propagate = Propagate.new(Call.new(nil, "read_file"))
+    assert(n_Propagate.is_a?(Propagate), "construction of Propagate")
+    nodes << n_Propagate
+    n_RangeLiteral = RangeLiteral.new(NumberLiteral.new("1"), NumberLiteral.new("10"), false)
+    assert(n_RangeLiteral.is_a?(RangeLiteral), "construction of RangeLiteral")
+    nodes << n_RangeLiteral
+    n_ReadInstanceVar = ReadInstanceVar.new(Var.new("obj"), "@field")
+    assert(n_ReadInstanceVar.is_a?(ReadInstanceVar), "construction of ReadInstanceVar")
+    nodes << n_ReadInstanceVar
+    n_Recover = Recover.new(Call.new(nil, "risky"), NumberLiteral.new("0"))
+    assert(n_Recover.is_a?(Recover), "construction of Recover")
+    nodes << n_Recover
+    n_RegexLiteral = RegexLiteral.new(StringLiteral.new("foo"), RegexOptions::IGNORE_CASE)
+    assert(n_RegexLiteral.is_a?(RegexLiteral), "construction of RegexLiteral")
+    nodes << n_RegexLiteral
+    n_Require = Require.new("json")
+    assert(n_Require.is_a?(Require), "construction of Require")
+    nodes << n_Require
+    n_Rescue = Rescue.new(StringLiteral.new("err"), ([Path.new("Exception")] of ASTNode), "ex")
+    assert(n_Rescue.is_a?(Rescue), "construction of Rescue")
+    nodes << n_Rescue
+    n_RespondsTo = RespondsTo.new(Var.new("x"), "to_s")
+    assert(n_RespondsTo.is_a?(RespondsTo), "construction of RespondsTo")
+    nodes << n_RespondsTo
+    n_Return = Return.new(NumberLiteral.new("10"))
+    assert(n_Return.is_a?(Return), "construction of Return")
+    nodes << n_Return
+    n_Select = Select.new([When.new(([Call.new(nil, "ch_receive")] of ASTNode), StringLiteral.new("got"))])
+    assert(n_Select.is_a?(Select), "construction of Select")
+    nodes << n_Select
+    n_Self = Self.new
+    assert(n_Self.is_a?(Self), "construction of Self")
+    nodes << n_Self
+    n_SizeOf = SizeOf.new(Path.new("Int32"))
+    assert(n_SizeOf.is_a?(SizeOf), "construction of SizeOf")
+    nodes << n_SizeOf
+    n_Splat = Splat.new(Var.new("args"))
+    assert(n_Splat.is_a?(Splat), "construction of Splat")
+    nodes << n_Splat
+    n_StringInterpolation = StringInterpolation.new(([StringLiteral.new("val="), Var.new("x")] of ASTNode))
+    assert(n_StringInterpolation.is_a?(StringInterpolation), "construction of StringInterpolation")
+    nodes << n_StringInterpolation
+    n_StringLiteral = StringLiteral.new("hello")
+    assert(n_StringLiteral.is_a?(StringLiteral), "construction of StringLiteral")
+    nodes << n_StringLiteral
+    n_SymbolLiteral = SymbolLiteral.new("my_sym")
+    assert(n_SymbolLiteral.is_a?(SymbolLiteral), "construction of SymbolLiteral")
+    nodes << n_SymbolLiteral
+    n_TraitDef = TraitDef.new(Path.new("MyTrait"), NumberLiteral.new("1"))
+    assert(n_TraitDef.is_a?(TraitDef), "construction of TraitDef")
+    nodes << n_TraitDef
+    n_TupleLiteral = TupleLiteral.new(([NumberLiteral.new("1"), StringLiteral.new("a")] of ASTNode))
+    assert(n_TupleLiteral.is_a?(TupleLiteral), "construction of TupleLiteral")
+    nodes << n_TupleLiteral
+    n_TypeDeclaration = TypeDeclaration.new(Var.new("count"), Path.new("Int32"), NumberLiteral.new("0"))
+    assert(n_TypeDeclaration.is_a?(TypeDeclaration), "construction of TypeDeclaration")
+    nodes << n_TypeDeclaration
+    n_TypeDef = TypeDef.new("SizeT", Path.new("UInt64"))
+    assert(n_TypeDef.is_a?(TypeDef), "construction of TypeDef")
+    nodes << n_TypeDef
+    n_TypeOf = TypeOf.new(([Var.new("x")] of ASTNode))
+    assert(n_TypeOf.is_a?(TypeOf), "construction of TypeOf")
+    nodes << n_TypeOf
+    n_Underscore = Underscore.new
+    assert(n_Underscore.is_a?(Underscore), "construction of Underscore")
+    nodes << n_Underscore
+    n_UninitializedVar = UninitializedVar.new(Var.new("buffer"), Path.new("Pointer"))
+    assert(n_UninitializedVar.is_a?(UninitializedVar), "construction of UninitializedVar")
+    nodes << n_UninitializedVar
+    n_Union = ASTUnion.new(([Path.new("Int32"), Path.new("String")] of ASTNode))
+    assert(n_Union.is_a?(ASTUnion), "construction of Union")
+    nodes << n_Union
+    n_Unless = Unless.new(BoolLiteral.new(false), NumberLiteral.new("1"), NumberLiteral.new("0"))
+    assert(n_Unless.is_a?(Unless), "construction of Unless")
+    nodes << n_Unless
+    n_Until = Until.new(BoolLiteral.new(false), NumberLiteral.new("42"))
+    assert(n_Until.is_a?(Until), "construction of Until")
+    nodes << n_Until
+    n_UsingDecl = UsingDecl.new(["compiler", "foundation", "location"], ["Location"])
+    assert(n_UsingDecl.is_a?(UsingDecl), "construction of UsingDecl")
+    nodes << n_UsingDecl
+    n_Var = Var.new("my_var")
+    assert(n_Var.is_a?(Var), "construction of Var")
+    nodes << n_Var
+    n_VisibilityModifier = VisibilityModifier.new(Visibility::Private, Def.new("secret"))
+    assert(n_VisibilityModifier.is_a?(VisibilityModifier), "construction of VisibilityModifier")
+    nodes << n_VisibilityModifier
+    n_When = When.new(([NumberLiteral.new("1")] of ASTNode), StringLiteral.new("one"))
+    assert(n_When.is_a?(When), "construction of When")
+    nodes << n_When
+    n_While = While.new(BoolLiteral.new(true), NumberLiteral.new("42"))
+    assert(n_While.is_a?(While), "construction of While")
+    nodes << n_While
+    n_Yield = Yield.new(([Var.new("y")] of ASTNode))
+    assert(n_Yield.is_a?(Yield), "construction of Yield")
+    nodes << n_Yield
+    assert(nodes.size == 104, "constructed all 104 nodes")
+    puts "ok (104 node kinds constructed)"
+  end
+
+  def self.test_node_cloning
+    puts "testing cloning for all 104 concrete AST node kinds..."
+    loc = Location.new("file.iyi", 10, 5)
+    end_loc = Location.new("file.iyi", 10, 25)
+    orig_Alias = Alias.new(Path.new("MyInt"), Path.new("Int32"))
+    orig_Alias.at(loc).at_end(end_loc)
+    orig_Alias.doc = "documentation for Alias"
+    orig_Alias.visibility = Visibility::Private
+    clone_Alias = orig_Alias.clone
+    assert(clone_Alias.is_a?(Alias), "clone type of Alias")
+    assert(clone_Alias.location == loc, "clone location of Alias")
+    assert(clone_Alias.end_location == end_loc, "clone end_location of Alias")
+    assert(clone_Alias.doc == "documentation for Alias", "clone doc of Alias")
+    assert(clone_Alias.visibility == Visibility::Private, "clone visibility of Alias")
+    assert(clone_Alias.node_id != orig_Alias.node_id, "clone creates distinct instance for Alias")
+    orig_AlignOf = AlignOf.new(Path.new("Int64"))
+    orig_AlignOf.at(loc).at_end(end_loc)
+    orig_AlignOf.doc = "documentation for AlignOf"
+    orig_AlignOf.visibility = Visibility::Private
+    clone_AlignOf = orig_AlignOf.clone
+    assert(clone_AlignOf.is_a?(AlignOf), "clone type of AlignOf")
+    assert(clone_AlignOf.location == loc, "clone location of AlignOf")
+    assert(clone_AlignOf.end_location == end_loc, "clone end_location of AlignOf")
+    assert(clone_AlignOf.doc == "documentation for AlignOf", "clone doc of AlignOf")
+    assert(clone_AlignOf.visibility == Visibility::Private, "clone visibility of AlignOf")
+    assert(clone_AlignOf.node_id != orig_AlignOf.node_id, "clone creates distinct instance for AlignOf")
+    orig_And = And.new(BoolLiteral.new(true), BoolLiteral.new(false))
+    orig_And.at(loc).at_end(end_loc)
+    orig_And.doc = "documentation for And"
+    orig_And.visibility = Visibility::Private
+    clone_And = orig_And.clone
+    assert(clone_And.is_a?(And), "clone type of And")
+    assert(clone_And.location == loc, "clone location of And")
+    assert(clone_And.end_location == end_loc, "clone end_location of And")
+    assert(clone_And.doc == "documentation for And", "clone doc of And")
+    assert(clone_And.visibility == Visibility::Private, "clone visibility of And")
+    assert(clone_And.node_id != orig_And.node_id, "clone creates distinct instance for And")
+    orig_Annotation = Annotation.new(Path.new("AlwaysInline"))
+    orig_Annotation.at(loc).at_end(end_loc)
+    orig_Annotation.doc = "documentation for Annotation"
+    orig_Annotation.visibility = Visibility::Private
+    clone_Annotation = orig_Annotation.clone
+    assert(clone_Annotation.is_a?(Annotation), "clone type of Annotation")
+    assert(clone_Annotation.location == loc, "clone location of Annotation")
+    assert(clone_Annotation.end_location == end_loc, "clone end_location of Annotation")
+    assert(clone_Annotation.doc == "documentation for Annotation", "clone doc of Annotation")
+    assert(clone_Annotation.visibility == Visibility::Private, "clone visibility of Annotation")
+    assert(clone_Annotation.node_id != orig_Annotation.node_id, "clone creates distinct instance for Annotation")
+    orig_AnnotationDef = AnnotationDef.new(Path.new("MyAnno"))
+    orig_AnnotationDef.at(loc).at_end(end_loc)
+    orig_AnnotationDef.doc = "documentation for AnnotationDef"
+    orig_AnnotationDef.visibility = Visibility::Private
+    clone_AnnotationDef = orig_AnnotationDef.clone
+    assert(clone_AnnotationDef.is_a?(AnnotationDef), "clone type of AnnotationDef")
+    assert(clone_AnnotationDef.location == loc, "clone location of AnnotationDef")
+    assert(clone_AnnotationDef.end_location == end_loc, "clone end_location of AnnotationDef")
+    assert(clone_AnnotationDef.doc == "documentation for AnnotationDef", "clone doc of AnnotationDef")
+    assert(clone_AnnotationDef.visibility == Visibility::Private, "clone visibility of AnnotationDef")
+    assert(clone_AnnotationDef.node_id != orig_AnnotationDef.node_id, "clone creates distinct instance for AnnotationDef")
+    orig_Arg = Arg.new("x", NumberLiteral.new("0"), Path.new("Int32"))
+    orig_Arg.at(loc).at_end(end_loc)
+    orig_Arg.doc = "documentation for Arg"
+    orig_Arg.visibility = Visibility::Private
+    clone_Arg = orig_Arg.clone
+    assert(clone_Arg.is_a?(Arg), "clone type of Arg")
+    assert(clone_Arg.location == loc, "clone location of Arg")
+    assert(clone_Arg.end_location == end_loc, "clone end_location of Arg")
+    assert(clone_Arg.doc == "documentation for Arg", "clone doc of Arg")
+    assert(clone_Arg.visibility == Visibility::Private, "clone visibility of Arg")
+    assert(clone_Arg.node_id != orig_Arg.node_id, "clone creates distinct instance for Arg")
+    orig_ArrayLiteral = ArrayLiteral.new(([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    orig_ArrayLiteral.at(loc).at_end(end_loc)
+    orig_ArrayLiteral.doc = "documentation for ArrayLiteral"
+    orig_ArrayLiteral.visibility = Visibility::Private
+    clone_ArrayLiteral = orig_ArrayLiteral.clone
+    assert(clone_ArrayLiteral.is_a?(ArrayLiteral), "clone type of ArrayLiteral")
+    assert(clone_ArrayLiteral.location == loc, "clone location of ArrayLiteral")
+    assert(clone_ArrayLiteral.end_location == end_loc, "clone end_location of ArrayLiteral")
+    assert(clone_ArrayLiteral.doc == "documentation for ArrayLiteral", "clone doc of ArrayLiteral")
+    assert(clone_ArrayLiteral.visibility == Visibility::Private, "clone visibility of ArrayLiteral")
+    assert(clone_ArrayLiteral.node_id != orig_ArrayLiteral.node_id, "clone creates distinct instance for ArrayLiteral")
+    orig_Asm = Asm.new("nop", [AsmOperand.new("=r", Var.new("o"))], [AsmOperand.new("r", Var.new("i"))], ["memory"])
+    orig_Asm.at(loc).at_end(end_loc)
+    orig_Asm.doc = "documentation for Asm"
+    orig_Asm.visibility = Visibility::Private
+    clone_Asm = orig_Asm.clone
+    assert(clone_Asm.is_a?(Asm), "clone type of Asm")
+    assert(clone_Asm.location == loc, "clone location of Asm")
+    assert(clone_Asm.end_location == end_loc, "clone end_location of Asm")
+    assert(clone_Asm.doc == "documentation for Asm", "clone doc of Asm")
+    assert(clone_Asm.visibility == Visibility::Private, "clone visibility of Asm")
+    assert(clone_Asm.node_id != orig_Asm.node_id, "clone creates distinct instance for Asm")
+    orig_AsmOperand = AsmOperand.new("=r", Var.new("out_val"))
+    orig_AsmOperand.at(loc).at_end(end_loc)
+    orig_AsmOperand.doc = "documentation for AsmOperand"
+    orig_AsmOperand.visibility = Visibility::Private
+    clone_AsmOperand = orig_AsmOperand.clone
+    assert(clone_AsmOperand.is_a?(AsmOperand), "clone type of AsmOperand")
+    assert(clone_AsmOperand.location == loc, "clone location of AsmOperand")
+    assert(clone_AsmOperand.end_location == end_loc, "clone end_location of AsmOperand")
+    assert(clone_AsmOperand.doc == "documentation for AsmOperand", "clone doc of AsmOperand")
+    assert(clone_AsmOperand.visibility == Visibility::Private, "clone visibility of AsmOperand")
+    assert(clone_AsmOperand.node_id != orig_AsmOperand.node_id, "clone creates distinct instance for AsmOperand")
+    orig_Assign = Assign.new(Var.new("x"), NumberLiteral.new("100"))
+    orig_Assign.at(loc).at_end(end_loc)
+    orig_Assign.doc = "documentation for Assign"
+    orig_Assign.visibility = Visibility::Private
+    clone_Assign = orig_Assign.clone
+    assert(clone_Assign.is_a?(Assign), "clone type of Assign")
+    assert(clone_Assign.location == loc, "clone location of Assign")
+    assert(clone_Assign.end_location == end_loc, "clone end_location of Assign")
+    assert(clone_Assign.doc == "documentation for Assign", "clone doc of Assign")
+    assert(clone_Assign.visibility == Visibility::Private, "clone visibility of Assign")
+    assert(clone_Assign.node_id != orig_Assign.node_id, "clone creates distinct instance for Assign")
+    orig_AssocTypeDecl = AssocTypeDecl.new("Item", Path.new("String"))
+    orig_AssocTypeDecl.at(loc).at_end(end_loc)
+    orig_AssocTypeDecl.doc = "documentation for AssocTypeDecl"
+    orig_AssocTypeDecl.visibility = Visibility::Private
+    clone_AssocTypeDecl = orig_AssocTypeDecl.clone
+    assert(clone_AssocTypeDecl.is_a?(AssocTypeDecl), "clone type of AssocTypeDecl")
+    assert(clone_AssocTypeDecl.location == loc, "clone location of AssocTypeDecl")
+    assert(clone_AssocTypeDecl.end_location == end_loc, "clone end_location of AssocTypeDecl")
+    assert(clone_AssocTypeDecl.doc == "documentation for AssocTypeDecl", "clone doc of AssocTypeDecl")
+    assert(clone_AssocTypeDecl.visibility == Visibility::Private, "clone visibility of AssocTypeDecl")
+    assert(clone_AssocTypeDecl.node_id != orig_AssocTypeDecl.node_id, "clone creates distinct instance for AssocTypeDecl")
+    orig_Block = Block.new([Var.new("item")], NumberLiteral.new("1"))
+    orig_Block.at(loc).at_end(end_loc)
+    orig_Block.doc = "documentation for Block"
+    orig_Block.visibility = Visibility::Private
+    clone_Block = orig_Block.clone
+    assert(clone_Block.is_a?(Block), "clone type of Block")
+    assert(clone_Block.location == loc, "clone location of Block")
+    assert(clone_Block.end_location == end_loc, "clone end_location of Block")
+    assert(clone_Block.doc == "documentation for Block", "clone doc of Block")
+    assert(clone_Block.visibility == Visibility::Private, "clone visibility of Block")
+    assert(clone_Block.node_id != orig_Block.node_id, "clone creates distinct instance for Block")
+    orig_BoolLiteral = BoolLiteral.new(true)
+    orig_BoolLiteral.at(loc).at_end(end_loc)
+    orig_BoolLiteral.doc = "documentation for BoolLiteral"
+    orig_BoolLiteral.visibility = Visibility::Private
+    clone_BoolLiteral = orig_BoolLiteral.clone
+    assert(clone_BoolLiteral.is_a?(BoolLiteral), "clone type of BoolLiteral")
+    assert(clone_BoolLiteral.location == loc, "clone location of BoolLiteral")
+    assert(clone_BoolLiteral.end_location == end_loc, "clone end_location of BoolLiteral")
+    assert(clone_BoolLiteral.doc == "documentation for BoolLiteral", "clone doc of BoolLiteral")
+    assert(clone_BoolLiteral.visibility == Visibility::Private, "clone visibility of BoolLiteral")
+    assert(clone_BoolLiteral.node_id != orig_BoolLiteral.node_id, "clone creates distinct instance for BoolLiteral")
+    orig_Break = Break.new(NumberLiteral.new("0"))
+    orig_Break.at(loc).at_end(end_loc)
+    orig_Break.doc = "documentation for Break"
+    orig_Break.visibility = Visibility::Private
+    clone_Break = orig_Break.clone
+    assert(clone_Break.is_a?(Break), "clone type of Break")
+    assert(clone_Break.location == loc, "clone location of Break")
+    assert(clone_Break.end_location == end_loc, "clone end_location of Break")
+    assert(clone_Break.doc == "documentation for Break", "clone doc of Break")
+    assert(clone_Break.visibility == Visibility::Private, "clone visibility of Break")
+    assert(clone_Break.node_id != orig_Break.node_id, "clone creates distinct instance for Break")
+    orig_CStructOrUnionDef = CStructOrUnionDef.new("Point", NumberLiteral.new("0"), false)
+    orig_CStructOrUnionDef.at(loc).at_end(end_loc)
+    orig_CStructOrUnionDef.doc = "documentation for CStructOrUnionDef"
+    orig_CStructOrUnionDef.visibility = Visibility::Private
+    clone_CStructOrUnionDef = orig_CStructOrUnionDef.clone
+    assert(clone_CStructOrUnionDef.is_a?(CStructOrUnionDef), "clone type of CStructOrUnionDef")
+    assert(clone_CStructOrUnionDef.location == loc, "clone location of CStructOrUnionDef")
+    assert(clone_CStructOrUnionDef.end_location == end_loc, "clone end_location of CStructOrUnionDef")
+    assert(clone_CStructOrUnionDef.doc == "documentation for CStructOrUnionDef", "clone doc of CStructOrUnionDef")
+    assert(clone_CStructOrUnionDef.visibility == Visibility::Private, "clone visibility of CStructOrUnionDef")
+    assert(clone_CStructOrUnionDef.node_id != orig_CStructOrUnionDef.node_id, "clone creates distinct instance for CStructOrUnionDef")
+    orig_Call = Call.new(Var.new("math"), "add", ([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    orig_Call.at(loc).at_end(end_loc)
+    orig_Call.doc = "documentation for Call"
+    orig_Call.visibility = Visibility::Private
+    clone_Call = orig_Call.clone
+    assert(clone_Call.is_a?(Call), "clone type of Call")
+    assert(clone_Call.location == loc, "clone location of Call")
+    assert(clone_Call.end_location == end_loc, "clone end_location of Call")
+    assert(clone_Call.doc == "documentation for Call", "clone doc of Call")
+    assert(clone_Call.visibility == Visibility::Private, "clone visibility of Call")
+    assert(clone_Call.node_id != orig_Call.node_id, "clone creates distinct instance for Call")
+    orig_Case = Case.new(Var.new("x"), [When.new(([NumberLiteral.new("1")] of ASTNode), StringLiteral.new("one"))])
+    orig_Case.at(loc).at_end(end_loc)
+    orig_Case.doc = "documentation for Case"
+    orig_Case.visibility = Visibility::Private
+    clone_Case = orig_Case.clone
+    assert(clone_Case.is_a?(Case), "clone type of Case")
+    assert(clone_Case.location == loc, "clone location of Case")
+    assert(clone_Case.end_location == end_loc, "clone end_location of Case")
+    assert(clone_Case.doc == "documentation for Case", "clone doc of Case")
+    assert(clone_Case.visibility == Visibility::Private, "clone visibility of Case")
+    assert(clone_Case.node_id != orig_Case.node_id, "clone creates distinct instance for Case")
+    orig_Cast = Cast.new(Var.new("x"), Path.new("String"))
+    orig_Cast.at(loc).at_end(end_loc)
+    orig_Cast.doc = "documentation for Cast"
+    orig_Cast.visibility = Visibility::Private
+    clone_Cast = orig_Cast.clone
+    assert(clone_Cast.is_a?(Cast), "clone type of Cast")
+    assert(clone_Cast.location == loc, "clone location of Cast")
+    assert(clone_Cast.end_location == end_loc, "clone end_location of Cast")
+    assert(clone_Cast.doc == "documentation for Cast", "clone doc of Cast")
+    assert(clone_Cast.visibility == Visibility::Private, "clone visibility of Cast")
+    assert(clone_Cast.node_id != orig_Cast.node_id, "clone creates distinct instance for Cast")
+    orig_CharLiteral = CharLiteral.new('z')
+    orig_CharLiteral.at(loc).at_end(end_loc)
+    orig_CharLiteral.doc = "documentation for CharLiteral"
+    orig_CharLiteral.visibility = Visibility::Private
+    clone_CharLiteral = orig_CharLiteral.clone
+    assert(clone_CharLiteral.is_a?(CharLiteral), "clone type of CharLiteral")
+    assert(clone_CharLiteral.location == loc, "clone location of CharLiteral")
+    assert(clone_CharLiteral.end_location == end_loc, "clone end_location of CharLiteral")
+    assert(clone_CharLiteral.doc == "documentation for CharLiteral", "clone doc of CharLiteral")
+    assert(clone_CharLiteral.visibility == Visibility::Private, "clone visibility of CharLiteral")
+    assert(clone_CharLiteral.node_id != orig_CharLiteral.node_id, "clone creates distinct instance for CharLiteral")
+    orig_ClassDef = ClassDef.new(Path.new("MyClass"), NumberLiteral.new("1"), Path.new("Object"))
+    orig_ClassDef.at(loc).at_end(end_loc)
+    orig_ClassDef.doc = "documentation for ClassDef"
+    orig_ClassDef.visibility = Visibility::Private
+    clone_ClassDef = orig_ClassDef.clone
+    assert(clone_ClassDef.is_a?(ClassDef), "clone type of ClassDef")
+    assert(clone_ClassDef.location == loc, "clone location of ClassDef")
+    assert(clone_ClassDef.end_location == end_loc, "clone end_location of ClassDef")
+    assert(clone_ClassDef.doc == "documentation for ClassDef", "clone doc of ClassDef")
+    assert(clone_ClassDef.visibility == Visibility::Private, "clone visibility of ClassDef")
+    assert(clone_ClassDef.node_id != orig_ClassDef.node_id, "clone creates distinct instance for ClassDef")
+    orig_ClassVar = ClassVar.new("@@my_cvar")
+    orig_ClassVar.at(loc).at_end(end_loc)
+    orig_ClassVar.doc = "documentation for ClassVar"
+    orig_ClassVar.visibility = Visibility::Private
+    clone_ClassVar = orig_ClassVar.clone
+    assert(clone_ClassVar.is_a?(ClassVar), "clone type of ClassVar")
+    assert(clone_ClassVar.location == loc, "clone location of ClassVar")
+    assert(clone_ClassVar.end_location == end_loc, "clone end_location of ClassVar")
+    assert(clone_ClassVar.doc == "documentation for ClassVar", "clone doc of ClassVar")
+    assert(clone_ClassVar.visibility == Visibility::Private, "clone visibility of ClassVar")
+    assert(clone_ClassVar.node_id != orig_ClassVar.node_id, "clone creates distinct instance for ClassVar")
+    orig_Def = Def.new("my_func", [Arg.new("a")], NumberLiteral.new("99"))
+    orig_Def.at(loc).at_end(end_loc)
+    orig_Def.doc = "documentation for Def"
+    orig_Def.visibility = Visibility::Private
+    clone_Def = orig_Def.clone
+    assert(clone_Def.is_a?(Def), "clone type of Def")
+    assert(clone_Def.location == loc, "clone location of Def")
+    assert(clone_Def.end_location == end_loc, "clone end_location of Def")
+    assert(clone_Def.doc == "documentation for Def", "clone doc of Def")
+    assert(clone_Def.visibility == Visibility::Private, "clone visibility of Def")
+    assert(clone_Def.node_id != orig_Def.node_id, "clone creates distinct instance for Def")
+    orig_Defer = Defer.new(Call.new(nil, "cleanup"))
+    orig_Defer.at(loc).at_end(end_loc)
+    orig_Defer.doc = "documentation for Defer"
+    orig_Defer.visibility = Visibility::Private
+    clone_Defer = orig_Defer.clone
+    assert(clone_Defer.is_a?(Defer), "clone type of Defer")
+    assert(clone_Defer.location == loc, "clone location of Defer")
+    assert(clone_Defer.end_location == end_loc, "clone end_location of Defer")
+    assert(clone_Defer.doc == "documentation for Defer", "clone doc of Defer")
+    assert(clone_Defer.visibility == Visibility::Private, "clone visibility of Defer")
+    assert(clone_Defer.node_id != orig_Defer.node_id, "clone creates distinct instance for Defer")
+    orig_DoubleSplat = DoubleSplat.new(Var.new("kwargs"))
+    orig_DoubleSplat.at(loc).at_end(end_loc)
+    orig_DoubleSplat.doc = "documentation for DoubleSplat"
+    orig_DoubleSplat.visibility = Visibility::Private
+    clone_DoubleSplat = orig_DoubleSplat.clone
+    assert(clone_DoubleSplat.is_a?(DoubleSplat), "clone type of DoubleSplat")
+    assert(clone_DoubleSplat.location == loc, "clone location of DoubleSplat")
+    assert(clone_DoubleSplat.end_location == end_loc, "clone end_location of DoubleSplat")
+    assert(clone_DoubleSplat.doc == "documentation for DoubleSplat", "clone doc of DoubleSplat")
+    assert(clone_DoubleSplat.visibility == Visibility::Private, "clone visibility of DoubleSplat")
+    assert(clone_DoubleSplat.node_id != orig_DoubleSplat.node_id, "clone creates distinct instance for DoubleSplat")
+    orig_EnumDef = EnumDef.new(Path.new("Color"), ([Var.new("Red"), Var.new("Green")] of ASTNode))
+    orig_EnumDef.at(loc).at_end(end_loc)
+    orig_EnumDef.doc = "documentation for EnumDef"
+    orig_EnumDef.visibility = Visibility::Private
+    clone_EnumDef = orig_EnumDef.clone
+    assert(clone_EnumDef.is_a?(EnumDef), "clone type of EnumDef")
+    assert(clone_EnumDef.location == loc, "clone location of EnumDef")
+    assert(clone_EnumDef.end_location == end_loc, "clone end_location of EnumDef")
+    assert(clone_EnumDef.doc == "documentation for EnumDef", "clone doc of EnumDef")
+    assert(clone_EnumDef.visibility == Visibility::Private, "clone visibility of EnumDef")
+    assert(clone_EnumDef.node_id != orig_EnumDef.node_id, "clone creates distinct instance for EnumDef")
+    orig_ExceptionHandler = ExceptionHandler.new(NumberLiteral.new("1"), [Rescue.new(NumberLiteral.new("2"))])
+    orig_ExceptionHandler.at(loc).at_end(end_loc)
+    orig_ExceptionHandler.doc = "documentation for ExceptionHandler"
+    orig_ExceptionHandler.visibility = Visibility::Private
+    clone_ExceptionHandler = orig_ExceptionHandler.clone
+    assert(clone_ExceptionHandler.is_a?(ExceptionHandler), "clone type of ExceptionHandler")
+    assert(clone_ExceptionHandler.location == loc, "clone location of ExceptionHandler")
+    assert(clone_ExceptionHandler.end_location == end_loc, "clone end_location of ExceptionHandler")
+    assert(clone_ExceptionHandler.doc == "documentation for ExceptionHandler", "clone doc of ExceptionHandler")
+    assert(clone_ExceptionHandler.visibility == Visibility::Private, "clone visibility of ExceptionHandler")
+    assert(clone_ExceptionHandler.node_id != orig_ExceptionHandler.node_id, "clone creates distinct instance for ExceptionHandler")
+    orig_Expressions = Expressions.new(([Var.new("a"), Var.new("b")] of ASTNode), Expressions::Keyword::None)
+    orig_Expressions.at(loc).at_end(end_loc)
+    orig_Expressions.doc = "documentation for Expressions"
+    orig_Expressions.visibility = Visibility::Private
+    clone_Expressions = orig_Expressions.clone
+    assert(clone_Expressions.is_a?(Expressions), "clone type of Expressions")
+    assert(clone_Expressions.location == loc, "clone location of Expressions")
+    assert(clone_Expressions.end_location == end_loc, "clone end_location of Expressions")
+    assert(clone_Expressions.doc == "documentation for Expressions", "clone doc of Expressions")
+    assert(clone_Expressions.visibility == Visibility::Private, "clone visibility of Expressions")
+    assert(clone_Expressions.node_id != orig_Expressions.node_id, "clone creates distinct instance for Expressions")
+    empty_sequence = Expressions.new
+    assert(empty_sequence.location.nil? && empty_sequence.end_location.nil?, "empty sequence has no source span")
+    first_expression = Var.new("first").at(loc).at_end(loc)
+    last_expression = Var.new("last").at(end_loc).at_end(end_loc)
+    inferred_sequence = Expressions.new([first_expression, last_expression] of ASTNode)
+    assert(inferred_sequence.location == loc, "sequence starts at its first expression")
+    assert(inferred_sequence.end_location == end_loc, "sequence ends at its last expression")
+    nested_sequence = Expressions.new([inferred_sequence] of ASTNode)
+    assert(nested_sequence.location == loc && nested_sequence.end_location == end_loc, "nested sequence inherits boundary spans")
+    first_expression.at(end_loc)
+    last_expression.at_end(loc)
+    assert(inferred_sequence.location == end_loc && inferred_sequence.end_location == loc, "sequence reads current child locations")
+    inferred_sequence.at(loc).at_end(end_loc)
+    assert(inferred_sequence.location == loc && inferred_sequence.end_location == end_loc, "explicit sequence span overrides child spans")
+    unlocated_edges = Expressions.new([Var.new("unknown"), last_expression] of ASTNode)
+    assert(unlocated_edges.location.nil?, "sequence does not skip an unlocated first expression")
+    unlocated_edges = Expressions.new([first_expression, Var.new("unknown")] of ASTNode)
+    assert(unlocated_edges.end_location.nil?, "sequence does not skip an unlocated last expression")
+    scalar_indexer = Primitive.tuple_indexer(0, 0, false)
+    singleton_indexer = Primitive.tuple_indexer(0, 0, true)
+    empty_indexer = Primitive.tuple_indexer(0, -1, true)
+    assert(!(scalar_indexer == singleton_indexer), "scalar and singleton tuple indices have distinct identity")
+    assert(!(singleton_indexer == empty_indexer), "singleton and empty tuple ranges have distinct identity")
+    assert(scalar_indexer.hash != singleton_indexer.hash, "tuple index form participates in hashing")
+    cloned_indexer = singleton_indexer.clone.as(Primitive)
+    assert(cloned_indexer == singleton_indexer, "cloning preserves tuple range identity")
+    assert(cloned_indexer.tuple_range, "cloning preserves the tuple range discriminator")
+    assert(empty_indexer.clone == empty_indexer, "cloning preserves an empty tuple range")
+    orig_Extend = Extend.new(Path.new("ClassMethods"))
+    orig_Extend.at(loc).at_end(end_loc)
+    orig_Extend.doc = "documentation for Extend"
+    orig_Extend.visibility = Visibility::Private
+    clone_Extend = orig_Extend.clone
+    assert(clone_Extend.is_a?(Extend), "clone type of Extend")
+    assert(clone_Extend.location == loc, "clone location of Extend")
+    assert(clone_Extend.end_location == end_loc, "clone end_location of Extend")
+    assert(clone_Extend.doc == "documentation for Extend", "clone doc of Extend")
+    assert(clone_Extend.visibility == Visibility::Private, "clone visibility of Extend")
+    assert(clone_Extend.node_id != orig_Extend.node_id, "clone creates distinct instance for Extend")
+    orig_ExternalVar = ExternalVar.new("errno", Path.new("Int32"))
+    orig_ExternalVar.at(loc).at_end(end_loc)
+    orig_ExternalVar.doc = "documentation for ExternalVar"
+    orig_ExternalVar.visibility = Visibility::Private
+    clone_ExternalVar = orig_ExternalVar.clone
+    assert(clone_ExternalVar.is_a?(ExternalVar), "clone type of ExternalVar")
+    assert(clone_ExternalVar.location == loc, "clone location of ExternalVar")
+    assert(clone_ExternalVar.end_location == end_loc, "clone end_location of ExternalVar")
+    assert(clone_ExternalVar.doc == "documentation for ExternalVar", "clone doc of ExternalVar")
+    assert(clone_ExternalVar.visibility == Visibility::Private, "clone visibility of ExternalVar")
+    assert(clone_ExternalVar.node_id != orig_ExternalVar.node_id, "clone creates distinct instance for ExternalVar")
+    orig_FunDef = FunDef.new("puts", [Arg.new("s", nil, Path.new("String"))], Path.new("Int32"))
+    orig_FunDef.at(loc).at_end(end_loc)
+    orig_FunDef.doc = "documentation for FunDef"
+    orig_FunDef.visibility = Visibility::Private
+    clone_FunDef = orig_FunDef.clone
+    assert(clone_FunDef.is_a?(FunDef), "clone type of FunDef")
+    assert(clone_FunDef.location == loc, "clone location of FunDef")
+    assert(clone_FunDef.end_location == end_loc, "clone end_location of FunDef")
+    assert(clone_FunDef.doc == "documentation for FunDef", "clone doc of FunDef")
+    assert(clone_FunDef.visibility == Visibility::Private, "clone visibility of FunDef")
+    assert(clone_FunDef.node_id != orig_FunDef.node_id, "clone creates distinct instance for FunDef")
+    orig_Generic = Generic.new(Path.new("Array"), ([Path.new("Int32")] of ASTNode))
+    orig_Generic.at(loc).at_end(end_loc)
+    orig_Generic.doc = "documentation for Generic"
+    orig_Generic.visibility = Visibility::Private
+    clone_Generic = orig_Generic.clone
+    assert(clone_Generic.is_a?(Generic), "clone type of Generic")
+    assert(clone_Generic.location == loc, "clone location of Generic")
+    assert(clone_Generic.end_location == end_loc, "clone end_location of Generic")
+    assert(clone_Generic.doc == "documentation for Generic", "clone doc of Generic")
+    assert(clone_Generic.visibility == Visibility::Private, "clone visibility of Generic")
+    assert(clone_Generic.node_id != orig_Generic.node_id, "clone creates distinct instance for Generic")
+    orig_Global = Global.new("$my_global")
+    orig_Global.at(loc).at_end(end_loc)
+    orig_Global.doc = "documentation for Global"
+    orig_Global.visibility = Visibility::Private
+    clone_Global = orig_Global.clone
+    assert(clone_Global.is_a?(Global), "clone type of Global")
+    assert(clone_Global.location == loc, "clone location of Global")
+    assert(clone_Global.end_location == end_loc, "clone end_location of Global")
+    assert(clone_Global.doc == "documentation for Global", "clone doc of Global")
+    assert(clone_Global.visibility == Visibility::Private, "clone visibility of Global")
+    assert(clone_Global.node_id != orig_Global.node_id, "clone creates distinct instance for Global")
+    orig_HashLiteral = HashLiteral.new([HashLiteral::Entry.new(StringLiteral.new("k"), NumberLiteral.new("1"))])
+    orig_HashLiteral.at(loc).at_end(end_loc)
+    orig_HashLiteral.doc = "documentation for HashLiteral"
+    orig_HashLiteral.visibility = Visibility::Private
+    clone_HashLiteral = orig_HashLiteral.clone
+    assert(clone_HashLiteral.is_a?(HashLiteral), "clone type of HashLiteral")
+    assert(clone_HashLiteral.location == loc, "clone location of HashLiteral")
+    assert(clone_HashLiteral.end_location == end_loc, "clone end_location of HashLiteral")
+    assert(clone_HashLiteral.doc == "documentation for HashLiteral", "clone doc of HashLiteral")
+    assert(clone_HashLiteral.visibility == Visibility::Private, "clone visibility of HashLiteral")
+    assert(clone_HashLiteral.node_id != orig_HashLiteral.node_id, "clone creates distinct instance for HashLiteral")
+    orig_If = If.new(BoolLiteral.new(true), NumberLiteral.new("1"), NumberLiteral.new("2"))
+    orig_If.at(loc).at_end(end_loc)
+    orig_If.doc = "documentation for If"
+    orig_If.visibility = Visibility::Private
+    clone_If = orig_If.clone
+    assert(clone_If.is_a?(If), "clone type of If")
+    assert(clone_If.location == loc, "clone location of If")
+    assert(clone_If.end_location == end_loc, "clone end_location of If")
+    assert(clone_If.doc == "documentation for If", "clone doc of If")
+    assert(clone_If.visibility == Visibility::Private, "clone visibility of If")
+    assert(clone_If.node_id != orig_If.node_id, "clone creates distinct instance for If")
+    orig_ImplDef = ImplDef.new(Path.new("MyTrait"), Path.new("MyClass"), NumberLiteral.new("1"))
+    orig_ImplDef.at(loc).at_end(end_loc)
+    orig_ImplDef.doc = "documentation for ImplDef"
+    orig_ImplDef.visibility = Visibility::Private
+    clone_ImplDef = orig_ImplDef.clone
+    assert(clone_ImplDef.is_a?(ImplDef), "clone type of ImplDef")
+    assert(clone_ImplDef.location == loc, "clone location of ImplDef")
+    assert(clone_ImplDef.end_location == end_loc, "clone end_location of ImplDef")
+    assert(clone_ImplDef.doc == "documentation for ImplDef", "clone doc of ImplDef")
+    assert(clone_ImplDef.visibility == Visibility::Private, "clone visibility of ImplDef")
+    assert(clone_ImplDef.node_id != orig_ImplDef.node_id, "clone creates distinct instance for ImplDef")
+    orig_ImplicitObj = ImplicitObj.new
+    orig_ImplicitObj.at(loc).at_end(end_loc)
+    orig_ImplicitObj.doc = "documentation for ImplicitObj"
+    orig_ImplicitObj.visibility = Visibility::Private
+    clone_ImplicitObj = orig_ImplicitObj.clone
+    assert(clone_ImplicitObj.is_a?(ImplicitObj), "clone type of ImplicitObj")
+    assert(clone_ImplicitObj.location == loc, "clone location of ImplicitObj")
+    assert(clone_ImplicitObj.end_location == end_loc, "clone end_location of ImplicitObj")
+    assert(clone_ImplicitObj.doc == "documentation for ImplicitObj", "clone doc of ImplicitObj")
+    assert(clone_ImplicitObj.visibility == Visibility::Private, "clone visibility of ImplicitObj")
+    assert(clone_ImplicitObj.node_id != orig_ImplicitObj.node_id, "clone creates distinct instance for ImplicitObj")
+    orig_ImportDecl = ImportDecl.new(["compiler", "foundation", "location"], true)
+    orig_ImportDecl.at(loc).at_end(end_loc)
+    orig_ImportDecl.doc = "documentation for ImportDecl"
+    orig_ImportDecl.visibility = Visibility::Private
+    clone_ImportDecl = orig_ImportDecl.clone
+    assert(clone_ImportDecl.is_a?(ImportDecl), "clone type of ImportDecl")
+    assert(clone_ImportDecl.location == loc, "clone location of ImportDecl")
+    assert(clone_ImportDecl.end_location == end_loc, "clone end_location of ImportDecl")
+    assert(clone_ImportDecl.doc == "documentation for ImportDecl", "clone doc of ImportDecl")
+    assert(clone_ImportDecl.visibility == Visibility::Private, "clone visibility of ImportDecl")
+    assert(clone_ImportDecl.node_id != orig_ImportDecl.node_id, "clone creates distinct instance for ImportDecl")
+    orig_Include = Include.new(Path.new("Enumerable"))
+    orig_Include.at(loc).at_end(end_loc)
+    orig_Include.doc = "documentation for Include"
+    orig_Include.visibility = Visibility::Private
+    clone_Include = orig_Include.clone
+    assert(clone_Include.is_a?(Include), "clone type of Include")
+    assert(clone_Include.location == loc, "clone location of Include")
+    assert(clone_Include.end_location == end_loc, "clone end_location of Include")
+    assert(clone_Include.doc == "documentation for Include", "clone doc of Include")
+    assert(clone_Include.visibility == Visibility::Private, "clone visibility of Include")
+    assert(clone_Include.node_id != orig_Include.node_id, "clone creates distinct instance for Include")
+    orig_InstanceAlignOf = InstanceAlignOf.new(Path.new("Bar"))
+    orig_InstanceAlignOf.at(loc).at_end(end_loc)
+    orig_InstanceAlignOf.doc = "documentation for InstanceAlignOf"
+    orig_InstanceAlignOf.visibility = Visibility::Private
+    clone_InstanceAlignOf = orig_InstanceAlignOf.clone
+    assert(clone_InstanceAlignOf.is_a?(InstanceAlignOf), "clone type of InstanceAlignOf")
+    assert(clone_InstanceAlignOf.location == loc, "clone location of InstanceAlignOf")
+    assert(clone_InstanceAlignOf.end_location == end_loc, "clone end_location of InstanceAlignOf")
+    assert(clone_InstanceAlignOf.doc == "documentation for InstanceAlignOf", "clone doc of InstanceAlignOf")
+    assert(clone_InstanceAlignOf.visibility == Visibility::Private, "clone visibility of InstanceAlignOf")
+    assert(clone_InstanceAlignOf.node_id != orig_InstanceAlignOf.node_id, "clone creates distinct instance for InstanceAlignOf")
+    orig_InstanceSizeOf = InstanceSizeOf.new(Path.new("Foo"))
+    orig_InstanceSizeOf.at(loc).at_end(end_loc)
+    orig_InstanceSizeOf.doc = "documentation for InstanceSizeOf"
+    orig_InstanceSizeOf.visibility = Visibility::Private
+    clone_InstanceSizeOf = orig_InstanceSizeOf.clone
+    assert(clone_InstanceSizeOf.is_a?(InstanceSizeOf), "clone type of InstanceSizeOf")
+    assert(clone_InstanceSizeOf.location == loc, "clone location of InstanceSizeOf")
+    assert(clone_InstanceSizeOf.end_location == end_loc, "clone end_location of InstanceSizeOf")
+    assert(clone_InstanceSizeOf.doc == "documentation for InstanceSizeOf", "clone doc of InstanceSizeOf")
+    assert(clone_InstanceSizeOf.visibility == Visibility::Private, "clone visibility of InstanceSizeOf")
+    assert(clone_InstanceSizeOf.node_id != orig_InstanceSizeOf.node_id, "clone creates distinct instance for InstanceSizeOf")
+    orig_InstanceVar = InstanceVar.new("@my_ivar")
+    orig_InstanceVar.at(loc).at_end(end_loc)
+    orig_InstanceVar.doc = "documentation for InstanceVar"
+    orig_InstanceVar.visibility = Visibility::Private
+    clone_InstanceVar = orig_InstanceVar.clone
+    assert(clone_InstanceVar.is_a?(InstanceVar), "clone type of InstanceVar")
+    assert(clone_InstanceVar.location == loc, "clone location of InstanceVar")
+    assert(clone_InstanceVar.end_location == end_loc, "clone end_location of InstanceVar")
+    assert(clone_InstanceVar.doc == "documentation for InstanceVar", "clone doc of InstanceVar")
+    assert(clone_InstanceVar.visibility == Visibility::Private, "clone visibility of InstanceVar")
+    assert(clone_InstanceVar.node_id != orig_InstanceVar.node_id, "clone creates distinct instance for InstanceVar")
+    orig_IsA = IsA.new(Var.new("x"), Path.new("Int32"))
+    orig_IsA.at(loc).at_end(end_loc)
+    orig_IsA.doc = "documentation for IsA"
+    orig_IsA.visibility = Visibility::Private
+    clone_IsA = orig_IsA.clone
+    assert(clone_IsA.is_a?(IsA), "clone type of IsA")
+    assert(clone_IsA.location == loc, "clone location of IsA")
+    assert(clone_IsA.end_location == end_loc, "clone end_location of IsA")
+    assert(clone_IsA.doc == "documentation for IsA", "clone doc of IsA")
+    assert(clone_IsA.visibility == Visibility::Private, "clone visibility of IsA")
+    assert(clone_IsA.node_id != orig_IsA.node_id, "clone creates distinct instance for IsA")
+    orig_LibDef = LibDef.new(Path.new("LibC"), NumberLiteral.new("0"))
+    orig_LibDef.at(loc).at_end(end_loc)
+    orig_LibDef.doc = "documentation for LibDef"
+    orig_LibDef.visibility = Visibility::Private
+    clone_LibDef = orig_LibDef.clone
+    assert(clone_LibDef.is_a?(LibDef), "clone type of LibDef")
+    assert(clone_LibDef.location == loc, "clone location of LibDef")
+    assert(clone_LibDef.end_location == end_loc, "clone end_location of LibDef")
+    assert(clone_LibDef.doc == "documentation for LibDef", "clone doc of LibDef")
+    assert(clone_LibDef.visibility == Visibility::Private, "clone visibility of LibDef")
+    assert(clone_LibDef.node_id != orig_LibDef.node_id, "clone creates distinct instance for LibDef")
+    orig_Macro = Macro.new("my_macro", [Arg.new("x")], StringLiteral.new("code"))
+    orig_Macro.at(loc).at_end(end_loc)
+    orig_Macro.doc = "documentation for Macro"
+    orig_Macro.visibility = Visibility::Private
+    clone_Macro = orig_Macro.clone
+    assert(clone_Macro.is_a?(Macro), "clone type of Macro")
+    assert(clone_Macro.location == loc, "clone location of Macro")
+    assert(clone_Macro.end_location == end_loc, "clone end_location of Macro")
+    assert(clone_Macro.doc == "documentation for Macro", "clone doc of Macro")
+    assert(clone_Macro.visibility == Visibility::Private, "clone visibility of Macro")
+    assert(clone_Macro.node_id != orig_Macro.node_id, "clone creates distinct instance for Macro")
+    orig_MacroExpression = MacroExpression.new(Var.new("x"), true)
+    orig_MacroExpression.at(loc).at_end(end_loc)
+    orig_MacroExpression.doc = "documentation for MacroExpression"
+    orig_MacroExpression.visibility = Visibility::Private
+    clone_MacroExpression = orig_MacroExpression.clone
+    assert(clone_MacroExpression.is_a?(MacroExpression), "clone type of MacroExpression")
+    assert(clone_MacroExpression.location == loc, "clone location of MacroExpression")
+    assert(clone_MacroExpression.end_location == end_loc, "clone end_location of MacroExpression")
+    assert(clone_MacroExpression.doc == "documentation for MacroExpression", "clone doc of MacroExpression")
+    assert(clone_MacroExpression.visibility == Visibility::Private, "clone visibility of MacroExpression")
+    assert(clone_MacroExpression.node_id != orig_MacroExpression.node_id, "clone creates distinct instance for MacroExpression")
+    orig_MacroFor = MacroFor.new([Var.new("i")], ArrayLiteral.new(([NumberLiteral.new("1")] of ASTNode)), Var.new("i"))
+    orig_MacroFor.at(loc).at_end(end_loc)
+    orig_MacroFor.doc = "documentation for MacroFor"
+    orig_MacroFor.visibility = Visibility::Private
+    clone_MacroFor = orig_MacroFor.clone
+    assert(clone_MacroFor.is_a?(MacroFor), "clone type of MacroFor")
+    assert(clone_MacroFor.location == loc, "clone location of MacroFor")
+    assert(clone_MacroFor.end_location == end_loc, "clone end_location of MacroFor")
+    assert(clone_MacroFor.doc == "documentation for MacroFor", "clone doc of MacroFor")
+    assert(clone_MacroFor.visibility == Visibility::Private, "clone visibility of MacroFor")
+    assert(clone_MacroFor.node_id != orig_MacroFor.node_id, "clone creates distinct instance for MacroFor")
+    orig_MacroIf = MacroIf.new(Var.new("flag"), NumberLiteral.new("1"), NumberLiteral.new("2"))
+    orig_MacroIf.at(loc).at_end(end_loc)
+    orig_MacroIf.doc = "documentation for MacroIf"
+    orig_MacroIf.visibility = Visibility::Private
+    clone_MacroIf = orig_MacroIf.clone
+    assert(clone_MacroIf.is_a?(MacroIf), "clone type of MacroIf")
+    assert(clone_MacroIf.location == loc, "clone location of MacroIf")
+    assert(clone_MacroIf.end_location == end_loc, "clone end_location of MacroIf")
+    assert(clone_MacroIf.doc == "documentation for MacroIf", "clone doc of MacroIf")
+    assert(clone_MacroIf.visibility == Visibility::Private, "clone visibility of MacroIf")
+    assert(clone_MacroIf.node_id != orig_MacroIf.node_id, "clone creates distinct instance for MacroIf")
+    orig_MacroLiteral = MacroLiteral.new("hello macro")
+    orig_MacroLiteral.at(loc).at_end(end_loc)
+    orig_MacroLiteral.doc = "documentation for MacroLiteral"
+    orig_MacroLiteral.visibility = Visibility::Private
+    clone_MacroLiteral = orig_MacroLiteral.clone
+    assert(clone_MacroLiteral.is_a?(MacroLiteral), "clone type of MacroLiteral")
+    assert(clone_MacroLiteral.location == loc, "clone location of MacroLiteral")
+    assert(clone_MacroLiteral.end_location == end_loc, "clone end_location of MacroLiteral")
+    assert(clone_MacroLiteral.doc == "documentation for MacroLiteral", "clone doc of MacroLiteral")
+    assert(clone_MacroLiteral.visibility == Visibility::Private, "clone visibility of MacroLiteral")
+    assert(clone_MacroLiteral.node_id != orig_MacroLiteral.node_id, "clone creates distinct instance for MacroLiteral")
+    orig_MacroVar = MacroVar.new("temp_var")
+    orig_MacroVar.at(loc).at_end(end_loc)
+    orig_MacroVar.doc = "documentation for MacroVar"
+    orig_MacroVar.visibility = Visibility::Private
+    clone_MacroVar = orig_MacroVar.clone
+    assert(clone_MacroVar.is_a?(MacroVar), "clone type of MacroVar")
+    assert(clone_MacroVar.location == loc, "clone location of MacroVar")
+    assert(clone_MacroVar.end_location == end_loc, "clone end_location of MacroVar")
+    assert(clone_MacroVar.doc == "documentation for MacroVar", "clone doc of MacroVar")
+    assert(clone_MacroVar.visibility == Visibility::Private, "clone visibility of MacroVar")
+    assert(clone_MacroVar.node_id != orig_MacroVar.node_id, "clone creates distinct instance for MacroVar")
+    orig_MacroVerbatim = MacroVerbatim.new(StringLiteral.new("verbatim code"))
+    orig_MacroVerbatim.at(loc).at_end(end_loc)
+    orig_MacroVerbatim.doc = "documentation for MacroVerbatim"
+    orig_MacroVerbatim.visibility = Visibility::Private
+    clone_MacroVerbatim = orig_MacroVerbatim.clone
+    assert(clone_MacroVerbatim.is_a?(MacroVerbatim), "clone type of MacroVerbatim")
+    assert(clone_MacroVerbatim.location == loc, "clone location of MacroVerbatim")
+    assert(clone_MacroVerbatim.end_location == end_loc, "clone end_location of MacroVerbatim")
+    assert(clone_MacroVerbatim.doc == "documentation for MacroVerbatim", "clone doc of MacroVerbatim")
+    assert(clone_MacroVerbatim.visibility == Visibility::Private, "clone visibility of MacroVerbatim")
+    assert(clone_MacroVerbatim.node_id != orig_MacroVerbatim.node_id, "clone creates distinct instance for MacroVerbatim")
+    orig_MagicConstant = MagicConstant.new(TokenKind::MAGIC_LINE)
+    orig_MagicConstant.at(loc).at_end(end_loc)
+    orig_MagicConstant.doc = "documentation for MagicConstant"
+    orig_MagicConstant.visibility = Visibility::Private
+    clone_MagicConstant = orig_MagicConstant.clone
+    assert(clone_MagicConstant.is_a?(MagicConstant), "clone type of MagicConstant")
+    assert(clone_MagicConstant.location == loc, "clone location of MagicConstant")
+    assert(clone_MagicConstant.end_location == end_loc, "clone end_location of MagicConstant")
+    assert(clone_MagicConstant.doc == "documentation for MagicConstant", "clone doc of MagicConstant")
+    assert(clone_MagicConstant.visibility == Visibility::Private, "clone visibility of MagicConstant")
+    assert(clone_MagicConstant.node_id != orig_MagicConstant.node_id, "clone creates distinct instance for MagicConstant")
+    orig_Metaclass = Metaclass.new(Path.new("String"))
+    orig_Metaclass.at(loc).at_end(end_loc)
+    orig_Metaclass.doc = "documentation for Metaclass"
+    orig_Metaclass.visibility = Visibility::Private
+    clone_Metaclass = orig_Metaclass.clone
+    assert(clone_Metaclass.is_a?(Metaclass), "clone type of Metaclass")
+    assert(clone_Metaclass.location == loc, "clone location of Metaclass")
+    assert(clone_Metaclass.end_location == end_loc, "clone end_location of Metaclass")
+    assert(clone_Metaclass.doc == "documentation for Metaclass", "clone doc of Metaclass")
+    assert(clone_Metaclass.visibility == Visibility::Private, "clone visibility of Metaclass")
+    assert(clone_Metaclass.node_id != orig_Metaclass.node_id, "clone creates distinct instance for Metaclass")
+    orig_ModuleDef = ModuleDef.new(Path.new("MyMod"), NumberLiteral.new("1"))
+    orig_ModuleDef.at(loc).at_end(end_loc)
+    orig_ModuleDef.doc = "documentation for ModuleDef"
+    orig_ModuleDef.visibility = Visibility::Private
+    clone_ModuleDef = orig_ModuleDef.clone
+    assert(clone_ModuleDef.is_a?(ModuleDef), "clone type of ModuleDef")
+    assert(clone_ModuleDef.location == loc, "clone location of ModuleDef")
+    assert(clone_ModuleDef.end_location == end_loc, "clone end_location of ModuleDef")
+    assert(clone_ModuleDef.doc == "documentation for ModuleDef", "clone doc of ModuleDef")
+    assert(clone_ModuleDef.visibility == Visibility::Private, "clone visibility of ModuleDef")
+    assert(clone_ModuleDef.node_id != orig_ModuleDef.node_id, "clone creates distinct instance for ModuleDef")
+    orig_ModuleHeader = ModuleHeader.new(["compiler", "syntax", "ast"])
+    orig_ModuleHeader.at(loc).at_end(end_loc)
+    orig_ModuleHeader.doc = "documentation for ModuleHeader"
+    orig_ModuleHeader.visibility = Visibility::Private
+    clone_ModuleHeader = orig_ModuleHeader.clone
+    assert(clone_ModuleHeader.is_a?(ModuleHeader), "clone type of ModuleHeader")
+    assert(clone_ModuleHeader.location == loc, "clone location of ModuleHeader")
+    assert(clone_ModuleHeader.end_location == end_loc, "clone end_location of ModuleHeader")
+    assert(clone_ModuleHeader.doc == "documentation for ModuleHeader", "clone doc of ModuleHeader")
+    assert(clone_ModuleHeader.visibility == Visibility::Private, "clone visibility of ModuleHeader")
+    assert(clone_ModuleHeader.node_id != orig_ModuleHeader.node_id, "clone creates distinct instance for ModuleHeader")
+    orig_MultiAssign = MultiAssign.new(([Var.new("a"), Var.new("b")] of ASTNode), ([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    orig_MultiAssign.at(loc).at_end(end_loc)
+    orig_MultiAssign.doc = "documentation for MultiAssign"
+    orig_MultiAssign.visibility = Visibility::Private
+    clone_MultiAssign = orig_MultiAssign.clone
+    assert(clone_MultiAssign.is_a?(MultiAssign), "clone type of MultiAssign")
+    assert(clone_MultiAssign.location == loc, "clone location of MultiAssign")
+    assert(clone_MultiAssign.end_location == end_loc, "clone end_location of MultiAssign")
+    assert(clone_MultiAssign.doc == "documentation for MultiAssign", "clone doc of MultiAssign")
+    assert(clone_MultiAssign.visibility == Visibility::Private, "clone visibility of MultiAssign")
+    assert(clone_MultiAssign.node_id != orig_MultiAssign.node_id, "clone creates distinct instance for MultiAssign")
+    orig_NamedArgument = NamedArgument.new("limit", NumberLiteral.new("10"))
+    orig_NamedArgument.at(loc).at_end(end_loc)
+    orig_NamedArgument.doc = "documentation for NamedArgument"
+    orig_NamedArgument.visibility = Visibility::Private
+    clone_NamedArgument = orig_NamedArgument.clone
+    assert(clone_NamedArgument.is_a?(NamedArgument), "clone type of NamedArgument")
+    assert(clone_NamedArgument.location == loc, "clone location of NamedArgument")
+    assert(clone_NamedArgument.end_location == end_loc, "clone end_location of NamedArgument")
+    assert(clone_NamedArgument.doc == "documentation for NamedArgument", "clone doc of NamedArgument")
+    assert(clone_NamedArgument.visibility == Visibility::Private, "clone visibility of NamedArgument")
+    assert(clone_NamedArgument.node_id != orig_NamedArgument.node_id, "clone creates distinct instance for NamedArgument")
+    orig_NamedTupleLiteral = NamedTupleLiteral.new([NamedTupleLiteral::Entry.new("key", NumberLiteral.new("10"))])
+    orig_NamedTupleLiteral.at(loc).at_end(end_loc)
+    orig_NamedTupleLiteral.doc = "documentation for NamedTupleLiteral"
+    orig_NamedTupleLiteral.visibility = Visibility::Private
+    clone_NamedTupleLiteral = orig_NamedTupleLiteral.clone
+    assert(clone_NamedTupleLiteral.is_a?(NamedTupleLiteral), "clone type of NamedTupleLiteral")
+    assert(clone_NamedTupleLiteral.location == loc, "clone location of NamedTupleLiteral")
+    assert(clone_NamedTupleLiteral.end_location == end_loc, "clone end_location of NamedTupleLiteral")
+    assert(clone_NamedTupleLiteral.doc == "documentation for NamedTupleLiteral", "clone doc of NamedTupleLiteral")
+    assert(clone_NamedTupleLiteral.visibility == Visibility::Private, "clone visibility of NamedTupleLiteral")
+    assert(clone_NamedTupleLiteral.node_id != orig_NamedTupleLiteral.node_id, "clone creates distinct instance for NamedTupleLiteral")
+    orig_Next = Next.new(nil)
+    orig_Next.at(loc).at_end(end_loc)
+    orig_Next.doc = "documentation for Next"
+    orig_Next.visibility = Visibility::Private
+    clone_Next = orig_Next.clone
+    assert(clone_Next.is_a?(Next), "clone type of Next")
+    assert(clone_Next.location == loc, "clone location of Next")
+    assert(clone_Next.end_location == end_loc, "clone end_location of Next")
+    assert(clone_Next.doc == "documentation for Next", "clone doc of Next")
+    assert(clone_Next.visibility == Visibility::Private, "clone visibility of Next")
+    assert(clone_Next.node_id != orig_Next.node_id, "clone creates distinct instance for Next")
+    orig_NilLiteral = NilLiteral.new
+    orig_NilLiteral.at(loc).at_end(end_loc)
+    orig_NilLiteral.doc = "documentation for NilLiteral"
+    orig_NilLiteral.visibility = Visibility::Private
+    clone_NilLiteral = orig_NilLiteral.clone
+    assert(clone_NilLiteral.is_a?(NilLiteral), "clone type of NilLiteral")
+    assert(clone_NilLiteral.location == loc, "clone location of NilLiteral")
+    assert(clone_NilLiteral.end_location == end_loc, "clone end_location of NilLiteral")
+    assert(clone_NilLiteral.doc == "documentation for NilLiteral", "clone doc of NilLiteral")
+    assert(clone_NilLiteral.visibility == Visibility::Private, "clone visibility of NilLiteral")
+    assert(clone_NilLiteral.node_id != orig_NilLiteral.node_id, "clone creates distinct instance for NilLiteral")
+    orig_NilableCast = NilableCast.new(Var.new("x"), Path.new("String"))
+    orig_NilableCast.at(loc).at_end(end_loc)
+    orig_NilableCast.doc = "documentation for NilableCast"
+    orig_NilableCast.visibility = Visibility::Private
+    clone_NilableCast = orig_NilableCast.clone
+    assert(clone_NilableCast.is_a?(NilableCast), "clone type of NilableCast")
+    assert(clone_NilableCast.location == loc, "clone location of NilableCast")
+    assert(clone_NilableCast.end_location == end_loc, "clone end_location of NilableCast")
+    assert(clone_NilableCast.doc == "documentation for NilableCast", "clone doc of NilableCast")
+    assert(clone_NilableCast.visibility == Visibility::Private, "clone visibility of NilableCast")
+    assert(clone_NilableCast.node_id != orig_NilableCast.node_id, "clone creates distinct instance for NilableCast")
+    orig_Nop = Nop.new
+    orig_Nop.at(loc).at_end(end_loc)
+    orig_Nop.doc = "documentation for Nop"
+    orig_Nop.visibility = Visibility::Private
+    clone_Nop = orig_Nop.clone
+    assert(clone_Nop.is_a?(Nop), "clone type of Nop")
+    assert(clone_Nop.location == loc, "clone location of Nop")
+    assert(clone_Nop.end_location == end_loc, "clone end_location of Nop")
+    assert(clone_Nop.doc == "documentation for Nop", "clone doc of Nop")
+    assert(clone_Nop.visibility == Visibility::Private, "clone visibility of Nop")
+    assert(clone_Nop.node_id != orig_Nop.node_id, "clone creates distinct instance for Nop")
+    orig_Not = Not.new(BoolLiteral.new(true))
+    orig_Not.at(loc).at_end(end_loc)
+    orig_Not.doc = "documentation for Not"
+    orig_Not.visibility = Visibility::Private
+    clone_Not = orig_Not.clone
+    assert(clone_Not.is_a?(Not), "clone type of Not")
+    assert(clone_Not.location == loc, "clone location of Not")
+    assert(clone_Not.end_location == end_loc, "clone end_location of Not")
+    assert(clone_Not.doc == "documentation for Not", "clone doc of Not")
+    assert(clone_Not.visibility == Visibility::Private, "clone visibility of Not")
+    assert(clone_Not.node_id != orig_Not.node_id, "clone creates distinct instance for Not")
+    orig_NumberLiteral = NumberLiteral.new("42", NumberKind::I32)
+    orig_NumberLiteral.at(loc).at_end(end_loc)
+    orig_NumberLiteral.doc = "documentation for NumberLiteral"
+    orig_NumberLiteral.visibility = Visibility::Private
+    clone_NumberLiteral = orig_NumberLiteral.clone
+    assert(clone_NumberLiteral.is_a?(NumberLiteral), "clone type of NumberLiteral")
+    assert(clone_NumberLiteral.location == loc, "clone location of NumberLiteral")
+    assert(clone_NumberLiteral.end_location == end_loc, "clone end_location of NumberLiteral")
+    assert(clone_NumberLiteral.doc == "documentation for NumberLiteral", "clone doc of NumberLiteral")
+    assert(clone_NumberLiteral.visibility == Visibility::Private, "clone visibility of NumberLiteral")
+    assert(clone_NumberLiteral.node_id != orig_NumberLiteral.node_id, "clone creates distinct instance for NumberLiteral")
+    orig_OffsetOf = OffsetOf.new(Path.new("Foo"), NumberLiteral.new("0"))
+    orig_OffsetOf.at(loc).at_end(end_loc)
+    orig_OffsetOf.doc = "documentation for OffsetOf"
+    orig_OffsetOf.visibility = Visibility::Private
+    clone_OffsetOf = orig_OffsetOf.clone
+    assert(clone_OffsetOf.is_a?(OffsetOf), "clone type of OffsetOf")
+    assert(clone_OffsetOf.location == loc, "clone location of OffsetOf")
+    assert(clone_OffsetOf.end_location == end_loc, "clone end_location of OffsetOf")
+    assert(clone_OffsetOf.doc == "documentation for OffsetOf", "clone doc of OffsetOf")
+    assert(clone_OffsetOf.visibility == Visibility::Private, "clone visibility of OffsetOf")
+    assert(clone_OffsetOf.node_id != orig_OffsetOf.node_id, "clone creates distinct instance for OffsetOf")
+    orig_OpAssign = OpAssign.new(Var.new("x"), "+", NumberLiteral.new("1"))
+    orig_OpAssign.at(loc).at_end(end_loc)
+    orig_OpAssign.doc = "documentation for OpAssign"
+    orig_OpAssign.visibility = Visibility::Private
+    clone_OpAssign = orig_OpAssign.clone
+    assert(clone_OpAssign.is_a?(OpAssign), "clone type of OpAssign")
+    assert(clone_OpAssign.location == loc, "clone location of OpAssign")
+    assert(clone_OpAssign.end_location == end_loc, "clone end_location of OpAssign")
+    assert(clone_OpAssign.doc == "documentation for OpAssign", "clone doc of OpAssign")
+    assert(clone_OpAssign.visibility == Visibility::Private, "clone visibility of OpAssign")
+    assert(clone_OpAssign.node_id != orig_OpAssign.node_id, "clone creates distinct instance for OpAssign")
+    orig_Or = Or.new(BoolLiteral.new(true), BoolLiteral.new(false))
+    orig_Or.at(loc).at_end(end_loc)
+    orig_Or.doc = "documentation for Or"
+    orig_Or.visibility = Visibility::Private
+    clone_Or = orig_Or.clone
+    assert(clone_Or.is_a?(Or), "clone type of Or")
+    assert(clone_Or.location == loc, "clone location of Or")
+    assert(clone_Or.end_location == end_loc, "clone end_location of Or")
+    assert(clone_Or.doc == "documentation for Or", "clone doc of Or")
+    assert(clone_Or.visibility == Visibility::Private, "clone visibility of Or")
+    assert(clone_Or.node_id != orig_Or.node_id, "clone creates distinct instance for Or")
+    orig_Out = Out.new(Var.new("buf"))
+    orig_Out.at(loc).at_end(end_loc)
+    orig_Out.doc = "documentation for Out"
+    orig_Out.visibility = Visibility::Private
+    clone_Out = orig_Out.clone
+    assert(clone_Out.is_a?(Out), "clone type of Out")
+    assert(clone_Out.location == loc, "clone location of Out")
+    assert(clone_Out.end_location == end_loc, "clone end_location of Out")
+    assert(clone_Out.doc == "documentation for Out", "clone doc of Out")
+    assert(clone_Out.visibility == Visibility::Private, "clone visibility of Out")
+    assert(clone_Out.node_id != orig_Out.node_id, "clone creates distinct instance for Out")
+    orig_Path = Path.new(["Foo", "Bar"], false)
+    orig_Path.at(loc).at_end(end_loc)
+    orig_Path.doc = "documentation for Path"
+    orig_Path.visibility = Visibility::Private
+    clone_Path = orig_Path.clone
+    assert(clone_Path.is_a?(Path), "clone type of Path")
+    assert(clone_Path.location == loc, "clone location of Path")
+    assert(clone_Path.end_location == end_loc, "clone end_location of Path")
+    assert(clone_Path.doc == "documentation for Path", "clone doc of Path")
+    assert(clone_Path.visibility == Visibility::Private, "clone visibility of Path")
+    assert(clone_Path.node_id != orig_Path.node_id, "clone creates distinct instance for Path")
+    orig_PointerOf = PointerOf.new(Var.new("p"))
+    orig_PointerOf.at(loc).at_end(end_loc)
+    orig_PointerOf.doc = "documentation for PointerOf"
+    orig_PointerOf.visibility = Visibility::Private
+    clone_PointerOf = orig_PointerOf.clone
+    assert(clone_PointerOf.is_a?(PointerOf), "clone type of PointerOf")
+    assert(clone_PointerOf.location == loc, "clone location of PointerOf")
+    assert(clone_PointerOf.end_location == end_loc, "clone end_location of PointerOf")
+    assert(clone_PointerOf.doc == "documentation for PointerOf", "clone doc of PointerOf")
+    assert(clone_PointerOf.visibility == Visibility::Private, "clone visibility of PointerOf")
+    assert(clone_PointerOf.node_id != orig_PointerOf.node_id, "clone creates distinct instance for PointerOf")
+    orig_ProcLiteral = ProcLiteral.new(Def.new("->", [Arg.new("i")], NumberLiteral.new("42")))
+    orig_ProcLiteral.at(loc).at_end(end_loc)
+    orig_ProcLiteral.doc = "documentation for ProcLiteral"
+    orig_ProcLiteral.visibility = Visibility::Private
+    clone_ProcLiteral = orig_ProcLiteral.clone
+    assert(clone_ProcLiteral.is_a?(ProcLiteral), "clone type of ProcLiteral")
+    assert(clone_ProcLiteral.location == loc, "clone location of ProcLiteral")
+    assert(clone_ProcLiteral.end_location == end_loc, "clone end_location of ProcLiteral")
+    assert(clone_ProcLiteral.doc == "documentation for ProcLiteral", "clone doc of ProcLiteral")
+    assert(clone_ProcLiteral.visibility == Visibility::Private, "clone visibility of ProcLiteral")
+    assert(clone_ProcLiteral.node_id != orig_ProcLiteral.node_id, "clone creates distinct instance for ProcLiteral")
+    orig_ProcNotation = ProcNotation.new(([Path.new("Int32")] of ASTNode), Path.new("String"))
+    orig_ProcNotation.at(loc).at_end(end_loc)
+    orig_ProcNotation.doc = "documentation for ProcNotation"
+    orig_ProcNotation.visibility = Visibility::Private
+    clone_ProcNotation = orig_ProcNotation.clone
+    assert(clone_ProcNotation.is_a?(ProcNotation), "clone type of ProcNotation")
+    assert(clone_ProcNotation.location == loc, "clone location of ProcNotation")
+    assert(clone_ProcNotation.end_location == end_loc, "clone end_location of ProcNotation")
+    assert(clone_ProcNotation.doc == "documentation for ProcNotation", "clone doc of ProcNotation")
+    assert(clone_ProcNotation.visibility == Visibility::Private, "clone visibility of ProcNotation")
+    assert(clone_ProcNotation.node_id != orig_ProcNotation.node_id, "clone creates distinct instance for ProcNotation")
+    orig_ProcPointer = ProcPointer.new(nil, "print", ([Path.new("String")] of ASTNode), false)
+    orig_ProcPointer.at(loc).at_end(end_loc)
+    orig_ProcPointer.doc = "documentation for ProcPointer"
+    orig_ProcPointer.visibility = Visibility::Private
+    clone_ProcPointer = orig_ProcPointer.clone
+    assert(clone_ProcPointer.is_a?(ProcPointer), "clone type of ProcPointer")
+    assert(clone_ProcPointer.location == loc, "clone location of ProcPointer")
+    assert(clone_ProcPointer.end_location == end_loc, "clone end_location of ProcPointer")
+    assert(clone_ProcPointer.doc == "documentation for ProcPointer", "clone doc of ProcPointer")
+    assert(clone_ProcPointer.visibility == Visibility::Private, "clone visibility of ProcPointer")
+    assert(clone_ProcPointer.node_id != orig_ProcPointer.node_id, "clone creates distinct instance for ProcPointer")
+    orig_Propagate = Propagate.new(Call.new(nil, "read_file"))
+    orig_Propagate.at(loc).at_end(end_loc)
+    orig_Propagate.doc = "documentation for Propagate"
+    orig_Propagate.visibility = Visibility::Private
+    clone_Propagate = orig_Propagate.clone
+    assert(clone_Propagate.is_a?(Propagate), "clone type of Propagate")
+    assert(clone_Propagate.location == loc, "clone location of Propagate")
+    assert(clone_Propagate.end_location == end_loc, "clone end_location of Propagate")
+    assert(clone_Propagate.doc == "documentation for Propagate", "clone doc of Propagate")
+    assert(clone_Propagate.visibility == Visibility::Private, "clone visibility of Propagate")
+    assert(clone_Propagate.node_id != orig_Propagate.node_id, "clone creates distinct instance for Propagate")
+    orig_RangeLiteral = RangeLiteral.new(NumberLiteral.new("1"), NumberLiteral.new("10"), false)
+    orig_RangeLiteral.at(loc).at_end(end_loc)
+    orig_RangeLiteral.doc = "documentation for RangeLiteral"
+    orig_RangeLiteral.visibility = Visibility::Private
+    clone_RangeLiteral = orig_RangeLiteral.clone
+    assert(clone_RangeLiteral.is_a?(RangeLiteral), "clone type of RangeLiteral")
+    assert(clone_RangeLiteral.location == loc, "clone location of RangeLiteral")
+    assert(clone_RangeLiteral.end_location == end_loc, "clone end_location of RangeLiteral")
+    assert(clone_RangeLiteral.doc == "documentation for RangeLiteral", "clone doc of RangeLiteral")
+    assert(clone_RangeLiteral.visibility == Visibility::Private, "clone visibility of RangeLiteral")
+    assert(clone_RangeLiteral.node_id != orig_RangeLiteral.node_id, "clone creates distinct instance for RangeLiteral")
+    orig_ReadInstanceVar = ReadInstanceVar.new(Var.new("obj"), "@field")
+    orig_ReadInstanceVar.at(loc).at_end(end_loc)
+    orig_ReadInstanceVar.doc = "documentation for ReadInstanceVar"
+    orig_ReadInstanceVar.visibility = Visibility::Private
+    clone_ReadInstanceVar = orig_ReadInstanceVar.clone
+    assert(clone_ReadInstanceVar.is_a?(ReadInstanceVar), "clone type of ReadInstanceVar")
+    assert(clone_ReadInstanceVar.location == loc, "clone location of ReadInstanceVar")
+    assert(clone_ReadInstanceVar.end_location == end_loc, "clone end_location of ReadInstanceVar")
+    assert(clone_ReadInstanceVar.doc == "documentation for ReadInstanceVar", "clone doc of ReadInstanceVar")
+    assert(clone_ReadInstanceVar.visibility == Visibility::Private, "clone visibility of ReadInstanceVar")
+    assert(clone_ReadInstanceVar.node_id != orig_ReadInstanceVar.node_id, "clone creates distinct instance for ReadInstanceVar")
+    orig_Recover = Recover.new(Call.new(nil, "risky"), NumberLiteral.new("0"))
+    orig_Recover.at(loc).at_end(end_loc)
+    orig_Recover.doc = "documentation for Recover"
+    orig_Recover.visibility = Visibility::Private
+    clone_Recover = orig_Recover.clone
+    assert(clone_Recover.is_a?(Recover), "clone type of Recover")
+    assert(clone_Recover.location == loc, "clone location of Recover")
+    assert(clone_Recover.end_location == end_loc, "clone end_location of Recover")
+    assert(clone_Recover.doc == "documentation for Recover", "clone doc of Recover")
+    assert(clone_Recover.visibility == Visibility::Private, "clone visibility of Recover")
+    assert(clone_Recover.node_id != orig_Recover.node_id, "clone creates distinct instance for Recover")
+    orig_RegexLiteral = RegexLiteral.new(StringLiteral.new("foo"), RegexOptions::IGNORE_CASE)
+    orig_RegexLiteral.at(loc).at_end(end_loc)
+    orig_RegexLiteral.doc = "documentation for RegexLiteral"
+    orig_RegexLiteral.visibility = Visibility::Private
+    clone_RegexLiteral = orig_RegexLiteral.clone
+    assert(clone_RegexLiteral.is_a?(RegexLiteral), "clone type of RegexLiteral")
+    assert(clone_RegexLiteral.location == loc, "clone location of RegexLiteral")
+    assert(clone_RegexLiteral.end_location == end_loc, "clone end_location of RegexLiteral")
+    assert(clone_RegexLiteral.doc == "documentation for RegexLiteral", "clone doc of RegexLiteral")
+    assert(clone_RegexLiteral.visibility == Visibility::Private, "clone visibility of RegexLiteral")
+    assert(clone_RegexLiteral.node_id != orig_RegexLiteral.node_id, "clone creates distinct instance for RegexLiteral")
+    orig_Require = Require.new("json")
+    orig_Require.at(loc).at_end(end_loc)
+    orig_Require.doc = "documentation for Require"
+    orig_Require.visibility = Visibility::Private
+    clone_Require = orig_Require.clone
+    assert(clone_Require.is_a?(Require), "clone type of Require")
+    assert(clone_Require.location == loc, "clone location of Require")
+    assert(clone_Require.end_location == end_loc, "clone end_location of Require")
+    assert(clone_Require.doc == "documentation for Require", "clone doc of Require")
+    assert(clone_Require.visibility == Visibility::Private, "clone visibility of Require")
+    assert(clone_Require.node_id != orig_Require.node_id, "clone creates distinct instance for Require")
+    orig_Rescue = Rescue.new(StringLiteral.new("err"), ([Path.new("Exception")] of ASTNode), "ex")
+    orig_Rescue.at(loc).at_end(end_loc)
+    orig_Rescue.doc = "documentation for Rescue"
+    orig_Rescue.visibility = Visibility::Private
+    clone_Rescue = orig_Rescue.clone
+    assert(clone_Rescue.is_a?(Rescue), "clone type of Rescue")
+    assert(clone_Rescue.location == loc, "clone location of Rescue")
+    assert(clone_Rescue.end_location == end_loc, "clone end_location of Rescue")
+    assert(clone_Rescue.doc == "documentation for Rescue", "clone doc of Rescue")
+    assert(clone_Rescue.visibility == Visibility::Private, "clone visibility of Rescue")
+    assert(clone_Rescue.node_id != orig_Rescue.node_id, "clone creates distinct instance for Rescue")
+    orig_RespondsTo = RespondsTo.new(Var.new("x"), "to_s")
+    orig_RespondsTo.at(loc).at_end(end_loc)
+    orig_RespondsTo.doc = "documentation for RespondsTo"
+    orig_RespondsTo.visibility = Visibility::Private
+    clone_RespondsTo = orig_RespondsTo.clone
+    assert(clone_RespondsTo.is_a?(RespondsTo), "clone type of RespondsTo")
+    assert(clone_RespondsTo.location == loc, "clone location of RespondsTo")
+    assert(clone_RespondsTo.end_location == end_loc, "clone end_location of RespondsTo")
+    assert(clone_RespondsTo.doc == "documentation for RespondsTo", "clone doc of RespondsTo")
+    assert(clone_RespondsTo.visibility == Visibility::Private, "clone visibility of RespondsTo")
+    assert(clone_RespondsTo.node_id != orig_RespondsTo.node_id, "clone creates distinct instance for RespondsTo")
+    orig_Return = Return.new(NumberLiteral.new("10"))
+    orig_Return.at(loc).at_end(end_loc)
+    orig_Return.doc = "documentation for Return"
+    orig_Return.visibility = Visibility::Private
+    clone_Return = orig_Return.clone
+    assert(clone_Return.is_a?(Return), "clone type of Return")
+    assert(clone_Return.location == loc, "clone location of Return")
+    assert(clone_Return.end_location == end_loc, "clone end_location of Return")
+    assert(clone_Return.doc == "documentation for Return", "clone doc of Return")
+    assert(clone_Return.visibility == Visibility::Private, "clone visibility of Return")
+    assert(clone_Return.node_id != orig_Return.node_id, "clone creates distinct instance for Return")
+    orig_Select = Select.new([When.new(([Call.new(nil, "ch_receive")] of ASTNode), StringLiteral.new("got"))])
+    orig_Select.at(loc).at_end(end_loc)
+    orig_Select.doc = "documentation for Select"
+    orig_Select.visibility = Visibility::Private
+    clone_Select = orig_Select.clone
+    assert(clone_Select.is_a?(Select), "clone type of Select")
+    assert(clone_Select.location == loc, "clone location of Select")
+    assert(clone_Select.end_location == end_loc, "clone end_location of Select")
+    assert(clone_Select.doc == "documentation for Select", "clone doc of Select")
+    assert(clone_Select.visibility == Visibility::Private, "clone visibility of Select")
+    assert(clone_Select.node_id != orig_Select.node_id, "clone creates distinct instance for Select")
+    orig_Self = Self.new
+    orig_Self.at(loc).at_end(end_loc)
+    orig_Self.doc = "documentation for Self"
+    orig_Self.visibility = Visibility::Private
+    clone_Self = orig_Self.clone
+    assert(clone_Self.is_a?(Self), "clone type of Self")
+    assert(clone_Self.location == loc, "clone location of Self")
+    assert(clone_Self.end_location == end_loc, "clone end_location of Self")
+    assert(clone_Self.doc == "documentation for Self", "clone doc of Self")
+    assert(clone_Self.visibility == Visibility::Private, "clone visibility of Self")
+    assert(clone_Self.node_id != orig_Self.node_id, "clone creates distinct instance for Self")
+    orig_SizeOf = SizeOf.new(Path.new("Int32"))
+    orig_SizeOf.at(loc).at_end(end_loc)
+    orig_SizeOf.doc = "documentation for SizeOf"
+    orig_SizeOf.visibility = Visibility::Private
+    clone_SizeOf = orig_SizeOf.clone
+    assert(clone_SizeOf.is_a?(SizeOf), "clone type of SizeOf")
+    assert(clone_SizeOf.location == loc, "clone location of SizeOf")
+    assert(clone_SizeOf.end_location == end_loc, "clone end_location of SizeOf")
+    assert(clone_SizeOf.doc == "documentation for SizeOf", "clone doc of SizeOf")
+    assert(clone_SizeOf.visibility == Visibility::Private, "clone visibility of SizeOf")
+    assert(clone_SizeOf.node_id != orig_SizeOf.node_id, "clone creates distinct instance for SizeOf")
+    orig_Splat = Splat.new(Var.new("args"))
+    orig_Splat.at(loc).at_end(end_loc)
+    orig_Splat.doc = "documentation for Splat"
+    orig_Splat.visibility = Visibility::Private
+    clone_Splat = orig_Splat.clone
+    assert(clone_Splat.is_a?(Splat), "clone type of Splat")
+    assert(clone_Splat.location == loc, "clone location of Splat")
+    assert(clone_Splat.end_location == end_loc, "clone end_location of Splat")
+    assert(clone_Splat.doc == "documentation for Splat", "clone doc of Splat")
+    assert(clone_Splat.visibility == Visibility::Private, "clone visibility of Splat")
+    assert(clone_Splat.node_id != orig_Splat.node_id, "clone creates distinct instance for Splat")
+    orig_StringInterpolation = StringInterpolation.new(([StringLiteral.new("val="), Var.new("x")] of ASTNode))
+    orig_StringInterpolation.at(loc).at_end(end_loc)
+    orig_StringInterpolation.doc = "documentation for StringInterpolation"
+    orig_StringInterpolation.visibility = Visibility::Private
+    clone_StringInterpolation = orig_StringInterpolation.clone
+    assert(clone_StringInterpolation.is_a?(StringInterpolation), "clone type of StringInterpolation")
+    assert(clone_StringInterpolation.location == loc, "clone location of StringInterpolation")
+    assert(clone_StringInterpolation.end_location == end_loc, "clone end_location of StringInterpolation")
+    assert(clone_StringInterpolation.doc == "documentation for StringInterpolation", "clone doc of StringInterpolation")
+    assert(clone_StringInterpolation.visibility == Visibility::Private, "clone visibility of StringInterpolation")
+    assert(clone_StringInterpolation.node_id != orig_StringInterpolation.node_id, "clone creates distinct instance for StringInterpolation")
+    orig_StringLiteral = StringLiteral.new("hello")
+    orig_StringLiteral.at(loc).at_end(end_loc)
+    orig_StringLiteral.doc = "documentation for StringLiteral"
+    orig_StringLiteral.visibility = Visibility::Private
+    clone_StringLiteral = orig_StringLiteral.clone
+    assert(clone_StringLiteral.is_a?(StringLiteral), "clone type of StringLiteral")
+    assert(clone_StringLiteral.location == loc, "clone location of StringLiteral")
+    assert(clone_StringLiteral.end_location == end_loc, "clone end_location of StringLiteral")
+    assert(clone_StringLiteral.doc == "documentation for StringLiteral", "clone doc of StringLiteral")
+    assert(clone_StringLiteral.visibility == Visibility::Private, "clone visibility of StringLiteral")
+    assert(clone_StringLiteral.node_id != orig_StringLiteral.node_id, "clone creates distinct instance for StringLiteral")
+    orig_SymbolLiteral = SymbolLiteral.new("my_sym")
+    orig_SymbolLiteral.at(loc).at_end(end_loc)
+    orig_SymbolLiteral.doc = "documentation for SymbolLiteral"
+    orig_SymbolLiteral.visibility = Visibility::Private
+    clone_SymbolLiteral = orig_SymbolLiteral.clone
+    assert(clone_SymbolLiteral.is_a?(SymbolLiteral), "clone type of SymbolLiteral")
+    assert(clone_SymbolLiteral.location == loc, "clone location of SymbolLiteral")
+    assert(clone_SymbolLiteral.end_location == end_loc, "clone end_location of SymbolLiteral")
+    assert(clone_SymbolLiteral.doc == "documentation for SymbolLiteral", "clone doc of SymbolLiteral")
+    assert(clone_SymbolLiteral.visibility == Visibility::Private, "clone visibility of SymbolLiteral")
+    assert(clone_SymbolLiteral.node_id != orig_SymbolLiteral.node_id, "clone creates distinct instance for SymbolLiteral")
+    orig_TraitDef = TraitDef.new(Path.new("MyTrait"), NumberLiteral.new("1"))
+    orig_TraitDef.at(loc).at_end(end_loc)
+    orig_TraitDef.doc = "documentation for TraitDef"
+    orig_TraitDef.visibility = Visibility::Private
+    clone_TraitDef = orig_TraitDef.clone
+    assert(clone_TraitDef.is_a?(TraitDef), "clone type of TraitDef")
+    assert(clone_TraitDef.location == loc, "clone location of TraitDef")
+    assert(clone_TraitDef.end_location == end_loc, "clone end_location of TraitDef")
+    assert(clone_TraitDef.doc == "documentation for TraitDef", "clone doc of TraitDef")
+    assert(clone_TraitDef.visibility == Visibility::Private, "clone visibility of TraitDef")
+    assert(clone_TraitDef.node_id != orig_TraitDef.node_id, "clone creates distinct instance for TraitDef")
+    orig_TupleLiteral = TupleLiteral.new(([NumberLiteral.new("1"), StringLiteral.new("a")] of ASTNode))
+    orig_TupleLiteral.at(loc).at_end(end_loc)
+    orig_TupleLiteral.doc = "documentation for TupleLiteral"
+    orig_TupleLiteral.visibility = Visibility::Private
+    clone_TupleLiteral = orig_TupleLiteral.clone
+    assert(clone_TupleLiteral.is_a?(TupleLiteral), "clone type of TupleLiteral")
+    assert(clone_TupleLiteral.location == loc, "clone location of TupleLiteral")
+    assert(clone_TupleLiteral.end_location == end_loc, "clone end_location of TupleLiteral")
+    assert(clone_TupleLiteral.doc == "documentation for TupleLiteral", "clone doc of TupleLiteral")
+    assert(clone_TupleLiteral.visibility == Visibility::Private, "clone visibility of TupleLiteral")
+    assert(clone_TupleLiteral.node_id != orig_TupleLiteral.node_id, "clone creates distinct instance for TupleLiteral")
+    orig_TypeDeclaration = TypeDeclaration.new(Var.new("count"), Path.new("Int32"), NumberLiteral.new("0"))
+    orig_TypeDeclaration.at(loc).at_end(end_loc)
+    orig_TypeDeclaration.doc = "documentation for TypeDeclaration"
+    orig_TypeDeclaration.visibility = Visibility::Private
+    clone_TypeDeclaration = orig_TypeDeclaration.clone
+    assert(clone_TypeDeclaration.is_a?(TypeDeclaration), "clone type of TypeDeclaration")
+    assert(clone_TypeDeclaration.location == loc, "clone location of TypeDeclaration")
+    assert(clone_TypeDeclaration.end_location == end_loc, "clone end_location of TypeDeclaration")
+    assert(clone_TypeDeclaration.doc == "documentation for TypeDeclaration", "clone doc of TypeDeclaration")
+    assert(clone_TypeDeclaration.visibility == Visibility::Private, "clone visibility of TypeDeclaration")
+    assert(clone_TypeDeclaration.node_id != orig_TypeDeclaration.node_id, "clone creates distinct instance for TypeDeclaration")
+    orig_TypeDef = TypeDef.new("SizeT", Path.new("UInt64"))
+    orig_TypeDef.at(loc).at_end(end_loc)
+    orig_TypeDef.doc = "documentation for TypeDef"
+    orig_TypeDef.visibility = Visibility::Private
+    clone_TypeDef = orig_TypeDef.clone
+    assert(clone_TypeDef.is_a?(TypeDef), "clone type of TypeDef")
+    assert(clone_TypeDef.location == loc, "clone location of TypeDef")
+    assert(clone_TypeDef.end_location == end_loc, "clone end_location of TypeDef")
+    assert(clone_TypeDef.doc == "documentation for TypeDef", "clone doc of TypeDef")
+    assert(clone_TypeDef.visibility == Visibility::Private, "clone visibility of TypeDef")
+    assert(clone_TypeDef.node_id != orig_TypeDef.node_id, "clone creates distinct instance for TypeDef")
+    orig_TypeOf = TypeOf.new(([Var.new("x")] of ASTNode))
+    orig_TypeOf.at(loc).at_end(end_loc)
+    orig_TypeOf.doc = "documentation for TypeOf"
+    orig_TypeOf.visibility = Visibility::Private
+    clone_TypeOf = orig_TypeOf.clone
+    assert(clone_TypeOf.is_a?(TypeOf), "clone type of TypeOf")
+    assert(clone_TypeOf.location == loc, "clone location of TypeOf")
+    assert(clone_TypeOf.end_location == end_loc, "clone end_location of TypeOf")
+    assert(clone_TypeOf.doc == "documentation for TypeOf", "clone doc of TypeOf")
+    assert(clone_TypeOf.visibility == Visibility::Private, "clone visibility of TypeOf")
+    assert(clone_TypeOf.node_id != orig_TypeOf.node_id, "clone creates distinct instance for TypeOf")
+    orig_Underscore = Underscore.new
+    orig_Underscore.at(loc).at_end(end_loc)
+    orig_Underscore.doc = "documentation for Underscore"
+    orig_Underscore.visibility = Visibility::Private
+    clone_Underscore = orig_Underscore.clone
+    assert(clone_Underscore.is_a?(Underscore), "clone type of Underscore")
+    assert(clone_Underscore.location == loc, "clone location of Underscore")
+    assert(clone_Underscore.end_location == end_loc, "clone end_location of Underscore")
+    assert(clone_Underscore.doc == "documentation for Underscore", "clone doc of Underscore")
+    assert(clone_Underscore.visibility == Visibility::Private, "clone visibility of Underscore")
+    assert(clone_Underscore.node_id != orig_Underscore.node_id, "clone creates distinct instance for Underscore")
+    orig_UninitializedVar = UninitializedVar.new(Var.new("buffer"), Path.new("Pointer"))
+    orig_UninitializedVar.at(loc).at_end(end_loc)
+    orig_UninitializedVar.doc = "documentation for UninitializedVar"
+    orig_UninitializedVar.visibility = Visibility::Private
+    clone_UninitializedVar = orig_UninitializedVar.clone
+    assert(clone_UninitializedVar.is_a?(UninitializedVar), "clone type of UninitializedVar")
+    assert(clone_UninitializedVar.location == loc, "clone location of UninitializedVar")
+    assert(clone_UninitializedVar.end_location == end_loc, "clone end_location of UninitializedVar")
+    assert(clone_UninitializedVar.doc == "documentation for UninitializedVar", "clone doc of UninitializedVar")
+    assert(clone_UninitializedVar.visibility == Visibility::Private, "clone visibility of UninitializedVar")
+    assert(clone_UninitializedVar.node_id != orig_UninitializedVar.node_id, "clone creates distinct instance for UninitializedVar")
+    orig_Union = ASTUnion.new(([Path.new("Int32"), Path.new("String")] of ASTNode))
+    orig_Union.at(loc).at_end(end_loc)
+    orig_Union.doc = "documentation for Union"
+    orig_Union.visibility = Visibility::Private
+    clone_Union = orig_Union.clone
+    assert(clone_Union.is_a?(ASTUnion), "clone type of Union")
+    assert(clone_Union.location == loc, "clone location of Union")
+    assert(clone_Union.end_location == end_loc, "clone end_location of Union")
+    assert(clone_Union.doc == "documentation for Union", "clone doc of Union")
+    assert(clone_Union.visibility == Visibility::Private, "clone visibility of Union")
+    assert(clone_Union.node_id != orig_Union.node_id, "clone creates distinct instance for Union")
+    orig_Unless = Unless.new(BoolLiteral.new(false), NumberLiteral.new("1"), NumberLiteral.new("0"))
+    orig_Unless.at(loc).at_end(end_loc)
+    orig_Unless.doc = "documentation for Unless"
+    orig_Unless.visibility = Visibility::Private
+    clone_Unless = orig_Unless.clone
+    assert(clone_Unless.is_a?(Unless), "clone type of Unless")
+    assert(clone_Unless.location == loc, "clone location of Unless")
+    assert(clone_Unless.end_location == end_loc, "clone end_location of Unless")
+    assert(clone_Unless.doc == "documentation for Unless", "clone doc of Unless")
+    assert(clone_Unless.visibility == Visibility::Private, "clone visibility of Unless")
+    assert(clone_Unless.node_id != orig_Unless.node_id, "clone creates distinct instance for Unless")
+    orig_Until = Until.new(BoolLiteral.new(false), NumberLiteral.new("42"))
+    orig_Until.at(loc).at_end(end_loc)
+    orig_Until.doc = "documentation for Until"
+    orig_Until.visibility = Visibility::Private
+    clone_Until = orig_Until.clone
+    assert(clone_Until.is_a?(Until), "clone type of Until")
+    assert(clone_Until.location == loc, "clone location of Until")
+    assert(clone_Until.end_location == end_loc, "clone end_location of Until")
+    assert(clone_Until.doc == "documentation for Until", "clone doc of Until")
+    assert(clone_Until.visibility == Visibility::Private, "clone visibility of Until")
+    assert(clone_Until.node_id != orig_Until.node_id, "clone creates distinct instance for Until")
+    orig_UsingDecl = UsingDecl.new(["compiler", "foundation", "location"], ["Location"])
+    orig_UsingDecl.at(loc).at_end(end_loc)
+    orig_UsingDecl.doc = "documentation for UsingDecl"
+    orig_UsingDecl.visibility = Visibility::Private
+    clone_UsingDecl = orig_UsingDecl.clone
+    assert(clone_UsingDecl.is_a?(UsingDecl), "clone type of UsingDecl")
+    assert(clone_UsingDecl.location == loc, "clone location of UsingDecl")
+    assert(clone_UsingDecl.end_location == end_loc, "clone end_location of UsingDecl")
+    assert(clone_UsingDecl.doc == "documentation for UsingDecl", "clone doc of UsingDecl")
+    assert(clone_UsingDecl.visibility == Visibility::Private, "clone visibility of UsingDecl")
+    assert(clone_UsingDecl.node_id != orig_UsingDecl.node_id, "clone creates distinct instance for UsingDecl")
+    orig_Var = Var.new("my_var")
+    orig_Var.at(loc).at_end(end_loc)
+    orig_Var.doc = "documentation for Var"
+    orig_Var.visibility = Visibility::Private
+    clone_Var = orig_Var.clone
+    assert(clone_Var.is_a?(Var), "clone type of Var")
+    assert(clone_Var.location == loc, "clone location of Var")
+    assert(clone_Var.end_location == end_loc, "clone end_location of Var")
+    assert(clone_Var.doc == "documentation for Var", "clone doc of Var")
+    assert(clone_Var.visibility == Visibility::Private, "clone visibility of Var")
+    assert(clone_Var.node_id != orig_Var.node_id, "clone creates distinct instance for Var")
+    orig_VisibilityModifier = VisibilityModifier.new(Visibility::Private, Def.new("secret"))
+    orig_VisibilityModifier.at(loc).at_end(end_loc)
+    orig_VisibilityModifier.doc = "documentation for VisibilityModifier"
+    orig_VisibilityModifier.visibility = Visibility::Private
+    clone_VisibilityModifier = orig_VisibilityModifier.clone
+    assert(clone_VisibilityModifier.is_a?(VisibilityModifier), "clone type of VisibilityModifier")
+    assert(clone_VisibilityModifier.location == loc, "clone location of VisibilityModifier")
+    assert(clone_VisibilityModifier.end_location == end_loc, "clone end_location of VisibilityModifier")
+    assert(clone_VisibilityModifier.doc == "documentation for VisibilityModifier", "clone doc of VisibilityModifier")
+    assert(clone_VisibilityModifier.visibility == Visibility::Private, "clone visibility of VisibilityModifier")
+    assert(clone_VisibilityModifier.node_id != orig_VisibilityModifier.node_id, "clone creates distinct instance for VisibilityModifier")
+    orig_When = When.new(([NumberLiteral.new("1")] of ASTNode), StringLiteral.new("one"))
+    orig_When.at(loc).at_end(end_loc)
+    orig_When.doc = "documentation for When"
+    orig_When.visibility = Visibility::Private
+    clone_When = orig_When.clone
+    assert(clone_When.is_a?(When), "clone type of When")
+    assert(clone_When.location == loc, "clone location of When")
+    assert(clone_When.end_location == end_loc, "clone end_location of When")
+    assert(clone_When.doc == "documentation for When", "clone doc of When")
+    assert(clone_When.visibility == Visibility::Private, "clone visibility of When")
+    assert(clone_When.node_id != orig_When.node_id, "clone creates distinct instance for When")
+    orig_While = While.new(BoolLiteral.new(true), NumberLiteral.new("42"))
+    orig_While.at(loc).at_end(end_loc)
+    orig_While.doc = "documentation for While"
+    orig_While.visibility = Visibility::Private
+    clone_While = orig_While.clone
+    assert(clone_While.is_a?(While), "clone type of While")
+    assert(clone_While.location == loc, "clone location of While")
+    assert(clone_While.end_location == end_loc, "clone end_location of While")
+    assert(clone_While.doc == "documentation for While", "clone doc of While")
+    assert(clone_While.visibility == Visibility::Private, "clone visibility of While")
+    assert(clone_While.node_id != orig_While.node_id, "clone creates distinct instance for While")
+    orig_Yield = Yield.new(([Var.new("y")] of ASTNode))
+    orig_Yield.at(loc).at_end(end_loc)
+    orig_Yield.doc = "documentation for Yield"
+    orig_Yield.visibility = Visibility::Private
+    clone_Yield = orig_Yield.clone
+    assert(clone_Yield.is_a?(Yield), "clone type of Yield")
+    assert(clone_Yield.location == loc, "clone location of Yield")
+    assert(clone_Yield.end_location == end_loc, "clone end_location of Yield")
+    assert(clone_Yield.doc == "documentation for Yield", "clone doc of Yield")
+    assert(clone_Yield.visibility == Visibility::Private, "clone visibility of Yield")
+    assert(clone_Yield.node_id != orig_Yield.node_id, "clone creates distinct instance for Yield")
+    puts "ok (104 node kinds cloned with location and identity isolation)"
+  end
+
+  def self.test_node_equality
+    puts "testing equality and hashing for all 104 concrete AST node kinds..."
+    a_Alias = Alias.new(Path.new("MyInt"), Path.new("Int32"))
+    b_Alias = Alias.new(Path.new("MyInt"), Path.new("Int32"))
+    assert(a_Alias == b_Alias, "equality of identical Alias")
+    assert(a_Alias.hash == b_Alias.hash, "hash consistency of Alias")
+    assert(!(a_Alias == Nop.new) || "Alias" == "Nop", "inequality across different types for Alias")
+    a_AlignOf = AlignOf.new(Path.new("Int64"))
+    b_AlignOf = AlignOf.new(Path.new("Int64"))
+    assert(a_AlignOf == b_AlignOf, "equality of identical AlignOf")
+    assert(a_AlignOf.hash == b_AlignOf.hash, "hash consistency of AlignOf")
+    assert(!(a_AlignOf == Nop.new) || "AlignOf" == "Nop", "inequality across different types for AlignOf")
+    a_And = And.new(BoolLiteral.new(true), BoolLiteral.new(false))
+    b_And = And.new(BoolLiteral.new(true), BoolLiteral.new(false))
+    assert(a_And == b_And, "equality of identical And")
+    assert(a_And.hash == b_And.hash, "hash consistency of And")
+    assert(!(a_And == Nop.new) || "And" == "Nop", "inequality across different types for And")
+    a_Annotation = Annotation.new(Path.new("AlwaysInline"))
+    b_Annotation = Annotation.new(Path.new("AlwaysInline"))
+    assert(a_Annotation == b_Annotation, "equality of identical Annotation")
+    assert(a_Annotation.hash == b_Annotation.hash, "hash consistency of Annotation")
+    assert(!(a_Annotation == Nop.new) || "Annotation" == "Nop", "inequality across different types for Annotation")
+    a_AnnotationDef = AnnotationDef.new(Path.new("MyAnno"))
+    b_AnnotationDef = AnnotationDef.new(Path.new("MyAnno"))
+    assert(a_AnnotationDef == b_AnnotationDef, "equality of identical AnnotationDef")
+    assert(a_AnnotationDef.hash == b_AnnotationDef.hash, "hash consistency of AnnotationDef")
+    assert(!(a_AnnotationDef == Nop.new) || "AnnotationDef" == "Nop", "inequality across different types for AnnotationDef")
+    a_Arg = Arg.new("x", NumberLiteral.new("0"), Path.new("Int32"))
+    b_Arg = Arg.new("x", NumberLiteral.new("0"), Path.new("Int32"))
+    assert(a_Arg == b_Arg, "equality of identical Arg")
+    assert(a_Arg.hash == b_Arg.hash, "hash consistency of Arg")
+    assert(!(a_Arg == Nop.new) || "Arg" == "Nop", "inequality across different types for Arg")
+    a_ArrayLiteral = ArrayLiteral.new(([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    b_ArrayLiteral = ArrayLiteral.new(([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    assert(a_ArrayLiteral == b_ArrayLiteral, "equality of identical ArrayLiteral")
+    assert(a_ArrayLiteral.hash == b_ArrayLiteral.hash, "hash consistency of ArrayLiteral")
+    assert(!(a_ArrayLiteral == Nop.new) || "ArrayLiteral" == "Nop", "inequality across different types for ArrayLiteral")
+    a_Asm = Asm.new("nop", [AsmOperand.new("=r", Var.new("o"))], [AsmOperand.new("r", Var.new("i"))], ["memory"])
+    b_Asm = Asm.new("nop", [AsmOperand.new("=r", Var.new("o"))], [AsmOperand.new("r", Var.new("i"))], ["memory"])
+    assert(a_Asm == b_Asm, "equality of identical Asm")
+    assert(a_Asm.hash == b_Asm.hash, "hash consistency of Asm")
+    assert(!(a_Asm == Nop.new) || "Asm" == "Nop", "inequality across different types for Asm")
+    a_AsmOperand = AsmOperand.new("=r", Var.new("out_val"))
+    b_AsmOperand = AsmOperand.new("=r", Var.new("out_val"))
+    assert(a_AsmOperand == b_AsmOperand, "equality of identical AsmOperand")
+    assert(a_AsmOperand.hash == b_AsmOperand.hash, "hash consistency of AsmOperand")
+    assert(!(a_AsmOperand == Nop.new) || "AsmOperand" == "Nop", "inequality across different types for AsmOperand")
+    a_Assign = Assign.new(Var.new("x"), NumberLiteral.new("100"))
+    b_Assign = Assign.new(Var.new("x"), NumberLiteral.new("100"))
+    assert(a_Assign == b_Assign, "equality of identical Assign")
+    assert(a_Assign.hash == b_Assign.hash, "hash consistency of Assign")
+    assert(!(a_Assign == Nop.new) || "Assign" == "Nop", "inequality across different types for Assign")
+    a_AssocTypeDecl = AssocTypeDecl.new("Item", Path.new("String"))
+    b_AssocTypeDecl = AssocTypeDecl.new("Item", Path.new("String"))
+    assert(a_AssocTypeDecl == b_AssocTypeDecl, "equality of identical AssocTypeDecl")
+    assert(a_AssocTypeDecl.hash == b_AssocTypeDecl.hash, "hash consistency of AssocTypeDecl")
+    assert(!(a_AssocTypeDecl == Nop.new) || "AssocTypeDecl" == "Nop", "inequality across different types for AssocTypeDecl")
+    a_Block = Block.new([Var.new("item")], NumberLiteral.new("1"))
+    b_Block = Block.new([Var.new("item")], NumberLiteral.new("1"))
+    assert(a_Block == b_Block, "equality of identical Block")
+    assert(a_Block.hash == b_Block.hash, "hash consistency of Block")
+    assert(!(a_Block == Nop.new) || "Block" == "Nop", "inequality across different types for Block")
+    a_BoolLiteral = BoolLiteral.new(true)
+    b_BoolLiteral = BoolLiteral.new(true)
+    assert(a_BoolLiteral == b_BoolLiteral, "equality of identical BoolLiteral")
+    assert(a_BoolLiteral.hash == b_BoolLiteral.hash, "hash consistency of BoolLiteral")
+    assert(!(a_BoolLiteral == Nop.new) || "BoolLiteral" == "Nop", "inequality across different types for BoolLiteral")
+    a_Break = Break.new(NumberLiteral.new("0"))
+    b_Break = Break.new(NumberLiteral.new("0"))
+    assert(a_Break == b_Break, "equality of identical Break")
+    assert(a_Break.hash == b_Break.hash, "hash consistency of Break")
+    assert(!(a_Break == Nop.new) || "Break" == "Nop", "inequality across different types for Break")
+    a_CStructOrUnionDef = CStructOrUnionDef.new("Point", NumberLiteral.new("0"), false)
+    b_CStructOrUnionDef = CStructOrUnionDef.new("Point", NumberLiteral.new("0"), false)
+    assert(a_CStructOrUnionDef == b_CStructOrUnionDef, "equality of identical CStructOrUnionDef")
+    assert(a_CStructOrUnionDef.hash == b_CStructOrUnionDef.hash, "hash consistency of CStructOrUnionDef")
+    assert(!(a_CStructOrUnionDef == Nop.new) || "CStructOrUnionDef" == "Nop", "inequality across different types for CStructOrUnionDef")
+    a_Call = Call.new(Var.new("math"), "add", ([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    b_Call = Call.new(Var.new("math"), "add", ([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    assert(a_Call == b_Call, "equality of identical Call")
+    assert(a_Call.hash == b_Call.hash, "hash consistency of Call")
+    assert(!(a_Call == Nop.new) || "Call" == "Nop", "inequality across different types for Call")
+    a_Case = Case.new(Var.new("x"), [When.new(([NumberLiteral.new("1")] of ASTNode), StringLiteral.new("one"))])
+    b_Case = Case.new(Var.new("x"), [When.new(([NumberLiteral.new("1")] of ASTNode), StringLiteral.new("one"))])
+    assert(a_Case == b_Case, "equality of identical Case")
+    assert(a_Case.hash == b_Case.hash, "hash consistency of Case")
+    assert(!(a_Case == Nop.new) || "Case" == "Nop", "inequality across different types for Case")
+    a_Cast = Cast.new(Var.new("x"), Path.new("String"))
+    b_Cast = Cast.new(Var.new("x"), Path.new("String"))
+    assert(a_Cast == b_Cast, "equality of identical Cast")
+    assert(a_Cast.hash == b_Cast.hash, "hash consistency of Cast")
+    assert(!(a_Cast == Nop.new) || "Cast" == "Nop", "inequality across different types for Cast")
+    a_CharLiteral = CharLiteral.new('z')
+    b_CharLiteral = CharLiteral.new('z')
+    assert(a_CharLiteral == b_CharLiteral, "equality of identical CharLiteral")
+    assert(a_CharLiteral.hash == b_CharLiteral.hash, "hash consistency of CharLiteral")
+    assert(!(a_CharLiteral == Nop.new) || "CharLiteral" == "Nop", "inequality across different types for CharLiteral")
+    a_ClassDef = ClassDef.new(Path.new("MyClass"), NumberLiteral.new("1"), Path.new("Object"))
+    b_ClassDef = ClassDef.new(Path.new("MyClass"), NumberLiteral.new("1"), Path.new("Object"))
+    assert(a_ClassDef == b_ClassDef, "equality of identical ClassDef")
+    assert(a_ClassDef.hash == b_ClassDef.hash, "hash consistency of ClassDef")
+    assert(!(a_ClassDef == Nop.new) || "ClassDef" == "Nop", "inequality across different types for ClassDef")
+    a_ClassVar = ClassVar.new("@@my_cvar")
+    b_ClassVar = ClassVar.new("@@my_cvar")
+    assert(a_ClassVar == b_ClassVar, "equality of identical ClassVar")
+    assert(a_ClassVar.hash == b_ClassVar.hash, "hash consistency of ClassVar")
+    assert(!(a_ClassVar == Nop.new) || "ClassVar" == "Nop", "inequality across different types for ClassVar")
+    a_Def = Def.new("my_func", [Arg.new("a")], NumberLiteral.new("99"))
+    b_Def = Def.new("my_func", [Arg.new("a")], NumberLiteral.new("99"))
+    assert(a_Def == b_Def, "equality of identical Def")
+    assert(a_Def.hash == b_Def.hash, "hash consistency of Def")
+    assert(!(a_Def == Nop.new) || "Def" == "Nop", "inequality across different types for Def")
+    a_Defer = Defer.new(Call.new(nil, "cleanup"))
+    b_Defer = Defer.new(Call.new(nil, "cleanup"))
+    assert(a_Defer == b_Defer, "equality of identical Defer")
+    assert(a_Defer.hash == b_Defer.hash, "hash consistency of Defer")
+    assert(!(a_Defer == Nop.new) || "Defer" == "Nop", "inequality across different types for Defer")
+    a_DoubleSplat = DoubleSplat.new(Var.new("kwargs"))
+    b_DoubleSplat = DoubleSplat.new(Var.new("kwargs"))
+    assert(a_DoubleSplat == b_DoubleSplat, "equality of identical DoubleSplat")
+    assert(a_DoubleSplat.hash == b_DoubleSplat.hash, "hash consistency of DoubleSplat")
+    assert(!(a_DoubleSplat == Nop.new) || "DoubleSplat" == "Nop", "inequality across different types for DoubleSplat")
+    a_EnumDef = EnumDef.new(Path.new("Color"), ([Var.new("Red"), Var.new("Green")] of ASTNode))
+    b_EnumDef = EnumDef.new(Path.new("Color"), ([Var.new("Red"), Var.new("Green")] of ASTNode))
+    assert(a_EnumDef == b_EnumDef, "equality of identical EnumDef")
+    assert(a_EnumDef.hash == b_EnumDef.hash, "hash consistency of EnumDef")
+    assert(!(a_EnumDef == Nop.new) || "EnumDef" == "Nop", "inequality across different types for EnumDef")
+    a_ExceptionHandler = ExceptionHandler.new(NumberLiteral.new("1"), [Rescue.new(NumberLiteral.new("2"))])
+    b_ExceptionHandler = ExceptionHandler.new(NumberLiteral.new("1"), [Rescue.new(NumberLiteral.new("2"))])
+    assert(a_ExceptionHandler == b_ExceptionHandler, "equality of identical ExceptionHandler")
+    assert(a_ExceptionHandler.hash == b_ExceptionHandler.hash, "hash consistency of ExceptionHandler")
+    assert(!(a_ExceptionHandler == Nop.new) || "ExceptionHandler" == "Nop", "inequality across different types for ExceptionHandler")
+    a_Expressions = Expressions.new(([Var.new("a"), Var.new("b")] of ASTNode), Expressions::Keyword::None)
+    b_Expressions = Expressions.new(([Var.new("a"), Var.new("b")] of ASTNode), Expressions::Keyword::None)
+    assert(a_Expressions == b_Expressions, "equality of identical Expressions")
+    assert(a_Expressions.hash == b_Expressions.hash, "hash consistency of Expressions")
+    assert(!(a_Expressions == Nop.new) || "Expressions" == "Nop", "inequality across different types for Expressions")
+    a_Extend = Extend.new(Path.new("ClassMethods"))
+    b_Extend = Extend.new(Path.new("ClassMethods"))
+    assert(a_Extend == b_Extend, "equality of identical Extend")
+    assert(a_Extend.hash == b_Extend.hash, "hash consistency of Extend")
+    assert(!(a_Extend == Nop.new) || "Extend" == "Nop", "inequality across different types for Extend")
+    a_ExternalVar = ExternalVar.new("errno", Path.new("Int32"))
+    b_ExternalVar = ExternalVar.new("errno", Path.new("Int32"))
+    assert(a_ExternalVar == b_ExternalVar, "equality of identical ExternalVar")
+    assert(a_ExternalVar.hash == b_ExternalVar.hash, "hash consistency of ExternalVar")
+    assert(!(a_ExternalVar == Nop.new) || "ExternalVar" == "Nop", "inequality across different types for ExternalVar")
+    a_FunDef = FunDef.new("puts", [Arg.new("s", nil, Path.new("String"))], Path.new("Int32"))
+    b_FunDef = FunDef.new("puts", [Arg.new("s", nil, Path.new("String"))], Path.new("Int32"))
+    assert(a_FunDef == b_FunDef, "equality of identical FunDef")
+    assert(a_FunDef.hash == b_FunDef.hash, "hash consistency of FunDef")
+    assert(!(a_FunDef == Nop.new) || "FunDef" == "Nop", "inequality across different types for FunDef")
+    a_Generic = Generic.new(Path.new("Array"), ([Path.new("Int32")] of ASTNode))
+    b_Generic = Generic.new(Path.new("Array"), ([Path.new("Int32")] of ASTNode))
+    assert(a_Generic == b_Generic, "equality of identical Generic")
+    assert(a_Generic.hash == b_Generic.hash, "hash consistency of Generic")
+    assert(!(a_Generic == Nop.new) || "Generic" == "Nop", "inequality across different types for Generic")
+    a_Global = Global.new("$my_global")
+    b_Global = Global.new("$my_global")
+    assert(a_Global == b_Global, "equality of identical Global")
+    assert(a_Global.hash == b_Global.hash, "hash consistency of Global")
+    assert(!(a_Global == Nop.new) || "Global" == "Nop", "inequality across different types for Global")
+    a_HashLiteral = HashLiteral.new([HashLiteral::Entry.new(StringLiteral.new("k"), NumberLiteral.new("1"))])
+    b_HashLiteral = HashLiteral.new([HashLiteral::Entry.new(StringLiteral.new("k"), NumberLiteral.new("1"))])
+    assert(a_HashLiteral == b_HashLiteral, "equality of identical HashLiteral")
+    assert(a_HashLiteral.hash == b_HashLiteral.hash, "hash consistency of HashLiteral")
+    assert(!(a_HashLiteral == Nop.new) || "HashLiteral" == "Nop", "inequality across different types for HashLiteral")
+    a_If = If.new(BoolLiteral.new(true), NumberLiteral.new("1"), NumberLiteral.new("2"))
+    b_If = If.new(BoolLiteral.new(true), NumberLiteral.new("1"), NumberLiteral.new("2"))
+    assert(a_If == b_If, "equality of identical If")
+    assert(a_If.hash == b_If.hash, "hash consistency of If")
+    assert(!(a_If == Nop.new) || "If" == "Nop", "inequality across different types for If")
+    a_ImplDef = ImplDef.new(Path.new("MyTrait"), Path.new("MyClass"), NumberLiteral.new("1"))
+    b_ImplDef = ImplDef.new(Path.new("MyTrait"), Path.new("MyClass"), NumberLiteral.new("1"))
+    assert(a_ImplDef == b_ImplDef, "equality of identical ImplDef")
+    assert(a_ImplDef.hash == b_ImplDef.hash, "hash consistency of ImplDef")
+    assert(!(a_ImplDef == Nop.new) || "ImplDef" == "Nop", "inequality across different types for ImplDef")
+    a_ImplicitObj = ImplicitObj.new
+    b_ImplicitObj = ImplicitObj.new
+    assert(a_ImplicitObj == b_ImplicitObj, "equality of identical ImplicitObj")
+    assert(a_ImplicitObj.hash == b_ImplicitObj.hash, "hash consistency of ImplicitObj")
+    assert(!(a_ImplicitObj == Nop.new) || "ImplicitObj" == "Nop", "inequality across different types for ImplicitObj")
+    a_ImportDecl = ImportDecl.new(["compiler", "foundation", "location"], true)
+    b_ImportDecl = ImportDecl.new(["compiler", "foundation", "location"], true)
+    assert(a_ImportDecl == b_ImportDecl, "equality of identical ImportDecl")
+    assert(a_ImportDecl.hash == b_ImportDecl.hash, "hash consistency of ImportDecl")
+    assert(!(a_ImportDecl == Nop.new) || "ImportDecl" == "Nop", "inequality across different types for ImportDecl")
+    a_Include = Include.new(Path.new("Enumerable"))
+    b_Include = Include.new(Path.new("Enumerable"))
+    assert(a_Include == b_Include, "equality of identical Include")
+    assert(a_Include.hash == b_Include.hash, "hash consistency of Include")
+    assert(!(a_Include == Nop.new) || "Include" == "Nop", "inequality across different types for Include")
+    a_InstanceAlignOf = InstanceAlignOf.new(Path.new("Bar"))
+    b_InstanceAlignOf = InstanceAlignOf.new(Path.new("Bar"))
+    assert(a_InstanceAlignOf == b_InstanceAlignOf, "equality of identical InstanceAlignOf")
+    assert(a_InstanceAlignOf.hash == b_InstanceAlignOf.hash, "hash consistency of InstanceAlignOf")
+    assert(!(a_InstanceAlignOf == Nop.new) || "InstanceAlignOf" == "Nop", "inequality across different types for InstanceAlignOf")
+    a_InstanceSizeOf = InstanceSizeOf.new(Path.new("Foo"))
+    b_InstanceSizeOf = InstanceSizeOf.new(Path.new("Foo"))
+    assert(a_InstanceSizeOf == b_InstanceSizeOf, "equality of identical InstanceSizeOf")
+    assert(a_InstanceSizeOf.hash == b_InstanceSizeOf.hash, "hash consistency of InstanceSizeOf")
+    assert(!(a_InstanceSizeOf == Nop.new) || "InstanceSizeOf" == "Nop", "inequality across different types for InstanceSizeOf")
+    a_InstanceVar = InstanceVar.new("@my_ivar")
+    b_InstanceVar = InstanceVar.new("@my_ivar")
+    assert(a_InstanceVar == b_InstanceVar, "equality of identical InstanceVar")
+    assert(a_InstanceVar.hash == b_InstanceVar.hash, "hash consistency of InstanceVar")
+    assert(!(a_InstanceVar == Nop.new) || "InstanceVar" == "Nop", "inequality across different types for InstanceVar")
+    a_IsA = IsA.new(Var.new("x"), Path.new("Int32"))
+    b_IsA = IsA.new(Var.new("x"), Path.new("Int32"))
+    assert(a_IsA == b_IsA, "equality of identical IsA")
+    assert(a_IsA.hash == b_IsA.hash, "hash consistency of IsA")
+    assert(!(a_IsA == Nop.new) || "IsA" == "Nop", "inequality across different types for IsA")
+    a_LibDef = LibDef.new(Path.new("LibC"), NumberLiteral.new("0"))
+    b_LibDef = LibDef.new(Path.new("LibC"), NumberLiteral.new("0"))
+    assert(a_LibDef == b_LibDef, "equality of identical LibDef")
+    assert(a_LibDef.hash == b_LibDef.hash, "hash consistency of LibDef")
+    assert(!(a_LibDef == Nop.new) || "LibDef" == "Nop", "inequality across different types for LibDef")
+    a_Macro = Macro.new("my_macro", [Arg.new("x")], StringLiteral.new("code"))
+    b_Macro = Macro.new("my_macro", [Arg.new("x")], StringLiteral.new("code"))
+    assert(a_Macro == b_Macro, "equality of identical Macro")
+    assert(a_Macro.hash == b_Macro.hash, "hash consistency of Macro")
+    assert(!(a_Macro == Nop.new) || "Macro" == "Nop", "inequality across different types for Macro")
+    a_MacroExpression = MacroExpression.new(Var.new("x"), true)
+    b_MacroExpression = MacroExpression.new(Var.new("x"), true)
+    assert(a_MacroExpression == b_MacroExpression, "equality of identical MacroExpression")
+    assert(a_MacroExpression.hash == b_MacroExpression.hash, "hash consistency of MacroExpression")
+    assert(!(a_MacroExpression == Nop.new) || "MacroExpression" == "Nop", "inequality across different types for MacroExpression")
+    a_MacroFor = MacroFor.new([Var.new("i")], ArrayLiteral.new(([NumberLiteral.new("1")] of ASTNode)), Var.new("i"))
+    b_MacroFor = MacroFor.new([Var.new("i")], ArrayLiteral.new(([NumberLiteral.new("1")] of ASTNode)), Var.new("i"))
+    assert(a_MacroFor == b_MacroFor, "equality of identical MacroFor")
+    assert(a_MacroFor.hash == b_MacroFor.hash, "hash consistency of MacroFor")
+    assert(!(a_MacroFor == Nop.new) || "MacroFor" == "Nop", "inequality across different types for MacroFor")
+    a_MacroIf = MacroIf.new(Var.new("flag"), NumberLiteral.new("1"), NumberLiteral.new("2"))
+    b_MacroIf = MacroIf.new(Var.new("flag"), NumberLiteral.new("1"), NumberLiteral.new("2"))
+    assert(a_MacroIf == b_MacroIf, "equality of identical MacroIf")
+    assert(a_MacroIf.hash == b_MacroIf.hash, "hash consistency of MacroIf")
+    assert(!(a_MacroIf == Nop.new) || "MacroIf" == "Nop", "inequality across different types for MacroIf")
+    a_MacroLiteral = MacroLiteral.new("hello macro")
+    b_MacroLiteral = MacroLiteral.new("hello macro")
+    assert(a_MacroLiteral == b_MacroLiteral, "equality of identical MacroLiteral")
+    assert(a_MacroLiteral.hash == b_MacroLiteral.hash, "hash consistency of MacroLiteral")
+    assert(!(a_MacroLiteral == Nop.new) || "MacroLiteral" == "Nop", "inequality across different types for MacroLiteral")
+    a_MacroVar = MacroVar.new("temp_var")
+    b_MacroVar = MacroVar.new("temp_var")
+    assert(a_MacroVar == b_MacroVar, "equality of identical MacroVar")
+    assert(a_MacroVar.hash == b_MacroVar.hash, "hash consistency of MacroVar")
+    assert(!(a_MacroVar == Nop.new) || "MacroVar" == "Nop", "inequality across different types for MacroVar")
+    a_MacroVerbatim = MacroVerbatim.new(StringLiteral.new("verbatim code"))
+    b_MacroVerbatim = MacroVerbatim.new(StringLiteral.new("verbatim code"))
+    assert(a_MacroVerbatim == b_MacroVerbatim, "equality of identical MacroVerbatim")
+    assert(a_MacroVerbatim.hash == b_MacroVerbatim.hash, "hash consistency of MacroVerbatim")
+    assert(!(a_MacroVerbatim == Nop.new) || "MacroVerbatim" == "Nop", "inequality across different types for MacroVerbatim")
+    a_MagicConstant = MagicConstant.new(TokenKind::MAGIC_LINE)
+    b_MagicConstant = MagicConstant.new(TokenKind::MAGIC_LINE)
+    assert(a_MagicConstant == b_MagicConstant, "equality of identical MagicConstant")
+    assert(a_MagicConstant.hash == b_MagicConstant.hash, "hash consistency of MagicConstant")
+    assert(!(a_MagicConstant == Nop.new) || "MagicConstant" == "Nop", "inequality across different types for MagicConstant")
+    a_Metaclass = Metaclass.new(Path.new("String"))
+    b_Metaclass = Metaclass.new(Path.new("String"))
+    assert(a_Metaclass == b_Metaclass, "equality of identical Metaclass")
+    assert(a_Metaclass.hash == b_Metaclass.hash, "hash consistency of Metaclass")
+    assert(!(a_Metaclass == Nop.new) || "Metaclass" == "Nop", "inequality across different types for Metaclass")
+    a_ModuleDef = ModuleDef.new(Path.new("MyMod"), NumberLiteral.new("1"))
+    b_ModuleDef = ModuleDef.new(Path.new("MyMod"), NumberLiteral.new("1"))
+    assert(a_ModuleDef == b_ModuleDef, "equality of identical ModuleDef")
+    assert(a_ModuleDef.hash == b_ModuleDef.hash, "hash consistency of ModuleDef")
+    assert(!(a_ModuleDef == Nop.new) || "ModuleDef" == "Nop", "inequality across different types for ModuleDef")
+    a_ModuleHeader = ModuleHeader.new(["compiler", "syntax", "ast"])
+    b_ModuleHeader = ModuleHeader.new(["compiler", "syntax", "ast"])
+    assert(a_ModuleHeader == b_ModuleHeader, "equality of identical ModuleHeader")
+    assert(a_ModuleHeader.hash == b_ModuleHeader.hash, "hash consistency of ModuleHeader")
+    assert(!(a_ModuleHeader == Nop.new) || "ModuleHeader" == "Nop", "inequality across different types for ModuleHeader")
+    a_MultiAssign = MultiAssign.new(([Var.new("a"), Var.new("b")] of ASTNode), ([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    b_MultiAssign = MultiAssign.new(([Var.new("a"), Var.new("b")] of ASTNode), ([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    assert(a_MultiAssign == b_MultiAssign, "equality of identical MultiAssign")
+    assert(a_MultiAssign.hash == b_MultiAssign.hash, "hash consistency of MultiAssign")
+    assert(!(a_MultiAssign == Nop.new) || "MultiAssign" == "Nop", "inequality across different types for MultiAssign")
+    a_NamedArgument = NamedArgument.new("limit", NumberLiteral.new("10"))
+    b_NamedArgument = NamedArgument.new("limit", NumberLiteral.new("10"))
+    assert(a_NamedArgument == b_NamedArgument, "equality of identical NamedArgument")
+    assert(a_NamedArgument.hash == b_NamedArgument.hash, "hash consistency of NamedArgument")
+    assert(!(a_NamedArgument == Nop.new) || "NamedArgument" == "Nop", "inequality across different types for NamedArgument")
+    a_NamedTupleLiteral = NamedTupleLiteral.new([NamedTupleLiteral::Entry.new("key", NumberLiteral.new("10"))])
+    b_NamedTupleLiteral = NamedTupleLiteral.new([NamedTupleLiteral::Entry.new("key", NumberLiteral.new("10"))])
+    assert(a_NamedTupleLiteral == b_NamedTupleLiteral, "equality of identical NamedTupleLiteral")
+    assert(a_NamedTupleLiteral.hash == b_NamedTupleLiteral.hash, "hash consistency of NamedTupleLiteral")
+    assert(!(a_NamedTupleLiteral == Nop.new) || "NamedTupleLiteral" == "Nop", "inequality across different types for NamedTupleLiteral")
+    a_Next = Next.new(nil)
+    b_Next = Next.new(nil)
+    assert(a_Next == b_Next, "equality of identical Next")
+    assert(a_Next.hash == b_Next.hash, "hash consistency of Next")
+    assert(!(a_Next == Nop.new) || "Next" == "Nop", "inequality across different types for Next")
+    a_NilLiteral = NilLiteral.new
+    b_NilLiteral = NilLiteral.new
+    assert(a_NilLiteral == b_NilLiteral, "equality of identical NilLiteral")
+    assert(a_NilLiteral.hash == b_NilLiteral.hash, "hash consistency of NilLiteral")
+    assert(!(a_NilLiteral == Nop.new) || "NilLiteral" == "Nop", "inequality across different types for NilLiteral")
+    a_NilableCast = NilableCast.new(Var.new("x"), Path.new("String"))
+    b_NilableCast = NilableCast.new(Var.new("x"), Path.new("String"))
+    assert(a_NilableCast == b_NilableCast, "equality of identical NilableCast")
+    assert(a_NilableCast.hash == b_NilableCast.hash, "hash consistency of NilableCast")
+    assert(!(a_NilableCast == Nop.new) || "NilableCast" == "Nop", "inequality across different types for NilableCast")
+    a_Nop = Nop.new
+    b_Nop = Nop.new
+    assert(a_Nop == b_Nop, "equality of identical Nop")
+    assert(a_Nop.hash == b_Nop.hash, "hash consistency of Nop")
+    assert(!(a_Nop == Nop.new) || "Nop" == "Nop", "inequality across different types for Nop")
+    a_Not = Not.new(BoolLiteral.new(true))
+    b_Not = Not.new(BoolLiteral.new(true))
+    assert(a_Not == b_Not, "equality of identical Not")
+    assert(a_Not.hash == b_Not.hash, "hash consistency of Not")
+    assert(!(a_Not == Nop.new) || "Not" == "Nop", "inequality across different types for Not")
+    a_NumberLiteral = NumberLiteral.new("42", NumberKind::I32)
+    b_NumberLiteral = NumberLiteral.new("42", NumberKind::I32)
+    assert(a_NumberLiteral == b_NumberLiteral, "equality of identical NumberLiteral")
+    assert(a_NumberLiteral.hash == b_NumberLiteral.hash, "hash consistency of NumberLiteral")
+    assert(!(a_NumberLiteral == Nop.new) || "NumberLiteral" == "Nop", "inequality across different types for NumberLiteral")
+    a_OffsetOf = OffsetOf.new(Path.new("Foo"), NumberLiteral.new("0"))
+    b_OffsetOf = OffsetOf.new(Path.new("Foo"), NumberLiteral.new("0"))
+    assert(a_OffsetOf == b_OffsetOf, "equality of identical OffsetOf")
+    assert(a_OffsetOf.hash == b_OffsetOf.hash, "hash consistency of OffsetOf")
+    assert(!(a_OffsetOf == Nop.new) || "OffsetOf" == "Nop", "inequality across different types for OffsetOf")
+    a_OpAssign = OpAssign.new(Var.new("x"), "+", NumberLiteral.new("1"))
+    b_OpAssign = OpAssign.new(Var.new("x"), "+", NumberLiteral.new("1"))
+    assert(a_OpAssign == b_OpAssign, "equality of identical OpAssign")
+    assert(a_OpAssign.hash == b_OpAssign.hash, "hash consistency of OpAssign")
+    assert(!(a_OpAssign == Nop.new) || "OpAssign" == "Nop", "inequality across different types for OpAssign")
+    a_Or = Or.new(BoolLiteral.new(true), BoolLiteral.new(false))
+    b_Or = Or.new(BoolLiteral.new(true), BoolLiteral.new(false))
+    assert(a_Or == b_Or, "equality of identical Or")
+    assert(a_Or.hash == b_Or.hash, "hash consistency of Or")
+    assert(!(a_Or == Nop.new) || "Or" == "Nop", "inequality across different types for Or")
+    a_Out = Out.new(Var.new("buf"))
+    b_Out = Out.new(Var.new("buf"))
+    assert(a_Out == b_Out, "equality of identical Out")
+    assert(a_Out.hash == b_Out.hash, "hash consistency of Out")
+    assert(!(a_Out == Nop.new) || "Out" == "Nop", "inequality across different types for Out")
+    a_Path = Path.new(["Foo", "Bar"], false)
+    b_Path = Path.new(["Foo", "Bar"], false)
+    assert(a_Path == b_Path, "equality of identical Path")
+    assert(a_Path.hash == b_Path.hash, "hash consistency of Path")
+    assert(!(a_Path == Nop.new) || "Path" == "Nop", "inequality across different types for Path")
+    a_PointerOf = PointerOf.new(Var.new("p"))
+    b_PointerOf = PointerOf.new(Var.new("p"))
+    assert(a_PointerOf == b_PointerOf, "equality of identical PointerOf")
+    assert(a_PointerOf.hash == b_PointerOf.hash, "hash consistency of PointerOf")
+    assert(!(a_PointerOf == Nop.new) || "PointerOf" == "Nop", "inequality across different types for PointerOf")
+    a_ProcLiteral = ProcLiteral.new(Def.new("->", [Arg.new("i")], NumberLiteral.new("42")))
+    b_ProcLiteral = ProcLiteral.new(Def.new("->", [Arg.new("i")], NumberLiteral.new("42")))
+    assert(a_ProcLiteral == b_ProcLiteral, "equality of identical ProcLiteral")
+    assert(a_ProcLiteral.hash == b_ProcLiteral.hash, "hash consistency of ProcLiteral")
+    assert(!(a_ProcLiteral == Nop.new) || "ProcLiteral" == "Nop", "inequality across different types for ProcLiteral")
+    a_ProcNotation = ProcNotation.new(([Path.new("Int32")] of ASTNode), Path.new("String"))
+    b_ProcNotation = ProcNotation.new(([Path.new("Int32")] of ASTNode), Path.new("String"))
+    assert(a_ProcNotation == b_ProcNotation, "equality of identical ProcNotation")
+    assert(a_ProcNotation.hash == b_ProcNotation.hash, "hash consistency of ProcNotation")
+    assert(!(a_ProcNotation == Nop.new) || "ProcNotation" == "Nop", "inequality across different types for ProcNotation")
+    a_ProcPointer = ProcPointer.new(nil, "print", ([Path.new("String")] of ASTNode), false)
+    b_ProcPointer = ProcPointer.new(nil, "print", ([Path.new("String")] of ASTNode), false)
+    assert(a_ProcPointer == b_ProcPointer, "equality of identical ProcPointer")
+    assert(a_ProcPointer.hash == b_ProcPointer.hash, "hash consistency of ProcPointer")
+    assert(!(a_ProcPointer == Nop.new) || "ProcPointer" == "Nop", "inequality across different types for ProcPointer")
+    a_Propagate = Propagate.new(Call.new(nil, "read_file"))
+    b_Propagate = Propagate.new(Call.new(nil, "read_file"))
+    assert(a_Propagate == b_Propagate, "equality of identical Propagate")
+    assert(a_Propagate.hash == b_Propagate.hash, "hash consistency of Propagate")
+    assert(!(a_Propagate == Nop.new) || "Propagate" == "Nop", "inequality across different types for Propagate")
+    a_RangeLiteral = RangeLiteral.new(NumberLiteral.new("1"), NumberLiteral.new("10"), false)
+    b_RangeLiteral = RangeLiteral.new(NumberLiteral.new("1"), NumberLiteral.new("10"), false)
+    assert(a_RangeLiteral == b_RangeLiteral, "equality of identical RangeLiteral")
+    assert(a_RangeLiteral.hash == b_RangeLiteral.hash, "hash consistency of RangeLiteral")
+    assert(!(a_RangeLiteral == Nop.new) || "RangeLiteral" == "Nop", "inequality across different types for RangeLiteral")
+    a_ReadInstanceVar = ReadInstanceVar.new(Var.new("obj"), "@field")
+    b_ReadInstanceVar = ReadInstanceVar.new(Var.new("obj"), "@field")
+    assert(a_ReadInstanceVar == b_ReadInstanceVar, "equality of identical ReadInstanceVar")
+    assert(a_ReadInstanceVar.hash == b_ReadInstanceVar.hash, "hash consistency of ReadInstanceVar")
+    assert(!(a_ReadInstanceVar == Nop.new) || "ReadInstanceVar" == "Nop", "inequality across different types for ReadInstanceVar")
+    a_Recover = Recover.new(Call.new(nil, "risky"), NumberLiteral.new("0"))
+    b_Recover = Recover.new(Call.new(nil, "risky"), NumberLiteral.new("0"))
+    assert(a_Recover == b_Recover, "equality of identical Recover")
+    assert(a_Recover.hash == b_Recover.hash, "hash consistency of Recover")
+    assert(!(a_Recover == Nop.new) || "Recover" == "Nop", "inequality across different types for Recover")
+    a_RegexLiteral = RegexLiteral.new(StringLiteral.new("foo"), RegexOptions::IGNORE_CASE)
+    b_RegexLiteral = RegexLiteral.new(StringLiteral.new("foo"), RegexOptions::IGNORE_CASE)
+    assert(a_RegexLiteral == b_RegexLiteral, "equality of identical RegexLiteral")
+    assert(a_RegexLiteral.hash == b_RegexLiteral.hash, "hash consistency of RegexLiteral")
+    assert(!(a_RegexLiteral == Nop.new) || "RegexLiteral" == "Nop", "inequality across different types for RegexLiteral")
+    a_Require = Require.new("json")
+    b_Require = Require.new("json")
+    assert(a_Require == b_Require, "equality of identical Require")
+    assert(a_Require.hash == b_Require.hash, "hash consistency of Require")
+    assert(!(a_Require == Nop.new) || "Require" == "Nop", "inequality across different types for Require")
+    a_Rescue = Rescue.new(StringLiteral.new("err"), ([Path.new("Exception")] of ASTNode), "ex")
+    b_Rescue = Rescue.new(StringLiteral.new("err"), ([Path.new("Exception")] of ASTNode), "ex")
+    assert(a_Rescue == b_Rescue, "equality of identical Rescue")
+    assert(a_Rescue.hash == b_Rescue.hash, "hash consistency of Rescue")
+    assert(!(a_Rescue == Nop.new) || "Rescue" == "Nop", "inequality across different types for Rescue")
+    a_RespondsTo = RespondsTo.new(Var.new("x"), "to_s")
+    b_RespondsTo = RespondsTo.new(Var.new("x"), "to_s")
+    assert(a_RespondsTo == b_RespondsTo, "equality of identical RespondsTo")
+    assert(a_RespondsTo.hash == b_RespondsTo.hash, "hash consistency of RespondsTo")
+    assert(!(a_RespondsTo == Nop.new) || "RespondsTo" == "Nop", "inequality across different types for RespondsTo")
+    a_Return = Return.new(NumberLiteral.new("10"))
+    b_Return = Return.new(NumberLiteral.new("10"))
+    assert(a_Return == b_Return, "equality of identical Return")
+    assert(a_Return.hash == b_Return.hash, "hash consistency of Return")
+    assert(!(a_Return == Nop.new) || "Return" == "Nop", "inequality across different types for Return")
+    a_Select = Select.new([When.new(([Call.new(nil, "ch_receive")] of ASTNode), StringLiteral.new("got"))])
+    b_Select = Select.new([When.new(([Call.new(nil, "ch_receive")] of ASTNode), StringLiteral.new("got"))])
+    assert(a_Select == b_Select, "equality of identical Select")
+    assert(a_Select.hash == b_Select.hash, "hash consistency of Select")
+    assert(!(a_Select == Nop.new) || "Select" == "Nop", "inequality across different types for Select")
+    a_Self = Self.new
+    b_Self = Self.new
+    assert(a_Self == b_Self, "equality of identical Self")
+    assert(a_Self.hash == b_Self.hash, "hash consistency of Self")
+    assert(!(a_Self == Nop.new) || "Self" == "Nop", "inequality across different types for Self")
+    a_SizeOf = SizeOf.new(Path.new("Int32"))
+    b_SizeOf = SizeOf.new(Path.new("Int32"))
+    assert(a_SizeOf == b_SizeOf, "equality of identical SizeOf")
+    assert(a_SizeOf.hash == b_SizeOf.hash, "hash consistency of SizeOf")
+    assert(!(a_SizeOf == Nop.new) || "SizeOf" == "Nop", "inequality across different types for SizeOf")
+    a_Splat = Splat.new(Var.new("args"))
+    b_Splat = Splat.new(Var.new("args"))
+    assert(a_Splat == b_Splat, "equality of identical Splat")
+    assert(a_Splat.hash == b_Splat.hash, "hash consistency of Splat")
+    assert(!(a_Splat == Nop.new) || "Splat" == "Nop", "inequality across different types for Splat")
+    a_StringInterpolation = StringInterpolation.new(([StringLiteral.new("val="), Var.new("x")] of ASTNode))
+    b_StringInterpolation = StringInterpolation.new(([StringLiteral.new("val="), Var.new("x")] of ASTNode))
+    assert(a_StringInterpolation == b_StringInterpolation, "equality of identical StringInterpolation")
+    assert(a_StringInterpolation.hash == b_StringInterpolation.hash, "hash consistency of StringInterpolation")
+    assert(!(a_StringInterpolation == Nop.new) || "StringInterpolation" == "Nop", "inequality across different types for StringInterpolation")
+    a_StringLiteral = StringLiteral.new("hello")
+    b_StringLiteral = StringLiteral.new("hello")
+    assert(a_StringLiteral == b_StringLiteral, "equality of identical StringLiteral")
+    assert(a_StringLiteral.hash == b_StringLiteral.hash, "hash consistency of StringLiteral")
+    assert(!(a_StringLiteral == Nop.new) || "StringLiteral" == "Nop", "inequality across different types for StringLiteral")
+    a_SymbolLiteral = SymbolLiteral.new("my_sym")
+    b_SymbolLiteral = SymbolLiteral.new("my_sym")
+    assert(a_SymbolLiteral == b_SymbolLiteral, "equality of identical SymbolLiteral")
+    assert(a_SymbolLiteral.hash == b_SymbolLiteral.hash, "hash consistency of SymbolLiteral")
+    assert(!(a_SymbolLiteral == Nop.new) || "SymbolLiteral" == "Nop", "inequality across different types for SymbolLiteral")
+    a_TraitDef = TraitDef.new(Path.new("MyTrait"), NumberLiteral.new("1"))
+    b_TraitDef = TraitDef.new(Path.new("MyTrait"), NumberLiteral.new("1"))
+    assert(a_TraitDef == b_TraitDef, "equality of identical TraitDef")
+    assert(a_TraitDef.hash == b_TraitDef.hash, "hash consistency of TraitDef")
+    assert(!(a_TraitDef == Nop.new) || "TraitDef" == "Nop", "inequality across different types for TraitDef")
+    a_TupleLiteral = TupleLiteral.new(([NumberLiteral.new("1"), StringLiteral.new("a")] of ASTNode))
+    b_TupleLiteral = TupleLiteral.new(([NumberLiteral.new("1"), StringLiteral.new("a")] of ASTNode))
+    assert(a_TupleLiteral == b_TupleLiteral, "equality of identical TupleLiteral")
+    assert(a_TupleLiteral.hash == b_TupleLiteral.hash, "hash consistency of TupleLiteral")
+    assert(!(a_TupleLiteral == Nop.new) || "TupleLiteral" == "Nop", "inequality across different types for TupleLiteral")
+    a_TypeDeclaration = TypeDeclaration.new(Var.new("count"), Path.new("Int32"), NumberLiteral.new("0"))
+    b_TypeDeclaration = TypeDeclaration.new(Var.new("count"), Path.new("Int32"), NumberLiteral.new("0"))
+    assert(a_TypeDeclaration == b_TypeDeclaration, "equality of identical TypeDeclaration")
+    assert(a_TypeDeclaration.hash == b_TypeDeclaration.hash, "hash consistency of TypeDeclaration")
+    assert(!(a_TypeDeclaration == Nop.new) || "TypeDeclaration" == "Nop", "inequality across different types for TypeDeclaration")
+    a_TypeDef = TypeDef.new("SizeT", Path.new("UInt64"))
+    b_TypeDef = TypeDef.new("SizeT", Path.new("UInt64"))
+    assert(a_TypeDef == b_TypeDef, "equality of identical TypeDef")
+    assert(a_TypeDef.hash == b_TypeDef.hash, "hash consistency of TypeDef")
+    assert(!(a_TypeDef == Nop.new) || "TypeDef" == "Nop", "inequality across different types for TypeDef")
+    a_TypeOf = TypeOf.new(([Var.new("x")] of ASTNode))
+    b_TypeOf = TypeOf.new(([Var.new("x")] of ASTNode))
+    assert(a_TypeOf == b_TypeOf, "equality of identical TypeOf")
+    assert(a_TypeOf.hash == b_TypeOf.hash, "hash consistency of TypeOf")
+    assert(!(a_TypeOf == Nop.new) || "TypeOf" == "Nop", "inequality across different types for TypeOf")
+    a_Underscore = Underscore.new
+    b_Underscore = Underscore.new
+    assert(a_Underscore == b_Underscore, "equality of identical Underscore")
+    assert(a_Underscore.hash == b_Underscore.hash, "hash consistency of Underscore")
+    assert(!(a_Underscore == Nop.new) || "Underscore" == "Nop", "inequality across different types for Underscore")
+    a_UninitializedVar = UninitializedVar.new(Var.new("buffer"), Path.new("Pointer"))
+    b_UninitializedVar = UninitializedVar.new(Var.new("buffer"), Path.new("Pointer"))
+    assert(a_UninitializedVar == b_UninitializedVar, "equality of identical UninitializedVar")
+    assert(a_UninitializedVar.hash == b_UninitializedVar.hash, "hash consistency of UninitializedVar")
+    assert(!(a_UninitializedVar == Nop.new) || "UninitializedVar" == "Nop", "inequality across different types for UninitializedVar")
+    a_Union = ASTUnion.new(([Path.new("Int32"), Path.new("String")] of ASTNode))
+    b_Union = ASTUnion.new(([Path.new("Int32"), Path.new("String")] of ASTNode))
+    assert(a_Union == b_Union, "equality of identical Union")
+    assert(a_Union.hash == b_Union.hash, "hash consistency of Union")
+    assert(!(a_Union == Nop.new) || "Union" == "Nop", "inequality across different types for Union")
+    a_Unless = Unless.new(BoolLiteral.new(false), NumberLiteral.new("1"), NumberLiteral.new("0"))
+    b_Unless = Unless.new(BoolLiteral.new(false), NumberLiteral.new("1"), NumberLiteral.new("0"))
+    assert(a_Unless == b_Unless, "equality of identical Unless")
+    assert(a_Unless.hash == b_Unless.hash, "hash consistency of Unless")
+    assert(!(a_Unless == Nop.new) || "Unless" == "Nop", "inequality across different types for Unless")
+    a_Until = Until.new(BoolLiteral.new(false), NumberLiteral.new("42"))
+    b_Until = Until.new(BoolLiteral.new(false), NumberLiteral.new("42"))
+    assert(a_Until == b_Until, "equality of identical Until")
+    assert(a_Until.hash == b_Until.hash, "hash consistency of Until")
+    assert(!(a_Until == Nop.new) || "Until" == "Nop", "inequality across different types for Until")
+    a_UsingDecl = UsingDecl.new(["compiler", "foundation", "location"], ["Location"])
+    b_UsingDecl = UsingDecl.new(["compiler", "foundation", "location"], ["Location"])
+    assert(a_UsingDecl == b_UsingDecl, "equality of identical UsingDecl")
+    assert(a_UsingDecl.hash == b_UsingDecl.hash, "hash consistency of UsingDecl")
+    assert(!(a_UsingDecl == Nop.new) || "UsingDecl" == "Nop", "inequality across different types for UsingDecl")
+    a_Var = Var.new("my_var")
+    b_Var = Var.new("my_var")
+    assert(a_Var == b_Var, "equality of identical Var")
+    assert(a_Var.hash == b_Var.hash, "hash consistency of Var")
+    assert(!(a_Var == Nop.new) || "Var" == "Nop", "inequality across different types for Var")
+    a_VisibilityModifier = VisibilityModifier.new(Visibility::Private, Def.new("secret"))
+    b_VisibilityModifier = VisibilityModifier.new(Visibility::Private, Def.new("secret"))
+    assert(a_VisibilityModifier == b_VisibilityModifier, "equality of identical VisibilityModifier")
+    assert(a_VisibilityModifier.hash == b_VisibilityModifier.hash, "hash consistency of VisibilityModifier")
+    assert(!(a_VisibilityModifier == Nop.new) || "VisibilityModifier" == "Nop", "inequality across different types for VisibilityModifier")
+    a_When = When.new(([NumberLiteral.new("1")] of ASTNode), StringLiteral.new("one"))
+    b_When = When.new(([NumberLiteral.new("1")] of ASTNode), StringLiteral.new("one"))
+    assert(a_When == b_When, "equality of identical When")
+    assert(a_When.hash == b_When.hash, "hash consistency of When")
+    assert(!(a_When == Nop.new) || "When" == "Nop", "inequality across different types for When")
+    a_While = While.new(BoolLiteral.new(true), NumberLiteral.new("42"))
+    b_While = While.new(BoolLiteral.new(true), NumberLiteral.new("42"))
+    assert(a_While == b_While, "equality of identical While")
+    assert(a_While.hash == b_While.hash, "hash consistency of While")
+    assert(!(a_While == Nop.new) || "While" == "Nop", "inequality across different types for While")
+    a_Yield = Yield.new(([Var.new("y")] of ASTNode))
+    b_Yield = Yield.new(([Var.new("y")] of ASTNode))
+    assert(a_Yield == b_Yield, "equality of identical Yield")
+    assert(a_Yield.hash == b_Yield.hash, "hash consistency of Yield")
+    assert(!(a_Yield == Nop.new) || "Yield" == "Nop", "inequality across different types for Yield")
+    puts "ok (104 node kinds verified for structural equality and hashing)"
+  end
+
+  def self.test_node_to_s
+    puts "testing to_s string formatting for all 104 concrete AST node kinds..."
+    node_Alias = Alias.new(Path.new("MyInt"), Path.new("Int32"))
+    str_Alias = node_Alias.to_s
+    assert(!str_Alias.empty?, "to_s non-empty for Alias")
+    node_AlignOf = AlignOf.new(Path.new("Int64"))
+    str_AlignOf = node_AlignOf.to_s
+    assert(!str_AlignOf.empty?, "to_s non-empty for AlignOf")
+    node_And = And.new(BoolLiteral.new(true), BoolLiteral.new(false))
+    str_And = node_And.to_s
+    assert(!str_And.empty?, "to_s non-empty for And")
+    node_Annotation = Annotation.new(Path.new("AlwaysInline"))
+    str_Annotation = node_Annotation.to_s
+    assert(!str_Annotation.empty?, "to_s non-empty for Annotation")
+    node_AnnotationDef = AnnotationDef.new(Path.new("MyAnno"))
+    str_AnnotationDef = node_AnnotationDef.to_s
+    assert(!str_AnnotationDef.empty?, "to_s non-empty for AnnotationDef")
+    node_Arg = Arg.new("x", NumberLiteral.new("0"), Path.new("Int32"))
+    str_Arg = node_Arg.to_s
+    assert(!str_Arg.empty?, "to_s non-empty for Arg")
+    node_ArrayLiteral = ArrayLiteral.new(([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    str_ArrayLiteral = node_ArrayLiteral.to_s
+    assert(!str_ArrayLiteral.empty?, "to_s non-empty for ArrayLiteral")
+    node_Asm = Asm.new("nop", [AsmOperand.new("=r", Var.new("o"))], [AsmOperand.new("r", Var.new("i"))], ["memory"])
+    str_Asm = node_Asm.to_s
+    assert(!str_Asm.empty?, "to_s non-empty for Asm")
+    node_AsmOperand = AsmOperand.new("=r", Var.new("out_val"))
+    str_AsmOperand = node_AsmOperand.to_s
+    assert(!str_AsmOperand.empty?, "to_s non-empty for AsmOperand")
+    node_Assign = Assign.new(Var.new("x"), NumberLiteral.new("100"))
+    str_Assign = node_Assign.to_s
+    assert(!str_Assign.empty?, "to_s non-empty for Assign")
+    node_AssocTypeDecl = AssocTypeDecl.new("Item", Path.new("String"))
+    str_AssocTypeDecl = node_AssocTypeDecl.to_s
+    assert(!str_AssocTypeDecl.empty?, "to_s non-empty for AssocTypeDecl")
+    node_Block = Block.new([Var.new("item")], NumberLiteral.new("1"))
+    str_Block = node_Block.to_s
+    assert(!str_Block.empty?, "to_s non-empty for Block")
+    node_BoolLiteral = BoolLiteral.new(true)
+    str_BoolLiteral = node_BoolLiteral.to_s
+    assert(!str_BoolLiteral.empty?, "to_s non-empty for BoolLiteral")
+    node_Break = Break.new(NumberLiteral.new("0"))
+    str_Break = node_Break.to_s
+    assert(!str_Break.empty?, "to_s non-empty for Break")
+    node_CStructOrUnionDef = CStructOrUnionDef.new("Point", NumberLiteral.new("0"), false)
+    str_CStructOrUnionDef = node_CStructOrUnionDef.to_s
+    assert(!str_CStructOrUnionDef.empty?, "to_s non-empty for CStructOrUnionDef")
+    node_Call = Call.new(Var.new("math"), "add", ([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    str_Call = node_Call.to_s
+    assert(!str_Call.empty?, "to_s non-empty for Call")
+    node_Case = Case.new(Var.new("x"), [When.new(([NumberLiteral.new("1")] of ASTNode), StringLiteral.new("one"))])
+    str_Case = node_Case.to_s
+    assert(!str_Case.empty?, "to_s non-empty for Case")
+    node_Cast = Cast.new(Var.new("x"), Path.new("String"))
+    str_Cast = node_Cast.to_s
+    assert(!str_Cast.empty?, "to_s non-empty for Cast")
+    node_CharLiteral = CharLiteral.new('z')
+    str_CharLiteral = node_CharLiteral.to_s
+    assert(!str_CharLiteral.empty?, "to_s non-empty for CharLiteral")
+    node_ClassDef = ClassDef.new(Path.new("MyClass"), NumberLiteral.new("1"), Path.new("Object"))
+    str_ClassDef = node_ClassDef.to_s
+    assert(!str_ClassDef.empty?, "to_s non-empty for ClassDef")
+    node_ClassVar = ClassVar.new("@@my_cvar")
+    str_ClassVar = node_ClassVar.to_s
+    assert(!str_ClassVar.empty?, "to_s non-empty for ClassVar")
+    node_Def = Def.new("my_func", [Arg.new("a")], NumberLiteral.new("99"))
+    str_Def = node_Def.to_s
+    assert(!str_Def.empty?, "to_s non-empty for Def")
+    node_Defer = Defer.new(Call.new(nil, "cleanup"))
+    str_Defer = node_Defer.to_s
+    assert(!str_Defer.empty?, "to_s non-empty for Defer")
+    node_DoubleSplat = DoubleSplat.new(Var.new("kwargs"))
+    str_DoubleSplat = node_DoubleSplat.to_s
+    assert(!str_DoubleSplat.empty?, "to_s non-empty for DoubleSplat")
+    node_EnumDef = EnumDef.new(Path.new("Color"), ([Var.new("Red"), Var.new("Green")] of ASTNode))
+    str_EnumDef = node_EnumDef.to_s
+    assert(!str_EnumDef.empty?, "to_s non-empty for EnumDef")
+    node_ExceptionHandler = ExceptionHandler.new(NumberLiteral.new("1"), [Rescue.new(NumberLiteral.new("2"))])
+    str_ExceptionHandler = node_ExceptionHandler.to_s
+    assert(!str_ExceptionHandler.empty?, "to_s non-empty for ExceptionHandler")
+    node_Expressions = Expressions.new(([Var.new("a"), Var.new("b")] of ASTNode), Expressions::Keyword::None)
+    str_Expressions = node_Expressions.to_s
+    assert(!str_Expressions.empty?, "to_s non-empty for Expressions")
+    node_Extend = Extend.new(Path.new("ClassMethods"))
+    str_Extend = node_Extend.to_s
+    assert(!str_Extend.empty?, "to_s non-empty for Extend")
+    node_ExternalVar = ExternalVar.new("errno", Path.new("Int32"))
+    str_ExternalVar = node_ExternalVar.to_s
+    assert(!str_ExternalVar.empty?, "to_s non-empty for ExternalVar")
+    node_FunDef = FunDef.new("puts", [Arg.new("s", nil, Path.new("String"))], Path.new("Int32"))
+    str_FunDef = node_FunDef.to_s
+    assert(!str_FunDef.empty?, "to_s non-empty for FunDef")
+    node_Generic = Generic.new(Path.new("Array"), ([Path.new("Int32")] of ASTNode))
+    str_Generic = node_Generic.to_s
+    assert(!str_Generic.empty?, "to_s non-empty for Generic")
+    node_Global = Global.new("$my_global")
+    str_Global = node_Global.to_s
+    assert(!str_Global.empty?, "to_s non-empty for Global")
+    node_HashLiteral = HashLiteral.new([HashLiteral::Entry.new(StringLiteral.new("k"), NumberLiteral.new("1"))])
+    str_HashLiteral = node_HashLiteral.to_s
+    assert(!str_HashLiteral.empty?, "to_s non-empty for HashLiteral")
+    node_If = If.new(BoolLiteral.new(true), NumberLiteral.new("1"), NumberLiteral.new("2"))
+    str_If = node_If.to_s
+    assert(!str_If.empty?, "to_s non-empty for If")
+    node_ImplDef = ImplDef.new(Path.new("MyTrait"), Path.new("MyClass"), NumberLiteral.new("1"))
+    str_ImplDef = node_ImplDef.to_s
+    assert(!str_ImplDef.empty?, "to_s non-empty for ImplDef")
+    node_ImplicitObj = ImplicitObj.new
+    str_ImplicitObj = node_ImplicitObj.to_s
+    node_ImportDecl = ImportDecl.new(["compiler", "foundation", "location"], true)
+    str_ImportDecl = node_ImportDecl.to_s
+    assert(!str_ImportDecl.empty?, "to_s non-empty for ImportDecl")
+    node_Include = Include.new(Path.new("Enumerable"))
+    str_Include = node_Include.to_s
+    assert(!str_Include.empty?, "to_s non-empty for Include")
+    node_InstanceAlignOf = InstanceAlignOf.new(Path.new("Bar"))
+    str_InstanceAlignOf = node_InstanceAlignOf.to_s
+    assert(!str_InstanceAlignOf.empty?, "to_s non-empty for InstanceAlignOf")
+    node_InstanceSizeOf = InstanceSizeOf.new(Path.new("Foo"))
+    str_InstanceSizeOf = node_InstanceSizeOf.to_s
+    assert(!str_InstanceSizeOf.empty?, "to_s non-empty for InstanceSizeOf")
+    node_InstanceVar = InstanceVar.new("@my_ivar")
+    str_InstanceVar = node_InstanceVar.to_s
+    assert(!str_InstanceVar.empty?, "to_s non-empty for InstanceVar")
+    node_IsA = IsA.new(Var.new("x"), Path.new("Int32"))
+    str_IsA = node_IsA.to_s
+    assert(!str_IsA.empty?, "to_s non-empty for IsA")
+    node_LibDef = LibDef.new(Path.new("LibC"), NumberLiteral.new("0"))
+    str_LibDef = node_LibDef.to_s
+    assert(!str_LibDef.empty?, "to_s non-empty for LibDef")
+    node_Macro = Macro.new("my_macro", [Arg.new("x")], StringLiteral.new("code"))
+    str_Macro = node_Macro.to_s
+    assert(!str_Macro.empty?, "to_s non-empty for Macro")
+    node_MacroExpression = MacroExpression.new(Var.new("x"), true)
+    str_MacroExpression = node_MacroExpression.to_s
+    assert(!str_MacroExpression.empty?, "to_s non-empty for MacroExpression")
+    node_MacroFor = MacroFor.new([Var.new("i")], ArrayLiteral.new(([NumberLiteral.new("1")] of ASTNode)), Var.new("i"))
+    str_MacroFor = node_MacroFor.to_s
+    assert(!str_MacroFor.empty?, "to_s non-empty for MacroFor")
+    node_MacroIf = MacroIf.new(Var.new("flag"), NumberLiteral.new("1"), NumberLiteral.new("2"))
+    str_MacroIf = node_MacroIf.to_s
+    assert(!str_MacroIf.empty?, "to_s non-empty for MacroIf")
+    node_MacroLiteral = MacroLiteral.new("hello macro")
+    str_MacroLiteral = node_MacroLiteral.to_s
+    assert(!str_MacroLiteral.empty?, "to_s non-empty for MacroLiteral")
+    node_MacroVar = MacroVar.new("temp_var")
+    str_MacroVar = node_MacroVar.to_s
+    assert(!str_MacroVar.empty?, "to_s non-empty for MacroVar")
+    node_MacroVerbatim = MacroVerbatim.new(StringLiteral.new("verbatim code"))
+    str_MacroVerbatim = node_MacroVerbatim.to_s
+    assert(!str_MacroVerbatim.empty?, "to_s non-empty for MacroVerbatim")
+    node_MagicConstant = MagicConstant.new(TokenKind::MAGIC_LINE)
+    str_MagicConstant = node_MagicConstant.to_s
+    assert(!str_MagicConstant.empty?, "to_s non-empty for MagicConstant")
+    node_Metaclass = Metaclass.new(Path.new("String"))
+    str_Metaclass = node_Metaclass.to_s
+    assert(!str_Metaclass.empty?, "to_s non-empty for Metaclass")
+    node_ModuleDef = ModuleDef.new(Path.new("MyMod"), NumberLiteral.new("1"))
+    str_ModuleDef = node_ModuleDef.to_s
+    assert(!str_ModuleDef.empty?, "to_s non-empty for ModuleDef")
+    node_ModuleHeader = ModuleHeader.new(["compiler", "syntax", "ast"])
+    str_ModuleHeader = node_ModuleHeader.to_s
+    assert(!str_ModuleHeader.empty?, "to_s non-empty for ModuleHeader")
+    node_MultiAssign = MultiAssign.new(([Var.new("a"), Var.new("b")] of ASTNode), ([NumberLiteral.new("1"), NumberLiteral.new("2")] of ASTNode))
+    str_MultiAssign = node_MultiAssign.to_s
+    assert(!str_MultiAssign.empty?, "to_s non-empty for MultiAssign")
+    node_NamedArgument = NamedArgument.new("limit", NumberLiteral.new("10"))
+    str_NamedArgument = node_NamedArgument.to_s
+    assert(!str_NamedArgument.empty?, "to_s non-empty for NamedArgument")
+    node_NamedTupleLiteral = NamedTupleLiteral.new([NamedTupleLiteral::Entry.new("key", NumberLiteral.new("10"))])
+    str_NamedTupleLiteral = node_NamedTupleLiteral.to_s
+    assert(!str_NamedTupleLiteral.empty?, "to_s non-empty for NamedTupleLiteral")
+    node_Next = Next.new(nil)
+    str_Next = node_Next.to_s
+    assert(!str_Next.empty?, "to_s non-empty for Next")
+    node_NilLiteral = NilLiteral.new
+    str_NilLiteral = node_NilLiteral.to_s
+    assert(!str_NilLiteral.empty?, "to_s non-empty for NilLiteral")
+    node_NilableCast = NilableCast.new(Var.new("x"), Path.new("String"))
+    str_NilableCast = node_NilableCast.to_s
+    assert(!str_NilableCast.empty?, "to_s non-empty for NilableCast")
+    node_Nop = Nop.new
+    str_Nop = node_Nop.to_s
+    node_Not = Not.new(BoolLiteral.new(true))
+    str_Not = node_Not.to_s
+    assert(!str_Not.empty?, "to_s non-empty for Not")
+    node_NumberLiteral = NumberLiteral.new("42", NumberKind::I32)
+    str_NumberLiteral = node_NumberLiteral.to_s
+    assert(!str_NumberLiteral.empty?, "to_s non-empty for NumberLiteral")
+    node_OffsetOf = OffsetOf.new(Path.new("Foo"), NumberLiteral.new("0"))
+    str_OffsetOf = node_OffsetOf.to_s
+    assert(!str_OffsetOf.empty?, "to_s non-empty for OffsetOf")
+    node_OpAssign = OpAssign.new(Var.new("x"), "+", NumberLiteral.new("1"))
+    str_OpAssign = node_OpAssign.to_s
+    assert(!str_OpAssign.empty?, "to_s non-empty for OpAssign")
+    node_Or = Or.new(BoolLiteral.new(true), BoolLiteral.new(false))
+    str_Or = node_Or.to_s
+    assert(!str_Or.empty?, "to_s non-empty for Or")
+    node_Out = Out.new(Var.new("buf"))
+    str_Out = node_Out.to_s
+    assert(!str_Out.empty?, "to_s non-empty for Out")
+    node_Path = Path.new(["Foo", "Bar"], false)
+    str_Path = node_Path.to_s
+    assert(!str_Path.empty?, "to_s non-empty for Path")
+    node_PointerOf = PointerOf.new(Var.new("p"))
+    str_PointerOf = node_PointerOf.to_s
+    assert(!str_PointerOf.empty?, "to_s non-empty for PointerOf")
+    node_ProcLiteral = ProcLiteral.new(Def.new("->", [Arg.new("i")], NumberLiteral.new("42")))
+    str_ProcLiteral = node_ProcLiteral.to_s
+    assert(!str_ProcLiteral.empty?, "to_s non-empty for ProcLiteral")
+    node_ProcNotation = ProcNotation.new(([Path.new("Int32")] of ASTNode), Path.new("String"))
+    str_ProcNotation = node_ProcNotation.to_s
+    assert(!str_ProcNotation.empty?, "to_s non-empty for ProcNotation")
+    node_ProcPointer = ProcPointer.new(nil, "print", ([Path.new("String")] of ASTNode), false)
+    str_ProcPointer = node_ProcPointer.to_s
+    assert(!str_ProcPointer.empty?, "to_s non-empty for ProcPointer")
+    node_Propagate = Propagate.new(Call.new(nil, "read_file"))
+    str_Propagate = node_Propagate.to_s
+    assert(!str_Propagate.empty?, "to_s non-empty for Propagate")
+    node_RangeLiteral = RangeLiteral.new(NumberLiteral.new("1"), NumberLiteral.new("10"), false)
+    str_RangeLiteral = node_RangeLiteral.to_s
+    assert(!str_RangeLiteral.empty?, "to_s non-empty for RangeLiteral")
+    node_ReadInstanceVar = ReadInstanceVar.new(Var.new("obj"), "@field")
+    str_ReadInstanceVar = node_ReadInstanceVar.to_s
+    assert(!str_ReadInstanceVar.empty?, "to_s non-empty for ReadInstanceVar")
+    node_Recover = Recover.new(Call.new(nil, "risky"), NumberLiteral.new("0"))
+    str_Recover = node_Recover.to_s
+    assert(!str_Recover.empty?, "to_s non-empty for Recover")
+    node_RegexLiteral = RegexLiteral.new(StringLiteral.new("foo"), RegexOptions::IGNORE_CASE)
+    str_RegexLiteral = node_RegexLiteral.to_s
+    assert(!str_RegexLiteral.empty?, "to_s non-empty for RegexLiteral")
+    node_Require = Require.new("json")
+    str_Require = node_Require.to_s
+    assert(!str_Require.empty?, "to_s non-empty for Require")
+    node_Rescue = Rescue.new(StringLiteral.new("err"), ([Path.new("Exception")] of ASTNode), "ex")
+    str_Rescue = node_Rescue.to_s
+    assert(!str_Rescue.empty?, "to_s non-empty for Rescue")
+    node_RespondsTo = RespondsTo.new(Var.new("x"), "to_s")
+    str_RespondsTo = node_RespondsTo.to_s
+    assert(!str_RespondsTo.empty?, "to_s non-empty for RespondsTo")
+    node_Return = Return.new(NumberLiteral.new("10"))
+    str_Return = node_Return.to_s
+    assert(!str_Return.empty?, "to_s non-empty for Return")
+    node_Select = Select.new([When.new(([Call.new(nil, "ch_receive")] of ASTNode), StringLiteral.new("got"))])
+    str_Select = node_Select.to_s
+    assert(!str_Select.empty?, "to_s non-empty for Select")
+    node_Self = Self.new
+    str_Self = node_Self.to_s
+    assert(!str_Self.empty?, "to_s non-empty for Self")
+    node_SizeOf = SizeOf.new(Path.new("Int32"))
+    str_SizeOf = node_SizeOf.to_s
+    assert(!str_SizeOf.empty?, "to_s non-empty for SizeOf")
+    node_Splat = Splat.new(Var.new("args"))
+    str_Splat = node_Splat.to_s
+    assert(!str_Splat.empty?, "to_s non-empty for Splat")
+    node_StringInterpolation = StringInterpolation.new(([StringLiteral.new("val="), Var.new("x")] of ASTNode))
+    str_StringInterpolation = node_StringInterpolation.to_s
+    assert(!str_StringInterpolation.empty?, "to_s non-empty for StringInterpolation")
+    node_StringLiteral = StringLiteral.new("hello")
+    str_StringLiteral = node_StringLiteral.to_s
+    assert(!str_StringLiteral.empty?, "to_s non-empty for StringLiteral")
+    node_SymbolLiteral = SymbolLiteral.new("my_sym")
+    str_SymbolLiteral = node_SymbolLiteral.to_s
+    assert(!str_SymbolLiteral.empty?, "to_s non-empty for SymbolLiteral")
+    node_TraitDef = TraitDef.new(Path.new("MyTrait"), NumberLiteral.new("1"))
+    str_TraitDef = node_TraitDef.to_s
+    assert(!str_TraitDef.empty?, "to_s non-empty for TraitDef")
+    node_TupleLiteral = TupleLiteral.new(([NumberLiteral.new("1"), StringLiteral.new("a")] of ASTNode))
+    str_TupleLiteral = node_TupleLiteral.to_s
+    assert(!str_TupleLiteral.empty?, "to_s non-empty for TupleLiteral")
+    node_TypeDeclaration = TypeDeclaration.new(Var.new("count"), Path.new("Int32"), NumberLiteral.new("0"))
+    str_TypeDeclaration = node_TypeDeclaration.to_s
+    assert(!str_TypeDeclaration.empty?, "to_s non-empty for TypeDeclaration")
+    node_TypeDef = TypeDef.new("SizeT", Path.new("UInt64"))
+    str_TypeDef = node_TypeDef.to_s
+    assert(!str_TypeDef.empty?, "to_s non-empty for TypeDef")
+    node_TypeOf = TypeOf.new(([Var.new("x")] of ASTNode))
+    str_TypeOf = node_TypeOf.to_s
+    assert(!str_TypeOf.empty?, "to_s non-empty for TypeOf")
+    node_Underscore = Underscore.new
+    str_Underscore = node_Underscore.to_s
+    assert(!str_Underscore.empty?, "to_s non-empty for Underscore")
+    node_UninitializedVar = UninitializedVar.new(Var.new("buffer"), Path.new("Pointer"))
+    str_UninitializedVar = node_UninitializedVar.to_s
+    assert(!str_UninitializedVar.empty?, "to_s non-empty for UninitializedVar")
+    node_Union = ASTUnion.new(([Path.new("Int32"), Path.new("String")] of ASTNode))
+    str_Union = node_Union.to_s
+    assert(!str_Union.empty?, "to_s non-empty for Union")
+    node_Unless = Unless.new(BoolLiteral.new(false), NumberLiteral.new("1"), NumberLiteral.new("0"))
+    str_Unless = node_Unless.to_s
+    assert(!str_Unless.empty?, "to_s non-empty for Unless")
+    node_Until = Until.new(BoolLiteral.new(false), NumberLiteral.new("42"))
+    str_Until = node_Until.to_s
+    assert(!str_Until.empty?, "to_s non-empty for Until")
+    node_UsingDecl = UsingDecl.new(["compiler", "foundation", "location"], ["Location"])
+    str_UsingDecl = node_UsingDecl.to_s
+    assert(!str_UsingDecl.empty?, "to_s non-empty for UsingDecl")
+    node_Var = Var.new("my_var")
+    str_Var = node_Var.to_s
+    assert(!str_Var.empty?, "to_s non-empty for Var")
+    node_VisibilityModifier = VisibilityModifier.new(Visibility::Private, Def.new("secret"))
+    str_VisibilityModifier = node_VisibilityModifier.to_s
+    assert(!str_VisibilityModifier.empty?, "to_s non-empty for VisibilityModifier")
+    node_When = When.new(([NumberLiteral.new("1")] of ASTNode), StringLiteral.new("one"))
+    str_When = node_When.to_s
+    assert(!str_When.empty?, "to_s non-empty for When")
+    node_While = While.new(BoolLiteral.new(true), NumberLiteral.new("42"))
+    str_While = node_While.to_s
+    assert(!str_While.empty?, "to_s non-empty for While")
+    node_Yield = Yield.new(([Var.new("y")] of ASTNode))
+    str_Yield = node_Yield.to_s
+    assert(!str_Yield.empty?, "to_s non-empty for Yield")
+    puts "ok (104 node kinds verified for to_s formatting)"
+  end
+
+  def self.test_visitor_traversal
+    puts "testing Visitor and ToSVisitor traversal..."
+    counter = NodeCounterVisitor.new
+    tree = Expressions.new(([
+      Assign.new(Var.new("x"), NumberLiteral.new("10")),
+      If.new(BoolLiteral.new(true), Return.new(Var.new("x")), Nop.new),
+      Call.new(nil, "print", ([StringLiteral.new("done")] of ASTNode)),
+    ] of ASTNode))
+    tree.accept(counter)
+    assert(counter.count == 11, "NodeCounterVisitor counted all nodes in tree")
+
+    tos_visitor = ToSVisitor.new
+    tree.accept(tos_visitor)
+    formatted = tos_visitor.to_s
+    assert(formatted.includes?("x = 10"), "ToSVisitor formatted Assign")
+    assert(formatted.includes?("if true"), "ToSVisitor formatted If")
+    assert(formatted.includes?("print("), "ToSVisitor formatted Call")
+    puts "ok (visitor traversal and ToSVisitor formatting verified)"
+  end
+
+  def self.test_transformer
+    puts "testing Transformer framework..."
+    folder = ConstantFolder.new
+    orig = Assign.new(Var.new("counter"), NumberLiteral.new("5"))
+    transformed = orig.transform(folder).as(Assign)
+    assert(transformed.target.as(Var).name == "counter_renamed", "transformer renamed target")
+    assert(transformed.value.as(NumberLiteral).value == "10", "transformer folded value")
+    puts "ok (transformer tree modification verified)"
+  end
+
+  def self.test_node_map
+    puts "testing out-of-band NodeMap side storage (no reopening of node types)..."
+    type_map = NodeMap(String).new
+    n1 = NumberLiteral.new("42")
+    n2 = StringLiteral.new("hello")
+    n3 = BoolLiteral.new(true)
+
+    type_map[n1] = "Int32"
+    type_map[n2] = "String"
+    type_map[n3] = "Bool"
+
+    assert(type_map.size == 3, "NodeMap contains 3 entries")
+    assert(type_map[n1] == "Int32", "NodeMap lookup n1")
+    assert(type_map[n2] == "String", "NodeMap lookup n2")
+    assert(type_map[n3] == "Bool", "NodeMap lookup n3")
+    assert(type_map.has_key?(n1), "NodeMap has_key? n1")
+    assert(!type_map.has_key?(Var.new("other")), "NodeMap does not have unmapped node")
+
+    deleted = type_map.delete(n2)
+    assert(deleted == "String", "NodeMap delete returned deleted value")
+    assert(type_map.size == 2, "NodeMap size decreased after delete")
+    assert(type_map[n2]? == nil, "deleted key returns nil")
+
+    type_map.clear
+    assert(type_map.empty?, "NodeMap clear emptied store")
+    assert(type_map.size == 0, "NodeMap size 0 after clear")
+    puts "ok (NodeMap out-of-band side storage verified)"
+  end
+
+  def self.run_all
+    puts "=== Running Selfhost AST Exercise Suite ==="
+    test_node_construction
+    test_node_cloning
+    test_node_equality
+    test_node_to_s
+    test_visitor_traversal
+    test_transformer
+    test_node_map
+    puts "ALL SELFHOST AST CHECKS PASSED SUCCESSFULLY!"
+  end
+end
+
+BenchSelfhostAstExercise.run_all

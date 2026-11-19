@@ -1,0 +1,15 @@
+@[Unsafe("the fixture holds an inline asm template in a naked function")]
+
+@[NoInline]
+@[Naked]
+fun pair : Nil
+  asm("stp x19, x20, [sp, #-16]!\nmov x19, x0\nmov x20, x1\nadd x0, x19, #1\nldp x19, x20, [sp], #16\nret" ::: "x19", "x20" : "volatile")
+end
+
+def callpair : Int64
+  out = 0_i64
+  asm("bl _pair" : "={x0}"(out) : "{x0}"(3_i64), "{x1}"(4_i64) : "x30" : "volatile")
+  out
+end
+
+puts "#{callpair()}"

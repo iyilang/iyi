@@ -1,0 +1,100 @@
+; iyi-ir 1
+module "calls_both"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @ihelp(i64 %a) {
+entry:
+  %h1 = mul i64 %a, 2
+  %h2 = mul i64 %a, 5
+  %h3 = mul i64 %a, 8
+  %h4 = mul i64 %a, 11
+  %h5 = mul i64 %a, 14
+  %h6 = mul i64 %a, 17
+  %h7 = mul i64 %a, 20
+  %h8 = mul i64 %a, 23
+  %h9 = mul i64 %a, 26
+  %h10 = mul i64 %a, 29
+  %h11 = mul i64 %a, 32
+  %h12 = mul i64 %a, 35
+  %h13 = mul i64 %a, 38
+  %h14 = mul i64 %a, 41
+  %hs2 = add i64 %h1, %h2
+  %hs3 = add i64 %hs2, %h3
+  %hs4 = add i64 %hs3, %h4
+  %hs5 = add i64 %hs4, %h5
+  %hs6 = add i64 %hs5, %h6
+  %hs7 = add i64 %hs6, %h7
+  %hs8 = add i64 %hs7, %h8
+  %hs9 = add i64 %hs8, %h9
+  %hs10 = add i64 %hs9, %h10
+  %hs11 = add i64 %hs10, %h11
+  %hs12 = add i64 %hs11, %h12
+  %hs13 = add i64 %hs12, %h13
+  %hs14 = add i64 %hs13, %h14
+  ret i64 %hs14
+}
+
+define internal double @fhelp(double %a) {
+entry:
+  %q1 = fmul double %a, 0x3ff0000000000000
+  %q2 = fmul double %a, 0x4008000000000000
+  %q3 = fmul double %a, 0x4014000000000000
+  %q4 = fmul double %a, 0x401c000000000000
+  %q5 = fmul double %a, 0x4022000000000000
+  %q6 = fmul double %a, 0x4026000000000000
+  %q7 = fmul double %a, 0x402a000000000000
+  %q8 = fmul double %a, 0x402e000000000000
+  %q9 = fmul double %a, 0x4031000000000000
+  %q10 = fmul double %a, 0x4033000000000000
+  %q11 = fmul double %a, 0x4035000000000000
+  %q12 = fmul double %a, 0x4037000000000000
+  %q13 = fmul double %a, 0x4039000000000000
+  %q14 = fmul double %a, 0x403b000000000000
+  %qs2 = fadd double %q1, %q2
+  %qs3 = fadd double %qs2, %q3
+  %qs4 = fadd double %qs3, %q4
+  %qs5 = fadd double %qs4, %q5
+  %qs6 = fadd double %qs5, %q6
+  %qs7 = fadd double %qs6, %q7
+  %qs8 = fadd double %qs7, %q8
+  %qs9 = fadd double %qs8, %q9
+  %qs10 = fadd double %qs9, %q10
+  %qs11 = fadd double %qs10, %q11
+  %qs12 = fadd double %qs11, %q12
+  %qs13 = fadd double %qs12, %q13
+  %qs14 = fadd double %qs13, %q14
+  ret double %qs14
+}
+
+define internal i64 @mix(i64 %x, double %y) {
+entry:
+  %g1 = mul i64 %x, 7
+  %g2 = add i64 %x, 9
+  %g3 = sub i64 %x, 4
+  %f1 = fmul double %y, 0x4000000000000000
+  %f2 = fadd double %y, 0x4008000000000000
+  %ci = call i64 (i64) @ihelp(i64 %x)
+  %g4 = add i64 %g1, %ci
+  %cf = call double (double) @fhelp(double %y)
+  %f3 = fadd double %f1, %cf
+  %g5 = add i64 %g4, %g2
+  %gi = fptosi double %f3 to i64
+  %f4 = fadd double %f2, %f3
+  %gf = fptosi double %f4 to i64
+  %t1 = add i64 %g5, %g3
+  %t2 = add i64 %t1, %gi
+  %t3 = add i64 %t2, %gf
+  ret i64 %t3
+}
+
+define i32 @main() {
+entry:
+  %r1 = call i64 (i64, double) @mix(i64 5, double 0x3ff8000000000000)
+  %r2 = call i64 (i64, double) @mix(i64 -2, double 0x3fe0000000000000)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r1)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r2)
+  ret i32 0
+}

@@ -1,0 +1,88 @@
+module calls_both
+
+import std/float
+
+def ihelp(a : Int64) : Int64
+  h1 = a * 2_i64
+  h2 = a * 5_i64
+  h3 = a * 8_i64
+  h4 = a * 11_i64
+  h5 = a * 14_i64
+  h6 = a * 17_i64
+  h7 = a * 20_i64
+  h8 = a * 23_i64
+  h9 = a * 26_i64
+  h10 = a * 29_i64
+  h11 = a * 32_i64
+  h12 = a * 35_i64
+  h13 = a * 38_i64
+  h14 = a * 41_i64
+  hs2 = h1 + h2
+  hs3 = hs2 + h3
+  hs4 = hs3 + h4
+  hs5 = hs4 + h5
+  hs6 = hs5 + h6
+  hs7 = hs6 + h7
+  hs8 = hs7 + h8
+  hs9 = hs8 + h9
+  hs10 = hs9 + h10
+  hs11 = hs10 + h11
+  hs12 = hs11 + h12
+  hs13 = hs12 + h13
+  hs14 = hs13 + h14
+  hs14
+end
+
+def fhelp(a : Float64) : Float64
+  q1 = a * 1.0
+  q2 = a * 3.0
+  q3 = a * 5.0
+  q4 = a * 7.0
+  q5 = a * 9.0
+  q6 = a * 11.0
+  q7 = a * 13.0
+  q8 = a * 15.0
+  q9 = a * 17.0
+  q10 = a * 19.0
+  q11 = a * 21.0
+  q12 = a * 23.0
+  q13 = a * 25.0
+  q14 = a * 27.0
+  qs2 = q1 + q2
+  qs3 = qs2 + q3
+  qs4 = qs3 + q4
+  qs5 = qs4 + q5
+  qs6 = qs5 + q6
+  qs7 = qs6 + q7
+  qs8 = qs7 + q8
+  qs9 = qs8 + q9
+  qs10 = qs9 + q10
+  qs11 = qs10 + q11
+  qs12 = qs11 + q12
+  qs13 = qs12 + q13
+  qs14 = qs13 + q14
+  qs14
+end
+
+def mix(x : Int64, y : Float64) : Int64
+  g1 = x * 7_i64
+  g2 = x + 9_i64
+  g3 = x - 4_i64
+  f1 = y * 2.0
+  f2 = y + 3.0
+  ci = ihelp(x)
+  g4 = g1 + ci
+  cf = fhelp(y)
+  f3 = f1 + cf
+  g5 = g4 + g2
+  gi = f3.to_i64
+  f4 = f2 + f3
+  gf = f4.to_i64
+  t1 = g5 + g3
+  t2 = t1 + gi
+  t3 = t2 + gf
+  t3
+end
+
+puts "#{mix(5_i64, 1.5)}"
+puts "#{mix(-2_i64, 0.5)}"

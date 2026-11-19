@@ -1,0 +1,36 @@
+; iyi-ir 1
+module "globals"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [13 x i8] c"%s %ld %d\0A\00"
+@counter = internal global i64 0, align 8
+@msg = private constant [6 x i8] c"hello\00"
+@table = internal global [2 x ptr] [ ptr @counter, ptr @msg ]
+@environ = external global ptr
+@weight = internal global i32 7, align 4
+
+define internal i64 @bump() {
+entry:
+  %v = load i64, ptr @counter, align 8
+  %n = add i64 %v, 1
+  store i64 %n, ptr @counter, align 8
+  ret i64 %n
+}
+
+define i32 @main() {
+entry:
+  %a = call i64 () @bump()
+  %b = call i64 () @bump()
+  %c = call i64 () @bump()
+  %slot = getelementptr [2 x ptr], ptr @table, i64 0, i64 1
+  %text = load ptr, ptr %slot, align 8
+  %env = load ptr, ptr @environ, align 8
+  %envok = icmp ne ptr %env, null
+  %ok = zext i1 %envok to i32
+  %w = load i32, ptr @weight, align 4
+  %wsum = add i32 %w, %ok
+  %final = load i64, ptr @counter, align 8
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, ptr %text, i64 %final, i32 %wsum)
+  ret i32 0
+}

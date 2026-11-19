@@ -1,0 +1,77 @@
+module jump_widths
+
+import std/int
+
+def neg8(n : Int8) : Int32
+  case n
+  when -5 then 450
+  when -4 then 460
+  when -3 then 470
+  when -2 then 480
+  when -1 then 490
+  when  0 then 500
+  when  1 then 510
+  when  2 then 520
+  when  3 then 530
+  when  4 then 540
+  else         -1
+  end
+end
+
+def neg16(n : Int16) : Int32
+  case n
+  when -4 then 560
+  when -3 then 570
+  when -2 then 580
+  when -1 then 590
+  when  0 then 600
+  when  1 then 610
+  when  2 then 620
+  when  3 then 630
+  when  4 then 640
+  when  5 then 650
+  else         -2
+  end
+end
+
+def far64(n : Int64) : Int32
+  case n
+  when 8589934592 then 1
+  when 8589934593 then 8
+  when 8589934594 then 15
+  when 8589934595 then 22
+  when 8589934596 then 29
+  when 8589934597 then 36
+  else                 -3
+  end
+end
+
+def neg32(n : Int32) : Int32
+  case n
+  when -3 then 91
+  when -2 then 94
+  when -1 then 97
+  when  0 then 100
+  when  1 then 103
+  when  2 then 106
+  when  3 then 109
+  when  4 then 112
+  when  5 then 115
+  when  6 then 118
+  else         -4
+  end
+end
+
+puts "#{neg8(-5)}"
+puts "#{neg8(4)}"
+puts "#{neg8(5)}"
+puts "#{neg8(-6)}"
+puts "#{neg16(-4)}"
+puts "#{neg16(5)}"
+puts "#{neg16(6)}"
+puts "#{far64(8589934592)}"
+puts "#{far64(8589934597)}"
+puts "#{far64(8589934591)}"
+puts "#{neg32(-3)}"
+puts "#{neg32(6)}"
+puts "#{neg32(7)}"

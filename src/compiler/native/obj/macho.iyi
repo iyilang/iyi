@@ -1,0 +1,1473 @@
+module compiler/native/obj/macho
+
+import compiler/platform/target::{Target}
+import compiler/native/obj/object::{ObjectFile, ObjFormat, Section, SectionKind, Symbol, SymbolBinding, SymbolKind, Reloc, RelocKind, ObjError, BuildVersion, BuildTool, DataInCodeEntry}
+import std/slice::{Slice, Bytes}
+
+# Mach-O constants as <mach-o/loader.h>, <mach-o/nlist.h>, <mach-o/reloc.h> and
+# <mach-o/arm64/reloc.h> name them. Int64 throughout, so every shift and
+# comparison is on one width.
+class MachO
+  MAGIC_64                   = 0xfeedfacf_i64
+  CPU_TYPE_ARM64             = 0x0100000c_i64
+  MH_OBJECT                  =          1_i64
+  MH_SUBSECTIONS_VIA_SYMBOLS =     0x2000_i64
+  HEADER_SIZE                =         32_i64
+  SECTION_SIZE               =         80_i64
+  SEGMENT_HEADER_SIZE        =         72_i64
+  NLIST_SIZE                 =         16_i64
+  RELOC_SIZE                 =          8_i64
+  LC_SEGMENT_64              =       0x19_i64
+  LC_SYMTAB                  =        0x2_i64
+  LC_DYSYMTAB                =        0xb_i64
+  LC_BUILD_VERSION           =       0x32_i64
+  LC_DATA_IN_CODE            =       0x29_i64
+  LC_LINKER_OPTION           =       0x2d_i64
+  S_REGULAR                  =        0x0_i64
+  S_ZEROFILL                 =        0x1_i64
+  S_NON_LAZY_SYMBOL_POINTERS =        0x6_i64
+  S_LAZY_SYMBOL_POINTERS     =        0x7_i64
+  S_SYMBOL_STUBS             =        0x8_i64
+  S_THREAD_LOCAL_REGULAR     =       0x11_i64
+  S_THREAD_LOCAL_ZEROFILL    =       0x12_i64
+  S_THREAD_LOCAL_VARIABLES   =       0x13_i64
+  S_ATTR_PURE_INSTRUCTIONS   = 0x80000000_i64
+  S_ATTR_SOME_INSTRUCTIONS   =      0x400_i64
+  S_ATTR_DEBUG               =  0x2000000_i64
+  TEXT_DEFAULT_FLAGS         = 0x80000400_i64
+  TLS_TYPE_MASK              =       0xff_i64
+  N_STAB                     =       0xe0_i64
+  N_TYPE                     =        0xe_i64
+  N_UNDF                     =          0_i64
+  N_ABS                      =        0x2_i64
+  N_SECT                     =        0xe_i64
+  N_PEXT                     =       0x10_i64
+  N_EXT                      =        0x1_i64
+  N_WEAK_REF                 =       0x40_i64
+  N_WEAK_DEF                 =       0x80_i64
+  # ARM64_RELOC_* as <mach-o/arm64/reloc.h> numbers them.
+  R_UNSIGNED            =  0_i64
+  R_SUBTRACTOR          =  1_i64
+  R_BRANCH26            =  2_i64
+  R_PAGE21              =  3_i64
+  R_PAGEOFF12           =  4_i64
+  R_GOT_LOAD_PAGE21     =  5_i64
+  R_GOT_LOAD_PAGEOFF12  =  6_i64
+  R_POINTER_TO_GOT      =  7_i64
+  R_TLVP_LOAD_PAGE21    =  8_i64
+  R_TLVP_LOAD_PAGEOFF12 =  9_i64
+  R_ADDEND              = 10_i64
+end
+
+# Reads an unsigned little-endian integer of `width` bytes. The caller has
+# checked that the bytes exist.
+def le_word(bytes : Bytes, at : Int64, width : Int32) : Int64
+  value = 0_i64
+  i = width - 1
+  while i >= 0
+    value = value.unsafe_shl(8_i64) | bytes[(at + i.to_i64).to_i32].to_i64
+    i = i - 1
+  end
+  value
+end
+
+# The canonical name of a Mach-O section, or "SEG,sect" for one the model names
+# by its Mach-O name. `macho_section_names` is the inverse.
+def canonical_section_name(segment : String, section : String) : String
+  if segment == "__TEXT" && section == "__text"
+    return ".text"
+  end
+  if segment == "__TEXT" && section == "__const"
+    return ".rodata"
+  end
+  if segment == "__DATA" && section == "__data"
+    return ".data"
+  end
+  if segment == "__DATA" && section == "__bss"
+    return ".bss"
+  end
+  if segment == "__DATA" && section == "__thread_data"
+    return ".tdata"
+  end
+  if segment == "__DATA" && section == "__thread_bss"
+    return ".tbss"
+  end
+  if segment == "__DATA" && section == "__thread_vars"
+    return ".tlv"
+  end
+  "#{segment},#{section}"
+end
+
+# The Mach-O segment and section names a model section name is written under.
+def macho_section_names(name : String) : Array(String)
+  if name == ".text"
+    return ["__TEXT", "__text"]
+  end
+  if name == ".rodata"
+    return ["__TEXT", "__const"]
+  end
+  if name == ".data"
+    return ["__DATA", "__data"]
+  end
+  if name == ".bss"
+    return ["__DATA", "__bss"]
+  end
+  if name == ".tdata"
+    return ["__DATA", "__thread_data"]
+  end
+  if name == ".tbss"
+    return ["__DATA", "__thread_bss"]
+  end
+  if name == ".tlv"
+    return ["__DATA", "__thread_vars"]
+  end
+  parts = name.split(',')
+  if parts.size != 2
+    raise "section #{name} is neither a canonical name nor SEG,sect"
+  end
+  [parts[0], parts[1]]
+end
+
+# The relocation type, pc-relative flag and log2 length (2 for 4 bytes, 3 for
+# 8) that a Mach-O arm64 relocation of `kind` carries.
+def arm64_relocation_shape(kind : RelocKind) : Array(Int64)
+  if kind == RelocKind::Abs64
+    return [MachO::R_UNSIGNED, 0_i64, 3_i64]
+  end
+  if kind == RelocKind::Abs32
+    return [MachO::R_UNSIGNED, 0_i64, 2_i64]
+  end
+  if kind == RelocKind::A64Call26 || kind == RelocKind::A64Jump26
+    return [MachO::R_BRANCH26, 1_i64, 2_i64]
+  end
+  if kind == RelocKind::A64AdrpPage21
+    return [MachO::R_PAGE21, 1_i64, 2_i64]
+  end
+  if kind == RelocKind::A64AddLo12 || kind == RelocKind::A64Ldst8Lo12 || kind == RelocKind::A64Ldst16Lo12 || kind == RelocKind::A64Ldst32Lo12 || kind == RelocKind::A64Ldst64Lo12 || kind == RelocKind::A64Ldst128Lo12
+    return [MachO::R_PAGEOFF12, 0_i64, 2_i64]
+  end
+  if kind == RelocKind::A64GotPage21
+    return [MachO::R_GOT_LOAD_PAGE21, 1_i64, 2_i64]
+  end
+  if kind == RelocKind::A64GotLo12
+    return [MachO::R_GOT_LOAD_PAGEOFF12, 0_i64, 2_i64]
+  end
+  if kind == RelocKind::A64PointerToGot
+    return [MachO::R_POINTER_TO_GOT, 1_i64, 2_i64]
+  end
+  if kind == RelocKind::A64TlvpPage21
+    return [MachO::R_TLVP_LOAD_PAGE21, 1_i64, 2_i64]
+  end
+  if kind == RelocKind::A64TlvpLo12
+    return [MachO::R_TLVP_LOAD_PAGEOFF12, 0_i64, 2_i64]
+  end
+  raise "relocation kind #{kind} has no Mach-O arm64 form"
+end
+
+# One section header as the file states it, before its bytes are copied.
+class MachOSectionHeader
+  property segment : String
+  property section : String
+  property addr : Int64
+  property size : Int64
+  property offset : Int64
+  property align_exp : Int64
+  property reloff : Int64
+  property nreloc : Int64
+  property flags : Int64
+
+  def initialize(@segment : String, @section : String, @addr : Int64, @size : Int64, @offset : Int64, @align_exp : Int64, @reloff : Int64, @nreloc : Int64, @flags : Int64)
+  end
+
+  def label : String
+    "#{@segment},#{@section}"
+  end
+
+  def zero_fill? : Bool
+    type = @flags & MachO::TLS_TYPE_MASK
+    type == MachO::S_ZEROFILL || type == MachO::S_THREAD_LOCAL_ZEROFILL
+  end
+
+  def kind : SectionKind
+    type = @flags & MachO::TLS_TYPE_MASK
+    if zero_fill?
+      if type == MachO::S_THREAD_LOCAL_ZEROFILL
+        return SectionKind::TlsZeroFill
+      end
+      return SectionKind::ZeroFill
+    end
+    if type == MachO::S_THREAD_LOCAL_REGULAR
+      return SectionKind::TlsData
+    end
+    if type == MachO::S_THREAD_LOCAL_VARIABLES
+      return SectionKind::TlsVars
+    end
+    if @section == "__eh_frame" || @section == "__compact_unwind" || @section == "__unwind_info"
+      return SectionKind::Unwind
+    end
+    if (@flags & MachO::S_ATTR_PURE_INSTRUCTIONS) != 0 || (@flags & MachO::S_ATTR_SOME_INSTRUCTIONS) != 0
+      return SectionKind::Text
+    end
+    if @segment == "__DWARF" || (@flags & MachO::S_ATTR_DEBUG) != 0
+      return SectionKind::Other
+    end
+    if @section == "__const" || @segment == "__DATA_CONST" || @segment == "__TEXT"
+      return SectionKind::ReadOnly
+    end
+    if @segment == "__DATA"
+      return SectionKind::Data
+    end
+    SectionKind::Other
+  end
+end
+
+# Reads one Mach-O arm64 MH_OBJECT. Every failure is recorded and returned as
+# an ObjError that names the section, offset or symbol at fault; nothing raises.
+class MachOReader
+  property data : Bytes
+  property target : ::Compiler::Platform::Target::Target
+  property failure : String?
+  property ncmds : Int64
+  property sizeofcmds : Int64
+  property headers : Array(MachOSectionHeader)
+  property sections : Array(Section)
+  property symbols : Array(Symbol)
+  property has_symtab : Bool
+  property nsyms : Int64
+  property symoff : Int64
+  property stroff : Int64
+  property strsize : Int64
+  property has_dysym : Bool
+  property dysym : Array(Int64)
+  property build : BuildVersion?
+  property data_in_code : Array(DataInCodeEntry)
+  property linker_options : Array(String)
+
+  def initialize(@data : Bytes, @target : ::Compiler::Platform::Target::Target)
+    @failure = nil
+    @ncmds = 0_i64
+    @sizeofcmds = 0_i64
+    @headers = [] of MachOSectionHeader
+    @sections = [] of Section
+    @symbols = [] of Symbol
+    @has_symtab = false
+    @nsyms = 0_i64
+    @symoff = 0_i64
+    @stroff = 0_i64
+    @strsize = 0_i64
+    @has_dysym = false
+    @dysym = [] of Int64
+    @build = nil
+    @data_in_code = [] of DataInCodeEntry
+    @linker_options = [] of String
+  end
+
+  def read : ObjectFile | ObjError
+    read_header
+    read_commands
+    read_sections
+    read_symbols
+    check_groups
+    if message = @failure
+      return ObjError.new(message)
+    end
+    file = ObjectFile.new(ObjFormat::MachO, @target, "llvm")
+    file.sections = @sections
+    file.symbols = @symbols
+    file.build_version = @build
+    file.linker_options = @linker_options
+    file.data_in_code = @data_in_code
+    file
+  end
+
+  def reject(message : String) : Nil
+    unless @failure
+      @failure = message
+    end
+  end
+
+  def size : Int64
+    @data.size.to_i64
+  end
+
+  def fits?(at : Int64, count : Int64) : Bool
+    at >= 0_i64 && count >= 0_i64 && at <= size - count
+  end
+
+  def need(at : Int64, count : Int64, what : String) : Bool
+    return true if fits?(at, count)
+    reject("#{what} runs past the end of the file (#{size} bytes)")
+    false
+  end
+
+  def word(at : Int64, width : Int32) : Int64
+    le_word(@data, at, width)
+  end
+
+  def byte(at : Int64) : Int64
+    @data[at.to_i32].to_i64
+  end
+
+  # The bytes from `start` up to a NUL that must come before `limit`.
+  def c_string(start : Int64, limit : Int64, what : String) : String
+    end_at = start
+    while end_at < limit && @data[end_at.to_i32] != 0_u8
+      end_at = end_at + 1
+    end
+    if end_at >= limit
+      reject("#{what} is not NUL-terminated within its table")
+      return ""
+    end
+    copy = Slice(UInt8).new((end_at - start).to_i32)
+    i = 0
+    while i < copy.size
+      copy[i] = @data[(start + i.to_i64).to_i32]
+      i = i + 1
+    end
+    String.new(copy)
+  end
+
+  def read_header : Nil
+    return if @failure
+    return unless need(0_i64, MachO::HEADER_SIZE, "the Mach-O header")
+    if word(0_i64, 4) != MachO::MAGIC_64
+      reject("not a 64-bit little-endian Mach-O file: magic #{word(0_i64, 4)}")
+      return
+    end
+    cputype = word(4_i64, 4)
+    subtype = word(8_i64, 4)
+    filetype = word(12_i64, 4)
+    @ncmds = word(16_i64, 4)
+    @sizeofcmds = word(20_i64, 4)
+    flags = word(24_i64, 4)
+    if cputype != MachO::CPU_TYPE_ARM64
+      reject("not an arm64 Mach-O object: cputype #{cputype}")
+    elsif @target.architecture != "aarch64"
+      reject("the target is #{@target.architecture}, and this object is arm64")
+    elsif subtype != 0_i64
+      reject("cpusubtype #{subtype}: only ARM64_ALL objects are read")
+    elsif filetype != MachO::MH_OBJECT
+      reject("filetype #{filetype} is not MH_OBJECT")
+    elsif flags != MachO::MH_SUBSECTIONS_VIA_SYMBOLS
+      reject("header flags #{flags}: only MH_SUBSECTIONS_VIA_SYMBOLS is read")
+    end
+    need(MachO::HEADER_SIZE, @sizeofcmds, "the load commands")
+  end
+
+  def read_commands : Nil
+    return if @failure
+    at = MachO::HEADER_SIZE
+    end_cmds = MachO::HEADER_SIZE + @sizeofcmds
+    i = 0_i64
+    while i < @ncmds
+      return if @failure
+      unless need(at, 8_i64, "load command #{i}")
+        return
+      end
+      cmd = word(at, 4)
+      cmdsize = word(at + 4_i64, 4)
+      if cmdsize < 8_i64 || at + cmdsize > end_cmds
+        reject("load command #{i} has size #{cmdsize} at offset #{at}, outside the load commands")
+        return
+      end
+      if cmd == MachO::LC_SEGMENT_64
+        read_segment(at, cmdsize)
+      elsif cmd == MachO::LC_SYMTAB
+        read_symtab(at)
+      elsif cmd == MachO::LC_DYSYMTAB
+        read_dysymtab(at, cmdsize)
+      elsif cmd == MachO::LC_BUILD_VERSION
+        read_build_version(at, cmdsize)
+      elsif cmd == MachO::LC_DATA_IN_CODE
+        read_data_in_code(at)
+      elsif cmd == MachO::LC_LINKER_OPTION
+        read_linker_option(at, cmdsize)
+      else
+        reject("load command #{cmd} at offset #{at} is not one the native object reader knows")
+      end
+      at = at + cmdsize
+      i = i + 1
+    end
+    if !@failure && at != end_cmds
+      reject("the load commands end at #{at}, but the header says #{end_cmds}")
+    end
+  end
+
+  def read_segment(at : Int64, cmdsize : Int64) : Nil
+    nsects = word(at + 64_i64, 4)
+    if cmdsize < MachO::SEGMENT_HEADER_SIZE + nsects * MachO::SECTION_SIZE
+      reject("LC_SEGMENT_64 at #{at} is too short for its #{nsects} sections")
+      return
+    end
+    k = 0_i64
+    while k < nsects
+      return if @failure
+      sec = at + MachO::SEGMENT_HEADER_SIZE + k * MachO::SECTION_SIZE
+      sectname = fixed_name(sec, 16_i64)
+      segname = fixed_name(sec + 16_i64, 16_i64)
+      addr = word(sec + 32_i64, 8)
+      size = word(sec + 40_i64, 8)
+      offset = word(sec + 48_i64, 4)
+      align_exp = word(sec + 52_i64, 4)
+      reloff = word(sec + 56_i64, 4)
+      nreloc = word(sec + 60_i64, 4)
+      flags = word(sec + 64_i64, 4)
+      type = flags & MachO::TLS_TYPE_MASK
+      if type == MachO::S_NON_LAZY_SYMBOL_POINTERS || type == MachO::S_LAZY_SYMBOL_POINTERS || type == MachO::S_SYMBOL_STUBS
+        reject("#{segname},#{sectname} is an indirect symbol section, which objects read here do not carry")
+        return
+      end
+      if align_exp > 31_i64
+        reject("#{segname},#{sectname} has alignment 2^#{align_exp}")
+        return
+      end
+      @headers << MachOSectionHeader.new(segname, sectname, addr, size, offset, align_exp, reloff, nreloc, flags)
+      k = k + 1
+    end
+  end
+
+  def fixed_name(at : Int64, width : Int64) : String
+    len = 0_i64
+    while len < width && @data[(at + len).to_i32] != 0_u8
+      len = len + 1_i64
+    end
+    copy = Slice(UInt8).new(len.to_i32)
+    i = 0
+    while i < copy.size
+      copy[i] = @data[(at + i.to_i64).to_i32]
+      i = i + 1
+    end
+    String.new(copy)
+  end
+
+  def read_symtab(at : Int64) : Nil
+    return if @failure
+    if @has_symtab
+      reject("the object has two LC_SYMTAB commands")
+      return
+    end
+    @has_symtab = true
+    @symoff = word(at + 8_i64, 4)
+    @nsyms = word(at + 12_i64, 4)
+    @stroff = word(at + 16_i64, 4)
+    @strsize = word(at + 20_i64, 4)
+    need(@symoff, @nsyms * MachO::NLIST_SIZE, "the symbol table")
+    need(@stroff, @strsize, "the string table")
+  end
+
+  def read_dysymtab(at : Int64, cmdsize : Int64) : Nil
+    return if @failure
+    if cmdsize < 80_i64
+      reject("LC_DYSYMTAB at #{at} is too short")
+      return
+    end
+    @has_dysym = true
+    k = 0_i64
+    while k < 6_i64
+      @dysym << word(at + 8_i64 + k * 4_i64, 4)
+      k = k + 1
+    end
+  end
+
+  def read_build_version(at : Int64, cmdsize : Int64) : Nil
+    return if @failure
+    if @build
+      reject("the object has two LC_BUILD_VERSION commands")
+      return
+    end
+    ntools = word(at + 20_i64, 4)
+    if cmdsize < 24_i64 + ntools * 8_i64
+      reject("LC_BUILD_VERSION at #{at} is too short for its #{ntools} tools")
+      return
+    end
+    tools = [] of BuildTool
+    k = 0_i64
+    while k < ntools
+      p = at + 24_i64 + k * 8_i64
+      tools << BuildTool.new(word(p, 4).to_i32, word(p + 4_i64, 4).to_i32)
+      k = k + 1
+    end
+    @build = BuildVersion.new(word(at + 8_i64, 4).to_i32, word(at + 12_i64, 4).to_i32, word(at + 16_i64, 4).to_i32, tools)
+  end
+
+  def read_data_in_code(at : Int64) : Nil
+    return if @failure
+    dataoff = word(at + 8_i64, 4)
+    datasize = word(at + 12_i64, 4)
+    return unless need(dataoff, datasize, "the data-in-code table")
+    if datasize % 8_i64 != 0_i64
+      reject("the data-in-code table is #{datasize} bytes, not a whole number of entries")
+      return
+    end
+    n = datasize.unsafe_shr(3_i64)
+    k = 0_i64
+    while k < n
+      p = dataoff + k * 8_i64
+      @data_in_code << DataInCodeEntry.new(word(p, 4).to_i32, word(p + 4_i64, 2).to_i32, word(p + 6_i64, 2).to_i32)
+      k = k + 1
+    end
+  end
+
+  def read_linker_option(at : Int64, cmdsize : Int64) : Nil
+    return if @failure
+    count = word(at + 8_i64, 4)
+    p = at + 12_i64
+    limit = at + cmdsize
+    k = 0_i64
+    while k < count
+      return if @failure
+      text = c_string(p, limit, "an LC_LINKER_OPTION string")
+      @linker_options << text
+      p = p + text.bytesize.to_i64 + 1_i64
+      k = k + 1
+    end
+  end
+
+  def read_sections : Nil
+    return if @failure
+    k = 0
+    while k < @headers.size
+      return if @failure
+      h = @headers[k]
+      bytes = Slice(UInt8).new(0)
+      if !h.zero_fill?
+        return unless need(h.offset, h.size, "section #{h.label}")
+        bytes = Slice(UInt8).new(h.size.to_i32)
+        i = 0
+        while i < bytes.size
+          bytes[i] = @data[(h.offset + i.to_i64).to_i32]
+          i = i + 1
+        end
+      end
+      relocs = [] of Reloc
+      read_relocs(h, bytes, relocs)
+      return if @failure
+      name = canonical_section_name(h.segment, h.section)
+      align = 1_i64.unsafe_shl(h.align_exp).to_i32
+      size = h.size
+      @sections << Section.new(name, h.kind, align, bytes, size, relocs, h.flags)
+      k = k + 1
+    end
+  end
+
+  # The symbol a relocation's number names: an index into the symbol table when
+  # the record is extern, else a section, which the model names -(index + 1).
+  def symbol_ref(ext : Int64, symnum : Int64, h : MachOSectionHeader) : Int64
+    if ext == 1_i64
+      if symnum >= @nsyms
+        reject("#{h.label} has a relocation against symbol #{symnum}, past the #{@nsyms} symbols")
+        return 0_i64
+      end
+      return symnum
+    end
+    if symnum < 1_i64 || symnum > @headers.size.to_i64
+      reject("#{h.label} has a relocation against section #{symnum}, which is not one of the #{@headers.size} sections")
+      return 0_i64
+    end
+    0_i64 - symnum
+  end
+
+  def sign_extend_24(value : Int64) : Int64
+    if value >= 0x800000_i64
+      return value - 0x1000000_i64
+    end
+    value
+  end
+
+  # The model kind of a relocation that is not part of a pair or an addend.
+  def primary_kind(rtype : Int64, pcrel : Int64, len : Int64, address : Int64, bytes : Bytes, h : MachOSectionHeader) : RelocKind
+    shape_ok = false
+    kind = RelocKind::Abs64
+    if rtype == MachO::R_UNSIGNED
+      if pcrel == 0_i64 && len == 3_i64
+        kind = RelocKind::Abs64
+        shape_ok = true
+      elsif pcrel == 0_i64 && len == 2_i64
+        kind = RelocKind::Abs32
+        shape_ok = true
+      end
+    elsif rtype == MachO::R_BRANCH26 && pcrel == 1_i64 && len == 2_i64
+      word_at = le_word_checked(bytes, address, h)
+      kind = RelocKind::A64Jump26
+      if ((word_at.unsafe_shr(31_i64)) & 1_i64) == 1_i64
+        kind = RelocKind::A64Call26
+      end
+      shape_ok = true
+    elsif rtype == MachO::R_PAGE21 && pcrel == 1_i64 && len == 2_i64
+      kind = RelocKind::A64AdrpPage21
+      shape_ok = true
+    elsif rtype == MachO::R_PAGEOFF12 && pcrel == 0_i64 && len == 2_i64
+      word_at = le_word_checked(bytes, address, h)
+      if ((word_at.unsafe_shr(23_i64)) & 63_i64) == 34_i64
+        kind = RelocKind::A64AddLo12
+        shape_ok = true
+      elsif ((word_at.unsafe_shr(27_i64)) & 7_i64) == 7_i64 && ((word_at.unsafe_shr(24_i64)) & 3_i64) == 1_i64
+        size = (word_at.unsafe_shr(30_i64)) & 3_i64
+        vector = (word_at.unsafe_shr(26_i64)) & 1_i64
+        opc = (word_at.unsafe_shr(22_i64)) & 3_i64
+        shape_ok = true
+        if vector == 1_i64 && size == 0_i64 && opc == 3_i64
+          kind = RelocKind::A64Ldst128Lo12
+        elsif size == 0_i64
+          kind = RelocKind::A64Ldst8Lo12
+        elsif size == 1_i64
+          kind = RelocKind::A64Ldst16Lo12
+        elsif size == 2_i64
+          kind = RelocKind::A64Ldst32Lo12
+        else
+          kind = RelocKind::A64Ldst64Lo12
+        end
+      end
+    elsif rtype == MachO::R_GOT_LOAD_PAGE21 && pcrel == 1_i64 && len == 2_i64
+      kind = RelocKind::A64GotPage21
+      shape_ok = true
+    elsif rtype == MachO::R_GOT_LOAD_PAGEOFF12 && pcrel == 0_i64 && len == 2_i64
+      kind = RelocKind::A64GotLo12
+      shape_ok = true
+    elsif rtype == MachO::R_POINTER_TO_GOT && pcrel == 1_i64 && len == 2_i64
+      kind = RelocKind::A64PointerToGot
+      shape_ok = true
+    elsif rtype == MachO::R_TLVP_LOAD_PAGE21 && pcrel == 1_i64 && len == 2_i64
+      kind = RelocKind::A64TlvpPage21
+      shape_ok = true
+    elsif rtype == MachO::R_TLVP_LOAD_PAGEOFF12 && pcrel == 0_i64 && len == 2_i64
+      kind = RelocKind::A64TlvpLo12
+      shape_ok = true
+    end
+    unless shape_ok
+      reject("#{h.label} has an arm64 relocation of type #{rtype} with pc-relative #{pcrel} and length #{len}, which the reader does not decode")
+    end
+    kind
+  end
+
+  def le_word_checked(bytes : Bytes, address : Int64, h : MachOSectionHeader) : Int64
+    unless fits?(address, 4_i64) && address + 4_i64 <= bytes.size.to_i64
+      reject("#{h.label} has an instruction relocation at offset #{address} with no instruction after it")
+      return 0_i64
+    end
+    le_word(bytes, address, 4)
+  end
+
+  # The in-place value of an absolute reloc is its addend in Mach-O, and the
+  # model keeps it in Reloc#addend instead. `fold_in_place` reads the value at
+  # the site, zeroes the site, and returns the addend. For a section-relative
+  # reloc (r_extern 0, the reference is -(section index + 1)) the in-place value
+  # is the target section's address plus the offset, so the addend is that
+  # offset: the in-place value less the target section's address in this object.
+  def fold_in_place(h : MachOSectionHeader, bytes : Bytes, address : Int64, width : Int64, ref : Int64) : Int64
+    if address + width > h.size
+      reject("#{h.label} has an absolute relocation at offset #{address} whose #{width} bytes run past the section")
+      return 0_i64
+    end
+    value = le_word(bytes, address, width.to_i32)
+    if width == 4_i64 && value >= 0x80000000_i64
+      value = value - 0x100000000_i64
+    end
+    k = 0_i64
+    while k < width
+      bytes[(address + k).to_i32] = 0_u8
+      k = k + 1_i64
+    end
+    if ref < 0_i64
+      target = @headers[(0_i64 - ref - 1_i64).to_i32]
+      value = value - target.addr
+    end
+    value
+  end
+
+  # Decodes a section's relocation records into the model. An ADDEND record
+  # carries the addend of the record after it; a SUBTRACTOR record is followed by
+  # the UNSIGNED record it subtracts from, and the pair becomes a Sub64 reloc and
+  # an absolute reloc at the same offset.
+  def read_relocs(h : MachOSectionHeader, bytes : Bytes, sink : Array(Reloc)) : Nil
+    return if @failure
+    count = h.nreloc
+    return unless need(h.reloff, count * MachO::RELOC_SIZE, "the relocations of #{h.label}")
+    if count > 0_i64 && h.zero_fill?
+      reject("#{h.label} is zero-filled and has no bytes for its #{count} relocations")
+      return
+    end
+    addend = 0_i64
+    addend_at = -1_i64
+    i = 0_i64
+    while i < count
+      return if @failure
+      at = h.reloff + i * MachO::RELOC_SIZE
+      address = word(at, 4)
+      info = word(at + 4_i64, 4)
+      symnum = info & 0xffffff_i64
+      pcrel = (info.unsafe_shr(24_i64)) & 1_i64
+      len = (info.unsafe_shr(25_i64)) & 3_i64
+      ext = (info.unsafe_shr(27_i64)) & 1_i64
+      rtype = (info.unsafe_shr(28_i64)) & 15_i64
+      if (address & 0x80000000_i64) != 0_i64
+        reject("#{h.label} has a scattered relocation, which arm64 objects do not use")
+        return
+      end
+      if address >= h.size
+        reject("#{h.label} has a relocation at offset #{address}, past its #{h.size} bytes")
+        return
+      end
+      if rtype == MachO::R_ADDEND
+        if ext != 0_i64 || pcrel != 0_i64 || len != 2_i64 || addend_at >= 0_i64
+          reject("#{h.label} has a malformed ADDEND record at offset #{address}")
+          return
+        end
+        addend = sign_extend_24(symnum)
+        addend_at = address
+        i = i + 1
+      elsif rtype == MachO::R_SUBTRACTOR
+        if i + 1 >= count
+          reject("#{h.label} has a SUBTRACTOR at offset #{address} with no UNSIGNED after it")
+          return
+        end
+        next_at = h.reloff + (i + 1) * MachO::RELOC_SIZE
+        next_address = word(next_at, 4)
+        next_info = word(next_at + 4_i64, 4)
+        next_symnum = next_info & 0xffffff_i64
+        next_pcrel = (next_info.unsafe_shr(24_i64)) & 1_i64
+        next_len = (next_info.unsafe_shr(25_i64)) & 3_i64
+        next_ext = (next_info.unsafe_shr(27_i64)) & 1_i64
+        next_type = (next_info.unsafe_shr(28_i64)) & 15_i64
+        if next_address != address || next_type != MachO::R_UNSIGNED || next_pcrel != 0_i64 || next_len != len || (len != 2_i64 && len != 3_i64) || pcrel != 0_i64 || ext != 1_i64
+          reject("#{h.label} has a SUBTRACTOR at offset #{address} that is not paired with an UNSIGNED of the same width there")
+          return
+        end
+        if addend_at >= 0_i64 && addend_at != address
+          reject("#{h.label} has an ADDEND at offset #{addend_at} that applies to nothing at that offset")
+          return
+        end
+        subtrahend = symbol_ref(ext, symnum, h)
+        minuend = symbol_ref(next_ext, next_symnum, h)
+        minuend_kind = RelocKind::Abs32
+        if len == 3_i64
+          minuend_kind = RelocKind::Abs64
+        end
+        sink << Reloc.new(address, RelocKind::Sub64, subtrahend.to_i32, 0_i64)
+        minuend_width = 4_i64
+        if minuend_kind == RelocKind::Abs64
+          minuend_width = 8_i64
+        end
+        minuend_total = addend + fold_in_place(h, bytes, address, minuend_width, minuend)
+        return if @failure
+        sink << Reloc.new(address, minuend_kind, minuend.to_i32, minuend_total)
+        addend = 0_i64
+        addend_at = -1_i64
+        i = i + 2
+      else
+        if addend_at >= 0_i64 && addend_at != address
+          reject("#{h.label} has an ADDEND at offset #{addend_at} that applies to nothing at that offset")
+          return
+        end
+        kind = primary_kind(rtype, pcrel, len, address, bytes, h)
+        return if @failure
+        target = symbol_ref(ext, symnum, h)
+        return if @failure
+        width = 4_i64
+        if kind == RelocKind::Abs64
+          width = 8_i64
+        end
+        total = addend
+        if kind == RelocKind::Abs64 || kind == RelocKind::Abs32
+          total = addend + fold_in_place(h, bytes, address, width, target)
+        end
+        return if @failure
+        sink << Reloc.new(address, kind, target.to_i32, total)
+        addend = 0_i64
+        addend_at = -1_i64
+        i = i + 1
+      end
+    end
+    if addend_at >= 0_i64
+      reject("#{h.label} has an ADDEND at offset #{addend_at} with no relocation after it")
+    end
+  end
+
+  def read_symbols : Nil
+    return if @failure
+    unless @has_symtab
+      reject("the object has no LC_SYMTAB")
+      return
+    end
+    i = 0_i64
+    while i < @nsyms
+      return if @failure
+      at = @symoff + i * MachO::NLIST_SIZE
+      strx = word(at, 4)
+      ntype = byte(at + 4_i64)
+      nsect = byte(at + 5_i64)
+      ndesc = word(at + 6_i64, 2)
+      nvalue = word(at + 8_i64, 8)
+      if (ntype & MachO::N_STAB) != 0_i64
+        reject("symbol #{i} is a stab (debugging) entry, which objects read here do not carry")
+        return
+      end
+      if strx >= @strsize
+        reject("symbol #{i} names string offset #{strx}, past the #{@strsize}-byte string table")
+        return
+      end
+      raw_start = @stroff + strx
+      raw_limit = @stroff + @strsize
+      name = ""
+      if raw_start < raw_limit && @data[raw_start.to_i32] == 95_u8
+        name = c_string(raw_start + 1_i64, raw_limit, "symbol #{i}")
+      else
+        name = c_string(raw_start, raw_limit, "symbol #{i}")
+      end
+      return if @failure
+      type = ntype & MachO::N_TYPE
+      ext = (ntype & MachO::N_EXT) != 0_i64
+      pext = (ntype & MachO::N_PEXT) != 0_i64
+      weak = (ndesc & (MachO::N_WEAK_REF | MachO::N_WEAK_DEF)) != 0_i64
+      kind = SymbolKind::Undefined
+      section = -1_i64
+      value = nvalue
+      if type == MachO::N_UNDF
+        unless ext
+          reject("symbol #{name} is undefined and not external")
+          return
+        end
+        kind = SymbolKind::Undefined
+      elsif type == MachO::N_ABS
+        kind = SymbolKind::Absolute
+      elsif type == MachO::N_SECT
+        if nsect < 1_i64 || nsect > @headers.size.to_i64
+          reject("symbol #{name} is in section #{nsect}, which is not one of the #{@headers.size} sections")
+          return
+        end
+        section = nsect - 1_i64
+        h = @headers[section.to_i32]
+        value = nvalue - h.addr
+        section_kind = h.kind
+        if section_kind == SectionKind::Text
+          kind = SymbolKind::Func
+        elsif section_kind == SectionKind::TlsData || section_kind == SectionKind::TlsZeroFill || section_kind == SectionKind::TlsVars
+          kind = SymbolKind::Tls
+        else
+          kind = SymbolKind::Object
+        end
+      else
+        reject("symbol #{name} has n_type #{ntype}, which the reader does not decode")
+        return
+      end
+      binding = SymbolBinding::Local
+      if ext
+        binding = SymbolBinding::Global
+        if weak
+          binding = SymbolBinding::Weak
+        end
+      end
+      @symbols << Symbol.new(name, kind, binding, section.to_i32, value, 0_i64, nil, ndesc, pext)
+      i = i + 1
+    end
+  end
+
+  # LC_DYSYMTAB must place the local, external and undefined symbols in that
+  # order, which is the order the writer produces and the linker reads.
+  def check_groups : Nil
+    return if @failure
+    unless @has_dysym
+      reject("the object has no LC_DYSYMTAB")
+      return
+    end
+    ilocal = @dysym[0]
+    nlocal = @dysym[1]
+    iext = @dysym[2]
+    nextdef = @dysym[3]
+    iundef = @dysym[4]
+    nundef = @dysym[5]
+    if ilocal != 0_i64 || iext != ilocal + nlocal || iundef != iext + nextdef || iundef + nundef != @nsyms
+      reject("LC_DYSYMTAB's symbol groups do not cover the #{@nsyms} symbols in order")
+      return
+    end
+    i = 0
+    while i < @symbols.size
+      sym = @symbols[i]
+      k = i.to_i64
+      if k < nlocal && sym.binding != SymbolBinding::Local
+        reject("symbol #{sym.name} is in the local group but is external")
+        return
+      end
+      if k >= iext && k < iext + nextdef && (sym.binding == SymbolBinding::Local || sym.kind == SymbolKind::Undefined)
+        reject("symbol #{sym.name} is in the external group but is local or undefined")
+        return
+      end
+      if k >= iundef && sym.kind != SymbolKind::Undefined
+        reject("symbol #{sym.name} is in the undefined group but is defined")
+        return
+      end
+      i = i + 1
+    end
+  end
+end
+
+pub def read_object(bytes : ::Std::Slice::Bytes, target : ::Compiler::Platform::Target::Target) : ObjectFile | ObjError
+  MachOReader.new(bytes, target).read
+end
+
+# Writes an arm64 MH_OBJECT. The output is deterministic: the same ObjectFile
+# always gives the same bytes. Symbols are laid out local, external, undefined,
+# and relocations keep the order they have in their section. A model the Mach-O
+# format cannot state raises, because it is the native backend's own error.
+pub def write_object(obj : ObjectFile) : ::Std::Slice::Bytes
+  MachOWriter.new(obj).write
+end
+
+class MachOPlan
+  property name : String
+  property segment : String
+  property section : String
+  property kind : SectionKind
+  property flags : Int64
+  property align : Int64
+  property size : Int64
+  property addr : Int64
+  property offset : Int64
+  property reloff : Int64
+  property records : Array(Int64)
+  property inplace : Array(Reloc)
+  property bytes : ::Std::Slice::Bytes
+
+  def initialize(@name : String, @segment : String, @section : String, @kind : SectionKind, @flags : Int64, @align : Int64, @size : Int64, @bytes : ::Std::Slice::Bytes)
+    @addr = 0_i64
+    @offset = 0_i64
+    @reloff = 0_i64
+    @records = [] of Int64
+    @inplace = [] of Reloc
+  end
+
+  def zero_fill? : Bool
+    @kind == SectionKind::ZeroFill || @kind == SectionKind::TlsZeroFill
+  end
+
+  def nreloc : Int64
+    @records.size.to_i64.unsafe_shr(1_i64)
+  end
+end
+
+class MachOWriter
+  property obj : ObjectFile
+  property buf : Array(UInt8)
+  property plans : Array(MachOPlan)
+  property order : Array(Int32)
+  property remap : Array(Int64)
+  property nlocal : Int64
+  property nextdef : Int64
+  property nundef : Int64
+  property strtab : Array(UInt8)
+  property strx : Array(Int64)
+
+  def initialize(@obj : ObjectFile)
+    @buf = [] of UInt8
+    @plans = [] of MachOPlan
+    @order = [] of Int32
+    @remap = [] of Int64
+    @nlocal = 0_i64
+    @nextdef = 0_i64
+    @nundef = 0_i64
+    @strtab = [] of UInt8
+    @strx = [] of Int64
+  end
+
+  def write : ::Std::Slice::Bytes
+    unless @obj.target.architecture == "aarch64"
+      raise "the Mach-O writer writes arm64 objects, not #{@obj.target.architecture}"
+    end
+    partition_symbols
+    build_strtab
+    plan_sections
+    layout_and_emit
+  end
+
+  # The symbol table in the order LC_DYSYMTAB names: local, external, undefined.
+  def partition_symbols : Nil
+    syms = @obj.symbols
+    @remap = [] of Int64
+    i = 0
+    while i < syms.size
+      @remap << 0_i64
+      i = i + 1
+    end
+    pass = 0
+    while pass < 3
+      i = 0
+      while i < syms.size
+        sym = syms[i]
+        if sym.kind == SymbolKind::Undefined && sym.binding == SymbolBinding::Local
+          raise "symbol #{sym.name} is undefined and local, which Mach-O cannot state"
+        end
+        in_pass = false
+        if pass == 0
+          in_pass = sym.binding == SymbolBinding::Local
+        elsif pass == 1
+          in_pass = sym.binding != SymbolBinding::Local && sym.kind != SymbolKind::Undefined
+        else
+          in_pass = sym.kind == SymbolKind::Undefined
+        end
+        if in_pass
+          @remap[i] = @order.size.to_i64
+          @order << i.to_i32
+          if pass == 0
+            @nlocal = @nlocal + 1_i64
+          elsif pass == 1
+            @nextdef = @nextdef + 1_i64
+          else
+            @nundef = @nundef + 1_i64
+          end
+        end
+        i = i + 1
+      end
+      pass = pass + 1
+    end
+  end
+
+  def build_strtab : Nil
+    @strtab = [] of UInt8
+    @strtab << 32_u8
+    @strtab << 0_u8
+    @strx = [] of Int64
+    @order.each do |index|
+      sym = @obj.symbols[index.to_i32]
+      @strx << @strtab.size.to_i64
+      @strtab << 95_u8
+      i = 0
+      while i < sym.name.bytesize
+        @strtab << sym.name.byte_at(i)
+        i = i + 1
+      end
+      @strtab << 0_u8
+    end
+    while @strtab.size % 8 != 0
+      @strtab << 0_u8
+    end
+  end
+
+  def plan_sections : Nil
+    @plans = [] of MachOPlan
+    @obj.sections.each do |sec|
+      flags = sec.flags
+      if flags == 0_i64
+        flags = default_flags(sec.kind)
+      end
+      align = sec.align.to_i64
+      if align < 1_i64
+        align = 1_i64
+      end
+      size = sec.size
+      bytes = sec.bytes
+      if !(sec.kind == SectionKind::ZeroFill || sec.kind == SectionKind::TlsZeroFill)
+        size = bytes.size.to_i64
+      end
+      names = macho_section_names(sec.name)
+      plan = MachOPlan.new(sec.name, names[0], names[1], sec.kind, flags, align, size, bytes)
+      encode_relocs(plan, sec)
+      @plans << plan
+    end
+  end
+
+  def default_flags(kind : SectionKind) : Int64
+    if kind == SectionKind::Text
+      return MachO::TEXT_DEFAULT_FLAGS
+    end
+    if kind == SectionKind::ZeroFill
+      return MachO::S_ZEROFILL
+    end
+    if kind == SectionKind::TlsData
+      return MachO::S_THREAD_LOCAL_REGULAR
+    end
+    if kind == SectionKind::TlsZeroFill
+      return MachO::S_THREAD_LOCAL_ZEROFILL
+    end
+    if kind == SectionKind::TlsVars
+      return MachO::S_THREAD_LOCAL_VARIABLES
+    end
+    MachO::S_REGULAR
+  end
+
+  def record(plan : MachOPlan, address : Int64, symnum : Int64, ext : Int64, pcrel : Int64, len : Int64, rtype : Int64) : Nil
+    info = (symnum & 0xffffff_i64) | pcrel.unsafe_shl(24_i64) | len.unsafe_shl(25_i64) | ext.unsafe_shl(27_i64) | rtype.unsafe_shl(28_i64)
+    plan.records << address
+    plan.records << info
+  end
+
+  def encode_relocs(plan : MachOPlan, sec : Section) : Nil
+    relocs = sec.relocs
+    i = 0
+    while i < relocs.size
+      r = relocs[i]
+      if r.kind == RelocKind::Sub64
+        unless i + 1 < relocs.size && relocs[i + 1].offset == r.offset && (relocs[i + 1].kind == RelocKind::Abs64 || relocs[i + 1].kind == RelocKind::Abs32)
+          raise "section #{sec.name} has a Sub64 at offset #{r.offset} with no absolute reloc at that offset after it"
+        end
+        m = relocs[i + 1]
+        plan.inplace << m
+        len = 2_i64
+        if m.kind == RelocKind::Abs64
+          len = 3_i64
+        end
+        # The minuend's addend is in place, not in an ADDEND record.
+        record(plan, r.offset, symbol_number(r.symbol), symbol_ext(r.symbol), 0_i64, len, MachO::R_SUBTRACTOR)
+        record(plan, r.offset, symbol_number(m.symbol), symbol_ext(m.symbol), 0_i64, len, MachO::R_UNSIGNED)
+        i = i + 2
+      else
+        shape = arm64_relocation_shape(r.kind)
+        if r.kind == RelocKind::Abs64 || r.kind == RelocKind::Abs32
+          plan.inplace << r
+        elsif r.addend != 0_i64
+          addend_record(plan, r.offset, r.addend)
+        end
+        record(plan, r.offset, symbol_number(r.symbol), symbol_ext(r.symbol), shape[1], shape[2], shape[0])
+        i = i + 1
+      end
+    end
+  end
+
+  # Writes an absolute reloc's addend into its site: the addend itself for an
+  # extern reloc, and the target section's address plus the addend for a
+  # section-relative one, which the reader took the offset from.
+  def patch_site(start : Int64, plan : MachOPlan, p : Reloc) : Nil
+    width = 8_i64
+    if p.kind == RelocKind::Abs32
+      width = 4_i64
+    end
+    value = p.addend
+    if p.symbol < 0
+      value = value + @plans[(0_i64 - p.symbol.to_i64 - 1_i64).to_i32].addr
+    end
+    if width == 4_i64 && (value < -0x80000000_i64 || value >= 0x100000000_i64)
+      raise "section #{plan.name} has an absolute value #{value} that a 32-bit site cannot state"
+    end
+    k = 0_i64
+    while k < width
+      @buf[(start + p.offset + k).to_i32] = ((value.unsafe_shr(8_i64 * k)) & 0xff_i64).to_u8
+      k = k + 1_i64
+    end
+  end
+
+  def addend_record(plan : MachOPlan, address : Int64, addend : Int64) : Nil
+    if addend < -0x800000_i64 || addend >= 0x800000_i64
+      raise "section #{plan.name} has an addend #{addend} that an ADDEND record cannot state"
+    end
+    record(plan, address, addend, 0_i64, 0_i64, 2_i64, MachO::R_ADDEND)
+  end
+
+  def symbol_ext(sym : Int32) : Int64
+    if sym >= 0
+      return 1_i64
+    end
+    0_i64
+  end
+
+  def symbol_number(sym : Int32) : Int64
+    if sym >= 0
+      if sym.to_i64 >= @remap.size.to_i64
+        raise "a relocation names symbol #{sym}, past the #{@remap.size} symbols"
+      end
+      return @remap[sym.to_i32]
+    end
+    section_number = 0_i64 - sym.to_i64
+    if section_number < 1_i64 || section_number > @obj.sections.size.to_i64
+      raise "a relocation names section #{section_number - 1}, which is not one of the #{@obj.sections.size} sections"
+    end
+    section_number
+  end
+
+  def layout_and_emit : ::Std::Slice::Bytes
+    ncmds = 3_i64
+    cmds_size = MachO::SEGMENT_HEADER_SIZE + @plans.size.to_i64 * MachO::SECTION_SIZE + 24_i64 + 80_i64
+    build = @obj.build_version
+    if build
+      ncmds = ncmds + 1_i64
+      cmds_size = cmds_size + 24_i64 + build.tools.size.to_i64 * 8_i64
+    end
+    dic = @obj.data_in_code
+    if dic.size > 0
+      ncmds = ncmds + 1_i64
+      cmds_size = cmds_size + 16_i64
+    end
+    options = @obj.linker_options
+    option_bytes = 12_i64
+    options.each do |text|
+      option_bytes = option_bytes + text.bytesize.to_i64 + 1_i64
+    end
+    if options.size > 0
+      ncmds = ncmds + 1_i64
+      cmds_size = cmds_size + align8(option_bytes)
+    end
+
+    cursor = MachO::HEADER_SIZE + cmds_size
+    data_start = cursor
+    addr_cursor = 0_i64
+    @plans.each do |plan|
+      plan.addr = align_to(addr_cursor, plan.align)
+      addr_cursor = plan.addr + plan.size
+      if plan.zero_fill?
+        plan.offset = 0_i64
+      else
+        plan.offset = align_to(cursor, plan.align)
+        cursor = plan.offset + plan.size
+      end
+    end
+    data_end = cursor
+    @plans.each do |plan|
+      if plan.nreloc > 0_i64
+        plan.reloff = align_to(cursor, 8_i64)
+        cursor = plan.reloff + plan.nreloc * MachO::RELOC_SIZE
+      end
+    end
+    dic_off = align_to(cursor, 4_i64)
+    cursor = dic_off + dic.size.to_i64 * 8_i64
+    symoff = align_to(cursor, 8_i64)
+    cursor = symoff + @order.size.to_i64 * MachO::NLIST_SIZE
+    stroff = cursor
+    cursor = stroff + @strtab.size.to_i64
+    total = cursor
+
+    put(MachO::MAGIC_64, 4)
+    put(MachO::CPU_TYPE_ARM64, 4)
+    put(0_i64, 4)
+    put(MachO::MH_OBJECT, 4)
+    put(ncmds, 4)
+    put(cmds_size, 4)
+    put(MachO::MH_SUBSECTIONS_VIA_SYMBOLS, 4)
+    put(0_i64, 4)
+
+    seg_size = MachO::SEGMENT_HEADER_SIZE + @plans.size.to_i64 * MachO::SECTION_SIZE
+    put(MachO::LC_SEGMENT_64, 4)
+    put(seg_size, 4)
+    put_zeros(16)
+    put(0_i64, 8)
+    put(addr_cursor, 8)
+    put(data_start, 8)
+    put(data_end - data_start, 8)
+    put(7_i64, 4)
+    put(7_i64, 4)
+    put(@plans.size.to_i64, 4)
+    put(0_i64, 4)
+    @plans.each do |plan|
+      put_name(plan.section)
+      put_name(plan.segment)
+      put(plan.addr, 8)
+      put(plan.size, 8)
+      put(plan.offset, 4)
+      put(log2(plan.align), 4)
+      put(plan.reloff, 4)
+      put(plan.nreloc, 4)
+      put(plan.flags, 4)
+      put(0_i64, 4)
+      put(0_i64, 4)
+      put(0_i64, 4)
+    end
+
+    if build
+      put(MachO::LC_BUILD_VERSION, 4)
+      put(24_i64 + build.tools.size.to_i64 * 8_i64, 4)
+      put(build.platform.to_i64, 4)
+      put(build.minos.to_i64, 4)
+      put(build.sdk.to_i64, 4)
+      put(build.tools.size.to_i64, 4)
+      build.tools.each do |tool|
+        put(tool.tool.to_i64, 4)
+        put(tool.version.to_i64, 4)
+      end
+    end
+
+    put(MachO::LC_SYMTAB, 4)
+    put(24_i64, 4)
+    put(symoff, 4)
+    put(@order.size.to_i64, 4)
+    put(stroff, 4)
+    put(@strtab.size.to_i64, 4)
+
+    put(MachO::LC_DYSYMTAB, 4)
+    put(80_i64, 4)
+    put(0_i64, 4)
+    put(@nlocal, 4)
+    put(@nlocal, 4)
+    put(@nextdef, 4)
+    put(@nlocal + @nextdef, 4)
+    put(@nundef, 4)
+    k = 0
+    while k < 12
+      put(0_i64, 4)
+      k = k + 1
+    end
+
+    if dic.size > 0
+      put(MachO::LC_DATA_IN_CODE, 4)
+      put(16_i64, 4)
+      put(dic_off, 4)
+      put(dic.size.to_i64 * 8_i64, 4)
+    end
+
+    if options.size > 0
+      put(MachO::LC_LINKER_OPTION, 4)
+      put(align8(option_bytes), 4)
+      put(options.size.to_i64, 4)
+      options.each do |text|
+        i = 0
+        while i < text.bytesize
+          @buf << text.byte_at(i)
+          i = i + 1
+        end
+        @buf << 0_u8
+      end
+      pad_to(data_start)
+    end
+
+    pad_to(data_start)
+    @plans.each do |plan|
+      next if plan.zero_fill?
+      pad_to(plan.offset)
+      start = @buf.size.to_i64
+      i = 0
+      while i < plan.bytes.size
+        @buf << plan.bytes[i]
+        i = i + 1
+      end
+      plan.inplace.each do |p|
+        patch_site(start, plan, p)
+      end
+    end
+    pad_to(data_end)
+    @plans.each do |plan|
+      next if plan.nreloc == 0_i64
+      pad_to(plan.reloff)
+      k = 0
+      while k < plan.records.size
+        put(plan.records[k], 4)
+        k = k + 1
+      end
+    end
+    pad_to(dic_off)
+    dic.each do |entry|
+      put(entry.offset.to_i64, 4)
+      put(entry.length.to_i64, 2)
+      put(entry.kind.to_i64, 2)
+    end
+    pad_to(symoff)
+    @order.each_with_index do |index, k|
+      sym = @obj.symbols[index.to_i32]
+      emit_symbol(sym, @strx[k])
+    end
+    pad_to(stroff)
+    @strtab.each do |b|
+      @buf << b
+    end
+    if @buf.size.to_i64 != total
+      raise "the Mach-O writer laid out #{total} bytes and wrote #{@buf.size}"
+    end
+    to_slice
+  end
+
+  def emit_symbol(sym : Symbol, strx : Int64) : Nil
+    n_type = 0_i64
+    n_sect = 0_i64
+    n_value = sym.value
+    ext = sym.binding != SymbolBinding::Local
+    if sym.kind == SymbolKind::Undefined
+      n_type = MachO::N_UNDF
+    elsif sym.kind == SymbolKind::Absolute
+      n_type = MachO::N_ABS
+    else
+      if sym.section < 0 || sym.section.to_i64 >= @obj.sections.size.to_i64
+        raise "symbol #{sym.name} is defined in section #{sym.section}, which is not one of the #{@obj.sections.size} sections"
+      end
+      n_type = MachO::N_SECT
+      n_sect = sym.section.to_i64 + 1_i64
+      n_value = @plans[sym.section.to_i32].addr + sym.value
+    end
+    if ext
+      n_type = n_type | MachO::N_EXT
+    end
+    if sym.private_extern
+      n_type = n_type | MachO::N_PEXT
+    end
+    n_desc = sym.desc
+    if sym.binding == SymbolBinding::Weak
+      if sym.kind == SymbolKind::Undefined
+        n_desc = n_desc | MachO::N_WEAK_REF
+      else
+        n_desc = n_desc | MachO::N_WEAK_DEF
+      end
+    end
+    put(strx, 4)
+    put(n_type, 1)
+    put(n_sect, 1)
+    put(n_desc & 0xffff_i64, 2)
+    put(n_value, 8)
+  end
+
+  def align_to(value : Int64, align : Int64) : Int64
+    if align <= 1_i64
+      return value
+    end
+    t = value + align - 1_i64
+    t - (t % align)
+  end
+
+  def align8(value : Int64) : Int64
+    align_to(value, 8_i64)
+  end
+
+  def log2(align : Int64) : Int64
+    if align < 1_i64 || (align & (align - 1_i64)) != 0_i64
+      raise "section alignment #{align} is not a power of two"
+    end
+    exp = 0_i64
+    value = align
+    while value > 1_i64
+      value = value.unsafe_shr(1_i64)
+      exp = exp + 1_i64
+    end
+    exp
+  end
+
+  def put(value : Int64, width : Int32) : Nil
+    i = 0
+    while i < width
+      @buf << ((value.unsafe_shr(8_i64 * i.to_i64)) & 0xff_i64).to_u8
+      i = i + 1
+    end
+  end
+
+  def put_zeros(count : Int32) : Nil
+    i = 0
+    while i < count
+      @buf << 0_u8
+      i = i + 1
+    end
+  end
+
+  # A 16-byte, NUL-padded name field.
+  def put_name(name : String) : Nil
+    written = 0
+    while written < name.bytesize && written < 16
+      @buf << name.byte_at(written)
+      written = written + 1
+    end
+    while written < 16
+      @buf << 0_u8
+      written = written + 1
+    end
+  end
+
+  def pad_to(offset : Int64) : Nil
+    if @buf.size.to_i64 > offset
+      raise "the Mach-O writer is at byte #{@buf.size}, past where #{offset} was planned"
+    end
+    while @buf.size.to_i64 < offset
+      @buf << 0_u8
+    end
+  end
+
+  def to_slice : ::Std::Slice::Bytes
+    out = Slice(UInt8).new(@buf.size)
+    i = 0
+    while i < @buf.size
+      out[i] = @buf[i]
+      i = i + 1
+    end
+    out
+  end
+end

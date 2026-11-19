@@ -1,0 +1,787 @@
+module compiler/native/link/macho_exe
+
+# The Mach-O executable writer (SPEC 2.3). For one arm64 executable it writes
+# the segments, the load commands, the LINKEDIT blobs (rebase and bind opcodes,
+# the export trie, function starts, data in code, the symbol and string tables)
+# and the ad-hoc code signature. link.iyi decides the sections and their
+# contents and resolves every relocation; this module writes what it was given.
+#
+# Layout: __PAGEZERO, then __TEXT at 0x100000000 with file offset 0 (the headers
+# are inside it), then __DATA, then __LINKEDIT last. Every segment boundary is a
+# 16 KiB page, which arm64 requires. __DATA holds its file-backed sections first
+# and its zero-fill sections last, so each segment's file bytes are one run.
+# This linker writes no __DATA_CONST.
+
+import compiler/native/link/codesign::{code_signature, code_signature_size}
+import std/digest::{SHA256}
+import std/slice::{Slice, Bytes}
+
+pub class MachOExe
+  TEXT_BASE              = 0x100000000_i64
+  PAGEZERO_SIZE          = 0x100000000_i64
+  PAGE                   =       16384_i64
+  HEADER_SIZE            =          32_i64
+  SECTION_SIZE           =          80_i64
+  SEGMENT_SIZE           =          72_i64
+  NLIST_SIZE             =          16_i64
+  MAGIC_64               =  0xfeedfacf_i64
+  CPU_ARM64              =  0x0100000c_i64
+  MH_EXECUTE             =           2_i64
+  MH_NOUNDEFS            =         0x1_i64
+  MH_DYLDLINK            =         0x4_i64
+  MH_TWOLEVEL            =        0x80_i64
+  MH_PIE                 =    0x200000_i64
+  MH_HAS_TLV_DESCRIPTORS =    0x800000_i64
+  LC_SEGMENT_64          =        0x19_i64
+  LC_SYMTAB              =         0x2_i64
+  LC_DYSYMTAB            =         0xb_i64
+  LC_LOAD_DYLIB          =         0xc_i64
+  LC_LOAD_DYLINKER       =         0xe_i64
+  LC_UUID                =        0x1b_i64
+  LC_CODE_SIGNATURE      =        0x1d_i64
+  LC_FUNCTION_STARTS     =        0x26_i64
+  LC_DATA_IN_CODE        =        0x29_i64
+  LC_SOURCE_VERSION      =        0x2a_i64
+  LC_BUILD_VERSION       =        0x32_i64
+  LC_DYLD_INFO_ONLY      =  0x80000022_i64
+  LC_MAIN                =  0x80000028_i64
+  PLATFORM_MACOS         =           1_i64
+  MINOS_14_4             =  0x000e0400_i64
+  S_TLV_VARS             =        0x13_i64
+  N_SECT                 =         0xe_i64
+  N_UNDF                 =         0x0_i64
+  N_ABS                  =         0x2_i64
+  N_EXT                  =         0x1_i64
+  # Rebase and bind opcodes as <mach-o/loader.h> names them.
+  REBASE_TYPE_POINTER                =    1_i64
+  REBASE_SET_TYPE_IMM                = 0x10_i64
+  REBASE_SET_SEGMENT_AND_OFFSET      = 0x20_i64
+  REBASE_DO_IMM_TIMES                = 0x50_i64
+  REBASE_DONE                        = 0x00_i64
+  BIND_SET_DYLIB_ORDINAL_IMM         = 0x10_i64
+  BIND_SET_DYLIB_ORDINAL_ULEB        = 0x20_i64
+  BIND_SET_SYMBOL_TRAILING_FLAGS_IMM = 0x40_i64
+  BIND_SET_TYPE_IMM                  = 0x50_i64
+  BIND_SET_ADDEND_SLEB               = 0x60_i64
+  BIND_SET_SEGMENT_AND_OFFSET        = 0x70_i64
+  BIND_DO_BIND                       = 0x90_i64
+  BIND_DONE                          = 0x00_i64
+  # Segment indexes: __PAGEZERO is 0, so __TEXT is 1 and __DATA is 2.
+  SEG_DATA_INDEX = 2_i64
+end
+
+# Unsigned LEB128 of `value` (non-negative), appended to `buf`.
+pub def uleb_encode(value : Int64, buf : Array(UInt8)) : Nil
+  v = value
+  while true
+    byte = v & 0x7f_i64
+    v = v.unsafe_shr(7_i64)
+    if v == 0_i64
+      buf << byte.to_u8
+      return
+    end
+    buf << (byte | 0x80_i64).to_u8
+  end
+end
+
+# The byte count `uleb_encode` writes for `value`.
+pub def uleb_size(value : Int64) : Int64
+  n = 1_i64
+  v = value.unsafe_shr(7_i64)
+  while v != 0_i64
+    n = n + 1_i64
+    v = v.unsafe_shr(7_i64)
+  end
+  n
+end
+
+# Signed LEB128 of `value`, appended to `buf`.
+pub def sleb_encode(value : Int64, buf : Array(UInt8)) : Nil
+  v = value
+  more = true
+  while more
+    byte = v & 0x7f_i64
+    v = v.unsafe_shr(7_i64)
+    if (v == 0_i64 && (byte & 0x40_i64) == 0_i64) || (v == -1_i64 && (byte & 0x40_i64) != 0_i64)
+      more = false
+      buf << byte.to_u8
+    else
+      buf << (byte | 0x80_i64).to_u8
+    end
+  end
+end
+
+# Rounds `value` up to a multiple of `align` (a power of two, or 1).
+pub def align_to(value : Int64, align : Int64) : Int64
+  if align <= 1_i64
+    return value
+  end
+  t = value + align - 1_i64
+  t - (t % align)
+end
+
+# The log2 of a power-of-two alignment in bytes.
+def log2_of(align : Int64) : Int64
+  exp = 0_i64
+  v = align
+  while v > 1_i64
+    v = v.unsafe_shr(1_i64)
+    exp = exp + 1_i64
+  end
+  exp
+end
+
+# One section of the executable. `bytes` holds the file content and is empty for
+# a zero-fill section, whose `size` is its length in memory. `reserved2` is the
+# stub size for __stubs and zero otherwise.
+pub class ExeSection
+  property segment : String
+  property name : String
+  property flags : Int64
+  property align : Int64
+  property size : Int64
+  property bytes : Bytes
+  property zero_fill : Bool
+  property reserved2 : Int64
+  property addr : Int64
+  property offset : Int64
+
+  def initialize(@segment : String, @name : String, @flags : Int64, @align : Int64, @size : Int64, @bytes : Bytes, @zero_fill : Bool, @reserved2 : Int64)
+    @addr = 0_i64
+    @offset = 0_i64
+  end
+
+  def label : String
+    "#{@segment},#{@name}"
+  end
+end
+
+# One nlist_64 entry. `name` is the Mach-O name, with its leading underscore.
+pub class ExeSymbol
+  property name : String
+  property n_type : Int64
+  property n_sect : Int64
+  property n_desc : Int64
+  property value : Int64
+
+  def initialize(@name : String, @n_type : Int64, @n_sect : Int64, @n_desc : Int64, @value : Int64)
+  end
+end
+
+# A bind: the pointer at `addr` receives the address of `name` in the dylib
+# `ordinal` (1 based, in the order the executable loads them), plus `addend`.
+pub class ExeBind
+  property addr : Int64
+  property ordinal : Int64
+  property name : String
+  property addend : Int64
+
+  def initialize(@addr : Int64, @ordinal : Int64, @name : String, @addend : Int64)
+  end
+end
+
+# An exported symbol: `name` is its Mach-O name, `addr` its link address.
+pub class ExeExport
+  property name : String
+  property addr : Int64
+
+  def initialize(@name : String, @addr : Int64)
+  end
+end
+
+# One LC_DATA_IN_CODE entry, by link address.
+pub class ExeDataInCode
+  property addr : Int64
+  property length : Int64
+  property kind : Int64
+
+  def initialize(@addr : Int64, @length : Int64, @kind : Int64)
+  end
+end
+
+# Writes bytes into a buffer at a moving position, little-endian.
+class ImageWriter
+  property image : Bytes
+  property pos : Int64
+
+  def initialize(@image : Bytes)
+    @pos = 0_i64
+  end
+
+  def seek(at : Int64) : Nil
+    @pos = at
+  end
+
+  def byte(value : Int64) : Nil
+    @image[@pos.to_i32] = (value & 0xff_i64).to_u8
+    @pos = @pos + 1_i64
+  end
+
+  def num(value : Int64, width : Int32) : Nil
+    i = 0
+    while i < width
+      byte(value.unsafe_shr(i.to_i64 * 8_i64))
+      i = i + 1
+    end
+  end
+
+  def zeros(count : Int64) : Nil
+    i = 0_i64
+    while i < count
+      byte(0_i64)
+      i = i + 1_i64
+    end
+  end
+
+  # A NUL-padded name field of `width` bytes.
+  def name_field(text : String, width : Int64) : Nil
+    i = 0_i64
+    while i < width
+      if i < text.bytesize.to_i64
+        byte(text.byte_at(i.to_i32).to_i64)
+      else
+        byte(0_i64)
+      end
+      i = i + 1_i64
+    end
+  end
+
+  def cstring(text : String) : Nil
+    i = 0
+    while i < text.bytesize
+      byte(text.byte_at(i).to_i64)
+      i = i + 1
+    end
+    byte(0_i64)
+  end
+
+  def array(values : Array(UInt8)) : Nil
+    i = 0
+    while i < values.size
+      byte(values[i].to_i64)
+      i = i + 1
+    end
+  end
+end
+
+pub class Executable
+  property identifier : String
+  property sections : Array(ExeSection)
+  property dylibs : Array(String)
+  property rebases : Array(Int64)
+  property binds : Array(ExeBind)
+  property symbols : Array(ExeSymbol)
+  property nlocal : Int64
+  property nextdef : Int64
+  property nundef : Int64
+  property exports : Array(ExeExport)
+  property function_starts : Array(Int64)
+  property data_in_code : Array(ExeDataInCode)
+  property entry : Int64
+  property text_size : Int64
+  property data_vmaddr : Int64
+  property data_vmsize : Int64
+  property data_fileoff : Int64
+  property data_filesize : Int64
+  property linkedit_vmaddr : Int64
+  property linkedit_fileoff : Int64
+
+  def initialize(@identifier : String)
+    @sections = [] of ExeSection
+    @dylibs = [] of String
+    @rebases = [] of Int64
+    @binds = [] of ExeBind
+    @symbols = [] of ExeSymbol
+    @nlocal = 0_i64
+    @nextdef = 0_i64
+    @nundef = 0_i64
+    @exports = [] of ExeExport
+    @function_starts = [] of Int64
+    @data_in_code = [] of ExeDataInCode
+    @entry = 0_i64
+    @text_size = 0_i64
+    @data_vmaddr = 0_i64
+    @data_vmsize = 0_i64
+    @data_fileoff = 0_i64
+    @data_filesize = 0_i64
+    @linkedit_vmaddr = 0_i64
+    @linkedit_fileoff = 0_i64
+  end
+
+  def text_section_count : Int64
+    n = 0_i64
+    @sections.each do |sec|
+      if sec.segment == "__TEXT"
+        n = n + 1_i64
+      end
+    end
+    n
+  end
+
+  def data_section_count : Int64
+    n = 0_i64
+    @sections.each do |sec|
+      if sec.segment == "__DATA"
+        n = n + 1_i64
+      end
+    end
+    n
+  end
+
+  def has_tls_vars : Bool
+    i = 0
+    while i < @sections.size
+      sec = @sections[i]
+      return true if sec.segment == "__DATA" && (sec.flags & 0xff_i64) == MachOExe::S_TLV_VARS
+      i = i + 1
+    end
+    false
+  end
+
+  def dylib_command_size(path : String) : Int64
+    align_to(24_i64 + path.bytesize.to_i64 + 1_i64, 8_i64)
+  end
+
+  # The load commands in bytes, each one counted with its section headers.
+  def commands_size : Int64
+    total = 4_i64 * MachOExe::SEGMENT_SIZE + (text_section_count + data_section_count) * MachOExe::SECTION_SIZE
+    total = total + 48_i64 + 24_i64 + 80_i64 + 32_i64 + 24_i64 + 24_i64 + 16_i64 + 24_i64
+    total = total + 16_i64 + 16_i64 + 16_i64
+    @dylibs.each do |path|
+      total = total + dylib_command_size(path)
+    end
+    total
+  end
+
+  def command_count : Int64
+    15_i64 + @dylibs.size.to_i64
+  end
+
+  # Gives every section its address and file offset (SPEC 2.3 layout). The
+  # sections already have their sizes; the caller fills their bytes afterwards.
+  def assign_addresses : Nil
+    cursor = MachOExe::HEADER_SIZE + commands_size
+    @sections.each do |sec|
+      if sec.segment == "__TEXT"
+        cursor = align_to(cursor, sec.align)
+        sec.addr = MachOExe::TEXT_BASE + cursor
+        sec.offset = cursor
+        cursor = cursor + sec.size
+      end
+    end
+    @text_size = align_to(cursor, MachOExe::PAGE)
+    @data_vmaddr = MachOExe::TEXT_BASE + @text_size
+    @data_fileoff = @text_size
+    dcur = 0_i64
+    @sections.each do |sec|
+      if sec.segment == "__DATA" && !sec.zero_fill
+        dcur = align_to(dcur, sec.align)
+        sec.addr = @data_vmaddr + dcur
+        sec.offset = @data_fileoff + dcur
+        dcur = dcur + sec.size
+      end
+    end
+    @data_filesize = align_to(dcur, MachOExe::PAGE)
+    @sections.each do |sec|
+      if sec.segment == "__DATA" && sec.zero_fill
+        dcur = align_to(dcur, sec.align)
+        sec.addr = @data_vmaddr + dcur
+        sec.offset = 0_i64
+        dcur = dcur + sec.size
+      end
+    end
+    @data_vmsize = align_to(dcur, MachOExe::PAGE)
+    @linkedit_vmaddr = @data_vmaddr + @data_vmsize
+    @linkedit_fileoff = @data_fileoff + @data_filesize
+  end
+
+  # The rebase opcodes: each absolute pointer in __DATA is slid by dyld.
+  def encode_rebases : Array(UInt8)
+    ob = [] of UInt8
+    if @rebases.size > 0
+      ob << (MachOExe::REBASE_SET_TYPE_IMM | MachOExe::REBASE_TYPE_POINTER).to_u8
+    end
+    @rebases.each do |addr|
+      ob << (MachOExe::REBASE_SET_SEGMENT_AND_OFFSET | MachOExe::SEG_DATA_INDEX).to_u8
+      uleb_encode(addr - @data_vmaddr, ob)
+      ob << (MachOExe::REBASE_DO_IMM_TIMES | 1_i64).to_u8
+    end
+    ob << MachOExe::REBASE_DONE.to_u8
+    ob
+  end
+
+  # The bind opcodes: every import is bound at launch (no lazy binding).
+  def encode_binds : Array(UInt8)
+    ob = [] of UInt8
+    @binds.each do |b|
+      if b.ordinal <= 15_i64
+        ob << (MachOExe::BIND_SET_DYLIB_ORDINAL_IMM | b.ordinal).to_u8
+      else
+        ob << MachOExe::BIND_SET_DYLIB_ORDINAL_ULEB.to_u8
+        uleb_encode(b.ordinal, ob)
+      end
+      ob << MachOExe::BIND_SET_SYMBOL_TRAILING_FLAGS_IMM.to_u8
+      i = 0
+      while i < b.name.bytesize
+        ob << b.name.byte_at(i)
+        i = i + 1
+      end
+      ob << 0_u8
+      ob << (MachOExe::BIND_SET_TYPE_IMM | MachOExe::REBASE_TYPE_POINTER).to_u8
+      ob << MachOExe::BIND_SET_ADDEND_SLEB.to_u8
+      sleb_encode(b.addend, ob)
+      ob << (MachOExe::BIND_SET_SEGMENT_AND_OFFSET | MachOExe::SEG_DATA_INDEX).to_u8
+      uleb_encode(b.addr - @data_vmaddr, ob)
+      ob << MachOExe::BIND_DO_BIND.to_u8
+    end
+    ob << MachOExe::BIND_DONE.to_u8
+    ob
+  end
+
+  # The export trie: a root with one leaf per exported name. A child's offset
+  # depends on the root's size, so the offsets are iterated until they are stable.
+  def encode_exports : Array(UInt8)
+    ob = [] of UInt8
+    n = @exports.size
+    if n == 0
+      ob << 0_u8
+      ob << 0_u8
+      return ob
+    end
+    infos = [] of Array(UInt8)
+    @exports.each do |e|
+      info = [] of UInt8
+      info << 0_u8
+      uleb_encode(e.addr - MachOExe::TEXT_BASE, info)
+      infos << info
+    end
+    offsets = [] of Int64
+    i = 0
+    while i < n
+      offsets << 0_i64
+      i = i + 1
+    end
+    stable = false
+    while !stable
+      root = 1_i64 + uleb_size(n.to_i64)
+      i = 0
+      while i < n
+        root = root + @exports[i].name.bytesize.to_i64 + 1_i64 + uleb_size(offsets[i])
+        i = i + 1
+      end
+      stable = true
+      at = root
+      i = 0
+      while i < n
+        if offsets[i] != at
+          offsets[i] = at
+          stable = false
+        end
+        child = uleb_size(infos[i].size.to_i64) + infos[i].size.to_i64 + 1_i64
+        at = at + child
+        i = i + 1
+      end
+    end
+    ob << 0_u8
+    uleb_encode(n.to_i64, ob)
+    i = 0
+    while i < n
+      name = @exports[i].name
+      j = 0
+      while j < name.bytesize
+        ob << name.byte_at(j)
+        j = j + 1
+      end
+      ob << 0_u8
+      uleb_encode(offsets[i], ob)
+      i = i + 1
+    end
+    i = 0
+    while i < n
+      uleb_encode(infos[i].size.to_i64, ob)
+      j = 0
+      while j < infos[i].size
+        ob << infos[i][j]
+        j = j + 1
+      end
+      ob << 0_u8
+      i = i + 1
+    end
+    ob
+  end
+
+  # The function-start addresses, as ULEB deltas from the start of __TEXT.
+  def encode_function_starts : Array(UInt8)
+    ob = [] of UInt8
+    prev = MachOExe::TEXT_BASE
+    @function_starts.each do |addr|
+      uleb_encode(addr - prev, ob)
+      prev = addr
+    end
+    ob << 0_u8
+    ob
+  end
+
+  # The string table: " " and NUL first, then each name NUL-terminated, padded
+  # to 8 bytes. `strx` receives the offset each symbol's name starts at.
+  def encode_strings(strx : Array(Int64)) : Array(UInt8)
+    ob = [] of UInt8
+    ob << 32_u8
+    ob << 0_u8
+    @symbols.each do |sym|
+      strx << ob.size.to_i64
+      i = 0
+      while i < sym.name.bytesize
+        ob << sym.name.byte_at(i)
+        i = i + 1
+      end
+      ob << 0_u8
+    end
+    while ob.size % 8 != 0
+      ob << 0_u8
+    end
+    ob
+  end
+
+  def pad8(n : Int64) : Int64
+    align_to(n, 8_i64)
+  end
+
+  # The whole executable. Its UUID is the first 16 bytes of the SHA-256 of the
+  # image with the UUID field zero; the signature covers everything before it.
+  def write : Bytes
+    rebase_bytes = encode_rebases
+    bind_bytes = encode_binds
+    export_bytes = encode_exports
+    fstart_bytes = encode_function_starts
+    strx = [] of Int64
+    string_bytes = encode_strings(strx)
+
+    pos = @linkedit_fileoff
+    rebase_off = pos
+    pos = pos + pad8(rebase_bytes.size.to_i64)
+    bind_off = pos
+    pos = pos + pad8(bind_bytes.size.to_i64)
+    export_off = pos
+    pos = pos + pad8(export_bytes.size.to_i64)
+    fstart_off = pos
+    pos = pos + pad8(fstart_bytes.size.to_i64)
+    dic_off = pos
+    dic_size = @data_in_code.size.to_i64 * 8_i64
+    pos = pos + dic_size
+    sym_off = align_to(pos, 8_i64)
+    pos = sym_off + @symbols.size.to_i64 * MachOExe::NLIST_SIZE
+    str_off = pos
+    pos = str_off + string_bytes.size.to_i64
+    sig_off = align_to(pos, 16_i64)
+    sig_size = code_signature_size(sig_off, @identifier)
+    total = sig_off + sig_size
+    linkedit_filesize = total - @linkedit_fileoff
+    linkedit_vmsize = align_to(linkedit_filesize, MachOExe::PAGE)
+
+    image = Slice(UInt8).new(total.to_i32)
+    image.fill(0_u8)
+    w = ImageWriter.new(image)
+
+    text_secs = [] of ExeSection
+    data_secs = [] of ExeSection
+    @sections.each do |sec|
+      if sec.segment == "__TEXT"
+        text_secs << sec
+      else
+        data_secs << sec
+      end
+    end
+    cmds_size = commands_size
+    flags = MachOExe::MH_PIE | MachOExe::MH_TWOLEVEL | MachOExe::MH_DYLDLINK | MachOExe::MH_NOUNDEFS
+    if has_tls_vars
+      flags = flags | MachOExe::MH_HAS_TLV_DESCRIPTORS
+    end
+
+    w.seek(0_i64)
+    w.num(MachOExe::MAGIC_64, 4)
+    w.num(MachOExe::CPU_ARM64, 4)
+    w.num(0_i64, 4)
+    w.num(MachOExe::MH_EXECUTE, 4)
+    w.num(command_count, 4)
+    w.num(cmds_size, 4)
+    w.num(flags, 4)
+    w.num(0_i64, 4)
+
+    write_segment(w, "__PAGEZERO", 0_i64, MachOExe::PAGEZERO_SIZE, 0_i64, 0_i64, 0_i64, 0_i64, [] of ExeSection)
+    write_segment(w, "__TEXT", MachOExe::TEXT_BASE, @text_size, 0_i64, @text_size, 7_i64, 5_i64, text_secs)
+    write_segment(w, "__DATA", @data_vmaddr, @data_vmsize, @data_fileoff, @data_filesize, 7_i64, 3_i64, data_secs)
+    write_segment(w, "__LINKEDIT", @linkedit_vmaddr, linkedit_vmsize, @linkedit_fileoff, linkedit_filesize, 7_i64, 1_i64, [] of ExeSection)
+
+    w.num(MachOExe::LC_DYLD_INFO_ONLY, 4)
+    w.num(48_i64, 4)
+    w.num(rebase_off, 4)
+    w.num(pad8(rebase_bytes.size.to_i64), 4)
+    w.num(bind_off, 4)
+    w.num(pad8(bind_bytes.size.to_i64), 4)
+    w.num(0_i64, 4)
+    w.num(0_i64, 4)
+    w.num(0_i64, 4)
+    w.num(0_i64, 4)
+    w.num(export_off, 4)
+    w.num(pad8(export_bytes.size.to_i64), 4)
+
+    w.num(MachOExe::LC_SYMTAB, 4)
+    w.num(24_i64, 4)
+    w.num(sym_off, 4)
+    w.num(@symbols.size.to_i64, 4)
+    w.num(str_off, 4)
+    w.num(string_bytes.size.to_i64, 4)
+
+    w.num(MachOExe::LC_DYSYMTAB, 4)
+    w.num(80_i64, 4)
+    w.num(0_i64, 4)
+    w.num(@nlocal, 4)
+    w.num(@nlocal, 4)
+    w.num(@nextdef, 4)
+    w.num(@nlocal + @nextdef, 4)
+    w.num(@nundef, 4)
+    k = 0
+    while k < 12
+      w.num(0_i64, 4)
+      k = k + 1
+    end
+
+    w.num(MachOExe::LC_LOAD_DYLINKER, 4)
+    w.num(32_i64, 4)
+    w.num(12_i64, 4)
+    w.cstring("/usr/lib/dyld")
+    w.zeros(6_i64)
+
+    w.num(MachOExe::LC_UUID, 4)
+    w.num(24_i64, 4)
+    uuid_at = w.pos
+    w.zeros(16_i64)
+
+    w.num(MachOExe::LC_BUILD_VERSION, 4)
+    w.num(24_i64, 4)
+    w.num(MachOExe::PLATFORM_MACOS, 4)
+    w.num(MachOExe::MINOS_14_4, 4)
+    w.num(MachOExe::MINOS_14_4, 4)
+    w.num(0_i64, 4)
+
+    w.num(MachOExe::LC_SOURCE_VERSION, 4)
+    w.num(16_i64, 4)
+    w.num(0_i64, 8)
+
+    w.num(MachOExe::LC_MAIN, 4)
+    w.num(24_i64, 4)
+    w.num(@entry - MachOExe::TEXT_BASE, 8)
+    w.num(0_i64, 8)
+
+    @dylibs.each do |path|
+      size = dylib_command_size(path)
+      w.num(MachOExe::LC_LOAD_DYLIB, 4)
+      w.num(size, 4)
+      w.num(24_i64, 4)
+      w.num(2_i64, 4)
+      w.num(0x01530000_i64, 4)
+      w.num(0x00010000_i64, 4)
+      w.cstring(path)
+      w.zeros(size - 24_i64 - path.bytesize.to_i64 - 1_i64)
+    end
+
+    w.num(MachOExe::LC_FUNCTION_STARTS, 4)
+    w.num(16_i64, 4)
+    w.num(fstart_off, 4)
+    w.num(pad8(fstart_bytes.size.to_i64), 4)
+
+    w.num(MachOExe::LC_DATA_IN_CODE, 4)
+    w.num(16_i64, 4)
+    w.num(dic_off, 4)
+    w.num(dic_size, 4)
+
+    w.num(MachOExe::LC_CODE_SIGNATURE, 4)
+    w.num(16_i64, 4)
+    w.num(sig_off, 4)
+    w.num(sig_size, 4)
+
+    @sections.each do |sec|
+      if !sec.zero_fill
+        i = 0
+        while i < sec.bytes.size
+          image[(sec.offset + i.to_i64).to_i32] = sec.bytes[i]
+          i = i + 1
+        end
+      end
+    end
+
+    w.seek(rebase_off)
+    w.array(rebase_bytes)
+    w.seek(bind_off)
+    w.array(bind_bytes)
+    w.seek(export_off)
+    w.array(export_bytes)
+    w.seek(fstart_off)
+    w.array(fstart_bytes)
+    w.seek(dic_off)
+    @data_in_code.each do |d|
+      w.num(d.addr - MachOExe::TEXT_BASE, 4)
+      w.num(d.length, 2)
+      w.num(d.kind, 2)
+    end
+    w.seek(sym_off)
+    @symbols.each_with_index do |sym, k|
+      w.num(strx[k], 4)
+      w.num(sym.n_type, 1)
+      w.num(sym.n_sect, 1)
+      w.num(sym.n_desc, 2)
+      w.num(sym.value, 8)
+    end
+    w.seek(str_off)
+    w.array(string_bytes)
+
+    uuid = SHA256.digest(image[0, total.to_i32])
+    w.seek(uuid_at)
+    i = 0
+    while i < 16
+      w.byte(uuid[i].to_i64)
+      i = i + 1
+    end
+
+    sig = code_signature(image, sig_off, @identifier, 0_i64, @text_size)
+    i = 0
+    while i < sig.size
+      image[(sig_off + i.to_i64).to_i32] = sig[i]
+      i = i + 1
+    end
+    image
+  end
+
+  def write_segment(w : ImageWriter, name : String, vmaddr : Int64, vmsize : Int64, fileoff : Int64, filesize : Int64, maxprot : Int64, initprot : Int64, secs : Array(ExeSection)) : Nil
+    w.num(MachOExe::LC_SEGMENT_64, 4)
+    w.num(MachOExe::SEGMENT_SIZE + secs.size.to_i64 * MachOExe::SECTION_SIZE, 4)
+    w.name_field(name, 16_i64)
+    w.num(vmaddr, 8)
+    w.num(vmsize, 8)
+    w.num(fileoff, 8)
+    w.num(filesize, 8)
+    w.num(maxprot, 4)
+    w.num(initprot, 4)
+    w.num(secs.size.to_i64, 4)
+    w.num(0_i64, 4)
+    secs.each do |sec|
+      w.name_field(sec.name, 16_i64)
+      w.name_field(sec.segment, 16_i64)
+      w.num(sec.addr, 8)
+      w.num(sec.size, 8)
+      if sec.zero_fill
+        w.num(0_i64, 4)
+      else
+        w.num(sec.offset, 4)
+      end
+      w.num(log2_of(sec.align), 4)
+      w.num(0_i64, 4)
+      w.num(0_i64, 4)
+      w.num(sec.flags, 4)
+      w.num(0_i64, 4)
+      w.num(sec.reserved2, 4)
+      w.num(0_i64, 4)
+    end
+  end
+end

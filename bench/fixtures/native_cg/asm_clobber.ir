@@ -1,0 +1,16 @@
+; iyi-ir 1
+module "asm_clobber"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+; The template overwrites x0, x1 and x2 with 99. The value %a is live across it and must not sit in one of them.
+define i32 @main() {
+entry:
+  %a = add i64 1, 100
+  call void () asm sideeffect "mov x0, #99; mov x1, #99; mov x2, #99", "~{x0},~{x1},~{x2}"()
+  %s = add i64 %a, 0
+  %p = call i32 (ptr, ...) @printf(ptr @fmt, i64 %s)
+  ret i32 0
+}

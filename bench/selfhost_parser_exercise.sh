@@ -38,6 +38,18 @@ cd "$REPO"
 status=0
 diverged=0
 
+# invalid_mutant: a check that cannot run. Inside a mutation proof (_PM_ARMED, from mutation.sh) the mutant is invalid,
+# and the proof fails. Outside one, the probe itself failed, and the gate fails with the reason printed. It is defined
+# here, before the first probe that may call it (the require-location probe called it before its definition in section 5).
+invalid_mutant() {
+  if [ "${_PM_ARMED:-0}" = 1 ]; then
+    echo "INVALID MUTANT: $*"
+    return 0
+  fi
+  echo "CHECK NOT RUN: $*"
+  return 1
+}
+
 echo "== 1. Building and running selfhost parser exercise (plain mode)"
 "$IYI" build -o "$WORK_NATIVE/exercise-plain$EXE" "$REPO_NATIVE/bench/selfhost_parser_exercise.iyi"
 "$WORK/exercise-plain$EXE" > "$WORK/plain.out" 2>&1
@@ -902,7 +914,16 @@ check_require_locations() {
   fi
   cmp -s "$WORK/require_hosted.out" "$WORK/require_port.out"
 }
-if ! check_require_locations; then
+# A probe that cannot build or run is reported with its output. A difference is reported only when both ran.
+if ! "$IYI" build -o "$WORK_NATIVE/require_port$EXE" "$WORK_NATIVE/require_locations.iyi" > "$WORK/require_build.log" 2>&1; then
+  echo "  require location probe did not build; its build log follows"
+  cat "$WORK/require_build.log"
+  status=1
+elif ! "$WORK/require_port$EXE" "$WORK_NATIVE/require_input.iyi" > "$WORK/require_port.out" 2> "$WORK/require_port.err"; then
+  echo "  require location probe did not run; its error follows"
+  cat "$WORK/require_port.err"
+  status=1
+elif ! cmp -s "$WORK/require_hosted.out" "$WORK/require_port.out"; then
   echo "  port require locations differ from hosted parser"
   status=1
 fi
@@ -1118,13 +1139,6 @@ done
 
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
-
-# The mutation helper treats a nonzero check as caught, so invalid builds and
-# oracle failures must return success during a mutation and fail the proof.
-invalid_mutant() {
-  echo "INVALID MUTANT: $*"
-  [ "${_PM_ARMED:-0}" = 1 ]
-}
 
 build_mutant_exercise() {
   rm -f "$WORK/mut-exercise$EXE"

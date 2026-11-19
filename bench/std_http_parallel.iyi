@@ -32,6 +32,10 @@
 # accepts, and every answer must name the accepting thread; the block
 # appends to an `Array`, which is not `Share`, and closes its listener
 # itself, both of which the compiler refuses on more than one worker.
+# A broken server may send that block to the pool. It reports its thread
+# before touching either non-Share value, so the check can name the wrong
+# thread without racing the Array. The accepting task closes the listener
+# when the block ran elsewhere.
 #
 # Then the same server over TLS, `tls: config.frozen`, on a listener of
 # its own. Eight clients connect before anything accepts and send their
@@ -427,9 +431,12 @@ watched("the run under workers: 1", 30000) do
   group do |g|
     g.spawn do
       Server.serve(alone, workers: 1) do |request|
-        heard << request.path
-        alone.close if request.path == "/stop"
-        Response.new(200, "#{IyiScheduler.state.object_id}")
+        answering = IyiScheduler.state.object_id
+        if answering == accepting
+          heard << request.path
+          alone.close if request.path == "/stop"
+        end
+        Response.new(200, "#{answering}")
       end
       0
     end
@@ -437,10 +444,15 @@ watched("the run under workers: 1", 30000) do
       threads = early_alone.map { |socket| answer(socket) }
       early_alone.each(&.close)
       distinct = threads.uniq
-      check("workers: 1, the threads that answered", distinct == [accepting.to_s] ? "the accepting thread alone" : "#{distinct.size}, not all the accepting one", "the accepting thread alone", failures)
-      stopper = connect(alone_port)
-      ask(stopper, "/stop")
-      stopper.close
+      on_accepting = distinct == [accepting.to_s]
+      check("workers: 1, the threads that answered", on_accepting ? "the accepting thread alone" : "#{distinct.size}, not all the accepting one", "the accepting thread alone", failures)
+      if on_accepting
+        stopper = connect(alone_port)
+        ask(stopper, "/stop")
+        stopper.close
+      else
+        alone.close
+      end
       check("workers: 1, the requests the block recorded", heard.size.to_s, "5", failures)
       0
     end

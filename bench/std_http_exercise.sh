@@ -1338,7 +1338,7 @@ else
   # a copy of std/<module> (http unless given) with <old> made <new> must
   # print "FAIL <check>".
   parallel_breaks() {
-    local label="$1" old="$2" new="$3" check="$4" module="${5:-http}"
+    local label="$1" old="$2" new="$3" check="$4" module="${5:-http}" ended
     rm -rf "$WORK/parbreak" && mkdir -p "$WORK/parbreak/std"
     if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module.iyi" "$WORK/parbreak/std/$module.iyi" <<'PY'
 import os, sys
@@ -1359,12 +1359,13 @@ PY
       return
     fi
     timeout 120 "$WORK/parallel-broken" >"$WORK/parallel-broken.out" 2>&1
+    ended=$?
     got="$(grep -m1 "^FAIL $check" "$WORK/parallel-broken.out" | tr -d '\r')"
     if [ -n "$got" ]; then
       echo "  $label: caught: $got"
     else
-      echo "  $label: not caught at \"$check\""
-      sed -n '1,12p' "$WORK/parallel-broken.out" | sed 's/^/    /'
+      echo "  $label: not caught at \"$check\" (exit $ended)"
+      sed 's/^/    /' "$WORK/parallel-broken.out"
       status=1
     fi
   }

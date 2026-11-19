@@ -20,11 +20,15 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lsp_session import process_binary  # noqa: E402
 
 IYI = os.path.abspath(os.environ.get("IYI", "./bin/iyi"))
+
+# How long the restore waits for Windows to let go of the set-aside image.
+RESTORE_WAIT_SECONDS = 10.0
 
 passed = 0
 
@@ -43,6 +47,26 @@ def run(*args, cwd=None):
     return proc
 
 
+def restore_binary(aside, binary):
+    """Put the set-aside image back under its own name.
+
+    Windows can still report the image in use for a moment after the server
+    has been reaped: the rename then fails with WinError 32 (seen in CI). That
+    one error is retried until RESTORE_WAIT_SECONDS have passed, and raised
+    after that. Every other error, on every system, is raised at once.
+    """
+    deadline = time.monotonic() + RESTORE_WAIT_SECONDS
+    while True:
+        try:
+            os.rename(aside, binary)
+            return
+        except PermissionError as error:
+            in_use = sys.platform == "win32" and getattr(error, "winerror", None) == 32
+            if not in_use or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+
 def reap_and_restore_binary(server, aside, binary, rpc_exit):
     """Reap the running MCP server on Windows before restoring its binary image.
 
@@ -50,10 +74,10 @@ def reap_and_restore_binary(server, aside, binary, rpc_exit):
     WinError 32 if restored while the process is alive. The response from check
     is the proof; stop and reap the server before putting its executable back.
 
-    A nested try/finally ensures os.rename(aside, binary) executes unconditionally
-    even if rpc_exit raises or server.wait times out. On timeout, the server is
-    terminated with kill() before restoring. If aside is absent, os.rename fails
-    loudly with FileNotFoundError rather than silently skipping restoration.
+    A nested try/finally ensures the restore runs unconditionally, even if
+    rpc_exit raises or server.wait times out. On timeout, the server is
+    terminated with kill() before restoring. If aside is absent, the restore
+    fails loudly with FileNotFoundError rather than silently skipping.
     """
     try:
         if sys.platform == "win32":
@@ -67,7 +91,7 @@ def reap_and_restore_binary(server, aside, binary, rpc_exit):
                     server.kill()
                     server.wait()
     finally:
-        os.rename(aside, binary)
+        restore_binary(aside, binary)
 
 
 def main():

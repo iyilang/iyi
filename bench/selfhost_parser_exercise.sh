@@ -1287,7 +1287,7 @@ prove_mutation "mutation 36: a proc pointer accepts a global prefix on a local r
 # Mutation 37: a setter name loses its equals sign, so `->reset=` names `reset`.
 run_proof_in "mutation 37: a proc pointer setter loses its equals sign" "$PARSER" \
   $'        name = "#{name}="\n      elsif @token.type == TokenKind::OP_PERIOD' \
-  $'        name = name\n      elsif @token.type == TokenKind::OP_PERIOD'
+  $'        name = "#{name}"\n      elsif @token.type == TokenKind::OP_PERIOD'
 # Mutation 38: a top-level proc pointer loses its global prefix.
 run_proof_in "mutation 38: a top-level proc pointer loses its global flag" "$PARSER" \
   "      global_call = global" \

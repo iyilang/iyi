@@ -3065,6 +3065,8 @@ pub class Call < ASTNode
   property block_arg : ASTNode?
   property named_args : Array(NamedArgument)?
   property has_parentheses : Bool = false
+  # Hosted ast.cr 964: the arguments are written in brackets (`a[i]`), which an index assignment reads.
+  property args_in_brackets : Bool = false
   property name_location : Location? = nil
   property global : Bool = false
   property iyi_group : Bool = false

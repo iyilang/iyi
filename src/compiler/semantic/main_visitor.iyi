@@ -6227,6 +6227,48 @@ pub class MainVisitor < TypeNodeHost
     visit_self(self, node)
   end
 
+  # A proc pointer, typed as the hosted MainVisitor#visit(ProcPointer) decides (main_visitor.cr 1462-1499): a
+  # receiver-less pointer and a pointer on a path that is not a lib are expanded into a proc literal that calls
+  # the target, and the pointer takes the expansion's type. Refused by name, not ported: a pointer that closes
+  # over a variable (its closure is refused in cleanup_transformer.cr 2297-2330, not ported), a lib function
+  # (main_visitor.cr 1501-1547), any other receiver, and the macro refusal (1474-1481).
+  def visit(node : ProcPointer) : Bool
+    obj = node.obj
+    if obj
+      obj.accept(self)
+    end
+    if obj.nil?
+      return proc_pointer_expansion(node)
+    end
+    if obj.is_a?(Var) || obj.is_a?(InstanceVar) || obj.is_a?(ClassVar)
+      return refuse(node, "a proc pointer that closes over a variable is not ported yet: #{node.name}")
+    end
+    if obj.is_a?(Path)
+      owner = child_type(obj)
+      return false if owner.nil?
+      if owner.is_a?(LibType)
+        return refuse(node, "a proc pointer to a lib function is not ported yet: #{node.name}")
+      end
+      return proc_pointer_expansion(node)
+    end
+    refuse(node, "a proc pointer on this receiver is not ported yet: #{node.name}")
+  end
+
+  # The expansion of a proc pointer (literal_expander.cr 1225-1251), visited in place of the pointer, which takes
+  # its type from the expansion as the MacroIf arm does (visit(MacroIf) above).
+  def proc_pointer_expansion(node : ProcPointer) : Bool
+    expanded = @expansions[node]?
+    if expanded.nil?
+      expanded = LiteralExpander.new(@program.normalizer).expand_proc_pointer(node)
+      @expansions[node] = expanded
+    end
+    expanded.accept(self)
+    if et = child_type(expanded)
+      set_type(node, et)
+    end
+    false
+  end
+
   def visit(node : PointerOf) : Bool
     exp = node.exp
     if exp.is_a?(ClassVar) || exp.is_a?(InstanceVar)

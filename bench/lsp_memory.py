@@ -545,9 +545,13 @@ def workspace_pull(argv):
 
 
 def one_compile_mb(path):
-    """What one compile of *path* costs a worker alone: the first and the
-    last `iyi/footprint` it says, a fresh worker's before it compiled and
-    what it holds after opening the file and answering a hover."""
+    """What one compile of *path* costs a worker alone: a fresh worker's
+    resident megabytes once it has answered `initialize`, and the last
+    `iyi/footprint` it says after opening the file and answering a hover.
+    The start is read from the process, not from what it says: a worker
+    says its footprint in `FOOTPRINT_STEP` steps from zero, and Windows'
+    fresh one, under 32 MB, says nothing until it has compiled, which read
+    as a compile that cost nothing (job 135555395513)."""
     client = Client(("lsp", "--worker"))
     said = []
     read = client.read_message
@@ -559,8 +563,18 @@ def one_compile_mb(path):
         return message
 
     client.read_message = reading
+    uri = "file://" + str(path)
+    fresh = 0
     try:
-        uri = open_module(client, path, path.read_text())
+        client.send("initialize", {"processId": None,
+                                   "rootUri": "file://" + str(REPO),
+                                   "capabilities": {}})
+        fresh = rss_mb(client.proc.pid)
+        client.send("initialized", {}, wait=False)
+        client.send("textDocument/didOpen",
+                    {"textDocument": {"uri": uri, "languageId": "iyi",
+                                      "version": 1, "text": path.read_text()}}, wait=False)
+        client.diagnostics(uri)
         hover(client, uri, 0, 0)
         client.send("shutdown", {})
         client.send("exit", {}, wait=False)
@@ -568,7 +582,7 @@ def one_compile_mb(path):
     finally:
         if client.proc.poll() is None:
             client.proc.kill()
-    return (said[0], said[-1]) if said else (0, 0)
+    return fresh, (said[-1] if said else 0)
 
 
 def heavy_module_questions():

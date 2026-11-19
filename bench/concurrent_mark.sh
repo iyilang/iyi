@@ -245,6 +245,23 @@ IyiMark.workers = 0_u64 if Program.args.size > 0 && Program.args[0] == "alone"
 flag = Flag.new
 spinners = [] of IyiThread
 (IyiThread.core_count.to_i * 2).times { spinners << IyiThread.start { spin(flag) } }
+# Under -Dready_force the copy holds each helper until this program releases
+# it, and it releases them only once a collection has returned: a watcher
+# waits for that, and fails by name if none returns in ten seconds.
+{% if flag?(:ready_force) %}
+watcher = IyiThread.start do
+  deadline = IyiMark.now_ns + 10000000000_u64
+  while IyiMark.collections == 0_u64 && IyiMark.now_ns < deadline
+    IyiThread.yield_cpu
+  end
+  if IyiMark.collections == 0_u64
+    print "FAIL: crowded: the first collection did not return while its helpers were held\n"
+    __iyi_exit(1)
+  end
+  IyiMark.release_ready
+  nil
+end
+{% end %}
 started = IyiMark.now_ns
 sum = 0_i64
 300000.times do |i|
@@ -254,6 +271,9 @@ end
 took = IyiMark.now_ns - started
 flag.stop.set(1_i64)
 spinners.each { |thread| thread.join }
+{% if flag?(:ready_force) %}
+watcher.join
+{% end %}
 puts "crowded: #{took // 1000000_u64} ms, #{IyiMark.collections} collections, beside #{spinners.size} threads, #{sum}"
 IYI
 if ! "$IYI" build --release crowded.iyi -o crowded > build-crowded.log 2>&1; then
@@ -1023,6 +1043,64 @@ fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' unstarted.txt)"
 fi
 
+# The first collection's wait for every helper to reach its park, put back.
+# Each helper makes its count on entry, and the helpers' start waits for every
+# count. Forced: the copy holds each helper before its count until the program
+# releases them, and the program releases them only once a collection has
+# returned. With the wait put back the first collection then never returns and
+# the program's watcher fails by name. The hook alone (the count, no wait)
+# lets the first collection return, and the program passes.
+step "failure proof: a first collection that waits for every helper to reach its park is caught"
+mkdir -p held-helpers/iyi
+cp "$REPO"/src/iyi/*.iyi held-helpers/iyi/
+awk 'function forced() {
+    print "      # Copy only (concurrent_mark: the first-collection proof): a helper waits here until the program releases it."
+    print "      @[UnsafeReach(\"copy-only: the release word, set and read through its address\")]"
+    print "      @@forced_ready : UInt64 = 0_u64"
+    print ""
+    print "      def self.release_ready : Nil"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_ready).address).value.set(1_u64)"
+    print "      end"
+    print ""
+    print "      def self.forced_ready? : Bool"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_ready).address).value.get != 0_u64"
+    print "      end"
+    print ""
+  }
+  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared = 1 }
+  declared && !hooked && /^        w = worker$/ {
+    print
+    print "        while !IyiMark.forced_ready?"
+    print "          IyiThread.park_if_requested"
+    print "          spin_pause"
+    print "        end"
+    print "        pool_word(512_u64).value.add(1_u64)"
+    hooked = 1; next }
+  { print } END { if (!declared || !hooked) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held-helpers/iyi/prelude.iyi || { echo "the helper's entry this proof holds is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/held-helpers${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-held > build-held-helpers.log 2>&1; then
+  cat build-held-helpers.log; exit 1
+fi
+timeout -k 5 120 ./crowded-held > crowded-held.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -q '^crowded: ' crowded-held.txt; then
+  echo "the hook alone, helpers held until a collection returns, did not pass (exit $code):"; tail -3 crowded-held.txt; exit 1
+fi
+echo "  the hook alone, exits 0: $(grep -m1 '^crowded: ' crowded-held.txt)"
+mkdir -p ready/iyi
+cp held-helpers/iyi/*.iyi ready/iyi/
+awk '/^          @@helpers = @@helpers \+ 1_u64$/ { made = 1; print; next }
+  made && /^        end$/ { print; print "        limit_ns = now_ns + 10000000000_u64"; print "        while pool_word(512_u64).value.get < @@helpers && now_ns < limit_ns"; print "          spin_pause"; print "        end"; print "        if pool_word(512_u64).value.get < @@helpers"; print "          __iyi_write(2, \"FAIL: crowded: the first collection did not return while its helpers were held\\n\".to_unsafe.as(Void*), 79_u64)"; print "          __iyi_exit(1)"; print "        end"; made = 0; waited = 1; next }
+  { print } END { if (!waited) exit 3 }' held-helpers/iyi/prelude.iyi > ready/iyi/prelude.iyi || { echo "the helpers' start this proof changes is not in the prelude any more"; exit 1; }
+cmp -s ready/iyi/prelude.iyi held-helpers/iyi/prelude.iyi && { echo "the awk found nothing to change"; exit 1; }
+if ! IYI_PATH="$WORK/ready${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-ready > build-ready.log 2>&1; then
+  cat build-ready.log; exit 1
+fi
+timeout -k 5 120 ./crowded-ready > crowded-ready.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -Fxq 'FAIL: crowded: the first collection did not return while its helpers were held' crowded-ready.txt; then
+  echo "the first collection's wait was not caught (exit $code):"; tail -3 crowded-ready.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' 'FAIL: crowded: the first collection did not return while its helpers were held'
 if [ "$PSEP" = ":" ]; then
   echo "workdir $WORK"
   echo "concurrent mark: every step held"
@@ -1158,38 +1236,6 @@ if [ "$code" -ne 1 ] || ! grep -q "^FAIL: busy pool:" pooled.txt; then
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: busy pool:' pooled.txt)"
 
-# Measured on twelve cores, where eleven new helpers waited for a core;
-# on a CI runner's four the wait cost 35 ms against a 164 ms bound and the
-# proof did not fire. Below eight cores it is said to be unmeasured.
-cores="${NUMBER_OF_PROCESSORS:-$(nproc 2>/dev/null || echo 0)}"
-if [ "$cores" -lt 8 ]; then
-  echo "  the first-collection wait proof needs 8 cores to show; this machine has $cores: unmeasured here"
-else
-step "failure proof: a first collection that waits for every helper to reach its park is caught"
-mkdir -p ready/iyi
-cp "$REPO"/src/iyi/*.iyi ready/iyi/
-# The wait put back as it was: each helper counts itself in on a word of
-# the pool, and the helpers' start waits for the count.
-awk '/^      def self\.helper_main\(seen : UInt64\) : Nil$/ { print; main = 1; next }
-  main && /^        w = worker$/ { print; print "        pool_word(512_u64).value.add(1_u64)"; main = 0; counted = 1; next }
-  /^          @@helpers = @@helpers \+ 1_u64$/ { print; made = 1; next }
-  made && /^        end$/ { print; print "        while pool_word(512_u64).value.get < @@helpers"; print "          spin_pause"; print "        end"; made = 0; waited = 1; next }
-  { print } END { if (!counted || !waited) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > ready/iyi/prelude.iyi || { echo "the helpers' start this proof changes is not in the prelude any more"; exit 1; }
-if ! IYI_PATH="$WORK/ready${PSEP}$REPO/src" "$IYI" build --release crowded.iyi -o crowded-ready > build-ready.log 2>&1; then
-  cat build-ready.log; exit 1
-fi
-# Runs with the wait took 291 to 1,223 ms here, against bounds of 140 and
-# 184, and a machine busy elsewhere moves both: five rounds of three, and
-# the first caught is the proof.
-caught=""
-for round in 1 2 3 4 5; do
-  crowded_best crowded-ready helped
-  if [ "$best" -gt "$bound" ]; then caught="$round"; break; fi
-done
-[ -n "$caught" ] || { echo "the crowded check did not fire in five rounds: $best ms with the wait, within $bound"; exit 1; }
-echo "  caught on round $caught: beside $beside threads computing, past four times the time with no helpers and 100 ms"
-fi
 
 echo "workdir $WORK"
 echo "concurrent mark: every step held"

@@ -1,0 +1,26 @@
+module tls_two
+
+class Two
+  @[ThreadLocal]
+  @@ta = 10_i64
+
+  @[ThreadLocal]
+  @@tb = 0_i64
+
+  def self.ta
+    @@ta
+  end
+
+  def self.tb
+    @@tb
+  end
+
+  def self.set_tb(value : Int64)
+    @@tb = value
+  end
+end
+
+a = Two.ta
+before = Two.tb
+Two.set_tb(a * 2_i64)
+puts "#{a} #{before} #{Two.tb}"

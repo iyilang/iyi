@@ -1,0 +1,245 @@
+module compiler/native/obj/object
+
+import compiler/platform/target::{Target}
+import std/slice::{Bytes}
+
+# The object formats the native backend reads and writes. Each has a module
+# beside this one (`macho`; `elf` and `coff` follow). Wasm objects are not
+# read or written here.
+pub enum ObjFormat
+  MachO
+  Elf
+  Coff
+  Wasm
+end
+
+pub enum SectionKind
+  Text
+  ReadOnly
+  Data
+  ZeroFill
+  TlsData
+  TlsZeroFill
+  TlsVars # Mach-O TLV descriptors
+  Unwind  # .eh_frame / .pdata / .xdata passed through from LLVM objects
+  Other
+end
+
+pub enum SymbolBinding
+  Local
+  Global
+  Weak
+end
+
+pub enum SymbolKind
+  Func
+  Object
+  Tls
+  Section
+  Undefined
+  Absolute
+end
+
+# A relocation applies to the bytes at `offset` in its section. The kinds name
+# what the instruction or data word needs, so a linker never has to decode a
+# format's own relocation type. `Sub64` is the subtrahend of a difference: it
+# applies to the `Abs32` or `Abs64` reloc that follows it at the same offset,
+# which holds the minuend.
+pub enum RelocKind
+  Abs64
+  Abs32
+  PcRel32     # x86_64 rip-relative data; ELF PREL32 (eh_frame)
+  X86Branch32 # call/jmp rel32 (ELF PLT32, COFF REL32 on calls)
+  X86GotPcRel # GOTPCREL(X): a GOT entry or relaxation
+  X86TpOff32  # local-exec %fs offset
+  A64Call26
+  A64Jump26
+  A64AdrpPage21
+  A64AddLo12
+  A64Ldst8Lo12
+  A64Ldst16Lo12
+  A64Ldst32Lo12
+  A64Ldst64Lo12
+  A64Ldst128Lo12
+  A64GotPage21
+  A64GotLo12
+  A64PointerToGot # Mach-O POINTER_TO_GOT: 32-bit pc-relative to a GOT entry
+  A64TlvpPage21   # Mach-O TLV descriptor
+  A64TlvpLo12
+  A64TprelHi12 # ELF local-exec
+  A64TprelLo12Nc
+  CoffAddr32Nb # image-relative (.pdata)
+  CoffSecRel32 # TLS offset in .tls
+  CoffSection
+  Sub64 # Mach-O SUBTRACTOR pairs and differences
+  WasmFuncIndexLeb
+  WasmTableIndexSleb
+  WasmTableIndexI32
+  WasmMemAddrLeb
+  WasmMemAddrSleb
+  WasmMemAddrI32
+  WasmTypeIndexLeb
+  WasmGlobalIndexLeb
+  X86Abs32S        # ELF R_X86_64_32S
+  X86GotPcRelX     # ELF R_X86_64_GOTPCRELX (a GOT entry, relaxable)
+  X86RexGotPcRelX  # ELF R_X86_64_REX_GOTPCRELX (a GOT entry, relaxable with a REX prefix)
+  A64TprelMovwG1   # ELF R_AARCH64_TLSLE_MOVW_TPREL_G1 (local-exec, movz with LSL 16)
+  A64TprelMovwG0Nc # ELF R_AARCH64_TLSLE_MOVW_TPREL_G0_NC (local-exec, movk)
+  PcRel64          # 64-bit pc-relative: ELF R_AARCH64_PREL64 and R_X86_64_PC64 (eh_frame)
+end
+
+pub struct Reloc
+  getter offset : Int64
+  getter kind : RelocKind
+  getter symbol : Int32
+  getter addend : Int64
+
+  def initialize(@offset : Int64, @kind : RelocKind, @symbol : Int32, @addend : Int64 = 0_i64)
+  end
+end
+
+# A named region of an object. `align` is in bytes. `flags` carries the Mach-O
+# section type and attribute bits; zero lets the Mach-O writer choose them from
+# `kind`, and the Mach-O reader always sets them.
+pub class Section
+  property name : String # canonical: ".text" ".rodata" ".data" ".bss" ".tdata" ".tbss" ".tlv"; any other Mach-O section is "SEG,sect"; writers map per format
+  property kind : SectionKind
+  property align : Int32
+  property bytes : ::Std::Slice::Bytes
+  property size : Int64 # for zero-fill
+  property relocs : Array(Reloc)
+  property flags : Int64
+  property entsize : Int64 # ELF sh_entsize; 0 in other formats
+
+  def initialize(@name : String, @kind : SectionKind, @align : Int32, @bytes : ::Std::Slice::Bytes, @size : Int64, @relocs : Array(Reloc) = [] of Reloc, @flags : Int64 = 0_i64)
+    @entsize = 0_i64
+  end
+end
+
+pub class Symbol
+  property name : String # undecorated; the Mach-O writer adds "_"
+  property kind : SymbolKind
+  property binding : SymbolBinding
+  property section : Int32 # index into ObjectFile#sections; -1 when undefined or absolute
+  property value : Int64   # offset within its section, or the absolute value
+  property size : Int64
+  property import_library : String?
+  property desc : Int64          # Mach-O n_desc bits, kept whole; 0 in other formats
+  property private_extern : Bool # Mach-O N_PEXT: global within a link, never exported
+
+  def initialize(@name : String, @kind : SymbolKind, @binding : SymbolBinding, @section : Int32 = -1, @value : Int64 = 0_i64, @size : Int64 = 0_i64, @import_library : String? = nil, @desc : Int64 = 0_i64, @private_extern : Bool = false)
+  end
+end
+
+pub struct LineRow
+  getter offset : Int32 # from the function's start
+  getter file : Int32
+  getter line : Int32
+  getter column : Int32
+
+  def initialize(@offset : Int32, @file : Int32, @line : Int32, @column : Int32)
+  end
+end
+
+pub struct DebugFunc # format-neutral; the linker writes DWARF or PDB from it
+  getter symbol : Int32
+  getter display_name : String
+  getter rows : Array(LineRow)
+
+  def initialize(@symbol : Int32, @display_name : String, @rows : Array(LineRow))
+  end
+end
+
+pub enum FrameOp
+  PushFrameRecord # stp x29, x30 / push rbp
+  SetFramePointer
+  SaveReg
+  AllocStack
+end
+
+pub struct FrameEvent
+  getter offset : Int32 # code offset after which the event holds
+  getter op : FrameOp
+  getter reg : Int32
+  getter value : Int64
+
+  def initialize(@offset : Int32, @op : FrameOp, @reg : Int32, @value : Int64)
+  end
+end
+
+pub struct FrameDesc # format-neutral; the linker writes .eh_frame or .pdata/.xdata from it
+  getter symbol : Int32
+  getter size : Int32
+  getter events : Array(FrameEvent)
+
+  def initialize(@symbol : Int32, @size : Int32, @events : Array(FrameEvent))
+  end
+end
+
+# One entry of Mach-O LC_BUILD_VERSION's tool list.
+pub struct BuildTool
+  getter tool : Int32
+  getter version : Int32
+
+  def initialize(@tool : Int32, @version : Int32)
+  end
+end
+
+# Mach-O LC_BUILD_VERSION. `minos` and `sdk` pack as x << 16 | y << 8 | z.
+pub class BuildVersion
+  property platform : Int32 # 1 is macOS
+  property minos : Int32
+  property sdk : Int32
+  property tools : Array(BuildTool)
+
+  def initialize(@platform : Int32, @minos : Int32, @sdk : Int32, @tools : Array(BuildTool) = [] of BuildTool)
+  end
+end
+
+# One LC_DATA_IN_CODE entry: data inside the code section, by offset in it.
+pub struct DataInCodeEntry
+  getter offset : Int32
+  getter length : Int32
+  getter kind : Int32
+
+  def initialize(@offset : Int32, @length : Int32, @kind : Int32)
+  end
+end
+
+# A file that is not a well-formed object. Reading returns this rather than
+# raising; the message names the file's problem and where it is.
+pub class ObjError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+pub class ObjectFile
+  property format : ObjFormat
+  property target : ::Compiler::Platform::Target::Target
+  property producer : String # "iyi-native" or "llvm"; the linker refuses a mix
+  property sections : Array(Section)
+  property symbols : Array(Symbol)
+  property debug_funcs : Array(DebugFunc)
+  property frame_descs : Array(FrameDesc)
+  property files : Array(String)
+  property build_version : BuildVersion?         # Mach-O LC_BUILD_VERSION
+  property linker_options : Array(String)        # Mach-O LC_LINKER_OPTION
+  property data_in_code : Array(DataInCodeEntry) # Mach-O LC_DATA_IN_CODE
+
+  def initialize(@format : ObjFormat, @target : ::Compiler::Platform::Target::Target, @producer : String)
+    @sections = [] of Section
+    @symbols = [] of Symbol
+    @debug_funcs = [] of DebugFunc
+    @frame_descs = [] of FrameDesc
+    @files = [] of String
+    @build_version = nil
+    @linker_options = [] of String
+    @data_in_code = [] of DataInCodeEntry
+  end
+end

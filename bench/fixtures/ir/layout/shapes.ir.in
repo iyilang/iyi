@@ -1,0 +1,9 @@
+; iyi-ir 1
+module "shapes"
+target triple = "@TRIPLE@"
+target datalayout = "@DATALAYOUT@"
+%IntPair = type { i8, i64 }
+%MixedInts = type { i8, i16, i32, i8, i64 }
+%PointerPair = type { ptr, i8 }
+%WideInt = type { i8, i128 }
+%FloatMix = type { i8, float, double }

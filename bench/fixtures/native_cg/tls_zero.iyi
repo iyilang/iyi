@@ -1,0 +1,18 @@
+module tls_zero
+
+class Slot
+  @[ThreadLocal]
+  @@slot = 0_i64
+
+  def self.slot
+    @@slot
+  end
+
+  def self.set_slot(value : Int64)
+    @@slot = value
+  end
+end
+
+zero = Slot.slot
+Slot.set_slot(5_i64)
+puts "#{zero} #{Slot.slot}"

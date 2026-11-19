@@ -1,0 +1,41 @@
+; iyi-ir 1
+module "loop_backedge"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @loopy(i64 %n, i64 %k) {
+entry:
+  %kk = mul i64 %k, 5
+  %kq = add i64 %k, 3
+  br label %head
+head:
+  %i = phi i64 [ 0, label %entry ], [ %i2, label %body ]
+  %acc = phi i64 [ 0, label %entry ], [ %acc2, label %body ]
+  %prev = phi i64 [ 1, label %entry ], [ %cur, label %body ]
+  %more = icmp slt i64 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %t1 = mul i64 %i, %k
+  %t2 = add i64 %t1, %prev
+  %t3 = add i64 %t2, %kk
+  %acc2 = add i64 %acc, %t3
+  %cur = add i64 %t2, %kq
+  %i2 = add i64 %i, 1
+  br label %head
+done:
+  %res = add i64 %acc, %kq
+  ret i64 %res
+}
+
+define i32 @main() {
+entry:
+  %r1 = call i64 (i64, i64) @loopy(i64 10, i64 3)
+  %r2 = call i64 (i64, i64) @loopy(i64 0, i64 3)
+  %r3 = call i64 (i64, i64) @loopy(i64 25, i64 -2)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r1)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r2)
+  %p3 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r3)
+  ret i32 0
+}

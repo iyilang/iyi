@@ -1,0 +1,11 @@
+module frame64k
+
+import std/int
+
+def big(seed : Int32) : Int32
+  first = seed.to_i8.to_i32
+  last = (seed.to_i8 &+ 5_i8).to_i32
+  first + last
+end
+
+puts "#{big(9)} 42"

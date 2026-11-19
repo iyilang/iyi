@@ -103,6 +103,25 @@
       {% end %}
     end
 
+    # The add as a plain add tears it: the count is read, and the read plus one
+    # stored. `race_forced` puts another task's add between the two; the atomic
+    # add is one step, so it has no gap there to be put in.
+    def read_count : Int64
+      {% if flag?(:parallel_plain_add) %}
+        @hits.get
+      {% else %}
+        0_i64
+      {% end %}
+    end
+
+    def store_count(seen : Int64) : Nil
+      {% if flag?(:parallel_plain_add) %}
+        @hits.set(seen + 1_i64)
+      {% else %}
+        @hits.add(1_i64)
+      {% end %}
+    end
+
     def hits : Int64
       @hits.get
     end
@@ -370,6 +389,45 @@
     end
   end
 
+  # The race forced: one task reads the count and holds its read until the
+  # other task's add has stored, then stores the read plus one. A plain add
+  # loses the other's add that way every time; the atomic add is one step and
+  # keeps both. Each task waits on a count the other sets, and the watch names
+  # a wait that never ends.
+  def race_forced(watch : Int32) : Nil
+    watched("race", watch) do
+      racer = Racer.new
+      looked = Tally.new
+      stored = Tally.new
+      group do |g|
+        g.spawn(unit: :new) do
+          seen = racer.read_count
+          looked.add(1_i64)
+          started = __iyi_monotonic_ns
+          while stored.count == 0_i64
+            IyiThread.spin_pause
+            fail("race: the other task's add never stored within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+          end
+          racer.store_count(seen)
+          0
+        end
+        g.spawn(unit: :new) do
+          started = __iyi_monotonic_ns
+          while looked.count == 0_i64
+            IyiThread.spin_pause
+            fail("race: the first task never read the count within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+          end
+          racer.bump
+          stored.add(1_i64)
+          0
+        end
+      end
+      want = 2_i64
+      fail("race: increments lost: #{want - racer.hits} of #{want}, so one task stored the count it read before the other's add landed") unless racer.hits == want
+      puts "race: two tasks added to one count with one add put between another's read and store, and lost none"
+    end
+  end
+
   # Values cross threads through channels exactly once and in each
   # sender's order: producers on the pool, the consumer on the main
   # thread; then a pipeline through a parallel stage, in order; then
@@ -526,6 +584,35 @@
     end
   end
 
+  # The take_now copy that drops the channel's lock reads the count, yields,
+  # then stores it again. Two takes from one full channel on the main thread:
+  # the first yields between its read and its store (armed below, copy only),
+  # the second takes and stores in that gap, and the first then stores a count
+  # it read before. Unforced, each take runs to its end before the next
+  # starts, and nothing shows.
+  def now_forced(watch : Int32) : Nil
+    watched("now", watch) do
+      places = Channel(Int32).new(2)
+      places.send(0)
+      places.send(1)
+      {% if flag?(:now_force) %}
+        IyiScheduler.force_yield_arm
+      {% end %}
+      group do |g|
+        g.spawn(unit: :same) do
+          places.take_now
+          0
+        end
+        g.spawn(unit: :same) do
+          places.take_now
+          0
+        end
+      end
+      fail("now: a place is still held after both takes") if places.receive_ready?
+      puts "now: two takes from one full channel on one thread left no place held"
+    end
+  end
+
   # The failing task's wait for its cue: a spin with no back-edge check,
   # so from its first statement to its failure the worker it is on runs
   # nothing else and the sleeper cannot go to sleep there. Said started
@@ -626,6 +713,44 @@
     end
   end
 
+  # The unstarted tasks a cancel must reach. Four NoPreempt holders occupy
+  # every worker (the pool is four: `IyiWorkers.count = 4` in main), so the
+  # 32 children spawned after them never start: each has no home and waits in
+  # the pool. The group's cancel must flag them while they wait. The holders
+  # are released after the cancel, and a child the cancel did not flag runs
+  # its sleep to the end.
+  def cancel_unstarted(watch : Int32) : Nil
+    watched("cancel", watch) do
+      begun = Tally.new
+      cue = Tally.new
+      waited = Tally.new
+      children = IyiWorkers.count * 8
+      group do |g|
+        IyiWorkers.count.times do
+          g.spawn(unit: :new) do
+            hold_for(begun, cue)
+            0
+          end
+        end
+        started = __iyi_monotonic_ns
+        while begun.count < IyiWorkers.count.to_i64
+          sleep(1)
+          fail("cancel: the holders did not take every worker within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+        end
+        children.times do
+          g.spawn(unit: :new) do
+            waited.add(1_i64) unless sleep(1000).is_a?(Cancelled)
+            0
+          end
+        end
+        g.cancel_children
+        cue.add(1_i64)
+      end
+      fail("cancel: #{waited.count} tasks waiting in the pool ran uncancelled") if waited.count > 0
+      puts "cancel: #{children} tasks waiting in the pool were cancelled before any started"
+    end
+  end
+
   # A panic stops at the task's boundary, on whatever thread it ran: the
   # handle answers `Panicked`, its siblings finish.
   def panics(watch : Int32) : Nil
@@ -692,6 +817,30 @@
         fail("steal: no worker took a task another worker's task had spawned") if stolen == 0_u64
       end
       puts "steal: 64 tasks one parallel task spawned ran once each, #{elsewhere.count} on other workers, #{stolen} stolen, the first within #{waited_ms} ms"
+    end
+  end
+
+  # The main thread waits on its group while a task finishes, so the task's
+  # wake for the main thread goes through the main thread's own inbox and
+  # rings its poller. A forced copy whose ring is gone leaves the main thread
+  # asleep until the watch's timer ends it. The worker waits until the main
+  # thread's wait has marked it idle (`IyiScheduler.force_idle_seen?`, copy
+  # only), and only then finishes; unforced, the step is a plain join.
+  def home_wake(watch : Int32) : Nil
+    watched("home", watch) do
+      group do |g|
+        g.spawn(unit: :new) do
+          {% if flag?(:lostwake_force) %}
+            started = __iyi_monotonic_ns
+            while !IyiScheduler.force_idle_seen?
+              IyiThread.spin_pause
+              fail("home: the main thread never went idle within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+            end
+          {% end %}
+          0
+        end
+      end
+      puts "home: a task finished on a worker and woke the main thread it was joined by"
     end
   end
 
@@ -926,6 +1075,30 @@
     end
   end
 
+  # The copy's window, forced: `force_window_hold` holds a parked task between
+  # its look at its word and its wait, until the program lets it go. The main
+  # thread cancels the task while it is held there, and only a cancel that
+  # claims the park can end it. Built only under -Dlostcancel_force.
+  def cancel_in_window(ended : Tally, watch : Int32) : Nil
+    {% if flag?(:lostcancel_force) %}
+      IyiScheduler.force_window_arm
+      never = Channel(Int32).new
+      group do |inner|
+        inner.spawn(unit: :new) do
+          ended.add(1_i64) if never.receive.is_a?(Cancelled)
+          0
+        end
+        started = __iyi_monotonic_ns
+        while !IyiScheduler.force_window_held?
+          sleep(1)
+          fail("wakes, cancels: the task never reached its park's window within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+        end
+        inner.cancel_children
+        IyiScheduler.force_window_release
+      end
+    {% end %}
+  end
+
   # Wakes that race, now that each channel and each list `park_on` waits
   # in has a lock of its own and a parked fiber's wake goes to whichever
   # waker claims it (`IyiFiber#claim`). Selects parked on two channels
@@ -969,6 +1142,39 @@
       end
     end
 
+    # A select with two arms and no timeout parks on both channels; the main
+    # thread hands it a value once it is parked, and closes the channel. A
+    # value handed to a parked select is the select's: the sender marks the
+    # receiver's node handed, and a select woken without that mark takes no
+    # arm and parks again, so the value is lost.
+    if parts.includes?("handed")
+      watched("wakes, selects", watch) do
+        a = Channel(Int64).new
+        b = Channel(Int64).new
+        group do |g|
+          chooser = g.spawn(unit: :new) do
+            taken = -3_i64
+            select
+            when x = a.receive
+              taken = x.is_a?(Int64) ? x : -1_i64
+            when y = b.receive
+              taken = y.is_a?(Int64) ? y : -2_i64
+            end
+            taken
+          end
+          started = __iyi_monotonic_ns
+          while chooser.fiber.state != IyiFiberState::WaitingCh
+            sleep(1)
+            fail("wakes, selects: the select never parked on its two channels within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+          end
+          a.send(42_i64)
+          a.close
+          handed_answer = chooser.value
+          fail("wakes, selects: a value handed to a parked select was not received (it answered #{handed_answer})") unless handed_answer == 42_i64
+        end
+      end
+    end
+
     # Half the workers spin waiting for their child to start, so the
     # other half are there to start it: four spinners on four workers
     # left each child to wait for a preemption.
@@ -977,19 +1183,24 @@
     ended = Tally.new
     if parts.includes?("cancels")
       watched("wakes, cancels", watch) do
-        group do |g|
-          tasks.times do
-            g.spawn(unit: :new) do
-              round = 0
-              while round < rounds
-                cancel_as_parked(ended)
-                round = round + 1
+        {% if flag?(:lostcancel_force) %}
+          cancel_in_window(ended, watch)
+          fail("wakes: #{ended.count} of 1 tasks cancelled in their park's window answered Cancelled") unless ended.count == 1_i64
+        {% else %}
+          group do |g|
+            tasks.times do
+              g.spawn(unit: :new) do
+                round = 0
+                while round < rounds
+                  cancel_as_parked(ended)
+                  round = round + 1
+                end
+                0
               end
-              0
             end
           end
-        end
-        fail("wakes: #{ended.count} of #{tasks * rounds} tasks cancelled as they parked answered Cancelled") unless ended.count == tasks.to_i64 * rounds
+          fail("wakes: #{ended.count} of #{tasks * rounds} tasks cancelled as they parked answered Cancelled") unless ended.count == tasks.to_i64 * rounds
+        {% end %}
       end
     end
 
@@ -1009,21 +1220,21 @@
     puts "wakes: #{got.count} values through selects over two channels and a deadline, each once; #{ended.count} tasks cancelled as they parked; #{parts.includes?("words") ? turns_each * 2_i64 : 0_i64} turns handed through park_on and wake_on"
   end
 
-  STEPS = ["placement", "exactly_once", "race", "channels", "now", "cancel", "panics", "steal", "collector", "typed", "wakes"]
+  STEPS = ["placement", "exactly_once", "race", "race_forced", "channels", "now", "now_forced", "cancel", "cancel_unstarted", "panics", "steal", "home", "collector", "typed", "wakes"]
 
   arguments = Program.args
   if arguments.size == 4 && arguments[0] == "speed"
     speed(arguments[1].to_i, arguments[2].to_i, arguments[3].to_i.to_i64)
   else
     watch = 60000
-    parts = ["selects", "cancels", "words"]
+    parts = ["selects", "handed", "cancels", "words"]
     chosen = [] of String
     arguments.each do |argument|
       if argument.starts_with?("--watch=")
         watch = argument[8, argument.size - 8].to_i
       elsif argument.starts_with?("--only=")
         parts = [argument[7, argument.size - 7]]
-        fail("wakes has no part named #{parts[0]}") unless ["selects", "cancels", "words"].includes?(parts[0])
+        fail("wakes has no part named #{parts[0]}") unless ["selects", "handed", "cancels", "words"].includes?(parts[0])
       else
         fail("no step named #{argument}") unless STEPS.includes?(argument)
         chosen << argument
@@ -1044,6 +1255,10 @@
       when "collector"    then collector(watch)
       when "typed"        then typed_step(watch)
       when "wakes"        then wakes(watch, parts)
+      when "race_forced"      then race_forced(watch)
+      when "now_forced"       then now_forced(watch)
+      when "cancel_unstarted" then cancel_unstarted(watch)
+      when "home"             then home_wake(watch)
       end
     end
     puts "parallel exercise: every property held on #{IyiWorkers.count} workers"

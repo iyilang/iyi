@@ -626,8 +626,9 @@
   (59.6 MB) that nothing ever deletes. `IYI_CACHE_DIR` is now under the
   job's `RUNNER_TEMP`, as fresh as GitHub's VMs and gone with the job.
   Crystal's cache, which the bootstrap compiler builds `iyi` through, is
-  each runner's own under `RUNNER_TOOL_CACHE` and kept between its jobs,
-  so `make iyi` stays warm.
+  each runner's own under `RUNNER_TOOL_CACHE` and kept between its jobs
+  as before: brew's Crystal rotates it with no lock at all, and one
+  runner runs one job at a time.
 
 - **`bench/spawn_eligible.iyi`'s `grows` keeps its four tasks wanting
   to run until the pool has answered them.** The pool starts one worker

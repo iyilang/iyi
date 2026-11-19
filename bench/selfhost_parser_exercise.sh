@@ -1575,7 +1575,7 @@ run_proof_in "mutation 24: a heredoc is not read with its indent removed" "$PARS
   $'if delimiter_state.kind == DelimiterKind::HEREDOC\n      return StringInterpolation' \
   $'if false && delimiter_state.kind == DelimiterKind::HEREDOC\n      return StringInterpolation'
 run_proof_in "mutation 25: a begin block gets the paren keyword" "$PARSER" \
-  "        body.keyword = Expressions::Keyword::Begin" "        body.keyword = Expressions::Keyword::Paren"
+  "      node.keyword = Expressions::Keyword::Begin" "      node.keyword = Expressions::Keyword::Paren"
 run_proof_in "mutation 26: &.name with a local of that name reads the local" "$PARSER" \
   "      if is_var && !call_only" "      if is_var"
 run_proof_in "mutation 27: a comma does not continue a call across the line break" "$PARSER" \

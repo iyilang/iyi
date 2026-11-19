@@ -4527,7 +4527,7 @@ jobs:
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
-            wasi-run, wasm32-collector, binary, clean-room, vscode, heap22, darwin-heap22, windows-heap22,
+            npm-recipe, wasi-run, wasm32-collector, binary, clean-room, vscode, heap22, darwin-heap22, windows-heap22,
             selfhost, selfhost-darwin, selfhost-windows]
     if: ${{ always() }}
     runs-on: ubuntu-24.04

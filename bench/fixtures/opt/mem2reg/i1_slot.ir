@@ -1,0 +1,11 @@
+; iyi-ir 1
+source_filename = "i1_slot"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @i1_slot() {
+entry:
+  %slot = alloca i1, align 1
+  store i1 true, ptr %slot, align 1
+  %value = load i1, ptr %slot, align 1
+  ret i1 %value
+}

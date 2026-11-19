@@ -1,0 +1,255 @@
+@[Unsafe("reads the bit pattern of a float through a pointer cast: iyi has no float bit conversion, and a float constant carries its bits")]
+module compiler/ir/values
+
+import std/float
+import std/int
+import compiler/ir/types::{IrType}
+
+# The base of everything that can be an operand: instructions, constants, parameters, globals and functions.
+# A name of "" marks an unnamed value; the printer numbers those in definition order.
+pub class Value
+  property name : String
+  getter type : IrType
+
+  def initialize(@type : IrType, @name : String = "")
+  end
+end
+
+pub class Param < Value
+  getter index : Int32
+
+  def initialize(type : IrType, name : String, @index : Int32)
+    super(type, name)
+  end
+end
+
+# The local names of one function, claimed the way LLVM's ValueSymbolTable claims them
+# (makeUniqueName). A free name is kept as given. A taken name gets the function's counter
+# appended with no separator, incremented until the result is free. The counter is shared by
+# every value in the function, blocks and parameters included, as LLVM's LastUnique is. "" is
+# unnamed and is never claimed. The text parser registers the names it reads as written, so the
+# verifier still sees a duplicate that the text itself contains.
+pub class SymbolTable
+  def initialize
+    @taken = Hash(String, Bool).new
+    @last_unique = 0
+  end
+
+  def taken?(name : String) : Bool
+    @taken.has_key?(name)
+  end
+
+  def register(name : String) : Nil
+    @taken[name] = true unless name.empty?
+  end
+
+  def claim(name : String) : String
+    return name if name.empty?
+    candidate = name
+    while taken?(candidate)
+      @last_unique += 1
+      candidate = "#{name}#{@last_unique}"
+    end
+    register(candidate)
+    candidate
+  end
+end
+
+# The bit pattern of a double, as a signed 64-bit integer.
+pub def double_bits(value : Float64) : Int64
+  pointerof(value).as(Int64*).value
+end
+
+# The bit pattern of a float (32-bit), held in the low 32 bits of a non-negative Int64.
+pub def single_bits(value : Float64) : Int64
+  narrowed = value.to_f32
+  (pointerof(narrowed).as(Int32*).value.to_i64) & 0xFFFFFFFF_i64
+end
+
+# The 32 bits of the float that holds exactly the value a double's 64 bits hold, or nil when no float does.
+# LLVM writes a float constant as the double of the same value (`float 0xC7EFFFFFE0000000`), so the bits are
+# moved field by field rather than converted: an infinity stays one, a NaN keeps its sign and the top of its
+# payload, and a value a float would have to round is refused.
+pub def single_bits_of_double(bits : Int64) : Int64?
+  sign = (bits >> 63) & 1_i64
+  exponent = (bits >> 52) & 0x7FF_i64
+  mantissa = bits & 0xFFFFFFFFFFFFF_i64
+  # A float keeps the top 23 of the double's 52 mantissa bits; the low 29 must be clear.
+  return nil if (mantissa & 0x1FFFFFFF_i64) != 0_i64
+  top = mantissa >> 29
+  if exponent == 0x7FF_i64
+    return (sign << 31) | (0xFF_i64 << 23) | top
+  end
+  if exponent == 0_i64
+    # Zero. A double below its own normal range is below every float.
+    return mantissa == 0_i64 ? sign << 31 : nil
+  end
+  power = exponent - 1023_i64
+  if power >= -126_i64 && power <= 127_i64
+    return (sign << 31) | ((power + 127_i64) << 23) | top
+  end
+  if power >= -149_i64 && power < -126_i64
+    # Below the float's normal range: the leading one moves into the mantissa, and what is shifted out must be clear.
+    shift = (-126_i64 - power).to_i32
+    full = (1_i64 << 23) | top
+    return nil if (full & ((1_i64 << shift) - 1_i64)) != 0_i64
+    return (sign << 31) | (full >> shift)
+  end
+  nil
+end
+
+# A 64-bit pattern read as a signed Int64: the same bits, not the same value.
+pub def u64_as_i64(u : UInt64) : Int64
+  low = (u & 0x7FFFFFFFFFFFFFFF_u64).to_i64
+  if ((u >> 63) & 1_u64) == 1_u64
+    low - 9223372036854775807_i64 - 1_i64
+  else
+    low
+  end
+end
+
+# The two's complement negation of `words`, taken across all of them: the magnitude of a negative value.
+def negate_words(words : Array(UInt64)) : Array(UInt64)
+  out = [] of UInt64
+  carry = 1_u64
+  words.each do |w|
+    inv = w ^ 0xFFFFFFFFFFFFFFFF_u64
+    sum = inv &+ carry
+    carry = (carry == 1_u64 && sum == 0_u64) ? 1_u64 : 0_u64
+    out << sum
+  end
+  out
+end
+
+# The `bits`-bit two's complement value of `words`: every bit from `bits` up is a copy of bit `bits - 1`. Its words are
+# the canonical form of that value, so a word list equals its own sign extension exactly when it fits `bits` bits.
+pub def sign_extend_words(words : Array(UInt64), bits : Int32) : Array(UInt64)
+  top = bits - 1
+  k = top // 64
+  r = top % 64
+  sign = ((words[k] >> r) & 1_u64) == 1_u64
+  keep = r == 63 ? 0xFFFFFFFFFFFFFFFF_u64 : (1_u64 << (r + 1)) - 1_u64
+  high = keep ^ 0xFFFFFFFFFFFFFFFF_u64
+  out = [] of UInt64
+  i = 0
+  while i < words.size
+    if i < k
+      out << words[i]
+    elsif i == k
+      out << (sign ? (words[i] | high) : (words[i] & keep))
+    else
+      out << (sign ? 0xFFFFFFFFFFFFFFFF_u64 : 0_u64)
+    end
+    i = i + 1
+  end
+  out
+end
+
+# The canonical words of the `bits`-bit integer that `words` (least significant first, as Int64) truncates to.
+pub def canonical_words(words : Array(Int64), bits : Int32) : Array(Int64)
+  sign_extend_words(words.map { |w| w.unsafe_to_u64 }, bits).map { |w| u64_as_i64(w) }
+end
+
+# A 128-bit constant as two 64-bit halves in two's complement: `hi` holds bits 64 to 127, `lo` bits 0 to 63.
+pub class Wide128
+  getter hi : Int64
+  getter lo : Int64
+
+  def initialize(@hi : Int64, @lo : Int64)
+  end
+end
+
+# The 128-bit value of `text` in decimal, LLVM's signed form. Nil when it does not fit [-2^127, 2^127 - 1].
+pub def i128_parse(text : String) : Wide128?
+  if words = int_words_parse(text, 128)
+    return Wide128.new(words[1], words[0])
+  end
+  nil
+end
+
+# A 128-bit two's complement constant as LLVM's signed decimal text.
+pub def i128_text(hi : Int64, lo : Int64) : String
+  int_words_text([lo, hi], 128)
+end
+
+# The 64-bit words of the `bits`-bit integer that `text` writes in decimal (LLVM's signed form, `-5`), least
+# significant first and sign-extended to whole words. Nil when the text is not a decimal number or does not fit the
+# signed range [-2^(bits-1), 2^(bits-1) - 1].
+pub def int_words_parse(text : String, bits : Int32) : Array(Int64)?
+  negative = text.starts_with?("-")
+  digits = negative ? text[1, text.bytesize - 1] : text
+  return nil if digits.empty?
+  count = (bits + 63) // 64
+  # 32-bit limbs, least significant first; the spare limb holds a magnitude one word past the value's own.
+  limbs = [] of UInt64
+  (2 * count + 1).times { limbs << 0_u64 }
+  i = 0
+  while i < digits.bytesize
+    b = digits.byte_at(i)
+    return nil if b < 48_u8 || b > 57_u8
+    carry = (b - 48_u8).to_i64.unsafe_to_u64
+    k = 0
+    while k < limbs.size
+      current = limbs[k] * 10_u64 + carry
+      limbs[k] = current & 0xFFFFFFFF_u64
+      carry = current >> 32
+      k = k + 1
+    end
+    return nil unless carry == 0_u64
+    i = i + 1
+  end
+  k = 2 * count
+  while k < limbs.size
+    return nil unless limbs[k] == 0_u64
+    k = k + 1
+  end
+  words = [] of UInt64
+  j = 0
+  while j < count
+    words << (limbs[2 * j] | (limbs[2 * j + 1] << 32))
+    j = j + 1
+  end
+  # A zero is never negative; the value's top bit must then agree with its sign, and its bits above must be a sign extension.
+  negative = negative && words.any? { |w| w != 0_u64 }
+  words = negate_words(words) if negative
+  top = bits - 1
+  sign_set = ((words[top // 64] >> (top % 64)) & 1_u64) == 1_u64
+  return nil unless sign_set == negative
+  return nil unless sign_extend_words(words, bits) == words
+  words.map { |w| u64_as_i64(w) }
+end
+
+# LLVM's signed decimal text of the `bits`-bit integer whose 64-bit words are `words`, least significant first.
+pub def int_words_text(words : Array(Int64), bits : Int32) : String
+  count = (bits + 63) // 64
+  raise "a #{bits}-bit integer takes #{count} words, not #{words.size}" unless words.size == count
+  value = sign_extend_words(words.map { |w| w.unsafe_to_u64 }, bits)
+  top = bits - 1
+  negative = ((value[top // 64] >> (top % 64)) & 1_u64) == 1_u64
+  magnitude = negative ? negate_words(value) : value
+  digits = unsigned_words_decimal(magnitude)
+  negative ? "-" + digits : digits
+end
+
+# The decimal digits of the unsigned value of `words` (least significant first), by repeated division of 32-bit limbs.
+def unsigned_words_decimal(words : Array(UInt64)) : String
+  limbs = [] of UInt64
+  words.each do |w|
+    limbs << (w & 0xFFFFFFFF_u64)
+    limbs << (w >> 32)
+  end
+  digits = [] of String
+  while limbs.any? { |l| l != 0_u64 }
+    remainder = 0_u64
+    k = limbs.size - 1
+    while k >= 0
+      current = (remainder << 32) | limbs[k]
+      limbs[k] = current // 10_u64
+      remainder = current % 10_u64
+      k = k - 1
+    end
+    digits << remainder.to_s
+  end
+  return "0" if digits.empty?
+  digits.reversed.join
+end

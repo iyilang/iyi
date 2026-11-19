@@ -1,0 +1,9 @@
+; iyi-ir 1
+source_filename = "expect_const"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @expect_const() {
+entry:
+  %v = intrinsic llvm.expect.i1(i1 true, i1 false)
+  ret i1 %v
+}

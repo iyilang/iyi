@@ -1,0 +1,686 @@
+module compiler/ir/builder
+
+import compiler/ir/types::{IrType, TypeTable}
+import compiler/ir/values::{Value, double_bits, single_bits, u64_as_i64, canonical_words}
+import compiler/ir/inst::{Op, Inst, Block, CallConv, CallAux, Attribute, AsmAux, AsmDialect, GepAux, MemAux, IntrinsicAux, InstAux, Ordering, IntPredicate, RealPredicate, ThreadPointerKind, DebugLoc, terminator_op?}
+import compiler/ir/function::{Function, Global}
+import compiler/ir/module::{Module}
+import compiler/ir/intrinsics::{IntrinsicId, intrinsic_accepts?, intrinsic_signature, intrinsic_name}
+
+# Builds instructions and constants into a module, with the method names and argument order of
+# compiler/llvm/builder.iyi. Constants are created without a block, so they are Insts that are never
+# placed in one: the constant factories live here, because an IR type cannot name an Inst (R-1).
+pub class Builder
+  getter module : Module
+
+  def initialize(@module : Module)
+    @block = nil
+    @before = nil
+    @loc = nil
+  end
+
+  def types : TypeTable
+    @module.types
+  end
+
+  # ---- insertion point ----------------------------------------------------------------
+
+  def position_at_end(block : Block) : Nil
+    @block = block
+    @before = nil
+  end
+
+  # Inserts before `inst`, which must sit in the current insertion block.
+  def position_before(inst : Inst) : Nil
+    raise "the builder has no insertion block" unless @block
+    @before = inst
+  end
+
+  def insert_block : Block?
+    @block
+  end
+
+  # Names an instruction that is already placed. The name is claimed in the insertion block's function.
+  def name_inst(inst : Inst, name : String) : Nil
+    block = @block
+    raise "the builder has no insertion block" unless block
+    if symbols = block.symbols
+      inst.name = symbols.claim(name)
+    else
+      inst.name = name
+    end
+  end
+
+  def set_debug_loc(loc : DebugLoc?) : Nil
+    @loc = loc
+  end
+
+  def append_block(fn : Function, name : String) : Block
+    fn.append_basic_block(name)
+  end
+
+  # ---- constants ----------------------------------------------------------------------
+
+  # An integer constant. An integer wider than 64 bits gets every word: the sign extension of `value`.
+  def const_int(type : IrType, value : Int64) : Inst
+    raise "a ConstInt needs an integer type, not #{type}" unless type.int?
+    inst = Inst.new(Op::ConstInt, type, [] of Value, value, nil, [] of Block, [] of Int64)
+    if type.bits > 64
+      sign = value < 0_i64 ? -1_i64 : 0_i64
+      words = [value] of Int64
+      while words.size < (type.bits + 63) // 64
+        words << sign
+      end
+      inst.wide_words = words
+    end
+    inst
+  end
+
+  # A 128-bit integer constant from its two halves in two's complement.
+  def const_wide(type : IrType, hi : Int64, lo : Int64) : Inst
+    raise "a wide constant needs an i128, not #{type}" unless type.int? && type.bits == 128
+    inst = Inst.new(Op::ConstInt, type, [] of Value, lo, nil, [] of Block, [] of Int64)
+    inst.wide_words = [lo, hi]
+    inst
+  end
+
+  # An integer constant wider than 64 bits from its 64-bit words, least significant first. The value is truncated to the
+  # type's width and sign-extended, so one value has exactly one word list.
+  def const_words(type : IrType, words : Array(Int64)) : Inst
+    raise "a wide constant needs an integer wider than 64 bits, not #{type}" unless type.int? && type.bits > 64
+    count = (type.bits + 63) // 64
+    raise "#{type} takes #{count} words, not #{words.size}" unless words.size == count
+    inst = Inst.new(Op::ConstInt, type, [] of Value, words[0], nil, [] of Block, [] of Int64)
+    inst.wide_words = canonical_words(words, type.bits)
+    inst
+  end
+
+  def const_int(type : IrType, value : Int32) : Inst
+    const_int(type, value.to_i64)
+  end
+
+  # An unsigned constant: its bit pattern is stored, and printed as the signed value of that pattern.
+  def const_uint(type : IrType, value : UInt64) : Inst
+    const_int(type, u64_as_i64(value))
+  end
+
+  def const_float(type : IrType, value : Float64) : Inst
+    raise "a ConstFloat needs a floating-point type, not #{type}" unless type.float?
+    bits = type.float32? ? single_bits(value) : double_bits(value)
+    Inst.new(Op::ConstFloat, type, [] of Value, bits, nil, [] of Block, [] of Int64)
+  end
+
+  def const_null(type : IrType) : Inst
+    Inst.new(Op::ConstNull, type, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def const_null_pointer(address_space : Int32 = 0) : Inst
+    const_null(types.ptr(address_space))
+  end
+
+  def const_undef(type : IrType) : Inst
+    Inst.new(Op::ConstUndef, type, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def const_poison(type : IrType) : Inst
+    Inst.new(Op::ConstPoison, type, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def const_zero(type : IrType) : Inst
+    Inst.new(Op::ConstZero, type, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  # `[N x i8]` data: one i8 constant per byte, with a trailing zero byte when `null_terminated`.
+  def const_string(str : String, null_terminated : Bool = true) : Inst
+    count = str.bytesize + (null_terminated ? 1 : 0)
+    bytes = [] of Value
+    i = 0
+    while i < count
+      byte = i < str.bytesize ? str.byte_at(i).to_i64 : 0_i64
+      bytes << const_int(types.int8, byte)
+      i = i + 1
+    end
+    Inst.new(Op::ConstBytes, types.array_of(types.int8, count.to_i64), bytes, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def const_struct(values : Array(Value), packed : Bool = false) : Inst
+    fields = values.map { |v| v.type }
+    Inst.new(Op::ConstAggregate, types.struct_of(fields, packed), values, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def const_array(element : IrType, values : Array(Value)) : Inst
+    Inst.new(Op::ConstAggregate, types.array_of(element, values.size.to_i64), values, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  # The address of a global, as a constant (for initialisers that point at other globals).
+  def const_global_addr(global : Global) : Inst
+    Inst.new(Op::GlobalAddr, types.ptr(0), [global] of Value, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def const_function_addr(fn : Function) : Inst
+    Inst.new(Op::FunctionAddr, types.ptr(0), [fn] of Value, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def const_gep(source_type : IrType, base : Value, indices : Array(Value), inbounds : Bool = false) : Inst
+    args = [base] of Value
+    indices.each { |i| args << i }
+    Inst.new(Op::ConstExpr, base.type, args, Op::Gep.value.to_i64, GepAux.new(source_type, inbounds), [] of Block, [] of Int64)
+  end
+
+  def const_cast(op : Op, value : Value, dest : IrType) : Inst
+    Inst.new(Op::ConstExpr, dest, [value] of Value, op.value.to_i64, nil, [] of Block, [] of Int64)
+  end
+
+  # ---- terminators --------------------------------------------------------------------
+
+  def ret(value : Value) : Inst
+    emit(Op::Ret, types.void, [value] of Value, 0_i64, nil, [] of Block, [] of Int64, "")
+  end
+
+  def ret_void : Inst
+    emit(Op::Ret, types.void, [] of Value, 0_i64, nil, [] of Block, [] of Int64, "")
+  end
+
+  def br(dest : Block) : Inst
+    emit(Op::Br, types.void, [] of Value, 0_i64, nil, [dest], [] of Int64, "")
+  end
+
+  def cond_br(cond : Value, then_block : Block, else_block : Block) : Inst
+    emit(Op::CondBr, types.void, [cond] of Value, 0_i64, nil, [then_block, else_block], [] of Int64, "")
+  end
+
+  def switch(value : Value, else_block : Block, cases : Array({Value, Block})) : Inst
+    targets = [else_block] of Block
+    values = [] of Int64
+    cases.each do |c|
+      raise "a switch case must be a ConstInt" unless c[0].is_a?(Inst) && c[0].as(Inst).op == Op::ConstInt
+      values << c[0].as(Inst).aux_int
+      targets << c[1]
+    end
+    emit(Op::Switch, types.void, [value] of Value, 0_i64, nil, targets, values, "")
+  end
+
+  def unreachable : Inst
+    emit(Op::Unreachable, types.void, [] of Value, 0_i64, nil, [] of Block, [] of Int64, "")
+  end
+
+  def invoke(fn_type : IrType, callee : Value, args : Array(Value), normal : Block, unwind : Block, name : String = "") : Inst
+    call_args = [callee] of Value
+    args.each { |a| call_args << a }
+    emit(Op::Invoke, fn_type.return_type, call_args, 0_i64, CallAux.new(fn_type), [normal, unwind], [] of Int64, name)
+  end
+
+  def resume(value : Value) : Inst
+    emit(Op::Resume, types.void, [value] of Value, 0_i64, nil, [] of Block, [] of Int64, "")
+  end
+
+  # A landing pad. `personality` is the function's personality routine; `clauses` are typed values.
+  def landing_pad(type : IrType, personality : Value, clauses : Array(Value) = [] of Value, name : String = "", cleanup : Bool = false) : Inst
+    args = [personality] of Value
+    clauses.each { |c| args << c }
+    emit(Op::LandingPad, type, args, cleanup ? 1_i64 : 0_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  # Windows exception handling. `parent` is a pad, or a null ptr for `none`.
+  def catch_switch(parent : Value, handlers : Array(Block), unwind : Block?, name : String = "") : Inst
+    targets = [] of Block
+    handlers.each { |h| targets << h }
+    flag = 0_i64
+    if u = unwind
+      targets << u
+      flag = 1_i64
+    end
+    emit(Op::CatchSwitch, types.ptr(0), [parent] of Value, flag, nil, targets, [] of Int64, name)
+  end
+
+  def catch_pad(parent : Value, args : Array(Value), name : String = "") : Inst
+    operands = [parent] of Value
+    args.each { |a| operands << a }
+    emit(Op::CatchPad, types.ptr(0), operands, 0_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  def catch_ret(pad : Value, dest : Block) : Inst
+    emit(Op::CatchRet, types.void, [pad] of Value, 0_i64, nil, [dest], [] of Int64, "")
+  end
+
+  def cleanup_pad(parent : Value, args : Array(Value), name : String = "") : Inst
+    operands = [parent] of Value
+    args.each { |a| operands << a }
+    emit(Op::CleanupPad, types.ptr(0), operands, 0_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  def cleanup_ret(pad : Value, unwind : Block?) : Inst
+    targets = [] of Block
+    flag = 0_i64
+    if u = unwind
+      targets << u
+      flag = 1_i64
+    end
+    emit(Op::CleanupRet, types.void, [pad] of Value, flag, nil, targets, [] of Int64, "")
+  end
+
+  # ---- memory -------------------------------------------------------------------------
+
+  def alloca(type : IrType, name : String = "") : Inst
+    emit(Op::Alloca, types.ptr(0), [] of Value, 0_i64, GepAux.new(type, false), [] of Block, [] of Int64, name)
+  end
+
+  def load(type : IrType, pointer : Value, name : String = "") : Inst
+    emit(Op::Load, type, [pointer] of Value, 0_i64, MemAux.new, [] of Block, [] of Int64, name)
+  end
+
+  def store(value : Value, pointer : Value) : Inst
+    emit(Op::Store, types.void, [value, pointer] of Value, 0_i64, MemAux.new, [] of Block, [] of Int64, "")
+  end
+
+  # A load with an atomic ordering (`load atomic seq_cst`), volatile when asked. The alignment is the
+  # caller's to set, as for a plain load.
+  def atomic_load(type : IrType, pointer : Value, ordering : Ordering, volatile : Bool = false, name : String = "") : Inst
+    aux = MemAux.new(0, volatile, ordering, Ordering::NotAtomic, false, "", false)
+    emit(Op::Load, type, [pointer] of Value, 0_i64, aux, [] of Block, [] of Int64, name)
+  end
+
+  def atomic_store(value : Value, pointer : Value, ordering : Ordering, volatile : Bool = false) : Inst
+    aux = MemAux.new(0, volatile, ordering, Ordering::NotAtomic, false, "", false)
+    emit(Op::Store, types.void, [value, pointer] of Value, 0_i64, aux, [] of Block, [] of Int64, "")
+  end
+
+  def gep(type : IrType, pointer : Value, indices : Array(Value), name : String = "") : Inst
+    gep_with(type, pointer, indices, false, name)
+  end
+
+  def inbounds_gep(type : IrType, pointer : Value, indices : Array(Value), name : String = "") : Inst
+    gep_with(type, pointer, indices, true, name)
+  end
+
+  def fence(ordering : Ordering, single_thread : Bool = false) : Inst
+    emit(Op::Fence, types.void, [] of Value, 0_i64, MemAux.new(0, false, ordering, Ordering::NotAtomic, single_thread), [] of Block, [] of Int64, "")
+  end
+
+  def cmpxchg(pointer : Value, compare : Value, replacement : Value, success : Ordering, failure : Ordering, name : String = "") : Inst
+    result = types.struct_of([compare.type, types.int1])
+    aux = MemAux.new(0, false, success, failure, false, "", false)
+    emit(Op::CmpXchg, result, [pointer, compare, replacement] of Value, 0_i64, aux, [] of Block, [] of Int64, name)
+  end
+
+  # `operation` is LLVM's name for the read-modify-write: "xchg", "add", "sub", "and", "max" ...
+  def atomicrmw(operation : String, pointer : Value, value : Value, ordering : Ordering, single_thread : Bool = false, name : String = "") : Inst
+    aux = MemAux.new(0, false, ordering, Ordering::NotAtomic, single_thread, operation, false)
+    emit(Op::AtomicRmw, value.type, [pointer, value] of Value, 0_i64, aux, [] of Block, [] of Int64, name)
+  end
+
+  def va_arg(pointer : Value, type : IrType, name : String = "") : Inst
+    emit(Op::VaArg, type, [pointer] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  # ---- arithmetic and comparisons -----------------------------------------------------
+
+  # A binary operation. `flags` is bit 0 nuw, bit 1 nsw, bit 2 exact.
+  def binop(op : Op, lhs : Value, rhs : Value, flags : Int64 = 0_i64, name : String = "") : Inst
+    if folded = fold_binop(op, lhs, rhs, flags)
+      return folded
+    end
+    emit(op, lhs.type, [lhs, rhs] of Value, flags, nil, [] of Block, [] of Int64, name)
+  end
+
+  # Match the hosted IRBuilder's folding of unflagged integer arithmetic.
+  # Poison-producing and wide operations stay instructions.
+  private def fold_binop(op : Op, lhs : Value, rhs : Value, flags : Int64) : Inst?
+    return nil unless flags == 0_i64 && lhs.type.int? && lhs.type == rhs.type
+    return nil unless lhs.is_a?(Inst) && rhs.is_a?(Inst)
+    left = lhs.as(Inst)
+    right = rhs.as(Inst)
+    return nil unless left.op == Op::ConstInt && right.op == Op::ConstInt
+    bits = lhs.type.bits
+    return nil unless bits >= 1 && bits <= 64
+    a = left.aux_int
+    b = right.aux_int
+    value = case op
+            when Op::Add then a &+ b
+            when Op::Sub then a &- b
+            when Op::Mul then a &* b
+            when Op::And then a & b
+            when Op::Or  then a | b
+            when Op::Xor then a ^ b
+            when Op::Shl
+              return nil unless b >= 0_i64 && b < bits
+              a.unsafe_shl(b.to_i32)
+            when Op::LShr
+              return nil unless b >= 0_i64 && b < bits
+              unsigned = a.unsafe_to_u64
+              unsigned &= 0xFFFFFFFFFFFFFFFF_u64.unsafe_shr(64 - bits) if bits < 64
+              u64_as_i64(unsigned.unsafe_shr(b.to_i32))
+            when Op::AShr
+              return nil unless b >= 0_i64 && b < bits
+              padding = 64 - bits
+              signed = bits == 64 ? a : a.unsafe_shl(padding).unsafe_shr(padding)
+              signed.unsafe_shr(b.to_i32)
+            else
+              return nil
+            end
+    # Canonical signed storage, except i1's established 0/1 representation.
+    if bits == 1
+      value &= 1_i64
+    elsif bits < 64
+      padding = 64 - bits
+      value = value.unsafe_shl(padding).unsafe_shr(padding)
+    end
+    const_int(lhs.type, value)
+  end
+
+  def add(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::Add, lhs, rhs, 0_i64, name)
+  end
+
+  def sub(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::Sub, lhs, rhs, 0_i64, name)
+  end
+
+  def mul(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::Mul, lhs, rhs, 0_i64, name)
+  end
+
+  def sdiv(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::SDiv, lhs, rhs, 0_i64, name)
+  end
+
+  def exact_sdiv(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::SDiv, lhs, rhs, 4_i64, name)
+  end
+
+  def udiv(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::UDiv, lhs, rhs, 0_i64, name)
+  end
+
+  def srem(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::SRem, lhs, rhs, 0_i64, name)
+  end
+
+  def urem(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::URem, lhs, rhs, 0_i64, name)
+  end
+
+  def shl(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::Shl, lhs, rhs, 0_i64, name)
+  end
+
+  def lshr(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::LShr, lhs, rhs, 0_i64, name)
+  end
+
+  def ashr(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::AShr, lhs, rhs, 0_i64, name)
+  end
+
+  def build_and(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::And, lhs, rhs, 0_i64, name)
+  end
+
+  def build_or(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::Or, lhs, rhs, 0_i64, name)
+  end
+
+  def build_xor(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::Xor, lhs, rhs, 0_i64, name)
+  end
+
+  def bitwise_and(lhs : Value, rhs : Value, name : String = "") : Inst
+    build_and(lhs, rhs, name)
+  end
+
+  def bitwise_or(lhs : Value, rhs : Value, name : String = "") : Inst
+    build_or(lhs, rhs, name)
+  end
+
+  def bitwise_xor(lhs : Value, rhs : Value, name : String = "") : Inst
+    build_xor(lhs, rhs, name)
+  end
+
+  # Bitwise not: xor with all ones.
+  def build_not(value : Value, name : String = "") : Inst
+    build_xor(value, const_int(value.type, -1_i64), name)
+  end
+
+  def bitwise_not(value : Value, name : String = "") : Inst
+    build_not(value, name)
+  end
+
+  # Integer negation: subtract from zero.
+  def neg(value : Value, name : String = "") : Inst
+    sub(const_int(value.type, 0_i64), value, name)
+  end
+
+  def fadd(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::FAdd, lhs, rhs, 0_i64, name)
+  end
+
+  def fsub(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::FSub, lhs, rhs, 0_i64, name)
+  end
+
+  def fmul(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::FMul, lhs, rhs, 0_i64, name)
+  end
+
+  def fdiv(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::FDiv, lhs, rhs, 0_i64, name)
+  end
+
+  def frem(lhs : Value, rhs : Value, name : String = "") : Inst
+    binop(Op::FRem, lhs, rhs, 0_i64, name)
+  end
+
+  def fneg(value : Value, name : String = "") : Inst
+    emit(Op::FNeg, value.type, [value] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  def icmp(predicate : IntPredicate, lhs : Value, rhs : Value, name : String = "") : Inst
+    emit(Op::ICmp, types.int1, [lhs, rhs] of Value, predicate.value.to_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  def fcmp(predicate : RealPredicate, lhs : Value, rhs : Value, name : String = "") : Inst
+    emit(Op::FCmp, types.int1, [lhs, rhs] of Value, predicate.value.to_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  # ---- conversions --------------------------------------------------------------------
+
+  def trunc(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::Trunc, value, dest_type, name)
+  end
+
+  def zext(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::ZExt, value, dest_type, name)
+  end
+
+  def sext(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::SExt, value, dest_type, name)
+  end
+
+  def fp_trunc(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::FPTrunc, value, dest_type, name)
+  end
+
+  def fp_ext(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::FPExt, value, dest_type, name)
+  end
+
+  def fp_to_si(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::FPToSI, value, dest_type, name)
+  end
+
+  def fp_to_ui(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::FPToUI, value, dest_type, name)
+  end
+
+  def si_to_fp(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::SIToFP, value, dest_type, name)
+  end
+
+  def ui_to_fp(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::UIToFP, value, dest_type, name)
+  end
+
+  def ptr_to_int(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::PtrToInt, value, dest_type, name)
+  end
+
+  def int_to_ptr(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::IntToPtr, value, dest_type, name)
+  end
+
+  def bit_cast(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::BitCast, value, dest_type, name)
+  end
+
+  def addr_space_cast(value : Value, dest_type : IrType, name : String = "") : Inst
+    cast(Op::AddrSpaceCast, value, dest_type, name)
+  end
+
+  # ---- values -------------------------------------------------------------------------
+
+  def select(cond : Value, then_value : Value, else_value : Value, name : String = "") : Inst
+    emit(Op::Select, then_value.type, [cond, then_value, else_value] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  # An empty phi: add its incoming pairs with add_incoming.
+  def phi(type : IrType, name : String = "") : Inst
+    emit(Op::Phi, type, [] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  def phi(type : IrType, incoming : Array({Value, Block}), name : String = "") : Inst
+    node = phi(type, name)
+    incoming.each { |pair| node.add_incoming(pair[0], pair[1]) }
+    node
+  end
+
+  def add_incoming(phi_node : Inst, val : Value, bb : Block) : Nil
+    phi_node.add_incoming(val, bb)
+  end
+
+  def add_incoming(phi_node : Inst, vals : Array(Value), bbs : Array(Block)) : Nil
+    raise "add_incoming needs as many values as blocks" unless vals.size == bbs.size
+    i = 0
+    while i < vals.size
+      phi_node.add_incoming(vals[i], bbs[i])
+      i = i + 1
+    end
+  end
+
+  def extract_value(agg : Value, index : Int32, name : String = "") : Inst
+    field = aggregate_element(agg.type, index)
+    emit(Op::ExtractValue, field, [agg] of Value, index.to_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  def insert_value(agg : Value, value : Value, index : Int32, name : String = "") : Inst
+    emit(Op::InsertValue, agg.type, [agg, value] of Value, index.to_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  def freeze(value : Value, name : String = "") : Inst
+    emit(Op::Freeze, value.type, [value] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  # ---- calls --------------------------------------------------------------------------
+
+  def call(fn_type : IrType, callee : Value, args : Array(Value), name : String = "") : Inst
+    cc = callee.is_a?(Function) ? callee.as(Function).call_convention : CallConv::C
+    call_aux(CallAux.new(fn_type, cc), callee, args, name)
+  end
+
+  def call(fn_type : IrType, callee : Value, arg1 : Value, name : String = "") : Inst
+    call(fn_type, callee, [arg1] of Value, name)
+  end
+
+  def call(fn_type : IrType, callee : Value, arg1 : Value, arg2 : Value, name : String = "") : Inst
+    call(fn_type, callee, [arg1, arg2] of Value, name)
+  end
+
+  # A call with explicit attributes and calling convention.
+  def call_aux(aux : CallAux, callee : Value, args : Array(Value), name : String = "") : Inst
+    operands = [callee] of Value
+    args.each { |a| operands << a }
+    emit(Op::Call, aux.fn_type.return_type, operands, 0_i64, aux, [] of Block, [] of Int64, name)
+  end
+
+  # An intrinsic call. `overload` is the set of types the LLVM name spells, and the result type follows
+  # from it: the IR refuses an overload its family does not accept, rather than guessing a signature.
+  def intrinsic(id : IntrinsicId, overload : Array(IrType), args : Array(Value), name : String = "") : Inst
+    intrinsic_with(id, overload, args, [] of Array(Attribute), name)
+  end
+
+  # An intrinsic call whose operands carry attributes: `param_attrs[k]` belongs to operand k, as on an ordinary call.
+  def intrinsic_with(id : IntrinsicId, overload : Array(IrType), args : Array(Value), param_attrs : Array(Array(Attribute)), name : String = "") : Inst
+    unless intrinsic_accepts?(id, overload)
+      raise "#{intrinsic_name(id, overload)} is not an intrinsic the IR accepts at these types"
+    end
+    if param_attrs.size > args.size
+      raise "#{intrinsic_name(id, overload)} has #{param_attrs.size} attribute lists for #{args.size} operands"
+    end
+    signature = intrinsic_signature(id, overload, types)
+    emit(Op::Intrinsic, signature[0], args, 0_i64, IntrinsicAux.new(id, overload, param_attrs), [] of Block, [] of Int64, name)
+  end
+
+  # An inline asm callee. Call it with `call`; the printer writes the template where the callee goes.
+  def inline_asm(fn_type : IrType, template : String, constraints : String, side_effects : Bool, align_stack : Bool, dialect : AsmDialect, unwind : Bool = false) : Value
+    aux = AsmAux.new(template, constraints, side_effects, align_stack, dialect, unwind)
+    Inst.new(Op::Call, fn_type, [] of Value, 0_i64, aux, [] of Block, [] of Int64)
+  end
+
+  # ---- runtime contract ---------------------------------------------------------------
+
+  def thread_local_addr(global : Global, name : String = "") : Inst
+    emit(Op::ThreadLocalAddr, types.ptr(0), [global] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  def thread_pointer(kind : ThreadPointerKind, name : String = "") : Inst
+    emit(Op::ThreadPointer, types.ptr(0), [] of Value, kind.value.to_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  # ---- internals ----------------------------------------------------------------------
+
+  private def emit(op : Op, type : IrType, args : Array(Value), aux_int : Int64, aux : InstAux, targets : Array(Block), cases : Array(Int64), name : String) : Inst
+    inst = Inst.new(op, type, args, aux_int, aux, targets, cases, name)
+    inst.loc = @loc
+    place(inst)
+    inst
+  end
+
+  private def place(inst : Inst) : Nil
+    block = @block
+    raise "the builder has no insertion point" unless block
+    if symbols = block.symbols
+      inst.name = symbols.claim(inst.name)
+    end
+    if before = @before
+      index = block.insts.index(before)
+      raise "the insertion point is not in the current block" unless index
+      block.insert_at(index, inst)
+    else
+      block.insts << inst
+    end
+    if terminator_op?(inst.op)
+      inst.targets.each { |t| t.add_pred(block) }
+    end
+  end
+
+  private def cast(op : Op, value : Value, dest : IrType, name : String) : Inst
+    emit(op, dest, [value] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+  end
+
+  private def gep_with(type : IrType, pointer : Value, indices : Array(Value), inbounds : Bool, name : String) : Inst
+    args = [pointer] of Value
+    indices.each { |i| args << i }
+    emit(Op::Gep, pointer.type, args, 0_i64, GepAux.new(type, inbounds), [] of Block, [] of Int64, name)
+  end
+
+  private def aggregate_element(agg : IrType, index : Int32) : IrType
+    if agg.struct?
+      fields = agg.struct_element_types
+      raise "index #{index} is out of range for #{agg}" if index < 0 || index >= fields.size
+      return fields[index]
+    end
+    if agg.array?
+      return agg.element_type
+    end
+    raise "extractvalue needs an aggregate, not #{agg}"
+  end
+end

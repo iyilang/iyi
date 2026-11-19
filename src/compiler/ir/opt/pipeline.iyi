@@ -1,0 +1,136 @@
+module compiler/ir/opt/pipeline
+
+import compiler/ir/function::{Function}
+import compiler/ir/module::{Module}
+import compiler/ir/verifier::{verify_function}
+import compiler/ir/opt/cfg_simplify::{run_cfg_simplify}
+import compiler/ir/opt/mem2reg::{run_mem2reg}
+import compiler/ir/opt/simplify::{run_simplify}
+import compiler/ir/opt/dce::{run_dce}
+import std/time::{Time}
+
+pub enum PassId
+  CfgSimplify
+  Mem2Reg
+  Simplify
+  Dce
+end
+
+pub enum OptTier
+  None
+  Default
+  Release
+end
+
+pub class PassOptions
+  getter verify_each : Bool
+  getter time_passes : Bool
+
+  def initialize(@verify_each : Bool = false, @time_passes : Bool = false)
+  end
+
+  def self.from_env : PassOptions
+    PassOptions.new(Program.env("IYI_VERIFY_PASSES") == "1", Program.env("IYI_TIME_PASSES") == "1")
+  end
+end
+
+pub def pass_name(id : PassId) : String
+  case id
+  when PassId::CfgSimplify then "cfg-simplify"
+  when PassId::Mem2Reg     then "mem2reg"
+  when PassId::Simplify    then "simplify"
+  when PassId::Dce         then "dce"
+  else
+    raise "BUG: unknown IR pass"
+  end
+end
+
+pub def pass_named(name : String) : PassId?
+  case name
+  when "cfg-simplify" then PassId::CfgSimplify
+  when "mem2reg"      then PassId::Mem2Reg
+  when "simplify"     then PassId::Simplify
+  when "dce"          then PassId::Dce
+  else
+    nil
+  end
+end
+
+pub def tier_passes(tier : OptTier) : Array(PassId)
+  return [] of PassId if tier == OptTier::None
+  [PassId::CfgSimplify, PassId::Mem2Reg, PassId::Simplify, PassId::Dce, PassId::CfgSimplify]
+end
+
+pub def run_function_pass(mod : Module, fn : Function, id : PassId) : Bool
+  return false if fn.declaration?
+  case id
+  when PassId::CfgSimplify then run_cfg_simplify(mod, fn)
+  when PassId::Mem2Reg     then run_mem2reg(mod, fn)
+  when PassId::Simplify    then run_simplify(mod, fn)
+  when PassId::Dce         then run_dce(mod, fn)
+  else
+    raise "BUG: unknown IR pass"
+  end
+end
+
+# Positions, rather than pass names, distinguish repeated passes in one pipeline.
+class PassTimings
+  def initialize(count : Int32)
+    @changed = [] of Int32
+    @nanos = [] of Int64
+    k = 0
+    while k < count
+      @changed << 0
+      @nanos << 0_i64
+      k = k + 1
+    end
+  end
+
+  def add(index : Int32, nanos : Int64, changed : Bool) : Nil
+    @nanos[index] = @nanos[index] + nanos
+    @changed[index] = @changed[index] + 1 if changed
+  end
+
+  def report(passes : Array(PassId)) : Nil
+    k = 0
+    while k < passes.size
+      STDERR.puts "opt-time\t#{pass_name(passes[k])}\t#{@changed[k]}\t#{@nanos[k]}"
+      k = k + 1
+    end
+  end
+end
+
+pub def run_passes(mod : Module, passes : Array(PassId), options : PassOptions) : String?
+  timings = options.time_passes ? PassTimings.new(passes.size) : nil
+  f = 0
+  while f < mod.functions.size
+    fn = mod.functions[f]
+    unless fn.declaration?
+      k = 0
+      while k < passes.size
+        if clock = timings
+          started = Time.monotonic
+          changed = run_function_pass(mod, fn, passes[k])
+          clock.add(k, (Time.monotonic - started).total_nanoseconds.to_i64, changed)
+        else
+          changed = run_function_pass(mod, fn, passes[k])
+        end
+        if changed && options.verify_each
+          errors = verify_function(mod, fn)
+          unless errors.empty?
+            if clock = timings
+              clock.report(passes)
+            end
+            return "#{pass_name(passes[k])}: @#{fn.name}: #{errors[0]}"
+          end
+        end
+        k = k + 1
+      end
+    end
+    f = f + 1
+  end
+  if clock = timings
+    clock.report(passes)
+  end
+  nil
+end

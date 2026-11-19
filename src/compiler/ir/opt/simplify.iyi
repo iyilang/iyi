@@ -1,0 +1,461 @@
+module compiler/ir/opt/simplify
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, Block, IntPredicate, IntrinsicAux}
+import compiler/ir/function::{Function}
+import compiler/ir/module::{Module}
+import compiler/ir/intrinsics::{IntrinsicId}
+import compiler/ir/builder::{Builder}
+import compiler/ir/opt/analysis::{DefUse, Use, local_value?}
+import compiler/ir/opt/effects::{opaque?}
+import compiler/ir/opt/edit::{new_inst}
+import compiler/ir/opt/fold::{int_value, canonical, fold_binary, fold_icmp, fold_cast}
+
+# Constants are not interned: equal incoming constants can be separate objects.
+def same_value?(a : Value, b : Value) : Bool
+  return true if a == b
+  return false unless a.type == b.type && a.is_a?(Inst) && b.is_a?(Inst)
+  left = a.as(Inst)
+  right = b.as(Inst)
+  return false unless left.op == right.op
+  case left.op
+  when Op::ConstInt
+    return canonical(a.type.bits, left.aux_int) == canonical(b.type.bits, right.aux_int) if a.type.bits <= 64
+    left.int_words(a.type.bits) == right.int_words(b.type.bits)
+  when Op::ConstFloat
+    left.aux_int == right.aux_int
+  when Op::ConstNull, Op::ConstZero
+    true
+  else
+    false
+  end
+end
+
+def indeterminate?(v : Value) : Bool
+  return false unless v.is_a?(Inst)
+  v.as(Inst).op == Op::ConstPoison || v.as(Inst).op == Op::ConstUndef
+end
+
+def wide_constant_pair?(a : Value, b : Value) : Bool
+  return false unless a.type.int? && a.type.bits > 64 && a.is_a?(Inst) && b.is_a?(Inst)
+  a.as(Inst).op == Op::ConstInt && b.as(Inst).op == Op::ConstInt
+end
+
+# Test all words, including the sign-extended top word of a wide constant.
+def integer_is?(v : Value, wanted : Int32) : Bool
+  return false unless v.is_a?(Inst) && v.type.int?
+  inst = v.as(Inst)
+  return false unless inst.op == Op::ConstInt
+  if v.type.bits <= 64
+    number = canonical(v.type.bits, inst.aux_int)
+    return number == 0_i64 if wanted == 0
+    return number == 1_i64 if wanted == 1
+    return number == (v.type.bits == 1 ? 1_i64 : -1_i64)
+  end
+  words = inst.int_words(v.type.bits)
+  k = 0
+  while k < words.size
+    expected = wanted == -1 ? -1_i64 : (wanted == 1 && k == 0 ? 1_i64 : 0_i64)
+    return false unless words[k] == expected
+    k = k + 1
+  end
+  true
+end
+
+# Return the shift count only for a nonzero power of two at the operand width.
+def power_of_two(v : Value) : Int32?
+  return nil unless v.is_a?(Inst) && v.type.int?
+  inst = v.as(Inst)
+  return nil unless inst.op == Op::ConstInt
+  words = inst.int_words(v.type.bits)
+  found = -1
+  k = 0
+  while k < words.size
+    word = words[k].unsafe_to_u64
+    remaining = v.type.bits - k * 64
+    word &= 0xFFFFFFFFFFFFFFFF_u64.unsafe_shr(64 - remaining) if remaining < 64
+    if word != 0_u64
+      return nil unless found == -1 && (word & (word &- 1_u64)) == 0_u64
+      bit = 0
+      while word > 1_u64
+        word = word.unsafe_shr(1)
+        bit = bit + 1
+      end
+      found = k * 64 + bit
+    end
+    k = k + 1
+  end
+  found == -1 ? nil : found
+end
+
+def reflexive_icmp(b : Builder, predicate : Int64) : Value?
+  if predicate == IntPredicate::EQ.value.to_i64 || predicate == IntPredicate::UGE.value.to_i64 || predicate == IntPredicate::ULE.value.to_i64 || predicate == IntPredicate::SGE.value.to_i64 || predicate == IntPredicate::SLE.value.to_i64
+    return b.const_int(b.types.int1, 1_i64)
+  end
+  if predicate == IntPredicate::NE.value.to_i64 || predicate == IntPredicate::UGT.value.to_i64 || predicate == IntPredicate::ULT.value.to_i64 || predicate == IntPredicate::SGT.value.to_i64 || predicate == IntPredicate::SLT.value.to_i64
+    return b.const_int(b.types.int1, 0_i64)
+  end
+  nil
+end
+
+# A pointer-to-integer constant expression is not in DefUse's local-value map.
+def pointer_constant?(root : Value) : Bool
+  return false unless root.is_a?(Inst)
+  first = root.as(Inst)
+  return false unless first.op == Op::ConstExpr || first.op == Op::ConstAggregate
+  work = [first] of Inst
+  seen = Hash(Inst, Bool).new
+  while !work.empty?
+    inst = work.pop
+    next if seen[inst]?
+    seen[inst] = true
+    return true if inst.op == Op::ConstExpr && inst.aux_int == Op::PtrToInt.value.to_i64
+    inst.args.each do |arg|
+      if arg.is_a?(Inst)
+        child = arg.as(Inst)
+        work << child if child.op == Op::ConstExpr || child.op == Op::ConstAggregate
+      end
+    end
+  end
+  false
+end
+
+class Simplifier
+  def initialize(@mod : Module, @fn : Function)
+    @builder = Builder.new(@mod)
+    @du = DefUse.new(@fn)
+    @work = [] of Inst
+    @queued = Hash(Inst, Bool).new
+    @removed = Hash(Inst, Bool).new
+    @before = Hash(Inst, Array(Inst)).new
+    @branches = Hash(Inst, Inst).new
+    @pointer_derived = Hash(Inst, Bool).new
+    @changed = false
+    @edges_changed = false
+    seed_pointer_derivations
+  end
+
+  # The graph is monotone: a conservative taint remains valid after rewrites.
+  def mark_pointer_derived(seed : Inst) : Nil
+    return if @pointer_derived[seed]?
+    work = [seed] of Inst
+    @pointer_derived[seed] = true
+    cursor = 0
+    while cursor < work.size
+      value = work[cursor]
+      cursor = cursor + 1
+      @du.users(value).each do |user|
+        unless @pointer_derived[user]?
+          @pointer_derived[user] = true
+          work << user
+        end
+      end
+    end
+  end
+
+  def seed_pointer_derivations : Nil
+    @fn.blocks.each do |block|
+      block.insts.each do |inst|
+        derived = inst.op == Op::PtrToInt
+        inst.args.each { |arg| derived = true if pointer_constant?(arg) }
+        mark_pointer_derived(inst) if derived
+      end
+    end
+  end
+
+  def pointer_derived?(value : Value) : Bool
+    return false unless value.is_a?(Inst)
+    @pointer_derived[value.as(Inst)]? || pointer_constant?(value)
+  end
+
+  def enqueue(inst : Inst) : Nil
+    return if @queued[inst]? || @removed[inst]?
+    @queued[inst] = true
+    @work << inst
+  end
+
+  def remove_inputs(inst : Inst) : Nil
+    k = 0
+    while k < inst.args.size
+      value = inst.args[k]
+      @du.remove(inst, k)
+      enqueue(value.as(Inst)) if value.is_a?(Inst) && local_value?(value)
+      k = k + 1
+    end
+  end
+
+  def replace(old : Inst, value : Value) : Nil
+    return if old == value || @removed[old]?
+    uses = [] of Use
+    @du.uses(old).each { |use| uses << use }
+    uses.each do |use|
+      user = use.user
+      @du.remove(user, use.index)
+      user.args[use.index] = value
+      @du.add(user, use.index)
+      mark_pointer_derived(user) if pointer_derived?(value)
+      enqueue(user)
+    end
+    remove_inputs(old)
+    @removed[old] = true
+    @changed = true
+  end
+
+  def erase_unused(inst : Inst) : Nil
+    return if @removed[inst]?
+    raise "BUG: erase of a used value" unless @du.use_count(inst) == 0
+    remove_inputs(inst)
+    @removed[inst] = true
+    @changed = true
+  end
+
+  def insert_before(anchor : Inst, inst : Inst) : Nil
+    list = @before[anchor]?
+    unless list
+      list = [] of Inst
+      @before[anchor] = list
+    end
+    list << inst
+    k = 0
+    while k < inst.args.size
+      @du.add(inst, k)
+      k = k + 1
+    end
+    inst.args.each { |arg| mark_pointer_derived(inst) if pointer_derived?(arg) }
+    enqueue(inst)
+  end
+
+  def replace_branch(inst : Inst, target : Block) : Nil
+    branch = new_inst(Op::Br, @mod.types.void, [] of Value, 0_i64, nil, [target] of Block)
+    remove_inputs(inst)
+    @branches[inst] = branch
+    @removed[inst] = true
+    @changed = true
+    @edges_changed = true
+  end
+
+  def trivial_phi(inst : Inst) : Value?
+    candidate = nil.as(Value?)
+    inst.args.each do |arg|
+      next if arg == inst
+      if first = candidate
+        return nil unless same_value?(first, arg)
+      else
+        candidate = arg
+      end
+    end
+    candidate
+  end
+
+  def identity(inst : Inst) : Value?
+    return nil unless inst.type.int? && inst.args.size == 2
+    a = inst.args[0]
+    b = inst.args[1]
+    return nil if wide_constant_pair?(a, b)
+    zero_a = integer_is?(a, 0)
+    zero_b = integer_is?(b, 0)
+    one_a = integer_is?(a, 1)
+    one_b = integer_is?(b, 1)
+    all_a = integer_is?(a, -1)
+    all_b = integer_is?(b, -1)
+    same = same_value?(a, b) && !indeterminate?(a) && !indeterminate?(b)
+    case inst.op
+    when Op::Add
+      return b if zero_a
+      return a if zero_b
+    when Op::Sub
+      return a if zero_b
+      return @builder.const_int(inst.type, 0_i64) if same && !pointer_derived?(a)
+    when Op::Mul
+      return a if zero_a && !indeterminate?(b) && !pointer_derived?(b)
+      return b if zero_b && !indeterminate?(a) && !pointer_derived?(a)
+      return b if one_a
+      return a if one_b
+      if inst.aux_int == 0_i64
+        if shift = power_of_two(b)
+          unless pointer_derived?(a)
+            result = new_inst(Op::Shl, inst.type, [a, @builder.const_int(inst.type, shift.to_i64)] of Value)
+            insert_before(inst, result)
+            return result
+          end
+        elsif shift = power_of_two(a)
+          unless pointer_derived?(b)
+            result = new_inst(Op::Shl, inst.type, [b, @builder.const_int(inst.type, shift.to_i64)] of Value)
+            insert_before(inst, result)
+            return result
+          end
+        end
+      end
+    when Op::And
+      return a if zero_a && !indeterminate?(b) && !pointer_derived?(b)
+      return b if zero_b && !indeterminate?(a) && !pointer_derived?(a)
+      return b if all_a
+      return a if all_b || same
+    when Op::Or
+      return a if all_a && !indeterminate?(b) && !pointer_derived?(b)
+      return b if all_b && !indeterminate?(a) && !pointer_derived?(a)
+      return b if zero_a
+      return a if zero_b || same
+    when Op::Xor
+      return b if zero_a
+      return a if zero_b
+      return @builder.const_int(inst.type, 0_i64) if same && !pointer_derived?(a)
+    when Op::Shl, Op::LShr, Op::AShr
+      return a if zero_b
+    end
+    nil
+  end
+
+  def overflow_op(id : IntrinsicId) : Op?
+    case id
+    when IntrinsicId::SAddOverflow, IntrinsicId::UAddOverflow then Op::Add
+    when IntrinsicId::SSubOverflow, IntrinsicId::USubOverflow then Op::Sub
+    when IntrinsicId::SMulOverflow, IntrinsicId::UMulOverflow then Op::Mul
+    else
+      nil
+    end
+  end
+
+  def lower_overflow(inst : Inst, op : Op) : Bool
+    uses = [] of Use
+    @du.uses(inst).each { |use| uses << use }
+    values = [] of Inst
+    flags = [] of Inst
+    uses.each do |use|
+      extract = use.user
+      return false unless extract.op == Op::ExtractValue && use.index == 0
+      if extract.aux_int == 0_i64
+        values << extract
+      elsif extract.aux_int == 1_i64 && @du.use_count(extract) == 0
+        flags << extract
+      else
+        return false
+      end
+    end
+    unless values.empty?
+      result = new_inst(op, inst.args[0].type, [inst.args[0], inst.args[1]] of Value)
+      insert_before(inst, result)
+      values.each { |extract| replace(extract, result) }
+    end
+    flags.each { |extract| erase_unused(extract) }
+    erase_unused(inst)
+    true
+  end
+
+  def simplify(inst : Inst) : Nil
+    return if @removed[inst]? || opaque?(inst)
+    case inst.op
+    when Op::Phi
+      if value = trivial_phi(inst)
+        replace(inst, value)
+      end
+    when Op::Add, Op::Sub, Op::Mul, Op::SDiv, Op::UDiv, Op::SRem, Op::URem, Op::Shl, Op::LShr, Op::AShr, Op::And, Op::Or, Op::Xor, Op::FAdd, Op::FSub, Op::FMul, Op::FDiv
+      value = fold_binary(@builder, inst.op, inst.type, inst.args[0], inst.args[1], inst.aux_int)
+      value = identity(inst) unless value
+      replace(inst, value) if value
+    when Op::FNeg
+      if value = fold_binary(@builder, inst.op, inst.type, inst.args[0], inst.args[0], inst.aux_int)
+        replace(inst, value)
+      end
+    when Op::ICmp
+      value = fold_icmp(@builder, inst.aux_int, inst.args[0], inst.args[1])
+      if !value && inst.args[0].type.int? && !wide_constant_pair?(inst.args[0], inst.args[1]) && same_value?(inst.args[0], inst.args[1]) && !indeterminate?(inst.args[0]) && !pointer_derived?(inst.args[0])
+        value = reflexive_icmp(@builder, inst.aux_int)
+      end
+      replace(inst, value) if value
+    when Op::Trunc, Op::ZExt, Op::SExt
+      if value = fold_cast(@builder, inst.op, inst.args[0], inst.type)
+        replace(inst, value)
+      end
+    when Op::Select
+      if same_value?(inst.args[1], inst.args[2]) && !indeterminate?(inst.args[0]) && !pointer_derived?(inst.args[0])
+        replace(inst, inst.args[1])
+      end
+    when Op::CondBr
+      if value = int_value(inst.args[0])
+        replace_branch(inst, inst.targets[value == 0_i64 ? 1 : 0])
+      end
+    when Op::Switch
+      if value = int_value(inst.args[0])
+        target = inst.targets[0]
+        k = 0
+        while k < inst.cases.size
+          if canonical(inst.args[0].type.bits, inst.cases[k]) == value
+            target = inst.targets[k + 1]
+            break
+          end
+          k = k + 1
+        end
+        replace_branch(inst, target)
+      end
+    when Op::ExtractValue
+      if @du.use_count(inst) == 0 && inst.args[0].is_a?(Inst)
+        enqueue(inst.args[0].as(Inst))
+      end
+    when Op::Intrinsic
+      aux = inst.aux
+      if aux.is_a?(IntrinsicAux)
+        intrinsic = aux.as(IntrinsicAux)
+        if intrinsic.id == IntrinsicId::ExpectI1
+          replace(inst, inst.args[0]) if int_value(inst.args[0])
+        elsif op = overflow_op(intrinsic.id)
+          lower_overflow(inst, op)
+        end
+      end
+    end
+  end
+
+  def emit_instruction(inst : Inst, rebuilt : Array(Inst)) : Nil
+    if added = @before[inst]?
+      added.each { |child| emit_instruction(child, rebuilt) }
+    end
+    if branch = @branches[inst]?
+      rebuilt << branch
+    elsif !@removed[inst]?
+      rebuilt << inst
+    end
+  end
+
+  def run : Bool
+    @fn.blocks.each { |block| block.insts.each { |inst| enqueue(inst) } }
+    cursor = 0
+    while cursor < @work.size
+      inst = @work[cursor]
+      cursor = cursor + 1
+      @queued[inst] = false
+      simplify(inst)
+    end
+    return false unless @changed
+    @fn.blocks.each do |block|
+      rebuilt = [] of Inst
+      block.insts.each { |inst| emit_instruction(inst, rebuilt) }
+      block.insts[0, block.insts.size] = rebuilt
+    end
+    if @edges_changed
+      @fn.relink
+      @fn.blocks.each do |block|
+        block.insts.each do |inst|
+          break unless inst.op == Op::Phi
+          inst.keep_incoming(block.preds)
+        end
+      end
+    end
+    true
+  end
+
+  def edges_changed? : Bool
+    @edges_changed
+  end
+end
+
+pub def run_simplify(mod : Module, fn : Function) : Bool
+  return false if fn.declaration?
+  changed = false
+  while true
+    pass = Simplifier.new(mod, fn)
+    changed = true if pass.run
+    break unless pass.edges_changed?
+  end
+  changed
+end

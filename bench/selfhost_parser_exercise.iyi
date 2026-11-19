@@ -817,6 +817,8 @@ module BenchSelfhostParserExercise
       "bench/fixtures/syntax_macro_text_splits.iyi",
       "bench/fixtures/syntax_macro_keywords_and_escapes.iyi",
       "bench/fixtures/syntax_proc_literals.iyi",
+      "bench/fixtures/syntax_proc_pointers.iyi",
+      "bench/fixtures/syntax_scope_locals.iyi",
       "bench/fixtures/syntax_index_tuples_and_keyword_names.iyi",
       "bench/fixtures/syntax_type_list_then_call.iyi",
       "bench/fixtures/syntax_heredoc_command_and_folds.iyi",

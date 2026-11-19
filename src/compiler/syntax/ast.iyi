@@ -2255,6 +2255,9 @@ pub class ExceptionHandler < ASTNode
   property ensure : ASTNode?
   property suffix : Bool
   property implicit : Bool = false
+  # Hosted syntax/ast.cr 2935-2938: where this handler's `else` and `ensure` are written.
+  property else_location : Location? = nil
+  property ensure_location : Location? = nil
   # The handler a `defer` is normalized to (hosted syntax/ast.cr 2967). iyi refuses a written `ensure`;
   # this one is the defer registry's pop and is not refused.
   property iyi_defer : Bool = false
@@ -3464,11 +3467,10 @@ pub class ProcPointer < ASTNode
 
   def to_s(sb : StringBuilder) : Nil
     sb << "->"
+    sb << "::" if @global
     if o = @obj
       o.to_s(sb)
       sb << "."
-    elsif @global
-      sb << "::"
     end
     sb << @name
     if @args.size > 0

@@ -890,13 +890,26 @@
   # at the word again and parks - and its wake lands between a park's
   # look and its link as often as a race can make it. The main thread's
   # watchdog cannot run while it looks, so it names a turn that never
-  # comes itself. The copy that looks outside the lock
-  # (bench/parallel_exercise.sh) is caught here in 10 runs of 10 on Linux
-  # x86_64; with both sides parked tasks it was caught in 1 run of 10, and
-  # with both looking 32 times before they parked, in none of 10.
+  # comes itself. The copy that looks outside the lock is not left to that
+  # race: under -Dlostword_force its parked side waits in the window until
+  # this side's first wake has passed, so the first turn is handed over
+  # only once the parked side is there (bench/parallel_exercise.sh,
+  # lostword). Unforced, the race was caught in 10 runs of 10 on Linux
+  # x86_64, and in two of nine Namespace macOS jobs 5 runs of 5 each
+  # handed every turn (134616549649, 134738824347).
   def spun_turns(turns : Turns, rounds : Int64, watch : Int32) : Nil
     word = turns.word
     done = 0_i64
+    {% if flag?(:lostword_force) %}
+      # Held until the parked side is in its window, which the copy's
+      # `force_lost_wake_on` arranges: the first turn is handed over only
+      # then. If the parked side never gets there, the watch names it.
+      waited_since = __iyi_monotonic_ns
+      while !IyiScheduler.forced_in_window?
+        IyiThread.spin_pause
+        fail("wakes, words: the parked side never reached its park in #{watch} ms") if elapsed_ms(waited_since) >= watch.to_i64
+      end
+    {% end %}
     while done < rounds
       seen = word.value.get
       if seen % 2_u64 == 1_u64
@@ -983,6 +996,9 @@
     turns_each = 20000_i64
     if parts.includes?("words")
       turns = Turns.new
+      {% if flag?(:lostword_force) %}
+        IyiScheduler.force_lost_wake_on(turns.word)
+      {% end %}
       group do |g|
         parker = g.spawn(unit: :new) { parked_turns(turns, turns_each) }
         spun_turns(turns, turns_each, watch)

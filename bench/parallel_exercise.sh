@@ -891,16 +891,22 @@ echo "  broken copy, the second block left out: refused with no other block coun
 # ── 7. Failure proofs: broken copies of the runtime ──────────────────────
 # Each a copy of src/iyi with one file changed - concurrency.iyi unless
 # another is named - built against through IYI_PATH, of the program named
-# or of parallel_exercise.iyi; nothing in the tree is touched.
-broken() { # name, awk program[, file in src/iyi[, program in bench]]
-  local file="${3:-concurrency.iyi}" program="${4:-parallel_exercise}"
+# or of parallel_exercise.iyi, with any build flags after the program's
+# name; nothing in the tree is touched. An awk that finds an anchor gone
+# exits nonzero, and that fails the gate.
+broken() { # name, awk program[, file in src/iyi[, program in bench[, build flags...]]]
+  local file="${3:-concurrency.iyi}" program="${4:-parallel_exercise}" awk_status
   mkdir -p "$1/iyi"
   cp "$REPO"/src/iyi/*.iyi "$1/iyi/"
   awk "$2" "$REPO/src/iyi/$file" > "$1/iyi/$file"
+  awk_status=$?
+  if [ "$awk_status" -ne 0 ]; then
+    echo "the awk for $1 exited $awk_status: an anchor it needs is gone from $file"; exit 1
+  fi
   if cmp -s "$1/iyi/$file" "$REPO/src/iyi/$file"; then
     echo "the awk for $1 found nothing to change"; exit 1
   fi
-  if ! IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "$REPO/bench/$program.iyi" -o "$1-run" > "build-$1.log" 2>&1; then
+  if ! IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "${@:5}" "$REPO/bench/$program.iyi" -o "$1-run" > "build-$1.log" 2>&1; then
     echo "the broken copy $1 failed to build:"; tail -20 "build-$1.log"; exit 1
   fi
 }
@@ -910,7 +916,8 @@ broken() { # name, awk program[, file in src/iyi[, program in bench]]
 # through and exited 0 in 2 on one prelude and 1 on the next. A run that
 # ends any way but exit 1 at the sentence is run again, up to five times;
 # one ending there is the proof, and none in five is a failure of the gate.
-# CAUGHT_RUNS raises the five for one proof (`CAUGHT_RUNS=60 caught ...`).
+# CAUGHT_RUNS sets the runs for one proof: `CAUGHT_RUNS=1 caught ...` is
+# a copy forced to fail on its single run, as the lostword proof is.
 caught() { # name, expected FAIL text, step arguments...
   local name="$1" want="$2" code attempt
   shift 2
@@ -1014,13 +1021,66 @@ else
   caught unhanded 'wakes: selects over two channels received' wakes --only=selects --watch=5000
   broken lostcancel '/^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; next } { print }'
   caught lostcancel 'wakes, cancels: still waiting after 5000 ms' wakes --only=cancels --watch=5000
-  broken lostword '/def self.park_on\(/ { inpark = 1 } inpark && held == "" && /^    IyiChanLock.lock\(lock\)$/ { held = $0; next } inpark && held != "" && /^      IyiChanLock.unlock\(lock\)$/ { next } inpark && held != "" && /^    end$/ { print; print held; held = ""; inpark = 0; next } { print }'
-  # On Namespace's macOS 15 VM (6 vCPUs) the copy handed all 40,000 turns
-  # in 5 runs of 5 in two of nine jobs (134616549649, 134738824347), each
-  # run a quarter of a second, where an M5 Max caught it in 99 runs of 100,
-  # each at the 5000 ms watch: the race is rarer there, not gone, so the
-  # copy gets up to 60 runs, at most about 15 s on that VM.
-  CAUGHT_RUNS=60 caught lostword 'wakes, words: turn' wakes --only=words --watch=5000
+  # The copy looks at the word outside its list's lock, and unforced that
+  # is a race: in two of nine Namespace macOS jobs it handed all 40,000
+  # turns in 5 runs of 5 (134616549649, 134738824347), each run a quarter
+  # of a second. So the copy is forced instead. -Dlostword_force holds its
+  # parked side in the window between the look and the lock until the first
+  # wake has passed (IyiScheduler.force_lost_wake_on, which the copy adds).
+  # That wake scans an empty list, the parked side links in after it and
+  # waits for a wake that is gone. The run ends at turn 2 every time, so one
+  # run is the proof, and a run that ends anywhere else is a failure.
+  forced_lostword='
+/def self.park_on\(/ { inpark = 1 }
+inpark && held == "" && /^    IyiChanLock.lock\(lock\)$/ { held = $0; next }
+inpark && held != "" && /^      IyiChanLock.unlock\(lock\)$/ { next }
+inpark && held != "" && /^    end$/ {
+  print
+  print "    if word.address == @@forced_word"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_in_window).address).value.set(1_u64)"
+  print "      woke_cell = Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke).address)"
+  print "      while woke_cell.value.get <= seen"
+  print "        IyiThread.spin_pause"
+  print "      end"
+  print "    end"
+  print held
+  held = ""; inpark = 0; did_park = 1; next
+}
+/def self.wake_on\(/ { inwake = 1 }
+inwake && /^    IyiChanLock.unlock\(lock\)$/ {
+  print "    if word.address == @@forced_word"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke).address).value.set(word.value.get)"
+  print "    end"
+  inwake = 0; did_wake = 1
+}
+/^  @@lot_locks : Pointer\(UInt64\)/ {
+  print
+  print "  # A failure proof, in the copy only: the word it forces, the value its waker stores,"
+  print "  # and whether the parked side is in its window. All three are atomics."
+  print "  @[UnsafeReach(\"written before the spawn by force_lost_wake_on, then only read\")]"
+  print "  @@forced_word : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"stored by the waker under the list lock, then only loaded atomically\")]"
+  print "  @@forced_woke : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"stored by the parked side in its window, then only loaded atomically\")]"
+  print "  @@forced_in_window : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_lost_wake_on(word : Pointer(Atomic(UInt64))) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_in_window).address).value.set(0_u64)"
+  print "    @@forced_word = word.address"
+  print "  end"
+  print ""
+  print "  def self.forced_in_window? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_in_window).address).value.get == 1_u64"
+  print "  end"
+  did_defs = 1
+  next
+}
+{ print }
+END { if (!(did_park && did_wake && did_defs)) exit 3 }
+'
+  broken lostword "$forced_lostword" concurrency.iyi parallel_exercise -Dlostword_force
+  CAUGHT_RUNS=1 caught lostword 'wakes, words: turn 2 was not taken in 5000 ms' wakes --only=words --watch=5000
 fi
 
 step "failure proof: a plain add loses counts when tasks run at the same instant"

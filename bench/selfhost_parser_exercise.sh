@@ -1076,6 +1076,40 @@ for bad in "${scope_refusals[@]}"; do
   fi
 done
 
+echo "== Refusal text parity: both parsers refuse each source with the same message"
+# Each row is a source and the message both refusals must carry. The blocks above compare accept and reject only;
+# these rows compare the text too.
+refusal_text_sources=(
+  '->(x):Int32 { 1 }'
+  '-> :Int32 { 1 }'
+)
+refusal_texts=(
+  "a space is mandatory between ':' and return type"
+  "a space is mandatory between ':' and return type"
+)
+for i in "${!refusal_text_sources[@]}"; do
+  bad="${refusal_text_sources[$i]}"
+  want="${refusal_texts[$i]}"
+  printf '%s\n' "$bad" > "$WORK/refusal-text.iyi"
+  if "$WORK/exercise-plain$EXE" "$WORK_NATIVE/refusal-text.iyi" > "$WORK/refusal-text-port.log" 2>&1; then
+    echo "  native accepted invalid: $bad"
+    status=1
+  elif ! grep -qF "Syntax error" "$WORK/refusal-text-port.log" || ! grep -qF "$want" "$WORK/refusal-text-port.log"; then
+    echo "  native refusal text differs from: $want (source: $bad)"
+    cat "$WORK/refusal-text-port.log"
+    status=1
+  elif "$WORK/dump_hosted$EXE" "$WORK_NATIVE/refusal-text.iyi" > "$WORK/refusal-text-hosted.log" 2>&1; then
+    echo "  hosted accepted invalid: $bad"
+    status=1
+  elif ! grep -qF "Iyi::SyntaxException" "$WORK/refusal-text-hosted.log" || ! grep -qF "$want" "$WORK/refusal-text-hosted.log"; then
+    echo "  hosted refusal text differs from: $want (source: $bad)"
+    cat "$WORK/refusal-text-hosted.log"
+    status=1
+  else
+    echo "  both refuse with: $want"
+  fi
+done
+
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
@@ -1425,6 +1459,32 @@ prove_mutation "mutation 49: a ::name is assigned as a local" "$PARSER" \
 prove_mutation "mutation 50: a local followed by a space reads / as a regex" "$PARSER" \
   '      @wants_regex = !is_var' \
   '      @wants_regex = true' -- unspaced_forms_hold || status=1
+
+# A mutant whose refusal text differs from the hosted text, or that accepts a refused source, is caught.
+refusal_text_hold() {
+  local i bad want
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  for i in "${!refusal_text_sources[@]}"; do
+    bad="${refusal_text_sources[$i]}"
+    want="${refusal_texts[$i]}"
+    printf '%s\n' "$bad" > "$WORK/mut-text.iyi"
+    if "$WORK/mut-exercise$EXE" "$WORK_NATIVE/mut-text.iyi" > "$WORK/mut-text.log" 2>&1; then
+      return 1
+    fi
+    if ! grep -qF "$want" "$WORK/mut-text.log"; then
+      return 1
+    fi
+  done
+  return 0
+}
+# Mutation 51: the second case of a proc literal drops the symbol refusal, so `->(x):Int32` is refused with another text.
+old_sym=$'      # ->() :T { }\n      syntax_error("a space is mandatory between \':\' and return type", @token.location)'
+new_sym=$'      # ->() :T { }\n      nil'
+prove_mutation "mutation 51: a proc literal's second case drops the symbol refusal" "$PARSER" \
+  "$old_sym" "$new_sym" -- refusal_text_hold || status=1
 
 echo
 echo "== Rebuilding and running restored parser exercise"

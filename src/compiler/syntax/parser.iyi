@@ -4583,7 +4583,12 @@ pub class Parser < Lexer
       next_token_skip_space_or_newline
     end
 
-    if @token.type == TokenKind::OP_COLON
+    # hosted parser.cr 3406-3414: after the parameters, a symbol is `:T` with no space before the return type.
+    case @token.type
+    when TokenKind::SYMBOL
+      # ->() :T { }
+      syntax_error("a space is mandatory between ':' and return type", @token.location)
+    when TokenKind::OP_COLON
       next_token_skip_space_or_newline
       return_type = parse_bare_proc_type
       skip_space_or_newline

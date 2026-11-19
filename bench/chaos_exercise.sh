@@ -12,8 +12,8 @@
 #      does.
 #   2. The bugs pass without it: bench/chaos_claim.iyi (a check-then-act
 #      on an `Atomic`) and bench/chaos_join.iyi (a missing join), each
-#      built once and run PLAIN_RUNS times on the machine's own pool, fail
-#      at most once.
+#      built once and run PLAIN_RUNS times on one worker (IYI_WORKERS=1),
+#      every run passing.
 #   3. Caught, with a seed that reproduces: `iyi test --chaos=1
 #      --chaos-runs 100` fails each test, naming the seed and the
 #      `--chaos=SEED` that runs it again; that line fails again; and the
@@ -178,15 +178,18 @@ off_is_nothing() { # prelude, label
 off_is_nothing "" shipped || exit 1
 
 # ── 2. The bugs pass without it ───────────────────────────────────────────
+# One worker, so that a plain run's outcome does not depend on how the
+# pool's threads interleave. Every run must pass: a failing run is a
+# finding, not a run to tolerate.
 for test in claim join; do
-  step "bench/chaos_$test.iyi passes without --chaos"
+  step "bench/chaos_$test.iyi passes without --chaos, on one worker"
   build "plain-$test" "" "$REPO/bench/chaos_$test.iyi" || die "the plain build failed: $(tail -20 "build-plain-$test.log")"
   failed=0
   for run in $(seq 1 "$PLAIN_RUNS"); do
-    timeout -k 5 120 "./plain-$test$EXE" > "plain-$test-$run.txt" 2>&1 || failed=$((failed + 1))
+    IYI_WORKERS=1 timeout -k 5 120 "./plain-$test$EXE" > "plain-$test-$run.txt" 2>&1 || failed=$((failed + 1))
   done
-  echo "  failed $failed of $PLAIN_RUNS runs on the machine's own pool"
-  [ "$failed" -le 1 ] || die "chaos_$test failed $failed of $PLAIN_RUNS plain runs: $(cat plain-"$test"-*.txt | sort | uniq -c)"
+  echo "  failed $failed of $PLAIN_RUNS runs on one worker"
+  [ "$failed" -eq 0 ] || die "chaos_$test failed $failed of $PLAIN_RUNS plain runs: $(cat plain-"$test"-*.txt | sort | uniq -c)"
 done
 
 # ── 3. Caught, with a seed that reproduces ────────────────────────────────

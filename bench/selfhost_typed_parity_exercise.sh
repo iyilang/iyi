@@ -423,6 +423,36 @@ PY
     '      def_args << Arg.new(name)' \
     "BELOW FLOOR" -- child_gate "$PROOF_FLOOR" || status=1
 
+  prove_mutation "a proc pointer with no receiver is refused, not expanded (main_visitor.cr 1487-1490)" \
+    "$REPO/src/compiler/semantic/main_visitor.iyi" \
+    '    if obj.nil?
+      return proc_pointer_expansion(node)' \
+    '    if obj.nil?
+      return refuse(node, "a proc pointer with no receiver is refused in this mutant")' \
+    "BELOW FLOOR" -- child_gate "$PROOF_FLOOR" || status=1
+
+  prove_mutation "a proc pointer's expansion does not type the pointer (visit(MacroIf) pattern, main_visitor.cr 977-999)" \
+    "$REPO/src/compiler/semantic/main_visitor.iyi" \
+    '  def proc_pointer_expansion(node : ProcPointer) : Bool
+    expanded = @expansions[node]?
+    if expanded.nil?
+      expanded = LiteralExpander.new(@program.normalizer).expand_proc_pointer(node)
+      @expansions[node] = expanded
+    end
+    expanded.accept(self)
+    if et = child_type(expanded)
+      set_type(node, et)
+    end' \
+    '  def proc_pointer_expansion(node : ProcPointer) : Bool
+    expanded = @expansions[node]?
+    if expanded.nil?
+      expanded = LiteralExpander.new(@program.normalizer).expand_proc_pointer(node)
+      @expansions[node] = expanded
+    end
+    expanded.accept(self)
+    child_type(expanded)' \
+    "BELOW FLOOR" -- child_gate "$PROOF_FLOOR" || status=1
+
   LOWERED="$WORK/lowered.floor"
   "$PY" - "$(native_path "$PROOF_FLOOR")" "$(native_path "$LOWERED")" <<'PY'
 import sys

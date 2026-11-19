@@ -45,10 +45,20 @@ module BenchSelfhostSemanticDeclarationsExercise
     nil
   end
 
+  # Whether a path is absolute as the gate gives it: a POSIX `/...` path, or a Windows path with a drive letter, a colon
+  # and a separator (`D:/...` from `cygpath -m`, or `D:\...`). Only a path that is not absolute is read from the working
+  # directory, so an absolute drive path is never prefixed a second time.
+  def self.absolute_path?(path : String) : Bool
+    return true if path.starts_with?("/")
+    return false if path.bytesize < 3
+    letter = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".includes?(path[0, 1])
+    letter && path[1, 1] == ":" && (path[2, 1] == "/" || path[2, 1] == "\\")
+  end
+
   # Loads a file and its closure into a fresh program. Returns the program and the entry.
   def self.load_program(path : String) : {SemanticProgram, String}
     cwd = ENV["PWD"]? || "."
-    absolute = path.starts_with?("/") ? path : "#{cwd}/#{path}"
+    absolute = absolute_path?(path) ? path : "#{cwd}/#{path}"
     entry = normalize_path(absolute)
     src = File.read(entry)
     parser = Parser.new(src, entry)
@@ -77,7 +87,7 @@ module BenchSelfhostSemanticDeclarationsExercise
   # (type_node_system before the prelude, matching the hosted prelude-first declaration pass).
   def self.load_typed_program(path : String) : {SemanticProgram, String}
     cwd = ENV["PWD"]? || "."
-    absolute = path.starts_with?("/") ? path : "#{cwd}/#{path}"
+    absolute = absolute_path?(path) ? path : "#{cwd}/#{path}"
     entry = normalize_path(absolute)
     src = File.read(entry)
     parser = Parser.new(src, entry)
@@ -163,7 +173,7 @@ module BenchSelfhostSemanticDeclarationsExercise
   # print a dump: it completes, or the port refuses the file.
   def self.load_whole(path : String, typed : Bool = false) : SemanticProgram
     cwd = ENV["PWD"]? || "."
-    absolute = path.starts_with?("/") ? path : "#{cwd}/#{path}"
+    absolute = absolute_path?(path) ? path : "#{cwd}/#{path}"
     entry = normalize_path(absolute)
     src = File.read(entry)
     parser = Parser.new(src, entry)
@@ -246,6 +256,12 @@ end
 if Program.args.empty?
   # A self-check for `iyi run` with no arguments: the built-in types load and print.
   print BenchSelfhostSemanticDeclarationsExercise.dump_initial
+elsif Program.args[0] == "--absolute-path"
+  Program.args.each do |p|
+    unless p == "--absolute-path"
+      print "#{p} => #{BenchSelfhostSemanticDeclarationsExercise.absolute_path?(p)}\n"
+    end
+  end
 elsif Program.args[0] == "--initial"
   print BenchSelfhostSemanticDeclarationsExercise.dump_initial
 elsif Program.args[0] == "--chain"

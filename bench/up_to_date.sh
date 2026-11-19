@@ -356,8 +356,8 @@ else
 fi
 
 echo "== inputs the check cannot list"
-cat > sys.iyi <<'EOF'
-module sys
+cat > sys.cr <<'EOF'
+require "prelude"
 
 puts {{ `echo from-a-command`.stringify }}
 EOF
@@ -373,12 +373,12 @@ puts {{ run("./gen").stringify }}
 EOF
 sleep 1
 for program in sys runner; do
-  "$IYI" build -s -o "$program" "$program.iyi" > "$WORK/b.log" 2>&1
-  "$IYI" build -s -o "$program" "$program.iyi" > "$WORK/b.log" 2>&1; code=$?
   case "$program" in
-    sys) why="a macro runs a command at sys.iyi:3" ;;
-    runner) why='did not say which files it read' ;;
+    sys) source=sys.cr; why="a macro runs a command at sys.cr:3" ;;
+    runner) source=runner.iyi; why='did not say which files it read' ;;
   esac
+  "$IYI" build -s -o "$program" "$source" > "$WORK/b.log" 2>&1
+  "$IYI" build -s -o "$program" "$source" > "$WORK/b.log" 2>&1; code=$?
   say "$program: the second build compiles too, and the first said why" \
     "$([ $code -eq 0 ] && ! grep -q 'is up to date' "$WORK/b.log" && grep -qF "the next build compiles: " "$WORK/b.log" && grep -qF "$why" "$WORK/b.log"; echo $?)"
 done

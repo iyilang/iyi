@@ -6,6 +6,7 @@ require "c/minwinbase"
 lib LibC
   fun GetFullPathNameW(lpFileName : LPWSTR, nBufferLength : DWORD, lpBuffer : LPWSTR, lpFilePart : LPWSTR*) : DWORD
   fun GetLongPathNameW(lpszShortPath : LPWSTR, lpszLongPath : LPWSTR, cchBuffer : DWORD) : DWORD
+  fun GetFinalPathNameByHandleW(hFile : HANDLE, lpszFilePath : LPWSTR, cchFilePath : DWORD, dwFlags : DWORD) : DWORD
   fun GetTempPathW(nBufferLength : DWORD, lpBuffer : LPWSTR) : DWORD
 
   FILE_TYPE_CHAR    = DWORD.new(0x2)

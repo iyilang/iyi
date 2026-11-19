@@ -1416,7 +1416,7 @@ prove_mutation "mutation 47: a name used inside its own assignment is accepted" 
 # Mutation 48: an operator assignment to a name that is not yet defined is accepted.
 prove_mutation "mutation 48: an operator assignment to an undefined name is accepted" "$PARSER" \
   '          if atomic.is_a?(Call) && atomic.name != "[]" && !var_in_scope?(atomic.name)' \
-  '          if false' -- scope_refusals_hold || status=1
+  '          if atomic.is_a?(Call) && atomic.name != "[]" && false' -- scope_refusals_hold || status=1
 # Mutation 49: a global name is assigned as a local.
 prove_mutation "mutation 49: a ::name is assigned as a local" "$PARSER" \
   '    return unless atomic.is_a?(Call) && atomic.global && atomic.obj.nil? && atomic.args.empty?' \

@@ -62,10 +62,18 @@ mkdir -p "$SRV"
 SERVER_PID=$!
 for _ in $(seq 200); do
   [ -f "$SRV/ready" ] && break
+  kill -0 "$SERVER_PID" 2>/dev/null || break
   sleep 0.1
 done
 if [ ! -f "$SRV/ready" ]; then
-  echo "the scripted servers did not start"
+  # The server writes the step it has reached, and every thread's stack to
+  # its log after 15 s without ready, so a stall names where it is.
+  if kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "the scripted servers did not start in 20 s, stopped at stage: $(cat "$SRV/stage" 2>/dev/null || echo none)"
+  else
+    echo "the scripted servers exited before they started, at stage: $(cat "$SRV/stage" 2>/dev/null || echo none)"
+  fi
+  echo "files: $(ls "$SRV" | tr '\n' ' ')"
   cat "$WORK/server.log"
   exit 1
 fi

@@ -527,6 +527,13 @@ IYI
     "$PY" - > "$WORK/py_server.out" 2>&1 <<'PY' &
 import gzip, zlib, sys, email.parser, email.policy
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import socketserver
+def _bind(self):
+    # HTTPServer.server_bind also asks for this host's name, a reverse lookup
+    # these tests never use and that waits on the machine's resolver.
+    socketserver.TCPServer.server_bind(self)
+    self.server_name, self.server_port = self.server_address[:2]
+HTTPServer.server_bind = _bind
 try:
     from compression import zstd
     from compression.zstd import ZstdCompressor, CompressionParameter
@@ -751,6 +758,13 @@ IYI
     "$PY" - "$WORK/tls" > "$WORK/tls_server.out" 2>&1 <<'PY' &
 import gzip, socket, ssl, sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import socketserver
+def _bind(self):
+    # HTTPServer.server_bind also asks for this host's name, a reverse lookup
+    # these tests never use and that waits on the machine's resolver.
+    socketserver.TCPServer.server_bind(self)
+    self.server_name, self.server_port = self.server_address[:2]
+HTTPServer.server_bind = _bind
 text = b"python's own words " * 1000
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"

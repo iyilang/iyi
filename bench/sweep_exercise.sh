@@ -288,45 +288,45 @@ else
   echo "  trim stress failed:"; tail -3 "$WORK/trim_stress.out" | sed 's/^/    /'; status=1
 fi
 
-# The listed pages counted off by every refill that read them listed, as
-# before `IyiHeap.unlist_page`: two refills adopting the batches of
-# adjacent slices both count the page the slices share, the arena's count
-# reaches zero with pages listed, and the trim and the pause make idle
-# pages under objects a cache handed out. The two refills must read the
-# shared page between one's read and its clear, and that window is a few
-# instructions: on darwin's sixteen-kilobyte pages the plain stress caught
-# the old counting in 11 runs of 11 of 20 s on macOS 26.6, Apple M2 Pro, 10
-# cores (the user's machine), but on four-kilobyte pages it passed 3 runs
-# of 3 on Windows 11, 12 logical processors (the user's machine), where
-# two adoptions met in the window 0-3 times in 10 s. So both copies here
-# hold the window open: an adoption that reads a batch's first or last
-# page listed spins WIDEN_NS before it clears the bit, and counts the
-# times the clear finds another adoption got there first
-# (`IyiHeap.widen_hits`, reported by trim_stress.iyi built with
-# -Dtrim_widen). The fix, widened, must read every block back whole with
-# the window met; the old counting, widened, must fail within three runs
-# of 10 s. At 20 microseconds the old counting was caught on the first run
-# in 20 runs of 20, within 0-6 s, on Windows 11, 12 logical processors and
-# on macOS 26.6, Apple M2 Pro, 10 cores (the user's machines), and the fix
-# read every block back whole in 5 runs of 5 and 3 of 3 with the window
-# met 4,706-5,750 and 9,483-15,972 times. With a run's miss rate under
-# 3/20 (95%), three misses in a row are under 0.4%.
-WIDEN_NS=20000
-widen_prelude() {
+echo
+echo "== the listed pages counted once per clear"
+# The listed pages are counted off once per clear, not once per page read
+# listed. Two refills adopting the batches of adjacent slices both read the
+# page the slices share as listed, but only one of them clears its bit, and
+# `IyiHeap.unlist_page` answers which. A refill that also counts the page it
+# lost leaves the arena's count short of its bits. The count reaches zero
+# with pages still listed, and the trim and the pause then make idle pages
+# under objects a cache handed out.
+#
+# `bench/unlist_count.iyi` checks the count on one thread, with no timing. It
+# unlists pages 1 to 3 of five listed pages and compares the count with the
+# bits left. The copy plays the neighbouring adoption inside `unlist_batch`,
+# at the batch's first and last pages, between the read and the clear: the
+# neighbour clears the edge page and takes it off the count, then this
+# adoption's own clear loses. That is the interleaving the race made, and it
+# happens on every run. The fix counts only the clears it wins and reads
+# 2 = 2. The copy also counts the clear it lost and reads 0 against 2, so it
+# fails on its only run.
+#
+# The old proof raced two adoptions in a window of 20 microseconds, then
+# waited for the trim stress to show the downstream effect, a block handed out
+# twice. On Namespace's Linux 4x16 it passed 4 of 5 runs, though the fix met
+# the window 1,136 and 2,271 times in 10 s (jwaldrip/iyi run 44368465397). A
+# check whose outcome depends on how often a timed race lands is not
+# deterministic, so it is gone.
+#
+# The stress keeps one job: the fix, with the same interleaving at every batch
+# edge, must read every block back whole under eight threads and the idle trim
+# for 10 s. `IyiHeap.widen_hits` counts the edge pages met that way. It is
+# printed, not asserted.
+play_prelude() {
   mkdir -p "$WORK/$1/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$1/iyi/"
-  awk -v mode="$1" -v widen="$WIDEN_NS" '
+  awk -v mode="$1" '
     /^      def self\.pages_released : UInt64$/ {
       print "      @@widen_hits : UInt64 = 0_u64"
       print "      def self.widen_hits : UInt64"
       print "        @@widen_hits"
-      print "      end"
-      print "      def self.spin_widen : Nil"
-      print "        stop = IyiMark.now_ns + " widen "_u64"
-      print "        spun = 0_u64"
-      print "        while IyiMark.now_ns < stop"
-      print "          spun = spun + 1_u64"
-      print "        end"
       print "      end"
       print
       n++; next }
@@ -335,36 +335,65 @@ widen_prelude() {
     /^          count = count \+ 1_u64 if unlist_page\(arena, page\)$/ {
       batch = 0
       print "          if page_listed?(arena, arena + page * PAGE)"
-      print "            spin_widen if page == low_edge || page == last"
+      print "            if page == low_edge || page == last"
+      print "              Pointer(Atomic(UInt64)).new(arena + OFF_LISTED).value.sub(1_u64) if unlist_page(arena, page)"
+      print "            end"
       print "            won = unlist_page(arena, page)"
       print "            Pointer(Atomic(UInt64)).new(pointerof(@@widen_hits).address).value.add(1_u64) unless won"
       print (mode == "doublecount" ? "            count = count + 1_u64" : "            count = count + 1_u64 if won")
       print "          end"
       n++; next }
     { print }
-    END { if (n != 3) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi" &&
-    IYI_PATH="$WORK/$1:$REPO/src" "$IYI" build --release -Dtrim_widen -o "$WORK/$1/program" "$REPO/bench/trim_stress.iyi" >"$WORK/$1/build.log" 2>&1
+    END { if (n != 3) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi"
 }
-if ! widen_prelude widened; then
-  echo "  the window held open: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
-elif stress_run widened "$WORK/widened/program" 10 &&
-     hits=$(sed -n 's/.*, \([0-9]*\) edge pages read listed by two adoptions at once$/\1/p' "$WORK/widened.out") &&
-     [ -n "$hits" ] && [ "$hits" -gt 0 ]; then
-  echo "  the window held open ${WIDEN_NS} ns: every block read back whole, $hits edge pages read listed by two adoptions at once"
+
+# Builds bench/unlist_count.iyi against copy $1 and runs it once. The status is
+# 2 when it did not build, otherwise the program's own: 0 when the count agrees
+# with the bits, 1 on the FAIL line.
+unlist_count_run() {
+  IYI_PATH="$WORK/$1:$REPO/src" "$IYI" build -o "$WORK/$1/unlist_count" \
+    "$REPO/bench/unlist_count.iyi" >"$WORK/$1/unlist.build.log" 2>&1 || return 2
+  "$WORK/$1/unlist_count" >"$WORK/$1/unlist.out" 2>&1
+}
+
+if ! play_prelude played; then
+  echo "  the adjacent adoption played: the lines it edits are not in the prelude any more"; status=1
 else
-  echo "  the window held open: the fix failed, or the window was never met:"; tail -3 "$WORK/widened.out" | sed 's/^/    /'; status=1
-fi
-if ! widen_prelude doublecount; then
-  echo "  the listed pages counted twice: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
-else
-  caught=0
-  for again in 1 2 3; do
-    stress_run doublecount "$WORK/doublecount/program" 10 || { caught=$again; break; }
-  done
-  if [ "$caught" -ne 0 ]; then
-    echo "  the listed pages counted twice: caught on run $caught: $(grep -m1 'FAIL\|panic' "$WORK/doublecount.out" | cut -c1-200)"
+  if unlist_count_run played; then
+    sed 's/^/  /' "$WORK/played/unlist.out"
   else
-    echo "  the listed pages counted twice: three runs passed, so the stress does not test it"; status=1
+    echo "  the adjacent adoption played: the count is wrong, or the copy did not build:"
+    sed -n '1,12p' "$WORK/played/unlist.build.log" "$WORK/played/unlist.out" 2>/dev/null | sed 's/^/    /'
+    status=1
+  fi
+  if ! IYI_PATH="$WORK/played:$REPO/src" "$IYI" build --release -Dtrim_widen -o "$WORK/played/program" \
+       "$REPO/bench/trim_stress.iyi" >"$WORK/played/build.log" 2>&1; then
+    echo "  the adjacent adoption played: the stress did not build"
+    sed -n '1,12p' "$WORK/played/build.log" | sed 's/^/    /'
+    status=1
+  elif stress_run played "$WORK/played/program" 10 &&
+       hits=$(sed -n 's/.*, \([0-9]*\) edge pages read listed by two adoptions at once$/\1/p' "$WORK/played.out") &&
+       [ -n "$hits" ]; then
+    echo "  the adjacent adoption played at each batch edge: every block read back whole, $hits edge pages read listed by two adoptions at once"
+  else
+    echo "  the adjacent adoption played: the stress failed, or did not report its edge pages:"
+    tail -3 "$WORK/played.out" | sed 's/^/    /'
+    status=1
+  fi
+fi
+
+echo
+if ! play_prelude doublecount; then
+  echo "  the listed pages counted twice: the lines it edits are not in the prelude any more"; status=1
+else
+  unlist_count_run doublecount
+  rc=$?
+  if [ "$rc" -eq 1 ] && grep -q '^FAIL: unlist: the arena counts ' "$WORK/doublecount/unlist.out"; then
+    echo "  the listed pages counted twice: caught on its only run: $(grep -m1 '^FAIL: unlist' "$WORK/doublecount/unlist.out")"
+  else
+    echo "  the listed pages counted twice: not caught at the expected check (status $rc):"
+    sed -n '1,12p' "$WORK/doublecount/unlist.build.log" "$WORK/doublecount/unlist.out" 2>/dev/null | sed 's/^/    /'
+    status=1
   fi
 fi
 

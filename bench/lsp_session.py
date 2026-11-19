@@ -63,6 +63,9 @@ def watchdog(seconds):
                 # What was asked and who was left to answer it: a hang on a
                 # Windows runner said nothing more than the line above.
                 print(f"  the last request sent: {LAST.get('sent', '(none)')}", flush=True)
+                if sys.platform == "darwin" and "held" in LAST:
+                    for line in held_report(LAST["held"]):
+                        print(line, flush=True)
                 for proc in LIVE:
                     if proc.poll() is None:
                         try:
@@ -70,21 +73,69 @@ def watchdog(seconds):
                         except Exception as error:  # noqa: BLE001 - a report, not a check
                             kids = f"unlisted ({error})"
                         print(f"  server {proc.pid} running, its children {kids}", flush=True)
-                        # Where each one is waiting: darwin's `sample` reads
-                        # every thread's stack for a second, symbols and all.
+                        # Where each one is waiting: `ps -M` lists its threads, and
+                        # `sample` reads every thread's whole call graph, uncut.
                         if sys.platform == "darwin" and isinstance(kids, list):
                             for pid in [proc.pid, *kids]:
-                                sampled = subprocess.run(["sample", str(pid), "1", "-mayDie"],
-                                                         capture_output=True, text=True, timeout=30)
-                                stack = [line for line in sampled.stdout.splitlines()
-                                         if "+" in line and ("iyi" in line or "Lsp" in line or "Fiber" in line)]
-                                print(f"  {pid}'s busiest frames:", flush=True)
-                                for line in stack[:40]:
-                                    print(f"    {line.strip()[:160]}", flush=True)
+                                try:
+                                    darwin_stacks(pid)
+                                except Exception as error:  # noqa: BLE001 - a report, not a check
+                                    print(f"  {pid}'s stacks: {error}", flush=True)
                 for proc in LIVE:
                     proc.kill()
                 os._exit(1)
     threading.Thread(target=watch, daemon=True).start()
+
+
+def darwin_stacks(pid):
+    """Every thread of *pid* as `ps -M` lists it, then the call graph
+    `sample` takes of it for a second, uncut to about 600 lines. The view
+    this replaced kept only the frames that named iyi, Lsp or Fiber, so the
+    libsystem leaf a thread was blocked in was the part it dropped."""
+    listed = subprocess.run(["ps", "-M", "-p", str(pid)], capture_output=True,
+                            text=True, timeout=30)
+    print(f"  {pid}'s threads (ps -M):", flush=True)
+    for line in listed.stdout.splitlines():
+        print(f"    {line}", flush=True)
+    with tempfile.TemporaryDirectory(prefix="iyi-lsp-sample") as scratch:
+        report = os.path.join(scratch, "sample.txt")
+        sampled = subprocess.run(["sample", str(pid), "1", "-mayDie", "-file", report],
+                                 capture_output=True, text=True, timeout=60)
+        if not os.path.exists(report):
+            print(f"  {pid}'s call graph: no report: {sampled.stderr.strip()[:200]}",
+                  flush=True)
+            return
+        with open(report, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith("Call graph:")), None)
+    if start is None:
+        print(f"  {pid}'s call graph: none in its report", flush=True)
+        return
+    stops = ("Total number in stack", "Sort by top of stack", "Binary Images:")
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith(stops)),
+               len(lines))
+    graph = lines[start + 1:end]
+    print(f"  {pid}'s call graph ({len(graph)} lines):", flush=True)
+    for line in graph[:600]:
+        print(f"    {line}", flush=True)
+    if len(graph) > 600:
+        print(f"    ... {len(graph) - 600} more lines not printed", flush=True)
+
+
+def held_report(record):
+    """Each step of the held FIFO's release, with how long before now it ran
+    or that it did not, and whether the path still exists. If every step ran,
+    a stuck compile is waiting on its own side of the pipe; the first step that
+    did not run is where the release stopped."""
+    now = time.monotonic()
+    state = "still exists" if os.path.exists(record["path"]) else "is gone"
+    lines = [f"  the held FIFO {record['path']} {state}"]
+    steps = (("entered", "release entered os.open"), ("opened", "os.open returned"),
+             ("unlinked", "unlinked"), ("wrote", "wrote the newline"), ("closed", "closed"))
+    for key, what in steps:
+        at = record.get(key)
+        lines.append(f"    {what}: " + (f"{now - at:.1f} s ago" if at is not None else "not reached"))
+    return lines
 
 
 def uri_path(uri):
@@ -451,9 +502,14 @@ def package_fixture(home):
     env = dict(os.environ)
     lib = os.path.join(home, "work", "liba")
     os.makedirs(lib, exist_ok=True)
+    # Signing off in this repository's own config: a machine whose global
+    # config signs commits and tags (`git tag` then wants a message and a
+    # key) must not decide whether this gate can build its fixture.
     steps = [["git", "init", "-q", lib],
              ["git", "-C", lib, "config", "user.email", "t@t"],
-             ["git", "-C", lib, "config", "user.name", "t"]]
+             ["git", "-C", lib, "config", "user.name", "t"],
+             ["git", "-C", lib, "config", "commit.gpgsign", "false"],
+             ["git", "-C", lib, "config", "tag.gpgsign", "false"]]
     for command in steps:
         if subprocess.run(command, capture_output=True).returncode != 0:
             return None
@@ -1362,11 +1418,12 @@ def nt_pipe(path):
 
 
 def held_open(work, seconds):
-    """A path a macro's `read_file` waits on for *seconds*, then reads
-    as empty: a FIFO on POSIX, a named pipe on Windows. A compile that
-    reads it lasts as long as the gate says, on any machine. Once let
-    go of, the path is gone, and a later compile of the same text
-    fails at once rather than waiting again."""
+    """A path a macro's `read_file` waits on for *seconds*, then reads to
+    its end: a FIFO on POSIX, which reads as one newline (written a second
+    before the close, see `release`), and a named pipe on Windows, which
+    reads as empty. A compile that reads it lasts as long as the gate says,
+    on any machine. Once let go of, the path is gone, and a later compile of
+    the same text fails at once rather than waiting again."""
     if os.name == "nt":
         path = r"\\.\pipe\iyi-lsp-held-%d" % os.getpid()
         kernel, handle = nt_pipe(path)
@@ -1378,14 +1435,36 @@ def held_open(work, seconds):
     else:
         path = os.path.join(work, "held")
         os.mkfifo(path)
+        # When each step of the release ran, for the watchdog: a hang is
+        # read from which of them never returned.
+        record = {"path": path}
+        LAST["held"] = record
 
         def release():
-            time.sleep(seconds)
-            # Blocks until the reader has opened it, so the reader sees
-            # the end of the file rather than no file.
+            time.sleep(seconds - 1)
+            # Blocks until the reader has opened it, so the reader sees a
+            # writer rather than no file. The unlink follows at once, so a
+            # later compile of the same text fails at once instead of waiting.
+            record["entered"] = time.monotonic()
             writer = os.open(path, os.O_WRONLY)
+            record["opened"] = time.monotonic()
             os.unlink(path)
-            os.close(writer)
+            record["unlinked"] = time.monotonic()
+            # The reader takes the newline through the data path, then sleeps in
+            # its next read until the close, a second later. macOS can lose the
+            # wakeup of a reader asleep in read(2) when the last writer closes as
+            # the reader goes to sleep: a hold that closed right after its open
+            # stalled 3 times in 916 iterations of step 74a, and standalone FIFO
+            # runs stalled after 46 to 5362 iterations. A close 50 ms after the
+            # reader went to sleep stalled in none of 400 such runs, so the second
+            # here lets the reader sleep before the close comes.
+            try:
+                os.write(writer, b"\n")
+                record["wrote"] = time.monotonic()
+                time.sleep(1)
+            finally:
+                os.close(writer)
+            record["closed"] = time.monotonic()
     threading.Thread(target=release, daemon=True).start()
     return path
 

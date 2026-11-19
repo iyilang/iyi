@@ -1107,102 +1107,98 @@ IYI
 esac
 
 # ── 4e. The release waits for nobody it lets go ──────────────────────────
-# A stop's release waited for every thread it let go to leave its park,
-# so a collection lasted until the last of them had a processor again. A
-# thread asked to stop inside the allocator parks itself where it leaves.
-# Here it shares a processor, at the lowest priority, with another
-# program - one the stop does not stop - computing 400 ms at a time at
-# the highest: it parks in that program's millisecond off, the mark that
-# follows outlasts the millisecond, and the release waited out the next
-# run. The release now leaves the wait to the next stop, which clears the
-# words the parked threads read: on Windows 11, 12 logical processors,
-# 403 to 410 ms past each stop before, 25 to 28 after, the mark among
-# it (3 runs each). On Linux the held thread is at SCHED_IDLE, which the
-# scheduler still runs within ticks: 34 to 47 ms before and 38 to 42
-# after on twelve vCPUs, so it is printed there; darwin has no placing
-# to hold it by. Asserted on Windows; printed everywhere.
+# A stop's release used to wait for every thread it let go to leave its
+# park, so a collection lasted until the last of them had a processor
+# again: on Windows 11, 12 logical processors, a thread parked inside the
+# allocator and then held off its processor by another program kept each
+# collection 403 to 410 ms past its stop, and 25 to 28 ms once the release
+# stopped waiting (the mark of 2,000,000 links among it). The next stop
+# now waits, before it clears the words the released threads read
+# (`stop_others`), and the release waits for none of them (`resume_others`).
+#
+# This step asserts a property, not a duration: the release must not
+# wait for the held thread. The held thread is inside the allocator
+# (`enter_barrier` to `leave_barrier`) for all the time it is not
+# leaving, so every stop finds it there, and it parks where it leaves.
+# Its park holds it at a gate after the release has let it go:
+# `release_gate_arm` names the held line, `release_gate_hold` marks `held`
+# and waits, and `release_gate_open` opens the gate once the release has
+# returned and reports whether `held` was reached and whether the gate's
+# 5 s ran out first. A correct release returns with the gate still shut,
+# so `held` is 1 and `expired` is 0. A release that waits for the threads
+# it let go cannot return until the held thread has counted out of the
+# gate, and the gate opens only after the release returns, so the 5 s run
+# out and `expired` is set. Only the broken copy ever reaches that bound.
+#
+# The bound this replaces was 200 ms on a mean of five collections. It read
+# 175 ms in one run and 411 ms in the next on GitHub's windows-2025 runner,
+# beside 76 ms for the healthy release (jwaldrip/iyi run 44368465397), so
+# it measured the runner's scheduling and not the release.
+#
+# The gate is four words on the control page past IYI_TC_TURNS, and it
+# exists only in copies of the runtime's thread.iyi, made here by awk, so
+# the tree is never touched. The healthy copy is the tree with the hook and
+# nothing else; the waiting copy adds the wait a release would make.
+cat > gate.part <<'IYI'
+    # ── The release gate (bench/thread_exercise.sh, step 4e) ─────────────
+    # Copies only: the awk in that step puts this into a copy of the
+    # runtime's thread.iyi, and the tree has none of it. The gate is four
+    # words on the control page past IYI_TC_TURNS: the line armed for the
+    # gate, whether that thread has reached its park, whether the gate is
+    # open, and whether its deadline ran out first.
+    IYI_GATE_LINE    = 384_u64
+    IYI_GATE_HELD    = 448_u64
+    IYI_GATE_OPEN    = 512_u64
+    IYI_GATE_EXPIRED = 576_u64
+    IYI_GATE_NS      = 5000000000_u64
+
+    # The calling thread's own line is the one the gate holds.
+    def self.release_gate_arm : Nil
+      word(control + IYI_GATE_LINE).value.set(@@line)
+    end
+
+    # `park` calls this for every parked thread before it counts itself out
+    # of the release. Atomics only: nothing allocates and no lock is taken.
+    # For the armed line the thread sets `held`, then waits for the gate to
+    # open, or for its deadline, which sets `expired`.
+    def self.release_gate_hold(line : UInt64) : Nil
+      page = control
+      return if line == 0_u64 || word(page + IYI_GATE_LINE).value.get != line
+      word(page + IYI_GATE_HELD).value.set(1_u64)
+      began = IyiMark.now_ns
+      while word(page + IYI_GATE_OPEN).value.get == 0_u64
+        if IyiMark.now_ns &- began > IYI_GATE_NS
+          word(page + IYI_GATE_EXPIRED).value.set(1_u64)
+          return
+        end
+        yield_cpu
+      end
+    end
+
+    # Opens the gate and answers {held, expired}. The release may return
+    # before the armed thread has reached the gate, so this waits for `held`
+    # as well, within the same bound.
+    def self.release_gate_open : Tuple(Bool, Bool)
+      page = control
+      word(page + IYI_GATE_OPEN).value.set(1_u64)
+      began = IyiMark.now_ns
+      while word(page + IYI_GATE_HELD).value.get == 0_u64 && IyiMark.now_ns &- began <= IYI_GATE_NS
+        yield_cpu
+      end
+      {word(page + IYI_GATE_HELD).value.get != 0_u64, word(page + IYI_GATE_EXPIRED).value.get != 0_u64}
+    end
+
+IYI
 cat > release.iyi <<'IYI'
-@[Unsafe("the held thread pins and deprioritizes itself through C calls and raw sched syscalls whose arguments live in Pointer#malloc memory")]
 module release
-
-import std/process::{Process, ChildProcess}
-
-class Link
-  getter next_link : Link?
-
-  def initialize(@next_link : Link?)
-  end
-end
 
 class Flag
   getter stop : Atomic(Int64)
-  getter held : Atomic(Int64)
+  getter inside : Atomic(Int64)
 
   def initialize
     @stop = Atomic(Int64).new(0_i64)
-    @held = Atomic(Int64).new(0_i64)
-  end
-end
-
-{% if flag?(:win32) %}
-  lib Placing
-    fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
-    fun SetThreadPriority(thread : Void*, priority : Int32) : Int32
-    fun Sleep(milliseconds : UInt32) : Nil
-  end
-{% elsif flag?(:linux) && flag?(:x86_64) %}
-  SYS_SCHED_SETAFFINITY  = 203_i64
-  SYS_SCHED_SETSCHEDULER = 144_i64
-  SYS_NANOSLEEP          =  35_i64
-{% elsif flag?(:linux) %}
-  SYS_SCHED_SETAFFINITY  = 122_i64
-  SYS_SCHED_SETSCHEDULER = 119_i64
-  SYS_NANOSLEEP          = 101_i64
-{% end %}
-
-# The running thread held to processor `cpu`, the lowest of its
-# priorities when `low` and otherwise the highest, with no boost:
-# Windows' -2 and 2, Linux's SCHED_IDLE and the default policy. Nothing
-# on darwin.
-def hold(cpu : Int32, low : Bool) : Nil
-  {% if flag?(:win32) %}
-    Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, 1_u64.unsafe_shl(cpu.to_u64))
-    Placing.SetThreadPriority(::LibC.GetCurrentThread, low ? -2_i32 : 2_i32)
-    ::LibC.SetThreadPriorityBoost(::LibC.GetCurrentThread, 1_i32)
-  {% elsif flag?(:linux) %}
-    mask = Pointer(UInt64).malloc(16_u64)
-    mask[cpu // 64] = 1_u64.unsafe_shl((cpu % 64).to_u64)
-    __iyi_conc_syscall3(SYS_SCHED_SETAFFINITY, 0_i64, 128_i64, mask.address.to_i64)
-    if low
-      param = Pointer(Int32).malloc(1_u64)
-      __iyi_conc_syscall3(SYS_SCHED_SETSCHEDULER, 0_i64, 5_i64, param.address.to_i64)
-    end
-  {% end %}
-end
-
-# A millisecond off the processor, for the held thread to run in.
-def nap : Nil
-  {% if flag?(:win32) %}
-    Placing.Sleep(1_u32)
-  {% elsif flag?(:linux) %}
-    spec = Pointer(Int64).malloc(2_u64)
-    spec[1] = 1000000_i64
-    __iyi_conc_syscall3(SYS_NANOSLEEP, spec.address.to_i64, 0_i64, 0_i64)
-  {% end %}
-end
-
-# Inside the allocator nearly all its time, so a stop finds it there and
-# leaves it to park where it leaves (`IyiHeap.leave_barrier`).
-def spin_low(flag : Flag, cpu : Int32) : Nil
-  hold(cpu, true)
-  flag.held.add(1_i64)
-  while flag.stop.get == 0_i64
-    IyiHeap.enter_barrier
-    turns = 0_i64
-    while turns < 100000_i64
-      turns = turns + flag.held.get
-    end
-    IyiHeap.leave_barrier
+    @inside = Atomic(Int64).new(0_i64)
   end
 end
 
@@ -1211,90 +1207,73 @@ def fail(message : String) : Nil
   __iyi_exit(1)
 end
 
-# The other program: on the held thread's processor, above it, 400 ms
-# computing at a time and a millisecond off between, for 60 s at most.
-if Program.args.size == 2 && Program.args[0] == "hog"
-  hold(Program.args[1].to_i, false)
-  quits = IyiMark.now_ns + 60000000000_u64
-  while IyiMark.now_ns < quits
-    ends = IyiMark.now_ns + 400000000_u64
-    while IyiMark.now_ns < ends
+# The held thread. It is inside the allocator from `enter_barrier` to
+# `leave_barrier` for all the time it is not leaving, so every stop finds
+# it there and it parks where it leaves. `inside` tells the stopper that it
+# has entered, before the stop is sent.
+def hold_in_allocator(flag : Flag) : Nil
+  IyiThread.release_gate_arm
+  while flag.stop.get == 0_i64
+    IyiHeap.enter_barrier
+    flag.inside.set(1_i64)
+    while flag.stop.get == 0_i64 && !IyiHeap.stop_requested?
+      IyiThread.spin_pause
     end
-    nap
+    flag.inside.set(0_i64)
+    IyiHeap.leave_barrier
   end
-  exit 0
 end
 
-asserted = false
-{% if flag?(:win32) %}
-  asserted = true
-{% end %}
-if IyiThread.core_count < 2_u64
-  puts "release: one processor here, nothing to hold a thread off"
-  exit 0
-end
-# A chain the stop's mark walks one link at a time, some tens of
-# milliseconds: past the other program's millisecond off, which a timer
-# of Windows' default resolution makes 15.6.
-chain = nil.as(Link?)
-2000000.times { chain = Link.new(chain) }
-hog = Process.spawn(Process.executable || "", ["hog", "1"])
-unless hog.is_a?(ChildProcess)
-  print "FAIL: release: the other program did not start\n"
-  exit 1
-end
 flag = Flag.new
-held = IyiThread.start { spin_low(flag, 1) }
-while flag.held.get < 1_i64
+held = IyiThread.start { hold_in_allocator(flag) }
+while flag.inside.get == 0_i64
   IyiThread.yield_cpu
 end
-hold(0, false)
-stop_ns = IyiThread.stop_ns
-pause_ns = IyiMark.pause_total_ns
-stops = IyiThread.stops
-5.times { IyiMark.collect }
-count = IyiThread.stops - stops
-after = ((IyiMark.pause_total_ns - pause_ns) - (IyiThread.stop_ns - stop_ns)) // count
+IyiRuntimeLock.lock
+others = IyiThread.stop_others
+IyiThread.resume_others(others)
+IyiRuntimeLock.unlock
+reached, expired = IyiThread.release_gate_open
 flag.stop.set(1_i64)
-hog.kill
-hog.wait
 held.join
-links = 0
-link = chain
-while link.is_a?(Link)
-  links = links + 1
-  link = link.next_link
-end
-fail("release: the chain kept #{links} links of 2000000") if links != 2000000
-fail("release: #{count} collections beside a thread held off its processor went on #{after // 1000000_u64} ms each past their stops, past 200") if asserted && after > 200000000_u64
-puts "release: #{count} collections beside a thread held off its processor, #{after // 1000_u64} us each past their stops (the mark of 2000000 links among it), held to 200 ms"
+fail("release: the held thread never reached its park") unless reached
+fail("release: the release waited for the thread it let go") if expired
+puts "release: the held thread parked inside the allocator, and the release did not wait for it"
 IYI
-step "a collection's release, beside a thread held off its processor"
-if ! "$IYI" build --release release.iyi -o release > build-release.log 2>&1; then
+step "a release beside a thread held in the allocator, which it does not wait for"
+mkdir -p gated/iyi waiting/iyi
+cp "$REPO"/src/iyi/*.iyi gated/iyi/
+awk -v gate=gate.part '
+  /^    # ── Roots / { while ((getline line < gate) > 0) print line; roots = 1 }
+  /^      count_in\(page \+ IYI_TC_RESUMED\)$/ { print "      release_gate_hold(line)"; hook = 1 }
+  { print }
+  END { if (!roots || !hook) exit 3 }
+' "$REPO/src/iyi/thread.iyi" > gated/iyi/thread.iyi || { echo "the park or the roots are not in thread.iyi any more"; exit 1; }
+if ! IYI_PATH="$WORK/gated${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release > build-release.log 2>&1; then
   cat build-release.log; exit 1
 fi
 if ! timeout -k 5 120 ./release > release.txt 2>&1; then
   cat release.txt; exit 1
 fi
 sed 's/^/  /' release.txt
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    step "failure proof: a release that waits for the threads it let go is caught"
-    mkdir -p waiting/iyi
-    cp "$REPO"/src/iyi/*.iyi waiting/iyi/
-    awk '{ print } /^        @@owed = @@deferred$/ { print "        while word(page + IYI_TC_RESUMED).value.get < @@owed.to_u64"; print "          yield_cpu"; print "        end"; found = 1 } END { if (!found) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > waiting/iyi/thread.iyi || { echo "the release is not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/waiting${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release-waiting > build-waiting.log 2>&1; then
-      cat build-waiting.log; exit 1
-    fi
-    timeout -k 5 120 ./release-waiting > waiting.txt 2>&1
-    code=$?
-    if [ "$code" -ne 1 ] || ! grep -q '^FAIL: release:' waiting.txt; then
-      echo "the release check did not fire (exit $code):"; tail -3 waiting.txt; exit 1
-    fi
-    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: release:' waiting.txt)"
-    ;;
-esac
+
+step "failure proof: a release that waits for the threads it let go is caught on its one run"
+cp "$REPO"/src/iyi/*.iyi waiting/iyi/
+awk '
+  /^        @@owed = @@deferred$/ { print; print "        while word(page + IYI_TC_RESUMED).value.get < @@owed.to_u64"; print "          yield_cpu"; print "        end"; deferred = 1; next }
+  /^        @@owed = others$/ { print; print "        wait_count(page + IYI_TC_RESUMED, @@owed.to_u64)"; owed = 1; next }
+  { print }
+  END { if (!deferred || !owed) exit 3 }
+' gated/iyi/thread.iyi > waiting/iyi/thread.iyi || { echo "the release is not in thread.iyi any more"; exit 1; }
+if ! IYI_PATH="$WORK/waiting${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release-waiting > build-waiting.log 2>&1; then
+  cat build-waiting.log; exit 1
+fi
+timeout -k 5 120 ./release-waiting > waiting.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q '^FAIL: release: the release waited for the thread it let go$' waiting.txt; then
+  echo "the release check did not fire on its one run (exit $code):"; cat waiting.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: release:' waiting.txt)"
 
 # ── 5. Failure proof: a stopped thread's frames are roots ─────────────────
 # The walk over stopped threads removed from the root set, in a copy of
@@ -3141,68 +3120,76 @@ IYI
     ;;
 esac
 
-# ── 7i. darwin: a spinner gives its core away ────────────────────────────
+# ── 7i. darwin: a yield is a Mach trap ──────────────────────────────────
 # darwin's `IyiThread.yield_cpu` was the ARM `yield` hint, which gives the
 # scheduler nothing; it is Mach's `thread_switch` with the depress option
-# now (src/iyi/thread.iyi says what each try cost). Beside a busy process
-# per core, 7h's program made its threads at a tenth of the rate it made
-# them alone with the hint, and as fast or faster with the switch; the
-# check asks half, the best of three runs each way, and the proof puts
-# the hint back.
+# now (src/iyi/thread.iyi says what each call cost). The check was a ratio
+# of threads born a second beside a busy process per core to the alone
+# rate, and the runner moved the ratio: on Namespace's macOS 15 VM (6
+# vCPUs) the hint kept 37 to 52 per cent and the switch 64 to 70 (runs
+# 44271652334, 44292915166, 44358208505), so a proof that the hint falls
+# under half failed some of its tries. Counted instead: each call is one
+# `thread_switch` trap, and the task's `syscalls_mach` (task_events_info,
+# flavor 2, its sixth word) reads the traps. A thousand calls must make at
+# least a thousand traps, and the hint, which makes none, must make fewer
+# than a thousand. A call makes its trap whatever else the machine is
+# doing, so load on the runner does not move the count.
 case "$(uname -s)" in
   Darwin)
-    cores="$(sysctl -n hw.ncpu)"
-    # Threads a second, alone and beside a busy process per core: the
-    # best of three runs of the given program each way.
-    rates() {
-      alone=0; beside=0
-      for way in alone beside; do
-        run=1
-        while [ "$run" -le 3 ]; do
-          busy=""
-          if [ "$way" = beside ]; then
-            i=0
-            while [ "$i" -lt "$cores" ]; do yes > /dev/null & busy="$busy $!"; i=$((i + 1)); done
-          fi
-          ( timeout -k 5 60 "./$1" 200 10 > rates.txt 2>&1; exit $? ) 2> /dev/null
-          code=$?
-          [ -n "$busy" ] && { for b in $busy; do end_process "$b"; done; wait $busy 2> /dev/null; }
-          if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ms=[0-9]* ' rates.txt; then
-            echo "$1, $way, run $run exited $code:"; tail -3 rates.txt; exit 1
-          fi
-          born="$(sed -n 's/^ok born=\([0-9]*\) .*/\1/p' rates.txt)"
-          ms="$(sed -n 's/^ok born=[0-9]* ms=\([0-9]*\) .*/\1/p' rates.txt)"
-          rate=$((born * 1000 / (ms + 1)))
-          if [ "$way" = alone ]; then [ "$rate" -gt "$alone" ] && alone=$rate; else [ "$rate" -gt "$beside" ] && beside=$rate; fi
-          run=$((run + 1))
-        done
-      done
-    }
-    if [ "$cores" -lt 6 ]; then
-      echo "  the core's give-away needs 6 cores to show beside busy processes; this machine has $cores: unmeasured here"
-    else
-      step "darwin: threads born beside a busy process per core at least half as fast as alone, best of three runs each"
-      rates asleep
-      echo "  alone $alone threads a second, beside $cores busy processes $beside"
-      if [ $((beside * 2)) -lt "$alone" ]; then
-        echo "beside $cores busy processes the storm made $beside threads a second, under half of $alone alone"; exit 1
-      fi
+    step "darwin: a thousand yield_cpu calls make at least a thousand Mach traps"
+    cat > yield_traps.iyi <<'IYI'
+@[Unsafe("the Mach trap count is read through task_info, a C call that fills Pointer.malloc memory")]
+module yield_traps
 
-      step "failure proof: yield_cpu as the ARM hint again, and beside the busy processes it falls under half"
-      mkdir -p hinted/iyi
-      cp "$REPO"/src/iyi/*.iyi hinted/iyi/
-      awk '/^        LibC\.thread_switch\(0_u32, IYI_SWITCH_OPTION_DEPRESS, 1_u32\)$/ { print "        asm(\"yield\" :::: \"volatile\")"; found = 1; next }
-        { print } END { if (!found) exit 3 }' \
-        "$REPO/src/iyi/thread.iyi" > hinted/iyi/thread.iyi || { echo "darwin's thread_switch is not in thread.iyi any more"; exit 1; }
-      if ! IYI_PATH="$WORK/hinted${PSEP}$REPO/src" "$IYI" build asleep.iyi -o hinted-run > build-hinted.log 2>&1; then
-        cat build-hinted.log; exit 1
-      fi
-      rates hinted-run
-      echo "  with the hint: alone $alone threads a second, beside $cores busy processes $beside"
-      if [ $((beside * 2)) -ge "$alone" ]; then
-        echo "with the hint back, the storm beside the busy processes kept $beside threads a second of $alone alone"; exit 1
-      fi
+lib LibTraps
+  fun task_self_trap : UInt32
+  fun task_info(task : UInt32, flavor : Int32, info : Int32*, count : UInt32*) : Int32
+end
+
+# The task's Mach trap count: task_events_info (TASK_EVENTS_INFO, flavor
+# 2), eight 32-bit words, and syscalls_mach is the sixth of them.
+def mach_traps : Int64
+  info = Pointer(Int32).malloc(8_u64)
+  count = Pointer(UInt32).malloc(1_u64)
+  count.value = 8_u32
+  return -1_i64 if LibTraps.task_info(LibTraps.task_self_trap, 2, info, count) != 0
+  info[5].to_i64
+end
+
+before = mach_traps
+1000.times { IyiThread.yield_cpu }
+after = mach_traps
+puts "yield: #{after - before} Mach traps for 1000 yield_cpu calls"
+IYI
+    if ! "$IYI" build yield_traps.iyi -o yield-traps > build-traps.log 2>&1; then
+      cat build-traps.log; exit 1
     fi
+    if ! timeout -k 5 120 ./yield-traps > traps.txt 2>&1; then
+      cat traps.txt; exit 1
+    fi
+    traps="$(sed -n 's/^yield: \([0-9-]*\) Mach traps.*$/\1/p' traps.txt)"
+    if [ -z "$traps" ] || [ "$traps" -lt 1000 ]; then
+      echo "a thousand yield_cpu calls made ${traps:-no count} Mach traps, under 1,000"; cat traps.txt; exit 1
+    fi
+    sed 's/^/  /' traps.txt
+
+    step "failure proof: yield_cpu as the ARM hint again, and the same calls make under a thousand traps"
+    mkdir -p hinted/iyi
+    cp "$REPO"/src/iyi/*.iyi hinted/iyi/
+    awk '/^        LibC\.thread_switch\(0_u32, IYI_SWITCH_OPTION_DEPRESS, 1_u32\)$/ { print "        asm(\"yield\" :::: \"volatile\")"; found = 1; next }
+      { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > hinted/iyi/thread.iyi || { echo "darwin's thread_switch is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/hinted${PSEP}$REPO/src" "$IYI" build yield_traps.iyi -o yield-traps-hinted > build-hinted.log 2>&1; then
+      cat build-hinted.log; exit 1
+    fi
+    if ! timeout -k 5 120 ./yield-traps-hinted > hinted-traps.txt 2>&1; then
+      cat hinted-traps.txt; exit 1
+    fi
+    hinted="$(sed -n 's/^yield: \([0-9-]*\) Mach traps.*$/\1/p' hinted-traps.txt)"
+    if [ -z "$hinted" ] || [ "$hinted" -ge 1000 ]; then
+      echo "with the hint, a thousand yield_cpu calls made ${hinted:-no count} Mach traps, not under 1,000"; cat hinted-traps.txt; exit 1
+    fi
+    echo "  with the hint, the same calls make $hinted traps: under 1,000, caught"
     ;;
 esac
 

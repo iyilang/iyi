@@ -157,13 +157,25 @@ TABLE="$WORK/table.md"
 # own holders (`held by`, found by a search of whatever is still live)
 # left out. Prints the report's first line and what it found, or nothing
 # when a run missed.
+# The verifier names one finding in one of two sentences: at the
+# partition's local collection, or at the unit's death when a pause or a
+# mark beside the program overlapped the local check, which then withholds
+# the hit (heap_verify.iyi:846-848) - the death's check runs inside the
+# allocator's barrier, so no pause can overlap it (heap_partition.iyi:3449-
+# 3462). The classvar-publish copy read the first in one run and the second
+# in the next on Namespace's Linux (jwaldrip/iyi run 44368465397), caught
+# both times, so both sentences read as one here; any other difference
+# between two runs, a holder or a target, still fails the comparison.
+FINDING="  a slot names one of its unit's LOCAL chunks, about to be freed (at its local collection, or at its death when a pause overlapped that check)"
 verifier_caught() { # program check
   local program="$1" check="$2" k=1 first="" report line code
   while [ "$k" -le "$RUNS" ]; do
     verified "$program" "$program.v$k" 1 "$check"
     code="$(cat "$WORK/$program.v$k.code")"
     report="$(sed -n '/^iyi: heap_verify: partition [0-9]*, /,/^iyi: heap_verify: aborting/p' "$WORK/$program.v$k.err" |
-      sed -E '/^    held by /d; /^    field \+[0-9]+$/d; s/0x[0-9a-f]{6,}/0x…/g; s/, check [0-9]+$/, check …/')"
+      sed -E '/^    held by /d; /^    field \+[0-9]+$/d; s/0x[0-9a-f]{6,}/0x…/g; s/, check [0-9]+$/, check …/' |
+      sed -e "s/^  a slot names a LOCAL chunk its local mark left unmarked, about to be freed\$/$FINDING/" \
+          -e "s/^  at its unit's death, a slot names one of its LOCAL chunks, about to be freed\$/$FINDING/")"
     if [ "$code" != 86 ] || [ -z "$report" ]; then
       echo "run $k: exit $code, $( [ -n "$report" ] && echo "report" || echo "no report")" >"$WORK/$program.missed"
       return

@@ -727,6 +727,26 @@ class Counter < Iyi::Visitor
   end
 end
 
+if ARGV.size == 2 && ARGV[0] == "--verdicts"
+  # One verdict per file in the list: ACCEPT, or REFUSE with the error's line and column and its message.
+  File.read_lines(ARGV[1]).each do |path|
+    next if path.empty?
+    begin
+      parser = Iyi::Parser.new(File.read(path))
+      parser.filename = path
+      parser.parse
+      puts "ACCEPT #{path}"
+    rescue e : Iyi::SyntaxException
+      text = e.message.to_s.split('\n').join(" ")
+      puts "REFUSE #{path} Syntax error in #{path}:#{e.line_number}:#{e.column_number}: #{text}"
+    rescue e : Exception
+      text = e.message.to_s.split('\n').join(" ")
+      puts "REFUSE #{path} #{text}"
+    end
+  end
+  exit 0
+end
+
 filename = ARGV[0]
 src = File.read(filename)
 parser = Iyi::Parser.new(src)
@@ -790,6 +810,9 @@ for fixture in \
   "$REPO"/bench/fixtures/syntax_named_forward_block.iyi \
   "$REPO"/bench/fixtures/syntax_call_spans.iyi \
   "$REPO"/bench/fixtures/syntax_begin_shorthand_and_comma_lines.iyi \
+  "$REPO"/bench/fixtures/syntax_op_assign_targets.iyi \
+  "$REPO"/bench/fixtures/syntax_call_arg_starts.iyi \
+  "$REPO"/bench/fixtures/syntax_string_keys.iyi \
   "$REPO"/bench/fixtures/syntax_implicit_rescue.iyi; do
   fixture_name="${fixture#"$REPO/"}"
   fixture_native="$(native_path "$fixture")"
@@ -1361,6 +1384,267 @@ else
   status=1
 fi
 
+echo "== Operator assignment targets: both parsers give each row the same verdict and the hosted first error line"
+# Each row is a source and its expectation: ACCEPT, or REFUSE with the hosted line and message (parser.cr 732-861 for a bare
+# name, 1113-1262 for a receiver, 1284-1295 for a[], 8324-8336 for what may be assigned). One process per parser runs the list.
+opa_sources=(
+  $'def apply_config(cfg : Config, table : Hash(String, Int32), key : String) : Nil\n  cfg.limit += 10\n  cfg.fallback ||= 100\n  cfg.active &&= true\n  table[key] += 1\n  table[key] ||= 0\nend\n'
+  $'cfg = 1\ncfg.limit? += 2\n'
+  $'Foo.bar += 1\n'
+  $'self.name += 1\n'
+  $'cfg = 1\ncfg.limit.other += 1\n'
+  $'a = [1]\na[] += 1\n'
+  $'a = [1]\na[] = 2\n'
+  $'a = [1]\nx = a[]\n'
+  $'cfg = 1\ncfg.limit? = 2\n'
+  $'self.name = 1\n'
+  $'x = 1\nx += 1\n'
+  $'@x += 1\n'
+  $'@@x += 1\n'
+  $'a = [1]\na.b[0] += 1\n'
+  $'x += 1\n'
+  $'x ||= 1\n'
+  $'foo(1) += 2\n'
+  $'foo() += 2\n'
+  $'self += 1\n'
+  $'Foo += 1\n'
+  $'cfg.limit(1) += 2\n'
+  $'cfg.limit() += 2\n'
+  $'cfg.limit { 1 } += 2\n'
+  $'a = [1]\na[0]? += 1\n'
+  $'cfg.limit() = 2\n'
+  $'foo? = 1\n'
+  $'x? += 1\n'
+)
+opa_expect=(
+  ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT
+  "REFUSE 1 '+=' before definition of 'x'"
+  "REFUSE 1 '||=' before definition of 'x'"
+  "REFUSE 1 unexpected token: \"+=\""
+  "REFUSE 1 unexpected token: \"+=\""
+  "REFUSE 1 can't change the value of self"
+  "REFUSE 1 can't reassign to constant"
+  "REFUSE 1 unexpected token: \"+=\""
+  "REFUSE 1 unexpected token: \"+=\""
+  "REFUSE 1 unexpected token: \"+=\""
+  "REFUSE 2 unexpected token: \"+=\""
+  "REFUSE 1 unexpected token: \"=\""
+  "REFUSE 1 unexpected token: \"=\""
+  "REFUSE 1 '+=' before definition of 'x?'"
+)
+# verdict_matches OUTPUT EXPECTATION: one verdict line says what its expectation says (ACCEPT, or REFUSE with line and message).
+verdict_matches() {
+  local out="$1" want="$2" n msg loc
+  if [ "$want" = ACCEPT ]; then
+    case "$out" in "ACCEPT "*) return 0 ;; esac
+    return 1
+  fi
+  n="${want#REFUSE }"
+  n="${n%% *}"
+  msg="${want#REFUSE $n }"
+  case "$out" in "REFUSE "*) ;; *) return 1 ;; esac
+  loc=$(printf '%s' "$out" | sed -n 's/.*Syntax error in [^ ]*:\([0-9][0-9]*\):[0-9][0-9]*: .*/\1/p')
+  [ "$loc" = "$n" ] || return 1
+  case "$out" in *"$msg"*) return 0 ;; esac
+  return 1
+}
+# opa_check VERDICTS: every row's verdict line matches its expectation. Each row that does not is printed.
+opa_check() {
+  local file="$1" i line bad=0
+  for i in "${!opa_sources[@]}"; do
+    line=$(sed -n "$((i + 1))p" "$file")
+    if ! verdict_matches "$line" "${opa_expect[$i]}"; then
+      echo "  row $((i + 1)) disagrees with '${opa_expect[$i]}': $line"
+      bad=$((bad + 1))
+    fi
+  done
+  [ "$bad" -eq 0 ]
+}
+opa_dir="$WORK/opa"
+rm -rf "$opa_dir" && mkdir -p "$opa_dir"
+: > "$opa_dir/list.txt"
+for i in "${!opa_sources[@]}"; do
+  printf '%s\n' "${opa_sources[$i]}" > "$opa_dir/row_$i.iyi"
+  echo "$WORK_NATIVE/opa/row_$i.iyi" >> "$opa_dir/list.txt"
+done
+"$WORK/exercise-plain$EXE" --verdicts "$WORK_NATIVE/opa/list.txt" > "$opa_dir/port.all" 2> "$opa_dir/port.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$opa_dir/port.all" > "$opa_dir/port.txt"
+"$WORK/dump_hosted$EXE" --verdicts "$WORK_NATIVE/opa/list.txt" > "$opa_dir/hosted.txt" 2> "$opa_dir/hosted.err" || true
+if opa_check "$opa_dir/port.txt"; then
+  echo "  port: each of ${#opa_sources[@]} rows has its expected verdict and first error line"
+else
+  echo "  port rows disagree with the expectations"
+  status=1
+fi
+if opa_check "$opa_dir/hosted.txt"; then
+  echo "  hosted: the same rows hold"
+else
+  echo "  hosted rows do not hold: the expectations are wrong"
+  status=1
+fi
+
+echo "== Call arguments that start with a doubled brace or a magic constant: both parsers accept them, and agree on the tree"
+# verdict_rows_check FILE SOURCES EXPECTATIONS: each row's verdict line in FILE matches its expectation (the arrays by name).
+verdict_rows_check() {
+  local file="$1" i line bad=0
+  local -n srcs="$2"
+  local -n exps="$3"
+  for i in "${!srcs[@]}"; do
+    line=$(sed -n "$((i + 1))p" "$file")
+    if ! verdict_matches "$line" "${exps[$i]}"; then
+      echo "  row $((i + 1)) disagrees with '${exps[$i]}': $line"
+      bad=$((bad + 1))
+    fi
+  done
+  [ "$bad" -eq 0 ]
+}
+arg_sources=(
+  $'assert_true {{ 1 == 1 }}, "x"\n'
+  $'f {{ 1 == 1 }}\n'
+  $'f __LINE__\n'
+  $'f __FILE__\n'
+  $'f(1, __LINE__)\n'
+)
+arg_expect=(ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT)
+arg_dir="$WORK/argstart"
+rm -rf "$arg_dir" && mkdir -p "$arg_dir"
+: > "$arg_dir/list.txt"
+for i in "${!arg_sources[@]}"; do
+  printf '%s\n' "${arg_sources[$i]}" > "$arg_dir/row_$i.iyi"
+  echo "$WORK_NATIVE/argstart/row_$i.iyi" >> "$arg_dir/list.txt"
+done
+"$WORK/exercise-plain$EXE" --verdicts "$WORK_NATIVE/argstart/list.txt" > "$arg_dir/port.all" 2> "$arg_dir/port.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$arg_dir/port.all" > "$arg_dir/port.txt"
+"$WORK/dump_hosted$EXE" --verdicts "$WORK_NATIVE/argstart/list.txt" > "$arg_dir/hosted.all" 2> "$arg_dir/hosted.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$arg_dir/hosted.all" > "$arg_dir/hosted.txt"
+if verdict_rows_check "$arg_dir/port.txt" arg_sources arg_expect; then
+  echo "  port: each of ${#arg_sources[@]} call-argument rows is accepted"
+else
+  echo "  port call-argument rows disagree with the expectations"
+  status=1
+fi
+if verdict_rows_check "$arg_dir/hosted.txt" arg_sources arg_expect; then
+  echo "  hosted: the same rows hold"
+else
+  echo "  hosted call-argument rows do not hold: the expectations are wrong"
+  status=1
+fi
+
+echo "== String keys: a string glued to its colon names a named tuple's member or a named argument, as the hosted parser reads it"
+# Each row: a source and its expectation (ACCEPT, or REFUSE with the hosted line and message). The refusals are hosted's:
+# parser.cr 4084-4099 (a space, an empty name, the arrow), 4261-4302 (later names, duplicates), 3882-3899 and 6866-6900
+# (named arguments), 6819-6820 (a call's string name).
+strkey_sources=(
+  $'a = {"a-b": 7, x: 1}\n'
+  $'b = {x: 1, "b c": 2}\n'
+  $'c = {"a": 1, "b c": 2, d: 3}\n'
+  $'d = {"a" => 1}\n'
+  $'f("a": 1)\n'
+  $'f "a": 1\n'
+  $'f("a": 1, b: 2)\n'
+  $'f(x: 1, "b": 2)\n'
+  $'f("a" : 1)\n'
+  $'h = {"a":1}\n'
+  $'h = {"": 1}\n'
+  $'h = {"a" : 1}\n'
+  $'h = {"a#{1}": 2}\n'
+  $'h = {"a": 1, "a": 2}\n'
+  $'h = {x: 1, x: 2}\n'
+  $'h = {"a": 1,\n  "b" : 2}\n'
+  $'f("": 1)\n'
+  $'f("a": 1, "a": 2)\n'
+  $'f("a#{1}": 1)\n'
+)
+strkey_expect=(
+  ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT ACCEPT
+  "REFUSE 1 unexpected token: \"}\""
+  "REFUSE 1 named tuple name cannot be empty"
+  "REFUSE 1 space not allowed between named argument name and ':'"
+  "REFUSE 1 expecting token '=>', not ':'"
+  "REFUSE 1 duplicated key: a"
+  "REFUSE 1 duplicated key: x"
+  "REFUSE 2 space not allowed between named argument name and ':'"
+  "REFUSE 1 named argument cannot have an empty name"
+  "REFUSE 1 duplicated named argument: a"
+  "REFUSE 1 expecting token ')', not ':'"
+)
+strkey_dir="$WORK/strkey"
+rm -rf "$strkey_dir" && mkdir -p "$strkey_dir"
+: > "$strkey_dir/list.txt"
+for i in "${!strkey_sources[@]}"; do
+  printf '%s\n' "${strkey_sources[$i]}" > "$strkey_dir/row_$i.iyi"
+  echo "$WORK_NATIVE/strkey/row_$i.iyi" >> "$strkey_dir/list.txt"
+done
+"$WORK/exercise-plain$EXE" --verdicts "$WORK_NATIVE/strkey/list.txt" > "$strkey_dir/port.all" 2> "$strkey_dir/port.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$strkey_dir/port.all" > "$strkey_dir/port.txt"
+"$WORK/dump_hosted$EXE" --verdicts "$WORK_NATIVE/strkey/list.txt" > "$strkey_dir/hosted.all" 2> "$strkey_dir/hosted.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$strkey_dir/hosted.all" > "$strkey_dir/hosted.txt"
+if verdict_rows_check "$strkey_dir/port.txt" strkey_sources strkey_expect; then
+  echo "  port: each of ${#strkey_sources[@]} string-key rows has its expected verdict and first error line"
+else
+  echo "  port string-key rows disagree with the expectations"
+  status=1
+fi
+if verdict_rows_check "$strkey_dir/hosted.txt" strkey_sources strkey_expect; then
+  echo "  hosted: the same rows hold"
+else
+  echo "  hosted string-key rows do not hold: the expectations are wrong"
+  status=1
+fi
+
+echo "== Whole corpus: every tracked .iyi under src, samples and bench, by both parsers' verdicts (accepted or refused only)"
+# No other check in this gate runs the port's parser over the tracked corpus: the parity loops use a fixed list, and the
+# sample gates compile samples/iyi with the hosted compiler. One process per parser covers the whole list.
+HOSTED_REFUSES_PORT_ACCEPTS_CEILING=0
+git -C "$REPO" ls-files -- 'src/*.iyi' 'samples/*.iyi' 'bench/*.iyi' > "$WORK/corpus.txt"
+corpus_files=$(awk 'END {print NR}' "$WORK/corpus.txt")
+"$WORK/exercise-plain$EXE" --verdicts "$WORK_NATIVE/corpus.txt" > "$WORK/corpus-port.all" 2> "$WORK/corpus-port.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$WORK/corpus-port.all" > "$WORK/corpus-port.txt"
+"$WORK/dump_hosted$EXE" --verdicts "$WORK_NATIVE/corpus.txt" > "$WORK/corpus-hosted.all" 2> "$WORK/corpus-hosted.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$WORK/corpus-hosted.all" > "$WORK/corpus-hosted.txt"
+# corpus_verdicts HOSTED PORT: each file the port refuses and hosted accepts is printed with the port's error line, each
+# file hosted refuses and the port accepts is printed, and one summary line closes the report.
+corpus_verdicts() {
+  awk '
+    FNR == NR { hv[$2] = ($1 == "ACCEPT") ? "A" : "R"; next }
+    {
+      pv = ($1 == "ACCEPT") ? "A" : "R"
+      seen++
+      if (!($2 in hv)) { missing++; next }
+      if (hv[$2] == "A" && pv == "R") { over++; print "  OVER-REFUSAL, hosted accepts and the port refuses: " $0 }
+      else if (hv[$2] == "R" && pv == "A") { under++; print "  hosted refuses and the port accepts: " $2 }
+      else if (pv == "A") { both_accept++ }
+      else { both_refuse++ }
+    }
+    END {
+      printf "  corpus: %d verdicts, %d accepted by both, %d refused by both, over-refusals %d, hosted-refuses-port-accepts %d, missing %d\n", seen, both_accept, both_refuse, over, under, missing
+    }
+  ' "$1" "$2"
+}
+corpus_verdicts "$WORK/corpus-hosted.txt" "$WORK/corpus-port.txt" > "$WORK/corpus-verdicts.txt"
+cat "$WORK/corpus-verdicts.txt"
+seen=$(sed -n 's/.*corpus: \([0-9]*\) verdicts.*/\1/p' "$WORK/corpus-verdicts.txt")
+over=$(sed -n 's/.*over-refusals \([0-9]*\),.*/\1/p' "$WORK/corpus-verdicts.txt")
+under=$(sed -n 's/.*hosted-refuses-port-accepts \([0-9]*\),.*/\1/p' "$WORK/corpus-verdicts.txt")
+missing=$(sed -n 's/.*missing \([0-9]*\)$/\1/p' "$WORK/corpus-verdicts.txt")
+case "$seen$over$under$missing" in
+  ''|*[!0-9]*) echo "  the corpus summary is missing or malformed"; status=1 ;;
+  *)
+    if [ "$seen" -ne "$corpus_files" ] || [ "$missing" -ne 0 ]; then
+      echo "  the verdict runs did not cover the corpus: $seen of $corpus_files verdicts, $missing missing"
+      status=1
+    fi
+    if [ "$over" -ne 0 ]; then
+      echo "  $over corpus file(s) the port refuses and hosted accepts (must be 0)"
+      status=1
+    fi
+    if [ "$under" -gt "$HOSTED_REFUSES_PORT_ACCEPTS_CEILING" ]; then
+      echo "  hosted refuses and the port accepts $under corpus file(s), above the ceiling of $HOSTED_REFUSES_PORT_ACCEPTS_CEILING"
+      status=1
+    fi
+    ;;
+esac
+
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
@@ -1800,6 +2084,76 @@ prove_mutation "mutation 58: a handler's else body is dropped" "$PARSER" \
 prove_mutation "mutation 59: a handler's ensure body is dropped" "$PARSER" \
   '      a_ensure = parse_expressions' \
   '      a_ensure = nil' -- implicit_rescue_hold || status=1
+# opassign_hold: the operator-assignment rows, checked on a mutant's verdicts. A mutant that disagrees with a row is caught.
+opassign_hold() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  "$WORK/mut-exercise$EXE" --verdicts "$WORK_NATIVE/opa/list.txt" > "$WORK/opa-mut.all" 2> "$WORK/opa-mut.err" || true
+  awk '/^(ACCEPT|REFUSE) /' "$WORK/opa-mut.all" > "$WORK/opa-mut.txt"
+  opa_check "$WORK/opa-mut.txt"
+}
+# Mutation 60: a receiver's `name op= value` is no longer built by the method suffix, so it reaches the bare-name check.
+prove_mutation "mutation 60: a receiver's operator assignment is not built by the method suffix" "$PARSER" \
+  $'        if @token.type.assignment_operator?\n          call = Call.new(res, name)' \
+  $'        if false\n          call = Call.new(res, name)' -- opassign_hold || status=1
+# Mutation 61: a call written with parentheses is assignable, so `cfg.limit() = 2` and `cfg.limit() += 2` are accepted.
+prove_mutation "mutation 61: a call with parentheses is assignable" "$PARSER" \
+  '      return false if node.has_parentheses' \
+  '      return false if false' -- opassign_hold || status=1
+# arg_starts_hold: the call-argument rows, checked on a mutant's verdicts.
+arg_starts_hold() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  "$WORK/mut-exercise$EXE" --verdicts "$WORK_NATIVE/argstart/list.txt" > "$WORK/argstart-mut.all" 2> "$WORK/argstart-mut.err" || true
+  awk '/^(ACCEPT|REFUSE) /' "$WORK/argstart-mut.all" > "$WORK/argstart-mut.txt"
+  verdict_rows_check "$WORK/argstart-mut.txt" arg_sources arg_expect
+}
+# Mutation 62: a doubled brace does not start a call argument, so `f {{ 1 == 1 }}` is refused.
+prove_mutation "mutation 62: a doubled brace does not start a call argument" "$PARSER" \
+  ', TokenKind::OP_LCURLY_LCURLY,' ',' -- arg_starts_hold || status=1
+# strkey_hold: the string-key rows, checked on a mutant's verdicts.
+strkey_hold() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  "$WORK/mut-exercise$EXE" --verdicts "$WORK_NATIVE/strkey/list.txt" > "$WORK/strkey-mut.all" 2> "$WORK/strkey-mut.err" || true
+  awk '/^(ACCEPT|REFUSE) /' "$WORK/strkey-mut.all" > "$WORK/strkey-mut.txt"
+  verdict_rows_check "$WORK/strkey-mut.txt" strkey_sources strkey_expect
+}
+# Mutation 63: a string key after the first name is refused (parse_named_tuple, parser.cr 4261-4270).
+prove_mutation "mutation 63: a string key after the first name is refused" "$PARSER" \
+  $'        elsif string_literal_start?\n          key = parse_string_without_interpolation("named tuple name", false)' \
+  $'        elsif false\n          key = parse_string_without_interpolation("named tuple name", false)' -- strkey_hold || status=1
+# Mutation 64: a string glued to its colon is not a named tuple's first name (parser.cr 4088-4096).
+prove_mutation "mutation 64: a string glued to its colon is not a named tuple's first name" "$PARSER" \
+  '        return parse_named_tuple(location, first_key.value)' \
+  '        syntax_error("a named tuple has no string name", @token.location)' -- strkey_hold || status=1
+# Mutation 65: a string literal a colon follows is not a named argument in a call (parser.cr 6819-6820).
+prove_mutation "mutation 65: a call's string name is not a named argument" "$PARSER" \
+  $'        if @token.type == TokenKind::OP_COLON && arg.is_a?(StringLiteral)\n          named_args = parse_named_args(allow_newline: true, first_name: arg.value)' \
+  $'        if false && @token.type == TokenKind::OP_COLON && arg.is_a?(StringLiteral)\n          named_args = parse_named_args(allow_newline: true, first_name: arg.value)' -- strkey_hold || status=1
+# corpus_hold: a mutant's verdicts over the whole corpus. Caught when it refuses a corpus file hosted accepts.
+corpus_hold() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  "$WORK/mut-exercise$EXE" --verdicts "$WORK_NATIVE/corpus.txt" > "$WORK/corpus-mut.all" 2> "$WORK/corpus-mut.err" || true
+  awk '/^(ACCEPT|REFUSE) /' "$WORK/corpus-mut.all" > "$WORK/corpus-mut.txt"
+  local found
+  found=$(corpus_verdicts "$WORK/corpus-hosted.txt" "$WORK/corpus-mut.txt" | sed -n 's/.*over-refusals \([0-9]*\),.*/\1/p')
+  [ "${found:-0}" -eq 0 ]
+}
+# Mutation 66: a string-keyed named tuple is refused. The rows above catch it, and so does the whole-corpus check on the two
+# corpus files that write one (std_tuple_exercise.iyi, std_named_tuple_exercise.iyi).
+prove_mutation "mutation 66: a string-keyed named tuple is refused, found by the whole-corpus check" "$PARSER" \
+  '        return parse_named_tuple(location, first_key.value)' \
+  '        syntax_error("a named tuple has no string name", @token.location)' -- corpus_hold || status=1
 
 echo
 echo "== Rebuilding and running restored parser exercise"

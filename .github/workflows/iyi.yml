@@ -1704,6 +1704,19 @@ jobs:
           # longer exists (an installer's sandbox); every later step uses
           # the job's own temporary directory instead.
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          # The three runners also share one HOME, and with it the compilers'
+          # caches: one job's rotation removed a directory another job's
+          # build was linking from (job 135882647898, fixed in the compiler
+          # since; bench/rebuild_reuse.py step 7), and ~/.cache/iyi held
+          # 24,428 reach verdicts, nothing ever deleting them. Each job gets
+          # iyi's cache to itself, as GitHub's fresh VMs give it, and gone
+          # with the job. Crystal's, which the bootstrap compiler builds
+          # `iyi` through, is the runner's own and kept: its rotation is
+          # upstream's, with no lock at all, and one runner runs one job at a
+          # time; kept, `make iyi` here takes 19-30 s, where macos-15, cold
+          # every job, took 41-116 s.
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TOOL_CACHE/crystal-cache" >> "$GITHUB_ENV"
           # The service also carries its owner's shell flags: LDFLAGS naming
           # brew's LLVM 23 put its static libraries ahead of the recipe's in
           # the link. Every job starts with none, and the static LLVM lives
@@ -2087,6 +2100,8 @@ jobs:
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TOOL_CACHE/crystal-cache" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM (GitHub's runner)
@@ -2197,6 +2212,8 @@ jobs:
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TOOL_CACHE/crystal-cache" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM (GitHub's runner)
@@ -2255,6 +2272,8 @@ jobs:
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TOOL_CACHE/crystal-cache" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM (GitHub's runner)

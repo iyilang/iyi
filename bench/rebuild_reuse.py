@@ -40,7 +40,15 @@ cache:
   5. on Windows, one more while another process holds the program, shared
      for reading only, for a second: the build waits for it and links;
   6. eleven other programs built into the same cache, then the fixture
-     again: the EIY helper its template runs is reused, not built again.
+     again: the EIY helper its template runs is reused, not built again,
+     and the rotation left the ten builds it keeps;
+  7. on Linux and macOS, the fixture's directory, made the oldest and
+     padded to 50,000 files so that removing it takes a while, removed by
+     another build's rotation: while files are still going, the removal
+     holds the directory's `compiler.lock`, and the fixture built meanwhile
+     waits for it and links; then the fixture built while this script holds
+     the lock, the directory and the lock file removed before it is let go:
+     the build makes the directory again and compiles every object.
 
 Step 5 is what Smart App Control's services do, evaluating, on Windows 11:
 the Restart Manager named `CryptSvc`, `AppIDSvc` and the `applockerfltr`
@@ -53,6 +61,24 @@ nor linked again. Against that compiler step 5 failed in 2 runs of 2, at
 Step 6 is #143: the cache keeps the ten directories used last, and the
 helper counted with them. Against the compiler before helpers were kept
 apart it failed in 1 run of 1, the helper built again in 2.38 s.
+
+Step 7 is the self-hosted Mac's three CI jobs sharing one cache: a broken
+copy of the std/secure_dns exercise stopped at "clang: error: no such file
+or directory: 'P-ointer40U-I-nt841.o0.o'" (job 135882647898) while another
+job built nine samples, each ending in a rotation. The removal asked
+whether anyone held the directory and then deleted it holding nothing, so
+a build that took the directory in between kept the objects it found and
+linked after they were gone. Against that compiler (18333d052) on Linux,
+on ext4, the first half failed 5 runs of 5 ("the removal did not hold the
+lock: ... compiler.lock was free"), and the second half, run alone, 5 of 5
+("a codegen thread failed: Error opening file with mode 'w': ...
+_main.o0.bc: No such file or directory"); a build begun during a removal
+padded to 200,000 files stopped 5 times of 5 at the Mac's own "cannot find
+P-ointer40U-I-nt841.o0.o: No such file or directory". The second half needs
+to see that the build has the lock file open, which Linux's /proc and
+macOS's lsof show. Step 7 does not run on Windows: Python opens a file
+without FILE_SHARE_DELETE, so this script could neither delete a lock file
+it holds nor let the compiler delete one it has open.
 
 And because the old shuffle was there for a reason, rule 2's reordering is
 held too: `probe/a` and `probe/b` both import `probe/log` and each
@@ -76,6 +102,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -482,8 +509,15 @@ def held(work):
 
 
 # More other programs than the cache's rotation keeps (`CacheDir::KEPT`).
-OTHERS = 11
+KEPT = 10
+OTHERS = KEPT + 1
 HELPER = re.compile(r"^ - .*eiy[\\/]process\.iyi: (.*)$", re.M)
+
+
+def builds(cache):
+    """The build directories in *cache*: not the helpers, which the rotation
+    counts apart (`CacheDir::MACRO_RUN`)."""
+    return [entry for entry in cache.iterdir() if entry.is_dir() and not (entry / "macro_run").exists()]
 
 
 def outlived(work):
@@ -507,7 +541,156 @@ def outlived(work):
         fail("6. a helper outlives other builds", f"`iyi build -s` named no EIY helper\n{proc.stdout}")
     if not found.group(1).startswith("reused previous compilation"):
         fail("6. a helper outlives other builds", f"after {OTHERS} other programs the EIY helper was built again: {found.group(1)}")
-    print(f"  ok   6. after {OTHERS} other programs into the same cache, the EIY helper is reused")
+    kept = builds(work / "cache")
+    if len(kept) != KEPT:
+        fail("6. a helper outlives other builds",
+             f"after {OTHERS + 1} programs the rotation left {len(kept)} builds, not {KEPT}: "
+             f"{', '.join(sorted(entry.name for entry in kept))}")
+    print(f"  ok   6. after {OTHERS} other programs into the same cache, the EIY helper is reused, and {KEPT} builds are kept")
+
+
+# Files added to the fixture's directory so that removing it takes long
+# enough to be looked at: about 0.6 s on Linux (ext4).
+PADS = 50_000
+
+
+def entries(directory):
+    """How many entries *directory* holds; -1 once it is gone."""
+    try:
+        return len(os.listdir(directory))
+    except FileNotFoundError:
+        return -1
+
+
+def has_open(pid, path):
+    """Whether process *pid* has *path* open: Linux's /proc, else lsof."""
+    target = os.path.realpath(path)
+    fds = f"/proc/{pid}/fd"
+    if os.path.isdir(fds):
+        for fd in os.listdir(fds):
+            try:
+                if os.path.realpath(os.readlink(os.path.join(fds, fd))) == target:
+                    return True
+            except OSError:
+                pass
+        return False
+    proc = subprocess.run(["lsof", "-a", "-p", str(pid), "-Fn"], capture_output=True, text=True)
+    return any(line[1:] and os.path.realpath(line[1:]) == target for line in proc.stdout.splitlines() if line.startswith("n"))
+
+
+def directory_of(cache, root):
+    """The fixture's build directory in *cache*: named after its entry's path."""
+    tail = f"-{root.name}-main.iyi"
+    found = [entry for entry in builds(cache) if entry.name.endswith(tail)]
+    if len(found) != 1:
+        fail("7. a directory removed under a build", f"{len(found)} directories in {cache} end in {tail}")
+    return found[0]
+
+
+def reported(output):
+    found = REUSED.search(output)
+    return found.group(1) if found else "no reuse line"
+
+
+def contested(work):
+    """A build whose cache directory another build's rotation is removing."""
+    step = "7. a directory removed under a build"
+    if os.name == "nt":
+        print("  skip 7. Windows: this script cannot hold a file the compiler deletes (Python opens files without FILE_SHARE_DELETE)")
+        return
+    import fcntl
+
+    root = work / "contested"
+    write(root, FIXTURE)
+    cache = work / "contested-cache"
+    env = environment(cache)
+    build(root, "main.iyi", "prog", env)
+    directory = directory_of(cache, root)
+    lock = directory / "compiler.lock"
+
+    # The removal: the fixture's directory the oldest of eleven builds, and
+    # another build's rotation at its end.
+    for i in range(PADS):
+        open(directory / f"pad-{i}", "w").close()
+    os.utime(directory, (946684800, 946684800))
+    for i in range(KEPT):
+        (cache / f"newer-{i}").mkdir()
+    whole = entries(directory)
+    others = work / "contested-others"
+    write(others, {"rotate.iyi": "module rotate\n\nputs 0\n"})
+    rotation = subprocess.Popen([IYI, "build", "rotate.iyi", "-o", "rotate"], cwd=others, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    while entries(directory) >= whole:
+        if rotation.poll() is not None:
+            fail(step, f"the rotation did not remove the oldest directory (exit {rotation.returncode})\n{rotation.stdout.read()}")
+        time.sleep(0.001)
+
+    # Looked at mid-way: the lock tried, then the files counted, so a removal
+    # that still had files to delete after the try was under way during it.
+    try:
+        fd = os.open(lock, os.O_RDONLY)
+    except FileNotFoundError:
+        held = "gone"
+    else:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = "free"
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except BlockingIOError:
+            held = "held"
+        os.close(fd)
+    left = entries(directory)
+    if left <= 1:
+        fail(step, f"the removal of {whole} entries ended before it could be looked at; pad the directory more than {PADS}")
+    if held != "held":
+        fail(step, f"the removal did not hold the lock: with {left} of {whole} entries left, compiler.lock was {held}")
+
+    during = subprocess.run([IYI, "build", "-s", "--force", "main.iyi", "-o", "prog"], cwd=root, env=env,
+                            capture_output=True, text=True)
+    rotated = rotation.communicate()[0]
+    if rotation.returncode != 0:
+        fail(step, f"the build whose rotation removed the directory failed\n{rotated}")
+    if during.returncode != 0:
+        fail(step, f"the fixture built during the removal failed\n{during.stdout}{during.stderr}")
+    if run(root, "prog") != EXPECTED:
+        fail(step, "the fixture built during the removal printed something else")
+    if any(name.startswith("pad-") for name in (os.listdir(directory) if directory.exists() else [])):
+        fail(step, "the removal left files behind")
+    print(f"  ok   7. a removal holds compiler.lock while it deletes ({left} of {whole} entries left),"
+          f" and a build meanwhile waits for it and links")
+
+    # The build waiting while the lock's holder removes the directory, the
+    # lock file and all: it has to find it holds a file that is gone.
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        waiting = subprocess.Popen([IYI, "build", "-s", "--force", "main.iyi", "-o", "prog"], cwd=root, env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        deadline = time.monotonic() + 120
+        while not has_open(waiting.pid, lock):
+            if waiting.poll() is not None:
+                fail(step, f"the fixture built while its directory's lock was held by another\n{waiting.stdout.read()}")
+            if time.monotonic() > deadline:
+                waiting.kill()
+                fail(step, "the fixture's build did not open compiler.lock in 120 s")
+            time.sleep(0.01)
+        for name in os.listdir(directory):
+            if (directory / name).is_dir():
+                shutil.rmtree(directory / name)
+            elif name != lock.name:
+                os.unlink(directory / name)
+        os.unlink(lock)
+        os.rmdir(directory)
+    finally:
+        os.close(fd)
+    printed = waiting.communicate()[0]
+    if waiting.returncode != 0:
+        fail(step, f"the build that waited while its directory was removed failed\n{printed}")
+    if reported(printed) != "no previous":
+        fail(step, f"the build that waited while its directory was removed said: {reported(printed)}")
+    if run(root, "prog") != EXPECTED:
+        fail(step, "the build that waited while its directory was removed printed something else")
+    print("  ok   7. a build waiting on a directory its lock's holder removed makes it again and compiles every object")
 
 
 def main():
@@ -517,6 +700,7 @@ def main():
         reuse(work)
         held(work)
         outlived(work)
+        contested(work)
         probe(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)

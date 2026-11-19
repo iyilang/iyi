@@ -3182,18 +3182,37 @@ pub class Parser < Lexer
     res
   end
 
+  # The hosted parser's `type_start?`: an opening parenthesis or brace decides
+  # nothing, the token after it does, so `[] of Arg, (a + b)` and
+  # `[] of Arg, {x: 1}` leave the next argument an expression.
   def type_start_check : Bool
+    while @token.type == TokenKind::OP_LPAREN || @token.type == TokenKind::OP_LCURLY
+      next_token_skip_space_or_newline
+    end
+
     case @token.type
+    when TokenKind::IDENT
+      return false if named_tuple_start?
+      kw = @token.keyword
+      if kw == Keyword::TYPEOF
+        true
+      elsif kw == Keyword::SELF || @token.value == "self?"
+        next_token_skip_space
+        delimiter_or_type_suffix?
+      else
+        false
+      end
     when TokenKind::CONST
       return false if named_tuple_start?
       type_path_start?
-    when TokenKind::OP_COLON_COLON, TokenKind::UNDERSCORE, TokenKind::OP_LCURLY, TokenKind::OP_MINUS_GT
+    when TokenKind::OP_COLON_COLON
+      next_token
+      type_path_start?
+    when TokenKind::UNDERSCORE, TokenKind::OP_MINUS_GT
       true
-    when TokenKind::OP_LPAREN
-      true
-    when TokenKind::IDENT
-      kw = @token.keyword
-      kw == Keyword::SELF || kw == Keyword::TYPEOF || @token.value == "self?"
+    when TokenKind::OP_STAR
+      next_token_skip_space_or_newline
+      type_start_check
     else
       false
     end

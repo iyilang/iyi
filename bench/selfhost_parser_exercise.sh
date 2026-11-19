@@ -1196,6 +1196,15 @@ run_proof_in "mutation 28: a control keyword before a colon is refused as a void
 run_proof_in "mutation 29: discard the closing call delimiter location" "$PARSER" \
   'CallArgs.new(args, block, block_arg, named_args, false, end_location, true)' \
   'CallArgs.new(args, block, block_arg, named_args, false, nil, true)'
+run_proof_in "mutation 30: an opening parenthesis or brace after a type list starts a type" "$PARSER" \
+  $'    while @token.type == TokenKind::OP_LPAREN || @token.type == TokenKind::OP_LCURLY\n      next_token_skip_space_or_newline\n    end\n' \
+  $'    return true if @token.type == TokenKind::OP_LPAREN || @token.type == TokenKind::OP_LCURLY\n'
+run_proof_in "mutation 31: self after a type list starts a type whatever follows it" "$PARSER" \
+  $'        next_token_skip_space\n        delimiter_or_type_suffix?\n' \
+  $'        true\n'
+run_proof_in "mutation 32: a global path after a type list starts a type whatever follows it" "$PARSER" \
+  $'    when TokenKind::OP_COLON_COLON\n      next_token\n      type_path_start?\n' \
+  $'    when TokenKind::OP_COLON_COLON\n      true\n'
 
 echo
 echo "== Rebuilding and running restored parser exercise"

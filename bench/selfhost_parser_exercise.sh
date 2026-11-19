@@ -1592,6 +1592,59 @@ else
   status=1
 fi
 
+echo "== Whole corpus: every tracked .iyi under src, samples and bench, by both parsers' verdicts (accepted or refused only)"
+# No other check in this gate runs the port's parser over the tracked corpus: the parity loops use a fixed list, and the
+# sample gates compile samples/iyi with the hosted compiler. One process per parser covers the whole list.
+HOSTED_REFUSES_PORT_ACCEPTS_CEILING=0
+git -C "$REPO" ls-files -- 'src/*.iyi' 'samples/*.iyi' 'bench/*.iyi' > "$WORK/corpus.txt"
+corpus_files=$(awk 'END {print NR}' "$WORK/corpus.txt")
+"$WORK/exercise-plain$EXE" --verdicts "$WORK_NATIVE/corpus.txt" > "$WORK/corpus-port.all" 2> "$WORK/corpus-port.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$WORK/corpus-port.all" > "$WORK/corpus-port.txt"
+"$WORK/dump_hosted$EXE" --verdicts "$WORK_NATIVE/corpus.txt" > "$WORK/corpus-hosted.all" 2> "$WORK/corpus-hosted.err" || true
+awk '/^(ACCEPT|REFUSE) /' "$WORK/corpus-hosted.all" > "$WORK/corpus-hosted.txt"
+# corpus_verdicts HOSTED PORT: each file the port refuses and hosted accepts is printed with the port's error line, each
+# file hosted refuses and the port accepts is printed, and one summary line closes the report.
+corpus_verdicts() {
+  awk '
+    FNR == NR { hv[$2] = ($1 == "ACCEPT") ? "A" : "R"; next }
+    {
+      pv = ($1 == "ACCEPT") ? "A" : "R"
+      seen++
+      if (!($2 in hv)) { missing++; next }
+      if (hv[$2] == "A" && pv == "R") { over++; print "  OVER-REFUSAL, hosted accepts and the port refuses: " $0 }
+      else if (hv[$2] == "R" && pv == "A") { under++; print "  hosted refuses and the port accepts: " $2 }
+      else if (pv == "A") { both_accept++ }
+      else { both_refuse++ }
+    }
+    END {
+      printf "  corpus: %d verdicts, %d accepted by both, %d refused by both, over-refusals %d, hosted-refuses-port-accepts %d, missing %d\n", seen, both_accept, both_refuse, over, under, missing
+    }
+  ' "$1" "$2"
+}
+corpus_verdicts "$WORK/corpus-hosted.txt" "$WORK/corpus-port.txt" > "$WORK/corpus-verdicts.txt"
+cat "$WORK/corpus-verdicts.txt"
+seen=$(sed -n 's/.*corpus: \([0-9]*\) verdicts.*/\1/p' "$WORK/corpus-verdicts.txt")
+over=$(sed -n 's/.*over-refusals \([0-9]*\),.*/\1/p' "$WORK/corpus-verdicts.txt")
+under=$(sed -n 's/.*hosted-refuses-port-accepts \([0-9]*\),.*/\1/p' "$WORK/corpus-verdicts.txt")
+missing=$(sed -n 's/.*missing \([0-9]*\)$/\1/p' "$WORK/corpus-verdicts.txt")
+case "$seen$over$under$missing" in
+  ''|*[!0-9]*) echo "  the corpus summary is missing or malformed"; status=1 ;;
+  *)
+    if [ "$seen" -ne "$corpus_files" ] || [ "$missing" -ne 0 ]; then
+      echo "  the verdict runs did not cover the corpus: $seen of $corpus_files verdicts, $missing missing"
+      status=1
+    fi
+    if [ "$over" -ne 0 ]; then
+      echo "  $over corpus file(s) the port refuses and hosted accepts (must be 0)"
+      status=1
+    fi
+    if [ "$under" -gt "$HOSTED_REFUSES_PORT_ACCEPTS_CEILING" ]; then
+      echo "  hosted refuses and the port accepts $under corpus file(s), above the ceiling of $HOSTED_REFUSES_PORT_ACCEPTS_CEILING"
+      status=1
+    fi
+    ;;
+esac
+
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
@@ -2084,6 +2137,23 @@ prove_mutation "mutation 64: a string glued to its colon is not a named tuple's 
 prove_mutation "mutation 65: a call's string name is not a named argument" "$PARSER" \
   $'        if @token.type == TokenKind::OP_COLON && arg.is_a?(StringLiteral)\n          named_args = parse_named_args(allow_newline: true, first_name: arg.value)' \
   $'        if false && @token.type == TokenKind::OP_COLON && arg.is_a?(StringLiteral)\n          named_args = parse_named_args(allow_newline: true, first_name: arg.value)' -- strkey_hold || status=1
+# corpus_hold: a mutant's verdicts over the whole corpus. Caught when it refuses a corpus file hosted accepts.
+corpus_hold() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  "$WORK/mut-exercise$EXE" --verdicts "$WORK_NATIVE/corpus.txt" > "$WORK/corpus-mut.all" 2> "$WORK/corpus-mut.err" || true
+  awk '/^(ACCEPT|REFUSE) /' "$WORK/corpus-mut.all" > "$WORK/corpus-mut.txt"
+  local found
+  found=$(corpus_verdicts "$WORK/corpus-hosted.txt" "$WORK/corpus-mut.txt" | sed -n 's/.*over-refusals \([0-9]*\),.*/\1/p')
+  [ "${found:-0}" -eq 0 ]
+}
+# Mutation 66: a string-keyed named tuple is refused. The rows above catch it, and so does the whole-corpus check on the two
+# corpus files that write one (std_tuple_exercise.iyi, std_named_tuple_exercise.iyi).
+prove_mutation "mutation 66: a string-keyed named tuple is refused, found by the whole-corpus check" "$PARSER" \
+  '        return parse_named_tuple(location, first_key.value)' \
+  '        syntax_error("a named tuple has no string name", @token.location)' -- corpus_hold || status=1
 
 echo
 echo "== Rebuilding and running restored parser exercise"

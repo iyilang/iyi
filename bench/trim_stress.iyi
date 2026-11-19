@@ -19,9 +19,10 @@
 #
 # With no arguments it runs two threads for a second and prints a fixed
 # line: Windows CI runs every bench program bare. Built with -Dtrim_widen
-# against a prelude copy that holds the adoptions' edge-page window open
-# (`bench/sweep_exercise.sh`), it reports how often two adoptions met in
-# it, `IyiHeap.widen_hits`, which only that copy defines.
+# against a prelude copy that plays the neighbouring adoption at each
+# batch's edge pages (`bench/sweep_exercise.sh`), it reports how many edge
+# pages two adoptions read listed at once, `IyiHeap.widen_hits`, which only
+# that copy defines.
 
 @[Unsafe("it writes and reads raw blocks by address to check them")]
 module bench/trim_stress

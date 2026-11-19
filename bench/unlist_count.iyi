@@ -1,0 +1,71 @@
+# The listed pages' count against the bits that list them, after one batch of
+# them is unlisted. `bench/sweep_exercise.sh` builds this against a copy of
+# the prelude that plays the neighbouring adoption at the batch's edges (the
+# fix), and against a copy that also counts the clear it lost (the broken
+# counting). Built against the prelude as it is, it reads 2 = 2 as well.
+#
+#   ./bin/iyi build bench/unlist_count.iyi && ./unlist_count
+#
+# It prints `unlist: ok, the arena counts N listed pages, its bits list M` when
+# the count equals the bits. When it does not, it prints the FAIL line with the
+# same two numbers and exits 1.
+#
+# One thread, no timing. A zeroed fake header lists pages 1 to 5 with
+# `IyiHeap.set_listed` and sets the count to 5, as a sweep leaves it. Then
+# `IyiHeap.unlist_batch` unlists pages 1 to 3, so two pages stay listed and the
+# count must be 2. Only one interleaving can make it differ: two adoptions read
+# the edge page listed, one clears it, and the other's clear loses. A count
+# that includes the lost clear reads short of the bits.
+
+@[Unsafe("it writes a fake arena header by address, which nothing else owns")]
+module bench/unlist_count
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  # The fake header is not a root the collector scans, so no collection runs
+  # while the check holds its address.
+  IyiMark.auto = false
+
+  # How many bits of a bitmap word are set, one lowest bit at a time.
+  def listed_bits(word : UInt64) : UInt64
+    count = 0_u64
+    while word != 0_u64
+      word = word & (word - 1_u64)
+      count = count + 1_u64
+    end
+    count
+  end
+
+  # The header holds the count and the bitmap's first word and nothing past
+  # them: `set_listed`, `unlist_batch` and `unlist_page` touch no other offset.
+  words = IyiHeap::OFF_LISTED_PAGES.unsafe_shr(3_u64) + 1_u64
+  header = Pointer(UInt64).malloc(words)
+  arena = header.address
+  slot = 0_u64
+  while slot < words
+    IyiHeap.write64(arena + slot * 8_u64, 0_u64)
+    slot = slot + 1_u64
+  end
+
+  # Pages 1 to 5 listed, and the count set to the five of them.
+  IyiHeap.set_listed(arena, arena + IyiHeap::PAGE, arena + 6_u64 * IyiHeap::PAGE, true)
+  IyiHeap.write64(arena + IyiHeap::OFF_LISTED, 5_u64)
+  count = IyiHeap.read64(arena + IyiHeap::OFF_LISTED)
+  bits = listed_bits(IyiHeap.read64(arena + IyiHeap::OFF_LISTED_PAGES))
+  unless count == 5_u64 && bits == 5_u64
+    print "FAIL: unlist: setup: the arena counts #{count.to_i64} listed pages, its bits list #{bits.to_i64}, not 5 and 5\n"
+    __iyi_exit(2)
+  end
+
+  IyiHeap.unlist_batch(arena, 1_u64, 3_u64)
+
+  count = IyiHeap.read64(arena + IyiHeap::OFF_LISTED)
+  bits = listed_bits(IyiHeap.read64(arena + IyiHeap::OFF_LISTED_PAGES))
+  if count == bits
+    puts "unlist: ok, the arena counts #{count.to_i64} listed pages, its bits list #{bits.to_i64}"
+  else
+    print "FAIL: unlist: the arena counts #{count.to_i64} listed pages, its bits list #{bits.to_i64}\n"
+    __iyi_exit(1)
+  end
+{% else %}
+  puts "unlist: no collector's allocator on this target, nothing to count"
+{% end %}

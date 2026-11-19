@@ -1,0 +1,14 @@
+# A type declaration written as an argument of a call declares no local
+# variable, so the bare name that follows it is still a call in the same scope.
+
+struct User
+  getter name : String
+  getter age : Int32
+end
+
+def greeting
+  "hello #{name}"
+end
+
+name = "outside"
+puts name

@@ -1,0 +1,5 @@
+macro array_map
+  puts({{ [1, 2].map { |item| item * 2 }.splat(" + 0") }})
+end
+
+array_map

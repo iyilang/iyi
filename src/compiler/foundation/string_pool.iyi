@@ -1,0 +1,22 @@
+module compiler/foundation/string_pool
+
+pub class StringPool
+  @pool : Hash(String, String)
+
+  def initialize
+    @pool = Hash(String, String).new
+  end
+
+  def get(str : String) : String
+    if existing = @pool[str]?
+      existing
+    else
+      @pool[str] = str
+      str
+    end
+  end
+
+  def size : Int32
+    @pool.size
+  end
+end

@@ -1,0 +1,5 @@
+macro sum_splats(*numbers)
+  0 {% for n in numbers %} + {{n}} {% end %}
+end
+
+sum_splats(1, 2, 3, 4)

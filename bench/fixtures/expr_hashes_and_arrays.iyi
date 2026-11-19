@@ -1,0 +1,17 @@
+# Hashes and arrays fixture
+empty_arr = [] of Int32
+empty_hash = {} of String => Int32
+
+simple_arr = [1, 2, 3]
+nested_arr = [[1, 2], [3, 4], [5, 6]]
+
+simple_hash = {"apple" => 1, "banana" => 2}
+nested_hash = {
+  "group1" => {"a" => 10, "b" => 20},
+  "group2" => {"c" => 30, "d" => 40},
+}
+
+array_access = simple_arr[0]
+hash_access = simple_hash["apple"]
+array_update = (simple_arr[1] = 99)
+hash_update = (simple_hash["banana"] = 100)

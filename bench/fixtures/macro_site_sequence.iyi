@@ -1,0 +1,10 @@
+macro sites(name, n)
+  head {{name.id}}
+  {% if n > 1 %}
+    many
+  {% end %}
+  {% for i in 1..2 %}{{ i }} {% end %}
+  tail {{n}}
+end
+
+sites(alpha, 2)

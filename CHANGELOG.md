@@ -11,6 +11,13 @@
   settings, and cache writes replace an existing checkpoint through an
   exclusive same-directory file. Package downloads do not use them yet.
   Independent cryptographic review is required before anything depends on them.
+
+- **The macro engine and syntax normalizer are written in iyi.**
+  Their component gates compare expansions, diagnostics and normalized trees
+  with the hosted compiler and exercise compiled mutations. The macro-site
+  census measures this component's source population. Hosted commands remain
+  unchanged.
+
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.

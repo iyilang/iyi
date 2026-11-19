@@ -15,13 +15,14 @@
 #      built once and run PLAIN_RUNS times on one worker (IYI_WORKERS=1),
 #      every run passing.
 #   3. Caught, with a seed that reproduces: `iyi test --chaos=1
-#      --chaos-runs 100` fails each test, naming the seed and the
-#      `--chaos=SEED` that runs it again; that line fails again; and the
-#      program built for chaos, run five times on the seed with
-#      IYI_CHAOS_TRACE, prints the same output and the same schedule five
-#      times, failing each.
-#   4. A drawn seed: `iyi test --chaos --chaos-runs 200` on the claim test
-#      fails on a seed drawn there, and that seed fails again.
+#      --chaos-runs 100` fails each test at its pinned seed (6 for the
+#      claim, 42 for the join), naming the seed and the `--chaos=SEED` that
+#      runs it again; that line fails again; and the program built for
+#      chaos, run five times on the seed with IYI_CHAOS_TRACE, prints the
+#      same output and the pinned schedule hash five times, failing each.
+#   4. A drawn seed: `iyi test --chaos --chaos-runs 200` on a test that
+#      fails on every seed fails at run 1 of 200 whichever seed the clock
+#      draws, names that seed, and the seed fails again.
 #   5. One seed, one schedule; many seeds, many: bench/chaos_exercise.iyi
 #      under seeds 1 to 30, twice each, holds every property each time,
 #      each seed's two runs print the same lines and schedule, the 30 meet
@@ -75,30 +76,39 @@ build() { # name, prelude, source, flags...
 }
 
 # `iyi test` over *source*, under *prelude*; its output in *log*, its exit
-# code answered.
+# code answered. On one worker, whatever the environment says: a chaos seed
+# names one schedule only there, and the pinned seeds and hashes are that
+# schedule's.
 chaos_test() { # prelude, log, iyi test arguments...
   local prelude="$1" log="$2"
   shift 2
   if [ -n "$prelude" ]; then
-    IYI_PATH="$prelude${PSEP}$REPO/src" timeout -k 5 900 "$IYI" test "$@" > "$log" 2>&1
+    IYI_WORKERS=1 IYI_PATH="$prelude${PSEP}$REPO/src" timeout -k 5 900 "$IYI" test "$@" > "$log" 2>&1
   else
-    timeout -k 5 900 "$IYI" test "$@" > "$log" 2>&1
+    IYI_WORKERS=1 timeout -k 5 900 "$IYI" test "$@" > "$log" 2>&1
   fi
 }
 
-# Step 3 for one test under one prelude: caught within 100 seeds from 1,
-# the named seed failing again through `iyi test`, and five traced runs of
-# it identical and failing. Prints why it did not hold and answers 1.
-caught() { # prelude, label, source
-  local prelude="$1" label="$2" source="$3" code seed first run
+# Step 3 for one test under one prelude: caught by the search over seeds 1
+# to 100 at its pinned seed (`want_seed`), the named seed failing again
+# through `iyi test`, and five traced runs of it identical, failing and on
+# the pinned schedule hash (`want_hash`). The search is kept: each seed is
+# one schedule of the simulation, so the first seed that fails is the same
+# on every run, and a compiler change that moves it fails here and forces a
+# deliberate re-pin. Prints why it did not hold and answers 1. The broken
+# copies pass no pins: they must not be caught at all.
+caught() { # prelude, label, source, [pinned seed, pinned schedule hash]
+  local prelude="$1" label="$2" source="$3" want_seed="${4:-}" want_hash="${5:-}" code seed first got
   chaos_test "$prelude" "catch-$label.txt" --chaos=1 --chaos-runs 100 "$source"
   code=$?
   if [ "$code" -ne 1 ] || ! grep -q "reproduce: .* test --chaos=" "catch-$label.txt"; then
     echo "$label: not caught in seeds 1 to 100 (exit $code):"; tail -5 "catch-$label.txt"; return 1
   fi
-  seed="$(sed -n 's/.*(chaos seed \([0-9][0-9]*\), run \([0-9][0-9]*\) of 100).*/\1/p' "catch-$label.txt" | head -1)"
-  run="$(sed -n 's/.*(chaos seed \([0-9][0-9]*\), run \([0-9][0-9]*\) of 100).*/\2/p' "catch-$label.txt" | head -1)"
+  seed="$(sed -n 's/.*(chaos seed \([0-9][0-9]*\), run [0-9][0-9]* of 100).*/\1/p' "catch-$label.txt" | head -1)"
   [ -n "$seed" ] || { echo "$label: the failure names no seed:"; cat "catch-$label.txt"; return 1; }
+  if [ -n "$want_seed" ] && [ "$seed" != "$want_seed" ]; then
+    echo "$label: caught at seed $seed, not the pinned seed $want_seed (the compiler's schedule moved; re-pin it on purpose):"; tail -5 "catch-$label.txt"; return 1
+  fi
   chaos_test "$prelude" "again-$label.txt" "--chaos=$seed" "$source"
   code=$?
   if [ "$code" -ne 1 ] || ! grep -q "(chaos seed $seed, run 1 of 1)" "again-$label.txt"; then
@@ -116,7 +126,11 @@ caught() { # prelude, label, source
       echo "$label: seed $seed ran two schedules:"; cat "$first" "traced-$label-$attempt.txt"; return 1
     fi
   done
-  echo "  $label: caught at seed $seed (run $run of 100), again through --chaos=$seed, and five traced runs alike:"
+  got="$(sed -n 's/.*schedule \([0-9a-f][0-9a-f]*\)$/\1/p' "$first" | head -1)"
+  if [ -n "$want_hash" ] && [ "$got" != "$want_hash" ]; then
+    echo "$label: seed $seed's schedule is ${got:-none}, not the pinned $want_hash:"; cat "$first"; return 1
+  fi
+  echo "  $label: caught at seed $seed, again through --chaos=$seed, and five traced runs alike on schedule ${got:-none}:"
   sed 's/^/    /' "$first"
 }
 
@@ -193,9 +207,9 @@ for test in claim join; do
 done
 
 # ── 3. Caught, with a seed that reproduces ────────────────────────────────
-step "iyi test --chaos catches each bug, and its seed runs the schedule again"
-caught "" claim "$REPO/bench/chaos_claim.iyi" || exit 1
-caught "" join "$REPO/bench/chaos_join.iyi" || exit 1
+step "iyi test --chaos catches each bug at its pinned seed, and that seed runs the schedule again"
+caught "" claim "$REPO/bench/chaos_claim.iyi" 6 2f3a4336168015eb || exit 1
+caught "" join "$REPO/bench/chaos_join.iyi" 42 c358ff992036ee50 || exit 1
 
 # ── 4. A drawn seed ───────────────────────────────────────────────────────
 step "a seed drawn by iyi test, named and run again"

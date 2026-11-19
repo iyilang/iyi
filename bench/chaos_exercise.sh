@@ -272,7 +272,7 @@ expect_caught seedignored "two runs differ"
 step "broken copy: units ignored, a unit-mate chosen like any task"
 broken unitsignored chaos.iyi '/^      if unit.stamp != generation$/ { print "      if true"; next } { print }'
 seeds "$WORK/unitsignored" unitsignored > unitsignored.txt 2>&1
-expect_caught unitsignored "FAIL: "
+expect_caught unitsignored "FAIL: a task of the spawner's unit ran before the spawner parked"
 
 step "broken copy: a parallel task left in its spawner's unit"
 broken leftinunit chaos.iyi '/^    task.fiber.chaos_unit = IyiCross.shared \{ IyiChaosUnit.new\(IyiStat.get\(IyiStat::CHAOS_UNITS\), fresh_priority\) \}$/ { next } { print }'

@@ -1,47 +1,29 @@
 @[Unsafe("declares LLVM's C functions and handles in its lib, which the compiler does not check")]
 module compiler/llvm/lib_llvm
+# The LLVM this bridge binds is named by build flags, which whoever builds a program that imports it passes, because a
+# macro in a dependency may not read the environment or run a shell command. A build passes -Dllvm_major_N,
+# -Dllvm_minor_N and -Dllvm_patch_N (minor and patch count as 0 when absent), one -Dllvm_target_<name> per target
+# llvm-config --targets-built prints (lower-cased), and --link-flags with the link flags. bench/lib/host.sh's
+# llvm_bridge_build_args prints them for the host.
 
 {% begin %}
+  {% llvm_major = nil %}
+  {% llvm_minor = 0 %}
+  {% llvm_patch = 0 %}
+  {% for n in (0..99) %}
+    {% if flag?("llvm_major_#{n}") %}{% llvm_major = n %}{% end %}
+    {% if flag?("llvm_minor_#{n}") %}{% llvm_minor = n %}{% end %}
+    {% if flag?("llvm_patch_#{n}") %}{% llvm_patch = n %}{% end %}
+  {% end %}
+  {% unless llvm_major %}
+    {% raise "The LLVM bridge reads its version and targets from build flags, and they are missing: pass -Dllvm_major_N, -Dllvm_minor_N and -Dllvm_patch_N (minor and patch count as 0), one -Dllvm_target_<name> per built target, and --link-flags, as bench/lib/host.sh's llvm_bridge_build_args prints them." %}
+  {% end %}
+  {% llvm_version = "#{llvm_major}.#{llvm_minor}.#{llvm_patch}" %}
   {% if flag?(:win32) %}
-    {% name = "LIBRARY_PATH" %}
-    {% library_path = env("IYI_#{name.id}") || env("CRYSTAL_#{name.id}") || "" %}
-    {% config = nil %}
-    {% for dir in library_path.split(";") %}
-      {% config ||= read_file?("#{dir.id}/llvm_VERSION") %}
-    {% end %}
-    {% lines = config ? config.lines.map(&.chomp) : nil %}
-    {% llvm_version = env("LLVM_VERSION") %}
-    {% llvm_version = nil if llvm_version && llvm_version.strip.empty? %}
-    {% llvm_version ||= lines[0] if lines && lines.size > 0 %}
-    {% llvm_targets = env("LLVM_TARGETS") %}
-    {% llvm_targets = nil if llvm_targets && llvm_targets.strip.empty? %}
-    {% llvm_targets ||= lines[1] if lines && lines.size > 1 %}
-    {% llvm_ldflags = env("LLVM_LDFLAGS") %}
-    {% llvm_ldflags = nil if llvm_ldflags && llvm_ldflags.strip.empty? %}
-    {% llvm_ldflags ||= lines[2] if lines && lines.size > 2 %}
-    {% unless llvm_version && !llvm_version.strip.empty? && llvm_targets && !llvm_targets.strip.empty? %}
-      {% raise "LLVM_VERSION and LLVM_TARGETS must be set, or IYI_LIBRARY_PATH must contain an llvm_VERSION file with version and targets" %}
-    {% end %}
     @[Link("llvm")]
     @[Link(dll: "LLVM-C.dll")]
   {% else %}
-    {% llvm_config = env("LLVM_CONFIG") || "llvm-config" %}
-    {% llvm_version = env("LLVM_VERSION") || `#{llvm_config.id} --version 2> /dev/null || true`.strip.stringify %}
-    {% if llvm_version.empty? %}
-      {% raise "Cannot read LLVM's version; set LLVM_CONFIG or LLVM_VERSION" %}
-    {% end %}
-    {% llvm_targets = env("LLVM_TARGETS") || `#{llvm_config.id} --targets-built 2> /dev/null || true`.strip.stringify %}
-    {% llvm_ldflags = env("LLVM_LDFLAGS") || `#{llvm_config.id} --libs --system-libs --ldflags 2> /dev/null || true`.strip.gsub(/\n/, " ").stringify %}
-    {% if llvm_ldflags.empty? %}
-      {% raise "Cannot read LLVM's link flags; set LLVM_CONFIG or LLVM_LDFLAGS" %}
-    {% end %}
-    {% if llvm_targets.empty? %}
-      {% raise "Cannot read LLVM's targets; set LLVM_CONFIG or LLVM_TARGETS" %}
-    {% end %}
     @[Link("stdc++")]
-  {% end %}
-  {% if llvm_ldflags && !llvm_ldflags.empty? %}
-    @[Link(ldflags: {{ llvm_ldflags }})]
   {% end %}
   {% is_lt_90 = compare_versions(llvm_version, "9.0.0") < 0 %}
   {% is_lt_110 = compare_versions(llvm_version, "11.0.0") < 0 %}
@@ -73,16 +55,16 @@ module compiler/llvm/lib_llvm
     IS_LT_210 = {{ is_lt_210 }}
     IS_LT_220 = {{ is_lt_220 }}
 
-    # The targets the linked LLVM was built with (`llvm-config --targets-built`, or LLVM_TARGETS). A static LLVM built
-    # with five targets has no LLVMInitializeRISCVTarget to link, so `Target.init_*` asks before it names one.
-    HAS_X86_TARGET         = {{ llvm_targets.includes?("X86") }}
-    HAS_AARCH64_TARGET     = {{ llvm_targets.includes?("AArch64") }}
-    HAS_ARM_TARGET         = {{ llvm_targets.includes?("ARM") }}
-    HAS_WEBASSEMBLY_TARGET = {{ llvm_targets.includes?("WebAssembly") }}
-    HAS_RISCV_TARGET       = {{ llvm_targets.includes?("RISCV") }}
-    HAS_MIPS_TARGET        = {{ llvm_targets.includes?("Mips") }}
-    HAS_POWERPC_TARGET     = {{ llvm_targets.includes?("PowerPC") }}
-    HAS_BPF_TARGET         = {{ llvm_targets.includes?("BPF") }}
+    # The targets the linked LLVM was built with: one -Dllvm_target_<name> build flag per target, lower-cased. A static
+    # LLVM built with five targets has no LLVMInitializeRISCVTarget to link, so Target.init_* asks before it names one.
+    HAS_X86_TARGET         = {{ flag?(:llvm_target_x86) }}
+    HAS_AARCH64_TARGET     = {{ flag?(:llvm_target_aarch64) }}
+    HAS_ARM_TARGET         = {{ flag?(:llvm_target_arm) }}
+    HAS_WEBASSEMBLY_TARGET = {{ flag?(:llvm_target_webassembly) }}
+    HAS_RISCV_TARGET       = {{ flag?(:llvm_target_riscv) }}
+    HAS_MIPS_TARGET        = {{ flag?(:llvm_target_mips) }}
+    HAS_POWERPC_TARGET     = {{ flag?(:llvm_target_powerpc) }}
+    HAS_BPF_TARGET         = {{ flag?(:llvm_target_bpf) }}
 
     alias Bool = Int32
     alias Char = UInt8

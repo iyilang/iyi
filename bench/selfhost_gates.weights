@@ -1,0 +1,53 @@
+# Seconds each self-host gate takes on the slowest host, for the deal that
+# bench/selfhost_gates.sh makes with --shard K/N and --list: heaviest first,
+# each into the lightest shard so far. One gate per line: its name (the file
+# without .sh) and its seconds, rounded up. A gate with no line is dealt at the
+# driver's default weight and printed as unweighted until a run measures it. A
+# line for a gate that does not exist is ignored.
+#
+# Measured in the runs of PR #217 (head 8145262e44):
+#   linux    job 135287300837: 17 gates passed, then the job was cancelled at
+#            its 90-minute limit. Seconds are from the driver's group and exit
+#            lines: each gate from the previous gate's exit line, the first from
+#            the header line.
+#   windows  job 135281088805: all 22 gates ran in 81 minutes. Four exited 1 on
+#            an invalid run (below), so their Windows seconds are not used.
+#   darwin   no run of #217 reached this job. A loaded local workstation gave
+#            typed_parity 1,440 s and semantic_declarations 1,798 s. Those are
+#            upper bounds for a CI darwin run, not weights.
+#
+# The weight is the slowest host's seconds. Where one host has no valid run, the
+# other host's seconds are scaled by the largest ratio among the 14 gates that
+# ran on both hosts: Windows at most 1.934 times Linux (macros: 603.1 s over
+# 311.8 s), Linux at most 1.085 times Windows (diagnostic_total: 7.7 s over 7.1).
+#
+# Four Windows runs were invalid. semantic_calls: 59 of its 63 mutation proofs
+# died on a prelude parse error. semantic_declarations: the corpus totals show
+# 120 oracle and 116 port failures among 237 files, and no mutation proof ran.
+# semantic: 9 mutants ended in an oracle or driver failure. typed_parity: 430
+# lines of the same prelude parse error. The first three take their Linux
+# seconds times 1.934. typed_parity has no Linux run, so it takes its loaded
+# darwin seconds times 1.934 as an upper bound.
+
+selfhost_ast_exercise 61                       # linux 38.6, windows 60.8
+selfhost_call_cover_exercise 30                # linux 29.7, windows 29.9
+selfhost_closures_exercise 184                 # linux 183.4, windows 181.4
+selfhost_diagnostic_total_exercise 8           # linux 7.7, windows 7.1
+selfhost_enum_primitive_exercise 65            # linux 58.1, windows 64.3
+selfhost_external_address_exercise 65          # linux 60.7, windows 64.8
+selfhost_lexer_exercise 23                     # linux 15.3, windows 22.5
+selfhost_linea_corpus_exercise 209             # linux 180.2, windows 208.9
+selfhost_macros_exercise 604                   # linux 311.8, windows 603.1
+selfhost_normalizer_exercise 97                # linux 85.6, windows 96.9
+selfhost_parser_exercise 148                   # linux 138.6, windows 147.9
+selfhost_platform_exercise 58                  # linux 57.2, windows 53.9
+selfhost_semantic_calls_exercise 4162          # linux 2151.5 x 1.934 (windows invalid)
+selfhost_semantic_declarations_exercise 1736   # linux 897.6 x 1.934 (windows invalid)
+selfhost_semantic_exercise 849                 # linux 438.6 x 1.934 (windows invalid)
+selfhost_semantic_new_exercise 139             # linux 139.0, windows 132.6
+selfhost_semantic_transform_exercise 520       # linux 375.9, windows 519.6
+selfhost_semantic_type_nodes_exercise 373      # windows 343.3 x 1.085, no linux run
+selfhost_semantic_types_exercise 364           # windows 335.4 x 1.085, no linux run
+selfhost_tuple_scalar_exercise 73              # windows 66.7 x 1.085, no linux run
+selfhost_typed_parity_exercise 2786            # darwin loaded 1440 x 1.934, no valid run
+selfhost_types_exercise 141                    # windows 129.4 x 1.085, no linux run

@@ -169,6 +169,19 @@
 
 ### Fixed
 
+- **A pool short of workers no longer stays short while its tasks take
+  turns.** The pool starts its workers one at a time: each new worker,
+  finding a task with more waiting, calls for the next. A task halfway
+  through giving its worker up at a back-edge is not seen waiting, so a
+  find that took the last task it saw called nobody. The tasks then took
+  turns on the workers they had, every 5 ms, and no other worker ever
+  started. On the project's Mac (Apple M2 Pro, 10 cores), ten spinning
+  tasks kept to nine workers for two seconds beside two other CI jobs,
+  and in 1 of 150 runs beside 20 busy loops. A task that takes its turn
+  while another waits and no worker is idle now starts one more (SPEC.md
+  III.4.15, part 6). In 150 runs beside 20 busy loops on that Mac, the
+  pool then filled every time, within 56 ms.
+
 - **`iyi lsp` no longer recompiles a large module for every question.** A
   worker is replaced at 512 MB, and one compile of std/autocert (527 MB)
   or std/acme (514 MB) reaches that by itself. So each successor was over
@@ -580,6 +593,23 @@
   rows in state R), ten looks over a second, and the rule is the same.
   What no clock blurs is still held everywhere: an idle worker called at
   each hand-off, the woken task run on another worker, within 40 ms.
+
+- **The idle pool step names a pool that stopped growing.**
+  `bench/concurrent_mark.iyi` read "9 of 10 workers waiting after five
+  seconds" on the project's Mac beside two other CI jobs (job
+  134651603579). That was the pool's stall under Fixed, not the machine:
+  the step's ten tasks spun their two seconds for a tenth worker that never
+  started. The tasks now wait for the pool for up to ten seconds, and a
+  pool still short after them fails as itself ("the pool launched 9 of 10
+  workers"), before the count of workers waiting. Nothing the step
+  asserts changed: every worker of a per-core pool waits, the mark beside
+  them asks for two helpers or more, and the busy pool asks for one on
+  Windows. `bench/concurrent_mark.sh` runs the step on a runtime in which
+  no worker's find calls the next, where the turns alone fill the pool,
+  and catches the same copy without the turns' start ("the pool launched
+  1 of 12 workers"). The step as it was before the pool's count (tasks
+  that wait only for each other) still exits 1 at the count of workers
+  waiting.
 
 - **heap22's "large mapping widens the bounds" copy can no longer pass
   by where Windows puts a mapping.** The arena directory's bounds are
@@ -28796,7 +28826,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,399-line library and nothing else. Every other
+  written against iyi's own 36,421-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

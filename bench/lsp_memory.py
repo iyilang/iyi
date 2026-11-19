@@ -86,6 +86,23 @@ HEAVY = ["autocert", "acme", "websocket", "http", "tls"]
 HEAVY_QUESTIONS = 40
 HEAVY_WORKERS = 4
 
+# What a workspace pull may hold. A worker stops a pull at
+# `Proxy::RETIRE_FOOTPRINT`, but only between files, and finishes the file
+# it is compiling first (`Server`: one file per answer at the least), so the
+# tree peaks at the proxy and a worker that crossed the bound in its last
+# file. On Linux the second worker of every pull of samples/iyi finished at
+# 693-699 MB and the others at 518-583, beside a proxy of 62-64 MB: 755-761 MB
+# in 10 pulls of 10 (jwaldrip/iyi run 44510638896), 744-768 MB in CI;
+# Windows' working set reads 640-643 MB. Every file compiled in one worker,
+# the pull this bounds against, held 2,782-2,786 MB for these 37 files, the
+# step's check taken out of the worker (jwaldrip/iyi run 44512679912). Twice
+# the worker's bound sits between the two, 1.33 times the highest healthy
+# reading and 2.7 times under the broken one. The typing ceiling was this
+# step's bound until 2026-11-19, and its own noise crossed it: 3 runs of 23
+# on GitHub's ubuntu-24.04 and 1 of 5 on Namespace's Linux failed with
+# every file judged and the pull carried as designed.
+PULL_CEILING_MB = 2 * RETIRE_FOOTPRINT
+
 FAILURES = []
 
 
@@ -477,8 +494,8 @@ def workspace_pull(argv):
     """`workspace/diagnostic` over `samples/iyi`, cold, and the peak tree
     megabytes while it runs; then the same pull with the ids it handed
     out, which is every file `unchanged` only if the first answer judged
-    every file. Returns the peak, the files judged, and whether the
-    second answer said nothing new.
+    every file. Returns the peak, the files judged, whether the second
+    answer said nothing new, and how many workers took part.
 
     One pull compiled every file in one worker and gave nothing back until
     it answered: 1,443 MB for these 36 files, 5.4 GB for 145, against the
@@ -492,11 +509,13 @@ def workspace_pull(argv):
     client.send("initialized", {}, wait=False)
     # Sampled while the pull runs, not after it: what a pull cost is gone
     # the moment its worker is retired.
-    peak, pulling = [0], [True]
+    peak, pulling, seen = [0], [True], set()
 
     def sample():
         while pulling[0]:
-            peak[0] = max(peak[0], tree_mb(client.proc.pid))
+            kids = children(client.proc.pid)
+            seen.update(kids)
+            peak[0] = max(peak[0], rss_mb(client.proc.pid) + sum(rss_mb(kid) for kid in kids))
             time.sleep(0.25)
     sampler = threading.Thread(target=sample, daemon=True)
     sampler.start()
@@ -511,7 +530,7 @@ def workspace_pull(argv):
     client.send("exit", {}, wait=False)
     client.proc.wait(timeout=30)
     whole = bool(items) and len(kinds) == len(items) and all(kind == "unchanged" for kind in kinds)
-    return peak[0], len(items), whole
+    return peak[0], len(items), whole, len(seen)
 
 
 def one_compile_mb(name):
@@ -633,16 +652,19 @@ def main():
          f"{len(first)} item(s) for `s.up`, identical" if first == last
          else f"{first} -> {last}")
 
-    peak, judged, whole = workspace_pull(argv)
+    peak, judged, whole, carried = workspace_pull(argv)
     detail = (f"{judged} files of samples/iyi in one answer"
-              f"{', every one' if whole else ', not every one'}, peak {peak} MB")
+              f"{', every one' if whole else ', not every one'}, "
+              f"carried by {carried} worker(s), peak {peak} MB")
     if not measured:
         step("a workspace pull is bounded too", whole,
              detail + " (no /proc here; unmeasured)")
     else:
+        # More than one worker: the pull costs more than the bound, so one
+        # worker answering it all is the shape this step rules out.
         step("a workspace pull is bounded too",
-             whole and peak <= TYPING_CEILING_MB,
-             detail + f", bound {TYPING_CEILING_MB} MB")
+             whole and carried >= 2 and peak <= PULL_CEILING_MB,
+             detail + f", bound {PULL_CEILING_MB} MB, at least 2 workers")
 
     # A rebuild unlinks the binary under a running session, which
     # `lsp_session.py` step 46 holds for the process the editor talks to.

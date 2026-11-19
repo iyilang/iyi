@@ -74,11 +74,16 @@ lock: ... compiler.lock was free"), and the second half, run alone, 5 of 5
 ("a codegen thread failed: Error opening file with mode 'w': ...
 _main.o0.bc: No such file or directory"); a build begun during a removal
 padded to 200,000 files stopped 5 times of 5 at the Mac's own "cannot find
-P-ointer40U-I-nt841.o0.o: No such file or directory". The second half needs
-to see that the build has the lock file open, which Linux's /proc and
-macOS's lsof show. Step 7 does not run on Windows: Python opens a file
-without FILE_SHARE_DELETE, so this script could neither delete a lock file
-it holds nor let the compiler delete one it has open.
+P-ointer40U-I-nt841.o0.o: No such file or directory". On that Mac (Apple
+M2 Pro, APFS) the first half failed 3 runs of 3 and the second 3 of
+3, and a build begun during a removal padded to 100,000 files stopped 2
+times of 3 at "clang: error: no such file or directory: 'U-I-nt64.o0.o'";
+with the fix the whole gate passed there and on Linux, and those builds
+waited out the removal and linked 3 of 3. The second half needs to see
+that the build has the lock file open, which Linux's /proc and macOS's
+lsof show. Step 7 does not run on Windows: Python opens a file without
+FILE_SHARE_DELETE, so this script could neither delete a lock file it
+holds nor let the compiler delete one it has open.
 
 And because the old shuffle was there for a reason, rule 2's reordering is
 held too: `probe/a` and `probe/b` both import `probe/log` and each

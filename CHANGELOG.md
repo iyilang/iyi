@@ -615,20 +615,19 @@
   built while the script holds the lock and removes the directory, lock
   file and all: the build must make it again and compile every object.
   Against the compiler before the fix the first half failed 5 runs of 5
-  on Linux and the second, run alone, 5 of 5. Step 6 now also counts
-  what the rotation keeps, ten builds, on every system that runs it,
-  Windows included.
+  on Linux and 3 of 3 on the project's Mac, and the second, run alone,
+  5 of 5 and 3 of 3. Step 6 now also counts what the rotation keeps, ten
+  builds, on every system that runs it, Windows included.
 
-- **The darwin jobs on the project's Mac each get iyi's cache to
-  themselves.** Its three runners share one HOME, so they shared
+- **The darwin jobs on the project's Mac each get the compilers' caches
+  to themselves.** Its three runners share one HOME, so they shared
   ~/.cache/iyi: one job's rotation reached another's build (Fixed, above),
   and the directory held 24,451 entries, 24,428 of them reach verdicts
-  (59.6 MB) that nothing ever deletes. `IYI_CACHE_DIR` is now under the
-  job's `RUNNER_TEMP`, as fresh as GitHub's VMs and gone with the job.
-  Crystal's cache, which the bootstrap compiler builds `iyi` through, is
-  each runner's own under `RUNNER_TOOL_CACHE` and kept between its jobs
-  as before: brew's Crystal rotates it with no lock at all, and one
-  runner runs one job at a time.
+  (59.6 MB) that nothing ever deletes. They shared ~/.cache/crystal too,
+  which brew's Crystal rotates with no lock at all. `IYI_CACHE_DIR` and
+  `CRYSTAL_CACHE_DIR` are now under the job's `RUNNER_TEMP`, as fresh as
+  GitHub's VMs and gone with the job. That costs `make iyi` a cold
+  cache: 19 and 21 s on the idle Mac, against 13 and 14 s warm.
 
 - **`bench/spawn_eligible.iyi`'s `grows` keeps its four tasks wanting
   to run until the pool has answered them.** The pool starts one worker

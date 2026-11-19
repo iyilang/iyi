@@ -12212,7 +12212,7 @@ Named honestly, so nobody mistakes this draft for complete.
     until the last object has been read; a build that waited on the lock and
     finds it no longer at `compiler.lock` makes the directory again
     (`CacheDir#hold`, `#remove`; `bench/rebuild_reuse.py` step 7, which the
-    compiler before failed 5 runs of 5 on Linux).
+    compiler before failed 5 runs of 5 on Linux and 3 of 3 on the Mac).
 
     Two smaller things came out of the same hour. A codegen thread that raised
     used to print its exception and leave the build to fail later at the link,

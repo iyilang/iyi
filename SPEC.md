@@ -1063,7 +1063,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 141,929 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 142,150 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 36,399-line own prelude + 128,413 in std |
 | Specs | 21,146 lines | 17,691 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -7607,9 +7607,13 @@ then artifacts are a local cache and the registry serves source.
 
 #### What not to build
 
-- **No install-time scripts.** They are the supply chain's largest hole and there
-  is no reason to inherit it. A package is source and artifacts, and building it
-  runs the compiler and nothing else.
+- **No install-time scripts.** A package is source and artifacts. Macros in
+  `.iyi` files refuse `system` and backticks, limit file reads to the macro's
+  own package or the standard library, and refuse environment reads from
+  dependencies. `run` may execute a program from the macro's package, without
+  a sandbox, so building a package can still run package-supplied code.
+  A macro defined and called in `.cr` keeps its existing behavior; a `.cr`
+  macro called from `.iyi` follows the same restrictions as an `.iyi` macro.
 - **No central name registry.** Identity is the path (above), so the registry is
   a cache and an index, and losing it loses discovery rather than the ability to
   build.

@@ -65,18 +65,41 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
+  # The task-panic step's panic waits until every reader is parked on its io
+  # wait, the state a cancel must end: a cancel that leaves io waits parked
+  # hangs the join, and one that ends them does not. Main sleeps while it
+  # waits, so the readers on this thread can park, and names a reader that
+  # has not parked within 4000 ms.
+  def await_io_parks(readers : Array(IyiTask(Int32)), release : Channel(Int32)) : Nil
+    started = __iyi_monotonic_ns
+    parked = false
+    while !parked
+      sleep(1)
+      parked = true
+      i = 0
+      while i < readers.size
+        parked = false unless readers[i].fiber.state == IyiFiberState::WaitingIo
+        i = i + 1
+      end
+      fail("task-panic: a reader never parked on its io wait") if !parked && (__iyi_monotonic_ns - started) // 1000000_i64 >= 4000_i64
+    end
+    release.send(1)
+  end
+
   # The parked tasks and the ending, spawned one way or the other: the
   # block a parallel task runs is checked for what it captures, so it is
   # written out at each spawn rather than passed along as a proc.
   {% for kind in [{"spawn", "spawn"}, {"parallel", "spawn(unit: :new)"}] %}
     def ends_{{kind[0].id}}(g : IyiGroup, mode : String, near : Array(Int32), far : Array(Int32), listening : Int32, never : Channel(Int32)) : Nil
+      readers = [] of IyiTask(Int32)
+      release = Channel(Int32).new
       PAIRS.times do |index|
         a = near[index]
         b = far[index]
-        g.{{kind[1].id}} { park_read(a) }
-        g.{{kind[1].id}} { park_read(b) }
+        readers << g.{{kind[1].id}} { park_read(a) }
+        readers << g.{{kind[1].id}} { park_read(b) }
       end
-      g.{{kind[1].id}} { park_accept(listening) }
+      readers << g.{{kind[1].id}} { park_accept(listening) }
       2.times do
         g.{{kind[1].id}} do
           sleep(60000)
@@ -87,7 +110,7 @@ import std/socket::{IyiSocket, SocketError}
       case mode
       when "task-panic"
         g.{{kind[1].id}} do
-          sleep(LEAD_MS)
+          release.receive
           raise "a task's panic, with tasks parked on the poller"
         end
       when "task-exit"
@@ -99,6 +122,7 @@ import std/socket::{IyiSocket, SocketError}
         sleep(LEAD_MS)
         raise "the main task's panic, with tasks parked on the poller"
       end
+      await_io_parks(readers, release) if mode == "task-panic"
     end
   {% end %}
 

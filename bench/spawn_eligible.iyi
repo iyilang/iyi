@@ -80,7 +80,8 @@ import std/int
     end
     took = (__iyi_monotonic_ns - started) // 1000000_i64
     if missed.get != 0_i64
-      fail("#{where}: #{missed.get} of #{TOGETHER} eligible spawns waited #{WAIT_NS // 1000000_i64} ms for the others and left alone: they ran one at a time")
+      puts "#{where}: #{missed.get} of #{TOGETHER} eligible spawns were left waiting"
+      fail("#{where}: eligible spawns waited #{WAIT_NS // 1000000_i64} ms for the others and left alone: they ran one at a time")
     end
     puts "#{where}: #{TOGETHER} eligible spawns were all running at one instant, in #{took} ms"
   end
@@ -110,6 +111,9 @@ import std/int
                 seen, set = most.compare_and_set(seen, now)
                 break if set
               end
+{% if flag?(:madeparallel_force) %}
+              fail("unit: a second task of the unit never ran beside the first") unless IyiWorkers.forced_meet
+{% end %}
               until_ns = __iyi_monotonic_ns + SPIN_NS
               while __iyi_monotonic_ns < until_ns
               end
@@ -134,7 +138,8 @@ import std/int
       end
     end
     if most.get != 1_i64
-      fail("unit: #{most.get} tasks of one unit were running at one instant")
+      puts "unit: #{most.get} tasks of one unit were running at one instant"
+      fail("unit: tasks of one unit were running at one instant")
     end
     fail("unit: the unit's array holds #{total.get} of #{TOGETHER} appends") if total.get != TOGETHER
     puts "unit: #{TOGETHER} spawns appending to their parent's array ran one at a time in its unit"
@@ -154,6 +159,9 @@ import std/int
             seen, set = most.compare_and_set(seen, now)
             break if set
           end
+{% if flag?(:optoutignored_force) %}
+          fail("serial: a second spawn(unit: :same) task never ran beside the first") unless IyiWorkers.forced_meet
+{% end %}
           until_ns = __iyi_monotonic_ns + SPIN_NS
           while __iyi_monotonic_ns < until_ns
           end
@@ -184,11 +192,13 @@ import std/int
       end
     end
     if inside.get != 1_i64
-      fail("serial: #{inside.get} spawn(unit: :same) tasks were running at one instant inside a parallel task")
+      puts "serial: #{inside.get} spawn(unit: :same) tasks were running at one instant inside a parallel task"
+      fail("serial: spawn(unit: :same) tasks were running at one instant inside a parallel task")
     end
     outside = serial_round
     if outside != 1_i64
-      fail("serial: #{outside} spawn(unit: :same) tasks were running at one instant on the main thread")
+      puts "serial: #{outside} spawn(unit: :same) tasks were running at one instant on the main thread"
+      fail("serial: spawn(unit: :same) tasks were running at one instant on the main thread")
     end
     puts "serial: spawn(unit: :same) kept #{TOGETHER} tasks that capture only atomics in their unit, one at a time, inside a parallel task and on the main thread"
   end
@@ -215,8 +225,16 @@ import std/int
         end
       end
     end
-    fail("one: #{most.get} eligible spawns were running at one instant on a pool of one") if most.get != 1_i64
-    fail("one: #{away.get} eligible spawns ran on a pool worker, with one worker asked for") if away.get != 0_i64
+    # On a pool of one a preempted task yields to the next, so how many run at
+    # one instant is not fixed; a task that ran on the pool's worker is.
+    if away.get != 0_i64
+      puts "one: #{away.get} eligible spawns ran on a pool worker, with one worker asked for"
+      fail("one: eligible spawns ran on a pool worker, with one worker asked for")
+    end
+    if most.get != 1_i64
+      puts "one: #{most.get} eligible spawns were running at one instant on a pool of one"
+      fail("one: eligible spawns were running at one instant on a pool of one")
+    end
     fail("one: the pool started for eligible spawns on a pool of one") if IyiWorkers.started?
     puts "one: on a pool of one, #{TOGETHER} eligible spawns ran on the main thread, one at a time, and no pool started"
   end
@@ -238,7 +256,8 @@ import std/int
       end
     end
     if missed.get != 0_i64
-      fail("asked: #{missed.get} of #{TOGETHER} spawn(unit: :new) tasks waited #{WAIT_NS // 1000000_i64} ms for the others and left alone: they ran one at a time")
+      puts "asked: #{missed.get} of #{TOGETHER} spawn(unit: :new) tasks were left waiting"
+      fail("asked: spawn(unit: :new) tasks waited #{WAIT_NS // 1000000_i64} ms for the others and left alone: they ran one at a time")
     end
     puts "asked: #{TOGETHER} spawn(unit: :new) tasks were all running at one instant"
   end
@@ -255,7 +274,10 @@ import std/int
         end
       end
     end
-    fail("askedone: #{TOGETHER - away.get} of #{TOGETHER} spawn(unit: :new) tasks ran on the spawner's thread on a pool of one") if away.get != TOGETHER
+    if away.get != TOGETHER
+      puts "askedone: #{TOGETHER - away.get} of #{TOGETHER} spawn(unit: :new) tasks ran on the spawner's thread"
+      fail("askedone: spawn(unit: :new) tasks ran on the spawner's thread on a pool of one")
+    end
     puts "askedone: on a pool of one, #{TOGETHER} spawn(unit: :new) tasks ran on the pool's worker"
   end
 
@@ -264,8 +286,9 @@ import std/int
   # made and joined one at a time may find the worker that ran the last
   # still on its way to idle, and start another: 2 in each of 12 runs on
   # four workers, and 3 in one of three runs on twelve (Linux, 12 vCPUs,
-  # shared), so LIGHT_MOST is 3, short of the pool's four. Four tasks that
-  # spin until all four are running start the four.
+  # shared). The copy that starts all four at once (`wholepool`) starts 4, so
+  # LIGHT_MOST is 3: short of the pool's four.
+  # Four tasks that spin until all four are running start the four.
   LIGHT_ROUNDS = 200
   LIGHT_MOST   =   3
 

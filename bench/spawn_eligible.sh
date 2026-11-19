@@ -458,7 +458,9 @@ fi
 # A line above the spawn moves it to line 9 and makes `app/work` stale, so
 # this rebuild compiles it again: the spawn is named by its def and its
 # block, not by its line, and it has not moved.
-awk 'NR == 2 { print "# Above the spawn: its line moves, and it does not." } { print }' cliff/app/work.iyi > work.iyi.new && mv work.iyi.new cliff/app/work.iyi
+awk 'NR == 2 { print "# Above the spawn: its line moves, and it does not."; found++ } { print } END { if (found != 1) exit 3 }' cliff/app/work.iyi > work.iyi.new &&
+  mv work.iyi.new cliff/app/work.iyi ||
+  { echo "the work fixture could not be moved down one line"; exit 1; }
 rebuild still.log || { echo "the rebuild failed:"; cat still.log; exit 1; }
 if grep -q 'up to date' still.log || grep -q ': note: ' still.log; then
   echo "a rebuild that compiled app/work again and moved nothing did not stay silent:"; cat still.log; exit 1
@@ -744,9 +746,9 @@ forced_words() { # file: the copy-only words go in before the pool's start
     /^  # The pool, started once, on the thread of the first parallel spawn,$/ {
       while ((getline line < words) > 0) print line
       close(words)
-      found = 1
+      found++
     }
-    { print } END { if (!found) exit 3 }' "$1" > "$1.new" ||
+    { print } END { if (found != 1) exit 3 }' "$1" > "$1.new" ||
     { echo "the pool's start is not in the runtime any more"; exit 1; }
   mv "$1.new" "$1"
 }
@@ -755,7 +757,8 @@ broken() { # name, awk program, build flags...
   shift 2
   mkdir -p "$name/iyi"
   cp "$REPO"/src/iyi/*.iyi "$name/iyi/"
-  awk "$program" "$REPO/src/iyi/concurrency.iyi" > "$name/iyi/concurrency.iyi"
+  awk "$program" "$REPO/src/iyi/concurrency.iyi" > "$name/iyi/concurrency.iyi" ||
+    { echo "the awk for $name failed: an anchor is missing or duplicated"; exit 1; }
   if cmp -s "$name/iyi/concurrency.iyi" "$REPO/src/iyi/concurrency.iyi"; then
     echo "the awk for $name found nothing to change"; exit 1
   fi
@@ -779,28 +782,28 @@ caught() { # name, exact sentence, step arguments...
 }
 
 step "failure proof: an eligible spawn left in its unit"
-broken leftserial '/^      return in_unit\(&block\) unless IyiWorkers.parallel\?$/ { print "      return in_unit(&block)"; next } { print }'
+broken leftserial '/^    private def spawn_pooled\(/ { inside = 1; defs++ } inside && /^      return in_unit\(&block\) unless IyiWorkers.parallel\?$/ { print "      return in_unit(&block)"; hits++; next } inside && /^    end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }'
 caught leftserial 'together: eligible spawns waited 2000 ms for the others and left alone: they ran one at a time' together --workers=4
 
 step "failure proof: an ineligible spawn sent to the pool"
-broken madeparallel '/^  def spawn\(&block/ { inspawn = 1 } inspawn && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; inspawn = 0; next } { print }' -Dmadeparallel_force
+broken madeparallel '/^  def spawn\(&block/ { inside = 1; defs++ } inside && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; hits++; next } inside && /^  end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }' -Dmadeparallel_force
 caught madeparallel 'unit: tasks of one unit were running at one instant' unit --workers=4
 
 step "failure proof: unit: :same sent to the pool"
-broken optoutignored '/^  def spawn\(\*, unit : Symbol, &block/ { inserial = 1 } inserial && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; inserial = 0; next } { print }' -Doptoutignored_force
+broken optoutignored '/^  def spawn\(\*, unit : Symbol, &block/ { inside = 1; defs++ } inside && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; hits++; next } inside && /^  end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }' -Doptoutignored_force
 caught optoutignored 'serial: spawn(unit: :same) tasks were running at one instant inside a parallel task' serial --workers=4
 
 step "failure proof: unit: :new left in its unit"
-broken askedignored '/^    private def spawn_new\(/ { inasked = 1 } inasked && /^      on_pool\(pinned, &block\)$/ { print "      in_unit(&block)"; inasked = 0; next } { print }'
+broken askedignored '/^    private def spawn_new\(/ { inside = 1; defs++ } inside && /^      on_pool\(pinned, &block\)$/ { print "      in_unit(&block)"; hits++; next } inside && /^    end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }'
 caught askedignored 'asked: spawn(unit: :new) tasks waited 2000 ms for the others and left alone: they ran one at a time' asked --workers=4
 caught askedignored "askedone: spawn(unit: :new) tasks ran on the spawner's thread on a pool of one" askedone --workers=1
 
 step "failure proof: a pool of one that starts for eligible spawns"
-broken oneignored '/^  def self.parallel\? : Bool$/ { print; print "    return true"; next } { print }'
+broken oneignored '/^  def self.parallel\? : Bool$/ { print; print "    return true"; hits++; next } { print } END { if (hits != 1) exit 3 }'
 caught oneignored "one: eligible spawns ran on a pool worker, with one worker asked for" one --workers=1
 
 step "failure proof: a pool that starts every worker at once"
-broken wholepool '/^      start_monitor$/ { print "      while word(pointerof(@@launched)).value.get < @@started.to_i64"; print "        word(pointerof(@@launched)).value.add(1_i64)"; print "        word(pointerof(@@spinning)).value.add(1_i64)"; print "        IyiThread.start { IyiWorkers.work }"; print "      end" } { print }'
+broken wholepool '/^  def self.start : Nil$/ { inside = 1; defs++ } inside && /^      start_monitor$/ { print "      while word(pointerof(@@launched)).value.get < @@started.to_i64"; print "        word(pointerof(@@launched)).value.add(1_i64)"; print "        word(pointerof(@@spinning)).value.add(1_i64)"; print "        IyiThread.start { IyiWorkers.work }"; print "      end"; hits++ } inside && /^  end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }'
 caught wholepool "grows: one eligible spawn started 4 of the pool's 4 workers" grows --workers=4
 
 step "failure proof: a pool that never starts a second worker"
@@ -820,18 +823,23 @@ caught nevergrows "grows: 4 eligible spawns running at one instant started 1 of 
 step "a spawn landing between a worker's empty look and its idle count starts no second worker"
 mkdir -p widened/iyi
 cp "$REPO"/src/iyi/*.iyi widened/iyi/
-awk '/^  def self\.work : Nil$/ { inwork = 1 }
-  inwork && /^      while true$/ { print "      widened = slot != 0_i64"; inwork = 0; a = 1 }
-  /^          IyiScheduler\.idle_worker\(st\)$/ {
+awk '/^  def self\.work : Nil$/ { inwork = 1; workdefs++ }
+  /^  def self\.start : Nil$/ { instart = 1; startdefs++ }
+  /^    private def pooled\(/ { inpooled = 1; pooleddefs++ }
+  inwork && /^      while true$/ { print "      widened = slot != 0_i64"; a++ }
+  inwork && /^          IyiScheduler\.idle_worker\(st\)$/ {
     print "          unless widened"
     print "            widened = true"
     print "            IyiWorkers.forced_enter"
     print "            IyiWorkers.forced_wait_pushed"
     print "          end"
-    print; b = 1; next }
-  /^      start_monitor$/ { print; print "      IyiWorkers.forced_wait_entered"; c = 1; next }
-  /^      IyiWorkers\.pay$/ { print; print "      IyiWorkers.forced_set_pushed"; d = 1; next }
-  { print } END { if (!a || !b || !c || !d) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > widened/iyi/concurrency.iyi ||
+    b++ }
+  instart && /^      start_monitor$/ { print; print "      IyiWorkers.forced_wait_entered"; c++; next }
+  inpooled && /^      IyiWorkers\.pay$/ { print; print "      IyiWorkers.forced_set_pushed"; d++; next }
+  inwork && /^  end$/ { inwork = 0 }
+  instart && /^  end$/ { instart = 0 }
+  inpooled && /^    end$/ { inpooled = 0 }
+  { print } END { if (workdefs != 1 || startdefs != 1 || pooleddefs != 1 || a != 1 || b != 1 || c != 1 || d != 1) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > widened/iyi/concurrency.iyi ||
   { echo "the worker's look, the pool's start and the spawn's push this step holds are not in the runtime any more"; exit 1; }
 forced_words widened/iyi/concurrency.iyi
 if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_eligible.iyi" -o widened-run > build-widened.log 2>&1; then
@@ -847,8 +855,10 @@ echo "  the window held open, and the push after it: $(grep -m1 '^grows: one' wi
 step "failure proof: the token given back before the idle count"
 mkdir -p early/iyi
 cp "$REPO"/src/iyi/*.iyi early/iyi/
-awk '/^          IyiScheduler\.release_unit\(st\)$/ { print "          stop_spinning(st, false)"; found = 1 }
-  { print } END { if (!found) exit 3 }' widened/iyi/concurrency.iyi > early/iyi/concurrency.iyi ||
+awk '/^  def self\.work : Nil$/ { inside = 1; defs++ }
+  inside && /^          IyiScheduler\.release_unit\(st\)$/ { print "          stop_spinning(st, false)"; found++ }
+  inside && /^  end$/ { inside = 0 }
+  { print } END { if (defs != 1 || found != 1) exit 3 }' widened/iyi/concurrency.iyi > early/iyi/concurrency.iyi ||
   { echo "the worker's way to idle this proof reorders is not in the runtime any more"; exit 1; }
 if ! IYI_PATH="$WORK/early${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_eligible.iyi" -o early-run > build-early.log 2>&1; then
   echo "the broken copy early failed to build:"; tail -20 build-early.log; exit 1
@@ -858,8 +868,9 @@ caught early "grows: one eligible spawn started 2 of the pool's 4 workers" grows
 step "failure proof: spawn_parallel kept as an alias"
 mkdir -p alias/iyi
 cp "$REPO"/src/iyi/*.iyi alias/iyi/
-awk '/^    private def spawn_new\(/ { print "    def spawn_parallel(&block : -> T) : IyiTask(T) forall T"; print "      on_pool(false, &block)"; print "    end"; print "" } { print }' \
-  "$REPO/src/iyi/concurrency.iyi" > alias/iyi/concurrency.iyi
+awk '/^    private def spawn_new\(/ { print "    def spawn_parallel(&block : -> T) : IyiTask(T) forall T"; print "      on_pool(false, &block)"; print "    end"; print ""; found++ } { print } END { if (found != 1) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > alias/iyi/concurrency.iyi ||
+  { echo "the alias anchor is missing or duplicated"; exit 1; }
 if cmp -s alias/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi"; then
   echo "the awk for alias found nothing to change"; exit 1
 fi
@@ -871,8 +882,9 @@ echo "  caught: with the alias, spawn_parallel at old.iyi:5 is not refused ($(gr
 step "failure proof: serial: kept as an alias"
 mkdir -p serial_alias/iyi
 cp "$REPO"/src/iyi/*.iyi serial_alias/iyi/
-awk '/^  def spawn\(\*, unit : Symbol, &block/ { print "  def spawn(*, serial : Bool, &block : -> T) : IyiTask(T) forall T"; print "    in_unit(&block)"; print "  end"; print "" } { print }' \
-  "$REPO/src/iyi/concurrency.iyi" > serial_alias/iyi/concurrency.iyi
+awk '/^  def spawn\(\*, unit : Symbol, &block/ { print "  def spawn(*, serial : Bool, &block : -> T) : IyiTask(T) forall T"; print "    in_unit(&block)"; print "  end"; print ""; found++ } { print } END { if (found != 1) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > serial_alias/iyi/concurrency.iyi ||
+  { echo "the serial alias anchor is missing or duplicated"; exit 1; }
 if cmp -s serial_alias/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi"; then
   echo "the awk for serial_alias found nothing to change"; exit 1
 fi

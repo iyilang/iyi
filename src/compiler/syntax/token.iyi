@@ -1,0 +1,691 @@
+module compiler/syntax/token
+
+import compiler/foundation/location::{Location}
+import compiler/foundation/enums
+
+pub enum Keyword
+  ABSTRACT
+  ALIAS
+  ALIGNOF
+  ANNOTATION
+  AS
+  AS_QUESTION
+  ASM
+  BEGIN
+  BREAK
+  CASE
+  CLASS
+  DEF
+  DO
+  ELSE
+  ELSIF
+  END
+  ENSURE
+  ENUM
+  EXTEND
+  FALSE
+  FOR
+  FUN
+  IF
+  IMPL
+  IMPORT
+  IN
+  INCLUDE
+  INSTANCE_ALIGNOF
+  INSTANCE_SIZEOF
+  IS_A_QUESTION
+  LIB
+  MACRO
+  MODULE
+  NEXT
+  NIL
+  NIL_QUESTION
+  OF
+  OFFSETOF
+  OUT
+  POINTEROF
+  PRIVATE
+  PROTECTED
+  PUB
+  REQUIRE
+  RESCUE
+  RESPONDS_TO_QUESTION
+  RETURN
+  SELECT
+  SELF
+  SIZEOF
+  STRUCT
+  SUPER
+  THEN
+  TRAIT
+  TRUE
+  TYPE
+  TYPEOF
+  UNINITIALIZED
+  UNION
+  UNLESS
+  UNTIL
+  USING
+  VERBATIM
+  WHEN
+  WHILE
+  WITH
+  YIELD
+
+  def to_s : String
+    case self
+    when AS_QUESTION
+      "as?"
+    when IS_A_QUESTION
+      "is_a?"
+    when NIL_QUESTION
+      "nil?"
+    when RESPONDS_TO_QUESTION
+      "responds_to?"
+    when ABSTRACT         then "abstract"
+    when ALIAS            then "alias"
+    when ALIGNOF          then "alignof"
+    when ANNOTATION       then "annotation"
+    when AS               then "as"
+    when ASM              then "asm"
+    when BEGIN            then "begin"
+    when BREAK            then "break"
+    when CASE             then "case"
+    when CLASS            then "class"
+    when DEF              then "def"
+    when DO               then "do"
+    when ELSE             then "else"
+    when ELSIF            then "elsif"
+    when END              then "end"
+    when ENSURE           then "ensure"
+    when ENUM             then "enum"
+    when EXTEND           then "extend"
+    when FALSE            then "false"
+    when FOR              then "for"
+    when FUN              then "fun"
+    when IF               then "if"
+    when IMPL             then "impl"
+    when IMPORT           then "import"
+    when IN               then "in"
+    when INCLUDE          then "include"
+    when INSTANCE_ALIGNOF then "instance_alignof"
+    when INSTANCE_SIZEOF  then "instance_sizeof"
+    when LIB              then "lib"
+    when MACRO            then "macro"
+    when MODULE           then "module"
+    when NEXT             then "next"
+    when NIL              then "nil"
+    when OF               then "of"
+    when OFFSETOF         then "offsetof"
+    when OUT              then "out"
+    when POINTEROF        then "pointerof"
+    when PRIVATE          then "private"
+    when PROTECTED        then "protected"
+    when PUB              then "pub"
+    when REQUIRE          then "require"
+    when RESCUE           then "rescue"
+    when RETURN           then "return"
+    when SELECT           then "select"
+    when SELF             then "self"
+    when SIZEOF           then "sizeof"
+    when STRUCT           then "struct"
+    when SUPER            then "super"
+    when THEN             then "then"
+    when TRAIT            then "trait"
+    when TRUE             then "true"
+    when TYPE             then "type"
+    when TYPEOF           then "typeof"
+    when UNINITIALIZED    then "uninitialized"
+    when UNION            then "union"
+    when UNLESS           then "unless"
+    when UNTIL            then "until"
+    when USING            then "using"
+    when VERBATIM         then "verbatim"
+    when WHEN             then "when"
+    when WHILE            then "while"
+    when WITH             then "with"
+    when YIELD            then "yield"
+    else
+      "keyword"
+    end
+  end
+end
+
+pub enum NumberKind
+  I8
+  I16
+  I32
+  I64
+  I128
+  U8
+  U16
+  U32
+  U64
+  U128
+  F32
+  F64
+
+  def to_s : String
+    case self
+    when I8   then "i8"
+    when I16  then "i16"
+    when I32  then "i32"
+    when I64  then "i64"
+    when I128 then "i128"
+    when U8   then "u8"
+    when U16  then "u16"
+    when U32  then "u32"
+    when U64  then "u64"
+    when U128 then "u128"
+    when F32  then "f32"
+    when F64  then "f64"
+    else           "i32"
+    end
+  end
+
+  def float? : Bool
+    self == F32 || self == F64
+  end
+
+  def signed? : Bool
+    self == I8 || self == I16 || self == I32 || self == I64 || self == I128
+  end
+
+  def unsigned? : Bool
+    self == U8 || self == U16 || self == U32 || self == U64 || self == U128
+  end
+
+  def bit_width : Int32
+    case self
+    when I8, U8        then 8
+    when I16, U16      then 16
+    when I32, U32, F32 then 32
+    when I64, U64, F64 then 64
+    when I128, U128    then 128
+    else                    32
+    end
+  end
+end
+
+pub enum DelimiterKind
+  STRING
+  REGEX
+  STRING_ARRAY
+  SYMBOL_ARRAY
+  COMMAND
+  HEREDOC
+
+  def array? : Bool
+    self == STRING_ARRAY || self == SYMBOL_ARRAY
+  end
+
+  def string? : Bool
+    self == STRING
+  end
+
+  def regex? : Bool
+    self == REGEX
+  end
+
+  def command? : Bool
+    self == COMMAND
+  end
+
+  def heredoc? : Bool
+    self == HEREDOC
+  end
+
+  def to_s : String
+    case self
+    when STRING       then "string"
+    when REGEX        then "regex"
+    when STRING_ARRAY then "string_array"
+    when SYMBOL_ARRAY then "symbol_array"
+    when COMMAND      then "command"
+    when HEREDOC      then "heredoc"
+    else                   "delimiter"
+    end
+  end
+end
+
+pub struct DelimiterState
+  getter kind : DelimiterKind
+  getter nest : String
+  getter the_end : String
+  getter open_count : Int32
+  getter heredoc_indent : Int32
+  getter allow_escapes : Bool
+
+  def initialize(@kind : DelimiterKind, @nest : String, @the_end : String, @open_count : Int32 = 0, @heredoc_indent : Int32 = 0, @allow_escapes : Bool = true)
+  end
+
+  def self.default : DelimiterState
+    DelimiterState.new(DelimiterKind::STRING, "\0", "\0", 0, 0, true)
+  end
+
+  def with_open_count_delta(delta : Int32) : DelimiterState
+    DelimiterState.new(@kind, @nest, @the_end, @open_count + delta, @heredoc_indent, @allow_escapes)
+  end
+
+  def with_heredoc_indent(indent : Int32) : DelimiterState
+    DelimiterState.new(@kind, @nest, @the_end, @open_count, indent, @allow_escapes)
+  end
+end
+
+pub enum MacroKeywordState
+  AbstractDef
+  Other
+end
+
+pub struct MacroState
+  property whitespace : Bool
+  property nest : Int32
+  property control_nest : Int32
+  property delimiter_state : DelimiterState?
+  property beginning_of_line : Bool
+  property yields : Bool
+  property comment : Bool
+  property heredocs : Array(DelimiterState)?
+
+  def initialize(@whitespace : Bool = true, @nest : Int32 = 0, @control_nest : Int32 = 0, @delimiter_state : DelimiterState? = nil, @beginning_of_line : Bool = true, @yields : Bool = false, @comment : Bool = false, @heredocs : Array(DelimiterState)? = nil)
+  end
+
+  def self.default : MacroState
+    MacroState.new(true, 0, 0, nil, true, false, false, nil)
+  end
+end
+
+pub enum TokenKind
+  EOF
+  SPACE
+  NEWLINE
+
+  IDENT
+  CONST
+  INSTANCE_VAR
+  CLASS_VAR
+
+  CHAR
+  STRING
+  SYMBOL
+  NUMBER
+
+  UNDERSCORE
+  COMMENT
+
+  DELIMITER_START
+  DELIMITER_END
+
+  STRING_ARRAY_START
+  INTERPOLATION_START
+  SYMBOL_ARRAY_START
+  STRING_ARRAY_END
+
+  GLOBAL
+  GLOBAL_MATCH_DATA_INDEX
+
+  MAGIC_DIR
+  MAGIC_END_LINE
+  MAGIC_FILE
+  MAGIC_LINE
+
+  MACRO_LITERAL
+  MACRO_EXPRESSION_START
+  MACRO_CONTROL_START
+  MACRO_VAR
+  MACRO_END
+
+  OP_BANG
+  OP_BANG_EQ
+  OP_BANG_TILDE
+  OP_DOLLAR_QUESTION
+  OP_DOLLAR_TILDE
+  OP_PERCENT
+  OP_PERCENT_EQ
+  OP_PERCENT_RCURLY
+  OP_AMP
+  OP_AMP_AMP
+  OP_AMP_AMP_EQ
+  OP_AMP_STAR
+  OP_AMP_STAR_STAR
+  OP_AMP_STAR_EQ
+  OP_AMP_PLUS
+  OP_AMP_PLUS_EQ
+  OP_AMP_MINUS
+  OP_AMP_MINUS_EQ
+  OP_AMP_EQ
+  OP_LPAREN
+  OP_RPAREN
+  OP_STAR
+  OP_STAR_STAR
+  OP_STAR_STAR_EQ
+  OP_STAR_EQ
+  OP_PLUS
+  OP_PLUS_EQ
+  OP_COMMA
+  OP_MINUS
+  OP_MINUS_EQ
+  OP_MINUS_GT
+  OP_PERIOD
+  OP_PERIOD_PERIOD
+  OP_PERIOD_PERIOD_PERIOD
+  OP_SLASH
+  OP_SLASH_SLASH
+  OP_SLASH_SLASH_EQ
+  OP_SLASH_EQ
+  OP_COLON
+  OP_COLON_COLON
+  OP_SEMICOLON
+  OP_LT
+  OP_LT_LT
+  OP_LT_LT_EQ
+  OP_LT_EQ
+  OP_LT_EQ_GT
+  OP_EQ
+  OP_EQ_EQ
+  OP_EQ_EQ_EQ
+  OP_EQ_GT
+  OP_EQ_TILDE
+  OP_GT
+  OP_GT_EQ
+  OP_GT_GT
+  OP_GT_GT_EQ
+  OP_QUESTION
+  OP_AT_LSQUARE
+  OP_LSQUARE
+  OP_LSQUARE_RSQUARE
+  OP_LSQUARE_RSQUARE_EQ
+  OP_LSQUARE_RSQUARE_QUESTION
+  OP_RSQUARE
+  OP_CARET
+  OP_CARET_EQ
+  OP_GRAVE
+  OP_LCURLY
+  OP_LCURLY_PERCENT
+  OP_LCURLY_LCURLY
+  OP_BAR
+  OP_BAR_EQ
+  OP_BAR_BAR
+  OP_BAR_BAR_EQ
+  OP_RCURLY
+  OP_TILDE
+
+  def to_s : String
+    case self
+    when EOF                         then "EOF"
+    when SPACE                       then "SPACE"
+    when NEWLINE                     then "NEWLINE"
+    when IDENT                       then "IDENT"
+    when CONST                       then "CONST"
+    when INSTANCE_VAR                then "INSTANCE_VAR"
+    when CLASS_VAR                   then "CLASS_VAR"
+    when CHAR                        then "CHAR"
+    when STRING                      then "STRING"
+    when SYMBOL                      then "SYMBOL"
+    when NUMBER                      then "NUMBER"
+    when UNDERSCORE                  then "_"
+    when COMMENT                     then "COMMENT"
+    when DELIMITER_START             then "DELIMITER_START"
+    when DELIMITER_END               then "DELIMITER_END"
+    when STRING_ARRAY_START          then "STRING_ARRAY_START"
+    when INTERPOLATION_START         then "INTERPOLATION_START"
+    when SYMBOL_ARRAY_START          then "SYMBOL_ARRAY_START"
+    when STRING_ARRAY_END            then "STRING_ARRAY_END"
+    when GLOBAL                      then "GLOBAL"
+    when GLOBAL_MATCH_DATA_INDEX     then "GLOBAL_MATCH_DATA_INDEX"
+    when MAGIC_DIR                   then "__DIR__"
+    when MAGIC_END_LINE              then "__END_LINE__"
+    when MAGIC_FILE                  then "__FILE__"
+    when MAGIC_LINE                  then "__LINE__"
+    when MACRO_LITERAL               then "MACRO_LITERAL"
+    when MACRO_EXPRESSION_START      then "{{"
+    when MACRO_CONTROL_START         then "{%"
+    when MACRO_VAR                   then "MACRO_VAR"
+    when MACRO_END                   then "MACRO_END"
+    when OP_BANG                     then "!"
+    when OP_BANG_EQ                  then "!="
+    when OP_BANG_TILDE               then "!~"
+    when OP_DOLLAR_QUESTION          then "$?"
+    when OP_DOLLAR_TILDE             then "$~"
+    when OP_PERCENT                  then "%"
+    when OP_PERCENT_EQ               then "%="
+    when OP_PERCENT_RCURLY           then "%}"
+    when OP_AMP                      then "&"
+    when OP_AMP_AMP                  then "&&"
+    when OP_AMP_AMP_EQ               then "&&="
+    when OP_AMP_STAR                 then "&*"
+    when OP_AMP_STAR_STAR            then "&**"
+    when OP_AMP_STAR_EQ              then "&*="
+    when OP_AMP_PLUS                 then "&+"
+    when OP_AMP_PLUS_EQ              then "&+="
+    when OP_AMP_MINUS                then "&-"
+    when OP_AMP_MINUS_EQ             then "&-="
+    when OP_AMP_EQ                   then "&="
+    when OP_LPAREN                   then "("
+    when OP_RPAREN                   then ")"
+    when OP_STAR                     then "*"
+    when OP_STAR_STAR                then "**"
+    when OP_STAR_STAR_EQ             then "**="
+    when OP_STAR_EQ                  then "*="
+    when OP_PLUS                     then "+"
+    when OP_PLUS_EQ                  then "+="
+    when OP_COMMA                    then ","
+    when OP_MINUS                    then "-"
+    when OP_MINUS_EQ                 then "-="
+    when OP_MINUS_GT                 then "->"
+    when OP_PERIOD                   then "."
+    when OP_PERIOD_PERIOD            then ".."
+    when OP_PERIOD_PERIOD_PERIOD     then "..."
+    when OP_SLASH                    then "/"
+    when OP_SLASH_SLASH              then "//"
+    when OP_SLASH_SLASH_EQ           then "//="
+    when OP_SLASH_EQ                 then "/="
+    when OP_COLON                    then ":"
+    when OP_COLON_COLON              then "::"
+    when OP_SEMICOLON                then ";"
+    when OP_LT                       then "<"
+    when OP_LT_LT                    then "<<"
+    when OP_LT_LT_EQ                 then "<<="
+    when OP_LT_EQ                    then "<="
+    when OP_LT_EQ_GT                 then "<=>"
+    when OP_EQ                       then "="
+    when OP_EQ_EQ                    then "=="
+    when OP_EQ_EQ_EQ                 then "==="
+    when OP_EQ_GT                    then "=>"
+    when OP_EQ_TILDE                 then "=~"
+    when OP_GT                       then ">"
+    when OP_GT_EQ                    then ">="
+    when OP_GT_GT                    then ">>"
+    when OP_GT_GT_EQ                 then ">>="
+    when OP_QUESTION                 then "?"
+    when OP_AT_LSQUARE               then "@["
+    when OP_LSQUARE                  then "["
+    when OP_LSQUARE_RSQUARE          then "[]"
+    when OP_LSQUARE_RSQUARE_EQ       then "[]="
+    when OP_LSQUARE_RSQUARE_QUESTION then "[]?"
+    when OP_RSQUARE                  then "]"
+    when OP_CARET                    then "^"
+    when OP_CARET_EQ                 then "^="
+    when OP_GRAVE                    then "`"
+    when OP_LCURLY                   then "{"
+    when OP_LCURLY_PERCENT           then "{%"
+    when OP_LCURLY_LCURLY            then "{{"
+    when OP_BAR                      then "|"
+    when OP_BAR_EQ                   then "|="
+    when OP_BAR_BAR                  then "||"
+    when OP_BAR_BAR_EQ               then "||="
+    when OP_RCURLY                   then "}"
+    when OP_TILDE                    then "~"
+    else                                  "UNKNOWN"
+    end
+  end
+
+  def operator? : Bool
+    self.value >= OP_BANG.value && self.value <= OP_TILDE.value
+  end
+
+  def assignment_operator? : Bool
+    self == OP_PLUS_EQ || self == OP_MINUS_EQ || self == OP_STAR_EQ ||
+      self == OP_SLASH_EQ || self == OP_SLASH_SLASH_EQ || self == OP_PERCENT_EQ ||
+      self == OP_BAR_EQ || self == OP_AMP_EQ || self == OP_CARET_EQ ||
+      self == OP_STAR_STAR_EQ || self == OP_LT_LT_EQ || self == OP_GT_GT_EQ ||
+      self == OP_BAR_BAR_EQ || self == OP_AMP_AMP_EQ || self == OP_AMP_PLUS_EQ ||
+      self == OP_AMP_MINUS_EQ || self == OP_AMP_STAR_EQ
+  end
+
+  def unary_operator? : Bool
+    self == OP_BANG || self == OP_PLUS || self == OP_MINUS ||
+      self == OP_TILDE || self == OP_AMP_PLUS || self == OP_AMP_MINUS
+  end
+
+  def magic? : Bool
+    self == MAGIC_DIR || self == MAGIC_END_LINE || self == MAGIC_FILE || self == MAGIC_LINE
+  end
+end
+
+pub class Token
+  property type : TokenKind
+  property value : String
+  property keyword : Keyword?
+  property number_kind : NumberKind
+  property line_number : Int32
+  property column_number : Int32
+  property filename : String
+  property delimiter_state : DelimiterState
+  property macro_state : MacroState
+  property passed_backslash_newline : Bool
+  property doc : String?
+  property raw : String
+  property start : Int32
+  property invalid_escape : Bool
+
+  def initialize
+    @type = TokenKind::EOF
+    @value = ""
+    @keyword = nil
+    @number_kind = NumberKind::I32
+    @line_number = 0
+    @column_number = 0
+    @filename = ""
+    @delimiter_state = DelimiterState.default
+    @macro_state = MacroState.default
+    @passed_backslash_newline = false
+    @doc = nil
+    @raw = ""
+    @start = 0
+    @invalid_escape = false
+  end
+
+  def location : Location
+    Location.new(@filename, @line_number, @column_number)
+  end
+
+  def keyword? : Bool
+    @type == TokenKind::IDENT && !@keyword.nil?
+  end
+
+  def keyword?(kw : Keyword) : Bool
+    @type == TokenKind::IDENT && @keyword == kw
+  end
+
+  def copy_from(other : Token)
+    @type = other.type
+    @value = other.value
+    @keyword = other.keyword
+    @number_kind = other.number_kind
+    @line_number = other.line_number
+    @column_number = other.column_number
+    @filename = other.filename
+    @delimiter_state = other.delimiter_state
+    @macro_state = other.macro_state
+    @passed_backslash_newline = other.passed_backslash_newline
+    @doc = other.doc
+    @raw = other.raw
+    @start = other.start
+    @invalid_escape = other.invalid_escape
+  end
+
+  def to_s : String
+    if @value.empty?
+      @type.to_s
+    else
+      @value
+    end
+  end
+
+  private def escape_string_for_normalized(s : String) : String
+    res = "\""
+    i = 0
+    while i < s.bytesize
+      case s[i]
+      when '\n' then res = res + "\\n"
+      when '\r' then res = res + "\\r"
+      when '\t' then res = res + "\\t"
+      when '\\' then res = res + "\\\\"
+      when '"'  then res = res + "\\\""
+      else           res = res + s[i].to_s
+      end
+      i = i + 1
+    end
+    res + "\""
+  end
+
+  def normalized_s : String
+    case @type
+    when TokenKind::IDENT
+      if kw = @keyword
+        "IDENT Keyword::#{kw.to_s.upcase}"
+      else
+        "IDENT #{escape_string_for_normalized(@value)}"
+      end
+    when TokenKind::NUMBER
+      "NUMBER #{escape_string_for_normalized(@value)} #{@number_kind.to_s}"
+    when TokenKind::CONST
+      "CONST #{escape_string_for_normalized(@value)}"
+    when TokenKind::INSTANCE_VAR
+      "INSTANCE_VAR #{escape_string_for_normalized(@value)}"
+    when TokenKind::CLASS_VAR
+      "CLASS_VAR #{escape_string_for_normalized(@value)}"
+    when TokenKind::CHAR
+      "CHAR #{escape_string_for_normalized(@value)}"
+    when TokenKind::STRING
+      "STRING #{escape_string_for_normalized(@value)}"
+    when TokenKind::SYMBOL
+      "SYMBOL #{escape_string_for_normalized(@value)}"
+    when TokenKind::COMMENT
+      "COMMENT #{escape_string_for_normalized(@value)}"
+    when TokenKind::GLOBAL
+      "GLOBAL #{escape_string_for_normalized(@value)}"
+    when TokenKind::GLOBAL_MATCH_DATA_INDEX
+      "GLOBAL_MATCH_DATA_INDEX #{escape_string_for_normalized(@value)}"
+    when TokenKind::SPACE
+      "SPACE nil"
+    when TokenKind::NEWLINE
+      "NEWLINE nil"
+    when TokenKind::EOF
+      "EOF nil"
+    when TokenKind::DELIMITER_START
+      "DELIMITER_START nil"
+    when TokenKind::DELIMITER_END
+      "DELIMITER_END nil"
+    when TokenKind::STRING_ARRAY_START
+      "STRING_ARRAY_START nil"
+    when TokenKind::STRING_ARRAY_END
+      "STRING_ARRAY_END nil"
+    when TokenKind::SYMBOL_ARRAY_START
+      "SYMBOL_ARRAY_START nil"
+    when TokenKind::INTERPOLATION_START
+      "INTERPOLATION_START nil"
+    when TokenKind::MAGIC_DIR, TokenKind::MAGIC_FILE, TokenKind::MAGIC_LINE, TokenKind::MAGIC_END_LINE
+      "#{@type.to_s} nil"
+    when TokenKind::UNDERSCORE
+      "_ nil"
+    else
+      if @type.operator?
+        "#{@type.to_s} nil"
+      else
+        "#{@type.to_s} #{escape_string_for_normalized(@value)}"
+      end
+    end
+  end
+end

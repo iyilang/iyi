@@ -1,0 +1,17 @@
+# Associativity fixture
+# Power is right-associative: a ** b ** c is a ** (b ** c)
+r1 = 2 ** 3 ** 4
+
+# Subtraction is left-associative: a - b - c is (a - b) - c
+r2 = 100 - 20 - 5
+
+# Division is left-associative: a / b / c is (a / b) / c
+r3 = 100 / 5 / 2
+
+# Chained assignment is right-associative: a = b = c = 10
+x = y = z = 42
+
+# Ternary is right-associative: a ? b : c ? d : e
+cond1 = true
+cond2 = false
+r4 = cond1 ? 1 : cond2 ? 2 : 3

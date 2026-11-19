@@ -1,0 +1,66 @@
+trait BaseTrait
+  abstract def id : Int32
+end
+
+trait Greet
+  abstract def message : String
+end
+
+trait Converter(From, To)
+  abstract def convert(value : From) : To
+end
+
+trait Ordered : BaseTrait
+  abstract def order : Int32
+end
+
+class User
+end
+
+class Box(T)
+end
+
+trait Printable
+  abstract def print_out : String
+end
+
+class Sequence
+end
+
+impl Greet for User
+  def message : String
+    "hello"
+  end
+end
+
+impl Greet for Box(T) forall T
+  def message : String
+    "box"
+  end
+end
+
+impl Printable for Box(T) forall T
+  def print_out : String
+    "box"
+  end
+end
+
+impl Converter(Int32, String) for User
+  def convert(value : Int32) : String
+    "converted"
+  end
+end
+
+trait ItemIterator
+  type Item
+
+  abstract def next : Item?
+end
+
+impl ItemIterator for Sequence
+  type Item = Int32
+
+  def next : Int32?
+    nil
+  end
+end

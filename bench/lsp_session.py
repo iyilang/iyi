@@ -502,9 +502,14 @@ def package_fixture(home):
     env = dict(os.environ)
     lib = os.path.join(home, "work", "liba")
     os.makedirs(lib, exist_ok=True)
+    # Signing off in this repository's own config: a machine whose global
+    # config signs commits and tags (`git tag` then wants a message and a
+    # key) must not decide whether this gate can build its fixture.
     steps = [["git", "init", "-q", lib],
              ["git", "-C", lib, "config", "user.email", "t@t"],
-             ["git", "-C", lib, "config", "user.name", "t"]]
+             ["git", "-C", lib, "config", "user.name", "t"],
+             ["git", "-C", lib, "config", "commit.gpgsign", "false"],
+             ["git", "-C", lib, "config", "tag.gpgsign", "false"]]
     for command in steps:
         if subprocess.run(command, capture_output=True).returncode != 0:
             return None

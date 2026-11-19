@@ -1137,6 +1137,143 @@ for i in "${!refusal_text_sources[@]}"; do
   fi
 done
 
+echo "== Declarations inside a def or a fun: both parsers refuse with the hosted text, and accept the valid forms"
+# Each refusal row is a source and the text both refusals must carry (parser.cr 1970-1977, 1748, 1758-1763, 5493-5503).
+declaration_refusal_sources=(
+  $'def f\n  abstract def g : Int32\nend\n'
+  $'def f\n  def g\n  end\nend\n'
+  $'def f\n  macro m\n  end\nend\n'
+  $'def f\n  require "x"\nend\n'
+  $'def f\n  include Foo\nend\n'
+  $'def f\n  extend Foo\nend\n'
+  $'def f\n  class Foo\n  end\nend\n'
+  $'def f\n  struct Foo\n  end\nend\n'
+  $'def f\n  module Foo\n  end\nend\n'
+  $'def f\n  trait Foo\n  end\nend\n'
+  $'def f\n  impl Foo\n  end\nend\n'
+  $'def f\n  import "x"\nend\n'
+  $'def f\n  using Foo\nend\n'
+  $'def f\n  pub def g\n  end\nend\n'
+  $'def f\n  enum E\n  end\nend\n'
+  $'def f\n  lib L\n  end\nend\n'
+  $'def f\n  fun g\n  end\nend\n'
+  $'def f\n  alias A = B\nend\n'
+  $'def f\n  annotation A\n  end\nend\n'
+  $'trait T\n  def f\n    type X\n  end\nend\n'
+  $'fun f\n  abstract def g : Int32\nend\n'
+  $'fun f\n  def g\n  end\nend\n'
+  $'fun f\n  macro m\n  end\nend\n'
+  $'fun f\n  require "x"\nend\n'
+  $'fun f\n  include Foo\nend\n'
+  $'fun f\n  extend Foo\nend\n'
+  $'fun f\n  class Foo\n  end\nend\n'
+  $'fun f\n  struct Foo\n  end\nend\n'
+  $'fun f\n  module Foo\n  end\nend\n'
+  $'fun f\n  trait Foo\n  end\nend\n'
+  $'fun f\n  impl Foo\n  end\nend\n'
+  $'fun f\n  import "x"\nend\n'
+  $'fun f\n  using Foo\nend\n'
+  $'fun f\n  pub def g\n  end\nend\n'
+  $'fun f\n  enum E\n  end\nend\n'
+  $'fun f\n  lib L\n  end\nend\n'
+  $'fun f\n  fun g\n  end\nend\n'
+  $'fun f\n  alias A = B\nend\n'
+  $'fun f\n  annotation A\n  end\nend\n'
+  $'trait T\n  fun f\n    type X\n  end\nend\n'
+  $'trait T\n  def area : Float64\n  def b\n  end\nend\n'
+)
+declaration_refusal_texts=(
+  "can't use abstract inside def"
+  "can't define def inside def"
+  "can't define macro inside def"
+  "can't require inside def"
+  "can't include inside def"
+  "can't extend inside def"
+  "can't define class inside def"
+  "can't define struct inside def"
+  "can't define module inside def"
+  "can't define trait inside def"
+  "can't define impl inside def"
+  "can't import inside def"
+  "can't import inside def"
+  "can't export inside def"
+  "can't define enum inside def"
+  "can't define lib inside def"
+  "can't define fun inside def"
+  "can't define alias inside def"
+  "can't define annotation inside def"
+  "can't declare an associated type inside def"
+  "can't use abstract inside fun"
+  "can't define def inside fun"
+  "can't define macro inside fun"
+  "can't require inside fun"
+  "can't include inside fun"
+  "can't extend inside fun"
+  "can't define class inside fun"
+  "can't define struct inside fun"
+  "can't define module inside fun"
+  "can't define trait inside fun"
+  "can't define impl inside fun"
+  "can't import inside fun"
+  "can't import inside fun"
+  "can't export inside fun"
+  "can't define enum inside fun"
+  "can't define lib inside fun"
+  "can't define fun inside fun"
+  "can't define alias inside fun"
+  "can't define annotation inside fun"
+  "can't declare an associated type inside fun"
+  "can't define def inside def: the \`def\` above it has no \`end\`"
+)
+declaration_accepted_sources=(
+  $'class Outer\n  class Inner\n  end\nend\n'
+  $'module M\n  def g\n  end\nend\n'
+  $'fun f\nend\n'
+  $'macro m\nend\n'
+  $'alias A = B\n'
+  $'def f\nend\n'
+)
+# Runs one parser binary on every row: each refusal source must fail with a text containing the wanted text, and each
+# accepted source must parse. Returns 1 at the first row that is wrong.
+declaration_rows_run() {
+  local exe="$1" i bad want
+  for i in "${!declaration_refusal_sources[@]}"; do
+    bad="${declaration_refusal_sources[$i]}"
+    want="${declaration_refusal_texts[$i]}"
+    printf '%s\n' "$bad" > "$WORK/declaration.iyi"
+    if "$exe" "$WORK_NATIVE/declaration.iyi" > "$WORK/declaration.log" 2>&1; then
+      echo "  accepted a declaration that must be refused: $bad"
+      return 1
+    fi
+    if ! grep -qF "$want" "$WORK/declaration.log"; then
+      echo "  refusal text differs from: $want (source: $bad)"
+      cat "$WORK/declaration.log"
+      return 1
+    fi
+  done
+  for bad in "${declaration_accepted_sources[@]}"; do
+    printf '%s\n' "$bad" > "$WORK/declaration.iyi"
+    if ! "$exe" "$WORK_NATIVE/declaration.iyi" > "$WORK/declaration.log" 2>&1; then
+      echo "  refused a declaration that must be accepted: $bad"
+      cat "$WORK/declaration.log"
+      return 1
+    fi
+  done
+  return 0
+}
+if declaration_rows_run "$WORK/exercise-plain$EXE"; then
+  echo "  port: ${#declaration_refusal_sources[@]} refusals carry the hosted text, ${#declaration_accepted_sources[@]} valid sources parse"
+else
+  echo "  port declaration rows differ from the hosted parser"
+  status=1
+fi
+if declaration_rows_run "$WORK/dump_hosted$EXE"; then
+  echo "  hosted: the same rows hold"
+else
+  echo "  hosted declaration rows do not hold: the row wants are wrong"
+  status=1
+fi
+
 echo
 echo "== 5. Guarded mutation proofs (verify patch applies, exercise fails, revert passes)"
 
@@ -1509,6 +1646,19 @@ prove_mutation "mutation 51: a proc literal's second case drops the symbol refus
 prove_mutation "mutation 52: a missing name after def or macro is refused with the old wording" "$PARSER" \
   "      syntax_error(\"expecting a name after '#{what}', not #{not_what}\", @token.location)" \
   "      unexpected_token(\"expected def or macro name\")" -- refusal_text_hold || status=1
+# Declarations inside a def or a fun: the port refuses each one with the hosted text. A row is checked on the mutant when the
+# mutation below runs, so dropping the fun case of check_not_inside_def is caught.
+declaration_rows_hold() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  declaration_rows_run "$WORK/mut-exercise$EXE"
+}
+# Mutation 53: the fun case of check_not_inside_def is dropped, so a declaration inside a fun is accepted.
+prove_mutation "mutation 53: a declaration inside a fun is accepted, as before the fun case" "$PARSER" \
+  '    if @def_nest == 0 && @fun_nest == 0' \
+  '    if @def_nest == 0' -- declaration_rows_hold || status=1
 
 echo
 echo "== Rebuilding and running restored parser exercise"

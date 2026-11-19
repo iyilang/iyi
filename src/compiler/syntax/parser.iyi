@@ -1247,6 +1247,7 @@ pub class Parser < Lexer
             parse_macro
           end
         when Keyword::DEF
+          check_iyi_bodiless_trait_def
           check_not_inside_def("can't define def") do
             parse_def
           end
@@ -1267,7 +1268,7 @@ pub class Parser < Lexer
             parse_import
           end
         when Keyword::USING
-          check_not_inside_def("can't use using") do
+          check_not_inside_def("can't import") do
             parse_using
           end
         when Keyword::ENUM
@@ -1338,7 +1339,9 @@ pub class Parser < Lexer
           end
         when Keyword::TYPE
           if @inside_trait_or_impl
-            parse_assoc_type
+            check_not_inside_def("can't declare an associated type") do
+              parse_assoc_type
+            end
           else
             check_type_declaration { parse_var_or_call(location) }
           end
@@ -2574,12 +2577,20 @@ pub class Parser < Lexer
     @fun_nest > 0
   end
 
+  # Hosted parser.cr 1970-1977: a declaration inside a def or a fun is refused, and the message names which.
   def check_not_inside_def(msg : String, &) : ASTNode
-    if inside_def?
-      syntax_error(msg, @token.location)
-    else
+    if @def_nest == 0 && @fun_nest == 0
       yield
+    else
+      suffix = @def_nest > 0 ? " inside def" : " inside fun"
+      syntax_error(msg + suffix, @token.location)
     end
+  end
+
+  # Hosted parser.cr 5493-5503: a def with no body inside a trait or impl, followed by another def.
+  def check_iyi_bodiless_trait_def : Nil
+    return unless @inside_trait_or_impl && @def_nest > 0
+    syntax_error("can't define def inside def: the `def` above it has no `end`\n\nA method a trait requires of its implementers has no body and says\nso - `abstract def name : Type` (SPEC.md II.6). A `def` with a body\nends with `end`.", @token.location)
   end
 
   def set_visibility(node : ASTNode) : ASTNode

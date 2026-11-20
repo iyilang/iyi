@@ -1314,7 +1314,11 @@ for workers in 12 0; do
   verdict_caught parkedio 'task-panic: the registered target missed the io cancellation branch' task-panic "--workers=$workers"
   timeout -k 5 120 ./parkedio_hook-run task-panic "--workers=$workers" > parkedio_hook.txt 2>&1
   code=$?
-  if [ "$code" -ne 1 ] || ! grep -qxF 'task-panic: the registered target reached the io cancellation branch' parkedio_hook.txt || ! grep -qxF "iyi: panic: a task's panic, with tasks parked on the poller" parkedio_hook.txt; then
+  if [ "$code" -ne 1 ] || grep -q '^FAIL: ' parkedio_hook.txt \
+    || ! grep -qxF 'task-panic: the registered target reached the io cancellation branch' parkedio_hook.txt \
+    || ! grep -qxF "iyi: panic: a task's panic, with tasks parked on the poller" parkedio_hook.txt \
+    || ! grep -qxF "iyi: panic: a task panicked: a task's panic, with tasks parked on the poller" parkedio_hook.txt \
+    || ! grep -qxE 'task-panic: every task ended [0-9]+ ms after the start' parkedio_hook.txt; then
     echo "parkedio hook control did not reach its io decision and original panic (exit $code):"; tail -20 parkedio_hook.txt; exit 1
   fi
   echo "  parkedio control workers=$workers: the registered target reached the io cancellation branch"

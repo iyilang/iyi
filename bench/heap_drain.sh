@@ -19,6 +19,20 @@
 # sweep claim go before its walk ends, are caught by `-Dheap_verify`
 # (exit 86).
 #
+# How each copy is decided: a verdict is one whole line, and the program
+# decides it from runtime state, never from the resident set or a clock.
+# State-decided: c1 (a drained run taken again), c2 (a parked run put back on
+# a drain list), c5 (the cooled path's release calls, counted in the copy),
+# c6 (a unit holds under the held mark), c8 (the bounds' answer, asked
+# directly), c9 (a placed object's heap-pointer check), c3 and c7 (the
+# verifier's report). The resident set and the arena growth are information.
+# RSS-decided, not forced: none.
+# Clock-decided, not forced: c4 ("an idle worker wakes for the warm pool"). Its
+# verdict is that the pool is still warm IDLE_MS after the last round. The
+# runtime answers the cap for the pending-idle branch first, in the same
+# function (`idle_wait_ms`), so no answer tells the copy from the healthy
+# build. Forcing it needs an observable idle wake.
+#
 #   bash bench/heap_drain.sh           # every part
 #   bash bench/heap_drain.sh sound     # plain, optimised, verifier, chaos
 #   bash bench/heap_drain.sh off       # the flag-off control
@@ -57,7 +71,7 @@ status=0
 build() {
   local name="$1" flags="$2" path="${3:-}"
   # shellcheck disable=SC2086
-  if ! env -u IYI_OPTS ${path:+IYI_PATH="$path"} "$IYI" build $flags -o "$WORK/$name" "$REPO/bench/heap_drain.iyi" >"$WORK/$name.build.log" 2>&1; then
+  if ! env -u IYI_OPTS ${path:+IYI_PATH="$path"} "$IYI" build $flags -o "$WORK/$name" "${PROGRAM:-$REPO/bench/heap_drain.iyi}" >"$WORK/$name.build.log" 2>&1; then
     echo "  $name: build failed"
     sed -n '1,12p' "$WORK/$name.build.log" | sed 's/^/    /'
     status=1
@@ -164,8 +178,20 @@ copy() {
   [ "$want" = 86 ] && only=1
   timeout 600 env ${only:+HEAP22_PRINT_ONLY=1} "$WORK/$name-bin" "$@" >"$dir/run.out" 2>"$dir/run.err"
   local code=$?
+  if [ "$code" -eq 76 ]; then
+    echo "  $label: setup failed (exit 76: a watchdog or setup, not a catch)"
+    sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
+    status=1
+    return
+  fi
   if [ "$code" -ne "$want" ]; then
     echo "  $label: missed (exit $code, wanted $want)"
+    sed -n '1,6p' "$dir/run.out" | sed 's/^/    /'
+    status=1
+    return
+  fi
+  if [ -n "${EXPECT:-}" ] && ! { [ "$(grep -c '^FAIL: ' "$dir/run.out")" -eq 1 ] && grep -qxE "$EXPECT" "$dir/run.out"; }; then
+    echo "  $label: missed: the verdict is not the one sentence (wanted $EXPECT)"
     sed -n '1,6p' "$dir/run.out" | sed 's/^/    /'
     status=1
     return
@@ -270,6 +296,10 @@ IYI
     echo "  $label: prelude.iyi is not in the form the copy patches"
     status=1
     return
+  fi
+  if [ -n "${NEG_REFUSE_PLACEMENT:-}" ]; then
+    awk '{ if ($0 ~ /return hint if placed_try\(hint, mapped\) == hint/) { sub(/return hint if placed_try\(hint, mapped\) == hint/, "return hint if false"); n++ } print } END { if (n != 1) exit 3 }' "$dir/iyi/heap_partition.iyi" >"$dir/heap.neg" || { echo "  $label: the placement refusal control is not in the form the copy patches"; status=1; return; }
+    mv "$dir/heap.neg" "$dir/iyi/heap_partition.iyi"
   fi
   build "$name-bin" "-Dheap_partitions --release -Dplaced_force" "$dir${PSEP}$REPO/src" || return
   timeout 600 "$WORK/$name-bin" dir >"$dir/run.out" 2>"$dir/run.err"
@@ -379,7 +409,12 @@ IYI
     status=1
     return
   fi
-  build "$name-bin" "-Dheap_partitions --release -Dmark_force" "$dir${PSEP}$REPO/src" || return
+  local program="$REPO/bench/heap_drain.iyi"
+  if [ -n "${NEG_STALL_UNIT:-}" ]; then
+    awk '{ if ($0 ~ /IyiMark\.forced_target\(IyiHeap\.current_record\)/) { print "          while true"; print "            sleep(1)"; print "          end"; n++ } print } END { if (n != 1) exit 3 }' "$REPO/bench/heap_drain.iyi" >"$dir/program.iyi" || { echo "  $label: the stalled-unit control is not in the form the program has"; status=1; return; }
+    program="$dir/program.iyi"
+  fi
+  PROGRAM="$program" build "$name-bin" "-Dheap_partitions --release -Dmark_force" "$dir${PSEP}$REPO/src" || return
   timeout 600 "$WORK/$name-bin" mark >"$dir/run.out" 2>"$dir/run.err"
   local code=$?
   if [ "$code" -eq 76 ]; then
@@ -402,18 +437,83 @@ IYI
   status=1
 }
 
+# The cooled path's release call, counted (c5). COOL_ACCESS adds the copy-only
+# counter and its reader before `cool_pools`, once. COOL_HOOK records each of
+# its three release calls beside the call, under the same condition; COOL_BROKEN
+# deletes the calls, and the record with them.
+COOL_ACCESS='/^  def self\.cool_pools\(limit : Int32\) : Nil/ { declarations++; while ((getline line < ins) > 0) print line; print "" } { print } END { if (declarations != 1) exit 3 }'
+COOL_BROKEN='/def self\.cool_pools/ { armed = 1 } armed && /^  end$/ { armed = 0 } armed && /__iyi_release_pages\(/ { found = found + 1; next } { print } END { if (found != 3) exit 3 }'
+COOL_HOOK='/^  def self\.cool_pools/ { armed = 1; declarations++ } armed && /__iyi_release_pages\(/ { line = $0; print; cond = line; if (!sub(/^.* if /, "", cond)) exit 3; indent = line; sub(/[^ ].*$/, "", indent); print indent "IyiHeap.cool_record if " cond; sites++; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 3) exit 3 }'
+
+# The copy-only methods COOL_ACCESS inserts: the counter and its reader.
+# `state LABEL NAME WANT FLAGS ACCESS SITE`: the copy of src/iyi with ACCESS,
+# then SITE, applied to heap_partition.iyi, built with FLAGS and run once in
+# drain mode. WANT 1 must exit 1 with the one sentence the program prints when
+# the release never ran; WANT 0 (the hook alone) must exit 0 and print the count.
+# Exit 76 is setup or a watchdog, never a catch.
+state() {
+  local label="$1" name="$2" want="$3" flags="$4" access="$5" site="$6"
+  local dir="$WORK/$name"
+  mkdir -p "$dir"
+  cp -R "$REPO/src/iyi" "$REPO/src/std" "$dir/"
+  cat >"$WORK/cool.iyi" <<'IYI'
+  # copy only (bench/heap_drain.sh's `state`): the count of the cooled path's
+  # release calls, written beside each call.
+  @@cool_released : UInt64 = 0_u64
+
+  def self.cool_record : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@cool_released).address).value.add(1_u64)
+  end
+
+  def self.cool_released_count : UInt64
+    Pointer(Atomic(UInt64)).new(pointerof(@@cool_released).address).value.get
+  end
+
+IYI
+  if ! awk -v ins="$WORK/cool.iyi" "$access" "$REPO/src/iyi/heap_partition.iyi" >"$dir/a.1"; then
+    echo "  $label: heap_partition.iyi's cool_pools is not in the form the copy patches"
+    status=1
+    return
+  fi
+  if ! awk "$site" "$dir/a.1" >"$dir/iyi/heap_partition.iyi"; then
+    echo "  $label: cool_pools' release calls are not in the form the copy patches"
+    status=1
+    return
+  fi
+  build "$name-bin" "$flags" "$dir${PSEP}$REPO/src" || return
+  timeout 600 "$WORK/$name-bin" >"$dir/run.out" 2>"$dir/run.err"
+  local code=$?
+  if [ "$code" -eq 76 ]; then
+    echo "  $label: setup failed (exit 76)"
+    sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
+    status=1
+    return
+  fi
+  if [ "$want" = 1 ]; then
+    if [ "$code" -eq 1 ] && [ "$(grep -c '^FAIL: ' "$dir/run.out")" -eq 1 ] && grep -qxE "FAIL: idle: no cooled run's pages were handed back to the OS: the release call did not run" "$dir/run.out"; then
+      echo "  $label: caught, FAIL: idle: no cooled run's pages were handed back to the OS: the release call did not run"
+      return
+    fi
+  elif [ "$code" -eq 0 ] && grep -qxE 'idle: [1-9][0-9]* cooled runs handed their pages back to the OS' "$dir/run.out"; then
+    echo "  $label: $(grep -xE 'idle: [1-9][0-9]* cooled runs handed their pages back to the OS' "$dir/run.out")"
+    return
+  fi
+  echo "  $label: missed (exit $code, wanted $want)"
+  sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
+  status=1
+}
 if [ "$PART" = all ] || [ "$PART" = copies ]; then
   echo "== each mechanism removed"
-  copy "a partition takes drained runs" c1 1 \
+  EXPECT='^FAIL: drain: no parked run was taken again from a drained list$' copy "a partition takes drained runs" c1 1 \
     "$(subst 'def self\.partition_take' 'drained = pop_listed\(index, PC_DRAIN\)' 'drained = 0_u64')"
-  copy "the global sweep lists a parked run again" c2 1 \
-    "$(del 'def self\.sweep_partition_slice' 'IyiHeap\.list_drained\(index, arena, cursor, n\)')"
+  EXPECT='^FAIL: drain: the global sweep put no parked run back on a drain list$' copy "the global sweep lists a parked run again" c2 1 \
+    '/def self\.sweep_partition_slice/ { armed = 1 } armed && /IyiHeap\.list_drained\(index, arena, cursor, n\)/ { found++; next } armed && /IyiHeap\.note_drained/ { found++; next } armed && /^  end$/ { armed = 0 } { print } END { if (found != 2) exit 3 }'
   copy "a taken run's objects published" c3 86 \
     "$(subst 'def self\.adopt_drained' 'write8\(own, OWN_PUB\)' 'write8(own, 0_u64)')" "-Dheap_partitions -Dheap_verify" 8 24 4
-  copy "an idle worker wakes for the warm pool" c4 1 \
+  EXPECT='^FAIL: idle: pooled runs still hold their pages 3500 ms after the last round$' copy "an idle worker wakes for the warm pool" c4 1 \
     "$(subst 'def self\.idle_wait_ms' 'elsif pool_warm\?' 'elsif false')"
-  copy "a cooled run's pages go back" c5 1 \
-    '/def self\.cool_pools/ { armed = 1 } armed && /^  end$/ { armed = 0 } armed && /__iyi_release_pages\(/ { found = found + 1; next } { print } END { if (found != 3) exit 3 }'
+  state "a cooled run's pages go back" c5 1 "-Dheap_partitions --release -Dcool_force" "$COOL_ACCESS" "$COOL_BROKEN"
+  state "a cooled run's release is recorded (hook only)" cool 0 "-Dheap_partitions --release -Dcool_force" "$COOL_ACCESS" "$COOL_HOOK"
   marked "a unit holds beneath an open mark" held 0
   marked "a partition holds under a mark" c6 1 "$C6_DELETE"
   # A sweep helper that lets its walk claim go before its walk ends: a
@@ -427,7 +527,7 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   # the directory's end read in it again, its pages go resident; not
   # widened by a large mapping, an object of one outside the arenas'
   # slots is nobody's.
-  copy "the directory unread outside the bounds" c8 1 \
+  EXPECT='^FAIL: dir: a slot outside every arena.s bounds is answered as inside$' copy "the directory unread outside the bounds" c8 1 \
     "$(subst 'def self\.dir_outside\?' 'slot < @@dir_low \|\| slot > @@dir_high' 'slot >= DIR_SLOTS')" \
     "-Dheap_partitions --release" dir
   hinted "a large mapping widens the bounds" c9 1 "$C9_DELETE"

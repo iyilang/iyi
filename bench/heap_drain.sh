@@ -80,38 +80,13 @@ whole() {
   echo "  $label: $(head -1 "$WORK/$name.out")"
 }
 
-# The directory mode's exit when none of its large objects landed outside
-# the arenas' slots: the widening went unasked (bench/heap_drain.iyi,
-# DIR_UNASKED). Where the kernel puts a mapping changes from run to run,
-# so such a run is run again, up to UNASKED_TRIES times; a run that never
-# asks is a failure, not a pass. On Windows (tssh, 20 runs each) the
-# sound build asked nothing in 1 run and the copy without the widening in
-# 8, the other 12 caught and none passed: 0.4 a run, so twelve tries
-# leave it unasked about once in 60,000 gates.
-UNASKED=75
-UNASKED_TRIES=12
-
-# runs OUT ERR PROGRAM [ARGS...]: PROGRAM run until it exits anything but
-# UNASKED or UNASKED_TRIES times; its last exit, and in `tries` how many.
-runs() {
-  local out="$1" err="$2" code
-  shift 2
-  tries=0
-  while :; do
-    tries=$((tries + 1))
-    timeout 600 "$@" >"$out" 2>"$err"
-    code=$?
-    [ "$code" -eq "$UNASKED" ] && [ "$tries" -lt "$UNASKED_TRIES" ] || return "$code"
-  done
-}
-
 # again LABEL NAME OUT [ARGS...]: NAME, built by `whole`, run again with
 # ARGS into OUT; exit 0, no report.
 again() {
   local label="$1" name="$2" out="$3"
   shift 3
   [ -x "$WORK/$name" ] || return
-  runs "$WORK/$out.out" "$WORK/$out.err" "$WORK/$name" "$@"
+  timeout 600 "$WORK/$name" "$@" >"$WORK/$out.out" 2>"$WORK/$out.err"
   local code=$?
   if [ "$code" -ne 0 ] || grep -q "^iyi: heap_verify: partition" "$WORK/$out.err"; then
     echo "  $label: exit $code"
@@ -119,7 +94,7 @@ again() {
     status=1
     return
   fi
-  echo "  $label: $(head -1 "$WORK/$out.out")$([ "$tries" -gt 1 ] && echo " (run $tries times: the earlier landed inside the bounds)")"
+  echo "  $label: $(head -1 "$WORK/$out.out")"
 }
 
 if [ "$PART" = all ] || [ "$PART" = sound ]; then
@@ -186,7 +161,7 @@ copy() {
   build "$name-bin" "$flags" "$dir${PSEP}$REPO/src" || return
   local only=""
   [ "$want" = 86 ] && only=1
-  runs "$dir/run.out" "$dir/run.err" env ${only:+HEAP22_PRINT_ONLY=1} "$WORK/$name-bin" "$@"
+  timeout 600 env ${only:+HEAP22_PRINT_ONLY=1} "$WORK/$name-bin" "$@" >"$dir/run.out" 2>"$dir/run.err"
   local code=$?
   if [ "$code" -ne "$want" ]; then
     echo "  $label: missed (exit $code, wanted $want)"
@@ -199,6 +174,116 @@ copy() {
   else
     echo "  $label: caught, $(grep -m1 '^FAIL: ' "$dir/run.out")"
   fi
+}
+
+# The placement hint for the directory mode's copies, which `hinted` applies
+# to two files. heap_partition.iyi gets the copy's own hint code after
+# `dir_outside?`; prelude.iyi's `take_large` maps the program's large objects
+# (armed by `-Dplaced_force`) at the first slot above the directory's high
+# bound. The kernel is asked for that address once: MAP_FIXED_NOREPLACE on
+# Linux, an mmap hint on darwin, VirtualAlloc with an address on Windows.
+# A kernel that does not give it fails the copy by name; nothing is retried.
+PASS='{ print }'
+PLACE_TAKE='/def self\.take_large\(size : UInt64, bits : UInt64\)/ { armed = 1 } armed && sub(/base = __iyi_mmap\(mapped\)\.address/, "base = placed_pick(size, mapped)") { armed = 0; found = 1 } { print } END { if (!found) exit 3 }'
+PLACE_AFTER='/def self\.dir_outside\?\(slot : UInt64\) : Bool/ { armed = 1 } { print } armed && /^  end$/ { armed = 0; found = 1; while ((getline line < ins) > 0) print line } END { if (!found) exit 3 }'
+
+# hinted LABEL NAME WANT [PRELUDE_AWK]: a copy of src/iyi with the placement
+# hint, built with `-Dplaced_force` and run once as `dir`. WANT 1 is a forced
+# copy: it must exit 1 at the first large object's sentence. WANT 0 is the
+# hint alone: it must pass with at least one object outside the bounds.
+# PRELUDE_AWK, when given, patches prelude.iyi too (c9's widening).
+hinted() {
+  local label="$1" name="$2" want="$3" patch="${4:-$PASS}"
+  local dir="$WORK/$name"
+  mkdir -p "$dir"
+  cp -R "$REPO/src/iyi" "$REPO/src/std" "$dir/"
+  cat >"$WORK/placed.iyi" <<'IYI'
+
+  # copy only (bench/heap_drain.sh's `hinted`): a large object the copy places
+  # sits at the first slot above the directory's high bound, where only a
+  # widening of the bounds makes the mark see it.
+  @@placed_size : UInt64 = 0_u64
+
+  def self.placed_arm(size : UInt64) : Nil
+    @@placed_size = size
+  end
+
+  def self.placed_pick(size : UInt64, mapped : UInt64) : UInt64
+    return placed_map(mapped) if @@placed_size != 0_u64 && size == @@placed_size
+    __iyi_mmap(mapped).address
+  end
+
+  # One mapping asked for at one address: the kernel gives it or it does not
+  # (Linux: a range in use is EEXIST, never moved; darwin and Windows: another
+  # address). Anything else it gave is given back, and 0 says it was refused.
+  def self.placed_try(hint : UInt64, mapped : UInt64) : UInt64
+    got = 0_u64
+    {% if flag?(:win32) %}
+      got = LibC.VirtualAlloc(Pointer(Void).new(hint), mapped, 0x3000_i32, 4_i32).address
+    {% elsif flag?(:darwin) %}
+      got = LibC.mmap(Pointer(Void).new(hint), mapped, 3, 0x1002, -1, 0_i64).address
+      if got == 0xFFFFFFFFFFFFFFFF_u64
+        got = 0_u64
+      end
+    {% else %}
+      # MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE: a range in use is EEXIST, never moved
+      result = __iyi_conc_syscall6(IYI_SYS_MMAP, hint.to_i64, mapped.to_i64, 3_i64, 0x100022_i64, -1_i64, 0_i64)
+      got = result < 0_i64 ? 0_u64 : result.to_u64
+    {% end %}
+    if got != 0_u64 && got != hint
+      __iyi_munmap(got, mapped)
+      got = 0_u64
+    end
+    got
+  end
+
+  # The first slot above the directory's high bound that the kernel gives a
+  # mapping of *mapped* bytes: a slot in use (the program's own mappings sit
+  # between some arenas and above them) is refused and the next is asked for,
+  # up to 64. Every slot asked for is above the bounds, so the object is
+  # outside them whichever one it gets.
+  def self.placed_map(mapped : UInt64) : UInt64
+    k = 1_u64
+    while k <= 64_u64
+      slot = @@dir_high &+ k
+      placed_fail("iyi: placed: the directory has no slot above its high bound\n") if slot >= DIR_SLOTS
+      hint = slot.unsafe_shl(24_u64)
+      return hint if placed_try(hint, mapped) == hint
+      k = k + 1_u64
+    end
+    placed_fail("iyi: placed: none of the 64 slots above the directory's high bound was free\n")
+  end
+
+  def self.placed_fail(message : String) : NoReturn
+    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+    __iyi_exit(1)
+  end
+IYI
+  if ! awk -v ins="$WORK/placed.iyi" "$PLACE_AFTER" "$REPO/src/iyi/heap_partition.iyi" >"$dir/iyi/heap_partition.iyi"; then
+    echo "  $label: heap_partition.iyi's dir_outside? is not in the form the copy patches"
+    status=1
+    return
+  fi
+  if ! awk "$PLACE_TAKE" "$REPO/src/iyi/prelude.iyi" >"$dir/prelude.1" || ! awk "$patch" "$dir/prelude.1" >"$dir/iyi/prelude.iyi"; then
+    echo "  $label: prelude.iyi is not in the form the copy patches"
+    status=1
+    return
+  fi
+  build "$name-bin" "-Dheap_partitions --release -Dplaced_force" "$dir${PSEP}$REPO/src" || return
+  timeout 600 "$WORK/$name-bin" dir >"$dir/run.out" 2>"$dir/run.err"
+  local code=$?
+  if [ "$want" = 1 ]; then
+    if [ "$code" -eq 1 ] && grep -qxE 'FAIL: dir: large object 0 at 0x[0-9a-f]+ is no heap pointer the moment it is made' "$dir/run.out"; then
+      echo "  $label: caught, $(grep -m1 '^FAIL: ' "$dir/run.out")"
+      return
+    fi
+  elif [ "$code" -eq 0 ] && grep -qE '^dir: [1-9][0-9]* of the 8 large objects landed outside' "$dir/run.out"; then
+    echo "  $label: $(grep -m1 'landed outside' "$dir/run.out")"
+    return
+  fi
+  echo "  $label: missed (exit $code, wanted $want)"
+  sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
+  status=1
 }
 
 if [ "$PART" = all ] || [ "$PART" = copies ]; then
@@ -229,9 +314,8 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   copy "the directory unread outside the bounds" c8 1 \
     "$(subst 'def self\.dir_outside\?' 'slot < @@dir_low \|\| slot > @@dir_high' 'slot >= DIR_SLOTS')" \
     "-Dheap_partitions --release" dir
-  COPY_FILE=prelude.iyi copy "a large mapping widens the bounds" c9 1 \
-    "$(del 'def self\.count_large' 'dir_widen\(')" \
-    "-Dheap_partitions --release" dir
+  hinted "a large mapping widens the bounds" c9 1 "$(del 'def self\.count_large' 'dir_widen\(')"
+  hinted "a placed large object lands outside the bounds" placed 0
 fi
 
 exit $status

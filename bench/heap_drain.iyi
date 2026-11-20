@@ -529,20 +529,21 @@ module bench/heap_drain
   # every platform when a large object lost its bytes. Windows reads the
   # pages' residency through QueryWorkingSetEx, the others mincore.
   #
-  # Where a large object lands is the kernel's choice, and an object that
-  # lands between two arenas' slots needs no widening: the bounds already
-  # hold it, and a copy that never widens passes. On Windows 1 run in 10
-  # began with arenas 126 slots (2 GiB) apart, and all eight objects
-  # landed in that gap (tssh, 2026-11-18): the broken copy that skips the
-  # widening was missed once on a GitHub runner (job 134651603528). So
-  # each object's slots are held against the bounds as they were just
-  # before it was made (read through `IyiHeap.dir_outside?`), and with the
-  # flag on a run in which none landed outside them exits DIR_UNASKED:
-  # it asked nothing, and bench/heap_drain.sh runs it again.
+  # Where a large object lands is the kernel's choice, and one that lands
+  # between two arenas' slots needs no widening: the bounds already hold
+  # it, and a copy that never widens passes. On Windows 1 run in 10 began
+  # with arenas 126 slots (2 GiB) apart, and all eight objects landed in
+  # that gap (tssh, 2026-11-18); the copy that skips the widening then
+  # passed on three Windows gates (jobs 135024748862, 135036250242,
+  # 135036784946). So a failure proof places its objects itself: its
+  # copy maps each large object at the first slot above the directory's
+  # high bound (`-Dplaced_force`, bench/heap_drain.sh's `hinted`), where
+  # only the widening can make the mark see it. Each object's slots are
+  # held against the bounds as they were just before it was made
+  # (`IyiHeap.dir_outside?`); a placed build needs at least one outside.
   #   ./heap_drain dir [LARGE]                    # default 8
   DIR_RESIDENT_MAX = 32_u64
   DIR_LARGE_BYTES  = 41943040_u64
-  DIR_UNASKED      = 75
 
   # The bounds `IyiHeap.dir_outside?` answers by, as slots: the
   # contiguous run of slots it calls inside around *anchor*, an arena's
@@ -648,6 +649,11 @@ module bench/heap_drain
     # An arena's slot: inside the bounds from the first arena on.
     anchor = Pointer(UInt8).malloc(64_u64).address.unsafe_shr(24_u64)
     outside = 0
+    {% if flag?(:placed_force) %}
+      # copy only (bench/heap_drain.sh, `hinted`): every large object is
+      # mapped above the arenas' slots, not where the kernel puts it
+      IyiHeap.placed_arm(DIR_LARGE_BYTES)
+    {% end %}
     large.times do |i|
       {% if flag?(:heap_partitions) %}
         low, high = dir_bounds(anchor)
@@ -684,10 +690,9 @@ module bench/heap_drain
     {% if flag?(:heap_partitions) %}
       fail("dir: #{resident} of the arena directory's #{pages} pages resident after the mark read a word for each (at most #{DIR_RESIDENT_MAX})") if resident > DIR_RESIDENT_MAX.to_i64
       print "dir: the mark read no directory page outside the arenas' slots\n"
-      if outside == 0
-        print "dir: none of the #{large} large objects landed outside the arenas' slots, so the bounds' widening went unasked\n"
-        __iyi_exit(DIR_UNASKED)
-      end
+      {% if flag?(:placed_force) %}
+        fail("dir: none of the #{large} large objects was placed outside the arenas' slots") if outside == 0
+      {% end %}
       print "dir: #{outside} of the #{large} large objects landed outside the slots before them, each a heap pointer\n"
     {% end %}
   end

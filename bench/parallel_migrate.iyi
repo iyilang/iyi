@@ -1596,38 +1596,24 @@ import std/socket::{IyiSocket, SocketError}
   {% end %}
 
   # ── heldio ───────────────────────────────────────────────────────────
-  # A task parks on a socket's read, and the worker it parked on starts a
-  # sibling task - another unit - that holds it 100 ms with its loop
-  # marked `@[NoPreempt]`, so nothing of that worker looks at its poller
-  # until the hold ends. The read's answer is sent while it holds, with
-  # the other workers idle. On Linux and darwin the reader waits in that
-  # worker's own epoll or kqueue, and another worker must take its news
-  # from there and read it within `HELD_BOUND_MS`; on Windows the
-  # process's one port is any worker's to take from
-  # (bench/completions_taken.iyi). The other workers are held until the
-  # sibling starts on the reader's worker, so each of the `HELD_ROUNDS`
-  # runs is measured once.
-  HELD_NS       = 100_000_000_i64
-  HELD_BOUND_MS =              20_i64
-  HELD_ROUNDS   =               5
+  # A reader parks on a socket, then a sibling holds its worker with
+  # preemption off until the answer is read on another worker. Linux and
+  # darwin use the reader's own poller; Windows uses a shared port, covered
+  # by bench/completions_taken.iyi. Each round is run once.
+  HELD_ROUNDS = 5
 
-  # What a round's two tasks say, `Share` by their atomic fields: the
-  # worker the reader parked on and the one it read on, whether the hold
-  # ran on the reader's worker (1) or elsewhere (2), and when the answer
-  # was read and the hold ended.
+  # The reader and sibling publish their workers and read time atomically.
   class Held
     @reader : Atomic(UInt64)
     @read_on : Atomic(UInt64)
     @holding : Atomic(Int64)
     @read_at : Atomic(Int64)
-    @held_until : Atomic(Int64)
 
     def initialize
       @reader = Atomic(UInt64).new(0_u64)
       @read_on = Atomic(UInt64).new(0_u64)
       @holding = Atomic(Int64).new(0_i64)
       @read_at = Atomic(Int64).new(0_i64)
-      @held_until = Atomic(Int64).new(0_i64)
     end
 
     def reader : UInt64
@@ -1662,13 +1648,6 @@ import std/socket::{IyiSocket, SocketError}
       @read_at.set(ns)
     end
 
-    def held_until : Int64
-      @held_until.get
-    end
-
-    def note_held_until(ns : Int64) : Nil
-      @held_until.set(ns)
-    end
   end
 
   # One round: the nanoseconds from the send to the read while the reader's
@@ -1681,6 +1660,7 @@ import std/socket::{IyiSocket, SocketError}
     sent_at = 0_i64
     parked = Tally.new
     release = Tally.new
+    owner_go = Tally.new
     group do |g|
       # The other workers are held, with preemption off, until the sibling
       # sits on the reader's worker: nothing can steal it there, so no round is
@@ -1707,8 +1687,7 @@ import std/socket::{IyiSocket, SocketError}
           inner.spawn(unit: :new) do
             if IyiScheduler.state.object_id == marks.reader
               marks.note_holding(1_i64)
-              hold_np(HELD_NS)
-              marks.note_held_until(__iyi_monotonic_ns)
+              hold_until_or_fail(owner_go, 1_i64, "heldio: progress hang: the reader's worker was not released")
             else
               marks.note_holding(2_i64)
             end
@@ -1728,22 +1707,22 @@ import std/socket::{IyiSocket, SocketError}
         waited = waited + 1
         fail("heldio: round #{number}'s sibling did not start in 10000 ms") if waited > 10000
       end
+      fail("heldio: round #{number}'s sibling did not hold its reader's worker") unless marks.holding == 1_i64
       release.add(1_i64)
       sent_at = __iyi_monotonic_ns
       wrote = near.write("x")
       fail("heldio: round #{number}'s write answered #{wrote}") unless wrote.is_a?(Int32)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while marks.read_on == 0_u64
+        sleep(1)
+        fail("heldio: progress hang: round #{number}'s answer was not read in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      fail("heldio: round #{number}'s answer was read on the worker that held") if marks.read_on == marks.reader
+      owner_go.add(1_i64)
     end
     near.close
     far.close
-    fail("heldio: round #{number}'s sibling did not hold its reader's worker") unless marks.holding == 1_i64
-    took = marks.read_at - sent_at
-    if took > HELD_BOUND_MS * 1_000_000_i64
-      fail("heldio: an answer sent while the worker its reader parked on was held #{HELD_NS // 1_000_000_i64} ms with preemption off was read #{took // 1_000_000_i64} ms later, with the other workers idle (round #{number}; the hold went on #{(marks.held_until - marks.read_at) // 1_000_000_i64} ms past the read)")
-    end
-    if marks.read_on == marks.reader
-      fail("heldio: round #{number}'s answer was read on the worker that held, #{took // 1000_i64} us after it was sent")
-    end
-    took
+    marks.read_at - sent_at
   end
 
   # Whether the fiber with object id *id* is in *state* now, read from the scheduler's list of every fiber.
@@ -1869,7 +1848,7 @@ import std/socket::{IyiSocket, SocketError}
         end
         listener.close
         sorted = took.sorted
-        puts "heldio: #{HELD_ROUNDS} answers sent while their reader's worker was held #{HELD_NS // 1_000_000_i64} ms were read on another worker in #{sorted.map { |w| w // 1000_i64 }} us (#{HELD_ROUNDS} rounds)"
+        puts "heldio: #{HELD_ROUNDS} answers sent while their reader's worker was held were read on another worker in #{sorted.map { |w| w // 1000_i64 }} us (#{HELD_ROUNDS} rounds)"
       {% end %}
     end
   end

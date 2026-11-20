@@ -1748,6 +1748,7 @@ import std/socket::{IyiSocket, SocketError}
     while fiber.is_a?(IyiFiber)
       return fiber.state == state if fiber.object_id == id
       fiber = fiber.next_fiber
+    end
     false
   end
 
@@ -1840,6 +1841,7 @@ import std/socket::{IyiSocket, SocketError}
       owner_go.add(1_i64)
       fail("heldio: not armed: the answer was read on the worker that holds the reader") unless read_elsewhere
       puts "heldio: the answer sent to a reader parked on a held worker was read on another worker before the hold ended"
+    end
     near.close
     far.close
     listener.close

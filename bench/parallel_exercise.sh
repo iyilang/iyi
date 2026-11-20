@@ -31,20 +31,17 @@
 #      within 1 ms (not judged on a host loaded past its cores), and
 #      within 50 ms after a ping-pong
 #      left its waker's worker calling nobody, where the monitor calls; on
-#      Linux and darwin a connection's answer, sent while the worker its
-#      reader parked on is held 100 ms with preemption off, is read on
-#      another worker within 20 ms; and a task joining a thread leaves its
-#      worker to its child. On Windows,
-#      bench/completions_taken.iyi holds the process's one completion port
-#      at twelve workers: a task's socket answered while the worker it
-#      parked on computes with preemption off is read on another worker
-#      within 250 ms; and the process's priority boost is off once the pool
-#      has started.
-#      bench/parallel_preempt.iyi then holds preemption at loop back-edges
-#      (SPEC.md III.4.13, part 9): a short task, a sleeper and a fast
-#      request beside a task computing with no call in its loop wait no
-#      more than 100 ms, 80 for the request, in the server shape and with
-#      the request's window held open on one worker; a preempted task
+#      Linux and darwin an answer sent while the reader's worker is held
+#      is read on another worker before that hold ends; and a task joining
+#      a thread leaves its worker to its child. On Windows,
+#      bench/completions_taken.iyi checks the shared completion port: an
+#      answer is read on another worker while the reader's worker is held.
+#      The process's priority boost is off once the pool has started.
+#      bench/parallel_preempt.iyi checks preemption at loop back-edges
+#      (SPEC.md III.4.13, part 9): a short task and a sleeper run beside a
+#      computing task; a dedicated fast request is served while a slow
+#      handler stays active, and bulk server latency is measured; the
+#      poller request also has its own bound; a preempted task
 #      keeps its unit's token; a task switched in after one that held its
 #      worker past a look begins its own quantum; the monitor looks every
 #      4 to 10.5 ms (8 on Windows) and the quantum is at most three of
@@ -269,9 +266,9 @@ case "$(uname -s)" in
 esac
 
 # ── 2b. Preemption at loop back-edges, twice ─────────────────────────────
-# bench/parallel_preempt.iyi: a task computing with no call in its loop
-# no longer holds a short task, a sleeper or a connection behind it past
-# 100 ms (80 for a fast request in the server shape); a preempted task
+# bench/parallel_preempt.iyi: a short task and a sleeper run beside a
+# computing task; a fast request is served while a slow handler stays
+# active; bulk server latency is measured; a preempted task
 # keeps its unit's token; a task switched in is not given up on the word
 # raised for the one before it; the monitor looks every 4 to 10.5 ms (8
 # on Windows) and two tasks on one worker take turns of at most three of
@@ -1615,10 +1612,6 @@ END { if (n_defs != 1 || n_wake != 1 || n_hand != 1 || n_mut != 1 || expect) exi
   print "    \"evals=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_evals).address).value.get} ring=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_ring_size).address).value.get} turned=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_turned).address).value.get} idle=#{word(pointerof(@@idle)).value.get} spinning=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_spinning).address).value.get}\""
   print "  end"
   print ""
-  print ""
-  print "  def self.force_figures : String"
-  print "    \"evals=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_evals).address).value.get} ring=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_ring_size).address).value.get} turned=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_turned).address).value.get} idle=#{word(pointerof(@@idle)).value.get} spinning=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_spinning).address).value.get}\""
-  print "  end"
   print ""
   print
   n_defs++

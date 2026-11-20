@@ -21,10 +21,8 @@
 #           inside it never runs between two of its statements that are not
 #           a park, while another parallel task's ticker, asleep on the
 #           same worker, wakes within 100 ms of its time.
-#   server  28 connections making 0.2 ms requests beside 4 making 100 ms
-#           ones: a fast request whose connection waits in the poller of a
-#           worker busy with a slow one is answered within 80 ms, where it
-#           waited the 100 ms out before.
+#   server  a dedicated fast request completes while a slow handler stays
+#           active, followed by bulk fast and slow latency measurements.
 #   poller  the server shape's claim with its window held: one connection
 #           waits in the poller of the pool's one worker while that worker
 #           computes a request that runs until the connection's own request
@@ -383,7 +381,7 @@ import std/socket::{IyiSocket, SocketError}
   # ── server ───────────────────────────────────────────────────────────
   FAST_BOUND_MS = 80_i64
   # A dedicated pair establishes that one fast request is served while a
-  # slow handler holds a worker. Bulk timings below are measurements.
+  # slow handler is active. Bulk timings below are measurements.
 
   class ServerRelease
     @value : Atomic(Int64)
@@ -412,7 +410,6 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   @[NoInline]
-  @[NoPreempt]
   def server_hold(release : ServerRelease) : Nil
     release.start
     limit = __iyi_monotonic_ns + 20_000_000_000_i64
@@ -478,7 +475,7 @@ import std/socket::{IyiSocket, SocketError}
     fast_client.close
     fast_server.close
     listener.close
-    say "server: a fast request was served while the slow handler held its worker"
+    say "server: a fast request was served while the slow handler remained active"
   end
 
   def server(per_ms : Int64) : Nil

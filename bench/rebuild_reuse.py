@@ -127,7 +127,8 @@ beside it": the mark went under a key computed without the flags the link
 adds, and with a linker that counts its calls each build of the three
 after the first tried the failing template again, where the fix tried it
 once), and, run without the failing template, the rotation ("the rotation
-left 21 link templates, not 20").
+left 21 link templates, not 20"). The leftovers failed 3 of 3 on Windows 11
+too, and with the fix the whole gate passed on both.
 
 And because the old shuffle was there for a reason, rule 2's reordering is
 held too: `probe/a` and `probe/b` both import `probe/log` and each

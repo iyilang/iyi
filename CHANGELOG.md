@@ -742,7 +742,7 @@
   rotated as step 8 rotates verdicts: twenty kept, the one a build has
   just read among them, and one removed asked of `cc` again to the same
   bytes. Against the compiler before, each of the three failed 3 runs of
-  3 on Linux.
+  3 on Linux, and the leftovers 3 of 3 on Windows 11.
 
 - **The darwin jobs on the project's Mac each get the compilers' caches
   to themselves.** Its three runners share one HOME, so they shared

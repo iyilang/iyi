@@ -304,13 +304,31 @@ fi
 # times the clear finds another adoption got there first
 # (`IyiHeap.widen_hits`, reported by trim_stress.iyi built with
 # -Dtrim_widen). The fix, widened, must read every block back whole with
-# the window met; the old counting, widened, must fail within three runs
-# of 10 s. At 20 microseconds the old counting was caught on the first run
-# in 20 runs of 20, within 0-6 s, on Windows 11, 12 logical processors and
-# on macOS 26.6, Apple M2 Pro, 10 cores (the user's machines), and the fix
-# read every block back whole in 5 runs of 5 and 3 of 3 with the window
-# met 4,706-5,750 and 9,483-15,972 times. With a run's miss rate under
-# 3/20 (95%), three misses in a row are under 0.4%.
+# the window met. At 20 microseconds the old counting was caught on the
+# first run in 20 runs of 20, within 0-6 s, on Windows 11, 12 logical
+# processors and on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+# machines), and the fix read every block back whole in 5 runs of 5 and
+# 3 of 3 with the window met 4,706-5,750 and 9,483-15,972 times.
+#
+# But a meeting only leaves the arena's count one short: a block reads
+# wrong when the count then reaches zero exactly with pages still listed,
+# a refill reads it there and keeps its batch's pages listed, and the
+# pause makes them idle under its objects. The meetings do not decide
+# that. On a GitHub ubuntu runner (master's job 136048960124) the fix
+# met the window 961 times in its run and the old counting passed three
+# runs of three. On this Linux machine, 12 vCPUs, the old counting
+# passed 0 runs of 40, 1 of 40 on two of them (taskset) with the window
+# met 1,157 times, 15 of 40 beside twelve busy loops and 13 of 30 on four
+# beside four, met 552-1,377 times, and 40 of 40 on one, met 0-7 times.
+# So both copies also audit the count where it must be exact: at the
+# pause, with every thread stopped and none inside the allocator, an
+# arena counts as listed the pages its bitmap lists
+# (`IyiHeap.audit_listed`, before `IyiHeap.idle_listed` moves them;
+# `IyiHeap.listed_off`). The program asks after every trim, and after a
+# last collection once its threads end, and fails at the first count off.
+# The fix must hold every count. The old counting's count is one short
+# from a meeting to the next pause, so a run that meets the window fails;
+# one that never meets it tests nothing, and runs again, three at most.
 WIDEN_NS=20000
 widen_prelude() {
   mkdir -p "$WORK/$1/iyi"
@@ -328,8 +346,47 @@ widen_prelude() {
       print "          spun = spun + 1_u64"
       print "        end"
       print "      end"
+      print "      @@listed_audits : UInt64 = 0_u64"
+      print "      @@listed_off : UInt64 = 0_u64"
+      print "      @@listed_off_count : UInt64 = 0_u64"
+      print "      @@listed_off_pages : UInt64 = 0_u64"
+      print "      def self.listed_audits : UInt64"
+      print "        @@listed_audits"
+      print "      end"
+      print "      def self.listed_off : UInt64"
+      print "        @@listed_off"
+      print "      end"
+      print "      def self.listed_off_count : UInt64"
+      print "        @@listed_off_count"
+      print "      end"
+      print "      def self.listed_off_pages : UInt64"
+      print "        @@listed_off_pages"
+      print "      end"
+      print "      def self.audit_listed(arena : UInt64, count : UInt64) : Nil"
+      print "        words = read64(arena + OFF_MAP).unsafe_shr(PAGE_SHIFT + 6_u64)"
+      print "        pages = 0_u64"
+      print "        slot = 0_u64"
+      print "        while slot < words"
+      print "          word = read64(arena + OFF_LISTED_PAGES + slot * 8_u64)"
+      print "          while word != 0_u64"
+      print "            word = word & (word - 1_u64)"
+      print "            pages = pages + 1_u64"
+      print "          end"
+      print "          slot = slot + 1_u64"
+      print "        end"
+      print "        @@listed_audits = @@listed_audits + 1_u64"
+      print "        if pages != count"
+      print "          if @@listed_off == 0_u64"
+      print "            @@listed_off_count = count"
+      print "            @@listed_off_pages = pages"
+      print "          end"
+      print "          @@listed_off = @@listed_off + 1_u64"
+      print "        end"
+      print "      end"
       print
       n++; next }
+    /^      def self\.idle_listed\(arena : UInt64\) : Nil$/ { pause = 1 }
+    pause && /^        return if count == 0$/ { print "        audit_listed(arena, count)"; print; pause = 0; n++; next }
     /^      def self\.unlist_batch\(/ { batch = 1 }
     batch && /^        while page <= last$/ { print "        low_edge = page"; print; n++; next }
     /^          count = count \+ 1_u64 if unlist_page\(arena, page\)$/ {
@@ -342,29 +399,36 @@ widen_prelude() {
       print "          end"
       n++; next }
     { print }
-    END { if (n != 3) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi" &&
+    END { if (n != 4) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi" &&
     IYI_PATH="$WORK/$1:$REPO/src" "$IYI" build --release -Dtrim_widen -o "$WORK/$1/program" "$REPO/bench/trim_stress.iyi" >"$WORK/$1/build.log" 2>&1
+}
+window_met() {
+  sed -n 's/.*, \([0-9]*\) edge pages read listed by two adoptions at once.*$/\1/p' "$WORK/$1.out" | head -1
 }
 if ! widen_prelude widened; then
   echo "  the window held open: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
 elif stress_run widened "$WORK/widened/program" 10 &&
-     hits=$(sed -n 's/.*, \([0-9]*\) edge pages read listed by two adoptions at once$/\1/p' "$WORK/widened.out") &&
-     [ -n "$hits" ] && [ "$hits" -gt 0 ]; then
-  echo "  the window held open ${WIDEN_NS} ns: every block read back whole, $hits edge pages read listed by two adoptions at once"
+     hits=$(window_met widened) && [ -n "$hits" ] && [ "$hits" -gt 0 ]; then
+  echo "  the window held open ${WIDEN_NS} ns: every block read back whole, $hits edge pages read listed by two adoptions at once, every count of listed pages its pages"
 else
   echo "  the window held open: the fix failed, or the window was never met:"; tail -3 "$WORK/widened.out" | sed 's/^/    /'; status=1
 fi
 if ! widen_prelude doublecount; then
   echo "  the listed pages counted twice: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
 else
-  caught=0
+  caught=0 met=0
   for again in 1 2 3; do
     stress_run doublecount "$WORK/doublecount/program" 10 || { caught=$again; break; }
+    met=$(window_met doublecount)
+    [ "${met:-0}" -gt 0 ] && break
+    met=0
   done
   if [ "$caught" -ne 0 ]; then
     echo "  the listed pages counted twice: caught on run $caught: $(grep -m1 'FAIL\|panic' "$WORK/doublecount.out" | cut -c1-200)"
+  elif [ "$met" -gt 0 ]; then
+    echo "  the listed pages counted twice: two adoptions met $met times and every count read its pages, so the audit does not test it"; status=1
   else
-    echo "  the listed pages counted twice: three runs passed, so the stress does not test it"; status=1
+    echo "  the listed pages counted twice: three runs passed and none met the window, so nothing tested it"; status=1
   fi
 fi
 

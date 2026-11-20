@@ -479,10 +479,17 @@ module bench/heap_drain
   UNDER_MARK_BYTES = 16777216_u64
   FORCED_NODES = 2000000
 
+  def mark_setup_fail(message : String) : NoReturn
+    __iyi_write(1, "FAIL: ".to_unsafe.as(Void*), 6_u64)
+    __iyi_write(1, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+    __iyi_write(1, "\n".to_unsafe.as(Void*), 1_u64)
+    __iyi_exit(76)
+  end
+
   def mark_forced(arguments : Array(String)) : Nil
     {% if flag?(:mark_force) %}
       IyiWorkers.count = 4
-      fail("mark: the main thread allocates in a partition; the marks need the shared heap") if IyiHeap.current_record != 0
+      mark_setup_fail("mark: main thread allocates in a partition") if IyiHeap.current_record != 0
       opened = Atomic(Int32).new(0)
       unit_done = Atomic(Int32).new(0)
       # A large live set makes a mark concurrent: a small one finishes in its
@@ -493,12 +500,11 @@ module bench/heap_drain
         head = GraphNode.new(head, n.to_i64)
         n = n + 1
       end
-      IyiMark.forced_arm
       group do |g|
         unit = g.spawn(unit: :new) do
           start_wait = IyiMark.now_ns
           while opened.get == 0
-            fail("mark: unit timed out waiting for the held mark") if IyiMark.now_ns &- start_wait >= 60000000000_u64
+            mark_setup_fail("mark: unit timed out waiting for the held mark") if IyiMark.now_ns &- start_wait >= 60000000000_u64
             sleep(1)
           end
           IyiMark.forced_target(IyiHeap.current_record)
@@ -515,25 +521,33 @@ module bench/heap_drain
           unit_done.set(1)
           made
         end
-        shared = 0_i64
-        rounds = 0
+        # Start exactly one concurrent mark; no allocation loop competes with
+        # the closer or blocks the main thread inside the shared heap's hold.
+        IyiMark.settle
+        IyiMark.forced_arm
+        IyiHeap.allocated_word.value.set(IyiMark.budget)
+        IyiMark.collect_if_due
+        start_wait = IyiMark.now_ns
         while !IyiMark.forced_open?
-          rounds = rounds + 1
-          fail("mark: no mark reached its closer in #{rounds} rounds of shared garbage") if rounds > 20000
-          200.times do |k|
-            s = "s" * (24 + k % 40)
-            shared = shared &+ s.bytesize.to_i64
-          end
+          mark_setup_fail("mark: timed out waiting for the closer") if IyiMark.now_ns &- start_wait >= 60000000000_u64
+          IyiThread.park_if_requested
+          IyiThread.yield_cpu
         end
         opened.set(1)
         start_wait = IyiMark.now_ns
-        while unit_done.get == 0 && IyiHeap.partition_holds == 0
-          fail("mark: unit timed out before holding or finishing") if IyiMark.now_ns &- start_wait >= 60000000000_u64
+        while unit_done.get == 0 && IyiStat.atomic(IyiStat::PARTITION_HOLDS).value.get == 0_u64
+          mark_setup_fail("mark: unit timed out before holding or finishing") if IyiMark.now_ns &- start_wait >= 60000000000_u64
           sleep(1)
         end
-        holds = IyiHeap.partition_holds
-        fail("mark: unit never entered a partition slice under the held mark") unless IyiMark.forced_slice?
+        holds = IyiStat.atomic(IyiStat::PARTITION_HOLDS).value.get
+        mark_setup_fail("mark: unit never entered a partition slice under the held mark") unless IyiMark.forced_slice?
         IyiMark.forced_release
+        start_wait = IyiMark.now_ns
+        while !unit.done?
+          mark_setup_fail("mark: unit timed out completing after release") if IyiMark.now_ns &- start_wait >= 60000000000_u64
+          IyiThread.park_if_requested
+          IyiThread.yield_cpu
+        end
         made_unit = unit.value
         fail("mark: a unit allocated #{made_unit} bytes under a held mark and never held") if holds == 0
         print "mark: a unit held under an open mark: #{holds} holds, its partition past its ceiling while the mark was open\n"

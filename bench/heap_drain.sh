@@ -12,8 +12,9 @@
 # listing the arenas grow, without the idle wake the pool stays warm,
 # without the release the resident set stays, without the hold a unit
 # allocates under a held mark without holding, without the directory's
-# bounds its pages go resident, and with bounds a large mapping does not widen a large
-# object is no heap pointer (the program fails), and a taken run's
+# bounds its pages go resident, and without widening the directory bounds
+# for a large mapping, an object placed beyond them fails the heap-pointer
+# check, and a taken run's
 # objects left `LOCAL` instead of published, or a helper that lets its
 # sweep claim go before its walk ends, are caught by `-Dheap_verify`
 # (exit 86).
@@ -184,8 +185,9 @@ copy() {
 # VirtualAlloc with an address. Occupied slots are skipped, up to 64; failure
 # to place an object fails the copy by name.
 PASS='{ print }'
-PLACE_TAKE='/def self\.take_large\(size : UInt64, bits : UInt64\)/ { armed = 1 } armed && sub(/base = __iyi_mmap\(mapped\)\.address/, "base = placed_pick(size, mapped)") { armed = 0; found = 1 } { print } END { if (!found) exit 3 }'
-PLACE_AFTER='/def self\.dir_outside\?\(slot : UInt64\) : Bool/ { armed = 1 } { print } armed && /^  end$/ { armed = 0; found = 1; while ((getline line < ins) > 0) print line } END { if (!found) exit 3 }'
+PLACE_TAKE='/^      def self\.take_large\(size : UInt64, bits : UInt64\)/ { armed = 1; declarations++ } armed && /base = __iyi_mmap\(mapped\)\.address/ { sites++; sub(/base = __iyi_mmap\(mapped\)\.address/, "base = placed_pick(size, mapped)") } armed && /^      end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
+PLACE_AFTER='/^  def self\.dir_outside\?\(slot : UInt64\) : Bool/ { armed = 1; declarations++ } { print } armed && /^  end$/ { armed = 0; sites++; while ((getline line < ins) > 0) print line } END { if (declarations != 1 || sites != 1) exit 3 }'
+C9_DELETE='/^      def self\.count_large\(base : UInt64, mapped : UInt64, on : Bool\)/ { armed = 1; declarations++ } armed && /dir_widen\(/ { sites++; next } armed && /^      end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
 
 # hinted LABEL NAME WANT [PRELUDE_AWK]: a copy of src/iyi with the placement
 # hint, built with `-Dplaced_force` and run once as `dir`. WANT 1 is a forced
@@ -290,9 +292,10 @@ IYI
 # the copy's helper_main waits at its finish on a word (`IyiMark.forced_wait`)
 # until the program releases it, so a mark stays open while one unit allocates.
 # The methods go in before helper_main and the wait before its finish call.
-PLACE_MARK_METHODS='/def self\.helper_main\(seen : UInt64\) : Nil/ { found = 1; while ((getline line < ins) > 0) print line; print "" } { print } END { if (!found) exit 3 }'
-PLACE_MARK_HOLD='/seen = finish_concurrent/ { found = 1; sub(/seen = finish_concurrent/, "IyiMark.forced_wait\n              seen = finish_concurrent") } { print } END { if (!found) exit 3 }'
-PLACE_MARK_SLICE='/def self\.partition_slice\(record : UInt64, slice : UInt64\) : Nil/ { armed = 1 } armed && /if LibIyiGCTable\.__iyi_marking != 0_u8/ { print; print "      IyiMark.forced_record_slice(record)"; armed = 0; found = 1; next } { print } END { if (!found) exit 3 }'
+PLACE_MARK_METHODS='/^      def self\.helper_main\(seen : UInt64\) : Nil/ { declarations++; while ((getline line < ins) > 0) print line; print "" } { print } END { if (declarations != 1) exit 3 }'
+PLACE_MARK_HOLD='/^      def self\.helper_main\(seen : UInt64\) : Nil/ { armed = 1; declarations++ } armed && /seen = finish_concurrent/ { sites++; sub(/seen = finish_concurrent/, "IyiMark.forced_wait\n              seen = finish_concurrent") } armed && /^      end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
+PLACE_MARK_SLICE='/^  def self\.partition_slice\(record : UInt64, slice : UInt64\) : Nil/ { armed = 1; declarations++ } armed && /if LibIyiGCTable\.__iyi_marking != 0_u8/ { sites++; print; print "      IyiMark.forced_record_slice(record)"; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
+C6_DELETE='/^  def self\.partition_slice\(record : UInt64, slice : UInt64\) : Nil/ { armed = 1; declarations++ } armed && /hold_partition\(record, debt\)/ { sites++; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
 
 # marked LABEL NAME WANT [HEAP_PATCH]: the copy holds the mark's closer open
 # (`PLACE_MARK_*`), HEAP_PATCH is applied to heap_partition.iyi, and the
@@ -352,7 +355,7 @@ marked() {
           if IyiMark.now_ns &- started >= 60000000000_u64
             message = "FAIL: mark: closer timed out waiting for release\n"
             __iyi_write(1, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-            __iyi_exit(1)
+            __iyi_exit(76)
           end
           IyiThread.park_if_requested
           IyiThread.spin_pause
@@ -374,8 +377,8 @@ IYI
   timeout 600 "$WORK/$name-bin" mark >"$dir/run.out" 2>"$dir/run.err"
   local code=$?
   if [ "$want" = 1 ]; then
-    if [ "$code" -eq 1 ] && grep -qxE 'FAIL: mark: a unit allocated [0-9]+ bytes under a held mark and never held' "$dir/run.out"; then
-      echo "  $label: caught, $(grep -m1 '^FAIL: ' "$dir/run.out")"
+    if [ "$code" -eq 1 ] && [ "$(grep -c '^FAIL: ' "$dir/run.out")" -eq 1 ] && grep -qxE 'FAIL: mark: a unit allocated [0-9]+ bytes under a held mark and never held' "$dir/run.out"; then
+      echo "  $label: caught, $(grep -xE 'FAIL: mark: a unit allocated [0-9]+ bytes under a held mark and never held' "$dir/run.out")"
       return
     fi
   elif [ "$code" -eq 0 ] && grep -qxE 'mark: a unit held under an open mark: [1-9][0-9]* holds, its partition past its ceiling while the mark was open' "$dir/run.out"; then
@@ -400,7 +403,7 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   copy "a cooled run's pages go back" c5 1 \
     '/def self\.cool_pools/ { armed = 1 } armed && /^  end$/ { armed = 0 } armed && /__iyi_release_pages\(/ { found = found + 1; next } { print } END { if (found != 3) exit 3 }'
   marked "a unit holds beneath an open mark" held 0
-  marked "a partition holds under a mark" c6 1 "$(del 'def self\.partition_slice' 'hold_partition\(record, debt\)')"
+  marked "a partition holds under a mark" c6 1 "$C6_DELETE"
   # A sweep helper that lets its walk claim go before its walk ends: a
   # partition's local sweep could pass `quiet_class` into an arena whose
   # frees are still landing on its return stack (`IyiMark.sweep_one_
@@ -415,7 +418,7 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   copy "the directory unread outside the bounds" c8 1 \
     "$(subst 'def self\.dir_outside\?' 'slot < @@dir_low \|\| slot > @@dir_high' 'slot >= DIR_SLOTS')" \
     "-Dheap_partitions --release" dir
-  hinted "a large mapping widens the bounds" c9 1 "$(del 'def self\.count_large' 'dir_widen\(')"
+  hinted "a large mapping widens the bounds" c9 1 "$C9_DELETE"
   hinted "a placed large object lands outside the bounds" placed 0
 fi
 

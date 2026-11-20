@@ -1072,9 +1072,11 @@ intake && /^    unlock$/ { n_take_unlock++ }
 input && /^    lock$/ { n_put_lock++ }
 input && /^    unlock$/ { n_put_unlock++ }'
 NOW_SHIFT_BUG='/^  private def shift_item : T$/ { inshift = 1; n_method++ }
-inshift && /^    @count = @count - 1$/ { print "    seen_count = @count"; print "    IyiScheduler.force_now_hold(pointerof(@guard).address)"; print "    @count = seen_count - 1"; print "    IyiScheduler.force_now_stored(pointerof(@guard).address)"; n_shift++; inshift = 0; next }'
+inshift && /^  end$/ { inshift = 0 }
+inshift && /^    @count = @count - 1$/ { print "    seen_count = @count"; print "    IyiScheduler.force_now_hold(pointerof(@guard).address)"; print "    @count = seen_count - 1"; print "    IyiScheduler.force_now_stored(pointerof(@guard).address)"; n_shift++; next }'
 NOW_SHIFT_HOOK='/^  private def shift_item : T$/ { inshift = 1; n_method++ }
-inshift && /^    @count = @count - 1$/ { print "    IyiScheduler.force_now_hold(pointerof(@guard).address)"; print; print "    IyiScheduler.force_now_stored(pointerof(@guard).address)"; n_shift++; inshift = 0; next }'
+inshift && /^  end$/ { inshift = 0 }
+inshift && /^    @count = @count - 1$/ { print "    IyiScheduler.force_now_hold(pointerof(@guard).address)"; print; print "    IyiScheduler.force_now_stored(pointerof(@guard).address)"; n_shift++; next }'
 NOW_DEFS='/^  def self.reschedule : Nil$/ {
   print "  @[UnsafeReach(\"copy-only rendezvous words accessed atomically\")]"
   print "  @@now_target : UInt64 = 0_u64"
@@ -1213,9 +1215,10 @@ step "failure proof: a cancel never delivered to a sleeping task's thread"
 # identity. Both copies observe the same post_cancel; the mutant returns
 # before posting, and the control records the completed post.
 POST_COMMON='/^  def self.post_cancel\(home : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { inpost = 1; n_method++ }
-inpost && /^    home.post_mail$/ { print; print "    force_post_done(fiber)"; n_post++; inpost = 0; next }'
-POST_BUG='inpost && /^    return if fiber.cancel_posted$/ { print "    force_post_missing(fiber)"; print "    return"; n_guard++; next }'
-POST_HOOK='inpost && /^    return if fiber.cancel_posted$/ { n_guard++ }'
+inpost && /^  end$/ { inpost = 0 }
+inpost && /^    home.post_mail$/ { print; print "    force_post_done(fiber)"; n_post++; at_post = NR; next }'
+POST_BUG='inpost && /^    return if fiber.cancel_posted$/ { print "    force_post_missing(fiber)"; print "    return"; n_guard++; at_guard = NR; next }'
+POST_HOOK='inpost && /^    return if fiber.cancel_posted$/ { n_guard++; at_guard = NR }'
 POST_DEFS='/^  def self.reschedule : Nil$/ {
   print "  @[UnsafeReach(\"copy-only target fiber, accessed atomically\")]"
   print "  @@forced_post_target : UInt64 = 0_u64"
@@ -1235,7 +1238,7 @@ POST_DEFS='/^  def self.reschedule : Nil$/ {
   n_defs++
   next
 }'
-POST_END='END { if (n_method != 1 || n_post != 1 || n_guard != 1 || n_defs != 1) exit 3 }'
+POST_END='END { if (n_method != 1 || n_post != 1 || n_guard != 1 || at_guard >= at_post || n_defs != 1) exit 3 }'
 broken undelivered "$POST_COMMON
 $POST_BUG
 $POST_DEFS
@@ -1257,14 +1260,16 @@ step "failure proof: a cancel that leaves an io wait parked keeps a panicking pr
 # A target reader arms itself before reading. Both copies acknowledge its
 # registration and its cancel_wait branch; only the mutant omits that branch.
 PARKED_COMMON='/^  def self.park_overlapped_current\(/ { inover = 1; n_over++ }
-inover && /^    fiber.list_on\(st.object_id\) if @@shared && fiber.unit.is_a\?\(IyiUnit\)$/ { print; print "    force_io_registered(fiber)"; inover = 0; n_reg_over++; next }
+inover && /^  end$/ { inover = 0 }
+inover && /^    fiber.list_on\(st.object_id\) if @@shared && fiber.unit.is_a\?\(IyiUnit\)$/ { print; print "    force_io_registered(fiber)"; n_reg_over++; next }
 /^  def self.wait_posix\(/ { inposix = 1; n_posix++ }
-inposix && /^    fiber.list_on\(st.object_id\) if moving$/ { print; print "    force_io_registered(fiber)"; inposix = 0; n_reg_posix++; next }
+inposix && /^  end$/ { inposix = 0 }
+inposix && /^    fiber.list_on\(st.object_id\) if moving$/ { print; print "    force_io_registered(fiber)"; n_reg_posix++; next }
 /^  def self.cancel_wait\(fiber : IyiFiber\) : Nil$/ { incancel = 1; n_cancel++ }
-incancel && /^    elsif fiber.state == IyiFiberState::WaitingCh$/ { print "      force_io_decision(fiber, true)"; print; n_taken++; next }
+incancel && /^    elsif fiber.state == IyiFiberState::WaitingCh$/ { print "      force_io_decision(fiber, true)"; print; n_taken++; at_taken = NR; next }
 incancel && /^  end$/ { print "    force_io_decision(fiber, false)"; print; incancel = 0; n_end++; next }'
-PARKED_BUG='incancel && /^    elsif fiber.state == IyiFiberState::WaitingIo$/ { print "    elsif false"; n_branch++; next }'
-PARKED_HOOK='incancel && /^    elsif fiber.state == IyiFiberState::WaitingIo$/ { n_branch++ }'
+PARKED_BUG='incancel && /^    elsif fiber.state == IyiFiberState::WaitingIo$/ { print "    elsif false"; n_branch++; at_branch = NR; next }'
+PARKED_HOOK='incancel && /^    elsif fiber.state == IyiFiberState::WaitingIo$/ { n_branch++; at_branch = NR }'
 PARKED_DEFS='/^  def self.reschedule : Nil$/ {
   print "  @[UnsafeReach(\"copy-only io cancellation rendezvous, accessed atomically\")]"
   print "  @@forced_io_target : UInt64 = 0_u64"
@@ -1302,7 +1307,7 @@ PARKED_DEFS='/^  def self.reschedule : Nil$/ {
   n_defs++
   next
 }'
-PARKED_END='END { if (n_over != 1 || n_reg_over != 1 || n_posix != 1 || n_reg_posix != 1 || n_cancel != 1 || n_taken != 1 || n_end != 1 || n_branch != 1 || n_defs != 1) exit 3 }'
+PARKED_END='END { if (n_over != 1 || n_reg_over != 1 || n_posix != 1 || n_reg_posix != 1 || n_cancel != 1 || n_taken != 1 || n_end != 1 || n_branch != 1 || at_branch >= at_taken || n_defs != 1) exit 3 }'
 broken parkedio "$PARKED_COMMON
 $PARKED_BUG
 $PARKED_DEFS

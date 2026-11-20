@@ -382,18 +382,112 @@ import std/socket::{IyiSocket, SocketError}
 
   # ── server ───────────────────────────────────────────────────────────
   FAST_BOUND_MS = 80_i64
-  # The slow handler holds its first request open until a fast handler runs
-  # while slow work is active. Latency remains a measurement, not a verdict:
-  # a loaded runner can delay a correct request past a wall-clock bound.
+  # A dedicated pair establishes that one fast request is served while a
+  # slow handler holds a worker. Bulk timings below are measurements.
+
+  class ServerRelease
+    @value : Atomic(Int64)
+    @active : Atomic(Int64)
+
+    def initialize
+      @value = Atomic(Int64).new(0_i64)
+      @active = Atomic(Int64).new(0_i64)
+    end
+
+    def open : Nil
+      @value.set(1_i64)
+    end
+
+    def open? : Bool
+      @value.get != 0_i64
+    end
+
+    def start : Nil
+      @active.set(1_i64)
+    end
+
+    def active? : Bool
+      @active.get != 0_i64
+    end
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def server_hold(release : ServerRelease) : Nil
+    release.start
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while !release.open?
+      IyiThread.spin_pause
+      fail("server: progress hang: the slow handler was not released in 20000 ms") if __iyi_monotonic_ns > limit
+    end
+  end
+
+  def server_pair : Nil
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    slow_client = IyiSocket.connect("127.0.0.1", port, 5000)
+    fail("server: slow connect answered #{slow_client}") unless slow_client.is_a?(IyiSocket)
+    slow_server = listener.accept
+    fail("server: slow accept answered #{slow_server}") unless slow_server.is_a?(IyiSocket)
+    fast_client = IyiSocket.connect("127.0.0.1", port, 5000)
+    fail("server: fast connect answered #{fast_client}") unless fast_client.is_a?(IyiSocket)
+    fast_server = listener.accept
+    fail("server: fast accept answered #{fast_server}") unless fast_server.is_a?(IyiSocket)
+    slow_fd = slow_server.fd
+    slow_family = slow_server.family
+    fast_fd = fast_server.fd
+    fast_family = fast_server.family
+    release = ServerRelease.new
+    served = Atomic(Int64).new(0_i64)
+    group do |g|
+      g.spawn(unit: :new) do
+        socket = IyiSocket.new(slow_fd, slow_family)
+        got = socket.read(1)
+        fail("server: slow request answered #{got.inspect}") unless got == "b"
+        server_hold(release)
+        0
+      end
+      g.spawn(unit: :new) do
+        socket = IyiSocket.new(fast_fd, fast_family)
+        got = socket.read(1)
+        fail("server: fast request answered #{got.inspect}") unless got == "c"
+        fail("server: not armed: slow handler was not active") unless release.active? && !release.open?
+        wrote = socket.write("k")
+        fail("server: fast response answered #{wrote.inspect}") unless wrote.is_a?(Int32)
+        served.set(1_i64)
+        0
+      end
+      wrote = slow_client.write("b")
+      fail("server: slow send answered #{wrote.inspect}") unless wrote.is_a?(Int32)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !release.active?
+        sleep(1)
+        fail("server: progress hang: slow handler did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      wrote = fast_client.write("c")
+      fail("server: fast send answered #{wrote.inspect}") unless wrote.is_a?(Int32)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while served.get == 0_i64
+        sleep(1)
+        fail("server: progress hang: the fast request was not served in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      release.open
+    end
+    slow_client.close
+    slow_server.close
+    fast_client.close
+    fast_server.close
+    listener.close
+    say "server: a fast request was served while the slow handler held its worker"
+  end
 
   def server(per_ms : Int64) : Nil
+    server_pair
     listener = IyiSocket.listen("127.0.0.1", 0)
     port = listener.local_port
     conns = 32
     fast = Stat.new
     slow = Stat.new
-    slow_active = Atomic(Int64).new(0_i64)
-    fast_during = Atomic(Int64).new(0_i64)
     group do |g|
       g.spawn do
         conns.times do
@@ -406,19 +500,8 @@ import std/socket::{IyiSocket, SocketError}
             while true
               got = socket.read(64)
               break unless got.is_a?(String) && !got.empty?
-              heavy = got.starts_with?("b")
-              if heavy
-                slow_active.add(1_i64)
-                limit = __iyi_monotonic_ns + 10_000_000_000_i64
-                while fast_during.get == 0_i64
-                  IyiThread.spin_pause
-                  fail("server: progress hang: no fast request ran while slow work was active in 10000 ms") if __iyi_monotonic_ns > limit
-                end
-              end
-              cost = heavy ? 100_i64 * per_ms : per_ms // 5_i64
+              cost = got.starts_with?("b") ? 100_i64 * per_ms : per_ms // 5_i64
               x = spin(cost, 5_u64)
-              fast_during.add(1_i64) if !heavy && slow_active.get > 0_i64
-              slow_active.add(-1_i64) if heavy
               socket.write(x == 0_u64 ? "K" : "k")
             end
             socket.close
@@ -457,8 +540,7 @@ import std/socket::{IyiSocket, SocketError}
       end
       clients.each(&.close)
     end
-    fail("server: no fast request ran while slow work was active") if fast_during.get == 0_i64
-    say "server: #{fast_during.get} fast requests ran while slow work was active; 28 connections of 0.2 ms requests beside 4 of 100 ms on #{IyiWorkers.count} workers: the slowest fast request took #{fast.max_ms} ms, #{fast.over20} of #{fast.count} over 20 ms; the slow ones at most #{slow.max_ms} ms"
+    say "server: 28 connections of 0.2 ms requests beside 4 of 100 ms on #{IyiWorkers.count} workers: the slowest fast request took #{fast.max_ms} ms, #{fast.over20} of #{fast.count} over 20 ms; the slow ones at most #{slow.max_ms} ms"
   end
 
   # ── poller ───────────────────────────────────────────────────────────

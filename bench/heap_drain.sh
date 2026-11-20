@@ -450,72 +450,219 @@ IYI
   status=1
 }
 
-# The cooled path's release call, counted (c5). COOL_ACCESS adds the copy-only
-# counter and its reader before `cool_pools`, once. COOL_HOOK records each of
-# its three release calls beside the call, under the same condition; COOL_BROKEN
-# deletes the calls, and the record with them.
-COOL_ACCESS='/^  def self\.cool_pools\(limit : Int32\) : Nil/ { declarations++; while ((getline line < ins) > 0) print line; print "" } { print } END { if (declarations != 1) exit 3 }'
-COOL_BROKEN='/def self\.cool_pools/ { armed = 1 } armed && /^  end$/ { armed = 0 } armed && /__iyi_release_pages\(/ { found = found + 1; next } { print } END { if (found != 3) exit 3 }'
-COOL_HOOK='/^  def self\.cool_pools/ { armed = 1; declarations++ } armed && /__iyi_release_pages\(/ { line = $0; print; cond = line; if (!sub(/^.* if /, "", cond)) exit 3; indent = line; sub(/[^ ].*$/, "", indent); print indent "IyiHeap.cool_record if " cond; sites++; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 3) exit 3 }'
+# The keyed witnesses (review findings 1, 2 and 5). KEYED_ACCESS inserts the
+# copy-only methods once, before `cool_pools`; each site awk adds one witness
+# call or deletes one mechanism. Every anchor must match exactly once, or the
+# awk exits 3 and the copy is "not in the form the copy patches", a setup failure.
+KEYED_ACCESS='/^  def self\.cool_pools\(limit : Int32\) : Nil$/ { declarations++; while ((getline line < ins) > 0) print line; print "" } { print } END { if (declarations != 1) exit 3 }'
+# c2: the relist of the run the program parked. The control keeps the relist and
+# records it; the mutant deletes the relist and keeps the record.
+PARK_WITNESS='/^  def self\.sweep_partition_slice\(arena : UInt64, span : UInt64\) : UInt64$/ { armed = 1; declarations++ } { print } armed && /^          IyiHeap\.list_drained\(index, arena, cursor, n\)$/ { sites++; print "          IyiHeap.park_witness(arena, granule, cursor, index)" } armed && /^  end$/ { armed = 0 } END { if (declarations != 1 || sites != 1) exit 3 }'
+PARK_BROKEN='/^  def self\.sweep_partition_slice\(arena : UInt64, span : UInt64\) : UInt64$/ { armed = 1; declarations++ } armed && /^          IyiHeap\.list_drained\(index, arena, cursor, n\)$/ { sites++; print "          IyiHeap.park_witness(arena, granule, cursor, index)"; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
+# c4: the warm-pool branch of idle_wait_ms, the cap a worker's wait gets.
+WARM_BROKEN='/^  def self\.idle_wait_ms\(timeout : Int64\) : Int64$/ { armed = 1; declarations++ } armed && /^    elsif pool_warm\?$/ { sites++; sub(/pool_warm\?/, "false") } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
+# c5: the cooled run's release. The control records the cold push beside the
+# witness; the mutant deletes the three release calls and keeps the witness.
+COOL_WITNESS='/^  def self\.cool_pools\(limit : Int32\) : Nil$/ { armed = 1; declarations++ } { print } armed && /^      write64\(line \+ PC_COLD, run\)$/ { sites++; print "      cool_witness(run)" } armed && /^  end$/ { armed = 0 } END { if (declarations != 1 || sites != 1) exit 3 }'
+COOL_BROKEN='/^  def self\.cool_pools\(limit : Int32\) : Nil$/ { armed = 1; declarations++ } armed && /__iyi_release_pages\(/ { found++; next } armed && /^      write64\(line \+ PC_COLD, run\)$/ { sites++; print; print "      cool_witness(run)"; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || found != 3 || sites != 1) exit 3 }'
 
-# The copy-only methods COOL_ACCESS inserts: the counter and its reader.
-# `state LABEL NAME WANT FLAGS ACCESS SITE`: the copy of src/iyi with ACCESS,
-# then SITE, applied to heap_partition.iyi, built with FLAGS and run once in
-# drain mode. WANT 1 must exit 1 with the one sentence the program prints when
-# the release never ran; WANT 0 (the hook alone) must exit 0 and print the count.
-# Exit 76 is setup or a watchdog, never a catch.
-state() {
-  local label="$1" name="$2" want="$3" flags="$4" access="$5" site="$6"
+# keyed LABEL NAME WANT WHICH LINE FLAGS [SITE...]: the copy of src/iyi with
+# KEYED_ACCESS, then each SITE in order, applied to heap_partition.iyi, built
+# with FLAGS and run as `keyed WHICH`. WANT 1 must exit 1 with exactly one FAIL
+# line and LINE as a whole line; WANT 0 must exit 0 with LINE as a whole line
+# and no FAIL line. Exit 76 is setup (a watchdog or a stage that never reached
+# its run) and never a catch.
+keyed() {
+  local label="$1" name="$2" want="$3" which="$4" line="$5" flags="$6"
+  shift 6
   local dir="$WORK/$name"
   mkdir -p "$dir"
   cp -R "$REPO/src/iyi" "$REPO/src/std" "$dir/"
-  cat >"$WORK/cool.iyi" <<'IYI'
-  # copy only (bench/heap_drain.sh's `state`): the count of the cooled path's
-  # release calls, written beside each call.
-  @@cool_released : UInt64 = 0_u64
+  cat >"$WORK/keyed.iyi" <<'IYI'
+  # copy only (bench/heap_drain.sh's `keyed`): the witnesses. Each records what
+  # the runtime did to the one run the program staged; a copy that never reaches
+  # that run leaves its record empty, and the program reports setup, not a catch.
+  @@park_key : UInt64 = 0_u64
+  @@park_seen : UInt64 = 0_u64
+  @@cool_key : UInt64 = 0_u64
+  @@cool_page : UInt64 = 0_u64
+  @@cool_seen : UInt64 = 0_u64
+  COOL_SENTINEL = 0x5EEDC0015EEDC001_u64
 
-  def self.cool_record : Nil
-    Pointer(Atomic(UInt64)).new(pointerof(@@cool_released).address).value.add(1_u64)
+  def self.park_stage : UInt64
+    index = 0
+    while index < CLASSES
+      class_lock(index)
+      run = take_pool_run(index)
+      if run != 0_u64
+        arena = run & (0_u64 &- MAP)
+        granule = granule_of(arena, run)
+        set_run_word(arena, granule, 0_u64, run_n(run_word(arena, granule)), RUN_PARKED)
+        Pointer(Atomic(UInt64)).new(pointerof(@@park_key).address).value.set(run)
+        class_unlock(index)
+        return run
+      end
+      class_unlock(index)
+      index = index + 1
+    end
+    0_u64
   end
 
-  def self.cool_released_count : UInt64
-    Pointer(Atomic(UInt64)).new(pointerof(@@cool_released).address).value.get
+  def self.park_witness(arena : UInt64, granule : UInt64, run : UInt64, index : Int32) : Nil
+    return unless run == Pointer(Atomic(UInt64)).new(pointerof(@@park_key).address).value.get
+    seen = Pointer(Atomic(UInt64)).new(pointerof(@@park_seen).address)
+    return unless seen.value.get == 0_u64
+    listed = read64(pline(index) + PC_DRAIN) == run ? 2_u64 : 0_u64
+    seen.value.set(1_u64 | listed | run_state(run_word(arena, granule)).unsafe_shl(4_u64))
+  end
+
+  def self.park_seen : UInt64
+    Pointer(Atomic(UInt64)).new(pointerof(@@park_seen).address).value.get
+  end
+
+  def self.warm_stage : Bool
+    index = 0
+    while index < CLASSES
+      class_lock(index)
+      line = pline(index)
+      if (read64(line + PC_POOL) | read64(line + PC_OLD) | read64(line + PC_RELEASE)) != 0_u64
+        class_unlock(index)
+        return true
+      end
+      run = pop_listed(index, PC_COLD)
+      if run != 0_u64
+        arena = run & (0_u64 &- MAP)
+        pool_run(index, arena, run, run_n(run_word(arena, granule_of(arena, run))))
+        class_unlock(index)
+        return true
+      end
+      class_unlock(index)
+      index = index + 1
+    end
+    false
+  end
+
+  def self.warm_wait(requested : Int64) : Int64
+    lock
+    pending = IyiStat.atomic(IyiStat::IDLE_PENDING)
+    was_pending = pending.value.get
+    was_cursor = IyiStat.get(IyiStat::IDLE_CURSOR)
+    pending.value.set(0_u64)
+    IyiStat.set(IyiStat::IDLE_CURSOR, 0_u64)
+    got = -2_i64
+    index = 0
+    while got == -2_i64 && index < CLASSES
+      class_lock(index)
+      line = pline(index)
+      got = idle_wait_ms(requested) if (read64(line + PC_POOL) | read64(line + PC_OLD) | read64(line + PC_RELEASE)) != 0_u64
+      class_unlock(index)
+      index = index + 1
+    end
+    IyiStat.set(IyiStat::IDLE_CURSOR, was_cursor)
+    pending.value.set(1_u64) if was_pending != 0_u64
+    unlock
+    got
   end
 
   def self.cool_arm : Nil
     IyiStat.set(IyiStat::COOL_PENDING, 1_u64)
   end
 
+  def self.cool_stage : UInt64
     IyiStat.set(IyiStat::COOL_PENDING, 1_u64)
+    index = 0
+    while index < CLASSES
+      class_lock(index)
+      line = pline(index)
+      chosen = 0_u64
+      skipped = 0_u64
+      while chosen == 0_u64
+        run = take_pool_run(index)
+        break if run == 0_u64
+        arena = run & (0_u64 &- MAP)
+        granule = granule_of(arena, run)
+        n = run_n(run_word(arena, granule))
+        low = (first_head(arena, run) + PAGE - 1_u64) & (0_u64 &- PAGE)
+        high = first_head(arena, run + n.unsafe_shl(GRANULE_SHIFT)) & (0_u64 &- PAGE)
+        if high > low
+          write64(low, COOL_SENTINEL)
+          set_run_word(arena, granule, read64(line + PC_RELEASE), n, RUN_POOL)
+          write64(line + PC_RELEASE, run)
+          Pointer(Atomic(UInt64)).new(pointerof(@@cool_page).address).value.set(low)
+          Pointer(Atomic(UInt64)).new(pointerof(@@cool_key).address).value.set(run)
+          chosen = run
+        else
+          set_run_word(arena, granule, skipped, n, RUN_POOL)
+          skipped = run
+        end
+      end
+      while skipped != 0_u64
+        arena = skipped & (0_u64 &- MAP)
+        granule = granule_of(arena, skipped)
+        word = run_word(arena, granule)
+        set_run_word(arena, granule, read64(line + PC_POOL), run_n(word), RUN_POOL)
+        write64(line + PC_POOL, skipped)
+        skipped = word & RUN_LINK
+      end
+      class_unlock(index)
+      return chosen if chosen != 0_u64
+      index = index + 1
+    end
+    0_u64
+  end
+
+  def self.cool_witness(run : UInt64) : Nil
+    return unless run == Pointer(Atomic(UInt64)).new(pointerof(@@cool_key).address).value.get
+    seen = Pointer(Atomic(UInt64)).new(pointerof(@@cool_seen).address)
+    return unless seen.value.get == 0_u64
+    arena = run & (0_u64 &- MAP)
+    n = run_n(run_word(arena, granule_of(arena, run)))
+    low = (first_head(arena, run) + PAGE - 1_u64) & (0_u64 &- PAGE)
+    high = first_head(arena, run + n.unsafe_shl(GRANULE_SHIFT)) & (0_u64 &- PAGE)
+    page = Pointer(Atomic(UInt64)).new(pointerof(@@cool_page).address).value.get
+    whole = high > low && low == page ? 2_u64 : 0_u64
+    word = read64(page)
+    read = word == 0_u64 ? 1_u64 : (word == COOL_SENTINEL ? 2_u64 : 3_u64)
+    seen.value.set(1_u64 | whole | read.unsafe_shl(4_u64))
+  end
+
+  def self.cool_seen : UInt64
+    Pointer(Atomic(UInt64)).new(pointerof(@@cool_seen).address).value.get
   end
 
 IYI
-  if ! awk -v ins="$WORK/cool.iyi" "$access" "$REPO/src/iyi/heap_partition.iyi" >"$dir/a.1"; then
+  if ! awk -v ins="$WORK/keyed.iyi" "$KEYED_ACCESS" "$REPO/src/iyi/heap_partition.iyi" >"$dir/k.0"; then
     echo "  $label: heap_partition.iyi's cool_pools is not in the form the copy patches"
     status=1
     return
   fi
-  if ! awk "$site" "$dir/a.1" >"$dir/iyi/heap_partition.iyi"; then
-    echo "  $label: cool_pools' release calls are not in the form the copy patches"
-    status=1
-    return
-  fi
+  local src="$dir/k.0" i=0 script
+  for script in "$@"; do
+    i=$((i + 1))
+    if ! awk "$script" "$src" >"$dir/k.$i"; then
+      echo "  $label: site $i is not in the form the copy patches"
+      status=1
+      return
+    fi
+    src="$dir/k.$i"
+  done
+  cp "$src" "$dir/iyi/heap_partition.iyi"
   build "$name-bin" "$flags" "$dir${PSEP}$REPO/src" || return
-  timeout 600 "$WORK/$name-bin" >"$dir/run.out" 2>"$dir/run.err"
+  timeout 600 "$WORK/$name-bin" keyed "$which" >"$dir/run.out" 2>"$dir/run.err"
   local code=$?
   if [ "$code" -eq 76 ]; then
-    echo "  $label: setup failed (exit 76)"
+    echo "  $label: setup failed (exit 76: a stage that never reached its run, or a watchdog)"
     sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
     status=1
     return
   fi
   if [ "$want" = 1 ]; then
-    if [ "$code" -eq 1 ] && [ "$(grep -c '^FAIL: ' "$dir/run.out")" -eq 1 ] && grep -qxE "FAIL: idle: no cooled run's pages were handed back to the OS: the release call did not run" "$dir/run.out"; then
-      echo "  $label: caught, FAIL: idle: no cooled run's pages were handed back to the OS: the release call did not run"
+    if [ "$code" -eq 1 ] && [ "$(grep -c '^FAIL: ' "$dir/run.out")" -eq 1 ] && grep -Fxq -- "$line" "$dir/run.out"; then
+      echo "  $label: caught, $line"
       return
     fi
-  elif [ "$code" -eq 0 ] && grep -qxE 'idle: [1-9][0-9]* cooled runs handed their pages back to the OS' "$dir/run.out"; then
-    echo "  $label: $(grep -xE 'idle: [1-9][0-9]* cooled runs handed their pages back to the OS' "$dir/run.out")"
+  elif [ "$code" -eq 0 ] && [ "$(grep -c '^FAIL: ' "$dir/run.out")" -eq 0 ] && grep -Fxq -- "$line" "$dir/run.out"; then
+    echo "  $label: $line"
     return
   fi
   echo "  $label: missed (exit $code, wanted $want)"

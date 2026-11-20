@@ -1077,54 +1077,119 @@ for run in 1 2 3; do
 done
 grep -E '^(bounded|stopped|verb|one core):' trigger-1.txt | sed 's/^/  /'
 
-# `@@collecting` let go after the release again, in one of the two places
-# that let it go, and the thread that ran the collection held a second
-# between the two: the second thread's slices are turned away, it
-# triggers nothing and does nothing more, and the rounds that end there
-# fail by name - `collect_locked`'s the stopped round and the verb's, and
-# `finish_stopped`'s the bounded one; 12 runs of 12 each here held to
-# three, four and twelve cores, and the runtime as it is 12 of 12 clean.
+# At the release of each stopped-collection path, hold its collector until a
+# resumed thread crosses the next budget. The broken copies additionally hold
+# until that thread reaches the ceiling; the normal copies release on the first
+# crossing. Time is only a named setup failure, never a release condition.
+if grep -q '^one core:' trigger-1.txt; then
+  echo "FAIL: this host has one core; the bounded round needs a helper beside a second thread, and CI shapes have at least four"
+  exit 1
+fi
+step "the stopped collectors let go before a resumed thread crosses the budget"
+mkdir -p letgo-held/iyi
+cp "$REPO"/src/iyi/*.iyi letgo-held/iyi/
+awk 'function declarations() {
+    print "      @[UnsafeReach(\"copy-only: let-go proof state\")]"
+    print "      @@go_state : UInt64 = 0_u64"
+    print "      @[UnsafeReach(\"copy-only: let-go proof sites\")]"
+    print "      @@go_seen : UInt64 = 0_u64"
+    print "      @[UnsafeReach(\"copy-only: let-go proof flag\")]"
+    print "      @@go_up : UInt64 = 0_u64"
+    print "      @[UnsafeReach(\"copy-only: let-go proof hold count\")]"
+    print "      @@go_holds : UInt64 = 0_u64"
+    print "      def self.go_arm(site : UInt64) : Bool"
+    print "        seen = Pointer(Atomic(UInt64)).new(pointerof(@@go_seen).address)"
+    print "        bit = 1_u64.unsafe_shl(site)"
+    print "        return false if seen.value.get & bit != 0_u64"
+    print "        seen.value.set(seen.value.get | bit)"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@go_up).address).value.set(0_u64)"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@go_holds).address).value.set(IyiStat.get(IyiStat::HOLDS))"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@go_state).address).value.set(1_u64)"
+    print "        true"
+    print "      end"
+    print "      def self.go_probe(total : UInt64) : Nil"
+    print "        state = Pointer(Atomic(UInt64)).new(pointerof(@@go_state).address)"
+    print "        return unless state.value.get == 1_u64 && total >= budget"
+    print "        up = @@collecting"
+    print "        return unless state.value.compare_and_set(1_u64, 2_u64)[1]"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@go_up).address).value.set(up ? 1_u64 : 0_u64)"
+    print "        message = up ? \"let-go: a resumed slice crossed the budget while collecting was up\\n\" : \"let-go: a resumed slice crossed the budget after collection was let go\\n\""
+    print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "        state.value.set(3_u64)"
+    print "      end"
+    print "      def self.go_hold : Nil"
+    print "        state = Pointer(Atomic(UInt64)).new(pointerof(@@go_state).address)"
+    print "        limit = now_ns &+ 10000000000_u64"
+    print "        while state.value.get != 3_u64 || (Pointer(Atomic(UInt64)).new(pointerof(@@go_up).address).value.get != 0_u64 && IyiStat.get(IyiStat::HOLDS) <= Pointer(Atomic(UInt64)).new(pointerof(@@go_holds).address).value.get)"
+    print "          if now_ns >= limit"
+    print "            message = \"FAIL: let-go: the resumed thread did not answer the release probe within ten seconds\\n\""
+    print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "            __iyi_exit(76)"
+    print "          end"
+    print "          spin_pause"
+    print "        end"
+    print "        state.value.set(0_u64)"
+    print "      end"
+  }
+  /^      def self\.pressure\(size : UInt64\) : Nil$/ { declarations(); print; declared++; in_pressure = 1; next }
+  in_pressure && /^        total = IyiHeap\.allocated_word\.value\.add\(size\) \+ size$/ { print; print "        go_probe(total)"; in_pressure = 0; probed++; next }
+  /^      def self\.collect_locked\(eager : Bool\) : Nil$/ { scope = 1 }
+  /^        def self\.finish_stopped\(started : UInt64, others : Int64\) : Nil$/ { scope = 2 }
+  /^        def self\.finish_concurrent : UInt64$/ { scope = 0 }
+  scope == 1 && /^      end$/ { scope = 0 }
+  scope == 2 && /^        end$/ { scope = 0 }
+  scope == 1 && /^          IyiThread\.resume_others\(others\)$/ {
+    print "          go_locked = go_arm(eager ? 2_u64 : 1_u64)"
+    print
+    print "          go_hold if go_locked"
+    locked++; next
+  }
+  scope == 2 && /^          IyiThread\.resume_others\(others\)$/ {
+    print "          go_stopped = go_arm(3_u64)"
+    print
+    print "          go_hold if go_stopped"
+    stopped++; next
+  }
+  { print } END { if (declared != 1 || probed != 1 || locked != 1 || stopped != 1) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > letgo-held/iyi/prelude.iyi || { echo "the let-go proof anchors are missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/letgo-held${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/release_trigger.iyi" -o letgo-held-run > build-letgo-held.log 2>&1; then
+  cat build-letgo-held.log; exit 1
+fi
+timeout -k 5 120 ./letgo-held-run > letgo-held.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -Fxq "release trigger: every collection was let go before its threads were released" letgo-held.txt || [ "$(grep -Fxc "let-go: a resumed slice crossed the budget after collection was let go" letgo-held.txt)" -ne 3 ]; then
+  echo "the held let-go control did not complete (exit $code):"; tail -10 letgo-held.txt; exit 1
+fi
+echo "  held let-go control exits 0 for all three collection paths"
 let_go_late() {
   name=$1 indent=$2
   shift 2
   mkdir -p "$name/iyi"
-  cp "$REPO"/src/iyi/*.iyi "$name/iyi/"
+  cp letgo-held/iyi/*.iyi "$name/iyi/"
   awk -v n="$indent" 'BEGIN { while (length(pad) < n) pad = pad " " }
-    $0 == (pad "@@collecting = false") && !moved { held = 1; next }
-    held && /^          IyiThread\.resume_others\(others\)$/ {
-      print
-      print "          window = now_ns + 1000000000_u64"
-      print "          while now_ns < window"
-      print "            spin_pause"
-      print "          end"
-      print "          @@collecting = false"
-      held = 0; moved = 1; next }
-    { print } END { if (!moved) exit 3 }' \
-    "$REPO/src/iyi/prelude.iyi" > "$name/iyi/prelude.iyi" || { echo "the order the $name proof undoes is not in the prelude any more"; exit 1; }
+    $0 == (pad "@@collecting = false") { removed++; next }
+    n == 8 && $0 == "          go_hold if go_locked" { print; print "          @@collecting = false"; inserted++; next }
+    n == 10 && $0 == "          go_hold if go_stopped" { print; print "          @@collecting = false"; inserted++; next }
+    { print } END { if (removed != 1 || inserted != 1) exit 3 }' \
+    letgo-held/iyi/prelude.iyi > "$name/iyi/prelude.iyi" || { echo "the let-go order for $name is missing or ambiguous"; exit 1; }
   if ! IYI_PATH="$WORK/$name${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/release_trigger.iyi" -o "$name-run" > "build-$name.log" 2>&1; then
     cat "build-$name.log"; exit 1
   fi
-  timeout -k 5 60 "./$name-run" > "$name.txt" 2>&1
+  timeout -k 5 120 "./$name-run" > "$name.txt" 2>&1
   code=$?
   if [ "$code" -ne 1 ]; then
     echo "the untriggered slices were not caught (exit $code):"; cat "$name.txt"; exit 1
   fi
   for round in "$@"; do
-    if ! grep -q "^FAIL: $round: after collection" "$name.txt"; then
-      echo "the $round round did not fail:"; cat "$name.txt"; exit 1
+    if ! grep -Eq "^FAIL: $round: after collection [0-9]+ was counted, [1-9][0-9]* of a thread's slices were held at the ceiling of a collection that was not theirs, which had not been let go$" "$name.txt"; then
+      echo "the $round round did not fail at its complete sentence:"; cat "$name.txt"; exit 1
     fi
-    printf '  exits 1 at "%s"\n' "$(grep -m1 "^FAIL: $round:" "$name.txt" | cut -c1-150)"
+    printf '  exits 1 at "%s"\n' "$(grep -m1 "^FAIL: $round:" "$name.txt")"
   done
 }
-
 step "failure proof: a stopped collection let go after its threads are released leaves their slices untriggered"
 let_go_late locked-late 8 stopped verb
-
 step "failure proof: a collection that ends in its first stop let go after its threads are released leaves their slices untriggered"
-if grep -q '^one core:' trigger-1.txt; then
-  echo "FAIL: this host has one core; the bounded round needs a helper beside a second thread, and CI shapes have at least four"
-  exit 1
-fi
 let_go_late bounded-late 10 bounded
 
 # Both copies hold the same free between reading and linking its cache head.

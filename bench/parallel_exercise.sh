@@ -1345,11 +1345,11 @@ END { if (n_defs != 1 || n_seen != 1 || n_scan != 1 || n_guard != 1 || n_skip !=
   broken intransit_hook "$INTRANSIT_HOOK" prelude.iyi parallel_migrate -Dintransit_force
   verdict_held intransit_hook "channels: the collector's stack walk scanned a queued fiber's saved stack that held a list's head" channels
 
-  step "failure proof: an io wait that does not say whose poller holds it is never cancelled"
-  # Copy only, for the unlistedio proof of bench/parallel_migrate.iyi (-Dunlistedio_force). Both copies count each io
-  # wait once its registration has run (force_armed, after the list_on). The mutant replaces that one list_on with the
-  # count, so its waiters are armed and parked but not listed for a cancel. Each anchor is counted once; the awk
-  # exits 3 on any other count.
+  step "failure proof: cancellation cannot route an io wait whose poller is not listed"
+  # Copy only: count each registration and each cancel_moving call that
+  # observes a nonzero listed owner. The verdict is about that routing
+  # observation, not whether a reader remained parked after cancellation.
+  # Each anchor is counted once; the awk exits 3 on any other count.
   UNLIST_PRINTS='  print "  # Copy only, for the unlistedio proof of bench/parallel_migrate.iyi: each io wait counts itself once its"
   print "  # registration has run (force_armed). The program reads the count (force_armed_count)."
   print "  @[UnsafeReach(\"bumped by each io wait after its registration, read by the program: atomics only\")]"
@@ -1401,9 +1401,9 @@ $UNLIST_DISPATCH_RULE
 { print }
 END { if (n_defs != 1 || n_list != 1 || n_disp != 1 || n_mut != 1) exit 3 }"
   broken unlistedio "$UNLIST_BUG" concurrency.iyi parallel_migrate -Dunlistedio_force
-  verdict_caught unlistedio "cancel: a cancel left a reader parked in an io wait, whose poller was not listed for the cancel" cancel --watch=5000
+  verdict_caught unlistedio "cancel: cancellation recorded fewer than eight nonzero listed-owner routes" cancel --watch=5000
   broken unlistedio_hook "$UNLIST_HOOK" concurrency.iyi parallel_migrate -Dunlistedio_force
-  verdict_held unlistedio_hook "cancel: the cancel reached the poller of every reader parked in an io wait" cancel --watch=5000
+  verdict_held unlistedio_hook "cancel: cancellation recorded at least eight nonzero listed-owner routes" cancel --watch=5000
 
   step "failure proof: a close posted to no thread leaves a read on another worker parked"
   case "$(uname -s)" in

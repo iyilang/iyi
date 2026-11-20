@@ -517,11 +517,9 @@ import std/socket::{IyiSocket, SocketError}
 
   # ── cancel ───────────────────────────────────────────────────────────
   {% if flag?(:unlistedio_force) %}
-  # The forced io cancel (`-Dunlistedio_force`), run without the step's watchdog so that its own named
-  # limits are the only waits. Eight readers park in their io waits; each reader's registration counts
-  # itself (force_armed, after the list_on). Main waits for all eight, checks each is still parked in its
-  # io wait before the cancel, then cancels the group. A cancel that reaches a parked io waiter wakes it,
-  # so a reader still parked once the cancel has returned is the verdict: its poller was not listed.
+  # Eight readers register their io waits. After cancellation, the copy's
+  # counter records how many cancel_moving calls saw a nonzero listed owner.
+  # That is a routing observation, not proof a reader remained parked.
   def cancel_io_forced : Nil
     listener = IyiSocket.listen("127.0.0.1", 0)
     port = listener.local_port
@@ -560,8 +558,8 @@ import std/socket::{IyiSocket, SocketError}
       end
       g.cancel_children
       found = IyiScheduler.force_dispatched_count
-      fail("cancel: a cancel left a reader parked in an io wait, whose poller was not listed for the cancel") if found < readers.to_u64
-      puts "cancel: the cancel reached the poller of every reader parked in an io wait"
+      fail("cancel: cancellation recorded fewer than eight nonzero listed-owner routes") if found < readers.to_u64
+      puts "cancel: cancellation recorded at least eight nonzero listed-owner routes"
     end
     ends.each(&.close)
     listener.close

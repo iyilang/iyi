@@ -1746,7 +1746,7 @@ $JOIN_END" thread.iyi parallel_migrate -Dkerneljoin_force
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_handoff_decision).address).value.compare_and_set(0_u64, decision)"
   print "  end"
   print "  def self.force_handoff_done(st : IyiSchedulerState, fiber : IyiFiber) : Nil"
-  print "    force_handoff_decide(fiber, handed_on?(st, fiber) ? 5_u64 : 4_u64)"
+  print "    force_handoff_decide(fiber, handed_on?(st, fiber) ? (st.handoff_skip == 0_u64 ? 5_u64 : 3_u64) : 4_u64)"
   print "  end"
   print; inpush = 1; n_defs++; next
 }

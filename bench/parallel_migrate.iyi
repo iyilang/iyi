@@ -1333,6 +1333,7 @@ import std/socket::{IyiSocket, SocketError}
       {% if flag?(:nohandoff_force) %}
         decision = IyiWorkers.force_handoff_decision
         release.add(1_i64)
+        fail("handoff: not eligible: back-off was active at the target decision") if decision == 3_u64
         fail("handoff: an eligible hand-off for a parked task took no hand-off branch") if decision == 5_u64
         fail("handoff: not armed: the target was not an eligible hand-off without back-off") unless decision == 2_u64
         puts "handoff: the eligible hand-off for a parked task took its branch with no back-off"

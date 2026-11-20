@@ -27,8 +27,6 @@
 # best_ms also discards the timeout's exit status before parsing its output.
 # Copy-generator anchor negatives ran locally on macOS; platform-applicable
 # generated copies passed the gate on Linux, Windows and macOS.
-# Unproven placement: moving an array, hash or string require anchor to EOF
-# leaves libruntime's generator exit 0; missing and duplicate anchors exit 3.
 #
 #   1. The exercise holds every property, plain and --release: parallel
 #      tasks start on the pool and on more than one worker, never on the
@@ -2466,8 +2464,11 @@ step "failure proof: the prelude's library compiled as the runtime's holds its w
 # never check. Their own `@[Unsafe]` marks are left out: prelude.iyi's, at
 # its top, covers what they handle. A plain build, whose copy is a loop of
 # bytes and long enough to tell.
-broken libruntime '/^require "\.\/(array|hash|string)"$/ {
-  name = $2; gsub(/"|\.\//, "", name); count[name]++
+broken libruntime '/^require "\.\/(float|range|set)"$/ {
+  name = $2; gsub(/"|\.\//, "", name); count[name]++; position[name] = NR
+}
+/^require "\.\/(array|hash|string)"$/ {
+  name = $2; gsub(/"|\.\//, "", name); count[name]++; position[name] = NR
   file = "'"$REPO"'/src/iyi/" name ".iyi"
   read_any = 0
   while ((status = getline line < file) > 0) { read_any = 1; if (line !~ /^@\[Unsafe\(/) print line }
@@ -2475,7 +2476,7 @@ broken libruntime '/^require "\.\/(array|hash|string)"$/ {
   close(file); next
 }
 { print }
-END { if (count["array"] != 1 || count["hash"] != 1 || count["string"] != 1) exit 3 }' prelude.iyi parallel_preempt_lib -Dpreempt_timing_proof
+END { if (count["float"] != 1 || count["range"] != 1 || count["set"] != 1 || count["array"] != 1 || count["hash"] != 1 || count["string"] != 1 || position["string"] != position["float"] + 1 || position["array"] != position["string"] + 1 || position["hash"] != position["range"] + 1 || position["set"] != position["hash"] + 1) exit 3 }' prelude.iyi parallel_preempt_lib -Dpreempt_timing_proof
 for proof in sort copy rehash join; do
   verdict_caught libruntime "$proof: the short task exceeded the wait bound" "$proof" --workers=1
 done

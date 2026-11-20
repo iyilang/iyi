@@ -178,6 +178,23 @@
 
 ### Fixed
 
+- **`std/xz` keeps its ring's bare pointers inside the ring whatever the
+  ring's growth does.** The dictionary ring is read through pointers whose
+  bounds held only because the ring grows to the dictionary's size before
+  it wraps: a match's start was `@dpos - distance`, plus the ring's size
+  once, and the oldest unread byte `@dpos - @pending` the same way. A ring
+  that stopped growing (the exercise's copy that never grows past 64 KiB)
+  left both below the ring's memory: a read of `text.p0.xz` whole waited
+  222,794 bytes in a 64 KiB ring and read the rest from before it, giving
+  wrong bytes on most runs and a segmentation fault on some (darwin CI, job
+  136498363156). Two checks now refuse such a stream by its sentence first:
+  a match that reaches back past the ring (`a distance reaches past the
+  ring`, beside the decoder's checks against the output and the
+  dictionary), and more bytes waiting after a run than the ring holds
+  (`more bytes wait to be read than the ring holds`). Neither can fail
+  while the ring grows as it should; each costs a comparison per match or
+  per run.
+
 - **A build that runs a command from a macro is no longer taken for up to
   date by the next.** The up-to-date check's recorder stepped aside for
   its own reads by taking itself from the whole process, while the
@@ -624,6 +641,21 @@
   run again, up to five times.
 
 ### Gates
+
+- **`bench/std_xz_exercise.sh`'s copy whose ring never grows past 64 KiB
+  is caught at its check every run.** It read below the ring's memory, so
+  it failed by a wrong CRC64 on most runs and by a memory fault on some:
+  darwin CI job 136498363156 (run 44796773422, self-hosted Mac), and on
+  master's module 1 of 400 runs on Linux and 2 of 400 on Windows, all
+  among the runs four at once beside busy loops, and 3 of 400 on the Mac
+  beside three CI jobs. With `std/xz`'s new ring checks the copy is held
+  to `text.p0.xz, whole: refused with "xz: more bytes wait to be read than
+  the ring holds`, and a new copy whose ring stops growing at 1 MiB to
+  `far.p6.xz, whole: refused with "LZMA2: a distance reaches past the
+  ring` (its repeat from 1.6 MB back), so each check is proven able to
+  fail: 400 of 400 runs of the first and 200 of 200 of the second on
+  Linux and the Mac, 400 and 300 on Windows, half or more of them four at
+  once beside busy loops. 25 breaks, all caught.
 
 - **`bench/sweep_exercise.sh`'s copy that counts the listed pages twice
   fails every run in which two adoptions meet in its window.** In master's

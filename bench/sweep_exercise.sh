@@ -329,6 +329,11 @@ fi
 # The fix must hold every count. The old counting's count is one short
 # from a meeting to the next pause, so a run that meets the window fails;
 # one that never meets it tests nothing, and runs again, three at most.
+# So built, the old counting failed 250 runs of 250 on this Linux machine,
+# 50 each on 12, four and two vCPUs, beside twelve busy loops and on four
+# beside four, and on one vCPU the 8 of 30 that met the window; and 80 of
+# 80 on macOS 26.6, Apple M2 Pro, 10 cores (the user's machine), 30 beside
+# ten busy loops. The fix held every count in 60 runs of 60 and 30 of 30.
 WIDEN_NS=20000
 widen_prelude() {
   mkdir -p "$WORK/$1/iyi"

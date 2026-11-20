@@ -627,9 +627,14 @@
   most. The copy now fails 250 runs of 250 on Linux: 50 each on 12, four
   and two vCPUs, beside twelve busy loops, and on four vCPUs beside four.
   On one vCPU it failed in all 8 of 30 runs that met the window; the
-  other 22 never met it. The fix's copy read every block back whole in
-  60 runs of 60, on 12, four and two vCPUs and beside twelve busy loops,
-  with all 575,784 of the counts it checked right.
+  other 22 never met it. On macOS 26.6, Apple M2 Pro, 10 cores (the
+  user's machine), it failed 50 runs of 50 and 30 of 30 beside ten busy
+  loops. The copy without the count check failed 40 of 40 there too, 20
+  of them beside ten busy loops, each on a block that read wrong.
+  The fix's copy read every block back whole in 60 runs of 60 on Linux,
+  on 12, four and two vCPUs and beside twelve busy loops, with all
+  575,784 of the counts it checked right. On the Mac it did so in 30 of
+  30, ten of them beside ten busy loops, with all 634,160 right.
 
 - **`bench/heap_local.iyi`'s `filter` check holds the owning unit's
   token while it looks, so the copy without the local mark's owner filter

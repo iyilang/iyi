@@ -987,13 +987,13 @@ caught_line() { # name, exact line, step arguments...
 # exits 3, which fails the gate through broken().
 WAKE_COMMON='/^  def self.wait_shared\(st : IyiSchedulerState\) : Nil$/ { inws = 1; n_wait++ }
 inws && /^  end$/ { inws = 0 }
-inws && /^    st.idle = true$/ { print; print "    IyiScheduler.force_idle_mark(st)"; n_mark++; next }
-inws && /^    wait_for_events\(true\)$/ { print "    IyiScheduler.force_idle_hold(st)"; print; n_hold++; next }
+inws && /^    st.idle = true$/ { print; print "    IyiScheduler.force_idle_mark(st)"; n_mark++; at_mark = NR; next }
+inws && /^    wait_for_events\(true\)$/ { print "    IyiScheduler.force_idle_hold(st)"; print; n_hold++; at_hold = NR; next }
 /^  def self.send_home\(home : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { insend = 1; n_send++ }
 insend && /^  end$/ { insend = 0 }
-insend && /^    home.post_mail$/ { print; print "    force_home_post(home, fiber)"; n_post++; next }'
-WAKE_RING_BUG='insend && /^    ring\(home\)$/ { print "    force_home_done(home, fiber)"; n_ring++; next }'
-WAKE_RING_HOOK='insend && /^    ring\(home\)$/ { print; print "    force_home_done(home, fiber)"; n_ring++; next }'
+insend && /^    home.post_mail$/ { print; print "    force_home_post(home, fiber)"; n_post++; at_post = NR; next }'
+WAKE_RING_BUG='insend && /^    ring\(home\)$/ { print "    force_home_done(home, fiber)"; n_ring++; at_ring = NR; next }'
+WAKE_RING_HOOK='insend && /^    ring\(home\)$/ { print; print "    force_home_done(home, fiber)"; n_ring++; at_ring = NR; next }'
 WAKE_DEFS='/^  def self.reschedule : Nil$/ {
   print "  @[UnsafeReach(\"copy-only home wake rendezvous, accessed atomically\")]"
   print "  @@forced_home_state : UInt64 = 0_u64"
@@ -1052,7 +1052,7 @@ WAKE_DEFS='/^  def self.reschedule : Nil$/ {
   n_defs++
   next
 }'
-WAKE_END='END { if (n_wait != 1 || n_mark != 1 || n_hold != 1 || n_send != 1 || n_post != 1 || n_ring != 1 || n_defs != 1) exit 3 }'
+WAKE_END='END { if (n_wait != 1 || n_mark != 1 || n_hold != 1 || at_mark >= at_hold || n_send != 1 || n_post != 1 || n_ring != 1 || at_post >= at_ring || n_defs != 1) exit 3 }'
 WAKE_BUG="$WAKE_COMMON
 $WAKE_RING_BUG
 $WAKE_DEFS
@@ -1067,20 +1067,22 @@ NOW_COMMON='/^  def take_now : T \| ChannelClosed$/ { intake = 1; n_take++ }
 /^  def put_now\(value : T\) : Nil \| ChannelClosed$/ { input = 1; n_put++ }
 (intake || input) && /^  end$/ { intake = 0; input = 0 }
 intake && /^    lock$/ { print "    IyiScheduler.force_now_attempt(pointerof(@guard).address)"; n_attempt++ }'
-NOW_LOCK_BUG='intake && /^    lock$/ { n_take_lock++; next }
-intake && /^    unlock$/ { n_take_unlock++; next }
-input && /^    lock$/ { n_put_lock++; next }
-input && /^    unlock$/ { n_put_unlock++; next }'
-NOW_LOCK_HOOK='intake && /^    lock$/ { n_take_lock++ }
-intake && /^    unlock$/ { n_take_unlock++ }
-input && /^    lock$/ { n_put_lock++ }
-input && /^    unlock$/ { n_put_unlock++ }'
+NOW_LOCK_BUG='intake && /^    lock$/ { n_take_lock++; at_take_lock = NR; next }
+intake && /^    unlock$/ { n_take_unlock++; at_take_unlock = NR; next }
+input && /^    lock$/ { n_put_lock++; at_put_lock = NR; next }
+input && /^    unlock$/ { n_put_unlock++; at_put_unlock = NR; next }'
+NOW_LOCK_HOOK='intake && /^    lock$/ { n_take_lock++; at_take_lock = NR }
+intake && /^    unlock$/ { n_take_unlock++; at_take_unlock = NR }
+input && /^    lock$/ { n_put_lock++; at_put_lock = NR }
+input && /^    unlock$/ { n_put_unlock++; at_put_unlock = NR }'
 NOW_SHIFT_BUG='/^  private def shift_item : T$/ { inshift = 1; n_method++ }
 inshift && /^  end$/ { inshift = 0 }
-inshift && /^    @count = @count - 1$/ { print "    seen_count = @count"; print "    IyiScheduler.force_now_hold(pointerof(@guard).address)"; print "    @count = seen_count - 1"; print "    IyiScheduler.force_now_stored(pointerof(@guard).address)"; n_shift++; next }'
+inshift && /^    @count = @count - 1$/ { print "    seen_count = @count"; print "    IyiScheduler.force_now_hold(pointerof(@guard).address)"; print "    @count = seen_count - 1"; print "    IyiScheduler.force_now_stored(pointerof(@guard).address)"; n_shift++; at_shift = NR; next }
+inshift && /^    value$/ { n_value++; at_value = NR }'
 NOW_SHIFT_HOOK='/^  private def shift_item : T$/ { inshift = 1; n_method++ }
 inshift && /^  end$/ { inshift = 0 }
-inshift && /^    @count = @count - 1$/ { print "    IyiScheduler.force_now_hold(pointerof(@guard).address)"; print; print "    IyiScheduler.force_now_stored(pointerof(@guard).address)"; n_shift++; next }'
+inshift && /^    @count = @count - 1$/ { print "    IyiScheduler.force_now_hold(pointerof(@guard).address)"; print; print "    IyiScheduler.force_now_stored(pointerof(@guard).address)"; n_shift++; at_shift = NR; next }
+inshift && /^    value$/ { n_value++; at_value = NR }'
 NOW_DEFS='/^  def self.reschedule : Nil$/ {
   print "  @[UnsafeReach(\"copy-only rendezvous words accessed atomically\")]"
   print "  @@now_target : UInt64 = 0_u64"
@@ -1124,7 +1126,7 @@ NOW_DEFS='/^  def self.reschedule : Nil$/ {
   n_defs++
   next
 }'
-NOW_END='END { if (n_take != 1 || n_put != 1 || n_attempt != 1 || n_take_lock != 1 || n_take_unlock != 1 || n_put_lock != 1 || n_put_unlock != 1 || n_method != 1 || n_shift != 1 || n_defs != 1) exit 3 }'
+NOW_END='END { if (n_take != 1 || n_put != 1 || n_attempt != 1 || n_take_lock != 1 || n_take_unlock != 1 || at_take_lock >= at_take_unlock || n_put_lock != 1 || n_put_unlock != 1 || at_put_lock >= at_put_unlock || n_method != 1 || n_shift != 1 || n_value != 1 || at_value != at_shift + 1 || n_defs != 1) exit 3 }'
 NOW_BUG="$NOW_COMMON
 $NOW_LOCK_BUG
 $NOW_SHIFT_BUG
@@ -1147,7 +1149,9 @@ insus && /^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print; print "    
 insus && /^    reschedule$/ { print "    force_window_decision(fiber, 2_u64)"; print; n_fall++; at_fall = NR; next }'
 CANCEL_PARK='/^  def self.park\(fiber : IyiFiber\) : UInt64$/ { inpark = 1; n_park++ }
 inpark && /^  end$/ { inpark = 0 }
-inpark && /^    fiber.wait_for_wake\(nonce\)$/ { print "    IyiScheduler.force_window_hold(fiber)"; print; n_hold++; next }'
+inpark && /^    nonce = parking\(fiber\)$/ { n_parking++; at_parking = NR }
+inpark && /^    fiber.wait_for_wake\(nonce\)$/ { print "    IyiScheduler.force_window_hold(fiber)"; print; n_hold++; at_hold = NR; next }
+inpark && /^    nonce$/ { n_nonce++; at_nonce = NR }'
 CANCEL_DEFS='/^  def self.reschedule : Nil$/ {
   print "  @[UnsafeReach(\"copy-only cancellation rendezvous, accessed atomically\")]"
   print "  @@forced_window_target : UInt64 = 0_u64"
@@ -1187,7 +1191,7 @@ CANCEL_DEFS='/^  def self.reschedule : Nil$/ {
   n_defs++
   next
 }'
-CANCEL_END='END { if (n_suspend != 1 || n_decision != 1 || n_fall != 1 || at_decision >= at_fall || n_park != 1 || n_hold != 1 || n_defs != 1) exit 3 }'
+CANCEL_END='END { if (n_suspend != 1 || n_decision != 1 || n_fall != 1 || at_decision >= at_fall || n_park != 1 || n_parking != 1 || n_hold != 1 || n_nonce != 1 || at_hold != at_parking + 1 || at_nonce != at_hold + 1 || n_defs != 1) exit 3 }'
 CANCEL_BUG="$CANCEL_SUSPEND_BUG
 $CANCEL_PARK
 $CANCEL_DEFS
@@ -1207,11 +1211,11 @@ verdict_held lostwake_hook 'home: a task finished on a worker and woke the main 
 
 step "failure proof: a steal that leaves the task in its victim's queue hands it out twice"
 broken duplicate '/^  private def self.steal_unstarted\(st : IyiSchedulerState\) : IyiFiber\?$/ { inside = 1; n_method++ }
-inside && /^          victim.pool_head = fiber.next_run$/ { n_head++; next }
-inside && /^          victim.pool_tail = nil if victim.pool_head.is_a\?\(Nil\)$/ { n_tail++; next }
+inside && /^          victim.pool_head = fiber.next_run$/ { n_head++; at_head = NR; next }
+inside && /^          victim.pool_tail = nil if victim.pool_head.is_a\?\(Nil\)$/ { n_tail++; at_tail = NR; next }
 inside && /^  end$/ { inside = 0 }
 { print }
-END { if (n_method != 1 || n_head != 1 || n_tail != 1) exit 3 }'
+END { if (n_method != 1 || n_head != 1 || n_tail != 1 || at_tail != at_head + 1) exit 3 }'
 caught_line duplicate 'iyi: panic: the pool handed one parallel task to a worker twice: two threads would run one stack' steal
 
 step "failure proof: a cancel never delivered to a sleeping task's thread"
@@ -1220,7 +1224,8 @@ step "failure proof: a cancel never delivered to a sleeping task's thread"
 # before posting, and the control records the completed post.
 POST_COMMON='/^  def self.post_cancel\(home : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { inpost = 1; n_method++ }
 inpost && /^  end$/ { inpost = 0 }
-inpost && /^    home.post_mail$/ { print; print "    force_post_done(fiber)"; n_post++; at_post = NR; next }'
+inpost && /^    home.post_mail$/ { print; print "    force_post_done(fiber)"; n_post++; at_post = NR; next }
+inpost && /^    ring\(home\)$/ { n_ring++; at_ring = NR }'
 POST_BUG='inpost && /^    return if fiber.cancel_posted$/ { print "    force_post_missing(fiber)"; print "    return"; n_guard++; at_guard = NR; next }'
 POST_HOOK='inpost && /^    return if fiber.cancel_posted$/ { n_guard++; at_guard = NR }'
 POST_DEFS='/^  def self.reschedule : Nil$/ {
@@ -1242,7 +1247,7 @@ POST_DEFS='/^  def self.reschedule : Nil$/ {
   n_defs++
   next
 }'
-POST_END='END { if (n_method != 1 || n_post != 1 || n_guard != 1 || at_guard >= at_post || n_defs != 1) exit 3 }'
+POST_END='END { if (n_method != 1 || n_post != 1 || n_guard != 1 || n_ring != 1 || at_guard >= at_post || at_ring != at_post + 1 || n_defs != 1) exit 3 }'
 broken undelivered "$POST_COMMON
 $POST_BUG
 $POST_DEFS
@@ -1270,10 +1275,11 @@ inover && /^    fiber.list_on\(st.object_id\) if @@shared && fiber.unit.is_a\?\(
 inposix && /^  end$/ { inposix = 0 }
 inposix && /^    fiber.list_on\(st.object_id\) if moving$/ { print; print "    force_io_registered(fiber)"; n_reg_posix++; next }
 /^  def self.cancel_wait\(fiber : IyiFiber\) : Nil$/ { incancel = 1; n_cancel++ }
-incancel && /^    elsif fiber.state == IyiFiberState::WaitingCh$/ { print "      force_io_decision(fiber, true)"; print; n_taken++; at_taken = NR; next }
+incancel && /^    (elsif|else)( |$)/ && waitingio && !/^    elsif fiber.state == IyiFiberState::WaitingCh$/ { n_intervening++ }
+incancel && /^    elsif fiber.state == IyiFiberState::WaitingCh$/ { print "      force_io_decision(fiber, true)"; print; n_taken++; at_taken = NR; waitingio = 0; next }
 incancel && /^  end$/ { print "    force_io_decision(fiber, false)"; print; incancel = 0; n_end++; next }'
-PARKED_BUG='incancel && /^    elsif fiber.state == IyiFiberState::WaitingIo$/ { print "    elsif false"; n_branch++; at_branch = NR; next }'
-PARKED_HOOK='incancel && /^    elsif fiber.state == IyiFiberState::WaitingIo$/ { n_branch++; at_branch = NR }'
+PARKED_BUG='incancel && /^    elsif fiber.state == IyiFiberState::WaitingIo$/ { print "    elsif false"; n_branch++; at_branch = NR; waitingio = 1; next }'
+PARKED_HOOK='incancel && /^    elsif fiber.state == IyiFiberState::WaitingIo$/ { n_branch++; at_branch = NR; waitingio = 1 }'
 PARKED_DEFS='/^  def self.reschedule : Nil$/ {
   print "  @[UnsafeReach(\"copy-only io cancellation rendezvous, accessed atomically\")]"
   print "  @@forced_io_target : UInt64 = 0_u64"
@@ -1311,7 +1317,7 @@ PARKED_DEFS='/^  def self.reschedule : Nil$/ {
   n_defs++
   next
 }'
-PARKED_END='END { if (n_over != 1 || n_reg_over != 1 || n_posix != 1 || n_reg_posix != 1 || n_cancel != 1 || n_taken != 1 || n_end != 1 || n_branch != 1 || at_branch >= at_taken || n_defs != 1) exit 3 }'
+PARKED_END='END { if (n_over != 1 || n_reg_over != 1 || n_posix != 1 || n_reg_posix != 1 || n_cancel != 1 || n_taken != 1 || n_end != 1 || n_branch != 1 || at_branch >= at_taken || n_intervening != 0 || n_defs != 1) exit 3 }'
 broken parkedio "$PARKED_COMMON
 $PARKED_BUG
 $PARKED_DEFS
@@ -1381,22 +1387,23 @@ verdict_held lostcancel_hook 'wakes, cancels: the targeted suspend claimed its c
   LOSTWORD_COMMON='/^  def self.park_on\(/ { inpark = 1; inlink = 1; n_park++ }
 inpark && /^  end$/ { inpark = 0 }
 inlink && /^  end$/ { inlink = 0 }
-inlink && /^    tails\[bucket\] = waiter$/ { print; print "    force_lost_link(word)"; n_link++; next }
+inlink && /^    tails\[bucket\] = waiter$/ { print; print "    force_lost_link(word)"; n_link++; at_link = NR; next }
 /^  def self.wake_on\(/ { inwake = 1; n_wake++ }
 inwake && /^  end$/ { inwake = 0 }
-inwake && /^    IyiChanLock.lock\(lock\)$/ { print "    force_lost_attempt(word)"; n_attempt++ }
-inwake && /^    IyiChanLock.unlock\(lock\)$/ { print "    force_lost_scanned(word, woken)"; print; print "    force_lost_done(word)"; n_done++; next }'
+inwake && /^    IyiChanLock.lock\(lock\)$/ { print "    force_lost_attempt(word)"; n_attempt++; at_attempt = NR }
+inwake && /^    IyiChanLock.unlock\(lock\)$/ { print "    force_lost_scanned(word, woken)"; print; print "    force_lost_done(word)"; n_done++; at_done = NR; next }
+inwake && /^    while chain.is_a\?\(IyiFiber\)$/ { n_chain++; at_chain = NR }'
   LOSTWORD_BUG='inpark && !seq_open && !seq_done && /^    IyiChanLock.lock\(lock\)$/ { seq_open = 1; seq = 1; n_lock++; next }
 seq == 1 { if ($0 != "    if word.value.get != seen") exit 3; seq = 2; print; next }
 seq == 2 { if ($0 != "      IyiChanLock.unlock(lock)") exit 3; seq = 3; n_unlock++; next }
 seq == 3 { if ($0 != "      return nil") exit 3; seq = 4; print; next }
-seq == 4 { if ($0 != "    end") exit 3; seq = 0; seq_done = 1; print; print "    force_lost_window(word, lock)"; print "    IyiChanLock.lock(lock)"; n_window++; n_insert++; next }
+seq == 4 { if ($0 != "    end") exit 3; seq = 0; seq_done = 1; at_seq = NR; print; print "    force_lost_window(word, lock)"; print "    IyiChanLock.lock(lock)"; n_window++; n_insert++; next }
 inpark && (/^ +if word\.value\.get != seen$/ || /^      IyiChanLock\.unlock\(lock\)$/) { n_stray++ }'
   LOSTWORD_CONTROL='inpark && !seq_open && !seq_done && /^    IyiChanLock.lock\(lock\)$/ { seq_open = 1; seq = 1; n_lock++; print; next }
 seq == 1 { if ($0 != "    if word.value.get != seen") exit 3; seq = 2; print; next }
 seq == 2 { if ($0 != "      IyiChanLock.unlock(lock)") exit 3; seq = 3; n_unlock++; print; next }
 seq == 3 { if ($0 != "      return nil") exit 3; seq = 4; print; next }
-seq == 4 { if ($0 != "    end") exit 3; seq = 0; seq_done = 1; print; print "    force_lost_window(word, lock)"; n_window++; n_insert++; next }
+seq == 4 { if ($0 != "    end") exit 3; seq = 0; seq_done = 1; at_seq = NR; print; print "    force_lost_window(word, lock)"; n_window++; n_insert++; next }
 inpark && (/^ +if word\.value\.get != seen$/ || /^      IyiChanLock\.unlock\(lock\)$/) { n_stray++ }'
   LOSTWORD_DEFS='/^  @@lot_locks : Pointer\(UInt64\)/ {
   print
@@ -1458,7 +1465,7 @@ inpark && (/^ +if word\.value\.get != seen$/ || /^      IyiChanLock\.unlock\(loc
   n_defs++
   next
 }'
-  LOSTWORD_END='END { if (n_park != 1 || n_window != 1 || n_wake != 1 || n_attempt != 1 || n_done != 1 || n_link != 1 || n_lock != 1 || n_unlock != 1 || n_insert != 1 || n_defs != 1 || seq_open != 1 || seq_done != 1 || seq != 0 || n_stray != 0) exit 3 }'
+  LOSTWORD_END='END { if (n_park != 1 || n_window != 1 || n_wake != 1 || n_attempt != 1 || n_done != 1 || n_link != 1 || n_chain != 1 || n_lock != 1 || n_unlock != 1 || n_insert != 1 || n_defs != 1 || seq_open != 1 || seq_done != 1 || seq != 0 || n_stray != 0 || at_seq >= at_link || at_attempt >= at_done || at_chain != at_done + 1) exit 3 }'
   broken lostword "$LOSTWORD_COMMON
 $LOSTWORD_BUG
 $LOSTWORD_DEFS
@@ -1577,16 +1584,16 @@ step "failure proof: a thread-local read before a park and kept after it names t
   next
 }
 in_walker && /^      end$/ { in_walker = 0; print; next }
-in_walker && /^          while fiber\.is_a\?\(IyiFiber\)$/ { print; print "            force_note_seen(fiber)"; n_seen++; next }
-in_walker && /^            if fiber\.state != IyiFiberState::Running && fiber\.state != IyiFiberState::Done && fiber\.saved_sp != 0$/ { n_guard++ }
-in_walker && /^              scan_range\(fiber\.saved_sp, top, visit\)$/ { print "              force_note_scanned(fiber)"; print; n_scan++; next }'
+in_walker && /^          while fiber\.is_a\?\(IyiFiber\)$/ { print; print "            force_note_seen(fiber)"; n_seen++; at_seen = NR; next }
+in_walker && /^            if fiber\.state != IyiFiberState::Running && fiber\.state != IyiFiberState::Done && fiber\.saved_sp != 0$/ { n_guard++; at_guard = NR }
+in_walker && /^              scan_range\(fiber\.saved_sp, top, visit\)$/ { print "              force_note_scanned(fiber)"; print; n_scan++; at_scan = NR; next }'
   INTRANSIT_HOOK="$INTRANSIT_DEFS
 { print }
-END { if (n_defs != 1 || n_seen != 1 || n_scan != 1 || n_guard != 1) exit 3 }"
+END { if (n_defs != 1 || n_seen != 1 || n_scan != 1 || n_guard != 1 || at_seen >= at_guard || at_guard >= at_scan) exit 3 }"
   INTRANSIT_BUG="$INTRANSIT_DEFS
 in_walker && /^            if fiber\.state != IyiFiberState::Running && fiber\.state != IyiFiberState::Done && fiber\.saved_sp != 0\$/ { print \"            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Runnable && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0\"; n_skip++; next }
 { print }
-END { if (n_defs != 1 || n_seen != 1 || n_scan != 1 || n_guard != 1 || n_skip != 1) exit 3 }"
+END { if (n_defs != 1 || n_seen != 1 || n_scan != 1 || n_guard != 1 || n_skip != 1 || at_seen >= at_guard || at_guard >= at_scan) exit 3 }"
   broken intransit "$INTRANSIT_BUG" prelude.iyi parallel_migrate -Dintransit_force
   verdict_caught intransit "channels: the collector's stack walk omitted a queued fiber's saved stack that held a list's head" channels
   broken intransit_hook "$INTRANSIT_HOOK" prelude.iyi parallel_migrate -Dintransit_force
@@ -1631,22 +1638,27 @@ END { if (n_defs != 1 || n_seen != 1 || n_scan != 1 || n_guard != 1 || n_skip !=
   UNLIST_DEFS="$UNLIST_ANCHOR {
 $UNLIST_PRINTS
   print
-  n_defs++
+  n_defs++; inowner = 1
   next
 }"
-  UNLIST_HOOK_RULE="$UNLIST_LIST { print; print \"    force_armed\"; n_list++; next }"
-  UNLIST_BUG_RULE="$UNLIST_LIST { print \"    force_armed\"; n_list++; n_mut++; next }"
-  UNLIST_DISPATCH_RULE='/^    return if owner == 0_u64$/ { print; print "    force_dispatched"; n_disp++; next }'
+  UNLIST_SCOPE='inowner && /^  end$/ { inowner = 0 }
+/^  def self.cancel_moving\(fiber : IyiFiber\) : Nil$/ { incancel = 1; n_cancel++ }
+incancel && /^  end$/ { incancel = 0 }'
+  UNLIST_HOOK_RULE="inowner && $UNLIST_LIST { print; print \"    force_armed\"; n_list++; next }"
+  UNLIST_BUG_RULE="inowner && $UNLIST_LIST { print \"    force_armed\"; n_list++; n_mut++; next }"
+  UNLIST_DISPATCH_RULE='incancel && /^    return if owner == 0_u64$/ { print; print "    force_dispatched"; n_disp++; next }'
   UNLIST_HOOK="$UNLIST_DEFS
+$UNLIST_SCOPE
 $UNLIST_HOOK_RULE
 $UNLIST_DISPATCH_RULE
 { print }
-END { if (n_defs != 1 || n_list != 1 || n_disp != 1) exit 3 }"
+END { if (n_defs != 1 || n_cancel != 1 || n_list != 1 || n_disp != 1) exit 3 }"
   UNLIST_BUG="$UNLIST_DEFS
+$UNLIST_SCOPE
 $UNLIST_BUG_RULE
 $UNLIST_DISPATCH_RULE
 { print }
-END { if (n_defs != 1 || n_list != 1 || n_disp != 1 || n_mut != 1) exit 3 }"
+END { if (n_defs != 1 || n_cancel != 1 || n_list != 1 || n_disp != 1 || n_mut != 1) exit 3 }"
   broken unlistedio "$UNLIST_BUG" concurrency.iyi parallel_migrate -Dunlistedio_force
   verdict_caught unlistedio "cancel: a cancel found no listed owner for a reader switched out of its io wait" cancel --watch=5000
   broken unlistedio_hook "$UNLIST_HOOK" concurrency.iyi parallel_migrate -Dunlistedio_force
@@ -1662,9 +1674,9 @@ inwait && /^  end$/ { inwait = 0 }
 inwait && /^    fiber.list_on\(st.object_id\) if moving$/ { print; print "    force_close_registered(fd)"; n_reg++; next }
 /^  def self.wake_closed\(fd : Int32\) : Nil$/ { inclose = 1; n_close++ }
 inclose && /^  end$/ { inclose = 0 }
-inclose && /^          other.post_mail$/ { print; print "          force_close_posted(fd)"; n_post++; next }'
-      CLOSE_BUG='inclose && /^      return unless @@shared$/ { print "      force_close_missing(fd)"; print "      return"; n_guard++; next }'
-      CLOSE_HOOK='inclose && /^      return unless @@shared$/ { n_guard++ }'
+inclose && /^          other.post_mail$/ { print; print "          force_close_posted(fd)"; n_post++; at_post = NR; next }'
+      CLOSE_BUG='inclose && /^      return unless @@shared$/ { print "      force_close_missing(fd)"; print "      return"; n_guard++; at_guard = NR; next }'
+      CLOSE_HOOK='inclose && /^      return unless @@shared$/ { n_guard++; at_guard = NR }'
       CLOSE_DEFS='/^  def self.reschedule : Nil$/ {
   print "  @[UnsafeReach(\"copy-only close target, accessed atomically\")]"
   print "  @@forced_close_fd : UInt64 = 0_u64"
@@ -1697,7 +1709,7 @@ inclose && /^          other.post_mail$/ { print; print "          force_close_p
   n_defs++
   next
 }'
-      CLOSE_END='END { if (n_wait != 1 || n_reg != 1 || n_close != 1 || n_post != 1 || n_guard != 1 || n_defs != 1) exit 3 }'
+      CLOSE_END='END { if (n_wait != 1 || n_reg != 1 || n_close != 1 || n_post != 1 || n_guard != 1 || at_guard >= at_post || n_defs != 1) exit 3 }'
       broken noclose "$CLOSE_COMMON
 $CLOSE_BUG
 $CLOSE_DEFS
@@ -1742,9 +1754,10 @@ injoin && /^      {% if flag\?\(:linux\) %}$/ { print "      IyiThread.force_joi
 sequence == 1 { if ($0 != "        IyiScheduler.park_on(pointerof(@ended), 0_u64, false)") exit 3; sequence = 2; n_park++; next }
 sequence == 2 { if ($0 != "      end") exit 3; sequence = 0; n_end++; next }
 injoin && /^      end$/ { n_other_end++ }'
-  JOIN_HOOK='injoin && /^      while @ended.get == 0_u64$/ { n_loop++ }
-injoin && /^        IyiScheduler.park_on\(pointerof\(@ended\), 0_u64, false\)$/ { print "        IyiThread.force_join_decided(self, 1_u64)"; n_park++ }
-injoin && /^      end$/ { n_end++ }'
+  JOIN_HOOK='injoin && /^      while @ended.get == 0_u64$/ { sequence = 1; n_loop++; print; next }
+sequence == 1 { if ($0 != "        IyiScheduler.park_on(pointerof(@ended), 0_u64, false)") exit 3; sequence = 2; n_park++; print "        IyiThread.force_join_decided(self, 1_u64)"; print; next }
+sequence == 2 { if ($0 != "      end") exit 3; sequence = 0; n_end++; print; next }
+injoin && /^      end$/ { n_other_end++ }'
   JOIN_END='END { if (sequence || n_other_end != 0 || n_method != 1 || n_kernel != 1 || n_loop != 1 || n_park != 1 || n_end != 1) exit 3 }'
   broken kerneljoin "$JOIN_COMMON
 $JOIN_BUG
@@ -1780,12 +1793,12 @@ $JOIN_END" thread.iyi parallel_migrate -Dkerneljoin_force
   print "  end"
   print; inpush = 1; n_defs++; next
 }
-inpush && /^    if st.ring_size > 1_u64$/ { print; print "      force_handoff_decide(fiber, 1_u64)"; n_ring++; next }
-inpush && /^      skip = st.handoff_skip$/ { print; print "      force_handoff_decide(fiber, skip == 0_u64 ? 2_u64 : 3_u64)"; n_skip++; next }
+inpush && /^    if st.ring_size > 1_u64$/ { print; print "      force_handoff_decide(fiber, 1_u64)"; n_ring++; at_ring = NR; next }
+inpush && /^      skip = st.handoff_skip$/ { print; print "      force_handoff_decide(fiber, skip == 0_u64 ? 2_u64 : 3_u64)"; n_skip++; at_skip = NR; next }
 inpush && /^  end$/ { print "    force_handoff_done(st, fiber)"; print; inpush = 0; n_end++; next }'
-  NOHAND_BUG='inpush && /^    elsif handed_on\?\(st, fiber\)$/ { print "    elsif false"; n_mut++; next }'
-  NOHAND_HOOK='inpush && /^    elsif handed_on\?\(st, fiber\)$/ { n_mut++ }'
-  NOHAND_END='END { if (n_defs != 1 || n_ring != 1 || n_skip != 1 || n_end != 1 || n_mut != 1) exit 3 }'
+  NOHAND_BUG='inpush && /^    elsif handed_on\?\(st, fiber\)$/ { print "    elsif false"; n_mut++; at_mut = NR; next }'
+  NOHAND_HOOK='inpush && /^    elsif handed_on\?\(st, fiber\)$/ { n_mut++; at_mut = NR }'
+  NOHAND_END='END { if (n_defs != 1 || n_ring != 1 || n_skip != 1 || n_end != 1 || n_mut != 1 || at_ring >= at_mut || at_mut >= at_skip) exit 3 }'
   broken nohandoff "$NOHAND_COMMON
 $NOHAND_BUG
 { print }
@@ -1833,11 +1846,12 @@ $NOHAND_END" concurrency.iyi parallel_migrate -Dnohandoff_force
   print "  end"
   print ""
   print
-  n_defs++
+  n_defs++; inpush = 1
   next
 }
+inpush && /^  end$/ { inpush = 0 }
 /^  def self.wake_one : Nil$/ { print; print "    force_wake_hook"; n_wake++; next }
-/^        st.handoff_last = fiber.object_id$/ { print "        force_branch(fiber.object_id, st.object_id)"; print; n_hand++; expect = 1; next }'
+inpush && /^        st.handoff_last = fiber.object_id$/ { print "        force_branch(fiber.object_id, st.object_id)"; print; n_hand++; expect = 1; next }'
   NOCALL_HOOK_TAIL='expect { if (!/^        wake_one$/) exit 3; expect = 0; print; next }'
   NOCALL_BUG_TAIL='expect { if (!/^        wake_one$/) exit 3; expect = 0; n_mut++; next }'
   NOCALL_HOOK="$NOCALL_DEFS
@@ -1979,25 +1993,32 @@ END { if (n_defs != 1 || n_wake != 1 || n_hand != 1 || n_mut != 1 || expect) exi
   print ""
   print ""
   print
-  n_defs++
+  n_defs++; inlook = 1
   next
 }'
-  NOBACK_COMMON='/^            stuck = true if st.ring_size > 0_u64$/ { print "            if force_held?(st.object_id)"; print "              stuck = true if force_ring(st)"; print "            else"; print; print "            end"; n_ring++; next }
-/^        st.handoff_skip = skip &- 1_u64$/ { print "        force_skip(st.object_id, fiber.object_id)"; print; n_skip++; next }
-/^        fiber = grab\(victim, st\)$/ { print "        fiber = force_grab(victim, st)"; n_grab++; next }
-/^      return true if listed_at\(index\)\.ring_size > 0_u64$/ { print "      return true if listed_at(index).ring_size > 0_u64 && !force_held?(listed_at(index).object_id)"; n_wait++; next }'
-  NOBACK_HOOK_LOOK='/^    wake_one if stuck$/ { print; print "    force_look_end(stuck)"; n_look++; next }'
-  NOBACK_BUG_LOOK='/^    wake_one if stuck$/ { print "    force_look_end(false)"; n_look++; n_mut++; next }'
+  NOBACK_COMMON='inlook && /^  end$/ { inlook = 0 }
+/^  def self.push_runnable\(st : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { inpush = 1; n_push++ }
+inpush && /^  end$/ { inpush = 0 }
+/^  def self.steal\(st : IyiSchedulerState\) : IyiFiber\?$/ { insteal = 1; n_steal++ }
+insteal && /^  end$/ { insteal = 0 }
+/^  def self.work_waiting\? : Bool$/ { inwait = 1; n_wait_method++ }
+inwait && /^  end$/ { inwait = 0 }
+inlook && /^            stuck = true if st.ring_size > 0_u64$/ { print "            if force_held?(st.object_id)"; print "              stuck = true if force_ring(st)"; print "            else"; print; print "            end"; n_ring++; at_ring = NR; next }
+inpush && /^        st.handoff_skip = skip &- 1_u64$/ { print "        force_skip(st.object_id, fiber.object_id)"; print; n_skip++; next }
+insteal && /^        fiber = grab\(victim, st\)$/ { print "        fiber = force_grab(victim, st)"; n_grab++; next }
+inwait && /^      return true if listed_at\(index\)\.ring_size > 0_u64$/ { print "      return true if listed_at(index).ring_size > 0_u64 && !force_held?(listed_at(index).object_id)"; n_wait++; next }'
+  NOBACK_HOOK_LOOK='inlook && /^    wake_one if stuck$/ { print; print "    force_look_end(stuck)"; n_look++; at_look = NR; next }'
+  NOBACK_BUG_LOOK='inlook && /^    wake_one if stuck$/ { print "    force_look_end(false)"; n_look++; at_look = NR; n_mut++; next }'
   NOBACK_HOOK="$NOBACK_DEFS
 $NOBACK_COMMON
 $NOBACK_HOOK_LOOK
 { print }
-END { if (n_defs != 1 || n_ring != 1 || n_skip != 1 || n_grab != 1 || n_wait != 1 || n_look != 1) exit 3 }"
+END { if (n_defs != 1 || n_push != 1 || n_steal != 1 || n_wait_method != 1 || n_ring != 1 || n_skip != 1 || n_grab != 1 || n_wait != 1 || n_look != 1 || at_ring >= at_look) exit 3 }"
   NOBACK_BUG="$NOBACK_DEFS
 $NOBACK_COMMON
 $NOBACK_BUG_LOOK
 { print }
-END { if (n_defs != 1 || n_ring != 1 || n_skip != 1 || n_grab != 1 || n_wait != 1 || n_look != 1 || n_mut != 1) exit 3 }"
+END { if (n_defs != 1 || n_push != 1 || n_steal != 1 || n_wait_method != 1 || n_ring != 1 || n_skip != 1 || n_grab != 1 || n_wait != 1 || n_look != 1 || at_ring >= at_look || n_mut != 1) exit 3 }"
   broken nobackstop "$NOBACK_BUG" concurrency.iyi parallel_migrate -Dnobackstop_force
   verdict_caught nobackstop "backstop: the monitor's stuck decision for a held ring omitted its wake_one call" backstop
   broken nobackstop_hook "$NOBACK_HOOK" concurrency.iyi parallel_migrate -Dnobackstop_force
@@ -2055,22 +2076,23 @@ END { if (n_defs != 1 || n_ring != 1 || n_skip != 1 || n_grab != 1 || n_wait != 
   print "  end"
   print ""
   print
-  n_defs++
+  n_defs++; inlook = 1
   next
-}'
-      NOHELD_LOOK_END='/^    wake_one if stuck$/ { print; print "    force_look_end(stuck)"; n_look++; next }'
-      NOHELD_HOOK_DECIDE='/^          stuck = true if held_io\?\(st\)$/ { print "          io_held = held_io?(st)"; print "          force_io_decision(st.object_id, io_held)"; print "          stuck = true if io_held"; n_dec++; next }'
-      NOHELD_BUG_DECIDE='/^          stuck = true if held_io\?\(st\)$/ { print "          io_held = held_io?(st)"; print "          force_io_decision(st.object_id, io_held)"; n_dec++; n_mut++; next }'
+}
+inlook && /^  end$/ { inlook = 0 }'
+      NOHELD_LOOK_END='inlook && /^    wake_one if stuck$/ { print; print "    force_look_end(stuck)"; n_look++; at_look = NR; next }'
+      NOHELD_HOOK_DECIDE='inlook && /^          stuck = true if held_io\?\(st\)$/ { print "          io_held = held_io?(st)"; print "          force_io_decision(st.object_id, io_held)"; print "          stuck = true if io_held"; n_dec++; at_dec = NR; next }'
+      NOHELD_BUG_DECIDE='inlook && /^          stuck = true if held_io\?\(st\)$/ { print "          io_held = held_io?(st)"; print "          force_io_decision(st.object_id, io_held)"; n_dec++; at_dec = NR; n_mut++; next }'
       NOHELD_HOOK="$NOHELD_DEFS
 $NOHELD_HOOK_DECIDE
 $NOHELD_LOOK_END
 { print }
-END { if (n_defs != 1 || n_dec != 1 || n_look != 1) exit 3 }"
+END { if (n_defs != 1 || n_dec != 1 || n_look != 1 || at_dec >= at_look) exit 3 }"
       NOHELD_BUG="$NOHELD_DEFS
 $NOHELD_BUG_DECIDE
 $NOHELD_LOOK_END
 { print }
-END { if (n_defs != 1 || n_dec != 1 || n_look != 1 || n_mut != 1) exit 3 }"
+END { if (n_defs != 1 || n_dec != 1 || n_look != 1 || at_dec >= at_look || n_mut != 1) exit 3 }"
       broken noheldio "$NOHELD_BUG" concurrency.iyi parallel_migrate -Dnoheldio_force
       verdict_caught noheldio "heldio: the monitor's held-io decision for a reader's poller omitted the wake that rings an idle worker" heldio
       broken noheldio_hook "$NOHELD_HOOK" concurrency.iyi parallel_migrate -Dnoheldio_force
@@ -2082,9 +2104,11 @@ END { if (n_defs != 1 || n_dec != 1 || n_look != 1 || n_mut != 1) exit 3 }"
     # Both without preemption: a preempted task waits in a queue any worker
     # takes from, which spreads the parked tasks as a steal would, and a
     # pool that never steals took 1.88x the ideal with it on.
-    NOPREEMPT='/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++; next } '
+    NOPREEMPT='/^  private def self.look : Bool$/ { inlook = 1; n_look++ }
+inlook && /^  end$/ { inlook = 0 }
+inlook && /^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++; next } '
     step "failure proof: a pool that never steals a started task leaves tasks woken on one worker there"
-    broken nosteal "$NOPREEMPT"'/^  def self.grab\(victim : IyiSchedulerState, thief : IyiSchedulerState\) : IyiFiber\?$/ { print; print "    return nil"; n_grab++; next } { print } END { if (n_pre != 1 || n_grab != 1) exit 3 }' concurrency.iyi parallel_migrate
+    broken nosteal "$NOPREEMPT"'/^  def self.grab\(victim : IyiSchedulerState, thief : IyiSchedulerState\) : IyiFiber\?$/ { print; print "    return nil"; n_grab++; next } { print } END { if (n_look != 1 || n_pre != 1 || n_grab != 1) exit 3 }' concurrency.iyi parallel_migrate
     verdict_caught nosteal 'balance: tasks woken from a worker exceeded the balance bound' balance
 
     step "failure proof: tasks woken back onto the worker they parked on, as before tasks moved"
@@ -2115,24 +2139,24 @@ END { if (n_defs != 1 || n_dec != 1 || n_look != 1 || n_mut != 1) exit 3 }"
   next
 }
 in_ready && /^  end$/ { in_ready = 0 }
-in_ready && /^          IyiWorkers\.push_shared\(fiber\)$/ { print "          force_pin_note(fiber, 1_u64)"; print; n_shared++; next }
-in_ready && /^    send_home\(home, fiber\)$/ { print "    force_pin_note(fiber, home.object_id)"; print; n_home++; next }'
+in_ready && /^          IyiWorkers\.push_shared\(fiber\)$/ { print "          force_pin_note(fiber, 1_u64)"; print; n_shared++; at_shared = NR; next }
+in_ready && /^    send_home\(home, fiber\)$/ { print "    force_pin_note(fiber, home.object_id)"; print; n_home++; at_home = NR; next }'
     PIN_HOOK="$PIN_DEFS"'
 /^  private def self.look : Bool$/ { in_look = 1; n_look++ }
 in_look && /^  end$/ { in_look = 0 }
 in_look && /^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++ }
-in_ready && /^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { n_ready++ }
+in_ready && /^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { n_ready++; at_ready = NR }
 /^  def self.grab\(victim : IyiSchedulerState, thief : IyiSchedulerState\) : IyiFiber\?$/ { n_grab++ }
 { print }
-END { if (n_defs != 1 || n_shared != 1 || n_home != 1 || n_look != 1 || n_pre != 1 || n_ready != 1 || n_grab != 1) exit 3 }'
+END { if (n_defs != 1 || n_shared != 1 || n_home != 1 || n_look != 1 || n_pre != 1 || n_ready != 1 || at_ready >= at_shared || at_shared >= at_home || n_grab != 1) exit 3 }'
     PIN_BUG="$PIN_DEFS"'
 /^  private def self.look : Bool$/ { in_look = 1; n_look++ }
 in_look && /^  end$/ { in_look = 0 }
 in_look && /^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++; next }
-in_ready && /^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; n_ready++; next }
+in_ready && /^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; n_ready++; at_ready = NR; next }
 /^  def self.grab\(victim : IyiSchedulerState, thief : IyiSchedulerState\) : IyiFiber\?$/ { print; print "    return nil"; n_grab++; next }
 { print }
-END { if (n_defs != 1 || n_shared != 1 || n_home != 1 || n_look != 1 || n_pre != 1 || n_ready != 1 || n_grab != 1) exit 3 }'
+END { if (n_defs != 1 || n_shared != 1 || n_home != 1 || n_look != 1 || n_pre != 1 || n_ready != 1 || at_ready >= at_shared || at_shared >= at_home || n_grab != 1) exit 3 }'
     broken pinned "$PIN_BUG" concurrency.iyi parallel_migrate -Dpinned_force
     verdict_caught pinned "balance: a task woken from the main thread was sent back to the worker it parked on" balance
     broken pinned_hook "$PIN_HOOK" concurrency.iyi parallel_migrate -Dpinned_force
@@ -2161,9 +2185,9 @@ case "$(uname -s)" in
 instart && /^  end$/ { instart = 0 }
 /^  private def self.monitor_wait\(parked : Bool\) : Nil$/ { inwait = 1; n_wait++ }
 inwait && /^  end$/ { inwait = 0 }
-inwait && /^        if set != 0_i32$/ { print "        force_tick_fail(4_u64) if set == 0_i32"; print; n_set++; next }
-inwait && /^          LibC.WaitForSingleObject\(timer, -1_i32\)$/ { print "          waited = LibC.WaitForSingleObject(timer, -1_i32)"; print "          force_tick_fail(3_u64) if waited != 0_i32"; print "          force_tick_record(1_u64) if waited == 0_i32"; n_timer_wait++; next }
-inwait && /^      LibC.WaitForSingleObject\(Pointer\(Void\).new\(@@monitor_handle\), parked \? -1_i32 : PREEMPT_TICK_MS\)$/ { print "      fallback = LibC.WaitForSingleObject(Pointer(Void).new(@@monitor_handle), parked ? -1_i32 : PREEMPT_TICK_MS)"; print "      force_tick_fail(6_u64) if !parked && fallback == -1_i32"; print "      force_tick_record(2_u64) if !parked && fallback != -1_i32"; n_fallback++; next }
+inwait && /^        if set != 0_i32$/ { print "        force_tick_fail(4_u64) if set == 0_i32"; print; n_set++; at_set = NR; next }
+inwait && /^          LibC.WaitForSingleObject\(timer, -1_i32\)$/ { print "          waited = LibC.WaitForSingleObject(timer, -1_i32)"; print "          force_tick_fail(3_u64) if waited != 0_i32"; print "          force_tick_record(1_u64) if waited == 0_i32"; n_timer_wait++; at_timer = NR; next }
+inwait && /^      LibC.WaitForSingleObject\(Pointer\(Void\).new\(@@monitor_handle\), parked \? -1_i32 : PREEMPT_TICK_MS\)$/ { print "      fallback = LibC.WaitForSingleObject(Pointer(Void).new(@@monitor_handle), parked ? -1_i32 : PREEMPT_TICK_MS)"; print "      force_tick_fail(6_u64) if !parked && fallback == -1_i32"; print "      force_tick_record(2_u64) if !parked && fallback != -1_i32"; n_fallback++; at_fallback = NR; next }
 /^  def self.monitor_entry : UInt64$/ {
   print "  @[UnsafeReach(\"copy-only monitor tick observation, accessed atomically\")]"
   print "  @@forced_tick_armed : UInt64 = 0_u64"
@@ -2201,7 +2225,7 @@ inwait && /^      LibC.WaitForSingleObject\(Pointer\(Void\).new\(@@monitor_handl
 }'
     COARSE_BUG='instart && /^        @@monitor_timer = timer.address$/ { print "        force_tick_made(timer)"; print "        @@monitor_timer = 0_u64"; n_assignment++; next }'
     COARSE_HOOK='instart && /^        @@monitor_timer = timer.address$/ { print "        force_tick_made(timer)"; n_assignment++ }'
-    COARSE_END='END { if (n_start != 1 || n_wait != 1 || n_set != 1 || n_timer_wait != 1 || n_fallback != 1 || n_defs != 1 || n_assignment != 1) exit 3 }'
+    COARSE_END='END { if (n_start != 1 || n_wait != 1 || n_set != 1 || n_timer_wait != 1 || n_fallback != 1 || at_set >= at_timer || at_timer >= at_fallback || n_defs != 1 || n_assignment != 1) exit 3 }'
     broken coarse "$COARSE_COMMON
 $COARSE_BUG
 { print }
@@ -2260,19 +2284,23 @@ step "failure proof: a monitor that raises a worker's word after three unchanged
   next
 }'
   SLOW_TICKS='/^  PREEMPT_TICKS   =       1_u64$/ { print "  PREEMPT_TICKS   =       3_u64"; n_ticks++; next }'
-  SLOW_SAVE='/^            ticks = 0_u64$/ { print "            force_pending_ticks(ticks)"; print; n_save++; next }'
-  SLOW_STORE='/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { print; print "            force_raise if address != 0_u64"; n_store++; next }'
+  SLOW_SCOPE='/^  private def self.look : Bool$/ { inlook = 1; n_look_method++ }
+inlook && /^  end$/ { inlook = 0 }'
+  SLOW_SAVE='inlook && /^            ticks = 0_u64$/ { print "            force_pending_ticks(ticks)"; print; n_save++; at_save = NR; next }'
+  SLOW_STORE='inlook && /^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { print; print "            force_raise if address != 0_u64"; n_store++; at_store = NR; next }'
   SLOW_HOOK="$SLOW_DEFS
+$SLOW_SCOPE
 $SLOW_SAVE
 $SLOW_STORE
 { print }
-END { if (n_defs != 1 || n_save != 1 || n_store != 1) exit 3 }"
+END { if (n_defs != 1 || n_look_method != 1 || n_save != 1 || n_store != 1 || at_save >= at_store) exit 3 }"
   SLOW_BUG="$SLOW_DEFS
+$SLOW_SCOPE
 $SLOW_TICKS
 $SLOW_SAVE
 $SLOW_STORE
 { print }
-END { if (n_defs != 1 || n_ticks != 1 || n_save != 1 || n_store != 1) exit 3 }"
+END { if (n_defs != 1 || n_look_method != 1 || n_ticks != 1 || n_save != 1 || n_store != 1 || at_save >= at_store) exit 3 }"
   broken slowturn "$SLOW_BUG" concurrency.iyi parallel_preempt -Dslowturn_force
   verdict_caught slowturn "period: a worker's word was raised after 3 unchanged looks" period --workers=1
   broken slowturn_hook "$SLOW_HOOK" concurrency.iyi parallel_preempt -Dslowturn_force
@@ -2495,9 +2523,13 @@ step "failure proof: a scheduler the compiler takes for a library's checks, and 
   mkdir -p rtout/iyi
   cp "$REPO"/src/iyi/*.iyi rtout/iyi/
   mv rtout/iyi/concurrency.iyi rtout/iyi/scheduler.iyi
-  if ! awk '/^  require "\.\/concurrency"$/ { n++; print "  require \"./scheduler\""; next } { print } END { if (n != 1) exit 3 }' \
+  if ! awk '$0 == "{% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}" { platforms++; expect = 1; print; next }
+expect { if ($0 != "  require \"./concurrency\"") exit 3; expect = 0 }
+/^  require "\.\/concurrency"$/ { n++; print "  require \"./scheduler\""; next }
+{ print }
+END { if (platforms != 1 || n != 1 || expect) exit 3 }' \
     "$REPO/src/iyi/prelude.iyi" > rtout/iyi/prelude.iyi; then
-    echo "the awk for rtout found a missing or duplicate anchor"; exit 1
+    echo "the awk for rtout found a missing, duplicate, or misplaced anchor"; exit 1
   fi
   cmp -s rtout/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk for rtout found nothing to change"; exit 1; }
   if ! IYI_PATH="$WORK/rtout${PSEP}$REPO/src" "$IYI" build --emit llvm-ir "$REPO/bench/parallel_preempt_lib.iyi" -o rtout-run > build-rtout.log 2>&1; then

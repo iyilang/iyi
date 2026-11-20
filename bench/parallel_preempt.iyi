@@ -382,6 +382,9 @@ import std/socket::{IyiSocket, SocketError}
 
   # ── server ───────────────────────────────────────────────────────────
   FAST_BOUND_MS = 80_i64
+  # The slow handler holds its first request open until a fast handler runs
+  # while slow work is active. Latency remains a measurement, not a verdict:
+  # a loaded runner can delay a correct request past a wall-clock bound.
 
   def server(per_ms : Int64) : Nil
     listener = IyiSocket.listen("127.0.0.1", 0)
@@ -389,6 +392,8 @@ import std/socket::{IyiSocket, SocketError}
     conns = 32
     fast = Stat.new
     slow = Stat.new
+    slow_active = Atomic(Int64).new(0_i64)
+    fast_during = Atomic(Int64).new(0_i64)
     group do |g|
       g.spawn do
         conns.times do
@@ -401,8 +406,19 @@ import std/socket::{IyiSocket, SocketError}
             while true
               got = socket.read(64)
               break unless got.is_a?(String) && !got.empty?
-              cost = got.starts_with?("b") ? 100_i64 * per_ms : per_ms // 5_i64
+              heavy = got.starts_with?("b")
+              if heavy
+                slow_active.add(1_i64)
+                limit = __iyi_monotonic_ns + 10_000_000_000_i64
+                while fast_during.get == 0_i64
+                  IyiThread.spin_pause
+                  fail("server: progress hang: no fast request ran while slow work was active in 10000 ms") if __iyi_monotonic_ns > limit
+                end
+              end
+              cost = heavy ? 100_i64 * per_ms : per_ms // 5_i64
               x = spin(cost, 5_u64)
+              fast_during.add(1_i64) if !heavy && slow_active.get > 0_i64
+              slow_active.add(-1_i64) if heavy
               socket.write(x == 0_u64 ? "K" : "k")
             end
             socket.close
@@ -441,10 +457,8 @@ import std/socket::{IyiSocket, SocketError}
       end
       clients.each(&.close)
     end
-    if fast.max_ms > FAST_BOUND_MS
-      fail("server: a fast request took #{fast.max_ms} ms beside the 100 ms ones, past #{FAST_BOUND_MS} ms (#{fast.over20} of #{fast.count} over 20 ms)")
-    end
-    say "server: 28 connections of 0.2 ms requests beside 4 of 100 ms on #{IyiWorkers.count} workers: the slowest fast request took #{fast.max_ms} ms, #{fast.over20} of #{fast.count} over 20 ms; the slow ones at most #{slow.max_ms} ms"
+    fail("server: no fast request ran while slow work was active") if fast_during.get == 0_i64
+    say "server: #{fast_during.get} fast requests ran while slow work was active; 28 connections of 0.2 ms requests beside 4 of 100 ms on #{IyiWorkers.count} workers: the slowest fast request took #{fast.max_ms} ms, #{fast.over20} of #{fast.count} over 20 ms; the slow ones at most #{slow.max_ms} ms"
   end
 
   # ── poller ───────────────────────────────────────────────────────────
@@ -692,8 +706,46 @@ import std/socket::{IyiSocket, SocketError}
     PERIOD_BOUND_US = 10500_i64
   {% end %}
   QUANTUM_LOOKS     =     3_i64
+  {% if flag?(:slowturn_force) %}
+  # The forced check (`-Dslowturn_force`), run first and apart from the timed checks below. Two tasks compute on
+  # the one worker until the monitor has raised its word three times (a progress limit names a hang). The copy
+  # records, at each raise, the unchanged looks it came after: the control raises after one, the mutant after
+  # three. Zero is not armed. No clock decides anything here.
+  def period_forced(per_ms : Int64) : Nil
+    fail("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    base = IyiWorkers.force_raise_count
+    done = Atomic(Int64).new(0_i64)
+    group do |g|
+      2.times do |i|
+        g.spawn(unit: :new) do
+          x = 13_u64 + i.to_u64
+          while done.get < 1_i64
+            x = x &* 6364136223846793005_u64 &+ 1_u64
+          end
+          x
+        end
+      end
+      limit = __iyi_monotonic_ns + 20_000_000_000_i64
+      while IyiWorkers.force_raise_count < base + 3_u64
+        sleep(1)
+        fail("period: progress hang: the monitor raised no word three times in 20000 ms") if __iyi_monotonic_ns > limit
+      end
+      done.set(1_i64)
+    end
+    ticks = IyiWorkers.force_raise_ticks
+    fail("period: not armed: a raise of the monitor's word recorded no unchanged looks") if ticks == 0_u64
+    fail("period: a worker's word was raised after 3 unchanged looks") if ticks == 3_u64
+    fail("period: a worker's word was raised after #{ticks} unchanged looks") unless ticks == 1_u64
+    puts "period: the monitor raised a worker's word after one unchanged look"
+  end
+  {% end %}
+
 
   def period(per_ms : Int64) : Nil
+    {% if flag?(:slowturn_force) %}
+      period_forced(per_ms)
+      return
+    {% end %}
     fail("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
     looked = Atomic(Int64).new(0_i64)
     took = Atomic(Int64).new(0_i64)

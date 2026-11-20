@@ -6,18 +6,12 @@
 # `taken`: a parallel task parks on a socket's read, and the worker it
 # parked on starts a sibling task that computes for COMPUTE_MS with its
 # loop marked `@[NoPreempt]`, so nothing of that worker looks at a port or
-# a queue until it ends. The read's answer is sent while it computes. With
-# the process's one port another worker takes the answer, and the task
-# reads it on that worker within BOUND_MS; with a port per worker, or a
-# port only its own worker takes from, the answer waits for the
-# computation's end. The sibling is spawned onto the worker's own queue,
-# where an idle worker may steal it first: a round where it ran elsewhere
-# proves nothing and is run again, and `ROUNDS` that do prove are needed.
-# On the user's Windows 11 machine with 12 logical processors, 36 rounds
-# of 279 proved in 12 runs, about one in eight: at 40 attempts a run
-# would find fewer than three about one time in ten, at 120 about once
-# in ninety thousand, and a round that does not prove costs a
-# connection and no computation.
+# a queue until it ends. The answer is sent while it computes. The round is
+# forced, not searched (see forced_round): the other workers are held, so the
+# sibling cannot be stolen, and one spare worker waits in the port to read it.
+# With the process's one port another worker takes the answer, and the task
+# reads it before the computation ends; with a port per worker, or a port
+# only its own worker takes from, the answer is read only once it ends.
 #
 # `boost`: the process's dynamic priority boost is off once the pool has
 # started (`IyiWorkers.start`), as `GetProcessPriorityBoost` reads it.
@@ -37,9 +31,6 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   COMPUTE_MS = 1500_i64
-  BOUND_MS   =  250_i64
-  ROUNDS     =        3
-  ATTEMPTS   =      120
 
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
@@ -57,6 +48,7 @@ import std/socket::{IyiSocket, SocketError}
     @computing : Atomic(Int64)
     @read_at : Atomic(Int64)
     @computed_until : Atomic(Int64)
+    @deadline : Atomic(Int64)
 
     def initialize
       @reader = Atomic(UInt64).new(0_u64)
@@ -65,6 +57,7 @@ import std/socket::{IyiSocket, SocketError}
       @computing = Atomic(Int64).new(0_i64)
       @read_at = Atomic(Int64).new(0_i64)
       @computed_until = Atomic(Int64).new(0_i64)
+      @deadline = Atomic(Int64).new(0_i64)
     end
 
     def reader : UInt64
@@ -116,6 +109,15 @@ import std/socket::{IyiSocket, SocketError}
     def note_computed_until(ns : Int64) : Nil
       @computed_until.set(ns)
     end
+
+    # When the computation ends, set before it starts: a send after it proves nothing.
+    def deadline : Int64
+      @deadline.get
+    end
+
+    def note_deadline(ns : Int64) : Nil
+      @deadline.set(ns)
+    end
   end
 
   # The computation: integer work until *deadline*, with no check at the
@@ -131,79 +133,186 @@ import std/socket::{IyiSocket, SocketError}
     x
   end
 
-  # One round: true when the computation ran on the reader's worker, and
-  # then the read must have come in within the bound.
-  def round(listener : IyiSocket, port : Int32, number : Int32) : Bool
+  # Counts the holders share: `Share` by its atomic field.
+  class Tally
+    @count : Atomic(Int64)
+
+    def initialize
+      @count = Atomic(Int64).new(0_i64)
+    end
+
+    def add(value : Int64) : Nil
+      @count.add(value)
+    end
+
+    def count : Int64
+      @count.get
+    end
+  end
+
+  # A spin with preemption off until *count* reaches *target*: the task holding
+  # a worker in it keeps the worker, and the wait ends on a word another task
+  # sets, never on a clock.
+  @[NoInline]
+  @[NoPreempt]
+  def hold_until(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while count.count < target
+      IyiThread.spin_pause
+      fail("#{what}: the hold did not release in 20000 ms") if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # A slot a task notes its fiber or worker in.
+  class Slot
+    @value : Atomic(UInt64)
+
+    def initialize
+      @value = Atomic(UInt64).new(0_u64)
+    end
+
+    def value : UInt64
+      @value.get
+    end
+
+    def note(id : UInt64) : Nil
+      @value.set(id)
+    end
+  end
+
+  # Whether the fiber with object id *id* is in *state* now, read from the scheduler's list of every fiber.
+  def fiber_in_state?(id : UInt64, state : IyiFiberState) : Bool
+    fiber = IyiScheduler.first_fiber
+    while fiber.is_a?(IyiFiber)
+      return fiber.state == state if fiber.object_id == id
+      fiber = fiber.next_fiber
+    end
+    false
+  end
+
+  # A spin with preemption off until *count* reaches *target*. Its limit ends a hang as a named failure.
+  @[NoInline]
+  @[NoPreempt]
+  def hold_until_or_fail(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while count.count < target
+      IyiThread.spin_pause
+      fail("#{what}: the hold did not release in 20000 ms") if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # The main thread's wait for *count* to reach *target*, with a named limit.
+  def wait_or_fail(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 10_000_000_000_i64
+    while count.count < target
+      sleep(1)
+      fail("#{what}: no progress in 10000 ms") if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # The round: every worker but one is held with preemption off, so the reader parks on the one left, and its
+  # sibling, queued on that worker, computes there with its own hold on a release word. Main releases the holders
+  # and a spare waits in the port, then sends the answer, and holds the sibling until the copy's record of the
+  # packet's dispatch says whether its fiber was made homebound to the worker it parked on. Homebound is the
+  # verdict. Otherwise the answer is read on another worker while the reader's worker still holds. Nothing here
+  # waits on a clock: the waits are on states, records and tallies, each with a named limit.
+  def forced_round(listener : IyiSocket, port : Int32) : Nil
     near = IyiSocket.connect("127.0.0.1", port, 5000)
     fail("taken: connect answered #{near}") unless near.is_a?(IyiSocket)
     far = listener.accept
     fail("taken: accept answered #{far}") unless far.is_a?(IyiSocket)
     far_fd = far.fd
     marks = Marks.new
-    sent_at = 0_i64
+    reader = Slot.new
+    owner = Slot.new
+    holders = IyiWorkers.count - 1
+    parked = Tally.new
+    release = Tally.new
+    spare = Tally.new
+    owner_go = Tally.new
     group do |g|
+      (holders - 1).times do
+        g.spawn(unit: :new) do
+          parked.add(1_i64)
+          hold_until_or_fail(release, 1_i64, "taken: progress hang: a holder was not released")
+          0
+        end
+      end
       g.spawn(unit: :new) do
+        parked.add(1_i64)
+        hold_until_or_fail(spare, 1_i64, "taken: progress hang: the spare was not released")
+        0
+      end
+      wait_or_fail(parked, holders.to_i64, "taken: progress hang: the holders did not start")
+      g.spawn(unit: :new) do
+        reader.note(IyiScheduler.current.object_id)
         group do |inner|
-          # Onto this worker's own queue, which it takes from next once the
-          # read below parks; a steal may take it first.
           inner.spawn(unit: :new) do
             here = IyiScheduler.state.object_id
+            owner.note(here)
             marks.note_computer(here)
-            if here == marks.reader
-              marks.note_computing(1_i64)
-              x = compute(__iyi_monotonic_ns + COMPUTE_MS * 1_000_000_i64)
-              marks.note_computed_until(__iyi_monotonic_ns + (x == 0_u64 ? 1_i64 : 0_i64))
-            else
-              marks.note_computing(2_i64)
-            end
+            marks.note_computing(here == marks.reader ? 1_i64 : 2_i64)
+            hold_until_or_fail(owner_go, 1_i64, "taken: progress hang: the computing sibling was not released")
             0
           end
           marks.note_reader(IyiScheduler.state.object_id)
           got = IyiSocket.new(far_fd).read(1).or_panic
           marks.note_read_at(__iyi_monotonic_ns)
           marks.note_read_on(IyiScheduler.state.object_id)
-          fail("taken: round #{number}'s read answered #{got.inspect}") unless got == "x"
+          fail("taken: progress hang: the read answered #{got.inspect}") unless got == "x"
         end
         0
       end
-      waited = 0
-      while marks.computing == 0_i64
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while reader.value == 0_u64 || !fiber_in_state?(reader.value, IyiFiberState::WaitingIo)
         sleep(1)
-        waited = waited + 1
-        fail("taken: round #{number}'s sibling did not start in 10000 ms") if waited > 10000
+        fail("taken: progress hang: the reader did not park on its read in 10000 ms") if __iyi_monotonic_ns > limit
       end
-      sent_at = __iyi_monotonic_ns
-      near.write("x").or_panic
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while owner.value == 0_u64
+        sleep(1)
+        fail("taken: progress hang: the sibling did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      fail("taken: not armed: the sibling did not start on its reader's worker") unless owner.value == marks.reader
+      {% if flag?(:nocross_force) %}
+        IyiScheduler.force_dispatch_target(reader.value)
+      {% end %}
+      spare.add(1_i64)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiScheduler.waiting_threads < 1_u64
+        sleep(1)
+        fail("taken: progress hang: no spare waited in the port in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      wrote = near.write("x")
+      fail("taken: progress hang: the send answered #{wrote}") unless wrote.is_a?(Int32)
+      {% if flag?(:nocross_force) %}
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiScheduler.force_dispatch_fiber != reader.value
+        sleep(1)
+        fail("taken: progress hang: the packet was not dispatched in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      fail("taken: the packet's fiber was made homebound to the worker it parked on, so its answer waits for that worker") if IyiScheduler.force_dispatch_homebound == 1_u64
+      {% end %}
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while marks.read_on == 0_u64
+        sleep(1)
+        fail("taken: progress hang: the answer was not read in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      elsewhere = marks.read_on != owner.value
+      owner_go.add(1_i64)
+      release.add(1_i64)
+      fail("taken: not armed: the answer was read on the worker that computed") unless elsewhere
+      puts "taken: a packet's answer was read on another worker while its reader's worker computed"
     end
     near.close
     far.close
-    return false unless marks.computing == 1_i64
-    took = (marks.read_at - sent_at) // 1_000_000_i64
-    computed = (marks.computed_until - sent_at) // 1_000_000_i64
-    if took > BOUND_MS
-      fail("taken: round #{number}'s answer, sent while its worker computed, was read #{took} ms later (the worker computed #{computed} ms more)")
-    end
-    if marks.read_on == marks.reader
-      fail("taken: round #{number}'s answer was read on the worker that computed, #{took} ms after it was sent")
-    end
-    puts "taken: round #{number}: read #{took} ms after it was sent, on another worker, while its own computed #{computed} ms more"
-    true
   end
 
   def taken : Nil
     listener = IyiSocket.listen("127.0.0.1", 0)
     port = listener.local_port
-    proved = 0
-    attempts = 0
-    while proved < ROUNDS && attempts < ATTEMPTS
-      attempts = attempts + 1
-      proved = proved + 1 if round(listener, port, attempts)
-    end
+    forced_round(listener, port)
     listener.close
-    if proved < ROUNDS
-      fail("taken: in #{attempts} rounds the computation ran on its reader's worker #{proved} times, not #{ROUNDS}")
-    end
-    puts "taken: #{proved} answers read on another worker in #{attempts} rounds, on #{IyiWorkers.count} workers"
   end
 
   def boost : Nil

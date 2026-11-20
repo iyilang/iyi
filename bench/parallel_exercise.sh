@@ -952,6 +952,32 @@ held() { # name, sentence, step arguments...
   fi
   echo "  hook-only control $name passes: \"$want\""
 }
+# Cb's proofs end at a verdict: a whole output line, with its exit status. A
+# fragment cannot pass, and a timing cannot pass, because the program prints
+# the invariant alone on its line and its figures on earlier lines. A mutant
+# must exit 1 at "FAIL: <verdict>"; a control must exit 0 with <verdict> as
+# a line. Not armed, progress hang and a fault each print their own FAIL line,
+# so none of them matches a mutant's verdict.
+verdict_caught() { # name, exact verdict, step arguments...
+  local name="$1" want="$2" code
+  shift 2
+  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 1 ] || ! grep -qxF -- "FAIL: $want" "$name.txt"; then
+    echo "the broken copy $name did not end at its verdict on its one run (exit $code; want exit 1 and the line \"FAIL: $want\"):"; tail -20 "$name.txt"; exit 1
+  fi
+  echo "  exits 1 at \"$want\""
+}
+verdict_held() { # name, exact verdict, step arguments...
+  local name="$1" want="$2" code
+  shift 2
+  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -qxF -- "$want" "$name.txt"; then
+    echo "the hook-only control $name did not pass with its verdict line (exit $code; want exit 0 and the line \"$want\"):"; tail -20 "$name.txt"; exit 1
+  fi
+  echo "  hook-only control $name passes: \"$want\""
+}
 # The copy-only definitions the forced proofs add to the runtime's files, in
 # awk output only: nothing reaches src/iyi. Each is reached through a -D flag
 # the program sets, so no healthy build sees it. An awk that misses an anchor
@@ -1088,7 +1114,7 @@ broken lostwake_hook "$WAKE_HOOK" concurrency.iyi parallel_exercise -Dlostwake_f
 held lostwake_hook 'home: a task finished on a worker and woke the main thread it was joined by' home --watch=5000
 
 step "failure proof: a steal that leaves the task in its victim's queue hands it out twice"
-broken duplicate '/^          victim.pool_head = fiber.next_run$/ { next } /^          victim.pool_tail = nil if victim.pool_head.is_a\?\(Nil\)$/ { next } { print }'
+broken duplicate '/^          victim.pool_head = fiber.next_run$/ { n_head++; next } /^          victim.pool_tail = nil if victim.pool_head.is_a\?\(Nil\)$/ { n_tail++; next } { print } END { if (n_head != 1 || n_tail != 1) exit 3 }'
 caught duplicate 'the pool handed one parallel task to a worker twice' steal
 
 step "failure proof: a cancel never delivered to a sleeping task's thread"
@@ -1229,26 +1255,152 @@ step "failure proof: a thread-local read before a park and kept after it names t
   if ! "$IYI" build --release -Dparallel_stale_tls "$REPO/bench/parallel_migrate.iyi" -o staletls-run > build-staletls.log 2>&1; then
     echo "the stale thread-local build failed:"; tail -20 build-staletls.log; exit 1
   fi
-  caught staletls 'a thread-local read after a park named another thread' channels
+  verdict_caught staletls "channels: a thread-local read after a park named another thread than the one the task resumed on" channels
+  if ! "$IYI" build --release "$REPO/bench/parallel_migrate.iyi" -o staletls_hook-run > build-staletls-control.log 2>&1; then
+    echo "the healthy control build failed:"; tail -20 build-staletls-control.log; exit 1
+  fi
+  verdict_held staletls_hook "channels: the forced task moved to another worker and its thread-local read named that worker" channels
 
   step "failure proof: a thread-local read hoisted out of a loop names the thread the task left once the back-edge check moves it"
   if ! "$IYI" build --release -Dparallel_hoisted_tls "$REPO/bench/parallel_migrate.iyi" -o hoistedtls-run > build-hoistedtls.log 2>&1; then
     echo "the hoisted thread-local build failed:"; tail -20 build-hoistedtls.log; exit 1
   fi
-  caught hoistedtls "a thread-local read after a loop's back-edge check named another thread" loops
+  verdict_caught hoistedtls "loops: a thread-local read after a loop's back-edge check named another thread than the one the task was on" loops
+  if ! "$IYI" build --release "$REPO/bench/parallel_migrate.iyi" -o hoistedtls_hook-run > build-hoistedtls-control.log 2>&1; then
+    echo "the healthy control build failed:"; tail -20 build-hoistedtls-control.log; exit 1
+  fi
+  verdict_held hoistedtls_hook "loops: the forced loop resumed on another worker and its thread-local read named that worker" loops
 
-  step "failure proof: a collector that skips a fiber on its way between workers frees the lists on its stack"
-  broken intransit '/^            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0$/ { print "            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Runnable && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0"; next } { print }' prelude.iyi parallel_migrate
-  caught intransit 'list was not whole' channels
+  step "failure proof: a collector's stack walk omits a queued fiber's saved stack that held a list's head"
+  # Copy only, for the intransit proof of bench/parallel_migrate.iyi (-Dintransit_force). The head is kept complemented,
+  # so the global the copy adds is not an address the root walk could take for a retained list. The walk records, for
+  # each queued fiber whose saved stack holds the head, the fiber it saw (force_note_seen, before the state test) and
+  # the fiber it scanned (force_note_scanned, in the scan). The mutant's walk omits Runnable fibers, so it sees the
+  # task's fiber and scans none; the verdict is read there, keyed to the task's fiber. Nothing claims a loss or a reuse.
+  INTRANSIT_DEFS='/^      def self.each_fiber_root\(visit : Proc\(UInt64, Nil\)\) : Nil$/ {
+  print "      # Copy only, for the intransit proof of bench/parallel_migrate.iyi: the head word the program names, kept complemented,"
+  print "      # and the queued fibers whose saved stacks hold it, which the root walk saw and which it scanned."
+  print "      @[UnsafeReach(\"set by the program before a collection, read by the walk: atomics only\")]"
+  print "      @@forced_head : UInt64 = 0_u64"
+  print "      @[UnsafeReach(\"set by the walk, read by the program after it: atomics only\")]"
+  print "      @@forced_seen_fiber : UInt64 = 0_u64"
+  print "      @[UnsafeReach(\"set by the walk, read by the program after it: atomics only\")]"
+  print "      @@forced_scanned_fiber : UInt64 = 0_u64"
+  print ""
+  print "      def self.force_head_set(head : UInt64) : Nil"
+  print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_head).address).value.set(~head)"
+  print "      end"
+  print ""
+  print "      def self.force_seen_fiber : UInt64"
+  print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_seen_fiber).address).value.get"
+  print "      end"
+  print ""
+  print "      def self.force_scanned_fiber : UInt64"
+  print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_scanned_fiber).address).value.get"
+  print "      end"
+  print ""
+  print "      # Whether the fiber is queued (Runnable) and its saved stack, from its saved pointer to its top, holds the head word."
+  print "      def self.force_queued_holds?(fiber : IyiFiber) : Bool"
+  print "        stored = Pointer(Atomic(UInt64)).new(pointerof(@@forced_head).address).value.get"
+  print "        return false if stored == 0_u64 || fiber.state != IyiFiberState::Runnable || fiber.saved_sp == 0_u64"
+  print "        head = ~stored"
+  print "        top = fiber.stack_top"
+  print "        top = stack_base if top == 0_u64"
+  print "        address = fiber.saved_sp"
+  print "        while address < top"
+  print "          return true if Pointer(UInt64).new(address).value == head"
+  print "          address += 8_u64"
+  print "        end"
+  print "        false"
+  print "      end"
+  print ""
+  print "      def self.force_note_seen(fiber : IyiFiber) : Nil"
+  print "        return unless force_queued_holds?(fiber)"
+  print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_seen_fiber).address).value.set(fiber.object_id)"
+  print "      end"
+  print ""
+  print "      def self.force_note_scanned(fiber : IyiFiber) : Nil"
+  print "        return unless force_queued_holds?(fiber)"
+  print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_scanned_fiber).address).value.set(fiber.object_id)"
+  print "      end"
+  print ""
+  print
+  did_defs = 1
+  next
+}
+/^          while fiber\.is_a\?\(IyiFiber\)$/ { print; print "            force_note_seen(fiber)"; did_seen = 1; next }
+/^              scan_range\(fiber\.saved_sp, top, visit\)$/ { print "              force_note_scanned(fiber)"; print; did_scan = 1; next }'
+  INTRANSIT_HOOK="$INTRANSIT_DEFS
+{ print }
+END { if (!(did_defs && did_seen && did_scan)) exit 3 }"
+  INTRANSIT_BUG="$INTRANSIT_DEFS
+/^            if fiber\.state != IyiFiberState::Running && fiber\.state != IyiFiberState::Done && fiber\.saved_sp != 0\$/ { print \"            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Runnable && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0\"; did_skip = 1; next }
+{ print }
+END { if (!(did_defs && did_seen && did_scan && did_skip)) exit 3 }"
+  broken intransit "$INTRANSIT_BUG" prelude.iyi parallel_migrate -Dintransit_force
+  verdict_caught intransit "channels: the collector's stack walk omitted a queued fiber's saved stack that held a list's head" channels
+  broken intransit_hook "$INTRANSIT_HOOK" prelude.iyi parallel_migrate -Dintransit_force
+  verdict_held intransit_hook "channels: the collector's stack walk scanned a queued fiber's saved stack that held a list's head" channels
 
   step "failure proof: an io wait that does not say whose poller holds it is never cancelled"
+  # Copy only, for the unlistedio proof of bench/parallel_migrate.iyi (-Dunlistedio_force). Both copies count each io
+  # wait once its registration has run (force_armed, after the list_on). The mutant replaces that one list_on with the
+  # count, so its waiters are armed and parked but not listed for a cancel. Each anchor is counted once; the awk
+  # exits 3 on any other count.
+  UNLIST_PRINTS='  print "  # Copy only, for the unlistedio proof of bench/parallel_migrate.iyi: each io wait counts itself once its"
+  print "  # registration has run (force_armed). The program reads the count (force_armed_count)."
+  print "  @[UnsafeReach(\"bumped by each io wait after its registration, read by the program: atomics only\")]"
+  print "  @@forced_armed : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_armed : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_armed).address).value.add(1_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_armed_count : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_armed).address).value.get"
+  print "  end"
+  print "  @[UnsafeReach(\"bumped by a cancel that finds the poller of a waiter, read by the program: atomics only\")]"
+  print "  @@forced_dispatched : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_dispatched : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_dispatched).address).value.add(1_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_dispatched_count : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_dispatched).address).value.get"
+  print "  end"
+  print ""'
   case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN* | Windows_NT)
-      broken unlistedio '/def self.park_overlapped_current\(/ { inpark = 1 } inpark && /^    fiber\.list_on\(st\.object_id\) if @@shared && fiber\.unit\.is_a\?\(IyiUnit\)$/ { inpark = 0; next } { print }' concurrency.iyi parallel_migrate ;;
+      UNLIST_ANCHOR='/^  def self.park_overlapped_current\(ms : Int32 = -1\) : Int64 \| Cancelled$/'
+      UNLIST_LIST='/^    fiber\.list_on\(st\.object_id\) if @@shared && fiber\.unit\.is_a\?\(IyiUnit\)$/' ;;
     *)
-      broken unlistedio '/def self.wait_posix\(fd/ { inwait = 1 } inwait && /^    fiber\.list_on\(st\.object_id\) if moving$/ { inwait = 0; next } { print }' concurrency.iyi parallel_migrate ;;
+      UNLIST_ANCHOR='/^  def self.wait_posix\(fd : Int32, direction : Int32, ms : Int32\) : Nil \| Cancelled$/'
+      UNLIST_LIST='/^    fiber\.list_on\(st\.object_id\) if moving$/' ;;
   esac
-  caught unlistedio 'cancel: still waiting after 5000 ms' cancel --watch=5000
+  UNLIST_DEFS="$UNLIST_ANCHOR {
+$UNLIST_PRINTS
+  print
+  n_defs++
+  next
+}"
+  UNLIST_HOOK_RULE="$UNLIST_LIST { print; print \"    force_armed\"; n_list++; next }"
+  UNLIST_BUG_RULE="$UNLIST_LIST { print \"    force_armed\"; n_list++; n_mut++; next }"
+  UNLIST_DISPATCH_RULE='/^    return if owner == 0_u64$/ { print; print "    force_dispatched"; n_disp++; next }'
+  UNLIST_HOOK="$UNLIST_DEFS
+$UNLIST_HOOK_RULE
+$UNLIST_DISPATCH_RULE
+{ print }
+END { if (n_defs != 1 || n_list != 1 || n_disp != 1) exit 3 }"
+  UNLIST_BUG="$UNLIST_DEFS
+$UNLIST_BUG_RULE
+$UNLIST_DISPATCH_RULE
+{ print }
+END { if (n_defs != 1 || n_list != 1 || n_disp != 1 || n_mut != 1) exit 3 }"
+  broken unlistedio "$UNLIST_BUG" concurrency.iyi parallel_migrate -Dunlistedio_force
+  verdict_caught unlistedio "cancel: a cancel left a reader parked in an io wait, whose poller was not listed for the cancel" cancel --watch=5000
+  broken unlistedio_hook "$UNLIST_HOOK" concurrency.iyi parallel_migrate -Dunlistedio_force
+  verdict_held unlistedio_hook "cancel: the cancel reached the poller of every reader parked in an io wait" cancel --watch=5000
 
   step "failure proof: a close posted to no thread leaves a read on another worker parked"
   case "$(uname -s)" in
@@ -1280,30 +1432,284 @@ step "failure proof: a thread-local read before a park and kept after it names t
   broken nohandoff '/^    elsif handed_on\?\(st, fiber\)$/ { print "    elsif false"; next } { print }' concurrency.iyi parallel_migrate
   caught nohandoff 'were handed over with no idle worker called' handoff
 
-  step "failure proof: a hand-off that marks its call and rings nobody waits for the monitor"
-  # The copy keeps `handoff_last` and drops the call, so only the clock
-  # can tell: the monitor calls for the fiber a look or two into the
-  # hold (`look`), and its wakes waited 5.1 to 10.2 ms at the median
-  # (Linux, loads 18 to 33, 15 of 15 runs), 6.3 on tmac (20 of 20) and
-  # 1.2 to 12.5 on Windows (15 of 15), the 1.2 beside 24 busy loops; there
-  # some wakes start within 30 us even without the call (4 of 10 in one
-  # run), so the median, not the fastest, is what tells.
-  broken nocall '/^        st.handoff_last = fiber.object_id$/ { print; drop = 1; next } drop && /^        wake_one$/ { drop = 0; next } { print }' concurrency.iyi parallel_migrate
-  caught nocall 'handoff: tasks woken onto a worker held 50 ms' handoff
+  step "failure proof: a hand-off for a parked task omits its immediate wake_one call"
+  # Copy only, for the nocall proof of bench/parallel_migrate.iyi. Both copies record the hand-off branch's
+  # fiber and worker (push_runnable), and wake_one, when it runs on that worker, records the fiber as woken.
+  # The mutant differs from the hook-only control by exactly one deleted line: the wake_one that follows
+  # `st.handoff_last`. Each anchor is counted once; an awk that finds another count exits 3.
+  NOCALL_DEFS='/^  def self.push_runnable\(st : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ {
+  print "  # Copy only, for the nocall proof of bench/parallel_migrate.iyi: the hand-off branch records the fiber it took and"
+  print "  # its worker, and wake_one, when it runs on that worker, records the fiber as woken."
+  print "  @[UnsafeReach(\"set by the hand-off branch, read by wake_one and the program: atomics only\")]"
+  print "  @@forced_branch : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by the hand-off branch, read by wake_one: atomics only\")]"
+  print "  @@forced_worker : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by wake_one on the worker of the branch, read by the program: atomics only\")]"
+  print "  @@forced_wake : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_branch(fiber_id : UInt64, worker : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_worker).address).value.set(worker)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_branch).address).value.set(fiber_id)"
+  print "  end"
+  print ""
+  print "  def self.force_wake_hook : Nil"
+  print "    fiber_id = Pointer(Atomic(UInt64)).new(pointerof(@@forced_branch).address).value.get"
+  print "    return if fiber_id == 0_u64"
+  print "    return unless Pointer(Atomic(UInt64)).new(pointerof(@@forced_worker).address).value.get == IyiScheduler.state_id"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_wake).address).value.set(fiber_id)"
+  print "  end"
+  print ""
+  print "  def self.force_branch_id : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_branch).address).value.get"
+  print "  end"
+  print ""
+  print "  def self.force_wake_id : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_wake).address).value.get"
+  print "  end"
+  print ""
+  print
+  n_defs++
+  next
+}
+/^  def self.wake_one : Nil$/ { print; print "    force_wake_hook"; n_wake++; next }
+/^        st.handoff_last = fiber.object_id$/ { print "        force_branch(fiber.object_id, st.object_id)"; print; n_hand++; expect = 1; next }'
+  NOCALL_HOOK_TAIL='expect { if (!/^        wake_one$/) exit 3; expect = 0; print; next }'
+  NOCALL_BUG_TAIL='expect { if (!/^        wake_one$/) exit 3; expect = 0; n_mut++; next }'
+  NOCALL_HOOK="$NOCALL_DEFS
+$NOCALL_HOOK_TAIL
+{ print }
+END { if (n_defs != 1 || n_wake != 1 || n_hand != 1 || expect) exit 3 }"
+  NOCALL_BUG="$NOCALL_DEFS
+$NOCALL_BUG_TAIL
+{ print }
+END { if (n_defs != 1 || n_wake != 1 || n_hand != 1 || n_mut != 1 || expect) exit 3 }"
+  broken nocall "$NOCALL_BUG" concurrency.iyi parallel_migrate -Dnocall_force
+  verdict_caught nocall 'nocall: a hand-off for a parked task omitted its immediate wake_one call' handoff
+  broken nocall_hook "$NOCALL_HOOK" concurrency.iyi parallel_migrate -Dnocall_force
+  verdict_held nocall_hook 'nocall: the hand-off for a parked task made its immediate wake_one call' handoff
 
-  step "failure proof: a monitor that calls nobody for a held worker's ring leaves a hand-off its back-off skipped behind the hold"
-  broken nobackstop '/^    wake_one if stuck$/ { next } { print }' concurrency.iyi parallel_migrate
-  caught nobackstop 'backstop: tasks woken after a ping-pong onto a worker held 100 ms' backstop
+  step "failure proof: a monitor that decides a held ring is stuck and omits its wake_one call"
+  # Copy only: serialize grabs with the arm, and hide the target ring until
+  # the skipped hand-off has a monitor decision with an idle spare. Both
+  # copies use the same hooks; every source anchor must match exactly once.
+  NOBACK_DEFS='/^  private def self.look : Bool$/ {
+  print "  # Copy only: record the target ring and the completed monitor wake decision."
+  print "  @[UnsafeReach(\"set by the waker, read by the monitor: atomics only\")]"
+  print "  @@forced_target : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by the monitor, read by the program: atomics only\")]"
+  print "  @@forced_pending : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set at the look end, read by the program: atomics only\")]"
+  print "  @@forced_done : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set at the look end, read by the program: atomics only\")]"
+  print "  @@forced_woke_done : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by the monitor, read by the program: atomics only\")]"
+  print "  @@forced_idle : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by the waker, read by the enqueue: atomics only\")]"
+  print "  @@forced_fiber : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by the enqueue, read by the program: atomics only\")]"
+  print "  @@forced_skipped : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"updated by the monitor and thieves, read by the program: atomics only\")]"
+  print "  @@forced_evals : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"updated by thieves, read by the program: atomics only\")]"
+  print "  @@forced_turned : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"updated by the monitor, read by the program: atomics only\")]"
+  print "  @@forced_ring_size : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"updated by the monitor, read by the program: atomics only\")]"
+  print "  @@forced_spinning : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"serializes the armed target with in-flight ring grabs: atomics only\")]"
+  print "  @@forced_grab_lock : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_lock : Nil"
+  print "    lock = Pointer(Atomic(UInt64)).new(pointerof(@@forced_grab_lock).address)"
+  print "    limit = __iyi_monotonic_ns + 10_000_000_000_i64"
+  print "    until lock.value.compare_and_set(0_u64, 1_u64)[1]"
+  print "      IyiThread.spin_pause"
+  print "      raise \"backstop: progress hang: the grab gate did not open in 10000 ms\" if __iyi_monotonic_ns > limit"
+  print "    end"
+  print "  end"
+  print ""
+  print "  def self.force_unlock : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_grab_lock).address).value.set(0_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_grab(victim : IyiSchedulerState, thief : IyiSchedulerState) : IyiFiber?"
+  print "    force_lock"
+  print "    fiber = force_steal_held?(victim.object_id) ? nil : grab(victim, thief)"
+  print "    force_unlock"
+  print "    fiber"
+  print "  end"
+  print ""
+  print "  def self.force_target(worker : UInt64, fiber : UInt64) : Nil"
+  print "    force_lock"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_fiber).address).value.set(fiber)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_target).address).value.set(worker)"
+  print "    force_unlock"
+  print "    IyiScheduler.state.handoff_skip = 1_u64"
+  print "  end"
+  print ""
+  print "  def self.force_held?(worker : UInt64) : Bool"
+  print "    target = Pointer(Atomic(UInt64)).new(pointerof(@@forced_target).address).value.get"
+  print "    target != 0_u64 && worker == target && Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.get != target"
+  print "  end"
+  print ""
+  print "  def self.force_steal_held?(worker : UInt64) : Bool"
+  print "    return false unless force_held?(worker)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_turned).address).value.add(1_u64)"
+  print "    true"
+  print "  end"
+  print ""
+  print "  def self.force_skip(worker : UInt64, fiber : UInt64) : Nil"
+  print "    return unless worker == Pointer(Atomic(UInt64)).new(pointerof(@@forced_target).address).value.get"
+  print "    return unless fiber == Pointer(Atomic(UInt64)).new(pointerof(@@forced_fiber).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_skipped).address).value.set(1_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_skipped? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_skipped).address).value.get == 1_u64"
+  print "  end"
+  print ""
+  print "  def self.force_idle? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_idle).address).value.get == 1_u64"
+  print "  end"
+  print ""
+  print "  def self.force_ring(st : IyiSchedulerState) : Bool"
+  print "    return false unless force_held?(st.object_id) && force_skipped?"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_evals).address).value.add(1_u64)"
+  print "    size = st.ring_size"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ring_size).address).value.set(size)"
+  print "    idle = word(pointerof(@@idle)).value.get"
+  print "    spinning = word(pointerof(@@spinning)).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_spinning).address).value.set(spinning.to_u64)"
+  print "    return false unless size == 1_u64 && st.slot(st.ring_head) == Pointer(Atomic(UInt64)).new(pointerof(@@forced_fiber).address).value.get"
+  print "    return false unless idle > 0_i64 && spinning == 0_i64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_idle).address).value.set(1_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_pending).address).value.set(st.object_id)"
+  print "    true"
+  print "  end"
+  print ""
+  print "  def self.force_look_end(called : Bool) : Nil"
+  print "    pending = Pointer(Atomic(UInt64)).new(pointerof(@@forced_pending).address).value.get"
+  print "    return if pending == 0_u64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke_done).address).value.set(called ? 1_u64 : 0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.set(pending)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_pending).address).value.set(0_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_reset : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_pending).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke_done).address).value.set(0_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_done_id : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.get"
+  print "  end"
+  print ""
+  print "  def self.force_woke_done : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke_done).address).value.get"
+  print "  end"
+  print "  def self.force_figures : String"
+  print "    \"evals=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_evals).address).value.get} ring=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_ring_size).address).value.get} turned=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_turned).address).value.get} idle=#{word(pointerof(@@idle)).value.get} spinning=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_spinning).address).value.get}\""
+  print "  end"
+  print ""
+  print ""
+  print
+  n_defs++
+  next
+}'
+  NOBACK_COMMON='/^            stuck = true if st.ring_size > 0_u64$/ { print "            if force_held?(st.object_id)"; print "              stuck = true if force_ring(st)"; print "            else"; print; print "            end"; n_ring++; next }
+/^        st.handoff_skip = skip &- 1_u64$/ { print "        force_skip(st.object_id, fiber.object_id)"; print; n_skip++; next }
+/^        fiber = grab\(victim, st\)$/ { print "        fiber = force_grab(victim, st)"; n_grab++; next }
+/^      return true if listed_at\(index\)\.ring_size > 0_u64$/ { print "      return true if listed_at(index).ring_size > 0_u64 && !force_held?(listed_at(index).object_id)"; n_wait++; next }'
+  NOBACK_HOOK_LOOK='/^    wake_one if stuck$/ { print; print "    force_look_end(stuck)"; n_look++; next }'
+  NOBACK_BUG_LOOK='/^    wake_one if stuck$/ { print "    force_look_end(false)"; n_look++; n_mut++; next }'
+  NOBACK_HOOK="$NOBACK_DEFS
+$NOBACK_COMMON
+$NOBACK_HOOK_LOOK
+{ print }
+END { if (n_defs != 1 || n_ring != 1 || n_skip != 1 || n_grab != 1 || n_wait != 1 || n_look != 1) exit 3 }"
+  NOBACK_BUG="$NOBACK_DEFS
+$NOBACK_COMMON
+$NOBACK_BUG_LOOK
+{ print }
+END { if (n_defs != 1 || n_ring != 1 || n_skip != 1 || n_grab != 1 || n_wait != 1 || n_look != 1 || n_mut != 1) exit 3 }"
+  broken nobackstop "$NOBACK_BUG" concurrency.iyi parallel_migrate -Dnobackstop_force
+  verdict_caught nobackstop "backstop: the monitor's stuck decision for a held ring omitted its wake_one call" backstop
+  broken nobackstop_hook "$NOBACK_HOOK" concurrency.iyi parallel_migrate -Dnobackstop_force
+  verdict_held nobackstop_hook "backstop: the monitor's stuck decision for a held ring called wake_one" backstop
 
   case "$(uname -s)" in
-    MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      echo "  noheldio: skipped on Windows, where the monitor's held-io decision is not compiled (concurrency.iyi's look is unless flag?(:win32)); the completions port has its own proof"
+      ;;
     *)
-      step "failure proof: a monitor that calls nobody for a held worker's poller leaves its connection's answer behind the hold"
-      # Measured with the heldio step, Linux, 12 vCPUs, plain build: the
-      # answer was read 98 ms after its send beside a 100 ms hold without
-      # the call, and 0.2 to 4.8 ms with it.
-      broken noheldio '/^          stuck = true if held_io\?\(st\)$/ { next } { print }' concurrency.iyi parallel_migrate
-      caught noheldio 'heldio: an answer sent while the worker its reader parked on was held 100 ms' heldio
+      step "failure proof: a monitor that finds news on a held worker's poller and omits the wake that rings an idle worker"
+      # Copy only: record the held-io decision for the selected poller and
+      # whether the same monitor look called wake_one at its call site.
+      NOHELD_DEFS='/^  private def self.look : Bool$/ {
+  print "  # Copy only: record the selected poller and the monitor wake decision."
+  print "  @[UnsafeReach(\"set by the program, read by the monitor: atomics only\")]"
+  print "  @@forced_target : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by the monitor, read by the program: atomics only\")]"
+  print "  @@forced_pending : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set at the look end, read by the program: atomics only\")]"
+  print "  @@forced_done : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set at the look end, read by the program: atomics only\")]"
+  print "  @@forced_woke_done : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set at the look end, read by the program: atomics only\")]"
+  print "  @@forced_seq : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_io_target(worker : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_target).address).value.set(worker)"
+  print "  end"
+  print ""
+  print "  def self.force_io_decision(worker : UInt64, held : Bool) : Nil"
+  print "    return unless held && worker == Pointer(Atomic(UInt64)).new(pointerof(@@forced_target).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_pending).address).value.set(worker)"
+  print "  end"
+  print ""
+  print "  def self.force_look_end(called : Bool) : Nil"
+  print "    pending = Pointer(Atomic(UInt64)).new(pointerof(@@forced_pending).address).value.get"
+  print "    return if pending == 0_u64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke_done).address).value.set(called ? 1_u64 : 0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.set(pending)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_pending).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_seq).address).value.add(1_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_seq : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_seq).address).value.get"
+  print "  end"
+  print ""
+  print "  def self.force_done_id : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.get"
+  print "  end"
+  print ""
+  print "  def self.force_woke_done : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke_done).address).value.get"
+  print "  end"
+  print ""
+  print
+  n_defs++
+  next
+}'
+      NOHELD_LOOK_END='/^    wake_one if stuck$/ { print; print "    force_look_end(stuck)"; n_look++; next }'
+      NOHELD_HOOK_DECIDE='/^          stuck = true if held_io\?\(st\)$/ { print "          io_held = held_io?(st)"; print "          force_io_decision(st.object_id, io_held)"; print "          stuck = true if io_held"; n_dec++; next }'
+      NOHELD_BUG_DECIDE='/^          stuck = true if held_io\?\(st\)$/ { print "          io_held = held_io?(st)"; print "          force_io_decision(st.object_id, io_held)"; n_dec++; n_mut++; next }'
+      NOHELD_HOOK="$NOHELD_DEFS
+$NOHELD_HOOK_DECIDE
+$NOHELD_LOOK_END
+{ print }
+END { if (n_defs != 1 || n_dec != 1 || n_look != 1) exit 3 }"
+      NOHELD_BUG="$NOHELD_DEFS
+$NOHELD_BUG_DECIDE
+$NOHELD_LOOK_END
+{ print }
+END { if (n_defs != 1 || n_dec != 1 || n_look != 1 || n_mut != 1) exit 3 }"
+      broken noheldio "$NOHELD_BUG" concurrency.iyi parallel_migrate -Dnoheldio_force
+      verdict_caught noheldio "heldio: the monitor's held-io decision for a reader's poller omitted the wake that rings an idle worker" heldio
+      broken noheldio_hook "$NOHELD_HOOK" concurrency.iyi parallel_migrate -Dnoheldio_force
+      verdict_held noheldio_hook "heldio: the answer sent to a reader parked on a held worker was read on another worker before the hold ended" heldio
       ;;
   esac
 
@@ -1317,8 +1723,20 @@ step "failure proof: a thread-local read before a park and kept after it names t
     caught nosteal 'woken from a worker, took' balance
 
     step "failure proof: tasks woken back onto the worker they parked on, as before tasks moved"
-    broken pinned "$NOPREEMPT"'/^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; next } /^  def self.grab\(victim/ { print; print "    return nil"; next } { print }' concurrency.iyi parallel_migrate
-    caught pinned 'woken from the main thread, took' balance
+    # The pinned mutant patches three sites of the runtime, each counted once (the awk exits 3 on any other count):
+    # the monitor's preemption store (concurrency.iyi look), the ready branch that sends a woken unit fiber to the
+    # shared queue (ready), and grab, which takes tasks from another worker's ring (so nothing steals them). The
+    # program's forced placement check (-Dpinned_force) asserts where the tasks resume, not the ratio; the control is
+    # the same runtime, unpatched, under the same flag.
+    PIN_BUG='/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++; next }
+/^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; n_ready++; next }
+/^  def self.grab\(victim/ { print; print "    return nil"; n_grab++; next }
+{ print }
+END { if (n_pre != 1 || n_ready != 1 || n_grab != 1) exit 3 }'
+    broken pinned "$PIN_BUG" concurrency.iyi parallel_migrate -Dpinned_force
+    verdict_caught pinned "balance: every task woken from the main thread resumed on the worker it parked on" balance
+    broken pinned_hook '{ print } END { print "# the hook-only control: the same runtime, unpatched" }' concurrency.iyi parallel_migrate -Dpinned_force
+    verdict_held pinned_hook "balance: some task woken from the main thread resumed on another worker than it parked on" balance
 
 step "failure proof: a loop marked @[NoPreempt] holds its worker for its whole computation"
 if ! "$IYI" build --release -Dpreempt_off "$REPO/bench/parallel_preempt.iyi" -o preemptoff-run > build-preemptoff.log 2>&1; then
@@ -1351,9 +1769,60 @@ esac
 # and 4.02 and 3.96 on Windows 11, 12 logical processors (the user's
 # machine), held to 4; the real monitor's turns took 1.61 to 2.25 looks
 # in those debug jobs.
-step "failure proof: a monitor that raises a worker's word after three unchanged looks makes turns of four"
-broken slowturn '/^  PREEMPT_TICKS   =       1_u64$/ { print "  PREEMPT_TICKS   =       3_u64"; next } { print }' concurrency.iyi parallel_preempt
-caught slowturn 'period: two tasks computing on one worker took turns of' period --workers=1
+step "failure proof: a monitor that raises a worker's word after three unchanged looks"
+  # Copy only, for the slowturn proof of bench/parallel_preempt.iyi (-Dslowturn_force). Both copies save the unchanged
+  # looks at each raise (force_pending_ticks, before the reset) and count each raise at the store of the worker's word
+  # (force_raise, after the nonzero-address store). The mutant differs from the hook-only control only in PREEMPT_TICKS.
+  # The program reads the last raise: exactly one unchanged look is the control, exactly three the mutant. Zero is unarmed.
+  SLOW_DEFS='/^  def self.preempts : UInt64$/ {
+  print "  # Copy only, for the slowturn proof of bench/parallel_preempt.iyi: the unchanged looks each raise came after, and"
+  print "  # the number of raises. The store of the worker word is where a raise is counted (force_raise)."
+  print "  @[UnsafeReach(\"set by the monitor look, read by the program: atomics only\")]"
+  print "  @@forced_pending_ticks : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by the monitor look, read by the program: atomics only\")]"
+  print "  @@forced_raise_count : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by the monitor look, read by the program: atomics only\")]"
+  print "  @@forced_raise_ticks : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_pending_ticks(ticks : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_pending_ticks).address).value.set(ticks)"
+  print "  end"
+  print ""
+  print "  def self.force_raise : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_raise_ticks).address).value.set(Pointer(Atomic(UInt64)).new(pointerof(@@forced_pending_ticks).address).value.get)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_raise_count).address).value.add(1_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_raise_count : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_raise_count).address).value.get"
+  print "  end"
+  print ""
+  print "  def self.force_raise_ticks : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_raise_ticks).address).value.get"
+  print "  end"
+  print ""
+  print
+  n_defs++
+  next
+}'
+  SLOW_TICKS='/^  PREEMPT_TICKS   =       1_u64$/ { print "  PREEMPT_TICKS   =       3_u64"; n_ticks++; next }'
+  SLOW_SAVE='/^            ticks = 0_u64$/ { print "            force_pending_ticks(ticks)"; print; n_save++; next }'
+  SLOW_STORE='/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { print; print "            force_raise if address != 0_u64"; n_store++; next }'
+  SLOW_HOOK="$SLOW_DEFS
+$SLOW_SAVE
+$SLOW_STORE
+{ print }
+END { if (n_defs != 1 || n_save != 1 || n_store != 1) exit 3 }"
+  SLOW_BUG="$SLOW_DEFS
+$SLOW_TICKS
+$SLOW_SAVE
+$SLOW_STORE
+{ print }
+END { if (n_defs != 1 || n_ticks != 1 || n_save != 1 || n_store != 1) exit 3 }"
+  broken slowturn "$SLOW_BUG" concurrency.iyi parallel_preempt -Dslowturn_force
+  verdict_caught slowturn "period: a worker's word was raised after 3 unchanged looks" period --workers=1
+  broken slowturn_hook "$SLOW_HOOK" concurrency.iyi parallel_preempt -Dslowturn_force
+  verdict_held slowturn_hook "period: the monitor raised a worker's word after one unchanged look" period --workers=1
 
 # The accessor's checks are caught in the IR, where they are calls of
 # `*IyiWorkers::preempt` however fast the runner is. By the clock the
@@ -1417,10 +1886,54 @@ caught stale 'fresh: round ' fresh --workers=1
 step "failure proof: a port whose packets only the thread their task parked on runs leaves an answer behind a computation"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    # Every task woken from a packet is woken onto the worker it parked on,
-    # as a port per worker that no other worker takes from would wake it.
-    broken nocross '/^        wake_completed\(fiber\)$/ { print "        fiber.homebound = true if owner.object_id != state.object_id" } { print }' concurrency.iyi completions_taken
-    caught nocross 'answer, sent while its worker computed, was read' taken --workers=12 ;;
+    # Every packet's fiber is woken onto the worker it parked on, when the packet is taken by another
+    # worker, if it is made homebound (the mutant, at both take_packet dispatches). The copy records only the
+    # armed reader's dispatch before waking it; other completions cannot overwrite the target's verdict.
+    NOX_DEFS='/^    def self.take_packet\(overlapped : UInt64, bytes : Int64\) : Nil$/ {
+  print "    # Copy only: record the armed reader dispatch before waking it."
+  print "    @[UnsafeReach(\"set by the program, read by packet dispatch: atomics only\")]"
+  print "    @@forced_dispatch_target : UInt64 = 0_u64"
+  print "    @[UnsafeReach(\"set by packet dispatch, read by the program: atomics only\")]"
+  print "    @@forced_dispatch_fiber : UInt64 = 0_u64"
+  print "    @[UnsafeReach(\"set by packet dispatch, read by the program: atomics only\")]"
+  print "    @@forced_dispatch_homebound : UInt64 = 0_u64"
+  print ""
+  print "    def self.force_dispatch_target(fiber : UInt64) : Nil"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_dispatch_target).address).value.set(fiber)"
+  print "    end"
+  print ""
+  print "    def self.force_dispatch(fiber : IyiFiber, owner : IyiSchedulerState) : Nil"
+  print "      return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_dispatch_target).address).value.get"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_dispatch_homebound).address).value.set(fiber.homebound ? 1_u64 : 0_u64)"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_dispatch_fiber).address).value.set(fiber.object_id)"
+  print "    end"
+  print ""
+  print "    def self.force_dispatch_fiber : UInt64"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_dispatch_fiber).address).value.get"
+  print "    end"
+  print ""
+  print "    def self.force_dispatch_homebound : UInt64"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_dispatch_homebound).address).value.get"
+  print "    end"
+  print ""
+  print
+  n_defs++
+  next
+}'
+    NOX_REC='/^        wake_completed\(fiber\)$/ { print "        force_dispatch(fiber, owner)"; print; n_rec++; next }'
+    NOX_HOME='/^        wake_completed\(fiber\)$/ { print "        fiber.homebound = true if owner.object_id != state.object_id"; print "        force_dispatch(fiber, owner)"; print; n_home++; next }'
+    NOX_HOOK="$NOX_DEFS
+$NOX_REC
+{ print }
+END { if (n_defs != 1 || n_rec != 2) exit 3 }"
+    NOX_BUG="$NOX_DEFS
+$NOX_HOME
+{ print }
+END { if (n_defs != 1 || n_home != 2) exit 3 }"
+    broken nocross "$NOX_BUG" concurrency.iyi completions_taken -Dnocross_force
+    verdict_caught nocross "taken: the packet's fiber was made homebound to the worker it parked on, so its answer waits for that worker" taken --workers=12
+    broken nocross_hook "$NOX_HOOK" concurrency.iyi completions_taken -Dnocross_force
+    verdict_held nocross_hook "taken: a packet's answer was read on another worker while its reader's worker computed" taken --workers=12 ;;
   *)
     echo "  Windows' alone, as the port is" ;;
 esac

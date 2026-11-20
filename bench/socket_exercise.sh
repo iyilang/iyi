@@ -63,6 +63,19 @@ esac
 
 status=0
 
+# A timeout is a failure of the setup, never a successful mutant catch.
+# Each changed rendezvous prints its stage before it can park.
+run_bounded() {
+  local label="$1" output="$2" program="$3" code
+  timeout -k 5 120 "$program" >"$output" 2>&1
+  code=$?
+  if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+    echo "  $label: watchdog expired (exit $code); last reported stages:"
+    grep -F "watchdog stage:" "$output" | tail -3 || true
+  fi
+  return "$code"
+}
+
 run_case() {
   local label="$1" name="$2"
   shift 2
@@ -73,7 +86,7 @@ run_case() {
     status=1
     return 1
   fi
-  "$WORK/$name" >"$WORK/$name.out" 2>&1
+  run_bounded "$label" "$WORK/$name.out" "$WORK/$name"
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
@@ -197,16 +210,22 @@ prove_fails() {
     status=1
     return
   fi
-  "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  run_bounded "$label" "$WORK/$dir/out" "$WORK/$dir/program"
   local exit_code=$?
+  if [ "$exit_code" -eq 124 ] || [ "$exit_code" -eq 137 ]; then
+    sed 's/^/    /' "$WORK/$dir/out"
+    status=1
+    return
+  fi
   if [ "$exit_code" -eq 0 ]; then
     echo "  $label: the exercise still passed, so it does not test this"
+    sed 's/^/    /' "$WORK/$dir/out"
     status=1
     return
   fi
   if ! grep -q "$phrase" "$WORK/$dir/out"; then
     echo "  $label: failed, but not at the expected check"
-    sed -n '$p' "$WORK/$dir/out"
+    sed 's/^/    /' "$WORK/$dir/out"
     status=1
     return
   fi
@@ -296,13 +315,13 @@ case "$(uname -s)" in
       # before "disconnect: ok". The program reads to the peer's end first, so
       # the first write that fails meets the peer's reset as EPIPE in CLOSE_WAIT:
       # the copy that drops MSG_NOSIGNAL raises SIGPIPE there.
-      "$WORK/sigpipe/program" >"$WORK/sigpipe/out" 2>&1
+      run_bounded "SIGPIPE on a gone peer" "$WORK/sigpipe/out" "$WORK/sigpipe/program"
       code=$?
       if [ "$code" -eq 141 ] && grep -qF "disconnect: writing to a peer that has closed" "$WORK/sigpipe/out" && ! grep -qF "disconnect: ok" "$WORK/sigpipe/out"; then
         echo "  SIGPIPE on a gone peer: killed by the signal at the disconnect (exit 141)"
       else
         echo "  SIGPIPE on a gone peer: exited $code, so the check does not see it"
-        tail -3 "$WORK/sigpipe/out"
+        sed 's/^/    /' "$WORK/sigpipe/out"
         status=1
       fi
     fi ;;
@@ -326,12 +345,13 @@ case "$(uname -s)" in
       echo "  SIGPIPE on a connection reset before its accept: the patched library did not build"
       status=1
     else
-      "$WORK/sigpipe/program" >"$WORK/sigpipe/out" 2>&1
+      run_bounded "SIGPIPE on a connection reset before its accept" "$WORK/sigpipe/out" "$WORK/sigpipe/program"
       code=$?
-      if [ "$code" -eq 141 ] && grep -q "disconnect: ok" "$WORK/sigpipe/out" && ! grep -q "reset_before_accept: ok" "$WORK/sigpipe/out"; then
+      if [ "$code" -eq 141 ] && grep -qF "disconnect: ok" "$WORK/sigpipe/out" && grep -qF "reset_before_accept: writing to the reset peer" "$WORK/sigpipe/out" && ! grep -qF "reset_before_accept: ok" "$WORK/sigpipe/out"; then
         echo "  SIGPIPE on a connection reset before its accept: killed by the signal there (exit 141)"
       else
         echo "  SIGPIPE on a connection reset before its accept: exited $code, so the check does not see it"
+        sed 's/^/    /' "$WORK/sigpipe/out"
         status=1
       fi
     fi ;;

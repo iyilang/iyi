@@ -290,16 +290,16 @@ puts "disconnect: ok (#{wrote.message})"
   linger[1] = 0
   raise "reset_before_accept: SO_LINGER refused" if LibReset.setsockopt(reset_client.fd, 0xffff, 0x80, linger.as(Void*), 8_u32) != 0
   reset_client.close
-  sleep(50)
+  # The barrier, in place of a sleep. The reset went out before this connect
+  # was made, so the kernel has the reset connection queued, and reset,
+  # ahead of this one. Accept takes the first of the two: the reset one.
+  puts "watchdog stage: connecting and accepting the reset-peer barrier"
+  reset_barrier = IyiSocket.connect("127.0.0.1", reset_server.local_port).or_panic
   reset_conn = reset_server.accept.or_panic
-  reset_tries = 0
+  puts "watchdog stage: reset-peer barrier accepted"
+  reset_barrier.close
+  puts "reset_before_accept: writing to the reset peer"
   reset_wrote = reset_conn.write("after the reset")
-  while reset_wrote.is_a?(Int32)
-    reset_tries = reset_tries + 1
-    raise "reset_before_accept: #{reset_tries} writes to a reset peer all went through" if reset_tries > 100
-    sleep(10)
-    reset_wrote = reset_conn.write("after the reset")
-  end
   raise "reset_before_accept: expected a SocketError, got #{reset_wrote.inspect}" unless reset_wrote.is_a?(SocketError)
   reset_conn.close
   reset_server.close

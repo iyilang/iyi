@@ -19,8 +19,8 @@
 # sweep claim go before its walk ends, are caught by `-Dheap_verify`
 # (exit 86).
 #
-# How each copy is decided: a verdict is one whole line, and the program
-# decides it from runtime state, never from the resident set or a clock.
+# Each copy's verdict is one whole line. The checks below are state-decided
+# except for c4's clock-decided mutant catch; none is RSS-decided.
 # State-decided: c1 (a drained run taken again), c2 (a parked run put back on
 # a drain list), c5 (the cooled path's release calls, counted in the copy),
 # c6 (a unit holds under the held mark), c8 (the bounds' answer, asked

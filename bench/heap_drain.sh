@@ -482,6 +482,10 @@ state() {
     Pointer(Atomic(UInt64)).new(pointerof(@@cool_released).address).value.get
   end
 
+  def self.cool_arm : Nil
+    IyiStat.set(IyiStat::COOL_PENDING, 1_u64)
+  end
+
 IYI
   if ! awk -v ins="$WORK/cool.iyi" "$access" "$REPO/src/iyi/heap_partition.iyi" >"$dir/a.1"; then
     echo "  $label: heap_partition.iyi's cool_pools is not in the form the copy patches"
@@ -519,14 +523,14 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   echo "== each mechanism removed"
   EXPECT='^FAIL: drain: no parked run was taken again from a drained list$' copy "a partition takes drained runs" c1 1 \
     "$(subst 'def self\.partition_take' 'drained = pop_listed\(index, PC_DRAIN\)' 'drained = 0_u64')"
-  EXPECT='^FAIL: drain: the global sweep put no parked run back on a drain list$' copy "the global sweep lists a parked run again" c2 1 \
-    '/def self\.sweep_partition_slice/ { armed = 1 } armed && /IyiHeap\.list_drained\(index, arena, cursor, n\)/ { relists++; next } armed && /IyiHeap\.note_drained/ { counts++; next } armed && /^  end$/ { armed = 0 } { print } END { if (relists != 1 || counts != 1) exit 3 }'
+  keyed "the global sweep's relist, deleted (c2)" c2 1 park "FAIL: drain: the global sweep left the run the program parked on no drain list" "-Dheap_partitions --release -Dkeyed_force" "$PARK_BROKEN"
+  keyed "the relist, kept and recorded (hook only)" relisted 0 park "drain: the global sweep put the run the program parked back on its class's drain list" "-Dheap_partitions --release -Dkeyed_force" "$PARK_WITNESS"
   EXPECT_ERR='  a slot names a LOCAL chunk its local mark left unmarked, about to be freed' copy "a taken run's objects published" c3 86 \
     "$(subst 'def self\.adopt_drained' 'write8\(own, OWN_PUB\)' 'write8(own, 0_u64)')" "-Dheap_partitions -Dheap_verify" 8 24 4
-  EXPECT='^FAIL: idle: pooled runs still hold their pages 3500 ms after the last round$' copy "an idle worker wakes for the warm pool" c4 1 \
-    "$(subst 'def self\.idle_wait_ms' 'elsif pool_warm\?' 'elsif false')" "-Dheap_partitions --release -Dwarm_force"
-  state "a cooled run's pages go back" c5 1 "-Dheap_partitions --release -Dcool_force" "$COOL_ACCESS" "$COOL_BROKEN"
-  state "a cooled run's release is recorded (hook only)" cool 0 "-Dheap_partitions --release -Dcool_force" "$COOL_ACCESS" "$COOL_HOOK"
+  keyed "an idle worker wakes for the warm pool (c4)" c4 1 warm "FAIL: idle_wait_ms left a worker's wait unbounded with a pooled run held warm and no partition pending" "-Dheap_partitions --release -Dkeyed_force" "$WARM_BROKEN"
+  keyed "the warm-pool cap, kept (hook only)" warm 0 warm "idle: idle_wait_ms cut a worker's unbounded wait to the pool's turn with a pooled run held warm and no partition pending" "-Dheap_partitions --release -Dkeyed_force"
+  keyed "a cooled run's pages go back (c5)" c5 1 cool "FAIL: idle: the run the program put on a release list reached the cold list with its page unreleased: the release call did not run" "-Dheap_partitions --release -Dkeyed_force" "$COOL_BROKEN"
+  keyed "a cooled run's release is recorded (hook only)" cool 0 cool "idle: the run the program put on a release list reached the cold list with its page reading zero" "-Dheap_partitions --release -Dkeyed_force" "$COOL_WITNESS"
   marked "a unit holds beneath an open mark" held 0
   marked "a partition holds under a mark" c6 1 "$C6_DELETE"
   # A sweep helper that lets its walk claim go before its walk ends: a

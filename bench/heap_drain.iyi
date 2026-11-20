@@ -302,10 +302,9 @@ module bench/heap_drain
     line = line + " rss_mib=#{residents.map { |b| b // mib }.join(",")}"
     {% if flag?(:heap_partitions) %}
       line = line + " handed=#{IyiHeap.handed_shared} adopted=#{IyiHeap.runs_adopted} parked=#{IyiHeap.runs_parked} relisted=#{IyiHeap.runs_drained}"
-      # The runtime's own counts, not a size: a parked run taken again from a
-      # drained list (c1), and a parked run the global sweep put back on one (c2).
+      # The runtime's own count: a parked run taken again from a drained list
+      # (c1). The relist is decided by the keyed witness (`keyed park`).
       fail("drain: no parked run was taken again from a drained list") if IyiHeap.runs_adopted == 0
-      fail("drain: the global sweep put no parked run back on a drain list") if IyiHeap.runs_drained == 0
       base = spans[WARM - 1]
       last = spans[rounds - 1]
       slack = base // 4_u64
@@ -333,22 +332,9 @@ module bench/heap_drain
       line = line + " idle: rss_mib=#{busy // mib},#{idle // mib} cold_mib=#{cold_busy // mib},#{cold_idle // mib} cooled=#{IyiHeap.runs_cooled}"
       print line + "\n"
       print "arenas: #{base // mib} MiB after round #{WARM}, #{last // mib} MiB after round #{rounds}, slack #{slack // mib} MiB (information: the bound is not a verdict)\n"
-      {% if flag?(:warm_force) %}
-        # copy only (bench/heap_drain.sh's c4): a pool still warm IDLE_MS after the
-        # last round is the mutant's, and this reading is a clock's, so only the
-        # mutant build asks for it. The healthy build never fails on it.
-        fail("idle: pooled runs still hold their pages #{IDLE_MS} ms after the last round") if IyiHeap.pool_warm?
-      {% end %}
       reading = IyiHeap.pool_warm? ? "still warm" : "cold"
       print "idle: the pool is #{reading} #{IDLE_MS} ms after the last round (information: a clock reading)\n"
       print "idle: #{released // mib} MiB of runs went cold, the last round kept #{POOL_BYTES // 1048576} MiB (information)\n"
-      {% if flag?(:cool_force) %}
-        # copy only (bench/heap_drain.sh's `state`): the cooled path's release
-        # calls, counted where each is made. Zero means no run's pages were
-        # handed to the OS, whatever the resident set did.
-        fail("idle: no cooled run's pages were handed back to the OS: the release call did not run") if IyiHeap.cool_released_count == 0
-        print "idle: #{IyiHeap.cool_released_count} cooled runs handed their pages back to the OS\n"
-      {% end %}
       print "idle: resident set #{busy // mib} MiB before the idle wait and #{idle // mib} MiB after (information: the RSS is not a verdict)\n"
     {% else %}
       print line + "\n"
@@ -808,6 +794,120 @@ module bench/heap_drain
     {% end %}
   end
 
+  # Keyed mode (the review's witnesses): `heap_drain keyed NAME` makes a pool
+  # by one round, stages one run for the check NAME, and reads the copy's
+  # record of what the runtime did to that run. Built only with -Dkeyed_force,
+  # which only the copies carry; a sound build never names the copy-only words.
+  def keyed_quiet : Nil
+    {% if flag?(:keyed_force) %}
+      waited = 0
+      while IyiHeap.partitions_live != 0_u64 && waited < 10000
+        sleep(1)
+        waited = waited + 1
+      end
+      mark_setup_fail("keyed: #{IyiHeap.partitions_live} partitions still live after every unit ended") if IyiHeap.partitions_live != 0_u64
+    {% end %}
+  end
+
+  def keyed_park : Nil
+    {% if flag?(:keyed_force) %}
+      IyiHeap.enter_barrier
+      run = IyiHeap.park_stage
+      IyiHeap.leave_barrier
+      mark_setup_fail("keyed park: no pooled run to park") if run == 0_u64
+      IyiMark.collect
+      seen = IyiHeap.park_seen
+      mark_setup_fail("keyed park: the sweep never reached the parked run") if seen & 1_u64 == 0_u64
+      listed = seen & 2_u64 != 0_u64
+      state = seen.unsafe_shr(4_u64)
+      if listed && state == IyiHeap::RUN_DRAINING
+        print "drain: the global sweep put the run the program parked back on its class's drain list\n"
+      elsif !listed && state == IyiHeap::RUN_PARKED
+        fail("drain: the global sweep left the run the program parked on no drain list")
+      else
+        mark_setup_fail("keyed park: the run is in state #{state}, listed #{listed}")
+      end
+    {% else %}
+      mark_setup_fail("keyed park needs -Dkeyed_force")
+    {% end %}
+  end
+
+  def keyed_warm : Nil
+    {% if flag?(:keyed_force) %}
+      IyiHeap.enter_barrier
+      staged = IyiHeap.warm_stage
+      IyiHeap.leave_barrier
+      mark_setup_fail("keyed warm: no pooled run is held warm") unless staged
+      got = IyiHeap.warm_wait(-1_i64)
+      cap = (IyiHeap::POOL_TURN_NS // 1000000_u64).to_i64 &+ 1_i64
+      if got == cap
+        print "idle: idle_wait_ms cut a worker's unbounded wait to the pool's turn with a pooled run held warm and no partition pending\n"
+      elsif got == -1_i64
+        fail("idle_wait_ms left a worker's wait unbounded with a pooled run held warm and no partition pending")
+      else
+        mark_setup_fail("keyed warm: idle_wait_ms answered #{got}")
+      end
+    {% else %}
+      mark_setup_fail("keyed warm needs -Dkeyed_force")
+    {% end %}
+  end
+
+  def keyed_cool : Nil
+    {% if flag?(:keyed_force) %}
+      keyed_quiet
+      IyiMark.collect
+      IyiHeap.enter_barrier
+      staged = IyiHeap.cool_stage
+      IyiHeap.leave_barrier
+      mark_setup_fail("keyed cool: no pooled run could be staged on a release list") if staged == 0_u64
+      # Idle pool workers run `cool_pools` too, and their last look clears the
+      # pending word: arm it and call again until the record shows the staged
+      # run. Each call is inside the bracket; the bound is a setup limit, and
+      # the verdict is still the record's.
+      tries = 0
+      while IyiHeap.cool_seen == 0_u64 && tries < 2000
+        IyiHeap.enter_barrier
+        IyiHeap.cool_arm
+        IyiHeap.cool_pools(1 << 30)
+        IyiHeap.leave_barrier
+        sleep(1) if IyiHeap.cool_seen == 0_u64
+        tries = tries + 1
+      end
+      seen = IyiHeap.cool_seen
+      mark_setup_fail("keyed cool: the cooled path never reached the staged run") if seen & 1_u64 == 0_u64
+      mark_setup_fail("keyed cool: the staged run was not eligible for release") if seen & 2_u64 == 0_u64
+      read = seen.unsafe_shr(4_u64)
+      if read == 1_u64
+        print "idle: the run the program put on a release list reached the cold list with its page reading zero\n"
+      elsif read == 2_u64
+        fail("idle: the run the program put on a release list reached the cold list with its page unreleased: the release call did not run")
+      else
+        mark_setup_fail("keyed cool: the page read #{read}, neither zero nor the sentinel")
+      end
+    {% else %}
+      mark_setup_fail("keyed cool needs -Dkeyed_force")
+    {% end %}
+  end
+
+  def keyed_main(which : String) : Nil
+    {% if flag?(:keyed_force) %}
+      IyiWorkers.count = 4
+      pool_round(48)
+      keyed_quiet
+      if which == "park"
+        keyed_park
+      elsif which == "warm"
+        keyed_warm
+      elsif which == "cool"
+        keyed_cool
+      else
+        fail("usage: heap_drain keyed park|warm|cool")
+      end
+    {% else %}
+      mark_setup_fail("keyed mode needs -Dkeyed_force")
+    {% end %}
+  end
+
   Checks.read_env
   arguments = Program.args
   if arguments.size > 0 && arguments[0] == "mark"
@@ -820,6 +920,8 @@ module bench/heap_drain
     claim_main(arguments)
   elsif arguments.size > 0 && arguments[0] == "dir"
     dir_main(arguments)
+  elsif arguments.size > 1 && arguments[0] == "keyed"
+    keyed_main(arguments[1])
   else
     drain_main(arguments)
   end

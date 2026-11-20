@@ -1125,7 +1125,12 @@ step "two threads' panics resolve each trace whole, and the reader in module sta
 # proof is a copy of the prelude whose `__iyi_say` writes each piece as it
 # is put in the room, as the eight writes did: it must tear in one of
 # three runs. darwin prints `backtrace_symbols_fd`'s frames after each
-# report, which this program does not expect, and is not measured here.
+# report, each a whole line - all 15.4 million of 800 runs on macOS 26.6
+# were, six to a report - in libSystem's columns, `%-4d%-35s 0x%016llx
+# %s + %lu`: there those are set aside first, matched column by column
+# from the line's start, so a torn piece in front of one - `4` of a site's
+# line before a frame's `1` - moves the image's name off column 5 and is
+# no frame, and what remains is held as everywhere else.
 cat > "$work/raise_lines.iyi" <<'EOF'
 module raiselines
 
@@ -1184,62 +1189,85 @@ group do |g|
 end
 puts "caught #{total}"
 EOF
-if [ "$(uname -s)" != Darwin ]; then
-  mkdir -p "$work/piecewise/iyi"
-  cp src/iyi/*.iyi "$work/piecewise/iyi/"
-  awk '$0 == "  return fill + take unless last || fill + take == 4096" { found++; next } { print } END { if (found != 1) exit 3 }' \
-    src/iyi/prelude.iyi > "$work/piecewise/iyi/prelude.iyi" ||
-    fail "the report's room is not kept until its last piece where it was in prelude.iyi"
-  path="$work/piecewise:$PWD/src"
-  case "$(uname -s)" in
-    MINGW* | MSYS* | CYGWIN* | Windows_NT) path="$(cygpath -m "$work/piecewise");$(cygpath -m "$PWD/src")" ;;
-  esac
-  "$IYI" build -o "$work/raise_lines" "$work/raise_lines.iyi" > "$work/raise_lines.log" 2>&1 ||
-    fail "the panicking units did not build: $(cat "$work/raise_lines.log")"
-  IYI_PATH="$path" "$IYI" build -o "$work/raise_lines_piecewise" "$work/raise_lines.iyi" > "$work/raise_lines.log" 2>&1 ||
-    fail "the panicking units did not build on the piecewise copy: $(cat "$work/raise_lines.log")"
-  rounds=400
-  # binary -> torn, unpaired: lines that are no whole line of a report,
-  # and reports whose message has not its own site on the line under it.
-  report_lines() {
-    set +e
-    "$1" "$rounds" > "$work/raise_lines.out" 2> "$work/raise_lines.err"
-    code=$?
-    set -e
-    [ "$code" = 0 ] || fail "the panicking units exited $code: $(tail -20 "$work/raise_lines.err")"
-    [ "$(tr -d '\r' < "$work/raise_lines.out")" = "caught $((8 * rounds))" ] ||
-      fail "the panicking units' panics were not all caught: $(cat "$work/raise_lines.out")"
-    tr '\\' '/' < "$work/raise_lines.err" | tr -d '\r' | awk -v reports=$((8 * rounds)) '
-      { line[NR] = $0 }
-      END {
-        torn = 0; pairs = 0
-        for (i = 1; i <= NR; i++) {
-          if (line[i] ~ /^iyi: panic: unit [0-7] boom$/) {
-            k = substr(line[i], 18, 1) + 0
-            if (i < NR && line[i + 1] ~ ("^  at .*/raise_lines\\.iyi:" (k + 4) "$")) { pairs++; i++ }
-          } else if (line[i] !~ /^  at .*\/raise_lines\.iyi:[0-9]+$/) {
-            torn++
-          }
+mkdir -p "$work/piecewise/iyi"
+cp src/iyi/*.iyi "$work/piecewise/iyi/"
+awk '$0 == "  return fill + take unless last || fill + take == 4096" { found++; next } { print } END { if (found != 1) exit 3 }' \
+  src/iyi/prelude.iyi > "$work/piecewise/iyi/prelude.iyi" ||
+  fail "the report's room is not kept until its last piece where it was in prelude.iyi"
+path="$work/piecewise:$PWD/src"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) path="$(cygpath -m "$work/piecewise");$(cygpath -m "$PWD/src")" ;;
+esac
+"$IYI" build -o "$work/raise_lines" "$work/raise_lines.iyi" > "$work/raise_lines.log" 2>&1 ||
+  fail "the panicking units did not build: $(cat "$work/raise_lines.log")"
+IYI_PATH="$path" "$IYI" build -o "$work/raise_lines_piecewise" "$work/raise_lines.iyi" > "$work/raise_lines.log" 2>&1 ||
+  fail "the panicking units did not build on the piecewise copy: $(cat "$work/raise_lines.log")"
+rounds=400
+darwin=0
+[ "$(uname -s)" = Darwin ] && darwin=1
+# stdin, DARWIN -> torn, unpaired, frames: lines that are no whole line of
+# a report, reports whose message has not its own site on the line under
+# it, and the frame lines set aside (when DARWIN is 1).
+count_lines() {
+  awk -v reports=$((8 * rounds)) -v darwin="$1" '
+    # `%-4d%-35s 0x%016llx %s + %lu`: the frame number and its padding in
+    # columns 1-4, the image from column 5 padded to 39 (the names here
+    # are shorter than 35), then the address and the symbol.
+    function frame(l) {
+      return substr(l, 1, 4) ~ /^[0-9]+ *$/ && substr(l, 5, 35) ~ /^[^ ]+ *$/ &&
+        length(substr(l, 40, 20)) == 20 && substr(l, 40, 20) ~ /^ 0x[0-9a-f]+ $/ &&
+        substr(l, 60) ~ /^[^ ].* \+ [0-9]+$/
+    }
+    darwin && frame($0) { frames++; next }
+    { line[++n] = $0 }
+    END {
+      torn = 0; pairs = 0
+      for (i = 1; i <= n; i++) {
+        if (line[i] ~ /^iyi: panic: unit [0-7] boom$/) {
+          k = substr(line[i], 18, 1) + 0
+          if (i < n && line[i + 1] ~ ("^  at .*/raise_lines\\.iyi:" (k + 4) "$")) { pairs++; i++ }
+        } else if (line[i] !~ /^  at .*\/raise_lines\.iyi:[0-9]+$/) {
+          torn++
         }
-        print torn, reports - pairs
-      }' > "$work/raise_lines.count"
-    read -r torn unpaired < "$work/raise_lines.count"
-  }
-  for try in 1 2 3; do
-    report_lines "$work/raise_lines"
-    [ "$torn" = 0 ] && [ "$unpaired" = 0 ] ||
-      fail "run $try: $torn lines on the error stream were no whole line of a report and $unpaired of $((8 * rounds)) messages had not their own site under them: $(head -20 "$work/raise_lines.err")"
-  done
-  caught=""
-  for try in 1 2 3; do
-    report_lines "$work/raise_lines_piecewise"
-    if [ "$torn" != 0 ] || [ "$unpaired" != 0 ]; then
-      caught="$torn torn lines and $unpaired unpaired reports in run $try"
-      break
-    fi
-  done
-  [ -n "$caught" ] || fail "the copy writing the report piece by piece printed whole lines in 3 runs of $((8 * rounds)) panics"
-  step "eight units' panics print whole lines, each message with its site (the piecewise copy: $caught)"
-fi
+      }
+      print torn, reports - pairs, frames + 0
+    }'
+}
+# The frame match itself, on every host: a frame as darwin prints it is set
+# aside, and the same frame behind a site's `4`, behind a message, or
+# behind the `  at ` a site starts with is a torn line, not a frame.
+f='1   raise_lines                         0x00000001025aa8f4 ~procProc(Int32)^raise_lines.iyi:20 + 16'
+set -- $(printf '%s\n' "$f" "4$f" "unit 3 boom$f" "  at $f" | count_lines 1)
+[ "$1 $3" = "3 1" ] || fail "the frame match set aside $3 of 4 lines and called $1 torn, wanted 1 and 3"
+report_lines() { # binary -> torn, unpaired, frames
+  set +e
+  "$1" "$rounds" > "$work/raise_lines.out" 2> "$work/raise_lines.err"
+  code=$?
+  set -e
+  [ "$code" = 0 ] || fail "the panicking units exited $code: $(tail -20 "$work/raise_lines.err")"
+  [ "$(tr -d '\r' < "$work/raise_lines.out")" = "caught $((8 * rounds))" ] ||
+    fail "the panicking units' panics were not all caught: $(cat "$work/raise_lines.out")"
+  tr '\\' '/' < "$work/raise_lines.err" | tr -d '\r' | count_lines "$darwin" > "$work/raise_lines.count"
+  read -r torn unpaired frames < "$work/raise_lines.count"
+}
+for try in 1 2 3; do
+  report_lines "$work/raise_lines"
+  [ "$torn" = 0 ] && [ "$unpaired" = 0 ] ||
+    fail "run $try: $torn lines on the error stream were no whole line of a report and $unpaired of $((8 * rounds)) messages had not their own site under them: $(head -20 "$work/raise_lines.err")"
+  # Every darwin report prints its frames: none set aside is a format the
+  # match no longer knows, not a clean run.
+  [ "$darwin" = 0 ] || [ "$frames" -ge $((8 * rounds)) ] ||
+    fail "run $try: $frames frame lines were set aside for $((8 * rounds)) reports: $(head -20 "$work/raise_lines.err")"
+done
+caught=""
+for try in 1 2 3; do
+  report_lines "$work/raise_lines_piecewise"
+  if [ "$torn" != 0 ] || [ "$unpaired" != 0 ]; then
+    caught="$torn torn lines and $unpaired unpaired reports in run $try"
+    break
+  fi
+done
+[ -n "$caught" ] || fail "the copy writing the report piece by piece printed whole lines in 3 runs of $((8 * rounds)) panics"
+step "eight units' panics print whole lines, each message with its site (the piecewise copy: $caught)"
 
 echo "panics gate: every step held"

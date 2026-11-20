@@ -187,15 +187,18 @@
   and 85 to 95 % on Windows 11 no whole line of any report (an empty one,
   a line number alone, `unit 4 boom` with no `iyi: panic: `), and 73 to
   98 % of the messages without their own site under them, in every run of
-  150 on Linux and 100 on Windows, to a pipe or a file. The pieces now
-  fill a 4 KiB room on the stack, written in one call when it is full and
-  after the last piece, which a pipe keeps whole up to that size; nothing
-  is allocated that was not before (`line.to_s`, for a site). After: 0 torn
-  lines and 0 messages without their site in 1,600 runs (5.1 million
-  lines) on Linux and 1,300 runs (4.2 million lines) on Windows 11, to a
-  pipe and a file, at 12 processors and held to 2. A report longer than
-  4 KiB goes out a room at a time. `std/debug`'s frame lines were each one
-  write already.
+  150 on Linux and 100 on Windows, to a pipe or a file; at 400 times each
+  on macOS 26.6 (Apple M2 Pro), 94 to 96 % of the lines that were not
+  frames and 95 to 97 % of the messages, in every run of 70. The pieces
+  now fill a 4 KiB room on the stack, written in one call when it is full
+  and after the last piece, which a pipe keeps whole up to that size;
+  nothing is allocated that was not before (`line.to_s`, for a site).
+  After: 0 torn lines and 0 messages without their site in 1,600 runs
+  (5.1 million lines) on Linux, 1,300 runs (4.2 million) on Windows 11 and
+  800 runs (20.5 million, frames included) on macOS, to a pipe and a file,
+  on Linux and Windows also held to 2 processors. A report longer than
+  4 KiB goes out a room at a time. `std/debug`'s frame lines, and darwin's
+  from `backtrace_symbols_fd`, were each one write already.
 
 - **A build that runs a command from a macro is no longer taken for up to
   date by the next.** The up-to-date check's recorder stepped aside for
@@ -650,13 +653,18 @@
   with its own site under it, in three runs. The proof is a copy of the
   prelude whose `__iyi_say` writes each piece as it is put, as the old
   path did: it tore in every run, 300 at 12 processors and 300 held to 2
-  on Linux, 200 and 100 on Windows 11, and the gate needs it to tear in
-  one of three. darwin, which prints `backtrace_symbols_fd`'s frames after
-  each report, does not run the step. Step 13's frame lines are matched
-  from the start of their line now, where they were matched anywhere in
-  it because the report tore them: the old prelude failed the anchored
-  match in 18 runs of 100 on Linux and 28 of 50 on Windows 11, the fix in
-  0 of 300 and 0 of 200.
+  on Linux, 200 and 100 on Windows 11, and 400 of 400 on macOS 26.6
+  (Apple M2 Pro, beside three CI jobs), and the gate needs it to tear in
+  one of three. darwin prints `backtrace_symbols_fd`'s frames after each
+  report, each a whole line in libSystem's columns (`%-4d%-35s 0x%016llx
+  %s + %lu`); the step sets those aside first, matched column by column
+  from the line's start, and checks first that the same frame behind a
+  site's `4`, a message or `  at ` is called torn, not a frame - and on
+  darwin that every report's frames were set aside. Step 13's frame lines
+  are matched from the start of their line now, where they were matched
+  anywhere in it because the report tore them: the old prelude failed the
+  anchored match in 18 runs of 100 on Linux and 28 of 50 on Windows 11,
+  the fix in 0 of 300 and 0 of 200.
 
 - **`bench/sweep_exercise.sh`'s copy that counts the listed pages twice
   fails every run in which two adoptions meet in its window.** In master's

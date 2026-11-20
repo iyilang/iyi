@@ -373,9 +373,12 @@ listener = IyiSocket.listen(0)
 quiet_port = listener.local_port
 parked_answer = ""
 held = [] of IyiSocket
+reader_connected = false
 group do |g|
   g.spawn do
-    case peer = IyiSocket.connect("127.0.0.1", quiet_port)
+    dialed = IyiSocket.connect("127.0.0.1", quiet_port)
+    reader_connected = true
+    case peer = dialed
     in Cancelled
       parked_answer = "connect cancelled"
     in SocketError
@@ -400,8 +403,25 @@ group do |g|
     0
   end
   g.spawn do
-    sleep(20)
-    Boom.new
+    # Boom waits for the reader's connect to return, so the cancellation
+    # reaches the read. A fixed sleep can fire before that connect returns,
+    # and the reader then reports "connect cancelled" in place of "cancelled".
+    # The wait is on the reader's word, not on a clock; the 1 ms poll only
+    # looks at that word.
+    puts "watchdog stage: waiting for parked reader connection"
+    cancelled = false
+    while !reader_connected
+      if sleep(1).is_a?(Cancelled)
+        cancelled = true
+        break
+      end
+    end
+    if cancelled
+      0
+    else
+      puts "watchdog stage: parked reader connected"
+      Boom.new
+    end
   end
 end
 held.each { |h| h.close }

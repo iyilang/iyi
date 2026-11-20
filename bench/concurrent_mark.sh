@@ -4,12 +4,12 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# The rules: every failure proof runs its broken copy once and passes only on
-# its exact exit status and exact sentence. A forced copy waits on a word the
-# program sets, never on a clock, and a copy that cannot build against the
-# real runtime fails the gate. A step whose code this platform does not
-# compile says so by name, and a host with too few cores fails. In the order
-# they run:
+# Every failure proof runs its broken copy once and checks its exit status
+# and named failure. Some older proofs still match only a sentence fragment.
+# A forced copy waits on a word the program sets, and a copy that cannot
+# build against the real runtime fails the gate. A step whose code this
+# platform does not compile says so by name; a host with too few cores fails.
+# In the order they run:
 #   - the program, release: rounds that move a payload into a black holder
 #     under a running mark, the pauses of a concurrent collection against the
 #     stop-the-world mark, a large block outgrown under a mark, a small live
@@ -41,7 +41,7 @@
 #     start_helper and prelude.iyi's start_concurrent under win32), and the
 #     gate names that platform arm instead of passing silently.
 # Not forced by this gate (clock-decided, listed for the record): the stored,
-# late, released and let_go_late proofs.
+# late, released, let_go_late and arrived_only proofs.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -693,7 +693,7 @@ if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build --release -Dmove_forc
 fi
 timeout -k 5 300 ./nobarrier > nobarrier.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q "the barrier lost it" nobarrier.txt; then
+if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: round [0-9]+: (the payload moved into a black holder under the mark was freed: the barrier lost it|the payload's seed is -?[0-9]+ rather than -?[0-9]+: its chunk was reused, the barrier lost it)$" nobarrier.txt; then
   echo "the payload check did not fire (exit $code):"; tail -3 nobarrier.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'the barrier lost it' nobarrier.txt)"
@@ -709,7 +709,7 @@ if ! IYI_PATH="$WORK/stray${PSEP}$REPO/src" "$IYI" build --release -Dmove_force 
 fi
 timeout -k 5 300 ./straybarrier > stray.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q "stray: a barrier run after its mark" stray.txt; then
+if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: stray: a barrier run after its mark had ended left the holder gray, and the next mark swept the payload it held" stray.txt; then
   echo "the stray barrier check did not fire (exit $code):"; tail -3 stray.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'stray: a barrier run after' stray.txt)"
@@ -1260,7 +1260,7 @@ if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release arrived_o
 fi
 timeout -k 5 300 ./arrived-only > arrived.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q "^FAIL: idle pool: [0-9]* of [0-9]* workers waiting" arrived.txt; then
+if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: idle pool: [0-9]+ of [0-9]+ workers waiting after five seconds$" arrived.txt; then
   echo "the idle pool check did not fire (exit $code):"; tail -3 arrived.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' arrived.txt)"

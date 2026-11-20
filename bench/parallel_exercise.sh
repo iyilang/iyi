@@ -7,7 +7,6 @@
 # cannot fail is not a gate:
 #
 # Timing-decided, not forced:
-#   kerneljoin: a finite thread and latency bound decide; hold the joined thread and record its kernel join.
 #   nosteal: a balance timing bound decides; hold the owner and record a targeted steal decision.
 #   preemptoff: a timed short task decides; hold the computation and require the short task before release.
 #   noflag: a timed short task decides; hold the computation and record the monitor's raised-word decision.
@@ -1692,8 +1691,43 @@ $CLOSE_END" concurrency.iyi parallel_migrate -Dnoclose_force
   verdict_caught closeshome 'closes: the main thread closed a socket on the thread its reader parked on' closes
 
   step "failure proof: a join held in the kernel holds its worker, and the sleepers on it"
-  broken kerneljoin '/^      while @ended.get == 0_u64$/ { skip = 3; n++ } skip > 0 { skip = skip - 1; next } { print } END { if (n != 1) exit 3 }' thread.iyi parallel_migrate
-  verdict_caught kerneljoin "join: the child's measured wake was outside the allowed range" join
+  JOIN_COMMON='/^    def join : Nil$/ {
+  print "    @[UnsafeReach(\"copy-only keyed join decision, accessed atomically\")]"
+  print "    @@forced_join_thread : UInt64 = 0_u64"
+  print "    @[UnsafeReach(\"copy-only keyed join decision, accessed atomically\")]"
+  print "    @@forced_join_decision : UInt64 = 0_u64"
+  print "    def self.force_join_key(thread : IyiThread) : Nil"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_join_thread).address).value.set(thread.object_id)"
+  print "    end"
+  print "    def self.force_join_decision : UInt64"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_join_decision).address).value.get"
+  print "    end"
+  print "    def self.force_join_decided(thread : IyiThread, decision : UInt64) : Nil"
+  print "      return unless thread.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_join_thread).address).value.get"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_join_decision).address).value.compare_and_set(0_u64, decision)"
+  print "    end"
+  print; injoin = 1; n_method++; next
+}
+injoin && /^    end$/ { injoin = 0 }
+injoin && /^      {% if flag\?\(:linux\) %}$/ { print "      IyiThread.force_join_decided(self, @ended.get == 0_u64 ? 2_u64 : 3_u64)"; n_kernel++ }'
+  JOIN_BUG='injoin && /^      while @ended.get == 0_u64$/ { sequence = 1; n_loop++; next }
+sequence == 1 { if ($0 != "        IyiScheduler.park_on(pointerof(@ended), 0_u64, false)") exit 3; sequence = 2; n_park++; next }
+sequence == 2 { if ($0 != "      end") exit 3; sequence = 0; n_end++; next }
+injoin && /^      end$/ { n_other_end++ }'
+  JOIN_HOOK='injoin && /^      while @ended.get == 0_u64$/ { n_loop++ }
+injoin && /^        IyiScheduler.park_on\(pointerof\(@ended\), 0_u64, false\)$/ { print "        IyiThread.force_join_decided(self, 1_u64)"; n_park++ }
+injoin && /^      end$/ { n_end++ }'
+  JOIN_END='END { if (sequence || n_other_end != 0 || n_method != 1 || n_kernel != 1 || n_loop != 1 || n_park != 1 || n_end != 1) exit 3 }'
+  broken kerneljoin "$JOIN_COMMON
+$JOIN_BUG
+{ print }
+$JOIN_END" thread.iyi parallel_migrate -Dkerneljoin_force
+  verdict_caught kerneljoin "join: the join of a running thread entered the kernel's join without parking" join
+  broken kerneljoin_hook "$JOIN_COMMON
+$JOIN_HOOK
+{ print }
+$JOIN_END" thread.iyi parallel_migrate -Dkerneljoin_force
+  verdict_held kerneljoin_hook "join: the join of a running thread took its park path" join
 
   step "failure proof: a task woken by a task that computes on waits for that computation"
   # The parked target is keyed before its waker is released. The copy records

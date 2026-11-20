@@ -1912,22 +1912,42 @@ import std/socket::{IyiSocket, SocketError}
               0
             end
             thread = IyiThread.start do
+              {% if flag?(:kerneljoin_force) %}
+                wait_started = __iyi_monotonic_ns
+                while IyiThread.force_join_decision == 0_u64
+                  IyiThread.spin_pause
+                  raise "join: progress hang: join did not record its decision" if elapsed_ms(wait_started) >= 10000_i64
+                end
+              {% end %}
               began = __iyi_monotonic_ns
               while __iyi_monotonic_ns - began < 400_000_000_i64
                 IyiThread.spin_pause
               end
             end
+            {% if flag?(:kerneljoin_force) %}
+              IyiThread.force_join_key(thread)
+            {% end %}
             thread.join
           end
           child_at
         end
         got = task.value
-        answer = got.is_a?(Int64) ? got : -2_i64
+        fail("join: the joining task answered no Int64 result") unless got.is_a?(Int64)
+        answer = got
       end
-      if answer < 0_i64 || answer >= 300_i64
-        puts "join: the child's measured wake was #{answer} ms"
-        fail("join: the child's measured wake was outside the allowed range")
-      end
+      fail("join: the child recorded no wake") if answer < 0_i64
+      {% if flag?(:kerneljoin_force) %}
+        decision = IyiThread.force_join_decision
+        puts "join: the child's wake was #{answer} ms"
+        fail("join: the join of a running thread entered the kernel's join without parking") if decision == 2_u64
+        fail("join: not armed: the target join did not record its park path") unless decision == 1_u64
+        puts "join: the join of a running thread took its park path"
+      {% else %}
+        if answer >= 300_i64
+          puts "join: the child's measured wake was #{answer} ms"
+          fail("join: the child's measured wake was outside the allowed range")
+        end
+      {% end %}
       puts "join: a task joining a 400 ms thread left its worker to its child, which woke #{answer} ms in"
     end
   end

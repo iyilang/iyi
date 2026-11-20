@@ -1,0 +1,54 @@
+# The tenth codegen fixture: a generic type, one copy per type argument.
+#
+# `generic` is the most common shape the port's own source writes that
+# the emitter did not carry, at 241, and it is the first thing the
+# prelude needs: `Pointer(T)`, `Array(T)` and every container under them
+# are generic before they are anything else.
+#
+# What a backend does with one is monomorphise it: `Box(Int32)` and
+# `Box(Bool)` are two types with two sets of methods, and neither of
+# them carries a type argument at run time. That is emittable without a
+# runtime, which is what keeps this on this side of the wall.
+
+require "../../../src/iyi/prelude"
+
+struct Box(T)
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+end
+
+struct Pair(A, B)
+  def initialize(@first : A, @second : B)
+  end
+
+  def first : A
+    @first
+  end
+
+  def second : B
+    @second
+  end
+end
+
+def answer : Int32
+  number = Box(Int32).new(7)
+  other = Box(Int32).new(30)
+  both = Pair(Int32, Int32).new(2, 3)
+  # A second instantiation with a different argument, so the
+  # substitution is measured rather than assumed: Box(Bool) holds one
+  # bit and Box(Int32) holds four bytes.
+  flag = Box(Bool).new(true)
+  mixed = Pair(Bool, Int32).new(false, 5)
+  total = number.value + other.value + both.first + both.second + mixed.second
+  if flag.value
+    total + 1
+  else
+    total
+  end
+end
+
+__iyi_exit(answer)

@@ -1,0 +1,39 @@
+# The seventh codegen fixture: a class, which is a reference.
+#
+# The struct fixture passed its value around, so two locals holding the
+# same fields were two values. A class is one object with a name for it,
+# and the fixture is built so that getting this wrong changes the answer
+# rather than the shape of the IR: `bump` is called twice on one counter,
+# and a port that copied the object by value would answer 7 where this
+# answers 8.
+#
+# What it costs is a heap. The current compiler brings its own; this
+# slice calls the C library's `malloc`, the same way it calls `write`,
+# and nothing frees anything. A collector is not a codegen slice.
+
+require "../../../src/iyi/prelude"
+
+class Counter
+  def initialize(@count : Int32)
+  end
+
+  def count : Int32
+    @count
+  end
+
+  # A field written through a method, which is the whole difference
+  # between a value and a reference.
+  def bump : Int32
+    @count = @count + 1
+    @count
+  end
+end
+
+def answer : Int32
+  counter = Counter.new(5)
+  counter.bump
+  counter.bump
+  counter.count + 1
+end
+
+__iyi_exit(answer)

@@ -38,6 +38,9 @@
 
 ### Changed
 
+- Pass the selected static LLVM configuration to the macOS frontend comparisons,
+  including the semantic, inference and code-generation oracles.
+
 - **Compile-time macros in `.iyi` files refuse shell commands.** `system`
   and backticks fail with the source location. `read_file`, `read_file?` and
   `file_exists?` stay within the defining package and the standard library,

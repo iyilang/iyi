@@ -138,6 +138,13 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r"/usr/lib/crystal\b", "the bootstrap release's library directory, as a path"),
     (r"^\s*crystal --version$", "the bootstrap compiler reporting itself"),
     (r"[Cc]opyright.*Crystal", "copyright"),
+    # `selfhost/macro/expand.iyi` says what it is a port of: Crystal runs a
+    # macro by expanding it into source and parsing the result, and this
+    # pass does the same for the shapes the corpora write. The sentence is
+    # about the other compiler's behaviour, which is the whole reason the
+    # file explains itself that way. Found by this gate the first run it
+    # ever reached, because the step above it used to fail first.
+    (r"Crystal expands a macro into source", "how the other compiler runs one"),
     # The compiler still declares these names itself, in
     # `src/compiler/iyi/macros.cr`: `__crystal_pseudo_sizeof`,
     # `__crystal_pseudo_is_a?` and their siblings, with
@@ -324,6 +331,12 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # The bootstrap compiler's cache, set beside iyi's in the gate that reads
     # the broken copy's objects out of it: the bootstrap reads no other name.
     (r'CRYSTAL_CACHE_DIR="\$WORK/\$label-cache"', "the bootstrap compiler's cache, where bench/symbol_names.sh reads its broken copy"),
+    (r'^CRYSTAL_CACHE_DIR="\$WORK/cr" \\$',
+     "the Crystal declaration oracle's separate cache in selfhost/semantic/diff.sh"),
+    (r'"crystal_version"',
+     "the Crystal compiler identity recorded in the native IR oracle manifest"),
+    (r'^# Normalize external LLVM/Crystal transport only;',
+     "the LLVM layout oracle compiled from Crystal, not the iyi driver under test"),
     # The linker's search path, in the gate that proves the binaries build
     # with bdw-gc unreachable. `IYI_LIBRARY_PATH` is not a substitute: it adds
     # to the default search path where `CRYSTAL_LIBRARY_PATH` replaces it, and

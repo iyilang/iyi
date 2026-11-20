@@ -1,0 +1,4 @@
+def open_and_close(path : String, flag : Bool) : Bool
+  defer File.delete(path) if flag
+  flag
+end

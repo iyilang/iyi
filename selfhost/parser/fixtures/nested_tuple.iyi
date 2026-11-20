@@ -1,0 +1,10 @@
+class Pair
+  def pick(x : Int32)
+    i = 1
+    {i, {x, 2}}
+  end
+
+  def nest
+    {1, {2, {3, 4}}}
+  end
+end

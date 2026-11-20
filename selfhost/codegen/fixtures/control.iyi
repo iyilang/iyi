@@ -1,0 +1,84 @@
+# The eighth codegen fixture: the rest of the control flow, and the
+# booleans that drive it.
+#
+# Measured rather than chosen. Across the port's own source the shapes
+# this slice did not carry are, by count: `and` 434 and `or` 360,
+# `return` 390, `not` 114, `bool` 106, `unless` 74, `next` 29 and
+# `break` 10. Those are the ones that need nothing from the prelude,
+# which is what makes them a fixture rather than a plan.
+#
+# What is still missing after this is the prelude itself: a string
+# interpolation, an array literal, a generic and a cast all need a
+# `String`, an `Array` and a type argument compiled first, and that is
+# the bootstrap rather than another node.
+
+require "../../../src/iyi/prelude"
+
+# An early return, and the modifier form of both conditionals.
+def classify(n : Int32) : Int32
+  return 0 if n < 0
+  return 1 unless n > 10
+  2
+end
+
+# `&&` and `||` answer without asking the other side when the first one
+# settles it, which is why they are blocks rather than instructions.
+def both(a : Int32, b : Int32) : Int32
+  if a > 0 && b > 0
+    1
+  else
+    0
+  end
+end
+
+def either(a : Int32, b : Int32) : Int32
+  if a > 0 || b > 0
+    1
+  else
+    0
+  end
+end
+
+def negate(a : Int32) : Int32
+  if !(a > 0)
+    1
+  else
+    0
+  end
+end
+
+# A boolean in a local, which is the first value in this slice that is
+# neither an integer nor an object.
+def held(a : Int32) : Int32
+  flag = a > 3
+  if flag
+    1
+  else
+    0
+  end
+end
+
+# `next` goes back to the condition and `break` leaves the loop, so both
+# are branches to a label the loop is holding.
+def skipping(n : Int32) : Int32
+  total = 0
+  i = 0
+  while i < n
+    i = i + 1
+    next if i == 2
+    break if i == 5
+    total = total + i
+  end
+  total
+end
+
+def answer : Int32
+  # The first four calls settle the answer on the first side, which is
+  # the only place a short circuit is visible: both(0, 1) never asks
+  # about b and either(1, 0) never asks about b.
+  classify(0 - 1) + classify(5) + classify(50) +
+    both(1, 1) + both(0, 1) + either(0, 1) + either(1, 0) +
+    negate(0) + held(9) + skipping(9)
+end
+
+__iyi_exit(answer)

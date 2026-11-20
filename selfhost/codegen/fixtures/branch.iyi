@@ -1,0 +1,36 @@
+# The third codegen fixture: a branch, which is the first shape that is
+# not one straight line of instructions.
+#
+# An `if` is two blocks and a value that depends on which one ran, so it
+# is the first thing this slice cannot emit by appending. The comparison
+# in front of it is a primitive as well: `def <(other : Int32) : Bool` is
+# an instruction, and the `i1` it answers is what a branch takes.
+#
+# `Bool` is the second type in the slice, and it only ever appears as a
+# condition: nothing here stores one, returns one, or prints one.
+
+require "../../../src/iyi/prelude"
+
+def larger(a : Int32, b : Int32) : Int32
+  if a < b
+    b
+  else
+    a
+  end
+end
+
+# A branch with no else is worth nothing on one side, and the method
+# answers what follows it.
+def clamp(n : Int32) : Int32
+  answer = n
+  if n > 9
+    answer = 9
+  end
+  answer
+end
+
+def pick : Int32
+  larger(3, 7) + clamp(40)
+end
+
+__iyi_exit(pick)

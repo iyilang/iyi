@@ -1,0 +1,42 @@
+# The ninth codegen fixture: the shapes left that need no prelude.
+#
+# After the control flow, the count of what the port's own source writes
+# and the emitter did not carry leaves `case` 23 with `when` 69, and a
+# typed local declaration, `typedecl` 182. Both are prelude-free. What
+# remains after them - `generic`, `cast`, `stringinterpolation`,
+# `arrayliteral` - needs a type the prelude declares, and that is the
+# bootstrap rather than another fixture.
+#
+# A `case` over values is a chain of comparisons, which is what the
+# current compiler turns it into as well when the subject is an integer.
+
+require "../../../src/iyi/prelude"
+
+def name_length(kind : Int32) : Int32
+  case kind
+  when 0
+    3
+  when 1
+    5
+  when 2
+    7
+  else
+    11
+  end
+end
+
+# A local that says its type and is given a value in the same line. The
+# value is deliberately not zero: a fixture that declared one would pass
+# whether or not the value was read, which is what the mutation proof
+# caught the first time this was written.
+def declared(n : Int32) : Int32
+  total : Int32 = 6
+  total = total + n
+  total
+end
+
+def answer : Int32
+  name_length(0) + name_length(2) + name_length(9) + declared(4)
+end
+
+__iyi_exit(answer)

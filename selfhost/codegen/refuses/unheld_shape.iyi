@@ -1,0 +1,25 @@
+# Not a fixture: a program this slice is required to refuse.
+#
+# A string interpolation is a shape the emitter does not carry. Its node
+# reached the `else` arm of the switch in `emit`, which returned a
+# literal zero. The same defect as the unresolved call, one level up.
+#
+# The interpolation is built and never read, which is the point. An
+# array literal would do as well for showing the defect, but not for
+# gating it: `xs.size` is a call on what the zero produced, so the call
+# refusal catches it whether the shape refusal exists or not, and a
+# fixture that passes either way proves nothing. Nothing here asks the
+# zero a question. With the shape refusal removed this program emits,
+# assembles, runs, and exits 5, which is the right answer to a program
+# that is not the one that was written.
+#
+# `#{node.class}` is the whole message, because the list of shapes that
+# reach here is exactly the list a bootstrap still needs.
+
+def answer : Int32
+  n = 7
+  text = "n is #{n}"
+  5
+end
+
+__iyi_exit(answer)

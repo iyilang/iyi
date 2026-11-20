@@ -1,0 +1,17 @@
+# The fifth codegen fixture: what the program prints.
+#
+# Every fixture so far was worth a number, and the gate compared the exit
+# status. This one writes bytes, which is a stronger observable and the
+# one a compiler is eventually judged by: the gate compares stdout as
+# well.
+#
+# `print` of a literal is the whole of it. This slice does not build an
+# iyi `String` - a bytesize, a length and the bytes - because nothing
+# here asks a string for anything. It writes the bytes the literal
+# holds, which is all `print` of a literal does.
+
+require "../../../src/iyi/prelude"
+
+print "hello from the port\n"
+print "two lines, one of them with a tab:\there\n"
+__iyi_exit(3)

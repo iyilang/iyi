@@ -1,0 +1,9 @@
+def label(n : Int32) : String
+  case n
+  when 1,
+       2
+    "small"
+  else
+    "big"
+  end
+end

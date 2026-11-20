@@ -207,6 +207,195 @@ jobs:
           path: .build/crystal
           retention-days: 1
 
+  # The LLVM/clang-backed frontend port is compared against the hosted
+  # compiler on each host. This is not proof of an LLVM-free Windows backend.
+  port:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'port') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "The frontend port against the hosted compiler on Linux"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+
+      - name: Install and identify the IR assembler
+        run: |
+          if ! command -v clang >/dev/null; then
+            apt-get update -qq && apt-get install -y -qq clang
+          fi
+          test "$(uname -s)" = Linux
+          uname -s -m
+          llvm_config="$(bash src/llvm/ext/find-llvm-config.sh)"
+          "$llvm_config" --version
+          "$llvm_config" --targets-built
+          clang --version
+
+      - name: Build `iyi`
+        run: make -o .build/crystal iyi
+
+      # What a string knows about itself. The prelude fills in a
+      # `String`'s two counts, and a wrong one is a number that comes
+      # out wrong somewhere far away rather than a crash: nothing else
+      # here would catch it, because the specs are the compiler's, the
+      # roundtrip compares a program against itself, and no sample has
+      # expected output pinned.
+      - name: A string knows its own two counts
+        run: bash bench/string_invariants.sh
+
+      # The corpus is listed with `find` rather than `selfhost/**/*.iyi`
+      # because that glob is `selfhost/*/*.iyi` unless `globstar` is on:
+      # 10 files instead of 40, still matching, still passing, quietly
+      # missing everything a directory deeper. A gate that shrinks
+      # without saying so is the failure this workflow exists against,
+      # so it counts what it read and says the number.
+      #
+      # `shell: bash` because this workflow's default is `sh -e`, where
+      # `mapfile` and `<(...)` are a syntax error rather than a feature
+      # that quietly does less.
+      - name: The lexer answers what the current lexer answers
+        shell: bash
+        run: |
+          mapfile -t port < <(find selfhost -name '*.iyi' | sort)
+          echo "port files: ${#port[@]}"
+          test "${#port[@]}" -gt 0
+          bash selfhost/lexer/diff.sh "${port[@]}" src/iyi/*.iyi
+
+      - name: The parser builds the tree the current parser builds
+        shell: bash
+        run: |
+          mapfile -t port < <(find selfhost -name '*.iyi' | sort)
+          echo "port files: ${#port[@]}"
+          test "${#port[@]}" -gt 0
+          bash selfhost/parser/diff.sh
+          bash selfhost/parser/diff.sh "${port[@]}"
+
+      - name: The declaration pass declares what the semantic pass does
+        run: bash selfhost/semantic/diff.sh
+
+      - name: Inference answers the types the semantic pass answers
+        run: bash selfhost/semantic/infer_diff.sh
+
+      - name: The emitter's programs match the hosted programs
+        shell: bash
+        run: bash selfhost/codegen/diff.sh
+
+  port-darwin:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'port-darwin') }}
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+    timeout-minutes: 120
+    name: "The frontend port against the hosted compiler on macOS"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the bootstrap toolchain
+        run: |
+          sw_vers
+          uname -s -m
+          brew install crystal coreutils pkgconf
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: Build the native compilers
+        run: |
+          "$HOME/llvm-static/bin/llvm-config" --version
+          "$HOME/llvm-static/bin/llvm-config" --targets-built
+          clang --version
+          make crystal iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+      - name: Compare the entire frontend corpus and generated programs
+        shell: bash
+        run: |
+          export LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+          test "$(uname -s)" = Darwin
+          port=()
+          while IFS= read -r file; do port[${#port[@]}]="$file"; done < <(find selfhost -name '*.iyi' | sort)
+          echo "port files: ${#port[@]}"
+          test "${#port[@]}" -gt 0
+          bash selfhost/lexer/diff.sh "${port[@]}" src/iyi/*.iyi
+          bash selfhost/parser/diff.sh
+          bash selfhost/parser/diff.sh "${port[@]}"
+          bash selfhost/semantic/diff.sh
+          bash selfhost/semantic/infer_diff.sh
+          bash selfhost/codegen/diff.sh
+
+  port-windows:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'port-windows') }}
+    runs-on: windows-2025
+    timeout-minutes: 120
+    name: "The frontend port against the hosted compiler on Windows"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+        with:
+          crystal: 1.21.0
+      - name: Identify the toolchain
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --version 4.4.1 --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
+            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
+            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
+            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
+              throw "Chocolatey's make.exe is not the pinned binary: $hash"
+            }
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          if (-not (Test-Path "$lib\llvm_VERSION")) {
+            throw "no llvm_VERSION beside the Crystal package's libraries, at $lib"
+          }
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          Write-Host "bootstrap libraries: $lib"
+          Write-Host "llvm: $llvm"
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Get-Command clang.exe -ErrorAction Stop | Format-List Source
+          clang --version
+          if ($LASTEXITCODE -ne 0) { throw "clang is unavailable" }
+      - name: Build the native compilers
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+      - name: Compare the entire frontend corpus and generated programs
+        shell: bash
+        run: |
+          case "$(uname -s)" in MINGW* | MSYS* | CYGWIN* | Windows_NT) ;; *) exit 1 ;; esac
+          uname -s -m
+          port=()
+          while IFS= read -r file; do port[${#port[@]}]="$file"; done < <(find selfhost -name '*.iyi' | sort)
+          echo "port files: ${#port[@]}"
+          test "${#port[@]}" -gt 0
+          bash selfhost/lexer/diff.sh "${port[@]}" src/iyi/*.iyi
+          bash selfhost/parser/diff.sh
+          bash selfhost/parser/diff.sh "${port[@]}"
+          bash selfhost/semantic/diff.sh
+          bash selfhost/semantic/infer_diff.sh
+          bash selfhost/codegen/diff.sh
+
   iyi:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'iyi') }}
@@ -2362,7 +2551,11 @@ jobs:
           Write-Host "linking with: $command"
           $parts = $command -split '\s+'
           & $parts[0] $parts[1..($parts.Length - 1)]
-          if ($LASTEXITCODE -ne 0) { Write-Host "link failed with $LASTEXITCODE"; exit 0 }
+          # Exits with the linker's status, not 0. It used to exit 0,
+          # which skipped the twenty runs below and left the job green
+          # on a build that never linked: the three steps under this one
+          # already do it the right way round.
+          if ($LASTEXITCODE -ne 0) { Write-Host "link failed with $LASTEXITCODE"; exit $LASTEXITCODE }
 
           # Normalised before comparing, both sides: `Out-String` hands back CRLF
           # and the reference was written on Linux. The first version of this
@@ -4398,12 +4591,11 @@ jobs:
           path: editors/vscode/*.vsix
           retention-days: 7
 
-  # One check for the master ruleset to require: every job this
-  # run selected passed. A job the plan left out is skipped, and passes; a
-  # failed or cancelled one does not. `scripts/ci_plan.py` refuses a
-  # workflow whose jobs this list does not name.
+  # A skipped unselected job is harmless. A selected job must succeed:
+  # otherwise a missing or skipped platform could silently pass the verdict.
+  # The planner also refuses a workflow whose jobs this list does not name.
   result:
-    needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, std,
+    needs: [plan, docs, build, port, port-darwin, port-windows, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,
@@ -4420,7 +4612,11 @@ jobs:
         run: |
           printf '%s' "$RESULTS" | python3 -c '
           import json, sys
-          failed = [name for name, job in json.load(sys.stdin).items()
-                    if job["result"] in ("failure", "cancelled")]
-          print("failed or cancelled: " + ", ".join(failed) if failed else "every selected job passed")
+          results = json.load(sys.stdin)
+          selected = set(json.loads(results["plan"]["outputs"]["jobs"]))
+          failed = sorted(
+              {name for name, job in results.items() if job["result"] in ("failure", "cancelled")}
+              | {name for name in selected | {"plan"}
+                 if results.get(name, {}).get("result") != "success"})
+          print("not successful: " + ", ".join(failed) if failed else "every selected job passed")
           sys.exit(1 if failed else 0)'

@@ -1,0 +1,7 @@
+class Slot(T)
+  @got : T
+
+  def initialize
+    @got = uninitialized T
+  end
+end

@@ -33,6 +33,8 @@ Within a pull request the changed files narrow it further:
     proven by running what it changed, not by running everything; a change to
     this script or to the workflow's header runs the fast tier, which starts
     with `plan`. If the base workflow cannot be read, everything runs;
+  - anything under `selfhost/`: the port's Linux, macOS and Windows jobs,
+    which compare it against the hosted compiler on each host;
   - otherwise: the fast tier, plus every job that runs a changed bench file.
 
 A job runs a bench file when one of its steps names it, or names a bench
@@ -75,6 +77,9 @@ VARIABLE = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 FAST = ["build", "iyi", "compiler-specs", "stdlib-specs", "targets",
         "cross-objects", "cross-run", "windows-probe", "windows-collector",
         "windows-runtime", "docs", "vscode"]
+
+# The LLVM/clang frontend port is separate from the native-backend jobs.
+PORT = ["port", "port-darwin", "port-windows"]
 
 # Not selected by this script: `plan` is the script, `result` reads every
 # selected job's outcome, and `release` gates itself on a `v*` tag.
@@ -330,6 +335,11 @@ def plan(jobs, event, ref, files, bench, ci_jobs=None):
     if not code_files:
         return close_over_needs(jobs, selected), "only docs changed"
 
+    # No bench file names `selfhost/`, so Reach cannot select the port's
+    # corpus and executable codegen checks when the port itself changes.
+    if any(f.startswith("selfhost/") for f in code_files):
+        selected.update(PORT)
+
     changed_bench = [f for f in code_files if f.startswith("bench/")]
     reach = Reach(jobs, bench) if changed_bench else None
     running = {f: reach.running_jobs(f) for f in changed_bench}
@@ -353,9 +363,9 @@ def main():
         sys.exit("ci_plan: no event: pass --event or run under GitHub Actions")
 
     jobs = parse_jobs(WORKFLOW.read_text(encoding="utf-8"))
-    missing = [name for name in FAST if name not in jobs]
+    missing = [name for name in FAST + PORT if name not in jobs]
     if missing:
-        sys.exit(f"ci_plan: FAST names jobs the workflow does not have: {', '.join(missing)}")
+        sys.exit(f"ci_plan: planned jobs the workflow does not have: {', '.join(missing)}")
     # `result` is the one check a ruleset requires, so a job it does not
     # need could fail and still let a change through.
     unread = sorted(set(jobs) - NOT_PLANNED - set(jobs["result"]["needs"]))

@@ -1,0 +1,56 @@
+# The twelfth codegen fixture: the integer tower, which until now was
+# one width pretending to be all of them.
+#
+# Every integer in the slices before this was emitted as an `i32`,
+# `Int64` included, which is right until a program writes a number that
+# does not fit in one. The prelude declares the whole tower and its
+# conversions as primitives, so none of this needs a body compiled: a
+# widening is a `sext`, a narrowing is a `trunc`, and which one a
+# conversion is depends on the two widths.
+#
+# Signedness is the other half, and it is not a width. `//`, `%` and
+# every ordering comparison have two spellings, and picking the wrong
+# one on a number with its top bit set answers something else.
+#
+# Every conversion here fits. The prelude declares an unchecked pair
+# beside the checked one, `to_u8!`, which iyi source cannot call: a
+# trailing `!` is error propagation. A value that does not fit needs a
+# raise either way, and a raise needs the prelude compiled.
+
+def doubled(value : Int64) : Int64
+  value + value
+end
+
+# The parameter is wider than what the caller holds, so the call widens
+# before it passes.
+def scaled(value : Int64) : Int64
+  value * 3
+end
+
+def answer : Int32
+  big = 2000000000.to_i64
+  wide = doubled(big)
+  # 4_000_000_000 does not fit in a signed 32-bit integer: read as one
+  # it is negative.
+  fits = (wide // 100000000).to_i32
+
+  # Built rather than written, because the literal does not fit in the
+  # `Int64` the lexer would give it. The top bit ends up set, and the
+  # two spellings of `>` disagree about what that means.
+  huge = 9000000000000000000.to_u64 + 9000000000000000000.to_u64
+  small = 7.to_u64
+  bigger = huge > small ? 5 : 0
+
+  # Unsigned division, which is not signed division of the same bits.
+  shared = (huge // 2000000000000000000.to_u64).to_i32
+
+  # A narrowing and a widening back. An unsigned byte widens with
+  # zeroes: read with its sign, 200 would be negative. Divided rather
+  # than added, because the two answers differ by 256 and the exit
+  # status keeps only what is under that.
+  cut = 200.to_u8.to_i32 // 7
+
+  fits + bigger + shared + cut + scaled(2).to_i32
+end
+
+__iyi_exit(answer)

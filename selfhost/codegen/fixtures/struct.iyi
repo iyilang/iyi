@@ -1,0 +1,40 @@
+# The sixth codegen fixture: a type with fields.
+#
+# Every value so far was an `i32` in a register or a slot. A struct is
+# the first value with a shape: `Point` is two `i32`s side by side, and
+# the methods on it read them by offset rather than by name.
+#
+# A struct is passed by value, which is what makes this a first slice
+# with a type in it: there is nothing to allocate and nothing to collect.
+# `new` fills the fields and answers the value, and a method on it takes
+# the value as its first argument. A class, which is a reference, is the
+# slice after this one and needs a heap.
+
+require "../../../src/iyi/prelude"
+
+struct Point
+  def initialize(@x : Int32, @y : Int32)
+  end
+
+  def x : Int32
+    @x
+  end
+
+  def y : Int32
+    @y
+  end
+
+  # A method reaching another on the same value, with no receiver
+  # written.
+  def spread : Int32
+    x - y
+  end
+end
+
+def answer : Int32
+  near = Point.new(3, 1)
+  far = Point.new(30, 8)
+  near.spread + far.y
+end
+
+__iyi_exit(answer)

@@ -1,0 +1,4 @@
+def halve(count : Int32)
+  a, b = divide(count, 2) if count % 2 == 1
+  c, d = divide(count, 3) unless count > 9
+end

@@ -1,0 +1,7 @@
+annotation Route
+end
+
+@[Route]
+def index : Int32
+  1
+end

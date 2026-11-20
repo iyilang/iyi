@@ -1,0 +1,33 @@
+# The fourteenth codegen fixture: a method the prelude writes a body
+# for, compiled rather than known about.
+#
+# Everything the slices before this reached in the prelude was a
+# declaration the compiler answers without reading: `+` is an `add`,
+# `to_i64` is a `sext`, `String#bytesize` is a word out of a header.
+# `Int32#abs` is none of those. `number.iyi` writes it as
+# `self < 0 ? -self : self`, in iyi, and the only way to call it is to
+# compile it.
+#
+# It arrived here as a refusal. A call this slice could not answer used
+# to come back as a literal zero, so `(0 - 9).abs` emitted
+# `add i32 %t, 0`, assembled, ran, and exited 0 where the compiler exits
+# 39. Every fixture passed throughout, because none of them reached one.
+#
+# `even?` and `odd?` are here for their names as much as their bodies: a
+# `?` cannot appear in a bare LLVM symbol, so every symbol this emits is
+# a quoted one.
+#
+# No `require`. That is the point rather than an omission: an iyi
+# program is compiled against the prelude without asking, and a fixture
+# that required its own copy would be a program the compiler refuses,
+# because a file may not redefine a method the prelude has.
+
+def answer : Int32
+  total = 0
+  total = total + (0 - 9).abs
+  total = total + (4.even? ? 10 : 0)
+  total = total + (7.odd? ? 20 : 0)
+  total
+end
+
+__iyi_exit(answer)

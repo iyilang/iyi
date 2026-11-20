@@ -1,0 +1,5 @@
+class P
+  def go : String
+    "\u{A0}\u{AD}\u{300}\u{200B}\u{2028}\u{3000}\u{E000}\u{F3B2}\u{F8FF}\u{F0000}\u{FFFE}\u{FEFF}\u{1F600}\u{378}\u{2003}\u{E9}\u{85}\u{9F}\u{A9}\u{2014}\u{E0A0}\u{10FFFD}"
+  end
+end

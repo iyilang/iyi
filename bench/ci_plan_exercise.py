@@ -23,6 +23,7 @@ comment, a message, a `$( )` in quotes, a loop, a function and Python's
 strings, reads and subprocesses.
 """
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -69,6 +70,22 @@ reason, jobs = planned("bench/std_base64_exercise.sh")
 check("an exercise no step names is still run, through the siblings",
       "std-siblings" in jobs and reason.startswith("only bench files changed"), f"{reason}: {sorted(jobs)}")
 
+port_jobs = {"port", "port-darwin", "port-windows"}
+for path in (
+    "selfhost/parser/parser.iyi",
+    "selfhost/semantic/infer_diff.sh",
+    "selfhost/codegen/emit.iyi",
+    "selfhost/codegen/fixtures/print.iyi",
+):
+    reason, jobs = planned(path)
+    check(f"{path} selects the port on all three hosts",
+          port_jobs <= jobs and "build" in jobs,
+          f"{reason}: {sorted(jobs)}")
+
+reason, jobs = planned("src/iyi/array.iyi")
+check("an unrelated source change does not select the frontend port jobs",
+      not (port_jobs & jobs), f"{reason}: {sorted(jobs)}")
+
 reason, jobs = planned("bench/panics.sh")
 check("a gate a job runs selects that job", "windows-native" in jobs, f"{reason}: {sorted(jobs)}")
 
@@ -104,6 +121,27 @@ print("== a workflow and a bench directory of this exercise's own")
 spec = importlib.util.spec_from_file_location("ci_plan_under_test", PLANNER)
 planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
+actual_jobs = planner.parse_jobs((ROOT / ".github" / "workflows" / "iyi.yml").read_text(encoding="utf-8"))
+# Execute the workflow command instead of treating a selected job as a pass.
+result_lines = actual_jobs["result"]["text"].splitlines()
+command_lines = []
+for line in result_lines[result_lines.index("        run: |") + 1:]:
+    if line.strip() and not line.startswith("          "):
+        break
+    command_lines.append(line[10:])
+result_command = "\n".join(command_lines)
+for what, selected, verdicts, passes in [
+    ("selected success permits unselected skips", ["probe"], {"probe": "success", "unused": "skipped"}, True),
+    ("a selected skip blocks the result", ["probe"], {"probe": "skipped"}, False),
+    ("a missing selected job blocks the result", ["probe"], {}, False),
+    ("a skipped plan blocks the result", ["probe"], {"plan": "skipped", "probe": "success"}, False),
+    ("an intentionally empty plan can pass", [], {"unused": "skipped"}, True),
+]:
+    results = {name: {"result": verdict} for name, verdict in verdicts.items()}
+    results.setdefault("plan", {"result": "success"})["outputs"] = {"jobs": json.dumps(selected)}
+    ran = subprocess.run(["bash", "-c", result_command], cwd=ROOT, capture_output=True, text=True,
+                         env={**os.environ, "RESULTS": json.dumps(results)})
+    check(what, (ran.returncode == 0) == passes, ran.stdout + ran.stderr)
 if not hasattr(planner, "Reach"):
     check("the planner reads what runs what (`Reach`)", False, f"{PLANNER} has no Reach")
 else:

@@ -1,0 +1,30 @@
+# The first codegen slice: integer arithmetic, locals, and calls.
+#
+# Every value here is an `Int32`, which is what makes a first slice
+# possible at all: no boxing, no strings, no allocation, no runtime. What
+# the program is worth is its exit status, and that is the one observable
+# both the current compiler and the port can produce, so it is what the
+# gate compares.
+#
+# `__iyi_exit` is the prelude's own exit, so the fixture is an ordinary
+# iyi program the current compiler builds and runs.
+
+require "../../../src/iyi/prelude"
+
+def double(n : Int32) : Int32
+  n * 2
+end
+
+def add(a : Int32, b : Int32) : Int32
+  a + b
+end
+
+# A local carries what it was assigned, and a call reaches a method
+# declared above it.
+def total : Int32
+  x = double(3)
+  y = add(x, 4)
+  y + 1
+end
+
+__iyi_exit(total)

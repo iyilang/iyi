@@ -1,0 +1,6 @@
+def run(a : Int32) : Int32
+  b = begin
+    a + 1
+  end
+  b
+end

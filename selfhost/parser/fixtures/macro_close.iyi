@@ -1,0 +1,7 @@
+class Macros
+  def go : Int32
+    {{ 1 + 2 }}
+    {{ [{a: 1}].size }}
+    2
+  end
+end

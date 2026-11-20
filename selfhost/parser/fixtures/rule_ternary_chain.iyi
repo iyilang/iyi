@@ -1,0 +1,5 @@
+def pick(a : Int32, b : Int32) : Int32
+  x = a > b ? a : b > 0 ? b : 0
+  a > b ? a : b > 0 ? b : 0
+  x
+end

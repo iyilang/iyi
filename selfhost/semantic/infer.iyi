@@ -1,0 +1,569 @@
+module main
+
+# The inference slice, written in iyi: the return type of every method a
+# call actually reaches.
+#
+# This is deliberately smaller than "the semantic pass". It carries what a
+# method body is made of: literal types, typed arguments, local assignment
+# and lookup, the value of an expression list, the union of two branches,
+# every way out of a body rather than only the last one, and a loop, which
+# is not a value. It carries what a body reaches: another method in the
+# file, a constructor, a method on a value whose type is known, and a
+# method on this type named without a receiver.
+#
+# The oracle asks the current compiler the same question after `semantic`,
+# and the fixtures include methods nothing calls, so collecting
+# declarations cannot pass for call-driven inference.
+#
+# What it does not carry is a method on a value the prelude owns: the pass
+# runs on one file with no prelude, so `1 + 1` has no `+` to reach, and no
+# fixture writes one.
+
+import std/file::{File}
+import macro/expand::{expand_with, host_flags}
+import parser/parser::{Parser, Node, RequireNode, SelfNode, NumNode, StrNode, BoolNode, NilNode, NopNode, CharNode, VarNode, IvarNode, AssignNode, ExprsNode, IfNode, UnlessNode, WhileNode, ReturnNode, DefNode, ArgNode, PathNode, CallNode, ClassDefNode, ModuleDefNode, VisibilityModifierNode}
+
+pub class TypeEnv
+  @names : Array(String)
+  @types : Array(String)
+  # Every `return` the body reaches. A method answers what its last
+  # expression is worth *and* what it returned on the way out.
+  @returns : Array(String)
+  # The type whose method this is, so a call with no receiver written
+  # inside it is looked up there before the program.
+  @owner : String
+
+  def initialize(@owner : String)
+    @names = [] of String
+    @types = [] of String
+    @returns = [] of String
+  end
+
+  def owner : String
+    @owner
+  end
+
+  def set(name : String, type : String) : Nil
+    index = @names.index(name)
+    if index.nil?
+      @names << name
+      @types << type
+    else
+      @types[index] = type
+    end
+  end
+
+  def get(name : String) : String
+    index = @names.index(name)
+    return "Unknown" if index.nil?
+    @types[index]
+  end
+
+  def add_return(type : String) : Nil
+    @returns << type
+  end
+
+  def returns : Array(String)
+    @returns
+  end
+
+  def each_field(& : String, String -> Nil) : Nil
+    index = 0
+    while index < @names.size
+      yield @names[index], @types[index]
+      index = index + 1
+    end
+  end
+end
+
+# One type the file declares: the methods written on it and the fields
+# its `initialize` brings into being.
+pub class TypeInfo
+  getter path : String
+  getter defs : Array(DefNode)
+  getter fields : TypeEnv
+  # Whether the fields have been read off `initialize` yet. Reading them
+  # means inferring a body, and that must not look like a call.
+  getter learned : Bool
+
+  def initialize(@path : String)
+    @defs = [] of DefNode
+    @fields = TypeEnv.new(@path)
+    @learned = false
+  end
+
+  def add(node : DefNode) : Nil
+    @defs << node
+  end
+
+  def learn : Nil
+    @learned = true
+  end
+
+  def method(name : String) : Array(DefNode)
+    hit = [] of DefNode
+    @defs.each { |node| hit << node if node.name == name && node.receiver != "self" }
+    hit
+  end
+
+  def knows?(name : String) : Bool
+    method(name).size > 0
+  end
+end
+
+# What the file declares, and what each method answers.
+#
+# A method is typed by what its body reaches, and a body can reach another
+# method. A method that reaches itself is typed by the way out that does
+# not: the recursive call contributes nothing, which is what `NoReturn` is
+# for and what the empty answer stands in for here.
+pub class Known
+  @defs : Array(DefNode)
+  @types : Array(TypeInfo)
+  @active : Array(String)
+  @rows : Array(String)
+  # A type's fields are read by inferring its `initialize`, and that
+  # reading is not a call. Rows are only recorded for what a call reached.
+  @recording : Bool
+  # The types a require brought. They are not this file's, so nothing
+  # about them is ever reported, and their methods are typed by what
+  # they declare: R-2 makes an exported method carry its return type, so
+  # `def to_i64 : Int64` is an answer without reading a body.
+  @library : Array(TypeInfo)
+
+  def initialize
+    @defs = [] of DefNode
+    @types = [] of TypeInfo
+    @active = [] of String
+    @rows = [] of String
+    @recording = true
+    @library = [] of TypeInfo
+  end
+
+  def library_named(path : String) : Array(TypeInfo)
+    hit = [] of TypeInfo
+    @library.each { |info| hit << info if info.path == path }
+    hit
+  end
+
+  def library?(path : String) : Bool
+    library_named(path).size > 0
+  end
+
+  # A required type reopened by a second file is one type, so the
+  # methods land on the entry that is already there.
+  def library_at(path : String) : TypeInfo
+    found = library_named(path)
+    return found[0] if found.size > 0
+    made = TypeInfo.new(path)
+    @library << made
+    made
+  end
+
+  def add(node : DefNode) : Nil
+    @defs << node
+  end
+
+  def add_type(info : TypeInfo) : Nil
+    @types << info
+  end
+
+  def rows : Array(String)
+    @rows
+  end
+
+  def type_named(path : String) : Array(TypeInfo)
+    hit = [] of TypeInfo
+    @types.each { |info| hit << info if info.path == path }
+    hit
+  end
+
+  def type?(path : String) : Bool
+    type_named(path).size > 0
+  end
+
+  def knows?(name : String) : Bool
+    held = false
+    @defs.each { |node| held = true if node.name == name && node.receiver != "self" }
+    held
+  end
+
+  def toplevel(name : String) : Array(DefNode)
+    hit = [] of DefNode
+    @defs.each { |node| hit << node if node.name == name && node.receiver != "self" }
+    hit
+  end
+
+  # The fields `initialize` brings into being. The parser writes
+  # `def initialize(@x : Int32)` as an argument named `x` and an
+  # assignment in the body, so the fields are read the same way for a
+  # constructor that declares them and one that assigns them itself.
+  def fields_of(info : TypeInfo) : TypeEnv
+    return info.fields if info.learned
+    info.learn
+    found = info.method("initialize")
+    return info.fields if found.size == 0
+    was = @recording
+    @recording = false
+    env = TypeEnv.new(info.path)
+    found[0].args.each do |arg|
+      case arg
+      when ArgNode then env.set(arg.name, restriction(arg))
+      end
+    end
+    learn_fields(found[0].body, env, info)
+    @recording = was
+    info.fields
+  end
+
+  # Only the assignments to a field, and only their types: a constructor
+  # is the one body read for something other than what it answers.
+  def learn_fields(nodes : Array(Node), env : TypeEnv, info : TypeInfo) : Nil
+    nodes.each do |node|
+      case node
+      when ExprsNode
+        learn_fields(node.items, env, info)
+      when VisibilityModifierNode
+        learn_fields(node.body, env, info)
+      when AssignNode
+        type = one(node.value, env, self)
+        if node.target.size > 0
+          target = node.target[0]
+          case target
+          when IvarNode then info.fields.set(target.name, type)
+          when VarNode  then env.set(target.name, type)
+          end
+        end
+      end
+    end
+  end
+
+  def record(row : String) : Nil
+    @rows << row if @recording
+  end
+
+  # The type a method answers, recorded as reached. `owner` is a type's
+  # path, or empty for a method of the program itself.
+  def type_of(owner : String, name : String) : String
+    key = "#{owner}##{name}"
+    return "" if @active.includes?(key)
+    found = owner == "" ? toplevel(name) : type_named(owner)[0].method(name)
+    return "Unknown" if found.size == 0
+    @active << key
+    env = TypeEnv.new(owner)
+    unless owner == ""
+      fields = fields_of(type_named(owner)[0])
+      fields.each_field { |field, type| env.set(field, type) }
+    end
+    found[0].args.each do |arg|
+      case arg
+      when ArgNode then env.set(arg.name, restriction(arg))
+      end
+    end
+    answer = one(found[0].body, env, self)
+    env.returns.each { |type| answer = union(answer, type) }
+    @active.delete(key)
+    record("#{owner == "" ? "<Program>" : owner}##{name}=#{answer}")
+    answer
+  end
+
+  # `Point.new(1, 2)` is worth a `Point`, and it reaches the `initialize`
+  # that the `new` the compiler writes calls.
+  def construct(path : String) : String
+    record("#{path}.class#new=#{path}")
+    type_of(path, "initialize") if type_named(path)[0].knows?("initialize")
+    path
+  end
+end
+
+pub def one(nodes : Array(Node), env : TypeEnv, program : Known) : String
+  return "Nil" if nodes.size == 0
+  infer(nodes[0], env, program)
+end
+
+# An empty side is a way out that answers nothing: `return` leaves the
+# method rather than producing a value, and a union with it is the other
+# side alone.
+pub def union(left : String, right : String) : String
+  return right if left == ""
+  return left if right == ""
+  return left if left == right
+  "(#{left} | #{right})"
+end
+
+# `1` is an `Int32` and `1.5` is a `Float64`. The lexer drops a literal's
+# suffix, so `1_i64` arrives here as `1` and no fixture writes one.
+pub def number_type(text : String) : String
+  text.index('.').nil? ? "Int32" : "Float64"
+end
+
+pub def path_of(nodes : Array(Node)) : String
+  return "" if nodes.size == 0
+  node = nodes[0]
+  case node
+  when PathNode then node.names
+  else               ""
+  end
+end
+
+pub def infer(node : Node, env : TypeEnv, program : Known) : String
+  case node
+  when NumNode
+    number_type(node.value)
+  when StrNode
+    "String"
+  when CharNode
+    "Char"
+  when BoolNode
+    "Bool"
+  when NilNode
+    "Nil"
+  when NopNode
+    "Nil"
+  when VarNode
+    env.get(node.name)
+  when IvarNode
+    env.get(node.name)
+  when AssignNode
+    type = one(node.value, env, program)
+    if node.target.size > 0
+      target = node.target[0]
+      case target
+      when VarNode  then env.set(target.name, type)
+      when IvarNode then env.set(target.name, type)
+      end
+    end
+    type
+  when ExprsNode
+    # The body is worth what its last expression is worth, and one that
+    # ends in a `return` is worth nothing: the way out is the answer.
+    type = "Nil"
+    node.items.each { |item| type = infer(item, env, program) }
+    type
+  when VisibilityModifierNode
+    one(node.body, env, program)
+  when IfNode
+    union(one(node.then_branch, env, program), one(node.else_branch, env, program))
+  when UnlessNode
+    union(one(node.then_branch, env, program), one(node.else_branch, env, program))
+  when WhileNode
+    # A loop is not a value. It runs until its condition is false and the
+    # method answers whatever follows it.
+    "Nil"
+  when ReturnNode
+    env.add_return(one(node.value, env, program))
+    ""
+  when CallNode
+    call_type(node, env, program)
+  else
+    "Unknown"
+  end
+end
+
+# What a call reaches. Four shapes, and the receiver decides which.
+pub def call_type(node : CallNode, env : TypeEnv, program : Known) : String
+  if node.recv.size == 0
+    # Written without a receiver inside a method, this is a call on the
+    # type that method belongs to before it is one on the program.
+    if env.owner != "" && program.type?(env.owner) &&
+       program.type_named(env.owner)[0].knows?(node.name)
+      return program.type_of(env.owner, node.name)
+    end
+    return program.knows?(node.name) ? program.type_of("", node.name) : "Unknown"
+  end
+
+  # `Point.new` names a type rather than a value.
+  named = path_of(node.recv)
+  if node.name == "new" && named != "" && program.type?(named)
+    return program.construct(named)
+  end
+
+  # Anything else is a method on a value, and the value's type is where
+  # it is looked up. A type this file declared is read; a type a require
+  # brought answers what its declaration says.
+  receiver = infer(node.recv[0], env, program)
+  if program.type?(receiver) && program.type_named(receiver)[0].knows?(node.name)
+    return program.type_of(receiver, node.name)
+  end
+  if program.library?(receiver)
+    return declared_type(program.library_named(receiver)[0], node, receiver, env, program)
+  end
+  "Unknown"
+end
+
+# What a required method answers, read off its declaration. R-2 makes an
+# exported method carry its return type, so the prelude is read rather
+# than inferred: `def to_i64 : Int64` is an `Int64` and
+# `def +(other : Int32) : self` is whatever the receiver is.
+pub def declared_type(info : TypeInfo, node : CallNode, receiver : String,
+                      env : TypeEnv, program : Known) : String
+  found = overload(info, node, env, program)
+  return "Unknown" if found.size == 0
+  return "Unknown" if found[0].ret.size == 0
+  written = found[0].ret[0]
+  case written
+  # `def +(other : Int32) : self` answers whatever the receiver is, and
+  # `self` in a type position is its own node rather than a path.
+  when SelfNode then receiver
+  when PathNode then written.names
+  else               "Unknown"
+  end
+end
+
+# The overload a call reaches: the one whose first parameter is the type
+# of the first argument, and the first declared otherwise. `1 + 1` and
+# `1 + 1.5` are the same name and two answers.
+pub def overload(info : TypeInfo, node : CallNode, env : TypeEnv,
+                 program : Known) : Array(DefNode)
+  found = info.method(node.name)
+  return found if found.size < 2 || node.args.size == 0
+  given = infer(node.args[0], env, program)
+  answer = found
+  found.each do |candidate|
+    next if candidate.args.size == 0
+    first = candidate.args[0]
+    case first
+    when ArgNode
+      answer = [candidate] of DefNode if restriction(first) == given
+    end
+  end
+  answer
+end
+
+pub def restriction(arg : ArgNode) : String
+  return "Unknown" if arg.restriction.size == 0
+  node = arg.restriction[0]
+  case node
+  when PathNode then node.names
+  else               "Unknown"
+  end
+end
+
+# The declarations a file holds, at the top or inside a module or a type.
+pub def collect(nodes : Array(Node), scope : String, program : Known,
+                holder : TypeInfo?) : Nil
+  nodes.each do |node|
+    case node
+    when ExprsNode
+      collect(node.items, scope, program, holder)
+    when VisibilityModifierNode
+      collect(node.body, scope, program, holder)
+    when DefNode
+      holder.nil? ? program.add(node) : holder.add(node)
+    when ModuleDefNode
+      collect(node.body, join(scope, path_of(node.name)), program, nil)
+    when ClassDefNode
+      info = TypeInfo.new(join(scope, path_of(node.name)))
+      program.add_type(info)
+      collect(node.body, info.path, program, info)
+    end
+  end
+end
+
+pub def join(scope : String, name : String) : String
+  return name if scope == ""
+  "#{scope}::#{name}"
+end
+
+# The calls the file makes at its top level, which is what starts the
+# inference: a method no call reaches is never typed.
+pub def entry_calls(nodes : Array(Node), found : Array(CallNode)) : Nil
+  nodes.each do |node|
+    case node
+    when ExprsNode then entry_calls(node.items, found)
+    when CallNode  then found << node
+    end
+  end
+end
+
+# The directory a path is in, which is what a relative require is
+# relative to. Written here rather than shared with the declaration
+# pass: that file is a driver as well as a module, and importing it
+# would run it.
+pub def directory_of(path : String) : String
+  cut = -1
+  index = 0
+  while index < path.bytesize
+    cut = index if path[index] == '/'
+    index = index + 1
+  end
+  return "" if cut < 0
+  path[0, cut]
+end
+
+pub def resolve_require(written : String, from : String) : String
+  return "" if written == ""
+  path = written.starts_with?("./") ? written[2, written.bytesize - 2] : written
+  base = from == "" ? path : "#{from}/#{path}"
+  candidate = "#{base}.iyi"
+  File.exists?(candidate) ? candidate : ""
+end
+
+# What a require brought, registered as library. Each file is expanded
+# first, because the prelude writes its integer tower with a macro: the
+# conversions `1.to_i64` reaches are a `{% for %}` over a map, and a
+# pass that read the source rather than the expansion would find no
+# method of that name at all.
+pub def load_requires(source : String, from : String, seen : Array(String),
+                      program : Known) : Nil
+  parser = Parser.new(source)
+  parser.parse
+  parser.requires.each do |node|
+    case node
+    when RequireNode
+      found = resolve_require(node.path, from)
+      next if found == "" || seen.includes?(found)
+      seen << found
+      written = File.read(found)
+      load_requires(written, directory_of(found), seen, program)
+      absorb(expand_with("", written, host_flags), program)
+    end
+  end
+end
+
+# The declarations of a required file. Only types and their methods: a
+# body is never read, so nothing here is inferred and nothing is
+# reported.
+pub def absorb(source : String, program : Known) : Nil
+  tree = Parser.new(source).parse
+  absorb_nodes([tree] of Node, "", program, nil)
+end
+
+pub def absorb_nodes(nodes : Array(Node), scope : String, program : Known,
+                     holder : TypeInfo?) : Nil
+  nodes.each do |node|
+    case node
+    when ExprsNode
+      absorb_nodes(node.items, scope, program, holder)
+    when VisibilityModifierNode
+      absorb_nodes(node.body, scope, program, holder)
+    when DefNode
+      holder.add(node) unless holder.nil?
+    when ModuleDefNode
+      absorb_nodes(node.body, join(scope, path_of(node.name)), program, nil)
+    when ClassDefNode
+      info = program.library_at(join(scope, path_of(node.name)))
+      absorb_nodes(node.body, info.path, program, info)
+    end
+  end
+end
+
+path = Program.args[0]?
+if path.nil?
+  puts "usage: infer <file.iyi>"
+else
+  source = File.read(path)
+  tree = Parser.new(source).parse
+  program = Known.new
+  # What the file requires is read first and never reported: a row is
+  # this file's method or it is nothing.
+  load_requires(source, directory_of(path), [] of String, program)
+  collect([tree] of Node, "", program, nil)
+
+  calls = [] of CallNode
+  entry_calls([tree] of Node, calls)
+  env = TypeEnv.new("")
+  calls.each { |call| call_type(call, env, program) }
+
+  puts program.rows.uniq.sorted.join(" ")
+end

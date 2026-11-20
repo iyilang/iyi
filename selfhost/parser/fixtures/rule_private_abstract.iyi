@@ -1,0 +1,7 @@
+abstract class Shape
+  private abstract def area : Float64
+
+  def label : String
+    "shape"
+  end
+end

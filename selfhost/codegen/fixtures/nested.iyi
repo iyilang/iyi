@@ -1,0 +1,23 @@
+# The second codegen fixture: precedence, and a call inside one.
+#
+# The first fixture was one operation per line, which an emitter that
+# read the source left to right would also get right. This one is not:
+# `triple(a) + b * 2 - 1` is three operators of two precedences with a
+# call in front of them, and what decides the answer is the shape the
+# parser built rather than the order the characters were written in.
+
+require "../../../src/iyi/prelude"
+
+def triple(n : Int32) : Int32
+  n * 3
+end
+
+def combine(a : Int32, b : Int32) : Int32
+  triple(a) + b * 2 - 1
+end
+
+def value : Int32
+  combine(3, 5) - 4
+end
+
+__iyi_exit(value)

@@ -187,13 +187,14 @@
   leave the recorder gone for the rest of the build. The macro's command
   was then never told to it, a record was written, and the next build was
   "up to date" over a command it never ran again: bench/up_to_date.sh's
-  `sys` case failed in two darwin CI jobs in a row (job 136048431367), and
-  5 runs of 150 on Linux, in the first build or the second. A recorder now
-  steps aside for the fiber that asks and no other. On Linux the case then
-  passed 200 runs of 200, two at a time; the compiler spec that pauses two
-  fibers while a third reads fails against the old recorder every time.
-  The gate now checks the first build's note too, and prints both builds'
-  output when it fails.
+  `sys` case failed in two darwin CI jobs in a row (job 136048431367), 7
+  runs of 90 on the project's Mac (release compiler, the CI job's
+  environment, three at a time) and 5 of 150 on Linux, in the first build
+  or the second. A recorder now steps aside for the fiber that asks and no
+  other. The case then passed 240 runs of 240 on the Mac and 200 of 200 on
+  Linux; the compiler spec that pauses two fibers while a third reads
+  fails against the old recorder every time. The gate now checks the
+  first build's note too, and prints both builds' output when it fails.
 
 - **A build no longer links objects another build's cache rotation has
   just deleted.** Every compile ends by removing all but the ten most

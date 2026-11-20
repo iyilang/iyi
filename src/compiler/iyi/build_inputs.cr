@@ -68,8 +68,9 @@ module Iyi
     # it found, could put back the other's nil: the rest of the build was
     # recorded by nobody, a macro's command went untold, the record was
     # written, and the next build was "up to date" over a command it never
-    # ran again (bench/up_to_date.sh's `sys`, job 136048431367; 5 runs of
-    # 150 on Linux, in the first build or the second).
+    # ran again (bench/up_to_date.sh's `sys`, job 136048431367; 7 runs of 90
+    # on the project's Mac, 5 of 150 on Linux, in the first build or the
+    # second).
     def self.paused(&)
       fiber = Fiber.current
       held = fiber.iyi_inputs_paused?

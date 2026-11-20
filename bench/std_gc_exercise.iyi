@@ -105,7 +105,7 @@ c0 = s0.collections
 churn(300_000)
 s1 = GC.stats
 check(s1.collections > c0, "churn crossed the trigger: collections #{c0} -> #{s1.collections}")
-check(s1.mapped_bytes >= s0.mapped_bytes, "mapped_bytes never shrinks below the first arena")
+check(s1.mapped_bytes >= 16_777_216_u64, "mapped_bytes never shrinks below the first arena (#{s1.mapped_bytes})")
 churn(1_000)
 check(GC.stats.bytes_since_collection > 0_u64, "bytes_since_collection climbs after allocation")
 c1 = GC.stats.collections

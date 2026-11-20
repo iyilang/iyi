@@ -1368,58 +1368,68 @@ if [ "$code" -ne 1 ] || ! grep -Fxq "freed: a free outside the allocator's brack
 fi
 printf '  exits 1 at "%s"\n' "freed: a free outside the allocator's bracket put a dropped list back"
 
-# The idle pool's step fills the pool before it asks anything of it, and
-# the pool grows one worker at a time, each started by the last to find a
-# task (`IyiWorkers.grow`). On Windows 11 with 12 logical processors (the
-# user's machine) a start took about a millisecond, and the twelve spinning
-# tasks could all arrive time-sliced on fewer threads, each preempted in
-# its 5 to 10 ms quantum, and end with 7 to 11 workers launched: "11 of 12
-# workers waiting" in 13 of 60 runs. Held open here: a copy of the runtime
-# in which every worker's thread waits 50 ms before its first look, so the
-# pool takes 50 ms a worker to fill and the tasks have all arrived on the
-# first long before. The step holds on that copy - its tasks spin until the
-# pool has launched every worker - and the step as it was, its tasks
-# spinning only until all have arrived and nothing counting the workers
-# launched after them, exits 1 on it at the count of workers waiting. The
-# program runs that step on three cores or more, which step 1's answers
-# say.
+# Hold each worker after the first until every task has arrived. The healthy
+# program releases the workers while waiting for the launched count; the
+# arrived-only mutant waits only for task arrival and releases after the group.
 if ! grep -q '^idle pool: with' answers.txt; then
   echo "FAIL: the idle pool step did not run: it needs three cores, and this host has fewer"
   exit 1
 fi
-step "the idle pool fills on a runtime whose workers each start 50 ms late"
+step "the idle pool fills when workers wait for task arrival"
 mkdir -p latestart/iyi
 cp "$REPO"/src/iyi/*.iyi latestart/iyi/
-awk '/^  def self\.work : Nil$/ { print; getline; print
-    print "      late = __iyi_monotonic_ns + 50000000_i64"
-    print "      while __iyi_monotonic_ns < late"
-    print "        IyiThread.spin_pause"
+awk '/^  def self\.work : Nil$/ {
+    print "  @[UnsafeReach(\"copy-only: idle start rendezvous\")]"
+    print "  @@idle_starts : Int64 = 0_i64"
+    print "  @[UnsafeReach(\"copy-only: idle start rendezvous\")]"
+    print "  @@idle_release : Int64 = 0_i64"
+    print "  def self.release_starts : Nil"
+    print "    word(pointerof(@@idle_release)).value.set(1_i64)"
+    print "  end"
+    print "  def self.hold_start : Nil"
+    print "    return if word(pointerof(@@idle_starts)).value.add(1_i64) == 0_i64"
+    print "    limit = IyiMark.now_ns &+ 10000000000_u64"
+    print "    while word(pointerof(@@idle_release)).value.get == 0_i64"
+    print "      if IyiMark.now_ns >= limit"
+    print "        message = \"FAIL: idle pool: a worker start was held past ten seconds\\n\""
+    print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "        __iyi_exit(76)"
     print "      end"
-    found = 1; next }
-  { print } END { if (!found) exit 3 }' \
-  "$REPO/src/iyi/concurrency.iyi" > latestart/iyi/concurrency.iyi || { echo "the worker's start this step delays is not in the runtime any more"; exit 1; }
-if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o latestart-run > build-latestart.log 2>&1; then
+    print "      IyiThread.park_if_requested"
+    print "      IyiThread.spin_pause"
+    print "    end"
+    print "    message = \"idle pool: a worker start waited until task arrival\\n\""
+    print "    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "  end"
+    print; found++; next
+  }
+  /^    \{% if !flag\?\(:gc_none\) && !flag\?\(:gc_boehm\) %\}$/ && found == 1 && !inserted {
+    print; print "      hold_start"; inserted++; next
+  }
+  { print } END { if (found != 1 || inserted != 1) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > latestart/iyi/concurrency.iyi || { echo "the worker start is missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release -Didle_force "$REPO/bench/concurrent_mark.iyi" -o latestart-run > build-latestart.log 2>&1; then
   cat build-latestart.log; exit 1
 fi
 timeout -k 5 300 ./latestart-run > latestart.txt 2>&1
 code=$?
-if [ "$code" -ne 0 ] || ! grep -q "^idle pool: with" latestart.txt; then
+if [ "$code" -ne 0 ] || ! grep -q "^idle pool: with" latestart.txt || ! grep -Fxq "idle pool: a worker start waited until task arrival" latestart.txt; then
   echo "the idle pool step did not hold on the late-start runtime (exit $code):"; tail -3 latestart.txt; exit 1
 fi
 echo "  $(grep -m1 '^idle pool: with' latestart.txt)"
 
 step "failure proof: an idle pool step whose tasks wait only for each other is caught on that runtime"
-awk '$0 == "          while (Busy.arrived.value.get < cores || IyiWorkers.launched < cores.to_i32) && IyiMark.now_ns < until_ns" {
-    print "          while Busy.arrived.value.get < cores && IyiMark.now_ns < until_ns"; found++; next }
-  $0 == "    launched = IyiWorkers.launched" || /^    fail\("idle pool: the pool launched .*\) if launched < cores\.to_i32$/ { found++; next }
-  { print } END { if (found != 3) exit 3 }' \
-  "$REPO/bench/concurrent_mark.iyi" > arrived_only.iyi || { echo "the wait this proof shortens, or the count of workers launched it removes, is not in bench/concurrent_mark.iyi any more"; exit 1; }
-if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release arrived_only.iyi -o arrived-only > build-arrived.log 2>&1; then
+awk '$0 == "            break unless arrived < cores || IyiWorkers.launched < cores.to_i32" {
+    print "            break unless arrived < cores"; changed++; next }
+  /^    fail\("idle pool: the pool launched .*\) if launched < cores\.to_i32$/ { removed++; next }
+  { print } END { if (changed != 1 || removed != 1) exit 3 }' \
+  "$REPO/bench/concurrent_mark.iyi" > arrived_only.iyi || { echo "the idle wait or launched check is missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release -Didle_force arrived_only.iyi -o arrived-only > build-arrived.log 2>&1; then
   cat build-arrived.log; exit 1
 fi
 timeout -k 5 300 ./arrived-only > arrived.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: idle pool: [0-9]+ of [0-9]+ workers waiting after five seconds$" arrived.txt; then
+if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: idle pool: [12] of [0-9]+ workers waiting, and every worker the pool launched is one of them$" arrived.txt; then
   echo "the idle pool check did not fire (exit $code):"; tail -3 arrived.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' arrived.txt)"
@@ -1467,7 +1477,7 @@ cp uncalled/iyi/*.iyi unstarted/iyi/
 awk 'prev == "    return false unless work_waiting?" && $0 == "    wake_one" { found = 1; prev = $0; next }
   { prev = $0; print } END { if (!found) exit 3 }' \
   uncalled/iyi/concurrency.iyi > unstarted/iyi/concurrency.iyi || { echo "the turn's start this proof removes is not in the runtime any more"; exit 1; }
-if ! IYI_PATH="$WORK/unstarted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o unstarted-run > build-unstarted.log 2>&1; then
+if ! IYI_PATH="$WORK/unstarted${PSEP}$REPO/src" "$IYI" build --release -Dunstarted_clock "$REPO/bench/concurrent_mark.iyi" -o unstarted-run > build-unstarted.log 2>&1; then
   cat build-unstarted.log; exit 1
 fi
 timeout -k 5 300 ./unstarted-run > unstarted.txt 2>&1

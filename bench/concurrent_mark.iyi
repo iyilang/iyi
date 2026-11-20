@@ -673,13 +673,29 @@
         g.spawn(unit: :new) do
           Busy.arrived.value.add(1_u64)
           until_ns = IyiMark.now_ns + 10000000000_u64
-          while (Busy.arrived.value.get < cores || IyiWorkers.launched < cores.to_i32) && IyiMark.now_ns < until_ns
+          while true
+            arrived = Busy.arrived.value.get
+            break unless arrived < cores || IyiWorkers.launched < cores.to_i32
+            if IyiMark.now_ns >= until_ns
+              {% if flag?(:unstarted_clock) %}
+                break
+              {% else %}
+                print "FAIL: idle pool: tasks did not arrive and workers did not launch within ten seconds\n"
+                __iyi_exit(76)
+              {% end %}
+            end
+            {% if flag?(:idle_force) %}
+              IyiWorkers.release_starts if arrived >= cores
+            {% end %}
             IyiThread.spin_pause
           end
           0
         end
       end
     end
+    {% if flag?(:idle_force) %}
+      IyiWorkers.release_starts
+    {% end %}
     # A pool still short of a worker once its tasks have ended is the
     # runtime's finding, and is named as one: no task waits any more, so
     # nothing starts the rest, and the count below could only read the
@@ -690,18 +706,21 @@
     # never started a tenth (`IyiWorkers.turn_wanted?` has the cause). With
     # that fixed, the pool filled within 56 ms in each of 150 release runs
     # beside 20 busy loops there (median 18), where one run in 150 had
-    # stopped at nine. The tasks still wait ten seconds before the step
-    # names a pool that stopped growing, so a slow machine is not read as
-    # one.
+    # stopped at nine. The task and wait deadlines name a stalled setup;
+    # neither releases a task or decides whether the pool grew.
     launched = IyiWorkers.launched
     fail("idle pool: the pool launched #{launched} of #{cores.to_i64} workers while #{cores.to_i64} tasks spun up to ten seconds for them") if launched < cores.to_i32
     deadline = IyiMark.now_ns + 5000000000_u64
     # A spin, not a sleep: this thread asleep would be counted waiting.
-    while IyiScheduler.waiting_threads < cores && IyiMark.now_ns < deadline
+    while IyiScheduler.waiting_threads < launched.to_u64 && IyiMark.now_ns < deadline
       IyiThread.yield_cpu
     end
     waiting = IyiScheduler.waiting_threads
-    fail("idle pool: #{waiting.to_i64} of #{cores.to_i64} workers waiting after five seconds") if waiting < cores
+    if waiting < launched.to_u64
+      print "FAIL: idle pool: the launched workers did not all reach their wait within five seconds\n"
+      __iyi_exit(76)
+    end
+    fail("idle pool: #{waiting.to_i64} of #{cores.to_i64} workers waiting, and every worker the pool launched is one of them") if waiting < cores
     threads = IyiThread.program_threads
     IyiMark.auto = false
     chain = build_chain(11_u64)

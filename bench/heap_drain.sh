@@ -197,8 +197,20 @@ copy() {
     status=1
     return
   fi
+  if [ -n "${EXPECT_FIXED:-}" ] && ! { [ "$(grep -c '^FAIL: ' "$dir/run.out")" -eq 1 ] && grep -Fxq -- "$EXPECT_FIXED" "$dir/run.out"; }; then
+    echo "  $label: missed: the fixed verdict was not present"
+    sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
+    status=1
+    return
+  fi
+  if [ "$want" = 86 ] && ! { [ -n "${EXPECT_ERR:-}" ] && grep -Fxq -- "$EXPECT_ERR" "$dir/run.err"; }; then
+    echo "  $label: missed: the intended verifier report was not present"
+    sed -n '1,6p' "$dir/run.err" | sed 's/^/    /'
+    status=1
+    return
+  fi
   if [ "$want" = 86 ]; then
-    echo "  $label: caught, $(grep -m1 -A1 '^iyi: heap_verify: partition' "$dir/run.err" | tail -1 | sed 's/^ *//')"
+    echo "  $label: caught, $EXPECT_ERR"
   else
     echo "  $label: caught, $(grep -m1 '^FAIL: ' "$dir/run.out")"
   fi
@@ -508,8 +520,8 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   EXPECT='^FAIL: drain: no parked run was taken again from a drained list$' copy "a partition takes drained runs" c1 1 \
     "$(subst 'def self\.partition_take' 'drained = pop_listed\(index, PC_DRAIN\)' 'drained = 0_u64')"
   EXPECT='^FAIL: drain: the global sweep put no parked run back on a drain list$' copy "the global sweep lists a parked run again" c2 1 \
-    '/def self\.sweep_partition_slice/ { armed = 1 } armed && /IyiHeap\.list_drained\(index, arena, cursor, n\)/ { found++; next } armed && /IyiHeap\.note_drained/ { found++; next } armed && /^  end$/ { armed = 0 } { print } END { if (found != 2) exit 3 }'
-  copy "a taken run's objects published" c3 86 \
+    '/def self\.sweep_partition_slice/ { armed = 1 } armed && /IyiHeap\.list_drained\(index, arena, cursor, n\)/ { relists++; next } armed && /IyiHeap\.note_drained/ { counts++; next } armed && /^  end$/ { armed = 0 } { print } END { if (relists != 1 || counts != 1) exit 3 }'
+  EXPECT_ERR='  a slot names a LOCAL chunk its local mark left unmarked, about to be freed' copy "a taken run's objects published" c3 86 \
     "$(subst 'def self\.adopt_drained' 'write8\(own, OWN_PUB\)' 'write8(own, 0_u64)')" "-Dheap_partitions -Dheap_verify" 8 24 4
   EXPECT='^FAIL: idle: pooled runs still hold their pages 3500 ms after the last round$' copy "an idle worker wakes for the warm pool" c4 1 \
     "$(subst 'def self\.idle_wait_ms' 'elsif pool_warm\?' 'elsif false')" "-Dheap_partitions --release -Dwarm_force"
@@ -521,14 +533,14 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   # partition's local sweep could pass `quiet_class` into an arena whose
   # frees are still landing on its return stack (`IyiMark.sweep_one_
   # helper`, prelude.iyi). The release put above the walk.
-  COPY_FILE=prelude.iyi copy "a helper holds its claim to its walk's end" c7 86 \
+  EXPECT_ERR='  a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it' COPY_FILE=prelude.iyi copy "a helper holds its claim to its walk's end" c7 86 \
     '/def self\.sweep_one_helper : Bool/ { armed = 1 } armed && /^          batch = sweep_slice\(arena, SWEEP_SPAN\)$/ { print "          IyiHeap.class_lock(index)"; print "          release_claim(arena, epoch)"; print "          IyiHeap.class_unlock(index)"; print; armed = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
     "-Dheap_partitions -Dheap_verify" claim
   # The arena directory's bounds (TmacRss, heap22 fu): every word below
   # the directory's end read in it again, its pages go resident; not
   # widened by a large mapping, an object of one outside the arenas'
   # slots is nobody's.
-  EXPECT='^FAIL: dir: a slot outside every arena.s bounds is answered as inside$' copy "the directory unread outside the bounds" c8 1 \
+  EXPECT_FIXED="FAIL: dir: a slot outside every arena's bounds is answered as inside" copy "the directory unread outside the bounds" c8 1 \
     "$(subst 'def self\.dir_outside\?' 'slot < @@dir_low \|\| slot > @@dir_high' 'slot >= DIR_SLOTS')" \
     "-Dheap_partitions --release" dir
   hinted "a large mapping widens the bounds" c9 1 "$C9_DELETE"

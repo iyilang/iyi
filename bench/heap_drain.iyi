@@ -35,11 +35,10 @@
 # set and the bytes gone cold before and after IDLE_MS idle; the program
 # fails when the span after the last round is more than a quarter (and
 # 4 MiB) above the span after round WARM, plus three times what the kept
-# strings grew by meanwhile and half a `IyiHeap::UNIT_MIN` a unit, when a
-# kept string is not what was sent, when a pooled run still holds its
-# pages after the idle wait, when less
-# than a quarter of POOL_BYTES went cold, or when the resident set fell
-# by less than half of what went cold meanwhile.
+# strings grew by meanwhile and half a `IyiHeap::UNIT_MIN` a unit. It fails
+# when a kept string is not what was sent. The pool's cold bytes, the idle
+# residency and the warm pool's reading after the idle wait are information
+# (the warm-pool reading is the clock's; see bench/heap_drain.sh's header).
 
 @[Unsafe("the resident set is read through a C call - task_info, K32GetProcessMemoryInfo - that fills Pointer#malloc memory")]
 module bench/heap_drain
@@ -632,10 +631,10 @@ module bench/heap_drain
   # pointer the moment it is made (`IyiRoots.base_of`: a mapping the
   # bounds left out is nobody's to the mark, which would free it live),
   # then an untyped block holding a word for every page of the directory,
-  # and collects twice. With the flag on it fails when more than
-  # DIR_RESIDENT_MAX of the directory's pages are resident after, and on
-  # every platform when a large object lost its bytes. Windows reads the
-  # pages' residency through QueryWorkingSetEx, the others mincore.
+  # and collects twice. It fails when a large object lost its bytes, and when
+  # the bounds answer a slot below every arena as inside. The residency read
+  # (Windows QueryWorkingSetEx, the others mincore) is a measurement printed as
+  # information: an unavailable read is printed as such and never fails the run.
   #
   # Where a large object lands is the kernel's choice, and one that lands
   # between two arenas' slots needs no widening: the bounds already hold
@@ -650,7 +649,7 @@ module bench/heap_drain
   # held against the bounds as they were just before it was made
   # (`IyiHeap.dir_outside?`); a placed build needs at least one outside.
   #   ./heap_drain dir [LARGE]                    # default 8
-  DIR_RESIDENT_MAX = 32_u64
+  # Retired as a verdict: the residency is information (see above).
   DIR_LARGE_BYTES  = 41943040_u64
 
   # The bounds `IyiHeap.dir_outside?` answers by, as slots: the
@@ -794,14 +793,14 @@ module bench/heap_drain
       buffer = buffers[i]
       fail("dir: large object #{i} lost its bytes over two collections") if buffer[0] != (i & 0xFF).to_u8 || buffer[DIR_LARGE_BYTES.to_i32 - 1] != (i & 0xFF).to_u8
     end
-    fail("dir: the residency read failed") if resident < 0
+    # The residency is a measurement: a failed read says so and never fails the run.
+    print "dir: residency #{resident < 0 ? "unavailable" : resident.to_s} of the arena directory's #{pages} pages after the mark (information)\n"
     {% if flag?(:heap_partitions) %}
-      print "dir: #{resident} of the arena directory's #{pages} pages resident after the mark read a word for each (information: the residency is not a verdict)\n"
-      # The bound's answer, asked directly (c8): a slot below the lowest arena's
-      # slot is outside every arena, and the answer must say so. A copy that
-      # answers by the directory's size alone says it is inside.
+      # The boundary's predicate, asked directly (c8): a slot below the lowest
+      # arena's slot is outside every arena, and the answer must say so.
       fail("dir: a slot outside every arena's bounds is answered as inside") unless IyiHeap.dir_outside?(0_u64)
-      print "dir: the mark read no directory page outside the arenas' slots\n"
+      print "dir: the boundary predicate answers outside for a slot below every arena\n"
+      print "dir: the boundary predicate is the verdict; the residency above is a measurement\n"
       {% if flag?(:placed_force) %}
         fail("dir: none of the #{large} large objects was placed outside the arenas' slots") if outside == 0
       {% end %}

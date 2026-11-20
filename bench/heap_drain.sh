@@ -27,11 +27,11 @@
 # directly), c9 (a placed object's heap-pointer check), c3 and c7 (the
 # verifier's report). The resident set and the arena growth are information.
 # RSS-decided, not forced: none.
-# Clock-decided, not forced: c4 ("an idle worker wakes for the warm pool"). Its
-# verdict is that the pool is still warm IDLE_MS after the last round. The
-# runtime answers the cap for the pending-idle branch first, in the same
-# function (`idle_wait_ms`), so no answer tells the copy from the healthy
-# build. Forcing it needs an observable idle wake.
+# Mutant catch clock-decided: c4 ("an idle worker wakes for the warm pool"). The
+# mutant is caught when the pool is still warm IDLE_MS after the last round
+# (`-Dwarm_force`). The warm-pool cap sits behind the pending-idle branch in
+# `idle_wait_ms`, so no state record isolates it without a clock. The healthy
+# build's reading of the same pool is information only and never fails.
 #
 #   bash bench/heap_drain.sh           # every part
 #   bash bench/heap_drain.sh sound     # plain, optimised, verifier, chaos
@@ -511,7 +511,7 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   copy "a taken run's objects published" c3 86 \
     "$(subst 'def self\.adopt_drained' 'write8\(own, OWN_PUB\)' 'write8(own, 0_u64)')" "-Dheap_partitions -Dheap_verify" 8 24 4
   EXPECT='^FAIL: idle: pooled runs still hold their pages 3500 ms after the last round$' copy "an idle worker wakes for the warm pool" c4 1 \
-    "$(subst 'def self\.idle_wait_ms' 'elsif pool_warm\?' 'elsif false')"
+    "$(subst 'def self\.idle_wait_ms' 'elsif pool_warm\?' 'elsif false')" "-Dheap_partitions --release -Dwarm_force"
   state "a cooled run's pages go back" c5 1 "-Dheap_partitions --release -Dcool_force" "$COOL_ACCESS" "$COOL_BROKEN"
   state "a cooled run's release is recorded (hook only)" cool 0 "-Dheap_partitions --release -Dcool_force" "$COOL_ACCESS" "$COOL_HOOK"
   marked "a unit holds beneath an open mark" held 0

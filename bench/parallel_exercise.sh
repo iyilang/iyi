@@ -1630,9 +1630,11 @@ END { if (n_defs != 1 || n_list != 1 || n_disp != 1 || n_mut != 1) exit 3 }"
       echo "  a close on Windows ends the posted read, whose completion any thread takes off the port: there is nothing to post" ;;
     *)
       CLOSE_COMMON='/^  def self.wait_posix\(/ { inwait = 1; n_wait++ }
-inwait && /^    fiber.list_on\(st.object_id\) if moving$/ { print; print "    force_close_registered(fd)"; inwait = 0; n_reg++; next }
+inwait && /^  end$/ { inwait = 0 }
+inwait && /^    fiber.list_on\(st.object_id\) if moving$/ { print; print "    force_close_registered(fd)"; n_reg++; next }
 /^  def self.wake_closed\(fd : Int32\) : Nil$/ { inclose = 1; n_close++ }
-inclose && /^          other.post_mail$/ { print; print "          force_close_posted(fd)"; inclose = 0; n_post++; next }'
+inclose && /^  end$/ { inclose = 0 }
+inclose && /^          other.post_mail$/ { print; print "          force_close_posted(fd)"; n_post++; next }'
       CLOSE_BUG='inclose && /^      return unless @@shared$/ { print "      force_close_missing(fd)"; print "      return"; n_guard++; next }'
       CLOSE_HOOK='inclose && /^      return unless @@shared$/ { n_guard++ }'
       CLOSE_DEFS='/^  def self.reschedule : Nil$/ {

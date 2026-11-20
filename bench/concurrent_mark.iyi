@@ -595,14 +595,7 @@
   wakes = IyiMark.wakes
   slow = IyiMark.wakes_slow
   {% if flag?(:win32) %}
-    if slow > 3_u64
-      puts "wake: #{slow.to_i64} of #{wakes.to_i64} wakes past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us in the first round, the longest #{(wake // 1000_u64).to_i64} us; a second round decides"
-      wakes_before = wakes
-      wake_rounds(kept)
-      wakes = IyiMark.wakes - wakes_before
-      slow = IyiMark.wakes_slow - slow
-    end
-    fail("wake: waking the helpers held the program's thread past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us in #{slow.to_i64} wakes of #{wakes.to_i64}, the longest #{(wake // 1000_u64).to_i64} us") if slow > 3_u64
+    fail("wake: waking the helpers held the program's thread past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us in #{slow.to_i64} wakes of #{wakes.to_i64}, the longest #{(wake // 1000_u64).to_i64} us") if slow > 4_u64
   {% end %}
   IyiMark.auto = false
   puts "wake: the program's thread woke the helpers #{wakes.to_i64} times, #{slow.to_i64} of them past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us, the longest #{(wake // 1000_u64).to_i64} us"

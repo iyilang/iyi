@@ -1218,6 +1218,8 @@ awk 'function forced() {
     print "      # Copy only (concurrent_mark: the first-collection proof): a helper waits here until the program releases it."
     print "      @[UnsafeReach(\"copy-only: the release word, set and read through its address\")]"
     print "      @@forced_ready : UInt64 = 0_u64"
+    print "      @[UnsafeReach(\"copy-only: the first collection is waiting for helper readiness\")]"
+    print "      @@forced_waiting : UInt64 = 0_u64"
     print ""
     print "      def self.release_ready : Nil"
     print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_ready).address).value.set(1_u64)"
@@ -1226,18 +1228,30 @@ awk 'function forced() {
     print "      def self.forced_ready? : Bool"
     print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_ready).address).value.get != 0_u64"
     print "      end"
+    print "      def self.note_ready_wait : Nil"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_waiting).address).value.set(1_u64)"
+    print "      end"
+    print ""
+    print "      def self.ready_waiting? : Bool"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_waiting).address).value.get != 0_u64"
+    print "      end"
+    print ""
     print ""
   }
-  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared = 1 }
-  declared && !hooked && /^        w = worker$/ {
+  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
+  declared == 1 && !hooked && /^        w = worker$/ {
     print
     print "        while !IyiMark.forced_ready?"
+    print "          if IyiMark.ready_waiting?"
+    print "            __iyi_write(2, \"FAIL: crowded: the first collection waited for a held helper\\n\".to_unsafe.as(Void*), 61_u64)"
+    print "            __iyi_exit(1)"
+    print "          end"
     print "          IyiThread.park_if_requested"
     print "          spin_pause"
     print "        end"
     print "        pool_word(512_u64).value.add(1_u64)"
     hooked = 1; next }
-  { print } END { if (!declared || !hooked) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held-helpers/iyi/prelude.iyi || { echo "the helper's entry this proof holds is not in the prelude any more"; exit 1; }
+  { print } END { if (declared != 1 || hooked != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held-helpers/iyi/prelude.iyi || { echo "the helper's entry this proof holds is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/held-helpers${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-held > build-held-helpers.log 2>&1; then
   cat build-held-helpers.log; exit 1
 fi

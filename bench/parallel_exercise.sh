@@ -24,6 +24,7 @@
 # Repeated healthy verdicts, not made deterministic here: best_ms combines
 # the best time and highest at-once count from three runs; tight compares
 # best-of-seven times; sockets and deep retry a no-move run up to five times.
+# best_ms also discards the timeout's exit status before parsing its output.
 #
 #   1. The exercise holds every property, plain and --release: parallel
 #      tasks start on the pool and on more than one worker, never on the

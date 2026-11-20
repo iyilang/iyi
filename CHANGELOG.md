@@ -178,6 +178,21 @@
 
 ### Fixed
 
+- **A build no longer links objects another build's cache rotation has
+  just deleted.** Every compile ends by removing all but the ten most
+  recently used directories in the cache. It asked whether a build held a
+  directory's `compiler.lock` and then deleted the directory holding
+  nothing. A build that took the directory in between kept the objects it
+  found and linked after they were gone: "clang: error: no such file or
+  directory: 'P-ointer40U-I-nt841.o0.o'" in a broken copy of the
+  std/secure_dns exercise on the project's Mac, while another CI job
+  sharing the cache built nine samples (job 135882647898). The rotation
+  now deletes holding the lock and removes the lock file last. A build
+  holds it from the moment codegen names the directory until the last
+  object has been read, `--emit-iyimod`'s copies included, and a build
+  that waited on the lock and finds it gone makes the directory again.
+  Any two builds sharing a cache could meet this, not only CI's.
+
 - **A pool short of workers no longer stays short while its tasks take
   turns.** The pool starts its workers one at a time: each new worker,
   finding a task with more waiting, calls for the next. A task halfway
@@ -615,6 +630,28 @@
   400 ms before its second read, and with the token taken 250 or 400 ms
   late, after an idle worker has collected B: 20 of 20 each on Linux,
   10 of 10 on Windows 11.
+
+- **`bench/rebuild_reuse.py` holds the cache's rotation against a build
+  in the same directory.** Step 7, on Linux and macOS, pads the fixture's
+  directory to 50,000 files and makes it the oldest of eleven. Another
+  build's rotation must hold `compiler.lock` while files are still going,
+  and the fixture built meanwhile must wait and link. Then the fixture is
+  built while the script holds the lock and removes the directory, lock
+  file and all: the build must make it again and compile every object.
+  Against the compiler before the fix the first half failed 5 runs of 5
+  on Linux and 3 of 3 on the project's Mac, and the second, run alone,
+  5 of 5 and 3 of 3. Step 6 now also counts what the rotation keeps, ten
+  builds, on every system that runs it, Windows included.
+
+- **The darwin jobs on the project's Mac each get the compilers' caches
+  to themselves.** Its three runners share one HOME, so they shared
+  ~/.cache/iyi: one job's rotation reached another's build (Fixed, above),
+  and the directory held 24,451 entries, 24,428 of them reach verdicts
+  (59.6 MB) that nothing ever deletes. They shared ~/.cache/crystal too,
+  which brew's Crystal rotates with no lock at all. `IYI_CACHE_DIR` and
+  `CRYSTAL_CACHE_DIR` are now under the job's `RUNNER_TEMP`, as fresh as
+  GitHub's VMs and gone with the job. That costs `make iyi` a cold
+  cache: 19 and 21 s on the idle Mac, against 13 and 14 s warm.
 
 - **`bench/spawn_eligible.iyi`'s `grows` keeps its four tasks wanting
   to run until the pool has answered them.** The pool starts one worker

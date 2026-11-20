@@ -108,7 +108,7 @@ module Iyi
 
     # Keeps the 10 most recently used directories in the cache,
     # and removes all others. Directories a compiler is working in right now
-    # are kept whatever their age (see `#directory_in_use?`).
+    # are kept whatever their age (see `#hold` and `#remove`).
     #
     # iyi: and a macro's `run` program counts only against the others, ten
     # of them kept apart (`MACRO_RUN`). It is the program's to build again
@@ -235,38 +235,74 @@ module Iyi
           .sort_by! { |dir| File.info?(dir).try(&.modification_time) || Time.unix(0) }
           .reverse!
           .skip(KEPT)
-          .each { |name| FileUtils.rm_rf(name) unless directory_in_use?(name) }
+          .each { |dir| remove(dir) }
       end
     end
 
-    # iyi: whether a compiler is working in this directory right now.
+    # The file a build's directory is held by (`#hold`), which a removal
+    # holds too (`#remove`).
+    LOCK = "compiler.lock"
+
+    # iyi: holds *dir* for a build, made if it is not there, and returns the
+    # locked file; the directory is the build's until the file is closed.
     #
     # The rule above is "keep the ten most recently used", and a directory's
     # last use is read from its modification time — which stops moving while a
-    # build sits in an optimization pass, writing nothing. Ten other builds in
-    # that window and this one's directory was deleted underneath it, from
-    # another process, mid-codegen. What came out was an object file that could
-    # not be written, or a linker asking for object files nobody had written.
-    #
-    # A build already says it is using its directory: it holds `compiler.lock`
-    # there for the whole of codegen and linking. This asks.
-    def directory_in_use?(dir : String) : Bool
-      lock = File.join(dir, "compiler.lock")
-      return false unless File.exists?(lock)
+    # build sits in an optimization pass, writing nothing, and does not move at
+    # all for a build that reuses every object. A build held its directory for
+    # its codegen and link only, and a removal asked whether anyone held it and
+    # then deleted it, holding nothing: a build that took its directory after
+    # the question and before the last file was gone kept the objects it found
+    # and linked after they were deleted. On the self-hosted Mac, three CI jobs
+    # sharing one cache, a broken copy of the std/secure_dns exercise stopped
+    # at "clang: error: no such file or directory: 'P-ointer40U-I-nt841.o0.o'"
+    # (job 135882647898) while another job built nine samples, each ending in
+    # a rotation. Now a removal holds the lock while it deletes, and the lock
+    # file goes last: a build that waited on it, or took it while the removal
+    # was about to delete it, finds the file it holds is no longer the one at
+    # `compiler.lock`, and makes the directory again.
+    def hold(dir : String) : File
+      lock = File.join(dir, LOCK)
+      loop do
+        Dir.mkdir_p(dir)
+        begin
+          file = File.open(lock, "a")
+        rescue File::NotFoundError
+          # Removed between the two lines above.
+          next
+        end
+        begin
+          file.flock_exclusive
+          return file if File.info?(lock).try(&.same_file?(file.info))
+        rescue ex
+          file.close
+          raise ex
+        end
+        file.close
+      end
+    end
 
-      File.open(lock, "r") do |file|
+    # iyi: removes a build's directory unless a build holds it (`#hold`),
+    # holding its lock until everything else in it is gone. Each entry on its
+    # own and its errors passed over: a build starting outside the hold
+    # forgets its up-to-date record (`UpToDate#forget`), and one entry gone first
+    # stopped the whole removal, 50,000 files left behind. A directory that
+    # cannot be locked is left for a later rotation, and one that cannot be
+    # emptied keeps what is left, which a build reads as it reads any cache:
+    # an object without its bitcode is compiled again.
+    private def remove(dir : String) : Nil
+      lock = File.join(dir, LOCK)
+      File.open(lock, "a") do |file|
         begin
           file.flock_exclusive(blocking: false)
         rescue IO::Error
-          return true
+          return
         end
-        file.flock_unlock
+        Dir.children(dir).each { |name| FileUtils.rm_rf(File.join(dir, name)) unless name == LOCK }
+        File.delete(lock)
       end
-      false
-    rescue File::Error
-      # The directory answered nothing we can read. Deleting it is the one
-      # thing that can lose someone else's work, so don't.
-      true
+      Dir.delete(dir)
+    rescue File::Error | IO::Error
     end
 
     # iyi: what the cache root holds besides build directories, which the

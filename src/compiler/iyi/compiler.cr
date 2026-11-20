@@ -484,10 +484,7 @@ module Iyi
       prepared = prepare_iyimods program
       keep_iyi_namespace program
 
-      units = codegen program, node, sources, output_filename unless @no_codegen
-
-      write_iyimods program, prepared, units
-      fill_bind_artifact program, units
+      units = codegen_held program, node, sources, output_filename, prepared
 
       @progress_tracker.clear
       print_macro_run_stats(program)
@@ -570,7 +567,7 @@ module Iyi
     # output goes; `new_program` sets the first and the adopt path sets neither,
     # which is visible now rather than merely true.
     OUTSIDE_PRELUDE_ANALYSIS = %w(
-      cleanup cross_compile dependency_printer dump_ll emit_base_filename
+      cache_hold cleanup cross_compile dependency_printer dump_ll emit_base_filename
       emit_bind emit_targets frame_pointers iyi_direct_link iyi_keep
       iyi_link_driver_only link_flags mattr mcmodel mcpu n_threads no_cleanup
       program progress_tracker single_module stderr target_machine verbose
@@ -667,10 +664,7 @@ module Iyi
       prepared = prepare_iyimods program
       keep_iyi_namespace program
 
-      units = codegen program, node, source, output_filename unless @no_codegen
-
-      write_iyimods program, prepared, units
-      fill_bind_artifact program, units
+      units = codegen_held program, node, source, output_filename, prepared
 
       @progress_tracker.clear
       print_macro_run_stats(program)
@@ -679,6 +673,21 @@ module Iyi
 
       Result.new program, node
     end
+
+    # iyi: codegen, and the artifacts that copy objects out of the build's
+    # cache directory after it, with the directory held from the moment
+    # codegen names it until the last of them is read (`CacheDir#hold`).
+    private def codegen_held(program, node, sources, output_filename, prepared)
+      units = codegen program, node, sources, output_filename unless @no_codegen
+      write_iyimods program, prepared, units
+      fill_bind_artifact program, units
+      units
+    ensure
+      @cache_hold.try &.close
+      @cache_hold = nil
+    end
+
+    @cache_hold : File?
 
     # iyi: describes a `.iyimod` per imported module (SPEC.md IV.1), when
     # `--emit-iyimod` asked for it. Everything but the object code, which does
@@ -3537,7 +3546,11 @@ module Iyi
         modules
       end
 
+      # Held from here until `codegen_held` has read the last object out of
+      # it: the reuse below decides on files that must still be there at the
+      # link (`CacheDir#hold`).
       output_dir = CacheDir.instance.directory_for(sources)
+      @cache_hold = CacheDir.instance.hold(output_dir)
 
       bc_flags_changed = bc_flags_changed? output_dir
       target_triple = target_machine.triple
@@ -3569,9 +3582,7 @@ module Iyi
       if @cross_compile
         cross_compile program, units, output_filename
       else
-        units = with_file_lock(output_dir) do
-          codegen program, units, output_filename, output_dir
-        end
+        units = codegen program, units, output_filename, output_dir
 
         {% if flag?(:darwin) %}
           run_dsymutil(output_filename) unless debug.none?
@@ -3585,14 +3596,6 @@ module Iyi
       CacheDir.instance.cleanup if @cleanup
 
       units
-    end
-
-    private def with_file_lock(output_dir, &)
-      File.open(File.join(output_dir, "compiler.lock"), "w") do |file|
-        file.flock_exclusive do
-          yield
-        end
-      end
     end
 
     private def run_dsymutil(filename)
@@ -4805,10 +4808,10 @@ module Iyi
           # iyi: or that it is short, or that it is not an object at all.
           # The line above guards the one corruption this cache was known
           # to produce; the cache produces others. A directory deleted
-          # mid-codegen by another build's cleanup (see
-          # `CacheDir#directory_in_use?`, which exists because that
-          # happened), a full disk, a killed process between `emit_obj` and
-          # `File.rename` - each leaves bytes that are not an object, and
+          # mid-codegen by another build's cleanup (see `CacheDir#hold`,
+          # which exists because that happened), a full disk, a killed
+          # process between `emit_obj` and `File.rename` - each leaves
+          # bytes that are not an object, and
           # every later build linked them: `ld.lld: error: <file>:1:
           # unknown directive: garbage`, forever, until somebody thought to
           # run `clear_cache`. A cache is a cache. Anything in it that we

@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 36,421 lines, of which 4,737 are the library held to the 4,738 ceiling (7,155 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 142,150 lines, none of it written in iyi |
+| compiler | 142,189 lines, none of it written in iyi |
 | artifact format | `.iyimod` v64, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1063,7 +1063,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 142,150 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 142,189 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 36,421-line own prelude + 128,413 in std |
 | Specs | 21,146 lines | 17,691 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -12202,6 +12202,18 @@ Named honestly, so nobody mistakes this draft for complete.
     kept here, and an equally old directory nobody holds is still evicted, so
     the cache still shrinks.
 
+    Reading it was not enough. The cleaner asked whether anyone held the lock
+    and then deleted the directory holding nothing, so a build that took the
+    lock in between kept the objects it had found and linked after they were
+    gone: "clang: error: no such file or directory: 'P-ointer40U-I-nt841.o0.o'"
+    on the project's Mac, three CI jobs sharing one cache (job 135882647898).
+    Now the cleaner holds the lock while it deletes and removes the lock file
+    last, and a build holds it from the moment codegen names the directory
+    until the last object has been read; a build that waited on the lock and
+    finds it no longer at `compiler.lock` makes the directory again
+    (`CacheDir#hold`, `#remove`; `bench/rebuild_reuse.py` step 7, which the
+    compiler before failed 5 runs of 5 on Linux and 3 of 3 on the Mac).
+
     Two smaller things came out of the same hour. A codegen thread that raised
     used to print its exception and leave the build to fail later at the link,
     so the failure is now kept and raised as what it is. And it is worth saying
@@ -14706,7 +14718,7 @@ For traceability, since several rules here rest on numbers rather than taste.
 | One file is one module, and it had to be said | a second `module a/b` header in a file was accepted: the file emitted one artifact under the first name carrying both modules' exports, and the second module had none (IV.6) |
 | A compiled artifact needs its own checksum | one flipped byte in a `.iyimod` built silently 7 times out of 10 and reached the linker the other 3; per-section checksums in format v19 refuse 12 of 12 and name the section (IV.2a) |
 | A prefix is not a parent directory | working in `/tmp/x/crystal` with a cache at `/tmp/x/crystal-cache`, every object file was written to `-cache/…`; the same "No such file or directory" the cleaner race produces, from a different cause (V.10) |
-| A build's cache directory can be deleted underneath it | the cleaner keeps the ten most recently modified directories and runs after every compile; removing one mid-codegen reproduces both failures, the single-threaded path included, and reading the `compiler.lock` the build already holds fixes it (V.10) |
+| A build's cache directory can be deleted underneath it | the cleaner keeps the ten most recently modified directories and runs after every compile; removing one mid-codegen reproduces both failures, the single-threaded path included, and reading the `compiler.lock` the build already holds fixed it until a build took the lock between the cleaner's look and its delete; the cleaner now deletes holding it (V.10) |
 | A module as the unit of compilation is worth 8x to 9x over Crystal | the same program, the same compiler binary, one module edited: 1.17 s as Crystal, 0.13 s as iyi, against `go build`'s 0.16 s, and 1.29 / 0.16 / 0.19 an hour earlier (IV.3a) |
 | The edit loop is where R-1 pays, and it pays 1.8x | one module edited in a 30-module, 7,207-line project: 0.13 s with artifacts, 0.23 s without, against `go build`'s 0.16 s for the same edit (IV.3a) |
 | The path/name mapping needed more than snake_case | `camelcase` drops an underscore before a digit, so `v_1` and `v1` both give `V1`; requiring each group to start with a letter removes that and three sibling collisions (IV.6 #6) |

@@ -4,11 +4,10 @@
 #   ./bin/iyi run --release bench/parallel_preempt_lib.iyi -- sort fib
 #   ./bin/iyi run --release bench/parallel_preempt_lib.iyi -- cost
 #
-# Each step makes one long call in a parallel task on a pool of one
-# worker and reports how long a short task waits. Scheduling latency is
-# information, not a healthy-build verdict. The libruntime sort, copy,
-# rehash and join mutants and the recursionoff mutant remain
-# timing-decided, not forced.
+# Each healthy step queues a short task before its long call starts, then
+# requires the short task to run on the same worker before that call ends.
+# Latency is data. The libruntime sort, copy, rehash and join mutants still
+# use timing-decided verdicts; recursionoff tests the ordering witness.
 #
 #   sort    `Array#sort_in_place` of 6,000,000 `Int64`s
 #   copy    `Slice#copy_from` of 192 MB, a million bytes a turn; long
@@ -129,13 +128,30 @@ import std/password::{Bcrypt}
   class Clock
     @started : Atomic(Int64)
     @took : Atomic(Int64)
+    @holding : Atomic(Int64)
+    @queued : Atomic(Int64)
+    @worker : Atomic(UInt64)
 
     def initialize
       @started = Atomic(Int64).new(0_i64)
       @took = Atomic(Int64).new(-1_i64)
+      @holding = Atomic(Int64).new(0_i64)
+      @queued = Atomic(Int64).new(0_i64)
+      @worker = Atomic(UInt64).new(0_u64)
     end
 
+    @[NoPreempt]
     def start : Int64
+      {% unless flag?(:preempt_timing_proof) %}
+        state = IyiScheduler.state
+        @worker.set(state.object_id)
+        @holding.set(1_i64)
+        started = __iyi_monotonic_ns
+        while @queued.get == 0_i64 || Pointer(Atomic(UInt64)).new(state.preempt_word).value.get == 0_u64
+          IyiThread.spin_pause
+          raise "library: progress hang waiting for the queued task and preemption word" if elapsed_ms(started) >= 20000_i64
+        end
+      {% end %}
       t = __iyi_monotonic_ns
       @started.set(t)
       t
@@ -151,6 +167,18 @@ import std/password::{Bcrypt}
 
     def took : Int64
       @took.get
+    end
+
+    def holding? : Bool
+      @holding.get != 0_i64
+    end
+
+    def queued : Nil
+      @queued.set(1_i64)
+    end
+
+    def worker : UInt64
+      @worker.get
     end
   end
 
@@ -223,6 +251,7 @@ import std/password::{Bcrypt}
   def step(name : String, quiet : Bool) : Nil
     clock = Clock.new
     waited = Atomic(Int64).new(-1_i64)
+    witness = Atomic(Int64).new(0_i64)
     {% if flag?(:heap_partitions) %}
       collected = Atomic(Int64).new(0_i64)
     {% end %}
@@ -233,23 +262,40 @@ import std/password::{Bcrypt}
         answer.set(run_op(name, clock))
         0
       end
-      until clock.started?
-        sleep(1)
-      end
-      sleep(20)
+      {% if flag?(:preempt_timing_proof) %}
+        until clock.started?
+          sleep(1)
+        end
+        sleep(20)
+      {% else %}
+        started = __iyi_monotonic_ns
+        until clock.holding?
+          sleep(1)
+          fail("#{name}: progress hang: the operation did not reach its checkpoint") if elapsed_ms(started) >= 20000_i64
+        end
+      {% end %}
       asked = __iyi_monotonic_ns
       {% if flag?(:heap_partitions) %}
         local_before = IyiHeap.local_ns
         g.spawn(unit: :new) do
+          {% unless flag?(:preempt_timing_proof) %}
+            witness.set(!clock.started? ? 3_i64 : (clock.took >= 0_i64 ? 2_i64 : (IyiScheduler.state.object_id != clock.worker ? 4_i64 : 1_i64)))
+          {% end %}
           waited.set(elapsed_ms(asked))
           collected.set(((IyiHeap.local_ns - local_before) // 1000000_u64).to_i64)
           0
         end
       {% else %}
         g.spawn(unit: :new) do
+          {% unless flag?(:preempt_timing_proof) %}
+            witness.set(!clock.started? ? 3_i64 : (clock.took >= 0_i64 ? 2_i64 : (IyiScheduler.state.object_id != clock.worker ? 4_i64 : 1_i64)))
+          {% end %}
           waited.set(elapsed_ms(asked))
           0
         end
+      {% end %}
+      {% unless flag?(:preempt_timing_proof) %}
+        clock.queued
       {% end %}
     end
     {% if flag?(:heap_partitions) %}
@@ -270,14 +316,20 @@ import std/password::{Bcrypt}
         end
       {% end %}
     {% end %}
+    {% unless flag?(:preempt_timing_proof) %}
+      fail("#{name}: the short task queued before the call ran only after the call ended") if witness.get == 2_i64
+      fail("#{name}: not armed: the short task did not run inside the target call on its worker") unless witness.get == 1_i64
+    {% end %}
     if name == "fib" && answer.get != 102334155_i64
       fail("fib: the preempted recursion answered #{answer.get}, and 40's is 102334155")
     end
     given = IyiWorkers.preempts - preempts
-    {% if flag?(:heap_partitions) %}
-      puts "#{name}: a short task spawned 20 ms into a #{clock.took} ms call started #{ms} ms later beyond #{local_ms} ms of local collections (#{given} preemptions)" unless quiet
+    {% if flag?(:preempt_timing_proof) %}
+      puts "#{name}: the short task started #{ms} ms after its spawn during the timing proof (#{given} preemptions)" unless quiet
+    {% elsif flag?(:heap_partitions) %}
+      puts "#{name}: a short task queued before a #{clock.took} ms call ran inside it #{ms} ms after its spawn beyond #{local_ms} ms of local collections (#{given} preemptions)" unless quiet
     {% else %}
-      puts "#{name}: a short task spawned 20 ms into a #{clock.took} ms call started #{ms} ms later (#{given} preemptions)" unless quiet
+      puts "#{name}: a short task queued before a #{clock.took} ms call ran inside it #{ms} ms after its spawn (#{given} preemptions)" unless quiet
     {% end %}
   end
 

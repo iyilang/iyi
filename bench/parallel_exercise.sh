@@ -17,8 +17,7 @@
 #   libruntime copy: finite work and latency decide; hold an in-copy poll point until a short task is queued.
 #   libruntime rehash: finite work and latency decide; hold an in-rehash poll point until a short task is queued.
 #   libruntime join: finite work and latency decide; hold an in-join poll point until a short task is queued.
-#   recursionoff: finite recursion and latency decide; hold a recursion poll point until a short task is queued.
-# The healthy library run reports latency without a pass/fail bound.
+# The healthy library run requires the queued short task before completion.
 # Conditional, not forced:
 #   closeshome: registration relies on a sleep and a wake-count check can mask the verdict; record registration and judge placement first.
 #   duplicate: another worker must steal the stale head; rendezvous at that head would force the witness.
@@ -466,8 +465,8 @@ fi
 # ── 2c. Preemption inside the library, std and recursion, twice ──────────
 # bench/parallel_preempt_lib.iyi: a sort, a copy, a hash's growth, a join,
 # a regex search, a JSON parse, a bcrypt hash and a recursion with no loop
-# each give their worker up to a short task within 100 ms. The release
-# build writes its IR too, for the audit after.
+# each give their worker up to a queued short task before completing. The
+# release build writes its IR too, for the audit after.
 for build in plain release; do
   step "preemption inside library calls and recursion, $build build"
   flag=""
@@ -2378,10 +2377,10 @@ else
 fi
 
 step "failure proof: a recursion marked @[NoPreempt] holds its worker for its whole computation"
-if ! "$IYI" build -Dpreempt_off -Dpreempt_timing_proof "$REPO/bench/parallel_preempt_lib.iyi" -o recursionoff-run > build-recursionoff.log 2>&1; then
+if ! "$IYI" build -Dpreempt_off "$REPO/bench/parallel_preempt_lib.iyi" -o recursionoff-run > build-recursionoff.log 2>&1; then
   echo "the @[NoPreempt] build failed:"; tail -20 build-recursionoff.log; exit 1
 fi
-verdict_caught recursionoff 'fib: the short task exceeded the wait bound' fib --workers=1
+verdict_caught recursionoff 'fib: the short task queued before the call ran only after the call ended' fib --workers=1
 
 step "failure proof: a scheduler the compiler takes for a library's checks, and the audit names where"
 [ -n "$PY" ] || { echo "no python here to read the IR with: the audit cannot run"; exit 1; }

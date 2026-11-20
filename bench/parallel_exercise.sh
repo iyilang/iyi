@@ -1726,20 +1726,48 @@ END { if (n_defs != 1 || n_dec != 1 || n_look != 1 || n_mut != 1) exit 3 }"
     caught nosteal 'woken from a worker, took' balance
 
     step "failure proof: tasks woken back onto the worker they parked on, as before tasks moved"
-    # The pinned mutant patches three sites of the runtime, each counted once (the awk exits 3 on any other count):
-    # the monitor's preemption store (concurrency.iyi look), the ready branch that sends a woken unit fiber to the
-    # shared queue (ready), and grab, which takes tasks from another worker's ring (so nothing steals them). The
-    # program's forced placement check (-Dpinned_force) asserts where the tasks resume, not the ratio; the control is
-    # the same runtime, unpatched, under the same flag.
-    PIN_BUG='/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++; next }
+    # Both copies record the target fiber's actual route in ready: 1 for
+    # the shared queue, or the parked worker's state for its inbox.
+    PIN_DEFS='/^  def self.ready\(fiber : IyiFiber, held : Bool = true\) : Nil$/ {
+  print "  @[UnsafeReach(\"set by the program, read by ready: atomics only\")]"
+  print "  @@forced_pin_target : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by ready, read by the program: atomics only\")]"
+  print "  @@forced_pin_route : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_pin_target(id : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_pin_target).address).value.set(id)"
+  print "  end"
+  print ""
+  print "  def self.force_pin_note(fiber : IyiFiber, to : UInt64) : Nil"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_pin_target).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_pin_route).address).value.compare_and_set(0_u64, to)"
+  print "  end"
+  print ""
+  print "  def self.force_pin_route : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_pin_route).address).value.get"
+  print "  end"
+  print ""
+  print
+  in_ready = 1
+  n_defs++
+  next
+}
+in_ready && /^  end$/ { in_ready = 0 }
+in_ready && /^          IyiWorkers\.push_shared\(fiber\)$/ { print "          force_pin_note(fiber, 1_u64)"; print; n_shared++; next }
+in_ready && /^    send_home\(home, fiber\)$/ { print "    force_pin_note(fiber, home.object_id)"; print; n_home++; next }'
+    PIN_HOOK="$PIN_DEFS"'
+{ print }
+END { if (n_defs != 1 || n_shared != 1 || n_home != 1) exit 3 }'
+    PIN_BUG="$PIN_DEFS"'
+/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++; next }
 /^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; n_ready++; next }
 /^  def self.grab\(victim/ { print; print "    return nil"; n_grab++; next }
 { print }
-END { if (n_pre != 1 || n_ready != 1 || n_grab != 1) exit 3 }'
+END { if (n_defs != 1 || n_shared != 1 || n_home != 1 || n_pre != 1 || n_ready != 1 || n_grab != 1) exit 3 }'
     broken pinned "$PIN_BUG" concurrency.iyi parallel_migrate -Dpinned_force
-    verdict_caught pinned "balance: every task woken from the main thread resumed on the worker it parked on" balance
-    broken pinned_hook '{ print } END { print "# the hook-only control: the same runtime, unpatched" }' concurrency.iyi parallel_migrate -Dpinned_force
-    verdict_held pinned_hook "balance: some task woken from the main thread resumed on another worker than it parked on" balance
+    verdict_caught pinned "balance: a task woken from the main thread was sent back to the worker it parked on" balance
+    broken pinned_hook "$PIN_HOOK" concurrency.iyi parallel_migrate -Dpinned_force
+    verdict_held pinned_hook "balance: a task woken from the main thread was queued for the pool and resumed on a spare while the worker it parked on was held" balance
 
 step "failure proof: a loop marked @[NoPreempt] holds its worker for its whole computation"
 if ! "$IYI" build --release -Dpreempt_off "$REPO/bench/parallel_preempt.iyi" -o preemptoff-run > build-preemptoff.log 2>&1; then

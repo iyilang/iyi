@@ -1091,83 +1091,80 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   {% if flag?(:pinned_force) %}
-  # The placement check for `pinned` (`-Dpinned_force`), in place of balance's timed rounds, which it does not judge.
-  # Holders keep every worker but one, so every task starts and parks on that worker; main checks, from each task's
-  # fiber state, that all of them are parked, and that they parked on one owner. Then the holders are let go and main
-  # wakes the tasks from the main thread. Each task records the worker it resumed on. The verdict is whether any task
-  # resumed on a worker other than the one it parked on: none in the pinned mutant (its wakes go to the parked worker,
-  # and nothing steals from that ring), some in the control. The ratio is printed as data, not judged.
-  def balance_placement(per_ms : Int64) : Nil
-    workers = IyiWorkers.count
-    tasks = workers * 6
+  # Hold the target's owner until a spare resumes it; record the route that
+  # ready selected before waiting for a resume.
+  def balance_placement : Nil
+    holders = IyiWorkers.count - 1
     gate = Channel(Int32).new
-    holders_go = Tally.new
     holding = Tally.new
-    arrived = Tally.new
-    moved = Tally.new
-    finished = Tally.new
-    fibers = [] of Armed
-    owners = [] of Owner
-    tasks.times do
-      fibers << Armed.new
-      owners << Owner.new
-    end
+    holders_go = Tally.new
+    owner_go = Tally.new
+    target = Armed.new
+    parked_on = Owner.new
+    owner = Owner.new
+    resumed_on = Owner.new
     group do |g|
-      (workers - 1).times do
+      holders.times do
         g.spawn(unit: :new) do
           holding.add(1_i64)
           hold_until_or_fail(holders_go, 1_i64, "balance: progress hang: a holder was not released")
           0
         end
       end
-      wait_or_fail(holding, (workers - 1).to_i64, "balance: progress hang: the holders did not start")
-      tasks.times do |i|
-        slot = fibers[i]
-        owner = owners[i]
-        g.spawn(unit: :new) do
-          slot.note_fiber(IyiScheduler.current.object_id)
-          owner.note_worker(IyiScheduler.state.object_id)
-          arrived.add(1_i64)
-          gate.receive
-          moved.add(1_i64) unless IyiScheduler.state.object_id == owner.worker
-          finished.add(1_i64)
-          0
-        end
+      wait_or_fail(holding, holders.to_i64, "balance: progress hang: the holders did not start")
+      g.spawn(unit: :new) do
+        parked_on.note_worker(IyiScheduler.state.object_id)
+        target.note_fiber(IyiScheduler.current.object_id)
+        gate.receive
+        resumed_on.note_worker(IyiScheduler.state.object_id)
+        0
       end
-      wait_or_fail(arrived, tasks.to_i64, "balance: progress hang: the tasks did not start")
-      fibers.each do |slot|
-        limit = __iyi_monotonic_ns + 10_000_000_000_i64
-        while !parked_on_channel?(slot.fiber)
-          sleep(1)
-          fail("balance: progress hang: a task did not park in 10000 ms") if __iyi_monotonic_ns > limit
-        end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while target.fiber == 0_u64 || !parked_on_channel?(target.fiber)
+        sleep(1)
+        fail("balance: progress hang: the target did not park in 10000 ms") if __iyi_monotonic_ns > limit
       end
-      parked_on = owners[0].worker
-      fail("balance: not armed: the tasks did not all park on one worker") unless owners.all? { |owner| owner.worker == parked_on }
+      g.spawn(unit: :new) do
+        owner.note_worker(IyiScheduler.state.object_id)
+        hold_until_or_fail(owner_go, 1_i64, "balance: progress hang: the owner was not released")
+        0
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while owner.worker == 0_u64
+        sleep(1)
+        fail("balance: progress hang: the owner did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      fail("balance: not armed: the owner did not start on the worker the target parked on") unless owner.worker == parked_on.worker
       holders_go.add(1_i64)
-      tasks.times { gate.send(1) }
-      wait_or_fail(finished, tasks.to_i64, "balance: progress hang: a task did not finish")
-      count = moved.count
-      puts "balance: #{count} of #{tasks} tasks woken from the main thread resumed on another worker than they parked on"
-      fail("balance: every task woken from the main thread resumed on the worker it parked on") if count == 0_i64
-      puts "balance: some task woken from the main thread resumed on another worker than it parked on"
+      IyiScheduler.force_pin_target(target.fiber)
+      gate.send(1)
+      route = IyiScheduler.force_pin_route
+      fail("balance: a task woken from the main thread was sent back to the worker it parked on") if route == parked_on.worker
+      fail("balance: a task woken from the main thread was routed neither to the pool's queue nor to the worker it parked on") unless route == 1_u64
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while resumed_on.worker == 0_u64
+        sleep(1)
+        fail("balance: progress hang: no spare resumed the target in 10000 ms while its worker was held") if __iyi_monotonic_ns > limit
+      end
+      elsewhere = resumed_on.worker != parked_on.worker
+      owner_go.add(1_i64)
+      fail("balance: not armed: the target resumed on the worker it parked on while the owner held it") unless elsewhere
+      puts "balance: a task woken from the main thread was queued for the pool and resumed on a spare while the worker it parked on was held"
     end
   end
   {% end %}
 
   def balance(watch : Int32) : Nil
     watched("balance", watch) do
-      # The walk's end is kept, or an optimised build drops the walk and the
-      # clock reads no time at all: a release build calibrated so spent
-      # 1,470 ms on each task's 25, and 17.5 s on the step.
-      t = __iyi_monotonic_ns
-      x = spin(50_000_000_i64, 3_u64)
-      ms = elapsed_ms(t)
-      ms = ms + 1_i64 if x == 0_u64
-      per_ms = 50_000_000_i64 // (ms > 0_i64 ? ms : 1_i64)
       {% if flag?(:pinned_force) %}
-        balance_placement(per_ms)
+        balance_placement
       {% else %}
+        # Calibrate only the timed benchmark, not the forced proof.
+        t = __iyi_monotonic_ns
+        x = spin(50_000_000_i64, 3_u64)
+        ms = elapsed_ms(t)
+        ms = ms + 1_i64 if x == 0_u64
+        per_ms = 50_000_000_i64 // (ms > 0_i64 ? ms : 1_i64)
         balance_round("from the main thread", false, per_ms)
         balance_round("from a worker", true, per_ms)
       {% end %}

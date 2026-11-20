@@ -40,8 +40,8 @@
 #     free. Those proofs exist only where their code is compiled (thread.iyi's
 #     start_helper and prelude.iyi's start_concurrent under win32), and the
 #     gate names that platform arm instead of passing silently.
-# Not forced by this gate (clock-decided, listed for the record): the late,
-# released, let_go_late and arrived_only proofs.
+# Not forced by this gate (clock-decided, listed for the record): the released,
+# let_go_late and arrived_only proofs.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -895,46 +895,85 @@ if [ "$code" -ne 1 ] || ! grep -Fxq "stored: an assist counted itself in before 
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'went below zero' stored.txt)"
 
-# Helper 0 reading the generation it waits past after `@@collecting`
-# falls, and held there until another thread's mark turns it, ten seconds
-# at most: helper 0 then waits past that mark, and with no other helper
-# nobody takes its permit. The collection stands still and the tasks
-# allocate; the runtime's overdue report, its bound cut to 20 ms here,
-# names the mark while they do, and the watchdog holds them at 512 MiB and
-# fails the run two seconds later - 12 runs of 12 here held to three,
-# four and twelve cores, each at the second collection, the reports at 20
-# to 22, 40 to 46 and 81 to 93 ms and in one run 182. The hold was 50 ms
-# at most, and on a four-core Windows runner no mark began inside it at
-# any of one run's 13 collections, the tasks held by the watchdog at 11 of
-# them, and the copy exited 0 (job 122392781393).
-step "failure proof: helper 0 waiting past the next mark leaves it to nobody"
-mkdir -p late/iyi
-cp "$REPO"/src/iyi/*.iyi late/iyi/
-awk '/^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ { early = 1; next }
+# Hold helper 0 after its first finish until a later concurrent mark opens.
+# The control keeps the early generation read; the mutant moves only that
+# read past the hold and is caught by the actual unclaimed-permit state.
+step "helper 0 retains its generation across a forced next mark"
+mkdir -p late-held/iyi late/iyi
+cp "$REPO"/src/iyi/*.iyi late-held/iyi/
+awk 'function forced() {
+    print "      @[UnsafeReach(\"copy-only: one late generation hold\")]"
+    print "      @@late_once : UInt64 = 0_u64"
+    print "      def self.late_hold : Bool"
+    print "        once = Pointer(Atomic(UInt64)).new(pointerof(@@late_once).address).value"
+    print "        return false unless once.compare_and_set(0_u64, 1_u64)[1]"
+    print "        if @@helpers != 1_u64"
+    print "          message = \"FAIL: late: the forced generation proof requires one helper\\n\""
+    print "          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "          __iyi_exit(76)"
+    print "        end"
+    print "        old = pool_word(POOL_GENERATION).value.get"
+    print "        limit = now_ns &+ 10000000000_u64"
+    print "        while pool_word(POOL_GENERATION).value.get == old || LibIyiGCTable.__iyi_marking == 0_u8 || pool_word(POOL_FINISH).value.get == 0_u64"
+    print "          if now_ns >= limit"
+    print "            message = \"FAIL: late: the next concurrent mark did not start within ten seconds\\n\""
+    print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "            __iyi_exit(76)"
+    print "          end"
+    print "          spin_pause"
+    print "        end"
+    print "        true"
+    print "      end"
+    print "      def self.late_check(generation : UInt64) : Nil"
+    print "        permits = pool_word(POOL_MARK_PERMITS).value.get"
+    print "        unless LibIyiGCTable.__iyi_marking != 0_u8 && pool_word(POOL_FINISH).value.get != 0_u64 && permits == 1_u64"
+    print "          message = \"FAIL: late: the next mark did not retain one unclaimed permit\\n\""
+    print "          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "          __iyi_exit(76)"
+    print "        end"
+    print "        if generation == pool_word(POOL_GENERATION).value.get && LibIyiGCTable.__iyi_marking != 0_u8 && pool_word(POOL_FINISH).value.get != 0_u64 && permits == 1_u64"
+    print "          message = \"FAIL: late: helper 0 would wait past the turn of a mark whose permit nobody has taken\\n\""
+    print "          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "          __iyi_exit(1)"
+    print "        end"
+    print "        message = \"late: helper 0 retained its earlier generation through the next mark\\n\""
+    print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "      end"
+  }
+  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
   /^            return generation$/ {
-    print "            held = pool_word(POOL_GENERATION).value.get"
-    print "            until_ns = now_ns + 10000000000_u64"
-    print "            while pool_word(POOL_GENERATION).value.get == held && now_ns < until_ns"
-    print "              spin_pause"
-    print "            end"
-    print "            return pool_word(POOL_GENERATION).value.get"
-    late = 1; next }
-  /^      MARK_OVERDUE_NS = 10000000000_u64$/ { print "      MARK_OVERDUE_NS = 20000000_u64"; due = 1; next }
-  { print } END { if (!early || !late || !due) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > late/iyi/prelude.iyi || { echo "the generation read or the overdue bound this proof moves is not in the prelude any more"; exit 1; }
+    print "            late_forced = late_hold"
+    print "            late_check(generation) if late_forced"
+    hook++
+  }
+  { print } END { if (declared != 1 || hook != 1) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > late-held/iyi/prelude.iyi || { echo "the late generation hook is missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/late-held${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o late-held-run > build-late-held.log 2>&1; then
+  cat build-late-held.log; exit 1
+fi
+timeout -k 5 120 ./late-held-run workers=12 seconds=2 helpers=1 > late-held.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -Fxq "mark stall: every collection finished beside 24 connections" late-held.txt || ! grep -Fxq "late: helper 0 retained its earlier generation through the next mark" late-held.txt; then
+  echo "the held late control did not complete (exit $code):"; tail -5 late-held.txt; exit 1
+fi
+echo "  held late control exits 0 after the next mark"
+step "failure proof: helper 0 reads the next mark generation too late"
+cp late-held/iyi/*.iyi late/iyi/
+awk '/^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ { early++; next }
+  /^            late_check\(generation\) if late_forced$/ {
+    print "            generation = pool_word(POOL_GENERATION).value.get"
+    moved++
+  }
+  { print } END { if (early != 1 || moved != 1) exit 3 }' late-held/iyi/prelude.iyi > late/iyi/prelude.iyi || { echo "the late generation read is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/late${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o late-run > build-late.log 2>&1; then
   cat build-late.log; exit 1
 fi
-timeout -k 5 120 ./late-run workers=12 seconds=10 helpers=1 stall_mib=512 stall_ms=2000 > late.txt 2>&1
+timeout -k 5 120 ./late-run workers=12 seconds=2 helpers=1 > late.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q "^FAIL: stall:" late.txt; then
-  echo "the watchdog did not catch the mark nobody drained (exit $code):"; tail -3 late.txt; exit 1
+if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: late: helper 0 would wait past the turn of a mark whose permit nobody has taken" late.txt; then
+  echo "the late generation was not caught (exit $code):"; tail -5 late.txt; exit 1
 fi
-if ! grep -q "the collector's mark has run .* permits left 1 and taken 0" late.txt; then
-  echo "the runtime did not say the mark nobody drained was overdue:"; tail -3 late.txt; exit 1
-fi
-printf '  says "%s"\n' "$(grep -m1 "the collector's mark has run" late.txt | cut -c1-150)"
-printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stall:' late.txt | cut -c1-150)"
+printf '  exits 1 at "%s"\n' "FAIL: late: helper 0 would wait past the turn of a mark whose permit nobody has taken"
 
 # `@@collecting` let go after helper 0 releases the threads, as it was,
 # and helper 0 held ten seconds before it lets it go: the window a

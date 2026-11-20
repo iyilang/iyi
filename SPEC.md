@@ -2259,7 +2259,10 @@ language already had:
   raise printed, until the stack ended - a closed reader (`prog | head`)
   turned every panic into a segfault. The panic path holds no stream
   object either: it is reachable before the globals one would use are
-  built. Then it unwinds by
+  built. And the report is one write, built on the stack first, so
+  threads that panic at once print whole lines, each message with its
+  own site under it (`bench/panics.sh` holds it with eight units and a
+  copy that writes piece by piece). Then it unwinds by
   registry: `defer` pushes its cleanup on the way in (the normalizer
   emits `__iyi_defer_push(-> { x })` and pops on every ordinary exit),
   so the panic path walks the current task's list innermost-first

@@ -178,6 +178,25 @@
 
 ### Fixed
 
+- **Threads that panic at once print whole lines.** `raise` wrote its
+  report in eight pieces - `iyi: panic: `, the message, its newline,
+  `  at `, the file, the colon, the line, its newline - each its own write
+  to descriptor 2, and threads that panicked together tore each other's
+  lines. Eight units each panicking 200 times, every panic caught at its
+  task's boundary, left 58 to 62 % of the error stream's lines on Linux
+  and 85 to 95 % on Windows 11 no whole line of any report (an empty one,
+  a line number alone, `unit 4 boom` with no `iyi: panic: `), and 73 to
+  98 % of the messages without their own site under them, in every run of
+  150 on Linux and 100 on Windows, to a pipe or a file. The pieces now
+  fill a 4 KiB room on the stack, written in one call when it is full and
+  after the last piece, which a pipe keeps whole up to that size; nothing
+  is allocated that was not before (`line.to_s`, for a site). After: 0 torn
+  lines and 0 messages without their site in 1,600 runs (5.1 million
+  lines) on Linux and 1,300 runs (4.2 million lines) on Windows 11, to a
+  pipe and a file, at 12 processors and held to 2. A report longer than
+  4 KiB goes out a room at a time. `std/debug`'s frame lines were each one
+  write already.
+
 - **A build that runs a command from a macro is no longer taken for up to
   date by the next.** The up-to-date check's recorder stepped aside for
   its own reads by taking itself from the whole process, while the
@@ -624,6 +643,20 @@
   run again, up to five times.
 
 ### Gates
+
+- **`bench/panics.sh` holds that threads that panic at once print whole
+  lines (step 14).** Eight units panic 400 times each; every line on the
+  error stream must be a whole message or a whole site, every message
+  with its own site under it, in three runs. The proof is a copy of the
+  prelude whose `__iyi_say` writes each piece as it is put, as the old
+  path did: it tore in every run, 300 at 12 processors and 300 held to 2
+  on Linux, 200 and 100 on Windows 11, and the gate needs it to tear in
+  one of three. darwin, which prints `backtrace_symbols_fd`'s frames after
+  each report, does not run the step. Step 13's frame lines are matched
+  from the start of their line now, where they were matched anywhere in
+  it because the report tore them: the old prelude failed the anchored
+  match in 18 runs of 100 on Linux and 28 of 50 on Windows 11, the fix in
+  0 of 300 and 0 of 200.
 
 - **`bench/sweep_exercise.sh`'s copy that counts the listed pages twice
   fails every run in which two adoptions meet in its window.** In master's

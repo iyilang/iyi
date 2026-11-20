@@ -12001,15 +12001,20 @@ class IyiPanic
 end
 
 # The panic's own write: descriptor 2 directly, no stream object, no error;
-# `print` raises when a pipe closes and `STDERR` may not exist yet.
-private def __iyi_say(text : String) : Nil
-  written = 0_i64
-  total = text.bytesize.to_i64
-  while written < total
-    n = __iyi_write(2, (text.to_unsafe + written).as(Void*), (total - written).to_u64)
+# `print` raises when a pipe closes and `STDERR` may not exist yet. Pieces
+# fill a room on the caller's stack, one write when full and at the *last*,
+# so threads panicking at once tear no line (bench/panics.sh, step 14).
+private def __iyi_say(room : UInt8*, fill : Int32, text : String, last = false, from = 0) : Int32
+  take = text.bytesize - from < 4096 - fill ? text.bytesize - from : 4096 - fill
+  (room + fill).copy_from(text.to_unsafe + from, take)
+  return fill + take unless last || fill + take == 4096
+  written = 0
+  while written < fill + take
+    n = __iyi_write(2, (room + written).as(Void*), (fill + take - written).to_u64)
     break if n <= 0_i64
     written = written + n
   end
+  from + take < text.bytesize ? __iyi_say(room, 0, text, last, from + take) : 0
 end
 
 {% if flag?(:win32) %}
@@ -12062,18 +12067,13 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
       IyiThread.lower_stopper
     {% end %}
   {% end %}
-  __iyi_say("iyi: panic: ")
-  __iyi_say(message)
-  __iyi_say("\n")
+  space = uninitialized StaticArray(UInt8, 4096)
+  room = pointerof(space).as(Pointer(UInt8))
+  fill = __iyi_say(room, __iyi_say(room, 0, "iyi: panic: "), message)
   # The site, when it is the program's; a panic the library raises names
   # the library's own line, which is not where the bug is, and prints none.
-  unless file.includes?("/src/iyi/") || file.includes?("/src/std/") || file.starts_with?("src/iyi/") || file.starts_with?("src/std/") || __iyi_native_library_site?(file)
-    __iyi_say("  at ")
-    __iyi_say(file)
-    __iyi_say(":")
-    __iyi_say(line.to_s)
-    __iyi_say("\n")
-  end
+  fill = __iyi_say(room, __iyi_say(room, __iyi_say(room, __iyi_say(room, fill, "\n  at "), file), ":"), line.to_s) unless file.includes?("/src/iyi/") || file.includes?("/src/std/") || file.starts_with?("src/iyi/") || file.starts_with?("src/std/") || __iyi_native_library_site?(file)
+  __iyi_say(room, fill, "\n", true)
   {% if flag?(:darwin) %}
     if r = IyiPanic.resolver
       r.call(count > 1 ? pointerof(callstack).as(Void**) + 1 : pointerof(callstack).as(Void**), count > 1 ? count - 1 : count)

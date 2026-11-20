@@ -1132,13 +1132,16 @@ $NOW_DEFS
 { print }
 $NOW_END"
 CANCEL_SUSPEND_BUG='/^  def self.suspend\(fiber : IyiFiber, nonce : UInt64\) : Nil$/ { insus = 1; n_suspend++ }
-insus && /^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; print "      force_window_decision(fiber, 1_u64)"; n_decision++; next }
-insus && /^    reschedule$/ { print "    force_window_decision(fiber, 2_u64)"; print; insus = 0; n_fall++; next }'
+insus && /^  end$/ { insus = 0 }
+insus && /^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; print "      force_window_decision(fiber, 1_u64)"; n_decision++; at_decision = NR; next }
+insus && /^    reschedule$/ { print "    force_window_decision(fiber, 2_u64)"; print; n_fall++; at_fall = NR; next }'
 CANCEL_SUSPEND_HOOK='/^  def self.suspend\(fiber : IyiFiber, nonce : UInt64\) : Nil$/ { insus = 1; n_suspend++ }
-insus && /^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print; print "      force_window_decision(fiber, 1_u64)"; n_decision++; next }
-insus && /^    reschedule$/ { print "    force_window_decision(fiber, 2_u64)"; print; insus = 0; n_fall++; next }'
+insus && /^  end$/ { insus = 0 }
+insus && /^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print; print "      force_window_decision(fiber, 1_u64)"; n_decision++; at_decision = NR; next }
+insus && /^    reschedule$/ { print "    force_window_decision(fiber, 2_u64)"; print; n_fall++; at_fall = NR; next }'
 CANCEL_PARK='/^  def self.park\(fiber : IyiFiber\) : UInt64$/ { inpark = 1; n_park++ }
-inpark && /^    fiber.wait_for_wake\(nonce\)$/ { print "    IyiScheduler.force_window_hold(fiber)"; print; inpark = 0; n_hold++; next }'
+inpark && /^  end$/ { inpark = 0 }
+inpark && /^    fiber.wait_for_wake\(nonce\)$/ { print "    IyiScheduler.force_window_hold(fiber)"; print; n_hold++; next }'
 CANCEL_DEFS='/^  def self.reschedule : Nil$/ {
   print "  @[UnsafeReach(\"copy-only cancellation rendezvous, accessed atomically\")]"
   print "  @@forced_window_target : UInt64 = 0_u64"
@@ -1178,7 +1181,7 @@ CANCEL_DEFS='/^  def self.reschedule : Nil$/ {
   n_defs++
   next
 }'
-CANCEL_END='END { if (n_suspend != 1 || n_decision != 1 || n_fall != 1 || n_park != 1 || n_hold != 1 || n_defs != 1) exit 3 }'
+CANCEL_END='END { if (n_suspend != 1 || n_decision != 1 || n_fall != 1 || at_decision >= at_fall || n_park != 1 || n_hold != 1 || n_defs != 1) exit 3 }'
 CANCEL_BUG="$CANCEL_SUSPEND_BUG
 $CANCEL_PARK
 $CANCEL_DEFS

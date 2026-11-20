@@ -77,13 +77,12 @@ end
 # its link and its slot written over the key that lives in it. A
 # collection called by hand sweeps the whole heap in its pause, so after
 # two of them that sweep has reached every chunk the round was handed.
-# Read only when its round ended, a key was dropped before that sweep in
-# most runs: on Linux a run handed out 9 to 25 chunks under slot 0's
-# entry, the read saw 0 to 2 of them, and the proof below caught its
-# defect in 14 runs of 40 (darwin 16 of 40, Windows 5 of 20) - five runs
-# on a darwin runner passed every time. Read again two collections on,
-# 40 of 40 on each, with 7 to 21 keys wrong in a run on Linux, 3 to 12 on
-# darwin and 5 to 24 on Windows.
+# Read only when its round ended, most of those keys were dropped before
+# that sweep reached their chunks: on Linux a run handed out 9 to 25 chunks
+# under slot 0's entry, and the read saw 0 to 2 of them. Read again two
+# collections on, the sweep has reached every one. An unforced run had 7
+# to 21 keys wrong that way on Linux, 3 to 12 on darwin and 5 to 24 on
+# Windows.
 def round_of(size : Int32) : Tuple(Int32, Int32)
   table = {} of String => Int32
   i = 0
@@ -121,6 +120,10 @@ end
 bodies_wrong = 0
 BODIES.each_with_index { |body, index| bodies_wrong = bodies_wrong + 1 if body.x != WANT[index] }
 
+{% if flag?(:straddler_force) %}
+puts "reuse integrity: the straddle check met #{IyiMark.straddle_met} released boundaries, armed #{IyiMark.straddle_armed} nonzero slots there, #{IyiMark.straddle_damaged} zeroed by a release"
+raise "reuse integrity: a release zeroed a listed chunk slot word at a released boundary, #{IyiMark.straddle_damaged} time(s)" if IyiMark.straddle_damaged != 0
+{% end %}
 if wrong != 0 || late != 0 || bodies_wrong != 0
   raise "reuse integrity: #{wrong} key(s) no longer spelled their value as their round ended and #{late} two collections later, and #{bodies_wrong} of #{BODIES.size} startup bodies changed, after #{rounds} rounds"
 end
@@ -174,17 +177,21 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
     end
   end
 
-  def fresh(count : Int32) : Int32
+  def fresh(count : Int32, kept : UInt64) : Tuple(Int32, Int32)
     held = [] of Chain
     stale = 0
+    on_kept = 0
     n = 0
     while n < count
       link = Chain.new(n.to_u64)
-      stale = stale + 1 unless link.next.nil?
+      unless link.next.nil?
+        stale = stale + 1
+        on_kept = on_kept + 1 if kept != 0_u64 && (link.object_id & (0_u64 &- IyiHeap::PAGE)) == kept
+      end
       held << link
       n = n + 1
     end
-    stale
+    {stale, on_kept}
   end
 
   # Up to three attempts at a run that takes released pages up: under
@@ -203,16 +210,27 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
       nil
     end
     filler.join
+    {% if flag?(:advice_force) %}
+      IyiHeap.advice_arm(IyiHeap.arena_chunk(IyiHeap.arena_of(Chain.new(0_u64).object_id)))
+    {% end %}
     IyiMark.collect
     IyiMark.collect
     IyiMark.settle
     reopened = IyiHeap.pages_reopened
     rewarmed = IyiHeap.pages_rewarmed
-    stale = fresh(born)
+    {% if flag?(:advice_force) %}
+    kept = IyiHeap.advice_kept
+    raise "reuse integrity: the copy kept no cold page intact, so the fresh objects proved nothing" if kept == 0_u64
+    {% else %}
+    kept = 0_u64
+    {% end %}
+    result = fresh(born, kept)
+    stale = result[0]
+    on_kept = result[1]
     # Cold pages the carve took up, as against warm ones: a warm page was
     # never released, and a check that met none proved nothing.
     cold = (IyiHeap.pages_reopened - reopened) - (IyiHeap.pages_rewarmed - rewarmed)
-    raise "reuse integrity: #{stale} of #{born} fresh objects read a field their constructor never set as something other than nil, on #{cold.to_i64} released pages taken up again" if stale != 0
+    raise "reuse integrity: #{stale} of #{born} fresh objects read a field their constructor never set as something other than nil, on #{cold.to_i64} released pages taken up again, #{on_kept} of them on the cold page the copy kept" if stale != 0
   end
   raise "reuse integrity: the carve took up no released page in #{attempts} attempts, so the fresh objects proved nothing" if cold == 0_u64
   puts "reuse integrity: #{born} fresh objects on #{cold.to_i64} released pages taken up again, every unset field nil"

@@ -35,7 +35,7 @@
 #   - marks beside twenty-four connections on twelve workers, with every helper
 #     and with one;
 #   - on Windows only: the helpers woken with the boost (the boost counted and
-#     the wake check); the helper cap beside a busy program; the pool's waiting
+#     wake timings reported); the helper cap beside a busy program; the pool's waiting
 #     workers counted as the program's; a busy pool's running workers counted
 #     free. Those proofs exist only where their code is compiled (thread.iyi's
 #     start_helper and prelude.iyi's start_concurrent under win32), and the
@@ -335,6 +335,9 @@ end
 
 # Past the stop's bound, so every mark goes beside the program and a
 # helper's stop ends it, wherever this thread stands.
+{% if flag?(:freed_force) %}
+  IyiMark.auto = false
+{% end %}
 chain = nil.as(Node?)
 i = 0
 while i < 20000
@@ -358,26 +361,30 @@ end
 lost = 0
 round = 0
 {% if flag?(:freed_force) %}
-  # The look must be held by a sweep helper, not an allocation paying sweep
-  # debt on this thread. Clear old debt, trigger one epoch, then allocate
-  # nothing while its helpers find the armed arena and until its look is freed.
+  # Clear old debt before arming the look. Disable automatic collections while
+  # setting up, then trigger exactly one lazy collection without allocating.
+  # A sweep helper, never this thread, must publish the armed look.
+  # Probe 44681170296: control and mutant matched 20 of 20 on each CI shape.
+  forced_limit = IyiMark.now_ns + 5000000000_u64
+  while IyiMark.freed_collecting?
+    if IyiMark.now_ns >= forced_limit
+      print "FAIL: freed: the previous collection did not finish within five seconds\n"
+      __iyi_exit(76)
+    end
+    IyiThread.spin_pause
+  end
   forced_arena = IyiHeap.arena_of(aged[0].address)
-  IyiMark.settle
   IyiMark.collect
   IyiHeap.arm_look(forced_arena)
   forced_limit = IyiMark.now_ns + 5000000000_u64
-  epoch_before = IyiMark.epoch
-  while IyiMark.epoch == epoch_before && IyiMark.now_ns < forced_limit
-    block = Pointer(UInt8).malloc(64_u64)
-    block.value = 1_u8
-  end
-  IyiMark.settle
+  IyiHeap.allocated_word.value.set(IyiMark.budget)
+  IyiMark.collect_if_due
   while IyiHeap.forced_look == 0_u64 && IyiMark.now_ns < forced_limit
     IyiThread.spin_pause
   end
   if IyiHeap.forced_look == 0_u64
     print "FAIL: freed: no sweep looked at a chunk the last mark kept within five seconds\n"
-    __iyi_exit(1)
+    __iyi_exit(76)
   end
   look = IyiHeap.forced_look
   first = -1
@@ -391,6 +398,7 @@ round = 0
     __iyi_exit(1)
   end
   lost += free_aged(aged, generation, first)
+  IyiMark.auto = true
   generation = generation &+ 1_u64
   j = 0
   while j < 64
@@ -544,6 +552,13 @@ awk 'function forced() {
     print ""
   }
   /^      def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared++ }
+  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ {
+    print "      def self.freed_collecting? : Bool"
+    print "        @@collecting"
+    print "      end"
+    print ""
+    mark_declared++
+  }
   /^      def self\.free_unswept\(/ { print; print "        note_free_waiting(head)"; noted++; next }
   /^          word = IyiHeap\.read8\(byte\)$/ { print
     print "          if chunk >= 1024_u64 && word & IyiHeap::EPOCH_FLAG != epoch && word & IyiHeap::FREE_FLAG == 0 && IyiHeap.read8(mark) != WHITE"
@@ -574,7 +589,7 @@ awk 'function forced() {
     print "            end"
     print "          end"
     found++; next }
-  { print } END { if (declared != 1 || noted != 1 || found != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > widened/iyi/prelude.iyi || { echo "the sweep's look or the free this step arms is missing or ambiguous"; exit 1; }
+  { print } END { if (declared != 1 || mark_declared != 1 || noted != 1 || found != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > widened/iyi/prelude.iyi || { echo "the sweep's look or the free this step arms is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-widened > build-widened.log 2>&1; then
   cat build-widened.log; exit 1
 fi

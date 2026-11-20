@@ -6,6 +6,7 @@
 #
 # Each healthy step queues a short task before its long call starts, then
 # requires the short task to run on the same worker before that call ends.
+# Every ordering step requires a pool of one; `cost` is measurement only.
 # Latency is data. The libruntime sort, copy, rehash and join mutants still
 # use timing-decided verdicts; recursionoff tests the ordering witness.
 #
@@ -249,6 +250,7 @@ import std/password::{Bcrypt}
   BOUND_MS = 100_i64
 
   def step(name : String, quiet : Bool) : Nil
+    fail("#{name}: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
     clock = Clock.new
     waited = Atomic(Int64).new(-1_i64)
     witness = Atomic(Int64).new(0_i64)

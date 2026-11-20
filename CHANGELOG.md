@@ -607,6 +607,17 @@
 
 ### Gates
 
+- **The Linux samples job is two jobs that run side by side.** It took
+  58 to 71 minutes in twelve green runs on GitHub's runners and 88 on a
+  slow one, and a runner about 1.4 times slower in every step ran into
+  its 90-minute limit (job 136251143205). Its gates from the edit-rebuild
+  loop on, the editor and agent surfaces, bound shards and the floors among
+  them, run in `samples-surfaces` now, which builds `iyi` itself. On the
+  median runner the two halves come to 31.6 and 30.8 minutes with setup,
+  and 48 and 45 at the cut-off runner's pace. Each has a 75-minute limit.
+  `scripts/ci_plan.py` selects the two together, so every gate still runs
+  on every run that ran it before.
+
 - **`bench/heap_local.iyi`'s `filter` check holds the owning unit's
   token while it looks, so the copy without the local mark's owner filter
   fails every run.** The check reads the `OWN` byte of an object of unit

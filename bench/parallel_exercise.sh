@@ -120,10 +120,8 @@
 #      join held in the kernel; and on Windows
 #      a port whose packets only the worker their task parked on runs, and
 #      a pool that leaves the priority boost on.
-#      Timing-decided, not forced: kerneljoin, nosteal, preemptoff, noflag,
-#      coarse, nopoll, stale, tokenless, libruntime (sort, copy, rehash and
-#      join), and recursionoff. Their elapsed-time checks do not establish
-#      the intended scheduler placement or wait decision.
+#      Timing-decided and conditional exceptions are listed in the header.
+#      Coarse is a structural wait-path proof; tokenless is conditional.
 #   8. Failure proof: the pool held to one worker whatever it was asked
 #      for, and step 4's floors refuse what comes out.
 set -u

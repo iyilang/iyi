@@ -1362,10 +1362,12 @@ verdict_held lostcancel_hook 'wakes, cancels: the targeted suspend claimed its c
   # The same word-keyed hook holds the first park at its word check in both
   # copies. A locked check waits for the wake to attempt the lock; an
   # unlocked check waits for the wake to finish before linking the waiter.
-  LOSTWORD_COMMON='/^  def self.park_on\(/ { inpark = 1; n_park++ }
+  LOSTWORD_COMMON='/^  def self.park_on\(/ { inpark = 1; inlink = 1; n_park++ }
+inlink && /^  end$/ { inlink = 0 }
+inlink && /^    tails\[bucket\] = waiter$/ { print; print "    force_lost_link(word)"; n_link++; next }
 /^  def self.wake_on\(/ { inwake = 1; n_wake++ }
 inwake && /^    IyiChanLock.lock\(lock\)$/ { print "    force_lost_attempt(word)"; n_attempt++ }
-inwake && /^    IyiChanLock.unlock\(lock\)$/ { print; print "    force_lost_done(word)"; n_done++; inwake = 0; next }'
+inwake && /^    IyiChanLock.unlock\(lock\)$/ { print "    force_lost_scanned(word, woken)"; print; print "    force_lost_done(word)"; n_done++; inwake = 0; next }'
   LOSTWORD_BUG='inpark && /^    IyiChanLock.lock\(lock\)$/ { n_lock++; next }
 inpark && /^      IyiChanLock.unlock\(lock\)$/ { n_unlock++; next }
 inpark && /^    end$/ { print; print "    force_lost_window(word, lock)"; print "    IyiChanLock.lock(lock)"; n_window++; n_insert++; inpark = 0; next }'
@@ -1382,6 +1384,25 @@ inpark && /^    end$/ { print; print "    force_lost_window(word, lock)"; n_wind
   print "  @@forced_attempted : UInt64 = 0_u64"
   print "  @[UnsafeReach(\"copy-only word rendezvous accessed atomically\")]"
   print "  @@forced_woke : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only first wake scan and waiter link, accessed atomically\")]"
+  print "  @@forced_scan : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only first wake scan and waiter link, accessed atomically\")]"
+  print "  @@forced_link : UInt64 = 0_u64"
+  print "  def self.forced_scan : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_scan).address).value.get"
+  print "  end"
+  print "  def self.forced_link : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_link).address).value.get"
+  print "  end"
+  print "  def self.force_lost_scanned(word : Pointer(Atomic(UInt64)), woken : Int32) : Nil"
+  print "    return unless word.address == Pointer(Atomic(UInt64)).new(pointerof(@@forced_word).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_scan).address).value.compare_and_set(0_u64, woken.to_u64 &+ 1_u64)"
+  print "  end"
+  print "  def self.force_lost_link(word : Pointer(Atomic(UInt64))) : Nil"
+  print "    return unless word.address == Pointer(Atomic(UInt64)).new(pointerof(@@forced_word).address).value.get"
+  print "    decision = forced_scan == 1_u64 ? 2_u64 : 1_u64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_link).address).value.compare_and_set(0_u64, decision)"
+  print "  end"
   print "  def self.force_lost_wake_on(word : Pointer(Atomic(UInt64))) : Nil"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_word).address).value.set(word.address)"
   print "  end"
@@ -1413,7 +1434,7 @@ inpark && /^    end$/ { print; print "    force_lost_window(word, lock)"; n_wind
   n_defs++
   next
 }'
-  LOSTWORD_END='END { if (n_park != 1 || n_window != 1 || n_wake != 1 || n_attempt != 1 || n_done != 1 || n_lock != 1 || n_unlock != 1 || n_insert != 1 || n_defs != 1) exit 3 }'
+  LOSTWORD_END='END { if (n_park != 1 || n_window != 1 || n_wake != 1 || n_attempt != 1 || n_done != 1 || n_link != 1 || n_lock != 1 || n_unlock != 1 || n_insert != 1 || n_defs != 1) exit 3 }'
   broken lostword "$LOSTWORD_COMMON
 $LOSTWORD_BUG
 $LOSTWORD_DEFS
@@ -1425,7 +1446,7 @@ $LOSTWORD_CONTROL
 $LOSTWORD_DEFS
 { print }
 $LOSTWORD_END" concurrency.iyi parallel_exercise -Dlostword_force
-  verdict_held lostword_hook 'wakes: 0 values through selects over two channels and a deadline, each once; 0 tasks cancelled as they parked; 40000 turns handed through park_on and wake_on' wakes --only=words --watch=5000
+  verdict_held lostword_hook 'wakes, words: the forced first wake claimed the waiter that linked before its scan' wakes --only=words --watch=5000
 
 step "failure proof: a plain add loses counts when two tasks add at once"
 # The plain add is a load and a store. race_forced puts one task's add between

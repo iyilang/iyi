@@ -1053,6 +1053,21 @@
     0
   end
 
+  {% if flag?(:lostword_force) %}
+  def lost_word_decision(watch : Int32) : Nil
+    started = __iyi_monotonic_ns
+    while IyiScheduler.forced_link == 0_u64
+      IyiThread.spin_pause
+      fail("wakes, words: progress hang: the forced waiter recorded no link in #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+    end
+    if IyiScheduler.forced_link == 2_u64
+      fail("wakes, words: the forced first wake was lost before its waiter linked")
+    end
+    fail("wakes, words: not armed: the first wake did not claim the linked waiter") unless IyiScheduler.forced_scan == 2_u64
+    puts "wakes, words: the forced first wake claimed the waiter that linked before its scan"
+  end
+  {% end %}
+
   # The other side, on the main thread, which is no worker: it never
   # parks, but looks at the word until its turn comes, so it takes the
   # turn the moment the parked side hands it over - while that side looks
@@ -1087,9 +1102,7 @@
           IyiThread.spin_pause
           if elapsed_ms(started) >= watch.to_i64
             puts "wakes, words: turn #{seen + 1_u64} was not taken in #{watch} ms"
-            {% if flag?(:lostword_force) %}
-              fail("wakes, words: the forced first wake was lost before its waiter linked") if seen == 1_u64
-            {% end %}
+            # A deadline is a progress failure, never the mutant verdict.
             fail("wakes, words: an unexpected turn was not taken")
           end
         end
@@ -1097,6 +1110,9 @@
       end
       word.value.set(seen + 1_u64)
       IyiScheduler.wake_on(word, 1)
+      {% if flag?(:lostword_force) %}
+        lost_word_decision(watch) if done == 0_i64
+      {% end %}
       done = done + 1_i64
     end
   end

@@ -625,6 +625,15 @@
 
 ### Gates
 
+- **The cursor sweep's five shards are dealt by what the modules weigh
+  since `iyi lsp` stopped recompiling large modules.** Their weights were
+  taken while std/autocert, std/acme and std/http cost 895, 625 and 626 s;
+  they now cost 93, 101 and 349, so in 20 green shard jobs of 2026-11-20
+  the shard holding std/autocert swept in about 295 s on a median runner
+  and the heaviest in up to 920 (jobs 6.7 to 23.2 minutes). The weights in
+  `bench/lsp_positions.py` are re-read from those jobs' per-module lines
+  and the five shards hold 676 to 715 s each.
+
 - **`bench/sweep_exercise.sh`'s copy that counts the listed pages twice
   fails every run in which two adoptions meet in its window.** In master's
   push run 44663881849 (job 136048960124, a GitHub ubuntu runner) the

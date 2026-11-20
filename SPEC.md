@@ -6097,13 +6097,28 @@ five rounds overlap: 45.4 to 53.1 before, 42.7 to 46.0 after.
 
 1. A plain build names nothing of the scheduler in its IR, and a chaos
    build does.
-2. `chaos_claim` and `chaos_join` built plain pass at least 39 of 40 runs
-   on the machine's own pool.
-3. `iyi test --chaos=1 --chaos-runs 100` catches each. The `--chaos=SEED`
-   line it prints fails again, and five traced runs of the seed print the
-   same output and the same schedule hash.
-4. A seed drawn by `iyi test --chaos --chaos-runs 200` catches the claim,
-   and fails again when named.
+2. `chaos_claim` and `chaos_join` built plain pass all 40 runs on one
+   worker (`IYI_WORKERS=1`), each run passing.
+3. `iyi test --chaos=1 --chaos-runs 100` first finds `chaos_claim` at seed
+   6 and `chaos_join` at seed 42 (current-build canaries: a legitimate
+   scheduler change may move them, and the gate then fails until they are
+   re-pinned). Each is reported as a normal child failure, under the exact
+   result header `<fixture>: fail (chaos seed S, run R of N)`, with the
+   fixture's exact verdict, then a runtime trace naming S, then the
+   `reproduce:` line whose `test --chaos=S <fixture>` suffix the gate
+   checks; a child that died or timed out after its verdict is not
+   accepted. The `--chaos=SEED` line it prints is run again and gives the
+   same verdict and effective seed at run 1 of 1. Five direct traced runs
+   of each seed exit 1 at that verdict and print byte-identical output and
+   schedule hashes within the same build; the hash is printed, not fixed
+   across compiler builds.
+4. A seed drawn by `iyi test --chaos --chaos-runs 200` on a test that fails
+   on every seed fails at run 1 of 200, and fails again when named. The
+   drawn and the replayed run each print a runtime trace whose effective
+   seed matches the reported seed; the trace immediately follows the exact
+   fixture verdict. The report checker ignores only the intervening
+   diagnostics between the result header and the verdict, where the
+   command combines compiler diagnostics with child output.
 5. `bench/chaos_exercise.iyi` runs under seeds 1 to 30, twice each. It
    has three parallel units, two unit-mates, a mutex, a `wait_for`, a
    buffered channel and a two-arm `select`. Every run holds the unit
@@ -6114,20 +6129,23 @@ five rounds overlap: 45.4 to 53.1 before, 42.7 to 46.0 after.
 6. Five broken copies of the scheduler, each caught at the check that
    names it:
    - the stream ignored, every draw 0, which is the plain scheduler's
-     choice everywhere: it catches neither bug in 100 seeds;
-   - the seed not honoured, the stream seeded from the clock: one seed's
-     two runs differ;
+     choice everywhere: the known failing seed for each fixture (6 for
+     the claim, 42 for the join) exits 0 at that fixture's normal verdict;
+   - the seed not honoured, the stream seeded from a substituted seed: the
+     supplied seed 1 and the substituted seed 2 give different runs, which
+     the gate compares;
    - units ignored: a unit-mate runs before its spawner parks;
-   - parallel tasks left in their spawner's unit: no seed starts one
-     early;
+   - parallel tasks left in their spawner's unit: at seed 2 no parallel
+     task starts early, while the healthy seed 2 starts at least one early;
    - the scheduler left in a plain build: the plain IR names it.
 
    III.4.18 added a `Unit` to the exercise, whose tasks must start before
    the spawner parks under some seeds and not others, and two broken
    copies: a `Unit`'s tasks each given a chaos unit of their own, caught
    when two of them run between each other's operations, and a `Unit`'s
-   tasks left in their spawner's unit, caught when no seed starts one
-   early. The table below was measured before them.
+   tasks left in their spawner's unit, caught when, at seed 2, no Unit
+   task starts early while the healthy seed 2 starts at least one early.
+   The table below was measured before them.
 
 | | Linux x86-64, 12 vCPUs, shared | macOS 26.6, Apple M2 Pro, 10 cores (the user's machine) | Windows 11, 12 logical processors (the user's machine) |
 |---|---|---|---|

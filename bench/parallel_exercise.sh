@@ -240,10 +240,10 @@ for build in plain release; do
   grep -v 'every property held' "handed-$build.txt" | sed "s/^/  /; s/\$/$judged/"
 done
 # ── 2a. Windows' one completion port, twice ──────────────────────────────
-# bench/completions_taken.iyi at twelve workers: a task's socket answered
-# while the worker it parked on computes with preemption off is read on
-# another worker within 250 ms, and the process's priority boost is off
-# once the pool has started (SPEC.md III.4.13, part 5).
+# bench/completions_taken.iyi at twelve workers: the reader's owner holds
+# on a release word, and a healthy read finishes on another worker before
+# release. The mutant exits at the armed reader's homebound dispatch, not
+# at a later read. The process's priority boost is off once the pool starts.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     for build in plain release; do

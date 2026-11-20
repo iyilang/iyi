@@ -3,15 +3,11 @@
 #   ./bin/iyi run bench/completions_taken.iyi                # both steps
 #   ./bin/iyi run bench/completions_taken.iyi -- taken       # one of them
 #
-# `taken`: a parallel task parks on a socket's read, and the worker it
-# parked on starts a sibling task that computes for COMPUTE_MS with its
-# loop marked `@[NoPreempt]`, so nothing of that worker looks at a port or
-# a queue until it ends. The answer is sent while it computes. The round is
-# forced, not searched (see forced_round): the other workers are held, so the
-# sibling cannot be stolen, and one spare worker waits in the port to read it.
-# With the process's one port another worker takes the answer, and the task
-# reads it before the computation ends; with a port per worker, or a port
-# only its own worker takes from, the answer is read only once it ends.
+# `taken`: a reader parks on a socket, and a sibling holds its worker on a
+# release word with preemption off. A spare waits in the shared port when
+# the answer is sent. The healthy read must finish on another worker before
+# the owner is released. The mutant exits when the armed reader's packet
+# is dispatched homebound; it does not observe a later read.
 #
 # `boost`: the process's dynamic priority boost is off once the pool has
 # started (`IyiWorkers.start`), as `GetProcessPriorityBoost` reads it.
@@ -37,10 +33,8 @@ import std/socket::{IyiSocket, SocketError}
     __iyi_exit(1)
   end
 
-  # What a round's two tasks say, `Share` by their atomic fields and with
-  # no setter (III.4.4): the worker the reader parked on and the one it
-  # read on, the worker the computation ran on and whether it computed,
-  # and when the answer was read and the computation ended.
+  # Atomic observations shared by the reader and its holding sibling.
+  # The forced round uses their worker identities and the read time.
   class Marks
     @reader : Atomic(UInt64)
     @read_on : Atomic(UInt64)
@@ -110,7 +104,7 @@ import std/socket::{IyiSocket, SocketError}
       @computed_until.set(ns)
     end
 
-    # When the computation ends, set before it starts: a send after it proves nothing.
+    # Retained deadline field; the forced round does not use it.
     def deadline : Int64
       @deadline.get
     end
@@ -120,8 +114,7 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  # The computation: integer work until *deadline*, with no check at the
-  # loop's back-edge, so its worker is the task's alone until then.
+  # Retained timed computation helper; the forced round uses a release word.
   @[NoPreempt]
   def compute(deadline : Int64) : UInt64
     x = 1_u64
@@ -210,12 +203,11 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  # The round: every worker but one is held with preemption off, so the reader parks on the one left, and its
-  # sibling, queued on that worker, computes there with its own hold on a release word. Main releases the holders
-  # and a spare waits in the port, then sends the answer, and holds the sibling until the copy's record of the
-  # packet's dispatch says whether its fiber was made homebound to the worker it parked on. Homebound is the
-  # verdict. Otherwise the answer is read on another worker while the reader's worker still holds. Nothing here
-  # waits on a clock: the waits are on states, records and tallies, each with a named limit.
+  # Every worker but one is held while the reader parks. Its sibling holds
+  # that worker on a release word; a spare waits in the port before main
+  # sends the answer. In a forced copy, the armed reader's dispatch records
+  # whether it was made homebound. The healthy read must finish on a spare
+  # before main releases the sibling. Each wait has a named progress limit.
   def forced_round(listener : IyiSocket, port : Int32) : Nil
     near = IyiSocket.connect("127.0.0.1", port, 5000)
     fail("taken: connect answered #{near}") unless near.is_a?(IyiSocket)

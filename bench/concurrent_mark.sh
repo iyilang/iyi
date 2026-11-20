@@ -975,52 +975,88 @@ if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: late: helper 0 would wait past the tu
 fi
 printf '  exits 1 at "%s"\n' "FAIL: late: helper 0 would wait past the turn of a mark whose permit nobody has taken"
 
-# `@@collecting` let go after helper 0 releases the threads, as it was,
-# and helper 0 held ten seconds before it lets it go: the window a
-# four-core Windows runner gave twelve and eight workers whenever they
-# took helper 0's cores, held past the watchdog's whole course - its hold
-# at 256 MiB or two seconds after the last collection, and its two
-# seconds' wait after. The tasks allocate with no mark to assist and no
-# trigger to cross, and while the flag is up `pressure` turns every slice
-# away, so nothing the held tasks still allocate triggers the next: the
-# run fails, naming the count since the last collection against its
-# budget. The hold is after helper 0's unlock, the flag's fall moved
-# there with it: held under the lock, the tasks waited for helper 0
-# wherever they needed the lock, and on master merged with #150 and #151
-# the copy exited 0 in 34 runs of 36. Here it fails at the first
-# collection, 36 runs of 36 held to three, four and twelve cores, and the
-# runtime as it is passes the same run 36 of 36. Two holds were left to
-# the machine before. 300 ms caught it only where the tasks allocated
-# 256 MiB inside it: four-core Windows runners held them at 287 and 289
-# MiB (jobs 122392780789 and 122392781553). And a hold until nothing was
-# counted for half a second let the flag fall while the held tasks still
-# allocated - a cache folds its allocation into the count a 64 KiB slice
-# at a time - and a slice then crossed the budget and collected: on the
-# same merge 2 runs of 12 on twelve cores exited 0, the tasks held 554 ms
-# at the longest.
+# The historical bug let the collection flag fall after threads were released.
+# The copy holds the collector after its release until the first slice
+# past the budget answers the probe. The control clears the flag before the
+# release and the probe answers "let go". The mutant clears the flag only after
+# the hold, and the probe fails on that state.
 step "failure proof: a collection let go after its threads are released leaves their allocation untriggered"
-mkdir -p released/iyi
-cp "$REPO"/src/iyi/*.iyi released/iyi/
-awk '/^            @@collecting = false$/ && !moved { moved = 1; next }
-  moved && !put && /^            unlock_released$/ {
-    print
-    print "            window = now_ns + 10000000000_u64"
-    print "            while now_ns < window"
-    print "              spin_pause"
-    print "            end"
-    print "            @@collecting = false"
-    put = 1; next }
-  { print } END { if (!moved || !put) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > released/iyi/prelude.iyi || { echo "the order this proof undoes is not in the prelude any more"; exit 1; }
+mkdir -p released-held/iyi released/iyi
+cp "$REPO"/src/iyi/*.iyi released-held/iyi/
+awk 'function declarations() {
+    print "      # Copy only (concurrent_mark released proof): the first slice past the budget after the release answers one probe."
+    print "      @[UnsafeReach(\"copy-only: release probe words\")]"
+    print "      @@probe_once : UInt64 = 0_u64"
+    print "      @[UnsafeReach(\"copy-only: release probe words\")]"
+    print "      @@probe_state : UInt64 = 0_u64"
+    print ""
+    print "      def self.arm_release_probe : Bool"
+    print "        return false unless Pointer(Atomic(UInt64)).new(pointerof(@@probe_once).address).value.compare_and_set(0_u64, 1_u64)[1]"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@probe_state).address).value.set(1_u64)"
+    print "        true"
+    print "      end"
+    print ""
+    print "      def self.release_probe(total : UInt64) : Nil"
+    print "        return unless Pointer(Atomic(UInt64)).new(pointerof(@@probe_state).address).value.get == 1_u64 && total >= budget"
+    print "        up = @@collecting"
+    print "        return unless Pointer(Atomic(UInt64)).new(pointerof(@@probe_state).address).value.compare_and_set(1_u64, 2_u64)[1]"
+    print "        if up"
+    print "          message = \"FAIL: released: the first slice past the budget after the release found the collection still up\\n\""
+    print "          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "          __iyi_exit(1)"
+    print "        end"
+    print "        message = \"released: the first slice past the budget after the release found the collection let go\\n\""
+    print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@probe_state).address).value.set(3_u64)"
+    print "      end"
+    print ""
+    print "      def self.hold_release_probe : Nil"
+    print "        limit = now_ns &+ 10000000000_u64"
+    print "        while Pointer(Atomic(UInt64)).new(pointerof(@@probe_state).address).value.get != 3_u64"
+    print "          if now_ns >= limit"
+    print "            message = \"FAIL: released: the release probe was not answered within ten seconds\\n\""
+    print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "            __iyi_exit(76)"
+    print "          end"
+    print "          spin_pause"
+    print "        end"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@probe_state).address).value.set(0_u64)"
+    print "      end"
+    print ""
+  }
+  /^      def self\.pressure\(size : UInt64\) : Nil$/ { declarations(); print; declared++; in_pressure = 1; next }
+  in_pressure && /^        total = IyiHeap\.allocated_word\.value\.add\(size\) \+ size$/ { print; print "        release_probe(total)"; in_pressure = 0; probed++; next }
+  prev_lg && $0 == "            IyiThread.resume_others(others)" { print "            released_forced = arm_release_probe"; print; prev_lg = 0; armed++; next }
+  $0 == "            return generation" { print "            hold_release_probe if released_forced"; print; returned++; prev_lg = 0; next }
+  { prev_lg = ($0 == "            let_go_holders"); print }
+  END { if (declared != 1 || probed != 1 || armed != 1 || returned != 1) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > released-held/iyi/prelude.iyi || { echo "the release order or pressure is missing or ambiguous"; exit 1; }
+cp released-held/iyi/*.iyi released/iyi/
+awk 'pend {
+    if ($0 == "            let_go_holders") { print; pend = 0; dropped++; next }
+    print "            @@collecting = false"; pend = 0
+  }
+  $0 == "            @@collecting = false" { pend = 1; next }
+  $0 == "            hold_release_probe if released_forced" { print; print "            @@collecting = false"; added++; next }
+  { print } END { if (dropped != 1 || added != 1) exit 3 }' released-held/iyi/prelude.iyi > released/iyi/prelude.iyi || { echo "the flag this proof moves is missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/released-held${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o released-held-run > build-released-held.log 2>&1; then
+  cat build-released-held.log; exit 1
+fi
+timeout -k 5 120 ./released-held-run workers=12 seconds=2 > released-held.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -Fxq "mark stall: every collection finished beside 24 connections" released-held.txt || ! grep -Fxq "released: the first slice past the budget after the release found the collection let go" released-held.txt; then
+  echo "the held release control did not complete (exit $code):"; tail -5 released-held.txt; exit 1
+fi
+echo "  held release control exits 0 after the probe answers let go"
 if ! IYI_PATH="$WORK/released${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o released-run > build-released.log 2>&1; then
   cat build-released.log; exit 1
 fi
-timeout -k 5 120 ./released-run workers=12 seconds=10 stall_ms=2000 > released.txt 2>&1
+timeout -k 5 120 ./released-run workers=12 seconds=2 > released.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q "^FAIL: stall:.*marking false" released.txt; then
-  echo "the untriggered allocation was not caught (exit $code):"; tail -3 released.txt; exit 1
+if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: released: the first slice past the budget after the release found the collection still up" released.txt; then
+  echo "the untriggered allocation was not caught (exit $code):"; tail -5 released.txt; exit 1
 fi
-printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stall:' released.txt | cut -c1-150)"
+printf '  exits 1 at "%s"\n' "FAIL: released: the first slice past the budget after the release found the collection still up"
 
 # The same window where a program's own thread finishes the collection:
 # the trigger's whose mark ends inside its first stop (`finish_stopped`),

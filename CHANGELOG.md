@@ -223,6 +223,26 @@
   verdict gone, before or while reading it, proves those claims again over
   its own code, as with a cold cache, and stores the same answer.
 
+- **The cache's rotation removes old link templates too, and a template
+  that failed is marked where the next build looks.** On Linux a build
+  links through the command `cc` computed once, stored at the top of the
+  cache per set of link flags, and nothing removed them: 166 on a Linux
+  box. The rotation now keeps the 20 used last, one for each build and
+  helper it keeps, and a build that reads one marks it used; one found
+  gone, even between a look and the read, is asked of `cc` again rather
+  than failing the build, and a template is written whole, renamed into
+  place. A template whose link failed was marked unusable under a key
+  computed without the `-rdynamic` (and any `-fuse-ld=`) the link adds,
+  so the mark went to a file nobody reads: every build tried the failing
+  template, then linked again through `cc`. It is now marked under the key
+  it was read by, and only the first build pays the extra link.
+
+- **Spec and eval runners clean up after killed runs.** A run of
+  `crystal spec` killed before it cleaned up left its 61 to 74 MB spec
+  program in the cache, and only `iyi run` swept leftovers, its own name's
+  alone: a Linux box held eight, 518 MB. `spec`, `eval` and `run` now all
+  remove what a runner of either name left more than an hour ago.
+
 - **A pool short of workers no longer stays short while its tasks take
   turns.** The pool starts its workers one at a time: each new worker,
   finding a task with more waiting, calls for the next. A task halfway
@@ -713,6 +733,16 @@
   than the rotation counts. Against the compiler before, the first half
   failed 3 runs of 3 on Linux and 3 of 3 on Windows 11, and 3 of 3 on
   Linux against the fix with a read no longer marking the verdict used.
+
+- **`bench/rebuild_reuse.py` holds the link templates and a runner's
+  leftovers.** Step 9 plants two leftovers two hours old, one per runner
+  name, and one just made: `iyi run` must take the two and keep the third.
+  On Linux, a template whose linker fails must leave the build linked
+  through `cc` and the template marked unusable, and the templates are
+  rotated as step 8 rotates verdicts: twenty kept, the one a build has
+  just read among them, and one removed asked of `cc` again to the same
+  bytes. Against the compiler before, each of the three failed 3 runs of
+  3 on Linux.
 
 - **The darwin jobs on the project's Mac each get the compilers' caches
   to themselves.** Its three runners share one HOME, so they shared

@@ -528,7 +528,7 @@ module Iyi
       lines.each_with_index do |line, index|
         next if index.zero?
         if line == "end"
-          used(path)
+          CacheDir.instance.used(path)
           return verdict
         end
         fields = line.split('\t')
@@ -551,17 +551,6 @@ module Iyi
       nil
     rescue File::Error | IO::Error
       nil
-    end
-
-    # Marks the verdict at *path* used now: the cache's rotation keeps the
-    # verdicts used last (`CacheDir#cleanup_verdicts`), and one every build
-    # reads and none writes again would otherwise age out under the builds
-    # that need it. Not `File.touch`, which makes the file when a rotation
-    # has just removed it, an empty verdict the next build reads as none.
-    private def used(path : String) : Nil
-      now = Time.utc
-      File.utime(now, now, path)
-    rescue File::Error
     end
 
     private def write_verdict(path : String, verdict : Verdict) : Nil

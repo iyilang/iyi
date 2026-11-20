@@ -58,7 +58,17 @@ cache:
      removes them: both builds link, the fixture prints what it should,
      and after one more build 240 verdicts are left, the fixture's among
      them with the bytes it first stored. And no more std modules hold a
-     `@[SafeReach]` claim than `CacheDir::REACH_MODULES` counts.
+     `@[SafeReach]` claim than `CacheDir::REACH_MODULES` counts;
+  9. a runner's leftovers, in a cache of their own: two programs left two
+     hours ago, one by `crystal spec` and one by `iyi run`, and one left
+     just now, and `iyi run` must take the two and keep the third; then,
+     on Linux, where a build links through the command the driver computed
+     once (a link template): a template whose linker fails, and the build
+     must link through the driver and mark that template unusable; then
+     the templates rotated as step 8 rotates verdicts, twenty kept
+     (`CacheDir::LINK_KEPT`), 5,000 stale ones removed while a program
+     builds, and its template, removed outright, asked of the driver again
+     to the same bytes.
 
 Step 5 is what Smart App Control's services do, evaluating, on Windows 11:
 the Restart Manager named `CryptSvc`, `AppIDSvc` and the `applockerfltr`
@@ -105,6 +115,19 @@ and 3 of 3 on Windows 11 ("the rotation left 241 reach verdicts, not 240"),
 and against the fix with a read no longer marking the verdict used, 3 of 3
 on Linux ("the rotation removed 1 of the 1 verdicts the build it ended had
 just read"). With the fix the whole gate passed on both.
+
+Step 9 is the rest of what piled up at the root of this Linux box's cache:
+eight spec programs `crystal spec` runs left, ended before their cleanup, 518 MB,
+which no runner but `iyi run` swept and it only its own name's, and 166
+link templates, which nothing removed. Against the compiler before
+(6b131f8d8) on Linux each part failed 3 runs of 3: the leftovers ("the
+cache holds crystal-run-spec-1.tmp, crystal-run-spec-3.tmp"), the failing
+template ("not marked unusable ... and link-template-a184... was written
+beside it": the mark went under a key computed without the flags the link
+adds, and with a linker that counts its calls each build of the three
+after the first tried the failing template again, where the fix tried it
+once), and, run without the failing template, the rotation ("the rotation
+left 21 link templates, not 20").
 
 And because the old shuffle was there for a reason, rule 2's reordering is
 held too: `probe/a` and `probe/b` both import `probe/log` and each
@@ -733,22 +756,23 @@ AGED = 946684800
 YEAR = 365 * 86400
 
 
-def verdicts(cache):
-    """The reach verdicts at *cache*'s root, by name."""
-    return {entry.name: entry for entry in cache.iterdir() if entry.name.startswith("reach-") and entry.is_file()}
+def verdicts(cache, prefix="reach-"):
+    """The reach verdicts (or the files named *prefix*) at *cache*'s root, by name."""
+    return {entry.name: entry for entry in cache.iterdir() if entry.name.startswith(prefix) and entry.is_file()}
 
 
-def counted(cache):
-    return sum(1 for name in os.listdir(cache) if name.startswith("reach-"))
+def counted(cache, prefix="reach-"):
+    return sum(1 for name in os.listdir(cache) if name.startswith(prefix))
 
 
-def plant(cache, tag, count, start):
-    """*count* verdicts no build reads, the first dated *start* and each a
-    second newer than the one before; their names, oldest first."""
+def plant(cache, tag, count, start, prefix="reach-", text="iyi reach verdict 2\nend\n"):
+    """*count* verdicts (or files named *prefix*) no build reads, the first
+    dated *start* and each a second newer than the one before; their names,
+    oldest first."""
     names = []
     for i in range(count):
-        path = cache / f"reach-{tag}-{i:08d}"
-        path.write_text("iyi reach verdict 2\nend\n", newline="\n")
+        path = cache / f"{prefix}{tag}-{i:08d}"
+        path.write_text(text, newline="\n")
         os.utime(path, (start + i, start + i))
         names.append(path.name)
     return names
@@ -837,6 +861,131 @@ def verdicts_rotated(work):
           f" and its verdicts back after it with the same bytes; {REACH_KEPT} kept")
 
 
+# The link templates the rotation keeps (`CacheDir::LINK_KEPT`): one for
+# each build and helper it keeps, each linking once.
+LINK_KEPT = 2 * KEPT
+TEMPLATE = "link-template-"
+TINY = {"tiny.iyi": "module tiny\n\nputs 9\n"}
+# What a template stores beside a command naming none of the toolchain's
+# objects (`Compiler#iyi_link_inputs_fingerprint`): the digest of nothing.
+NOTHING = "d41d8cd98f00b204e9800998ecf8427e"
+
+
+def leftovers_swept(work):
+    """A runner takes away what runners of either of the compiler's names
+    left an hour ago, and nothing younger."""
+    step = "9. a runner's leftovers"
+    cache = work / "run-cache"
+    cache.mkdir()
+    env = environment(cache)
+    old = time.time() - 2 * 3600
+    left = {"crystal-run-spec-1.tmp": old, "iyi-run-tiny-2.tmp": old, "crystal-run-spec-3.tmp": time.time()}
+    for name, when in left.items():
+        (cache / name).write_bytes(b"\0" * 1024)
+        os.utime(cache / name, (when, when))
+    root = work / "run"
+    write(root, TINY)
+    proc = subprocess.run([IYI, "run", "tiny.iyi"], cwd=root, env=env, capture_output=True, text=True)
+    if proc.returncode != 0 or proc.stdout.replace("\r\n", "\n") != "9\n":
+        fail(step, f"`iyi run tiny.iyi` failed or printed something else\n{proc.stdout}{proc.stderr}")
+    kept = sorted(name for name in left if (cache / name).exists())
+    if kept != ["crystal-run-spec-3.tmp"]:
+        fail(step, f"after `iyi run` the cache holds {', '.join(kept) or 'none'} of the leftovers;"
+                   " wanted the hour-young crystal-run-spec-3.tmp alone")
+    print("  ok   9. `iyi run` takes the leftovers of either of the compiler's names an hour old, and keeps a younger one")
+
+
+def templates_rotated(work):
+    """A template whose link failed is marked so under the key it was read
+    by; the rotation keeps the templates used last, the one a build has
+    just read among them; and a build after a removal asks the driver again
+    for the same template."""
+    step = "9. link templates"
+    if not sys.platform.startswith("linux"):
+        print("  skip 9. link templates: only a Linux build links through one (`Compiler#iyi_direct_link_command`)")
+        return
+    root = work / "link"
+    write(root, TINY)
+
+    def stored_one(cache, env):
+        build(root, "tiny.iyi", "tiny", env)
+        found = verdicts(cache, TEMPLATE)
+        if len(found) != 1:
+            fail(step, f"the build of tiny.iyi stored {len(found)} link templates, not 1")
+        return found
+
+    # The template a machine could not link with: a linker that fails.
+    cache = work / "link-unusable-cache"
+    env = environment(cache)
+    env.pop("IYI_LINK_DRIVER", None)
+    (name, entry), = stored_one(cache, env).items()
+    key = entry.read_text().split("\n")[0]
+    entry.write_text(f"{key}\n{NOTHING}\nfalse\n\n", newline="\n")
+    build(root, "tiny.iyi", "tiny", env)
+    if run(root, "tiny") != "9\n":
+        fail(step, "tiny.iyi, linked again by the driver after its template failed, printed something else")
+    marked = (cache / name).read_text() if (cache / name).exists() else "(gone)"
+    if marked != f"{key}\n\nunusable":
+        stray = sorted(set(verdicts(cache, TEMPLATE)) - {name})
+        fail(step, f"the template whose link failed was not marked unusable: it reads {marked!r}"
+                   + (f", and {', '.join(stray)} was written beside it" if stray else ""))
+    print("  ok   9. a template whose link failed is marked unusable under the key it was read by")
+
+    cache = work / "link-cache"
+    env = environment(cache)
+    env.pop("IYI_LINK_DRIVER", None)
+    first = stored_one(cache, env)
+    stored = {name: (entry.stat().st_ino, entry.read_bytes()) for name, entry in first.items()}
+    age(first.values(), AGED)
+    planted = plant(cache, "kept", LINK_KEPT, AGED + YEAR, prefix=TEMPLATE, text="planted\n")
+    build(root, "tiny.iyi", "tiny", env)
+    left = verdicts(cache, TEMPLATE)
+    if any(name not in left for name in first):
+        fail(step, "the rotation removed the template the build it ended had just linked with")
+    if any(left[name].stat().st_ino != stored[name][0] for name in first):
+        fail(step, "the rebuild asked the driver again for the template it had stored")
+    if len(left) != LINK_KEPT:
+        fail(step, f"the rotation left {len(left)} link templates, not {LINK_KEPT}")
+    removed = [name for name in planted if name not in left]
+    if removed != planted[:len(first)]:
+        fail(step, f"the rotation removed {len(removed)} of the planted templates, not the {len(first)} oldest")
+    print(f"  ok   9. the template tiny.iyi links with, made the oldest of {len(first) + LINK_KEPT}, outlives the"
+          f" rotation of the build that reads it, and the {LINK_KEPT} kept are the newest")
+
+    plant(cache, "stale", STALE, AGED - YEAR, prefix=TEMPLATE, text="planted\n")
+    age((cache / name for name in first), AGED - 2 * YEAR)
+    whole = counted(cache, TEMPLATE)
+    others = work / "link-others"
+    write(others, {"rotate.iyi": "module rotate\n\nputs 0\n"})
+    rotation = subprocess.Popen([IYI, "build", "rotate.iyi", "-o", "rotate"], cwd=others, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    while (begun := counted(cache, TEMPLATE)) >= whole:
+        if rotation.poll() is not None and counted(cache, TEMPLATE) >= whole:
+            fail(step, f"the rotation removed no link template of {whole} (exit {rotation.returncode})\n{rotation.stdout.read()}")
+        time.sleep(0.001)
+    during = subprocess.run([IYI, "build", "-s", "--force", "tiny.iyi", "-o", "tiny"], cwd=root, env=env,
+                            capture_output=True, text=True)
+    rotated = rotation.communicate()[0]
+    if rotation.returncode != 0:
+        fail(step, f"the build whose rotation removed the templates failed\n{rotated}")
+    if during.returncode != 0:
+        fail(step, f"tiny.iyi built while the templates were being removed failed\n{during.stdout}{during.stderr}")
+    if run(root, "tiny") != "9\n":
+        fail(step, "tiny.iyi built while the templates were being removed printed something else")
+    # And removed outright: the next build asks the driver again.
+    for entry in first.values():
+        entry.unlink(missing_ok=True)
+    build(root, "tiny.iyi", "tiny", env)
+    last = verdicts(cache, TEMPLATE)
+    if len(last) != LINK_KEPT:
+        fail(step, f"after {STALE} stale templates the rotation left {len(last)}, not {LINK_KEPT}")
+    changed = sorted(name for name in first if name not in last or last[name].read_bytes() != stored[name][1])
+    if changed:
+        fail(step, f"the template tiny.iyi links with, removed and asked for again, is missing or reads otherwise: {', '.join(changed)}")
+    print(f"  ok   9. tiny.iyi built with {begun} of {whole} templates left to another build's rotation, and its"
+          f" template, removed, asked of the driver again to the same bytes; {LINK_KEPT} kept")
+
+
 def main():
     work = Path(tempfile.mkdtemp(prefix="iyi-rebuild-reuse"))
     try:
@@ -846,6 +995,8 @@ def main():
         outlived(work)
         contested(work)
         verdicts_rotated(work)
+        leftovers_swept(work)
+        templates_rotated(work)
         probe(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)

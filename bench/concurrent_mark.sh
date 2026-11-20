@@ -653,7 +653,13 @@ hold_moves() {
     }
     /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
     /^            IyiHeap\.write64\(w \+ W_BLACK, drain\(w\)\)$/ {
+      print "            move_limit = IyiMark.now_ns &+ 10000000000_u64"
       print "            while forced_move_hold?"
+      print "              if IyiMark.now_ns >= move_limit"
+      print "                message = \"FAIL: moves: the helper was held past ten seconds\\n\""
+      print "                __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "                __iyi_exit(76)"
+      print "              end"
       print "              IyiThread.park_if_requested"
       print "              spin_pause"
       print "            end"
@@ -1347,10 +1353,16 @@ awk 'function forced() {
   /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
   declared == 1 && !hooked && /^        w = worker$/ {
     print
+    print "        ready_limit = IyiMark.now_ns &+ 10000000000_u64"
     print "        while !IyiMark.forced_ready?"
     print "          if IyiMark.ready_waiting?"
     print "            __iyi_write(2, \"FAIL: crowded: the first collection waited for a held helper\\n\".to_unsafe.as(Void*), 61_u64)"
     print "            __iyi_exit(1)"
+    print "          end"
+    print "          if IyiMark.now_ns >= ready_limit"
+    print "            message = \"FAIL: crowded: the helper was held past ten seconds\\n\""
+    print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "            __iyi_exit(76)"
     print "          end"
     print "          IyiThread.park_if_requested"
     print "          spin_pause"
@@ -1370,7 +1382,7 @@ echo "  the hook alone, exits 0: $(grep -m1 '^crowded: ' crowded-held.txt)"
 mkdir -p ready/iyi
 cp held-helpers/iyi/*.iyi ready/iyi/
 awk '/^          @@helpers = @@helpers \+ 1_u64$/ { made++; print; next }
-  made == 1 && !waited && /^        end$/ { print; print "        while pool_word(512_u64).value.get < @@helpers"; print "          IyiMark.note_ready_wait"; print "          spin_pause"; print "        end"; waited++; next }
+  made == 1 && !waited && /^        end$/ { print; print "        ready_limit = IyiMark.now_ns &+ 10000000000_u64"; print "        while pool_word(512_u64).value.get < @@helpers"; print "          IyiMark.note_ready_wait"; print "          if IyiMark.now_ns >= ready_limit"; print "            message = \"FAIL: crowded: the readiness wait was held past ten seconds\\n\""; print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"; print "            __iyi_exit(76)"; print "          end"; print "          spin_pause"; print "        end"; waited++; next }
   { print } END { if (made != 1 || waited != 1) exit 3 }' held-helpers/iyi/prelude.iyi > ready/iyi/prelude.iyi || { echo "the helpers' start this proof changes is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/ready${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-ready > build-ready.log 2>&1; then
   cat build-ready.log; exit 1

@@ -4,113 +4,42 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Twenty-seven steps, seventeen of them failure proofs:
-#   1. The program holds, release: twenty-four rounds or more each move a
-#      payload out of an unmarked chain into an already-marked holder, at
-#      least one of them under a running mark, and every payload is intact
-#      after the collection; and large blocks outgrown by `realloc` under
-#      a running mark stay mapped beside the helpers, and are freed after.
-#   2. The pauses, printed: the stop-the-world mark over the same chain
-#      against a concurrent collection's two stops, and the longest the
-#      program's thread spent waking the helpers, which on Windows is
-#      held under 1 ms; and how many helpers a mark beside a thread on
-#      every core but one asked for, which on Windows is held to one.
-#      And a mark beside a pool of a worker per core: more than one
-#      helper while every worker waits with nothing to run, everywhere,
-#      and one while every worker runs a task, on Windows.
-#   3. The machine alone, printed: one thread per core reading the clock
-#      and nothing else, and the longest gap any of them saw. A pause is
-#      only the runtime's where the machine gives its threads their cores:
-#      on a twelve-core Windows VM this read 23 to 64 ms, the length of
-#      the longest second stops measured there. And the first collections
-#      beside twice the cores' threads computing: on Windows, the main
-#      thread's allocations take no more than four times what they take
-#      with no helpers, and 100 ms.
-#   4. Buffers of references grown by `realloc`, ten runs of three hundred
-#      rounds, plain: every referent intact in every run. The old buffer
-#      is freed while a mark may have it queued.
-#   5. Small chunks handed back by `GC.free` in bursts, ten runs, plain:
-#      every chunk kept since is intact, the pauses landing among the
-#      frees included; and chunks the last mark kept, freed while a slice
-#      of their arena is in flight, intact until they are freed.
-#   6. The same program on a copy of the prelude whose sweep waits at
-#      each kept chunk of a kilobyte or more for a free to land, ten runs:
-#      none lands, because such a free waits for the slice.
-#   7. Failure proof: that copy with the free of a chunk the sweep has
-#      not reached put back to the cache alone, no lock; the sweep sees
-#      the free land and the program exits 1 saying so.
-#   8. Failure proof: the barrier's shade removed from a copy of the
-#      prelude; the first payload moved under a mark is freed, and the
-#      program exits 1 saying so.
-#   9. Failure proof: the barrier's own look at the marking flag removed;
-#      a barrier run after its mark ended grays a holder, the next mark
-#      sweeps the payload it held, and the program exits 1 saying so.
-#  10. Failure proof: `free`'s look at the mark removed; a large block
-#      outgrown under a mark is unmapped beside the helpers at once, which
-#      is how a helper walking the large list faulted, and the program
-#      exits 1 saying so.
-#  11. Marks beside the program that end, the shape of #149's server:
-#      bench/mark_stall.iyi's twenty-four connections on twelve workers,
-#      each a parallel task parked on its socket for every request, ten
-#      seconds with the runtime's helpers and ten with one: every
-#      collection finishes, and no collection count stands still while
-#      the tasks allocate. Under `-Dheap_partitions` (IYI_OPTS) the
-#      clients allocate in the shared heap's bracket, since a partition
-#      feeds no global collection, and each checks that its own node is
-#      its partition's and the bracket's is not.
-#  12. Failure proof: the remainder round's store of the count of workers
-#      marking put back, every second stop retreating once, and a window
-#      before the store held open until an assist has counted itself in;
-#      the count goes below zero at the first collection and the runtime
-#      exits 1 saying so.
-#  13. Failure proof: helper 0 reading the generation it waits past after
-#      the collection is let go, held until the next mark turns it, with
-#      one helper; nobody drains that mark, the runtime says the mark is
-#      overdue, and the program's watchdog exits 1.
-#  14. Failure proof: the collection let go after helper 0 releases the
-#      threads, with helper 0 held ten seconds after its unlock and before
-#      the fall; the threads allocate past the budget with nothing
-#      triggered, and the watchdog exits 1.
-#  15. A collection a program's own thread finishes, whose mark ends in
-#      its first stop, with no helper, and `IyiMark.collect`'s, three runs:
-#      a second thread's slices past the budget after each trigger the
-#      next (bench/release_trigger.iyi).
-#  16. Failure proof: the stopped collection let go after its release,
-#      its thread held a second between the two; the stopped and the
-#      verb's rounds exit 1 saying their slices triggered nothing.
-#  17. Failure proof: the same for a collection whose mark ends in its
-#      first stop, and the bounded round exits 1.
-#  18. Failure proof: `free` outside the allocator's bracket; a pause
-#      among the frees puts the lists it dropped back on the cache, and
-#      step 5's program exits 1 within ten runs.
-#  19. The program on a copy of the runtime whose every worker's thread
-#      waits 50 ms before its first look, on three cores or more: the
-#      idle pool step still fills the pool, its tasks spinning until the
-#      pool has launched every worker.
-#  20. Failure proof: that step as it was, its tasks spinning only until
-#      all have arrived and nothing counting the pool's workers after
-#      them, on the same copy; they arrive time-sliced on the first
-#      workers, the pool stops growing, and the idle pool check exits 1.
-#  21. The program on a copy of the runtime in which no worker's find
-#      calls for the next worker, on three cores or more: the idle pool
-#      step still fills the pool, each task that takes its turn while one
-#      waits and none is idle starting the next worker.
-#  22. Failure proof: that start removed from the same copy too; the
-#      tasks take turns on the workers their spawns started, the pool
-#      never grows, and the step exits 1 naming the workers launched.
-#  23. Failure proof, on Windows: the helpers given back the boost a
-#      satisfied wait brings, and the wake check - more than three of the
-#      program's wakes past a millisecond - exits 1, run held to two
-#      processors beside a spinning process, where the shipped build
-#      holds.
-#  24. Failure proof, on Windows: the cap on the helpers beside a busy
-#      program removed, and the share check exits 1.
-#  25. Failure proof, on Windows: the pool's waiting workers counted as
-#      threads of the program's, and the idle pool check exits 1.
-#  26. Failure proof, on Windows: every worker of a started pool counted
-#      free, running or not, and the busy pool check exits 1.
-#  27. Failure proof, on Windows: the first collection's wait for every
-#      helper to reach its park put back, and the crowded check fires.
+# The rules: every failure proof runs its broken copy once and passes only on
+# its exact exit status and exact sentence. A forced copy waits on a word the
+# program sets, never on a clock, and a copy that cannot build against the
+# real runtime fails the gate. A step whose code this platform does not
+# compile says so by name, and a host with too few cores fails. In the order
+# they run:
+#   - the program, release: rounds that move a payload into a black holder
+#     under a running mark, the pauses of a concurrent collection against the
+#     stop-the-world mark, a large block outgrown under a mark, a small live
+#     set finished in its stop, a stray barrier, the share beside busy threads,
+#     the wakes, and on Windows the priority boost counted over the process's
+#     threads;
+#   - the machine alone, and the first collections beside threads computing on
+#     every core, held to four times the time with no helpers and 100 ms;
+#   - buffers grown by realloc beside a mark, ten runs;
+#   - small chunks freed in bursts across the pauses, ten runs, on every shape;
+#   - chunks the last mark kept, freed beside a sweep that waits at each, ten
+#     runs, and the armed look that holds the sweep at one kept chunk until the
+#     program frees it;
+#   - failure proofs: an unlocked free inside a sweep's look; a barrier that
+#     shades nothing; a barrier run after its mark ended; a block outgrown under
+#     a mark that the closer holds open; a small live set given the
+#     thousand-object bound; the remainder round's count stored over the
+#     assists counted in; helper 0 waiting past the next mark; a collection let
+#     go after the release; the stopped, bounded and verb collections let go
+#     late; a free outside the allocator's bracket; an idle pool whose workers
+#     start late, and one whose workers are not called; a first collection
+#     waiting for every helper to park;
+#   - marks beside twenty-four connections on twelve workers, with every helper
+#     and with one;
+#   - on Windows only: the helpers woken with the boost (the boost counted and
+#     the wake check); the helper cap beside a busy program; the pool's waiting
+#     workers counted as the program's; a busy pool's running workers counted
+#     free. Those proofs exist only where their code is compiled (thread.iyi's
+#     start_helper and prelude.iyi's start_concurrent under win32), and the
+#     gate names that platform arm instead of passing silently.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -656,8 +585,8 @@ awk 'function forced() {
     print "              __iyi_exit(1)"
     print "            end"
     print "          end"
-    found = 1; next }
-  { print } END { if (!declared || !noted || !found) exit 3 }' "$REPO/src/iyi/prelude.iyi" > widened/iyi/prelude.iyi || { echo "the sweep's look or the free this step arms is not in the prelude any more"; exit 1; }
+    found++; next }
+  { print } END { if (declared != 1 || noted != 1 || found != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > widened/iyi/prelude.iyi || { echo "the sweep's look or the free this step arms is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-widened > build-widened.log 2>&1; then
   cat build-widened.log; exit 1
 fi
@@ -684,7 +613,7 @@ echo "  the hook alone, armed, exits 0: $(grep -m1 '^lost' armed.txt)"
 step "failure proof: a chunk the sweep has not reached, freed with no lock, is freed inside the sweep's look"
 mkdir -p unlocked/iyi
 cp "$REPO"/src/iyi/*.iyi unlocked/iyi/
-awk '{ if (sub(/^            free_unswept\(arena, head, slot, table, index\)$/, "            list_freed(arena, head, slot, table, index)")) found = 1; print } END { if (!found) exit 3 }' \
+awk '{ if (sub(/^            free_unswept\(arena, head, slot, table, index\)$/, "            list_freed(arena, head, slot, table, index)")) found++; print } END { if (found != 1) exit 3 }' \
   widened/iyi/prelude.iyi > unlocked/iyi/prelude.iyi || { echo "the free this proof puts back is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/unlocked${PSEP}$REPO/src" "$IYI" build freed.iyi -Dfreed_force -o freed-unlocked > build-unlocked.log 2>&1; then
   cat build-unlocked.log; exit 1
@@ -1320,40 +1249,35 @@ fi
 echo "  the hook alone, exits 0: $(grep -m1 '^crowded: ' crowded-held.txt)"
 mkdir -p ready/iyi
 cp held-helpers/iyi/*.iyi ready/iyi/
-awk '/^          @@helpers = @@helpers \+ 1_u64$/ { made = 1; print; next }
-  made && /^        end$/ { print; print "        limit_ns = now_ns + 10000000000_u64"; print "        while pool_word(512_u64).value.get < @@helpers && now_ns < limit_ns"; print "          spin_pause"; print "        end"; print "        if pool_word(512_u64).value.get < @@helpers"; print "          __iyi_write(2, \"FAIL: crowded: the first collection did not return while its helpers were held\\n\".to_unsafe.as(Void*), 79_u64)"; print "          __iyi_exit(1)"; print "        end"; made = 0; waited = 1; next }
-  { print } END { if (!waited) exit 3 }' held-helpers/iyi/prelude.iyi > ready/iyi/prelude.iyi || { echo "the helpers' start this proof changes is not in the prelude any more"; exit 1; }
-cmp -s ready/iyi/prelude.iyi held-helpers/iyi/prelude.iyi && { echo "the awk found nothing to change"; exit 1; }
+awk '/^          @@helpers = @@helpers \+ 1_u64$/ { made++; print; next }
+  made == 1 && !waited && /^        end$/ { print; print "        while pool_word(512_u64).value.get < @@helpers"; print "          IyiMark.note_ready_wait"; print "          spin_pause"; print "        end"; waited++; next }
+  { print } END { if (made != 1 || waited != 1) exit 3 }' held-helpers/iyi/prelude.iyi > ready/iyi/prelude.iyi || { echo "the helpers' start this proof changes is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/ready${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-ready > build-ready.log 2>&1; then
   cat build-ready.log; exit 1
 fi
 timeout -k 5 120 ./crowded-ready > crowded-ready.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -Fxq 'FAIL: crowded: the first collection did not return while its helpers were held' crowded-ready.txt; then
+if [ "$code" -ne 1 ] || ! grep -Fxq 'FAIL: crowded: the first collection waited for a held helper' crowded-ready.txt; then
   echo "the first collection's wait was not caught (exit $code):"; tail -3 crowded-ready.txt; exit 1
 fi
-printf '  exits 1 at "%s"\n' 'FAIL: crowded: the first collection did not return while its helpers were held'
+printf '  exits 1 at "%s"\n' 'FAIL: crowded: the first collection waited for a held helper'
+# Four proofs follow, and they exist only where the code they prove does: the
+# wake boost is set in thread.iyi's start_helper under win32, and the helper
+# cap and the threads-minus-waiting count are in prelude.iyi's start_concurrent
+# under win32. Off Windows those lines are not compiled, so these steps run on
+# Windows alone, and this exit names them rather than passing silently.
 if [ "$PSEP" = ":" ]; then
+  echo "platform: the wake boost (thread.iyi start_helper), the helper cap and the thread counts (prelude.iyi start_concurrent) are compiled only for Windows; their four steps run there"
   echo "workdir $WORK"
-  echo "concurrent mark: every step held"
+  echo "concurrent mark: every step that exists on this platform held"
   exit 0
 fi
 
-step "failure proof: helpers woken with Windows' wake boost hold the program's thread"
+step "failure proof: helpers created with Windows priority boost enabled are detected"
 mkdir -p boosted/iyi
 cp "$REPO"/src/iyi/*.iyi boosted/iyi/
-awk '{ if ($0 ~ /^ *LibC\.SetThreadPriorityBoost\(h, 1_i32\)$/) { print "        # the helpers keep the boost"; next } print }' "$REPO/src/iyi/thread.iyi" > boosted/iyi/thread.iyi
-cmp -s boosted/iyi/thread.iyi "$REPO/src/iyi/thread.iyi" && { echo "the awk found nothing to change"; exit 1; }
-# The collection's raises taken out too, as they were when this proof was
-# measured: the collecting thread is raised before it takes the runtime
-# lock (`IyiMark.collect`, `IyiMark.collect_if_due`), and so it wakes the
-# helpers already at the highest priority, where a boosted helper does
-# not preempt it. With those raises in, the copy lost 0 wakes of 256 in
-# each of three runs held to two processors beside a spinner (run
-# 41800443380, windows-2025); with them out, it failed 30 of 30 on three
-# of those runners (debug run 41812323963). The stop's own raise stays.
-awk '/^ *IyiThread\.raise_stopper$/ { found++; next } { print } END { if (found != 4) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > boosted/iyi/prelude.iyi || { echo "the collection's four raises are not in the prelude any more"; exit 1; }
+awk '/^ *LibC\.SetThreadPriorityBoost\(h, 1_i32\)$/ { print "        # the helpers keep the boost"; found++; next } { print } END { if (found != 1) exit 3 }' \
+  "$REPO/src/iyi/thread.iyi" > boosted/iyi/thread.iyi || { echo "the helper boost call is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/boosted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o boosted-run > build-boosted.log 2>&1; then
   cat build-boosted.log; exit 1
 fi
@@ -1399,13 +1323,16 @@ pinned_run() {
   MSYS_NO_PATHCONV=1 cmd /c start "" /b /affinity 3 spin.exe > spin.txt 2>&1
   for wait in $(seq 1 100); do [ -f spin-ready ] && break; sleep 0.1; done
   [ -f spin-ready ] || { echo "the spinner did not start"; exit 1; }
-  MSYS_NO_PATHCONV=1 timeout -k 5 300 cmd /c start "" /b /wait /affinity 3 "$1.exe" > "$2" 2>&1
+  MSYS_NO_PATHCONV=1 timeout -k 5 300 cmd /c start "" /b /wait /affinity 3 "$1.exe" pinned > "$2" 2>&1
+  pinned_status=$?
   touch spin-stop
   sleep 1
+  return "$pinned_status"
 }
 pinned_run marks pinned.txt
-if grep -q "^FAIL:" pinned.txt || ! grep -q "^wake: the program's thread woke the helpers" pinned.txt; then
-  echo "the shipped build, held to two processors beside a spinner:"; tail -3 pinned.txt; exit 1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -Fxq "concurrent mark: every property held" pinned.txt || ! grep -q "^wake: the program's thread woke the helpers" pinned.txt; then
+  echo "the shipped build, held to two processors beside a spinner failed (exit $code):"; tail -3 pinned.txt; exit 1
 fi
 echo "  the shipped build, held to two processors beside a spinner: $(grep -m1 '^wake: the program' pinned.txt)"
 # The decider is the structural check: a copy that drops the boost leaves the

@@ -581,13 +581,13 @@
   # took the thread away for 3.7 ms in one wake of 49, which it does
   # without any help. So the wakes are counted, over two hundred more
   # collections beside a kept chain, and the check is how many were slow.
-  # On a four-core Windows runner, 40 runs each: the shipped helpers made
-  # no wake past a millisecond in 10,000, and helpers with the boost made
-  # 5 to 88 in every run of 250. Asserted where it was measured; printed
-  # everywhere. A CI runner still took the thread for 4 wakes of 256 once,
-  # with the shipped helpers: so a round past the bound is run again, and
-  # the check is the second round. The boost is slow in every round, the
-  # machine's stalls are not.
+  # On a four-core Windows runner, 40 runs each, as the predecessor measured
+  # them (its job ids were not recorded): the shipped helpers made no wake past
+  # a millisecond in 10,000, and at most 4 of 256 once in CI, where helpers
+  # with the boost made 5 to 88 of 250 in every run. The bound is the geometric
+  # midpoint of the highest healthy count and the lowest broken one, sqrt(4 * 5),
+  # so more than four slow wakes fails on one round, with no second round. The
+  # boost count above decides the boost; this is its measured effect.
   IyiMark.auto = true
   kept = build_chain(1_u64)
   wake_rounds(kept)
@@ -642,6 +642,9 @@
     {% end %}
     puts "share: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, the mark beside them asked for #{asked.to_i64} helpers"
     fail("the chain's tail lost its payload beside the busy threads") unless tail(chain).payload.is_a?(Payload)
+  else
+    fail("the share proof needs three cores; this host has #{cores.to_i64}") unless Program.args.size > 0 && Program.args[0] == "pinned"
+    puts "share: the pinned run holds two processors, so the share and pool steps are measured on three or more"
   end
 
   # ── The helpers' share beside an idle pool ────────────────────────────
@@ -757,6 +760,8 @@
     {% end %}
     puts "busy pool: with #{cores.to_i64} pool workers running on #{cores.to_i64} cores, #{busy_waiting.to_i64} waiting, the mark beside them asked for #{busy_asked.to_i64} helpers"
     fail("the chain's tail lost its payload beside the busy pool") unless tail(chain).payload.is_a?(Payload)
+  else
+    fail("the idle and busy pool proofs need three cores; this host has #{cores.to_i64}") unless Program.args.size > 0 && Program.args[0] == "pinned"
   end
   puts "concurrent mark: every property held"
 {% else %}

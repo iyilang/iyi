@@ -625,6 +625,35 @@
 
 ### Gates
 
+- **`bench/sweep_exercise.sh`'s copy that counts the listed pages twice
+  fails every run in which two adoptions meet in its window.** In master's
+  push run 44663881849 (job 136048960124, a GitHub ubuntu runner) the
+  copy passed three runs of 10 s, while the fix's copy met the window 961
+  times in its one. A meeting only leaves the arena's count of listed
+  pages one short. A block reads wrong only if that count then reaches
+  zero with pages still listed, a refill reads it there, and the pause
+  makes that refill's pages idle under its objects. On this Linux
+  machine, 12 vCPUs, the copy as the gate builds it passed none of 40
+  runs, but 1 of 40 on two vCPUs (taskset), with the window met 1,157
+  times, 15 of 40 beside twelve busy loops and 13 of 30 on four vCPUs
+  beside four, with it met 552 to 1,377 times. Both copies now count
+  each arena's listed pages at every pause, where no thread is inside the
+  allocator, and check them against the arena's count; the stress
+  program fails at the first count that is off. It checks after every
+  trim and after one more collection once its threads end. A run that
+  never meets the window tested nothing and runs again, three times at
+  most. The copy now fails 250 runs of 250 on Linux: 50 each on 12, four
+  and two vCPUs, beside twelve busy loops, and on four vCPUs beside four.
+  On one vCPU it failed in all 8 of 30 runs that met the window; the
+  other 22 never met it. On macOS 26.6, Apple M2 Pro, 10 cores (the
+  user's machine), it failed 50 runs of 50 and 30 of 30 beside ten busy
+  loops. The copy without the count check failed 40 of 40 there too, 20
+  of them beside ten busy loops, each on a block that read wrong.
+  The fix's copy read every block back whole in 60 runs of 60 on Linux,
+  on 12, four and two vCPUs and beside twelve busy loops, with all
+  575,784 of the counts it checked right. On the Mac it did so in 30 of
+  30, ten of them beside ten busy loops, with all 634,160 right.
+
 - **`bench/heap_local.iyi`'s `filter` check holds the owning unit's
   token while it looks, so the copy without the local mark's owner filter
   fails every run.** The check reads the `OWN` byte of an object of unit

@@ -1325,18 +1325,21 @@ step "failure proof: a thread-local read before a park and kept after it names t
   print "      end"
   print ""
   print
-  did_defs = 1
+  n_defs++
+  in_walker = 1
   next
 }
-/^          while fiber\.is_a\?\(IyiFiber\)$/ { print; print "            force_note_seen(fiber)"; did_seen = 1; next }
-/^              scan_range\(fiber\.saved_sp, top, visit\)$/ { print "              force_note_scanned(fiber)"; print; did_scan = 1; next }'
+in_walker && /^      end$/ { in_walker = 0; print; next }
+in_walker && /^          while fiber\.is_a\?\(IyiFiber\)$/ { print; print "            force_note_seen(fiber)"; n_seen++; next }
+in_walker && /^            if fiber\.state != IyiFiberState::Running && fiber\.state != IyiFiberState::Done && fiber\.saved_sp != 0$/ { n_guard++ }
+in_walker && /^              scan_range\(fiber\.saved_sp, top, visit\)$/ { print "              force_note_scanned(fiber)"; print; n_scan++; next }'
   INTRANSIT_HOOK="$INTRANSIT_DEFS
 { print }
-END { if (!(did_defs && did_seen && did_scan)) exit 3 }"
+END { if (n_defs != 1 || n_seen != 1 || n_scan != 1 || n_guard != 1) exit 3 }"
   INTRANSIT_BUG="$INTRANSIT_DEFS
-/^            if fiber\.state != IyiFiberState::Running && fiber\.state != IyiFiberState::Done && fiber\.saved_sp != 0\$/ { print \"            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Runnable && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0\"; did_skip = 1; next }
+in_walker && /^            if fiber\.state != IyiFiberState::Running && fiber\.state != IyiFiberState::Done && fiber\.saved_sp != 0\$/ { print \"            if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Runnable && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0\"; n_skip++; next }
 { print }
-END { if (!(did_defs && did_seen && did_scan && did_skip)) exit 3 }"
+END { if (n_defs != 1 || n_seen != 1 || n_scan != 1 || n_guard != 1 || n_skip != 1) exit 3 }"
   broken intransit "$INTRANSIT_BUG" prelude.iyi parallel_migrate -Dintransit_force
   verdict_caught intransit "channels: the collector's stack walk omitted a queued fiber's saved stack that held a list's head" channels
   broken intransit_hook "$INTRANSIT_HOOK" prelude.iyi parallel_migrate -Dintransit_force

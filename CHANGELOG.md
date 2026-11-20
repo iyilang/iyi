@@ -195,6 +195,28 @@
   while the ring grows as it should; each costs a comparison per match or
   per run.
 
+- **Threads that panic at once print whole lines.** `raise` wrote its
+  report in eight pieces - `iyi: panic: `, the message, its newline,
+  `  at `, the file, the colon, the line, its newline - each its own write
+  to descriptor 2, and threads that panicked together tore each other's
+  lines. Eight units each panicking 200 times, every panic caught at its
+  task's boundary, left 58 to 62 % of the error stream's lines on Linux
+  and 85 to 95 % on Windows 11 no whole line of any report (an empty one,
+  a line number alone, `unit 4 boom` with no `iyi: panic: `), and 73 to
+  98 % of the messages without their own site under them, in every run of
+  150 on Linux and 100 on Windows, to a pipe or a file; at 400 times each
+  on macOS 26.6 (Apple M2 Pro), 94 to 96 % of the lines that were not
+  frames and 95 to 97 % of the messages, in every run of 70. The pieces
+  now fill a 4 KiB room on the stack, written in one call when it is full
+  and after the last piece, which a pipe keeps whole up to that size;
+  nothing is allocated that was not before (`line.to_s`, for a site).
+  After: 0 torn lines and 0 messages without their site in 1,600 runs
+  (5.1 million lines) on Linux, 1,300 runs (4.2 million) on Windows 11 and
+  800 runs (20.5 million, frames included) on macOS, to a pipe and a file,
+  on Linux and Windows also held to 2 processors. A report longer than
+  4 KiB goes out a room at a time. `std/debug`'s frame lines, and darwin's
+  from `backtrace_symbols_fd`, were each one write already.
+
 - **A build that runs a command from a macro is no longer taken for up to
   date by the next.** The up-to-date check's recorder stepped aside for
   its own reads by taking itself from the whole process, while the
@@ -227,6 +249,38 @@
   object has been read, `--emit-iyimod`'s copies included, and a build
   that waited on the lock and finds it gone makes the directory again.
   Any two builds sharing a cache could meet this, not only CI's.
+
+- **The cache's rotation removes old reach verdicts too.** A build stores
+  one verdict per std module with `@[SafeReach]` claims at the top of the
+  cache, keyed by the module's bytes, the flags and the compiler's own
+  executable, so every rebuild of the compiler writes a new set. The
+  rotation removed only directories: ~/.cache/iyi held 24,428 of them on
+  the project's Mac (59.6 MB) and 16,660 on a Linux box. It now keeps the
+  240 used last, as many as the twenty directories it keeps may each have
+  read (twelve modules with claims), and a build that reads a verdict
+  marks it used. Nothing waits on a lock for this: a build that finds a
+  verdict gone, before or while reading it, proves those claims again over
+  its own code, as with a cold cache, and stores the same answer.
+
+- **The cache's rotation removes old link templates too, and a template
+  that failed is marked where the next build looks.** On Linux a build
+  links through the command `cc` computed once, stored at the top of the
+  cache per set of link flags, and nothing removed them: 166 on a Linux
+  box. The rotation now keeps the 20 used last, one for each build and
+  helper it keeps, and a build that reads one marks it used; one found
+  gone, even between a look and the read, is asked of `cc` again rather
+  than failing the build, and a template is written whole, renamed into
+  place. A template whose link failed was marked unusable under a key
+  computed without the `-rdynamic` (and any `-fuse-ld=`) the link adds,
+  so the mark went to a file nobody reads: every build tried the failing
+  template, then linked again through `cc`. It is now marked under the key
+  it was read by, and only the first build pays the extra link.
+
+- **Spec and eval runners clean up after killed runs.** A run of
+  `crystal spec` killed before it cleaned up left its 61 to 74 MB spec
+  program in the cache, and only `iyi run` swept leftovers, its own name's
+  alone: a Linux box held eight, 518 MB. `spec`, `eval` and `run` now all
+  remove what a runner of either name left more than an hour ago.
 
 - **A pool short of workers no longer stays short while its tasks take
   turns.** The pool starts its workers one at a time: each new worker,
@@ -657,6 +711,34 @@
   Linux and the Mac, 400 and 300 on Windows, half or more of them four at
   once beside busy loops. 25 breaks, all caught.
 
+- **The cursor sweep's five shards are dealt by what the modules weigh
+  since `iyi lsp` stopped recompiling large modules.** Their weights were
+  taken while std/autocert, std/acme and std/http cost 895, 625 and 626 s;
+  they now cost 93, 101 and 349, so in 20 green shard jobs of 2026-11-20
+  the shard holding std/autocert swept in about 295 s on a median runner
+  and the heaviest in up to 920 (jobs 6.7 to 23.2 minutes). The weights in
+  `bench/lsp_positions.py` are re-read from those jobs' per-module lines
+  and the five shards hold 676 to 715 s each.
+
+- **`bench/panics.sh` holds that threads that panic at once print whole
+  lines (step 14).** Eight units panic 400 times each; every line on the
+  error stream must be a whole message or a whole site, every message
+  with its own site under it, in three runs. The proof is a copy of the
+  prelude whose `__iyi_say` writes each piece as it is put, as the old
+  path did: it tore in every run, 300 at 12 processors and 300 held to 2
+  on Linux, 200 and 100 on Windows 11, and 400 of 400 on macOS 26.6
+  (Apple M2 Pro, beside three CI jobs), and the gate needs it to tear in
+  one of three. darwin prints `backtrace_symbols_fd`'s frames after each
+  report, each a whole line in libSystem's columns (`%-4d%-35s 0x%016llx
+  %s + %lu`); the step sets those aside first, matched column by column
+  from the line's start, and checks first that the same frame behind a
+  site's `4`, a message or `  at ` is called torn, not a frame - and on
+  darwin that every report's frames were set aside. Step 13's frame lines
+  are matched from the start of their line now, where they were matched
+  anywhere in it because the report tore them: the old prelude failed the
+  anchored match in 18 runs of 100 on Linux and 28 of 50 on Windows 11,
+  the fix in 0 of 300 and 0 of 200.
+
 - **`bench/sweep_exercise.sh`'s copy that counts the listed pages twice
   fails every run in which two adoptions meet in its window.** In master's
   push run 44663881849 (job 136048960124, a GitHub ubuntu runner) the
@@ -685,6 +767,45 @@
   on 12, four and two vCPUs and beside twelve busy loops, with all
   575,784 of the counts it checked right. On the Mac it did so in 30 of
   30, ten of them beside ten busy loops, with all 634,160 right.
+
+- **The Linux samples job is two jobs that run side by side.** It took
+  58 to 71 minutes in twelve green runs on GitHub's runners and 88 on a
+  slow one, and a runner about 1.4 times slower in every step ran into
+  its 90-minute limit (job 136251143205). Its gates from the edit-rebuild
+  loop on, the editor and agent surfaces, bound shards and the floors among
+  them, run in `samples-surfaces` now, which builds `iyi` itself. On the
+  median runner the two halves come to 31.6 and 30.8 minutes with setup,
+  and 48 and 45 at the cut-off runner's pace. Each has a 75-minute limit.
+  `scripts/ci_plan.py` selects the two together, so every gate still runs
+  on every run that ran it before.
+
+- **`bench/std_gc_exercise.sh` names the copies whose `stats` or
+  `is_heap_ptr` walks without the runtime lock, every run and on every
+  system.** The races at the exercise's end proved them: two seconds of
+  each verb beside threads whose mappings come and go, with the gate
+  expecting a memory fault and running the proofs on Windows only. A
+  Windows CI runner's `is_heap_ptr` copy answered wrong instead, at the
+  race's own check, and the gate failed it "not at the expected check"
+  (job 136250482652). It is the same unlocked walk, reading a node
+  another thread has unmapped or a mapping made in its place, and a
+  fault is not the only way it shows: on Linux, idle and on four busy
+  cores, the `is_heap_ptr` copy died of SIGSEGV in 187 runs of 200 (with
+  no sentence of iyi's: there the driver names that death, and the gate
+  runs the program itself), answered wrong in 1 and passed 12; the
+  `stats` copy faulted in 99 of 100 and passed 1. On Windows 11 both
+  faulted in every run, 200 and 100. The exercise now holds the runtime
+  lock on another thread and asks each verb inside the hold: the holder
+  lets go once the verb has answered or a second has passed, so a verb
+  that takes the lock answers after it, and one that walks without it
+  answers while it is held. Both copies fail there, at "stats answered
+  while another thread held the runtime lock" and its `is_heap_ptr`
+  twin: 200 runs of 200 each on Linux and on Windows 11, half idle and
+  half on four cores beside four busy loops. Beside the loops the
+  unlocked verbs answered within 2.6 µs of the ask, against the second
+  the hold allows. The sound module passes the whole gate 10 times of 10
+  idle and 10 of 10 beside load, on Linux and on Windows 11, with all six
+  copies failing at their checks each time; the races stay, as the locked
+  walk beside real unmaps.
 
 - **`bench/heap_local.iyi`'s `filter` check holds the owning unit's
   token while it looks, so the copy without the local mark's owner filter
@@ -722,15 +843,38 @@
   5 of 5 and 3 of 3. Step 6 now also counts what the rotation keeps, ten
   builds, on every system that runs it, Windows included.
 
+- **`bench/rebuild_reuse.py` holds the rotation of reach verdicts.** Step 8
+  makes the fixture's verdict older than 240 others, then builds the
+  fixture again: the build must read it, not prove it again, and its
+  rotation must keep it and remove the oldest of the others. Then 5,000
+  stale verdicts more, the fixture's the oldest, are removed by another
+  build's rotation while the fixture builds: both must link, and after one
+  more build 240 must be left, the fixture's with the bytes it first
+  stored. It also fails when more std modules hold a `@[SafeReach]` claim
+  than the rotation counts. Against the compiler before, the first half
+  failed 3 runs of 3 on Linux and 3 of 3 on Windows 11, and 3 of 3 on
+  Linux against the fix with a read no longer marking the verdict used.
+
+- **`bench/rebuild_reuse.py` holds the link templates and a runner's
+  leftovers.** Step 9 plants two leftovers two hours old, one per runner
+  name, and one just made: `iyi run` must take the two and keep the third.
+  On Linux, a template whose linker fails must leave the build linked
+  through `cc` and the template marked unusable, and the templates are
+  rotated as step 8 rotates verdicts: twenty kept, the one a build has
+  just read among them, and one removed asked of `cc` again to the same
+  bytes. Against the compiler before, each of the three failed 3 runs of
+  3 on Linux, and the leftovers 3 of 3 on Windows 11.
+
 - **The darwin jobs on the project's Mac each get the compilers' caches
   to themselves.** Its three runners share one HOME, so they shared
   ~/.cache/iyi: one job's rotation reached another's build (Fixed, above),
   and the directory held 24,451 entries, 24,428 of them reach verdicts
-  (59.6 MB) that nothing ever deletes. They shared ~/.cache/crystal too,
-  which brew's Crystal rotates with no lock at all. `IYI_CACHE_DIR` and
-  `CRYSTAL_CACHE_DIR` are now under the job's `RUNNER_TEMP`, as fresh as
-  GitHub's VMs and gone with the job. That costs `make iyi` a cold
-  cache: 19 and 21 s on the idle Mac, against 13 and 14 s warm.
+  (59.6 MB) that nothing deleted then (Fixed, above). They shared
+  ~/.cache/crystal too, which brew's Crystal rotates with no lock at all.
+  `IYI_CACHE_DIR` and `CRYSTAL_CACHE_DIR` are now under the job's
+  `RUNNER_TEMP`, as fresh as GitHub's VMs and gone with the job. That
+  costs `make iyi` a cold cache: 19 and 21 s on the idle Mac, against 13
+  and 14 s warm.
 
 - **darwin's spinner step in `bench/thread_exercise.sh` (7i) holds the
   spinners' CPU in every run, and judges the hint copy's rate only where

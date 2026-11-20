@@ -1345,10 +1345,10 @@ END { if (n_defs != 1 || n_seen != 1 || n_scan != 1 || n_guard != 1 || n_skip !=
   broken intransit_hook "$INTRANSIT_HOOK" prelude.iyi parallel_migrate -Dintransit_force
   verdict_held intransit_hook "channels: the collector's stack walk scanned a queued fiber's saved stack that held a list's head" channels
 
-  step "failure proof: cancellation cannot route an io wait whose poller is not listed"
-  # Copy only: count each registration and each cancel_moving call that
-  # observes a nonzero listed owner. The verdict is about that routing
-  # observation, not whether a reader remained parked after cancellation.
+  step "failure proof: a cancel finds no owner for an io wait that does not say whose poller holds it"
+  # Count registrations and cancel_moving calls with a nonzero listed owner.
+  # The program cancels only after each reader has switched out, past its
+  # own cancellation check.
   # Each anchor is counted once; the awk exits 3 on any other count.
   UNLIST_PRINTS='  print "  # Copy only, for the unlistedio proof of bench/parallel_migrate.iyi: each io wait counts itself once its"
   print "  # registration has run (force_armed). The program reads the count (force_armed_count)."
@@ -1401,9 +1401,9 @@ $UNLIST_DISPATCH_RULE
 { print }
 END { if (n_defs != 1 || n_list != 1 || n_disp != 1 || n_mut != 1) exit 3 }"
   broken unlistedio "$UNLIST_BUG" concurrency.iyi parallel_migrate -Dunlistedio_force
-  verdict_caught unlistedio "cancel: cancellation recorded fewer than eight nonzero listed-owner routes" cancel --watch=5000
+  verdict_caught unlistedio "cancel: a cancel found no listed owner for a reader switched out of its io wait" cancel --watch=5000
   broken unlistedio_hook "$UNLIST_HOOK" concurrency.iyi parallel_migrate -Dunlistedio_force
-  verdict_held unlistedio_hook "cancel: cancellation recorded at least eight nonzero listed-owner routes" cancel --watch=5000
+  verdict_held unlistedio_hook "cancel: a cancel found the listed owner of every reader switched out of its io wait, and each read answered Cancelled" cancel --watch=5000
 
   step "failure proof: a close posted to no thread leaves a read on another worker parked"
   case "$(uname -s)" in
@@ -1615,6 +1615,10 @@ END { if (n_defs != 1 || n_wake != 1 || n_hand != 1 || n_mut != 1 || expect) exi
   print "    \"evals=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_evals).address).value.get} ring=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_ring_size).address).value.get} turned=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_turned).address).value.get} idle=#{word(pointerof(@@idle)).value.get} spinning=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_spinning).address).value.get}\""
   print "  end"
   print ""
+  print ""
+  print "  def self.force_figures : String"
+  print "    \"evals=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_evals).address).value.get} ring=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_ring_size).address).value.get} turned=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_turned).address).value.get} idle=#{word(pointerof(@@idle)).value.get} spinning=#{Pointer(Atomic(UInt64)).new(pointerof(@@forced_spinning).address).value.get}\""
+  print "  end"
   print ""
   print
   n_defs++

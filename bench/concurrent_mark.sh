@@ -151,7 +151,9 @@ grep '^machine:' machine.txt | sed 's/^/  /'
 # main thread took 1.8 to 4.0 s, against 8 to 212 ms with no helpers. A
 # helper is handed the generation it waits past now, and nothing waits for
 # it to run: 11 to 77 ms. Three runs of each, the best of each compared;
-# asserted on Windows, where it was measured, and printed everywhere.
+# asserted on every shape against four times the best of three with no helpers
+# plus 100 ms. Probe values, 2026-11-19: Linux (4 cores) 15 and 18 ms with
+# helpers, 20 and 31 ms with none, bound 180 and 224 ms; macOS (6 cores) passed.
 cat > crowded.iyi <<'IYI'
 module crowded
 
@@ -225,11 +227,11 @@ alone="$best"
 crowded_best crowded helped
 helped="$best"
 bound=$((alone * 4 + 100))
-if [ "$PSEP" != ":" ] && [ "$helped" -gt "$bound" ]; then
+if [ "$helped" -gt "$bound" ]; then
   echo "beside $beside threads computing, 300,000 allocations took $helped ms with helpers, past $bound: four times the $alone ms with none, and 100"
   exit 1
 fi
-echo "  beside $beside threads computing, held to four times the time with no helpers and 100 ms"
+echo "  beside $beside threads computing: $helped ms with helpers, $alone ms with none, held to $bound ms"
 
 # A buffer of references grown by `realloc` frees its old copy, and a mark
 # beside the program may have that copy grayed and queued: it blackened the
@@ -478,12 +480,9 @@ IYI
 if ! "$IYI" build freed.iyi -o freed > build-freed.log 2>&1; then
   cat build-freed.log; exit 1
 fi
-# Not on darwin: its three-core runner ended a run with no line printed,
-# inside the 120 s bound or past it, and what stops a thread there is a
-# signal at a safe point rather than a suspend at any instruction.
-if [ "$(uname -s)" = "Darwin" ]; then
-  echo "  the bursts of frees are measured on Windows and Linux; darwin's runner is not one of them"
-else
+# Every shape runs the bursts, darwin included: the macOS 15 runner this gate
+# runs on (six cores) ended each of ten runs in 1 to 4 s with every kept chunk
+# intact (probe/rl-concmark, 2026-11-19, job 135912015082 and 135912015440).
 for run in 1 2 3 4 5 6 7 8 9 10; do
   timeout -k 5 120 ./freed > freed.txt 2>&1
   code=$?
@@ -492,7 +491,6 @@ for run in 1 2 3 4 5 6 7 8 9 10; do
   fi
 done
 echo "  ten runs of 200,000 bursts of frees, every kept chunk intact"
-fi
 
 # A chunk the last mark kept, freed before the lazy sweep of its arena
 # reached it - the aged chunks above. A slice walking past it reads its
@@ -520,6 +518,8 @@ cp "$REPO"/src/iyi/*.iyi widened/iyi/
 # its chunk and holds it by words until the program's free of that chunk
 # announces itself on the slice's claim (`note_free_waiting`, at the top of
 # free_unswept), or the entry changes. Five seconds without either is named.
+# A separate copy below holds the look while a second thread enters the
+# unlocked wait, then asks the real thread-stop path to stop it there.
 awk 'function forced() {
     print "      # Copy only (concurrent_mark freed proof): the first kept chunk a sweep looks at in the armed arena is published"
     print "      # here, and the look holds until its free says it is waiting, or the entry of that chunk changes."
@@ -560,8 +560,8 @@ awk 'function forced() {
     print "      end"
     print ""
   }
-  /^      def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared = 1 }
-  /^      def self\.free_unswept\(/ { print; print "        note_free_waiting(head)"; noted = 1; next }
+  /^      def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared++ }
+  /^      def self\.free_unswept\(/ { print; print "        note_free_waiting(head)"; noted++; next }
   /^          word = IyiHeap\.read8\(byte\)$/ { print
     print "          if chunk >= 1024_u64 && word & IyiHeap::EPOCH_FLAG != epoch && word & IyiHeap::FREE_FLAG == 0 && IyiHeap.read8(mark) != WHITE"
     print "            if IyiHeap.look_armed_in?(arena) && IyiHeap.forced_look == 0_u64"
@@ -681,14 +681,14 @@ awk 'function forced() {
     print "      end"
     print ""
   }
-  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared = 1 }
+  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
   /^              seen = finish_concurrent$/ {
     print "              while IyiMark.forced_hold?"
     print "                IyiThread.park_if_requested"
     print "                spin_pause"
     print "              end"
-    hooked = 1 }
-  { print } END { if (!declared || !hooked) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held/iyi/prelude.iyi || { echo "the closer's finish or helper_main is not in the prelude any more"; exit 1; }
+    hooked++ }
+  { print } END { if (declared != 1 || hooked != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held/iyi/prelude.iyi || { echo "the closer's finish or helper_main is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force "$REPO/bench/concurrent_mark.iyi" -o held-run > build-held.log 2>&1; then
   cat build-held.log; exit 1
 fi
@@ -700,9 +700,11 @@ fi
 echo "  the hook alone, exits 0: $(grep -m1 '^large: 2 of 2' held.txt)"
 mkdir -p unmapped/iyi
 cp held/iyi/*.iyi unmapped/iyi/
-awk '{ if (sub(/free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8/, "free_large(pointer.address - HEADER)")) found = 1; print } END { if (!found) exit 3 }' \
-  held/iyi/prelude.iyi > unmapped/iyi/prelude.iyi || { echo "the look at the mark this proof removes is not in the prelude any more"; exit 1; }
-cmp -s unmapped/iyi/prelude.iyi held/iyi/prelude.iyi && { echo "the awk found nothing to change"; exit 1; }
+awk '
+  /^            free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8 && partition_free_large\(pointer\.address - HEADER - LARGE_HEAD\)$/ { print "            free_large(pointer.address - HEADER) if partition_free_large(pointer.address - HEADER - LARGE_HEAD)"; partitioned++; next }
+  /^            free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8$/ { print "            free_large(pointer.address - HEADER)"; shared++; next }
+  { print } END { if (partitioned != 1 || shared != 1) exit 3 }' \
+  held/iyi/prelude.iyi > unmapped/iyi/prelude.iyi || { echo "the shared or partitioned guard is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/unmapped${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force "$REPO/bench/concurrent_mark.iyi" -o unmapped-run > build-unmapped.log 2>&1; then
   cat build-unmapped.log; exit 1
 fi
@@ -960,20 +962,17 @@ let_go_late locked-late 8 stopped verb
 
 step "failure proof: a collection that ends in its first stop let go after its threads are released leaves their slices untriggered"
 if grep -q '^one core:' trigger-1.txt; then
-  echo "  not run: one core, no helper, and no mark that ends in its first stop"
-else
-  let_go_late bounded-late 10 bounded
+  echo "FAIL: this host has one core; the bounded round needs a helper beside a second thread, and CI shapes have at least four"
+  exit 1
 fi
+let_go_late bounded-late 10 bounded
 
 # The free's bracket, and the list it guards. A free links the chunk onto its
 # cache's list, and a pause drops every cache's list: a link to a list read
-# before a collection and written after it puts back what the collection
 # dropped, and the chunks it links are the ones its sweep had already put on
-# the centre. A collection inside the free is what the bracket keeps from
-# happening (the stop waits for a free inside the bracket), so the copy with
-# the bracket removed runs one there, at the one free the program arms. The
-# control keeps the bracket and the link, and no collection. Single thread:
-# a deterministic sequence, not a timing race.
+# the centre. Both copies execute the same armed collection: the control runs
+# it after the bracket's leave and link, and the broken copy moves it between
+# reading the stale head and writing the link.
 step "failure proof: a free outside the allocator's bracket puts a dropped list back"
 mkdir -p bracketed/iyi
 cp "$REPO"/src/iyi/*.iyi bracketed/iyi/
@@ -982,6 +981,7 @@ cat > unbracketed.iyi <<'IYI'
 module unbracketed
 
 import std/gc::{GC}
+IyiMark.auto = false
 
 live = Pointer(Pointer(UInt64)).malloc(64_u64)
 i = 0
@@ -1138,8 +1138,9 @@ printf '  exits 1 at "%s"\n' "freed: a free outside the allocator's bracket put 
 # program runs that step on three cores or more, which step 1's answers
 # say.
 if ! grep -q '^idle pool: with' answers.txt; then
-  echo "  the idle pool step needs three cores, and step 1 did not run it here: its late-start and uncalled-worker proofs are unmeasured"
-else
+  echo "FAIL: the idle pool step did not run: it needs three cores, and this host has fewer"
+  exit 1
+fi
 step "the idle pool fills on a runtime whose workers each start 50 ms late"
 mkdir -p latestart/iyi
 cp "$REPO"/src/iyi/*.iyi latestart/iyi/
@@ -1229,15 +1230,12 @@ if [ "$code" -ne 1 ] || ! grep -q "^FAIL: idle pool: the pool launched" unstarte
   echo "the idle pool's count of workers launched did not fire (exit $code):"; tail -3 unstarted.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' unstarted.txt)"
-fi
 
 # The first collection's wait for every helper to reach its park, put back.
-# Each helper makes its count on entry, and the helpers' start waits for every
-# count. Forced: the copy holds each helper before its count until the program
-# releases them, and the program releases them only once a collection has
-# returned. With the wait put back the first collection then never returns and
-# the program's watcher fails by name. The hook alone (the count, no wait)
-# lets the first collection return, and the program passes.
+# The helper is held before it counts itself ready. The same hook runs in
+# both copies and reports if it observes the first collection waiting for
+# that count before the program has released the helper. The broken copy
+# publishes that state from inside its restored wait; no timer is a verdict.
 step "failure proof: a first collection that waits for every helper to reach its park is caught"
 mkdir -p held-helpers/iyi
 cp "$REPO"/src/iyi/*.iyi held-helpers/iyi/

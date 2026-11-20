@@ -291,21 +291,18 @@ case "$(uname -s)" in
       echo "  SIGPIPE on a gone peer: the patched library did not build"
       status=1
     else
-      # A write to a peer whose reset has already arrived answers
-      # ECONNRESET, which raises no signal, where one before it answers
-      # EPIPE and the signal: which comes first is the scheduler's timing,
-      # and a run on the work-stealing pool once answered the first and
-      # exited 0. The copy is run up to five times; one death by the
-      # signal is the proof.
-      for attempt in 1 2 3 4 5; do
-        "$WORK/sigpipe/program" >"$WORK/sigpipe/out" 2>&1
-        code=$?
-        [ "$code" -eq 141 ] && break
-      done
-      if [ "$code" -eq 141 ] && ! grep -q "disconnect: ok" "$WORK/sigpipe/out"; then
+      # One run. The program prints a marker just before its writes to the gone
+      # peer, and the signal counts only when it came after that marker and
+      # before "disconnect: ok". The program reads to the peer's end first, so
+      # the first write that fails meets the peer's reset as EPIPE in CLOSE_WAIT:
+      # the copy that drops MSG_NOSIGNAL raises SIGPIPE there.
+      "$WORK/sigpipe/program" >"$WORK/sigpipe/out" 2>&1
+      code=$?
+      if [ "$code" -eq 141 ] && grep -qF "disconnect: writing to a peer that has closed" "$WORK/sigpipe/out" && ! grep -qF "disconnect: ok" "$WORK/sigpipe/out"; then
         echo "  SIGPIPE on a gone peer: killed by the signal at the disconnect (exit 141)"
       else
         echo "  SIGPIPE on a gone peer: exited $code, so the check does not see it"
+        tail -3 "$WORK/sigpipe/out"
         status=1
       fi
     fi ;;

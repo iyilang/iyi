@@ -234,8 +234,26 @@ gone_server = IyiSocket.listen(0)
 gone_client = IyiSocket.connect("127.0.0.1", gone_server.local_port).or_panic
 gone_conn = gone_server.accept.or_panic
 gone_client.close
+{% if flag?(:linux) %}
+  # Read to the peer's end before writing. The read returns the end only
+  # after the kernel has processed the peer's FIN, so the socket is in
+  # CLOSE_WAIT before the first write, where the peer's reset sets EPIPE
+  # rather than ECONNRESET. The first write that meets the reset raises
+  # SIGPIPE in a build that drops MSG_NOSIGNAL, and answers EPIPE in the
+  # sound build. Without the read, a write can come before the FIN is
+  # processed, and the reset then answers ECONNRESET, which raises no signal.
+  puts "watchdog stage: waiting for the closed peer's EOF"
+  case gone_end = gone_conn.read(256)
+  in String
+    raise "disconnect: the peer sent #{gone_end.bytesize} bytes after it closed" unless gone_end.empty?
+  in Cancelled, SocketError
+    raise "disconnect: the peer's end did not arrive: #{gone_end.message}"
+  end
+  puts "watchdog stage: closed peer EOF received"
+{% end %}
 chunk = "x" * 65536
 tries = 0
+puts "disconnect: writing to a peer that has closed"
 wrote = gone_conn.write(chunk)
 while wrote.is_a?(Int32)
   tries = tries + 1
@@ -243,6 +261,10 @@ while wrote.is_a?(Int32)
   wrote = gone_conn.write(chunk)
 end
 raise "disconnect: expected a SocketError, got #{wrote.inspect}" unless wrote.is_a?(SocketError)
+{% if flag?(:linux) %}
+  puts "disconnect: errno #{wrote.code}"
+  raise "disconnect: expected errno 32, got #{wrote.code}" unless wrote.code == 32
+{% end %}
 raise "disconnect: #{wrote.message} is not a disconnect" unless wrote.disconnected?
 gone_conn.close
 gone_server.close

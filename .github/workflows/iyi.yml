@@ -377,6 +377,13 @@ jobs:
   # two shards with both grown modules' old weights were cut off at 45
   # (jobs 134257615300, 134616844992). Five hold 1,145 to 1,152 s: 27
   # minutes at 1.24 with setup, 60% of forty-five, and 43 at 2.1.
+  #
+  # Then `iyi lsp` stopped recompiling a large module for every question
+  # (bcee7ed4f) and the sweep fell to 3,464 s: in 20 green shard jobs of
+  # 2026-11-20 the shard holding std/autocert swept in 290 to 300 s on a
+  # median runner and the heaviest in 900 to 920 (jobs 6.7 to 23.2 minutes).
+  # Re-dealt by those jobs' own seconds, five hold 676 to 715 s: 23 minutes
+  # at the slowest green job's 1.72 with setup, 51% of forty-five.
   lsp-positions:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'lsp-positions') }}

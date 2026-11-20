@@ -1371,17 +1371,25 @@ verdict_held lostcancel_hook 'wakes, cancels: the targeted suspend claimed its c
   # copies. A locked check waits for the wake to attempt the lock; an
   # unlocked check waits for the wake to finish before linking the waiter.
   LOSTWORD_COMMON='/^  def self.park_on\(/ { inpark = 1; inlink = 1; n_park++ }
+inpark && /^  end$/ { inpark = 0 }
 inlink && /^  end$/ { inlink = 0 }
 inlink && /^    tails\[bucket\] = waiter$/ { print; print "    force_lost_link(word)"; n_link++; next }
 /^  def self.wake_on\(/ { inwake = 1; n_wake++ }
+inwake && /^  end$/ { inwake = 0 }
 inwake && /^    IyiChanLock.lock\(lock\)$/ { print "    force_lost_attempt(word)"; n_attempt++ }
-inwake && /^    IyiChanLock.unlock\(lock\)$/ { print "    force_lost_scanned(word, woken)"; print; print "    force_lost_done(word)"; n_done++; inwake = 0; next }'
-  LOSTWORD_BUG='inpark && /^    IyiChanLock.lock\(lock\)$/ { n_lock++; next }
-inpark && /^      IyiChanLock.unlock\(lock\)$/ { n_unlock++; next }
-inpark && /^    end$/ { print; print "    force_lost_window(word, lock)"; print "    IyiChanLock.lock(lock)"; n_window++; n_insert++; inpark = 0; next }'
-  LOSTWORD_CONTROL='inpark && /^    IyiChanLock.lock\(lock\)$/ { n_lock++ }
-inpark && /^      IyiChanLock.unlock\(lock\)$/ { n_unlock++ }
-inpark && /^    end$/ { print; print "    force_lost_window(word, lock)"; n_window++; n_insert++; inpark = 0; next }'
+inwake && /^    IyiChanLock.unlock\(lock\)$/ { print "    force_lost_scanned(word, woken)"; print; print "    force_lost_done(word)"; n_done++; next }'
+  LOSTWORD_BUG='inpark && !seq_open && !seq_done && /^    IyiChanLock.lock\(lock\)$/ { seq_open = 1; seq = 1; n_lock++; next }
+seq == 1 { if ($0 != "    if word.value.get != seen") exit 3; seq = 2; print; next }
+seq == 2 { if ($0 != "      IyiChanLock.unlock(lock)") exit 3; seq = 3; n_unlock++; next }
+seq == 3 { if ($0 != "      return nil") exit 3; seq = 4; print; next }
+seq == 4 { if ($0 != "    end") exit 3; seq = 0; seq_done = 1; print; print "    force_lost_window(word, lock)"; print "    IyiChanLock.lock(lock)"; n_window++; n_insert++; next }
+inpark && (/^ +if word\.value\.get != seen$/ || /^      IyiChanLock\.unlock\(lock\)$/) { n_stray++ }'
+  LOSTWORD_CONTROL='inpark && !seq_open && !seq_done && /^    IyiChanLock.lock\(lock\)$/ { seq_open = 1; seq = 1; n_lock++; print; next }
+seq == 1 { if ($0 != "    if word.value.get != seen") exit 3; seq = 2; print; next }
+seq == 2 { if ($0 != "      IyiChanLock.unlock(lock)") exit 3; seq = 3; n_unlock++; print; next }
+seq == 3 { if ($0 != "      return nil") exit 3; seq = 4; print; next }
+seq == 4 { if ($0 != "    end") exit 3; seq = 0; seq_done = 1; print; print "    force_lost_window(word, lock)"; n_window++; n_insert++; next }
+inpark && (/^ +if word\.value\.get != seen$/ || /^      IyiChanLock\.unlock\(lock\)$/) { n_stray++ }'
   LOSTWORD_DEFS='/^  @@lot_locks : Pointer\(UInt64\)/ {
   print
   print "  @[UnsafeReach(\"copy-only word rendezvous accessed atomically\")]"
@@ -1442,7 +1450,7 @@ inpark && /^    end$/ { print; print "    force_lost_window(word, lock)"; n_wind
   n_defs++
   next
 }'
-  LOSTWORD_END='END { if (n_park != 1 || n_window != 1 || n_wake != 1 || n_attempt != 1 || n_done != 1 || n_link != 1 || n_lock != 1 || n_unlock != 1 || n_insert != 1 || n_defs != 1) exit 3 }'
+  LOSTWORD_END='END { if (n_park != 1 || n_window != 1 || n_wake != 1 || n_attempt != 1 || n_done != 1 || n_link != 1 || n_lock != 1 || n_unlock != 1 || n_insert != 1 || n_defs != 1 || seq_open != 1 || seq_done != 1 || seq != 0 || n_stray != 0) exit 3 }'
   broken lostword "$LOSTWORD_COMMON
 $LOSTWORD_BUG
 $LOSTWORD_DEFS

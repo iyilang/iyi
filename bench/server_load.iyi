@@ -153,6 +153,38 @@ bad = 0
 
 canary_bad = 0
 
+{% if !flag?(:win32) %}
+# Two calls, each in its own frame so that nothing holds the buffer's address
+# across the collection: the first discards its result, the second is read
+# after the collection.
+def warm_events : Int32
+  IyiScheduler.events_buffer
+  0
+end
+
+def events_freed : Bool
+  IyiMark.flags(IyiScheduler.events_buffer) & IyiHeap::FREE_FLAG != 0
+end
+{% end %}
+
+# The POSIX half of the check, before the run and before any poll. The
+# scheduler state refers to the poller's event buffer and nothing else, so
+# the collector's view of that one reference is the whole question. In the
+# sound build the state's field is typed and keeps the buffer live. In a copy
+# that holds the buffer as a number, this collection frees it, and the copy
+# exits here on its first run, before anything can write into the freed
+# chunk. Placed inside a connection's serve instead, the copy went uncaught on
+# Linux in 20 of 20 whole-gate runs (probe job 135796826923, 0 of 20 passed),
+# so the check runs here, once, before any connection exists.
+{% if !flag?(:win32) %}
+  warm_events
+  IyiMark.collect
+  if events_freed
+    print "FAIL: a collection freed the poller's event buffer, which the kernel writes into\n"
+    __iyi_exit(1)
+  end
+{% end %}
+collections_before_load = IyiMark.collections
 group do |outer|
   outer.spawn { churn }
   outer.spawn do
@@ -189,6 +221,7 @@ group do |outer|
     0
   end
 end
+collections_during_load = IyiMark.collections - collections_before_load
 
 listener.close
 
@@ -197,7 +230,7 @@ tops.each do |top|
   distinct << top unless distinct.includes?(top) || top == 0_u64
 end
 
-puts "collections " + IyiMark.collections.to_s
+puts "collections during load " + collections_during_load.to_s
 puts "answers " + tops.size.to_s + ", failures " + bad.to_s
 puts "stacks " + distinct.size.to_s
 
@@ -207,7 +240,7 @@ raise "FAIL: the poller wrote into " + canary_bad.to_s +
       " object(s) the collector had handed out" if canary_bad != 0
 raise "FAIL: a reply was wrong" if bad != 0
 raise "FAIL: served " + tops.size.to_s + " of " + ROUNDS.to_s if tops.size != ROUNDS
-raise "FAIL: nothing was collected, so nothing was proven" if IyiMark.collections == 0_u64
+raise "FAIL: nothing was collected during load, so nothing was proven" if collections_during_load == 0_u64
 raise "FAIL: the stacks were not reused - " + distinct.size.to_s + " of them for " +
       ROUNDS.to_s + " connections" if distinct.size > STACK_BOUND
 puts "every property held"

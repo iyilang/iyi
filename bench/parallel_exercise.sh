@@ -11,7 +11,7 @@
 #   preemptoff: a timed short task decides; hold the computation and require the short task before release.
 #   noflag: a timed short task decides; hold the computation and record the monitor's raised-word decision.
 #   nopoll: a request latency bound decides; hold the slow task and record the targeted poll decision.
-#   stale: a timed monitor/switch alignment decides; force the raised word across the targeted switch.
+#   stale: a timed switch decision repeats up to 50 rounds for 10 judged; force the raised word across the target switch.
 #   libruntime sort: finite work and latency decide; hold an in-sort poll point until a short task is queued.
 #   libruntime copy: finite work and latency decide; hold an in-copy poll point until a short task is queued.
 #   libruntime rehash: finite work and latency decide; hold an in-rehash poll point until a short task is queued.
@@ -21,6 +21,9 @@
 #   closeshome: registration relies on a sleep and a wake-count check can mask the verdict; record registration and judge placement first.
 #   duplicate: another worker must steal the stale head; rendezvous at that head would force the witness.
 #   tokenless: preemption must land with a same-unit child runnable; hold that child ready across the switch.
+# Repeated healthy verdicts, not made deterministic here: best_ms combines
+# the best time and highest at-once count from three runs; tight compares
+# best-of-seven times; sockets and deep retry a no-move run up to five times.
 #
 #   1. The exercise holds every property, plain and --release: parallel
 #      tasks start on the pool and on more than one worker, never on the
@@ -120,10 +123,10 @@
 #      join held in the kernel; and on Windows
 #      a port whose packets only the worker their task parked on runs, and
 #      a pool that leaves the priority boost on.
-#      Timing-decided and conditional exceptions are listed in the header.
-#      Coarse is a structural wait-path proof; tokenless is conditional.
-#   8. Failure proof: the pool held to one worker whatever it was asked
-#      for, and step 4's floors refuse what comes out.
+#      Timing-decided, repeated and conditional exceptions are in the header.
+#      Coarse is structural; tokenless is conditional.
+#   8. Failure proof: one run of the pool held to one worker is refused by
+#      the at-once floor, independent of elapsed time.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"

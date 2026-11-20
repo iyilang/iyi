@@ -882,7 +882,9 @@ group do |g|
   g.spawn(unit: :new) { ask(2_i64) }
 end
 IYI
-awk '/^@\[SafeReach/ { next } /^module reaches$/ { print "module reaches_bare"; next } { print }' reaches.iyi > reaches_bare.iyi
+if ! awk '/^@\[SafeReach/ { marks++; next } /^module reaches$/ { modules++; print "module reaches_bare"; next } { print } END { if (marks != 1 || modules != 1) exit 3 }' reaches.iyi > reaches_bare.iyi; then
+  echo "the awk for reaches_bare found a missing or duplicate anchor"; exit 1
+fi
 if cmp -s reaches.iyi reaches_bare.iyi; then
   echo "the awk for reaches_bare found nothing to change"; exit 1
 fi
@@ -909,7 +911,9 @@ if ! grep -qF "$want" check-reaches-bare.log; then
 fi
 echo "  broken copy, the mark taken off: refused by the build and by check, the claim offered"
 echo "  refused once for two blocks: $(grep -m1 -oF "$want" build-reaches-bare.log | cut -c1-150)"
-awk '/ask\(2_i64\)/ { next } /^module reaches_bare$/ { print "module reaches_lone"; next } { print }' reaches_bare.iyi > reaches_lone.iyi
+if ! awk '/ask\(2_i64\)/ { calls++; next } /^module reaches_bare$/ { modules++; print "module reaches_lone"; next } { print } END { if (calls != 1 || modules != 1) exit 3 }' reaches_bare.iyi > reaches_lone.iyi; then
+  echo "the awk for reaches_lone found a missing or duplicate anchor"; exit 1
+fi
 if cmp -s reaches_bare.iyi reaches_lone.iyi; then
   echo "the awk for reaches_lone found nothing to change"; exit 1
 fi
@@ -1361,7 +1365,11 @@ step "failure proof: a hand that never marks its select, a cancel lost as a task
 # sampled had a worker in `take_mail` holding the scheduler's lock and
 # every other thread waiting for it, its watchdog's among them, so it is
 # not one of the proofs.
-broken unhanded '/^      head.handed = true$/ { n++; next } { print } END { if (n != 1) exit 3 }'
+broken unhanded '/^  private def hand\(value : T\) : Bool$/ { inside = 1; methods++ }
+inside && /^  end$/ { inside = 0 }
+inside && /^      head.handed = true$/ { n++; next }
+{ print }
+END { if (methods != 1 || n != 1) exit 3 }'
 verdict_caught unhanded 'wakes, selects: a value handed to a parked select was not received' wakes --only=handed --watch=5000
 broken lostcancel "$CANCEL_BUG" concurrency.iyi parallel_exercise -Dlostcancel_force
 verdict_caught lostcancel 'wakes, cancels: the targeted suspend omitted the cancelled claim' wakes --only=cancels --watch=5000
@@ -2137,7 +2145,11 @@ fi
 verdict_caught preemptoff 'slice: the short task exceeded the wait bound' slice --workers=1
 
 step "failure proof: a monitor that never raises a worker's word preempts nothing"
-broken noflag '/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
+broken noflag '/^  private def self.look : Bool$/ { inside = 1; methods++ }
+inside && /^  end$/ { inside = 0 }
+inside && /^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n++; next }
+{ print }
+END { if (methods != 1 || n != 1) exit 3 }' concurrency.iyi parallel_preempt
 verdict_caught noflag 'slice: the short task exceeded the wait bound' slice --workers=1
 
 # Both copies make, set and wait on the high-resolution timer before the
@@ -2302,7 +2314,11 @@ step "failure proof: a slow half that does not poll leaves a connection in a bus
 # answer on. On Windows 11, 12 logical processors (the user's machine),
 # the copy answered at 999 to 1001 ms in ten runs of ten, where the
 # gate's own poller step read 7.0 to 9.1 ms in six.
-broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
+broken nopoll '/^  def self.preempted : Nil$/ { inside = 1; methods++ }
+inside && /^  end$/ { inside = 0 }
+inside && /^        IyiScheduler.wait_for_events\(false\)$/ { n++; print "        IyiScheduler.wake_expired_sleepers"; next }
+{ print }
+END { if (methods != 1 || n != 1) exit 3 }' concurrency.iyi parallel_preempt
 verdict_caught nopoll 'poller: the fast request exceeded the wait bound' poller --workers=1
 
 step "failure proof: a word the monitor raised for the task before preempts the task switched in after it"
@@ -2322,7 +2338,11 @@ step "failure proof: a word the monitor raised for the task before preempts the 
 # caught at round 1 within 55 to 3075 us of that end on Linux (8 runs, 16
 # to 48 threads runnable), 64 us in a gate run beside 12 busy loops, and
 # 34 to 50 us on tmac.
-broken stale '/^        raised.value.set\(0_u64\) if raised.value.get != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
+broken stale '/^  def self.switch_to\(fiber : IyiFiber\) : Nil$/ { inside = 1; methods++ }
+inside && /^  end$/ { inside = 0 }
+inside && /^        raised.value.set\(0_u64\) if raised.value.get != 0_u64$/ { n++; next }
+{ print }
+END { if (methods != 1 || n != 1) exit 3 }' concurrency.iyi parallel_preempt
 verdict_caught stale "fresh: a switched-in task yielded before the monitor's floor" fresh --workers=1
 
 step "failure proof: a port whose packets only the thread their task parked on runs leaves an answer behind a computation"
@@ -2386,14 +2406,22 @@ esac
 step "failure proof: a pool that leaves Windows' priority boost on"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    broken boosted '/^        LibC\.SetProcessPriorityBoost\(LibC\.GetCurrentProcess, 1_i32\)$/ { next } { print }' concurrency.iyi completions_taken
+    broken boosted '/^  def self.start : Nil$/ { inside = 1; methods++ }
+inside && /^  end$/ { inside = 0 }
+inside && /^        LibC\.SetProcessPriorityBoost\(LibC\.GetCurrentProcess, 1_i32\)$/ { n++; next }
+{ print }
+END { if (methods != 1 || n != 1) exit 3 }' concurrency.iyi completions_taken
     verdict_caught boosted "boost: the process's priority boost is on with the pool started" boost --workers=12 ;;
   *)
     echo "  Windows' alone: the boost is its scheduler's" ;;
 esac
 
 step "failure proof: a preempted task that gives its unit's token away lets its child run inside it"
-broken tokenless '/^      return unless unit.hand_to_yielded\(id\)$/ { print "      unit.give"; next } { print }' concurrency.iyi parallel_preempt
+broken tokenless '/^  private def self.give_up\(st : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { inside = 1; methods++ }
+inside && /^  end$/ { inside = 0 }
+inside && /^      return unless unit.hand_to_yielded\(id\)$/ { n++; print "      unit.give"; next }
+{ print }
+END { if (methods != 1 || n != 1) exit 3 }' concurrency.iyi parallel_preempt
 verdict_caught tokenless 'unit: a task of the same unit ran inside the preempted task' unit --workers=1
 
 step "failure proof: the prelude's library compiled as the runtime's holds its worker through a sort, a copy, a growth and a join"
@@ -2422,8 +2450,13 @@ done
 step "failure proof: a copy whose every run goes through the loop of runs checks however short it is"
 mkdir -p copyruns/iyi
 cp "$REPO"/src/iyi/*.iyi copyruns/iyi/
-awk '/^    return copy_run\(source, count\) if count <= 1048576$/ { next } { print }' \
-  "$REPO/src/iyi/string.iyi" > copyruns/iyi/string.iyi
+if ! awk '/^  def copy_from\(source : Pointer\(T\), count : Int32\) : Nil$/ { inside = 1; methods++ }
+inside && /^  end$/ { inside = 0 }
+inside && /^    return copy_run\(source, count\) if count <= 1048576$/ { n++; next }
+{ print }
+END { if (methods != 1 || n != 1) exit 3 }' "$REPO/src/iyi/string.iyi" > copyruns/iyi/string.iyi; then
+  echo "the awk for copyruns found a missing or duplicate anchor"; exit 1
+fi
 cmp -s copyruns/iyi/string.iyi "$REPO/src/iyi/string.iyi" && { echo "the awk for copyruns found nothing to change"; exit 1; }
 if ! IYI_PATH="$WORK/copyruns${PSEP}$REPO/src" "$IYI" build --release --emit llvm-ir "$REPO/bench/parallel_preempt_lib.iyi" -o copyruns-run > build-copyruns.log 2>&1; then
   echo "the copyruns copy failed to build:"; tail -20 build-copyruns.log; exit 1
@@ -2462,8 +2495,10 @@ step "failure proof: a scheduler the compiler takes for a library's checks, and 
   mkdir -p rtout/iyi
   cp "$REPO"/src/iyi/*.iyi rtout/iyi/
   mv rtout/iyi/concurrency.iyi rtout/iyi/scheduler.iyi
-  awk '/^  require "\.\/concurrency"$/ { print "  require \"./scheduler\""; next } { print }' \
-    "$REPO/src/iyi/prelude.iyi" > rtout/iyi/prelude.iyi
+  if ! awk '/^  require "\.\/concurrency"$/ { n++; print "  require \"./scheduler\""; next } { print } END { if (n != 1) exit 3 }' \
+    "$REPO/src/iyi/prelude.iyi" > rtout/iyi/prelude.iyi; then
+    echo "the awk for rtout found a missing or duplicate anchor"; exit 1
+  fi
   cmp -s rtout/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk for rtout found nothing to change"; exit 1; }
   if ! IYI_PATH="$WORK/rtout${PSEP}$REPO/src" "$IYI" build --emit llvm-ir "$REPO/bench/parallel_preempt_lib.iyi" -o rtout-run > build-rtout.log 2>&1; then
     echo "the renamed scheduler failed to build:"; tail -20 build-rtout.log; exit 1
@@ -2481,7 +2516,11 @@ step "failure proof: a pool held to one worker fails the at-once floor in one ru
 need_cores 2 "the floor is not held on one core, so there is nothing to fail"
   mkdir -p oneworker/iyi
   cp "$REPO"/src/iyi/*.iyi oneworker/iyi/
-  if ! awk '/^      workers = resolved$/ { print "      workers = 1"; n++; next } { print } END { if (n != 1) exit 3 }' \
+  if ! awk '/^  def self.start : Nil$/ { inside = 1; methods++ }
+inside && /^  end$/ { inside = 0 }
+inside && /^      workers = resolved$/ { print "      workers = 1"; n++; next }
+{ print }
+END { if (methods != 1 || n != 1) exit 3 }' \
     "$REPO/src/iyi/concurrency.iyi" > oneworker/iyi/concurrency.iyi; then
     echo "the one-worker mutation anchor was missing or duplicated"; exit 1
   fi

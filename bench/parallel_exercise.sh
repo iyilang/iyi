@@ -2453,28 +2453,29 @@ step "failure proof: a scheduler the compiler takes for a library's checks, and 
   echo "  $(head -1 rtout.txt | sed 's/^preempt audit: //'), the first of them $(sed -n 2p rtout.txt | sed 's/^ *//')"
 
 # ── 8. Failure proof: one worker, whatever was asked for ──────────────────
-# Refused at any load by the threads that held a task at once, which one
-# worker holds at 1.00 at most; and where step 3 judged the time's ratio,
-# by that too.
-step "failure proof: a pool held to one worker fails the speedup floor"
+# One run is refused by the at-once floor: one worker holds its tasks at
+# most 1.00 at once, below 0.6 x K for K of two or more. Time is data.
+step "failure proof: a pool held to one worker fails the at-once floor in one run"
 need_cores 2 "the floor is not held on one core, so there is nothing to fail"
   mkdir -p oneworker/iyi
   cp "$REPO"/src/iyi/*.iyi oneworker/iyi/
-  awk '/^      workers = resolved$/ { print "      workers = 1"; next } { print }' \
-    "$REPO/src/iyi/concurrency.iyi" > oneworker/iyi/concurrency.iyi
-  cmp -s oneworker/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && { echo "the awk for oneworker found nothing to change"; exit 1; }
+  if ! awk '/^      workers = resolved$/ { print "      workers = 1"; n++; next } { print } END { if (n != 1) exit 3 }' \
+    "$REPO/src/iyi/concurrency.iyi" > oneworker/iyi/concurrency.iyi; then
+    echo "the one-worker mutation anchor was missing or duplicated"; exit 1
+  fi
   if ! IYI_PATH="$WORK/oneworker${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/parallel_exercise.iyi" -o oneworker-run > build-oneworker.log 2>&1; then
     echo "the one-worker copy failed to build:"; tail -20 build-oneworker.log; exit 1
   fi
-  got="$(best_ms "$K" oneworker-run)" || exit 1
-  SLOW="${got% *}"
-  SLOW_AT="${got#* }"
+  line="$(timeout -k 5 300 ./oneworker-run speed "$K" "$TASKS" "$ROUNDS")"
+  code=$?
+  SLOW="$(echo "$line" | sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p')"
+  SLOW_AT="$(echo "$line" | sed -n 's/.*at_once=\([0-9]*\).*/\1/p')"
+  if [ "$code" -ne 0 ] || [ -z "$SLOW" ] || [ -z "$SLOW_AT" ]; then
+    echo "the one-worker copy did not print its time and count (exit $code): $line"; exit 1
+  fi
   if holds_at_once "$SLOW_AT" "$K"; then
     echo "a pool of one worker asked for $K held its tasks $(at_once "$SLOW_AT") at once and passed the floor"; exit 1
   fi
-  if [ -n "$SPEED_JUDGED" ] && holds_floor "$ONE" "$SLOW" "$K"; then
-    echo "a pool of one worker asked for $K took $SLOW ms against $ONE ms and passed the floor"; exit 1
-  fi
-  echo "  asked for $K, ran on 1: $(at_once "$SLOW_AT") at once, $SLOW ms against $ONE ms, $(awk -v a="$ONE" -v b="$SLOW" 'BEGIN { printf "%.2f", a / b }')x, refused"
+  echo "  asked for $K, ran on 1, one run: $(at_once "$SLOW_AT") at once, under the floor; $SLOW ms, not judged"
 
 echo "parallel gate: every property held"

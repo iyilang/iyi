@@ -504,7 +504,7 @@ module bench/heap_drain
         unit = g.spawn(unit: :new) do
           start_wait = IyiMark.now_ns
           while opened.get == 0
-            mark_setup_fail("mark: unit timed out waiting for the held mark") if IyiMark.now_ns &- start_wait >= 60000000000_u64
+            mark_setup_fail("mark: unit timed out waiting for the held mark") if IyiMark.now_ns &- start_wait >= 120000000000_u64
             sleep(1)
           end
           IyiMark.forced_target(IyiHeap.current_record)

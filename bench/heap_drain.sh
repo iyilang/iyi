@@ -258,7 +258,7 @@ hinted() {
 
   def self.placed_fail(message : String) : NoReturn
     __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-    __iyi_exit(1)
+    __iyi_exit(76)
   end
 IYI
   if ! awk -v ins="$WORK/placed.iyi" "$PLACE_AFTER" "$REPO/src/iyi/heap_partition.iyi" >"$dir/iyi/heap_partition.iyi"; then
@@ -274,6 +274,12 @@ IYI
   build "$name-bin" "-Dheap_partitions --release -Dplaced_force" "$dir${PSEP}$REPO/src" || return
   timeout 600 "$WORK/$name-bin" dir >"$dir/run.out" 2>"$dir/run.err"
   local code=$?
+  if [ "$code" -eq 76 ]; then
+    echo "  $label: setup failed (exit 76: the placement or a watchdog, not a catch)"
+    sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
+    status=1
+    return
+  fi
   if [ "$want" = 1 ]; then
     if [ "$code" -eq 1 ] && grep -qxE 'FAIL: dir: large object 0 at 0x[0-9a-f]+ is no heap pointer the moment it is made' "$dir/run.out"; then
       echo "  $label: caught, $(grep -m1 '^FAIL: ' "$dir/run.out")"
@@ -352,7 +358,7 @@ marked() {
         Pointer(Atomic(UInt64)).new(pointerof(@@forced_open).address).value.set(1_u64)
         started = IyiMark.now_ns
         while Pointer(Atomic(UInt64)).new(pointerof(@@forced_hold).address).value.get != 0_u64
-          if IyiMark.now_ns &- started >= 60000000000_u64
+          if IyiMark.now_ns &- started >= 120000000000_u64
             message = "FAIL: mark: closer timed out waiting for release\n"
             __iyi_write(1, message.to_unsafe.as(Void*), message.bytesize.to_u64)
             __iyi_exit(76)
@@ -376,6 +382,12 @@ IYI
   build "$name-bin" "-Dheap_partitions --release -Dmark_force" "$dir${PSEP}$REPO/src" || return
   timeout 600 "$WORK/$name-bin" mark >"$dir/run.out" 2>"$dir/run.err"
   local code=$?
+  if [ "$code" -eq 76 ]; then
+    echo "  $label: setup failed (exit 76: a watchdog or setup, not a catch)"
+    sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
+    status=1
+    return
+  fi
   if [ "$want" = 1 ]; then
     if [ "$code" -eq 1 ] && [ "$(grep -c '^FAIL: ' "$dir/run.out")" -eq 1 ] && grep -qxE 'FAIL: mark: a unit allocated [0-9]+ bytes under a held mark and never held' "$dir/run.out"; then
       echo "  $label: caught, $(grep -xE 'FAIL: mark: a unit allocated [0-9]+ bytes under a held mark and never held' "$dir/run.out")"

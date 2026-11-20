@@ -571,9 +571,8 @@
   fail("large: #{kept_large} of #{large_round} outgrown blocks were never freed, #{large_under_mark} of them outgrown under a mark") if large_under_mark >= 2 && kept_large >= large_under_mark
   puts "large: #{large_under_mark} of #{large_round} blocks outgrown under a running mark stayed mapped beside the helpers, and #{large_round - kept_large} were freed after"
   # The helpers' priority boost is off. thread.iyi's start_helper turns it off
-  # for each helper the runtime starts on Windows, and a helper woken with the
-  # boost on runs above the thread that woke it, which the effect check below
-  # can only sample. Counted over the process's own threads instead: at least
+  # for each helper the runtime starts on Windows. Wake timings below are
+  # informational. Count the boost over the process's own threads: at least
   # as many with the boost off as the helpers the last mark beside the program
   # asked for, and such a mark must have asked for some.
   {% if flag?(:win32) %}
@@ -590,10 +589,9 @@
   # woke it and took its core, 3.7 to 40 ms at the longest. The longest
   # wake was the check, and it caught the machine instead once: a runner
   # took the thread away for 3.7 ms in one wake of 49, which it does
-  # without any help. So the wakes are counted, over two hundred more
-  # collections beside a kept chain, and the check is how many were slow.
-  # The structural count above decides the boost; the wake timings are
-  # information only because scheduling can delay a healthy thread.
+  # without any help. Wake counts and timings over two hundred more
+  # collections are information only; the structural count above decides
+  # the boost because scheduling can delay a healthy thread.
   IyiMark.auto = true
   kept = build_chain(1_u64)
   wake_rounds(kept)

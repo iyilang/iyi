@@ -514,11 +514,9 @@
   outgrown = Pointer(UInt64).malloc(64_u64)
   large_under_mark = 0
   large_round = 0
-  {% if flag?(:unmapped_force) %}
-    large_rounds = 2
-  {% else %}
-    large_rounds = 8
-  {% end %}
+  # Probe 44660980105 kept one of two blocks in 9 of 20 macOS runs; retain
+  # the plain run's eight-block margin against conservative stale words.
+  large_rounds = 8
   while large_round < large_rounds
     IyiMark.auto = false
     {% if flag?(:unmapped_force) %}
@@ -568,7 +566,7 @@
     index = index + 1
   end
   {% if flag?(:unmapped_force) %}
-    fail("large: #{large_under_mark} of #{large_round} held rounds reached the check, not 2") unless large_under_mark == 2
+    fail("large: #{large_under_mark} of #{large_round} held rounds reached the check, not 8") unless large_under_mark == 8
   {% end %}
   fail("large: #{kept_large} of #{large_round} outgrown blocks were never freed, #{large_under_mark} of them outgrown under a mark") if large_under_mark >= 2 && kept_large >= large_under_mark
   puts "large: #{large_under_mark} of #{large_round} blocks outgrown under a running mark stayed mapped beside the helpers, and #{large_round - kept_large} were freed after"

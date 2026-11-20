@@ -739,10 +739,10 @@ if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_for
 fi
 timeout -k 5 300 ./held-run > held.txt 2>&1
 code=$?
-if [ "$code" -ne 0 ] || ! grep -q "^large: 2 of 2 blocks outgrown under a running mark stayed mapped beside the helpers, and [0-2] were freed after$" held.txt; then
+if [ "$code" -ne 0 ] || ! grep -q "^large: 8 of 8 blocks outgrown under a running mark stayed mapped beside the helpers, and [0-8] were freed after$" held.txt; then
   echo "the held rounds did not keep the block mapped (exit $code):"; tail -3 held.txt; exit 1
 fi
-echo "  the hook alone, exits 0: $(grep -m1 '^large: 2 of 2' held.txt)"
+echo "  the hook alone, exits 0: $(grep -m1 '^large: 8 of 8' held.txt)"
 mkdir -p unmapped/iyi
 cp held/iyi/*.iyi unmapped/iyi/
 awk '

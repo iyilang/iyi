@@ -789,6 +789,16 @@ cat > "$WORK/forced_words.iyi" <<'IYI'
     true
   end
 
+  def self.forced_unit_placement : Bool
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_seen).address).value.add(1_u64)
+    !IyiScheduler.current.parallel
+  end
+
+  def self.forced_parallel_placement : Bool
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_seen).address).value.add(1_u64)
+    IyiScheduler.current.parallel
+  end
+
   def self.forced_seen : UInt64
     Pointer(Atomic(UInt64)).new(pointerof(@@forced_seen).address).value.get
   end

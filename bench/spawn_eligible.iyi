@@ -112,7 +112,7 @@ import std/int
                 break if set
               end
 {% if flag?(:madeparallel_force) %}
-              fail("unit: a second task of the unit never ran beside the first") unless IyiWorkers.forced_meet
+              fail("unit: tasks of one unit were running at one instant") unless IyiWorkers.forced_unit_placement
 {% end %}
               until_ns = __iyi_monotonic_ns + SPIN_NS
               while __iyi_monotonic_ns < until_ns

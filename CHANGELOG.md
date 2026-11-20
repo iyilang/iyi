@@ -607,6 +607,34 @@
 
 ### Gates
 
+- **`bench/std_gc_exercise.sh` names the copies whose `stats` or
+  `is_heap_ptr` walks without the runtime lock, every run and on every
+  system.** The races at the exercise's end proved them: two seconds of
+  each verb beside threads whose mappings come and go, with the gate
+  expecting a memory fault and running the proofs on Windows only. A
+  Windows CI runner's `is_heap_ptr` copy answered wrong instead, at the
+  race's own check, and the gate failed it "not at the expected check"
+  (job 136250482652). It is the same unlocked walk, reading a node
+  another thread has unmapped or a mapping made in its place, and a
+  fault is not the only way it shows: on Linux, idle and on four busy
+  cores, the `is_heap_ptr` copy died of SIGSEGV in 187 runs of 200 (with
+  no sentence of iyi's: there the driver names that death, and the gate
+  runs the program itself), answered wrong in 1 and passed 12; the
+  `stats` copy faulted in 99 of 100 and passed 1. On Windows 11 both
+  faulted in every run, 200 and 100. The exercise now holds the runtime
+  lock on another thread and asks each verb inside the hold: the holder
+  lets go once the verb has answered or a second has passed, so a verb
+  that takes the lock answers after it, and one that walks without it
+  answers while it is held. Both copies fail there, at "stats answered
+  while another thread held the runtime lock" and its `is_heap_ptr`
+  twin: 200 runs of 200 each on Linux and on Windows 11, half idle and
+  half on four cores beside four busy loops. Beside the loops the
+  unlocked verbs answered within 2.6 µs of the ask, against the second
+  the hold allows. The sound module passes the whole gate 10 times of 10
+  idle and 10 of 10 beside load, on Linux and on Windows 11, with all six
+  copies failing at their checks each time; the races stay, as the locked
+  walk beside real unmaps.
+
 - **`bench/heap_local.iyi`'s `filter` check holds the owning unit's
   token while it looks, so the copy without the local mark's owner filter
   fails every run.** The check reads the `OWN` byte of an object of unit

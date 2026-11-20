@@ -27,6 +27,8 @@
 # best_ms also discards the timeout's exit status before parsing its output.
 # Copy-generator anchor negatives ran locally on macOS; platform-applicable
 # generated copies passed the gate on Linux, Windows and macOS.
+# Unproven placement: moving an array, hash or string require anchor to EOF
+# leaves libruntime's generator exit 0; missing and duplicate anchors exit 3.
 #
 #   1. The exercise holds every property, plain and --release: parallel
 #      tasks start on the pool and on more than one worker, never on the

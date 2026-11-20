@@ -1000,9 +1000,22 @@ IyiMark.collect
 # the free (copy only) drops it.
 GC.free(live[0].as(Void*))
 {% if flag?(:unbracketed_force) %}
+  arena = IyiHeap.arena_of(live[1].address)
+  head = IyiHeap.head_of(arena, live[1].address)
+  slot = IyiHeap.chunk_index(arena, head)
+  if IyiHeap.read8(arena + IyiHeap::META + slot * IyiHeap::META_ENTRY) & IyiHeap::EPOCH_FLAG != IyiMark.epoch_flag
+    print "FAIL: freed: the armed chunk would take the locked free path\n"
+    __iyi_exit(1)
+  end
   IyiHeap.arm_drop
 {% end %}
 GC.free(live[1].as(Void*))
+{% if flag?(:unbracketed_force) %}
+  if IyiHeap.drop_done != 1_u64
+    print "FAIL: freed: the armed collection did not complete exactly once\n"
+    __iyi_exit(1)
+  end
+{% end %}
 got = Pointer(Pointer(UInt64)).malloc(64_u64)
 k = 0
 while k < 64
@@ -1053,6 +1066,8 @@ awk 'function forced() {
     print "      # Copy only (concurrent_mark bracket proof): the one-shot word the program arms before its free."
     print "      @[UnsafeReach(\"copy-only: the one-shot word, set and read through its address\")]"
     print "      @@drop_armed : UInt64 = 0_u64"
+    print "      @[UnsafeReach(\"copy-only: the number of forced collections completed\")]"
+    print "      @@drop_done : UInt64 = 0_u64"
     print ""
     print "      def self.arm_drop : Nil"
     print "        Pointer(Atomic(UInt64)).new(pointerof(@@drop_armed).address).value.set(1_u64)"
@@ -1063,27 +1078,39 @@ awk 'function forced() {
     print "        Pointer(Atomic(UInt64)).new(pointerof(@@drop_armed).address).value.set(0_u64) if armed"
     print "        armed"
     print "      end"
+    print "      def self.drop_done : UInt64"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@drop_done).address).value.get"
+    print "      end"
+    print ""
+    print "      def self.force_drop : Nil"
+    print "        if take_drop"
+    print "          IyiMark.collect"
+    print "          Pointer(Atomic(UInt64)).new(pointerof(@@drop_done).address).value.add(1_u64)"
+    print "        end"
+    print "      end"
+    print ""
     print ""
   }
-  /^      def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared = 1 }
-  /^        write64\(head \+ OFF_LINK, table\[index\]\)$/ { print "        stale = table[index]"; print "        write64(head + OFF_LINK, stale)"; linked = 1; next }
-  { print } END { if (!declared || !linked) exit 3 }' "$REPO/src/iyi/prelude.iyi" > bracketed/iyi/prelude.iyi || { echo "the list link or the free this proof changes is not in the prelude any more"; exit 1; }
+  /^      def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared++ }
+  /^          leave\(table\)$/ { print; print "          IyiHeap.force_drop"; left++; next }
+  /^        write64\(head \+ OFF_LINK, table\[index\]\)$/ { print "        stale = table[index]"; print "        write64(head + OFF_LINK, stale)"; linked++; next }
+  { print } END { if (declared != 1 || linked != 1 || left != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > bracketed/iyi/prelude.iyi || { echo "the list link, bracket leave or free this proof changes is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/bracketed${PSEP}$REPO/src" "$IYI" build unbracketed.iyi -Dunbracketed_force -o bracketed-run > build-bracketed.log 2>&1; then
   cat build-bracketed.log; exit 1
 fi
 timeout -k 5 120 ./bracketed-run > bracketed.txt 2>&1
 code=$?
-if [ "$code" -ne 0 ] || ! grep -q '^unbracketed: ' bracketed.txt; then
-  echo "the control, bracket kept and no collection, did not pass (exit $code):"; tail -3 bracketed.txt; exit 1
+if [ "$code" -ne 0 ] || ! grep -Fxq 'unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole' bracketed.txt; then
+  echo "the control, collection after the bracket, did not pass (exit $code):"; tail -3 bracketed.txt; exit 1
 fi
-echo "  the control, bracket kept, exits 0: $(grep -m1 '^unbracketed: ' bracketed.txt)"
+echo "  the control, collection after the bracket, exits 0: $(grep -Fx 'unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole' bracketed.txt)"
 mkdir -p unbracketed/iyi
 cp bracketed/iyi/*.iyi unbracketed/iyi/
-awk '/^        stale = table\[index\]$/ { print; print "        IyiMark.collect if IyiHeap.take_drop"; hooked = 1; next }
-  { print } END { if (!hooked) exit 3 }' bracketed/iyi/prelude.iyi > unbracketed/iyi/prelude.iyi || { echo "the link this proof collects inside is not in the prelude any more"; exit 1; }
-awk '/^          write64\(table\.address &\+ CACHE_INSIDE, read64\(table\.address &\+ CACHE_INSIDE\) &\+ 1_u64\)$/ { entered = 1; next }
-  prev ~ /^          end$/ && /^          leave\(table\)$/ { left = 1; prev = $0; next }
-  { prev = $0; print } END { if (!entered || !left) exit 3 }' unbracketed/iyi/prelude.iyi > unbracketed/iyi/prelude.iyi.new || { echo "the bracket this proof removes from free is not in the prelude any more"; exit 1; }
+awk '/^        stale = table\[index\]$/ { print; print "        IyiHeap.force_drop"; hooked++; next }
+  { print } END { if (hooked != 1) exit 3 }' bracketed/iyi/prelude.iyi > unbracketed/iyi/prelude.iyi || { echo "the link this proof collects inside is missing or ambiguous"; exit 1; }
+awk '/^          write64\(table\.address &\+ CACHE_INSIDE, read64\(table\.address &\+ CACHE_INSIDE\) &\+ 1_u64\)$/ { entered++; next }
+  prev ~ /^          end$/ && /^          leave\(table\)$/ { left++; prev = $0; next }
+  { prev = $0; print } END { if (entered != 1 || left != 1) exit 3 }' unbracketed/iyi/prelude.iyi > unbracketed/iyi/prelude.iyi.new || { echo "the bracket this proof removes from free is missing or ambiguous"; exit 1; }
 mv unbracketed/iyi/prelude.iyi.new unbracketed/iyi/prelude.iyi
 if ! IYI_PATH="$WORK/unbracketed${PSEP}$REPO/src" "$IYI" build unbracketed.iyi -Dunbracketed_force -o unbracketed-run > build-unbracketed.log 2>&1; then
   cat build-unbracketed.log; exit 1

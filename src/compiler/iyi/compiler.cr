@@ -569,7 +569,7 @@ module Iyi
     OUTSIDE_PRELUDE_ANALYSIS = %w(
       cache_hold cleanup cross_compile dependency_printer dump_ll emit_base_filename
       emit_bind emit_targets frame_pointers iyi_direct_link iyi_keep
-      iyi_link_driver_only link_flags mattr mcmodel mcpu n_threads no_cleanup
+      iyi_link_driver_only iyi_link_template_key link_flags mattr mcmodel mcpu n_threads no_cleanup
       program progress_tracker single_module stderr target_machine verbose
     )
 
@@ -3875,22 +3875,29 @@ module Iyi
       # One file per set of flags, rather than one file: two programs in a
       # directory that link different libraries would otherwise take turns
       # overwriting each other's answer and asking the driver again each time.
-      cache = CacheDir.instance.join("link-template-#{key}")
+      cache = CacheDir.instance.join("#{CacheDir::LINK_TEMPLATE}#{key}")
+      @iyi_link_template_key = key
 
-      if File.file?(cache)
-        stored = File.read(cache).split('\n')
-        if stored[0]? == key && stored[1]? == iyi_link_inputs_fingerprint(stored[3]?)
-          return nil if stored[2]? == "unusable"
-          if (linker = stored[2]?) && (prefix = stored[3]?) && (suffix = stored[4]?)
-            return {linker, prefix, suffix}
-          end
+      # Read as one: the cache's rotation may remove the file between a
+      # look and a read (`CacheDir#cleanup_used`), and a missing template is
+      # one more question to the driver, not a failed build.
+      stored = begin
+        File.read(cache).split('\n')
+      rescue File::Error
+        nil
+      end
+      if stored && stored[0]? == key && stored[1]? == iyi_link_inputs_fingerprint(stored[3]?)
+        CacheDir.instance.used(cache)
+        return nil if stored[2]? == "unusable"
+        if (linker = stored[2]?) && (prefix = stored[3]?) && (suffix = stored[4]?)
+          return {linker, prefix, suffix}
         end
       end
 
       template = iyi_ask_driver_for_link_template(link_flags, lib_flags)
       linker, prefix, suffix = template if template
       stamp = iyi_link_inputs_fingerprint(prefix)
-      File.write(cache, template ? "#{key}\n#{stamp}\n#{linker}\n#{prefix}\n#{suffix}" : "#{key}\n#{stamp}\nunusable") rescue nil
+      iyi_store_link_template(key, template ? "#{key}\n#{stamp}\n#{linker}\n#{prefix}\n#{suffix}" : "#{key}\n#{stamp}\nunusable")
       template
     end
 
@@ -3973,16 +3980,42 @@ module Iyi
       {linker, before, after}
     end
 
+    # The key of the template this build looked up (`iyi_link_template`).
+    @iyi_link_template_key : String?
+
     # Records that the template does not work here, so the next build does not
-    # try it. Called after a direct link failed and the driver succeeded.
-    private def iyi_disable_direct_link(link_flags, lib_flags) : Nil
-      key = ::Crystal::Digest::MD5.hexdigest(
-        "#{DEFAULT_LINKER}\n#{link_flags}\n#{lib_flags}\n#{codegen_target}\n2")
-      # An empty fingerprint, which is what a template with no inputs has: the
-      # reader computes the same for this file and so believes it.
-      File.write(CacheDir.instance.join("link-template-#{key}"), "#{key}\n\nunusable") rescue nil
+    # try it. Called after a direct link failed, before the driver links.
+    #
+    # Under the key the template was looked up by. It was computed again here
+    # from `@link_flags` alone, without the `-rdynamic` (and any `-fuse-ld=`)
+    # the link adds before the lookup, so the mark went to a file nobody
+    # reads and every build tried the failing template again, then the
+    # driver: two links a build where one was meant to be paid once
+    # (`bench/rebuild_reuse.py` step 9: a linker counting its calls was
+    # called by each of three builds; now by the first alone).
+    private def iyi_disable_direct_link : Nil
+      if key = @iyi_link_template_key
+        # An empty fingerprint, which is what a template with no inputs has: the
+        # reader computes the same for this file and so believes it.
+        iyi_store_link_template(key, "#{key}\n\nunusable")
+      end
       @iyi_direct_link = false
       @iyi_link_driver_only = true
+    end
+
+    # Writes a template whole: to a file of this process's, renamed over the
+    # template, so a build reading it meanwhile finds the old one or the new
+    # one and never half of either. A template that cannot be stored is
+    # asked for again next time.
+    private def iyi_store_link_template(key : String, text : String) : Nil
+      cache = CacheDir.instance.join("#{CacheDir::LINK_TEMPLATE}#{key}")
+      temporary = "#{cache}.#{Process.pid}.tmp"
+      File.write(temporary, text)
+      File.rename(temporary, cache)
+    rescue File::Error | IO::Error
+      if temporary
+        File.delete?(temporary) rescue nil
+      end
     end
 
     # Tests if `mold` or `lld` are available and prefers them as linkers over
@@ -4135,7 +4168,7 @@ module Iyi
             # not work: the driver is asked to do it instead and the template
             # is marked unusable, so this is paid once rather than every build.
             raise ex unless @iyi_direct_link
-            iyi_disable_direct_link(@link_flags || "", program.lib_flags(@cross_compile))
+            iyi_disable_direct_link
             run_linker *linker_command(program, object_names, output_filename, output_dir, expand: true), busy_output: output_filename
           end
         end

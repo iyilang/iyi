@@ -211,6 +211,38 @@
   that waited on the lock and finds it gone makes the directory again.
   Any two builds sharing a cache could meet this, not only CI's.
 
+- **The cache's rotation removes old reach verdicts too.** A build stores
+  one verdict per std module with `@[SafeReach]` claims at the top of the
+  cache, keyed by the module's bytes, the flags and the compiler's own
+  executable, so every rebuild of the compiler writes a new set. The
+  rotation removed only directories: ~/.cache/iyi held 24,428 of them on
+  the project's Mac (59.6 MB) and 16,660 on a Linux box. It now keeps the
+  240 used last, as many as the twenty directories it keeps may each have
+  read (twelve modules with claims), and a build that reads a verdict
+  marks it used. Nothing waits on a lock for this: a build that finds a
+  verdict gone, before or while reading it, proves those claims again over
+  its own code, as with a cold cache, and stores the same answer.
+
+- **The cache's rotation removes old link templates too, and a template
+  that failed is marked where the next build looks.** On Linux a build
+  links through the command `cc` computed once, stored at the top of the
+  cache per set of link flags, and nothing removed them: 166 on a Linux
+  box. The rotation now keeps the 20 used last, one for each build and
+  helper it keeps, and a build that reads one marks it used; one found
+  gone, even between a look and the read, is asked of `cc` again rather
+  than failing the build, and a template is written whole, renamed into
+  place. A template whose link failed was marked unusable under a key
+  computed without the `-rdynamic` (and any `-fuse-ld=`) the link adds,
+  so the mark went to a file nobody reads: every build tried the failing
+  template, then linked again through `cc`. It is now marked under the key
+  it was read by, and only the first build pays the extra link.
+
+- **Spec and eval runners clean up after killed runs.** A run of
+  `crystal spec` killed before it cleaned up left its 61 to 74 MB spec
+  program in the cache, and only `iyi run` swept leftovers, its own name's
+  alone: a Linux box held eight, 518 MB. `spec`, `eval` and `run` now all
+  remove what a runner of either name left more than an hour ago.
+
 - **A pool short of workers no longer stays short while its tasks take
   turns.** The pool starts its workers one at a time: each new worker,
   finding a task with more waiting, calls for the next. A task halfway
@@ -738,15 +770,38 @@
   5 of 5 and 3 of 3. Step 6 now also counts what the rotation keeps, ten
   builds, on every system that runs it, Windows included.
 
+- **`bench/rebuild_reuse.py` holds the rotation of reach verdicts.** Step 8
+  makes the fixture's verdict older than 240 others, then builds the
+  fixture again: the build must read it, not prove it again, and its
+  rotation must keep it and remove the oldest of the others. Then 5,000
+  stale verdicts more, the fixture's the oldest, are removed by another
+  build's rotation while the fixture builds: both must link, and after one
+  more build 240 must be left, the fixture's with the bytes it first
+  stored. It also fails when more std modules hold a `@[SafeReach]` claim
+  than the rotation counts. Against the compiler before, the first half
+  failed 3 runs of 3 on Linux and 3 of 3 on Windows 11, and 3 of 3 on
+  Linux against the fix with a read no longer marking the verdict used.
+
+- **`bench/rebuild_reuse.py` holds the link templates and a runner's
+  leftovers.** Step 9 plants two leftovers two hours old, one per runner
+  name, and one just made: `iyi run` must take the two and keep the third.
+  On Linux, a template whose linker fails must leave the build linked
+  through `cc` and the template marked unusable, and the templates are
+  rotated as step 8 rotates verdicts: twenty kept, the one a build has
+  just read among them, and one removed asked of `cc` again to the same
+  bytes. Against the compiler before, each of the three failed 3 runs of
+  3 on Linux, and the leftovers 3 of 3 on Windows 11.
+
 - **The darwin jobs on the project's Mac each get the compilers' caches
   to themselves.** Its three runners share one HOME, so they shared
   ~/.cache/iyi: one job's rotation reached another's build (Fixed, above),
   and the directory held 24,451 entries, 24,428 of them reach verdicts
-  (59.6 MB) that nothing ever deletes. They shared ~/.cache/crystal too,
-  which brew's Crystal rotates with no lock at all. `IYI_CACHE_DIR` and
-  `CRYSTAL_CACHE_DIR` are now under the job's `RUNNER_TEMP`, as fresh as
-  GitHub's VMs and gone with the job. That costs `make iyi` a cold
-  cache: 19 and 21 s on the idle Mac, against 13 and 14 s warm.
+  (59.6 MB) that nothing deleted then (Fixed, above). They shared
+  ~/.cache/crystal too, which brew's Crystal rotates with no lock at all.
+  `IYI_CACHE_DIR` and `CRYSTAL_CACHE_DIR` are now under the job's
+  `RUNNER_TEMP`, as fresh as GitHub's VMs and gone with the job. That
+  costs `make iyi` a cold cache: 19 and 21 s on the idle Mac, against 13
+  and 14 s warm.
 
 - **darwin's spinner step in `bench/thread_exercise.sh` (7i) holds the
   spinners' CPU in every run, and judges the hint copy's rate only where

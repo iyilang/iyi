@@ -851,7 +851,13 @@ import std/socket::{IyiSocket, SocketError}
         end
         done.set(1_i64)
       end
-      fail("period: the active monitor used the semaphore fallback") if IyiWorkers.force_tick_wait == 2_u64
+      tick = IyiWorkers.force_tick_wait
+      fail("period: the high-resolution timer could not be made") if tick == 5_u64
+      fail("period: the high-resolution timer could not be set") if tick == 4_u64
+      fail("period: a wait on the high-resolution timer failed") if tick == 3_u64
+      fail("period: the semaphore wait failed") if tick == 6_u64
+      fail("period: the active monitor used the semaphore fallback") if tick == 2_u64
+      fail("period: the active monitor's tick recorded #{tick}") unless tick == 1_u64
       puts "period: the active monitor used its high-resolution timer"
       return
     {% end %}

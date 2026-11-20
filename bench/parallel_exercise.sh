@@ -2118,15 +2118,18 @@ step "failure proof: a monitor that never raises a worker's word preempts nothin
 broken noflag '/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
 verdict_caught noflag 'slice: the short task exceeded the wait bound' slice --workers=1
 
-# On Windows, observe which wait the active monitor actually completed.
-# Elapsed cadence remains in the healthy benchmark, not this verdict.
-# Windows probe 44682358165: both exact verdicts held 20 of 20.
+# Both copies make, set and wait on the high-resolution timer before the
+# mutant drops its handle. Setup and wait failures have separate verdicts.
 step "failure proof: a Windows monitor using the semaphore fallback for an active tick"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    COARSE_COMMON='/^  private def self.monitor_wait\(parked : Bool\) : Nil$/ { inwait = 1; n_wait++ }
-inwait && /^          LibC.WaitForSingleObject\(timer, -1_i32\)$/ { print; print "          force_tick_record(1_u64)"; n_timer_wait++; next }
-inwait && /^      LibC.WaitForSingleObject\(Pointer\(Void\).new\(@@monitor_handle\), parked \? -1_i32 : PREEMPT_TICK_MS\)$/ { print; print "      force_tick_record(2_u64) unless parked"; inwait = 0; n_fallback++; next }
+    COARSE_COMMON='/^  def self.start_monitor : Nil$/ { instart = 1; n_start++ }
+instart && /^  end$/ { instart = 0 }
+/^  private def self.monitor_wait\(parked : Bool\) : Nil$/ { inwait = 1; n_wait++ }
+inwait && /^  end$/ { inwait = 0 }
+inwait && /^        if set != 0_i32$/ { print "        force_tick_fail(4_u64) if set == 0_i32"; print; n_set++; next }
+inwait && /^          LibC.WaitForSingleObject\(timer, -1_i32\)$/ { print "          waited = LibC.WaitForSingleObject(timer, -1_i32)"; print "          force_tick_fail(3_u64) if waited != 0_i32"; print "          force_tick_record(1_u64) if waited == 0_i32"; n_timer_wait++; next }
+inwait && /^      LibC.WaitForSingleObject\(Pointer\(Void\).new\(@@monitor_handle\), parked \? -1_i32 : PREEMPT_TICK_MS\)$/ { print "      fallback = LibC.WaitForSingleObject(Pointer(Void).new(@@monitor_handle), parked ? -1_i32 : PREEMPT_TICK_MS)"; print "      force_tick_fail(6_u64) if !parked && fallback == -1_i32"; print "      force_tick_record(2_u64) if !parked && fallback != -1_i32"; n_fallback++; next }
 /^  def self.monitor_entry : UInt64$/ {
   print "  @[UnsafeReach(\"copy-only monitor tick observation, accessed atomically\")]"
   print "  @@forced_tick_armed : UInt64 = 0_u64"
@@ -2141,15 +2144,30 @@ inwait && /^      LibC.WaitForSingleObject\(Pointer\(Void\).new\(@@monitor_handl
   print "  def self.force_tick_record(result : UInt64) : Nil"
   print "    return unless Pointer(Atomic(UInt64)).new(pointerof(@@forced_tick_armed).address).value.get == 1_u64"
   print "    stored = Pointer(Atomic(UInt64)).new(pointerof(@@forced_tick_result).address)"
-  print "    stored.value.set(result) if stored.value.get == 0_u64"
+  print "    stored.value.compare_and_set(0_u64, result)"
+  print "  end"
+  print "  def self.force_tick_fail(result : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_tick_result).address).value.compare_and_set(0_u64, result)"
+  print "  end"
+  print "  def self.force_tick_made(timer : Pointer(Void)) : Nil"
+  print "    if timer.address == 0_u64"
+  print "      force_tick_fail(5_u64)"
+  print "      return"
+  print "    end"
+  print "    due = 0_i64 - (PREEMPT_TICK_NS // 100_u64).to_i64"
+  print "    if LibC.SetWaitableTimer(timer, pointerof(due), 0_i32, Pointer(Void).new(0_u64), Pointer(Void).new(0_u64), 0_i32) == 0_i32"
+  print "      force_tick_fail(4_u64)"
+  print "      return"
+  print "    end"
+  print "    force_tick_fail(3_u64) if LibC.WaitForSingleObject(timer, 1000_i32) != 0_i32"
   print "  end"
   print
   n_defs++
   next
 }'
-    COARSE_BUG='/^        @@monitor_timer = timer.address$/ { print "        @@monitor_timer = 0_u64"; n_assignment++; next }'
-    COARSE_HOOK='/^        @@monitor_timer = timer.address$/ { n_assignment++ }'
-    COARSE_END='END { if (n_wait != 1 || n_timer_wait != 1 || n_fallback != 1 || n_defs != 1 || n_assignment != 1) exit 3 }'
+    COARSE_BUG='instart && /^        @@monitor_timer = timer.address$/ { print "        force_tick_made(timer)"; print "        @@monitor_timer = 0_u64"; n_assignment++; next }'
+    COARSE_HOOK='instart && /^        @@monitor_timer = timer.address$/ { print "        force_tick_made(timer)"; n_assignment++ }'
+    COARSE_END='END { if (n_start != 1 || n_wait != 1 || n_set != 1 || n_timer_wait != 1 || n_fallback != 1 || n_defs != 1 || n_assignment != 1) exit 3 }'
     broken coarse "$COARSE_COMMON
 $COARSE_BUG
 { print }

@@ -6,6 +6,24 @@
 # Eight steps; the last three are failure proofs, because a gate that
 # cannot fail is not a gate:
 #
+# Timing-decided, not forced:
+#   kerneljoin: a finite thread and latency bound decide; hold the joined thread and record its kernel join.
+#   nosteal: a balance timing bound decides; hold the owner and record a targeted steal decision.
+#   preemptoff: a timed short task decides; hold the computation and require the short task before release.
+#   noflag: a timed short task decides; hold the computation and record the monitor's raised-word decision.
+#   nopoll: a request latency bound decides; hold the slow task and record the targeted poll decision.
+#   stale: a timed monitor/switch alignment decides; force the raised word across the targeted switch.
+#   libruntime sort: finite work and latency decide; hold an in-sort poll point until a short task is queued.
+#   libruntime copy: finite work and latency decide; hold an in-copy poll point until a short task is queued.
+#   libruntime rehash: finite work and latency decide; hold an in-rehash poll point until a short task is queued.
+#   libruntime join: finite work and latency decide; hold an in-join poll point until a short task is queued.
+#   recursionoff: finite recursion and latency decide; hold a recursion poll point until a short task is queued.
+# The healthy library run reports latency without a pass/fail bound.
+# Conditional, not forced:
+#   closeshome: registration relies on a sleep and a wake-count check can mask the verdict; record registration and judge placement first.
+#   duplicate: another worker must steal the stale head; rendezvous at that head would force the witness.
+#   tokenless: preemption must land with a same-unit child runnable; hold that child ready across the switch.
+#
 #   1. The exercise holds every property, plain and --release: parallel
 #      tasks start on the pool and on more than one worker, never on the
 #      spawning thread, a thousand run exactly once, an atomic count loses
@@ -104,6 +122,10 @@
 #      join held in the kernel; and on Windows
 #      a port whose packets only the worker their task parked on runs, and
 #      a pool that leaves the priority boost on.
+#      Timing-decided, not forced: kerneljoin, nosteal, preemptoff, noflag,
+#      coarse, nopoll, stale, tokenless, libruntime (sort, copy, rehash and
+#      join), and recursionoff. Their elapsed-time checks do not establish
+#      the intended scheduler placement or wait decision.
 #   8. Failure proof: the pool held to one worker whatever it was asked
 #      for, and step 4's floors refuse what comes out.
 set -u
@@ -166,8 +188,8 @@ for build in plain release; do
 done
 
 # ── 2. What a move keeps, twice ───────────────────────────────────────────
-# Its balance step is timed against four workers' ideal, which a machine
-# with fewer cores than that cannot keep; there the other steps run.
+# Its balance step is timed against four workers' ideal, so a host with fewer
+# cores fails before the migration exercise runs.
 MIGRATE_STEPS="channels sockets cancel closes deep loops balance backstop heldio join"
 need_cores 4 "the balance step is timed against four workers' ideal"
 # The handoff step runs by itself after the others, its host's load read
@@ -922,39 +944,9 @@ broken() { # name, awk program[, file in src/iyi[, program in bench[, build flag
     echo "the broken copy $1 failed to build:"; tail -20 "build-$1.log"; exit 1
   fi
 }
-# A broken copy is a race the gate makes on purpose, so each proof is forced
-# instead: the copy holds the interleaving in place, and the run's ending is
-# the proof, on one run. `caught` passes only on exit 1 at the sentence. Any
-# other ending (exit 0, another sentence, a fault, a signal, a hang the timeout
-# ends) fails the gate and prints the tail. A timeout only limits a hang.
-caught() { # name, expected FAIL text, step arguments...
-  local name="$1" want="$2" code
-  shift 2
-  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
-  code=$?
-  if [ "$code" -ne 1 ] || ! grep -qF "$want" "$name.txt"; then
-    echo "the broken copy $name was not caught at \"$want\" on its one run (exit $code):"; tail -20 "$name.txt"; exit 1
-  fi
-  echo "  exits 1 at \"$(grep -m1 -F "$want" "$name.txt" | sed 's/^FAIL: //; s/^iyi: panic: //')\""
-}
-# A hook-only control is the copy with the forcing and without the bug. It
-# must pass on its one run, at the sentence the healthy step prints.
-held() { # name, sentence, step arguments...
-  local name="$1" want="$2" code
-  shift 2
-  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
-  code=$?
-  if [ "$code" -ne 0 ] || ! grep -qF "$want" "$name.txt"; then
-    echo "the hook-only control $name did not pass at \"$want\" (exit $code):"; tail -20 "$name.txt"; exit 1
-  fi
-  echo "  hook-only control $name passes: \"$want\""
-}
-# Cb's proofs end at a verdict: a whole output line, with its exit status. A
-# fragment cannot pass, and a timing cannot pass, because the program prints
-# the invariant alone on its line and its figures on earlier lines. A mutant
-# must exit 1 at "FAIL: <verdict>"; a control must exit 0 with <verdict> as
-# a line. Not armed, progress hang and a fault each print their own FAIL line,
-# so none of them matches a mutant's verdict.
+# Mutants must exit 1 with the exact FAIL or panic line; controls must
+# exit with their expected status and exact verdict. Timing-decided
+# exceptions are named in the header. Timeouts never count as catches.
 verdict_caught() { # name, exact verdict, step arguments...
   local name="$1" want="$2" code
   shift 2
@@ -975,181 +967,369 @@ verdict_held() { # name, exact verdict, step arguments...
   fi
   echo "  hook-only control $name passes: \"$want\""
 }
+caught_line() { # name, exact line, step arguments...
+  local name="$1" want="$2" code
+  shift 2
+  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 1 ] || ! grep -qxF -- "$want" "$name.txt"; then
+    echo "the broken copy $name did not exit 1 at \"$want\" (exit $code):"; tail -20 "$name.txt"; exit 1
+  fi
+  echo "  exits 1 at \"$want\""
+}
 # The copy-only definitions the forced proofs add to the runtime's files, in
 # awk output only: nothing reaches src/iyi. Each is reached through a -D flag
 # the program sets, so no healthy build sees it. An awk that misses an anchor
 # exits 3, which fails the gate through broken().
-WAKE_RING_RULES='/^  def self.send_home\(home : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { insend = 1 }
-insend && /^    ring\(home\)$/ { print "    # the doorbell, not rung"; insend = 0; did_ring = 1; next }'
-WAKE_RING_END='END { if (!did_ring) exit 3 }'
-WAKE_HOOK_RULES='/^  def self.wait_shared\(st : IyiSchedulerState\) : Nil$/ { inws = 1 }
-inws && /^    st.idle = true$/ { print; print "    IyiScheduler.force_idle_mark"; inws = 0; did_mark = 1; next }
-/^  def self.reschedule : Nil$/ {
-  print "  # Copy only, for the home step of bench/parallel_exercise.iyi: the root thread marks itself"
-  print "  # idle here, once its mail is read and it is about to sleep in its poller."
-  print "  @[UnsafeReach(\"set once by the root thread when it goes idle, then only loaded by the forced step\")]"
+WAKE_COMMON='/^  def self.wait_shared\(st : IyiSchedulerState\) : Nil$/ { inws = 1; n_wait++ }
+inws && /^  end$/ { inws = 0 }
+inws && /^    st.idle = true$/ { print; print "    IyiScheduler.force_idle_mark(st)"; n_mark++; next }
+inws && /^    wait_for_events\(true\)$/ { print "    IyiScheduler.force_idle_hold(st)"; print; n_hold++; next }
+/^  def self.send_home\(home : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { insend = 1; n_send++ }
+insend && /^  end$/ { insend = 0 }
+insend && /^    home.post_mail$/ { print; print "    force_home_post(home, fiber)"; n_post++; next }'
+WAKE_RING_BUG='insend && /^    ring\(home\)$/ { print "    force_home_done(home, fiber)"; n_ring++; next }'
+WAKE_RING_HOOK='insend && /^    ring\(home\)$/ { print; print "    force_home_done(home, fiber)"; n_ring++; next }'
+WAKE_DEFS='/^  def self.reschedule : Nil$/ {
+  print "  @[UnsafeReach(\"copy-only home wake rendezvous, accessed atomically\")]"
+  print "  @@forced_home_state : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only home wake rendezvous, accessed atomically\")]"
+  print "  @@forced_home_fiber : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only home wake rendezvous, accessed atomically\")]"
   print "  @@forced_idle : UInt64 = 0_u64"
-  print ""
-  print "  def self.force_idle_mark : Nil"
+  print "  @[UnsafeReach(\"copy-only home wake rendezvous, accessed atomically\")]"
+  print "  @@forced_home_posted : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only home wake rendezvous, accessed atomically\")]"
+  print "  @@forced_home_result : UInt64 = 0_u64"
+  print "  def self.force_home_arm(state : IyiSchedulerState, fiber : IyiFiber) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_state).address).value.set(state.object_id)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_fiber).address).value.set(fiber.object_id)"
+  print "  end"
+  print "  def self.force_idle_mark(state : IyiSchedulerState) : Nil"
+  print "    return unless state.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_state).address).value.get"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_idle).address).value.set(1_u64)"
   print "  end"
-  print ""
+  print "  def self.force_idle_hold(state : IyiSchedulerState) : Nil"
+  print "    return unless state.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_state).address).value.get"
+  print "    started = __iyi_monotonic_ns"
+  print "    while !force_home_completed?"
+  print "      IyiThread.spin_pause"
+  print "      raise \"home: copy hook waited for the target post decision\" if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "    end"
+  print "  end"
   print "  def self.force_idle_seen? : Bool"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_idle).address).value.get == 1_u64"
   print "  end"
-  print ""
+  print "  def self.force_home_post(home : IyiSchedulerState, fiber : IyiFiber) : Nil"
+  print "    return if force_home_completed?"
+  print "    return unless home.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_state).address).value.get"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_fiber).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_posted).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_home_done(home : IyiSchedulerState, fiber : IyiFiber) : Nil"
+  print "    return if force_home_completed?"
+  print "    return unless home.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_state).address).value.get"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_fiber).address).value.get"
+  print "    return unless Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_posted).address).value.get == 1_u64"
+  print "    unless home.idle"
+  print "      puts \"FAIL: home: the targeted post found the root not idle\""
+  print "      __iyi_exit(1)"
+  print "    end"
+  print "    unless home.notified"
+  print "      puts \"FAIL: home: the targeted idle root was posted but not rung\""
+  print "      __iyi_exit(1)"
+  print "    end"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_result).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_home_completed? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_result).address).value.get == 1_u64"
+  print "  end"
   print
-  did_defs = 1
+  n_defs++
   next
 }'
-WAKE_HOOK_END='END { if (!(did_mark && did_defs)) exit 3 }'
-WAKE_BUG="$WAKE_RING_RULES
-$WAKE_HOOK_RULES
+WAKE_END='END { if (n_wait != 1 || n_mark != 1 || n_hold != 1 || n_send != 1 || n_post != 1 || n_ring != 1 || n_defs != 1) exit 3 }'
+WAKE_BUG="$WAKE_COMMON
+$WAKE_RING_BUG
+$WAKE_DEFS
 { print }
-$WAKE_RING_END
-$WAKE_HOOK_END"
-WAKE_HOOK="$WAKE_HOOK_RULES
+$WAKE_END"
+WAKE_HOOK="$WAKE_COMMON
+$WAKE_RING_HOOK
+$WAKE_DEFS
 { print }
-$WAKE_HOOK_END"
-NOW_LOCK_RULES='/^  def (take_now|put_now)/ { inside = 1 }
-inside && /^    (lock|unlock)$/ { locks = locks + 1; next }
-/^  end$/ { inside = 0 }'
-NOW_SHIFT_BUG='/^  private def shift_item : T$/ { inshift = 1 }
-inshift && /^    @count = @count - 1$/ { print "    seen_count = @count"; print "    IyiScheduler.force_yield_here"; print "    @count = seen_count - 1"; inshift = 0; did_shift = 1; next }'
-NOW_SHIFT_HOOK='/^  private def shift_item : T$/ { inshift = 1 }
-inshift && /^    @count = @count - 1$/ { print "    IyiScheduler.force_yield_here"; print "    @count = @count - 1"; inshift = 0; did_shift = 1; next }'
+$WAKE_END"
+NOW_COMMON='/^  def take_now : T \| ChannelClosed$/ { intake = 1; n_take++ }
+/^  def put_now\(value : T\) : Nil \| ChannelClosed$/ { input = 1; n_put++ }
+(intake || input) && /^  end$/ { intake = 0; input = 0 }
+intake && /^    lock$/ { print "    IyiScheduler.force_now_attempt(pointerof(@guard).address)"; n_attempt++ }'
+NOW_LOCK_BUG='intake && /^    lock$/ { n_take_lock++; next }
+intake && /^    unlock$/ { n_take_unlock++; next }
+input && /^    lock$/ { n_put_lock++; next }
+input && /^    unlock$/ { n_put_unlock++; next }'
+NOW_LOCK_HOOK='intake && /^    lock$/ { n_take_lock++ }
+intake && /^    unlock$/ { n_take_unlock++ }
+input && /^    lock$/ { n_put_lock++ }
+input && /^    unlock$/ { n_put_unlock++ }'
+NOW_SHIFT_BUG='/^  private def shift_item : T$/ { inshift = 1; n_method++ }
+inshift && /^    @count = @count - 1$/ { print "    seen_count = @count"; print "    IyiScheduler.force_now_hold(pointerof(@guard).address)"; print "    @count = seen_count - 1"; print "    IyiScheduler.force_now_stored(pointerof(@guard).address)"; n_shift++; inshift = 0; next }'
+NOW_SHIFT_HOOK='/^  private def shift_item : T$/ { inshift = 1; n_method++ }
+inshift && /^    @count = @count - 1$/ { print "    IyiScheduler.force_now_hold(pointerof(@guard).address)"; print; print "    IyiScheduler.force_now_stored(pointerof(@guard).address)"; n_shift++; inshift = 0; next }'
 NOW_DEFS='/^  def self.reschedule : Nil$/ {
-  print "  # Copy only, for the now_forced step of bench/parallel_exercise.iyi: armed by the program,"
-  print "  # then the first take to read the count yields between that read and its store."
-  print "  @[UnsafeReach(\"armed by the forced step before its takes, then read and cleared by the take that yields: atomics only\")]"
-  print "  @@forced_yield : UInt64 = 0_u64"
-  print ""
-  print "  def self.force_yield_arm : Nil"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_yield).address).value.set(1_u64)"
+  print "  @[UnsafeReach(\"copy-only rendezvous words accessed atomically\")]"
+  print "  @@now_target : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only rendezvous words accessed atomically\")]"
+  print "  @@now_entered : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only rendezvous words accessed atomically\")]"
+  print "  @@now_blocked : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only rendezvous words accessed atomically\")]"
+  print "  @@now_stored : UInt64 = 0_u64"
+  print "  def self.force_now_arm(target : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@now_target).address).value.set(target)"
   print "  end"
-  print ""
-  print "  def self.force_yield_here : Nil"
-  print "    armed = Pointer(Atomic(UInt64)).new(pointerof(@@forced_yield).address)"
-  print "    return unless armed.value.get == 1_u64"
-  print "    armed.value.set(0_u64)"
-  print "    enqueue(current)"
-  print "    reschedule"
+  print "  def self.force_now_entered? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@now_entered).address).value.get == 1_u64"
   print "  end"
-  print ""
+  print "  def self.force_now_attempt(target : UInt64) : Nil"
+  print "    return unless target == Pointer(Atomic(UInt64)).new(pointerof(@@now_target).address).value.get"
+  print "    return unless force_now_entered?"
+  print "    if Pointer(Atomic(UInt64)).new(target).value.get != 0_u64"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@now_blocked).address).value.set(1_u64)"
+  print "    end"
+  print "  end"
+  print "  def self.force_now_hold(target : UInt64) : Nil"
+  print "    return unless target == Pointer(Atomic(UInt64)).new(pointerof(@@now_target).address).value.get"
+  print "    entered = Pointer(Atomic(UInt64)).new(pointerof(@@now_entered).address)"
+  print "    return if entered.value.get != 0_u64"
+  print "    entered.value.set(1_u64)"
+  print "    blocked = Pointer(Atomic(UInt64)).new(pointerof(@@now_blocked).address)"
+  print "    stored = Pointer(Atomic(UInt64)).new(pointerof(@@now_stored).address)"
+  print "    started = __iyi_monotonic_ns"
+  print "    while blocked.value.get == 0_u64 && stored.value.get == 0_u64"
+  print "      IyiThread.spin_pause"
+  print "      raise \"now: copy hook waited for the second take\" if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "    end"
+  print "  end"
+  print "  def self.force_now_stored(target : UInt64) : Nil"
+  print "    return unless target == Pointer(Atomic(UInt64)).new(pointerof(@@now_target).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@now_stored).address).value.set(1_u64)"
+  print "  end"
   print
-  did_defs = 1
+  n_defs++
   next
 }'
-NOW_END='END { if (locks != 4 || !did_shift || !did_defs) exit 3 }'
-NOW_BUG="$NOW_LOCK_RULES
+NOW_END='END { if (n_take != 1 || n_put != 1 || n_attempt != 1 || n_take_lock != 1 || n_take_unlock != 1 || n_put_lock != 1 || n_put_unlock != 1 || n_method != 1 || n_shift != 1 || n_defs != 1) exit 3 }'
+NOW_BUG="$NOW_COMMON
+$NOW_LOCK_BUG
 $NOW_SHIFT_BUG
 $NOW_DEFS
 { print }
 $NOW_END"
-NOW_HOOK="$NOW_LOCK_RULES
+NOW_HOOK="$NOW_COMMON
+$NOW_LOCK_HOOK
 $NOW_SHIFT_HOOK
 $NOW_DEFS
 { print }
 $NOW_END"
-CANCEL_SUSPEND='/^  def self.suspend\(fiber : IyiFiber, nonce : UInt64\) : Nil$/ { insus = 1 }
-insus && /^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; insus = 0; did_suspend = 1; next }'
-CANCEL_PARK='/^  def self.park\(fiber : IyiFiber\) : UInt64$/ { inpark = 1 }
-inpark && /^    fiber.wait_for_wake\(nonce\)$/ { print "    IyiScheduler.force_window_hold"; print; inpark = 0; did_hold = 1; next }'
+CANCEL_SUSPEND_BUG='/^  def self.suspend\(fiber : IyiFiber, nonce : UInt64\) : Nil$/ { insus = 1; n_suspend++ }
+insus && /^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; print "      force_window_decision(fiber, 1_u64)"; n_decision++; next }
+insus && /^    reschedule$/ { print "    force_window_decision(fiber, 2_u64)"; print; insus = 0; n_fall++; next }'
+CANCEL_SUSPEND_HOOK='/^  def self.suspend\(fiber : IyiFiber, nonce : UInt64\) : Nil$/ { insus = 1; n_suspend++ }
+insus && /^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print; print "      force_window_decision(fiber, 1_u64)"; n_decision++; next }
+insus && /^    reschedule$/ { print "    force_window_decision(fiber, 2_u64)"; print; insus = 0; n_fall++; next }'
+CANCEL_PARK='/^  def self.park\(fiber : IyiFiber\) : UInt64$/ { inpark = 1; n_park++ }
+inpark && /^    fiber.wait_for_wake\(nonce\)$/ { print "    IyiScheduler.force_window_hold(fiber)"; print; inpark = 0; n_hold++; next }'
 CANCEL_DEFS='/^  def self.reschedule : Nil$/ {
-  print "  # Copy only, for the lostcancel step of bench/parallel_exercise.iyi: the one park that finds"
-  print "  # the arm set holds between its look and its wait until the step has cancelled the task."
-  print "  @[UnsafeReach(\"armed by the forced step, cleared by the park it holds: atomics only\")]"
-  print "  @@forced_window_armed : UInt64 = 0_u64"
-  print "  @[UnsafeReach(\"set by the parked task in its window, then only loaded by the forced step\")]"
+  print "  @[UnsafeReach(\"copy-only cancellation rendezvous, accessed atomically\")]"
+  print "  @@forced_window_target : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only cancellation rendezvous, accessed atomically\")]"
   print "  @@forced_window_held : UInt64 = 0_u64"
-  print "  @[UnsafeReach(\"set by the forced step after its cancel, then only loaded by the parked task\")]"
+  print "  @[UnsafeReach(\"copy-only cancellation rendezvous, accessed atomically\")]"
   print "  @@forced_window_release : UInt64 = 0_u64"
-  print ""
-  print "  def self.force_window_arm : Nil"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_armed).address).value.set(1_u64)"
+  print "  @[UnsafeReach(\"copy-only cancellation rendezvous, accessed atomically\")]"
+  print "  @@forced_window_result : UInt64 = 0_u64"
+  print "  def self.force_window_arm(fiber : IyiFiber) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_target).address).value.set(fiber.object_id)"
   print "  end"
-  print ""
   print "  def self.force_window_held? : Bool"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_held).address).value.get == 1_u64"
   print "  end"
-  print ""
   print "  def self.force_window_release : Nil"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_release).address).value.set(1_u64)"
   print "  end"
-  print ""
-  print "  def self.force_window_hold : Nil"
-  print "    armed = Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_armed).address)"
-  print "    return unless armed.value.get == 1_u64"
-  print "    armed.value.set(0_u64)"
+  print "  def self.force_window_result : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_result).address).value.get"
+  print "  end"
+  print "  def self.force_window_decision(fiber : IyiFiber, result : UInt64) : Nil"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_target).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_result).address).value.set(result)"
+  print "  end"
+  print "  def self.force_window_hold(fiber : IyiFiber) : Nil"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_target).address).value.get"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_held).address).value.set(1_u64)"
   print "    released = Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_release).address)"
   print "    started = __iyi_monotonic_ns"
   print "    while released.value.get == 0_u64"
   print "      IyiThread.spin_pause"
-  print "      raise \"copy window hold ran past 10 s\" if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "      raise \"lostcancel: copy hook waited for release\" if __iyi_monotonic_ns - started > 10000000000_i64"
   print "    end"
   print "  end"
-  print ""
   print
-  did_defs = 1
+  n_defs++
   next
 }'
-CANCEL_BUG="$CANCEL_SUSPEND
+CANCEL_END='END { if (n_suspend != 1 || n_decision != 1 || n_fall != 1 || n_park != 1 || n_hold != 1 || n_defs != 1) exit 3 }'
+CANCEL_BUG="$CANCEL_SUSPEND_BUG
 $CANCEL_PARK
 $CANCEL_DEFS
 { print }
-END { if (!(did_suspend && did_hold && did_defs)) exit 3 }"
-CANCEL_HOOK="$CANCEL_PARK
+$CANCEL_END"
+CANCEL_HOOK="$CANCEL_SUSPEND_HOOK
+$CANCEL_PARK
 $CANCEL_DEFS
 { print }
-END { if (!(did_hold && did_defs)) exit 3 }"
+$CANCEL_END"
 
 step "failure proof: a cross-thread wake that does not ring is a lost wakeup"
 broken lostwake "$WAKE_BUG" concurrency.iyi parallel_exercise -Dlostwake_force
-caught lostwake 'home: still waiting after 5000 ms' home --watch=5000
+verdict_caught lostwake 'home: the targeted idle root was posted but not rung' home --watch=5000
 broken lostwake_hook "$WAKE_HOOK" concurrency.iyi parallel_exercise -Dlostwake_force
-held lostwake_hook 'home: a task finished on a worker and woke the main thread it was joined by' home --watch=5000
+verdict_held lostwake_hook 'home: a task finished on a worker and woke the main thread it was joined by' home --watch=5000
 
 step "failure proof: a steal that leaves the task in its victim's queue hands it out twice"
-broken duplicate '/^          victim.pool_head = fiber.next_run$/ { n_head++; next } /^          victim.pool_tail = nil if victim.pool_head.is_a\?\(Nil\)$/ { n_tail++; next } { print } END { if (n_head != 1 || n_tail != 1) exit 3 }'
-caught duplicate 'the pool handed one parallel task to a worker twice' steal
+broken duplicate '/^  private def self.steal_unstarted\(st : IyiSchedulerState\) : IyiFiber\?$/ { inside = 1; n_method++ }
+inside && /^          victim.pool_head = fiber.next_run$/ { n_head++; next }
+inside && /^          victim.pool_tail = nil if victim.pool_head.is_a\?\(Nil\)$/ { n_tail++; next }
+inside && /^  end$/ { inside = 0 }
+{ print }
+END { if (n_method != 1 || n_head != 1 || n_tail != 1) exit 3 }'
+caught_line duplicate 'iyi: panic: the pool handed one parallel task to a worker twice: two threads would run one stack' steal
 
 step "failure proof: a cancel never delivered to a sleeping task's thread"
-# The copy posts no cancel to another thread, so the sleeper on a worker
-# and the task asleep on the main thread sleep their 10 s out past the
-# watchdog. The step cued its failure by a 100 ms sleep once, and beside
-# 12 busy loops on Linux's 12 vCPUs the copy passed it in 19 runs of 20,
-# the cancel finding sleeps not yet begun, which end themselves; the
-# failure now waits until each is where the step says (`cancel`).
-broken undelivered '/^    return if fiber.cancel_posted$/ { print "    return"; next } { print }'
-caught undelivered 'cancel: still waiting after 5000 ms' cancel --watch=5000
+# The sleeper is registered on another worker before the program arms its
+# identity. Both copies observe the same post_cancel; the mutant returns
+# before posting, and the control records the completed post.
+POST_COMMON='/^  def self.post_cancel\(home : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { inpost = 1; n_method++ }
+inpost && /^    home.post_mail$/ { print; print "    force_post_done(fiber)"; n_post++; inpost = 0; next }'
+POST_BUG='inpost && /^    return if fiber.cancel_posted$/ { print "    force_post_missing(fiber)"; print "    return"; n_guard++; next }'
+POST_HOOK='inpost && /^    return if fiber.cancel_posted$/ { n_guard++ }'
+POST_DEFS='/^  def self.reschedule : Nil$/ {
+  print "  @[UnsafeReach(\"copy-only target fiber, accessed atomically\")]"
+  print "  @@forced_post_target : UInt64 = 0_u64"
+  print "  def self.force_post_target(fiber : IyiFiber) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_post_target).address).value.set(fiber.object_id)"
+  print "  end"
+  print "  def self.force_post_missing(fiber : IyiFiber) : Nil"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_post_target).address).value.get"
+  print "    puts \"FAIL: cancel: the registered target was not posted to its worker\""
+  print "    __iyi_exit(1)"
+  print "  end"
+  print "  def self.force_post_done(fiber : IyiFiber) : Nil"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_post_target).address).value.get"
+  print "    puts \"cancel: the registered target was posted to its worker\""
+  print "  end"
+  print
+  n_defs++
+  next
+}'
+POST_END='END { if (n_method != 1 || n_post != 1 || n_guard != 1 || n_defs != 1) exit 3 }'
+broken undelivered "$POST_COMMON
+$POST_BUG
+$POST_DEFS
+{ print }
+$POST_END" concurrency.iyi parallel_exercise -Dundelivered_force
+verdict_caught undelivered 'cancel: the registered target was not posted to its worker' cancel --watch=5000
+broken undelivered_hook "$POST_COMMON
+$POST_HOOK
+$POST_DEFS
+{ print }
+$POST_END" concurrency.iyi parallel_exercise -Dundelivered_force
+verdict_held undelivered_hook 'cancel: the registered target was posted to its worker' cancel --watch=5000
 
 step "failure proof: a cancel that skips tasks waiting in the pool runs them uncancelled"
-broken unflagged '/def self.cancel\(fiber/ { incancel = 1 } incancel && /^    fiber.cancelled = true$/ { print "    fiber.cancelled = true unless fiber.home.is_a?(Nil)"; incancel = 0; next } { print }'
-caught unflagged 'cancel: 32 tasks waiting in the pool ran uncancelled' cancel_unstarted --watch=5000
+broken unflagged '/^  def self.cancel\(fiber : IyiFiber\) : Nil$/ { incancel = 1; n_method++ } incancel && /^    fiber.cancelled = true$/ { print "    fiber.cancelled = true unless fiber.home.is_a?(Nil)"; n_flag++; next } incancel && /^  end$/ { incancel = 0 } { print } END { if (n_method != 1 || n_flag != 1) exit 3 }'
+verdict_caught unflagged 'cancel: 32 tasks waiting in the pool ran uncancelled' cancel_unstarted --watch=5000
 
 step "failure proof: a cancel that leaves an io wait parked keeps a panicking program running"
-# The cancel ends no io wait, so a task parked on a read nobody answers is
-# parked for good, and the panic's join waits on it. This is how master
-# bcefa35fc's server_load copy hung after its panic line in job
-# 123987176637: a cancelled read's packet was dropped, and nothing else
-# could wake it.
-broken parkedio '/^    elsif fiber.state == IyiFiberState::WaitingIo$/ { print "    elsif false"; next } { print }' concurrency.iyi panic_exit
-caught parkedio 'task-panic: still running 5000 ms after it started' task-panic --workers=12
-caught parkedio 'task-panic: still running 5000 ms after it started' task-panic --workers=0
+# A target reader arms itself before reading. Both copies acknowledge its
+# registration and its cancel_wait branch; only the mutant omits that branch.
+PARKED_COMMON='/^  def self.park_overlapped_current\(/ { inover = 1; n_over++ }
+inover && /^    fiber.list_on\(st.object_id\) if @@shared && fiber.unit.is_a\?\(IyiUnit\)$/ { print; print "    force_io_registered(fiber)"; inover = 0; n_reg_over++; next }
+/^  def self.wait_posix\(/ { inposix = 1; n_posix++ }
+inposix && /^    fiber.list_on\(st.object_id\) if moving$/ { print; print "    force_io_registered(fiber)"; inposix = 0; n_reg_posix++; next }
+/^  def self.cancel_wait\(fiber : IyiFiber\) : Nil$/ { incancel = 1; n_cancel++ }
+incancel && /^    elsif fiber.state == IyiFiberState::WaitingCh$/ { print "      force_io_decision(fiber, true)"; print; n_taken++; next }
+incancel && /^  end$/ { print "    force_io_decision(fiber, false)"; print; incancel = 0; n_end++; next }'
+PARKED_BUG='incancel && /^    elsif fiber.state == IyiFiberState::WaitingIo$/ { print "    elsif false"; n_branch++; next }'
+PARKED_HOOK='incancel && /^    elsif fiber.state == IyiFiberState::WaitingIo$/ { n_branch++ }'
+PARKED_DEFS='/^  def self.reschedule : Nil$/ {
+  print "  @[UnsafeReach(\"copy-only io cancellation rendezvous, accessed atomically\")]"
+  print "  @@forced_io_target : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only io cancellation rendezvous, accessed atomically\")]"
+  print "  @@forced_io_registered : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only io cancellation rendezvous, accessed atomically\")]"
+  print "  @@forced_io_decided : UInt64 = 0_u64"
+  print "  def self.force_io_target(fiber : IyiFiber) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_target).address).value.set(fiber.object_id)"
+  print "  end"
+  print "  def self.force_io_registered(fiber : IyiFiber) : Nil"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_target).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_registered).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_io_registered? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_registered).address).value.get == 1_u64"
+  print "  end"
+  print "  def self.force_io_decision(fiber : IyiFiber, handled : Bool) : Nil"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_target).address).value.get"
+  print "    return if Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_decided).address).value.get != 0_u64"
+  print "    unless force_io_registered?"
+  print "      puts \"FAIL: task-panic: target cancellation preceded io registration\""
+  print "      __iyi_exit(1)"
+  print "    end"
+  print "    return unless fiber.cancelled"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_decided).address).value.set(1_u64)"
+  print "    if handled"
+  print "      puts \"task-panic: the registered target reached the io cancellation branch\""
+  print "    elsif fiber.state == IyiFiberState::WaitingIo"
+  print "      puts \"FAIL: task-panic: the registered target missed the io cancellation branch\""
+  print "      __iyi_exit(1)"
+  print "    end"
+  print "  end"
+  print
+  n_defs++
+  next
+}'
+PARKED_END='END { if (n_over != 1 || n_reg_over != 1 || n_posix != 1 || n_reg_posix != 1 || n_cancel != 1 || n_taken != 1 || n_end != 1 || n_branch != 1 || n_defs != 1) exit 3 }'
+broken parkedio "$PARKED_COMMON
+$PARKED_BUG
+$PARKED_DEFS
+{ print }
+$PARKED_END" concurrency.iyi panic_exit -Dparkedio_force
+broken parkedio_hook "$PARKED_COMMON
+$PARKED_HOOK
+$PARKED_DEFS
+{ print }
+$PARKED_END" concurrency.iyi panic_exit -Dparkedio_force
+for workers in 12 0; do
+  verdict_caught parkedio 'task-panic: the registered target missed the io cancellation branch' task-panic "--workers=$workers"
+  timeout -k 5 120 ./parkedio_hook-run task-panic "--workers=$workers" > parkedio_hook.txt 2>&1
+  code=$?
+  if [ "$code" -ne 1 ] || ! grep -qxF 'task-panic: the registered target reached the io cancellation branch' parkedio_hook.txt || ! grep -qxF "iyi: panic: a task's panic, with tasks parked on the poller" parkedio_hook.txt; then
+    echo "parkedio hook control did not reach its io decision and original panic (exit $code):"; tail -20 parkedio_hook.txt; exit 1
+  fi
+  echo "  parkedio control workers=$workers: the registered target reached the io cancellation branch"
+done
 
 step "failure proof: take_now without its channel's lock loses a place when two takes overlap"
-# take_now without the channel's lock reads the count, yields, and stores it
-# again. The forced copy yields inside shift_item, armed by -Dnow_force, so the
-# first take the step makes yields between its read and its store; the second
-# take runs and stores in that gap, and the first then stores the count it read
-# before. Both takes are tasks on this thread, so the forcing needs no second
-# core and no run count: one run, at its sentence. The hook-only copy yields
-# with its store kept fresh and passes on its one run.
+# The first take waits inside the critical section. The second observes the
+# guard before taking it: in the control it reports contention, so the first
+# proceeds and unlocks; in the mutant it stores before the first resumes.
+# Both copies use the same hook, and only the mutant removes the four locks
+# and writes the stale count.
 broken unlocked "$NOW_BUG" concurrency.iyi parallel_exercise -Dnow_force
-caught unlocked 'now: a place is still held after both takes' now_forced
+verdict_caught unlocked 'now: a place is still held after both takes' now_forced
 broken unlocked_hook "$NOW_HOOK" concurrency.iyi parallel_exercise -Dnow_force
-held unlocked_hook 'now: two takes from one full channel on one thread left no place held' now_forced
+verdict_held unlocked_hook 'now: two takes from one full channel on two workers left no place held' now_forced
 
 step "failure proof: a hand that never marks its select, a cancel lost as a task parks, a word's wake lost before the link"
 # Each channel and each list `park_on` waits in has a lock of its own, so
@@ -1169,72 +1349,79 @@ step "failure proof: a hand that never marks its select, a cancel lost as a task
 # sampled had a worker in `take_mail` holding the scheduler's lock and
 # every other thread waiting for it, its watchdog's among them, so it is
 # not one of the proofs.
-broken unhanded '/^      head.handed = true$/ { next } { print }'
-caught unhanded 'wakes, selects: a value handed to a parked select was not received' wakes --only=handed --watch=5000
+broken unhanded '/^      head.handed = true$/ { n++; next } { print } END { if (n != 1) exit 3 }'
+verdict_caught unhanded 'wakes, selects: a value handed to a parked select was not received' wakes --only=handed --watch=5000
 broken lostcancel "$CANCEL_BUG" concurrency.iyi parallel_exercise -Dlostcancel_force
-caught lostcancel 'wakes, cancels: still waiting after 5000 ms' wakes --only=cancels --watch=5000
+verdict_caught lostcancel 'wakes, cancels: the targeted suspend omitted the cancelled claim' wakes --only=cancels --watch=5000
 broken lostcancel_hook "$CANCEL_HOOK" concurrency.iyi parallel_exercise -Dlostcancel_force
-held lostcancel_hook '; 1 tasks cancelled as they parked;' wakes --only=cancels --watch=5000
-  # The copy looks at the word outside its list's lock, and unforced that
-  # is a race: in two of nine Namespace macOS jobs it handed all 40,000
-  # turns in 5 runs of 5 (134616549649, 134738824347), each run a quarter
-  # of a second. So the copy is forced instead. -Dlostword_force holds its
-  # parked side in the window between the look and the lock until the first
-  # wake has passed (IyiScheduler.force_lost_wake_on, which the copy adds).
-  # That wake scans an empty list, the parked side links in after it and
-  # waits for a wake that is gone. The run ends at turn 2 every time, so one
-  # run is the proof, and a run that ends anywhere else is a failure.
-  forced_lostword='
-/def self.park_on\(/ { inpark = 1 }
-inpark && held == "" && /^    IyiChanLock.lock\(lock\)$/ { held = $0; next }
-inpark && held != "" && /^      IyiChanLock.unlock\(lock\)$/ { next }
-inpark && held != "" && /^    end$/ {
+verdict_held lostcancel_hook 'wakes, cancels: the targeted suspend claimed its cancellation' wakes --only=cancels --watch=5000
+  # The same word-keyed hook holds the first park at its word check in both
+  # copies. A locked check waits for the wake to attempt the lock; an
+  # unlocked check waits for the wake to finish before linking the waiter.
+  LOSTWORD_COMMON='/^  def self.park_on\(/ { inpark = 1; n_park++ }
+/^  def self.wake_on\(/ { inwake = 1; n_wake++ }
+inwake && /^    IyiChanLock.lock\(lock\)$/ { print "    force_lost_attempt(word)"; n_attempt++ }
+inwake && /^    IyiChanLock.unlock\(lock\)$/ { print; print "    force_lost_done(word)"; n_done++; inwake = 0; next }'
+  LOSTWORD_BUG='inpark && /^    IyiChanLock.lock\(lock\)$/ { n_lock++; next }
+inpark && /^      IyiChanLock.unlock\(lock\)$/ { n_unlock++; next }
+inpark && /^    end$/ { print; print "    force_lost_window(word, lock)"; print "    IyiChanLock.lock(lock)"; n_window++; n_insert++; inpark = 0; next }'
+  LOSTWORD_CONTROL='inpark && /^    IyiChanLock.lock\(lock\)$/ { n_lock++ }
+inpark && /^      IyiChanLock.unlock\(lock\)$/ { n_unlock++ }
+inpark && /^    end$/ { print; print "    force_lost_window(word, lock)"; n_window++; n_insert++; inpark = 0; next }'
+  LOSTWORD_DEFS='/^  @@lot_locks : Pointer\(UInt64\)/ {
   print
-  print "    if word.address == @@forced_word"
-  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_in_window).address).value.set(1_u64)"
-  print "      woke_cell = Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke).address)"
-  print "      while woke_cell.value.get <= seen"
-  print "        IyiThread.spin_pause"
-  print "      end"
-  print "    end"
-  print held
-  held = ""; inpark = 0; did_park = 1; next
-}
-/def self.wake_on\(/ { inwake = 1 }
-inwake && /^    IyiChanLock.unlock\(lock\)$/ {
-  print "    if word.address == @@forced_word"
-  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke).address).value.set(word.value.get)"
-  print "    end"
-  inwake = 0; did_wake = 1
-}
-/^  @@lot_locks : Pointer\(UInt64\)/ {
-  print
-  print "  # A failure proof, in the copy only: the word it forces, the value its waker stores,"
-  print "  # and whether the parked side is in its window. All three are atomics."
-  print "  @[UnsafeReach(\"written before the spawn by force_lost_wake_on, then only read\")]"
+  print "  @[UnsafeReach(\"copy-only word rendezvous accessed atomically\")]"
   print "  @@forced_word : UInt64 = 0_u64"
-  print "  @[UnsafeReach(\"stored by the waker under the list lock, then only loaded atomically\")]"
-  print "  @@forced_woke : UInt64 = 0_u64"
-  print "  @[UnsafeReach(\"stored by the parked side in its window, then only loaded atomically\")]"
+  print "  @[UnsafeReach(\"copy-only word rendezvous accessed atomically\")]"
   print "  @@forced_in_window : UInt64 = 0_u64"
-  print ""
+  print "  @[UnsafeReach(\"copy-only word rendezvous accessed atomically\")]"
+  print "  @@forced_attempted : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only word rendezvous accessed atomically\")]"
+  print "  @@forced_woke : UInt64 = 0_u64"
   print "  def self.force_lost_wake_on(word : Pointer(Atomic(UInt64))) : Nil"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke).address).value.set(0_u64)"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_in_window).address).value.set(0_u64)"
-  print "    @@forced_word = word.address"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_word).address).value.set(word.address)"
   print "  end"
-  print ""
   print "  def self.forced_in_window? : Bool"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_in_window).address).value.get == 1_u64"
   print "  end"
-  did_defs = 1
+  print "  def self.force_lost_attempt(word : Pointer(Atomic(UInt64))) : Nil"
+  print "    return unless word.address == Pointer(Atomic(UInt64)).new(pointerof(@@forced_word).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_attempted).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_lost_done(word : Pointer(Atomic(UInt64))) : Nil"
+  print "    return unless word.address == Pointer(Atomic(UInt64)).new(pointerof(@@forced_word).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_lost_window(word : Pointer(Atomic(UInt64)), lock : Pointer(Atomic(UInt64))) : Nil"
+  print "    return unless word.address == Pointer(Atomic(UInt64)).new(pointerof(@@forced_word).address).value.get"
+  print "    entered = Pointer(Atomic(UInt64)).new(pointerof(@@forced_in_window).address)"
+  print "    return if entered.value.get != 0_u64"
+  print "    locked = lock.value.get != 0_u64"
+  print "    entered.value.set(1_u64)"
+  print "    attempted = Pointer(Atomic(UInt64)).new(pointerof(@@forced_attempted).address)"
+  print "    woke = Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke).address)"
+  print "    started = __iyi_monotonic_ns"
+  print "    while locked ? attempted.value.get == 0_u64 : woke.value.get == 0_u64"
+  print "      IyiThread.spin_pause"
+  print "      raise \"lostword: copy hook waited for its wake\" if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "    end"
+  print "  end"
+  n_defs++
   next
-}
+}'
+  LOSTWORD_END='END { if (n_park != 1 || n_window != 1 || n_wake != 1 || n_attempt != 1 || n_done != 1 || n_lock != 1 || n_unlock != 1 || n_insert != 1 || n_defs != 1) exit 3 }'
+  broken lostword "$LOSTWORD_COMMON
+$LOSTWORD_BUG
+$LOSTWORD_DEFS
 { print }
-END { if (!(did_park && did_wake && did_defs)) exit 3 }
-'
-  broken lostword "$forced_lostword" concurrency.iyi parallel_exercise -Dlostword_force
-  caught lostword 'wakes, words: turn 2 was not taken in 5000 ms' wakes --only=words --watch=5000
+$LOSTWORD_END" concurrency.iyi parallel_exercise -Dlostword_force
+  verdict_caught lostword 'wakes, words: the forced first wake was lost before its waiter linked' wakes --only=words --watch=5000
+  broken lostword_hook "$LOSTWORD_COMMON
+$LOSTWORD_CONTROL
+$LOSTWORD_DEFS
+{ print }
+$LOSTWORD_END" concurrency.iyi parallel_exercise -Dlostword_force
+  verdict_held lostword_hook 'wakes: 0 values through selects over two channels and a deadline, each once; 0 tasks cancelled as they parked; 40000 turns handed through park_on and wake_on' wakes --only=words --watch=5000
 
 step "failure proof: a plain add loses counts when two tasks add at once"
 # The plain add is a load and a store. race_forced puts one task's add between
@@ -1243,11 +1430,25 @@ step "failure proof: a plain add loses counts when two tasks add at once"
 if ! "$IYI" build --release -Dparallel_plain_add "$REPO/bench/parallel_exercise.iyi" -o plainadd-run > build-plainadd.log 2>&1; then
   echo "the plain-add build failed:"; tail -20 build-plainadd.log; exit 1
 fi
-caught plainadd 'race: increments lost' race_forced
+verdict_caught plainadd "race: a task stored the count it read before another task's add landed" race_forced
 
 # What a move keeps, broken one way each, and the migration exercise's
 # step that names it. A move needs two workers on two cores.
 need_cores 2 "a move needs two workers on two cores"
+# These mutants are compile-time branches rather than awk-made copies.
+# Audit each method and both its mutant and control expressions independently.
+TLS_AUDIT='
+/^  def state_after\(before : UInt64\) : UInt64$/ { state = 1; n_state++ }
+/^  def line_in_loop\(before : UInt64\) : UInt64$/ { line = 1; n_line++ }
+state && /^    {% if flag\?\(:parallel_stale_tls\) %}$/ { n_stale++ }
+line && /^    {% if flag\?\(:parallel_hoisted_tls\) %}$/ { n_hoisted++ }
+state && /^      before$/ { n_state_before++ }
+line && /^      before$/ { n_line_before++ }
+state && /^      IyiScheduler.state.object_id$/ { n_state_current++ }
+line && /^      IyiThread.current_line$/ { n_line_current++ }
+/^  end$/ { state = 0; line = 0 }
+END { if (n_state != 1 || n_line != 1 || n_stale != 1 || n_hoisted != 1 || n_state_before != 1 || n_line_before != 1 || n_state_current != 1 || n_line_current != 1) exit 3 }'
+awk "$TLS_AUDIT" "$REPO/bench/parallel_migrate.iyi" || { echo "TLS mutant or control anchor missing or duplicated"; exit 1; }
 step "failure proof: a thread-local read before a park and kept after it names the thread the task left"
   if ! "$IYI" build --release -Dparallel_stale_tls "$REPO/bench/parallel_migrate.iyi" -o staletls-run > build-staletls.log 2>&1; then
     echo "the stale thread-local build failed:"; tail -20 build-staletls.log; exit 1
@@ -1407,19 +1608,68 @@ END { if (n_defs != 1 || n_list != 1 || n_disp != 1 || n_mut != 1) exit 3 }"
     MINGW* | MSYS* | CYGWIN* | Windows_NT)
       echo "  a close on Windows ends the posted read, whose completion any thread takes off the port: there is nothing to post" ;;
     *)
-      broken noclose '/def self.wake_closed\(fd/ { inclose = 1 } inclose && /^      return unless @@shared$/ { print "      return"; inclose = 0; next } { print }' concurrency.iyi parallel_migrate
-      caught noclose 'closes: still waiting after 5000 ms' closes --watch=5000 ;;
+      CLOSE_COMMON='/^  def self.wait_posix\(/ { inwait = 1; n_wait++ }
+inwait && /^    fiber.list_on\(st.object_id\) if moving$/ { print; print "    force_close_registered(fd)"; inwait = 0; n_reg++; next }
+/^  def self.wake_closed\(fd : Int32\) : Nil$/ { inclose = 1; n_close++ }
+inclose && /^          other.post_mail$/ { print; print "          force_close_posted(fd)"; inclose = 0; n_post++; next }'
+      CLOSE_BUG='inclose && /^      return unless @@shared$/ { print "      force_close_missing(fd)"; print "      return"; n_guard++; next }'
+      CLOSE_HOOK='inclose && /^      return unless @@shared$/ { n_guard++ }'
+      CLOSE_DEFS='/^  def self.reschedule : Nil$/ {
+  print "  @[UnsafeReach(\"copy-only close target, accessed atomically\")]"
+  print "  @@forced_close_fd : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only close registration, accessed atomically\")]"
+  print "  @@forced_close_registered : UInt64 = 0_u64"
+  print "  def self.force_close_target(fd : Int32) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_fd).address).value.set(fd.to_u64 + 1_u64)"
+  print "  end"
+  print "  def self.force_close_registered(fd : Int32) : Nil"
+  print "    return unless fd.to_u64 + 1_u64 == Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_fd).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_registered).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_close_registered? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_registered).address).value.get == 1_u64"
+  print "  end"
+  print "  def self.force_close_missing(fd : Int32) : Nil"
+  print "    return unless fd.to_u64 + 1_u64 == Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_fd).address).value.get"
+  print "    unless force_close_registered?"
+  print "      puts \"FAIL: closes: the target was closed before io registration\""
+  print "      __iyi_exit(1)"
+  print "    end"
+  print "    puts \"FAIL: closes: the registered target close was not posted to its reader\""
+  print "    __iyi_exit(1)"
+  print "  end"
+  print "  def self.force_close_posted(fd : Int32) : Nil"
+  print "    return unless fd.to_u64 + 1_u64 == Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_fd).address).value.get"
+  print "    puts \"closes: the registered target close was posted to its reader\""
+  print "  end"
+  print
+  n_defs++
+  next
+}'
+      CLOSE_END='END { if (n_wait != 1 || n_reg != 1 || n_close != 1 || n_post != 1 || n_guard != 1 || n_defs != 1) exit 3 }'
+      broken noclose "$CLOSE_COMMON
+$CLOSE_BUG
+$CLOSE_DEFS
+{ print }
+$CLOSE_END" concurrency.iyi parallel_migrate -Dnoclose_force
+      verdict_caught noclose 'closes: the registered target close was not posted to its reader' closes --watch=5000
+      broken noclose_hook "$CLOSE_COMMON
+$CLOSE_HOOK
+$CLOSE_DEFS
+{ print }
+$CLOSE_END" concurrency.iyi parallel_migrate -Dnoclose_force
+      verdict_held noclose_hook 'closes: the registered target close was posted to its reader' closes --watch=5000 ;;
   esac
 
   step "failure proof: a read made on the thread that closes its socket is a close that never crossed"
   if ! "$IYI" build --release -Dparallel_closes_home "$REPO/bench/parallel_migrate.iyi" -o closeshome-run > build-closeshome.log 2>&1; then
     echo "the closes-home build failed:"; tail -20 build-closeshome.log; exit 1
   fi
-  caught closeshome 'the main thread closed a socket on the thread its reader parked on' closes
+  verdict_caught closeshome 'closes: the main thread closed a socket on the thread its reader parked on' closes
 
   step "failure proof: a join held in the kernel holds its worker, and the sleepers on it"
-  broken kerneljoin '/^      while @ended.get == 0_u64$/ { skip = 3 } skip > 0 { skip = skip - 1; next } { print }' thread.iyi parallel_migrate
-  caught kerneljoin 'join: a task' join
+  broken kerneljoin '/^      while @ended.get == 0_u64$/ { skip = 3; n++ } skip > 0 { skip = skip - 1; next } { print } END { if (n != 1) exit 3 }' thread.iyi parallel_migrate
+  verdict_caught kerneljoin "join: the child's measured wake was outside the allowed range" join
 
   step "failure proof: a task woken by a task that computes on waits for that computation"
   # Measured with the handoff step, Linux, 12 vCPUs, release: the woken
@@ -1430,7 +1680,7 @@ END { if (n_defs != 1 || n_list != 1 || n_disp != 1 || n_mut != 1) exit 3 }"
   # 20 on tmac at loads of 4 to 41, and 15 of 15 on Windows, 12 vCPUs,
   # beside up to 24 busy loops.
   broken nohandoff '/^    elsif handed_on\?\(st, fiber\)$/ { print "    elsif false"; next } { print }' concurrency.iyi parallel_migrate
-  caught nohandoff 'were handed over with no idle worker called' handoff
+  verdict_caught nohandoff 'handoff: a parked task was handed over without an idle worker called' handoff
 
   step "failure proof: a hand-off for a parked task omits its immediate wake_one call"
   # Copy only, for the nocall proof of bench/parallel_migrate.iyi. Both copies record the hand-off branch's
@@ -1717,10 +1967,10 @@ END { if (n_defs != 1 || n_dec != 1 || n_look != 1 || n_mut != 1) exit 3 }"
     # Both without preemption: a preempted task waits in a queue any worker
     # takes from, which spreads the parked tasks as a steal would, and a
     # pool that never steals took 1.88x the ideal with it on.
-    NOPREEMPT='/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { next } '
+    NOPREEMPT='/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++; next } '
     step "failure proof: a pool that never steals a started task leaves tasks woken on one worker there"
-    broken nosteal "$NOPREEMPT"'/^  def self.grab\(victim/ { print; print "    return nil"; next } { print }' concurrency.iyi parallel_migrate
-    caught nosteal 'woken from a worker, took' balance
+    broken nosteal "$NOPREEMPT"'/^  def self.grab\(victim : IyiSchedulerState, thief : IyiSchedulerState\) : IyiFiber\?$/ { print; print "    return nil"; n_grab++; next } { print } END { if (n_pre != 1 || n_grab != 1) exit 3 }' concurrency.iyi parallel_migrate
+    verdict_caught nosteal 'balance: tasks woken from a worker exceeded the balance bound' balance
 
     step "failure proof: tasks woken back onto the worker they parked on, as before tasks moved"
     # Both copies record the target fiber's actual route in ready: 1 for
@@ -1753,14 +2003,21 @@ in_ready && /^  end$/ { in_ready = 0 }
 in_ready && /^          IyiWorkers\.push_shared\(fiber\)$/ { print "          force_pin_note(fiber, 1_u64)"; print; n_shared++; next }
 in_ready && /^    send_home\(home, fiber\)$/ { print "    force_pin_note(fiber, home.object_id)"; print; n_home++; next }'
     PIN_HOOK="$PIN_DEFS"'
+/^  private def self.look : Bool$/ { in_look = 1; n_look++ }
+in_look && /^  end$/ { in_look = 0 }
+in_look && /^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++ }
+in_ready && /^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { n_ready++ }
+/^  def self.grab\(victim : IyiSchedulerState, thief : IyiSchedulerState\) : IyiFiber\?$/ { n_grab++ }
 { print }
-END { if (n_defs != 1 || n_shared != 1 || n_home != 1) exit 3 }'
+END { if (n_defs != 1 || n_shared != 1 || n_home != 1 || n_look != 1 || n_pre != 1 || n_ready != 1 || n_grab != 1) exit 3 }'
     PIN_BUG="$PIN_DEFS"'
-/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++; next }
-/^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; n_ready++; next }
-/^  def self.grab\(victim/ { print; print "    return nil"; n_grab++; next }
+/^  private def self.look : Bool$/ { in_look = 1; n_look++ }
+in_look && /^  end$/ { in_look = 0 }
+in_look && /^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++; next }
+in_ready && /^      if fiber.unit.is_a\?\(IyiUnit\) && !fiber.homebound$/ { print "      if false"; n_ready++; next }
+/^  def self.grab\(victim : IyiSchedulerState, thief : IyiSchedulerState\) : IyiFiber\?$/ { print; print "    return nil"; n_grab++; next }
 { print }
-END { if (n_defs != 1 || n_shared != 1 || n_home != 1 || n_pre != 1 || n_ready != 1 || n_grab != 1) exit 3 }'
+END { if (n_defs != 1 || n_shared != 1 || n_home != 1 || n_look != 1 || n_pre != 1 || n_ready != 1 || n_grab != 1) exit 3 }'
     broken pinned "$PIN_BUG" concurrency.iyi parallel_migrate -Dpinned_force
     verdict_caught pinned "balance: a task woken from the main thread was sent back to the worker it parked on" balance
     broken pinned_hook "$PIN_HOOK" concurrency.iyi parallel_migrate -Dpinned_force
@@ -1770,22 +2027,54 @@ step "failure proof: a loop marked @[NoPreempt] holds its worker for its whole c
 if ! "$IYI" build --release -Dpreempt_off "$REPO/bench/parallel_preempt.iyi" -o preemptoff-run > build-preemptoff.log 2>&1; then
   echo "the @[NoPreempt] build failed:"; tail -20 build-preemptoff.log; exit 1
 fi
-caught preemptoff 'slice: a short task waited' slice --workers=1
+verdict_caught preemptoff 'slice: the short task exceeded the wait bound' slice --workers=1
 
 step "failure proof: a monitor that never raises a worker's word preempts nothing"
 broken noflag '/^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
-caught noflag 'slice: a short task waited' slice --workers=1
+verdict_caught noflag 'slice: the short task exceeded the wait bound' slice --workers=1
 
-# Caught at its look, which the period step holds to 8 ms on Windows: the
-# copy read 10.1 to 13.1 ms in 20 runs of debug jobs 124913849506 and
-# 124922160886, and 15.6 and 16.0 on Windows 11, 12 logical processors
-# (the user's machine), held to 4. Against the 10.5 ms every platform was
-# held to, it passed the look in master's soak (job 124885593140).
-step "failure proof: a Windows monitor that waits on the system timer looks too seldom"
+# On Windows, observe which wait the active monitor actually completed.
+# Elapsed cadence remains in the healthy benchmark, not this verdict.
+# Windows probe 44682358165: both exact verdicts held 20 of 20.
+step "failure proof: a Windows monitor using the semaphore fallback for an active tick"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    broken coarse '/^        @@monitor_timer = timer.address$/ { print "        @@monitor_timer = 0_u64"; did_timer = 1; next } /^      LibC.WaitForSingleObject\(Pointer\(Void\).new\(@@monitor_handle\), parked \? -1_i32 : PREEMPT_TICK_MS\)$/ { print; print "      if !parked"; print "        spun = __iyi_monotonic_ns"; print "        while __iyi_monotonic_ns - spun < 16000000_i64"; print "          IyiThread.spin_pause"; print "        end"; print "      end"; did_spin = 1; next } { print } END { if (!(did_timer && did_spin)) exit 3 }' concurrency.iyi parallel_preempt
-    caught coarse 'period: the monitor looked every' period --workers=1 ;;
+    COARSE_COMMON='/^  private def self.monitor_wait\(parked : Bool\) : Nil$/ { inwait = 1; n_wait++ }
+inwait && /^          LibC.WaitForSingleObject\(timer, -1_i32\)$/ { print; print "          force_tick_record(1_u64)"; n_timer_wait++; next }
+inwait && /^      LibC.WaitForSingleObject\(Pointer\(Void\).new\(@@monitor_handle\), parked \? -1_i32 : PREEMPT_TICK_MS\)$/ { print; print "      force_tick_record(2_u64) unless parked"; inwait = 0; n_fallback++; next }
+/^  def self.monitor_entry : UInt64$/ {
+  print "  @[UnsafeReach(\"copy-only monitor tick observation, accessed atomically\")]"
+  print "  @@forced_tick_armed : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only monitor tick observation, accessed atomically\")]"
+  print "  @@forced_tick_result : UInt64 = 0_u64"
+  print "  def self.force_tick_arm : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_tick_armed).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_tick_wait : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_tick_result).address).value.get"
+  print "  end"
+  print "  def self.force_tick_record(result : UInt64) : Nil"
+  print "    return unless Pointer(Atomic(UInt64)).new(pointerof(@@forced_tick_armed).address).value.get == 1_u64"
+  print "    stored = Pointer(Atomic(UInt64)).new(pointerof(@@forced_tick_result).address)"
+  print "    stored.value.set(result) if stored.value.get == 0_u64"
+  print "  end"
+  print
+  n_defs++
+  next
+}'
+    COARSE_BUG='/^        @@monitor_timer = timer.address$/ { print "        @@monitor_timer = 0_u64"; n_assignment++; next }'
+    COARSE_HOOK='/^        @@monitor_timer = timer.address$/ { n_assignment++ }'
+    COARSE_END='END { if (n_wait != 1 || n_timer_wait != 1 || n_fallback != 1 || n_defs != 1 || n_assignment != 1) exit 3 }'
+    broken coarse "$COARSE_COMMON
+$COARSE_BUG
+{ print }
+$COARSE_END" concurrency.iyi parallel_preempt -Dcoarse_force
+    verdict_caught coarse 'period: the active monitor used the semaphore fallback' period --workers=1
+    broken coarse_hook "$COARSE_COMMON
+$COARSE_HOOK
+{ print }
+$COARSE_END" concurrency.iyi parallel_preempt -Dcoarse_force
+    verdict_held coarse_hook 'period: the active monitor used its high-resolution timer' period --workers=1 ;;
   *)
     echo "  the monitor's tick here is the kernel's own timeout, and there is no system timer for it to fall back to" ;;
 esac
@@ -1889,7 +2178,7 @@ step "failure proof: a slow half that does not poll leaves a connection in a bus
 # the copy answered at 999 to 1001 ms in ten runs of ten, where the
 # gate's own poller step read 7.0 to 9.1 ms in six.
 broken nopoll '/^        IyiScheduler.wait_for_events\(false\)$/ { print "        IyiScheduler.wake_expired_sleepers"; next } { print }' concurrency.iyi parallel_preempt
-caught nopoll 'poller: a fast request took' poller --workers=1
+verdict_caught nopoll 'poller: the fast request exceeded the wait bound' poller --workers=1
 
 step "failure proof: a word the monitor raised for the task before preempts the task switched in after it"
 # The switch lowers the word no more: the task the fresh step switches
@@ -1909,7 +2198,7 @@ step "failure proof: a word the monitor raised for the task before preempts the 
 # to 48 threads runnable), 64 us in a gate run beside 12 busy loops, and
 # 34 to 50 us on tmac.
 broken stale '/^        raised.value.set\(0_u64\) if raised.value.get != 0_u64$/ { next } { print }' concurrency.iyi parallel_preempt
-caught stale 'fresh: round ' fresh --workers=1
+verdict_caught stale "fresh: a switched-in task yielded before the monitor's floor" fresh --workers=1
 
 step "failure proof: a port whose packets only the thread their task parked on runs leaves an answer behind a computation"
 case "$(uname -s)" in
@@ -1945,19 +2234,22 @@ case "$(uname -s)" in
   print "    end"
   print ""
   print
+  in_packet = 1
   n_defs++
   next
-}'
-    NOX_REC='/^        wake_completed\(fiber\)$/ { print "        force_dispatch(fiber, owner)"; print; n_rec++; next }'
-    NOX_HOME='/^        wake_completed\(fiber\)$/ { print "        fiber.homebound = true if owner.object_id != state.object_id"; print "        force_dispatch(fiber, owner)"; print; n_home++; next }'
+}
+in_packet && /^    end$/ { in_packet = 0 }
+in_packet && /^      posting = fiber_posting\(overlapped\)$/ { after_posting = 1; n_posting++ }'
+    NOX_REC='in_packet && /^        wake_completed\(fiber\)$/ { print "        force_dispatch(fiber, owner)"; print; if (after_posting) n_second++; else n_first++; next }'
+    NOX_HOME='in_packet && /^        wake_completed\(fiber\)$/ { print "        fiber.homebound = true if owner.object_id != state.object_id"; print "        force_dispatch(fiber, owner)"; print; if (after_posting) n_second++; else n_first++; next }'
     NOX_HOOK="$NOX_DEFS
 $NOX_REC
 { print }
-END { if (n_defs != 1 || n_rec != 2) exit 3 }"
+END { if (n_defs != 1 || n_posting != 1 || n_first != 1 || n_second != 1) exit 3 }"
     NOX_BUG="$NOX_DEFS
 $NOX_HOME
 { print }
-END { if (n_defs != 1 || n_home != 2) exit 3 }"
+END { if (n_defs != 1 || n_posting != 1 || n_first != 1 || n_second != 1) exit 3 }"
     broken nocross "$NOX_BUG" concurrency.iyi completions_taken -Dnocross_force
     verdict_caught nocross "taken: the packet's fiber was made homebound to the worker it parked on, so its answer waits for that worker" taken --workers=12
     broken nocross_hook "$NOX_HOOK" concurrency.iyi completions_taken -Dnocross_force
@@ -1970,14 +2262,14 @@ step "failure proof: a pool that leaves Windows' priority boost on"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     broken boosted '/^        LibC\.SetProcessPriorityBoost\(LibC\.GetCurrentProcess, 1_i32\)$/ { next } { print }' concurrency.iyi completions_taken
-    caught boosted "boost: the process's priority boost is on" boost --workers=12 ;;
+    verdict_caught boosted "boost: the process's priority boost is on with the pool started" boost --workers=12 ;;
   *)
     echo "  Windows' alone: the boost is its scheduler's" ;;
 esac
 
 step "failure proof: a preempted task that gives its unit's token away lets its child run inside it"
 broken tokenless '/^      return unless unit.hand_to_yielded\(id\)$/ { print "      unit.give"; next } { print }' concurrency.iyi parallel_preempt
-caught tokenless 'unit: a task of the same unit ran' unit --workers=1
+verdict_caught tokenless 'unit: a task of the same unit ran inside the preempted task' unit --workers=1
 
 step "failure proof: the prelude's library compiled as the runtime's holds its worker through a sort, a copy, a growth and a join"
 # `array.iyi`, `hash.iyi` and `string.iyi` written into prelude.iyi where it
@@ -1985,9 +2277,9 @@ step "failure proof: the prelude's library compiled as the runtime's holds its w
 # never check. Their own `@[Unsafe]` marks are left out: prelude.iyi's, at
 # its top, covers what they handle. A plain build, whose copy is a loop of
 # bytes and long enough to tell.
-broken libruntime '/^require "\.\/(array|hash|string)"$/ { name = $2; gsub(/"|\.\//, "", name); file = "'"$REPO"'/src/iyi/" name ".iyi"; while ((getline line < file) > 0) if (line !~ /^@\[Unsafe\(/) print line; close(file); next } { print }' prelude.iyi parallel_preempt_lib
+broken libruntime '/^require "\.\/(array|hash|string)"$/ { name = $2; gsub(/"|\.\//, "", name); file = "'"$REPO"'/src/iyi/" name ".iyi"; while ((getline line < file) > 0) if (line !~ /^@\[Unsafe\(/) print line; close(file); next } { print }' prelude.iyi parallel_preempt_lib -Dpreempt_timing_proof
 for proof in sort copy rehash join; do
-  caught libruntime "$proof: a short task waited" "$proof" --workers=1
+  verdict_caught libruntime "$proof: the short task exceeded the wait bound" "$proof" --workers=1
 done
 
 # The two halves of `copy_checks`, broken: `Pointer#copy_from` with no way
@@ -2023,10 +2315,10 @@ else
 fi
 
 step "failure proof: a recursion marked @[NoPreempt] holds its worker for its whole computation"
-if ! "$IYI" build -Dpreempt_off "$REPO/bench/parallel_preempt_lib.iyi" -o recursionoff-run > build-recursionoff.log 2>&1; then
+if ! "$IYI" build -Dpreempt_off -Dpreempt_timing_proof "$REPO/bench/parallel_preempt_lib.iyi" -o recursionoff-run > build-recursionoff.log 2>&1; then
   echo "the @[NoPreempt] build failed:"; tail -20 build-recursionoff.log; exit 1
 fi
-caught recursionoff 'fib: a short task waited' fib --workers=1
+verdict_caught recursionoff 'fib: the short task exceeded the wait bound' fib --workers=1
 
 step "failure proof: a scheduler the compiler takes for a library's checks, and the audit names where"
 [ -n "$PY" ] || { echo "no python here to read the IR with: the audit cannot run"; exit 1; }

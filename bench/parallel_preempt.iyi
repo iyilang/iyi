@@ -309,7 +309,8 @@ import std/socket::{IyiSocket, SocketError}
     end
     ms = waited.get
     if ms > BOUND_MS
-      fail("slice: a short task waited #{ms} ms behind a task computing a #{which} on its one worker, past #{BOUND_MS} ms")
+      puts "slice: the short task waited #{ms} ms behind #{which}, past #{BOUND_MS} ms"
+      fail("slice: the short task exceeded the wait bound")
     end
     want = which == "walk" ? spin_np(walk, 5_u64) : 0_u64
     if answer.get != want
@@ -370,7 +371,8 @@ import std/socket::{IyiSocket, SocketError}
     given = IyiWorkers.preempts - preempts
     fail("unit: the computing task was never preempted for the ticker beside it") if given == 0_u64
     if moved.get != 0_i64
-      fail("unit: a task of the same unit ran #{moved.get} times between two statements of a preempted task")
+      puts "unit: the child ran #{moved.get} times during the preempted task"
+      fail("unit: a task of the same unit ran inside the preempted task")
     end
     if late.max_ms > BOUND_MS
       fail("unit: a ticker asleep on the worker of a computing task woke #{late.max_ms} ms late, past #{BOUND_MS} ms")
@@ -613,7 +615,8 @@ import std/socket::{IyiSocket, SocketError}
       fast.close
     end
     if took_us // 1000_i64 > FAST_BOUND_MS
-      fail("poller: a fast request took #{took_us // 1000_i64} ms, its connection in the poller of the one worker while that worker computed, past #{FAST_BOUND_MS} ms")
+      puts "poller: the fast request took #{took_us // 1000_i64} ms, past #{FAST_BOUND_MS} ms"
+      fail("poller: the fast request exceeded the wait bound")
     end
     say "poller: a fast request whose connection waited in the poller of the one worker, busy computing, was answered in #{took_us} us"
   end
@@ -729,12 +732,14 @@ import std/socket::{IyiSocket, SocketError}
       if gave < 0_i64 || gave >= PERIOD_FLOOR_US
         judged += 1
       elsif most < PERIOD_FLOOR_US
-        fail("fresh: round #{round}: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check gave the worker up within #{most} us of that task's end, under the monitor's #{PERIOD_FLOOR_US} us")
+        puts "fresh: round #{round}, end-to-yield #{most} us, floor #{PERIOD_FLOOR_US} us"
+        fail("fresh: a switched-in task yielded before the monitor's floor")
       elsif THREAD_CLOCK && gave + off >= PERIOD_FLOOR_US
         set_aside += 1
       else
         held = THREAD_CLOCK ? ", the kernel holding its thread off its core #{off} us of the #{most - gave} around the switch and the give-up" : ""
-        fail("fresh: round #{round}: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check gave the worker up #{gave} us into its run, under the monitor's #{PERIOD_FLOOR_US} us#{held}")
+        puts "fresh: round #{round}, yield #{gave} us, floor #{PERIOD_FLOOR_US} us#{held}"
+        fail("fresh: a switched-in task yielded before the monitor's floor")
       end
     end
     given = IyiWorkers.preempts - preempts
@@ -821,6 +826,35 @@ import std/socket::{IyiSocket, SocketError}
 
 
   def period(per_ms : Int64) : Nil
+    {% if flag?(:coarse_force) && flag?(:win32) %}
+      fail("period: runs on a pool of one") if IyiWorkers.count != 1
+      done = Atomic(Int64).new(0_i64)
+      started = Atomic(Int64).new(0_i64)
+      group do |g|
+        g.spawn(unit: :new) do
+          x = 13_u64
+          started.set(1_i64)
+          while done.get == 0_i64
+            x = x &* 6364136223846793005_u64 &+ 1_u64
+          end
+          x
+        end
+        limit = __iyi_monotonic_ns + 20_000_000_000_i64
+        while started.get == 0_i64
+          sleep(1)
+          fail("period: the active worker did not start") if __iyi_monotonic_ns > limit
+        end
+        IyiWorkers.force_tick_arm
+        while IyiWorkers.force_tick_wait == 0_u64
+          sleep(1)
+          fail("period: the active monitor tick did not complete") if __iyi_monotonic_ns > limit
+        end
+        done.set(1_i64)
+      end
+      fail("period: the active monitor used the semaphore fallback") if IyiWorkers.force_tick_wait == 2_u64
+      puts "period: the active monitor used its high-resolution timer"
+      return
+    {% end %}
     {% if flag?(:slowturn_force) %}
       period_forced(per_ms)
       return

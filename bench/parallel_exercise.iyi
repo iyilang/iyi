@@ -423,7 +423,10 @@
         end
       end
       want = 2_i64
-      fail("race: increments lost: #{want - racer.hits} of #{want}, so one task stored the count it read before the other's add landed") unless racer.hits == want
+      unless racer.hits == want
+        puts "race: lost #{want - racer.hits} of #{want} increments"
+        fail("race: a task stored the count it read before another task's add landed")
+      end
       puts "race: two tasks added to one count with one add put between another's read and store, and lost none"
     end
   end
@@ -584,32 +587,36 @@
     end
   end
 
-  # The take_now copy that drops the channel's lock reads the count, yields,
-  # then stores it again. Two takes from one full channel on the main thread:
-  # the first yields between its read and its store (armed below, copy only),
-  # the second takes and stores in that gap, and the first then stores a count
-  # it read before. Unforced, each take runs to its end before the next
-  # starts, and nothing shows.
+  # Two workers take from one channel. The copy-only hook holds the first
+  # inside shift_item until the second either observes its lock held or
+  # stores the count without that lock.
   def now_forced(watch : Int32) : Nil
     watched("now", watch) do
       places = Channel(Int32).new(2)
       places.send(0)
       places.send(1)
       {% if flag?(:now_force) %}
-        IyiScheduler.force_yield_arm
+        IyiScheduler.force_now_arm(places.lock_address)
       {% end %}
       group do |g|
-        g.spawn(unit: :same) do
+        g.spawn(unit: :new) do
           places.take_now
           0
         end
-        g.spawn(unit: :same) do
+        {% if flag?(:now_force) %}
+          started = __iyi_monotonic_ns
+          while !IyiScheduler.force_now_entered?
+            sleep(1)
+            fail("now: the first take did not reach its held count") if elapsed_ms(started) >= watch.to_i64
+          end
+        {% end %}
+        g.spawn(unit: :new) do
           places.take_now
           0
         end
       end
       fail("now: a place is still held after both takes") if places.receive_ready?
-      puts "now: two takes from one full channel on one thread left no place held"
+      puts "now: two takes from one full channel on two workers left no place held"
     end
   end
 
@@ -672,6 +679,9 @@
         while sleeper.fiber.listed_on == 0_u64 || waiter.fiber.state != IyiFiberState::WaitingCh || local.fiber.state != IyiFiberState::Sleeping
           sleep(1)
         end
+        {% if flag?(:undelivered_force) %}
+          IyiScheduler.force_post_target(sleeper.fiber)
+        {% end %}
         cue.add(sleeper.fiber.listed_on.to_i64)
         got = sleeper.value
         slept = got.is_a?(Int32) ? got : -1
@@ -717,13 +727,13 @@
   # every worker (the pool is four: `IyiWorkers.count = 4` in main), so the
   # 32 children spawned after them never start: each has no home and waits in
   # the pool. The group's cancel must flag them while they wait. The holders
-  # are released after the cancel, and a child the cancel did not flag runs
-  # its sleep to the end.
+  # are released after the cancel. Their flags are read before release, so
+  # the verdict does not depend on a child starting or sleeping.
   def cancel_unstarted(watch : Int32) : Nil
     watched("cancel", watch) do
       begun = Tally.new
       cue = Tally.new
-      waited = Tally.new
+      missed = 0_i64
       children = IyiWorkers.count * 8
       group do |g|
         IyiWorkers.count.times do
@@ -737,16 +747,21 @@
           sleep(1)
           fail("cancel: the holders did not take every worker within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
         end
+        handles = [] of IyiTask(Int32)
         children.times do
-          g.spawn(unit: :new) do
-            waited.add(1_i64) unless sleep(1000).is_a?(Cancelled)
-            0
-          end
+          child = g.spawn(unit: :new) { 0 }
+          handles << child
+        end
+        handles.each do |child|
+          fail("cancel: a pool child started before cancellation") unless child.fiber.home.is_a?(Nil)
         end
         g.cancel_children
+        handles.each do |child|
+          missed = missed + 1_i64 unless child.fiber.cancelled
+        end
         cue.add(1_i64)
       end
-      fail("cancel: #{waited.count} tasks waiting in the pool ran uncancelled") if waited.count > 0
+      fail("cancel: #{missed} tasks waiting in the pool ran uncancelled") if missed > 0
       puts "cancel: #{children} tasks waiting in the pool were cancelled before any started"
     end
   end
@@ -820,14 +835,13 @@
     end
   end
 
-  # The main thread waits on its group while a task finishes, so the task's
-  # wake for the main thread goes through the main thread's own inbox and
-  # rings its poller. A forced copy whose ring is gone leaves the main thread
-  # asleep until the watch's timer ends it. The worker waits until the main
-  # thread's wait has marked it idle (`IyiScheduler.force_idle_seen?`, copy
-  # only), and only then finishes; unforced, the step is a plain join.
+  # The forced copy targets the joining fiber and its home. Its worker waits
+  # until that home is idle, then the copy records the post and ring decision.
   def home_wake(watch : Int32) : Nil
     watched("home", watch) do
+      {% if flag?(:lostwake_force) %}
+        IyiScheduler.force_home_arm(IyiScheduler.state, IyiScheduler.current)
+      {% end %}
       group do |g|
         g.spawn(unit: :new) do
           {% if flag?(:lostwake_force) %}
@@ -840,6 +854,12 @@
           0
         end
       end
+      {% if flag?(:lostwake_force) %}
+        fail("home: the targeted post and ring decision did not complete") unless IyiScheduler.force_home_completed?
+        # A later post of the same root must not reopen the completed proof.
+        IyiScheduler.force_home_post(IyiScheduler.state, IyiScheduler.current)
+        IyiScheduler.force_home_done(IyiScheduler.state, IyiScheduler.current)
+      {% end %}
       puts "home: a task finished on a worker and woke the main thread it was joined by"
     end
   end
@@ -1065,7 +1085,13 @@
         started = __iyi_monotonic_ns
         while word.value.get == seen
           IyiThread.spin_pause
-          fail("wakes, words: turn #{seen + 1_u64} was not taken in #{watch} ms, so a wake on the word was lost") if elapsed_ms(started) >= watch.to_i64
+          if elapsed_ms(started) >= watch.to_i64
+            puts "wakes, words: turn #{seen + 1_u64} was not taken in #{watch} ms"
+            {% if flag?(:lostword_force) %}
+              fail("wakes, words: the forced first wake was lost before its waiter linked") if seen == 1_u64
+            {% end %}
+            fail("wakes, words: an unexpected turn was not taken")
+          end
         end
         next
       end
@@ -1081,10 +1107,10 @@
   # claims the park can end it. Built only under -Dlostcancel_force.
   def cancel_in_window(ended : Tally, watch : Int32) : Nil
     {% if flag?(:lostcancel_force) %}
-      IyiScheduler.force_window_arm
       never = Channel(Int32).new
       group do |inner|
-        inner.spawn(unit: :new) do
+        task = inner.spawn(unit: :new) do
+          IyiScheduler.force_window_arm(IyiScheduler.current)
           ended.add(1_i64) if never.receive.is_a?(Cancelled)
           0
         end
@@ -1094,7 +1120,15 @@
           fail("wakes, cancels: the task never reached its park's window within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
         end
         inner.cancel_children
+        fail("wakes, cancels: the targeted cancellation did not set its flag") unless task.fiber.cancelled
         IyiScheduler.force_window_release
+        started = __iyi_monotonic_ns
+        while IyiScheduler.force_window_result == 0_u64
+          sleep(1)
+          fail("wakes, cancels: the targeted suspend decision did not complete") if elapsed_ms(started) >= watch.to_i64
+        end
+        fail("wakes, cancels: the targeted suspend omitted the cancelled claim") if IyiScheduler.force_window_result == 2_u64
+        puts "wakes, cancels: the targeted suspend claimed its cancellation"
       end
     {% end %}
   end
@@ -1170,7 +1204,10 @@
           a.send(42_i64)
           a.close
           handed_answer = chooser.value
-          fail("wakes, selects: a value handed to a parked select was not received (it answered #{handed_answer})") unless handed_answer == 42_i64
+          unless handed_answer == 42_i64
+            puts "wakes, selects: the select answered #{handed_answer}"
+            fail("wakes, selects: a value handed to a parked select was not received")
+          end
         end
       end
     end

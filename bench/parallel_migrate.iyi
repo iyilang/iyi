@@ -716,6 +716,9 @@ import std/socket::{IyiSocket, SocketError}
       last = pair(listener, port)
       ends << last[0]
       lent = Lent.new(last[1])
+      {% if flag?(:noclose_force) %}
+        IyiScheduler.force_close_target(lent.socket.fd)
+      {% end %}
       lent_reader = Where.new
       go = Channel(Int32).new
       waiting = Tally.new
@@ -757,7 +760,15 @@ import std/socket::{IyiSocket, SocketError}
         while waiting.count < (units + 1).to_i64
           sleep(1)
         end
-        sleep(20)
+        {% if flag?(:noclose_force) %}
+          started = __iyi_monotonic_ns
+          while !IyiScheduler.force_close_registered?
+            sleep(1)
+            fail("closes: the targeted reader did not complete io registration") if elapsed_ms(started) >= watch.to_i64
+          end
+        {% else %}
+          sleep(20)
+        {% end %}
         units.times { go.send(1) }
         main_crossed = os_thread != lent_reader.thread
         lent.socket.close
@@ -1107,7 +1118,8 @@ import std/socket::{IyiSocket, SocketError}
     ratio = (wall * 100_i64 // ideal).to_f / 100.0
     took = IyiWorkers.grabs - grabs
     if wall > ideal * 2_i64
-      fail("balance: #{tasks} tasks that parked on one worker, woken #{label}, took #{wall} ms against #{ideal} ms of work per worker (#{ratio}x)")
+      puts "balance: #{tasks} tasks woken #{label}, #{wall} ms against #{ideal} ms of work per worker (#{ratio}x)"
+      fail("balance: tasks woken #{label} exceeded the balance bound")
     end
     puts "balance: #{tasks} tasks parked on one worker, woken #{label}: #{wall} ms against an ideal #{ideal} ms (#{ratio}x), #{took} steals from a ring"
   end
@@ -1414,7 +1426,8 @@ import std/socket::{IyiSocket, SocketError}
         puts "handoff: #{rounds} tasks woken onto a worker held 50 ms with preemption off, under the forced copy"
       {% else %}
       if uncalled > 0
-        fail("handoff: #{uncalled} of #{rounds} tasks woken onto a worker held 50 ms with preemption off were handed over with no idle worker called")
+        puts "handoff: #{uncalled} of #{rounds} parked tasks were handed over without an idle worker called"
+        fail("handoff: a parked task was handed over without an idle worker called")
       end
       sorted = waits.sorted
       if stayed > 0
@@ -1900,7 +1913,10 @@ import std/socket::{IyiSocket, SocketError}
         got = task.value
         answer = got.is_a?(Int64) ? got : -2_i64
       end
-      fail("join: a task's child asleep 20 ms woke #{answer} ms in, behind the 400 ms thread its parent joined") if answer < 0_i64 || answer >= 300_i64
+      if answer < 0_i64 || answer >= 300_i64
+        puts "join: the child's measured wake was #{answer} ms"
+        fail("join: the child's measured wake was outside the allowed range")
+      end
       puts "join: a task joining a 400 ms thread left its worker to its child, which woke #{answer} ms in"
     end
   end

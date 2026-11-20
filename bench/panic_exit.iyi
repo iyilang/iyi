@@ -38,7 +38,10 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # A read nobody answers: parked on the poller until it is cancelled.
-  def park_read(fd : Int32) : Int32
+  def park_read(fd : Int32, target : Bool = false) : Int32
+    {% if flag?(:parkedio_force) %}
+      IyiScheduler.force_io_target(IyiScheduler.current) if target
+    {% end %}
     case got = IyiSocket.new(fd).read(1)
     in Cancelled, SocketError
       0
@@ -79,6 +82,9 @@ import std/socket::{IyiSocket, SocketError}
       i = 0
       while i < readers.size
         parked = false unless readers[i].fiber.state == IyiFiberState::WaitingIo
+        {% if flag?(:parkedio_force) %}
+          parked = false unless IyiScheduler.force_io_registered?
+        {% end %}
         i = i + 1
       end
       fail("task-panic: a reader never parked on its io wait") if !parked && (__iyi_monotonic_ns - started) // 1000000_i64 >= 4000_i64
@@ -96,7 +102,8 @@ import std/socket::{IyiSocket, SocketError}
       PAIRS.times do |index|
         a = near[index]
         b = far[index]
-        readers << g.{{kind[1].id}} { park_read(a) }
+        target = index == 0
+        readers << g.{{kind[1].id}} { park_read(a, target) }
         readers << g.{{kind[1].id}} { park_read(b) }
       end
       readers << g.{{kind[1].id}} { park_accept(listening) }

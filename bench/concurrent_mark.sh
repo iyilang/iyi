@@ -358,20 +358,22 @@ end
 lost = 0
 round = 0
 {% if flag?(:freed_force) %}
-  # The copy's sweep answers the armed arena's first look with the kept chunk
-  # it looks at, and holds that look until this program frees the chunk. Nothing
-  # is allocated from the moment the concurrent mark starts until the look is
-  # answered: a collection this program triggered in that window would wait for
-  # the held sweep. A settle and an eager collection first leave no lazy sweep
-  # of an older mark pending.
+  # The look must be held by a sweep helper, not an allocation paying sweep
+  # debt on this thread. Clear old debt, trigger one epoch, then allocate
+  # nothing while its helpers find the armed arena and until its look is freed.
   forced_arena = IyiHeap.arena_of(aged[0].address)
   IyiMark.settle
   IyiMark.collect
   IyiHeap.arm_look(forced_arena)
   forced_limit = IyiMark.now_ns + 5000000000_u64
-  while IyiHeap.forced_look == 0_u64 && IyiMark.now_ns < forced_limit
+  epoch_before = IyiMark.epoch
+  while IyiMark.epoch == epoch_before && IyiMark.now_ns < forced_limit
     block = Pointer(UInt8).malloc(64_u64)
     block.value = 1_u8
+  end
+  IyiMark.settle
+  while IyiHeap.forced_look == 0_u64 && IyiMark.now_ns < forced_limit
+    IyiThread.spin_pause
   end
   if IyiHeap.forced_look == 0_u64
     print "FAIL: freed: no sweep looked at a chunk the last mark kept within five seconds\n"
@@ -514,6 +516,10 @@ awk 'function forced() {
     print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_on).address).value.set(1_u64)"
     print "      end"
     print ""
+    print "      def self.look_on_helper? : Bool"
+    print "        @@cache == 0_u64"
+    print "      end"
+    print ""
     print "      def self.look_armed_in?(arena : UInt64) : Bool"
     print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_on).address).value.get != 0_u64 && Pointer(Atomic(UInt64)).new(pointerof(@@forced_arena).address).value.get == arena"
     print "      end"
@@ -542,6 +548,11 @@ awk 'function forced() {
   /^          word = IyiHeap\.read8\(byte\)$/ { print
     print "          if chunk >= 1024_u64 && word & IyiHeap::EPOCH_FLAG != epoch && word & IyiHeap::FREE_FLAG == 0 && IyiHeap.read8(mark) != WHITE"
     print "            if IyiHeap.look_armed_in?(arena) && IyiHeap.forced_look == 0_u64"
+    print "              unless IyiHeap.look_on_helper?"
+    print "                message = \"freed: the armed look ran on an allocating thread, not a helper\\n\""
+    print "                __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "                __iyi_exit(1)"
+    print "              end"
     print "              IyiHeap.publish_look(cursor)"
     print "              look_limit = IyiMark.now_ns &+ 5000000000_u64"
     print "              while IyiHeap.read8(byte) == word && IyiHeap.forced_waiting != cursor && IyiMark.now_ns < look_limit"

@@ -308,6 +308,16 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   def boost : Nil
+    # Make the starting state explicit: a mutant that omits the pool's
+    # change must not pass because the process inherited a disabled boost.
+    if ::LibC.SetProcessPriorityBoost(::LibC.GetCurrentProcess, 0_i32) == 0
+      fail("boost: could not enable the process's priority boost before starting the pool")
+    end
+    disabled = 1
+    if LibBoost.GetProcessPriorityBoost(::LibC.GetCurrentProcess, pointerof(disabled)) == 0
+      fail("boost: GetProcessPriorityBoost failed before starting the pool")
+    end
+    fail("boost: the process's priority boost was not initially enabled") if disabled != 0
     # The pool starts at the first parallel task.
     group do |g|
       g.spawn(unit: :new) { 0 }

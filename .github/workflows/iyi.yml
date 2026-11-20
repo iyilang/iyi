@@ -24,7 +24,9 @@ name: iyi
 #   stdlib-specs     Crystal's library suite. The compiler is still a Crystal
 #                    program and is built with this library
 #   samples          every sample, then the same programs built again with the
-#                    modules' source deleted, which is R-1 taken literally
+#                    modules' source deleted, which is R-1 taken literally; its
+#                    later gates - rebuilds, packages, the editor and agent
+#                    surfaces, bound shards, the floors - in samples-surfaces
 #   targets          the platform files the library still carries, type-checked
 #                    by cross-compiling: an edit to `src/lib_c` or
 #                    `src/crystal/system` is invisible here until somebody
@@ -329,8 +331,8 @@ jobs:
         env:
           CRYSTAL_WORKERS: 1
 
-  # And the question from a position nobody chose. The samples job's
-  # soak asks one hover after each abuse; this asks every cursor question
+  # And the question from a position nobody chose. The samples-surfaces
+  # job's soak asks one hover after each abuse; this asks every cursor question
   # at thousands of positions across `src/std`, including the two shapes
   # the answers were wrong on — a macro directive line and a local
   # assignment, where a variable an arm this target does not take has no
@@ -419,7 +421,20 @@ jobs:
     # At 90 the job took 87 on most runs and was cancelled at 90 on
     # 2026-10-16, `lsp_positions.py` 22 to 41 minutes of it: that step is
     # now the `lsp-positions` job's, run beside this one.
-    timeout-minutes: 90
+    #
+    # And it grew back. In twelve green runs of 2026-11-19 and 11-20 on
+    # GitHub's runners it took 58.0 to 71.4 minutes (60.9 the median) and
+    # 87.6 on a slow runner (job 135531037219); run 44725107313's was cut
+    # off at 90 on one about 1.4 times slower in every step (job
+    # 136251143205: the dependency floor 430 s against 274, the release
+    # build 346 against 238). The gates from the edit-rebuild loop on are
+    # the `samples-surfaces` job's now, from a build of its own, beside
+    # this one. Cut there, the gates held 1,775 s here and 1,729 there
+    # in the median of those twelve runs and each job pays about 120 s
+    # to start its container and build `iyi`: 31.6 and 30.8 minutes, and
+    # 48.0 and 45.1 at the cut-off job's pace. Seventy-five is 1.6 times
+    # the slowest of those and still ends a hang.
+    timeout-minutes: 75
     container:
       image: crystallang/crystal:1.21.0-build
     name: "Samples, from source and from artifacts"
@@ -767,6 +782,35 @@ jobs:
           bash bench/reuse_integrity.sh
           bash bench/collect_trigger.sh
           bash bench/windows_exercise.sh
+
+  # The later half of what was the samples job - the rebuild loop, `iyi
+  # migrate`, packages, the editor and agent surfaces, bound shards, the
+  # floors and the threads under the collector - beside it rather than
+  # after it. The samples job's comment has the measurement; the setup is
+  # its setup but the daemon, so what runs these gates is the same binary.
+  samples-surfaces:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'samples-surfaces') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "Rebuilds, packages, the editor and agent surfaces, bound shards and the floors"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+
+      # The binary a person downloads, as in the samples job. Not the
+      # daemon's server: the gates that start a daemon are the samples
+      # job's.
+      - name: Build `iyi`
+        run: make -o .build/crystal iyi
 
       # The rebuild loop, held: cheap on both arms, and the artifact
       # read inside its band — the corrected prediction is in SPEC.md.
@@ -1435,7 +1479,7 @@ jobs:
           # The thread floor's aarch64 arm: raw `clone`, `futex`, `tgkill`
           # and a signal handler with the kernel's vdso sigreturn, none of
           # it run anywhere else. Its x86-64 arm is bench/thread_floor.sh in
-          # the samples job.
+          # the samples-surfaces job.
           ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
             -o cross/floor-aarch64 bench/thread_floor.iyi
           # Threads under the collector, the aarch64 arm: the runtime's own
@@ -1853,8 +1897,8 @@ jobs:
       # `pthread_create`, `pthread_kill`, `sigaction`, an `os_unfair_lock`
       # to park on, and `__tlv_bootstrap` for a `@[ThreadLocal]` — held as
       # the exact list, beside the runtime's twelve, with the pause printed
-      # by count. The Linux arm is the samples job's; the aarch64 Linux arm
-      # is cross-run's.
+      # by count. The Linux arm is the samples-surfaces job's; the aarch64
+      # Linux arm is cross-run's.
       - name: The thread floor (III.9, GC_DESIGN.md Stage 4)
         run: bash bench/thread_floor.sh
 
@@ -1862,7 +1906,7 @@ jobs:
       # signal stop and the pipe park in the runtime rather than the probe,
       # held to the thread floor's exact list, with a live list in every
       # stopped thread's frames surviving the collections. The Linux arm
-      # is the samples job's, the aarch64 arm is cross-run's.
+      # is the samples-surfaces job's, the aarch64 arm is cross-run's.
       - name: Threads under the collector (GC_DESIGN.md Stage 4)
         run: bash bench/thread_exercise.sh
 
@@ -4220,7 +4264,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
-            samples, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
+            samples, samples-surfaces, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
             npm-recipe, wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-siblings, windows-std-platforms, windows-gates, windows-compiler-specs,
@@ -4403,7 +4447,7 @@ jobs:
   # failed or cancelled one does not. `scripts/ci_plan.py` refuses a
   # workflow whose jobs this list does not name.
   result:
-    needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, std,
+    needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, samples-surfaces, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,

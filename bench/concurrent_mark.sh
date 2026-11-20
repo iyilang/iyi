@@ -40,8 +40,8 @@
 #     free. Those proofs exist only where their code is compiled (thread.iyi's
 #     start_helper and prelude.iyi's start_concurrent under win32), and the
 #     gate names that platform arm instead of passing silently.
-# Not forced by this gate (clock-decided, listed for the record): the stored,
-# late, released, let_go_late and arrived_only proofs.
+# Not forced by this gate (clock-decided, listed for the record): the late,
+# released, let_go_late and arrived_only proofs.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -807,54 +807,93 @@ for helpers in every one; do
   echo "  with $helpers helper: $(grep '^collections:' "stall-$helpers.txt")"
 done
 
-# The store put back where the remainder round counts helper 0 in, and a
-# window before it, held open until an assist has counted itself in - a
-# second at most - in which every assist that begins is held until the
-# store has landed: the window Windows' release leaves open while the
-# threads it resumed first allocate, made certain. And every second stop
-# retreats once, so that round runs at every collection. Both were left
-# to the machine before: a window of 200 us, and no forced retreat, and
-# on four-core Windows and three-core darwin runners the program
-# retreated 0 or 1 times in ten seconds and that copy exited 0. The
-# count goes below zero at the first collection's remainder round, and
-# `count_out` says so: 12 runs of 12 here held to three, four and twelve
-# cores, each ended inside 110 ms.
-step "failure proof: the remainder round's count stored over the assists counted in"
-mkdir -p stored/iyi
-cp "$REPO"/src/iyi/*.iyi stored/iyi/
-awk '/^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
-    print "          pool_word(1408_u64).value.set(0_u64)"
-    print "          pool_word(1344_u64).value.set(1_u64)"
-    print "          window = now_ns + 1000000000_u64"
-    print "          while pool_word(1408_u64).value.get == 0_u64 && now_ns < window"
-    print "            spin_pause"
+# Force one retreat and hold its remainder count until an assist has counted
+# itself in. The control adds helper 0; the mutant stores over that assist.
+step "the remainder round counts helper 0 beside a held assist"
+mkdir -p stored-held/iyi stored/iyi
+cp "$REPO"/src/iyi/*.iyi stored-held/iyi/
+awk 'function declarations() {
+    print "      @[UnsafeReach(\"copy-only: stored proof state\")]"
+    print "      @@stored_state : UInt64 = 0_u64"
+    print "      @[UnsafeReach(\"copy-only: stored proof assist\")]"
+    print "      @@stored_assist : UInt64 = 0_u64"
+    print "      def self.stored_word : Pointer(Atomic(UInt64))"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@stored_state).address)"
+    print "      end"
+    print "      def self.stored_retreat?(attempts : UInt64) : Bool"
+    print "        attempts == 0_u64 && stored_word.value.compare_and_set(0_u64, 1_u64)[1]"
+    print "      end"
+    print "      def self.stored_open : Bool"
+    print "        return false unless stored_word.value.compare_and_set(1_u64, 2_u64)[1]"
+    print "        limit = now_ns &+ 10000000000_u64"
+    print "        assist = Pointer(Atomic(UInt64)).new(pointerof(@@stored_assist).address)"
+    print "        while assist.value.get == 0_u64"
+    print "          if now_ns >= limit"
+    print "            message = \"FAIL: stored: no assist entered the forced remainder within ten seconds\\n\""
+    print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "            __iyi_exit(76)"
     print "          end"
-    print "          pool_word(POOL_ACTIVE).value.set(1_u64)"
-    print "          pool_word(1344_u64).value.set(0_u64)"
-    stored = 1; next }
-  /^        active\.value\.add\(1_u64\)$/ {
-    print
-    print "        if pool_word(1344_u64).value.get != 0_u64"
-    print "          pool_word(1408_u64).value.set(1_u64)"
-    print "          while pool_word(1344_u64).value.get != 0_u64"
-    print "            spin_pause"
-    print "          end"
+    print "          spin_pause"
     print "        end"
-    held = 1; next }
+    print "        message = \"stored: an assist counted itself in before helper 0 and waits for its count\\n\""
+    print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "        true"
+    print "      end"
+    print "      def self.stored_close : Nil"
+    print "        stored_word.value.set(3_u64)"
+    print "      end"
+    print "      def self.stored_hold_assist : Nil"
+    print "        return unless stored_word.value.get == 2_u64"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@stored_assist).address).value.set(1_u64)"
+    print "        limit = now_ns &+ 10000000000_u64"
+    print "        while stored_word.value.get == 2_u64"
+    print "          if now_ns >= limit"
+    print "            message = \"FAIL: stored: the assist was held past ten seconds\\n\""
+    print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "            __iyi_exit(76)"
+    print "          end"
+    print "          spin_pause"
+    print "        end"
+    print "      end"
+  }
+  /^      def self\.assist : Nil$/ { declarations(); declared++ }
+  /^        active\.value\.add\(1_u64\)$/ { print; print "        stored_hold_assist"; assist++; next }
   /^            if attempts < FINISH_RETRIES && unfinished$/ {
-    print "            if attempts < FINISH_RETRIES && (unfinished || attempts == 0_u64)"
-    forced = 1; next }
-  { print } END { if (!stored || !held || !forced) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > stored/iyi/prelude.iyi || { echo "the count this proof stores, or the assist it holds, is not in the prelude any more"; exit 1; }
+    print "            if attempts < FINISH_RETRIES && (stored_retreat?(attempts) || unfinished)"
+    retreat++; next
+  }
+  /^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
+    print "          stored_window = stored_open"
+    print
+    print "          stored_close if stored_window"
+    counted++; next
+  }
+  { print } END { if (declared != 1 || assist != 1 || retreat != 1 || counted != 1) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > stored-held/iyi/prelude.iyi || { echo "the stored proof hooks are missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o stored-held-run > build-stored-held.log 2>&1; then
+  cat build-stored-held.log; exit 1
+fi
+timeout -k 5 120 ./stored-held-run workers=12 seconds=2 > stored-held.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -Fxq "mark stall: every collection finished beside 24 connections" stored-held.txt || ! grep -Fxq "stored: an assist counted itself in before helper 0 and waits for its count" stored-held.txt; then
+  echo "the held stored control did not complete (exit $code):"; tail -5 stored-held.txt; exit 1
+fi
+echo "  held stored control exits 0 after the assist rendezvous"
+step "failure proof: storing over the counted assist loses the worker count"
+cp stored-held/iyi/*.iyi stored/iyi/
+awk '/^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
+    print "          pool_word(POOL_ACTIVE).value.set(1_u64)"; found++; next
+  }
+  { print } END { if (found != 1) exit 3 }' stored-held/iyi/prelude.iyi > stored/iyi/prelude.iyi || { echo "the remainder count is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/stored${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o stored-run > build-stored.log 2>&1; then
   cat build-stored.log; exit 1
 fi
-timeout -k 5 120 ./stored-run workers=12 seconds=10 > stored.txt 2>&1
+timeout -k 5 120 ./stored-run workers=12 seconds=2 > stored.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q "count of workers marking went below zero" stored.txt; then
-  echo "the stored count was not caught (exit $code):"; tail -3 stored.txt; exit 1
+if [ "$code" -ne 1 ] || ! grep -Fxq "stored: an assist counted itself in before helper 0 and waits for its count" stored.txt || ! grep -Eq "^iyi: the collector's count of workers marking went below zero: POOL_ACTIVE [0-9]+, POOL_HEAD [0-9]+, generation [0-9]+, permits left [0-9]+ and taken [0-9]+, helpers done [0-9]+[.] A mark that does not end is a bug in iyi's runtime, ours to fix: https://github[.]com/iyilang/iyi/issues$" stored.txt; then
+  echo "the stored count was not caught after the rendezvous (exit $code):"; tail -5 stored.txt; exit 1
 fi
-printf '  exits 1 at "%s"\n' "$(grep -m1 'went below zero' stored.txt | cut -c1-150)"
+printf '  exits 1 at "%s"\n' "$(grep -m1 'went below zero' stored.txt)"
 
 # Helper 0 reading the generation it waits past after `@@collecting`
 # falls, and held there until another thread's mark turns it, ten seconds

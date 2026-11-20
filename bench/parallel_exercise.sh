@@ -2331,7 +2331,16 @@ step "failure proof: the prelude's library compiled as the runtime's holds its w
 # never check. Their own `@[Unsafe]` marks are left out: prelude.iyi's, at
 # its top, covers what they handle. A plain build, whose copy is a loop of
 # bytes and long enough to tell.
-broken libruntime '/^require "\.\/(array|hash|string)"$/ { name = $2; gsub(/"|\.\//, "", name); file = "'"$REPO"'/src/iyi/" name ".iyi"; while ((getline line < file) > 0) if (line !~ /^@\[Unsafe\(/) print line; close(file); next } { print }' prelude.iyi parallel_preempt_lib -Dpreempt_timing_proof
+broken libruntime '/^require "\.\/(array|hash|string)"$/ {
+  name = $2; gsub(/"|\.\//, "", name); count[name]++
+  file = "'"$REPO"'/src/iyi/" name ".iyi"
+  read_any = 0
+  while ((status = getline line < file) > 0) { read_any = 1; if (line !~ /^@\[Unsafe\(/) print line }
+  if (status < 0 || !read_any) exit 3
+  close(file); next
+}
+{ print }
+END { if (count["array"] != 1 || count["hash"] != 1 || count["string"] != 1) exit 3 }' prelude.iyi parallel_preempt_lib -Dpreempt_timing_proof
 for proof in sort copy rehash join; do
   verdict_caught libruntime "$proof: the short task exceeded the wait bound" "$proof" --workers=1
 done

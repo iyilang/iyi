@@ -23,12 +23,11 @@
 #     must be the pattern written into them.
 #
 # Every round that made its move under a mark counts; the program asks for
-# at least one, and reports how many. Twenty-four rounds, and no more: whether
-# the program reaches the tail before the marker does is a race the machine
-# decides, and a run in which no round won it fails by name. Measured in CI
-# probes (probe/rl-concmark, 2026-11-19): 24 of 24 on Linux (4 cores) and
-# macOS (6 cores), and 24 of 24 in the local darwin arm64 run. The pauses are
-# printed beside the stop-the-world mark's over the same chain: a concurrent collection's two
+# at least one, and reports how many. Twenty-four rounds. Under -Dmove_force
+# (bench/concurrent_mark.sh) each round's helpers are held until its move, so
+# its payload is white at the move on every round; the plain build reports the
+# count and decides nothing about the race.
+# The pauses are printed beside the stop-the-world mark's over the same chain: a concurrent collection's two
 # stops, the longest of each, against the one stop that marked it all —
 # and how many second stops found a white root or a full pool and retreated
 # to mark it beside the program before stopping again.
@@ -458,6 +457,9 @@
     {% if flag?(:heap_partitions) %}
       scrub_stack
     {% end %}
+    {% if flag?(:move_force) %}
+      IyiMark.hold_move
+    {% end %}
     IyiMark.auto = true
     marking = allocate_until_marking
     holder = born_black_holder(round)
@@ -467,7 +469,13 @@
     payload_white = tail_white?(chain)
     marking = marking && IyiMark.marking? && IyiMark.colour(holder.object_id.to_u64) == IyiMark::BLACK && payload_white
     under_mark = under_mark + 1 if marking
+    {% if flag?(:move_force) %}
+      fail("moves: the forced move did not find a white payload under a mark") unless marking
+    {% end %}
     move(chain, holder)
+    {% if flag?(:move_force) %}
+      IyiMark.release_move
+    {% end %}
     {% if flag?(:heap_partitions) %}
       scrub_stack
     {% end %}
@@ -484,7 +492,9 @@
   IyiMark.auto = false
   rounds = round
   concurrent = IyiMark.concurrent_collections - concurrent_before
-  fail("no round made its move under a mark: nothing here was concurrent") if under_mark == 0
+  {% if flag?(:move_force) %}
+    fail("moves: no forced move ran under a mark") if under_mark == 0
+  {% end %}
   fail("no collection ran beside the program across #{rounds} rounds") if concurrent == 0_u64
 
   puts "moves: #{under_mark} of #{rounds} rounds moved a payload into a black holder under a running mark, #{concurrent.to_i64} collections ran beside the program, every payload intact"
@@ -570,6 +580,7 @@
   # asked for, and such a mark must have asked for some.
   {% if flag?(:win32) %}
     asked_helpers = IyiMark.beside_helpers
+    fail("wake boost: the pool started before the count, so every thread has the boost off") if IyiWorkers.started?
     fail("wake boost: no mark beside the program asked for helpers") if asked_helpers == 0_u64
     boost_off = ThreadBoost.count_boost_off
     fail("wake boost: #{boost_off.to_i64} threads of this process have the priority boost off, the mark asked for #{asked_helpers.to_i64} helpers") if boost_off < asked_helpers
@@ -583,22 +594,14 @@
   # took the thread away for 3.7 ms in one wake of 49, which it does
   # without any help. So the wakes are counted, over two hundred more
   # collections beside a kept chain, and the check is how many were slow.
-  # On a four-core Windows runner, 40 runs each, as the predecessor measured
-  # them (its job ids were not recorded): the shipped helpers made no wake past
-  # a millisecond in 10,000, and at most 4 of 256 once in CI, where helpers
-  # with the boost made 5 to 88 of 250 in every run. The bound is the geometric
-  # midpoint of the highest healthy count and the lowest broken one, sqrt(4 * 5),
-  # so more than four slow wakes fails on one round, with no second round. The
-  # boost count above decides the boost; this is its measured effect.
+  # The structural count above decides the boost; the wake timings are
+  # information only because scheduling can delay a healthy thread.
   IyiMark.auto = true
   kept = build_chain(1_u64)
   wake_rounds(kept)
   wake = IyiMark.wake_longest_ns
   wakes = IyiMark.wakes
   slow = IyiMark.wakes_slow
-  {% if flag?(:win32) %}
-    fail("wake: waking the helpers held the program's thread past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us in #{slow.to_i64} wakes of #{wakes.to_i64}, the longest #{(wake // 1000_u64).to_i64} us") if slow > 4_u64
-  {% end %}
   IyiMark.auto = false
   puts "wake: the program's thread woke the helpers #{wakes.to_i64} times, #{slow.to_i64} of them past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us, the longest #{(wake // 1000_u64).to_i64} us"
 

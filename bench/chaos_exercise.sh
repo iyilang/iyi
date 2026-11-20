@@ -54,8 +54,9 @@ case "$(uname -s)" in
     WORK="$(cygpath -m "$WORK")"
     PSEP=';'
     EXE=".exe"
+    PATH_WINDOWS=1
     ;;
-  *) PSEP=':' ;;
+  *) PSEP=':'; PATH_WINDOWS=0 ;;
 esac
 
 cd "$WORK" || exit 1
@@ -104,10 +105,11 @@ chaos_test() { # prelude, log, iyi test arguments...
 # The CLI prints its reproduce line only after the child's evidence ends.
 normal_failure() { # log, fixture verdict, source, seed, run, total
   local log="$1" verdict="$2" source="$3" seed="$4" run="$5" total="$6"
-  awk -v verdict="  $verdict" -v source="$source" -v seed="$seed" -v run="$run" -v total="$total" '
+  CHAOS_SOURCE="$source" awk -v verdict="  $verdict" -v seed="$seed" -v run="$run" -v total="$total" -v windows="$PATH_WINDOWS" '
+    BEGIN { source = ENVIRON["CHAOS_SOURCE"] }
     {
       line = $0
-      gsub(/\\/, "/", line)
+      if (windows) gsub(/\\/, "/", line)
       if (line == source ": fail (chaos seed " seed ", run " run " of " total ")") {
         if (header++ || stage) exit 1
         next
@@ -138,11 +140,7 @@ caught() { # prelude, label, source, expected seed, exact fixture verdict
   if [ "$code" -ne 1 ] || ! normal_failure "catch-$label.txt" "$verdict" "$source" "$want_seed" "$want_seed" 100; then
     echo "$label: search did not end at its fixture verdict (exit $code):"; tail -20 "catch-$label.txt"; return 1
   fi
-  seed="$(sed -n 's/.*(chaos seed \([0-9][0-9]*\), run [0-9][0-9]* of 100).*/\1/p' "catch-$label.txt" | head -1)"
-  [ -n "$seed" ] || { echo "$label: the failure names no seed:"; cat "catch-$label.txt"; return 1; }
-  if [ -n "$want_seed" ] && [ "$seed" != "$want_seed" ]; then
-    echo "$label: caught at seed $seed, not the pinned seed $want_seed (the compiler's schedule moved; re-pin it on purpose):"; tail -5 "catch-$label.txt"; return 1
-  fi
+  seed="$want_seed"
   IYI_CHAOS_TRACE=1 chaos_test "$prelude" "again-$label.txt" "--chaos=$seed" "$source"
   code=$?
   if [ "$code" -ne 1 ] || ! normal_failure "again-$label.txt" "$verdict" "$source" "$seed" 1 1; then
@@ -258,8 +256,20 @@ IYI
 IYI_CHAOS_TRACE=1 chaos_test "" drawn.txt --chaos --chaos-runs 200 "$WORK/fails_every_seed.iyi"
 code=$?
 [ "$code" -eq 1 ] || die "a test that fails on every seed did not fail under 200 drawn seeds (exit $code): $(tail -3 drawn.txt)"
-seed="$(sed -n 's/.*reproduce: .* test --chaos=\([0-9][0-9]*\) .*/\1/p' drawn.txt | head -1)"
-[ -n "$seed" ] || die "the drawn failure names no seed: $(cat drawn.txt)"
+seed="$(CHAOS_SOURCE="$WORK/fails_every_seed.iyi" awk -v windows="$PATH_WINDOWS" '
+  BEGIN { prefix = ENVIRON["CHAOS_SOURCE"] ": fail (chaos seed " }
+  {
+    line = $0
+    if (windows) gsub(/\\/, "/", line)
+    if (substr(line, 1, length(prefix)) != prefix) next
+    rest = substr(line, length(prefix) + 1)
+    if (rest !~ /^[0-9]+, run 1 of 200\)$/) next
+    sub(/, run 1 of 200\)$/, "", rest)
+    seed = rest
+    count++
+  }
+  END { if (count != 1) exit 1; print seed }
+' drawn.txt)" || die "drawn test has no unique fixture failure header: $(tail -20 drawn.txt)"
 normal_failure drawn.txt "fails on every seed" "$WORK/fails_every_seed.iyi" "$seed" 1 200 || die "drawn test did not exit normally with effective seed $seed: $(tail -20 drawn.txt)"
 grep -qF "(chaos seed $seed, run 1 of 200)" drawn.txt || die "the drawn seed $seed was not run 1 of 200: $(grep -m1 'chaos seed' drawn.txt)"
 IYI_CHAOS_TRACE=1 chaos_test "" drawn-again.txt "--chaos=$seed" "$WORK/fails_every_seed.iyi"

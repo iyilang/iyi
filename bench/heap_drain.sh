@@ -32,6 +32,7 @@
 # (`-Dwarm_force`). The warm-pool cap sits behind the pending-idle branch in
 # `idle_wait_ms`, so no state record isolates it without a clock. The healthy
 # build's reading of the same pool is information only and never fails.
+# Probe 44819618628: two jobs on each shape, ten whole-gate passes per job.
 #
 #   bash bench/heap_drain.sh           # every part
 #   bash bench/heap_drain.sh sound     # plain, optimised, verifier, chaos

@@ -1697,15 +1697,44 @@ $CLOSE_END" concurrency.iyi parallel_migrate -Dnoclose_force
   verdict_caught kerneljoin "join: the child's measured wake was outside the allowed range" join
 
   step "failure proof: a task woken by a task that computes on waits for that computation"
-  # Measured with the handoff step, Linux, 12 vCPUs, release: the woken
-  # task started 50.0 ms after its send in each of 20 wakes without the
-  # call, beside a 50 ms hold, and 23 to 28 us with it. The step names the
-  # call it finds missing before it reads a clock, so a loaded host
-  # catches the copy too: 15 of 15 runs at Linux loads of 18 to 33, 20 of
-  # 20 on tmac at loads of 4 to 41, and 15 of 15 on Windows, 12 vCPUs,
-  # beside up to 24 busy loops.
-  broken nohandoff '/^    elsif handed_on\?\(st, fiber\)$/ { print "    elsif false"; next } { print }' concurrency.iyi parallel_migrate
-  verdict_caught nohandoff 'handoff: a parked task was handed over without an idle worker called' handoff
+  # The parked target is keyed before its waker is released. The copy records
+  # the decision inside push_runnable, before the waker can consume its handoff.
+  NOHAND_COMMON='/^  def self.push_runnable\(st : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ {
+  print "  @[UnsafeReach(\"copy-only keyed handoff decision, accessed atomically\")]"
+  print "  @@forced_handoff_target : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only keyed handoff decision, accessed atomically\")]"
+  print "  @@forced_handoff_decision : UInt64 = 0_u64"
+  print "  def self.force_handoff_key(id : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_handoff_target).address).value.set(id)"
+  print "  end"
+  print "  def self.force_handoff_decision : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_handoff_decision).address).value.get"
+  print "  end"
+  print "  def self.force_handoff_decide(fiber : IyiFiber, decision : UInt64) : Nil"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_handoff_target).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_handoff_decision).address).value.compare_and_set(0_u64, decision)"
+  print "  end"
+  print "  def self.force_handoff_done(st : IyiSchedulerState, fiber : IyiFiber) : Nil"
+  print "    force_handoff_decide(fiber, handed_on?(st, fiber) ? 5_u64 : 4_u64)"
+  print "  end"
+  print; inpush = 1; n_defs++; next
+}
+inpush && /^    if st.ring_size > 1_u64$/ { print; print "      force_handoff_decide(fiber, 1_u64)"; n_ring++; next }
+inpush && /^      skip = st.handoff_skip$/ { print; print "      force_handoff_decide(fiber, skip == 0_u64 ? 2_u64 : 3_u64)"; n_skip++; next }
+inpush && /^  end$/ { print "    force_handoff_done(st, fiber)"; print; inpush = 0; n_end++; next }'
+  NOHAND_BUG='inpush && /^    elsif handed_on\?\(st, fiber\)$/ { print "    elsif false"; n_mut++; next }'
+  NOHAND_HOOK='inpush && /^    elsif handed_on\?\(st, fiber\)$/ { n_mut++ }'
+  NOHAND_END='END { if (n_defs != 1 || n_ring != 1 || n_skip != 1 || n_end != 1 || n_mut != 1) exit 3 }'
+  broken nohandoff "$NOHAND_COMMON
+$NOHAND_BUG
+{ print }
+$NOHAND_END" concurrency.iyi parallel_migrate -Dnohandoff_force
+  verdict_caught nohandoff 'handoff: an eligible hand-off for a parked task took no hand-off branch' handoff
+  broken nohandoff_hook "$NOHAND_COMMON
+$NOHAND_HOOK
+{ print }
+$NOHAND_END" concurrency.iyi parallel_migrate -Dnohandoff_force
+  verdict_held nohandoff_hook 'handoff: the eligible hand-off for a parked task took its branch with no back-off' handoff
 
   step "failure proof: a hand-off for a parked task omits its immediate wake_one call"
   # Copy only, for the nocall proof of bench/parallel_migrate.iyi. Both copies record the hand-off branch's

@@ -1295,7 +1295,7 @@ import std/socket::{IyiSocket, SocketError}
   # wake_one made on the branch's worker woke it. A missing wake_one is the
   # mutant's verdict. The claim is exact: the immediate call was made or omitted
   # at the hand-off's site; it does not say that an idle worker was rung.
-  {% if flag?(:nocall_force) %}
+  {% if flag?(:nocall_force) || flag?(:nohandoff_force) %}
   def handoff_forced : Nil
     armed = Armed.new
     gate = Channel(Int64).new(1)
@@ -1325,14 +1325,25 @@ import std/socket::{IyiSocket, SocketError}
         sleep(1)
         fail("nocall: progress hang: the sleeper did not park in 10000 ms") if __iyi_monotonic_ns > limit
       end
+      {% if flag?(:nohandoff_force) %}
+        IyiWorkers.force_handoff_key(armed.fiber)
+      {% end %}
       go.add(1_i64)
       wait_or_fail(sent, 1_i64, "nocall: progress hang: the send did not return")
-      fiber = armed.fiber
-      fail("nocall: not armed: the hand-off branch did not take the parked task") unless IyiWorkers.force_branch_id == fiber
-      woke = IyiWorkers.force_wake_id == fiber
-      release.add(1_i64)
-      fail("nocall: a hand-off for a parked task omitted its immediate wake_one call") unless woke
-      puts "nocall: the hand-off for a parked task made its immediate wake_one call"
+      {% if flag?(:nohandoff_force) %}
+        decision = IyiWorkers.force_handoff_decision
+        release.add(1_i64)
+        fail("handoff: an eligible hand-off for a parked task took no hand-off branch") if decision == 5_u64
+        fail("handoff: not armed: the target was not an eligible hand-off without back-off") unless decision == 2_u64
+        puts "handoff: the eligible hand-off for a parked task took its branch with no back-off"
+      {% else %}
+        fiber = armed.fiber
+        fail("nocall: not armed: the hand-off branch did not take the parked task") unless IyiWorkers.force_branch_id == fiber
+        woke = IyiWorkers.force_wake_id == fiber
+        release.add(1_i64)
+        fail("nocall: a hand-off for a parked task omitted its immediate wake_one call") unless woke
+        puts "nocall: the hand-off for a parked task made its immediate wake_one call"
+      {% end %}
     end
   end
   {% end %}
@@ -1379,7 +1390,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   def handoff(watch : Int32, loaded : String) : Nil
-    {% if flag?(:nocall_force) %}
+    {% if flag?(:nocall_force) || flag?(:nohandoff_force) %}
       handoff_forced
       return
     {% end %}

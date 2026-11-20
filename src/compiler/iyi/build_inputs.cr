@@ -48,23 +48,36 @@ module Iyi
 
     @@current : BuildInputs?
 
-    # The recorder of the build running in this process, or nil.
+    # The recorder of the build running in this process, or nil; nil too in
+    # a fiber inside `paused`.
     def self.current : BuildInputs?
-      @@current
+      return nil unless inputs = @@current
+      Fiber.current.iyi_inputs_paused? ? nil : inputs
     end
 
     def self.current=(@@current : BuildInputs?)
     end
 
     # Runs the block with no recorder, for the reads that belong to the
-    # check itself rather than to a build.
+    # check itself rather than to a build - in this fiber only. A build reads
+    # on other threads meanwhile: the parse-ahead workers (`ParseAhead`) list
+    # the directory a `require "./x/*"` names (`listed`, which pauses for its
+    # own listing) while the walk expands macros. The pause took the
+    # recorder from the whole process, so what the others read meanwhile
+    # went unrecorded, and two pauses on two threads, each putting back what
+    # it found, could put back the other's nil: the rest of the build was
+    # recorded by nobody, a macro's command went untold, the record was
+    # written, and the next build was "up to date" over a command it never
+    # ran again (bench/up_to_date.sh's `sys`, job 136048431367; 5 runs of
+    # 150 on Linux, in the first build or the second).
     def self.paused(&)
-      held = @@current
-      @@current = nil
+      fiber = Fiber.current
+      held = fiber.iyi_inputs_paused?
+      fiber.iyi_inputs_paused = true
       begin
         yield
       ensure
-        @@current = held
+        fiber.iyi_inputs_paused = held
       end
     end
 
@@ -512,6 +525,11 @@ module Iyi
       nil
     end
   end
+end
+
+class Fiber
+  # Inside `Iyi::BuildInputs.paused`: what this fiber reads is not the build's.
+  property? iyi_inputs_paused = false
 end
 
 # The reads, observed. Each calls through to the definition it replaces; the

@@ -2535,7 +2535,7 @@ jobs:
       # The action is pinned to a commit; the Crystal package it downloads
       # for 1.21.0 is not checked against a hash written here, because the
       # action takes none.
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -2882,7 +2882,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3058,7 +3058,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3128,7 +3128,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3202,7 +3202,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3259,7 +3259,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3346,7 +3346,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3416,7 +3416,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3646,7 +3646,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 

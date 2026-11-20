@@ -496,9 +496,12 @@ module bench/heap_drain
       IyiMark.forced_arm
       group do |g|
         unit = g.spawn(unit: :new) do
+          start_wait = IyiMark.now_ns
           while opened.get == 0
+            fail("mark: unit timed out waiting for the held mark") if IyiMark.now_ns &- start_wait >= 60000000000_u64
             sleep(1)
           end
+          IyiMark.forced_target(IyiHeap.current_record)
           ring = [] of String
           64.times { ring << "" }
           made = 0_i64
@@ -523,10 +526,13 @@ module bench/heap_drain
           end
         end
         opened.set(1)
+        start_wait = IyiMark.now_ns
         while unit_done.get == 0 && IyiHeap.partition_holds == 0
+          fail("mark: unit timed out before holding or finishing") if IyiMark.now_ns &- start_wait >= 60000000000_u64
           sleep(1)
         end
         holds = IyiHeap.partition_holds
+        fail("mark: unit never entered a partition slice under the held mark") unless IyiMark.forced_slice?
         IyiMark.forced_release
         made_unit = unit.value
         fail("mark: a unit allocated #{made_unit} bytes under a held mark and never held") if holds == 0

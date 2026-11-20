@@ -10,9 +10,9 @@
 # park, no report; the flag-off control; then one broken copy per
 # mechanism: without the take of drained runs or the global sweep's
 # listing the arenas grow, without the idle wake the pool stays warm,
-# without the release the resident set stays, without the hold the
-# arenas grow under the marks, without the directory's bounds its pages
-# go resident, and with bounds a large mapping does not widen a large
+# without the release the resident set stays, without the hold a unit
+# allocates under a held mark without holding, without the directory's
+# bounds its pages go resident, and with bounds a large mapping does not widen a large
 # object is no heap pointer (the program fails), and a taken run's
 # objects left `LOCAL` instead of published, or a helper that lets its
 # sweep claim go before its walk ends, are caught by `-Dheap_verify`
@@ -180,9 +180,9 @@ copy() {
 # to two files. heap_partition.iyi gets the copy's own hint code after
 # `dir_outside?`; prelude.iyi's `take_large` maps the program's large objects
 # (armed by `-Dplaced_force`) at the first slot above the directory's high
-# bound. The kernel is asked for that address once: MAP_FIXED_NOREPLACE on
-# Linux, an mmap hint on darwin, VirtualAlloc with an address on Windows.
-# A kernel that does not give it fails the copy by name; nothing is retried.
+# bound. Linux uses MAP_FIXED_NOREPLACE, darwin an mmap hint, and Windows
+# VirtualAlloc with an address. Occupied slots are skipped, up to 64; failure
+# to place an object fails the copy by name.
 PASS='{ print }'
 PLACE_TAKE='/def self\.take_large\(size : UInt64, bits : UInt64\)/ { armed = 1 } armed && sub(/base = __iyi_mmap\(mapped\)\.address/, "base = placed_pick(size, mapped)") { armed = 0; found = 1 } { print } END { if (!found) exit 3 }'
 PLACE_AFTER='/def self\.dir_outside\?\(slot : UInt64\) : Bool/ { armed = 1 } { print } armed && /^  end$/ { armed = 0; found = 1; while ((getline line < ins) > 0) print line } END { if (!found) exit 3 }'
@@ -277,7 +277,7 @@ IYI
       echo "  $label: caught, $(grep -m1 '^FAIL: ' "$dir/run.out")"
       return
     fi
-  elif [ "$code" -eq 0 ] && grep -qE '^dir: [1-9][0-9]* of the 8 large objects landed outside' "$dir/run.out"; then
+  elif [ "$code" -eq 0 ] && grep -qxE 'dir: [1-9][0-9]* of the 8 large objects landed outside the slots before them, each a heap pointer' "$dir/run.out"; then
     echo "  $label: $(grep -m1 'landed outside' "$dir/run.out")"
     return
   fi
@@ -292,6 +292,7 @@ IYI
 # The methods go in before helper_main and the wait before its finish call.
 PLACE_MARK_METHODS='/def self\.helper_main\(seen : UInt64\) : Nil/ { found = 1; while ((getline line < ins) > 0) print line; print "" } { print } END { if (!found) exit 3 }'
 PLACE_MARK_HOLD='/seen = finish_concurrent/ { found = 1; sub(/seen = finish_concurrent/, "IyiMark.forced_wait\n              seen = finish_concurrent") } { print } END { if (!found) exit 3 }'
+PLACE_MARK_SLICE='/def self\.partition_slice\(record : UInt64, slice : UInt64\) : Nil/ { armed = 1 } armed && /if LibIyiGCTable\.__iyi_marking != 0_u8/ { print; print "      IyiMark.forced_record_slice(record)"; armed = 0; found = 1; next } { print } END { if (!found) exit 3 }'
 
 # marked LABEL NAME WANT [HEAP_PATCH]: the copy holds the mark's closer open
 # (`PLACE_MARK_*`), HEAP_PATCH is applied to heap_partition.iyi, and the
@@ -310,6 +311,23 @@ marked() {
       # says the hold has begun.
       @@forced_hold : UInt64 = 0_u64
       @@forced_open : UInt64 = 0_u64
+      @@forced_target : UInt64 = 0_u64
+      @@forced_slice : UInt64 = 0_u64
+
+      def self.forced_target(record : UInt64) : Nil
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_target).address).value.set(record)
+      end
+
+      def self.forced_record_slice(record : UInt64) : Nil
+        target = Pointer(Atomic(UInt64)).new(pointerof(@@forced_target).address).value.get
+        if target != 0_u64 && target == record && forced_open? && Pointer(Atomic(UInt64)).new(pointerof(@@forced_hold).address).value.get != 0_u64
+          Pointer(Atomic(UInt64)).new(pointerof(@@forced_slice).address).value.set(1_u64)
+        end
+      end
+
+      def self.forced_slice? : Bool
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_slice).address).value.get != 0_u64
+      end
 
       def self.forced_arm : Nil
         Pointer(Atomic(UInt64)).new(pointerof(@@forced_open).address).value.set(0_u64)
@@ -329,7 +347,13 @@ marked() {
       def self.forced_wait : Nil
         return if Pointer(Atomic(UInt64)).new(pointerof(@@forced_hold).address).value.get == 0_u64
         Pointer(Atomic(UInt64)).new(pointerof(@@forced_open).address).value.set(1_u64)
+        started = IyiMark.now_ns
         while Pointer(Atomic(UInt64)).new(pointerof(@@forced_hold).address).value.get != 0_u64
+          if IyiMark.now_ns &- started >= 60000000000_u64
+            message = "FAIL: mark: closer timed out waiting for release\n"
+            __iyi_write(1, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+            __iyi_exit(1)
+          end
           IyiThread.park_if_requested
           IyiThread.spin_pause
         end
@@ -341,7 +365,7 @@ IYI
     status=1
     return
   fi
-  if ! awk "$patch" "$REPO/src/iyi/heap_partition.iyi" >"$dir/iyi/heap_partition.iyi"; then
+  if ! awk "$PLACE_MARK_SLICE" "$REPO/src/iyi/heap_partition.iyi" >"$dir/heap.1" || ! awk "$patch" "$dir/heap.1" >"$dir/iyi/heap_partition.iyi"; then
     echo "  $label: heap_partition.iyi is not in the form the copy patches"
     status=1
     return
@@ -354,7 +378,7 @@ IYI
       echo "  $label: caught, $(grep -m1 '^FAIL: ' "$dir/run.out")"
       return
     fi
-  elif [ "$code" -eq 0 ] && grep -qE '^mark: a unit held under an open mark' "$dir/run.out"; then
+  elif [ "$code" -eq 0 ] && grep -qxE 'mark: a unit held under an open mark: [1-9][0-9]* holds, its partition past its ceiling while the mark was open' "$dir/run.out"; then
     echo "  $label: $(grep -m1 '^mark: a unit held' "$dir/run.out")"
     return
   fi

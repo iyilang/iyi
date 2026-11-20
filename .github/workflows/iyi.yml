@@ -1708,7 +1708,7 @@ jobs:
           # caches: one job's rotation removed a directory another job's
           # build was linking from (job 135882647898, fixed in the compiler
           # since; bench/rebuild_reuse.py step 7), and ~/.cache/iyi held
-          # 24,428 reach verdicts, nothing ever deleting them. Each job gets
+          # 24,428 reach verdicts, nothing then deleting them (step 8). Each job gets
           # both caches to itself, as GitHub's fresh VMs give them, gone with
           # the job: iyi's, and Crystal's, which the bootstrap compiler
           # builds `iyi` through and rotates with no lock at all (brew's

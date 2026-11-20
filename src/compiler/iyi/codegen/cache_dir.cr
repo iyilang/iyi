@@ -119,10 +119,12 @@ module Iyi
     # 6.03 to 14.17 s in `Semantic (main)` instead of 3.28 to 3.81 - 2.06 to
     # 4.47 s building the helper again, and once 9.21 s for its 51 runs,
     # a program Windows had not yet seen starting (Windows 11, five rounds).
-    # Kept apart, the same five rounds took 3.44 to 4.11 s.
+    # Kept apart, the same five rounds took 3.44 to 4.11 s. And the reach
+    # verdicts at the root are kept by their own count (`#cleanup_verdicts`).
     def cleanup(dir = compute_dir)
       entries = gather_cache_entries(dir)
       cleanup_dirs(entries)
+      cleanup_verdicts(entries)
     end
 
     # What a macro's `run` program is called in its directory.
@@ -130,6 +132,19 @@ module Iyi
 
     # How many directories of each kind the rotation keeps.
     KEPT = 10
+
+    # iyi: what a std module's reach verdict is called at the cache root,
+    # before its key (`ReachProof#verdict_path`).
+    REACH = "reach-"
+
+    # The std modules that hold a `@[SafeReach]` claim, each of which a build
+    # reads or writes one verdict for: twelve today (`bench/rebuild_reuse.py`
+    # step 8 counts them).
+    REACH_MODULES = 12
+
+    # How many verdicts the rotation keeps: every verdict the builds and the
+    # helpers it keeps may each have used last.
+    REACH_KEPT = 2 * KEPT * REACH_MODULES
 
     # Returns a filename that has prepended the cache directory.
     def join(filename)
@@ -239,6 +254,44 @@ module Iyi
       end
     end
 
+    # iyi: keeps the `REACH_KEPT` reach verdicts used last and removes the
+    # others (`ReachProof`). A verdict is keyed by its module's bytes, the
+    # flags and this compiler's executable, so every program importing the
+    # module reads the one any of them wrote, and every rebuild of the
+    # compiler starts a new set. The rotation passed over them as files, and
+    # ~/.cache/iyi on the project's Mac held 24,428 of them (59.6 MB), this
+    # Linux box's 16,660, nearly all for compilers long gone.
+    #
+    # Shared by programs, a verdict belongs to no build directory, so it is
+    # kept by its last use as a directory is: its modification time, which
+    # a build that reads it moves (`ReachProof#load_verdict`), and as many
+    # as the builds and helpers the rotation keeps may each have read last,
+    # one per module with claims. No lock: a build that finds its verdict
+    # gone, before or while reading it, proves the module's claims over its
+    # own code as it does in a cold cache and stores the answer again, so a
+    # removal under a concurrent build costs it that proof and never changes
+    # an answer. One already read is in memory, and an open read survives
+    # the delete (unlinked on POSIX, opened with FILE_SHARE_DELETE on
+    # Windows). A writer's `.tmp`, left by one that died, goes by the same
+    # rule; one being written is the newest there is.
+    private def cleanup_verdicts(entries)
+      entries
+        .compact_map do |path|
+          next unless File.basename(path).starts_with?(REACH)
+          info = File.info?(path)
+          {path, info.modification_time} if info && info.file?
+        end
+        .sort_by! { |(_, time)| time }
+        .reverse!
+        .skip(REACH_KEPT)
+        .each do |(path, _)|
+          begin
+            File.delete?(path)
+          rescue File::Error
+          end
+        end
+    end
+
     # The file a build's directory is held by (`#hold`), which a removal
     # holds too (`#remove`).
     LOCK = "compiler.lock"
@@ -314,7 +367,8 @@ module Iyi
     # earlier answered "cannot fetch example.com/me/greet v0.1.0" offline.
     # `clear_cache` still removes it. The root's files - `msvc-probe`,
     # `linker-probe`, the link templates - are not directories and the
-    # rotation passes over them already.
+    # rotation passes over them, all but the reach verdicts, which it keeps
+    # by a rule of their own (`#cleanup_verdicts`).
     NOT_BUILDS = {"mod"}
 
     private def gather_cache_entries(dir)

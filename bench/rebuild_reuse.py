@@ -48,7 +48,17 @@ cache:
      holds the directory's `compiler.lock`, and the fixture built meanwhile
      waits for it and links; then the fixture built while this script holds
      the lock, the directory and the lock file removed before it is let go:
-     the build makes the directory again and compiles every object.
+     the build makes the directory again and compiles every object;
+  8. the reach verdicts at the cache's root, in a cache of their own: the
+     fixture's made older than as many others as the rotation keeps
+     (`CacheDir::REACH_KEPT`, 240), and the fixture built again: it reads
+     them, proving nothing again, and its rotation keeps them and removes
+     the oldest others; then 5,000 stale verdicts more, the fixture's the
+     oldest of all, and the fixture built while another build's rotation
+     removes them: both builds link, the fixture prints what it should,
+     and after one more build 240 verdicts are left, the fixture's among
+     them with the bytes it first stored. And no more std modules hold a
+     `@[SafeReach]` claim than `CacheDir::REACH_MODULES` counts.
 
 Step 5 is what Smart App Control's services do, evaluating, on Windows 11:
 the Restart Manager named `CryptSvc`, `AppIDSvc` and the `applockerfltr`
@@ -84,6 +94,16 @@ that the build has the lock file open, which Linux's /proc and macOS's
 lsof show. Step 7 does not run on Windows: Python opens a file without
 FILE_SHARE_DELETE, so this script could neither delete a lock file it
 holds nor let the compiler delete one it has open.
+
+Step 8 is the reach verdicts nothing removed: one per std module with
+claims, keyed by the module's bytes, the flags and the compiler's own
+executable, so every rebuild of the compiler wrote a new set, and the
+rotation, removing directories only, passed over them. ~/.cache/iyi held
+24,428 on the project's Mac (59.6 MB) and 16,660 on the Linux box. Against
+the compiler before (6b131f8d8) the first half failed 3 runs of 3 on Linux
+("the rotation left 241 reach verdicts, not 240"), and against the fix with
+a read no longer marking the verdict used, 3 of 3 ("the rotation removed 1
+of the 1 verdicts the build it ended had just read").
 
 And because the old shuffle was there for a reason, rule 2's reordering is
 held too: `probe/a` and `probe/b` both import `probe/log` and each
@@ -698,6 +718,124 @@ def contested(work):
     print("  ok   7. a build waiting on a directory its lock's holder removed makes it again and compiles every object")
 
 
+# The reach verdicts the rotation keeps (`CacheDir::REACH_KEPT`): one for
+# each std module that holds a `@[SafeReach]` claim
+# (`CacheDir::REACH_MODULES`), for every build and helper it keeps.
+REACH_MODULES = 12
+REACH_KEPT = 2 * KEPT * REACH_MODULES
+# The verdicts no build reads that step 8 leaves a rotation to cut down
+# while the fixture builds.
+STALE = 5_000
+CLAIM = re.compile(r"^\s*@\[SafeReach\b", re.M)
+# 2000-01-01, and a year: dates older than any build of today's.
+AGED = 946684800
+YEAR = 365 * 86400
+
+
+def verdicts(cache):
+    """The reach verdicts at *cache*'s root, by name."""
+    return {entry.name: entry for entry in cache.iterdir() if entry.name.startswith("reach-") and entry.is_file()}
+
+
+def counted(cache):
+    return sum(1 for name in os.listdir(cache) if name.startswith("reach-"))
+
+
+def plant(cache, tag, count, start):
+    """*count* verdicts no build reads, the first dated *start* and each a
+    second newer than the one before; their names, oldest first."""
+    names = []
+    for i in range(count):
+        path = cache / f"reach-{tag}-{i:08d}"
+        path.write_text("iyi reach verdict 2\nend\n", newline="\n")
+        os.utime(path, (start + i, start + i))
+        names.append(path.name)
+    return names
+
+
+def age(paths, when):
+    for path in paths:
+        os.utime(path, (when, when))
+
+
+def verdicts_rotated(work):
+    """The rotation keeps the reach verdicts used last, those a build has
+    just read among them, and a build whose verdicts it removes proves them
+    again to the same answer."""
+    step = "8. reach verdicts"
+    modules = [path for path in sorted((REPO / "src" / "std").rglob("*.iyi"))
+               if CLAIM.search(path.read_text(encoding="utf-8"))]
+    if len(modules) > REACH_MODULES:
+        fail(step, f"{len(modules)} std modules hold a @[SafeReach] claim, and the rotation keeps verdicts for "
+                   f"{REACH_MODULES} a build: raise CacheDir::REACH_MODULES, and REACH_MODULES here")
+
+    root = work / "reach"
+    write(root, FIXTURE)
+    cache = work / "reach-cache"
+    env = environment(cache)
+    build(root, "main.iyi", "prog", env)
+    first = verdicts(cache)
+    if not first:
+        fail(step, "the fixture's build stored no reach verdict")
+    if len(first) > REACH_MODULES:
+        fail(step, f"the fixture's build stored {len(first)} reach verdicts, more than the {REACH_MODULES} a build may")
+    stored = {name: (entry.stat().st_ino, entry.read_bytes()) for name, entry in first.items()}
+
+    # The fixture's verdicts made older than as many others as the rotation
+    # keeps: the build that reads them makes them its newest.
+    age(first.values(), AGED)
+    planted = plant(cache, "kept", REACH_KEPT, AGED + YEAR)
+    build(root, "main.iyi", "prog", env)
+    left = verdicts(cache)
+    gone = sorted(set(first) - set(left))
+    if gone:
+        fail(step, f"the rotation removed {len(gone)} of the {len(first)} verdicts the build it ended had just read: {', '.join(gone)}")
+    # Read, a verdict keeps its file; proven again, it is written to another
+    # and renamed over the first.
+    proven = sorted(name for name in first if left[name].stat().st_ino != stored[name][0])
+    if proven:
+        fail(step, f"the rebuild proved {len(proven)} of its {len(first)} stored verdicts again: {', '.join(proven)}")
+    if len(left) != REACH_KEPT:
+        fail(step, f"the rotation left {len(left)} reach verdicts, not {REACH_KEPT}")
+    removed = [name for name in planted if name not in left]
+    if removed != planted[:len(first)]:
+        fail(step, f"the rotation removed {len(removed)} of the planted verdicts, not the {len(first)} oldest")
+    print(f"  ok   8. the fixture's reach verdicts ({len(first)}), made the oldest of {len(first) + REACH_KEPT},"
+          f" outlive the rotation of the build that reads them, and the {REACH_KEPT} kept are the newest")
+
+    # A rotation with STALE more to remove, the fixture's own the oldest
+    # of all, and the fixture built while it removes them.
+    plant(cache, "stale", STALE, AGED - YEAR)
+    age((cache / name for name in first), AGED - 2 * YEAR)
+    whole = counted(cache)
+    others = work / "reach-others"
+    write(others, {"rotate.iyi": "module rotate\n\nputs 0\n"})
+    rotation = subprocess.Popen([IYI, "build", "rotate.iyi", "-o", "rotate"], cwd=others, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    while (begun := counted(cache)) >= whole:
+        if rotation.poll() is not None and counted(cache) >= whole:
+            fail(step, f"the rotation removed no reach verdict of {whole} (exit {rotation.returncode})\n{rotation.stdout.read()}")
+        time.sleep(0.001)
+    during = subprocess.run([IYI, "build", "-s", "--force", "main.iyi", "-o", "prog"], cwd=root, env=env,
+                            capture_output=True, text=True)
+    rotated = rotation.communicate()[0]
+    if rotation.returncode != 0:
+        fail(step, f"the build whose rotation removed the verdicts failed\n{rotated}")
+    if during.returncode != 0:
+        fail(step, f"the fixture built while its verdicts were being removed failed\n{during.stdout}{during.stderr}")
+    if run(root, "prog") != EXPECTED:
+        fail(step, "the fixture built while its verdicts were being removed printed something else")
+    build(root, "main.iyi", "prog", env)
+    last = verdicts(cache)
+    if len(last) != REACH_KEPT:
+        fail(step, f"after {STALE} stale verdicts the rotation left {len(last)}, not {REACH_KEPT}")
+    changed = sorted(name for name in first if name not in last or last[name].read_bytes() != stored[name][1])
+    if changed:
+        fail(step, f"the fixture's verdicts, removed and proven again, are missing or answer otherwise: {', '.join(changed)}")
+    print(f"  ok   8. the fixture built with {begun} of {whole} verdicts left to a rotation that removes its own,"
+          f" and its verdicts back after it with the same bytes; {REACH_KEPT} kept")
+
+
 def main():
     work = Path(tempfile.mkdtemp(prefix="iyi-rebuild-reuse"))
     try:
@@ -706,6 +844,7 @@ def main():
         held(work)
         outlived(work)
         contested(work)
+        verdicts_rotated(work)
         probe(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)

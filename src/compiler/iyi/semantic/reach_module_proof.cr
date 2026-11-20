@@ -487,7 +487,7 @@ module Iyi
     end
 
     private def verdict_path(file : String) : String?
-      CacheDir.instance.join("reach-#{module_key(file)}")
+      CacheDir.instance.join("#{CacheDir::REACH}#{module_key(file)}")
     rescue File::Error | IO::Error
       nil
     end
@@ -527,7 +527,10 @@ module Iyi
       current = nil
       lines.each_with_index do |line, index|
         next if index.zero?
-        return verdict if line == "end"
+        if line == "end"
+          used(path)
+          return verdict
+        end
         fields = line.split('\t')
         case fields[0]?
         when "state"
@@ -548,6 +551,17 @@ module Iyi
       nil
     rescue File::Error | IO::Error
       nil
+    end
+
+    # Marks the verdict at *path* used now: the cache's rotation keeps the
+    # verdicts used last (`CacheDir#cleanup_verdicts`), and one every build
+    # reads and none writes again would otherwise age out under the builds
+    # that need it. Not `File.touch`, which makes the file when a rotation
+    # has just removed it, an empty verdict the next build reads as none.
+    private def used(path : String) : Nil
+      now = Time.utc
+      File.utime(now, now, path)
+    rescue File::Error
     end
 
     private def write_verdict(path : String, verdict : Verdict) : Nil

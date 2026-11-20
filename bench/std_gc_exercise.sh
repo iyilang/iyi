@@ -216,9 +216,9 @@ prove_fails "free does nothing" free_noop "a freed chunk is not" \
 # faulted in 99 of 100 and passed 1. At the hold each fails 200 runs of
 # 200 on Linux and on Windows 11, idle and on four busy cores.
 prove_fails "stats walks without the lock" stats_unlocked "stats answered while another thread held the runtime lock" \
-  '/def self.stats/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d}'
+  '/def self.stats/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d;}'
 prove_fails "is_heap_ptr walks without the lock" is_heap_unlocked "is_heap_ptr answered while another thread held the runtime lock" \
-  '/def self.is_heap_ptr/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d}'
+  '/def self.is_heap_ptr/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d;}'
 
 echo
 if [ "$status" -eq 0 ]; then

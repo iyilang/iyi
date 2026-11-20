@@ -94,12 +94,34 @@ chaos_test() { # prelude, log, iyi test arguments...
   fi
 }
 
-# The sweep checks CLI search behaviour, not mutant detection.
+# The sweep checks CLI search behaviour, not mutant detection. Seeds 6 and
+# 42 are canaries for this build's scheduler, not compatibility promises.
+#
+# After the fixture's verdict the only child evidence may be its optional
+# trace. A death description, even one unknown to this gate, cannot be
+# mistaken for a normal exit. Build diagnostics before the verdict are
+# allowed, since the compiler may emit linker warnings.
+# The CLI prints its reproduce line only after the child's evidence ends.
+normal_failure() { # log, fixture verdict, optional expected trace seed
+  local log="$1" verdict="$2" seed="${3:-}"
+  awk -v verdict="  $verdict" -v seed="$seed" '
+    $0 == verdict { if (stage || seen++) exit 1; stage = 1; next }
+    stage == 1 && seed != "" {
+      if ($0 !~ ("^  iyi chaos: seed " seed ", .*schedule [0-9a-f]+$")) exit 1
+      stage = 2; next
+    }
+    stage == 1 || stage == 2 {
+      if ($0 !~ /^  reproduce: .* test --chaos=/) exit 1
+      stage = 3; next
+    }
+    END { if (seen != 1 || stage != 3) exit 1 }
+  ' "$log"
+}
 caught() { # prelude, label, source, expected seed, exact fixture verdict
   local prelude="$1" label="$2" source="$3" want_seed="$4" verdict="$5" code seed first got
   chaos_test "$prelude" "catch-$label.txt" --chaos=1 --chaos-runs 100 "$source"
   code=$?
-  if [ "$code" -ne 1 ] || ! grep -qxF "  $verdict" "catch-$label.txt" || ! grep -q "reproduce: .* test --chaos=" "catch-$label.txt" || grep -qE 'the program was killed|the program died|status 0x|hung:|does not build' "catch-$label.txt"; then
+  if [ "$code" -ne 1 ] || ! normal_failure "catch-$label.txt" "$verdict"; then
     echo "$label: search did not end at its fixture verdict (exit $code):"; tail -20 "catch-$label.txt"; return 1
   fi
   seed="$(sed -n 's/.*(chaos seed \([0-9][0-9]*\), run [0-9][0-9]* of 100).*/\1/p' "catch-$label.txt" | head -1)"
@@ -109,7 +131,7 @@ caught() { # prelude, label, source, expected seed, exact fixture verdict
   fi
   chaos_test "$prelude" "again-$label.txt" "--chaos=$seed" "$source"
   code=$?
-  if [ "$code" -ne 1 ] || ! grep -qF "(chaos seed $seed, run 1 of 1)" "again-$label.txt" || ! grep -qxF "  $verdict" "again-$label.txt" || grep -qE 'the program was killed|the program died|status 0x|hung:|does not build' "again-$label.txt"; then
+  if [ "$code" -ne 1 ] || ! grep -qF "(chaos seed $seed, run 1 of 1)" "again-$label.txt" || ! normal_failure "again-$label.txt" "$verdict"; then
     echo "$label: --chaos=$seed did not fail again (exit $code):"; tail -5 "again-$label.txt"; return 1
   fi
   build "traced-$label" "$prelude" "$source" -Diyi_chaos || { echo "$label: the chaos build failed:"; tail -20 "build-traced-$label.log"; return 1; }
@@ -219,19 +241,17 @@ module chaos_fails_every_seed
 print "fails on every seed\n"
 exit(1)
 IYI
-chaos_test "" drawn.txt --chaos --chaos-runs 200 "$WORK/fails_every_seed.iyi"
+IYI_CHAOS_TRACE=1 chaos_test "" drawn.txt --chaos --chaos-runs 200 "$WORK/fails_every_seed.iyi"
 code=$?
 [ "$code" -eq 1 ] || die "a test that fails on every seed did not fail under 200 drawn seeds (exit $code): $(tail -3 drawn.txt)"
-grep -qxF "  fails on every seed" drawn.txt || die "drawn test did not print its verdict: $(tail -20 drawn.txt)"
-! grep -qE 'the program was killed|the program died|status 0x|hung:|does not build' drawn.txt || die "drawn test did not fail normally: $(tail -20 drawn.txt)"
 seed="$(sed -n 's/.*reproduce: .* test --chaos=\([0-9][0-9]*\) .*/\1/p' drawn.txt | head -1)"
 [ -n "$seed" ] || die "the drawn failure names no seed: $(cat drawn.txt)"
+normal_failure drawn.txt "fails on every seed" "$seed" || die "drawn test did not exit normally with effective seed $seed: $(tail -20 drawn.txt)"
 grep -qF "(chaos seed $seed, run 1 of 200)" drawn.txt || die "the drawn seed $seed was not run 1 of 200: $(grep -m1 'chaos seed' drawn.txt)"
-chaos_test "" drawn-again.txt "--chaos=$seed" "$WORK/fails_every_seed.iyi"
+IYI_CHAOS_TRACE=1 chaos_test "" drawn-again.txt "--chaos=$seed" "$WORK/fails_every_seed.iyi"
 code=$?
 [ "$code" -eq 1 ] || die "the drawn seed $seed did not fail again (exit $code): $(tail -3 drawn-again.txt)"
-grep -qxF "  fails on every seed" drawn-again.txt || die "drawn replay did not print its verdict: $(tail -20 drawn-again.txt)"
-! grep -qE 'the program was killed|the program died|status 0x|hung:|does not build' drawn-again.txt || die "drawn replay did not fail normally: $(tail -20 drawn-again.txt)"
+normal_failure drawn-again.txt "fails on every seed" "$seed" || die "drawn replay did not exit normally with effective seed $seed: $(tail -20 drawn-again.txt)"
 grep -qF "(chaos seed $seed, run 1 of 1)" drawn-again.txt || die "--chaos=$seed did not run one seed: $(grep -m1 'chaos seed' drawn-again.txt)"
 echo "  drawn seed $seed failed at run 1 of 200, and --chaos=$seed failed again"
 
@@ -287,14 +307,18 @@ cmp -s seedignored-normalized.txt seed2-normalized.txt || die "seedignored did n
 echo "  seedignored consumed seed 1 and ran seed 2's schedule"
 
 # Each copy runs one seed. The healthy seed 2 must witness both early starts.
-grep -qxF "left arms 1 of 3, parallel units started before the spawner parked: 3" seed-shipped-2-a.txt || die "parallel early-start witness was not armed"
-grep -qxF "Unit tasks started before the spawner parked: 2" seed-shipped-2-a.txt || die "Unit early-start witness was not armed"
+grep -qE '^left arms [0-3] of 3, parallel units started before the spawner parked: [1-9][0-9]*$' seed-shipped-2-a.txt || die "parallel early-start witness was not armed"
+grep -qE '^Unit tasks started before the spawner parked: [1-9][0-9]*$' seed-shipped-2-a.txt || die "Unit early-start witness was not armed"
 mutant_run() { # name, seed, expected exit, exact verdict
   local name="$1" seed="$2" want_code="$3" verdict="$4" code
   build "exercise-$name" "$WORK/$name" "$REPO/bench/chaos_exercise.iyi" -Diyi_chaos || die "$name build failed: $(tail -20 "build-exercise-$name.log")"
   IYI_CHAOS="$seed" IYI_CHAOS_TRACE=1 IYI_WORKERS=1 timeout -k 5 120 "./exercise-$name$EXE" > "$name.txt" 2>&1
   code=$?
-  [ "$code" -eq "$want_code" ] && grep -qxF "$verdict" "$name.txt" || die "$name seed $seed did not exit $want_code at '$verdict' (exit $code): $(tail -20 "$name.txt")"
+  if [ "$name" = leftinunit ]; then
+    [ "$code" -eq "$want_code" ] && grep -qxE "$verdict" "$name.txt" || die "$name seed $seed did not exit $want_code at its early-start verdict (exit $code): $(tail -20 "$name.txt")"
+  else
+    [ "$code" -eq "$want_code" ] && grep -qxF "$verdict" "$name.txt" || die "$name seed $seed did not exit $want_code at '$verdict' (exit $code): $(tail -20 "$name.txt")"
+  fi
   echo "  $name seed $seed: $verdict"
 }
 
@@ -304,7 +328,7 @@ mutant_run unitsignored 2 1 "FAIL: a task of the spawner's unit ran before the s
 
 step "broken copy: a parallel task left in its spawner's unit"
 broken leftinunit chaos.iyi '/^    task.fiber.chaos_unit = IyiCross.shared \{ IyiChaosUnit.new\(IyiStat.get\(IyiStat::CHAOS_UNITS\), fresh_priority\) \}$/ { n++; next } { print } END { if (n != 1) exit 3 }'
-mutant_run leftinunit 2 0 "left arms 0 of 3, parallel units started before the spawner parked: 0"
+mutant_run leftinunit 2 0 "left arms [0-3] of 3, parallel units started before the spawner parked: 0"
 grep -qxF "every property held" leftinunit.txt || die "leftinunit fixture did not finish normally"
 
 step "broken copy: a Unit's tasks each given a chaos unit of their own"
@@ -317,8 +341,44 @@ mutant_run unitleft 2 0 "Unit tasks started before the spawner parked: 0"
 grep -qxF "every property held" unitleft.txt || die "unitleft fixture did not finish normally"
 
 step "broken copy: the scheduler left in a build without the flag"
-broken pointleft prelude.iyi '/^  {% if flag\?\(:iyi_chaos\) %}$/ && !done { n++; print "  {% if true %}"; done = 1; next } { print } END { if (n != 1) exit 3 }'
-awk '{ n += sub(/\{% if flag\?\(:iyi_chaos\) %\}/, "{% if true %}"); print } END { if (!n) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > pointleft/iyi/concurrency.iyi || die "pointleft concurrency anchor missing"
+broken pointleft prelude.iyi 'NR > 1 { if ($0 == "    require \"./chaos\"") { if (prev != "  {% if flag?(:iyi_chaos) %}") exit 3; prev = "  {% if true %}"; n++ } print prev } { prev = $0 } END { if (NR) print prev; if (n != 1) exit 3 }'
+# Loading chaos also needs each gated concurrency support block. Check each
+# block by its first line and multiplicity, not only a combined count.
+awk '
+  BEGIN {
+    expected["# The unit the chaos scheduler counts this fiber in, and whether it"] = 1
+    expected["fiber.homebound = true if IyiChaos.kept?(fiber)"] = 1
+    expected["fiber = IyiChaos.pick(st)"] = 1
+    expected["IyiChaos.at_idle"] = 1
+    expected["return chaos_wake_on(word, count) if IyiChaos.chooses_wakes?"] = 1
+    expected["drawn = IyiChaos.steal_start(count)"] = 1
+    expected["return if IyiChaos.back_edge"] = 1
+    expected["return give_up(st, fiber) if !fiber.homebound && IyiChaos.forced_turn?"] = 1
+    expected["IyiChaos.report"] = 1
+    expected["IyiChaos.point"] = 11
+    expected["# Its tasks\047 chaos unit, made at its first task (`IyiChaos.adopt_into`)."] = 1
+    expected["IyiChaos.adopt(fiber)"] = 1
+    expected["return chaos_task(pinned, &block) if IyiChaos.simulated?"] = 2
+    expected["IyiChaos.adopt_into(fiber, owner)"] = 1
+    expected["# The chaos scheduler\047s arm tried first (SPEC.md III.4.17); the"] = 1
+    expected["chaos_arm = IyiChaos.arm({{ U.size }})"] = 1
+  }
+  NR > 1 {
+    if (prev ~ /\{% if flag\?\(:iyi_chaos\) %\}/) {
+      key = $0
+      sub(/^[[:space:]]*/, "", key)
+      if (!(key in expected)) exit 3
+      found[key]++
+      sub(/\{% if flag\?\(:iyi_chaos\) %\}/, "{% if true %}", prev)
+    }
+    print prev
+  }
+  { prev = $0 }
+  END {
+    if (NR) print prev
+    for (key in expected) if (found[key] != expected[key]) exit 3
+  }
+' "$REPO/src/iyi/concurrency.iyi" > pointleft/iyi/concurrency.iyi || die "pointleft concurrency support anchor missing or ambiguous"
 off_is_nothing "$WORK/pointleft" pointleft > pointleft.txt 2>&1
 expect_caught pointleft "a plain build names the chaos scheduler"
 

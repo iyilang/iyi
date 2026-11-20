@@ -286,6 +286,83 @@ IYI
   status=1
 }
 
+# The mark's closer held open, for the program's `mark_forced` (-Dmark_force):
+# the copy's helper_main waits at its finish on a word (`IyiMark.forced_wait`)
+# until the program releases it, so a mark stays open while one unit allocates.
+# The methods go in before helper_main and the wait before its finish call.
+PLACE_MARK_METHODS='/def self\.helper_main\(seen : UInt64\) : Nil/ { found = 1; while ((getline line < ins) > 0) print line; print "" } { print } END { if (!found) exit 3 }'
+PLACE_MARK_HOLD='/seen = finish_concurrent/ { found = 1; sub(/seen = finish_concurrent/, "IyiMark.forced_wait\n              seen = finish_concurrent") } { print } END { if (!found) exit 3 }'
+
+# marked LABEL NAME WANT [HEAP_PATCH]: the copy holds the mark's closer open
+# (`PLACE_MARK_*`), HEAP_PATCH is applied to heap_partition.iyi, and the
+# program is built with `-Dmark_force` and run once as `mark`. WANT 0 is the
+# hold alone: a unit's allocation under the open mark holds, and the program
+# says so. WANT 1 must exit 1 at the sentence for a unit that allocated under
+# the held mark and never held.
+marked() {
+  local label="$1" name="$2" want="$3" patch="${4:-$PASS}"
+  local dir="$WORK/$name"
+  mkdir -p "$dir"
+  cp -R "$REPO/src/iyi" "$REPO/src/std" "$dir/"
+  cat >"$WORK/forced.iyi" <<'IYI'
+      # copy only (bench/heap_drain.sh's `marked`): the closer of a mark holds
+      # it open here, on a word, until the program lets it go; `forced_open`
+      # says the hold has begun.
+      @@forced_hold : UInt64 = 0_u64
+      @@forced_open : UInt64 = 0_u64
+
+      def self.forced_arm : Nil
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_open).address).value.set(0_u64)
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_hold).address).value.set(1_u64)
+      end
+
+      def self.forced_release : Nil
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_hold).address).value.set(0_u64)
+      end
+
+      def self.forced_open? : Bool
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_open).address).value.get != 0_u64
+      end
+
+      # A closer that finishes before the program arms the hold is not held,
+      # and does not open anything: the program's own marks, at its list, end so.
+      def self.forced_wait : Nil
+        return if Pointer(Atomic(UInt64)).new(pointerof(@@forced_hold).address).value.get == 0_u64
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_open).address).value.set(1_u64)
+        while Pointer(Atomic(UInt64)).new(pointerof(@@forced_hold).address).value.get != 0_u64
+          IyiThread.park_if_requested
+          IyiThread.spin_pause
+        end
+      end
+IYI
+  if ! awk -v ins="$WORK/forced.iyi" "$PLACE_MARK_METHODS" "$REPO/src/iyi/prelude.iyi" >"$dir/prelude.1" \
+    || ! awk "$PLACE_MARK_HOLD" "$dir/prelude.1" >"$dir/iyi/prelude.iyi"; then
+    echo "  $label: prelude.iyi's helper_main is not in the form the copy patches"
+    status=1
+    return
+  fi
+  if ! awk "$patch" "$REPO/src/iyi/heap_partition.iyi" >"$dir/iyi/heap_partition.iyi"; then
+    echo "  $label: heap_partition.iyi is not in the form the copy patches"
+    status=1
+    return
+  fi
+  build "$name-bin" "-Dheap_partitions --release -Dmark_force" "$dir${PSEP}$REPO/src" || return
+  timeout 600 "$WORK/$name-bin" mark >"$dir/run.out" 2>"$dir/run.err"
+  local code=$?
+  if [ "$want" = 1 ]; then
+    if [ "$code" -eq 1 ] && grep -qxE 'FAIL: mark: a unit allocated [0-9]+ bytes under a held mark and never held' "$dir/run.out"; then
+      echo "  $label: caught, $(grep -m1 '^FAIL: ' "$dir/run.out")"
+      return
+    fi
+  elif [ "$code" -eq 0 ] && grep -qE '^mark: a unit held under an open mark' "$dir/run.out"; then
+    echo "  $label: $(grep -m1 '^mark: a unit held' "$dir/run.out")"
+    return
+  fi
+  echo "  $label: missed (exit $code, wanted $want)"
+  sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
+  status=1
+}
+
 if [ "$PART" = all ] || [ "$PART" = copies ]; then
   echo "== each mechanism removed"
   copy "a partition takes drained runs" c1 1 \
@@ -298,8 +375,8 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
     "$(subst 'def self\.idle_wait_ms' 'elsif pool_warm\?' 'elsif false')"
   copy "a cooled run's pages go back" c5 1 \
     '/def self\.cool_pools/ { armed = 1 } armed && /^  end$/ { armed = 0 } armed && /__iyi_release_pages\(/ { found = found + 1; next } { print } END { if (found != 3) exit 3 }'
-  copy "a partition holds under a mark" c6 1 \
-    "$(del 'def self\.partition_slice' 'hold_partition\(record, debt\)')" "-Dheap_partitions --release" mark
+  marked "a unit holds beneath an open mark" held 0
+  marked "a partition holds under a mark" c6 1 "$(del 'def self\.partition_slice' 'hold_partition\(record, debt\)')"
   # A sweep helper that lets its walk claim go before its walk ends: a
   # partition's local sweep could pass `quiet_class` into an arena whose
   # frees are still landing on its return stack (`IyiMark.sweep_one_

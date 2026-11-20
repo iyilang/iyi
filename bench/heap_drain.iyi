@@ -354,12 +354,11 @@ module bench/heap_drain
   # baseline - then builds a shared list of NODES nodes and keeps
   # allocating: every mark from then on walks the list, long enough for
   # the units to grow their partitions many times over unless they hold.
-  # Fails when the span grows past the baseline by more than what the
-  # units may hold - each up to `IyiMark::HOLD_PAST` percent of the
-  # largest budget, `IyiHeap::UNIT_BUSY_MAX`, and a MiB of runs partly
-  # filled besides - or when the second phase saw fewer than two marks.
-  # Without the hold the units grew the span by 51 to 79 MiB; with it, by
-  # 6 to 15 (tmac, Linux, LeakHunt3).
+  # The sound build prints the span and the marks, and fails on the list
+  # alone. How far the span grows under marks is set by the machine (tmac
+  # measured 6 to 15 MiB held, 51 to 79 without the hold), so no bound on
+  # it is checked here: the hold itself is, by `mark_forced` under
+  # `-Dmark_force` (bench/heap_drain.sh's `marked`).
   #
   #   ./heap_drain mark [NODES [WORKERS [SECONDS]]]   # default 2000000 4 3
 
@@ -462,14 +461,85 @@ module bench/heap_drain
     {% if flag?(:heap_partitions) %}
       line = line + " carved_mib=#{base // mib},#{last // mib} holds=#{IyiHeap.partition_holds} timed_out=#{IyiHeap.partition_holds_timed_out}"
       print line + "\n"
-      fail("mark: #{marks_b} marks over the list, too few to hold under") if marks_b < 2
-      slack = workers.to_u64 * (IyiHeap::UNIT_BUSY_MAX.unsafe_div(100_u64) * IyiMark::HOLD_PAST + mib)
-      slack = 8_u64 * mib if slack < 8_u64 * mib
-      fail("mark: the partition arenas grew from #{base // mib} MiB to #{last // mib} MiB under the marks") if last > base + slack
     {% else %}
       print line + "\n"
     {% end %}
     print "mark: the list intact\n"
+  end
+
+  # Forced mark (copy only, `-Dmark_force`, bench/heap_drain.sh's `marked`):
+  # the copy's closer holds the mark open on a word until this program lets
+  # it go (`IyiMark.forced_wait`), so the mark stays open while ONE unit
+  # allocates UNDER_MARK_BYTES beside it. A partition past its ceiling under
+  # an open mark holds (`IyiHeap.hold_partition`) and counts itself in
+  # PARTITION_HOLDS before it waits. The program waits for that count, or for
+  # the unit to finish, then lets the mark go and reads the count. No span is
+  # measured and no clock decides a result: a unit that finished under the
+  # held mark without holding is the failure.
+  UNDER_MARK_BYTES = 16777216_u64
+  FORCED_NODES = 2000000
+
+  def mark_forced(arguments : Array(String)) : Nil
+    {% if flag?(:mark_force) %}
+      IyiWorkers.count = 4
+      fail("mark: the main thread allocates in a partition; the marks need the shared heap") if IyiHeap.current_record != 0
+      opened = Atomic(Int32).new(0)
+      unit_done = Atomic(Int32).new(0)
+      # A large live set makes a mark concurrent: a small one finishes in its
+      # stop and never reaches a helper's finish, where the copy holds it.
+      head : GraphNode? = nil
+      n = 0
+      while n < FORCED_NODES
+        head = GraphNode.new(head, n.to_i64)
+        n = n + 1
+      end
+      IyiMark.forced_arm
+      group do |g|
+        unit = g.spawn(unit: :new) do
+          while opened.get == 0
+            sleep(1)
+          end
+          ring = [] of String
+          64.times { ring << "" }
+          made = 0_i64
+          i = 0
+          while made < UNDER_MARK_BYTES.to_i64
+            s = "u" * (16 + (i % 8) * 24)
+            ring[i & 63] = s
+            made = made &+ s.bytesize.to_i64
+            i = i + 1
+          end
+          unit_done.set(1)
+          made
+        end
+        shared = 0_i64
+        rounds = 0
+        while !IyiMark.forced_open?
+          rounds = rounds + 1
+          fail("mark: no mark reached its closer in #{rounds} rounds of shared garbage") if rounds > 20000
+          200.times do |k|
+            s = "s" * (24 + k % 40)
+            shared = shared &+ s.bytesize.to_i64
+          end
+        end
+        opened.set(1)
+        while unit_done.get == 0 && IyiHeap.partition_holds == 0
+          sleep(1)
+        end
+        holds = IyiHeap.partition_holds
+        IyiMark.forced_release
+        made_unit = unit.value
+        fail("mark: a unit allocated #{made_unit} bytes under a held mark and never held") if holds == 0
+        print "mark: a unit held under an open mark: #{holds} holds, its partition past its ceiling while the mark was open\n"
+      end
+      walked = 0
+      node = head
+      while node.is_a?(GraphNode)
+        walked = walked + 1
+        node = node.next_node
+      end
+      fail("mark: the list walked #{walked} nodes, not #{FORCED_NODES}") if walked != FORCED_NODES
+    {% end %}
   end
 
   # Claim mode (PauseHunt, S6): a sweep slice's walk claim held to its
@@ -700,7 +770,11 @@ module bench/heap_drain
   Checks.read_env
   arguments = Program.args
   if arguments.size > 0 && arguments[0] == "mark"
-    mark_main(arguments)
+    {% if flag?(:mark_force) %}
+      mark_forced(arguments)
+    {% else %}
+      mark_main(arguments)
+    {% end %}
   elsif arguments.size > 0 && arguments[0] == "claim"
     claim_main(arguments)
   elsif arguments.size > 0 && arguments[0] == "dir"

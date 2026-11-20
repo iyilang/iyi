@@ -3181,14 +3181,20 @@ case "$(uname -s)" in
       ps -o time= -p "$1" | awk '{ n = split($1, f, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + f[i]; t += s } END { printf "%.2f\n", t }'
     }
     # Threads a second, alone and beside a busy process per core: the
-    # best of three runs of the given program each way, the runs beside
-    # them those where they and the program held SHARE_MIN percent of the
-    # cores' time (`shares`; `aside` the shares of the runs set aside).
+    # best of three runs of the given program each way, the rate beside
+    # them from the runs where they and the program held SHARE_MIN percent
+    # of the cores' time (`shares`; `aside` the shares of the others).
+    # After UNASKED_TRIES runs set aside the rate beside them is judged on
+    # the held runs so far, none if none: three CI jobs on the Mac held
+    # 74 to 88 % for 20 runs in a row (job 136179732963).
     SHARE_MIN=90
-    UNASKED_TRIES=20
-    # The most CPU the program spent per thread born in a judged run
-    # beside the busy processes, in microseconds: a spinner that gives
-    # its core away spends next to none, one on the hint spins out turns.
+    UNASKED_TRIES=10
+    # The most CPU the program spent per thread born in any run beside
+    # the busy processes, held or not, in microseconds: a spinner that
+    # gives its core away spends next to none, one on the hint spins out
+    # turns whatever else runs. Runs held at 69 to 88 % on tmac (beside a
+    # server under wrk, compile loops, 10 more busy loops): the runtime
+    # 60 to 110 us in 24, the copy 470 to 120,000 in 24.
     SPIN_MAX_US=400
     rates() {
       alone=0; beside=0; shares=""; aside=""; unasked=0; spent=0
@@ -3215,20 +3221,17 @@ case "$(uname -s)" in
           ms="$(sed -n 's/^ok born=[0-9]* ms=\([0-9]*\) .*/\1/p' rates.txt)"
           rate=$((born * 1000 / (ms + 1)))
           if [ "$way" = beside ]; then
+            us="$(awk -v n="$born" '$1 == "user" || $1 == "sys" { t += $2 } END { printf "%d\n", t * 1000000 / n }' times.txt)"
+            [ "$us" -gt "$spent" ] && spent=$us
             # Percent of the cores' time over the run.
             share="$(awk -v b="$before" -v a="$after" -v c="$cores" '$1 == "real" { r = $2 } $1 == "user" || $1 == "sys" { t += $2 } END { printf "%d\n", (r > 0 ? 100 * (a - b + t) / (c * r) : 0) }' times.txt)"
             if [ "$share" -lt "$SHARE_MIN" ]; then
               unasked=$((unasked + 1))
               aside="$aside $share%"
-              if [ "$unasked" -ge "$UNASKED_TRIES" ]; then
-                echo "$1: in $unasked runs beside $cores busy processes, something else held a part of the cores; they and the program held only$aside"; exit 1
-              fi
-              sleep 1
+              [ "$unasked" -ge "$UNASKED_TRIES" ] && run=4
               continue
             fi
             shares="$shares $share%"
-            us="$(awk -v n="$born" '$1 == "user" || $1 == "sys" { t += $2 } END { printf "%d\n", t * 1000000 / n }' times.txt)"
-            [ "$us" -gt "$spent" ] && spent=$us
           fi
           if [ "$way" = alone ]; then [ "$rate" -gt "$alone" ] && alone=$rate; else [ "$rate" -gt "$beside" ] && beside=$rate; fi
           run=$((run + 1))
@@ -3240,8 +3243,8 @@ case "$(uname -s)" in
     else
       step "darwin: threads born beside a busy process per core at least half as fast as alone, best of three runs each, at under $SPIN_MAX_US us of CPU a thread in every one"
       rates asleep
-      echo "  alone $alone threads a second, beside $cores busy processes $beside at up to $spent us of CPU a thread (they and the program held${shares} of the cores${aside:+; set aside at$aside})"
-      if [ $((beside * 2)) -lt "$alone" ]; then
+      echo "  alone $alone threads a second, beside $cores busy processes ${beside:-none held} at up to $spent us of CPU a thread (they and the program held${shares:- none} of the cores${aside:+; set aside at$aside})"
+      if [ "$beside" -gt 0 ] && [ $((beside * 2)) -lt "$alone" ]; then
         echo "beside $cores busy processes the storm made $beside threads a second, under half of $alone alone"; exit 1
       fi
       if [ "$spent" -ge "$SPIN_MAX_US" ]; then
@@ -3258,8 +3261,8 @@ case "$(uname -s)" in
         cat build-hinted.log; exit 1
       fi
       rates hinted-run
-      echo "  with the hint: alone $alone threads a second, beside $cores busy processes $beside at up to $spent us of CPU a thread (they and the program held${shares} of the cores${aside:+; set aside at$aside})"
-      if [ $((beside * 2)) -ge "$alone" ] && [ "$spent" -lt "$SPIN_MAX_US" ]; then
+      echo "  with the hint: alone $alone threads a second, beside $cores busy processes $beside at up to $spent us of CPU a thread (they and the program held${shares:- none} of the cores${aside:+; set aside at$aside})"
+      if { [ "$beside" -eq 0 ] || [ $((beside * 2)) -ge "$alone" ]; } && [ "$spent" -lt "$SPIN_MAX_US" ]; then
         echo "with the hint back, the storm beside the busy processes kept $beside threads a second of $alone alone at up to $spent us of CPU a thread"; exit 1
       fi
     fi

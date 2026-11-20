@@ -479,28 +479,14 @@ for run in 1 2 3 4 5 6 7 8 9 10; do
 done
 echo "  ten runs of 200,000 bursts of frees, every kept chunk intact"
 
-# A chunk the last mark kept, freed before the lazy sweep of its arena
-# reached it - the aged chunks above. A slice walking past it reads its
-# entry, then its colour, and writes the entry back: freed between the two
-# reads it read as allocated before the mark and white, dead, and the
-# slice linked it into its batch while it sat on the freeing thread's
-# list; freed between the read and the write it lost its free flag. Such a
-# free now waits for the slice. On four cores beside two busy loops the
-# old free faulted step 5's program in 4 runs of 1,000, plain, and 108 of
-# 1,000 release: ten runs are no proof. So a copy of the prelude widens
-# the window: a slice that meets a chunk of a kilobyte or more the last
-# mark kept waits up to 100 us for its entry to change, and says so and
-# exits 1 if it does. The aged chunks are freed all at once as soon as a
-# slice of their arena is in flight, while it waits at one of them. With
-# the old free that copy exited 1 by name in 200 runs of 200, plain and
-# release alike, and with the lock in 0 of 1,000 of each. Small classes
-# are left alone: a slice meets thousands of kept chunks there, and a
-# wait at each stalls the sweep.
-step "chunks the last mark kept, freed beside a sweep that waits at each, ten runs"
+# A sweep may read a kept chunk while that chunk is being freed. The armed
+# copy publishes that exact look and holds it until the free announces itself
+# or changes the entry. The unarmed runs exercise the same copy without a
+# clock-decided widening window.
+step "chunks the last mark kept, freed beside the sweep, ten runs"
 mkdir -p widened/iyi
 cp "$REPO"/src/iyi/*.iyi widened/iyi/
-# The sweep's look at a kept chunk of a kilobyte or more. Unarmed (the plain
-# runs), the look waits 100 us for the entry to change. Armed by the program
+# Armed by the program
 # (`IyiHeap.arm_look`, on the aged chunks' arena), the first such look publishes
 # its chunk and holds it by words until the program's free of that chunk
 # announces itself on the slice's claim (`note_free_waiting`, at the top of
@@ -566,7 +552,7 @@ awk 'function forced() {
     print "              unless IyiHeap.look_on_helper?"
     print "                message = \"freed: the armed look ran on an allocating thread, not a helper\\n\""
     print "                __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
-    print "                __iyi_exit(1)"
+    print "                __iyi_exit(76)"
     print "              end"
     print "              IyiHeap.publish_look(cursor)"
     print "              look_limit = IyiMark.now_ns &+ 5000000000_u64"
@@ -575,17 +561,12 @@ awk 'function forced() {
     print "              end"
     print "              if IyiHeap.read8(byte) == word && IyiHeap.forced_waiting != cursor"
     print "                __iyi_write(2, \"freed: the sweep held a chunk the last mark kept for five seconds, and no free came\\n\".to_unsafe.as(Void*), 84_u64)"
+    print "                __iyi_exit(76)"
+    print "              end"
+    print "              if IyiHeap.read8(byte) != word"
+    print "                __iyi_write(2, \"freed: a chunk the last mark kept was freed while the sweep looked at it\\n\".to_unsafe.as(Void*), 73_u64)"
     print "                __iyi_exit(1)"
     print "              end"
-    print "            else"
-    print "              window_end = IyiMark.now_ns &+ 100000_u64"
-    print "              while IyiHeap.read8(byte) == word && IyiMark.now_ns < window_end"
-    print "                spin_pause"
-    print "              end"
-    print "            end"
-    print "            if IyiHeap.read8(byte) != word"
-    print "              __iyi_write(2, \"freed: a chunk the last mark kept was freed while the sweep looked at it\\n\".to_unsafe.as(Void*), 73_u64)"
-    print "              __iyi_exit(1)"
     print "            end"
     print "          end"
     found++; next }

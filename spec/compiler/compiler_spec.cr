@@ -100,6 +100,51 @@ describe "Compiler" do
     end
   end
 
+  # iyi: `BuildInputs.paused` takes the recorder from the fiber that pauses
+  # and from no other. The two fibers here stand for two parse-ahead workers,
+  # each listing a directory while the walk reads on: the pause took the
+  # recorder from the whole process, the walk's reads went unrecorded, and
+  # the pause that ended last put back the nil the other had left, so the
+  # rest of the build was recorded by nobody (bench/up_to_date.sh's `sys`,
+  # job 136048431367). Fibers rather than threads, so that the pauses end in
+  # this order every run.
+  it "records what a build reads while other fibers pause, and after" do
+    with_tempdir("iyi-inputs-paused") do
+      File.write "input", "x"
+      input = File.expand_path("input")
+      inputs = Iyi::BuildInputs.new(nil)
+      Iyi::BuildInputs.current = inputs
+      begin
+        inside = Channel(Iyi::BuildInputs?).new
+        left = Channel(Nil).new
+        gates = {Channel(Nil).new, Channel(Nil).new}
+        gates.each do |gate|
+          spawn do
+            Iyi::BuildInputs.paused do
+              inside.send Iyi::BuildInputs.current
+              gate.receive
+            end
+            left.send nil
+          end
+        end
+        # Both inside their pauses, where neither records...
+        2.times { inside.receive.should be_nil }
+        # ...and this fiber still does.
+        Iyi::BuildInputs.current.should be(inputs)
+        File.exists?(input).should be_true
+        inputs.files.has_key?(Iyi::BuildInputs.key(input)).should be_true
+        # The first in leaves first, as two threads' pauses could.
+        gates.each do |gate|
+          gate.send nil
+          left.receive
+        end
+        Iyi::BuildInputs.current.should be(inputs)
+      ensure
+        Iyi::BuildInputs.current = nil
+      end
+    end
+  end
+
   # iyi: the linker probe is asked once per `PATH`, not once per build.
   #
   # Before linking, the compiler searches `PATH` for `mold` and then for

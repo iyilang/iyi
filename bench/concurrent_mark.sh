@@ -40,8 +40,8 @@
 #     free. Those proofs exist only where their code is compiled (thread.iyi's
 #     start_helper and prelude.iyi's start_concurrent under win32), and the
 #     gate names that platform arm instead of passing silently.
-# Not forced by this gate (clock-decided, listed for the record): the released,
-# let_go_late and arrived_only proofs.
+# The separate unstarted proof remains clock-decided: it needs a rendezvous
+# to establish that queued tasks cannot cause another worker to launch.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"

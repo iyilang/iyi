@@ -101,9 +101,10 @@ executable, so every rebuild of the compiler wrote a new set, and the
 rotation, removing directories only, passed over them. ~/.cache/iyi held
 24,428 on the project's Mac (59.6 MB) and 16,660 on the Linux box. Against
 the compiler before (6b131f8d8) the first half failed 3 runs of 3 on Linux
-("the rotation left 241 reach verdicts, not 240"), and against the fix with
-a read no longer marking the verdict used, 3 of 3 ("the rotation removed 1
-of the 1 verdicts the build it ended had just read").
+and 3 of 3 on Windows 11 ("the rotation left 241 reach verdicts, not 240"),
+and against the fix with a read no longer marking the verdict used, 3 of 3
+on Linux ("the rotation removed 1 of the 1 verdicts the build it ended had
+just read"). With the fix the whole gate passed on both.
 
 And because the old shuffle was there for a reason, rule 2's reordering is
 held too: `probe/a` and `probe/b` both import `probe/log` and each

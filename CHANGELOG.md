@@ -711,8 +711,8 @@
   more build 240 must be left, the fixture's with the bytes it first
   stored. It also fails when more std modules hold a `@[SafeReach]` claim
   than the rotation counts. Against the compiler before, the first half
-  failed 3 runs of 3 on Linux, and 3 of 3 against the fix with a read no
-  longer marking the verdict used.
+  failed 3 runs of 3 on Linux and 3 of 3 on Windows 11, and 3 of 3 on
+  Linux against the fix with a read no longer marking the verdict used.
 
 - **The darwin jobs on the project's Mac each get the compilers' caches
   to themselves.** Its three runners share one HOME, so they shared

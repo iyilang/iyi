@@ -882,7 +882,7 @@ group do |g|
   g.spawn(unit: :new) { ask(2_i64) }
 end
 IYI
-if ! awk '/^@\[SafeReach/ { marks++; next } /^module reaches$/ { modules++; print "module reaches_bare"; next } { print } END { if (marks != 1 || modules != 1) exit 3 }' reaches.iyi > reaches_bare.iyi; then
+if ! awk '/^@\[SafeReach/ { marks++; at_mark = NR; next } /^DATABASE = Database.new$/ { databases++; at_database = NR } /^module reaches$/ { modules++; print "module reaches_bare"; next } { print } END { if (marks != 1 || modules != 1 || databases != 1 || at_database != at_mark + 1) exit 3 }' reaches.iyi > reaches_bare.iyi; then
   echo "the awk for reaches_bare found a missing or duplicate anchor"; exit 1
 fi
 if cmp -s reaches.iyi reaches_bare.iyi; then
@@ -911,7 +911,7 @@ if ! grep -qF "$want" check-reaches-bare.log; then
 fi
 echo "  broken copy, the mark taken off: refused by the build and by check, the claim offered"
 echo "  refused once for two blocks: $(grep -m1 -oF "$want" build-reaches-bare.log | cut -c1-150)"
-if ! awk '/ask\(2_i64\)/ { calls++; next } /^module reaches_bare$/ { modules++; print "module reaches_lone"; next } { print } END { if (calls != 1 || modules != 1) exit 3 }' reaches_bare.iyi > reaches_lone.iyi; then
+if ! awk '/^  g.spawn\(unit: :new\) \{ ask\(1_i64\) \}$/ { first++; at_first = NR } /^  g.spawn\(unit: :new\) \{ ask\(2_i64\) \}$/ { calls++; at_second = NR; next } /^module reaches_bare$/ { modules++; print "module reaches_lone"; next } { print } END { if (first != 1 || calls != 1 || modules != 1 || at_second != at_first + 1) exit 3 }' reaches_bare.iyi > reaches_lone.iyi; then
   echo "the awk for reaches_lone found a missing or duplicate anchor"; exit 1
 fi
 if cmp -s reaches_bare.iyi reaches_lone.iyi; then
@@ -1140,11 +1140,11 @@ $NOW_DEFS
 { print }
 $NOW_END"
 CANCEL_SUSPEND_BUG='/^  def self.suspend\(fiber : IyiFiber, nonce : UInt64\) : Nil$/ { insus = 1; n_suspend++ }
-insus && /^  end$/ { insus = 0 }
+insus && /^  end$/ { insus = 0; at_suspend_end = NR }
 insus && /^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print "    if false"; print "      force_window_decision(fiber, 1_u64)"; n_decision++; at_decision = NR; next }
 insus && /^    reschedule$/ { print "    force_window_decision(fiber, 2_u64)"; print; n_fall++; at_fall = NR; next }'
 CANCEL_SUSPEND_HOOK='/^  def self.suspend\(fiber : IyiFiber, nonce : UInt64\) : Nil$/ { insus = 1; n_suspend++ }
-insus && /^  end$/ { insus = 0 }
+insus && /^  end$/ { insus = 0; at_suspend_end = NR }
 insus && /^    if fiber.cancelled && fiber.claim\(nonce\)$/ { print; print "      force_window_decision(fiber, 1_u64)"; n_decision++; at_decision = NR; next }
 insus && /^    reschedule$/ { print "    force_window_decision(fiber, 2_u64)"; print; n_fall++; at_fall = NR; next }'
 CANCEL_PARK='/^  def self.park\(fiber : IyiFiber\) : UInt64$/ { inpark = 1; n_park++ }
@@ -1191,7 +1191,7 @@ CANCEL_DEFS='/^  def self.reschedule : Nil$/ {
   n_defs++
   next
 }'
-CANCEL_END='END { if (n_suspend != 1 || n_decision != 1 || n_fall != 1 || at_decision >= at_fall || n_park != 1 || n_parking != 1 || n_hold != 1 || n_nonce != 1 || at_hold != at_parking + 1 || at_nonce != at_hold + 1 || n_defs != 1) exit 3 }'
+CANCEL_END='END { if (n_suspend != 1 || n_decision != 1 || n_fall != 1 || at_decision >= at_fall || at_suspend_end != at_fall + 1 || n_park != 1 || n_parking != 1 || n_hold != 1 || n_nonce != 1 || at_hold != at_parking + 1 || at_nonce != at_hold + 1 || n_defs != 1) exit 3 }'
 CANCEL_BUG="$CANCEL_SUSPEND_BUG
 $CANCEL_PARK
 $CANCEL_DEFS
@@ -1387,7 +1387,8 @@ verdict_held lostcancel_hook 'wakes, cancels: the targeted suspend claimed its c
   LOSTWORD_COMMON='/^  def self.park_on\(/ { inpark = 1; inlink = 1; n_park++ }
 inpark && /^  end$/ { inpark = 0 }
 inlink && /^  end$/ { inlink = 0 }
-inlink && /^    tails\[bucket\] = waiter$/ { print; print "    force_lost_link(word)"; n_link++; at_link = NR; next }
+expect_link_unlock { if ($0 != "    IyiChanLock.unlock(lock)") exit 3; expect_link_unlock = 0; n_link_unlock++; print; next }
+inlink && /^    tails\[bucket\] = waiter$/ { print; print "    force_lost_link(word)"; n_link++; at_link = NR; expect_link_unlock = 1; next }
 /^  def self.wake_on\(/ { inwake = 1; n_wake++ }
 inwake && /^  end$/ { inwake = 0 }
 inwake && /^    IyiChanLock.lock\(lock\)$/ { print "    force_lost_attempt(word)"; n_attempt++; at_attempt = NR }
@@ -1465,7 +1466,7 @@ inpark && (/^ +if word\.value\.get != seen$/ || /^      IyiChanLock\.unlock\(loc
   n_defs++
   next
 }'
-  LOSTWORD_END='END { if (n_park != 1 || n_window != 1 || n_wake != 1 || n_attempt != 1 || n_done != 1 || n_link != 1 || n_chain != 1 || n_lock != 1 || n_unlock != 1 || n_insert != 1 || n_defs != 1 || seq_open != 1 || seq_done != 1 || seq != 0 || n_stray != 0 || at_seq >= at_link || at_attempt >= at_done || at_chain != at_done + 1) exit 3 }'
+  LOSTWORD_END='END { if (n_park != 1 || n_window != 1 || n_wake != 1 || n_attempt != 1 || n_done != 1 || n_link != 1 || n_link_unlock != 1 || expect_link_unlock || n_chain != 1 || n_lock != 1 || n_unlock != 1 || n_insert != 1 || n_defs != 1 || seq_open != 1 || seq_done != 1 || seq != 0 || n_stray != 0 || at_seq >= at_link || at_attempt >= at_done || at_chain != at_done + 1) exit 3 }'
   broken lostword "$LOSTWORD_COMMON
 $LOSTWORD_BUG
 $LOSTWORD_DEFS
@@ -1749,16 +1750,16 @@ $CLOSE_END" concurrency.iyi parallel_migrate -Dnoclose_force
   print; injoin = 1; n_method++; next
 }
 injoin && /^    end$/ { injoin = 0 }
-injoin && /^      {% if flag\?\(:linux\) %}$/ { print "      IyiThread.force_join_decided(self, @ended.get == 0_u64 ? 2_u64 : 3_u64)"; n_kernel++ }'
-  JOIN_BUG='injoin && /^      while @ended.get == 0_u64$/ { sequence = 1; n_loop++; next }
+injoin && /^      {% if flag\?\(:linux\) %}$/ { print "      IyiThread.force_join_decided(self, @ended.get == 0_u64 ? 2_u64 : 3_u64)"; n_kernel++; at_kernel = NR }'
+  JOIN_BUG='injoin && /^      while @ended.get == 0_u64$/ { sequence = 1; n_loop++; at_loop = NR; next }
 sequence == 1 { if ($0 != "        IyiScheduler.park_on(pointerof(@ended), 0_u64, false)") exit 3; sequence = 2; n_park++; next }
 sequence == 2 { if ($0 != "      end") exit 3; sequence = 0; n_end++; next }
 injoin && /^      end$/ { n_other_end++ }'
-  JOIN_HOOK='injoin && /^      while @ended.get == 0_u64$/ { sequence = 1; n_loop++; print; next }
+  JOIN_HOOK='injoin && /^      while @ended.get == 0_u64$/ { sequence = 1; n_loop++; at_loop = NR; print; next }
 sequence == 1 { if ($0 != "        IyiScheduler.park_on(pointerof(@ended), 0_u64, false)") exit 3; sequence = 2; n_park++; print "        IyiThread.force_join_decided(self, 1_u64)"; print; next }
 sequence == 2 { if ($0 != "      end") exit 3; sequence = 0; n_end++; print; next }
 injoin && /^      end$/ { n_other_end++ }'
-  JOIN_END='END { if (sequence || n_other_end != 0 || n_method != 1 || n_kernel != 1 || n_loop != 1 || n_park != 1 || n_end != 1) exit 3 }'
+  JOIN_END='END { if (sequence || n_other_end != 0 || n_method != 1 || n_kernel != 1 || n_loop != 1 || n_park != 1 || n_end != 1 || at_kernel != at_loop + 3) exit 3 }'
   broken kerneljoin "$JOIN_COMMON
 $JOIN_BUG
 { print }
@@ -2283,24 +2284,27 @@ step "failure proof: a monitor that raises a worker's word after three unchanged
   n_defs++
   next
 }'
-  SLOW_TICKS='/^  PREEMPT_TICKS   =       1_u64$/ { print "  PREEMPT_TICKS   =       3_u64"; n_ticks++; next }'
-  SLOW_SCOPE='/^  private def self.look : Bool$/ { inlook = 1; n_look_method++ }
+  SLOW_TICKS='/^  PREEMPT_TICKS   =       1_u64$/ { print "  PREEMPT_TICKS   =       3_u64"; n_ticks++; at_ticks = NR; next }'
+  SLOW_TICKS_HOOK='/^  PREEMPT_TICKS   =       1_u64$/ { n_ticks++; at_ticks = NR }'
+  SLOW_SCOPE='/^  PREEMPT_TICK_NS = 5000000_u64$/ { n_tick_ns++; at_tick_ns = NR }
+/^  private def self.look : Bool$/ { inlook = 1; n_look_method++ }
 inlook && /^  end$/ { inlook = 0 }'
   SLOW_SAVE='inlook && /^            ticks = 0_u64$/ { print "            force_pending_ticks(ticks)"; print; n_save++; at_save = NR; next }'
   SLOW_STORE='inlook && /^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { print; print "            force_raise if address != 0_u64"; n_store++; at_store = NR; next }'
   SLOW_HOOK="$SLOW_DEFS
 $SLOW_SCOPE
+$SLOW_TICKS_HOOK
 $SLOW_SAVE
 $SLOW_STORE
 { print }
-END { if (n_defs != 1 || n_look_method != 1 || n_save != 1 || n_store != 1 || at_save >= at_store) exit 3 }"
+END { if (n_defs != 1 || n_look_method != 1 || n_tick_ns != 1 || n_ticks != 1 || at_ticks != at_tick_ns + 1 || n_save != 1 || n_store != 1 || at_save >= at_store) exit 3 }"
   SLOW_BUG="$SLOW_DEFS
 $SLOW_SCOPE
 $SLOW_TICKS
 $SLOW_SAVE
 $SLOW_STORE
 { print }
-END { if (n_defs != 1 || n_look_method != 1 || n_ticks != 1 || n_save != 1 || n_store != 1 || at_save >= at_store) exit 3 }"
+END { if (n_defs != 1 || n_look_method != 1 || n_tick_ns != 1 || n_ticks != 1 || at_ticks != at_tick_ns + 1 || n_save != 1 || n_store != 1 || at_save >= at_store) exit 3 }"
   broken slowturn "$SLOW_BUG" concurrency.iyi parallel_preempt -Dslowturn_force
   verdict_caught slowturn "period: a worker's word was raised after 3 unchanged looks" period --workers=1
   broken slowturn_hook "$SLOW_HOOK" concurrency.iyi parallel_preempt -Dslowturn_force

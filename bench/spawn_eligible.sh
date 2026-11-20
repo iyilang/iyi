@@ -850,8 +850,15 @@ caught() { # name, exact sentence, step arguments...
 }
 
 step "failure proof: an eligible spawn left in its unit"
-broken leftserial '/^    private def spawn_pooled\(/ { inside = 1; defs++ } inside && /^      return in_unit\(&block\) unless IyiWorkers.parallel\?$/ { print "      return in_unit(&block)"; hits++; next } inside && /^    end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }'
-caught leftserial 'together: eligible spawns waited 2000 ms for the others and left alone: they ran one at a time' together --workers=4
+broken leftserial '/^    private def spawn_pooled\(/ { inside = 1; defs++ } inside && /^      return in_unit\(&block\) unless IyiWorkers.parallel\?$/ { print "      return in_unit(&block)"; hits++; next } inside && /^    end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }' -Dplacement_force
+caught leftserial 'eligible placement: a spawn stayed in its unit' eligible_placement --workers=4
+broken eligible_control '/^    private def spawn_pooled\(/ { print; print "      # placement control"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dplacement_force
+timeout -k 5 120 ./eligible_control-run eligible_placement --workers=4 > eligible_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'eligible placement: 4 tasks ran on the pool' eligible_control.txt; then
+  echo "the eligible placement control failed (exit $code):"; tail -20 eligible_control.txt; exit 1
+fi
+echo "  eligible placement control: 4 tasks ran on the pool"
 
 step "failure proof: an ineligible spawn sent to the pool"
 broken madeparallel '/^  def spawn\(&block/ { inside = 1; defs++ } inside && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; hits++; next } inside && /^  end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }' -Dmadeparallel_force
@@ -876,8 +883,15 @@ fi
 echo "  sound placement hook: serial saw 8 tasks"
 
 step "failure proof: unit: :new left in its unit"
-broken askedignored '/^    private def spawn_new\(/ { inside = 1; defs++ } inside && /^      on_pool\(pinned, &block\)$/ { print "      in_unit(&block)"; hits++; next } inside && /^    end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }'
-caught askedignored 'asked: spawn(unit: :new) tasks waited 2000 ms for the others and left alone: they ran one at a time' asked --workers=4
+broken askedignored '/^    private def spawn_new\(/ { inside = 1; defs++ } inside && /^      on_pool\(pinned, &block\)$/ { print "      in_unit(&block)"; hits++; next } inside && /^    end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }' -Dplacement_force
+caught askedignored 'asked placement: a spawn stayed in its unit' asked_placement --workers=4
+broken asked_control '/^    private def spawn_new\(/ { print; print "      # placement control"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dplacement_force
+timeout -k 5 120 ./asked_control-run asked_placement --workers=4 > asked_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'asked placement: 4 tasks ran on the pool' asked_control.txt; then
+  echo "the asked placement control failed (exit $code):"; tail -20 asked_control.txt; exit 1
+fi
+echo "  asked placement control: 4 tasks ran on the pool"
 caught askedignored "askedone: spawn(unit: :new) tasks ran on the spawner's thread on a pool of one" askedone --workers=1
 
 step "failure proof: a pool of one that starts for eligible spawns"

@@ -347,8 +347,38 @@ import std/int
   end
 {% end %}
 
+{% if flag?(:placement_force) %}
+  def eligible_placement : Nil
+    group do |g|
+      TASKS.times do
+        g.spawn do
+          fail("eligible placement: a spawn stayed in its unit") unless IyiWorkers.forced_parallel_placement
+          0
+        end
+      end
+    end
+    fail("eligible placement: the hook missed a task") unless IyiWorkers.forced_seen == 4_u64
+    puts "eligible placement: 4 tasks ran on the pool"
+  end
+
+  def asked_placement : Nil
+    group do |g|
+      TASKS.times do
+        g.spawn(unit: :new) do
+          fail("asked placement: a spawn stayed in its unit") unless IyiWorkers.forced_parallel_placement
+          0
+        end
+      end
+    end
+    fail("asked placement: the hook missed a task") unless IyiWorkers.forced_seen == 4_u64
+    puts "asked placement: 4 tasks ran on the pool"
+  end
+{% end %}
+
   {% if flag?(:growth_force) %}
     STEPS = ["together", "nested", "unit", "serial", "asked", "one", "askedone", "grows", "growth"]
+  {% elsif flag?(:placement_force) %}
+    STEPS = ["together", "nested", "unit", "serial", "asked", "one", "askedone", "grows", "eligible_placement", "asked_placement"]
   {% else %}
     STEPS = ["together", "nested", "unit", "serial", "asked", "one", "askedone", "grows"]
   {% end %}
@@ -377,6 +407,10 @@ import std/int
     when "grows"    then grows
 {% if flag?(:growth_force) %}
     when "growth"   then growth
+{% end %}
+{% if flag?(:placement_force) %}
+    when "eligible_placement" then eligible_placement
+    when "asked_placement" then asked_placement
 {% end %}
     end
   end

@@ -486,6 +486,9 @@ state() {
     IyiStat.set(IyiStat::COOL_PENDING, 1_u64)
   end
 
+    IyiStat.set(IyiStat::COOL_PENDING, 1_u64)
+  end
+
 IYI
   if ! awk -v ins="$WORK/cool.iyi" "$access" "$REPO/src/iyi/heap_partition.iyi" >"$dir/a.1"; then
     echo "  $label: heap_partition.iyi's cool_pools is not in the form the copy patches"

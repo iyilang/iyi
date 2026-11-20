@@ -700,24 +700,26 @@
   GitHub's VMs and gone with the job. That costs `make iyi` a cold
   cache: 19 and 21 s on the idle Mac, against 13 and 14 s warm.
 
-- **darwin's spinner step in `bench/thread_exercise.sh` (7i) judges a
-  run beside its busy processes only where they hold the cores, and
-  holds the spinners' CPU too.** The copy with the ARM `yield` hint back
-  kept 2,275 threads a second beside a busy process per core of 2,307
-  alone on the project's Mac (job 135961830899), while another CI job's
-  server ran under wrk. A load that wakes tens of thousands of times a
-  second takes cores and turns from the busy processes, and the hint's
-  spinner then no longer spins out the holder's turn: on tmac, beside
-  that server and wrk (and a compile loop), the busy processes and the
-  program held 69 to 76 % of the cores and the copy made 861 to 1,991 a
-  second beside them of 702 to 1,206 alone; beside 12 threads that wake
-  every 70 us they held 90 to 97 % and the copy made 1,405 to 3,073 of
-  2,143 to 2,505. A run beside the busy processes now counts only where
-  they and the program held 90 % of the cores' time (`ps` and time(1)),
-  and is run again otherwise, failing after 20. Every counted run must
-  also cost the program under 400 us of CPU per thread born: the sound
-  runtime spent 60 to 140 us in 36 runs across six loads, the copy 740
-  to 5,470 in every run that counted. The half bound is unchanged.
+- **darwin's spinner step in `bench/thread_exercise.sh` (7i) holds the
+  spinners' CPU in every run, and judges the hint copy's rate only where
+  the busy processes hold the cores.** The copy with the ARM `yield` hint
+  back kept 2,275 threads a second beside a busy process per core of
+  2,307 alone on the project's Mac (job 135961830899), while another CI
+  job's server ran under wrk. A load that wakes tens of thousands of times
+  a second takes cores and turns from the busy processes, and the hint's
+  spinner then no longer spins out the holder's turn: on tmac, beside that
+  server and wrk (and a compile loop), the busy processes and the program
+  held 69 to 76 % of the cores and the copy made 861 to 1,991 a second
+  beside them of 702 to 1,206 alone. Every run beside the busy processes
+  now also costs the program under 400 us of CPU per thread born, held or
+  not: the sound runtime spent 60 to 150 us at every load measured (27 to
+  100 % of the cores held), the copy 470 to 120,000. The runtime's half
+  rate is judged on every run, as before. The copy is caught by the CPU
+  check, or by a half rate on runs where the busy processes and the
+  program held 90 % of the cores' time (`ps` and time(1)). After ten runs
+  set aside, the tries stop rather than fail: a first version that failed
+  there failed its first Mac CI run beside two other jobs, where only 74
+  to 88 % was held (job 136179732963). The half bound is unchanged.
 
 - **`bench/spawn_eligible.iyi`'s `grows` keeps its four tasks wanting
   to run until the pool has answered them.** The pool starts one worker

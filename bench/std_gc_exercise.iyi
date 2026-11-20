@@ -9,10 +9,11 @@
 #   * `stats` moves the way the collector does: `bytes_since_collection`
 #     climbs with allocation and is zero right after `collect`; `collections`
 #     counts every collection; the sweep after garbage reports bytes freed;
-#     `mapped_bytes` is at least one arena, and does not shrink within a
-#     second: a class's empty arenas go back once nobody has refilled it
-#     for three collections and a second (`IyiMark.class_idle?`), and the
-#     check stands under 134 ms into the run on Linux.
+#     `mapped_bytes` is at least one arena, and stays at or above the first
+#     arena's 16 MiB floor: a class's empty arenas go back once nobody has
+#     refilled it for three collections and a second (`IyiMark.class_idle?`),
+#     so the figure can fall below an earlier reading; the check stands under
+#     134 ms into the run on Linux.
 #   * `disable` holds the trigger through allocation that would have
 #     collected; `enable` lets it run again; `collect` works while disabled.
 #   * `stats` reads whole lists beside threads that allocate: two seconds
@@ -21,8 +22,9 @@
 #     two seconds of it end without a fault, every answer right.
 #
 # bench/std_gc_exercise.sh drives it, builds once with -Dgc_none to require
-# the compile-time refusal, and breaks copies of the module to prove the
-# checks can fail.
+# the compile-time refusal, and breaks copies of the module and the runtime to
+# prove the checks can fail. With -Dstats_force or -Dis_heap_force, only the
+# forced block below runs (see there).
 #
 #     ./bin/iyi run bench/std_gc_exercise.iyi
 
@@ -46,6 +48,34 @@ def churn(rounds : Int32) : Int32
   end
   kept
 end
+
+# A failure proof's program, in a copy only: `-Dstats_force` or `-Dis_heap_force`
+# runs this block alone. It arms one large chunk and starts a second thread that
+# frees it while the walk holds at the chunk (see the proof in
+# bench/std_gc_exercise.sh). The copy's own calls live here, so this block does
+# not build against the real runtime.
+{% if flag?(:stats_force) || flag?(:is_heap_force) %}
+victim = GC.malloc(2_000_000)
+IyiHeap.forced_arm(victim.address)
+freer = IyiThread.start do
+  IyiHeap.forced_started_set
+  IyiHeap.forced_wait_held
+  IyiHeap.forced_acked_set
+  GC.free(Pointer(Void).new(IyiHeap.forced_victim))
+  nil
+end
+IyiHeap.forced_wait_started
+{% if flag?(:stats_force) %}
+GC.stats
+{% else %}
+check(GC.is_heap_ptr(victim), "a large chunk is a heap pointer")
+{% end %}
+freer.join
+check(IyiHeap.forced_walked == 1_u64, "the walk reached the armed chunk once (#{IyiHeap.forced_walked})")
+check(IyiHeap.forced_waited?, "the freeing thread waited for the runtime lock")
+puts "the armed chunk was walked and read whole"
+exit 0
+{% end %}
 
 # ---------------------------------------------------------------------------
 puts "== raw words"
@@ -105,7 +135,7 @@ c0 = s0.collections
 churn(300_000)
 s1 = GC.stats
 check(s1.collections > c0, "churn crossed the trigger: collections #{c0} -> #{s1.collections}")
-check(s1.mapped_bytes >= 16_777_216_u64, "mapped_bytes never shrinks below the first arena (#{s1.mapped_bytes})")
+check(s1.mapped_bytes >= 16_777_216_u64, "mapped_bytes stays at the first arena's floor (#{s1.mapped_bytes})")
 churn(1_000)
 check(GC.stats.bytes_since_collection > 0_u64, "bytes_since_collection climbs after allocation")
 c1 = GC.stats.collections

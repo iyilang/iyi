@@ -371,9 +371,10 @@ if make_copy straddle_control "$WARM" "$STRADDLE_CONTROL" && build_copy straddle
     '^reuse integrity: the straddle check met [1-9][0-9]* released boundaries, armed [1-9][0-9]* nonzero slots there, 0 zeroed by a release$'
 fi
 
-# The release keeps a designated cold page's bytes: the fresh objects carved
-# on that page read an unset field, and the proof names the page. The control
-# is the warm room alone, with the advice left out.
+# The copy skips the release of a designated cold page. The carve's first
+# chunk on that page retains the pattern and forces one stale object; later
+# chunks are listed by the carve and cleared when popped. The control is
+# the warm room alone, with the advice left out.
 echo
 echo "== the check fails when a released page keeps its bytes"
 if make_copy warm_control "$WARM" && build_copy warm_control; then
@@ -381,7 +382,7 @@ if make_copy warm_control "$WARM" && build_copy warm_control; then
 fi
 if make_copy advice "$WARM" "$ADVICE" && build_copy advice -Dadvice_force; then
   prove_fails advice \
-    '^iyi: panic: reuse integrity: [1-9][0-9]* of 6000000 fresh objects read a field their constructor never set as something other than nil, on [1-9][0-9]* released pages taken up again, [1-9][0-9]* of them on the cold page the copy kept$'
+    '^iyi: panic: reuse integrity: [1-9][0-9]* of 6000000 fresh objects read a field their constructor never set as something other than nil, on [1-9][0-9]* released pages taken up again, [1-9][0-9]* of the stale objects on the cold page whose release the copy skipped$'
 fi
 
 echo

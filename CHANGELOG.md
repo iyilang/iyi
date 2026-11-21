@@ -876,6 +876,44 @@
   sleeps took 8.0 to 13.0 ms, and the step failed there by saying so, for
   the sound runtime and the copy alike.
 
+- **`bench/heap_codegen.sh`'s `classvar-publish` copy and
+  `bench/heap_lend.sh`'s `foreign` copy are caught by their local
+  collection's check every run (#223).** Both programs' `collect_here`
+  scrubbed the stack below its own frame, and that frame lay over the
+  frames that had just made the copy's chain: a slot of it not yet
+  written still named the chain's head, so the local mark kept the chain
+  and the check saw nothing. The plain `foreign` copy was then caught
+  only at its unit's death, while the other unit's `Holder` naming the
+  chain still lived: that unit died first once and the copy was missed
+  (CI job 134750417357, exit 0), and master's run 44280407780 listed the
+  death's word for the plain build on Linux and Windows against the
+  release build's local one. The plain `classvar-publish` copy fell to a
+  stressed collection after `collect_here`, whose hit a global mark
+  beginning dropped, and to the unit's death after it: CI job
+  135044352904's first run named the death and its second, the one the
+  table printed, the local collection. `collect_here` is now a macro
+  that scrubs in its caller's frame, as bench/heap_local's callers scrub
+  before `collect_now`, then collects from a def whose frame lies on the
+  zeroed stack, scrubbing again before each try and counting only a
+  collection its own call ran. The plain `foreign` copy named the death
+  in 600 runs of 600 on Linux (idle, beside twelve busy loops, and held
+  to two CPUs beside them) and 400 of 400 on Windows 11 (idle and beside
+  twelve), and names the local collection in 500 of 500 and 400 of 400.
+  The plain `classvar-publish` copy at chaos seeds 1 to 100 named the
+  death in 23 of 6,000 runs on Linux (20 of 4,000 idle, 3 of 2,000 beside
+  the busy loops) and 972 of 1,500 on Windows 11 (968 of 1,000 idle, 4 of
+  500 beside them), and in none of 6,000 and 1,500 now. On the Mac both
+  copies named the local collection before and after (400 runs, half
+  beside ten busy loops, and 1,500, a third). Both gates now hold each
+  copy to the verifier's check it names - its local collection's, its
+  unit's death's (`c1`, `new-shared`, heap_lend's `death`) or the
+  hand-back's (`unlent`) - and heap_codegen.sh prints both runs' reports
+  when two differ, where it printed the later one alone. Against the old
+  `heap_lend.iyi` the new heap_lend.sh fails at `foreign`'s first run on
+  Linux. With `RUNS=25` both gates catch every copy at its check with
+  one report in 25 runs of 25 on Linux (idle and beside the busy loops),
+  the Mac and Windows 11.
+
 - **`bench/std_xz_exercise.sh`'s copy whose ring never grows past 64 KiB
   is caught at its check every run.** It read below the ring's memory, so
   it failed by a wrong CRC64 on most runs and by a memory fault on some:

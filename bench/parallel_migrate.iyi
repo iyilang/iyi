@@ -404,32 +404,120 @@ import std/socket::{IyiSocket, SocketError}
   # run on another worker and, on Windows, moves the socket to that
   # worker's port while the reader's next read is posted on its own.
   #
-  # A read moves only when another worker takes its socket's news, which
-  # a host loaded past its cores makes rarer: Linux on 12 vCPUs moved 12
-  # to 92 of the 192 reads a run, and beside 12 busy loops, at a load of
-  # 34, one run moved none. A run that moves none holds nothing of what a
-  # move keeps, so it is run again, up to SOCKET_RUNS times; one in which
-  # no read ever moves fails.
-  SOCKET_RUNS = 5
-
+  # One read is forced to move while its original worker is held. The
+  # larger run then exercises the same socket traffic once, regardless of
+  # how many of its reads happen to move.
   def sockets(watch : Int32) : Nil
     watched("sockets", watch) do
       conns = 16
       rounds = 12
       stops = IyiThread.stops
-      runs = 0
-      moved = 0_i64
-      while moved == 0_i64 && runs < SOCKET_RUNS
-        runs += 1
-        moved = socket_run(conns, rounds)
-        break if IyiWorkers.count <= 1
-      end
-      if IyiWorkers.count > 1 && moved == 0_i64
-        fail("sockets: none of #{conns * rounds} reads parked on a socket resumed on another worker, in #{runs} runs")
-      end
-      again = runs > 1 ? " (run #{runs}; the #{runs - 1} before moved none)" : ""
-      puts "sockets: #{conns} connections, #{rounds} requests each read and answered in order, #{moved} reads resumed on another worker#{again}, through #{IyiThread.stops - stops} stops"
+      sockets_forced
+      moved = socket_run(conns, rounds)
+      puts "sockets: #{conns} connections, #{rounds} requests each read and answered in order, #{moved} reads resumed on another worker, through #{IyiThread.stops - stops} stops"
     end
+  end
+
+  def sockets_hang(what : String) : Nil
+    print "FAIL: sockets: progress hang: #{what}\n"
+    __iyi_exit(76)
+  end
+
+  def sockets_wait(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 10_000_000_000_i64
+    while count.count < target
+      sleep(1)
+      sockets_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # Publish the worker from inside the non-preemptible hold, so the
+  # observer cannot release the other workers before this one is held.
+  @[NoInline]
+  @[NoPreempt]
+  def sockets_hold(release : Tally, entered : Tally, owner : Owner, what : String) : Nil
+    owner.note_worker(IyiScheduler.state.object_id)
+    entered.add(1_i64)
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while release.count == 0_i64
+      IyiThread.spin_pause
+      sockets_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # The sibling is queued by the reader on its own worker. With every
+  # other worker held it cannot start until the read parks on that worker.
+  @[NoInline]
+  @[NoPreempt]
+  def sockets_force_reader(fd : Int32, family : Int32, reader : Armed, parked_on : Owner, owner : Owner, owner_entered : Tally, owner_go : Tally, finished : Tally) : Nil
+    kept = build(2000, 57_i64)
+    os = os_thread
+    st = IyiScheduler.state.object_id
+    parked_on.note_worker(st)
+    reader.note_fiber(IyiScheduler.current.object_id)
+    group do |inner|
+      inner.spawn(unit: :new) do
+        sockets_hold(owner_go, owner_entered, owner, "the reader's worker was not released")
+        0
+      end
+      got = IyiSocket.new(fd, family).read(1)
+      fail("sockets: the forced read answered #{got.inspect}") unless got == "x"
+      fail("sockets: the forced read resumed on the worker its sibling held") unless moved?("sockets", os, st)
+      churn(3000)
+      fail("sockets: the forced reader's list was not whole after its move") unless whole?(kept, 2000, 57_i64)
+      finished.add(1_i64)
+    end
+  end
+
+  def sockets_forced : Nil
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    near, far = pair(listener, listener.local_port)
+    fd = far.fd
+    family = far.family
+    holders = IyiWorkers.count - 1
+    holder_entered = Tally.new
+    holders_go = Tally.new
+    holder_on = Owner.new
+    reader = Armed.new
+    parked_on = Owner.new
+    owner = Owner.new
+    owner_entered = Tally.new
+    owner_go = Tally.new
+    finished = Tally.new
+    group do |g|
+      holders.times do
+        g.spawn(unit: :new) do
+          sockets_hold(holders_go, holder_entered, holder_on, "a holder was not released")
+          0
+        end
+      end
+      sockets_wait(holder_entered, holders.to_i64, "the holders did not start")
+      g.spawn(unit: :new) do
+        sockets_force_reader(fd, family, reader, parked_on, owner, owner_entered, owner_go, finished)
+        0
+      end
+      sockets_wait(owner_entered, 1_i64, "the reader's sibling did not start")
+      fail("sockets: not armed: the sibling did not hold the reader's worker") unless owner.worker == parked_on.worker
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !fiber_in_state?(reader.fiber, IyiFiberState::WaitingIo)
+        sleep(1)
+        sockets_hang("the reader did not register its socket wait") if __iyi_monotonic_ns > limit
+      end
+      holders_go.add(1_i64)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiScheduler.waiting_threads < 1_u64
+        sleep(1)
+        sockets_hang("no spare worker waited after the holders were released") if __iyi_monotonic_ns > limit
+      end
+      wrote = near.write("x")
+      fail("sockets: the forced write answered #{wrote}") unless wrote.is_a?(Int32)
+      sockets_wait(finished, 1_i64, "the reader did not finish while its worker was held")
+      owner_go.add(1_i64)
+    end
+    near.close
+    far.close
+    listener.close
+    puts "sockets: a socket read resumed on a spare while its worker was held, and its list stayed whole"
   end
 
   # One run of the sockets step: the reads that resumed on another worker.
@@ -699,6 +787,18 @@ import std/socket::{IyiSocket, SocketError}
   # nothing closes a number twice. Under `-Dparallel_closes_home` the
   # seventeenth read is a task of the main thread's own, made where its
   # close is, and the step fails by name.
+  # WaitingIo is set just before the reader is linked into its poller.
+  # Once it has also left the CPU, registration has finished.
+  def closes_registered : Int32
+    count = 0
+    fiber = IyiScheduler.first_fiber
+    while fiber.is_a?(IyiFiber)
+      count += 1 if fiber.state == IyiFiberState::WaitingIo && !fiber.on_cpu?
+      fiber = fiber.next_fiber
+    end
+    count
+  end
+
   def closes(watch : Int32) : Nil
     watched("closes", watch) do
       units = 16
@@ -724,7 +824,6 @@ import std/socket::{IyiSocket, SocketError}
       waiting = Tally.new
       woken = Tally.new
       crossed = Tally.new
-      main_crossed = false
       group do |g|
         units.times do |u|
           fd = fds[u]
@@ -757,9 +856,15 @@ import std/socket::{IyiSocket, SocketError}
         {% else %}
           g.spawn(unit: :new) { lent_read(lent, lent_reader, waiting, woken) }
         {% end %}
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
         while waiting.count < (units + 1).to_i64
           sleep(1)
+          if __iyi_monotonic_ns > limit
+            print "FAIL: closes: progress hang: the readers did not start\n"
+            __iyi_exit(76)
+          end
         end
+        fail("closes: the main thread closed a socket on the thread its reader parked on") unless os_thread != lent_reader.thread
         {% if flag?(:noclose_force) %}
           started = __iyi_monotonic_ns
           while !IyiScheduler.force_close_registered?
@@ -767,16 +872,21 @@ import std/socket::{IyiSocket, SocketError}
             fail("closes: the targeted reader did not complete io registration") if elapsed_ms(started) >= watch.to_i64
           end
         {% else %}
-          sleep(20)
+          limit = __iyi_monotonic_ns + 10_000_000_000_i64
+          while io_waiting < units + 1 || closes_registered < units + 1
+            sleep(1)
+            if __iyi_monotonic_ns > limit
+              print "FAIL: closes: progress hang: the readers did not finish registering their socket waits\n"
+              __iyi_exit(76)
+            end
+          end
         {% end %}
         units.times { go.send(1) }
-        main_crossed = os_thread != lent_reader.thread
         lent.socket.close
       end
       ends.each(&.close)
       listener.close
       fail("closes: #{woken.count} of #{units + 1} reads woke when their socket was closed") unless woken.count == (units + 1).to_i64
-      fail("closes: the main thread closed a socket on the thread its reader parked on") unless main_crossed
       puts "closes: #{units + 1} reads woken by a close, the main thread's and #{units} a sibling task's, #{crossed.count} of those made on another worker"
     end
   end
@@ -829,31 +939,101 @@ import std/socket::{IyiSocket, SocketError}
   # kernel as the probes reach the guard page, against the stack bounds
   # in the TEB of the thread now running the fiber.
   #
-  # A wake moves only when another worker takes it, which a loaded host
-  # makes rarer, as for the sockets: earlier gate runs here moved 19 to
-  # 150 of the 160, and beside 12 busy loops (`procs_running` 17) one
-  # release run moved none. A run that moves none holds nothing of what a
-  # move keeps, so it is run again, up to DEEP_RUNS times; one in which
-  # no wake ever moves fails.
-  DEEP_RUNS = 5
-
+  # A forced wake moves to a spare before the deep frames are made. The
+  # larger run follows once, and reports its incidental moves as data.
   def deep_step(watch : Int32) : Nil
     watched("deep", watch) do
       tasks = 16
       rounds = 10
-      runs = 0
-      moved = 0_i64
-      while moved == 0_i64 && runs < DEEP_RUNS
-        runs += 1
-        moved = deep_run(tasks, rounds)
-        break if IyiWorkers.count <= 1
-      end
-      if IyiWorkers.count > 1 && moved == 0_i64
-        fail("deep: no task resumed on another worker before its deep frames, in #{runs} runs")
-      end
-      again = runs > 1 ? " (run #{runs}; the #{runs - 1} before moved none)" : ""
-      puts "deep: #{tasks * rounds} frames 120 KiB deep, #{moved} of them after a move#{again}"
+      deep_forced
+      moved = deep_run(tasks, rounds)
+      puts "deep: #{tasks * rounds} frames 120 KiB deep, #{moved} of them after a move"
     end
+  end
+
+  def deep_hang(what : String) : Nil
+    print "FAIL: deep: progress hang: #{what}\n"
+    __iyi_exit(76)
+  end
+
+  def deep_wait(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 10_000_000_000_i64
+    while count.count < target
+      sleep(1)
+      deep_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def deep_hold(release : Tally, entered : Tally, owner : Owner, what : String) : Nil
+    owner.note_worker(IyiScheduler.state.object_id)
+    entered.add(1_i64)
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while release.count == 0_i64
+      IyiThread.spin_pause
+      deep_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # Main wakes the parked task into the pool's shared queue while the
+  # worker it left is held. The deep frames therefore follow a real move.
+  def deep_forced : Nil
+    holders = IyiWorkers.count - 1
+    holder_entered = Tally.new
+    holders_go = Tally.new
+    holder_on = Owner.new
+    target = Armed.new
+    parked_on = Owner.new
+    owner = Owner.new
+    owner_entered = Tally.new
+    owner_go = Tally.new
+    finished = Tally.new
+    feed = Channel(Int32).new(1)
+    group do |g|
+      holders.times do
+        g.spawn(unit: :new) do
+          deep_hold(holders_go, holder_entered, holder_on, "a holder was not released")
+          0
+        end
+      end
+      deep_wait(holder_entered, holders.to_i64, "the holders did not start")
+      g.spawn(unit: :new) do
+        os = os_thread
+        st = IyiScheduler.state.object_id
+        parked_on.note_worker(st)
+        target.note_fiber(IyiScheduler.current.object_id)
+        got = feed.receive
+        fail("deep: the forced receive answered #{got}") unless got == 1
+        fail("deep: the forced task resumed on the worker its sibling held") unless moved?("deep", os, st)
+        deep(200)
+        churn(2000)
+        finished.add(1_i64)
+        0
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while target.fiber == 0_u64 || !parked_on_channel?(target.fiber)
+        sleep(1)
+        deep_hang("the target did not park on its channel") if __iyi_monotonic_ns > limit
+      end
+      g.spawn(unit: :new) do
+        deep_hold(owner_go, owner_entered, owner, "the target's worker was not released")
+        0
+      end
+      deep_wait(owner_entered, 1_i64, "the target's sibling did not start")
+      fail("deep: not armed: the sibling did not hold the target's worker") unless owner.worker == parked_on.worker
+      holders_go.add(1_i64)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiScheduler.waiting_threads < 1_u64
+        sleep(1)
+        deep_hang("no spare worker waited after the holders were released") if __iyi_monotonic_ns > limit
+      end
+      sent = feed.send(1)
+      fail("deep: the forced send answered #{sent}") unless sent.nil?
+      deep_wait(finished, 1_i64, "the target did not finish while its worker was held")
+      owner_go.add(1_i64)
+    end
+    puts "deep: a channel wake resumed on a spare while its worker was held, then ran deep frames"
   end
 
   # One run of the deep step: the wakes that resumed on another worker.
@@ -1188,10 +1368,133 @@ import std/socket::{IyiSocket, SocketError}
   end
   {% end %}
 
+  {% if flag?(:nosteal_force) %}
+  # A hang is not the planted verdict. Keep its exit status distinct.
+  def balance_steal_hang(what : String) : Nil
+    print "FAIL: balance: progress hang: #{what}\n"
+    __iyi_exit(76)
+  end
+
+  def balance_steal_wait(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 10_000_000_000_i64
+    while count.count < target
+      sleep(1)
+      balance_steal_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def balance_steal_hold(started : Tally, go : Tally, what : String) : Nil
+    started.add(1_i64)
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while go.count < 1_i64
+      IyiThread.spin_pause
+      balance_steal_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # All other workers are held until the sends finish. The target id is
+  # armed before the sends, but no thief can make a decision until main
+  # releases the one temporary holder after the ring is populated.
+  @[NoInline]
+  @[NoPreempt]
+  def balance_steal_wake(gate : Channel(Int32), tasks : Int32, owner : Owner, ready : Tally, go : Tally) : Nil
+    st = IyiScheduler.state
+    owner.note_worker(st.object_id)
+    IyiWorkers.force_grab_arm(st.object_id)
+    i = 0
+    while i < tasks
+      sent = gate.send(1)
+      fail("balance: not armed: a target wake was not delivered") unless sent.is_a?(Nil)
+      i += 1
+    end
+    fail("balance: not armed: the waker moved while sending") unless IyiScheduler.state.object_id == st.object_id
+    fail("balance: not armed: the woken targets were not all in the waker's ring") unless st.ring_size == tasks.to_u64
+    ready.add(1_i64)
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while go.count < 1_i64
+      IyiThread.spin_pause
+      balance_steal_hang("the waker's worker was not released") if __iyi_monotonic_ns > limit
+    end
+  end
+
+  def balance_steal_forced : Nil
+    fail("balance: not armed: the forced steal needs four workers") unless IyiWorkers.count == 4
+    tasks = 4
+    gate = Channel(Int32).new
+    holders = Tally.new
+    holders_go = Tally.new
+    spare_held = Tally.new
+    spare_go = Tally.new
+    owner_ready = Tally.new
+    owner_go = Tally.new
+    owner = Owner.new
+    resumed_on = Owner.new
+    resumed = Tally.new
+    targets = [] of Armed
+    group do |g|
+      2.times do
+        g.spawn(unit: :new) do
+          balance_steal_hold(holders, holders_go, "a permanent holder was not released")
+          0
+        end
+      end
+      balance_steal_wait(holders, 2_i64, "the permanent holders did not start")
+      g.spawn(unit: :new) do
+        balance_steal_hold(spare_held, spare_go, "the spare holder was not released")
+        0
+      end
+      balance_steal_wait(spare_held, 1_i64, "the spare holder did not start")
+      tasks.times do
+        target = Armed.new
+        targets << target
+        g.spawn(unit: :new) do
+          target.note_fiber(IyiScheduler.current.object_id)
+          value = gate.receive
+          fail("balance: not armed: a target did not receive its wake") unless value.is_a?(Int32) && value == 1
+          resumed_on.note_worker(IyiScheduler.state.object_id)
+          resumed.add(1_i64)
+          0
+        end
+      end
+      targets.each do |target|
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
+        while target.fiber == 0_u64 || !parked_on_channel?(target.fiber)
+          sleep(1)
+          balance_steal_hang("a target did not park on the gate") if __iyi_monotonic_ns > limit
+        end
+      end
+      g.spawn(unit: :new) do
+        balance_steal_wake(gate, tasks, owner, owner_ready, owner_go)
+        0
+      end
+      balance_steal_wait(owner_ready, 1_i64, "the waker did not fill and hold its ring")
+      spare_go.add(1_i64)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      decision = IyiWorkers.force_grab_result
+      while decision == 0_u64
+        sleep(1)
+        balance_steal_hang("the spare made no grab decision for the held worker") if __iyi_monotonic_ns > limit
+        decision = IyiWorkers.force_grab_result
+      end
+      fail("balance: a worker looking for work took none of the tasks woken into a held worker's ring") if decision == 2_u64
+      fail("balance: not armed: the target grab recorded an unknown decision") unless decision == 1_u64
+      balance_steal_wait(resumed, 1_i64, "no target resumed while the waker was held")
+      fail("balance: not armed: a target resumed on its held waker's worker") if resumed_on.worker == owner.worker
+      owner_go.add(1_i64)
+      holders_go.add(1_i64)
+      puts "balance: a worker looking for work took tasks woken into a held worker's ring"
+    end
+  end
+  {% end %}
+
   def balance(watch : Int32) : Nil
     watched("balance", watch) do
       {% if flag?(:pinned_force) %}
         balance_placement
+      {% elsif flag?(:nosteal_force) %}
+        balance_steal_forced
       {% else %}
         # Calibrate only the timed benchmark, not the forced proof.
         t = __iyi_monotonic_ns

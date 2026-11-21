@@ -2075,15 +2075,51 @@ END { if (n_defs != 1 || n_dec != 1 || n_look != 1 || at_dec >= at_look || n_mut
   esac
 
   need_cores 4 "the balance step is timed against four workers' ideal, so the stealing proofs need four cores"
-    # Both without preemption: a preempted task waits in a queue any worker
-    # takes from, which spreads the parked tasks as a steal would, and a
-    # pool that never steals took 1.88x the ideal with it on.
-    NOPREEMPT='/^  private def self.look : Bool$/ { inlook = 1; n_look++ }
-inlook && /^  end$/ { inlook = 0 }
-inlook && /^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n_pre++; next } '
     step "failure proof: a pool that never steals a started task leaves tasks woken on one worker there"
-    broken nosteal "$NOPREEMPT"'/^  def self.grab\(victim : IyiSchedulerState, thief : IyiSchedulerState\) : IyiFiber\?$/ { print; print "    return nil"; n_grab++; next } { print } END { if (n_look != 1 || n_pre != 1 || n_grab != 1) exit 3 }' concurrency.iyi parallel_migrate
-    verdict_caught nosteal 'balance: tasks woken from a worker exceeded the balance bound' balance
+    # Both copies record the first grab decision for the held waker. The
+    # program releases exactly one thief only after the waker's ring is full.
+    NOSTEAL_COMMON='/^  def self.preempts : UInt64$/ {
+  print "  # Copy only: record the first grab decision for the armed victim."
+  print "  @[UnsafeReach(\"set by the program, read by stealing workers: atomics only\")]"
+  print "  @@forced_grab_target : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by a stealing worker, read by the program: atomics only\")]"
+  print "  @@forced_grab_result : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_grab_arm(state : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_grab_result).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_grab_target).address).value.set(state)"
+  print "  end"
+  print ""
+  print "  def self.force_grab_decided(victim : IyiSchedulerState, fiber : IyiFiber?) : Nil"
+  print "    return unless victim.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_grab_target).address).value.get"
+  print "    decision = fiber.is_a?(IyiFiber) ? 1_u64 : 2_u64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_grab_result).address).value.compare_and_set(0_u64, decision)"
+  print "  end"
+  print ""
+  print "  def self.force_grab_result : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_grab_result).address).value.get"
+  print "  end"
+  print ""
+  print
+  n_defs++
+  next
+}
+/^  def self.steal\(st : IyiSchedulerState\) : IyiFiber\?$/ { in_steal = 1; n_steal++ }
+in_steal && /^  end$/ { in_steal = 0 }
+in_steal && /^        fiber = grab\(victim, st\)$/ { print; print "        force_grab_decided(victim, fiber)"; n_dec++; at_dec = NR; next }
+in_steal && /^        if fiber\.is_a\?\(IyiFiber\)$/ { n_next++; at_next = NR }
+/^  def self.grab\(victim : IyiSchedulerState, thief : IyiSchedulerState\) : IyiFiber\?$/ { n_grab++ }'
+    NOSTEAL_HOOK="$NOSTEAL_COMMON"'
+{ print }
+END { if (n_defs != 1 || n_steal != 1 || n_dec != 1 || n_next != 1 || at_next != at_dec + 1 || n_grab != 1) exit 3 }'
+    NOSTEAL_BUG="$NOSTEAL_COMMON"'
+/^  def self.grab\(victim : IyiSchedulerState, thief : IyiSchedulerState\) : IyiFiber\?$/ { print; print "    return nil"; n_bug++; next }
+{ print }
+END { if (n_defs != 1 || n_steal != 1 || n_dec != 1 || n_next != 1 || at_next != at_dec + 1 || n_grab != 1 || n_bug != 1) exit 3 }'
+    broken nosteal "$NOSTEAL_BUG" concurrency.iyi parallel_migrate -Dnosteal_force
+    verdict_caught nosteal "balance: a worker looking for work took none of the tasks woken into a held worker's ring" balance
+    broken nosteal_hook "$NOSTEAL_HOOK" concurrency.iyi parallel_migrate -Dnosteal_force
+    verdict_held nosteal_hook "balance: a worker looking for work took tasks woken into a held worker's ring" balance
 
     step "failure proof: tasks woken back onto the worker they parked on, as before tasks moved"
     # Both copies record the target fiber's actual route in ready: 1 for

@@ -523,9 +523,8 @@ def fail(message : String) : Nil
   __iyi_exit(1)
 end
 
-asserted = false
-{% if flag?(:win32) %}
-  asserted = true
+{% if flag?(:win32) && flag?(:stop_order_force) %}
+IyiThread.stop_order_reset
 {% end %}
 cores = IyiThread.core_count.to_i
 crowd = cores * 4
@@ -573,26 +572,24 @@ flag.go.set(1_i64)
 while flag.held.get < 3_i64
   IyiThread.yield_cpu
 end
-mean = 0_u64
-tries = 0
-while tries < 3 && (tries == 0 || mean > 60000000_u64)
-  stop_ns = IyiThread.stop_ns
-  stops = IyiThread.stops
-  5.times do
-    burst = flag.burst.get
-    while flag.burst.get == burst
-      IyiThread.yield_cpu
-    end
-    IyiMark.collect
+stop_ns = IyiThread.stop_ns
+stops = IyiThread.stops
+5.times do
+  burst = flag.burst.get
+  while flag.burst.get == burst
+    IyiThread.yield_cpu
   end
-  round = (IyiThread.stop_ns - stop_ns) // (IyiThread.stops - stops)
-  mean = round if tries == 0 || round < mean
-  tries = tries + 1
+  IyiMark.collect
 end
+mean = (IyiThread.stop_ns - stop_ns) // (IyiThread.stops - stops)
 flag.stop.set(1_i64)
 spinners.each { |thread| thread.join }
-fail("stop: five collections stopped #{spinners.size} threads that only compute, on one processor, in #{mean // 1000000_u64} ms each, past 60") if asserted && mean > 60000000_u64
-puts "stop: five collections stopped #{spinners.size} threads that only compute, on one processor, in #{mean // 1000_u64} us each, held to 60 ms a stop"
+{% if flag?(:win32) && flag?(:stop_order_force) %}
+fail("stop: a context was captured before all suspend requests were issued") if IyiThread.stop_order_early?
+fail("stop: no context capture was observed") unless IyiThread.stop_order_seen?
+puts "stop: every suspend request preceded the first context capture"
+{% end %}
+puts "stop: five collections stopped #{spinners.size} threads that only compute, on one processor, in #{mean // 1000_u64} us each (measurement only)"
 IYI
 step "the runtime lock with four times the cores' threads, and the stop"
 if ! "$IYI" build --release crowd.iyi -o crowd > build-crowd.log 2>&1; then
@@ -602,32 +599,69 @@ if ! timeout -k 5 300 ./crowd > crowd.txt 2>&1; then
   cat crowd.txt; exit 1
 fi
 sed 's/^/  /' crowd.txt
-# The stop's proof holds on any core count, its threads placed as above.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    step "failure proof: a stop that waits for each suspend before the next is caught"
-    mkdir -p serial/iyi
+    cat > stop-order.part <<'IYI'
+    IYI_STOP_ORDER_SEEN = 1408_u64
+    IYI_STOP_ORDER_EARLY = 1472_u64
+    def self.stop_order_reset : Nil
+      word(control + IYI_STOP_ORDER_SEEN).value.set(0_u64)
+      word(control + IYI_STOP_ORDER_EARLY).value.set(0_u64)
+    end
+    def self.stop_order_observe(asked : Int64, expected : Int64) : Nil
+      page = control
+      word(page + IYI_STOP_ORDER_SEEN).value.set(1_u64)
+      word(page + IYI_STOP_ORDER_EARLY).value.set(1_u64) if asked < expected
+    end
+    def self.stop_order_seen? : Bool
+      word(control + IYI_STOP_ORDER_SEEN).value.get != 0_u64
+    end
+    def self.stop_order_early? : Bool
+      word(control + IYI_STOP_ORDER_EARLY).value.get != 0_u64
+    end
+IYI
+    stop_order_copy() {
+      awk -v part=stop-order.part -v mode="$1" '
+        /^    # ── Roots/ { while ((getline s < part) > 0) print s; roots++ }
+        /^      private def self\.suspend_others\(line : UInt64\) : Int64$/ { print; print "        stop_asked = 0_i64"; entry++; next }
+        /^          LibC\.SuspendThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\) if cursor != line$/ {
+          if (mode == "control") { print; print "          stop_asked += 1_i64 if cursor != line" }
+          asked++; next
+        }
+        /^            handle = Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)$/ {
+          print
+          if (mode == "forced") { print "            LibC.SuspendThread(handle)"; print "            stop_asked += 1_i64" }
+          print "            stop_order_observe(stop_asked, @@count - (line != 0_u64 ? 1_i64 : 0_i64))"
+          capture++; next
+        }
+        { print }
+        END { if (roots != 1 || entry != 1 || asked != 1 || capture != 1) exit 3 }
+      ' "$REPO/src/iyi/thread.iyi" > "$2"
+    }
+    mkdir -p ordered/iyi serial/iyi
+    cp "$REPO"/src/iyi/*.iyi ordered/iyi/
     cp "$REPO"/src/iyi/*.iyi serial/iyi/
-    awk '/^          LibC\.SuspendThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\) if cursor != line$/ { asked = 1; next }
-      { print }
-      /^            handle = Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)$/ && asked { print "            LibC.SuspendThread(handle)"; moved = 1 }
-      END { if (!asked || !moved) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > serial/iyi/thread.iyi || { echo "the stop's suspends are not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/serial${PSEP}$REPO/src" "$IYI" build --release crowd.iyi -o crowd-serial > build-serial.log 2>&1; then
+    stop_order_copy control ordered/iyi/thread.iyi || { echo "stop ordering control anchors changed"; exit 1; }
+    stop_order_copy forced serial/iyi/thread.iyi || { echo "stop ordering mutant anchors changed"; exit 1; }
+    if ! IYI_PATH="$WORK/ordered${PSEP}$REPO/src" "$IYI" build --release crowd.iyi -Dstop_order_force -o crowd-order > build-order.log 2>&1; then
+      cat build-order.log; exit 1
+    fi
+    timeout -k 5 300 ./crowd-order > order.txt 2>&1
+    code=$?
+    if [ "$code" -ne 0 ] || ! tr -d '\r' < order.txt | grep -qxF 'stop: every suspend request preceded the first context capture'; then
+      echo "the stop-order control failed (exit $code):"; cat order.txt; exit 1
+    fi
+    echo "  control: exit 0, every suspend request preceded the first context capture"
+    step "failure proof: a stop that captures before issuing every suspend request is caught"
+    if ! IYI_PATH="$WORK/serial${PSEP}$REPO/src" "$IYI" build --release crowd.iyi -Dstop_order_force -o crowd-serial > build-serial.log 2>&1; then
       cat build-serial.log; exit 1
     fi
-    # One run. On a Windows machine (Windows 11, 12 logical processors)
-    # this copy stopped them in 400 to 401 ms a stop in 10 runs of 10,
-    # and in 400 in 10 of 10 held to four processors (`start /affinity
-    # F`), where the runtime's own stop took 81 to 108 us and 90 to 608;
-    # in one run each held to two and to one, 400 and 380 ms against 108
-    # and 44 us.
     timeout -k 5 300 ./crowd-serial > serial.txt 2>&1
     code=$?
-    if [ "$code" -ne 1 ] || ! grep -q '^FAIL: stop:' serial.txt; then
-      echo "the stop check did not fire (exit $code):"; tail -3 serial.txt; exit 1
+    if [ "$code" -ne 1 ] || ! tr -d '\r' < serial.txt | grep -qxF 'FAIL: stop: a context was captured before all suspend requests were issued'; then
+      echo "the stop-order check did not fire (exit $code):"; cat serial.txt; exit 1
     fi
-    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stop:' serial.txt)"
+    echo '  exits 1 at "FAIL: stop: a context was captured before all suspend requests were issued"'
     ;;
 esac
 

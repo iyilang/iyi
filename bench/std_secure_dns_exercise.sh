@@ -124,7 +124,8 @@ elif [ "$start_state" = hang ]; then
       if [ "$(uname -s)" = Darwin ]; then
         vm_stat 2>&1 || :
         echo "== startup diagnostics: sample of server ${SERVER_NATIVE_PID:-$SERVER_PID}"
-        sample "${SERVER_NATIVE_PID:-$SERVER_PID}" 3 2>&1 || :
+        sample "${SERVER_NATIVE_PID:-$SERVER_PID}" 3 -file "$WORK/server.sample" 2>&1 || :
+        [ ! -f "$WORK/server.sample" ] || cat "$WORK/server.sample"
       fi
       ;;
   esac

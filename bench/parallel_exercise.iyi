@@ -24,10 +24,9 @@
 # never arrives is a named failure rather than a hung job.
 #
 # `speed W T N` runs T tasks of N rounds of integer arithmetic on W
-# workers and prints the wall time and how many threads held a task at
-# once on average; bench/parallel_exercise.sh runs it at one worker and at
-# several and holds both to a floor, and runs broken copies of the runtime
-# to prove each step above can fail.
+# workers and prints wall time and how many threads held a task at once.
+# The gate holds the at-once count to a floor; the wall-time ratio is
+# performance information. Broken runtime copies exercise the checks above.
 
 @[Unsafe("allocates raw blocks through Pointer.malloc in tasks, and Turns trusts @[Share] to hand its word's pointerof address to park_on and wake_on")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}

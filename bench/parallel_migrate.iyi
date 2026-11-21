@@ -9,11 +9,9 @@
 # the thread-locals of that thread, not of the one it left; its socket's
 # bytes, delivered by whichever poller or port took them; a cancel, from
 # whichever thread, that finds it where it waits; and on Windows the TEB's
-# stack bounds of its own stack, which a deep frame's probes read. Every
-# step parks tasks over and over while they and their siblings allocate,
-# so collections stop the workers while tasks are on their way between
-# them, and counts the parks a task resumed from on another thread: a step
-# whose tasks never moved proved nothing, and fails saying so.
+# stack bounds of its own stack, which a deep frame's probes read. The
+# socket and deep steps force a move before their larger exercises; the
+# other steps report or check movement as their own scenarios require.
 #
 # What a thread is, here, is read twice: by the thread-local the runtime
 # keeps (`IyiScheduler.state`), and by asm, from the register the kernel

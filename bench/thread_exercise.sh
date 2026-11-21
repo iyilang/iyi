@@ -3071,8 +3071,9 @@ echo "  an Int32, a String and a List(String) class variable only their initiali
 # with the main thread still suspended: the process never ended, its one
 # thread in `NtTerminateProcess` and beyond `timeout`; 35 runs in 100 here,
 # 20 in 40 held to four cores. `main` ends through `TerminateProcess` now:
-# 0 in 1,000. The proof puts the return back, and a run that hangs is
-# released by resuming its threads, which nothing else here can do.
+# 0 in 1,000. The proof puts the return back, and the emitted IR of main
+# shows it on one build: the end must be the `__iyi_exit` call with no `ret`
+# in main. Two hundred runs stay as the stress test of the end itself.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     step "a program ends while another thread's collections stop it: two hundred runs, and every one ends"
@@ -3112,8 +3113,29 @@ Get-Process $Name -ErrorAction SilentlyContinue | ForEach-Object {
 "left: $(@(Get-Process $Name -ErrorAction SilentlyContinue).Count)"
 PS1
     release() { powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$WORK/release.ps1")" -Name "$1"; }
-    if ! "$IYI" build --release ends.iyi -o ends > build-ends.log 2>&1; then
+    # Windows' `main` ends in `__iyi_exit`, which ends the process with
+    # `TerminateProcess`. In LLVM IR that is the call and then `unreachable`,
+    # with no `ret` in main. A copy that returns to the C runtime has a `ret`
+    # where the call was, and its run is the one that can hang under a
+    # collection. The check reads main's body from the emitted IR, on one
+    # build, so it is the same on every run.
+    ends_in_exit() {
+      awk '
+        /^define .*@main\(/ { inmain = 1; rets = 0; exits = 0; last = ""; prev = ""; next }
+        inmain && /^}/ {
+          seen = 1
+          if (rets == 0 && exits >= 1 && last ~ /^  unreachable/ && prev ~ /__iyi_exit/) { print "main ends in __iyi_exit"; exit 0 }
+          print "FAIL: main returns to the C runtime instead of ending in __iyi_exit"; exit 1
+        }
+        inmain && /^  / { if ($0 ~ /^  ret /) rets++; if ($0 ~ /__iyi_exit/) exits++; prev = last; last = $0 }
+        END { if (!seen) { print "FAIL: no main in the IR"; exit 1 } }
+      ' "$1"
+    }
+    if ! "$IYI" build --release --emit llvm-ir ends.iyi -o ends > build-ends.log 2>&1; then
       cat build-ends.log; exit 1
+    fi
+    if ! ends_in_exit ends.ll > ends-end.txt || [ "$(cat ends-end.txt)" != 'main ends in __iyi_exit' ]; then
+      echo "the healthy program does not end in __iyi_exit:"; cat ends-end.txt; exit 1
     fi
     again=1
     while [ "$again" -le 200 ]; do
@@ -3126,30 +3148,23 @@ PS1
     done
     echo "  two hundred of two hundred ended"
 
-    step "failure proof: a program that ends back in the C runtime hangs under a collection"
+    step "failure proof: a program that ends back in the C runtime fails the end check on its one build"
     mkdir -p crt-end/iyi
     cp "$REPO"/src/iyi/*.iyi crt-end/iyi/
     # The pair is the win32 end of `fun main`; `def exit` writes the same
     # `__iyi_exit(status)` line, so only the one after the flush is taken.
     awk 'after && /^    __iyi_exit\(status\)$/ { found++; after = 0; next } { after = 0 } /^    LibC\.fflush\(Pointer\(Void\)\.new\(0_u64\)\)$/ { found++; after = 1; next } { print } END { if (found != 2) exit 3 }' \
       "$REPO/src/iyi/prelude.iyi" > crt-end/iyi/prelude.iyi || { echo "the end this proof removes is not in the prelude any more"; exit 1; }
-    if ! IYI_PATH="$WORK/crt-end${PSEP}$REPO/src" "$IYI" build --release ends.iyi -o ends-in-crt > build-crt-end.log 2>&1; then
+    if ! IYI_PATH="$WORK/crt-end${PSEP}$REPO/src" "$IYI" build --release --emit llvm-ir ends.iyi -o ends-in-crt > build-crt-end.log 2>&1; then
       cat build-crt-end.log; exit 1
     fi
-    # One run in two hung on four cores, so twenty runs; the first that
-    # does not end is the proof.
-    hung=""
-    try=1
-    while [ "$try" -le 20 ]; do
-      timeout -k 1 5 ./ends-in-crt > ends-in-crt.txt 2>&1
-      code=$?
-      if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then hung="$try"; break; fi
-      try=$((try + 1))
-    done
-    left="$(release ends-in-crt | tr -d '\r')"
-    [ -n "$hung" ] || { echo "twenty runs that end in the C runtime all ended"; exit 1; }
-    [ "$left" = "left: 0" ] || { echo "a hung run could not be released ($left)"; exit 1; }
-    printf '  run %s never ended, and was released by resuming its threads\n' "$hung"
+    if ends_in_exit ends-in-crt.ll > crt-end.txt; then
+      echo "the program that ends back in the C runtime passed the end check:"; cat crt-end.txt; exit 1
+    fi
+    if [ "$(cat crt-end.txt)" != 'FAIL: main returns to the C runtime instead of ending in __iyi_exit' ]; then
+      echo "the end check failed with another sentence:"; cat crt-end.txt; exit 1
+    fi
+    echo "  $(cat crt-end.txt)"
     ;;
 esac
 

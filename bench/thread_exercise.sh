@@ -950,7 +950,8 @@ esac
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     if [ "${NUMBER_OF_PROCESSORS:-1}" -lt 2 ]; then
-      echo "  the stop beside a burst needs a second processor for the threads it stops; this machine has ${NUMBER_OF_PROCESSORS:-1}: unmeasured here"
+      echo "the stop beside a burst needs at least two processors for the threads it stops; this machine has ${NUMBER_OF_PROCESSORS:-1}" >&2
+      exit 1
     else
     cat > burst.iyi <<'IYI'
 @[Unsafe("the burner pins itself to one processor and raises its priority by calling Windows' thread functions through a lib")]
@@ -994,12 +995,14 @@ class Flag
   getter held : Atomic(Int64)
   getter waited : Atomic(Int64)
   getter waits : Atomic(Int64)
+  getter turns : Atomic(Int64)
 
   def initialize
     @stop = Atomic(Int64).new(0_i64)
     @held = Atomic(Int64).new(0_i64)
     @waited = Atomic(Int64).new(0_i64)
     @waits = Atomic(Int64).new(0_i64)
+    @turns = Atomic(Int64).new(0_i64)
   end
 end
 
@@ -1034,6 +1037,7 @@ def taker(flag : Flag, mask : UInt64, bound : UInt64) : Nil
     took = IyiMark.now_ns - asked
     IyiRuntimeLock.unlock
     flag.waits.add(1_i64) if took > bound
+    flag.turns.add(1_i64)
     flag.waited.set(took.to_i64) if took.to_i64 > flag.waited.get
     ends = IyiMark.now_ns + 20000_u64
     while IyiMark.now_ns < ends
@@ -1074,6 +1078,10 @@ computes = others - 2
 computes = 4 if computes > 4
 computes = 0 if computes < 0
 IyiMark.workers = 0_u64
+{% if flag?(:burst_force) %}
+# Initialize the copy-only record before any thread can read it.
+IyiThread.burst_probe_init
+{% end %}
 flag = Flag.new
 threads = [] of IyiThread
 computes.times { threads << IyiThread.start { compute(flag, elsewhere) } }
@@ -1088,10 +1096,24 @@ over = 0
 longest = 0_u64
 stop_ns = IyiThread.stop_ns
 started = IyiMark.now_ns
-ends = started + 4000000000_u64
-while IyiMark.now_ns < ends
+watch = started + 60000000000_u64
+# The collections follow the taker's 100th acknowledged lock attempt, a
+# happens-before word (the turns counter), not a clock window. The healthy
+# verdict is the structural counter below and that the taker reached 100
+# turns within 60 s. Stop and wait timings are measurements only.
+while flag.turns.get < 100_i64
+  fail("taker: fewer than 100 turns on the runtime lock within 60 s") if IyiMark.now_ns >= watch
+  IyiThread.yield_cpu
+end
+20.times do
+  {% if flag?(:burst_force) %}
+  IyiThread.burst_probe_begin
+  {% end %}
   before = IyiThread.stop_ns
   IyiMark.collect
+  {% if flag?(:burst_force) %}
+  IyiThread.burst_probe_end
+  {% end %}
   took = IyiThread.stop_ns - before
   longest = took if took > longest
   over = over + 1 if took > bound
@@ -1100,16 +1122,19 @@ end
 share = (IyiThread.stop_ns - stop_ns) * 100_u64 // (IyiMark.now_ns - started)
 flag.stop.set(1_i64)
 threads.each { |thread| thread.join }
-# A stray stop past the bound is a stopped thread's, not the burst's: in
-# the 45 runs above, 3 stops passed 15 ms, one of them 28.6 ms, and each
-# spent all but 12 us in one `GetThreadContext`, waiting for a thread on
-# another processor to take its suspend; CI's runs had one stop of 24 to
-# 33 ms in a run. The burst holds dozens: with the raises taken out, 21 to
-# 33 stops of 100 to 142 ms a run in 18 runs there. So up to three pass.
-fail("stop: #{over} of #{collections} stops beside a burst on the stopping thread's processor took past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us") if over > 3
-fail("lock: #{flag.waits.get} waits for the runtime lock beside #{collections} collections took past #{lock_bound // 1000000_u64} ms, the longest #{flag.waited.get // 1000_i64} us") if flag.waits.get > 0_i64
+# Stop and lock-wait durations above the supplied thresholds are measured,
+# never verdicts. Both copies observe the same lower_stopper body and the
+# actual runtime-unlock event on the collecting thread. The mutant moves
+# the restore before that unlock; the control keeps the original order.
+{% if flag?(:burst_force) %}
+seen = IyiThread.burst_probe_seen
+unlocked = IyiThread.burst_probe_unlocked
+fail("lock: no priority restore was recorded") if seen == 0_u64
+fail("lock: the priority was restored while the stopper still held the runtime lock") if unlocked == 0_u64
+puts "lock: restore recorded after the runtime lock was released"
+{% end %}
 puts "stop: #{collections} stops of #{threads.size} threads beside a burst on the stopping thread's processor, #{share}% of the run in stops, #{over} past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us"
-puts "lock: the longest wait for the runtime lock beside them #{flag.waited.get // 1000_i64} us, held to #{lock_bound // 1000000_u64} ms"
+puts "lock: #{flag.waits.get} waits for the runtime lock beside #{collections} collections took past #{lock_bound // 1000000_u64} ms, the longest #{flag.waited.get // 1000_i64} us"
 IYI
     shared=$(( NUMBER_OF_PROCESSORS - 1 ))
     # `./$1` beside the burst, its output in `$2`.
@@ -1119,21 +1144,93 @@ IYI
       for wait in $(seq 1 100); do [ -f burst-ready ] && break; sleep 0.1; done
       [ -f burst-ready ] || { echo "the burst did not start"; exit 1; }
       timeout -k 5 120 "./$1" "$shared" 20 50 > "$2" 2>&1
+      BURST_STATUS=$?
       touch burst-stop
       sleep 1
-      taskkill //F //IM burst.exe > /dev/null 2>&1
+      timeout -k 5 15 taskkill //F //IM burst.exe > /dev/null 2>&1 || true
       tr -d '\r' < burst.txt >> "$2"
+    }
+    cat > burst.part <<'IYI'
+    # Both copies observe the actual lower_stopper body. These per-thread
+    # words track whether this stopper has executed the actual runtime unlock.
+    IYI_BURST_SEEN     = 384_u64
+    IYI_BURST_EARLY    = 448_u64
+    @[ThreadLocal]
+    @@burst_probe_active : Bool = false
+    @[ThreadLocal]
+    @@burst_probe_released : Bool = false
+
+    def self.burst_probe_init : Nil
+      page = control
+      word(page + IYI_BURST_SEEN).value.set(0_u64)
+      word(page + IYI_BURST_EARLY).value.set(0_u64)
+    end
+
+    def self.burst_probe_begin : Nil
+      @@burst_probe_released = false
+      @@burst_probe_active = true
+    end
+
+    def self.burst_probe_unlock : Nil
+      @@burst_probe_released = true if @@burst_probe_active
+    end
+
+    def self.burst_probe_restore : Nil
+      return unless @@burst_probe_active
+      page = control
+      word(page + IYI_BURST_SEEN).value.add(1_u64)
+      word(page + IYI_BURST_EARLY).value.add(1_u64) unless @@burst_probe_released
+    end
+
+    def self.burst_probe_end : Nil
+      @@burst_probe_active = false
+    end
+
+    def self.burst_probe_seen : UInt64
+      word(control + IYI_BURST_SEEN).value.get
+    end
+
+    def self.burst_probe_unlocked : UInt64
+      word(control + IYI_BURST_EARLY).value.get == 0_u64 ? 1_u64 : 0_u64
+    end
+IYI
+    burst_copy() {
+      awk -v gate=burst.part -v mode="$1" '
+        /^    # ── Roots/ { while ((getline line < gate) > 0) print line; roots++ }
+        /^        return unless @@stopper_raised$/ { print; print "        burst_probe_restore"; observed++; next }
+        mode == "forced" && /^        @@owed = @@deferred$/ {
+          print
+          print "        lower_stopper"
+          moved++; next
+        }
+        { print }
+        END { if (roots != 1 || observed != 1 || (mode == "forced" && moved != 1)) exit 3 }
+      ' "$REPO/src/iyi/thread.iyi" > "$2"
+    }
+    burst_prelude() {
+      awk -v mode="$1" '
+        in_unlock && /^        IyiRuntimeLock\.unlock$/ { print; print "        IyiThread.burst_probe_unlock"; released++; next }
+        mode == "forced" && in_unlock && /^          IyiThread\.lower_stopper$/ { lower++; next }
+        /^      def self\.unlock_released : Nil$/ { unlocks++; in_unlock = 1 }
+        in_unlock && /^      end$/ { in_unlock = 0 }
+        { print }
+        END { if (unlocks != 1 || released != 1 || (mode == "forced" && lower != 1)) exit 3 }
+      ' "$REPO/src/iyi/prelude.iyi" > "$2"
     }
     step "the stop beside a burst on the stopping thread's processor"
     if ! "$IYI" build --release burst.iyi -o burst > build-burst.log 2>&1; then
       cat build-burst.log; exit 1
     fi
-    if ! "$IYI" build --release stopping.iyi -o stopping > build-stopping.log 2>&1; then
+    mkdir -p burst-ctl/iyi
+    cp "$REPO"/src/iyi/*.iyi burst-ctl/iyi/
+    burst_copy control burst-ctl/iyi/thread.iyi || { echo "the burst probe's roots anchor is not unique"; exit 1; }
+    burst_prelude control burst-ctl/iyi/prelude.iyi || { echo "the runtime lock wait anchor is not unique"; exit 1; }
+    if ! IYI_PATH="$WORK/burst-ctl${PSEP}$REPO/src" "$IYI" build --release stopping.iyi -Dburst_force -o stopping > build-stopping.log 2>&1; then
       cat build-stopping.log; exit 1
     fi
     beside_burst stopping stopping.txt
-    if grep -q '^FAIL' stopping.txt || ! grep -q '^stop:' stopping.txt; then
-      echo "beside a burst:"; cat stopping.txt; exit 1
+    if [ "$BURST_STATUS" -ne 0 ] || grep -q '^FAIL' stopping.txt || ! grep -qxF 'lock: restore recorded after the runtime lock was released' stopping.txt || ! grep -q '^stop:' stopping.txt || ! grep -qE '^lock: [0-9]+ waits for the runtime lock beside [0-9]+ collections took past 50 ms, the longest [0-9]+ us$' stopping.txt; then
+      echo "beside a burst (exit $BURST_STATUS):"; cat stopping.txt; exit 1
     fi
     sed 's/^/  /' stopping.txt
 
@@ -1145,39 +1242,18 @@ IYI
     # ends by leaving the count owed to the next stop, `@@owed`.
     mkdir -p inside/iyi
     cp "$REPO"/src/iyi/*.iyi inside/iyi/
-    awk '{ print } /^        @@owed = @@deferred$/ { print "        lower_stopper"; moved++ } END { if (moved != 1) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > inside/iyi/thread.iyi || { echo "the release's end is not in thread.iyi any more"; exit 1; }
-    awk '/^          IyiThread\.lower_stopper$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
-      "$REPO/src/iyi/prelude.iyi" > inside/iyi/prelude.iyi || { echo "the lowering after the lock is not in the prelude any more"; exit 1; }
-    if ! IYI_PATH="$WORK/inside${PSEP}$REPO/src" "$IYI" build --release stopping.iyi -o stopping-inside > build-inside.log 2>&1; then
+    burst_copy forced inside/iyi/thread.iyi || { echo "the burst probe's roots or release anchor is not unique"; exit 1; }
+    burst_prelude forced inside/iyi/prelude.iyi || { echo "the runtime lock wait or lowering anchor is not unique"; exit 1; }
+    if ! IYI_PATH="$WORK/inside${PSEP}$REPO/src" "$IYI" build --release stopping.iyi -Dburst_force -o stopping-inside > build-inside.log 2>&1; then
       cat build-inside.log; exit 1
     fi
     beside_burst stopping-inside inside.txt
-    if ! grep -q '^FAIL: lock:' inside.txt; then
-      echo "the lock check did not fire:"; cat inside.txt; exit 1
+    if [ "$BURST_STATUS" -ne 1 ] || ! grep -qxF 'FAIL: lock: the priority was restored while the stopper still held the runtime lock' inside.txt; then
+      echo "the lock check did not fire on its one run (exit $BURST_STATUS):"; cat inside.txt; exit 1
     fi
     printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: lock:' inside.txt)"
+    fi
 
-    step "failure proof: a stopping thread left at its priority is held by the burst"
-    mkdir -p level/iyi
-    cp "$REPO"/src/iyi/*.iyi level/iyi/
-    # Every raise taken out: the stop's own, and the collection's before
-    # it takes the runtime lock - at its start, again after a wait for a
-    # collection beside the program, and after each debt walk
-    # (`IyiMark.collect`, `IyiMark.collect_if_due`).
-    awk '/^        raise_stopper$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > level/iyi/thread.iyi || { echo "the stop's raise is not in thread.iyi any more"; exit 1; }
-    awk '/^ *IyiThread\.raise_stopper$/ { found++; next } { print } END { if (found != 4) exit 3 }' \
-      "$REPO/src/iyi/prelude.iyi" > level/iyi/prelude.iyi || { echo "the collection's four raises are not in the prelude any more"; exit 1; }
-    if ! IYI_PATH="$WORK/level${PSEP}$REPO/src" "$IYI" build --release stopping.iyi -o stopping-level > build-level.log 2>&1; then
-      cat build-level.log; exit 1
-    fi
-    beside_burst stopping-level level.txt
-    if ! grep -q '^FAIL: stop:' level.txt; then
-      echo "the stop check did not fire:"; cat level.txt; exit 1
-    fi
-    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: stop:' level.txt)"
-    fi
 
     # A panic inside a stop ends its task, not its thread, which then runs
     # every task after it: `raise` puts the priority back. A copy panics

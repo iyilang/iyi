@@ -178,6 +178,30 @@
 
 ### Fixed
 
+- **A string's hash is keyed afresh in every process, so keys built to
+  collide no longer make a table quadratic (#212).** `String#hash` was
+  FNV-1a from a fixed start, and keys that all share one hash are cheap to
+  build offline: 65,536 of 64 bytes took 3,196 ms to put in a `Hash` and
+  6,395 ms for `JSON.parse` to read as one object, against 8 ms and 16 ms
+  for ordinary keys (Linux x86-64, `--release`) - anywhere a program files
+  client-chosen strings in a table, a request body's JSON or std/http's
+  headers among them. It is SipHash-1-3 now, the hash Rust's and Python's
+  tables use, keyed with sixteen bytes the system's entropy gives each
+  process once, before its first line: `getrandom` (GRND_INSECURE, so a
+  program at boot never waits for the pool; /dev/urandom where the call is
+  hidden), `arc4random_buf` on darwin, `RtlGenRandom` on Windows and
+  `random_get` on wasm32-wasi. The same keys take 1-2 ms and 2-3 ms at
+  16,384 and land on 65,536 distinct hashes; a key of 64 bytes or more
+  hashes two to five times faster than before (15 ns against 35 ns at 64
+  bytes, 172 against 858 at 1,024), and one of eight bytes 4 ns slower
+  (6.7 against 2.6; a lookup 18 ns against 13). A string's hash is no
+  longer the same from one run to the next; a table's order is the order
+  things went in, as it was, so nothing a program prints moves with it.
+  Only a program that hashes a string reads the key: darwin's links
+  `arc4random_buf` and Windows' imports advapi32 for it, which
+  `bench/std_io_exercise.sh`'s and `bench/std_time_exercise.sh`'s floors
+  now name.
+
 - **`std/xz` keeps its ring's bare pointers inside the ring whatever the
   ring's growth does.** The dictionary ring is read through pointers whose
   bounds held only because the ring grows to the dictionary's size before
@@ -695,6 +719,18 @@
   run again, up to five times.
 
 ### Gates
+
+- **`bench/collections_exercise.sh` holds a string's hash to SipHash-1-3
+  keyed per process (#212).** The exercise builds the 1,024 keys that
+  shared one FNV-1a hash and asks for at least 1,000 distinct hashes
+  (keyed, all 1,024 apart but for odds near 1 in 8,000); a copy with
+  FNV-1a back is caught there at 1 of 1,024. A program run twice must
+  hash six strings across the block edges apart in all six, and a copy
+  with the key fixed in the source is caught printing the same six both
+  times. A copy keyed with the reference key 00..0f must print
+  SipHash-1-3's answers, plain and `--release`, checked against a Python
+  transcription that gives the published `Sip13` vector, and a copy with
+  two finalisation rounds is caught at the first of them.
 
 - **`bench/std_xz_exercise.sh`'s copy whose ring never grows past 64 KiB
   is caught at its check every run.** It read below the ring's memory, so
@@ -29166,7 +29202,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,421-line library and nothing else. Every other
+  written against iyi's own 36,537-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -1,30 +1,65 @@
 #!/usr/bin/env bash
 # heap22 S6 (LeakHunt): the partitions' runs given back, driven.
-# bench/heap_drain.iyi built with partitions, plain and optimised: its
-# partition arenas flat round after round (drained runs taken again) and
-# its pooled runs' pages back after an idle wait; its mark mode, the
-# partitions held under long global marks; its claim mode, the sweep
-# helpers' rounds swept beside a sleeping program; its directory mode,
-# the arena directory left unread for words outside every arena's slot;
-# with the verifier and under chaos with a local collection at every
-# park, no report; the flag-off control; then one broken copy per
-# mechanism: without the take of drained runs or the global sweep's
-# listing the arenas grow, without the idle wake the pool stays warm,
-# without the release the resident set stays, without the hold a unit
-# allocates under a held mark without holding, without the directory's
-# bounds its pages go resident, and without widening the directory bounds
-# for a large mapping, an object placed beyond them fails the heap-pointer
-# check, and a taken run's
-# objects left `LOCAL` instead of published, or a helper that lets its
-# sweep claim go before its walk ends, are caught by `-Dheap_verify`
-# (exit 86).
+# bench/heap_drain.iyi built with partitions, plain and optimised, with its
+# verifier, and under chaos with a local collection at every park: the sound
+# builds, which must finish with no verifier report. Then the sound modes: the
+# partitions held under long global marks (mark), the helpers' sweep claims
+# (claim), the arena directory's bounds (dir), a unit's first allocation taking
+# a drained run (adopt), and the flag-off control.
 #
-# Each copy's verdict is one whole line. c2 checks the staged run's drain
-# list membership; c4 checks the selected idle deadline with a warm pool
-# and no pending partition; c5 checks a sentinel on the staged release run.
-# A missing witness is setup failure, never a catch.
-# c3's verdict is the local check of a unit that takes a drained run (the
-# `adopt` mode of heap_drain.iyi), which runs before that unit dies.
+# Then one broken copy per mechanism, each with a hook-only control that must
+# pass on the same single run. A copy is caught only when it exits with the
+# status named below and prints its verdict as a whole line, matched with
+# grep -Fx. Exit 76 is setup (a watchdog, or a stage that never reached its
+# run): a miss, never a catch.
+#
+#   c1  a partition takes drained runs (exit 1)
+#         FAIL: drain: no parked run was taken again from a drained list
+#   c2  the global sweep's relist, deleted (exit 1). Keyed park: the run the
+#       program parks is read after the sweep: is it on its class's drain list?
+#         FAIL: drain: the global sweep left the run the program parked on no drain list
+#       Hook only, the relist kept and recorded (exit 0):
+#         drain: the global sweep put the run the program parked back on its class's drain list
+#   c3  a taken run's objects left published (exit 86): the verifier's report at
+#       the taker's own local collection, the first check that sees them.
+#         a slot names a LOCAL chunk its local mark left unmarked, about to be freed
+#       The same mutant with the verifier's local check silenced (exit 1): the
+#       taker's own check reads the published mark.
+#         FAIL: adopt: the published string is LOCAL after the taker's local collection
+#       Hook only (exit 0):
+#         adopt: a unit's first allocation took a run its dead predecessor published, and the local collection left the published string intact
+#   c4  the pool-turn cap of a worker's idle wait, deleted (exit 1). Keyed warm:
+#       a pooled run is held warm with no partition pending, and the wait the
+#       worker gets is read: the selected idle deadline, not a clock.
+#         FAIL: idle_wait_ms left a worker's wait unbounded with a pooled run held warm and no partition pending
+#       Hook only (exit 0):
+#         idle: idle_wait_ms cut a worker's unbounded wait to the pool's turn with a pooled run held warm and no partition pending
+#   c5  a cooled run's page releases, deleted (exit 1). Keyed cool: the staged
+#       run's first page holds a sentinel, read after the cooler returns (the
+#       staged-page sentinel).
+#         FAIL: idle: the run the program put on a release list reached the cold list with its page unreleased: the release call did not run
+#       Hook only, the release recorded (exit 0):
+#         idle: the run the program put on a release list reached the cold list with its page reading zero
+#   c6  a unit allocates under an open mark without holding (exit 1).
+#         FAIL: mark: a unit allocated N bytes under a held mark and never held
+#       Hook only, the hold in place (exit 0):
+#         mark: a unit held under an open mark: N holds, its partition past its ceiling while the mark was open
+#   c7  a helper's walk claim let go before its walk ends (exit 86): the check at
+#       the walk's end. Hook only, every claim counted complete (exit 0):
+#         claim: every walk claim held to its walk's end
+#         a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it
+#   c8  the boundary predicate answers every slot below DIR_SLOTS as inside
+#       (exit 1), asked directly for slot 0.
+#         FAIL: dir: a slot outside every arena's bounds is answered as inside
+#   c9  a large mapping does not widen the bounds (exit 1): its object fails the
+#       heap-pointer check at its first sentence.
+#         FAIL: dir: large object 0 at 0x... is no heap pointer the moment it is made
+#       Placed hint only (exit 0):
+#         dir: N of the 8 large objects landed outside the slots before them, each a heap pointer
+#
+# Residency, RSS, arena growth, carved and cold bytes and the pool's warm state
+# are printed as information only. No verdict reads them, so none fails a run,
+# and an unavailable reading prints as unavailable.
 #
 #   bash bench/heap_drain.sh           # every part
 #   bash bench/heap_drain.sh sound     # plain, optimised, verifier, chaos
@@ -106,7 +141,7 @@ again() {
 }
 
 if [ "$PART" = all ] || [ "$PART" = sound ]; then
-  echo "== the arenas flat round after round (-Dheap_partitions)"
+  echo "== the drained runs taken again, round after round (-Dheap_partitions)"
   whole "plain" plain "-Dheap_partitions"
   whole "optimised" release "-Dheap_partitions --release"
   whole "verifier" verify "-Dheap_partitions -Dheap_verify" 8 24 4
@@ -151,9 +186,10 @@ subst() {
 # copy LABEL DIR WANT AWK [FLAGS [ARGS...]]: src/iyi/heap_partition.iyi
 # (or `COPY_FILE`, another file of src/iyi) patched by AWK, the program
 # built against it (with FLAGS, default the optimised partitioned build)
-# and run with ARGS: caught when it exits WANT - 1, the arenas' growth
-# the program fails on, or 86, the verifier's report, the program's own
-# checks printed and passed over.
+# and run with ARGS. Caught when it exits WANT with its verdict as the one
+# whole line EXPECT, EXPECT_FIXED or EXPECT_ERR (a verifier report is on
+# stderr) and, where one is named, exactly one FAIL line. A hook-only control
+# (WANT 0) must print EXPECT_OUT and no verifier report. Exit 76 is setup.
 copy() {
   local label="$1" name="$2" dir="$WORK/$2" want="$3" script="$4" flags="${5:--Dheap_partitions --release}"
   local file="${COPY_FILE:-heap_partition.iyi}"
@@ -452,7 +488,7 @@ IYI
   status=1
 }
 
-# The keyed witnesses (review findings 1, 2 and 5). KEYED_ACCESS inserts the
+# The keyed witnesses (c2, c4 and c5). KEYED_ACCESS inserts the
 # copy-only methods once, before `cool_pools`; each site awk adds one witness
 # call or deletes one mechanism. Every anchor must match exactly once, or the
 # awk exits 3 and the copy is "not in the form the copy patches", a setup failure.

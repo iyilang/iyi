@@ -7,8 +7,8 @@
 # Each healthy step queues a short task before its long call starts, then
 # requires the short task to run on the same worker before that call ends.
 # Every ordering step requires a pool of one; `cost` is measurement only.
-# Latency is data. The libruntime sort, copy, rehash and join mutants still
-# use timing-decided verdicts; recursionoff tests the ordering witness.
+# Latency is data. Copy-only hooks hold a target library loop until a short
+# task is queued, then record whether it ran before the loop's next turn.
 #
 #   sort    `Array#sort_in_place` of 6,000,000 `Int64`s
 #   copy    `Slice#copy_from` of 192 MB, a million bytes a turn; long
@@ -132,26 +132,32 @@ import std/password::{Bcrypt}
     @holding : Atomic(Int64)
     @queued : Atomic(Int64)
     @worker : Atomic(UInt64)
+    @force : Bool
 
-    def initialize
+    def initialize(force : Bool)
       @started = Atomic(Int64).new(0_i64)
       @took = Atomic(Int64).new(-1_i64)
       @holding = Atomic(Int64).new(0_i64)
       @queued = Atomic(Int64).new(0_i64)
+      @force = force
       @worker = Atomic(UInt64).new(0_u64)
     end
 
     @[NoPreempt]
     def start : Int64
-      {% unless flag?(:preempt_timing_proof) %}
-        state = IyiScheduler.state
-        @worker.set(state.object_id)
-        @holding.set(1_i64)
-        started = __iyi_monotonic_ns
-        while @queued.get == 0_i64 || Pointer(Atomic(UInt64)).new(state.preempt_word).value.get == 0_u64
-          IyiThread.spin_pause
-          raise "library: progress hang waiting for the queued task and preemption word" if elapsed_ms(started) >= 20000_i64
+      state = IyiScheduler.state
+      @worker.set(state.object_id)
+      @holding.set(1_i64)
+      started = __iyi_monotonic_ns
+      while @queued.get == 0_i64 || Pointer(Atomic(UInt64)).new(state.preempt_word).value.get == 0_u64
+        IyiThread.spin_pause
+        if elapsed_ms(started) >= 20000_i64
+          print "FAIL: library: progress hang: the clock start signal or preemption word did not arrive\n"
+          __iyi_exit(76)
         end
+      end
+      {% if flag?(:libruntime_force) %}
+        IyiWorkers.force_lib_arm(IyiScheduler.current.object_id) if @force
       {% end %}
       t = __iyi_monotonic_ns
       @started.set(t)
@@ -159,6 +165,9 @@ import std/password::{Bcrypt}
     end
 
     def stop(since : Int64) : Nil
+      {% if flag?(:libruntime_force) %}
+        IyiWorkers.force_lib_disarm if @force
+      {% end %}
       @took.set(elapsed_ms(since))
     end
 
@@ -247,11 +256,15 @@ import std/password::{Bcrypt}
     end
   end
 
-  BOUND_MS = 100_i64
 
   def step(name : String, quiet : Bool) : Nil
     fail("#{name}: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
-    clock = Clock.new
+    {% if flag?(:libruntime_force) %}
+      forced = name == "sort" || name == "copy" || name == "rehash" || name == "join"
+    {% else %}
+      forced = false
+    {% end %}
+    clock = Clock.new(forced)
     waited = Atomic(Int64).new(-1_i64)
     witness = Atomic(Int64).new(0_i64)
     {% if flag?(:heap_partitions) %}
@@ -264,71 +277,93 @@ import std/password::{Bcrypt}
         answer.set(run_op(name, clock))
         0
       end
-      {% if flag?(:preempt_timing_proof) %}
-        until clock.started?
-          sleep(1)
+      started = __iyi_monotonic_ns
+      until clock.holding?
+        sleep(1)
+        if elapsed_ms(started) >= 20000_i64
+          print "FAIL: #{name}: progress hang: the operation did not reach its checkpoint\n"
+          __iyi_exit(76)
         end
-        sleep(20)
-      {% else %}
-        started = __iyi_monotonic_ns
-        until clock.holding?
-          sleep(1)
-          fail("#{name}: progress hang: the operation did not reach its checkpoint") if elapsed_ms(started) >= 20000_i64
+      end
+      {% if flag?(:libruntime_force) %}
+        if forced
+          # Enter the target before queueing the short task, so an earlier
+          # library check cannot consume the task meant for this loop turn.
+          clock.queued
+          started = __iyi_monotonic_ns
+          until IyiWorkers.force_lib_ready?
+            if IyiWorkers.force_lib_result == 3_u64
+              print "FAIL: #{name}: progress hang: the library loop waited for the preemption word\n"
+              __iyi_exit(76)
+            end
+            if IyiWorkers.force_lib_result == 5_u64
+              print "FAIL: #{name}: progress hang: the library loop waited for its queued task\n"
+              __iyi_exit(76)
+            end
+            if elapsed_ms(started) >= 10000_i64
+              print "FAIL: #{name}: progress hang: the library copy hook did not hold the target loop\n"
+              __iyi_exit(76)
+            end
+            sleep(1)
+          end
         end
       {% end %}
       asked = __iyi_monotonic_ns
       {% if flag?(:heap_partitions) %}
         local_before = IyiHeap.local_ns
-        g.spawn(unit: :new) do
-          {% unless flag?(:preempt_timing_proof) %}
-            witness.set(!clock.started? ? 3_i64 : (clock.took >= 0_i64 ? 2_i64 : (IyiScheduler.state.object_id != clock.worker ? 4_i64 : 1_i64)))
-          {% end %}
-          waited.set(elapsed_ms(asked))
+      {% end %}
+      g.spawn(unit: :new) do
+        {% if flag?(:libruntime_force) %}
+          IyiWorkers.force_lib_note_short(IyiScheduler.state.object_id) if forced
+        {% end %}
+        witness.set(!clock.started? ? 3_i64 : (clock.took >= 0_i64 ? 2_i64 : (IyiScheduler.state.object_id != clock.worker ? 4_i64 : 1_i64)))
+        waited.set(elapsed_ms(asked))
+        {% if flag?(:heap_partitions) %}
           collected.set(((IyiHeap.local_ns - local_before) // 1000000_u64).to_i64)
-          0
+        {% end %}
+        0
+      end
+      {% if flag?(:libruntime_force) %}
+        if forced
+          IyiWorkers.force_lib_release
+        else
+          clock.queued
         end
       {% else %}
-        g.spawn(unit: :new) do
-          {% unless flag?(:preempt_timing_proof) %}
-            witness.set(!clock.started? ? 3_i64 : (clock.took >= 0_i64 ? 2_i64 : (IyiScheduler.state.object_id != clock.worker ? 4_i64 : 1_i64)))
-          {% end %}
-          waited.set(elapsed_ms(asked))
-          0
-        end
-      {% end %}
-      {% unless flag?(:preempt_timing_proof) %}
         clock.queued
       {% end %}
     end
     {% if flag?(:heap_partitions) %}
       local_ms = collected.get
       ms = waited.get - local_ms
-      {% if flag?(:preempt_timing_proof) %}
-        if ms > BOUND_MS
-          puts "#{name}: the short task waited #{ms} ms beyond #{local_ms} ms of local collections, past #{BOUND_MS} ms"
-          fail("#{name}: the short task exceeded the wait bound")
-        end
-      {% end %}
     {% else %}
       ms = waited.get
-      {% if flag?(:preempt_timing_proof) %}
-        if ms > BOUND_MS
-          puts "#{name}: the short task waited #{ms} ms behind a #{clock.took} ms call, past #{BOUND_MS} ms"
-          fail("#{name}: the short task exceeded the wait bound")
+    {% end %}
+    {% if flag?(:libruntime_force) %}
+      if forced
+        result = IyiWorkers.force_lib_result
+        if result == 3_u64
+          print "FAIL: #{name}: progress hang: the library loop waited for the preemption word\n"
+          __iyi_exit(76)
         end
-      {% end %}
+        if result == 5_u64
+          print "FAIL: #{name}: progress hang: the library loop waited for its queued task\n"
+          __iyi_exit(76)
+        end
+        fail("#{name}: not armed: the library copy hook did not reach two target-loop turns") if result == 0_u64
+        fail("#{name}: not armed: the queued task did not witness the target worker's turn") if result == 4_u64
+        fail("#{name}: the library's loop turned with its worker's word raised and kept its worker") if result == 2_u64
+        fail("#{name}: not armed: the library copy hook returned an unknown result") unless result == 1_u64
+        puts "#{name}: the library's loop gave its worker up at the turn after its word was raised"
+      end
     {% end %}
-    {% unless flag?(:preempt_timing_proof) %}
-      fail("#{name}: the short task queued before the call ran only after the call ended") if witness.get == 2_i64
-      fail("#{name}: not armed: the short task did not run inside the target call on its worker") unless witness.get == 1_i64
-    {% end %}
+    fail("#{name}: the short task queued before the call ran only after the call ended") if witness.get == 2_i64
+    fail("#{name}: not armed: the short task did not run inside the target call on its worker") unless witness.get == 1_i64
     if name == "fib" && answer.get != 102334155_i64
       fail("fib: the preempted recursion answered #{answer.get}, and 40's is 102334155")
     end
     given = IyiWorkers.preempts - preempts
-    {% if flag?(:preempt_timing_proof) %}
-      puts "#{name}: the short task started #{ms} ms after its spawn during the timing proof (#{given} preemptions)" unless quiet
-    {% elsif flag?(:heap_partitions) %}
+    {% if flag?(:heap_partitions) %}
       puts "#{name}: a short task queued before a #{clock.took} ms call ran inside it #{ms} ms after its spawn beyond #{local_ms} ms of local collections (#{given} preemptions)" unless quiet
     {% else %}
       puts "#{name}: a short task queued before a #{clock.took} ms call ran inside it #{ms} ms after its spawn (#{given} preemptions)" unless quiet

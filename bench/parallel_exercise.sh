@@ -2547,17 +2547,153 @@ END { if (methods != 1 || n != 1) exit 3 }' concurrency.iyi parallel_preempt
 verdict_caught tokenless 'unit: a task of the same unit ran inside the preempted task' unit --workers=1
 
 step "failure proof: the prelude's library compiled as the runtime's holds its worker through a sort, a copy, a growth and a join"
-# `array.iyi`, `hash.iyi` and `string.iyi` written into prelude.iyi where it
-# requires them, so the compiler takes their defs for the runtime's, which
-# never check. Their own `@[Unsafe]` marks are left out: prelude.iyi's, at
-# its top, covers what they handle. A plain build, whose copy is a loop of
-# bytes and long enough to tell.
-broken libruntime '/^require "\.\/(float|range|set)"$/ {
+# The same loop hooks and scheduler definitions go into both copies. Only
+# the mutant inlines the hooked library into the runtime's prelude.
+LIB_POLL_ARRAY='/^  def join\(separator : String\) : String$/ { in_join = 1; n_join_def++ }
+in_join && /^  end$/ { in_join = 0 }
+in_join && /^      each do \|value\|$/ {
+  n_join_loop++; at_join_loop = NR
+  print; print "        IyiWorkers.force_lib_turn"; next
+}
+in_join && /^        io << separator unless first$/ { n_join_body++; at_join_body = NR }
+/^  def sort_in_place\(& : T, T -> Int32\) : self$/ { in_sort = 1; n_sort_def++ }
+in_sort && /^  end$/ { in_sort = 0 }
+in_sort && /^      while index < finish$/ {
+  n_sort_loop++; at_sort_loop = NR
+  print; print "        IyiWorkers.force_lib_turn"; next
+}
+in_sort && /^        value = @buffer\[index\]$/ { n_sort_body++; at_sort_body = NR }
+{ print }
+END {
+  if (n_join_def != 1 || n_join_loop != 1 || n_join_body != 1 || at_join_body != at_join_loop + 1 ||
+      n_sort_def != 1 || n_sort_loop != 1 || n_sort_body != 1 || at_sort_body != at_sort_loop + 1) exit 3
+}'
+LIB_POLL_STRING='/^  def copy_from\(source : Pointer\(T\), count : Int32\) : Nil$/ { inside = 1; n_def++ }
+inside && /^  end$/ { inside = 0 }
+inside && /^    while index < count$/ {
+  n_loop++; at_loop = NR
+  print; print "      IyiWorkers.force_lib_turn"; next
+}
+inside && /^      run = count - index > 1048576 \? 1048576 : count - index$/ { n_body++; at_body = NR }
+{ print }
+END { if (n_def != 1 || n_loop != 1 || n_body != 1 || at_body != at_loop + 1) exit 3 }'
+LIB_POLL_HASH='/^  private def grow : Nil$/ { inside = 1; n_def++ }
+inside && /^  end$/ { inside = 0 }
+inside && /^    while entry < old_used$/ {
+  n_loop++; at_loop = NR
+  print; print "      IyiWorkers.force_lib_turn"; next
+}
+inside && /^      unless old_gone\.address != 0_u64 && old_gone\[entry\]$/ { n_body++; at_body = NR }
+{ print }
+END { if (n_def != 1 || n_loop != 1 || n_body != 1 || at_body != at_loop + 1) exit 3 }'
+LIB_DEFS='/^class IyiWorkers$/ { in_workers = 1; n_workers++ }
+in_workers && /^end$/ { in_workers = 0 }
+in_workers && /^  def self.preempts : UInt64$/ {
+  n_defs++; at_defs = NR
+  print "  @[UnsafeReach(\"copy-only library turn target, accessed atomically\")]"
+  print "  @@force_lib_fiber : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only library turn owner, accessed atomically\")]"
+  print "  @@force_lib_worker : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only library turn switch count, accessed atomically\")]"
+  print "  @@force_lib_switches : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only library turn rendezvous, accessed atomically\")]"
+  print "  @@force_lib_phase : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only short task witness, accessed atomically\")]"
+  print "  @@force_lib_short : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only library turn result, accessed atomically\")]"
+  print "  @@force_lib_result : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_lib_arm(fiber : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_worker).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_switches).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_phase).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_short).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_result).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_fiber).address).value.set(fiber)"
+  print "  end"
+  print ""
+  print "  def self.force_lib_disarm : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_fiber).address).value.set(0_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_lib_ready? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_phase).address).value.get == 1_u64"
+  print "  end"
+  print ""
+  print "  def self.force_lib_release : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_phase).address).value.compare_and_set(1_u64, 2_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_lib_result : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_result).address).value.get"
+  print "  end"
+  print ""
+  print "  def self.force_lib_note_short(worker : UInt64) : Nil"
+  print "    phase = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_phase).address).value.get"
+  print "    owner = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_worker).address).value.get"
+  print "    decision = phase == 2_u64 && worker == owner ? 1_u64 : 2_u64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_short).address).value.compare_and_set(0_u64, decision)"
+  print "  end"
+  print ""
+  print "  @[NoPreempt]"
+  print "  def self.force_lib_turn : Nil"
+  print "    target = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_fiber).address).value.get"
+  print "    return if target == 0_u64 || force_lib_result != 0_u64"
+  print "    fiber = IyiScheduler.current?"
+  print "    return unless fiber.is_a?(IyiFiber) && fiber.object_id == target"
+  print "    st = IyiScheduler.state"
+  print "    phase = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_phase).address)"
+  print "    result = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_result).address)"
+  print "    if phase.value.get == 0_u64"
+  print "      word = Pointer(Atomic(UInt64)).new(st.preempt_word)"
+  print "      started = __iyi_monotonic_ns"
+  print "      while word.value.get == 0_u64"
+  print "        if __iyi_monotonic_ns - started >= 20000000000_i64"
+  print "          result.value.compare_and_set(0_u64, 3_u64)"
+  print "          phase.value.set(3_u64)"
+  print "          return"
+  print "        end"
+  print "        IyiThread.spin_pause"
+  print "      end"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_worker).address).value.set(st.object_id)"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_switches).address).value.set(st.switches)"
+  print "      phase.value.set(1_u64)"
+  print "      started = __iyi_monotonic_ns"
+  print "      while phase.value.get == 1_u64"
+  print "        if __iyi_monotonic_ns - started >= 20000000000_i64"
+  print "          result.value.compare_and_set(0_u64, 5_u64)"
+  print "          phase.value.set(3_u64)"
+  print "          return"
+  print "        end"
+  print "        IyiThread.spin_pause"
+  print "      end"
+  print "    elsif phase.value.get == 2_u64"
+  print "      before = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_switches).address).value.get"
+  print "      owner = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_worker).address).value.get"
+  print "      short = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_short).address).value.get"
+  print "      if st.object_id == owner && st.switches != before && short == 1_u64"
+  print "        decision = 1_u64"
+  print "      elsif st.object_id == owner && st.switches == before && short == 0_u64"
+  print "        decision = 2_u64"
+  print "      else"
+  print "        decision = 4_u64"
+  print "      end"
+  print "      result.value.compare_and_set(0_u64, decision)"
+  print "      phase.value.set(3_u64)"
+  print "    end"
+  print "  end"
+  print ""
+  print; next
+}
+in_workers && /^    IyiStat\.atomic\(IyiStat::PREEMPTS\)\.value\.get$/ { n_body++; at_body = NR }
+{ print }
+END { if (n_workers != 1 || n_defs != 1 || n_body != 1 || at_body != at_defs + 1) exit 3 }'
+LIB_INLINE='/^require "\.\/(float|range|set)"$/ {
   name = $2; gsub(/"|\.\//, "", name); count[name]++; position[name] = NR
 }
 /^require "\.\/(array|hash|string)"$/ {
   name = $2; gsub(/"|\.\//, "", name); count[name]++; position[name] = NR
-  file = "'"$REPO"'/src/iyi/" name ".iyi"
+  file = "'"$WORK"'/libhooked/" name ".iyi"
   read_any = 0
   while ((status = getline line < file) > 0) { read_any = 1; if (line !~ /^@\[Unsafe\(/) print line }
   if (status < 0 || !read_any) exit 3
@@ -2597,7 +2733,8 @@ for copy in libruntime libruntime_hook; do
   fi
 done
 for proof in sort copy rehash join; do
-  verdict_caught libruntime "$proof: the short task exceeded the wait bound" "$proof" --workers=1
+  verdict_caught libruntime "$proof: the library's loop turned with its worker's word raised and kept its worker" "$proof" --workers=1
+  verdict_held libruntime_hook "$proof: the library's loop gave its worker up at the turn after its word was raised" "$proof" --workers=1
 done
 
 # The two halves of `copy_checks`, broken: `Pointer#copy_from` with no way

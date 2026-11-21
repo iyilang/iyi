@@ -3173,20 +3173,25 @@ esac
 # and its handle reached its line only after the lock was released: a stop
 # in between suspended NULL, read sp 0 and scanned from address 0. The
 # child is created suspended now, its handle written under the lock, and
-# resumed after. A copy of the runtime holds every start open 2 ms there
-# while two threads collect, and every run ends well; the failure proof
-# puts the old order back under the same 2 ms, and a run dies.
+# resumed after. The failure proof holds the next start after its unlock and
+# before its handle is written, while a helper collects: the child runs
+# unnamed meanwhile, and the copy's stop that visits its line records it and
+# skips it. The child holds nothing a stop would free, so the record is
+# the observable and the copy skips that line to avoid scanning address 0.
+# The control holds the same start after its handle is written and before
+# the thread is resumed, and records nothing.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    step "threads started while two others collect, each start held open 2 ms: three runs, and every one ends well"
     cat > starting.iyi <<'IYI'
 class Flag
   getter stop : Atomic(Int64)
   getter ran : Atomic(Int64)
+  getter opened : Atomic(Int64)
 
   def initialize
     @stop = Atomic(Int64).new(0_i64)
     @ran = Atomic(Int64).new(0_i64)
+    @opened = Atomic(Int64).new(0_i64)
   end
 end
 
@@ -3224,11 +3229,75 @@ def child(flag : Flag, i : Int32) : Nil
   flag.ran.add(1_i64)
 end
 
+# The forced program's child allocates nothing, so a stop that skips its
+# unnamed line frees nothing this child still holds.
+def child_quiet(flag : Flag) : Nil
+  # Linked until the collection that the armed start was held for is over:
+  # a child that exited earlier would leave the stop nothing to visit.
+  deadline = IyiMark.now_ns &+ 20000000000_u64
+  while flag.opened.get == 0_i64
+    if IyiMark.now_ns >= deadline
+      print "FAIL: unnamed: the held child's gate never opened\n"
+      __iyi_exit(1)
+    end
+    IyiThread.spin_pause
+  end
+  flag.ran.add(1_i64)
+end
+
 flag = Flag.new
 churners = [] of IyiThread
-2.times { churners << IyiThread.start { churn(flag) } }
-deadline = __iyi_monotonic_ns + Program.args[0].to_i.to_i64 * 1_000_000_000_i64
 started = 0
+{% if flag?(:unnamed_force) %}
+IyiMark.auto = false
+{% else %}
+2.times { churners << IyiThread.start { churn(flag) } }
+{% end %}
+{% if flag?(:unnamed_force) %}
+# Started before the arm, so its own start is not the one held. It waits,
+# with a bound of its own, for the armed start to reach its gate, collects
+# while that start is held, and opens the gate. A lapsed hold or a missed
+# gate ends the run with its own sentence.
+helper = IyiThread.start do
+  bound = IyiMark.now_ns &+ 20000000000_u64
+  while !IyiThread.release_gate_held? && IyiMark.now_ns < bound
+    IyiThread.yield_cpu
+  end
+  if !IyiThread.release_gate_held?
+    print "FAIL: unnamed: the armed start never reached its gate\n"
+    __iyi_exit(1)
+  end
+  if IyiThread.release_gate_expired?
+    print "FAIL: unnamed: the hold expired before the collection\n"
+    __iyi_exit(1)
+  end
+  IyiMark.collect
+  if IyiThread.release_gate_expired?
+    print "FAIL: unnamed: the hold expired during the collection\n"
+    __iyi_exit(1)
+  end
+  held, expired = IyiThread.release_gate_open
+  if !held || expired
+    print "FAIL: unnamed: the hold expired before it opened\n"
+    __iyi_exit(1)
+  end
+  flag.opened.set(1_i64)
+  nil
+end
+IyiThread.release_gate_arm_next
+armed = IyiThread.start { child_quiet(flag) }
+armed.join
+helper.join
+flag.stop.set(1_i64)
+churners.each(&.join)
+if IyiThread.release_gate_recorded?
+  print "FAIL: a stop met a started thread whose handle was not yet written\n"
+  __iyi_exit(1)
+end
+puts "unnamed: held=1 collected=1 expired=0, and no stop met a thread without its handle"
+started = 1
+{% else %}
+deadline = __iyi_monotonic_ns + Program.args[0].to_i.to_i64 * 1_000_000_000_i64
 while __iyi_monotonic_ns < deadline
   batch = [] of IyiThread
   4.times do |k|
@@ -3240,54 +3309,80 @@ while __iyi_monotonic_ns < deadline
 end
 flag.stop.set(1_i64)
 churners.each(&.join)
+{% end %}
 raise "ran #{flag.ran.get} of #{started}" if flag.ran.get != started
 puts "ok started=#{started}"
 IYI
-    widen='function widen(pad) {
-      print pad "widen = __iyi_monotonic_ns"
-      print pad "while __iyi_monotonic_ns - widen < 2000000_i64"
-      print pad "end"
-    }'
-    mkdir -p widened/iyi
-    cp "$REPO"/src/iyi/*.iyi widened/iyi/
-    awk "$widen"' /^        LibC\.ResumeThread\(h\)$/ { widen("        "); found = 1 } { print } END { if (!found) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > widened/iyi/thread.iyi || { echo "the start's resume is not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build starting.iyi -o widened-run > build-widened.log 2>&1; then
-      cat build-widened.log; exit 1
+    # The gate's functions go into a copy's thread.iyi before its roots, and
+    # the start is held after its unlock. `forced` creates the thread running
+    # and writes its handle after the hold; `control` writes it before the
+    # unlock, as shipped, and holds after. Both copies make a stop skip and
+    # record a visit to a line whose handle is still 0.
+    unnamed_copy() {
+      awk -v gate=gate.part -v mode="$1" '
+        /^    # ── Roots/ { while ((getline line < gate) > 0) print line; roots++ }
+        /^        h = LibC\.CreateThread\(nil, 0_u64, Pointer\(Void\)\.new\(thread_entry\), Pointer\(Void\)\.new\(line\), 4_i32, nil\)$/ {
+          print "        late = IyiThread.release_gate_take_arm"
+          if (mode == "forced") print "        h = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(thread_entry), Pointer(Void).new(line), (late ? 0_i32 : 4_i32), nil)"
+          else print
+          created++; next
+        }
+        mode == "forced" && created == 1 && /^        IyiHeap\.write64\(line \+ IYI_TL_HANDLE, h\.address\)$/ { print "        IyiHeap.write64(line + IYI_TL_HANDLE, h.address) unless late"; written_late = 1; next }
+        mode == "forced" && written_late && /^        IyiRuntimeLock\.unlock$/ { print; print "        IyiThread.release_gate_start_hold(line) if late"; print "        IyiHeap.write64(line + IYI_TL_HANDLE, h.address) if late"; found++; written_late = 0; next }
+        mode == "control" && created == 1 && /^        IyiHeap\.write64\(line \+ IYI_TL_HANDLE, h\.address\)$/ { written_ctl = 1; print; next }
+        mode == "control" && written_ctl && /^        IyiRuntimeLock\.unlock$/ { print; print "        IyiThread.release_gate_start_hold(line) if late"; written_ctl = 0; found++; next }
+        /^      private def self\.suspend_others\(line : UInt64\) : Int64$/ { print; print "        IyiThread.release_gate_clear_skip"; clears++; next }
+        /^          LibC\.SuspendThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\) if cursor != line$/ { print "          LibC.SuspendThread(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))) if cursor != line && !IyiThread.release_gate_unnamed?(cursor, line)"; one++; next }
+        /^        deferred = 0_i64$/ { armed_scan = 1 }
+        armed_scan && /^          if cursor != line$/ { print "          if cursor != line && !IyiThread.release_gate_skipped?(cursor)"; two++; armed_scan = 0; next }
+        /^        if cursor != own$/ { print "        if cursor != own && !IyiThread.release_gate_skipped?(cursor)"; roots3++; next }
+        { print }
+        END { if (roots != 1 || created != 1 || found != 1 || clears != 1 || one != 1 || two != 1 || roots3 != 1) exit 3 }
+      ' "$REPO/src/iyi/thread.iyi" > "$2"
+    }
+
+    step "threads started while two others collect: three runs, and every one ends well"
+    if ! "$IYI" build starting.iyi -o starting > build-starting.log 2>&1; then
+      cat build-starting.log; exit 1
     fi
     run=1
     while [ "$run" -le 3 ]; do
-      timeout -k 5 60 ./widened-run 3 > widened.txt 2>&1
+      timeout -k 5 60 ./starting 3 > starting.txt 2>&1
       code=$?
-      if [ "$code" -ne 0 ] || ! grep -q '^ok ' widened.txt; then
-        echo "run $run with every start held open exited $code:"; tail -3 widened.txt; exit 1
+      if [ "$code" -ne 0 ] || ! grep -q '^ok ' starting.txt; then
+        echo "run $run exited $code:"; tail -3 starting.txt; exit 1
       fi
       run=$((run + 1))
     done
     echo "  three runs of three seconds, and every thread ran its body"
 
-    step "failure proof: the handle written after the unlock, the thread already running, under the same 2 ms"
+    step "the gate after the handle is written, the thread still suspended: one run, and nothing recorded"
+    mkdir -p held/iyi
+    cp "$REPO"/src/iyi/*.iyi held/iyi/
+    unnamed_copy control held/iyi/thread.iyi || { echo "the start's unlock or the stop's suspend is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build starting.iyi -Dunnamed_force -o held-run > build-held.log 2>&1; then
+      cat build-held.log; exit 1
+    fi
+    timeout -k 5 60 ./held-run 3 > held.txt 2>&1
+    code=$?
+    if [ "$code" -ne 0 ] || ! tr -d '\r' < held.txt | grep -qFx 'unnamed: held=1 collected=1 expired=0, and no stop met a thread without its handle' || ! tr -d '\r' < held.txt | grep -qFx 'ok started=1'; then
+      echo "the control held after the handle was written exited $code:"; tail -3 held.txt; exit 1
+    fi
+    echo "  control: exit 0, unnamed: held=1 collected=1 expired=0, and no stop met a thread without its handle"
+
+    step "failure proof: a stop that meets a started thread before its handle is written is recorded on its one run"
     mkdir -p unnamed/iyi
     cp "$REPO"/src/iyi/*.iyi unnamed/iyi/
-    awk "$widen"' /^        IyiHeap\.write64\(line \+ IYI_TL_HANDLE, h\.address\)$/ { held = $0; found++; next }
-      /^        h = LibC\.CreateThread\(.*thread_entry.*, 4_i32, nil\)$/ { sub(/, 4_i32, nil\)$/, ", 0_i32, nil)"); found++ }
-      /^        LibC\.ResumeThread\(h\)$/ { widen("        "); print held; found++ }
-      { print } END { if (found != 3) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > unnamed/iyi/thread.iyi || { echo "the start's creation, handle write or resume is not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/unnamed${PSEP}$REPO/src" "$IYI" build starting.iyi -o unnamed-run > build-unnamed.log 2>&1; then
+    unnamed_copy forced unnamed/iyi/thread.iyi || { echo "the start's unlock or the stop's suspend is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/unnamed${PSEP}$REPO/src" "$IYI" build starting.iyi -Dunnamed_force -o unnamed-run > build-unnamed.log 2>&1; then
       cat build-unnamed.log; exit 1
     fi
-    caught=0
-    run=1
-    while [ "$caught" -eq 0 ] && [ "$run" -le 10 ]; do
-      timeout -k 5 60 ./unnamed-run 3 > unnamed.txt 2>&1
-      grep -q '^ok ' unnamed.txt || caught=$run
-      run=$((run + 1))
-    done
-    if [ "$caught" -eq 0 ]; then
-      echo "ten runs with the handle written after the unlock all ended well"; exit 1
+    timeout -k 5 60 ./unnamed-run 3 > unnamed.txt 2>&1
+    code=$?
+    if [ "$code" -ne 1 ] || ! tr -d '\r' < unnamed.txt | grep -qFx 'FAIL: a stop met a started thread whose handle was not yet written'; then
+      echo "the stop did not meet the unnamed thread on its one run (exit $code):"; tail -3 unnamed.txt; exit 1
     fi
-    printf '  run %s of up to ten: "%s"\n' "$caught" "$(head -1 unnamed.txt | tr -d '\r' | cut -d. -f1)"
+    printf '  exits 1 at "%s"\n' 'FAIL: a stop met a started thread whose handle was not yet written'
     ;;
 esac
 

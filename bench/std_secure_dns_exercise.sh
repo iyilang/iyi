@@ -81,6 +81,8 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   read_status=0
   IFS= read -r -t 1 ready <&3 || read_status=$?
   if [ "$read_status" -eq 0 ]; then
+    # Native Windows Python writes CRLF to its stdout pipe.
+    ready="${ready%$'\r'}"
     case "$ready" in
       "pid "*)
         SERVER_NATIVE_PID="${ready#pid }"

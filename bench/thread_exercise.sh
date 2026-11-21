@@ -355,7 +355,8 @@ IYI
       [ "$got" = "core_count=2 default_helpers=1" ] || { echo "held to two cores: $got"; exit 1; }
       echo "  held to one core it counts 1 and starts no helper; held to two, 2 and one"
     else
-      echo "  held to one core it counts 1 and starts no helper; one core here, so two were not tried"
+      echo "the affinity check requires at least two processors" >&2
+      exit 1
     fi
     ;;
 esac

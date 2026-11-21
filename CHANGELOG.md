@@ -50,6 +50,20 @@
   refused, and whose `read_error` says why a read failed. The panicking
   forms are unchanged, to the letter. In `std/file` rather than the
   prelude, which sits on its ceiling.
+- **std/http: `Server.serve` and `Server.handle` take `max_head` and
+  `max_body` (issue #213).** The most of a request's head and of its body
+  the server reads, by default `Server::MAX_HEAD` (1 MiB) and
+  `Server::MAX_BODY` (64 MiB) as before, held to while the request is
+  read - a head past `max_head` is a 431, a body past `max_body` a 413 at
+  its `Content-Length` or at the chunk that passes it - over HTTP/1.1 and
+  HTTP/2 (the header list advertised and taken, a body past the limit 413
+  on its stream), on the calling thread and on the pool, and under
+  `stream_bodies` for `body_io` and `Request#body` alike.
+  `Server.parse_request` and `parse_head` take them too. A server with
+  smaller limits of its own, as iyi-web calling `handle` with a 16 KiB
+  head limit, could check them only once std/http had held up to 1 MiB of
+  every connection's head, and no server took a body past 64 MiB, streamed
+  or not.
 
 ### Changed
 
@@ -249,6 +263,15 @@
   `bench/std_io_exercise.sh`'s and `bench/std_time_exercise.sh`'s floors
   now name.
 
+
+- **std/http refuses a head past its limit whose end came in the read
+  that passed the limit (issue #213).** `Conn#read_head` refused a head
+  only while its end had not come, so a read that carried the bytes past
+  the limit and the head's end together was served: a 20 KB head sent at
+  once to a server with a 16 KiB `max_head` was answered 200, and a head
+  past `MAX_HEAD` by up to one read was taken the same way. It is a 431
+  now wherever its end lies, and a client's read of an answer's head is
+  held the same way.
 - **`std/xz` keeps its ring's bare pointers inside the ring whatever the
   ring's growth does.** The dictionary ring is read through pointers whose
   bounds held only because the ring grows to the dictionary's size before
@@ -803,6 +826,26 @@
   `write`, `flush` and `close` are checked to panic with the sentence
   they had, to the letter.
 
+
+- **`bench/std_http_exercise.sh` holds a server to its caller's
+  `max_head` and `max_body` (issue #213).** std_http_exercise.iyi's server
+  with 16 KiB and 64 KiB limits answers a head with no end 431 and a
+  megabyte of chunks 413 while they are sent, and what it allocates is
+  held under 192 KiB and 256 KiB (on this Linux machine 93 KB and 66 KB,
+  where a server under std/http's own limits took 2.9 MB for the same
+  256 KB head finished and 2.1 MB for the megabyte finished); a 20 KB head
+  that comes whole is a 431 and a `Content-Length` past the limit a 413
+  before its body; `Server.handle` under an 80 MiB `max_body` takes a body
+  of 64 MiB and a byte, read whole and streamed. http2_exercise.iyi holds
+  the same over HTTP/2, and std_http_parallel.iyi on the pool. Eleven
+  copies that hand one of those places std/http's own limit instead -
+  the head's read, a head past the limit whose end came with it, the
+  `Content-Length`, the chunked reader, the whole body's read, a streaming
+  block's `body`, `serve`'s and the pool's handing on to `handle`, and
+  HTTP/2's head, body and whole body's read - are caught: seven by the
+  exercise, three at their HTTP/2 check, one at the pool's. The patch
+  sites of the copies that name `serve`'s internal signatures follow
+  them.
 - **`bench/std_xz_exercise.sh`'s copy whose ring never grows past 64 KiB
   is caught at its check every run.** It read below the ring's memory, so
   it failed by a wrong CRC64 on most runs and by a memory fault on some:

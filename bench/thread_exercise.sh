@@ -624,7 +624,19 @@ case "$(uname -s)" in
       word(control + IYI_STOP_ORDER_SEEN).value.set(0_u64)
       word(control + IYI_STOP_ORDER_EARLY).value.set(0_u64)
     end
-    def self.stop_order_observe(asked : Int64, expected : Int64) : Nil
+    def self.stop_order_suspend(handle : Pointer(Void)) : Nil
+      if LibC.SuspendThread(handle) < 0_i32
+        message = "SETUP: stop: SuspendThread failed\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(76)
+      end
+    end
+    def self.stop_order_observe(asked : Int64, expected : Int64, sp : UInt64) : Nil
+      if sp == 0_u64
+        message = "SETUP: stop: context capture returned no stack\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(76)
+      end
       page = control
       word(page + IYI_STOP_ORDER_SEEN).value.set(1_u64)
       word(page + IYI_STOP_ORDER_EARLY).value.set(1_u64) if asked < expected
@@ -641,17 +653,26 @@ IYI
         /^    # ── Roots/ { while ((getline s < part) > 0) print s; roots++ }
         /^      private def self\.suspend_others\(line : UInt64\) : Int64$/ { print; print "        stop_asked = 0_i64"; entry++; next }
         /^          LibC\.SuspendThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\) if cursor != line$/ {
-          if (mode == "control") { print; print "          stop_asked += 1_i64 if cursor != line" }
+          if (mode == "control") {
+            print "          if cursor != line"
+            print "            stop_order_suspend(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE)))"
+            print "            stop_asked += 1_i64"
+            print "          end"
+          }
           asked++; next
         }
         /^            handle = Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)$/ {
           print
-          if (mode == "forced") { print "            LibC.SuspendThread(handle)"; print "            stop_asked += 1_i64" }
-          print "            stop_order_observe(stop_asked, @@count - (line != 0_u64 ? 1_i64 : 0_i64))"
+          if (mode == "forced") { print "            stop_order_suspend(handle)"; print "            stop_asked += 1_i64" }
+          handles++; next
+        }
+        /^            sp = IyiRoots\.capture_thread_registers\(handle, cursor \+ IYI_TL_SPILL\)$/ {
+          print
+          print "            stop_order_observe(stop_asked, @@count - (line != 0_u64 ? 1_i64 : 0_i64), sp)"
           capture++; next
         }
         { print }
-        END { if (roots != 1 || entry != 1 || asked != 1 || capture != 1) exit 3 }
+        END { if (roots != 1 || entry != 1 || asked != 1 || handles != 1 || capture != 1) exit 3 }
       ' "$REPO/src/iyi/thread.iyi" > "$2"
     }
     mkdir -p ordered/iyi serial/iyi
@@ -664,6 +685,7 @@ IYI
     fi
     timeout -k 5 300 ./crowd-order > order.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat order.txt; exit 76; fi
     if [ "$code" -ne 0 ] || ! tr -d '\r' < order.txt | grep -qxF 'stop: every suspend request preceded the first context capture'; then
       echo "the stop-order control failed (exit $code):"; cat order.txt; exit 1
     fi
@@ -674,6 +696,7 @@ IYI
     fi
     timeout -k 5 300 ./crowd-serial > serial.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat serial.txt; exit 76; fi
     if [ "$code" -ne 1 ] || ! tr -d '\r' < serial.txt | grep -qxF 'FAIL: stop: a context was captured before all suspend requests were issued'; then
       echo "the stop-order check did not fire (exit $code):"; cat serial.txt; exit 1
     fi

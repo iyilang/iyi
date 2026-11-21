@@ -63,7 +63,7 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 36,537 lines, of which 4,763 are the library held to the 4,738 ceiling (7,271 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| iyi's own prelude | 36,537 lines, of which 4,763 are the library held to the 4,763 ceiling (7,271 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
 | compiler | 142,338 lines, none of it written in iyi |
 | artifact format | `.iyimod` v64, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
@@ -507,6 +507,16 @@ because only it knows its cases and its children. Behind an import they
 would be a framework a test asks for before it can be skipped, which is the
 one thing `iyi test` set out not to be. The owner chose the number, as
 measured with them in: 4,738.
+
+**And to 4,763, owner approved 2026-11-21 for #212.** `String#hash` was
+FNV-1a from a fixed start, and keys built offline to share one hash made a
+`Hash` - and `JSON.parse` of an object - quadratic in them. SipHash-1-3,
+keyed with sixteen bytes the system's entropy gives each process, is 37
+lines of `string.iyi` where FNV-1a was 11, 26 more (the entropy read is
+each platform's own and stays out of the count). `Hash` lives in the prelude, so
+the hash it places every string key by cannot sit behind an import, and a
+table a program fills with client-chosen strings is exposed until it does.
+The owner chose the number, as measured with it in: 4,763.
 
 What the rule does *not* forgive: a `pub def` a program calls is API and
 counts wherever it is written, macro arm or not — the exclusion is for the

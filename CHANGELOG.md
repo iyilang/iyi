@@ -66,6 +66,10 @@
   decision** (SPEC.md I.4): the 49 lines `skip:`, `--run`, the case
   report and taking them out of a test's environment need, which only the
   test program can do.
+- **The prelude's library is held to 4,763 lines, owner approved
+  2026-11-21 for #212** (SPEC.md I.4): `String#hash` keyed per process
+  with SipHash-1-3. `Hash` lives in the prelude, so the keyed hash cannot
+  sit behind an import.
 - **A program a test starts no longer reports into the test's file or runs
   only its `--run` cases.** IYI_TEST_REPORT and IYI_TEST_RUN were in the
   environment the test's children inherit; the prelude reads them at the

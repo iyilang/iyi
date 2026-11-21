@@ -686,7 +686,9 @@ for w in 2 4 8; do
   [ "$w" -gt "$CORES" ] && break
   got="$(speed_run "$w" exercise-release)" || exit 1
   ms="${got% *}"
-  ratio="$(awk -v a="$ONE" -v b="$ms" 'BEGIN { printf "%.2f", a / b }')"
+  if ! ratio="$(awk -v a="$ONE" -v b="$ms" 'BEGIN { printf "%.2f", a / b }')"; then
+    echo "FAIL: speed: could not compute the $w-worker speed ratio"; exit 1
+  fi
   printf '  %2s worker(s): %6s ms, %sx one worker, %s at once\n' "$w" "$ms" "$ratio" "$(at_once "${got#* }")"
   [ "$w" -eq "$K" ] && { MANY="$ms"; MANY_AT="${got#* }"; }
 done
@@ -697,9 +699,13 @@ if ! holds_at_once "$MANY_AT" "$K"; then
   echo "$K workers held their tasks $(at_once "$MANY_AT") at once on average: under 0.6 x $K, which is not parallel"
   exit 1
 fi
-awk -v one="$ONE" -v many="$MANY" -v k="$K" 'BEGIN {
-  printf "  performance information: %d workers, %.2fx one worker; 0.6 x K is %.2fx (%s)\n", k, one / many, 0.6 * k, one / many >= 0.6 * k ? "above" : "below"
-}'
+if ! awk -v one="$ONE" -v many="$MANY" -v k="$K" 'BEGIN {
+  if (one / many >= 0.6 * k) result = "above"
+  else result = "below"
+  printf "  performance information: %d workers, %.2fx one worker; 0.6 x K is %.2fx (%s)\n", k, one / many, 0.6 * k, result
+}'; then
+  echo "FAIL: speed: could not compute the performance information"; exit 1
+fi
 
 # ── 4. A deadlock across threads is named ────────────────────────────────
 step "a deadlock across threads is a diagnosis, not a hang"

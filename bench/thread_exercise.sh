@@ -3554,11 +3554,19 @@ IYI
     def self.guard_page_of(sp : UInt64, top : UInt64) : UInt64
       buffer = uninitialized UInt64[6]
       info = pointerof(buffer).as(Pointer(UInt64))
-      return 0_u64 if LibC.VirtualQuery(Pointer(Void).new(sp), info.as(Void*), 48_u64) == 0_u64
+      if LibC.VirtualQuery(Pointer(Void).new(sp), info.as(Void*), 48_u64) == 0_u64
+        message = "SETUP: guard: stack VirtualQuery failed\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(76)
+      end
       pos = info[1]
-      while pos < top && LibC.VirtualQuery(Pointer(Void).new(pos), info.as(Void*), 48_u64) != 0_u64
+      while pos < top
+        if LibC.VirtualQuery(Pointer(Void).new(pos), info.as(Void*), 48_u64) == 0_u64 || info[3] == 0_u64
+          message = "SETUP: guard: reservation VirtualQuery failed\n"
+          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+          __iyi_exit(76)
+        end
         return pos if (info[4] & 0xFFFFFFFF_u64) == 0x1000_u64 && (info[4].unsafe_shr(32_u64) & 0x100_u64) != 0_u64
-        return 0_u64 if info[3] == 0_u64
         pos = info[0] + info[3]
       end
       0_u64
@@ -3583,13 +3591,29 @@ IYI
     end
 
     def self.release_gate_guard_scan(sp : UInt64, top : UInt64, keep : Bool) : UInt64
-      committed = first_written(sp, top)
-      return committed if word(control + IYI_GATE_GUARD).value.get == 0_u64
-      return committed if word(control + IYI_GATE_HOLDER).value.get != top
+      return first_written(sp, top) if word(control + IYI_GATE_GUARD).value.get == 0_u64
+      return first_written(sp, top) if word(control + IYI_GATE_HOLDER).value.get != top
       guard = guard_page_of(sp, top)
-      return committed if guard == 0_u64
+      if guard == 0_u64
+        message = "SETUP: guard: the holder has no guard page\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(76)
+      end
       word(control + IYI_GATE_CANDIDATE).value.set(guard)
       if keep
+        committed = first_written(guard + 64_u64, top)
+        buffer = uninitialized UInt64[6]
+        info = pointerof(buffer).as(Pointer(UInt64))
+        if LibC.VirtualQuery(Pointer(Void).new(committed), info.as(Void*), 48_u64) == 0_u64
+          message = "SETUP: guard: normalized scan VirtualQuery failed\n"
+          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+          __iyi_exit(76)
+        end
+        if committed > sp || committed >= top || (info[4] & 0xFFFFFFFF_u64) != 0x1000_u64 || (info[4].unsafe_shr(32_u64) & 0x100_u64) != 0_u64
+          message = "FAIL: guard: normalization did not find committed stack memory\n"
+          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+          __iyi_exit(1)
+        end
         word(control + IYI_GATE_SCANNED).value.set(committed)
         return committed
       end
@@ -3652,8 +3676,8 @@ holder = IyiThread.start { hold(shared); nil }
 watch = IyiMark.now_ns &+ 20000000000_u64
 while shared.ready.get == 0_i64
   if IyiMark.now_ns >= watch
-    print "FAIL: guard: the holder never reached its hold (setup)\n"
-    __iyi_exit(1)
+    print "SETUP: guard: the holder never reached its hold\n"
+    __iyi_exit(76)
   end
   IyiThread.yield_cpu
 end
@@ -3662,12 +3686,12 @@ shared.release.set(1_i64)
 holder.join
 {% if flag?(:guard_force) %}
 if IyiThread.release_gate_candidate == 0_u64
-  print "FAIL: guard: the holder's stack has no guard page at its top (setup)\n"
-  __iyi_exit(1)
+  print "SETUP: guard: the holder's stack has no guard page\n"
+  __iyi_exit(76)
 end
 if IyiThread.release_gate_scanned_from == 0_u64
-  print "FAIL: guard: the stop did not scan the holder's stack (setup)\n"
-  __iyi_exit(1)
+  print "SETUP: guard: the stop did not scan the holder's stack\n"
+  __iyi_exit(76)
 end
 puts "guard: the stop scanned the holder's stack from its committed page"
 {% end %}
@@ -3675,13 +3699,14 @@ IYI
     step "the holder's stack, scanned from its committed page, armed: one run, and the scan is reported"
     mkdir -p kept/iyi
     cp "$REPO"/src/iyi/*.iyi kept/iyi/
-    guard_copy true kept/iyi/thread.iyi || { echo "the scan's start is not in thread.iyi any more"; exit 1; }
-    guard_prelude kept/iyi/prelude.iyi || { echo "the guard fault handler is not in prelude.iyi any more"; exit 1; }
+    guard_copy true kept/iyi/thread.iyi || { echo "SETUP: guard: scan anchor changed"; exit 76; }
+    guard_prelude kept/iyi/prelude.iyi || { echo "SETUP: guard: fault handler anchor changed"; exit 76; }
     if ! IYI_PATH="$WORK/kept${PSEP}$REPO/src" "$IYI" build guard-hold.iyi -Dguard_force -o guard-kept > build-kept.log 2>&1; then
-      cat build-kept.log; exit 1
+      cat build-kept.log; exit 76
     fi
     timeout -k 5 60 ./guard-kept > kept.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat kept.txt; exit 76; fi
     if [ "$code" -ne 0 ] || ! tr -d '\r' < kept.txt | grep -qxF "guard: the stop scanned the holder's stack from its committed page"; then
       echo "the control did not scan from its committed page (exit $code):"; tail -3 kept.txt; exit 1
     fi
@@ -3690,17 +3715,39 @@ IYI
     step "failure proof: the holder's stack scanned from its guard page dies on its one run"
     mkdir -p guarded/iyi
     cp "$REPO"/src/iyi/*.iyi guarded/iyi/
-    guard_copy false guarded/iyi/thread.iyi || { echo "the scan's start is not in thread.iyi any more"; exit 1; }
-    guard_prelude guarded/iyi/prelude.iyi || { echo "the guard fault handler is not in prelude.iyi any more"; exit 1; }
+    guard_copy false guarded/iyi/thread.iyi || { echo "SETUP: guard: scan anchor changed"; exit 76; }
+    guard_prelude guarded/iyi/prelude.iyi || { echo "SETUP: guard: fault handler anchor changed"; exit 76; }
     if ! IYI_PATH="$WORK/guarded${PSEP}$REPO/src" "$IYI" build guard-hold.iyi -Dguard_force -o guard-from-sp > build-guarded.log 2>&1; then
-      cat build-guarded.log; exit 1
+      cat build-guarded.log; exit 76
     fi
     timeout -k 5 60 ./guard-from-sp > guarded.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat guarded.txt; exit 76; fi
     if [ "$code" -ne 1 ] || ! grep -qxF 'FAIL: guard: a stop scan began inside its guard page' guarded.txt; then
       echo "the guard-page scan did not end at its sentence (exit $code):"; tail -3 guarded.txt; exit 1
     fi
     echo "  exits 1 at \"FAIL: guard: a stop scan began inside its guard page\""
+
+    step "failure proof: an identity stack normalization rejects a guard-page input"
+    mkdir -p identity/iyi
+    cp kept/iyi/*.iyi identity/iyi/
+    awk '
+      /^      def self\.first_written\(sp : UInt64, top : UInt64\) : UInt64$/ {
+        print; print "        return sp"; found++; next
+      }
+      { print }
+      END { if (found != 1) exit 3 }
+    ' kept/iyi/thread.iyi > identity/iyi/thread.iyi || { echo "SETUP: guard: normalization anchor changed"; exit 76; }
+    if ! IYI_PATH="$WORK/identity${PSEP}$REPO/src" "$IYI" build guard-hold.iyi -Dguard_force -o guard-identity > build-identity.log 2>&1; then
+      cat build-identity.log; exit 76
+    fi
+    timeout -k 5 60 ./guard-identity > identity.txt 2>&1
+    code=$?
+    if [ "$code" -eq 76 ]; then cat identity.txt; exit 76; fi
+    if [ "$code" -ne 1 ] || ! tr -d '\r' < identity.txt | grep -qxF 'FAIL: guard: normalization did not find committed stack memory'; then
+      echo "the normalization check did not fire (exit $code):"; cat identity.txt; exit 1
+    fi
+    echo '  exits 1 at "FAIL: guard: normalization did not find committed stack memory"'
     ;;
 esac
 

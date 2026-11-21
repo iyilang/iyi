@@ -35,6 +35,21 @@
   FILE -o BINARY` and nothing else, so neither the optimised program nor a
   flag-gated path could be tested; a `--chaos` failure's `reproduce:` line
   carries the flags, since without them the seed reruns another program.
+- **A refused file is a value: `File.open?`, `File.read?`, `File.write?`,
+  and a `FileIO`'s `write?`, `flush?` and `close?` (#214).** `File.open`,
+  `IyiIO#write` and the flush in `close` panicked when the system refused
+  them - a full disk, a missing directory, a file this user may not
+  write - and iyi has no `rescue`, so a server could not answer 507 or
+  500 and carry on. `std/file` now has, in std's `?` convention
+  (`Base64.decode?`, `UdpSocket.bind?`), forms that answer an `IOError`:
+  the operation, the path, and the platform's number (errno, or Windows'
+  `GetLastError`), with `reason` in words, `not_found?`, `denied?` and
+  `full?`, and a `message` such as `cannot open /srv/up/a: no such file
+  or directory`. `File.open?` answers a `FileIO`, the same stream knowing
+  its path, whose `close?` closes the file even when its flush is
+  refused, and whose `read_error` says why a read failed. The panicking
+  forms are unchanged, to the letter. In `std/file` rather than the
+  prelude, which sits on its ceiling.
 
 ### Changed
 
@@ -695,6 +710,20 @@
   run again, up to five times.
 
 ### Gates
+
+- **`bench/std_file_exercise.sh` holds `std/file`'s `?` forms (#214).**
+  A new section answers, on every platform, an open of a missing
+  directory, an open of a file this user may not write (skipped, and
+  said, where the user writes it all the same), a read of a directory, a
+  write, a flush and a close's flush to a file open only to read, and on
+  Linux the same to `/dev/full`, each as an `IOError` with the right
+  number and the path. Six copies of `std/file` fail at the check that
+  names them: an `open?` that panics, a refused write taken as written,
+  a `write?` that panics, a `close?` that drops its flush's refusal, a
+  refusal that reads the wrong number, and (POSIX) a `read?` that drops
+  the read's refusal. And `File.open`, `File.write` and the stream's
+  `write`, `flush` and `close` are checked to panic with the sentence
+  they had, to the letter.
 
 - **`bench/std_xz_exercise.sh`'s copy whose ring never grows past 64 KiB
   is caught at its check every run.** It read below the ring's memory, so

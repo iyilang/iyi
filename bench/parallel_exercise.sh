@@ -47,17 +47,18 @@
 #      the request's window held open on one worker; a preempted task
 #      keeps its unit's token; a task switched in after one that held its
 #      worker past a look begins its own quantum; the monitor looks every
-#      4 to 10.5 ms (8 on Windows) and the quantum is at most three of
-#      those looks; a tight loop costs at most twice what its
-#      `@[NoPreempt]` twin does; and the release build's IR shows each
-#      tight loop's checks reading the worker's word through the thread
-#      pointer, none calling its thread-local accessor. Its failure proofs
-#      are with step 7's: a `@[NoPreempt]` loop, a monitor that never
-#      raises the word, a Windows monitor on the system timer's tick, a
-#      monitor that raises it after three unchanged looks, a check that
-#      calls the accessor (darwin and Windows), a slow half that does not
-#      poll, a word left raised for the task before, and a preempted task
-#      that gives its unit's token away.
+#      4 to 10.5 ms (8 on Windows) wherever the host wakes a sleeper on
+#      time, and the quantum is at most three looks; a tight loop costs at
+#      most twice what its `@[NoPreempt]` twin does; and the release
+#      build's IR shows each tight loop's checks reading the worker's word
+#      through the thread pointer, none calling its thread-local accessor.
+#      Its failure proofs are with step 7's: a `@[NoPreempt]` loop, a
+#      monitor that never raises the word, a Windows monitor on the system
+#      timer's tick, a monitor ticking every 12 ms, a monitor that raises
+#      it after three unchanged looks, a check that calls the accessor
+#      (darwin and Windows), a slow half that does not poll, a word left
+#      raised for the task before, and a preempted task that gives its
+#      unit's token away.
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
 #   4. The speedup, measured: CPU-bound tasks on one worker and on several,
@@ -268,10 +269,11 @@ esac
 # 100 ms (80 for a fast request in the server shape); a preempted task
 # keeps its unit's token; a task switched in is not given up on the word
 # raised for the one before it; the monitor looks every 4 to 10.5 ms (8
-# on Windows) and two tasks on one worker take turns of at most three of
-# those looks; the tight loops cost at most twice what their
-# `@[NoPreempt]` twins cost; and their checks read the word through the
-# thread pointer, in the release build's IR, which it writes for that.
+# on Windows) wherever the host wakes a sleeper on time, and two tasks on
+# one worker take turns of at most three looks; the tight loops cost at
+# most twice what their `@[NoPreempt]` twins cost; and their checks read
+# the word through the thread pointer, in the release build's IR, which
+# it writes for that.
 PREEMPT_WORKERS=8
 [ "$CORES" -lt 8 ] && PREEMPT_WORKERS="$CORES"
 # The server shape's clients are the program's own main thread, which on
@@ -1161,9 +1163,10 @@ caught noflag 'slice: a short task waited' slice --workers=1
 
 # Caught at its look, which the period step holds to 8 ms on Windows: the
 # copy read 10.1 to 13.1 ms in 20 runs of debug jobs 124913849506 and
-# 124922160886, and 15.6 and 16.0 on Windows 11, 12 logical processors
-# (the user's machine), held to 4. Against the 10.5 ms every platform was
-# held to, it passed the look in master's soak (job 124885593140).
+# 124922160886, and 15.0 to 16.6 in 60 runs on Windows 11, 12 logical
+# processors (the user's machine), idle, held to 4 beside 4 busy loops
+# and beside 12 on its 12. Against the 10.5 ms every platform was held
+# to, it passed the look in master's soak (job 124885593140).
 step "failure proof: a Windows monitor that waits on the system timer looks too seldom"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
@@ -1173,13 +1176,23 @@ case "$(uname -s)" in
     echo "  the monitor's tick here is the kernel's own timeout, and there is no system timer for it to fall back to" ;;
 esac
 
-# The turn is held to three of the period step's own looks. This copy
-# took 3.45 to 4.35 looks a turn in 16 runs on macos-15 and 3.84 to 4.02
-# in 20 on windows-2025 (debug jobs 124913849625 and 124922160678,
-# 124913849506 and 124922160886), 3.88 to 4.21 in three here on Linux,
-# and 4.02 and 3.96 on Windows 11, 12 logical processors (the user's
-# machine), held to 4; the real monitor's turns took 1.61 to 2.25 looks
-# in those debug jobs.
+# The period step judges only the windows where a thread's 5 ms sleeps
+# woke on time; a monitor whose own tick is long is caught in them
+# wherever the host wakes threads promptly. This copy waits 12 ms between
+# looks, past the 10.5 ms bound (8 on Windows): it read 12.3 to 14.6 ms in
+# those 60 runs on Windows 11, 13.4 to 14.5 in 50 on macOS 26.6 (M2 Pro,
+# 10 cores, idle and beside 10 or 20 busy loops) and 11.9 to 12.5 in 50
+# here on Linux (idle and beside 4 or 8 on 4 vCPUs).
+step "failure proof: a monitor ticking every 12 ms looks too seldom"
+broken slowtick '/^  PREEMPT_TICK_MS =           5$/ { print "  PREEMPT_TICK_MS =          12"; next } /^  PREEMPT_TICK_NS = 5000000_u64$/ { print "  PREEMPT_TICK_NS = 12000000_u64"; next } { print }' concurrency.iyi parallel_preempt
+caught slowtick 'period: the monitor looked every' period --workers=1
+
+# The turn is held to three looks, counted over the turns whose two ends
+# found the worker's thread on its core. This copy took 3.45 to 4.35
+# looks a turn in 16 runs on macos-15 and 3.84 to 4.02 in 20 on
+# windows-2025 (debug jobs 124913849625 and 124922160678, 124913849506
+# and 124922160886), counted over all the turns; counted so, 3.87 to 4.00
+# in the 160 runs above, where the real monitor's turns took 1.95 to 2.00.
 step "failure proof: a monitor that raises a worker's word after three unchanged looks makes turns of four"
 broken slowturn '/^  PREEMPT_TICKS   =       1_u64$/ { print "  PREEMPT_TICKS   =       3_u64"; next } { print }' concurrency.iyi parallel_preempt
 caught slowturn 'period: two tasks computing on one worker took turns of' period --workers=1

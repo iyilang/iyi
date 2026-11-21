@@ -178,6 +178,21 @@
 
 ### Fixed
 
+- **A regex literal a macro writes is `std/regex`'s, as it is outside
+  one (#215).** Inside `{% if %}`, `{% for %}`, a `macro`'s body or a
+  class body's `{% begin %}`, `text.sub(/^model name\s*:\s*/, "")` was
+  refused with `undefined constant ::Regex::Options` in a program that
+  imports `std/regex`, while the same literal in a method body compiled.
+  Whether a literal is iyi's was asked of its location's filename, and a
+  macro's expansion is located in a `VirtualFile`, which is no `.iyi`: the
+  literal became the other library's `::Regex.new`. The expansion is now
+  read as written in the file that expanded it, at any depth, the way the
+  parser already reads it (`Program#iyi_written?`, shared with the check
+  that `call.cr` made for a def from an artifact); the instance variable a
+  literal initializes is guessed the same way. Covered by the codegen spec
+  that builds the issue's program with all four forms, and a normalize
+  spec for an expansion one and two macros deep.
+
 - **`std/xz` keeps its ring's bare pointers inside the ring whatever the
   ring's growth does.** The dictionary ring is read through pointers whose
   bounds held only because the ring grows to the dictionary's size before

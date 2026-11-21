@@ -904,14 +904,13 @@ cp "$REPO"/src/iyi/*.iyi late-held/iyi/
 awk 'function forced() {
     print "      @[UnsafeReach(\"copy-only: one late generation hold\")]"
     print "      @@late_once : UInt64 = 0_u64"
-    print "      def self.late_hold : Bool"
+    print "      def self.late_hold(old : UInt64) : Bool"
     print "        return false unless Pointer(Atomic(UInt64)).new(pointerof(@@late_once).address).value.compare_and_set(0_u64, 1_u64)[1]"
     print "        if @@helpers != 1_u64"
     print "          message = \"FAIL: late: the forced generation proof requires one helper\\n\""
     print "          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
     print "          __iyi_exit(76)"
     print "        end"
-    print "        old = pool_word(POOL_GENERATION).value.get"
     print "        limit = now_ns &+ 10000000000_u64"
     print "        while pool_word(POOL_GENERATION).value.get == old || LibIyiGCTable.__iyi_marking == 0_u8 || pool_word(POOL_FINISH).value.get == 0_u64"
     print "          if now_ns >= limit"
@@ -940,12 +939,16 @@ awk 'function forced() {
     print "      end"
   }
   /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
+  /^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ {
+    print "            late_baseline = pool_word(POOL_GENERATION).value.get"
+    baseline++
+  }
   /^            return generation$/ {
-    print "            late_forced = late_hold"
+    print "            late_forced = late_hold(late_baseline)"
     print "            late_check(generation) if late_forced"
     hook++
   }
-  { print } END { if (declared != 1 || hook != 1) exit 3 }' \
+  { print } END { if (declared != 1 || baseline != 1 || hook != 1) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > late-held/iyi/prelude.iyi || { echo "the late generation hook is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/late-held${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o late-held-run > build-late-held.log 2>&1; then
   cat build-late-held.log; exit 1

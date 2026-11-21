@@ -37,23 +37,22 @@
 #      because a thread stopped while it has no CPU is the case the
 #      floor's table said costs the timeslice, and the properties must hold
 #      there too.
-#  4b. Four times the cores' threads taking the runtime lock in turn, held
-#      on Windows to five times one thread taking it for all their turns,
-#      and three threads computing on one processor, two of them kept off
-#      it, stopped by collections, held there to 60 ms a stop; with a
-#      failure proof each - the lock's yield removed, and the suspends
-#      asked one at a time.
+#  4b. Four times the cores' threads taking the runtime lock in turn,
+#      with the ratio to one thread reported, and three threads computing
+#      on one processor, two of them kept off it, stopped by collections,
+#      held on Windows to 60 ms a stop; with the suspends asked one at a
+#      time, the stop check fails.
 #  4c. On Windows held to one core, five threads start and are joined
 #      beside a thread that collects in a loop, and beside one that takes
-#      the runtime lock in a loop, each within 10 s; with the lock's count
-#      and the collection's yield taken out a run never ends.
+#      the runtime lock in a loop, each within 10 s. Copy-only controls
+#      check the spinner's count and both collection yields separately.
 #  4d. On Windows, a process one level above normal computes in bursts on
 #      the stopping thread's processor while that thread collects in a
 #      loop, and no more than three stops last past the bound; with the
 #      stop's raise of its thread's priority taken out, stops last a
-#      burst. A thread taking the runtime lock beside them never waits
-#      past its bound; with the priority put back inside the release
-#      rather than after the lock, waits last a burst. A panic inside a
+#      burst. A thread taking the runtime lock beside them allows at most
+#      five waits past its bound; a copy-only counter detects a lock held
+#      while the stopper lowers its priority inside the release. A panic inside a
 #      stop puts the priority back; with `raise`'s lowering taken out,
 #      the thread keeps it. Threads that raise together for collections,
 #      crossing the budget at once or collecting at once, each put their
@@ -72,8 +71,9 @@
 #      the block names is asked what a captured value is (6d).
 #   7. On Windows, a program whose main thread ends while another thread's
 #      collections stop it ends, two hundred runs of two hundred; and with
-#      the end put back into the C runtime's `exit` a run never ends, and
-#      is released by resuming its threads.
+#      the end put back into the C runtime's `exit`, main's emitted IR
+#      returns where it should end in `__iyi_exit`, which the check names
+#      on the one build.
 #  7c. On Windows, threads and their tasks grow fresh stacks while a thread
 #      collects in a loop, and every run ends; with the stop's scan started
 #      at sp again, inside the guard page, a run dies.
@@ -102,7 +102,27 @@
 #      and `pthread_join`. With the compiler's answer replaced by a
 #      `false`, the threads are raw clones again and a run dies or says so.
 #
-# Linux x86_64 and aarch64, darwin aarch64.
+# Not forced (each is decided by a timeout, a timing bound or a schedule
+# search, so the verdict is not a named invariant of the code under test):
+#   4c   five threads started and joined beside a collecting or lock-taking
+#        thread, held to 10 s: a healthy timing bound, unchanged.
+#   4d   the no-raise timing mutant (a stop beside a burst with the raises
+#        taken out): removed; its only verdict was a stop timing.
+#   7d   unborn: the mutant's verdict is a schedule search for a collection
+#        landing before a link, not forced.
+#   7e   toplate: its healthy topfirst can pass without seeing two collections;
+#        no witness added.
+#   7h   unwoken: the mutant's verdict is the 30 s timeout (exit 124).
+#   7h   Linux unowed: the mutant's verdict is exit 124 or a count of owed turns
+#        in a timed storm.
+#   7j   Darwin counted: the mutant's verdict is the 30 s timeout (exit 124); the
+#        healthy early count is a measurement (a child that links first in every
+#        round is possible).
+#   7g   heaped: the healthy wild exits 3 if no fault has come by its deadline,
+#        and no fault-handler witness is required.
+#   The lock-order record (B6), the guard holder (B5), the release record (A2),
+#   the stop-order record (4b) and the fixed-count burst (A1) are forced.
+#
 set -u
 
 part="${1:-}"
@@ -113,6 +133,49 @@ esac
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/end_process.sh"
+# On Windows `timeout` is this bounded wait, not GNU timeout: GNU timeout ends
+# an overrunning run through MSYS's exit_process_tree, which can end the runner
+# agent (bench/end_process.sh). Here an overrun is ended by end_process and
+# answers 124, as timeout does, and every other exit is the program's own. The
+# step that runs it is the one that fails. Elsewhere it is GNU timeout.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # The end of an overrunning child is bounded by its own deadline, separate
+    # from the child's bound. end_process runs in the background; a stalled end
+    # is reported as a child that could not be recovered, and is not waited for.
+    end_bounded() {
+      local child="$1" killer deadline=$((SECONDS + 10))
+      end_process "$child" KILL &
+      killer=$!
+      while kill -0 "$killer" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+          echo "FAIL: child $child could not be ended within 10 s of its bound; it is left running" >&2
+          return 125
+        fi
+        sleep 0.1
+      done
+      wait "$killer" 2>/dev/null
+      return 0
+    }
+    timeout() {
+      local limit child deadline
+      while [ "${1:-}" = -k ]; do shift 2; done
+      limit="$1"; shift
+      deadline=$((SECONDS + limit))
+      "$@" &
+      child=$!
+      while kill -0 "$child" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+          echo "FAIL: a program exceeded its $limit s bound" >&2
+          end_bounded "$child" || true
+          return 124
+        fi
+        sleep 0.1
+      done
+      wait "$child"
+    }
+    ;;
+esac
 # The compiler, overridable: `bin/iyi` is a POSIX shell wrapper, and on
 # Windows the caller is the only one who knows where the real binary is.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -139,7 +202,13 @@ esac
 
 cd "$WORK" || exit 1
 
-step() { echo "== $1"; }
+current_step=""
+step() {
+  [ -z "$current_step" ] || printf '== end: %s\n' "$current_step"
+  current_step="$1"
+  printf '== start: %s\n' "$current_step"
+}
+trap 'status=$?; [ -z "$current_step" ] || printf "== end: %s (exit %s)\n" "$current_step" "$status"' EXIT
 
 case "$(uname -s)" in
   Linux | Darwin | MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;

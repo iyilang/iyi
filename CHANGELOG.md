@@ -790,6 +790,15 @@
 
 ### Gates
 
+- **`bench/arena_exercise.sh` prints a sample's output when its two runs
+  exit differently.** It said `cores: exit 1 default, 0 under -Dgc_iyi`
+  and nothing more (Windows CI job 136817848846): neither run's output,
+  so nothing of what ended the first, and the scratch directory holding it
+  was gone with the runner. Both runs' last 20 lines are printed now,
+  and a default build that fails prints its log's tail, as the `-Dgc_iyi`
+  one did. The two builds are one program since `-Dgc_iyi` became the
+  default spelled out, so a mismatch there is a run that fails now and
+  then, not an allocator's difference.
 - **`bench/unsafe.sh` and `bench/bind_roundtrip.sh` store into and read a
   C global from a body that travels (#204).** `unsafe.sh`'s artifact step
   builds an importer of a marked module whose generic stores 7 into libc's

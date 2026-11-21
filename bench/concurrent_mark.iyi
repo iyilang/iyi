@@ -307,10 +307,16 @@
       fun Thread32Next(snapshot : Void*, entry : UInt32*) : Int32
       fun OpenThread(access : UInt32, inherit : Int32, thread_id : UInt32) : Void*
       fun GetThreadPriorityBoost(thread : Void*, disabled : Int32*) : Int32
+      fun GetLastError : Int32
       fun CloseHandle(handle : Void*) : Int32
     end
 
     class ThreadBoost
+      def self.setup_failure(message : String) : NoReturn
+        print "FAIL: wake boost setup: #{message}\n"
+        __iyi_exit(76)
+      end
+
       # The threads of this process whose priority boost is off, from a snapshot
       # of every thread on the machine (TH32CS_SNAPTHREAD = 4). Each entry is a
       # THREADENTRY32 of seven 32-bit words: dwSize, cntUsage, th32ThreadID,
@@ -318,23 +324,28 @@
       # first, and the owner is word 3.
       def self.count_boost_off : UInt64
         snapshot = LibBoost.CreateToolhelp32Snapshot(4_u32, 0_u32)
-        fail("wake boost: no snapshot of the threads") if snapshot.address == 0xFFFFFFFFFFFFFFFF_u64
+        setup_failure("cannot create the thread snapshot") if snapshot.address == 0xFFFFFFFFFFFFFFFF_u64
         entry = uninitialized UInt32[7]
         words = pointerof(entry).as(UInt32*)
         words[0] = 28_u32
         pid = LibBoost.GetCurrentProcessId.to_u64
         count = 0_u64
         more = LibBoost.Thread32First(snapshot, words) != 0
+        setup_failure("cannot read the first thread in the snapshot") unless more
         while more
           if words[3].to_u64 == pid
             thread = LibBoost.OpenThread(0x00000040_u32, 0_i32, words[2])
-            if thread.address != 0_u64
-              disabled = 0_i32
-              count = count + 1_u64 if LibBoost.GetThreadPriorityBoost(thread, pointerof(disabled)) != 0 && disabled != 0_i32
-              LibBoost.CloseHandle(thread)
-            end
+            setup_failure("cannot open a process thread") if thread.address == 0_u64
+            disabled = 0_i32
+            queried = LibBoost.GetThreadPriorityBoost(thread, pointerof(disabled))
+            LibBoost.CloseHandle(thread)
+            setup_failure("cannot query a process thread's priority boost") if queried == 0
+            count = count + 1_u64 if disabled != 0_i32
           end
           more = LibBoost.Thread32Next(snapshot, words) != 0
+          if !more && LibBoost.GetLastError != 18_i32 # ERROR_NO_MORE_FILES
+            setup_failure("cannot continue the thread snapshot")
+          end
         end
         LibBoost.CloseHandle(snapshot)
         count

@@ -4,11 +4,12 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Every failure proof runs its broken copy once and checks its exit status
-# and named failure. Some older proofs still match only a sentence fragment.
-# A forced copy waits on a word the program sets, and a copy that cannot
-# build against the real runtime fails the gate. A step whose code this
-# platform does not compile says so by name; a host with too few cores fails.
+# Every failure proof runs its broken copy once and requires exit 1 and the
+# whole named failure sentence (numeric observations may vary). Setup and
+# query failures exit 76 instead. A forced copy waits on a word the program
+# sets, and a copy that cannot build against the runtime fails the gate.
+# A step whose code this platform does not compile says so by name; a host
+# with too few cores fails.
 # In the order they run:
 #   - the program, release: rounds that move a payload into a black holder
 #     under a running mark, the pauses of a concurrent collection against the
@@ -33,8 +34,9 @@
 #     a first collection waiting for every helper to park;
 #   - marks beside twenty-four connections on twelve workers, with every helper
 #     and with one;
-#   - on Windows only: the helpers woken with the boost (the boost counted and
-#     wake timings reported); the helper cap beside a busy program; the pool's waiting
+#   - on Windows only: the boost checked structurally, with a failed-query
+#     control (wake timings are displayed only for the shipped build); the
+#     helper cap beside a busy program; the pool's waiting
 #     workers counted as the program's; a busy pool's running workers counted
 #     free. Those proofs exist only where their code is compiled (thread.iyi's
 #     start_helper and prelude.iyi's start_concurrent under win32), and the
@@ -151,9 +153,11 @@ module crowded
 
 class Flag
   getter stop : Atomic(Int64)
+  getter collection_returned : Atomic(Int64)
 
   def initialize
     @stop = Atomic(Int64).new(0_i64)
+    @collection_returned = Atomic(Int64).new(0_i64)
   end
 end
 
@@ -164,6 +168,9 @@ def spin(flag : Flag) : Nil
   end
 end
 
+{% if flag?(:ready_force) %}
+IyiMark.auto = false
+{% end %}
 IyiMark.workers = 0_u64 if Program.args.size > 0 && Program.args[0] == "alone"
 flag = Flag.new
 spinners = [] of IyiThread
@@ -174,21 +181,32 @@ spinners = [] of IyiThread
 {% if flag?(:ready_force) %}
 watcher = IyiThread.start do
   deadline = IyiMark.now_ns + 10000000000_u64
-  while IyiMark.collections == 0_u64 && IyiMark.now_ns < deadline
+  while flag.collection_returned.get == 0_i64 && IyiMark.now_ns < deadline
     IyiThread.yield_cpu
   end
-  if IyiMark.collections == 0_u64
-    print "FAIL: crowded: the first collection did not return while its helpers were held\n"
-    __iyi_exit(1)
+  if flag.collection_returned.get == 0_i64
+    print "FAIL: crowded setup: the triggering collection did not return while its helpers were held\n"
+    __iyi_exit(76)
   end
   IyiMark.release_ready
   nil
 end
 {% end %}
+{% if flag?(:ready_force) %}
+before = IyiMark.collections
+IyiMark.auto = true
+{% end %}
 started = IyiMark.now_ns
 sum = 0_i64
 300000.times do |i|
   a = Array(Int32).new(4, i)
+  {% if flag?(:ready_force) %}
+    # Only the allocating caller publishes this, after the triggering
+    # allocation has returned, not while its collector still holds the lock.
+    if IyiMark.collections > before && flag.collection_returned.get == 0_i64
+      flag.collection_returned.set(1_i64)
+    end
+  {% end %}
   sum = sum + a[0]
 end
 took = IyiMark.now_ns - started
@@ -820,10 +838,14 @@ class Flag
   getter ready : Atomic(Int32)
   getter go : Atomic(Int32)
   getter stop : Atomic(Int32)
+  getter phase : Atomic(Int32)
+  getter shutdown_blocked : Atomic(Int32)
   def initialize
     @ready = Atomic(Int32).new(0)
     @go = Atomic(Int32).new(0)
     @stop = Atomic(Int32).new(0)
+    @phase = Atomic(Int32).new(0)
+    @shutdown_blocked = Atomic(Int32).new(0)
   end
 end
 
@@ -840,13 +862,46 @@ Program.args.each do |argument|
   end
 end
 IyiMark.auto = false
+flag = Flag.new
+# A single deadline covers setup, acknowledgement, producer shutdown, and
+# the final readback. It starts before the heap and producer threads exist,
+# leaving the shell's 120-second cap headroom to print the actual cause.
+fixture_deadline = IyiMark.now_ns + 100000000000_u64
+watchdog = IyiThread.start do
+  deadline = fixture_deadline
+  while true
+    phase = flag.phase.get
+    break if phase == 4
+    {% if flag?(:shutdown_force) %}
+      # The negative control advances the clock only after a producer has
+      # entered its forced shutdown hold.
+      deadline = 0_u64 if phase == 3 && flag.shutdown_blocked.get != 0
+    {% end %}
+    if IyiMark.now_ns >= deadline
+      case phase
+      when 0
+        print "FAIL: #{name}: fixture setup did not finish before the fixture deadline\n"
+      when 1
+        print "FAIL: #{name}: producers did not become ready before the fixture deadline\n"
+      when 2
+        print "FAIL: #{name}: the copy did not acknowledge before the fixture deadline\n"
+      when 3
+        print "FAIL: #{name}: producers did not stop after acknowledgement before the fixture deadline\n"
+      end
+      __iyi_exit(76)
+    end
+    IyiThread.park_if_requested
+    IyiThread.yield_cpu
+  end
+  nil
+end
 chain = nil.as(Node?)
 i = 0
 while i < 200000
   chain = Node.new(i.to_i64, chain)
   i += 1
 end
-flag = Flag.new
+flag.phase.set(1)
 producers = [] of IyiThread
 2.times do
   producers << IyiThread.start do
@@ -865,6 +920,13 @@ producers = [] of IyiThread
       end
       kept = kept &+ node.value
     end
+    {% if flag?(:shutdown_force) %}
+      flag.shutdown_blocked.set(1)
+      while true
+        IyiThread.park_if_requested
+        IyiThread.yield_cpu
+      end
+    {% end %}
     nil
   end
 end
@@ -877,6 +939,7 @@ while flag.ready.get != 2
   IyiThread.yield_cpu
 end
 IyiMark.auto = true
+flag.phase.set(2)
 flag.go.set(1)
 limit = IyiMark.now_ns + 60000000000_u64
 while !IyiMark.forced_acked?
@@ -886,6 +949,7 @@ while !IyiMark.forced_acked?
   end
   IyiThread.yield_cpu
 end
+flag.phase.set(3)
 flag.stop.set(1)
 producers.each { |thread| thread.join }
 count = 0
@@ -898,6 +962,7 @@ if count != 200000
   print "FAIL: #{name}: the chain held #{count} of its 200000 nodes after the acknowledgement\n"
   __iyi_exit(1)
 end
+flag.phase.set(4)
 puts "forced: #{name} acknowledged"
 IYI
 add_forced_ack() {
@@ -996,6 +1061,16 @@ if [ "$code" -ne 0 ] || ! grep -Fxq "forced: stored acknowledged" stored-held.tx
   echo "the held stored control did not complete (exit $code):"; tail -5 stored-held.txt; exit 1
 fi
 echo "  held stored control exits 0 after the assist rendezvous"
+step "control: a producer held after acknowledgement is a setup failure"
+if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release -Dshutdown_force forced.iyi -o shutdown-held-run > build-shutdown-held.log 2>&1; then
+  cat build-shutdown-held.log; exit 1
+fi
+timeout -k 5 120 ./shutdown-held-run name=stored > shutdown-held.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "stored: the mark whose remainder counted the held assist finished" shutdown-held.txt || ! grep -Fxq "FAIL: stored: producers did not stop after acknowledgement before the fixture deadline" shutdown-held.txt || grep -Fxq "forced: stored acknowledged" shutdown-held.txt; then
+  echo "the held producer was not reported as a shutdown failure (exit $code):"; tail -5 shutdown-held.txt; exit 1
+fi
+printf '  exits 76 at "%s"\n' "FAIL: stored: producers did not stop after acknowledgement before the fixture deadline"
 step "failure proof: storing over the counted assist loses the worker count"
 cp stored-held/iyi/*.iyi stored/iyi/
 awk '/^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
@@ -1745,6 +1820,38 @@ if [ "$code" -ne 1 ] || ! grep -Fxq 'FAIL: crowded: the first collection waited 
   echo "the first collection's wait was not caught (exit $code):"; tail -3 crowded-ready.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' 'FAIL: crowded: the first collection waited for a held helper'
+# This copy waits after the collector has resumed the watcher but before it
+# returns to the allocating caller. The watcher must not release a helper
+# merely because the collection count changed inside the collector.
+step "failure proof: a readiness wait after the watcher resumes is caught"
+mkdir -p ready-after-release/iyi
+cp held-helpers/iyi/*.iyi ready-after-release/iyi/
+awk '/^        def self\.finish_stopped\(started : UInt64, others : Int64\) : Nil$/ { inside = 1 }
+  inside && /^          IyiThread\.resume_others\(others\)$/ {
+    print
+    print "          ready_limit = IyiMark.now_ns &+ 10000000000_u64"
+    print "          while pool_word(512_u64).value.get < @@helpers"
+    print "            IyiMark.note_ready_wait"
+    print "            if IyiMark.now_ns >= ready_limit"
+    print "              message = \"FAIL: crowded setup: the post-release readiness wait was held past ten seconds\\n\""
+    print "              __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "              __iyi_exit(76)"
+    print "            end"
+    print "            spin_pause"
+    print "          end"
+    inserted++; next
+  }
+  inside && /^        end$/ { inside = 0 }
+  { print } END { if (inserted != 1) exit 3 }' held-helpers/iyi/prelude.iyi > ready-after-release/iyi/prelude.iyi || { echo "the post-release readiness anchor is missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/ready-after-release${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-ready-after-release > build-ready-after-release.log 2>&1; then
+  cat build-ready-after-release.log; exit 1
+fi
+timeout -k 5 120 ./crowded-ready-after-release > crowded-ready-after-release.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -Fxq 'FAIL: crowded: the first collection waited for a held helper' crowded-ready-after-release.txt; then
+  echo "the post-release readiness wait was not caught (exit $code):"; tail -3 crowded-ready-after-release.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' 'FAIL: crowded: the first collection waited for a held helper'
 # Four proofs follow, and they exist only where the code they prove does: the
 # wake boost is set in thread.iyi's start_helper under win32, and the helper
 # cap and the threads-minus-waiting count are in prelude.iyi's start_concurrent
@@ -1765,21 +1872,9 @@ awk '/^ *LibC\.SetThreadPriorityBoost\(h, 1_i32\)$/ { print "        # the helpe
 if ! IYI_PATH="$WORK/boosted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o boosted-run > build-boosted.log 2>&1; then
   cat build-boosted.log; exit 1
 fi
-# The wake is one scheduling race per collection. Slow wakes over two
-# hundred and fifty collections are printed as information, not a bound.
-# On a machine with idle processors the race is the machine's to lose: a
-# woken helper takes an idle processor and preempts nobody. On twelve
-# processors the boosted build lost 0 to 3 wakes of 256 in five runs, and
-# the gate's ten runs missed it at two and four workers (WinSoak's soak).
-# So each run is held to two processors (`start /affinity 3`), with a
-# process spinning beside it: the program's thread and the spinner hold
-# both, and a boosted helper preempts one of them at every wake. Here,
-# Windows 11 with 12 logical processors (the user's machine), five runs
-# so: the boosted build lost 118 to 132 wakes of 256 in the four that
-# started after the spinner (a fifth, its spinner a Python not yet
-# running, lost none, which is why the spinner here says it is ready),
-# and the shipped build 0 or 1 in each of five. The shipped build is run
-# the same way first, and holds.
+# The shipped build also reports wake timing while pinned beside a spinner.
+# Timing is informational: the boosted copy exits at the structural boost
+# check before it reaches the wake measurements.
 cat > spin.iyi <<'IYI'
 module spin
 
@@ -1829,6 +1924,23 @@ if [ "$code" -ne 1 ] || ! grep -q '^FAIL: wake boost: [0-9]* threads of this pro
   echo "the boost check did not fire (exit $code):"; tail -3 boosted.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: wake boost' boosted.txt)"
+
+# A copy in which the OS query fails must be rejected as setup failure, not
+# miscounted as a boosted thread and accepted as the mutant's catch.
+step "control: an unreadable Windows priority boost is a setup failure"
+awk '$0 == "            queried = LibBoost.GetThreadPriorityBoost(thread, pointerof(disabled))" {
+    print "            queried = 0_i32"; changed++; next
+  }
+  { print } END { if (changed != 1) exit 3 }' "$REPO/bench/concurrent_mark.iyi" > boost-query-failed.iyi || { echo "the boost query anchor is missing or ambiguous"; exit 1; }
+if ! "$IYI" build --release boost-query-failed.iyi -o boost-query-failed > build-boost-query-failed.log 2>&1; then
+  cat build-boost-query-failed.log; exit 1
+fi
+timeout -k 5 300 ./boost-query-failed > boost-query-failed.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: wake boost setup: cannot query a process thread's priority boost" boost-query-failed.txt || grep -q '^FAIL: wake boost: ' boost-query-failed.txt; then
+  echo "the failed boost query was not reported as setup failure (exit $code):"; tail -3 boost-query-failed.txt; exit 1
+fi
+printf '  exits 76 at "%s"\n' "FAIL: wake boost setup: cannot query a process thread's priority boost"
 
 step "failure proof: a mark beside a busy program that asks for every helper is caught"
 mkdir -p greedy/iyi

@@ -6,25 +6,13 @@
 # Eight steps; the last three are failure proofs, because a gate that
 # cannot fail is not a gate:
 #
-# Timing-decided, not forced:
-#   nosteal: a balance timing bound decides; hold the owner and record a targeted steal decision.
-#   preemptoff: a timed short task decides; hold the computation and require the short task before release.
-#   noflag: a timed short task decides; hold the computation and record the monitor's raised-word decision.
-#   nopoll: a request latency bound decides; hold the slow task and record the targeted poll decision.
-#   stale: a timed switch decision repeats up to 50 rounds for 10 judged; force the raised word across the target switch.
-#   libruntime sort: finite work and latency decide; hold an in-sort poll point until a short task is queued.
-#   libruntime copy: finite work and latency decide; hold an in-copy poll point until a short task is queued.
-#   libruntime rehash: finite work and latency decide; hold an in-rehash poll point until a short task is queued.
-#   libruntime join: finite work and latency decide; hold an in-join poll point until a short task is queued.
-# The healthy library run requires the queued short task before completion.
-# Conditional, not forced:
-#   closeshome: registration relies on a sleep and a wake-count check can mask the verdict; record registration and judge placement first.
-#   duplicate: another worker must steal the stale head; rendezvous at that head would force the witness.
-#   tokenless: preemption must land with a same-unit child runnable; hold that child ready across the switch.
-# Repeated healthy verdicts still pending: sockets and deep retry a no-move
-# run up to five times. Speed and tight-loop ratios are each measured once.
-# Copy-generator anchor negatives ran locally on macOS; platform-applicable
-# generated copies passed the gate on Linux, Windows and macOS.
+# The formerly timing-decided and conditional copies force the relevant
+# queue, monitor, poll, switch, or library-loop state. A hooked control
+# uses the same observation as its mutant. The close-placement and
+# no-preemption mutants use the corresponding healthy program as control.
+# Each copy gets one run; a progress hang is not a successful catch.
+# Socket and deep-frame movement are forced before their larger exercises.
+# Speed and tight-loop timings are performance information, sampled once.
 #
 #   1. The exercise holds every property, plain and --release: parallel
 #      tasks start on the pool and on more than one worker, never on the
@@ -121,8 +109,8 @@
 #      join held in the kernel; and on Windows
 #      a port whose packets only the worker their task parked on runs, and
 #      a pool that leaves the priority boost on.
-#      Timing-decided, repeated and conditional exceptions are in the header.
-#      Coarse is structural; tokenless is conditional.
+#      Coarse uses a structural timer decision; tokenless forces a
+#      same-unit child to be ready at a preemption decision.
 #   8. Failure proof: one run of the pool held to one worker is refused by
 #      the at-once floor, independent of elapsed time.
 set -u
@@ -291,9 +279,9 @@ esac
 # keeps its unit's token; a task switched in is not given up on the word
 # raised for the one before it; the monitor looks every 4 to 10.5 ms (8
 # on Windows) and two tasks on one worker take turns of at most three of
-# those looks; the tight loops cost at most twice what their
-# `@[NoPreempt]` twins cost; and their checks read the word through the
-# thread pointer, in the release build's IR, which it writes for that.
+# those looks; tight loops and their `@[NoPreempt]` twins must answer
+# alike, and their timing ratios are informational. Their checks read
+# the word through the thread pointer in the release build's IR.
 PREEMPT_WORKERS=8
 [ "$CORES" -lt 8 ] && PREEMPT_WORKERS="$CORES"
 # The server shape's clients are the program's own main thread, which on
@@ -922,8 +910,8 @@ broken() { # name, awk program[, file in src/iyi[, program in bench[, build flag
   fi
 }
 # Mutants must exit 1 with the exact FAIL or panic line; controls must
-# exit with their expected status and exact verdict. Timing-decided
-# exceptions are named in the header. Timeouts never count as catches.
+# exit with their expected status and exact verdict. Timeouts never count
+# as catches.
 verdict_caught() { # name, exact verdict, step arguments...
   local name="$1" want="$2" code
   shift 2
@@ -2257,15 +2245,65 @@ step "failure proof: a loop marked @[NoPreempt] holds its worker for its whole c
 if ! "$IYI" build --release -Dpreempt_off "$REPO/bench/parallel_preempt.iyi" -o preemptoff-run > build-preemptoff.log 2>&1; then
   echo "the @[NoPreempt] build failed:"; tail -20 build-preemptoff.log; exit 1
 fi
-verdict_caught preemptoff 'slice: the short task exceeded the wait bound' slice --workers=1
+verdict_caught preemptoff 'slice: the short task queued before the walk ran only after the walk ended' slice --workers=1
 
 step "failure proof: a monitor that never raises a worker's word preempts nothing"
-broken noflag '/^  private def self.look : Bool$/ { inside = 1; methods++ }
-inside && /^  end$/ { inside = 0 }
-inside && /^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ { n++; next }
+# At the armed worker's first decision, both copies lower its word just
+# before the store position and record the word afterward. Only the mutant
+# omits the store.
+NOFLAG_COMMON='/^  def self.preempts : UInt64$/ {
+  print "  @[UnsafeReach(\"armed by the held task, read by the monitor: atomics only\")]"
+  print "  @@forced_flag_target : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"set by the monitor, read by the held task: atomics only\")]"
+  print "  @@forced_flag_seen : UInt64 = 0_u64"
+  print ""
+  print "  def self.force_flag_arm(state : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_flag_target).address).value.set(state)"
+  print "  end"
+  print ""
+  print "  def self.force_flag_prepare(st : IyiSchedulerState, address : UInt64) : Nil"
+  print "    return unless st.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_flag_target).address).value.get"
+  print "    return if address == 0_u64"
+  print "    return unless Pointer(Atomic(UInt64)).new(pointerof(@@forced_flag_seen).address).value.get == 0_u64"
+  print "    Pointer(Atomic(UInt64)).new(address).value.set(0_u64)"
+  print "  end"
+  print ""
+  print "  def self.force_flag_decision(st : IyiSchedulerState, address : UInt64) : Nil"
+  print "    return unless st.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_flag_target).address).value.get"
+  print "    return if address == 0_u64"
+  print "    seen = Pointer(Atomic(UInt64)).new(address).value.get == 0_u64 ? 1_u64 : 2_u64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_flag_seen).address).value.compare_and_set(0_u64, seen)"
+  print "  end"
+  print ""
+  print "  def self.force_flag_seen : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_flag_seen).address).value.get"
+  print "  end"
+  print ""
+  print
+  n_defs++
+  next
+}
+/^  private def self.look : Bool$/ { in_look = 1; n_look++ }
+in_look && /^  end$/ { in_look = 0 }
+in_look && /^            Pointer\(Atomic\(UInt64\)\).new\(address\).value.set\(1_u64\) if address != 0_u64$/ {
+  n_store++; at_store = NR
+  print "            force_flag_prepare(st, address)"
+  if (!drop_raise) print
+  print "            force_flag_decision(st, address)"
+  next
+}
+in_look && /^            stuck = true if st\.ring_size > 0_u64$/ { n_stuck++; at_stuck = NR }'
+NOFLAG_HOOK="$NOFLAG_COMMON"'
 { print }
-END { if (methods != 1 || n != 1) exit 3 }' concurrency.iyi parallel_preempt
-verdict_caught noflag 'slice: the short task exceeded the wait bound' slice --workers=1
+END { if (n_defs != 1 || n_look != 1 || n_store != 1 || n_stuck != 1 || at_stuck != at_store + 1) exit 3 }'
+NOFLAG_BUG='BEGIN { drop_raise = 1 }
+'"$NOFLAG_COMMON"'
+{ print }
+END { if (n_defs != 1 || n_look != 1 || n_store != 1 || n_stuck != 1 || at_stuck != at_store + 1) exit 3 }'
+broken noflag "$NOFLAG_BUG" concurrency.iyi parallel_preempt -Dnoflag_force
+verdict_caught noflag "slice: the monitor's preemption decision for a held worker left its word down" slice --workers=1
+broken noflag_hook "$NOFLAG_HOOK" concurrency.iyi parallel_preempt -Dnoflag_force
+verdict_held noflag_hook "slice: the monitor's preemption decision for a held worker raised its word" slice --workers=1
 
 # Both copies make, set and wait on the high-resolution timer before the
 # mutant drops its handle. Setup and wait failures have separate verdicts.
@@ -2426,46 +2464,186 @@ else
 fi
 
 step "failure proof: a slow half that does not poll leaves a connection in a busy worker's poller"
-# Caught by the poller step, whose window is held: the server shape's
-# copy waited only when a connection happened to park on a worker a slow
-# request then took, and passed three of eight runs under its 80 ms bound,
-# at 76 to 78 ms, on macOS 26.6, Apple M2 Pro, 10 cores (the user's
-# machine). Windows' port is the process's, and in the server shape an
-# idle worker takes what the busy one's poll would have; the poller
-# step's pool of one has no idle worker, so only the poll hands the
-# answer on. On Windows 11, 12 logical processors (the user's machine),
-# the copy answered at 999 to 1001 ms in ten runs of ten, where the
-# gate's own poller step read 7.0 to 9.1 ms in six.
-broken nopoll '/^  def self.preempted : Nil$/ { inside = 1; methods++ }
-inside && /^  end$/ { inside = 0 }
-inside && /^        IyiScheduler.wait_for_events\(false\)$/ { n++; print "        IyiScheduler.wake_expired_sleepers"; next }
+# Both copies record the first armed decision on the selected worker. The
+# mutant changes only the call between the identical expect/decided hooks.
+NOPOLL_DEFS='/^  def self.preempts : UInt64$/ {
+  print "  @[UnsafeReach(\"copy-only poll decision state, accessed atomically\")]"
+  print "  @@forced_poll_target : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only poll decision state, accessed atomically\")]"
+  print "  @@forced_poll_expected : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only poll decision state, accessed atomically\")]"
+  print "  @@forced_poll_entered : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only poll decision state, accessed atomically\")]"
+  print "  @@forced_poll_result : UInt64 = 0_u64"
+  print "  def self.force_poll_arm(state : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_expected).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_entered).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_result).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_target).address).value.set(state)"
+  print "  end"
+  print "  def self.force_poll_expect(st : IyiSchedulerState) : Nil"
+  print "    target = Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_target).address).value.get"
+  print "    return if target == 0_u64 || st.object_id != target || force_poll_result != 0_u64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_expected).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_poll_entered(blocking : Bool) : Nil"
+  print "    return if blocking || Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_expected).address).value.get == 0_u64"
+  print "    target = Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_target).address).value.get"
+  print "    return if target == 0_u64 || IyiScheduler.state_id != target"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_entered).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_poll_decided(st : IyiSchedulerState) : Nil"
+  print "    target = Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_target).address).value.get"
+  print "    return if target == 0_u64 || st.object_id != target"
+  print "    return if Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_expected).address).value.get == 0_u64"
+  print "    entered = Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_entered).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_result).address).value.compare_and_set(0_u64, entered == 1_u64 ? 1_u64 : 2_u64)"
+  print "  end"
+  print "  def self.force_poll_result : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_result).address).value.get"
+  print "  end"
+  print
+  n_defs++
+  next
+}'
+NOPOLL_COMMON='/^  def self.wait_for_events\(blocking : Bool\) : Nil$/ {
+  in_poll_wait = 1; n_wait++; at_wait = NR
+  print; print "    IyiWorkers.force_poll_entered(blocking)"; next
+}
+in_poll_wait && /^    st = state$/ { n_wait_state++; at_wait_state = NR }
+in_poll_wait && /^  end$/ { in_poll_wait = 0 }
+/^  def self.preempted : Nil$/ { in_poll_preempted = 1; n_preempted++ }
+in_poll_preempted && /^  end$/ { in_poll_preempted = 0 }
+in_poll_preempted && /^      if io$/ { n_poll_if++; at_poll_if = NR }
+in_poll_preempted && /^      else$/ { n_poll_else++; at_poll_else = NR }'
+NOPOLL_SITE_HOOK='in_poll_preempted && /^        IyiScheduler.wait_for_events\(false\)$/ {
+  print "        force_poll_expect(st)"; print; print "        force_poll_decided(st)"
+  n_poll++; at_poll = NR; next
+}'
+NOPOLL_SITE_BUG='in_poll_preempted && /^        IyiScheduler.wait_for_events\(false\)$/ {
+  print "        force_poll_expect(st)"; print "        IyiScheduler.wake_expired_sleepers"; print "        force_poll_decided(st)"
+  n_poll++; at_poll = NR; next
+}'
+NOPOLL_END='END {
+  if (n_defs != 1 || n_wait != 1 || n_wait_state != 1 || at_wait_state != at_wait + 1 ||
+      n_preempted != 1 || n_poll_if != 1 || n_poll != 1 || n_poll_else != 1 ||
+      at_poll != at_poll_if + 1 || at_poll_else != at_poll + 1) exit 3
+}'
+NOPOLL_HOOK="$NOPOLL_DEFS
+$NOPOLL_COMMON
+$NOPOLL_SITE_HOOK
 { print }
-END { if (methods != 1 || n != 1) exit 3 }' concurrency.iyi parallel_preempt
-verdict_caught nopoll 'poller: the fast request exceeded the wait bound' poller --workers=1
+$NOPOLL_END"
+NOPOLL_BUG="$NOPOLL_DEFS
+$NOPOLL_COMMON
+$NOPOLL_SITE_BUG
+{ print }
+$NOPOLL_END"
+broken nopoll "$NOPOLL_BUG" concurrency.iyi parallel_preempt -Dnopoll_force
+verdict_caught nopoll "poller: a preemption with a read waiting did not poll its worker's poller" poller --workers=1
+broken nopoll_hook "$NOPOLL_HOOK" concurrency.iyi parallel_preempt -Dnopoll_force
+verdict_held nopoll_hook "poller: a preemption with a read waiting polled its worker's poller" poller --workers=1
 
 step "failure proof: a word the monitor raised for the task before preempts the task switched in after it"
-# The switch lowers the word no more: the task the fresh step switches
-# in after a 30 ms hold with no check gives its worker up at its first
-# back-edge, round 1 of 10. Master's runtime did so 0 to 1 us into the
-# task in three runs of three on Windows 11, 12 logical processors (the
-# user's machine), and 0 us in three of three on Linux here (12 vCPUs);
-# the lowered word ran 10 rounds of 10 through with no preemption on
-# both, plain and on Windows release too. In this gate's first runs the
-# copy was caught at round 1, 0 us in, on that Windows machine at 12
-# processors and held to 4, on Linux here and on macOS 26.6, Apple M2
-# Pro, 10 cores (the user's machine), and the fresh step held 10 rounds
-# with no preemption, plain and release, on each.
-# The step now judges each round from the task before's end to the end
-# of the slice the give-up came in (`fresh_round`), and the copy was
-# caught at round 1 within 55 to 3075 us of that end on Linux (8 runs, 16
-# to 48 threads runnable), 64 us in a gate run beside 12 busy loops, and
-# 34 to 50 us on tmac.
-broken stale '/^  def self.switch_to\(fiber : IyiFiber\) : Nil$/ { inside = 1; methods++ }
-inside && /^  end$/ { inside = 0 }
-inside && /^        raised.value.set\(0_u64\) if raised.value.get != 0_u64$/ { n++; next }
+# The monitor waits at the next look's entry. That rendezvous also drains
+# any earlier look, preventing its old decision from raising the word after
+# the switch. Only the lowering line differs between the two copies.
+STALE_DEFS='/^  def self.preempts : UInt64$/ {
+  print "  @[UnsafeReach(\"copy-only switch decision state, accessed atomically\")]"
+  print "  @@forced_stale_target : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only switch decision state, accessed atomically\")]"
+  print "  @@forced_stale_gate : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only switch decision state, accessed atomically\")]"
+  print "  @@forced_stale_word : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only switch decision state, accessed atomically\")]"
+  print "  @@forced_stale_before : UInt64 = 0_u64"
+  print "  def self.force_stale_arm(state : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_before).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_word).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_target).address).value.set(state)"
+  print "  end"
+  print "  def self.force_stale_close_gate : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_gate).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_stale_gate_state : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_gate).address).value.get"
+  print "  end"
+  print "  def self.force_stale_gate : Nil"
+  print "    gate = Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_gate).address)"
+  print "    return unless gate.value.compare_and_set(1_u64, 2_u64)[1]"
+  print "    limit = __iyi_monotonic_ns + 10000000000_i64"
+  print "    while gate.value.get == 2_u64"
+  print "      if __iyi_monotonic_ns > limit"
+  print "        gate.value.compare_and_set(2_u64, 4_u64)"
+  print "        return"
+  print "      end"
+  print "      IyiThread.spin_pause"
+  print "    end"
+  print "  end"
+  print "  def self.force_stale_input(st : IyiSchedulerState, word : UInt64) : Nil"
+  print "    return unless st.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_target).address).value.get"
+  print "    return unless force_stale_gate_state == 2_u64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_before).address).value.compare_and_set(0_u64, word == 0_u64 ? 1_u64 : 2_u64)"
+  print "  end"
+  print "  def self.force_stale_before : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_before).address).value.get"
+  print "  end"
+  print "  def self.force_stale_decision(st : IyiSchedulerState, word : UInt64) : Nil"
+  print "    return unless st.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_target).address).value.get"
+  print "    gate = Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_gate).address)"
+  print "    return unless gate.value.get == 2_u64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_word).address).value.compare_and_set(0_u64, word == 0_u64 ? 1_u64 : 2_u64)"
+  print "    gate.value.compare_and_set(2_u64, 3_u64)"
+  print "  end"
+  print "  def self.force_stale_word : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_word).address).value.get"
+  print "  end"
+  print
+  n_defs++
+  next
+}'
+STALE_COMMON='/^  def self.switch_to\(fiber : IyiFiber\) : Nil$/ { in_stale_switch = 1; n_switch++ }
+in_stale_switch && /^  end$/ { in_stale_switch = 0 }
+in_stale_switch && /^        st\.switches = st\.switches &\+ 1_u64$/ { n_switch_count++; at_switch_count = NR }
+in_stale_switch && /^        raised = Pointer\(Atomic\(UInt64\)\).new\(st\.preempt_word\)$/ {
+  n_raised++; at_raised = NR
+  print; print "        IyiWorkers.force_stale_input(st, raised.value.get)"; next
+}
+/^  private def self.look : Bool$/ {
+  in_stale_look = 1; n_look++; at_look = NR
+  print; print "    force_stale_gate"; next
+}
+in_stale_look && /^    busy = false$/ { n_busy++; at_busy = NR }
+in_stale_look && /^  end$/ { in_stale_look = 0 }'
+STALE_SITE_HOOK='in_stale_switch && /^        raised\.value\.set\(0_u64\) if raised\.value\.get != 0_u64$/ {
+  print; print "        IyiWorkers.force_stale_decision(st, raised.value.get)"
+  n_lower++; at_lower = NR; next
+}'
+STALE_SITE_BUG='in_stale_switch && /^        raised\.value\.set\(0_u64\) if raised\.value\.get != 0_u64$/ {
+  print "        IyiWorkers.force_stale_decision(st, raised.value.get)"
+  n_lower++; at_lower = NR; next
+}'
+STALE_END='END {
+  if (n_defs != 1 || n_switch != 1 || n_switch_count != 1 || n_raised != 1 || n_lower != 1 ||
+      at_raised != at_switch_count + 1 || at_lower != at_raised + 1 ||
+      n_look != 1 || n_busy != 1 || at_busy != at_look + 1) exit 3
+}'
+STALE_HOOK="$STALE_DEFS
+$STALE_COMMON
+$STALE_SITE_HOOK
 { print }
-END { if (methods != 1 || n != 1) exit 3 }' concurrency.iyi parallel_preempt
-verdict_caught stale "fresh: a switched-in task yielded before the monitor's floor" fresh --workers=1
+$STALE_END"
+STALE_BUG="$STALE_DEFS
+$STALE_COMMON
+$STALE_SITE_BUG
+{ print }
+$STALE_END"
+broken stale "$STALE_BUG" concurrency.iyi parallel_preempt -Dstale_force
+verdict_caught stale "fresh: the word raised for the task before was still up after the switch" fresh --workers=1
+broken stale_hook "$STALE_HOOK" concurrency.iyi parallel_preempt -Dstale_force
+verdict_held stale_hook "fresh: the switch after a task held its raised word lowered the word" fresh --workers=1
+broken stale_release_hook "$STALE_HOOK" concurrency.iyi parallel_preempt --release -Dstale_force
+verdict_held stale_release_hook "fresh: the switch after a task held its raised word lowered the word" fresh --workers=1
 
 step "failure proof: a port whose packets only the thread their task parked on runs leaves an answer behind a computation"
 case "$(uname -s)" in

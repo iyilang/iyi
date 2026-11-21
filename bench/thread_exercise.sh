@@ -59,6 +59,10 @@
 #      crossing the budget at once or collecting at once, each put their
 #      own back; with one record of the raise for them all, a thread
 #      keeps it.
+#  4e. A collection returns while the thread its release let go is held
+#      in its park, at a gate a copy of thread.iyi adds; with the release
+#      waiting for its threads to count out again, the collection returns
+#      only when the gate's 5 s have run out, which the program reports.
 #   5. Failure proof: the thread-root walk removed from a copy of the
 #      prelude, and a thread's list — reachable from its stopped frames
 #      alone — is swept out from under it; the program exits 1 naming the
@@ -690,6 +694,27 @@ esac
 # Five interleaved runs: 0.3 to 16.8 ms, none past 20, and with the drop
 # put back at the end of the release, 100.1 to 102.6 ms, 36 or 37 waits
 # past 20 ms in each run. The bound is 50 ms.
+#
+# The 50 ms are of the time the taker ran while it waited, read off its
+# own cycles (`QueryThreadCycleTime`), not of the clock (#223). By the
+# clock a wait also counts the taker's time suspended by a stop, which
+# the stop check holds to 20 ms with three a run let pass, and its time
+# off its processors while other threads had them. In 111 jobs on
+# windows-2025 every wait past 2 ms had a stop as long in its run (30.1
+# ms beside a stop of 30.0, 33.0 beside 33.0, 45.8 beside 42.0), and two
+# failed on one wait each, of 54.4 and 75.0 ms (jobs 135417513745, and
+# 135512428102 on master). On Windows 11 (12 logical processors), 40
+# runs each way, interleaved: beside twelve busy loops, with three more
+# pinned to the taker's processors or not, the clock failed the shipped
+# runtime in 7 runs of 26, on waits of 68 to 168 ms, and in none of the
+# 14 without them; by the taker's run it passed all 40, its longest 0.03
+# to 0.4 ms, and the copy that puts the priority back inside the release
+# was caught in all 40, its longest 100 to 168 ms. Counted on the lock's
+# own spin at normal priority, that copy was missed in all 26 runs beside
+# the loops: the spin gives the core away every 128 turns, and the taker
+# ran 0.3 to 0.7 ms of waits of 100 ms and more. And the taker must have
+# run half the run, or a hold of a burst could not have kept it spinning
+# past 50 ms: the step fails saying so rather than pass on nothing.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     if [ "${NUMBER_OF_PROCESSORS:-1}" -lt 2 ]; then
@@ -737,17 +762,27 @@ class Flag
   getter held : Atomic(Int64)
   getter waited : Atomic(Int64)
   getter waits : Atomic(Int64)
+  getter ran : Atomic(Int64)
+  getter off : Atomic(Int64)
+  getter rate : Atomic(Int64)
+  getter share : Atomic(Int64)
 
   def initialize
     @stop = Atomic(Int64).new(0_i64)
     @held = Atomic(Int64).new(0_i64)
     @waited = Atomic(Int64).new(0_i64)
     @waits = Atomic(Int64).new(0_i64)
+    @ran = Atomic(Int64).new(0_i64)
+    @off = Atomic(Int64).new(0_i64)
+    @rate = Atomic(Int64).new(0_i64)
+    @share = Atomic(Int64).new(0_i64)
   end
 end
 
 lib Placing
   fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
+  fun SetThreadPriority(thread : Void*, priority : Int32) : Int32
+  fun QueryThreadCycleTime(thread : Void*, cycles : UInt64*) : Int32
 end
 
 def fail(message : String) : Nil
@@ -765,23 +800,71 @@ def compute(flag : Flag, mask : UInt64) : Nil
   end
 end
 
+# The cycles the calling thread has run: they stand still while it is
+# suspended, and while it waits for a processor.
+def cycles : UInt64
+  count = 0_u64
+  Placing.QueryThreadCycleTime(::LibC.GetCurrentThread, pointerof(count))
+  count
+end
+
+# This thread's cycles a microsecond as it spins: the most of twenty
+# spins of a millisecond each, since one it lost its processor in reads
+# low.
+def cycle_rate : UInt64
+  best = 0_u64
+  spins = 0
+  while spins < 20
+    ran = cycles
+    began = IyiMark.now_ns
+    while IyiMark.now_ns - began < 1000000_u64
+    end
+    rate = (cycles - ran) * 1000_u64 // (IyiMark.now_ns - began)
+    best = rate if rate > best
+    spins = spins + 1
+  end
+  best
+end
+
 # Takes the runtime lock in a loop on the processors *mask* names,
-# computing 20 us between turns, and keeps its longest wait and how many
-# waits passed *bound*.
+# computing 20 us between turns, at Windows' highest priority and asking
+# by `try_lock` in a spin of its own: the lock's own spin gives the core
+# to any thread ready on it every 128 turns, and a normal one there kept
+# the taker off its processor through whole waits. A wait is judged by
+# the time the taker ran in it, its own cycles: how long a holder kept
+# out a waiter that could run. Its time suspended by a stop is the stop
+# check's, and its time off its processors while other threads had them
+# is the machine's. Keeps the longest of those and how many passed
+# *bound*; the longest wait by the clock, and how many passed *bound* by
+# the clock but not by the taker's run; and how much of its time the
+# taker ran, in per cent.
 def taker(flag : Flag, mask : UInt64, bound : UInt64) : Nil
   Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, mask)
+  Placing.SetThreadPriority(::LibC.GetCurrentThread, 2_i32)
+  rate = cycle_rate
+  flag.rate.set(rate.to_i64)
+  rate = 1_u64 if rate == 0_u64
   flag.held.add(1_i64)
+  ran_from = cycles
+  wall_from = IyiMark.now_ns
   while flag.stop.get == 0_i64
+    ran = cycles
     asked = IyiMark.now_ns
-    IyiRuntimeLock.lock
+    until IyiRuntimeLock.try_lock
+      IyiThread.spin_pause
+    end
     took = IyiMark.now_ns - asked
+    ran = (cycles - ran) * 1000_u64 // rate
     IyiRuntimeLock.unlock
-    flag.waits.add(1_i64) if took > bound
+    flag.waits.add(1_i64) if ran > bound
+    flag.ran.set(ran.to_i64) if ran.to_i64 > flag.ran.get
+    flag.off.add(1_i64) if took > bound && ran <= bound
     flag.waited.set(took.to_i64) if took.to_i64 > flag.waited.get
     ends = IyiMark.now_ns + 20000_u64
     while IyiMark.now_ns < ends
     end
   end
+  flag.share.set((((cycles - ran_from) * 1000_u64 // rate) * 100_u64 // (IyiMark.now_ns - wall_from)).to_i64)
 end
 
 # The processor the first argument numbers is the stopping thread's, and
@@ -850,9 +933,14 @@ threads.each { |thread| thread.join }
 # 33 ms in a run. The burst holds dozens: with the raises taken out, 21 to
 # 33 stops of 100 to 142 ms a run in 18 runs there. So up to three pass.
 fail("stop: #{over} of #{collections} stops beside a burst on the stopping thread's processor took past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us") if over > 3
-fail("lock: #{flag.waits.get} waits for the runtime lock beside #{collections} collections took past #{lock_bound // 1000000_u64} ms, the longest #{flag.waited.get // 1000_i64} us") if flag.waits.get > 0_i64
+fail("lock: #{flag.waits.get} waits for the runtime lock beside #{collections} collections kept the taker spinning past #{lock_bound // 1000000_u64} ms, the longest #{flag.ran.get // 1000_i64} us of it running, #{flag.waited.get // 1000_i64} us by the clock") if flag.waits.get > 0_i64
+fail("lock: the taker's cycles did not move, so no wait for the runtime lock could be judged") if flag.rate.get == 0_i64
+# Spinning past the bound through a hold of a burst takes a taker that
+# runs more than half the time; held off its processors more than that,
+# the check could not fail, and says so rather than passing.
+fail("lock: the taker ran #{flag.share.get}% of the run, under half, so no collection holding the runtime lock a burst could have kept it spinning past #{lock_bound // 1000000_u64} ms: nothing was judged") if flag.share.get < 50_i64
 puts "stop: #{collections} stops of #{threads.size} threads beside a burst on the stopping thread's processor, #{share}% of the run in stops, #{over} past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us"
-puts "lock: the longest wait for the runtime lock beside them #{flag.waited.get // 1000_i64} us, held to #{lock_bound // 1000000_u64} ms"
+puts "lock: the longest the taker spun for the runtime lock beside them #{flag.ran.get // 1000_i64} us, held to #{lock_bound // 1000000_u64} ms, the taker running #{flag.share.get}% of the run; the longest wait by the clock #{flag.waited.get // 1000_i64} us, #{flag.off.get} past #{lock_bound // 1000000_u64} ms with the taker off its processors"
 IYI
     shared=$(( NUMBER_OF_PROCESSORS - 1 ))
     # `./$1` beside the burst, its output in `$2`.
@@ -896,10 +984,10 @@ IYI
       cat build-inside.log; exit 1
     fi
     beside_burst stopping-inside inside.txt
-    if ! grep -q '^FAIL: lock:' inside.txt; then
+    if ! grep -q '^FAIL: lock: [0-9]* waits for the runtime lock' inside.txt; then
       echo "the lock check did not fire:"; cat inside.txt; exit 1
     fi
-    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: lock:' inside.txt)"
+    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: lock: [0-9]* waits for the runtime lock' inside.txt)"
 
     step "failure proof: a stopping thread left at its priority is held by the burst"
     mkdir -p level/iyi
@@ -1108,101 +1196,98 @@ esac
 
 # ── 4e. The release waits for nobody it lets go ──────────────────────────
 # A stop's release waited for every thread it let go to leave its park,
-# so a collection lasted until the last of them had a processor again. A
-# thread asked to stop inside the allocator parks itself where it leaves.
-# Here it shares a processor, at the lowest priority, with another
-# program - one the stop does not stop - computing 400 ms at a time at
-# the highest: it parks in that program's millisecond off, the mark that
-# follows outlasts the millisecond, and the release waited out the next
-# run. The release now leaves the wait to the next stop, which clears the
-# words the parked threads read: on Windows 11, 12 logical processors,
-# 403 to 410 ms past each stop before, 25 to 28 after, the mark among
-# it (3 runs each). On Linux the held thread is at SCHED_IDLE, which the
-# scheduler still runs within ticks: 34 to 47 ms before and 38 to 42
-# after on twelve vCPUs, so it is printed there; darwin has no placing
-# to hold it by. Asserted on Windows; printed everywhere.
+# so a collection lasted until the last of them had a processor again: on
+# Windows 11, 12 logical processors, a thread parked inside the allocator
+# and then held off its processor by another program kept each collection
+# 403 to 410 ms past its stop, and 25 to 28 once the release left that
+# wait to the next stop (`resume_others`, `stop_others`; the mark of
+# 2,000,000 links among it, 3 runs each).
+#
+# Held by construction, not by a clock. A copy of thread.iyi gains a gate
+# in `park`, after the release word and before the count out, for the one
+# thread the program names: that thread, asked to stop inside the
+# allocator, parks where it leaves, and once released waits at the gate
+# until the program opens it, which it does when its collection has
+# returned. A release that does not wait returns with the thread still at
+# the gate. One that waits for the count out returns only when the gate's
+# own 5 s have run out, which the thread records: caught on its one run,
+# on every system, whatever else the machine runs. The copy is the tree's
+# thread.iyi and the gate, made here by awk, the tree untouched; the gate
+# lets every other thread through, and every thread once it is open. The
+# gate is jwaldrip's design, from #218.
+#
+# This was the time five collections went on past their stops beside a
+# thread that a process at the highest priority, computing 400 ms at a
+# time, kept off its processor, held to 200 ms on Windows; nothing waited
+# for that process to be computing. On that machine, idle, its first
+# burst began 1.7 to 34.0 ms after the collections did (20 runs), and a
+# collection of the copy that waits was held a burst only once it had:
+# with the process made to start 150 or 250 ms late, the copy came in
+# under the bound in 5 runs of 5 each, at 21 to 29 ms. On a
+# 4-core runner the copy came in at 161 and 165 ms, one or two of its five
+# collections held (jobs 135060721721 and 135025096299, #223), and at 279
+# to 419 ms in 104 other jobs.
+cat > gate.part <<'IYI'
+    # ── The release gate (bench/thread_exercise.sh, step 4e) ─────────────
+    # In that step's copies only; the tree has none of it. Four words on
+    # the control page past the stop's own, a line each: the thread the
+    # gate holds, whether it has reached the gate, whether the gate is
+    # open, and whether its deadline ran out first.
+    IYI_GATE_LINE    = 384_u64
+    IYI_GATE_HELD    = 448_u64
+    IYI_GATE_OPEN    = 512_u64
+    IYI_GATE_EXPIRED = 576_u64
+    IYI_GATE_NS      = 5000000000_u64
+
+    # The calling thread is the one the gate holds.
+    def self.release_gate_arm : Nil
+      word(control + IYI_GATE_LINE).value.set(@@line)
+    end
+
+    # Every released thread, before it counts itself out of its park: the
+    # one armed waits here until the gate opens, or its deadline passes,
+    # which it records. Atomics, the clock and the yield only, nothing
+    # allocated and no lock: on Linux and darwin a park can be the stop's
+    # signal handler.
+    def self.release_gate_hold(line : UInt64) : Nil
+      page = control
+      return if line == 0_u64 || word(page + IYI_GATE_LINE).value.get != line
+      word(page + IYI_GATE_HELD).value.set(1_u64)
+      began = IyiMark.now_ns
+      while word(page + IYI_GATE_OPEN).value.get == 0_u64
+        if IyiMark.now_ns &- began > IYI_GATE_NS
+          word(page + IYI_GATE_EXPIRED).value.set(1_u64)
+          return
+        end
+        yield_cpu
+      end
+    end
+
+    # Opens the gate; answers whether the armed thread reached it and
+    # whether its deadline ran out before the gate opened. A release that
+    # does not wait can return before the thread is at the gate, so this
+    # waits for it to get there, within the same deadline.
+    def self.release_gate_open : Tuple(Bool, Bool)
+      page = control
+      word(page + IYI_GATE_OPEN).value.set(1_u64)
+      began = IyiMark.now_ns
+      while word(page + IYI_GATE_HELD).value.get == 0_u64 && IyiMark.now_ns &- began <= IYI_GATE_NS
+        yield_cpu
+      end
+      {word(page + IYI_GATE_HELD).value.get != 0_u64, word(page + IYI_GATE_EXPIRED).value.get != 0_u64}
+    end
+
+IYI
 cat > release.iyi <<'IYI'
-@[Unsafe("the held thread pins and deprioritizes itself through C calls and raw sched syscalls whose arguments live in Pointer#malloc memory")]
 module release
-
-import std/process::{Process, ChildProcess}
-
-class Link
-  getter next_link : Link?
-
-  def initialize(@next_link : Link?)
-  end
-end
 
 class Flag
   getter stop : Atomic(Int64)
-  getter held : Atomic(Int64)
+  getter inside : Atomic(Int64)
 
   def initialize
     @stop = Atomic(Int64).new(0_i64)
-    @held = Atomic(Int64).new(0_i64)
-  end
-end
-
-{% if flag?(:win32) %}
-  lib Placing
-    fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
-    fun SetThreadPriority(thread : Void*, priority : Int32) : Int32
-    fun Sleep(milliseconds : UInt32) : Nil
-  end
-{% elsif flag?(:linux) && flag?(:x86_64) %}
-  SYS_SCHED_SETAFFINITY  = 203_i64
-  SYS_SCHED_SETSCHEDULER = 144_i64
-  SYS_NANOSLEEP          =  35_i64
-{% elsif flag?(:linux) %}
-  SYS_SCHED_SETAFFINITY  = 122_i64
-  SYS_SCHED_SETSCHEDULER = 119_i64
-  SYS_NANOSLEEP          = 101_i64
-{% end %}
-
-# The running thread held to processor `cpu`, the lowest of its
-# priorities when `low` and otherwise the highest, with no boost:
-# Windows' -2 and 2, Linux's SCHED_IDLE and the default policy. Nothing
-# on darwin.
-def hold(cpu : Int32, low : Bool) : Nil
-  {% if flag?(:win32) %}
-    Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, 1_u64.unsafe_shl(cpu.to_u64))
-    Placing.SetThreadPriority(::LibC.GetCurrentThread, low ? -2_i32 : 2_i32)
-    ::LibC.SetThreadPriorityBoost(::LibC.GetCurrentThread, 1_i32)
-  {% elsif flag?(:linux) %}
-    mask = Pointer(UInt64).malloc(16_u64)
-    mask[cpu // 64] = 1_u64.unsafe_shl((cpu % 64).to_u64)
-    __iyi_conc_syscall3(SYS_SCHED_SETAFFINITY, 0_i64, 128_i64, mask.address.to_i64)
-    if low
-      param = Pointer(Int32).malloc(1_u64)
-      __iyi_conc_syscall3(SYS_SCHED_SETSCHEDULER, 0_i64, 5_i64, param.address.to_i64)
-    end
-  {% end %}
-end
-
-# A millisecond off the processor, for the held thread to run in.
-def nap : Nil
-  {% if flag?(:win32) %}
-    Placing.Sleep(1_u32)
-  {% elsif flag?(:linux) %}
-    spec = Pointer(Int64).malloc(2_u64)
-    spec[1] = 1000000_i64
-    __iyi_conc_syscall3(SYS_NANOSLEEP, spec.address.to_i64, 0_i64, 0_i64)
-  {% end %}
-end
-
-# Inside the allocator nearly all its time, so a stop finds it there and
-# leaves it to park where it leaves (`IyiHeap.leave_barrier`).
-def spin_low(flag : Flag, cpu : Int32) : Nil
-  hold(cpu, true)
-  flag.held.add(1_i64)
-  while flag.stop.get == 0_i64
-    IyiHeap.enter_barrier
-    turns = 0_i64
-    while turns < 100000_i64
-      turns = turns + flag.held.get
-    end
-    IyiHeap.leave_barrier
+    @inside = Atomic(Int64).new(0_i64)
   end
 end
 
@@ -1211,90 +1296,69 @@ def fail(message : String) : Nil
   __iyi_exit(1)
 end
 
-# The other program: on the held thread's processor, above it, 400 ms
-# computing at a time and a millisecond off between, for 60 s at most.
-if Program.args.size == 2 && Program.args[0] == "hog"
-  hold(Program.args[1].to_i, false)
-  quits = IyiMark.now_ns + 60000000000_u64
-  while IyiMark.now_ns < quits
-    ends = IyiMark.now_ns + 400000000_u64
-    while IyiMark.now_ns < ends
+# The held thread, the gate's: inside the allocator's bracket from its
+# first `enter_barrier` on, but for the instant it leaves to park, so a
+# stop finds it there on every system and it parks where it leaves
+# (`IyiHeap.leave`).
+def hold_inside(flag : Flag) : Nil
+  IyiThread.release_gate_arm
+  while flag.stop.get == 0_i64
+    IyiHeap.enter_barrier
+    flag.inside.set(1_i64)
+    while flag.stop.get == 0_i64 && !IyiHeap.stop_requested?
+      IyiThread.spin_pause
     end
-    nap
+    IyiHeap.leave_barrier
   end
-  exit 0
 end
 
-asserted = false
-{% if flag?(:win32) %}
-  asserted = true
-{% end %}
-if IyiThread.core_count < 2_u64
-  puts "release: one processor here, nothing to hold a thread off"
-  exit 0
-end
-# A chain the stop's mark walks one link at a time, some tens of
-# milliseconds: past the other program's millisecond off, which a timer
-# of Windows' default resolution makes 15.6.
-chain = nil.as(Link?)
-2000000.times { chain = Link.new(chain) }
-hog = Process.spawn(Process.executable || "", ["hog", "1"])
-unless hog.is_a?(ChildProcess)
-  print "FAIL: release: the other program did not start\n"
-  exit 1
-end
 flag = Flag.new
-held = IyiThread.start { spin_low(flag, 1) }
-while flag.held.get < 1_i64
+held = IyiThread.start { hold_inside(flag) }
+while flag.inside.get == 0_i64
   IyiThread.yield_cpu
 end
-hold(0, false)
-stop_ns = IyiThread.stop_ns
-pause_ns = IyiMark.pause_total_ns
-stops = IyiThread.stops
-5.times { IyiMark.collect }
-count = IyiThread.stops - stops
-after = ((IyiMark.pause_total_ns - pause_ns) - (IyiThread.stop_ns - stop_ns)) // count
+IyiMark.collect
+reached, expired = IyiThread.release_gate_open
 flag.stop.set(1_i64)
-hog.kill
-hog.wait
 held.join
-links = 0
-link = chain
-while link.is_a?(Link)
-  links = links + 1
-  link = link.next_link
-end
-fail("release: the chain kept #{links} links of 2000000") if links != 2000000
-fail("release: #{count} collections beside a thread held off its processor went on #{after // 1000000_u64} ms each past their stops, past 200") if asserted && after > 200000000_u64
-puts "release: #{count} collections beside a thread held off its processor, #{after // 1000_u64} us each past their stops (the mark of 2000000 links among it), held to 200 ms"
+fail("release: the thread the collection stopped inside the allocator never reached its park's gate") unless reached
+fail("release: the collection returned only once the thread its release let go had counted out of its park") if expired
+puts "release: a collection returned with the thread its release let go still held in its park"
 IYI
-step "a collection's release, beside a thread held off its processor"
-if ! "$IYI" build --release release.iyi -o release > build-release.log 2>&1; then
+step "a collection's release, beside a thread it lets go and holds in its park"
+mkdir -p gated/iyi waiting/iyi
+cp "$REPO"/src/iyi/*.iyi gated/iyi/
+awk -v gate=gate.part '
+  /^    # ── Roots / { while ((getline line < gate) > 0) print line; roots++ }
+  /^      count_in\(page \+ IYI_TC_RESUMED\)$/ { print "      release_gate_hold(line)"; hook++ }
+  { print }
+  END { if (roots != 1 || hook != 1) exit 3 }
+' "$REPO/src/iyi/thread.iyi" > gated/iyi/thread.iyi || { echo "the park's count out or the roots' heading is not in thread.iyi once any more"; exit 1; }
+if ! IYI_PATH="$WORK/gated${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release > build-release.log 2>&1; then
   cat build-release.log; exit 1
 fi
-if ! timeout -k 5 120 ./release > release.txt 2>&1; then
+if ! timeout -k 5 120 ./release > release.txt 2>&1 || ! grep -q '^release: ' release.txt; then
   cat release.txt; exit 1
 fi
 sed 's/^/  /' release.txt
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    step "failure proof: a release that waits for the threads it let go is caught"
-    mkdir -p waiting/iyi
-    cp "$REPO"/src/iyi/*.iyi waiting/iyi/
-    awk '{ print } /^        @@owed = @@deferred$/ { print "        while word(page + IYI_TC_RESUMED).value.get < @@owed.to_u64"; print "          yield_cpu"; print "        end"; found = 1 } END { if (!found) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > waiting/iyi/thread.iyi || { echo "the release is not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/waiting${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release-waiting > build-waiting.log 2>&1; then
-      cat build-waiting.log; exit 1
-    fi
-    timeout -k 5 120 ./release-waiting > waiting.txt 2>&1
-    code=$?
-    if [ "$code" -ne 1 ] || ! grep -q '^FAIL: release:' waiting.txt; then
-      echo "the release check did not fire (exit $code):"; tail -3 waiting.txt; exit 1
-    fi
-    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: release:' waiting.txt)"
-    ;;
-esac
+
+step "failure proof: a release that waits for the threads it let go is caught"
+cp "$REPO"/src/iyi/*.iyi waiting/iyi/
+awk '
+  /^        @@owed = @@deferred$/ { print; print "        while word(page + IYI_TC_RESUMED).value.get < @@owed.to_u64"; print "          yield_cpu"; print "        end"; deferred++; next }
+  /^        @@owed = others$/ { print; print "        wait_count(page + IYI_TC_RESUMED, @@owed.to_u64)"; owed++; next }
+  { print }
+  END { if (deferred != 1 || owed != 1) exit 3 }
+' gated/iyi/thread.iyi > waiting/iyi/thread.iyi || { echo "the release is not in thread.iyi any more"; exit 1; }
+if ! IYI_PATH="$WORK/waiting${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release-waiting > build-waiting.log 2>&1; then
+  cat build-waiting.log; exit 1
+fi
+timeout -k 5 120 ./release-waiting > waiting.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q '^FAIL: release: the collection returned only once' waiting.txt; then
+  echo "the release check did not fire (exit $code):"; cat waiting.txt; exit 1
+fi
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: release:' waiting.txt)"
 
 # ── 5. Failure proof: a stopped thread's frames are roots ─────────────────
 # The walk over stopped threads removed from the root set, in a copy of

@@ -914,6 +914,50 @@
   one report in 25 runs of 25 on Linux (idle and beside the busy loops),
   the Mac and Windows 11.
 
+- **`bench/thread_exercise.sh`'s copy whose release waits for the threads
+  it let go is caught on its one run, on Linux, darwin and Windows (step
+  4e, #223).** It was caught by time: five collections beside a thread
+  that a process computing 400 ms at a time kept off its processor had to
+  average past 200 ms after their stops, and nothing waited for that
+  process to start. A collection was held a burst only once the process
+  was computing, so the copy read 161 and 165 ms on two windows-2025
+  runners (jobs 135060721721 and 135025096299, one or two collections
+  held), and on Windows 11, idle, the process's first burst came 1.7 to
+  34.0 ms after the collections began; made to start 150 or 250 ms late
+  it let the copy through 5 runs of 5 each. Now a copy of `thread.iyi`
+  holds the thread the collection stops inside the allocator at a gate in
+  its park, after its release and before it counts itself out, until the
+  program opens the gate when the collection has returned: the release
+  returns with the thread still held, and the copy that waits for the
+  count out returns only when the gate's 5 s run out, which the program
+  reports. The hog, the priorities, the 2,000,000-link chain and the
+  bound are gone. 30 of 30 sound runs and 30 of 30 caught in each of:
+  Linux (12 vCPUs) idle and beside a busy loop pinned to each processor;
+  Windows 11 (12 logical processors) idle, beside a loop pinned to each,
+  and held to 4 processors beside a loop on each; the M2 Pro idle and
+  beside 10 busy loops (macOS pins nothing). The gate is jwaldrip's
+  design, from #218, without its five tries.
+
+- **`bench/thread_exercise.sh` holds the runtime lock's waits beside a
+  burst to the time the waiter ran in them (step 4d, #223).** The check
+  is that a collection does not hold the lock where its priority drops
+  and the burst takes its processor, and it held a fifth thread's waits
+  to 50 ms by the clock, which also counts the waiter suspended by a stop
+  (the stop check's, three stops a run past 20 ms let through) and off its
+  processors for other threads. Every wait past 2 ms in 111 windows-2025
+  jobs had a stop as long in its run, and two failed on one wait each, of
+  54.4 and 75.0 ms (jobs 135417513745, and 135512428102 on master's own
+  run). The waiter now spins at Windows' highest priority on `try_lock`
+  and is judged by its own cycles (`QueryThreadCycleTime`); the runtime
+  lock's spin gives the core away every 128 turns, and on it the copy
+  that puts the priority back inside the release was missed in all 26
+  runs beside busy loops. On Windows 11, 40 runs each way: the clock
+  failed the shipped runtime in 7 of 26 runs beside twelve busy loops
+  (waits of 68 to 168 ms) and none of 14 without; by the waiter's run it
+  passed 40 of 40, its longest 0.03 to 0.4 ms, and the copy was caught 40
+  of 40, its longest 100 to 168 ms. A waiter that ran under half the run
+  could not have caught a burst-long hold, and the step fails saying so.
+
 - **`bench/std_xz_exercise.sh`'s copy whose ring never grows past 64 KiB
   is caught at its check every run.** It read below the ring's memory, so
   it failed by a wrong CRC64 on most runs and by a memory fault on some:

@@ -43,6 +43,24 @@
     __iyi_exit(1)
   end
 
+  # A forced premise can fail while its helpers are held. Do not allocate a
+  # formatted message there, where an allocation could wait on that mark.
+  def setup_fail(message : String) : Nil
+    buffer = uninitialized UInt8[512]
+    bytes = pointerof(buffer).as(UInt8*)
+    size = message.bytesize
+    if size > 505
+      overflow = "FAIL: benchmark setup sentence exceeds 505 bytes\n"
+      __iyi_write(2, overflow.to_unsafe.as(Void*), overflow.bytesize.to_u64)
+      __iyi_exit(76)
+    end
+    bytes.copy_from("FAIL: ".to_unsafe, 6)
+    (bytes + 6).copy_from(message.to_unsafe, size)
+    bytes[size + 6] = 10_u8
+    __iyi_write(2, bytes.as(Void*), (size + 7).to_u64)
+    __iyi_exit(76)
+  end
+
   class Payload
     @bytes : Pointer(UInt8)
     @seed : UInt64
@@ -430,7 +448,7 @@
   # What the mark found is the premise: anything else still alive makes
   # the live set large, and a mark over it goes beside the program as it
   # should.
-  fail("small: the live set is #{small_live.to_i64} bytes, not two thousand payloads: something else is still alive") if small_live > 2097152_u64
+  setup_fail("small: the live set is #{small_live.to_i64} bytes, not two thousand payloads: something else is still alive") if small_live > 2097152_u64
   IyiMark.auto = true
   small_collections = IyiMark.collections
   small_beside = IyiMark.concurrent_collections
@@ -441,7 +459,7 @@
   IyiMark.auto = false
   small_collections = IyiMark.collections - small_collections
   small_beside = IyiMark.concurrent_collections - small_beside
-  fail("small: eight budgets of churn triggered no collection") if small_collections == 0_u64
+  setup_fail("small: eight budgets of churn triggered no collection") if small_collections == 0_u64
   fail("small: #{small_beside.to_i64} of #{small_collections.to_i64} collections over #{small_live.to_i64} live bytes ran beside the program") if small_beside != 0_u64
   fail("small: a payload of the live set came back wrong") unless small[1999].seed == 1999_u64 && small[1999].intact?
   puts "small: #{small_collections.to_i64} collections over #{small_live.to_i64} live bytes, every one finished in its stop"
@@ -481,7 +499,7 @@
     marking = marking && IyiMark.marking? && IyiMark.colour(holder.object_id.to_u64) == IyiMark::BLACK && payload_white
     under_mark = under_mark + 1 if marking
     {% if flag?(:move_force) %}
-      fail("moves: the forced move did not find a white payload under a mark") unless marking
+      setup_fail("moves: the forced move did not find a white payload under a mark") unless marking
     {% end %}
     move(chain, holder)
     {% if flag?(:move_force) %}
@@ -504,9 +522,9 @@
   rounds = round
   concurrent = IyiMark.concurrent_collections - concurrent_before
   {% if flag?(:move_force) %}
-    fail("moves: no forced move ran under a mark") if under_mark == 0
+    setup_fail("moves: no forced move ran under a mark") if under_mark == 0
   {% end %}
-  fail("no collection ran beside the program across #{rounds} rounds") if concurrent == 0_u64
+  setup_fail("no collection ran beside the program across #{rounds} rounds") if concurrent == 0_u64
 
   puts "moves: #{under_mark} of #{rounds} rounds moved a payload into a black holder under a running mark, #{concurrent.to_i64} collections ran beside the program, every payload intact"
   puts "pause: #{stw_mean.unsafe_div(1000_u64).to_i64} us to mark the chain stopped; beside the program the longest first stop was #{Stops.first.unsafe_div(1000_u64).to_i64} us, the longest second #{Stops.second.unsafe_div(1000_u64).to_i64} us, and #{IyiMark.finish_retries.to_i64} second stops retreated to mark what they found"
@@ -551,7 +569,7 @@
       fail("large: a block outgrown under a mark was unmapped beside the helpers") if IyiHeap.containing_large(block.as(Void*)) == 0_u64
     end
     {% if flag?(:unmapped_force) %}
-      fail("large: the held round's mark was not running when its block was outgrown") unless marking && IyiMark.marking?
+      setup_fail("large: the held round's mark was not running when its block was outgrown") unless marking && IyiMark.marking?
       IyiMark.release_mark
     {% end %}
     fail("large: the grown block lost its first byte") unless grown.value == 5_u8
@@ -577,7 +595,7 @@
     index = index + 1
   end
   {% if flag?(:unmapped_force) %}
-    fail("large: #{large_under_mark} of #{large_round} held rounds reached the check, not 8") unless large_under_mark == 8
+    setup_fail("large: #{large_under_mark} of #{large_round} held rounds reached the check, not 8") unless large_under_mark == 8
   {% end %}
   fail("large: #{kept_large} of #{large_round} outgrown blocks were never freed, #{large_under_mark} of them outgrown under a mark") if large_under_mark >= 2 && kept_large >= large_under_mark
   puts "large: #{large_under_mark} of #{large_round} blocks outgrown under a running mark stayed mapped beside the helpers, and #{large_round - kept_large} were freed after"
@@ -588,8 +606,8 @@
   # asked for, and such a mark must have asked for some.
   {% if flag?(:win32) %}
     asked_helpers = IyiMark.beside_helpers
-    fail("wake boost: the pool started before the count, so every thread has the boost off") if IyiWorkers.started?
-    fail("wake boost: no mark beside the program asked for helpers") if asked_helpers == 0_u64
+    setup_fail("wake boost: the pool started before the count, so every thread has the boost off") if IyiWorkers.started?
+    setup_fail("wake boost: no mark beside the program asked for helpers") if asked_helpers == 0_u64
     boost_off = ThreadBoost.count_boost_off
     fail("wake boost: #{boost_off.to_i64} threads of this process have the priority boost off, the mark asked for #{asked_helpers.to_i64} helpers") if boost_off < asked_helpers
     puts "wake boost: #{boost_off.to_i64} threads of this process have the priority boost off, the mark asked for #{asked_helpers.to_i64} helpers"
@@ -641,14 +659,14 @@
     Busy.stop.value.set(1_u64)
     busy.each(&.join)
     IyiMark.auto = false
-    fail("share: no mark ran beside the busy threads in 8 tries") unless marked
+    setup_fail("share: no mark ran beside the busy threads in 8 tries") unless marked
     {% if flag?(:win32) %}
       fail("share: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, the mark beside them asked for #{asked.to_i64} helpers rather than 1") if asked != 1_u64
     {% end %}
     puts "share: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, the mark beside them asked for #{asked.to_i64} helpers"
     fail("the chain's tail lost its payload beside the busy threads") unless tail(chain).payload.is_a?(Payload)
   else
-    fail("the share proof needs three cores; this host has #{cores.to_i64}") unless Program.args.size > 0 && Program.args[0] == "pinned"
+    setup_fail("the share proof needs three cores; this host has #{cores.to_i64}") unless Program.args.size > 0 && Program.args[0] == "pinned"
     puts "share: the pinned run holds two processors, so the share and pool steps are measured on three or more"
   end
 
@@ -742,7 +760,7 @@
       attempt = attempt + 1
     end
     IyiMark.auto = false
-    fail("idle pool: no mark ran beside the idle pool in 8 tries") unless marked
+    setup_fail("idle pool: no mark ran beside the idle pool in 8 tries") unless marked
     fail("idle pool: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, #{waiting.to_i64} of them pool workers waiting, the mark beside them asked for #{asked.to_i64} helper") if asked < 2_u64
     puts "idle pool: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, #{waiting.to_i64} of them pool workers waiting, the mark beside them asked for #{asked.to_i64} helpers"
     fail("the chain's tail lost its payload beside the idle pool") unless tail(chain).payload.is_a?(Payload)
@@ -774,14 +792,14 @@
       IyiMark.auto = false
       Busy.stop.value.set(1_u64)
     end
-    fail("busy pool: no mark ran beside the busy pool in 8 tries") unless marked
+    setup_fail("busy pool: no mark ran beside the busy pool in 8 tries") unless marked
     {% if flag?(:win32) %}
       fail("busy pool: with #{cores.to_i64} pool workers running on #{cores.to_i64} cores, #{busy_waiting.to_i64} waiting, the mark beside them asked for #{busy_asked.to_i64} helpers rather than 1") if busy_asked != 1_u64
     {% end %}
     puts "busy pool: with #{cores.to_i64} pool workers running on #{cores.to_i64} cores, #{busy_waiting.to_i64} waiting, the mark beside them asked for #{busy_asked.to_i64} helpers"
     fail("the chain's tail lost its payload beside the busy pool") unless tail(chain).payload.is_a?(Payload)
   else
-    fail("the idle and busy pool proofs need three cores; this host has #{cores.to_i64}") unless Program.args.size > 0 && Program.args[0] == "pinned"
+    setup_fail("the idle and busy pool proofs need three cores; this host has #{cores.to_i64}") unless Program.args.size > 0 && Program.args[0] == "pinned"
   end
   puts "concurrent mark: every property held"
 {% else %}

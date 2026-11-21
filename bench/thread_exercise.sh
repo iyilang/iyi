@@ -1449,40 +1449,32 @@ esac
 # now waits, before it clears the words the released threads read
 # (`stop_others`), and the release waits for none of them (`resume_others`).
 #
-# This step asserts a property, not a duration: the release must not
-# wait for the held thread. The held thread is inside the allocator
-# (`enter_barrier` to `leave_barrier`) for all the time it is not
-# leaving, so every stop finds it there, and it parks where it leaves.
-# Its park holds it at a gate after the release has let it go:
-# `release_gate_arm` names the held line, `release_gate_hold` marks `held`
-# and waits, and `release_gate_open` opens the gate once the release has
-# returned and reports whether `held` was reached and whether the gate's
-# 5 s ran out first. A correct release returns with the gate still shut,
-# so `held` is 1 and `expired` is 0. A release that waits for the threads
-# it let go cannot return until the held thread has counted out of the
-# gate, and the gate opens only after the release returns, so the 5 s run
-# out and `expired` is set. Only the broken copy ever reaches that bound.
+# The released thread is held before counting out. Both copies read the
+# actual count-out after resume_others returns; the mutant waits for that
+# count inside the release after letting the held thread leave its gate.
+# A missing or expired hold is a distinct setup failure, not the verdict.
 #
 # The bound this replaces was 200 ms on a mean of five collections. It read
 # 175 ms in one run and 411 ms in the next on GitHub's windows-2025 runner,
 # beside 76 ms for the healthy release (jwaldrip/iyi run 44368465397), so
 # it measured the runner's scheduling and not the release.
 #
-# The gate is four words on the control page past IYI_TC_TURNS, and it
+# The gate uses words on the control page past IYI_TC_TURNS, and it
 # exists only in copies of the runtime's thread.iyi, made here by awk, so
 # the tree is never touched. The healthy copy is the tree with the hook and
 # nothing else; the waiting copy adds the wait a release would make.
 cat > gate.part <<'IYI'
     # ── The release gate (bench/thread_exercise.sh, step 4e) ─────────────
     # Copies only: the awk in that step puts this into a copy of the
-    # runtime's thread.iyi, and the tree has none of it. The gate is four
-    # words on the control page past IYI_TC_TURNS: the line armed for the
-    # gate, whether that thread has reached its park, whether the gate is
-    # open, and whether its deadline ran out first.
+    # runtime's thread.iyi, and the tree has none of it. The control-page
+    # words name the armed line, hold, opening, expiry, and start time.
+    # The start time also lets the collector detect an expired hold while
+    # the held thread itself is suspended.
     IYI_GATE_LINE    = 384_u64
     IYI_GATE_HELD    = 448_u64
     IYI_GATE_OPEN    = 512_u64
     IYI_GATE_EXPIRED = 576_u64
+    IYI_GATE_STARTED = 832_u64
     IYI_GATE_NS      = 5000000000_u64
 
     # The calling thread's own line is the one the gate holds.
@@ -1497,8 +1489,9 @@ cat > gate.part <<'IYI'
     def self.release_gate_hold(line : UInt64) : Nil
       page = control
       return if line == 0_u64 || word(page + IYI_GATE_LINE).value.get != line
-      word(page + IYI_GATE_HELD).value.set(1_u64)
       began = IyiMark.now_ns
+      word(page + IYI_GATE_STARTED).value.set(began)
+      word(page + IYI_GATE_HELD).value.set(1_u64)
       while word(page + IYI_GATE_OPEN).value.get == 0_u64
         if IyiMark.now_ns &- began > IYI_GATE_NS
           word(page + IYI_GATE_EXPIRED).value.set(1_u64)
@@ -1513,16 +1506,112 @@ cat > gate.part <<'IYI'
     # as well, within the same bound.
     def self.release_gate_open : Tuple(Bool, Bool)
       page = control
+      expired_before_open = release_gate_expired?
       word(page + IYI_GATE_OPEN).value.set(1_u64)
       began = IyiMark.now_ns
       while word(page + IYI_GATE_HELD).value.get == 0_u64 && IyiMark.now_ns &- began <= IYI_GATE_NS
         yield_cpu
       end
-      {word(page + IYI_GATE_HELD).value.get != 0_u64, word(page + IYI_GATE_EXPIRED).value.get != 0_u64}
+      {word(page + IYI_GATE_HELD).value.get != 0_u64, expired_before_open || word(page + IYI_GATE_EXPIRED).value.get != 0_u64}
+    end
+
+    # Whether the armed thread has reached its gate. A skipping copy's main
+    # waits on this before it collects; nothing else reads it.
+    def self.release_gate_held? : Bool
+      word(control + IYI_GATE_HELD).value.get != 0_u64
+    end
+    def self.release_gate_expired? : Bool
+      page = control
+      return true if word(page + IYI_GATE_EXPIRED).value.get != 0_u64
+      return false if word(page + IYI_GATE_HELD).value.get == 0_u64
+      IyiMark.now_ns &- word(page + IYI_GATE_STARTED).value.get > IYI_GATE_NS
+    end
+    # Both copies observe the actual count-out after the held thread reaches
+    # its gate. A missing hold or expired gate is a setup failure.
+    def self.release_gate_wait_held(page : UInt64) : Nil
+      began = IyiMark.now_ns
+      while word(page + IYI_GATE_HELD).value.get == 0_u64
+        if IyiMark.now_ns &- began > IYI_GATE_NS
+          message = "FAIL: release: the held thread never reached its park (setup)\n"
+          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+          __iyi_exit(1)
+        end
+        yield_cpu
+      end
+    end
+
+    # Mutant: allow the held thread to leave its gate and wait for the real
+    # count-out before returning from resume_others.
+    def self.release_gate_wait_resumed(page : UInt64, target : UInt64) : Nil
+      release_gate_wait_held(page)
+      word(page + IYI_GATE_OPEN).value.set(1_u64)
+      began = IyiMark.now_ns
+      while word(page + IYI_TC_RESUMED).value.get < target
+        if IyiMark.now_ns &- began > IYI_GATE_NS
+          message = "FAIL: release: the held thread never counted out (setup)\n"
+          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+          __iyi_exit(1)
+        end
+        yield_cpu
+      end
+    end
+
+    def self.release_gate_counted_out? : Bool
+      page = control
+      release_gate_wait_held(page)
+      word(page + IYI_TC_RESUMED).value.get != 0_u64
+    end
+
+
+
+    # ── Copy-only: an armed start with its handle written late ──────────
+    # `release_gate_arm_next` arms exactly one start. `release_gate_take_arm`
+    # is called once per start before its CreateThread: the one armed start
+    # is created suspended-free but writes its handle only after its unlock,
+    # and holds there in `release_gate_start_hold` until the gate opens. A
+    # stop reads each thread's handle once, in `release_gate_unnamed?`, and
+    # records a visit to the armed line whose handle is still 0.
+    IYI_GATE_ARM    = 640_u64
+    IYI_GATE_RECORD = 704_u64
+    IYI_GATE_SKIP   = 768_u64
+
+    def self.release_gate_arm_next : Nil
+      word(control + IYI_GATE_ARM).value.set(1_u64)
+    end
+
+    def self.release_gate_take_arm : Bool
+      word(control + IYI_GATE_ARM).value.swap(0_u64) != 0_u64
+    end
+
+    def self.release_gate_start_hold(line : UInt64) : Nil
+      word(control + IYI_GATE_LINE).value.set(line)
+      release_gate_hold(line)
+    end
+
+    def self.release_gate_unnamed?(cursor : UInt64, line : UInt64) : Bool
+      return false if cursor == line
+      return false if word(control + IYI_GATE_LINE).value.get != cursor
+      return false if IyiHeap.read64(cursor + IYI_TL_HANDLE) != 0_u64
+      word(control + IYI_GATE_SKIP).value.set(cursor)
+      word(control + IYI_GATE_RECORD).value.set(1_u64)
+      true
+    end
+    def self.release_gate_clear_skip : Nil
+      word(control + IYI_GATE_SKIP).value.set(0_u64)
+    end
+
+    def self.release_gate_skipped?(cursor : UInt64) : Bool
+      cursor == word(control + IYI_GATE_SKIP).value.get
+    end
+
+
+    def self.release_gate_recorded? : Bool
+      word(control + IYI_GATE_RECORD).value.get != 0_u64
     end
 
 IYI
 cat > release.iyi <<'IYI'
+@[Unsafe("a timed-out allocator rendezvous writes its diagnostic without allocating")]
 module release
 
 class Flag
@@ -1549,7 +1638,13 @@ def hold_in_allocator(flag : Flag) : Nil
   while flag.stop.get == 0_i64
     IyiHeap.enter_barrier
     flag.inside.set(1_i64)
+    began = IyiMark.now_ns
     while flag.stop.get == 0_i64 && !IyiHeap.stop_requested?
+      if IyiMark.now_ns &- began > 20000000000_u64
+        message = "FAIL: release: the holder never received a stop request\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(1)
+      end
       IyiThread.spin_pause
     end
     flag.inside.set(0_i64)
@@ -1559,28 +1654,32 @@ end
 
 flag = Flag.new
 held = IyiThread.start { hold_in_allocator(flag) }
+deadline = IyiMark.now_ns &+ 20000000000_u64
 while flag.inside.get == 0_i64
+  fail("release: the holder never entered the allocator") if IyiMark.now_ns >= deadline
   IyiThread.yield_cpu
 end
 IyiRuntimeLock.lock
 others = IyiThread.stop_others
 IyiThread.resume_others(others)
+waited = IyiThread.release_gate_counted_out?
 IyiRuntimeLock.unlock
 reached, expired = IyiThread.release_gate_open
 flag.stop.set(1_i64)
 held.join
 fail("release: the held thread never reached its park") unless reached
-fail("release: the release waited for the thread it let go") if expired
+fail("release: the hold expired before it opened (setup watchdog, not the verdict)") if expired
+fail("release: the release waited for the thread it let go") if waited
 puts "release: the held thread parked inside the allocator, and the release did not wait for it"
 IYI
 step "a release beside a thread held in the allocator, which it does not wait for"
 mkdir -p gated/iyi waiting/iyi
 cp "$REPO"/src/iyi/*.iyi gated/iyi/
 awk -v gate=gate.part '
-  /^    # ── Roots / { while ((getline line < gate) > 0) print line; roots = 1 }
-  /^      count_in\(page \+ IYI_TC_RESUMED\)$/ { print "      release_gate_hold(line)"; hook = 1 }
+  /^    # ── Roots / { while ((getline line < gate) > 0) print line; roots++ }
+  /^      count_in\(page \+ IYI_TC_RESUMED\)$/ { print "      release_gate_hold(line)"; hook++ }
   { print }
-  END { if (!roots || !hook) exit 3 }
+  END { if (roots != 1 || hook != 1) exit 3 }
 ' "$REPO/src/iyi/thread.iyi" > gated/iyi/thread.iyi || { echo "the park or the roots are not in thread.iyi any more"; exit 1; }
 if ! IYI_PATH="$WORK/gated${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release > build-release.log 2>&1; then
   cat build-release.log; exit 1
@@ -1593,10 +1692,10 @@ sed 's/^/  /' release.txt
 step "failure proof: a release that waits for the threads it let go is caught on its one run"
 cp "$REPO"/src/iyi/*.iyi waiting/iyi/
 awk '
-  /^        @@owed = @@deferred$/ { print; print "        while word(page + IYI_TC_RESUMED).value.get < @@owed.to_u64"; print "          yield_cpu"; print "        end"; deferred = 1; next }
-  /^        @@owed = others$/ { print; print "        wait_count(page + IYI_TC_RESUMED, @@owed.to_u64)"; owed = 1; next }
+  /^        @@owed = @@deferred$/ { print; print "        release_gate_wait_resumed(page, @@owed.to_u64)"; deferred++; next }
+  /^        @@owed = others$/ { print; print "        release_gate_wait_resumed(page, @@owed.to_u64)"; owed++; next }
   { print }
-  END { if (!deferred || !owed) exit 3 }
+  END { if (deferred != 1 || owed != 1) exit 3 }
 ' gated/iyi/thread.iyi > waiting/iyi/thread.iyi || { echo "the release is not in thread.iyi any more"; exit 1; }
 if ! IYI_PATH="$WORK/waiting${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release-waiting > build-waiting.log 2>&1; then
   cat build-waiting.log; exit 1

@@ -807,6 +807,118 @@ for helpers in every one; do
   echo "  with $helpers helper: $(grep '^collections:' "stall-$helpers.txt")"
 done
 
+# The copied runtime acknowledges its forced event. Producers keep allocating
+# until that acknowledgement, with a deadline used only to name a hang.
+cat > forced.iyi <<'IYI'
+module forced
+
+class Node
+  getter value : Int64
+  property next_node : Node?
+  def initialize(@value : Int64, @next_node : Node?)
+  end
+end
+
+class Flag
+  getter ready : Atomic(Int32)
+  getter go : Atomic(Int32)
+  getter stop : Atomic(Int32)
+  def initialize
+    @ready = Atomic(Int32).new(0)
+    @go = Atomic(Int32).new(0)
+    @stop = Atomic(Int32).new(0)
+  end
+end
+
+name = "forced"
+Program.args.each do |argument|
+  parts = argument.split('=')
+  if parts.size == 2 && parts[0] == "name"
+    name = parts[1]
+  elsif parts.size == 2 && parts[0] == "helpers"
+    IyiMark.workers = parts[1].to_i.to_u64
+  else
+    print "FAIL: forced: no option #{argument}\n"
+    __iyi_exit(2)
+  end
+end
+IyiMark.auto = false
+chain = nil.as(Node?)
+i = 0
+while i < 200000
+  chain = Node.new(i.to_i64, chain)
+  i += 1
+end
+flag = Flag.new
+producers = [] of IyiThread
+2.times do
+  producers << IyiThread.start do
+    flag.ready.add(1)
+    while flag.go.get == 0
+      IyiThread.park_if_requested
+      IyiThread.spin_pause
+    end
+    kept = 0_i64
+    while flag.stop.get == 0
+      node = Node.new(kept, nil)
+      j = 1
+      while j < 64
+        node = Node.new(kept &+ j.to_i64, node)
+        j += 1
+      end
+      kept = kept &+ node.value
+    end
+    nil
+  end
+end
+limit = IyiMark.now_ns + 60000000000_u64
+while flag.ready.get != 2
+  if IyiMark.now_ns >= limit
+    print "FAIL: #{name}: producers did not become ready within sixty seconds\n"
+    __iyi_exit(76)
+  end
+  IyiThread.yield_cpu
+end
+IyiMark.auto = true
+flag.go.set(1)
+limit = IyiMark.now_ns + 60000000000_u64
+while !IyiMark.forced_acked?
+  if IyiMark.now_ns >= limit
+    print "FAIL: #{name}: the copy acknowledged nothing within sixty seconds, after #{IyiMark.collections} collections, #{IyiMark.concurrent_collections} of them beside the program\n"
+    __iyi_exit(76)
+  end
+  IyiThread.yield_cpu
+end
+flag.stop.set(1)
+producers.each { |thread| thread.join }
+count = 0
+node = chain
+while node
+  count += 1
+  node = node.next_node
+end
+if count != 200000
+  print "FAIL: #{name}: the chain held #{count} of its 200000 nodes after the acknowledgement\n"
+  __iyi_exit(1)
+end
+puts "forced: #{name} acknowledged"
+IYI
+add_forced_ack() {
+  awk '/^      def self\.helper_main\(seen : UInt64\) : Nil$/ {
+      print "      @[UnsafeReach(\"copy-only: forced fixture acknowledgement\")]"
+      print "      @@forced_ack : UInt64 = 0_u64"
+      print "      def self.forced_ack : Nil"
+      print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_ack).address).value.set(1_u64)"
+      print "      end"
+      print "      def self.forced_acked? : Bool"
+      print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_ack).address).value.get != 0_u64"
+      print "      end"
+      found++
+    }
+    { print } END { if (found != 1) exit 3 }' "$1/iyi/prelude.iyi" > "$1/iyi/prelude.iyi.new" || { echo "the acknowledgement anchor in $1 is missing or ambiguous"; exit 1; }
+  mv "$1/iyi/prelude.iyi.new" "$1/iyi/prelude.iyi"
+}
+
 # Force one retreat and hold its remainder count until an assist has counted
 # itself in. The control adds helper 0; the mutant stores over that assist.
 step "the remainder round counts helper 0 beside a held assist"
@@ -855,6 +967,12 @@ awk 'function declarations() {
     print "          spin_pause"
     print "        end"
     print "      end"
+    print "      def self.stored_finished : Nil"
+    print "        return unless stored_word.value.compare_and_set(3_u64, 4_u64)[1]"
+    print "        message = \"stored: the mark whose remainder counted the held assist finished\\n\""
+    print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "        forced_ack"
+    print "      end"
   }
   /^      def self\.assist : Nil$/ { declarations(); declared++ }
   /^        active\.value\.add\(1_u64\)$/ { print; print "        stored_hold_assist"; assist++; next }
@@ -868,14 +986,16 @@ awk 'function declarations() {
     print "          stored_close if stored_window"
     counted++; next
   }
-  { print } END { if (declared != 1 || assist != 1 || retreat != 1 || counted != 1) exit 3 }' \
+  /^            return generation$/ { print "            stored_finished"; finished++ }
+  { print } END { if (declared != 1 || assist != 1 || retreat != 1 || counted != 1 || finished != 1) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > stored-held/iyi/prelude.iyi || { echo "the stored proof hooks are missing or ambiguous"; exit 1; }
-if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o stored-held-run > build-stored-held.log 2>&1; then
+add_forced_ack stored-held
+if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o stored-held-run > build-stored-held.log 2>&1; then
   cat build-stored-held.log; exit 1
 fi
-timeout -k 5 120 ./stored-held-run workers=12 seconds=2 > stored-held.txt 2>&1
+timeout -k 5 120 ./stored-held-run name=stored > stored-held.txt 2>&1
 code=$?
-if [ "$code" -ne 0 ] || ! grep -Fxq "mark stall: every collection finished beside 24 connections" stored-held.txt || ! grep -Fxq "stored: an assist counted itself in before helper 0 and waits for its count" stored-held.txt; then
+if [ "$code" -ne 0 ] || ! grep -Fxq "forced: stored acknowledged" stored-held.txt || ! grep -Fxq "stored: the mark whose remainder counted the held assist finished" stored-held.txt || ! grep -Fxq "stored: an assist counted itself in before helper 0 and waits for its count" stored-held.txt; then
   echo "the held stored control did not complete (exit $code):"; tail -5 stored-held.txt; exit 1
 fi
 echo "  held stored control exits 0 after the assist rendezvous"
@@ -885,12 +1005,12 @@ awk '/^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
     print "          pool_word(POOL_ACTIVE).value.set(1_u64)"; found++; next
   }
   { print } END { if (found != 1) exit 3 }' stored-held/iyi/prelude.iyi > stored/iyi/prelude.iyi || { echo "the remainder count is missing or ambiguous"; exit 1; }
-if ! IYI_PATH="$WORK/stored${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o stored-run > build-stored.log 2>&1; then
+if ! IYI_PATH="$WORK/stored${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o stored-run > build-stored.log 2>&1; then
   cat build-stored.log; exit 1
 fi
-timeout -k 5 120 ./stored-run workers=12 seconds=2 > stored.txt 2>&1
+timeout -k 5 120 ./stored-run name=stored > stored.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -Fxq "stored: an assist counted itself in before helper 0 and waits for its count" stored.txt || ! grep -Eq "^iyi: the collector's count of workers marking went below zero: POOL_ACTIVE [0-9]+, POOL_HEAD [0-9]+, generation [0-9]+, permits left [0-9]+ and taken [0-9]+, helpers done [0-9]+[.] A mark that does not end is a bug in iyi's runtime, ours to fix: https://github[.]com/iyilang/iyi/issues$" stored.txt; then
+if [ "$code" -ne 1 ] || grep -Fxq "forced: stored acknowledged" stored.txt || ! grep -Fxq "stored: an assist counted itself in before helper 0 and waits for its count" stored.txt || ! grep -Eq "^iyi: the collector's count of workers marking went below zero: POOL_ACTIVE [0-9]+, POOL_HEAD [0-9]+, generation [0-9]+, permits left [0-9]+ and taken [0-9]+, helpers done [0-9]+[.] A mark that does not end is a bug in iyi's runtime, ours to fix: https://github[.]com/iyilang/iyi/issues$" stored.txt; then
   echo "the stored count was not caught after the rendezvous (exit $code):"; tail -5 stored.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'went below zero' stored.txt)"
@@ -904,6 +1024,8 @@ cp "$REPO"/src/iyi/*.iyi late-held/iyi/
 awk 'function forced() {
     print "      @[UnsafeReach(\"copy-only: one late generation hold\")]"
     print "      @@late_once : UInt64 = 0_u64"
+    print "      @[UnsafeReach(\"copy-only: late check passed\")]"
+    print "      @@late_checked : UInt64 = 0_u64"
     print "      def self.late_hold(old : UInt64) : Bool"
     print "        return false unless Pointer(Atomic(UInt64)).new(pointerof(@@late_once).address).value.compare_and_set(0_u64, 1_u64)[1]"
     print "        if @@helpers != 1_u64"
@@ -936,6 +1058,13 @@ awk 'function forced() {
     print "        end"
     print "        message = \"late: helper 0 retained its earlier generation through the next mark\\n\""
     print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "        Pointer(Atomic(UInt64)).new(pointerof(@@late_checked).address).value.set(1_u64)"
+    print "      end"
+    print "      def self.late_finished : Nil"
+    print "        return unless Pointer(Atomic(UInt64)).new(pointerof(@@late_checked).address).value.compare_and_set(1_u64, 2_u64)[1]"
+    print "        message = \"late: helper 0 finished the next mark\\n\""
+    print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "        forced_ack"
     print "      end"
   }
   /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
@@ -946,16 +1075,18 @@ awk 'function forced() {
   /^            return generation$/ {
     print "            late_forced = late_hold(late_baseline)"
     print "            late_check(generation) if late_forced"
+    print "            late_finished unless late_forced"
     hook++
   }
   { print } END { if (declared != 1 || baseline != 1 || hook != 1) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > late-held/iyi/prelude.iyi || { echo "the late generation hook is missing or ambiguous"; exit 1; }
-if ! IYI_PATH="$WORK/late-held${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o late-held-run > build-late-held.log 2>&1; then
+add_forced_ack late-held
+if ! IYI_PATH="$WORK/late-held${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o late-held-run > build-late-held.log 2>&1; then
   cat build-late-held.log; exit 1
 fi
-timeout -k 5 120 ./late-held-run workers=12 seconds=2 helpers=1 > late-held.txt 2>&1
+timeout -k 5 120 ./late-held-run name=late helpers=1 > late-held.txt 2>&1
 code=$?
-if [ "$code" -ne 0 ] || ! grep -Fxq "mark stall: every collection finished beside 24 connections" late-held.txt || ! grep -Fxq "late: helper 0 retained its earlier generation through the next mark" late-held.txt; then
+if [ "$code" -ne 0 ] || ! grep -Fxq "forced: late acknowledged" late-held.txt || ! grep -Fxq "late: helper 0 finished the next mark" late-held.txt || ! grep -Fxq "late: helper 0 retained its earlier generation through the next mark" late-held.txt; then
   echo "the held late control did not complete (exit $code):"; tail -5 late-held.txt; exit 1
 fi
 echo "  held late control exits 0 after the next mark"
@@ -967,12 +1098,12 @@ awk '/^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ { ear
     moved++
   }
   { print } END { if (early != 1 || moved != 1) exit 3 }' late-held/iyi/prelude.iyi > late/iyi/prelude.iyi || { echo "the late generation read is missing or ambiguous"; exit 1; }
-if ! IYI_PATH="$WORK/late${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o late-run > build-late.log 2>&1; then
+if ! IYI_PATH="$WORK/late${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o late-run > build-late.log 2>&1; then
   cat build-late.log; exit 1
 fi
-timeout -k 5 120 ./late-run workers=12 seconds=2 helpers=1 > late.txt 2>&1
+timeout -k 5 120 ./late-run name=late helpers=1 > late.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: late: helper 0 would wait past the turn of a mark whose permit nobody has taken" late.txt; then
+if [ "$code" -ne 1 ] || grep -Fxq "forced: late acknowledged" late.txt || ! grep -Fxq "FAIL: late: helper 0 would wait past the turn of a mark whose permit nobody has taken" late.txt; then
   echo "the late generation was not caught (exit $code):"; tail -5 late.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "FAIL: late: helper 0 would wait past the turn of a mark whose permit nobody has taken"
@@ -1023,6 +1154,7 @@ awk 'function declarations() {
     print "          spin_pause"
     print "        end"
     print "        Pointer(Atomic(UInt64)).new(pointerof(@@probe_state).address).value.set(0_u64)"
+    print "        forced_ack"
     print "      end"
     print ""
   }
@@ -1033,6 +1165,7 @@ awk 'function declarations() {
   { prev_lg = ($0 == "            let_go_holders"); print }
   END { if (declared != 1 || probed != 1 || armed != 1 || returned != 1) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > released-held/iyi/prelude.iyi || { echo "the release order or pressure is missing or ambiguous"; exit 1; }
+add_forced_ack released-held
 cp released-held/iyi/*.iyi released/iyi/
 awk 'pend {
     if ($0 == "            let_go_holders") { print; pend = 0; dropped++; next }
@@ -1041,21 +1174,21 @@ awk 'pend {
   $0 == "            @@collecting = false" { pend = 1; next }
   $0 == "            hold_release_probe if released_forced" { print; print "            @@collecting = false"; added++; next }
   { print } END { if (dropped != 1 || added != 1) exit 3 }' released-held/iyi/prelude.iyi > released/iyi/prelude.iyi || { echo "the flag this proof moves is missing or ambiguous"; exit 1; }
-if ! IYI_PATH="$WORK/released-held${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o released-held-run > build-released-held.log 2>&1; then
+if ! IYI_PATH="$WORK/released-held${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o released-held-run > build-released-held.log 2>&1; then
   cat build-released-held.log; exit 1
 fi
-timeout -k 5 120 ./released-held-run workers=12 seconds=2 > released-held.txt 2>&1
+timeout -k 5 120 ./released-held-run name=released > released-held.txt 2>&1
 code=$?
-if [ "$code" -ne 0 ] || ! grep -Fxq "mark stall: every collection finished beside 24 connections" released-held.txt || ! grep -Fxq "released: the first slice past the budget after the release found the collection let go" released-held.txt; then
+if [ "$code" -ne 0 ] || ! grep -Fxq "forced: released acknowledged" released-held.txt || ! grep -Fxq "released: the first slice past the budget after the release found the collection let go" released-held.txt; then
   echo "the held release control did not complete (exit $code):"; tail -5 released-held.txt; exit 1
 fi
 echo "  held release control exits 0 after the probe answers let go"
-if ! IYI_PATH="$WORK/released${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o released-run > build-released.log 2>&1; then
+if ! IYI_PATH="$WORK/released${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o released-run > build-released.log 2>&1; then
   cat build-released.log; exit 1
 fi
-timeout -k 5 120 ./released-run workers=12 seconds=2 > released.txt 2>&1
+timeout -k 5 120 ./released-run name=released > released.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: released: the first slice past the budget after the release found the collection still up" released.txt; then
+if [ "$code" -ne 1 ] || grep -Fxq "forced: released acknowledged" released.txt || ! grep -Fxq "FAIL: released: the first slice past the budget after the release found the collection still up" released.txt; then
   echo "the untriggered allocation was not caught (exit $code):"; tail -5 released.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "FAIL: released: the first slice past the budget after the release found the collection still up"

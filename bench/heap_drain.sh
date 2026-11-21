@@ -722,12 +722,18 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   keyed "the relist, kept and recorded (hook only)" relisted 0 park "drain: the global sweep put the run the program parked back on its class's drain list" "-Dheap_partitions --release -Dkeyed_force" "$PARK_WITNESS"
   # c3 (adopt_drained's OWN_PUB, `adopt` in heap_drain.iyi): the taker's local
   # collection is the first check that can see its mislabelled published string,
-  # and it aborts there, so the copy's one verdict is the local sentence. Its
+  # and it aborts there, so the copy's one verdict is the verifier's report. Its
   # control runs the same program without the mutant and reports nothing.
   EXPECT_ERR='  a slot names a LOCAL chunk its local mark left unmarked, about to be freed' copy "a taken run's objects published" c3 86 \
     "$(subst 'def self\.adopt_drained' 'write8\(own, OWN_PUB\)' 'write8(own, 0_u64)')" "-Dheap_partitions -Dheap_verify" adopt
   EXPECT_OUT="adopt: a unit's first allocation took a run its dead predecessor published, and the local collection left the published string intact" \
     copy "a taken run's objects published, with no mutant (hook only)" c3ctl 0 "$PASS" "-Dheap_partitions -Dheap_verify" adopt
+  # c3's own byte (`adopt_taker`): the same mutant with the verifier's local
+  # check silenced, so the taker's own check is the first to read the published
+  # mark. A failure, exit 1, never setup (76).
+  OWN_SILENT='/def self\.adopt_drained/ { armed = 1; declarations++ } armed && /write8\(own, OWN_PUB\)/ { sub(/OWN_PUB/, "0_u64"); mutated++; armed = 0 } /return false unless IyiHeapVerify\.check\(record, id, parity, running\)/ { silenced++; sub(/return false unless IyiHeapVerify\.check\(record, id, parity, running\)/, "") } { print } END { if (declarations != 1 || mutated != 1 || silenced != 1) exit 3 }'
+  EXPECT_FIXED="FAIL: adopt: the published string is LOCAL after the taker's local collection" \
+    copy "a taken run's published mark lost, the verifier's local check silenced (c3's own byte)" c3own 1 "$OWN_SILENT" "-Dheap_partitions -Dheap_verify" adopt
   keyed "an idle worker wakes for the warm pool (c4)" c4 1 warm "FAIL: idle_wait_ms left a worker's wait unbounded with a pooled run held warm and no partition pending" "-Dheap_partitions --release -Dkeyed_force" "$WARM_BROKEN"
   keyed "the warm-pool cap, kept (hook only)" warm 0 warm "idle: idle_wait_ms cut a worker's unbounded wait to the pool's turn with a pooled run held warm and no partition pending" "-Dheap_partitions --release -Dkeyed_force"
   keyed "a cooled run's pages go back (c5)" c5 1 cool "FAIL: idle: the run the program put on a release list reached the cold list with its page unreleased: the release call did not run" "-Dheap_partitions --release -Dkeyed_force" "$COOL_SITE" "$COOL_BROKEN"

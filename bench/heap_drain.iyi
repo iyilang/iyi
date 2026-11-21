@@ -911,12 +911,25 @@ module bench/heap_drain
   # check is the first verifier report and aborts, so no unit dies with the
   # chunk still LOCAL. Automatic collection is off from the donor's start on,
   # so no global mark can withhold the check, and the taker's stack is scrubbed
-  # first, so no stale word of an earlier call marks the string.
+  # first, so no stale word of an earlier call marks the string. If the check
+  # stays silent and the string is no longer published, that is a failure of the
+  # invariant under test (exit 1), not setup.
   ADOPT_LENGTH = 52
   ADOPT_GARBAGE = 8
   ADOPT_HIDE_MASK = 0x5A5A5A5A5A5A5A5A_u64
 
   {% if flag?(:heap_partitions) %}
+    # A published string that is no longer published after the taker's whole
+    # local collection, with the adoption and the claim proven: the invariant
+    # under test is broken, a failure (exit 1). Written here and exited directly:
+    # `fail` prints and goes on under HEAP22_PRINT_ONLY (bench/heap_drain.sh's c3).
+    def adopt_fail(message : String) : NoReturn
+      __iyi_write(1, "FAIL: ".to_unsafe.as(Void*), 6_u64)
+      __iyi_write(1, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+      __iyi_write(1, "\n".to_unsafe.as(Void*), 1_u64)
+      __iyi_exit(1)
+    end
+
     @[NoInline]
     def adopt_scrub : UInt64
       room = uninitialized StaticArray(UInt64, 2048)
@@ -978,7 +991,7 @@ module bench/heap_drain
       before = IyiHeap.partition_collections(record)
       IyiHeap.collect_local(record)
       mark_setup_fail("adopt: the taker's local collection did not run whole") if IyiHeap.partition_collections(record) == before
-      mark_setup_fail("adopt: the published string is LOCAL after the taker's local collection") unless adopt_published?(hidden)
+      adopt_fail("adopt: the published string is LOCAL after the taker's local collection") unless adopt_published?(hidden)
       0
     end
 

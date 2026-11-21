@@ -58,24 +58,80 @@ status=0
 export IYI_PATH="$REPO/src"
 SRV="$WORK/servers"
 mkdir -p "$SRV"
-"$PY" "$REPO/bench/std_secure_dns_server.py" "$SRV" >"$WORK/server.log" 2>&1 &
+# Readiness is a pipe event, not a repeated file check. The one-second
+# reads also let us check that the child is alive while it starts.
+STARTUP_HANG_SECONDS=20
+STARTUP_FAILURE_STATUS=76
+exec 3< <(exec "$PY" "$REPO/bench/std_secure_dns_server.py" "$SRV" 2>"$WORK/server.log")
 SERVER_PID=$!
-for _ in $(seq 200); do
-  [ -f "$SRV/ready" ] && break
-  kill -0 "$SERVER_PID" 2>/dev/null || break
-  sleep 0.1
-done
-if [ ! -f "$SRV/ready" ]; then
-  # The server writes the step it has reached, and every thread's stack to
-  # its log after 15 s without ready, so a stall names where it is.
-  if kill -0 "$SERVER_PID" 2>/dev/null; then
-    echo "the scripted servers did not start in 20 s, stopped at stage: $(cat "$SRV/stage" 2>/dev/null || echo none)"
-  else
-    echo "the scripted servers exited before they started, at stage: $(cat "$SRV/stage" 2>/dev/null || echo none)"
+SERVER_NATIVE_PID=""
+deadline=$((SECONDS + STARTUP_HANG_SECONDS))
+start_state=hang
+pipe_closed=0
+ready=""
+while [ "$SECONDS" -lt "$deadline" ]; do
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    start_state=exited
+    break
   fi
+  if [ "$pipe_closed" -eq 1 ]; then
+    sleep 1
+    continue
+  fi
+  read_status=0
+  IFS= read -r -t 1 ready <&3 || read_status=$?
+  if [ "$read_status" -eq 0 ]; then
+    case "$ready" in
+      "pid "*)
+        SERVER_NATIVE_PID="${ready#pid }"
+        case "$SERVER_NATIVE_PID" in
+          "" | *[!0-9]*) start_state=invalid; break ;;
+        esac
+        ;;
+      ready) start_state=ready; break ;;
+      *) start_state=invalid; break ;;
+    esac
+  elif [ "$read_status" -le 128 ]; then
+    # A closed pipe is not necessarily a dead process yet; wait for either
+    # its exit or the original hang bound before taking its exit status.
+    pipe_closed=1
+  fi
+done
+exec 3<&-
+if [ "$start_state" = hang ] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+  start_state=exited
+fi
+if [ "$start_state" = exited ]; then
+  child_status=0
+  wait "$SERVER_PID" 2>/dev/null || child_status=$?
+  if [ -s "$WORK/server.log" ]; then
+    echo "the scripted servers exited before readiness (status $child_status); server output follows"
+  else
+    echo "the scripted servers exited silently before readiness (status $child_status)"
+  fi
+  cat "$WORK/server.log"
+  exit "$STARTUP_FAILURE_STATUS"
+elif [ "$start_state" = hang ]; then
+  echo "the scripted servers hung before signaling readiness, at stage: $(cat "$SRV/stage" 2>/dev/null || echo none)"
   echo "files: $(ls "$SRV" | tr '\n' ' ')"
   cat "$WORK/server.log"
-  exit 1
+  case "$(uname -s)" in
+    Darwin|Linux)
+      echo "== startup diagnostics: load and five busiest processes"
+      uptime 2>&1 || :
+      ps -A -o pid=,ppid=,stat=,pcpu=,etime=,comm= 2>&1 | LC_ALL=C sort -k4,4nr | head -5
+      if [ "$(uname -s)" = Darwin ]; then
+        vm_stat 2>&1 || :
+        echo "== startup diagnostics: sample of server ${SERVER_NATIVE_PID:-$SERVER_PID}"
+        sample "${SERVER_NATIVE_PID:-$SERVER_PID}" 3 2>&1 || :
+      fi
+      ;;
+  esac
+  exit "$STARTUP_FAILURE_STATUS"
+elif [ "$ready" != ready ] || [ ! -f "$SRV/ready" ]; then
+  echo "the scripted servers sent an invalid readiness signal: $ready"
+  cat "$WORK/server.log"
+  exit "$STARTUP_FAILURE_STATUS"
 fi
 if [ -f "$SRV/h2.missing" ]; then
   echo "== $(cat "$SRV/h2.missing"): DNS over HTTPS is asked over HTTP/1.1 alone"

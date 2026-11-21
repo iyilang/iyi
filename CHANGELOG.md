@@ -846,6 +846,36 @@
   exercise, three at their HTTP/2 check, one at the pool's. The patch
   sites of the copies that name `serve`'s internal signatures follow
   them.
+
+- **`bench/parallel_preempt.iyi`'s period step judges the monitor only
+  where the host wakes a sleeping thread on time.** A windows-2025 runner
+  took 1.08 s over the half second the step's task computed, and its
+  monitor looked every 8206 us, past the 8 ms bound (CI job
+  135466663176): a host that wakes every thread late makes a slow tick of
+  a sound one. A thread of the step's own now sleeps 5 ms at a time beside
+  the computing task, ten sleeps a window, waiting as the monitor does (on
+  Windows on a high-resolution waitable timer of its own: the runtime's
+  `sleep`, through the completion port, took 11 to 48 ms beside 12 busy
+  loops on Windows 11's 12 logical processors while the monitor looked
+  every 6.1 to 6.4 ms), and the monitor's looks are counted over the
+  windows whose sleeps took the bound less 1.5 ms or less on average,
+  until 400 ms of them, or 20 s fail with the sleeps' spread. The bounds
+  are as they were. The quantum is counted the same way the host cannot
+  fake: looks a turn over the turns whose two ends found the worker's
+  thread on its core, where all the turns over all their looks took up to
+  3.04 a turn beside busy loops on the Mac and failed 1 run of 25. In 20
+  runs each on Windows 11, idle, held to 4 beside 4 busy loops and beside
+  12 on its 12, the sound runtime passed every run, the monitor looking
+  every 5.1 to 6.4 ms and taking 1.95 to 1.97 looks a turn; the
+  timer-tick copy was caught at 15.0 to 16.6 ms every run, and a new copy
+  ticking every 12 ms at 12.3 to 14.6, and the three-look copy at 3.90 to
+  3.97 looks a turn. On macOS 26.6 (M2 Pro, 10 cores; idle, beside 10 and
+  20 busy loops, 50 runs in all) and here on Linux (idle, beside 4 and 8
+  on 4 vCPUs, 50 runs in all) likewise: every sound run passed, every
+  copy's run was caught. Held to 4 beside 8 busy loops, Windows 11's
+  sleeps took 8.0 to 13.0 ms, and the step failed there by saying so, for
+  the sound runtime and the copy alike.
+
 - **`bench/std_xz_exercise.sh`'s copy whose ring never grows past 64 KiB
   is caught at its check every run.** It read below the ring's memory, so
   it failed by a wrong CRC64 on most runs and by a memory fault on some:

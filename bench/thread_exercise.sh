@@ -1831,6 +1831,41 @@ class Tally
     Pointer(Atomic(UInt64)).new(@@page + 8_u64)
   end
 end
+{% if flag?(:skipping_force) %}
+# Addresses in this mapping are not roots; the sweep's flags can be read
+# without following links in nodes that may have been freed.
+class Ledger
+  @@page = 0_u64
+
+  def self.setup : Nil
+    @@page = __iyi_mmap(8192_u64).address
+  end
+
+  def self.record(side : Int32, head : Node?) : Nil
+    index = 0
+    node = head
+    while node.is_a?(Node)
+      Pointer(Atomic(UInt64)).new(@@page + (side * 300 + index).to_u64 * 8_u64).value.set(node.object_id)
+      node = node.next_node
+      index = index + 1
+    end
+  end
+
+  def self.freed : Int32
+    count = 0
+    600.times do |index|
+      address = Pointer(Atomic(UInt64)).new(@@page + index.to_u64 * 8_u64).value.get
+      if address == 0_u64
+        print "FAIL: skipping: the ledger was not populated\n"
+        __iyi_exit(1)
+      end
+      count = count + 1 if IyiMark.flags(address) & IyiHeap::FREE_FLAG != 0
+    end
+    count
+  end
+end
+{% end %}
+
 
 def pair(id : Int32, trips : Int32) : Nil
   there = Channel(Int32).new(1)
@@ -1840,6 +1875,9 @@ def pair(id : Int32, trips : Int32) : Nil
       g.spawn do
         seed = (id * 10 + side).to_i64 * 1000000_i64
         mine = build(300, seed)
+        {% if flag?(:skipping_force) %}
+        Ledger.record(side, mine)
+        {% end %}
         wrong = 0
         trips.times do |t|
           if side == 0
@@ -1849,6 +1887,9 @@ def pair(id : Int32, trips : Int32) : Nil
             there.receive
             back.send(t)
           end
+          {% if flag?(:skipping_force) %}
+          IyiThread.release_gate_arm if id == 1 && side == 0 && t == 2
+          {% end %}
           build(20, 0_i64) if t % 8 == 0
           wrong = wrong + 1 if t % 64 == 0 && !intact?(mine, 300, seed)
         end
@@ -1862,10 +1903,48 @@ def pair(id : Int32, trips : Int32) : Nil
 end
 
 Tally.setup
+count = 6
+{% if flag?(:skipping_force) %}
+IyiMark.auto = false
+Ledger.setup
+count = 1
+{% end %}
 threads = [] of IyiThread
-6.times do |id|
+count.times do |id|
   threads << IyiThread.start { pair(id + 1, 100000); nil }
 end
+{% if flag?(:skipping_force) %}
+# Collect once while the switch is held. Read the sweep flags before any
+# allocation can reuse the unrooted nodes recorded in the mmap ledger.
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while !IyiThread.release_gate_held? && IyiMark.now_ns < deadline
+  IyiThread.yield_cpu
+end
+if !IyiThread.release_gate_held?
+  print "FAIL: skipping: the armed switch never reached the gate\n"
+  __iyi_exit(1)
+end
+if IyiThread.release_gate_expired?
+  print "FAIL: skipping: the hold expired before the collection\n"
+  __iyi_exit(1)
+end
+GC.collect
+if IyiThread.release_gate_expired?
+  print "FAIL: skipping: the hold ran out before the collection\n"
+  __iyi_exit(1)
+end
+freed = Ledger.freed
+if IyiThread.release_gate_expired?
+  print "FAIL: skipping: the hold ran out before the ledger was read\n"
+  __iyi_exit(1)
+end
+if freed != 0
+  puts "FAIL: skipping: #{freed} live nodes of a task marked running before its switch are on a free list after the collection"
+  __iyi_exit(1)
+end
+puts "skipping: held=1 collected=1 expired=0 freed=0"
+__iyi_exit(0)
+{% end %}
 while Tally.finished.value.get < 12_u64
   GC.collect
   sleep(1)
@@ -1887,29 +1966,55 @@ while [ "$run" -le 5 ]; do
 done
 echo "  five runs, no list lost"
 
-# The failure proof: the fiber marked running before the switch again, in
-# a copy.
+# Hold the switch before the planted early Running write is followed by a
+# context swap. A single collection must free nodes belonging to the skipped
+# target; the mmap ledger observes the free flags without reading freed nodes.
 step "failure proof: a fiber marked running before the switch loses its list"
 mkdir -p skipping/iyi
 cp "$REPO"/src/iyi/*.iyi skipping/iyi/
-awk '/^    st.current = fiber$/ { print "    fiber.state = IyiFiberState::Running"; found = 1 } { print } END { if (!found) exit 3 }' \
-  "$REPO/src/iyi/concurrency.iyi" > skipping/iyi/concurrency.iyi || { echo "the switch's current-fiber line is not in concurrency.iyi any more"; exit 1; }
-if ! IYI_PATH="$WORK/skipping${PSEP}$REPO/src" "$IYI" build switching.iyi -o skipping-run > build-skipping.log 2>&1; then
+# The gate's functions go into the copy's thread.iyi, before its roots.
+splice_gate() {
+  awk -v gate=gate.part '
+    /^    # ── Roots/ { while ((getline line < gate) > 0) print line; roots++ }
+    { print }
+    END { if (roots != 1) exit 3 }
+  ' "$REPO/src/iyi/thread.iyi" > "$1"
+}
+splice_gate skipping/iyi/thread.iyi || { echo "the roots are not in thread.iyi any more"; exit 1; }
+awk '
+  /^    st.current = fiber$/ { print "    fiber.state = IyiFiberState::Running"; print "    IyiThread.release_gate_hold(IyiThread.current_line)"; found++ }
+  { print }
+  END { if (found != 1) exit 3 }
+' "$REPO/src/iyi/concurrency.iyi" > skipping/iyi/concurrency.iyi || { echo "the switch's current-fiber line is not in concurrency.iyi any more"; exit 1; }
+if ! IYI_PATH="$WORK/skipping${PSEP}$REPO/src" "$IYI" build switching.iyi -Dskipping_force -o skipping-run > build-skipping.log 2>&1; then
   cat build-skipping.log; exit 1
 fi
-# A race, so it is run until it is caught: most runs lose a list, and one
-# runner once ran five that all kept theirs.
-caught=""
-run=1
-while [ "$run" -le 20 ]; do
-  timeout -k 5 120 ./skipping-run > skipping.txt 2>&1
-  grep -q '^wrong=0$' skipping.txt || { caught="$run"; break; }
-  run=$((run + 1))
-done
-if [ -z "$caught" ]; then
-  echo "twenty runs with the fiber marked early all kept their lists"; exit 1
+timeout -k 5 120 ./skipping-run > skipping.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -qEx 'FAIL: skipping: [1-9][0-9]* live nodes of a task marked running before its switch are on a free list after the collection' skipping.txt; then
+  echo "the fiber marked running early was not caught on its one run (exit $code):"; tail -3 skipping.txt; exit 1
 fi
-echo "  run $caught lost a list or died"
+printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: skipping' skipping.txt)"
+
+# The same hold after the switch scans both lists, so no node is free.
+step "the same hold after the switch, with the fiber already running: every list holds"
+mkdir -p skipping-ctl/iyi
+cp "$REPO"/src/iyi/*.iyi skipping-ctl/iyi/
+splice_gate skipping-ctl/iyi/thread.iyi || { echo "the roots are not in thread.iyi any more"; exit 1; }
+awk '
+  /^    current.state = IyiFiberState::Running$/ { print; print "    IyiThread.release_gate_hold(IyiThread.current_line)"; found++; next }
+  { print }
+  END { if (found != 1) exit 3 }
+' "$REPO/src/iyi/concurrency.iyi" > skipping-ctl/iyi/concurrency.iyi || { echo "the running write is not in concurrency.iyi any more"; exit 1; }
+if ! IYI_PATH="$WORK/skipping-ctl${PSEP}$REPO/src" "$IYI" build switching.iyi -Dskipping_force -o skipping-ctl-run > build-skipping-ctl.log 2>&1; then
+  cat build-skipping-ctl.log; exit 1
+fi
+timeout -k 5 120 ./skipping-ctl-run > skipping-ctl.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'skipping: held=1 collected=1 expired=0 freed=0' skipping-ctl.txt; then
+  echo "the hook-only control failed (exit $code):"; tail -3 skipping-ctl.txt; exit 1
+fi
+echo "  hook-only control: held=1 collected=1 expired=0 freed=0"
 
 # Windows' `SuspendThread` asks for the suspend and returns, and the thread
 # runs on until `GetThreadContext` waits for it. The stop read the

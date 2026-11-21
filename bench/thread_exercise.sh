@@ -155,6 +155,12 @@ case "$(uname -s)" in
         sleep 0.1
       done
       if ! wait "$killer" 2>/dev/null; then
+        # The child can exit between the launcher's liveness check and
+        # end_process reading its PID. Reap that already-exited child.
+        if ! kill -0 "$child" 2>/dev/null; then
+          wait "$child" 2>/dev/null || true
+          return 0
+        fi
         echo "FAIL: ${current_step:-bounded cleanup}: the child could not be recovered (pid $child)" >&2
         return 76
       fi

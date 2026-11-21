@@ -675,12 +675,19 @@ esac
 # A spinner that sees no release in 128 turns counts itself on the lock's
 # word now, and a free lock with one counted is its first; a collection
 # gives the core away once it has released the threads it stopped, which
-# was nearly all the time they had. The proof takes both out, and a run
-# held to one core does not end.
+# was nearly all the time they had. The controls below check those three
+# invariants directly rather than killing a deliberately hung process.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     step "held to one core, threads start beside a thread collecting in a loop and one taking the lock in a loop"
     cat > starve.iyi <<'IYI'
+@[Unsafe("the one-core exercise pins its process with the Windows affinity API")]
+module starve
+
+lib CorePin
+  fun SetProcessAffinityMask(process : Void*, mask : UInt64) : Int32
+end
+
 class Flag
   getter stop : Atomic(Int64)
   getter turns : Atomic(Int64)
@@ -725,6 +732,9 @@ def beside(collect : Bool) : UInt64
   took
 end
 
+fail("one-core affinity could not be set") if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, 1_u64) == 0_i32
+fail("the process is not held to one core") unless IyiThread.core_count == 1
+
 took = beside(true)
 fail("five threads started beside a thread collecting in a loop took #{took // 1000000_u64} ms, past 10 s") if took > 10000000000_u64
 puts "five threads started and joined beside a thread collecting in a loop, held to 10 s"
@@ -732,32 +742,175 @@ took = beside(false)
 fail("five threads started beside a thread taking the runtime lock in a loop took #{took // 1000000_u64} ms, past 10 s") if took > 10000000000_u64
 puts "five threads started and joined beside a thread taking the runtime lock in a loop, held to 10 s"
 IYI
-    one_core() { MSYS2_ARG_CONV_EXCL='*' timeout -k 5 "$1" cmd /c "start /affinity 1 /b /wait $2.exe" | tr -d '\r'; }
+    # Unlike GNU timeout on MSYS, end_process ends only this native child.
+    # A stuck child's wait is bounded even if Windows cannot terminate it.
+    win_native() {
+      local limit="$1" label="$2" child deadline
+      shift 2
+      "$@" &
+      child=$!
+      deadline=$((SECONDS + limit))
+      while kill -0 "$child" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+          echo "FAIL: $label exceeded its process bound" >&2
+          end_bounded "$child" || true
+          return 124
+        fi
+        sleep 0.1
+      done
+      wait "$child"
+    }
     if ! "$IYI" build --release starve.iyi -o starve > build-starve.log 2>&1; then
       cat build-starve.log; exit 1
     fi
-    one_core 120 starve > starve.txt
-    if [ "$(grep -c ', held to 10 s$' starve.txt)" -ne 2 ] || grep -q '^FAIL' starve.txt; then
-      echo "held to one core:"; cat starve.txt; exit 1
+    win_native 120 "the one-core check" ./starve > starve-raw.txt 2>&1
+    code=$?
+    tr -d '\r' < starve-raw.txt > starve.txt
+    if [ "$code" -ne 0 ] || [ "$(grep -c ', held to 10 s$' starve.txt)" -ne 2 ] || grep -q '^FAIL' starve.txt; then
+      echo "held to one core (exit $code):"; cat starve.txt; exit 1
     fi
     sed 's/^/  /' starve.txt
 
-    step "failure proof: without the lock's count and the collection's yield, a run held to one core never ends"
-    mkdir -p unfair/iyi
-    cp "$REPO"/src/iyi/*.iyi unfair/iyi/
-    awk '/^        if !counted && released == since$/ { print "        if false"; found = 1; next } { print } END { if (!found) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > unfair/iyi/thread.iyi || { echo "the lock's count is not in thread.iyi any more"; exit 1; }
-    awk '/^          IyiThread\.yield_to_stopped$/ { found++; next } { print } END { if (found != 2) exit 3 }' \
-      "$REPO/src/iyi/prelude.iyi" > unfair/iyi/prelude.iyi || { echo "the collections' yields are not in the prelude any more"; exit 1; }
-    if ! IYI_PATH="$WORK/unfair${PSEP}$REPO/src" "$IYI" build --release starve.iyi -o starve-unfair > build-unfair.log 2>&1; then
-      cat build-unfair.log; exit 1
-    fi
-    one_core 30 starve-unfair > unfair.txt
-    taskkill //F //IM starve-unfair.exe > /dev/null 2>&1
-    if [ "$(grep -c ', held to 10 s$' unfair.txt)" -eq 2 ]; then
-      echo "the unfair lock let every thread start:"; cat unfair.txt; exit 1
-    fi
-    echo "  $(grep -c ', held to 10 s$' unfair.txt) of the two shapes ended within 30 s"
+    # The old proof passed when GNU timeout killed a deliberately hung
+    # process. On MSYS that kill can also reach the runner agent through a
+    # reused parent pid. Exercise the spinner's count directly instead, and
+    # record the return from each real collection yield in copy-only code.
+    cat > fairness.iyi <<'IYI'
+@[Unsafe("the test's atomic word is outside the collector and the copy records collection yields")]
+module fairness
+
+class Flag
+  getter ready : Atomic(Int64)
+  getter stop : Atomic(Int64)
+
+  def initialize
+    @ready = Atomic(Int64).new(0_i64)
+    @stop = Atomic(Int64).new(0_i64)
+  end
+end
+
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+{% if flag?(:fairness_force) %}
+IyiThread.fair_yield_reset
+{% end %}
+word = Pointer(Atomic(UInt64)).new(__iyi_mmap(4096_u64).address)
+word.value.set(1_u64)
+spins, since = IyiThread.lock_turn(word, 1_u64, 127_i64, 0_u64)
+if spins >= 0_i64 || (word.value.get & 0xFFFE_u64) != 2_u64
+  print "FAIL: fairness: a spinner seeing no lock release for 128 turns was not counted\n"
+  __iyi_exit(1)
+end
+
+flag = Flag.new
+worker = IyiThread.start do
+  flag.ready.set(1_i64)
+  while flag.stop.get == 0_i64
+    IyiThread.spin_pause
+  end
+  nil
+end
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while flag.ready.get == 0_i64
+  if IyiMark.now_ns >= deadline
+    print "FAIL: fairness: the helper did not start\n"
+    __iyi_exit(1)
+  end
+  IyiThread.yield_cpu
+end
+IyiMark.collect
+if IyiThread.fair_yield_count != 1_u64
+  print "FAIL: fairness: an explicit collection released its threads without yielding\n"
+  __iyi_exit(1)
+end
+# Make the budget collection due without relying on allocation timing.
+IyiHeap.allocated_word.value.set(IyiMark.budget)
+IyiMark.collect_if_due
+if IyiThread.fair_yield_count != 2_u64
+  print "FAIL: fairness: a budget collection released its threads without yielding\n"
+  __iyi_exit(1)
+end
+flag.stop.set(1_i64)
+worker.join
+puts "fairness: the spinner was counted, and explicit and budget collections yielded after release"
+IYI
+    fair_thread() {
+      awk -v mode="$1" '
+        /^    # ── Roots/ {
+          print "    def self.fair_yield_reset : Nil"
+          print "      word(control + 384_u64).value.set(0_u64)"
+          print "    end"
+          print "    def self.fair_yield_count : UInt64"
+          print "      word(control + 384_u64).value.get"
+          print "    end"
+          roots++
+        }
+        /^      yield_cpu if @@count > 1_i64$/ {
+          print "      if @@count > 1_i64"
+          print "        yield_cpu"
+          print "        word(control + 384_u64).value.add(1_u64)"
+          print "      end"
+          hook++; next
+        }
+        mode == "uncounted" && /^        if !counted && released == since$/ {
+          print "        if false"
+          removed++; next
+        }
+        { print }
+        END { if (roots != 1 || hook != 1 || (mode == "uncounted" && removed != 1)) exit 3 }
+      ' "$REPO/src/iyi/thread.iyi" > "$2"
+    }
+    fair_prelude() {
+      awk -v mode="$1" '
+        /^      def self\.collect_if_due : Nil$/ { section = "budget"; budget++ }
+        /^      def self\.collect_cleared : Nil$/ { section = "explicit"; explicit++ }
+        /^          IyiThread\.yield_to_stopped$/ && section == mode { removed++; next }
+        { print }
+        END { if (budget != 1 || explicit != 1 || removed != 1) exit 3 }
+      ' "$REPO/src/iyi/prelude.iyi" > "$2"
+    }
+    for mode in control uncounted explicit budget; do
+      case "$mode" in
+        control)
+          step "the counted-spinner and collection-yield control"
+          expected="fairness: the spinner was counted, and explicit and budget collections yielded after release"
+          expected_code=0
+          ;;
+        uncounted)
+          step "failure proof: a spinner is not counted after 128 turns"
+          expected="FAIL: fairness: a spinner seeing no lock release for 128 turns was not counted"
+          expected_code=1
+          ;;
+        explicit)
+          step "failure proof: an explicit collection omits its yield"
+          expected="FAIL: fairness: an explicit collection released its threads without yielding"
+          expected_code=1
+          ;;
+        budget)
+          step "failure proof: a budget collection omits its yield"
+          expected="FAIL: fairness: a budget collection released its threads without yielding"
+          expected_code=1
+          ;;
+      esac
+      mkdir -p "fair-$mode/iyi"
+      cp "$REPO"/src/iyi/*.iyi "fair-$mode/iyi/"
+      fair_thread "$mode" "fair-$mode/iyi/thread.iyi" || { echo "the fairness hook or count anchor is not unique"; exit 1; }
+      case "$mode" in
+        explicit | budget)
+          fair_prelude "$mode" "fair-$mode/iyi/prelude.iyi" || { echo "the collection yield anchor is not unique"; exit 1; }
+          ;;
+      esac
+      if ! IYI_PATH="$WORK/fair-$mode${PSEP}$REPO/src" "$IYI" build --release fairness.iyi -Dfairness_force -o "fair-$mode-run" > "build-fair-$mode.log" 2>&1; then
+        cat "build-fair-$mode.log"; exit 1
+      fi
+      win_native 60 "the fairness $mode proof" "./fair-$mode-run" > "fair-$mode-raw.txt" 2>&1
+      code=$?
+      tr -d '\r' < "fair-$mode-raw.txt" > "fair-$mode.txt"
+      if [ "$code" -ne "$expected_code" ] || ! grep -qxF "$expected" "fair-$mode.txt"; then
+        echo "the fairness $mode proof exited $code, expected $expected_code:"; cat "fair-$mode.txt"; exit 1
+      fi
+      printf '  exits %s at "%s"\n' "$code" "$expected"
+    done
     ;;
 esac
 

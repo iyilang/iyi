@@ -14,6 +14,16 @@
 # Socket and deep-frame movement are forced before their larger exercises.
 # Speed and tight-loop timings are performance information, sampled once.
 #
+# State visibility limit: IyiFiber.state is a plain enum, and its writers do
+# not share one lock. The registry walks hold IyiRuntimeLock for list links;
+# they do not make the state field atomic. The cancel, close, channel-park,
+# deep, balance, handoff, backstop, held-io, and Windows completion witnesses
+# read that field, as do panic-exit's reader waits. Their target waits remain
+# parked until the test releases them; a missed observation ends as a named
+# status-76 progress hang, never as a caught mutant. The runtime exposes no
+# atomic state load paired with its writers, so visibility is not guaranteed.
+# Poller uses the reader's atomic listed_on and on_cpu words instead.
+#
 #   1. The exercise holds every property, plain and --release: parallel
 #      tasks start on the pool and on more than one worker, never on the
 #      spawning thread, a thousand run exactly once, an atomic count loses

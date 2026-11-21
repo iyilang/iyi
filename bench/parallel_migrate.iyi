@@ -47,6 +47,11 @@ import std/socket::{IyiSocket, SocketError}
     __iyi_exit(1)
   end
 
+  def progress_hang(message : String) : NoReturn
+    print "FAIL: #{message}\n"
+    __iyi_exit(76)
+  end
+
   def elapsed_ms(since : Int64) : Int64
     (__iyi_monotonic_ns - since) // 1000000_i64
   end
@@ -205,7 +210,7 @@ import std/socket::{IyiSocket, SocketError}
     group do |w|
       w.spawn do
         waited = sleep(ms)
-        fail("#{name}: still waiting after #{ms} ms") unless waited.is_a?(Cancelled)
+        progress_hang("#{name}: progress hang: still waiting after #{ms} ms") unless waited.is_a?(Cancelled)
         0
       end
       block.call
@@ -660,16 +665,13 @@ import std/socket::{IyiSocket, SocketError}
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while IyiScheduler.force_armed_count < base + readers.to_u64
         sleep(1)
-        fail("cancel: progress hang: the readers did not register their io waits in 10000 ms") if __iyi_monotonic_ns > limit
-      end
-      slots.each do |slot|
-        fail("cancel: not armed: a reader was not parked in its io wait") unless fiber_in_state?(slot.fiber, IyiFiberState::WaitingIo)
+        progress_hang("cancel: progress hang: the readers did not register their io waits in 10000 ms") if __iyi_monotonic_ns > limit
       end
       slots.each do |slot|
         limit = __iyi_monotonic_ns + 10_000_000_000_i64
         while !switched_out?(slot.fiber, IyiFiberState::WaitingIo)
           sleep(1)
-          fail("cancel: progress hang: a reader did not switch out of its io wait in 10000 ms") if __iyi_monotonic_ns > limit
+          progress_hang("cancel: progress hang: a reader did not switch out of its io wait in 10000 ms") if __iyi_monotonic_ns > limit
         end
       end
       before = IyiScheduler.force_dispatched_count
@@ -738,14 +740,15 @@ import std/socket::{IyiSocket, SocketError}
           end
         end
         (kinds * per).times { go.send(1) }
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
         while parked.count < (kinds * per).to_i64
           sleep(1)
+          progress_hang("cancel: progress hang: the readers did not start") if __iyi_monotonic_ns > limit
         end
-        waited = 0
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
         while io_waiting < per
           sleep(1)
-          waited += 1
-          fail("cancel: the socket reads did not park in the io wait in 10000 ms") if waited > 10000
+          progress_hang("cancel: progress hang: the socket reads did not park in the io wait") if __iyi_monotonic_ns > limit
         end
         began = __iyi_monotonic_ns
         g.spawn(unit: :new) { Boom.new }
@@ -911,7 +914,7 @@ import std/socket::{IyiSocket, SocketError}
           started = __iyi_monotonic_ns
           while !IyiScheduler.force_close_registered?
             sleep(1)
-            fail("closes: the targeted reader did not complete io registration") if elapsed_ms(started) >= watch.to_i64
+            progress_hang("closes: progress hang: the targeted reader did not complete io registration") if elapsed_ms(started) >= watch.to_i64
           end
         {% else %}
           limit = __iyi_monotonic_ns + 10_000_000_000_i64
@@ -1390,7 +1393,7 @@ import std/socket::{IyiSocket, SocketError}
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while target.fiber == 0_u64 || !parked_on_channel?(target.fiber)
         sleep(1)
-        fail("balance: progress hang: the target did not park in 10000 ms") if __iyi_monotonic_ns > limit
+        progress_hang("balance: progress hang: the target did not park in 10000 ms") if __iyi_monotonic_ns > limit
       end
       g.spawn(unit: :new) do
         owner.note_worker(IyiScheduler.state.object_id)
@@ -1688,7 +1691,7 @@ import std/socket::{IyiSocket, SocketError}
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while !parked_on_channel?(armed.fiber)
         sleep(1)
-        fail("nocall: progress hang: the sleeper did not park in 10000 ms") if __iyi_monotonic_ns > limit
+        progress_hang("nocall: progress hang: the sleeper did not park in 10000 ms") if __iyi_monotonic_ns > limit
       end
       {% if flag?(:nohandoff_force) %}
         IyiWorkers.force_handoff_key(armed.fiber)
@@ -1781,7 +1784,7 @@ import std/socket::{IyiSocket, SocketError}
             limit = __iyi_monotonic_ns + 10_000_000_000_i64
             while handed.fiber == 0_u64 || !parked_on_channel?(handed.fiber)
               sleep(1)
-              fail("handoff: progress hang: the sleeper did not park in 10000 ms") if __iyi_monotonic_ns > limit
+              progress_hang("handoff: progress hang: the sleeper did not park in 10000 ms") if __iyi_monotonic_ns > limit
             end
             gate.send(__iyi_monotonic_ns)
             st = IyiScheduler.state
@@ -1964,7 +1967,7 @@ import std/socket::{IyiSocket, SocketError}
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while !parked_on_channel?(sleeper.fiber)
         sleep(1)
-        fail("backstop: progress hang: the sleeper did not park in 10000 ms") if __iyi_monotonic_ns > limit
+        progress_hang("backstop: progress hang: the sleeper did not park in 10000 ms") if __iyi_monotonic_ns > limit
       end
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while owner.worker == 0_u64
@@ -2204,7 +2207,7 @@ import std/socket::{IyiSocket, SocketError}
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while !fiber_in_state?(reader.fiber, IyiFiberState::WaitingIo)
         sleep(1)
-        fail("heldio: progress hang: the read did not register in 10000 ms") if __iyi_monotonic_ns > limit
+        progress_hang("heldio: progress hang: the read did not register in 10000 ms") if __iyi_monotonic_ns > limit
       end
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while owner.worker == 0_u64

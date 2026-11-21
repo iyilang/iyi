@@ -36,6 +36,11 @@
     __iyi_exit(1)
   end
 
+  def progress_hang(message : String) : NoReturn
+    print "FAIL: #{message}\n"
+    __iyi_exit(76)
+  end
+
   def elapsed_ms(since : Int64) : Int64
     (__iyi_monotonic_ns - since) // 1000000_i64
   end
@@ -153,7 +158,7 @@
     group do |w|
       w.spawn do
         waited = sleep(ms)
-        fail("#{name}: still waiting after #{ms} ms") unless waited.is_a?(Cancelled)
+        progress_hang("#{name}: progress hang: still waiting after #{ms} ms") unless waited.is_a?(Cancelled)
         0
       end
       block.call
@@ -673,11 +678,15 @@
         while begun.count == 0_i64
           sleep(1)
         end
-        sleeper = g.spawn(unit: :new) { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
+        fail("cancel: watch must leave room for the sleeping tasks") if watch <= 0 || watch > 2_147_473_647
+        sleep_ms = watch + 10_000
+        sleeper = g.spawn(unit: :new) { sleep(sleep_ms).is_a?(Cancelled) ? 1 : 0 }
         waiter = g.spawn(unit: :new) { never.receive.is_a?(Cancelled) ? 1 : 0 }
-        local = g.spawn(unit: :same) { sleep(10000).is_a?(Cancelled) ? 1 : 0 }
+        local = g.spawn(unit: :same) { sleep(sleep_ms).is_a?(Cancelled) ? 1 : 0 }
+        started = __iyi_monotonic_ns
         while sleeper.fiber.listed_on == 0_u64 || waiter.fiber.state != IyiFiberState::WaitingCh || local.fiber.state != IyiFiberState::Sleeping
           sleep(1)
+          progress_hang("cancel: progress hang: the siblings did not park") if elapsed_ms(started) >= watch.to_i64
         end
         {% if flag?(:undelivered_force) %}
           IyiScheduler.force_post_target(sleeper.fiber)
@@ -1271,7 +1280,7 @@
           started = __iyi_monotonic_ns
           while chooser.fiber.state != IyiFiberState::WaitingCh
             sleep(1)
-            fail("wakes, selects: the select never parked on its two channels within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+            progress_hang("wakes, selects: progress hang: the select did not park on its two channels within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
           end
           a.send(42_i64)
           a.close

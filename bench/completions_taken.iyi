@@ -33,6 +33,11 @@ import std/socket::{IyiSocket, SocketError}
     __iyi_exit(1)
   end
 
+  def progress_hang(message : String) : NoReturn
+    print "FAIL: #{message}\n"
+    __iyi_exit(76)
+  end
+
   # Atomic observations shared by the reader and its holding sibling.
   # The forced round uses their worker identities and the read time.
   class Marks
@@ -266,7 +271,7 @@ import std/socket::{IyiSocket, SocketError}
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while reader.value == 0_u64 || !fiber_in_state?(reader.value, IyiFiberState::WaitingIo)
         sleep(1)
-        fail("taken: progress hang: the reader did not park on its read in 10000 ms") if __iyi_monotonic_ns > limit
+        progress_hang("taken: progress hang: the reader did not park on its read in 10000 ms") if __iyi_monotonic_ns > limit
       end
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while owner.value == 0_u64

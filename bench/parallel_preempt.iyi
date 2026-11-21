@@ -702,15 +702,18 @@ import std/socket::{IyiSocket, SocketError}
   # worker is armed. In the forced copy, the slow half records whether its
   # next decision actually enters the nonblocking poll, before main sends
   # the fast request. The hold ends on the answer, not on a latency bound.
+  # The reader publishes its id after its first response. Its first wait
+  # has already unlisted, so a nonzero listed_on is the second read's
+  # atomic registration, not a stale WaitingIo from its first read.
   @[NoInline]
   @[NoPreempt]
-  def poller_fiber_in_state?(id : UInt64, state : IyiFiberState) : Bool
+  def poller_reader_parked?(id : UInt64) : Bool
     found = false
     IyiRuntimeLock.lock
     fiber = IyiScheduler.first_fiber
     while fiber.is_a?(IyiFiber)
       if fiber.object_id == id
-        found = fiber.state == state
+        found = fiber.listed_on != 0_u64 && !fiber.on_cpu?
         break
       end
       fiber = fiber.next_fiber
@@ -772,7 +775,7 @@ import std/socket::{IyiSocket, SocketError}
       fast.read(8)
       slow.write("b")
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
-      while computing.get == 0_i64 || reader.get == 0_u64 || !poller_fiber_in_state?(reader.get, IyiFiberState::WaitingIo)
+      while computing.get == 0_i64 || reader.get == 0_u64 || !poller_reader_parked?(reader.get)
         poller_hang("the fast reader did not park while the slow handler computed in 10000 ms") if __iyi_monotonic_ns > limit
         sleep(1)
       end

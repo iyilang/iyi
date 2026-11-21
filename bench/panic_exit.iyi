@@ -37,6 +37,11 @@ import std/socket::{IyiSocket, SocketError}
     __iyi_exit(1)
   end
 
+  def progress_hang(message : String) : NoReturn
+    print "FAIL: #{message}\n"
+    __iyi_exit(76)
+  end
+
   # A read nobody answers: parked on the poller until it is cancelled.
   def park_read(fd : Int32, target : Bool = false) : Int32
     {% if flag?(:parkedio_force) %}
@@ -87,7 +92,7 @@ import std/socket::{IyiSocket, SocketError}
         {% end %}
         i = i + 1
       end
-      fail("task-panic: a reader never parked on its io wait") if !parked && (__iyi_monotonic_ns - started) // 1000000_i64 >= 4000_i64
+      progress_hang("task-panic: progress hang: a reader did not park on its io wait") if !parked && (__iyi_monotonic_ns - started) // 1000000_i64 >= 4000_i64
     end
     release.send(1)
   end
@@ -151,7 +156,7 @@ import std/socket::{IyiSocket, SocketError}
     group do |w|
       w.spawn do
         waited = sleep(watch)
-        fail("#{mode}: still running #{watch} ms after it started") unless waited.is_a?(Cancelled)
+        progress_hang("#{mode}: progress hang: still running #{watch} ms after it started") unless waited.is_a?(Cancelled)
         puts "#{mode}: every task ended #{(__iyi_monotonic_ns - started) // 1000000_i64} ms after the start"
         0
       end

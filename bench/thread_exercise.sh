@@ -2157,9 +2157,9 @@ case "$(uname -s)" in
       word(page + IYI_EARLY_HELD).value.set(1_u64)
       while word(page + IYI_EARLY_OPEN).value.get == 0_u64
         if IyiMark.now_ns &- began >= 5000000000_u64
-          message = "FAIL: early: the gate inside take never opened\n"
+          message = "SETUP: early: the gate inside take never opened\n"
           __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-          __iyi_exit(1)
+          __iyi_exit(76)
         end
         spin_pause
       end
@@ -2170,7 +2170,7 @@ case "$(uname -s)" in
     # pointer. The stopper writes and exits; it never returns a stale sp.
     def self.early_setup_fail(message : String) : Nil
       __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-      __iyi_exit(1)
+      __iyi_exit(76)
     end
 
     def self.early_rendezvous(cursor : UInt64, handle : Pointer(Void), sp : UInt64) : UInt64
@@ -2183,23 +2183,26 @@ case "$(uname -s)" in
       word(page + IYI_EARLY_SEEN).value.set(1_u64)
       return sp if before != 0_u64
       word(page + IYI_EARLY_GO).value.set(cursor)
-      LibC.ResumeThread(handle)
+      if LibC.ResumeThread(handle) != 1_i32
+        early_setup_fail("SETUP: early: the armed thread could not be resumed\n")
+      end
       began = IyiMark.now_ns
       while word(page + IYI_EARLY_HELD).value.get == 0_u64
         if IyiMark.now_ns &- began >= 5000000000_u64
           word(page + IYI_EARLY_LAPSED).value.set(1_u64)
           word(page + IYI_EARLY_GO).value.set(0_u64)
-          LibC.SuspendThread(handle)
-          early_setup_fail("FAIL: early: the armed thread never reached the hook inside take\n")
+          early_setup_fail("SETUP: early: the armed thread never reached the hook inside take\n")
         end
         yield_cpu
       end
       word(page + IYI_EARLY_GO).value.set(0_u64)
-      LibC.SuspendThread(handle)
+      if LibC.SuspendThread(handle) != 0_i32
+        early_setup_fail("SETUP: early: the armed thread could not be suspended\n")
+      end
       captured = IyiRoots.capture_thread_registers(handle, cursor + IYI_TL_SPILL)
       if captured == 0_u64
         word(page + IYI_EARLY_LAPSED).value.set(2_u64)
-        early_setup_fail("FAIL: early: the second context capture returned no stack\n")
+        early_setup_fail("SETUP: early: the second context capture returned no stack\n")
       end
       word(page + IYI_EARLY_AFTER).value.set(IyiHeap.cache_inside?(cache) ? 1_u64 : 0_u64)
       word(page + IYI_EARLY_SP2).value.set(captured)
@@ -2249,9 +2252,9 @@ IYI
           print "        early_deadline = IyiMark.now_ns &+ 20000000000_u64"
           print
           print "          if IyiMark.now_ns >= early_deadline"
-          print "            message = \"FAIL: early: the deferred owner never parked\\n\""
+          print "            message = \"SETUP: early: the deferred owner never parked\\n\""
           print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
-          print "            __iyi_exit(1)"
+          print "            __iyi_exit(76)"
           print "          end"
           bounded++; next
         }
@@ -2263,10 +2266,11 @@ IYI
     # The copy of prelude.iyi: `take`'s fast path calls the hook after its stamp.
     early_prelude() {
       awk '
-        /^      def self\.take\(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64\) : UInt64$/ { intake = 1 }
-        intake && /^ *stamp\(table, index, head, bits, type_id\)$/ { ind = substr($0, 1, match($0, /[^ ]/) - 1); print; print ind "IyiThread.early_take_hook"; intake = 0; found++; next }
+        /^      def self\.take\(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64\) : UInt64$/ { declarations++; intake = 1; print; next }
+        intake && /^      end$/ { intake = 0; closures++; print; next }
+        intake && /^ *stamp\(table, index, head, bits, type_id\)$/ { ind = substr($0, 1, match($0, /[^ ]/) - 1); print; print ind "IyiThread.early_take_hook"; stamps++; next }
         { print }
-        END { if (found != 1) exit 3 }
+        END { if (declarations != 1 || closures != 1 || stamps != 1) exit 3 }
       ' "$REPO/src/iyi/prelude.iyi" > "$1"
     }
     cat > early.iyi <<'IYI'
@@ -2309,8 +2313,8 @@ owner = IyiThread.start do
   deadline = IyiMark.now_ns &+ 20000000000_u64
   while !IyiThread.early_go? && flag.release.get == 0_i64
     if IyiMark.now_ns >= deadline
-      print "FAIL: early: the owner was never let go\n"
-      __iyi_exit(1)
+      print "SETUP: early: the owner was never let go\n"
+      __iyi_exit(76)
     end
     IyiThread.spin_pause
   end
@@ -2320,8 +2324,8 @@ end
 deadline = IyiMark.now_ns &+ 20000000000_u64
 while flag.waiting.get == 0_i64
   if IyiMark.now_ns >= deadline
-    print "FAIL: early: the owner never armed\n"
-    __iyi_exit(1)
+    print "SETUP: early: the owner never armed\n"
+    __iyi_exit(76)
   end
   IyiThread.yield_cpu
 end
@@ -2331,12 +2335,12 @@ IyiThread.early_open
 owner.join
 lapsed = IyiThread.early_value(IyiThread::IYI_EARLY_LAPSED)
 if lapsed == 1_u64
-  print "FAIL: early: the armed thread never reached the hook inside take\n"
-  __iyi_exit(1)
+  print "SETUP: early: the armed thread never reached the hook inside take\n"
+  __iyi_exit(76)
 end
 if lapsed == 2_u64
-  print "FAIL: early: the second context capture returned no stack\n"
-  __iyi_exit(1)
+  print "SETUP: early: the second context capture returned no stack\n"
+  __iyi_exit(76)
 end
 held = IyiThread.early_value(IyiThread::IYI_EARLY_HELD)
 seen = IyiThread.early_value(IyiThread::IYI_EARLY_SEEN)
@@ -2348,8 +2352,8 @@ parked = IyiThread.early_value(IyiThread::IYI_EARLY_PARKED)
 same_sp = IyiThread.early_value(IyiThread::IYI_EARLY_SAME_SP)
 puts "early: held=#{held} before=#{before} after=#{after} stopped=#{stopped} parked=#{parked}"
 if held != 1_u64 || seen != 1_u64 || before != 0_u64 || after != 1_u64 || snapshot != 1_u64
-  print "FAIL: early: the rendezvous did not take the armed thread from outside take to inside it\n"
-  __iyi_exit(1)
+  print "SETUP: early: the rendezvous did not take the armed thread from outside take to inside it\n"
+  __iyi_exit(76)
 end
 if stopped == 1_u64 && parked == 0_u64 && same_sp == 1_u64
   puts "early: the second captured sp was stored on the stopped line"
@@ -2357,21 +2361,22 @@ if stopped == 1_u64 && parked == 0_u64 && same_sp == 1_u64
   __iyi_exit(1)
 end
 if stopped != 0_u64 || parked != 1_u64
-  print "FAIL: early: the stop neither parked nor held the armed thread\n"
-  __iyi_exit(1)
+  print "SETUP: early: the stop neither parked nor held the armed thread\n"
+  __iyi_exit(76)
 end
 puts "early: the stop deferred the thread after the second context capture"
 IYI
     step "the late context capture is followed by a fresh allocator-depth check"
     mkdir -p early-ctl/iyi early-fz/iyi
     cp "$REPO"/src/iyi/*.iyi early-ctl/iyi/
-    early_prelude early-ctl/iyi/prelude.iyi || { echo "the take's stamp is not in prelude.iyi any more"; exit 1; }
-    early_thread control early-ctl/iyi/thread.iyi || { echo "the roots of thread.iyi are not in it any more"; exit 1; }
+    early_prelude early-ctl/iyi/prelude.iyi || { echo "SETUP: early: the take fast-path anchors changed"; exit 76; }
+    early_thread control early-ctl/iyi/thread.iyi || { echo "SETUP: early: the thread anchors changed"; exit 76; }
     if ! IYI_PATH="$WORK/early-ctl${PSEP}$REPO/src" "$IYI" build early.iyi -Dearly_force -o early-ctl-run > build-early-ctl.log 2>&1; then
-      cat build-early-ctl.log; exit 1
+      cat build-early-ctl.log; exit 76
     fi
     win_native 60 "the late-capture control" ./early-ctl-run > early-ctl-raw.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat early-ctl-raw.txt; exit 76; fi
     tr -d '\r' < early-ctl-raw.txt > early-ctl.txt
     if [ "$code" -ne 0 ] || ! grep -qxF 'early: held=1 before=0 after=1 stopped=0 parked=1' early-ctl.txt || ! grep -qxF 'early: the stop deferred the thread after the second context capture' early-ctl.txt; then
       echo "the control did not defer the armed thread (exit $code):"; cat early-ctl.txt; exit 1
@@ -2379,13 +2384,14 @@ IYI
     printf '  control: exit 0, %s\n' "$(grep -m1 '^early: held=' early-ctl.txt)"
     step "failure proof: a stop uses the allocator depth read before the second context capture"
     cp "$REPO"/src/iyi/*.iyi early-fz/iyi/
-    early_prelude early-fz/iyi/prelude.iyi || { echo "the take's stamp is not in prelude.iyi any more"; exit 1; }
-    early_thread forced early-fz/iyi/thread.iyi || { echo "the roots or the sp store of thread.iyi are not in it any more"; exit 1; }
+    early_prelude early-fz/iyi/prelude.iyi || { echo "SETUP: early: the take fast-path anchors changed"; exit 76; }
+    early_thread forced early-fz/iyi/thread.iyi || { echo "SETUP: early: the thread anchors changed"; exit 76; }
     if ! IYI_PATH="$WORK/early-fz${PSEP}$REPO/src" "$IYI" build early.iyi -Dearly_force -o early-fz-run > build-early-fz.log 2>&1; then
-      cat build-early-fz.log; exit 1
+      cat build-early-fz.log; exit 76
     fi
     win_native 60 "the stale-decision proof" ./early-fz-run > early-fz-raw.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat early-fz-raw.txt; exit 76; fi
     tr -d '\r' < early-fz-raw.txt > early-fz.txt
     if [ "$code" -ne 1 ] || ! grep -qxF 'early: held=1 before=0 after=1 stopped=1 parked=0' early-fz.txt || ! grep -qxF 'early: the second captured sp was stored on the stopped line' early-fz.txt || ! grep -qxF 'FAIL: early: a stop held a thread inside take on a decision read before it went in' early-fz.txt; then
       echo "the stale allocator decision was not caught on its one run (exit $code):"; cat early-fz.txt; exit 1

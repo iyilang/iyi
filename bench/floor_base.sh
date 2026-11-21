@@ -57,7 +57,8 @@ FLOOR_LIBS_PROGRAM="libSystem libc.so ld-linux libgcc_s Security CoreFoundation"
 # That is the runtime's floor - the collector, the scheduler and threads
 # are kernel32's - and a program may add three, each through the modules
 # named:
-#   advapi32.dll      `RtlGenRandom`, the OS entropy `std/random` reads;
+#   advapi32.dll      `RtlGenRandom`, the OS entropy `std/random` reads
+#                     and the prelude keys `String#hash` with (#212);
 #                     the registry `std/socket` reads the name servers
 #                     from; the account name and token SIDs `std/user`
 #                     answers `User.current` with (SPEC.md III.10)

@@ -108,8 +108,6 @@
 #        thread, held to 10 s: a healthy timing bound, unchanged.
 #   4d   the no-raise timing mutant (a stop beside a burst with the raises
 #        taken out): removed; its only verdict was a stop timing.
-#   7d   unborn: the mutant's verdict is a schedule search for a collection
-#        landing before a link, not forced.
 #   7e   toplate: its healthy topfirst can pass without seeing two collections;
 #        no witness added.
 #   7h   unwoken: the mutant's verdict is the 30 s timeout (exit 124).
@@ -3851,13 +3849,9 @@ esac
 # Pro), and the program below in 19 of 20 (18 killed, 1 trapped), each
 # inside 4 s. A thread links its own line now, after its first touch: the
 # program, 3,200 threads a run, sixteen at a time beside a thread that
-# collects in a loop, ran 20 runs of 20 there. The failure proof links the
-# line in the parent again. Then a handler that lands before the thread's
-# touch, or inside it where the allocator lets its own touch through,
-# finds no line, returns without counting in, and the stop waits for it
-# forever (5 runs of 5 hung so on the M2): the copy's handler aborts there
-# instead, so the proof counts a kill, a trap or an abort, each by name,
-# and never waits out a timeout. The M2 counted 5 aborts in 5 runs.
+# collects in a loop, remains as stress. The proof holds one child at run
+# entry, before the TLS write. Both copies observe the stop's real signal
+# site; the mutant links the line in its parent and fails before signaling it.
 #
 # A run is bounded by its own clock, not by a count: twenty rounds, then
 # rounds until 10 s have passed, 200 at most. Every run was 200 rounds and
@@ -3931,43 +3925,146 @@ IYI
     done
     echo "  five runs, every thread born and joined:$born threads"
 
-    step "failure proof: the line linked by the parent before the thread's first touch, as it was"
-    probe='function probe(pad) {
-      print pad "if line == 0"
-      print pad "  message = \"iyi: proof: a stop reached a thread before it wrote its line\\n\""
-      print pad "  __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
-      print pad "  LibC.pthread_kill(LibC.pthread_self, 6)"
-      print pad "end"
-    }'
-    mkdir -p unborn/iyi
-    cp "$REPO"/src/iyi/*.iyi unborn/iyi/
-    awk "$probe"' /^        result = LibC\.pthread_create\(Pointer\(UInt64\)\.new\(line \+ IYI_TL_HANDLE\), / {
-        print "        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)"; print "        @@lines = line"; print "        @@count = @@count + 1_i64"; found++ }
-      /^        link\(line\)$/ { found++; next }
-      /^      line = own_line$/ { print; probe("      "); found++; next }
-      { print } END { if (found != 3) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > unborn/iyi/thread.iyi || { echo "the start's pthread_create, the thread's own link or the handler's line is not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/unborn${PSEP}$REPO/src" "$IYI" build born.iyi -o unborn-run > build-unborn.log 2>&1; then
-      cat build-unborn.log; exit 1
-    fi
-    killed=0; trapped=0; aborted=0; ended=0; other=""
-    run=1
-    while [ "$run" -le 5 ]; do
-      ( timeout -k 5 60 ./unborn-run 200 10 > unborn.txt 2>&1; exit $? ) 2> /dev/null
+    cat > pretls.part <<'IYI'
+    IYI_PRETLS_ARM = 384_u64
+    IYI_PRETLS_LINE = 448_u64
+    IYI_PRETLS_OPEN = 512_u64
+    IYI_PRETLS_STOP = 576_u64
+    def self.pretls_arm : Nil
+      word(control + IYI_PRETLS_ARM).value.set(1_u64)
+    end
+    def self.pretls_held? : Bool
+      word(control + IYI_PRETLS_LINE).value.get != 0_u64
+    end
+    def self.pretls_stopped? : Bool
+      word(control + IYI_PRETLS_STOP).value.get != 0_u64
+    end
+    def self.pretls_open : Nil
+      word(control + IYI_PRETLS_OPEN).value.set(1_u64)
+    end
+    # Called at run entry, before the child's first TLS write. Do not read a
+    # thread-local or lazily create the shared control page here.
+    def self.pretls_hold(line : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || !word(page + IYI_PRETLS_ARM).value.compare_and_set(1_u64, 0_u64)[1]
+      word(page + IYI_PRETLS_LINE).value.set(line)
+      began = IyiMark.now_ns
+      while word(page + IYI_PRETLS_OPEN).value.get == 0_u64
+        if IyiMark.now_ns &- began > 20000000000_u64
+          message = "SETUP: pretls: the held child was never opened\n"
+          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+          LibC.pretls_exit(76_i32)
+        end
+        yield_cpu
+      end
+    end
+    def self.pretls_stop : Nil
+      page = @@control
+      return if page == 0_u64 || word(page + IYI_PRETLS_LINE).value.get == 0_u64 || word(page + IYI_PRETLS_OPEN).value.get != 0_u64
+      word(page + IYI_PRETLS_STOP).value.set(1_u64)
+    end
+    def self.pretls_signal(cursor : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || word(page + IYI_PRETLS_OPEN).value.get != 0_u64
+      return if cursor == 0_u64 || cursor != word(page + IYI_PRETLS_LINE).value.get
+      message = "FAIL: pretls: a stop named a child before its first TLS write\n"
+      __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+      LibC.pretls_exit(1_i32)
+    end
+IYI
+    pretls_copy() {
+      awk -v part=pretls.part -v mode="$1" '
+        /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ { print; print "      fun pretls_exit = _exit(status : Int32) : NoReturn"; alias_count++; next }
+        /^    # ── Roots/ { while ((getline s < part) > 0) print s; roots++ }
+        /^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { in_start = 1; starts++ }
+        in_start && /^      \{% elsif flag\?\(:darwin\) %\}$/ { in_darwin = 1; darwin++ }
+        in_start && /^      \{% elsif flag\?\(:win32\) %\}$/ { in_darwin = 0 }
+        in_start && /^    end$/ { in_start = 0; in_darwin = 0; start_ends++ }
+        in_darwin && /^        result = LibC\.pthread_create\(Pointer\(UInt64\)\.new\(line \+ IYI_TL_HANDLE\), / {
+          if (mode == "forced") { print "        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)"; print "        @@lines = line"; print "        @@count = @@count + 1_i64" }
+          created++
+        }
+        /^    def self\.run\(line : UInt64\) : Nil$/ { print; print "      IyiThread.pretls_hold(line)"; runs++; in_run = 1; next }
+        in_run && /^    end$/ { in_run = 0; run_ends++ }
+        in_run && /^        link\(line\)$/ { links++; if (mode == "forced") next }
+        /^      return 0_i64 if @@count == 0_i64 \|\| \(line != 0 && @@count <= 1_i64\)$/ { print "      IyiThread.pretls_stop"; stops++ }
+        /^              result = LibC\.pthread_kill\(handle, IYI_SIGSTOP_THE_WORLD\)$/ { print "              IyiThread.pretls_signal(cursor)"; signals++ }
+        { print }
+        END { if (alias_count != 1 || roots != 1 || starts != 1 || start_ends != 1 || darwin != 1 || created != 1 || runs != 1 || run_ends != 1 || links != 1 || stops != 1 || signals != 1) exit 3 }
+      ' "$REPO/src/iyi/thread.iyi" > "$2"
+    }
+    cat > pretls.iyi <<'IYI'
+@[Unsafe("the copy-only proof holds a child before its first thread-local write")]
+class Gate
+  getter ready : Atomic(Int64)
+  getter stop : Atomic(Int64)
+  def initialize
+    @ready = Atomic(Int64).new(0_i64)
+    @stop = Atomic(Int64).new(0_i64)
+  end
+end
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+IyiThread.pretls_arm
+gate = Gate.new
+thread = IyiThread.start do
+  gate.ready.set(1_i64)
+  while gate.stop.get == 0_i64
+    IyiThread.spin_pause
+  end
+  nil
+end
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while !IyiThread.pretls_held?
+  if IyiMark.now_ns >= deadline
+    print "SETUP: pretls: the child never reached run entry\n"
+    __iyi_exit(76)
+  end
+  IyiThread.yield_cpu
+end
+IyiMark.collect
+unless IyiThread.pretls_stopped?
+  print "SETUP: pretls: the held-child stop was not observed\n"
+  __iyi_exit(76)
+end
+IyiThread.pretls_open
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while gate.ready.get == 0_i64
+  if IyiMark.now_ns >= deadline
+    print "SETUP: pretls: the child did not start after opening\n"
+    __iyi_exit(76)
+  end
+  IyiThread.yield_cpu
+end
+before = IyiThread.stopped
+IyiMark.collect
+if IyiThread.stopped <= before
+  print "SETUP: pretls: the linked child was not stopped\n"
+  __iyi_exit(76)
+end
+gate.stop.set(1_i64)
+thread.join
+puts "pretls: the pre-TLS child was not named, then its linked line was stopped"
+IYI
+    for mode in control forced; do
+      mkdir -p "pretls-$mode/iyi"
+      cp "$REPO"/src/iyi/*.iyi "pretls-$mode/iyi/"
+      pretls_copy "$mode" "pretls-$mode/iyi/thread.iyi" || { echo "SETUP: pretls: copy anchors changed"; exit 76; }
+      if ! IYI_PATH="$WORK/pretls-$mode${PSEP}$REPO/src" "$IYI" build pretls.iyi -o "pretls-$mode-run" > "build-pretls-$mode.log" 2>&1; then
+        cat "build-pretls-$mode.log"; exit 76
+      fi
+      step "darwin: pre-TLS child $mode"
+      timeout -k 5 60 "./pretls-$mode-run" > "pretls-$mode.txt" 2>&1
       code=$?
-      case "$code" in
-        137) killed=$((killed + 1)) ;;
-        133) trapped=$((trapped + 1)) ;;
-        134) grep -q '^iyi: proof: a stop reached a thread before it wrote its line' unborn.txt && aborted=$((aborted + 1)) || other="$other 134" ;;
-        0) ended=$((ended + 1)) ;;
-        *) other="$other $code" ;;
-      esac
-      run=$((run + 1))
+      if [ "$code" -eq 76 ] || [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then cat "pretls-$mode.txt"; exit 76; fi
+      if [ "$mode" = control ]; then
+        [ "$code" -eq 0 ] && grep -qxF 'pretls: the pre-TLS child was not named, then its linked line was stopped' "pretls-$mode.txt" || { echo "pretls control failed (exit $code):"; cat "pretls-$mode.txt"; exit 1; }
+        echo '  control: exit 0, pretls: the pre-TLS child was not named, then its linked line was stopped'
+      else
+        [ "$code" -eq 1 ] && grep -qxF 'FAIL: pretls: a stop named a child before its first TLS write' "pretls-$mode.txt" || { echo "pretls mutant failed unexpectedly (exit $code):"; cat "pretls-$mode.txt"; exit 1; }
+        echo '  exits 1 at "FAIL: pretls: a stop named a child before its first TLS write"'
+      fi
     done
-    echo "  five runs: $killed killed (SIGKILL), $trapped trapped (SIGTRAP), $aborted aborted at the handler's unwritten line (SIGABRT), $ended ended${other:+, other exits:$other}"
-    if [ $((killed + trapped + aborted)) -eq 0 ]; then
-      echo "five runs with the line linked before the thread's first touch: none killed, trapped or aborted"; exit 1
-    fi
 
     ;;
 esac

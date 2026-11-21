@@ -249,24 +249,41 @@
 
   # The running unit's partition collected, as its own token holder; asked
   # again until one has run (a local collection steps aside while a global
-  # mark runs).
-  @[NoInline]
-  def collect_here : Nil
+  # mark runs). A macro, so that the first scrub runs in the frame that
+  # called the droppers, as heap_local's callers scrub before
+  # `collect_now`: a def that scrubbed first thing lay over the droppers'
+  # frames itself, and a slot of its frame it never wrote still named
+  # the head of the chain `chain` had made below it. The `foreign` copy's
+  # local collection marked the chain through it, every run of the plain
+  # build, and only the unit's death reported the chain, while the
+  # `Holder` naming it lived: on CI its unit died first once, and the
+  # copy was missed (plain: 600 runs of 600 on Linux and 400 of 400 on
+  # Windows 11 reported at the death; job 134750417357).
+  macro collect_here
     scrub
+    collect_scrubbed
+  end
+
+  # `collect_here`'s collection, its frame laid over the zeroed stack.
+  # Each try scrubs again, since a try a global mark aborted left its
+  # frames under the next, and counts only a collection its own
+  # `collect_local` ran, not one at the park between two tries, over
+  # frames no scrub reached.
+  @[NoInline]
+  def collect_scrubbed : Nil
     {% if flag?(:heap_partitions) %}
       record = IyiScheduler.current.alloc
       return if record == 0_u64
-      before = IyiHeap.partition_collections(record)
       tries = 0
-      while IyiHeap.partition_collections(record) == before
-        if tries == 1000
-          fail("a local collection did not run in 1000 tries")
-          break
-        end
+      while tries < 1000
+        scrub
+        before = IyiHeap.partition_collections(record)
         IyiHeap.collect_local(record)
+        return if IyiHeap.partition_collections(record) != before
+        sleep(1)
         tries = tries + 1
-        sleep(1) if IyiHeap.partition_collections(record) == before
       end
+      fail("a local collection did not run in 1000 tries")
     {% end %}
   end
 
@@ -571,7 +588,6 @@
   def defer_list(seed : Int32) : Nil
     DeferRan.reset
     push_below_shared(seed)
-    scrub
     collect_here
     5.times { __iyi_defer_pop_run }
     fail("defer list: the cleanups ran as #{DeferRan.order}, not 94321") unless DeferRan.order == 94321_u64

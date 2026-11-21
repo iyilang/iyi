@@ -110,7 +110,6 @@
 #        taken out): removed; its only verdict was a stop timing.
 #   7e   toplate: its healthy topfirst can pass without seeing two collections;
 #        no witness added.
-#   7h   unwoken: the mutant's verdict is the 30 s timeout (exit 124).
 #   7h   Linux unowed: the mutant's verdict is exit 124 or a count of owed turns
 #        in a timed storm.
 #   7g   heaped: the healthy wild exits 3 if no fault has come by its deadline,
@@ -4404,21 +4403,100 @@ IYI
       run=$((run + 1))
     done
 
-    step "failure proof: the last thread to count in leaves the stopper asleep, and a run hangs"
-    mkdir -p unwoken/iyi
-    cp "$REPO"/src/iyi/*.iyi unwoken/iyi/
-    awk '/^        return if sleeper == 0_u64 \|\| now < sleeper$/ { print "        return"; found = 1; next }
-      { print } END { if (!found) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > unwoken/iyi/thread.iyi || { echo "the count's wake is not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/unwoken${PSEP}$REPO/src" "$IYI" build asleep.iyi -o unwoken-run > build-unwoken.log 2>&1; then
-      cat build-unwoken.log; exit 1
-    fi
-    ( timeout -k 5 30 ./unwoken-run 200 10 > unwoken.txt 2>&1; exit $? ) 2> /dev/null
-    code=$?
-    if [ "$code" -ne 124 ]; then
-      echo "with the wake taken out, a run exited $code rather than hanging:"; tail -3 unwoken.txt; exit 1
-    fi
-    echo "  the run hung until the 30 s timeout (exit 124)"
+    cat > final-wake.part <<'IYI'
+    IYI_WAKE_TARGET = 384_u64
+    IYI_WAKE_PUBLISHED = 448_u64
+    IYI_WAKE_CALLED = 512_u64
+    def self.final_wake_arm(address : UInt64) : Nil
+      page = control
+      word(page + IYI_WAKE_TARGET).value.set(address)
+      word(page + IYI_WAKE_PUBLISHED).value.set(0_u64)
+      word(page + IYI_WAKE_CALLED).value.set(0_u64)
+    end
+    def self.final_wake_published(address : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || word(page + IYI_WAKE_TARGET).value.get != address
+      word(page + IYI_WAKE_PUBLISHED).value.set(1_u64)
+    end
+    def self.final_wake_called(address : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || word(page + IYI_WAKE_TARGET).value.get != address
+      word(page + IYI_WAKE_CALLED).value.set(1_u64)
+    end
+    def self.final_wake_published? : Bool
+      word(control + IYI_WAKE_PUBLISHED).value.get != 0_u64
+    end
+    def self.final_wake_called? : Bool
+      word(control + IYI_WAKE_CALLED).value.get != 0_u64
+    end
+IYI
+    final_wake_copy() {
+      awk -v part=final-wake.part -v mode="$1" '
+        /^    # ── Roots/ { while ((getline s < part) > 0) print s; roots++ }
+        /^    def self\.wait_count\(address : UInt64, target : UInt64\) : Nil$/ { in_wait = 1; waits++ }
+        in_wait && /^    end$/ { in_wait = 0; wait_ends++ }
+        in_wait && /^        word\(control \+ IYI_TC_SLEEPER\)\.value\.set\(target\)$/ { print; print "        IyiThread.final_wake_published(address)"; published++; next }
+        /^    def self\.count_in\(address : UInt64\) : Nil$/ { in_count = 1; counts++ }
+        in_count && /^    end$/ { in_count = 0; count_ends++ }
+        in_count && /^        return if sleeper == 0_u64 \|\| now < sleeper$/ {
+          if (mode == "forced") print "        return"
+          else print
+          condition++; next
+        }
+        in_count && /^          __iyi_conc_syscall6\(IYI_SYS_FUTEX, address\.to_i64, IYI_FUTEX_WAKE, 1_i64, 0_i64, 0_i64, 0_i64\)$/ { print; print "          IyiThread.final_wake_called(address)"; linux++; next }
+        in_count && /^          LibC\.os_sync_wake_by_address_all\(Pointer\(Void\)\.new\(address\), 8_u64, 0_u32\)$/ { print; print "          IyiThread.final_wake_called(address)"; darwin++; next }
+        { print }
+        END { if (roots != 1 || waits != 1 || wait_ends != 1 || published != 1 || counts != 1 || count_ends != 1 || condition != 1 || linux != 1 || darwin != 1) exit 3 }
+      ' "$REPO/src/iyi/thread.iyi" > "$2"
+    }
+    cat > final-wake.iyi <<'IYI'
+@[Unsafe("the proof uses a private mapped counter and copy-only wake witnesses")]
+module final_wake
+
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+address = __iyi_mmap(4096_u64).address
+Pointer(Atomic(UInt64)).new(address).value.set(0_u64)
+IyiThread.final_wake_arm(address)
+waiter = IyiThread.start do
+  IyiThread.wait_count(address, 1_u64)
+  nil
+end
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while !IyiThread.final_wake_published?
+  if IyiMark.now_ns >= deadline
+    print "SETUP: final wake: the waiter never published its target\n"
+    __iyi_exit(76)
+  end
+  IyiThread.yield_cpu
+end
+IyiThread.count_in(address)
+unless IyiThread.final_wake_called?
+  print "FAIL: final wake: the last increment did not call the platform wake\n"
+  __iyi_exit(1)
+end
+waiter.join
+puts "final wake: the last increment called the platform wake"
+IYI
+    for mode in control forced; do
+      mkdir -p "final-wake-$mode/iyi"
+      cp "$REPO"/src/iyi/*.iyi "final-wake-$mode/iyi/"
+      final_wake_copy "$mode" "final-wake-$mode/iyi/thread.iyi" || { echo "SETUP: final wake: copy anchors changed"; exit 76; }
+      if ! IYI_PATH="$WORK/final-wake-$mode${PSEP}$REPO/src" "$IYI" build final-wake.iyi -o "final-wake-$mode-run" > "build-final-wake-$mode.log" 2>&1; then
+        cat "build-final-wake-$mode.log"; exit 76
+      fi
+      step "the last increment's platform wake, $mode"
+      ( timeout -k 5 60 "./final-wake-$mode-run" > "final-wake-$mode.txt" 2>&1; exit $? ) 2> /dev/null
+      code=$?
+      if [ "$code" -eq 76 ] || [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then cat "final-wake-$mode.txt"; exit 76; fi
+      if [ "$mode" = control ]; then
+        [ "$code" -eq 0 ] && grep -qxF 'final wake: the last increment called the platform wake' "final-wake-$mode.txt" || { echo "final wake control failed (exit $code):"; cat "final-wake-$mode.txt"; exit 1; }
+        echo '  control: exit 0, final wake: the last increment called the platform wake'
+      else
+        [ "$code" -eq 1 ] && grep -qxF 'FAIL: final wake: the last increment did not call the platform wake' "final-wake-$mode.txt" || { echo "final wake mutant failed unexpectedly (exit $code):"; cat "final-wake-$mode.txt"; exit 1; }
+        echo '  exits 1 at "FAIL: final wake: the last increment did not call the platform wake"'
+      fi
+    done
 
     # The same storm holds the collection's wait for the turns the last
     # stop's lock waiters are owed (`IyiThread.await_turns`): the release

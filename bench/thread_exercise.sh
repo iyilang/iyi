@@ -1155,19 +1155,38 @@ IYI
     shared=$(( NUMBER_OF_PROCESSORS - 1 ))
     # `./$1` beside the burst, its output in `$2`.
     beside_burst() {
+      local burst_pid deadline killed=0
       rm -f burst-ready burst-stop
-      MSYS_NO_PATHCONV=1 cmd /c start "" /b burst.exe "$shared" 100 > burst.txt 2>&1
-      for wait in $(seq 1 100); do [ -f burst-ready ] && break; sleep 0.1; done
-      [ -f burst-ready ] || { echo "the burst did not start"; exit 1; }
+      MSYS_NO_PATHCONV=1 ./burst.exe "$shared" 100 > burst.txt 2>&1 &
+      burst_pid=$!
+      deadline=$((SECONDS + 10))
+      while [ ! -f burst-ready ]; do
+        if ! kill -0 "$burst_pid" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+          echo "SETUP: burst: owned burner did not become ready (pid $burst_pid)" >&2
+          if kill -0 "$burst_pid" 2>/dev/null; then end_bounded "$burst_pid" || exit 76; fi
+          wait "$burst_pid" 2>/dev/null || true
+          exit 76
+        fi
+        sleep 0.1
+      done
       timeout -k 5 120 "./$1" "$shared" 20 50 > "$2" 2>&1
       BURST_STATUS=$?
       touch burst-stop
-      sleep 1
-      timeout -k 5 15 taskkill //F //IM burst.exe > /dev/null || {
-        cleanup=$?
-        [ "$cleanup" -ne 76 ] || exit 76
-      }
+      deadline=$((SECONDS + 10))
+      while kill -0 "$burst_pid" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+          end_bounded "$burst_pid" || exit 76
+          killed=1
+          break
+        fi
+        sleep 0.1
+      done
+      if ! wait "$burst_pid" 2>/dev/null && [ "$killed" -eq 0 ]; then
+        echo "SETUP: burst: owned burner exited unsuccessfully (pid $burst_pid)" >&2
+        exit 76
+      fi
       tr -d '\r' < burst.txt >> "$2"
+      [ "$BURST_STATUS" -ne 76 ] || exit 76
     }
     cat > burst.part <<'IYI'
     # Both copies observe the actual lower_stopper body. These per-thread

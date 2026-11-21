@@ -798,6 +798,17 @@ import std/socket::{IyiSocket, SocketError}
     end
     count
   end
+  # Count alone can include unrelated waiters. Also identify the reader of
+  # the socket the main thread will close.
+  def closes_target_registered?(id : UInt64) : Bool
+    return false if id == 0_u64
+    fiber = IyiScheduler.first_fiber
+    while fiber.is_a?(IyiFiber)
+      return fiber.state == IyiFiberState::WaitingIo && !fiber.on_cpu? if fiber.object_id == id
+      fiber = fiber.next_fiber
+    end
+    false
+  end
 
   def closes(watch : Int32) : Nil
     watched("closes", watch) do
@@ -864,6 +875,14 @@ import std/socket::{IyiSocket, SocketError}
             __iyi_exit(76)
           end
         end
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
+        while !closes_target_registered?(lent_reader.fiber)
+          sleep(1)
+          if __iyi_monotonic_ns > limit
+            print "FAIL: closes: progress hang: the target reader did not finish registering its socket wait\n"
+            __iyi_exit(76)
+          end
+        end
         fail("closes: the main thread closed a socket on the thread its reader parked on") unless os_thread != lent_reader.thread
         {% if flag?(:noclose_force) %}
           started = __iyi_monotonic_ns
@@ -883,6 +902,7 @@ import std/socket::{IyiSocket, SocketError}
         {% end %}
         units.times { go.send(1) }
         lent.socket.close
+        puts "closes: the registered reader parked on a different thread from the main thread that closed its socket"
       end
       ends.each(&.close)
       listener.close
@@ -895,6 +915,7 @@ import std/socket::{IyiSocket, SocketError}
   # main thread's close to be measured against.
   def lent_read(lent : Lent, where : Where, waiting : Tally, woken : Tally) : Int32
     where.note(os_thread)
+    where.note_fiber(IyiScheduler.current.object_id)
     waiting.add(1_i64)
     got = lent.socket.read(16)
     woken.add(1_i64) if got.is_a?(Cancelled)
@@ -919,13 +940,23 @@ import std/socket::{IyiSocket, SocketError}
   # `Share` by its atomic field.
   class Where
     @thread : Atomic(UInt64)
+    @fiber : Atomic(UInt64)
 
     def initialize
       @thread = Atomic(UInt64).new(0_u64)
+      @fiber = Atomic(UInt64).new(0_u64)
     end
 
     def note(thread : UInt64) : Nil
       @thread.set(thread)
+    end
+
+    def note_fiber(fiber : UInt64) : Nil
+      @fiber.set(fiber)
+    end
+
+    def fiber : UInt64
+      @fiber.get
     end
 
     def thread : UInt64

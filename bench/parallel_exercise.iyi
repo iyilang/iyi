@@ -789,49 +789,105 @@
     end
   end
 
-  # The steal: one parallel task spawns 64 more, which go into its own
-  # worker's queue, and then keeps its worker busy - spinning, never
-  # parking - until a child has run on another worker. A worker takes from
-  # the pool only when it has nothing to run, so while the spawner spins
-  # its own worker takes none of them, and a child that runs anywhere else
-  # got there by a steal: nothing here depends on how fast a build drains
-  # its own queue. Waited for 10 s at most, and named if it never comes.
-  # Every child runs once.
+  # The duplicate-steal copy starts all four workers before arming the
+  # victim. The first thief waits after unlocking the scheduler, so another
+  # already-started worker must be available to make the second look.
+  {% if flag?(:duplicate_force) %}
+    @[NoInline]
+    @[NoPreempt]
+    def steal_prime(ready : Tally, release : Tally) : Nil
+      ready.add(1_i64)
+      limit = __iyi_monotonic_ns + 20_000_000_000_i64
+      while release.count == 0_i64
+        IyiThread.spin_pause
+        if __iyi_monotonic_ns > limit
+          puts "FAIL: steal: progress hang: a worker was not released after pool startup"
+          __iyi_flush_std
+          __iyi_exit(76)
+        end
+      end
+    end
+  {% end %}
+
+  # Keep the spawner on its worker from arming through the first child's
+  # arrival. A different worker must therefore have taken that child.
+  @[NoInline]
+  @[NoPreempt]
+  def steal_spawn(tally : Tally, elsewhere : Tally) : Int64
+    home = thread_here
+    {% if flag?(:duplicate_force) %}
+      IyiWorkers.force_dup_arm(IyiScheduler.state)
+    {% end %}
+    group do |inner|
+      64.times do |i|
+        inner.spawn(unit: :new) do
+          spin(1_000_000_i64, (i + 7).to_u64)
+          elsewhere.add(1_i64) unless thread_here == home
+          tally.add(1_i64)
+          0
+        end
+      end
+      started = __iyi_monotonic_ns
+      while elsewhere.count == 0_i64
+        IyiThread.spin_pause
+        if elapsed_ms(started) >= 20_000_i64
+          puts "FAIL: steal: progress hang: no child ran on another worker while the spawner held its worker"
+          __iyi_flush_std
+          __iyi_exit(76)
+        end
+      end
+      elapsed_ms(started)
+    end
+  end
+
+  # Each child starts once. In the forced copy, the first thief stays in
+  # take_queued after unlocking until another worker looks at this victim.
   def steal(watch : Int32) : Nil
     watched("steal", watch) do
+      {% if flag?(:duplicate_force) %}
+        ready = Tally.new
+        release = Tally.new
+        group do |priming|
+          IyiWorkers.count.times do
+            priming.spawn(unit: :new) do
+              steal_prime(ready, release)
+              0
+            end
+          end
+          started = __iyi_monotonic_ns
+          while ready.count < IyiWorkers.count.to_i64
+            sleep(1)
+            if elapsed_ms(started) >= 10_000_i64
+              puts "FAIL: steal: progress hang: not every worker started for the second look"
+              __iyi_flush_std
+              __iyi_exit(76)
+            end
+          end
+          release.add(1_i64)
+        end
+      {% end %}
       before = IyiWorkers.steals
       tally = Tally.new
       elsewhere = Tally.new
       waited_ms = 0_i64
       group do |g|
         spawner = g.spawn(unit: :new) do
-          home = thread_here
-          group do |inner|
-            64.times do |i|
-              inner.spawn(unit: :new) do
-                spin(1_000_000_i64, (i + 7).to_u64)
-                elsewhere.add(1_i64) unless thread_here == home
-                tally.add(1_i64)
-                0
-              end
-            end
-            started = __iyi_monotonic_ns
-            while elsewhere.count == 0_i64 && elapsed_ms(started) < 10000_i64
-              IyiThread.spin_pause
-            end
-            elapsed_ms(started)
-          end
+          steal_spawn(tally, elsewhere)
         end
         answer = spawner.value
         waited_ms = answer.is_a?(Int64) ? answer : -1_i64
       end
+      {% if flag?(:duplicate_force) %}
+        fail("steal: not armed: no second worker looked at the targeted victim") if IyiWorkers.force_dup_seconds == 0_u64
+        fail("steal: the second steal found the first task still in its victim's queue") if IyiWorkers.force_dup_stale != 0_u64
+        puts "steal: a second steal found the task the first took gone from its victim's queue"
+      {% end %}
       stolen = IyiWorkers.steals - before
       fail("steal: #{tally.count} of 64 children ran") unless tally.count == 64_i64
       if IyiWorkers.count > 1
-        fail("steal: no child ran on a worker other than its spawner's within 10000 ms, while the spawner kept its own worker busy") if elsewhere.count == 0_i64
         fail("steal: no worker took a task another worker's task had spawned") if stolen == 0_u64
       end
-      puts "steal: 64 tasks one parallel task spawned ran once each, #{elsewhere.count} on other workers, #{stolen} stolen, the first within #{waited_ms} ms"
+      puts "steal: 64 tasks one parallel task spawned ran once each, #{elsewhere.count} on other workers, #{stolen} stolen, the first after #{waited_ms} ms"
     end
   end
 

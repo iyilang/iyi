@@ -1183,13 +1183,94 @@ broken lostwake_hook "$WAKE_HOOK" concurrency.iyi parallel_exercise -Dlostwake_f
 verdict_held lostwake_hook 'home: a task finished on a worker and woke the main thread it was joined by' home --watch=5000
 
 step "failure proof: a steal that leaves the task in its victim's queue hands it out twice"
-broken duplicate '/^  private def self.steal_unstarted\(st : IyiSchedulerState\) : IyiFiber\?$/ { inside = 1; n_method++ }
-inside && /^          victim.pool_head = fiber.next_run$/ { n_head++; at_head = NR; next }
-inside && /^          victim.pool_tail = nil if victim.pool_head.is_a\?\(Nil\)$/ { n_tail++; at_tail = NR; next }
-inside && /^  end$/ { inside = 0 }
+# Both copies record the first fiber seen at the armed victim, then the
+# first subsequent look at that same victim. The first thief waits only
+# after assigning home and unlocking; if the second look finds the same
+# fiber it remains held until the runtime's duplicate guard terminates.
+DUP_COMMON='/^  private def self.steal_unstarted\(st : IyiSchedulerState\) : IyiFiber\?$/ { insteal = 1; n_steal++ }
+insteal && /^  end$/ { insteal = 0; n_steal_end++ }
+insteal && /^        fiber = victim.pool_head$/ { print; print "        force_dup_look(victim, fiber)"; n_look++; at_look = NR; next }
+insteal && /^        if fiber.is_a\?\(IyiFiber\)$/ { n_if++; at_if = NR }
+/^  def self.take_queued\(st : IyiSchedulerState\) : IyiFiber\?$/ { intake = 1; n_take++ }
+intake && /^  end$/ { intake = 0; n_take_end++ }
+intake && /^    unless fiber.home.is_a\?\(Nil\)$/ { n_guard++; at_guard = NR }
+intake && /^      __iyi_exit\(1\)$/ { n_exit++; at_exit = NR }
+intake && /^    fiber.home = st$/ { n_home++; at_home = NR }
+intake && /^    IyiSchedLock.unlock$/ { n_unlock++; at_unlock = NR }
+intake && /^    fiber$/ { print "    force_dup_hold(fiber)"; print; n_hold++; at_hold = NR; next }'
+DUP_REMOVE='insteal && /^          victim.pool_head = fiber.next_run$/ { n_head++; at_head = NR; next }
+insteal && /^          victim.pool_tail = nil if victim.pool_head.is_a\?\(Nil\)$/ { n_tail++; at_tail = NR; next }'
+DUP_KEEP='insteal && /^          victim.pool_head = fiber.next_run$/ { n_head++; at_head = NR }
+insteal && /^          victim.pool_tail = nil if victim.pool_head.is_a\?\(Nil\)$/ { n_tail++; at_tail = NR }'
+DUP_DEFS='/^  def self.preempts : UInt64$/ {
+  print "  @[UnsafeReach(\"copy-only duplicate-steal victim, accessed atomically\")]"
+  print "  @@forced_dup_victim : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only first stolen fiber, accessed atomically\")]"
+  print "  @@forced_dup_first : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only second-look count, accessed atomically\")]"
+  print "  @@forced_dup_seconds : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only second-look result, accessed atomically\")]"
+  print "  @@forced_dup_result : UInt64 = 0_u64"
+  print "  def self.force_dup_arm(state : IyiSchedulerState) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_victim).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_first).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_seconds).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_result).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_victim).address).value.set(state.object_id)"
+  print "  end"
+  print "  def self.force_dup_look(victim : IyiSchedulerState, fiber : IyiFiber?) : Nil"
+  print "    return unless victim.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_victim).address).value.get"
+  print "    first = Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_first).address)"
+  print "    seen = first.value.get"
+  print "    if seen == 0_u64"
+  print "      first.value.compare_and_set(0_u64, fiber.object_id) if fiber.is_a?(IyiFiber)"
+  print "      return"
+  print "    end"
+  print "    same = fiber.is_a?(IyiFiber) && fiber.object_id == seen"
+  print "    result = same ? 2_u64 : 1_u64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_result).address).value.compare_and_set(0_u64, result)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_seconds).address).value.add(1_u64)"
+  print "  end"
+  print "  def self.force_dup_hold(fiber : IyiFiber) : Nil"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_first).address).value.get"
+  print "    result = Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_result).address)"
+  print "    started = __iyi_monotonic_ns"
+  print "    while result.value.get != 1_u64"
+  print "      IyiThread.spin_pause"
+  print "      if __iyi_monotonic_ns - started > 10_000_000_000_i64"
+  print "        said = \"FAIL: duplicate: progress hang: the second look or duplicate guard never arrived\\n\""
+  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "        __iyi_flush_std"
+  print "        __iyi_exit(76)"
+  print "      end"
+  print "    end"
+  print "  end"
+  print "  def self.force_dup_seconds : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_seconds).address).value.get"
+  print "  end"
+  print "  def self.force_dup_stale : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_dup_result).address).value.get == 2_u64 ? 1_u64 : 0_u64"
+  print "  end"
+  print ""
+  print
+  n_defs++
+  next
+}'
+DUP_END='END { if (n_steal != 1 || n_steal_end != 1 || n_look != 1 || n_if != 1 || n_head != 1 || n_tail != 1 || at_if != at_look + 1 || at_head != at_if + 1 || at_tail != at_head + 1 || n_take != 1 || n_take_end != 1 || n_guard != 1 || n_exit != 1 || at_exit != at_guard + 4 || n_home != 1 || at_home != at_exit + 2 || n_unlock != 1 || at_unlock != at_home + 1 || n_hold != 1 || at_hold != at_unlock + 1 || n_defs != 1) exit 3 }'
+DUP_BUG="$DUP_COMMON
+$DUP_REMOVE
+$DUP_DEFS
 { print }
-END { if (n_method != 1 || n_head != 1 || n_tail != 1 || at_tail != at_head + 1) exit 3 }'
+$DUP_END"
+DUP_HOOK="$DUP_COMMON
+$DUP_KEEP
+$DUP_DEFS
+{ print }
+$DUP_END"
+broken duplicate "$DUP_BUG" concurrency.iyi parallel_exercise -Dduplicate_force
 caught_line duplicate 'iyi: panic: the pool handed one parallel task to a worker twice: two threads would run one stack' steal
+broken duplicate_hook "$DUP_HOOK" concurrency.iyi parallel_exercise -Dduplicate_force
+verdict_held duplicate_hook "steal: a second steal found the task the first took gone from its victim's queue" steal
 
 step "failure proof: a cancel never delivered to a sleeping task's thread"
 # The sleeper is registered on another worker before the program arms its
@@ -2483,7 +2564,38 @@ broken libruntime '/^require "\.\/(float|range|set)"$/ {
   close(file); next
 }
 { print }
-END { if (count["float"] != 1 || count["range"] != 1 || count["set"] != 1 || count["array"] != 1 || count["hash"] != 1 || count["string"] != 1 || position["string"] != position["float"] + 1 || position["array"] != position["string"] + 1 || position["hash"] != position["range"] + 1 || position["set"] != position["hash"] + 1) exit 3 }' prelude.iyi parallel_preempt_lib -Dpreempt_timing_proof
+END {
+  if (count["float"] != 1 || count["range"] != 1 || count["set"] != 1 ||
+      count["array"] != 1 || count["hash"] != 1 || count["string"] != 1 ||
+      position["string"] != position["float"] + 1 || position["array"] != position["string"] + 1 ||
+      position["hash"] != position["range"] + 1 || position["set"] != position["hash"] + 1) exit 3
+}'
+lib_awk() { # label, source, destination, awk program
+  local label="$1" source="$2" destination="$3" status
+  awk "$4" "$source" > "$destination"
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "the awk for $label exited $status: an anchor is missing or duplicated"; exit 1
+  fi
+  if cmp -s "$source" "$destination"; then
+    echo "the awk for $label found nothing to change"; exit 1
+  fi
+}
+mkdir -p libhooked libruntime/iyi libruntime_hook/iyi || exit 1
+lib_awk libruntime-array "$REPO/src/iyi/array.iyi" libhooked/array.iyi "$LIB_POLL_ARRAY"
+lib_awk libruntime-string "$REPO/src/iyi/string.iyi" libhooked/string.iyi "$LIB_POLL_STRING"
+lib_awk libruntime-hash "$REPO/src/iyi/hash.iyi" libhooked/hash.iyi "$LIB_POLL_HASH"
+lib_awk libruntime-defs "$REPO/src/iyi/concurrency.iyi" libhooked/concurrency.iyi "$LIB_DEFS"
+for copy in libruntime libruntime_hook; do
+  cp "$REPO"/src/iyi/*.iyi "$copy/iyi/" || exit 1
+  cp libhooked/*.iyi "$copy/iyi/" || exit 1
+done
+lib_awk libruntime-inline "$REPO/src/iyi/prelude.iyi" libruntime/iyi/prelude.iyi "$LIB_INLINE"
+for copy in libruntime libruntime_hook; do
+  if ! IYI_PATH="$WORK/$copy${PSEP}$REPO/src" "$IYI" build -Dlibruntime_force "$REPO/bench/parallel_preempt_lib.iyi" -o "$copy-run" > "build-$copy.log" 2>&1; then
+    echo "the library copy $copy failed to build:"; tail -20 "build-$copy.log"; exit 1
+  fi
+done
 for proof in sort copy rehash join; do
   verdict_caught libruntime "$proof: the short task exceeded the wait bound" "$proof" --workers=1
 done

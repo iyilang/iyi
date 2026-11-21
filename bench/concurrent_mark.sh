@@ -30,8 +30,8 @@
 #     assists counted in; helper 0 waiting past the next mark; a collection let
 #     go after the release; the stopped, bounded and verb collections let go
 #     late; a free outside the allocator's bracket; an idle pool whose workers
-#     start late, and one whose workers are not called; a first collection
-#     waiting for every helper to park;
+#     wait for task arrival, and a queued-work turn that starts no worker;
+#     a first collection waiting for every helper to park;
 #   - marks beside twenty-four connections on twelve workers, with every helper
 #     and with one;
 #   - on Windows only: the helpers woken with the boost (the boost counted and
@@ -40,8 +40,6 @@
 #     free. Those proofs exist only where their code is compiled (thread.iyi's
 #     start_helper and prelude.iyi's start_concurrent under win32), and the
 #     gate names that platform arm instead of passing silently.
-# The separate unstarted proof remains clock-decided: it needs a rendezvous
-# to establish that queued tasks cannot cause another worker to launch.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -1537,9 +1535,9 @@ awk '/^  def self\.work : Nil$/ {
     print "    message = \"idle pool: a worker start waited until task arrival\\n\""
     print "    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
     print "  end"
-    print; found++; next
-  }
-  /^    \{% if !flag\?\(:gc_none\) && !flag\?\(:gc_boehm\) %\}$/ && found == 1 && !inserted {
+    print
+    found++
+    if (getline <= 0 || $0 != "    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}") exit 3
     print; print "      hold_start"; inserted++; next
   }
   { print } END { if (found != 1 || inserted != 1) exit 3 }' \
@@ -1557,9 +1555,8 @@ echo "  $(grep -m1 '^idle pool: with' latestart.txt)"
 step "failure proof: an idle pool step whose tasks wait only for each other is caught on that runtime"
 awk '$0 == "            break unless arrived < cores || IyiWorkers.launched < cores.to_i32" {
     print "            break unless arrived < cores"; changed++; next }
-  /^    fail\("idle pool: the pool launched .*\) if launched < cores\.to_i32$/ { removed++; next }
-  { print } END { if (changed != 1 || removed != 1) exit 3 }' \
-  "$REPO/bench/concurrent_mark.iyi" > arrived_only.iyi || { echo "the idle wait or launched check is missing or ambiguous"; exit 1; }
+  { print } END { if (changed != 1) exit 3 }' \
+  "$REPO/bench/concurrent_mark.iyi" > arrived_only.iyi || { echo "the idle wait is missing or ambiguous"; exit 1; }
 if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release -Didle_force arrived_only.iyi -o arrived-only > build-arrived.log 2>&1; then
   cat build-arrived.log; exit 1
 fi
@@ -1580,48 +1577,90 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' arrived.txt)"
 # read "9 of 10 workers waiting" so (job 134651603579), and in 1 of 150
 # release runs beside 20 busy loops. A task that takes its turn while one
 # waits and none is idle now starts the next worker
-# (`IyiWorkers.turn_wanted?`). The lost call is a race the machine decides:
-# without that start, a copy whose every give-up spun 3 ms between its take
-# and its queue stopped the pool short in 9 of 12 runs beside 24 busy loops
-# on Linux (12 vCPU), and in none of 30 on the idle machine, where the pool
-# has grown before the first turn. So it is made certain here: a copy of
-# the runtime in which no find calls the next worker, and the turns alone
-# grow the pool. The step holds on that copy; with the turns' start taken
-# out of it too, the pool keeps the workers the spawns started, and the
-# step exits 1 naming them. On Linux (12 vCPU), on all twelve, four and
-# three of its cores, that copy held 30 runs of 30 and the one without the
-# start was caught in 30 of 30, at one or two workers launched.
-step "the idle pool fills on a runtime in which no worker's find calls the next"
-mkdir -p uncalled/iyi
-cp "$REPO"/src/iyi/*.iyi uncalled/iyi/
-awk '$0 == "    wake_one if found && work_waiting?" { found = 1; next }
-  { print } END { if (!found) exit 3 }' \
-  "$REPO/src/iyi/concurrency.iyi" > uncalled/iyi/concurrency.iyi || { echo "the call for the next worker this step removes is not in the runtime any more"; exit 1; }
-if ! IYI_PATH="$WORK/uncalled${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o uncalled-run > build-uncalled.log 2>&1; then
-  cat build-uncalled.log; exit 1
+# (`IyiWorkers.turn_wanted?`). The copies below queue every task while the
+# first worker is held, then observe a turn with no idle worker, no start in
+# flight, and no start owed. Only the turn's start differs in the mutant.
+turn_called="idle pool: a turn with queued work and no idle or spinning worker called for the next worker"
+turn_lost="FAIL: idle pool: a turn with queued work and no idle or spinning worker called for no worker"
+step "a turn with queued work calls for the next worker"
+mkdir -p turn-held/iyi unstarted/iyi
+cp "$REPO"/src/iyi/*.iyi turn-held/iyi/
+awk -v called="$turn_called" -v lost="$turn_lost" 'function held() {
+    print "  @[UnsafeReach(\"copy-only: turn proof words\")]"
+    print "  @@first_held : Int64 = 0_i64"
+    print "  @[UnsafeReach(\"copy-only: turn proof words\")]"
+    print "  @@first_release : Int64 = 0_i64"
+    print "  @[UnsafeReach(\"copy-only: turn proof words\")]"
+    print "  @@turn_once : Int64 = 0_i64"
+    print "  @[UnsafeReach(\"copy-only: turn proof words\")]"
+    print "  @@turn_launched : Int64 = 0_i64"
+    print "  @[UnsafeReach(\"copy-only: turn proof words\")]"
+    print "  @@turn_owes : Int64 = 0_i64"
+    print "  def self.release_first : Nil"
+    print "    word(pointerof(@@first_release)).value.set(1_i64)"
+    print "  end"
+    print "  def self.hold_first : Nil"
+    print "    return unless word(pointerof(@@first_held)).value.add(1_i64) == 0_i64"
+    print "    limit = IyiMark.now_ns &+ 10000000000_u64"
+    print "    while word(pointerof(@@first_release)).value.get == 0_i64"
+    print "      if IyiMark.now_ns >= limit"
+    print "        message = \"FAIL: idle pool: the first worker was held past ten seconds\\n\""
+    print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "        __iyi_exit(76)"
+    print "      end"
+    print "      IyiThread.park_if_requested"
+    print "      IyiThread.spin_pause"
+    print "    end"
+    print "  end"
+    print "  def self.turn_arm : Bool"
+    print "    return false unless word(pointerof(@@launched)).value.get == 1_i64 && word(pointerof(@@idle)).value.get == 0_i64 && word(pointerof(@@spinning)).value.get == 0_i64 && word(pointerof(@@owed)).value.get == 0_i64"
+    print "    return false unless word(pointerof(@@turn_once)).value.compare_and_set(0_i64, 1_i64)[1]"
+    print "    word(pointerof(@@turn_launched)).value.set(word(pointerof(@@launched)).value.get)"
+    print "    word(pointerof(@@turn_owes)).value.set(owes.to_i64)"
+    print "    true"
+    print "  end"
+    print "  def self.turn_verdict : Nil"
+    print "    if word(pointerof(@@launched)).value.get > word(pointerof(@@turn_launched)).value.get || owes.to_i64 > word(pointerof(@@turn_owes)).value.get"
+    print "      message = \"" called "\\n\""
+    print "      __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "      return"
+    print "    end"
+    print "    message = \"" lost "\\n\""
+    print "    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "    __iyi_exit(1)"
+    print "  end"
+  }
+  $0 == "    wake_one if found && work_waiting?" { uncalled++; prev = $0; next }
+  /^  def self\.work : Nil$/ {
+    held(); declared++; print
+    if (getline <= 0 || $0 != "    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}") exit 3
+    print; print "      hold_first"; inserted++; prev = $0; next
+  }
+  prev == "    return false unless work_waiting?" && $0 == "    wake_one" { print "    turn_armed = turn_arm"; print; print "    turn_verdict if turn_armed"; hooked++; prev = $0; next }
+  { prev = $0; print } END { if (uncalled != 1 || declared != 1 || inserted != 1 || hooked != 1) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > turn-held/iyi/concurrency.iyi || { echo "a turn proof anchor is missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/turn-held${PSEP}$REPO/src" "$IYI" build --release -Dunstarted_force "$REPO/bench/concurrent_mark.iyi" -o turn-held-run > build-turn-held.log 2>&1; then
+  cat build-turn-held.log; exit 1
 fi
-timeout -k 5 300 ./uncalled-run > uncalled.txt 2>&1
+timeout -k 5 300 ./turn-held-run > turn-held.txt 2>&1
 code=$?
-if [ "$code" -ne 0 ] || ! grep -q "^idle pool: with" uncalled.txt; then
-  echo "the idle pool step did not hold on the runtime whose finds call nobody (exit $code):"; tail -3 uncalled.txt; exit 1
+if [ "$code" -ne 0 ] || ! grep -q "^idle pool: with" turn-held.txt || [ "$(grep -Fxc "$turn_called" turn-held.txt)" -ne 1 ]; then
+  echo "the held turn control did not call for the next worker and fill the pool (exit $code):"; tail -5 turn-held.txt; exit 1
 fi
-echo "  $(grep -m1 '^idle pool: with' uncalled.txt)"
-
-step "failure proof: turns taken while a task waits and none is idle that start no worker are caught on that runtime"
-mkdir -p unstarted/iyi
-cp uncalled/iyi/*.iyi unstarted/iyi/
-awk 'prev == "    return false unless work_waiting?" && $0 == "    wake_one" { found = 1; prev = $0; next }
-  { prev = $0; print } END { if (!found) exit 3 }' \
-  uncalled/iyi/concurrency.iyi > unstarted/iyi/concurrency.iyi || { echo "the turn's start this proof removes is not in the runtime any more"; exit 1; }
-if ! IYI_PATH="$WORK/unstarted${PSEP}$REPO/src" "$IYI" build --release -Dunstarted_clock "$REPO/bench/concurrent_mark.iyi" -o unstarted-run > build-unstarted.log 2>&1; then
+echo "  $turn_called"
+step "failure proof: a turn with queued work calls for no worker"
+cp turn-held/iyi/*.iyi unstarted/iyi/
+awk 'prev == "    turn_armed = turn_arm" && $0 == "    wake_one" { removed++; prev = $0; next }
+  { prev = $0; print } END { if (removed != 1) exit 3 }' turn-held/iyi/concurrency.iyi > unstarted/iyi/concurrency.iyi || { echo "the turn start is missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/unstarted${PSEP}$REPO/src" "$IYI" build --release -Dunstarted_force "$REPO/bench/concurrent_mark.iyi" -o unstarted-run > build-unstarted.log 2>&1; then
   cat build-unstarted.log; exit 1
 fi
 timeout -k 5 300 ./unstarted-run > unstarted.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q "^FAIL: idle pool: the pool launched" unstarted.txt; then
-  echo "the idle pool's count of workers launched did not fire (exit $code):"; tail -3 unstarted.txt; exit 1
+if [ "$code" -ne 1 ] || ! grep -Fxq "$turn_lost" unstarted.txt; then
+  echo "the turn that called for no worker was not caught (exit $code):"; tail -5 unstarted.txt; exit 1
 fi
-printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' unstarted.txt)"
+printf '  exits 1 at "%s"\n' "$turn_lost"
 
 # The first collection's wait for every helper to reach its park, put back.
 # The helper is held before it counts itself ready. The same hook runs in

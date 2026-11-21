@@ -677,12 +677,12 @@
             arrived = Busy.arrived.value.get
             break unless arrived < cores || IyiWorkers.launched < cores.to_i32
             if IyiMark.now_ns >= until_ns
-              {% if flag?(:unstarted_clock) %}
-                break
-              {% else %}
-                print "FAIL: idle pool: tasks did not arrive and workers did not launch within ten seconds\n"
-                __iyi_exit(76)
-              {% end %}
+              if arrived < cores
+                print "FAIL: idle pool: #{arrived.to_i64} of #{cores.to_i64} tasks arrived within ten seconds\n"
+              else
+                print "FAIL: idle pool: every task arrived, and the pool launched #{IyiWorkers.launched} of #{cores.to_i64} workers within ten seconds\n"
+              end
+              __iyi_exit(76)
             end
             {% if flag?(:idle_force) %}
               IyiWorkers.release_starts if arrived >= cores
@@ -692,24 +692,20 @@
           0
         end
       end
+      {% if flag?(:unstarted_force) %}
+        IyiWorkers.release_first
+      {% end %}
     end
     {% if flag?(:idle_force) %}
       IyiWorkers.release_starts
     {% end %}
-    # A pool still short of a worker once its tasks have ended is the
-    # runtime's finding, and is named as one: no task waits any more, so
-    # nothing starts the rest, and the count below could only read the
-    # workers short. On the project's Mac (macOS 26.6, Apple M2 Pro, 10
-    # cores) beside two other CI jobs this step read "9 of 10 workers
-    # waiting after five seconds" (job 134651603579): the tasks had taken
-    # turns on nine workers until their two seconds ran out, and the pool
-    # never started a tenth (`IyiWorkers.turn_wanted?` has the cause). With
-    # that fixed, the pool filled within 56 ms in each of 150 release runs
-    # beside 20 busy loops there (median 18), where one run in 150 had
-    # stopped at nine. The task and wait deadlines name a stalled setup;
-    # neither releases a task or decides whether the pool grew.
+    # Each task waits for both all arrivals and all worker launches. The
+    # deadline names which condition stalled; it never releases a task.
+    # A held-turn copy in the gate proves a turn starts the next worker.
+    # On the project's Mac, the old check read 9 of 10 waiting in job
+    # 134651603579; after the fix the pool filled in 56 ms or less in 150
+    # release runs beside 20 busy loops.
     launched = IyiWorkers.launched
-    fail("idle pool: the pool launched #{launched} of #{cores.to_i64} workers while #{cores.to_i64} tasks spun up to ten seconds for them") if launched < cores.to_i32
     deadline = IyiMark.now_ns + 5000000000_u64
     # A spin, not a sleep: this thread asleep would be counted waiting.
     while IyiScheduler.waiting_threads < launched.to_u64 && IyiMark.now_ns < deadline

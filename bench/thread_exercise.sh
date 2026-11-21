@@ -1141,12 +1141,17 @@ while flag.turns.get < 100_i64
 end
 20.times do
   {% if flag?(:burst_force) %}
+  seen_before = IyiThread.burst_probe_seen
   IyiThread.burst_probe_begin
   {% end %}
   before = IyiThread.stop_ns
   IyiMark.collect
   {% if flag?(:burst_force) %}
   IyiThread.burst_probe_end
+  if IyiThread.burst_probe_seen == seen_before
+    print "SETUP: lock: a collection did not restore its stopper priority\n"
+    __iyi_exit(76)
+  end
   {% end %}
   took = IyiThread.stop_ns - before
   longest = took if took > longest
@@ -1207,14 +1212,14 @@ IYI
       [ "$BURST_STATUS" -ne 76 ] || exit 76
     }
     cat > burst.part <<'IYI'
-    # Both copies observe the actual lower_stopper body. These per-thread
-    # words track whether this stopper has executed the actual runtime unlock.
+    # Both copies inspect the actual restore result and the collecting
+    # thread's runtime-lock ownership at every armed priority restore.
     IYI_BURST_SEEN     = 384_u64
     IYI_BURST_EARLY    = 448_u64
     @[ThreadLocal]
     @@burst_probe_active : Bool = false
     @[ThreadLocal]
-    @@burst_probe_released : Bool = false
+    @@burst_probe_holding : Bool = false
 
     def self.burst_probe_init : Nil
       page = control
@@ -1223,19 +1228,34 @@ IYI
     end
 
     def self.burst_probe_begin : Nil
-      @@burst_probe_released = false
+      @@burst_probe_holding = false
       @@burst_probe_active = true
     end
 
-    def self.burst_probe_unlock : Nil
-      @@burst_probe_released = true if @@burst_probe_active
+    def self.burst_probe_lock : Nil
+      @@burst_probe_holding = true if @@burst_probe_active
     end
 
-    def self.burst_probe_restore : Nil
+    def self.burst_probe_unlock : Nil
+      @@burst_probe_holding = false if @@burst_probe_active
+    end
+
+    def self.burst_probe_restore(expected : Int32, result : Int32) : Nil
       return unless @@burst_probe_active
+      actual = LibC.GetThreadPriority(LibC.GetCurrentThread)
+      if result == 0_i32 || actual == 2147483647_i32
+        message = "SETUP: lock: restoring or querying stopper priority failed\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(76)
+      end
+      if actual != expected
+        message = "FAIL: lock: the stopper priority was not restored\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(1)
+      end
       page = control
       word(page + IYI_BURST_SEEN).value.add(1_u64)
-      word(page + IYI_BURST_EARLY).value.add(1_u64) unless @@burst_probe_released
+      word(page + IYI_BURST_EARLY).value.add(1_u64) if @@burst_probe_holding
     end
 
     def self.burst_probe_end : Nil
@@ -1253,7 +1273,11 @@ IYI
     burst_copy() {
       awk -v gate=burst.part -v mode="$1" '
         /^    # ── Roots/ { while ((getline line < gate) > 0) print line; roots++ }
-        /^        return unless @@stopper_raised$/ { print; print "        burst_probe_restore"; observed++; next }
+        /^        LibC\.SetThreadPriority\(LibC\.GetCurrentThread, @@stopper_priority\)$/ {
+          print "        restored = LibC.SetThreadPriority(LibC.GetCurrentThread, @@stopper_priority)"
+          print "        IyiThread.burst_probe_restore(@@stopper_priority, restored)"
+          observed++; next
+        }
         mode == "forced" && /^        @@owed = @@deferred$/ {
           print
           print "        lower_stopper"
@@ -1265,12 +1289,17 @@ IYI
     }
     burst_prelude() {
       awk -v mode="$1" '
-        in_unlock && /^        IyiRuntimeLock\.unlock$/ { print; print "        IyiThread.burst_probe_unlock"; released++; next }
-        mode == "forced" && in_unlock && /^          IyiThread\.lower_stopper$/ { lower++; next }
-        /^      def self\.unlock_released : Nil$/ { unlocks++; in_unlock = 1 }
-        in_unlock && /^      end$/ { in_unlock = 0 }
+        /^  def self\.lock : Nil$/ { in_lock = 1; lock_methods++ }
+        in_lock && /^  end$/ { in_lock = 0 }
+        in_lock && /^    \{% if !flag\?\(:gc_none\).*IyiThread\.lock_taken/ { print; print "    IyiThread.burst_probe_lock"; locked++; next }
+        /^  def self\.unlock : Nil$/ { in_runtime_unlock = 1; runtime_unlocks++ }
+        in_runtime_unlock && /^  end$/ { in_runtime_unlock = 0 }
+        in_runtime_unlock && /^    \{% if flag\?\(:heap_verify\) %\}@@holding = false; word\.value\.add/ { print; print "    IyiThread.burst_probe_unlock"; released++; next }
+        mode == "forced" && in_release && /^          IyiThread\.lower_stopper$/ { lower++; next }
+        /^      def self\.unlock_released : Nil$/ { releases++; in_release = 1 }
+        in_release && /^      end$/ { in_release = 0 }
         { print }
-        END { if (unlocks != 1 || released != 1 || (mode == "forced" && lower != 1)) exit 3 }
+        END { if (lock_methods != 1 || locked != 1 || runtime_unlocks != 1 || released != 1 || releases != 1 || (mode == "forced" && lower != 1)) exit 3 }
       ' "$REPO/src/iyi/prelude.iyi" > "$2"
     }
     step "the stop beside a burst on the stopping thread's processor"

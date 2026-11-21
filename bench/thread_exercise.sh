@@ -350,22 +350,63 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     step "the cores a process may run on are its affinity mask's"
     cat > cores.iyi <<'IYI'
-puts "core_count=#{IyiThread.core_count} default_helpers=#{IyiMark.default_helpers}"
+@[Unsafe("the test reads Windows process affinity using pointer arguments")]
+module cores
+if Program.args.size > 0
+  process = 0_u64
+  system = 0_u64
+  if LibC.GetProcessAffinityMask(LibC.GetCurrentProcess, pointerof(process), pointerof(system)) == 0_i32
+    print "SETUP: affinity: GetProcessAffinityMask failed\n"
+    __iyi_exit(76)
+  end
+  puts "mask=#{process}"
+else
+  puts "core_count=#{IyiThread.core_count} default_helpers=#{IyiMark.default_helpers}"
+end
 IYI
     if ! "$IYI" build cores.iyi -o cores > build-cores.log 2>&1; then
-      cat build-cores.log; exit 1
+      cat build-cores.log; exit 76
     fi
-    held() { MSYS2_ARG_CONV_EXCL='*' cmd /c "start /affinity $1 /b /wait cores.exe" | tr -d '\r'; }
-    got="$(held 1)"
+    ./cores mask > affinity-mask.txt 2>&1
+    code=$?
+    if [ "$code" -ne 0 ]; then cat affinity-mask.txt; exit 76; fi
+    mask="$(tr -d '\r' < affinity-mask.txt)"
+    case "$mask" in mask=*) mask="${mask#mask=}" ;; *) echo "SETUP: affinity: invalid process mask"; exit 76 ;; esac
+    case "$mask" in ''|*[!0-9]*) echo "SETUP: affinity: invalid process mask"; exit 76 ;; esac
+    AFFINITY_COUNT=0
+    AFFINITY_FIRST=0
+    AFFINITY_SECOND=0
+    AFFINITY_LAST=0
+    for ((cpu = 0; cpu < 64; cpu++)); do
+      if (( mask & (1 << cpu) )); then
+        if [ "$AFFINITY_COUNT" -eq 0 ]; then AFFINITY_FIRST=$cpu; fi
+        if [ "$AFFINITY_COUNT" -eq 1 ]; then AFFINITY_SECOND=$cpu; fi
+        AFFINITY_LAST=$cpu
+        AFFINITY_COUNT=$((AFFINITY_COUNT + 1))
+      fi
+    done
+    if [ "$AFFINITY_COUNT" -lt 2 ]; then
+      echo "SETUP: affinity: the process has fewer than two allowed processors" >&2
+      exit 76
+    fi
+    AFFINITY_ONE_DEC="$(printf '%u' "$((1 << AFFINITY_FIRST))")"
+    affinity_one="$(printf '%X' "$((1 << AFFINITY_FIRST))")"
+    affinity_two="$(printf '%X' "$(((1 << AFFINITY_FIRST) | (1 << AFFINITY_SECOND)))")"
+    held() {
+      MSYS2_ARG_CONV_EXCL='*' cmd /c "start /affinity $1 /b /wait cores.exe" > held-affinity.txt 2>&1
+      status=$?
+      if [ "$status" -ne 0 ]; then cat held-affinity.txt >&2; return 76; fi
+      tr -d '\r' < held-affinity.txt
+    }
+    got="$(held "$affinity_one")"
+    code=$?
+    if [ "$code" -ne 0 ]; then echo "SETUP: affinity: one-core launch failed" >&2; exit 76; fi
     [ "$got" = "core_count=1 default_helpers=0" ] || { echo "held to one core: $got"; exit 1; }
-    if [ "${NUMBER_OF_PROCESSORS:-1}" -ge 2 ]; then
-      got="$(held 3)"
-      [ "$got" = "core_count=2 default_helpers=1" ] || { echo "held to two cores: $got"; exit 1; }
-      echo "  held to one core it counts 1 and starts no helper; held to two, 2 and one"
-    else
-      echo "the affinity check requires at least two processors" >&2
-      exit 1
-    fi
+    got="$(held "$affinity_two")"
+    code=$?
+    if [ "$code" -ne 0 ]; then echo "SETUP: affinity: two-core launch failed" >&2; exit 76; fi
+    [ "$got" = "core_count=2 default_helpers=1" ] || { echo "held to two cores: $got"; exit 1; }
+    echo "  held to one core it counts 1 and starts no helper; held to two, 2 and one"
     ;;
 esac
 
@@ -808,6 +849,8 @@ case "$(uname -s)" in
 @[Unsafe("the one-core exercise pins its process with the Windows affinity API")]
 module starve
 
+import std/text
+
 lib CorePin
   fun SetProcessAffinityMask(process : Void*, mask : UInt64) : Int32
 end
@@ -856,8 +899,10 @@ def beside(collect : Bool) : UInt64
   took
 end
 
-fail("one-core affinity could not be set") if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, 1_u64) == 0_i32
-fail("the process is not held to one core") unless IyiThread.core_count == 1
+if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, Program.args[0].to_u64) == 0_i32 || IyiThread.core_count != 1
+  print "SETUP: affinity: the process could not be held to one allowed core\n"
+  __iyi_exit(76)
+end
 
 took = beside(true)
 fail("five threads started beside a thread collecting in a loop took #{took // 1000000_u64} ms, past 10 s") if took > 10000000000_u64
@@ -887,7 +932,7 @@ IYI
     if ! "$IYI" build --release starve.iyi -o starve > build-starve.log 2>&1; then
       cat build-starve.log; exit 1
     fi
-    win_native 120 "the one-core check" ./starve > starve-raw.txt 2>&1
+    win_native 120 "the one-core check" ./starve "$AFFINITY_ONE_DEC" > starve-raw.txt 2>&1
     code=$?
     if [ "$code" -eq 76 ]; then cat starve-raw.txt; exit 76; fi
     tr -d '\r' < starve-raw.txt > starve.txt
@@ -1074,9 +1119,9 @@ esac
 # past 20 ms in each run. The bound is 50 ms.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    if [ "${NUMBER_OF_PROCESSORS:-1}" -lt 2 ]; then
-      echo "the stop beside a burst needs at least two processors for the threads it stops; this machine has ${NUMBER_OF_PROCESSORS:-1}" >&2
-      exit 1
+    if [ "$AFFINITY_COUNT" -lt 2 ]; then
+      echo "SETUP: burst: the process has fewer than two allowed processors" >&2
+      exit 76
     else
     cat > burst.iyi <<'IYI'
 @[Unsafe("the burner pins itself to one processor and raises its priority by calling Windows' thread functions through a lib")]
@@ -1266,7 +1311,7 @@ puts "lock: restore recorded after the runtime lock was released"
 puts "stop: #{collections} stops of #{threads.size} threads beside a burst on the stopping thread's processor, #{share}% of the run in stops, #{over} past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us"
 puts "lock: #{flag.waits.get} waits for the runtime lock beside #{collections} collections took past #{lock_bound // 1000000_u64} ms, the longest #{flag.waited.get // 1000_i64} us"
 IYI
-    shared=$(( NUMBER_OF_PROCESSORS - 1 ))
+    shared="$AFFINITY_LAST"
     # `./$1` beside the burst, its output in `$2`.
     beside_burst() {
       local burst_pid deadline killed=0

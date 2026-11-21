@@ -104,6 +104,7 @@ fi
 if [ "$start_state" = exited ]; then
   child_status=0
   wait "$SERVER_PID" 2>/dev/null || child_status=$?
+  SERVER_PID=""
   if [ -s "$WORK/server.log" ]; then
     echo "the scripted servers exited before readiness (status $child_status); server output follows"
   else

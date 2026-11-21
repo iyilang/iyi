@@ -702,13 +702,21 @@ import std/socket::{IyiSocket, SocketError}
   # worker is armed. In the forced copy, the slow half records whether its
   # next decision actually enters the nonblocking poll, before main sends
   # the fast request. The hold ends on the answer, not on a latency bound.
+  @[NoInline]
+  @[NoPreempt]
   def poller_fiber_in_state?(id : UInt64, state : IyiFiberState) : Bool
+    found = false
+    IyiRuntimeLock.lock
     fiber = IyiScheduler.first_fiber
     while fiber.is_a?(IyiFiber)
-      return fiber.state == state if fiber.object_id == id
+      if fiber.object_id == id
+        found = fiber.state == state
+        break
+      end
       fiber = fiber.next_fiber
     end
-    false
+    IyiRuntimeLock.unlock
+    found
   end
 
   def poller_hang(message : String) : NoReturn

@@ -174,13 +174,21 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # Whether the fiber with object id *id* is in *state* now, read from the scheduler's list of every fiber.
+  @[NoInline]
+  @[NoPreempt]
   def fiber_in_state?(id : UInt64, state : IyiFiberState) : Bool
+    found = false
+    IyiRuntimeLock.lock
     fiber = IyiScheduler.first_fiber
     while fiber.is_a?(IyiFiber)
-      return fiber.state == state if fiber.object_id == id
+      if fiber.object_id == id
+        found = fiber.state == state
+        break
+      end
       fiber = fiber.next_fiber
     end
-    false
+    IyiRuntimeLock.unlock
+    found
   end
 
   # A spin with preemption off until *count* reaches *target*. Its limit ends a hang as a named failure.

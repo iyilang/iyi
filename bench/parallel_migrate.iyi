@@ -589,17 +589,18 @@ import std/socket::{IyiSocket, SocketError}
     moves.count
   end
 
-  # The io waiters the registry holds, by state: each parked read is WaitingIo
-  # once it has registered with its worker's poller and is on the list cancel
-  # walks. Read unlocked, which is safe here: no fiber of this step ends until
-  # it is cancelled, so no link changes under the walk.
+  # Walk the registry under the same lock as its link and unlink operations.
+  @[NoInline]
+  @[NoPreempt]
   def io_waiting : Int32
     count = 0
+    IyiRuntimeLock.lock
     fiber = IyiScheduler.first_fiber
     while fiber.is_a?(IyiFiber)
-      count += 1 if fiber.state == IyiFiberState::WaitingIo
+      count = count &+ 1 if fiber.state == IyiFiberState::WaitingIo
       fiber = fiber.next_fiber
     end
+    IyiRuntimeLock.unlock
     count
   end
 
@@ -607,13 +608,21 @@ import std/socket::{IyiSocket, SocketError}
   {% if flag?(:unlistedio_force) %}
   # Cancel only after every reader has switched out of its io wait, past
   # its own cancellation check. Then count the listed-owner routes.
+  @[NoInline]
+  @[NoPreempt]
   def switched_out?(id : UInt64, state : IyiFiberState) : Bool
+    found = false
+    IyiRuntimeLock.lock
     fiber = IyiScheduler.first_fiber
     while fiber.is_a?(IyiFiber)
-      return fiber.state == state && !fiber.on_cpu? if fiber.object_id == id
+      if fiber.object_id == id
+        found = fiber.state == state && !fiber.on_cpu?
+        break
+      end
       fiber = fiber.next_fiber
     end
-    false
+    IyiRuntimeLock.unlock
+    found
   end
 
   def cancel_io_forced : Nil
@@ -788,26 +797,40 @@ import std/socket::{IyiSocket, SocketError}
   # seventeenth read is a task of the main thread's own, made where its
   # close is, and the step fails by name.
   # WaitingIo is set just before the reader is linked into its poller.
-  # Once it has also left the CPU, registration has finished.
+  # Once it has also left the CPU, registration has finished. The runtime
+  # lock protects registry links while either witness walks them.
+  @[NoInline]
+  @[NoPreempt]
   def closes_registered : Int32
     count = 0
+    IyiRuntimeLock.lock
     fiber = IyiScheduler.first_fiber
     while fiber.is_a?(IyiFiber)
-      count += 1 if fiber.state == IyiFiberState::WaitingIo && !fiber.on_cpu?
+      count = count &+ 1 if fiber.state == IyiFiberState::WaitingIo && !fiber.on_cpu?
       fiber = fiber.next_fiber
     end
+    IyiRuntimeLock.unlock
     count
   end
+
   # Count alone can include unrelated waiters. Also identify the reader of
   # the socket the main thread will close.
+  @[NoInline]
+  @[NoPreempt]
   def closes_target_registered?(id : UInt64) : Bool
     return false if id == 0_u64
+    found = false
+    IyiRuntimeLock.lock
     fiber = IyiScheduler.first_fiber
     while fiber.is_a?(IyiFiber)
-      return fiber.state == IyiFiberState::WaitingIo && !fiber.on_cpu? if fiber.object_id == id
+      if fiber.object_id == id
+        found = fiber.state == IyiFiberState::WaitingIo && !fiber.on_cpu?
+        break
+      end
       fiber = fiber.next_fiber
     end
-    false
+    IyiRuntimeLock.unlock
+    found
   end
 
   def closes(watch : Int32) : Nil
@@ -1612,13 +1635,21 @@ import std/socket::{IyiSocket, SocketError}
 
   # Whether the fiber with object id *id* is parked on a channel now, read from
   # the scheduler's list of every fiber: a state, not a clock.
+  @[NoInline]
+  @[NoPreempt]
   def parked_on_channel?(id : UInt64) : Bool
+    found = false
+    IyiRuntimeLock.lock
     fiber = IyiScheduler.first_fiber
     while fiber.is_a?(IyiFiber)
-      return fiber.state == IyiFiberState::WaitingCh if fiber.object_id == id
+      if fiber.object_id == id
+        found = fiber.state == IyiFiberState::WaitingCh
+        break
+      end
       fiber = fiber.next_fiber
     end
-    false
+    IyiRuntimeLock.unlock
+    found
   end
 
   # The forced round (`-Dnocall_force`), run first in a fresh process, so no
@@ -2102,13 +2133,21 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # Whether the fiber with object id *id* is in *state* now, read from the scheduler's list of every fiber.
+  @[NoInline]
+  @[NoPreempt]
   def fiber_in_state?(id : UInt64, state : IyiFiberState) : Bool
+    found = false
+    IyiRuntimeLock.lock
     fiber = IyiScheduler.first_fiber
     while fiber.is_a?(IyiFiber)
-      return fiber.state == state if fiber.object_id == id
+      if fiber.object_id == id
+        found = fiber.state == state
+        break
+      end
       fiber = fiber.next_fiber
     end
-    false
+    IyiRuntimeLock.unlock
+    found
   end
 
   {% if flag?(:noheldio_force) %}

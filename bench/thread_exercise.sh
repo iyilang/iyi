@@ -1527,9 +1527,9 @@ cat > gate.part <<'IYI'
 
     # `park` calls this for every parked thread before it counts itself out
     # of the release. Atomics only: nothing allocates and no lock is taken.
-    # For the armed line the thread sets `held`, then waits for the gate to
-    # open, or for its deadline, which sets `expired`.
-    def self.release_gate_hold(line : UInt64) : Nil
+    # For the armed line the thread sets `held`, then waits for its owner.
+    # A deadline failure ends the process; it never opens the gate.
+    def self.release_gate_hold(line : UInt64, message : String) : Nil
       page = control
       return if line == 0_u64 || word(page + IYI_GATE_LINE).value.get != line
       began = IyiMark.now_ns
@@ -1537,8 +1537,12 @@ cat > gate.part <<'IYI'
       word(page + IYI_GATE_HELD).value.set(1_u64)
       while word(page + IYI_GATE_OPEN).value.get == 0_u64
         if IyiMark.now_ns &- began > IYI_GATE_NS
-          word(page + IYI_GATE_EXPIRED).value.set(1_u64)
-          return
+          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+          {% if flag?(:darwin) %}
+            LibC.thread_gate_exit(76_i32)
+          {% else %}
+            __iyi_exit(76)
+          {% end %}
         end
         yield_cpu
       end
@@ -1549,13 +1553,22 @@ cat > gate.part <<'IYI'
     # as well, within the same bound.
     def self.release_gate_open : Tuple(Bool, Bool)
       page = control
-      expired_before_open = release_gate_expired?
-      word(page + IYI_GATE_OPEN).value.set(1_u64)
       began = IyiMark.now_ns
-      while word(page + IYI_GATE_HELD).value.get == 0_u64 && IyiMark.now_ns &- began <= IYI_GATE_NS
+      while word(page + IYI_GATE_HELD).value.get == 0_u64
+        if IyiMark.now_ns &- began > IYI_GATE_NS
+          message = "SETUP: release gate: the held thread never arrived\n"
+          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+          __iyi_exit(76)
+        end
         yield_cpu
       end
-      {word(page + IYI_GATE_HELD).value.get != 0_u64, expired_before_open || word(page + IYI_GATE_EXPIRED).value.get != 0_u64}
+      if release_gate_expired?
+        message = "SETUP: release gate: hold deadline elapsed before opening\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(76)
+      end
+      word(page + IYI_GATE_OPEN).value.set(1_u64)
+      {true, false}
     end
 
     # Whether the armed thread has reached its gate. A skipping copy's main
@@ -1575,9 +1588,9 @@ cat > gate.part <<'IYI'
       began = IyiMark.now_ns
       while word(page + IYI_GATE_HELD).value.get == 0_u64
         if IyiMark.now_ns &- began > IYI_GATE_NS
-          message = "FAIL: release: the held thread never reached its park (setup)\n"
+          message = "SETUP: release: the held thread never reached its park\n"
           __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-          __iyi_exit(1)
+          __iyi_exit(76)
         end
         yield_cpu
       end
@@ -1591,9 +1604,9 @@ cat > gate.part <<'IYI'
       began = IyiMark.now_ns
       while word(page + IYI_TC_RESUMED).value.get < target
         if IyiMark.now_ns &- began > IYI_GATE_NS
-          message = "FAIL: release: the held thread never counted out (setup)\n"
+          message = "SETUP: release: the held thread never counted out\n"
           __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-          __iyi_exit(1)
+          __iyi_exit(76)
         end
         yield_cpu
       end
@@ -1628,7 +1641,7 @@ cat > gate.part <<'IYI'
 
     def self.release_gate_start_hold(line : UInt64) : Nil
       word(control + IYI_GATE_LINE).value.set(line)
-      release_gate_hold(line)
+      release_gate_hold(line, "SETUP: unnamed: held start gate timed out\n")
     end
 
     def self.release_gate_unnamed?(cursor : UInt64, line : UInt64) : Bool
@@ -1684,9 +1697,9 @@ def hold_in_allocator(flag : Flag) : Nil
     began = IyiMark.now_ns
     while flag.stop.get == 0_i64 && !IyiHeap.stop_requested?
       if IyiMark.now_ns &- began > 20000000000_u64
-        message = "FAIL: release: the holder never received a stop request\n"
+        message = "SETUP: release: the holder never received a stop request\n"
         __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-        __iyi_exit(1)
+        __iyi_exit(76)
       end
       IyiThread.spin_pause
     end
@@ -1699,7 +1712,10 @@ flag = Flag.new
 held = IyiThread.start { hold_in_allocator(flag) }
 deadline = IyiMark.now_ns &+ 20000000000_u64
 while flag.inside.get == 0_i64
-  fail("release: the holder never entered the allocator") if IyiMark.now_ns >= deadline
+  if IyiMark.now_ns >= deadline
+    print "SETUP: release: the holder never entered the allocator\n"
+    __iyi_exit(76)
+  end
   IyiThread.yield_cpu
 end
 IyiRuntimeLock.lock
@@ -1710,8 +1726,10 @@ IyiRuntimeLock.unlock
 reached, expired = IyiThread.release_gate_open
 flag.stop.set(1_i64)
 held.join
-fail("release: the held thread never reached its park") unless reached
-fail("release: the hold expired before it opened (setup watchdog, not the verdict)") if expired
+if !reached || expired
+  print "SETUP: release: the held thread did not remain at its park\n"
+  __iyi_exit(76)
+end
 fail("release: the release waited for the thread it let go") if waited
 puts "release: the held thread parked inside the allocator, and the release did not wait for it"
 IYI
@@ -1720,15 +1738,19 @@ mkdir -p gated/iyi waiting/iyi
 cp "$REPO"/src/iyi/*.iyi gated/iyi/
 awk -v gate=gate.part '
   /^    # ── Roots / { while ((getline line < gate) > 0) print line; roots++ }
-  /^      count_in\(page \+ IYI_TC_RESUMED\)$/ { print "      release_gate_hold(line)"; hook++ }
+  /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ { print; print "      fun thread_gate_exit = _exit(status : Int32) : NoReturn"; darwin_exit++; next }
+  /^      count_in\(page \+ IYI_TC_RESUMED\)$/ { print "      release_gate_hold(line, \"SETUP: release: held thread gate timed out\\n\")"; hook++ }
   { print }
-  END { if (roots != 1 || hook != 1) exit 3 }
+  END { if (roots != 1 || hook != 1 || darwin_exit != 1) exit 3 }
 ' "$REPO/src/iyi/thread.iyi" > gated/iyi/thread.iyi || { echo "the park or the roots are not in thread.iyi any more"; exit 1; }
 if ! IYI_PATH="$WORK/gated${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release > build-release.log 2>&1; then
   cat build-release.log; exit 1
 fi
-if ! timeout -k 5 120 ./release > release.txt 2>&1; then
-  cat release.txt; exit 1
+timeout -k 5 120 ./release > release.txt 2>&1
+code=$?
+if [ "$code" -eq 76 ]; then cat release.txt; exit 76; fi
+if [ "$code" -ne 0 ] || ! grep -qxF 'release: the held thread parked inside the allocator, and the release did not wait for it' release.txt; then
+  echo "the release control failed (exit $code):"; cat release.txt; exit 1
 fi
 sed 's/^/  /' release.txt
 
@@ -1745,6 +1767,7 @@ if ! IYI_PATH="$WORK/waiting${PSEP}$REPO/src" "$IYI" build --release release.iyi
 fi
 timeout -k 5 120 ./release-waiting > waiting.txt 2>&1
 code=$?
+if [ "$code" -eq 76 ]; then cat waiting.txt; exit 76; fi
 if [ "$code" -ne 1 ] || ! grep -q '^FAIL: release: the release waited for the thread it let go$' waiting.txt; then
   echo "the release check did not fire on its one run (exit $code):"; cat waiting.txt; exit 1
 fi
@@ -1964,22 +1987,22 @@ while !IyiThread.release_gate_held? && IyiMark.now_ns < deadline
   IyiThread.yield_cpu
 end
 if !IyiThread.release_gate_held?
-  print "FAIL: skipping: the armed switch never reached the gate\n"
-  __iyi_exit(1)
+  print "SETUP: skipping: the armed switch never reached the gate\n"
+  __iyi_exit(76)
 end
 if IyiThread.release_gate_expired?
-  print "FAIL: skipping: the hold expired before the collection\n"
-  __iyi_exit(1)
+  print "SETUP: skipping: the hold deadline elapsed before the collection\n"
+  __iyi_exit(76)
 end
 GC.collect
 if IyiThread.release_gate_expired?
-  print "FAIL: skipping: the hold ran out before the collection\n"
-  __iyi_exit(1)
+  print "SETUP: skipping: the hold deadline elapsed during the collection\n"
+  __iyi_exit(76)
 end
 freed = Ledger.freed
 if IyiThread.release_gate_expired?
-  print "FAIL: skipping: the hold ran out before the ledger was read\n"
-  __iyi_exit(1)
+  print "SETUP: skipping: the hold deadline elapsed before the ledger was read\n"
+  __iyi_exit(76)
 end
 if freed != 0
   puts "FAIL: skipping: #{freed} live nodes of a task marked running before its switch are on a free list after the collection"
@@ -2018,14 +2041,15 @@ cp "$REPO"/src/iyi/*.iyi skipping/iyi/
 # The gate's functions go into the copy's thread.iyi, before its roots.
 splice_gate() {
   awk -v gate=gate.part '
+    /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ { print; print "      fun thread_gate_exit = _exit(status : Int32) : NoReturn"; darwin_exit++; next }
     /^    # ── Roots/ { while ((getline line < gate) > 0) print line; roots++ }
     { print }
-    END { if (roots != 1) exit 3 }
+    END { if (roots != 1 || darwin_exit != 1) exit 3 }
   ' "$REPO/src/iyi/thread.iyi" > "$1"
 }
 splice_gate skipping/iyi/thread.iyi || { echo "the roots are not in thread.iyi any more"; exit 1; }
 awk '
-  /^    st.current = fiber$/ { print "    fiber.state = IyiFiberState::Running"; print "    IyiThread.release_gate_hold(IyiThread.current_line)"; found++ }
+  /^    st.current = fiber$/ { print "    fiber.state = IyiFiberState::Running"; print "    IyiThread.release_gate_hold(IyiThread.current_line, \"SETUP: skipping: held switch gate timed out\\n\")"; found++ }
   { print }
   END { if (found != 1) exit 3 }
 ' "$REPO/src/iyi/concurrency.iyi" > skipping/iyi/concurrency.iyi || { echo "the switch's current-fiber line is not in concurrency.iyi any more"; exit 1; }
@@ -2034,6 +2058,7 @@ if ! IYI_PATH="$WORK/skipping${PSEP}$REPO/src" "$IYI" build switching.iyi -Dskip
 fi
 timeout -k 5 120 ./skipping-run > skipping.txt 2>&1
 code=$?
+if [ "$code" -eq 76 ]; then cat skipping.txt; exit 76; fi
 if [ "$code" -ne 1 ] || ! grep -qEx 'FAIL: skipping: [1-9][0-9]* live nodes of a task marked running before its switch are on a free list after the collection' skipping.txt; then
   echo "the fiber marked running early was not caught on its one run (exit $code):"; tail -3 skipping.txt; exit 1
 fi
@@ -2045,7 +2070,7 @@ mkdir -p skipping-ctl/iyi
 cp "$REPO"/src/iyi/*.iyi skipping-ctl/iyi/
 splice_gate skipping-ctl/iyi/thread.iyi || { echo "the roots are not in thread.iyi any more"; exit 1; }
 awk '
-  /^    current.state = IyiFiberState::Running$/ { print; print "    IyiThread.release_gate_hold(IyiThread.current_line)"; found++; next }
+  /^    current.state = IyiFiberState::Running$/ { print; print "    IyiThread.release_gate_hold(IyiThread.current_line, \"SETUP: skipping: held switch gate timed out\\n\")"; found++; next }
   { print }
   END { if (found != 1) exit 3 }
 ' "$REPO/src/iyi/concurrency.iyi" > skipping-ctl/iyi/concurrency.iyi || { echo "the running write is not in concurrency.iyi any more"; exit 1; }
@@ -2054,6 +2079,7 @@ if ! IYI_PATH="$WORK/skipping-ctl${PSEP}$REPO/src" "$IYI" build switching.iyi -D
 fi
 timeout -k 5 120 ./skipping-ctl-run > skipping-ctl.txt 2>&1
 code=$?
+if [ "$code" -eq 76 ]; then cat skipping-ctl.txt; exit 76; fi
 if [ "$code" -ne 0 ] || ! grep -qxF 'skipping: held=1 collected=1 expired=0 freed=0' skipping-ctl.txt; then
   echo "the hook-only control failed (exit $code):"; tail -3 skipping-ctl.txt; exit 1
 fi
@@ -3286,8 +3312,8 @@ def child_quiet(flag : Flag) : Nil
   deadline = IyiMark.now_ns &+ 20000000000_u64
   while flag.opened.get == 0_i64
     if IyiMark.now_ns >= deadline
-      print "FAIL: unnamed: the held child's gate never opened\n"
-      __iyi_exit(1)
+      print "SETUP: unnamed: the held child's gate never opened\n"
+      __iyi_exit(76)
     end
     IyiThread.spin_pause
   end
@@ -3313,22 +3339,22 @@ helper = IyiThread.start do
     IyiThread.yield_cpu
   end
   if !IyiThread.release_gate_held?
-    print "FAIL: unnamed: the armed start never reached its gate\n"
-    __iyi_exit(1)
+    print "SETUP: unnamed: the armed start never reached its gate\n"
+    __iyi_exit(76)
   end
   if IyiThread.release_gate_expired?
-    print "FAIL: unnamed: the hold expired before the collection\n"
-    __iyi_exit(1)
+    print "SETUP: unnamed: the hold deadline elapsed before the collection\n"
+    __iyi_exit(76)
   end
   IyiMark.collect
   if IyiThread.release_gate_expired?
-    print "FAIL: unnamed: the hold expired during the collection\n"
-    __iyi_exit(1)
+    print "SETUP: unnamed: the hold deadline elapsed during the collection\n"
+    __iyi_exit(76)
   end
   held, expired = IyiThread.release_gate_open
   if !held || expired
-    print "FAIL: unnamed: the hold expired before it opened\n"
-    __iyi_exit(1)
+    print "SETUP: unnamed: the held start gate did not open\n"
+    __iyi_exit(76)
   end
   flag.opened.set(1_i64)
   nil
@@ -3369,6 +3395,7 @@ IYI
     # record a visit to a line whose handle is still 0.
     unnamed_copy() {
       awk -v gate=gate.part -v mode="$1" '
+        /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ { print; print "      fun thread_gate_exit = _exit(status : Int32) : NoReturn"; darwin_exit++; next }
         /^    # ── Roots/ { while ((getline line < gate) > 0) print line; roots++ }
         /^        h = LibC\.CreateThread\(nil, 0_u64, Pointer\(Void\)\.new\(thread_entry\), Pointer\(Void\)\.new\(line\), 4_i32, nil\)$/ {
           print "        late = IyiThread.release_gate_take_arm"
@@ -3386,7 +3413,7 @@ IYI
         armed_scan && /^          if cursor != line$/ { print "          if cursor != line && !IyiThread.release_gate_skipped?(cursor)"; two++; armed_scan = 0; next }
         /^        if cursor != own$/ { print "        if cursor != own && !IyiThread.release_gate_skipped?(cursor)"; roots3++; next }
         { print }
-        END { if (roots != 1 || created != 1 || found != 1 || clears != 1 || one != 1 || two != 1 || roots3 != 1) exit 3 }
+        END { if (roots != 1 || darwin_exit != 1 || created != 1 || found != 1 || clears != 1 || one != 1 || two != 1 || roots3 != 1) exit 3 }
       ' "$REPO/src/iyi/thread.iyi" > "$2"
     }
 
@@ -3414,6 +3441,7 @@ IYI
     fi
     timeout -k 5 60 ./held-run 3 > held.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat held.txt; exit 76; fi
     if [ "$code" -ne 0 ] || ! tr -d '\r' < held.txt | grep -qFx 'unnamed: held=1 collected=1 expired=0, and no stop met a thread without its handle' || ! tr -d '\r' < held.txt | grep -qFx 'ok started=1'; then
       echo "the control held after the handle was written exited $code:"; tail -3 held.txt; exit 1
     fi
@@ -3428,6 +3456,7 @@ IYI
     fi
     timeout -k 5 60 ./unnamed-run 3 > unnamed.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat unnamed.txt; exit 76; fi
     if [ "$code" -ne 1 ] || ! tr -d '\r' < unnamed.txt | grep -qFx 'FAIL: a stop met a started thread whose handle was not yet written'; then
       echo "the stop did not meet the unnamed thread on its one run (exit $code):"; tail -3 unnamed.txt; exit 1
     fi

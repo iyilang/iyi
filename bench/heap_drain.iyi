@@ -797,12 +797,11 @@ module bench/heap_drain
   # which only the copies carry; a sound build never names the copy-only words.
   def keyed_quiet : Nil
     {% if flag?(:keyed_force) %}
-      waited = 0
-      while IyiHeap.partitions_live != 0_u64 && waited < 10000
+      started = IyiMark.now_ns
+      while IyiHeap.partitions_live != 0_u64
+        mark_setup_fail("keyed: timed out waiting for every partition to die") if IyiMark.now_ns &- started >= 120000000000_u64
         sleep(1)
-        waited = waited + 1
       end
-      mark_setup_fail("keyed: #{IyiHeap.partitions_live} partitions still live after every unit ended") if IyiHeap.partitions_live != 0_u64
     {% end %}
   end
 
@@ -831,11 +830,14 @@ module bench/heap_drain
 
   def keyed_warm : Nil
     {% if flag?(:keyed_force) %}
+      # Keep a cooler from taking the staged run before idle_wait_ms reads it.
+      IyiHeap.cool_gate_lock
       IyiHeap.enter_barrier
       staged = IyiHeap.warm_stage
+      got = staged ? IyiHeap.warm_wait(-1_i64) : -2_i64
+      IyiHeap.cool_gate_unlock
       IyiHeap.leave_barrier
       mark_setup_fail("keyed warm: no pooled run is held warm") unless staged
-      got = IyiHeap.warm_wait(-1_i64)
       cap = (IyiHeap::POOL_TURN_NS // 1000000_u64).to_i64 &+ 1_i64
       if got == cap
         print "idle: idle_wait_ms cut a worker's unbounded wait to the pool's turn with a pooled run held warm and no partition pending\n"
@@ -853,23 +855,18 @@ module bench/heap_drain
     {% if flag?(:keyed_force) %}
       keyed_quiet
       IyiMark.collect
+      # The gate waits for any in-flight cooler and holds all others out.
+      # Stage the run and execute the unchanged cooling body exactly once.
+      IyiHeap.cool_gate_lock
       IyiHeap.enter_barrier
       staged = IyiHeap.cool_stage
+      if staged != 0_u64
+        IyiHeap.cool_arm
+        IyiHeap.cool_pools_body(1 << 30)
+      end
+      IyiHeap.cool_gate_unlock
       IyiHeap.leave_barrier
       mark_setup_fail("keyed cool: no pooled run could be staged on a release list") if staged == 0_u64
-      # Idle pool workers run `cool_pools` too, and their last look clears the
-      # pending word: arm it and call again until the record shows the staged
-      # run. Each call is inside the bracket; the bound is a setup limit, and
-      # the verdict is still the record's.
-      tries = 0
-      while IyiHeap.cool_seen == 0_u64 && tries < 2000
-        IyiHeap.enter_barrier
-        IyiHeap.cool_arm
-        IyiHeap.cool_pools(1 << 30)
-        IyiHeap.leave_barrier
-        sleep(1) if IyiHeap.cool_seen == 0_u64
-        tries = tries + 1
-      end
       seen = IyiHeap.cool_seen
       mark_setup_fail("keyed cool: the cooled path never reached the staged run") if seen & 1_u64 == 0_u64
       mark_setup_fail("keyed cool: the staged run was not eligible for release") if seen & 2_u64 == 0_u64

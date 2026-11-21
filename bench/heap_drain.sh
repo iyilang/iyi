@@ -445,17 +445,20 @@ IYI
 # call or deletes one mechanism. Every anchor must match exactly once, or the
 # awk exits 3 and the copy is "not in the form the copy patches", a setup failure.
 KEYED_ACCESS='/^  def self\.cool_pools\(limit : Int32\) : Nil$/ { declarations++; while ((getline line < ins) > 0) print line; print "" } { print } END { if (declarations != 1) exit 3 }'
+# The keyed copies serialize cooling on a copy-only word. The test holds it
+# while staging and exercising a run, so an idle worker cannot take that run.
+COOL_GATE='/^  def self\.cool_pools\(limit : Int32\) : Nil$/ { declarations++; print "  def self.cool_pools(limit : Int32) : Nil"; print "    cool_gate_lock"; print "    cool_pools_body(limit)"; print "    cool_gate_unlock"; print "  end"; print ""; print "  def self.cool_pools_body(limit : Int32) : Nil"; next } { print } END { if (declarations != 1) exit 3 }'
 # c2: the relist of the run the program parked. The control keeps the relist and
-# records it; the mutant deletes the relist and keeps the record.
-PARK_WITNESS='/^  def self\.sweep_partition_slice\(arena : UInt64, span : UInt64\) : UInt64$/ { armed = 1; declarations++ } { print } armed && /^          IyiHeap\.list_drained\(index, arena, cursor, n\)$/ { sites++; print "          IyiHeap.park_witness(arena, granule, cursor, index)" } armed && /^  end$/ { armed = 0 } END { if (declarations != 1 || sites != 1) exit 3 }'
-PARK_BROKEN='/^  def self\.sweep_partition_slice\(arena : UInt64, span : UInt64\) : UInt64$/ { armed = 1; declarations++ } armed && /^          IyiHeap\.list_drained\(index, arena, cursor, n\)$/ { sites++; print "          IyiHeap.park_witness(arena, granule, cursor, index)"; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
+# records it; the mutant deletes the relist and keeps the record and counter.
+PARK_WITNESS='/^  def self\.sweep_partition_slice\(arena : UInt64, span : UInt64\) : UInt64$/ { armed = 1; declarations++ } { print } armed && /^          IyiHeap\.list_drained\(index, arena, cursor, n\)$/ { sites++; print "          IyiHeap.park_witness(arena, granule, cursor, index)" } armed && /^          IyiHeap\.note_drained$/ { counters++ } armed && /^  end$/ { armed = 0 } END { if (declarations != 1 || sites != 1 || counters != 1) exit 3 }'
+PARK_BROKEN='/^  def self\.sweep_partition_slice\(arena : UInt64, span : UInt64\) : UInt64$/ { armed = 1; declarations++ } armed && /^          IyiHeap\.list_drained\(index, arena, cursor, n\)$/ { sites++; print "          IyiHeap.park_witness(arena, granule, cursor, index)"; next } armed && /^          IyiHeap\.note_drained$/ { counters++ } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1 || counters != 1) exit 3 }'
 # c4: the warm-pool branch of idle_wait_ms, the cap a worker's wait gets.
 WARM_BROKEN='/^  def self\.idle_wait_ms\(timeout : Int64\) : Int64$/ { armed = 1; declarations++ } armed && /^    elsif pool_warm\?$/ { sites++; sub(/pool_warm\?/, "false") } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
-# c5: the cooled run's release. The control records the cold push beside the
-# witness; the mutant deletes the three release calls and keeps the witness.
-COOL_SITE='/^  def self\.cool_pools\(limit : Int32\) : Nil$/ { armed = 1; declarations++ } armed && /^      __iyi_release_pages\(low, high - low\) if high > low$/ { sites++; print "      cool_eligible(run, low, high) if high > low" } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
-COOL_WITNESS='/^  def self\.cool_pools\(limit : Int32\) : Nil$/ { armed = 1; declarations++ } { print } armed && /^      write64\(line \+ PC_COLD, run\)$/ { sites++; print "      cool_witness(run)" } armed && /^  end$/ { armed = 0 } END { if (declarations != 1 || sites != 1) exit 3 }'
-COOL_BROKEN='/^  def self\.cool_pools\(limit : Int32\) : Nil$/ { armed = 1; declarations++ } armed && /__iyi_release_pages\(/ { found++; next } armed && /^      write64\(line \+ PC_COLD, run\)$/ { sites++; print; print "      cool_witness(run)"; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || found != 3 || sites != 1) exit 3 }'
+# c5: the cooled run's release. Both copies record eligibility and the cold
+# push; only the mutant deletes the three release calls.
+COOL_SITE='/^  def self\.cool_pools_body\(limit : Int32\) : Nil$/ { armed = 1; declarations++ } armed && /^      __iyi_release_pages\(low, high - low\) if high > low$/ { sites++; print "      cool_eligible(run, low, high) if high > low" } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
+COOL_WITNESS='/^  def self\.cool_pools_body\(limit : Int32\) : Nil$/ { armed = 1; declarations++ } { print } armed && /^      write64\(line \+ PC_COLD, run\)$/ { sites++; print "      cool_witness(run)" } armed && /^  end$/ { armed = 0 } END { if (declarations != 1 || sites != 1) exit 3 }'
+COOL_BROKEN='/^  def self\.cool_pools_body\(limit : Int32\) : Nil$/ { armed = 1; declarations++ } armed && /^      __iyi_release_pages\(low, high - low\) if high > low$/ { whole++; next } armed && /^      __iyi_release_pages\(edge, PAGE\) if edge < low && pooled_page\?\(arena, edge\)$/ { first++; next } armed && /^      __iyi_release_pages\(high, PAGE\) if high < span_high && high >= low && pooled_page\?\(arena, high\)$/ { last++; next } armed && /^      write64\(line \+ PC_COLD, run\)$/ { sites++; print; print "      cool_witness(run)"; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || whole != 1 || first != 1 || last != 1 || sites != 1) exit 3 }'
 
 # keyed LABEL NAME WANT WHICH LINE FLAGS [SITE...]: the copy of src/iyi with
 # KEYED_ACCESS, then each SITE in order, applied to heap_partition.iyi, built
@@ -473,13 +476,40 @@ keyed() {
   # copy only (bench/heap_drain.sh's `keyed`): the witnesses. Each records what
   # the runtime did to the one run the program staged; a copy that never reaches
   # that run leaves its record empty, and the program reports setup, not a catch.
+  @[UnsafeReach("the staged run is stored and read atomically")]
   @@park_key : UInt64 = 0_u64
+  @[UnsafeReach("the sweep records and the program reads atomically")]
   @@park_seen : UInt64 = 0_u64
+  @[UnsafeReach("the staged run is stored and read atomically")]
   @@cool_key : UInt64 = 0_u64
+  @[UnsafeReach("the staged page is stored and read atomically")]
   @@cool_page : UInt64 = 0_u64
+  @[UnsafeReach("the cooler records and the program reads atomically")]
   @@cool_seen : UInt64 = 0_u64
+  @[UnsafeReach("the release site records and the witness reads atomically")]
   @@cool_eligible : UInt64 = 0_u64
   COOL_SENTINEL = 0x5EEDC0015EEDC001_u64
+  @[UnsafeReach("the copy-only cooling gate is acquired and released atomically")]
+  @@cool_gate : UInt64 = 0_u64
+
+  # Only the copy serializes cooling. A waiter has its own watchdog sentence;
+  # neither its timing nor its count can decide a mutant verdict.
+  def self.cool_gate_lock : Nil
+    word = Pointer(Atomic(UInt64)).new(pointerof(@@cool_gate).address)
+    started = IyiMark.now_ns
+    until word.value.compare_and_set(0_u64, 1_u64)[1]
+      if IyiMark.now_ns &- started >= 120000000000_u64
+        message = "FAIL: keyed cooling: timed out waiting for the copy-only gate\n"
+        __iyi_write(1, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(76)
+      end
+      IyiThread.spin_pause
+    end
+  end
+
+  def self.cool_gate_unlock : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@cool_gate).address).value.set(0_u64)
+  end
 
   def self.park_stage : UInt64
     index = 0
@@ -633,7 +663,8 @@ keyed() {
   end
 
 IYI
-  if ! awk -v ins="$WORK/keyed.iyi" "$KEYED_ACCESS" "$REPO/src/iyi/heap_partition.iyi" >"$dir/k.0"; then
+  if ! awk -v ins="$WORK/keyed.iyi" "$KEYED_ACCESS" "$REPO/src/iyi/heap_partition.iyi" >"$dir/k.insert" \
+    || ! awk "$COOL_GATE" "$dir/k.insert" >"$dir/k.0"; then
     echo "  $label: heap_partition.iyi's cool_pools is not in the form the copy patches"
     status=1
     return

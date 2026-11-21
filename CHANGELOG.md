@@ -720,6 +720,26 @@
   beside 10 busy loops (macOS pins nothing). The gate is jwaldrip's
   design, from #218, without its five tries.
 
+- **`bench/thread_exercise.sh` holds the runtime lock's waits beside a
+  burst to the time the waiter ran in them (step 4d, #223).** The check
+  is that a collection does not hold the lock where its priority drops
+  and the burst takes its processor, and it held a fifth thread's waits
+  to 50 ms by the clock, which also counts the waiter suspended by a stop
+  (the stop check's, three stops a run past 20 ms let through) and off its
+  processors for other threads. Every wait past 2 ms in 111 windows-2025
+  jobs had a stop as long in its run, and two failed on one wait each, of
+  54.4 and 75.0 ms (jobs 135417513745, and 135512428102 on master's own
+  run). The waiter now spins at Windows' highest priority on `try_lock`
+  and is judged by its own cycles (`QueryThreadCycleTime`); the runtime
+  lock's spin gives the core away every 128 turns, and on it the copy
+  that puts the priority back inside the release was missed in all 26
+  runs beside busy loops. On Windows 11, 40 runs each way: the clock
+  failed the shipped runtime in 7 of 26 runs beside twelve busy loops
+  (waits of 68 to 168 ms) and none of 14 without; by the waiter's run it
+  passed 40 of 40, its longest 0.03 to 0.4 ms, and the copy was caught 40
+  of 40, its longest 100 to 168 ms. A waiter that ran under half the run
+  could not have caught a burst-long hold, and the step fails saying so.
+
 - **`bench/std_xz_exercise.sh`'s copy whose ring never grows past 64 KiB
   is caught at its check every run.** It read below the ring's memory, so
   it failed by a wrong CRC64 on most runs and by a memory fault on some:

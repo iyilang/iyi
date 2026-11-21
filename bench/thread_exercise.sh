@@ -694,6 +694,27 @@ esac
 # Five interleaved runs: 0.3 to 16.8 ms, none past 20, and with the drop
 # put back at the end of the release, 100.1 to 102.6 ms, 36 or 37 waits
 # past 20 ms in each run. The bound is 50 ms.
+#
+# The 50 ms are of the time the taker ran while it waited, read off its
+# own cycles (`QueryThreadCycleTime`), not of the clock (#223). By the
+# clock a wait also counts the taker's time suspended by a stop, which
+# the stop check holds to 20 ms with three a run let pass, and its time
+# off its processors while other threads had them. In 111 jobs on
+# windows-2025 every wait past 2 ms had a stop as long in its run (30.1
+# ms beside a stop of 30.0, 33.0 beside 33.0, 45.8 beside 42.0), and two
+# failed on one wait each, of 54.4 and 75.0 ms (jobs 135417513745, and
+# 135512428102 on master). On Windows 11 (12 logical processors), 40
+# runs each way, interleaved: beside twelve busy loops, with three more
+# pinned to the taker's processors or not, the clock failed the shipped
+# runtime in 7 runs of 26, on waits of 68 to 168 ms, and in none of the
+# 14 without them; by the taker's run it passed all 40, its longest 0.03
+# to 0.4 ms, and the copy that puts the priority back inside the release
+# was caught in all 40, its longest 100 to 168 ms. Counted on the lock's
+# own spin at normal priority, that copy was missed in all 26 runs beside
+# the loops: the spin gives the core away every 128 turns, and the taker
+# ran 0.3 to 0.7 ms of waits of 100 ms and more. And the taker must have
+# run half the run, or a hold of a burst could not have kept it spinning
+# past 50 ms: the step fails saying so rather than pass on nothing.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     if [ "${NUMBER_OF_PROCESSORS:-1}" -lt 2 ]; then
@@ -741,17 +762,27 @@ class Flag
   getter held : Atomic(Int64)
   getter waited : Atomic(Int64)
   getter waits : Atomic(Int64)
+  getter ran : Atomic(Int64)
+  getter off : Atomic(Int64)
+  getter rate : Atomic(Int64)
+  getter share : Atomic(Int64)
 
   def initialize
     @stop = Atomic(Int64).new(0_i64)
     @held = Atomic(Int64).new(0_i64)
     @waited = Atomic(Int64).new(0_i64)
     @waits = Atomic(Int64).new(0_i64)
+    @ran = Atomic(Int64).new(0_i64)
+    @off = Atomic(Int64).new(0_i64)
+    @rate = Atomic(Int64).new(0_i64)
+    @share = Atomic(Int64).new(0_i64)
   end
 end
 
 lib Placing
   fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
+  fun SetThreadPriority(thread : Void*, priority : Int32) : Int32
+  fun QueryThreadCycleTime(thread : Void*, cycles : UInt64*) : Int32
 end
 
 def fail(message : String) : Nil
@@ -769,23 +800,71 @@ def compute(flag : Flag, mask : UInt64) : Nil
   end
 end
 
+# The cycles the calling thread has run: they stand still while it is
+# suspended, and while it waits for a processor.
+def cycles : UInt64
+  count = 0_u64
+  Placing.QueryThreadCycleTime(::LibC.GetCurrentThread, pointerof(count))
+  count
+end
+
+# This thread's cycles a microsecond as it spins: the most of twenty
+# spins of a millisecond each, since one it lost its processor in reads
+# low.
+def cycle_rate : UInt64
+  best = 0_u64
+  spins = 0
+  while spins < 20
+    ran = cycles
+    began = IyiMark.now_ns
+    while IyiMark.now_ns - began < 1000000_u64
+    end
+    rate = (cycles - ran) * 1000_u64 // (IyiMark.now_ns - began)
+    best = rate if rate > best
+    spins = spins + 1
+  end
+  best
+end
+
 # Takes the runtime lock in a loop on the processors *mask* names,
-# computing 20 us between turns, and keeps its longest wait and how many
-# waits passed *bound*.
+# computing 20 us between turns, at Windows' highest priority and asking
+# by `try_lock` in a spin of its own: the lock's own spin gives the core
+# to any thread ready on it every 128 turns, and a normal one there kept
+# the taker off its processor through whole waits. A wait is judged by
+# the time the taker ran in it, its own cycles: how long a holder kept
+# out a waiter that could run. Its time suspended by a stop is the stop
+# check's, and its time off its processors while other threads had them
+# is the machine's. Keeps the longest of those and how many passed
+# *bound*; the longest wait by the clock, and how many passed *bound* by
+# the clock but not by the taker's run; and how much of its time the
+# taker ran, in per cent.
 def taker(flag : Flag, mask : UInt64, bound : UInt64) : Nil
   Placing.SetThreadAffinityMask(::LibC.GetCurrentThread, mask)
+  Placing.SetThreadPriority(::LibC.GetCurrentThread, 2_i32)
+  rate = cycle_rate
+  flag.rate.set(rate.to_i64)
+  rate = 1_u64 if rate == 0_u64
   flag.held.add(1_i64)
+  ran_from = cycles
+  wall_from = IyiMark.now_ns
   while flag.stop.get == 0_i64
+    ran = cycles
     asked = IyiMark.now_ns
-    IyiRuntimeLock.lock
+    until IyiRuntimeLock.try_lock
+      IyiThread.spin_pause
+    end
     took = IyiMark.now_ns - asked
+    ran = (cycles - ran) * 1000_u64 // rate
     IyiRuntimeLock.unlock
-    flag.waits.add(1_i64) if took > bound
+    flag.waits.add(1_i64) if ran > bound
+    flag.ran.set(ran.to_i64) if ran.to_i64 > flag.ran.get
+    flag.off.add(1_i64) if took > bound && ran <= bound
     flag.waited.set(took.to_i64) if took.to_i64 > flag.waited.get
     ends = IyiMark.now_ns + 20000_u64
     while IyiMark.now_ns < ends
     end
   end
+  flag.share.set((((cycles - ran_from) * 1000_u64 // rate) * 100_u64 // (IyiMark.now_ns - wall_from)).to_i64)
 end
 
 # The processor the first argument numbers is the stopping thread's, and
@@ -854,9 +933,14 @@ threads.each { |thread| thread.join }
 # 33 ms in a run. The burst holds dozens: with the raises taken out, 21 to
 # 33 stops of 100 to 142 ms a run in 18 runs there. So up to three pass.
 fail("stop: #{over} of #{collections} stops beside a burst on the stopping thread's processor took past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us") if over > 3
-fail("lock: #{flag.waits.get} waits for the runtime lock beside #{collections} collections took past #{lock_bound // 1000000_u64} ms, the longest #{flag.waited.get // 1000_i64} us") if flag.waits.get > 0_i64
+fail("lock: #{flag.waits.get} waits for the runtime lock beside #{collections} collections kept the taker spinning past #{lock_bound // 1000000_u64} ms, the longest #{flag.ran.get // 1000_i64} us of it running, #{flag.waited.get // 1000_i64} us by the clock") if flag.waits.get > 0_i64
+fail("lock: the taker's cycles did not move, so no wait for the runtime lock could be judged") if flag.rate.get == 0_i64
+# Spinning past the bound through a hold of a burst takes a taker that
+# runs more than half the time; held off its processors more than that,
+# the check could not fail, and says so rather than passing.
+fail("lock: the taker ran #{flag.share.get}% of the run, under half, so no collection holding the runtime lock a burst could have kept it spinning past #{lock_bound // 1000000_u64} ms: nothing was judged") if flag.share.get < 50_i64
 puts "stop: #{collections} stops of #{threads.size} threads beside a burst on the stopping thread's processor, #{share}% of the run in stops, #{over} past #{bound // 1000000_u64} ms, the longest #{longest // 1000_u64} us"
-puts "lock: the longest wait for the runtime lock beside them #{flag.waited.get // 1000_i64} us, held to #{lock_bound // 1000000_u64} ms"
+puts "lock: the longest the taker spun for the runtime lock beside them #{flag.ran.get // 1000_i64} us, held to #{lock_bound // 1000000_u64} ms, the taker running #{flag.share.get}% of the run; the longest wait by the clock #{flag.waited.get // 1000_i64} us, #{flag.off.get} past #{lock_bound // 1000000_u64} ms with the taker off its processors"
 IYI
     shared=$(( NUMBER_OF_PROCESSORS - 1 ))
     # `./$1` beside the burst, its output in `$2`.
@@ -900,10 +984,10 @@ IYI
       cat build-inside.log; exit 1
     fi
     beside_burst stopping-inside inside.txt
-    if ! grep -q '^FAIL: lock:' inside.txt; then
+    if ! grep -q '^FAIL: lock: [0-9]* waits for the runtime lock' inside.txt; then
       echo "the lock check did not fire:"; cat inside.txt; exit 1
     fi
-    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: lock:' inside.txt)"
+    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: lock: [0-9]* waits for the runtime lock' inside.txt)"
 
     step "failure proof: a stopping thread left at its priority is held by the burst"
     mkdir -p level/iyi

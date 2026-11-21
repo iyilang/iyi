@@ -1064,7 +1064,7 @@ Checking it moved two things and left the shape alone.
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
 | Compiler | 24,984 lines, **written in Crystal** | 142,338 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 36,421-line own prelude + 128,424 in std |
+| Library | 8,161 lines (3,551 of it core) | 36,421-line own prelude + 128,470 in std |
 | Specs | 21,146 lines | 17,691 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -3961,7 +3961,10 @@ clients it does not control is bounded by default since: a request's
 head within `timeout_ms` (60 s), the whole request within
 `request_timeout_ms` (5 minutes), each counted from when the wait began,
 and at most `max_connections` (1,024) served at once, the next one
-queued in the listen queue rather than refused.
+queued in the listen queue rather than refused; a request's head is held
+to `max_head` (1 MiB, 431 past it) and its body to `max_body` (64 MiB,
+413) while they are read, over HTTP/1.1 and HTTP/2, so a caller with
+smaller limits of its own is never made to hold the defaults first.
 
 #### III.4.12 Concurrency on wasm32-wasi: **MEASURED and REFUSED: why this target has no runtime**
 

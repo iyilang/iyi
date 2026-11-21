@@ -19,20 +19,10 @@
 # sweep claim go before its walk ends, are caught by `-Dheap_verify`
 # (exit 86).
 #
-# Each copy's verdict is one whole line. The checks below are state-decided
-# except for c4's clock-decided mutant catch; none is RSS-decided.
-# State-decided: c1 (a drained run taken again), c2 (a parked run put back on
-# a drain list), c5 (the cooled path's release calls, counted in the copy),
-# c6 (a unit holds under the held mark), c8 (the bounds' answer, asked
-# directly), c9 (a placed object's heap-pointer check), c3 and c7 (the
-# verifier's report). The resident set and the arena growth are information.
-# RSS-decided, not forced: none.
-# Mutant catch clock-decided: c4 ("an idle worker wakes for the warm pool"). The
-# mutant is caught when the pool is still warm IDLE_MS after the last round
-# (`-Dwarm_force`). The warm-pool cap sits behind the pending-idle branch in
-# `idle_wait_ms`, so no state record isolates it without a clock. The healthy
-# build's reading of the same pool is information only and never fails.
-# Probe 44819618628: two jobs on each shape, ten whole-gate passes per job.
+# Each copy's verdict is one whole line. c2 checks the staged run's drain
+# list membership; c4 checks the selected idle deadline with a warm pool
+# and no pending partition; c5 checks a sentinel on the staged release run.
+# A missing witness is setup failure, never a catch.
 #
 #   bash bench/heap_drain.sh           # every part
 #   bash bench/heap_drain.sh sound     # plain, optimised, verifier, chaos
@@ -463,6 +453,7 @@ PARK_BROKEN='/^  def self\.sweep_partition_slice\(arena : UInt64, span : UInt64\
 WARM_BROKEN='/^  def self\.idle_wait_ms\(timeout : Int64\) : Int64$/ { armed = 1; declarations++ } armed && /^    elsif pool_warm\?$/ { sites++; sub(/pool_warm\?/, "false") } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
 # c5: the cooled run's release. The control records the cold push beside the
 # witness; the mutant deletes the three release calls and keeps the witness.
+COOL_SITE='/^  def self\.cool_pools\(limit : Int32\) : Nil$/ { armed = 1; declarations++ } armed && /^      __iyi_release_pages\(low, high - low\) if high > low$/ { sites++; print "      cool_eligible(run, low, high) if high > low" } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
 COOL_WITNESS='/^  def self\.cool_pools\(limit : Int32\) : Nil$/ { armed = 1; declarations++ } { print } armed && /^      write64\(line \+ PC_COLD, run\)$/ { sites++; print "      cool_witness(run)" } armed && /^  end$/ { armed = 0 } END { if (declarations != 1 || sites != 1) exit 3 }'
 COOL_BROKEN='/^  def self\.cool_pools\(limit : Int32\) : Nil$/ { armed = 1; declarations++ } armed && /__iyi_release_pages\(/ { found++; next } armed && /^      write64\(line \+ PC_COLD, run\)$/ { sites++; print; print "      cool_witness(run)"; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || found != 3 || sites != 1) exit 3 }'
 
@@ -487,6 +478,7 @@ keyed() {
   @@cool_key : UInt64 = 0_u64
   @@cool_page : UInt64 = 0_u64
   @@cool_seen : UInt64 = 0_u64
+  @@cool_eligible : UInt64 = 0_u64
   COOL_SENTINEL = 0x5EEDC0015EEDC001_u64
 
   def self.park_stage : UInt64
@@ -611,6 +603,15 @@ keyed() {
     0_u64
   end
 
+  # Record the same keyed run at the whole-page release site in both copies.
+  def self.cool_eligible(run : UInt64, low : UInt64, high : UInt64) : Nil
+    key = Pointer(Atomic(UInt64)).new(pointerof(@@cool_key).address).value.get
+    page = Pointer(Atomic(UInt64)).new(pointerof(@@cool_page).address).value.get
+    if key != 0_u64 && run == key && low == page && high > low
+      Pointer(Atomic(UInt64)).new(pointerof(@@cool_eligible).address).value.set(run)
+    end
+  end
+
   def self.cool_witness(run : UInt64) : Nil
     return unless run == Pointer(Atomic(UInt64)).new(pointerof(@@cool_key).address).value.get
     seen = Pointer(Atomic(UInt64)).new(pointerof(@@cool_seen).address)
@@ -620,7 +621,8 @@ keyed() {
     low = (first_head(arena, run) + PAGE - 1_u64) & (0_u64 &- PAGE)
     high = first_head(arena, run + n.unsafe_shl(GRANULE_SHIFT)) & (0_u64 &- PAGE)
     page = Pointer(Atomic(UInt64)).new(pointerof(@@cool_page).address).value.get
-    whole = high > low && low == page ? 2_u64 : 0_u64
+    eligible = Pointer(Atomic(UInt64)).new(pointerof(@@cool_eligible).address).value.get
+    whole = high > low && low == page && eligible == run ? 2_u64 : 0_u64
     word = read64(page)
     read = word == 0_u64 ? 1_u64 : (word == COOL_SENTINEL ? 2_u64 : 3_u64)
     seen.value.set(1_u64 | whole | read.unsafe_shl(4_u64))
@@ -679,8 +681,8 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
     "$(subst 'def self\.adopt_drained' 'write8\(own, OWN_PUB\)' 'write8(own, 0_u64)')" "-Dheap_partitions -Dheap_verify" 8 24 4
   keyed "an idle worker wakes for the warm pool (c4)" c4 1 warm "FAIL: idle_wait_ms left a worker's wait unbounded with a pooled run held warm and no partition pending" "-Dheap_partitions --release -Dkeyed_force" "$WARM_BROKEN"
   keyed "the warm-pool cap, kept (hook only)" warm 0 warm "idle: idle_wait_ms cut a worker's unbounded wait to the pool's turn with a pooled run held warm and no partition pending" "-Dheap_partitions --release -Dkeyed_force"
-  keyed "a cooled run's pages go back (c5)" c5 1 cool "FAIL: idle: the run the program put on a release list reached the cold list with its page unreleased: the release call did not run" "-Dheap_partitions --release -Dkeyed_force" "$COOL_BROKEN"
-  keyed "a cooled run's release is recorded (hook only)" cool 0 cool "idle: the run the program put on a release list reached the cold list with its page reading zero" "-Dheap_partitions --release -Dkeyed_force" "$COOL_WITNESS"
+  keyed "a cooled run's pages go back (c5)" c5 1 cool "FAIL: idle: the run the program put on a release list reached the cold list with its page unreleased: the release call did not run" "-Dheap_partitions --release -Dkeyed_force" "$COOL_SITE" "$COOL_BROKEN"
+  keyed "a cooled run's release is recorded (hook only)" cool 0 cool "idle: the run the program put on a release list reached the cold list with its page reading zero" "-Dheap_partitions --release -Dkeyed_force" "$COOL_SITE" "$COOL_WITNESS"
   marked "a unit holds beneath an open mark" held 0
   marked "a partition holds under a mark" c6 1 "$C6_DELETE"
   # A sweep helper that lets its walk claim go before its walk ends: a

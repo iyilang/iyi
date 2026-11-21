@@ -149,12 +149,22 @@ case "$(uname -s)" in
       killer=$!
       while kill -0 "$killer" 2>/dev/null; do
         if [ "$SECONDS" -ge "$deadline" ]; then
-          echo "FAIL: child $child could not be ended within 10 s of its bound; it is left running" >&2
-          return 125
+          echo "FAIL: ${current_step:-bounded cleanup}: the child could not be recovered (pid $child)" >&2
+          return 76
         fi
         sleep 0.1
       done
-      wait "$killer" 2>/dev/null
+      if ! wait "$killer" 2>/dev/null; then
+        echo "FAIL: ${current_step:-bounded cleanup}: the child could not be recovered (pid $child)" >&2
+        return 76
+      fi
+      while kill -0 "$child" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+          echo "FAIL: ${current_step:-bounded cleanup}: the child could not be recovered (pid $child)" >&2
+          return 76
+        fi
+        sleep 0.1
+      done
       return 0
     }
     timeout() {
@@ -167,7 +177,7 @@ case "$(uname -s)" in
       while kill -0 "$child" 2>/dev/null; do
         if [ "$SECONDS" -ge "$deadline" ]; then
           echo "FAIL: a program exceeded its $limit s bound" >&2
-          end_bounded "$child" || true
+          end_bounded "$child" || return 76
           return 124
         fi
         sleep 0.1
@@ -753,7 +763,7 @@ IYI
       while kill -0 "$child" 2>/dev/null; do
         if [ "$SECONDS" -ge "$deadline" ]; then
           echo "FAIL: $label exceeded its process bound" >&2
-          end_bounded "$child" || true
+          end_bounded "$child" || return 76
           return 124
         fi
         sleep 0.1
@@ -1147,7 +1157,10 @@ IYI
       BURST_STATUS=$?
       touch burst-stop
       sleep 1
-      timeout -k 5 15 taskkill //F //IM burst.exe > /dev/null 2>&1 || true
+      timeout -k 5 15 taskkill //F //IM burst.exe > /dev/null || {
+        cleanup=$?
+        [ "$cleanup" -ne 76 ] || exit 76
+      }
       tr -d '\r' < burst.txt >> "$2"
     }
     cat > burst.part <<'IYI'

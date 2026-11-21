@@ -35,6 +35,35 @@
   FILE -o BINARY` and nothing else, so neither the optimised program nor a
   flag-gated path could be tested; a `--chaos` failure's `reproduce:` line
   carries the flags, since without them the seed reruns another program.
+- **A refused file is a value: `File.open?`, `File.read?`, `File.write?`,
+  and a `FileIO`'s `write?`, `flush?` and `close?` (#214).** `File.open`,
+  `IyiIO#write` and the flush in `close` panicked when the system refused
+  them - a full disk, a missing directory, a file this user may not
+  write - and iyi has no `rescue`, so a server could not answer 507 or
+  500 and carry on. `std/file` now has, in std's `?` convention
+  (`Base64.decode?`, `UdpSocket.bind?`), forms that answer an `IOError`:
+  the operation, the path, and the platform's number (errno, or Windows'
+  `GetLastError`), with `reason` in words, `not_found?`, `denied?` and
+  `full?`, and a `message` such as `cannot open /srv/up/a: no such file
+  or directory`. `File.open?` answers a `FileIO`, the same stream knowing
+  its path, whose `close?` closes the file even when its flush is
+  refused, and whose `read_error` says why a read failed. The panicking
+  forms are unchanged, to the letter. In `std/file` rather than the
+  prelude, which sits on its ceiling.
+- **std/http: `Server.serve` and `Server.handle` take `max_head` and
+  `max_body` (issue #213).** The most of a request's head and of its body
+  the server reads, by default `Server::MAX_HEAD` (1 MiB) and
+  `Server::MAX_BODY` (64 MiB) as before, held to while the request is
+  read - a head past `max_head` is a 431, a body past `max_body` a 413 at
+  its `Content-Length` or at the chunk that passes it - over HTTP/1.1 and
+  HTTP/2 (the header list advertised and taken, a body past the limit 413
+  on its stream), on the calling thread and on the pool, and under
+  `stream_bodies` for `body_io` and `Request#body` alike.
+  `Server.parse_request` and `parse_head` take them too. A server with
+  smaller limits of its own, as iyi-web calling `handle` with a 16 KiB
+  head limit, could check them only once std/http had held up to 1 MiB of
+  every connection's head, and no server took a body past 64 MiB, streamed
+  or not.
 
 ### Changed
 
@@ -66,6 +95,10 @@
   decision** (SPEC.md I.4): the 49 lines `skip:`, `--run`, the case
   report and taking them out of a test's environment need, which only the
   test program can do.
+- **The prelude's library is held to 4,763 lines, owner approved
+  2026-11-21 for #212** (SPEC.md I.4): `String#hash` keyed per process
+  with SipHash-1-3. `Hash` lives in the prelude, so the keyed hash cannot
+  sit behind an import.
 - **A program a test starts no longer reports into the test's file or runs
   only its `--run` cases.** IYI_TEST_REPORT and IYI_TEST_RUN were in the
   environment the test's children inherit; the prelude reads them at the
@@ -178,6 +211,67 @@
 
 ### Fixed
 
+- **A regex literal a macro writes is `std/regex`'s, as it is outside
+  one (#215).** Inside `{% if %}`, `{% for %}`, a `macro`'s body or a
+  class body's `{% begin %}`, `text.sub(/^model name\s*:\s*/, "")` was
+  refused with `undefined constant ::Regex::Options` in a program that
+  imports `std/regex`, while the same literal in a method body compiled.
+  Whether a literal is iyi's was asked of its location's filename, and a
+  macro's expansion is located in a `VirtualFile`, which is no `.iyi`: the
+  literal became the other library's `::Regex.new`. The expansion is now
+  read as written in the file that expanded it, at any depth, the way the
+  parser already reads it (`Program#iyi_written?`, shared with the check
+  that `call.cr` made for a def from an artifact); the instance variable a
+  literal initializes is guessed the same way. Covered by the codegen spec
+  that builds the issue's program with all four forms, and a normalize
+  spec for an expansion one and two macros deep.
+
+- **A `lib` global read by a body that travels is declared on the far side
+  (#204).** A module's `.iyimod` carried its `lib`'s `fun` lines and
+  dropped its external variables, so a generic that read one - a
+  Security.framework `$kSecKeyAlgorithm…`, libc's `$daylight` - built in
+  its own module and said `undefined fun 'kSecKeyAlgorithm…'` in every
+  importer built with `--use-iyimod`, which compiles that body again.
+  `--emit-iyimod` and `crystal tool bind` now write each one as the line
+  that declares it, `$name = c_name : Type` beside the `fun`s, with its
+  `@[ThreadLocal]`. Lines of text in the section that already held the
+  `fun`s, so the format stays v64: an artifact written without them stops
+  at the same error, and a compiler without the fix reads the new lines as
+  the source they are.
+
+- **A string's hash is keyed afresh in every process, so keys built to
+  collide no longer make a table quadratic (#212).** `String#hash` was
+  FNV-1a from a fixed start, and keys that all share one hash are cheap to
+  build offline: 65,536 of 64 bytes took 3,196 ms to put in a `Hash` and
+  6,395 ms for `JSON.parse` to read as one object, against 8 ms and 16 ms
+  for ordinary keys (Linux x86-64, `--release`) - anywhere a program files
+  client-chosen strings in a table, a request body's JSON or std/http's
+  headers among them. It is SipHash-1-3 now, the hash Rust's and Python's
+  tables use, keyed with sixteen bytes the system's entropy gives each
+  process once, before its first line: `getrandom` (GRND_INSECURE, so a
+  program at boot never waits for the pool; /dev/urandom where the call is
+  hidden), `arc4random_buf` on darwin, `RtlGenRandom` on Windows and
+  `random_get` on wasm32-wasi. The same keys take 1-2 ms and 2-3 ms at
+  16,384 and land on 65,536 distinct hashes; a key of 64 bytes or more
+  hashes two to five times faster than before (15 ns against 35 ns at 64
+  bytes, 172 against 858 at 1,024), and one of eight bytes 4 ns slower
+  (6.7 against 2.6; a lookup 18 ns against 13). A string's hash is no
+  longer the same from one run to the next; a table's order is the order
+  things went in, as it was, so nothing a program prints moves with it.
+  Only a program that hashes a string reads the key: darwin's links
+  `arc4random_buf` and Windows' imports advapi32 for it, which
+  `bench/std_io_exercise.sh`'s and `bench/std_time_exercise.sh`'s floors
+  now name.
+
+
+- **std/http refuses a head past its limit whose end came in the read
+  that passed the limit (issue #213).** `Conn#read_head` refused a head
+  only while its end had not come, so a read that carried the bytes past
+  the limit and the head's end together was served: a 20 KB head sent at
+  once to a server with a 16 KiB `max_head` was answered 200, and a head
+  past `MAX_HEAD` by up to one read was taken the same way. It is a 431
+  now wherever its end lies, and a client's read of an answer's head is
+  held the same way.
 - **`std/xz` keeps its ring's bare pointers inside the ring whatever the
   ring's growth does.** The dictionary ring is read through pointers whose
   bounds held only because the ring grows to the dictionary's size before
@@ -695,6 +789,174 @@
   run again, up to five times.
 
 ### Gates
+
+- **`bench/unsafe.sh` and `bench/bind_roundtrip.sh` store into and read a
+  C global from a body that travels (#204).** `unsafe.sh`'s artifact step
+  builds an importer of a marked module whose generic stores 7 into libc's
+  `daylight` and reads it back, with the module's source gone, and runs it
+  (front end only on Windows, whose CRT's `_daylight` is no data symbol a
+  program can import); the bound shard's `Signed#flag_of` does the same
+  through `LibShardSign.flag`. Built with the compiler before the fix, the
+  importer stopped at `undefined fun 'daylight=' for Raw::Zone::LibZone`
+  and the shard's consumer at `undefined fun 'flag=' for LibShardSign`.
+
+- **`bench/collections_exercise.sh` holds a string's hash to SipHash-1-3
+  keyed per process (#212).** The exercise builds the 1,024 keys that
+  shared one FNV-1a hash and asks for at least 1,000 distinct hashes
+  (keyed, all 1,024 apart but for odds near 1 in 8,000); a copy with
+  FNV-1a back is caught there at 1 of 1,024. A program run twice must
+  hash six strings across the block edges apart in all six, and a copy
+  with the key fixed in the source is caught printing the same six both
+  times. A copy keyed with the reference key 00..0f must print
+  SipHash-1-3's answers, plain and `--release`, checked against a Python
+  transcription that gives the published `Sip13` vector, and a copy with
+  two finalisation rounds is caught at the first of them.
+
+- **`bench/std_file_exercise.sh` holds `std/file`'s `?` forms (#214).**
+  A new section answers, on every platform, an open of a missing
+  directory, an open of a file this user may not write (skipped, and
+  said, where the user writes it all the same), a read of a directory, a
+  write, a flush and a close's flush to a file open only to read, and on
+  Linux the same to `/dev/full`, each as an `IOError` with the right
+  number and the path. Six copies of `std/file` fail at the check that
+  names them: an `open?` that panics, a refused write taken as written,
+  a `write?` that panics, a `close?` that drops its flush's refusal, a
+  refusal that reads the wrong number, and (POSIX) a `read?` that drops
+  the read's refusal. And `File.open`, `File.write` and the stream's
+  `write`, `flush` and `close` are checked to panic with the sentence
+  they had, to the letter.
+
+
+- **`bench/std_http_exercise.sh` holds a server to its caller's
+  `max_head` and `max_body` (issue #213).** std_http_exercise.iyi's server
+  with 16 KiB and 64 KiB limits answers a head with no end 431 and a
+  megabyte of chunks 413 while they are sent, and what it allocates is
+  held under 192 KiB and 256 KiB (on this Linux machine 93 KB and 66 KB,
+  where a server under std/http's own limits took 2.9 MB for the same
+  256 KB head finished and 2.1 MB for the megabyte finished); a 20 KB head
+  that comes whole is a 431 and a `Content-Length` past the limit a 413
+  before its body; `Server.handle` under an 80 MiB `max_body` takes a body
+  of 64 MiB and a byte, read whole and streamed. http2_exercise.iyi holds
+  the same over HTTP/2, and std_http_parallel.iyi on the pool. Eleven
+  copies that hand one of those places std/http's own limit instead -
+  the head's read, a head past the limit whose end came with it, the
+  `Content-Length`, the chunked reader, the whole body's read, a streaming
+  block's `body`, `serve`'s and the pool's handing on to `handle`, and
+  HTTP/2's head, body and whole body's read - are caught: seven by the
+  exercise, three at their HTTP/2 check, one at the pool's. The patch
+  sites of the copies that name `serve`'s internal signatures follow
+  them.
+
+- **`bench/parallel_preempt.iyi`'s period step judges the monitor only
+  where the host wakes a sleeping thread on time.** A windows-2025 runner
+  took 1.08 s over the half second the step's task computed, and its
+  monitor looked every 8206 us, past the 8 ms bound (CI job
+  135466663176): a host that wakes every thread late makes a slow tick of
+  a sound one. A thread of the step's own now sleeps 5 ms at a time beside
+  the computing task, ten sleeps a window, waiting as the monitor does (on
+  Windows on a high-resolution waitable timer of its own: the runtime's
+  `sleep`, through the completion port, took 11 to 48 ms beside 12 busy
+  loops on Windows 11's 12 logical processors while the monitor looked
+  every 6.1 to 6.4 ms), and the monitor's looks are counted over the
+  windows whose sleeps took the bound less 1.5 ms or less on average,
+  until 400 ms of them, or 20 s fail with the sleeps' spread. The bounds
+  are as they were. The quantum is counted the same way the host cannot
+  fake: looks a turn over the turns whose two ends found the worker's
+  thread on its core, where all the turns over all their looks took up to
+  3.04 a turn beside busy loops on the Mac and failed 1 run of 25. In 20
+  runs each on Windows 11, idle, held to 4 beside 4 busy loops and beside
+  12 on its 12, the sound runtime passed every run, the monitor looking
+  every 5.1 to 6.4 ms and taking 1.95 to 1.97 looks a turn; the
+  timer-tick copy was caught at 15.0 to 16.6 ms every run, and a new copy
+  ticking every 12 ms at 12.3 to 14.6, and the three-look copy at 3.90 to
+  3.97 looks a turn. On macOS 26.6 (M2 Pro, 10 cores; idle, beside 10 and
+  20 busy loops, 50 runs in all) and here on Linux (idle, beside 4 and 8
+  on 4 vCPUs, 50 runs in all) likewise: every sound run passed, every
+  copy's run was caught. Held to 4 beside 8 busy loops, Windows 11's
+  sleeps took 8.0 to 13.0 ms, and the step failed there by saying so, for
+  the sound runtime and the copy alike.
+
+- **`bench/heap_codegen.sh`'s `classvar-publish` copy and
+  `bench/heap_lend.sh`'s `foreign` copy are caught by their local
+  collection's check every run (#223).** Both programs' `collect_here`
+  scrubbed the stack below its own frame, and that frame lay over the
+  frames that had just made the copy's chain: a slot of it not yet
+  written still named the chain's head, so the local mark kept the chain
+  and the check saw nothing. The plain `foreign` copy was then caught
+  only at its unit's death, while the other unit's `Holder` naming the
+  chain still lived: that unit died first once and the copy was missed
+  (CI job 134750417357, exit 0), and master's run 44280407780 listed the
+  death's word for the plain build on Linux and Windows against the
+  release build's local one. The plain `classvar-publish` copy fell to a
+  stressed collection after `collect_here`, whose hit a global mark
+  beginning dropped, and to the unit's death after it: CI job
+  135044352904's first run named the death and its second, the one the
+  table printed, the local collection. `collect_here` is now a macro
+  that scrubs in its caller's frame, as bench/heap_local's callers scrub
+  before `collect_now`, then collects from a def whose frame lies on the
+  zeroed stack, scrubbing again before each try and counting only a
+  collection its own call ran. The plain `foreign` copy named the death
+  in 600 runs of 600 on Linux (idle, beside twelve busy loops, and held
+  to two CPUs beside them) and 400 of 400 on Windows 11 (idle and beside
+  twelve), and names the local collection in 500 of 500 and 400 of 400.
+  The plain `classvar-publish` copy at chaos seeds 1 to 100 named the
+  death in 23 of 6,000 runs on Linux (20 of 4,000 idle, 3 of 2,000 beside
+  the busy loops) and 972 of 1,500 on Windows 11 (968 of 1,000 idle, 4 of
+  500 beside them), and in none of 6,000 and 1,500 now. On the Mac both
+  copies named the local collection before and after (400 runs, half
+  beside ten busy loops, and 1,500, a third). Both gates now hold each
+  copy to the verifier's check it names - its local collection's, its
+  unit's death's (`c1`, `new-shared`, heap_lend's `death`) or the
+  hand-back's (`unlent`) - and heap_codegen.sh prints both runs' reports
+  when two differ, where it printed the later one alone. Against the old
+  `heap_lend.iyi` the new heap_lend.sh fails at `foreign`'s first run on
+  Linux. With `RUNS=25` both gates catch every copy at its check with
+  one report in 25 runs of 25 on Linux (idle and beside the busy loops),
+  the Mac and Windows 11.
+
+- **`bench/thread_exercise.sh`'s copy whose release waits for the threads
+  it let go is caught on its one run, on Linux, darwin and Windows (step
+  4e, #223).** It was caught by time: five collections beside a thread
+  that a process computing 400 ms at a time kept off its processor had to
+  average past 200 ms after their stops, and nothing waited for that
+  process to start. A collection was held a burst only once the process
+  was computing, so the copy read 161 and 165 ms on two windows-2025
+  runners (jobs 135060721721 and 135025096299, one or two collections
+  held), and on Windows 11, idle, the process's first burst came 1.7 to
+  34.0 ms after the collections began; made to start 150 or 250 ms late
+  it let the copy through 5 runs of 5 each. Now a copy of `thread.iyi`
+  holds the thread the collection stops inside the allocator at a gate in
+  its park, after its release and before it counts itself out, until the
+  program opens the gate when the collection has returned: the release
+  returns with the thread still held, and the copy that waits for the
+  count out returns only when the gate's 5 s run out, which the program
+  reports. The hog, the priorities, the 2,000,000-link chain and the
+  bound are gone. 30 of 30 sound runs and 30 of 30 caught in each of:
+  Linux (12 vCPUs) idle and beside a busy loop pinned to each processor;
+  Windows 11 (12 logical processors) idle, beside a loop pinned to each,
+  and held to 4 processors beside a loop on each; the M2 Pro idle and
+  beside 10 busy loops (macOS pins nothing). The gate is jwaldrip's
+  design, from #218, without its five tries.
+
+- **`bench/thread_exercise.sh` holds the runtime lock's waits beside a
+  burst to the time the waiter ran in them (step 4d, #223).** The check
+  is that a collection does not hold the lock where its priority drops
+  and the burst takes its processor, and it held a fifth thread's waits
+  to 50 ms by the clock, which also counts the waiter suspended by a stop
+  (the stop check's, three stops a run past 20 ms let through) and off its
+  processors for other threads. Every wait past 2 ms in 111 windows-2025
+  jobs had a stop as long in its run, and two failed on one wait each, of
+  54.4 and 75.0 ms (jobs 135417513745, and 135512428102 on master's own
+  run). The waiter now spins at Windows' highest priority on `try_lock`
+  and is judged by its own cycles (`QueryThreadCycleTime`); the runtime
+  lock's spin gives the core away every 128 turns, and on it the copy
+  that puts the priority back inside the release was missed in all 26
+  runs beside busy loops. On Windows 11, 40 runs each way: the clock
+  failed the shipped runtime in 7 of 26 runs beside twelve busy loops
+  (waits of 68 to 168 ms) and none of 14 without; by the waiter's run it
+  passed 40 of 40, its longest 0.03 to 0.4 ms, and the copy was caught 40
+  of 40, its longest 100 to 168 ms. A waiter that ran under half the run
+  could not have caught a burst-long hold, and the step fails saying so.
 
 - **`bench/std_xz_exercise.sh`'s copy whose ring never grows past 64 KiB
   is caught at its check every run.** It read below the ring's memory, so
@@ -29166,7 +29428,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,421-line library and nothing else. Every other
+  written against iyi's own 36,537-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

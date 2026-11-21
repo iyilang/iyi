@@ -536,6 +536,49 @@ end
     result
   end
 
+  # The sixteen bytes `String#hash` is keyed with, read once per process
+  # (#212): `getrandom`, 318 on x86_64 and 278 on aarch64, asked with
+  # GRND_INSECURE (4), which never waits for the pool to fill at boot - a
+  # key that spreads a table is not a secret worth stalling a program
+  # for, as Python's and Rust's tables decided. A kernel older than 5.6
+  # refuses the flag (-EINVAL) and is asked without it, and a wait a
+  # signal cut short (-EINTR) is asked again; one older than 3.17, or a
+  # sandbox that hides the call (-ENOSYS), is read from /dev/urandom, as
+  # `Random::Secure` reads it. Sixteen bytes are never a short answer.
+  def __iyi_hash_key : {UInt64, UInt64}
+    key = {0_u64, 0_u64}
+    buffer = pointerof(key).as(UInt8*)
+    flags = 4_i64
+    while true
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(318_i64), "{rdi}"(buffer), "{rsi}"(16_i64), "{rdx}"(flags)
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(278_i64), "{x0}"(buffer), "{x1}"(16_i64), "{x2}"(flags)
+                     : "memory"
+                     : "volatile")
+      {% end %}
+      return key if result == 16_i64
+      break if result == -38_i64
+      raise "String#hash: getrandom answered #{result}" unless result == -22_i64 || result == -4_i64
+      flags = 0_i64 if result == -22_i64
+    end
+    fd = __iyi_open_read("/dev/urandom".to_unsafe)
+    raise "String#hash: no getrandom, and /dev/urandom could not be opened (#{fd})" if fd < 0_i64
+    done = 0_i64
+    while done < 16_i64
+      got = __iyi_file_read(fd, (buffer + done).as(Void*), (16_i64 - done).to_u64)
+      raise "String#hash: /dev/urandom answered #{got}" if got <= 0_i64 && got != -4_i64
+      done = done + got if got > 0_i64
+    end
+    __iyi_close(fd)
+    key
+  end
+
   def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     __iyi_read(fd.to_i32, buffer, count)
   end
@@ -629,6 +672,11 @@ end
     # `getcwd` fills the buffer and answers it, or null when the
     # directory does not fit or has been removed.
     fun getcwd(buf : UInt8*, size : UInt64) : UInt8*
+    # The key `String#hash` is keyed with: libSystem's entropy, the call
+    # `Random::Secure` and `File.tempfile` make, bound as `std/random`
+    # binds it - a lib is one lib across modules, so the two must agree.
+    # It cannot fail.
+    fun arc4random_buf(buffer : Void*, count : UInt64) : Void
   end
 
   def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -658,6 +706,14 @@ end
       length = length + 1
     end
     length.to_i64
+  end
+
+  # The sixteen bytes `String#hash` is keyed with, read once per process
+  # (#212).
+  def __iyi_hash_key : {UInt64, UInt64}
+    key = {0_u64, 0_u64}
+    LibC.arc4random_buf(pointerof(key).as(Void*), 16_u64)
+    key
   end
 
   def __iyi_open_read(path : UInt8*) : Int64
@@ -1501,6 +1557,25 @@ end
     written.to_i64
   end
 
+  # The OS entropy `Random::Secure` reads, for the key `String#hash` is
+  # keyed with: `RtlGenRandom`, advapi32's `SystemFunction036` - kernel32
+  # has no call for it, and advapi32 ships with every Windows (SPEC.md
+  # III.10). Linked only where a program hashes a string. A BOOLEAN is one
+  # byte and a ULONG 32 bits, declared as `std/random` declares them: the
+  # compiler holds one signature to one symbol, whichever lib binds it.
+  @[Link("advapi32")]
+  lib LibIyiAdvapi32
+    fun RtlGenRandom = SystemFunction036(buffer : Void*, length : UInt32) : UInt8
+  end
+
+  # The sixteen bytes `String#hash` is keyed with, read once per process
+  # (#212).
+  def __iyi_hash_key : {UInt64, UInt64}
+    key = {0_u64, 0_u64}
+    raise "String#hash: RtlGenRandom answered no bytes" if LibIyiAdvapi32.RtlGenRandom(pointerof(key).as(Void*), 16_u32) == 0_u8
+    key
+  end
+
   # The directory in UTF-8, the way every other platform answers it.
   # `GetCurrentDirectoryW` writes the character count, or, when the
   # buffer is too small, the count it needs with the terminator in it:
@@ -1551,7 +1626,8 @@ end
   # WASI's own types are fd/size/errno as u32; iyi's primitives carry
   # arithmetic on Int32/Int64/UInt8/UInt64 only, so the u32-width parameters
   # are declared Int32, which is the same 32 bits at the ABI, and no UInt32
-  # value ever exists in this file to convert.
+  # value exists in this file to convert - `random_get`'s length, below, is
+  # a literal.
   lib LibWasi
     struct Ciovec
       buf : UInt8*
@@ -1563,6 +1639,12 @@ end
     fun fd_read = __wasi_fd_read(fd : Int32, iovs : Ciovec*,
                                  iovs_len : Int32, nread : Int32*) : Int32
     fun proc_exit = __wasi_proc_exit(code : Int32) : NoReturn
+    # The host's entropy, for the key `String#hash` is keyed with. It
+    # answers WASI's 16-bit errno, zero when every byte was written.
+    # `std/random` reopens this lib with the same binding, and a lib is
+    # one lib across modules, so the two signatures must be one: its
+    # length is the UInt32 WASI declares.
+    fun random_get = __wasi_random_get(buffer : UInt8*, length : UInt32) : UInt16
   end
 
   def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -1611,6 +1693,14 @@ end
 
   def __iyi_file_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
     -1_i64
+  end
+
+  # The sixteen bytes `String#hash` is keyed with, read once per process
+  # (#212).
+  def __iyi_hash_key : {UInt64, UInt64}
+    key = {0_u64, 0_u64}
+    raise "String#hash: random_get answered an errno" if LibWasi.random_get(pointerof(key).as(UInt8*), 16_u32) != 0_u16
+    key
   end
 
   def __iyi_exit(status : Int32) : NoReturn

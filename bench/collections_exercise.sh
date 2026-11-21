@@ -489,6 +489,120 @@ prove_fails "== is identity again" identity_eq hash.iyi \
   "hash: equal pairs in another order are equal" \
   '/^  def ==(other : Hash(K, V)) : Bool$/,/^  end$/d'
 
+# 3. A string hashed as it was before #212: FNV-1a from a fixed start, which
+#    every key the exercise builds to collide under it then shares.
+prove_fails "String#hash is FNV-1a again" fnv_string string.iyi \
+  "hash: keys built to collide under FNV-1a spread" \
+  's/^  def hash : Int32$/  def hash : Int32; value = -2128831035; bytesize.times { |i| value = (value ^ to_unsafe[i].to_i32) \&* 16777619 }; return value; end; def sip_hash : Int32/'
+
+echo
+echo "== a string's hash is SipHash-1-3, keyed afresh in every process (#212)"
+
+# Six strings across the block edges: none, one byte, seven, eight, nine,
+# and a long one. Keyed with the reference key 00 01 .. 0f, SipHash-1-3
+# answers what the published implementation answers - Rust's `siphasher`
+# `Sip13` gives 0xabac0158050fc4dc for the empty string - folded to 32 bits
+# by `UInt64#hash`; computed with a Python transcription of the paper's
+# algorithm checked against that vector.
+printf 'module main\n\nputs ["", "a", "abcdefg", "abcdefgh", "abcdefghi", "hello world, this is a longer key!"].map(&.hash).join(" ")\n' > "$WORK/keyed.iyi"
+REFERENCE="-1653063420 -1401826804 -154133257 1847241452 -1294140095 -1843959762"
+
+# keyed_build <dir> <name> [build flags...]: keyed.iyi built against the
+# prelude copy in <dir> (`-` for the real one) and run twice, into
+# <name>.1 and <name>.2; fails, saying why, when either step does.
+keyed_build() {
+  local dir="$1" name="$2" search="$REPO/src"
+  shift 2
+  [ "$dir" = "-" ] || search="$WORK/$dir${PSEP}$REPO/src"
+  if ! IYI_PATH="$search" "$IYI" build "$@" -o "$WORK/$name" "$WORK/keyed.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $name: did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    return 1
+  fi
+  "$WORK/$name" > "$WORK/$name.1" 2>&1 && "$WORK/$name" > "$WORK/$name.2" 2>&1 && return 0
+  echo "  $name: the program failed: $(cat "$WORK/$name.2" "$WORK/$name.1" 2>/dev/null | head -2 | tr '\n' ' ')"
+  return 1
+}
+
+# keyed_apart <name>: whether two runs hashed every string differently.
+# One string landing on the same 32 bits in both runs is 1 in 2^32, so
+# six of six apart is a bound no run misses, and a key shared by any of
+# the six lengths' paths is caught.
+keyed_apart() {
+  [ -s "$WORK/$1.1" ] && [ "$(paste -d ' ' "$WORK/$1.1" "$WORK/$1.2" | awk '{ n = NF / 2; same = 0; for (i = 1; i <= n; i++) if ($i == $(i + n)) same++; print (NF == 12 ? same : -1) }')" = 0 ]
+}
+
+# keyed_copy <dir> <sed script>: the prelude copied, string.iyi patched; a
+# patch that changes nothing fails.
+keyed_copy() {
+  mkdir -p "$WORK/$1/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$1/iyi/"
+  sed -e "$2" "$REPO/src/iyi/string.iyi" > "$WORK/$1/iyi/string.iyi"
+  ! cmp -s "$REPO/src/iyi/string.iyi" "$WORK/$1/iyi/string.iyi"
+}
+
+REFERENCE_KEY='s/^  private HASH_KEY = __iyi_hash_key$/  private HASH_KEY = {0x0706050403020100_u64, 0x0f0e0d0c0b0a0908_u64}/'
+
+if keyed_build - live; then
+  if keyed_apart live; then
+    echo "  two runs hash all six strings apart: $(cat "$WORK/live.1") / $(cat "$WORK/live.2")"
+  else
+    echo "  FAIL: two runs share a string's hash, so the key is not the process's own: $(cat "$WORK/live.1") / $(cat "$WORK/live.2")"
+    status=1
+  fi
+else
+  status=1
+fi
+
+if ! keyed_copy reference "$REFERENCE_KEY"; then
+  echo "  the reference-key patch changed nothing, so the vectors prove nothing"
+  status=1
+else
+  for flags in plain release; do
+    if keyed_build reference "reference-$flags" $([ "$flags" = release ] && echo --release); then
+      if [ "$(cat "$WORK/reference-$flags.1")" = "$REFERENCE" ]; then
+        echo "  $flags, the reference key: SipHash-1-3's answers for all six"
+      else
+        echo "  FAIL: $flags, the reference key: $(cat "$WORK/reference-$flags.1"), not SipHash-1-3's $REFERENCE"
+        status=1
+      fi
+    else
+      status=1
+    fi
+  done
+fi
+
+# And each of the two checks above caught by a copy that breaks it: a key
+# fixed in the source - FNV's mistake again, under SipHash - and one round
+# of finalisation left out, which is SipHash-1-2 and nobody's vector.
+if ! keyed_copy fixed_key 's/^  private HASH_KEY = __iyi_hash_key$/  private HASH_KEY = {1_u64, 2_u64}/'; then
+  echo "  a key fixed in the source: the patch changed nothing, so this proves nothing"
+  status=1
+elif keyed_build fixed_key fixed-key-run; then
+  if keyed_apart fixed-key-run; then
+    echo "  a key fixed in the source: two runs still hashed apart, so the check does not test the key"
+    status=1
+  else
+    echo "  a key fixed in the source: caught, both runs printed $(cat "$WORK/fixed-key-run.1")"
+  fi
+else
+  status=1
+fi
+if ! keyed_copy two_rounds "$REFERENCE_KEY"'; s/^    3.times { v0, v1, v2, v3 = sip_round(v0, v1, v2, v3, 0_u64) }$/    2.times { v0, v1, v2, v3 = sip_round(v0, v1, v2, v3, 0_u64) }/' \
+   || cmp -s "$WORK/reference/iyi/string.iyi" "$WORK/two_rounds/iyi/string.iyi"; then
+  echo "  two finalisation rounds: the patch changed nothing, so this proves nothing"
+  status=1
+elif keyed_build two_rounds two-rounds-run; then
+  if [ "$(cat "$WORK/two-rounds-run.1")" = "$REFERENCE" ]; then
+    echo "  two finalisation rounds: the reference answers still came out, so the vectors do not test the rounds"
+    status=1
+  else
+    echo "  two finalisation rounds: caught, $(cut -d ' ' -f 1 "$WORK/two-rounds-run.1") where SipHash-1-3 is ${REFERENCE%% *}"
+  fi
+else
+  status=1
+fi
+
 echo
 echo "== and what an empty receiver says when it is asked for a size"
 panics_with "a negative capacity" neg_cap "negative capacity" "Array(Int32).new(-1).size"

@@ -439,6 +439,22 @@ pair_hashes = [] of Int32
 assert_int(spread(pair_hashes), 90000, "hash: a 300 by 300 grid of arrays spreads")
 assert_true([1, 2].hash == [1, 2].hash && [1, 2] == [1, 2], "hash: equal arrays hash alike")
 
+# A string's hash is keyed per process, so keys built offline to share one
+# hash do not share it here (#212). Each pair below reaches one FNV-1a state
+# from the one before it - the birthday search in the issue, ten levels -
+# so all 1,024 keys made of one half of each pair had one FNV-1a hash, the
+# one `String#hash` was, and a table of 65,536 such keys took 2.8 s to fill.
+# Keyed, 1,024 random 32-bit hashes share one with odds near 1 in 8,000,
+# so 1,000 distinct is a bound no run misses.
+fnv_twins = [""]
+"h8pE/TOtB 2kYF/zEqT hOah/t4Ga R8BK/v7nP 1EWl/Cztx gZiQ/1eVe H9Yo/4J3f m5TK/IL8R 0wgB/xukp WTrd/97Yx".split(' ').each do |pair|
+  longer = [] of String
+  fnv_twins.each { |front| pair.split('/').each { |half| longer << front + half } }
+  fnv_twins = longer
+end
+assert_true(fnv_twins.size == 1024 && spread(fnv_twins.map(&.hash)) >= 1000, "hash: keys built to collide under FNV-1a spread (#{spread(fnv_twins.map(&.hash))} of #{fnv_twins.size})")
+assert_true("abcdefghi".hash == ("abcd" + "efghi").hash && "".hash == "xyz"[1, 0].hash, "hash: equal strings hash alike")
+
 # Distinct hashes that share their low bits are not one slot either: an
 # Int's hash is itself, the table took the slot from the low bits as they
 # were, and keys that were multiples of 65536 made one run of probes -

@@ -2267,47 +2267,12 @@ if [ "$code" -ne 0 ] || ! grep -qxF 'skipping: held=1 collected=1 expired=0 free
 fi
 echo "  hook-only control: held=1 collected=1 expired=0 freed=0"
 
-# Windows' `SuspendThread` asks for the suspend and returns, and the thread
-# runs on until `GetThreadContext` waits for it. The stop read the
-# allocator's word in between, so a thread that ran on into `take` was
-# stopped inside it, which the deferral exists to prevent: the program
-# above died of a memory fault once in the 54 runs CI made of it. A copy
-# of the runtime makes the run-on likely - every suspend taken back and asked
-# again, for up to 2 ms, until the context is read with the thread inside the
-# allocator, or 2 ms pass. The five runs below say the lists hold when it
-# lands inside. They do not force the landing, so the landing itself is not
-# proven here (listed in the header as not forced).
+# Windows can run a thread on into take after SuspendThread returns. The
+# same-hook control below forces that rendezvous, confirms the owner was
+# deferred, and checks a live list held on its stack through the collection.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    runon='function runon(pad) {
-      print pad "until_ns = __iyi_monotonic_ns + 2000000_i64"
-      print pad "while __iyi_monotonic_ns < until_ns"
-      print pad "  LibC.ResumeThread(handle)"
-      print pad "  while __iyi_monotonic_ns < until_ns && !IyiHeap.cache_inside?(IyiHeap.read64(cursor + IYI_TL_CACHE))"
-      print pad "  end"
-      print pad "  LibC.SuspendThread(handle)"
-      print pad "  IyiRoots.capture_thread_registers(handle, cursor + IYI_TL_SPILL)"
-      print pad "  break if IyiHeap.cache_inside?(IyiHeap.read64(cursor + IYI_TL_CACHE))"
-      print pad "end"
-    }'
-    step "a stop whose suspend lands inside the allocator keeps every list"
-    mkdir -p late/iyi
-    cp "$REPO"/src/iyi/*.iyi late/iyi/
-    awk "$runon"' /^            sp = IyiRoots\.capture_thread_registers\(handle, cursor \+ IYI_TL_SPILL\)$/ { runon("            "); found = 1 } { print } END { if (!found) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > late/iyi/thread.iyi || { echo "the stop's context read is not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/late${PSEP}$REPO/src" "$IYI" build switching.iyi -o late-run > build-late.log 2>&1; then
-      cat build-late.log; exit 1
-    fi
-    run=1
-    while [ "$run" -le 5 ]; do
-      timeout -k 5 120 ./late-run > late.txt 2>&1
-      code=$?
-      if [ "$code" -ne 0 ] || ! grep -q '^wrong=0$' late.txt; then
-        echo "run $run with late suspends exited $code:"; tail -3 late.txt; exit 1
-      fi
-      run=$((run + 1))
-    done
-    echo "  five runs, no list lost"
+    # One forced rendezvous replaces the former five 2 ms searches.
     # ── 15. The handshake: the armed thread is held inside `take` ─────────
     # The same rendezvous runs in both copies: the stopper first sees the
     # armed owner outside `take`, lets it enter the fast path, suspends it
@@ -2482,13 +2447,18 @@ IYI
       ' "$REPO/src/iyi/prelude.iyi" > "$1"
     }
     cat > early.iyi <<'IYI'
+@[Unsafe("the live-list ledger stores non-root addresses in a private mapping")]
+module early
+
 class Flag
   getter waiting : Atomic(Int64)
   getter release : Atomic(Int64)
+  getter list_ok : Atomic(Int64)
 
   def initialize
     @waiting = Atomic(Int64).new(0_i64)
     @release = Atomic(Int64).new(0_i64)
+    @list_ok = Atomic(Int64).new(0_i64)
   end
 end
 
@@ -2506,14 +2476,50 @@ def fill(n : Int32) : Node?
   head
 end
 
+@[UnsafeReach("the ledger mapping records addresses without making them roots")]
+class EarlyLedger
+  @@page = 0_u64
+  def self.setup : Nil
+    @@page = __iyi_mmap(4096_u64).address
+  end
+  def self.record(head : Node?) : Nil
+    node = head
+    i = 0
+    while node.is_a?(Node) && i < 300
+      Pointer(Atomic(UInt64)).new(@@page + i.to_u64 * 8_u64).value.set(node.object_id)
+      node = node.next_node
+      i += 1
+    end
+    if i != 300 || node.is_a?(Node)
+      print "SETUP: early: the live-list ledger was not populated\n"
+      __iyi_exit(76)
+    end
+  end
+  def self.freed : Int32
+    count = 0
+    300.times do |i|
+      address = Pointer(Atomic(UInt64)).new(@@page + i.to_u64 * 8_u64).value.get
+      if address == 0_u64
+        print "SETUP: early: the live-list ledger has an empty slot\n"
+        __iyi_exit(76)
+      end
+      count += 1 if IyiMark.flags(address) & IyiHeap::FREE_FLAG != 0
+    end
+    count
+  end
+end
+
 
 {% if flag?(:early_force) %}
 IyiMark.auto = false
 IyiMark.workers = 0_u64
 IyiThread.early_setup
+EarlyLedger.setup
 {% end %}
 flag = Flag.new
 owner = IyiThread.start do
+  held_list = fill(300)
+  EarlyLedger.record(held_list)
   warm = fill(400)
   warm = nil
   IyiThread.early_arm
@@ -2527,6 +2533,16 @@ owner = IyiThread.start do
     IyiThread.spin_pause
   end
   kept = Node.new(42_i64, nil)
+  if IyiThread.early_value(IyiThread::IYI_EARLY_STOPPED) == 0_u64
+    count = 0
+    node = held_list
+    while node.is_a?(Node)
+      break unless node.value == 999_i64
+      count += 1
+      node = node.next_node
+    end
+    flag.list_ok.set(1_i64) if count == 300
+  end
   kept.value
 end
 deadline = IyiMark.now_ns &+ 20000000000_u64
@@ -2572,6 +2588,11 @@ if stopped != 0_u64 || parked != 1_u64
   print "SETUP: early: the stop neither parked nor held the armed thread\n"
   __iyi_exit(76)
 end
+if EarlyLedger.freed != 0 || flag.list_ok.get != 1_i64
+  print "FAIL: early: the deferred thread's live list was not preserved\n"
+  __iyi_exit(1)
+end
+puts "early: the deferred thread's 300-node live list remained intact"
 puts "early: the stop deferred the thread after the second context capture"
 IYI
     step "the late context capture is followed by a fresh allocator-depth check"
@@ -2586,7 +2607,7 @@ IYI
     code=$?
     if [ "$code" -eq 76 ]; then cat early-ctl-raw.txt; exit 76; fi
     tr -d '\r' < early-ctl-raw.txt > early-ctl.txt
-    if [ "$code" -ne 0 ] || ! grep -qxF 'early: held=1 before=0 after=1 stopped=0 parked=1' early-ctl.txt || ! grep -qxF 'early: the stop deferred the thread after the second context capture' early-ctl.txt; then
+    if [ "$code" -ne 0 ] || ! grep -qxF 'early: held=1 before=0 after=1 stopped=0 parked=1' early-ctl.txt || ! grep -qxF 'early: the stop deferred the thread after the second context capture' early-ctl.txt || ! grep -qxF "early: the deferred thread's 300-node live list remained intact" early-ctl.txt; then
       echo "the control did not defer the armed thread (exit $code):"; cat early-ctl.txt; exit 1
     fi
     printf '  control: exit 0, %s\n' "$(grep -m1 '^early: held=' early-ctl.txt)"

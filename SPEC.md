@@ -2355,17 +2355,33 @@ exit but the panic — the half of cleanup that matters. `.cr` sources keep
 theirs.
 
 ```
+import std/file::{File, IOError}
+
 pub def with_file(path : String) : String | IOError
-  f = open_file(path)!          # the program's own: IyiIO | IOError
+  f = File.open?(path)!         # FileIO | IOError
   defer f.close
   f.read_all
 end
 ```
 
-`open_file` is the program's, because the prelude's `File.open` answers an
+`File.open?` is `std/file`'s (#214). The prelude's `File.open` answers an
 `IyiIO` and panics with the path when it cannot, so a `!` after it is
 refused: "`!` has no error to propagate: no member of IyiIO implements
-`Error`".
+`Error`". Beside it, and beside `File.read`, `File.write` and the stream's
+`write`, `flush` and `close`, each of which panics, `std/file` has a `?`
+form in std's own convention — `Base64.decode?`, `UdpSocket.bind?` — that
+answers what the system refused as an `IOError`: `File.open?`,
+`File.read?`, `File.write?`, and on the `FileIO` that `File.open?` answers,
+`write?`, `flush?` and `close?`. An `IOError` carries the operation, the
+path and the platform's number for why (errno, or Windows'
+`GetLastError`); `reason` says it in words, `not_found?`, `denied?` and
+`full?` say whether it is a 404, a 403 or a 507, and its `message` is
+what `File.open`, `File.read` or `File.write` panics with, and the reason:
+`cannot open /srv/up/a: no such file or directory`. A `close?` whose flush
+is refused closes the file all the same. They live in `std/file`, not the
+prelude, because the prelude sits on its ceiling (I.4), and the panicking
+forms are unchanged, to the letter; `bench/std_file_exercise.sh` holds
+both.
 
 **Built, and panics gave it its final shape.** `defer x` expands to a
 registered cleanup around the rest of its scope:

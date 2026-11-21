@@ -3422,6 +3422,9 @@ def deep(n : Int32) : Int32
 end
 
 shared = Shared.new
+{% if flag?(:guard_force) %}
+IyiThread.release_gate_arm_guard
+{% end %}
 collector = IyiThread.start do
   while shared.stop.get == 0_i64
     IyiMark.collect
@@ -3433,8 +3436,10 @@ workers = [] of IyiThread
 4.times do
   workers << IyiThread.start do
     while IyiMark.now_ns < deadline
-      # A new thread each time: its stack and its tasks' stacks are
-      # committed only as they grow.
+      # A healthy stress only: it shows the stacks grow beside a collector
+      # and that every run ends. It does not decide the guard proof (step 7c's
+      # holder does); a collector that runs after the workers finish proves
+      # nothing here, and that is why the proof does not use it.
       IyiThread.start do
         raise "a thread's frames read back wrong" if deep(2000) != 0
         group do |g|
@@ -3467,25 +3472,186 @@ IYI
     done
     echo "  three runs of two seconds, and every one ended"
 
-    step "failure proof: the scan from sp again, guard page and all, and a run dies"
+    # The guard scan's functions go into a copy's thread.iyi before its roots:
+    # `keep` answers the committed page, as shipped (the control); the forced
+    # copy answers the page one below it while the arm is up, which is the
+    # guard page under a growing stack.
+    cat > guard.part <<'IYI'
+    # ── The guard scan (bench/thread_exercise.sh, step 7c) ─────────────────
+    # Copies only: the awk in that step puts this into a copy of thread.iyi,
+    # and the tree has none of it. While armed, a copy's scan of a stopped
+    # stack starts inside the stack's guard page (64 bytes into it), which is
+    # the guard page under a growing stack.
+    IYI_GATE_GUARD = 768_u64
+    IYI_GATE_GUARD_HIT = 832_u64
+    IYI_GATE_HOLDER = 960_u64
+    IYI_GATE_CANDIDATE = 1024_u64
+    IYI_GATE_SCANNED = 1088_u64
+
+    def self.release_gate_guard_hit?(address : UInt64) : Bool
+      page = word(control + IYI_GATE_GUARD_HIT).value.get
+      page != 0_u64 && address >= page && address < page + 4096_u64
+    end
+
+    def self.release_gate_arm_guard : Nil
+      word(control + IYI_GATE_GUARD).value.set(1_u64)
+    end
+
+    # The guard page of the stack `sp` is in: the committed page with
+    # PAGE_GUARD in its reservation, found walking up from the allocation
+    # base to the top. Windows keeps one guard page at a growing stack's
+    # committed edge, so this is the page a scan from below that edge reads
+    # first, wherever the stack's sp sits. 0 when there is none.
+    def self.guard_page_of(sp : UInt64, top : UInt64) : UInt64
+      buffer = uninitialized UInt64[6]
+      info = pointerof(buffer).as(Pointer(UInt64))
+      return 0_u64 if LibC.VirtualQuery(Pointer(Void).new(sp), info.as(Void*), 48_u64) == 0_u64
+      pos = info[1]
+      while pos < top && LibC.VirtualQuery(Pointer(Void).new(pos), info.as(Void*), 48_u64) != 0_u64
+        return pos if (info[4] & 0xFFFFFFFF_u64) == 0x1000_u64 && (info[4].unsafe_shr(32_u64) & 0x100_u64) != 0_u64
+        return 0_u64 if info[3] == 0_u64
+        pos = info[0] + info[3]
+      end
+      0_u64
+    end
+
+    # The holder marks its own stack top before it holds, so the scan can
+    # recognise its stack by top alone (no timing, no sp).
+    def self.release_gate_holder_mark : Nil
+      top = IyiHeap.read64(current_line + IYI_TL_TOP)
+      word(control + IYI_GATE_HOLDER).value.set(top)
+    end
+
+    # Both copies resolve the same candidate for the holder's stack: the guard
+    # page found from its allocation base. The control records the committed
+    # scan start it used; the mutant scans from the guard page instead.
+    def self.release_gate_candidate : UInt64
+      word(control + IYI_GATE_CANDIDATE).value.get
+    end
+
+    def self.release_gate_scanned_from : UInt64
+      word(control + IYI_GATE_SCANNED).value.get
+    end
+
+    def self.release_gate_guard_scan(sp : UInt64, top : UInt64, keep : Bool) : UInt64
+      committed = first_written(sp, top)
+      return committed if word(control + IYI_GATE_GUARD).value.get == 0_u64
+      return committed if word(control + IYI_GATE_HOLDER).value.get != top
+      guard = guard_page_of(sp, top)
+      return committed if guard == 0_u64
+      word(control + IYI_GATE_CANDIDATE).value.set(guard)
+      if keep
+        word(control + IYI_GATE_SCANNED).value.set(committed)
+        return committed
+      end
+      word(control + IYI_GATE_GUARD_HIT).value.set(guard)
+      guard + 64_u64
+    end
+IYI
+    guard_copy() {
+      awk -v gate=guard.part -v keep="$1" '
+        /^    # ── Roots/ { while ((getline line < gate) > 0) print line; roots++ }
+        /^            sp = first_written\(sp, top\)$/ { print "            sp = IyiThread.release_gate_guard_scan(sp, top, " keep ")"; scans++; next }
+        { print }
+        END { if (roots != 1 || scans != 1) exit 3 }
+      ' "$REPO/src/iyi/thread.iyi" > "$2"
+    }
+    guard_prelude() {
+      awk '
+        /^    if code == IYI_WIN_GUARD_PAGE$/ { guard_branch++; inside_guard = 1 }
+        /^    if code == IYI_WIN_ACCESS_VIOLATION$/ { inside_guard = 0 }
+        inside_guard && /^        if IyiScheduler.fiber_guard_hit\?\(faulting\)$/ {
+          print "        if IyiThread.release_gate_guard_hit?(faulting)"
+          print "          message = \"FAIL: guard: a stop scan began inside its guard page\\n\""
+          print "          LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)"
+          print "          __iyi_win_fault_exit"
+          print "        end"
+          found++
+        }
+        { print }
+        END { if (guard_branch != 1 || found != 1) exit 3 }
+      ' "$REPO/src/iyi/prelude.iyi" > "$1"
+    }
+
+    cat > guard-hold.iyi <<'IYI'
+@[Unsafe("the holder marks its own stack top and then spins without allocating; the copy records are the only shared state")]
+class Shared
+  getter ready : Atomic(Int64)
+  getter release : Atomic(Int64)
+
+  def initialize
+    @ready = Atomic(Int64).new(0_i64)
+    @release = Atomic(Int64).new(0_i64)
+  end
+end
+
+def hold(shared : Shared) : Nil
+  {% if flag?(:guard_force) %}
+  IyiThread.release_gate_holder_mark
+  {% end %}
+  shared.ready.set(1_i64)
+  while shared.release.get == 0_i64
+    IyiThread.spin_pause
+  end
+end
+
+shared = Shared.new
+{% if flag?(:guard_force) %}
+IyiThread.release_gate_arm_guard
+{% end %}
+holder = IyiThread.start { hold(shared); nil }
+watch = IyiMark.now_ns &+ 20000000000_u64
+while shared.ready.get == 0_i64
+  if IyiMark.now_ns >= watch
+    print "FAIL: guard: the holder never reached its hold (setup)\n"
+    __iyi_exit(1)
+  end
+  IyiThread.yield_cpu
+end
+IyiMark.collect
+shared.release.set(1_i64)
+holder.join
+{% if flag?(:guard_force) %}
+if IyiThread.release_gate_candidate == 0_u64
+  print "FAIL: guard: the holder's stack has no guard page at its top (setup)\n"
+  __iyi_exit(1)
+end
+if IyiThread.release_gate_scanned_from == 0_u64
+  print "FAIL: guard: the stop did not scan the holder's stack (setup)\n"
+  __iyi_exit(1)
+end
+puts "guard: the stop scanned the holder's stack from its committed page"
+{% end %}
+IYI
+    step "the holder's stack, scanned from its committed page, armed: one run, and the scan is reported"
+    mkdir -p kept/iyi
+    cp "$REPO"/src/iyi/*.iyi kept/iyi/
+    guard_copy true kept/iyi/thread.iyi || { echo "the scan's start is not in thread.iyi any more"; exit 1; }
+    guard_prelude kept/iyi/prelude.iyi || { echo "the guard fault handler is not in prelude.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/kept${PSEP}$REPO/src" "$IYI" build guard-hold.iyi -Dguard_force -o guard-kept > build-kept.log 2>&1; then
+      cat build-kept.log; exit 1
+    fi
+    timeout -k 5 60 ./guard-kept > kept.txt 2>&1
+    code=$?
+    if [ "$code" -ne 0 ] || ! tr -d '\r' < kept.txt | grep -qxF "guard: the stop scanned the holder's stack from its committed page"; then
+      echo "the control did not scan from its committed page (exit $code):"; tail -3 kept.txt; exit 1
+    fi
+    echo "  control: exit 0, guard: the stop scanned the holder's stack from its committed page"
+
+    step "failure proof: the holder's stack scanned from its guard page dies on its one run"
     mkdir -p guarded/iyi
     cp "$REPO"/src/iyi/*.iyi guarded/iyi/
-    awk '/^            sp = first_written\(sp, top\)$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > guarded/iyi/thread.iyi || { echo "the scan's start is not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/guarded${PSEP}$REPO/src" "$IYI" build guard.iyi -o guard-from-sp > build-guarded.log 2>&1; then
+    guard_copy false guarded/iyi/thread.iyi || { echo "the scan's start is not in thread.iyi any more"; exit 1; }
+    guard_prelude guarded/iyi/prelude.iyi || { echo "the guard fault handler is not in prelude.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/guarded${PSEP}$REPO/src" "$IYI" build guard-hold.iyi -Dguard_force -o guard-from-sp > build-guarded.log 2>&1; then
       cat build-guarded.log; exit 1
     fi
-    caught=0
-    run=1
-    while [ "$caught" -eq 0 ] && [ "$run" -le 5 ]; do
-      timeout -k 5 60 ./guard-from-sp 2000 > guarded.txt 2>&1
-      grep -q '^stacks grown beside a collecting thread: true' guarded.txt || caught=$run
-      run=$((run + 1))
-    done
-    if [ "$caught" -eq 0 ]; then
-      echo "five runs scanning from sp all ended well"; exit 1
+    timeout -k 5 60 ./guard-from-sp > guarded.txt 2>&1
+    code=$?
+    if [ "$code" -ne 1 ] || ! grep -qxF 'FAIL: guard: a stop scan began inside its guard page' guarded.txt; then
+      echo "the guard-page scan did not end at its sentence (exit $code):"; tail -3 guarded.txt; exit 1
     fi
-    echo "  run $caught of up to five died"
+    echo "  exits 1 at \"FAIL: guard: a stop scan began inside its guard page\""
     ;;
 esac
 

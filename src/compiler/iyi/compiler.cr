@@ -2277,12 +2277,15 @@ module Iyi
         overloads.each do |entry|
           a_def = entry.def
           next unless a_def.is_a?(External)
-          # An external *variable* — libc's `$errno` — is not a `fun`.
-          next if a_def.external_var?
+          # An external *variable* — libc's `$daylight` — is two `External`s,
+          # a getter and a setter, and travels as the one line that declares
+          # both. Dropped, a travelling body that reads one said `undefined
+          # fun 'kSecKeyAlgorithm…'` on the far side (#204).
+          next if a_def.external_var? && a_def.name.ends_with?('=')
           # Through the macro, like every other location question here: a
           # platform's `lib` is written inside `{% if flag?(:darwin) %}`.
           next unless a_def.location.try(&.original_read_from) == filename
-          funs << iyi_render_fun(a_def)
+          funs << (a_def.external_var? ? iyi_render_external_var(a_def) : iyi_render_fun(a_def))
         end
       end
       funs.sort!
@@ -2352,6 +2355,19 @@ module Iyi
         if return_type = a_def.return_type
           io << " : " << return_type
         end
+      end
+    end
+
+    # iyi: one external variable, as the line that declares it: `$daylight :
+    # Int32`, with the C name where it differs and the `@[ThreadLocal]` the
+    # module wrote. The type is the resolved one, as for a `fun` parameter
+    # whose restriction is gone: the getter keeps no type spec.
+    private def iyi_render_external_var(a_def : External) : String
+      String.build do |io|
+        io << "@[ThreadLocal] " if a_def.thread_local?
+        io << '$' << a_def.name
+        io << " = " << a_def.real_name unless a_def.name == a_def.real_name
+        io << " : " << a_def.type
       end
     end
 

@@ -178,6 +178,19 @@
 
 ### Fixed
 
+- **A `lib` global read by a body that travels is declared on the far side
+  (#204).** A module's `.iyimod` carried its `lib`'s `fun` lines and
+  dropped its external variables, so a generic that read one - a
+  Security.framework `$kSecKeyAlgorithm…`, libc's `$daylight` - built in
+  its own module and said `undefined fun 'kSecKeyAlgorithm…'` in every
+  importer built with `--use-iyimod`, which compiles that body again.
+  `--emit-iyimod` and `crystal tool bind` now write each one as the line
+  that declares it, `$name = c_name : Type` beside the `fun`s, with its
+  `@[ThreadLocal]`. Lines of text in the section that already held the
+  `fun`s, so the format stays v64: an artifact written without them stops
+  at the same error, and a compiler without the fix reads the new lines as
+  the source they are.
+
 - **`std/xz` keeps its ring's bare pointers inside the ring whatever the
   ring's growth does.** The dictionary ring is read through pointers whose
   bounds held only because the ring grows to the dictionary's size before
@@ -695,6 +708,16 @@
   run again, up to five times.
 
 ### Gates
+
+- **`bench/unsafe.sh` and `bench/bind_roundtrip.sh` store into and read a
+  C global from a body that travels (#204).** `unsafe.sh`'s artifact step
+  builds an importer of a marked module whose generic stores 7 into libc's
+  `daylight` and reads it back, with the module's source gone, and runs it
+  (front end only on Windows, whose CRT's `_daylight` is no data symbol a
+  program can import); the bound shard's `Signed#flag_of` does the same
+  through `LibShardSign.flag`. Built with the compiler before the fix, the
+  importer stopped at `undefined fun 'daylight=' for Raw::Zone::LibZone`
+  and the shard's consumer at `undefined fun 'flag=' for LibShardSign`.
 
 - **`bench/std_xz_exercise.sh`'s copy whose ring never grows past 64 KiB
   is caught at its check every run.** It read below the ring's memory, so

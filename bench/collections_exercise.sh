@@ -541,7 +541,7 @@ keyed_copy() {
   ! cmp -s "$REPO/src/iyi/string.iyi" "$WORK/$1/iyi/string.iyi"
 }
 
-REFERENCE_KEY='s/^  private HASH_KEY = __iyi_hash_key$/  private HASH_KEY = {0x0706050403020100_u64, 0x0f0e0d0c0b0a0908_u64}/'
+REFERENCE_KEY='s/^  private HASH_KEY *= __iyi_hash_key$/  private HASH_KEY = {0x0706050403020100_u64, 0x0f0e0d0c0b0a0908_u64}/'
 
 if keyed_build - live; then
   if keyed_apart live; then
@@ -575,7 +575,7 @@ fi
 # And each of the two checks above caught by a copy that breaks it: a key
 # fixed in the source - FNV's mistake again, under SipHash - and one round
 # of finalisation left out, which is SipHash-1-2 and nobody's vector.
-if ! keyed_copy fixed_key 's/^  private HASH_KEY = __iyi_hash_key$/  private HASH_KEY = {1_u64, 2_u64}/'; then
+if ! keyed_copy fixed_key 's/^  private HASH_KEY *= __iyi_hash_key$/  private HASH_KEY = {1_u64, 2_u64}/'; then
   echo "  a key fixed in the source: the patch changed nothing, so this proves nothing"
   status=1
 elif keyed_build fixed_key fixed-key-run; then

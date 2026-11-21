@@ -17,6 +17,7 @@ class String
   # under every other allocator the word is under `malloc`'s pointer and
   # the id is stored here.
   HEADER_SIZE = 8
+  private HASH_KEY    = __iyi_hash_key
 
   # Allocates *bytesize* bytes, hands the buffer to the block to fill, and
   # returns the string that results. The character count is left at zero,
@@ -432,7 +433,6 @@ class String
   # SipHash-1-3, as Rust's and Python's tables hash, keyed with sixteen bytes
   # of the system's entropy read once per process: FNV-1a from a fixed start
   # let anyone build keys offline that all shared one hash (#212).
-  private HASH_KEY = __iyi_hash_key
   def hash : Int32
     k0, k1 = HASH_KEY
     v0, v1 = k0 ^ 0x736f6d6570736575_u64, k1 ^ 0x646f72616e646f6d_u64

@@ -43,7 +43,7 @@ describe "Code gen: regex literal spec" do
         end
 
         def inside(text : String) : String
-          {% if flag?(:win32) %}
+          {% if flag?(:iyi_spec_flag_no_target_sets) %}
             text
           {% else %}
             text.sub(/^model name\s*:\s*/, "")

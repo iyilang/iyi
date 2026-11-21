@@ -563,6 +563,7 @@ File.delete(fmode)
 puts "  every open mode reads and writes where Crystal's does"
 
 puts "\n== failures answered as values"
+
 # What a `?` form answered, as the refusal it has to be: a success fails
 # the check by name.
 def refused(answer : Nil | IOError, what : String) : IOError

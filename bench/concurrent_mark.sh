@@ -20,9 +20,8 @@
 #     every core, reported as measurements;
 #   - buffers grown by realloc beside a mark, ten runs;
 #   - small chunks freed in bursts across the pauses, ten runs, on every shape;
-#   - chunks the last mark kept, freed beside a sweep that waits at each, ten
-#     runs, and the armed look that holds the sweep at one kept chunk until the
-#     program frees it;
+#   - chunks the last mark kept, freed beside the sweep, ten runs, and the
+#     armed look that holds the sweep at one kept chunk until the program frees it;
 #   - failure proofs: an unlocked free inside a sweep's look; a barrier that
 #     shades nothing; a barrier run after its mark ended; a block outgrown under
 #     a mark that the closer holds open; a small live set given the
@@ -763,14 +762,14 @@ printf '  exits 1 at "%s"\n' "$(grep -Fx 'FAIL: large: a block outgrown under a 
 step "failure proof: a small live set given the thousand-object bound goes beside the program"
 mkdir -p thousand/iyi
 cp "$REPO"/src/iyi/*.iyi thousand/iyi/
-awk '{ if (sub(/drain_bounded\(w, IyiStat\.get\(IyiStat::KEPT\) < STW_MARK_SMALL \? STW_MARK_SMALL : STW_MARK_BOUND\)/, "drain_bounded(w, STW_MARK_BOUND)")) found = 1; print } END { if (!found) exit 3 }' \
+awk '{ if (sub(/drain_bounded\(w, IyiStat\.get\(IyiStat::KEPT\) < STW_MARK_SMALL \? STW_MARK_SMALL : STW_MARK_BOUND\)/, "drain_bounded(w, STW_MARK_BOUND)")) found++; print } END { if (found != 1) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > thousand/iyi/prelude.iyi || { echo "the bound this proof replaces is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/thousand${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o thousand-run > build-thousand.log 2>&1; then
   cat build-thousand.log; exit 1
 fi
 timeout -k 5 300 ./thousand-run > thousand.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q "^FAIL: small:" thousand.txt; then
+if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: small: [0-9]+ of [0-9]+ collections over [0-9]+ live bytes ran beside the program$" thousand.txt; then
   echo "the small live set check did not fire (exit $code):"; tail -3 thousand.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: small:' thousand.txt)"
@@ -787,8 +786,8 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: small:' thousand.txt)"
 # runtime gives it, and ten with one: helper 0 alone, the case in which
 # helper 0 waiting past the next mark leaves nobody to drain it. Linux
 # never showed the stall unwidened - twenty runs of fifteen seconds at
-# twelve workers on master, 1,588 second stops retreated, none stalled -
-# so each proof below widens its window.
+# twelve workers on master, 1,588 second stops retreated, none stalled.
+# The proofs below force their interleavings with event acknowledgements.
 step "marks beside twenty-four connections on twelve workers all end, with every helper and with one"
 if ! "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o stall > build-stall.log 2>&1; then
   cat build-stall.log; exit 1
@@ -1254,9 +1253,18 @@ awk 'function declarations() {
     print "      def self.go_hold : Nil"
     print "        state = Pointer(Atomic(UInt64)).new(pointerof(@@go_state).address)"
     print "        limit = now_ns &+ 10000000000_u64"
-    print "        while state.value.get != 3_u64 || (Pointer(Atomic(UInt64)).new(pointerof(@@go_up).address).value.get != 0_u64 && IyiStat.get(IyiStat::HOLDS) <= Pointer(Atomic(UInt64)).new(pointerof(@@go_holds).address).value.get)"
+    print "        while state.value.get != 3_u64"
     print "          if now_ns >= limit"
     print "            message = \"FAIL: let-go: the resumed thread did not answer the release probe within ten seconds\\n\""
+    print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+    print "            __iyi_exit(76)"
+    print "          end"
+    print "          spin_pause"
+    print "        end"
+    print "        limit = now_ns &+ 10000000000_u64"
+    print "        while Pointer(Atomic(UInt64)).new(pointerof(@@go_up).address).value.get != 0_u64 && IyiStat.get(IyiStat::HOLDS) <= Pointer(Atomic(UInt64)).new(pointerof(@@go_holds).address).value.get"
+    print "          if now_ns >= limit"
+    print "            message = \"FAIL: let-go: no resumed slice reached the ceiling within ten seconds of the probe\\n\""
     print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
     print "            __iyi_exit(76)"
     print "          end"
@@ -1825,14 +1833,14 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: wake boost' boosted.txt)"
 step "failure proof: a mark beside a busy program that asks for every helper is caught"
 mkdir -p greedy/iyi
 cp "$REPO"/src/iyi/*.iyi greedy/iyi/
-awk '/^ *helpers = free if helpers > free$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+awk '/^ *helpers = free if helpers > free$/ { found++; next } { print } END { if (found != 1) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > greedy/iyi/prelude.iyi || { echo "the cap this proof removes is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/greedy${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o greedy-run > build-greedy.log 2>&1; then
   cat build-greedy.log; exit 1
 fi
 timeout -k 5 300 ./greedy-run > greedy.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q "^FAIL: share:" greedy.txt; then
+if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: share: with [0-9]+ threads of the program's on [0-9]+ cores, the mark beside them asked for [0-9]+ helpers rather than 1$" greedy.txt; then
   echo "the share check did not fire (exit $code):"; tail -3 greedy.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: share:' greedy.txt)"
@@ -1843,14 +1851,14 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: share:' greedy.txt)"
 step "failure proof: a mark beside an idle pool that counts its waiting workers is caught"
 mkdir -p counted/iyi
 cp "$REPO"/src/iyi/*.iyi counted/iyi/
-awk '/^ *threads = threads > waiting \? threads - waiting : 1_u64$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+awk '/^ *threads = threads > waiting \? threads - waiting : 1_u64$/ { found++; next } { print } END { if (found != 1) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > counted/iyi/prelude.iyi || { echo "the line this proof removes is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/counted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o counted-run > build-counted.log 2>&1; then
   cat build-counted.log; exit 1
 fi
 timeout -k 5 300 ./counted-run > counted.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q "^FAIL: idle pool:" counted.txt; then
+if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: idle pool: with [0-9]+ threads of the program's on [0-9]+ cores, [0-9]+ of them pool workers waiting, the mark beside them asked for [0-9]+ helper$" counted.txt; then
   echo "the idle pool check did not fire (exit $code):"; tail -3 counted.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' counted.txt)"
@@ -1860,14 +1868,14 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' counted.txt)"
 step "failure proof: a mark beside a busy pool that counts its running workers free is caught"
 mkdir -p pooled/iyi
 cp "$REPO"/src/iyi/*.iyi pooled/iyi/
-awk '/^ *waiting = IyiScheduler\.waiting_threads$/ { sub(/IyiScheduler\.waiting_threads/, "IyiWorkers.started? ? IyiWorkers.count.to_u64 : IyiScheduler.waiting_threads"); found = 1 } { print } END { if (!found) exit 3 }' \
+awk '/^ *waiting = IyiScheduler\.waiting_threads$/ { sub(/IyiScheduler\.waiting_threads/, "IyiWorkers.started? ? IyiWorkers.count.to_u64 : IyiScheduler.waiting_threads"); found++ } { print } END { if (found != 1) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > pooled/iyi/prelude.iyi || { echo "the line this proof changes is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/pooled${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o pooled-run > build-pooled.log 2>&1; then
   cat build-pooled.log; exit 1
 fi
 timeout -k 5 300 ./pooled-run > pooled.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q "^FAIL: busy pool:" pooled.txt; then
+if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: busy pool: with [0-9]+ pool workers running on [0-9]+ cores, [0-9]+ waiting, the mark beside them asked for [0-9]+ helpers rather than 1$" pooled.txt; then
   echo "the busy pool check did not fire (exit $code):"; tail -3 pooled.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: busy pool:' pooled.txt)"

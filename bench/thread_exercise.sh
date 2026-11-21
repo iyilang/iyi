@@ -182,9 +182,9 @@ case "$(uname -s)" in
       child=$!
       while kill -0 "$child" 2>/dev/null; do
         if [ "$SECONDS" -ge "$deadline" ]; then
-          echo "FAIL: a program exceeded its $limit s bound" >&2
+          echo "SETUP: ${current_step:-bounded run}: process exceeded its $limit s bound" >&2
           end_bounded "$child" || return 76
-          return 124
+          return 76
         fi
         sleep 0.1
       done
@@ -768,9 +768,9 @@ IYI
       deadline=$((SECONDS + limit))
       while kill -0 "$child" 2>/dev/null; do
         if [ "$SECONDS" -ge "$deadline" ]; then
-          echo "FAIL: $label exceeded its process bound" >&2
+          echo "SETUP: $label: process exceeded its bound" >&2
           end_bounded "$child" || return 76
-          return 124
+          return 76
         fi
         sleep 0.1
       done
@@ -781,6 +781,7 @@ IYI
     fi
     win_native 120 "the one-core check" ./starve > starve-raw.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat starve-raw.txt; exit 76; fi
     tr -d '\r' < starve-raw.txt > starve.txt
     if [ "$code" -ne 0 ] || [ "$(grep -c ', held to 10 s$' starve.txt)" -ne 2 ] || grep -q '^FAIL' starve.txt; then
       echo "held to one core (exit $code):"; cat starve.txt; exit 1
@@ -1332,8 +1333,10 @@ IYI
       cat build-panicky.log; exit 1
     fi
     timeout -k 5 60 ./panicky > panicky.txt 2>&1
-    if ! grep -q '^iyi: panic: inside the stop' panicky.txt || ! grep -q "^panic: the stopping thread's priority put back" panicky.txt; then
-      echo "a panic inside the stop:"; cat panicky.txt; exit 1
+    code=$?
+    if [ "$code" -eq 76 ]; then cat panicky.txt; exit 76; fi
+    if [ "$code" -ne 1 ] || ! tr -d '\r' < panicky.txt | grep -qxF "panic: the stopping thread's priority put back" || ! tr -d '\r' < panicky.txt | grep -q '^iyi: panic: inside the stop'; then
+      echo "a panic inside the stop (exit $code):"; cat panicky.txt; exit 1
     fi
     echo "  $(grep -m1 '^panic:' panicky.txt)"
 
@@ -1346,8 +1349,10 @@ IYI
       cat build-unlowered.log; exit 1
     fi
     timeout -k 5 60 ./panicky-unlowered > unlowered.txt 2>&1
-    if ! grep -q '^FAIL: panic:' unlowered.txt; then
-      echo "the panic check did not fire:"; cat unlowered.txt; exit 1
+    code=$?
+    if [ "$code" -eq 76 ]; then cat unlowered.txt; exit 76; fi
+    if [ "$code" -ne 1 ] || ! tr -d '\r' < unlowered.txt | grep -qxF "FAIL: panic: the stopping thread kept the stop's priority"; then
+      echo "the panic check did not fire (exit $code):"; cat unlowered.txt; exit 1
     fi
     printf '  says "%s"\n' "$(grep -m1 '^FAIL: panic:' unlowered.txt)"
 

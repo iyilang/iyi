@@ -740,17 +740,51 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   keyed "a cooled run's release is recorded (hook only)" cool 0 cool "idle: the run the program put on a release list reached the cold list with its page reading zero" "-Dheap_partitions --release -Dkeyed_force" "$COOL_SITE" "$COOL_WITNESS"
   marked "a unit holds beneath an open mark" held 0
   marked "a partition holds under a mark" c6 1 "$C6_DELETE"
-  # A sweep helper that lets its walk claim go before its walk ends: a
-  # partition's local sweep could pass `quiet_class` into an arena whose
-  # frees are still landing on its return stack (`IyiMark.sweep_one_
-  # helper`, prelude.iyi). The release put above the walk.
-  EXPECT_ERR='  a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it' COPY_FILE=prelude.iyi copy "a helper holds its claim to its walk's end" c7 86 \
-    '/def self\.sweep_one_helper : Bool/ { armed = 1 } armed && /^          batch = sweep_slice\(arena, SWEEP_SPAN\)$/ { print "          IyiHeap.class_lock(index)"; print "          release_claim(arena, epoch)"; print "          IyiHeap.class_unlock(index)"; print; armed = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
-    "-Dheap_partitions -Dheap_verify" claim
-  # The arena directory's bounds (TmacRss, heap22 fu): every word below
-  # the directory's end read in it again, its pages go resident; not
-  # widened by a large mapping, an object of one outside the arenas'
-  # slots is nobody's.
+  # c7, the walk claim (claim mode, `claim` in heap_drain.iyi). The copy releases
+  # a helper's claim before its walk: the order the check exists to catch. The
+  # walk's end then fails its check, which exits the run with the verifier's
+  # report before that slice counts itself complete. The copy-only counters
+  # below count every claim a helper takes and every helper slice complete, and
+  # claim mode waits for the two to meet under `-Dclaim_force`. The hook-only
+  # control counts and must pass.
+  cat >"$WORK/claim.iyi" <<'IYI'
+      # copy only (bench/heap_drain.sh's c7): every claim a helper takes is counted
+      # when taken, and every helper slice when it is complete (after its
+      # walk-claim check, its claim let go and its batch handed on). Claim mode
+      # waits for the two counts to meet under `-Dclaim_force`.
+      @[UnsafeReach("helper claims and completions are counted atomically")]
+      @@forced_taken : UInt64 = 0_u64
+      @[UnsafeReach("helper claims and completions are counted atomically")]
+      @@forced_done : UInt64 = 0_u64
+
+      def self.forced_claim_taken : Nil
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_taken).address).value.add(1_u64)
+      end
+
+      def self.forced_claim_done : Nil
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.add(1_u64)
+      end
+
+      def self.forced_claims_taken_count : UInt64
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_taken).address).value.get
+      end
+
+      def self.forced_claims_done_count : UInt64
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.get
+      end
+
+IYI
+  export CLAIM_INS="$WORK/claim.iyi"
+  # The sites: the methods go in before helper_main; a helper counts its claim
+  # beside POOL_SWEEPERS' add; it counts its completion before the partition
+  # branch's else. The mutant also releases the claim before its walk.
+  CLAIM_CONTROL='/^      def self\.helper_main\(seen : UInt64\) : Nil$/ { declarations++; while ((getline line < ENVIRON["CLAIM_INS"]) > 0) print line; print "" } /def self\.sweep_one_helper : Bool/ { helper = 1 } helper && /^            pool_word\(POOL_SWEEPERS\)\.value\.add\(1_u64\) if arena > 2_u64$/ { print; print "            forced_claim_taken if arena > 2_u64"; taken++; next } helper && /^          [{]% else %[}]$/ && !completed { print "            forced_claim_done"; completed++; helper = 0 } { print } END { if (declarations != 1 || taken != 1 || completed != 1) exit 3 }'
+  CLAIM_MUTANT='/^      def self\.helper_main\(seen : UInt64\) : Nil$/ { declarations++; while ((getline line < ENVIRON["CLAIM_INS"]) > 0) print line; print "" } /def self\.sweep_one_helper : Bool/ { helper = 1 } helper && /^            pool_word\(POOL_SWEEPERS\)\.value\.add\(1_u64\) if arena > 2_u64$/ { print; print "            forced_claim_taken if arena > 2_u64"; taken++; next } helper && /^          batch = sweep_slice\(arena, SWEEP_SPAN\)$/ { print "          IyiHeap.class_lock(index)"; print "          release_claim(arena, epoch)"; print "          IyiHeap.class_unlock(index)"; released++ } helper && /^          [{]% else %[}]$/ && !completed { print "            forced_claim_done"; completed++; helper = 0 } { print } END { if (declarations != 1 || taken != 1 || released != 1 || completed != 1) exit 3 }'
+  EXPECT_ERR='  a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it' COPY_FILE=prelude.iyi copy "a helper holds its claim to its walk's end" c7 86 "$CLAIM_MUTANT" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim
+  EXPECT_OUT="claim: every walk claim held to its walk's end" COPY_FILE=prelude.iyi copy "a helper's claims, all counted complete (hook only)" c7ctl 0 "$CLAIM_CONTROL" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim
+  # c8, the arena directory's bounds (directory mode, `dir` in heap_drain.iyi):
+  # the copy's boundary predicate answers a slot below every arena as inside,
+  # and the program asks it directly and fails by name. Residency is information.
   EXPECT_FIXED="FAIL: dir: a slot outside every arena's bounds is answered as inside" copy "the directory unread outside the bounds" c8 1 \
     "$(subst 'def self\.dir_outside\?' 'slot < @@dir_low \|\| slot > @@dir_high' 'slot >= DIR_SLOTS')" \
     "-Dheap_partitions --release" dir

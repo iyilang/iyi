@@ -563,19 +563,38 @@ module bench/heap_drain
     {% end %}
   end
 
-  # Claim mode (PauseHunt, S6): a sweep slice's walk claim held to its
-  # walk's end, the helpers' above all, who let theirs go before the
-  # runtime lock under `-Dheap_partitions` (`IyiMark.sweep_one_helper`).
-  # Each round, UNITS units leave their runs to the pool (`pool_round`)
-  # and the main thread makes shared garbage until a collection the
-  # budget triggers - whose sweep is lazy and opens the helpers' round,
-  # where `IyiMark.collect` sweeps eagerly - then sleeps CLAIM_SLEEP_MS,
-  # so that the helpers sweep what is left alone. Under `-Dheap_verify`
-  # each slice's walker checks at its walk's end that its claim is still
-  # its own (`IyiHeapVerify.check_claimed`). Fails when the helpers began
-  # no arena: no helper's claim would have been tested.
+  # Claim mode (PauseHunt, S6): a sweep slice's walk claim held to its walk's
+  # end, the helpers' above all, who let theirs go before the runtime lock under
+  # `-Dheap_partitions` (`IyiMark.sweep_one_helper`). Each round, UNITS units
+  # leave their runs to the pool (`pool_round`), and the main thread makes shared
+  # garbage until a collection the budget triggers, whose sweep is lazy and opens
+  # the helpers' round. Under `-Dheap_verify` each slice's walker checks at its
+  # walk's end that its claim is still its own (`IyiHeapVerify.check_claimed`).
+  # Nothing waits on a clock: `claim_wait` waits on state until a helper has
+  # taken a claim and, in a `-Dclaim_force` copy, until every claim taken has
+  # counted itself complete. A broken slice's check ends the run before that
+  # count, so only the check can end such a run with a catch. A wait that never
+  # ends is setup (exit 76), never a catch.
   #   ./heap_drain claim [ROUNDS [UNITS]]         # default 6 8
-  CLAIM_SLEEP_MS = 200
+  def claim_wait(first : UInt64) : Nil
+    started = IyiMark.now_ns
+    {% if flag?(:claim_force) %}
+      while IyiMark.forced_claims_taken_count == 0_u64
+        mark_setup_fail("claim: no helper took a claim within the watchdog") if IyiMark.now_ns &- started >= 120000000000_u64
+        sleep(1)
+      end
+      started = IyiMark.now_ns
+      while IyiMark.forced_claims_taken_count != IyiMark.forced_claims_done_count
+        mark_setup_fail("claim: the helpers' claims did not all complete within the watchdog") if IyiMark.now_ns &- started >= 120000000000_u64
+        sleep(1)
+      end
+    {% else %}
+      while IyiMark.swept_by_helpers == first
+        mark_setup_fail("claim: no helper began an arena within the watchdog") if IyiMark.now_ns &- started >= 120000000000_u64
+        sleep(1)
+      end
+    {% end %}
+  end
 
   def claim_main(arguments : Array(String)) : Nil
     rounds = arguments.size > 1 ? arguments[1].to_i : 6
@@ -586,18 +605,19 @@ module bench/heap_drain
     while round < rounds
       pool_round(units)
       seen = IyiMark.collections
+      started = IyiMark.now_ns
       while IyiMark.collections == seen
+        mark_setup_fail("claim: no collection ran within the watchdog") if IyiMark.now_ns &- started >= 120000000000_u64
         100.times do |k|
           s = "s" * (24 + k % 40)
           made = made &+ s.bytesize.to_i64
         end
       end
-      sleep(CLAIM_SLEEP_MS)
       round = round + 1
     end
+    claim_wait(first)
     began = IyiMark.swept_by_helpers - first
     print "claim rounds=#{rounds} units=#{units} collections=#{IyiMark.collections} helper_arenas=#{began} made_mib=#{made // 1048576}\n"
-    fail("claim: the helpers began no arena, so no helper's walk claim was tested") if began == 0
     print "claim: every walk claim held to its walk's end\n"
   end
 

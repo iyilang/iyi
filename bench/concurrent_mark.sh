@@ -871,7 +871,7 @@ watchdog = IyiThread.start do
   deadline = fixture_deadline
   while true
     phase = flag.phase.get
-    break if phase == 4
+    break if phase == 5
     {% if flag?(:shutdown_force) %}
       # The negative control advances the clock only after a producer has
       # entered its forced shutdown hold.
@@ -887,6 +887,8 @@ watchdog = IyiThread.start do
         print "FAIL: #{name}: the copy did not acknowledge before the fixture deadline\n"
       when 3
         print "FAIL: #{name}: producers did not stop after acknowledgement before the fixture deadline\n"
+      when 4
+        print "FAIL: #{name}: chain readback did not finish before the fixture deadline\n"
       end
       __iyi_exit(76)
     end
@@ -952,6 +954,7 @@ end
 flag.phase.set(3)
 flag.stop.set(1)
 producers.each { |thread| thread.join }
+flag.phase.set(4)
 count = 0
 node = chain
 while node
@@ -962,7 +965,7 @@ if count != 200000
   print "FAIL: #{name}: the chain held #{count} of its 200000 nodes after the acknowledgement\n"
   __iyi_exit(1)
 end
-flag.phase.set(4)
+flag.phase.set(5)
 puts "forced: #{name} acknowledged"
 IYI
 add_forced_ack() {

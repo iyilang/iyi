@@ -3196,20 +3196,34 @@ PS1
     # build, so it is the same on every run.
     ends_in_exit() {
       awk '
-        /^define .*@main\(/ { inmain = 1; rets = 0; exits = 0; last = ""; prev = ""; next }
-        inmain && /^}/ {
-          seen = 1
-          if (rets == 0 && exits >= 1 && last ~ /^  unreachable/ && prev ~ /__iyi_exit/) { print "main ends in __iyi_exit"; exit 0 }
-          print "FAIL: main returns to the C runtime instead of ending in __iyi_exit"; exit 1
+        /^define .*@main\(/ { definitions++; inmain = 1; next }
+        inmain && /^}/ { closed++; inmain = 0; next }
+        inmain && /^  / {
+          if ($0 ~ /^  ret /) rets++
+          if ($0 ~ /(^|[[:space:]])call[[:space:]].*@__iyi_exit\(/) exits++
+          prev = last; last = $0
         }
-        inmain && /^  / { if ($0 ~ /^  ret /) rets++; if ($0 ~ /__iyi_exit/) exits++; prev = last; last = $0 }
-        END { if (!seen) { print "FAIL: no main in the IR"; exit 1 } }
+        END {
+          if (definitions != 1 || closed != 1 || last == "") {
+            print "SETUP: ends: missing or malformed main in the IR"; exit 76
+          }
+          if (rets > 0) {
+            print "FAIL: main returns to the C runtime instead of ending in __iyi_exit"; exit 1
+          }
+          if (exits >= 1 && last ~ /^  unreachable([[:space:]]|$)/ && prev ~ /(^|[[:space:]])call[[:space:]].*@__iyi_exit\(/) {
+            print "main ends in __iyi_exit"; exit 0
+          }
+          print "SETUP: ends: main has no final exit call followed by unreachable"; exit 76
+        }
       ' "$1"
     }
     if ! "$IYI" build --release --emit llvm-ir ends.iyi -o ends > build-ends.log 2>&1; then
       cat build-ends.log; exit 1
     fi
-    if ! ends_in_exit ends.ll > ends-end.txt || [ "$(cat ends-end.txt)" != 'main ends in __iyi_exit' ]; then
+    ends_in_exit ends.ll > ends-end.txt
+    code=$?
+    if [ "$code" -eq 76 ]; then cat ends-end.txt; exit 76; fi
+    if [ "$code" -ne 0 ] || [ "$(cat ends-end.txt)" != 'main ends in __iyi_exit' ]; then
       echo "the healthy program does not end in __iyi_exit:"; cat ends-end.txt; exit 1
     fi
     again=1
@@ -3228,13 +3242,23 @@ PS1
     cp "$REPO"/src/iyi/*.iyi crt-end/iyi/
     # The pair is the win32 end of `fun main`; `def exit` writes the same
     # `__iyi_exit(status)` line, so only the one after the flush is taken.
-    awk 'after && /^    __iyi_exit\(status\)$/ { found++; after = 0; next } { after = 0 } /^    LibC\.fflush\(Pointer\(Void\)\.new\(0_u64\)\)$/ { found++; after = 1; next } { print } END { if (found != 2) exit 3 }' \
-      "$REPO/src/iyi/prelude.iyi" > crt-end/iyi/prelude.iyi || { echo "the end this proof removes is not in the prelude any more"; exit 1; }
+    awk '
+      /^fun main\(argc : Int32, argv : UInt8\*\*\) : Int32$/ { main++; inmain = 1 }
+      inmain && /^end$/ { inmain = 0; closed++ }
+      inmain && after && /^    __iyi_exit\(status\)$/ { exits++; after = 0; next }
+      after { after = 0 }
+      inmain && /^    LibC\.fflush\(Pointer\(Void\)\.new\(0_u64\)\)$/ { flushes++; after = 1; next }
+      { print }
+      END { if (main != 1 || closed != 1 || flushes != 1 || exits != 1) exit 3 }
+    ' "$REPO/src/iyi/prelude.iyi" > crt-end/iyi/prelude.iyi || { echo "SETUP: ends: main flush/exit anchors changed"; exit 76; }
     if ! IYI_PATH="$WORK/crt-end${PSEP}$REPO/src" "$IYI" build --release --emit llvm-ir ends.iyi -o ends-in-crt > build-crt-end.log 2>&1; then
       cat build-crt-end.log; exit 1
     fi
-    if ends_in_exit ends-in-crt.ll > crt-end.txt; then
-      echo "the program that ends back in the C runtime passed the end check:"; cat crt-end.txt; exit 1
+    ends_in_exit ends-in-crt.ll > crt-end.txt
+    code=$?
+    if [ "$code" -eq 76 ]; then cat crt-end.txt; exit 76; fi
+    if [ "$code" -ne 1 ]; then
+      echo "the program that ends back in the C runtime did not fail correctly (exit $code):"; cat crt-end.txt; exit 1
     fi
     if [ "$(cat crt-end.txt)" != 'FAIL: main returns to the C runtime instead of ending in __iyi_exit' ]; then
       echo "the end check failed with another sentence:"; cat crt-end.txt; exit 1
@@ -3397,23 +3421,38 @@ IYI
       awk -v gate=gate.part -v mode="$1" '
         /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ { print; print "      fun thread_gate_exit = _exit(status : Int32) : NoReturn"; darwin_exit++; next }
         /^    # ── Roots/ { while ((getline line < gate) > 0) print line; roots++ }
-        /^        h = LibC\.CreateThread\(nil, 0_u64, Pointer\(Void\)\.new\(thread_entry\), Pointer\(Void\)\.new\(line\), 4_i32, nil\)$/ {
+        /^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { starts++; in_start = 1 }
+        in_start && /^      \{% elsif flag\?\(:win32\) %\}$/ { win_branches++; in_win = 1 }
+        in_start && /^    end$/ { closes++; in_start = 0; in_win = 0 }
+        in_win && /^        h = LibC\.CreateThread\(nil, 0_u64, Pointer\(Void\)\.new\(thread_entry\), Pointer\(Void\)\.new\(line\), 4_i32, nil\)$/ {
+          created++
           print "        late = IyiThread.release_gate_take_arm"
           if (mode == "forced") print "        h = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(thread_entry), Pointer(Void).new(line), (late ? 0_i32 : 4_i32), nil)"
           else print
-          created++; next
+          next
         }
-        mode == "forced" && created == 1 && /^        IyiHeap\.write64\(line \+ IYI_TL_HANDLE, h\.address\)$/ { print "        IyiHeap.write64(line + IYI_TL_HANDLE, h.address) unless late"; written_late = 1; next }
-        mode == "forced" && written_late && /^        IyiRuntimeLock\.unlock$/ { print; print "        IyiThread.release_gate_start_hold(line) if late"; print "        IyiHeap.write64(line + IYI_TL_HANDLE, h.address) if late"; found++; written_late = 0; next }
-        mode == "control" && created == 1 && /^        IyiHeap\.write64\(line \+ IYI_TL_HANDLE, h\.address\)$/ { written_ctl = 1; print; next }
-        mode == "control" && written_ctl && /^        IyiRuntimeLock\.unlock$/ { print; print "        IyiThread.release_gate_start_hold(line) if late"; written_ctl = 0; found++; next }
+        in_win && /^        IyiHeap\.write64\(line \+ IYI_TL_HANDLE, h\.address\)$/ {
+          stores++
+          if (created != 1 || stores != 1 || unlocks != 0) bad_order = 1
+          if (mode == "forced") print "        IyiHeap.write64(line + IYI_TL_HANDLE, h.address) unless late"
+          else print
+          next
+        }
+        in_win && /^        IyiRuntimeLock\.unlock$/ {
+          unlocks++
+          if (created != 1 || stores != 1 || unlocks != 1) bad_order = 1
+          print
+          print "        IyiThread.release_gate_start_hold(line) if late"
+          if (mode == "forced") print "        IyiHeap.write64(line + IYI_TL_HANDLE, h.address) if late"
+          next
+        }
         /^      private def self\.suspend_others\(line : UInt64\) : Int64$/ { print; print "        IyiThread.release_gate_clear_skip"; clears++; next }
         /^          LibC\.SuspendThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\) if cursor != line$/ { print "          LibC.SuspendThread(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))) if cursor != line && !IyiThread.release_gate_unnamed?(cursor, line)"; one++; next }
         /^        deferred = 0_i64$/ { armed_scan = 1 }
         armed_scan && /^          if cursor != line$/ { print "          if cursor != line && !IyiThread.release_gate_skipped?(cursor)"; two++; armed_scan = 0; next }
         /^        if cursor != own$/ { print "        if cursor != own && !IyiThread.release_gate_skipped?(cursor)"; roots3++; next }
         { print }
-        END { if (roots != 1 || darwin_exit != 1 || created != 1 || found != 1 || clears != 1 || one != 1 || two != 1 || roots3 != 1) exit 3 }
+        END { if (roots != 1 || darwin_exit != 1 || starts != 1 || closes != 1 || win_branches != 1 || created != 1 || stores != 1 || unlocks != 1 || bad_order || clears != 1 || one != 1 || two != 1 || roots3 != 1) exit 3 }
       ' "$REPO/src/iyi/thread.iyi" > "$2"
     }
 

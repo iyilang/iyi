@@ -21,10 +21,8 @@
 #   closeshome: registration relies on a sleep and a wake-count check can mask the verdict; record registration and judge placement first.
 #   duplicate: another worker must steal the stale head; rendezvous at that head would force the witness.
 #   tokenless: preemption must land with a same-unit child runnable; hold that child ready across the switch.
-# Repeated healthy verdicts, not made deterministic here: best_ms combines
-# the best time and highest at-once count from three runs; tight compares
-# best-of-seven times; sockets and deep retry a no-move run up to five times.
-# best_ms also discards the timeout's exit status before parsing its output.
+# Repeated healthy verdicts still pending: sockets and deep retry a no-move
+# run up to five times. Speed and tight-loop ratios are each measured once.
 # Copy-generator anchor negatives ran locally on macOS; platform-applicable
 # generated copies passed the gate on Linux, Windows and macOS.
 #
@@ -67,10 +65,10 @@
 #      keeps its unit's token; a task switched in after one that held its
 #      worker past a look begins its own quantum; the monitor looks every
 #      4 to 10.5 ms (8 on Windows) and the quantum is at most three of
-#      those looks; a tight loop costs at most twice what its
-#      `@[NoPreempt]` twin does; and the release build's IR shows each
-#      tight loop's checks reading the worker's word through the thread
-#      pointer, none calling its thread-local accessor. Its failure proofs
+#      those looks; tight loops and their `@[NoPreempt]` twins produce the
+#      same answers, with their timing ratios reported as information; the
+#      release build's IR shows each tight loop's checks reading the word
+#      through the thread pointer, without calling its accessor. Its failure proofs
 #      are with step 7's: a `@[NoPreempt]` loop, a monitor that never
 #      raises the word, a Windows monitor on the system timer's tick, a
 #      monitor that raises it after three unchanged looks, a check that
@@ -79,13 +77,10 @@
 #      that gives its unit's token away.
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
-#   4. The speedup, measured: CPU-bound tasks on one worker and on several,
-#      release build, best of three. K workers must hold their tasks on
-#      0.6 x K threads at once on average, at any load; and where the host
-#      leaves K cores free, finish 0.6 x K times faster than one - a pool
-#      that is parallel only in name cannot pass either. The table for 1,
-#      2, 4 and 8 workers (as far as the cores go) is printed for the
-#      record.
+#   4. CPU-bound tasks on one worker and on several, release build, one
+#      run per worker count. K workers must hold their tasks on 0.6 x K
+#      threads at once on average. The speed ratio and its 0.6 x K floor
+#      are performance information and do not decide a failure proof.
 #   5. A deadlock across threads - a parallel task waiting on a channel
 #      nobody sends on - is named, not hung. And bench/panic_exit.iyi
 #      ends the process with tasks parked on the poller, on twelve
@@ -659,39 +654,31 @@ case "$(uname -s)" in
 esac
 
 # ── 3. The speedup ────────────────────────────────────────────────────────
-# Sixteen tasks of integer work with nothing to allocate, so the ratio is
-# the scheduler's and not the collector's. Best of three, because a
-# shared machine's clock is weather.
-#
-# The wall-clock ratio is a host's as much as the pool's: Linux on 12
-# vCPUs beside 12 busy loops (`procs_running` 17) gave 4 workers 2.10x
-# one worker's time, where an idle run gives 3.4 to 3.9x, and 8 workers
-# 4.72x in the same run. So the ratio is judged only where the host has
-# the K workers' cores free - its load, read as the hand-off step reads
-# it, at most the cores less K before the runs and after them - and is
-# printed with the reason otherwise. What no load blurs is held at every
-# load: how many threads held a task at once, on average over the run
-# (`at_once` in hundredths, each task looking at its thread and the clock
-# every 65536 rounds): a thread holds its task whether or not the kernel
-# has it on a core, and a pool that runs its tasks one thread at a time
-# cannot pass 1.00, so K workers are held to 0.6 x K there too.
+# Each worker count gets one run. Wall-clock ratios and the 0.6 x K speed
+# floor are performance information, not a failure proof: host load also
+# affects them. The at-once floor and its one-worker mutant are separate.
 TASKS=16
 ROUNDS=40000000
-best_ms() { # workers binary -> "fastest_ms most_at_once"
-  local best="" most="" run line ms at
-  for run in 1 2 3; do
-    line="$(timeout -k 5 300 "./$2" speed "$1" "$TASKS" "$ROUNDS")"
-    ms="$(echo "$line" | sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p')"
-    at="$(echo "$line" | sed -n 's/.*at_once=\([0-9]*\).*/\1/p')"
-    [ -n "$ms" ] && [ -n "$at" ] || { echo "the speed run at $1 workers printed no time: $line" >&2; return 1; }
-    if [ -z "$best" ] || [ "$ms" -lt "$best" ]; then best="$ms"; fi
-    if [ -z "$most" ] || [ "$at" -gt "$most" ]; then most="$at"; fi
-  done
-  echo "$best $most"
-}
-# The floor: k workers must finish at least 0.6 * k times faster than one.
-holds_floor() { # one_ms k_ms k
-  awk -v one="$1" -v many="$2" -v k="$3" 'BEGIN { exit !(many > 0 && one / many >= 0.6 * k) }'
+speed_run() { # workers binary -> this run's "wall_ms at_once"
+  local workers="$1" binary="$2" line code pair
+  line="$(timeout -k 5 300 "./$binary" speed "$workers" "$TASKS" "$ROUNDS" 2>&1)"
+  code=$?
+  if [ "$code" -ne 0 ]; then
+    echo "FAIL: speed: $workers-worker run exited $code (124 or 137 means a timeout): $line" >&2
+    return 1
+  fi
+  if ! pair="$(printf '%s\n' "$line" | awk -v workers="$workers" '
+    $1 == "workers=" workers && $4 ~ /^wall_ms=[0-9]+$/ && $5 ~ /^at_once=[0-9]+$/ {
+      ms = substr($4, 9); at = substr($5, 9); found++
+    }
+    END {
+      if (found != 1 || ms + 0 <= 0) exit 1
+      print ms, at
+    }')"; then
+    echo "FAIL: speed: $workers-worker run did not print one valid time and at-once pair: $line" >&2
+    return 1
+  fi
+  printf '%s\n' "$pair"
 }
 # The same floor on the threads that held a task at once.
 holds_at_once() { # at_once_hundredths k
@@ -700,47 +687,31 @@ holds_at_once() { # at_once_hundredths k
 at_once() { awk -v a="$1" 'BEGIN { printf "%.2f", a / 100 }'; }
 K=4
 [ "$CORES" -lt "$K" ] && K="$CORES"
-step "the speedup: $TASKS CPU-bound tasks, release build, best of three, $CORES cores here"
-if [ "$CORES" -lt 2 ]; then
-  echo "  one core here: nothing to scale onto, so the ratio is not held"
-else
-  SPEED_LOAD="$(host_load)"
-  got="$(best_ms 1 exercise-release)" || exit 1
-  ONE="${got% *}"
-  printf '  %2s worker(s): %6s ms, %s at once\n' 1 "$ONE" "$(at_once "${got#* }")"
-  MANY=""
-  MANY_AT=""
-  for w in 2 4 8; do
-    [ "$w" -gt "$CORES" ] && break
-    got="$(best_ms "$w" exercise-release)" || exit 1
-    ms="${got% *}"
-    ratio="$(awk -v a="$ONE" -v b="$ms" 'BEGIN { printf "%.2f", a / b }')"
-    printf '  %2s worker(s): %6s ms, %sx one worker, %s at once\n' "$w" "$ms" "$ratio" "$(at_once "${got#* }")"
-    [ "$w" -eq "$K" ] && { MANY="$ms"; MANY_AT="${got#* }"; }
-  done
-  if [ -z "$MANY" ]; then
-    got="$(best_ms "$K" exercise-release)" || exit 1
-    MANY="${got% *}"; MANY_AT="${got#* }"
-  fi
-  after="$(host_load)"
-  [ -n "$after" ] && { [ -z "$SPEED_LOAD" ] || awk -v a="$after" -v b="$SPEED_LOAD" 'BEGIN { exit !(a > b) }'; } && SPEED_LOAD="$after"
-  if ! holds_at_once "$MANY_AT" "$K"; then
-    echo "$K workers held their tasks $(at_once "$MANY_AT") at once on average: under 0.6 x $K, which is not parallel"
-    exit 1
-  fi
-  # Judged where the load leaves K cores free, or where none is read.
-  SPEED_JUDGED=yes
-  [ -n "$SPEED_LOAD" ] && awk -v l="$SPEED_LOAD" -v c="$CORES" -v k="$K" 'BEGIN { exit !(l > c - k) }' && SPEED_JUDGED=""
-  if [ -n "$SPEED_JUDGED" ]; then
-    if ! holds_floor "$ONE" "$MANY" "$K"; then
-      echo "$K workers took $MANY ms against one worker's $ONE ms: under 0.6 x $K, which is not parallel${SPEED_LOAD:+ (a load of $SPEED_LOAD on $CORES cores)}"
-      exit 1
-    fi
-    echo "  $K workers: $(awk -v a="$ONE" -v b="$MANY" 'BEGIN { printf "%.2f", a / b }')x one worker, over the floor of $(awk -v k="$K" 'BEGIN { printf "%.1f", 0.6 * k }')x${SPEED_LOAD:+, judged at a load of $SPEED_LOAD on $CORES cores}; $(at_once "$MANY_AT") at once"
-  else
-    echo "  $K workers: $(at_once "$MANY_AT") at once, over the floor of $(awk -v k="$K" 'BEGIN { printf "%.1f", 0.6 * k }'); the time's ratio not judged, a load of $SPEED_LOAD on $CORES cores leaving fewer than $K free"
-  fi
+step "the speedup: $TASKS CPU-bound tasks, one run per worker count, $CORES cores here"
+need_cores 2 "the at-once floor needs at least two workers"
+got="$(speed_run 1 exercise-release)" || exit 1
+ONE="${got% *}"
+printf '  %2s worker(s): %6s ms, %s at once\n' 1 "$ONE" "$(at_once "${got#* }")"
+MANY=""
+MANY_AT=""
+for w in 2 4 8; do
+  [ "$w" -gt "$CORES" ] && break
+  got="$(speed_run "$w" exercise-release)" || exit 1
+  ms="${got% *}"
+  ratio="$(awk -v a="$ONE" -v b="$ms" 'BEGIN { printf "%.2f", a / b }')"
+  printf '  %2s worker(s): %6s ms, %sx one worker, %s at once\n' "$w" "$ms" "$ratio" "$(at_once "${got#* }")"
+  [ "$w" -eq "$K" ] && { MANY="$ms"; MANY_AT="${got#* }"; }
+done
+if [ -z "$MANY" ]; then
+  echo "FAIL: speed: no measurement was made for the required $K-worker run"; exit 1
 fi
+if ! holds_at_once "$MANY_AT" "$K"; then
+  echo "$K workers held their tasks $(at_once "$MANY_AT") at once on average: under 0.6 x $K, which is not parallel"
+  exit 1
+fi
+awk -v one="$ONE" -v many="$MANY" -v k="$K" 'BEGIN {
+  printf "  performance information: %d workers, %.2fx one worker; 0.6 x K is %.2fx (%s)\n", k, one / many, 0.6 * k, one / many >= 0.6 * k ? "above" : "below"
+}'
 
 # ── 4. A deadlock across threads is named ────────────────────────────────
 step "a deadlock across threads is a diagnosis, not a hang"

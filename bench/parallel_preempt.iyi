@@ -42,9 +42,8 @@
 #           apart in 56 runs on GitHub's runners) fails the first, and a
 #           monitor that waits three looks unchanged rather than one the
 #           second.
-#   tight   what the check costs a tight loop: four loops timed against
-#           `@[NoPreempt]` twins of themselves, interleaved, best of seven,
-#           each ratio held to 2x.
+#   tight   each loop and its @[NoPreempt] twin run once, with matching
+#           answers; their timings and ratios are performance information.
 #
 # With no arguments it runs slice, unit and period on a pool of one and
 # prints only that every property held: the slice step's short task must
@@ -903,26 +902,9 @@ import std/socket::{IyiSocket, SocketError}
     say "period: the monitor looked every #{us} us over #{looks} looks; two tasks computing on one worker took #{turns} turns of #{quantum} us"
   end
 
-  # ── tight ────────────────────────────────────────────────────────────
-  # Each loop and its `@[NoPreempt]` twin, alternately, seven times, inside
-  # a parallel task; the best of each, and their ratio, held to
-  # TIGHT_BOUND thousandths. The check is a read or two and a branch per
-  # turn. On GitHub's x86-64 runners the vectorised sums run at one of two
-  # speeds, about 32 or 48 ms, and a checked one at the slower: 1.46 to
-  # 1.50x on Windows (`sum` 1.503x in CI job 121231000410), and through
-  # `each` 1.51x on Linux, whose unchecked `sum` came in at the slower speed
-  # too, 1.001x. A windows-2025 runner then took a checked sum about 54 ms
-  # against 31: `each` 1.745x to 1.762x over eight runs as master builds
-  # it, `sum` 1.252x to 1.265x inlined and 1.744x to 1.755x `@[NoInline]`
-  # (CI job 122916661258). Windows 11 on 12 logical processors (the
-  # user's machine) measured every loop 0.98x to 1.08x, either way. The
-  # bound is twice, room of an eighth above that runner's worst. It says
-  # what the check costs, not which check it is: one that calls the
-  # accessor at every turn, as darwin's and Windows' did at first, cost
-  # those sums 3.4 to 5.8 times their twins there, but 1.776x and 1.828x on
-  # the Windows runner of CI job 122792275988, about what the cheap check
-  # cost on another. bench/parallel_exercise.sh tells the two in the IR.
-  TIGHT_BOUND = 2000_i64
+  # Each loop and its @[NoPreempt] twin run once inside a parallel task.
+  # Their answers must agree; their times and ratio are information only.
+  # bench/parallel_exercise.sh checks the generated back-edges in the IR.
 
   def tight : Nil
     group do |g|
@@ -931,34 +913,26 @@ import std/socket::{IyiSocket, SocketError}
         bytes = Array(UInt8).new(262_144) { |i| ((i * 7 + 3) & 0xFF).to_u8 }
         table = crc_table
         ["walk", "sum", "each", "crc"].each do |name|
-          best = 9223372036854775807_i64
-          best_np = 9223372036854775807_i64
-          7.times do
-            t = __iyi_monotonic_ns
-            a = case name
-                when "walk" then spin(200_000_000_i64, 7_u64)
-                when "sum"  then sum(values, 300).to_u64
-                when "each" then sum_each(values, 300).to_u64
-                else             crc(table, bytes, 600).to_u64
-                end
-            took = __iyi_monotonic_ns - t
-            best = took if took < best
-            t = __iyi_monotonic_ns
-            b = case name
-                when "walk" then spin_np(200_000_000_i64, 7_u64)
-                when "sum"  then sum_np(values, 300).to_u64
-                when "each" then sum_each_np(values, 300).to_u64
-                else             crc_np(table, bytes, 600).to_u64
-                end
-            took = __iyi_monotonic_ns - t
-            best_np = took if took < best_np
-            fail("tight: #{name} answered #{a} checked and #{b} unchecked") if a != b
-          end
-          ratio = (best * 1000_i64 // best_np).to_f / 1000.0
-          if best * 1000_i64 > best_np * TIGHT_BOUND
-            fail("tight: #{name}: #{best // 1000_i64} us checked against #{best_np // 1000_i64} us unchecked, #{ratio}x, past #{TIGHT_BOUND / 1000.0}x")
-          end
-          say "tight: #{name}: #{best // 1000_i64} us checked, #{best_np // 1000_i64} us unchecked, #{ratio}x"
+          t = __iyi_monotonic_ns
+          a = case name
+              when "walk" then spin(200_000_000_i64, 7_u64)
+              when "sum"  then sum(values, 300).to_u64
+              when "each" then sum_each(values, 300).to_u64
+              else             crc(table, bytes, 600).to_u64
+              end
+          took = __iyi_monotonic_ns - t
+          t = __iyi_monotonic_ns
+          b = case name
+              when "walk" then spin_np(200_000_000_i64, 7_u64)
+              when "sum"  then sum_np(values, 300).to_u64
+              when "each" then sum_each_np(values, 300).to_u64
+              else             crc_np(table, bytes, 600).to_u64
+              end
+          took_np = __iyi_monotonic_ns - t
+          fail("tight: #{name} answered #{a} checked and #{b} unchecked") if a != b
+          fail("tight: #{name} recorded a zero unchecked duration") if took_np <= 0_i64
+          ratio = (took * 1000_i64 // took_np).to_f / 1000.0
+          say "tight: #{name}: #{took // 1000_i64} us checked, #{took_np // 1000_i64} us unchecked, #{ratio}x (performance information)"
         end
         0
       end

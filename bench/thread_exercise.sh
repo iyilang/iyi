@@ -115,9 +115,6 @@
 #   7h   unwoken: the mutant's verdict is the 30 s timeout (exit 124).
 #   7h   Linux unowed: the mutant's verdict is exit 124 or a count of owed turns
 #        in a timed storm.
-#   7j   Darwin counted: the mutant's verdict is the 30 s timeout (exit 124); the
-#        healthy early count is a measurement (a child that links first in every
-#        round is possible).
 #   7g   heaped: the healthy wild exits 3 if no fault has come by its deadline,
 #        and no fault-handler witness is required.
 #   The lock-order record (B6), the guard holder (B5), the release record (A2),
@@ -4449,107 +4446,168 @@ IYI
 esac
 
 # ── 7j. darwin: a stop counts only the lines it can name ─────────────────
-# A darwin thread links its own line (7d), and `start` counted it before
-# it had: a collection in between got past the stop's early return on the
-# count, cleared the counts the last release's threads leave by, found
-# no line but its own, and released nobody - and the next stop waited for
-# the last release's threads to count out of the count it had seen
-# cleared, forever. The thread counts its line where it links it now
-# (`IyiThread.link`). The program starts a thread and collects at once,
-# which lands in that instant whenever the thread has yet to run that
-# far, then collects until a stop has named the thread; the proof counts
-# the thread in `start` again, and a run hangs.
-# On macOS 26.6, an M2 Pro with 10 cores, each of the 2,000 collections in
-# each of 10 runs landed before its thread had linked its line, and every
-# run ended inside a second; the copy that counts in `start` hung 5 runs
-# of 5 until a 30 s timeout. Linux links a thread in its parent before
-# `clone`, under the lock the count is taken under, and there the program
-# found the line linked at all 2,000 (12 vCPU), so the step is darwin's.
+# Hold one child after TLS is established but before it links its line.
+# The same copy-only observer checks the actual count and roster at entry
+# to stop_others. The mutant counts in start before the held line is linked.
 case "$(uname -s)" in
   Darwin)
-    step "darwin: a collection between a thread's start and its link stops nobody, and the next waits for nothing: three runs, and every one ends"
-    cat > unlinked.iyi <<'IYI'
-module unlinked
+    cat > count-roster.part <<'IYI'
+    IYI_ROSTER_ARM = 384_u64
+    IYI_ROSTER_HELD = 448_u64
+    IYI_ROSTER_OPEN = 512_u64
+    IYI_ROSTER_CHECKED = 576_u64
 
-import std/gc::{GC}
-
-class Gate
-  getter go : Atomic(Int64)
-
-  def initialize
-    @go = Atomic(Int64).new(0_i64)
-  end
-end
-
-def hold(gate : Gate) : Nil
-  while gate.go.get == 0_i64
-  end
-end
-
-# A thread started and a collection at once, which stops nobody if the
-# thread has yet to link its line (answers 1 then); then collections until
-# one has stopped the thread, the first of them a stop that waits for the
-# threads the release before it let go.
-def round_of(gate : Gate) : Int32
-  thread = IyiThread.start { hold(gate) }
-  stops = IyiThread.stops
-  GC.collect
-  early = IyiThread.stops == stops ? 1 : 0
-  stopped = IyiThread.stopped
-  while IyiThread.stopped == stopped
-    GC.collect
-  end
-  gate.go.set(1_i64)
-  thread.join
-  early
-end
-
-rounds = Program.args[0].to_i
-deadline = __iyi_monotonic_ns + Program.args[1].to_i.to_i64 * 1_000_000_000_i64
-early = 0
-round = 0
-while round < rounds && (round < 20 || __iyi_monotonic_ns < deadline)
-  early = early + round_of(Gate.new)
-  round = round + 1
-end
-puts "ok rounds=#{round} early=#{early} stops=#{IyiThread.stops}"
+    def self.roster_arm : Nil
+      word(control + IYI_ROSTER_ARM).value.set(1_u64)
+    end
+    def self.roster_held? : Bool
+      word(control + IYI_ROSTER_HELD).value.get != 0_u64
+    end
+    def self.roster_checked? : Bool
+      word(control + IYI_ROSTER_CHECKED).value.get != 0_u64
+    end
+    def self.roster_open : Nil
+      word(control + IYI_ROSTER_OPEN).value.set(1_u64)
+    end
+    def self.roster_pre_link : Nil
+      page = @@control
+      return if page == 0_u64 || !word(page + IYI_ROSTER_ARM).value.compare_and_set(1_u64, 0_u64)[1]
+      word(page + IYI_ROSTER_HELD).value.set(1_u64)
+      started = IyiMark.now_ns
+      while word(page + IYI_ROSTER_OPEN).value.get == 0_u64
+        if IyiMark.now_ns &- started > 20000000000_u64
+          message = "SETUP: roster: the held child was never opened\n"
+          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+          LibC.roster_exit(76_i32)
+        end
+        yield_cpu
+      end
+    end
+    def self.roster_check(line : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || word(page + IYI_ROSTER_HELD).value.get == 0_u64 || word(page + IYI_ROSTER_OPEN).value.get != 0_u64
+      roster = 0_i64
+      cursor = @@lines
+      while cursor != 0_u64
+        roster += 1_i64
+        cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
+      end
+      if @@count != roster
+        message = "FAIL: roster: a thread was counted before its line was linked\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        LibC.roster_exit(1_i32)
+      end
+      if roster != 1_i64 || line == 0_u64
+        message = "SETUP: roster: the held-child stop did not have one collector line\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        LibC.roster_exit(76_i32)
+      end
+      word(page + IYI_ROSTER_CHECKED).value.set(1_u64)
+    end
 IYI
-    if ! "$IYI" build unlinked.iyi -o unlinked > build-unlinked.log 2>&1; then
-      cat build-unlinked.log; exit 1
-    fi
-    run=1
-    early=0
-    while [ "$run" -le 3 ]; do
-      ( timeout -k 5 60 ./unlinked 2000 5 > unlinked.txt 2>&1; exit $? ) 2> /dev/null
-      code=$?
-      if [ "$code" -ne 0 ] || ! grep -q '^ok rounds=[0-9]* early=[0-9]* ' unlinked.txt; then
-        echo "run $run exited $code:"; tail -3 unlinked.txt; exit 1
-      fi
-      echo "  $(sed 's/^ok //' unlinked.txt)"
-      early=$((early + $(sed -n 's/^ok rounds=[0-9]* early=\([0-9]*\) .*/\1/p' unlinked.txt)))
-      run=$((run + 1))
-    done
-    # A child that links its line first in every round is a schedule, not a
-    # failure: the early count is printed, and the mutant below is decided by
-    # its timeout (not forced; see the header list).
-    echo "unlinked: early=$early of three runs (measured, not required)"
+    roster_copy() {
+      awk -v part=count-roster.part -v mode="$1" '
+        /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ { print; print "      fun roster_exit = _exit(status : Int32) : NoReturn"; alias_count++; next }
+        /^    # ── Roots/ { while ((getline s < part) > 0) print s; roots++ }
+        /^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { in_start = 1; starts++ }
+        in_start && /^      \{% elsif flag\?\(:darwin\) %\}$/ { in_darwin = 1; darwin++ }
+        in_start && /^      \{% elsif flag\?\(:win32\) %\}$/ { in_darwin = 0 }
+        in_start && /^    end$/ { in_start = 0; in_darwin = 0; start_ends++ }
+        in_darwin && /^          Pointer\(Void\)\.new\(thread_entry\), Pointer\(Void\)\.new\(line\)\)$/ {
+          print
+          if (mode == "forced") print "        @@count = @@count + 1_i64 if result == 0"
+          created++; next
+        }
+        /^    def self\.run\(line : UInt64\) : Nil$/ { in_run = 1; runs++ }
+        in_run && /^    end$/ { in_run = 0; run_ends++ }
+        in_run && /^        link\(line\)$/ {
+          print "        IyiThread.roster_pre_link"
+          if (mode == "forced") {
+            print "        IyiRuntimeLock.lock"
+            print "        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)"
+            print "        @@lines = line"
+            print "        IyiRuntimeLock.unlock"
+          } else print
+          links++; next
+        }
+        /^      return 0_i64 if @@count == 0_i64 \|\| \(line != 0 && @@count <= 1_i64\)$/ { print "      IyiThread.roster_check(line)"; checks++ }
+        { print }
+        END { if (alias_count != 1 || roots != 1 || starts != 1 || start_ends != 1 || darwin != 1 || created != 1 || runs != 1 || run_ends != 1 || links != 1 || checks != 1) exit 3 }
+      ' "$REPO/src/iyi/thread.iyi" > "$2"
+    }
+    cat > roster.iyi <<'IYI'
+@[Unsafe("the proof holds a child at a copy-only pre-link rendezvous")]
+class Gate
+  getter ready : Atomic(Int64)
+  getter stop : Atomic(Int64)
+  def initialize
+    @ready = Atomic(Int64).new(0_i64)
+    @stop = Atomic(Int64).new(0_i64)
+  end
+end
 
-    step "failure proof: the thread counted by start before it links its line, as it was, and a run hangs"
-    mkdir -p counted/iyi
-    cp "$REPO"/src/iyi/*.iyi counted/iyi/
-    awk '/^          Pointer\(Void\)\.new\(thread_entry\), Pointer\(Void\)\.new\(line\)\)$/ { print; print "        @@count = @@count + 1_i64 if result == 0"; found++; next }
-      /^        link\(line\)$/ { print "        IyiRuntimeLock.lock"; print "        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)"; print "        @@lines = line"; print "        IyiRuntimeLock.unlock"; found++; next }
-      { print } END { if (found != 2) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > counted/iyi/thread.iyi || { echo "darwin's pthread_create in start or the thread's own link is not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/counted${PSEP}$REPO/src" "$IYI" build unlinked.iyi -o counted-run > build-counted.log 2>&1; then
-      cat build-counted.log; exit 1
-    fi
-    ( timeout -k 5 30 ./counted-run 2000 5 > counted.txt 2>&1; exit $? ) 2> /dev/null
-    code=$?
-    if [ "$code" -ne 124 ]; then
-      echo "with the thread counted by start, a run exited $code rather than hanging:"; tail -3 counted.txt; exit 1
-    fi
-    echo "  the run hung until the 30 s timeout (exit 124)"
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+IyiThread.roster_arm
+gate = Gate.new
+thread = IyiThread.start do
+  gate.ready.set(1_i64)
+  while gate.stop.get == 0_i64
+    IyiThread.spin_pause
+  end
+  nil
+end
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while !IyiThread.roster_held?
+  if IyiMark.now_ns >= deadline
+    print "SETUP: roster: the child never reached the pre-link gate\n"
+    __iyi_exit(76)
+  end
+  IyiThread.yield_cpu
+end
+IyiMark.collect
+unless IyiThread.roster_checked?
+  print "SETUP: roster: the held-child stop was not observed\n"
+  __iyi_exit(76)
+end
+IyiThread.roster_open
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while gate.ready.get == 0_i64
+  if IyiMark.now_ns >= deadline
+    print "SETUP: roster: the child did not link after opening\n"
+    __iyi_exit(76)
+  end
+  IyiThread.yield_cpu
+end
+before = IyiThread.stopped
+IyiMark.collect
+if IyiThread.stopped <= before
+  print "SETUP: roster: the linked child was not stopped\n"
+  __iyi_exit(76)
+end
+gate.stop.set(1_i64)
+thread.join
+puts "roster: the unlinked child was not counted, then its linked line was stopped"
+IYI
+    for mode in control forced; do
+      mkdir -p "roster-$mode/iyi"
+      cp "$REPO"/src/iyi/*.iyi "roster-$mode/iyi/"
+      roster_copy "$mode" "roster-$mode/iyi/thread.iyi" || { echo "SETUP: roster: copy anchors changed"; exit 76; }
+      if ! IYI_PATH="$WORK/roster-$mode${PSEP}$REPO/src" "$IYI" build roster.iyi -o "roster-$mode-run" > "build-roster-$mode.log" 2>&1; then
+        cat "build-roster-$mode.log"; exit 76
+      fi
+      step "darwin: pre-link roster $mode"
+      timeout -k 5 60 "./roster-$mode-run" > "roster-$mode.txt" 2>&1
+      code=$?
+      if [ "$code" -eq 76 ] || [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then cat "roster-$mode.txt"; exit 76; fi
+      if [ "$mode" = control ]; then
+        [ "$code" -eq 0 ] && grep -qxF 'roster: the unlinked child was not counted, then its linked line was stopped' "roster-$mode.txt" || { echo "roster control failed (exit $code):"; cat "roster-$mode.txt"; exit 1; }
+        echo '  control: exit 0, roster: the unlinked child was not counted, then its linked line was stopped'
+      else
+        [ "$code" -eq 1 ] && grep -qxF 'FAIL: roster: a thread was counted before its line was linked' "roster-$mode.txt" || { echo "roster mutant failed unexpectedly (exit $code):"; cat "roster-$mode.txt"; exit 1; }
+        echo '  exits 1 at "FAIL: roster: a thread was counted before its line was linked"'
+      fi
+    done
     ;;
 esac
 

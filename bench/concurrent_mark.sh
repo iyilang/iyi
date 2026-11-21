@@ -5,11 +5,11 @@
 #     bash bench/concurrent_mark.sh
 #
 # Every failure proof runs its broken copy once and requires exit 1 and the
-# whole named failure sentence (numeric observations may vary). Setup and
-# query failures exit 76 instead. A forced copy waits on a word the program
-# sets, and a copy that cannot build against the runtime fails the gate.
-# A step whose code this platform does not compile says so by name; a host
-# with too few cores fails.
+# whole named failure sentence (numeric observations may vary). Explicit
+# fixture-premise, watchdog and Windows boost-query failures exit 76 with
+# their own sentences. Build, shell and unexpected failures fail the gate
+# without that status contract. A forced copy waits on a word the program
+# sets; code not compiled on this platform is named, not silently passed.
 # In the order they run:
 #   - the program, release: rounds that move a payload into a black holder
 #     under a running mark, the pauses of a concurrent collection against the
@@ -24,16 +24,16 @@
 #   - chunks the last mark kept, freed beside the sweep, ten runs, and the
 #     armed look that holds the sweep at one kept chunk until the program frees it;
 #   - failure proofs: an unlocked free inside a sweep's look; a barrier that
-#     shades nothing; a barrier run after its mark ended; a block outgrown under
-#     a mark that the closer holds open; a small live set given the
-#     thousand-object bound; the remainder round's count stored over the
-#     assists counted in; helper 0 waiting past the next mark; a collection let
-#     go after the release; the stopped, bounded and verb collections let go
-#     late; a free outside the allocator's bracket; an idle pool whose workers
-#     wait for task arrival, and a queued-work turn that starts no worker;
-#     a first collection waiting for every helper to park;
+#     shades nothing; a barrier run after its mark ended; a block outgrown
+#     under a held mark; and a small live set given the thousand-object bound;
 #   - marks beside twenty-four connections on twelve workers, with every helper
 #     and with one;
+#   - failure proofs: the remainder round's count stored over assists; helper 0
+#     waiting past the next mark; a collection let go after the release; the
+#     stopped, bounded and verb collections let go late; a free outside the
+#     allocator's bracket; an idle pool whose workers wait for task arrival,
+#     and a queued-work turn that starts no worker; a first collection waiting
+#     for every helper to park;
 #   - on Windows only: the boost checked structurally, with a failed-query
 #     control (wake timings are displayed only for the shipped build); the
 #     helper cap beside a busy program; the pool's waiting
@@ -410,7 +410,7 @@ round = 0
   end
   if first < 0
     print "FAIL: freed: the sweep looked at a chunk the last mark kept that is not one of the aged ones\n"
-    __iyi_exit(1)
+    __iyi_exit(76)
   end
   lost += free_aged(aged, generation, first)
   IyiMark.auto = true
@@ -608,6 +608,18 @@ if [ "$code" -ne 0 ] || ! grep -qx "lost 0" armed.txt; then
   echo "the hook alone, armed, did not keep every chunk (exit $code):"; tail -3 armed.txt; exit 1
 fi
 echo "  the hook alone, armed, exits 0: $(grep -m1 '^lost' armed.txt)"
+step "control: a sweep look outside the aged set is a setup failure"
+awk '$0 == "  if first < 0" { print "  first = -1"; found++ }
+  { print } END { if (found != 1) exit 3 }' freed.iyi > freed-premise.iyi || { echo "the aged-set premise is missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build freed-premise.iyi -Dfreed_force -o freed-premise > build-freed-premise.log 2>&1; then
+  cat build-freed-premise.log; exit 1
+fi
+timeout -k 5 120 ./freed-premise > freed-premise.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: freed: the sweep looked at a chunk the last mark kept that is not one of the aged ones" freed-premise.txt; then
+  echo "the aged-set premise was not reported as setup failure (exit $code):"; tail -3 freed-premise.txt; exit 1
+fi
+printf '  exits 76 at "%s"\n' "FAIL: freed: the sweep looked at a chunk the last mark kept that is not one of the aged ones"
 
 step "failure proof: a chunk the sweep has not reached, freed with no lock, is freed inside the sweep's look"
 mkdir -p unlocked/iyi
@@ -760,6 +772,90 @@ if [ "$code" -ne 0 ] || ! grep -q "^large: 8 of 8 blocks outgrown under a runnin
   echo "the held rounds did not keep the block mapped (exit $code):"; tail -3 held.txt; exit 1
 fi
 echo "  the hook alone, exits 0: $(grep -m1 '^large: 8 of 8' held.txt)"
+# Separate copies keep the move and large-block holds independent. Each
+# invocation forces one named premise false and requires its exact sentence.
+step "controls: benchmark premises fail as setup, not as mutant catches"
+awk '$0 == "  index = 0" && ++indexes == 1 {
+    print "  premise = Program.args.size > 0 ? Program.args[0] : \"\""; init++
+  }
+  $0 == "  small_live = IyiMark.bytes_marked" {
+    print; print "  small_live = 2097153_u64 if premise == \"small-live\""; small_live++; next
+  }
+  $0 == "  small_beside = IyiMark.concurrent_collections - small_beside" {
+    print; print "  small_collections = 0_u64 if premise == \"small-none\""; small_none++; next
+  }
+  $0 == "  while round < 24" {
+    print "  while round < (premise == \"move-none\" ? 0 : 24)"; move_none++; next
+  }
+  /^    marking = marking && IyiMark\.marking\?/ {
+    print; print "    marking = false if premise == \"move-white\""; move_white++; next
+  }
+  $0 == "  concurrent = IyiMark.concurrent_collections - concurrent_before" {
+    print; print "  concurrent = 0_u64 if premise == \"concurrent-none\""; concurrent++; next
+  }
+  $0 == "  large_rounds = 8" {
+    print; print "  large_rounds = 0 if premise == \"large-count\""; large_rounds++; next
+  }
+  $0 == "    if marking && IyiMark.marking?" {
+    print "    marking = false if premise == \"large-mark\""; large_mark++
+  }
+  /setup_fail\("large: #\{large_under_mark\}/ {
+    print "    large_under_mark = 0 if premise == \"large-count\""; large_count++
+  }
+  $0 == "    asked_helpers = IyiMark.beside_helpers" {
+    print; print "    asked_helpers = 0_u64 if premise == \"boost-none\""; boost_none++; next
+  }
+  /setup_fail\("wake boost: the pool started/ {
+    sub(/if IyiWorkers\.started\?$/, "if IyiWorkers.started? || premise == \"boost-pool\""); boost_pool++
+  }
+  $0 == "  cores = IyiThread.core_count" {
+    print; print "  cores = 2_u64 if premise == \"share-cores\" || premise == \"pool-cores\""; cores++; next
+  }
+  /setup_fail\("share: no mark ran/ { print "    marked = false if premise == \"share-mark\""; share++ }
+  /setup_fail\("idle pool: no mark ran/ { print "    marked = false if premise == \"idle-mark\""; idle++ }
+  /setup_fail\("busy pool: no mark ran/ { print "    marked = false if premise == \"busy-mark\""; busy++ }
+  /setup_fail\("the share proof needs three cores/ {
+    sub(/unless /, "unless premise == \"pool-cores\" || "); share_cores++
+  }
+  { print }
+  END { if (init != 1 || indexes != 2 || small_live != 1 || small_none != 1 || move_none != 1 || move_white != 1 || concurrent != 1 || large_rounds != 1 || large_mark != 1 || large_count != 1 || boost_none != 1 || boost_pool != 1 || cores != 1 || share != 1 || idle != 1 || busy != 1 || share_cores != 1) exit 3 }' \
+  "$REPO/bench/concurrent_mark.iyi" > benchmark-premises.iyi || { echo "a benchmark premise anchor is missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/moves-held${PSEP}$REPO/src" "$IYI" build --release -Dmove_force benchmark-premises.iyi -o move-premises-run > build-move-premises.log 2>&1; then
+  cat build-move-premises.log; exit 1
+fi
+if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force benchmark-premises.iyi -o large-premises-run > build-large-premises.log 2>&1; then
+  cat build-large-premises.log; exit 1
+fi
+premises="small-live small-none move-white move-none concurrent-none large-mark large-count share-mark idle-mark busy-mark share-cores pool-cores"
+if [ "$PSEP" = ";" ]; then premises="$premises boost-pool boost-none"; fi
+for premise in $premises; do
+  case "$premise" in
+    small-live) expected="FAIL: small: the live set is 2097153 bytes, not two thousand payloads: something else is still alive" ;;
+    small-none) expected="FAIL: small: eight budgets of churn triggered no collection" ;;
+    move-white) expected="FAIL: moves: the forced move did not find a white payload under a mark" ;;
+    move-none) expected="FAIL: moves: no forced move ran under a mark" ;;
+    concurrent-none) expected="FAIL: no collection ran beside the program across 24 rounds" ;;
+    large-mark) expected="FAIL: large: the held round's mark was not running when its block was outgrown" ;;
+    large-count) expected="FAIL: large: 0 of 0 held rounds reached the check, not 8" ;;
+    boost-pool) expected="FAIL: wake boost: the pool started before the count, so every thread has the boost off" ;;
+    boost-none) expected="FAIL: wake boost: no mark beside the program asked for helpers" ;;
+    share-mark) expected="FAIL: share: no mark ran beside the busy threads in 8 tries" ;;
+    idle-mark) expected="FAIL: idle pool: no mark ran beside the idle pool in 8 tries" ;;
+    busy-mark) expected="FAIL: busy pool: no mark ran beside the busy pool in 8 tries" ;;
+    share-cores) expected="FAIL: the share proof needs three cores; this host has 2" ;;
+    pool-cores) expected="FAIL: the idle and busy pool proofs need three cores; this host has 2" ;;
+  esac
+  case "$premise" in
+    large-mark | large-count) runner=large-premises-run ;;
+    *) runner=move-premises-run ;;
+  esac
+  timeout -k 5 300 "./$runner" "$premise" > "benchmark-premise-$premise.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 76 ] || ! grep -Fxq "$expected" "benchmark-premise-$premise.txt"; then
+    echo "the $premise benchmark premise did not fail as setup (exit $code):"; tail -3 "benchmark-premise-$premise.txt"; exit 1
+  fi
+  printf '  exits 76 at "%s"\n' "$expected"
+done
 mkdir -p unmapped/iyi
 cp held/iyi/*.iyi unmapped/iyi/
 awk '
@@ -838,14 +934,10 @@ class Flag
   getter ready : Atomic(Int32)
   getter go : Atomic(Int32)
   getter stop : Atomic(Int32)
-  getter phase : Atomic(Int32)
-  getter shutdown_blocked : Atomic(Int32)
   def initialize
     @ready = Atomic(Int32).new(0)
     @go = Atomic(Int32).new(0)
     @stop = Atomic(Int32).new(0)
-    @phase = Atomic(Int32).new(0)
-    @shutdown_blocked = Atomic(Int32).new(0)
   end
 end
 
@@ -858,52 +950,27 @@ Program.args.each do |argument|
     IyiMark.workers = parts[1].to_i.to_u64
   else
     print "FAIL: forced: no option #{argument}\n"
-    __iyi_exit(2)
+    __iyi_exit(76)
   end
 end
 IyiMark.auto = false
 flag = Flag.new
-# A single deadline covers setup, acknowledgement, producer shutdown, and
-# the final readback. It starts before the heap and producer threads exist,
-# leaving the shell's 120-second cap headroom to print the actual cause.
-fixture_deadline = IyiMark.now_ns + 100000000000_u64
-watchdog = IyiThread.start do
-  deadline = fixture_deadline
-  while true
-    phase = flag.phase.get
-    break if phase == 5
-    {% if flag?(:shutdown_force) %}
-      # The negative control advances the clock only after a producer has
-      # entered its forced shutdown hold.
-      deadline = 0_u64 if phase == 3 && flag.shutdown_blocked.get != 0
-    {% end %}
-    if IyiMark.now_ns >= deadline
-      case phase
-      when 0
-        print "FAIL: #{name}: fixture setup did not finish before the fixture deadline\n"
-      when 1
-        print "FAIL: #{name}: producers did not become ready before the fixture deadline\n"
-      when 2
-        print "FAIL: #{name}: the copy did not acknowledge before the fixture deadline\n"
-      when 3
-        print "FAIL: #{name}: producers did not stop after acknowledgement before the fixture deadline\n"
-      when 4
-        print "FAIL: #{name}: chain readback did not finish before the fixture deadline\n"
-      end
-      __iyi_exit(76)
-    end
-    IyiThread.park_if_requested
-    IyiThread.yield_cpu
-  end
-  nil
-end
+# This watchdog is a native helper with no collector registration. It
+# reads only its mapped page, so it can name a phase even if a collector
+# stops every registered thread while holding the runtime lock.
+IyiMark.forced_watch(IyiMark.now_ns + 100000000000_u64,
+  "FAIL: #{name}: fixture setup did not finish before the fixture deadline\n",
+  "FAIL: #{name}: producers did not become ready before the fixture deadline\n",
+  "FAIL: #{name}: the copy did not acknowledge before the fixture deadline\n",
+  "FAIL: #{name}: producers did not stop after acknowledgement before the fixture deadline\n",
+  "FAIL: #{name}: chain readback did not finish before the fixture deadline\n")
 chain = nil.as(Node?)
 i = 0
 while i < 200000
   chain = Node.new(i.to_i64, chain)
   i += 1
 end
-flag.phase.set(1)
+IyiMark.forced_phase(1_u64)
 producers = [] of IyiThread
 2.times do
   producers << IyiThread.start do
@@ -923,7 +990,7 @@ producers = [] of IyiThread
       kept = kept &+ node.value
     end
     {% if flag?(:shutdown_force) %}
-      flag.shutdown_blocked.set(1)
+      IyiMark.forced_trip
       while true
         IyiThread.park_if_requested
         IyiThread.yield_cpu
@@ -940,8 +1007,11 @@ while flag.ready.get != 2
   end
   IyiThread.yield_cpu
 end
+IyiMark.forced_phase(2_u64)
+{% if flag?(:stopped_force) %}
+  IyiMark.arm_stop_hold
+{% end %}
 IyiMark.auto = true
-flag.phase.set(2)
 flag.go.set(1)
 limit = IyiMark.now_ns + 60000000000_u64
 while !IyiMark.forced_acked?
@@ -951,10 +1021,14 @@ while !IyiMark.forced_acked?
   end
   IyiThread.yield_cpu
 end
-flag.phase.set(3)
+{% if flag?(:stopped_force) %}
+  print "FAIL: #{name}: no producer collection stopped the other threads before acknowledgement\n"
+  __iyi_exit(76)
+{% end %}
+IyiMark.forced_phase(3_u64)
 flag.stop.set(1)
 producers.each { |thread| thread.join }
-flag.phase.set(4)
+IyiMark.forced_phase(4_u64)
 count = 0
 node = chain
 while node
@@ -965,7 +1039,7 @@ if count != 200000
   print "FAIL: #{name}: the chain held #{count} of its 200000 nodes after the acknowledgement\n"
   __iyi_exit(1)
 end
-flag.phase.set(5)
+IyiMark.forced_phase(5_u64)
 puts "forced: #{name} acknowledged"
 IYI
 add_forced_ack() {
@@ -978,9 +1052,95 @@ add_forced_ack() {
       print "      def self.forced_acked? : Bool"
       print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_ack).address).value.get != 0_u64"
       print "      end"
+      print "      @[UnsafeReach(\"copy-only: unregistered fixture watchdog page\")]"
+      print "      @@forced_watch : UInt64 = 0_u64"
+      print "      @[UnsafeReach(\"copy-only: stopped-world control arm\")]"
+      print "      @@forced_stop_armed : UInt64 = 0_u64"
+      print "      def self.forced_watch(deadline : UInt64, setup : String, ready : String, acked : String, stopped : String, readback : String) : Nil"
+      print "        page = __iyi_mmap(4096_u64).address"
+      print "        IyiHeap.write64(page + 16_u64, deadline)"
+      print "        forced_slot(page, 0_u64, setup)"
+      print "        forced_slot(page, 1_u64, ready)"
+      print "        forced_slot(page, 2_u64, acked)"
+      print "        forced_slot(page, 3_u64, stopped)"
+      print "        forced_slot(page, 4_u64, readback)"
+      print "        @@forced_watch = page"
+      print "        IyiThread.start_helper(forced_watch_entry, page)"
+      print "      end"
+      print "      def self.forced_slot(page : UInt64, phase : UInt64, text : String) : Nil"
+      print "        if text.bytesize > 504"
+      print "          message = \"FAIL: forced: a watchdog sentence does not fit its slot\\n\""
+      print "          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "          __iyi_exit(76)"
+      print "        end"
+      print "        slot = page + 512_u64 * (phase + 1_u64)"
+      print "        IyiHeap.write64(slot, text.bytesize.to_u64)"
+      print "        Pointer(UInt8).new(slot + 8_u64).copy_from(text.to_unsafe, text.bytesize)"
+      print "      end"
+      print "      def self.forced_watch_entry : UInt64"
+      print "        proc = ->(page : UInt64) { IyiMark.forced_watch_main(page) }"
+      print "        Pointer(UInt64).new(pointerof(proc).address).value"
+      print "      end"
+      print "      # No line, heap allocation, park, or runtime-lock acquisition."
+      print "      def self.forced_watch_main(page : UInt64) : Nil"
+      print "        while true"
+      print "          tripped = Pointer(Atomic(UInt64)).new(page + 8_u64).value.get != 0_u64"
+      print "          phase = Pointer(Atomic(UInt64)).new(page).value.get"
+      print "          return if phase >= 5_u64"
+      print "          if tripped || now_ns >= IyiHeap.read64(page + 16_u64)"
+      print "            slot = page + 512_u64 * (phase + 1_u64)"
+      print "            __iyi_write(2, Pointer(Void).new(slot + 8_u64), IyiHeap.read64(slot))"
+      print "            {% if flag?(:darwin) %}"
+      print "              LibC._exit(76)"
+      print "            {% elsif flag?(:win32) %}"
+      print "              LibC.TerminateProcess(LibC.GetCurrentProcess, 76)"
+      print "              while true"
+      print "              end"
+      print "            {% else %}"
+      print "              __iyi_exit(76)"
+      print "            {% end %}"
+      print "          end"
+      print "          IyiThread.yield_cpu"
+      print "        end"
+      print "      end"
+      print "      def self.forced_phase(phase : UInt64) : Nil"
+      print "        Pointer(Atomic(UInt64)).new(@@forced_watch).value.set(phase)"
+      print "      end"
+      print "      def self.forced_trip : Nil"
+      print "        Pointer(Atomic(UInt64)).new(@@forced_watch + 8_u64).value.set(1_u64)"
+      print "      end"
+      print "      def self.arm_stop_hold : Nil"
+      print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_stop_armed).address).value.set(1_u64)"
+      print "      end"
+      print "      def self.forced_stop_hold(others : Int64) : Nil"
+      print "        page = @@forced_watch"
+      print "        return if page == 0_u64 || IyiThread.current_line == 0_u64"
+      print "        return unless Pointer(Atomic(UInt64)).new(page).value.get == 2_u64"
+      print "        armed = Pointer(Atomic(UInt64)).new(pointerof(@@forced_stop_armed).address)"
+      print "        return unless armed.value.compare_and_set(1_u64, 2_u64)[1]"
+      print "        if others < 2_i64"
+      print "          message = \"FAIL: stopped: the producer did not stop both other fixture threads\\n\""
+      print "          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "          __iyi_exit(76)"
+      print "        end"
+      print "        message = \"stopped: a producer held its collection after stopping the other registered threads\\n\""
+      print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "        forced_trip"
+      print "        while true"
+      print "          IyiThread.yield_cpu"
+      print "        end"
+      print "      end"
       found++
     }
-    { print } END { if (found != 1) exit 3 }' "$1/iyi/prelude.iyi" > "$1/iyi/prelude.iyi.new" || { echo "the acknowledgement anchor in $1 is missing or ambiguous"; exit 1; }
+    /^    fun exit\(status : Int32\) : NoReturn$/ { print; print "    fun _exit(status : Int32) : NoReturn"; darwin++; next }
+    /^          others = IyiThread\.stop_others$/ {
+      print
+      print "          {% if flag?(:stopped_force) %}"
+      print "            forced_stop_hold(others)"
+      print "          {% end %}"
+      stopped++; next
+    }
+    { print } END { if (found != 1 || darwin != 1 || stopped != 2) exit 3 }' "$1/iyi/prelude.iyi" > "$1/iyi/prelude.iyi.new" || { echo "the acknowledgement, exit or stop anchor in $1 is missing or ambiguous"; exit 1; }
   mv "$1/iyi/prelude.iyi.new" "$1/iyi/prelude.iyi"
 }
 
@@ -1064,6 +1224,13 @@ if [ "$code" -ne 0 ] || ! grep -Fxq "forced: stored acknowledged" stored-held.tx
   echo "the held stored control did not complete (exit $code):"; tail -5 stored-held.txt; exit 1
 fi
 echo "  held stored control exits 0 after the assist rendezvous"
+step "control: an unknown forced-fixture option is a setup failure"
+timeout -k 5 120 ./stored-held-run unknown=1 > unknown-option.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: forced: no option unknown=1" unknown-option.txt; then
+  echo "the unknown forced-fixture option did not fail as setup (exit $code):"; tail -3 unknown-option.txt; exit 1
+fi
+printf '  exits 76 at "%s"\n' "FAIL: forced: no option unknown=1"
 step "control: a producer held after acknowledgement is a setup failure"
 if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release -Dshutdown_force forced.iyi -o shutdown-held-run > build-shutdown-held.log 2>&1; then
   cat build-shutdown-held.log; exit 1
@@ -1074,6 +1241,17 @@ if [ "$code" -ne 76 ] || ! grep -Fxq "stored: the mark whose remainder counted t
   echo "the held producer was not reported as a shutdown failure (exit $code):"; tail -5 shutdown-held.txt; exit 1
 fi
 printf '  exits 76 at "%s"\n' "FAIL: stored: producers did not stop after acknowledgement before the fixture deadline"
+step "control: a producer held after stopping the other threads is named by its phase"
+if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release -Dstopped_force forced.iyi -o stopped-held-run > build-stopped-held.log 2>&1; then
+  cat build-stopped-held.log; exit 1
+fi
+timeout -k 5 120 ./stopped-held-run name=stored > stopped-held.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "stopped: a producer held its collection after stopping the other registered threads" stopped-held.txt || ! grep -Fxq "FAIL: stored: the copy did not acknowledge before the fixture deadline" stopped-held.txt || grep -Fxq "forced: stored acknowledged" stopped-held.txt; then
+  echo "the stopped-world collection was not named by its phase (exit $code):"; tail -5 stopped-held.txt; exit 1
+fi
+echo "  stopped: a producer held its collection after stopping the other registered threads"
+printf '  exits 76 at "%s"\n' "FAIL: stored: the copy did not acknowledge before the fixture deadline"
 step "failure proof: storing over the counted assist loses the worker count"
 cp stored-held/iyi/*.iyi stored/iyi/
 awk '/^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
@@ -1462,7 +1640,7 @@ GC.free(live[0].as(Void*))
   slot = IyiHeap.chunk_index(arena, head)
   if IyiHeap.read8(arena + IyiHeap::META + slot * IyiHeap::META_ENTRY) & IyiHeap::EPOCH_FLAG != IyiMark.epoch_flag
     print "FAIL: freed: the armed chunk would take the locked free path\n"
-    __iyi_exit(1)
+    __iyi_exit(76)
   end
   IyiHeap.arm_drop
 {% end %}
@@ -1471,7 +1649,7 @@ GC.free(live[1].as(Void*))
   collector.join
   if IyiHeap.drop_done != 1_u64
     print "FAIL: freed: the armed collection did not complete exactly once\n"
-    __iyi_exit(1)
+    __iyi_exit(76)
   end
 {% end %}
 got = Pointer(Pointer(UInt64)).malloc(64_u64)
@@ -1572,6 +1750,32 @@ if [ "$code" -ne 0 ] || ! grep -Fxq 'unbracketed: 64 chunks handed out, none sha
   echo "the bracketed control did not pass (exit $code):"; tail -3 bracketed.txt; exit 1
 fi
 echo "  the bracketed control exits 0: $(grep -Fx 'unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole' bracketed.txt)"
+step "controls: the bracket proof rejects a locked path and a missing acknowledgement"
+awk '$0 == "IyiMark.auto = false" {
+    print; print "premise = Program.args.size > 0 ? Program.args[0] : \"\""; option++; next
+  }
+  $0 == "  if IyiHeap.read8(arena + IyiHeap::META + slot * IyiHeap::META_ENTRY) & IyiHeap::EPOCH_FLAG != IyiMark.epoch_flag" {
+    print $0 " || premise == \"locked\""; locked++; next
+  }
+  $0 == "  if IyiHeap.drop_done != 1_u64" {
+    print $0 " || premise == \"ack\""; ack++; next
+  }
+  { print } END { if (option != 1 || locked != 1 || ack != 1) exit 3 }' unbracketed.iyi > bracket-premise.iyi || { echo "the bracket premise anchors are missing or ambiguous"; exit 1; }
+if ! IYI_PATH="$WORK/bracketed${PSEP}$REPO/src" "$IYI" build bracket-premise.iyi -Dunbracketed_force -o bracket-premise > build-bracket-premise.log 2>&1; then
+  cat build-bracket-premise.log; exit 1
+fi
+for premise in locked ack; do
+  case "$premise" in
+    locked) expected="FAIL: freed: the armed chunk would take the locked free path" ;;
+    ack) expected="FAIL: freed: the armed collection did not complete exactly once" ;;
+  esac
+  timeout -k 5 120 ./bracket-premise "$premise" > "bracket-premise-$premise.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 76 ] || ! grep -Fxq "$expected" "bracket-premise-$premise.txt"; then
+    echo "the $premise bracket premise was not reported as setup failure (exit $code):"; tail -3 "bracket-premise-$premise.txt"; exit 1
+  fi
+  printf '  exits 76 at "%s"\n' "$expected"
+done
 mkdir -p unbracketed/iyi
 cp bracketed/iyi/*.iyi unbracketed/iyi/
 awk '/^          write64\(table\.address &\+ CACHE_INSIDE, read64\(table\.address &\+ CACHE_INSIDE\) &\+ 1_u64\)$/ { entered++; next }

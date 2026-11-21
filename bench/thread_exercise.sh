@@ -106,8 +106,6 @@
 # search, so the verdict is not a named invariant of the code under test):
 #   4c   five threads started and joined beside a collecting or lock-taking
 #        thread, held to 10 s: a healthy timing bound, unchanged.
-#   4d   the no-raise timing mutant (a stop beside a burst with the raises
-#        taken out): removed; its only verdict was a stop timing.
 #   7e   toplate: its healthy topfirst can pass without seeing two collections;
 #        no witness added.
 #   7h   Linux unowed: the mutant's verdict is exit 124 or a count of owed turns
@@ -614,6 +612,27 @@ case "$(uname -s)" in
     cat > stop-order.part <<'IYI'
     IYI_STOP_ORDER_SEEN = 1408_u64
     IYI_STOP_ORDER_EARLY = 1472_u64
+    IYI_STOP_PRIORITY_ARM = 1536_u64
+    IYI_STOP_PRIORITY_SAMPLE = 1600_u64
+    def self.stop_priority_arm : Nil
+      page = control
+      word(page + IYI_STOP_PRIORITY_SAMPLE).value.set(0_u64)
+      word(page + IYI_STOP_PRIORITY_ARM).value.set(1_u64)
+    end
+    def self.stop_priority_sample : Nil
+      page = control
+      return unless word(page + IYI_STOP_PRIORITY_ARM).value.compare_and_set(1_u64, 0_u64)[1]
+      actual = LibC.GetThreadPriority(LibC.GetCurrentThread)
+      if actual == 2147483647_i32
+        message = "SETUP: raise: GetThreadPriority failed\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(76)
+      end
+      word(page + IYI_STOP_PRIORITY_SAMPLE).value.set((actual.to_i64 + 16_i64).to_u64)
+    end
+    def self.stop_priority_value : Int64
+      word(control + IYI_STOP_PRIORITY_SAMPLE).value.get.to_i64 - 16_i64
+    end
     def self.stop_order_reset : Nil
       word(control + IYI_STOP_ORDER_SEEN).value.set(0_u64)
       word(control + IYI_STOP_ORDER_EARLY).value.set(0_u64)
@@ -624,6 +643,7 @@ case "$(uname -s)" in
         __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
         __iyi_exit(76)
       end
+      stop_priority_sample
     end
     def self.stop_order_observe(asked : Int64, expected : Int64, sp : UInt64) : Nil
       if sp == 0_u64
@@ -645,9 +665,10 @@ IYI
     stop_order_copy() {
       awk -v part=stop-order.part -v mode="$1" '
         /^    # ── Roots/ { while ((getline s < part) > 0) print s; roots++ }
+        mode == "noraise" && /^        @@stopper_raised = LibC\.SetThreadPriority\(me, THREAD_PRIORITY_HIGHEST\) != 0$/ { print "        @@stopper_raised = false"; raise_removed++; next }
         /^      private def self\.suspend_others\(line : UInt64\) : Int64$/ { print; print "        stop_asked = 0_i64"; entry++; next }
         /^          LibC\.SuspendThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\) if cursor != line$/ {
-          if (mode == "control") {
+          if (mode != "forced") {
             print "          if cursor != line"
             print "            stop_order_suspend(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE)))"
             print "            stop_asked += 1_i64"
@@ -666,7 +687,7 @@ IYI
           capture++; next
         }
         { print }
-        END { if (roots != 1 || entry != 1 || asked != 1 || handles != 1 || capture != 1) exit 3 }
+        END { if (roots != 1 || entry != 1 || asked != 1 || handles != 1 || capture != 1 || (mode == "noraise" && raise_removed != 1)) exit 3 }
       ' "$REPO/src/iyi/thread.iyi" > "$2"
     }
     mkdir -p ordered/iyi serial/iyi
@@ -695,6 +716,76 @@ IYI
       echo "the stop-order check did not fire (exit $code):"; cat serial.txt; exit 1
     fi
     echo '  exits 1 at "FAIL: stop: a context was captured before all suspend requests were issued"'
+
+    cat > raising.iyi <<'IYI'
+@[Unsafe("the test sets and queries the stopping thread's Windows priority")]
+module raising
+class Flag
+  getter ready : Atomic(Int64)
+  getter done : Atomic(Int64)
+  def initialize
+    @ready = Atomic(Int64).new(0_i64)
+    @done = Atomic(Int64).new(0_i64)
+  end
+end
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+if LibC.SetThreadPriority(LibC.GetCurrentThread, 0_i32) == 0_i32 || LibC.GetThreadPriority(LibC.GetCurrentThread) != 0_i32
+  print "SETUP: raise: could not set and verify normal priority\n"
+  __iyi_exit(76)
+end
+flag = Flag.new
+worker = IyiThread.start do
+  flag.ready.set(1_i64)
+  while flag.done.get == 0_i64
+    IyiThread.spin_pause
+  end
+  nil
+end
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while flag.ready.get == 0_i64
+  if IyiMark.now_ns >= deadline
+    print "SETUP: raise: the worker did not start\n"
+    __iyi_exit(76)
+  end
+  IyiThread.yield_cpu
+end
+IyiThread.stop_priority_arm
+IyiMark.collect
+sample = IyiThread.stop_priority_value
+if sample == -16_i64
+  print "SETUP: raise: the first suspend was not sampled\n"
+  __iyi_exit(76)
+end
+if sample != 2_i64
+  print "FAIL: raise: the stopper was not raised at the first suspend\n"
+  __iyi_exit(1)
+end
+flag.done.set(1_i64)
+worker.join
+puts "raise: the stopper was raised at the first suspend"
+IYI
+    mkdir -p noraise/iyi
+    cp "$REPO"/src/iyi/*.iyi noraise/iyi/
+    stop_order_copy noraise noraise/iyi/thread.iyi || { echo "SETUP: raise: copy anchors changed"; exit 76; }
+    for mode in control noraise; do
+      tree=ordered
+      [ "$mode" = noraise ] && tree=noraise
+      if ! IYI_PATH="$WORK/$tree${PSEP}$REPO/src" "$IYI" build --release raising.iyi -o "raising-$mode" > "build-raising-$mode.log" 2>&1; then
+        cat "build-raising-$mode.log"; exit 76
+      fi
+      step "the stopper's priority at the first suspend, $mode"
+      timeout -k 5 60 "./raising-$mode" > "raising-$mode.txt" 2>&1
+      code=$?
+      if [ "$code" -eq 76 ]; then cat "raising-$mode.txt"; exit 76; fi
+      if [ "$mode" = control ]; then
+        [ "$code" -eq 0 ] && tr -d '\r' < "raising-$mode.txt" | grep -qxF 'raise: the stopper was raised at the first suspend' || { echo "raise control failed (exit $code):"; cat "raising-$mode.txt"; exit 1; }
+        echo '  control: exit 0, raise: the stopper was raised at the first suspend'
+      else
+        [ "$code" -eq 1 ] && tr -d '\r' < "raising-$mode.txt" | grep -qxF 'FAIL: raise: the stopper was not raised at the first suspend' || { echo "raise mutant failed (exit $code):"; cat "raising-$mode.txt"; exit 1; }
+        echo '  exits 1 at "FAIL: raise: the stopper was not raised at the first suspend"'
+      fi
+    done
     ;;
 esac
 

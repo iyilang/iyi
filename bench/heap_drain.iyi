@@ -26,6 +26,7 @@
 #   ./heap_drain mark [NODES [WORKERS [SECONDS]]]   # see mark_main
 #   ./heap_drain claim [ROUNDS [UNITS]]         # see claim_main
 #   ./heap_drain dir [LARGE]                    # see dir_main
+#   ./heap_drain adopt                          # see adopt_main
 #   bash bench/heap_drain.sh                    # with its broken copies
 #
 # The line printed gives the bytes the partition arenas' runs span after
@@ -902,6 +903,128 @@ module bench/heap_drain
     {% end %}
   end
 
+  # The adopted run (c3, bench/heap_drain.sh's `adopt`). A unit's predecessor
+  # publishes one string and dies, so its run, with that string on it, goes to
+  # the shared heap's drain list. A new unit's first allocation of the class
+  # takes that run (`adopt_drained`), and that unit's own local collection
+  # checks the shared heap's kept string, which names the run's chunk. The
+  # check is the first verifier report and aborts, so no unit dies with the
+  # chunk still LOCAL. Automatic collection is off from the donor's start on,
+  # so no global mark can withhold the check, and the taker's stack is scrubbed
+  # first, so no stale word of an earlier call marks the string.
+  ADOPT_LENGTH = 52
+  ADOPT_GARBAGE = 8
+  ADOPT_HIDE_MASK = 0x5A5A5A5A5A5A5A5A_u64
+
+  {% if flag?(:heap_partitions) %}
+    @[NoInline]
+    def adopt_scrub : UInt64
+      room = uninitialized StaticArray(UInt64, 2048)
+      words = pointerof(room).as(Pointer(UInt64))
+      index = 0
+      while index < 2048
+        words[index] = 0_u64
+        index = index + 1
+      end
+      asm("" :: "r"(words) : "memory" : "volatile")
+      words[2047]
+    end
+
+    def adopt_quiet : Nil
+      started = IyiMark.now_ns
+      while IyiHeap.partitions_live != 0_u64
+        mark_setup_fail("adopt: timed out waiting for every partition to die") if IyiMark.now_ns &- started >= 120000000000_u64
+        sleep(1)
+      end
+    end
+
+    # The donor's string reaches the taker only in hidden form (XOR with a
+    # constant, so it is no address). A live copy of the address in the taker's
+    # frame would be a root of its local mark, which would mark the string and
+    # hide the mislabelled chunk from the check. These helpers hold the address
+    # only while they answer, in frames that are dead before any collection.
+    @[NoInline]
+    def adopt_claimed?(hidden : UInt64, id : UInt64) : Bool
+      object = hidden ^ ADOPT_HIDE_MASK
+      arena = IyiHeap.arena_of(object)
+      slot = IyiHeap.chunk_index(arena, object)
+      head = IyiHeap.arena_first(arena) &+ slot &* IyiHeap.arena_chunk(arena)
+      IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, head)) == id
+    end
+
+    @[NoInline]
+    def adopt_published?(hidden : UInt64) : Bool
+      object = hidden ^ ADOPT_HIDE_MASK
+      arena = IyiHeap.arena_of(object)
+      slot = IyiHeap.chunk_index(arena, object)
+      own = IyiHeap.read8(IyiHeap.own_address(arena, slot))
+      own & IyiHeap::OWN_PUB != 0_u64
+    end
+
+    # The taker. Its first allocation of the class takes the donor's run, which
+    # the taker must own afterwards (the adoption, proven by the run's owner, not
+    # by a count). Its one local collection is the only verifier check. Once past
+    # it, the published string must still read as published, so a check that
+    # stayed silent ends this run in setup, before any death.
+    def adopt_taker(hidden : UInt64) : Int32
+      record = IyiHeap.current_record
+      mark_setup_fail("adopt: the taker allocates in the shared heap") if record == 0_u64
+      id = IyiHeap.read64(record &+ IyiHeap::REC_ID)
+      adopted = IyiHeap.runs_adopted
+      b = "b" * ADOPT_LENGTH
+      mark_setup_fail("adopt: the taker's first allocation took no drained run") if IyiHeap.runs_adopted == adopted || b.bytesize != ADOPT_LENGTH
+      mark_setup_fail("adopt: the donor's run was not claimed by the taker") unless adopt_claimed?(hidden, id)
+      adopt_scrub
+      before = IyiHeap.partition_collections(record)
+      IyiHeap.collect_local(record)
+      mark_setup_fail("adopt: the taker's local collection did not run whole") if IyiHeap.partition_collections(record) == before
+      mark_setup_fail("adopt: the published string is LOCAL after the taker's local collection") unless adopt_published?(hidden)
+      0
+    end
+
+    def adopt_run : Nil
+      IyiWorkers.count = 4
+      mark_setup_fail("adopt: main thread allocates in a partition") if IyiHeap.current_record != 0_u64
+      IyiMark.auto = false
+      kept = [] of String
+      sink = Channel(String).new(1)
+      group do |g|
+        g.spawn(unit: :new) do
+          junk = 0_i64
+          i = 0
+          while i < ADOPT_GARBAGE
+            s = "a" * ADOPT_LENGTH
+            junk = junk &+ s.bytesize.to_i64
+            i = i + 1
+          end
+          sink.send("p" * ADOPT_LENGTH)
+          junk > 0 ? 0 : 1
+        end
+        got = sink.receive
+        mark_setup_fail("adopt: the donor's string did not arrive") unless got.is_a?(String)
+        kept << got
+      end
+      adopt_quiet
+      hidden = kept[0].object_id ^ ADOPT_HIDE_MASK
+      group do |g|
+        g.spawn(unit: :new) { adopt_taker(hidden) }
+      end
+      if kept[0] == "p" * ADOPT_LENGTH
+        print "adopt: a unit's first allocation took a run its dead predecessor published, and the local collection left the published string intact\n"
+      else
+        fail("adopt: the published string reads wrong after the local collection")
+      end
+    end
+  {% end %}
+
+  def adopt_main(arguments : Array(String)) : Nil
+    {% if flag?(:heap_partitions) %}
+      adopt_run
+    {% else %}
+      mark_setup_fail("adopt needs -Dheap_partitions")
+    {% end %}
+  end
+
   Checks.read_env
   arguments = Program.args
   if arguments.size > 0 && arguments[0] == "mark"
@@ -916,6 +1039,8 @@ module bench/heap_drain
     dir_main(arguments)
   elsif arguments.size > 1 && arguments[0] == "keyed"
     keyed_main(arguments[1])
+  elsif arguments.size > 0 && arguments[0] == "adopt"
+    adopt_main(arguments)
   else
     drain_main(arguments)
   end

@@ -23,6 +23,8 @@
 # list membership; c4 checks the selected idle deadline with a warm pool
 # and no pending partition; c5 checks a sentinel on the staged release run.
 # A missing witness is setup failure, never a catch.
+# c3's verdict is the local check of a unit that takes a drained run (the
+# `adopt` mode of heap_drain.iyi), which runs before that unit dies.
 #
 #   bash bench/heap_drain.sh           # every part
 #   bash bench/heap_drain.sh sound     # plain, optimised, verifier, chaos
@@ -197,6 +199,16 @@ copy() {
     echo "  $label: missed: the intended verifier report was not present"
     sed -n '1,6p' "$dir/run.err" | sed 's/^/    /'
     status=1
+    return
+  fi
+  if [ "$want" = 0 ]; then
+    if grep -q '^iyi: heap_verify' "$dir/run.err" || { [ -n "${EXPECT_OUT:-}" ] && ! grep -Fxq -- "$EXPECT_OUT" "$dir/run.out"; }; then
+      echo "  $label: missed: the verifier reported, or the expected line is absent"
+      sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
+      status=1
+      return
+    fi
+    echo "  $label: no verifier report, and the expected line is present"
     return
   fi
   if [ "$want" = 86 ]; then
@@ -708,8 +720,14 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
     "$(subst 'def self\.partition_take' 'drained = pop_listed\(index, PC_DRAIN\)' 'drained = 0_u64')"
   keyed "the global sweep's relist, deleted (c2)" c2 1 park "FAIL: drain: the global sweep left the run the program parked on no drain list" "-Dheap_partitions --release -Dkeyed_force" "$PARK_BROKEN"
   keyed "the relist, kept and recorded (hook only)" relisted 0 park "drain: the global sweep put the run the program parked back on its class's drain list" "-Dheap_partitions --release -Dkeyed_force" "$PARK_WITNESS"
+  # c3 (adopt_drained's OWN_PUB, `adopt` in heap_drain.iyi): the taker's local
+  # collection is the first check that can see its mislabelled published string,
+  # and it aborts there, so the copy's one verdict is the local sentence. Its
+  # control runs the same program without the mutant and reports nothing.
   EXPECT_ERR='  a slot names a LOCAL chunk its local mark left unmarked, about to be freed' copy "a taken run's objects published" c3 86 \
-    "$(subst 'def self\.adopt_drained' 'write8\(own, OWN_PUB\)' 'write8(own, 0_u64)')" "-Dheap_partitions -Dheap_verify" 8 24 4
+    "$(subst 'def self\.adopt_drained' 'write8\(own, OWN_PUB\)' 'write8(own, 0_u64)')" "-Dheap_partitions -Dheap_verify" adopt
+  EXPECT_OUT="adopt: a unit's first allocation took a run its dead predecessor published, and the local collection left the published string intact" \
+    copy "a taken run's objects published, with no mutant (hook only)" c3ctl 0 "$PASS" "-Dheap_partitions -Dheap_verify" adopt
   keyed "an idle worker wakes for the warm pool (c4)" c4 1 warm "FAIL: idle_wait_ms left a worker's wait unbounded with a pooled run held warm and no partition pending" "-Dheap_partitions --release -Dkeyed_force" "$WARM_BROKEN"
   keyed "the warm-pool cap, kept (hook only)" warm 0 warm "idle: idle_wait_ms cut a worker's unbounded wait to the pool's turn with a pooled run held warm and no partition pending" "-Dheap_partitions --release -Dkeyed_force"
   keyed "a cooled run's pages go back (c5)" c5 1 cool "FAIL: idle: the run the program put on a release list reached the cold list with its page unreleased: the release call did not run" "-Dheap_partitions --release -Dkeyed_force" "$COOL_SITE" "$COOL_BROKEN"

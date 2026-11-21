@@ -232,7 +232,10 @@ if ! "$IYI" build "$REPO/bench/thread_exercise.iyi" -o threads > build.log 2>&1;
   cat build.log; exit 1
 fi
 if [ "$part" != again ]; then
-  if ! timeout -k 5 300 ./threads 8 > answers.txt 2>&1; then
+  timeout -k 5 300 ./threads 8 > answers.txt 2>&1
+  code=$?
+  if [ "$code" -eq 76 ]; then cat answers.txt; exit 76; fi
+  if [ "$code" -ne 0 ]; then
     cat answers.txt; exit 1
   fi
   grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
@@ -241,7 +244,10 @@ if [ "$part" != again ]; then
   if ! "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o threads-release > build-release.log 2>&1; then
     cat build-release.log; exit 1
   fi
-  if ! timeout -k 5 300 ./threads-release 8 > answers-release.txt 2>&1; then
+  timeout -k 5 300 ./threads-release 8 > answers-release.txt 2>&1
+  code=$?
+  if [ "$code" -eq 76 ]; then cat answers-release.txt; exit 76; fi
+  if [ "$code" -ne 0 ]; then
     cat answers-release.txt; exit 1
   fi
   grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
@@ -259,6 +265,7 @@ if [ "$part" != but-again ]; then
   while [ "$again" -le 10 ]; do
     timeout -k 5 300 ./threads 8 > again.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat again.txt; exit 76; fi
     if [ "$code" -ne 0 ] || ! grep -q 'every property held' again.txt; then
       echo "run $again exited $code:"; tail -5 again.txt; exit 1
     fi
@@ -419,7 +426,10 @@ over=$((cores * 2))
 [ "$over" -lt 9 ] && over=9
 [ "$over" -gt 32 ] && over=32
 step "the same, $over threads, release (past the $cores cores here)"
-if ! timeout -k 5 300 ./threads-release "$over" > answers-32.txt 2>&1; then
+timeout -k 5 300 ./threads-release "$over" > answers-32.txt 2>&1
+code=$?
+if [ "$code" -eq 76 ]; then cat answers-32.txt; exit 76; fi
+if [ "$code" -ne 0 ]; then
   cat answers-32.txt; exit 1
 fi
 grep -q 'every property held' answers-32.txt || { cat answers-32.txt; exit 1; }
@@ -644,7 +654,10 @@ step "the runtime lock with four times the cores' threads, and the stop"
 if ! "$IYI" build --release crowd.iyi -o crowd > build-crowd.log 2>&1; then
   cat build-crowd.log; exit 1
 fi
-if ! timeout -k 5 300 ./crowd > crowd.txt 2>&1; then
+timeout -k 5 300 ./crowd > crowd.txt 2>&1
+code=$?
+if [ "$code" -eq 76 ]; then cat crowd.txt; exit 76; fi
+if [ "$code" -ne 0 ]; then
   cat crowd.txt; exit 1
 fi
 sed 's/^/  /' crowd.txt
@@ -1075,6 +1088,7 @@ IYI
       fi
       win_native 60 "the fairness $mode proof" "./fair-$mode-run" > "fair-$mode-raw.txt" 2>&1
       code=$?
+      if [ "$code" -eq 76 ]; then cat "fair-$mode-raw.txt"; exit 76; fi
       tr -d '\r' < "fair-$mode-raw.txt" > "fair-$mode.txt"
       if [ "$code" -ne "$expected_code" ] || ! grep -qxF "$expected" "fair-$mode.txt"; then
         echo "the fairness $mode proof exited $code, expected $expected_code:"; cat "fair-$mode.txt"; exit 1
@@ -1636,7 +1650,10 @@ IYI
     if ! "$IYI" build --release raisers.iyi -o raisers > build-raisers.log 2>&1; then
       cat build-raisers.log; exit 1
     fi
-    if ! timeout -k 5 60 ./raisers > raisers.txt 2>&1 || ! grep -q '^raise:' raisers.txt; then
+    timeout -k 5 60 ./raisers > raisers.txt 2>&1
+    code=$?
+    if [ "$code" -eq 76 ]; then cat raisers.txt; exit 76; fi
+    if [ "$code" -ne 0 ] || ! grep -q '^raise:' raisers.txt; then
       echo "threads raised together:"; cat raisers.txt; exit 1
     fi
     echo "  $(grep -m1 '^raise:' raisers.txt)"
@@ -1657,6 +1674,7 @@ IYI
     fi
     timeout -k 5 60 ./raisers-shared > shared.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat shared.txt; exit 76; fi
     if [ "$code" -ne 1 ] || ! grep -q '^FAIL: raise:' shared.txt; then
       echo "one record for every thread was not caught (exit $code):"; cat shared.txt; exit 1
     fi
@@ -1973,6 +1991,7 @@ fi
 # that does not end the run is a job that hangs to its own limit.
 timeout -k 5 120 ./unrooted 8 > unrooted.txt 2>&1
 code=$?
+if [ "$code" -eq 76 ]; then cat unrooted.txt; exit 76; fi
 if [ "$code" -ne 1 ] || ! grep -q "on a free list" unrooted.txt; then
   echo "the live-list check did not fire (exit $code):"; tail -5 unrooted.txt; exit 1
 fi
@@ -1997,6 +2016,7 @@ case "$(uname -s)" in
     while [ "$again" -le 200 ]; do
       timeout -k 5 30 ./unrooted 8 > unrooted-again.txt 2>&1
       code=$?
+      if [ "$code" -eq 76 ]; then cat unrooted-again.txt; exit 76; fi
       if [ "$code" -ne 1 ] || ! grep -qE "on a free list|^iyi: out of memory$" unrooted-again.txt; then
         echo "run $again exited $code:"; tail -3 unrooted-again.txt; exit 1
       fi
@@ -2020,6 +2040,7 @@ if ! IYI_PATH="$WORK/stale${PSEP}$REPO/src" "$IYI" build "$REPO/bench/thread_exe
 fi
 timeout -k 5 120 ./stale-threads 8 > stale.txt 2>&1
 code=$?
+if [ "$code" -eq 76 ]; then cat stale.txt; exit 76; fi
 if [ "$code" -ne 1 ] || ! grep -q "registry:" stale.txt; then
   echo "the registry check did not fire (exit $code):"; tail -5 stale.txt; exit 1
 fi
@@ -2207,6 +2228,7 @@ run=1
 while [ "$run" -le 5 ]; do
   timeout -k 5 120 ./switching > switching.txt 2>&1
   code=$?
+  if [ "$code" -eq 76 ]; then cat switching.txt; exit 76; fi
   if [ "$code" -ne 0 ] || ! grep -q '^wrong=0$' switching.txt; then
     echo "run $run exited $code:"; tail -3 switching.txt; exit 1
   fi
@@ -2678,6 +2700,7 @@ run=1
 while [ "$run" -le 100 ]; do
   timeout -k 5 30 ./first > first.txt 2>&1
   code=$?
+  if [ "$code" -eq 76 ]; then cat first.txt; exit 76; fi
   if [ "$code" -ne 0 ] || ! grep -q '^collected' first.txt; then
     echo "run $run exited $code (124 is the harness's timeout):"; tail -3 first.txt; exit 1
   fi
@@ -2818,6 +2841,7 @@ for run in neighbours neighbours-window neighbours-unlocked; do
   while [ "$again" -le 5 ]; do
     timeout -k 5 30 "./$run" > "$run.txt" 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat "$run.txt"; exit 76; fi
     if [ "$code" -ne 0 ] || ! grep -qx "behind=1 left=$want" "$run.txt"; then
       echo "$run, run $again, exited $code where it should leave $want fiber(s) registered:"; tail -3 "$run.txt"; exit 1
     fi
@@ -3433,6 +3457,7 @@ PS1
     while [ "$again" -le 200 ]; do
       timeout -k 1 30 ./ends > ends.txt 2>&1
       code=$?
+      if [ "$code" -eq 76 ]; then cat ends.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q "^ended with 2000$" ends.txt; then
         echo "run $again exited $code:"; tail -3 ends.txt; release ends; exit 1
       fi
@@ -3667,6 +3692,7 @@ IYI
     while [ "$run" -le 3 ]; do
       timeout -k 5 60 ./starting 3 > starting.txt 2>&1
       code=$?
+      if [ "$code" -eq 76 ]; then cat starting.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q '^ok ' starting.txt; then
         echo "run $run exited $code:"; tail -3 starting.txt; exit 1
       fi
@@ -3785,6 +3811,7 @@ IYI
     while [ "$run" -le 3 ]; do
       timeout -k 5 60 ./guard 2000 > guard.txt 2>&1
       code=$?
+      if [ "$code" -eq 76 ]; then cat guard.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q '^stacks grown beside a collecting thread: true' guard.txt; then
         echo "run $run exited $code:"; tail -3 guard.txt; exit 1
       fi
@@ -4102,6 +4129,7 @@ IYI
     while [ "$run" -le 5 ]; do
       ( timeout -k 5 60 ./born 200 10 > born.txt 2>&1; exit $? ) 2> /dev/null
       code=$?
+      if [ "$code" -eq 76 ]; then cat born.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ' born.txt; then
         echo "run $run exited $code:"; tail -3 born.txt; exit 1
       fi
@@ -4306,6 +4334,7 @@ case "$(uname -s)" in
     while [ "$run" -le 3 ]; do
       ( timeout -k 5 60 ./topfirst-run 20 1 > topfirst.txt 2>&1; exit $? ) 2> /dev/null
       code=$?
+      if [ "$code" -eq 76 ]; then cat topfirst.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q '^ok born=320 ' topfirst.txt; then
         echo "run $run exited $code:"; tail -3 topfirst.txt; exit 1
       fi
@@ -4319,6 +4348,7 @@ case "$(uname -s)" in
     while [ "$run" -le 3 ]; do
       ( timeout -k 5 60 ./toplate-run 20 1 > toplate.txt 2>&1; exit $? ) 2> /dev/null
       code=$?
+      if [ "$code" -eq 76 ]; then cat toplate.txt; exit 76; fi
       case "$code" in
         134) grep -q "^iyi: proof: a thread's first allocation was swept from under it" toplate.txt && aborted=$((aborted + 1)) || other="$other 134" ;;
         139) faulted=$((faulted + 1)) ;;
@@ -4419,6 +4449,7 @@ IYI
     while [ "$run" -le 3 ]; do
       ( timeout -k 5 60 ./fresh 5 > fresh.txt 2>&1; exit $? ) 2> /dev/null
       code=$?
+      if [ "$code" -eq 76 ]; then cat fresh.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q '^ok started=[0-9]* ' fresh.txt; then
         echo "run $run exited $code:"; tail -3 fresh.txt; exit 1
       fi
@@ -4439,6 +4470,7 @@ IYI
     fi
     ( timeout -k 5 60 ./topless-run 5 > topless.txt 2>&1; exit $? ) 2> /dev/null
     code=$?
+    if [ "$code" -eq 76 ]; then cat topless.txt; exit 76; fi
     if [ "$code" -eq 0 ] || ! grep -q "a task's stack top is no task's to the stop's scan" topless.txt; then
       echo "with a fiber's top read as no fiber's, a run exited $code:"; tail -3 topless.txt; exit 1
     fi
@@ -4487,6 +4519,7 @@ IYI
     fi
     ( timeout -k 5 60 ./wild > wild.txt 2>&1; exit $? ) 2> /dev/null
     code=$?
+    if [ "$code" -eq 76 ]; then cat wild.txt; exit 76; fi
     if [ "$code" -ne 139 ]; then
       echo "a helper's fault holding the runtime lock exited $code, not 139 (SIGSEGV):"; tail -3 wild.txt; exit 1
     fi
@@ -4504,6 +4537,7 @@ IYI
     fi
     ( timeout -k 5 60 ./heaped-run > heaped.txt 2>&1; exit $? ) 2> /dev/null
     code=$?
+    if [ "$code" -eq 76 ]; then cat heaped.txt; exit 76; fi
     if [ "$code" -ne 3 ] || ! grep -q "^the helper's fault left the process alive for 5 s" heaped.txt; then
       echo "with the action in a heap block, a helper's fault exited $code:"; tail -3 heaped.txt; exit 1
     fi
@@ -4579,6 +4613,7 @@ IYI
     while [ "$run" -le 3 ]; do
       ( timeout -k 5 60 ./asleep 200 10 > asleep.txt 2>&1; exit $? ) 2> /dev/null
       code=$?
+      if [ "$code" -eq 76 ]; then cat asleep.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ms=[0-9]* .* owing=[0-9]* outwaited=[0-9]*$' asleep.txt; then
         echo "run $run exited $code:"; tail -3 asleep.txt; exit 1
       fi
@@ -4719,6 +4754,7 @@ IYI
       fi
       ( timeout -k 5 30 ./unowed-run 200 10 > unowed.txt 2>&1; exit $? ) 2> /dev/null
       code=$?
+      if [ "$code" -eq 76 ]; then cat unowed.txt; exit 76; fi
       if [ "$code" -eq 124 ]; then
         echo "  the run hung until the 30 s timeout (exit 124)"
       elif [ "$code" -eq 0 ] && grep -q '^ok born=[0-9]* ms=[0-9]* .* owing=[0-9]* outwaited=[0-9]*$' unowed.txt; then
@@ -4777,7 +4813,10 @@ IYI
     if ! "$IYI" build yield_traps.iyi -o yield-traps > build-traps.log 2>&1; then
       cat build-traps.log; exit 1
     fi
-    if ! timeout -k 5 120 ./yield-traps > traps.txt 2>&1; then
+    timeout -k 5 120 ./yield-traps > traps.txt 2>&1
+    code=$?
+    if [ "$code" -eq 76 ]; then cat traps.txt; exit 76; fi
+    if [ "$code" -ne 0 ]; then
       cat traps.txt; exit 1
     fi
     traps="$(sed -n 's/^yield: \([0-9-]*\) Mach traps.*$/\1/p' traps.txt)"
@@ -4795,7 +4834,10 @@ IYI
     if ! IYI_PATH="$WORK/hinted${PSEP}$REPO/src" "$IYI" build yield_traps.iyi -o yield-traps-hinted > build-hinted.log 2>&1; then
       cat build-hinted.log; exit 1
     fi
-    if ! timeout -k 5 120 ./yield-traps-hinted > hinted-traps.txt 2>&1; then
+    timeout -k 5 120 ./yield-traps-hinted > hinted-traps.txt 2>&1
+    code=$?
+    if [ "$code" -eq 76 ]; then cat hinted-traps.txt; exit 76; fi
+    if [ "$code" -ne 0 ]; then
       cat hinted-traps.txt; exit 1
     fi
     hinted="$(sed -n 's/^yield: \([0-9-]*\) Mach traps.*$/\1/p' hinted-traps.txt)"
@@ -5049,7 +5091,10 @@ IYI
     if ! "$IYI" build calls_c.iyi -o calls-c > build-calls-c.log 2>&1; then
       cat build-calls-c.log; exit 1
     fi
-    if ! timeout -k 5 120 ./calls-c > calls-c.txt 2>&1 || ! grep -q 'every property held' calls-c.txt; then
+    timeout -k 5 120 ./calls-c > calls-c.txt 2>&1
+    code=$?
+    if [ "$code" -eq 76 ]; then cat calls-c.txt; exit 76; fi
+    if [ "$code" -ne 0 ] || ! grep -q 'every property held' calls-c.txt; then
       cat calls-c.txt; exit 1
     fi
     named=$(nm -u calls-c | sed -e 's/^ *[wU] *//' -e 's/@.*$//' | grep -cE '^(pthread_create|pthread_join)$')
@@ -5070,6 +5115,7 @@ IYI
     fi
     ( timeout -k 5 120 ./cloned-run > cloned.txt 2>&1; exit $? ) 2> /dev/null
     code=$?
+    if [ "$code" -eq 76 ]; then cat cloned.txt; exit 76; fi
     if [ "$code" -eq 0 ] || grep -q 'every property held' cloned.txt; then
       echo "with raw clones, C on the workers still held:"; cat cloned.txt; exit 1
     fi

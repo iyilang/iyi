@@ -20,8 +20,16 @@
 @[Unsafe("its threads count in a page mapped with __iyi_mmap, read and written as atomics through raw pointers")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
-    print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    page = Tally.page
+    if page == 0_u64 || Pointer(Atomic(UInt64)).new(page + 320_u64).value.compare_and_set(0_u64, 1_u64)[1]
+      print "FAIL: #{message}\n"
+      __iyi_exit(1)
+    end
+    # Another thread's failure is being reported, and its exit ends the
+    # process: this one waits for that, so a run prints one FAIL line.
+    while true
+      IyiThread.spin_pause
+    end
   end
 
   # Watchdogs report setup failures, never a verdict about join.
@@ -69,6 +77,12 @@
 
     def self.go : Pointer(Atomic(UInt64))
       Pointer(Atomic(UInt64)).new(@@page + 192_u64)
+    end
+
+    # The page's address, zero until setup. Word 320 of it is the one
+    # failure a run may print: the first thread to fail takes it (`fail`).
+    def self.page : UInt64
+      @@page
     end
 
     # Each thread takes its number here, not from a captured variable: a
@@ -368,7 +382,7 @@
 
   args = Program.args
   count = args.size > 0 ? args[0].to_i : 8
-  fail("at least one thread") if count < 1
+  join_setup("SETUP: threads: at least one thread is required\n") if count < 1
   Tally.setup
 
   # ── 1. Threads, collections, live lists ────────────────────────────────

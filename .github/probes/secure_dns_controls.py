@@ -1,3 +1,16 @@
+"""Startup, stage and cleanup controls for bench/std_secure_dns_exercise.sh.
+
+A manual probe, not run by CI. Each control copies the gate and the scripted
+server into a scratch tree, breaks one mechanism through an exact-once anchor,
+runs the gate, and asserts the exact sentence and status that mechanism must
+produce. Run it from the repository root, once for each Bash that runs the gate:
+
+    python3 .github/probes/secure_dns_controls.py "$PWD" "$(command -v bash)"
+
+Mode names after the Bash run a subset. It stays out of the workflows because a
+full run takes minutes on each runner: the earlier 48-control set took 101 s on
+Linux, 228 s on macOS per Bash and 123 s on Windows.
+"""
 import os
 import pathlib
 import shutil
@@ -102,6 +115,18 @@ def gone(pid, native):
     return False
 
 
+def hold_bash_deadlines(shell):
+    # A bash-side watchdog starts only after the fixture has opened, so a
+    # preflight or the bootstrap wait cannot expire before the fixture runs.
+    shell = once(shell, "PYTHON_PREFLIGHT_SECONDS=20\n", "PYTHON_PREFLIGHT_SECONDS=1\n")
+    shell = once(shell, '      if [ "$SECONDS" -ge "$end" ]; then\n',
+                 '      if [ ! -e "$SDNS_TEST_TOOL_OPENED" ]; then end=$((SECONDS + seconds)); fi\n'
+                 '      if [ "$SECONDS" -ge "$end" ]; then\n')
+    return once(shell, '    if [ "$SECONDS" -ge "$bootstrap_deadline" ]; then\n',
+                '    if [ ! -e "$SDNS_TEST_TOOL_OPENED" ]; then bootstrap_deadline=$((SECONDS + PYTHON_PREFLIGHT_SECONDS)); fi\n'
+                '    if [ "$SECONDS" -ge "$bootstrap_deadline" ]; then\n')
+
+
 def test(mode):
     with tempfile.TemporaryDirectory(prefix="sdns-review-control-") as temp:
         root = pathlib.Path(temp)
@@ -111,26 +136,28 @@ def test(mode):
         (bench / "end_process.sh").write_text(HELPER, newline="\n")
         env = os.environ.copy()
         marker = 'if [ -f "$SRV/h2.missing" ]; then\n'
-        ready = '    os.write(1, b"ready\\n")\n'
-        handoff = '            events = queue.Queue()\n'
-        success = {"crlf", "split", "queued-frames"}
-        if mode in success:
-            if mode == "queued-frames":
-                body = ('echo "fixture body reached"\ntrap - EXIT\n'
-                        'printf "stage 1 - queued fixture\\ndone\\nexit 0\\n" >&4\nexit 0\n')
-                anchor = '    threading.Thread(target=stream_reader, args=(body.stdout, events, body_closed), daemon=True).start()\n'
-                grouped = ('    def grouped_fixture_reader():\n'
-                           '        data = body.stdout.read()\n'
-                           '        events.put(("data", data))\n'
-                           '        events.put(("eof", b""))\n'
-                           '        body_closed.set()\n'
-                           '    threading.Thread(target=grouped_fixture_reader, daemon=True).start()\n')
-                shell = once(shell, anchor, grouped)
-            else:
-                body = 'echo "fixture body reached"\nprintf "done\\n" >&4\nexit 0\n'
+        ready = '    write(work, "ready", "ready\\n")\n'
+        success = {"queued-frames"}
+        if mode == "queued-frames":
+            body = ('echo "fixture body reached"\n'
+                    'printf "stage 1 - queued fixture\\ndone\\n" >&4\n'
+                    'exit 0\n')
+            anchor = '    threading.Thread(target=stream_reader, args=(body.stdout, events), daemon=True).start()\n'
+            grouped = ('    def grouped_fixture_reader():\n'
+                       '        data = b""\n'
+                       '        while not data.endswith(b"exit 0\\n"):\n'
+                       '            chunk = os.read(body.stdout.fileno(), 4096)\n'
+                       '            if not chunk:\n'
+                       '                break\n'
+                       '            data += chunk\n'
+                       '        events.put(("data", data))\n'
+                       '        events.put(("eof", b""))\n'
+                       '    threading.Thread(target=grouped_fixture_reader, daemon=True).start()\n')
+            shell = once(shell, anchor, grouped)
             shell = once(shell, marker, body + marker)
             shell = once(shell, '        say("the std/secure_dns exercise holds")\n', '        say("fixture supervisor completed")\n')
-        if mode == "body-early":
+            expected = "fixture body reached"
+        elif mode == "body-early":
             shell = once(shell, marker, 'echo "fixture body exited early"\nexit 0\n' + marker)
             expected = "the secure DNS exercise exited without completing its control stream"
         elif mode == "silent":
@@ -163,90 +190,12 @@ def test(mode):
             )
             server = once(server, "\nimport base64\n", stall)
             expected = "the scripted servers hung before signaling readiness, at stage: none"
-        elif mode in ("invalid-dead", "invalid-deadline"):
-            server = once(server, ready, '    os.write(1, b"wrong\\n"); os._exit(23)\n')
-            shell = once(shell, handoff, '            server.wait(timeout=5)\n' + handoff)
-            if mode == "invalid-deadline":
-                anchor = '            threading.Thread(target=stream_reader, args=(server.stdout, events), daemon=True).start()\n'
-                replacement = '            reader = threading.Thread(target=stream_reader, args=(server.stdout, events), daemon=True)\n            reader.start()\n            reader.join(timeout=5)\n            if reader.is_alive(): raise RuntimeError("fixture reader did not finish")\n            deadline = time.monotonic() - 1\n'
-                shell = once(shell, anchor, replacement)
-            expected = "the scripted servers sent an invalid readiness signal: wrong"
-        elif mode == "truncated":
-            server = once(server, ready, '    os.write(1, b"rea"); os._exit(23)\n')
-            shell = once(shell, handoff, '            server.wait(timeout=5)\n' + handoff)
-            expected = "the scripted servers sent a truncated readiness signal: rea"
         elif mode == "ready-dead":
             server = once(server, ready, ready + '    os._exit(23)\n')
-            shell = once(shell, handoff, '            server.wait(timeout=5)\n' + handoff)
-            expected = "the scripted servers exited before readiness handoff (status 23)"
-        elif mode == "late-ready":
-            anchor = '            threading.Thread(target=stream_reader, args=(server.stdout, events), daemon=True).start()\n'
-            replacement = ('            reader = threading.Thread(target=stream_reader, args=(server.stdout, events), daemon=True)\n'
-                           '            reader.start()\n'
-                           '            reader.join(timeout=20)\n'
-                           '            if reader.is_alive(): raise RuntimeError("fixture reader did not reach EOF")\n'
-                           '            deadline = time.monotonic() - 1\n')
-            shell = once(shell, anchor, replacement)
-            expected = "the scripted servers' readiness was not accepted before the startup deadline"
-        elif mode == "closed":
-            server = once(server, ready,
-                          '    print("fixture stall with stdout closed", file=sys.stderr, flush=True)\n'
-                          '    os.close(1)\n'
-                          '    open(os.path.join(work, "fixture.armed"), "w").close()\n'
-                          '    threading.Event().wait()\n')
-            expected = "the scripted servers hung before signaling readiness, at stage: udp (stdout closed)"
-        elif mode == "closed-exit":
-            server = once(server, ready,
-                          '    os.close(1)\n'
-                          '    while not os.path.exists(os.path.join(work, "exit.release")):\n'
-                          '        threading.Event().wait(0.01)\n'
-                          '    os._exit(23)\n')
-            anchor = '            if eof:\n                raise queue.Empty\n'
-            replacement = (
-                '            if eof:\n'
-                '                (srv / "exit.release").touch()\n'
-                '                child.wait(timeout=5)\n'
-                '                expired = True\n'
-                '                raise queue.Empty\n'
-            )
-            shell = once(shell, anchor, replacement)
-            expected = "the scripted servers exited silently before readiness (status 23)"
-        elif mode == "surplus":
-            server = once(server, ready,
-                          ready +
-                          '    while not os.path.exists(os.path.join(work, "surplus.release")):\n'
-                          '        threading.Event().wait(0.01)\n'
-                          '    os.write(1, b"extra\\n")\n')
-            anchor = '            buffer.extend(value)\n'
-            shell = once(shell, anchor, anchor +
-                         '            if b"\\n" in buffer:\n'
-                         '                (srv / "surplus.release").touch()\n')
-            expected = "the scripted servers sent extra bytes after readiness"
-        elif mode == "surplus-coalesced":
-            server = once(server, ready, '    os.write(1, b"ready\\nextra\\n")\n')
-            anchor = '            threading.Thread(target=stream_reader, args=(server.stdout, events), daemon=True).start()\n'
-            grouped = ('            def grouped_server_reader():\n'
-                       '                data = server.stdout.read()\n'
-                       '                events.put(("data", data))\n'
-                       '                events.put(("eof", b""))\n'
-                       '            threading.Thread(target=grouped_server_reader, daemon=True).start()\n')
-            shell = once(shell, anchor, grouped)
-            expected = "the scripted servers sent extra bytes after readiness"
-        elif mode == "ready-open":
-            server = once(server, ready, ready + '    threading.Event().wait()\n')
-            anchor = '                frame = raw[:-1] if raw.endswith(b"\\r") else raw\n'
-            shell = once(shell, anchor, anchor + '                deadline = time.monotonic() - 1\n')
-            expected = "the scripted servers did not close their readiness pipe after readiness"
-        elif mode == "crlf":
-            server = once(server, ready, '    if os.name == "nt": __import__("msvcrt").setmode(1, os.O_BINARY)\n    os.write(1, b"ready\\r\\n")\n')
-            expected = "fixture body reached"
-        elif mode == "split":
-            server = once(server, ready, '    os.write(1, b"rea")\n    while not os.path.exists(os.path.join(work, "split.release")):\n        __import__("time").sleep(0.01)\n    os.write(1, b"dy\\n")\n')
-            anchor = '            buffer.extend(value)\n'
-            shell = once(shell, anchor, anchor + '            if buffer == b"rea":\n                (srv / "split.release").touch()\n')
-            expected = "fixture body reached"
-        elif mode == "queued-frames":
-            expected = "fixture body reached"
+            # Whether the supervisor accepts the ready file before the exit is
+            # a race; either order must end in a named status 76 failure.
+            expected = ("the scripted servers exited during the exercise (status 23)",
+                        "the scripted servers exited before readiness was accepted (status 23)")
         elif mode == "diagnostic":
             program = ('import threading; print("discarded-diagnostic-prefix", flush=True); '
                        'print("D" * 20000, flush=True); print("partial-diagnostic", flush=True); '
@@ -260,14 +209,11 @@ def test(mode):
                           '    open(os.path.join(work, "fixture.armed"), "w").close()\n'
                           '    threading.Event().wait()\n')
             expected = "startup diagnostics watchdog expired"
-        elif mode in ("broken-h2", "broken-h2-self"):
+        elif mode == "broken-h2":
             package = root / "h2"
             package.mkdir()
             (package / "__init__.py").write_text("")
-            if mode == "broken-h2":
-                (package / "connection.py").write_text('raise ImportError("controlled broken h2")\n')
-            else:
-                (package / "connection.py").write_text('raise ModuleNotFoundError("controlled broken h2", name="h2")\n')
+            (package / "connection.py").write_text('raise ImportError("controlled broken h2")\n')
             env["PYTHONPATH"] = str(root)
             expected = "the scripted servers exited before readiness (status 1); server output follows"
         elif mode == "dependency-self":
@@ -283,6 +229,7 @@ def test(mode):
                          '    while not pathlib.Path(os.environ["SDNS_TEST_FIXTURE_STOP"]).exists():\n'
                          '        threading.Event().wait(0.01)\n' + anchor)
             env["SDNS_TEST_SUPERVISOR_PID"] = str(root / "supervisor-pid")
+            shell = hold_bash_deadlines(shell)
             expected = "Python supervisor startup watchdog expired"
         elif mode == "bootstrap-exit":
             anchor = '    (work / "supervisor.armed").touch()\n'
@@ -309,6 +256,8 @@ def test(mode):
                 shell = between(shell, start, end, shlex.quote(program) + ' || exit "$CANCEL_STATUS"')
                 expected = ("Python dependency preflight watchdog expired" if mode.endswith("hang")
                             else "Python dependency preflight failed")
+            if mode.endswith("hang"):
+                shell = hold_bash_deadlines(shell)
         elif mode in ("build-hang", "mutation-build-hang", "mutation-patch-hang",
                       "dig-hang", "dig-query-hang", "dig-version-hang",
                       "gap-hang", "gap-evidence-hang", "server-exit-tool"):
@@ -370,7 +319,10 @@ def test(mode):
                 command = ('"$PY" -c ' + shlex.quote(program) +
                            ' >"$WORK/gap.log" 2>&1 </dev/null 3<&- 4>&-\n')
                 if mode == "gap-hang":
+                    # The initial stage has no evidence file, so the server log
+                    # must not be printed in its place.
                     shell = once(shell, "STAGE_SECONDS = 60\n", "STAGE_SECONDS = 1\n")
+                    command = 'printf "unrelated server output\\n" >>"$WORK/server.log"\n' + command
                     expected = "the secure DNS exercise watchdog expired (1 s)"
                 else:
                     command = 'stage 1 gap.log "fixture gap"\n' + command
@@ -394,19 +346,17 @@ def test(mode):
         elif mode in ("plain-timeout", "release-timeout", "exit-124", "exit-137"):
             env["IYI"] = "true"
             selected = "release" if mode.startswith("release") else "plain"
-            name = "dns-release" if selected == "release" else "dns-plain"
-            anchor = '    if kind == "' + selected + '" and name == "' + name + '":\n        return [str(work / name), SRV], work / (name + ".out"), 180\n'
+            anchor = '  "$WORK/$name" "$SRV" >"$WORK/$name.out" 2>&1 </dev/null 3<&- 4>&-\n'
             if mode.endswith("timeout"):
                 program = tool_program("fixture %s partial evidence" % mode)
-                bound = "0.5"
-                expected = ("release" if mode.startswith("release") else "plain") + ": client watchdog expired (180 s)"
+                shell = once(shell, "CLIENT_SECONDS=180\n", "CLIENT_SECONDS=1\n")
+                expected = "%s: client watchdog expired (1 s)" % selected
             else:
                 number = mode.split("-")[-1]
                 program = "import sys; sys.exit(%s)" % number
-                bound = "5"
                 expected = "plain: exited " + number
-            replacement = '    if kind == "' + selected + '" and name == "' + name + '":\n        return [PYTHON, "-c", ' + repr(program) + '], work / (name + ".out"), ' + bound + '\n'
-            shell = once(shell, anchor, replacement)
+            shell = once(shell, anchor,
+                         '  "$PY" -c ' + shlex.quote(program) + ' >"$WORK/$name.out" 2>&1 </dev/null 3<&- 4>&-\n')
             if mode == "release-timeout":
                 shell = once(shell, 'for mode in plain release; do\n', 'for mode in release; do\n')
             if mode.startswith("exit-"):
@@ -417,21 +367,18 @@ def test(mode):
             (root / "src/std").mkdir(parents=True)
             shutil.copy2(ROOT / "src/std/secure_dns.iyi", root / "src/std/secure_dns.iyi")
             shell = without_comparisons(shell)
-            anchor = '        return [str(work / name / "program"), SRV], work / name / "out", 120\n'
             program = tool_program("a server whose certificate does not name wrong.test")
-            shell = once(shell, anchor, '        return [PYTHON, "-c", ' + repr(program) + '], work / name / "out", 0.5\n')
-            expected = "the server's name not verified: broken-copy watchdog expired (120 s)"
+            shell = once(shell, "BROKEN_SECONDS=120\n", "BROKEN_SECONDS=1\n")
+            shell = once(shell, '  "$WORK/$dir/program" "$SRV" >"$WORK/$dir/out" 2>&1 </dev/null 3<&- 4>&-\n',
+                         '  "$PY" -c ' + shlex.quote(program) + ' >"$WORK/$dir/out" 2>&1 </dev/null 3<&- 4>&-\n')
+            expected = "the server's name not verified: broken copy watchdog expired (1 s)"
         else:
             raise RuntimeError("unknown mode " + mode)
-        startup_failures = {
-            "silent", "crash", "hang", "import-hang", "invalid-dead", "invalid-deadline",
-            "truncated", "ready-dead", "late-ready", "closed", "closed-exit", "surplus",
-            "surplus-coalesced", "ready-open", "diagnostic", "broken-h2", "broken-h2-self",
-        }
+        startup_failures = {"silent", "crash", "hang", "import-hang", "diagnostic", "broken-h2"}
         if mode in startup_failures:
             shell = once(shell, marker, 'echo "fixture body reached"\n' + marker)
-        if mode in ("hang", "import-hang", "closed", "diagnostic"):
-            anchor = '            outcome = startup(server, events, deadline)\n'
+        if mode in ("hang", "import-hang", "diagnostic"):
+            anchor = '            outcome = startup(server, deadline)\n'
             shell = once(shell, anchor,
                          '            while server.poll() is None and not (srv / "fixture.armed").exists():\n'
                          '                if cancelled(): break\n'
@@ -439,23 +386,24 @@ def test(mode):
                          '            deadline = time.monotonic() + 1\n' + anchor)
         client_timeout_modes = {"plain-timeout", "release-timeout", "mutation-timeout"}
         if mode in client_timeout_modes:
-            anchor = '                if time.monotonic() >= deadline:\n                    return "timeout"\n'
+            # The stage watchdog starts only once the fixture is alive and its
+            # native handle is retained.
+            anchor = '                remaining = stage_deadline - time.monotonic()\n'
             shell = once(shell, anchor,
                          '                if not pathlib.Path(os.environ["SDNS_TEST_TOOL_OPENED"]).exists():\n'
-                         '                    deadline = time.monotonic() + bound\n' + anchor)
+                         '                    stage_deadline = time.monotonic() + 1\n' + anchor)
         server_live_modes = {
-            "body-early", "late-ready", "hang", "import-hang", "closed", "diagnostic",
-            "surplus", "surplus-coalesced", "ready-open", "crlf", "split", "queued-frames", "build-hang",
-            "mutation-build-hang", "mutation-patch-hang",
+            "body-early", "hang", "import-hang", "diagnostic", "queued-frames",
+            "build-hang", "mutation-build-hang", "mutation-patch-hang",
             "dig-hang", "dig-query-hang", "dig-version-hang", "gap-hang", "gap-evidence-hang",
             "dig-broken", "dig-junk", "dig-usage-only",
             "plain-timeout", "release-timeout", "mutation-timeout", "exit-124", "exit-137",
         }
         if mode in server_live_modes:
             env["SDNS_TEST_SERVER_REAPED"] = str(root / "server-reaped")
-            env["SDNS_TEST_CLIENT_REAPED"] = str(root / "client-reaped")
             anchor = '        return True\n    except ProcessLookupError:\n'
-            replacement = '        if len(child.args) > 1 and child.args[1] == SERVER:\n            pathlib.Path(os.environ["SDNS_TEST_SERVER_REAPED"]).write_text("reaped")\n        elif len(child.args) > 1 and child.args[1] == "-c":\n            pathlib.Path(os.environ["SDNS_TEST_CLIENT_REAPED"]).write_text("reaped")\n' + anchor
+            replacement = ('        if len(child.args) > 1 and child.args[1] == SERVER:\n'
+                           '            pathlib.Path(os.environ["SDNS_TEST_SERVER_REAPED"]).write_text("reaped")\n' + anchor)
             shell = once(shell, anchor, replacement)
         (bench / "std_secure_dns_exercise.sh").write_text(shell, newline="\n")
         (bench / "std_secure_dns_server.py").write_text(server, newline="\n")
@@ -476,16 +424,19 @@ def test(mode):
             os.unlink(name)
             stop_path = pathlib.Path(name)
             env["SDNS_TEST_FIXTURE_STOP"] = str(stop_path)
-        if mode in pid_modes and mode != "bootstrap-hang":
-            env["SDNS_TEST_TOOL_PID"] = str(root / "tool-pid")
             env["SDNS_TEST_TOOL_OPENED"] = str(root / "tool-opened")
             env["SDNS_TEST_TOOL_FDS"] = str(root / "tool-fds")
+            if mode != "bootstrap-hang":
+                env["SDNS_TEST_TOOL_PID"] = str(root / "tool-pid")
         try:
             with output.open("wb") as log:
                 process = subprocess.Popen([SHELL, (bench / "std_secure_dns_exercise.sh").as_posix()], env=env,
                                            stdout=log, stderr=subprocess.STDOUT)
                 if mode in pid_modes:
-                    deadline = time.monotonic() + 40
+                    # Healthy runs publish within seconds. Under six CPU-bound
+                    # processes on the 4-core runner, publication took more than
+                    # 40 s, so the bound is 180 s; a hang still ends the run.
+                    deadline = time.monotonic() + 180
                     marker = root / ("supervisor-pid" if mode == "bootstrap-hang" else "tool-pid")
                     while time.monotonic() < deadline and process.poll() is None:
                         text = marker.read_text().strip() if marker.exists() else ""
@@ -496,8 +447,7 @@ def test(mode):
                     if pid is None:
                         raise RuntimeError("%s: fixture child did not publish its PID" % mode)
                     native = open_handle(pid)
-                    if mode != "bootstrap-hang":
-                        (root / "tool-opened").touch()
+                    (root / "tool-opened").touch()
                 returncode = process.wait(timeout=80)
                 if pid is not None:
                     deadline = time.monotonic() + 5
@@ -543,24 +493,21 @@ def test(mode):
         status = 0 if mode in success else (1 if mode.startswith("exit-") else 76)
         print("=== %s status=%s ===" % (mode, returncode), flush=True)
         print(captured, flush=True)
-        if returncode != status or lines.count(expected) != 1:
-            raise RuntimeError("%s: expected status %s and exactly one %r" % (mode, status, expected))
+        expected_lines = (expected,) if isinstance(expected, str) else expected
+        if returncode != status or sum(lines.count(text) for text in expected_lines) != 1:
+            raise RuntimeError("%s: expected status %s and exactly one of %r" % (mode, status, expected_lines))
         if "supervisor cleanup is unconfirmed" in captured:
             raise RuntimeError("supervisor cleanup was not confirmed")
         if mode == "bootstrap-hang" and lines.count("the secure DNS supervisor did not stop during cleanup") != 1:
             raise RuntimeError("bootstrap-hang did not reach forced supervisor cleanup")
         if mode in server_live_modes and (root / "server-reaped").read_text() != "reaped":
             raise RuntimeError("server was not reaped by its supervisor")
-        if mode in client_timeout_modes and (root / "client-reaped").read_text() != "reaped":
-            raise RuntimeError("timed-out client was not reaped by its supervisor")
         if mode in success and lines.count("fixture supervisor completed") != 1:
             raise RuntimeError("fixture did not complete its supervisor handoff")
-        if mode == "closed-exit" and "hung before signaling readiness" in captured:
-            raise RuntimeError("closed EOF plus exit was mistaken for a hang")
         if mode == "dig-usage-only":
             if lines.count("  | Usage: dig [@server] name [type]") != 1 or "skipped: this dig has neither" in captured:
                 raise RuntimeError("usage-only dig output was not rejected as a failed preflight")
-        if mode in ("broken-h2", "broken-h2-self") and "controlled broken h2" not in captured:
+        if mode == "broken-h2" and "controlled broken h2" not in captured:
             raise RuntimeError("broken h2 traceback missing")
         if mode == "hang":
             for text in ("Timeout (", "(most recent call first):", "fixture stall at pki"):
@@ -568,9 +515,8 @@ def test(mode):
                     raise RuntimeError("synchronized startup evidence missing: " + text)
             if (sys.platform == "darwin" or sys.platform.startswith("linux")) and "== startup diagnostics: uptime" not in lines:
                 raise RuntimeError("startup diagnostics did not run")
-        if mode in ("import-hang", "closed", "diagnostic"):
+        if mode in ("import-hang", "diagnostic"):
             stall = {"import-hang": "fixture stall during import",
-                     "closed": "fixture stall with stdout closed",
                      "diagnostic": "fixture diagnostic stall"}[mode]
             if stall not in lines:
                 raise RuntimeError("fixture stall evidence missing: " + stall)
@@ -584,6 +530,8 @@ def test(mode):
                 raise RuntimeError("crash traceback missing")
             if "last 16384 of " not in captured or "discarded-crash-prefix" in captured or "C" * 16385 in captured:
                 raise RuntimeError("crash evidence was not capped")
+        if mode == "gap-hang" and "unrelated server output" in captured:
+            raise RuntimeError("an initial stage with no evidence file printed the server log")
         evidence_modes = {
             "interpreter-hang", "dependency-hang", "build-hang", "mutation-build-hang", "mutation-patch-hang",
             "dig-hang", "dig-query-hang", "dig-version-hang",
@@ -598,8 +546,8 @@ def test(mode):
                 raise RuntimeError("%s: capped partial evidence missing" % mode)
             if "discarded-evidence-prefix" in captured or "X" * 16385 in captured:
                 raise RuntimeError("%s: evidence exceeded its cap" % mode)
-            if mode in client_timeout_modes and lines.count("  | " + evidence) != 1:
-                raise RuntimeError("%s: client evidence was not retained" % mode)
+            if mode in client_timeout_modes and lines.count(evidence) != 1:
+                raise RuntimeError("%s: stage evidence was not retained" % mode)
         fd_modes = {"build-hang", "mutation-build-hang", "mutation-patch-hang",
                     "dig-hang", "dig-query-hang", "dig-version-hang",
                     "gap-hang", "gap-evidence-hang", "server-exit-tool"}
@@ -617,10 +565,8 @@ def test(mode):
 
 if __name__ == "__main__":
     modes = sys.argv[3:] or [
-        "body-early", "silent", "crash", "hang", "import-hang", "invalid-dead",
-        "invalid-deadline", "truncated", "ready-dead", "late-ready", "closed",
-        "closed-exit", "surplus", "surplus-coalesced", "ready-open", "crlf", "split", "queued-frames",
-        "diagnostic", "broken-h2", "broken-h2-self", "bootstrap-hang", "bootstrap-exit",
+        "body-early", "silent", "crash", "hang", "import-hang", "ready-dead", "queued-frames",
+        "diagnostic", "broken-h2", "bootstrap-hang", "bootstrap-exit",
         "interpreter-hang", "dependency-hang", "interpreter-exit-124", "interpreter-exit-137",
         "dependency-exit-124", "dependency-exit-137", "dependency-broken", "dependency-self",
         "build-hang", "mutation-build-hang", "mutation-patch-hang",

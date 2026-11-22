@@ -60,14 +60,89 @@ import std/indexable
 import std/socket::{IyiSocket, SocketError}
 
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  {% unless flag?(:run_end_copy) %}
+    # one ending: begin
+    # The run's one ending, for every catch, watchdog and setup failure, on
+    # any thread and under any lock. The first caller to claim the word
+    # writes its line with one write and ends the process with its status;
+    # every later caller writes nothing and yields until that end. Nothing
+    # here allocates or takes a lock. The old IyiIO#write could be
+    # preempted after its low-level write and before returning to the
+    # caller's exit, leaving a later placement fiber holding the worker.
+    # Darwin leaves through the exit system call, avoiding libSystem exit
+    # teardown. Binding `_exit` would put `__exit` on the dependency floor
+    # bench/parallel_exercise.sh holds. That script holds every copy of
+    # this block to bench/parallel_exercise.iyi's and appends it to each
+    # runtime copy it runs, built with -Drun_end_copy, so a hook and its
+    # fixture claim one word.
+    class RunEnd
+      @[UnsafeReach("the run's claim: atomically set once, reset only for the ending-hook setup probe")]
+      @@claimed : UInt64 = 0_u64
+
+      def self.claim : Bool
+        Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.compare_and_set(0_u64, 1_u64)[1]
+      end
+
+      {% if flag?(:ending_hook) %}
+        # Only before the racers start, after the cross-layer claim probe.
+        def self.reset_for_test : Nil
+          Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.set(0_u64)
+        end
+      {% end %}
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def end_run(status : Int32, fd : Int32, lead : String, what : String = "", tail : String = "") : NoReturn
+      unless RunEnd.claim
+        while true
+          IyiThread.yield_cpu
+        end
+      end
+      size = lead.bytesize + what.bytesize + tail.bytesize
+      line = uninitialized UInt8[512]
+      base = pointerof(line).as(UInt8*)
+      at = 0
+      piece = 0
+      while piece < 3
+        text = piece == 0 ? lead : (piece == 1 ? what : tail)
+        from = text.to_unsafe
+        count = text.bytesize
+        if size <= 512
+          i = 0
+          while i < count
+            (base + at + i).value = from[i]
+            i = i + 1
+          end
+          at = at + count
+          from = base
+          count = piece == 2 ? at : 0
+        end
+        done = 0
+        while done < count
+          wrote = __iyi_write(fd, (from + done).as(Void*), (count - done).to_u64)
+          break if wrote <= 0_i64
+          done = done + wrote.to_i32
+        end
+        piece = piece + 1
+      end
+      {% if flag?(:darwin) %}
+        asm("svc #0x80" :: "{x16}"(1_i64), "{x0}"(status.to_i64) : "memory" : "volatile")
+        while true
+        end
+      {% else %}
+        __iyi_exit(status)
+      {% end %}
+    end
+    # one ending: end
+  {% end %}
+
   def fail(message : String) : Nil
-    print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    end_run(1, 1, "FAIL: ", message, "\n")
   end
 
   def setup_exit(message : String) : Nil
-    print "FAIL: #{message}\n"
-    __iyi_exit(76)
+    end_run(76, 1, "FAIL: ", message, "\n")
   end
 
   def elapsed_ms(since : Int64) : Int64
@@ -422,12 +497,11 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   def slice_hang(what : String) : Nil
-    puts "FAIL: slice: progress hang: #{what}"
-    __iyi_exit(76)
+    end_run(76, 1, "FAIL: slice: progress hang: ", what, "\n")
   end
 
   def slice_unarmed(what : String) : Nil
-    setup_exit("slice: not armed: #{what}")
+    end_run(76, 1, "FAIL: slice: not armed: ", what, "\n")
   end
 
   {% if flag?(:turn_refusal_watchdog) %}
@@ -458,8 +532,7 @@ import std/socket::{IyiSocket, SocketError}
   @[NoInline]
   @[NoPreempt]
   def slice_lock_hang(message : String) : Nil
-    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-    __iyi_exit(76)
+    end_run(76, 2, message)
   end
   {% end %}
 
@@ -485,7 +558,7 @@ import std/socket::{IyiSocket, SocketError}
         end
         seen = IyiWorkers.force_flag_seen
         fail("slice: the monitor's preemption decision for a held worker left its word down") if seen == 1_u64
-        slice_unarmed("the monitor recorded an invalid word decision #{seen}") unless seen == 2_u64
+        slice_unarmed("the monitor recorded an invalid word decision") unless seen == 2_u64
         proof.finish
         return
       end
@@ -687,12 +760,11 @@ import std/socket::{IyiSocket, SocketError}
   # The unhooked check observes a preemption attempt. The copy-only check
   # separately records the scheduler's decision for the keyed child.
   def unit_hang(what : String) : Nil
-    puts "FAIL: unit: progress hang: #{what}"
-    __iyi_exit(76)
+    end_run(76, 1, "FAIL: unit: progress hang: ", what, "\n")
   end
 
   def unit_unarmed(what : String) : Nil
-    setup_exit("unit: not armed: #{what}")
+    end_run(76, 1, "FAIL: unit: not armed: ", what, "\n")
   end
 
   def unit_observed(per_ms : Int64) : Nil
@@ -1194,8 +1266,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   def poller_hang(message : String) : NoReturn
-    puts "FAIL: poller: progress hang: #{message}"
-    __iyi_exit(76)
+    end_run(76, 1, "FAIL: poller: progress hang: ", message, "\n")
   end
 
   def poller(per_ms : Int64) : Nil
@@ -1339,8 +1410,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   def fresh_hang(message : String) : NoReturn
-    puts "FAIL: fresh: progress hang: #{message}"
-    __iyi_exit(76)
+    end_run(76, 1, "FAIL: fresh: progress hang: ", message, "\n")
   end
 
   @[NoInline]

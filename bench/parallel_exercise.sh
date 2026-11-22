@@ -117,6 +117,8 @@
 #      Coarse uses a structural timer decision. Slice, recursion, library
 #      loops, std calls and tokenless use keyed eligible decisions; a refused
 #      check waits in its slow path or exits as a progress failure.
+#      Five simultaneous endings, an unclaimed copy, a runtime-hook race,
+#      and withheld placement arrivals check the watchdog failure path itself.
 #   8. Failure proof: a pool held to one worker is refused by the capacity
 #      witness. The speed parser and at-once floor also have a separate
 #      one-worker negative check; neither measured value gates a healthy run.
@@ -151,6 +153,16 @@ child_progress_status() { # label, status, output
   fi
 }
 
+one_ending() { # output, exact FAIL line, status
+  [ "$3" -eq 76 ] && [ "$(grep -cxF -- "$2" "$1")" -eq 1 ] && [ "$(grep -c '^FAIL: ' "$1")" -eq 1 ]
+}
+emergency_timeout() { # name, child status
+  if [ "$2" -eq 124 ] || [ "$2" -eq 137 ]; then
+    echo "FAIL: $1: progress hang: the shell emergency timeout stopped the run (exit $2)"
+    exit 76
+  fi
+}
+
 # The cores this process may run on, as the pool counts them.
 cores() {
   case "$(uname -s)" in
@@ -167,6 +179,25 @@ fi
 need_cores() { # cores, what the proof needs
   if [ "$CORES" -lt "$1" ]; then echo "FAIL: cores: setup: this host has $CORES cores but needs $1: $2"; exit 76; fi
 }
+
+# Every running runtime copy receives exactly the fixture's ending block.
+run_end_block() { # fixture file
+  awk '/^    # one ending: begin$/ { begun++; on = 1; next }
+/^    # one ending: end$/ { ended++; on = 0; next }
+on { print }
+END { if (begun != 1 || ended != 1) exit 3 }' "$1"
+}
+if ! RUN_END="$(run_end_block "$REPO/bench/parallel_exercise.iyi")" || [ -z "$RUN_END" ]; then
+  echo "FAIL: one ending: setup: bench/parallel_exercise.iyi has no single one-ending block"; exit 76
+fi
+for fixture in parallel_exercise parallel_migrate parallel_preempt parallel_preempt_lib completions_taken; do
+  if ! block="$(run_end_block "$REPO/bench/$fixture.iyi")" || [ "$block" != "$RUN_END" ]; then
+    echo "FAIL: one ending: setup: bench/$fixture.iyi's one-ending block is not bench/parallel_exercise.iyi's"; exit 76
+  fi
+  if [ "$(grep -c '__iyi_exit(' "$REPO/bench/$fixture.iyi")" -ne 1 ]; then
+    echo "FAIL: one ending: setup: bench/$fixture.iyi ends the process outside its one-ending block"; exit 76
+  fi
+done
 
 # ── 1. The exercise, twice ────────────────────────────────────────────────
 for build in plain release; do
@@ -803,6 +834,23 @@ for workers in 12 0; do
   done
 done
 
+step "failure proof: each panic mode names a reader that never parks"
+if ! "$IYI" build -Dpanic_park_watchdog "$REPO/bench/panic_exit.iyi" -o panic_park_watchdog-run > build-panic_park_watchdog.log 2>&1; then
+  echo "FAIL: panic_park_watchdog: setup: the exercise failed to build"; tail -20 build-panic_park_watchdog.log; exit 76
+fi
+for workers in 0 12; do
+  for mode in task-panic main-panic task-exit; do
+    timeout -k 5 120 ./panic_park_watchdog-run "$mode" --workers="$workers" --watch=100 > panic_park_watchdog.txt 2>&1
+    code=$?
+    emergency_timeout panic_park_watchdog "$code"
+    want="FAIL: $mode: progress hang: a reader did not park on its io wait"
+    if ! one_ending panic_park_watchdog.txt "$want" "$code"; then
+      echo "FAIL: panic_park_watchdog: setup: expected one exact watchdog verdict for $mode with $workers workers and exit 76, got exit $code"; tail -20 panic_park_watchdog.txt; exit 76
+    fi
+    echo "  watchdog control panic_park_watchdog workers=$workers mode=$mode exits 76 at \"$want\""
+  done
+done
+
 # ── 5. Share gates the parallel block ─────────────────────────────────────
 step "Share gates what a parallel task's block captures"
 refused() { # name, expected text, program body
@@ -931,12 +979,17 @@ fi
 echo "  broken copy, the second block left out: refused with no other block counted"
 
 # ── 7. Failure proofs: broken copies of the runtime ──────────────────────
-# Each a copy of src/iyi with one file changed - concurrency.iyi unless
-# another is named - built against through IYI_PATH, of the program named
-# or of parallel_exercise.iyi, with any build flags after the program's
-# name; nothing in the tree is touched. An awk that finds an anchor gone
-# exits nonzero, and that fails the gate.
-broken() { # name, awk program[, file in src/iyi[, program in bench[, build flags...]]]
+# Each running copy of src/iyi has one file changed by awk and shares its
+# ending with the fixture through -Drun_end_copy. IR-only copies stay separate.
+# The program is a bench fixture name or a generated fixture path. Missing
+# or duplicate awk anchors fail the gate; nothing in the tree is touched.
+copy_build() { # copy directory, bench fixture name or generated path, build flags...
+  local program="$REPO/bench/$2.iyi"
+  case "$2" in *.iyi) program="$2" ;; esac
+  printf '%s\n' "$RUN_END" >> "$1/iyi/concurrency.iyi" || { echo "FAIL: $1: setup: could not append the run's one ending to the runtime copy"; exit 76; }
+  IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build -Drun_end_copy "${@:3}" "$program" -o "$1-run" > "build-$1.log" 2>&1
+}
+broken() { # name, awk program[, file in src/iyi[, bench fixture name or path[, build flags...]]]
   local file="${3:-concurrency.iyi}" program="${4:-parallel_exercise}" awk_status cmp_status
   mkdir -p "$1/iyi" || { echo "FAIL: $1: setup: could not create the runtime copy"; exit 76; }
   cp "$REPO"/src/iyi/*.iyi "$1/iyi/" || { echo "FAIL: $1: setup: could not copy the runtime"; exit 76; }
@@ -952,19 +1005,13 @@ broken() { # name, awk program[, file in src/iyi[, program in bench[, build flag
   elif [ "$cmp_status" -ne 1 ]; then
     echo "FAIL: $1: setup: could not compare the generated runtime copy"; exit 76
   fi
-  if ! IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "${@:5}" "$REPO/bench/$program.iyi" -o "$1-run" > "build-$1.log" 2>&1; then
+  if ! copy_build "$1" "$program" "${@:5}"; then
     echo "FAIL: $1: setup: the runtime copy failed to build"; tail -20 "build-$1.log"; exit 76
   fi
 }
 # Mutants must exit 1 with the exact FAIL or panic line; controls must
 # exit with their expected status and exact verdict. Timeouts never count
 # as catches.
-emergency_timeout() { # name, child status
-  if [ "$2" -eq 124 ] || [ "$2" -eq 137 ]; then
-    echo "FAIL: $1: progress hang: the shell emergency timeout stopped the run (exit $2)"
-    exit 76
-  fi
-}
 verdict_caught() { # name, exact verdict, step arguments...
   local name="$1" want="$2" code
   shift 2
@@ -1007,15 +1054,26 @@ verdict_watchdog() { # name, exact FAIL line, step arguments...
   timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
   code=$?
   emergency_timeout "$name" "$code"
-  if [ "$code" -ne 76 ] || [ "$(grep -cxF -- "$want" "$name.txt")" -ne 1 ] || [ "$(grep -c '^FAIL: ' "$name.txt")" -ne 1 ]; then
+  if ! one_ending "$name.txt" "$want" "$code"; then
     echo "FAIL: $name: setup: expected one exact watchdog verdict with exit 76, got exit $code"; tail -20 "$name.txt"; exit 76
   fi
   echo "  watchdog control $name exits 76 at \"$want\""
 }
-# The copy-only definitions the forced proofs add to the runtime's files, in
-# awk output only: nothing reaches src/iyi. Each is reached through a -D flag
-# the program sets, so no healthy build sees it. An awk that misses an anchor
-# exits 3, which fails the gate through broken().
+verdict_repeated() { # name, exact FAIL line, required repetitions, step arguments...
+  local name="$1" want="$2" times="$3" code
+  shift 3
+  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
+  code=$?
+  emergency_timeout "$name" "$code"
+  if [ "$code" -ne 76 ] || [ "$(grep -cxF -- "$want" "$name.txt")" -ne "$times" ] ||
+     [ "$(grep -c '^FAIL: ' "$name.txt")" -ne "$times" ] || one_ending "$name.txt" "$want" "$code"; then
+    echo "FAIL: $name: setup: expected $times exact unclaimed watchdog verdicts with exit 76, got exit $code"; tail -20 "$name.txt"; exit 76
+  fi
+  echo "  unclaimed control $name exits 76 with $times identical failures; one-ending check rejects it"
+}
+# Copy-only definitions below are generated into runtime files, never src.
+# Hook and fixture endings use the one block appended by copy_build; the
+# fixture's own block is compiled out. An awk that misses an anchor exits 3.
 WAKE_COMMON='/^  def self.wait_shared\(st : IyiSchedulerState\) : Nil$/ { inws = 1; n_wait++ }
 inws && /^  end$/ { inws = 0 }
 inws && /^    st.idle = true$/ { print; print "    IyiScheduler.force_idle_mark(st)"; n_mark++; at_mark = NR; next }
@@ -1050,9 +1108,7 @@ WAKE_DEFS='/^  def self.reschedule : Nil$/ {
   print "    while !force_home_completed?"
   print "      IyiThread.spin_pause"
   print "      if __iyi_monotonic_ns - started > 10000000000_i64"
-  print "        said = \"FAIL: home: progress hang: the copy hook waited for the target post decision\\n\""
-  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "        __iyi_exit(76)"
+  print "        end_run(76, 2, \"FAIL: home: progress hang: the copy hook waited for the target post decision\\n\")"
   print "      end"
   print "    end"
   print "  end"
@@ -1071,13 +1127,10 @@ WAKE_DEFS='/^  def self.reschedule : Nil$/ {
   print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_fiber).address).value.get"
   print "    return unless Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_posted).address).value.get == 1_u64"
   print "    unless home.idle"
-  print "      said = \"FAIL: home: not armed: the targeted post found the root not idle\\n\""
-  print "      __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "      __iyi_exit(76)"
+  print "      end_run(76, 2, \"FAIL: home: not armed: the targeted post found the root not idle\\n\")"
   print "    end"
   print "    unless home.notified"
-  print "      puts \"FAIL: home: the targeted idle root was posted but not rung\""
-  print "      __iyi_exit(1)"
+  print "      end_run(1, 1, \"FAIL: home: the targeted idle root was posted but not rung\\n\")"
   print "    end"
   print "    {% if !flag?(:copy_hook_watchdog) %}"
   print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_result).address).value.set(1_u64)"
@@ -1156,9 +1209,7 @@ NOW_DEFS='/^  def self.reschedule : Nil$/ {
   print "    while blocked.value.get == 0_u64 && stored.value.get == 0_u64"
   print "      IyiThread.spin_pause"
   print "      if __iyi_monotonic_ns - started > 10000000000_i64"
-  print "        said = \"FAIL: now: progress hang: the copy hook waited for the second take\\n\""
-  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "        __iyi_exit(76)"
+  print "        end_run(76, 2, \"FAIL: now: progress hang: the copy hook waited for the second take\\n\")"
   print "      end"
   print "    end"
   print "  end"
@@ -1233,9 +1284,7 @@ CANCEL_DEFS='/^  def self.reschedule : Nil$/ {
   print "    while released.value.get == 0_u64"
   print "      IyiThread.spin_pause"
   print "      if __iyi_monotonic_ns - started > 10000000000_i64"
-  print "        said = \"FAIL: lostcancel: progress hang: the copy hook waited for release\\n\""
-  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "        __iyi_exit(76)"
+  print "        end_run(76, 2, \"FAIL: lostcancel: progress hang: the copy hook waited for release\\n\")"
   print "      end"
   print "    end"
   print "  end"
@@ -1254,6 +1303,43 @@ $CANCEL_PARK
 $CANCEL_DEFS
 { print }
 $CANCEL_END"
+
+ENDING_HOOK='/^  def self.reschedule : Nil$/ {
+  print "  def self.force_end_claim : Bool"
+  print "    RunEnd.claim"
+  print "  end"
+  print "  def self.force_end_reset : Nil"
+  print "    RunEnd.reset_for_test"
+  print "  end"
+  print ""
+  print "  @[NoInline]"
+  print "  @[NoPreempt]"
+  print "  def self.force_end_now : NoReturn"
+  print "    end_run(76, 2, \"FAIL: ending: progress hang: five watchdogs reached one deadline together\\n\")"
+  print "  end"
+  print
+  n_defs++
+  next
+}
+{ print }
+END { if (n_defs != 1) exit 3 }'
+
+step "failure proof: five failures at one deadline end the run once"
+ENDING_LINE='FAIL: ending: progress hang: five watchdogs reached one deadline together'
+if ! "$IYI" build "$REPO/bench/parallel_exercise.iyi" -o ending-run > build-ending.log 2>&1; then
+  echo "FAIL: ending: setup: the exercise failed to build"; tail -20 build-ending.log; exit 76
+fi
+verdict_watchdog ending "$ENDING_LINE" ending
+if ! "$IYI" build -Dending_unclaimed "$REPO/bench/parallel_exercise.iyi" -o ending_unclaimed-run > build-ending_unclaimed.log 2>&1; then
+  echo "FAIL: ending_unclaimed: setup: the exercise failed to build"; tail -20 build-ending_unclaimed.log; exit 76
+fi
+verdict_repeated ending_unclaimed "$ENDING_LINE" 5 ending
+broken ending_hook "$ENDING_HOOK" concurrency.iyi parallel_exercise -Dending_hook
+verdict_watchdog ending_hook "$ENDING_LINE" ending
+if ! "$IYI" build -Dplacement_withhold_arrival "$REPO/bench/parallel_exercise.iyi" -o placementheld-run > build-placementheld.log 2>&1; then
+  echo "FAIL: placementheld: setup: the exercise failed to build"; tail -20 build-placementheld.log; exit 76
+fi
+verdict_watchdog placementheld 'FAIL: placement: progress hang: a parallel task held its worker for 10000 ms and no second task started' placement
 
 step "failure proof: a cross-thread wake that does not ring is a lost wakeup"
 broken lostwake "$WAKE_BUG" concurrency.iyi parallel_exercise -Dlostwake_force
@@ -1319,10 +1405,7 @@ DUP_DEFS='/^  def self.preempts : UInt64$/ {
   print "    while result.value.get != 1_u64"
   print "      IyiThread.spin_pause"
   print "      if __iyi_monotonic_ns - started > 10_000_000_000_i64"
-  print "        said = \"FAIL: duplicate: progress hang: the second look or duplicate guard never arrived\\n\""
-  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "        __iyi_flush_std"
-  print "        __iyi_exit(76)"
+  print "        end_run(76, 2, \"FAIL: duplicate: progress hang: the second look or duplicate guard never arrived\\n\")"
   print "      end"
   print "    end"
   print "  end"
@@ -1371,8 +1454,7 @@ POST_DEFS='/^  def self.reschedule : Nil$/ {
   print "  end"
   print "  def self.force_post_missing(fiber : IyiFiber) : Nil"
   print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_post_target).address).value.get"
-  print "    puts \"FAIL: cancel: the registered target was not posted to its worker\""
-  print "    __iyi_exit(1)"
+  print "    end_run(1, 1, \"FAIL: cancel: the registered target was not posted to its worker\\n\")"
   print "  end"
   print "  def self.force_post_done(fiber : IyiFiber) : Nil"
   print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_post_target).address).value.get"
@@ -1436,17 +1518,14 @@ PARKED_DEFS='/^  def self.reschedule : Nil$/ {
   print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_target).address).value.get"
   print "    return if Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_decided).address).value.get != 0_u64"
   print "    unless force_io_registered?"
-  print "      said = \"FAIL: task-panic: not armed: target cancellation preceded io registration\\n\""
-  print "      __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "      __iyi_exit(76)"
+  print "      end_run(76, 2, \"FAIL: task-panic: not armed: target cancellation preceded io registration\\n\")"
   print "    end"
   print "    return unless fiber.cancelled"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_decided).address).value.set(1_u64)"
   print "    if handled"
   print "      puts \"task-panic: the registered target reached the io cancellation branch\""
   print "    elsif fiber.state == IyiFiberState::WaitingIo"
-  print "      puts \"FAIL: task-panic: the registered target missed the io cancellation branch\""
-  print "      __iyi_exit(1)"
+  print "      end_run(1, 1, \"FAIL: task-panic: the registered target missed the io cancellation branch\\n\")"
   print "    end"
   print "  end"
   print
@@ -1607,9 +1686,7 @@ inpark && (/^ +if word\.value\.get != seen$/ || /^      IyiChanLock\.unlock\(loc
   print "    while locked ? attempted.value.get == 0_u64 : woke.value.get == 0_u64"
   print "      IyiThread.spin_pause"
   print "      if __iyi_monotonic_ns - started > 10000000000_i64"
-  print "        said = \"FAIL: lostword: progress hang: the copy hook waited for its wake\\n\""
-  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "        __iyi_exit(76)"
+  print "        end_run(76, 2, \"FAIL: lostword: progress hang: the copy hook waited for its wake\\n\")"
   print "      end"
   print "    end"
   print "  end"
@@ -1854,12 +1931,9 @@ inclose && /^          other.post_mail$/ { print; print "          force_close_p
   print "  def self.force_close_missing(fd : Int32) : Nil"
   print "    return unless fd.to_u64 + 1_u64 == Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_fd).address).value.get"
   print "    unless force_close_registered?"
-  print "      said = \"FAIL: closes: not armed: the target was closed before io registration\\n\""
-  print "      __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "      __iyi_exit(76)"
+  print "      end_run(76, 2, \"FAIL: closes: not armed: the target was closed before io registration\\n\")"
   print "    end"
-  print "    puts \"FAIL: closes: the registered target close was not posted to its reader\""
-  print "    __iyi_exit(1)"
+  print "    end_run(1, 1, \"FAIL: closes: the registered target close was not posted to its reader\\n\")"
   print "  end"
   print "  def self.force_close_posted(fd : Int32) : Nil"
   print "    return unless fd.to_u64 + 1_u64 == Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_fd).address).value.get"
@@ -2070,9 +2144,7 @@ END { if (n_defs != 1 || n_wake != 1 || n_hand != 1 || n_mut != 1 || expect) exi
   print "    until lock.value.compare_and_set(0_u64, 1_u64)[1]"
   print "      IyiThread.spin_pause"
   print "      if __iyi_monotonic_ns > limit"
-  print "        said = \"FAIL: backstop: progress hang: the grab gate did not open in 10000 ms\\n\""
-  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "        __iyi_exit(76)"
+  print "        end_run(76, 2, \"FAIL: backstop: progress hang: the grab gate did not open in 10000 ms\\n\")"
   print "      end"
   print "    end"
   print "  end"
@@ -2479,8 +2551,7 @@ in_turn_workers && /^  def self.preempts : UInt64$/ {
   print "  end"
   print "  @[NoPreempt]"
   print "  def self.force_turn_hang(said : String) : Nil"
-  print "    __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "    __iyi_exit(76)"
+  print "    end_run(76, 2, said)"
   print "  end"
   print "  @[NoPreempt]"
   print "  def self.force_turn_target_on?(st : IyiSchedulerState) : Bool"
@@ -3031,8 +3102,7 @@ TICKER_DEFS='in_ticker_workers && /^  def self.preempts : UInt64$/ {
   print "  @@forced_ticker_slow_active : UInt64 = 0_u64"
   print "  @[NoPreempt]"
   print "  def self.force_ticker_abort(said : String) : Nil"
-  print "    __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "    __iyi_exit(76)"
+  print "    end_run(76, 2, said)"
   print "  end"
   print "  def self.force_ticker_result : UInt64"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_result).address).value.get"
@@ -3187,6 +3257,47 @@ verdict_caught tickerwake "unit: an expired sleeper was not enqueued by its work
 broken tickerwake_hook "$TICKER_HOOK" concurrency.iyi parallel_preempt -Dticker_force
 verdict_held tickerwake_hook "unit: the preempted worker enqueued and ran its expired sleeper" unit --workers=1
 
+step "failure proof: ticker watchdogs name withheld progress"
+for proof in ready decision resumed lock; do
+  copy="ticker_${proof}_watchdog"
+  if ! awk -v mode="$proof" '
+    /^  def unit_ticker_sleeper\(/ { sleeper = 1 }
+    /^  def unit_ticker_long\(/ { long = 1 }
+    /^  def unit_ticker : Nil/ { main = 1 }
+    /^  end$/ { sleeper = 0; long = 0; main = 0 }
+    sleeper && mode == "ready" && /^    state\.ready$/ { n++; print "    # withhold readiness"; next }
+    sleeper && mode == "resumed" && /^    state\.observe\(observed\)$/ { n++; print "    # withhold the return witness"; next }
+    long && mode == "decision" && /IyiWorkers\.force_ticker_arm\(/ { n++; print "    # withhold the preemption arm"; next }
+    main && mode == "lock" && /^      state\.queue$/ {
+      print "      lock_gate = SliceLockGate.new"
+      print "      IyiThread.start do"
+      print "        lock_gate.hold"
+      print "        nil"
+      print "      end"
+      print "      until lock_gate.held?"
+      print "        IyiThread.spin_pause"
+      print "      end"
+      print
+      n++; next
+    }
+    { print }
+    END { if (n != 1) exit 3 }
+  ' "$REPO/bench/parallel_preempt.iyi" > "$copy.iyi"; then
+    echo "FAIL: $copy: setup: the fixture mutation anchor was missing or duplicated"; exit 76
+  fi
+  flags=(-Dticker_force)
+  case "$proof" in
+    ready) want='FAIL: unit: progress hang: the keyed sleeper did not hold its worker in 10000 ms' ;;
+    decision) want="FAIL: unit: progress hang: the keyed sleeper's preemption decision did not finish in 20000 ms" ;;
+    resumed) want='FAIL: unit: progress hang: the enqueued sleeper did not resume in 20000 ms' ;;
+    lock)
+      want='FAIL: ticker: progress hang: the runtime lock did not clear for the keyed preemption in 20000 ms'
+      flags+=(-Dturn_refusal_watchdog) ;;
+  esac
+  broken "$copy" "$TICKER_HOOK" concurrency.iyi "$WORK/$copy.iyi" "${flags[@]}"
+  verdict_watchdog "$copy" "$want" unit --workers=1
+done
+
 step "failure proof: a word the monitor raised for the task before preempts the task switched in after it"
 # The monitor waits at the next look's entry. That rendezvous also drains
 # any earlier look, preventing its old decision from raising the word after
@@ -3212,9 +3323,7 @@ STALE_DEFS='/^  def self.preempts : UInt64$/ {
   print "      IyiThread.park_if_requested"
   print "      IyiThread.spin_pause"
   print "    end"
-  print "    said = \"FAIL: stale: not armed: the monitor gate had an unexpected state before closing\\n\""
-  print "    __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "    __iyi_exit(76)"
+  print "    end_run(76, 2, \"FAIL: stale: not armed: the monitor gate had an unexpected state before closing\\n\")"
   print "  end"
   print "  def self.force_stale_gate_state : UInt64"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_gate).address).value.get"
@@ -3230,9 +3339,7 @@ STALE_DEFS='/^  def self.preempts : UInt64$/ {
   print "    limit = __iyi_monotonic_ns + 10000000000_i64"
   print "    while gate.value.get == 2_u64"
   print "      if __iyi_monotonic_ns > limit"
-  print "        said = \"FAIL: stale: progress hang: the monitor gate was not released by the target switch in 10000 ms\\n\""
-  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
-  print "        __iyi_exit(76)"
+  print "        end_run(76, 2, \"FAIL: stale: progress hang: the monitor gate was not released by the target switch in 10000 ms\\n\")"
   print "      end"
   print "      IyiThread.spin_pause"
   print "    end"
@@ -3467,7 +3574,7 @@ for copy in libruntime libruntime_hook; do
 done
 lib_awk libruntime-inline "$REPO/src/iyi/prelude.iyi" libruntime/iyi/prelude.iyi "$LIB_INLINE"
 for copy in libruntime libruntime_hook; do
-  if ! IYI_PATH="$WORK/$copy${PSEP}$REPO/src" "$IYI" build -Dlibruntime_force "$REPO/bench/parallel_preempt_lib.iyi" -o "$copy-run" > "build-$copy.log" 2>&1; then
+  if ! copy_build "$copy" parallel_preempt_lib -Dlibruntime_force; then
     echo "FAIL: $copy: setup: the library copy failed to build"; tail -20 "build-$copy.log"; exit 76
   fi
 done
@@ -3475,6 +3582,19 @@ for proof in sort copy rehash join; do
   verdict_caught libruntime "$proof: the library's loop turned with its worker's word raised and kept its worker" "$proof" --workers=1
   verdict_held libruntime_hook "$proof: the library's loop gave its worker up at the turn after its word was raised" "$proof" --workers=1
 done
+
+step "failure proof: a library operation that never starts is named"
+if ! awk '
+  /^        answer\.set\(run_op\(name, clock\)\)$/ { n++; print "        sleep(60000)"; next }
+  { print }
+  END { if (n != 1) exit 3 }
+' "$REPO/bench/parallel_preempt_lib.iyi" > library_watchdog.iyi; then
+  echo "FAIL: library_watchdog: setup: the operation anchor was missing or duplicated"; exit 76
+fi
+if ! "$IYI" build "$WORK/library_watchdog.iyi" -o library_watchdog-run > build-library_watchdog.log 2>&1; then
+  echo "FAIL: library_watchdog: setup: the fixture failed to build"; tail -20 build-library_watchdog.log; exit 76
+fi
+verdict_watchdog library_watchdog 'FAIL: sort: progress hang: the operation did not reach its checkpoint' sort --workers=1
 
 # The two halves of `copy_checks`, broken: `Pointer#copy_from` with no way
 # around its loop of runs, as it was, and darwin's anchor in the entry
@@ -3580,7 +3700,7 @@ END { if (methods != 1 || n != 1) exit 3 }' \
     "$REPO/src/iyi/concurrency.iyi" > oneworker/iyi/concurrency.iyi; then
     echo "FAIL: one-worker: setup: the mutation anchor was missing or duplicated"; exit 76
   fi
-  if ! IYI_PATH="$WORK/oneworker${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/parallel_exercise.iyi" -o oneworker-run > build-oneworker.log 2>&1; then
+  if ! copy_build oneworker parallel_exercise --release; then
     echo "FAIL: one-worker: setup: the copy failed to build"; tail -20 build-oneworker.log; exit 76
   fi
   verdict_caught oneworker "capacity: the pool started 1 worker, expected $K" capacity "$K"

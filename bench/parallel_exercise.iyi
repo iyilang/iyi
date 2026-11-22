@@ -4,6 +4,7 @@
 #   ./bin/iyi run bench/parallel_exercise.iyi wake cancel      # some of them
 #   ./bin/iyi run bench/parallel_exercise.iyi speed W T N      # one timing
 #   ./bin/iyi run bench/parallel_exercise.iyi capacity K       # worker holds
+#   ./bin/iyi run bench/parallel_exercise.iyi ending           # simultaneous endings
 #
 # Every claim the pool makes, run rather than asserted: parallel tasks
 # start on worker threads and not on the thread that spawned them, on more
@@ -20,25 +21,101 @@
 # as tasks park, turns handed through `park_on` - are neither lost nor
 # doubled.
 #
-# Every step runs under a watchdog: a task on the main thread that sleeps
-# and fails the run by name if the step has not finished, so a wake that
-# never arrives is a named failure rather than a hung job.
+# Property steps run under a watchdog: a task on the main thread that sleeps
+# and fails the run by name if the step has not finished. The ending scenario
+# instead makes five callers reach the same deadline together.
 #
 # `capacity K` holds K non-preemptible tasks on distinct workers together.
+# `-Dplacement_withhold_arrival` makes each placement task reach its deadline.
 # `speed W T N` reports wall time and sampled at-once occupancy only.
 # OPEN: the former 3000 ms cancellation bounds are measurements, not
 # correctness guarantees; forced cancellation copies hold the outcomes.
 
 @[Unsafe("allocates raw blocks through Pointer.malloc in tasks, and Turns trusts @[Share] to hand its word's pointerof address to park_on and wake_on")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  {% unless flag?(:run_end_copy) %}
+    # one ending: begin
+    # The run's one ending, for every catch, watchdog and setup failure, on
+    # any thread and under any lock. The first caller to claim the word
+    # writes its line with one write and ends the process with its status;
+    # every later caller writes nothing and yields until that end. Nothing
+    # here allocates or takes a lock. The old IyiIO#write could be
+    # preempted after its low-level write and before returning to the
+    # caller's exit, leaving a later placement fiber holding the worker.
+    # Darwin leaves through the exit system call, avoiding libSystem exit
+    # teardown. Binding `_exit` would put `__exit` on the dependency floor
+    # bench/parallel_exercise.sh holds. That script holds every copy of
+    # this block to bench/parallel_exercise.iyi's and appends it to each
+    # runtime copy it runs, built with -Drun_end_copy, so a hook and its
+    # fixture claim one word.
+    class RunEnd
+      @[UnsafeReach("the run's claim: atomically set once, reset only for the ending-hook setup probe")]
+      @@claimed : UInt64 = 0_u64
+
+      def self.claim : Bool
+        Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.compare_and_set(0_u64, 1_u64)[1]
+      end
+
+      {% if flag?(:ending_hook) %}
+        # Only before the racers start, after the cross-layer claim probe.
+        def self.reset_for_test : Nil
+          Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.set(0_u64)
+        end
+      {% end %}
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def end_run(status : Int32, fd : Int32, lead : String, what : String = "", tail : String = "") : NoReturn
+      unless RunEnd.claim
+        while true
+          IyiThread.yield_cpu
+        end
+      end
+      size = lead.bytesize + what.bytesize + tail.bytesize
+      line = uninitialized UInt8[512]
+      base = pointerof(line).as(UInt8*)
+      at = 0
+      piece = 0
+      while piece < 3
+        text = piece == 0 ? lead : (piece == 1 ? what : tail)
+        from = text.to_unsafe
+        count = text.bytesize
+        if size <= 512
+          i = 0
+          while i < count
+            (base + at + i).value = from[i]
+            i = i + 1
+          end
+          at = at + count
+          from = base
+          count = piece == 2 ? at : 0
+        end
+        done = 0
+        while done < count
+          wrote = __iyi_write(fd, (from + done).as(Void*), (count - done).to_u64)
+          break if wrote <= 0_i64
+          done = done + wrote.to_i32
+        end
+        piece = piece + 1
+      end
+      {% if flag?(:darwin) %}
+        asm("svc #0x80" :: "{x16}"(1_i64), "{x0}"(status.to_i64) : "memory" : "volatile")
+        while true
+        end
+      {% else %}
+        __iyi_exit(status)
+      {% end %}
+    end
+    # one ending: end
+  {% end %}
+
   def fail(message : String) : Nil
-    print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    end_run(1, 1, "FAIL: ", message, "\n")
   end
 
   def progress_hang(message : String) : NoReturn
-    print "FAIL: #{message}\n"
-    __iyi_exit(76)
+    end_run(76, 1, "FAIL: ", message, "\n")
   end
 
   def elapsed_ms(since : Int64) : Int64
@@ -320,7 +397,9 @@
   @[NoPreempt]
   def placement_first(arrived : Tally) : UInt64
     first = thread_here
-    arrived.add(1_i64)
+    {% unless flag?(:placement_withhold_arrival) %}
+      arrived.add(1_i64)
+    {% end %}
     held = __iyi_monotonic_ns
     while arrived.count < 2_i64
       progress_hang("placement: progress hang: a parallel task held its worker for 10000 ms and no second task started") if elapsed_ms(held) >= 10000_i64
@@ -852,9 +931,7 @@
       while release.count == 0_i64
         IyiThread.spin_pause
         if __iyi_monotonic_ns > limit
-          puts "FAIL: steal: progress hang: a worker was not released after pool startup"
-          __iyi_flush_std
-          __iyi_exit(76)
+          end_run(76, 1, "FAIL: steal: progress hang: a worker was not released after pool startup\n")
         end
       end
     end
@@ -882,9 +959,7 @@
       while elsewhere.count == 0_i64
         IyiThread.spin_pause
         if elapsed_ms(started) >= 20_000_i64
-          puts "FAIL: steal: progress hang: no child ran on another worker while the spawner held its worker"
-          __iyi_flush_std
-          __iyi_exit(76)
+          end_run(76, 1, "FAIL: steal: progress hang: no child ran on another worker while the spawner held its worker\n")
         end
       end
       elapsed_ms(started)
@@ -909,9 +984,7 @@
           while ready.count < IyiWorkers.count.to_i64
             sleep(1)
             if elapsed_ms(started) >= 10_000_i64
-              puts "FAIL: steal: progress hang: not every worker started for the second look"
-              __iyi_flush_std
-              __iyi_exit(76)
+              end_run(76, 1, "FAIL: steal: progress hang: not every worker started for the second look\n")
             end
           end
           release.add(1_i64)
@@ -1393,6 +1466,120 @@
     puts "wakes: #{got.count} values through selects over two channels and a deadline, each once; #{ended.count} tasks cancelled as they parked; #{parts.includes?("words") ? turns_each * 2_i64 : 0_i64} turns handed through park_on and wake_on"
   end
 
+  def ending_line : String
+    "FAIL: ending: progress hang: five watchdogs reached one deadline together\n"
+  end
+
+  # Every participant reaches the claim boundary before any may proceed.
+  @[NoInline]
+  @[NoPreempt]
+  def ending_wait_all(reached : Tally) : Nil
+    reached.add(1_i64)
+    started = __iyi_monotonic_ns
+    while reached.count < 5_i64
+      end_run(76, 1, "FAIL: ending: setup: all five racers did not reach the ending in 10000 ms\n") if __iyi_monotonic_ns - started >= 10_000_000_000_i64
+      IyiThread.spin_pause
+    end
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def ending_end(wrote : Tally, order : Int32) : NoReturn
+    {% if flag?(:ending_unclaimed) %}
+      # Serialize this deliberately broken output so its five lines remain
+      # intact even when the host does not serialize concurrent writes.
+      started = __iyi_monotonic_ns
+      while wrote.count < order.to_i64
+        end_run(76, 1, "FAIL: ending: setup: an unclaimed writer did not reach its turn in 10000 ms\n") if __iyi_monotonic_ns - started >= 10_000_000_000_i64
+        IyiThread.spin_pause
+      end
+      line = ending_line
+      __iyi_write(1, line.to_unsafe.as(Void*), line.bytesize.to_u64)
+      wrote.add(1_i64)
+      started = __iyi_monotonic_ns
+      while wrote.count < 5_i64
+        end_run(76, 1, "FAIL: ending: setup: the unclaimed writers did not finish in 10000 ms\n") if __iyi_monotonic_ns - started >= 10_000_000_000_i64
+        IyiThread.spin_pause
+      end
+      end_run(76, 1, "")
+    {% else %}
+      end_run(76, 1, ending_line)
+    {% end %}
+  end
+
+  # kind 0 takes its list lock, 1 the scheduler lock, 2 the runtime lock, 3 nothing:
+  # in turn, the runtime's own lock order, so no runtime thread is caught between two.
+  @[NoInline]
+  @[NoPreempt]
+  def ending_racer(kind : Int32, ready : Tally, go : Tally, armed : Tally, fire : Tally, reached : Tally, wrote : Tally) : Nil
+    ready.add(1_i64)
+    while go.count == 0_i64 || armed.count < kind.to_i64
+      IyiThread.spin_pause
+    end
+    if kind == 0
+      IyiScheduler.lists_lock(IyiScheduler.state)
+    elsif kind == 1
+      IyiSchedLock.lock
+    elsif kind == 2
+      IyiRuntimeLock.lock
+    end
+    armed.add(1_i64)
+    while fire.count == 0_i64
+      IyiThread.spin_pause
+    end
+    ending_wait_all(reached)
+    {% if flag?(:ending_hook) %}
+      IyiScheduler.force_end_now if kind == 1
+    {% end %}
+    ending_end(wrote, kind)
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def ending_fire(go : Tally, armed : Tally, fire : Tally, reached : Tally, wrote : Tally) : Nil
+    go.add(1_i64)
+    since = __iyi_monotonic_ns
+    while armed.count < 4_i64
+      end_run(76, 1, "FAIL: ending: not armed: the four racers did not take their locks in 10000 ms\n") if __iyi_monotonic_ns - since >= 10_000_000_000_i64
+      IyiThread.spin_pause
+    end
+    fire.add(1_i64)
+    ending_wait_all(reached)
+    ending_end(wrote, 4)
+  end
+
+  def ending_race : Nil
+    {% if flag?(:ending_hook) %}
+      hook_claimed = IyiScheduler.force_end_claim
+      fixture_claimed = RunEnd.claim
+      IyiScheduler.force_end_reset
+      RunEnd.reset_for_test
+      unless hook_claimed && !fixture_claimed
+        end_run(76, 1, "FAIL: ending: setup: the runtime hook and fixture did not share one ending claim\n")
+      end
+    {% end %}
+    ready = Tally.new
+    go = Tally.new
+    armed = Tally.new
+    fire = Tally.new
+    reached = Tally.new
+    wrote = Tally.new
+    group do |g|
+      4.times do |kind|
+        g.spawn(unit: :new) do
+          ending_racer(kind, ready, go, armed, fire, reached, wrote)
+          0
+        end
+      end
+      started = __iyi_monotonic_ns
+      while ready.count < 4_i64
+        sleep(1)
+        end_run(76, 1, "FAIL: ending: setup: the four racers did not take the four workers in 20000 ms\n") if elapsed_ms(started) >= 20000_i64
+      end
+      ending_fire(go, armed, fire, reached, wrote)
+    end
+  end
+
   STEPS = ["placement", "exactly_once", "race", "race_forced", "channels", "now", "now_forced", "cancel", "cancel_unstarted", "panics", "steal", "home", "collector", "typed", "wakes"]
 
   arguments = Program.args
@@ -1407,6 +1594,9 @@
     rounds = arguments[3].to_i?
     progress_hang("speed: setup: workers, tasks and rounds must be positive integers") unless workers.is_a?(Int32) && workers > 0 && tasks.is_a?(Int32) && tasks > 0 && rounds.is_a?(Int32) && rounds > 0
     speed(workers, tasks, rounds.to_i64)
+  elsif arguments.size == 1 && arguments[0] == "ending"
+    IyiWorkers.count = 4
+    ending_race
   else
     watch = 60000
     parts = ["selects", "handed", "cancels", "words"]

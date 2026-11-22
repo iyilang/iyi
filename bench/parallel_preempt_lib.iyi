@@ -56,14 +56,89 @@ import std/json::{JSON}
 import std/password::{Bcrypt}
 
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  {% unless flag?(:run_end_copy) %}
+    # one ending: begin
+    # The run's one ending, for every catch, watchdog and setup failure, on
+    # any thread and under any lock. The first caller to claim the word
+    # writes its line with one write and ends the process with its status;
+    # every later caller writes nothing and yields until that end. Nothing
+    # here allocates or takes a lock. The old IyiIO#write could be
+    # preempted after its low-level write and before returning to the
+    # caller's exit, leaving a later placement fiber holding the worker.
+    # Darwin leaves through the exit system call, avoiding libSystem exit
+    # teardown. Binding `_exit` would put `__exit` on the dependency floor
+    # bench/parallel_exercise.sh holds. That script holds every copy of
+    # this block to bench/parallel_exercise.iyi's and appends it to each
+    # runtime copy it runs, built with -Drun_end_copy, so a hook and its
+    # fixture claim one word.
+    class RunEnd
+      @[UnsafeReach("the run's claim: atomically set once, reset only for the ending-hook setup probe")]
+      @@claimed : UInt64 = 0_u64
+
+      def self.claim : Bool
+        Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.compare_and_set(0_u64, 1_u64)[1]
+      end
+
+      {% if flag?(:ending_hook) %}
+        # Only before the racers start, after the cross-layer claim probe.
+        def self.reset_for_test : Nil
+          Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.set(0_u64)
+        end
+      {% end %}
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def end_run(status : Int32, fd : Int32, lead : String, what : String = "", tail : String = "") : NoReturn
+      unless RunEnd.claim
+        while true
+          IyiThread.yield_cpu
+        end
+      end
+      size = lead.bytesize + what.bytesize + tail.bytesize
+      line = uninitialized UInt8[512]
+      base = pointerof(line).as(UInt8*)
+      at = 0
+      piece = 0
+      while piece < 3
+        text = piece == 0 ? lead : (piece == 1 ? what : tail)
+        from = text.to_unsafe
+        count = text.bytesize
+        if size <= 512
+          i = 0
+          while i < count
+            (base + at + i).value = from[i]
+            i = i + 1
+          end
+          at = at + count
+          from = base
+          count = piece == 2 ? at : 0
+        end
+        done = 0
+        while done < count
+          wrote = __iyi_write(fd, (from + done).as(Void*), (count - done).to_u64)
+          break if wrote <= 0_i64
+          done = done + wrote.to_i32
+        end
+        piece = piece + 1
+      end
+      {% if flag?(:darwin) %}
+        asm("svc #0x80" :: "{x16}"(1_i64), "{x0}"(status.to_i64) : "memory" : "volatile")
+        while true
+        end
+      {% else %}
+        __iyi_exit(status)
+      {% end %}
+    end
+    # one ending: end
+  {% end %}
+
   def fail(message : String) : Nil
-    print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    end_run(1, 1, "FAIL: ", message, "\n")
   end
 
   def setup_exit(message : String) : Nil
-    print "FAIL: #{message}\n"
-    __iyi_exit(76)
+    end_run(76, 1, "FAIL: ", message, "\n")
   end
 
   def elapsed_ms(since : Int64) : Int64
@@ -176,8 +251,7 @@ import std/password::{Bcrypt}
       while @queued.get == 0_i64 || (@force_key == 0_u64 && Pointer(Atomic(UInt64)).new(state.preempt_word).value.get == 0_u64)
         IyiThread.spin_pause
         if elapsed_ms(started) >= 20000_i64
-          print "FAIL: library: progress hang: the clock start signal or preemption word did not arrive\n"
-          __iyi_exit(76)
+          end_run(76, 1, "FAIL: library: progress hang: the clock start signal or preemption word did not arrive\n")
         end
       end
       {% if flag?(:libruntime_force) || flag?(:recursion_force) || flag?(:stdcall_force) %}
@@ -379,8 +453,7 @@ import std/password::{Bcrypt}
       until clock.holding?
         sleep(1)
         if elapsed_ms(started) >= 20000_i64
-          print "FAIL: #{name}: progress hang: the operation did not reach its checkpoint\n"
-          __iyi_exit(76)
+          end_run(76, 1, "FAIL: ", name, ": progress hang: the operation did not reach its checkpoint\n")
         end
       end
       {% if flag?(:libruntime_force) || flag?(:recursion_force) || flag?(:stdcall_force) %}
@@ -390,8 +463,7 @@ import std/password::{Bcrypt}
           started = __iyi_monotonic_ns
           until IyiWorkers.force_turn_ready?
             if elapsed_ms(started) >= 10000_i64
-              print "FAIL: #{name}: progress hang: the copy hook did not hold the target's first turn\n"
-              __iyi_exit(76)
+              end_run(76, 1, "FAIL: ", name, ": progress hang: the copy hook did not hold the target's first turn\n")
             end
             sleep(1)
           end
@@ -418,8 +490,7 @@ import std/password::{Bcrypt}
               started = __iyi_monotonic_ns
             elsif elapsed_ms(started) >= 70000_i64
               if IyiWorkers.force_turn_outer_claim?
-                print "FAIL: #{name}: progress hang: the call and queued task did not finish\n"
-                __iyi_exit(76)
+                end_run(76, 1, "FAIL: ", name, ": progress hang: the call and queued task did not finish\n")
               end
               started = __iyi_monotonic_ns
             end

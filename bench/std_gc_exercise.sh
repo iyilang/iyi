@@ -10,10 +10,10 @@
 #     sentence, not with an undefined name from the missing collector.
 #   * A negative size is refused by name at every allocating verb.
 #   * Negative proofs: copies of the module that report a constant
-#     collection count, that leave the trigger on under `disable`, and that
-#     answer false for every heap pointer each fail at the named check; one
-#     whose `stats` walks without the runtime lock, and one whose
-#     `is_heap_ptr` does, each die of a memory fault.
+#     collection count, that leave the trigger on under `disable`, that
+#     answer false for every heap pointer, that free nothing, and whose
+#     `stats` or `is_heap_ptr` walks without the runtime lock, each fail
+#     at the named check, every run and on every system.
 #
 # Exits non-zero if any check fails.
 set -u
@@ -71,7 +71,7 @@ build_and_run "std_gc" exercise-gc "$REPO/bench/std_gc_exercise.iyi"
 
 echo
 echo "== every gc check reported"
-for check in "raw words" "heap pointers" "stats move with the collector" "disable holds the trigger" "a string built in a reused chunk ends in a NUL" "stats beside threads that allocate" "is_heap_ptr beside threads whose large chunks come and go" "ALL CHECKS PASSED"; do
+for check in "raw words" "heap pointers" "stats move with the collector" "disable holds the trigger" "a string built in a reused chunk ends in a NUL" "stats and is_heap_ptr wait for the runtime lock" "stats beside threads that allocate" "is_heap_ptr beside threads whose large chunks come and go" "ALL CHECKS PASSED"; do
   if ! grep -q "$check" "$WORK/exercise-gc.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
@@ -167,8 +167,8 @@ gc_panics_with "realloc to -64" realloc_neg "negative size: -64" 'GC.realloc(GC.
 
 echo
 echo "== proving the checks can fail when the module is broken"
-prove_fails() { # prove_fails <label> <dir> <phrase> <sed script> [runs]
-  local label="$1" dir="$2" phrase="$3" script="$4" runs="${5:-1}"
+prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
+  local label="$1" dir="$2" phrase="$3" script="$4"
   mkdir -p "$WORK/$dir/std"
   sed -e "$script" "$REPO/src/std/gc.iyi" > "$WORK/$dir/std/gc.iyi"
   if cmp -s "$REPO/src/std/gc.iyi" "$WORK/$dir/std/gc.iyi"; then
@@ -182,16 +182,10 @@ prove_fails() { # prove_fails <label> <dir> <phrase> <sed script> [runs]
     status=1
     return
   fi
-  # A race is run until it is caught, up to *runs* times.
-  local run=1 exit_code=0
-  while [ "$run" -le "$runs" ]; do
-    "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
-    exit_code=$?
-    [ "$exit_code" -ne 0 ] && break
-    run=$((run + 1))
-  done
+  "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  local exit_code=$?
   if [ "$exit_code" -eq 0 ]; then
-    echo "  $label: the exercise still passed in $runs run(s), so it does not test this"
+    echo "  $label: the exercise still passed, so it does not test this"
     status=1
     return
   fi
@@ -212,25 +206,19 @@ prove_fails "is_heap_ptr answers false for every pointer" never_heap "a chunk's 
   's/^    base != 0_u64$/    base == 18446744073709551615_u64/'
 prove_fails "free does nothing" free_noop "a freed chunk is not" \
   's/    IyiHeap.free(pointer)/    pointer/'
-# Three threads allocate beside two seconds of `stats`: walked without the
-# lock, the walk died of a memory fault in 20 runs of 20 on Windows, where a
-# released arena is unmapped as the scavenge ends. `is_heap_ptr` beside
-# three threads whose large chunks come and go died the same way in 10 runs
-# of 10. A Linux runner's walk without the lock passed: the race is the
-# platform's to arrange, so the proofs run where they were measured.
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    # Races: 20 in 20 and 10 in 10 where measured, and one Windows runner
-    # once ran the second clean, so each runs up to five times.
-    prove_fails "stats walks without the lock" stats_unlocked "memory fault" \
-      '/def self.stats/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d}' 5
-    prove_fails "is_heap_ptr walks without the lock" is_heap_unlocked "memory fault" \
-      '/def self.is_heap_ptr/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d}' 5
-    ;;
-  *)
-    echo "  stats and is_heap_ptr walking without the lock: not proven here, the races were measured on Windows"
-    ;;
-esac
+# `stats` and `is_heap_ptr` walked without the lock are caught where the
+# exercise holds the runtime lock on another thread: each answers inside
+# the hold. They were proven by the races after it, expecting a memory
+# fault, and on Windows only. A Windows CI runner's `is_heap_ptr` copy
+# answered wrong instead (job 136250482652). On Linux, idle and on four
+# busy cores, that copy died of SIGSEGV - no sentence of iyi's - in 187
+# runs of 200, answered wrong in 1 and passed 12, and the `stats` copy
+# faulted in 99 of 100 and passed 1. At the hold each fails 200 runs of
+# 200 on Linux and on Windows 11, idle and on four busy cores.
+prove_fails "stats walks without the lock" stats_unlocked "stats answered while another thread held the runtime lock" \
+  '/def self.stats/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d;}'
+prove_fails "is_heap_ptr walks without the lock" is_heap_unlocked "is_heap_ptr answered while another thread held the runtime lock" \
+  '/def self.is_heap_ptr/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d;}'
 
 echo
 if [ "$status" -eq 0 ]; then

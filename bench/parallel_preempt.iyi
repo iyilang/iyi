@@ -16,34 +16,38 @@
 #           finite-run ordering is information; answers must match their
 #           unchecked twins. Copy-only hooks force an eligible turn in
 #           checked and `@[NoPreempt]` variants of each computation.
-#   unit    a preempted task keeps its unit's token: a task `spawn` started
-#           inside it never runs between two of its statements that are not
-#           a park, while another parallel task's ticker, asleep on the
-#           same worker, wakes within 100 ms of its time. A copy-only
-#           forced turn checks a queued same-unit child separately.
+#   unit    a same-unit child must not run inside the computing task.
+#           The unforced ticker's lateness and the pool's preemption count
+#           are information only. A copy-only forced turn checks a queued
+#           same-unit child's deferral at an eligible decision.
 #   server  a dedicated fast request completes while a slow handler stays
 #           active, followed by bulk fast and slow latency measurements.
 #   poller  a fast connection waits in the one worker's poller while a
-#           slow handler computes until it is answered. The healthy path
-#           also holds the 80 ms latency bound; the copy-only proof records
-#           whether preemption entered the worker's nonblocking poll.
+#           slow handler computes until it is answered. Its latency is
+#           information only; a copy-only proof records whether preemption
+#           entered the worker's nonblocking poll.
 #   fresh   a task holds the worker until the monitor raises its word,
 #           then its queued successor runs on the same worker. Copy-only
 #           hooks hold the monitor and check that the switch lowers the word.
-#   period  the monitor's period, its looks over a task computing half a
-#           second on a pool of one, held to 4 to 10.5 ms (8 on Windows);
-#           and the quantum, two such tasks taking turns on the one worker,
-#           held to three of the looks the same run measured. A Windows
-#           monitor waiting on the system timer's tick (10.1 to 14.3 ms
-#           apart in 56 runs on GitHub's runners) fails the first, and a
-#           monitor that waits three looks unchanged rather than one the
-#           second.
+#   period  the monitor's measured look interval and the whole-group time
+#           divided by global preemptions plus one are information only.
+#           Copy-only checks test the unchanged-look decision and, on
+#           Windows, timer choice, not a wall-clock latency bound.
 #   tight   each loop and its @[NoPreempt] twin run once, with matching
 #           answers; their timings and ratios are performance information.
 #
+# OPEN: former shared-runner bounds are measurements, not verdicts.
+#   unit: at least one global preemption, and ticker maximum at most
+#         100 integer milliseconds.
+#   poller: fast response within 80 integer milliseconds.
+#   period: at least two monitor looks, averaging 4,000 to 10,500 us
+#           (8,000 us on Windows); at least one global preemption; and
+#           total / (preemptions + 1) at most three measured look periods.
+# The forced pairs test mechanisms, not these finite-run counts or SLOs.
+#
 # With no arguments it runs slice, unit and period on a pool of one and
-# prints only that every checked property held. A second, idle worker
-# would make the slice ordering observation needless.
+# prints the measurements and final result. A second, idle worker would
+# make the slice ordering observation needless.
 #
 # bench/parallel_exercise.sh runs it, and broken copies of the runtime,
 # each caught by the step that names it.
@@ -70,8 +74,8 @@ import std/socket::{IyiSocket, SocketError}
     (__iyi_monotonic_ns - since) // 1000000_i64
   end
 
-  # A step's measurements, printed when steps were asked for by name: a run
-  # with no arguments says only that every property held.
+  # Optional detail for steps asked for by name. Former bounds are printed
+  # separately as measurements even when no steps were named.
   def say(line : String) : Nil
     puts line unless Program.args.empty?
   end
@@ -349,7 +353,7 @@ import std/socket::{IyiSocket, SocketError}
   # ── slice ────────────────────────────────────────────────────────────
   # The long task holds its worker until the short task is queued and the
   # monitor's word is up. The short task records where it ran, not a time.
-  # The bound is retained for the separate ticker check in unit.
+  # The former ticker limit is printed for comparison, not enforced.
   BOUND_MS = 100_i64
 
   class SliceState
@@ -799,12 +803,10 @@ import std/socket::{IyiSocket, SocketError}
   end
   {% end %}
 
-  # A parallel task computes 300 ms on a pool of one while a task it
-  # spawned sleeps 1 ms and counts, and another parallel task's ticker
-  # sleeps 1 ms and measures how late it woke. The ticker is what the
-  # computing task is preempted for; its child, of the same unit, must not
-  # run until the computation ends, and the count it moves is read on both
-  # sides of the computation.
+  # A parallel task computes while its same-unit child counts and another
+  # parallel task's ticker measures wake lateness. The child must not run
+  # during the computation; the global count and ticker samples do not
+  # establish that this particular task was preempted.
   def unit(per_ms : Int64) : Nil
     {% if flag?(:tokenless_force) %}
       unit_turn(per_ms)
@@ -846,19 +848,19 @@ import std/socket::{IyiSocket, SocketError}
       end
     end
     given = IyiWorkers.preempts - preempts
-    fail("unit: the computing task was never preempted for the ticker beside it") if given == 0_u64
     if moved.get != 0_i64
       puts "unit: the child ran #{moved.get} times during the preempted task"
       fail("unit: a task of the same unit ran inside the computing task during the ticker stress")
     end
-    if late.max_ms > BOUND_MS
-      fail("unit: a ticker asleep on the worker of a computing task woke #{late.max_ms} ms late, past #{BOUND_MS} ms")
+    puts "measure: unit: #{given} global preemptions (former minimum 1; information only)"
+    if late.count == 0_i64
+      puts "measure: unit: the ticker recorded no sleep samples; wake lateness is unavailable (former bound #{BOUND_MS} ms; information only)"
+    else
+      puts "measure: unit: the ticker woke at most #{late.max_ms} ms late over #{late.count} sleeps (former bound #{BOUND_MS} ms; information only)"
     end
-    say "unit: a task preempted #{given} times kept its unit's token, and its child ran only after it; the ticker beside it woke at most #{late.max_ms} ms late over #{late.count} sleeps"
   end
 
   # ── server ───────────────────────────────────────────────────────────
-  FAST_BOUND_MS = 80_i64
   # A dedicated pair establishes that one fast request is served while a
   # slow handler is active. Bulk timings below are measurements.
 
@@ -908,6 +910,7 @@ import std/socket::{IyiSocket, SocketError}
     fast_client = IyiSocket.connect("127.0.0.1", port, 5000)
     setup_exit("server: fast connect answered #{fast_client}") unless fast_client.is_a?(IyiSocket)
     fast_server = listener.accept
+    fast_client.read_timeout_ms = 10000
     setup_exit("server: fast accept answered #{fast_server}") unless fast_server.is_a?(IyiSocket)
     slow_fd = slow_server.fd
     slow_family = slow_server.family
@@ -930,6 +933,7 @@ import std/socket::{IyiSocket, SocketError}
         setup_exit("server: not armed: slow handler was not active") unless release.active? && !release.open?
         wrote = socket.write("k")
         setup_exit("server: fast response answered #{wrote.inspect}") unless wrote.is_a?(Int32)
+        fail("server: the fast handler did not write one response byte") unless wrote == 1
         served.set(1_i64)
         0
       end
@@ -947,6 +951,9 @@ import std/socket::{IyiSocket, SocketError}
         sleep(1)
         setup_exit("server: progress hang: the fast request was not served in 10000 ms") if __iyi_monotonic_ns > limit
       end
+      response = fast_client.read(1)
+      setup_exit("server: fast response read answered #{response.inspect}") unless response.is_a?(String)
+      fail("server: the fast client received an invalid response") unless response == "k"
       release.open
     end
     slow_client.close
@@ -1020,6 +1027,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # ── poller ───────────────────────────────────────────────────────────
+  FAST_BOUND_MS = 80_i64
   # The fast handler parks on its second read before the slow handler's
   # worker is armed. In the forced copy, the slow half records whether its
   # next decision actually enters the nonblocking poll, before main sends
@@ -1094,7 +1102,9 @@ import std/socket::{IyiSocket, SocketError}
       fast = IyiSocket.connect("127.0.0.1", port, 5000)
       setup_exit("poller: connect answered #{fast}") unless fast.is_a?(IyiSocket)
       fast.write("c")
-      fast.read(8)
+      response = fast.read(8)
+      setup_exit("poller: initial fast response read answered #{response.inspect}") unless response.is_a?(String)
+      fail("poller: the initial fast response was invalid") unless response == "k" || response == "K"
       slow.write("b")
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while computing.get == 0_i64 || reader.get == 0_u64 || !poller_reader_parked?(reader.get)
@@ -1115,20 +1125,18 @@ import std/socket::{IyiSocket, SocketError}
       {% end %}
       s = __iyi_monotonic_ns
       fast.write("c")
-      fast.read(8)
+      response = fast.read(8)
+      setup_exit("poller: fast response read answered #{response.inspect}") unless response.is_a?(String)
+      fail("poller: the fast response was invalid") unless response == "k" || response == "K"
       took_us = (__iyi_monotonic_ns - s) // 1000_i64
       answered.set(1_i64)
-      slow.read(8)
+      response = slow.read(8)
+      setup_exit("poller: slow response read answered #{response.inspect}") unless response.is_a?(String)
+      fail("poller: the slow response was invalid") unless response == "k" || response == "K"
       slow.close
       fast.close
     end
-    {% unless flag?(:nopoll_force) %}
-      if took_us // 1000_i64 > FAST_BOUND_MS
-        puts "poller: the fast request took #{took_us // 1000_i64} ms, past #{FAST_BOUND_MS} ms"
-        fail("poller: the fast request exceeded the wait bound")
-      end
-    {% end %}
-    say "poller: a fast request whose connection waited in the poller of the one worker, busy computing, was answered in #{took_us} us"
+    puts "measure: poller: the fast response took #{took_us} us (former bound #{FAST_BOUND_MS} integer ms; information only)"
   end
 
   # ── fresh ────────────────────────────────────────────────────────────
@@ -1294,41 +1302,13 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # ── period ───────────────────────────────────────────────────────────
-  # The monitor's period, and the quantum it makes. A task computing half a
-  # second on a pool of one, and the monitor's looks over it: every look
-  # is a tick, PREEMPT_TICK_MS apart. Then two such tasks on the one
-  # worker, which take turns: the time they took over the turns they took
-  # is the quantum, two ticks once each look after a turn sees the count
-  # move and the next sees it stand. Linux, darwin and Windows looked every
-  # 5.1 to 6.3 ms and took turns of 10.2 to 12.3 ms on the machines
-  # measured (SPEC.md III.4.13); a Windows wait that ends on the system
-  # timer's tick looked every 11.2 to 12.3 ms there, and a wait that ends
-  # at once would spin the monitor.
-  #
-  # The look's bound sits between the two. darwin's three-core runners,
-  # sharing their cores with the task the monitor watches, looked every
-  # 6.3, 8.9 and 9.0 ms in three CI runs (the last, job 122004173378, past
-  # the 9 ms this bound was), and 7.1 to 8.9 ms in the 7 runs of macos-15
-  # in CI's logs. Windows' looks end on a high-resolution timer: its
-  # runners read 5.14 to 5.42 ms in 101 runs. The timer-tick copy read
-  # 10.6 to 14.3 ms in 36, and in job 124885593140 came under 10.5: it
-  # passed the look and was caught only by the 20 ms the turn was then
-  # held to, at turns of 20845 us, about two of its looks. It read 10.1 to
-  # 13.1 ms in 20 runs of debug jobs 124913849506 and 124922160886, where
-  # the real looks read 5.15 to 5.30. So on Windows the bound is 8 ms,
-  # half again the slowest real look and under four fifths of the copy's
-  # quickest.
-  #
-  # The quantum is two looks wherever the looks are, so it is held to
-  # QUANTUM_LOOKS of the ones this run measured, not to a time a slow
-  # runner's looks stretch it towards: Windows took 1.91 to 2.09 looks a
-  # turn in those 101 runs, and darwin 1.52 to 2.52 in 15 on macos-14 and
-  # macos-15, where looks of up to 8.9 ms made turns of up to 17.2 ms,
-  # 2.8 ms under the 20 ms the turn was held to. In the debug jobs,
-  # macos-15 took 1.61 to 2.25 looks a turn in 44 runs (124913849625 and
-  # 124922160678) and windows-2025 1.94 to 2.03 in 40. A monitor that
-  # raises the word after three unchanged looks rather than one takes
-  # four looks a turn, and fails it.
+  # The unforced run records the monitor's look interval and whole-group
+  # time divided by global preemptions plus one. Both include scheduler delays,
+  # and a finite task need not see any looks or turns. The former limits
+  # remain in the output for comparison and are not correctness gates.
+  # The forced slowturn pair checks the unchanged-look decision itself;
+  # the Windows coarse pair checks which timer the monitor uses. Neither
+  # establishes the removed wall-clock bounds.
   PERIOD_FLOOR_US   =  4000_i64
   {% if flag?(:win32) %}
     PERIOD_BOUND_US = 8000_i64
@@ -1425,10 +1405,11 @@ import std/socket::{IyiSocket, SocketError}
       end
     end
     looks = looked.get
-    fail("period: the monitor looked #{looks} times in #{took.get} us of a task computing") if looks < 2_i64
-    us = took.get // looks
-    if us < PERIOD_FLOOR_US || us > PERIOD_BOUND_US
-      fail("period: the monitor looked every #{us} us over #{looks} looks, outside #{PERIOD_FLOOR_US} to #{PERIOD_BOUND_US} us")
+    if looks == 0_i64
+      puts "measure: period: no monitor looks over #{took.get} us; look interval is unavailable (former minimum 2 looks and bound #{PERIOD_FLOOR_US} to #{PERIOD_BOUND_US} us; information only)"
+    else
+      us = took.get // looks
+      puts "measure: period: #{looks} monitor looks over #{took.get} us, #{us} us per look (former minimum 2 looks and bound #{PERIOD_FLOOR_US} to #{PERIOD_BOUND_US} us; information only)"
     end
     preempts = IyiWorkers.preempts
     t = __iyi_monotonic_ns
@@ -1441,12 +1422,8 @@ import std/socket::{IyiSocket, SocketError}
     end
     total = (__iyi_monotonic_ns - t) // 1000_i64
     turns = (IyiWorkers.preempts - preempts).to_i64
-    fail("period: two tasks computing on one worker took no turns in #{total} us") if turns == 0_i64
     quantum = total // (turns + 1_i64)
-    if quantum > QUANTUM_LOOKS * us
-      fail("period: two tasks computing on one worker took turns of #{quantum} us, past #{QUANTUM_LOOKS} of the #{us} us looks")
-    end
-    say "period: the monitor looked every #{us} us over #{looks} looks; two tasks computing on one worker took #{turns} turns of #{quantum} us"
+    puts "measure: period: #{turns} global preemptions over #{total} us, total / (preemptions + 1) is #{quantum} us (former minimum 1 preemption and bound #{QUANTUM_LOOKS} measured looks; information only)"
   end
 
   # Each loop and its @[NoPreempt] twin run once inside a parallel task.

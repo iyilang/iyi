@@ -4129,8 +4129,9 @@ another worker, or by the main thread - wakes the read parked on it through
 the reader's worker's mail. `bench/parallel_migrate.iyi` holds each of these at
 a constructed move, with the task's own worker held while it resumes on a spare
 (channels' forced task, sockets, deep, the forced loop, and closes' registered
-reader), plain and release, with broken copies caught by name on one run. The
-moves its larger exercises happen to make are counted as information.
+reader), plain and release. Broken copies of the channels, closes, loops and
+io-cancel moves are caught by name on one run. The moves its larger exercises
+happen to make are counted as information.
 
 **2. The door is asked for at the call, and `Share` gates it as it gates a
 thread.** Built as a verb of its own, `spawn_parallel`, spelled

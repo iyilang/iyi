@@ -178,9 +178,9 @@
 
 ### Fixed
 
-- **Named bench gates decide no verdict by a clock or a retry count, and their watchdogs exit 76.** The gates and verdicts this entry covers are these, and no others:
+- **Named bench gates decide no verdict by a clock or a retry count, and their watchdogs exit 76.** The gates and verdicts this entry covers are these; the others this series changed are under Gates:
   - `bench/concurrent_mark.iyi`: the three premise marks wait for the mark flag under a ten-second watchdog that exits 76, in place of eight attempts. The leak verdict is decided only under `-Dunmapped_force`, and detects a sweep that never frees an outgrown block: a planted copy that never frees must fail it on its one run. Partial retention is legitimate conservative retention (healthy held runs kept 0 and 1 of 8 outgrown blocks) and is not judged, so the verdict makes no claim about partial leaks.
-  - `bench/spawn_eligible.iyi`: `together` and `asked` judge four arrivals, with a 60-second hang that exits 76. `beside` holds every worker in turn and pays a start owed to the spawner: each spawn made beside running ones must start a worker or owe one that is paid, so a pool that stops at two is caught at the third, with a forced owed-start control. `grows` prints its launch count and judges only the first worker. The copy watchdogs `forced_wait`, `forced_growth_holder` and `forced_meet` exit 76.
+  - `bench/spawn_eligible.iyi`: `together` and `asked` judge four arrivals, with a 60-second hang that exits 76. `beside` holds every worker in turn and pays a start owed to the spawner: each spawn made beside running ones must start a worker or owe one that is paid, so a pool that stops at two is caught at the third, with a forced owed-start control. `grows` prints its launch count and judges only the first worker. The copy watchdogs `forced_growth_holder` and `forced_meet` exit 76.
   - `bench/reuse_integrity.iyi`: a size class that never goes idle, and the two premise raises, end at named setup sentences with status 76, and the class-idle control proves the status.
   - `bench/std_gc_exercise.iyi` and `bench/std_log_exercise.sh`: the copy-only watchdogs exit 76.
   - `bench/server_load.iyi`: a load that collects nothing is a setup failure with a control, and the stack bound is the measured geometric midpoint of the healthy population (Darwin, 40 runs) and ROUNDS.

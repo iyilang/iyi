@@ -6165,8 +6165,8 @@ five rounds overlap: 45.4 to 53.1 before, 42.7 to 46.0 after.
    seed's two runs are byte-identical, schedule hash included. The 30
    seeds meet at least 20 orders and both arms. Parallel units start
    before the spawner parks under some seeds and not under others.
-6. Five broken copies of the scheduler, each caught at the check that
-   names it:
+6. Seven broken copies of the scheduler, each caught at the check that
+   names it. The first five are:
    - the stream ignored, every draw 0, which is the plain scheduler's
      choice everywhere: the known failing seed for each fixture (6 for
      the claim, 42 for the join) exits 0 at that fixture's normal verdict;

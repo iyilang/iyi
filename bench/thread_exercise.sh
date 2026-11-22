@@ -373,8 +373,8 @@ fi
 # The release run above passed these checks, and its output is the control: the same
 # program with no planted mutant, which the stress steps checked exited 0. Each mutant
 # is one copy of the runtime or of the program, built against IYI_PATH and run once,
-# and must end in exit 1 with its one FAIL sentence. The watchdog is 300 s: the 1b loop
-# sleeps a second in each of 200 threads, one after another.
+# and must end in exit 1 with its one FAIL sentence. The 300 s watchdog bounds a hang
+# only: each 1b task's sleep(1) is one millisecond, so a healthy run finishes far inside it.
 teardown_pass='teardown: 200 finished threads gave their schedulers back'
 joined_pass="joined: fewer than half of the joined threads' payloads survived a collection"
 mapped_pass="joined: a joined thread's line was unmapped"

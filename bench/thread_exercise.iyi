@@ -318,15 +318,14 @@
     end
   {% end %}
 
-  # The process's open handles on Windows; 0 elsewhere, where the check
-  # that reads it has nothing to compare.
-  def process_handles : Int32
-    handles = 0
-    {% if flag?(:win32) %}
+  # The process's open handles, the count teardown_count reads on Windows.
+  {% if flag?(:win32) %}
+    def process_handles : Int32
+      handles = 0
       LibC.GetProcessHandleCount(LibC.GetCurrentProcess, pointerof(handles))
-    {% end %}
-    handles
-  end
+      handles
+    end
+  {% end %}
 
   # What a finished thread's scheduler leaves open, counted: the process's
   # handles on Windows, and elsewhere the lowest descriptor number nothing
@@ -450,6 +449,28 @@
   count = args.size > 0 ? args[0].to_i : 8
   join_setup("SETUP: threads: at least one thread is required\n") if count < 1
   Tally.setup
+
+  # ── 1c. A joined thread's line is unmapped, checked before any collection ──
+  # No collection has run, so no mark helper, sweep or pool monitor exists.
+  # A helper is made only inside a collection (`mark`), a sweep round opens
+  # only at a collection's end, and the monitor starts only with a pool task;
+  # this program's spawns are all `unit: :same`, which starts none. The probe's
+  # thread is the only other thread, and `join` returns only once that OS
+  # thread has ended, so it maps nothing after the unmap. Nothing allocates
+  # between the unmap and the query, and automatic collections are off, so no
+  # mapping can take the freed page in between. The query asks mprotect for
+  # the line's own protection, read and write: a line still mapped keeps it,
+  # and a freed page answers ENOMEM. No other mapping can share the page, so
+  # the request reaches only this line.
+  IyiMark.auto = false
+  probe = IyiThread.start { nil }
+  probe_line = probe.line
+  join_setup("SETUP: joined: the probe thread had no line\n") if probe_line == 0_u64
+  probe.join
+  still_mapped = line_mapped?(probe_line)
+  IyiMark.auto = true
+  fail("joined: a joined thread's line is still mapped") if still_mapped
+  puts "joined: a joined thread's line was unmapped"
 
   # ── 1. Threads, collections, live lists ────────────────────────────────
   before = IyiMark.collections
@@ -590,12 +611,6 @@
   puts "joined: fewer than half of the joined threads' payloads survived a collection"
   join_twice
   puts "joined: the second join returned while the later thread was held"
-  probe = IyiThread.start { nil }
-  probe_line = probe.line
-  join_setup("SETUP: joined: the probe thread had no line\n") if probe_line == 0_u64
-  probe.join
-  fail("joined: a joined thread's line is still mapped") if line_mapped?(probe_line)
-  puts "joined: a joined thread's line was unmapped"
 
   # ── 2. The price: allocations per second per thread ────────────────────
   # Each thread allocates a fixed count from its own cache with the

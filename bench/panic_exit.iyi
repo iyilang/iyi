@@ -84,9 +84,29 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  # Wait for every read and accept to register and switch out before
-  # ending the process. A pool fiber publishes its io-list owner after
-  # registration; the main thread's fibers take turns with this wait.
+  # A same-thread fiber has no listed_on word. Its scheduler's io list is
+  # protected by this lock on every platform, and this scan cannot switch
+  # to another fiber while it holds the lock.
+  @[NoInline]
+  @[NoPreempt]
+  def local_io_parked?(fiber : IyiFiber) : Bool
+    state = IyiScheduler.state
+    found = false
+    IyiScheduler.lists_lock(state)
+    cursor = state.io_head
+    while cursor.is_a?(IyiFiber)
+      if cursor.object_id == fiber.object_id
+        found = true
+        break
+      end
+      cursor = cursor.next_io
+    end
+    IyiScheduler.lists_unlock(state)
+    found
+  end
+
+  # A pool fiber publishes the io-list owner atomically and clears on_cpu
+  # only after switching out. Same-thread readers are in their io list.
   def await_io_parks(readers : Array(IyiTask(Int32)), mode : String) : Nil
     started = __iyi_monotonic_ns
     parked = false
@@ -98,8 +118,9 @@ import std/socket::{IyiSocket, SocketError}
         fiber = readers[i].fiber
         if fiber.unit.is_a?(IyiUnit)
           parked = false if fiber.listed_on == 0_u64 || fiber.on_cpu?
+        else
+          parked = false unless local_io_parked?(fiber)
         end
-        parked = false unless fiber.state == IyiFiberState::WaitingIo
         {% if flag?(:parkedio_force) %}
           parked = false unless IyiScheduler.force_io_registered?
         {% end %}
@@ -195,11 +216,15 @@ import std/socket::{IyiSocket, SocketError}
   chosen = ""
   Program.args.each do |argument|
     if argument.starts_with?("--workers=")
-      workers = argument[10, argument.size - 10].to_i
+      value = argument[10, argument.size - 10].to_i?
+      setup_failure("setup: workers must be a nonnegative integer") unless value.is_a?(Int32) && value >= 0
+      workers = value
     elsif argument.starts_with?("--watch=")
-      watch = argument[8, argument.size - 8].to_i
+      value = argument[8, argument.size - 8].to_i?
+      setup_failure("setup: watch must be a positive integer") unless value.is_a?(Int32) && value > 0
+      watch = value
     else
-      fail("no step named #{argument}") unless STEPS.includes?(argument)
+      setup_failure("setup: no step named #{argument}") unless STEPS.includes?(argument)
       chosen = argument
     end
   end

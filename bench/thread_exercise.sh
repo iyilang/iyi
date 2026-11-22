@@ -7633,8 +7633,8 @@ IYI
       exit 1
     fi
     if grep -Eq '(^|[[:space:]])_thread_switch$' yield-mutant-symbols.txt; then
-      echo 'FAIL: yield: the mutant still imports thread_switch'
-      exit 1
+      echo 'SETUP: yield: the mutant still imports thread_switch, so its observer witness is broken'
+      exit 76
     fi
     echo '  imports: control has _thread_switch; mutant does not'
     ( timeout -k 5 120 ./yield-mutant-run > yield-mutant.txt 2>&1; exit $? ) 2>/dev/null

@@ -588,7 +588,9 @@ case "$(uname -s)" in
     # top, each libSystem's, which the `allowed_libs` check below proves.
     # `fstat64` is the runtime's read asking whether standard input is a
     # regular file, which a socket's read shares the code of.
-    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect environ fstat64 getsockname listen open recv send setsockopt socket unlink"
+    # `arc4random_buf` is the key `String#hash` is keyed with (#212), which
+    # std/env's `ENV.to_h` table reaches.
+    allowed_symbols="$FLOOR_BASE_DARWIN accept arc4random_buf bind chmod close connect environ fstat64 getsockname listen open recv send setsockopt socket unlink"
     ;;
 esac
 allowed_libs="$FLOOR_LIBS_PROGRAM"

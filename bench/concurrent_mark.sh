@@ -25,7 +25,9 @@
 #     armed look that holds the sweep at one kept chunk until the program frees it;
 #   - failure proofs: an unlocked free inside a sweep's look; a barrier that
 #     shades nothing; a barrier run after its mark ended; a block outgrown
-#     under a held mark; and a small live set given the thousand-object bound;
+#     under a held mark; a sweep that never frees a large block, caught when all
+#     eight outgrown blocks were held under a mark; and a small live set given the
+#     thousand-object bound;
 #   - marks beside twenty-four connections on twelve workers, with every helper
 #     and with one;
 #   - failure proofs: the remainder round's count stored over assists; helper 0
@@ -1119,6 +1121,25 @@ if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: large: a block outgrown under a mark 
   echo "the large block check did not fire (exit $code):"; tail -3 unmapped.txt; fail_for_status "$code" unmapped.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -Fx 'FAIL: large: a block outgrown under a mark was unmapped beside the helpers' unmapped.txt)"
+
+step "failure proof: a large block the sweep never frees is a leak, caught when every outgrown block was held under a mark"
+mkdir -p leak/iyi
+cp held/iyi/*.iyi leak/iyi/
+awk '
+  /^      def self\.sweep_large : Nil$/ { in_sweep = 1; methods++ }
+  in_sweep && /^            IyiHeap\.free_large\(node \+ IyiHeap::LARGE_HEAD\)$/ { deleted++; next }
+  in_sweep && /^      end$/ { in_sweep = 0 }
+  { print } END { if (methods != 1 || deleted != 1 || in_sweep) exit 3 }' \
+  held/iyi/prelude.iyi > leak/iyi/prelude.iyi || { echo "the sweep's large free is missing or ambiguous"; exit 76; }
+if ! IYI_PATH="$WORK/leak${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force "$REPO/bench/concurrent_mark.iyi" -o leak-run > build-leak.log 2>&1; then
+  fail_build build-leak.log
+fi
+timeout -k 5 300 ./leak-run > leak.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: large: 8 of 8 outgrown blocks were never freed, 8 of them outgrown under a mark" leak.txt; then
+  echo "the leak check did not fire (exit $code):"; tail -3 leak.txt; fail_for_status "$code" leak.txt
+fi
+printf '  exits 1 at "%s"\n' "FAIL: large: 8 of 8 outgrown blocks were never freed, 8 of them outgrown under a mark"
 
 step "failure proof: a small live set given the thousand-object bound goes beside the program"
 mkdir -p thousand/iyi

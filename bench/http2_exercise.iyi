@@ -15,7 +15,9 @@
 # bodies, a megabyte each way through the windows, HEAD, gzip and zstd,
 # cookies on fields of their own, a redirect, 200 requests on one
 # connection - and what HTTP/2 refuses: an upgrade (HTTP_1_1_REQUIRED),
-# and a body past the server's limit (413). `serve` is the same server
+# and, from servers with `max_head` and `max_body` of their own, a body
+# past the limit (413) and a head past it, beside a body past 64 MiB
+# taken under a larger limit. `serve` is the same server
 # for curl, Node and raw frames from bench/std_http_exercise.sh, and
 # `serve-tls` the same over std/tls's server, ALPN offering h2 and
 # http/1.1; `fetch` is the client against Node's server, and prints what
@@ -153,6 +155,18 @@ end
 # and the listener is the thread's that accepts.
 def serve_on(listener : IyiSocket, compress : Bool, tls : TlsServerConfig? = nil) : Nil
   Server.serve(listener, compress: compress, tls: tls, workers: 1) do |req|
+    if req.path == "/quit"
+      listener.close
+      Response.new(200, "bye")
+    else
+      answer(req)
+    end
+  end
+end
+
+# `serve_on` without compression, its limits on a request named.
+def serve_limited(listener : IyiSocket, max_head : Int32, max_body : Int32) : Nil
+  Server.serve(listener, max_head: max_head, max_body: max_body, workers: 1) do |req|
     if req.path == "/quit"
       listener.close
       Response.new(200, "bye")
@@ -407,6 +421,42 @@ check(client.connections_made == made, "a stream's reset leaves its connection (
 plain = fetched(HTTP.get("#{base}/echo?over=h1"), "the same listener serves HTTP/1.1")
 check(plain.body.starts_with?("GET /echo over=h1 HTTP/1.1"), "the same listener serves HTTP/1.1 (#{plain.body})")
 puts "  an upgrade reset on its stream alone; HTTP/1.1 on the same port"
+
+puts "== a server's own limits"
+# `serve`'s *max_head* and *max_body* over HTTP/2 (issue #213): a server
+# whose limits are smaller than std/http's ends a connection whose head
+# passes *max_head* and answers 413 to a body past *max_body*, and one
+# whose body limit is larger takes a body past 64 MiB.
+tight_l = IyiSocket.listen("127.0.0.1", 0)
+tight_base = "http://127.0.0.1:#{tight_l.local_port}"
+tight_fd = tight_l.to_unsafe
+tight_server = IyiThread.start do
+  serve_limited(IyiSocket.new(tight_fd), 4096, 65536)
+  nil
+end
+loose_l = IyiSocket.listen("127.0.0.1", 0)
+loose_base = "http://127.0.0.1:#{loose_l.local_port}"
+loose_fd = loose_l.to_unsafe
+loose_server = IyiThread.start do
+  serve_limited(IyiSocket.new(loose_fd), Server::MAX_HEAD, 83886080)
+  nil
+end
+at_limit = pattern(65536)
+r = fetched(client.post("#{tight_base}/echo", at_limit), "a body at a server's own limit over HTTP/2")
+check(r.status == 200 && r.body.includes?("length=65536 fnv=#{fnv(at_limit)}"), "a body at a server's own limit over HTTP/2 (#{r.status} #{r.body})")
+r = fetched(client.post("#{tight_base}/echo", pattern(65537)), "a body past a server's own limit over HTTP/2")
+check(r.status == 413, "a body past a server's own limit over HTTP/2 is a 413 (#{r.status} #{r.body})")
+r = fetched(client.get("#{tight_base}/echo", {"X-Pad" => "p" * 2000}), "a head inside a server's own limit over HTTP/2")
+check(r.status == 200, "a head inside a server's own limit over HTTP/2 (#{r.status} #{r.body})")
+padded = client.get("#{tight_base}/echo", {"X-Pad" => "p" * 8000})
+check(!padded.is_a?(Response), "a head past a server's own limit over HTTP/2 ends its connection (#{padded.is_a?(Response) ? "answered #{padded.status}" : padded})")
+past = pattern(67108865)
+r = fetched(client.post("#{loose_base}/echo", past), "a body past 64 MiB to a server that takes it over HTTP/2")
+check(r.status == 200 && r.body.includes?("length=67108865 fnv=#{fnv(past)}"), "a body past 64 MiB to a server that takes it over HTTP/2 (#{r.status} #{r.body[0, 200]})")
+check(HTTP.get("#{tight_base}/quit").or_panic.status == 200 && HTTP.get("#{loose_base}/quit").or_panic.status == 200, "the limited servers quit")
+tight_server.join
+loose_server.join
+puts "  a head and a body past a server's smaller limits refused, a body past 64 MiB taken under a larger one"
 
 client.close
 check(HTTP.get("#{base}/quit").or_panic.status == 200, "the server quits")

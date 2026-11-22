@@ -335,7 +335,7 @@ module Iyi
       # where the library it compiles against does - and a Program built
       # without a driver (Crystal's own compiler specs do that) carries the
       # default prelude flag while compiling snippets that are not iyi's.
-      if @program.iyi_prelude? && node.location.try(&.filename.to_s.ends_with?(".iyi"))
+      if @program.iyi_prelude? && @program.iyi_written?(node.location.try(&.filename))
         return iyi_regex_literal(node)
       end
 

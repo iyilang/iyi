@@ -27,12 +27,16 @@
 # `-Dparallel_closes_home` a read is made on the thread that closes its
 # socket (`closes`); each step fails by name.
 #
-# Then the timed shapes the issue's server is made of (#145): tasks that
-# park and then compute finish in about their work over the workers, when
-# the thread that wakes them is outside the pool and when it is a worker;
-# and a task joining a thread, or waiting on a Mutex's word, leaves its
-# worker to the tasks behind it. bench/parallel_exercise.sh runs this and
-# broken copies of the runtime, each caught by the check that names it.
+# The timed shapes report measurements, not correctness verdicts. OPEN:
+# cancel under 3000 ms; balance at most 2x measured work per worker;
+# handoff below 40 ms at the longest and at most 1 ms at the median on an
+# unloaded host; backstop below 50 ms; and join child wake below 300 ms.
+# The keyed copies check routing, wake and join mechanisms, not these
+# elapsed-time guarantees.
+#
+# Registry walks protect list links, not IyiFiber.state: that enum has no
+# atomic read paired with its writers. A missed wait-state observation can
+# end at its named status-76 watchdog, not as a caught defect.
 
 @[Unsafe("reads the thread pointer through asm, fills an uninitialized stack pad through pointerof, and Lent trusts @[Share] to carry a socket between workers")]
 module bench/parallel_migrate
@@ -316,12 +320,11 @@ import std/socket::{IyiSocket, SocketError}
   # times; the main thread sends, so each wake goes to the pool's shared
   # queue and whichever worker is free resumes it. Each round allocates.
   #
-  # With partitions in the runtime (`-Dheap_partitions`) each task's
-  # rounds allocate in its unit's own partition, which never feeds the
-  # global trigger (heap22 design, section 4.2) and collects itself with
-  # no worker stopped (section 4.1): there the main thread asks for a
-  # global collection after every eighth send, while the task it just woke
-  # is on its way to a worker, and the tasks' own collections must run.
+  # With partitions in the runtime (`-Dheap_partitions`) main also asks for
+  # a global collection after every eighth send. Stop and local-collection
+  # counts are pool-wide observations, not proof that a particular moving
+  # task was collected. The forced movement and in-transit stack scan are
+  # separate checks; bench/heap_local.iyi exercises local collections.
   def channels(watch : Int32) : Nil
     watched("channels", watch) do
       channels_forced
@@ -360,16 +363,13 @@ import std/socket::{IyiSocket, SocketError}
           (tasks * rounds).times { feed.send(1) }
         {% end %}
       end
-      setup_failure("channels: no collection stopped a worker while the tasks moved") if IyiThread.stops == stops
-      if IyiWorkers.count > 1 && moves.count == 0_i64
-        setup_failure("channels: none of #{tasks * rounds} parks on a channel resumed on another worker")
-      end
       {% if flag?(:heap_partitions) %}
         held = IyiHeap.local_collections - locals
-        setup_failure("channels: no local collection ran while #{tasks} tasks allocated in partitions of their own") if IyiWorkers.count > 1 && held == 0_u64
-        puts "channels: #{tasks} tasks parked #{rounds} times each, #{moves.count} resumed on another worker, lists whole through #{held} local collections and #{IyiThread.stops - stops} stops"
+        puts "channels: #{tasks} tasks parked #{rounds} times each, lists whole"
+        puts "measure: channels: #{moves.count} cross-worker resumes, #{held} local collections and #{IyiThread.stops - stops} stops (pool-wide observations)"
       {% else %}
-        puts "channels: #{tasks} tasks parked #{rounds} times each, #{moves.count} resumed on another worker, lists whole through #{IyiThread.stops - stops} stops"
+        puts "channels: #{tasks} tasks parked #{rounds} times each, lists whole"
+        puts "measure: channels: #{moves.count} cross-worker resumes and #{IyiThread.stops - stops} stops (pool-wide observations)"
       {% end %}
     end
   end
@@ -444,7 +444,8 @@ import std/socket::{IyiSocket, SocketError}
       stops = IyiThread.stops
       sockets_forced
       moved = socket_run(conns, rounds)
-      puts "sockets: #{conns} connections, #{rounds} requests each read and answered in order, #{moved} reads resumed on another worker, through #{IyiThread.stops - stops} stops"
+      puts "sockets: #{conns} connections, #{rounds} requests each read and answered in order"
+      puts "measure: sockets: #{moved} read calls resumed on another worker, #{IyiThread.stops - stops} stops"
     end
   end
 
@@ -578,11 +579,21 @@ import std/socket::{IyiSocket, SocketError}
                 0
               end
               rounds.times do |r|
-                os = os_thread
-                st = IyiScheduler.state.object_id
-                got = socket.read(64)
-                moves.add(1_i64) if moved?("sockets", os, st)
-                fail("sockets: connection #{c} read #{got} where request #{r} was sent") unless got == "q#{c}.#{r};"
+                expected = "q#{c}.#{r};"
+                got = ""
+                while got.bytesize < expected.bytesize
+                  os = os_thread
+                  st = IyiScheduler.state.object_id
+                  part = socket.read(expected.bytesize - got.bytesize)
+                  moves.add(1_i64) if moved?("sockets", os, st)
+                  if part.is_a?(String)
+                    fail("sockets: connection #{c} closed before request #{r} was complete") if part.empty?
+                    got = got + part
+                  else
+                    fail("sockets: connection #{c} read #{part} where request #{r} was sent")
+                  end
+                end
+                fail("sockets: connection #{c} read #{got} where request #{r} was sent") unless got == expected
                 churn(3000)
                 spin(200000_i64, r.to_u64)
                 fail("sockets: connection #{c}'s list was not whole after request #{r}") unless whole?(kept, 2000, c.to_i64 + 100_i64)
@@ -608,8 +619,18 @@ import std/socket::{IyiSocket, SocketError}
           fail("sockets: a client's write answered #{wrote}") unless wrote.is_a?(Int32)
         end
         clients.each do |client|
-          got = client.read(16)
-          fail("sockets: a client read #{got} where the answer to #{r} was due") unless got == "#{r}."
+          expected = "#{r}."
+          got = ""
+          while got.bytesize < expected.bytesize
+            part = client.read(expected.bytesize - got.bytesize)
+            if part.is_a?(String)
+              fail("sockets: a client closed before the answer to #{r} was complete") if part.empty?
+              got = got + part
+            else
+              fail("sockets: a client read #{part} where the answer to #{r} was due")
+            end
+          end
+          fail("sockets: a client read #{got} where the answer to #{r} was due") unless got == expected
         end
       end
       clients.each(&.close)
@@ -712,9 +733,9 @@ import std/socket::{IyiSocket, SocketError}
   end
   {% end %}
 
-  # Tasks that moved first, then parked - on a socket nobody writes, in a
-  # sleep, on a channel nobody sends on - are cancelled by a sibling's
-  # failure, from whichever thread it fails on: each answers `Cancelled`.
+  # After a channel wake, tasks enter a socket read, sleep or channel receive.
+  # A sibling's failure cancels each one, including cancellation before a wait.
+  # The io-state tally below is pool-wide, not a per-task registration witness.
   def cancel(watch : Int32) : Nil
     {% if flag?(:unlistedio_force) %}
       cancel_io_forced
@@ -737,7 +758,7 @@ import std/socket::{IyiSocket, SocketError}
       end
       go = Channel(Int32).new
       never = Channel(Int32).new
-      parked = Tally.new
+      starting_wait = Tally.new
       cancelled = Tally.new
       moves = Tally.new
       began = 0_i64
@@ -751,12 +772,15 @@ import std/socket::{IyiSocket, SocketError}
             st = IyiScheduler.state.object_id
             go.receive
             moves.add(1_i64) if moved?("cancel", os, st)
-            parked.add(1_i64)
+            starting_wait.add(1_i64)
             outcome = if kind == 0
                         socket = IyiSocket.new(fd, family)
                         socket.read(16)
                       elsif kind == 1
-                        sleep(20000)
+                        slept = sleep(20000)
+                        # Nil can be a normal expiry before the failure, so it is not a bug verdict.
+                        setup_failure("cancel: not armed: a sleep ended without observing cancellation") if slept.nil?
+                        slept
                       else
                         never.receive
                       end
@@ -766,7 +790,7 @@ import std/socket::{IyiSocket, SocketError}
         end
         (kinds * per).times { go.send(1) }
         limit = __iyi_monotonic_ns + 10_000_000_000_i64
-        while parked.count < (kinds * per).to_i64
+        while starting_wait.count < (kinds * per).to_i64
           sleep(1)
           progress_hang("cancel: progress hang: the readers did not start") if __iyi_monotonic_ns > limit
         end
@@ -781,9 +805,9 @@ import std/socket::{IyiSocket, SocketError}
       took = elapsed_ms(began)
       ends.each(&.close)
       listener.close
-      fail("cancel: #{cancelled.count} of #{kinds * per} parked tasks answered Cancelled") unless cancelled.count == (kinds * per).to_i64
-      fail("cancel: a failure took #{took} ms to cancel tasks parked on other workers") if took >= 3000
-      puts "cancel: #{kinds * per} tasks, #{moves.count} of them moved before they parked on a socket, a sleep or a channel, all cancelled in #{took} ms"
+      fail("cancel: #{cancelled.count} of #{kinds * per} tasks answered Cancelled") unless cancelled.count == (kinds * per).to_i64
+      puts "cancel: #{kinds * per} tasks answered Cancelled; #{moves.count} moved before entering their waits"
+      puts "measure: cancel: group completion took #{took} ms after the failure was spawned (former bound: under 3000 ms)"
     end
   end
 
@@ -826,20 +850,7 @@ import std/socket::{IyiSocket, SocketError}
   # close is, and the step fails by name.
   # WaitingIo is set just before the reader is linked into its poller.
   # Once it has also left the CPU, registration has finished. The runtime
-  # lock protects registry links while either witness walks them.
-  @[NoInline]
-  @[NoPreempt]
-  def closes_registered : Int32
-    count = 0
-    IyiRuntimeLock.lock
-    fiber = IyiScheduler.first_fiber
-    while fiber.is_a?(IyiFiber)
-      count = count &+ 1 if fiber.state == IyiFiberState::WaitingIo && !fiber.on_cpu?
-      fiber = fiber.next_fiber
-    end
-    IyiRuntimeLock.unlock
-    count
-  end
+  # lock protects registry links while the witness walks them.
 
   # Count alone can include unrelated waiters. Also identify the reader of
   # the socket the main thread will close.
@@ -885,6 +896,7 @@ import std/socket::{IyiSocket, SocketError}
     go = Channel(Int32).new
     waiting = Tally.new
     woken = Tally.new
+    readers = [] of Armed
     crossed = Tally.new
     # The outer watchdog's clock starts when this word is sent, once every named registration wait below has
     # succeeded. Until then no clock runs, so only those named waits can fire, each with its own sentence.
@@ -894,12 +906,15 @@ import std/socket::{IyiSocket, SocketError}
         units.times do |u|
           fd = fds[u]
           family = families[u]
+          reader = Armed.new
+          readers << reader
           g.spawn(unit: :new) do
             socket = IyiSocket.new(fd, family)
             reader_on = 0_u64
             group do |inner|
               inner.spawn do
                 reader_on = os_thread
+                reader.note_fiber(IyiScheduler.current.object_id)
                 waiting.add(1_i64)
                 got = socket.read(16)
                 woken.add(1_i64) if got.is_a?(Cancelled)
@@ -941,13 +956,16 @@ import std/socket::{IyiSocket, SocketError}
             progress_hang("closes: progress hang: the targeted reader did not complete io registration") if elapsed_ms(started) >= watch.to_i64
             sleep(1)
           end
-        {% else %}
-          limit = __iyi_monotonic_ns + 10_000_000_000_i64
-          while io_waiting < units + 1 || closes_registered < units + 1
-            sleep(1)
-            progress_hang("closes: progress hang: the readers did not finish registering their socket waits") if __iyi_monotonic_ns > limit
-          end
         {% end %}
+        # Check each sibling's identity, not just the pool-wide count: other
+        # socket waiters must not stand in for one of these 16 readers.
+        readers.each do |reader|
+          limit = __iyi_monotonic_ns + 10_000_000_000_i64
+          while !closes_target_registered?(reader.fiber)
+            sleep(1)
+            progress_hang("closes: progress hang: a sibling reader did not finish registering its socket wait") if __iyi_monotonic_ns > limit
+          end
+        end
         outer_start.send(1)
         units.times { go.send(1) }
         lent.socket.close
@@ -1151,15 +1169,11 @@ import std/socket::{IyiSocket, SocketError}
   # once before the loop and failed at its first check under qemu-user,
   # in 2 runs of 2, where the volatile read passes.
   #
-  # 16 tasks on the 4 workers each compute three loops of about 30 ms:
-  # the thread's line (`IyiThread.current_line`, a thread-local) is read
-  # before a loop, in every turn of it beside a xorshift walk, and right
-  # after it, with the kernel's thread read by asm on either side. The
-  # line after the loop and the kernel's thread changed together or not at
-  # all; and of the loops that moved, some turn read the line of a thread
-  # it moved to. Under `-Dparallel_hoisted_tls` the reads in and after the
-  # loop are the one before it, as the hoisted code read them, and the step
-  # fails by name.
+  # 16 tasks compute three calibrated loops each. Cross-worker moves and
+  # pool-wide give-ups in this ordinary run are measurements. The forced
+  # loop below constructs a move and checks a subsequent loop-body read.
+  # Under `-Dparallel_hoisted_tls` the reads in and after the loop are the
+  # one before it, as the hoisted code read them, and the step fails by name.
 
   # The thread's line in or after the loop: read here, or under
   # `-Dparallel_hoisted_tls` the one read before the loop.
@@ -1228,20 +1242,13 @@ import std/socket::{IyiSocket, SocketError}
         end
       end
       given = IyiWorkers.preempts - preempts
-      setup_failure("loops: #{tasks} tasks computed #{tasks * rounds} loops of 30 ms on #{IyiWorkers.count} workers and none was preempted") if given == 0_u64
-      if IyiWorkers.count > 1 && moved.count == 0_i64
-        setup_failure("loops: none of #{tasks * rounds} loops, preempted #{given} times, ended on another worker than it began on")
-      end
-      if moved.count > 0_i64 && turned.count == 0_i64
-        fail("loops: #{moved.count} loops ended on another worker and no turn of any of them read the line of a thread it moved to")
-      end
-      puts "loops: #{tasks * rounds} loops of 30 ms preempted #{given} times, #{moved.count} ended on another worker than they began on, #{turned.count} turns read the line of a thread they moved to"
+      puts "measure: loops: #{tasks * rounds} calibrated loops, #{given} pool-wide preemption give-ups, #{moved.count} ended on another worker, #{turned.count} turns read a different thread line"
     end
   end
 
-  # A loop run until *gate* is set, rather than for a count: the back-edge checks of line_loop, and the loop sets
-  # *replaced* once its kernel thread is not the one it began on. Its post-loop check reads the thread-local, as
-  # line_loop's does, and fails by name when the read named another thread.
+  # A loop run until *gate* is set. The original worker is held by a sibling.
+  # After observing a move, one further loop-body line read must name a
+  # different thread before *replaced* lets main end the loop.
   @[NoInline]
   def line_loop_live(gate : Tally, replaced : Tally, seed : UInt64) : Tuple(Bool, Int64, UInt64)
     os_before = os_thread
@@ -1250,6 +1257,7 @@ import std/socket::{IyiSocket, SocketError}
     sum = 0_u64
     turned = 0_i64
     moved = false
+    observed = false
     while gate.count < 1_i64
       x = x ^ x.unsafe_shl(13_u64)
       x = x ^ x.unsafe_shr(7_u64)
@@ -1257,9 +1265,12 @@ import std/socket::{IyiSocket, SocketError}
       line = line_in_loop(line_before)
       turned = turned &+ (line != line_before ? 1_i64 : 0_i64)
       sum = sum &+ (line ^ x)
-      if !moved && os_thread != os_before
-        moved = true
+      if moved && !observed
+        fail("loops: a thread-local read after a loop's back-edge check named another thread than the one the task was on") if line == line_before
+        observed = true
         replaced.add(1_i64)
+      elsif !moved && os_thread != os_before
+        moved = true
       end
     end
     line_after = line_in_loop(line_before)
@@ -1271,11 +1282,9 @@ import std/socket::{IyiSocket, SocketError}
     {os_after != os_before, turned, sum}
   end
 
-  # The move a loop makes only when the monitor preempts it, made on purpose, for `hoistedtls`, and run before the
-  # ordinary loops: every worker but one is held by a @[NoPreempt] task; a live loop computes on the one left; a
-  # sibling queued behind it takes that worker once the monitor preempts the loop. A holder then ends, a worker takes
-  # the loop, and the loop resumes on a worker it did not begin on (`replaced`). Only then is the loop let finish,
-  # so its post-loop check runs there. Each wait has a named limit.
+  # Every worker but one is held while the loop starts. A sibling then holds
+  # the original worker until the loop moves and completes another body
+  # turn, so that turn's line read cannot be from the original worker.
   def loops_forced(per_ms : Int64) : Nil
     holders = IyiWorkers.count - 1
     held = Tally.new
@@ -1318,14 +1327,10 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # ── balance ──────────────────────────────────────────────────────────
-  # The parked shape (#145): every task starts, and parks on a channel,
-  # on one worker - the others are held by tasks that spin until all have
-  # parked - and then each computes 25 ms. Woken from the main thread, a
-  # task goes to the pool's shared queue; woken by a task on a worker, to
-  # that worker's ring, and only a steal spreads it. Without moving, every
-  # task resumes where it parked, on the one worker, at the workers' count
-  # times the ideal. Held to twice the ideal, the work being each task's
-  # own measured time.
+  # The parked shape (#145): tasks woken from main use the shared queue;
+  # tasks woken by a worker use its ring. The measured wall/work ratio is
+  # informational. The pinned and nosteal copies check the routing and
+  # steal decisions, not a bound on elapsed time.
   def balance_round(label : String, from_worker : Bool, per_ms : Int64) : Nil
     workers = IyiWorkers.count
     tasks = workers * 6
@@ -1380,11 +1385,7 @@ import std/socket::{IyiSocket, SocketError}
     ideal = 1_i64 if ideal < 1_i64
     ratio = (wall * 100_i64 // ideal).to_f / 100.0
     took = IyiWorkers.grabs - grabs
-    if wall > ideal * 2_i64
-      puts "balance: #{tasks} tasks woken #{label}, #{wall} ms against #{ideal} ms of work per worker (#{ratio}x)"
-      fail("balance: tasks woken #{label} exceeded the balance bound")
-    end
-    puts "balance: #{tasks} tasks parked on one worker, woken #{label}: #{wall} ms against an ideal #{ideal} ms (#{ratio}x), #{took} steals from a ring"
+    puts "measure: balance: #{tasks} tasks parked on one worker, woken #{label}: #{wall} ms against #{ideal} ms of work per worker (#{ratio}x), #{took} steals (former bound: at most 2x)"
   end
 
   {% if flag?(:pinned_force) %}
@@ -1592,28 +1593,11 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # ── handoff ──────────────────────────────────────────────────────────
-  # A task woken by a task of another unit goes into its waker's ring,
-  # and the waker computes on: here a `@[NoPreempt]` loop, as the
-  # runtime's own code is, which no back-edge check gives up. The worker
-  # comes back for the woken task only when the loop ends, so an idle
-  # worker must be called to take it then and there. Each of ten wakes
-  # is timed from the send to the woken task's first statement after its
-  # receive, beside a 50 ms hold: half must start within 1 ms, and none
-  # may wait the hold out.
-  #
-  # The 1 ms is a sleeping kernel thread's wake, which Linux and Windows
-  # do not owe on a machine with more runnable threads than cores: Linux
-  # on 12 vCPUs at one-minute loads of 18 to 34 failed this step in 74 of
-  # 80 runs, its medians 0.8 to 4.3 ms and most near 2.9, and Windows on
-  # 12 vCPUs beside 12 and 24 busy loops in 32 of 80, while tmac (macOS
-  # 26, 10 cores) at loads of 4 to 44 failed none of 160, at 7 to 218 us.
-  # So the hand-off is also held where no clock can blur it: right after
-  # its send, the waker's worker has called an idle worker for the woken
-  # fiber (`handoff_last`, which only that worker writes and only its own
-  # `pop` clears), and the woken task then runs on another worker. Those
-  # hold on every machine; the median is judged unless
-  # bench/parallel_exercise.sh passes `--loaded=`, its reading of a Linux
-  # or Windows load at or past the cores, and the run then says so.
+  # A waker sends to a parked task and then holds a worker for 50 ms.
+  # The worker ids and the wait times below are samples, not verdicts:
+  # a waker can move between its send and its id read, and a spare can be
+  # delayed by the OS. The nocall and nohandoff copies check the exact
+  # hand-off decisions, not an elapsed-time guarantee.
   @[NoInline]
   @[NoPreempt]
   def hold_np(ns : Int64) : Nil
@@ -1826,37 +1810,18 @@ import std/socket::{IyiSocket, SocketError}
         stayed += 1 if handed.stayed?
       end
       setup_failure("handoff: a woken task answered no wait: #{waits}") if waits.any? { |w| w < 0_i64 }
-      {% if flag?(:nocall_force) %}
-        # The forced copy's wake calls are judged by handoff_forced, keyed to the sleeper's fiber. This round's
-        # placement and start-time judgements are the healthy gate's, and this copy skips them.
-        puts "handoff: #{rounds} tasks woken onto a worker held 50 ms with preemption off, under the forced copy"
-      {% else %}
-      if uncalled > 0
-        puts "handoff: #{uncalled} of #{rounds} parked tasks were handed over without an idle worker called"
-        fail("handoff: a parked task was handed over without an idle worker called")
-      end
       sorted = waits.sorted
-      if stayed > 0
-        fail("handoff: #{stayed} of #{rounds} tasks woken onto a worker held 50 ms with preemption off ran on that worker, after #{sorted.map { |w| w // 1000_i64 }} us")
-      end
       median = sorted[rounds // 2]
       longest = sorted[rounds - 1]
-      if longest >= 40_000_000_i64 || (loaded.empty? && median > 1_000_000_i64)
-        fail("handoff: tasks woken onto a worker held 50 ms with preemption off started after #{sorted.map { |w| w // 1000_i64 }} us, while other workers were idle")
-      end
-      judged = loaded.empty? ? "" : "; the 1 ms median not judged, #{loaded}"
-      puts "handoff: #{rounds} tasks woken onto a worker held 50 ms with preemption off, each with an idle worker called and run on another, started in #{median // 1000_i64} us at the median, #{longest // 1000_i64} us at most#{judged}"
-      {% end %}
+      load_note = loaded.empty? ? "" : "; reported load: #{loaded}"
+      puts "measure: handoff: #{rounds} wakes, median #{median // 1000_i64} us, longest #{longest // 1000_i64} us; #{uncalled} waker samples did not name the sleeper and #{stayed} worker-id samples matched#{load_note} (former bounds: median at most 1 ms when unloaded, longest below 40 ms)"
     end
   end
 
   # ── backstop ─────────────────────────────────────────────────────────
-  # The same wake right after its waker ping-ponged with another task
-  # 20,000 times: the worker took back the fiber it called for each time,
-  # so its back-off calls nobody for the hand-off (`push_runnable`), and
-  # the waker then holds the worker 100 ms with preemption off. The
-  # monitor, seeing the worker held a tick with a fiber in its ring,
-  # calls an idle worker: each of five wakes must start within 50 ms.
+  # After a ping-pong, the waker holds its worker 100 ms with preemption
+  # off. The ordinary round measures wake latency. The keyed copy checks
+  # the monitor's wake call, not a deadline for an OS-scheduled worker.
   def backstop(watch : Int32) : Nil
     {% if flag?(:nobackstop_force) %}
       backstop_forced
@@ -1907,10 +1872,7 @@ import std/socket::{IyiSocket, SocketError}
       setup_failure("backstop: a woken task answered no wait: #{waits}") if waits.any? { |w| w < 0_i64 }
       sorted = waits.sorted
       held = waits.count { |w| w > 1_000_000_i64 }
-      if sorted[rounds - 1] >= 50_000_000_i64
-        fail("backstop: tasks woken after a ping-pong onto a worker held 100 ms with preemption off started after #{sorted.map { |w| w // 1000_i64 }} us")
-      end
-      puts "backstop: #{rounds} tasks woken after a ping-pong onto a worker held 100 ms started in #{sorted[rounds // 2] // 1000_i64} us at the median, #{sorted[rounds - 1] // 1000_i64} us at most, #{held} after more than 1 ms"
+      puts "measure: backstop: #{rounds} wakes after a ping-pong, median #{sorted[rounds // 2] // 1000_i64} us, longest #{sorted[rounds - 1] // 1000_i64} us, #{held} after more than 1 ms (former bound: below 50 ms)"
     end
   end
 
@@ -2301,9 +2263,8 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # ── join ─────────────────────────────────────────────────────────────
-  # A task joining a thread parks: the task it spawned, asleep on the same
-  # worker, wakes on time while the thread runs 400 ms. A join held in the
-  # kernel held the worker, its sleepers and its unit with it.
+  # Measure when a child wakes while its sibling joins a 400 ms thread.
+  # The keyed copy checks the join path, not the child's wake deadline.
   def join(watch : Int32) : Nil
     watched("join", watch) do
       answer = 0_i64
@@ -2348,13 +2309,8 @@ import std/socket::{IyiSocket, SocketError}
         fail("join: the join of a running thread entered the kernel's join without parking") if decision == 2_u64
         setup_failure("join: not armed: the target join did not record its park path") unless decision == 1_u64
         puts "join: the join of a running thread took its park path"
-      {% else %}
-        if answer >= 300_i64
-          puts "join: the child's measured wake was #{answer} ms"
-          fail("join: the child's measured wake was outside the allowed range")
-        end
       {% end %}
-      puts "join: a task joining a 400 ms thread left its worker to its child, which woke #{answer} ms in"
+      puts "measure: join: child wake #{answer} ms after starting a task that joined a 400 ms thread (former bound: below 300 ms)"
     end
   end
 

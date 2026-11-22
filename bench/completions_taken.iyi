@@ -15,6 +15,10 @@
 # bench/parallel_exercise.sh runs both on Windows, at twelve workers, and
 # a broken copy of the runtime each: a port whose packets only the thread
 # their task parked on takes, and a pool that leaves the boost on.
+#
+# Registry walks protect list links, not IyiFiber.state: that enum has no
+# atomic read paired with its writers. A missed wait-state observation can
+# end at its named status-76 watchdog, not as a caught defect.
 
 @[Unsafe("on Windows it asks whether the process's priority boost is off through GetProcessPriorityBoost, a C call answering through pointerof")]
 module bench/completions_taken

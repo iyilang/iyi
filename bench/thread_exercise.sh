@@ -839,7 +839,11 @@ IYI
     fi
     ./cores mask > affinity-mask.txt 2>&1
     code=$?
-    if [ "$code" -ne 0 ]; then cat affinity-mask.txt; exit 76; fi
+    if [ "$code" -ne 0 ]; then
+      cat affinity-mask.txt
+      grep -q '^SETUP:' affinity-mask.txt || echo "SETUP: affinity: the process mask probe ended with exit $code"
+      exit 76
+    fi
     mask="$(tr -d '\r' < affinity-mask.txt)"
     case "$mask" in mask=*) mask="${mask#mask=}" ;; *) echo "SETUP: affinity: invalid process mask"; exit 76 ;; esac
     case "$mask" in ''|*[!0-9]*) echo "SETUP: affinity: invalid process mask"; exit 76 ;; esac
@@ -870,26 +874,43 @@ IYI
     case "$cores_active" in active=*) cores_active="${cores_active#active=}" ;; *) echo "SETUP: affinity: invalid active processor count"; exit 76 ;; esac
     case "$cores_active" in ''|*[!0-9]*) echo "SETUP: affinity: invalid active processor count"; exit 76 ;; esac
     if [ "$cores_active" -gt 16 ]; then cores_helpers=15; elif [ "$cores_active" -gt 1 ]; then cores_helpers=$((cores_active - 1)); else cores_helpers=0; fi
-    # held HEXMASK PROGRAM OUTPUT: the program's line, run on those cores.
+    # held HEXMASK PROGRAM OUTPUT: the program's line, run on those cores. The
+    # status is the program's own, so a crash shows as its exit status.
     held() {
       MSYS2_ARG_CONV_EXCL='*' cmd /c "start /affinity $1 /b /wait $2" > "$3" 2>&1
       local status=$?
-      if [ "$status" -ne 0 ]; then cat "$3" >&2; return 76; fi
       tr -d '\r' < "$3"
+      return "$status"
+    }
+    # A nonzero status: the program's own SETUP sentence is setup (76). Any other
+    # ending is a crash, a defect (exit 1 with its FAIL sentence), never setup.
+    held_ended() {
+      local status="$1" label="$2" file="$3"
+      if tr -d '\r' < "$file" | grep -q '^SETUP:'; then
+        tr -d '\r' < "$file" | grep -m1 '^SETUP:'
+        return 76
+      fi
+      echo "FAIL: affinity: $label ended with exit $status"
+      return 1
     }
     # The two checks the control runs. Each prints one FAIL line and returns 1
-    # when the program answers otherwise, and 76 when it cannot be launched.
+    # when the program answers otherwise, and returns what held_ended decides
+    # when the program ends with a nonzero status.
     one_core() {
-      local got
-      got="$(held "$affinity_one" "$1" "held-one-$2.txt")" || { echo "SETUP: affinity: the one-core launch of $2 failed"; return 76; }
+      local got status
+      got="$(held "$affinity_one" "$1" "held-one-$2.txt")"
+      status=$?
+      if [ "$status" -ne 0 ]; then held_ended "$status" "the one-core run of $1" "held-one-$2.txt"; return; fi
       if [ "$got" != "core_count=1 default_helpers=0" ]; then
         echo "FAIL: affinity: held to one core: $got"
         return 1
       fi
     }
     two_core() {
-      local got
-      got="$(held "$affinity_two" "$1" "held-two-$2.txt")" || { echo "SETUP: affinity: the two-core launch of $2 failed"; return 76; }
+      local got status
+      got="$(held "$affinity_two" "$1" "held-two-$2.txt")"
+      status=$?
+      if [ "$status" -ne 0 ]; then held_ended "$status" "the two-core run of $1" "held-two-$2.txt"; return; fi
       if [ "$got" != "core_count=2 default_helpers=1" ]; then
         echo "FAIL: affinity: held to two cores: $got"
         return 1
@@ -5603,7 +5624,7 @@ IYI
     if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build starting.iyi -Dunnamed_force -o held-run > build-held.log 2>&1; then
       echo "SETUP: ${current_step:-build}: held did not build"; cat build-held.log; exit 76
     fi
-    timeout -k 5 60 ./held-run 3 > held.txt 2>&1
+    timeout 60 ./held-run 3 > held.txt 2>&1
     code=$?; check_bound "$code" forced control held.txt
     if [ "$code" -eq 76 ]; then cat held.txt; exit 76; fi
     if [ "$code" -ne 0 ] || ! tr -d '\r' < held.txt | grep -qFx 'unnamed: held=1 collected=1 expired=0, and no stop met a thread without its handle' || ! tr -d '\r' < held.txt | grep -qFx 'ok started=1'; then

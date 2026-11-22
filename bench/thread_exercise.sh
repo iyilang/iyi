@@ -5011,68 +5011,241 @@ esac
 
 # ── 7g. A fault the stack guard does not own kills the process ───────────
 # The guard's handler (`IyiStackGuard.faulted`) gives a fault away from a
-# stack's edge back to the signal's default action, and built that action
-# in a heap block. A mark helper has no allocator cache, and one that
-# faulted inside a collection, holding the runtime lock, waited for that
-# lock at the block's first touch for good: on macOS 26.6, an M2 Pro with
-# 10 cores, a soak run of bench/concurrency_exercise.iyi hung so, sampled
-# with its helper in `IyiRuntimeLock.lock` under the handler, under a root
-# scan that had faulted. The action is in the handler's frame now. A
-# helper that takes the runtime lock and stores to address 8 kills the
-# process with SIGSEGV at once, on the M2 and on Linux x86_64; with the
-# heap block back, the process outlives the fault by the 5 s it waits,
-# and says so.
+# stack's edge back to the signal's default action, which was built in a heap
+# block. A mark helper has no allocator cache, so its first touch of a heap
+# page takes the runtime lock, and a helper that faulted holding the lock
+# waited on it for good: on macOS 26.6, an M2 Pro with 10 cores, a soak run of
+# bench/concurrency_exercise.iyi hung so. The action is in the handler's frame
+# now. Two copies carry the same witnesses and differ only in where the action
+# lives. The control witnesses its handler's store and reads its default action
+# back as SIG_DFL, and the process dies of SIGSEGV (139). The heaped mutant
+# builds the action in a heap block; its first touch, inside that window and
+# holding the lock, names the failure and exits 1 before the lock is taken. A
+# setup, query or watchdog failure exits 76 by name. No timing decides a verdict.
 case "$(uname -s)" in
   Linux | Darwin)
-    step "a mark helper's fault inside a collection kills the process"
+    wild_handler_line="wild: the fault handler classified the armed helper's store outside any stack edge"
+    wild_install_line="wild: the default action was installed and read back as SIG_DFL"
+    wild_fail_line="FAIL: heaped: the default action was allocated while its helper held the runtime lock"
+
+    # The witness: a copy-only part of thread.iyi, and hooks in concurrency.iyi
+    # and prelude.iyi. Every awk anchor is unique or scoped, counted exactly
+    # once and checked; a copy that does not match is a setup failure, status
+    # 76.
+    cat > wild.part <<'IYI'
+    # ── The fault witness (bench/thread_exercise.sh, step 7g) ───────────────
+    # Copies only: the awk in that step puts this into a copy of thread.iyi
+    # before its roots. The state is one page the main thread maps before the
+    # helper starts. The helper arms it with atomic stores while it owns the
+    # runtime lock. The fault handler witnesses the armed helper's store and
+    # opens the window in which it builds its default action; a first touch of
+    # a heap page inside that window names the failure before the lock. Nothing
+    # here allocates or takes a lock, and each failure is a named sentence and
+    # an exit.
+    IYI_WILD_TARGET   = 0_u64
+    IYI_WILD_ARMED    = 64_u64
+    IYI_WILD_BUILDING = 128_u64
+    @@wild_state : UInt64 = 0_u64
+
+    def self.wild_map(state : UInt64) : Nil
+      @@wild_state = state
+    end
+
+    def self.wild_word(offset : UInt64) : Pointer(Atomic(UInt64))
+      Pointer(Atomic(UInt64)).new(@@wild_state + offset)
+    end
+
+    def self.wild_armed? : Bool
+      wild_word(IYI_WILD_ARMED).value.get != 0_u64
+    end
+
+    # The thread's identity: its pthread on darwin, its tid on Linux.
+    def self.wild_self : UInt64
+      {% if flag?(:darwin) %}
+        LibC.pthread_self.address
+      {% else %}
+        __iyi_conc_syscall3(IYI_SYS_GETTID, 0_i64, 0_i64, 0_i64).to_u64
+      {% end %}
+    end
+
+    # One write and nothing allocated: the sentences the handler writes.
+    def self.wild_say(text : String) : Nil
+      __iyi_write(2, text.to_unsafe.as(Void*), text.bytesize.to_u64)
+    end
+
+    # A named sentence, then the exit. Darwin's `_exit`: libSystem's `exit`
+    # runs its handlers and flushes its streams, which a signal handler may not
+    # do.
+    def self.wild_fail(text : String, status : Int32) : NoReturn
+      wild_say(text)
+      {% if flag?(:darwin) %}
+        LibC._exit(status)
+      {% else %}
+        __iyi_exit(status)
+      {% end %}
+    end
+
+    # The helper, while it owns the runtime lock: where it will store, then its
+    # identity. A fault is the armed helper's only on this thread and on the
+    # page the helper stored to.
+    def self.wild_arm(address : UInt64) : Nil
+      wild_fail("SETUP: wild: the state page was never mapped\n", 76) if @@wild_state == 0_u64
+      wild_word(IYI_WILD_TARGET).value.set(address)
+      wild_word(IYI_WILD_ARMED).value.set(wild_self)
+    end
+
+    # The fault handler calls this once it has classified the address as outside
+    # the stack's edge. The armed helper's own store is witnessed here, and the
+    # window for its default action opens.
+    def self.wild_classified(address : UInt64) : Nil
+      return if @@wild_state == 0_u64
+      owner = wild_self
+      return if wild_word(IYI_WILD_ARMED).value.get != owner
+      return if address.unsafe_shr(12_u64) != wild_word(IYI_WILD_TARGET).value.get.unsafe_shr(12_u64)
+      wild_say("wild: the fault handler classified the armed helper's store outside any stack edge\n")
+      wild_word(IYI_WILD_BUILDING).value.set(owner)
+    end
+
+    # The first touch of a heap page takes the runtime lock. In the window for
+    # the default action, on the armed helper, that lock is the helper's own and
+    # is never released, so the failure is named here, before the lock.
+    def self.wild_prelock : Nil
+      return if @@wild_state == 0_u64
+      owner = wild_self
+      return if wild_word(IYI_WILD_BUILDING).value.get != owner
+      return if wild_word(IYI_WILD_ARMED).value.get != owner
+      wild_fail("FAIL: heaped: the default action was allocated while its helper held the runtime lock\n", 1) if IyiRuntimeLock.held?
+    end
+
+    # The handler's sigaction, given its answer. The install must succeed, and
+    # a read-back of the disposition must find SIG_DFL; anything else is a setup
+    # failure. Then the window closes and the install is witnessed.
+    def self.wild_installed(signal : Int32, result : Int64) : Nil
+      if result != 0_i64
+        wild_fail("SETUP: wild: the default action could not be installed\n", 76)
+      end
+      prior = uninitialized UInt64[4]
+      probe = pointerof(prior).as(Pointer(UInt64))
+      probe[0] = 1_u64
+      {% if flag?(:darwin) %}
+        query = LibC.sigaction(signal, Pointer(Void).new(0_u64), probe.as(Void*)).to_i64
+      {% else %}
+        query = __iyi_conc_syscall6(IYI_SYS_RT_SIGACTION, signal.to_i64, 0_i64, probe.address.to_i64, 8_i64, 0_i64, 0_i64)
+      {% end %}
+      if query != 0_i64
+        wild_fail("SETUP: wild: the default action could not be read back\n", 76)
+      end
+      if probe[0] != 0_u64
+        wild_fail("SETUP: wild: the default action did not read back as SIG_DFL\n", 76)
+      end
+      wild_word(IYI_WILD_BUILDING).value.set(0_u64)
+      wild_say("wild: the default action was installed and read back as SIG_DFL\n")
+    end
+
+IYI
+
+    # Each copy's awk. thread.iyi gets the part before its roots; prelude.iyi's
+    # first touch gets the hook before its lock, scoped to first_touch;
+    # concurrency.iyi's handler gets the classification, the two sigaction
+    # wraps, the _exit declaration and, in the heaped copy alone, the heap block
+    # in place of the stack action. A miss in any count exits 3, and the caller
+    # turns that into a setup failure.
+    wild_thread_copy() {
+      awk -v part=wild.part '
+        /^    # ── Roots/ { while ((getline line < part) > 0) print line; roots++ }
+        { print }
+        END { if (roots != 1) exit 3 }
+      ' "$REPO/src/iyi/thread.iyi" > "$1"
+    }
+    wild_prelude_copy() {
+      awk '
+        /^      def self\.first_touch : UInt64$/ { scope = 1; defs++ }
+        scope && /^        lock$/ { print "        IyiThread.wild_prelock"; print; locks++; next }
+        scope && /^      end$/ { scope = 0 }
+        { print }
+        END { if (defs != 1 || locks != 1) exit 3 }
+      ' "$REPO/src/iyi/prelude.iyi" > "$1"
+    }
+    wild_concurrency_copy() {
+      awk -v mode="$1" '
+        /^      fun sigaction\(signal : Int32, action : Void\*, previous : Void\*\) : Int32$/ {
+          print; print "      fun _exit(status : Int32) : NoReturn"; declared++; next
+        }
+        /^      # Not the stack.s edge: the signal.s default action, on the retry\.$/ {
+          print "      IyiThread.wild_classified(address)"; print; classified++; next
+        }
+        mode == "heaped" && /^      action = uninitialized UInt64\[4\]$/ { heaped_action++; next }
+        mode == "heaped" && /^      words = pointerof\(action\)\.as\(Pointer\(UInt64\)\)$/ {
+          print "      words = Pointer(UInt64).malloc(4_u64)"; heaped_words++; next
+        }
+        /^        LibC\.sigaction\(signal, words\.as\(Void\*\), Pointer\(Void\)\.new\(0_u64\)\)$/ {
+          print "        IyiThread.wild_installed(signal, LibC.sigaction(signal, words.as(Void*), Pointer(Void).new(0_u64)).to_i64)"; installed++; next
+        }
+        /^        __iyi_conc_syscall6\(IYI_SG_SYS_RT_SIGACTION, signal\.to_i64, words\.address\.to_i64, 0_i64, 8_i64, 0_i64, 0_i64\)$/ {
+          print "        IyiThread.wild_installed(signal, __iyi_conc_syscall6(IYI_SG_SYS_RT_SIGACTION, signal.to_i64, words.address.to_i64, 0_i64, 8_i64, 0_i64, 0_i64))"; installed++; next
+        }
+        { print }
+        END {
+          if (declared != 1 || classified != 1 || installed != 2) exit 3
+          if (mode == "heaped" && (heaped_action != 1 || heaped_words != 1)) exit 3
+        }
+      ' "$REPO/src/iyi/concurrency.iyi" > "$2"
+    }
+
+    # The program: the main thread maps the state page, then starts the helper.
+    # A fault ends it at once; its own exit is the 5 s watchdog's, 76.
     cat > wild.iyi <<'IYI'
 @[Unsafe("a mark helper is started on a function that writes to a wild address, the fault the gate wants inside a collection")]
 module wild
 
-# A helper's life here: the runtime lock taken, as a collection on a mark
-# helper holds it, then a store to an address nothing maps.
+# A helper's life here: the runtime lock taken, the helper armed while it owns
+# the lock (the arm is in the copies only, step 7g), then a store to an address
+# nothing maps.
 def fault_holding_the_lock(address : UInt64) : Nil
   IyiRuntimeLock.lock
+  IyiThread.wild_arm(address)
   Pointer(UInt64).new(address).value = 1_u64
 end
 
+IyiThread.wild_map(__iyi_mmap(4096_u64).address)
 entry = ->(address : UInt64) { fault_holding_the_lock(address) }
 IyiThread.start_helper(Pointer(UInt64).new(pointerof(entry).address).value, 8_u64)
 deadline = __iyi_monotonic_ns + 5_000_000_000_i64
 while __iyi_monotonic_ns < deadline
 end
-message = "the helper's fault left the process alive for 5 s\n"
+armed = IyiThread.wild_armed?
+message = armed ? "SETUP: wild: the helper's fault did not end the process within 5 s\n" : "SETUP: wild: the helper never armed\n"
 __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-__iyi_exit(3)
+__iyi_exit(76)
 IYI
-    if ! "$IYI" build wild.iyi -o wild > build-wild.log 2>&1; then
-      cat build-wild.log; exit 1
-    fi
-    ( timeout -k 5 60 ./wild > wild.txt 2>&1; exit $? ) 2> /dev/null
-    code=$?
-    if [ "$code" -eq 76 ]; then cat wild.txt; exit 76; fi
-    if [ "$code" -ne 139 ]; then
-      echo "a helper's fault holding the runtime lock exited $code, not 139 (SIGSEGV):"; tail -3 wild.txt; exit 1
-    fi
-    echo "  killed by SIGSEGV (exit 139)"
 
-    step "failure proof: the default action built in a heap block, as it was"
-    mkdir -p heaped/iyi
-    cp "$REPO"/src/iyi/*.iyi heaped/iyi/
-    awk '/^      action = uninitialized UInt64\[4\]$/ { found++; next }
-      /^      words = pointerof\(action\)\.as\(Pointer\(UInt64\)\)$/ { print "      words = Pointer(UInt64).malloc(4_u64)"; found++; next }
-      { print } END { if (found != 2) exit 3 }' \
-      "$REPO/src/iyi/concurrency.iyi" > heaped/iyi/concurrency.iyi || { echo "the stack guard's default action is not in concurrency.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/heaped${PSEP}$REPO/src" "$IYI" build wild.iyi -o heaped-run > build-heaped.log 2>&1; then
-      cat build-heaped.log; exit 1
-    fi
-    ( timeout -k 5 60 ./heaped-run > heaped.txt 2>&1; exit $? ) 2> /dev/null
+    step "a mark helper's fault holding the runtime lock: the control witnesses its handler and default action, and dies of SIGSEGV"
+    for mode in control heaped; do
+      mkdir -p "wild-$mode/iyi"
+      cp "$REPO"/src/iyi/*.iyi "wild-$mode/iyi/"
+      wild_thread_copy "wild-$mode/iyi/thread.iyi" || { echo "SETUP: wild: the roots anchor in thread.iyi changed"; exit 76; }
+      wild_prelude_copy "wild-$mode/iyi/prelude.iyi" || { echo "SETUP: wild: the first touch's lock in prelude.iyi changed"; exit 76; }
+      wild_concurrency_copy "$mode" "wild-$mode/iyi/concurrency.iyi" || { echo "SETUP: wild: a fault handler anchor in concurrency.iyi changed"; exit 76; }
+      if ! IYI_PATH="$WORK/wild-$mode${PSEP}$REPO/src" "$IYI" build wild.iyi -o "wild-$mode-run" > "build-wild-$mode.log" 2>&1; then
+        echo "SETUP: wild: the $mode copy did not build:"; cat "build-wild-$mode.log"; exit 76
+      fi
+    done
+    ( timeout -k 5 60 ./wild-control-run > wild-control.txt 2>&1; exit $? ) 2> /dev/null
     code=$?
-    if [ "$code" -eq 76 ]; then cat heaped.txt; exit 76; fi
-    if [ "$code" -ne 3 ] || ! grep -q "^the helper's fault left the process alive for 5 s" heaped.txt; then
-      echo "with the action in a heap block, a helper's fault exited $code:"; tail -3 heaped.txt; exit 1
+    if [ "$code" -eq 76 ] || [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then cat wild-control.txt; exit 76; fi
+    if [ "$code" -ne 139 ] || ! grep -qxF "$wild_handler_line" wild-control.txt || ! grep -qxF "$wild_install_line" wild-control.txt; then
+      echo "the control exited $code, not 139 after both witnesses:"; tail -3 wild-control.txt; exit 1
     fi
-    echo "  the process outlived its helper's fault by 5 s"
+    printf '  control: exit 139 (SIGSEGV), with "%s" and "%s"\n' "$wild_handler_line" "$wild_install_line"
+
+    step "failure proof: the default action built in a heap block fails at its first touch, before the lock, and exits 1"
+    ( timeout -k 5 60 ./wild-heaped-run > wild-heaped.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?
+    if [ "$code" -eq 76 ] || [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then cat wild-heaped.txt; exit 76; fi
+    if [ "$code" -ne 1 ] || ! grep -qxF "$wild_handler_line" wild-heaped.txt || ! grep -qxF "$wild_fail_line" wild-heaped.txt; then
+      echo "the heap-built default action exited $code, not 1 after its handler witness and FAIL sentence:"; tail -3 wild-heaped.txt; exit 1
+    fi
+    printf '  exits 1 at "%s"\n' "$wild_fail_line"
     ;;
 esac
 

@@ -27,7 +27,14 @@ module server_load
 import std/socket::{IyiSocket, SocketError}
 
 ROUNDS      = 200
-STACK_BOUND =   8
+# The stack bound. How many stacks 200 sequential connections take depends on how
+# many handlers overlap, so the bound is set from the population, not a guess.
+# Darwin arm64, this program as committed: 40 runs (20 plain, 20 release) took 1
+# or 2 stacks each, and 4 collections ran during every load. A stack that is never
+# handed back takes ROUNDS, one per connection. The bound is the geometric midpoint
+# of the healthy maximum (2) and ROUNDS: sqrt(2 * 200) = 20. Linux and Windows
+# populations were not measured here.
+STACK_BOUND = 20
 
 # One connection, server side: read (which parks), answer, and report the
 # stack it ran on, so the caller can count how many stacks the run used.

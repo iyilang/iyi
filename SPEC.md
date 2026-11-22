@@ -5909,10 +5909,12 @@ through `IYI_SPAWN_BROKEN` as `IYI_RELEASE_IMPORT=0` is
 `release_cores.sh`'s, a reason that names no module, `iyi check` silent
 unasked, no line for a moved spawn, and `spawn_parallel` or `serial:`
 answered as any undefined method or parameter.
-`IYI_SPAWN_BROKEN` is the gate's and nobody else's: a test-only switch,
-read once, that turns one of these mechanisms off (`remote`, `fallback`,
-`moves`, `retired`, `unit-capture`, `unit-answer`, comma-separated) and is
-empty in every other run; no program and no build is meant to set it.
+`IYI_SPAWN_BROKEN` is a test-only switch, read once, that turns one
+mechanism off by name (`remote`, `fallback`, `moves`, `retired`,
+`unit-capture`, `unit-answer` and others, comma-separated), and is empty
+in an ordinary run. This gate's copies, `bench/spawn_fuzz.sh`, heap22's
+gates and `bench/reach_rule.sh` set it for their own proofs. No program and
+no build is meant to set it.
 `bench/lsp_session.py` step 23s holds the inlay hints: `in a unit of its
 own` on line 9, ``in its spawner's unit: the block captures `log :
 Array(Int32)`, which is not Share`` on line 10, the definition of a unit in

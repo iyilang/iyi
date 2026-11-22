@@ -213,13 +213,22 @@
     # a freed node is still flagged — the deterministic form of the
     # thread-root property, and what the driver's failure proof removes.
     Tally.ready.value.add(1_u64)
+    deadline = __iyi_monotonic_ns + 20_000_000_000_i64
     while Tally.go.value.get == 0_u64
+      if __iyi_monotonic_ns >= deadline
+        join_setup("SETUP: threads: the explicit collection did not release the ready workers\n")
+      end
+      IyiThread.spin_pause
     end
     freed = ledger.freed
     fail("thread roots: the explicit collection swept a held thread's live nodes") if freed != 0_i64
     fail("thread #{seed.to_i64}: the live list's checksum changed under the collection that stopped this thread") if checksum(list) != expected
     Tally.checked.value.add(1_u64)
+    deadline = __iyi_monotonic_ns + 20_000_000_000_i64
     while Tally.go.value.get != 2_u64
+      if __iyi_monotonic_ns >= deadline
+        join_setup("SETUP: threads: the checked workers were not released after the explicit collection\n")
+      end
       IyiThread.spin_pause
     end
     burst = 0
@@ -409,11 +418,20 @@
   main_list = build_list(1000, 1_u64, main_ledger)
   main_sum = checksum(main_list)
   # The one explicit collection, with every worker spinning on its list.
+  deadline = __iyi_monotonic_ns + 20_000_000_000_i64
   while Tally.ready.value.get < count.to_u64
+    if __iyi_monotonic_ns >= deadline
+      join_setup("SETUP: threads: #{Tally.ready.value.get.to_i64} of #{count} workers prepared their lists for the explicit collection\n")
+    end
+    IyiThread.spin_pause
   end
   IyiMark.collect
   Tally.go.value.set(1_u64)
+  deadline = __iyi_monotonic_ns + 20_000_000_000_i64
   while Tally.checked.value.get < count.to_u64
+    if __iyi_monotonic_ns >= deadline
+      join_setup("SETUP: threads: #{Tally.checked.value.get.to_i64} of #{count} workers checked their lists after the explicit collection\n")
+    end
     IyiThread.spin_pause
   end
   Tally.go.value.set(2_u64)

@@ -241,8 +241,8 @@ esac
 
 # In the copy of the runtime's prelude: the armed chunk, the words the walk and the
 # freeing thread hand each other, and the hooks on the walk and on the free. Every
-# wait is on a word with its own limit and sentence. IyiRoots.fatal writes the
-# sentence and exits without blocking on the runtime lock: Linux uses exit_group,
+# wait is on a word with its own limit and sentence. Each watchdog writes the
+# sentence and exits 76 by the path IyiRoots.fatal takes, without blocking on the runtime lock: Linux uses exit_group,
 # macOS uses libSystem exit, and Windows makes bounded try_lock attempts before
 # TerminateProcess. A walk holding the lock cannot wait for itself on this path.
 prelude_awk='
@@ -301,11 +301,14 @@ $0 == "      def self.first_arena : UInt64" {
   print "        forced_wait(Pointer(Atomic(UInt64)).new(pointerof(@@forced_held).address), \"FAIL: the walk did not reach the armed chunk\\n\")"
   print "      end"
   print ""
-  print "      # A wait on a word, ended after 20 s with the sentence (which ends in a newline)."
+  print "      # A wait on a word, ended after 20 s with the sentence (which ends in a newline) and status 76."
   print "      def self.forced_wait(word : Pointer(Atomic(UInt64)), sentence : String) : Nil"
   print "        started = __iyi_monotonic_ns"
   print "        while word.value.get == 0_u64"
-  print "          IyiRoots.fatal(sentence) if __iyi_monotonic_ns - started > 20_000_000_000_i64"
+  print "          if __iyi_monotonic_ns - started > 20_000_000_000_i64"
+  print "            __iyi_write(2, sentence.to_unsafe.as(Void*), sentence.bytesize.to_u64)"
+  print "            __iyi_exit(76)"
+  print "          end"
   print "          IyiThread.spin_pause"
   print "        end"
   print "      end"

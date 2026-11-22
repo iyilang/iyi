@@ -350,7 +350,10 @@ else
   def self.forced_wait_steps(count : UInt64, sentence : String) : Nil
     started = __iyi_monotonic_ns
     while Pointer(Atomic(UInt64)).new(pointerof(@@forced_steps).address).value.get < count
-      IyiRoots.fatal(sentence) if __iyi_monotonic_ns - started > 20_000_000_000_i64
+      if __iyi_monotonic_ns - started > 20_000_000_000_i64
+        __iyi_write(2, sentence.to_unsafe.as(Void*), sentence.bytesize.to_u64)
+        __iyi_exit(76)
+      end
       IyiThread.spin_pause
     end
   end
@@ -359,7 +362,7 @@ else
   forced_defs_control='  # Copy only, for a failure proof: the first call to put, which runs under the
   # mutex, holds its line until a second writer has waited on the mutex. The copy of
   # std/mutex records that wait on its contended path (MutexProof). The hold ends
-  # after 20 s with its own sentence if no second writer ever waits.
+  # after 20 s with its own sentence and status 76 if no second writer ever waits.
   @[UnsafeReach("counts the calls to put, which run under the mutex, one at a time")]
   @@forced_calls : UInt64 = 0_u64
 
@@ -370,7 +373,11 @@ else
   def self.forced_first_hold : Nil
     started = __iyi_monotonic_ns
     until MutexProof.waited?
-      IyiRoots.fatal("FAIL: the second writer did not wait for the mutex while the first held its line\n") if __iyi_monotonic_ns - started > 20_000_000_000_i64
+      if __iyi_monotonic_ns - started > 20_000_000_000_i64
+        message = "FAIL: the second writer did not wait for the mutex while the first held its line\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(76)
+      end
       IyiThread.spin_pause
     end
   end

@@ -4096,18 +4096,22 @@ started together, parked on a channel and then computed 25 ms each took
 shape of 32 connections making 25 ms requests 1.26 to 2.20 times before
 and 1.16 to 1.20 after. In the best runs one worker did 328 ms of the
 parked tasks' work and another 59 before, and every worker 157 to 167 ms
-after. `bench/parallel_migrate.iyi`'s balance step holds the parked shape
-on four workers, under twice the ideal. Its handoff step holds the wake a
-handed-over task brings: a task woken by a task that then computes 50 ms
-with preemption off starts on an idle worker in 23 to 28 us at the median
-of ten (Linux, 12 vCPUs, release), where it waited the 50 ms out in all
-20 wakes of two runs before. It also holds what no load blurs: each
-hand-off called an idle worker, and the woken task ran on another worker.
-On a Linux or Windows host whose load in the second before the step is at
-or past its cores the median is not judged, since the kernel then wakes
-the called thread a slice later: 0.8 to 4.3 ms at loads of 18 to 34 on
-those 12 vCPUs. Linux's load there is its threads runnable, which the
-one-minute average lags.
+after. The balance step reports the parked shape on four workers against the
+ideal, and the former bound of at most twice the ideal is information. Its keyed
+copies hold the decisions: a worker looking for work takes tasks woken into a
+held worker's ring (`nosteal`), and a task woken from the main thread is queued
+for the pool rather than sent back to the worker it parked on while that worker
+is held (`pinned`). The handoff step reports the wake a handed-over task brings:
+a task woken by a task that then computes 50 ms with preemption off started on
+an idle worker in 23 to 28 us at the median of ten (measured on Linux, 12 vCPUs,
+release), where it waited the 50 ms out in all 20 wakes of two runs before. It
+judges no latency at any load. Host load is printed beside its medians, and on a
+loaded Linux or Windows host the kernel wakes the called thread a slice later,
+which measured 0.8 to 4.3 ms at loads of 18 to 34 on those 12 vCPUs; Linux's
+load there is its threads runnable, which the one-minute average lags. Keyed
+copies hold what it decides: an eligible hand-off for a parked task takes its
+branch with no back-off (`nohandoff`), and it makes its immediate wake_one call
+(`nocall`).
 
 What a move keeps, and what holds it: the fiber's stack is found by the
 collector on whichever thread runs it, through the fiber registry and the
@@ -4122,9 +4126,11 @@ it parked on (part 5); a cancel finds the thread whose sleep heap or
 poller holds the task by an id the task writes there (`IyiFiber#listed_on`);
 and a socket closed on another thread than its reader's - by a sibling on
 another worker, or by the main thread - wakes the read parked on it through
-the reader's worker's mail. `bench/parallel_migrate.iyi` holds each of
-these after hundreds of moves, plain and release, with broken copies caught
-by name.
+the reader's worker's mail. `bench/parallel_migrate.iyi` holds each of these at
+a constructed move, with the task's own worker held while it resumes on a spare
+(channels' forced task, sockets, deep, the forced loop, and closes' registered
+reader), plain and release, with broken copies caught by name on one run. The
+moves its larger exercises happen to make are counted as information.
 
 **2. The door is asked for at the call, and `Share` gates it as it gates a
 thread.** Built as a verb of its own, `spawn_parallel`, spelled
@@ -4217,9 +4223,12 @@ from its poll until the last waiter it found is off the lists, so an
 event it reads cannot be stale against a waiter the owner parked
 meanwhile. Nothing allocates under it: the slots grow, and the owners'
 table maps its chunk, before the owner takes it (`io_room`).
-`bench/parallel_migrate.iyi`'s heldio step holds the answer to within 20
-ms; it is read on another worker in 0.4 to 5.0 ms on Linux, the
-monitor's 5 ms tick and the call.
+`bench/parallel_migrate.iyi`'s heldio step holds that an answer sent while the
+reader's worker is held is read on another worker before the hold ends. A 10 s
+limit names a hang, and no latency is judged: the reads took 0.4 to 5.0 ms on
+Linux, the monitor's 5 ms tick and the call. A copy whose monitor finds the
+held poller's news but omits the wake that rings an idle worker fails by name
+(`noheldio`, on Linux and darwin; Windows has its own port proof).
 
 A worker's idle wait still takes its own poller's news and its expired
 sleepers before it says it is busy (`end_idle`), unlike Windows' below,
@@ -4445,8 +4454,10 @@ preemption word at its back-edge, and a monitor raises the word.
   `@[NoPreempt]` twins of themselves (release, best of seven,
   interleaved, load 5 to 6, Linux here): a xorshift walk 0.999x to
   1.001x, the vectorised sum 0.97x to 1.055x, the same through `each`
-  1.012x to 1.04x, a table CRC 0.992x to 1.004x. The gate holds every
-  ratio to 2x (below).
+  1.012x to 1.04x, a table CRC 0.992x to 1.004x. These are historical
+  measurements. The gate runs each loop and its twin once, requires the same
+  answer, and prints the ratio as information. What it holds is the check's form
+  in the release IR (below).
 - *Who raises it.* The pool's monitor, a helper thread the collector does
   not stop (Go's `sysmon`), looks every 5 ms and raises the word of a
   worker whose switch count has not moved since its last look: one task
@@ -4483,11 +4494,16 @@ After it, the server shape (8 workers, release, three runs, load 3.3 to
 15 ms quantum, against 67 to 84, at most 112 to 206 ms, without, and with
 the 5 to 10 ms kept, none and at most 14 to 17 ms in the gate's runs. A
 task spawned beside one computing a second on a pool of one starts 1 to 9
-ms later. `bench/parallel_preempt.iyi` holds each of these in
-`bench/parallel_exercise.sh`, with broken copies caught by name: a
-`@[NoPreempt]` loop, a monitor that never raises the word, a slow half that
-does not poll, a switch that leaves the word raised for the task before,
-and a preempted task that gives its unit's token away.
+ms later. These are measurements, which `bench/parallel_exercise.sh`
+reports without judging. What it holds is a dedicated pair: one fast
+request is served while a slow handler stays active. Broken copies are
+caught by name on one run at keyed decisions: a `@[NoPreempt]` loop and a
+vectorised sum that keep their worker at the turn after the word is
+raised, a monitor decision that leaves the word down, a monitor that
+raises after three unchanged looks instead of one, a slow half that does
+not poll its worker's poller, a switch that leaves the word raised for
+the task before, a preempted task that gives its unit's token away, and a
+preempted worker that does not enqueue its expired sleeper.
 
 A thread-local read is not shared across the check. The check goes in
 after LLVM has optimised the loop, so a read LLVM took as the same all
@@ -4509,11 +4525,14 @@ and 601 ms before, 582, 937 and 578 after; in a parallel task, whose loop
 has the check, 851, 879 and 855 before, 886, 856 and 857 after.
 `bench/parallel_migrate.iyi`'s `loops` step holds it wherever the gate
 runs, darwin and Windows included, and on aarch64 Linux under emulation
-in CI: 16 tasks on 4 workers read the line before, in and after loops whose
-checks moved them, against the kernel's thread read by asm. Built by the
-compiler before the volatile `mrs`, that step failed for aarch64 under
-qemu-user in 2 runs of 2; a copy that reads the line before the loop in
-its place (`-Dparallel_hoisted_tls`) fails it by name.
+in CI. A forced loop resumes on another worker while a sibling holds the
+one it started on: its next loop-body read must name a thread other than
+the one it started on, and its read after the loop must agree with the
+kernel's thread read by asm. The 16 calibrated tasks on 4 workers are
+counted as information. Built by the compiler before the volatile `mrs`,
+that step failed for aarch64 under qemu-user in 2 runs of 2; a copy that
+reads the line before the loop in its place (`-Dparallel_hoisted_tls`)
+fails at the forced move by name, beside a control built the same way.
 
 **The check and the tick on Windows and darwin, measured on GitHub's
 runners.** A debug workflow ran `bench/parallel_preempt.iyi` on
@@ -4547,11 +4566,12 @@ to 5.80x on darwin; the walk and the CRC cost 1.00x to 1.09x.
   its unchecked `sum` landed at the slower speed too (1.001x). The
   remaining cost is a check in a loop of about 1.3 cycles, not the
   Windows read. Nothing under 3% was found for this loop.
-- *The gate's bound and its proof.* The `tight` step holds every ratio to
-  2x, a measurement of what the check costs: a windows-2025 runner took
-  the checked sums about 54 ms against 31, `each` 1.745x to 1.762x over
-  eight runs (CI job 122916661258), where Windows 11 on 12 logical
-  processors (the user's machine) measured 0.98x to 1.08x. Which check it
+- *The gate's measurement and its proof.* The `tight` step runs each checked
+loop and its `@[NoPreempt]` twin once, requires the same answer, and prints
+the ratio as information. A windows-2025 runner took the checked sums about
+54 ms against 31, `each` 1.745x to 1.762x over eight runs (CI job
+122916661258), where Windows 11 on 12 logical processors (the user's machine)
+measured 0.98x to 1.08x, so no ratio bound holds on every runner. Which check it
   is, is read from the release build's IR instead
   (`bench/parallel_exercise.sh`'s `tight_checks`): every back-edge check
   of `spin`, `sum`, `sum_each` and `crc` must read the thread pointer
@@ -4572,20 +4592,27 @@ to 5.80x on darwin; the walk and the CRC cost 1.00x to 1.09x.
   take turns of 10.3 to 10.5 ms, and the ticker is at most 10 ms late.
   darwin looks every 5.8 to 6.3 ms with turns of 11.2 to 12.3 ms, and
   Linux here every 5.1 to 5.3 ms with turns of 10.2 to 10.5 ms.
-  `bench/parallel_preempt.iyi`'s new `period` step holds the look at 4 to
-  9 ms and the turn at 20 ms. On Windows, a copy whose monitor keeps the
-  semaphore's timeout must fail at `period: the monitor looked every`.
+  `bench/parallel_preempt.iyi`'s `period` step reports the look interval and
+  the turns as information. What it forces is the decision: a copy whose
+  monitor raises after three unchanged looks fails at `period: a worker's word
+  was raised after 3 unchanged looks`, beside a control that raises after one,
+  with the 5 ms tick and the one-look quantum pinned as the copy's anchors. On
+  Windows, a copy that drops its high-resolution timer fails at `period: the
+  active monitor used the semaphore fallback`, beside `period: the active
+  monitor used its high-resolution timer`.
 - *The server shape on Windows.* With 4 workers on 4 cores, the slowest
   fast request took 64 to 99 ms, and 760 to 897 of 11,200 requests went
   over 20 ms, with either tick. With 3 workers it took 36 to 49 ms. The
   shape's clients are the program's own main thread, which by every sign
-  waits for a core there, so the gate runs it on one worker fewer than the
-  cores. darwin, 3 workers on 3 cores: 26 to 50 ms.
+  waits for a core there, so the gate now runs it on at most two workers where
+  the host has four cores or fewer, and on at most eight otherwise
+  (`PREEMPT_WORKERS` in `bench/parallel_exercise.sh`). Measured before that
+  rule, darwin with 3 workers on 3 cores: 26 to 50 ms.
 - *The no-argument run.* It was all steps on 4 workers. Its slice step's
   short task then went to an idle worker, so nothing was preempted, and
   the step failed by name: on Windows CI, and on Linux here in 3 runs of
   3. With no arguments it now runs slice, unit and period on a pool of one
-  and prints only that every property held.
+  and ends by saying that every property held.
 
 **The prelude's library, std, and recursion. Built.** Measured before
 (`bench/parallel_preempt_lib.iyi`, release, one worker, a short task
@@ -4726,11 +4753,15 @@ whose check loaded a plain global, preempting nothing, cost the sort
 1.05x to 1.07x and the join 1.07x to 1.12x, and the same build with its
 loops marked but no check put in 0.98x to 1.01x. Not under 3% there.
 
-`bench/parallel_exercise.sh` holds each
-step plain and release, the audit, and three broken copies by name: the
-library written into prelude.iyi (sort, copy, growth and join each wait
-316 to 1,022 ms), a `@[NoPreempt]` recursion, and the scheduler's file
-renamed, which the audit names. Its `copy_checks` reads the release IR of
+`bench/parallel_exercise.sh` holds each step plain and release, with ordering
+(a short task queued on the call's worker runs inside or after the call)
+reported as information, and the audit. Broken copies are caught by name on
+one run at a keyed turn: the library written into prelude.iyi (sort, copy,
+growth and join each keep their worker at the turn after the word is raised,
+against a control with the same hooks that gives it up; measured before the
+forced turns, each waited 316 to 1,022 ms), a `@[NoPreempt]` recursion, regex,
+JSON and bcrypt calls made through a runtime definition, and the scheduler's
+file renamed, which the audit names. Its `copy_checks` reads the release IR of
 `copy_bytes` (bench/parallel_preempt_lib.iyi, `copy_from` as a function
 of its own): some path from the entry must copy and return through no
 check, the loop of runs must still check, and on darwin the entry block
@@ -4758,27 +4789,35 @@ built.
 **Built as decided, and measured.** `src/iyi/concurrency.iyi` has the
 pool (`IyiWorkers`), the inbox, the doorbell and the scheduler's lock;
 `CleanupTransformer#check_share_boundary` gates the parallel block with
-the thread's sentences. `bench/parallel_exercise.sh` is the gate: 16
-CPU-bound tasks, release, best of three, on a 12-core Linux machine
-other jobs were sharing, took 715 ms on one worker, 360 on two (1.99x),
-185 on four (3.86x) and 103 on eight (6.94x). Wherever the gate runs on
-at least four cores, four workers are held to 0.6 x 4 twice: their tasks
-held on 2.4 threads at once on average, at any load, and their time 0.6
-x 4 faster than one worker's where the host's load leaves four cores
-free. The race step
-is the other proof the tasks run at the same instant: eight tasks adding
-2,000,000 times each to one count lose nothing through an atomic, and
-with the add made a load and a store they lost 8,403,659 of 16,000,000,
-which no schedule of one thread can do. The gate also holds placement on
+the thread's sentences. `bench/parallel_exercise.sh` is the gate. Its speedup
+step is measurement: 16 CPU-bound tasks, release, best of three, on a 12-core
+Linux machine other jobs were sharing, took 715 ms on one worker, 360 on two
+(1.99x), 185 on four (3.86x) and 103 on eight (6.94x). The gate now runs each
+worker count once and reports wall time, speed ratio and average threads at
+once as information, so the former 0.6 x K occupancy floor is not a verdict.
+What it holds is capacity: K non-preemptible tasks on K distinct workers
+together (K = 4 on four or more cores, 2 otherwise), which a copy whose pool
+starts one worker fails by name (`capacity: the pool started 1 worker,
+expected 4`). The at-once floor is checked only on that copy's one-worker
+sample. The race step is the other proof the tasks run at the same instant:
+eight tasks adding 2,000,000 times each to one count lose nothing through an
+atomic, and the plain-add copy is caught on one forced run, where one task's
+add lands between another's read and store. The free-running loss of
+8,403,659 of 16,000,000, with the add made a load and a store, is measurement
+history: no schedule of one thread can lose that many. The gate also holds
+placement on
 more than one worker and never on the spawning thread,
 channel values across threads once each and in each sender's order, a
-cancel reaching a sleeper, a channel waiter, a task on the spawning
-thread and tasks still in the pool in about 100 ms, steals, lists on
-eight workers' fiber stacks through the collections, a deadlock across
-threads named, and broken copies of the runtime caught by name - a wake
-that does not ring, a steal that leaves the task queued, a cancel never
-delivered, a cancel that skips the pool, and a pool held to one worker -
-and runs `bench/parallel_migrate.iyi` with eleven more for part 1's moves.
+cancel reaching a sleeper, a channel waiter and a task on the spawning
+thread (its time is reported, not judged, and forced copies hold each
+delivery), tasks still in the pool, steals (the spawner holds its worker
+until a child runs elsewhere), lists on the stacks of eight tasks on four
+workers through an explicit global collection and, with partitions, each
+task's own local collection, a deadlock across threads named, and broken
+copies of the runtime caught by name (a wake that does not ring, a steal
+that leaves the task queued, a cancel never delivered, a cancel that skips
+the pool, and a pool held to one worker). `bench/parallel_migrate.iyi` runs
+with its own keyed copies for part 1's moves.
 The one name the pool adds to the floor is `environ`, the C runtime's
 table `IYI_WORKERS` is read from on Linux and darwin.
 

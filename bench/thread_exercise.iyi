@@ -328,9 +328,14 @@
     handles
   end
 
-  # A thread whose block holds 64 KiB only it names, started and joined.
-  def start_holding(index : Int32) : Nil
+  # One thread's block holds a 64 KiB payload only it names, started and
+  # joined. The ledger records the payload's object id in a mapping the
+  # collector does not scan, so recording it roots nothing. NoInline keeps
+  # the payload out of the caller's frame once the call returns.
+  @[NoInline]
+  def start_holding(index : Int32, ledger : UInt64) : Nil
     payload = "#{index}:" + ("x" * 65536)
+    Pointer(UInt64).new(ledger)[index] = payload.object_id
     IyiThread.start { fail("joined: a block lost what it captured") if payload.size < 65536; nil }.join
   end
 
@@ -339,7 +344,8 @@
   def line_mapped?(line : UInt64) : Bool
     {% if flag?(:win32) %}
       info = uninitialized UInt64[6]
-      LibC.VirtualQuery(Pointer(Void).new(line), pointerof(info).as(Void*), 48_u64)
+      queried = LibC.VirtualQuery(Pointer(Void).new(line), pointerof(info).as(Void*), 48_u64)
+      join_setup("SETUP: joined: VirtualQuery failed for a joined thread's line\n") if queried == 0_u64
       # The region's state, at 32: MEM_FREE is 0x10000.
       (Pointer(UInt64).new(pointerof(info).address + 32_u64).value & 0xFFFFFFFF_u64) != 0x10000_u64
     {% else %}
@@ -485,35 +491,62 @@
   states_left = scheduler_states - states_before
   fail("teardown: 200 finished threads left #{states_left} scheduler states on the roots' list") if states_left != 0
   handles_left = process_handles - handles_before
-  fail("teardown: 200 finished threads left #{handles_left} handles open") if handles_left > 20
+  puts "teardown: the process's handle count changed by #{handles_left}"
+  fail("teardown: 200 finished threads left handles open past the allowance of 20") if handles_left > 20
   puts "teardown: 200 finished threads gave their schedulers back"
 
   # ── 1c. A joined thread keeps nothing ──────────────────────────────────
   # Every thread object started stayed on the list that roots a body until
-  # its thread runs it, and so did everything its block captured: these
-  # 256 threads, every one joined, kept 20 MiB more through a collection.
-  # A thread takes itself off that list before its body runs now, and its
-  # join unmaps its line, which nothing unmapped before. The second join
-  # clears no handle belonging to a later thread: it returns while that
-  # thread is held at a rendezvous, before it is allowed to finish.
+  # its thread runs it, and so did everything its block captured. A thread
+  # takes itself off that list before its body runs now, so a join leaves
+  # its payload to the next collection. The ledger holds one 64 KiB payload
+  # per joined thread, 256 in all, and records only their addresses in a
+  # mapping the collector does not scan. Automatic collections are off while
+  # the threads run, so nothing a payload could reuse is freed before the
+  # ledger is read; an arena the collector released counts as freed. The
+  # join unmaps its line, and the second join clears no handle belonging to
+  # a later thread: it returns while that thread is held at a rendezvous,
+  # before it is allowed to finish.
+  IyiMark.auto = false
   IyiMark.collect
   kept_before = IyiMark.bytes_kept
+  payload_ledger = __iyi_mmap(4096_u64).address
   index = 0
   while index < 256
-    start_holding(index)
+    start_holding(index, payload_ledger)
     index = index + 1
   end
   IyiMark.collect
   kept_after = IyiMark.bytes_kept
+  payloads_kept = 0
+  index = 0
+  while index < 256
+    address = Pointer(UInt64).new(payload_ledger)[index]
+    join_setup("SETUP: joined: a payload was not recorded in the ledger\n") if address == 0_u64
+    # This loop allocates nothing. An arena the collector released answers
+    # 0, and its flags would be read from unmapped memory, so it counts as freed.
+    if IyiHeap.arena_of(address) != 0_u64 && IyiMark.flags(address) & IyiHeap::FREE_FLAG == 0_u64
+      payloads_kept = payloads_kept + 1
+    end
+    index = index + 1
+  end
+  __iyi_munmap(payload_ledger, 4096_u64)
+  IyiMark.auto = true
+  # The retained bytes are a measurement only; the ledger above is the check.
   grew = kept_after > kept_before ? kept_after - kept_before : 0_u64
-  fail("joined: 256 joined threads kept #{grew // 1048576_u64} MiB more through a collection, and the bound is 4") if grew >= 4194304_u64
+  puts "joined: #{payloads_kept} of 256 payloads were still live after the collection; retained bytes grew by #{grew // 1048576_u64} MiB"
+  fail("joined: #{payloads_kept} of 256 joined threads' payloads survived a collection") if payloads_kept >= 64
+  puts "joined: at least 192 of 256 joined threads' payloads were freed by a collection"
   join_twice
   puts "joined: the second join returned while the later thread was held"
   probe = IyiThread.start { nil }
   probe_line = probe.line
+  join_setup("SETUP: joined: the probe thread had no line\n") if probe_line == 0_u64
   probe.join
   fail("joined: a joined thread's line is still mapped") if line_mapped?(probe_line)
-  puts "joined: 256 joined threads keep under 4 MiB of what their blocks held"
+  {% if flag?(:win32) %}
+    puts "joined: a joined thread's line was unmapped"
+  {% end %}
 
   # ── 2. The price: allocations per second per thread ────────────────────
   # Each thread allocates a fixed count from its own cache with the

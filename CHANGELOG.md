@@ -496,101 +496,114 @@
   `--release` compile of web_cores 0.96 s against 0.92 and of
   std_http_exercise 1.36 s against 1.31.
 
-- **The reuse integrity gate's straddler proof catches its defect in
-  every run.** `bench/reuse_integrity.iyi` read each round's keys only
-  when the round ended. The chunk the broken copy hands out under slot
-  0's entry is listed again by the second sweep after the pop, its link
-  and slot written over the key living in it, and in most runs that
-  sweep came after the round's keys were dropped: of 9 to 25 such chunks
-  in a Linux run the read saw 0 to 2, and the copy was caught in 14 runs
-  of 40 on Linux, 16 of 40 on macOS and 5 of 20 on Windows - on Linux
-  and macOS 21 and 13 of 40 before the union padding fix above, so not
-  its doing - and five runs on a darwin runner could all pass, as they
-  did in CI run 43400562231. Each round's keys are now read again after
-  two collections, which sweep the whole heap in their pause: caught in
-  40 runs of 40 on each, with 7 to 21 keys wrong in a run on Linux, 3 to
-  12 on macOS and 5 to 24 on Windows, and the exercise passes. The
-  program takes 0.62 s where it took 0.52 on this Linux machine, and
-  0.68 s where it took 0.55 on an Apple M2 Pro.
+- **The reuse integrity gate's straddler proof catches its defect on its one
+  run.** `bench/reuse_integrity.iyi` read each round's keys only when the
+  round ended. The chunk the broken copy hands out under slot 0's entry is
+  listed again by the second sweep after the pop, its link and slot written
+  over the key living in it, and in most runs that sweep came after the
+  round's keys were dropped: of 9 to 25 such chunks in a Linux run the read
+  saw 0 to 2, and the copy was caught in 14 runs of 40 on Linux, 16 of 40 on
+  macOS and 5 of 20 on Windows - on Linux and macOS 21 and 13 of 40 before the
+  union padding fix above, so not its doing - and five runs on a darwin runner
+  could all pass, as they did in CI run 43400562231. Each round's keys are now
+  read again after two collections, which sweep the whole heap in their pause,
+  and the defect is forced rather than left to timing: the release zeroes a
+  listed chunk's slot word at a released boundary, which the proof observes
+  directly on its one run. Measured before the forced proof, that read caught
+  the copy in 40 runs of 40 on each, with 7 to 21 keys wrong in a run on Linux,
+  3 to 12 on macOS and 5 to 24 on Windows, and the exercise passes. The program
+  takes 0.62 s where it took 0.52 on this Linux machine, and 0.68 s where it
+  took 0.55 on an Apple M2 Pro.
 
-- **The parallel gate's hand-off step holds the call where a loaded host
-  blurs the clock.** `bench/parallel_migrate.iyi`'s handoff step wanted
-  half of ten tasks woken onto a worker held 50 ms with preemption off
-  to start within 1 ms. That is a sleeping thread's wake, which Linux
-  and Windows do not owe a machine with more runnable threads than
-  cores. With the runtime and the step unchanged, Linux on 12 vCPUs at
-  one-minute loads of 18 to 34 failed the step in 74 runs of 80, its
-  medians 0.8 to 4.3 ms and most near the kernel's 2.9 ms slice, and
-  Windows on 12 vCPUs beside 12 and 24 busy loops in 32 of 80, at 0.1 to
-  6.2 ms; tmac (macOS 26, 10 cores) at loads of 4 to 44 failed none of
-  160, at 7 to 218 us, and 45 CI runs of master and the next branches
-  none, at 15 to 163 us. The step now also holds that each hand-off
-  called an idle worker (the waker's `handoff_last`, read right after
-  its send) and that the woken task ran on another worker, on every
-  host; `bench/parallel_exercise.sh` runs the step by itself, after the
-  migration exercise's other steps, and passes `--loaded=` when the load
-  in the second before it is at or past the cores - on Linux the threads
-  runnable (`procs_running`), ten looks over the second, since the
-  one-minute average lagged the load a run met: one begun at an average
-  of 8.4 on those 12 vCPUs failed the median; on Windows the busy share
-  of the cores plus the ready queue - and the 1 ms median is then not
-  judged, said so in the output. The 40 ms bound
-  on every wake and the 1 ms median elsewhere are unchanged. The broken
-  copy without the call now fails at the call in 50 runs of 50 at any
-  load across the three machines, and a new one that marks its call and
-  rings nobody, left to the monitor, fails at the median in 50 of 50:
-  5.1 to 10.2 ms on Linux, 6.3 on tmac, 1.2 to 12.5 on Windows.
+- **The parallel gate's hand-off step holds the call on every host and
+  reports the clock.** `bench/parallel_migrate.iyi`'s handoff step wanted
+  half of ten tasks woken onto a worker held 50 ms with preemption off to
+  start within 1 ms. That is a sleeping thread's wake, which Linux and
+  Windows do not owe a machine with more runnable threads than cores. With
+  the runtime and the step unchanged, Linux on 12 vCPUs at one-minute loads
+  of 18 to 34 failed the step in 74 runs of 80, its medians 0.8 to 4.3 ms
+  and most near the kernel's 2.9 ms slice, and Windows on 12 vCPUs beside 12
+  and 24 busy loops in 32 of 80, at 0.1 to 6.2 ms. tmac (macOS 26, 10 cores)
+  at loads of 4 to 44 failed none of 160, at 7 to 218 us, and 45 CI runs of
+  master and the next branches none, at 15 to 163 us. The step now prints
+  each hand-off's median and longest wake beside the host load (on Linux the
+  threads runnable, read ten times over the second; on Windows the busy share
+  of the cores plus the ready queue; on darwin the runnable rows of
+  `ps -axM`), and judges neither: the 1 ms and 40 ms figures are information.
+  What is held on every host is the call. The forced `nocall` copy, which
+  omits the immediate wake_one call, fails at the call on one run, and the
+  forced `nohandoff` copy, which takes no hand-off branch for an eligible
+  hand-off, fails on one run; its control takes the branch with no back-off.
+  Measured before those copies were forced, the copy without the call failed
+  at the call in 50 runs of 50 at any load across the three machines, and a
+  copy that marks its call and rings nobody, left to the monitor, failed at
+  the median in 50 of 50 (5.1 to 10.2 ms on Linux, 6.3 on tmac, 1.2 to 12.5
+  on Windows). `bench/parallel_exercise.sh` runs the step by itself, after the
+  migration exercise's other steps.
 
-- **The parallel gate's cancel, fresh and sockets steps hold on a loaded
-  host, and the cancel step's broken copy is caught at any load.**
-  `bench/parallel_exercise.iyi`'s cancel step cued its failure with a 100
-  ms sleep. A plain spawn of a block that captures nothing runs on the
-  pool now (SPEC.md III.4.15), so its "task on this thread" was on a
-  worker. Beside 12 busy loops on this Linux machine's 12 vCPUs, the
-  sleeper, that task and the failing task were usually on one worker,
-  whose cancel ends its own sleeps without posting. The copy that posts
-  no cancel passed in 19 runs of 20. The failing task now holds its
-  worker with preemption off from before the sleepers are spawned. It
-  fails only once the main thread has seen three things: the sleeper
-  listed in another worker's sleep heap, the waiter parked, and a
-  `unit: :same` task asleep on the main thread. The copy is now caught in
-  39 runs of 39 on Linux, 11 of them beside 12 busy loops, and in 25 of
-  25 on tmac. `bench/parallel_preempt.iyi`'s fresh step timed a give-up
-  from the switched-in task's first statement. The monitor's 4000 us
-  floor is wall time since the switch, and a kernel that holds the
-  thread off its core spends that time too: one Linux round gave up 508
-  us in. Each round is now bracketed from both sides and fails when the
-  give-up came within 4000 us of the task before's end. A round where
-  the thread's CPU clock shows the kernel held the thread off its core
-  long enough to explain the give-up is set aside and run again. That
-  happened to 1 and 2 rounds in a gate run at a load of 35 (Linux and
-  darwin; Windows judges as before). `bench/parallel_migrate.iyi`'s
-  sockets step needs a read that moved. Its release build moved 3 to 23
-  of 192 beside 12 busy loops, and once none, so a run that moved none
-  is run again, up to five times. No bound changed.
+- **The parallel gate's cancel, fresh and sockets steps decide by forced
+  copies, not by the clock.** `bench/parallel_exercise.iyi`'s cancel step
+  cued its failure with a 100 ms sleep. A plain spawn of a block that
+  captures nothing runs on the pool now (SPEC.md III.4.15), so its "task on
+  this thread" was on a worker. Beside 12 busy loops on this Linux machine's
+  12 vCPUs, the sleeper, that task and the failing task were usually on one
+  worker, whose cancel ends its own sleeps without posting. Before the cue
+  was reworked, the copy that posts no cancel passed in 19 runs of 20. The
+  failing task now holds its worker from before the sleepers are spawned,
+  and the main thread cues it once they are in place. That copy is now the
+  forced `undelivered` copy, which fails on its one run; before it was
+  forced it was caught in 39 runs of 39 on Linux, 11 of them beside 12 busy
+  loops, and in 25 of 25 on tmac. `bench/parallel_preempt.iyi`'s fresh step
+  no longer judges a give-up's time. One Linux round gave up 508 us in
+  beside a kernel that held the thread off its core, and that time is
+  information: the 4000 us floor survives only as history on the period
+  step's line. The forced `stale` copy decides instead (the word raised for
+  the task before was still up after the switch). `bench/parallel_migrate.iyi`'s
+  sockets step needs a read that moved, and its forced move
+  (`sockets_forced`) decides on one run; the reads it moved in the larger
+  exercise (3 to 23 of 192 beside 12 busy loops, and once none) are
+  information.
 
-- **The parallel gate's speedup step holds on a loaded host, and a pool
-  of one worker is refused at any load.** Beside 12 busy loops on this
-  Linux machine's 12 vCPUs, 4 workers finished 2.10x faster than one
-  where 0.6 x 4 is 2.4, and 8 workers 4.72x in the same run: the wall
-  clock measured the host. Each timed task now looks at its thread and
-  the clock every 65536 rounds, and the run reports how many threads
-  held a task at once on average. A thread holds its task whether or not
-  the kernel runs it, and one worker cannot pass 1.00, so four workers
-  are held to 2.4 at every load. The time's ratio keeps its 0.6 x 4
-  floor where the load, `procs_running` as the hand-off step reads it,
-  leaves four cores free before and after the runs; elsewhere the output
-  says it was not judged and why. The one-worker copy is refused by the
-  threads at once on every host, and by the time too where it is judged.
-  The three broken copies of the wakes step now each run only their own
-  part (`wakes --only=selects|cancels|words`). At a load of 45, the copy
-  that loses a word's wake outran its 5000 ms watch in the cancels part
-  before it reached the words. `bench/parallel_migrate.iyi`'s deep step
-  needs a wake that moved, as the sockets step does. Beside 12 busy loops
-  its release build once moved none of 160, so a run that moves none is
-  run again, up to five times.
+- **The parallel gate's speedup step is information, and a pool that starts
+  one worker is refused by a forced capacity check.** Beside 12 busy loops
+  on this Linux machine's 12 vCPUs, 4 workers finished 2.10x faster than one
+  where 0.6 x 4 is 2.4, and 8 workers 4.72x in the same run: the wall clock
+  measured the host. The step now runs each worker count once and prints
+  wall time, speed ratio and the threads held at once on average as
+  `measure:` lines, none of them judged. What is held is capacity: K
+  non-preemptible tasks must hold K workers together (K = 4 on four or more
+  cores, 2 otherwise), and a pool that starts one worker is refused by name
+  on every host (`capacity: the pool started 1 worker, expected K`). The
+  at-once floor is checked only on the one-worker sample of that copy. The
+  three broken copies of the wakes step now each run only their own part
+  (`wakes --only=selects|cancels|words`). At a load of 45, the copy that
+  loses a word's wake outran its 5000 ms watch in the cancels part before it
+  reached the words. `bench/parallel_migrate.iyi`'s deep step has a forced
+  move (`deep_forced`) that decides on one run; the wakes it moved in the
+  larger exercise (once none of 160 beside 12 busy loops) are information.
 
 ### Gates
+
+- **The parallel gates' failure proofs are forced, and their wall-clock
+  bounds are information.** Each failure proof in `bench/parallel_exercise.sh`
+  runs its broken copy once and passes only at the copy's exact sentence
+  (exit 1), with a control that passes at its own. The programs it drives
+  are `bench/parallel_migrate.iyi`, `bench/parallel_preempt.iyi` and
+  `bench/parallel_preempt_lib.iyi`. The copies are decided by keyed
+  observations they are forced into, not by timing: a missed observation ends
+  the run once as a progress failure (status 76), and a timeout never counts
+  as a catch. `bench/concurrent_mark.sh` and `bench/reuse_integrity.sh` run
+  each failure proof once as well, and `bench/heap_drain.sh` decides its
+  placement proof on one run. The bounds that are information only, printed
+  as `measure:` lines and judged by no verdict, are in
+  `bench/parallel_exercise.sh` and the programs it drives: the balance
+  (former 2x the ideal), hand-off medians and longest wakes (former 1 ms and
+  40 ms), the backstop (50 ms), join (300 ms), cancel (3000 ms), speedup
+  (0.6 x K), tight-loop ratios (2x), the monitor's look interval and turns,
+  and the server's latencies; and in `bench/heap_drain.sh`, the residency,
+  arena growth, cold bytes and idle figures. What still decides is the
+  capacity witness, the keyed decisions the failure proofs name, the
+  structural IR checks, and the positive checks that every answer is right.
 
 - **`bench/lsp_memory.py` holds a workspace pull to what the design
   promises, not to a fixed 760 MB.** A worker stops a pull between
@@ -612,26 +625,26 @@
   in 7 to 218 us. Beside two other CI jobs on the project's Mac (three
   runners, 10 cores) it woke in 11 to 2,925 us, median 2,150 (job
   135122969351). darwin's load is now its runnable threads (`ps -axM`
-  rows in state R), ten looks over a second, and the rule is the same.
-  What no clock blurs is still held everywhere: an idle worker called at
-  each hand-off, the woken task run on another worker, within 40 ms.
+  rows in state R), ten looks over a second, and it is printed beside the
+  medians rather than judged. The call is held by the forced `nocall`
+  copy and the hand-off branch by `nohandoff`, each on one run; the 40 ms
+  and 1 ms figures are information.
 
 - **The idle pool step names a pool that stopped growing.**
   `bench/concurrent_mark.iyi` read "9 of 10 workers waiting after five
   seconds" on the project's Mac beside two other CI jobs (job
   134651603579). That was the pool's stall under Fixed, not the machine:
   the step's ten tasks spun their two seconds for a tenth worker that never
-  started. The tasks now wait for the pool for up to ten seconds, and a
-  pool still short after them fails as itself ("the pool launched 9 of 10
-  workers"), before the count of workers waiting. Nothing the step
+  started. The tasks now wait for the pool for up to ten seconds, and a pool
+  still short after them ends as a setup failure ("the pool launched 9 of
+  10 workers within ten seconds") rather than as a verdict. Nothing the step
   asserts changed: every worker of a per-core pool waits, the mark beside
   them asks for two helpers or more, and the busy pool asks for one on
-  Windows. `bench/concurrent_mark.sh` runs the step on a runtime in which
-  no worker's find calls the next, where the turns alone fill the pool,
-  and catches the same copy without the turns' start ("the pool launched
-  1 of 12 workers"). The step as it was before the pool's count (tasks
-  that wait only for each other) still exits 1 at the count of workers
-  waiting.
+  Windows. The count of workers waiting decides. `bench/concurrent_mark.sh`
+  runs the step on a runtime in which no worker's find calls the next, where
+  the turns alone fill the pool, and its copy whose tasks wait only for each
+  other is caught on its one run ("idle pool: 1 of 12 workers waiting, and
+  every worker the pool launched is one of them").
 
 - **heap22's "large mapping widens the bounds" copy can no longer pass
   by where Windows puts a mapping.** The arena directory's bounds are
@@ -639,13 +652,15 @@
   arenas' slots needs no widening. In 1 run in 10 on Windows the first
   arenas were 2 GiB apart and all eight objects landed in that gap, so
   the copy that never widens passed on a GitHub runner (job
-  134651603528). bench/heap_drain.iyi's directory mode now holds each
-  object against the bounds just before it was made and, with the flag
-  on, exits 75 when none landed outside them. bench/heap_drain.sh runs
-  such a run again, up to 12 times, and counts a run that never asks as
-  a failure. On tssh over 20 runs each, the sound build asked nothing
-  once and the broken copy was caught 12 times, asked nothing 8 times
-  and never passed.
+  134651603528). The directory mode now holds each object against the
+  bounds just before it was made. Its placement hint (`-Dplaced_force`)
+  puts each large object at the first slot above the directory's bounds:
+  the copy that never widens exits 1 at its first large object's
+  sentence on one run, and the sound build with the hint must pass with
+  at least one object outside the bounds. The exit-75 retry is gone, so a
+  run is not repeated. On tssh over 20 runs each, before that retry was
+  removed, the sound build asked nothing once and the broken copy was
+  caught 12 times, asked nothing 8 times and never passed.
 
 - **std/digest's `ValueBarrier` fallback is built and held.** The
   barrier is an empty inline asm on x86_64 and aarch64 and a volatile

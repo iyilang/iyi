@@ -279,6 +279,120 @@ if [ "$part" = again ]; then
   exit 0
 fi
 
+# ── 1d. A second join while a later thread is held ───────────────────────
+# Both builds run the same rendezvous. The only mutation removes the
+# joined thread's line clear, without changing the zero guard or unmap.
+rejoin_copy() {
+  awk -v mode="$1" '
+    /^    def join : Nil$/ { inside = 1; starts++ }
+    inside && /^      line = @line$/ { reads++ }
+    inside && /^      return if line == 0$/ { guards++ }
+    inside && /^      @line = 0_u64$/ {
+      resets++
+      after_reset = 1
+      if (mode != "mutant") print
+      next
+    }
+    inside && /^      __iyi_munmap\(line, IYI_THREAD_LINE\)$/ {
+      unmaps++
+      if (!after_reset) wrong_order++
+    }
+    inside && /^    end$/ { inside = 0; ends++ }
+    { after_reset = 0; print }
+    END {
+      if ((mode != "control" && mode != "mutant") || starts != 1 || ends != 1 ||
+          reads != 1 || guards != 1 || resets != 1 || unmaps != 1 || wrong_order || inside) exit 3
+    }
+  ' "$REPO/src/iyi/thread.iyi" > "$2"
+}
+for mode in control mutant; do
+  if ! mkdir -p "rejoin-$mode/iyi" || ! cp "$REPO"/src/iyi/*.iyi "rejoin-$mode/iyi/"; then
+    echo "SETUP: joined: the $mode source copy could not be made"; exit 76
+  fi
+  rejoin_copy "$mode" "rejoin-$mode/iyi/thread.iyi" || {
+    echo "SETUP: joined: the join copy anchors changed"; exit 76
+  }
+done
+
+# Reinserting the one removed line must reconstruct the control byte for
+# byte. Every other copied runtime file must also match the source.
+if ! awk '
+    /^    def join : Nil$/ { inside = 1; starts++ }
+    inside && /^      __iyi_munmap\(line, IYI_THREAD_LINE\)$/ {
+      print "      @line = 0_u64"
+      restored++
+    }
+    inside && /^    end$/ { inside = 0; ends++ }
+    { print }
+    END { if (starts != 1 || ends != 1 || restored != 1 || inside) exit 3 }
+  ' rejoin-mutant/iyi/thread.iyi > rejoin-restored.iyi ||
+   ! cmp -s rejoin-control/iyi/thread.iyi rejoin-restored.iyi; then
+  echo "SETUP: joined: the copies differ beyond the line clear"; exit 76
+fi
+for source in "$REPO"/src/iyi/*.iyi; do
+  file="${source##*/}"
+  if ! cmp -s "$source" "rejoin-control/iyi/$file"; then
+    echo "SETUP: joined: the control copy differs from the source"; exit 76
+  fi
+  if [ "$file" != thread.iyi ] && ! cmp -s "rejoin-control/iyi/$file" "rejoin-mutant/iyi/$file"; then
+    echo "SETUP: joined: the copies differ beyond the line clear"; exit 76
+  fi
+done
+
+rejoin_pass='joined: the second join returned while the later thread was held'
+rejoin_fail='FAIL: joined: the first join left a line for a second join to use'
+for mode in control mutant; do
+  step "joined: $mode run"
+  if ! IYI_PATH="$WORK/rejoin-$mode${PSEP}$REPO/src" "$IYI" build \
+      "$REPO/bench/thread_exercise.iyi" -Djoin_only -o "rejoin-$mode-run" > "build-rejoin-$mode.log" 2>&1; then
+    echo "SETUP: joined: the $mode copy did not build"
+    cat "build-rejoin-$mode.log"
+    exit 76
+  fi
+  timeout -k 5 60 "./rejoin-$mode-run" > "rejoin-$mode-raw.txt" 2>&1
+  code=$?
+  if ! tr -d '\r' < "rejoin-$mode-raw.txt" > "rejoin-$mode.txt"; then
+    echo "SETUP: joined: the $mode output could not be read"; exit 76
+  fi
+  output="rejoin-$mode.txt"
+  outer="SETUP: $current_step: process exceeded its 60 s bound"
+  if [ "$code" -eq 124 ] || [ "$code" -eq 137 ] || grep -qxF "$outer" "$output"; then
+    echo "SETUP: joined: the $mode run exceeded its outer watchdog"
+    grep -vxF "$outer" "$output" || :
+    exit 76
+  fi
+  if [ "$code" -eq 76 ] || grep -q '^SETUP:' "$output"; then
+    if grep -q '^SETUP:' "$output"; then
+      cat "$output"
+    else
+      echo "SETUP: joined: the $mode run exited 76 without a diagnostic"
+      cat "$output"
+    fi
+    exit 76
+  fi
+  fails="$(grep -c '^FAIL:' "$output" || :)"
+  passes="$(grep -cxF "$rejoin_pass" "$output" || :)"
+  if [ "$mode" = control ]; then
+    if [ "$code" -eq 1 ] && [ "$fails" -eq 1 ] && [ "$passes" -eq 0 ] && grep -qxF "$rejoin_fail" "$output"; then
+      cat "$output"; exit 1
+    fi
+    if [ "$code" -ne 0 ] || [ "$fails" -ne 0 ] || [ "$passes" -ne 1 ]; then
+      echo "SETUP: joined: the control did not complete its witness"
+      printf '  process exit %s\n' "$code"
+      cat "$output"; exit 76
+    fi
+    echo "  control: exit 0, $rejoin_pass"
+  else
+    if [ "$code" -ne 1 ] || [ "$fails" -ne 1 ] || [ "$passes" -ne 0 ] ||
+       ! grep -qxF "$rejoin_fail" "$output"; then
+      echo "SETUP: joined: the mutant did not produce the required verdict"
+      printf '  process exit %s\n' "$code"
+      cat "$output"; exit 76
+    fi
+    printf '  exits 1 at "%s"\n' "$rejoin_fail"
+  fi
+done
+
 # ── 2. The floor ──────────────────────────────────────────────────────────
 case "$(uname -s)" in
   Linux)

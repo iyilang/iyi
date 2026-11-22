@@ -455,18 +455,18 @@ stop lands. The exercise's fibers take stops on their own stacks. A
 is the answer if a program's fiber is ever that deep, and it is not
 built ahead of one.
 
-`bench/thread_exercise.sh` holds it, plain and release, on Linux and
-darwin, with the aarch64 arm run under emulation: eight threads
-allocating from their own caches while collections run from whichever
-crosses the budget, each holding a live list in nothing but its own
-frames through those collections and finding it intact by checksum and
-by the sweep's own free flag — after one explicit collection with
-every worker spinning on its list, and after twenty bursts of churn —
-each running fibers of its own with a parked one holding an object's
-only reference, then 32 threads past the core count; the floor read
-off the binary, five names on Linux; and the failure proof removes the
-thread-root walk from a copy of the prelude and the spinning threads'
-lists are swept out from under them by name. The price, release, 20
+`bench/thread_exercise.sh` holds it, plain and release, on Linux and darwin:
+eight threads allocating from their own caches while collections run from
+whichever crosses the budget, each holding a live list in nothing but its own
+frames through those collections and finding it intact by checksum and by the
+sweep's own free flag (after one explicit collection with every worker spinning
+on its list, and after twenty bursts of churn), each running fibers of its own
+with a parked one holding an object's only reference, then twice the core count,
+clamped to 9 to 32 threads; the floor read off the binary, five names on Linux;
+and the failure proof removes the thread-root walk from a copy of the prelude and
+the spinning threads' lists are swept out from under them by name. CI's cross-run
+job runs the aarch64 build of `bench/thread_exercise.iyi` under emulation, which
+this script does not do. The price, release, 20
 cores: 76 ns an allocation with one thread, 162 with four, 268 with
 eight — wall time per allocation per thread, every pause included,
 which is what Stages 7 and 8 exist to bring down: every thread stands

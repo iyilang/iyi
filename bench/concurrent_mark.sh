@@ -25,9 +25,9 @@
 #     armed look that holds the sweep at one kept chunk until the program frees it;
 #   - failure proofs: an unlocked free inside a sweep's look; a barrier that
 #     shades nothing; a barrier run after its mark ended; a block outgrown
-#     under a held mark; a sweep that never frees a large block, caught when all
-#     eight outgrown blocks were held under a mark; and a small live set given the
-#     thousand-object bound;
+#     under a held mark; a sweep that never frees an outgrown large block, caught
+#     when all eight stay mapped under a mark (partial retention is conservative
+#     and is not judged); and a small live set given the thousand-object bound;
 #   - marks beside twenty-four connections on twelve workers, with every helper
 #     and with one;
 #   - failure proofs: the remainder round's count stored over assists; helper 0
@@ -1122,7 +1122,7 @@ if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: large: a block outgrown under a mark 
 fi
 printf '  exits 1 at "%s"\n' "$(grep -Fx 'FAIL: large: a block outgrown under a mark was unmapped beside the helpers' unmapped.txt)"
 
-step "failure proof: a large block the sweep never frees is a leak, caught when every outgrown block was held under a mark"
+step "failure proof: a sweep that never frees an outgrown large block, caught when all eight stay mapped under a mark"
 mkdir -p leak/iyi
 cp held/iyi/*.iyi leak/iyi/
 awk '
@@ -1140,6 +1140,7 @@ if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: large: 8 of 8 outgrown blocks were ne
   echo "the leak check did not fire (exit $code):"; tail -3 leak.txt; fail_for_status "$code" leak.txt
 fi
 printf '  exits 1 at "%s"\n' "FAIL: large: 8 of 8 outgrown blocks were never freed, 8 of them outgrown under a mark"
+echo "  partial retention is conservative and is not judged: healthy held runs kept 0 or 1 of the 8 (observed)"
 
 step "failure proof: a small live set given the thousand-object bound goes beside the program"
 mkdir -p thousand/iyi

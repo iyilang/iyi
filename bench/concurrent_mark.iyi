@@ -624,8 +624,8 @@
   end
   {% if flag?(:unmapped_force) %}
     setup_fail("large: #{large_under_mark} of #{large_round} held rounds reached the check, not 8") unless large_under_mark == 8
-    # Decided only where every round is forced under a mark: the plain build's
-    # count is printed below and judges nothing, since it may give fewer than eight.
+    # Under -Dunmapped_force only: it detects a sweep that never frees an outgrown
+    # block (all eight kept). Partial retention is conservative and is not judged.
     fail("large: #{kept_large} of #{large_round} outgrown blocks were never freed, #{large_under_mark} of them outgrown under a mark") if kept_large >= large_under_mark
   {% end %}
   puts "large: #{large_under_mark} of #{large_round} blocks outgrown under a running mark stayed mapped beside the helpers, and #{large_round - kept_large} were freed after"

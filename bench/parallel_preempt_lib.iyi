@@ -5,11 +5,11 @@
 #   ./bin/iyi run --release bench/parallel_preempt_lib.iyi -- cost
 #
 # Each healthy ordering step queues a short task before its long call and
-# requires it to run on the same worker before that call ends. Fib reports
-# its ordering without gating it; the forced copy and its control hold the
-# recursive entry decision instead. Every ordering step uses one worker.
-# Copy-only hooks hold each target until its short task is queued, then
-# distinguish an eligible decision from a turn with no check.
+# reports whether it ran inside or after the call. Runtime lock contention
+# can refuse a turn, so that ordering is informational. Every ordering step
+# uses one worker. Copy-only hooks hold each target until its short task is
+# queued, then distinguish an eligible decision from a turn with no check
+# for the library loops, recursion, and standard-library calls.
 #
 #   sort    `Array#sort_in_place` of 6,000,000 `Int64`s
 #   copy    `Slice#copy_from` of 192 MB, a million bytes a turn; long
@@ -21,6 +21,7 @@
 #   regex   `Regex#find` over 24 MB that the pattern never matches
 #   json    `JSON.parse` of a 24 MB array of numbers
 #   bcrypt  `Bcrypt.hash` at cost 12
+#           the forced standard-library pairs use smaller inputs and cost 4
 #   fib     a naive recursive Fibonacci of 40, with no loop in it; the
 #           forced checked and @[NoPreempt] pair uses Fibonacci of 30
 #   cost    not run unless named: what the checks cost the library's own
@@ -29,9 +30,9 @@
 #           task, printed as times to compare against a build from before
 #           the library checked, and held to no bound here
 #
-# With no step named every step but `cost` runs and nothing it measured is
-# printed. bench/parallel_exercise.sh runs it, and broken copies, each
-# caught by the step that names it.
+# With no step named every step but `cost` runs, ordering is reported, and
+# timing is omitted. bench/parallel_exercise.sh runs it, and broken copies,
+# each caught by the step that names it.
 #
 # With partitions in the runtime (`-Dheap_partitions`) the call's task
 # allocates in its unit's own partition, which its worker collects on the
@@ -179,15 +180,22 @@ import std/password::{Bcrypt}
           __iyi_exit(76)
         end
       end
-      {% if flag?(:libruntime_force) || flag?(:recursion_force) %}
+      {% if flag?(:libruntime_force) || flag?(:recursion_force) || flag?(:stdcall_force) %}
         IyiWorkers.force_turn_arm(IyiScheduler.current.object_id, @force_key) if @force_key != 0_u64
+      {% end %}
+      {% if flag?(:stdcall_force) %}
+        IyiWorkers.force_turn(@force_key, 0_u64, 0_u64, true) if @force_key != 0_u64
       {% end %}
       t = __iyi_monotonic_ns
       @started.set(t)
       t
     end
 
+    @[NoPreempt]
     def stop(since : Int64) : Nil
+      {% if flag?(:stdcall_force) %}
+        IyiWorkers.force_turn(@force_key, 0_u64, 0_u64, true) if @force_key != 0_u64
+      {% end %}
       @took.set(elapsed_ms(since))
     end
 
@@ -210,6 +218,43 @@ import std/password::{Bcrypt}
     def worker : UInt64
       @worker.get
     end
+  end
+
+  # The runtime-copy mutant makes the same whole calls as the control, but
+  # compiles them without checks. The return values keep each call observable.
+  struct RegexCall
+    def initialize(@pattern : Regex, @text : String)
+    end
+
+    def run_call : Int64
+      @pattern.find(@text).nil? ? 0_i64 : 1_i64
+    end
+  end
+
+  struct JsonCall
+    def initialize(@text : String)
+    end
+
+    def run_call : Int64
+      JSON.parse(@text).as_a.size.to_i64
+    end
+  end
+
+  struct BcryptCall
+    def initialize(@cost : Int32)
+    end
+
+    def run_call : Int64
+      Bcrypt.hash("correct horse battery staple", @cost).bytesize.to_i64
+    end
+  end
+
+  def library_call(call : T) : Int64 forall T
+    {% if flag?(:std_unchecked) %}
+      IyiWorkers.force_runtime_call(call)
+    {% else %}
+      call.run_call
+    {% end %}
   end
 
   # The step's input, made before the clock starts, and then the one call;
@@ -251,23 +296,36 @@ import std/password::{Bcrypt}
       clock.stop(t)
       joined.bytesize.to_i64
     when "regex"
-      text = "abcabcabcabcabcabcabcabc" * 1_000_000
+      {% if flag?(:stdcall_force) %}
+        text = "abcabcabcabcabcabcabcabc" * 1_000
+      {% else %}
+        text = "abcabcabcabcabcabcabcabc" * 1_000_000
+      {% end %}
       pattern = Regex.new("a[bc]*d")
       t = clock.start
-      found = pattern.find(text)
+      found = library_call(RegexCall.new(pattern, text))
       clock.stop(t)
-      found.nil? ? 0_i64 : 1_i64
+      found
     when "json"
-      text = "[" + "1234567,8901234," * 1_500_000 + "0]"
+      {% if flag?(:stdcall_force) %}
+        text = "[" + "1234567,8901234," * 1_500 + "0]"
+      {% else %}
+        text = "[" + "1234567,8901234," * 1_500_000 + "0]"
+      {% end %}
       t = clock.start
-      doc = JSON.parse(text)
+      size = library_call(JsonCall.new(text))
       clock.stop(t)
-      doc.as_a.size.to_i64
+      size
     when "bcrypt"
+      {% if flag?(:stdcall_force) %}
+        cost = 4
+      {% else %}
+        cost = 12
+      {% end %}
       t = clock.start
-      made = Bcrypt.hash("correct horse battery staple", 12)
+      size = library_call(BcryptCall.new(cost))
       clock.stop(t)
-      made.bytesize.to_i64
+      size
     else
       t = clock.start
       {% if flag?(:recursion_force) %}
@@ -293,6 +351,13 @@ import std/password::{Bcrypt}
                   end
     {% elsif flag?(:recursion_force) %}
       force_key = name == "fib" ? 5_u64 : 0_u64
+    {% elsif flag?(:stdcall_force) %}
+      force_key = case name
+                  when "regex"  then 7_u64
+                  when "json"   then 8_u64
+                  when "bcrypt" then 9_u64
+                  else               0_u64
+                  end
     {% else %}
       force_key = 0_u64
     {% end %}
@@ -318,7 +383,7 @@ import std/password::{Bcrypt}
           __iyi_exit(76)
         end
       end
-      {% if flag?(:libruntime_force) || flag?(:recursion_force) %}
+      {% if flag?(:libruntime_force) || flag?(:recursion_force) || flag?(:stdcall_force) %}
         if forced
           # No candidate can consume an earlier check before the target holds.
           clock.queued
@@ -344,7 +409,7 @@ import std/password::{Bcrypt}
         {% end %}
         0
       end
-      {% if flag?(:libruntime_force) || flag?(:recursion_force) %}
+      {% if flag?(:libruntime_force) || flag?(:recursion_force) || flag?(:stdcall_force) %}
         if forced
           IyiWorkers.force_turn_release
           started = __iyi_monotonic_ns
@@ -373,7 +438,20 @@ import std/password::{Bcrypt}
     {% else %}
       ms = waited.get
     {% end %}
-    {% if flag?(:libruntime_force) || flag?(:recursion_force) %}
+    # A forced control must not pass because its library call was a no-op.
+    if name == "regex"
+      fail("regex: the search answered #{answer.get}, expected 0") if answer.get != 0_i64
+    elsif name == "json"
+      {% if flag?(:stdcall_force) %}
+        expected = 3001_i64
+      {% else %}
+        expected = 3_000_001_i64
+      {% end %}
+      fail("json: the parsed array has #{answer.get} elements, expected #{expected}") if answer.get != expected
+    elsif name == "bcrypt"
+      fail("bcrypt: the hash has #{answer.get} bytes, expected 60") if answer.get != 60_i64
+    end
+    {% if flag?(:libruntime_force) || flag?(:recursion_force) || flag?(:stdcall_force) %}
       if forced
         result = IyiWorkers.force_turn_result
         setup_exit("#{name}: not armed: the forced turn reached no decision before the call ended") if result == 0_u64
@@ -381,7 +459,11 @@ import std/password::{Bcrypt}
           if name == "fib"
             fail("fib: the recursion entered a call with its worker's word raised and kept its worker")
           else
-            fail("#{name}: the library's loop turned with its worker's word raised and kept its worker")
+            {% if flag?(:stdcall_force) %}
+              fail("#{name}: the library call returned with its worker's word raised and kept its worker")
+            {% else %}
+              fail("#{name}: the library's loop turned with its worker's word raised and kept its worker")
+            {% end %}
           end
         end
         setup_exit("#{name}: not armed: the forced turn returned an unknown result") unless result == 1_u64
@@ -389,21 +471,22 @@ import std/password::{Bcrypt}
         if name == "fib"
           puts "fib: the recursion gave its worker up at the call after its word was raised"
         else
-          puts "#{name}: the library's loop gave its worker up at the turn after its word was raised"
+          {% if flag?(:stdcall_force) %}
+            puts "#{name}: the library call gave its worker up after its word was raised"
+          {% else %}
+            puts "#{name}: the library's loop gave its worker up at the turn after its word was raised"
+          {% end %}
         end
       end
     {% end %}
-    if name == "fib" && !forced
+    if !forced
       if witness.get == 1_i64
-        puts "fib: the short task ran inside the call; ordering is informational"
+        puts "#{name}: the short task ran inside the call; ordering is informational"
       elsif witness.get == 2_i64
-        puts "fib: the short task ran after the call; ordering is informational"
+        puts "#{name}: the short task ran after the call; ordering is informational"
       else
-        setup_exit("fib: not armed: the short task did not run on the call's worker")
+        setup_exit("#{name}: not armed: the short task did not run on the call's worker")
       end
-    else
-      fail("#{name}: the short task queued before the call ran only after the call ended") if witness.get == 2_i64
-      setup_exit("#{name}: not armed: the short task did not run inside the target call on its worker") unless witness.get == 1_i64
     end
     if name == "fib"
       {% if flag?(:recursion_force) %}

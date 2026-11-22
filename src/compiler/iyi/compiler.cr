@@ -3393,6 +3393,15 @@ module Iyi
       ENV["IYI_RELEASE_INLINE"]?.try(&.to_i?).try { |limit| Math.max(limit, 0) } || ReleasePartition::INLINE_LIMIT
     end
 
+    # iyi: how small a share of a partition one function and its inner
+    # callees may grow to (`ReleasePartition::GROUP_SHARE`), when
+    # `IYI_RELEASE_GROUP` says. `IYI_RELEASE_GROUP=0` lets a group grow
+    # whatever its size, as 0.22.0 did: the broken copy
+    # `bench/release_cores.sh` holds the balance against.
+    private def release_group : Int32
+      ENV["IYI_RELEASE_GROUP"]?.try(&.to_i?).try { |share| Math.max(share, 0) } || ReleasePartition::GROUP_SHARE
+    end
+
     private def new_program(sources)
       @program = program = Program.new
       program.iyi_prelude = prelude.ends_with?("iyi/prelude")
@@ -3584,7 +3593,7 @@ module Iyi
       {% unless LibLLVM::IS_LT_130 %}
         if single_module && !@cross_compile && @emit_targets.none? && !@optimization_mode.o0? && units.size == 1
           @progress_tracker.stage("Codegen (partition)") do
-            units.first.partition(release_partitions, release_import, release_inline)
+            units.first.partition(release_partitions, release_import, release_inline, release_group)
           end
         end
       {% end %}
@@ -4434,6 +4443,14 @@ module Iyi
           puts " - #{unit.original_name} (#{unit.name}.bc)"
         end
       end
+      # iyi: how evenly a `--release` build was cut (`ReleasePartition`):
+      # what the partitions own before optimisation, the smallest and the
+      # largest, which `bench/release_cores.sh` reads.
+      units.each do |unit|
+        next unless plan = unit.plan
+        owned = plan.owned
+        puts " - #{unit.name}: #{plan.count} partitions owning #{owned.min} to #{owned.max} of #{owned.sum} instructions"
+      end
     end
 
     getter(target_machine : LLVM::TargetMachine) do
@@ -4696,7 +4713,7 @@ module Iyi
       @object_name : String?
       @bc_name : String?
       @preempt_flag : String?
-      @plan : ReleasePartition::Plan?
+      getter plan : ReleasePartition::Plan?
 
       # *verify*: whether `prepare` verifies the module, which it does for a
       # unit per type; one module is verified by `CodeGenVisitor#finish`.
@@ -4786,9 +4803,9 @@ module Iyi
       # stand in for it: each is optimised and compiled on its own, and their
       # objects are what links. Nothing changes when the module is too small
       # to be worth cutting.
-      def partition(count : Int32?, import_limit : Int32, inline_limit : Int32) : Nil
+      def partition(count : Int32?, import_limit : Int32, inline_limit : Int32, group_share : Int32) : Nil
         named = @preempt_flag.try { |flag| PreemptChecks.named(flag) } || [] of String
-        @plan = ReleasePartition.plan(llvm_mod, count, named, import_limit, inline_limit)
+        @plan = ReleasePartition.plan(llvm_mod, count, named, import_limit, inline_limit, group_share)
       end
 
       def partitions : Int32

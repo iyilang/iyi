@@ -47,18 +47,22 @@
 # that never fires only leaves a later hang at its site unnamed; the run then
 # ends at its outer timeout or shows as a hang. It cannot flip a verdict.
 #
-# Routed through a setup helper and counted by the structural check (every
-# marked deadline in the two repo fixtures leaves through setup_fail, and the only
-# status-76 exit in each file is the helper's; two mutants must fail it):
+# Routed through a setup helper and counted by the structural check. Every
+# marked deadline in the two repo fixtures leaves through setup_fail, and every
+# status-76 exit sits inside a setup helper: setup_fail, plus the Windows
+# ThreadBoost.setup_failure in concurrent_mark.iyi, matched by name prefix. Two
+# mutants must fail the check:
 #   concurrent_mark.iyi: the idle pool's arrival deadline (two sentences) and
 #     launch wait, and the busy pool's two exits.
 #   release_trigger.iyi: the ready, counted and churn waits, and the round's
-#     premise that its collections ran beside the program.
+#     premise that none of its collections went beside the program.
 #
 # Forced by their own control in the Darwin gate (exit 76 at the sentence):
-# the release-trigger ready, counted and churn waits, the busy pool exits and
-# their premises, and the watchdog phases for chain readback, copy
-# acknowledgement, producers stopped, bracket setup and bracket stop.
+# the release-trigger ready, counted and churn waits, the round's premise that
+# none of its collections went beside the program (the concurrent non-target
+# control), the busy pool exits and their premises, and the watchdog phases for
+# chain readback, copy acknowledgement, producers stopped, bracket setup and
+# bracket stop.
 #
 # NOT routed and NOT individually forced. Each exits 76 with the sentence
 # shown when its deadline expires, by source reading; no forced copy in the
@@ -94,8 +98,9 @@
 #   bracket drop (overlay): "FAIL: freed: the stop did not reach the held free"
 #   idle start and turn (overlay, concurrency.iyi): "FAIL: idle pool: a worker start was
 #     held past ten seconds"; "FAIL: idle pool: the first worker was held past ten seconds"
-# On Linux only, the libc watchdog launch trip also forces "FAIL: stored: fixture
-# setup did not finish before the fixture deadline".
+# The stored fixture-setup sentence, "FAIL: stored: fixture setup did not finish
+# before the fixture deadline", is forced on Linux only, by the libc watchdog
+# launch trip. On Darwin and Windows it is not forced.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -2107,8 +2112,10 @@ release_wait_control counted "FAIL: bounded: the second thread did not see the c
 step "control: a release-trigger churn that triggers no collection is a setup failure"
 release_wait_control churn "FAIL: bounded: churn did not trigger the round's collection within ten seconds"
 # A deadline in the two fixtures is marked `# gate-deadline`, and each one must
-# leave through `setup_fail(` within five lines. The only status-76 exit a
-# fixture may contain sits inside a setup helper, so no bare exit can hide.
+# leave through `setup_fail(` within five lines. Every status-76 exit a fixture
+# may contain sits inside a setup helper: a def whose name starts with setup_fail
+# (setup_fail, and the Windows setup_failure in concurrent_mark.iyi), so no bare
+# exit can hide.
 # Each count is printed; a miss is a setup failure with its own sentence.
 deadline_routing() {
   awk -v file="$(basename "$1")" '
@@ -2119,10 +2126,10 @@ deadline_routing() {
     pending > 0 { if ($0 ~ /setup_fail\(/) { routed++; pending = 0 } else pending-- }
     END {
       if (sites == 0 || routed != sites || exits != helper) {
-        printf "FAIL: gate setup: %s: %d of %d deadlines leave through setup_fail, and %d status-76 exits sit outside it\n", file, routed + 0, sites + 0, exits - helper
+        printf "FAIL: gate setup: %s: %d of %d deadlines leave through setup_fail, and %d status-76 exit(s) sit outside the setup helpers (defs named setup_fail*)\n", file, routed + 0, sites + 0, exits - helper
         exit 1
       }
-      printf "%s: %d of %d deadlines leave through setup_fail, 0 status-76 exits outside it\n", file, routed, sites
+      printf "%s: %d of %d deadlines leave through setup_fail; every status-76 exit sits inside a setup helper (defs named setup_fail*)\n", file, routed, sites
     }' "$1"
 }
 step "gate: every marked deadline in the two fixtures leaves through setup_fail"
@@ -2139,8 +2146,8 @@ awk '{ print } /^ *if IyiMark\.now_ns >= churn_deadline$/ { print "          __i
 awk '/setup_fail\("#\{name\}: churn/ { print "        nil"; next } { print }' "$REPO/bench/release_trigger.iyi" > mutant-unrouted/release_trigger.iyi
 for mutant in direct unrouted; do
   case "$mutant" in
-    direct) expected="FAIL: gate setup: release_trigger.iyi: 3 of 3 deadlines leave through setup_fail, and 1 status-76 exits sit outside it" ;;
-    unrouted) expected="FAIL: gate setup: release_trigger.iyi: 2 of 3 deadlines leave through setup_fail, and 0 status-76 exits sit outside it" ;;
+    direct) expected="FAIL: gate setup: release_trigger.iyi: 3 of 3 deadlines leave through setup_fail, and 1 status-76 exit(s) sit outside the setup helpers (defs named setup_fail*)" ;;
+    unrouted) expected="FAIL: gate setup: release_trigger.iyi: 2 of 3 deadlines leave through setup_fail, and 0 status-76 exit(s) sit outside the setup helpers (defs named setup_fail*)" ;;
   esac
   out=$(deadline_routing "mutant-$mutant/release_trigger.iyi" 2>&1)
   code=$?

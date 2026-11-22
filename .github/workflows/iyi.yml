@@ -791,7 +791,7 @@ jobs:
   samples-surfaces:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'samples-surfaces') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 75
     container:
       image: crystallang/crystal:1.21.0-build

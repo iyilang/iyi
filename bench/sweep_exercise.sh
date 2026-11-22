@@ -315,10 +315,14 @@ echo "== the listed pages counted once per clear"
 # check whose outcome depends on how often a timed race lands is not
 # deterministic, so it is gone.
 #
-# The stress keeps one job: the fix, with the same interleaving at every batch
-# edge, must read every block back whole under eight threads and the idle trim
-# for 10 s. `IyiHeap.widen_hits` counts the edge pages met that way. It is
-# printed, not asserted.
+# The stress keeps two jobs on the fix, with the same interleaving at every
+# batch edge: every block read back whole under eight threads and the idle
+# trim for 10 s, and every count exact at every pause. `IyiHeap.widen_hits`
+# counts the edge pages met that way; it is printed, not asserted. The count
+# is audited where it must be exact, with every thread stopped and none inside
+# the allocator, before `IyiHeap.idle_listed` moves the listed pages
+# (`IyiHeap.audit_listed`, `IyiHeap.listed_off`): an arena counts as listed
+# the pages its bitmap lists, and trim_stress.iyi fails at the first count off.
 play_prelude() {
   mkdir -p "$WORK/$1/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$1/iyi/"
@@ -328,8 +332,47 @@ play_prelude() {
       print "      def self.widen_hits : UInt64"
       print "        @@widen_hits"
       print "      end"
+      print "      @@listed_audits : UInt64 = 0_u64"
+      print "      @@listed_off : UInt64 = 0_u64"
+      print "      @@listed_off_count : UInt64 = 0_u64"
+      print "      @@listed_off_pages : UInt64 = 0_u64"
+      print "      def self.listed_audits : UInt64"
+      print "        @@listed_audits"
+      print "      end"
+      print "      def self.listed_off : UInt64"
+      print "        @@listed_off"
+      print "      end"
+      print "      def self.listed_off_count : UInt64"
+      print "        @@listed_off_count"
+      print "      end"
+      print "      def self.listed_off_pages : UInt64"
+      print "        @@listed_off_pages"
+      print "      end"
+      print "      def self.audit_listed(arena : UInt64, count : UInt64) : Nil"
+      print "        words = read64(arena + OFF_MAP).unsafe_shr(PAGE_SHIFT + 6_u64)"
+      print "        pages = 0_u64"
+      print "        slot = 0_u64"
+      print "        while slot < words"
+      print "          word = read64(arena + OFF_LISTED_PAGES + slot * 8_u64)"
+      print "          while word != 0_u64"
+      print "            word = word & (word - 1_u64)"
+      print "            pages = pages + 1_u64"
+      print "          end"
+      print "          slot = slot + 1_u64"
+      print "        end"
+      print "        @@listed_audits = @@listed_audits + 1_u64"
+      print "        if pages != count"
+      print "          if @@listed_off == 0_u64"
+      print "            @@listed_off_count = count"
+      print "            @@listed_off_pages = pages"
+      print "          end"
+      print "          @@listed_off = @@listed_off + 1_u64"
+      print "        end"
+      print "      end"
       print
       n++; next }
+    /^      def self\.idle_listed\(arena : UInt64\) : Nil$/ { pause = 1 }
+    pause && /^        return if count == 0$/ { print "        audit_listed(arena, count)"; print; pause = 0; n++; next }
     /^      def self\.unlist_batch\(/ { batch = 1 }
     batch && /^        while page <= last$/ { print "        low_edge = page"; print; n++; next }
     /^          count = count \+ 1_u64 if unlist_page\(arena, page\)$/ {
@@ -344,7 +387,7 @@ play_prelude() {
       print "          end"
       n++; next }
     { print }
-    END { if (n != 3) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi"
+    END { if (n != 4) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi"
 }
 
 # Builds bench/unlist_count.iyi against copy $1 and runs it once. The status is
@@ -372,7 +415,7 @@ else
     sed -n '1,12p' "$WORK/played/build.log" | sed 's/^/    /'
     status=1
   elif stress_run played "$WORK/played/program" 10 &&
-       hits=$(sed -n 's/.*, \([0-9]*\) edge pages read listed by two adoptions at once$/\1/p' "$WORK/played.out") &&
+       hits=$(sed -n 's/.*, \([0-9]*\) edge pages read listed by two adoptions at once.*$/\1/p' "$WORK/played.out") &&
        [ -n "$hits" ]; then
     echo "  the adjacent adoption played at each batch edge: every block read back whole, $hits edge pages read listed by two adoptions at once"
   else

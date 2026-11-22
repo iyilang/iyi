@@ -24,7 +24,9 @@ name: iyi
 #   stdlib-specs     Crystal's library suite. The compiler is still a Crystal
 #                    program and is built with this library
 #   samples          every sample, then the same programs built again with the
-#                    modules' source deleted, which is R-1 taken literally
+#                    modules' source deleted, which is R-1 taken literally; its
+#                    later gates - rebuilds, packages, the editor and agent
+#                    surfaces, bound shards, the floors - in samples-surfaces
 #   targets          the platform files the library still carries, type-checked
 #                    by cross-compiling: an edit to `src/lib_c` or
 #                    `src/crystal/system` is invisible here until somebody
@@ -212,7 +214,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -282,7 +284,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -308,7 +310,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -322,8 +324,8 @@ jobs:
         env:
           CRYSTAL_WORKERS: 1
 
-  # And the question from a position nobody chose. The samples job's
-  # soak asks one hover after each abuse; this asks every cursor question
+  # And the question from a position nobody chose. The samples-surfaces
+  # job's soak asks one hover after each abuse; this asks every cursor question
   # at thousands of positions across `src/std`, including the two shapes
   # the answers were wrong on — a macro directive line and a local
   # assignment, where a variable an arm this target does not take has no
@@ -368,6 +370,13 @@ jobs:
   # two shards with both grown modules' old weights were cut off at 45
   # (jobs 134257615300, 134616844992). Five hold 1,145 to 1,152 s: 27
   # minutes at 1.24 with setup, 60% of forty-five, and 43 at 2.1.
+  #
+  # Then `iyi lsp` stopped recompiling a large module for every question
+  # (bcee7ed4f) and the sweep fell to 3,464 s: in 20 green shard jobs of
+  # 2026-11-20 the shard holding std/autocert swept in 290 to 300 s on a
+  # median runner and the heaviest in 900 to 920 (jobs 6.7 to 23.2 minutes).
+  # Re-dealt by those jobs' own seconds, five hold 676 to 715 s: 23 minutes
+  # at the slowest green job's 1.72 with setup, 51% of forty-five.
   lsp-positions:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'lsp-positions') }}
@@ -384,7 +393,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -412,7 +421,20 @@ jobs:
     # At 90 the job took 87 on most runs and was cancelled at 90 on
     # 2026-10-16, `lsp_positions.py` 22 to 41 minutes of it: that step is
     # now the `lsp-positions` job's, run beside this one.
-    timeout-minutes: 90
+    #
+    # And it grew back. In twelve green runs of 2026-11-19 and 11-20 on
+    # GitHub's runners it took 58.0 to 71.4 minutes (60.9 the median) and
+    # 87.6 on a slow runner (job 135531037219); run 44725107313's was cut
+    # off at 90 on one about 1.4 times slower in every step (job
+    # 136251143205: the dependency floor 430 s against 274, the release
+    # build 346 against 238). The gates from the edit-rebuild loop on are
+    # the `samples-surfaces` job's now, from a build of its own, beside
+    # this one. Cut there, the gates held 1,775 s here and 1,729 there
+    # in the median of those twelve runs and each job pays about 120 s
+    # to start its container and build `iyi`: 31.6 and 30.8 minutes, and
+    # 48.0 and 45.1 at the cut-off job's pace. Seventy-five is 1.6 times
+    # the slowest of those and still ends a hang.
+    timeout-minutes: 75
     container:
       image: crystallang/crystal:1.21.0-build
     name: "Samples, from source and from artifacts"
@@ -420,7 +442,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -761,6 +783,35 @@ jobs:
           bash bench/collect_trigger.sh
           bash bench/windows_exercise.sh
 
+  # The later half of what was the samples job - the rebuild loop, `iyi
+  # migrate`, packages, the editor and agent surfaces, bound shards, the
+  # floors and the threads under the collector - beside it rather than
+  # after it. The samples job's comment has the measurement; the setup is
+  # its setup but the daemon, so what runs these gates is the same binary.
+  samples-surfaces:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'samples-surfaces') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "Rebuilds, packages, the editor and agent surfaces, bound shards and the floors"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+
+      # The binary a person downloads, as in the samples job. Not the
+      # daemon's server: the gates that start a daemon are the samples
+      # job's.
+      - name: Build `iyi`
+        run: make -o .build/crystal iyi
+
       # The rebuild loop, held: cheap on both arms, and the artifact
       # read inside its band — the corrected prediction is in SPEC.md.
       - name: The edit-rebuild loop stays cheap
@@ -1097,7 +1148,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -1135,7 +1186,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -1179,7 +1230,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -1210,7 +1261,7 @@ jobs:
       # Pebble, which it builds with `go install` - and skips, saying so,
       # where there is no Go, as there was none in this container. No
       # `go.sum` here to key a cache on, so none is asked for.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: stable
           cache: false
@@ -1244,7 +1295,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -1286,7 +1337,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -1379,7 +1430,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -1422,7 +1473,7 @@ jobs:
           # The thread floor's aarch64 arm: raw `clone`, `futex`, `tgkill`
           # and a signal handler with the kernel's vdso sigreturn, none of
           # it run anywhere else. Its x86-64 arm is bench/thread_floor.sh in
-          # the samples job.
+          # the samples-surfaces job.
           ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
             -o cross/floor-aarch64 bench/thread_floor.iyi
           # Threads under the collector, the aarch64 arm: the runtime's own
@@ -1517,7 +1568,7 @@ jobs:
     timeout-minutes: 30
     name: "An iyi program, run on musl and on aarch64"
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cross-objects
           path: cross
@@ -1679,9 +1730,16 @@ jobs:
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           # Every later step uses the job's own temporary directory.
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
-          # And no compiler or linker flags of the machine's: LDFLAGS naming
+          # No compiler or linker flags of the machine's: LDFLAGS naming
           # brew's LLVM 23 once put its static libraries ahead of the recipe's
-          # in the link.
+          # in the link. Each job keeps its own compiler caches under its
+          # temporary directory: one job's cache rotation removed a directory
+          # another job's build was linking from (job 135882647898, fixed in the
+          # compiler since; bench/rebuild_reuse.py step 7). Crystal's cache is
+          # per job too, since the bootstrap compiler builds `iyi` through it and
+          # brew's Crystal 1.22.3 rotates it with no lock at all.
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
@@ -1707,7 +1765,7 @@ jobs:
       # and a cache path should not depend on how a symlink is archived.
       - name: Restore the static LLVM
         id: llvm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
@@ -1802,8 +1860,8 @@ jobs:
       # `pthread_create`, `pthread_kill`, `sigaction`, an `os_unfair_lock`
       # to park on, and `__tlv_bootstrap` for a `@[ThreadLocal]` — held as
       # the exact list, beside the runtime's twelve, with the pause printed
-      # by count. The Linux arm is the samples job's; the aarch64 Linux arm
-      # is cross-run's.
+      # by count. The Linux arm is the samples-surfaces job's; the aarch64
+      # Linux arm is cross-run's.
       - name: The thread floor (III.9, GC_DESIGN.md Stage 4)
         run: bash bench/thread_floor.sh
 
@@ -1811,7 +1869,7 @@ jobs:
       # signal stop and the pipe park in the runtime rather than the probe,
       # held to the thread floor's exact list, with a live list in every
       # stopped thread's frames surviving the collections. The Linux arm
-      # is the samples job's, the aarch64 arm is cross-run's.
+      # is the samples-surfaces job's, the aarch64 arm is cross-run's.
       - name: Threads under the collector (GC_DESIGN.md Stage 4)
         run: bash bench/thread_exercise.sh
 
@@ -1825,7 +1883,7 @@ jobs:
       # collector, Boehm and Go on this runner, so darwin's numbers are in
       # every log the way Linux's are in GC_DESIGN.md. A shared runner is
       # not a machine to gate on, and this step asserts nothing.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: stable
           # Nothing here is a Go project, so there is no `go.sum` to key a
@@ -2039,11 +2097,13 @@ jobs:
         run: |
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
@@ -2093,7 +2153,7 @@ jobs:
       # 1.25.4): it said "unparsed" for http://[::ffff:127.0.0.1], where
       # proxy_for and Linux's go1.27.4 say direct (job 133974766871). No
       # `go.sum` here to key a cache on.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: stable
           cache: false
@@ -2147,11 +2207,13 @@ jobs:
         run: |
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
@@ -2188,11 +2250,13 @@ jobs:
         run: |
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
@@ -2244,7 +2308,7 @@ jobs:
     timeout-minutes: 30
     name: "What a Windows binary does, twenty times"
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cross-objects
           path: cross
@@ -2308,7 +2372,7 @@ jobs:
     timeout-minutes: 30
     name: "The collector on Windows x86_64"
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cross-objects
           path: cross
@@ -2351,7 +2415,7 @@ jobs:
     timeout-minutes: 30
     name: "The concurrency runtime on Windows x86_64"
     steps:
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cross-objects
           path: cross
@@ -2436,7 +2500,7 @@ jobs:
       # The action is pinned to a commit; the Crystal package it downloads
       # for 1.21.0 is not checked against a hash written here, because the
       # action takes none.
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -2783,7 +2847,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -2959,7 +3023,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3029,7 +3093,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3103,7 +3167,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3160,7 +3224,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3247,7 +3311,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3317,7 +3381,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3433,7 +3497,7 @@ jobs:
       # programs under iyi's collector, Boehm and Go on this runner. It
       # asserts no number, and refuses a row whose three arms answer
       # differently, which is a question Windows had never been asked.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: stable
           cache: false
@@ -3547,7 +3611,7 @@ jobs:
 
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
 
@@ -3594,7 +3658,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iyi-linux-x86_64
           path: dist/
@@ -3620,11 +3684,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cross-objects
           path: cross
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iyi-linux-x86_64
           path: dist/
@@ -3640,7 +3704,7 @@ jobs:
       # key being the script that pins them.
       - name: Restore the wasm toolchain
         id: wasm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/wasm-toolchain
           key: wasm-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-wasm-toolchain.sh') }}
@@ -3780,7 +3844,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iyi-linux-x86_64
           path: dist/
@@ -3788,7 +3852,7 @@ jobs:
       # The same toolchain the wasi-run job restores, for the same reason.
       - name: Restore the wasm toolchain
         id: wasm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/wasm-toolchain
           key: wasm-toolchain-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-wasm-toolchain.sh') }}
@@ -3889,7 +3953,7 @@ jobs:
       # roughly-an-hour build is paid once per recipe change, not per push.
       - name: Restore the static LLVM
         id: llvm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-ubuntu20.04-${{ hashFiles('scripts/build-static-llvm.sh') }}
@@ -4036,7 +4100,7 @@ jobs:
       # Checkout first: it clears the workspace, so an artifact
       # downloaded before it is an artifact deleted by it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iyi-linux-x86_64
           path: dist/
@@ -4146,7 +4210,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [binary, darwin, darwin-std, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
-            samples, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
+            samples, samples-surfaces, lsp-positions, std, std-siblings, std-platforms, targets, cross-objects, cross-run,
             npm-recipe, wasi-run, windows-probe, windows-collector, windows-runtime, windows-native,
             windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-siblings, windows-std-platforms, windows-gates, windows-compiler-specs,
@@ -4173,11 +4237,11 @@ jobs:
             echo "the tag is $GITHUB_REF_NAME, and src/IYI_VERSION builds v$version"
             exit 1
           fi
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iyi-linux-x86_64
           path: dist/
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iyi-darwin-arm64
           path: dist/
@@ -4185,7 +4249,7 @@ jobs:
       # installed by `install.ps1` in the same run. Without this line the
       # installer has nothing to download: it asks a release for
       # `iyi-<version>-windows-x86_64.zip` by name.
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iyi-windows-x86_64
           path: dist/
@@ -4329,7 +4393,7 @@ jobs:
   # failed or cancelled one does not. `scripts/ci_plan.py` refuses a
   # workflow whose jobs this list does not name.
   result:
-    needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, std,
+    needs: [plan, docs, build, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, samples-surfaces, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,

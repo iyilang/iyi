@@ -94,6 +94,8 @@
 #  7i. Darwin: one yield goes through an observer that records only after the
 #      real thread_switch returns; the old ARM hint leaves it unanswered. The
 #      mutant's binary no longer imports thread_switch, and the control's does.
+#      Threads born alone and beside busy processes are measured after 7i
+#      (`measure:`), not judged.
 #  7j. Darwin: hold an unlinked child, inspect the actual stop roster and count,
 #      then link it and witness a later stop. Early counting is named.
 #  7k. Linux: tasks and a thread call libc and check its answers and imports.
@@ -7701,6 +7703,124 @@ IYI
       pair_mismatch "$code" yield-mutant.txt mutant 0 "$yield_pass"
     fi
     echo "  exits 1 at \"$yield_fail\""
+    ;;
+esac
+
+# ── measure: darwin's threads born beside busy processes ────────────────────
+# Information, not a verdict. The rate of threads born alone and beside a busy
+# process per core, and the most CPU the program spent per thread born beside
+# them: the figures master's spinner step judged (7i), kept as measurements.
+# The storm is sixteen threads at a time beside a thread that collects in a
+# loop, for 10 s or 200 rounds, best of three runs each way. A run beside the
+# busy processes counts toward the rate only where they and the program held
+# 90 % of the cores' time (`ps` and time(1) read it); one where something else
+# held more is set aside and run again, and after ten such runs the rate is
+# taken from the held runs so far.
+case "$(uname -s)" in
+  Darwin)
+    cores="$(sysctl -n hw.ncpu)"
+    # The CPU seconds the given processes (comma-separated pids) have run so far.
+    cpu_of() {
+      ps -o time= -p "$1" | awk '{ n = split($1, f, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + f[i]; t += s } END { printf "%.2f\n", t }'
+    }
+    SHARE_MIN=90
+    UNASKED_TRIES=10
+    rates() {
+      alone=0; beside=0; anyheld=0; shares=""; aside=""; unasked=0; spent=0
+      for way in alone beside; do
+        run=1
+        while [ "$run" -le 3 ]; do
+          busy=""
+          if [ "$way" = beside ]; then
+            i=0
+            while [ "$i" -lt "$cores" ]; do yes > /dev/null & busy="$busy${busy:+,}$!"; i=$((i + 1)); done
+            before="$(cpu_of "$busy")"
+          fi
+          ( /usr/bin/time -p -o times.txt timeout -k 5 60 "./$1" 200 10 > rates.txt 2>&1; exit $? ) 2> /dev/null
+          code=$?
+          if [ -n "$busy" ]; then
+            after="$(cpu_of "$busy")"
+            for b in $(echo "$busy" | tr , ' '); do end_process "$b"; done
+            wait $(echo "$busy" | tr , ' ') 2> /dev/null
+          fi
+          if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ms=[0-9]* ' rates.txt; then
+            echo "FAIL: rates: $1, $way, run $run exited $code:"; tail -3 rates.txt; exit 1
+          fi
+          born="$(sed -n 's/^ok born=\([0-9]*\) .*/\1/p' rates.txt)"
+          ms="$(sed -n 's/^ok born=[0-9]* ms=\([0-9]*\) .*/\1/p' rates.txt)"
+          rate=$((born * 1000 / (ms + 1)))
+          if [ "$way" = beside ]; then
+            us="$(awk -v n="$born" '$1 == "user" || $1 == "sys" { t += $2 } END { printf "%d\n", t * 1000000 / n }' times.txt)"
+            [ "$us" -gt "$spent" ] && spent=$us
+            [ "$rate" -gt "$anyheld" ] && anyheld=$rate
+            share="$(awk -v b="$before" -v a="$after" -v c="$cores" '$1 == "real" { r = $2 } $1 == "user" || $1 == "sys" { t += $2 } END { printf "%d\n", (r > 0 ? 100 * (a - b + t) / (c * r) : 0) }' times.txt)"
+            if [ "$share" -lt "$SHARE_MIN" ]; then
+              unasked=$((unasked + 1))
+              aside="$aside $share%"
+              [ "$unasked" -ge "$UNASKED_TRIES" ] && run=4
+              continue
+            fi
+            shares="$shares $share%"
+          fi
+          if [ "$way" = alone ]; then [ "$rate" -gt "$alone" ] && alone=$rate; else [ "$rate" -gt "$beside" ] && beside=$rate; fi
+          run=$((run + 1))
+        done
+      done
+    }
+    if [ "$cores" -lt 6 ]; then
+      echo "measure: threads born beside busy processes: needs 6 cores, this machine has $cores: unmeasured here"
+    else
+      cat > asleep.iyi <<'IYI'
+module asleep
+
+import std/gc::{GC}
+
+class Flag
+  getter stop : Atomic(Int64)
+  getter born : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+    @born = Atomic(Int64).new(0_i64)
+  end
+end
+
+def storm(flag : Flag) : Nil
+  while flag.stop.get == 0_i64
+    GC.collect
+  end
+end
+
+def arrive(flag : Flag) : Nil
+  flag.born.add(1_i64)
+end
+
+flag = Flag.new
+stormer = IyiThread.start { storm(flag) }
+rounds = Program.args[0].to_i
+deadline = __iyi_monotonic_ns + Program.args[1].to_i.to_i64 * 1_000_000_000_i64
+started_ns = __iyi_monotonic_ns
+started = 0
+round = 0
+while round < rounds && (round < 20 || __iyi_monotonic_ns < deadline)
+  batch = [] of IyiThread
+  16.times { batch << IyiThread.start { arrive(flag) } }
+  started = started + 16
+  batch.each(&.join)
+  round = round + 1
+end
+took = (__iyi_monotonic_ns - started_ns) // 1_000_000_i64
+flag.stop.set(1_i64)
+stormer.join
+raise "born #{flag.born.get} of #{started}" if flag.born.get != started
+puts "ok born=#{started} ms=#{took} stops=#{IyiThread.stops} owing=#{IyiThread.owing_stops} outwaited=#{IyiThread.turn_waits_out}"
+IYI
+      if ! "$IYI" build asleep.iyi -o asleep > build-asleep.log 2>&1; then
+        echo "SETUP: rates: the storm program did not build"; cat build-asleep.log; exit 76
+      fi
+      rates asleep
+      echo "measure: threads born alone $alone a second; beside $cores busy processes $anyheld a second, at up to $spent us of CPU a thread (they and the program held${shares:- none} of the cores${aside:+; set aside at$aside})"
+    fi
     ;;
 esac
 

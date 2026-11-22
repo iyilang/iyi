@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 36,421 lines, of which 4,737 are the library held to the 4,738 ceiling (7,155 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 142,150 lines, none of it written in iyi |
+| iyi's own prelude | 36,537 lines, of which 4,763 are the library held to the 4,763 ceiling (7,271 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 142,382 lines, none of it written in iyi |
 | artifact format | `.iyimod` v64, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 36,421 lines
+> "No standard library worth the name" is still true of iyi's own 36,537 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 36,421 lines,
-primitives included, of which the library is 4,737.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 36,537 lines,
+primitives included, of which the library is 4,763.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -302,11 +302,11 @@ the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 seed under `-Diyi_chaos`, `chaos.iyi` and `chaos_points.iyi`, III.4.17),
 the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,737 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,763 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 2,418 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 2,508 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 7,155 with the floor
+below settles and explains. Opening `src/iyi/` counts 7,271 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -427,7 +427,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason — the platform floor measures **2,418 lines**
+exists for the same reason — the platform floor measures **2,508 lines**
 today (1,871 of the 4,803 that day), and Windows is the largest arm of it
 by a wide margin, which is what a platform whose every path, console byte
 and integer division needs its own answer costs.
@@ -507,6 +507,16 @@ because only it knows its cases and its children. Behind an import they
 would be a framework a test asks for before it can be skipped, which is the
 one thing `iyi test` set out not to be. The owner chose the number, as
 measured with them in: 4,738.
+
+**And to 4,763, owner approved 2026-11-21 for #212.** `String#hash` was
+FNV-1a from a fixed start, and keys built offline to share one hash made a
+`Hash` - and `JSON.parse` of an object - quadratic in them. SipHash-1-3,
+keyed with sixteen bytes the system's entropy gives each process, is 37
+lines of `string.iyi` where FNV-1a was 11, 26 more (the entropy read is
+each platform's own and stays out of the count). `Hash` lives in the prelude, so
+the hash it places every string key by cannot sit behind an import, and a
+table a program fills with client-chosen strings is exposed until it does.
+The owner chose the number, as measured with it in: 4,763.
 
 What the rule does *not* forgive: a `pub def` a program calls is API and
 counts wherever it is written, macro arm or not — the exclusion is for the
@@ -1063,8 +1073,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 142,150 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 36,421-line own prelude + 128,413 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 142,382 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 36,537-line own prelude + 128,696 in std |
 | Specs | 21,146 lines | 17,691 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -2259,7 +2269,10 @@ language already had:
   raise printed, until the stack ended - a closed reader (`prog | head`)
   turned every panic into a segfault. The panic path holds no stream
   object either: it is reachable before the globals one would use are
-  built. Then it unwinds by
+  built. And the report is one write, built on the stack first, so
+  threads that panic at once print whole lines, each message with its
+  own site under it (`bench/panics.sh` holds it with eight units and a
+  copy that writes piece by piece). Then it unwinds by
   registry: `defer` pushes its cleanup on the way in (the normalizer
   emits `__iyi_defer_push(-> { x })` and pops on every ordinary exit),
   so the panic path walks the current task's list innermost-first
@@ -2342,17 +2355,33 @@ exit but the panic — the half of cleanup that matters. `.cr` sources keep
 theirs.
 
 ```
+import std/file::{File, IOError}
+
 pub def with_file(path : String) : String | IOError
-  f = open_file(path)!          # the program's own: IyiIO | IOError
+  f = File.open?(path)!         # FileIO | IOError
   defer f.close
   f.read_all
 end
 ```
 
-`open_file` is the program's, because the prelude's `File.open` answers an
+`File.open?` is `std/file`'s (#214). The prelude's `File.open` answers an
 `IyiIO` and panics with the path when it cannot, so a `!` after it is
 refused: "`!` has no error to propagate: no member of IyiIO implements
-`Error`".
+`Error`". Beside it, and beside `File.read`, `File.write` and the stream's
+`write`, `flush` and `close`, each of which panics, `std/file` has a `?`
+form in std's own convention — `Base64.decode?`, `UdpSocket.bind?` — that
+answers what the system refused as an `IOError`: `File.open?`,
+`File.read?`, `File.write?`, and on the `FileIO` that `File.open?` answers,
+`write?`, `flush?` and `close?`. An `IOError` carries the operation, the
+path and the platform's number for why (errno, or Windows'
+`GetLastError`); `reason` says it in words, `not_found?`, `denied?` and
+`full?` say whether it is a 404, a 403 or a 507, and its `message` is
+what `File.open`, `File.read` or `File.write` panics with, and the reason:
+`cannot open /srv/up/a: no such file or directory`. A `close?` whose flush
+is refused closes the file all the same. They live in `std/file`, not the
+prelude, because the prelude sits on its ceiling (I.4), and the panicking
+forms are unchanged, to the letter; `bench/std_file_exercise.sh` holds
+both.
 
 **Built, and panics gave it its final shape.** `defer x` expands to a
 registered cleanup around the rest of its scope:
@@ -3960,7 +3989,10 @@ clients it does not control is bounded by default since: a request's
 head within `timeout_ms` (60 s), the whole request within
 `request_timeout_ms` (5 minutes), each counted from when the wait began,
 and at most `max_connections` (1,024) served at once, the next one
-queued in the listen queue rather than refused.
+queued in the listen queue rather than refused; a request's head is held
+to `max_head` (1 MiB, 431 past it) and its body to `max_body` (64 MiB,
+413) while they are read, over HTTP/1.1 and HTTP/2, so a caller with
+smaller limits of its own is never made to hold the defaults first.
 
 #### III.4.12 Concurrency on wasm32-wasi: **MEASURED and REFUSED: why this target has no runtime**
 
@@ -8884,7 +8916,7 @@ From Crystal's own *Required libraries* page, plus every `@[Link]` in this tree.
 | Library | What it is for | Reachable | iyi's answer |
 |---|---|---|---|
 | libc | everything | yes: `write`, `exit`, `memset` and the collector's `mmap`/`munmap` on darwin | keep. On Linux the prelude issues the raw syscalls instead, so the object asks libc for nothing and the executable carries only the link template's five |
-| kernel32, advapi32, the MSVC C runtime (Windows) | the platform itself | yes: `WriteFile`, `ExitProcess`, `VirtualAlloc`, `CreateThread`, the completion port, `CreateProcessW` for `std/process` — `RtlGenRandom` for `std/random`, and the registry reads (`RegOpenKeyExW`, `RegEnumKeyExW`, `RegQueryValueExW`, `RegCloseKey`) through which `std/socket`'s resolver finds the configured name servers, and the access list `std/autocert` gives its cache's directory (`ConvertStringSecurityDescriptorToSecurityDescriptorW`, `GetSecurityDescriptorDacl`, `SetNamedSecurityInfoW`, with kernel32's `LocalFree`) | keep, and of the platform's own only these two. Windows has no libc of its own: the C runtime's POSIX shims are a person-installed choice of CRT and the Win32 API is the platform's contract, which is the same answer Go gives. `kernel32` is the floor; `advapi32` is the OS entropy `Random::Secure` answers and `Random.new` seeds from, for which there is no kernel32 name, and the registry, where Windows keeps the name servers that iphlpapi and dnsapi — two more DLLs — would otherwise have answered. Both ship with every Windows. The link line also carries the *dynamic* C runtime — the static one, `libcmt`, links and access-violates before `main` — so every program imports `vcruntime140.dll` and five UCRT façades (runtime, math, stdio, locale, heap) beside `kernel32`, as III.9's PE measurement counts. The façades ship with Windows 10 and later; `vcruntime140.dll` is the Visual C++ redistributable, which a clean machine is not promised, so an `.exe` iyi builds needs that one installed |
+| kernel32, advapi32, the MSVC C runtime (Windows) | the platform itself | yes: `WriteFile`, `ExitProcess`, `VirtualAlloc`, `CreateThread`, the completion port, `CreateProcessW` for `std/process` — `RtlGenRandom` for `std/random` and for the key the prelude's `String#hash` is keyed with (#212), and the registry reads (`RegOpenKeyExW`, `RegEnumKeyExW`, `RegQueryValueExW`, `RegCloseKey`) through which `std/socket`'s resolver finds the configured name servers, and the access list `std/autocert` gives its cache's directory (`ConvertStringSecurityDescriptorToSecurityDescriptorW`, `GetSecurityDescriptorDacl`, `SetNamedSecurityInfoW`, with kernel32's `LocalFree`) | keep, and of the platform's own only these two. Windows has no libc of its own: the C runtime's POSIX shims are a person-installed choice of CRT and the Win32 API is the platform's contract, which is the same answer Go gives. `kernel32` is the floor; `advapi32` is the OS entropy `Random::Secure` answers, `Random.new` seeds from and a program that hashes a string keys its tables with, for which there is no kernel32 name, and the registry, where Windows keeps the name servers that iphlpapi and dnsapi — two more DLLs — would otherwise have answered. Both ship with every Windows. The link line also carries the *dynamic* C runtime — the static one, `libcmt`, links and access-violates before `main` — so every program imports `vcruntime140.dll` and five UCRT façades (runtime, math, stdio, locale, heap) beside `kernel32`, as III.9's PE measurement counts. The façades ship with Windows 10 and later; `vcruntime140.dll` is the Visual C++ redistributable, which a clean machine is not promised, so an `.exe` iyi builds needs that one installed |
 | ws2_32 (Windows) | sockets | yes: `socket`, `bind`, `listen`, `recv`, `send`, `recvfrom`, `sendto`, and the posted `AcceptEx`, `ConnectEx`, `WSASend` and `WSARecvFrom` the completion port answers — `std/socket` and `std/udp`, and nothing else | keep, and only for those two. Winsock *is* Windows' network interface: there is no socket call anywhere else, not in kernel32 and not in a CRT, which is the same position `kernel32` holds for processes and files. `ws2_32.dll` ships with every Windows, so it adds nothing to what an `.exe` iyi builds needs installed. `AcceptEx` and `ConnectEx` are mswsock's exports and are reached by asking a socket for the pointer (`WSAIoctl` with `SIO_GET_EXTENSION_FUNCTION_POINTER`) rather than by linking `mswsock`, so Windows' sockets are one row here and not two |
 | crypt32 (Windows); Security and CoreFoundation (darwin) | the trusted roots | yes: `CertOpenSystemStoreW`, `CertEnumCertificatesInStore`, `CertGetEnhancedKeyUsage`, `CertCloseStore` on Windows; `SecTrustCopyAnchorCertificates`, `SecTrustSettingsCopyCertificates`, `SecTrustSettingsCopyTrustSettings`, `SecCertificateCopyData` and the CoreFoundation array, data, dictionary, number and string calls they answer in on darwin — `std/system_roots`, and nothing else | keep, and only for that one. **Decided by the owner** for the TLS client: a system's trusted roots - and the roots an administrator or a user added or took away - are kept behind these interfaces and no file holds them, so reading them is the platform's act the way a socket is Winsock's. Each ships with every Windows and every macOS, so an `.exe` or a darwin binary needs nothing installed. Linux keeps its roots in a bundle file, read with no binding. The alternatives were weighed and refused: files only (no roots at all on Windows, and none a darwin user added), and a bundled copy of Mozilla's roots (stale between releases, and blind to every root an operating system trusts or distrusts on its own). std/x509 itself stays pure computation; a program that brings its own roots links none of these |
 | Boehm GC | allocation | no: the default is the owned collector, arena over the platform's own `mmap`; `-Dgc_boehm` opts libgc back in, `-Dgc_none` opts out of collecting | **owned, shipped, default.** II.5 already required a precise collector for R-4; GC_DESIGN.md is the record and `bench/gc_default.py` the measurement that flipped the default. Present on the compiler only as a temporary bootstrap runtime dependency with an exit condition: leaves when the compiler stops being a Crystal program |
@@ -12271,6 +12303,18 @@ Named honestly, so nobody mistakes this draft for complete.
     kept here, and an equally old directory nobody holds is still evicted, so
     the cache still shrinks.
 
+    Reading it was not enough. The cleaner asked whether anyone held the lock
+    and then deleted the directory holding nothing, so a build that took the
+    lock in between kept the objects it had found and linked after they were
+    gone: "clang: error: no such file or directory: 'P-ointer40U-I-nt841.o0.o'"
+    on the project's Mac, three CI jobs sharing one cache (job 135882647898).
+    Now the cleaner holds the lock while it deletes and removes the lock file
+    last, and a build holds it from the moment codegen names the directory
+    until the last object has been read; a build that waited on the lock and
+    finds it no longer at `compiler.lock` makes the directory again
+    (`CacheDir#hold`, `#remove`; `bench/rebuild_reuse.py` step 7, which the
+    compiler before failed 5 runs of 5 on Linux and 3 of 3 on the Mac).
+
     Two smaller things came out of the same hour. A codegen thread that raised
     used to print its exception and leave the build to fail later at the link,
     so the failure is now kept and raised as what it is. And it is worth saying
@@ -13797,7 +13841,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 36,421-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 36,537-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler
@@ -14775,7 +14819,7 @@ For traceability, since several rules here rest on numbers rather than taste.
 | One file is one module, and it had to be said | a second `module a/b` header in a file was accepted: the file emitted one artifact under the first name carrying both modules' exports, and the second module had none (IV.6) |
 | A compiled artifact needs its own checksum | one flipped byte in a `.iyimod` built silently 7 times out of 10 and reached the linker the other 3; per-section checksums in format v19 refuse 12 of 12 and name the section (IV.2a) |
 | A prefix is not a parent directory | working in `/tmp/x/crystal` with a cache at `/tmp/x/crystal-cache`, every object file was written to `-cache/…`; the same "No such file or directory" the cleaner race produces, from a different cause (V.10) |
-| A build's cache directory can be deleted underneath it | the cleaner keeps the ten most recently modified directories and runs after every compile; removing one mid-codegen reproduces both failures, the single-threaded path included, and reading the `compiler.lock` the build already holds fixes it (V.10) |
+| A build's cache directory can be deleted underneath it | the cleaner keeps the ten most recently modified directories and runs after every compile; removing one mid-codegen reproduces both failures, the single-threaded path included, and reading the `compiler.lock` the build already holds fixed it until a build took the lock between the cleaner's look and its delete; the cleaner now deletes holding it (V.10) |
 | A module as the unit of compilation is worth 8x to 9x over Crystal | the same program, the same compiler binary, one module edited: 1.17 s as Crystal, 0.13 s as iyi, against `go build`'s 0.16 s, and 1.29 / 0.16 / 0.19 an hour earlier (IV.3a) |
 | The edit loop is where R-1 pays, and it pays 1.8x | one module edited in a 30-module, 7,207-line project: 0.13 s with artifacts, 0.23 s without, against `go build`'s 0.16 s for the same edit (IV.3a) |
 | The path/name mapping needed more than snake_case | `camelcase` drops an underscore before a digit, so `v_1` and `v1` both give `V1`; requiring each group to start with a letter removes that and three sibling collisions (IV.6 #6) |

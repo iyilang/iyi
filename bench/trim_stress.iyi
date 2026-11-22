@@ -22,7 +22,11 @@
 # against a prelude copy that plays the neighbouring adoption at each
 # batch's edge pages (`bench/sweep_exercise.sh`), it reports how many edge
 # pages two adoptions read listed at once, `IyiHeap.widen_hits`, which only
-# that copy defines.
+# that copy defines. The same copy fails when a pause finds an arena's count
+# of listed pages other than the pages its bitmap lists,
+# `IyiHeap.listed_off`: the trimmer asks after every trim, and the main
+# thread collects once more after the threads end and asks again, so the
+# last epoch's adoptions are counted too.
 
 @[Unsafe("it writes and reads raw blocks by address to check them")]
 module bench/trim_stress
@@ -59,6 +63,23 @@ module bench/trim_stress
   def widen_note : String
     {% if flag?(:trim_widen) %}
       ", #{IyiHeap.widen_hits} edge pages read listed by two adoptions at once"
+    {% else %}
+      ""
+    {% end %}
+  end
+
+  def audit_listed : Nil
+    {% if flag?(:trim_widen) %}
+      if IyiHeap.listed_off != 0
+        print "FAIL: trim stress: a pause found an arena counting #{IyiHeap.listed_off_count} pages listed with #{IyiHeap.listed_off_pages} listed, #{IyiHeap.listed_off} of #{IyiHeap.listed_audits} arena counts off#{widen_note}\n"
+        __iyi_exit(1)
+      end
+    {% end %}
+  end
+
+  def audit_note : String
+    {% if flag?(:trim_widen) %}
+      ", and #{IyiHeap.listed_audits} arena counts of listed pages read at pauses, every one its pages"
     {% else %}
       ""
     {% end %}
@@ -119,6 +140,7 @@ module bench/trim_stress
     stop = IyiMark.now_ns + seconds.to_u64 * 1_000_000_000_u64
     while IyiMark.now_ns < stop
       IyiMark.trim_idle
+      audit_listed
     end
   end
 
@@ -156,10 +178,14 @@ module bench/trim_stress
   trim_thread = start_trimmer(seconds)
   workers.each { |w| w.join }
   trim_thread.join
+  {% if flag?(:trim_widen) %}
+    IyiMark.collect
+    audit_listed
+  {% end %}
   if quiet
     puts "trim stress: every block read back whole"
   else
-    puts "trim stress: #{threads} threads for #{seconds} s beside #{IyiMark.trims - trims} idle trims, #{IyiMark.collections - collections} collections and #{IyiHeap.pages_released - released} pages handed back, every block read back whole#{widen_note}"
+    puts "trim stress: #{threads} threads for #{seconds} s beside #{IyiMark.trims - trims} idle trims, #{IyiMark.collections - collections} collections and #{IyiHeap.pages_released - released} pages handed back, every block read back whole#{widen_note}#{audit_note}"
   end
 {% else %}
   puts "trim stress: no collector's allocator on this target, nothing to trim"

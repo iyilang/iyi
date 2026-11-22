@@ -9,6 +9,8 @@
 #   * A build with -Dgc_none is refused at compile time with the module's
 #     sentence, not with an undefined name from the missing collector.
 #   * A negative size is refused by name at every allocating verb.
+#   * `stats` and `is_heap_ptr` wait for the runtime lock: held by another
+#     thread, each answers only after the holder lets go, on the real module.
 #   * Negative proofs, each run once: copies of the module that report a
 #     constant collection count, that leave the trigger on under `disable`,
 #     that answer false for every heap pointer, or that free nothing each fail
@@ -73,7 +75,7 @@ build_and_run "std_gc" exercise-gc "$REPO/bench/std_gc_exercise.iyi"
 
 echo
 echo "== every gc check reported"
-for check in "raw words" "heap pointers" "stats move with the collector" "disable holds the trigger" "a string built in a reused chunk ends in a NUL" "stats beside threads that allocate" "is_heap_ptr beside threads whose large chunks come and go" "ALL CHECKS PASSED"; do
+for check in "raw words" "heap pointers" "stats move with the collector" "disable holds the trigger" "a string built in a reused chunk ends in a NUL" "stats and is_heap_ptr wait for the runtime lock" "stats beside threads that allocate" "is_heap_ptr beside threads whose large chunks come and go" "ALL CHECKS PASSED"; do
   if ! grep -q "$check" "$WORK/exercise-gc.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1

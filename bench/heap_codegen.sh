@@ -22,9 +22,13 @@
 # checks run before it (which bench/heap_verify.sh's comparison leaves
 # out too), which the pool's threads move by one or two run to run, and
 # the holder's own holders, which a search of what is still live finds
-# or not, are masked and left out;
-# and when the run without it stops at its check's `FAIL:` line, read
-# before any collection. A copy whose loss no verifier sees is listed
+# or not, are masked and left out; the verifier's finding is one sentence
+# whether its check reports it at the local collection or at the unit's
+# death (FINDING, below; the plain `classvar-publish` copy once fell through
+# its local collection to the death's, a backstop whose word changed run to
+# run, #223); and when the run without it stops at its check's `FAIL:` line,
+# read before any collection.
+# A copy whose loss no verifier sees is listed
 # apart (`OWN_ONLY`), with why, and caught by its `FAIL:` line alone.
 # Every copy is caught built `--release` as well: what a check keeps live
 # across a park is the optimiser's to keep or drop, and optimised copies

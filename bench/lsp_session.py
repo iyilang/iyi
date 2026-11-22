@@ -131,7 +131,7 @@ def held_report(record):
     state = "still exists" if os.path.exists(record["path"]) else "is gone"
     lines = [f"  the held FIFO {record['path']} {state}"]
     steps = (("entered", "release entered os.open"), ("opened", "os.open returned"),
-             ("unlinked", "unlinked"), ("wrote", "wrote the newline"), ("closed", "closed"))
+             ("renamed", "renamed away"), ("closed", "closed"), ("unlinked", "unlinked"))
     for key, what in steps:
         at = record.get(key)
         lines.append(f"    {what}: " + (f"{now - at:.1f} s ago" if at is not None else "not reached"))
@@ -1418,12 +1418,30 @@ def nt_pipe(path):
 
 
 def held_open(work, seconds):
-    """A path a macro's `read_file` waits on for *seconds*, then reads to
-    its end: a FIFO on POSIX, which reads as one newline (written a second
-    before the close, see `release`), and a named pipe on Windows, which
-    reads as empty. A compile that reads it lasts as long as the gate says,
-    on any machine. Once let go of, the path is gone, and a later compile of
-    the same text fails at once rather than waiting again."""
+    """A path a macro's `read_file` waits on for *seconds*, then reads
+    as empty: a FIFO on POSIX, a named pipe on Windows. A compile that
+    reads it lasts as long as the gate says, on any machine. Once let
+    go of, the path is gone, and a later compile of the same text
+    fails at once rather than waiting again.
+
+    Answers the path and what the release saw as its writer let go
+    (`letgo`, filled on POSIX): how many names the FIFO had and whether
+    the path was still there. Step 74b holds both.
+
+    The FIFO is renamed away before the writer closes it and unlinked
+    after, so it is never closed unnamed. It was unlinked first, and a
+    reader still on its way out of open(2) when the writer opened,
+    unlinked and closed it was left in read(2) for good, waiting on a
+    writer no path could bring: step 74a's worker, in its macro's
+    `read_file`, no answer in 180 s (darwin CI jobs 135494265207 and
+    137179880168). It is macOS's: a C reader and writer doing nothing
+    else lost the end of file in 36 of 4,800 rounds unlinked first and
+    in none of 4,800 renamed away first (none of 2,400 closed before
+    the unlink, none of 1,200 on Linux); `iyi check` lost it in 4 of
+    1,600 and the session's step in 4 of 820, renamed away in none of
+    800 and 600, with nothing anywhere holding the FIFO but the reader
+    (`lsof +L1`)."""
+    letgo = {}
     if os.name == "nt":
         path = r"\\.\pipe\iyi-lsp-held-%d" % os.getpid()
         kernel, handle = nt_pipe(path)
@@ -1441,32 +1459,23 @@ def held_open(work, seconds):
         LAST["held"] = record
 
         def release():
-            time.sleep(seconds - 1)
-            # Blocks until the reader has opened it, so the reader sees a
-            # writer rather than no file. The unlink follows at once, so a
-            # later compile of the same text fails at once instead of waiting.
+            time.sleep(seconds)
+            # Blocks until the reader has opened it, so the reader sees
+            # the end of the file rather than no file.
             record["entered"] = time.monotonic()
             writer = os.open(path, os.O_WRONLY)
             record["opened"] = time.monotonic()
-            os.unlink(path)
-            record["unlinked"] = time.monotonic()
-            # The reader takes the newline through the data path, then sleeps in
-            # its next read until the close, a second later. macOS can lose the
-            # wakeup of a reader asleep in read(2) when the last writer closes as
-            # the reader goes to sleep: a hold that closed right after its open
-            # stalled 3 times in 916 iterations of step 74a, and standalone FIFO
-            # runs stalled after 46 to 5362 iterations. A close 50 ms after the
-            # reader went to sleep stalled in none of 400 such runs, so the second
-            # here lets the reader sleep before the close comes.
-            try:
-                os.write(writer, b"\n")
-                record["wrote"] = time.monotonic()
-                time.sleep(1)
-            finally:
-                os.close(writer)
+            released = path + ".released"
+            os.rename(path, released)
+            record["renamed"] = time.monotonic()
+            letgo["names"] = os.fstat(writer).st_nlink
+            letgo["path"] = os.path.lexists(path)
+            os.close(writer)
             record["closed"] = time.monotonic()
+            os.unlink(released)
+            record["unlinked"] = time.monotonic()
     threading.Thread(target=release, daemon=True).start()
-    return path
+    return path, letgo
 
 
 def held_verdict_step():
@@ -1484,7 +1493,7 @@ def held_verdict_step():
     h.send("initialize", {"rootUri": file_uri(own), "capabilities": {}})
     h.send("initialized", {}, wait=False)
     held_uri = opened(h, own, "held.iyi", "module held\n\nputs 1\n")
-    spelled = held_open(own, 4).replace("\\", "\\\\")
+    spelled = held_open(own, 4)[0].replace("\\", "\\\\")
     h.send("textDocument/didChange", {"textDocument": {"uri": held_uri, "version": 2}, "contentChanges": [
         {"text": f'module held\n\n{{{{ read_file("{spelled}") }}}}\nputs 1\n'}]}, wait=False)
     # Past the hold, and past the quiet after it: a verdict still owed by
@@ -1506,6 +1515,35 @@ def held_verdict_step():
          first.get("id") != asked,
          "the verdict came before a hover asked after it" if first.get("id") != asked
          else "the hover was answered and the verdict never came")
+
+
+def held_release_step():
+    """74b. The hold 74a's compile reads lets go of its FIFO while the
+    FIFO still has a name, its path already gone, and the one reading
+    it reads to the end. Let go of unnamed - unlinked, then closed - a
+    reader on macOS could miss the end of file and wait for ever
+    (`held_open`), which is how 74a hung; the order is what this step
+    holds, on every POSIX machine and every run, since the loss itself
+    is a race."""
+    name = "the hold lets go of its FIFO still named, its path gone, and the reader reads to the end"
+    if os.name == "nt":
+        print(f"step 74b {name}: unmeasured here, a named pipe has no name on disk to keep", flush=True)
+        return
+    own = tempfile.mkdtemp(prefix="iyi-lsp-letgo")
+    path, letgo = held_open(own, 0.2)
+    got = {}
+
+    def read():
+        with open(path, "rb") as fifo:
+            got["text"] = fifo.read()
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(10)
+    shutil.rmtree(own, ignore_errors=True)
+    step("74b", name,
+         letgo.get("names", 0) >= 1 and letgo.get("path") is False and got.get("text") == b"",
+         f"{letgo.get('names')} name(s) as the writer closed, the path "
+         f"{'gone' if letgo.get('path') is False else 'still there'}, the reader read {got.get('text', '(nothing yet)')!r}")
 
 
 def main():
@@ -4125,6 +4163,7 @@ def main():
     orphan_steps()
     traits_disk_and_completion()
     held_verdict_step()
+    held_release_step()
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has
     # for it rather than an empty result.

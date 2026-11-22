@@ -625,7 +625,7 @@ helper 0 and `bench/release_trigger.iyi` names by round for the others.
 The first three were left to the machine once: the store's missed on
 four-core Windows and three-core darwin runners, the late read's on a
 four-core Windows one, and helper 0's held the tasks there at 287 and 289
-MiB against the watchdog's 256. Every proof is caught in every run now:
+MiB against the watchdog's 256. Before the proofs were forced, each was caught in every run:
 12 of 12 each here held to three, four and twelve cores, and one run on
 each of three four-core Windows runners and a three-core darwin one,
 where `bench/concurrent_mark.sh` and `bench/parallel_mark.sh` passed
@@ -935,7 +935,7 @@ is a few instructions, so the gate also runs the program on a copy of
 the prelude whose slice waits up to 100 us at each kept chunk of a
 kilobyte or more and exits by name if the entry changes under it; with
 the old free put back that copy failed by name in 200 runs of 200, plain
-and release alike.
+and release alike, before the copy was forced; the gate now catches it on one run.
 
 Two more levers on that garbage were tried in the second cycle and
 are not in the tree. A prefetch of a shaded object's line at its push:

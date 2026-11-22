@@ -67,9 +67,18 @@ else
     return 1
   }
   force_owned() {
-    # end_process ends the owned process by its own pid on both platforms. On
-    # Windows that is one taskkill of one native pid. A stuck taskkill is bounded
-    # by the job timeout, as for every other end_process caller.
+    if [ "$END_PROCESS_WINDOWS" = yes ]; then
+      # Windows: one taskkill of the owned native pid, from this shell. The
+      # setting is given for this command alone, so /F and /PID reach taskkill as
+      # written whatever the ambient MSYS2_ARG_CONV_EXCL is. end_process is not
+      # used here: its taskkill //F //PID needs MSYS argument conversion, which an
+      # ambient MSYS2_ARG_CONV_EXCL can turn off (bench/end_process.sh). timeout
+      # bounds a taskkill that runs past 10 s; a normal run never reaches that bound.
+      if { read -r native <"/proc/$OWNED_PID/winpid"; } 2>/dev/null; then
+        MSYS2_ARG_CONV_EXCL="*" timeout --foreground -k 1 10 taskkill /F /PID "$native" >/dev/null 2>&1 || :
+      fi
+      return 0
+    fi
     end_process "$OWNED_PID" KILL || :
   }
   reap_owned() {

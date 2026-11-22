@@ -381,7 +381,7 @@ def main():
     jobs = parse_jobs(WORKFLOW.read_text(encoding="utf-8"))
     missing = [name for name in FAST + sorted(set().union(*HALVES)) if name not in jobs]
     if missing:
-        sys.exit(f"ci_plan: FAST names jobs the workflow does not have: {', '.join(missing)}")
+        sys.exit(f"ci_plan: FAST or HALVES names jobs the workflow does not have: {', '.join(missing)}")
     missing = [name for name in SELFHOST if name not in jobs]
     if missing:
         sys.exit(f"ci_plan: SELFHOST names jobs the workflow does not have: {', '.join(missing)}")

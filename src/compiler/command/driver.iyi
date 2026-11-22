@@ -175,7 +175,7 @@ pub class CommandDriver
   # read a file outside its own directory at compile time (upstream #189), so
   # they are literals here. bench/doc_numbers.py fails when either differs from
   # its file.
-  IYI_VERSION  = "0.21.0"
+  IYI_VERSION  = "0.22.0"
   BASE_VERSION = "1.22.0-dev"
 
   # Match the hosted target configuration without linking LLVM: the platform

@@ -183,12 +183,30 @@ grep -E '^(stray|small|moves|pause|large|wake|share):' answers.txt | sed 's/^/  
 # second stops measured 13 to 45.
 step "the machine alone: a thread per core reading the clock, no collector"
 cat > machine.iyi <<'IYI'
-@[Unsafe("each thread writes its longest clock gap into its own word of a page mapped with __iyi_mmap, so no allocation or collector touches the measurement")]
+@[Unsafe("each thread writes its longest clock gap into its own word of a native-mapped page, so no allocation or collector touches the measurement")]
 class Gaps
   @@page : UInt64 = 0_u64
 
-  def self.setup : Nil
-    @@page = __iyi_mmap(4096_u64).address
+  def self.setup(length : UInt64) : Nil
+    page = 0_u64
+    failed = false
+    {% if flag?(:win32) %}
+      page = LibC.VirtualAlloc(nil, length, 0x3000_i32, 4_i32).address
+      failed = page == 0_u64
+    {% elsif flag?(:darwin) %}
+      page = LibC.mmap(Pointer(Void).new(0_u64), length, 3, 0x1002, -1, 0_i64).address
+      failed = page == 0xFFFFFFFFFFFFFFFF_u64
+    {% else %}
+      mapped = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, length.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
+      failed = mapped < 0_i64 && mapped >= -4095_i64
+      page = mapped.unsafe_to_u64
+    {% end %}
+    if failed
+      message = "FAIL: machine setup: the gap page could not be mapped\n"
+      __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+      __iyi_exit(76)
+    end
+    @@page = page
   end
 
   def self.slot(i : Int32) : Pointer(UInt64)
@@ -207,7 +225,7 @@ def watch(index : Int32, deadline : UInt64) : Nil
   Gaps.slot(index).value = longest
 end
 
-Gaps.setup
+Gaps.setup(Program.args.size == 1 && Program.args[0] == "unmappable" ? 0x4000000000000000_u64 : 4096_u64)
 count = IyiThread.core_count.to_i32
 deadline = IyiMark.now_ns + 1000000000_u64
 threads = [] of IyiThread
@@ -238,6 +256,13 @@ code=$?
 if [ "$code" -ne 0 ]; then cat machine.txt; fail_for_status "$code" machine.txt; fi
 if ! grep -q '^machine:' machine.txt; then echo "FAIL: machine setup: the measurement did not report its result"; cat machine.txt; exit 76; fi
 grep '^machine:' machine.txt | sed 's/^/  /'
+step "control: an unmappable machine-measurement page is a setup failure"
+timeout -k 5 60 ./machine unmappable > machine-unmappable.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: machine setup: the gap page could not be mapped" machine-unmappable.txt; then
+  echo "the machine page failure was not named as setup (exit $code):"; cat machine-unmappable.txt; fail_for_status "$code" machine-unmappable.txt
+fi
+printf '  exits 76 at "%s"\n' "FAIL: machine setup: the gap page could not be mapped"
 
 # Report the first collection beside busy threads with and without helpers.
 # The forced helper-hold proof below decides the wait defect; timings are
@@ -658,8 +683,9 @@ awk 'function forced() {
     print ""
     mark_declared++
   }
-  /^      def self\.free_unswept\(/ { print; print "        note_free_waiting(head)"; noted++; next }
-  /^          word = IyiHeap\.read8\(byte\)$/ { print
+  /^      def self\.free_unswept\(arena : UInt64, head : UInt64, slot : UInt64, table : Pointer\(UInt64\), index : Int32\) : Nil$/ { print; print "        note_free_waiting(head)"; noted++; next }
+  /^      def self\.sweep_slice\(arena : UInt64, span : UInt64\) : UInt64$/ { in_sweep = 1; sweep_methods++ }
+  in_sweep && /^          word = IyiHeap\.read8\(byte\)$/ { print
     print "          if chunk >= 1024_u64 && word & IyiHeap::EPOCH_FLAG != epoch && word & IyiHeap::FREE_FLAG == 0 && IyiHeap.read8(mark) != WHITE"
     print "            if IyiHeap.look_armed_in?(arena) && IyiHeap.forced_look == 0_u64"
     print "              unless IyiHeap.look_on_helper?"
@@ -683,7 +709,8 @@ awk 'function forced() {
     print "            end"
     print "          end"
     found++; next }
-  { print } END { if (declared != 1 || mark_declared != 1 || noted != 1 || found != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > widened/iyi/prelude.iyi || { echo "the sweep's look or the free this step arms is missing or ambiguous"; exit 76; }
+  in_sweep && /^      end$/ { in_sweep = 0 }
+  { print } END { if (declared != 1 || mark_declared != 1 || noted != 1 || sweep_methods != 1 || found != 1 || in_sweep) exit 3 }' "$REPO/src/iyi/prelude.iyi" > widened/iyi/prelude.iyi || { echo "the sweep's look or the free this step arms is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-widened > build-widened.log 2>&1; then
   fail_build build-widened.log
 fi
@@ -707,8 +734,10 @@ if [ "$code" -ne 0 ] || ! grep -qx "lost 0" armed.txt; then
 fi
 echo "  the hook alone, armed, exits 0: $(grep -m1 '^lost' armed.txt)"
 step "control: a sweep look outside the aged set is a setup failure"
-awk '$0 == "  if first < 0" { print "  first = -1"; found++ }
-  { print } END { if (found != 1) exit 3 }' freed.iyi > freed-premise.iyi || { echo "the aged-set premise is missing or ambiguous"; exit 76; }
+awk '$0 == "  look = IyiHeap.forced_look" { in_selection = 1; starts++ }
+  in_selection && $0 == "  if first < 0" { print "  first = -1"; found++ }
+  in_selection && $0 == "  lost += free_aged(aged, generation, first)" { in_selection = 0; ends++ }
+  { print } END { if (starts != 1 || ends != 1 || found != 1 || in_selection) exit 3 }' freed.iyi > freed-premise.iyi || { echo "the aged-set premise is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build freed-premise.iyi -Dfreed_force -o freed-premise > build-freed-premise.log 2>&1; then
   fail_build build-freed-premise.log
 fi
@@ -722,7 +751,10 @@ printf '  exits 76 at "%s"\n' "FAIL: freed: the sweep looked at a chunk the last
 step "failure proof: a chunk the sweep has not reached, freed with no lock, is freed inside the sweep's look"
 mkdir -p unlocked/iyi
 cp "$REPO"/src/iyi/*.iyi unlocked/iyi/
-awk '{ if (sub(/^            free_unswept\(arena, head, slot, table, index\)$/, "            list_freed(arena, head, slot, table, index)")) found++; print } END { if (found != 1) exit 3 }' \
+awk '/^      def self\.free\(pointer : Void\*\) : Nil$/ { in_free = 1; methods++ }
+  in_free && /^            free_unswept\(arena, head, slot, table, index\)$/ { print "            list_freed(arena, head, slot, table, index)"; found++; next }
+  in_free && /^      end$/ { in_free = 0 }
+  { print } END { if (methods != 1 || found != 1 || in_free) exit 3 }' \
   widened/iyi/prelude.iyi > unlocked/iyi/prelude.iyi || { echo "the free this proof puts back is not in the prelude any more"; exit 76; }
 if ! IYI_PATH="$WORK/unlocked${PSEP}$REPO/src" "$IYI" build freed.iyi -Dfreed_force -o freed-unlocked > build-unlocked.log 2>&1; then
   fail_build build-unlocked.log
@@ -757,8 +789,8 @@ hold_moves() {
       print "      end"
       print ""
     }
-    /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
-    /^            IyiHeap\.write64\(w \+ W_BLACK, drain\(w\)\)$/ {
+    /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++; in_helper = 1 }
+    in_helper && /^            IyiHeap\.write64\(w \+ W_BLACK, drain\(w\)\)$/ {
       print "            move_limit = IyiMark.now_ns &+ 10000000000_u64"
       print "            while forced_move_hold?"
       print "              if IyiMark.now_ns >= move_limit"
@@ -771,7 +803,8 @@ hold_moves() {
       print "            end"
       print; held++; next
     }
-    { print } END { if (declared != 1 || held != 1) exit 3 }' "$1" > "$2" || { echo "the helper's drain this proof holds is missing or ambiguous"; exit 76; }
+    in_helper && /^      end$/ { in_helper = 0 }
+    { print } END { if (declared != 1 || held != 1 || in_helper) exit 3 }' "$1" > "$2" || { echo "the helper's drain this proof holds is missing or ambiguous"; exit 76; }
 }
 
 step "the moves beside the program, forced: every round's payload white at its move"
@@ -791,8 +824,10 @@ echo "  the hook alone, exits 0: $(grep -m1 '^moves:' moves-held.txt | cut -c1-8
 step "failure proof: a barrier that shades nothing loses the moved payload"
 mkdir -p patched/iyi
 cp "$REPO"/src/iyi/*.iyi patched/iyi/
-awk '{ if (sub(/return unless Pointer\(Atomic\(UInt8\)\)\.new\(mark\)\.value\.compare_and_set\(WHITE\.unsafe_to_u8, GRAY\.unsafe_to_u8\)\[1\]/, "return # the barrier shades nothing")) found = 1; print } END { if (!found) exit 3 }' "$REPO/src/iyi/prelude.iyi" > patched/iyi/prelude.iyi.shade || { echo "the barrier's shading this proof removes is not in the prelude any more"; exit 76; }
-cmp -s patched/iyi/prelude.iyi.shade "$REPO/src/iyi/prelude.iyi" && { echo "FAIL: gate setup: the barrier-shading copy was unchanged"; exit 76; }
+awk '/^      def self\.barrier_word\(word : UInt64\) : Nil$/ { in_barrier_word = 1; methods++ }
+  in_barrier_word && /^        return unless Pointer\(Atomic\(UInt8\)\)\.new\(mark\)\.value\.compare_and_set\(WHITE\.unsafe_to_u8, GRAY\.unsafe_to_u8\)\[1\]$/ { print "        return # the barrier shades nothing"; found++; next }
+  in_barrier_word && /^      end$/ { in_barrier_word = 0 }
+  { print } END { if (methods != 1 || found != 1 || in_barrier_word) exit 3 }' "$REPO/src/iyi/prelude.iyi" > patched/iyi/prelude.iyi.shade || { echo "the barrier shading anchor is missing or ambiguous"; exit 76; }
 hold_moves patched/iyi/prelude.iyi.shade patched/iyi/prelude.iyi
 if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build --release -Dmove_force "$REPO/bench/concurrent_mark.iyi" -o nobarrier > build-nobarrier.log 2>&1; then
   fail_build build-nobarrier.log
@@ -807,8 +842,29 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 'the barrier lost it' nobarrier.txt)"
 step "failure proof: a barrier that shades after its mark ended loses what the holder held"
 mkdir -p stray/iyi
 cp "$REPO"/src/iyi/*.iyi stray/iyi/
-awk '{ if ($0 ~ /^        return if LibIyiGCTable\.__iyi_marking == 0_u8$/ && prev ~ /def self\.barrier\(/) { prev = $0; next } prev = $0; print }' "$REPO/src/iyi/prelude.iyi" > stray/iyi/prelude.iyi.stray
-cmp -s stray/iyi/prelude.iyi.stray "$REPO/src/iyi/prelude.iyi" && { echo "FAIL: gate setup: the stray-barrier copy was unchanged"; exit 76; }
+make_stray_copy() {
+  awk '$0 == "      def self.barrier(address : UInt64, words : UInt64) : Nil" { in_barrier = 1; methods++ }
+    in_barrier && $0 == "        return if LibIyiGCTable.__iyi_marking == 0_u8" { guards++; next }
+    in_barrier && $0 == "      end" { in_barrier = 0 }
+    { print } END { if (methods != 1 || guards != 1 || in_barrier) exit 3 }' "$1" > "$2" || {
+      echo "FAIL: gate setup: the stray barrier method or guard is missing or ambiguous"
+      return 76
+    }
+}
+step "controls: the stray-barrier splice rejects missing and duplicate guards"
+printf '%s\n' '      def self.barrier(address : UInt64, words : UInt64) : Nil' '      end' > stray-missing.iyi
+printf '%s\n' '      def self.barrier(address : UInt64, words : UInt64) : Nil' \
+  '        return if LibIyiGCTable.__iyi_marking == 0_u8' \
+  '        return if LibIyiGCTable.__iyi_marking == 0_u8' '      end' > stray-duplicate.iyi
+for shape in missing duplicate; do
+  make_stray_copy "stray-$shape.iyi" "stray-$shape.out" > "stray-$shape.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: gate setup: the stray barrier method or guard is missing or ambiguous" "stray-$shape.txt"; then
+    echo "the stray splice accepted $shape guards (exit $code):"; cat "stray-$shape.txt"; fail_for_status "$code" "stray-$shape.txt"
+  fi
+  printf '  exits 76 at "%s"\n' "FAIL: gate setup: the stray barrier method or guard is missing or ambiguous"
+done
+make_stray_copy "$REPO/src/iyi/prelude.iyi" stray/iyi/prelude.iyi.stray || exit "$?"
 hold_moves stray/iyi/prelude.iyi.stray stray/iyi/prelude.iyi
 if ! IYI_PATH="$WORK/stray${PSEP}$REPO/src" "$IYI" build --release -Dmove_force "$REPO/bench/concurrent_mark.iyi" -o straybarrier > build-stray.log 2>&1; then
   fail_build build-stray.log
@@ -848,8 +904,8 @@ awk 'function forced() {
     print "      end"
     print ""
   }
-  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
-  /^              seen = finish_concurrent$/ {
+  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++; in_helper = 1 }
+  in_helper && /^              seen = finish_concurrent$/ {
     print "              hold_limit = IyiMark.now_ns &+ 10000000000_u64"
     print "              while IyiMark.forced_hold?"
     print "                if IyiMark.now_ns >= hold_limit"
@@ -860,7 +916,8 @@ awk 'function forced() {
     print "                spin_pause"
     print "              end"
     hooked++ }
-  { print } END { if (declared != 1 || hooked != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held/iyi/prelude.iyi || { echo "the closer's finish or helper_main is missing or ambiguous"; exit 76; }
+  in_helper && /^      end$/ { in_helper = 0 }
+  { print } END { if (declared != 1 || hooked != 1 || in_helper) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held/iyi/prelude.iyi || { echo "the closer's finish or helper_main is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force "$REPO/bench/concurrent_mark.iyi" -o held-run > build-held.log 2>&1; then
   fail_build build-held.log
 fi
@@ -873,50 +930,59 @@ echo "  the hook alone, exits 0: $(grep -m1 '^large: 8 of 8' held.txt)"
 # Separate copies keep the move and large-block holds independent. Each
 # invocation forces one named premise false and requires its exact sentence.
 step "controls: benchmark premises fail as setup, not as mutant catches"
-awk '$0 == "  index = 0" && ++indexes == 1 {
-    print "  premise = Program.args.size > 0 ? Program.args[0] : \"\""; init++
+awk '/^  def busy_until_stopped : Nil$/ { in_busy = 1; busy_methods++ }
+  in_busy && /^  end$/ { in_busy = 0; in_main = 1; expect_index = 1; print; next }
+  in_main && expect_index && /^[[:space:]]*$/ { print; next }
+  in_main && expect_index && $0 != "  index = 0" { bad_index++ }
+  in_main && $0 == "  index = 0" {
+    indexes++
+    if (expect_index) { print "  premise = Program.args.size > 0 ? Program.args[0] : \"\""; init++; expect_index = 0 }
   }
-  $0 == "  small_live = IyiMark.bytes_marked" {
+  in_main && $0 == "  small_live = IyiMark.bytes_marked" {
     print; print "  small_live = 2097153_u64 if premise == \"small-live\""; small_live++; next
   }
-  $0 == "  small_beside = IyiMark.concurrent_collections - small_beside" {
+  in_main && $0 == "  small_beside = IyiMark.concurrent_collections - small_beside" {
     print; print "  small_collections = 0_u64 if premise == \"small-none\""; small_none++; next
   }
-  $0 == "  while round < 24" {
+  in_main && $0 == "  while round < 24" {
     print "  while round < (premise == \"move-none\" ? 0 : 24)"; move_none++; next
   }
-  /^    marking = marking && IyiMark\.marking\?/ {
+  in_main && $0 == "    marking = marking && IyiMark.marking? && IyiMark.colour(holder.object_id.to_u64) == IyiMark::BLACK && payload_white" {
     print; print "    marking = false if premise == \"move-white\""; move_white++; next
   }
-  $0 == "  concurrent = IyiMark.concurrent_collections - concurrent_before" {
+  in_main && $0 == "  concurrent = IyiMark.concurrent_collections - concurrent_before" {
     print; print "  concurrent = 0_u64 if premise == \"concurrent-none\""; concurrent++; next
   }
-  $0 == "  large_rounds = 8" {
+  in_main && $0 == "  large_rounds = 8" {
     print; print "  large_rounds = 0 if premise == \"large-count\""; large_rounds++; next
   }
-  $0 == "    if marking && IyiMark.marking?" {
+  in_main && $0 == "    if marking && IyiMark.marking?" {
     print "    marking = false if premise == \"large-mark\""; large_mark++
   }
-  /setup_fail\("large: #\{large_under_mark\}/ {
+  in_main && /setup_fail\("large: #\{large_under_mark\}/ {
     print "    large_under_mark = 0 if premise == \"large-count\""; large_count++
   }
-  $0 == "    asked_helpers = IyiMark.beside_helpers" {
+  in_main && $0 == "    asked_helpers = IyiMark.beside_helpers" {
     print; print "    asked_helpers = 0_u64 if premise == \"boost-none\""; boost_none++; next
   }
-  /setup_fail\("wake boost: the pool started/ {
-    sub(/if IyiWorkers\.started\?$/, "if IyiWorkers.started? || premise == \"boost-pool\""); boost_pool++
+  in_main && /setup_fail\("wake boost: the pool started/ {
+    boost_pool += gsub(/if IyiWorkers\.started\?$/, "if IyiWorkers.started? || premise == \"boost-pool\"")
   }
-  $0 == "  cores = IyiThread.core_count" {
+  in_main && $0 == "  cores = IyiThread.core_count" {
     print; print "  cores = 2_u64 if premise == \"share-cores\" || premise == \"pool-cores\""; cores++; next
   }
-  /setup_fail\("share: no mark ran/ { print "    marked = false if premise == \"share-mark\""; share++ }
-  /setup_fail\("idle pool: no mark ran/ { print "    marked = false if premise == \"idle-mark\""; idle++ }
-  /setup_fail\("busy pool: no mark ran/ { print "    marked = false if premise == \"busy-mark\""; busy++ }
-  /setup_fail\("the share proof needs three cores/ {
-    sub(/unless /, "unless premise == \"pool-cores\" || "); share_cores++
+  in_main && $0 == "    Busy.setup(4096_u64)" {
+    print "    Busy.setup(premise == \"busy-page\" ? 0x4000000000000000_u64 : 4096_u64)"; busy_page++; next
   }
+  in_main && /setup_fail\("share: no mark ran/ { print "    marked = false if premise == \"share-mark\""; share++ }
+  in_main && /setup_fail\("idle pool: no mark ran/ { print "    marked = false if premise == \"idle-mark\""; idle++ }
+  in_main && /setup_fail\("busy pool: no mark ran/ { print "    marked = false if premise == \"busy-mark\""; busy++ }
+  in_main && /setup_fail\("the share proof needs three cores/ {
+    share_cores += gsub(/unless /, "unless premise == \"pool-cores\" || ")
+  }
+  in_main && $0 == "  puts \"concurrent mark: every property held\"" { in_main = 0; ends++ }
   { print }
-  END { if (init != 1 || indexes != 2 || small_live != 1 || small_none != 1 || move_none != 1 || move_white != 1 || concurrent != 1 || large_rounds != 1 || large_mark != 1 || large_count != 1 || boost_none != 1 || boost_pool != 1 || cores != 1 || share != 1 || idle != 1 || busy != 1 || share_cores != 1) exit 3 }' \
+  END { if (busy_methods != 1 || ends != 1 || in_main || expect_index || bad_index || init != 1 || indexes != 2 || small_live != 1 || small_none != 1 || move_none != 1 || move_white != 1 || concurrent != 1 || large_rounds != 1 || large_mark != 1 || large_count != 1 || boost_none != 1 || boost_pool != 1 || cores != 1 || busy_page != 1 || share != 1 || idle != 1 || busy != 1 || share_cores != 1) exit 3 }' \
   "$REPO/bench/concurrent_mark.iyi" > benchmark-premises.iyi || { echo "a benchmark premise anchor is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/moves-held${PSEP}$REPO/src" "$IYI" build --release -Dmove_force benchmark-premises.iyi -o move-premises-run > build-move-premises.log 2>&1; then
   fail_build build-move-premises.log
@@ -924,7 +990,7 @@ fi
 if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force benchmark-premises.iyi -o large-premises-run > build-large-premises.log 2>&1; then
   fail_build build-large-premises.log
 fi
-premises="small-live small-none move-white move-none concurrent-none large-mark large-count share-mark idle-mark busy-mark share-cores pool-cores"
+premises="small-live small-none move-white move-none concurrent-none large-mark large-count busy-page share-mark idle-mark busy-mark share-cores pool-cores"
 if [ "$PSEP" = ";" ]; then premises="$premises boost-pool boost-none"; fi
 for premise in $premises; do
   case "$premise" in
@@ -937,6 +1003,7 @@ for premise in $premises; do
     large-count) expected="FAIL: large: 0 of 0 held rounds reached the check, not 8" ;;
     boost-pool) expected="FAIL: wake boost: the pool started before the count, so every thread has the boost off" ;;
     boost-none) expected="FAIL: wake boost: no mark beside the program asked for helpers" ;;
+    busy-page) expected="FAIL: share: the busy threads flag page could not be mapped" ;;
     share-mark) expected="FAIL: share: no mark ran beside the busy threads in 8 tries" ;;
     idle-mark) expected="FAIL: idle pool: no mark ran beside the idle pool in 8 tries" ;;
     busy-mark) expected="FAIL: busy pool: no mark ran beside the busy pool in 8 tries" ;;
@@ -957,9 +1024,11 @@ done
 mkdir -p unmapped/iyi
 cp held/iyi/*.iyi unmapped/iyi/
 awk '
-  /^            free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8 && partition_free_large\(pointer\.address - HEADER - LARGE_HEAD\)$/ { print "            free_large(pointer.address - HEADER) if partition_free_large(pointer.address - HEADER - LARGE_HEAD)"; partitioned++; next }
-  /^            free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8$/ { print "            free_large(pointer.address - HEADER)"; shared++; next }
-  { print } END { if (partitioned != 1 || shared != 1) exit 3 }' \
+  /^      def self\.free\(pointer : Void\*\) : Nil$/ { in_free = 1; methods++ }
+  in_free && /^            free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8 && partition_free_large\(pointer\.address - HEADER - LARGE_HEAD\)$/ { print "            free_large(pointer.address - HEADER) if partition_free_large(pointer.address - HEADER - LARGE_HEAD)"; partitioned++; next }
+  in_free && /^            free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8$/ { print "            free_large(pointer.address - HEADER)"; shared++; next }
+  in_free && /^      end$/ { in_free = 0 }
+  { print } END { if (methods != 1 || partitioned != 1 || shared != 1 || in_free) exit 3 }' \
   held/iyi/prelude.iyi > unmapped/iyi/prelude.iyi || { echo "the shared or partitioned guard is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/unmapped${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force "$REPO/bench/concurrent_mark.iyi" -o unmapped-run > build-unmapped.log 2>&1; then
   fail_build build-unmapped.log
@@ -974,7 +1043,10 @@ printf '  exits 1 at "%s"\n' "$(grep -Fx 'FAIL: large: a block outgrown under a 
 step "failure proof: a small live set given the thousand-object bound goes beside the program"
 mkdir -p thousand/iyi
 cp "$REPO"/src/iyi/*.iyi thousand/iyi/
-awk '{ if (sub(/drain_bounded\(w, IyiStat\.get\(IyiStat::KEPT\) < STW_MARK_SMALL \? STW_MARK_SMALL : STW_MARK_BOUND\)/, "drain_bounded(w, STW_MARK_BOUND)")) found++; print } END { if (found != 1) exit 3 }' \
+awk '/^        def self\.start_concurrent : Bool$/ { in_start = 1; methods++ }
+  in_start && /drain_bounded\(w, IyiStat\.get\(IyiStat::KEPT\) < STW_MARK_SMALL \? STW_MARK_SMALL : STW_MARK_BOUND\)/ { found += gsub(/drain_bounded\(w, IyiStat\.get\(IyiStat::KEPT\) < STW_MARK_SMALL \? STW_MARK_SMALL : STW_MARK_BOUND\)/, "drain_bounded(w, STW_MARK_BOUND)") }
+  in_start && /^        end$/ { in_start = 0 }
+  { print } END { if (methods != 1 || found != 1 || in_start) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > thousand/iyi/prelude.iyi || { echo "the bound this proof replaces is not in the prelude any more"; exit 76; }
 if ! IYI_PATH="$WORK/thousand${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o thousand-run > build-thousand.log 2>&1; then
   fail_build build-thousand.log
@@ -1020,6 +1092,14 @@ done
 # until that acknowledgement, with a deadline used only to name a hang.
 cat > forced.iyi <<'IYI'
 module forced
+{% if flag?(:watch_libc_force) %}
+  @[Unsafe("one libc call selects the libc thread-creation path for this copy")]
+  @[Link("c")]
+  lib LibWatchC
+    fun getpid : Int32
+  end
+  LibWatchC.getpid
+{% end %}
 
 class Node
   getter value : Int64
@@ -1046,6 +1126,8 @@ Program.args.each do |argument|
     name = parts[1]
   elsif parts.size == 2 && parts[0] == "helpers"
     IyiMark.workers = parts[1].to_i.to_u64
+  elsif IyiMark.forced_setup_option(parts)
+    nil
   else
     print "FAIL: forced: no option #{argument}\n"
     __iyi_exit(76)
@@ -1133,15 +1215,21 @@ while node
   count += 1
   node = node.next_node
 end
-if count != 200000
-  print "FAIL: #{name}: the chain held #{count} of its 200000 nodes after the acknowledgement\n"
-  __iyi_exit(1)
-end
+{% if flag?(:watch_verdict_force) %}
+  IyiMark.forced_trip
+  IyiMark.forced_wait_verdict_claim
+  count = 0
+  IyiMark.forced_note_verdict_attempt
+{% end %}
 {% if flag?(:watch_race_force) %}
   IyiMark.forced_trip
   IyiMark.forced_wait_race_sample
 {% end %}
 IyiMark.forced_phase(5_u64)
+if count != 200000
+  print "FAIL: #{name}: the chain held #{count} of its 200000 nodes after the acknowledgement\n"
+  __iyi_exit(1)
+end
 {% if flag?(:watch_race_force) %}
   IyiMark.forced_wait_race_loss
   puts "watchdog: completion won after the watchdog sampled the pending phase"
@@ -1149,7 +1237,8 @@ IyiMark.forced_phase(5_u64)
 puts "forced: #{name} acknowledged"
 IYI
 add_forced_ack() {
-  awk '/^      def self\.helper_main\(seen : UInt64\) : Nil$/ {
+  awk '/^    class IyiMark$/ { in_mark = 1; mark_classes++ }
+    in_mark && /^      def self\.helper_main\(seen : UInt64\) : Nil$/ {
       print "      @[UnsafeReach(\"copy-only: forced fixture acknowledgement\")]"
       print "      @@forced_ack : UInt64 = 0_u64"
       print "      def self.forced_ack : Nil"
@@ -1163,7 +1252,7 @@ add_forced_ack() {
       print "      @[UnsafeReach(\"copy-only: stopped-world control arm\")]"
       print "      @@forced_stop_armed : UInt64 = 0_u64"
       print "      def self.forced_watch(deadline : UInt64, setup : String, ready : String, acked : String, stopped : String, readback : String) : Nil"
-      print "        page = __iyi_mmap(4096_u64).address"
+      print "        page = forced_map(4096_u64, 1_u64)"
       print "        IyiHeap.write64(page + 16_u64, deadline)"
       print "        forced_slot(page, 0_u64, setup)"
       print "        forced_slot(page, 1_u64, ready)"
@@ -1171,7 +1260,93 @@ add_forced_ack() {
       print "        forced_slot(page, 3_u64, stopped)"
       print "        forced_slot(page, 4_u64, readback)"
       print "        @@forced_watch = page"
-      print "        IyiThread.start_helper(forced_watch_entry, page)"
+      print "        IyiThread.forced_start_helper(forced_watch_entry, page)"
+      print "        forced_setup_checked"
+      print "      end"
+      print "      {% if flag?(:watch_setup_force) %}"
+      print "        @[UnsafeReach(\"copy-only: watchdog setup failure selector\")]"
+      print "        @@forced_fail : UInt64 = 0_u64"
+      print "        @[UnsafeReach(\"copy-only: watchdog setup trip\")]"
+      print "        @@forced_setup_trip : UInt64 = 0_u64"
+      print "      {% end %}"
+      print "      def self.forced_setup_option(parts : Array(String)) : Bool"
+      print "        {% if flag?(:watch_setup_force) %}"
+      print "          return false unless parts.size == 2"
+      print "          if parts[0] == \"trip\" && parts[1] == \"setup\""
+      print "            @@forced_setup_trip = 1_u64"
+      print "            return true"
+      print "          end"
+      print "          return false unless parts[0] == \"fail\""
+      print "          step = 0_u64"
+      print "          step = 1_u64 if parts[1] == \"page\""
+      print "          step = 2_u64 if parts[1] == \"stack\""
+      print "          step = 3_u64 if parts[1] == \"scratch\""
+      print "          step = 4_u64 if parts[1] == \"tls\""
+      print "          step = 5_u64 if parts[1] == \"clone\""
+      print "          step = 6_u64 if parts[1] == \"libc\""
+      print "          step = 7_u64 if parts[1] == \"thread\""
+      print "          step = 8_u64 if parts[1] == \"tls-image\""
+      print "          return false if step == 0_u64"
+      print "          @@forced_fail = step"
+      print "          true"
+      print "        {% else %}"
+      print "          false"
+      print "        {% end %}"
+      print "      end"
+      print "      def self.forced_injected?(step : UInt64) : Bool"
+      print "        {% if flag?(:watch_setup_force) %}"
+      print "          @@forced_fail == step"
+      print "        {% else %}"
+      print "          false"
+      print "        {% end %}"
+      print "      end"
+      print "      # The platform map without the runtime allocator fatal exit."
+      print "      def self.forced_map(length : UInt64, step : UInt64) : UInt64"
+      print "        bytes = forced_injected?(step) ? 0x4000000000000000_u64 : length"
+      print "        {% if flag?(:darwin) %}"
+      print "          page = LibC.mmap(Pointer(Void).new(0_u64), bytes, 3, 0x1002, -1, 0_i64).address"
+      print "          forced_setup_failed(step) if page == 0xFFFFFFFFFFFFFFFF_u64"
+      print "          page"
+      print "        {% elsif flag?(:win32) %}"
+      print "          page = LibC.VirtualAlloc(nil, bytes, 0x3000_i32, 4_i32).address"
+      print "          forced_setup_failed(step) if page == 0_u64"
+      print "          page"
+      print "        {% else %}"
+      print "          result = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, bytes.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)"
+      print "          forced_setup_failed(step) if result < 0 && result >= -4095"
+      print "          result.to_u64"
+      print "        {% end %}"
+      print "      end"
+      print "      def self.forced_setup_failed(step : UInt64) : NoReturn"
+      print "        message = \"FAIL: watchdog setup: the watchdog page could not be mapped\\n\""
+      print "        message = \"FAIL: watchdog setup: the watchdog stack could not be mapped\\n\" if step == 2_u64"
+      print "        message = \"FAIL: watchdog setup: the watchdog tid scratch page could not be mapped\\n\" if step == 3_u64"
+      print "        message = \"FAIL: watchdog setup: the watchdog TLS block could not be mapped\\n\" if step == 4_u64"
+      print "        message = \"FAIL: watchdog setup: clone could not start the watchdog\\n\" if step == 5_u64"
+      print "        message = \"FAIL: watchdog setup: libc could not start the watchdog\\n\" if step == 6_u64"
+      print "        message = \"FAIL: watchdog setup: the executable has no TLS image\\n\" if step == 8_u64"
+      print "        {% if flag?(:win32) %}"
+      print "          message = \"FAIL: watchdog setup: CreateThread could not start the watchdog\\n\" if step == 7_u64"
+      print "        {% else %}"
+      print "          message = \"FAIL: watchdog setup: pthread_create could not start the watchdog\\n\" if step == 7_u64"
+      print "        {% end %}"
+      print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "        forced_exit76"
+      print "      end"
+      print "      def self.forced_setup_checked : Nil"
+      print "        {% if flag?(:watch_setup_force) %}"
+      print "          if @@forced_fail != 0_u64"
+      print "            message = \"FAIL: watchdog setup: the requested failure is not on this launch path\\n\""
+      print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "            forced_exit76"
+      print "          end"
+      print "          if @@forced_setup_trip != 0_u64"
+      print "            forced_trip"
+      print "            while true"
+      print "              IyiThread.yield_cpu"
+      print "            end"
+      print "          end"
+      print "        {% end %}"
       print "      end"
       print "      def self.forced_slot(page : UInt64, phase : UInt64, text : String) : Nil"
       print "        if text.bytesize > 504"
@@ -1226,6 +1401,22 @@ add_forced_ack() {
       print "              {% end %}"
       print "              next"
       print "            end"
+      print "            {% if flag?(:watch_verdict_force) %}"
+      print "              if phase == 4_u64"
+      print "                Pointer(Atomic(UInt64)).new(page + 40_u64).value.set(1_u64)"
+      print "                limit = now_ns &+ 10000000000_u64"
+      print "                while Pointer(Atomic(UInt64)).new(page + 48_u64).value.get == 0_u64"
+      print "                  if now_ns >= limit"
+      print "                    message = \"FAIL: watchdog: the wrong-verdict control did not reach arbitration\\n\""
+      print "                    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "                    forced_exit76"
+      print "                  end"
+      print "                  IyiThread.yield_cpu"
+      print "                end"
+      print "                message = \"watchdog: timeout claimed before the wrong readback verdict\\n\""
+      print "                __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "              end"
+      print "            {% end %}"
       print "            slot = page + 512_u64 * (phase + 1_u64)"
       print "            __iyi_write(2, Pointer(Void).new(slot + 8_u64), IyiHeap.read64(slot))"
       print "            forced_exit76"
@@ -1249,12 +1440,18 @@ add_forced_ack() {
       print "      def self.forced_trip : Nil"
       print "        Pointer(Atomic(UInt64)).new(@@forced_watch + 8_u64).value.set(1_u64)"
       print "      end"
-      print "      {% if flag?(:watch_race_force) %}"
+      print "      {% if flag?(:watch_race_force) || flag?(:watch_verdict_force) %}"
       print "        def self.forced_wait_race_sample : Nil"
       print "          forced_wait_race_word(24_u64, \"FAIL: watchdog: the race control did not sample the pending phase\\n\")"
       print "        end"
       print "        def self.forced_wait_race_loss : Nil"
       print "          forced_wait_race_word(32_u64, \"FAIL: watchdog: the race control did not observe a lost claim\\n\")"
+      print "        end"
+      print "        def self.forced_wait_verdict_claim : Nil"
+      print "          forced_wait_race_word(40_u64, \"FAIL: watchdog: the timeout did not claim the readback phase\\n\")"
+      print "        end"
+      print "        def self.forced_note_verdict_attempt : Nil"
+      print "          Pointer(Atomic(UInt64)).new(@@forced_watch + 48_u64).value.set(1_u64)"
       print "        end"
       print "        def self.forced_wait_race_word(offset : UInt64, message : String) : Nil"
       print "          limit = now_ns &+ 10000000000_u64"
@@ -1304,10 +1501,23 @@ add_forced_ack() {
       print "          IyiThread.yield_cpu"
       print "        end"
       print "      end"
+      print "      def self.forced_bracket_setup_hold : Nil"
+      print "        page = @@forced_watch"
+      print "        return if page == 0_u64"
+      print "        return unless Pointer(Atomic(UInt64)).new(page).value.get == 0_u64"
+      print "        message = \"freed: the bracket setup collection is held before return\\n\""
+      print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "        forced_trip"
+      print "        while true"
+      print "          IyiThread.yield_cpu"
+      print "        end"
+      print "      end"
       found++
     }
     /^    fun exit\(status : Int32\) : NoReturn$/ { print; print "    fun _exit(status : Int32) : NoReturn"; darwin++; next }
-    /^          others = IyiThread\.stop_others$/ {
+    in_mark && /^      def self\.collect_locked\(eager : Bool\) : Nil$/ { in_locked = 1; locked_methods++ }
+    in_mark && /^        def self\.start_concurrent : Bool$/ { in_start = 1; start_methods++ }
+    in_mark && (in_locked || in_start) && /^          others = IyiThread\.stop_others$/ {
       print
       print "          {% if flag?(:stopped_force) %}"
       print "            forced_stop_hold(others)"
@@ -1315,10 +1525,58 @@ add_forced_ack() {
       print "          {% if flag?(:bracket_stall_force) %}"
       print "            forced_bracket_hold(others)"
       print "          {% end %}"
-      stopped++; next
+      print "          {% if flag?(:bracket_setup_force) %}"
+      print "            forced_bracket_setup_hold"
+      print "          {% end %}"
+      if (in_locked) locked_stops++; else start_stops++
+      next
     }
-    { print } END { if (found != 1 || darwin != 1 || stopped != 2) exit 3 }' "$1/iyi/prelude.iyi" > "$1/iyi/prelude.iyi.new" || { echo "the acknowledgement, exit or stop anchor in $1 is missing or ambiguous"; exit 76; }
+    in_locked && /^      end$/ { in_locked = 0 }
+    in_start && /^        end$/ { in_start = 0 }
+    in_mark && /^    end$/ { in_mark = 0 }
+    { print } END { if (mark_classes != 1 || found != 1 || darwin != 1 || locked_methods != 1 || start_methods != 1 || locked_stops != 1 || start_stops != 1 || in_mark || in_locked || in_start) exit 3 }' "$1/iyi/prelude.iyi" > "$1/iyi/prelude.iyi.new" || { echo "the acknowledgement, exit or stop anchor in $1 is missing or ambiguous"; exit 76; }
   mv "$1/iyi/prelude.iyi.new" "$1/iyi/prelude.iyi"
+  # Derive a fallible watchdog-only twin from the real helper and TLS
+  # routines. Every original fatal allocation or launch is replaced and
+  # counted; a new fatal step makes this splice fail rather than drift.
+  awk 'function twin(line) {
+      if (line == "    def self.start_helper(entry : UInt64, argument : UInt64) : Nil") { head++; return "    def self.forced_start_helper(entry : UInt64, argument : UInt64) : Nil" }
+      if (line == "        stack = __iyi_mmap(IYI_THREAD_STACK).address") { stack++; return "        stack = IyiMark.forced_map(IYI_THREAD_STACK, 2_u64)" }
+      if (line == "          result = start_by_libc(stack, entry, argument, pointerof(handle).address)") { libc++; return "          result = IyiMark.forced_injected?(6_u64) ? 11_i32 : start_by_libc(stack, entry, argument, pointerof(handle).address)" }
+      if (line == "          raise \"pthread_create failed: #{result}\" if result != 0") { libc_failed++; return "          IyiMark.forced_setup_failed(6_u64) if result != 0" }
+      if (line == "          scratch = __iyi_mmap(4096_u64).address") { scratch++; return "          scratch = IyiMark.forced_map(4096_u64, 3_u64)" }
+      if (line == "          result = __iyi_thread_clone(stack + IYI_THREAD_STACK, entry, argument, scratch, IyiTlsImage.make)") { clone++; return "          result = IyiMark.forced_injected?(5_u64) ? -11_i64 : __iyi_thread_clone(stack + IYI_THREAD_STACK, entry, argument, scratch, IyiTlsImage.forced_make)" }
+      if (line == "          raise \"clone failed: #{result}\" if result < 0") { clone_failed++; return "          IyiMark.forced_setup_failed(5_u64) if result < 0" }
+      if (line == "        result = LibC.pthread_create(pointerof(handle), Pointer(Void).new(0_u64), Pointer(Void).new(entry), Pointer(Void).new(argument))") { pthread++; return "        result = IyiMark.forced_injected?(7_u64) ? 35_i32 : LibC.pthread_create(pointerof(handle), Pointer(Void).new(0_u64), Pointer(Void).new(entry), Pointer(Void).new(argument))" }
+      if (line == "        raise \"pthread_create failed: #{result}\" if result != 0") { pthread_failed++; return "        IyiMark.forced_setup_failed(7_u64) if result != 0" }
+      if (line == "        h = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(entry), Pointer(Void).new(argument), 0_i32, nil)") { created++; return "        h = IyiMark.forced_injected?(7_u64) ? Pointer(Void).new(0_u64) : LibC.CreateThread(nil, 0_u64, Pointer(Void).new(entry), Pointer(Void).new(argument), 0_i32, nil)" }
+      if (line == "        raise \"CreateThread failed\" if h.address == 0_u64") { created_failed++; return "        IyiMark.forced_setup_failed(7_u64) if h.address == 0_u64" }
+      if (line == "      def self.make : UInt64") { make_head++; return "      def self.forced_make : UInt64" }
+      if (line == "        read_segment") { read_call++; return "        forced_read_segment" }
+      if (line == "        mapping = __iyi_mmap(round_up(size + 64_u64, 4096_u64)).address") { tls++; return "        mapping = IyiMark.forced_map(round_up(size + 64_u64, 4096_u64), 4_u64)" }
+      if (line == "      def self.read_segment : Nil") { read_head++; return "      def self.forced_read_segment : Nil" }
+      if (line == "        return if @@align != 0_u64") { read_inject++; return "        IyiMark.forced_setup_failed(8_u64) if IyiMark.forced_injected?(8_u64)\n        return if @@align != 0_u64" }
+      if (line == "        raise \"no PT_TLS in the executable\" if @@align == 0_u64") { read_failed++; return "        IyiMark.forced_setup_failed(8_u64) if @@align == 0_u64" }
+      if (line ~ /raise |__iyi_mmap\(|IyiTlsImage\.make/) fatal++
+      return line
+    }
+    $0 == "    class IyiTlsImage" { tls_class = 1; tls_classes++ }
+    $0 == "  class IyiThread" { thread_class = 1; thread_classes++ }
+    tls_class && $0 == "      def self.read_segment : Nil" { kind = 1; n = 0; reads++ }
+    tls_class && $0 == "      def self.make : UInt64" { kind = 2; n = 0; makes++ }
+    thread_class && $0 == "    def self.start_helper(entry : UInt64, argument : UInt64) : Nil" { kind = 3; n = 0; helpers++ }
+    kind != 0 { body[++n] = $0 }
+    { print }
+    ((kind == 1 || kind == 2) && $0 == "      end") || (kind == 3 && $0 == "    end") {
+      print ""
+      for (i = 1; i <= n; i++) print twin(body[i])
+      kind = 0; n = 0
+    }
+    tls_class && kind == 0 && $0 == "    end" { tls_class = 0 }
+    thread_class && kind == 0 && $0 == "  end" { thread_class = 0 }
+    END { if (tls_classes != 1 || thread_classes != 1 || reads != 1 || makes != 1 || helpers != 1 || head != 1 || stack != 1 || libc != 1 || libc_failed != 1 || scratch != 1 || clone != 1 || clone_failed != 1 || pthread != 1 || pthread_failed != 1 || created != 1 || created_failed != 1 || make_head != 1 || read_call != 1 || tls != 1 || read_head != 1 || read_inject != 1 || read_failed != 1 || fatal != 0) exit 3 }' \
+    "$1/iyi/thread.iyi" > "$1/iyi/thread.iyi.new" || { echo "the watchdog helper or TLS twin in $1 is missing, ambiguous, or has an unconverted fatal step"; exit 76; }
+  mv "$1/iyi/thread.iyi.new" "$1/iyi/thread.iyi"
 }
 
 # Force one retreat and hold its remainder count until an assist has counted
@@ -1376,20 +1634,25 @@ awk 'function declarations() {
     print "        forced_ack"
     print "      end"
   }
-  /^      def self\.assist : Nil$/ { declarations(); declared++ }
-  /^        active\.value\.add\(1_u64\)$/ { print; print "        stored_hold_assist"; assist++; next }
-  /^            if attempts < FINISH_RETRIES && unfinished$/ {
+  /^      def self\.assist : Nil$/ { declarations(); declared++; in_assist = 1 }
+  /^        def self\.finish_concurrent : UInt64$/ { in_finish = 1; finish_methods++ }
+  /^        def self\.remainder_round\(w : UInt64\) : UInt64$/ { in_remainder = 1; remainder_methods++ }
+  in_assist && /^        active\.value\.add\(1_u64\)$/ { print; print "        stored_hold_assist"; assist++; next }
+  in_finish && /^            if attempts < FINISH_RETRIES && unfinished$/ {
     print "            if attempts < FINISH_RETRIES && (stored_retreat?(attempts) || unfinished)"
     retreat++; next
   }
-  /^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
+  in_remainder && /^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
     print "          stored_window = stored_open"
     print
     print "          stored_close if stored_window"
     counted++; next
   }
-  /^            return generation$/ { print "            stored_finished"; finished++ }
-  { print } END { if (declared != 1 || assist != 1 || retreat != 1 || counted != 1 || finished != 1) exit 3 }' \
+  in_finish && /^            return generation$/ { print "            stored_finished"; finished++ }
+  in_assist && /^      end$/ { in_assist = 0 }
+  in_finish && /^        end$/ { in_finish = 0 }
+  in_remainder && /^        end$/ { in_remainder = 0 }
+  { print } END { if (declared != 1 || finish_methods != 1 || remainder_methods != 1 || assist != 1 || retreat != 1 || counted != 1 || finished != 1 || in_assist || in_finish || in_remainder) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > stored-held/iyi/prelude.iyi || { echo "the stored proof hooks are missing or ambiguous"; exit 76; }
 add_forced_ack stored-held
 if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o stored-held-run > build-stored-held.log 2>&1; then
@@ -1414,6 +1677,17 @@ if grep -Fxq "FAIL: stored: chain readback did not finish before the fixture dea
   echo "the watchdog reported a false readback timeout after completion"; cat watch-race.txt; exit 1
 fi
 echo "  watchdog: completion won after the watchdog sampled the pending phase"
+step "control: a claimed timeout owns the outcome before a wrong readback verdict"
+if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release -Dwatch_verdict_force forced.iyi -o watch-verdict-run > build-watch-verdict.log 2>&1; then
+  fail_build build-watch-verdict.log
+fi
+timeout -k 5 120 ./watch-verdict-run name=stored > watch-verdict.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "watchdog: timeout claimed before the wrong readback verdict" watch-verdict.txt || ! grep -Fxq "FAIL: stored: chain readback did not finish before the fixture deadline" watch-verdict.txt || grep -q '^FAIL: stored: the chain held ' watch-verdict.txt || grep -Fxq "forced: stored acknowledged" watch-verdict.txt; then
+  echo "the claimed watchdog timeout did not own the wrong-verdict outcome (exit $code):"; cat watch-verdict.txt; fail_for_status "$code" watch-verdict.txt
+fi
+echo "  watchdog: timeout claimed before the wrong readback verdict"
+printf '  exits 76 at "%s"\n' "FAIL: stored: chain readback did not finish before the fixture deadline"
 step "control: an unknown forced-fixture option is a setup failure"
 timeout -k 5 120 ./stored-held-run unknown=1 > unknown-option.txt 2>&1
 code=$?
@@ -1421,6 +1695,52 @@ if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: forced: no option unknown=1" unknown
   echo "the unknown forced-fixture option did not fail as setup (exit $code):"; tail -3 unknown-option.txt; fail_for_status "$code" unknown-option.txt
 fi
 printf '  exits 76 at "%s"\n' "FAIL: forced: no option unknown=1"
+step "controls: watchdog page and native launch failures are setup failures"
+if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release -Dwatch_setup_force forced.iyi -o watch-setup-run > build-watch-setup.log 2>&1; then
+  fail_build build-watch-setup.log
+fi
+case "$(uname -s)" in
+  Linux) watch_steps="page stack scratch tls-image tls clone" ;;
+  Darwin) watch_steps="page thread"; watch_thread=pthread_create ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) watch_steps="page thread"; watch_thread=CreateThread ;;
+  *) echo "FAIL: watchdog setup: this platform has no named launch path"; exit 76 ;;
+esac
+for watch_step in $watch_steps; do
+  case "$watch_step" in
+    page) want="FAIL: watchdog setup: the watchdog page could not be mapped" ;;
+    stack) want="FAIL: watchdog setup: the watchdog stack could not be mapped" ;;
+    scratch) want="FAIL: watchdog setup: the watchdog tid scratch page could not be mapped" ;;
+    tls-image) want="FAIL: watchdog setup: the executable has no TLS image" ;;
+    tls) want="FAIL: watchdog setup: the watchdog TLS block could not be mapped" ;;
+    clone) want="FAIL: watchdog setup: clone could not start the watchdog" ;;
+    thread) want="FAIL: watchdog setup: $watch_thread could not start the watchdog" ;;
+  esac
+  timeout -k 5 120 ./watch-setup-run name=stored "fail=$watch_step" > "watch-setup-$watch_step.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 76 ] || ! grep -Fxq "$want" "watch-setup-$watch_step.txt" || [ "$(grep -c '^FAIL: ' "watch-setup-$watch_step.txt")" -ne 1 ] || grep -q '^iyi: ' "watch-setup-$watch_step.txt"; then
+    echo "the watchdog $watch_step failure was not named as setup (exit $code):"; cat "watch-setup-$watch_step.txt"; fail_for_status "$code" "watch-setup-$watch_step.txt"
+  fi
+  printf '  exits 76 at "%s"\n' "$want"
+done
+if [ "$(uname -s)" = Linux ]; then
+  if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release -Dwatch_setup_force -Dwatch_libc_force forced.iyi -o watch-libc-run > build-watch-libc.log 2>&1; then
+    fail_build build-watch-libc.log
+  fi
+  timeout -k 5 120 ./watch-libc-run name=stored fail=libc > watch-libc.txt 2>&1
+  code=$?
+  if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: watchdog setup: libc could not start the watchdog" watch-libc.txt || [ "$(grep -c '^FAIL: ' watch-libc.txt)" -ne 1 ] || grep -q '^iyi: ' watch-libc.txt; then
+    echo "the libc watchdog launch failure was not named as setup (exit $code):"; cat watch-libc.txt; fail_for_status "$code" watch-libc.txt
+  fi
+  printf '  exits 76 at "%s"\n' "FAIL: watchdog setup: libc could not start the watchdog"
+  timeout -k 5 120 ./watch-libc-run name=stored trip=setup > watch-libc-trip.txt 2>&1
+  code=$?
+  if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: stored: fixture setup did not finish before the fixture deadline" watch-libc-trip.txt || [ "$(grep -c '^FAIL: ' watch-libc-trip.txt)" -ne 1 ]; then
+    echo "the libc watchdog did not report its setup phase (exit $code):"; cat watch-libc-trip.txt; fail_for_status "$code" watch-libc-trip.txt
+  fi
+  printf '  exits 76 at "%s"\n' "FAIL: stored: fixture setup did not finish before the fixture deadline"
+else
+  echo "platform: watchdog stack, scratch, TLS image, TLS block, clone and libc checks run on Linux"
+fi
 step "control: a producer held after acknowledgement is a setup failure"
 if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release -Dshutdown_force forced.iyi -o shutdown-held-run > build-shutdown-held.log 2>&1; then
   fail_build build-shutdown-held.log
@@ -1444,10 +1764,12 @@ echo "  stopped: a producer held its collection after stopping the other registe
 printf '  exits 76 at "%s"\n' "FAIL: stored: the copy did not acknowledge before the fixture deadline"
 step "failure proof: storing over the counted assist loses the worker count"
 cp stored-held/iyi/*.iyi stored/iyi/
-awk '/^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
+awk '/^        def self\.remainder_round\(w : UInt64\) : UInt64$/ { in_remainder = 1; methods++ }
+  in_remainder && /^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
     print "          pool_word(POOL_ACTIVE).value.set(1_u64)"; found++; next
   }
-  { print } END { if (found != 1) exit 3 }' stored-held/iyi/prelude.iyi > stored/iyi/prelude.iyi || { echo "the remainder count is missing or ambiguous"; exit 76; }
+  in_remainder && /^        end$/ { in_remainder = 0 }
+  { print } END { if (methods != 1 || found != 1 || in_remainder) exit 3 }' stored-held/iyi/prelude.iyi > stored/iyi/prelude.iyi || { echo "the remainder count is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/stored${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o stored-run > build-stored.log 2>&1; then
   fail_build build-stored.log
 fi
@@ -1511,17 +1833,19 @@ awk 'function forced() {
     print "      end"
   }
   /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
-  /^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ {
+  /^        def self\.finish_concurrent : UInt64$/ { in_finish = 1; methods++ }
+  in_finish && /^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ {
     print "            late_baseline = pool_word(POOL_GENERATION).value.get"
     baseline++
   }
-  /^            return generation$/ {
+  in_finish && /^            return generation$/ {
     print "            late_forced = late_hold(late_baseline)"
     print "            late_check(generation) if late_forced"
     print "            late_finished unless late_forced"
     hook++
   }
-  { print } END { if (declared != 1 || baseline != 1 || hook != 1) exit 3 }' \
+  in_finish && /^        end$/ { in_finish = 0 }
+  { print } END { if (declared != 1 || methods != 1 || baseline != 1 || hook != 1 || in_finish) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > late-held/iyi/prelude.iyi || { echo "the late generation hook is missing or ambiguous"; exit 76; }
 add_forced_ack late-held
 if ! IYI_PATH="$WORK/late-held${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o late-held-run > build-late-held.log 2>&1; then
@@ -1535,12 +1859,14 @@ fi
 echo "  held late control exits 0 after the next mark"
 step "failure proof: helper 0 reads the next mark generation too late"
 cp late-held/iyi/*.iyi late/iyi/
-awk '/^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ { early++; next }
-  /^            late_check\(generation\) if late_forced$/ {
+awk '/^        def self\.finish_concurrent : UInt64$/ { in_finish = 1; methods++ }
+  in_finish && /^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ { early++; next }
+  in_finish && /^            late_check\(generation\) if late_forced$/ {
     print "            generation = pool_word(POOL_GENERATION).value.get"
     moved++
   }
-  { print } END { if (early != 1 || moved != 1) exit 3 }' late-held/iyi/prelude.iyi > late/iyi/prelude.iyi || { echo "the late generation read is missing or ambiguous"; exit 76; }
+  in_finish && /^        end$/ { in_finish = 0 }
+  { print } END { if (methods != 1 || early != 1 || moved != 1 || in_finish) exit 3 }' late-held/iyi/prelude.iyi > late/iyi/prelude.iyi || { echo "the late generation read is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/late${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o late-run > build-late.log 2>&1; then
   fail_build build-late.log
 fi
@@ -1602,21 +1928,26 @@ awk 'function declarations() {
     print ""
   }
   /^      def self\.pressure\(size : UInt64\) : Nil$/ { declarations(); print; declared++; in_pressure = 1; next }
-  in_pressure && /^        total = IyiHeap\.allocated_word\.value\.add\(size\) \+ size$/ { print; print "        release_probe(total)"; in_pressure = 0; probed++; next }
-  prev_lg && $0 == "            IyiThread.resume_others(others)" { print "            released_forced = arm_release_probe"; print; prev_lg = 0; armed++; next }
-  $0 == "            return generation" { print "            hold_release_probe if released_forced"; print; returned++; prev_lg = 0; next }
-  { prev_lg = ($0 == "            let_go_holders"); print }
-  END { if (declared != 1 || probed != 1 || armed != 1 || returned != 1) exit 3 }' \
+  in_pressure && /^        total = IyiHeap\.allocated_word\.value\.add\(size\) \+ size$/ { print; print "        release_probe(total)"; probed++; next }
+  in_pressure && /^      end$/ { in_pressure = 0 }
+  /^        def self\.finish_concurrent : UInt64$/ { in_finish = 1; finish_methods++ }
+  in_finish && prev_lg && $0 == "            IyiThread.resume_others(others)" { print "            released_forced = arm_release_probe"; print; prev_lg = 0; armed++; next }
+  in_finish && $0 == "            return generation" { print "            hold_release_probe if released_forced"; print; returned++; prev_lg = 0; next }
+  in_finish && /^        end$/ { in_finish = 0 }
+  { prev_lg = in_finish && ($0 == "            let_go_holders"); print }
+  END { if (declared != 1 || finish_methods != 1 || probed != 1 || armed != 1 || returned != 1 || in_pressure || in_finish) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > released-held/iyi/prelude.iyi || { echo "the release order or pressure is missing or ambiguous"; exit 76; }
 add_forced_ack released-held
 cp released-held/iyi/*.iyi released/iyi/
-awk 'pend {
+awk '/^        def self\.finish_concurrent : UInt64$/ { in_finish = 1; methods++ }
+  in_finish && pend {
     if ($0 == "            let_go_holders") { print; pend = 0; dropped++; next }
     print "            @@collecting = false"; pend = 0
   }
-  $0 == "            @@collecting = false" { pend = 1; next }
-  $0 == "            hold_release_probe if released_forced" { print; print "            @@collecting = false"; added++; next }
-  { print } END { if (dropped != 1 || added != 1) exit 3 }' released-held/iyi/prelude.iyi > released/iyi/prelude.iyi || { echo "the flag this proof moves is missing or ambiguous"; exit 76; }
+  in_finish && $0 == "            @@collecting = false" { pend = 1; next }
+  in_finish && $0 == "            hold_release_probe if released_forced" { print; print "            @@collecting = false"; added++; next }
+  in_finish && /^        end$/ { in_finish = 0 }
+  { print } END { if (methods != 1 || dropped != 1 || added != 1 || pend || in_finish) exit 3 }' released-held/iyi/prelude.iyi > released/iyi/prelude.iyi || { echo "the flag this proof moves is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/released-held${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o released-held-run > build-released-held.log 2>&1; then
   fail_build build-released-held.log
 fi
@@ -1727,10 +2058,10 @@ awk 'function declarations() {
     print "      end"
   }
   /^      def self\.pressure\(size : UInt64\) : Nil$/ { declarations(); print; declared++; in_pressure = 1; next }
-  in_pressure && /^        total = IyiHeap\.allocated_word\.value\.add\(size\) \+ size$/ { print; print "        go_probe(total)"; in_pressure = 0; probed++; next }
-  /^      def self\.collect_locked\(eager : Bool\) : Nil$/ { scope = 1 }
-  /^        def self\.finish_stopped\(started : UInt64, others : Int64\) : Nil$/ { scope = 2 }
-  /^        def self\.finish_concurrent : UInt64$/ { scope = 0 }
+  in_pressure && /^        total = IyiHeap\.allocated_word\.value\.add\(size\) \+ size$/ { print; print "        go_probe(total)"; probed++; next }
+  in_pressure && /^      end$/ { in_pressure = 0 }
+  /^      def self\.collect_locked\(eager : Bool\) : Nil$/ { scope = 1; locked_methods++ }
+  /^        def self\.finish_stopped\(started : UInt64, others : Int64\) : Nil$/ { scope = 2; stopped_methods++ }
   scope == 1 && /^      end$/ { scope = 0 }
   scope == 2 && /^        end$/ { scope = 0 }
   scope == 1 && /^          IyiThread\.resume_others\(others\)$/ {
@@ -1745,7 +2076,7 @@ awk 'function declarations() {
     print "          go_hold if go_stopped"
     stopped++; next
   }
-  { print } END { if (declared != 1 || probed != 1 || locked != 1 || stopped != 1) exit 3 }' \
+  { print } END { if (declared != 1 || locked_methods != 1 || stopped_methods != 1 || probed != 1 || locked != 1 || stopped != 1 || in_pressure || scope) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > letgo-held/iyi/prelude.iyi || { echo "the let-go proof anchors are missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/letgo-held${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/release_trigger.iyi" -o letgo-held-run > build-letgo-held.log 2>&1; then
   fail_build build-letgo-held.log
@@ -1756,16 +2087,59 @@ if [ "$code" -ne 0 ] || ! grep -Fxq "release trigger: every collection was let g
   echo "the held let-go control did not complete (exit $code):"; tail -10 letgo-held.txt; fail_control "$code" letgo-held.txt
 fi
 echo "  held let-go control exits 0 for all three collection paths"
+require_non_target_rounds() {
+  local file="$1" round
+  shift
+  for round in bounded stopped verb; do
+    case " $* " in *" $round "*) continue ;; esac
+    if grep -Eq "^FAIL: $round:" "$file"; then
+      echo "FAIL: let-go setup: the $round non-target round emitted a failure"
+      return 76
+    fi
+    if ! grep -Eq "^$round: after collection [0-9]+, three budgets of [0-9]+ bytes in slices on a second thread triggered [1-9][0-9]* more$" "$file"; then
+      echo "FAIL: let-go setup: the $round non-target round did not report its full success sentence"
+      return 76
+    fi
+  done
+  return 0
+}
+step "controls: missing non-target let-go rounds are setup failures"
+: > letgo-missing-round.txt
+for shape in locked bounded; do
+  case "$shape" in
+    locked) expected="FAIL: let-go setup: the bounded non-target round did not report its full success sentence"
+      require_non_target_rounds letgo-missing-round.txt stopped verb > "letgo-missing-$shape.txt" 2>&1 ;;
+    bounded) expected="FAIL: let-go setup: the stopped non-target round did not report its full success sentence"
+      require_non_target_rounds letgo-missing-round.txt bounded > "letgo-missing-$shape.txt" 2>&1 ;;
+  esac
+  code=$?
+  if [ "$code" -ne 76 ] || ! grep -Fxq "$expected" "letgo-missing-$shape.txt"; then
+    echo "the $shape non-target guard did not fail as setup (exit $code):"; cat "letgo-missing-$shape.txt"; fail_for_status "$code" "letgo-missing-$shape.txt"
+  fi
+  printf '  exits 76 at "%s"\n' "$expected"
+done
+printf '%s\n' "bounded: after collection 1, three budgets of 1 bytes in slices on a second thread triggered 1 more" "FAIL: bounded: forced non-target failure" > letgo-conflicting-round.txt
+require_non_target_rounds letgo-conflicting-round.txt stopped verb > letgo-conflicting-result.txt 2>&1
+code=$?
+expected="FAIL: let-go setup: the bounded non-target round emitted a failure"
+if [ "$code" -ne 76 ] || ! grep -Fxq "$expected" letgo-conflicting-result.txt; then
+  echo "the conflicting non-target round was not rejected (exit $code):"; cat letgo-conflicting-result.txt; fail_for_status "$code" letgo-conflicting-result.txt
+fi
+printf '  exits 76 at "%s"\n' "$expected"
 let_go_late() {
   name=$1 indent=$2
   shift 2
   mkdir -p "$name/iyi"
   cp letgo-held/iyi/*.iyi "$name/iyi/"
   awk -v n="$indent" 'BEGIN { while (length(pad) < n) pad = pad " " }
-    $0 == (pad "@@collecting = false") { removed++; next }
-    n == 8 && $0 == "          go_hold if go_locked" { print; print "          @@collecting = false"; inserted++; next }
-    n == 10 && $0 == "          go_hold if go_stopped" { print; print "          @@collecting = false"; inserted++; next }
-    { print } END { if (removed != 1 || inserted != 1) exit 3 }' \
+    /^      def self\.collect_locked\(eager : Bool\) : Nil$/ { in_locked = 1; locked_methods++ }
+    /^        def self\.finish_stopped\(started : UInt64, others : Int64\) : Nil$/ { in_stopped = 1; stopped_methods++ }
+    ((n == 8 && in_locked) || (n == 10 && in_stopped)) && $0 == (pad "@@collecting = false") { removed++; next }
+    n == 8 && in_locked && $0 == "          go_hold if go_locked" { print; print "          @@collecting = false"; inserted++; next }
+    n == 10 && in_stopped && $0 == "          go_hold if go_stopped" { print; print "          @@collecting = false"; inserted++; next }
+    in_locked && /^      end$/ { in_locked = 0 }
+    in_stopped && /^        end$/ { in_stopped = 0 }
+    { print } END { if (locked_methods != 1 || stopped_methods != 1 || removed != 1 || inserted != 1 || in_locked || in_stopped) exit 3 }' \
     letgo-held/iyi/prelude.iyi > "$name/iyi/prelude.iyi" || { echo "the let-go order for $name is missing or ambiguous"; exit 76; }
   if ! IYI_PATH="$WORK/$name${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/release_trigger.iyi" -o "$name-run" > "build-$name.log" 2>&1; then
     fail_build "build-$name.log"
@@ -1775,8 +2149,9 @@ let_go_late() {
   if [ "$code" -ne 1 ]; then
     echo "the untriggered slices were not caught (exit $code):"; cat "$name.txt"; fail_for_status "$code" "$name.txt"
   fi
+  require_non_target_rounds "$name.txt" "$@" || { code=$?; cat "$name.txt"; exit "$code"; }
   for round in "$@"; do
-    if ! grep -Eq "^FAIL: $round: after collection [0-9]+ was counted, [1-9][0-9]* of a thread's slices were held at the ceiling of a collection that was not theirs, which had not been let go$" "$name.txt"; then
+    if [ "$(grep -Ec "^FAIL: $round: after collection [0-9]+ was counted, [1-9][0-9]* of a thread's slices were held at the ceiling of a collection that was not theirs, which had not been let go$" "$name.txt")" -ne 1 ]; then
       echo "the $round round did not fail at its complete sentence:"; cat "$name.txt"; exit 1
     fi
     printf '  exits 1 at "%s"\n' "$(grep -m1 "^FAIL: $round:" "$name.txt")"
@@ -1786,6 +2161,24 @@ step "failure proof: a stopped collection let go after its threads are released 
 let_go_late locked-late 8 stopped verb
 step "failure proof: a collection that ends in its first stop let go after its threads are released leaves their slices untriggered"
 let_go_late bounded-late 10 bounded
+step "control: a concurrent non-target let-go round is a setup failure"
+awk '/^  def round\(name : String, path : String\) : Bool$/ { in_round = 1; declared++ }
+  in_round && $0 == "    went = IyiMark.concurrent_collections - beside" {
+    print; print "    went = 1_u64 if name == \"bounded\""; found++; next
+  }
+  in_round && /^  end$/ { in_round = 0 }
+  { print } END { if (declared != 1 || found != 1 || in_round) exit 3 }' \
+  "$REPO/bench/release_trigger.iyi" > release-premise.iyi || { echo "the let-go wrong-path premise anchor is missing or ambiguous"; exit 76; }
+if ! IYI_PATH="$WORK/locked-late${PSEP}$REPO/src" "$IYI" build --release release-premise.iyi -o release-premise-run > build-release-premise.log 2>&1; then
+  fail_build build-release-premise.log
+fi
+timeout -k 5 120 ./release-premise-run > release-premise.txt 2>&1
+code=$?
+expected="FAIL: bounded: 1 of the round's collections went beside the program, so the round tried no collection that ends in its stop"
+if [ "$code" -ne 76 ] || ! grep -Fxq "$expected" release-premise.txt; then
+  echo "the concurrent non-target round was not named as setup (exit $code):"; cat release-premise.txt; fail_for_status "$code" release-premise.txt
+fi
+printf '  exits 76 at "%s"\n' "$expected"
 
 # Both copies hold the same free between reading and linking its cache head.
 # A second thread requests collection there. The bracketed free observes the
@@ -1800,6 +2193,15 @@ module unbracketed
 
 import std/gc::{GC}
 IyiMark.auto = false
+{% if flag?(:unbracketed_force) %}
+  # Start before the setup collection, while phase zero names preparation.
+  IyiMark.forced_watch(IyiMark.now_ns + 100000000000_u64,
+    "FAIL: freed: the bracket setup collection did not finish before the fixture deadline\n",
+    "FAIL: freed: the armed free did not request its collection before the fixture deadline\n",
+    "FAIL: freed: the bracket collector did not finish after its stop was requested\n",
+    "FAIL: freed: the bracket collector did not finish after its stop was requested\n",
+    "FAIL: freed: the bracket collector did not finish after its stop was requested\n")
+{% end %}
 
 live = Pointer(Pointer(UInt64)).malloc(64_u64)
 i = 0
@@ -1815,13 +2217,6 @@ end
 IyiMark.collect
 # The second thread waits until the free reaches the shared hook.
 {% if flag?(:unbracketed_force) %}
-  # The native watchdog cannot be stopped with either fixture thread.
-  IyiMark.forced_watch(IyiMark.now_ns + 100000000000_u64,
-    "FAIL: freed: the bracket fixture did not start its collector before the fixture deadline\n",
-    "FAIL: freed: the armed free did not request its collection before the fixture deadline\n",
-    "FAIL: freed: the bracket collector did not finish after its stop was requested\n",
-    "FAIL: freed: the bracket collector did not finish after its stop was requested\n",
-    "FAIL: freed: the bracket collector did not finish after its stop was requested\n")
   IyiMark.forced_phase(1_u64)
   collector = IyiThread.start do
     limit = IyiMark.now_ns + 10000000000_u64
@@ -1943,13 +2338,15 @@ awk 'function forced() {
     print "      end"
   }
   /^      def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared++ }
-  /^        write64\(head \+ OFF_LINK, table\[index\]\)$/ {
+  /^      def self\.list_freed\(arena : UInt64, head : UInt64, slot : UInt64, table : Pointer\(UInt64\), index : Int32\) : Nil$/ { in_list = 1; list_methods++ }
+  in_list && /^        write64\(head \+ OFF_LINK, table\[index\]\)$/ {
     print "        stale = table[index]"
     print "        IyiHeap.hold_drop(table)"
     print "        write64(head + OFF_LINK, stale)"
     linked++; next
   }
-  { print } END { if (declared != 1 || linked != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > bracketed/iyi/prelude.iyi || { echo "the list link or free this proof changes is missing or ambiguous"; exit 76; }
+  in_list && /^      end$/ { in_list = 0 }
+  { print } END { if (declared != 1 || list_methods != 1 || linked != 1 || in_list) exit 3 }' "$REPO/src/iyi/prelude.iyi" > bracketed/iyi/prelude.iyi || { echo "the list link or free this proof changes is missing or ambiguous"; exit 76; }
 add_forced_ack bracketed
 if ! IYI_PATH="$WORK/bracketed${PSEP}$REPO/src" "$IYI" build unbracketed.iyi -Dunbracketed_force -o bracketed-run > build-bracketed.log 2>&1; then
   fail_build build-bracketed.log
@@ -1960,6 +2357,17 @@ if [ "$code" -ne 0 ] || ! grep -Fxq 'unbracketed: 64 chunks handed out, none sha
   echo "the bracketed control did not pass (exit $code):"; tail -3 bracketed.txt; fail_control "$code" bracketed.txt
 fi
 echo "  the bracketed control exits 0: $(grep -Fx 'unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole' bracketed.txt)"
+step "control: the bracket watchdog names a stalled setup collection"
+if ! IYI_PATH="$WORK/bracketed${PSEP}$REPO/src" "$IYI" build -Dunbracketed_force -Dbracket_setup_force unbracketed.iyi -o bracket-setup-run > build-bracket-setup.log 2>&1; then
+  fail_build build-bracket-setup.log
+fi
+timeout -k 5 120 ./bracket-setup-run > bracket-setup.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "freed: the bracket setup collection is held before return" bracket-setup.txt || ! grep -Fxq "FAIL: freed: the bracket setup collection did not finish before the fixture deadline" bracket-setup.txt || grep -Fxq "unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole" bracket-setup.txt; then
+  echo "the stalled bracket setup collection was not named (exit $code):"; cat bracket-setup.txt; fail_for_status "$code" bracket-setup.txt
+fi
+echo "  freed: the bracket setup collection is held before return"
+printf '  exits 76 at "%s"\n' "FAIL: freed: the bracket setup collection did not finish before the fixture deadline"
 step "control: the bracket watchdog names a stalled collector after the stop request"
 if ! IYI_PATH="$WORK/bracketed${PSEP}$REPO/src" "$IYI" build -Dunbracketed_force -Dbracket_stall_force unbracketed.iyi -o bracket-stall-run > build-bracket-stall.log 2>&1; then
   fail_build build-bracket-stall.log
@@ -1972,16 +2380,17 @@ fi
 echo "  freed: the bracket collector stopped the free thread and is held"
 printf '  exits 76 at "%s"\n' "FAIL: freed: the bracket collector did not finish after its stop was requested"
 step "controls: the bracket proof rejects a locked path and a missing acknowledgement"
-awk '$0 == "IyiMark.auto = false" {
+awk '$0 == "IyiMark.auto = false" { in_main = 1; starts++
     print; print "premise = Program.args.size > 0 ? Program.args[0] : \"\""; option++; next
   }
-  $0 == "  if IyiHeap.read8(arena + IyiHeap::META + slot * IyiHeap::META_ENTRY) & IyiHeap::EPOCH_FLAG != IyiMark.epoch_flag" {
+  in_main && $0 == "  if IyiHeap.read8(arena + IyiHeap::META + slot * IyiHeap::META_ENTRY) & IyiHeap::EPOCH_FLAG != IyiMark.epoch_flag" {
     print $0 " || premise == \"locked\""; locked++; next
   }
-  $0 == "  if IyiHeap.drop_done != 1_u64" {
+  in_main && $0 == "  if IyiHeap.drop_done != 1_u64" {
     print $0 " || premise == \"ack\""; ack++; next
   }
-  { print } END { if (option != 1 || locked != 1 || ack != 1) exit 3 }' unbracketed.iyi > bracket-premise.iyi || { echo "the bracket premise anchors are missing or ambiguous"; exit 76; }
+  in_main && $0 == "puts \"unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole\"" { in_main = 0; ends++ }
+  { print } END { if (starts != 1 || ends != 1 || option != 1 || locked != 1 || ack != 1 || in_main) exit 3 }' unbracketed.iyi > bracket-premise.iyi || { echo "the bracket premise anchors are missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/bracketed${PSEP}$REPO/src" "$IYI" build bracket-premise.iyi -Dunbracketed_force -o bracket-premise > build-bracket-premise.log 2>&1; then
   fail_build build-bracket-premise.log
 fi
@@ -1999,9 +2408,11 @@ for premise in locked ack; do
 done
 mkdir -p unbracketed/iyi
 cp bracketed/iyi/*.iyi unbracketed/iyi/
-awk '/^          write64\(table\.address &\+ CACHE_INSIDE, read64\(table\.address &\+ CACHE_INSIDE\) &\+ 1_u64\)$/ { entered++; next }
-  prev ~ /^          end$/ && /^          leave\(table\)$/ { left++; prev = $0; next }
-  { prev = $0; print } END { if (entered != 1 || left != 1) exit 3 }' bracketed/iyi/prelude.iyi > unbracketed/iyi/prelude.iyi.new || { echo "the bracket this proof removes from free is missing or ambiguous"; exit 76; }
+awk '/^      def self\.free\(pointer : Void\*\) : Nil$/ { in_free = 1; methods++ }
+  in_free && /^          write64\(table\.address &\+ CACHE_INSIDE, read64\(table\.address &\+ CACHE_INSIDE\) &\+ 1_u64\)$/ { entered++; next }
+  in_free && prev ~ /^          end$/ && /^          leave\(table\)$/ { left++; prev = $0; next }
+  in_free && /^      end$/ { in_free = 0 }
+  { prev = $0; print } END { if (methods != 1 || entered != 1 || left != 1 || in_free) exit 3 }' bracketed/iyi/prelude.iyi > unbracketed/iyi/prelude.iyi.new || { echo "the bracket this proof removes from free is missing or ambiguous"; exit 76; }
 mv unbracketed/iyi/prelude.iyi.new unbracketed/iyi/prelude.iyi
 if ! IYI_PATH="$WORK/unbracketed${PSEP}$REPO/src" "$IYI" build unbracketed.iyi -Dunbracketed_force -o unbracketed-run > build-unbracketed.log 2>&1; then
   fail_build build-unbracketed.log
@@ -2069,9 +2480,12 @@ fi
 echo "  $(grep -m1 '^idle pool: with' latestart.txt)"
 
 step "failure proof: an idle pool step whose tasks wait only for each other is caught on that runtime"
-awk '$0 == "            break unless arrived < cores || IyiWorkers.launched < cores.to_i32" {
+awk '/^  def busy_until_stopped : Nil$/ { in_busy = 1; methods++ }
+  in_busy && /^  end$/ { in_busy = 0; in_main = 1 }
+  in_main && $0 == "            break unless arrived < cores || IyiWorkers.launched < cores.to_i32" {
     print "            break unless arrived < cores"; changed++; next }
-  { print } END { if (changed != 1) exit 3 }' \
+  in_main && $0 == "  puts \"concurrent mark: every property held\"" { in_main = 0; ends++ }
+  { print } END { if (methods != 1 || ends != 1 || changed != 1 || in_main) exit 3 }' \
   "$REPO/bench/concurrent_mark.iyi" > arrived_only.iyi || { echo "the idle wait is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release -Didle_force arrived_only.iyi -o arrived-only > build-arrived.log 2>&1; then
   fail_build build-arrived.log
@@ -2146,14 +2560,18 @@ awk -v called="$turn_called" -v lost="$turn_lost" 'function held() {
     print "    __iyi_exit(1)"
     print "  end"
   }
-  $0 == "    wake_one if found && work_waiting?" { uncalled++; prev = $0; next }
+  /^  def self\.stop_spinning\(st : IyiSchedulerState, found : Bool\) : Nil$/ { in_stop = 1; stop_methods++ }
+  /^  private def self\.turn_wanted\?\(st : IyiSchedulerState, fiber : IyiFiber\) : Bool$/ { in_turn = 1; turn_methods++ }
+  in_stop && $0 == "    wake_one if found && work_waiting?" { uncalled++; prev = $0; next }
   /^  def self\.work : Nil$/ {
     held(); declared++; print
     if (getline <= 0 || $0 != "    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}") exit 3
     print; print "      hold_first"; inserted++; prev = $0; next
   }
-  prev == "    return false unless work_waiting?" && $0 == "    wake_one" { print "    turn_armed = turn_arm"; print; print "    turn_verdict if turn_armed"; hooked++; prev = $0; next }
-  { prev = $0; print } END { if (uncalled != 1 || declared != 1 || inserted != 1 || hooked != 1) exit 3 }' \
+  in_turn && prev == "    return false unless work_waiting?" && $0 == "    wake_one" { print "    turn_armed = turn_arm"; print; print "    turn_verdict if turn_armed"; hooked++; prev = $0; next }
+  in_stop && /^  end$/ { in_stop = 0 }
+  in_turn && /^  end$/ { in_turn = 0 }
+  { prev = $0; print } END { if (stop_methods != 1 || turn_methods != 1 || uncalled != 1 || declared != 1 || inserted != 1 || hooked != 1 || in_stop || in_turn) exit 3 }' \
   "$REPO/src/iyi/concurrency.iyi" > turn-held/iyi/concurrency.iyi || { echo "a turn proof anchor is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/turn-held${PSEP}$REPO/src" "$IYI" build --release -Dunstarted_force "$REPO/bench/concurrent_mark.iyi" -o turn-held-run > build-turn-held.log 2>&1; then
   fail_build build-turn-held.log
@@ -2166,8 +2584,10 @@ fi
 echo "  $turn_called"
 step "failure proof: a turn with queued work calls for no worker"
 cp turn-held/iyi/*.iyi unstarted/iyi/
-awk 'prev == "    turn_armed = turn_arm" && $0 == "    wake_one" { removed++; prev = $0; next }
-  { prev = $0; print } END { if (removed != 1) exit 3 }' turn-held/iyi/concurrency.iyi > unstarted/iyi/concurrency.iyi || { echo "the turn start is missing or ambiguous"; exit 76; }
+awk '/^  private def self\.turn_wanted\?\(st : IyiSchedulerState, fiber : IyiFiber\) : Bool$/ { in_turn = 1; methods++ }
+  in_turn && prev == "    turn_armed = turn_arm" && $0 == "    wake_one" { removed++; prev = $0; next }
+  in_turn && /^  end$/ { in_turn = 0 }
+  { prev = $0; print } END { if (methods != 1 || removed != 1 || in_turn) exit 3 }' turn-held/iyi/concurrency.iyi > unstarted/iyi/concurrency.iyi || { echo "the turn start is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/unstarted${PSEP}$REPO/src" "$IYI" build --release -Dunstarted_force "$REPO/bench/concurrent_mark.iyi" -o unstarted-run > build-unstarted.log 2>&1; then
   fail_build build-unstarted.log
 fi
@@ -2186,7 +2606,8 @@ printf '  exits 1 at "%s"\n' "$turn_lost"
 step "failure proof: a first collection that waits for every helper to reach its park is caught"
 mkdir -p held-helpers/iyi
 cp "$REPO"/src/iyi/*.iyi held-helpers/iyi/
-awk 'function forced() {
+make_crowded_copy() {
+  awk 'function forced() {
     print "      # Copy only (concurrent_mark: the first-collection proof): a helper waits here until the program releases it."
     print "      @[UnsafeReach(\"copy-only: the release word, set and read through its address\")]"
     print "      @@forced_ready : UInt64 = 0_u64"
@@ -2210,8 +2631,10 @@ awk 'function forced() {
     print ""
     print ""
   }
-  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
-  declared == 1 && !hooked && /^        w = worker$/ {
+  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++; in_helper = 1; previous = $0; print; next }
+  in_helper && /^        w = worker$/ {
+    candidates++
+    if (previous == "      def self.helper_main(seen : UInt64) : Nil") adjacent++
     print
     print "        ready_limit = IyiMark.now_ns &+ 10000000000_u64"
     print "        while !IyiMark.forced_ready?"
@@ -2228,8 +2651,26 @@ awk 'function forced() {
     print "          spin_pause"
     print "        end"
     print "        pool_word(512_u64).value.add(1_u64)"
-    hooked = 1; next }
-  { print } END { if (declared != 1 || hooked != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held-helpers/iyi/prelude.iyi || { echo "the helper's entry this proof holds is missing or ambiguous"; exit 76; }
+    hooked++; previous = $0; next
+  }
+  in_helper && /^      end$/ { in_helper = 0 }
+  { previous = $0; print } END { if (declared != 1 || candidates != 1 || adjacent != 1 || hooked != 1 || in_helper) exit 3 }' "$1" > "$2" || {
+    echo "FAIL: gate setup: the crowded helper method or entry is missing or ambiguous"
+    return 76
+  }
+}
+step "controls: the crowded splice rejects missing and duplicate helper entries"
+printf '%s\n' '      def self.helper_main(seen : UInt64) : Nil' '      end' '        w = worker' > crowded-missing.iyi
+printf '%s\n' '      def self.helper_main(seen : UInt64) : Nil' '        w = worker' '        w = worker' '      end' > crowded-duplicate.iyi
+for shape in missing duplicate; do
+  make_crowded_copy "crowded-$shape.iyi" "crowded-$shape.out" > "crowded-$shape.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: gate setup: the crowded helper method or entry is missing or ambiguous" "crowded-$shape.txt"; then
+    echo "the crowded splice accepted $shape entries (exit $code):"; cat "crowded-$shape.txt"; fail_for_status "$code" "crowded-$shape.txt"
+  fi
+  printf '  exits 76 at "%s"\n' "FAIL: gate setup: the crowded helper method or entry is missing or ambiguous"
+done
+make_crowded_copy "$REPO/src/iyi/prelude.iyi" held-helpers/iyi/prelude.iyi || exit "$?"
 if ! IYI_PATH="$WORK/held-helpers${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-held > build-held-helpers.log 2>&1; then
   fail_build build-held-helpers.log
 fi
@@ -2241,9 +2682,11 @@ fi
 echo "  the hook alone, exits 0: $(grep -m1 '^crowded: ' crowded-held.txt)"
 mkdir -p ready/iyi
 cp held-helpers/iyi/*.iyi ready/iyi/
-awk '/^          @@helpers = @@helpers \+ 1_u64$/ { made++; print; next }
-  made == 1 && !waited && /^        end$/ { print; print "        ready_limit = IyiMark.now_ns &+ 10000000000_u64"; print "        while pool_word(512_u64).value.get < @@helpers"; print "          IyiMark.note_ready_wait"; print "          if IyiMark.now_ns >= ready_limit"; print "            message = \"FAIL: crowded: the readiness wait was held past ten seconds\\n\""; print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"; print "            __iyi_exit(76)"; print "          end"; print "          spin_pause"; print "        end"; waited++; next }
-  { print } END { if (made != 1 || waited != 1) exit 3 }' held-helpers/iyi/prelude.iyi > ready/iyi/prelude.iyi || { echo "the helpers' start this proof changes is missing or ambiguous"; exit 76; }
+awk '/^      def self\.start_helpers\(count : UInt64\) : Nil$/ { inside = 1; methods++ }
+  inside && /^          @@helpers = @@helpers \+ 1_u64$/ { made++; previous = $0; print; next }
+  inside && previous == "          @@helpers = @@helpers + 1_u64" && /^        end$/ { print; print "        ready_limit = IyiMark.now_ns &+ 10000000000_u64"; print "        while pool_word(512_u64).value.get < @@helpers"; print "          IyiMark.note_ready_wait"; print "          if IyiMark.now_ns >= ready_limit"; print "            message = \"FAIL: crowded: the readiness wait was held past ten seconds\\n\""; print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"; print "            __iyi_exit(76)"; print "          end"; print "          spin_pause"; print "        end"; waited++; previous = $0; next }
+  inside && /^      end$/ { inside = 0 }
+  { previous = $0; print } END { if (methods != 1 || made != 1 || waited != 1 || inside) exit 3 }' held-helpers/iyi/prelude.iyi > ready/iyi/prelude.iyi || { echo "the helpers' start this proof changes is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/ready${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-ready > build-ready.log 2>&1; then
   fail_build build-ready.log
 fi
@@ -2259,7 +2702,7 @@ printf '  exits 1 at "%s"\n' 'FAIL: crowded: the first collection waited for a h
 step "failure proof: a readiness wait after the watcher resumes is caught"
 mkdir -p ready-after-release/iyi
 cp held-helpers/iyi/*.iyi ready-after-release/iyi/
-awk '/^        def self\.finish_stopped\(started : UInt64, others : Int64\) : Nil$/ { inside = 1 }
+awk '/^        def self\.finish_stopped\(started : UInt64, others : Int64\) : Nil$/ { inside = 1; methods++ }
   inside && /^          IyiThread\.resume_others\(others\)$/ {
     print
     print "          ready_limit = IyiMark.now_ns &+ 10000000000_u64"
@@ -2275,7 +2718,7 @@ awk '/^        def self\.finish_stopped\(started : UInt64, others : Int64\) : Ni
     inserted++; next
   }
   inside && /^        end$/ { inside = 0 }
-  { print } END { if (inserted != 1) exit 3 }' held-helpers/iyi/prelude.iyi > ready-after-release/iyi/prelude.iyi || { echo "the post-release readiness anchor is missing or ambiguous"; exit 76; }
+  { print } END { if (methods != 1 || inserted != 1 || inside) exit 3 }' held-helpers/iyi/prelude.iyi > ready-after-release/iyi/prelude.iyi || { echo "the post-release readiness anchor is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/ready-after-release${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-ready-after-release > build-ready-after-release.log 2>&1; then
   fail_build build-ready-after-release.log
 fi
@@ -2285,13 +2728,11 @@ if [ "$code" -ne 1 ] || ! grep -Fxq 'FAIL: crowded: the first collection waited 
   echo "the post-release readiness wait was not caught (exit $code):"; tail -3 crowded-ready-after-release.txt; fail_for_status "$code" crowded-ready-after-release.txt
 fi
 printf '  exits 1 at "%s"\n' 'FAIL: crowded: the first collection waited for a held helper'
-# Four proofs follow, and they exist only where the code they prove does: the
-# wake boost is set in thread.iyi's start_helper under win32, and the helper
-# cap and the threads-minus-waiting count are in prelude.iyi's start_concurrent
-# under win32. Off Windows those lines are not compiled, so these steps run on
-# Windows alone, and this exit names them rather than passing silently.
+# Four proofs and the failed-query control follow. They exist only where the
+# wake boost in thread.iyi and the helper cap and thread counts in prelude.iyi
+# are compiled, so off Windows this exit names them rather than passing silently.
 if [ "$PSEP" = ":" ]; then
-  echo "platform: the wake boost (thread.iyi start_helper), the helper cap and the thread counts (prelude.iyi start_concurrent) are compiled only for Windows; their four steps run there"
+  echo "platform: the wake boost, helper cap, and thread-count proofs and the failed-query control run only on Windows"
   echo "workdir $WORK"
   echo "concurrent mark: every step that exists on this platform held"
   exit 0
@@ -2300,7 +2741,10 @@ fi
 step "failure proof: helpers created with Windows priority boost enabled are detected"
 mkdir -p boosted/iyi
 cp "$REPO"/src/iyi/*.iyi boosted/iyi/
-awk '/^ *LibC\.SetThreadPriorityBoost\(h, 1_i32\)$/ { print "        # the helpers keep the boost"; found++; next } { print } END { if (found != 1) exit 3 }' \
+awk '/^    def self\.start_helper\(entry : UInt64, argument : UInt64\) : Nil$/ { inside = 1; methods++ }
+  inside && /^        LibC\.SetThreadPriorityBoost\(h, 1_i32\)$/ { print "        # the helpers keep the boost"; found++; next }
+  inside && /^    end$/ { inside = 0 }
+  { print } END { if (methods != 1 || found != 1 || inside) exit 3 }' \
   "$REPO/src/iyi/thread.iyi" > boosted/iyi/thread.iyi || { echo "the helper boost call is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/boosted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o boosted-run > build-boosted.log 2>&1; then
   fail_build build-boosted.log
@@ -2353,7 +2797,7 @@ echo "  the shipped build, held to two processors beside a spinner: $(grep -m1 '
 # repeat the same run.
 timeout -k 5 300 ./boosted-run > boosted.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q '^FAIL: wake boost: [0-9]* threads of this process have the priority boost off, the mark asked for [0-9]* helpers$' boosted.txt; then
+if [ "$code" -ne 1 ] || ! grep -Eq '^FAIL: wake boost: [0-9]+ threads of this process have the priority boost off, the mark asked for [0-9]+ helpers$' boosted.txt; then
   echo "the boost check did not fire (exit $code):"; tail -3 boosted.txt; fail_for_status "$code" boosted.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: wake boost' boosted.txt)"
@@ -2361,10 +2805,12 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: wake boost' boosted.txt)"
 # A copy in which the OS query fails must be rejected as setup failure, not
 # miscounted as a boosted thread and accepted as the mutant's catch.
 step "control: an unreadable Windows priority boost is a setup failure"
-awk '$0 == "            queried = LibBoost.GetThreadPriorityBoost(thread, pointerof(disabled))" {
+awk '/^      def self\.count_boost_off : UInt64$/ { inside = 1; methods++ }
+  inside && $0 == "            queried = LibBoost.GetThreadPriorityBoost(thread, pointerof(disabled))" {
     print "            queried = 0_i32"; changed++; next
   }
-  { print } END { if (changed != 1) exit 3 }' "$REPO/bench/concurrent_mark.iyi" > boost-query-failed.iyi || { echo "the boost query anchor is missing or ambiguous"; exit 76; }
+  inside && /^      end$/ { inside = 0 }
+  { print } END { if (methods != 1 || changed != 1 || inside) exit 3 }' "$REPO/bench/concurrent_mark.iyi" > boost-query-failed.iyi || { echo "the boost query anchor is missing or ambiguous"; exit 76; }
 if ! "$IYI" build --release boost-query-failed.iyi -o boost-query-failed > build-boost-query-failed.log 2>&1; then
   fail_build build-boost-query-failed.log
 fi
@@ -2378,7 +2824,10 @@ printf '  exits 76 at "%s"\n' "FAIL: wake boost setup: cannot query a process th
 step "failure proof: a mark beside a busy program that asks for every helper is caught"
 mkdir -p greedy/iyi
 cp "$REPO"/src/iyi/*.iyi greedy/iyi/
-awk '/^ *helpers = free if helpers > free$/ { found++; next } { print } END { if (found != 1) exit 3 }' \
+awk '/^        def self\.start_concurrent : Bool$/ { inside = 1; methods++ }
+  inside && /^            helpers = free if helpers > free$/ { found++; next }
+  inside && /^        end$/ { inside = 0 }
+  { print } END { if (methods != 1 || found != 1 || inside) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > greedy/iyi/prelude.iyi || { echo "the cap this proof removes is not in the prelude any more"; exit 76; }
 if ! IYI_PATH="$WORK/greedy${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o greedy-run > build-greedy.log 2>&1; then
   fail_build build-greedy.log
@@ -2396,7 +2845,10 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: share:' greedy.txt)"
 step "failure proof: a mark beside an idle pool that counts its waiting workers is caught"
 mkdir -p counted/iyi
 cp "$REPO"/src/iyi/*.iyi counted/iyi/
-awk '/^ *threads = threads > waiting \? threads - waiting : 1_u64$/ { found++; next } { print } END { if (found != 1) exit 3 }' \
+awk '/^        def self\.start_concurrent : Bool$/ { inside = 1; methods++ }
+  inside && /^            threads = threads > waiting \? threads - waiting : 1_u64$/ { found++; next }
+  inside && /^        end$/ { inside = 0 }
+  { print } END { if (methods != 1 || found != 1 || inside) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > counted/iyi/prelude.iyi || { echo "the line this proof removes is not in the prelude any more"; exit 76; }
 if ! IYI_PATH="$WORK/counted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o counted-run > build-counted.log 2>&1; then
   fail_build build-counted.log
@@ -2413,7 +2865,10 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' counted.txt)"
 step "failure proof: a mark beside a busy pool that counts its running workers free is caught"
 mkdir -p pooled/iyi
 cp "$REPO"/src/iyi/*.iyi pooled/iyi/
-awk '/^ *waiting = IyiScheduler\.waiting_threads$/ { sub(/IyiScheduler\.waiting_threads/, "IyiWorkers.started? ? IyiWorkers.count.to_u64 : IyiScheduler.waiting_threads"); found++ } { print } END { if (found != 1) exit 3 }' \
+awk '/^        def self\.start_concurrent : Bool$/ { inside = 1; methods++ }
+  inside && /^            waiting = IyiScheduler\.waiting_threads$/ { found += gsub(/IyiScheduler\.waiting_threads/, "IyiWorkers.started? ? IyiWorkers.count.to_u64 : IyiScheduler.waiting_threads") }
+  inside && /^        end$/ { inside = 0 }
+  { print } END { if (methods != 1 || found != 1 || inside) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > pooled/iyi/prelude.iyi || { echo "the line this proof changes is not in the prelude any more"; exit 76; }
 if ! IYI_PATH="$WORK/pooled${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o pooled-run > build-pooled.log 2>&1; then
   fail_build build-pooled.log

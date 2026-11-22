@@ -35,7 +35,7 @@
 # bench/concurrent_mark.sh drives it and proves the check fails when the
 # barrier shades nothing.
 
-@[Unsafe("moves raw Pointer.malloc blocks while the marker walks, flags threads through words in an __iyi_mmap page, and scrubs an uninitialized stack pad through pointerof and asm")]
+@[Unsafe("moves raw Pointer.malloc blocks while the marker walks, flags threads through words in a platform-mapped page, and scrubs an uninitialized stack pad through pointerof and asm")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   import std/int
   def fail(message : String) : Nil
@@ -303,8 +303,20 @@
   class Busy
     @@page : UInt64 = 0_u64
 
-    def self.setup : Nil
-      @@page = __iyi_mmap(4096_u64).address
+    def self.setup(length : UInt64) : Nil
+      {% if flag?(:win32) %}
+        page = LibC.VirtualAlloc(Pointer(Void).new(0_u64), length, 0x3000_i32, 4_i32).address
+        setup_fail("share: the busy threads flag page could not be mapped") if page == 0_u64
+        @@page = page
+      {% elsif flag?(:darwin) %}
+        page = LibC.mmap(Pointer(Void).new(0_u64), length, 3, 4098, -1, 0_i64).address
+        setup_fail("share: the busy threads flag page could not be mapped") if page &+ 1_u64 == 0_u64
+        @@page = page
+      {% else %}
+        page = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, length.unsafe_to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
+        setup_fail("share: the busy threads flag page could not be mapped") if page < 0_i64 && page >= -4095_i64
+        @@page = page.unsafe_to_u64
+      {% end %}
     end
 
     def self.stop : Pointer(Atomic(UInt64))
@@ -638,7 +650,7 @@
   # printed everywhere.
   cores = IyiThread.core_count
   if cores >= 3_u64
-    Busy.setup
+    Busy.setup(4096_u64)
     busy = [] of IyiThread
     while busy.size.to_u64 < cores - 2_u64
       busy << IyiThread.start { busy_until_stopped; nil }

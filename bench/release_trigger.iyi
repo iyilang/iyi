@@ -35,8 +35,8 @@
 # The rounds: the trigger's collection whose mark ends inside the bound,
 # with one helper (`finish_stopped`); the trigger's collection with no
 # helper (`collect_locked`); and `IyiMark.collect`, the verb
-# (`collect_locked` too). Every round is checked and named, and a run
-# with any round failed exits 1 at the end.
+# (`collect_locked` too). Each round is named. A wrong-path premise exits
+# 76; otherwise every round is checked and invariant failures exit 1.
 #
 # bench/concurrent_mark.sh runs it, and broken copies of the runtime it
 # catches.
@@ -135,7 +135,7 @@ module bench/release_trigger
     went = IyiMark.concurrent_collections - beside
     if went != 0_u64
       print "FAIL: #{name}: #{went} of the round's collections went beside the program, so the round tried no collection that ends in its stop\n"
-      return false
+      __iyi_exit(76)
     end
     if settled.get == seen.get
       print "FAIL: #{name}: after collection #{seen.get} was counted, a thread's slices came to #{budget.get * 3_u64 // IyiHeap::SLICE * IyiHeap::SLICE} bytes, three budgets of #{budget.get}, and no collection ran - #{settled.get} collections once it was done, #{counted.get} bytes counted since the last collection\n"

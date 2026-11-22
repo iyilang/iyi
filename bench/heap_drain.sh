@@ -54,7 +54,7 @@
 #       Hook only, the staged slice checked and the round closed (exit 0):
 #         claim: every walk claim held to its walk's end
 #       The release kept under the class's lock, the staged check skipped (exit 0):
-#       the lock and the reservation hold until the slice's own release has run,
+#       the lock and the reservation hold until the slice's tail has run,
 #       so nothing can observe the release and no slice reports:
 #         claim: every walk claim held to its walk's end
 #       Completion not recorded (exit 76, its own watchdog sentence):
@@ -808,32 +808,32 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   marked "a partition holds under a mark" c6 1 "$C6_DELETE"
   # c7, the walk claim (claim mode, `claim` in heap_drain.iyi). The first helper
   # slice's claim is the staged arena: `claim.iyi`'s hooks reserve it from every
-  # other claim (`claim_class`, `partition_sweep_for`) until that slice's check
-  # has run. The mutant lets the staged claim go after its walk, under the class's
-  # lock, and checks it before that lock is let go. The readers of the claim word
-  # that could run in between all take that lock (`quiet`, `free_unswept`,
-  # `idle_batches`, `next_slab`, `take_run`); `release_arena` cannot run then,
-  # because a collection waits for the sweep round to close first.
+  # other claim (`claim_class`, `partition_sweep_for`) until that slice's tail has run:
+  # its release and arena_done, under the class lock. The mutant lets the staged claim
+  # go after the walk, under that lock, and checks it before the lock is let go. The
+  # readers of the claim word that could run in between all take that lock (`quiet`,
+  # `free_unswept`, `idle_batches`, `next_slab`, `take_run`); `release_arena` cannot run
+  # then, because a collection waits for the sweep round to close first.
   #   c7        the check fails (exit 86), and its report names the arena that the
   #             release line named: the staged slice.
-  #   c7 hook   the same hooks without the release: the staged slice is checked and
-  #             reports that it was (exit 0), and the verifier reports nothing.
+  #   c7 hook   the same hooks without the release: the staged slice's tail runs and sets
+  #             the done word (exit 0), and the verifier reports nothing.
   #   c7skip    the release kept under the class lock, the staged check skipped: the lock
-  #             and the reservation hold until the slice's own release has run, so
-  #             nothing can observe the release, and no slice reports (exit 0).
-  #   c7 count  the same hooks with the staged slice never reported as checked: the
-  #             claim wait can end only at its completion watchdog (exit 76).
+  #             and the reservation hold until the slice's tail has run, so nothing can
+  #             observe the release, and no slice reports (exit 0).
+  #   c7 count  the same hooks with the staged slice's tail never setting the done word:
+  #             the claim wait can end only at its completion watchdog (exit 76).
   cat >"$WORK/claim.iyi" <<'IYI'
       # copy only (bench/heap_drain.sh's c7): the first helper's claim is the staged
       # arena. Another claim of it, by a helper (`claim_class`) or by an allocating
-      # thread (`partition_sweep_for`), is refused until that slice's walk-claim
-      # check has run. The mutant lets the staged claim go after its walk, under
-      # the class's lock, and checks it before that lock is let go.
+      # thread (`partition_sweep_for`), is refused until that slice's tail has run: its
+      # release and arena_done, under the class's lock. The mutant lets the staged claim
+      # go after its walk, under that lock, and checks it before the lock is let go.
       @[UnsafeReach("the staged arena's address is set once, by the first helper's claim")]
       @@forced_staged : UInt64 = 0_u64
-      @[UnsafeReach("nonzero while the staged arena is reserved, cleared by its check")]
+      @[UnsafeReach("nonzero while the staged arena is reserved, cleared at the staged slice's tail")]
       @@forced_held : UInt64 = 0_u64
-      @[UnsafeReach("set once, by the staged slice after its check")]
+      @[UnsafeReach("set once, by the staged slice at its tail, after its arena_done")]
       @@forced_done : UInt64 = 0_u64
 
       def self.forced_claim_taken(arena : UInt64) : Nil
@@ -872,24 +872,52 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
 
 IYI
   export CLAIM_INS="$WORK/claim.iyi"
-  # The awk programs. Each rule counts its sites inside its own method: its scope
-  # opens at the method's first line and closes at its closing line. Each program
-  # requires exactly one site of every rule it uses, so a missing or a duplicate
-  # anchor exits 3, and the copy is not built.
+  # The awk programs. Each rule counts its sites inside its scope: a method (`in_helper`,
+  # `in_class`), or, inside sweep_one_helper, its partition arm (`in_arm`, from the
+  # `{% if flag?(:heap_partitions) %}` line to the `{% else %}` line). Each program
+  # requires exactly one site of each rule it uses (its END), so a missing or a
+  # duplicate site in scope exits 3 and the copy is not built. A site outside a scope
+  # is not counted, which the awk control below checks.
   CLAIM_METHODS='/^      def self\.helper_main\(seen : UInt64\) : Nil$/ { declarations++; methods = 0; while ((getline line < ENVIRON["CLAIM_INS"]) > 0) { print line; methods++ }; if (methods == 0) exit 3; print "" }'
   CLAIM_CLASS='/^      def self\.claim_class\(index : Int32, who : Int32\) : UInt64$/ { in_class = 1; classes++ } in_class && /^          if sweep_left\?\(arena, epoch\)$/ { reserved++; print "          if sweep_left?(arena, epoch) && !forced_reserved?(arena)"; next } in_class && /^      end$/ { in_class = 0 }'
   CLAIM_TAKEN='/^        def self\.sweep_one_helper : Bool$/ { in_helper = 1; helpers++ } in_helper && /^            pool_word\(POOL_SWEEPERS\)\.value\.add\(1_u64\) if arena > 2_u64$/ { taken++; print; print "            forced_claim_taken(arena) if arena > 2_u64"; next } in_helper && /^        end$/ { in_helper = 0 }'
-  CLAIM_STAGED='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { staged++; print "            if forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "              forced_release_staged(arena, epoch)"; print "              {% if flag?(:heap_verify) %} IyiHeapVerify.check_claimed(arena, epoch) {% end %}"; print "              IyiHeap.class_unlock(index)"; print "            end" }'
-  CLAIM_STAGED_HELD='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { staged++; print "            if forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "              forced_release_staged(arena, epoch)"; print "            end" }'
-  CLAIM_SKIP_CHECK='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { skipped++; armed_lock = 1; print "            {% if flag?(:heap_verify) %}"; print "            unless forced_reserved?(arena)"; print "              IyiHeapVerify.check_claimed(arena, epoch)"; print "            end"; print "            {% end %}"; next }'
-  CLAIM_SKIP_LOCK='in_helper && armed_lock && /^            IyiHeap\.class_lock\(index\)$/ { locked++; armed_lock = 0; print "            unless forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "            end"; next }'
-  CLAIM_DONE='in_helper && !cleared && /^            arena_done\(arena, epoch\)$/ { cleared++; print; print "            forced_slice_checked(arena)"; next }'
+  CLAIM_ARM='in_helper && /^          [{]% if flag\?\(:heap_partitions\) %[}]$/ { in_arm = 1; arms++ } in_helper && in_arm && /^          [{]% else %[}]$/ { in_arm = 0; closes++ }'
+  CLAIM_STAGED='in_helper && in_arm && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { staged++; print "            if forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "              forced_release_staged(arena, epoch)"; print "              {% if flag?(:heap_verify) %} IyiHeapVerify.check_claimed(arena, epoch) {% end %}"; print "              IyiHeap.class_unlock(index)"; print "            end" }'
+  CLAIM_STAGED_HELD='in_helper && in_arm && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { staged++; print "            if forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "              forced_release_staged(arena, epoch)"; print "            end" }'
+  CLAIM_SKIP_CHECK='in_helper && in_arm && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { skipped++; print "            {% if flag?(:heap_verify) %}"; print "            unless forced_reserved?(arena)"; print "              IyiHeapVerify.check_claimed(arena, epoch)"; print "            end"; print "            {% end %}"; next }'
+  CLAIM_SKIP_LOCK='in_helper && in_arm && /^            IyiHeap\.class_lock\(index\)$/ { locked++; print "            unless forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "            end"; next }'
+  CLAIM_DONE='in_helper && in_arm && /^            arena_done\(arena, epoch\)$/ { cleared++; print; print "            forced_slice_checked(arena)"; next }'
   CLAIM_PARTITION='/^  def self\.partition_sweep_for\(record : UInt64, index : Int32\) : UInt64$/ { in_part = 1; parts++ } in_part && /^        if IyiHeap\.partition_arena\?\(arena\) && sweep_left\?\(arena, epoch\) && IyiHeap\.read64\(arena \+ IyiHeap::OFF_SWEEPING\) != epoch$/ { reserved_part++; print "        if IyiHeap.partition_arena?(arena) && sweep_left?(arena, epoch) && IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) != epoch && !IyiMark.forced_reserved?(arena)"; next } in_part && /^  end$/ { in_part = 0 }'
-  PRELUDE_CONTROL="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_DONE { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || cleared != 1) exit 3 }"
-  PRELUDE_MUTANT="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_STAGED $CLAIM_DONE { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || staged != 1 || cleared != 1) exit 3 }"
-  PRELUDE_SKIP="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_STAGED_HELD $CLAIM_SKIP_CHECK $CLAIM_SKIP_LOCK $CLAIM_DONE { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || staged != 1 || skipped != 1 || locked != 1 || cleared != 1) exit 3 }"
+  PRELUDE_CONTROL="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_ARM $CLAIM_DONE { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || arms != 1 || closes != 1 || cleared != 1) exit 3 }"
+  PRELUDE_MUTANT="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_ARM $CLAIM_STAGED $CLAIM_DONE { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || arms != 1 || closes != 1 || staged != 1 || cleared != 1) exit 3 }"
+  PRELUDE_SKIP="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_ARM $CLAIM_STAGED_HELD $CLAIM_SKIP_CHECK $CLAIM_SKIP_LOCK $CLAIM_DONE { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || arms != 1 || closes != 1 || staged != 1 || skipped != 1 || locked != 1 || cleared != 1) exit 3 }"
   PRELUDE_COUNTLESS="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1) exit 3 }"
   PARTITION_RESERVE="$CLAIM_PARTITION { print } END { if (parts != 1 || reserved_part != 1) exit 3 }"
+  # awk control, no copy built: the partition-arm rules count inside the arm. Each
+  # program exits 0 on the source. A second arena_done or class_lock inside the arm
+  # exits 3. A second arena_done in the else arm is outside the arm and is not counted.
+  AWK_CONTROL="$WORK/awk-control"
+  mkdir -p "$AWK_CONTROL"
+  AWK_STATE='/^        def self\.sweep_one_helper : Bool$/ { h = 1 } h && /^          [{]% if flag\?\(:heap_partitions\) %[}]$/ { arm = 1 } h && arm && /^          [{]% else %[}]$/ { arm = 0; alt = 1 } /^        end$/ { h = 0; alt = 0 } { print }'
+  awk "$AWK_STATE h && arm && !d && /^            arena_done\(arena, epoch\)$/ { print; d = 1 }" "$REPO/src/iyi/prelude.iyi" > "$AWK_CONTROL/arm-arena.iyi"
+  awk "$AWK_STATE h && alt && !d && /^            arena_done\(arena, epoch\)$/ { print; d = 1 }" "$REPO/src/iyi/prelude.iyi" > "$AWK_CONTROL/else-arena.iyi"
+  awk "$AWK_STATE h && arm && !d && /^            IyiHeap\.class_lock\(index\)$/ { print; d = 1 }" "$REPO/src/iyi/prelude.iyi" > "$AWK_CONTROL/arm-lock.iyi"
+  awk_expect() {
+    awk "$3" "$4" >/dev/null 2>&1
+    local code=$?
+    if [ "$code" -ne "$1" ]; then
+      echo "  awk control: missed: $2 exited $code, wanted $1"
+      status=1
+    fi
+  }
+  ARENA_DONE_ONCE="$CLAIM_TAKEN $CLAIM_ARM $CLAIM_DONE { print } END { if (cleared != 1) exit 3 }"
+  LOCK_ONCE="$CLAIM_TAKEN $CLAIM_ARM $CLAIM_SKIP_LOCK { print } END { if (locked != 1) exit 3 }"
+  awk_expect 0 "the source's arm arena_done" "$ARENA_DONE_ONCE" "$REPO/src/iyi/prelude.iyi"
+  awk_expect 3 "a second arena_done in the arm" "$ARENA_DONE_ONCE" "$AWK_CONTROL/arm-arena.iyi"
+  awk_expect 0 "a second arena_done in the else arm" "$ARENA_DONE_ONCE" "$AWK_CONTROL/else-arena.iyi"
+  awk_expect 0 "the source's arm class_lock" "$LOCK_ONCE" "$REPO/src/iyi/prelude.iyi"
+  awk_expect 3 "a second class_lock in the arm" "$LOCK_ONCE" "$AWK_CONTROL/arm-lock.iyi"
+  [ "$status" -eq 0 ] && echo "  awk control: a duplicate anchor in the partition arm exits 3, one in the else arm is not counted, the source passes"
   EXPECT_ERR='  a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it' NAMED_STAGED=1 \
     COPY_FILE=prelude.iyi EXTRA_FILE=heap_partition.iyi EXTRA_AWK="$PARTITION_RESERVE" \
     copy "a helper holds its claim to its walk's end" c7 86 "$PRELUDE_MUTANT" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim

@@ -558,9 +558,9 @@ module bench/heap_drain
   # watchdog as setup (exit 76), never as a catch. A stock build waits until one
   # helper has begun an arena. A `-Dclaim_force` copy (bench/heap_drain.sh's c7)
   # waits until the first helper's claim is reserved, and then until that one
-  # slice has passed its check. Both then run one explicit collection: a
-  # collection closes the helpers' round and waits out every slice still in
-  # flight, so each of them has reached its check when it returns.
+  # slice has run its tail (its release and arena_done, under the class lock). Both
+  # then run one explicit collection: a collection closes the helpers' round and waits
+  # out every slice still in flight, so each of them has finished its tail when it returns.
   #   ./heap_drain claim [ROUNDS [UNITS [WATCHDOG_SECONDS [DONE_SECONDS]]]]   # default 6 8 120 120
   #   DONE_SECONDS bounds only the staged slice's completion; the others keep WATCHDOG_SECONDS.
   CLAIM_WATCHDOG_S = 120

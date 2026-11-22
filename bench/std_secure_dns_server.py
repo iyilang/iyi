@@ -15,12 +15,14 @@ Makes a test CA and a server certificate for `dns.test` and 127.0.0.1
     the file is not written and WORKDIR/h2.missing says why.
   * plain DNS over UDP, for the resolver's opt-in fallback; WORKDIR/udp.port.
 
-WORKDIR/ready is written last. Runs until killed, a thread per connection.
-WORKDIR/stage names the step it has reached (pki, dot, doh, h2, udp), and
-every thread's Python stack goes to stderr if ready is not written within
-15 s: the exercise's 20 s wait once ran out with neither (iyilang/iyi run
-44329905718, Namespace's macOS VM), while 300 starts there alone were all
-ready within 2 s, so the next stall says where it is.
+WORKDIR/ready is written last, once every listener above is bound. The
+exercise's supervisor starts the exercise once it sees that file. Runs until
+killed, a thread per connection.
+WORKDIR/stage names the step it
+has reached (pki, dot, doh, h2, udp). For a hang after the traceback timer
+is armed, every thread's Python stack goes to stderr after 15 seconds.
+The exercise's wait once ran out without a trace (iyilang/iyi run
+44329905718, Namespace's macOS VM).
 
 The zone is ZONE below. A few names misbehave on purpose, the way a broken
 or hostile server would, so the client's refusals have something to refuse:
@@ -47,12 +49,19 @@ the counts since it was last asked, this query included, as
 "queries=N edns=E unpadded=U", followed by " first=<why>" for the first
 query that was not padded, and starts the counts again.
 """
+import faulthandler
+
+# Arm before imports, which can also stall before main writes its stage.
+if __name__ == "__main__":
+    faulthandler.dump_traceback_later(15, exit=False)
+
+import os
+
 import base64
 import datetime as dt
-import faulthandler
 import http.server
+import importlib.util
 import ipaddress
-import os
 import select
 import socket
 import socketserver
@@ -595,7 +604,6 @@ def listen_tcp():
 
 def main():
     work = sys.argv[1]
-    faulthandler.dump_traceback_later(15, exit=False)
     write(work, "stage", "pki\n")
     make_pki(work)
 
@@ -610,12 +618,12 @@ def main():
     write(work, "doh.port", str(doh.server_address[1]))
 
     write(work, "stage", "h2\n")
-    try:
+    if importlib.util.find_spec("h2") is None:
+        have_h2 = False
+        write(work, "h2.missing", "no h2 package for this python, so there is no HTTP/2 server")
+    else:
         import h2.connection  # noqa: F401
         have_h2 = True
-    except ImportError as missing:
-        have_h2 = False
-        write(work, "h2.missing", "no h2 package for this python (%s), so there is no HTTP/2 server" % missing)
     if have_h2:
         h2_listener = listen_tcp()
         threading.Thread(target=serve_h2, args=(h2_listener, context(work, ["h2"])), daemon=True).start()

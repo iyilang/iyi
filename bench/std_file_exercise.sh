@@ -13,6 +13,14 @@
 #     directory passed where a file is expected, unsupported open modes,
 #     info on a nonexistent path, a path with a NUL in it, and real_path
 #     through a file; and, on Linux, that `exists?` of a FIFO answers.
+#   * Failures as values (#214): `File.open?`, `File.read?`, `File.write?`
+#     and a `FileIO`'s `write?`, `flush?` and `close?` answer a missing
+#     directory, a file this user may not write, a write to a file open
+#     only to read (every platform) and to /dev/full (Linux), and close's
+#     refused flush, as an `IOError` with the path and the system's number;
+#     copies whose `?` form panics, swallows the refusal or reads the wrong
+#     number fail at the check that names it; and `File.open`, `File.write`
+#     and `IyiIO#write`/`flush`/`close` still panic with their sentences.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -98,6 +106,7 @@ for phrase in "== write, read, and append" \
               "== paths, links, and content comparison" \
               "== locks" \
               "== open modes" \
+              "== failures answered as values" \
               "== delete"; do
   if ! grep -q "$phrase" "$WORK/file-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
@@ -519,6 +528,48 @@ if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
     fd' \
     "append after a seek still appends"
 fi
+# The `?` forms (#214), each made to panic, to swallow the refusal, or to
+# read the wrong number, in a copy that compiles.
+exercise_broken "an open? that panics" open_panics std \
+  '    return Std::File::IOError.last("open", path, fd) if fd < 0_i64' \
+  '    raise "cannot open #{path}" if fd < 0_i64' \
+  "panic: cannot open .*std_file_ex_no_such_dir"
+exercise_broken "a refused write taken as written" write_swallowed std \
+  '      @refusal = IOError.last("write", @path, n)' '      @refusal = nil' \
+  "flush? answers a refused write"
+exercise_broken "a write? that panics" write_panics std \
+  '      return count.to_i64
+    end
+    n
+  end' \
+  '    end
+    n
+  end' \
+  "panic: write failed"
+exercise_broken "a close? that drops its flush's refusal" close_swallowed std \
+  '    close
+    taken_refusal' \
+  '    close
+    taken_refusal
+    nil' \
+  "close? answers its flush's refusal"
+case "$(uname -s)" in
+  Linux) number_site='      (0_i64 - result).to_i32' ;;
+  Darwin) number_site='      Std::File::LibC.__error.value' ;;
+  *) number_site='      Std::File::LibKernel32.GetLastError
+    {% elsif flag?(:darwin) %}' ;;
+esac
+exercise_broken "a refusal that reads the wrong number" wrong_number std \
+  "$number_site" "$(printf '%s' "$number_site" | sed '1s/^\( *\).*/\11/')" \
+  "open? of a missing directory answers not found"
+# Windows refuses a directory at the open, which the copy above covers;
+# POSIX opens it and refuses the read.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *) exercise_broken "a read? that drops the read's refusal" read_swallowed std \
+       '    return refused unless refused.nil?' '' \
+       "read? of a directory answers its refusal" ;;
+esac
 # A user mode 000 does not stop - root, which a CI container runs as -
 # reads every file, so the exercise skips these two checks there and a
 # broken copy has nothing to fail.
@@ -595,6 +646,50 @@ refuses "info on a path that does not exist" info_nonexistent "File not found: "
   'File.info("'"$WORK"'/does_not_exist.txt")'
 refuses "real_path of an empty path" realpath_empty "Cannot resolve realpath for " \
   'File.real_path("")'
+# The panicking forms beside the `?` ones (#214) say what they said, to
+# the letter: panics_exactly <label> <name> <sentence> <program>.
+panics_exactly() {
+  local label="$1" name="$2" sentence="$3" expr="$4"
+  printf 'module main\n\nimport std/file::{File}\n\n%s\n' "$expr" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2>&1
+  local code=$? first
+  first="$(sed -n '1p' "$WORK/$name.out" | tr -d '\r')"
+  if [ "$code" -eq 0 ] || [ "$first" != "iyi: panic: $sentence" ]; then
+    echo "  $label: exited $code with '$first', not 'iyi: panic: $sentence'"
+    status=1
+    return
+  fi
+  printf '  %s: exits %s at "%s"\n' "$label" "$code" "$sentence"
+}
+printf 'kept' > "$WORK/read_only_target.txt"
+refused_write="write failed: the reader is gone, or the device refused it"
+panics_exactly "File.open of a missing directory" open_missing "cannot open $WORK/no_such_dir/upload" \
+  'File.open("'"$WORK"'/no_such_dir/upload", "w")'
+panics_exactly "File.write to a missing directory" write_missing "cannot write $WORK/no_such_dir/upload" \
+  'File.write("'"$WORK"'/no_such_dir/upload", "x")'
+panics_exactly "close of File.open's stream, its flush refused" close_refused "$refused_write" \
+  'io = File.open("'"$WORK"'/read_only_target.txt", "r")
+io.write("x")
+io.close'
+panics_exactly "flush of File.open?'s stream, refused" fileio_flush_refused "$refused_write" \
+  'io = File.open?("'"$WORK"'/read_only_target.txt", "r").or_panic
+io.write("x")
+io.flush'
+if [ "$(uname -s)" = Linux ]; then
+  panics_exactly "a write to /dev/full, then close" dev_full "$refused_write" \
+    'file = File.open("/dev/full", "w")
+file.write("x")
+file.close
+puts "closed"'
+fi
+refuses "open? of a missing directory, or_panic" open_or_panic "cannot open $WORK/no_such_dir/upload: " \
+  'File.open?("'"$WORK"'/no_such_dir/upload", "w").or_panic'
 # A path a NUL cuts short is refused, as std/file's own calls refuse it:
 # the prelude's handed the kernel the bytes before the NUL, and a write
 # to `victim\0.txt` wrote `victim`.

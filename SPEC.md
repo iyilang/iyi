@@ -2879,9 +2879,10 @@ a captured value with a setter, a local assigned after the call, the mark
 on a def with no block, a proc passed as a parallel task's block, and the
 def's block no longer trusted once the def assigns it), by
 `spec/compiler/iyimod_spec.cr` (the marker written, read and refused
-across an artifact), by `bench/thread_exercise.sh`'s last step, a
-program that must not compile, and by `bench/parallel_exercise.sh`'s
-fifth, four more. A `Share` type makes a value safe to read
+across an artifact), by the programs that must not compile in
+`bench/thread_exercise.sh`'s steps 6 to 6d, each refused by name, and by
+`bench/parallel_exercise.sh`'s fifth, four more. A `Share` type makes a
+value safe to read
 from two threads, not a variable safe to write, and a captured local is
 one cell both threads reach: a local the block assigns, or that its
 starter assigns after the start, or in a loop or block that starts the
@@ -2902,8 +2903,9 @@ thread's block and a million by its starter, had compiled and printed
 1061337, and is refused now with ``names the constant `COUNTS :
 Array(Int32)`, which is not Share``. A constant that a method the block
 calls reads is reached through the call, and is refused as well (below,
-and III.4.5). Step 6d holds the refusal. A class variable the block
-names is the same state with a cell of its own: one written after its
+and III.4.5). Step 6d holds the receiver form (`C2.bump` in a block), and
+`bench/parallel_exercise.sh` holds the read through a def. A class variable
+the block names is the same state with a cell of its own: one written after its
 initializer - by the block, by any method the program calls, or through
 `pointerof` - is refused by name, as a captured local assigned after the
 start is (``assigns `@@count`, a class variable, so every thread that

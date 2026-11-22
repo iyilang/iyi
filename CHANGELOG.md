@@ -1,6 +1,54 @@
 # Changelog
 
-## Unreleased
+## 0.22.0 — 2026-11-22
+
+**A string's hash is keyed afresh in every process, std/http holds a request
+to the limits its caller sets, and the runtime 0.21.0 made parallel holds
+under load.** `String#hash` is SipHash-1-3 keyed from the system's entropy
+once a process, so keys built offline to collide no longer make a `Hash` or
+`JSON.parse` quadratic (#212). `Server.serve` and `Server.handle` take
+`max_head` and `max_body`, and a head past the limit whose end came in the
+same read is refused (#213). std/tls, std/x509, std/ocsp, std/cookie,
+std/password, std/otp, std/rsa and std/big close what a peer could reach,
+and an `iyi.sum` hash is SHA-256 and says where each file ends.
+`File.open?`, `File.read?`, `File.write?` and a `FileIO`'s `write?`,
+`flush?` and `close?` answer a refusal as an `IOError` (#214), and
+compile-time macros in `.iyi` files run no shell command. In the runtime a
+pool short of workers fills, a finished thread leaves nothing on the
+scheduler's registry, threads that panic at once print whole lines, and a
+size class keeps warm what it took the epoch before, so #145's app holds
+127 MB at steady load on this Linux machine against 0.21.0's 170, and 134
+against 179 on macOS. A build that runs a command from a macro is no longer
+taken for up to date, the compiler's cache stays bounded, a regex literal a
+macro writes and a `lib` global read by a generic that travels compile
+(#215, #204), and `iyi test` runs tests at once. heap22, a heap per pool
+unit that each unit collects on its own thread, ships as an experiment
+behind `-Dheap_partitions`, kept or dropped on its measurements.
+
+**What a user must change.** A macro in a `.iyi` file that called `system`
+or backticks is refused at its line, `read_file` reads only within its
+package and std, and only the root package reads `env`. The signing calls
+of std/rsa, std/tls, std/x509 and std/acme answer an error beside the
+signature, `Bcrypt.hash` panics for a password with a NUL or past 72 bytes,
+std/otp refuses a secret under 16 bytes unless `min_secret:` says less, and
+`Cookie#to_set_cookie` panics for a path, domain or `SameSite` a cookie
+cannot carry. `iyi.sum` lines are `h2:`, which 0.21.0 does not read, so a
+team that shares one upgrades together, and `iyi.sum` now records the
+manifests MVS reads: run `iyi mod tidy` and commit what it writes before
+`iyi mod tidy --check` passes again. A string's hash differs from one run
+to the next, so nothing may keep or print one as if it stayed. The Changed
+entry "What the fixes below change in a program's source" has the details.
+
+### Breaking
+
+- **Compile-time macros in `.iyi` files refuse shell commands.** `system`
+  and backticks fail with the source location. `read_file`, `read_file?` and
+  `file_exists?` stay within the defining package and the standard library,
+  including paths through symbolic links or Windows junctions. Only the root package
+  may read the build environment with `env`. A `run` helper must be in the
+  defining package, but it still executes without a sandbox and can run
+  arbitrary code. A macro defined and called in `.cr` keeps its existing
+  behavior; a `.cr` macro called from `.iyi` follows the same restrictions.
 
 ### Added
 
@@ -66,15 +114,6 @@
   or not.
 
 ### Changed
-
-- **Compile-time macros in `.iyi` files refuse shell commands.** `system`
-  and backticks fail with the source location. `read_file`, `read_file?` and
-  `file_exists?` stay within the defining package and the standard library,
-  including paths through symbolic links or Windows junctions. Only the root package
-  may read the build environment with `env`. A `run` helper must be in the
-  defining package, but it still executes without a sandbox and can run
-  arbitrary code. A macro defined and called in `.cr` keeps its existing
-  behavior; a `.cr` macro called from `.iyi` follows the same restrictions.
 
 - **`iyi test` in a directory no longer runs other projects' tests.** It
   walks the tree as `fix` and `mod tidy` do: not into `lib` (the installed

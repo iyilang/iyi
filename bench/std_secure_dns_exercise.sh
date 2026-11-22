@@ -39,18 +39,22 @@ evidence() {
 
 if [ "${1:-}" = "--dns-body" ]; then
   WORK="$2" SRV="$3" PY="$4" IYI="$5" REPO="$6" PSEP="$7"
-  # The supervisor owns the server and watched clients. FD 3 receives its
-  # replies, FD 4 sends requests, and ordinary gate output remains visible.
+  # The supervisor owns the server and every stage. FD 3 receives its go
+  # line, FD 4 sends stage requests and the exit line, and ordinary gate
+  # output remains visible.
   exec 3<&0 4>&1
   exec 0</dev/null 1>&2
-  trap 'gate_exit=$?; printf "exit %s\n" "$gate_exit" >&4 || :' EXIT
+  # After its exit line the body waits on FD 3, so the supervisor's group or
+  # Job kill always meets a live leader.
+  trap 'gate_exit=$?; printf "exit %s\n" "$gate_exit" >&4 || :; read -r _ <&3 || :' EXIT
   grant=""
   if ! IFS= read -r grant <&3 || [ "$grant" != go ]; then
     echo "the secure DNS supervisor did not grant the exercise"
     exit 76
   fi
 else
-  . "$REPO/bench/end_process.sh"
+  END_PROCESS_SH="$REPO/bench/end_process.sh"
+  . "$END_PROCESS_SH"
   WORK="$(mktemp -d)"
   OWNED_PID=""
   OWNED_KIND=""
@@ -65,13 +69,11 @@ else
   }
   force_owned() {
     if [ "$END_PROCESS_WINDOWS" = yes ]; then
-      # Only an MSYS Bash is watched by timeout. taskkill addresses the
-      # one native process, not a PID tree.
-      timeout --foreground -k 1 3 "$BASH" -c '
-        { read -r native <"/proc/$1/winpid"; } 2>/dev/null || exit 1
-        MSYS2_ARG_CONV_EXCL="*" taskkill /F /PID "$native" >/dev/null 2>&1
-        exit $?
-      ' _ "$OWNED_PID" || :
+      # One native process, killed by taskkill on its own Windows pid from this
+      # shell. timeout bounds only a taskkill that does not return.
+      if { read -r native <"/proc/$OWNED_PID/winpid"; } 2>/dev/null; then
+        MSYS2_ARG_CONV_EXCL="*" timeout --foreground -k 1 10 taskkill /F /PID "$native" >/dev/null 2>&1 || :
+      fi
     else
       end_process "$OWNED_PID" KILL || :
     fi
@@ -215,6 +217,11 @@ from cryptography import x509
       evidence "$WORK/crypto-preflight.log"
       exit 76
       ;;
+    cleanup)
+      echo "Python dependency preflight cleanup failed"
+      evidence "$WORK/crypto-preflight.log"
+      exit 76
+      ;;
     *)
       echo "Python dependency preflight failed"
       evidence "$WORK/crypto-preflight.log"
@@ -330,7 +337,7 @@ def diagnostics(child):
             show(work / "server.sample", head=True)
 
 
-def stream_reader(pipe, events, closed=None):
+def stream_reader(pipe, events):
     try:
         while True:
             chunk = os.read(pipe.fileno(), 4096)
@@ -340,120 +347,31 @@ def stream_reader(pipe, events, closed=None):
             events.put(("data", chunk))
     except OSError as error:
         events.put(("error", str(error)))
-    finally:
-        if closed is not None:
-            closed.set()
 
 
-def startup(child, events, deadline):
-    buffer = bytearray()
-    frame = None
-    eof = False
+def startup(child, deadline):
+    # The server writes WORKDIR/ready last, after every listener is bound.
     while True:
         if cancelled():
             return "cancel"
-        remaining = deadline - time.monotonic()
-        expired = remaining <= 0
-        try:
-            if eof:
-                raise queue.Empty
-            kind, value = events.get_nowait() if expired else events.get(timeout=min(0.1, remaining))
-        except queue.Empty:
-            if expired:
-                code = child.poll()
-                if eof and code is not None:
-                    kind, value = "idle", b""
-                elif code is not None:
-                    say("the scripted server readiness pipe did not drain by the startup deadline (child status %s)" % code)
-                    return "error"
-                elif frame is not None:
-                    say("the scripted servers did not close their readiness pipe after readiness")
-                    return "error"
-                else:
-                    stage = (srv / "stage").read_text().strip() if (srv / "stage").exists() else "none"
-                    suffix = " (stdout closed)" if eof else ""
-                    say("the scripted servers hung before signaling readiness, at stage: %s%s" % (stage, suffix))
-                    diagnostics(child)
-                    return "error"
-            else:
-                kind, value = "idle", b""
-        if kind == "error":
-            say("the scripted servers' readiness pipe failed: %s" % value)
-            return "error"
-        if kind == "data":
-            if frame is not None:
-                say("the scripted servers sent extra bytes after readiness")
-                return "error"
-            buffer.extend(value)
-            if b"\n" in buffer:
-                raw, _, rest = bytes(buffer).partition(b"\n")
-                if len(raw) + 1 > 64:
-                    say("the scripted servers sent an oversized readiness signal")
-                    return "error"
-                frame = raw[:-1] if raw.endswith(b"\r") else raw
-                buffer = bytearray(rest)
-                if frame != b"ready":
-                    say("the scripted servers sent an invalid readiness signal: %s" % frame.decode("utf-8", "backslashreplace"))
-                    return "error"
-                if buffer:
-                    say("the scripted servers sent extra bytes after readiness")
-                    return "error"
-            elif len(buffer) > 64:
-                say("the scripted servers sent an oversized readiness signal")
-                return "error"
-        if kind == "eof":
-            eof = True
-            if buffer:
-                say("the scripted servers sent a truncated readiness signal: %s" % bytes(buffer).decode("utf-8", "backslashreplace"))
-                return "error"
         code = child.poll()
-        if frame is not None and eof:
-            if not (srv / "ready").is_file():
-                say("the scripted servers signaled readiness without a ready file")
-                return "error"
-            if code is not None:
-                say("the scripted servers exited before readiness handoff (status %s)" % code)
-                return "error"
-            if time.monotonic() >= deadline:
-                say("the scripted servers' readiness was not accepted before the startup deadline")
-                return "error"
-            return "ready"
-        if eof and code is not None:
-            log = work / "server.log"
-            if log.stat().st_size:
+        if (srv / "ready").is_file():
+            if code is None:
+                return "ready"
+            say("the scripted servers exited before readiness was accepted (status %s)" % code)
+            return "error"
+        if code is not None:
+            if (work / "server.log").stat().st_size:
                 say("the scripted servers exited before readiness (status %s); server output follows" % code)
             else:
                 say("the scripted servers exited silently before readiness (status %s)" % code)
             return "error"
-        if eof and not expired:
-            time.sleep(min(0.1, remaining))
-
-
-def client_command(kind, name):
-    if kind == "plain" and name == "dns-plain":
-        return [str(work / name), SRV], work / (name + ".out"), 180
-    if kind == "release" and name == "dns-release":
-        return [str(work / name), SRV], work / (name + ".out"), 180
-    if kind == "mutation" and name and all(c.isalnum() or c in "_-" for c in name):
-        return [str(work / name / "program"), SRV], work / name / "out", 120
-    raise ValueError("invalid client request")
-
-
-def watch_client(command, output_path, bound, body_closed, server):
-    deadline = time.monotonic() + bound
-    with output_path.open("wb") as output:
-        client = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
-        try:
-            while client.poll() is None:
-                if cancelled() or body_closed.is_set() or server.poll() is not None:
-                    return "cancel"
-                if time.monotonic() >= deadline:
-                    return "timeout"
-                time.sleep(min(0.1, max(0.001, deadline - time.monotonic())))
-            return "exit %s" % client.returncode
-        finally:
-            if not stop(client, time.monotonic() + CLEANUP_SECONDS):
-                raise RuntimeError("client cleanup failed")
+        if time.monotonic() >= deadline:
+            stage = (srv / "stage").read_text().strip() if (srv / "stage").exists() else "none"
+            say("the scripted servers hung before signaling readiness, at stage: %s" % stage)
+            diagnostics(child)
+            return "error"
+        time.sleep(min(0.1, max(0.001, deadline - time.monotonic())))
 
 
 def start_body():
@@ -538,49 +456,9 @@ def start_body():
         return None, None
 
 
-def darwin_empty_group(body, deadline):
-    # Darwin can report EPERM for a group whose only member is an unreaped
-    # zombie. WNOWAIT keeps its PID reserved while the group is inspected.
-    try:
-        while True:
-            result = os.waitid(os.P_PID, body.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-            if result is not None:
-                if result.si_pid != body.pid:
-                    return False, "waitid returned an unexpected process"
-                break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False, "the group leader did not exit before the cleanup deadline"
-            time.sleep(min(0.05, remaining))
-        listing = subprocess.run(
-            ["ps", "-A", "-o", "pid=,pgid=,stat="],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            timeout=max(0.001, deadline - time.monotonic()), check=False,
-        )
-        if listing.returncode != 0:
-            return False, "ps failed (status %s): %s" % (listing.returncode, listing.stderr.strip()[:512])
-        leader_seen = False
-        for line in listing.stdout.splitlines():
-            fields = line.split()
-            if len(fields) != 3:
-                return False, "ps returned an invalid process record"
-            pid, group = int(fields[0]), int(fields[1])
-            state = fields[2]
-            if group != body.pid:
-                continue
-            if pid == body.pid and state.startswith("Z"):
-                leader_seen = True
-            if not state.startswith(("Z", "X")):
-                return False, "process %s in the group is still live (state %s)" % (pid, state)
-        if not leader_seen:
-            return False, "the exited group leader was not visible as a zombie"
-        return True, ""
-    except (AttributeError, OSError, ValueError, subprocess.TimeoutExpired) as error:
-        return False, "cannot inspect the group: %s" % error
-
-
 def end_body(body, job):
-    # The leader must not be reaped before the group/job is signalled.
+    # The body waits on its control pipe after its exit line, so it is still
+    # a live group leader here and the group can be signalled.
     deadline = time.monotonic() + CLEANUP_SECONDS
     ok = True
     if job is None:
@@ -588,11 +466,6 @@ def end_body(body, job):
             os.killpg(body.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        except PermissionError as error:
-            empty, detail = darwin_empty_group(body, deadline) if sys.platform == "darwin" else (False, "")
-            if not empty:
-                say("cannot signal secure DNS exercise group: %s%s" % (error, "; " + detail if detail else ""))
-                ok = False
         except OSError as error:
             say("cannot signal secure DNS exercise group: %s" % error)
             ok = False
@@ -626,27 +499,14 @@ def end_body(body, job):
     return ok
 
 
-def run_body(server, deadline):
-    if time.monotonic() >= deadline:
-        say("the scripted servers' readiness was not accepted before the startup deadline")
-        return FAILURE
-    if server.poll() is not None:
-        say("the scripted servers exited before readiness handoff (status %s)" % server.returncode)
-        return FAILURE
+def run_body(server):
     body, job = start_body()
     if body is None:
         return FAILURE
     events = queue.Queue()
-    body_closed = threading.Event()
-    threading.Thread(target=stream_reader, args=(body.stdout, events, body_closed), daemon=True).start()
+    threading.Thread(target=stream_reader, args=(body.stdout, events), daemon=True).start()
 
     def control():
-        if time.monotonic() >= deadline:
-            say("the scripted servers' readiness was not accepted before the startup deadline")
-            return FAILURE, False
-        if server.poll() is not None:
-            say("the scripted servers exited before readiness handoff (status %s)" % server.returncode)
-            return FAILURE, False
         try:
             body.stdin.write(b"go\n")
             body.stdin.flush()
@@ -659,17 +519,19 @@ def run_body(server, deadline):
         stage_label = "the secure DNS exercise"
         stage_evidence = None
         stage_deadline = time.monotonic() + stage_seconds
-        def failed(message):
+
+        def failed(message, fallback=None):
             say(message)
-            source = stage_evidence if stage_evidence is not None and stage_evidence.is_file() else work / "server.log"
-            show(source)
+            source = stage_evidence if stage_evidence is not None else fallback
+            if source is not None and source.is_file():
+                show(source)
             return FAILURE, False
 
         while True:
             if cancelled():
                 return 143, False
             if server.poll() is not None:
-                return failed("the scripted servers exited during the exercise (status %s)" % server.returncode)
+                return failed("the scripted servers exited during the exercise (status %s)" % server.returncode, work / "server.log")
             if b"\n" not in pending:
                 if len(pending) > 256:
                     return failed("the secure DNS exercise sent an oversized control request")
@@ -720,31 +582,8 @@ def run_body(server, deadline):
                 stage_evidence = None if relative == "-" else work / relative
                 stage_deadline = time.monotonic() + stage_seconds
                 continue
-            fields = line.split(" ")
-            if done or len(fields) != 3 or fields[0] != "run" or pending:
-                return failed("the secure DNS exercise sent an invalid control request")
-            try:
-                command, output_path, bound = client_command(fields[1], fields[2])
-            except ValueError:
-                return failed("the secure DNS exercise sent an invalid control request")
-            reply = watch_client(command, output_path, bound, body_closed, server)
-            if reply == "cancel":
-                if server.poll() is not None:
-                    say("the scripted servers exited during the exercise (status %s)" % server.returncode)
-                    show(output_path)
-                    return FAILURE, False
-                if cancelled():
-                    return 143, False
-                continue
-            stage_seconds = STAGE_SECONDS
-            stage_label = "%s %s: the checks after its client" % (fields[1], fields[2])
-            stage_evidence = output_path
-            stage_deadline = time.monotonic() + stage_seconds
-            try:
-                body.stdin.write((reply + "\n").encode("ascii"))
-                body.stdin.flush()
-            except BrokenPipeError:
-                pass
+            return failed("the secure DNS exercise sent an invalid control request")
+
     try:
         verdict, missing = control()
     finally:
@@ -762,27 +601,17 @@ def run_body(server, deadline):
 
 def main():
     (work / "supervisor.armed").touch()
-    bootstrap = time.monotonic() + SERVER_START_SECONDS
-    while not (work / "supervisor.grant").exists():
-        if cancelled():
-            return 143
-        if time.monotonic() >= bootstrap:
-            say("Python supervisor grant watchdog expired")
-            return FAILURE
-        time.sleep(0.05)
     server = None
     verdict = FAILURE
     try:
         with (work / "server.log").open("wb") as output:
             deadline = time.monotonic() + SERVER_START_SECONDS
-            server = subprocess.Popen([PYTHON, SERVER, SRV], stdout=subprocess.PIPE, stderr=output, bufsize=0)
-            events = queue.Queue()
-            threading.Thread(target=stream_reader, args=(server.stdout, events), daemon=True).start()
-            outcome = startup(server, events, deadline)
+            server = subprocess.Popen([PYTHON, SERVER, SRV], stdout=output, stderr=subprocess.STDOUT)
+            outcome = startup(server, deadline)
             if outcome == "cancel":
                 verdict = 143
             elif outcome == "ready":
-                verdict = run_body(server, deadline)
+                verdict = run_body(server)
             else:
                 show(work / "server.log")
     finally:
@@ -824,7 +653,6 @@ PY
     [ -f "$WORK/supervisor.armed" ] && break
     sleep 0.1
   done
-  : >"$WORK/supervisor.grant"
   supervisor_code=0
   while :; do
     supervisor_code=0
@@ -841,10 +669,12 @@ status=0
 export IYI_PATH="$REPO/src"
 
 BUILD_SECONDS=300
+CLIENT_SECONDS=180
+BROKEN_SECONDS=120
 DIG_SECONDS=30
 STAGE_SECONDS=60
 
-# Every stretch between client requests has an owner-enforced deadline.
+# Every stretch between stage requests has an owner-enforced deadline.
 stage() {
   if ! printf 'stage %s %s %s\n' "$1" "$2" "$3" >&4; then
     echo "the secure DNS supervisor could not receive a stage"
@@ -852,23 +682,6 @@ stage() {
   fi
 }
 
-# The supervisor owns each client and distinguishes its exit status from
-# a watchdog expiry, including a real exit 124 or 137.
-run_watched() {
-  if ! printf 'run %s %s\n' "$1" "$2" >&4; then
-    echo "the secure DNS supervisor could not receive a client request"
-    exit 76
-  fi
-  WATCHED_KIND="" WATCHED_CODE=""
-  if ! IFS=' ' read -r WATCHED_KIND WATCHED_CODE <&3; then
-    echo "the secure DNS client watchdog gave no verdict"
-    exit 76
-  fi
-  case "$WATCHED_KIND" in
-    exit | timeout) ;;
-    *) echo "the secure DNS client watchdog gave an invalid verdict"; exit 76 ;;
-  esac
-}
 if [ -f "$SRV/h2.missing" ]; then
   echo "== $(cat "$SRV/h2.missing" 3<&- 4>&-): DNS over HTTPS is asked over HTTP/1.1 alone"
 fi
@@ -886,13 +699,10 @@ build_and_run() {
     status=1
     return 1
   fi
-  run_watched "$label" "$name"
-  if [ "$WATCHED_KIND" = timeout ]; then
-    echo "$label: client watchdog expired (180 s)"
-    evidence "$WORK/$name.out"
-    exit 76
-  fi
-  local exit_code="$WATCHED_CODE"
+  stage "$CLIENT_SECONDS" "$name.out" "$label: client"
+  "$WORK/$name" "$SRV" >"$WORK/$name.out" 2>&1 </dev/null 3<&- 4>&-
+  local exit_code=$?
+  stage "$STAGE_SECONDS" "$name.out" "$label: the checks after its client"
   if [ "$exit_code" -ne 0 ]; then
     echo "$label: exited $exit_code"
     evidence "$WORK/$name.out"
@@ -1111,10 +921,9 @@ echo "== the checks fail when the module is broken"
 # replaced by *new* must fail, and say *phrase*.
 breaks() {
   local label="$1" dir="$2" phrase="$3"
-  stage "$STAGE_SECONDS" - "$label: patch preparation"
+  stage "$BUILD_SECONDS" "$dir/patch.log" "$label: patch"
   mkdir -p "$WORK/$dir/std" 3<&- 4>&-
   : >"$WORK/$dir/patch.log"
-  stage "$BUILD_SECONDS" "$dir/patch.log" "$label: patch"
   FILE1="$4" OLD1="$5" NEW1="$6" FILE2="${7:-}" OLD2="${8:-}" NEW2="${9:-}" "$PY" - >"$WORK/$dir/patch.log" 2>&1 3<&- 4>&- <<PY
 import os
 from pathlib import Path
@@ -1144,13 +953,9 @@ PY
     status=1
     return
   fi
-  run_watched mutation "$dir"
-  if [ "$WATCHED_KIND" = timeout ]; then
-    echo "$label: broken-copy watchdog expired (120 s)"
-    evidence "$WORK/$dir/out"
-    exit 76
-  fi
-  local code="$WATCHED_CODE"
+  stage "$BROKEN_SECONDS" "$dir/out" "$label: broken copy"
+  "$WORK/$dir/program" "$SRV" >"$WORK/$dir/out" 2>&1 </dev/null 3<&- 4>&-
+  local code=$?
   if [ "$code" -eq 0 ]; then
     echo "  $label: the exercise PASSED on a broken module"
     evidence "$WORK/$dir/out"

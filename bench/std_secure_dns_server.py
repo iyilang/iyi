@@ -15,8 +15,9 @@ Makes a test CA and a server certificate for `dns.test` and 127.0.0.1
     the file is not written and WORKDIR/h2.missing says why.
   * plain DNS over UDP, for the resolver's opt-in fallback; WORKDIR/udp.port.
 
-WORKDIR/ready is written last, then one ``ready\\n`` record goes to stdout
-and the readiness stream closes. Runs until killed, a thread per connection.
+WORKDIR/ready is written last, once every listener above is bound. The
+exercise's supervisor starts the exercise once it sees that file. Runs until
+killed, a thread per connection.
 WORKDIR/stage names the step it
 has reached (pki, dot, doh, h2, udp). For a hang after the traceback timer
 is armed, every thread's Python stack goes to stderr after 15 seconds.
@@ -634,12 +635,6 @@ def main():
     write(work, "udp.port", str(udp.server_address[1]))
 
     write(work, "ready", "ready\n")
-    os.write(1, b"ready\n")
-    null = os.open(os.devnull, os.O_WRONLY)
-    try:
-        os.dup2(null, 1)
-    finally:
-        os.close(null)
     faulthandler.cancel_dump_traceback_later()
     threading.Event().wait()
 

@@ -191,6 +191,22 @@
     false
   end
 
+  # The one bound on the three premise acquisitions below: a mark beside this
+  # thread must start within ten seconds of allocation. Past that the caller
+  # ends the run with its own setup sentence and status 76. Nothing counts
+  # attempts; every allocation is a check of the marking flag.
+  MARK_WATCHDOG_NS = 10000000000_u64
+
+  def await_mark : Bool
+    deadline = IyiMark.now_ns + MARK_WATCHDOG_NS
+    while IyiMark.now_ns < deadline
+      block = Pointer(UInt8).malloc(64_u64)
+      block.value = 1_u8
+      return true if IyiMark.marking?
+    end
+    false
+  end
+
   # A holder born under the mark, and blackened here: an object born
   # under a mark is white and alive by its epoch's parity (the mutator
   # writes no mark byte), and a holder with nothing in it is what a scan
@@ -660,18 +676,13 @@
     chain = build_chain(7_u64)
     IyiMark.auto = true
     asked = 0_u64
-    marked = false
-    attempt = 0
-    while !marked && attempt < 8
-      marked = allocate_until_marking
-      asked = IyiMark.beside_helpers if marked
-      IyiMark.settle
-      attempt = attempt + 1
-    end
+    marked = await_mark
+    asked = IyiMark.beside_helpers if marked
+    IyiMark.settle
     Busy.stop.value.set(1_u64)
     busy.each(&.join)
     IyiMark.auto = false
-    setup_fail("share: no mark ran beside the busy threads in 8 tries") unless marked
+    setup_fail("share: no mark ran beside the busy threads within ten seconds") unless marked
     {% if flag?(:win32) %}
       fail("share: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, the mark beside them asked for #{asked.to_i64} helpers rather than 1") if asked != 1_u64
     {% end %}
@@ -763,16 +774,11 @@
     chain = build_chain(11_u64)
     IyiMark.auto = true
     asked = 0_u64
-    marked = false
-    attempt = 0
-    while !marked && attempt < 8
-      marked = allocate_until_marking
-      asked = IyiMark.beside_helpers if marked
-      IyiMark.settle
-      attempt = attempt + 1
-    end
+    marked = await_mark
+    asked = IyiMark.beside_helpers if marked
+    IyiMark.settle
     IyiMark.auto = false
-    setup_fail("idle pool: no mark ran beside the idle pool in 8 tries") unless marked
+    setup_fail("idle pool: no mark ran beside the idle pool within ten seconds") unless marked
     fail("idle pool: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, #{waiting.to_i64} of them pool workers waiting, the mark beside them asked for #{asked.to_i64} helper") if asked < 2_u64
     puts "idle pool: with #{threads.to_i64} threads of the program's on #{cores.to_i64} cores, #{waiting.to_i64} of them pool workers waiting, the mark beside them asked for #{asked.to_i64} helpers"
     fail("the chain's tail lost its payload beside the idle pool") unless tail(chain).payload.is_a?(Payload)
@@ -802,18 +808,13 @@
       busy_arrived = Busy.arrived.value.get
       setup_fail("busy pool: #{busy_arrived.to_i64} of #{cores.to_i64} pool tasks started within five seconds") if busy_arrived < cores
       IyiMark.auto = true
-      marked = false
-      attempt = 0
-      while !marked && attempt < 8
-        marked = allocate_until_marking
-        busy_asked = IyiMark.beside_helpers if marked
-        IyiMark.settle
-        attempt = attempt + 1
-      end
+      marked = await_mark
+      busy_asked = IyiMark.beside_helpers if marked
+      IyiMark.settle
       IyiMark.auto = false
       Busy.stop.value.set(1_u64)
     end
-    setup_fail("busy pool: no mark ran beside the busy pool in 8 tries") unless marked
+    setup_fail("busy pool: no mark ran beside the busy pool within ten seconds") unless marked
     {% if flag?(:win32) %}
       fail("busy pool: with #{cores.to_i64} pool workers running on #{cores.to_i64} cores, #{busy_waiting.to_i64} waiting, the mark beside them asked for #{busy_asked.to_i64} helpers rather than 1") if busy_asked != 1_u64
     {% end %}

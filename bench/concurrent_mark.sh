@@ -67,6 +67,11 @@
 # NOT routed and NOT individually forced. Each exits 76 with the sentence
 # shown when its deadline expires, by source reading; no forced copy in the
 # Darwin gate reaches that sentence:
+#   share, idle pool and busy pool acquisitions (`await_mark`'s ten-second
+#     watchdog): "FAIL: share: no mark ran beside the busy threads within ten
+#     seconds", and the idle and busy pool sentences. The premise controls force
+#     the same sentences after a mark was found, so the watchdog's own return is
+#     checked by source reading.
 #   freed (generated): "FAIL: freed: the previous collection did not finish within five seconds";
 #     "FAIL: freed: no sweep looked at a chunk the last mark kept within five seconds"
 #   freed, sweep look (overlay sweep_slice): "freed: the sweep held a chunk the last
@@ -1070,9 +1075,9 @@ for premise in $premises; do
     boost-pool) expected="FAIL: wake boost: the pool started before the count, so every thread has the boost off" ;;
     boost-none) expected="FAIL: wake boost: no mark beside the program asked for helpers" ;;
     busy-page) expected="FAIL: share: the busy threads flag page could not be mapped" ;;
-    share-mark) expected="FAIL: share: no mark ran beside the busy threads in 8 tries" ;;
-    idle-mark) expected="FAIL: idle pool: no mark ran beside the idle pool in 8 tries" ;;
-    busy-mark) expected="FAIL: busy pool: no mark ran beside the busy pool in 8 tries" ;;
+    share-mark) expected="FAIL: share: no mark ran beside the busy threads within ten seconds" ;;
+    idle-mark) expected="FAIL: idle pool: no mark ran beside the idle pool within ten seconds" ;;
+    busy-mark) expected="FAIL: busy pool: no mark ran beside the busy pool within ten seconds" ;;
     busy-wait) expected="" ;;
     busy-arrival) expected="" ;;
     share-cores) expected="FAIL: the share proof needs three cores; this host has 2" ;;

@@ -176,7 +176,9 @@ import std/int
             break if set
           end
 {% if flag?(:optoutignored_force) %}
-          fail("serial: a second spawn(unit: :same) task never ran beside the first") unless IyiWorkers.forced_meet
+          # Its limit is a watchdog that ends the run at its own sentence with status 76.
+          # forced_meet never answers false, so there is no branch for it here.
+          IyiWorkers.forced_meet
 {% end %}
           until_ns = __iyi_monotonic_ns + SPIN_NS
           while __iyi_monotonic_ns < until_ns

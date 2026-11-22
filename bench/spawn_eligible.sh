@@ -713,7 +713,7 @@ cat > "$WORK/forced_words.iyi" <<'IYI'
     while hold.value.get == 0_u64
       if __iyi_monotonic_ns >= deadline
         print "FAIL: growth fixture holder was not released\n"
-        __iyi_exit(1)
+        __iyi_exit(76)
       end
       IyiThread.spin_pause
     end
@@ -823,7 +823,7 @@ cat > "$WORK/forced_words.iyi" <<'IYI'
     while cell.value.get == 0_u64
       if __iyi_monotonic_ns >= until_ns
         print "FAIL: #{sentence}\n"
-        __iyi_exit(1)
+        __iyi_exit(76)
       end
       IyiThread.spin_pause
     end

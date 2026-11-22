@@ -218,8 +218,13 @@ import std/file::{File}
 
 LOG = Log.for("gate")
 
+{% if flag?(:log_force) %}
+PER     = 1
+WORKERS = 2
+{% else %}
 PER     = 4000
 WORKERS = 12
+{% end %}
 
 def burst(k : Int32) : Int32
   i = 0
@@ -314,35 +319,159 @@ else
   status=1
 fi
 if [ -z "$PY" ]; then
-  echo "  skipped the broken copies: no working python3"
+  echo "  FAIL: no working python3, so the broken copies could not be made"
+  status=1
 else
-  # The race the copy makes can end some other way than by name - a
-  # fault, a torn buffer the run dies of - so a run that does not exit 1
-  # at the sentence is run again, up to five times.
+  # The race the broken copy makes is forced, not raced. The copy is the backend
+  # with its lock taken out, and the program is the two-worker shape (-Dlog_force):
+  # the first writer's line, then the second writer's line, then the first newline,
+  # then the second newline. The two lines come out as one torn line on every run.
+  # Every wait has its own 20 s limit and sentence, and fails the gate.
+  forced_defs_bug='  # Copy only, for a failure proof: the buffer steps (a line, then a newline, each
+  # one step) are counted atomically, and a writer takes a ticket on arrival. The
+  # second writer waits for the first line, the first newline waits for the second
+  # line, and the second newline waits for the first newline. Every wait ends after
+  # 20 s with its own sentence.
+  @[UnsafeReach("a count of writer tickets, taken atomically by each arriving writer in a failure proof copy only")]
+  @@forced_tickets : UInt64 = 0_u64
+  @[UnsafeReach("a count of buffer steps, added atomically by each writer in a failure proof copy only")]
+  @@forced_steps : UInt64 = 0_u64
+
+  def self.forced_enter : UInt64
+    ticket = Pointer(Atomic(UInt64)).new(pointerof(@@forced_tickets).address).value.add(1_u64)
+    IOBackend.forced_wait_steps(1_u64, "FAIL: the second writer ran before the first line was written\n") if ticket == 1_u64
+    ticket
+  end
+
+  def self.forced_step : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_steps).address).value.add(1_u64)
+  end
+
+  def self.forced_wait_steps(count : UInt64, sentence : String) : Nil
+    started = __iyi_monotonic_ns
+    while Pointer(Atomic(UInt64)).new(pointerof(@@forced_steps).address).value.get < count
+      IyiRoots.fatal(sentence) if __iyi_monotonic_ns - started > 20_000_000_000_i64
+      IyiThread.spin_pause
+    end
+  end
+
+  # Nothing is held back: each line was written as it came.'
+  forced_defs_control='  # Copy only, for a failure proof: the first call to put, which runs under the
+  # mutex, holds its line until a second writer has waited on the mutex. The copy of
+  # std/mutex records that wait on its contended path (MutexProof). The hold ends
+  # after 20 s with its own sentence if no second writer ever waits.
+  @[UnsafeReach("counts the calls to put, which run under the mutex, one at a time")]
+  @@forced_calls : UInt64 = 0_u64
+
+  def self.forced_first_call : Bool
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_calls).address).value.add(1_u64) == 0_u64
+  end
+
+  def self.forced_first_hold : Nil
+    started = __iyi_monotonic_ns
+    until MutexProof.waited?
+      IyiRoots.fatal("FAIL: the second writer did not wait for the mutex while the first held its line\n") if __iyi_monotonic_ns - started > 20_000_000_000_i64
+      IyiThread.spin_pause
+    end
+  end
+
+  # Nothing is held back: each line was written as it came.'
+  put_bug='    ticket = IOBackend.forced_enter
+    io.write(line)
+    IOBackend.forced_step
+    if ticket == 0_u64
+      IOBackend.forced_wait_steps(2_u64, "FAIL: the first newline waited for the second line, which never came\n")
+      io.write("\n")
+      io.flush
+      IOBackend.forced_step
+    else
+      IOBackend.forced_wait_steps(3_u64, "FAIL: the second newline waited for the first newline, which never came\n")
+      io.write("\n")
+      io.flush
+      IOBackend.forced_step
+    end'
+  put_control='    first = IOBackend.forced_first_call
+    io.write(line)
+    IOBackend.forced_first_hold if first
+    io.write("\n")
+    io.flush'
+  mutex_awk='
+$0 == "      began = __iyi_monotonic_ns" { print "      MutexProof.waiter_seen"; hooked++ }
+{ print }
+END {
+  if (hooked != 1) exit 3
+  print ""
+  print "# Copy only, for a failure proof: a task that waits on a contended Mutex says so, once."
+  print "pub class MutexProof"
+  print "  @[UnsafeReach(\"set once by a task that waits on a contended Mutex, read atomically by the proof\")]"
+  print "  @@waiter : UInt64 = 0_u64"
+  print ""
+  print "  def self.waiter_seen : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@waiter).address).value.set(1_u64)"
+  print "  end"
+  print ""
+  print "  def self.waited? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@waiter).address).value.get == 1_u64"
+  print "  end"
+  print "end"
+}'
+  torn='FAIL: 1 lines were not whole, 2 of 2 were not written exactly once, and 0 of 2 workers died'
+  whole_two='2 lines from 2 workers, each whole and each once'
   if ! copy_log unlocked \
        '  @out : Mutex(IyiIO)' '  @out : IyiIO' \
        '    @out = Mutex.new { IyiIO.new(handle) }' '    @out = IyiIO.new(handle)' \
        '      return unless @out.lock { |io| IOBackend.put(io, line) }.is_a?(Cancelled)' '      return IOBackend.put(@out, line)' \
        'pub class IOBackend < Backend' '@[Share]
 pub class IOBackend < Backend' \
-       $'\nmodule std/log\n' $'\n@[Unsafe("the broken copy claims IOBackend is Share without its lock, the race the exercise must catch")]\nmodule std/log\n'; then
+       $'\nmodule std/log\n' $'\n@[Unsafe("the broken copy claims IOBackend is Share without its lock, the race the exercise must catch")]\nmodule std/log\n' \
+       '  # Nothing is held back: each line was written as it came.' "$forced_defs_bug" \
+       '    io.write(line)
+    io.write("\n")
+    io.flush' "$put_bug"; then
     echo "  the unlocked patch did not apply"
     status=1
-  elif ! IYI_PATH="$WORK/unlocked${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/whole-unlocked" "$WORK/whole.iyi" > "$WORK/unlocked.build" 2>&1; then
+  elif ! IYI_PATH="$WORK/unlocked${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -Dlog_force -o "$WORK/whole-unlocked" "$WORK/whole.iyi" > "$WORK/unlocked.build" 2>&1; then
     echo "  the unlocked copy did not build:"
     tail -12 "$WORK/unlocked.build"
     status=1
   else
-    for attempt in 1 2 3 4 5; do
-      "$WORK/whole-unlocked" "$WORK/unlocked.log" > "$WORK/unlocked.out" 2>&1
-      code=$?
-      [ "$code" -eq 1 ] && grep -q "^FAIL: " "$WORK/unlocked.out" && break
-    done
-    if [ "$code" -eq 1 ] && grep -q "^FAIL: " "$WORK/unlocked.out"; then
-      echo "  a backend without its lock is caught: $(grep -m1 '^FAIL: ' "$WORK/unlocked.out" | sed 's/^FAIL: //')"
+    "$WORK/whole-unlocked" "$WORK/unlocked.log" > "$WORK/unlocked.out" 2>&1
+    code=$?
+    if [ "$code" -eq 1 ] && grep -qxF -- "$torn" "$WORK/unlocked.out"; then
+      echo "  a backend without its lock is caught: $(grep -m1 -F -- "$torn" "$WORK/unlocked.out" | sed 's/^FAIL: //')"
     else
       echo "  a backend without its lock was not caught (exit $code):"
-      tail -3 "$WORK/unlocked.out" | sed 's/^/    /'
+      sed -n '1,4p' "$WORK/unlocked.out" | sed 's/^/    /'
+      status=1
+    fi
+  fi
+  # The same pair with the lock kept: the first writer holds its line until the
+  # second writer has waited on the mutex, which the copy of std/mutex records on
+  # its contended path. Both lines then come out whole and once.
+  if ! copy_log held \
+       'import std/mutex::{Mutex}' 'import std/mutex::{Mutex, MutexProof}' \
+       '  # Nothing is held back: each line was written as it came.' "$forced_defs_control" \
+       '    io.write(line)
+    io.write("\n")
+    io.flush' "$put_control" \
+       $'\nmodule std/log\n' $'\n@[Unsafe("a failure proof copy: the hold keeps its word in an UnsafeReach class variable")]\nmodule std/log\n'; then
+    echo "  the held copy's patch did not apply"
+    status=1
+  elif ! awk "$mutex_awk" "$REPO/src/std/mutex.iyi" > "$WORK/held/std/mutex.iyi"; then
+    echo "  the mutex copy's anchor is gone from std/mutex, so the copy was not made"
+    status=1
+  elif ! IYI_PATH="$WORK/held${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -Dlog_force -o "$WORK/whole-held" "$WORK/whole.iyi" > "$WORK/held.build" 2>&1; then
+    echo "  the held copy did not build:"
+    tail -12 "$WORK/held.build"
+    status=1
+  else
+    "$WORK/whole-held" "$WORK/held.log" > "$WORK/held.out" 2>&1
+    code=$?
+    if [ "$code" -eq 0 ] && grep -qxF -- "$whole_two" "$WORK/held.out"; then
+      echo "  the lock kept, the second writer waited on it: $whole_two"
+    else
+      echo "  the held copy did not pass on its one run (exit $code):"
+      sed -n '1,4p' "$WORK/held.out" | sed 's/^/    /'
       status=1
     fi
   fi

@@ -428,16 +428,26 @@ import std/socket::{IyiSocket, SocketError}
 
   {% if flag?(:turn_refusal_watchdog) %}
   # The negative control holds the real runtime lock on a native thread.
-  @[NoInline]
-  @[NoPreempt]
-  def slice_hold_runtime_lock(requested : Atomic(Int64), held : Atomic(Int64)) : Nil
-    while requested.get == 0_i64
-      IyiThread.spin_pause
+  # Its word is a class field so both threads observe the same atomic.
+  class SliceLockGate
+    @held : Atomic(Int64)
+
+    def initialize
+      @held = Atomic(Int64).new(0_i64)
     end
-    IyiRuntimeLock.lock
-    held.set(1_i64)
-    while true
-      IyiThread.spin_pause
+
+    def held? : Bool
+      @held.get != 0_i64
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def hold : Nil
+      IyiRuntimeLock.lock
+      @held.set(1_i64)
+      while true
+        IyiThread.spin_pause
+      end
     end
   end
 
@@ -588,15 +598,13 @@ import std/socket::{IyiSocket, SocketError}
         0
       end
       {% if flag?(:turn_refusal_watchdog) %}
-        lock_requested = Atomic(Int64).new(0_i64)
-        lock_held = Atomic(Int64).new(0_i64)
+        lock_gate = SliceLockGate.new
         IyiThread.start do
-          slice_hold_runtime_lock(lock_requested, lock_held)
+          lock_gate.hold
           nil
         end
-        lock_requested.set(1_i64)
         limit = __iyi_monotonic_ns + 10_000_000_000_i64
-        while lock_held.get == 0_i64
+        while !lock_gate.held?
           if __iyi_monotonic_ns > limit
             slice_lock_hang("FAIL: slice: progress hang: the runtime lock holder did not acquire its lock in 10000 ms\n")
           end

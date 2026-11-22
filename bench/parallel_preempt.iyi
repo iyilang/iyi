@@ -577,11 +577,6 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  @[NoInline]
-  @[NoPreempt]
-  def slice_lock_hang(message : String) : Nil
-    end_run(76, 2, message)
-  end
   {% end %}
 
   @[NoInline]
@@ -731,7 +726,7 @@ import std/socket::{IyiSocket, SocketError}
         limit = __iyi_monotonic_ns + 10_000_000_000_i64
         while !lock_gate.held?
           if __iyi_monotonic_ns > limit
-            slice_lock_hang("FAIL: slice: progress hang: the runtime lock holder did not acquire its lock in 10000 ms\n")
+            end_run(76, 2, "FAIL: slice: progress hang: the runtime lock holder did not acquire its lock in 10000 ms\n")
           end
           IyiThread.spin_pause
         end
@@ -744,9 +739,9 @@ import std/socket::{IyiSocket, SocketError}
         elsif __iyi_monotonic_ns > limit
           if IyiWorkers.force_turn_outer_claim?
             {% if flag?(:turn_refusal_watchdog) && flag?(:sum_force) %}
-              slice_lock_hang("FAIL: slice: progress hang: the forced sum and short task did not finish in 30000 ms\n")
+              end_run(76, 2, "FAIL: slice: progress hang: the forced sum and short task did not finish in 30000 ms\n")
             {% elsif flag?(:turn_refusal_watchdog) %}
-              slice_lock_hang("FAIL: slice: progress hang: the forced walk and short task did not finish in 30000 ms\n")
+              end_run(76, 2, "FAIL: slice: progress hang: the forced walk and short task did not finish in 30000 ms\n")
             {% else %}
               slice_hang("the forced #{which} and short task did not finish in 30000 ms")
             {% end %}

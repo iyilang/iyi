@@ -190,14 +190,98 @@ END { if (begun != 1 || ended != 1) exit 3 }' "$1"
 if ! RUN_END="$(run_end_block "$REPO/bench/parallel_exercise.iyi")" || [ -z "$RUN_END" ]; then
   echo "FAIL: one ending: setup: bench/parallel_exercise.iyi has no single one-ending block"; exit 76
 fi
+
+# The one-ending scan. Outside the shared block, a fixture may not exit, write
+# raw bytes, use svc, or name a FAIL: sentence except as an argument of end_run,
+# fail, progress_hang, setup_* or held_exit. The same rules check the lines a
+# generated copy adds (scan_added). The rules are awk, loaded with -f; a refusal
+# prints one FAIL: line and the scan exits 76.
+cat > "$WORK/one_ending_rules.awk" <<'AWK'
+function refuse(kind) {
+  printf "FAIL: one ending: setup: %s line %d has %s outside the run's one-ending block\n", name, FNR, kind
+  exit 76
+}
+function check(text) {
+  if (text ~ /^[ \t]*#/) return
+  if (text ~ /LibC\.(_?exit|ExitProcess|TerminateProcess)\(/) refuse("a libc exit")
+  if (text ~ /__iyi_exit\(/) refuse("an __iyi_exit call")
+  if (text ~ /(^|[^A-Za-z0-9_.])_?exit\(/) refuse("an exit call")
+  if (text ~ /(^|[^A-Za-z0-9_])svc([^A-Za-z0-9_]|$)/) refuse("an svc instruction")
+  if (text ~ /__iyi_write\(|LibC\.write\(/) refuse("a raw write")
+  if (text ~ /FAIL: / && text !~ /(end_run|fail|progress_hang|setup_[A-Za-z_]*|held_exit)\(/) refuse("a FAIL: sentence that is not an argument of end_run, fail, progress_hang, setup_* or held_exit")
+}
+AWK
+cat > "$WORK/one_ending_fixture.awk" <<'AWK'
+/^    # one ending: begin$/ { inblock = 1; next }
+/^    # one ending: end$/ { inblock = 0; next }
+inblock { next }
+{ check($0) }
+AWK
+cat > "$WORK/one_ending_added.awk" <<'AWK'
+FNR == NR { seen[$0]++; next }
+{ if (seen[$0] > 0) { seen[$0]--; next } check($0) }
+AWK
+# Prints the first refusal, if any, and returns its status.
+scan_fixture() { # fixture file
+  awk -v name="$(basename "$1")" -f "$WORK/one_ending_rules.awk" -f "$WORK/one_ending_fixture.awk" "$1"
+}
+# The lines GENERATED adds to ORIGINAL, scanned by the same rules.
+scan_added() { # original, generated, label
+  awk -v name="$3" -f "$WORK/one_ending_rules.awk" -f "$WORK/one_ending_added.awk" "$1" "$2"
+}
 for fixture in parallel_exercise parallel_migrate parallel_preempt parallel_preempt_lib completions_taken; do
   if ! block="$(run_end_block "$REPO/bench/$fixture.iyi")" || [ "$block" != "$RUN_END" ]; then
     echo "FAIL: one ending: setup: bench/$fixture.iyi's one-ending block is not bench/parallel_exercise.iyi's"; exit 76
   fi
-  if [ "$(grep -c '__iyi_exit(' "$REPO/bench/$fixture.iyi")" -ne 1 ]; then
-    echo "FAIL: one ending: setup: bench/$fixture.iyi ends the process outside its one-ending block"; exit 76
+  if ! out="$(scan_fixture "$REPO/bench/$fixture.iyi")"; then
+    printf '%s\n' "${out:-FAIL: one ending: setup: bench/$fixture.iyi could not be scanned}"; exit 76
   fi
 done
+echo "  the five fixtures keep every exit, raw write and FAIL: sentence inside their one-ending block"
+
+step "one ending: the scan refuses each way out of the block, in a fixture and in a copy it generates"
+# A probe line put before the fixture's STEPS list, or before the runtime's
+# reschedule, must be refused by name at the probe's own line.
+scan_mutant() { # label, probe line, what the scan names
+  local m="$WORK/scan-$1.iyi" n out code want
+  if ! PROBE="$2" awk '/^  STEPS = \[/ && !done { print ENVIRON["PROBE"]; done = 1 } { print }
+END { if (!done) exit 3 }' "$REPO/bench/parallel_exercise.iyi" > "$m"; then
+    echo "FAIL: scan: setup: the STEPS anchor is missing from bench/parallel_exercise.iyi"; exit 76
+  fi
+  n="$(awk -v key="scan_probe_$1" 'index($0, key) { print FNR; exit }' "$m")"
+  out="$(scan_fixture "$m")"; code=$?
+  want="FAIL: one ending: setup: scan-$1.iyi line $n has $3 outside the run's one-ending block"
+  if [ "$code" -ne 76 ] || [ "$out" != "$want" ]; then
+    echo "FAIL: scan: setup: the $1 probe was not refused at its line: exit $code: $out"; exit 76
+  fi
+  echo "  scan mutant $1 exits 76 at \"${want#FAIL: }\""
+}
+scan_mutant_added() { # label, probe line, what the scan names
+  local g="$WORK/scan-added-$1.iyi" n out code want
+  if ! PROBE="$2" awk '/^  def self.reschedule : Nil$/ && !done { print ENVIRON["PROBE"]; done = 1 } { print }
+END { if (!done) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > "$g"; then
+    echo "FAIL: scan: setup: the reschedule anchor is missing from src/iyi/concurrency.iyi"; exit 76
+  fi
+  n="$(awk -v key="scan_probe_$1" 'index($0, key) { print FNR; exit }' "$g")"
+  out="$(scan_added "$REPO/src/iyi/concurrency.iyi" "$g" "scan-added-$1.iyi")"; code=$?
+  want="FAIL: one ending: setup: scan-added-$1.iyi line $n has $3 outside the run's one-ending block"
+  if [ "$code" -ne 76 ] || [ "$out" != "$want" ]; then
+    echo "FAIL: scan: setup: the added $1 probe was not refused at its line: exit $code: $out"; exit 76
+  fi
+  echo "  scan mutant added-$1 exits 76 at \"${want#FAIL: }\""
+}
+scan_mutant libc '  def scan_probe_libc : Nil; ::LibC.exit(1); end' 'a libc exit'
+scan_mutant iyi '  def scan_probe_iyi : Nil; __iyi_exit(1); end' 'an __iyi_exit call'
+scan_mutant exit '  def scan_probe_exit : Nil; exit(1); end' 'an exit call'
+scan_mutant svc '  def scan_probe_svc : Nil; asm("svc #0x80" :: "{x16}"(1_i64) : "memory" : "volatile"); end' 'an svc instruction'
+scan_mutant write '  def scan_probe_write : Nil; __iyi_write(1, nil, 0_u64); end' 'a raw write'
+scan_mutant literal '  def scan_probe_literal : Nil; print "FAIL: probe\n"; end' 'a FAIL: sentence that is not an argument of end_run, fail, progress_hang, setup_* or held_exit'
+scan_mutant_added libc '  def scan_probe_libc : Nil; ::LibC.exit(1); end' 'a libc exit'
+scan_mutant_added iyi '  def scan_probe_iyi : Nil; __iyi_exit(1); end' 'an __iyi_exit call'
+scan_mutant_added exit '  def scan_probe_exit : Nil; exit(1); end' 'an exit call'
+scan_mutant_added svc '  def scan_probe_svc : Nil; asm("svc #0x80" :: "{x16}"(1_i64) : "memory" : "volatile"); end' 'an svc instruction'
+scan_mutant_added write '  def scan_probe_write : Nil; __iyi_write(1, nil, 0_u64); end' 'a raw write'
+scan_mutant_added literal '  def scan_probe_literal : Nil; print "FAIL: probe\n"; end' 'a FAIL: sentence that is not an argument of end_run, fail, progress_hang, setup_* or held_exit'
 
 # ── 1. The exercise, twice ────────────────────────────────────────────────
 for build in plain release; do
@@ -1005,6 +1089,7 @@ broken() { # name, awk program[, file in src/iyi[, bench fixture name or path[, 
   elif [ "$cmp_status" -ne 1 ]; then
     echo "FAIL: $1: setup: could not compare the generated runtime copy"; exit 76
   fi
+  out="$(scan_added "$REPO/src/iyi/$file" "$1/iyi/$file" "$1/$file")" || { printf '%s\n' "${out:-FAIL: one ending: setup: $1/$file could not be scanned}"; exit 76; }
   if ! copy_build "$1" "$program" "${@:5}"; then
     echo "FAIL: $1: setup: the runtime copy failed to build"; tail -20 "build-$1.log"; exit 76
   fi
@@ -2550,10 +2635,6 @@ in_turn_workers && /^  def self.preempts : UInt64$/ {
   print "    unit.is_a?(IyiUnit) && unit.waiting?"
   print "  end"
   print "  @[NoPreempt]"
-  print "  def self.force_turn_hang(said : String) : Nil"
-  print "    end_run(76, 2, said)"
-  print "  end"
-  print "  @[NoPreempt]"
   print "  def self.force_turn_target_on?(st : IyiSchedulerState) : Bool"
   print "    target = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_fiber).address).value.get"
   print "    return false if target == 0_u64 || force_turn_result != 0_u64"
@@ -2570,7 +2651,7 @@ in_turn_workers && /^  def self.preempts : UInt64$/ {
   print "  end"
   print "  @[NoPreempt]"
   print "  def self.force_turn_wait_lock : Nil"
-  print "    force_turn_hang(\"FAIL: forced turn: not armed: the target holds the scheduler lock at its check\\n\") if IyiSchedLock.held_here?"
+  print "    end_run(76, 2, \"FAIL: forced turn: not armed: the target holds the scheduler lock at its check\\n\") if IyiSchedLock.held_here?"
   print "    owner = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_slow_active).address)"
   print "    until owner.value.compare_and_set(0_u64, 1_u64)[1]"
   print "      IyiThread.park_if_requested"
@@ -2580,7 +2661,7 @@ in_turn_workers && /^  def self.preempts : UInt64$/ {
   print "    while IyiRuntimeLock.held?"
   print "      IyiThread.park_if_requested"
   print "      IyiThread.spin_pause"
-  print "      force_turn_hang(\"FAIL: forced turn: progress hang: the runtime lock did not clear at the eligible check in 20000 ms\\n\") if __iyi_monotonic_ns - started > 20000000000_i64"
+  print "      end_run(76, 2, \"FAIL: forced turn: progress hang: the runtime lock did not clear at the eligible check in 20000 ms\\n\") if __iyi_monotonic_ns - started > 20000000000_i64"
   print "    end"
   print "    owner.value.set(0_u64)"
   print "  end"
@@ -2600,11 +2681,11 @@ in_turn_workers && /^  def self.preempts : UInt64$/ {
   print "    phase = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_phase).address)"
   print "    wanted = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_key).address).value.get"
   print "    if key != wanted"
-  print "      force_turn_hang(\"FAIL: forced turn: not armed: the target entered another hook site before its decision\\n\") if phase.value.get == 2_u64"
+  print "      end_run(76, 2, \"FAIL: forced turn: not armed: the target entered another hook site before its decision\\n\") if phase.value.get == 2_u64"
   print "      return"
   print "    end"
   print "    st = IyiScheduler.state"
-  print "    force_turn_hang(\"FAIL: forced turn: not armed: the target'"'"'s worker has no preemption word\\n\") if st.preempt_word == 0_u64"
+  print "    end_run(76, 2, \"FAIL: forced turn: not armed: the target'"'"'s worker has no preemption word\\n\") if st.preempt_word == 0_u64"
   print "    word = Pointer(Atomic(UInt64)).new(st.preempt_word)"
   print "    worker = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_worker).address)"
   print "    switches = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_switches).address)"
@@ -2613,7 +2694,7 @@ in_turn_workers && /^  def self.preempts : UInt64$/ {
   print "    saved_instance = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_instance).address)"
   print "    saved_run = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_run).address)"
   print "    if phase.value.get == 0_u64"
-  print "      force_turn_hang(\"FAIL: forced turn: not armed: the target turn has no successor in its loop\\n\") unless successor"
+  print "      end_run(76, 2, \"FAIL: forced turn: not armed: the target turn has no successor in its loop\\n\") unless successor"
   print "      owner = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_slow_active).address)"
   print "      until owner.value.compare_and_set(0_u64, 1_u64)[1]"
   print "        IyiThread.park_if_requested"
@@ -2627,25 +2708,25 @@ in_turn_workers && /^  def self.preempts : UInt64$/ {
   print "      while phase.value.get == 1_u64"
   print "        IyiThread.park_if_requested"
   print "        IyiThread.spin_pause"
-  print "        force_turn_hang(\"FAIL: forced turn: progress hang: the held turn was not released in 20000 ms\\n\") if __iyi_monotonic_ns - started > 20000000000_i64"
+  print "        end_run(76, 2, \"FAIL: forced turn: progress hang: the held turn was not released in 20000 ms\\n\") if __iyi_monotonic_ns - started > 20000000000_i64"
   print "      end"
   print "      owner.value.set(0_u64)"
   print "      switches.value.set(st.switches)"
   print "      word.value.set(1_u64)"
   print "      return"
   print "    end"
-  print "    force_turn_hang(\"FAIL: forced turn: not armed: the target turned on another worker\\n\") unless st.object_id == worker.value.get"
-  print "    force_turn_hang(\"FAIL: forced turn: not armed: the target turned in another loop instance\\n\") unless instance == saved_instance.value.get && run == saved_run.value.get"
+  print "    end_run(76, 2, \"FAIL: forced turn: not armed: the target turned on another worker\\n\") unless st.object_id == worker.value.get"
+  print "    end_run(76, 2, \"FAIL: forced turn: not armed: the target turned in another loop instance\\n\") unless instance == saved_instance.value.get && run == saved_run.value.get"
   print "    if eligible.value.get != 0_u64"
   print "      result.value.compare_and_set(0_u64, 1_u64)"
   print "      return"
   print "    end"
   print "    if st.switches == switches.value.get"
-  print "      force_turn_hang(\"FAIL: forced turn: not armed: the raised word went down with no check and no switch\\n\") if word.value.get == 0_u64"
+  print "      end_run(76, 2, \"FAIL: forced turn: not armed: the raised word went down with no check and no switch\\n\") if word.value.get == 0_u64"
   print "      result.value.compare_and_set(0_u64, 2_u64)"
   print "      return"
   print "    end"
-  print "    force_turn_hang(\"FAIL: forced turn: not armed: the check returned before an eligible decision\\n\")"
+  print "    end_run(76, 2, \"FAIL: forced turn: not armed: the check returned before an eligible decision\\n\")"
   print "  end"
   print ""
   print; next
@@ -3100,10 +3181,6 @@ TICKER_DEFS='in_ticker_workers && /^  def self.preempts : UInt64$/ {
   print "  @@forced_ticker_result : UInt64 = 0_u64"
   print "  @[UnsafeReach(\"copy-only ticker watchdog ownership, accessed atomically\")]"
   print "  @@forced_ticker_slow_active : UInt64 = 0_u64"
-  print "  @[NoPreempt]"
-  print "  def self.force_ticker_abort(said : String) : Nil"
-  print "    end_run(76, 2, said)"
-  print "  end"
   print "  def self.force_ticker_result : UInt64"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_result).address).value.get"
   print "  end"
@@ -3116,7 +3193,7 @@ TICKER_DEFS='in_ticker_workers && /^  def self.preempts : UInt64$/ {
   print "  def self.force_ticker_key(worker : UInt64, sleeper : UInt64) : Nil"
   print "    st = IyiScheduler.state"
   print "    fiber = IyiScheduler.current"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the sleeper key did not name the running worker and fiber\\n\") if worker == 0_u64 || sleeper == 0_u64 || !st.worker || st.object_id != worker || fiber.object_id != sleeper"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the sleeper key did not name the running worker and fiber\\n\") if worker == 0_u64 || sleeper == 0_u64 || !st.worker || st.object_id != worker || fiber.object_id != sleeper"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_long).address).value.set(0_u64)"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_held).address).value.set(0_u64)"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_expected).address).value.set(0_u64)"
@@ -3130,9 +3207,9 @@ TICKER_DEFS='in_ticker_workers && /^  def self.preempts : UInt64$/ {
   print "    sleeper = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_sleeper).address).value.get"
   print "    return if sleeper == 0_u64 || fiber.object_id != sleeper"
   print "    worker = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_worker).address).value.get"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the keyed sleeper entered sleep on another worker\\n\") unless IyiScheduler.state_id == worker"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the keyed sleeper entered sleep on another worker\\n\") unless IyiScheduler.state_id == worker"
   print "    held = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_held).address)"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the keyed sleeper entered sleep more than once\\n\") unless held.value.compare_and_set(0_u64, 1_u64)[1]"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the keyed sleeper entered sleep more than once\\n\") unless held.value.compare_and_set(0_u64, 1_u64)[1]"
   print "    fiber.deadline = 9223372036854775807_i64"
   print "  end"
   print "  def self.force_ticker_arm(worker : UInt64, long : UInt64) : Nil"
@@ -3140,8 +3217,8 @@ TICKER_DEFS='in_ticker_workers && /^  def self.preempts : UInt64$/ {
   print "    fiber = IyiScheduler.current"
   print "    wanted = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_worker).address).value.get"
   print "    sleeper = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_sleeper).address).value.get"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the long task did not name the keyed worker and its own fiber\\n\") if worker == 0_u64 || long == 0_u64 || sleeper == 0_u64 || worker != wanted || !st.worker || st.object_id != worker || fiber.object_id != long"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the worker has no preemption word\\n\") if st.preempt_word == 0_u64"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the long task did not name the keyed worker and its own fiber\\n\") if worker == 0_u64 || long == 0_u64 || sleeper == 0_u64 || worker != wanted || !st.worker || st.object_id != worker || fiber.object_id != long"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the worker has no preemption word\\n\") if st.preempt_word == 0_u64"
   print "    IyiScheduler.lists_lock(st)"
   print "    head = st.sleep_head"
   print "    valid = false"
@@ -3149,12 +3226,12 @@ TICKER_DEFS='in_ticker_workers && /^  def self.preempts : UInt64$/ {
   print "      valid = head.object_id == sleeper && head.state == IyiFiberState::Sleeping && head.deadline == 9223372036854775807_i64 && head.listed_on_fenced == worker && !head.on_cpu? && !head.io_timed && st.io_head.is_a?(Nil)"
   print "    end"
   print "    IyiScheduler.lists_unlock(st)"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the keyed sleeper was not the parked sleep-heap root without worker I/O\\n\") unless valid"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the keyed sleeper was not the parked sleep-heap root without worker I/O\\n\") unless valid"
   print "    {% if flag?(:win32) %}"
-  print "      force_ticker_abort(\"FAIL: ticker: not armed: the completion port has an I/O waiter\\n\") if IyiScheduler.io_waiting?"
+  print "      end_run(76, 2, \"FAIL: ticker: not armed: the completion port has an I/O waiter\\n\") if IyiScheduler.io_waiting?"
   print "    {% end %}"
   print "    target = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_long).address)"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the long task was already armed\\n\") unless target.value.compare_and_set(0_u64, long)[1]"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the long task was already armed\\n\") unless target.value.compare_and_set(0_u64, long)[1]"
   print "    Pointer(Atomic(UInt64)).new(st.preempt_word).value.set(1_u64)"
   print "  end"
   print "  @[NoPreempt]"
@@ -3168,11 +3245,11 @@ TICKER_DEFS='in_ticker_workers && /^  def self.preempts : UInt64$/ {
   print "  end"
   print "  @[NoPreempt]"
   print "  def self.force_ticker_wait_lock : Nil"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the long task holds the scheduler lock at its check\\n\") if IyiSchedLock.held_here?"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the long task holds the scheduler lock at its check\\n\") if IyiSchedLock.held_here?"
   print "    st = IyiScheduler.state"
   print "    fiber = IyiScheduler.current"
   print "    root = st.root"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the long task was not running on a non-root fiber\\n\") if fiber.state != IyiFiberState::Running || (root.is_a?(IyiFiber) && root.object_id == fiber.object_id)"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the long task was not running on a non-root fiber\\n\") if fiber.state != IyiFiberState::Running || (root.is_a?(IyiFiber) && root.object_id == fiber.object_id)"
   print "    owner = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_slow_active).address)"
   print "    until owner.value.compare_and_set(0_u64, 1_u64)[1]"
   print "      IyiThread.park_if_requested"
@@ -3182,11 +3259,11 @@ TICKER_DEFS='in_ticker_workers && /^  def self.preempts : UInt64$/ {
   print "    while IyiRuntimeLock.held?"
   print "      IyiThread.park_if_requested"
   print "      IyiThread.spin_pause"
-  print "      force_ticker_abort(\"FAIL: ticker: progress hang: the runtime lock did not clear for the keyed preemption in 20000 ms\\n\") if __iyi_monotonic_ns - started > 20000000000_i64"
+  print "      end_run(76, 2, \"FAIL: ticker: progress hang: the runtime lock did not clear for the keyed preemption in 20000 ms\\n\") if __iyi_monotonic_ns - started > 20000000000_i64"
   print "    end"
   print "  end"
   print "  def self.force_ticker_guard_io(st : IyiSchedulerState, io : Bool) : Nil"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the keyed preemption took the I/O branch\\n\") if force_ticker_target_on?(st) && io"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the keyed preemption took the I/O branch\\n\") if force_ticker_target_on?(st) && io"
   print "  end"
   print "  def self.force_ticker_prepare(st : IyiSchedulerState) : Nil"
   print "    sleeper = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_sleeper).address).value.get"
@@ -3199,7 +3276,7 @@ TICKER_DEFS='in_ticker_workers && /^  def self.preempts : UInt64$/ {
   print "      head.deadline = __iyi_monotonic_ns if valid"
   print "    end"
   print "    IyiScheduler.lists_unlock(st)"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the keyed sleeper changed before the wake decision\\n\") unless valid"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the keyed sleeper changed before the wake decision\\n\") unless valid"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_expected).address).value.set(1_u64)"
   print "  end"
   print "  def self.force_ticker_enqueued(fiber : IyiFiber) : Nil"
@@ -3209,9 +3286,9 @@ TICKER_DEFS='in_ticker_workers && /^  def self.preempts : UInt64$/ {
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_enqueued).address).value.set(1_u64)"
   print "  end"
   print "  def self.force_ticker_finish(st : IyiSchedulerState) : Nil"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the wake decision lost its keyed target\\n\") unless force_ticker_target_on?(st)"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the wake decision lost its keyed target\\n\") unless force_ticker_target_on?(st)"
   print "    expected = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_expected).address).value.get"
-  print "    force_ticker_abort(\"FAIL: ticker: not armed: the wake decision was not prepared\\n\") unless expected == 1_u64"
+  print "    end_run(76, 2, \"FAIL: ticker: not armed: the wake decision was not prepared\\n\") unless expected == 1_u64"
   print "    enqueued = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_enqueued).address).value.get"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_result).address).value.set(enqueued == 1_u64 ? 1_u64 : 2_u64)"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_slow_active).address).value.set(0_u64)"
@@ -3562,6 +3639,7 @@ lib_awk() { # label, source, destination, awk program
   elif [ "$status" -ne 1 ]; then
     echo "FAIL: $label: setup: could not compare the generated copy"; exit 76
   fi
+  out="$(scan_added "$source" "$destination" "$label")" || { printf '%s\n' "${out:-FAIL: one ending: setup: $label could not be scanned}"; exit 76; }
 }
 mkdir -p libhooked libruntime/iyi libruntime_hook/iyi || { echo "FAIL: libruntime: setup: could not create the runtime copies"; exit 76; }
 lib_awk libruntime-array "$REPO/src/iyi/array.iyi" libhooked/array.iyi "$LIB_POLL_ARRAY"

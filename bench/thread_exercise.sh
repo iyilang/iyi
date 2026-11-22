@@ -9,17 +9,23 @@
 #      collections, stopping, and list checksums and free flags. An explicit
 #      collection runs after all worker lists are ready.
 #  1b. Two hundred joined threads each run four sleeping tasks; the scheduler
-#      registry and Windows handle count are checked after they finish.
-#  1c. A collection compares retained bytes after 256 joined threads; Windows
-#      also asks whether a joined thread's line remains mapped.
+#      states are checked after they finish, and on Windows so is the handle
+#      count. Planted mutants leave a scheduler state on the roots' list, and on
+#      Windows leave handles open; each fails by one named sentence.
+#  1c. Two hundred fifty-six joined threads each hold a 64 KiB payload. At least
+#      192 are freed by a collection, and on Windows a joined thread's line is
+#      unmapped. Planted mutants keep the payloads on their thread's list and
+#      leave the line mapped; each fails by one named sentence.
 #  1d. Join the same thread twice while a later thread is held: the mutant
 #      keeps the first line, and that line is the named failure witness.
 #   2. Inspect both binaries' undefined symbols or imported DLLs against
-#      each platform's dependency floor.
+#      each platform's dependency floor; a copy that adds one dependency fails
+#      by name.
 #   3. Print allocations, collections, stops and allocation wall time; no
 #      speed threshold decides the result.
 #  3b. Windows: compare one- and two-core affinity with the reported core and
-#      helper counts. The process mask supplies the cores used by later checks.
+#      helper counts. The process mask supplies the cores used by later checks;
+#      a copy that counts the machine's cores instead fails by one named line.
 #   4. Run the release exercise with twice the core count, clamped to 9..32;
 #      on a machine with 32 or more cores this is not necessarily oversubscribed.
 #  4b. Measure the contended-lock ratio and mean stop time. On Windows, a
@@ -37,6 +43,8 @@
 #      raises and records each one's own restoration.
 #  4e. Hold a released thread at its allocator park. A count-out word records
 #      whether the release waited; the mutant attempts that wait.
+#  4f. Linux and Darwin: a stop beside a thread held in the allocator parks it
+#      only after it leaves. A copy that parks it inside is named on its one run.
 #   5. Remove the thread-root walks for one run: the ready-list rendezvous,
 #      explicit collection and sweep flags name the freed live nodes.
 #  5b. Remove thread retirement from a copy: the finished-fiber registry count
@@ -73,7 +81,8 @@
 #      two collections must each visit that line. The late-top mutant's sweep
 #      flag supplies the named failure before the child's first store.
 #  7f. Linux and Darwin: one task asks whether its stack top is in its own
-#      stack before any collector runs. The top-bound mutant is named.
+#      stack before any collector runs, and a stop with sp at a fresh fiber's
+#      top is bounded by that top. The topless mutant is named on its one run.
 #  7g. Linux and Darwin: an armed mark helper faults while holding the lock.
 #      The control witnesses handler classification and SIG_DFL installation,
 #      then exits on SIGSEGV. The heap-action mutant reports its pre-lock fault.
@@ -82,11 +91,13 @@
 #      spinner and its owed-turn word also expose the collector's lock attempt
 #      before payment in the mutant.
 #  7i. Darwin: one yield goes through an observer that records only after the
-#      real thread_switch returns; the old ARM hint leaves it unanswered.
+#      real thread_switch returns; the old ARM hint leaves it unanswered. The
+#      mutant's binary no longer imports thread_switch, and the control's does.
 #  7j. Darwin: hold an unlinked child, inspect the actual stop roster and count,
 #      then link it and witness a later stop. Early counting is named.
 #  7k. Linux: tasks and a thread call libc and check its answers and imports.
-#      A held thread's actual pthread handle exposes the raw-clone mutant.
+#      A held thread's pthread handle exposes the raw-clone mutant, and a mark
+#      helper launched on a fresh heap exposes the same mutant for helpers.
 #
 # Stress loops, never retries or claims that a particular schedule occurred:
 #   1/4: each exercise runs 20 allocation bursts per thread and main, 200
@@ -113,24 +124,22 @@
 # verdicts. The old timed no-raise comparison is not run; 4b samples priority
 # at the first suspend instead.
 #
-# Not forced: 1/4 allocator overlap and scheduler/retention checks have no
-# gate holding the relevant allocation or planted teardown/retention mutant.
-# The 2 import floor and 3b affinity checks compare actual values, without
-# planted mutants; 3 is measurement only. The 4b lock ratio and 4c one-core
-# timings have no scheduled starvation witness and are measurements only.
-# The ordinary 5c switching and 5e line stresses do not force a particular
-# switch or competing write; their separate held proofs do.
-# The 6 variants are direct compiler inputs, not mutated compiler builds.
-# The 7 termination storm does not prove a collection overlapped process exit;
-# the IR comparison is the separate structural check. The 7f task-top query
-# does not force a stop at the first instruction, although the bound mutant
-# is checked directly. The 7k held-thread check proves the chosen launch path;
-# the libc-call stress does not force a particular collection interleaving.
+# Not forced: 3 is measurement only. The 4b lock ratio and 4c one-core timings
+# have no scheduled starvation witness and are measurements only. The ordinary
+# 5c switching and 5e line stresses do not force a particular switch or
+# competing write; their separate held proofs do. The 6 variants are direct
+# compiler inputs, not mutated compiler builds. The 7 termination storm does
+# not prove a collection overlapped process exit; the IR comparison is the
+# separate structural check. The 7k held-thread check and the helper launch
+# prove the chosen launch path; the libc-call stress does not force a
+# particular collection interleaving. The one open item is termination
+# concurrent with collection: its failure is a hang inside kernel teardown,
+# and the IR check forces the cause rather than the interleaving.
 #
 # Exit 0: selected checks passed, including detected mutants; unsupported
 # platforms are a no-op. Exit 76: setup or watchdog failure, with SETUP:.
-# Exit 1: defect or assertion; named forced mutants emit their exact FAIL:
-# sentence. Invalid usage exits 2. A watchdog is not evidence of a defect.
+# Exit 1: defect, crashed control, or escaped mutant, with a FAIL: sentence.
+# Invalid usage exits 2. A watchdog is not evidence of a defect.
 #
 set -u
 
@@ -250,31 +259,57 @@ check_bound() {
     fi
   fi
 }
+# A forced pair has a control, which is the shipped program with no planted
+# mutant, and a mutant. The caller has already checked the success ending it
+# expects; pair_mismatch decides what any other ending means.
+#   pair_mismatch CODE OUTPUT control
+#     A FAIL line or any nonzero status (a crash, a signal or an uncaught
+#     raise) is a defect in the shipped program: exit 1. Only exit 0 with no
+#     witness is missing setup: SETUP, exit 76.
+#   pair_mismatch CODE OUTPUT mutant STATUS LINE...
+#     STATUS and LINE... are the control's own success ending. A mutant that
+#     ends that way escaped detection: exit 1. Any other ending fails the gate
+#     with the tail printed, exit 1. A SETUP line or exit 76 is setup: exit 76.
 pair_mismatch() {
-  local code="$1" output="$2" copy="$3" expected
+  local code="$1" output="$2" copy="$3" status line all=1
   shift 3
   if grep -q '^SETUP:' "$output"; then
     grep -m1 '^SETUP:' "$output"
     exit 76
   fi
-  if [ "$copy" = mutant ]; then
-    if [ "$code" -eq 0 ] && [ -n "${1:-}" ] && tr -d '\r' < "$output" | grep -qxF "$1"; then
+  if [ "$code" -eq 76 ]; then
+    echo "SETUP: ${current_step:-forced proof}: the $copy exited 76 without a setup sentence"
+    cat "$output"
+    exit 76
+  fi
+  if [ "$copy" = control ]; then
+    if [ "$code" -eq 0 ] && ! grep -q '^FAIL:' "$output"; then
+      echo "SETUP: ${current_step:-forced proof}: the control did not print its witness"
+      cat "$output"
+      exit 76
+    fi
+    if grep -q '^FAIL:' "$output"; then
+      tr -d '\r' < "$output" | grep -m1 '^FAIL:'
+    else
+      echo "FAIL: ${current_step:-forced proof}: the control exited $code without its witness"
+    fi
+    sed 's/^/  /' "$output" | tail -n 5
+    exit 1
+  fi
+  status="$1"
+  shift
+  if [ "$code" -eq "$status" ] && ! grep -q '^FAIL:' "$output"; then
+    for line in "$@"; do
+      tr -d '\r' < "$output" | grep -qxF "$line" || all=0
+    done
+    if [ "$all" -eq 1 ]; then
       echo "FAIL: ${current_step:-forced proof}: the mutant escaped detection"
       exit 1
     fi
-  else
-    for expected in "$@"; do
-      if [ "$code" -eq 1 ] &&
-         [ "$(tr -d '\r' < "$output" | grep -c '^FAIL:' || :)" -eq 1 ] &&
-         tr -d '\r' < "$output" | grep -qxF "$expected"; then
-        echo "$expected"
-        exit 1
-      fi
-    done
   fi
-  echo "SETUP: ${current_step:-forced proof}: the $copy did not complete its witness (exit $code)"
-  cat "$output"
-  exit 76
+  echo "FAIL: ${current_step:-forced proof}: the mutant ended with exit $code without its named sentence"
+  sed 's/^/  /' "$output" | tail -n 5
+  exit 1
 }
 trap 'status=$?; [ -z "$current_step" ] || printf "== end: %s (exit %s)\n" "$current_step" "$status"' EXIT
 
@@ -331,6 +366,133 @@ if [ "$part" = again ]; then
   echo "workdir $WORK"
   echo "thread exercise: the plain build's ten more runs held"
   exit 0
+fi
+
+# ── 1b and 1c, forced: a finished thread's scheduler, a joined thread's payloads and line ──
+# The release run above passed these checks, and its output is the control: the same
+# program with no planted mutant, which the stress steps checked exited 0. Each mutant
+# is one copy of the runtime or of the program, built against IYI_PATH and run once,
+# and must end in exit 1 with its one FAIL sentence. The watchdog is 300 s: the 1b loop
+# sleeps a second in each of 200 threads, one after another.
+teardown_pass='teardown: 200 finished threads gave their schedulers back'
+joined_pass="joined: at least 192 of 256 joined threads' payloads were freed by a collection"
+mapped_pass="joined: a joined thread's line was unmapped"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) teardown_windows=1 ;;
+  *) teardown_windows=0 ;;
+esac
+
+step "failure proof controls: the healthy release run prints its teardown and joined lines"
+tr -d '\r' < answers-release.txt > release-clean.txt
+controls=1
+grep -qxF "$teardown_pass" release-clean.txt || controls=0
+grep -qxF "$joined_pass" release-clean.txt || controls=0
+if [ "$teardown_windows" -eq 1 ]; then grep -qxF "$mapped_pass" release-clean.txt || controls=0; fi
+if [ "$controls" -ne 1 ] || [ "$(grep -c '^FAIL:' release-clean.txt || :)" -ne 0 ]; then
+  pair_mismatch 0 release-clean.txt control
+fi
+echo "  control: $teardown_pass"
+echo "  control: $joined_pass"
+if [ "$teardown_windows" -eq 1 ]; then echo "  control: $mapped_pass"; fi
+
+step "failure proof: a finished thread's scheduler state left on the roots' list is named"
+mkdir -p retired/iyi && cp "$REPO"/src/iyi/*.iyi retired/iyi/ || { echo "SETUP: ${current_step}: the retired copy could not be made"; exit 76; }
+awk '
+  /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
+  inside && /^          previous\.next_state = state\.next_state$/ { print "          nil"; hits++; next }
+  inside && /^          @@states_head = state\.next_state$/ { print "          nil"; hits++; next }
+  inside && /^  end$/ { inside = 0; ends++ }
+  { print }
+  END { if (starts != 1 || ends != 1 || hits != 2 || inside) exit 3 }
+' "$REPO/src/iyi/concurrency.iyi" > retired/iyi/concurrency.iyi || { echo "SETUP: ${current_step}: the retirement anchors changed"; exit 76; }
+cmp -s retired/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && { echo "SETUP: ${current_step}: the retired copy was unchanged"; exit 76; }
+if ! IYI_PATH="$WORK/retired${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o retired-run > build-retired.log 2>&1; then
+  echo "SETUP: ${current_step}: retired did not build"; cat build-retired.log; exit 76
+fi
+timeout -k 5 300 ./retired-run 8 > retired-raw.txt 2>&1
+code=$?; check_bound "$code" forced mutant retired-raw.txt
+if [ "$code" -eq 76 ]; then cat retired-raw.txt; exit 76; fi
+tr -d '\r' < retired-raw.txt > retired.txt
+retired_fail="FAIL: teardown: 200 finished threads left 200 scheduler states on the roots' list"
+if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' retired.txt || :)" -ne 1 ] || ! grep -qxF "$retired_fail" retired.txt; then
+  pair_mismatch "$code" retired.txt mutant 0 "$teardown_pass"
+fi
+printf '  exits 1 at "%s"\n' "$retired_fail"
+
+if [ "$teardown_windows" -eq 1 ]; then
+  step "failure proof: a finished thread's handles left open past the allowance are named"
+  mkdir -p unclosed/iyi && cp "$REPO"/src/iyi/*.iyi unclosed/iyi/ || { echo "SETUP: ${current_step}: the unclosed copy could not be made"; exit 76; }
+  awk '
+    /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
+    inside && $0 == "    {% if flag?(:win32) %}" { win = 1; print; next }
+    inside && win && $0 == "    {% end %}" { win = 0; print; next }
+    inside && win && $0 == "      __iyi_close(state.wake_fd) if state.wake_fd > 0_i64" { wake++; next }
+    inside && win && $0 == "      __iyi_close(state.deadline_timer) if state.deadline_timer > 0_i64" { timer++; next }
+    inside && /^  end$/ { inside = 0; ends++ }
+    { print }
+    END { if (starts != 1 || ends != 1 || wake != 1 || timer != 1 || inside || win) exit 3 }
+  ' "$REPO/src/iyi/concurrency.iyi" > unclosed/iyi/concurrency.iyi || { echo "SETUP: ${current_step}: the handle anchors changed"; exit 76; }
+  cmp -s unclosed/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && { echo "SETUP: ${current_step}: the unclosed copy was unchanged"; exit 76; }
+  if ! IYI_PATH="$WORK/unclosed${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o unclosed-run > build-unclosed.log 2>&1; then
+    echo "SETUP: ${current_step}: unclosed did not build"; cat build-unclosed.log; exit 76
+  fi
+  timeout -k 5 300 ./unclosed-run 8 > unclosed-raw.txt 2>&1
+  code=$?; check_bound "$code" forced mutant unclosed-raw.txt
+  if [ "$code" -eq 76 ]; then cat unclosed-raw.txt; exit 76; fi
+  tr -d '\r' < unclosed-raw.txt > unclosed.txt
+  unclosed_fail="FAIL: teardown: 200 finished threads left handles open past the allowance of 20"
+  if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' unclosed.txt || :)" -ne 1 ] || ! grep -qxF "$unclosed_fail" unclosed.txt; then
+    pair_mismatch "$code" unclosed.txt mutant 0 "$teardown_pass"
+  fi
+  printf '  exits 1 at "%s"\n' "$unclosed_fail"
+fi
+
+step "failure proof: a joined thread's payloads kept by its thread's list are named"
+mkdir -p listed/iyi && cp "$REPO"/src/iyi/*.iyi listed/iyi/ || { echo "SETUP: ${current_step}: the listed copy could not be made"; exit 76; }
+awk '
+  /^    def self\.run\(line : UInt64\) : Nil$/ { inside = 1; starts++ }
+  inside && $0 == "      if thread.is_a?(IyiThread)" { print "      if false && thread.is_a?(IyiThread)"; hits++; next }
+  inside && /^    end$/ { inside = 0; ends++ }
+  { print }
+  END { if (starts != 1 || ends != 1 || hits != 1 || inside) exit 3 }
+' "$REPO/src/iyi/thread.iyi" > listed/iyi/thread.iyi || { echo "SETUP: ${current_step}: the run anchors changed"; exit 76; }
+cmp -s listed/iyi/thread.iyi "$REPO/src/iyi/thread.iyi" && { echo "SETUP: ${current_step}: the listed copy was unchanged"; exit 76; }
+if ! IYI_PATH="$WORK/listed${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o listed-run > build-listed.log 2>&1; then
+  echo "SETUP: ${current_step}: listed did not build"; cat build-listed.log; exit 76
+fi
+timeout -k 5 300 ./listed-run 8 > listed-raw.txt 2>&1
+code=$?; check_bound "$code" forced mutant listed-raw.txt
+if [ "$code" -eq 76 ]; then cat listed-raw.txt; exit 76; fi
+tr -d '\r' < listed-raw.txt > listed.txt
+listed_fail="FAIL: joined: 256 of 256 joined threads' payloads survived a collection"
+if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' listed.txt || :)" -ne 1 ] || ! grep -qxF "$listed_fail" listed.txt; then
+  pair_mismatch "$code" listed.txt mutant 0 "$joined_pass"
+fi
+printf '  exits 1 at "%s"\n' "$listed_fail"
+
+if [ "$teardown_windows" -eq 1 ]; then
+  step "failure proof: a joined thread's line left mapped is named"
+  mkdir -p mapped/iyi && cp "$REPO"/src/iyi/*.iyi mapped/iyi/ || { echo "SETUP: ${current_step}: the mapped copy could not be made"; exit 76; }
+  awk '
+    /^    def join : Nil$/ { inside = 1; starts++ }
+    inside && $0 == "      __iyi_munmap(line, IYI_THREAD_LINE)" { hits++; next }
+    inside && /^    end$/ { inside = 0; ends++ }
+    { print }
+    END { if (starts != 1 || ends != 1 || hits != 1 || inside) exit 3 }
+  ' "$REPO/src/iyi/thread.iyi" > mapped/iyi/thread.iyi || { echo "SETUP: ${current_step}: the join anchors changed"; exit 76; }
+  cmp -s mapped/iyi/thread.iyi "$REPO/src/iyi/thread.iyi" && { echo "SETUP: ${current_step}: the mapped copy was unchanged"; exit 76; }
+  if ! IYI_PATH="$WORK/mapped${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o mapped-run > build-mapped.log 2>&1; then
+    echo "SETUP: ${current_step}: mapped did not build"; cat build-mapped.log; exit 76
+  fi
+  timeout -k 5 300 ./mapped-run 8 > mapped-raw.txt 2>&1
+  code=$?; check_bound "$code" forced mutant mapped-raw.txt
+  if [ "$code" -eq 76 ]; then cat mapped-raw.txt; exit 76; fi
+  tr -d '\r' < mapped-raw.txt > mapped.txt
+  mapped_fail="FAIL: joined: a joined thread's line is still mapped"
+  if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' mapped.txt || :)" -ne 1 ] || ! grep -qxF "$mapped_fail" mapped.txt; then
+    pair_mismatch "$code" mapped.txt mutant 0 "$mapped_pass"
+  fi
+  printf '  exits 1 at "%s"\n' "$mapped_fail"
 fi
 
 # ── 1d. A second join while a later thread is held ───────────────────────
@@ -427,17 +589,13 @@ for mode in control mutant; do
       cat "$output"; exit 1
     fi
     if [ "$code" -ne 0 ] || [ "$fails" -ne 0 ] || [ "$passes" -ne 1 ]; then
-      echo "SETUP: joined: the control did not complete its witness"
-      printf '  process exit %s\n' "$code"
-      cat "$output"; exit 76
+      pair_mismatch "$code" "$output" control
     fi
     echo "  control: exit 0, $rejoin_pass"
   else
     if [ "$code" -ne 1 ] || [ "$fails" -ne 1 ] || [ "$passes" -ne 0 ] ||
        ! grep -qxF "$rejoin_fail" "$output"; then
-      echo "SETUP: joined: the mutant did not produce the required verdict"
-      printf '  process exit %s\n' "$code"
-      cat "$output"; exit 76
+      pair_mismatch "$code" "$output" mutant 0 "$rejoin_pass"
     fi
     printf '  exits 1 at "%s"\n' "$rejoin_fail"
   fi
@@ -447,18 +605,30 @@ done
 case "$(uname -s)" in
   Linux)
     step "dependency floor: threads and their stop add no symbol"
-    for bin in threads threads-release; do
-      added="$(nm -u "$bin" |
-        sed -e 's/^ *[wU] *//' -e 's/@.*$//' |
-        grep -v -E '^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main)$' |
-        grep -cv '^\s*$')"
-      if [ "$added" -ne 0 ]; then
-        echo "$bin put $added undefined symbols on the link line:"
-        nm -u "$bin"
-        exit 1
+    floor_fail='FAIL: dependency floor: floor-extra adds getppid to the link line'
+    floor_note='  five template names and nothing else, plain and release'
+    # The undefined names of BINARY, less the five a thread start and stop
+    # add: one FAIL line and 1 when any are left, 76 when nm cannot read it.
+    floor_verdict() {
+      local bin="$1" label="$2" undefined extra
+      if ! undefined="$(nm -u "$bin" 2>&1)"; then
+        echo "SETUP: dependency floor: nm could not read $label"
+        printf '%s\n' "$undefined"
+        return 76
       fi
-    done
-    echo "  five template names and nothing else, plain and release"
+      extra="$(printf '%s\n' "$undefined" |
+        sed -e 's/^ *[wU] *//' -e 's/@.*$//' |
+        awk 'NF && $0 !~ /^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main)$/ { print }' |
+        sort -u | tr '\n' ' ')"
+      extra="${extra% }"
+      if [ -n "$extra" ]; then
+        printf 'FAIL: dependency floor: %s adds %s to the link line\n' "$label" "$extra"
+        return 1
+      fi
+      return 0
+    }
+    # Whether BINARY still names the getppid that floor-extra adds.
+    floor_carries() { nm -u "$1" 2>/dev/null | grep -qE '(^|[[:space:]])getppid'; }
     ;;
   Darwin)
     # The runtime's list (bench/dependency_floor.sh), the concurrency
@@ -469,23 +639,41 @@ case "$(uname -s)" in
     # and close for a finished thread's kqueue
     # (`IyiScheduler.retire_thread`). Nothing else.
     step "dependency floor: what threads cost darwin, by name"
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _thread_switch _write'
-    thread='_close _pthread_create _pthread_join _pthread_kill'
-    for bin in threads threads-release; do
+    floor_fail='FAIL: dependency floor: floor-extra asks libSystem for _getppid'
+    floor_note="  the runtime's names and the thread floor's, and nothing else"
+    floor_verdict() {
+      local bin="$1" label="$2" undefined libraries allowed found extra runtime thread
+      runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _thread_switch _write'
+      thread='_close _pthread_create _pthread_join _pthread_kill'
+      if ! undefined="$(nm -u "$bin" 2>&1)"; then
+        echo "SETUP: dependency floor: nm could not read $label"
+        printf '%s\n' "$undefined"
+        return 76
+      fi
       allowed="$(printf '%s\n' $runtime $thread | sort -u)"
-      found="$(nm -u "$bin" | sed -e 's/^ *//' | awk '{ print $NF }' | sort -u)"
-      extra="$(comm -13 <(echo "$allowed") <(echo "$found"))"
+      found="$(printf '%s\n' "$undefined" | sed -e 's/^ *//' | awk '{ print $NF }' | sort -u)"
+      extra="$(comm -13 <(printf '%s\n' "$allowed") <(printf '%s\n' "$found") | tr '\n' ' ')"
+      extra="${extra% }"
       if [ -n "$extra" ]; then
-        echo "$bin asks libSystem for more than the list:"
-        echo "$extra" | sed 's/^/  /'
-        exit 1
+        printf 'FAIL: dependency floor: %s asks libSystem for %s\n' "$label" "$extra"
+        return 1
       fi
-      libs="$(otool -L "$bin" | sed -n '2,$p' | awk '{ print $1 }' | grep -v -E '^/usr/lib/libSystem' | grep -cv '^$')"
-      if [ "$libs" -ne 0 ]; then
-        echo "$bin links something beyond libSystem:"; otool -L "$bin"; exit 1
+      if ! libraries="$(otool -L "$bin" 2>&1)"; then
+        echo "SETUP: dependency floor: otool could not read $label"
+        printf '%s\n' "$libraries"
+        return 76
       fi
-    done
-    echo "  the runtime's names and the thread floor's, and nothing else"
+      extra="$(printf '%s\n' "$libraries" | sed -n '2,$p' | awk '{ print $1 }' |
+        grep -v -E '^/usr/lib/libSystem|^$' | tr '\n' ' ')"
+      extra="${extra% }"
+      if [ -n "$extra" ]; then
+        printf 'FAIL: dependency floor: %s links beyond libSystem: %s\n' "$label" "$extra"
+        return 1
+      fi
+      return 0
+    }
+    # Whether BINARY still names the _getppid that floor-extra adds.
+    floor_carries() { nm -u "$1" 2>/dev/null | grep -qE '(^|[[:space:]])_getppid$'; }
     ;;
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     # A PE leaves nothing undefined, so the floor is the DLLs a thread
@@ -493,19 +681,97 @@ case "$(uname -s)" in
     # and their stop are kernel32's (`CreateThread`, `SuspendThread`,
     # `GetThreadContext`), and nothing else may join the C runtime.
     step "dependency floor: threads and their stop add no DLL"
+    floor_fail='FAIL: dependency floor: floor-extra imports advapi32.dll beyond kernel32 and the C runtime'
+    floor_note="  kernel32 and the C runtime's DLLs, plain and release"
     DUMPBIN="$(find_dumpbin || true)"
-    [ -n "$DUMPBIN" ] || { echo "SETUP: ${current_step:-floor}: dumpbin is unavailable"; exit 76; }
-    for bin in threads threads-release; do
+    [ -n "$DUMPBIN" ] || { echo "SETUP: dependency floor: dumpbin is unavailable"; exit 76; }
+    floor_verdict() {
+      local bin="$1" label="$2" dlls extra
       dlls="$(pe_dlls "$bin.exe")"
-      [ -n "$dlls" ] || { echo "SETUP: ${current_step:-floor}: dumpbin read no import table from $bin"; exit 76; }
-      extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
-      if [ -n "$extra" ]; then
-        echo "$bin imports $(echo $extra) beyond kernel32 and the C runtime"; exit 1
+      if [ -z "$dlls" ]; then
+        echo "SETUP: dependency floor: dumpbin read no import table from $label"
+        return 76
       fi
-    done
-    echo "  kernel32 and the C runtime's DLLs, plain and release"
+      extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls" | tr '\n' ' ')"
+      extra="${extra% }"
+      if [ -n "$extra" ]; then
+        printf 'FAIL: dependency floor: %s imports %s beyond kernel32 and the C runtime\n' "$label" "$extra"
+        return 1
+      fi
+      return 0
+    }
+    # Whether BINARY still imports the advapi32 DLL that floor-extra adds.
+    floor_carries() { pe_dlls "$1.exe" | grep -qx 'advapi32.dll'; }
     ;;
 esac
+
+# The control: the shipped binaries pass the verdict, then print the note.
+( floor_verdict threads threads && floor_verdict threads-release threads-release && echo "$floor_note" ) > floor-control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! tr -d '\r' < floor-control.txt | grep -qxF "$floor_note"; then
+  pair_mismatch "$code" floor-control.txt control
+fi
+cat floor-control.txt
+
+step "failure proof: an added dependency is named by the floor"
+if ! mkdir -p floor-extra/iyi || ! cp "$REPO"/src/iyi/*.iyi floor-extra/iyi/; then
+  echo "SETUP: dependency floor: the floor-extra source copy could not be made"; exit 76
+fi
+if ! awk '
+  /^      fun pthread_attr_destroy\(attributes : Void\*\) : Int32$/ {
+    print
+    print "      fun getppid : Int32"
+    linux++
+    next
+  }
+  /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ {
+    print
+    print "      fun getppid : Int32"
+    darwin++
+    next
+  }
+  /^  \{% elsif flag\?\(:win32\) %\}$/ {
+    print
+    print "    @[Link(\"advapi32\")]"
+    print "    lib LibFloorExtra"
+    print "      fun RtlGenRandom = SystemFunction036(buffer : Void*, length : UInt32) : UInt8"
+    print "    end"
+    windows++
+    next
+  }
+  /^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ {
+    print
+    print "      {% if flag?(:win32) %}"
+    print "        @@count = LibFloorExtra.RtlGenRandom(Pointer(Void).new(0_u64), 0_u32).to_i64 if @@count < 0_i64"
+    print "      {% else %}"
+    print "        @@count = LibC.getppid.to_i64 if @@count < 0_i64"
+    print "      {% end %}"
+    starts++
+    next
+  }
+  { print }
+  END { if (linux != 1 || darwin != 1 || windows != 1 || starts != 1) exit 3 }
+' "$REPO/src/iyi/thread.iyi" > floor-extra/iyi/thread.iyi; then
+  echo "SETUP: dependency floor: the floor-extra anchors changed"; exit 76
+fi
+if cmp -s floor-extra/iyi/thread.iyi "$REPO/src/iyi/thread.iyi"; then
+  echo "SETUP: dependency floor: the floor-extra copy was unchanged"; exit 76
+fi
+if ! IYI_PATH="$WORK/floor-extra${PSEP}$REPO/src" "$IYI" build \
+    "$REPO/bench/thread_exercise.iyi" -o floor-extra-run > build-floor-extra.log 2>&1; then
+  echo "SETUP: dependency floor: floor-extra did not build"; cat build-floor-extra.log; exit 76
+fi
+if ! floor_carries floor-extra-run; then
+  echo "SETUP: dependency floor: floor-extra lost its added dependency in the build"; exit 76
+fi
+( floor_verdict floor-extra-run floor-extra && echo "$floor_note" ) > floor-extra-verdict.txt 2>&1
+code=$?
+if [ "$code" -eq 1 ] && [ "$(tr -d '\r' < floor-extra-verdict.txt | grep -c '^FAIL:' || :)" -eq 1 ] &&
+   tr -d '\r' < floor-extra-verdict.txt | grep -qxF "$floor_fail"; then
+  printf '  exits 1 at "%s"\n' "$floor_fail"
+else
+  pair_mismatch "$code" floor-extra-verdict.txt mutant 0 "$floor_note"
+fi
 
 # ── 3. The numbers ────────────────────────────────────────────────────────
 cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "${NUMBER_OF_PROCESSORS:-4}")"
@@ -523,7 +789,9 @@ case "$(uname -s)" in
     cat > cores.iyi <<'IYI'
 @[Unsafe("the test reads Windows process affinity using pointer arguments")]
 module cores
-if Program.args.size > 0
+if Program.args.size > 0 && Program.args[0] == "active"
+  puts "active=#{LibC.GetActiveProcessorCount(0xFFFF_u16)}"
+elsif Program.args.size > 0
   process = 0_u64
   system = 0_u64
   if LibC.GetProcessAffinityMask(LibC.GetCurrentProcess, pointerof(process), pointerof(system)) == 0_i32
@@ -560,24 +828,80 @@ IYI
       echo "SETUP: affinity: the process has fewer than two allowed processors" >&2
       exit 76
     fi
-    AFFINITY_ONE_DEC="$(printf '%u' "$((1 << AFFINITY_FIRST))")"
     affinity_one="$(printf '%X' "$((1 << AFFINITY_FIRST))")"
     affinity_two="$(printf '%X' "$(((1 << AFFINITY_FIRST) | (1 << AFFINITY_SECOND)))")"
+    # The machine's active processors, which a process with no mask counts.
+    # The maskless copy below must report them, and its expected line is named from them.
+    ./cores active > cores-active.txt 2>&1
+    code=$?
+    if [ "$code" -ne 0 ]; then cat cores-active.txt; echo "SETUP: affinity: the active processor count did not run"; exit 76; fi
+    cores_active="$(tr -d '\r' < cores-active.txt)"
+    case "$cores_active" in active=*) cores_active="${cores_active#active=}" ;; *) echo "SETUP: affinity: invalid active processor count"; exit 76 ;; esac
+    case "$cores_active" in ''|*[!0-9]*) echo "SETUP: affinity: invalid active processor count"; exit 76 ;; esac
+    if [ "$cores_active" -gt 16 ]; then cores_helpers=15; elif [ "$cores_active" -gt 1 ]; then cores_helpers=$((cores_active - 1)); else cores_helpers=0; fi
+    # held HEXMASK PROGRAM OUTPUT: the program's line, run on those cores.
     held() {
-      MSYS2_ARG_CONV_EXCL='*' cmd /c "start /affinity $1 /b /wait cores.exe" > held-affinity.txt 2>&1
-      status=$?
-      if [ "$status" -ne 0 ]; then cat held-affinity.txt >&2; return 76; fi
-      tr -d '\r' < held-affinity.txt
+      MSYS2_ARG_CONV_EXCL='*' cmd /c "start /affinity $1 /b /wait $2" > "$3" 2>&1
+      local status=$?
+      if [ "$status" -ne 0 ]; then cat "$3" >&2; return 76; fi
+      tr -d '\r' < "$3"
     }
-    got="$(held "$affinity_one")"
+    # The two checks the control runs. Each prints one FAIL line and returns 1
+    # when the program answers otherwise, and 76 when it cannot be launched.
+    one_core() {
+      local got
+      got="$(held "$affinity_one" "$1" "held-one-$2.txt")" || { echo "SETUP: affinity: the one-core launch of $2 failed"; return 76; }
+      if [ "$got" != "core_count=1 default_helpers=0" ]; then
+        echo "FAIL: affinity: held to one core: $got"
+        return 1
+      fi
+    }
+    two_core() {
+      local got
+      got="$(held "$affinity_two" "$1" "held-two-$2.txt")" || { echo "SETUP: affinity: the two-core launch of $2 failed"; return 76; }
+      if [ "$got" != "core_count=2 default_helpers=1" ]; then
+        echo "FAIL: affinity: held to two cores: $got"
+        return 1
+      fi
+    }
+    affinity_pass='  held to one core it counts 1 and starts no helper; held to two, 2 and one'
+    ( one_core cores.exe cores && two_core cores.exe cores && echo "$affinity_pass" ) > affinity-control.txt 2>&1
     code=$?
-    if [ "$code" -ne 0 ]; then echo "SETUP: affinity: one-core launch failed" >&2; exit 76; fi
-    [ "$got" = "core_count=1 default_helpers=0" ] || { echo "held to one core: $got"; exit 1; }
-    got="$(held "$affinity_two")"
+    if [ "$code" -ne 0 ] || ! tr -d '\r' < affinity-control.txt | grep -qxF "$affinity_pass"; then
+      pair_mismatch "$code" affinity-control.txt control
+    fi
+    cat affinity-control.txt
+
+    step "failure proof: a process held to one core counts the machine's cores"
+    if ! mkdir -p maskless/iyi || ! cp "$REPO"/src/iyi/*.iyi maskless/iyi/; then
+      echo "SETUP: affinity: the maskless source copy could not be made"; exit 76
+    fi
+    if ! awk '
+      /^        if LibC\.GetProcessAffinityMask\(LibC\.GetCurrentProcess, pointerof\(mask\), pointerof\(system\)\) != 0$/ {
+        print "        if false && LibC.GetProcessAffinityMask(LibC.GetCurrentProcess, pointerof(mask), pointerof(system)) != 0"
+        found++
+        next
+      }
+      { print }
+      END { if (found != 1) exit 3 }
+    ' "$REPO/src/iyi/thread.iyi" > maskless/iyi/thread.iyi; then
+      echo "SETUP: affinity: the core-count anchor changed"; exit 76
+    fi
+    if cmp -s maskless/iyi/thread.iyi "$REPO/src/iyi/thread.iyi"; then
+      echo "SETUP: affinity: the maskless copy was unchanged"; exit 76
+    fi
+    if ! IYI_PATH="$WORK/maskless${PSEP}$REPO/src" "$IYI" build cores.iyi -o cores-maskless > build-maskless.log 2>&1; then
+      echo "SETUP: affinity: the maskless probe did not build"; cat build-maskless.log; exit 76
+    fi
+    maskless_expected="FAIL: affinity: held to one core: core_count=$cores_active default_helpers=$cores_helpers"
+    ( one_core cores-maskless.exe maskless && two_core cores-maskless.exe maskless && echo "$affinity_pass" ) > maskless-verdict.txt 2>&1
     code=$?
-    if [ "$code" -ne 0 ]; then echo "SETUP: affinity: two-core launch failed" >&2; exit 76; fi
-    [ "$got" = "core_count=2 default_helpers=1" ] || { echo "held to two cores: $got"; exit 1; }
-    echo "  held to one core it counts 1 and starts no helper; held to two, 2 and one"
+    if [ "$code" -eq 1 ] && [ "$(tr -d '\r' < maskless-verdict.txt | grep -c '^FAIL:' || :)" -eq 1 ] &&
+       tr -d '\r' < maskless-verdict.txt | grep -qxF "$maskless_expected"; then
+      printf '  exits 1 at "%s"\n' "$maskless_expected"
+    else
+      pair_mismatch "$code" maskless-verdict.txt mutant 0 "$affinity_pass"
+    fi
     ;;
 esac
 
@@ -907,6 +1231,7 @@ IYI
         END { if (roots != 1 || entry != 1 || asked != 1 || handles != 1 || capture != 1 || (mode == "noraise" && raise_removed != 1)) exit 3 }
       ' "$REPO/src/iyi/thread.iyi" > "$2"
     }
+    step "stop ordering: the control issues every suspend before the first capture"
     mkdir -p ordered/iyi serial/iyi
     cp "$REPO"/src/iyi/*.iyi ordered/iyi/
     cp "$REPO"/src/iyi/*.iyi serial/iyi/
@@ -919,7 +1244,7 @@ IYI
     code=$?; check_bound "$code" forced control order.txt
     if [ "$code" -eq 76 ]; then cat order.txt; exit 76; fi
     if [ "$code" -ne 0 ] || ! tr -d '\r' < order.txt | grep -qxF 'stop: every suspend request preceded the first context capture'; then
-      pair_mismatch "$code" order.txt control 'FAIL: stop: a context was captured before all suspend requests were issued'
+      pair_mismatch "$code" order.txt control
     fi
     echo "  control: exit 0, every suspend request preceded the first context capture"
     step "failure proof: a stop that captures before issuing every suspend request is caught"
@@ -930,7 +1255,7 @@ IYI
     code=$?; check_bound "$code" forced mutant serial.txt
     if [ "$code" -eq 76 ]; then cat serial.txt; exit 76; fi
     if [ "$code" -ne 1 ] || ! tr -d '\r' < serial.txt | grep -qxF 'FAIL: stop: a context was captured before all suspend requests were issued'; then
-      pair_mismatch "$code" serial.txt mutant 'stop: every suspend request preceded the first context capture'
+      pair_mismatch "$code" serial.txt mutant 0 'stop: every suspend request preceded the first context capture'
     fi
     echo '  exits 1 at "FAIL: stop: a context was captured before all suspend requests were issued"'
 
@@ -996,10 +1321,10 @@ IYI
       code=$?; check_bound "$code" forced "$mode" "raising-$mode.txt"
       if [ "$code" -eq 76 ]; then cat "raising-$mode.txt"; exit 76; fi
       if [ "$mode" = control ]; then
-        [ "$code" -eq 0 ] && tr -d '\r' < "raising-$mode.txt" | grep -qxF 'raise: the stopper was raised at the first suspend' || pair_mismatch "$code" "raising-$mode.txt" control 'FAIL: raise: the stopper was not raised at the first suspend'
+        [ "$code" -eq 0 ] && tr -d '\r' < "raising-$mode.txt" | grep -qxF 'raise: the stopper was raised at the first suspend' || pair_mismatch "$code" "raising-$mode.txt" control
         echo '  control: exit 0, raise: the stopper was raised at the first suspend'
       else
-        [ "$code" -eq 1 ] && tr -d '\r' < "raising-$mode.txt" | grep -qxF 'FAIL: raise: the stopper was not raised at the first suspend' || pair_mismatch "$code" "raising-$mode.txt" mutant 'raise: the stopper was raised at the first suspend'
+        [ "$code" -eq 1 ] && tr -d '\r' < "raising-$mode.txt" | grep -qxF 'FAIL: raise: the stopper was not raised at the first suspend' || pair_mismatch "$code" "raising-$mode.txt" mutant 0 'raise: the stopper was raised at the first suspend'
         echo '  exits 1 at "FAIL: raise: the stopper was not raised at the first suspend"'
       fi
     done
@@ -1070,7 +1395,7 @@ def beside(collect : Bool) : UInt64
   took
 end
 
-if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, Program.args[0].to_i.to_u64) == 0_i32 || IyiThread.core_count != 1_u64
+if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, 1_u64.unsafe_shl(Program.args[0].to_i.to_u64)) == 0_i32 || IyiThread.core_count != 1_u64
   print "SETUP: affinity: the process could not be held to one allowed core\n"
   __iyi_exit(76)
 end
@@ -1100,7 +1425,7 @@ IYI
     if ! "$IYI" build --release starve.iyi -o starve > build-starve.log 2>&1; then
       echo "SETUP: fairness: the one-core measurement did not build"; cat build-starve.log; exit 76
     fi
-    win_native 120 "the one-core check" ./starve "$AFFINITY_ONE_DEC" > starve-raw.txt 2>&1
+    win_native 120 "the one-core check" ./starve "$AFFINITY_FIRST" > starve-raw.txt 2>&1
     code=$?; check_bound "$code" healthy "run 1"
     if [ "$code" -eq 76 ]; then cat starve-raw.txt; exit 76; fi
     tr -d '\r' < starve-raw.txt > starve.txt
@@ -1163,7 +1488,7 @@ def check_collection(stage : UInt64) : Nil
   end
 end
 
-if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, Program.args[0].to_i.to_u64) == 0_i32 || IyiThread.core_count != 1_u64
+if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, 1_u64.unsafe_shl(Program.args[0].to_i.to_u64)) == 0_i32 || IyiThread.core_count != 1_u64
   print "SETUP: fairness: the process could not be held to one allowed core\n"
   __iyi_exit(76)
 end
@@ -1499,7 +1824,7 @@ IYI
       if ! IYI_PATH="$WORK/fair-$mode${PSEP}$REPO/src" "$IYI" build --release fairness.iyi -Dfairness_force -o "fair-$mode-run" > "build-fair-$mode.log" 2>&1; then
         echo "SETUP: fairness: the $mode proof did not build"; cat "build-fair-$mode.log"; exit 76
       fi
-      win_native 60 "fairness: the $mode proof" "./fair-$mode-run" "$AFFINITY_ONE_DEC" > "fair-$mode-raw.txt" 2>&1
+      win_native 60 "fairness: the $mode proof" "./fair-$mode-run" "$AFFINITY_FIRST" > "fair-$mode-raw.txt" 2>&1
       code=$?; check_bound "$code" forced "$mode" "fair-$mode-raw.txt"
       if [ "$code" -eq 76 ]; then cat "fair-$mode-raw.txt"; exit 76; fi
       tr -d '\r' < "fair-$mode-raw.txt" > "fair-$mode.txt"
@@ -1511,12 +1836,9 @@ IYI
       [ "$expected_code" -eq 1 ] && expected_fails=1
       if [ "$code" -ne "$expected_code" ] || [ "$fail_lines" -ne "$expected_fails" ] || ! grep -qxF "$expected" "fair-$mode.txt"; then
         if [ "$mode" = control ]; then
-          pair_mismatch "$code" "fair-$mode.txt" control \
-            'FAIL: fairness: the owner retook the lock at its first look ahead of the waiter' \
-            'FAIL: fairness: the explicit collection did not yield after releasing its waiter and unlocking' \
-            'FAIL: fairness: the budget collection did not yield after releasing its waiter and unlocking'
+          pair_mismatch "$code" "fair-$mode.txt" control
         fi
-        pair_mismatch "$code" "fair-$mode.txt" mutant 'fairness: the owner deferred to its counted waiter; explicit and budget collections released, unlocked, and yielded'
+        pair_mismatch "$code" "fair-$mode.txt" mutant 0 'fairness: the owner deferred to its counted waiter; explicit and budget collections released, unlocked, and yielded'
       fi
       printf '  exits %s at "%s"\n' "$code" "$expected"
     done
@@ -1890,7 +2212,7 @@ IYI
     fi
     beside_burst stopping stopping.txt
     if [ "$BURST_STATUS" -ne 0 ] || grep -q '^FAIL' stopping.txt || ! grep -qxF 'lock: restore recorded after the runtime lock was released' stopping.txt || ! grep -q '^stop:' stopping.txt || ! grep -qE '^lock: [0-9]+ waits for the runtime lock beside [0-9]+ collections took past 50 ms, the longest [0-9]+ us$' stopping.txt; then
-      pair_mismatch "$BURST_STATUS" stopping.txt control 'FAIL: lock: the priority was restored while the stopper still held the runtime lock' 'FAIL: lock: the stopper priority was not restored'
+      pair_mismatch "$BURST_STATUS" stopping.txt control
     fi
     sed 's/^/  /' stopping.txt
 
@@ -1909,7 +2231,7 @@ IYI
     fi
     beside_burst stopping-inside inside.txt
     if [ "$BURST_STATUS" -ne 1 ] || ! grep -qxF 'FAIL: lock: the priority was restored while the stopper still held the runtime lock' inside.txt; then
-      pair_mismatch "$BURST_STATUS" inside.txt mutant
+      pair_mismatch "$BURST_STATUS" inside.txt mutant 0 'lock: restore recorded after the runtime lock was released'
     fi
     printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: lock:' inside.txt)"
     fi
@@ -1957,7 +2279,7 @@ IYI
     code=$?; check_bound "$code" forced control panicky.txt
     if [ "$code" -eq 76 ]; then cat panicky.txt; exit 76; fi
     if [ "$code" -ne 1 ] || ! tr -d '\r' < panicky.txt | grep -qxF "panic: the stopping thread's priority put back" || ! tr -d '\r' < panicky.txt | grep -q '^iyi: panic: inside the stop'; then
-      pair_mismatch "$code" panicky.txt control "FAIL: panic: the stopping thread kept the stop's priority"
+      pair_mismatch "$code" panicky.txt control
     fi
     echo "  $(grep -m1 '^panic:' panicky.txt)"
 
@@ -1973,7 +2295,7 @@ IYI
     code=$?; check_bound "$code" forced mutant unlowered.txt
     if [ "$code" -eq 76 ]; then cat unlowered.txt; exit 76; fi
     if [ "$code" -ne 1 ] || ! tr -d '\r' < unlowered.txt | grep -qxF "FAIL: panic: the stopping thread kept the stop's priority"; then
-      pair_mismatch "$code" unlowered.txt mutant
+      pair_mismatch "$code" unlowered.txt mutant 1 "panic: the stopping thread's priority put back"
     fi
     printf '  says "%s"\n' "$(grep -m1 '^FAIL: panic:' unlowered.txt)"
 
@@ -2616,7 +2938,7 @@ timeout -k 5 120 ./release > release.txt 2>&1
 code=$?; check_bound "$code" forced control release.txt
 if [ "$code" -eq 76 ]; then cat release.txt; exit 76; fi
 if [ "$code" -ne 0 ] || ! grep -qxF 'release: the held thread parked inside the allocator, and the release did not wait for it' release.txt; then
-  pair_mismatch "$code" release.txt control 'FAIL: release: the release waited for the thread it let go'
+  pair_mismatch "$code" release.txt control
 fi
 sed 's/^/  /' release.txt
 
@@ -2635,9 +2957,174 @@ timeout -k 5 120 ./release-waiting > waiting.txt 2>&1
 code=$?; check_bound "$code" forced mutant waiting.txt
 if [ "$code" -eq 76 ]; then cat waiting.txt; exit 76; fi
 if [ "$code" -ne 1 ] || ! grep -q '^FAIL: release: the release waited for the thread it let go$' waiting.txt; then
-  pair_mismatch "$code" waiting.txt mutant 'release: the held thread parked inside the allocator, and the release did not wait for it'
+  pair_mismatch "$code" waiting.txt mutant 0 'release: the held thread parked inside the allocator, and the release did not wait for it'
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: release:' waiting.txt)"
+
+# ── 4f. A stop parks no thread inside the allocator ─────────────────────────
+# A stop that reaches a thread inside the allocator does not park it there.
+# The handler asks for a park, and `leave` parks the thread at depth 0 once it
+# is out (prelude.iyi, `leave`). A thread parked inside could hold a chunk in
+# a register the scan does not name, or the centre's lock against the sweep
+# (thread.iyi, `stopped_by_signal`). The witness holds one thread inside the
+# allocator, stops the others, and reads at the held thread's first park
+# whether it was inside. The control copy adds one hook to `park` and nothing
+# else. The mutant also removes the handler's check, so the hook then runs
+# inside the signal handler; that is why the hook uses atomics only.
+case "$(uname -s)" in
+  Linux | Darwin)
+    depth_success='allocator: the stop parked the held thread after it left the allocator'
+    depth_failure='FAIL: allocator: a stop parked a thread inside the allocator'
+    cat > depth.part <<'IYI' || { echo "SETUP: allocator: could not write the hook"; exit 76; }
+    # ── The depth witness (bench/thread_exercise.sh, step 4f) ───────────────
+    # Copies only: the awk in that step puts this into a copy of the
+    # runtime's thread.iyi, and the tree has none of it. The control-page
+    # words name the armed line, whether that line has parked during a stop,
+    # and whether the thread was inside the allocator at its first park.
+    IYI_DEPTH_LINE   = 1280_u64
+    IYI_DEPTH_PARKED = 1344_u64
+    IYI_DEPTH_INSIDE = 4032_u64
+
+    # The calling thread's own line is the one the witness watches.
+    def self.depth_arm : Nil
+      word(control + IYI_DEPTH_LINE).value.set(@@line)
+    end
+
+    # `park` calls this for every park, before it counts the thread in. Only
+    # the armed line's first park is recorded. Atomics only: nothing allocates
+    # and no lock is taken, because the mutant runs this in the signal handler.
+    def self.depth_park(line : UInt64, page : UInt64) : Nil
+      return if line == 0_u64 || word(page + IYI_DEPTH_LINE).value.get != line
+      return if word(page + IYI_DEPTH_PARKED).value.get != 0_u64
+      inside = 0_u64
+      inside = 1_u64 if IyiHeap.in_allocator?
+      word(page + IYI_DEPTH_INSIDE).value.set(inside)
+      word(page + IYI_DEPTH_PARKED).value.set(1_u64)
+    end
+
+    # Read by the stopper once `stop_others` has returned.
+    def self.depth_parked? : Bool
+      word(control + IYI_DEPTH_PARKED).value.get != 0_u64
+    end
+
+    def self.depth_inside? : Bool
+      word(control + IYI_DEPTH_INSIDE).value.get != 0_u64
+    end
+
+IYI
+    cat > depth.iyi <<'IYI' || { echo "SETUP: allocator: could not write the witness program"; exit 76; }
+@[Unsafe("copy-only witness: a stop's park records the allocator depth of the thread it parks")]
+module depth
+
+class Flag
+  getter stop : Atomic(Int64)
+  getter inside : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+    @inside = Atomic(Int64).new(0_i64)
+  end
+end
+
+# The held thread, as release.iyi holds it: inside the allocator from
+# `enter_barrier` to `leave_barrier` for all the time it is not leaving, so a
+# stop finds it at depth 1.
+def hold_in_allocator(flag : Flag) : Nil
+  IyiThread.depth_arm
+  while flag.stop.get == 0_i64
+    IyiHeap.enter_barrier
+    flag.inside.set(1_i64)
+    began = IyiMark.now_ns
+    while flag.stop.get == 0_i64 && !IyiHeap.stop_requested?
+      if IyiMark.now_ns &- began > 20000000000_u64
+        message = "SETUP: allocator: the holder never received a stop request\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(76)
+      end
+      IyiThread.spin_pause
+    end
+    flag.inside.set(0_i64)
+    IyiHeap.leave_barrier
+  end
+end
+
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+flag = Flag.new
+held = IyiThread.start { hold_in_allocator(flag) }
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while flag.inside.get == 0_i64
+  if IyiMark.now_ns >= deadline
+    print "SETUP: allocator: the holder never entered the allocator\n"
+    __iyi_exit(76)
+  end
+  IyiThread.yield_cpu
+end
+IyiRuntimeLock.lock
+others = IyiThread.stop_others
+was_parked = IyiThread.depth_parked?
+was_inside = IyiThread.depth_inside?
+IyiThread.resume_others(others)
+IyiRuntimeLock.unlock
+flag.stop.set(1_i64)
+held.join
+if others != 1_i64
+  print "SETUP: allocator: the stop did not stop exactly the held thread\n"
+  __iyi_exit(76)
+end
+if !was_parked
+  print "SETUP: allocator: the held thread did not park during the stop\n"
+  __iyi_exit(76)
+end
+if was_inside
+  print "FAIL: allocator: a stop parked a thread inside the allocator\n"
+  __iyi_exit(1)
+end
+puts "allocator: the stop parked the held thread after it left the allocator"
+IYI
+    step "a stop beside a thread held in the allocator parks it after it leaves"
+    mkdir -p parkdepth-control/iyi parkdepth-mutant/iyi || { echo "SETUP: allocator: could not make the copies"; exit 76; }
+    cp "$REPO"/src/iyi/*.iyi parkdepth-control/iyi/ || { echo "SETUP: allocator: could not populate the control copy"; exit 76; }
+    awk -v part=depth.part '
+      /^    # ── Roots / { while ((getline line < part) > 0) print line; roots++ }
+      /^    def self\.park\(line : UInt64\) : Nil$/ { inpark = 1; parks++ }
+      inpark && /^      page = control$/ { print; print "      depth_park(line, page)"; hooks++; inpark = 0; next }
+      inpark && /^    end$/ { inpark = 0 }
+      { print }
+      END { if (roots != 1 || parks != 1 || hooks != 1) exit 3 }
+    ' "$REPO/src/iyi/thread.iyi" > parkdepth-control/iyi/thread.iyi || { echo "SETUP: allocator: the park or roots anchors changed"; exit 76; }
+    cmp -s parkdepth-control/iyi/thread.iyi "$REPO/src/iyi/thread.iyi" && { echo "SETUP: allocator: the control copy was unchanged"; exit 76; }
+    if ! IYI_PATH="$WORK/parkdepth-control${PSEP}$REPO/src" "$IYI" build --release depth.iyi -o parkdepth-control-run > parkdepth-control.build.log 2>&1; then
+      echo "SETUP: allocator: the control did not build"; cat parkdepth-control.build.log; exit 76
+    fi
+    timeout -k 5 120 ./parkdepth-control-run > parkdepth-control.txt 2>&1
+    code=$?; check_bound "$code" forced control parkdepth-control.txt
+    if [ "$code" -ne 0 ] || [ "$(tr -d '\r' < parkdepth-control.txt | grep -c '^FAIL:' || :)" -ne 0 ] || ! tr -d '\r' < parkdepth-control.txt | grep -qxF "$depth_success"; then
+      pair_mismatch "$code" parkdepth-control.txt control
+    fi
+    echo "  $depth_success"
+
+    step "failure proof: a stop that parks a thread inside the allocator is caught on its one run"
+    cp parkdepth-control/iyi/*.iyi parkdepth-mutant/iyi/ || { echo "SETUP: allocator: could not populate the mutant copy"; exit 76; }
+    awk '
+      /^    def self\.stopped_by_signal\(context : UInt64\) : Nil$/ { insignal = 1; signals++ }
+      insignal && /^      if IyiHeap\.in_allocator\?$/ { print "      if false && IyiHeap.in_allocator?"; guards++; insignal = 0; next }
+      insignal && /^    end$/ { insignal = 0 }
+      { print }
+      END { if (signals != 1 || guards != 1) exit 3 }
+    ' parkdepth-control/iyi/thread.iyi > parkdepth-mutant/iyi/thread.iyi || { echo "SETUP: allocator: the allocator guard anchor changed"; exit 76; }
+    cmp -s parkdepth-mutant/iyi/thread.iyi parkdepth-control/iyi/thread.iyi && { echo "SETUP: allocator: the mutant copy was unchanged"; exit 76; }
+    if ! IYI_PATH="$WORK/parkdepth-mutant${PSEP}$REPO/src" "$IYI" build --release depth.iyi -o parkdepth-mutant-run > parkdepth-mutant.build.log 2>&1; then
+      echo "SETUP: allocator: the mutant did not build"; cat parkdepth-mutant.build.log; exit 76
+    fi
+    timeout -k 5 120 ./parkdepth-mutant-run > parkdepth-mutant.txt 2>&1
+    code=$?; check_bound "$code" forced mutant parkdepth-mutant.txt
+    if [ "$code" -ne 1 ] || [ "$(tr -d '\r' < parkdepth-mutant.txt | grep -c '^FAIL:' || :)" -ne 1 ] || ! tr -d '\r' < parkdepth-mutant.txt | grep -qxF "$depth_failure"; then
+      pair_mismatch "$code" parkdepth-mutant.txt mutant 0 "$depth_success"
+    fi
+    printf '  exits 1 at "%s"\n' "$depth_failure"
+    ;;
+esac
 
 # ── 5. Failure proof: a stopped thread's frames are roots ─────────────────
 # The walk over stopped threads removed from the root set, in a copy of
@@ -2672,7 +3159,7 @@ timeout -k 5 120 ./unrooted 8 > unrooted.txt 2>&1
 code=$?; check_bound "$code" forced mutant unrooted.txt
 if [ "$code" -eq 76 ]; then cat unrooted.txt; exit 76; fi
 if [ "$code" -ne 1 ] || ! tr -d '\r' < unrooted.txt | grep -qxF "FAIL: thread roots: the explicit collection swept a held thread's live nodes"; then
-  pair_mismatch "$code" unrooted.txt mutant
+  pair_mismatch "$code" unrooted.txt mutant 0 'thread exercise: every property held'
 fi
 printf '  exits 1 at "%s"\n' "FAIL: thread roots: the explicit collection swept a held thread's live nodes"
 
@@ -2693,7 +3180,7 @@ timeout -k 5 120 ./stale-threads 8 > stale.txt 2>&1
 code=$?; check_bound "$code" forced mutant stale.txt
 if [ "$code" -eq 76 ]; then cat stale.txt; exit 76; fi
 if [ "$code" -ne 1 ] || ! tr -d '\r' < stale.txt | grep -qxF 'FAIL: registry: 8 fibers of 8 finished threads are still registered, naming stacks that are gone'; then
-  pair_mismatch "$code" stale.txt mutant
+  pair_mismatch "$code" stale.txt mutant 0 'thread exercise: every property held'
 fi
 printf '  exits 1 at "%s"\n' 'FAIL: registry: 8 fibers of 8 finished threads are still registered, naming stacks that are gone'
 
@@ -2915,7 +3402,7 @@ timeout -k 5 120 ./skipping-run > skipping.txt 2>&1
 code=$?; check_bound "$code" forced mutant skipping.txt
 if [ "$code" -eq 76 ]; then cat skipping.txt; exit 76; fi
 if [ "$code" -ne 1 ] || ! tr -d '\r' < skipping.txt | grep -qxF 'FAIL: skipping: a task marked running before its switch lost live nodes'; then
-  pair_mismatch "$code" skipping.txt mutant 'skipping: held=1 collected=1 expired=0 freed=0'
+  pair_mismatch "$code" skipping.txt mutant 0 'skipping: held=1 collected=1 expired=0 freed=0'
 fi
 printf '  exits 1 at "%s"\n' 'FAIL: skipping: a task marked running before its switch lost live nodes'
 
@@ -2936,7 +3423,7 @@ timeout -k 5 120 ./skipping-ctl-run > skipping-ctl.txt 2>&1
 code=$?; check_bound "$code" forced control skipping-ctl.txt
 if [ "$code" -eq 76 ]; then cat skipping-ctl.txt; exit 76; fi
 if [ "$code" -ne 0 ] || ! grep -qxF 'skipping: held=1 collected=1 expired=0 freed=0' skipping-ctl.txt; then
-  pair_mismatch "$code" skipping-ctl.txt control 'FAIL: skipping: a task marked running before its switch lost live nodes'
+  pair_mismatch "$code" skipping-ctl.txt control
 fi
 echo "  hook-only control: held=1 collected=1 expired=0 freed=0"
 
@@ -3281,7 +3768,7 @@ IYI
     if [ "$code" -eq 76 ]; then cat early-ctl-raw.txt; exit 76; fi
     tr -d '\r' < early-ctl-raw.txt > early-ctl.txt
     if [ "$code" -ne 0 ] || ! grep -qxF 'early: held=1 before=0 after=1 stopped=0 parked=1' early-ctl.txt || ! grep -qxF 'early: the stop deferred the thread after the second context capture' early-ctl.txt || ! grep -qxF "early: the deferred thread's 300-node live list remained intact" early-ctl.txt; then
-      pair_mismatch "$code" early-ctl.txt control 'FAIL: early: a stop held a thread inside take on a decision read before it went in' "FAIL: early: the deferred thread's live list was not preserved"
+      pair_mismatch "$code" early-ctl.txt control
     fi
     printf '  control: exit 0, %s\n' "$(grep -m1 '^early: held=' early-ctl.txt)"
     step "failure proof: a stop uses the allocator depth read before the second context capture"
@@ -3296,7 +3783,7 @@ IYI
     if [ "$code" -eq 76 ]; then cat early-fz-raw.txt; exit 76; fi
     tr -d '\r' < early-fz-raw.txt > early-fz.txt
     if [ "$code" -ne 1 ] || ! grep -qxF 'early: held=1 before=0 after=1 stopped=1 parked=0' early-fz.txt || ! grep -qxF 'early: the second captured sp was stored on the stopped line' early-fz.txt || ! grep -qxF 'FAIL: early: a stop held a thread inside take on a decision read before it went in' early-fz.txt; then
-      pair_mismatch "$code" early-fz.txt mutant
+      pair_mismatch "$code" early-fz.txt mutant 0 'early: held=1 before=0 after=1 stopped=0 parked=1' 'early: the stop deferred the thread after the second context capture' "early: the deferred thread's 300-node live list remained intact"
     fi
     printf '  exits 1 at "%s" (%s)\n' 'FAIL: early: a stop held a thread inside take on a decision read before it went in' "$(grep -m1 '^early: held=' early-fz.txt)"
     ;;
@@ -3653,19 +4140,13 @@ for first_mode in control mutant; do
     fi
     if [ "$code" -ne 0 ] || ! grep -qxF "$first_success" "first-$first_mode.txt" ||
        grep -q '^FAIL:' "first-$first_mode.txt"; then
-      echo "SETUP: first helpers: the control did not complete its witnesses (exit $code)"
-      cat "first-$first_mode.txt"
-      exit 76
+      pair_mismatch "$code" "first-$first_mode.txt" control
     fi
     printf '  control: exit 0, %s\n' "$first_success"
   else
     if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' "first-$first_mode.txt")" -ne 1 ] ||
        ! grep -qxF "$first_failure" "first-$first_mode.txt"; then
-      if [ "$code" -eq 0 ] && grep -qxF "$first_success" "first-$first_mode.txt" && ! grep -q '^FAIL:' "first-$first_mode.txt"; then
-        echo "FAIL: first helpers: the swapped helper decision was not caught (exit $code)"
-        exit 1
-      fi
-      pair_mismatch "$code" "first-$first_mode.txt" mutant
+      pair_mismatch "$code" "first-$first_mode.txt" mutant 0 "$first_success"
     fi
     printf '  exits 1 at "%s"\n' "$first_failure"
   fi
@@ -3813,12 +4294,12 @@ for line_mode in control mutant; do
   check_bound "$code" forced "$line_mode" "line-hold-$line_mode.txt"
   if [ "$line_mode" = control ]; then
     if [ "$code" -ne 0 ] || ! grep -qxF "$line_pass" "line-hold-$line_mode.txt"; then
-      pair_mismatch "$code" "line-hold-$line_mode.txt" control "$line_fail"
+      pair_mismatch "$code" "line-hold-$line_mode.txt" control
     fi
     printf '  control: exit 0, %s\n' "$line_pass"
   else
     if [ "$code" -ne 1 ] || ! grep -qxF "$line_fail" "line-hold-$line_mode.txt"; then
-      pair_mismatch "$code" "line-hold-$line_mode.txt" mutant "$line_pass"
+      pair_mismatch "$code" "line-hold-$line_mode.txt" mutant 0 "$line_pass"
     fi
     printf '  exits 1 at "%s"\n' "$line_fail"
   fi
@@ -4218,20 +4699,13 @@ for copy in registry-ctl registry-cut; do
   fi
   failures=$(grep -c '^FAIL:' "$WORK/$copy.txt" || true)
   if [ "$copy" = registry-ctl ]; then
-    if [ "$code" -eq 1 ] && [ "$failures" -eq 1 ]; then
-      pair_mismatch "$code" "$WORK/$copy.txt" control "$failure" \
-        'FAIL: registry: the locked membership check answered no for the first fiber' \
-        'FAIL: registry: the locked retirement did not restore the baseline registry'
-    fi
     if [ "$code" -ne 0 ] || [ "$failures" -ne 0 ] || ! grep -qxF "$control" "$WORK/$copy.txt"; then
-      echo "SETUP: registry: the control did not complete its witnessed retirement"
-      cat "$WORK/$copy.txt"; exit 76
+      pair_mismatch "$code" "$WORK/$copy.txt" control
     fi
     printf '  control: exit 0, %s\n' "$control"
   else
     if [ "$code" -ne 1 ] || [ "$failures" -ne 1 ] || ! grep -qxF "$failure" "$WORK/$copy.txt"; then
-      echo "SETUP: registry: the mutant did not produce the named membership failure"
-      cat "$WORK/$copy.txt"; exit 76
+      pair_mismatch "$code" "$WORK/$copy.txt" mutant 0 "$control"
     fi
     printf '  exits 1 at "%s"\n' "$failure"
   fi
@@ -4770,7 +5244,6 @@ echo "  an Int32, a String and a List(String) class variable only their initiali
 # in main. Two hundred runs stay as the stress test of the end itself.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    step "stress: a program ends while another thread's collections stop it, two hundred runs"
     cat > ends.iyi <<'IYI'
 head = [] of Int32
 n = 0
@@ -4839,6 +5312,7 @@ PS1
         }
       ' "$1"
     }
+    step "process exit: the control ends in __iyi_exit"
     if ! "$IYI" build --release --emit llvm-ir ends.iyi -o ends > build-ends.log 2>&1; then
       echo "SETUP: ${current_step:-build}: ends did not build"; cat build-ends.log; exit 76
     fi
@@ -4849,6 +5323,7 @@ PS1
       echo "the healthy program does not end in __iyi_exit:"; cat ends-end.txt; exit 1
     fi
     echo '  control: exit 0, main ends in __iyi_exit'
+    step "stress: a program ends while another thread's collections stop it, two hundred runs"
     again=1
     while [ "$again" -le 200 ]; do
       timeout -k 1 30 ./ends > ends.txt 2>&1
@@ -4882,10 +5357,10 @@ PS1
     code=$?
     if [ "$code" -eq 76 ]; then cat crt-end.txt; exit 76; fi
     if [ "$code" -ne 1 ]; then
-      pair_mismatch "$code" crt-end.txt mutant 'main ends in __iyi_exit'
+      pair_mismatch "$code" crt-end.txt mutant 0 'main ends in __iyi_exit'
     fi
     if [ "$(cat crt-end.txt)" != 'FAIL: main returns to the C runtime instead of ending in __iyi_exit' ]; then
-      pair_mismatch "$code" crt-end.txt mutant 'main ends in __iyi_exit'
+      pair_mismatch "$code" crt-end.txt mutant 0 'main ends in __iyi_exit'
     fi
     echo '  exits 1 at "FAIL: main returns to the C runtime instead of ending in __iyi_exit"'
     ;;
@@ -5107,7 +5582,7 @@ IYI
     code=$?; check_bound "$code" forced control held.txt
     if [ "$code" -eq 76 ]; then cat held.txt; exit 76; fi
     if [ "$code" -ne 0 ] || ! tr -d '\r' < held.txt | grep -qFx 'unnamed: held=1 collected=1 expired=0, and no stop met a thread without its handle' || ! tr -d '\r' < held.txt | grep -qFx 'ok started=1'; then
-      pair_mismatch "$code" held.txt control 'FAIL: a stop met a started thread whose handle was not yet written'
+      pair_mismatch "$code" held.txt control
     fi
     echo "  control: exit 0, unnamed: held=1 collected=1 expired=0, and no stop met a thread without its handle"
 
@@ -5122,7 +5597,7 @@ IYI
     code=$?; check_bound "$code" forced mutant unnamed.txt
     if [ "$code" -eq 76 ]; then cat unnamed.txt; exit 76; fi
     if [ "$code" -ne 1 ] || ! tr -d '\r' < unnamed.txt | grep -qFx 'FAIL: a stop met a started thread whose handle was not yet written'; then
-      pair_mismatch "$code" unnamed.txt mutant
+      pair_mismatch "$code" unnamed.txt mutant 0 'unnamed: held=1 collected=1 expired=0, and no stop met a thread without its handle' 'ok started=1'
     fi
     printf '  exits 1 at "%s"\n' 'FAIL: a stop met a started thread whose handle was not yet written'
     ;;
@@ -5404,7 +5879,7 @@ IYI
     code=$?; check_bound "$code" forced control kept.txt
     if [ "$code" -eq 76 ]; then cat kept.txt; exit 76; fi
     if [ "$code" -ne 0 ] || ! tr -d '\r' < kept.txt | grep -qxF "guard: the stop scanned the holder's stack from its committed page"; then
-      pair_mismatch "$code" kept.txt control 'FAIL: guard: normalization did not find committed stack memory' 'FAIL: guard: a stop scan began inside its guard page'
+      pair_mismatch "$code" kept.txt control
     fi
     echo "  control: exit 0, guard: the stop scanned the holder's stack from its committed page"
 
@@ -5420,7 +5895,7 @@ IYI
     code=$?; check_bound "$code" forced mutant guarded.txt
     if [ "$code" -eq 76 ]; then cat guarded.txt; exit 76; fi
     if [ "$code" -ne 1 ] || ! grep -qxF 'FAIL: guard: a stop scan began inside its guard page' guarded.txt; then
-      pair_mismatch "$code" guarded.txt mutant "guard: the stop scanned the holder's stack from its committed page"
+      pair_mismatch "$code" guarded.txt mutant 0 "guard: the stop scanned the holder's stack from its committed page"
     fi
     echo "  exits 1 at \"FAIL: guard: a stop scan began inside its guard page\""
 
@@ -5441,7 +5916,7 @@ IYI
     code=$?; check_bound "$code" forced mutant identity.txt
     if [ "$code" -eq 76 ]; then cat identity.txt; exit 76; fi
     if [ "$code" -ne 1 ] || ! tr -d '\r' < identity.txt | grep -qxF 'FAIL: guard: normalization did not find committed stack memory'; then
-      pair_mismatch "$code" identity.txt mutant "guard: the stop scanned the holder's stack from its committed page"
+      pair_mismatch "$code" identity.txt mutant 0 "guard: the stop scanned the holder's stack from its committed page"
     fi
     echo '  exits 1 at "FAIL: guard: normalization did not find committed stack memory"'
     ;;
@@ -5669,10 +6144,10 @@ IYI
       code=$?; check_bound "$code" forced "$mode" "pretls-$mode.txt"
       if [ "$code" -eq 76 ]; then cat "pretls-$mode.txt"; exit 76; fi
       if [ "$mode" = control ]; then
-        [ "$code" -eq 0 ] && grep -qxF 'pretls: the pre-TLS child was not named, then its linked line was stopped' "pretls-$mode.txt" || pair_mismatch "$code" "pretls-$mode.txt" control 'FAIL: pretls: a stop named a child before its first TLS write'
+        [ "$code" -eq 0 ] && grep -qxF 'pretls: the pre-TLS child was not named, then its linked line was stopped' "pretls-$mode.txt" || pair_mismatch "$code" "pretls-$mode.txt" control
         echo '  control: exit 0, pretls: the pre-TLS child was not named, then its linked line was stopped'
       else
-        [ "$code" -eq 1 ] && grep -qxF 'FAIL: pretls: a stop named a child before its first TLS write' "pretls-$mode.txt" || pair_mismatch "$code" "pretls-$mode.txt" mutant 'pretls: the pre-TLS child was not named, then its linked line was stopped'
+        [ "$code" -eq 1 ] && grep -qxF 'FAIL: pretls: a stop named a child before its first TLS write' "pretls-$mode.txt" || pair_mismatch "$code" "pretls-$mode.txt" mutant 0 'pretls: the pre-TLS child was not named, then its linked line was stopped'
         echo '  exits 1 at "FAIL: pretls: a stop named a child before its first TLS write"'
       fi
     done
@@ -6016,12 +6491,12 @@ IYI
         if [ "$code" -eq 0 ] && [ "$answer" = "$first_ok" ]; then
           echo "  control: exit 0, $first_ok"
         else
-          pair_mismatch "$code" "$copy.txt" control "$first_fail"
+          pair_mismatch "$code" "$copy.txt" control
         fi
       elif [ "$code" -eq 1 ] && [ "$answer" = "$first_fail" ]; then
         echo "  exits 1 at \"$first_fail\""
       else
-        pair_mismatch "$code" "$copy.txt" mutant "$first_ok"
+        pair_mismatch "$code" "$copy.txt" mutant 0 "$first_ok"
       fi
     done
     ;;
@@ -6129,7 +6604,7 @@ IYI
     ( timeout -k 5 60 ./fresh-control > fresh-control.txt 2>&1; exit $? ) 2> /dev/null
     code=$?; check_bound "$code" forced control fresh-control.txt
     if [ "$code" -eq 76 ]; then cat fresh-control.txt; exit 76; fi
-    [ "$code" -eq 0 ] && grep -qxF "$fresh_ok" fresh-control.txt || pair_mismatch "$code" fresh-control.txt control "$fresh_fail"
+    [ "$code" -eq 0 ] && grep -qxF "$fresh_ok" fresh-control.txt || pair_mismatch "$code" fresh-control.txt control
     printf '  control: exit 0, %s\n' "$fresh_ok"
 
     step "failure proof: a fiber's top read as no fiber's, as it was"
@@ -6145,7 +6620,7 @@ IYI
     ( timeout -k 5 60 ./topless-run > topless.txt 2>&1; exit $? ) 2> /dev/null
     code=$?; check_bound "$code" forced mutant topless.txt
     if [ "$code" -eq 76 ]; then cat topless.txt; exit 76; fi
-    [ "$code" -eq 1 ] && grep -qxF "$fresh_fail" topless.txt || pair_mismatch "$code" topless.txt mutant "$fresh_ok"
+    [ "$code" -eq 1 ] && grep -qxF "$fresh_fail" topless.txt || pair_mismatch "$code" topless.txt mutant 0 "$fresh_ok"
     printf '  exits 1 at "%s"\n' "$fresh_fail"
 
     step "stress: tasks begin on fresh stacks beside a collector, three runs of 5 s"
@@ -6171,6 +6646,221 @@ IYI
       run=$((run + 1))
     done
     echo "  three runs, every task's top its own stack's:$started tasks"
+    ;;
+esac
+
+# ── 7f (forced). A stop with sp at a fresh fiber's top, control and topless ─
+# A fiber made by hand is prepared and registered, never queued, and its top is
+# published. The child sets sp to that top in asm, publishes HELD and spins on
+# OPEN without touching its stack. The parent's one collection stops the child
+# there, and the copy-only hook in `each_stopped_root` checks that the top the
+# stop found is the armed one before anything is scanned. The topless copy reads
+# the top as no fiber's (`address < top`), so the bound is another mapping's top
+# or 0: the hook names that and exits before the scan. Hooks exist only in awk
+# copies under $WORK. A setup, watchdog or broken witness exits 76.
+case "$(uname -s)" in
+  Linux | Darwin)
+    stoptop_ok="stoptop: a stop at a fiber's top bounded its scan by that fiber's top"
+    stoptop_fail="FAIL: stoptop: a stop at a fiber's top was not bounded by that fiber's top"
+
+    # Module level, before `class IyiThread`: the switch the child calls. The
+    # caller's rbx (x19 on aarch64) goes on its own stack, sp moves to the armed
+    # top, HELD is stored, and the spin on OPEN never pushes, pops or calls.
+    cat > stoptop-asm.part <<'IYI'
+  {% if flag?(:x86_64) %}
+    @[NoInline]
+    @[Naked]
+    fun __iyi_stoptop_switch(top : UInt64, page : UInt64) : Nil
+      asm("pushq %rbx
+           movq %rsp, %rbx
+           movq %rdi, %rsp
+           movl $$1, %eax
+           xchgq %rax, 3264(%rsi)
+           1:
+           movq 3328(%rsi), %rax
+           testq %rax, %rax
+           jnz 2f
+           pause
+           jmp 1b
+           2:
+           movq %rbx, %rsp
+           popq %rbx
+           retq" :::: "volatile")
+    end
+  {% else %}
+    @[NoInline]
+    @[Naked]
+    fun __iyi_stoptop_switch(top : UInt64, page : UInt64) : Nil
+      asm("str x19, [sp, #-16]!
+           mov x19, sp
+           mov sp, x0
+           mov x2, #1
+           add x3, x1, #3264
+           stlr x2, [x3]
+           add x3, x1, #3328
+           1:
+           ldar x2, [x3]
+           cbnz x2, 2f
+           yield
+           b 1b
+           2:
+           mov sp, x19
+           ldr x19, [sp], #16
+           ret" :::: "volatile")
+    end
+  {% end %}
+IYI
+
+    # Copies only: the awk below puts this before the roots of a copy of
+    # thread.iyi. Control-page words: LINE (the held child's line), TOP (the
+    # armed fiber top), HELD (set by the child once sp is at TOP), OPEN (set by
+    # the parent to let the child return), BOUND (the top the stop's scan was
+    # given) and VISITS (collections that visited the armed line while held).
+    cat > stoptop.part <<'IYI'
+    IYI_STOPTOP_LINE   = 3136_u64
+    IYI_STOPTOP_TOP    = 3200_u64
+    IYI_STOPTOP_HELD   = 3264_u64
+    IYI_STOPTOP_OPEN   = 3328_u64
+    IYI_STOPTOP_BOUND  = 3392_u64
+    IYI_STOPTOP_VISITS = 3456_u64
+
+    # Made by hand and registered, never queued, so it never runs: its stack is
+    # prepared, and the registry the stop walks holds it with its top.
+    def self.stoptop_fresh_fiber : Nil
+      fiber = IyiFiber.new
+      fiber.prepare_stack
+      IyiScheduler.register(fiber)
+      word(control + IYI_STOPTOP_TOP).value.set(fiber.stack_top)
+    end
+
+    def self.stoptop_held? : Bool
+      word(control + IYI_STOPTOP_HELD).value.get != 0_u64
+    end
+
+    def self.stoptop_visits : UInt64
+      word(control + IYI_STOPTOP_VISITS).value.get
+    end
+
+    def self.stoptop_open : Nil
+      word(control + IYI_STOPTOP_OPEN).value.set(1_u64)
+    end
+
+    # The child's body, with no captures: publishes its line, then switches sp
+    # to the armed top and holds there until OPEN.
+    def self.stoptop_hold : Nil
+      page = control
+      word(page + IYI_STOPTOP_LINE).value.set(@@line)
+      __iyi_stoptop_switch(word(page + IYI_STOPTOP_TOP).value.get, page)
+    end
+
+    # Called by `each_stopped_root` with the top the stop found for a stopped
+    # thread's sp, before anything is scanned. Words and a literal only: no
+    # allocation, no lock, no print, so a stop may reach it at any point.
+    def self.stoptop_visit(cursor : UInt64, sp : UInt64, top : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || word(page + IYI_STOPTOP_HELD).value.get == 0_u64
+      return if word(page + IYI_STOPTOP_LINE).value.get != cursor
+      armed = word(page + IYI_STOPTOP_TOP).value.get
+      if sp != armed
+        message = "SETUP: stoptop: the held child's sp was not its fiber's top\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        {% if flag?(:darwin) %}
+          LibC.stoptop_exit(76_i32)
+        {% else %}
+          __iyi_exit(76)
+        {% end %}
+      end
+      word(page + IYI_STOPTOP_BOUND).value.set(top)
+      word(page + IYI_STOPTOP_VISITS).value.add(1_u64)
+      if top != armed
+        message = "FAIL: stoptop: a stop at a fiber's top was not bounded by that fiber's top\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        {% if flag?(:darwin) %}
+          LibC.stoptop_exit(1_i32)
+        {% else %}
+          __iyi_exit(1)
+        {% end %}
+      end
+    end
+IYI
+
+    # The awk that puts the part, the asm and the hook into a copy of thread.iyi.
+    # Each anchor is exact and counted once; a copy that does not match exits 3.
+    stoptop_copy() {
+      awk -v asmfile=stoptop-asm.part -v part=stoptop.part '
+        /^  class IyiThread$/ { while ((getline line < asmfile) > 0) print line; classes++ }
+        /^    # ── Roots/ { while ((getline line < part) > 0) print line; roots++ }
+        /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ {
+          print
+          print "      fun stoptop_exit = _exit(status : Int32) : NoReturn"
+          exits++
+          next
+        }
+        /^    def self\.each_stopped_root\(visit : Proc\(UInt64, Nil\)\) : Nil$/ { in_scan = 1; scans++ }
+        in_scan && /^          top = IyiScheduler\.fiber_top_holding\(sp\)$/ {
+          print
+          print "          IyiThread.stoptop_visit(cursor, sp, top)"
+          visits++
+          next
+        }
+        in_scan && /^    end$/ { in_scan = 0; scan_ends++ }
+        { print }
+        END { if (classes != 1 || roots != 1 || exits != 1 || scans != 1 || visits != 1 || scan_ends != 1) exit 3 }
+      ' "$REPO/src/iyi/thread.iyi" > "$1"
+    }
+
+    step "a stop with sp at a fresh fiber's top, control"
+    cat > stoptop.iyi <<'IYI'
+module stoptop
+
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+IyiThread.stoptop_fresh_fiber
+thread = IyiThread.start { IyiThread.stoptop_hold; nil }
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while !IyiThread.stoptop_held?
+  if IyiMark.now_ns >= deadline
+    print "SETUP: stoptop: the held child never reached its fiber's top\n"
+    __iyi_exit(76)
+  end
+  IyiThread.yield_cpu
+end
+before = IyiThread.stoptop_visits
+IyiMark.collect
+if IyiThread.stoptop_visits <= before
+  print "SETUP: stoptop: the collection did not visit the held line\n"
+  __iyi_exit(76)
+end
+IyiThread.stoptop_open
+thread.join
+puts "stoptop: a stop at a fiber's top bounded its scan by that fiber's top"
+IYI
+    mkdir -p stoptop-control/iyi
+    cp "$REPO"/src/iyi/*.iyi stoptop-control/iyi/
+    stoptop_copy stoptop-control/iyi/thread.iyi || { echo "SETUP: ${current_step:-stoptop}: the thread anchors changed"; exit 76; }
+    if ! IYI_PATH="$WORK/stoptop-control${PSEP}$REPO/src" "$IYI" build stoptop.iyi -o stoptop-control-run > stoptop-control-build.log 2>&1; then
+      echo "SETUP: ${current_step:-stoptop}: the control copy did not build"; cat stoptop-control-build.log; exit 76
+    fi
+    ( timeout -k 5 60 ./stoptop-control-run > stoptop-control.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?; check_bound "$code" forced control stoptop-control.txt
+    [ "$code" -eq 0 ] && tr -d '\r' < stoptop-control.txt | grep -qxF "$stoptop_ok" || pair_mismatch "$code" stoptop-control.txt control
+    printf '  control: exit 0, %s\n' "$stoptop_ok"
+
+    step "failure proof: a stop with sp at a fresh fiber's top, its scan bounded by the mapping above"
+    mkdir -p stoptop-topless/iyi
+    cp "$REPO"/src/iyi/*.iyi stoptop-topless/iyi/
+    stoptop_copy stoptop-topless/iyi/thread.iyi || { echo "SETUP: ${current_step:-stoptop}: the thread anchors changed"; exit 76; }
+    awk '/^      return top if top != 0 && address <= top && address > top - IyiFiber::STACK_BYTES$/ {
+        print "      return top if top != 0 && address < top && address >= top - IyiFiber::STACK_BYTES"; found++; next }
+      { print } END { if (found != 1) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > stoptop-topless/iyi/concurrency.iyi || { echo "SETUP: ${current_step:-stoptop}: the fiber stack bound anchor changed"; exit 76; }
+    cmp -s stoptop-topless/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && { echo "SETUP: ${current_step:-stoptop}: the topless copy was unchanged"; exit 76; }
+    if ! IYI_PATH="$WORK/stoptop-topless${PSEP}$REPO/src" "$IYI" build stoptop.iyi -o stoptop-topless-run > stoptop-topless-build.log 2>&1; then
+      echo "SETUP: ${current_step:-stoptop}: the topless copy did not build"; cat stoptop-topless-build.log; exit 76
+    fi
+    ( timeout -k 5 60 ./stoptop-topless-run > stoptop-topless.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?; check_bound "$code" forced mutant stoptop-topless.txt
+    [ "$code" -eq 1 ] && tr -d '\r' < stoptop-topless.txt | grep -qxF "$stoptop_fail" || pair_mismatch "$code" stoptop-topless.txt mutant 0 "$stoptop_ok"
+    printf '  exits 1 at "%s"\n' "$stoptop_fail"
     ;;
 esac
 
@@ -6399,7 +7089,7 @@ IYI
     code=$?; check_bound "$code" forced control wild-control.txt
     if [ "$code" -eq 76 ]; then cat wild-control.txt; exit 76; fi
     if [ "$code" -ne 139 ] || ! grep -qxF "$wild_handler_line" wild-control.txt || ! grep -qxF "$wild_install_line" wild-control.txt; then
-      pair_mismatch "$code" wild-control.txt control "$wild_fail_line"
+      pair_mismatch "$code" wild-control.txt control
     fi
     printf '  control: exit 139 (SIGSEGV), with "%s" and "%s"\n' "$wild_handler_line" "$wild_install_line"
 
@@ -6408,7 +7098,7 @@ IYI
     code=$?; check_bound "$code" forced mutant wild-heaped.txt
     if [ "$code" -eq 76 ]; then cat wild-heaped.txt; exit 76; fi
     if [ "$code" -ne 1 ] || ! grep -qxF "$wild_handler_line" wild-heaped.txt || ! grep -qxF "$wild_fail_line" wild-heaped.txt; then
-      pair_mismatch "$code" wild-heaped.txt mutant
+      pair_mismatch "$code" wild-heaped.txt mutant 139 "$wild_handler_line" "$wild_install_line"
     fi
     printf '  exits 1 at "%s"\n' "$wild_fail_line"
     ;;
@@ -6510,10 +7200,10 @@ IYI
       code=$?; check_bound "$code" forced "$mode" "final-wake-$mode.txt"
       if [ "$code" -eq 76 ]; then cat "final-wake-$mode.txt"; exit 76; fi
       if [ "$mode" = control ]; then
-        [ "$code" -eq 0 ] && grep -qxF 'final wake: the last increment called the platform wake' "final-wake-$mode.txt" || pair_mismatch "$code" "final-wake-$mode.txt" control 'FAIL: final wake: the last increment did not call the platform wake'
+        [ "$code" -eq 0 ] && grep -qxF 'final wake: the last increment called the platform wake' "final-wake-$mode.txt" || pair_mismatch "$code" "final-wake-$mode.txt" control
         echo '  control: exit 0, final wake: the last increment called the platform wake'
       else
-        [ "$code" -eq 1 ] && grep -qxF 'FAIL: final wake: the last increment did not call the platform wake' "final-wake-$mode.txt" || pair_mismatch "$code" "final-wake-$mode.txt" mutant 'final wake: the last increment called the platform wake'
+        [ "$code" -eq 1 ] && grep -qxF 'FAIL: final wake: the last increment did not call the platform wake' "final-wake-$mode.txt" || pair_mismatch "$code" "final-wake-$mode.txt" mutant 0 'final wake: the last increment called the platform wake'
         echo '  exits 1 at "FAIL: final wake: the last increment did not call the platform wake"'
       fi
     done
@@ -6830,12 +7520,12 @@ IYI
             cat "unowed-$mode.txt"; exit 1
           fi
           if [ "$code" -ne 0 ] || [ "$(grep -c '^FAIL:' "unowed-$mode.txt")" -ne 0 ] || [ "$(grep -cFx 'unowed: the collector waited for the parked spinner to pay its turn' "unowed-$mode.txt")" -ne 1 ]; then
-            echo "SETUP: unowed: the control did not produce its witness"; cat "unowed-$mode.txt"; exit 76
+            pair_mismatch "$code" "unowed-$mode.txt" control
           fi
           echo '  control: unowed: the collector waited for the parked spinner to pay its turn'
         else
           if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' "unowed-$mode.txt")" -ne 1 ] || [ "$(grep -cFx 'FAIL: unowed: the collector attempted the runtime lock before waiting for an owed turn' "unowed-$mode.txt")" -ne 1 ]; then
-            echo "SETUP: unowed: the mutant did not produce its named verdict"; cat "unowed-$mode.txt"; exit 76
+            pair_mismatch "$code" "unowed-$mode.txt" mutant 0 'unowed: the collector waited for the parked spinner to pay its turn'
           fi
           echo '  exits 1 at "FAIL: unowed: the collector attempted the runtime lock before waiting for an owed turn"'
         fi
@@ -6912,7 +7602,7 @@ IYI
     ( timeout -k 5 120 ./yield-control-run > yield-control.txt 2>&1; exit $? ) 2>/dev/null
     code=$?; check_bound "$code" forced control yield-control.txt
     if [ "$code" -ne 0 ] || ! cmp -s yield-pass.expected yield-control.txt; then
-      pair_mismatch "$code" yield-control.txt control "$yield_fail"
+      pair_mismatch "$code" yield-control.txt control
     fi
     echo "  control: $yield_pass"
 
@@ -6945,10 +7635,24 @@ IYI
     if ! IYI_PATH="$WORK/yield-mutant${PSEP}$REPO/src" "$IYI" build yield_witness.iyi -o yield-mutant-run > build-yield-mutant.log 2>&1; then
       echo 'SETUP: yield: the mutant copy did not build'; cat build-yield-mutant.log; exit 76
     fi
+    if ! nm -u yield-control-run > yield-control-symbols.txt 2>&1 ||
+       ! nm -u yield-mutant-run > yield-mutant-symbols.txt 2>&1; then
+      echo 'SETUP: yield: the import tables could not be read'
+      exit 76
+    fi
+    if ! grep -Eq '(^|[[:space:]])_thread_switch$' yield-control-symbols.txt; then
+      echo 'FAIL: yield: the control did not import thread_switch'
+      exit 1
+    fi
+    if grep -Eq '(^|[[:space:]])_thread_switch$' yield-mutant-symbols.txt; then
+      echo 'FAIL: yield: the mutant still imports thread_switch'
+      exit 1
+    fi
+    echo '  imports: control has _thread_switch; mutant does not'
     ( timeout -k 5 120 ./yield-mutant-run > yield-mutant.txt 2>&1; exit $? ) 2>/dev/null
     code=$?; check_bound "$code" forced mutant yield-mutant.txt
     if [ "$code" -ne 1 ] || ! cmp -s yield-fail.expected yield-mutant.txt; then
-      pair_mismatch "$code" yield-mutant.txt mutant "$yield_pass"
+      pair_mismatch "$code" yield-mutant.txt mutant 0 "$yield_pass"
     fi
     echo "  exits 1 at \"$yield_fail\""
     ;;
@@ -7110,10 +7814,10 @@ IYI
       code=$?; check_bound "$code" forced "$mode" "roster-$mode.txt"
       if [ "$code" -eq 76 ]; then cat "roster-$mode.txt"; exit 76; fi
       if [ "$mode" = control ]; then
-        [ "$code" -eq 0 ] && grep -qxF 'roster: the unlinked child was not counted, then its linked line was stopped' "roster-$mode.txt" || pair_mismatch "$code" "roster-$mode.txt" control 'FAIL: roster: a thread was counted before its line was linked'
+        [ "$code" -eq 0 ] && grep -qxF 'roster: the unlinked child was not counted, then its linked line was stopped' "roster-$mode.txt" || pair_mismatch "$code" "roster-$mode.txt" control
         echo '  control: exit 0, roster: the unlinked child was not counted, then its linked line was stopped'
       else
-        [ "$code" -eq 1 ] && grep -qxF 'FAIL: roster: a thread was counted before its line was linked' "roster-$mode.txt" || pair_mismatch "$code" "roster-$mode.txt" mutant 'roster: the unlinked child was not counted, then its linked line was stopped'
+        [ "$code" -eq 1 ] && grep -qxF 'FAIL: roster: a thread was counted before its line was linked' "roster-$mode.txt" || pair_mismatch "$code" "roster-$mode.txt" mutant 0 'roster: the unlinked child was not counted, then its linked line was stopped'
         echo '  exits 1 at "FAIL: roster: a thread was counted before its line was linked"'
       fi
     done
@@ -7265,11 +7969,174 @@ IYI
       code=$?; check_bound "$code" forced "$mode" "calls-c-$mode.txt"
       if [ "$code" -eq 76 ]; then cat "calls-c-$mode.txt"; exit 76; fi
       if [ "$mode" = control ]; then
-        [ "$code" -eq 0 ] && grep -qxF 'calls-c: the held thread used its own pthread handle' "calls-c-$mode.txt" || pair_mismatch "$code" "calls-c-$mode.txt" control 'FAIL: calls-c: a C-calling program started a raw-clone thread' "FAIL: calls-c: the worker's pthread_self did not match its recorded handle"
+        [ "$code" -eq 0 ] && grep -qxF 'calls-c: the held thread used its own pthread handle' "calls-c-$mode.txt" || pair_mismatch "$code" "calls-c-$mode.txt" control
         echo '  control: exit 0, calls-c: the held thread used its own pthread handle'
       else
-        [ "$code" -eq 1 ] && grep -qxF 'FAIL: calls-c: a C-calling program started a raw-clone thread' "calls-c-$mode.txt" || pair_mismatch "$code" "calls-c-$mode.txt" mutant 'calls-c: the held thread used its own pthread handle'
+        [ "$code" -eq 1 ] && grep -qxF 'FAIL: calls-c: a C-calling program started a raw-clone thread' "calls-c-$mode.txt" || pair_mismatch "$code" "calls-c-$mode.txt" mutant 0 'calls-c: the held thread used its own pthread handle'
         echo '  exits 1 at "FAIL: calls-c: a C-calling program started a raw-clone thread"'
+      fi
+    done
+    # ── 7k, the mark helper: a collection's helper launch under a C-calling program ──
+    # A collection makes helper threads as well as the program's own. On a
+    # fresh heap the first mark finds no earlier mark to size its helpers by,
+    # so it asks for none; the second finds four mebibytes live and asks for
+    # the one helper allowed. Automatic collection is off, workers is one, and
+    # two explicit collections run. The control is hooks only: they count the
+    # launch and keep the first pthread handle it got, and the program decides.
+    # The mutant makes every launch a raw clone, by letting program_calls_c?
+    # answer false, so its one launch gets no handle.
+    helper_pass='calls-c helper: the mark helper runs on its own libc thread'
+    helper_fail='FAIL: calls-c helper: a C-calling program launched its mark helper by raw clone'
+    step "failure proof: a C-calling program launches its mark helper on libc's thread"
+    cat > helper_launch.part <<'IYI' || { echo "SETUP: ${current_step:-calls-c helper}: could not write the hooks"; exit 76; }
+    # ── The mark helper's launch (bench/thread_exercise.sh, step 7k) ────────
+    # Copies only: the awk in that step puts this into a copy of thread.iyi
+    # before its roots. Two words of the control page count the launches
+    # start_helper makes and keep the first pthread handle one got. Nothing
+    # here allocates, takes a lock or writes a message: the program reads the
+    # words and decides the verdict.
+    IYI_HELPER_LAUNCHES = 3520_u64
+    IYI_HELPER_HANDLE = 3968_u64
+
+    # Zeroes both words. Mapping the page here means the launch hooks, which
+    # read @@control and never map it, find it.
+    def self.helper_arm : Nil
+      word(control + IYI_HELPER_LAUNCHES).value.set(0_u64)
+      word(control + IYI_HELPER_HANDLE).value.set(0_u64)
+    end
+
+    # start_helper, once the helper's stack is mapped and before the choice
+    # between libc's thread and a raw clone.
+    def self.helper_launch_counted : Nil
+      page = @@control
+      return if page == 0_u64
+      word(page + IYI_HELPER_LAUNCHES).value.add(1_u64)
+    end
+
+    # start_helper, right after libc's pthread_create. The first handle stays.
+    def self.helper_launch_handle(handle : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64
+      slot = word(page + IYI_HELPER_HANDLE)
+      slot.value.set(handle) if slot.value.get == 0_u64
+    end
+
+    def self.helper_launch_count : UInt64
+      word(control + IYI_HELPER_LAUNCHES).value.get
+    end
+
+    def self.helper_first_handle : UInt64
+      word(control + IYI_HELPER_HANDLE).value.get
+    end
+
+IYI
+    cat > helper_launch.iyi <<'IYI' || { echo "SETUP: ${current_step:-calls-c helper}: could not write the witness program"; exit 76; }
+@[Unsafe("the program asks libc for its thread, zeroes the helper words of its copy's control page, and reads the pthread handle of the mark helper its second collection launched")]
+module helper_launch
+lib HelperLibc
+  fun pthread_self : UInt64
+end
+# Sixty-four 64 KiB strings, held by a class variable: a global is a root, and
+# each string is an ordinary heap chunk, so the four mebibytes stay live through
+# both collections with no local naming them.
+class Ballast
+  @@keep : Array(String) = [] of String
+
+  def self.hold(chunk : String) : Nil
+    @@keep << chunk
+  end
+end
+
+main_self = HelperLibc.pthread_self
+if main_self == 0_u64
+  puts "SETUP: calls-c helper: the main thread has no pthread handle"
+  __iyi_exit(76)
+end
+
+# A fresh heap: no automatic collection, and one helper allowed. A host with
+# one core reads the helper count back as zero, which is setup.
+IyiMark.auto = false
+IyiMark.workers = 1_u64
+if IyiMark.workers != 1_u64
+  puts "SETUP: calls-c helper: the helper count did not read back as one, which needs two cores"
+  __iyi_exit(76)
+end
+IyiThread.helper_arm
+
+# The first mark finds no earlier mark to size its helpers by, so it asks for
+# none. The second finds four mebibytes live and asks for the one allowed.
+index = 0
+while index < 64
+  Ballast.hold("x" * 65536)
+  index = index + 1
+end
+IyiMark.collect
+IyiMark.collect
+
+if IyiThread.helper_launch_count == 0_u64
+  puts "SETUP: calls-c helper: the second collection launched no helper"
+  __iyi_exit(76)
+end
+handle = IyiThread.helper_first_handle
+if handle == 0_u64
+  puts "FAIL: calls-c helper: a C-calling program launched its mark helper by raw clone"
+  __iyi_exit(1)
+end
+if handle == main_self
+  puts "FAIL: calls-c helper: the mark helper was given the main thread handle"
+  __iyi_exit(1)
+end
+puts "calls-c helper: the mark helper runs on its own libc thread"
+IYI
+    helper_control_copy() {
+      awk -v part=helper_launch.part '
+        /^    # ── Roots/ {
+          while ((getline line < part) > 0) { print line; part_lines++ }
+          close(part)
+          roots++
+        }
+        /^    def self\.start_helper\(entry : UInt64, argument : UInt64\) : Nil$/ { in_helper = 1; helpers++ }
+        in_helper && /^        stack = __iyi_mmap\(IYI_THREAD_STACK\)\.address$/ {
+          print; print "        IyiThread.helper_launch_counted"; launches++; next
+        }
+        in_helper && /^          result = start_by_libc\(stack, entry, argument, pointerof\(handle\)\.address\)$/ {
+          print; print "          IyiThread.helper_launch_handle(handle)"; handles++; next
+        }
+        in_helper && /^    end$/ { in_helper = 0; ends++ }
+        { print }
+        END {
+          if (roots != 1 || part_lines == 0 || helpers != 1 || launches != 1 || handles != 1 || ends != 1) exit 3
+        }
+      ' "$REPO/src/iyi/thread.iyi" > "$1"
+    }
+    mkdir -p helper-control/iyi helper-cloned/iyi || { echo "SETUP: calls-c helper: could not make the copies"; exit 76; }
+    cp "$REPO"/src/iyi/*.iyi helper-control/iyi/ || { echo "SETUP: calls-c helper: could not populate the control copy"; exit 76; }
+    helper_control_copy helper-control/iyi/thread.iyi || { echo "SETUP: calls-c helper: the start_helper anchors changed"; exit 76; }
+    cp helper-control/iyi/*.iyi helper-cloned/iyi/ || { echo "SETUP: calls-c helper: could not populate the mutant copy"; exit 76; }
+    awk '/^    @\[Primitive\(:iyi_calls_c\)\]$/ { primitive++; next }
+      /^    def self\.program_calls_c\? : Bool$/ { print; print "      Pointer(UInt8).new(0_u64).address != 0_u64"; method++; next }
+      { print } END { if (primitive != 1 || method != 1) exit 3 }' \
+      helper-control/iyi/thread.iyi > helper-cloned/iyi/thread.iyi || { echo "SETUP: calls-c helper: the compiler answer anchors changed"; exit 76; }
+    cmp -s helper-control/iyi/thread.iyi helper-cloned/iyi/thread.iyi && { echo "SETUP: ${current_step:-calls-c helper}: the raw-clone copy was unchanged"; exit 76; }
+    for mode in control cloned; do
+      if ! IYI_PATH="$WORK/helper-$mode${PSEP}$REPO/src" "$IYI" build helper_launch.iyi -o "helper-$mode-run" > "build-helper-$mode.log" 2>&1; then
+        echo "SETUP: calls-c helper: the $mode copy did not build"; cat "build-helper-$mode.log"; exit 76
+      fi
+      step "linux: mark helper launch, $mode"
+      ( timeout -k 5 120 "./helper-$mode-run" > "helper-$mode.txt" 2>&1; exit $? ) 2> /dev/null
+      code=$?; check_bound "$code" forced "$mode" "helper-$mode.txt"
+      if [ "$mode" = control ]; then
+        if [ "$code" -eq 0 ] && [ "$(grep -c '^FAIL:' "helper-$mode.txt" || :)" -eq 0 ] && tr -d '\r' < "helper-$mode.txt" | grep -qxF "$helper_pass"; then
+          echo "  control: exit 0, $helper_pass"
+        else
+          pair_mismatch "$code" "helper-$mode.txt" control
+        fi
+      else
+        if [ "$code" -eq 1 ] && [ "$(grep -c '^FAIL:' "helper-$mode.txt" || :)" -eq 1 ] && tr -d '\r' < "helper-$mode.txt" | grep -qxF "$helper_fail"; then
+          echo "  exits 1 at \"$helper_fail\""
+        else
+          pair_mismatch "$code" "helper-$mode.txt" mutant 0 "$helper_pass"
+        fi
       fi
     done
     ;;

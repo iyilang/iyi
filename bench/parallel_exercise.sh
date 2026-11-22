@@ -2968,6 +2968,225 @@ verdict_held nopoll_hook "poller: a preemption with a read waiting polled its wo
 broken nopoll_watchdog "$NOPOLL_HOOK" concurrency.iyi parallel_preempt -Dnopoll_force -Dnopoll_withhold_decision
 verdict_watchdog nopoll_watchdog 'FAIL: poller: progress hang: the armed worker made no poll decision in 10000 ms' poller --workers=1
 
+step "failure proof: a preempted worker that does not wake its expired sleeper"
+# Both copies pin the keyed sleeper's deadline before insertion, then make it
+# due on the keyed long task's eligible no-I/O slow path. Only the mutant
+# omits that path's wake call; the enqueue hook runs after enqueue returns.
+TICKER_COMMON='/^class IyiWorkers$/ { in_ticker_workers = 1; n_ticker_workers++ }
+in_ticker_workers && /^end$/ { in_ticker_workers = 0 }
+/^  def self.sleep_current\(ms : Int32\) : Nil \| Cancelled$/ { in_ticker_sleep = 1; n_ticker_sleep++ }
+in_ticker_sleep && /^  end$/ { in_ticker_sleep = 0 }
+in_ticker_sleep && /^    fiber.deadline = __iyi_monotonic_ns \+ ms.to_i64 \* 1000000_i64$/ {
+  n_ticker_deadline++; at_ticker_deadline = NR
+  print; print "    IyiWorkers.force_ticker_hold(fiber)"; next
+}
+in_ticker_sleep && /^    fiber.state = IyiFiberState::Sleeping$/ { n_ticker_state++; at_ticker_state = NR }
+in_ticker_sleep && /^    sleep_insert\(fiber\)$/ { n_ticker_insert++; at_ticker_insert = NR }
+/^  def self.wake_expired_sleepers : Nil$/ { in_ticker_wake = 1; n_ticker_wake++ }
+in_ticker_wake && /^  end$/ { in_ticker_wake = 0 }
+in_ticker_wake && /^      if head.state == IyiFiberState::Sleeping \|\| head.state == IyiFiberState::WaitingIo$/ {
+  n_ticker_branch++; at_ticker_branch = NR
+}
+in_ticker_wake && /^        enqueue\(head\)$/ {
+  n_ticker_enqueue++
+  if (n_ticker_enqueue == 1) {
+    at_ticker_first_enqueue = NR
+    print; print "        IyiWorkers.force_ticker_enqueued(head)"; next
+  }
+  at_ticker_second_enqueue = NR
+}
+in_ticker_workers && /^  def self.preempted : Nil$/ { in_ticker_preempted = 1; n_ticker_preempted++ }
+in_ticker_preempted && /^  end$/ { in_ticker_preempted = 0 }
+in_ticker_preempted && /^      return if IyiSchedLock.held_here\? \|\| IyiRuntimeLock.held\?$/ {
+  n_ticker_refusal++; at_ticker_refusal = NR
+  print "      if force_ticker_target_on?(st)"
+  print "        force_ticker_wait_lock"
+  print "      else"
+  print
+  print "      end"
+  next
+}
+in_ticker_preempted && /^      if io$/ {
+  n_ticker_io++; at_ticker_io = NR
+  print "      force_ticker_guard_io(st, io)"; print; next
+}
+in_ticker_preempted && /^      else$/ { n_ticker_else++; at_ticker_else = NR }'
+TICKER_DEFS='in_ticker_workers && /^  def self.preempts : UInt64$/ {
+  n_ticker_defs++
+  print "  @[UnsafeReach(\"copy-only keyed sleeper worker, accessed atomically\")]"
+  print "  @@forced_ticker_worker : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only keyed sleeper, accessed atomically\")]"
+  print "  @@forced_ticker_sleeper : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only keyed long task, accessed atomically\")]"
+  print "  @@forced_ticker_long : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only sleeper insertion, accessed atomically\")]"
+  print "  @@forced_ticker_held : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only wake decision, accessed atomically\")]"
+  print "  @@forced_ticker_expected : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only enqueue observation, accessed atomically\")]"
+  print "  @@forced_ticker_enqueued : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only ticker result, accessed atomically\")]"
+  print "  @@forced_ticker_result : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only ticker watchdog ownership, accessed atomically\")]"
+  print "  @@forced_ticker_slow_active : UInt64 = 0_u64"
+  print "  @[NoPreempt]"
+  print "  def self.force_ticker_abort(said : String) : Nil"
+  print "    __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "    __iyi_exit(76)"
+  print "  end"
+  print "  def self.force_ticker_result : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_result).address).value.get"
+  print "  end"
+  print "  def self.force_ticker_slow_active? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_slow_active).address).value.get == 1_u64"
+  print "  end"
+  print "  def self.force_ticker_outer_claim? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_slow_active).address).value.compare_and_set(0_u64, 2_u64)[1]"
+  print "  end"
+  print "  def self.force_ticker_key(worker : UInt64, sleeper : UInt64) : Nil"
+  print "    st = IyiScheduler.state"
+  print "    fiber = IyiScheduler.current"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the sleeper key did not name the running worker and fiber\\n\") if worker == 0_u64 || sleeper == 0_u64 || !st.worker || st.object_id != worker || fiber.object_id != sleeper"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_long).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_held).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_expected).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_enqueued).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_result).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_slow_active).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_worker).address).value.set(worker)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_sleeper).address).value.set(sleeper)"
+  print "  end"
+  print "  def self.force_ticker_hold(fiber : IyiFiber) : Nil"
+  print "    sleeper = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_sleeper).address).value.get"
+  print "    return if sleeper == 0_u64 || fiber.object_id != sleeper"
+  print "    worker = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_worker).address).value.get"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the keyed sleeper entered sleep on another worker\\n\") unless IyiScheduler.state_id == worker"
+  print "    held = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_held).address)"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the keyed sleeper entered sleep more than once\\n\") unless held.value.compare_and_set(0_u64, 1_u64)[1]"
+  print "    fiber.deadline = 9223372036854775807_i64"
+  print "  end"
+  print "  def self.force_ticker_arm(worker : UInt64, long : UInt64) : Nil"
+  print "    st = IyiScheduler.state"
+  print "    fiber = IyiScheduler.current"
+  print "    wanted = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_worker).address).value.get"
+  print "    sleeper = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_sleeper).address).value.get"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the long task did not name the keyed worker and its own fiber\\n\") if worker == 0_u64 || long == 0_u64 || sleeper == 0_u64 || worker != wanted || !st.worker || st.object_id != worker || fiber.object_id != long"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the worker has no preemption word\\n\") if st.preempt_word == 0_u64"
+  print "    IyiScheduler.lists_lock(st)"
+  print "    head = st.sleep_head"
+  print "    valid = false"
+  print "    if head.is_a?(IyiFiber)"
+  print "      valid = head.object_id == sleeper && head.state == IyiFiberState::Sleeping && head.deadline == 9223372036854775807_i64 && head.listed_on_fenced == worker && !head.on_cpu? && !head.io_timed && st.io_head.is_a?(Nil)"
+  print "    end"
+  print "    IyiScheduler.lists_unlock(st)"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the keyed sleeper was not the parked sleep-heap root without worker I/O\\n\") unless valid"
+  print "    {% if flag?(:win32) %}"
+  print "      force_ticker_abort(\"FAIL: ticker: not armed: the completion port has an I/O waiter\\n\") if IyiScheduler.io_waiting?"
+  print "    {% end %}"
+  print "    target = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_long).address)"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the long task was already armed\\n\") unless target.value.compare_and_set(0_u64, long)[1]"
+  print "    Pointer(Atomic(UInt64)).new(st.preempt_word).value.set(1_u64)"
+  print "  end"
+  print "  @[NoPreempt]"
+  print "  def self.force_ticker_target_on?(st : IyiSchedulerState) : Bool"
+  print "    long = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_long).address).value.get"
+  print "    return false if long == 0_u64 || force_ticker_result != 0_u64"
+  print "    worker = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_worker).address).value.get"
+  print "    return false unless st.object_id == worker"
+  print "    fiber = IyiScheduler.current?"
+  print "    fiber.is_a?(IyiFiber) && fiber.object_id == long"
+  print "  end"
+  print "  @[NoPreempt]"
+  print "  def self.force_ticker_wait_lock : Nil"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the long task holds the scheduler lock at its check\\n\") if IyiSchedLock.held_here?"
+  print "    st = IyiScheduler.state"
+  print "    fiber = IyiScheduler.current"
+  print "    root = st.root"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the long task was not running on a non-root fiber\\n\") if fiber.state != IyiFiberState::Running || (root.is_a?(IyiFiber) && root.object_id == fiber.object_id)"
+  print "    owner = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_slow_active).address)"
+  print "    until owner.value.compare_and_set(0_u64, 1_u64)[1]"
+  print "      IyiThread.park_if_requested"
+  print "      IyiThread.spin_pause"
+  print "    end"
+  print "    started = __iyi_monotonic_ns"
+  print "    while IyiRuntimeLock.held?"
+  print "      IyiThread.park_if_requested"
+  print "      IyiThread.spin_pause"
+  print "      force_ticker_abort(\"FAIL: ticker: progress hang: the runtime lock did not clear for the keyed preemption in 20000 ms\\n\") if __iyi_monotonic_ns - started > 20000000000_i64"
+  print "    end"
+  print "  end"
+  print "  def self.force_ticker_guard_io(st : IyiSchedulerState, io : Bool) : Nil"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the keyed preemption took the I/O branch\\n\") if force_ticker_target_on?(st) && io"
+  print "  end"
+  print "  def self.force_ticker_prepare(st : IyiSchedulerState) : Nil"
+  print "    sleeper = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_sleeper).address).value.get"
+  print "    worker = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_worker).address).value.get"
+  print "    IyiScheduler.lists_lock(st)"
+  print "    head = st.sleep_head"
+  print "    valid = false"
+  print "    if head.is_a?(IyiFiber)"
+  print "      valid = head.object_id == sleeper && head.state == IyiFiberState::Sleeping && head.deadline == 9223372036854775807_i64 && head.listed_on_fenced == worker && !head.on_cpu? && !head.io_timed"
+  print "      head.deadline = __iyi_monotonic_ns if valid"
+  print "    end"
+  print "    IyiScheduler.lists_unlock(st)"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the keyed sleeper changed before the wake decision\\n\") unless valid"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_expected).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_ticker_enqueued(fiber : IyiFiber) : Nil"
+  print "    return unless Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_expected).address).value.get == 1_u64"
+  print "    sleeper = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_sleeper).address).value.get"
+  print "    return unless fiber.object_id == sleeper && force_ticker_target_on?(IyiScheduler.state)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_enqueued).address).value.set(1_u64)"
+  print "  end"
+  print "  def self.force_ticker_finish(st : IyiSchedulerState) : Nil"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the wake decision lost its keyed target\\n\") unless force_ticker_target_on?(st)"
+  print "    expected = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_expected).address).value.get"
+  print "    force_ticker_abort(\"FAIL: ticker: not armed: the wake decision was not prepared\\n\") unless expected == 1_u64"
+  print "    enqueued = Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_enqueued).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_result).address).value.set(enqueued == 1_u64 ? 1_u64 : 2_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_ticker_slow_active).address).value.set(0_u64)"
+  print "  end"
+  print ""
+  print; next
+}'
+TICKER_SITE='in_ticker_preempted && /^        IyiScheduler.wake_expired_sleepers$/ {
+  n_ticker_site++; at_ticker_site = NR
+  print "        if force_ticker_target_on?(st)"
+  print "          force_ticker_prepare(st)"
+  if (ticker_keep) print "          IyiScheduler.wake_expired_sleepers"
+  print "          force_ticker_finish(st)"
+  print "        else"
+  print "          IyiScheduler.wake_expired_sleepers"
+  print "        end"
+  next
+}'
+TICKER_END='END {
+  if (n_ticker_workers != 1 || n_ticker_defs != 1 || n_ticker_sleep != 1 ||
+      n_ticker_deadline != 1 || n_ticker_state != 1 || at_ticker_state != at_ticker_deadline + 1 ||
+      n_ticker_insert != 1 || at_ticker_insert != at_ticker_state + 1 ||
+      n_ticker_wake != 1 || n_ticker_branch != 1 || n_ticker_enqueue != 2 ||
+      at_ticker_first_enqueue != at_ticker_branch + 1 || at_ticker_second_enqueue != at_ticker_branch + 3 ||
+      n_ticker_preempted != 1 || n_ticker_refusal != 1 || n_ticker_io != 1 ||
+      n_ticker_else != 1 || n_ticker_site != 1 || at_ticker_refusal >= at_ticker_io ||
+      at_ticker_else != at_ticker_io + 2 || at_ticker_site != at_ticker_else + 1) exit 3
+}'
+TICKER_HOOK="BEGIN { ticker_keep = 1 }
+$TICKER_COMMON
+$TICKER_DEFS
+$TICKER_SITE
+{ print }
+$TICKER_END"
+TICKER_BUG="BEGIN { ticker_keep = 0 }
+$TICKER_COMMON
+$TICKER_DEFS
+$TICKER_SITE
+{ print }
+$TICKER_END"
+broken tickerwake "$TICKER_BUG" concurrency.iyi parallel_preempt -Dticker_force
+verdict_caught tickerwake "unit: an expired sleeper was not enqueued by its worker's preemption" unit --workers=1
+broken tickerwake_hook "$TICKER_HOOK" concurrency.iyi parallel_preempt -Dticker_force
+verdict_held tickerwake_hook "unit: the preempted worker enqueued and ran its expired sleeper" unit --workers=1
+
 step "failure proof: a word the monitor raised for the task before preempts the task switched in after it"
 # The monitor waits at the next look's entry. That rendezvous also drains
 # any earlier look, preventing its old decision from raising the word after

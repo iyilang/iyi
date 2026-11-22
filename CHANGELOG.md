@@ -483,9 +483,12 @@
   On macOS 26.6, Apple M2 Pro, waves of 16 threads that end together left
   a main fiber behind in 59 of 8,000 waves at 0.21.0 and none after;
   `thread_exercise` named one in 1 of 24 runs. bench/thread_exercise.sh
-  5f holds the ask open 300 ms in copies of the runtime while a neighbour
-  retires: under the lock nothing is left, 5 runs of 5; without it a main
-  fiber is, 5 of 5.
+  5f holds the ask at its first read until the neighbour either waits for the
+  runtime lock or has unlinked itself, with no timer. The locked copy leaves
+  only the baseline fiber registered and exits 0; the copy without the lock
+  leaves the retired main fiber registered and exits 1 at its named sentence,
+  one run each. Its earlier 300 ms hold left nothing under the lock in 5 runs
+  of 5 and a main fiber without it in 5 of 5.
 
 - **A store writes every byte of its slot.** A union stored through a
   smaller arm now has its bytes past the arm and its tag's padding
@@ -1067,8 +1070,9 @@ and leaves the unit's list only at its successor's first instruction; an
 idle worker could take the unit in between, and the death then took the
 partition off the unit while the takeover held it, so the takeover read
 the partition's unit as nothing and died of a memory fault (tssh,
-thread_exercise's `switching`: 12 runs in 390, and 18 in 270 with its
-suspends moved late; none in either with the fix, side by side). The
+thread_exercise's switching stress as it stood when measured (now 5c): 12
+runs in 390, and 18 in 270 with its suspends moved late; none in either
+with the fix, side by side). The
 takeover now collects the unit it took under the runtime's lock, and a
 death that comes while it holds the partition is left to it and done
 once it lets go. bench/heap_local's `takendeath` check holds a takeover

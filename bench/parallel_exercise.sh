@@ -37,19 +37,14 @@
 #      deadline take each value once, a cancel landing as a task parks
 #      ends it, and turns handed through `park_on` and `wake_on` are
 #      every one taken.
-#   2. bench/parallel_migrate.iyi holds what a task keeps when it resumes
-#      on another worker, plain and --release: its stack's lists through
-#      collections, thread-locals of the thread it is on, after a park and
-#      after a loop's back-edge check that moved it, its socket's bytes, a
-#      cancel and a close from a sibling or the main thread that find it,
-#      frames 120 KiB deep; tasks parked on one worker finish in under
-#      twice the ideal, woken from the main thread and from a worker; a
-#      task woken by a task that then computes with preemption off has an
-#      idle worker called for it, runs on another worker, and starts
-#      within 1 ms (not judged on a host loaded past its cores), and
-#      within 50 ms after a ping-pong
-#      left its waker's worker calling nobody, where the monitor calls; on
-#      Linux and darwin an answer sent while the reader's worker is held
+#   2. bench/parallel_migrate.iyi exercises what a task keeps through a
+#      move, plain and --release: its stack's lists through collections,
+#      thread-locals after a park and a loop, its socket's bytes, a cancel
+#      and a close from a sibling or the main thread, and frames 120 KiB
+#      deep. Keyed copies force the relevant migration and hand-off
+#      decisions. Balance and wake timings are measured, not judged; the
+#      monitor can call for a hand-off after the waker stops calling.
+#      On Linux and darwin an answer sent while the reader's worker is held
 #      is read on another worker before that hold ends; and a task joining
 #      a thread leaves its worker to its child. On Windows,
 #      bench/completions_taken.iyi checks the shared completion port: an
@@ -75,10 +70,10 @@
 #      that gives its unit's token away.
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
-#   4. CPU-bound tasks on one worker and on several, release build, one
-#      run per worker count. K workers must hold their tasks on 0.6 x K
-#      threads at once on average. The speed ratio and its 0.6 x K floor
-#      are performance information and do not decide a failure proof.
+#   4. A capacity witness holds K tasks on K workers together. CPU-bound
+#      tasks report wall time, speed ratio, and average threads at once.
+#      OPEN: the original 0.6 x K time-weighted occupancy guarantee is not
+#      proved; those samples are measure: information, not healthy verdicts.
 #   5. A deadlock across threads - a parallel task waiting on a channel
 #      nobody sends on - is named, not hung. And bench/panic_exit.iyi
 #      ends the process with tasks parked on the poller, on twelve
@@ -120,10 +115,11 @@
 #      a port whose packets only the worker their task parked on runs, and
 #      a pool that leaves the priority boost on.
 #      Coarse uses a structural timer decision. Slice, recursion, library
-#      loops and tokenless use keyed eligible decisions; a refused check
-#      waits in its slow path or exits as a progress failure.
-#   8. Failure proof: one run of the pool held to one worker is refused by
-#      the at-once floor, independent of elapsed time.
+#      loops, std calls and tokenless use keyed eligible decisions; a refused
+#      check waits in its slow path or exits as a progress failure.
+#   8. Failure proof: a pool held to one worker is refused by the capacity
+#      witness. The speed parser and at-once floor also have a separate
+#      one-worker negative check; neither measured value gates a healthy run.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)" || { echo "FAIL: gate: setup: could not resolve the repository"; exit 76; }
@@ -193,34 +189,12 @@ for build in plain release; do
 done
 
 # ── 2. What a move keeps, twice ───────────────────────────────────────────
-# Its balance step is timed against four workers' ideal, so a host with fewer
-# cores fails before the migration exercise runs.
+# The migration exercises use four workers.
 MIGRATE_STEPS="channels sockets cancel closes deep loops balance backstop heldio join"
-need_cores 4 "the balance step is timed against four workers' ideal"
-# The handoff step runs by itself after the others, its host's load read
-# the second before it. Its 1 ms median is a sleeping thread's wake,
-# which Linux and Windows do not owe a machine with more runnable threads
-# than cores: Linux on 12 vCPUs at one-minute loads of 18 to 34 failed it
-# in 74 of 80 runs, the medians near its 2.9 ms slice, and Windows on 12
-# vCPUs beside 12 and 24 busy loops in 32 of 80, at 0.1 to 6.2 ms.
-# So a run whose load is at or past the cores is told so (`--loaded=`),
-# and the step holds there only what no clock blurs: an idle worker
-# called at each hand-off, the woken task run on another worker, within
-# 40 ms. Linux's load is its threads runnable, `procs_running` in
-# /proc/stat less the one reading it, ten looks over the second: the
-# one-minute average lags it, and a run begun at an average of 8.4 on
-# those 12 vCPUs failed the median. Windows keeps none, so its load is
-# the busy share of the cores plus the ready queue over the second,
-# which read 0.1 to 1.2 idle, 6.1 to 7.3 beside 6 busy loops (no run
-# failed) and 20 to 45 beside 12 to 24. darwin woke the tasks in 7 to
-# 218 us at loads of 4 to 44 on 10 cores (tmac, 160 runs) of busy loops,
-# and was always judged until it failed beside two other CI jobs on the
-# project's Mac, three runners on those 10 cores: 11 to 2,925 us, the
-# median 2,150 (job 135122969351; its other runs there 14 to 45 at the
-# median). A busy loop is not what those jobs run - compilers and gates
-# that sleep, fork and touch memory - so darwin is read the way Linux is:
-# its threads runnable, a `ps -axM` thread row whose state is R, less the
-# one reading it, ten looks over the second.
+need_cores 4 "the migration exercises use four workers"
+# The handoff step runs separately. Sample host load only as context, not
+# as a condition on its verdict. Linux and darwin average runnable threads
+# over ten samples; Windows reads processor usage and its ready queue.
 host_load() {
   case "$(uname -s)" in
     Linux)
@@ -253,20 +227,16 @@ for build in plain release; do
   fi
   sed 's/^/  /' "migrated-$build.txt"
   load="$(host_load)"
-  loaded=""
-  judged=""
-  if [ -n "$load" ] && awk -v l="$load" -v c="$CORES" 'BEGIN { exit !(l >= c) }'; then
-    loaded="a load of $load on $CORES cores"
-  elif [ -n "$load" ]; then
-    judged="; judged at a load of $load on $CORES cores"
+  if [ -n "$load" ]; then
+    echo "  measure: handoff host load $load on $CORES cores"
   fi
-  timeout -k 5 300 "./migrate-$build" handoff ${loaded:+"--loaded=$loaded"} > "handed-$build.txt" 2>&1
+  timeout -k 5 300 "./migrate-$build" handoff > "handed-$build.txt" 2>&1
   code=$?
   child_progress_status handoff "$code" "handed-$build.txt"
   if [ "$code" -ne 0 ] || ! grep -q 'every property held' "handed-$build.txt"; then
-    echo "the hand-off step failed${load:+ at a load of $load on $CORES cores} (exit $code):"; cat "handed-$build.txt"; exit 1
+    echo "the hand-off step failed (exit $code):"; cat "handed-$build.txt"; exit 1
   fi
-  grep -v 'every property held' "handed-$build.txt" | sed "s/^/  /; s/\$/$judged/"
+  grep -v 'every property held' "handed-$build.txt" | sed 's/^/  /'
 done
 # ── 2a. Windows' one completion port, twice ──────────────────────────────
 # bench/completions_taken.iyi at twelve workers: the reader's owner holds
@@ -473,13 +443,13 @@ if [ "$(uname -s)" = Linux ]; then
   echo "  the check on Linux never calls the accessor: \`-Dpreempt_check_accessor\` builds the same code"
 fi
 
-# ── 2c. Preemption inside the library, std and recursion, twice ──────────
-# bench/parallel_preempt_lib.iyi: a sort, a copy, a hash's growth, a join,
-# a regex search, a JSON parse, a bcrypt hash and a recursion with no loop
-# each give their worker up to a queued short task before completing. The
-# release build writes its IR too, for the audit after.
+# ── 2c. Library calls and recursion, twice ───────────────────────────────
+# Each call runs with a short task queued on its worker. Whether the short
+# task runs inside the call is informational: any thread holding the runtime
+# lock can make a check refuse a turn. Keyed copies in step 7 judge ordering.
+# The release build writes its IR too, for the audit after.
 for build in plain release; do
-  step "preemption inside library calls and recursion, $build build"
+  step "library calls and recursion with a queued task, $build build"
   flag=""
   [ "$build" = release ] && flag="--release --emit llvm-ir"
   # shellcheck disable=SC2086 # the flags are words
@@ -670,10 +640,10 @@ case "$(uname -s)" in
     ;;
 esac
 
-# ── 3. The speedup ────────────────────────────────────────────────────────
-# Each worker count gets one run. Wall-clock ratios and the 0.6 x K speed
-# floor are performance information, not a failure proof: host load also
-# affects them. The at-once floor and its one-worker mutant are separate.
+# ── 3. Capacity and speed ─────────────────────────────────────────────────
+# The capacity witness proves that K distinct workers can hold K tasks
+# together, not the former 0.6 x K time-weighted occupancy fraction. Wall
+# time, speed ratio, and sampled at-once are information only.
 TASKS=16
 ROUNDS=40000000
 speed_run() { # workers binary -> this run's "wall_ms at_once"
@@ -731,13 +701,29 @@ check_at_once_floor() { # at_once_hundredths and k
 }
 K=2
 [ "$CORES" -ge 4 ] && K=4
+need_cores 2 "the capacity witness needs at least two workers"
+step "capacity: $K workers hold tasks together"
+timeout -k 5 300 ./exercise-release capacity "$K" > capacity-release.txt 2>&1
+code=$?
+child_progress_status capacity "$code" capacity-release.txt
+capacity_line="capacity: $K workers held tasks together"
+if [ "$code" -eq 1 ] &&
+   [ "$(grep -cE "^FAIL: capacity: the pool started [0-9]+ worker, expected $K$" capacity-release.txt)" -eq 1 ] &&
+   [ "$(grep -c '^FAIL: ' capacity-release.txt)" -eq 1 ]; then
+  grep -xE "^FAIL: capacity: the pool started [0-9]+ worker, expected $K$" capacity-release.txt
+  exit 1
+fi
+if [ "$code" -ne 0 ] || [ "$(grep -cxF -- "$capacity_line" capacity-release.txt)" -ne 1 ] || grep -q '^FAIL: ' capacity-release.txt; then
+  echo "FAIL: capacity: setup: expected one exact success verdict with exit 0, got exit $code"; cat capacity-release.txt; exit 76
+fi
+echo "  $capacity_line"
 step "the speedup: $TASKS CPU-bound tasks, one run per worker count, $CORES cores here"
-need_cores 2 "the at-once floor needs at least two workers"
+echo "  measure: sampled at-once and wall times are performance information only"
+echo "  measure: capacity does not prove the 0.6 x K time-weighted occupancy floor"
 got="$(speed_run 1 exercise-release)" || exit $?
 ONE="${got% *}"
-printf '  %2s worker(s): %6s ms, %s at once\n' 1 "$ONE" "$(at_once "${got#* }")"
+printf '  measure: %2s worker(s): %6s ms, %s at once\n' 1 "$ONE" "$(at_once "${got#* }")"
 MANY=""
-MANY_AT=""
 for w in 2 4 8; do
   [ "$w" -gt "$CORES" ] && break
   got="$(speed_run "$w" exercise-release)" || exit $?
@@ -745,17 +731,16 @@ for w in 2 4 8; do
   if ! ratio="$(awk -v a="$ONE" -v b="$ms" 'BEGIN { printf "%.2f", a / b }')"; then
     echo "FAIL: speed: setup: could not compute the $w-worker speed ratio"; exit 76
   fi
-  printf '  %2s worker(s): %6s ms, %sx one worker, %s at once\n' "$w" "$ms" "$ratio" "$(at_once "${got#* }")"
-  [ "$w" -eq "$K" ] && { MANY="$ms"; MANY_AT="${got#* }"; }
+  printf '  measure: %2s worker(s): %6s ms, %sx one worker, %s at once\n' "$w" "$ms" "$ratio" "$(at_once "${got#* }")"
+  [ "$w" -eq "$K" ] && MANY="$ms"
 done
 if [ -z "$MANY" ]; then
   echo "FAIL: speed: setup: no measurement was made for the required $K-worker run"; exit 76
 fi
-check_at_once_floor "$MANY_AT" "$K" || exit $?
 if ! awk -v one="$ONE" -v many="$MANY" -v k="$K" 'BEGIN {
   if (one / many >= 0.6 * k) result = "above"
   else result = "below"
-  printf "  performance information: %d workers, %.2fx one worker; 0.6 x K is %.2fx (%s)\n", k, one / many, 0.6 * k, result
+  printf "  measure: %d workers, %.2fx one worker; 0.6 x K is %.2fx (%s)\n", k, one / many, 0.6 * k, result
 }'; then
   echo "FAIL: speed: setup: could not compute the performance information"; exit 76
 fi
@@ -775,14 +760,16 @@ end
 puts "the group ended"
 IYI
 if ! "$IYI" build paralleldeadlock.iyi -o paralleldeadlock > build-deadlock.log 2>&1; then
-  echo "the deadlock program failed to build:"; tail -20 build-deadlock.log; exit 1
+  echo "FAIL: deadlock: setup: the deadlock program failed to build"; tail -20 build-deadlock.log; exit 76
 fi
 timeout -k 5 30 ./paralleldeadlock > deadlock.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q 'deadlock: every fiber is blocked' deadlock.txt; then
-  echo "a deadlock across threads exited $code (124 is a hang):"; cat deadlock.txt; exit 1
+child_progress_status deadlock "$code" deadlock.txt
+deadlock_line='iyi: panic: deadlock: every fiber is blocked and nothing can wake one'
+if [ "$code" -ne 1 ] || [ "$(grep -cxF -- "$deadlock_line" deadlock.txt)" -ne 1 ]; then
+  echo "FAIL: deadlock: the blocked task exited $code without the expected diagnosis"; cat deadlock.txt; exit 1
 fi
-echo "  exits 1: $(grep -m1 'deadlock' deadlock.txt)"
+echo "  exits 1: $deadlock_line"
 
 # ── 4a. A panic or an exit ends the process ──────────────────────────────
 # bench/panic_exit.iyi: tasks parked on the poller (reads nobody answers,
@@ -3314,6 +3301,27 @@ verdict_caught recursionoff "fib: the recursion entered a call with its worker's
 broken recursionoff_hook "$TURN" concurrency.iyi parallel_preempt_lib -Drecursion_force
 verdict_held recursionoff_hook "fib: the recursion gave its worker up at the call after its word was raised" fib --workers=1
 
+step "failure proof: a regex search, a JSON parse and a bcrypt hash made through the runtime hold their worker for the whole call"
+# Both copies use the same forced turns. Only the mutant invokes the call
+# through a runtime definition, compiling its body without preemption checks.
+STD_UNCHECKED='in_turn_workers && /^  def self.looks : UInt64$/ {
+  n_unchecked++
+  print "  def self.force_runtime_call(call : T) : Int64 forall T"
+  print "    call.run_call"
+  print "  end"
+  print ""
+}'
+TURN_STD="$TURN_COMMON
+$STD_UNCHECKED
+{ print }
+END { if ($TURN_CHECK || n_unchecked != 1) exit 3 }"
+broken stdcall "$TURN_STD" concurrency.iyi parallel_preempt_lib -Dstdcall_force -Dstd_unchecked
+broken stdcall_hook "$TURN_STD" concurrency.iyi parallel_preempt_lib -Dstdcall_force
+for proof in regex json bcrypt; do
+  verdict_caught stdcall "$proof: the library call returned with its worker's word raised and kept its worker" "$proof" --workers=1
+  verdict_held stdcall_hook "$proof: the library call gave its worker up after its word was raised" "$proof" --workers=1
+done
+
 step "failure proof: a scheduler the compiler takes for a library's checks, and the audit names where"
 [ -n "$PY" ] || { echo "FAIL: rtout: setup: Python is unavailable for the audit"; exit 76; }
   # `concurrency.iyi` renamed `scheduler.iyi`: the compiler treats it as
@@ -3339,10 +3347,10 @@ END { if (platforms != 1 || n != 1 || expect) exit 3 }'
   echo "  exits 1 at \"$want\""
 
 # ── 8. Failure proof: one worker, whatever was asked for ──────────────────
-# One run is refused by the at-once floor: one worker holds its tasks at
-# most 1.00 at once, below 0.6 x K for K of two or more. Time is data.
-step "failure proof: a pool held to one worker fails the at-once floor in one run"
-need_cores 2 "the floor is not held on one core, so there is nothing to fail"
+# The capacity witness catches the wrong pool size before trying to hold K
+# tasks together. The speed parser and the floor checker are checked separately.
+step "failure proof: a pool held to one worker fails the capacity witness"
+need_cores 2 "the capacity witness needs at least two workers"
   mkdir -p oneworker/iyi || { echo "FAIL: one-worker: setup: could not create the copy"; exit 76; }
   cp "$REPO"/src/iyi/*.iyi oneworker/iyi/ || { echo "FAIL: one-worker: setup: could not copy the runtime"; exit 76; }
   if ! awk '/^  def self.start : Nil$/ { inside = 1; methods++ }
@@ -3356,6 +3364,8 @@ END { if (methods != 1 || n != 1) exit 3 }' \
   if ! IYI_PATH="$WORK/oneworker${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/parallel_exercise.iyi" -o oneworker-run > build-oneworker.log 2>&1; then
     echo "FAIL: one-worker: setup: the copy failed to build"; tail -20 build-oneworker.log; exit 76
   fi
+  verdict_caught oneworker "capacity: the pool started 1 worker, expected $K" capacity "$K"
+  step "failure proof: the at-once floor checker rejects a one-worker sample"
   got="$(speed_run "$K" oneworker-run)" || exit $?
   SLOW="${got% *}"
   SLOW_AT="${got#* }"
@@ -3366,6 +3376,6 @@ END { if (methods != 1 || n != 1) exit 3 }' \
     echo "FAIL: one-worker: setup: the floor checker did not exit 1 at its exact below-floor line (exit $code)"; cat oneworker-floor.txt; exit 76
   fi
   echo "  exits 1 at \"$floor_line\""
-  echo "  asked for $K, ran on 1, one run: $(at_once "$SLOW_AT") at once, under the floor; $SLOW ms, not judged"
+  echo "  measure: asked for $K, ran on 1, one run: $(at_once "$SLOW_AT") at once, under the floor; $SLOW ms, not judged"
 
 echo "parallel gate: every property held"

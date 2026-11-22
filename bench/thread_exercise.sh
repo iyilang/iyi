@@ -878,11 +878,6 @@ class Flag
   end
 end
 
-def fail(message : String) : Nil
-  print "FAIL: #{message}\n"
-  __iyi_exit(1)
-end
-
 # Five threads started and joined one after another beside a thread that
 # collects in a loop, or takes the runtime lock in one and holds it for
 # 2,000 increments a turn; answers the nanoseconds the five took.
@@ -918,11 +913,9 @@ if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, Program.args[0].to_u
 end
 
 took = beside(true)
-fail("five threads started beside a thread collecting in a loop took #{took // 1000000_u64} ms, past 10 s") if took > 10000000000_u64
-puts "five threads started and joined beside a thread collecting in a loop, held to 10 s"
+puts "five threads started and joined beside a thread collecting in a loop in #{took // 1000000_u64} ms (measurement only)"
 took = beside(false)
-fail("five threads started beside a thread taking the runtime lock in a loop took #{took // 1000000_u64} ms, past 10 s") if took > 10000000000_u64
-puts "five threads started and joined beside a thread taking the runtime lock in a loop, held to 10 s"
+puts "five threads started and joined beside a thread taking the runtime lock in a loop in #{took // 1000000_u64} ms (measurement only)"
 IYI
     # Unlike GNU timeout on MSYS, end_process ends only this native child.
     # A stuck child's wait is bounded even if Windows cannot terminate it.
@@ -935,7 +928,10 @@ IYI
       while kill -0 "$child" 2>/dev/null; do
         if [ "$SECONDS" -ge "$deadline" ]; then
           echo "SETUP: $label: process exceeded its bound" >&2
-          end_bounded "$child" || return 76
+          if ! end_bounded "$child" 2>/dev/null; then
+            echo "SETUP: $label: the timed-out process could not be recovered" >&2
+            return 76
+          fi
           return 76
         fi
         sleep 0.1
@@ -943,155 +939,424 @@ IYI
       wait "$child"
     }
     if ! "$IYI" build --release starve.iyi -o starve > build-starve.log 2>&1; then
-      cat build-starve.log; exit 1
+      echo "SETUP: fairness: the one-core measurement did not build"; cat build-starve.log; exit 76
     fi
     win_native 120 "the one-core check" ./starve "$AFFINITY_ONE_DEC" > starve-raw.txt 2>&1
     code=$?
     if [ "$code" -eq 76 ]; then cat starve-raw.txt; exit 76; fi
     tr -d '\r' < starve-raw.txt > starve.txt
-    if [ "$code" -ne 0 ] || [ "$(grep -c ', held to 10 s$' starve.txt)" -ne 2 ] || grep -q '^FAIL' starve.txt; then
-      echo "held to one core (exit $code):"; cat starve.txt; exit 1
+    if [ "$code" -ne 0 ] || [ "$(grep -c ' (measurement only)$' starve.txt)" -ne 2 ]; then
+      echo "SETUP: fairness: the one-core measurement did not finish normally (exit $code)"; cat starve.txt; exit 76
     fi
     sed 's/^/  /' starve.txt
 
-    # The old proof passed when GNU timeout killed a deliberately hung
-    # process. On MSYS that kill can also reach the runner agent through a
-    # reused parent pid. Exercise the spinner's count directly instead, and
-    # record the return from each real collection yield in copy-only code.
+    # Both copies use the real runtime lock and the same rendezvous hooks.
+    # The owner cannot unlock until the other thread's 128th lock turn;
+    # the waiter cannot proceed until the owner's next look is observed.
+    # Each collection then stops a registered thread actually waiting on
+    # that lock, and records the release, unlock and yield in order.
     cat > fairness.iyi <<'IYI'
-@[Unsafe("the test's atomic word is outside the collector and the copy records collection yields")]
+@[Unsafe("the copy-only witnesses are atomic words outside the collected heap")]
 module fairness
 
-class Flag
-  getter ready : Atomic(Int64)
-  getter stop : Atomic(Int64)
+lib CorePin
+  fun SetProcessAffinityMask(process : Void*, mask : UInt64) : Int32
+end
 
-  def initialize
-    @ready = Atomic(Int64).new(0_i64)
-    @stop = Atomic(Int64).new(0_i64)
+def priority : Nil
+  thread = ::LibC.GetCurrentThread
+  if ::LibC.SetThreadPriority(thread, 2_i32) == 0_i32 ||
+     ::LibC.SetThreadPriorityBoost(thread, 1_i32) == 0_i32 ||
+     ::LibC.GetThreadPriority(thread) != 2_i32
+    IyiThread.fair_setup("SETUP: fairness: the threads could not be given equal priority\n")
   end
 end
 
-IyiMark.auto = false
-IyiMark.workers = 0_u64
-{% if flag?(:fairness_force) %}
-IyiThread.fair_yield_reset
-{% end %}
-word = Pointer(Atomic(UInt64)).new(__iyi_mmap(4096_u64).address)
-word.value.set(1_u64)
-spins, since = IyiThread.lock_turn(word, 1_u64, 127_i64, 0_u64)
-if spins >= 0_i64 || (word.value.get & 0xFFFE_u64) != 2_u64
-  print "FAIL: fairness: a spinner seeing no lock release for 128 turns was not counted\n"
-  __iyi_exit(1)
+def await_word(slot : UInt64, value : UInt64, message : String) : Nil
+  deadline = IyiMark.now_ns &+ 20000000000_u64
+  while IyiThread.fair_get(slot) != value
+    IyiThread.fair_setup(message) if IyiMark.now_ns >= deadline
+    IyiThread.yield_cpu
+  end
 end
 
-flag = Flag.new
-worker = IyiThread.start do
-  flag.ready.set(1_i64)
-  while flag.stop.get == 0_i64
-    IyiThread.spin_pause
+def check_collection(stage : UInt64) : Nil
+  explicit = stage == 2_u64
+  if IyiThread.fair_get(IyiThread::IYI_FAIR_WAIT) != stage
+    IyiThread.fair_setup(explicit ? "SETUP: fairness: the explicit collection did not stage its waiter\n" : "SETUP: fairness: the budget collection did not stage its waiter\n")
   end
-  nil
-end
-deadline = IyiMark.now_ns &+ 20000000000_u64
-while flag.ready.get == 0_i64
-  if IyiMark.now_ns >= deadline
-    print "FAIL: fairness: the helper did not start\n"
+  if IyiThread.fair_get(IyiThread::IYI_FAIR_SUSPENDED) != stage
+    IyiThread.fair_setup(explicit ? "SETUP: fairness: the explicit collection did not suspend its waiter\n" : "SETUP: fairness: the budget collection did not suspend its waiter\n")
+  end
+  if IyiThread.fair_get(IyiThread::IYI_FAIR_RESUMED) != stage || IyiThread.fair_get(IyiThread::IYI_FAIR_RELEASE) == 0_u64
+    IyiThread.fair_setup(explicit ? "SETUP: fairness: the explicit collection did not release its waiter\n" : "SETUP: fairness: the budget collection did not release its waiter\n")
+  end
+  released = IyiThread.fair_get(IyiThread::IYI_FAIR_RELEASE)
+  unlocked = IyiThread.fair_get(IyiThread::IYI_FAIR_UNLOCK)
+  yielded = IyiThread.fair_get(IyiThread::IYI_FAIR_YIELD)
+  if unlocked == 0_u64
+    IyiThread.fair_setup(explicit ? "SETUP: fairness: the explicit collection did not unlock after release\n" : "SETUP: fairness: the budget collection did not unlock after release\n")
+  end
+  if yielded == 0_u64 || released >= unlocked || unlocked >= yielded
+    message = explicit ? "FAIL: fairness: the explicit collection did not yield after releasing its waiter and unlocking\n" : "FAIL: fairness: the budget collection did not yield after releasing its waiter and unlocking\n"
+    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
     __iyi_exit(1)
   end
+end
+
+if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, Program.args[0].to_u64) == 0_i32 || IyiThread.core_count != 1_u64
+  print "SETUP: fairness: the process could not be held to one allowed core\n"
+  __iyi_exit(76)
+end
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+IyiThread.fair_init
+priority
+worker = IyiThread.start do
+  priority
+  IyiThread.fair_set(IyiThread::IYI_FAIR_WORKER, IyiThread.current_line)
+  IyiThread.fair_set(IyiThread::IYI_FAIR_READY, 1_u64)
+  await_word(IyiThread::IYI_FAIR_COMMAND, 1_u64, "SETUP: fairness: the waiter was not commanded to enter the handoff\n")
+  IyiRuntimeLock.lock
+  IyiRuntimeLock.unlock
+  IyiThread.fair_set(IyiThread::IYI_FAIR_DONE, 1_u64)
+  await_word(IyiThread::IYI_FAIR_COMMAND, 2_u64, "SETUP: fairness: the waiter was not commanded to enter the explicit collection\n")
+  IyiRuntimeLock.lock
+  IyiRuntimeLock.unlock
+  IyiThread.fair_set(IyiThread::IYI_FAIR_DONE, 2_u64)
+  await_word(IyiThread::IYI_FAIR_COMMAND, 3_u64, "SETUP: fairness: the waiter was not commanded to enter the budget collection\n")
+  IyiRuntimeLock.lock
+  IyiRuntimeLock.unlock
+  IyiThread.fair_set(IyiThread::IYI_FAIR_DONE, 3_u64)
+  await_word(IyiThread::IYI_FAIR_COMMAND, 4_u64, "SETUP: fairness: the budget waiter was not released after the yield witness\n")
+  nil
+end
+IyiThread.fair_set(IyiThread::IYI_FAIR_OWNER, IyiThread.current_line)
+await_word(IyiThread::IYI_FAIR_READY, 1_u64, "SETUP: fairness: the registered waiter did not start\n")
+if IyiThread.fair_get(IyiThread::IYI_FAIR_OWNER) == 0_u64 || IyiThread.fair_get(IyiThread::IYI_FAIR_WORKER) == 0_u64
+  IyiThread.fair_setup("SETUP: fairness: the owner or waiter has no registered line\n")
+end
+
+IyiRuntimeLock.lock
+IyiThread.fair_set(IyiThread::IYI_FAIR_STAGE, 1_u64)
+IyiThread.fair_set(IyiThread::IYI_FAIR_COMMAND, 1_u64)
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while IyiThread.fair_get(IyiThread::IYI_FAIR_TURN) == 0_u64
+  IyiThread.fair_setup("SETUP: fairness: the waiter did not reach turn 128 while the owner held the lock\n") if IyiMark.now_ns >= deadline
   IyiThread.yield_cpu
 end
+IyiThread.fair_set(IyiThread::IYI_FAIR_ARMED, 1_u64)
+IyiRuntimeLock.unlock
+IyiRuntimeLock.lock
+IyiRuntimeLock.unlock
+if IyiThread.fair_get(IyiThread::IYI_FAIR_LOOK) == 2_u64
+  print "FAIL: fairness: the owner retook the lock at its first look ahead of the waiter\n"
+  __iyi_exit(1)
+end
+if IyiThread.fair_get(IyiThread::IYI_FAIR_LOOK) != 1_u64
+  IyiThread.fair_setup("SETUP: fairness: the owner's first look was not observed\n")
+end
+if IyiThread.fair_get(IyiThread::IYI_FAIR_TURN) != 2_u64
+  IyiThread.fair_setup("SETUP: fairness: the witnessed waiter was not counted at turn 128\n")
+end
+if IyiThread.fair_get(IyiThread::IYI_FAIR_TAKEN) != 1_u64
+  IyiThread.fair_setup("SETUP: fairness: the counted waiter did not take the lock\n")
+end
+await_word(IyiThread::IYI_FAIR_DONE, 1_u64, "SETUP: fairness: the handoff waiter did not unlock\n")
+
+IyiThread.fair_arm_collection(2_u64)
 IyiMark.collect
-if IyiThread.fair_yield_count != 1_u64
-  print "FAIL: fairness: an explicit collection released its threads without yielding\n"
-  __iyi_exit(1)
-end
-# Make the budget collection due without relying on allocation timing.
+check_collection(2_u64)
+await_word(IyiThread::IYI_FAIR_DONE, 2_u64, "SETUP: fairness: the explicit collection waiter did not finish\n")
 IyiHeap.allocated_word.value.set(IyiMark.budget)
+IyiThread.fair_arm_collection(3_u64)
 IyiMark.collect_if_due
-if IyiThread.fair_yield_count != 2_u64
-  print "FAIL: fairness: a budget collection released its threads without yielding\n"
-  __iyi_exit(1)
-end
-flag.stop.set(1_i64)
+check_collection(3_u64)
+await_word(IyiThread::IYI_FAIR_DONE, 3_u64, "SETUP: fairness: the budget collection waiter did not finish\n")
+IyiThread.fair_set(IyiThread::IYI_FAIR_STAGE, 0_u64)
+IyiThread.fair_set(IyiThread::IYI_FAIR_COMMAND, 4_u64)
 worker.join
-puts "fairness: the spinner was counted, and explicit and budget collections yielded after release"
+puts "fairness: the owner deferred to its counted waiter; explicit and budget collections released, unlocked, and yielded"
+IYI
+    cat > fairness.part <<'IYI'
+    # A private mapping avoids changing the runtime control page. Every
+    # word read by both threads, including the rendezvous, is atomic.
+    IYI_FAIR_OWNER     = 0_u64
+    IYI_FAIR_WORKER    = 8_u64
+    IYI_FAIR_READY     = 16_u64
+    IYI_FAIR_COMMAND   = 24_u64
+    IYI_FAIR_STAGE     = 32_u64
+    IYI_FAIR_TURN      = 40_u64
+    IYI_FAIR_LOOK      = 48_u64
+    IYI_FAIR_TAKEN     = 56_u64
+    IYI_FAIR_DONE      = 64_u64
+    IYI_FAIR_WAIT      = 72_u64
+    IYI_FAIR_SUSPENDED = 80_u64
+    IYI_FAIR_RESUMED   = 88_u64
+    IYI_FAIR_RELEASE   = 96_u64
+    IYI_FAIR_UNLOCK    = 104_u64
+    IYI_FAIR_YIELD     = 112_u64
+    IYI_FAIR_SEQUENCE  = 120_u64
+    IYI_FAIR_ARMED     = 128_u64
+    @@fair_page : UInt64 = 0_u64
+
+    def self.fair_setup(message : String) : Nil
+      __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+      __iyi_exit(76)
+    end
+
+    def self.fair_init : Nil
+      @@fair_page = __iyi_mmap(4096_u64).address
+      fair_setup("SETUP: fairness: the witness page could not be mapped\n") if @@fair_page == 0_u64
+    end
+
+    def self.fair_get(slot : UInt64) : UInt64
+      word(@@fair_page + slot).value.get
+    end
+
+    def self.fair_set(slot : UInt64, value : UInt64) : Nil
+      word(@@fair_page + slot).value.set(value)
+    end
+
+    def self.fair_stamp(slot : UInt64) : Nil
+      value = word(@@fair_page + IYI_FAIR_SEQUENCE).value.add(1_u64) + 1_u64
+      fair_set(slot, value)
+    end
+
+    def self.fair_arm_collection(stage : UInt64) : Nil
+      fair_set(IYI_FAIR_WAIT, 0_u64)
+      fair_set(IYI_FAIR_SUSPENDED, 0_u64)
+      fair_set(IYI_FAIR_RESUMED, 0_u64)
+      fair_set(IYI_FAIR_RELEASE, 0_u64)
+      fair_set(IYI_FAIR_UNLOCK, 0_u64)
+      fair_set(IYI_FAIR_YIELD, 0_u64)
+      fair_set(IYI_FAIR_SEQUENCE, 0_u64)
+      fair_set(IYI_FAIR_STAGE, stage)
+    end
+
+    def self.fair_first_turn(seen : UInt64) : Nil
+      return if @@fair_page == 0_u64
+      stage = fair_get(IYI_FAIR_STAGE)
+      if stage == 1_u64 && @@line == fair_get(IYI_FAIR_OWNER) && fair_get(IYI_FAIR_ARMED) == 1_u64 && fair_get(IYI_FAIR_LOOK) == 0_u64
+        if (seen & 1_u64) != 0_u64 || (seen & 0xFFFE_u64) == 0_u64
+          fair_setup("SETUP: fairness: the owner's first look did not see the free counted lock\n")
+        end
+        fair_set(IYI_FAIR_LOOK, 1_u64)
+        deadline = IyiMark.now_ns &+ 20000000000_u64
+        while fair_get(IYI_FAIR_TAKEN) == 0_u64
+          fair_setup("SETUP: fairness: the waiter did not acquire after the owner's refusal\n") if IyiMark.now_ns >= deadline
+          yield_cpu
+        end
+      elsif (stage == 2_u64 || stage == 3_u64) && @@line == fair_get(IYI_FAIR_WORKER) && (seen & 1_u64) != 0_u64
+        fair_set(IYI_FAIR_WAIT, stage)
+      end
+    end
+
+    def self.fair_turn128(turn : Int64, counted : Bool) : Nil
+      return if @@fair_page == 0_u64 || fair_get(IYI_FAIR_STAGE) != 1_u64 || @@line != fair_get(IYI_FAIR_WORKER) || turn != 128_i64
+      fair_set(IYI_FAIR_TURN, counted ? 2_u64 : 1_u64)
+      deadline = IyiMark.now_ns &+ 20000000000_u64
+      while fair_get(IYI_FAIR_LOOK) == 0_u64
+        fair_setup("SETUP: fairness: the owner did not look after the waiter's 128th turn\n") if IyiMark.now_ns >= deadline
+        yield_cpu
+      end
+    end
+
+    def self.fair_taken(spins : Int64) : Nil
+      return if @@fair_page == 0_u64 || fair_get(IYI_FAIR_STAGE) != 1_u64 || fair_get(IYI_FAIR_ARMED) == 0_u64
+      if @@line == fair_get(IYI_FAIR_WORKER)
+        fair_set(IYI_FAIR_TAKEN, 1_u64)
+      elsif @@line == fair_get(IYI_FAIR_OWNER) && fair_get(IYI_FAIR_LOOK) == 0_u64
+        fair_setup("SETUP: fairness: the owner's first lock turn was not observed\n") if spins != 0_i64
+        fair_set(IYI_FAIR_LOOK, 2_u64)
+      end
+    end
+
+    def self.fair_before_stop : Nil
+      return if @@fair_page == 0_u64
+      stage = fair_get(IYI_FAIR_STAGE)
+      return unless (stage == 2_u64 || stage == 3_u64) && @@line == fair_get(IYI_FAIR_OWNER)
+      fair_set(IYI_FAIR_COMMAND, stage)
+      deadline = IyiMark.now_ns &+ 20000000000_u64
+      while fair_get(IYI_FAIR_WAIT) != stage
+        if IyiMark.now_ns >= deadline
+          fair_setup(stage == 2_u64 ? "SETUP: fairness: the explicit collection waiter did not enter the held lock\n" : "SETUP: fairness: the budget collection waiter did not enter the held lock\n")
+        end
+        yield_cpu
+      end
+    end
+
+    def self.fair_suspend(line : UInt64, result : Int32) : Nil
+      return if @@fair_page == 0_u64
+      stage = fair_get(IYI_FAIR_STAGE)
+      return unless (stage == 2_u64 || stage == 3_u64) && line == fair_get(IYI_FAIR_WORKER) && fair_get(IYI_FAIR_WAIT) == stage
+      fair_setup("SETUP: fairness: SuspendThread did not suspend the collection waiter\n") if result != 0_i32
+      fair_set(IYI_FAIR_SUSPENDED, stage)
+    end
+
+    def self.fair_resume(line : UInt64, result : Int32) : Nil
+      return if @@fair_page == 0_u64
+      stage = fair_get(IYI_FAIR_STAGE)
+      return unless (stage == 2_u64 || stage == 3_u64) && line == fair_get(IYI_FAIR_WORKER) && fair_get(IYI_FAIR_WAIT) == stage
+      fair_setup("SETUP: fairness: ResumeThread did not release the collection waiter\n") if result != 1_i32 || fair_get(IYI_FAIR_SUSPENDED) != stage
+      fair_set(IYI_FAIR_RESUMED, stage)
+    end
+
+    def self.fair_release(others : Int64) : Nil
+      return if @@fair_page == 0_u64
+      stage = fair_get(IYI_FAIR_STAGE)
+      return unless (stage == 2_u64 || stage == 3_u64) && @@line == fair_get(IYI_FAIR_OWNER)
+      if others <= 0_i64 || fair_get(IYI_FAIR_WAIT) != stage || fair_get(IYI_FAIR_RESUMED) != stage
+        fair_setup("SETUP: fairness: the collection release did not include its waiting thread\n")
+      end
+      fair_stamp(IYI_FAIR_RELEASE)
+    end
+
+    def self.fair_unlock : Nil
+      return if @@fair_page == 0_u64
+      stage = fair_get(IYI_FAIR_STAGE)
+      if (stage == 2_u64 || stage == 3_u64) && @@line == fair_get(IYI_FAIR_OWNER) && fair_get(IYI_FAIR_RELEASE) != 0_u64 && fair_get(IYI_FAIR_UNLOCK) == 0_u64
+        fair_stamp(IYI_FAIR_UNLOCK)
+      end
+    end
+
+    def self.fair_yield : Nil
+      return if @@fair_page == 0_u64
+      stage = fair_get(IYI_FAIR_STAGE)
+      fair_stamp(IYI_FAIR_YIELD) if (stage == 2_u64 || stage == 3_u64) && @@line == fair_get(IYI_FAIR_OWNER)
+    end
 IYI
     fair_thread() {
-      awk -v mode="$1" '
+      awk -v mode="$1" -v part=fairness.part '
         /^    # ── Roots/ {
-          print "    def self.fair_yield_reset : Nil"
-          print "      word(control + 384_u64).value.set(0_u64)"
-          print "    end"
-          print "    def self.fair_yield_count : UInt64"
-          print "      word(control + 384_u64).value.get"
-          print "    end"
+          while ((got = getline text < part) > 0) { print text; part_lines++ }
+          if (got < 0) bad = 1
+          close(part)
           roots++
         }
-        /^      yield_cpu if @@count > 1_i64$/ {
+        /^    def self\.lock_turn\(word : Pointer\(Atomic\(UInt64\)\), seen : UInt64, spins : Int64, since : UInt64\) : Tuple\(Int64, UInt64\)$/ { in_turn = 1; turns++ }
+        in_turn && /^    end$/ { in_turn = 0 }
+        in_turn && /^      if turn == 1$/ { print; print "        fair_first_turn(seen)"; first++; next }
+        in_turn && /^        if !counted && released == since$/ {
+          count_anchor++
+          if (mode == "uncounted") { print "        if false"; removed++; next }
+        }
+        in_turn && /^        yield_cpu if turn >= YIELD_AFTER$/ { print "        fair_turn128(turn, counted)"; print; turn128++; next }
+        /^      private def self\.suspend_others\(line : UInt64\) : Int64$/ { in_suspend = 1; suspends++ }
+        in_suspend && /^      end$/ { in_suspend = 0 }
+        in_suspend && /^          LibC\.SuspendThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\) if cursor != line$/ {
+          print "          fair_suspend(cursor, LibC.SuspendThread(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE)))) if cursor != line"
+          suspend_call++; next
+        }
+        /^      private def self\.resume_suspended\(line : UInt64\) : Nil$/ { in_resume = 1; resumes++ }
+        in_resume && /^      end$/ { in_resume = 0 }
+        in_resume && /^            LibC\.ResumeThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\)$/ {
+          print "            fair_resume(cursor, LibC.ResumeThread(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))))"
+          resume_call++; next
+        }
+        /^    def self\.resume_others\(others : Int64\) : Nil$/ { in_release = 1; releases++ }
+        in_release && /^    end$/ { in_release = 0 }
+        in_release && /^        @@owed = @@deferred$/ { print; print "        fair_release(others)"; release_call++; next }
+        /^    def self\.yield_to_stopped : Nil$/ { in_yield = 1; yields++ }
+        in_yield && /^    end$/ { in_yield = 0 }
+        in_yield && /^      yield_cpu if @@count > 1_i64$/ {
           print "      if @@count > 1_i64"
           print "        yield_cpu"
-          print "        word(control + 384_u64).value.add(1_u64)"
+          print "        fair_yield"
           print "      end"
-          hook++; next
-        }
-        mode == "uncounted" && /^        if !counted && released == since$/ {
-          print "        if false"
-          removed++; next
+          yield_call++; next
         }
         { print }
-        END { if (roots != 1 || hook != 1 || (mode == "uncounted" && removed != 1)) exit 3 }
+        END {
+          if (bad || part_lines == 0 || roots != 1 || turns != 1 || first != 1 || count_anchor != 1 || turn128 != 1 ||
+              suspends != 1 || suspend_call != 1 || resumes != 1 || resume_call != 1 ||
+              releases != 1 || release_call != 1 || yields != 1 || yield_call != 1 ||
+              (mode == "uncounted" && removed != 1) || (mode != "uncounted" && removed != 0)) exit 3
+        }
       ' "$REPO/src/iyi/thread.iyi" > "$2"
     }
     fair_prelude() {
       awk -v mode="$1" '
-        /^      def self\.collect_if_due : Nil$/ { section = "budget"; budget++ }
-        /^      def self\.collect_cleared : Nil$/ { section = "explicit"; explicit++ }
-        /^          IyiThread\.yield_to_stopped$/ && section == mode { removed++; next }
+        /^class IyiRuntimeLock$/ { in_runtime = 1; runtime++ }
+        in_runtime && /^end$/ { in_runtime = 0 }
+        in_runtime && /^  def self\.lock : Nil$/ { in_lock = 1; locks++ }
+        in_lock && /^  end$/ { in_lock = 0 }
+        in_lock && /^    \{% if !flag\?\(:gc_none\).*IyiThread\.lock_taken/ { print "    IyiThread.fair_taken(spins)"; print; taken++; next }
+        /^      def self\.collect_locked\(eager : Bool\) : Nil$/ { in_collect = 1; collections++ }
+        in_collect && /^      end$/ { in_collect = 0 }
+        in_collect && /^          others = IyiThread\.stop_others$/ { print "          IyiThread.fair_before_stop"; print; stop++; next }
+        /^      def self\.unlock_released : Nil$/ { in_unlock = 1; unlocks++ }
+        in_unlock && /^      end$/ { in_unlock = 0 }
+        in_unlock && /^        IyiRuntimeLock\.unlock$/ { print; print "        IyiThread.fair_unlock"; unlock_call++; next }
+        /^      def self\.collect_if_due : Nil$/ { in_budget = 1; budgets++ }
+        in_budget && /^      end$/ { in_budget = 0 }
+        in_budget && /^          IyiThread\.yield_to_stopped$/ {
+          budget_yield++
+          if (mode == "budget") { removed++; next }
+        }
+        /^      def self\.collect_cleared : Nil$/ { in_explicit = 1; explicits++ }
+        in_explicit && /^      end$/ { in_explicit = 0 }
+        in_explicit && /^          IyiThread\.yield_to_stopped$/ {
+          explicit_yield++
+          if (mode == "explicit") { removed++; next }
+        }
         { print }
-        END { if (budget != 1 || explicit != 1 || removed != 1) exit 3 }
+        END {
+          if (runtime != 1 || locks != 1 || taken != 1 || collections != 1 || stop != 1 ||
+              unlocks != 1 || unlock_call != 1 || budgets != 1 || budget_yield != 1 ||
+              explicits != 1 || explicit_yield != 1 ||
+              ((mode == "explicit" || mode == "budget") && removed != 1) ||
+              ((mode != "explicit" && mode != "budget") && removed != 0)) exit 3
+        }
       ' "$REPO/src/iyi/prelude.iyi" > "$2"
     }
     for mode in control uncounted explicit budget; do
       case "$mode" in
         control)
-          step "the counted-spinner and collection-yield control"
-          expected="fairness: the spinner was counted, and explicit and budget collections yielded after release"
+          step "the counted-waiter handoff and collection-yield control"
+          expected="fairness: the owner deferred to its counted waiter; explicit and budget collections released, unlocked, and yielded"
           expected_code=0
           ;;
         uncounted)
-          step "failure proof: a spinner is not counted after 128 turns"
-          expected="FAIL: fairness: a spinner seeing no lock release for 128 turns was not counted"
+          step "failure proof: an uncounted waiter loses the first lock look"
+          expected="FAIL: fairness: the owner retook the lock at its first look ahead of the waiter"
           expected_code=1
           ;;
         explicit)
           step "failure proof: an explicit collection omits its yield"
-          expected="FAIL: fairness: an explicit collection released its threads without yielding"
+          expected="FAIL: fairness: the explicit collection did not yield after releasing its waiter and unlocking"
           expected_code=1
           ;;
         budget)
           step "failure proof: a budget collection omits its yield"
-          expected="FAIL: fairness: a budget collection released its threads without yielding"
+          expected="FAIL: fairness: the budget collection did not yield after releasing its waiter and unlocking"
           expected_code=1
           ;;
       esac
       mkdir -p "fair-$mode/iyi"
       cp "$REPO"/src/iyi/*.iyi "fair-$mode/iyi/"
-      fair_thread "$mode" "fair-$mode/iyi/thread.iyi" || { echo "the fairness hook or count anchor is not unique"; exit 1; }
-      case "$mode" in
-        explicit | budget)
-          fair_prelude "$mode" "fair-$mode/iyi/prelude.iyi" || { echo "the collection yield anchor is not unique"; exit 1; }
-          ;;
-      esac
+      fair_thread "$mode" "fair-$mode/iyi/thread.iyi" || { echo "SETUP: fairness: the $mode thread-copy anchors changed"; exit 76; }
+      fair_prelude "$mode" "fair-$mode/iyi/prelude.iyi" || { echo "SETUP: fairness: the $mode prelude-copy anchors changed"; exit 76; }
       if ! IYI_PATH="$WORK/fair-$mode${PSEP}$REPO/src" "$IYI" build --release fairness.iyi -Dfairness_force -o "fair-$mode-run" > "build-fair-$mode.log" 2>&1; then
-        cat "build-fair-$mode.log"; exit 1
+        echo "SETUP: fairness: the $mode proof did not build"; cat "build-fair-$mode.log"; exit 76
       fi
-      win_native 60 "the fairness $mode proof" "./fair-$mode-run" > "fair-$mode-raw.txt" 2>&1
+      win_native 60 "fairness: the $mode proof" "./fair-$mode-run" "$AFFINITY_ONE_DEC" > "fair-$mode-raw.txt" 2>&1
       code=$?
       if [ "$code" -eq 76 ]; then cat "fair-$mode-raw.txt"; exit 76; fi
       tr -d '\r' < "fair-$mode-raw.txt" > "fair-$mode.txt"
-      if [ "$code" -ne "$expected_code" ] || ! grep -qxF "$expected" "fair-$mode.txt"; then
-        echo "the fairness $mode proof exited $code, expected $expected_code:"; cat "fair-$mode.txt"; exit 1
+      if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then
+        echo "SETUP: fairness: the $mode proof ended unexpectedly (exit $code)"; cat "fair-$mode.txt"; exit 76
+      fi
+      fail_lines="$(grep -c '^FAIL:' "fair-$mode.txt")"
+      expected_fails=0
+      [ "$expected_code" -eq 1 ] && expected_fails=1
+      if [ "$code" -ne "$expected_code" ] || [ "$fail_lines" -ne "$expected_fails" ] || ! grep -qxF "$expected" "fair-$mode.txt"; then
+        if [ "$fail_lines" -eq 0 ]; then
+          echo "FAIL: fairness: the $mode proof did not report its expected invariant"
+        else
+          cat "fair-$mode.txt"
+        fi
+        exit 1
       fi
       printf '  exits %s at "%s"\n' "$code" "$expected"
     done

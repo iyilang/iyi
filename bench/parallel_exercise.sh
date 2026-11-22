@@ -2589,7 +2589,7 @@ in_turn_workers && /^  def self.preempts : UInt64$/ {
   print "    end"
   print "    force_turn_hang(\"FAIL: forced turn: not armed: the check returned before an eligible decision\\n\")"
   print "  end"
-  print
+  print ""
   print; next
 }
 /^  def self.worker_next\(st : IyiSchedulerState\) : IyiFiber\?$/ { in_turn_next = 1; n_turn_next++ }

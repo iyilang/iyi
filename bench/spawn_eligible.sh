@@ -19,7 +19,9 @@
 #      its own, one spawn starts one worker, spawns joined one at a time at
 #      most three, and four tasks running at one instant all four; one
 #      spawn still starts one worker when it lands, every time, between
-#      the worker's first empty look and its idle count.
+#      the worker's first empty look and its idle count; and four tasks
+#      still start all four on a runtime whose every worker starts 50 ms
+#      late, the tasks waiting for the pool as well as for each other.
 #   2. The explanation: `--explain-spawn` notes each spawn, naming the
 #      capture that kept one in its unit - a captured `Array`, a local
 #      assigned in the loop that spawns, a constant reached through a call
@@ -62,8 +64,9 @@
 #      `unit: :new` left in the unit, `spawn_parallel` or `serial:` kept as an
 #      alias, a pool of one that starts for eligible spawns anyway, a pool
 #      that starts every worker at once, one that never starts a second,
-#      and a worker that gives back the token of the one out looking
-#      before it counts itself idle. Of the compiler, through
+#      a worker that gives back the token of the one out looking
+#      before it counts itself idle, and (on the late-start runtime)
+#      `grows`'s tasks waiting only for each other. Of the compiler, through
 #      `IYI_SPAWN_BROKEN`: no module named in a reason, no note from `iyi
 #      check` unasked, no line for a moved spawn, `spawn_parallel` and
 #      `serial: true` answered as any undefined method or parameter, an artifact written without what
@@ -751,10 +754,11 @@ caught nevergrows 'grows: 4 eligible spawns running at one instant started 1 of'
 # before it counts itself idle. Held open in every worker's first look,
 # the wait also let `grows`'s four tasks all arrive on fewer workers, time
 # sliced, and its last check failed one run of 20 on the Windows machine
-# with the token held through the wait. Given back first, the copy below
-# started a second worker in 20 runs of 20 on each of the three machines,
-# owing the start each time; with the same waits before the token went
-# back, 20 of 20 held on each.
+# with the token held through the wait; `grows`'s tasks now also wait for
+# the pool, which the late-start steps below hold. Given back first, the
+# copy below started a second worker in 20 runs of 20 on each of the three
+# machines, owing the start each time; with the same waits before the
+# token went back, 20 of 20 held on each.
 step "a spawn landing between a worker's empty look and its idle count starts no second worker"
 mkdir -p widened/iyi
 cp "$REPO"/src/iyi/*.iyi widened/iyi/
@@ -799,6 +803,52 @@ if ! IYI_PATH="$WORK/early${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_elig
   echo "the broken copy early failed to build:"; tail -20 build-early.log; exit 1
 fi
 caught early 'grows: one eligible spawn started 2 of' grows --workers=4
+
+# `grows`'s four tasks spin until all have arrived and the pool has
+# launched its four workers (`together`'s *pool*). Arrival alone is not
+# the precondition its count needs: the pool starts one worker at a time,
+# the next called for by the one before once it finds a task, and the
+# tasks take turns on the workers already up while one is on its way
+# (SPEC.md III.4.13, part 9), so they could all arrive and end before it
+# looked, and it found nothing to call the next for. On a Windows CI runner
+# the step above read "started 3 of the pool's 4 workers" so (job
+# 135727245245), and in 1 of 1,900 runs of that copy on Windows 11 with 12
+# logical processors. Held open here: a copy of the runtime whose every
+# worker's thread waits 50 ms before its first look. `grows` holds on it,
+# and the step as it was, its tasks waiting only for each other, exits 1
+# on it: 30 runs of 30 each way on that Windows machine and on Linux (12
+# vCPU).
+step "four tasks wanting to run at once fill the pool on a runtime whose workers each start 50 ms late"
+mkdir -p latestart/iyi
+cp "$REPO"/src/iyi/*.iyi latestart/iyi/
+awk '/^  def self\.work : Nil$/ { print; getline; print
+    print "      late = __iyi_monotonic_ns + 50000000_i64"
+    print "      while __iyi_monotonic_ns < late"
+    print "        IyiThread.spin_pause"
+    print "      end"
+    found = 1; next }
+  { print } END { if (!found) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > latestart/iyi/concurrency.iyi || { echo "the worker's start this step delays is not in the runtime any more"; exit 1; }
+if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_eligible.iyi" -o latestart-run > build-latestart.log 2>&1; then
+  echo "the late-start copy failed to build:"; tail -20 build-latestart.log; exit 1
+fi
+for run in 1 2 3; do
+  timeout -k 5 120 ./latestart-run grows --workers=4 > latestart.txt 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q 'every property held' latestart.txt; then
+    echo "  run $run of 3 with every worker starting 50 ms late failed (exit $code):"; cat latestart.txt; exit 1
+  fi
+done
+echo "  three runs with every worker starting 50 ms late: $(grep -m1 '^grows: one' latestart.txt | sed 's/^.*, and //')"
+
+step "failure proof: grows's tasks waiting only for each other are caught on that runtime"
+awk '$0 == "    together(\"grows\", pool: true)" { print "    together(\"grows\")"; found = 1; next }
+  { print } END { if (!found) exit 3 }' \
+  "$REPO/bench/spawn_eligible.iyi" > arrived_only.iyi || { echo "the wait for the pool this proof removes is not in bench/spawn_eligible.iyi any more"; exit 1; }
+if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build arrived_only.iyi -o arrivedonly-run > build-arrivedonly.log 2>&1; then
+  echo "the broken copy arrivedonly failed to build:"; tail -20 build-arrivedonly.log; exit 1
+fi
+caught arrivedonly 'grows: 4 eligible spawns running at one instant started' grows --workers=4
 
 step "failure proof: spawn_parallel kept as an alias"
 mkdir -p alias/iyi

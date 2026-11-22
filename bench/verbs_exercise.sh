@@ -1921,7 +1921,7 @@ fi
 # And a cached object that is not an object. A build killed between
 # `emit_obj` and `rename`, a full disk, or another build's cleanup
 # deleting this one's directory mid-codegen (which is why
-# `CacheDir#directory_in_use?` exists) leaves bytes the linker cannot
+# `CacheDir#hold` exists) leaves bytes the linker cannot
 # read - and every later build linked them again: `ld.lld: error:
 # <file>:1: unknown directive: garbage`, until somebody thought of
 # `clear_cache`. The empty case was already guarded; these were not.

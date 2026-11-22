@@ -400,11 +400,11 @@ step "failure proof: a finished thread's scheduler state left on the roots' list
 mkdir -p retired/iyi && cp "$REPO"/src/iyi/*.iyi retired/iyi/ || { echo "SETUP: ${current_step}: the retired copy could not be made"; exit 76; }
 awk '
   /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
-  inside && /^          previous\.next_state = state\.next_state$/ { print "          nil"; hits++; next }
-  inside && /^          @@states_head = state\.next_state$/ { print "          nil"; hits++; next }
+  inside && /^          previous\.next_state = state\.next_state$/ { print "          nil"; unlink_tail++; next }
+  inside && /^          @@states_head = state\.next_state$/ { print "          nil"; unlink_head++; next }
   inside && /^  end$/ { inside = 0; ends++ }
   { print }
-  END { if (starts != 1 || ends != 1 || hits != 2 || inside) exit 3 }
+  END { if (starts != 1 || ends != 1 || unlink_tail != 1 || unlink_head != 1 || inside) exit 3 }
 ' "$REPO/src/iyi/concurrency.iyi" > retired/iyi/concurrency.iyi || { echo "SETUP: ${current_step}: the retirement anchors changed"; exit 76; }
 cmp -s retired/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && { echo "SETUP: ${current_step}: the retired copy was unchanged"; exit 76; }
 if ! IYI_PATH="$WORK/retired${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o retired-run > build-retired.log 2>&1; then

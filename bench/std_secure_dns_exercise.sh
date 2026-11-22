@@ -53,8 +53,7 @@ if [ "${1:-}" = "--dns-body" ]; then
     exit 76
   fi
 else
-  END_PROCESS_SH="$REPO/bench/end_process.sh"
-  . "$END_PROCESS_SH"
+  . "$REPO/bench/end_process.sh"
   WORK="$(mktemp -d)"
   OWNED_PID=""
   OWNED_KIND=""
@@ -68,15 +67,10 @@ else
     return 1
   }
   force_owned() {
-    if [ "$END_PROCESS_WINDOWS" = yes ]; then
-      # One native process, killed by taskkill on its own Windows pid from this
-      # shell. timeout bounds only a taskkill that does not return.
-      if { read -r native <"/proc/$OWNED_PID/winpid"; } 2>/dev/null; then
-        MSYS2_ARG_CONV_EXCL="*" timeout --foreground -k 1 10 taskkill /F /PID "$native" >/dev/null 2>&1 || :
-      fi
-    else
-      end_process "$OWNED_PID" KILL || :
-    fi
+    # end_process ends the owned process by its own pid on both platforms. On
+    # Windows that is one taskkill of one native pid. A stuck taskkill is bounded
+    # by the job timeout, as for every other end_process caller.
+    end_process "$OWNED_PID" KILL || :
   }
   reap_owned() {
     local end=$((SECONDS + 5))
@@ -456,6 +450,17 @@ def start_body():
         return None, None
 
 
+def group_empty(group):
+    # Signal 0 asks whether any process still has this group id.
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def end_body(body, job):
     # The body waits on its control pipe after its exit line, so it is still
     # a live group leader here and the group can be signalled.
@@ -466,6 +471,13 @@ def end_body(body, job):
             os.killpg(body.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError as error:
+            # Darwin refuses a signal to a group whose only member is the unreaped
+            # zombie leader. Once the leader is reaped, ESRCH confirms that nothing
+            # is left in the group; anything else is reported.
+            if body.poll() is None or not group_empty(body.pid):
+                say("cannot signal secure DNS exercise group: %s" % error)
+                ok = False
         except OSError as error:
             say("cannot signal secure DNS exercise group: %s" % error)
             ok = False
@@ -527,17 +539,22 @@ def run_body(server):
                 show(source)
             return FAILURE, False
 
+        invalid = "the secure DNS exercise sent an invalid control request"
         while True:
             if cancelled():
                 return 143, False
             if server.poll() is not None:
                 return failed("the scripted servers exited during the exercise (status %s)" % server.returncode, work / "server.log")
-            if b"\n" not in pending:
-                if len(pending) > 256:
-                    return failed("the secure DNS exercise sent an oversized control request")
+            newline = pending.find(b"\n")
+            # A request is at most 256 bytes. The body is this gate's own code, but a
+            # writer that never sends a newline must not grow the buffer for a whole
+            # stage, so the bound holds while no newline has arrived.
+            if newline > 256 or (newline < 0 and len(pending) > 256):
+                return failed(invalid)
+            if newline < 0:
                 if closed:
                     if pending:
-                        return failed("the secure DNS exercise sent an invalid control request")
+                        return failed(invalid)
                     return FAILURE, stage_evidence if stage_evidence is not None else True
                 remaining = stage_deadline - time.monotonic()
                 try:
@@ -553,36 +570,26 @@ def run_body(server):
                 else:
                     return failed("the secure DNS exercise control stream closed unexpectedly")
                 continue
-            raw, _, rest = bytes(pending).partition(b"\n")
-            pending = bytearray(rest)
-            if len(raw) + 1 > 256:
-                return failed("the secure DNS exercise sent an oversized control request")
-            if raw.endswith(b"\r"):
-                raw = raw[:-1]
-            try:
-                line = raw.decode("ascii")
-            except UnicodeDecodeError:
-                return failed("the secure DNS exercise sent an invalid control request")
-            if line == "done" and not done:
+            line = bytes(pending[:newline])
+            del pending[:newline + 1]
+            if line == b"done" and not done:
                 done = True
                 continue
-            match = re.fullmatch(r"exit ([0-9]{1,3})", line)
+            match = re.fullmatch(rb"exit ([0-9]{1,3})", line)
             if match and not pending:
                 code = int(match.group(1))
                 if code > 255 or (code == 0 and not done):
                     return failed("the secure DNS exercise exited without completing its control stream")
                 return code, False
-            match = re.fullmatch(r"stage ([0-9]{1,4}) (-|[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*) ([ -~]+)", line)
-            if match and not done:
+            match = re.fullmatch(rb"stage ([0-9]{1,4}) (-|[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*) ([ -~]+)", line)
+            if match and not done and 1 <= int(match.group(1)) <= 3600 and b".." not in match.group(2):
                 seconds, relative, label = match.groups()
-                if not 1 <= int(seconds) <= 3600 or ".." in relative:
-                    return failed("the secure DNS exercise sent an invalid control request")
                 stage_seconds = int(seconds)
-                stage_label = label
-                stage_evidence = None if relative == "-" else work / relative
+                stage_label = label.decode("ascii")
+                stage_evidence = None if relative == b"-" else work / relative.decode("ascii")
                 stage_deadline = time.monotonic() + stage_seconds
                 continue
-            return failed("the secure DNS exercise sent an invalid control request")
+            return failed(invalid)
 
     try:
         verdict, missing = control()

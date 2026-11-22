@@ -229,19 +229,21 @@ def test(mode):
             print(output.read_text(errors="replace"), flush=True)
             raise RuntimeError("%s: fixture watchdog expired" % mode) from error
         finally:
+            # Retain the native handle while checking and, on a failed
+            # control, terminate only the supervisor whose PID we captured.
+            if handle:
+                if kernel.WaitForSingleObject(handle, 0) != 0:
+                    kernel.TerminateProcess(handle, 1)
+                    kernel.WaitForSingleObject(handle, 5000)
+                kernel.CloseHandle(handle)
             if "process" in locals() and process.poll() is None:
-                if pid is not None:
-                    if os.name == "nt" and handle:
-                        kernel.TerminateProcess(handle, 1)
-                    elif os.name != "nt":
-                        try:
-                            os.kill(pid, 9)
-                        except ProcessLookupError:
-                            pass
+                if pid is not None and os.name != "nt":
+                    try:
+                        os.kill(pid, 9)
+                    except ProcessLookupError:
+                        pass
                 process.kill()
                 process.wait(timeout=5)
-            if handle:
-                kernel.CloseHandle(handle)
         captured = output.read_text(errors="replace")
         lines = captured.splitlines()
         status = 0 if mode in success else (1 if mode.startswith("exit-") else 76)

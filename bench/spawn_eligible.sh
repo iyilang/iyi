@@ -838,7 +838,10 @@ cat > "$WORK/forced_words.iyi" <<'IYI'
     cell.value.add(1_u64)
     until_ns = __iyi_monotonic_ns + 10_000_000_000_i64
     while cell.value.get < 2_u64
-      return false if __iyi_monotonic_ns >= until_ns
+      if __iyi_monotonic_ns >= until_ns
+        print "FAIL: serial: a second spawn(unit: :same) task never ran beside the first within 10 seconds\n"
+        __iyi_exit(76)
+      end
       IyiThread.spin_pause
     end
     true

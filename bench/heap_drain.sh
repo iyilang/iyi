@@ -53,8 +53,9 @@
 #         a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it
 #       Hook only, the staged slice checked and the round closed (exit 0):
 #         claim: every walk claim held to its walk's end
-#       The release kept, the staged check skipped (exit 0): no other slice reports,
-#       so the catch can only come from the staged check:
+#       The release kept under the class's lock, the staged check skipped (exit 0):
+#       the lock and the reservation hold until the slice's own release has run,
+#       so nothing can observe the release and no slice reports:
 #         claim: every walk claim held to its walk's end
 #       Completion not recorded (exit 76, its own watchdog sentence):
 #         FAIL: claim: the staged slice did not complete within the watchdog
@@ -817,8 +818,9 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   #             release line named: the staged slice.
   #   c7 hook   the same hooks without the release: the staged slice is checked and
   #             reports that it was (exit 0), and the verifier reports nothing.
-  #   c7skip    the release kept, the staged check skipped: no slice reports (exit 0),
-  #             so the catch can only be the staged check's.
+  #   c7skip    the release kept under the class lock, the staged check skipped: the lock
+  #             and the reservation hold until the slice's own release has run, so
+  #             nothing can observe the release, and no slice reports (exit 0).
   #   c7 count  the same hooks with the staged slice never reported as checked: the
   #             claim wait can end only at its completion watchdog (exit 76).
   cat >"$WORK/claim.iyi" <<'IYI'
@@ -878,13 +880,14 @@ IYI
   CLAIM_CLASS='/^      def self\.claim_class\(index : Int32, who : Int32\) : UInt64$/ { in_class = 1; classes++ } in_class && /^          if sweep_left\?\(arena, epoch\)$/ { reserved++; print "          if sweep_left?(arena, epoch) && !forced_reserved?(arena)"; next } in_class && /^      end$/ { in_class = 0 }'
   CLAIM_TAKEN='/^        def self\.sweep_one_helper : Bool$/ { in_helper = 1; helpers++ } in_helper && /^            pool_word\(POOL_SWEEPERS\)\.value\.add\(1_u64\) if arena > 2_u64$/ { taken++; print; print "            forced_claim_taken(arena) if arena > 2_u64"; next } in_helper && /^        end$/ { in_helper = 0 }'
   CLAIM_STAGED='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { staged++; print "            if forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "              forced_release_staged(arena, epoch)"; print "              {% if flag?(:heap_verify) %} IyiHeapVerify.check_claimed(arena, epoch) {% end %}"; print "              IyiHeap.class_unlock(index)"; print "            end" }'
-  CLAIM_STAGED_UNCHECKED='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { staged++; print "            if forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "              forced_release_staged(arena, epoch)"; print "              IyiHeap.class_unlock(index)"; print "            end" }'
-  CLAIM_SKIP_CHECK='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { skipped++; print "            {% if flag?(:heap_verify) %}"; print "            unless forced_reserved?(arena)"; print "              IyiHeapVerify.check_claimed(arena, epoch)"; print "            end"; print "            {% end %}"; print "            forced_slice_checked(arena)"; next }'
-  CLAIM_CHECKED='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { checked++; print; print "            forced_slice_checked(arena)"; next }'
+  CLAIM_STAGED_HELD='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { staged++; print "            if forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "              forced_release_staged(arena, epoch)"; print "            end" }'
+  CLAIM_SKIP_CHECK='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { skipped++; armed_lock = 1; print "            {% if flag?(:heap_verify) %}"; print "            unless forced_reserved?(arena)"; print "              IyiHeapVerify.check_claimed(arena, epoch)"; print "            end"; print "            {% end %}"; next }'
+  CLAIM_SKIP_LOCK='in_helper && armed_lock && /^            IyiHeap\.class_lock\(index\)$/ { locked++; armed_lock = 0; print "            unless forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "            end"; next }'
+  CLAIM_DONE='in_helper && !cleared && /^            arena_done\(arena, epoch\)$/ { cleared++; print; print "            forced_slice_checked(arena)"; next }'
   CLAIM_PARTITION='/^  def self\.partition_sweep_for\(record : UInt64, index : Int32\) : UInt64$/ { in_part = 1; parts++ } in_part && /^        if IyiHeap\.partition_arena\?\(arena\) && sweep_left\?\(arena, epoch\) && IyiHeap\.read64\(arena \+ IyiHeap::OFF_SWEEPING\) != epoch$/ { reserved_part++; print "        if IyiHeap.partition_arena?(arena) && sweep_left?(arena, epoch) && IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) != epoch && !IyiMark.forced_reserved?(arena)"; next } in_part && /^  end$/ { in_part = 0 }'
-  PRELUDE_CONTROL="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_CHECKED { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || checked != 1) exit 3 }"
-  PRELUDE_MUTANT="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_STAGED $CLAIM_CHECKED { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || staged != 1 || checked != 1) exit 3 }"
-  PRELUDE_SKIP="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_STAGED_UNCHECKED $CLAIM_SKIP_CHECK { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || staged != 1 || skipped != 1) exit 3 }"
+  PRELUDE_CONTROL="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_DONE { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || cleared != 1) exit 3 }"
+  PRELUDE_MUTANT="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_STAGED $CLAIM_DONE { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || staged != 1 || cleared != 1) exit 3 }"
+  PRELUDE_SKIP="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_STAGED_HELD $CLAIM_SKIP_CHECK $CLAIM_SKIP_LOCK $CLAIM_DONE { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || staged != 1 || skipped != 1 || locked != 1 || cleared != 1) exit 3 }"
   PRELUDE_COUNTLESS="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1) exit 3 }"
   PARTITION_RESERVE="$CLAIM_PARTITION { print } END { if (parts != 1 || reserved_part != 1) exit 3 }"
   EXPECT_ERR='  a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it' NAMED_STAGED=1 \

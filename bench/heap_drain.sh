@@ -7,20 +7,22 @@
 # (claim), the arena directory's bounds (dir), a unit's first allocation taking
 # a drained run (adopt), and the flag-off control.
 #
-# Then one broken copy per mechanism, each with a hook-only control that must
-# pass on the same single run. A copy is caught only when it exits with the
-# status named below and prints its verdict as a whole line, matched with
-# grep -Fx. Exit 76 is setup (a watchdog, or a stage that never reached its
-# run): a miss, never a catch.
+# Then one broken copy per mechanism, with a control run separately on the
+# same path. A catch needs the named exit and whole verdict line. Fixed lines
+# use grep -Fx; the c6 and c9 lines with numeric values use whole-line regexes.
+# Exit 76 is setup, never a catch. The c7 count control expects its own 76
+# watchdog sentence and must not be confused with the mutant's exit 86.
 #
 #   c1  a partition takes drained runs (exit 1)
 #         FAIL: drain: no parked run was taken again from a drained list
+#       Unchanged take, site counted (exit 0):
+#         drain: 35712 kept strings intact
 #   c2  the global sweep's relist, deleted (exit 1). Keyed park: the run the
 #       program parks is read after the sweep: is it on its class's drain list?
 #         FAIL: drain: the global sweep left the run the program parked on no drain list
 #       Hook only, the relist kept and recorded (exit 0):
 #         drain: the global sweep put the run the program parked back on its class's drain list
-#   c3  a taken run's objects left published (exit 86): the verifier's report at
+#   c3  a taken run's published mark lost (exit 86): the verifier's report at
 #       the taker's own local collection, the first check that sees them.
 #         a slot names a LOCAL chunk its local mark left unmarked, about to be freed
 #       The same mutant with the verifier's local check silenced (exit 1): the
@@ -44,13 +46,17 @@
 #         FAIL: mark: a unit allocated N bytes under a held mark and never held
 #       Hook only, the hold in place (exit 0):
 #         mark: a unit held under an open mark: N holds, its partition past its ceiling while the mark was open
-#   c7  a helper's walk claim let go before its walk ends (exit 86): the check at
-#       the walk's end. Hook only, every claim counted complete (exit 0):
-#         claim: every walk claim held to its walk's end
+#   c7  a helper's walk claim let go before its walk ends (exit 86):
 #         a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it
+#       Hook only, the staged slice checked and the round closed (exit 0):
+#         claim: every walk claim held to its walk's end
+#       Completion not recorded (exit 76):
+#         FAIL: claim: the staged slice did not complete within the watchdog
 #   c8  the boundary predicate answers every slot below DIR_SLOTS as inside
 #       (exit 1), asked directly for slot 0.
 #         FAIL: dir: a slot outside every arena's bounds is answered as inside
+#       Unchanged predicate, site counted (exit 0):
+#         dir: the boundary predicate answers outside for a slot below every arena
 #   c9  a large mapping does not widen the bounds (exit 1): its object fails the
 #       heap-pointer check at its first sentence.
 #         FAIL: dir: large object 0 at 0x... is no heap pointer the moment it is made
@@ -148,7 +154,7 @@ if [ "$PART" = all ] || [ "$PART" = sound ]; then
   echo "== the partitions held under long marks (mark mode)"
   again "optimised" release release-mark mark
   again "verifier" verify verify-mark mark 1000000 4 2
-  echo "== the helpers' sweep rounds beside a sleeping program (claim mode)"
+  echo "== the helpers' sweep claims checked at each walk's end (claim mode)"
   again "verifier" verify verify-claim claim
   echo "== the arena directory left unread outside the arenas' slots (directory mode)"
   again "optimised" release release-dir dir
@@ -174,22 +180,11 @@ if [ "$PART" = all ] || [ "$PART" = off ]; then
   again "flag off, directory mode" off off-dir dir
 fi
 
-# One line deleted after a marker: `del MARKER LINE` as an awk program.
-del() {
-  printf '/%s/ { armed = 1 } armed && /%s/ { armed = 0; found = 1; next } { print } END { if (!found) exit 3 }' "$1" "$2"
-}
-# One line rewritten after a marker: `subst MARKER FROM TO`.
-subst() {
-  printf '/%s/ { armed = 1 } armed && sub(/%s/, "%s") { armed = 0; found = 1 } { print } END { if (!found) exit 3 }' "$1" "$2" "$3"
-}
-
-# copy LABEL DIR WANT AWK [FLAGS [ARGS...]]: src/iyi/heap_partition.iyi
-# (or `COPY_FILE`, another file of src/iyi) patched by AWK, the program
-# built against it (with FLAGS, default the optimised partitioned build)
-# and run with ARGS. Caught when it exits WANT with its verdict as the one
-# whole line EXPECT, EXPECT_FIXED or EXPECT_ERR (a verifier report is on
-# stderr) and, where one is named, exactly one FAIL line. A hook-only control
-# (WANT 0) must print EXPECT_OUT and no verifier report. Exit 76 is setup.
+# copy LABEL DIR WANT AWK [FLAGS [ARGS...]]: patch COPY_FILE (default
+# heap_partition.iyi) and, when named, EXTRA_FILE using EXTRA_AWK. Build and
+# run once. A catch needs its expected exit and whole verdict line. A control
+# needs its expected output and no verifier report. Exit 76 is setup, except
+# for the explicit watchdog control, which checks its own setup sentence.
 copy() {
   local label="$1" name="$2" dir="$WORK/$2" want="$3" script="$4" flags="${5:--Dheap_partitions --release}"
   local file="${COPY_FILE:-heap_partition.iyi}"
@@ -202,11 +197,22 @@ copy() {
     status=1
     return
   fi
+  if [ -n "${EXTRA_FILE:-}" ] && ! awk "$EXTRA_AWK" "$REPO/src/iyi/$EXTRA_FILE" >"$dir/iyi/$EXTRA_FILE"; then
+    echo "  $label: what the copy changes is not in $EXTRA_FILE any more"
+    status=1
+    return
+  fi
   build "$name-bin" "$flags" "$dir${PSEP}$REPO/src" || return
   local only=""
   [ "$want" = 86 ] && only=1
   timeout 600 env ${only:+HEAP22_PRINT_ONLY=1} "$WORK/$name-bin" "$@" >"$dir/run.out" 2>"$dir/run.err"
   local code=$?
+  if [ "$want" = 76 ] && [ "$code" -eq 76 ] && [ -n "${EXPECT_SETUP:-}" ] &&
+    [ "$(grep -c '^FAIL: ' "$dir/run.out")" -eq 1 ] &&
+    grep -Fxq -- "$EXPECT_SETUP" "$dir/run.out"; then
+    echo "  $label: expected setup watchdog (exit 76), $EXPECT_SETUP"
+    return
+  fi
   if [ "$code" -eq 76 ]; then
     echo "  $label: setup failed (exit 76: a watchdog or setup, not a catch)"
     sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
@@ -752,78 +758,122 @@ IYI
 }
 if [ "$PART" = all ] || [ "$PART" = copies ]; then
   echo "== each mechanism removed"
-  EXPECT='^FAIL: drain: no parked run was taken again from a drained list$' copy "a partition takes drained runs" c1 1 \
-    "$(subst 'def self\.partition_take' 'drained = pop_listed\(index, PC_DRAIN\)' 'drained = 0_u64')"
+  # c1 (`partition_take`'s drained list): the mutant takes no drained run, so the
+  # runtime's own count of drained takes stays 0 and the program fails by name
+  # (exit 1). The hook-only control scans the same site without changing it:
+  # a drained run is taken again and every kept string remains intact.
+  TAKE_DRAINED='/^  def self\.partition_take\(table : Pointer\(UInt64\), index : Int32\) : UInt64$/ { in_take = 1; takes++ } in_take && /^      drained = pop_listed\(index, PC_DRAIN\)$/ { sites++; print "      drained = 0_u64"; next } in_take && /^  end$/ { in_take = 0 } { print } END { if (takes != 1 || sites != 1) exit 3 }'
+  EXPECT_FIXED='FAIL: drain: no parked run was taken again from a drained list' copy "a partition takes drained runs" c1 1 "$TAKE_DRAINED"
+  TAKE_SITE='/^  def self\.partition_take\(table : Pointer\(UInt64\), index : Int32\) : UInt64$/ { in_take = 1; takes++ } in_take && /^      drained = pop_listed\(index, PC_DRAIN\)$/ { sites++ } in_take && /^  end$/ { in_take = 0 } { print } END { if (takes != 1 || sites != 1) exit 3 }'
+  EXPECT_OUT='drain: 35712 kept strings intact' copy "a partition takes drained runs (hook only)" c1ctl 0 "$TAKE_SITE"
   keyed "the global sweep's relist, deleted (c2)" c2 1 park "FAIL: drain: the global sweep left the run the program parked on no drain list" "-Dheap_partitions --release -Dkeyed_force" "$PARK_BROKEN"
   keyed "the relist, kept and recorded (hook only)" relisted 0 park "drain: the global sweep put the run the program parked back on its class's drain list" "-Dheap_partitions --release -Dkeyed_force" "$PARK_WITNESS"
-  # c3 (adopt_drained's OWN_PUB, `adopt` in heap_drain.iyi): the taker's local
-  # collection is the first check that can see its mislabelled published string,
-  # and it aborts there, so the copy's one verdict is the verifier's report. Its
-  # control runs the same program without the mutant and reports nothing.
-  EXPECT_ERR='  a slot names a LOCAL chunk its local mark left unmarked, about to be freed' copy "a taken run's objects published" c3 86 \
-    "$(subst 'def self\.adopt_drained' 'write8\(own, OWN_PUB\)' 'write8(own, 0_u64)')" "-Dheap_partitions -Dheap_verify" adopt
+  # c3 (adopt_drained's publishing write, `adopt` in heap_drain.iyi): the mutant
+  # loses the published mark of that one write, so the taker's own local
+  # collection is the first check that sees the chunk, and it names it (exit 86).
+  # The hook-only control runs the same scan with the publishing write left as it is.
+  ADOPT_LOSE='/^  def self\.adopt_drained\(/ { in_adopt = 1; adopts++ } in_adopt && /^          write8\(own, OWN_PUB\)$/ { sites++; print "          write8(own, 0_u64)"; next } in_adopt && /^  end$/ { in_adopt = 0 } { print } END { if (adopts != 1 || sites != 1) exit 3 }'
+  EXPECT_ERR='  a slot names a LOCAL chunk its local mark left unmarked, about to be freed' copy "a taken run's published mark lost" c3 86 "$ADOPT_LOSE" "-Dheap_partitions -Dheap_verify" adopt
+  ADOPT_SITE='/^  def self\.adopt_drained\(/ { in_adopt = 1; adopts++ } in_adopt && /^          write8\(own, OWN_PUB\)$/ { sites++ } in_adopt && /^  end$/ { in_adopt = 0 } { print } END { if (adopts != 1 || sites != 1) exit 3 }'
   EXPECT_OUT="adopt: a unit's first allocation took a run its dead predecessor published, and the local collection left the published string intact" \
-    copy "a taken run's objects published, with no mutant (hook only)" c3ctl 0 "$PASS" "-Dheap_partitions -Dheap_verify" adopt
-  # c3's own byte (`adopt_taker`): the same mutant with the verifier's local
-  # check silenced, so the taker's own check is the first to read the published
-  # mark. A failure, exit 1, never setup (76).
-  OWN_SILENT='/def self\.adopt_drained/ { armed = 1; declarations++ } armed && /write8\(own, OWN_PUB\)/ { sub(/OWN_PUB/, "0_u64"); mutated++; armed = 0 } /return false unless IyiHeapVerify\.check\(record, id, parity, running\)/ { silenced++; sub(/return false unless IyiHeapVerify\.check\(record, id, parity, running\)/, "") } { print } END { if (declarations != 1 || mutated != 1 || silenced != 1) exit 3 }'
-  EXPECT_FIXED="FAIL: adopt: the published string is LOCAL after the taker's local collection" \
-    copy "a taken run's published mark lost, the verifier's local check silenced (c3's own byte)" c3own 1 "$OWN_SILENT" "-Dheap_partitions -Dheap_verify" adopt
+    copy "a taken run's published mark kept (hook only)" c3ctl 0 "$ADOPT_SITE" "-Dheap_partitions -Dheap_verify" adopt
+  # c3own (the taker's own byte, `adopt_taker`): the same loss with the verifier's
+  # local check removed, so only the taker's own read of the mark can see it, and
+  # that is a failure (exit 1). The hook-only control removes the check alone and
+  # keeps the mark, so it must pass.
+  CHECK_SILENCE='/^  def self\.local_collect_in\(/ { in_local = 1; locals++ } in_local && /^    [{]% if flag\?\(:heap_verify\) %[}] return false unless IyiHeapVerify\.check\(record, id, parity, running\) [{]% end %[}]$/ { silenced++; next } in_local && /^  end$/ { in_local = 0 } { print } END { if (locals != 1 || silenced != 1) exit 3 }'
+  OWN_SILENT='/^  def self\.adopt_drained\(/ { in_adopt = 1; adopts++ } in_adopt && /^          write8\(own, OWN_PUB\)$/ { sites++; print "          write8(own, 0_u64)"; next } in_adopt && /^  end$/ { in_adopt = 0 } /^  def self\.local_collect_in\(/ { in_local = 1; locals++ } in_local && /^    [{]% if flag\?\(:heap_verify\) %[}] return false unless IyiHeapVerify\.check\(record, id, parity, running\) [{]% end %[}]$/ { silenced++; next } in_local && /^  end$/ { in_local = 0 } { print } END { if (adopts != 1 || sites != 1 || locals != 1 || silenced != 1) exit 3 }'
+  EXPECT_FIXED="FAIL: adopt: the published string is LOCAL after the taker's local collection" copy "a taken run's published mark lost, the verifier's local check removed (c3own)" c3own 1 "$OWN_SILENT" "-Dheap_partitions -Dheap_verify" adopt
+  EXPECT_OUT="adopt: a unit's first allocation took a run its dead predecessor published, and the local collection left the published string intact" \
+    copy "a taken run's published mark kept, the verifier's local check removed (hook only)" c3ownctl 0 "$CHECK_SILENCE" "-Dheap_partitions -Dheap_verify" adopt
   keyed "an idle worker wakes for the warm pool (c4)" c4 1 warm "FAIL: idle_wait_ms left a worker's wait unbounded with a pooled run held warm and no partition pending" "-Dheap_partitions --release -Dkeyed_force" "$WARM_BROKEN"
   keyed "the warm-pool cap, kept (hook only)" warm 0 warm "idle: idle_wait_ms cut a worker's unbounded wait to the pool's turn with a pooled run held warm and no partition pending" "-Dheap_partitions --release -Dkeyed_force"
   keyed "a cooled run's pages go back (c5)" c5 1 cool "FAIL: idle: the run the program put on a release list reached the cold list with its page unreleased: the release call did not run" "-Dheap_partitions --release -Dkeyed_force" "$COOL_SITE" "$COOL_BROKEN"
   keyed "a cooled run's release is recorded (hook only)" cool 0 cool "idle: the run the program put on a release list reached the cold list with its page reading zero" "-Dheap_partitions --release -Dkeyed_force" "$COOL_SITE" "$COOL_WITNESS"
   marked "a unit holds beneath an open mark" held 0
   marked "a partition holds under a mark" c6 1 "$C6_DELETE"
-  # c7, the walk claim (claim mode, `claim` in heap_drain.iyi). The copy releases
-  # a helper's claim before its walk: the order the check exists to catch. The
-  # walk's end then fails its check, which exits the run with the verifier's
-  # report before that slice counts itself complete. The copy-only counters
-  # below count every claim a helper takes and every helper slice complete, and
-  # claim mode waits for the two to meet under `-Dclaim_force`. The hook-only
-  # control counts and must pass.
+  # c7, the walk claim (claim mode, `claim` in heap_drain.iyi). A helper's slice
+  # that lets its claim go before its walk must fail its check at the walk's end.
+  # The first helper's claim is the staged arena: `claim.iyi`'s hooks reserve it
+  # from every other claim (`claim_class` and `partition_sweep_for`) until that
+  # slice's own check has run.
+  #   c7        releases its claim before its walk: the check fails (exit 86),
+  #             and the verifier names the walk-claim line.
+  #   c7 hook   the same hooks without the release: the staged slice is checked,
+  #             reports that it was (exit 0), and the verifier reports nothing.
+  #   c7 count  the same hooks with the staged slice never reported as checked:
+  #             the claim wait can end only at its watchdog (exit 76).
   cat >"$WORK/claim.iyi" <<'IYI'
-      # copy only (bench/heap_drain.sh's c7): every claim a helper takes is counted
-      # when taken, and every helper slice when it is complete (after its
-      # walk-claim check, its claim let go and its batch handed on). Claim mode
-      # waits for the two counts to meet under `-Dclaim_force`.
-      @[UnsafeReach("helper claims and completions are counted atomically")]
-      @@forced_taken : UInt64 = 0_u64
-      @[UnsafeReach("helper claims and completions are counted atomically")]
+      # copy only (bench/heap_drain.sh's c7): the first helper's claim is the staged
+      # arena. Another claim of it, by a helper (`claim_class`) or by an allocating
+      # thread (`partition_sweep_for`), is refused until that slice's walk-claim
+      # check has run. A slice that let its claim go before its walk therefore
+      # cannot be claimed again before the check reads the word.
+      @[UnsafeReach("the staged arena's address is set once, by the first helper's claim")]
+      @@forced_staged : UInt64 = 0_u64
+      @[UnsafeReach("nonzero while the staged arena is reserved, cleared by its check")]
+      @@forced_held : UInt64 = 0_u64
+      @[UnsafeReach("set once, by the staged slice after its check")]
       @@forced_done : UInt64 = 0_u64
 
-      def self.forced_claim_taken : Nil
-        Pointer(Atomic(UInt64)).new(pointerof(@@forced_taken).address).value.add(1_u64)
+      def self.forced_claim_taken(arena : UInt64) : Nil
+        if Pointer(Atomic(UInt64)).new(pointerof(@@forced_staged).address).value.compare_and_set(0_u64, arena)[1]
+          Pointer(Atomic(UInt64)).new(pointerof(@@forced_held).address).value.set(1_u64)
+        end
       end
 
-      def self.forced_claim_done : Nil
-        Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.add(1_u64)
+      def self.forced_reserved?(arena : UInt64) : Bool
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_held).address).value.get != 0_u64 && arena == Pointer(Atomic(UInt64)).new(pointerof(@@forced_staged).address).value.get
       end
 
-      def self.forced_claims_taken_count : UInt64
-        Pointer(Atomic(UInt64)).new(pointerof(@@forced_taken).address).value.get
+      def self.forced_slice_checked(arena : UInt64) : Nil
+        return unless arena == Pointer(Atomic(UInt64)).new(pointerof(@@forced_staged).address).value.get
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_held).address).value.set(0_u64)
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.set(1_u64)
       end
 
-      def self.forced_claims_done_count : UInt64
-        Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.get
+      def self.forced_staged_arena : UInt64
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_staged).address).value.get
+      end
+
+      def self.forced_staged_done? : Bool
+        Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.get != 0_u64
       end
 
 IYI
   export CLAIM_INS="$WORK/claim.iyi"
-  # The sites: the methods go in before helper_main; a helper counts its claim
-  # beside POOL_SWEEPERS' add; it counts its completion before the partition
-  # branch's else. The mutant also releases the claim before its walk.
-  CLAIM_CONTROL='/^      def self\.helper_main\(seen : UInt64\) : Nil$/ { declarations++; while ((getline line < ENVIRON["CLAIM_INS"]) > 0) print line; print "" } /def self\.sweep_one_helper : Bool/ { helper = 1 } helper && /^            pool_word\(POOL_SWEEPERS\)\.value\.add\(1_u64\) if arena > 2_u64$/ { print; print "            forced_claim_taken if arena > 2_u64"; taken++; next } helper && /^          [{]% else %[}]$/ && !completed { print "            forced_claim_done"; completed++; helper = 0 } { print } END { if (declarations != 1 || taken != 1 || completed != 1) exit 3 }'
-  CLAIM_MUTANT='/^      def self\.helper_main\(seen : UInt64\) : Nil$/ { declarations++; while ((getline line < ENVIRON["CLAIM_INS"]) > 0) print line; print "" } /def self\.sweep_one_helper : Bool/ { helper = 1 } helper && /^            pool_word\(POOL_SWEEPERS\)\.value\.add\(1_u64\) if arena > 2_u64$/ { print; print "            forced_claim_taken if arena > 2_u64"; taken++; next } helper && /^          batch = sweep_slice\(arena, SWEEP_SPAN\)$/ { print "          IyiHeap.class_lock(index)"; print "          release_claim(arena, epoch)"; print "          IyiHeap.class_unlock(index)"; released++ } helper && /^          [{]% else %[}]$/ && !completed { print "            forced_claim_done"; completed++; helper = 0 } { print } END { if (declarations != 1 || taken != 1 || released != 1 || completed != 1) exit 3 }'
-  EXPECT_ERR='  a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it' COPY_FILE=prelude.iyi copy "a helper holds its claim to its walk's end" c7 86 "$CLAIM_MUTANT" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim
-  EXPECT_OUT="claim: every walk claim held to its walk's end" COPY_FILE=prelude.iyi copy "a helper's claims, all counted complete (hook only)" c7ctl 0 "$CLAIM_CONTROL" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim
-  # c8, the arena directory's bounds (directory mode, `dir` in heap_drain.iyi):
-  # the copy's boundary predicate answers a slot below every arena as inside,
-  # and the program asks it directly and fails by name. Residency is information.
-  EXPECT_FIXED="FAIL: dir: a slot outside every arena's bounds is answered as inside" copy "the directory unread outside the bounds" c8 1 \
-    "$(subst 'def self\.dir_outside\?' 'slot < @@dir_low \|\| slot > @@dir_high' 'slot >= DIR_SLOTS')" \
-    "-Dheap_partitions --release" dir
+  # The awk programs. Each rule counts its sites inside its own method: its scope
+  # opens at the method's first line and closes at its closing line. Each program
+  # requires exactly one site of every rule it uses, so a missing or a duplicate
+  # anchor exits 3, and the copy is not built.
+  CLAIM_METHODS='/^      def self\.helper_main\(seen : UInt64\) : Nil$/ { declarations++; methods = 0; while ((getline line < ENVIRON["CLAIM_INS"]) > 0) { print line; methods++ }; if (methods == 0) exit 3; print "" }'
+  CLAIM_CLASS='/^      def self\.claim_class\(index : Int32, who : Int32\) : UInt64$/ { in_class = 1; classes++ } in_class && /^          if sweep_left\?\(arena, epoch\)$/ { reserved++; print "          if sweep_left?(arena, epoch) && !forced_reserved?(arena)"; next } in_class && /^      end$/ { in_class = 0 }'
+  CLAIM_TAKEN='/^        def self\.sweep_one_helper : Bool$/ { in_helper = 1; helpers++ } in_helper && /^            pool_word\(POOL_SWEEPERS\)\.value\.add\(1_u64\) if arena > 2_u64$/ { taken++; print; print "            forced_claim_taken(arena) if arena > 2_u64"; next } in_helper && /^        end$/ { in_helper = 0 }'
+  CLAIM_RELEASE='in_helper && /^          batch = sweep_slice\(arena, SWEEP_SPAN\)$/ { released++; print "          IyiHeap.class_lock(index)"; print "          release_claim(arena, epoch)"; print "          IyiHeap.class_unlock(index)"; print; next }'
+  CLAIM_CHECKED='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { checked++; print; print "            forced_slice_checked(arena)"; next }'
+  CLAIM_PARTITION='/^  def self\.partition_sweep_for\(record : UInt64, index : Int32\) : UInt64$/ { in_part = 1; parts++ } in_part && /^        if IyiHeap\.partition_arena\?\(arena\) && sweep_left\?\(arena, epoch\) && IyiHeap\.read64\(arena \+ IyiHeap::OFF_SWEEPING\) != epoch$/ { reserved_part++; print "        if IyiHeap.partition_arena?(arena) && sweep_left?(arena, epoch) && IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) != epoch && !IyiMark.forced_reserved?(arena)"; next } in_part && /^  end$/ { in_part = 0 }'
+  PRELUDE_CONTROL="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_CHECKED { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || checked != 1) exit 3 }"
+  PRELUDE_MUTANT="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_RELEASE $CLAIM_CHECKED { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || released != 1 || checked != 1) exit 3 }"
+  PRELUDE_COUNTLESS="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1) exit 3 }"
+  PARTITION_RESERVE="$CLAIM_PARTITION { print } END { if (parts != 1 || reserved_part != 1) exit 3 }"
+  EXPECT_ERR='  a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it' \
+    COPY_FILE=prelude.iyi EXTRA_FILE=heap_partition.iyi EXTRA_AWK="$PARTITION_RESERVE" \
+    copy "a helper holds its claim to its walk's end" c7 86 "$PRELUDE_MUTANT" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim
+  EXPECT_OUT="claim: every walk claim held to its walk's end" \
+    COPY_FILE=prelude.iyi EXTRA_FILE=heap_partition.iyi EXTRA_AWK="$PARTITION_RESERVE" \
+    copy "a helper's staged slice checked, not released (hook only)" c7ctl 0 "$PRELUDE_CONTROL" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim
+  EXPECT_SETUP='FAIL: claim: the staged slice did not complete within the watchdog' \
+    COPY_FILE=prelude.iyi EXTRA_FILE=heap_partition.iyi EXTRA_AWK="$PARTITION_RESERVE" \
+    copy "a staged slice never counted complete (c7 count)" c7cnt 76 "$PRELUDE_COUNTLESS" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim 1 8 5
+  # c8, the arena directory's bounds (directory mode, `dir` in heap_drain.iyi).
+  # The mutant answers every slot below DIR_SLOTS as inside, and the program asks
+  # the predicate directly for slot 0, so the verdict is the predicate's answer.
+  DIR_BOUND='/^  def self\.dir_outside\?\(slot : UInt64\) : Bool$/ { in_dir = 1; dirs++ } in_dir && /^    slot < @@dir_low \|\| slot > @@dir_high$/ { sites++; print "    slot >= DIR_SLOTS"; next } in_dir && /^  end$/ { in_dir = 0 } { print } END { if (dirs != 1 || sites != 1) exit 3 }'
+  EXPECT_FIXED="FAIL: dir: a slot outside every arena's bounds is answered as inside" copy "the directory unread outside the bounds" c8 1 "$DIR_BOUND" "-Dheap_partitions --release" dir
+  # The hook-only control runs the same scan with the predicate left unchanged.
+  DIR_SITE='/^  def self\.dir_outside\?\(slot : UInt64\) : Bool$/ { in_dir = 1; dirs++ } in_dir && /^    slot < @@dir_low \|\| slot > @@dir_high$/ { sites++ } in_dir && /^  end$/ { in_dir = 0 } { print } END { if (dirs != 1 || sites != 1) exit 3 }'
+  EXPECT_OUT="dir: the boundary predicate answers outside for a slot below every arena" \
+    copy "the directory unread outside the bounds (hook only)" c8ctl 0 "$DIR_SITE" "-Dheap_partitions --release" dir
   hinted "a large mapping widens the bounds" c9 1 "$C9_DELETE"
   hinted "a placed large object lands outside the bounds" placed 0
 fi

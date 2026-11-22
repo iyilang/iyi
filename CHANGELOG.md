@@ -178,6 +178,8 @@
 
 ### Fixed
 
+- **The bench gates decide no verdict by a clock or a retry count.** `bench/concurrent_mark.iyi` acquires each of its three premise marks by waiting for the mark flag, with a ten-second watchdog that ends in its own sentence and status 76, in place of eight attempts. `bench/spawn_eligible.iyi` judges `together` and `asked` by four arrivals rather than a two-second wait, and a new forced `beside` pair catches a pool that runs eligible spawns one at a time, deciding at the spawn. `grows` prints how many workers a run of joined spawns started, since the race that count measured is held open by the forced `widened` and `early` pairs. `bench/reuse_integrity.iyi` ends a size class that never goes idle with a named setup failure and status 76, not an uncaught raise, and the copy-only watchdogs in `std_gc_exercise` and `std_log_exercise` end with status 76 too.
+
 - **A pool short of workers no longer stays short while its tasks take
   turns.** The pool starts its workers one at a time: each new worker,
   finding a task with more waiting, calls for the next. A task halfway

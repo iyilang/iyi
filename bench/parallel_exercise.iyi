@@ -1094,8 +1094,12 @@
 
   # Keep each list on its fiber's stack through an explicit global stop
   # and, with partitions, an explicit collection of its own partition.
-  # OPEN: whether the allocation load alone triggers a local collection
-  # is reported as information, not judged by a schedule-dependent count.
+  # Whether the allocation load alone triggers a local collection is not judged
+  # here: this gate builds without -Dheap_partitions. It is proved by
+  # bench/heap_local.iyi's inflight_check, which heap_local.sh runs with partitions
+  # on each platform (heap22, darwin-heap22 and windows-heap22, on master pushes,
+  # nightly and dispatch): 200,000 objects allocated on a pool unit with
+  # collect_every_park off and no park, and partition_collections must advance.
   def collector(watch : Int32) : Nil
     watched("collector", watch) do
       stops = IyiThread.stops

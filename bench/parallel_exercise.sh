@@ -11,6 +11,9 @@
 # uses the same observation as its mutant. Close placement uses the
 # corresponding healthy program as its control.
 # Each copy gets one run; a progress hang is not a successful catch.
+# Every progress failure ends the run once, through the shared one-ending block.
+# A scan (below the fixture checks) refuses any other exit, raw write, svc or
+# FAIL: sentence in a fixture or a generated copy, and probes each refusal.
 # Socket and deep-frame movement are forced before their larger exercises.
 # Speed and tight-loop timings are performance information, sampled once.
 #
@@ -18,11 +21,12 @@
 # not share one lock. The registry walks hold IyiRuntimeLock for list links;
 # they do not make the state field atomic. The cancel, close, channel-park,
 # deep, balance, handoff, backstop, held-io, and Windows completion witnesses
-# read that field, as do panic-exit's reader waits. Their target waits remain
-# parked until the test releases them; a missed observation ends as a named
-# status-76 progress hang, never as a caught mutant. The runtime exposes no
-# atomic state load paired with its writers, so visibility is not guaranteed.
-# Poller uses the reader's atomic listed_on and on_cpu words instead.
+# read that field, through those walks and the copy hooks, so they prove
+# nothing about its visibility. Their target waits stay parked until the test
+# releases them, and a missed observation ends as a named status-76 progress
+# hang, never as a caught mutant. Poller and panic-exit's reader waits read
+# the reader's atomic listed_on and on_cpu words instead, and a reader on the
+# main thread is checked under the io list's lock.
 #
 #   1. The exercise holds every property, plain and --release: parallel
 #      tasks start on the pool and on more than one worker, never on the
@@ -53,21 +57,23 @@
 #      bench/parallel_preempt.iyi checks preemption at loop back-edges
 #      (SPEC.md III.4.13, part 9): a short task and a sleeper run beside a
 #      computing task; a dedicated fast request is served while a slow
-#      handler stays active, and bulk server latency is measured; the
-#      poller request also has its own bound; a preempted task
-#      keeps its unit's token; a task switched in after one that held its
-#      worker past a look begins its own quantum; the monitor looks every
-#      4 to 10.5 ms (8 on Windows) and the quantum is at most three of
-#      those looks; tight loops and their `@[NoPreempt]` twins produce the
-#      same answers, with their timing ratios reported as information; the
-#      release build's IR shows each tight loop's checks reading the word
-#      through the thread pointer, without calling its accessor. Its failure proofs
-#      are with step 7's: a `@[NoPreempt]` loop, a monitor that never
-#      raises the word, a Windows monitor on the system timer's tick, a
-#      monitor that raises it after three unchanged looks, a check that
-#      calls the accessor (darwin and Windows), a slow half that does not
-#      poll, a word left raised for the task before, and a preempted task
-#      that gives its unit's token away.
+#      handler stays active; a preempted task keeps its unit's token; a task
+#      switched in after one that held its worker past a look begins its own
+#      quantum; tight loops and their `@[NoPreempt]` twins give the same
+#      answers, and the release build's IR shows each tight loop's checks
+#      reading the word through the thread pointer, without calling its
+#      accessor. Latencies are measured and printed with `measure:`, never
+#      judged: the ticker, the poller's fast response, the monitor's look
+#      interval (4 to 10.5 ms, 8 on Windows) and quantum, and the tight-loop
+#      timing ratios. What is forced is the decision: the monitor's raise after
+#      one unchanged look (the control) and after three (the slowturn mutant,
+#      which is caught), a Windows monitor that falls back to the semaphore
+#      (coarse, also caught), and the requested tick, pinned by the anchors the
+#      copies must match on PREEMPT_TICK_NS. Its failure proofs are with step
+#      7's: a `@[NoPreempt]` loop, a monitor that never raises the word, a check
+#      that calls the accessor (darwin and Windows), a slow half that does not
+#      poll, a word left raised for the task before, and a preempted task that
+#      gives its unit's token away.
 #   3. The binary keeps the dependency floor the concurrency gate holds,
 #      plus `environ`, the C runtime's table `IYI_WORKERS` is read from.
 #   4. A capacity witness holds K tasks on K workers together. CPU-bound
@@ -383,13 +389,12 @@ esac
 # ── 2b. Preemption at loop back-edges, twice ─────────────────────────────
 # bench/parallel_preempt.iyi: a short task and a sleeper run beside a
 # computing task; a fast request is served while a slow handler stays
-# active; bulk server latency is measured; a preempted task
-# keeps its unit's token; a task switched in is not given up on the word
-# raised for the one before it; the monitor looks every 4 to 10.5 ms (8
-# on Windows) and two tasks on one worker take turns of at most three of
-# those looks; tight loops and their `@[NoPreempt]` twins must answer
-# alike, and their timing ratios are informational. Their checks read
-# the word through the thread pointer in the release build's IR.
+# active; a preempted task keeps its unit's token; a task switched in is not
+# given up on the word raised for the one before it; tight loops and their
+# `@[NoPreempt]` twins must answer alike. The monitor's look interval and
+# quantum, the poller's fast response and the timing ratios are printed as
+# information. The release build's IR gates the checks: they read the word
+# through the thread pointer.
 PREEMPT_WORKERS=8
 [ "$CORES" -lt 8 ] && PREEMPT_WORKERS="$CORES"
 # The server shape's clients are the program's own main thread, which on
@@ -2941,13 +2946,10 @@ $COARSE_END" concurrency.iyi parallel_preempt -Dcoarse_force
     echo "  the monitor's tick here is the kernel's own timeout, and there is no system timer for it to fall back to" ;;
 esac
 
-# The turn is held to three of the period step's own looks. This copy
-# took 3.45 to 4.35 looks a turn in 16 runs on macos-15 and 3.84 to 4.02
-# in 20 on windows-2025 (debug jobs 124913849625 and 124922160678,
-# 124913849506 and 124922160886), 3.88 to 4.21 in three here on Linux,
-# and 4.02 and 3.96 on Windows 11, 12 logical processors (the user's
-# machine), held to 4; the real monitor's turns took 1.61 to 2.25 looks
-# in those debug jobs.
+# Copy only: the monitor's raise is held to one unchanged look by the hook-only
+# control and to three by the mutant (PREEMPT_TICKS = 3). The program reads the
+# last raise and its count of unchanged looks. Nothing here times a turn; the
+# look counts a real turn takes are printed by the period step as information.
 step "failure proof: a monitor that raises a worker's word after three unchanged looks"
   # Copy only, for the slowturn proof of bench/parallel_preempt.iyi (-Dslowturn_force). Both copies save the unchanged
   # looks at each raise (force_pending_ticks, before the reset) and count each raise at the store of the worker's word

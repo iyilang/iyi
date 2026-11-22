@@ -318,15 +318,14 @@
     end
   {% end %}
 
-  # The process's open handles on Windows; 0 elsewhere, where the check
-  # that reads it has nothing to compare.
-  def process_handles : Int32
-    handles = 0
-    {% if flag?(:win32) %}
+  # The process's open handles, the count teardown_count reads on Windows.
+  {% if flag?(:win32) %}
+    def process_handles : Int32
+      handles = 0
       LibC.GetProcessHandleCount(LibC.GetCurrentProcess, pointerof(handles))
-    {% end %}
-    handles
-  end
+      handles
+    end
+  {% end %}
 
   # What a finished thread's scheduler leaves open, counted: the process's
   # handles on Windows, and elsewhere the lowest descriptor number nothing

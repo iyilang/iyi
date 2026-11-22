@@ -97,7 +97,12 @@ module bench/release_trigger
     held = Word.new
     second = IyiThread.start do
       ready.set(1_u64)
+      counted_deadline = IyiMark.now_ns + 10000000000_u64
       while IyiMark.collections == before
+        if IyiMark.now_ns >= counted_deadline
+          print "FAIL: #{name}: the second thread did not see the counted collection within ten seconds\n"
+          __iyi_exit(76)
+        end
         sleep(1)
       end
       seen.set(IyiMark.collections)
@@ -120,14 +125,24 @@ module bench/release_trigger
     # one that met the collection's lock there began after the flag had
     # fallen - the verb's round, the first that starts its collection at
     # once, passed on a copy it had to fail, 5 runs of 5, without this.
+    ready_deadline = IyiMark.now_ns + 10000000000_u64
     while ready.get == 0_u64
+      if IyiMark.now_ns >= ready_deadline
+        print "FAIL: #{name}: the second thread did not become ready within ten seconds\n"
+        __iyi_exit(76)
+      end
       sleep(1)
     end
     if path == "verb"
       IyiMark.collect
     else
       sum = 0_i64
+      churn_deadline = IyiMark.now_ns + 10000000000_u64
       while IyiMark.collections == before
+        if IyiMark.now_ns >= churn_deadline
+          print "FAIL: #{name}: churn did not trigger the round's collection within ten seconds\n"
+          __iyi_exit(76)
+        end
         sum = sum &+ churn(4096_u64)
       end
     end

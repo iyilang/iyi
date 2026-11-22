@@ -778,20 +778,27 @@
     fail("the chain's tail lost its payload beside the idle pool") unless tail(chain).payload.is_a?(Payload)
 
     Busy.stop.value.set(0_u64)
+    Busy.arrived.value.set(0_u64)
     busy_asked = 0_u64
     busy_waiting = 0_u64
     group do |g|
       cores.to_i32.times do
         g.spawn(unit: :new) do
+          Busy.arrived.value.add(1_u64)
           busy_until_stopped
           0
         end
       end
+      # A worker can leave its poller before it starts a task. Require both
+      # every busy task's acknowledgement and no remaining waiting worker.
       deadline = IyiMark.now_ns + 5000000000_u64
-      while IyiScheduler.waiting_threads > 0_u64 && IyiMark.now_ns < deadline
+      while (Busy.arrived.value.get < cores || IyiScheduler.waiting_threads > 0_u64) && IyiMark.now_ns < deadline
         IyiThread.yield_cpu
       end
       busy_waiting = IyiScheduler.waiting_threads
+      setup_fail("busy pool: #{busy_waiting.to_i64} of #{cores.to_i64} pool workers were still waiting after five seconds") if busy_waiting > 0_u64
+      busy_arrived = Busy.arrived.value.get
+      setup_fail("busy pool: #{busy_arrived.to_i64} of #{cores.to_i64} pool tasks started within five seconds") if busy_arrived < cores
       IyiMark.auto = true
       marked = false
       attempt = 0

@@ -839,7 +839,6 @@ if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: round [0-9]+: (the payload moved into
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'the barrier lost it' nobarrier.txt)"
 
-step "failure proof: a barrier that shades after its mark ended loses what the holder held"
 mkdir -p stray/iyi
 cp "$REPO"/src/iyi/*.iyi stray/iyi/
 make_stray_copy() {
@@ -864,6 +863,7 @@ for shape in missing duplicate; do
   fi
   printf '  exits 76 at "%s"\n' "FAIL: gate setup: the stray barrier method or guard is missing or ambiguous"
 done
+step "failure proof: a barrier that shades after its mark ended loses what the holder held"
 make_stray_copy "$REPO/src/iyi/prelude.iyi" stray/iyi/prelude.iyi.stray || exit "$?"
 hold_moves stray/iyi/prelude.iyi.stray stray/iyi/prelude.iyi
 if ! IYI_PATH="$WORK/stray${PSEP}$REPO/src" "$IYI" build --release -Dmove_force "$REPO/bench/concurrent_mark.iyi" -o straybarrier > build-stray.log 2>&1; then
@@ -876,7 +876,7 @@ if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: stray: a barrier run after its mark h
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'stray: a barrier run after' stray.txt)"
 
-step "failure proof: a large block outgrown under a mark, the mark held open by the copy's closer, is unmapped beside the helpers"
+step "control: a held mark keeps the outgrown block mapped"
 mkdir -p held/iyi
 cp "$REPO"/src/iyi/*.iyi held/iyi/
 # The closer of a concurrent mark is the only thing that finishes one (the
@@ -976,13 +976,19 @@ awk '/^  def busy_until_stopped : Nil$/ { in_busy = 1; busy_methods++ }
   }
   in_main && /setup_fail\("share: no mark ran/ { print "    marked = false if premise == \"share-mark\""; share++ }
   in_main && /setup_fail\("idle pool: no mark ran/ { print "    marked = false if premise == \"idle-mark\""; idle++ }
+  in_main && $0 == "      busy_waiting = IyiScheduler.waiting_threads" {
+    print; print "      busy_waiting = 1_u64 if premise == \"busy-wait\""; busy_wait++; next
+  }
+  in_main && $0 == "      busy_arrived = Busy.arrived.value.get" {
+    print; print "      busy_arrived = 0_u64 if premise == \"busy-arrival\""; busy_arrival++; next
+  }
   in_main && /setup_fail\("busy pool: no mark ran/ { print "    marked = false if premise == \"busy-mark\""; busy++ }
   in_main && /setup_fail\("the share proof needs three cores/ {
     share_cores += gsub(/unless /, "unless premise == \"pool-cores\" || ")
   }
   in_main && $0 == "  puts \"concurrent mark: every property held\"" { in_main = 0; ends++ }
   { print }
-  END { if (busy_methods != 1 || ends != 1 || in_main || expect_index || bad_index || init != 1 || indexes != 2 || small_live != 1 || small_none != 1 || move_none != 1 || move_white != 1 || concurrent != 1 || large_rounds != 1 || large_mark != 1 || large_count != 1 || boost_none != 1 || boost_pool != 1 || cores != 1 || busy_page != 1 || share != 1 || idle != 1 || busy != 1 || share_cores != 1) exit 3 }' \
+  END { if (busy_methods != 1 || ends != 1 || in_main || expect_index || bad_index || init != 1 || indexes != 2 || small_live != 1 || small_none != 1 || move_none != 1 || move_white != 1 || concurrent != 1 || large_rounds != 1 || large_mark != 1 || large_count != 1 || boost_none != 1 || boost_pool != 1 || cores != 1 || busy_page != 1 || share != 1 || idle != 1 || busy != 1 || busy_wait != 1 || busy_arrival != 1 || share_cores != 1) exit 3 }' \
   "$REPO/bench/concurrent_mark.iyi" > benchmark-premises.iyi || { echo "a benchmark premise anchor is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/moves-held${PSEP}$REPO/src" "$IYI" build --release -Dmove_force benchmark-premises.iyi -o move-premises-run > build-move-premises.log 2>&1; then
   fail_build build-move-premises.log
@@ -990,7 +996,7 @@ fi
 if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force benchmark-premises.iyi -o large-premises-run > build-large-premises.log 2>&1; then
   fail_build build-large-premises.log
 fi
-premises="small-live small-none move-white move-none concurrent-none large-mark large-count busy-page share-mark idle-mark busy-mark share-cores pool-cores"
+premises="small-live small-none move-white move-none concurrent-none large-mark large-count busy-page share-mark idle-mark busy-mark busy-wait busy-arrival share-cores pool-cores"
 if [ "$PSEP" = ";" ]; then premises="$premises boost-pool boost-none"; fi
 for premise in $premises; do
   case "$premise" in
@@ -1007,6 +1013,8 @@ for premise in $premises; do
     share-mark) expected="FAIL: share: no mark ran beside the busy threads in 8 tries" ;;
     idle-mark) expected="FAIL: idle pool: no mark ran beside the idle pool in 8 tries" ;;
     busy-mark) expected="FAIL: busy pool: no mark ran beside the busy pool in 8 tries" ;;
+    busy-wait) expected="" ;;
+    busy-arrival) expected="" ;;
     share-cores) expected="FAIL: the share proof needs three cores; this host has 2" ;;
     pool-cores) expected="FAIL: the idle and busy pool proofs need three cores; this host has 2" ;;
   esac
@@ -1016,11 +1024,18 @@ for premise in $premises; do
   esac
   timeout -k 5 300 "./$runner" "$premise" > "benchmark-premise-$premise.txt" 2>&1
   code=$?
-  if [ "$code" -ne 76 ] || ! grep -Fxq "$expected" "benchmark-premise-$premise.txt"; then
+  if [ "$premise" = busy-wait ]; then
+    expected="$(grep -Em1 '^FAIL: busy pool: 1 of [1-9][0-9]* pool workers were still waiting after five seconds$' "benchmark-premise-$premise.txt" || true)"
+  fi
+  if [ "$premise" = busy-arrival ]; then
+    expected="$(grep -Em1 '^FAIL: busy pool: 0 of [1-9][0-9]* pool tasks started within five seconds$' "benchmark-premise-$premise.txt" || true)"
+  fi
+  if [ "$code" -ne 76 ] || [ -z "$expected" ] || ! grep -Fxq "$expected" "benchmark-premise-$premise.txt"; then
     echo "the $premise benchmark premise did not fail as setup (exit $code):"; tail -3 "benchmark-premise-$premise.txt"; fail_for_status "$code" "benchmark-premise-$premise.txt"
   fi
   printf '  exits 76 at "%s"\n' "$expected"
 done
+step "failure proof: a large block outgrown under a mark, the mark held open by the copy's closer, is unmapped beside the helpers"
 mkdir -p unmapped/iyi
 cp held/iyi/*.iyi unmapped/iyi/
 awk '
@@ -1988,6 +2003,27 @@ for run in 1 2 3; do
   fi
 done
 grep -E '^(bounded|stopped|verb|one core):' trigger-1.txt | sed 's/^/  /'
+step "control: a release-trigger thread that is not ready is a setup failure"
+awk '/^  def round\(name : String, path : String\) : Bool$/ { in_round = 1; methods++ }
+  in_round && $0 == "    ready_deadline = IyiMark.now_ns + 10000000000_u64" {
+    print "    ready_deadline = 0_u64"; deadlines++; next
+  }
+  in_round && $0 == "    while ready.get == 0_u64" {
+    print "    while ready.get == 0_u64 || ready_deadline == 0_u64"; waits++; next
+  }
+  in_round && /^  end$/ { in_round = 0 }
+  { print } END { if (methods != 1 || deadlines != 1 || waits != 1 || in_round) exit 3 }' \
+  "$REPO/bench/release_trigger.iyi" > release-wait.iyi || { echo "FAIL: gate setup: the release-trigger ready wait is missing or ambiguous"; exit 76; }
+if ! "$IYI" build --release release-wait.iyi -o release-wait-run > build-release-wait.log 2>&1; then
+  fail_build build-release-wait.log
+fi
+timeout -k 5 60 ./release-wait-run > release-wait.txt 2>&1
+code=$?
+expected="FAIL: bounded: the second thread did not become ready within ten seconds"
+if [ "$code" -ne 76 ] || ! grep -Fxq "$expected" release-wait.txt; then
+  echo "the release-trigger ready wait was not named as setup (exit $code):"; cat release-wait.txt; fail_for_status "$code" release-wait.txt
+fi
+printf '  exits 76 at "%s"\n' "$expected"
 
 # At the release of each stopped-collection path, hold its collector until a
 # resumed thread crosses the next budget. The broken copies additionally hold
@@ -2603,7 +2639,6 @@ printf '  exits 1 at "%s"\n' "$turn_lost"
 # both copies and reports if it observes the first collection waiting for
 # that count before the program has released the helper. The broken copy
 # publishes that state from inside its restored wait; no timer is a verdict.
-step "failure proof: a first collection that waits for every helper to reach its park is caught"
 mkdir -p held-helpers/iyi
 cp "$REPO"/src/iyi/*.iyi held-helpers/iyi/
 make_crowded_copy() {
@@ -2670,6 +2705,7 @@ for shape in missing duplicate; do
   fi
   printf '  exits 76 at "%s"\n' "FAIL: gate setup: the crowded helper method or entry is missing or ambiguous"
 done
+step "control: the first collection returns while helpers are held"
 make_crowded_copy "$REPO/src/iyi/prelude.iyi" held-helpers/iyi/prelude.iyi || exit "$?"
 if ! IYI_PATH="$WORK/held-helpers${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-held > build-held-helpers.log 2>&1; then
   fail_build build-held-helpers.log
@@ -2680,6 +2716,7 @@ if [ "$code" -ne 0 ] || ! grep -q '^crowded: ' crowded-held.txt; then
   echo "the hook alone, helpers held until a collection returns, did not pass (exit $code):"; tail -3 crowded-held.txt; fail_control "$code" crowded-held.txt
 fi
 echo "  the hook alone, exits 0: $(grep -m1 '^crowded: ' crowded-held.txt)"
+step "failure proof: a first collection that waits for every helper to reach its park is caught"
 mkdir -p ready/iyi
 cp held-helpers/iyi/*.iyi ready/iyi/
 awk '/^      def self\.start_helpers\(count : UInt64\) : Nil$/ { inside = 1; methods++ }
@@ -2875,7 +2912,7 @@ if ! IYI_PATH="$WORK/pooled${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench
 fi
 timeout -k 5 300 ./pooled-run > pooled.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: busy pool: with [0-9]+ pool workers running on [0-9]+ cores, [0-9]+ waiting, the mark beside them asked for [0-9]+ helpers rather than 1$" pooled.txt; then
+if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: busy pool: with [0-9]+ pool workers running on [0-9]+ cores, 0 waiting, the mark beside them asked for [0-9]+ helpers rather than 1$" pooled.txt; then
   echo "the busy pool check did not fire (exit $code):"; tail -3 pooled.txt; fail_for_status "$code" pooled.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: busy pool:' pooled.txt)"

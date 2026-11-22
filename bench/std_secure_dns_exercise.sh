@@ -636,9 +636,12 @@ PY
   OWNED_PID=$!
   OWNED_KIND=supervisor
   bootstrap_deadline=$((SECONDS + PYTHON_PREFLIGHT_SECONDS))
-  while :; do
+  while [ ! -f "$WORK/supervisor.armed" ]; do
     if [ "$CANCEL_STATUS" -ne 0 ]; then exit "$CANCEL_STATUS"; fi
     if ! owned_active; then
+      # The supervisor writes the armed file before it can fail. A file found
+      # after its exit was written before that exit, so it did arm.
+      [ -f "$WORK/supervisor.armed" ] && break
       supervisor_code=0
       wait "$OWNED_PID" 2>/dev/null || supervisor_code=$?
       OWNED_PID=""
@@ -650,7 +653,6 @@ PY
       echo "Python supervisor startup watchdog expired"
       exit 76
     fi
-    [ -f "$WORK/supervisor.armed" ] && break
     sleep 0.1
   done
   supervisor_code=0

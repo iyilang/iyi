@@ -127,6 +127,21 @@ def hold_bash_deadlines(shell):
                 '    if [ "$SECONDS" -ge "$bootstrap_deadline" ]; then\n')
 
 
+VERDICT_PREFIXES = ("the scripted servers", "the secure DNS", "Python ", "the std/secure_dns", "cannot ")
+
+
+def verdict_alternatives(mode, expected):
+    # The verdict-level lines a control may print, in order. Any other line
+    # that starts like a verdict is a stray sentence and fails the control.
+    if mode == "bootstrap-hang":
+        return [["Python supervisor startup watchdog expired",
+                 "the secure DNS supervisor did not stop during cleanup"]]
+    if mode == "diagnostic":
+        return [["the scripted servers hung before signaling readiness, at stage: pki"]]
+    texts = (expected,) if isinstance(expected, str) else expected
+    return [[text] for text in texts]
+
+
 def test(mode):
     with tempfile.TemporaryDirectory(prefix="sdns-review-control-") as temp:
         root = pathlib.Path(temp)
@@ -160,8 +175,15 @@ def test(mode):
         elif mode == "body-early":
             shell = once(shell, marker, 'echo "fixture body exited early"\nexit 0\n' + marker)
             expected = "the secure DNS exercise exited without completing its control stream"
-        elif mode == "silent":
+        elif mode in ("silent", "arm-after-death"):
             server = once(server, "\nimport os\n", "\nimport os; os._exit(23)\n")
+            if mode == "arm-after-death":
+                # The supervisor arms, starts its server, sees it exit and leaves
+                # before bash reads the process table for the first time. Holding
+                # bash until its own table reports the job gone fixes that order.
+                shell = once(shell, "  bootstrap_deadline=$((SECONDS + PYTHON_PREFLIGHT_SECONDS))\n",
+                             "  until ! owned_active; do command sleep 0.05; done\n"
+                             "  bootstrap_deadline=$((SECONDS + PYTHON_PREFLIGHT_SECONDS))\n")
             expected = "the scripted servers exited silently before readiness (status 23)"
         elif mode == "crash":
             server = once(server, "def main():\n",
@@ -374,7 +396,12 @@ def test(mode):
             expected = "the server's name not verified: broken copy watchdog expired (1 s)"
         else:
             raise RuntimeError("unknown mode " + mode)
-        startup_failures = {"silent", "crash", "hang", "import-hang", "diagnostic", "broken-h2"}
+        # A startup failure ends before the body runs, and its verdict lines
+        # are exactly the expected ones: no stray sentence from another stage.
+        startup_failures = {"silent", "arm-after-death", "crash", "hang", "import-hang", "diagnostic", "broken-h2",
+                            "bootstrap-exit", "bootstrap-hang", "interpreter-hang", "interpreter-exit-124",
+                            "dependency-hang", "dependency-broken", "dependency-exit-124", "dependency-self"}
+        verdict_modes = startup_failures | {"ready-dead", "body-early"}
         if mode in startup_failures:
             shell = once(shell, marker, 'echo "fixture body reached"\n' + marker)
         if mode in ("hang", "import-hang", "diagnostic"):
@@ -496,6 +523,11 @@ def test(mode):
         expected_lines = (expected,) if isinstance(expected, str) else expected
         if returncode != status or sum(lines.count(text) for text in expected_lines) != 1:
             raise RuntimeError("%s: expected status %s and exactly one of %r" % (mode, status, expected_lines))
+        if mode in verdict_modes:
+            verdicts = [line for line in lines if line.startswith(VERDICT_PREFIXES)]
+            wanted = verdict_alternatives(mode, expected)
+            if verdicts not in wanted:
+                raise RuntimeError("%s: expected the verdict lines %r, got %r" % (mode, wanted, verdicts))
         if "supervisor cleanup is unconfirmed" in captured:
             raise RuntimeError("supervisor cleanup was not confirmed")
         if mode == "bootstrap-hang" and lines.count("the secure DNS supervisor did not stop during cleanup") != 1:

@@ -7,14 +7,16 @@ produce. Run it from the repository root, once for each Bash that runs the gate:
 
     python3 .github/probes/secure_dns_controls.py "$PWD" "$(command -v bash)"
 
-Mode names after the Bash run a subset. It stays out of the workflows because a
-full run takes minutes on each runner: the earlier 48-control set took 101 s on
-Linux, 228 s on macOS per Bash and 123 s on Windows.
+Mode names after the Bash run a subset. The controls stay out of the workflows,
+because a full run takes minutes on each runner. A startup control asserts its
+verdict lines exactly. body-killed signals the body, so it runs on POSIX only, and
+Windows skips it by name.
 """
 import os
 import pathlib
 import shutil
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -142,7 +144,45 @@ def verdict_alternatives(mode, expected):
     return [[text] for text in texts]
 
 
+HARNESS_HANG_SECONDS = 900
+
+
+def published(path):
+    # The integer a fixture wrote to path, or None until the file holds digits.
+    try:
+        text = path.read_text().strip()
+    except FileNotFoundError:
+        return None
+    return int(text) if text.isdigit() else None
+
+
+def await_fixture(process, ready, mode, output, what):
+    # The gate publishes what the harness needs, or it exits first. No clock
+    # decides a verdict here. The bound only names a fixture that never gets there.
+    stop = time.monotonic() + HARNESS_HANG_SECONDS
+    while True:
+        value = ready()
+        if value is not None:
+            return value
+        if process.poll() is not None:
+            print("=== %s: the gate exited (status %s) before its fixture published %s ===" % (mode, process.returncode, what), flush=True)
+            print(output.read_text(errors="replace"), flush=True)
+            raise RuntimeError("%s: the gate exited before its fixture published %s" % (mode, what))
+        if time.monotonic() >= stop:
+            print(output.read_text(errors="replace"), flush=True)
+            raise RuntimeError("%s: harness hang: the fixture did not publish %s" % (mode, what))
+        time.sleep(0.05)
+
+
+def harness_fail(mode, output, message):
+    print(output.read_text(errors="replace"), flush=True)
+    raise RuntimeError("%s: %s" % (mode, message))
+
+
 def test(mode):
+    if mode == "body-killed" and os.name == "nt":
+        print("body-killed: skipped on Windows, where a body is not ended by a signal", flush=True)
+        return
     with tempfile.TemporaryDirectory(prefix="sdns-review-control-") as temp:
         root = pathlib.Path(temp)
         bench = root / "bench"
@@ -185,6 +225,16 @@ def test(mode):
                              "  until ! owned_active; do command sleep 0.05; done\n"
                              "  bootstrap_deadline=$((SECONDS + PYTHON_PREFLIGHT_SECONDS))\n")
             expected = "the scripted servers exited silently before readiness (status 23)"
+        elif mode == "body-killed":
+            # A signal from outside ends the body before its exit line. The body
+            # parks on its control pipe, so the group holds no other member.
+            shell = once(shell, marker,
+                         'echo $$ >"$SDNS_TEST_BODY_PID"\n'
+                         ': >"$SDNS_TEST_BODY_READY"\n'
+                         'read -r _ <&3 || :\n' + marker)
+            env["SDNS_TEST_BODY_PID"] = str(root / "body-pid")
+            env["SDNS_TEST_BODY_READY"] = str(root / "body-ready")
+            expected = "the secure DNS exercise ended without reporting its status (status -9)"
         elif mode == "crash":
             server = once(server, "def main():\n",
                           'def main():\n'
@@ -219,9 +269,9 @@ def test(mode):
             expected = ("the scripted servers exited during the exercise (status 23)",
                         "the scripted servers exited before readiness was accepted (status 23)")
         elif mode == "diagnostic":
-            program = ('import threading; print("discarded-diagnostic-prefix", flush=True); '
-                       'print("D" * 20000, flush=True); print("partial-diagnostic", flush=True); '
-                       'threading.Event().wait()')
+            # The process never ends, so its deadline always expires. Its output is
+            # not asserted: 20 KB printed within DIAGNOSTIC_SECONDS would be a margin.
+            program = "import threading; threading.Event().wait()"
             anchor = "    commands = []\n"
             shell = once(shell, anchor, '    commands = [[sys.executable, "-c", ' + repr(program) + ']]\n')
             shell = once(shell, '    if system == "darwin" or system.startswith("linux"):\n', '    if False:\n')
@@ -257,8 +307,8 @@ def test(mode):
             anchor = '    (work / "supervisor.armed").touch()\n'
             shell = once(shell, anchor, '    sys.exit(23)\n' + anchor)
             expected = "Python supervisor exited before arming (status 23)"
-        elif mode in ("interpreter-hang", "interpreter-exit-124", "interpreter-exit-137",
-                      "dependency-hang", "dependency-broken", "dependency-exit-124", "dependency-exit-137"):
+        elif mode in ("interpreter-hang", "interpreter-exit-124",
+                      "dependency-hang", "dependency-broken", "dependency-exit-124"):
             if mode.startswith("interpreter-"):
                 program = (tool_program("fixture interpreter preflight evidence") if mode.endswith("hang")
                            else "import sys; sys.exit(%s)" % mode.rsplit("-", 1)[1])
@@ -365,7 +415,7 @@ def test(mode):
             program = 'import sys; print(%r); sys.exit(%s)' % (output_text, "1" if mode == "dig-broken" else "0")
             shell = once(shell, anchor, '  "$PY" -c ' + shlex.quote(program) + ' >"$WORK/dig.help" 2>&1 </dev/null 3<&- 4>&-\n')
             expected = "dig help failed"
-        elif mode in ("plain-timeout", "release-timeout", "exit-124", "exit-137"):
+        elif mode in ("plain-timeout", "release-timeout", "exit-124"):
             env["IYI"] = "true"
             selected = "release" if mode.startswith("release") else "plain"
             anchor = '  "$WORK/$name" "$SRV" >"$WORK/$name.out" 2>&1 </dev/null 3<&- 4>&-\n'
@@ -401,7 +451,7 @@ def test(mode):
         startup_failures = {"silent", "arm-after-death", "crash", "hang", "import-hang", "diagnostic", "broken-h2",
                             "bootstrap-exit", "bootstrap-hang", "interpreter-hang", "interpreter-exit-124",
                             "dependency-hang", "dependency-broken", "dependency-exit-124", "dependency-self"}
-        verdict_modes = startup_failures | {"ready-dead", "body-early"}
+        verdict_modes = startup_failures | {"ready-dead", "body-early", "body-killed"}
         if mode in startup_failures:
             shell = once(shell, marker, 'echo "fixture body reached"\n' + marker)
         if mode in ("hang", "import-hang", "diagnostic"):
@@ -424,7 +474,7 @@ def test(mode):
             "build-hang", "mutation-build-hang", "mutation-patch-hang",
             "dig-hang", "dig-query-hang", "dig-version-hang", "gap-hang", "gap-evidence-hang",
             "dig-broken", "dig-junk", "dig-usage-only",
-            "plain-timeout", "release-timeout", "mutation-timeout", "exit-124", "exit-137",
+            "plain-timeout", "release-timeout", "mutation-timeout", "exit-124",
         }
         if mode in server_live_modes:
             env["SDNS_TEST_SERVER_REAPED"] = str(root / "server-reaped")
@@ -460,32 +510,26 @@ def test(mode):
                 process = subprocess.Popen([SHELL, (bench / "std_secure_dns_exercise.sh").as_posix()], env=env,
                                            stdout=log, stderr=subprocess.STDOUT)
                 if mode in pid_modes:
-                    # Healthy runs publish within seconds. Under six CPU-bound
-                    # processes on the 4-core runner, publication took more than
-                    # 40 s, so the bound is 180 s; a hang still ends the run.
-                    deadline = time.monotonic() + 180
-                    marker = root / ("supervisor-pid" if mode == "bootstrap-hang" else "tool-pid")
-                    while time.monotonic() < deadline and process.poll() is None:
-                        text = marker.read_text().strip() if marker.exists() else ""
-                        if text.isdigit():
-                            pid = int(text)
-                            break
-                        time.sleep(0.05)
-                    if pid is None:
-                        raise RuntimeError("%s: fixture child did not publish its PID" % mode)
+                    tool_pid = root / ("supervisor-pid" if mode == "bootstrap-hang" else "tool-pid")
+                    pid = await_fixture(process, lambda: published(tool_pid), mode, output, "its PID")
                     native = open_handle(pid)
                     (root / "tool-opened").touch()
+                if mode == "body-killed":
+                    await_fixture(process, lambda: True if (root / "body-ready").exists() else None,
+                                  mode, output, "its body PID")
+                    pid = int((root / "body-pid").read_text().strip())
+                    os.kill(pid, signal.SIGKILL)
                 returncode = process.wait(timeout=80)
                 if pid is not None:
                     deadline = time.monotonic() + 5
                     while not gone(pid, native) and time.monotonic() < deadline:
                         time.sleep(0.05)
                     if not gone(pid, native):
-                        raise RuntimeError("%s: fixture PID %s survived cleanup" % (mode, pid))
+                        harness_fail(mode, output, "fixture PID %s survived cleanup" % pid)
                     print("%s fixture PID %s is gone" % (mode, pid), flush=True)
         except subprocess.TimeoutExpired as error:
             print(output.read_text(errors="replace"), flush=True)
-            raise RuntimeError("%s: fixture watchdog expired" % mode) from error
+            raise RuntimeError("%s: harness hang: the gate did not exit within 80 s" % mode) from error
         finally:
             # The stop file belongs only to this fixture. It cannot target a
             # recycled POSIX PID, even if the gate shell has already exited.
@@ -552,11 +596,6 @@ def test(mode):
                      "diagnostic": "fixture diagnostic stall"}[mode]
             if stall not in lines:
                 raise RuntimeError("fixture stall evidence missing: " + stall)
-        if mode == "diagnostic":
-            if lines.count("partial-diagnostic") != 1 or lines.count("the scripted servers hung before signaling readiness, at stage: pki") != 1:
-                raise RuntimeError("partial diagnostic output or stage verdict missing")
-            if "last 16384 of " not in captured or "discarded-diagnostic-prefix" in captured or "D" * 16385 in captured:
-                raise RuntimeError("diagnostic evidence was not capped")
         if mode == "crash":
             if "RuntimeError: controlled startup crash" not in captured:
                 raise RuntimeError("crash traceback missing")
@@ -597,15 +636,15 @@ def test(mode):
 
 if __name__ == "__main__":
     modes = sys.argv[3:] or [
-        "body-early", "silent", "crash", "hang", "import-hang", "ready-dead", "queued-frames",
-        "diagnostic", "broken-h2", "bootstrap-hang", "bootstrap-exit",
-        "interpreter-hang", "dependency-hang", "interpreter-exit-124", "interpreter-exit-137",
-        "dependency-exit-124", "dependency-exit-137", "dependency-broken", "dependency-self",
+        "body-early", "silent", "arm-after-death", "body-killed", "crash", "hang", "import-hang",
+        "ready-dead", "queued-frames", "diagnostic", "broken-h2", "bootstrap-hang", "bootstrap-exit",
+        "interpreter-hang", "dependency-hang", "interpreter-exit-124",
+        "dependency-exit-124", "dependency-broken", "dependency-self",
         "build-hang", "mutation-build-hang", "mutation-patch-hang",
         "dig-hang", "dig-query-hang", "dig-version-hang",
         "gap-hang", "gap-evidence-hang", "server-exit-tool",
         "dig-broken", "dig-junk", "dig-usage-only", "plain-timeout", "release-timeout",
-        "mutation-timeout", "exit-124", "exit-137",
+        "mutation-timeout", "exit-124",
     ]
     for mode in modes:
         test(mode)

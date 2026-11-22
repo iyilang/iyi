@@ -3161,61 +3161,377 @@ IYI
 esac
 
 # ── 5d. The first collection's helpers ────────────────────────────────────
-# How many helpers a mark may use is decided at the first collection, and
-# the word saying it was decided was written before the count: a thread
-# that read between the two started no helper, then read the count again,
-# handed the mark to a helper 0 that did not exist, and every collection
-# after waited on it forever - 31 runs in 200 of this program on a
-# twelve-core Windows machine. Eight threads cross the first budget
-# together, each holding a list past the stop's bound so the mark goes
-# beside the program; a hundred runs, and every one must end.
-step "threads crossing the first budget together: a hundred runs, and every one ends"
+# Hold one trigger between the helper count and its decided flag, before
+# the runtime lock. A second trigger enters while it is held, and each
+# reports the actual `wanted` local used by collect_if_due. The control
+# starts those helpers and finishes its first collection; the copy with
+# just the two decision writes reversed reports the mismatch.
+cat > first.part <<'IYI'
+    IYI_FIRST_A_LINE    = 3584_u64
+    IYI_FIRST_HELD      = 3648_u64
+    IYI_FIRST_B_BETWEEN = 3712_u64
+    IYI_FIRST_B_READ    = 3776_u64
+    IYI_FIRST_CHECKED   = 3840_u64
+    IYI_FIRST_STARTED   = 3904_u64
+
+    def self.first_say(message : String, status : Int32) : Nil
+      __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+      {% if flag?(:darwin) %}
+        LibC.first_proof_exit(status)
+      {% elsif flag?(:win32) %}
+        LibC.TerminateProcess(LibC.GetCurrentProcess, status)
+        LibC.ExitProcess(status)
+      {% else %}
+        __iyi_exit(status)
+      {% end %}
+    end
+
+    def self.first_init : Nil
+      page = control
+      first_say("SETUP: first helpers: the control page was not mapped\n", 76) if page == 0_u64
+      offset = IYI_FIRST_A_LINE
+      while offset <= IYI_FIRST_STARTED
+        word(page + offset).value.set(0_u64)
+        offset = offset + 64_u64
+      end
+    end
+
+    def self.first_value(offset : UInt64) : UInt64
+      word(control + offset).value.get
+    end
+
+    def self.first_wait(offset : UInt64, message : String) : Nil
+      page = @@control
+      first_say("SETUP: first helpers: the control page was not initialized\n", 76) if page == 0_u64
+      began = IyiMark.now_ns
+      while word(page + offset).value.get == 0_u64
+        first_say(message, 76) if IyiMark.now_ns &- began > 20000000000_u64
+        yield_cpu
+      end
+    end
+
+    def self.first_claim : Nil
+      page = @@control
+      if page == 0_u64 || @@line == 0_u64
+        first_say("SETUP: first helpers: the first trigger has no thread line\n", 76)
+      end
+      if word(page + IYI_FIRST_A_LINE).value.get != 0_u64
+        first_say("SETUP: first helpers: the first trigger was already claimed\n", 76)
+      end
+      word(page + IYI_FIRST_A_LINE).value.set(@@line)
+    end
+
+    # Both copies call here between the two real writes. The second
+    # trigger records its visit but does not wait in this hook.
+    def self.first_between : Nil
+      page = @@control
+      return if page == 0_u64
+      owner = word(page + IYI_FIRST_A_LINE).value.get
+      first_say("SETUP: first helpers: a decision had no first trigger\n", 76) if owner == 0_u64 || @@line == 0_u64
+      if @@line == owner
+        word(page + IYI_FIRST_HELD).value.set(1_u64)
+        first_wait(IYI_FIRST_B_READ, "SETUP: first helpers: the second trigger did not read the count\n")
+      else
+        if word(page + IYI_FIRST_HELD).value.get == 0_u64
+          first_say("SETUP: first helpers: the second trigger entered before the hold\n", 76)
+        end
+        word(page + IYI_FIRST_B_BETWEEN).value.set(1_u64)
+      end
+    end
+
+    # Called after the `if (wanted = ...)` block, even when wanted is
+    # zero. The second trigger stays off the lock until the first compares
+    # its own local with that snapshot.
+    def self.first_snapshot(wanted : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64
+      owner = word(page + IYI_FIRST_A_LINE).value.get
+      if owner == 0_u64 || @@line == 0_u64 || word(page + IYI_FIRST_HELD).value.get == 0_u64
+        first_say("SETUP: first helpers: a snapshot had no held first trigger\n", 76)
+      end
+      if @@line == owner
+        other = word(page + IYI_FIRST_B_READ).value.get
+        if other == 0_u64
+          first_say("SETUP: first helpers: the second trigger did not read the count\n", 76)
+        end
+        if wanted == 0_u64
+          first_say("SETUP: first helpers: the first trigger read no helpers\n", 76)
+        end
+        if wanted + 1_u64 != other
+          first_say("FAIL: first helpers: the helper decision was published before the count\n", 1)
+        end
+        if word(page + IYI_FIRST_B_BETWEEN).value.get != 1_u64
+          first_say("SETUP: first helpers: the second trigger did not take the decision path\n", 76)
+        end
+        word(page + IYI_FIRST_CHECKED).value.set(wanted + 1_u64)
+      else
+        if word(page + IYI_FIRST_B_READ).value.get != 0_u64
+          first_say("SETUP: first helpers: more than one second snapshot arrived\n", 76)
+        end
+        word(page + IYI_FIRST_B_READ).value.set(wanted + 1_u64)
+        first_wait(IYI_FIRST_CHECKED, "SETUP: first helpers: the first trigger did not check its count\n")
+      end
+    end
+
+    # `count` is @@helpers immediately after the real start_helpers call.
+    def self.first_started(count : UInt64) : Nil
+      page = @@control
+      word(page + IYI_FIRST_STARTED).value.set(count) if page != 0_u64
+    end
+IYI
+
+first_thread_copy() {
+  awk -v part=first.part '
+    /^  \{% elsif flag\?\(:darwin\) %\}$/ { darwin = 1 }
+    /^  \{% elsif flag\?\(:win32\) %\}$/ { darwin = 0 }
+    darwin && /^    lib LibC$/ { inlib = 1; libs++ }
+    darwin && inlib && /^    end$/ { inlib = 0; lib_ends++ }
+    darwin && inlib && /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ {
+      print
+      print "      fun first_proof_exit = _exit(status : Int32) : NoReturn"
+      exits++
+      next
+    }
+    /^  class IyiThread$/ { inthread = 1; threads++ }
+    inthread && /^  end$/ { inthread = 0; thread_ends++ }
+    inthread && /^    # ── Roots / {
+      while ((getline line < part) > 0) { print line; part_lines++ }
+      close(part)
+      roots++
+    }
+    { print }
+    END {
+      if (libs != 1 || lib_ends != 1 || exits != 1 || threads != 1 ||
+          thread_ends != 1 || roots != 1 || part_lines == 0) exit 3
+    }
+  ' "$REPO/src/iyi/thread.iyi"
+}
+
+first_prelude_copy() {
+  awk -v mode="$1" '
+    /^    class IyiMark$/ { mark = 1; marks++ }
+    mark && /^    end$/ { mark = 0; mark_ends++ }
+    mark && /^      def self\.collect_if_due : Nil$/ { due = 1; dues++ }
+    mark && /^      def self\.decide_helpers : Nil$/ {
+      decisions++
+      print "      def self.first_fresh? : Bool"
+      print "        !@@helpers_decided && !@@workers_set && @@helpers_wanted == 0_u64 && @@helpers == 0_u64"
+      print "      end"
+      print ""
+      decision = 1
+    }
+    due && /^      end$/ {
+      due = 0
+      due_ends++
+    }
+    decision && /^      end$/ {
+      if (pending) bad = 1
+      decision = 0
+      decision_ends++
+    }
+    decision && /^        return if @@helpers_decided$/ { returns++ }
+    decision && /^        @@helpers_wanted = default_helpers unless @@workers_set$/ {
+      counts++
+      pending = 1
+      count_line = $0
+      if (mode == "control") {
+        print
+        print "        IyiThread.first_between"
+      }
+      next
+    }
+    decision && /^        @@helpers_decided = true$/ {
+      flags++
+      if (!pending) bad = 1
+      if (mode == "mutant") {
+        print
+        print "        IyiThread.first_between"
+        print count_line
+      } else {
+        print
+      }
+      pending = 0
+      next
+    }
+    decision && pending { bad = 1 }
+    due && /^          if \(wanted = @@helpers_wanted\) > 0_u64$/ {
+      reads++
+      inread = 1
+    }
+    due && inread && /^            IyiThread\.register_current$/ { registrations++ }
+    due && inread && /^            IyiThread\.install_handler$/ { handlers++ }
+    due && inread && /^          end$/ {
+      read_ends++
+      inread = 0
+      print
+      print "          IyiThread.first_snapshot(wanted)"
+      next
+    }
+    due && /^          start_helpers\(wanted\)$/ {
+      starts++
+      print
+      print "          IyiThread.first_started(@@helpers)"
+      next
+    }
+    { print }
+    END {
+      if ((mode != "control" && mode != "mutant") || marks != 1 ||
+          mark_ends != 1 || dues != 1 || due_ends != 1 || decisions != 1 ||
+          decision_ends != 1 || returns != 1 || counts != 1 || flags != 1 ||
+          reads != 1 || registrations != 1 || handlers != 1 || read_ends != 1 ||
+          starts != 1 || pending || bad) exit 3
+    }
+  ' "$REPO/src/iyi/prelude.iyi"
+}
+
+# Undo only the declared swap and compare the entire result, not just its
+# length. All other copied runtime files must be byte-identical as well.
+first_normalize_mutant() {
+  awk '
+    /^      def self\.decide_helpers : Nil$/ { decision = 1; declarations++ }
+    decision && /^      end$/ { decision = 0; endings++ }
+    decision && /^        @@helpers_decided = true$/ {
+      flag = $0
+      if ((getline hook) <= 0 || (getline count) <= 0) { bad = 1; next }
+      if (hook != "        IyiThread.first_between" ||
+          count != "        @@helpers_wanted = default_helpers unless @@workers_set") bad = 1
+      print count
+      print hook
+      print flag
+      swaps++
+      next
+    }
+    { print }
+    END { if (declarations != 1 || endings != 1 || swaps != 1 || bad) exit 3 }
+  ' first-mutant/iyi/prelude.iyi
+}
+
 cat > first.iyi <<'IYI'
+@[Unsafe("the first-decision witnesses are atomic words in the runtime control page")]
 module first
 
-import std/gc::{GC}
-
-class Node
-  getter value : Int64
-  getter next_node : Node?
-
-  def initialize(@value : Int64, @next_node : Node?)
-  end
+# No automatic collection may decide the helpers before the held trigger.
+IyiMark.auto = false
+if IyiMark.collections != 0_u64 || !IyiMark.first_fresh?
+  IyiThread.first_say("SETUP: first helpers: the helper decision was not fresh\n", 76)
 end
-
-def build(n : Int32) : Node?
-  head = nil.as(Node?)
-  n.times { |i| head = Node.new(i.to_i64, head) }
-  head
+expected = IyiMark.default_helpers
+if expected == 0_u64
+  IyiThread.first_say("SETUP: first helpers: the default helper count was not positive\n", 76)
 end
+before = IyiMark.collections
 
-threads = [] of IyiThread
-8.times do
-  threads << IyiThread.start do
-    keep = build(3000)
-    20.times { build(3000) }
-    puts "lost" unless keep.is_a?(Node)
-    nil
-  end
+# Go through the real allocator with auto disabled, then enter the real
+# trigger directly from both registered threads. This leaves the trigger
+# above budget without letting an allocation decide the count first.
+block = Pointer(UInt8).malloc(IyiMark.budget + 4096_u64)
+block.value = 1_u8
+if IyiMark.allocated_since < IyiMark.budget
+  IyiThread.first_say("SETUP: first helpers: the allocation did not cross the budget\n", 76)
 end
-threads.each { |th| th.join }
-GC.collect
-puts "collected"
+IyiThread.first_init
+reader = IyiThread.start do
+  IyiThread.first_wait(IyiThread::IYI_FIRST_HELD, "SETUP: first helpers: the first trigger did not reach the hold\n")
+  IyiMark.collect_if_due
+  nil
+end
+if IyiMark.collections != before || !IyiMark.first_fresh?
+  IyiThread.first_say("SETUP: first helpers: the helper decision was not fresh\n", 76)
+end
+holder = IyiThread.start do
+  IyiThread.first_claim
+  IyiMark.collect_if_due
+  nil
+end
+holder.join
+reader.join
+IyiMark.settle
+
+if IyiThread.first_value(IyiThread::IYI_FIRST_A_LINE) == 0_u64 ||
+   IyiThread.first_value(IyiThread::IYI_FIRST_HELD) != 1_u64 ||
+   IyiThread.first_value(IyiThread::IYI_FIRST_B_BETWEEN) != 1_u64 ||
+   IyiThread.first_value(IyiThread::IYI_FIRST_B_READ) != expected + 1_u64 ||
+   IyiThread.first_value(IyiThread::IYI_FIRST_CHECKED) != expected + 1_u64
+  IyiThread.first_say("SETUP: first helpers: the two decision witnesses were incomplete\n", 76)
+end
+if IyiThread.first_value(IyiThread::IYI_FIRST_STARTED) != expected
+  IyiThread.first_say("SETUP: first helpers: the real helper start count did not match\n", 76)
+end
+if IyiMark.collections <= before
+  IyiThread.first_say("SETUP: first helpers: the first collection did not finish\n", 76)
+end
+puts "first helpers: both triggers read the same positive count and the first collection finished"
 IYI
-if ! "$IYI" build first.iyi -o first > build-first.log 2>&1; then
-  cat build-first.log; exit 1
-fi
-run=1
-while [ "$run" -le 100 ]; do
-  timeout -k 5 30 ./first > first.txt 2>&1
-  code=$?
-  if [ "$code" -eq 76 ]; then cat first.txt; exit 76; fi
-  if [ "$code" -ne 0 ] || ! grep -q '^collected' first.txt; then
-    echo "run $run exited $code (124 is the harness's timeout):"; tail -3 first.txt; exit 1
-  fi
-  run=$((run + 1))
+
+step "the first helper decision beside a second trigger"
+for first_mode in control mutant; do
+  mkdir -p "first-$first_mode/iyi" || { echo "SETUP: first helpers: the runtime copy directory could not be created"; exit 76; }
+  cp "$REPO"/src/iyi/*.iyi "first-$first_mode/iyi/" || { echo "SETUP: first helpers: the runtime copy could not be made"; exit 76; }
+  first_thread_copy > "first-$first_mode/iyi/thread.iyi" || { echo "SETUP: first helpers: the thread hook anchors changed"; exit 76; }
+  first_prelude_copy "$first_mode" > "first-$first_mode/iyi/prelude.iyi" || { echo "SETUP: first helpers: the collector hook anchors changed"; exit 76; }
 done
-echo "  a hundred of a hundred ended"
+first_normalize_mutant > first-normalized.iyi || { echo "SETUP: first helpers: the mutant write-order anchors changed"; exit 76; }
+if ! cmp -s first-control/iyi/prelude.iyi first-normalized.iyi; then
+  echo "SETUP: first helpers: the copies differ in more than the write order"; exit 76
+fi
+for first_source in "$REPO"/src/iyi/*.iyi; do
+  first_file="${first_source##*/}"
+  [ "$first_file" = prelude.iyi ] && continue
+  if ! cmp -s "first-control/iyi/$first_file" "first-mutant/iyi/$first_file"; then
+    echo "SETUP: first helpers: the copies differ in more than the write order"; exit 76
+  fi
+done
+
+first_success='first helpers: both triggers read the same positive count and the first collection finished'
+first_failure='FAIL: first helpers: the helper decision was published before the count'
+for first_mode in control mutant; do
+  if ! IYI_PATH="$WORK/first-$first_mode${PSEP}$REPO/src" "$IYI" build first.iyi -o "first-$first_mode-run" > "build-first-$first_mode.log" 2>&1; then
+    echo "SETUP: first helpers: the $first_mode copy did not build"
+    cat "build-first-$first_mode.log"
+    exit 76
+  fi
+done
+for first_mode in control mutant; do
+  timeout -k 5 120 "./first-$first_mode-run" > "first-$first_mode-raw.txt" 2>&1
+  code=$?
+  tr -d '\r' < "first-$first_mode-raw.txt" > "first-$first_mode.txt"
+  if [ "$code" -eq 124 ] || [ "$code" -eq 137 ] ||
+     grep -q '^SETUP: .*: process exceeded its [0-9][0-9]* s bound$' "first-$first_mode.txt"; then
+    echo "SETUP: first helpers: the $first_mode watchdog expired"
+    cat "first-$first_mode.txt"
+    exit 76
+  fi
+  if grep -q '^SETUP:' "first-$first_mode.txt"; then
+    cat "first-$first_mode.txt"
+    exit 76
+  fi
+  if [ "$code" -eq 76 ]; then
+    echo "SETUP: first helpers: the $first_mode exited without a setup sentence"
+    cat "first-$first_mode.txt"
+    exit 76
+  fi
+  if [ "$first_mode" = control ]; then
+    if [ "$code" -eq 1 ] && grep -qxF "$first_failure" "first-$first_mode.txt"; then
+      cat "first-$first_mode.txt"
+      exit 1
+    fi
+    if [ "$code" -ne 0 ] || ! grep -qxF "$first_success" "first-$first_mode.txt" ||
+       grep -q '^FAIL:' "first-$first_mode.txt"; then
+      echo "SETUP: first helpers: the control did not complete its witnesses (exit $code)"
+      cat "first-$first_mode.txt"
+      exit 76
+    fi
+    printf '  control: exit 0, %s\n' "$first_success"
+  else
+    if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' "first-$first_mode.txt")" -ne 1 ] ||
+       ! grep -qxF "$first_failure" "first-$first_mode.txt"; then
+      echo "FAIL: first helpers: the swapped helper decision was not caught (exit $code)"
+      cat "first-$first_mode.txt"
+      exit 1
+    fi
+    printf '  exits 1 at "%s"\n' "$first_failure"
+  fi
+done
 
 # ── 5e. A line `puts` writes is one write ─────────────────────────────────
 # `STDOUT` is sync, and `write_line` wrote the text and then the newline:

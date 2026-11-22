@@ -197,11 +197,14 @@ if ! RUN_END="$(run_end_block "$REPO/bench/parallel_exercise.iyi")" || [ -z "$RU
   echo "FAIL: one ending: setup: bench/parallel_exercise.iyi has no single one-ending block"; exit 76
 fi
 
-# The one-ending scan. Outside the shared block, a fixture may not exit, write
-# raw bytes, use svc, or name a FAIL: sentence except as an argument of end_run,
-# fail, progress_hang, setup_* or held_exit. The same rules check the lines a
-# generated copy adds (scan_added). The rules are awk, loaded with -f; a refusal
-# prints one FAIL: line and the scan exits 76.
+# The one-ending scan. Outside the shared block, a fixture may not call exit or
+# abort in any spelling (Process.exit and LibC.abort included), write raw bytes,
+# use svc, or name a FAIL: sentence unless its line calls end_run, fail,
+# progress_hang, setup_* or held_exit with that sentence as an argument, and the
+# line holds only one FAIL: sentence. Lines are checked one at a time, so a call
+# that spans lines is refused. The same rules check the lines a generated copy
+# adds (scan_added). The rules are awk, loaded with -f; a refusal prints one
+# FAIL: line and the scan exits 76.
 cat > "$WORK/one_ending_rules.awk" <<'AWK'
 function refuse(kind) {
   printf "FAIL: one ending: setup: %s line %d has %s outside the run's one-ending block\n", name, FNR, kind
@@ -209,12 +212,13 @@ function refuse(kind) {
 }
 function check(text) {
   if (text ~ /^[ \t]*#/) return
-  if (text ~ /LibC\.(_?exit|ExitProcess|TerminateProcess)\(/) refuse("a libc exit")
+  if (text ~ /LibC\.(_?exit|abort|ExitProcess|TerminateProcess)\(/) refuse("a libc exit")
   if (text ~ /__iyi_exit\(/) refuse("an __iyi_exit call")
-  if (text ~ /(^|[^A-Za-z0-9_.])_?exit\(/) refuse("an exit call")
+  if (text ~ /(^|[^A-Za-z0-9_])_?exit\(/) refuse("an exit call")
+  if (text ~ /(^|[^A-Za-z0-9_])abort\(/) refuse("an abort call")
   if (text ~ /(^|[^A-Za-z0-9_])svc([^A-Za-z0-9_]|$)/) refuse("an svc instruction")
   if (text ~ /__iyi_write\(|LibC\.write\(/) refuse("a raw write")
-  if (text ~ /FAIL: / && text !~ /(end_run|fail|progress_hang|setup_[A-Za-z_]*|held_exit)\(/) refuse("a FAIL: sentence that is not an argument of end_run, fail, progress_hang, setup_* or held_exit")
+  if (text ~ /FAIL: / && (text !~ /(end_run|fail|progress_hang|setup_[A-Za-z_]*|held_exit)\([^";]*"FAIL: / || split(text, parts, "FAIL: ") != 2)) refuse("a FAIL: sentence that is not an argument of end_run, fail, progress_hang, setup_* or held_exit")
 }
 AWK
 cat > "$WORK/one_ending_fixture.awk" <<'AWK'
@@ -282,12 +286,20 @@ scan_mutant exit '  def scan_probe_exit : Nil; exit(1); end' 'an exit call'
 scan_mutant svc '  def scan_probe_svc : Nil; asm("svc #0x80" :: "{x16}"(1_i64) : "memory" : "volatile"); end' 'an svc instruction'
 scan_mutant write '  def scan_probe_write : Nil; __iyi_write(1, nil, 0_u64); end' 'a raw write'
 scan_mutant literal '  def scan_probe_literal : Nil; print "FAIL: probe\n"; end' 'a FAIL: sentence that is not an argument of end_run, fail, progress_hang, setup_* or held_exit'
+scan_mutant pexit '  def scan_probe_pexit : Nil; Process.exit(1); end' 'an exit call'
+scan_mutant abort '  def scan_probe_abort : Nil; abort("probe"); end' 'an abort call'
+scan_mutant libcabort '  def scan_probe_libcabort : Nil; ::LibC.abort(1); end' 'a libc exit'
+scan_mutant shared '  def scan_probe_shared : Nil; fail("probe"); print "FAIL: probe\n"; end' 'a FAIL: sentence that is not an argument of end_run, fail, progress_hang, setup_* or held_exit'
 scan_mutant_added libc '  def scan_probe_libc : Nil; ::LibC.exit(1); end' 'a libc exit'
 scan_mutant_added iyi '  def scan_probe_iyi : Nil; __iyi_exit(1); end' 'an __iyi_exit call'
 scan_mutant_added exit '  def scan_probe_exit : Nil; exit(1); end' 'an exit call'
 scan_mutant_added svc '  def scan_probe_svc : Nil; asm("svc #0x80" :: "{x16}"(1_i64) : "memory" : "volatile"); end' 'an svc instruction'
 scan_mutant_added write '  def scan_probe_write : Nil; __iyi_write(1, nil, 0_u64); end' 'a raw write'
 scan_mutant_added literal '  def scan_probe_literal : Nil; print "FAIL: probe\n"; end' 'a FAIL: sentence that is not an argument of end_run, fail, progress_hang, setup_* or held_exit'
+scan_mutant_added pexit '  def scan_probe_pexit : Nil; Process.exit(1); end' 'an exit call'
+scan_mutant_added abort '  def scan_probe_abort : Nil; abort("probe"); end' 'an abort call'
+scan_mutant_added libcabort '  def scan_probe_libcabort : Nil; ::LibC.abort(1); end' 'a libc exit'
+scan_mutant_added shared '  def scan_probe_shared : Nil; fail("probe"); print "FAIL: probe\n"; end' 'a FAIL: sentence that is not an argument of end_run, fail, progress_hang, setup_* or held_exit'
 
 # ── 1. The exercise, twice ────────────────────────────────────────────────
 for build in plain release; do

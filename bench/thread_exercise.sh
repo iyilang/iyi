@@ -4295,8 +4295,15 @@ for line_mode in control mutant; do
       printf '%s\n' "$line_fail"
       exit 1
     else
-      echo "SETUP: whole lines: the $line_mode output held neither byte sequence"
-      exit 76
+      # The control never printed its witness: setup. A mutant that ends on
+      # neither byte sequence did not produce its witness, which is a defect.
+      # Its line carries no SETUP prefix, and exit 2 reaches pair_mismatch.
+      if [ "$line_mode" = control ]; then
+        echo "SETUP: whole lines: the control output held neither byte sequence"
+        exit 76
+      fi
+      echo "whole lines: the mutant output held neither byte sequence"
+      exit 2
     fi
   ) > "line-hold-$line_mode.txt"
   code=$?

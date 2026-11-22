@@ -62,7 +62,27 @@ import std/int
   # it. A spinning task never parks, so nothing but another thread runs
   # beside it.
 
-  def together(where : String) : Nil
+  # With *pool*, each task spins on, within the same bound, until the pool
+  # has launched every worker too: `grows` counts the workers four tasks
+  # wanting to run at one instant started, and that want has to last until
+  # the pool has answered it. The pool starts one worker at a time, the
+  # next called for by the one before it once it finds a task
+  # (`IyiWorkers.grow`), and while one is on its way the tasks take turns
+  # on the workers already there, which the monitor gives them every tick
+  # (SPEC.md III.4.13, part 9). Tasks that only waited for each other
+  # could all arrive by turns and end before the worker on its way had
+  # looked, which then found nothing to call the next for: "started 3 of
+  # the pool's 4 workers" in bench/spawn_eligible.sh's widened step on a
+  # Windows CI runner (job 135727245245, "all running at one instant, in
+  # 33 ms"; 105 earlier Windows jobs had passed it). On Windows 11 with 12
+  # logical processors that copy failed so in 1 of 1,900 runs with the
+  # turn's start taken out (`IyiWorkers.turn_wanted?`) and none of 1,900
+  # with it: the worker on its way holds the one token a start needs, so a
+  # turn starts none either. On a copy whose every worker starts 50 ms
+  # late the old wait failed 30 runs of 30 there and on Linux (12 vCPU),
+  # and this one none of 30; the widened copy, none of 1,000 on Windows
+  # and none of 1,500 on Linux, 500 of them held to four CPUs.
+  def together(where : String, pool : Bool = false) : Nil
     arrived = Atomic(Int64).new(0_i64)
     missed = Atomic(Int64).new(0_i64)
     started = __iyi_monotonic_ns
@@ -71,7 +91,7 @@ import std/int
         g.spawn do
           arrived.add(1_i64)
           until_ns = __iyi_monotonic_ns + WAIT_NS
-          while arrived.get < TOGETHER && __iyi_monotonic_ns < until_ns
+          while (arrived.get < TOGETHER || (pool && IyiWorkers.launched < IyiWorkers.count)) && __iyi_monotonic_ns < until_ns
           end
           missed.add(1_i64) if arrived.get < TOGETHER
           0
@@ -265,7 +285,9 @@ import std/int
   # still on its way to idle, and start another: 2 in each of 12 runs on
   # four workers, and 3 in one of three runs on twelve (Linux, 12 vCPUs,
   # shared), so LIGHT_MOST is 3, short of the pool's four. Four tasks that
-  # spin until all four are running start the four.
+  # spin until all four are running, and until the pool has launched its
+  # four (`together`'s *pool*), start the four; a pool that stops short
+  # is named after their two seconds.
   LIGHT_ROUNDS = 200
   LIGHT_MOST   =   3
 
@@ -291,7 +313,7 @@ import std/int
     if light > LIGHT_MOST
       fail("grows: #{LIGHT_ROUNDS} eligible spawns made and joined one at a time started #{light} of the pool's #{IyiWorkers.count} workers")
     end
-    together("grows")
+    together("grows", pool: true)
     loaded = IyiWorkers.launched
     if loaded != IyiWorkers.count
       fail("grows: #{TOGETHER} eligible spawns running at one instant started #{loaded} of the pool's #{IyiWorkers.count} workers, with #{IyiWorkers.owes} starts owed")

@@ -490,11 +490,22 @@ mutate "a distance's aligned bits in the wrong order" 'r = r.unsafe_shl(4) | rev
   "good-1-lzma2-1.xz, whole"
 mutate "the literal position bits ignored" 'base = LITERAL + 0x300 * ((((@written & lit_mask.to_i64).to_i32) << @lc)' 'base = LITERAL + 0x300 * (((0) << @lc)' \
   "good-1-lzma2-1.xz, whole"
-# The ring: its growth, its wrap, and what read takes from it.
+# The ring: its growth, its wrap, and what read takes from it. A ring
+# that stops growing is held to the module's own checks on its bare
+# pointers, each by its sentence: what waits after a run past what the
+# ring holds (text.p0.xz, read whole, waits 222,794 bytes in 64 KiB),
+# and a match reaching back past the ring (far.p6.xz's repeat from
+# 1.6 MB back, in 1 MiB). Before those checks, the 64 KiB ring read
+# below its memory: wrong bytes, or a memory fault on 6 of 1,200 runs on
+# Linux, darwin and Windows (and in darwin CI, job 136498363156).
 mutate "a ring that never grows past its first 64 KiB" 'if @dcap < @dsize
       cap = @dcap.to_i64 * 2_i64' 'if false
       cap = @dcap.to_i64 * 2_i64' \
-  "text.p0.xz, whole"
+  'text.p0.xz, whole: refused with "xz: more bytes wait to be read than the ring holds'
+mutate "a ring that stops growing at 1 MiB" 'if @dcap < @dsize
+      cap = @dcap.to_i64 * 2_i64' 'if @dcap < @dsize && @dcap < 1048576
+      cap = @dcap.to_i64 * 2_i64' \
+  'far.p6.xz, whole: refused with "LZMA2: a distance reaches past the ring'
 mutate "a ring that wraps a byte early" '    else
       @dpos = 0
     end' '    else

@@ -255,6 +255,25 @@ module Iyi
     # producer's tree is present and an honest error when it is not.
     getter iyi_artifact_source_paths = {} of String => String
 
+    # iyi: whether code at *filename* was written in iyi: in an `.iyi`
+    # file, in an artifact built from one, whose declarations are parsed
+    # under the artifact's own path (`SemanticVisitor`, above), or in a
+    # macro's expansion, which is written in whatever the code that
+    # expanded it was - the chain of `VirtualFile`s ends at that file, the
+    # one whose imports the expansion sees. A regex literal inside `{% if
+    # %}` asked its `VirtualFile` for `.iyi`, got no, and became the other
+    # library's `::Regex.new(..., ::Regex::Options.new(0))` in a program
+    # that imports `std/regex`, refused as an undefined constant (#215).
+    def iyi_written?(filename : String | VirtualFile | Nil) : Bool
+      while filename.is_a?(VirtualFile)
+        filename = filename.expanded_location.try(&.filename)
+      end
+      return false unless filename
+      return true if Lexer.iyi_source?(filename)
+      source = iyi_artifact_source_paths[filename]?
+      !source.nil? && Lexer.iyi_source?(source)
+    end
+
     # Canonical library roots used by macros. Each is checked against its
     # current filesystem identity before reuse, including after daemon reuse.
     getter iyi_macro_library_roots = {} of String => String

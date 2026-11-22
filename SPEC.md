@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 36,537 lines, of which 4,763 are the library held to the 4,763 ceiling (7,271 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 142,382 lines, none of it written in iyi |
+| compiler | 142,410 lines, none of it written in iyi |
 | artifact format | `.iyimod` v64, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1073,9 +1073,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 142,382 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 142,410 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 36,537-line own prelude + 128,696 in std |
-| Specs | 21,146 lines | 17,691 for iyi |
+| Specs | 21,146 lines | 17,694 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -10020,6 +10020,22 @@ consequence worth knowing, that a proc taken to such a function has a different
 address on each side of the boundary. A C function is never copied: it is a
 declaration with no body whoever asks, and internal linkage on a declaration is
 invalid IR, which `write` and `exit` reach from the prelude's own `puts`.
+
+*One unit per module, so the copy is made once per module.* Codegen gives
+every type a unit of its own, and a build writing artifacts did too, so the
+closure was copied into each of a module's types and into the module's unit
+besides. What it copies is most of the runtime: `Int32#%` can raise, and
+`raise` reaches the allocator, the collector and the scheduler, 669 functions
+behind one `Widget#score`. The 30-module, 10-type program of the edit-loop
+benchmark compiled 223,188 functions where its plain build compiles 1,973,
+and its first `--emit-iyimod` build took 13.9 s and 4.1 GiB against the plain
+build's 0.31 s and 0.42 GiB (iyi-benchmarks' `cold`, Linux, 12 vCPU). A build
+writing artifacts therefore puts every type a module declares in the
+module's own unit (`Program#iyi_owner_units`): the same symbols, from the
+same build, with the closure copied once: 22,488 functions, 1.2 s and 0.7
+GiB. What is left over the plain build is the copy itself, about 670
+functions a module, and 660 of them are functions every program defines, a
+hello world included.
 
 *And a program that links an artifact defines every type id.* The copy above
 brought its own undefined symbol: `String:type_id`, which the same program

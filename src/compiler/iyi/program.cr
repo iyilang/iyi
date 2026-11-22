@@ -497,6 +497,14 @@ module Iyi
     # unless `--emit-iyimod` asked for artifacts.
     getter iyi_exported_owners = Set(Type).new
 
+    # iyi: the module each of those owners is compiled into — the module type
+    # whose `.iyimod` carries it (SPEC.md IV.1g). An emitting build puts a
+    # module's types in one unit rather than one per type, because a unit that
+    # travels carries private copies of every prelude callee it reaches, and
+    # one per type copied the same runtime closure into each of a module's
+    # types (`CodeGenVisitor#type_module`).
+    getter iyi_owner_units = {} of Type => Type
+
     # iyi: true when the owners above are a `--iyi-keep` namespace, the fill
     # build `iyi bind` runs. A boundary's declarations write every parameter
     # at the type the keep file instantiates it at, so a parameter the shard

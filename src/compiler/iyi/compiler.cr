@@ -715,8 +715,7 @@ module Iyi
       return unless type.is_a?(ModuleType)
 
       program.iyi_fills_boundary = true
-      program.iyi_exported_owners << type
-      collect_iyi_owners type, program.iyi_exported_owners
+      collect_iyi_owners program, type
     end
 
     private def prepare_iyimods(program : Program) : Array({String, IyiMod::Artifact})?
@@ -729,8 +728,7 @@ module Iyi
       # code somebody else will call by name.
       program.iyi_module_paths.each_value do |module_name|
         if type = program.iyi_module_type(module_name)
-          program.iyi_exported_owners << type
-          collect_iyi_owners type, program.iyi_exported_owners
+          collect_iyi_owners program, type
         end
       end
 
@@ -1448,11 +1446,13 @@ module Iyi
     # iyi: the machine code for a module's own definitions, for `ObjectCode`
     # (IV.1). Empty on a `--no-codegen` build, which generated none.
     #
-    # Codegen already emits one LLVM module — and so one object file — per
-    # owner type, and the split is a partition: measured on the Kemal port, no
-    # symbol is defined by two of its 23 units. So a module's own code is a set
-    # of whole object files, identified by naming the types the module declares
-    # and taking the unit of each. A generic type contributes one unit per
+    # Codegen emits one LLVM module — and so one object file — per owner type,
+    # except that a build writing artifacts puts every type a module declares
+    # in the module's own unit (`Program#iyi_owner_units`), and the split is a
+    # partition: measured on the Kemal port, no symbol is defined by two of its
+    # 23 units. So a module's own code is a set of whole object files,
+    # identified by naming the module type and the types it declares and taking
+    # the unit of each that has one. A generic type contributes one unit per
     # instantiation, and a module's own `pub def`s are owned by the module type
     # itself, which is why that is in the set alongside the types under it.
     #
@@ -1770,24 +1770,34 @@ module Iyi
     end
 
     # The same walk as `collect_iyi_unit_names`, keeping the types rather than
-    # their names — `try_inline_call` is handed an owner, not a string.
-    private def collect_iyi_owners(type : ModuleType, owners : Set(Type)) : Nil
+    # their names — `try_inline_call` is handed an owner, not a string — and
+    # the unit each one is compiled into, which is *root*'s
+    # (`Program#iyi_owner_units`).
+    private def collect_iyi_owners(program : Program, root : ModuleType, type : ModuleType = root) : Nil
+      if type == root
+        program.iyi_exported_owners << root
+        program.iyi_owner_units[root] = root
+      end
       type.types?.try &.each_value do |declared|
         next if declared.iyi_unit?
         unless declared.is_a?(GenericType)
-          owners << declared
+          program.iyi_exported_owners << declared
+          program.iyi_owner_units[declared] = root
           # And the virtual form, for the reason `iyi_virtual_unit_name` gives:
-          # it is a second unit, it travels, and a unit that travels must have
-          # its callees copied into it. Without this the `Shard::Base+` unit
-          # arrived referring to `*String#+<String>:String` — a symbol in the
+          # it travels, and code that travels must have its callees copied
+          # into its unit. Without this the `Shard::Base+` methods arrived
+          # referring to `*String#+<String>:String` — a symbol in the
           # consumer's `String` unit only if the consumer's own code happened
           # to concatenate.
           if declared.responds_to?(:virtual_type)
             virtual = declared.virtual_type
-            owners << virtual unless virtual == declared
+            unless virtual == declared
+              program.iyi_exported_owners << virtual
+              program.iyi_owner_units[virtual] = root
+            end
           end
         end
-        collect_iyi_owners declared, owners if declared.is_a?(ModuleType)
+        collect_iyi_owners program, root, declared if declared.is_a?(ModuleType)
       end
     end
 

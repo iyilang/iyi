@@ -1056,7 +1056,17 @@ class Iyi::CodeGenVisitor
       when Nil, Program, LibType
         type_name = ""
       else
-        type_name = type.instance_type.to_s
+        # iyi: a type whose module's `.iyimod` this build writes is compiled
+        # into that module's unit, with the module's other types. A unit
+        # that travels carries a private copy of every prelude callee it
+        # reaches (`target_def_fun`), and that closure is most of the
+        # runtime: `Int32#%` can raise, and `raise` reaches the allocator,
+        # the collector and the scheduler. One unit per type copied it once
+        # per type, so a module of ten types carried it eleven times
+        # (SPEC.md IV.1g). Per module it is copied once, and the artifact
+        # defines the same symbols, from the same build.
+        instance = type.instance_type
+        type_name = (@program.iyi_owner_units[instance]? || instance).to_s
       end
 
       @modules[type_name] ||= begin

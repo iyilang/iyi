@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **A build that writes `.iyimod` artifacts compiles each module once, not
+  once per type.** A module's travelling code carries private copies of the
+  prelude functions it reaches (SPEC.md IV.1g), and with one unit per type
+  that copy, most of the runtime behind `raise`, was made for every type of
+  the module: the iyi-benchmarks medium program (30 modules of 10 types)
+  compiled 223,188 functions where its plain build compiles 1,973. Every type
+  a module declares now shares the module's unit, so the copy is made once
+  per module and the artifact defines the same symbols: 22,488 functions.
+  The `iyi-mods` lane of iyi-benchmarks against 0.22.0, on the 12-vCPU Linux
+  machine, 7 rounds: a first build (`cold`) 13.95 s → 1.17 s, 0.08x
+  (0.08–0.09), peak 4,203 → 713 MiB; `fresh` 0.09x; `leaf-body` 1.11 s →
+  0.32 s, 0.28x (0.28–0.29); `core-body` 6.92 s → 0.89 s, 0.13x;
+  `core-interface` 6.60 s → 0.78 s, 0.12x. The program the first build
+  links is 9.0 MB instead of 87.8 MB.
+
 ## 0.22.0 — 2026-11-22
 
 **A string's hash is keyed afresh in every process, std/http holds a request

@@ -66,7 +66,9 @@ pub def serve(client : IyiSocket) : UInt64
     # exit 124 in job 123987176637, and 2 runs in 10 on the user's
     # Windows 11 machine (12 logical processors), where a debug line in
     # `take_packet` named the two packets it dropped.
-    {% if flag?(:win32) %}
+    # A control holds the collector off for the whole load (`nocollect_force`), so its
+    # explicit collection is off too: the premise's zero is then what it measures.
+    {% if flag?(:win32) && !flag?(:nocollect_force) %}
       IyiMark.collect
       overlapped = IyiScheduler.current.wait_overlapped.address
       if IyiMark.flags(overlapped) & IyiHeap::FREE_FLAG != 0
@@ -191,6 +193,11 @@ end
     __iyi_exit(1)
   end
 {% end %}
+{% if flag?(:nocollect_force) %}
+  # A control only: the trigger is held off for the whole load, so no collection
+  # runs beside it and the premise below must end at its setup sentence.
+  IyiMark.auto = false
+{% end %}
 collections_before_load = IyiMark.collections
 group do |outer|
   outer.spawn { churn }
@@ -247,7 +254,10 @@ raise "FAIL: the poller wrote into " + canary_bad.to_s +
       " object(s) the collector had handed out" if canary_bad != 0
 raise "FAIL: a reply was wrong" if bad != 0
 raise "FAIL: served " + tops.size.to_s + " of " + ROUNDS.to_s if tops.size != ROUNDS
-raise "FAIL: nothing was collected during load, so nothing was proven" if collections_during_load == 0_u64
+if collections_during_load == 0_u64
+  print "FAIL: nothing was collected during load, so nothing was proven\n"
+  __iyi_exit(76)
+end
 raise "FAIL: the stacks were not reused - " + distinct.size.to_s + " of them for " +
       ROUNDS.to_s + " connections" if distinct.size > STACK_BOUND
 puts "every property held"

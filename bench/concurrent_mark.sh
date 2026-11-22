@@ -81,6 +81,15 @@ fail_for_status() {
   esac
 }
 
+fail_control() {
+  if [ "$1" -eq 0 ]; then
+    echo "FAIL: gate setup: required control evidence is missing ($2)"
+    cat "$2"
+    exit 76
+  fi
+  fail_for_status "$1" "$2"
+}
+
 fail_build() {
   echo "FAIL: gate setup: fixture build failed ($1)"
   cat "$1"
@@ -155,6 +164,13 @@ if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: gate setup: fixture build failed (bu
   echo "the gate did not name the compiler setup failure (exit $code):"; cat setup-build.txt; fail_for_status "$code" setup-build.txt
 fi
 printf '  exits 76 at "%s"\n' "FAIL: gate setup: fixture build failed (build.log)"
+: > empty-control.txt
+( fail_control 0 empty-control.txt ) > empty-control-result.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: gate setup: required control evidence is missing (empty-control.txt)" empty-control-result.txt; then
+  echo "the gate did not classify missing control evidence as setup (exit $code):"; cat empty-control-result.txt; fail_for_status "$code" empty-control-result.txt
+fi
+printf '  exits 76 at "%s"\n' "FAIL: gate setup: required control evidence is missing (empty-control.txt)"
 
 step "the pauses, stopped and beside the program ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS") cores here)"
 grep -E '^(stray|small|moves|pause|large|wake|share):' answers.txt | sed 's/^/  /'
@@ -220,6 +236,7 @@ fi
 timeout -k 5 60 ./machine > machine.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ]; then cat machine.txt; fail_for_status "$code" machine.txt; fi
+if ! grep -q '^machine:' machine.txt; then echo "FAIL: machine setup: the measurement did not report its result"; cat machine.txt; exit 76; fi
 grep '^machine:' machine.txt | sed 's/^/  /'
 
 # Report the first collection beside busy threads with and without helpers.
@@ -377,7 +394,7 @@ for run in 1 2 3 4 5 6 7 8 9 10; do
   timeout -k 5 120 ./realloced > realloced.txt 2>&1
   code=$?
   if [ "$code" -ne 0 ] || ! grep -qx "lost 0" realloced.txt; then
-    echo "  run $run of 10 lost what a realloc'd buffer held:"; tail -3 realloced.txt; fail_for_status "$code" realloced.txt
+    echo "  run $run of 10 lost what a realloc'd buffer held:"; tail -3 realloced.txt; fail_control "$code" realloced.txt
   fi
 done
 echo "  ten runs of three hundred realloc'd buffers, every leaf intact"
@@ -570,7 +587,7 @@ for run in 1 2 3 4 5 6 7 8 9 10; do
   timeout -k 5 120 ./freed > freed.txt 2>&1
   code=$?
   if [ "$code" -ne 0 ] || ! grep -qx "lost 0" freed.txt; then
-    echo "  run $run of 10 lost a chunk kept beside chunks freed (exit $code):"; tail -3 freed.txt; fail_for_status "$code" freed.txt
+    echo "  run $run of 10 lost a chunk kept beside chunks freed (exit $code):"; tail -3 freed.txt; fail_control "$code" freed.txt
   fi
 done
 echo "  ten runs of 200,000 bursts of frees, every kept chunk intact"
@@ -674,7 +691,7 @@ for run in 1 2 3 4 5 6 7 8 9 10; do
   timeout -k 5 120 ./freed-widened > widened.txt 2>&1
   code=$?
   if [ "$code" -ne 0 ] || ! grep -qx "lost 0" widened.txt; then
-    echo "  run $run of 10 beside the widened sweep lost a chunk or saw a free land (exit $code):"; tail -3 widened.txt; fail_for_status "$code" widened.txt
+    echo "  run $run of 10 beside the widened sweep lost a chunk or saw a free land (exit $code):"; tail -3 widened.txt; fail_control "$code" widened.txt
   fi
 done
 echo "  ten runs, no free inside the sweep's look at a kept chunk, every chunk intact"
@@ -686,7 +703,7 @@ fi
 timeout -k 5 120 ./freed-armed > armed.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -qx "lost 0" armed.txt; then
-  echo "the hook alone, armed, did not keep every chunk (exit $code):"; tail -3 armed.txt; fail_for_status "$code" armed.txt
+  echo "the hook alone, armed, did not keep every chunk (exit $code):"; tail -3 armed.txt; fail_control "$code" armed.txt
 fi
 echo "  the hook alone, armed, exits 0: $(grep -m1 '^lost' armed.txt)"
 step "control: a sweep look outside the aged set is a setup failure"
@@ -767,7 +784,7 @@ fi
 timeout -k 5 300 ./moves-held-run > moves-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -q '^moves: 24 of 24 rounds moved a payload' moves-held.txt; then
-  echo "the forced moves did not hold (exit $code):"; tail -3 moves-held.txt; fail_for_status "$code" moves-held.txt
+  echo "the forced moves did not hold (exit $code):"; tail -3 moves-held.txt; fail_control "$code" moves-held.txt
 fi
 echo "  the hook alone, exits 0: $(grep -m1 '^moves:' moves-held.txt | cut -c1-80)"
 
@@ -850,7 +867,7 @@ fi
 timeout -k 5 300 ./held-run > held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -q "^large: 8 of 8 blocks outgrown under a running mark stayed mapped beside the helpers, and [0-8] were freed after$" held.txt; then
-  echo "the held rounds did not keep the block mapped (exit $code):"; tail -3 held.txt; fail_for_status "$code" held.txt
+  echo "the held rounds did not keep the block mapped (exit $code):"; tail -3 held.txt; fail_control "$code" held.txt
 fi
 echo "  the hook alone, exits 0: $(grep -m1 '^large: 8 of 8' held.txt)"
 # Separate copies keep the move and large-block holds independent. Each
@@ -994,7 +1011,7 @@ for helpers in every one; do
   esac
   code=$?
   if [ "$code" -ne 0 ] || ! grep -q "every collection finished" "stall-$helpers.txt"; then
-    echo "  with $helpers helper, exit $code:"; cat "stall-$helpers.txt"; fail_for_status "$code" "stall-$helpers.txt"
+    echo "  with $helpers helper, exit $code:"; cat "stall-$helpers.txt"; fail_control "$code" "stall-$helpers.txt"
   fi
   echo "  with $helpers helper: $(grep '^collections:' "stall-$helpers.txt")"
 done
@@ -1381,7 +1398,7 @@ fi
 timeout -k 5 120 ./stored-held-run name=stored > stored-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq "forced: stored acknowledged" stored-held.txt || ! grep -Fxq "stored: the mark whose remainder counted the held assist finished" stored-held.txt || ! grep -Fxq "stored: an assist counted itself in before helper 0 and waits for its count" stored-held.txt; then
-  echo "the held stored control did not complete (exit $code):"; tail -5 stored-held.txt; fail_for_status "$code" stored-held.txt
+  echo "the held stored control did not complete (exit $code):"; tail -5 stored-held.txt; fail_control "$code" stored-held.txt
 fi
 echo "  held stored control exits 0 after the assist rendezvous"
 step "control: completion wins after the watchdog samples an expired pending phase"
@@ -1390,8 +1407,11 @@ if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release -Dwatch
 fi
 timeout -k 5 120 ./watch-race-run name=stored > watch-race.txt 2>&1
 code=$?
-if [ "$code" -ne 0 ] || ! grep -Fxq "watchdog: completion won after the watchdog sampled the pending phase" watch-race.txt || ! grep -Fxq "forced: stored acknowledged" watch-race.txt || grep -Fxq "FAIL: stored: chain readback did not finish before the fixture deadline" watch-race.txt; then
-  echo "completion did not defeat the stale watchdog claim (exit $code):"; cat watch-race.txt; fail_for_status "$code" watch-race.txt
+if [ "$code" -ne 0 ] || ! grep -Fxq "watchdog: completion won after the watchdog sampled the pending phase" watch-race.txt || ! grep -Fxq "forced: stored acknowledged" watch-race.txt; then
+  echo "the watchdog race control did not complete (exit $code):"; cat watch-race.txt; fail_control "$code" watch-race.txt
+fi
+if grep -Fxq "FAIL: stored: chain readback did not finish before the fixture deadline" watch-race.txt; then
+  echo "the watchdog reported a false readback timeout after completion"; cat watch-race.txt; exit 1
 fi
 echo "  watchdog: completion won after the watchdog sampled the pending phase"
 step "control: an unknown forced-fixture option is a setup failure"
@@ -1510,7 +1530,7 @@ fi
 timeout -k 5 120 ./late-held-run name=late helpers=1 > late-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq "forced: late acknowledged" late-held.txt || ! grep -Fxq "late: helper 0 finished the next mark" late-held.txt || ! grep -Fxq "late: helper 0 retained its earlier generation through the next mark" late-held.txt; then
-  echo "the held late control did not complete (exit $code):"; tail -5 late-held.txt; fail_for_status "$code" late-held.txt
+  echo "the held late control did not complete (exit $code):"; tail -5 late-held.txt; fail_control "$code" late-held.txt
 fi
 echo "  held late control exits 0 after the next mark"
 step "failure proof: helper 0 reads the next mark generation too late"
@@ -1603,7 +1623,7 @@ fi
 timeout -k 5 120 ./released-held-run name=released > released-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq "forced: released acknowledged" released-held.txt || ! grep -Fxq "released: the first slice past the budget after the release found the collection let go" released-held.txt; then
-  echo "the held release control did not complete (exit $code):"; tail -5 released-held.txt; fail_for_status "$code" released-held.txt
+  echo "the held release control did not complete (exit $code):"; tail -5 released-held.txt; fail_control "$code" released-held.txt
 fi
 echo "  held release control exits 0 after the probe answers let go"
 if ! IYI_PATH="$WORK/released${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o released-run > build-released.log 2>&1; then
@@ -1633,7 +1653,7 @@ for run in 1 2 3; do
   timeout -k 5 60 ./trigger > "trigger-$run.txt" 2>&1
   code=$?
   if [ "$code" -ne 0 ] || ! grep -q "every collection was let go" "trigger-$run.txt"; then
-    echo "  run $run:"; cat "trigger-$run.txt"; fail_for_status "$code" "trigger-$run.txt"
+    echo "  run $run:"; cat "trigger-$run.txt"; fail_control "$code" "trigger-$run.txt"
   fi
 done
 grep -E '^(bounded|stopped|verb|one core):' trigger-1.txt | sed 's/^/  /'
@@ -1733,7 +1753,7 @@ fi
 timeout -k 5 120 ./letgo-held-run > letgo-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq "release trigger: every collection was let go before its threads were released" letgo-held.txt || [ "$(grep -Fxc "let-go: a resumed slice crossed the budget after collection was let go" letgo-held.txt)" -ne 3 ]; then
-  echo "the held let-go control did not complete (exit $code):"; tail -10 letgo-held.txt; fail_for_status "$code" letgo-held.txt
+  echo "the held let-go control did not complete (exit $code):"; tail -10 letgo-held.txt; fail_control "$code" letgo-held.txt
 fi
 echo "  held let-go control exits 0 for all three collection paths"
 let_go_late() {
@@ -1937,7 +1957,7 @@ fi
 timeout -k 5 120 ./bracketed-run > bracketed.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq 'unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole' bracketed.txt; then
-  echo "the bracketed control did not pass (exit $code):"; tail -3 bracketed.txt; fail_for_status "$code" bracketed.txt
+  echo "the bracketed control did not pass (exit $code):"; tail -3 bracketed.txt; fail_control "$code" bracketed.txt
 fi
 echo "  the bracketed control exits 0: $(grep -Fx 'unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole' bracketed.txt)"
 step "control: the bracket watchdog names a stalled collector after the stop request"
@@ -2044,7 +2064,7 @@ fi
 timeout -k 5 300 ./latestart-run > latestart.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -q "^idle pool: with" latestart.txt || ! grep -Fxq "idle pool: a worker start waited until task arrival" latestart.txt; then
-  echo "the idle pool step did not hold on the late-start runtime (exit $code):"; tail -3 latestart.txt; fail_for_status "$code" latestart.txt
+  echo "the idle pool step did not hold on the late-start runtime (exit $code):"; tail -3 latestart.txt; fail_control "$code" latestart.txt
 fi
 echo "  $(grep -m1 '^idle pool: with' latestart.txt)"
 
@@ -2141,7 +2161,7 @@ fi
 timeout -k 5 300 ./turn-held-run > turn-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -q "^idle pool: with" turn-held.txt || [ "$(grep -Fxc "$turn_called" turn-held.txt)" -ne 1 ]; then
-  echo "the held turn control did not call for the next worker and fill the pool (exit $code):"; tail -5 turn-held.txt; fail_for_status "$code" turn-held.txt
+  echo "the held turn control did not call for the next worker and fill the pool (exit $code):"; tail -5 turn-held.txt; fail_control "$code" turn-held.txt
 fi
 echo "  $turn_called"
 step "failure proof: a turn with queued work calls for no worker"
@@ -2216,7 +2236,7 @@ fi
 timeout -k 5 120 ./crowded-held > crowded-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -q '^crowded: ' crowded-held.txt; then
-  echo "the hook alone, helpers held until a collection returns, did not pass (exit $code):"; tail -3 crowded-held.txt; fail_for_status "$code" crowded-held.txt
+  echo "the hook alone, helpers held until a collection returns, did not pass (exit $code):"; tail -3 crowded-held.txt; fail_control "$code" crowded-held.txt
 fi
 echo "  the hook alone, exits 0: $(grep -m1 '^crowded: ' crowded-held.txt)"
 mkdir -p ready/iyi
@@ -2323,7 +2343,7 @@ pinned_run() {
 pinned_run marks pinned.txt
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq "concurrent mark: every property held" pinned.txt || ! grep -q "^wake: the program's thread woke the helpers" pinned.txt; then
-  echo "the shipped build, held to two processors beside a spinner failed (exit $code):"; tail -3 pinned.txt; fail_for_status "$code" pinned.txt
+  echo "the shipped build, held to two processors beside a spinner failed (exit $code):"; tail -3 pinned.txt; fail_control "$code" pinned.txt
 fi
 echo "  the shipped build, held to two processors beside a spinner: $(grep -m1 '^wake: the program' pinned.txt)"
 # The decider is the structural check: a copy that drops the boost leaves the

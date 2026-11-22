@@ -113,6 +113,10 @@ def test(mode):
                          '    threading.Event().wait()\n' + anchor)
             env["SDNS_TEST_SUPERVISOR_PID"] = str(root / "supervisor-pid")
             expected = "Python supervisor startup watchdog expired"
+        elif mode == "bootstrap-exit":
+            anchor = '    (work / "supervisor.armed").touch()\n'
+            shell = once(shell, anchor, '    sys.exit(23)\n' + anchor)
+            expected = "Python supervisor exited before arming (status 23)"
         elif mode in ("interpreter-hang", "dependency-hang", "dependency-broken"):
             if mode == "interpreter-hang":
                 anchor = '"$candidate" -c \'import sys\''
@@ -253,6 +257,8 @@ def test(mode):
             raise RuntimeError("%s: expected status %s and exactly one %r" % (mode, status, expected))
         if "supervisor cleanup is unconfirmed" in captured:
             raise RuntimeError("supervisor cleanup was not confirmed")
+        if mode == "bootstrap-hang" and lines.count("the secure DNS supervisor did not stop during cleanup") != 1:
+            raise RuntimeError("bootstrap-hang did not reach forced supervisor cleanup")
         if mode in server_live_modes and (root / "server-reaped").read_text() != "reaped":
             raise RuntimeError("server was not reaped by its supervisor")
         if mode in client_timeout_modes and (root / "client-reaped").read_text() != "reaped":
@@ -283,6 +289,6 @@ def test(mode):
 
 
 if __name__ == "__main__":
-    modes = sys.argv[3:] or ["body-early", "silent", "crash", "hang", "import-hang", "invalid-dead", "invalid-deadline", "truncated", "ready-dead", "late-ready", "closed", "crlf", "split", "diagnostic", "broken-h2", "broken-h2-self", "bootstrap-hang", "interpreter-hang", "dependency-hang", "dependency-broken", "dependency-self", "dig-broken", "dig-junk", "plain-timeout", "release-timeout", "mutation-timeout", "exit-124", "exit-137"]
+    modes = sys.argv[3:] or ["body-early", "silent", "crash", "hang", "import-hang", "invalid-dead", "invalid-deadline", "truncated", "ready-dead", "late-ready", "closed", "crlf", "split", "diagnostic", "broken-h2", "broken-h2-self", "bootstrap-hang", "bootstrap-exit", "interpreter-hang", "dependency-hang", "dependency-broken", "dependency-self", "dig-broken", "dig-junk", "plain-timeout", "release-timeout", "mutation-timeout", "exit-124", "exit-137"]
     for mode in modes:
         test(mode)

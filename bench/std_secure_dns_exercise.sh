@@ -38,9 +38,11 @@ else
   WORK="$(mktemp -d)"
   SUPERVISOR_PID=""
   CANCEL_STATUS=0
+  # `jobs -p` can keep completed jobs until wait collects them. Only
+  # running jobs belong in the liveness and cleanup checks.
   supervisor_active() {
     local job
-    for job in $(jobs -p); do
+    for job in $(jobs -rp); do
       [ "$job" = "$SUPERVISOR_PID" ] && return 0
     done
     return 1
@@ -62,9 +64,10 @@ else
         if [ "$END_PROCESS_WINDOWS" = yes ]; then
           # MSYS2_ARG_CONV_EXCL may already be '*': doubled slashes then
           # reach taskkill literally and are rejected. Pass native switches.
-          timeout -k 1 3 "$BASH" -c '
+          timeout --foreground -k 1 3 "$BASH" -c '
             { read -r native <"/proc/$1/winpid"; } 2>/dev/null || exit 1
             MSYS2_ARG_CONV_EXCL="*" taskkill /F /PID "$native" >/dev/null 2>&1
+            exit $?
           ' _ "$SUPERVISOR_PID" || :
         else
           timeout -k 1 3 "$BASH" -c '. "$1"; end_process "$2"' _ "$REPO/bench/end_process.sh" "$SUPERVISOR_PID" || :
@@ -72,6 +75,7 @@ else
         cleanup_deadline=$((SECONDS + 5))
         while supervisor_active && [ "$SECONDS" -lt "$cleanup_deadline" ]; do sleep 0.1; done
         if supervisor_active; then
+          jobs -l >&2
           echo "supervisor cleanup is unconfirmed; retaining $WORK" >&2
           return
         fi

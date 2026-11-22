@@ -1817,133 +1817,377 @@ IYI
     fi
     printf '  says "%s"\n' "$(grep -m1 '^FAIL: panic:' unlowered.txt)"
 
-    # Every thread a collection raised puts its own priority back,
-    # however many raised together. The raise comes before the runtime
-    # lock, and threads that cross the budget at once, or collect at once,
-    # all raise and wait for the lock in turn. What to put back was one
-    # record for the program, the last raiser's, and every other raiser
-    # found another thread's id there and kept the highest priority for
-    # good: bench/mark_stall.iyi at twelve workers ended each of 30 runs
-    # with 8, 10 or 11 of its 14 threads raised, and made 89,327 to
-    # 387,547 requests in its 10 s, against 320,668 to 554,078 and none
-    # raised with a record per thread (Windows 11, 12 logical processors
-    # held to 4, the user's machine). On a four-processor CI runner its
-    # tasks allocated 60 MiB in five seconds, under the budget, and
-    # concurrent_mark.sh failed the run as a stall (job 128104679578).
-    # Here eight threads churn, and then four collect twenty times each
-    # at once. On that machine, held to 4, the runtime before kept 3 of
-    # the 4 collectors raised in each of 20 runs, and 1 to 7 of the 8
-    # churners; per thread, none in 20.
-    step "threads that raise together for collections each put their own priority back"
-    cat > raisers.iyi <<'IYI'
-@[Unsafe("each thread reads its own priority from Windows' GetThreadPriority, a C call")]
-module raisers
+    # Both stoppers raise before either restores. The first holds the real
+    # runtime lock until the second has raised, then unlocks and records
+    # its priority before the second takes the lock and restores. The same
+    # hooks observe both calls to lower_stopper and each actual Windows
+    # restore; only the two thread-local annotations differ in the mutant.
+    cat > shared-priority.part <<'IYI'
+    {% if flag?(:win32) %}
+      IYI_SHARED_ARM       = 1664_u64
+      IYI_SHARED_A_LINE    = 1728_u64
+      IYI_SHARED_B_LINE    = 1792_u64
+      IYI_SHARED_A_READY   = 1856_u64
+      IYI_SHARED_B_READY   = 1920_u64
+      IYI_SHARED_GO        = 1984_u64
+      IYI_SHARED_A_RAISED  = 2048_u64
+      IYI_SHARED_B_RAISED  = 2112_u64
+      IYI_SHARED_A_HELD    = 2176_u64
+      IYI_SHARED_A_LOWER   = 2240_u64
+      IYI_SHARED_B_LOWER   = 2304_u64
+      IYI_SHARED_A_RESTORE = 2368_u64
+      IYI_SHARED_B_RESTORE = 2432_u64
+      IYI_SHARED_A_AFTER   = 2496_u64
+      IYI_SHARED_B_AFTER   = 2560_u64
 
-# Threads crossing the budget together, then threads collecting together:
-# each reads its priority as it starts and again as it ends, and counts
-# itself if the two differ.
-class Tally
-  @count : Atomic(Int64)
+      def self.shared_priority_say(message : String, status : Int32) : Nil
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(status)
+      end
 
-  def initialize
-    @count = Atomic(Int64).new(0_i64)
-  end
+      def self.shared_priority_init : UInt64
+        page = control
+        offset = IYI_SHARED_ARM
+        while offset <= IYI_SHARED_B_AFTER
+          word(page + offset).value.set(0_u64)
+          offset = offset + 64_u64
+        end
+        page
+      end
 
-  def add(value : Int64) : Nil
-    @count.add(value)
-  end
+      def self.shared_priority_slot(page : UInt64, first : UInt64, second : UInt64) : UInt64
+        line = @@line
+        if line != 0_u64 && line == word(page + IYI_SHARED_A_LINE).value.get
+          first
+        elsif line != 0_u64 && line == word(page + IYI_SHARED_B_LINE).value.get
+          second
+        else
+          shared_priority_say("SETUP: shared priority: an unexpected thread reached a priority hook\n", 76)
+          0_u64
+        end
+      end
 
-  def count : Int64
-    @count.get
+      # Check the priority the real raise is about to save.
+      def self.shared_priority_before_raise(original : Int32) : Nil
+        page = @@control
+        return if page == 0_u64 || word(page + IYI_SHARED_ARM).value.get == 0_u64
+        if original == 2147483647_i32
+          shared_priority_say("SETUP: shared priority: GetThreadPriority failed before a raise\n", 76)
+        end
+        slot = shared_priority_slot(page, IYI_SHARED_A_LINE, IYI_SHARED_B_LINE)
+        if (slot == IYI_SHARED_A_LINE && original != -1_i32) || (slot == IYI_SHARED_B_LINE && original != 0_i32)
+          shared_priority_say("SETUP: shared priority: a starting priority changed before its raise\n", 76)
+        end
+      end
+
+      # Called after the real SetThreadPriority in raise_stopper.
+      def self.shared_priority_raise(result : Int32) : Nil
+        page = @@control
+        return if page == 0_u64 || word(page + IYI_SHARED_ARM).value.get == 0_u64
+        if result == 0_i32
+          shared_priority_say("SETUP: shared priority: SetThreadPriority failed during a raise\n", 76)
+        end
+        actual = LibC.GetThreadPriority(LibC.GetCurrentThread)
+        if actual == 2147483647_i32
+          shared_priority_say("SETUP: shared priority: GetThreadPriority failed during a raise\n", 76)
+        end
+        if actual != THREAD_PRIORITY_HIGHEST
+          shared_priority_say("SETUP: shared priority: a raise did not reach the highest priority\n", 76)
+        end
+        slot = shared_priority_slot(page, IYI_SHARED_A_RAISED, IYI_SHARED_B_RAISED)
+        word(page + slot).value.add(1_u64)
+      end
+
+      # This runs even when the real lower returns without a Windows call.
+      def self.shared_priority_lower : Nil
+        page = @@control
+        return if page == 0_u64 || word(page + IYI_SHARED_ARM).value.get == 0_u64
+        slot = shared_priority_slot(page, IYI_SHARED_A_LOWER, IYI_SHARED_B_LOWER)
+        word(page + slot).value.add(1_u64)
+      end
+
+      # A nonzero encoded priority witnesses a successful real restore.
+      def self.shared_priority_restored(result : Int32) : Nil
+        page = @@control
+        return if page == 0_u64 || word(page + IYI_SHARED_ARM).value.get == 0_u64
+        if result == 0_i32
+          shared_priority_say("SETUP: shared priority: SetThreadPriority failed during a restore\n", 76)
+        end
+        actual = LibC.GetThreadPriority(LibC.GetCurrentThread)
+        if actual == 2147483647_i32
+          shared_priority_say("SETUP: shared priority: GetThreadPriority failed during a restore\n", 76)
+        end
+        slot = shared_priority_slot(page, IYI_SHARED_A_RESTORE, IYI_SHARED_B_RESTORE)
+        word(page + slot).value.set((actual.to_i64 + 16_i64).to_u64)
+      end
+    {% end %}
+IYI
+    shared_priority_copy() {
+      awk -v gate=shared-priority.part '
+        /^    # ── Roots/ {
+          roots++
+          while ((getline line < gate) > 0) { print line; gate_lines++ }
+          close(gate)
+        }
+        /^      def self\.raise_stopper : Nil$/ { raises++; in_raise = 1; print; next }
+        in_raise && /^      end$/ { in_raise = 0 }
+        in_raise && /^        priority = LibC\.GetThreadPriority\(me\)$/ {
+          print
+          print "        IyiThread.shared_priority_before_raise(priority)"
+          raise_query++; next
+        }
+        in_raise && /^        @@stopper_raised = LibC\.SetThreadPriority\(me, THREAD_PRIORITY_HIGHEST\) != 0$/ {
+          print "        shared_result = LibC.SetThreadPriority(me, THREAD_PRIORITY_HIGHEST)"
+          print "        @@stopper_raised = shared_result != 0"
+          print "        IyiThread.shared_priority_raise(shared_result)"
+          raise_call++; next
+        }
+        /^      def self\.lower_stopper : Nil$/ {
+          lowers++; in_lower = 1
+          print
+          print "        IyiThread.shared_priority_lower"
+          next
+        }
+        in_lower && /^      end$/ { in_lower = 0 }
+        in_lower && /^        LibC\.SetThreadPriority\(LibC\.GetCurrentThread, @@stopper_priority\)$/ {
+          print "        shared_result = LibC.SetThreadPriority(LibC.GetCurrentThread, @@stopper_priority)"
+          print "        IyiThread.shared_priority_restored(shared_result)"
+          lower_call++; next
+        }
+        { print }
+        END {
+          if (roots != 1 || gate_lines == 0 || raises != 1 || raise_query != 1 || raise_call != 1 || lowers != 1 || lower_call != 1) exit 3
+        }
+      ' "$REPO/src/iyi/thread.iyi" > "$1"
+    }
+    shared_priority_mutate() {
+      awk '
+        /^      THREAD_PRIORITY_HIGHEST = 2_i32$/ { in_fields = 1; starts++ }
+        in_fields && /^      def self\.raise_stopper : Nil$/ { in_fields = 0; ends++ }
+        in_fields && /^      @\[ThreadLocal\]$/ {
+          if (held != "") print held
+          held = $0; next
+        }
+        in_fields && $0 == "      @@stopper_priority : Int32 = 0_i32" {
+          priorities++
+          if (held == "") bad++
+          held = ""; print; next
+        }
+        in_fields && $0 == "      @@stopper_raised : Bool = false" {
+          raised++
+          if (held == "") bad++
+          held = ""; print; next
+        }
+        {
+          if (held != "") { print held; held = "" }
+          print
+        }
+        END {
+          if (held != "") print held
+          if (starts != 1 || ends != 1 || priorities != 1 || raised != 1 || bad != 0) exit 3
+        }
+      ' "$1" > "$2"
+    }
+    shared_priority_restore_annotations() {
+      awk '
+        /^      THREAD_PRIORITY_HIGHEST = 2_i32$/ { in_fields = 1; starts++ }
+        in_fields && /^      def self\.raise_stopper : Nil$/ { in_fields = 0; ends++ }
+        in_fields && $0 == "      @@stopper_priority : Int32 = 0_i32" {
+          priorities++; print "      @[ThreadLocal]"
+        }
+        in_fields && $0 == "      @@stopper_raised : Bool = false" {
+          raised++; print "      @[ThreadLocal]"
+        }
+        { print }
+        END { if (starts != 1 || ends != 1 || priorities != 1 || raised != 1) exit 3 }
+      ' "$1" > "$2"
+    }
+    if ! mkdir -p shared-priority-control/iyi shared-priority-mutant/iyi ||
+       ! cp "$REPO"/src/iyi/*.iyi shared-priority-control/iyi/ ||
+       ! shared_priority_copy shared-priority-control/iyi/thread.iyi ||
+       ! cp shared-priority-control/iyi/*.iyi shared-priority-mutant/iyi/ ||
+       ! shared_priority_mutate shared-priority-control/iyi/thread.iyi shared-priority-mutant/iyi/thread.iyi ||
+       ! shared_priority_restore_annotations shared-priority-mutant/iyi/thread.iyi shared-priority-restored.iyi; then
+      echo "SETUP: shared priority: the copy anchors or files changed"; exit 76
+    fi
+    if ! cmp -s shared-priority-control/iyi/thread.iyi shared-priority-restored.iyi; then
+      echo "SETUP: shared priority: the copies differ beyond the two annotations"; exit 76
+    fi
+    for source in shared-priority-control/iyi/*.iyi; do
+      file="${source##*/}"
+      [ "$file" = thread.iyi ] && continue
+      if ! cmp -s "$source" "shared-priority-mutant/iyi/$file"; then
+        echo "SETUP: shared priority: the copies differ beyond the two annotations"; exit 76
+      fi
+    done
+
+    cat > shared-priority.iyi <<'IYI'
+@[Unsafe("the test pins each stopper and checks the real Windows priority operations")]
+module shared_priority
+
+lib SharedPlacing
+  fun SetThreadAffinityMask(thread : Void*, mask : UInt64) : UInt64
+end
+
+def load_word(page : UInt64, offset : UInt64) : UInt64
+  IyiThread.word(page + offset).value.get
+end
+
+def store_word(page : UInt64, offset : UInt64, value : UInt64) : Nil
+  IyiThread.word(page + offset).value.set(value)
+end
+
+def wait_word(page : UInt64, offset : UInt64, message : String) : Nil
+  started = IyiMark.now_ns
+  while load_word(page, offset) == 0_u64
+    if IyiMark.now_ns &- started > 20000000000_u64
+      IyiThread.shared_priority_say(message, 76)
+    end
+    IyiThread.yield_cpu
   end
 end
 
 def priority : Int32
-  ::LibC.GetThreadPriority(::LibC.GetCurrentThread)
+  actual = LibC.GetThreadPriority(LibC.GetCurrentThread)
+  if actual == 2147483647_i32
+    IyiThread.shared_priority_say("SETUP: shared priority: GetThreadPriority failed at a readback\n", 76)
+  end
+  actual
 end
 
-# Garbage a string at a time, flat out.
-def churn(strings : Int32) : Int64
-  kept = 0_i64
-  i = 0
-  while i < strings
-    kept = kept &+ "churn #{i}".bytesize.to_i64
-    i = i + 1
+def prepare(page : UInt64, mask : UInt64, original : Int32, line_slot : UInt64, ready_slot : UInt64) : Nil
+  me = LibC.GetCurrentThread
+  if SharedPlacing.SetThreadAffinityMask(me, mask) == 0_u64
+    IyiThread.shared_priority_say("SETUP: shared priority: SetThreadAffinityMask failed\n", 76)
   end
-  kept
+  if LibC.SetThreadPriority(me, original) == 0_i32
+    IyiThread.shared_priority_say("SETUP: shared priority: SetThreadPriority failed at setup\n", 76)
+  end
+  if priority != original
+    IyiThread.shared_priority_say("SETUP: shared priority: a starting priority did not read back\n", 76)
+  end
+  line = IyiThread.current_line
+  if line == 0_u64
+    IyiThread.shared_priority_say("SETUP: shared priority: a stopper has no registered line\n", 76)
+  end
+  store_word(page, line_slot, line)
+  store_word(page, ready_slot, 1_u64)
+  wait_word(page, IyiThread::IYI_SHARED_GO, "SETUP: shared priority: the stoppers were not released\n")
 end
 
-CHURNERS   = 8
-COLLECTORS = 4
-ROUNDS     = 20
+def first(page : UInt64, mask : UInt64) : Nil
+  prepare(page, mask, -1_i32, IyiThread::IYI_SHARED_A_LINE, IyiThread::IYI_SHARED_A_READY)
+  IyiThread.raise_stopper
+  if load_word(page, IyiThread::IYI_SHARED_A_RAISED) != 1_u64
+    IyiThread.shared_priority_say("SETUP: shared priority: the first stopper did not raise\n", 76)
+  end
+  IyiRuntimeLock.lock
+  store_word(page, IyiThread::IYI_SHARED_A_HELD, 1_u64)
+  wait_word(page, IyiThread::IYI_SHARED_B_RAISED, "SETUP: shared priority: the second stopper did not raise\n")
+  IyiMark.unlock_released
+  store_word(page, IyiThread::IYI_SHARED_A_AFTER, (priority.to_i64 + 16_i64).to_u64)
+end
 
-before = IyiMark.collections
-churners_raised = Tally.new
-collectors_raised = Tally.new
-go = Tally.new
-threads = [] of IyiThread
-CHURNERS.times do
-  threads << IyiThread.start do
-    was = priority
-    churn(1000000)
-    churners_raised.add(1_i64) if priority != was
-    nil
+def second(page : UInt64, mask : UInt64) : Nil
+  prepare(page, mask, 0_i32, IyiThread::IYI_SHARED_B_LINE, IyiThread::IYI_SHARED_B_READY)
+  wait_word(page, IyiThread::IYI_SHARED_A_HELD, "SETUP: shared priority: the first stopper did not hold the lock\n")
+  IyiThread.raise_stopper
+  if load_word(page, IyiThread::IYI_SHARED_B_RAISED) != 1_u64
+    IyiThread.shared_priority_say("SETUP: shared priority: the second stopper did not raise\n", 76)
   end
+  wait_word(page, IyiThread::IYI_SHARED_A_AFTER, "SETUP: shared priority: the first stopper did not read back its restore\n")
+  IyiRuntimeLock.lock
+  IyiMark.unlock_released
+  store_word(page, IyiThread::IYI_SHARED_B_AFTER, (priority.to_i64 + 16_i64).to_u64)
 end
-threads.each { |thread| thread.join }
-churned = IyiMark.collections - before
-threads = [] of IyiThread
-COLLECTORS.times do
-  threads << IyiThread.start do
-    was = priority
-    while go.count == 0_i64
-      IyiThread.spin_pause
-    end
-    ROUNDS.times { IyiMark.collect }
-    collectors_raised.add(1_i64) if priority != was
-    nil
-  end
+
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+page = IyiThread.shared_priority_init
+first_mask = 1_u64.unsafe_shl(Program.args[0].to_i.to_u64)
+second_mask = 1_u64.unsafe_shl(Program.args[1].to_i.to_u64)
+first_thread = IyiThread.start { first(page, first_mask); nil }
+second_thread = IyiThread.start { second(page, second_mask); nil }
+wait_word(page, IyiThread::IYI_SHARED_A_READY, "SETUP: shared priority: the first stopper did not start\n")
+wait_word(page, IyiThread::IYI_SHARED_B_READY, "SETUP: shared priority: the second stopper did not start\n")
+if load_word(page, IyiThread::IYI_SHARED_A_LINE) == load_word(page, IyiThread::IYI_SHARED_B_LINE)
+  IyiThread.shared_priority_say("SETUP: shared priority: the stoppers did not have distinct lines\n", 76)
 end
-go.add(1_i64)
-threads.each { |thread| thread.join }
-if churners_raised.count != 0_i64 || collectors_raised.count != 0_i64
-  print "FAIL: raise: #{churners_raised.count} of #{CHURNERS} threads churning through #{churned} collections, and #{collectors_raised.count} of #{COLLECTORS} collecting #{ROUNDS} times each together, kept the stop's priority\n"
-  __iyi_exit(1)
+store_word(page, IyiThread::IYI_SHARED_ARM, 1_u64)
+store_word(page, IyiThread::IYI_SHARED_GO, 1_u64)
+wait_word(page, IyiThread::IYI_SHARED_A_HELD, "SETUP: shared priority: the first stopper did not hold the lock\n")
+wait_word(page, IyiThread::IYI_SHARED_B_RAISED, "SETUP: shared priority: the second stopper did not raise\n")
+wait_word(page, IyiThread::IYI_SHARED_A_AFTER, "SETUP: shared priority: the first stopper did not read back its restore\n")
+wait_word(page, IyiThread::IYI_SHARED_B_AFTER, "SETUP: shared priority: the second stopper did not read back its restore\n")
+first_thread.join
+second_thread.join
+
+if load_word(page, IyiThread::IYI_SHARED_A_RAISED) != 1_u64 || load_word(page, IyiThread::IYI_SHARED_B_RAISED) != 1_u64
+  IyiThread.shared_priority_say("SETUP: shared priority: both real raises were not observed\n", 76)
 end
-print "raise: #{CHURNERS} threads churning through #{churned} collections, and #{COLLECTORS} collecting #{ROUNDS} times each together, every one at its own priority after\n"
+if load_word(page, IyiThread::IYI_SHARED_A_LOWER) != 1_u64 || load_word(page, IyiThread::IYI_SHARED_B_LOWER) != 1_u64
+  IyiThread.shared_priority_say("SETUP: shared priority: both real lowers were not observed\n", 76)
+end
+a_restore = load_word(page, IyiThread::IYI_SHARED_A_RESTORE)
+b_restore = load_word(page, IyiThread::IYI_SHARED_B_RESTORE)
+a_after = load_word(page, IyiThread::IYI_SHARED_A_AFTER)
+b_after = load_word(page, IyiThread::IYI_SHARED_B_AFTER)
+if a_restore == 0_u64 || a_restore != a_after || (b_restore != 0_u64 && b_restore != b_after)
+  IyiThread.shared_priority_say("SETUP: shared priority: a real restore readback was not observed\n", 76)
+end
+if b_restore == 0_u64 && b_after != 18_u64
+  IyiThread.shared_priority_say("SETUP: shared priority: the second restore result was not observed\n", 76)
+end
+if a_after == 15_u64 && b_after == 16_u64 && b_restore == 16_u64
+  puts "shared priority: both stoppers restored their own priorities"
+elsif a_after == 16_u64 && b_after == 18_u64 && b_restore == 0_u64
+  IyiThread.shared_priority_say("FAIL: shared priority: an overlapping raise overwrote another stopper's priority record\n", 1)
+else
+  IyiThread.shared_priority_say("SETUP: shared priority: the restore readbacks did not match either witness\n", 76)
+end
 IYI
-    if ! "$IYI" build --release raisers.iyi -o raisers > build-raisers.log 2>&1; then
-      cat build-raisers.log; exit 1
-    fi
-    timeout -k 5 60 ./raisers > raisers.txt 2>&1
-    code=$?
-    if [ "$code" -eq 76 ]; then cat raisers.txt; exit 76; fi
-    if [ "$code" -ne 0 ] || ! grep -q '^raise:' raisers.txt; then
-      echo "threads raised together:"; cat raisers.txt; exit 1
-    fi
-    echo "  $(grep -m1 '^raise:' raisers.txt)"
-
-    # The record the program's again: the raise's two words without their
-    # `@[ThreadLocal]`. A thread collecting waits at the lock raised while
-    # another holds it, so every collector but the last to lower finds
-    # the record already put back: 20 runs of 20 on the machine above.
-    step "failure proof: one record of the raise for every thread leaves a thread raised"
-    mkdir -p shared/iyi
-    cp "$REPO"/src/iyi/*.iyi shared/iyi/
-    awk '/^      @\[ThreadLocal\]$/ { held = $0; next }
-      held != "" { if ($0 ~ /^      @@stopper_(priority|raised) /) removed++; else print held; held = "" }
-      { print } END { if (removed != 2) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > shared/iyi/thread.iyi || { echo "the raise's thread-local record is not in thread.iyi any more"; exit 1; }
-    if ! IYI_PATH="$WORK/shared${PSEP}$REPO/src" "$IYI" build --release raisers.iyi -o raisers-shared > build-shared.log 2>&1; then
-      cat build-shared.log; exit 1
-    fi
-    timeout -k 5 60 ./raisers-shared > shared.txt 2>&1
-    code=$?
-    if [ "$code" -eq 76 ]; then cat shared.txt; exit 76; fi
-    if [ "$code" -ne 1 ] || ! grep -q '^FAIL: raise:' shared.txt; then
-      echo "one record for every thread was not caught (exit $code):"; cat shared.txt; exit 1
-    fi
-    printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: raise:' shared.txt)"
+    shared_priority_success="shared priority: both stoppers restored their own priorities"
+    shared_priority_failure="FAIL: shared priority: an overlapping raise overwrote another stopper's priority record"
+    for mode in control mutant; do
+      step "shared priority: $mode"
+      if ! IYI_PATH="$WORK/shared-priority-$mode${PSEP}$REPO/src" "$IYI" build --release shared-priority.iyi -o "shared-priority-$mode-run" > "build-shared-priority-$mode.log" 2>&1; then
+        echo "SETUP: shared priority: the $mode build failed"
+        cat "build-shared-priority-$mode.log"; exit 76
+      fi
+      timeout -k 5 60 "./shared-priority-$mode-run" "$AFFINITY_FIRST" "$AFFINITY_SECOND" > "shared-priority-$mode-raw.txt" 2>&1
+      code=$?
+      tr -d '\r' < "shared-priority-$mode-raw.txt" > "shared-priority-$mode.txt"
+      if [ "$code" -eq 124 ] || [ "$code" -eq 137 ] || grep -q '^SETUP: .*process exceeded its .* bound$' "shared-priority-$mode.txt"; then
+        echo "SETUP: shared priority: the $mode watchdog expired"; exit 76
+      fi
+      if [ "$code" -eq 76 ] || grep -q '^SETUP:' "shared-priority-$mode.txt"; then
+        if grep -q '^SETUP:' "shared-priority-$mode.txt"; then
+          grep '^SETUP:' "shared-priority-$mode.txt"
+        else
+          echo "SETUP: shared priority: the $mode process exited without a setup diagnostic"
+        fi
+        exit 76
+      fi
+      if [ "$mode" = control ]; then
+        if [ "$code" -eq 1 ] && [ "$(grep -c '^FAIL:' "shared-priority-$mode.txt")" -eq 1 ] && grep -qxF "$shared_priority_failure" "shared-priority-$mode.txt"; then
+          echo "$shared_priority_failure"; exit 1
+        fi
+        if [ "$code" -ne 0 ] || [ "$(grep -cxF "$shared_priority_success" "shared-priority-$mode.txt")" -ne 1 ] || grep -q '^FAIL:' "shared-priority-$mode.txt"; then
+          echo "SETUP: shared priority: the control ended without a valid witness"
+          cat "shared-priority-$mode.txt"; exit 76
+        fi
+        echo "  $shared_priority_success"
+      else
+        if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' "shared-priority-$mode.txt")" -ne 1 ] || ! grep -qxF "$shared_priority_failure" "shared-priority-$mode.txt"; then
+          if [ "$code" -eq 0 ] && grep -qxF "$shared_priority_success" "shared-priority-$mode.txt"; then
+            echo "FAIL: shared priority: the mutant escaped detection"; exit 1
+          fi
+          echo "SETUP: shared priority: the mutant ended without a valid witness"
+          cat "shared-priority-$mode.txt"; exit 76
+        fi
+        printf '  exits 1 at "%s"\n' "$shared_priority_failure"
+      fi
+    done
     ;;
 esac
 

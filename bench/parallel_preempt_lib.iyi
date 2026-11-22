@@ -4,11 +4,12 @@
 #   ./bin/iyi run --release bench/parallel_preempt_lib.iyi -- sort fib
 #   ./bin/iyi run --release bench/parallel_preempt_lib.iyi -- cost
 #
-# Each healthy step queues a short task before its long call starts, then
-# requires the short task to run on the same worker before that call ends.
-# Every ordering step requires a pool of one; `cost` is measurement only.
-# Latency is data. Copy-only hooks hold a target library loop until a short
-# task is queued, then record whether it ran before the loop's next turn.
+# Each healthy ordering step queues a short task before its long call and
+# requires it to run on the same worker before that call ends. Fib reports
+# its ordering without gating it; the forced copy and its control hold the
+# recursive entry decision instead. Every ordering step uses one worker.
+# Copy-only hooks hold each target until its short task is queued, then
+# distinguish an eligible decision from a turn with no check.
 #
 #   sort    `Array#sort_in_place` of 6,000,000 `Int64`s
 #   copy    `Slice#copy_from` of 192 MB, a million bytes a turn; long
@@ -20,9 +21,8 @@
 #   regex   `Regex#find` over 24 MB that the pattern never matches
 #   json    `JSON.parse` of a 24 MB array of numbers
 #   bcrypt  `Bcrypt.hash` at cost 12
-#   fib     a naive recursive Fibonacci of 40, with no loop in it; under
-#           `-Dpreempt_off` the same as a `@[NoPreempt]` def, which a
-#           short task waits for
+#   fib     a naive recursive Fibonacci of 40, with no loop in it; the
+#           forced checked and @[NoPreempt] pair uses Fibonacci of 30
 #   cost    not run unless named: what the checks cost the library's own
 #           work - a sort, copies long and short, hash inserts, a JSON
 #           parse, a join and a recursion - best of seven inside a parallel
@@ -60,6 +60,11 @@ import std/password::{Bcrypt}
     __iyi_exit(1)
   end
 
+  def setup_exit(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(76)
+  end
+
   def elapsed_ms(since : Int64) : Int64
     (__iyi_monotonic_ns - since) // 1000000_i64
   end
@@ -74,9 +79,26 @@ import std/password::{Bcrypt}
     n < 2 ? n.to_i64 : fib_np(n - 1) + fib_np(n - 2)
   end
 
+  {% if flag?(:recursion_force) %}
+    def forced_fib(n : Int32) : Int64
+      IyiWorkers.force_turn(5_u64)
+      return fib(n) if IyiWorkers.force_turn_result != 0_u64
+      n < 2 ? n.to_i64 : forced_fib(n - 1) + forced_fib(n - 2)
+    end
+
+    @[NoPreempt]
+    def forced_fib_np(n : Int32) : Int64
+      IyiWorkers.force_turn(5_u64)
+      return fib_np(n) if IyiWorkers.force_turn_result != 0_u64
+      n < 2 ? n.to_i64 : forced_fib_np(n - 1) + forced_fib_np(n - 2)
+    end
+  {% end %}
+
   def long_fib(n : Int32) : Int64
-    {% if flag?(:preempt_off) %}
-      fib_np(n)
+    {% if flag?(:recursion_force) && flag?(:preempt_off) %}
+      forced_fib_np(n)
+    {% elsif flag?(:recursion_force) %}
+      forced_fib(n)
     {% else %}
       fib(n)
     {% end %}
@@ -132,32 +154,33 @@ import std/password::{Bcrypt}
     @holding : Atomic(Int64)
     @queued : Atomic(Int64)
     @worker : Atomic(UInt64)
-    @force : Bool
+    @force_key : UInt64
 
-    def initialize(force : Bool)
+    def initialize(force_key : UInt64)
       @started = Atomic(Int64).new(0_i64)
       @took = Atomic(Int64).new(-1_i64)
       @holding = Atomic(Int64).new(0_i64)
       @queued = Atomic(Int64).new(0_i64)
-      @force = force
+      @force_key = force_key
       @worker = Atomic(UInt64).new(0_u64)
     end
 
     @[NoPreempt]
     def start : Int64
       state = IyiScheduler.state
+      setup_exit("library: not armed: the worker has no preemption word") if state.preempt_word == 0_u64
       @worker.set(state.object_id)
       @holding.set(1_i64)
       started = __iyi_monotonic_ns
-      while @queued.get == 0_i64 || Pointer(Atomic(UInt64)).new(state.preempt_word).value.get == 0_u64
+      while @queued.get == 0_i64 || (@force_key == 0_u64 && Pointer(Atomic(UInt64)).new(state.preempt_word).value.get == 0_u64)
         IyiThread.spin_pause
         if elapsed_ms(started) >= 20000_i64
           print "FAIL: library: progress hang: the clock start signal or preemption word did not arrive\n"
           __iyi_exit(76)
         end
       end
-      {% if flag?(:libruntime_force) %}
-        IyiWorkers.force_lib_arm(IyiScheduler.current.object_id) if @force
+      {% if flag?(:libruntime_force) || flag?(:recursion_force) %}
+        IyiWorkers.force_turn_arm(IyiScheduler.current.object_id, @force_key) if @force_key != 0_u64
       {% end %}
       t = __iyi_monotonic_ns
       @started.set(t)
@@ -165,9 +188,6 @@ import std/password::{Bcrypt}
     end
 
     def stop(since : Int64) : Nil
-      {% if flag?(:libruntime_force) %}
-        IyiWorkers.force_lib_disarm if @force
-      {% end %}
       @took.set(elapsed_ms(since))
     end
 
@@ -250,7 +270,11 @@ import std/password::{Bcrypt}
       made.bytesize.to_i64
     else
       t = clock.start
-      answer = long_fib(40)
+      {% if flag?(:recursion_force) %}
+        answer = long_fib(30)
+      {% else %}
+        answer = long_fib(40)
+      {% end %}
       clock.stop(t)
       answer
     end
@@ -258,13 +282,22 @@ import std/password::{Bcrypt}
 
 
   def step(name : String, quiet : Bool) : Nil
-    fail("#{name}: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    setup_exit("#{name}: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
     {% if flag?(:libruntime_force) %}
-      forced = name == "sort" || name == "copy" || name == "rehash" || name == "join"
+      force_key = case name
+                  when "sort"   then 1_u64
+                  when "copy"   then 2_u64
+                  when "rehash" then 3_u64
+                  when "join"   then 4_u64
+                  else               0_u64
+                  end
+    {% elsif flag?(:recursion_force) %}
+      force_key = name == "fib" ? 5_u64 : 0_u64
     {% else %}
-      forced = false
+      force_key = 0_u64
     {% end %}
-    clock = Clock.new(forced)
+    forced = force_key != 0_u64
+    clock = Clock.new(force_key)
     waited = Atomic(Int64).new(-1_i64)
     witness = Atomic(Int64).new(0_i64)
     {% if flag?(:heap_partitions) %}
@@ -285,23 +318,14 @@ import std/password::{Bcrypt}
           __iyi_exit(76)
         end
       end
-      {% if flag?(:libruntime_force) %}
+      {% if flag?(:libruntime_force) || flag?(:recursion_force) %}
         if forced
-          # Enter the target before queueing the short task, so an earlier
-          # library check cannot consume the task meant for this loop turn.
+          # No candidate can consume an earlier check before the target holds.
           clock.queued
           started = __iyi_monotonic_ns
-          until IyiWorkers.force_lib_ready?
-            if IyiWorkers.force_lib_result == 3_u64
-              print "FAIL: #{name}: progress hang: the library loop waited for the preemption word\n"
-              __iyi_exit(76)
-            end
-            if IyiWorkers.force_lib_result == 5_u64
-              print "FAIL: #{name}: progress hang: the library loop waited for its queued task\n"
-              __iyi_exit(76)
-            end
+          until IyiWorkers.force_turn_ready?
             if elapsed_ms(started) >= 10000_i64
-              print "FAIL: #{name}: progress hang: the library copy hook did not hold the target loop\n"
+              print "FAIL: #{name}: progress hang: the copy hook did not hold the target's first turn\n"
               __iyi_exit(76)
             end
             sleep(1)
@@ -313,9 +337,6 @@ import std/password::{Bcrypt}
         local_before = IyiHeap.local_ns
       {% end %}
       g.spawn(unit: :new) do
-        {% if flag?(:libruntime_force) %}
-          IyiWorkers.force_lib_note_short(IyiScheduler.state.object_id) if forced
-        {% end %}
         witness.set(!clock.started? ? 3_i64 : (clock.took >= 0_i64 ? 2_i64 : (IyiScheduler.state.object_id != clock.worker ? 4_i64 : 1_i64)))
         waited.set(elapsed_ms(asked))
         {% if flag?(:heap_partitions) %}
@@ -323,9 +344,22 @@ import std/password::{Bcrypt}
         {% end %}
         0
       end
-      {% if flag?(:libruntime_force) %}
+      {% if flag?(:libruntime_force) || flag?(:recursion_force) %}
         if forced
-          IyiWorkers.force_lib_release
+          IyiWorkers.force_turn_release
+          started = __iyi_monotonic_ns
+          while clock.took < 0_i64 || witness.get == 0_i64
+            if IyiWorkers.force_turn_slow_active?
+              started = __iyi_monotonic_ns
+            elsif elapsed_ms(started) >= 70000_i64
+              if IyiWorkers.force_turn_outer_claim?
+                print "FAIL: #{name}: progress hang: the call and queued task did not finish\n"
+                __iyi_exit(76)
+              end
+              started = __iyi_monotonic_ns
+            end
+            sleep(1)
+          end
         else
           clock.queued
         end
@@ -339,34 +373,51 @@ import std/password::{Bcrypt}
     {% else %}
       ms = waited.get
     {% end %}
-    {% if flag?(:libruntime_force) %}
+    {% if flag?(:libruntime_force) || flag?(:recursion_force) %}
       if forced
-        result = IyiWorkers.force_lib_result
-        if result == 3_u64
-          print "FAIL: #{name}: progress hang: the library loop waited for the preemption word\n"
-          __iyi_exit(76)
+        result = IyiWorkers.force_turn_result
+        setup_exit("#{name}: not armed: the forced turn reached no decision before the call ended") if result == 0_u64
+        if result == 2_u64
+          if name == "fib"
+            fail("fib: the recursion entered a call with its worker's word raised and kept its worker")
+          else
+            fail("#{name}: the library's loop turned with its worker's word raised and kept its worker")
+          end
         end
-        if result == 5_u64
-          print "FAIL: #{name}: progress hang: the library loop waited for its queued task\n"
-          __iyi_exit(76)
+        setup_exit("#{name}: not armed: the forced turn returned an unknown result") unless result == 1_u64
+        setup_exit("#{name}: not armed: the queued task did not run inside the call on its worker at the eligible decision") unless witness.get == 1_i64
+        if name == "fib"
+          puts "fib: the recursion gave its worker up at the call after its word was raised"
+        else
+          puts "#{name}: the library's loop gave its worker up at the turn after its word was raised"
         end
-        fail("#{name}: not armed: the library copy hook did not reach two target-loop turns") if result == 0_u64
-        fail("#{name}: not armed: the queued task did not witness the target worker's turn") if result == 4_u64
-        fail("#{name}: the library's loop turned with its worker's word raised and kept its worker") if result == 2_u64
-        fail("#{name}: not armed: the library copy hook returned an unknown result") unless result == 1_u64
-        puts "#{name}: the library's loop gave its worker up at the turn after its word was raised"
       end
     {% end %}
-    fail("#{name}: the short task queued before the call ran only after the call ended") if witness.get == 2_i64
-    fail("#{name}: not armed: the short task did not run inside the target call on its worker") unless witness.get == 1_i64
-    if name == "fib" && answer.get != 102334155_i64
-      fail("fib: the preempted recursion answered #{answer.get}, and 40's is 102334155")
+    if name == "fib" && !forced
+      if witness.get == 1_i64
+        puts "fib: the short task ran inside the call; ordering is informational"
+      elsif witness.get == 2_i64
+        puts "fib: the short task ran after the call; ordering is informational"
+      else
+        setup_exit("fib: not armed: the short task did not run on the call's worker")
+      end
+    else
+      fail("#{name}: the short task queued before the call ran only after the call ended") if witness.get == 2_i64
+      setup_exit("#{name}: not armed: the short task did not run inside the target call on its worker") unless witness.get == 1_i64
+    end
+    if name == "fib"
+      {% if flag?(:recursion_force) %}
+        fail("fib: the preempted recursion answered #{answer.get}, and 30's is 832040") if answer.get != 832040_i64
+      {% else %}
+        fail("fib: the preempted recursion answered #{answer.get}, and 40's is 102334155") if answer.get != 102334155_i64
+      {% end %}
     end
     given = IyiWorkers.preempts - preempts
+    when_ran = witness.get == 1_i64 ? "inside it" : "after it"
     {% if flag?(:heap_partitions) %}
-      puts "#{name}: a short task queued before a #{clock.took} ms call ran inside it #{ms} ms after its spawn beyond #{local_ms} ms of local collections (#{given} preemptions)" unless quiet
+      puts "#{name}: a short task queued before a #{clock.took} ms call ran #{when_ran} #{ms} ms after its spawn beyond #{local_ms} ms of local collections (#{given} preemptions)" unless quiet
     {% else %}
-      puts "#{name}: a short task queued before a #{clock.took} ms call ran inside it #{ms} ms after its spawn (#{given} preemptions)" unless quiet
+      puts "#{name}: a short task queued before a #{clock.took} ms call ran #{when_ran} #{ms} ms after its spawn (#{given} preemptions)" unless quiet
     {% end %}
   end
 

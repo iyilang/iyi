@@ -8,8 +8,8 @@
 #
 # The formerly timing-decided and conditional copies force the relevant
 # queue, monitor, poll, switch, or library-loop state. A hooked control
-# uses the same observation as its mutant. The close-placement and
-# no-preemption mutants use the corresponding healthy program as control.
+# uses the same observation as its mutant. Close placement uses the
+# corresponding healthy program as its control.
 # Each copy gets one run; a progress hang is not a successful catch.
 # Socket and deep-frame movement are forced before their larger exercises.
 # Speed and tight-loop timings are performance information, sampled once.
@@ -99,8 +99,8 @@
 #      wakeup), a steal that leaves the task in its victim's queue (a task
 #      handed out twice), a cancel that is never delivered to the thread a
 #      sleeping task is on, a cancel that skips tasks still waiting in the
-#      pool (a cancelled task run as if it were not), a cancel that leaves
-#      an io wait parked (a panic that never ends its program),
+#      pool (a cancelled task run as if it were not), a cancel that misses
+#      an instrumented io-wait branch after the reader registers,
 #      `take_now` and `put_now` without their channel's lock, a
 #      rendezvous hand that never marks the select it woke, a cancel the
 #      park it lands in never looks for, and `park_on` looking at its word
@@ -119,15 +119,16 @@
 #      join held in the kernel; and on Windows
 #      a port whose packets only the worker their task parked on runs, and
 #      a pool that leaves the priority boost on.
-#      Coarse uses a structural timer decision; tokenless forces a
-#      same-unit child to be ready at a preemption decision.
+#      Coarse uses a structural timer decision. Slice, recursion, library
+#      loops and tokenless use keyed eligible decisions; a refused check
+#      waits in its slow path or exits as a progress failure.
 #   8. Failure proof: one run of the pool held to one worker is refused by
 #      the at-once floor, independent of elapsed time.
 set -u
 
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$(dirname "$0")/.." && pwd)" || { echo "FAIL: gate: setup: could not resolve the repository"; exit 76; }
 IYI="${IYI:-$REPO/bin/iyi}"
-WORK="$(mktemp -d)"
+WORK="$(mktemp -d)" || { echo "FAIL: gate: setup: could not create a temporary directory"; exit 76; }
 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
@@ -141,11 +142,18 @@ case "$(uname -s)" in
   *) PSEP=':' ;;
 esac
 
-. "$REPO/bench/floor_base.sh"
+. "$REPO/bench/floor_base.sh" || { echo "FAIL: gate: setup: could not load the dependency-floor helpers"; exit 76; }
 
-cd "$WORK" || exit 1
+cd "$WORK" || { echo "FAIL: gate: setup: could not enter the temporary directory"; exit 76; }
 
 step() { echo "== $1"; }
+child_progress_status() { # label, status, output
+  if [ "$2" -eq 76 ]; then cat "$3"; exit 76; fi
+  if [ "$2" -eq 124 ] || [ "$2" -eq 137 ]; then
+    echo "FAIL: $1: progress hang: the shell emergency timeout stopped the run (exit $2)"
+    exit 76
+  fi
+}
 
 # The cores this process may run on, as the pool counts them.
 cores() {
@@ -155,12 +163,13 @@ cores() {
     *) nproc ;;
   esac
 }
-CORES="$(cores)"
+if ! CORES="$(cores)" || [[ ! "$CORES" =~ ^[1-9][0-9]*$ ]]; then
+  echo "FAIL: cores: setup: could not determine a positive processor count"; exit 76
+fi
 
-# A host with fewer cores than a proof needs fails the gate: a proof skipped
-# there proves nothing, and every CI shape has four cores.
+# A host with fewer cores than a proof needs fails rather than skipping it.
 need_cores() { # cores, what the proof needs
-  if [ "$CORES" -lt "$1" ]; then echo "this host has $CORES cores, and the proof needs $1: $2"; exit 1; fi
+  if [ "$CORES" -lt "$1" ]; then echo "FAIL: cores: setup: this host has $CORES cores but needs $1: $2"; exit 76; fi
 }
 
 # ── 1. The exercise, twice ────────────────────────────────────────────────
@@ -169,10 +178,11 @@ for build in plain release; do
   flag=""
   [ "$build" = release ] && flag="--release"
   if ! "$IYI" build $flag "$REPO/bench/parallel_exercise.iyi" -o "exercise-$build" > "build-$build.log" 2>&1; then
-    echo "build failed:"; tail -20 "build-$build.log"; exit 1
+    echo "FAIL: exercise: setup: the $build exercise failed to build"; tail -20 "build-$build.log"; exit 76
   fi
   timeout -k 5 600 "./exercise-$build" > "answers-$build.txt" 2>&1
   code=$?
+  child_progress_status exercise "$code" "answers-$build.txt"
   if [ "$code" -ne 0 ] || ! grep -q 'every property held' "answers-$build.txt"; then
     echo "the exercise failed (exit $code):"; cat "answers-$build.txt"; exit 1
   fi
@@ -232,11 +242,12 @@ for build in plain release; do
   flag=""
   [ "$build" = release ] && flag="--release"
   if ! "$IYI" build $flag "$REPO/bench/parallel_migrate.iyi" -o "migrate-$build" > "build-migrate-$build.log" 2>&1; then
-    echo "build failed:"; tail -20 "build-migrate-$build.log"; exit 1
+    echo "FAIL: migrate: setup: the $build exercise failed to build"; tail -20 "build-migrate-$build.log"; exit 76
   fi
   # shellcheck disable=SC2086 # the steps are words
   timeout -k 5 600 "./migrate-$build" $MIGRATE_STEPS > "migrated-$build.txt" 2>&1
   code=$?
+  child_progress_status migrate "$code" "migrated-$build.txt"
   if [ "$code" -ne 0 ] || ! grep -q 'every property held' "migrated-$build.txt"; then
     echo "the migration exercise failed (exit $code):"; cat "migrated-$build.txt"; exit 1
   fi
@@ -251,6 +262,7 @@ for build in plain release; do
   fi
   timeout -k 5 300 "./migrate-$build" handoff ${loaded:+"--loaded=$loaded"} > "handed-$build.txt" 2>&1
   code=$?
+  child_progress_status handoff "$code" "handed-$build.txt"
   if [ "$code" -ne 0 ] || ! grep -q 'every property held' "handed-$build.txt"; then
     echo "the hand-off step failed${load:+ at a load of $load on $CORES cores} (exit $code):"; cat "handed-$build.txt"; exit 1
   fi
@@ -268,10 +280,11 @@ case "$(uname -s)" in
       flag=""
       [ "$build" = release ] && flag="--release"
       if ! "$IYI" build $flag "$REPO/bench/completions_taken.iyi" -o "taken-$build" > "build-taken-$build.log" 2>&1; then
-        echo "build failed:"; tail -20 "build-taken-$build.log"; exit 1
+        echo "FAIL: taken: setup: the $build exercise failed to build"; tail -20 "build-taken-$build.log"; exit 76
       fi
       timeout -k 5 300 "./taken-$build" boost taken --workers=12 > "taken-$build.txt" 2>&1
       code=$?
+      child_progress_status taken "$code" "taken-$build.txt"
       if [ "$code" -ne 0 ] || ! grep -q 'every property held' "taken-$build.txt"; then
         echo "the completion port exercise failed (exit $code):"; cat "taken-$build.txt"; exit 1
       fi
@@ -351,12 +364,13 @@ for build in plain release; do
   [ "$build" = release ] && flag="--release --emit llvm-ir"
   # shellcheck disable=SC2086 # the flags are words
   if ! "$IYI" build $flag "$REPO/bench/parallel_preempt.iyi" -o "preempt-$build" > "build-preempt-$build.log" 2>&1; then
-    echo "build failed:"; tail -20 "build-preempt-$build.log"; exit 1
+    echo "FAIL: preempt: setup: the $build exercise failed to build"; tail -20 "build-preempt-$build.log"; exit 76
   fi
   for run in "slice --workers=1" "unit --workers=1" "period --workers=1" "poller --workers=1" "fresh --workers=1" "server --workers=$PREEMPT_WORKERS"; do
     # shellcheck disable=SC2086 # the step and its count are words
     timeout -k 5 300 "./preempt-$build" $run > "preempted-$build.txt" 2>&1
     code=$?
+    child_progress_status preempt "$code" "preempted-$build.txt"
     if [ "$code" -ne 0 ] || ! grep -q 'every property held' "preempted-$build.txt"; then
       echo "the preemption exercise failed at $run (exit $code):"; cat "preempted-$build.txt"; exit 1
     fi
@@ -366,6 +380,7 @@ done
 step "what the check costs a tight loop, release build"
 timeout -k 5 300 ./preempt-release tight --workers=1 > tight.txt 2>&1
 code=$?
+child_progress_status tight "$code" tight.txt
 if [ "$code" -ne 0 ] || ! grep -q 'every property held' tight.txt; then
   echo "the tight loops failed (exit $code):"; cat tight.txt; exit 1
 fi
@@ -441,8 +456,8 @@ tight_checks() { # IR file
           said = said ", " counts[kind] " " word
         }
         print fn ": " n " back-edge check" (n == 1 ? "" : "s") said
-        if ("accessor" in counts) fails = fails "FAIL: tight checks: " fn ": " counts["accessor"] " of " n " back-edge checks call the thread-local accessor *IyiWorkers::preempt\n"
-        else if ("another way" in counts) fails = fails "FAIL: tight checks: " fn ": " counts["another way"] " of " n " back-edge checks read the word neither through the thread pointer nor by the accessor\n"
+        if ("accessor" in counts && fails == "") fails = "FAIL: tight checks: " fn " calls the thread-local accessor *IyiWorkers::preempt at a back-edge\n"
+        else if ("another way" in counts && fails == "") fails = "FAIL: tight checks: " fn ": " counts["another way"] " of " n " back-edge checks read the word neither through the thread pointer nor by the accessor\n"
       }
       printf "%s", fails
       exit (fails != "")
@@ -469,10 +484,11 @@ for build in plain release; do
   [ "$build" = release ] && flag="--release --emit llvm-ir"
   # shellcheck disable=SC2086 # the flags are words
   if ! "$IYI" build $flag "$REPO/bench/parallel_preempt_lib.iyi" -o "preemptlib-$build" > "build-preemptlib-$build.log" 2>&1; then
-    echo "build failed:"; tail -20 "build-preemptlib-$build.log"; exit 1
+    echo "FAIL: preemptlib: setup: the $build exercise failed to build"; tail -20 "build-preemptlib-$build.log"; exit 76
   fi
   timeout -k 5 600 "./preemptlib-$build" sort copy rehash join regex json bcrypt fib --workers=1 > "preemptedlib-$build.txt" 2>&1
   code=$?
+  child_progress_status preemptlib "$code" "preemptedlib-$build.txt"
   if [ "$code" -ne 0 ] || ! grep -q 'every property held' "preemptedlib-$build.txt"; then
     echo "the library preemption exercise failed (exit $code):"; cat "preemptedlib-$build.txt"; exit 1
   fi
@@ -574,7 +590,7 @@ for candidate in python3 python; do
   fi
 done
 step "the runtime reaches no preemption check, release build"
-[ -n "$PY" ] || { echo "no python here to read the IR with: the audit cannot run"; exit 1; }
+[ -n "$PY" ] || { echo "FAIL: preempt audit: setup: Python is unavailable for the audit"; exit 76; }
 if ! "$PY" "$REPO/bench/preempt_audit.py" preemptlib-release.ll > audit.txt 2>&1; then
   echo "the audit failed:"; cat audit.txt; exit 1
 fi
@@ -606,27 +622,29 @@ NM=""
 command -v nm >/dev/null 2>&1 && NM=nm
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    DUMPBIN="$(find_dumpbin || true)"
-    if [ -z "$DUMPBIN" ]; then
-      echo "  no dumpbin here, so the import floor is not measured"
-    else
-      dlls="$(pe_dlls exercise-plain.exe)"
-      [ -n "$dlls" ] || { echo "dumpbin read no import table out of the exercise"; exit 1; }
-      extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
-      if [ -n "$extra" ]; then
-        echo "the pool moved the Windows floor: the exercise imports $(echo $extra)"; exit 1
-      fi
-      echo "  imports: $(echo $dlls)"
+    if ! DUMPBIN="$(find_dumpbin)" || [ -z "$DUMPBIN" ]; then
+      echo "FAIL: dependency floor: setup: dumpbin is unavailable on Windows"; exit 76
     fi
+    if ! dlls="$(set -o pipefail; pe_dlls exercise-plain.exe)" || [ -z "$dlls" ]; then
+      echo "FAIL: dependency floor: setup: dumpbin did not read the exercise import table"; exit 76
+    fi
+    extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
+    if [ -n "$extra" ]; then
+      echo "the pool moved the Windows floor: the exercise imports $(echo $extra)"; exit 1
+    fi
+    echo "  imports: $(echo $dlls)"
     ;;
   Darwin)
-    [ -n "$NM" ] || { echo "no nm here, so the symbol floor is not measured"; exit 1; }
+    [ -n "$NM" ] || { echo "FAIL: dependency floor: setup: nm is unavailable"; exit 76; }
     runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _thread_switch _write'
     thread='_close _pthread_kill'
     pool='_environ'
     allowed="$(printf '%s\n' $runtime $thread $pool | sort -u)"
     for bin in exercise-plain exercise-release; do
-      found="$("$NM" -u "$bin" | sed -e 's/^ *//' | awk '{ print $NF }' | sort -u)"
+      if ! symbols="$("$NM" -u "$bin")" || [ -z "$symbols" ]; then
+        echo "FAIL: dependency floor: setup: nm could not read undefined symbols from $bin"; exit 76
+      fi
+      found="$(printf '%s\n' "$symbols" | sed -e 's/^ *//' | awk '{ print $NF }' | sort -u)"
       extra="$(comm -13 <(echo "$allowed") <(echo "$found"))"
       if [ -n "$extra" ]; then
         echo "$bin asks libSystem for more than the list:"
@@ -637,12 +655,13 @@ case "$(uname -s)" in
     echo "  the runtime's names, a thread's ($(echo $thread)) and $pool, and nothing else, plain and release"
     ;;
   *)
-    [ -n "$NM" ] || { echo "no nm here, so the symbol floor is not measured"; exit 1; }
+    [ -n "$NM" ] || { echo "FAIL: dependency floor: setup: nm is unavailable"; exit 76; }
     for bin in exercise-plain exercise-release; do
-      added="$("$NM" -u "$bin" |
-        sed -e 's/^ *[wU] *//' -e 's/@.*$//' |
-        grep -v -E '^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main|environ|__environ)$' |
-        grep -cv '^\s*$')"
+      if ! symbols="$("$NM" -u "$bin")" || [ -z "$symbols" ]; then
+        echo "FAIL: dependency floor: setup: nm could not read undefined symbols from $bin"; exit 76
+      fi
+      added="$(printf '%s\n' "$symbols" | sed -e 's/^ *[wU] *//' -e 's/@.*$//' |
+        awk 'NF && $0 !~ /^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main|environ|__environ)$/ { n++ } END { print n + 0 }')"
       if [ "$added" -ne 0 ]; then
         echo "the pool put $added undefined symbols on $bin's link line:"; "$NM" -u "$bin"; exit 1
       fi
@@ -661,54 +680,68 @@ speed_run() { # workers binary -> this run's "wall_ms at_once"
   local workers="$1" binary="$2" line code pair
   line="$(timeout -k 5 300 "./$binary" speed "$workers" "$TASKS" "$ROUNDS" 2>&1)"
   code=$?
-  if [ "$code" -ne 0 ]; then
-    echo "FAIL: speed: $workers-worker run exited $code (124 or 137 means a timeout): $line" >&2
-    return 1
+  if [ "$code" -eq 76 ]; then
+    printf '%s\n' "$line" >&2
+    return 76
   fi
-  if ! pair="$(printf '%s\n' "$line" | awk -v workers="$workers" '
-    $1 == "workers=" workers && $4 ~ /^wall_ms=[0-9]+$/ && $5 ~ /^at_once=[0-9]+$/ {
-      ms = substr($4, 9); at = substr($5, 9); found++
+  if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+    echo "FAIL: speed: progress hang: the $workers-worker run hit the shell emergency timeout (exit $code)" >&2
+    return 76
+  fi
+  if [ "$code" -ne 0 ]; then
+    echo "FAIL: speed: setup: the $workers-worker run exited $code: $line" >&2
+    return 76
+  fi
+  if ! pair="$(printf '%s\n' "$line" | awk -v workers="$workers" -v tasks="$TASKS" -v rounds="$ROUNDS" '
+    $1 ~ /^workers=/ {
+      found++
+      if (NF != 6 || $1 != "workers=" workers || $2 != "tasks=" tasks ||
+          $3 != "rounds=" rounds || $4 !~ /^wall_ms=[0-9]+$/ ||
+          $5 !~ /^at_once=[0-9]+$/ || $6 !~ /^checksum=[0-9]+$/) {
+        bad = 1
+        next
+      }
+      ms = substr($4, 9); at = substr($5, 9)
     }
     END {
-      if (found != 1 || ms + 0 <= 0) exit 1
+      if (found != 1 || bad || ms + 0 <= 0 || at + 0 > tasks * 100) exit 1
       print ms, at
     }')"; then
-    echo "FAIL: speed: $workers-worker run did not print one valid time and at-once pair: $line" >&2
-    return 1
+    echo "FAIL: speed: setup: $workers-worker run did not print one valid time and at-once pair: $line" >&2
+    return 76
   fi
   printf '%s\n' "$pair"
 }
-# The same floor on the threads that held a task at once.
-holds_at_once() { # at_once_hundredths k
-  [ "$1" -ge $((60 * $2)) ]
-}
 at_once() { awk -v a="$1" 'BEGIN { printf "%.2f", a / 100 }'; }
-K=4
-[ "$CORES" -lt "$K" ] && K="$CORES"
+check_at_once_floor() { # validated at_once_hundredths and k
+  if [ "$1" -lt $((60 * $2)) ]; then
+    echo "FAIL: speed: $2 workers held their tasks $(at_once "$1") at once on average: under 0.6 x $2, which is not parallel"
+    return 1
+  fi
+}
+K=2
+[ "$CORES" -ge 4 ] && K=4
 step "the speedup: $TASKS CPU-bound tasks, one run per worker count, $CORES cores here"
 need_cores 2 "the at-once floor needs at least two workers"
-got="$(speed_run 1 exercise-release)" || exit 1
+got="$(speed_run 1 exercise-release)" || exit $?
 ONE="${got% *}"
 printf '  %2s worker(s): %6s ms, %s at once\n' 1 "$ONE" "$(at_once "${got#* }")"
 MANY=""
 MANY_AT=""
 for w in 2 4 8; do
   [ "$w" -gt "$CORES" ] && break
-  got="$(speed_run "$w" exercise-release)" || exit 1
+  got="$(speed_run "$w" exercise-release)" || exit $?
   ms="${got% *}"
   if ! ratio="$(awk -v a="$ONE" -v b="$ms" 'BEGIN { printf "%.2f", a / b }')"; then
-    echo "FAIL: speed: could not compute the $w-worker speed ratio"; exit 1
+    echo "FAIL: speed: setup: could not compute the $w-worker speed ratio"; exit 76
   fi
   printf '  %2s worker(s): %6s ms, %sx one worker, %s at once\n' "$w" "$ms" "$ratio" "$(at_once "${got#* }")"
   [ "$w" -eq "$K" ] && { MANY="$ms"; MANY_AT="${got#* }"; }
 done
 if [ -z "$MANY" ]; then
-  echo "FAIL: speed: no measurement was made for the required $K-worker run"; exit 1
+  echo "FAIL: speed: setup: no measurement was made for the required $K-worker run"; exit 76
 fi
-if ! holds_at_once "$MANY_AT" "$K"; then
-  echo "$K workers held their tasks $(at_once "$MANY_AT") at once on average: under 0.6 x $K, which is not parallel"
-  exit 1
-fi
+check_at_once_floor "$MANY_AT" "$K" || exit $?
 if ! awk -v one="$ONE" -v many="$MANY" -v k="$K" 'BEGIN {
   if (one / many >= 0.6 * k) result = "above"
   else result = "below"
@@ -746,17 +779,13 @@ echo "  exits 1: $(grep -m1 'deadlock' deadlock.txt)"
 # an accept nobody connects to) beside sleepers and channel receivers. The
 # program is then ended three ways: a task's panic, the main task's panic,
 # and a task's `exit(3)`. Each runs on twelve workers and on the main
-# thread alone. The program's watchdog names a run still going 5 s after
-# its start, which is a cancel that left some wait parked and the join
-# waiting on it. The timeout here is for an exit that never ends. The
-# first run is the virus scanner's first look at a new binary, 11.1 s for
-# one program on the user's Windows 11 machine (12 logical processors),
-# so it is not one of the timed runs.
+# thread alone. The program's five-second watchdog starts after every I/O
+# task has reached the park rendezvous. The shell timeout bounds setup and
+# exit as well.
 step "a panic or an exit ends the process with tasks parked on the poller"
 if ! "$IYI" build "$REPO/bench/panic_exit.iyi" -o panic_exit > build-panic-exit.log 2>&1; then
-  echo "build failed:"; tail -20 build-panic-exit.log; exit 1
+  echo "FAIL: panic: setup: the exercise failed to build"; tail -20 build-panic-exit.log; exit 76
 fi
-timeout -k 5 60 ./panic_exit > /dev/null 2>&1
 for workers in 12 0; do
   where="on 12 workers"
   [ "$workers" = 0 ] && where="on the main thread"
@@ -766,10 +795,11 @@ for workers in 12 0; do
       main-panic) want=1 said="iyi: panic: the main task's panic" ;;
       task-exit) want=3 said='' ;;
     esac
-    timeout -k 5 10 ./panic_exit "$mode" --workers="$workers" > panic-exit.txt 2>&1
+    timeout -k 5 60 ./panic_exit "$mode" --workers="$workers" > panic-exit.txt 2>&1
     code=$?
+    if [ "$code" -eq 76 ]; then cat panic-exit.txt; exit 76; fi
     if [ "$code" -ne "$want" ] || grep -q '^FAIL: ' panic-exit.txt || { [ -n "$said" ] && ! grep -qF "$said" panic-exit.txt; }; then
-      echo "$mode $where exited $code, not $want (124 is an exit that never ended):"; cat panic-exit.txt; exit 1
+      echo "FAIL: panic: setup: $mode $where exited $code, not $want (124 is a timeout)"; cat panic-exit.txt; exit 76
     fi
     ended="$(grep -m1 'every task ended' panic-exit.txt | sed 's/^[a-z-]*: every task ended /, every task ended /')"
     echo "  $mode $where: exits $code$ended"
@@ -910,31 +940,43 @@ echo "  broken copy, the second block left out: refused with no other block coun
 # name; nothing in the tree is touched. An awk that finds an anchor gone
 # exits nonzero, and that fails the gate.
 broken() { # name, awk program[, file in src/iyi[, program in bench[, build flags...]]]
-  local file="${3:-concurrency.iyi}" program="${4:-parallel_exercise}" awk_status
-  mkdir -p "$1/iyi"
-  cp "$REPO"/src/iyi/*.iyi "$1/iyi/"
+  local file="${3:-concurrency.iyi}" program="${4:-parallel_exercise}" awk_status cmp_status
+  mkdir -p "$1/iyi" || { echo "FAIL: $1: setup: could not create the runtime copy"; exit 76; }
+  cp "$REPO"/src/iyi/*.iyi "$1/iyi/" || { echo "FAIL: $1: setup: could not copy the runtime"; exit 76; }
   awk "$2" "$REPO/src/iyi/$file" > "$1/iyi/$file"
   awk_status=$?
   if [ "$awk_status" -ne 0 ]; then
-    echo "the awk for $1 exited $awk_status: an anchor it needs is gone from $file"; exit 1
+    echo "FAIL: $1: setup: the awk exited $awk_status because an anchor is missing or duplicated in $file"; exit 76
   fi
-  if cmp -s "$1/iyi/$file" "$REPO/src/iyi/$file"; then
-    echo "the awk for $1 found nothing to change"; exit 1
+  cmp -s "$1/iyi/$file" "$REPO/src/iyi/$file"
+  cmp_status=$?
+  if [ "$cmp_status" -eq 0 ]; then
+    echo "FAIL: $1: setup: the awk found nothing to change"; exit 76
+  elif [ "$cmp_status" -ne 1 ]; then
+    echo "FAIL: $1: setup: could not compare the generated runtime copy"; exit 76
   fi
   if ! IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "${@:5}" "$REPO/bench/$program.iyi" -o "$1-run" > "build-$1.log" 2>&1; then
-    echo "the broken copy $1 failed to build:"; tail -20 "build-$1.log"; exit 1
+    echo "FAIL: $1: setup: the runtime copy failed to build"; tail -20 "build-$1.log"; exit 76
   fi
 }
 # Mutants must exit 1 with the exact FAIL or panic line; controls must
 # exit with their expected status and exact verdict. Timeouts never count
 # as catches.
+emergency_timeout() { # name, child status
+  if [ "$2" -eq 124 ] || [ "$2" -eq 137 ]; then
+    echo "FAIL: $1: progress hang: the shell emergency timeout stopped the run (exit $2)"
+    exit 76
+  fi
+}
 verdict_caught() { # name, exact verdict, step arguments...
   local name="$1" want="$2" code
   shift 2
   timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
   code=$?
-  if [ "$code" -ne 1 ] || ! grep -qxF -- "FAIL: $want" "$name.txt"; then
-    echo "the broken copy $name did not end at its verdict on its one run (exit $code; want exit 1 and the line \"FAIL: $want\"):"; tail -20 "$name.txt"; exit 1
+  emergency_timeout "$name" "$code"
+  if [ "$code" -eq 76 ]; then cat "$name.txt"; exit 76; fi
+  if [ "$code" -ne 1 ] || [ "$(grep -cxF -- "FAIL: $want" "$name.txt")" -ne 1 ] || [ "$(grep -c '^FAIL: ' "$name.txt")" -ne 1 ]; then
+    echo "FAIL: $name: setup: expected one exact mutant verdict with exit 1, got exit $code"; tail -20 "$name.txt"; exit 76
   fi
   echo "  exits 1 at \"$want\""
 }
@@ -943,8 +985,10 @@ verdict_held() { # name, exact verdict, step arguments...
   shift 2
   timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
   code=$?
-  if [ "$code" -ne 0 ] || ! grep -qxF -- "$want" "$name.txt"; then
-    echo "the hook-only control $name did not pass with its verdict line (exit $code; want exit 0 and the line \"$want\"):"; tail -20 "$name.txt"; exit 1
+  emergency_timeout "$name" "$code"
+  if [ "$code" -eq 76 ]; then cat "$name.txt"; exit 76; fi
+  if [ "$code" -ne 0 ] || [ "$(grep -cxF -- "$want" "$name.txt")" -ne 1 ] || grep -q '^FAIL: ' "$name.txt"; then
+    echo "FAIL: $name: setup: expected one exact control verdict with exit 0, got exit $code"; tail -20 "$name.txt"; exit 76
   fi
   echo "  hook-only control $name passes: \"$want\""
 }
@@ -953,10 +997,23 @@ caught_line() { # name, exact line, step arguments...
   shift 2
   timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
   code=$?
-  if [ "$code" -ne 1 ] || ! grep -qxF -- "$want" "$name.txt"; then
-    echo "the broken copy $name did not exit 1 at \"$want\" (exit $code):"; tail -20 "$name.txt"; exit 1
+  emergency_timeout "$name" "$code"
+  if [ "$code" -eq 76 ]; then cat "$name.txt"; exit 76; fi
+  if [ "$code" -ne 1 ] || [ "$(grep -cxF -- "$want" "$name.txt")" -ne 1 ] || grep -q '^FAIL: ' "$name.txt"; then
+    echo "FAIL: $name: setup: expected one exact panic verdict with exit 1, got exit $code"; tail -20 "$name.txt"; exit 76
   fi
   echo "  exits 1 at \"$want\""
+}
+verdict_watchdog() { # name, exact FAIL line, step arguments...
+  local name="$1" want="$2" code
+  shift 2
+  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
+  code=$?
+  emergency_timeout "$name" "$code"
+  if [ "$code" -ne 76 ] || [ "$(grep -cxF -- "$want" "$name.txt")" -ne 1 ] || [ "$(grep -c '^FAIL: ' "$name.txt")" -ne 1 ]; then
+    echo "FAIL: $name: setup: expected one exact watchdog verdict with exit 76, got exit $code"; tail -20 "$name.txt"; exit 76
+  fi
+  echo "  watchdog control $name exits 76 at \"$want\""
 }
 # The copy-only definitions the forced proofs add to the runtime's files, in
 # awk output only: nothing reaches src/iyi. Each is reached through a -D flag
@@ -995,7 +1052,11 @@ WAKE_DEFS='/^  def self.reschedule : Nil$/ {
   print "    started = __iyi_monotonic_ns"
   print "    while !force_home_completed?"
   print "      IyiThread.spin_pause"
-  print "      raise \"home: copy hook waited for the target post decision\" if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "      if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "        said = \"FAIL: home: progress hang: the copy hook waited for the target post decision\\n\""
+  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "        __iyi_exit(76)"
+  print "      end"
   print "    end"
   print "  end"
   print "  def self.force_idle_seen? : Bool"
@@ -1013,14 +1074,17 @@ WAKE_DEFS='/^  def self.reschedule : Nil$/ {
   print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_fiber).address).value.get"
   print "    return unless Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_posted).address).value.get == 1_u64"
   print "    unless home.idle"
-  print "      puts \"FAIL: home: the targeted post found the root not idle\""
-  print "      __iyi_exit(1)"
+  print "      said = \"FAIL: home: not armed: the targeted post found the root not idle\\n\""
+  print "      __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "      __iyi_exit(76)"
   print "    end"
   print "    unless home.notified"
   print "      puts \"FAIL: home: the targeted idle root was posted but not rung\""
   print "      __iyi_exit(1)"
   print "    end"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_result).address).value.set(1_u64)"
+  print "    {% if !flag?(:copy_hook_watchdog) %}"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_result).address).value.set(1_u64)"
+  print "    {% end %}"
   print "  end"
   print "  def self.force_home_completed? : Bool"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_home_result).address).value.get == 1_u64"
@@ -1078,9 +1142,11 @@ NOW_DEFS='/^  def self.reschedule : Nil$/ {
   print "  def self.force_now_attempt(target : UInt64) : Nil"
   print "    return unless target == Pointer(Atomic(UInt64)).new(pointerof(@@now_target).address).value.get"
   print "    return unless force_now_entered?"
-  print "    if Pointer(Atomic(UInt64)).new(target).value.get != 0_u64"
-  print "      Pointer(Atomic(UInt64)).new(pointerof(@@now_blocked).address).value.set(1_u64)"
-  print "    end"
+  print "    {% if !flag?(:copy_hook_watchdog) %}"
+  print "      if Pointer(Atomic(UInt64)).new(target).value.get != 0_u64"
+  print "        Pointer(Atomic(UInt64)).new(pointerof(@@now_blocked).address).value.set(1_u64)"
+  print "      end"
+  print "    {% end %}"
   print "  end"
   print "  def self.force_now_hold(target : UInt64) : Nil"
   print "    return unless target == Pointer(Atomic(UInt64)).new(pointerof(@@now_target).address).value.get"
@@ -1092,12 +1158,18 @@ NOW_DEFS='/^  def self.reschedule : Nil$/ {
   print "    started = __iyi_monotonic_ns"
   print "    while blocked.value.get == 0_u64 && stored.value.get == 0_u64"
   print "      IyiThread.spin_pause"
-  print "      raise \"now: copy hook waited for the second take\" if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "      if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "        said = \"FAIL: now: progress hang: the copy hook waited for the second take\\n\""
+  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "        __iyi_exit(76)"
+  print "      end"
   print "    end"
   print "  end"
   print "  def self.force_now_stored(target : UInt64) : Nil"
   print "    return unless target == Pointer(Atomic(UInt64)).new(pointerof(@@now_target).address).value.get"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@now_stored).address).value.set(1_u64)"
+  print "    {% if !flag?(:copy_hook_watchdog) %}"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@now_stored).address).value.set(1_u64)"
+  print "    {% end %}"
   print "  end"
   print
   n_defs++
@@ -1145,7 +1217,9 @@ CANCEL_DEFS='/^  def self.reschedule : Nil$/ {
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_held).address).value.get == 1_u64"
   print "  end"
   print "  def self.force_window_release : Nil"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_release).address).value.set(1_u64)"
+  print "    {% if !flag?(:copy_hook_watchdog) %}"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_release).address).value.set(1_u64)"
+  print "    {% end %}"
   print "  end"
   print "  def self.force_window_result : UInt64"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_window_result).address).value.get"
@@ -1161,7 +1235,11 @@ CANCEL_DEFS='/^  def self.reschedule : Nil$/ {
   print "    started = __iyi_monotonic_ns"
   print "    while released.value.get == 0_u64"
   print "      IyiThread.spin_pause"
-  print "      raise \"lostcancel: copy hook waited for release\" if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "      if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "        said = \"FAIL: lostcancel: progress hang: the copy hook waited for release\\n\""
+  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "        __iyi_exit(76)"
+  print "      end"
   print "    end"
   print "  end"
   print
@@ -1185,6 +1263,8 @@ broken lostwake "$WAKE_BUG" concurrency.iyi parallel_exercise -Dlostwake_force
 verdict_caught lostwake 'home: the targeted idle root was posted but not rung' home --watch=5000
 broken lostwake_hook "$WAKE_HOOK" concurrency.iyi parallel_exercise -Dlostwake_force
 verdict_held lostwake_hook 'home: a task finished on a worker and woke the main thread it was joined by' home --watch=5000
+broken lostwake_watchdog "$WAKE_HOOK" concurrency.iyi parallel_exercise -Dlostwake_force -Dcopy_hook_watchdog
+verdict_watchdog lostwake_watchdog 'FAIL: home: progress hang: the copy hook waited for the target post decision' home --watch=5000
 
 step "failure proof: a steal that leaves the task in its victim's queue hands it out twice"
 # Both copies record the first fiber seen at the armed victim, then the
@@ -1323,7 +1403,7 @@ step "failure proof: a cancel that skips tasks waiting in the pool runs them unc
 broken unflagged '/^  def self.cancel\(fiber : IyiFiber\) : Nil$/ { incancel = 1; n_method++ } incancel && /^    fiber.cancelled = true$/ { print "    fiber.cancelled = true unless fiber.home.is_a?(Nil)"; n_flag++; next } incancel && /^  end$/ { incancel = 0 } { print } END { if (n_method != 1 || n_flag != 1) exit 3 }'
 verdict_caught unflagged 'cancel: 32 tasks waiting in the pool ran uncancelled' cancel_unstarted --watch=5000
 
-step "failure proof: a cancel that leaves an io wait parked keeps a panicking program running"
+step "failure proof: a cancel misses the registered reader's io-wait branch"
 # A target reader arms itself before reading. Both copies acknowledge its
 # registration and its cancel_wait branch; only the mutant omits that branch.
 PARKED_COMMON='/^  def self.park_overlapped_current\(/ { inover = 1; n_over++ }
@@ -1359,8 +1439,9 @@ PARKED_DEFS='/^  def self.reschedule : Nil$/ {
   print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_target).address).value.get"
   print "    return if Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_decided).address).value.get != 0_u64"
   print "    unless force_io_registered?"
-  print "      puts \"FAIL: task-panic: target cancellation preceded io registration\""
-  print "      __iyi_exit(1)"
+  print "      said = \"FAIL: task-panic: not armed: target cancellation preceded io registration\\n\""
+  print "      __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "      __iyi_exit(76)"
   print "    end"
   print "    return unless fiber.cancelled"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_io_decided).address).value.set(1_u64)"
@@ -1390,12 +1471,14 @@ for workers in 12 0; do
   verdict_caught parkedio 'task-panic: the registered target missed the io cancellation branch' task-panic "--workers=$workers"
   timeout -k 5 120 ./parkedio_hook-run task-panic "--workers=$workers" > parkedio_hook.txt 2>&1
   code=$?
+  emergency_timeout parkedio_hook "$code"
+  if [ "$code" -eq 76 ]; then cat parkedio_hook.txt; exit 76; fi
   if [ "$code" -ne 1 ] || grep -q '^FAIL: ' parkedio_hook.txt \
-    || ! grep -qxF 'task-panic: the registered target reached the io cancellation branch' parkedio_hook.txt \
-    || ! grep -qxF "iyi: panic: a task's panic, with tasks parked on the poller" parkedio_hook.txt \
-    || ! grep -qxF "iyi: panic: a task panicked: a task's panic, with tasks parked on the poller" parkedio_hook.txt \
+    || [ "$(grep -cxF 'task-panic: the registered target reached the io cancellation branch' parkedio_hook.txt)" -ne 1 ] \
+    || [ "$(grep -cxF "iyi: panic: a task's panic, with tasks parked on the poller" parkedio_hook.txt)" -ne 1 ] \
+    || [ "$(grep -cxF "iyi: panic: a task panicked: a task's panic, with tasks parked on the poller" parkedio_hook.txt)" -ne 1 ] \
     || ! grep -qxE 'task-panic: every task ended [0-9]+ ms after the start' parkedio_hook.txt; then
-    echo "parkedio hook control did not reach its io decision and original panic (exit $code):"; tail -20 parkedio_hook.txt; exit 1
+    echo "FAIL: parkedio_hook: setup: the control did not reach its io decision and original panic (exit $code)"; tail -20 parkedio_hook.txt; exit 76
   fi
   echo "  parkedio control workers=$workers: the registered target reached the io cancellation branch"
 done
@@ -1410,6 +1493,8 @@ broken unlocked "$NOW_BUG" concurrency.iyi parallel_exercise -Dnow_force
 verdict_caught unlocked 'now: a place is still held after both takes' now_forced
 broken unlocked_hook "$NOW_HOOK" concurrency.iyi parallel_exercise -Dnow_force
 verdict_held unlocked_hook 'now: two takes from one full channel on two workers left no place held' now_forced
+broken unlocked_watchdog "$NOW_HOOK" concurrency.iyi parallel_exercise -Dnow_force -Dcopy_hook_watchdog
+verdict_watchdog unlocked_watchdog 'FAIL: now: progress hang: the copy hook waited for the second take' now_forced
 
 step "failure proof: a hand that never marks its select, a cancel lost as a task parks, a word's wake lost before the link"
 # Each channel and each list `park_on` waits in has a lock of its own, so
@@ -1439,6 +1524,8 @@ broken lostcancel "$CANCEL_BUG" concurrency.iyi parallel_exercise -Dlostcancel_f
 verdict_caught lostcancel 'wakes, cancels: the targeted suspend omitted the cancelled claim' wakes --only=cancels --watch=5000
 broken lostcancel_hook "$CANCEL_HOOK" concurrency.iyi parallel_exercise -Dlostcancel_force
 verdict_held lostcancel_hook 'wakes, cancels: the targeted suspend claimed its cancellation' wakes --only=cancels --watch=5000
+broken lostcancel_watchdog "$CANCEL_HOOK" concurrency.iyi parallel_exercise -Dlostcancel_force -Dcopy_hook_watchdog
+verdict_watchdog lostcancel_watchdog 'FAIL: lostcancel: progress hang: the copy hook waited for release' wakes --only=cancels --watch=5000
   # The same word-keyed hook holds the first park at its word check in both
   # copies. A locked check waits for the wake to attempt the lock; an
   # unlocked check waits for the wake to finish before linking the waiter.
@@ -1501,11 +1588,15 @@ inpark && (/^ +if word\.value\.get != seen$/ || /^      IyiChanLock\.unlock\(loc
   print "  end"
   print "  def self.force_lost_attempt(word : Pointer(Atomic(UInt64))) : Nil"
   print "    return unless word.address == Pointer(Atomic(UInt64)).new(pointerof(@@forced_word).address).value.get"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_attempted).address).value.set(1_u64)"
+  print "    {% if !flag?(:copy_hook_watchdog) %}"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_attempted).address).value.set(1_u64)"
+  print "    {% end %}"
   print "  end"
   print "  def self.force_lost_done(word : Pointer(Atomic(UInt64))) : Nil"
   print "    return unless word.address == Pointer(Atomic(UInt64)).new(pointerof(@@forced_word).address).value.get"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke).address).value.set(1_u64)"
+  print "    {% if !flag?(:copy_hook_watchdog) %}"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_woke).address).value.set(1_u64)"
+  print "    {% end %}"
   print "  end"
   print "  def self.force_lost_window(word : Pointer(Atomic(UInt64)), lock : Pointer(Atomic(UInt64))) : Nil"
   print "    return unless word.address == Pointer(Atomic(UInt64)).new(pointerof(@@forced_word).address).value.get"
@@ -1518,7 +1609,11 @@ inpark && (/^ +if word\.value\.get != seen$/ || /^      IyiChanLock\.unlock\(loc
   print "    started = __iyi_monotonic_ns"
   print "    while locked ? attempted.value.get == 0_u64 : woke.value.get == 0_u64"
   print "      IyiThread.spin_pause"
-  print "      raise \"lostword: copy hook waited for its wake\" if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "      if __iyi_monotonic_ns - started > 10000000000_i64"
+  print "        said = \"FAIL: lostword: progress hang: the copy hook waited for its wake\\n\""
+  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "        __iyi_exit(76)"
+  print "      end"
   print "    end"
   print "  end"
   n_defs++
@@ -1537,13 +1632,19 @@ $LOSTWORD_DEFS
 { print }
 $LOSTWORD_END" concurrency.iyi parallel_exercise -Dlostword_force
   verdict_held lostword_hook 'wakes, words: the forced first wake claimed the waiter that linked before its scan' wakes --only=words --watch=5000
+  broken lostword_watchdog "$LOSTWORD_COMMON
+$LOSTWORD_CONTROL
+$LOSTWORD_DEFS
+{ print }
+$LOSTWORD_END" concurrency.iyi parallel_exercise -Dlostword_force -Dcopy_hook_watchdog
+  verdict_watchdog lostword_watchdog 'FAIL: lostword: progress hang: the copy hook waited for its wake' wakes --only=words --watch=5000
 
 step "failure proof: a plain add loses counts when two tasks add at once"
 # The plain add is a load and a store. race_forced puts one task's add between
 # another's load and its store, so the build without atomic adds loses a count
 # on its one run; the atomic build keeps both (step 1 runs race_forced there).
 if ! "$IYI" build --release -Dparallel_plain_add "$REPO/bench/parallel_exercise.iyi" -o plainadd-run > build-plainadd.log 2>&1; then
-  echo "the plain-add build failed:"; tail -20 build-plainadd.log; exit 1
+  echo "FAIL: plainadd: setup: the copy failed to build"; tail -20 build-plainadd.log; exit 76
 fi
 verdict_caught plainadd "race: a task stored the count it read before another task's add landed" race_forced
 
@@ -1563,24 +1664,24 @@ state && /^      IyiScheduler.state.object_id$/ { n_state_current++ }
 line && /^      IyiThread.current_line$/ { n_line_current++ }
 /^  end$/ { state = 0; line = 0 }
 END { if (n_state != 1 || n_line != 1 || n_stale != 1 || n_hoisted != 1 || n_state_before != 1 || n_line_before != 1 || n_state_current != 1 || n_line_current != 1) exit 3 }'
-awk "$TLS_AUDIT" "$REPO/bench/parallel_migrate.iyi" || { echo "TLS mutant or control anchor missing or duplicated"; exit 1; }
+awk "$TLS_AUDIT" "$REPO/bench/parallel_migrate.iyi" || { echo "FAIL: tls: setup: a mutant or control anchor is missing or duplicated"; exit 76; }
 step "failure proof: a thread-local read before a park and kept after it names the thread the task left"
   if ! "$IYI" build --release -Dparallel_stale_tls "$REPO/bench/parallel_migrate.iyi" -o staletls-run > build-staletls.log 2>&1; then
-    echo "the stale thread-local build failed:"; tail -20 build-staletls.log; exit 1
+    echo "FAIL: staletls: setup: the copy failed to build"; tail -20 build-staletls.log; exit 76
   fi
   verdict_caught staletls "channels: a thread-local read after a park named another thread than the one the task resumed on" channels
   if ! "$IYI" build --release "$REPO/bench/parallel_migrate.iyi" -o staletls_hook-run > build-staletls-control.log 2>&1; then
-    echo "the healthy control build failed:"; tail -20 build-staletls-control.log; exit 1
+    echo "FAIL: staletls_hook: setup: the control failed to build"; tail -20 build-staletls-control.log; exit 76
   fi
   verdict_held staletls_hook "channels: the forced task moved to another worker and its thread-local read named that worker" channels
 
   step "failure proof: a thread-local read hoisted out of a loop names the thread the task left once the back-edge check moves it"
   if ! "$IYI" build --release -Dparallel_hoisted_tls "$REPO/bench/parallel_migrate.iyi" -o hoistedtls-run > build-hoistedtls.log 2>&1; then
-    echo "the hoisted thread-local build failed:"; tail -20 build-hoistedtls.log; exit 1
+    echo "FAIL: hoistedtls: setup: the copy failed to build"; tail -20 build-hoistedtls.log; exit 76
   fi
   verdict_caught hoistedtls "loops: a thread-local read after a loop's back-edge check named another thread than the one the task was on" loops
   if ! "$IYI" build --release "$REPO/bench/parallel_migrate.iyi" -o hoistedtls_hook-run > build-hoistedtls-control.log 2>&1; then
-    echo "the healthy control build failed:"; tail -20 build-hoistedtls-control.log; exit 1
+    echo "FAIL: hoistedtls_hook: setup: the control failed to build"; tail -20 build-hoistedtls-control.log; exit 76
   fi
   verdict_held hoistedtls_hook "loops: the forced loop resumed on another worker and its thread-local read named that worker" loops
 
@@ -1726,7 +1827,7 @@ END { if (n_defs != 1 || n_cancel != 1 || n_list != 1 || n_disp != 1 || n_mut !=
   step "failure proof: a close posted to no thread leaves a read on another worker parked"
   case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN* | Windows_NT)
-      echo "  a close on Windows ends the posted read, whose completion any thread takes off the port: there is nothing to post" ;;
+      echo "  noclose and its registration watchdog control: skipped on Windows, where the completion port handles close without this POSIX post" ;;
     *)
       CLOSE_COMMON='/^  def self.wait_posix\(/ { inwait = 1; n_wait++ }
 inwait && /^  end$/ { inwait = 0 }
@@ -1746,7 +1847,9 @@ inclose && /^          other.post_mail$/ { print; print "          force_close_p
   print "  end"
   print "  def self.force_close_registered(fd : Int32) : Nil"
   print "    return unless fd.to_u64 + 1_u64 == Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_fd).address).value.get"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_registered).address).value.set(1_u64)"
+  print "    {% if !flag?(:noclose_withhold_registration) %}"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_registered).address).value.set(1_u64)"
+  print "    {% end %}"
   print "  end"
   print "  def self.force_close_registered? : Bool"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_registered).address).value.get == 1_u64"
@@ -1754,8 +1857,9 @@ inclose && /^          other.post_mail$/ { print; print "          force_close_p
   print "  def self.force_close_missing(fd : Int32) : Nil"
   print "    return unless fd.to_u64 + 1_u64 == Pointer(Atomic(UInt64)).new(pointerof(@@forced_close_fd).address).value.get"
   print "    unless force_close_registered?"
-  print "      puts \"FAIL: closes: the target was closed before io registration\""
-  print "      __iyi_exit(1)"
+  print "      said = \"FAIL: closes: not armed: the target was closed before io registration\\n\""
+  print "      __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "      __iyi_exit(76)"
   print "    end"
   print "    puts \"FAIL: closes: the registered target close was not posted to its reader\""
   print "    __iyi_exit(1)"
@@ -1780,12 +1884,18 @@ $CLOSE_HOOK
 $CLOSE_DEFS
 { print }
 $CLOSE_END" concurrency.iyi parallel_migrate -Dnoclose_force
-      verdict_held noclose_hook 'closes: the registered target close was posted to its reader' closes --watch=5000 ;;
+      verdict_held noclose_hook 'closes: the registered target close was posted to its reader' closes --watch=5000
+      broken noclose_watchdog "$CLOSE_COMMON
+$CLOSE_HOOK
+$CLOSE_DEFS
+{ print }
+$CLOSE_END" concurrency.iyi parallel_migrate -Dnoclose_force -Dnoclose_withhold_registration
+      verdict_watchdog noclose_watchdog 'FAIL: closes: progress hang: the targeted reader did not complete io registration' closes --watch=100 ;;
   esac
 
   step "failure proof: a read made on the thread that closes its socket is a close that never crossed"
   if ! "$IYI" build --release -Dparallel_closes_home "$REPO/bench/parallel_migrate.iyi" -o closeshome-run > build-closeshome.log 2>&1; then
-    echo "the closes-home build failed:"; tail -20 build-closeshome.log; exit 1
+    echo "FAIL: closeshome: setup: the copy failed to build"; tail -20 build-closeshome.log; exit 76
   fi
   verdict_caught closeshome 'closes: the main thread closed a socket on the thread its reader parked on' closes
 
@@ -1962,7 +2072,11 @@ END { if (n_defs != 1 || n_wake != 1 || n_hand != 1 || n_mut != 1 || expect) exi
   print "    limit = __iyi_monotonic_ns + 10_000_000_000_i64"
   print "    until lock.value.compare_and_set(0_u64, 1_u64)[1]"
   print "      IyiThread.spin_pause"
-  print "      raise \"backstop: progress hang: the grab gate did not open in 10000 ms\" if __iyi_monotonic_ns > limit"
+  print "      if __iyi_monotonic_ns > limit"
+  print "        said = \"FAIL: backstop: progress hang: the grab gate did not open in 10000 ms\\n\""
+  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "        __iyi_exit(76)"
+  print "      end"
   print "    end"
   print "  end"
   print ""
@@ -1979,6 +2093,9 @@ END { if (n_defs != 1 || n_wake != 1 || n_hand != 1 || n_mut != 1 || expect) exi
   print ""
   print "  def self.force_target(worker : UInt64, fiber : UInt64) : Nil"
   print "    force_lock"
+  print "    {% if flag?(:copy_hook_watchdog) %}"
+  print "      force_lock"
+  print "    {% end %}"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_fiber).address).value.set(fiber)"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_target).address).value.set(worker)"
   print "    force_unlock"
@@ -2082,6 +2199,8 @@ END { if (n_defs != 1 || n_push != 1 || n_steal != 1 || n_wait_method != 1 || n_
   verdict_caught nobackstop "backstop: the monitor's stuck decision for a held ring omitted its wake_one call" backstop
   broken nobackstop_hook "$NOBACK_HOOK" concurrency.iyi parallel_migrate -Dnobackstop_force
   verdict_held nobackstop_hook "backstop: the monitor's stuck decision for a held ring called wake_one" backstop
+  broken nobackstop_watchdog "$NOBACK_HOOK" concurrency.iyi parallel_migrate -Dnobackstop_force -Dcopy_hook_watchdog
+  verdict_watchdog nobackstop_watchdog 'FAIL: backstop: progress hang: the grab gate did not open in 10000 ms' backstop
 
   case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN* | Windows_NT)
@@ -2257,11 +2376,299 @@ END { if (n_defs != 1 || n_shared != 1 || n_home != 1 || n_look != 1 || n_pre !=
     broken pinned_hook "$PIN_HOOK" concurrency.iyi parallel_migrate -Dpinned_force
     verdict_held pinned_hook "balance: a task woken from the main thread was queued for the pool and resumed on a spare while the worker it parked on was held" balance
 
+# Both copies publish an eligible scheduler decision, not merely a changed
+# switch count. The target waits inside the slow path through a lock refusal.
+TURN_COMMON='/^class IyiWorkers$/ { in_turn_workers = 1; n_turn_workers++ }
+in_turn_workers && /^end$/ { in_turn_workers = 0 }
+in_turn_workers && /^  def self.preempts : UInt64$/ {
+  n_turn_defs++; at_turn_defs = NR
+  print "  @[UnsafeReach(\"copy-only forced turn target, accessed atomically\")]"
+  print "  @@force_turn_fiber : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only forced turn worker, accessed atomically\")]"
+  print "  @@force_turn_worker : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only forced turn switch count, accessed atomically\")]"
+  print "  @@force_turn_switches : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only forced turn rendezvous, accessed atomically\")]"
+  print "  @@force_turn_phase : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only eligible decision, accessed atomically\")]"
+  print "  @@force_turn_eligible : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only forced turn result, accessed atomically\")]"
+  print "  @@force_turn_result : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only forced turn site, accessed atomically\")]"
+  print "  @@force_turn_key : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only forced turn instance, accessed atomically\")]"
+  print "  @@force_turn_instance : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only forced turn loop run, accessed atomically\")]"
+  print "  @@force_turn_run : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only forced turn child, accessed atomically\")]"
+  print "  @@force_turn_child : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only give-up worker, accessed atomically\")]"
+  print "  @@force_turn_giveup : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only child decision, accessed atomically\")]"
+  print "  @@force_turn_child_result : UInt64 = 0_u64"
+  print "  @[UnsafeReach(\"copy-only slow-path watchdog ownership, accessed atomically\")]"
+  print "  @@force_turn_slow_active : UInt64 = 0_u64"
+  print "  def self.force_turn_arm(fiber : UInt64, key : UInt64 = 0_u64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_fiber).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_worker).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_switches).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_phase).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_eligible).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_result).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_key).address).value.set(key)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_instance).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_run).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_child).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_giveup).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_child_result).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_slow_active).address).value.set(0_u64)"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_fiber).address).value.set(fiber)"
+  print "  end"
+  print "  def self.force_turn_ready? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_phase).address).value.get == 1_u64"
+  print "  end"
+  print "  def self.force_turn_release : Nil"
+  print "    {% if !flag?(:copy_hook_watchdog) %}"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_phase).address).value.compare_and_set(1_u64, 2_u64)"
+  print "    {% end %}"
+  print "  end"
+  print "  def self.force_turn_result : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_result).address).value.get"
+  print "  end"
+  print "  def self.force_turn_child_arm(child : UInt64) : Nil"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_child).address).value.set(child)"
+  print "  end"
+  print "  def self.force_turn_child_result : UInt64"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_child_result).address).value.get"
+  print "  end"
+  print "  @[NoPreempt]"
+  print "  def self.force_turn_giveup_enter(st : IyiSchedulerState, fiber : IyiFiber) : Nil"
+  print "    return if Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_child).address).value.get == 0_u64"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_fiber).address).value.get"
+  print "    return unless Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_phase).address).value.get == 2_u64"
+  print "    return unless st.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_worker).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_giveup).address).value.set(st.object_id)"
+  print "  end"
+  print "  @[NoPreempt]"
+  print "  def self.force_turn_candidate(st : IyiSchedulerState, fiber : IyiFiber) : Nil"
+  print "    return unless st.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_giveup).address).value.get"
+  print "    return if fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_child).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_child_result).address).value.set(3_u64)"
+  print "  end"
+  print "  @[NoPreempt]"
+  print "  def self.force_turn_child_deferred(st : IyiSchedulerState, fiber : IyiFiber) : Nil"
+  print "    return unless st.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_giveup).address).value.get"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_child).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_child_result).address).value.compare_and_set(0_u64, 1_u64)"
+  print "  end"
+  print "  @[NoPreempt]"
+  print "  def self.force_turn_giveup_done(st : IyiSchedulerState, following : IyiFiber?) : Nil"
+  print "    active = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_giveup).address)"
+  print "    return unless st.object_id == active.value.get"
+  print "    result = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_child_result).address)"
+  print "    unless result.value.get == 3_u64"
+  print "      if following.is_a?(IyiFiber)"
+  print "        child = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_child).address).value.get"
+  print "        result.value.set(following.object_id == child ? 2_u64 : 3_u64)"
+  print "      elsif result.value.get != 1_u64"
+  print "        result.value.set(3_u64)"
+  print "      end"
+  print "    end"
+  print "    active.value.set(0_u64)"
+  print "  end"
+  print "  def self.force_turn_unit_waiting? : Bool"
+  print "    unit = IyiScheduler.current.unit"
+  print "    unit.is_a?(IyiUnit) && unit.waiting?"
+  print "  end"
+  print "  @[NoPreempt]"
+  print "  def self.force_turn_hang(said : String) : Nil"
+  print "    __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "    __iyi_exit(76)"
+  print "  end"
+  print "  @[NoPreempt]"
+  print "  def self.force_turn_target_on?(st : IyiSchedulerState) : Bool"
+  print "    target = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_fiber).address).value.get"
+  print "    return false if target == 0_u64 || force_turn_result != 0_u64"
+  print "    return false unless Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_phase).address).value.get == 2_u64"
+  print "    return false unless st.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_worker).address).value.get"
+  print "    fiber = IyiScheduler.current?"
+  print "    fiber.is_a?(IyiFiber) && fiber.object_id == target"
+  print "  end"
+  print "  def self.force_turn_slow_active? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_slow_active).address).value.get == 1_u64"
+  print "  end"
+  print "  def self.force_turn_outer_claim? : Bool"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_slow_active).address).value.compare_and_set(0_u64, 2_u64)[1]"
+  print "  end"
+  print "  @[NoPreempt]"
+  print "  def self.force_turn_wait_lock : Nil"
+  print "    force_turn_hang(\"FAIL: forced turn: not armed: the target holds the scheduler lock at its check\\n\") if IyiSchedLock.held_here?"
+  print "    owner = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_slow_active).address)"
+  print "    until owner.value.compare_and_set(0_u64, 1_u64)[1]"
+  print "      IyiThread.park_if_requested"
+  print "      IyiThread.spin_pause"
+  print "    end"
+  print "    started = __iyi_monotonic_ns"
+  print "    while IyiRuntimeLock.held?"
+  print "      IyiThread.park_if_requested"
+  print "      IyiThread.spin_pause"
+  print "      force_turn_hang(\"FAIL: forced turn: progress hang: the runtime lock did not clear at the eligible check in 20000 ms\\n\") if __iyi_monotonic_ns - started > 20000000000_i64"
+  print "    end"
+  print "    owner.value.set(0_u64)"
+  print "  end"
+  print "  @[NoPreempt]"
+  print "  def self.force_turn_decided(st : IyiSchedulerState, fiber : IyiFiber) : Nil"
+  print "    return unless fiber.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_fiber).address).value.get"
+  print "    return unless Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_phase).address).value.get == 2_u64"
+  print "    return unless st.object_id == Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_worker).address).value.get"
+  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_eligible).address).value.compare_and_set(0_u64, 1_u64)"
+  print "  end"
+  print "  @[NoPreempt]"
+  print "  def self.force_turn(key : UInt64 = 0_u64, instance : UInt64 = 0_u64, run : UInt64 = 0_u64, successor : Bool = true) : Nil"
+  print "    target = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_fiber).address).value.get"
+  print "    return if target == 0_u64 || force_turn_result != 0_u64"
+  print "    fiber = IyiScheduler.current?"
+  print "    return unless fiber.is_a?(IyiFiber) && fiber.object_id == target"
+  print "    phase = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_phase).address)"
+  print "    wanted = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_key).address).value.get"
+  print "    if key != wanted"
+  print "      force_turn_hang(\"FAIL: forced turn: not armed: the target entered another hook site before its decision\\n\") if phase.value.get == 2_u64"
+  print "      return"
+  print "    end"
+  print "    st = IyiScheduler.state"
+  print "    force_turn_hang(\"FAIL: forced turn: not armed: the target'"'"'s worker has no preemption word\\n\") if st.preempt_word == 0_u64"
+  print "    word = Pointer(Atomic(UInt64)).new(st.preempt_word)"
+  print "    worker = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_worker).address)"
+  print "    switches = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_switches).address)"
+  print "    eligible = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_eligible).address)"
+  print "    result = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_result).address)"
+  print "    saved_instance = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_instance).address)"
+  print "    saved_run = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_run).address)"
+  print "    if phase.value.get == 0_u64"
+  print "      force_turn_hang(\"FAIL: forced turn: not armed: the target turn has no successor in its loop\\n\") unless successor"
+  print "      owner = Pointer(Atomic(UInt64)).new(pointerof(@@force_turn_slow_active).address)"
+  print "      until owner.value.compare_and_set(0_u64, 1_u64)[1]"
+  print "        IyiThread.park_if_requested"
+  print "        IyiThread.spin_pause"
+  print "      end"
+  print "      worker.value.set(st.object_id)"
+  print "      saved_instance.value.set(instance)"
+  print "      saved_run.value.set(run)"
+  print "      phase.value.set(1_u64)"
+  print "      started = __iyi_monotonic_ns"
+  print "      while phase.value.get == 1_u64"
+  print "        IyiThread.park_if_requested"
+  print "        IyiThread.spin_pause"
+  print "        force_turn_hang(\"FAIL: forced turn: progress hang: the held turn was not released in 20000 ms\\n\") if __iyi_monotonic_ns - started > 20000000000_i64"
+  print "      end"
+  print "      owner.value.set(0_u64)"
+  print "      switches.value.set(st.switches)"
+  print "      word.value.set(1_u64)"
+  print "      return"
+  print "    end"
+  print "    force_turn_hang(\"FAIL: forced turn: not armed: the target turned on another worker\\n\") unless st.object_id == worker.value.get"
+  print "    force_turn_hang(\"FAIL: forced turn: not armed: the target turned in another loop instance\\n\") unless instance == saved_instance.value.get && run == saved_run.value.get"
+  print "    if eligible.value.get != 0_u64"
+  print "      result.value.compare_and_set(0_u64, 1_u64)"
+  print "      return"
+  print "    end"
+  print "    if st.switches == switches.value.get"
+  print "      force_turn_hang(\"FAIL: forced turn: not armed: the raised word went down with no check and no switch\\n\") if word.value.get == 0_u64"
+  print "      result.value.compare_and_set(0_u64, 2_u64)"
+  print "      return"
+  print "    end"
+  print "    force_turn_hang(\"FAIL: forced turn: not armed: the check returned before an eligible decision\\n\")"
+  print "  end"
+  print
+  print; next
+}
+/^  def self.worker_next\(st : IyiSchedulerState\) : IyiFiber\?$/ { in_turn_next = 1; n_turn_next++ }
+in_turn_next && /^  end$/ { in_turn_next = 0 }
+in_turn_next && /^        return nil unless fiber.is_a\?\(IyiFiber\)$/ { n_turn_candidate_guard++; at_turn_candidate_guard = NR }
+in_turn_next && /^        return fiber if take_unit\(st, fiber\)$/ {
+  n_turn_candidate++; at_turn_candidate = NR
+  print "        IyiWorkers.force_turn_candidate(st, fiber)"; print; next
+}
+/^  def self.take_unit\(st : IyiSchedulerState, fiber : IyiFiber\) : Bool$/ { in_turn_take = 1; n_turn_take++ }
+in_turn_take && /^  end$/ { in_turn_take = 0 }
+in_turn_take && /^        unit.waiting = true$/ {
+  n_turn_deferred++; at_turn_deferred = NR
+  print; print "        IyiWorkers.force_turn_child_deferred(st, fiber)"; next
+}
+in_turn_take && /^        drain_unit\(st, unit\) if unit.holder == 0_u64$/ { n_turn_drain++; at_turn_drain = NR }
+in_turn_workers && /^  private def self.give_up\(st : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { in_turn_giveup_common = 1; n_turn_giveup++ }
+in_turn_giveup_common && /^  end$/ { in_turn_giveup_common = 0 }
+in_turn_giveup_common && /^      st.unit = nil$/ { n_turn_handed++; at_turn_handed = NR }
+in_turn_giveup_common && /^      following = IyiScheduler.worker_next\(st\)$/ {
+  n_turn_following++; at_turn_following = NR
+  print "      force_turn_giveup_enter(st, fiber)"; print; print "      force_turn_giveup_done(st, following)"; next
+}
+in_turn_workers && /^    IyiStat\.atomic\(IyiStat::PREEMPTS\)\.value\.get$/ { n_turn_body++; at_turn_body = NR }
+in_turn_workers && /^  def self.preempted : Nil$/ { in_turn_preempted = 1; n_turn_preempted++ }
+in_turn_preempted && /^  end$/ { in_turn_preempted = 0 }
+in_turn_preempted && /^      return if IyiSchedLock.held_here\? \|\| IyiRuntimeLock.held\?$/ {
+  n_turn_refusal++; at_turn_refusal = NR
+  print "      if force_turn_target_on?(st)"
+  print "        force_turn_wait_lock"
+  print "      else"
+  print
+  print "      end"
+  next
+}
+in_turn_preempted && /^      pay$/ { n_turn_pay++; at_turn_pay = NR }
+in_turn_preempted && /^      give_up\(st, fiber\) if turn_wanted\?\(st, fiber\)$/ {
+  n_turn_site++; at_turn_site = NR
+  print "      force_turn_decided(st, fiber)"; print; next
+}'
+TURN_CHECK='n_turn_workers != 1 || n_turn_defs != 1 || n_turn_body != 1 || at_turn_body != at_turn_defs + 1 || n_turn_preempted != 1 || n_turn_refusal != 1 || n_turn_pay != 1 || at_turn_refusal >= at_turn_pay || n_turn_site != 1 || at_turn_site != at_turn_pay + 4 || n_turn_next != 1 || n_turn_candidate_guard != 1 || n_turn_candidate != 1 || at_turn_candidate != at_turn_candidate_guard + 1 || n_turn_take != 1 || n_turn_deferred != 1 || n_turn_drain != 1 || at_turn_drain != at_turn_deferred + 1 || n_turn_giveup != 1 || n_turn_handed != 1 || n_turn_following != 1 || at_turn_following != at_turn_handed + 1'
+TURN="$TURN_COMMON
+{ print }
+END { if ($TURN_CHECK) exit 3 }"
+TOKENLESS_BUG='/^  private def self.give_up\(st : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { in_turn_giveup = 1; n_giveup++ }
+in_turn_giveup && /^  end$/ { in_turn_giveup = 0 }
+in_turn_giveup && /^      return unless unit.hand_to_yielded\(id\)$/ { n_handed++; print "      unit.give"; next }'
+TURN_TOKENLESS="$TURN_COMMON
+$TOKENLESS_BUG
+{ print }
+END { if ($TURN_CHECK || n_giveup != 1 || n_handed != 1) exit 3 }"
+
 step "failure proof: a loop marked @[NoPreempt] holds its worker for its whole computation"
-if ! "$IYI" build --release -Dpreempt_off "$REPO/bench/parallel_preempt.iyi" -o preemptoff-run > build-preemptoff.log 2>&1; then
-  echo "the @[NoPreempt] build failed:"; tail -20 build-preemptoff.log; exit 1
+broken preemptoff "$TURN" concurrency.iyi parallel_preempt -Dslice_force -Dpreempt_off
+verdict_caught preemptoff "slice: the walk turned with its worker's word raised and kept its worker" slice --workers=1
+broken preemptoff_hook "$TURN" concurrency.iyi parallel_preempt -Dslice_force
+verdict_held preemptoff_hook "slice: the walk gave its worker up at the turn after its word was raised" slice --workers=1
+broken forced_turn_watchdog "$TURN" concurrency.iyi parallel_preempt -Dslice_force -Dcopy_hook_watchdog
+verdict_watchdog forced_turn_watchdog 'FAIL: forced turn: progress hang: the held turn was not released in 20000 ms' slice --workers=1
+broken turn_refusal_watchdog "$TURN" concurrency.iyi parallel_preempt -Dslice_force -Dturn_refusal_watchdog
+verdict_watchdog turn_refusal_watchdog 'FAIL: forced turn: progress hang: the runtime lock did not clear at the eligible check in 20000 ms' slice --workers=1
+step "failure proof: a vectorizable sum without preemption keeps its worker"
+broken sumoff "$TURN" concurrency.iyi parallel_preempt --release --emit llvm-ir -Dsum_force -Dpreempt_off
+verdict_caught sumoff "slice: the sum turned with its worker's word raised and kept its worker" slice --workers=1
+broken sumoff_hook "$TURN" concurrency.iyi parallel_preempt --release --emit llvm-ir -Dsum_force
+if ! awk '
+  /^define / {
+    line = $0
+    gsub(/\.3A\./, ":", line)
+    gsub(/\.3C\./, "<", line)
+    inside = (line ~ /ParallelPreempt::forced_sum</)
+    if (inside) found++
+    next
+  }
+  inside && /^}/ { inside = 0; next }
+  inside && index($0, "call void @__iyi_preempt()") { checks++ }
+  inside && /[[:space:]]add[[:space:]].*<[0-9]+ x i64>/ { vector_add++ }
+  END {
+    if (found != 1 || checks == 0) {
+      print "FAIL: sumoff_hook: setup: the checked forced_sum body or its preemption check is missing"
+      exit 76
+    }
+    if (vector_add > 0) print "  forced_sum: the release IR contains vector integer addition"
+    else print "  forced_sum: vectorization is not proven by the release IR"
+  }
+' sumoff_hook-run.ll; then
+  exit 76
 fi
-verdict_caught preemptoff 'slice: the short task queued before the walk ran only after the walk ended' slice --workers=1
+verdict_held sumoff_hook "slice: the sum gave its worker up at the turn after its word was raised" slice --workers=1
 
 step "failure proof: a monitor that never raises a worker's word preempts nothing"
 # At the armed worker's first decision, both copies lower its word just
@@ -2464,19 +2871,19 @@ END { if (n_defs != 1 || n_look_method != 1 || n_tick_ns != 1 || n_ticks != 1 ||
 # proof any more, and is not run.
 step "failure proof: a check that calls the thread-local accessor at every back-edge"
 if [ "$(uname -s)" = Linux ]; then
-  echo "  the check on Linux never calls the accessor: the copy builds the same code, so there is nothing to fail"
+  echo "  accessor: skipped on Linux, where the flag builds the same check without an accessor call"
 else
   if ! "$IYI" build --release --emit llvm-ir -Dpreempt_check_accessor "$REPO/bench/parallel_preempt.iyi" -o accessor-run > build-accessor.log 2>&1; then
-    echo "the accessor build failed:"; tail -20 build-accessor.log; exit 1
+    echo "FAIL: accessor: setup: the copy failed to build"; tail -20 build-accessor.log; exit 76
   fi
-  if tight_checks accessor-run.ll > accessor.txt 2>&1; then
-    echo "the broken copy accessor was not caught by the tight loops' checks:"; cat accessor.txt; exit 1
-  fi
-  if ! grep -q '^FAIL: tight checks: .* call the thread-local accessor' accessor.txt; then
-    echo "the tight loops' checks failed the accessor copy some other way:"; cat accessor.txt; exit 1
+  tight_checks accessor-run.ll > accessor.txt 2>&1
+  code=$?
+  want='FAIL: tight checks: spin calls the thread-local accessor *IyiWorkers::preempt at a back-edge'
+  if [ "$code" -ne 1 ] || [ "$(grep -cxF -- "$want" accessor.txt)" -ne 1 ] || [ "$(grep -c '^FAIL: ' accessor.txt)" -ne 1 ]; then
+    echo "FAIL: accessor: setup: the checker did not exit 1 at its exact accessor line (exit $code)"; cat accessor.txt; exit 76
   fi
   sed '/^FAIL: /d; s/^/  /' accessor.txt
-  echo "  exits 1 at \"$(grep -m1 '^FAIL: ' accessor.txt | sed 's/^FAIL: //')\""
+  echo "  exits 1 at \"${want#FAIL: }\""
 fi
 
 step "failure proof: a slow half that does not poll leaves a connection in a busy worker's poller"
@@ -2513,7 +2920,9 @@ NOPOLL_DEFS='/^  def self.preempts : UInt64$/ {
   print "    return if target == 0_u64 || st.object_id != target"
   print "    return if Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_expected).address).value.get == 0_u64"
   print "    entered = Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_entered).address).value.get"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_result).address).value.compare_and_set(0_u64, entered == 1_u64 ? 1_u64 : 2_u64)"
+  print "    {% if !flag?(:nopoll_withhold_decision) %}"
+  print "      Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_result).address).value.compare_and_set(0_u64, entered == 1_u64 ? 1_u64 : 2_u64)"
+  print "    {% end %}"
   print "  end"
   print "  def self.force_poll_result : UInt64"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_poll_result).address).value.get"
@@ -2559,6 +2968,8 @@ broken nopoll "$NOPOLL_BUG" concurrency.iyi parallel_preempt -Dnopoll_force
 verdict_caught nopoll "poller: a preemption with a read waiting did not poll its worker's poller" poller --workers=1
 broken nopoll_hook "$NOPOLL_HOOK" concurrency.iyi parallel_preempt -Dnopoll_force
 verdict_held nopoll_hook "poller: a preemption with a read waiting polled its worker's poller" poller --workers=1
+broken nopoll_watchdog "$NOPOLL_HOOK" concurrency.iyi parallel_preempt -Dnopoll_force -Dnopoll_withhold_decision
+verdict_watchdog nopoll_watchdog 'FAIL: poller: progress hang: the armed worker made no poll decision in 10000 ms' poller --workers=1
 
 step "failure proof: a word the monitor raised for the task before preempts the task switched in after it"
 # The monitor waits at the next look's entry. That rendezvous also drains
@@ -2579,10 +2990,23 @@ STALE_DEFS='/^  def self.preempts : UInt64$/ {
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_target).address).value.set(state)"
   print "  end"
   print "  def self.force_stale_close_gate : Nil"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_gate).address).value.set(1_u64)"
+  print "    gate = Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_gate).address)"
+  print "    return if gate.value.compare_and_set(0_u64, 1_u64)[1]"
+  print "    while gate.value.get == 4_u64"
+  print "      IyiThread.park_if_requested"
+  print "      IyiThread.spin_pause"
+  print "    end"
+  print "    said = \"FAIL: stale: not armed: the monitor gate had an unexpected state before closing\\n\""
+  print "    __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "    __iyi_exit(76)"
   print "  end"
   print "  def self.force_stale_gate_state : UInt64"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_gate).address).value.get"
+  print "  end"
+  print "  def self.force_stale_timeout_claim? : Bool"
+  print "    gate = Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_gate).address)"
+  print "    return true if gate.value.compare_and_set(0_u64, 4_u64)[1]"
+  print "    gate.value.compare_and_set(1_u64, 4_u64)[1]"
   print "  end"
   print "  def self.force_stale_gate : Nil"
   print "    gate = Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_gate).address)"
@@ -2590,8 +3014,9 @@ STALE_DEFS='/^  def self.preempts : UInt64$/ {
   print "    limit = __iyi_monotonic_ns + 10000000000_i64"
   print "    while gate.value.get == 2_u64"
   print "      if __iyi_monotonic_ns > limit"
-  print "        gate.value.compare_and_set(2_u64, 4_u64)"
-  print "        return"
+  print "        said = \"FAIL: stale: progress hang: the monitor gate was not released by the target switch in 10000 ms\\n\""
+  print "        __iyi_write(2, said.to_unsafe.as(Void*), said.bytesize.to_u64)"
+  print "        __iyi_exit(76)"
   print "      end"
   print "      IyiThread.spin_pause"
   print "    end"
@@ -2609,7 +3034,9 @@ STALE_DEFS='/^  def self.preempts : UInt64$/ {
   print "    gate = Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_gate).address)"
   print "    return unless gate.value.get == 2_u64"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_word).address).value.compare_and_set(0_u64, word == 0_u64 ? 1_u64 : 2_u64)"
-  print "    gate.value.compare_and_set(2_u64, 3_u64)"
+  print "    {% if !flag?(:copy_hook_watchdog) %}"
+  print "      gate.value.compare_and_set(2_u64, 3_u64)"
+  print "    {% end %}"
   print "  end"
   print "  def self.force_stale_word : UInt64"
   print "    Pointer(Atomic(UInt64)).new(pointerof(@@forced_stale_word).address).value.get"
@@ -2660,6 +3087,8 @@ broken stale_hook "$STALE_HOOK" concurrency.iyi parallel_preempt -Dstale_force
 verdict_held stale_hook "fresh: the switch after a task held its raised word lowered the word" fresh --workers=1
 broken stale_release_hook "$STALE_HOOK" concurrency.iyi parallel_preempt --release -Dstale_force
 verdict_held stale_release_hook "fresh: the switch after a task held its raised word lowered the word" fresh --workers=1
+broken stale_watchdog "$STALE_HOOK" concurrency.iyi parallel_preempt -Dstale_force -Dcopy_hook_watchdog
+verdict_watchdog stale_watchdog 'FAIL: stale: progress hang: the monitor gate was not released by the target switch in 10000 ms' fresh --workers=1
 
 step "failure proof: a port whose packets only the thread their task parked on runs leaves an answer behind a computation"
 case "$(uname -s)" in
@@ -2733,12 +3162,10 @@ END { if (methods != 1 || n != 1) exit 3 }' concurrency.iyi completions_taken
 esac
 
 step "failure proof: a preempted task that gives its unit's token away lets its child run inside it"
-broken tokenless '/^  private def self.give_up\(st : IyiSchedulerState, fiber : IyiFiber\) : Nil$/ { inside = 1; methods++ }
-inside && /^  end$/ { inside = 0 }
-inside && /^      return unless unit.hand_to_yielded\(id\)$/ { n++; print "      unit.give"; next }
-{ print }
-END { if (methods != 1 || n != 1) exit 3 }' concurrency.iyi parallel_preempt
+broken tokenless "$TURN_TOKENLESS" concurrency.iyi parallel_preempt -Dtokenless_force
 verdict_caught tokenless 'unit: a task of the same unit ran inside the preempted task' unit --workers=1
+broken tokenless_hook "$TURN" concurrency.iyi parallel_preempt -Dtokenless_force
+verdict_held tokenless_hook "unit: the same-unit child waited on its unit at the computing task's eligible preemption decision" unit --workers=1
 
 step "failure proof: the prelude's library compiled as the runtime's holds its worker through a sort, a copy, a growth and a join"
 # The same loop hooks and scheduler definitions go into both copies. Only
@@ -2747,14 +3174,14 @@ LIB_POLL_ARRAY='/^  def join\(separator : String\) : String$/ { in_join = 1; n_j
 in_join && /^  end$/ { in_join = 0 }
 in_join && /^      each do \|value\|$/ {
   n_join_loop++; at_join_loop = NR
-  print; print "        IyiWorkers.force_lib_turn"; next
+  print; print "        IyiWorkers.force_turn(4_u64, object_id, 0_u64, first && @size > 1)"; next
 }
 in_join && /^        io << separator unless first$/ { n_join_body++; at_join_body = NR }
 /^  def sort_in_place\(& : T, T -> Int32\) : self$/ { in_sort = 1; n_sort_def++ }
 in_sort && /^  end$/ { in_sort = 0 }
 in_sort && /^      while index < finish$/ {
   n_sort_loop++; at_sort_loop = NR
-  print; print "        IyiWorkers.force_lib_turn"; next
+  print; print "        IyiWorkers.force_turn(1_u64, object_id, start.to_u64, index + 1 < finish)"; next
 }
 in_sort && /^        value = @buffer\[index\]$/ { n_sort_body++; at_sort_body = NR }
 { print }
@@ -2766,7 +3193,7 @@ LIB_POLL_STRING='/^  def copy_from\(source : Pointer\(T\), count : Int32\) : Nil
 inside && /^  end$/ { inside = 0 }
 inside && /^    while index < count$/ {
   n_loop++; at_loop = NR
-  print; print "      IyiWorkers.force_lib_turn"; next
+  print; print "      IyiWorkers.force_turn(2_u64, self.address, 0_u64, count - index > 1048576)"; next
 }
 inside && /^      run = count - index > 1048576 \? 1048576 : count - index$/ { n_body++; at_body = NR }
 { print }
@@ -2775,113 +3202,11 @@ LIB_POLL_HASH='/^  private def grow : Nil$/ { inside = 1; n_def++ }
 inside && /^  end$/ { inside = 0 }
 inside && /^    while entry < old_used$/ {
   n_loop++; at_loop = NR
-  print; print "      IyiWorkers.force_lib_turn"; next
+  print; print "      IyiWorkers.force_turn(3_u64, object_id, 0_u64, entry + 1 < old_used)"; next
 }
 inside && /^      unless old_gone\.address != 0_u64 && old_gone\[entry\]$/ { n_body++; at_body = NR }
 { print }
 END { if (n_def != 1 || n_loop != 1 || n_body != 1 || at_body != at_loop + 1) exit 3 }'
-LIB_DEFS='/^class IyiWorkers$/ { in_workers = 1; n_workers++ }
-in_workers && /^end$/ { in_workers = 0 }
-in_workers && /^  def self.preempts : UInt64$/ {
-  n_defs++; at_defs = NR
-  print "  @[UnsafeReach(\"copy-only library turn target, accessed atomically\")]"
-  print "  @@force_lib_fiber : UInt64 = 0_u64"
-  print "  @[UnsafeReach(\"copy-only library turn owner, accessed atomically\")]"
-  print "  @@force_lib_worker : UInt64 = 0_u64"
-  print "  @[UnsafeReach(\"copy-only library turn switch count, accessed atomically\")]"
-  print "  @@force_lib_switches : UInt64 = 0_u64"
-  print "  @[UnsafeReach(\"copy-only library turn rendezvous, accessed atomically\")]"
-  print "  @@force_lib_phase : UInt64 = 0_u64"
-  print "  @[UnsafeReach(\"copy-only short task witness, accessed atomically\")]"
-  print "  @@force_lib_short : UInt64 = 0_u64"
-  print "  @[UnsafeReach(\"copy-only library turn result, accessed atomically\")]"
-  print "  @@force_lib_result : UInt64 = 0_u64"
-  print ""
-  print "  def self.force_lib_arm(fiber : UInt64) : Nil"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_worker).address).value.set(0_u64)"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_switches).address).value.set(0_u64)"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_phase).address).value.set(0_u64)"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_short).address).value.set(0_u64)"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_result).address).value.set(0_u64)"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_fiber).address).value.set(fiber)"
-  print "  end"
-  print ""
-  print "  def self.force_lib_disarm : Nil"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_fiber).address).value.set(0_u64)"
-  print "  end"
-  print ""
-  print "  def self.force_lib_ready? : Bool"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_phase).address).value.get == 1_u64"
-  print "  end"
-  print ""
-  print "  def self.force_lib_release : Nil"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_phase).address).value.compare_and_set(1_u64, 2_u64)"
-  print "  end"
-  print ""
-  print "  def self.force_lib_result : UInt64"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_result).address).value.get"
-  print "  end"
-  print ""
-  print "  def self.force_lib_note_short(worker : UInt64) : Nil"
-  print "    phase = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_phase).address).value.get"
-  print "    owner = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_worker).address).value.get"
-  print "    decision = phase == 2_u64 && worker == owner ? 1_u64 : 2_u64"
-  print "    Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_short).address).value.compare_and_set(0_u64, decision)"
-  print "  end"
-  print ""
-  print "  @[NoPreempt]"
-  print "  def self.force_lib_turn : Nil"
-  print "    target = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_fiber).address).value.get"
-  print "    return if target == 0_u64 || force_lib_result != 0_u64"
-  print "    fiber = IyiScheduler.current?"
-  print "    return unless fiber.is_a?(IyiFiber) && fiber.object_id == target"
-  print "    st = IyiScheduler.state"
-  print "    phase = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_phase).address)"
-  print "    result = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_result).address)"
-  print "    if phase.value.get == 0_u64"
-  print "      word = Pointer(Atomic(UInt64)).new(st.preempt_word)"
-  print "      started = __iyi_monotonic_ns"
-  print "      while word.value.get == 0_u64"
-  print "        if __iyi_monotonic_ns - started >= 20000000000_i64"
-  print "          result.value.compare_and_set(0_u64, 3_u64)"
-  print "          phase.value.set(3_u64)"
-  print "          return"
-  print "        end"
-  print "        IyiThread.spin_pause"
-  print "      end"
-  print "      Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_worker).address).value.set(st.object_id)"
-  print "      Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_switches).address).value.set(st.switches)"
-  print "      phase.value.set(1_u64)"
-  print "      started = __iyi_monotonic_ns"
-  print "      while phase.value.get == 1_u64"
-  print "        if __iyi_monotonic_ns - started >= 20000000000_i64"
-  print "          result.value.compare_and_set(0_u64, 5_u64)"
-  print "          phase.value.set(3_u64)"
-  print "          return"
-  print "        end"
-  print "        IyiThread.spin_pause"
-  print "      end"
-  print "    elsif phase.value.get == 2_u64"
-  print "      before = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_switches).address).value.get"
-  print "      owner = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_worker).address).value.get"
-  print "      short = Pointer(Atomic(UInt64)).new(pointerof(@@force_lib_short).address).value.get"
-  print "      if st.object_id == owner && st.switches != before && short == 1_u64"
-  print "        decision = 1_u64"
-  print "      elsif st.object_id == owner && st.switches == before && short == 0_u64"
-  print "        decision = 2_u64"
-  print "      else"
-  print "        decision = 4_u64"
-  print "      end"
-  print "      result.value.compare_and_set(0_u64, decision)"
-  print "      phase.value.set(3_u64)"
-  print "    end"
-  print "  end"
-  print ""
-  print; next
-}
-in_workers && /^    IyiStat\.atomic\(IyiStat::PREEMPTS\)\.value\.get$/ { n_body++; at_body = NR }
-{ print }
-END { if (n_workers != 1 || n_defs != 1 || n_body != 1 || at_body != at_defs + 1) exit 3 }'
 LIB_INLINE='/^require "\.\/(float|range|set)"$/ {
   name = $2; gsub(/"|\.\//, "", name); count[name]++; position[name] = NR
 }
@@ -2905,25 +3230,29 @@ lib_awk() { # label, source, destination, awk program
   awk "$4" "$source" > "$destination"
   status=$?
   if [ "$status" -ne 0 ]; then
-    echo "the awk for $label exited $status: an anchor is missing or duplicated"; exit 1
+    echo "FAIL: $label: setup: the awk exited $status because an anchor is missing or duplicated"; exit 76
   fi
-  if cmp -s "$source" "$destination"; then
-    echo "the awk for $label found nothing to change"; exit 1
+  cmp -s "$source" "$destination"
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    echo "FAIL: $label: setup: the awk found nothing to change"; exit 76
+  elif [ "$status" -ne 1 ]; then
+    echo "FAIL: $label: setup: could not compare the generated copy"; exit 76
   fi
 }
-mkdir -p libhooked libruntime/iyi libruntime_hook/iyi || exit 1
+mkdir -p libhooked libruntime/iyi libruntime_hook/iyi || { echo "FAIL: libruntime: setup: could not create the runtime copies"; exit 76; }
 lib_awk libruntime-array "$REPO/src/iyi/array.iyi" libhooked/array.iyi "$LIB_POLL_ARRAY"
 lib_awk libruntime-string "$REPO/src/iyi/string.iyi" libhooked/string.iyi "$LIB_POLL_STRING"
 lib_awk libruntime-hash "$REPO/src/iyi/hash.iyi" libhooked/hash.iyi "$LIB_POLL_HASH"
-lib_awk libruntime-defs "$REPO/src/iyi/concurrency.iyi" libhooked/concurrency.iyi "$LIB_DEFS"
+lib_awk libruntime-defs "$REPO/src/iyi/concurrency.iyi" libhooked/concurrency.iyi "$TURN"
 for copy in libruntime libruntime_hook; do
-  cp "$REPO"/src/iyi/*.iyi "$copy/iyi/" || exit 1
-  cp libhooked/*.iyi "$copy/iyi/" || exit 1
+  cp "$REPO"/src/iyi/*.iyi "$copy/iyi/" || { echo "FAIL: $copy: setup: could not copy the runtime"; exit 76; }
+  cp libhooked/*.iyi "$copy/iyi/" || { echo "FAIL: $copy: setup: could not copy the hooks"; exit 76; }
 done
 lib_awk libruntime-inline "$REPO/src/iyi/prelude.iyi" libruntime/iyi/prelude.iyi "$LIB_INLINE"
 for copy in libruntime libruntime_hook; do
   if ! IYI_PATH="$WORK/$copy${PSEP}$REPO/src" "$IYI" build -Dlibruntime_force "$REPO/bench/parallel_preempt_lib.iyi" -o "$copy-run" > "build-$copy.log" 2>&1; then
-    echo "the library copy $copy failed to build:"; tail -20 "build-$copy.log"; exit 1
+    echo "FAIL: $copy: setup: the library copy failed to build"; tail -20 "build-$copy.log"; exit 76
   fi
 done
 for proof in sort copy rehash join; do
@@ -2935,99 +3264,98 @@ done
 # around its loop of runs, as it was, and darwin's anchor in the entry
 # block (`-Dpreempt_anchor_entry`), which only darwin's makes by a call.
 step "failure proof: a copy whose every run goes through the loop of runs checks however short it is"
-mkdir -p copyruns/iyi
-cp "$REPO"/src/iyi/*.iyi copyruns/iyi/
-if ! awk '/^  def copy_from\(source : Pointer\(T\), count : Int32\) : Nil$/ { inside = 1; methods++ }
+mkdir -p copyruns/iyi || { echo "FAIL: copyruns: setup: could not create the runtime copy"; exit 76; }
+cp "$REPO"/src/iyi/*.iyi copyruns/iyi/ || { echo "FAIL: copyruns: setup: could not copy the runtime"; exit 76; }
+lib_awk copyruns "$REPO/src/iyi/string.iyi" copyruns/iyi/string.iyi '/^  def copy_from\(source : Pointer\(T\), count : Int32\) : Nil$/ { inside = 1; methods++ }
 inside && /^  end$/ { inside = 0 }
 inside && /^    return copy_run\(source, count\) if count <= 1048576$/ { n++; next }
 { print }
-END { if (methods != 1 || n != 1) exit 3 }' "$REPO/src/iyi/string.iyi" > copyruns/iyi/string.iyi; then
-  echo "the awk for copyruns found a missing or duplicate anchor"; exit 1
-fi
-cmp -s copyruns/iyi/string.iyi "$REPO/src/iyi/string.iyi" && { echo "the awk for copyruns found nothing to change"; exit 1; }
+END { if (methods != 1 || n != 1) exit 3 }'
 if ! IYI_PATH="$WORK/copyruns${PSEP}$REPO/src" "$IYI" build --release --emit llvm-ir "$REPO/bench/parallel_preempt_lib.iyi" -o copyruns-run > build-copyruns.log 2>&1; then
-  echo "the copyruns copy failed to build:"; tail -20 build-copyruns.log; exit 1
+  echo "FAIL: copyruns: setup: the copy failed to build"; tail -20 build-copyruns.log; exit 76
 fi
-if copy_checks copyruns-run.ll > copyruns.txt 2>&1; then
-  echo "the broken copy copyruns was not caught by the short-copy checks:"; cat copyruns.txt; exit 1
+copy_checks copyruns-run.ll > copyruns.txt 2>&1
+code=$?
+want='FAIL: copy checks: every copy in copy_bytes passes a check before it returns, however short'
+if [ "$code" -ne 1 ] || [ "$(grep -cxF -- "$want" copyruns.txt)" -ne 1 ] || [ "$(grep -c '^FAIL: ' copyruns.txt)" -ne 1 ]; then
+  echo "FAIL: copyruns: setup: the checker did not exit 1 at its exact copy line (exit $code)"; cat copyruns.txt; exit 76
 fi
-grep -q '^FAIL: copy checks: every copy' copyruns.txt || { echo "the short-copy checks failed copyruns some other way:"; cat copyruns.txt; exit 1; }
-echo "  exits 1 at \"$(grep -m1 '^FAIL: ' copyruns.txt | sed 's/^FAIL: //')\""
+echo "  exits 1 at \"${want#FAIL: }\""
 
 step "failure proof: darwin's anchor in the entry block calls the accessor at every copy"
 if [ "$(uname -s)" != Darwin ]; then
-  echo "  the anchor here is a constant or a load and calls nothing: the copy builds the same code, so there is nothing to fail"
+  echo "  anchorentry: skipped outside Darwin, where this anchor does not call an accessor"
 else
   if ! "$IYI" build --release --emit llvm-ir -Dpreempt_anchor_entry "$REPO/bench/parallel_preempt_lib.iyi" -o anchorentry-run > build-anchorentry.log 2>&1; then
-    echo "the anchor-at-entry build failed:"; tail -20 build-anchorentry.log; exit 1
+    echo "FAIL: anchorentry: setup: the copy failed to build"; tail -20 build-anchorentry.log; exit 76
   fi
-  if copy_checks anchorentry-run.ll > anchorentry.txt 2>&1; then
-    echo "the broken copy anchorentry was not caught by the short-copy checks:"; cat anchorentry.txt; exit 1
+  copy_checks anchorentry-run.ll > anchorentry.txt 2>&1
+  code=$?
+  want='FAIL: copy checks: the entry block of copy_bytes calls the thread-local accessor *IyiWorkers::preempt, which every copy then pays'
+  if [ "$code" -ne 1 ] || [ "$(grep -cxF -- "$want" anchorentry.txt)" -ne 1 ] || [ "$(grep -c '^FAIL: ' anchorentry.txt)" -ne 1 ]; then
+    echo "FAIL: anchorentry: setup: the checker did not exit 1 at its exact accessor line (exit $code)"; cat anchorentry.txt; exit 76
   fi
-  grep -q '^FAIL: copy checks: the entry block' anchorentry.txt || { echo "the short-copy checks failed anchorentry some other way:"; cat anchorentry.txt; exit 1; }
-  echo "  exits 1 at \"$(grep -m1 '^FAIL: ' anchorentry.txt | sed 's/^FAIL: //')\""
+  echo "  exits 1 at \"${want#FAIL: }\""
 fi
 
 step "failure proof: a recursion marked @[NoPreempt] holds its worker for its whole computation"
-if ! "$IYI" build -Dpreempt_off "$REPO/bench/parallel_preempt_lib.iyi" -o recursionoff-run > build-recursionoff.log 2>&1; then
-  echo "the @[NoPreempt] build failed:"; tail -20 build-recursionoff.log; exit 1
-fi
-verdict_caught recursionoff 'fib: the short task queued before the call ran only after the call ended' fib --workers=1
+broken recursionoff "$TURN" concurrency.iyi parallel_preempt_lib -Drecursion_force -Dpreempt_off
+verdict_caught recursionoff "fib: the recursion entered a call with its worker's word raised and kept its worker" fib --workers=1
+broken recursionoff_hook "$TURN" concurrency.iyi parallel_preempt_lib -Drecursion_force
+verdict_held recursionoff_hook "fib: the recursion gave its worker up at the call after its word was raised" fib --workers=1
 
 step "failure proof: a scheduler the compiler takes for a library's checks, and the audit names where"
-[ -n "$PY" ] || { echo "no python here to read the IR with: the audit cannot run"; exit 1; }
-  # `concurrency.iyi` renamed `scheduler.iyi`: the compiler's runtime is
-  # the prelude's files of three names (`codegen.cr#IYI_RUNTIME_FILES`),
-  # and the audit's is wherever the scheduler is written.
-  mkdir -p rtout/iyi
-  cp "$REPO"/src/iyi/*.iyi rtout/iyi/
-  mv rtout/iyi/concurrency.iyi rtout/iyi/scheduler.iyi
-  if ! awk '$0 == "{% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}" { platforms++; expect = 1; print; next }
+[ -n "$PY" ] || { echo "FAIL: rtout: setup: Python is unavailable for the audit"; exit 76; }
+  # `concurrency.iyi` renamed `scheduler.iyi`: the compiler treats it as
+  # a library, while the audit finds its scheduler functions by identity.
+  mkdir -p rtout/iyi || { echo "FAIL: rtout: setup: could not create the runtime copy"; exit 76; }
+  cp "$REPO"/src/iyi/*.iyi rtout/iyi/ || { echo "FAIL: rtout: setup: could not copy the runtime"; exit 76; }
+  mv rtout/iyi/concurrency.iyi rtout/iyi/scheduler.iyi || { echo "FAIL: rtout: setup: could not rename the scheduler"; exit 76; }
+  lib_awk rtout "$REPO/src/iyi/prelude.iyi" rtout/iyi/prelude.iyi '$0 == "{% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}" { platforms++; expect = 1; print; next }
 expect { if ($0 != "  require \"./concurrency\"") exit 3; expect = 0 }
 /^  require "\.\/concurrency"$/ { n++; print "  require \"./scheduler\""; next }
 { print }
-END { if (platforms != 1 || n != 1 || expect) exit 3 }' \
-    "$REPO/src/iyi/prelude.iyi" > rtout/iyi/prelude.iyi; then
-    echo "the awk for rtout found a missing, duplicate, or misplaced anchor"; exit 1
-  fi
-  cmp -s rtout/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk for rtout found nothing to change"; exit 1; }
+END { if (platforms != 1 || n != 1 || expect) exit 3 }'
   if ! IYI_PATH="$WORK/rtout${PSEP}$REPO/src" "$IYI" build --emit llvm-ir "$REPO/bench/parallel_preempt_lib.iyi" -o rtout-run > build-rtout.log 2>&1; then
-    echo "the renamed scheduler failed to build:"; tail -20 build-rtout.log; exit 1
+    echo "FAIL: rtout: setup: the renamed scheduler failed to build"; tail -20 build-rtout.log; exit 76
   fi
-  if "$PY" "$REPO/bench/preempt_audit.py" rtout-run.ll > rtout.txt 2>&1; then
-    echo "the audit passed a scheduler compiled with checks:"; cat rtout.txt; exit 1
+  "$PY" "$REPO/bench/preempt_audit.py" rtout-run.ll > rtout.txt 2>&1
+  code=$?
+  audit_count="$(awk 'NR == 1 && /^preempt audit: [1-9][0-9]* function\(s\) the runtime reaches hold a preemption check:$/ { print $3 }' rtout.txt)"
+  want="preempt audit: $audit_count function(s) the runtime reaches hold a preemption check:"
+  if [ "$code" -ne 1 ] || [ -z "$audit_count" ] || [ "$(grep -cxF -- "$want" rtout.txt)" -ne 1 ]; then
+    echo "FAIL: rtout: setup: the audit did not exit 1 at its exact checked-runtime line (exit $code)"; cat rtout.txt; exit 76
   fi
-  grep -q 'hold a preemption check' rtout.txt || { echo "the audit failed some other way:"; cat rtout.txt; exit 1; }
-  echo "  $(head -1 rtout.txt | sed 's/^preempt audit: //'), the first of them $(sed -n 2p rtout.txt | sed 's/^ *//')"
+  echo "  exits 1 at \"$want\""
 
 # ── 8. Failure proof: one worker, whatever was asked for ──────────────────
 # One run is refused by the at-once floor: one worker holds its tasks at
 # most 1.00 at once, below 0.6 x K for K of two or more. Time is data.
 step "failure proof: a pool held to one worker fails the at-once floor in one run"
 need_cores 2 "the floor is not held on one core, so there is nothing to fail"
-  mkdir -p oneworker/iyi
-  cp "$REPO"/src/iyi/*.iyi oneworker/iyi/
+  mkdir -p oneworker/iyi || { echo "FAIL: one-worker: setup: could not create the copy"; exit 76; }
+  cp "$REPO"/src/iyi/*.iyi oneworker/iyi/ || { echo "FAIL: one-worker: setup: could not copy the runtime"; exit 76; }
   if ! awk '/^  def self.start : Nil$/ { inside = 1; methods++ }
 inside && /^  end$/ { inside = 0 }
 inside && /^      workers = resolved$/ { print "      workers = 1"; n++; next }
 { print }
 END { if (methods != 1 || n != 1) exit 3 }' \
     "$REPO/src/iyi/concurrency.iyi" > oneworker/iyi/concurrency.iyi; then
-    echo "the one-worker mutation anchor was missing or duplicated"; exit 1
+    echo "FAIL: one-worker: setup: the mutation anchor was missing or duplicated"; exit 76
   fi
   if ! IYI_PATH="$WORK/oneworker${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/parallel_exercise.iyi" -o oneworker-run > build-oneworker.log 2>&1; then
-    echo "the one-worker copy failed to build:"; tail -20 build-oneworker.log; exit 1
+    echo "FAIL: one-worker: setup: the copy failed to build"; tail -20 build-oneworker.log; exit 76
   fi
-  line="$(timeout -k 5 300 ./oneworker-run speed "$K" "$TASKS" "$ROUNDS")"
+  got="$(speed_run "$K" oneworker-run)" || exit $?
+  SLOW="${got% *}"
+  SLOW_AT="${got#* }"
+  floor_line="FAIL: speed: $K workers held their tasks $(at_once "$SLOW_AT") at once on average: under 0.6 x $K, which is not parallel"
+  check_at_once_floor "$SLOW_AT" "$K" > oneworker-floor.txt 2>&1
   code=$?
-  SLOW="$(echo "$line" | sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p')"
-  SLOW_AT="$(echo "$line" | sed -n 's/.*at_once=\([0-9]*\).*/\1/p')"
-  if [ "$code" -ne 0 ] || [ -z "$SLOW" ] || [ -z "$SLOW_AT" ]; then
-    echo "the one-worker copy did not print its time and count (exit $code): $line"; exit 1
+  if [ "$code" -ne 1 ] || [ "$(grep -cxF -- "$floor_line" oneworker-floor.txt)" -ne 1 ] || [ "$(wc -l < oneworker-floor.txt | tr -d ' ')" -ne 1 ]; then
+    echo "FAIL: one-worker: setup: the floor checker did not exit 1 at its exact below-floor line (exit $code)"; cat oneworker-floor.txt; exit 76
   fi
-  if holds_at_once "$SLOW_AT" "$K"; then
-    echo "a pool of one worker asked for $K held its tasks $(at_once "$SLOW_AT") at once and passed the floor"; exit 1
-  fi
+  echo "  exits 1 at \"$floor_line\""
   echo "  asked for $K, ran on 1, one run: $(at_once "$SLOW_AT") at once, under the floor; $SLOW ms, not judged"
 
 echo "parallel gate: every property held"

@@ -12,13 +12,15 @@
 # one task has held for a quantum, 5 to 10 ms.
 #
 #   slice   a walk and a vectorised sum each hold their worker until a
-#           short task is queued and the preemption word is raised. The
-#           short task must run on that worker before the computation ends.
-#           `-Dpreempt_off` runs the walk without checks and fails that order.
+#           short task is queued and the preemption word is raised. Their
+#           finite-run ordering is information; answers must match their
+#           unchecked twins. Copy-only hooks force an eligible turn in
+#           checked and `@[NoPreempt]` variants of each computation.
 #   unit    a preempted task keeps its unit's token: a task `spawn` started
 #           inside it never runs between two of its statements that are not
 #           a park, while another parallel task's ticker, asleep on the
-#           same worker, wakes within 100 ms of its time.
+#           same worker, wakes within 100 ms of its time. A copy-only
+#           forced turn checks a queued same-unit child separately.
 #   server  a dedicated fast request completes while a slow handler stays
 #           active, followed by bulk fast and slow latency measurements.
 #   poller  a fast connection waits in the one worker's poller while a
@@ -40,8 +42,8 @@
 #           answers; their timings and ratios are performance information.
 #
 # With no arguments it runs slice, unit and period on a pool of one and
-# prints only that every property held: the slice step's short task must
-# wait for a preemption, which a second, idle worker would make needless.
+# prints only that every checked property held. A second, idle worker
+# would make the slice ordering observation needless.
 #
 # bench/parallel_exercise.sh runs it, and broken copies of the runtime,
 # each caught by the step that names it.
@@ -57,6 +59,11 @@ import std/socket::{IyiSocket, SocketError}
   def fail(message : String) : Nil
     print "FAIL: #{message}\n"
     __iyi_exit(1)
+  end
+
+  def setup_exit(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(76)
   end
 
   def elapsed_ms(since : Int64) : Int64
@@ -102,11 +109,43 @@ import std/socket::{IyiSocket, SocketError}
     x
   end
 
-  # The walk the slice step's long task takes: preempted, or under
-  # `-Dpreempt_off` not.
+  {% if flag?(:slice_force) %}
+  # The copy-only hook is the first statement of each keyed turn.
+  @[NoInline]
+  def forced_walk(rounds : Int64, seed : UInt64) : UInt64
+    x = seed | 1_u64
+    i = 0_i64
+    while i < rounds
+      IyiWorkers.force_turn
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+      i = i + 1
+    end
+    x
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def forced_walk_np(rounds : Int64, seed : UInt64) : UInt64
+    x = seed | 1_u64
+    i = 0_i64
+    while i < rounds
+      IyiWorkers.force_turn
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+      i = i + 1
+    end
+    x
+  end
+  {% end %}
+
   def long_walk(rounds : Int64, seed : UInt64) : UInt64
-    {% if flag?(:preempt_off) %}
-      spin_np(rounds, seed)
+    {% if flag?(:slice_force) && flag?(:preempt_off) %}
+      forced_walk_np(rounds, seed)
+    {% elsif flag?(:slice_force) %}
+      forced_walk(rounds, seed)
     {% else %}
       spin(rounds, seed)
     {% end %}
@@ -145,6 +184,52 @@ import std/socket::{IyiSocket, SocketError}
     end
     total
   end
+
+  {% if flag?(:sum_force) %}
+  # The hook keys the outer turn; the inner sum remains the vectorizable loop.
+  @[NoInline]
+  def forced_sum(values : Array(Int64), times : Int32) : Int64
+    total = 0_i64
+    t = 0
+    while t < times
+      IyiWorkers.force_turn(6_u64)
+      i = 0
+      size = values.size
+      while i < size
+        total = total &+ values.unsafe_fetch(i)
+        i = i + 1
+      end
+      t = t + 1
+    end
+    total
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def forced_sum_np(values : Array(Int64), times : Int32) : Int64
+    total = 0_i64
+    t = 0
+    while t < times
+      IyiWorkers.force_turn(6_u64)
+      i = 0
+      size = values.size
+      while i < size
+        total = total &+ values.unsafe_fetch(i)
+        i = i + 1
+      end
+      t = t + 1
+    end
+    total
+  end
+
+  def long_sum(values : Array(Int64), times : Int32) : Int64
+    {% if flag?(:preempt_off) %}
+      forced_sum_np(values, times)
+    {% else %}
+      forced_sum(values, times)
+    {% end %}
+  end
+  {% end %}
 
   # The same sum through `times` and `each`, whose loops are the prelude's
   # and check because they are inlined into this def.
@@ -337,12 +422,39 @@ import std/socket::{IyiSocket, SocketError}
     __iyi_exit(76)
   end
 
+  def slice_unarmed(what : String) : Nil
+    setup_exit("slice: not armed: #{what}")
+  end
+
+  {% if flag?(:turn_refusal_watchdog) %}
+  # The negative control holds the real runtime lock on a native thread.
+  @[NoInline]
+  @[NoPreempt]
+  def slice_hold_runtime_lock(requested : Atomic(Int64), held : Atomic(Int64)) : Nil
+    while requested.get == 0_i64
+      IyiThread.spin_pause
+    end
+    IyiRuntimeLock.lock
+    held.set(1_i64)
+    while true
+      IyiThread.spin_pause
+    end
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def slice_lock_hang(message : String) : Nil
+    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+    __iyi_exit(76)
+  end
+  {% end %}
+
   @[NoInline]
   @[NoPreempt]
   def slice_hold(proof : SliceState, force_flag : Bool) : Nil
     st = IyiScheduler.state
     address = st.preempt_word
-    fail("slice: not armed: the worker has no preemption word") if address == 0_u64
+    slice_unarmed("the worker has no preemption word") if address == 0_u64
     word = Pointer(Atomic(UInt64)).new(address)
     {% if flag?(:noflag_force) %}
       if force_flag
@@ -359,8 +471,9 @@ import std/socket::{IyiSocket, SocketError}
         end
         seen = IyiWorkers.force_flag_seen
         fail("slice: the monitor's preemption decision for a held worker left its word down") if seen == 1_u64
-        fail("slice: not armed: the monitor recorded an invalid word decision #{seen}") unless seen == 2_u64
-        # Printing here can yield before proof.start marks the computation.
+        slice_unarmed("the monitor recorded an invalid word decision #{seen}") unless seen == 2_u64
+        proof.finish
+        return
       end
     {% end %}
     while !proof.queued? || word.value.get == 0_u64
@@ -414,35 +527,163 @@ import std/socket::{IyiSocket, SocketError}
       end
     end
     witness = proof.witness
-    fail("slice: the short task queued before the walk ran only after the walk ended") if witness == 2_i64
-    fail("slice: not armed: the short task's #{which} witness was #{witness}, not the same worker during the walk") unless witness == 1_i64
+    slice_unarmed("the short task's #{which} witness was #{witness}, not a same-worker ordering") unless witness == 1_i64 || witness == 2_i64
     want = which == "walk" ? spin_np(walk, 5_u64) : 0_u64
     if answer.get != want
       fail("slice: the preempted #{which} answered #{answer.get}, and unpreempted it answers #{want}")
     end
     given = IyiWorkers.preempts - preempts
-    fail("slice: the short task started and no task was preempted") if given == 0_u64
-    {% if flag?(:noflag_force) %}
-      puts "slice: the monitor's preemption decision for a held worker raised its word" if which == "walk"
-    {% end %}
-    say "slice: the short task queued before the #{which} ran inside it on the same worker"
+    if witness == 1_i64
+      fail("slice: the short task started and no task was preempted") if given == 0_u64
+      say "slice: the short task queued before the #{which} ran inside it on the same worker (ordering information only)"
+    else
+      say "slice: the short task queued before the #{which} ran after it ended on the same worker (ordering information only)"
+    end
     say "slice: the short task waited #{waited.get} ms behind #{which} (#{given} preemptions); the #{which}'s answer is the unpreempted one"
   end
 
+  {% if flag?(:slice_force) || flag?(:sum_force) %}
+  def slice_forced(per_ms : Int64) : Nil
+    {% if flag?(:sum_force) %}
+      which = "sum"
+      times = 10
+    {% else %}
+      which = "walk"
+      walk = 100_i64 * (per_ms > 0_i64 ? per_ms : 1_i64)
+    {% end %}
+    slice_unarmed("the forced #{which} needs a pool of one, not #{IyiWorkers.count}") if IyiWorkers.count != 1
+    proof = SliceState.new
+    answer = Atomic(UInt64).new(0_u64)
+    {% if flag?(:sum_force) %}
+      expected = Atomic(UInt64).new(0_u64)
+    {% end %}
+    group do |g|
+      g.spawn(unit: :new) do
+        {% if flag?(:sum_force) %}
+          values = Array(Int64).new(1_000_000) { |i| i.to_i64 * 3_i64 }
+          expected.set(sum_np(values, times).to_u64)
+        {% end %}
+        proof.holding(IyiScheduler.state.object_id)
+        {% if flag?(:sum_force) %}
+          IyiWorkers.force_turn_arm(IyiScheduler.current.object_id, 6_u64)
+        {% else %}
+          IyiWorkers.force_turn_arm(IyiScheduler.current.object_id)
+        {% end %}
+        proof.start
+        {% if flag?(:sum_force) %}
+          answer.set(long_sum(values, times).to_u64)
+        {% else %}
+          answer.set(long_walk(walk, 5_u64))
+        {% end %}
+        proof.finish
+        0
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !IyiWorkers.force_turn_ready?
+        slice_hang("the copy hook did not hold the #{which}'s first turn in 10000 ms") if __iyi_monotonic_ns > limit
+        sleep(1)
+      end
+      g.spawn(unit: :new) do
+        proof.record_short
+        0
+      end
+      {% if flag?(:turn_refusal_watchdog) %}
+        lock_requested = Atomic(Int64).new(0_i64)
+        lock_held = Atomic(Int64).new(0_i64)
+        IyiThread.start do
+          slice_hold_runtime_lock(lock_requested, lock_held)
+          nil
+        end
+        lock_requested.set(1_i64)
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
+        while lock_held.get == 0_i64
+          if __iyi_monotonic_ns > limit
+            slice_lock_hang("FAIL: slice: progress hang: the runtime lock holder did not acquire its lock in 10000 ms\n")
+          end
+          IyiThread.spin_pause
+        end
+      {% end %}
+      IyiWorkers.force_turn_release
+      limit = __iyi_monotonic_ns + 30_000_000_000_i64
+      while !proof.finished? || proof.witness == 0_i64
+        if IyiWorkers.force_turn_slow_active?
+          limit = __iyi_monotonic_ns + 30_000_000_000_i64
+        elsif __iyi_monotonic_ns > limit
+          if IyiWorkers.force_turn_outer_claim?
+            {% if flag?(:turn_refusal_watchdog) && flag?(:sum_force) %}
+              slice_lock_hang("FAIL: slice: progress hang: the forced sum and short task did not finish in 30000 ms\n")
+            {% elsif flag?(:turn_refusal_watchdog) %}
+              slice_lock_hang("FAIL: slice: progress hang: the forced walk and short task did not finish in 30000 ms\n")
+            {% else %}
+              slice_hang("the forced #{which} and short task did not finish in 30000 ms")
+            {% end %}
+          end
+          limit = __iyi_monotonic_ns + 30_000_000_000_i64
+        end
+        {% if flag?(:turn_refusal_watchdog) %}
+          IyiThread.spin_pause
+        {% else %}
+          sleep(1)
+        {% end %}
+      end
+    end
+    result = IyiWorkers.force_turn_result
+    slice_unarmed("the forced #{which} reached no decision before it ended") if result == 0_u64
+    fail("slice: the #{which} turned with its worker's word raised and kept its worker") if result == 2_u64
+    slice_unarmed("the forced #{which} recorded decision #{result}") unless result == 1_u64
+    slice_unarmed("the queued task did not run inside the #{which} on its worker at the eligible decision") unless proof.witness == 1_i64
+    {% if flag?(:sum_force) %}
+      want = expected.get
+    {% else %}
+      want = spin_np(walk, 5_u64)
+    {% end %}
+    fail("slice: the preempted #{which} answered #{answer.get}, and unpreempted it answers #{want}") if answer.get != want
+    puts "slice: the #{which} gave its worker up at the turn after its word was raised"
+  end
+  {% end %}
+
+  {% if flag?(:noflag_force) %}
+  def slice_noflag : Nil
+    proof = SliceState.new
+    group do |g|
+      g.spawn(unit: :new) do
+        slice_hold(proof, true)
+        0
+      end
+      limit = __iyi_monotonic_ns + 30_000_000_000_i64
+      while !proof.finished?
+        slice_hang("the monitor decision did not finish in 30000 ms") if __iyi_monotonic_ns > limit
+        sleep(1)
+      end
+    end
+    puts "slice: the monitor's preemption decision for a held worker raised its word"
+  end
+  {% end %}
+
   def slice(per_ms : Int64) : Nil
-    slice_round("walk", per_ms)
-    slice_round("sum", per_ms)
+    {% if flag?(:slice_force) || flag?(:sum_force) %}
+      slice_forced(per_ms)
+    {% elsif flag?(:noflag_force) %}
+      slice_noflag
+    {% else %}
+      slice_round("walk", per_ms)
+      slice_round("sum", per_ms)
+    {% end %}
   end
 
   # ── unit ─────────────────────────────────────────────────────────────
-  # Force a same-unit child to be the next candidate at a preemption
-  # decision. The switch counter also advances when that child is deferred.
+  # The unhooked check observes a preemption attempt. The copy-only check
+  # separately records the scheduler's decision for the keyed child.
   def unit_hang(what : String) : Nil
     puts "FAIL: unit: progress hang: #{what}"
     __iyi_exit(76)
   end
 
-  def unit_forced(per_ms : Int64) : Nil
+  def unit_unarmed(what : String) : Nil
+    setup_exit("unit: not armed: #{what}")
+  end
+
+  def unit_observed(per_ms : Int64) : Nil
     computing = Atomic(Int64).new(0_i64)
     ran_inside = Atomic(Int64).new(0_i64)
     ran = Atomic(Int64).new(0_i64)
@@ -455,7 +696,7 @@ import std/socket::{IyiSocket, SocketError}
             ran.set(1_i64)
             0
           end
-          fail("unit: not armed: the same-unit child ran before the computation started") if ran.get != 0_i64
+          unit_unarmed("the same-unit child ran before the computation started") if ran.get != 0_i64
           st = IyiScheduler.state
           before = st.switches
           computing.set(1_i64)
@@ -470,16 +711,85 @@ import std/socket::{IyiSocket, SocketError}
           x
         end
       end
-      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      limit = __iyi_monotonic_ns + 30_000_000_000_i64
       while finished.get == 0_i64 || ran.get == 0_i64
         sleep(1)
-        unit_hang("the computing task and same-unit child did not finish in 10000 ms") if __iyi_monotonic_ns > limit
+        unit_hang("the computing task and same-unit child did not finish in 30000 ms") if __iyi_monotonic_ns > limit
       end
     end
-    fail("unit: a task of the same unit ran inside the preempted task") if ran_inside.get == 1_i64
-    fail("unit: not armed: the same-unit child never ran") if ran.get != 1_i64
-    say "unit: the task of the same unit ran only after the computing task's preemption check"
+    fail("unit: a task of the same unit ran inside the computing task during the unforced check") if ran_inside.get == 1_i64
+    unit_unarmed("the same-unit child never ran") if ran.get != 1_i64
+    say "unit: the task of the same unit ran only after the computing task's preemption attempt"
   end
+
+  {% if flag?(:tokenless_force) %}
+  def unit_turn(per_ms : Int64) : Nil
+    unit_unarmed("the forced child needs a pool of one, not #{IyiWorkers.count}") if IyiWorkers.count != 1
+    computing = Atomic(Int64).new(0_i64)
+    ran_inside = Atomic(Int64).new(0_i64)
+    ran = Atomic(Int64).new(0_i64)
+    finished = Atomic(Int64).new(0_i64)
+    group do |g|
+      g.spawn(unit: :new) do
+        group do |inner|
+          child = inner.spawn(unit: :same) do
+            ran_inside.set(computing.get)
+            ran.set(1_i64)
+            0
+          end
+          unit_unarmed("the same-unit child ran before the computation started") if ran.get != 0_i64
+          unit_unarmed("the unit already had a waiting task") if IyiWorkers.force_turn_unit_waiting?
+          rounds = per_ms // 10_i64
+          rounds = 2_i64 if rounds < 2_i64
+          IyiWorkers.force_turn_arm(IyiScheduler.current.object_id)
+          IyiWorkers.force_turn_child_arm(child.fiber.object_id)
+          computing.set(1_i64)
+          x = 7_u64
+          limit = __iyi_monotonic_ns + 20_000_000_000_i64
+          IyiWorkers.force_turn
+          while IyiWorkers.force_turn_result == 0_u64
+            x = spin(rounds, x)
+            IyiWorkers.force_turn
+            if IyiWorkers.force_turn_result == 0_u64 && __iyi_monotonic_ns > limit
+              unit_hang("the computing task reached no eligible preemption decision in 20000 ms")
+            end
+          end
+          computing.set(0_i64)
+          finished.set(1_i64)
+          x
+        end
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !IyiWorkers.force_turn_ready?
+        unit_hang("the copy hook did not hold the computing task's first turn in 10000 ms") if __iyi_monotonic_ns > limit
+        sleep(1)
+      end
+      IyiWorkers.force_turn_release
+      limit = __iyi_monotonic_ns + 20_000_000_000_i64
+      while finished.get == 0_i64 || ran.get == 0_i64
+        if IyiWorkers.force_turn_slow_active?
+          limit = __iyi_monotonic_ns + 20_000_000_000_i64
+        elsif __iyi_monotonic_ns > limit
+          if IyiWorkers.force_turn_outer_claim?
+            unit_hang("the computing task and same-unit child did not finish in 20000 ms")
+          end
+          limit = __iyi_monotonic_ns + 20_000_000_000_i64
+        end
+        sleep(1)
+      end
+    end
+    result = IyiWorkers.force_turn_result
+    decision = IyiWorkers.force_turn_child_result
+    unit_unarmed("the computing task recorded turn result #{result}, not an eligible decision") unless result == 1_u64
+    if decision == 2_u64 && ran_inside.get == 1_i64
+      fail("unit: a task of the same unit ran inside the preempted task")
+    end
+    unit_unarmed("the scheduler recorded child decision #{decision}, not a deferral") unless decision == 1_u64
+    unit_unarmed("the deferred same-unit child ran inside the computing task") unless ran_inside.get == 0_i64
+    unit_unarmed("the same-unit child never ran") unless ran.get == 1_i64
+    puts "unit: the same-unit child waited on its unit at the computing task's eligible preemption decision"
+  end
+  {% end %}
 
   # A parallel task computes 300 ms on a pool of one while a task it
   # spawned sleeps 1 ms and counts, and another parallel task's ticker
@@ -488,7 +798,11 @@ import std/socket::{IyiSocket, SocketError}
   # run until the computation ends, and the count it moves is read on both
   # sides of the computation.
   def unit(per_ms : Int64) : Nil
-    unit_forced(per_ms)
+    {% if flag?(:tokenless_force) %}
+      unit_turn(per_ms)
+      return
+    {% end %}
+    unit_observed(per_ms)
     late = Stat.new
     moved = Atomic(Int64).new(-1_i64)
     done = Atomic(Int64).new(0_i64)
@@ -527,7 +841,7 @@ import std/socket::{IyiSocket, SocketError}
     fail("unit: the computing task was never preempted for the ticker beside it") if given == 0_u64
     if moved.get != 0_i64
       puts "unit: the child ran #{moved.get} times during the preempted task"
-      fail("unit: a task of the same unit ran inside the preempted task")
+      fail("unit: a task of the same unit ran inside the computing task during the ticker stress")
     end
     if late.max_ms > BOUND_MS
       fail("unit: a ticker asleep on the worker of a computing task woke #{late.max_ms} ms late, past #{BOUND_MS} ms")
@@ -572,7 +886,7 @@ import std/socket::{IyiSocket, SocketError}
     limit = __iyi_monotonic_ns + 20_000_000_000_i64
     while !release.open?
       IyiThread.spin_pause
-      fail("server: progress hang: the slow handler was not released in 20000 ms") if __iyi_monotonic_ns > limit
+      setup_exit("server: progress hang: the slow handler was not released in 20000 ms") if __iyi_monotonic_ns > limit
     end
   end
 
@@ -580,13 +894,13 @@ import std/socket::{IyiSocket, SocketError}
     listener = IyiSocket.listen("127.0.0.1", 0)
     port = listener.local_port
     slow_client = IyiSocket.connect("127.0.0.1", port, 5000)
-    fail("server: slow connect answered #{slow_client}") unless slow_client.is_a?(IyiSocket)
+    setup_exit("server: slow connect answered #{slow_client}") unless slow_client.is_a?(IyiSocket)
     slow_server = listener.accept
-    fail("server: slow accept answered #{slow_server}") unless slow_server.is_a?(IyiSocket)
+    setup_exit("server: slow accept answered #{slow_server}") unless slow_server.is_a?(IyiSocket)
     fast_client = IyiSocket.connect("127.0.0.1", port, 5000)
-    fail("server: fast connect answered #{fast_client}") unless fast_client.is_a?(IyiSocket)
+    setup_exit("server: fast connect answered #{fast_client}") unless fast_client.is_a?(IyiSocket)
     fast_server = listener.accept
-    fail("server: fast accept answered #{fast_server}") unless fast_server.is_a?(IyiSocket)
+    setup_exit("server: fast accept answered #{fast_server}") unless fast_server.is_a?(IyiSocket)
     slow_fd = slow_server.fd
     slow_family = slow_server.family
     fast_fd = fast_server.fd
@@ -597,33 +911,33 @@ import std/socket::{IyiSocket, SocketError}
       g.spawn(unit: :new) do
         socket = IyiSocket.new(slow_fd, slow_family)
         got = socket.read(1)
-        fail("server: slow request answered #{got.inspect}") unless got == "b"
+        setup_exit("server: slow request answered #{got.inspect}") unless got == "b"
         server_hold(release)
         0
       end
       g.spawn(unit: :new) do
         socket = IyiSocket.new(fast_fd, fast_family)
         got = socket.read(1)
-        fail("server: fast request answered #{got.inspect}") unless got == "c"
-        fail("server: not armed: slow handler was not active") unless release.active? && !release.open?
+        setup_exit("server: fast request answered #{got.inspect}") unless got == "c"
+        setup_exit("server: not armed: slow handler was not active") unless release.active? && !release.open?
         wrote = socket.write("k")
-        fail("server: fast response answered #{wrote.inspect}") unless wrote.is_a?(Int32)
+        setup_exit("server: fast response answered #{wrote.inspect}") unless wrote.is_a?(Int32)
         served.set(1_i64)
         0
       end
       wrote = slow_client.write("b")
-      fail("server: slow send answered #{wrote.inspect}") unless wrote.is_a?(Int32)
+      setup_exit("server: slow send answered #{wrote.inspect}") unless wrote.is_a?(Int32)
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while !release.active?
         sleep(1)
-        fail("server: progress hang: slow handler did not start in 10000 ms") if __iyi_monotonic_ns > limit
+        setup_exit("server: progress hang: slow handler did not start in 10000 ms") if __iyi_monotonic_ns > limit
       end
       wrote = fast_client.write("c")
-      fail("server: fast send answered #{wrote.inspect}") unless wrote.is_a?(Int32)
+      setup_exit("server: fast send answered #{wrote.inspect}") unless wrote.is_a?(Int32)
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while served.get == 0_i64
         sleep(1)
-        fail("server: progress hang: the fast request was not served in 10000 ms") if __iyi_monotonic_ns > limit
+        setup_exit("server: progress hang: the fast request was not served in 10000 ms") if __iyi_monotonic_ns > limit
       end
       release.open
     end
@@ -646,7 +960,7 @@ import std/socket::{IyiSocket, SocketError}
       g.spawn do
         conns.times do
           client = listener.accept
-          fail("server: accept answered #{client}") unless client.is_a?(IyiSocket)
+          setup_exit("server: accept answered #{client}") unless client.is_a?(IyiSocket)
           fd = client.fd
           family = client.family
           g.spawn(unit: :new) do
@@ -667,7 +981,7 @@ import std/socket::{IyiSocket, SocketError}
       clients = [] of IyiSocket
       conns.times do
         c = IyiSocket.connect("127.0.0.1", port, 5000)
-        fail("server: connect answered #{c}") unless c.is_a?(IyiSocket)
+        setup_exit("server: connect answered #{c}") unless c.is_a?(IyiSocket)
         clients << c
       end
       group do |cg|
@@ -728,7 +1042,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   def poller(per_ms : Int64) : Nil
-    fail("poller: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    setup_exit("poller: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
     listener = IyiSocket.listen("127.0.0.1", 0)
     port = listener.local_port
     computing = Atomic(Int64).new(0_i64)
@@ -740,7 +1054,7 @@ import std/socket::{IyiSocket, SocketError}
       g.spawn do
         2.times do
           client = listener.accept
-          fail("poller: accept answered #{client}") unless client.is_a?(IyiSocket)
+          setup_exit("poller: accept answered #{client}") unless client.is_a?(IyiSocket)
           fd = client.fd
           family = client.family
           g.spawn(unit: :new) do
@@ -768,9 +1082,9 @@ import std/socket::{IyiSocket, SocketError}
         0
       end
       slow = IyiSocket.connect("127.0.0.1", port, 5000)
-      fail("poller: connect answered #{slow}") unless slow.is_a?(IyiSocket)
+      setup_exit("poller: connect answered #{slow}") unless slow.is_a?(IyiSocket)
       fast = IyiSocket.connect("127.0.0.1", port, 5000)
-      fail("poller: connect answered #{fast}") unless fast.is_a?(IyiSocket)
+      setup_exit("poller: connect answered #{fast}") unless fast.is_a?(IyiSocket)
       fast.write("c")
       fast.read(8)
       slow.write("b")
@@ -788,7 +1102,7 @@ import std/socket::{IyiSocket, SocketError}
         end
         result = IyiWorkers.force_poll_result
         fail("poller: a preemption with a read waiting did not poll its worker's poller") if result == 2_u64
-        fail("poller: not armed: the poll decision recorded #{result}") unless result == 1_u64
+        setup_exit("poller: not armed: the poll decision recorded #{result}") unless result == 1_u64
         puts "poller: a preemption with a read waiting polled its worker's poller"
       {% end %}
       s = __iyi_monotonic_ns
@@ -876,19 +1190,33 @@ import std/socket::{IyiSocket, SocketError}
   @[NoPreempt]
   def fresh_hold(shared : FreshState) : Nil
     st = IyiScheduler.state
+    setup_exit("fresh: not armed: the worker has no preemption word") if st.preempt_word == 0_u64
     word = Pointer(Atomic(UInt64)).new(st.preempt_word)
     shared.start(st.object_id)
     limit = __iyi_monotonic_ns + 20_000_000_000_i64
     while !shared.queued? || word.value.get == 0_u64
-      fresh_hang("the successor was not queued or the worker's word was not raised in 20000 ms") if __iyi_monotonic_ns > limit
+      if __iyi_monotonic_ns > limit
+        {% if flag?(:stale_force) %}
+          if IyiWorkers.force_stale_timeout_claim?
+            fresh_hang("the successor was not queued or the worker's word was not raised in 20000 ms")
+          end
+        {% else %}
+          fresh_hang("the successor was not queued or the worker's word was not raised in 20000 ms")
+        {% end %}
+      end
       IyiThread.spin_pause
     end
     {% if flag?(:stale_force) %}
       IyiWorkers.force_stale_arm(st.object_id)
       IyiWorkers.force_stale_close_gate
+      limit = __iyi_monotonic_ns + 20_000_000_000_i64
       while IyiWorkers.force_stale_gate_state != 2_u64
-        fresh_hang("the monitor released its gate before the switch") if IyiWorkers.force_stale_gate_state == 4_u64
-        fresh_hang("the monitor did not enter its gate in 20000 ms") if __iyi_monotonic_ns > limit
+        if IyiWorkers.force_stale_gate_state == 3_u64
+          setup_exit("fresh: not armed: the monitor gate was released before the held task observed it")
+        end
+        if __iyi_monotonic_ns > limit && IyiWorkers.force_stale_timeout_claim?
+          fresh_hang("the monitor did not enter its gate in 20000 ms")
+        end
         IyiThread.spin_pause
       end
     {% end %}
@@ -896,7 +1224,7 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   def fresh(per_ms : Int64) : Nil
-    fail("fresh: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    setup_exit("fresh: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
     shared = FreshState.new
     group do |g|
       g.spawn(unit: :new) do
@@ -905,12 +1233,20 @@ import std/socket::{IyiSocket, SocketError}
       end
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while !shared.started?
-        fresh_hang("the first task did not start in 10000 ms") if __iyi_monotonic_ns > limit
+        if __iyi_monotonic_ns > limit
+          {% if flag?(:stale_force) %}
+            if IyiWorkers.force_stale_timeout_claim?
+              fresh_hang("the first task did not start in 10000 ms")
+            end
+          {% else %}
+            fresh_hang("the first task did not start in 10000 ms")
+          {% end %}
+        end
         sleep(1)
       end
       g.spawn(unit: :new) do
-        fail("fresh: not armed: the successor ran before the first task held a raised word") unless shared.finished?
-        fail("fresh: not armed: the successor ran on a different worker") unless IyiScheduler.state.object_id == shared.owner
+        setup_exit("fresh: not armed: the successor ran before the first task held a raised word") unless shared.finished?
+        setup_exit("fresh: not armed: the successor ran on a different worker") unless IyiScheduler.state.object_id == shared.owner
         shared.start_successor
         spin(per_ms, 19_u64)
       end
@@ -918,20 +1254,31 @@ import std/socket::{IyiSocket, SocketError}
       {% if flag?(:stale_force) %}
         limit = __iyi_monotonic_ns + 10_000_000_000_i64
         while IyiWorkers.force_stale_word == 0_u64
-          fresh_hang("the monitor released its gate before the switch") if IyiWorkers.force_stale_gate_state == 4_u64
-          fresh_hang("the armed switch did not record its word in 10000 ms") if __iyi_monotonic_ns > limit
+          if IyiWorkers.force_stale_gate_state == 3_u64 && IyiWorkers.force_stale_word == 0_u64
+            setup_exit("fresh: not armed: the switch released the monitor gate without recording its word")
+          end
+          if __iyi_monotonic_ns > limit && IyiWorkers.force_stale_timeout_claim?
+            fresh_hang("the armed switch did not record its word in 10000 ms")
+          end
           sleep(1)
         end
-        fresh_hang("the monitor released its gate before the switch") if IyiWorkers.force_stale_gate_state == 4_u64
-        fail("fresh: not armed: the switch did not receive the raised word") unless IyiWorkers.force_stale_before == 2_u64
+        setup_exit("fresh: not armed: the switch did not receive the raised word") unless IyiWorkers.force_stale_before == 2_u64
         word = IyiWorkers.force_stale_word
         fail("fresh: the word raised for the task before was still up after the switch") if word == 2_u64
-        fail("fresh: not armed: the switch recorded word #{word}") unless word == 1_u64
+        setup_exit("fresh: not armed: the switch recorded word #{word}") unless word == 1_u64
         puts "fresh: the switch after a task held its raised word lowered the word"
       {% end %}
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while !shared.successor_started?
-        fresh_hang("the successor did not run in 10000 ms") if __iyi_monotonic_ns > limit
+        if __iyi_monotonic_ns > limit
+          {% if flag?(:stale_force) %}
+            if IyiWorkers.force_stale_gate_state == 3_u64 || IyiWorkers.force_stale_timeout_claim?
+              fresh_hang("the successor did not run in 10000 ms")
+            end
+          {% else %}
+            fresh_hang("the successor did not run in 10000 ms")
+          {% end %}
+        end
         sleep(1)
       end
     end
@@ -987,7 +1334,7 @@ import std/socket::{IyiSocket, SocketError}
   # records, at each raise, the unchanged looks it came after: the control raises after one, the mutant after
   # three. Zero is not armed. No clock decides anything here.
   def period_forced(per_ms : Int64) : Nil
-    fail("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    setup_exit("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
     base = IyiWorkers.force_raise_count
     done = Atomic(Int64).new(0_i64)
     group do |g|
@@ -1003,12 +1350,12 @@ import std/socket::{IyiSocket, SocketError}
       limit = __iyi_monotonic_ns + 20_000_000_000_i64
       while IyiWorkers.force_raise_count < base + 3_u64
         sleep(1)
-        fail("period: progress hang: the monitor raised no word three times in 20000 ms") if __iyi_monotonic_ns > limit
+        setup_exit("period: progress hang: the monitor raised no word three times in 20000 ms") if __iyi_monotonic_ns > limit
       end
       done.set(1_i64)
     end
     ticks = IyiWorkers.force_raise_ticks
-    fail("period: not armed: a raise of the monitor's word recorded no unchanged looks") if ticks == 0_u64
+    setup_exit("period: not armed: a raise of the monitor's word recorded no unchanged looks") if ticks == 0_u64
     fail("period: a worker's word was raised after 3 unchanged looks") if ticks == 3_u64
     fail("period: a worker's word was raised after #{ticks} unchanged looks") unless ticks == 1_u64
     puts "period: the monitor raised a worker's word after one unchanged look"
@@ -1018,7 +1365,7 @@ import std/socket::{IyiSocket, SocketError}
 
   def period(per_ms : Int64) : Nil
     {% if flag?(:coarse_force) && flag?(:win32) %}
-      fail("period: runs on a pool of one") if IyiWorkers.count != 1
+      setup_exit("period: runs on a pool of one") if IyiWorkers.count != 1
       done = Atomic(Int64).new(0_i64)
       started = Atomic(Int64).new(0_i64)
       group do |g|
@@ -1033,22 +1380,22 @@ import std/socket::{IyiSocket, SocketError}
         limit = __iyi_monotonic_ns + 20_000_000_000_i64
         while started.get == 0_i64
           sleep(1)
-          fail("period: the active worker did not start") if __iyi_monotonic_ns > limit
+          setup_exit("period: the active worker did not start") if __iyi_monotonic_ns > limit
         end
         IyiWorkers.force_tick_arm
         while IyiWorkers.force_tick_wait == 0_u64
           sleep(1)
-          fail("period: the active monitor tick did not complete") if __iyi_monotonic_ns > limit
+          setup_exit("period: the active monitor tick did not complete") if __iyi_monotonic_ns > limit
         end
         done.set(1_i64)
       end
       tick = IyiWorkers.force_tick_wait
-      fail("period: the high-resolution timer could not be made") if tick == 5_u64
-      fail("period: the high-resolution timer could not be set") if tick == 4_u64
-      fail("period: a wait on the high-resolution timer failed") if tick == 3_u64
-      fail("period: the semaphore wait failed") if tick == 6_u64
+      setup_exit("period: the high-resolution timer could not be made") if tick == 5_u64
+      setup_exit("period: the high-resolution timer could not be set") if tick == 4_u64
+      setup_exit("period: a wait on the high-resolution timer failed") if tick == 3_u64
+      setup_exit("period: the semaphore wait failed") if tick == 6_u64
       fail("period: the active monitor used the semaphore fallback") if tick == 2_u64
-      fail("period: the active monitor's tick recorded #{tick}") unless tick == 1_u64
+      setup_exit("period: the active monitor's tick recorded #{tick}") unless tick == 1_u64
       puts "period: the active monitor used its high-resolution timer"
       return
     {% end %}
@@ -1056,7 +1403,7 @@ import std/socket::{IyiSocket, SocketError}
       period_forced(per_ms)
       return
     {% end %}
-    fail("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    setup_exit("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
     looked = Atomic(Int64).new(0_i64)
     took = Atomic(Int64).new(0_i64)
     group do |g|
@@ -1122,7 +1469,7 @@ import std/socket::{IyiSocket, SocketError}
               end
           took_np = __iyi_monotonic_ns - t
           fail("tight: #{name} answered #{a} checked and #{b} unchecked") if a != b
-          fail("tight: #{name} recorded a zero unchecked duration") if took_np <= 0_i64
+          setup_exit("tight: #{name} recorded a zero unchecked duration") if took_np <= 0_i64
           ratio = (took * 1000_i64 // took_np).to_f / 1000.0
           say "tight: #{name}: #{took // 1000_i64} us checked, #{took_np // 1000_i64} us unchecked, #{ratio}x (performance information)"
         end

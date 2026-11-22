@@ -5583,13 +5583,15 @@ on twelve. The floor now counts only the threads that filled an
 allocation slice since the last collection (part 10).
 `bench/spawn_eligible.sh` holds it on a pool of four: one spawn starts one
 worker, also when it lands, every time, between the worker's first empty
-look and its idle count; four tasks running at one instant all four, which
-the count of arrivals proves and no clock does; and a second spawn made beside
+look and its idle count; four tasks that each spin until all four have started,
+which the count of arrivals proves: the four were started and in progress
+together, not that the pool then held four workers; and a second spawn made beside
 a running one starts a worker of its own, decided at the spawn. A pool that
 starts every worker at once, one that never starts a second, a worker that
 gives the token back before its idle count, and one that starts no worker for
-a spawn beside a running one are each caught on one run. How many workers a
-run of spawns made and joined one at a time start is printed, not judged.
+a spawn beside a running one are each caught on one run. How many workers four
+tasks running together, and spawns made and joined one at a time, start is
+printed, not judged.
 
 **7. With the rest of III.4.** An eligible task is a task of its group
 like any other: joined at the scope's end, cancelled with it, its failure

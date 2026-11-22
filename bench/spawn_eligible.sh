@@ -16,9 +16,10 @@
 #      running at one instant. On a pool of one, eligible spawns stay on
 #      the main thread and no pool starts, while `spawn(unit: :new)`
 #      tasks run on the pool's worker. On a pool of four, in a process of
-#      its own, one spawn starts one worker, and four tasks running at one
-#      instant all four; a second spawn made beside a running one starts a
-#      worker of its own, decided at the spawn; one
+#      its own, one spawn starts one worker, and four tasks that spin until all
+#      four have started are all in progress at once (the workers the pool then
+#      holds are printed, not judged); a second spawn made beside a running one
+#      starts a worker of its own, or owes it and has it paid; one
 #      spawn still starts one worker when it lands, every time, between
 #      the worker's first empty look and its idle count.
 #   2. The explanation: `--explain-spawn` notes each spawn, naming the

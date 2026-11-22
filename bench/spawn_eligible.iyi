@@ -36,9 +36,10 @@
 #             on the main thread, where a plain spawn of the same blocks
 #             (`one`) stays.
 #   grows     run first in its process: the pool starts one worker for one
-#             eligible spawn, and every worker only when that many tasks are
-#             running at one instant (`IyiWorkers.grow`). How many a run of
-#             spawns made and joined one at a time starts is printed, not judged.
+#             eligible spawn, which is judged. How many workers spawns made and
+#             joined one at a time start, and how many four tasks running at one
+#             instant had started, are printed, not judged: growth is judged by
+#             the forced `growth`, `beside`, `widened` and `early` pairs.
 #   beside    forced pair (`-Dbeside_force` only): a second spawn made while the
 #             first holds its worker starts a worker beside it, decided at the
 #             spawn itself; a copy that never grows the pool fails there.
@@ -244,8 +245,9 @@ import std/int
         end
       end
     end
-    # On a pool of one a preempted task yields to the next, so how many run at
-    # one instant is not fixed; a task that ran on the pool's worker is.
+    # On a pool of one no pool starts and no monitor runs, so nothing preempts a
+    # task: the four run one at a time on the spawner's thread, so `most` is 1 and
+    # `away` is 0 on every run.
     if away.get != 0_i64
       puts "one: #{away.get} eligible spawns ran on a pool worker, with one worker asked for"
       fail("one: eligible spawns ran on a pool worker, with one worker asked for")
@@ -302,7 +304,8 @@ import std/int
   # on four workers, 3 in one of three runs on twelve, Linux, 12 vCPUs, shared).
   # That race is held open by words in the `widened` and `early` pairs, which
   # judge it on one run, so this loop's count is printed and not judged. Four
-  # tasks that spin until all four are running start the four.
+  # tasks that spin until all four are running start as many workers as their
+  # owed starts pay for, which `grows` prints and does not judge.
   LIGHT_ROUNDS = 200
 
   def grows : Nil
@@ -325,11 +328,12 @@ import std/int
     end
     light = IyiWorkers.launched
     together("grows")
+    # Printed, not judged. An owed start is paid by whichever worker looks next,
+    # and a task spinning past its quantum can hand its worker to a queued one
+    # while the pool is still growing, so four arrivals do not mean four workers
+    # have started. Growth is judged by the forced pairs.
     loaded = IyiWorkers.launched
-    if loaded != IyiWorkers.count
-      fail("grows: #{TOGETHER} eligible spawns running at one instant started #{loaded} of the pool's #{IyiWorkers.count} workers, with #{IyiWorkers.owes} starts owed")
-    end
-    puts "grows: one eligible spawn started 1 of #{IyiWorkers.count} workers, #{LIGHT_ROUNDS} joined one at a time #{light}, and #{TOGETHER} running at one instant all #{loaded}"
+    puts "grows: one eligible spawn started 1 of #{IyiWorkers.count} workers, #{LIGHT_ROUNDS} joined one at a time #{light}, and #{TOGETHER} running at one instant had #{loaded} of #{IyiWorkers.count} started (information)"
   end
 
 {% if flag?(:beside_force) %}

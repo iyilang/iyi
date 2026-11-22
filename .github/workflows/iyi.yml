@@ -1109,8 +1109,8 @@ jobs:
       # the probe's mechanism in the runtime — eight threads allocating from
       # their own caches, collections stopping them where they run, every
       # stopped thread's frames scanned as roots, a live list in each
-      # surviving by checksum and by the sweep's flag, and 32 threads past
-      # the core count. The floor: five names, nothing added. The failure
+      # surviving by checksum and by the sweep's flag, and twice the core count
+      # of threads, clamped to 9 to 32. The floor: five names, nothing added. The failure
       # proof removes the thread-root walk and the list is swept by name.
       - name: Threads under the collector
         run: bash bench/thread_exercise.sh
@@ -1733,11 +1733,14 @@ jobs:
           # No compiler or linker flags of the machine's: LDFLAGS naming
           # brew's LLVM 23 once put its static libraries ahead of the recipe's
           # in the link. Each job keeps its own compiler caches under its
-          # temporary directory: one job's cache rotation removed a directory
-          # another job's build was linking from (job 135882647898, fixed in the
-          # compiler since; bench/rebuild_reuse.py step 7). Crystal's cache is
-          # per job too, since the bootstrap compiler builds `iyi` through it and
-          # brew's Crystal 1.22.3 rotates it with no lock at all.
+          # temporary directory. On the project's Mac the three darwin jobs
+          # shared one HOME, and one job's cache rotation removed a directory
+          # another job's build was linking from (job 135882647898, fixed in
+          # the compiler since; bench/rebuild_reuse.py step 7). A Namespace VM
+          # per job makes that moot, but the paths stay per job in case a
+          # runner is ever reused. Crystal's cache is kept per job as well:
+          # the bootstrap compiler builds `iyi` through it, and brew's
+          # Crystal 1.22.3 rotates it with no lock at all.
           echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
           echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done

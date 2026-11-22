@@ -1829,9 +1829,6 @@ IYI
       code=$?; check_bound "$code" forced "$mode" "fair-$mode-raw.txt"
       if [ "$code" -eq 76 ]; then cat "fair-$mode-raw.txt"; exit 76; fi
       tr -d '\r' < "fair-$mode-raw.txt" > "fair-$mode.txt"
-      if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then
-        echo "SETUP: fairness: the $mode proof ended unexpectedly (exit $code)"; cat "fair-$mode.txt"; exit 76
-      fi
       fail_lines="$(grep -c '^FAIL:' "fair-$mode.txt")"
       expected_fails=0
       [ "$expected_code" -eq 1 ] && expected_fails=1
@@ -2649,21 +2646,13 @@ IYI
         exit 76
       fi
       if [ "$mode" = control ]; then
-        if [ "$code" -eq 1 ] && [ "$(grep -c '^FAIL:' "shared-priority-$mode.txt")" -eq 1 ] && grep -qxF "$shared_priority_failure" "shared-priority-$mode.txt"; then
-          echo "$shared_priority_failure"; exit 1
-        fi
         if [ "$code" -ne 0 ] || [ "$(grep -cxF "$shared_priority_success" "shared-priority-$mode.txt")" -ne 1 ] || grep -q '^FAIL:' "shared-priority-$mode.txt"; then
-          echo "SETUP: shared priority: the control ended without a valid witness"
-          cat "shared-priority-$mode.txt"; exit 76
+          pair_mismatch "$code" "shared-priority-$mode.txt" control
         fi
         echo "  $shared_priority_success"
       else
         if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' "shared-priority-$mode.txt")" -ne 1 ] || ! grep -qxF "$shared_priority_failure" "shared-priority-$mode.txt"; then
-          if [ "$code" -eq 0 ] && grep -qxF "$shared_priority_success" "shared-priority-$mode.txt"; then
-            echo "FAIL: shared priority: the mutant escaped detection"; exit 1
-          fi
-          echo "SETUP: shared priority: the mutant ended without a valid witness"
-          cat "shared-priority-$mode.txt"; exit 76
+          pair_mismatch "$code" "shared-priority-$mode.txt" mutant 0 "$shared_priority_success"
         fi
         printf '  exits 1 at "%s"\n' "$shared_priority_failure"
       fi
@@ -4269,12 +4258,10 @@ for line_mode in control mutant; do
   code=$?
   check_bound "$code" healthy "$line_mode"
   if [ "$code" -ne 0 ]; then
-    if [ "$code" -eq 76 ] && grep -q '^SETUP:' "line-hold-$line_mode.err"; then
-      grep -m1 '^SETUP:' "line-hold-$line_mode.err"
-    else
-      echo "SETUP: whole lines: the $line_mode writer exited $code"
-    fi
-    exit 76
+    # The writer's own SETUP line, or a crash or defect in the program under
+    # test. pair_mismatch decides which: a control is never filed as setup.
+    if [ "$line_mode" = control ]; then pair_mismatch "$code" "line-hold-$line_mode.err" control; fi
+    pair_mismatch "$code" "line-hold-$line_mode.err" mutant 0 "$line_pass"
   fi
   # The writer has exited and released the redirected handle before cmp.
   # Iyi's low-level writes emit LF bytes directly on Windows as on POSIX.

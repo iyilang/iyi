@@ -594,26 +594,42 @@
 
 ### Gates
 
-- **The parallel gates' failure proofs are forced, and their wall-clock
-  bounds are information.** Each failure proof in `bench/parallel_exercise.sh`
-  runs its broken copy once and passes only at the copy's exact sentence
-  (exit 1), with a control that passes at its own. The programs it drives
-  are `bench/parallel_migrate.iyi`, `bench/parallel_preempt.iyi` and
-  `bench/parallel_preempt_lib.iyi`. The copies are decided by keyed
-  observations they are forced into, not by timing: a missed observation ends
-  the run once as a progress failure (status 76), and a timeout never counts
-  as a catch. `bench/concurrent_mark.sh` and `bench/reuse_integrity.sh` run
-  each failure proof once as well, and `bench/heap_drain.sh` decides its
-  placement proof on one run. The bounds that are information only, printed
-  as `measure:` lines and judged by no verdict, are in
-  `bench/parallel_exercise.sh` and the programs it drives: the balance
-  (former 2x the ideal), hand-off medians and longest wakes (former 1 ms and
-  40 ms), the backstop (50 ms), join (300 ms), cancel (3000 ms), speedup
-  (0.6 x K), tight-loop ratios (2x), the monitor's look interval and turns,
-  and the server's latencies; and in `bench/heap_drain.sh`, the residency,
-  arena growth, cold bytes and idle figures. What still decides is the
-  capacity witness, the keyed decisions the failure proofs name, the
-  structural IR checks, and the positive checks that every answer is right.
+- **The gates this series changed decide by forced observations, not by clocks,
+  retries or run counts. Their wall-clock bounds are information.** Each failure
+  proof in `bench/parallel_exercise.sh`, `bench/concurrent_mark.sh`,
+  `bench/reuse_integrity.sh` and `bench/heap_drain.sh` runs its broken copy once
+  and passes only at the copy's named sentence (exit 1), with a control that
+  passes at its own. A copy is decided by keyed observations it is forced into:
+  a missed observation ends the run as a named progress failure (status 76), and
+  a timeout never counts as a catch. The stress loops in `bench/thread_exercise.sh`
+  never retry. The per-gate account of each verdict that changed is under Fixed,
+  in "Named bench gates decide no verdict by a clock or a retry count". The
+  parallel gate's programs are `bench/parallel_migrate.iyi`,
+  `bench/parallel_preempt.iyi` and `bench/parallel_preempt_lib.iyi`.
+
+  The bounds below are information only: printed as measurements and judged by
+  no verdict. They are the ticker, the poller's response, the monitor's look
+  interval and quantum, balance (formerly at most 2x the measured work per
+  worker), hand-off (medians and longest wakes, formerly 1 ms and 40 ms), the
+  backstop (formerly 50 ms), join (formerly 300 ms), cancel timing (formerly
+  3000 ms), occupancy (the former 0.6 x K guarantee), the tight-loop ratios, the
+  thread gate's measurement lines (steps 3, 4b, 4c and 4d), and, in
+  `bench/heap_drain.sh`, the residency, RSS, arena growth, cold bytes and idle
+  figures. What still decides is the capacity witness, the keyed decisions the
+  failure proofs name, the structural IR checks, and the positive checks that
+  every answer is right.
+
+  Four open items are named where the code states them, and none is settled
+  here. The parallel witnesses that read `IyiFiber.state` prove nothing about
+  its visibility, since the field is a plain enum whose writers share no lock
+  (`bench/parallel_exercise.sh`'s header). Whether the allocation load alone
+  triggers a local collection is not judged by `bench/parallel_exercise.iyi`,
+  which cites `bench/heap_local.iyi`'s `inflight_check`, run with partitions on
+  each platform by heap22's CI jobs. Termination concurrent with collection in
+  the thread gate fails as a hang inside kernel teardown, and its IR check forces
+  the cause, not the interleaving (`bench/thread_exercise.sh`'s header). About
+  thirty watchdog sentences in `bench/concurrent_mark.sh`'s header are neither
+  routed nor individually forced.
 
 - **`bench/lsp_memory.py` holds a workspace pull to what the design
   promises, not to a fixed 760 MB.** A worker stops a pull between

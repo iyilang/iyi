@@ -16,8 +16,9 @@
 #      running at one instant. On a pool of one, eligible spawns stay on
 #      the main thread and no pool starts, while `spawn(unit: :new)`
 #      tasks run on the pool's worker. On a pool of four, in a process of
-#      its own, one spawn starts one worker, spawns joined one at a time at
-#      most three, and four tasks running at one instant all four; one
+#      its own, one spawn starts one worker, and four tasks running at one
+#      instant all four; a second spawn made beside a running one starts a
+#      worker of its own, decided at the spawn; one
 #      spawn still starts one worker when it lands, every time, between
 #      the worker's first empty look and its idle count.
 #   2. The explanation: `--explain-spawn` notes each spawn, naming the
@@ -61,7 +62,8 @@
 #      ineligible one sent to the pool, `unit: :same` sent to the pool,
 #      `unit: :new` left in the unit, `spawn_parallel` or `serial:` kept as an
 #      alias, a pool of one that starts for eligible spawns anyway, a pool
-#      that starts every worker at once, one that never starts a second,
+#      that starts every worker at once, one that never starts a second (which
+#      `beside` catches at its spawn),
 #      and a worker that gives back the token of the one out looking
 #      before it counts itself idle. Of the compiler, through
 #      `IYI_SPAWN_BROKEN`: no module named in a reason, no note from `iyi
@@ -745,6 +747,59 @@ cat > "$WORK/forced_words.iyi" <<'IYI'
     -2
   end
 
+  # Copy-only words for the `beside` pair: the first spawn's entry, its release,
+  # and the second spawn's start. Each wait has a hang limit that ends the run
+  # with status 76 and its own sentence.
+  @[UnsafeReach("copy-only beside pair words, accessed atomically")]
+  @@forced_beside_entered : UInt64 = 0_u64
+  @[UnsafeReach("copy-only beside pair words, accessed atomically")]
+  @@forced_beside_released : UInt64 = 0_u64
+  @[UnsafeReach("copy-only beside pair words, accessed atomically")]
+  @@forced_beside_started : UInt64 = 0_u64
+
+  @[NoInline]
+  @[NoPreempt]
+  def self.forced_beside_hold : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_entered).address).value.set(1_u64)
+    released = Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_released).address)
+    until_ns = __iyi_monotonic_ns + 60_000_000_000_i64
+    while released.value.get == 0_u64
+      if __iyi_monotonic_ns >= until_ns
+        print "FAIL: beside: the first spawn was not released within 60 seconds\n"
+        __iyi_exit(76)
+      end
+      IyiThread.spin_pause
+    end
+  end
+
+  def self.forced_beside_wait_entered : Nil
+    forced_beside_wait(pointerof(@@forced_beside_entered).address, "beside: the first spawn never started")
+  end
+
+  def self.forced_beside_mark : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_started).address).value.set(1_u64)
+  end
+
+  def self.forced_beside_wait_started : Nil
+    forced_beside_wait(pointerof(@@forced_beside_started).address, "beside: the second spawn never started")
+  end
+
+  def self.forced_beside_release : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_released).address).value.set(1_u64)
+  end
+
+  private def self.forced_beside_wait(address : UInt64, sentence : String) : Nil
+    cell = Pointer(Atomic(UInt64)).new(address)
+    until_ns = __iyi_monotonic_ns + 60_000_000_000_i64
+    while cell.value.get == 0_u64
+      if __iyi_monotonic_ns >= until_ns
+        print "FAIL: #{sentence} within 60 seconds\n"
+        __iyi_exit(76)
+      end
+      IyiThread.spin_pause
+    end
+  end
+
   def self.forced_enter : Nil
     Pointer(Atomic(UInt64)).new(pointerof(@@forced_entered).address).value.set(1_u64)
   end
@@ -912,6 +967,17 @@ if [ "$code" -ne 0 ] || ! grep -qxF 'growth: queued work started another worker'
   echo "the sound growth control failed (exit $code):"; tail -20 growth_control.txt; exit 1
 fi
 echo "  sound growth control: queued work started another worker"
+
+step "failure proof: a second spawn queued behind a running one, and a pool that never grows"
+broken beside_broken '/^  def self.grow : Nil$/ { print; print "    return"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dbeside_force
+caught beside_broken 'beside: a second spawn queued behind a running one started no worker' beside --workers=4
+broken beside_control '/^  def self.grow : Nil$/ { print; print "    # beside placement control"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dbeside_force
+timeout -k 5 120 ./beside_control-run beside --workers=4 > beside_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'beside: a second spawn started a worker beside the first, which was running' beside_control.txt; then
+  echo "the sound beside control failed (exit $code):"; tail -20 beside_control.txt; exit 1
+fi
+echo "  sound beside control: a second spawn started a worker beside the first"
 
 # A worker the pool starts holds the token of the one out looking until its
 # look finds a task or it has counted itself idle (`IyiScheduler.idle_worker`),

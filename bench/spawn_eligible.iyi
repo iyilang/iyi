@@ -12,10 +12,11 @@
 #
 #   together  four spawns whose blocks capture only atomics, from the main
 #             thread, are all running at one instant: each counts itself in
-#             and spins, without parking, until the four are in or two
-#             seconds have passed. Four tasks in one unit, or on the one
-#             thread, run one at a time, and each waits the two seconds
-#             out alone.
+#             and spins, without parking, until all four have counted in. The
+#             count is the verdict, not a clock; the clock is a 60-second hang
+#             limit that only a pool which cannot run them beside one another
+#             reaches (status 76). Four tasks in one unit, or on the one
+#             thread, never see each other and end there.
 #   nested    the same four, spawned inside a parallel task: an eligible
 #             spawn there is a unit of its own, not its parent's.
 #   unit      four spawns inside a parallel task whose blocks append to the
@@ -35,9 +36,12 @@
 #             on the main thread, where a plain spawn of the same blocks
 #             (`one`) stays.
 #   grows     run first in its process: the pool starts one worker for one
-#             eligible spawn, a few for spawns made and joined one at a
-#             time, and every worker only when that many tasks are running
-#             at one instant (`IyiWorkers.grow`).
+#             eligible spawn, a few for spawns made and joined one at a time, and
+#             every worker only when that many tasks are running at one
+#             instant (`IyiWorkers.grow`).
+#   beside    forced pair (`-Dbeside_force` only): a second spawn made while the
+#             first holds its worker starts a worker beside it, decided at the
+#             spawn itself; a copy that never grows the pool fails there.
 #
 # bench/spawn_eligible.sh runs it, and broken copies of the runtime, each
 # caught by the step that names it.
@@ -54,35 +58,42 @@ import std/int
 
   TASKS    =                4
   TOGETHER =            4_i64
-  WAIT_NS  = 2000_000_000_i64
+  # A hang limit only. The spins in `together` and `asked` end the moment all
+  # four have counted in, which a correct pool does in microseconds; this limit
+  # ends a run whose pool cannot run them beside one another, with status 76.
+  HANG_NS  = 60_000_000_000_i64
   SPIN_NS  =   20_000_000_i64
+
+  # A watchdog end: its own sentence and status 76, never a verdict.
+  def hang_end(sentence : String) : Nil
+    print "FAIL: #{sentence}\n"
+    __iyi_exit(76)
+  end
 
   # Each block below spins with its counters in its own text rather than
   # through a def: an `Atomic` is a struct, and an argument is a copy of
   # it. A spinning task never parks, so nothing but another thread runs
   # beside it.
 
+  # The verdict is the count. A task that sees all four counted in has its
+  # three unit-mates running beside it, and each task holds until that count
+  # is reached, so the proof is four arrivals, not a clock.
   def together(where : String) : Nil
     arrived = Atomic(Int64).new(0_i64)
-    missed = Atomic(Int64).new(0_i64)
     started = __iyi_monotonic_ns
     group do |g|
       TASKS.times do
         g.spawn do
           arrived.add(1_i64)
-          until_ns = __iyi_monotonic_ns + WAIT_NS
-          while arrived.get < TOGETHER && __iyi_monotonic_ns < until_ns
+          hang_at = __iyi_monotonic_ns + HANG_NS
+          while arrived.get < TOGETHER
+            hang_end("#{where}: the four spawns did not all reach one instant within 60 seconds") if __iyi_monotonic_ns >= hang_at
           end
-          missed.add(1_i64) if arrived.get < TOGETHER
           0
         end
       end
     end
     took = (__iyi_monotonic_ns - started) // 1000000_i64
-    if missed.get != 0_i64
-      puts "#{where}: #{missed.get} of #{TOGETHER} eligible spawns were left waiting"
-      fail("#{where}: eligible spawns waited #{WAIT_NS // 1000000_i64} ms for the others and left alone: they ran one at a time")
-    end
     puts "#{where}: #{TOGETHER} eligible spawns were all running at one instant, in #{took} ms"
   end
 
@@ -250,22 +261,17 @@ import std/int
   # The four of `together`, asked onto the pool with `unit: :new`.
   def asked : Nil
     arrived = Atomic(Int64).new(0_i64)
-    missed = Atomic(Int64).new(0_i64)
     group do |g|
       TASKS.times do
         g.spawn(unit: :new) do
           arrived.add(1_i64)
-          until_ns = __iyi_monotonic_ns + WAIT_NS
-          while arrived.get < TOGETHER && __iyi_monotonic_ns < until_ns
+          hang_at = __iyi_monotonic_ns + HANG_NS
+          while arrived.get < TOGETHER
+            hang_end("asked: the spawn(unit: :new) tasks did not all reach one instant within 60 seconds") if __iyi_monotonic_ns >= hang_at
           end
-          missed.add(1_i64) if arrived.get < TOGETHER
           0
         end
       end
-    end
-    if missed.get != 0_i64
-      puts "asked: #{missed.get} of #{TOGETHER} spawn(unit: :new) tasks were left waiting"
-      fail("asked: spawn(unit: :new) tasks waited #{WAIT_NS // 1000000_i64} ms for the others and left alone: they ran one at a time")
     end
     puts "asked: #{TOGETHER} spawn(unit: :new) tasks were all running at one instant"
   end
@@ -330,6 +336,34 @@ import std/int
     puts "grows: one eligible spawn started 1 of #{IyiWorkers.count} workers, #{LIGHT_ROUNDS} joined one at a time #{light}, and #{TOGETHER} running at one instant all #{loaded}"
   end
 
+{% if flag?(:beside_force) %}
+  # Queued work with no idle worker starts one (`push` grows the pool on the
+  # spawner's thread before `spawn` returns), so a second spawn made while the
+  # first holds its worker starts a worker beside it. The decision is the
+  # launch count read at the spawn, with no clock: a copy that never grows the
+  # pool fails on its one run. The first task holds on a word until the second
+  # has started.
+  def beside : Nil
+    group do |g|
+      g.spawn do
+        IyiWorkers.forced_beside_hold
+        0
+      end
+      IyiWorkers.forced_beside_wait_entered
+      before = IyiWorkers.launched
+      g.spawn do
+        IyiWorkers.forced_beside_mark
+        0
+      end
+      after = IyiWorkers.launched
+      fail("beside: a second spawn queued behind a running one started no worker") if after == before
+      IyiWorkers.forced_beside_wait_started
+      IyiWorkers.forced_beside_release
+    end
+    puts "beside: a second spawn started a worker beside the first, which was running"
+  end
+{% end %}
+
 {% if flag?(:growth_force) %}
   def growth : Nil
     decision = -3
@@ -379,6 +413,8 @@ import std/int
     STEPS = ["together", "nested", "unit", "serial", "asked", "one", "askedone", "grows", "growth"]
   {% elsif flag?(:placement_force) %}
     STEPS = ["together", "nested", "unit", "serial", "asked", "one", "askedone", "grows", "eligible_placement", "asked_placement"]
+  {% elsif flag?(:beside_force) %}
+    STEPS = ["together", "nested", "unit", "serial", "asked", "one", "askedone", "grows", "beside"]
   {% else %}
     STEPS = ["together", "nested", "unit", "serial", "asked", "one", "askedone", "grows"]
   {% end %}
@@ -411,6 +447,9 @@ import std/int
 {% if flag?(:placement_force) %}
     when "eligible_placement" then eligible_placement
     when "asked_placement" then asked_placement
+{% end %}
+{% if flag?(:beside_force) %}
+    when "beside" then beside
 {% end %}
     end
   end

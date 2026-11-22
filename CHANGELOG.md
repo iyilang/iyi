@@ -698,6 +698,14 @@
   a fallback folded to a plain value is refused. CI's wasm32-wasi job,
   where the load is the real branch, builds an X25519 and ML-KEM program,
   holds its IR to the same and runs it under wasmtime.
+- **`bench/std_secure_dns_exercise.sh` names each way its scripted servers fail
+  to start, and bounds every stage after readiness.** Before readiness the
+  supervisor checks the child on every look and ends the gate at status 76 with
+  a distinct sentence for a silent exit, an exit after output, a hang, and a
+  Python preflight that hangs. Each later stage runs under a named watchdog, and
+  the body's process group (its job object on Windows) is ended, reaping its
+  descendants. The earlier intermittent "the scripted servers did not start"
+  (CI job 134891405059) is unexplained: this makes no claim about its cause.
 - **A release tag must be the version its archives are built as.** The
   installers ask release `v<version>` for `iyi-<version>-...` by name,
   and the archives are named by `src/IYI_VERSION`: a trial tag on a tree

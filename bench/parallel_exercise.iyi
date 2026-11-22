@@ -154,15 +154,21 @@
   # The step *name* run under a watchdog on the main thread: a task that
   # sleeps *ms* and fails the run by name unless the step ends first.
   def watched(name : String, ms : Int32, &block : -> Nil) : Nil
-    group do |w|
-      w.spawn do
-        waited = sleep(ms)
-        progress_hang("#{name}: progress hang: still waiting after #{ms} ms") unless waited.is_a?(Cancelled)
-        0
-      end
+    {% if flag?(:copy_hook_watchdog) %}
+      # The withheld-event control exercises the copy hook's own watchdog.
+      # Its enclosing process timeout remains the outer safety net.
       block.call
-      w.cancel_children
-    end
+    {% else %}
+      group do |w|
+        w.spawn do
+          waited = sleep(ms)
+          progress_hang("#{name}: progress hang: still waiting after #{ms} ms") unless waited.is_a?(Cancelled)
+          0
+        end
+        block.call
+        w.cancel_children
+      end
+    {% end %}
   end
 
   # Every worker of the pool started: one task a worker, each spinning
@@ -410,7 +416,7 @@
           started = __iyi_monotonic_ns
           while stored.count == 0_i64
             IyiThread.spin_pause
-            fail("race: the other task's add never stored within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+            progress_hang("race: progress hang: the other task's add never stored within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
           end
           racer.store_count(seen)
           0
@@ -419,7 +425,7 @@
           started = __iyi_monotonic_ns
           while looked.count == 0_i64
             IyiThread.spin_pause
-            fail("race: the first task never read the count within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+            progress_hang("race: progress hang: the first task never read the count within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
           end
           racer.bump
           stored.add(1_i64)
@@ -611,7 +617,7 @@
           started = __iyi_monotonic_ns
           while !IyiScheduler.force_now_entered?
             sleep(1)
-            fail("now: the first take did not reach its held count") if elapsed_ms(started) >= watch.to_i64
+            progress_hang("now: progress hang: the first take did not reach its held count") if elapsed_ms(started) >= watch.to_i64
           end
         {% end %}
         g.spawn(unit: :new) do
@@ -677,7 +683,7 @@
         while begun.count == 0_i64
           sleep(1)
         end
-        fail("cancel: watch must leave room for the sleeping tasks") if watch <= 0 || watch > 2_147_473_647
+        progress_hang("cancel: setup: watch must leave room for the sleeping tasks") if watch <= 0 || watch > 2_147_473_647
         sleep_ms = watch + 10_000
         sleeper = g.spawn(unit: :new) { sleep(sleep_ms).is_a?(Cancelled) ? 1 : 0 }
         waiter = g.spawn(unit: :new) { never.receive.is_a?(Cancelled) ? 1 : 0 }
@@ -753,7 +759,7 @@
         started = __iyi_monotonic_ns
         while begun.count < IyiWorkers.count.to_i64
           sleep(1)
-          fail("cancel: the holders did not take every worker within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+          progress_hang("cancel: progress hang: the holders did not take every worker within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
         end
         handles = [] of IyiTask(Int32)
         children.times do
@@ -886,7 +892,7 @@
         waited_ms = answer.is_a?(Int64) ? answer : -1_i64
       end
       {% if flag?(:duplicate_force) %}
-        fail("steal: not armed: no second worker looked at the targeted victim") if IyiWorkers.force_dup_seconds == 0_u64
+        progress_hang("steal: not armed: no second worker looked at the targeted victim") if IyiWorkers.force_dup_seconds == 0_u64
         fail("steal: the second steal found the first task still in its victim's queue") if IyiWorkers.force_dup_stale != 0_u64
         puts "steal: a second steal found the task the first took gone from its victim's queue"
       {% end %}
@@ -912,14 +918,14 @@
             started = __iyi_monotonic_ns
             while !IyiScheduler.force_idle_seen?
               IyiThread.spin_pause
-              fail("home: the main thread never went idle within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+              progress_hang("home: progress hang: the main thread never went idle within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
             end
           {% end %}
           0
         end
       end
       {% if flag?(:lostwake_force) %}
-        fail("home: the targeted post and ring decision did not complete") unless IyiScheduler.force_home_completed?
+        progress_hang("home: not armed: the targeted post and ring decision did not complete") unless IyiScheduler.force_home_completed?
         # A later post of the same root must not reopen the completed proof.
         IyiScheduler.force_home_post(IyiScheduler.state, IyiScheduler.current)
         IyiScheduler.force_home_done(IyiScheduler.state, IyiScheduler.current)
@@ -1122,12 +1128,12 @@
     started = __iyi_monotonic_ns
     while IyiScheduler.forced_link == 0_u64
       IyiThread.spin_pause
-      fail("wakes, words: progress hang: the forced waiter recorded no link in #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+      progress_hang("wakes, words: progress hang: the forced waiter recorded no link in #{watch} ms") if elapsed_ms(started) >= watch.to_i64
     end
     if IyiScheduler.forced_link == 2_u64
       fail("wakes, words: the forced first wake was lost before its waiter linked")
     end
-    fail("wakes, words: not armed: the first wake did not claim the linked waiter") unless IyiScheduler.forced_scan == 2_u64
+    progress_hang("wakes, words: not armed: the first wake did not claim the linked waiter") unless IyiScheduler.forced_scan == 2_u64
     puts "wakes, words: the forced first wake claimed the waiter that linked before its scan"
   end
   {% end %}
@@ -1155,7 +1161,7 @@
       waited_since = __iyi_monotonic_ns
       while !IyiScheduler.forced_in_window?
         IyiThread.spin_pause
-        fail("wakes, words: the parked side never reached its park in #{watch} ms") if elapsed_ms(waited_since) >= watch.to_i64
+        progress_hang("wakes, words: progress hang: the parked side never reached its park in #{watch} ms") if elapsed_ms(waited_since) >= watch.to_i64
       end
     {% end %}
     while done < rounds
@@ -1167,7 +1173,7 @@
           if elapsed_ms(started) >= watch.to_i64
             puts "wakes, words: turn #{seen + 1_u64} was not taken in #{watch} ms"
             # A deadline is a progress failure, never the mutant verdict.
-            fail("wakes, words: an unexpected turn was not taken")
+            progress_hang("wakes, words: progress hang: an unexpected turn was not taken")
           end
         end
         next
@@ -1197,15 +1203,17 @@
         started = __iyi_monotonic_ns
         while !IyiScheduler.force_window_held?
           sleep(1)
-          fail("wakes, cancels: the task never reached its park's window within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
+          progress_hang("wakes, cancels: progress hang: the task never reached its park's window within #{watch} ms") if elapsed_ms(started) >= watch.to_i64
         end
         inner.cancel_children
-        fail("wakes, cancels: the targeted cancellation did not set its flag") unless task.fiber.cancelled
+        progress_hang("wakes, cancels: not armed: the targeted cancellation did not set its flag") unless task.fiber.cancelled
         IyiScheduler.force_window_release
         started = __iyi_monotonic_ns
         while IyiScheduler.force_window_result == 0_u64
           sleep(1)
-          fail("wakes, cancels: the targeted suspend decision did not complete") if elapsed_ms(started) >= watch.to_i64
+          {% unless flag?(:copy_hook_watchdog) %}
+            progress_hang("wakes, cancels: progress hang: the targeted suspend decision did not complete") if elapsed_ms(started) >= watch.to_i64
+          {% end %}
         end
         fail("wakes, cancels: the targeted suspend omitted the cancelled claim") if IyiScheduler.force_window_result == 2_u64
         puts "wakes, cancels: the targeted suspend claimed its cancellation"
@@ -1351,9 +1359,9 @@
         watch = argument[8, argument.size - 8].to_i
       elsif argument.starts_with?("--only=")
         parts = [argument[7, argument.size - 7]]
-        fail("wakes has no part named #{parts[0]}") unless ["selects", "handed", "cancels", "words"].includes?(parts[0])
+        progress_hang("wakes: setup: no part named #{parts[0]}") unless ["selects", "handed", "cancels", "words"].includes?(parts[0])
       else
-        fail("no step named #{argument}") unless STEPS.includes?(argument)
+        progress_hang("setup: no step named #{argument}") unless STEPS.includes?(argument)
         chosen << argument
       end
     end

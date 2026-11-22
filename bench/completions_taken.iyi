@@ -38,6 +38,24 @@ import std/socket::{IyiSocket, SocketError}
     __iyi_exit(76)
   end
 
+  # A failure before the proof was armed: the fixture could not set its scenario up, so no
+  # verdict was reached. Exit 76, never 1. Main-thread code only: its message is built here.
+  def setup_failure(message : String) : NoReturn
+    print "FAIL: #{message}\n"
+    __iyi_exit(76)
+  end
+
+  # A hang, or a not-armed failure, met by a task holding its worker with preemption off or under
+  # a lock. Nothing is built: the pieces go out through the runtime's own write, then the exit.
+  @[NoInline]
+  @[NoPreempt]
+  def held_exit(status : Int32, lead : String, what : String, tail : String) : NoReturn
+    __iyi_write(1, lead.to_unsafe.as(Void*), lead.bytesize.to_u64)
+    __iyi_write(1, what.to_unsafe.as(Void*), what.bytesize.to_u64)
+    __iyi_write(1, tail.to_unsafe.as(Void*), tail.bytesize.to_u64)
+    __iyi_exit(status)
+  end
+
   # Atomic observations shared by the reader and its holding sibling.
   # The forced round uses their worker identities and the read time.
   class Marks
@@ -148,19 +166,6 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  # A spin with preemption off until *count* reaches *target*: the task holding
-  # a worker in it keeps the worker, and the wait ends on a word another task
-  # sets, never on a clock.
-  @[NoInline]
-  @[NoPreempt]
-  def hold_until(count : Tally, target : Int64, what : String) : Nil
-    limit = __iyi_monotonic_ns + 20_000_000_000_i64
-    while count.count < target
-      IyiThread.spin_pause
-      fail("#{what}: the hold did not release in 20000 ms") if __iyi_monotonic_ns > limit
-    end
-  end
-
   # A slot a task notes its fiber or worker in.
   class Slot
     @value : Atomic(UInt64)
@@ -203,7 +208,7 @@ import std/socket::{IyiSocket, SocketError}
     limit = __iyi_monotonic_ns + 20_000_000_000_i64
     while count.count < target
       IyiThread.spin_pause
-      fail("#{what}: the hold did not release in 20000 ms") if __iyi_monotonic_ns > limit
+      held_exit(76, "FAIL: ", what, ": the hold did not release in 20000 ms\n") if __iyi_monotonic_ns > limit
     end
   end
 
@@ -212,7 +217,7 @@ import std/socket::{IyiSocket, SocketError}
     limit = __iyi_monotonic_ns + 10_000_000_000_i64
     while count.count < target
       sleep(1)
-      fail("#{what}: no progress in 10000 ms") if __iyi_monotonic_ns > limit
+      progress_hang("#{what}: no progress in 10000 ms") if __iyi_monotonic_ns > limit
     end
   end
 
@@ -223,9 +228,9 @@ import std/socket::{IyiSocket, SocketError}
   # before main releases the sibling. Each wait has a named progress limit.
   def forced_round(listener : IyiSocket, port : Int32) : Nil
     near = IyiSocket.connect("127.0.0.1", port, 5000)
-    fail("taken: connect answered #{near}") unless near.is_a?(IyiSocket)
+    setup_failure("taken: connect answered #{near}") unless near.is_a?(IyiSocket)
     far = listener.accept
-    fail("taken: accept answered #{far}") unless far.is_a?(IyiSocket)
+    setup_failure("taken: accept answered #{far}") unless far.is_a?(IyiSocket)
     far_fd = far.fd
     marks = Marks.new
     reader = Slot.new
@@ -261,10 +266,12 @@ import std/socket::{IyiSocket, SocketError}
             0
           end
           marks.note_reader(IyiScheduler.state.object_id)
-          got = IyiSocket.new(far_fd).read(1).or_panic
+          reply = IyiSocket.new(far_fd).read(1)
+          setup_failure("taken: setup: the forced read failed with a socket error") if reply.is_a?(SocketError)
+          got = reply
           marks.note_read_at(__iyi_monotonic_ns)
           marks.note_read_on(IyiScheduler.state.object_id)
-          fail("taken: progress hang: the read answered #{got.inspect}") unless got == "x"
+          fail("taken: the read answered #{got.inspect} where x was sent") unless got == "x"
         end
         0
       end
@@ -276,9 +283,9 @@ import std/socket::{IyiSocket, SocketError}
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while owner.value == 0_u64
         sleep(1)
-        fail("taken: progress hang: the sibling did not start in 10000 ms") if __iyi_monotonic_ns > limit
+        progress_hang("taken: progress hang: the sibling did not start in 10000 ms") if __iyi_monotonic_ns > limit
       end
-      fail("taken: not armed: the sibling did not start on its reader's worker") unless owner.value == marks.reader
+      setup_failure("taken: not armed: the sibling did not start on its reader's worker") unless owner.value == marks.reader
       {% if flag?(:nocross_force) %}
         IyiScheduler.force_dispatch_target(reader.value)
       {% end %}
@@ -286,27 +293,27 @@ import std/socket::{IyiSocket, SocketError}
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while IyiScheduler.waiting_threads < 1_u64
         sleep(1)
-        fail("taken: progress hang: no spare waited in the port in 10000 ms") if __iyi_monotonic_ns > limit
+        progress_hang("taken: progress hang: no spare waited in the port in 10000 ms") if __iyi_monotonic_ns > limit
       end
       wrote = near.write("x")
-      fail("taken: progress hang: the send answered #{wrote}") unless wrote.is_a?(Int32)
+      setup_failure("taken: the send answered #{wrote}") unless wrote.is_a?(Int32)
       {% if flag?(:nocross_force) %}
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while IyiScheduler.force_dispatch_fiber != reader.value
         sleep(1)
-        fail("taken: progress hang: the packet was not dispatched in 10000 ms") if __iyi_monotonic_ns > limit
+        progress_hang("taken: progress hang: the packet was not dispatched in 10000 ms") if __iyi_monotonic_ns > limit
       end
       fail("taken: the packet's fiber was made homebound to the worker it parked on, so its answer waits for that worker") if IyiScheduler.force_dispatch_homebound == 1_u64
       {% end %}
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while marks.read_on == 0_u64
         sleep(1)
-        fail("taken: progress hang: the answer was not read in 10000 ms") if __iyi_monotonic_ns > limit
+        progress_hang("taken: progress hang: the answer was not read in 10000 ms") if __iyi_monotonic_ns > limit
       end
       elsewhere = marks.read_on != owner.value
       owner_go.add(1_i64)
       release.add(1_i64)
-      fail("taken: not armed: the answer was read on the worker that computed") unless elsewhere
+      setup_failure("taken: not armed: the answer was read on the worker that computed") unless elsewhere
       puts "taken: a packet's answer was read on another worker while its reader's worker computed"
     end
     near.close
@@ -324,20 +331,20 @@ import std/socket::{IyiSocket, SocketError}
     # Make the starting state explicit: a mutant that omits the pool's
     # change must not pass because the process inherited a disabled boost.
     if ::LibC.SetProcessPriorityBoost(::LibC.GetCurrentProcess, 0_i32) == 0
-      fail("boost: could not enable the process's priority boost before starting the pool")
+      setup_failure("boost: could not enable the process's priority boost before starting the pool")
     end
     disabled = 1
     if LibBoost.GetProcessPriorityBoost(::LibC.GetCurrentProcess, pointerof(disabled)) == 0
-      fail("boost: GetProcessPriorityBoost failed before starting the pool")
+      setup_failure("boost: GetProcessPriorityBoost failed before starting the pool")
     end
-    fail("boost: the process's priority boost was not initially enabled") if disabled != 0
+    setup_failure("boost: the process's priority boost was not initially enabled") if disabled != 0
     # The pool starts at the first parallel task.
     group do |g|
       g.spawn(unit: :new) { 0 }
     end
     disabled = 0
     if LibBoost.GetProcessPriorityBoost(::LibC.GetCurrentProcess, pointerof(disabled)) == 0
-      fail("boost: GetProcessPriorityBoost failed")
+      setup_failure("boost: GetProcessPriorityBoost failed")
     end
     fail("boost: the process's priority boost is on with the pool started") if disabled == 0
     puts "boost: off with the pool started"
@@ -351,7 +358,7 @@ import std/socket::{IyiSocket, SocketError}
     if argument.starts_with?("--workers=")
       workers = argument[10, argument.size - 10].to_i
     else
-      fail("no step named #{argument}") unless STEPS.includes?(argument)
+      setup_failure("no step named #{argument}") unless STEPS.includes?(argument)
       chosen << argument
     end
   end

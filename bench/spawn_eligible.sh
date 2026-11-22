@@ -18,8 +18,9 @@
 #      tasks run on the pool's worker. On a pool of four, in a process of
 #      its own, one spawn starts one worker, and four tasks that spin until all
 #      four have started are all in progress at once (the workers the pool then
-#      holds are printed, not judged); a second spawn made beside a running one
-#      starts a worker of its own, or owes it and has it paid; one
+#      holds are printed, not judged); each spawn made beside running ones
+#      starts a worker of its own, or owes it and has it paid, and a pool that
+#      stops at two is caught at the third; one
 #      spawn still starts one worker when it lands, every time, between
 #      the worker's first empty look and its idle count.
 #   2. The explanation: `--explain-spawn` notes each spawn, naming the
@@ -748,57 +749,44 @@ cat > "$WORK/forced_words.iyi" <<'IYI'
     -2
   end
 
-  # Copy-only words for the `beside` pair: the first spawn's entry, its release,
-  # and the second spawn's start. Each wait has a hang limit that ends the run
+  # Copy-only words for the `beside` pair: a count of the holds that have started,
+  # and the release that ends them. The wait has a hang limit that ends the run
   # with status 76 and its own sentence.
-  @[UnsafeReach("copy-only beside pair words, accessed atomically")]
+  @[UnsafeReach("copy-only beside holds started, counted atomically")]
   @@forced_beside_entered : UInt64 = 0_u64
-  @[UnsafeReach("copy-only beside pair words, accessed atomically")]
+  @[UnsafeReach("copy-only beside release, set once")]
   @@forced_beside_released : UInt64 = 0_u64
-  @[UnsafeReach("copy-only beside pair words, accessed atomically")]
-  @@forced_beside_started : UInt64 = 0_u64
 
   @[NoInline]
   @[NoPreempt]
   def self.forced_beside_hold : Nil
-    Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_entered).address).value.set(1_u64)
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_entered).address).value.add(1_u64)
     released = Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_released).address)
     until_ns = __iyi_monotonic_ns + 60_000_000_000_i64
     while released.value.get == 0_u64
       if __iyi_monotonic_ns >= until_ns
-        print "FAIL: beside: the first spawn was not released within 60 seconds\n"
+        print "FAIL: beside: a held spawn was not released within 60 seconds\n"
         __iyi_exit(76)
       end
       IyiThread.spin_pause
     end
   end
 
-  def self.forced_beside_wait_entered : Nil
-    forced_beside_wait(pointerof(@@forced_beside_entered).address, "beside: the first spawn never started")
-  end
-
-  def self.forced_beside_mark : Nil
-    Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_started).address).value.set(1_u64)
-  end
-
-  def self.forced_beside_wait_started : Nil
-    forced_beside_wait(pointerof(@@forced_beside_started).address, "beside: the second spawn never started")
+  # Waits until at least `count` holds have started, each on a worker of its own.
+  def self.forced_beside_wait_entered(count : Int64) : Nil
+    cell = Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_entered).address)
+    until_ns = __iyi_monotonic_ns + 60_000_000_000_i64
+    while cell.value.get < count.to_u64
+      if __iyi_monotonic_ns >= until_ns
+        print "FAIL: beside: #{count} held spawns did not all start within 60 seconds\n"
+        __iyi_exit(76)
+      end
+      IyiThread.spin_pause
+    end
   end
 
   def self.forced_beside_release : Nil
     Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_released).address).value.set(1_u64)
-  end
-
-  private def self.forced_beside_wait(address : UInt64, sentence : String) : Nil
-    cell = Pointer(Atomic(UInt64)).new(address)
-    until_ns = __iyi_monotonic_ns + 60_000_000_000_i64
-    while cell.value.get == 0_u64
-      if __iyi_monotonic_ns >= until_ns
-        print "FAIL: #{sentence} within 60 seconds\n"
-        __iyi_exit(76)
-      end
-      IyiThread.spin_pause
-    end
   end
 
   # Copy-only owe arms for the `beside_owed` control: the first `forced_owe_arm`
@@ -988,22 +976,24 @@ if [ "$code" -ne 0 ] || ! grep -qxF 'growth: queued work started another worker'
 fi
 echo "  sound growth control: queued work started another worker"
 
-step "failure proof: a second spawn queued behind a running one, and a pool that never grows"
+step "failure proof: a spawn queued beside running ones starts no worker, and a pool that stops at two is caught at the third"
 broken beside_broken '/^  def self.grow : Nil$/ { print; print "    return"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dbeside_force
-caught beside_broken 'beside: a second spawn queued behind a running one started no worker' beside --workers=4
+caught beside_broken 'beside: a spawn made while others were running started no worker' beside --workers=4
+broken beside_stop2 '/^  def self.grow : Nil$/ { print; print "    return if word(pointerof(@@launched)).value.get >= 2_i64"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dbeside_force
+caught beside_stop2 'beside: a spawn made while others were running started no worker' beside --workers=4
 broken beside_control '/^  def self.grow : Nil$/ { print; print "    # beside placement control"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dbeside_force
 timeout -k 5 120 ./beside_control-run beside --workers=4 > beside_control.txt 2>&1
 code=$?
-if [ "$code" -ne 0 ] || ! grep -qxF 'beside: a second spawn started a worker beside the first, which was running' beside_control.txt; then
+if [ "$code" -ne 0 ] || ! grep -qxF 'beside: 4 spawns each started a worker beside the ones before, which were running' beside_control.txt; then
   echo "the sound beside control failed (exit $code):"; tail -20 beside_control.txt; exit 1
 fi
-echo "  sound beside control: a second spawn started a worker beside the first"
+echo "  sound beside control: 4 spawns each started a worker beside the ones before, which were running"
 
 step "failure proof: a start owed for a second spawn is paid by the spawner before its verdict"
 broken beside_owed '/^  def self.grow : Nil$/ { print; print "    if forced_owe_take"; print "      word(pointerof(@@owed)).value.set(1_i64)"; print "      IyiStat.add(IyiStat::OWES, 1_u64)"; print "      return"; print "    end"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dbeside_force -Dbeside_owed_force
 timeout -k 5 120 ./beside_owed-run beside --workers=4 > beside_owed.txt 2>&1
 code=$?
-if [ "$code" -ne 0 ] || ! grep -qxF 'beside: owed starts for the second spawn: 2 (information)' beside_owed.txt || ! grep -qxF 'beside: a second spawn started a worker beside the first, which was running' beside_owed.txt; then
+if [ "$code" -ne 0 ] || ! grep -qxF 'beside: owed starts for the second spawn: 2 (information)' beside_owed.txt || ! grep -qxF 'beside: 4 spawns each started a worker beside the ones before, which were running' beside_owed.txt; then
   echo "the owed-start control failed (exit $code):"; tail -20 beside_owed.txt; exit 1
 fi
 echo "  owed-start control: the second spawn owed two starts, the spawner paid them, and the verdict held"

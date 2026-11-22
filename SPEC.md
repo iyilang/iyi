@@ -5585,9 +5585,10 @@ allocation slice since the last collection (part 10).
 worker, also when it lands, every time, between the worker's first empty
 look and its idle count; four tasks that each spin until all four have started,
 which the count of arrivals proves: the four were started and in progress
-together, not that the pool then held four workers; and a second spawn made beside
-a running one starts a worker of its own or owes one that is then paid, and a spawn
-that does neither is caught on one run. A pool that
+together, not that the pool then held four workers; and each spawn made beside
+running ones starts a worker of its own or owes one that is then paid, a spawn that
+does neither is caught on one run, and a pool that stops at two is caught at the
+third. A pool that
 starts every worker at once, one that never starts a second, a worker that
 gives the token back before its idle count, and one that starts no worker for
 a spawn beside a running one are each caught on one run. How many workers four

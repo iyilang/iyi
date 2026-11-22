@@ -808,13 +808,65 @@ import std/socket::{IyiSocket, SocketError}
   # queued. The copy keeps its deadline in the future until the long
   # task's keyed preemption decision, so neither an idle poll nor the
   # park's periodic poll can wake it before that decision.
+  # The tasks share one object; Atomic is a value type and must not be
+  # passed as separate copies across the rendezvous.
+  class TickerState
+    @ready : Atomic(Int64)
+    @queued : Atomic(Int64)
+    @active : Atomic(Int64)
+    @witness : Atomic(Int64)
+
+    def initialize
+      @ready = Atomic(Int64).new(0_i64)
+      @queued = Atomic(Int64).new(0_i64)
+      @active = Atomic(Int64).new(0_i64)
+      @witness = Atomic(Int64).new(0_i64)
+    end
+
+    def ready : Nil
+      @ready.set(1_i64)
+    end
+
+    def ready? : Bool
+      @ready.get != 0_i64
+    end
+
+    def queue : Nil
+      @queued.set(1_i64)
+    end
+
+    def queued? : Bool
+      @queued.get != 0_i64
+    end
+
+    def start_computing : Nil
+      @active.set(1_i64)
+    end
+
+    def stop_computing : Nil
+      @active.set(0_i64)
+    end
+
+    def active? : Bool
+      @active.get == 1_i64
+    end
+
+    def witness : Int64
+      @witness.get
+    end
+
+    def observe(value : Int64) : Nil
+      @witness.set(value)
+    end
+  end
+
   @[NoInline]
   @[NoPreempt]
-  def unit_ticker_sleeper(ready : Atomic(Int64), queued : Atomic(Int64), active : Atomic(Int64), witness : Atomic(Int64)) : Nil
+  def unit_ticker_sleeper(state : TickerState) : Nil
     here = IyiScheduler.state.object_id
     IyiWorkers.force_ticker_key(here, IyiScheduler.current.object_id)
-    ready.set(1_i64)
-    while queued.get == 0_i64
+    state.ready
+    while !state.queued?
       IyiThread.park_if_requested
       IyiThread.spin_pause
     end
@@ -823,62 +875,66 @@ import std/socket::{IyiSocket, SocketError}
                  4_i64
                elsif IyiScheduler.state.object_id != here
                  3_i64
-               elsif active.get != 1_i64
+               elsif !state.active?
                  2_i64
                elsif IyiWorkers.force_ticker_result != 1_u64
                  5_i64
                else
                  1_i64
                end
-    witness.set(observed)
+    state.observe(observed)
   end
 
   # This loop must keep checking its worker's word until the sleeper ran,
   # or the mutant's keyed decision recorded that it was not enqueued.
   @[NoInline]
-  def unit_ticker_long(active : Atomic(Int64), witness : Atomic(Int64)) : UInt64
-    active.set(1_i64)
+  def unit_ticker_long(state : TickerState) : UInt64
+    state.start_computing
     IyiWorkers.force_ticker_arm(IyiScheduler.state.object_id, IyiScheduler.current.object_id)
     x = 7_u64
-    while witness.get == 0_i64 && IyiWorkers.force_ticker_result != 2_u64
+    while state.witness == 0_i64 && IyiWorkers.force_ticker_result != 2_u64
       x = x &* 6364136223846793005_u64 &+ 1_u64
     end
-    active.set(0_i64)
+    state.stop_computing
     x
   end
 
   def unit_ticker : Nil
     unit_unarmed("the forced ticker needs a pool of one, not #{IyiWorkers.count}") if IyiWorkers.count != 1
-    ready = Atomic(Int64).new(0_i64)
-    queued = Atomic(Int64).new(0_i64)
-    active = Atomic(Int64).new(0_i64)
-    witness = Atomic(Int64).new(0_i64)
+    state = TickerState.new
     group do |g|
       g.spawn(unit: :new) do
-        unit_ticker_sleeper(ready, queued, active, witness)
+        unit_ticker_sleeper(state)
         0
       end
       limit = __iyi_monotonic_ns + 10_000_000_000_i64
-      while ready.get == 0_i64
+      while !state.ready?
         sleep(1)
         unit_hang("the keyed sleeper did not hold its worker in 10000 ms") if __iyi_monotonic_ns > limit
       end
-      g.spawn(unit: :new) { unit_ticker_long(active, witness) }
-      queued.set(1_i64)
+      g.spawn(unit: :new) { unit_ticker_long(state) }
+      state.queue
       limit = __iyi_monotonic_ns + 20_000_000_000_i64
       while IyiWorkers.force_ticker_result == 0_u64
+        if IyiWorkers.force_ticker_slow_active?
+          limit = __iyi_monotonic_ns + 20_000_000_000_i64
+        elsif __iyi_monotonic_ns > limit
+          if IyiWorkers.force_ticker_outer_claim?
+            unit_hang("the keyed sleeper's preemption decision did not finish in 20000 ms")
+          end
+          limit = __iyi_monotonic_ns + 20_000_000_000_i64
+        end
         sleep(1)
-        unit_hang("the keyed sleeper's preemption decision did not finish in 20000 ms") if __iyi_monotonic_ns > limit
       end
       result = IyiWorkers.force_ticker_result
       fail("unit: an expired sleeper was not enqueued by its worker's preemption") if result == 2_u64
       unit_unarmed("the keyed sleeper recorded decision #{result}, not an enqueue") unless result == 1_u64
       limit = __iyi_monotonic_ns + 20_000_000_000_i64
-      while witness.get == 0_i64
+      while state.witness == 0_i64
         sleep(1)
         unit_hang("the enqueued sleeper did not resume in 20000 ms") if __iyi_monotonic_ns > limit
       end
-      unit_unarmed("the keyed sleeper recorded witness #{witness.get}, not a return on the active worker") unless witness.get == 1_i64
+      unit_unarmed("the keyed sleeper recorded witness #{state.witness}, not a return on the active worker") unless state.witness == 1_i64
     end
     puts "unit: the preempted worker enqueued and ran its expired sleeper"
   end

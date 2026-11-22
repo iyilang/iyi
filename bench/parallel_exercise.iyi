@@ -687,6 +687,7 @@
       cue = Tally.new
       owner = Tally.new
       local_started = Tally.new
+      failed = Tally.new
       slept = 0
       parked = 0
       pinned = 0

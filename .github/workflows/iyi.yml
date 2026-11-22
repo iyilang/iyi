@@ -546,6 +546,12 @@ jobs:
       - name: Build the samples again with their modules' source deleted
         run: bash bench/samples_roundtrip.sh
 
+      # Early cutoff (SPEC.md IV.3): a body-only edit leaves the artifacts of
+      # the modules that import it standing, and each kind of interface edit
+      # rebuilds them - each proven against a build that skips the check.
+      - name: An edit rebuilds the artifacts it reaches, and only those
+        run: bash bench/iyimod_cutoff.sh
+
       # A `--release` build cut into partitions and optimised on every core:
       # more than one core busy, the samples printing what one module
       # prints, and the same objects on one thread and on four - each with

@@ -475,6 +475,36 @@ module Iyi
     # part of the answer for everything that imports it.
     getter iyi_artifact_staleness = {} of String => String?
 
+    # iyi: whether an artifact may be read although a module it imports is
+    # compiled from its changed source in this build, on the condition that
+    # the module hashes to what the artifact recorded for it (SPEC.md IV.3,
+    # early cutoff). Set by the compiler for a build that writes artifacts;
+    # off in the second attempt of a build whose condition failed.
+    property? iyi_cuts_off = false
+
+    # iyi: the modules whose artifact is stale because their own source
+    # changed and for nothing else, each with the conditions a dependent's
+    # artifact inherits by trusting what it hashes to now: the edges of its
+    # old artifact that lead to modules rebuilt the same way.
+    getter iyi_artifact_rebuilt = {} of String => Array(IyiMod::ImportEdge)
+
+    # iyi: the conditions an artifact read under early cutoff was read on,
+    # by module path: edges whose far end is compiled from source in this
+    # build, and has to hash to what the edge says (`Compiler#check_iyi_cutoff`).
+    getter iyi_artifact_conditions = {} of String => Array(IyiMod::ImportEdge)
+
+    # iyi: what each unit's code calls in another module's unit, by unit
+    # name and symbol, for the artifact's `Demands` (`IyiMod::Demand`).
+    # Recorded only while writing artifacts.
+    getter iyi_unit_demands = {} of String => Hash(String, IyiMod::Demand)
+
+    # iyi: the demands of the artifacts read under early cutoff. The ones
+    # whose unit this build compiles from source are made into calls that
+    # compile them (`DefinitionTyping.append_cutoff_keeps`), and then asked
+    # after codegen whether each symbol is there (`Compiler#check_iyi_demands`).
+    getter iyi_cutoff_demands = [] of IyiMod::Demand
+    getter iyi_cutoff_kept = [] of IyiMod::Demand
+
     # iyi: whether an imported artifact's `ObjectCode` is worth reading.
     #
     # False for a front-end-only build, which is most of them: the section is

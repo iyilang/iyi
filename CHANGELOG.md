@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Gates
+
+- **`bench/lsp_session.py`'s held compile (step 74a) lets go of its FIFO
+  while the FIFO still has a name, and no longer hangs on macOS.** Twice on
+  darwin CI (jobs 135494265207 and 137179880168) the step after 72j had no
+  answer in 180 s, its worker in the top-level pass. The rest of that stack
+  is a macro's `read_file` in `read(2)` on the FIFO the gate holds the
+  compile with: the gate opened the FIFO's writer, unlinked the FIFO and
+  closed the writer, and on macOS a reader still on its way out of
+  `open(2)` can then miss the end of file and wait for a writer no path can
+  bring. The kernel loses it, not iyi: a C reader and writer doing nothing
+  else lost it in 36 of 4,800 rounds, `iyi check` in 4 of 1,600 and the
+  step in 4 of 820 on the project's Mac (none on Linux), with nothing
+  anywhere holding the FIFO but its reader. The FIFO is now renamed away,
+  its writer closed, and the renamed path unlinked: lost in none of 4,800,
+  800 and 600. New step 74b holds that order on every POSIX run; a release
+  that closes an unlinked FIFO fails it every time.
+- **The session gate's watchdog prints every thread's whole stack on
+  darwin.** Cut to iyi's own frames and to 40 lines, the hang above ended
+  at the top-level visitor, a dozen frames above the `read` that held it.
+
 ## 0.22.0 — 2026-11-22
 
 **A string's hash is keyed afresh in every process, std/http holds a request

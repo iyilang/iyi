@@ -591,7 +591,7 @@
     # Every worker started first: the pool starts a worker only while none
     # is idle (SPEC.md III.4.15, part 6), so a task a worker that returns
     # at once can leave all but two unstarted, and this step then read "2
-    # of 12 workers waiting". Each task spins, up to two seconds, until all
+    # of 12 workers waiting". Each task spins, up to ten seconds, until all
     # have arrived and the pool has launched every worker. All arrived is
     # not enough: the pool starts its workers one at a time, each started by
     # the last to find a task (`IyiWorkers.grow`), and a task spinning past
@@ -608,7 +608,7 @@
       cores.to_i32.times do
         g.spawn(unit: :new) do
           Busy.arrived.value.add(1_u64)
-          until_ns = IyiMark.now_ns + 2000000000_u64
+          until_ns = IyiMark.now_ns + 10000000000_u64
           while (Busy.arrived.value.get < cores || IyiWorkers.launched < cores.to_i32) && IyiMark.now_ns < until_ns
             IyiThread.spin_pause
           end
@@ -616,6 +616,21 @@
         end
       end
     end
+    # A pool still short of a worker once its tasks have ended is the
+    # runtime's finding, and is named as one: no task waits any more, so
+    # nothing starts the rest, and the count below could only read the
+    # workers short. On the project's Mac (macOS 26.6, Apple M2 Pro, 10
+    # cores) beside two other CI jobs this step read "9 of 10 workers
+    # waiting after five seconds" (job 134651603579): the tasks had taken
+    # turns on nine workers until their two seconds ran out, and the pool
+    # never started a tenth (`IyiWorkers.turn_wanted?` has the cause). With
+    # that fixed, the pool filled within 56 ms in each of 150 release runs
+    # beside 20 busy loops there (median 18), where one run in 150 had
+    # stopped at nine. The tasks still wait ten seconds before the step
+    # names a pool that stopped growing, so a slow machine is not read as
+    # one.
+    launched = IyiWorkers.launched
+    fail("idle pool: the pool launched #{launched} of #{cores.to_i64} workers while #{cores.to_i64} tasks spun up to ten seconds for them") if launched < cores.to_i32
     deadline = IyiMark.now_ns + 5000000000_u64
     # A spin, not a sleep: this thread asleep would be counted waiting.
     while IyiScheduler.waiting_threads < cores && IyiMark.now_ns < deadline

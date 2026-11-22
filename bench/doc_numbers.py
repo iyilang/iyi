@@ -170,10 +170,12 @@ def measured() -> dict[str, int]:
 # the counterpart of #128's class `==`. And to 4,738, for the 49 lines that
 # let `iyi test` read each named case's verdict, run the cases `--run` names,
 # skip one written with `skip:` and keep what it hands a test away from the
-# test's children, which only the test program can do. A check rather than
-# a habit since the night Windows' floor walked 508 lines over it and
-# nothing failed.
-CEILING = 4_738
+# test's children, which only the test program can do. And to 4,763, owner
+# approved 2026-11-21 for #212: the 26 lines `String#hash` grew as SipHash-1-3
+# keyed per process - `Hash` lives in the prelude, so the keyed hash cannot
+# sit behind an import. A check rather than a habit since the night
+# Windows' floor walked 508 lines over it and nothing failed.
+CEILING = 4_763
 
 
 # The runtime's files that `prelude_library_lines` leaves out whole: the
@@ -188,7 +190,7 @@ RUNTIME_FILES = {
 
 
 def prelude_library_lines() -> int:
-    """The figure SPEC.md holds to the 4,738-line ceiling: the library
+    """The figure SPEC.md holds to the 4,763-line ceiling: the library
     without any platform's floor.
 
     Everything under `src/iyi/` except two things. First, what Crystal's

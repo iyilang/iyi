@@ -36,14 +36,15 @@
 #           behind it: the word the monitor raised for the one before is
 #           not its. With the word left up it gave the worker up at its
 #           first back-edge.
-#   period  the monitor's period, its looks over a task computing half a
-#           second on a pool of one, held to 4 to 10.5 ms (8 on Windows);
-#           and the quantum, two such tasks taking turns on the one worker,
-#           held to three of the looks the same run measured. A Windows
+#   period  the monitor's period, its looks over a task computing on a pool
+#           of one, held to 4 to 10.5 ms (8 on Windows) over the windows
+#           where a thread's 5 ms sleeps took at most that bound
+#           less 1.5 ms; and the quantum, two such tasks taking turns
+#           on the one worker, held to three looks a turn. A Windows
 #           monitor waiting on the system timer's tick (10.1 to 14.3 ms
-#           apart in 56 runs on GitHub's runners) fails the first, and a
-#           monitor that waits three looks unchanged rather than one the
-#           second.
+#           apart in 56 runs on GitHub's runners) fails the first, as does
+#           a monitor ticking every 12 ms, and a monitor that waits three
+#           looks unchanged rather than one the second.
 #   tight   what the check costs a tight loop: four loops timed against
 #           `@[NoPreempt]` twins of themselves, interleaved, best of seven,
 #           each ratio held to 2x.
@@ -55,7 +56,7 @@
 # bench/parallel_exercise.sh runs it, and broken copies of the runtime,
 # each caught by the step that names it.
 
-@[Unsafe("the loops read arrays through unsafe_fetch, each index kept in 0...size by the loop that makes it")]
+@[Unsafe("the loops read arrays through unsafe_fetch, each index kept in 0...size by the loop that makes it; on Windows the period step's sleeper waits on a timer of its own through Windows' timer functions, C calls with a pointerof answer")]
 module bench/parallel_preempt
 
 import std/int
@@ -650,16 +651,15 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # ── period ───────────────────────────────────────────────────────────
-  # The monitor's period, and the quantum it makes. A task computing half a
-  # second on a pool of one, and the monitor's looks over it: every look
-  # is a tick, PREEMPT_TICK_MS apart. Then two such tasks on the one
-  # worker, which take turns: the time they took over the turns they took
-  # is the quantum, two ticks once each look after a turn sees the count
-  # move and the next sees it stand. Linux, darwin and Windows looked every
-  # 5.1 to 6.3 ms and took turns of 10.2 to 12.3 ms on the machines
-  # measured (SPEC.md III.4.13); a Windows wait that ends on the system
-  # timer's tick looked every 11.2 to 12.3 ms there, and a wait that ends
-  # at once would spin the monitor.
+  # The monitor's period, and the quantum it makes. A task computing on a
+  # pool of one, and the monitor's looks over it: every look is a tick,
+  # PREEMPT_TICK_MS apart. Then two such tasks on the one worker, which
+  # take turns: the looks over the turns they took are the quantum, two
+  # once each look after a turn sees the count move and the next sees it
+  # stand. Linux, darwin and Windows looked every 5.1 to 6.3 ms and took
+  # turns of 10.2 to 12.3 ms on the machines measured (SPEC.md III.4.13);
+  # a Windows wait that ends on the system timer's tick looked every 11.2
+  # to 12.3 ms there, and a wait that ends at once would spin the monitor.
   #
   # The look's bound sits between the two. darwin's three-core runners,
   # sharing their cores with the task the monitor watches, looked every
@@ -675,16 +675,50 @@ import std/socket::{IyiSocket, SocketError}
   # half again the slowest real look and under four fifths of the copy's
   # quickest.
   #
+  # A look comes when the kernel wakes the monitor's thread from its
+  # timer, and a host that wakes every such thread late makes a slow tick
+  # of a sound one: a windows-2025 runner took 1.08 s over the half second
+  # the task was to compute, and its monitor looked every 8206 us (CI job
+  # 135466663176). So while the task computes, a thread of its own (the
+  # sleeper, `sleep_windows`) sleeps PERIOD_SLEEP_MS, the tick the monitor
+  # is held to, PERIOD_SLEEPS times a window, and only the windows whose
+  # sleeps took PERIOD_ON_TIME_US or less on average are judged, until
+  # PERIOD_JUDGED_US of them have been - the 80 looks the half second gave
+  # - or PERIOD_GIVE_UP_MS has passed, which fails with the sleeps'
+  # spread: there the host wakes no sleeper on time, and a monitor's tick
+  # cannot be told from the host's lateness. Windows 11, 12 logical
+  # processors (the user's machine), held to 4 beside 8 busy loops, is
+  # such a host: its windows' sleeps took 8.0 to 13.0 ms, and the step
+  # failed so for the sound runtime and the timer-tick copy alike, 3 runs
+  # each. In a judged window a sound monitor looks about as soon as the
+  # sleeper wakes, so the windows' bound is the look's less 1.5 ms; a
+  # monitor waiting for the system timer's tick, or ticking slower, looks
+  # no sooner for the host's waking threads on time. In 20 runs each
+  # there, the monitor's looks over the judged windows read 5.1 to 6.4 ms
+  # idle (beside other jobs), 6.0 to 6.2 held to 4 beside 4 busy loops,
+  # and 6.0 to 6.2 beside 12 on its 12; the timer-tick copy's 15.0 to
+  # 16.6, and a copy ticking every 12 ms 12.3 to 14.6. The Mac (macOS
+  # 26.6, M2 Pro, 10 cores) looked every 6.1 to 6.5 ms idle, beside 10
+  # busy loops and beside 20, its sleeps 5.7 to 7.2, the 12 ms copy 13.4
+  # to 14.5; Linux 5.1 to 5.2 idle and beside 4 or 8 busy loops on 4
+  # vCPUs, the 12 ms copy 11.9 to 12.5.
+  #
   # The quantum is two looks wherever the looks are, so it is held to
-  # QUANTUM_LOOKS of the ones this run measured, not to a time a slow
-  # runner's looks stretch it towards: Windows took 1.91 to 2.09 looks a
-  # turn in those 101 runs, and darwin 1.52 to 2.52 in 15 on macos-14 and
-  # macos-15, where looks of up to 8.9 ms made turns of up to 17.2 ms,
-  # 2.8 ms under the 20 ms the turn was held to. In the debug jobs,
-  # macos-15 took 1.61 to 2.25 looks a turn in 44 runs (124913849625 and
-  # 124922160678) and windows-2025 1.94 to 2.03 in 40. A monitor that
-  # raises the word after three unchanged looks rather than one takes
-  # four looks a turn, and fails it.
+  # QUANTUM_LOOKS looks a turn, counted over the turns themselves
+  # (`take_turns`), not to a time a slow runner's looks stretch it
+  # towards: Windows took 1.91 to 2.09 looks a turn in those 101 runs,
+  # and darwin 1.52 to 2.52 in 15 on macos-14 and macos-15, where looks of
+  # up to 8.9 ms made turns of up to 17.2 ms, 2.8 ms under the 20 ms the
+  # turn was held to. In the debug jobs, macos-15 took 1.61 to 2.25 looks
+  # a turn in 44 runs (124913849625 and 124922160678) and windows-2025
+  # 1.94 to 2.03 in 40. Counted over all the turns, a kernel holding the
+  # worker's thread off its core at a turn's end added looks to it: the
+  # Mac beside 20 busy loops, or 10 and another job's, took up to 3.04
+  # looks a turn and failed 1 run of 25. Counted over the turns whose ends
+  # found the thread on its core, QUANTUM_TURNS of them, every machine
+  # above took 1.95 to 2.00 in every run, idle and beside its busy loops.
+  # A monitor that raises the word after three unchanged looks rather than
+  # one takes four looks a turn, 3.87 to 4.00 there, and fails it.
   PERIOD_FLOOR_US   =  4000_i64
   {% if flag?(:win32) %}
     PERIOD_BOUND_US = 8000_i64
@@ -692,44 +726,219 @@ import std/socket::{IyiSocket, SocketError}
     PERIOD_BOUND_US = 10500_i64
   {% end %}
   QUANTUM_LOOKS     =     3_i64
+  QUANTUM_TURNS     =    40_i64
+  QUANTUM_OFF_US    =  1000_i64
+  PERIOD_SLEEP_MS   =     5
+  PERIOD_SLEEPS     =    10
+  PERIOD_ON_TIME_US = PERIOD_BOUND_US - 1500_i64
+  PERIOD_JUDGED_US  = 400_000_i64
+  PERIOD_GIVE_UP_MS = 20_000_i64
+
+  # What the period step's sleeper saw, window by window: `Share` by its
+  # atomic fields.
+  class Sleeps
+    getter windows : Atomic(Int64)
+    getter judged : Atomic(Int64)
+    getter judged_us : Atomic(Int64)
+    getter looks : Atomic(Int64)
+    getter least : Atomic(Int64)
+    getter median : Atomic(Int64)
+    getter most : Atomic(Int64)
+
+    def initialize
+      @windows = Atomic(Int64).new(0_i64)
+      @judged = Atomic(Int64).new(0_i64)
+      @judged_us = Atomic(Int64).new(0_i64)
+      @looks = Atomic(Int64).new(0_i64)
+      @least = Atomic(Int64).new(0_i64)
+      @median = Atomic(Int64).new(0_i64)
+      @most = Atomic(Int64).new(0_i64)
+    end
+  end
+
+  # The sleeper: a thread of its own that sleeps PERIOD_SLEEP_MS at a
+  # time, PERIOD_SLEEPS times a window, and counts the monitor's looks over
+  # each window whose sleeps took PERIOD_ON_TIME_US or less on average,
+  # until PERIOD_JUDGED_US of those or PERIOD_GIVE_UP_MS. It waits as the
+  # monitor does: on Windows on a high-resolution waitable timer of its
+  # own. The runtime's `sleep` waits on the completion port instead, and
+  # beside 12 busy loops on Windows 11's 12 logical processors the main
+  # thread's 5 ms sleeps took 11 to 48 ms, 10 runs in 10, while the
+  # monitor looked every 6.1 to 6.4 ms and this timer woke at 5.9 to 7.0.
+  def sleep_windows(sleeps : Sleeps) : Nil
+    {% if flag?(:win32) %}
+      timer = LibC.CreateWaitableTimerExW(Pointer(Void).new(0_u64), Pointer(UInt16).new(0_u64), 2_i32, 0x1F0003_i32)
+      fail("period: no high-resolution waitable timer here for the sleeper") if timer.address == 0_u64
+      due = 0_i64 - PERIOD_SLEEP_MS.to_i64 * 10000_i64
+    {% end %}
+    means = [] of Int64
+    judged_us = 0_i64
+    began = __iyi_monotonic_ns
+    while judged_us < PERIOD_JUDGED_US && elapsed_ms(began) < PERIOD_GIVE_UP_MS
+      t = __iyi_monotonic_ns
+      before = IyiWorkers.looks
+      PERIOD_SLEEPS.times do
+        {% if flag?(:win32) %}
+          LibC.SetWaitableTimer(timer, pointerof(due), 0_i32, Pointer(Void).new(0_u64), Pointer(Void).new(0_u64), 0_i32)
+          LibC.WaitForSingleObject(timer, -1_i32)
+        {% else %}
+          sleep(PERIOD_SLEEP_MS)
+        {% end %}
+      end
+      us = (__iyi_monotonic_ns - t) // 1000_i64
+      looked = (IyiWorkers.looks - before).to_i64
+      means << us // PERIOD_SLEEPS.to_i64
+      if us // PERIOD_SLEEPS.to_i64 <= PERIOD_ON_TIME_US
+        judged_us += us
+        sleeps.judged.add(1_i64)
+        sleeps.looks.add(looked)
+      end
+    end
+    {% if flag?(:win32) %}
+      LibC.CloseHandle(timer)
+    {% end %}
+    means.sort_in_place
+    sleeps.judged_us.set(judged_us)
+    sleeps.windows.set(means.size.to_i64)
+    sleeps.least.set(means.first)
+    sleeps.median.set(means[means.size // 2])
+    sleeps.most.set(means.last)
+  end
 
   def period(per_ms : Int64) : Nil
     fail("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
-    looked = Atomic(Int64).new(0_i64)
-    took = Atomic(Int64).new(0_i64)
+    stop = Atomic(Int64).new(0_i64)
+    running = Atomic(Int64).new(0_i64)
+    sleeps = Sleeps.new
     group do |g|
       g.spawn(unit: :new) do
-        before = IyiWorkers.looks
-        t = __iyi_monotonic_ns
-        x = spin(500_i64 * per_ms, 11_u64)
-        took.set((__iyi_monotonic_ns - t) // 1000_i64 + (x == 0_u64 ? 1_i64 : 0_i64))
-        looked.set((IyiWorkers.looks - before).to_i64)
-        0
+        x = 11_u64
+        running.set(1_i64)
+        while stop.get == 0_i64
+          x = spin(per_ms, x)
+        end
+        x == 0_u64 ? 1 : 0
       end
+      while running.get == 0_i64
+        sleep(1)
+      end
+      sleeper = IyiThread.start { sleep_windows(sleeps) }
+      sleeper.join
+      stop.set(1_i64)
     end
-    looks = looked.get
-    fail("period: the monitor looked #{looks} times in #{took.get} us of a task computing") if looks < 2_i64
-    us = took.get // looks
+    windows = sleeps.windows.get
+    judged = sleeps.judged.get
+    judged_us = sleeps.judged_us.get
+    looks = sleeps.looks.get
+    slept = "#{sleeps.least.get} to #{sleeps.most.get} us, #{sleeps.median.get} the median"
+    if judged_us < PERIOD_JUDGED_US
+      fail("period: a thread's #{PERIOD_SLEEP_MS} ms sleeps took #{PERIOD_ON_TIME_US} us or less, on average, in #{judged} of #{windows} windows of #{PERIOD_SLEEPS} over #{PERIOD_GIVE_UP_MS} ms of a task computing (#{slept}): #{judged_us} us judged of the #{PERIOD_JUDGED_US} needed, the host waking a thread from a timer's wait too late to tell the monitor's tick from it")
+    end
+    fail("period: the monitor looked #{looks} times in #{judged_us} us of a task computing") if looks < 2_i64
+    us = judged_us // looks
     if us < PERIOD_FLOOR_US || us > PERIOD_BOUND_US
-      fail("period: the monitor looked every #{us} us over #{looks} looks, outside #{PERIOD_FLOOR_US} to #{PERIOD_BOUND_US} us")
+      fail("period: the monitor looked every #{us} us over #{looks} looks, outside #{PERIOD_FLOOR_US} to #{PERIOD_BOUND_US} us, in #{judged} of #{windows} windows where a thread's #{PERIOD_SLEEP_MS} ms sleeps took #{PERIOD_ON_TIME_US} us or less (#{slept})")
     end
-    preempts = IyiWorkers.preempts
+    counts = Turns.new
     t = __iyi_monotonic_ns
     group do |g|
       2.times do |i|
         g.spawn(unit: :new) do
-          spin(300_i64 * per_ms, 13_u64 + i.to_u64) == 0_u64 ? 1 : 0
+          take_turns(per_ms, 13_u64 + i.to_u64, counts) == 0_u64 ? 1 : 0
         end
       end
+      while counts.whole.get < QUANTUM_TURNS && elapsed_ms(t) < PERIOD_GIVE_UP_MS
+        sleep(10)
+      end
+      counts.stop.set(1_i64)
     end
     total = (__iyi_monotonic_ns - t) // 1000_i64
-    turns = (IyiWorkers.preempts - preempts).to_i64
-    fail("period: two tasks computing on one worker took no turns in #{total} us") if turns == 0_i64
-    quantum = total // (turns + 1_i64)
-    if quantum > QUANTUM_LOOKS * us
-      fail("period: two tasks computing on one worker took turns of #{quantum} us, past #{QUANTUM_LOOKS} of the #{us} us looks")
+    ended = counts.ended.get
+    turns = counts.whole.get
+    turn_looks = counts.looks.get
+    if turns < QUANTUM_TURNS
+      fail("period: two tasks computing on one worker ended #{ended} turns in #{total} us, #{turns} of them with the worker's thread on its core at both ends, of the #{QUANTUM_TURNS} needed: the host held the thread off its core too often to count a turn's looks")
     end
-    say "period: the monitor looked every #{us} us over #{looks} looks; two tasks computing on one worker took #{turns} turns of #{quantum} us"
+    quantum = total // (ended + 1_i64)
+    a_turn = turn_looks * 100_i64 // turns
+    pad = a_turn % 100_i64 < 10_i64 ? "0" : ""
+    shown = "#{a_turn // 100_i64}.#{pad}#{a_turn % 100_i64}"
+    if a_turn > QUANTUM_LOOKS * 100_i64
+      fail("period: two tasks computing on one worker took turns of #{shown} looks, #{turn_looks} in the #{turns} of #{ended} turns whose ends found the worker's thread on its core, past #{QUANTUM_LOOKS}")
+    end
+    say "period: the monitor looked every #{us} us over #{looks} looks, in #{judged} of #{windows} windows where a thread's #{PERIOD_SLEEP_MS} ms sleeps took #{PERIOD_ON_TIME_US} us or less (#{slept}); two tasks computing on one worker took #{ended} turns of #{quantum} us, #{shown} looks a turn over the #{turns} whose ends found the worker's thread on its core"
+  end
+
+  # The period step's turns, counted by the two tasks taking them: `Share`
+  # by its atomic fields. *last* is the clock at the last slice either task
+  # ended; *began* the monitor's looks at the latest turn's first slice,
+  # -1 before the first, and *prompt* whether the worker's thread was on
+  # its core across that turn's start.
+  class Turns
+    getter stop : Atomic(Int64)
+    getter ended : Atomic(Int64)
+    getter whole : Atomic(Int64)
+    getter looks : Atomic(Int64)
+    getter last : Atomic(Int64)
+    getter began : Atomic(Int64)
+    getter prompt : Atomic(Int64)
+
+    def initialize
+      @stop = Atomic(Int64).new(0_i64)
+      @ended = Atomic(Int64).new(0_i64)
+      @whole = Atomic(Int64).new(0_i64)
+      @looks = Atomic(Int64).new(0_i64)
+      @last = Atomic(Int64).new(__iyi_monotonic_ns)
+      @began = Atomic(Int64).new(-1_i64)
+      @prompt = Atomic(Int64).new(0_i64)
+    end
+  end
+
+  # One of the period step's two tasks taking turns on the worker, until
+  # the step says stop: it computes in slices of a tenth of a millisecond
+  # and reads the clock, the preemption count and the monitor's looks after
+  # each. Only one task runs on the worker at a time, so the two tasks'
+  # slices are one line of the worker's time, and a task's first slice of
+  # a turn - its first, or the one the count moved in - is the turn's
+  # start and the end of the turn before. A turn's looks are those between
+  # its start and the next's. The monitor raises the word at the look that
+  # ends the turn whether or not the task was running before it, so a
+  # kernel holding the thread off its core inside a turn adds it no look;
+  # held off between that look and the switch, it adds every look it
+  # waited. So a turn is counted only where the thread was on its core at
+  # both ends: the first slice of the turn, and of the next, ended within
+  # QUANTUM_OFF_US of the slice before it, whichever task ran that.
+  def take_turns(per_ms : Int64, seed : UInt64, counts : Turns) : UInt64
+    x = seed
+    slice = per_ms // 10_i64
+    seen = IyiWorkers.preempts
+    fresh = true
+    while counts.stop.get == 0_i64
+      x = spin(slice, x)
+      now = __iyi_monotonic_ns
+      prompt = now - counts.last.get <= QUANTUM_OFF_US * 1000_i64
+      counts.last.set(now)
+      count = IyiWorkers.preempts
+      if count != seen
+        seen = count
+        fresh = true
+      end
+      if fresh
+        looked = IyiWorkers.looks.to_i64
+        began = counts.began.get
+        if began >= 0_i64
+          counts.ended.add(1_i64)
+          if prompt && counts.prompt.get == 1_i64
+            counts.whole.add(1_i64)
+            counts.looks.add(looked - began)
+          end
+        end
+        counts.began.set(looked)
+        counts.prompt.set(prompt ? 1_i64 : 0_i64)
+        fresh = false
+      end
+    end
+    x
   end
 
   # ── tight ────────────────────────────────────────────────────────────

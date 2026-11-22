@@ -1067,12 +1067,13 @@ compare-and-set clears it. `bench/trim_stress.iyi` (eight threads in six
 classes, the trim run back to back) caught the old counting in 11 runs
 of 11 on macOS's sixteen-kilobyte pages, but two adoptions met in the
 window only 0-3 times in 10 s on four-kilobyte pages and three runs
-passed on Windows 11. So `bench/sweep_exercise.sh` builds both countings
-with the window held open 20 microseconds at a batch's edge pages: the
-old one was caught on the first run in 20 of 20 on Windows 11 and on
-macOS 26.6, and the fix read every block back whole with the window met
-4,706-15,972 times a run; the gate's run on Linux met it 9,539 times and
-caught the old counting on run 1.
+passed on Windows 11. So `bench/sweep_exercise.sh` no longer races the window.
+`bench/unlist_count.iyi` checks the count on one thread with the interleaving
+forced: the copy that counts the lost clear reads 0 against 2 and fails on its
+only run. The fix runs under the 10 s trim stress with the same interleaving at
+every batch edge, and `IyiHeap.audit_listed` checks each arena's count against
+its bitmap at every pause and after every trim, so a count that reads short
+fails the stress at the first check that sees it.
 
 Measured with #145's harness, six rounds per machine, iyiturkiye built
 by 0.21.0 against goturkiye, steady / peak / 5 s after the load, MB:

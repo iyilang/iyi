@@ -9,13 +9,14 @@
 #      collections, stopping, and list checksums and free flags. An explicit
 #      collection runs after all worker lists are ready.
 #  1b. Two hundred joined threads each run four sleeping tasks; the scheduler
-#      states are checked after they finish, and on Windows so is the handle
-#      count. Planted mutants leave a scheduler state on the roots' list, and on
-#      Windows leave handles open; each fails by one named sentence.
+#      states are checked after they finish, and so is what they leave open:
+#      the process's handles on Windows, the lowest unused descriptor elsewhere.
+#      Planted mutants leave a scheduler state on the roots' list, and leave
+#      handles or descriptors open; each fails by one named sentence.
 #  1c. Two hundred fifty-six joined threads each hold a 64 KiB payload. Fewer
-#      than half survive a collection, and on Windows a joined thread's line is
-#      unmapped. Planted mutants keep the payloads on their thread's list and
-#      leave the line mapped; each fails by one named sentence.
+#      than half survive a collection, and a joined thread's line is unmapped
+#      on every platform. Planted mutants keep the payloads on their thread's
+#      list and leave the line mapped; each fails by one named sentence.
 #  1d. Join the same thread twice while a later thread is held: the mutant
 #      keeps the first line, and that line is the named failure witness.
 #   2. Inspect both binaries' undefined symbols or imported DLLs against
@@ -377,24 +378,20 @@ fi
 teardown_pass='teardown: 200 finished threads gave their schedulers back'
 joined_pass="joined: fewer than half of the joined threads' payloads survived a collection"
 mapped_pass="joined: a joined thread's line was unmapped"
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) teardown_windows=1 ;;
-  *) teardown_windows=0 ;;
-esac
 
 step "failure proof controls: the healthy release run prints its teardown and joined lines"
 tr -d '\r' < answers-release.txt > release-clean.txt
 controls=1
 grep -qxF "$teardown_pass" release-clean.txt || controls=0
 grep -qxF "$joined_pass" release-clean.txt || controls=0
-if [ "$teardown_windows" -eq 1 ]; then grep -qxF "$mapped_pass" release-clean.txt || controls=0; fi
+grep -qxF "$mapped_pass" release-clean.txt || controls=0
 if [ "$controls" -ne 1 ] || [ "$(grep -c '^FAIL:' release-clean.txt || :)" -ne 0 ]; then
   pair_mismatch 0 release-clean.txt control
 fi
 echo "  control: $teardown_pass"
 echo "  control: $joined_pass"
-if [ "$teardown_windows" -eq 1 ]; then echo "  control: $mapped_pass"; fi
-awk '/handle count changed by|payloads were still live/{print "  measured: " $0}' release-clean.txt
+echo "  control: $mapped_pass"
+awk '/teardown: .* changed by|payloads were still live/{print "  measured: " $0}' release-clean.txt
 
 step "failure proof: a finished thread's scheduler state left on the roots' list is named"
 mkdir -p retired/iyi && cp "$REPO"/src/iyi/*.iyi retired/iyi/ || { echo "SETUP: ${current_step}: the retired copy could not be made"; exit 76; }
@@ -420,33 +417,60 @@ if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' retired.txt || :)" -ne 1 ] || ! gr
 fi
 printf '  exits 1 at "%s"\n' "$retired_fail"
 
-if [ "$teardown_windows" -eq 1 ]; then
-  step "failure proof: a finished thread's scheduler handles left open are named"
-  mkdir -p unclosed/iyi && cp "$REPO"/src/iyi/*.iyi unclosed/iyi/ || { echo "SETUP: ${current_step}: the unclosed copy could not be made"; exit 76; }
-  awk '
-    /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
-    inside && $0 == "    {% if flag?(:win32) %}" { win = 1; print; next }
-    inside && win && $0 == "    {% end %}" { win = 0; print; next }
-    inside && win && $0 == "      __iyi_close(state.wake_fd) if state.wake_fd > 0_i64" { wake++; next }
-    inside && win && $0 == "      __iyi_close(state.deadline_timer) if state.deadline_timer > 0_i64" { timer++; next }
-    inside && /^  end$/ { inside = 0; ends++ }
-    { print }
-    END { if (starts != 1 || ends != 1 || wake != 1 || timer != 1 || inside || win) exit 3 }
-  ' "$REPO/src/iyi/concurrency.iyi" > unclosed/iyi/concurrency.iyi || { echo "SETUP: ${current_step}: the handle anchors changed"; exit 76; }
-  cmp -s unclosed/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && { echo "SETUP: ${current_step}: the unclosed copy was unchanged"; exit 76; }
-  if ! IYI_PATH="$WORK/unclosed${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o unclosed-run > build-unclosed.log 2>&1; then
-    echo "SETUP: ${current_step}: unclosed did not build"; cat build-unclosed.log; exit 76
-  fi
-  timeout -k 5 300 ./unclosed-run 8 > unclosed-raw.txt 2>&1
-  code=$?; check_bound "$code" forced mutant unclosed-raw.txt
-  if [ "$code" -eq 76 ]; then cat unclosed-raw.txt; exit 76; fi
-  tr -d '\r' < unclosed-raw.txt > unclosed.txt
-  unclosed_fail="FAIL: teardown: 200 finished threads left handles open that their schedulers should have closed"
-  if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' unclosed.txt || :)" -ne 1 ] || ! grep -qxF "$unclosed_fail" unclosed.txt; then
-    pair_mismatch "$code" unclosed.txt mutant 0 "$teardown_pass"
-  fi
-  printf '  exits 1 at "%s"\n' "$unclosed_fail"
+step "failure proof: a finished thread's scheduler descriptors or handles left open are named"
+mkdir -p unclosed/iyi && cp "$REPO"/src/iyi/*.iyi unclosed/iyi/ || { echo "SETUP: ${current_step}: the unclosed copy could not be made"; exit 76; }
+# The scheduler's close calls in retire_thread, per platform. Linux: the epoll
+# descriptor and the eventfd doorbell. darwin: the kqueue. Windows: the
+# doorbell and the deadline timer.
+unclosed_copy() {
+  case "$(uname -s)" in
+    Linux)
+      awk '
+        /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
+        inside && $0 == "    __iyi_close(state.pollfd) if state.pollfd > 0_i64" { pollfds++; next }
+        inside && $0 == "    {% if flag?(:linux) %}" { linux = 1; print; next }
+        inside && linux && $0 == "      __iyi_close(state.wake_fd) if state.wake_fd > 0_i64" { wakes++; next }
+        inside && linux && $0 == "    {% end %}" { linux = 0; print; next }
+        inside && /^  end$/ { inside = 0; ends++ }
+        { print }
+        END { if (starts != 1 || ends != 1 || pollfds != 1 || wakes != 1 || inside || linux) exit 3 }
+      ' "$REPO/src/iyi/concurrency.iyi" ;;
+    Darwin)
+      awk '
+        /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
+        inside && $0 == "    __iyi_close(state.pollfd) if state.pollfd > 0_i64" { pollfds++; next }
+        inside && /^  end$/ { inside = 0; ends++ }
+        { print }
+        END { if (starts != 1 || ends != 1 || pollfds != 1 || inside) exit 3 }
+      ' "$REPO/src/iyi/concurrency.iyi" ;;
+    *)
+      awk '
+        /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
+        inside && $0 == "    {% if flag?(:win32) %}" { win = 1; print; next }
+        inside && win && $0 == "    {% end %}" { win = 0; print; next }
+        inside && win && $0 == "      __iyi_close(state.wake_fd) if state.wake_fd > 0_i64" { wake++; next }
+        inside && win && $0 == "      __iyi_close(state.deadline_timer) if state.deadline_timer > 0_i64" { timer++; next }
+        inside && /^  end$/ { inside = 0; ends++ }
+        { print }
+        END { if (starts != 1 || ends != 1 || wake != 1 || timer != 1 || inside || win) exit 3 }
+      ' "$REPO/src/iyi/concurrency.iyi" ;;
+  esac
+}
+unclosed_copy > unclosed/iyi/concurrency.iyi || { echo "SETUP: ${current_step}: the handle anchors changed"; exit 76; }
+cmp -s unclosed/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && { echo "SETUP: ${current_step}: the unclosed copy was unchanged"; exit 76; }
+if ! IYI_PATH="$WORK/unclosed${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o unclosed-run > build-unclosed.log 2>&1; then
+  echo "SETUP: ${current_step}: unclosed did not build"; cat build-unclosed.log; exit 76
 fi
+timeout -k 5 300 ./unclosed-run 8 > unclosed-raw.txt 2>&1
+code=$?; check_bound "$code" forced mutant unclosed-raw.txt
+if [ "$code" -eq 76 ]; then cat unclosed-raw.txt; exit 76; fi
+tr -d '\r' < unclosed-raw.txt > unclosed.txt
+unclosed_fail="FAIL: teardown: 200 finished threads left handles open that their schedulers should have closed"
+if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' unclosed.txt || :)" -ne 1 ] || ! grep -qxF "$unclosed_fail" unclosed.txt; then
+  pair_mismatch "$code" unclosed.txt mutant 0 "$teardown_pass"
+fi
+awk '/teardown: .* changed by/{print "  measured: " $0}' unclosed.txt
+printf '  exits 1 at "%s"\n' "$unclosed_fail"
 
 step "failure proof: a joined thread's payloads kept by its thread's list are named"
 mkdir -p listed/iyi && cp "$REPO"/src/iyi/*.iyi listed/iyi/ || { echo "SETUP: ${current_step}: the listed copy could not be made"; exit 76; }
@@ -471,30 +495,28 @@ if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' listed.txt || :)" -ne 1 ] || ! gre
 fi
 printf '  exits 1 at "%s"\n' "$listed_fail"
 
-if [ "$teardown_windows" -eq 1 ]; then
-  step "failure proof: a joined thread's line left mapped is named"
-  mkdir -p mapped/iyi && cp "$REPO"/src/iyi/*.iyi mapped/iyi/ || { echo "SETUP: ${current_step}: the mapped copy could not be made"; exit 76; }
-  awk '
-    /^    def join : Nil$/ { inside = 1; starts++ }
-    inside && $0 == "      __iyi_munmap(line, IYI_THREAD_LINE)" { hits++; next }
-    inside && /^    end$/ { inside = 0; ends++ }
-    { print }
-    END { if (starts != 1 || ends != 1 || hits != 1 || inside) exit 3 }
-  ' "$REPO/src/iyi/thread.iyi" > mapped/iyi/thread.iyi || { echo "SETUP: ${current_step}: the join anchors changed"; exit 76; }
-  cmp -s mapped/iyi/thread.iyi "$REPO/src/iyi/thread.iyi" && { echo "SETUP: ${current_step}: the mapped copy was unchanged"; exit 76; }
-  if ! IYI_PATH="$WORK/mapped${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o mapped-run > build-mapped.log 2>&1; then
-    echo "SETUP: ${current_step}: mapped did not build"; cat build-mapped.log; exit 76
-  fi
-  timeout -k 5 300 ./mapped-run 8 > mapped-raw.txt 2>&1
-  code=$?; check_bound "$code" forced mutant mapped-raw.txt
-  if [ "$code" -eq 76 ]; then cat mapped-raw.txt; exit 76; fi
-  tr -d '\r' < mapped-raw.txt > mapped.txt
-  mapped_fail="FAIL: joined: a joined thread's line is still mapped"
-  if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' mapped.txt || :)" -ne 1 ] || ! grep -qxF "$mapped_fail" mapped.txt; then
-    pair_mismatch "$code" mapped.txt mutant 0 "$mapped_pass"
-  fi
-  printf '  exits 1 at "%s"\n' "$mapped_fail"
+step "failure proof: a joined thread's line left mapped is named"
+mkdir -p mapped/iyi && cp "$REPO"/src/iyi/*.iyi mapped/iyi/ || { echo "SETUP: ${current_step}: the mapped copy could not be made"; exit 76; }
+awk '
+  /^    def join : Nil$/ { inside = 1; starts++ }
+  inside && $0 == "      __iyi_munmap(line, IYI_THREAD_LINE)" { hits++; next }
+  inside && /^    end$/ { inside = 0; ends++ }
+  { print }
+  END { if (starts != 1 || ends != 1 || hits != 1 || inside) exit 3 }
+' "$REPO/src/iyi/thread.iyi" > mapped/iyi/thread.iyi || { echo "SETUP: ${current_step}: the join anchors changed"; exit 76; }
+cmp -s mapped/iyi/thread.iyi "$REPO/src/iyi/thread.iyi" && { echo "SETUP: ${current_step}: the mapped copy was unchanged"; exit 76; }
+if ! IYI_PATH="$WORK/mapped${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o mapped-run > build-mapped.log 2>&1; then
+  echo "SETUP: ${current_step}: mapped did not build"; cat build-mapped.log; exit 76
 fi
+timeout -k 5 300 ./mapped-run 8 > mapped-raw.txt 2>&1
+code=$?; check_bound "$code" forced mutant mapped-raw.txt
+if [ "$code" -eq 76 ]; then cat mapped-raw.txt; exit 76; fi
+tr -d '\r' < mapped-raw.txt > mapped.txt
+mapped_fail="FAIL: joined: a joined thread's line is still mapped"
+if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' mapped.txt || :)" -ne 1 ] || ! grep -qxF "$mapped_fail" mapped.txt; then
+  pair_mismatch "$code" mapped.txt mutant 0 "$mapped_pass"
+fi
+printf '  exits 1 at "%s"\n' "$mapped_fail"
 
 # ── 1d. A second join while a later thread is held ───────────────────────
 # Both builds run the same rendezvous. The only mutation removes the

@@ -328,6 +328,42 @@
     handles
   end
 
+  # What a finished thread's scheduler leaves open, counted: the process's
+  # handles on Windows, and elsewhere the lowest descriptor number nothing
+  # holds. A new descriptor takes the lowest free number, so every descriptor
+  # a scheduler leaves open raises that number by one. The probe opens one and
+  # closes it again: no list of descriptors and no scan bound, and no import
+  # the floor does not already name (`kqueue` and `close` on darwin,
+  # `epoll_create1` by raw syscall on Linux).
+  {% if flag?(:darwin) %}
+    def probe_descriptor : Int64
+      LibC.kqueue.to_i64
+    end
+  {% elsif flag?(:linux) %}
+    def probe_descriptor : Int64
+      __iyi_conc_syscall3(IYI_SYS_EPOLL_CREATE1, 0_i64, 0_i64, 0_i64)
+    end
+  {% end %}
+
+  def free_descriptor : Int64
+    {% if flag?(:win32) %}
+      0_i64
+    {% else %}
+      fd = probe_descriptor
+      join_setup("SETUP: threads: the descriptor probe could not open a descriptor\n") if fd < 0
+      __iyi_close(fd)
+      fd
+    {% end %}
+  end
+
+  def teardown_count : Int64
+    {% if flag?(:win32) %}
+      process_handles.to_i64
+    {% else %}
+      free_descriptor
+    {% end %}
+  end
+
   # One thread's block holds a 64 KiB payload only it names, started and
   # joined. The ledger records the payload's object id in a mapping the
   # collector does not scan, so recording it roots nothing. NoInline keeps
@@ -339,8 +375,11 @@
     IyiThread.start { fail("joined: a block lost what it captured") if payload.size < 65536; nil }.join
   end
 
-  # Whether a line is still mapped: the kernel's answer on Windows, and
-  # no elsewhere, where the check that reads it has nothing to ask.
+  # Whether a line is still mapped. Windows asks the kernel for the region's
+  # state. darwin and Linux ask mprotect, which answers 0 for a page some
+  # mapping covers and ENOMEM for one none does. The protection asked for,
+  # read and write, is the one the line was mapped with, so the question
+  # leaves a mapped line as it was.
   def line_mapped?(line : UInt64) : Bool
     {% if flag?(:win32) %}
       info = uninitialized UInt64[6]
@@ -348,8 +387,10 @@
       join_setup("SETUP: joined: VirtualQuery failed for a joined thread's line\n") if queried == 0_u64
       # The region's state, at 32: MEM_FREE is 0x10000.
       (Pointer(UInt64).new(pointerof(info).address + 32_u64).value & 0xFFFFFFFF_u64) != 0x10000_u64
+    {% elsif flag?(:darwin) %}
+      LibC.mprotect(Pointer(Void).new(line), 4096_u64, 3_i32) == 0_i32
     {% else %}
-      false
+      __iyi_conc_syscall3(IYI_SYS_MPROTECT, line.to_i64, 4096_i64, 3_i64) == 0_i64
     {% end %}
   end
 
@@ -472,12 +513,14 @@
   # stacks for its tasks, and kept them all, with its state on the roots'
   # list, after the thread was gone: a thousand threads that each slept
   # once left 2,001 handles behind them. Two hundred threads that each
-  # sleep in four tasks leave the list where it was. On Windows the bound is
-  # one handle per finished thread: a correct build stays under it, and a
-  # copy that drops a scheduler's close calls must reach it.
+  # sleep in four tasks leave the list where it was. The count is what a
+  # finished thread leaves open: the process's handles on Windows, and the
+  # lowest unused descriptor elsewhere, which each descriptor left open
+  # raises by one. A correct build stays under one per finished thread, and
+  # a copy that drops a scheduler's close calls must reach that bound.
   finished_threads = 200
   states_before = scheduler_states
-  handles_before = process_handles
+  counted_before = teardown_count
   index = 0
   while index < finished_threads
     worker = IyiThread.start do
@@ -492,9 +535,13 @@
   end
   states_left = scheduler_states - states_before
   fail("teardown: 200 finished threads left #{states_left} scheduler states on the roots' list") if states_left != 0
-  handles_left = process_handles - handles_before
-  puts "teardown: the process's handle count changed by #{handles_left}"
-  fail("teardown: 200 finished threads left handles open that their schedulers should have closed") if handles_left >= finished_threads
+  counted_left = teardown_count - counted_before
+  {% if flag?(:win32) %}
+    puts "teardown: the process's handle count changed by #{counted_left}"
+  {% else %}
+    puts "teardown: the lowest unused descriptor changed by #{counted_left}"
+  {% end %}
+  fail("teardown: 200 finished threads left handles open that their schedulers should have closed") if counted_left >= finished_threads
   puts "teardown: 200 finished threads gave their schedulers back"
 
   # ── 1c. A joined thread keeps nothing ──────────────────────────────────
@@ -548,9 +595,7 @@
   join_setup("SETUP: joined: the probe thread had no line\n") if probe_line == 0_u64
   probe.join
   fail("joined: a joined thread's line is still mapped") if line_mapped?(probe_line)
-  {% if flag?(:win32) %}
-    puts "joined: a joined thread's line was unmapped"
-  {% end %}
+  puts "joined: a joined thread's line was unmapped"
 
   # ── 2. The price: allocations per second per thread ────────────────────
   # Each thread allocates a fixed count from its own cache with the

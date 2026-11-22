@@ -121,8 +121,8 @@ bodies_wrong = 0
 BODIES.each_with_index { |body, index| bodies_wrong = bodies_wrong + 1 if body.x != WANT[index] }
 
 {% if flag?(:straddler_force) %}
-puts "reuse integrity: the straddle check met #{IyiMark.straddle_met} released boundaries, armed #{IyiMark.straddle_armed} nonzero slots there, #{IyiMark.straddle_damaged} zeroed by a release"
-raise "reuse integrity: a release zeroed a listed chunk slot word at a released boundary, #{IyiMark.straddle_damaged} time(s)" if IyiMark.straddle_damaged != 0
+  puts "reuse integrity: the straddle check met #{IyiMark.straddle_met} released boundaries, armed #{IyiMark.straddle_armed} nonzero slots there, #{IyiMark.straddle_damaged} zeroed by a release"
+  raise "reuse integrity: a release zeroed a listed chunk slot word at a released boundary, #{IyiMark.straddle_damaged} time(s)" if IyiMark.straddle_damaged != 0
 {% end %}
 if wrong != 0 || late != 0 || bodies_wrong != 0
   raise "reuse integrity: #{wrong} key(s) no longer spelled their value as their round ended and #{late} two collections later, and #{bodies_wrong} of #{BODIES.size} startup bodies changed, after #{rounds} rounds"

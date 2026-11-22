@@ -26,7 +26,7 @@ module server_load
 
 import std/socket::{IyiSocket, SocketError}
 
-ROUNDS      = 200
+ROUNDS = 200
 # The stack bound. How many stacks 200 sequential connections take depends on how
 # many handlers overlap, so the bound is set from the population, not a guess.
 # Darwin arm64, this program as committed: 40 runs (20 plain, 20 release) took 1
@@ -163,17 +163,17 @@ bad = 0
 canary_bad = 0
 
 {% if !flag?(:win32) %}
-# Two calls, each in its own frame so that nothing holds the buffer's address
-# across the collection: the first discards its result, the second is read
-# after the collection.
-def warm_events : Int32
-  IyiScheduler.events_buffer
-  0
-end
+  # Two calls, each in its own frame so that nothing holds the buffer's address
+  # across the collection: the first discards its result, the second is read
+  # after the collection.
+  def warm_events : Int32
+    IyiScheduler.events_buffer
+    0
+  end
 
-def events_freed : Bool
-  IyiMark.flags(IyiScheduler.events_buffer) & IyiHeap::FREE_FLAG != 0
-end
+  def events_freed : Bool
+    IyiMark.flags(IyiScheduler.events_buffer) & IyiHeap::FREE_FLAG != 0
+  end
 {% end %}
 
 # The POSIX half of the check, before the run and before any poll. The

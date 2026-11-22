@@ -3551,9 +3551,14 @@ module Iyi
       # body was `undefined reference to '__iyi_raise_overflow'` at link.
       single_module = @cross_compile || !@emit_targets.none? ||
                       (@single_module && @emit_iyimod.nil? && program.iyi_artifact_objects.empty?)
+      # iyi: the IR keeps the names of its local values and blocks only for a
+      # build that prints it (`--emit`, `--ll`, `DUMP`, `IYI_DEBUG_CODEGEN`).
+      # Nothing else reads them: an object is the same bytes without them,
+      # and the bitcode compared for reuse is smaller.
+      discard_value_names = @emit_targets.none? && !dump_ll? && !ENV["DUMP"]? && !ENV["IYI_DEBUG_CODEGEN"]?
       llvm_modules = @progress_tracker.stage("Codegen (crystal)") do
         modules = program.codegen node, debug: debug, frame_pointers: frame_pointers,
-          single_module: single_module
+          single_module: single_module, discard_value_names: discard_value_names
         # iyi: recursion's checks go in before optimisation (SPEC.md
         # III.4.13, part 9; `PreemptChecks.mark_recursion`).
         if program.iyi_preempt_flag
@@ -4296,11 +4301,12 @@ module Iyi
     # a debug build from a cold cache on Linux (12 vCPU VM, release compiler,
     # `IYI_PROF=1` and five interleaved builds per row, 2026-11-04).
     #
-    # The first prepares every unit (`CompilationUnit#prepare`): verifies its
-    # module, writes its bitcode and compares that with the cache's. Crystal
-    # did the last two on the main thread, one unit after another, feeding the
-    # workers as it went, and then had each worker read the bitcode back into a
-    # fresh context before compiling, because its modules once shared contexts.
+    # The first prepares every unit (`CompilationUnit#prepare`): writes its
+    # bitcode, compares that with the cache's, and verifies the module of a
+    # unit that compiles. Writing and comparing ran the way Crystal ran them,
+    # on the main thread, one unit after another, feeding the workers as it
+    # went, and then each worker read the bitcode back into a fresh context
+    # before compiling, because its modules once shared contexts.
     # Here each has its own (`CodeGenVisitor#type_module`), so a worker
     # compiles the module the visitor built. Writing 404 units' bitcode was
     # 155 ms of the main thread, and verifying them 64 ms more before it; the
@@ -4737,15 +4743,27 @@ module Iyi
       end
 
       # iyi: everything that happens to the module the visitor built before it
-      # is compiled: verified, when the visitor did not, its bitcode written,
-      # and that compared with the last build's, which decides whether it is
-      # compiled at all. It touches this unit's module alone, and that module
-      # has a context of its own (`CodeGenVisitor#type_module`), so any thread
-      # may run it, every unit's at once (`mt_codegen`).
+      # is compiled: its bitcode written, and that compared with the last
+      # build's, which decides whether it is compiled at all, and the module
+      # verified, when the visitor did not and it compiles. It touches this
+      # unit's module alone, and that module has a context of its own
+      # (`CodeGenVisitor#type_module`), so any thread may run it, every unit's
+      # at once (`mt_codegen`).
+      #
+      # Verified after the comparison, and only when the unit compiles. A
+      # unit whose bitcode is the last build's, byte for byte, is the module
+      # that build verified: a `.bc` reaches the cache only from a module that
+      # passed (`compile` after this, `prepare_partitions` after `finish`
+      # verified the one module), and the verifier's answer is a function of
+      # the module, so asking it again could only say what it said then. A
+      # module that fails stops the build here, before its bitcode is kept.
+      # A one-line edit to iyi-benchmarks' medium project compiles 1 of 374
+      # units, and verifying the other 373 was 20 to 22 ms of processor time
+      # (Linux, 12 vCPU VM, 21 interleaved rebuilds, 2026-11-22).
       def prepare : Nil
         return unless @must_compile.nil?
-        @llvm_mod.verify if @verify
-        @must_compile = must_compile?
+        @must_compile = must_compile = must_compile?
+        @llvm_mod.verify if @verify && must_compile
       end
 
       # Whether `compile` will write an object rather than reuse the last

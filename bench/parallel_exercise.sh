@@ -713,8 +713,18 @@ speed_run() { # workers binary -> this run's "wall_ms at_once"
   printf '%s\n' "$pair"
 }
 at_once() { awk -v a="$1" 'BEGIN { printf "%.2f", a / 100 }'; }
-check_at_once_floor() { # validated at_once_hundredths and k
-  if [ "$1" -lt $((60 * $2)) ]; then
+check_at_once_floor() { # at_once_hundredths and k
+  case "$1:$2" in
+    :*|*:|*[!0-9:]*)
+      echo "FAIL: speed: setup: invalid at-once sample or worker count" >&2
+      return 76 ;;
+  esac
+  if ! [ "$1" -ge 0 ] 2>/dev/null || ! [ "$2" -gt 0 ] 2>/dev/null ||
+     ! [ "$2" -le 153722867280912930 ] 2>/dev/null; then
+    echo "FAIL: speed: setup: invalid at-once sample or worker count" >&2
+    return 76
+  fi
+  if [ "$1" -lt $((60 * 10#$2)) ]; then
     echo "FAIL: speed: $2 workers held their tasks $(at_once "$1") at once on average: under 0.6 x $2, which is not parallel"
     return 1
   fi
@@ -747,7 +757,7 @@ if ! awk -v one="$ONE" -v many="$MANY" -v k="$K" 'BEGIN {
   else result = "below"
   printf "  performance information: %d workers, %.2fx one worker; 0.6 x K is %.2fx (%s)\n", k, one / many, 0.6 * k, result
 }'; then
-  echo "FAIL: speed: could not compute the performance information"; exit 1
+  echo "FAIL: speed: setup: could not compute the performance information"; exit 76
 fi
 
 # ── 4. A deadlock across threads is named ────────────────────────────────

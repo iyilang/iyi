@@ -717,13 +717,13 @@
           while true
             arrived = Busy.arrived.value.get
             break unless arrived < cores || IyiWorkers.launched < cores.to_i32
+            # gate-deadline: the idle pool's tasks must arrive within ten seconds
             if IyiMark.now_ns >= until_ns
               if arrived < cores
-                print "FAIL: idle pool: #{arrived.to_i64} of #{cores.to_i64} tasks arrived within ten seconds\n"
+                setup_fail("idle pool: #{arrived.to_i64} of #{cores.to_i64} tasks arrived within ten seconds")
               else
-                print "FAIL: idle pool: every task arrived, and the pool launched #{IyiWorkers.launched} of #{cores.to_i64} workers within ten seconds\n"
+                setup_fail("idle pool: every task arrived, and the pool launched #{IyiWorkers.launched} of #{cores.to_i64} workers within ten seconds")
               end
-              __iyi_exit(76)
             end
             {% if flag?(:idle_force) %}
               IyiWorkers.release_starts if arrived >= cores
@@ -753,9 +753,9 @@
       IyiThread.yield_cpu
     end
     waiting = IyiScheduler.waiting_threads
+    # gate-deadline: the launched workers must reach their wait within five seconds
     if waiting < launched.to_u64
-      print "FAIL: idle pool: the launched workers did not all reach their wait within five seconds\n"
-      __iyi_exit(76)
+      setup_fail("idle pool: the launched workers did not all reach their wait within five seconds")
     end
     fail("idle pool: #{waiting.to_i64} of #{cores.to_i64} workers waiting, and every worker the pool launched is one of them") if waiting < cores
     threads = IyiThread.program_threads
@@ -795,8 +795,10 @@
       while (Busy.arrived.value.get < cores || IyiScheduler.waiting_threads > 0_u64) && IyiMark.now_ns < deadline
         IyiThread.yield_cpu
       end
+      # gate-deadline: the busy pool's workers must leave their wait within five seconds
       busy_waiting = IyiScheduler.waiting_threads
       setup_fail("busy pool: #{busy_waiting.to_i64} of #{cores.to_i64} pool workers were still waiting after five seconds") if busy_waiting > 0_u64
+      # gate-deadline: the busy pool's tasks must start within five seconds
       busy_arrived = Busy.arrived.value.get
       setup_fail("busy pool: #{busy_arrived.to_i64} of #{cores.to_i64} pool tasks started within five seconds") if busy_arrived < cores
       IyiMark.auto = true

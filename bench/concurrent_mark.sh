@@ -41,6 +41,61 @@
 #     free. Those proofs exist only where their code is compiled (thread.iyi's
 #     start_helper and prelude.iyi's start_concurrent under win32), and the
 #     gate names that platform arm instead of passing silently.
+#
+# Deadlines. A deadline is a watchdog, not part of a verdict: product checks
+# are decided by the forced predicates and their exact sentences. A deadline
+# that never fires only leaves a later hang at its site unnamed; the run then
+# ends at its outer timeout or shows as a hang. It cannot flip a verdict.
+#
+# Routed through a setup helper and counted by the structural check (every
+# marked deadline in the two repo fixtures leaves through setup_fail, and the only
+# status-76 exit in each file is the helper's; two mutants must fail it):
+#   concurrent_mark.iyi: the idle pool's arrival deadline (two sentences) and
+#     launch wait, and the busy pool's two exits.
+#   release_trigger.iyi: the ready, counted and churn waits, and the round's
+#     premise that its collections ran beside the program.
+#
+# Forced by their own control in the Darwin gate (exit 76 at the sentence):
+# the release-trigger ready, counted and churn waits, the busy pool exits and
+# their premises, and the watchdog phases for chain readback, copy
+# acknowledgement, producers stopped, bracket setup and bracket stop.
+#
+# NOT routed and NOT individually forced. Each exits 76 with the sentence
+# shown when its deadline expires, by source reading; no forced copy in the
+# Darwin gate reaches that sentence:
+#   freed (generated): "FAIL: freed: the previous collection did not finish within five seconds";
+#     "FAIL: freed: no sweep looked at a chunk the last mark kept within five seconds"
+#   freed, sweep look (overlay sweep_slice): "freed: the sweep held a chunk the last
+#     mark kept for five seconds, and no free came"
+#   crowded (generated watcher): "FAIL: crowded setup: the triggering collection did
+#     not return while its helpers were held"
+#   crowded (overlay): "FAIL: crowded: the helper was held past ten seconds";
+#     "FAIL: crowded: the readiness wait was held past ten seconds";
+#     "FAIL: crowded setup: the post-release readiness wait was held past ten seconds"
+#   forced (generated): "FAIL: <name>: producers did not become ready within sixty seconds";
+#     "FAIL: <name>: the copy acknowledged nothing within sixty seconds, after ..."
+#   forced_watch phase, producers ready (overlay, every watchdog family):
+#     "FAIL: <name>: producers did not become ready before the fixture deadline"
+#   unbracketed (generated collector): "FAIL: freed: the armed free never reached its link";
+#     watchdog phase "FAIL: freed: the armed free did not request its collection before the fixture deadline"
+#   moves (overlay helper hold): "FAIL: moves: the helper was held past ten seconds"
+#   large (overlay closer hold): "FAIL: large: the closer was held past ten seconds"
+#   watchdog race and verdict (overlay): "FAIL: watchdog: the race control did not publish
+#     completion"; "FAIL: watchdog: the wrong-verdict control did not reach arbitration";
+#     and three forced_wait_race_word sentences (sample the pending phase, observe a lost
+#     claim, claim the readback phase)
+#   stored assist (overlay): "FAIL: stored: no assist entered the forced remainder within
+#     ten seconds"; "FAIL: stored: the assist was held past ten seconds"
+#   late (overlay): "FAIL: late: the next concurrent mark did not start within ten seconds"
+#   released (overlay): "FAIL: released: the release probe was not answered within ten seconds"
+#   let-go (overlay): "FAIL: let-go: the resumed thread did not answer the release probe
+#     within ten seconds"; "FAIL: let-go: no resumed slice reached the ceiling within ten
+#     seconds of the probe"
+#   bracket drop (overlay): "FAIL: freed: the stop did not reach the held free"
+#   idle start and turn (overlay, concurrency.iyi): "FAIL: idle pool: a worker start was
+#     held past ten seconds"; "FAIL: idle pool: the first worker was held past ten seconds"
+# On Linux only, the libc watchdog launch trip also forces "FAIL: stored: fixture
+# setup did not finish before the fixture deadline".
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -2003,27 +2058,97 @@ for run in 1 2 3; do
   fi
 done
 grep -E '^(bounded|stopped|verb|one core):' trigger-1.txt | sed 's/^/  /'
+# Each copy forces one release-trigger predicate to stay pending past a
+# deadline that has already expired, one predicate per copy, and requires
+# that branch's own sentence and status 76. The counted copy joins its second
+# thread before the churn loop starts, so only that thread can exit; the other
+# copies replace the second thread with one that only sets `ready`.
+release_wait_control() {
+  mode=$1 expected=$2
+  awk -v mode="$mode" '
+    /^  def round\(name : String, path : String\) : Bool$/ { in_round = 1; methods++ }
+    in_round && $0 == "    second = IyiThread.start do" {
+      print; starts++; in_second = 1
+      if (mode != "counted") { print "      ready.set(1_u64)"; print "      nil"; skipping = 1 }
+      next
+    }
+    skipping { if ($0 == "    end") { skipping = 0; in_second = 0; ends++; print }; next }
+    in_second && $0 == "    end" { in_second = 0; ends++; print; next }
+    in_second && mode == "counted" && $0 == "      counted_deadline = IyiMark.now_ns + 10000000000_u64" { print "      counted_deadline = 0_u64"; deadlines++; next }
+    in_second && mode == "counted" && $0 == "      while IyiMark.collections == before" { print "      while IyiMark.collections == before || counted_deadline == 0_u64"; waits++; next }
+    in_round && mode == "counted" && $0 == "    if path == \"verb\"" { print "    second.join"; joins++; print; next }
+    in_round && mode == "ready" && $0 == "    ready_deadline = IyiMark.now_ns + 10000000000_u64" { print "    ready_deadline = 0_u64"; deadlines++; next }
+    in_round && mode == "ready" && $0 == "    while ready.get == 0_u64" { print "    while ready.get == 0_u64 || ready_deadline == 0_u64"; waits++; next }
+    in_round && mode == "churn" && $0 == "      churn_deadline = IyiMark.now_ns + 10000000000_u64" { print "      churn_deadline = 0_u64"; deadlines++; next }
+    in_round && mode == "churn" && $0 == "      while IyiMark.collections == before" { print "      while IyiMark.collections == before || churn_deadline == 0_u64"; waits++; next }
+    in_round && /^  end$/ { in_round = 0 }
+    { print }
+    END {
+      ok = methods == 1 && starts == 1 && ends == 1 && deadlines == 1 && waits == 1 && !in_round && !in_second && !skipping
+      if (mode == "counted") ok = ok && joins == 1
+      if (!ok) exit 3
+    }' "$REPO/bench/release_trigger.iyi" > "release-wait-$mode.iyi" || {
+      echo "FAIL: gate setup: the release-trigger $mode wait is missing or ambiguous"; exit 76
+    }
+  if ! "$IYI" build --release "release-wait-$mode.iyi" -o "release-wait-$mode-run" > "build-release-wait-$mode.log" 2>&1; then
+    fail_build "build-release-wait-$mode.log"
+  fi
+  timeout -k 5 60 "./release-wait-$mode-run" > "release-wait-$mode.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 76 ] || ! grep -Fxq "$expected" "release-wait-$mode.txt"; then
+    echo "the release-trigger $mode wait was not named as setup (exit $code):"; cat "release-wait-$mode.txt"; fail_for_status "$code" "release-wait-$mode.txt"
+  fi
+  printf '  exits 76 at "%s"\n' "$expected"
+}
 step "control: a release-trigger thread that is not ready is a setup failure"
-awk '/^  def round\(name : String, path : String\) : Bool$/ { in_round = 1; methods++ }
-  in_round && $0 == "    ready_deadline = IyiMark.now_ns + 10000000000_u64" {
-    print "    ready_deadline = 0_u64"; deadlines++; next
-  }
-  in_round && $0 == "    while ready.get == 0_u64" {
-    print "    while ready.get == 0_u64 || ready_deadline == 0_u64"; waits++; next
-  }
-  in_round && /^  end$/ { in_round = 0 }
-  { print } END { if (methods != 1 || deadlines != 1 || waits != 1 || in_round) exit 3 }' \
-  "$REPO/bench/release_trigger.iyi" > release-wait.iyi || { echo "FAIL: gate setup: the release-trigger ready wait is missing or ambiguous"; exit 76; }
-if ! "$IYI" build --release release-wait.iyi -o release-wait-run > build-release-wait.log 2>&1; then
-  fail_build build-release-wait.log
-fi
-timeout -k 5 60 ./release-wait-run > release-wait.txt 2>&1
-code=$?
-expected="FAIL: bounded: the second thread did not become ready within ten seconds"
-if [ "$code" -ne 76 ] || ! grep -Fxq "$expected" release-wait.txt; then
-  echo "the release-trigger ready wait was not named as setup (exit $code):"; cat release-wait.txt; fail_for_status "$code" release-wait.txt
-fi
-printf '  exits 76 at "%s"\n' "$expected"
+release_wait_control ready "FAIL: bounded: the second thread did not become ready within ten seconds"
+step "control: a release-trigger thread that sees no counted collection is a setup failure"
+release_wait_control counted "FAIL: bounded: the second thread did not see the counted collection within ten seconds"
+step "control: a release-trigger churn that triggers no collection is a setup failure"
+release_wait_control churn "FAIL: bounded: churn did not trigger the round's collection within ten seconds"
+# A deadline in the two fixtures is marked `# gate-deadline`, and each one must
+# leave through `setup_fail(` within five lines. The only status-76 exit a
+# fixture may contain sits inside a setup helper, so no bare exit can hide.
+# Each count is printed; a miss is a setup failure with its own sentence.
+deadline_routing() {
+  awk -v file="$(basename "$1")" '
+    /^ *def (self\.)?setup_fail/ { match($0, /^ */); ind = sprintf("%" RLENGTH "s", ""); in_helper = 1; next }
+    in_helper && $0 == ind "end" { in_helper = 0 }
+    /__iyi_exit\(76\)/ { exits++; if (in_helper) helper++ }
+    /# gate-deadline/ { sites++; pending = 5; next }
+    pending > 0 { if ($0 ~ /setup_fail\(/) { routed++; pending = 0 } else pending-- }
+    END {
+      if (sites == 0 || routed != sites || exits != helper) {
+        printf "FAIL: gate setup: %s: %d of %d deadlines leave through setup_fail, and %d status-76 exits sit outside it\n", file, routed + 0, sites + 0, exits - helper
+        exit 1
+      }
+      printf "%s: %d of %d deadlines leave through setup_fail, 0 status-76 exits outside it\n", file, routed, sites
+    }' "$1"
+}
+step "gate: every marked deadline in the two fixtures leaves through setup_fail"
+for fixture in concurrent_mark release_trigger; do
+  if ! out=$(deadline_routing "$REPO/bench/$fixture.iyi" 2>&1); then
+    echo "$out"
+    exit 76
+  fi
+  echo "  $out"
+done
+step "control: a fixture deadline that exits directly, or leaves unrouted, is a setup failure"
+mkdir -p mutant-direct mutant-unrouted
+awk '{ print } /^ *if IyiMark\.now_ns >= churn_deadline$/ { print "          __iyi_exit(76)" }' "$REPO/bench/release_trigger.iyi" > mutant-direct/release_trigger.iyi
+awk '/setup_fail\("#\{name\}: churn/ { print "        nil"; next } { print }' "$REPO/bench/release_trigger.iyi" > mutant-unrouted/release_trigger.iyi
+for mutant in direct unrouted; do
+  case "$mutant" in
+    direct) expected="FAIL: gate setup: release_trigger.iyi: 3 of 3 deadlines leave through setup_fail, and 1 status-76 exits sit outside it" ;;
+    unrouted) expected="FAIL: gate setup: release_trigger.iyi: 2 of 3 deadlines leave through setup_fail, and 0 status-76 exits sit outside it" ;;
+  esac
+  out=$(deadline_routing "mutant-$mutant/release_trigger.iyi" 2>&1)
+  code=$?
+  if [ "$code" -ne 1 ] || [ "$out" != "$expected" ]; then
+    echo "the $mutant deadline mutant was not rejected (exit $code):"; echo "$out"; exit 76
+  fi
+  printf '  exits 76 at "%s"\n' "$expected"
+done
 
 # At the release of each stopped-collection path, hold its collector until a
 # resumed thread crosses the next budget. The broken copies additionally hold
@@ -2220,7 +2345,7 @@ printf '  exits 76 at "%s"\n' "$expected"
 # A second thread requests collection there. The bracketed free observes the
 # deferred stop request and leaves the bracket; the unbracketed free is
 # stopped there and resumes after collection dropped its stale head.
-step "failure proof: a free outside the allocator's bracket puts a dropped list back"
+step "control: a bracketed free does not put a dropped list back"
 mkdir -p bracketed/iyi
 cp "$REPO"/src/iyi/*.iyi bracketed/iyi/
 cat > unbracketed.iyi <<'IYI'
@@ -2442,6 +2567,7 @@ for premise in locked ack; do
   fi
   printf '  exits 76 at "%s"\n' "$expected"
 done
+step "failure proof: a free outside the allocator's bracket puts a dropped list back"
 mkdir -p unbracketed/iyi
 cp bracketed/iyi/*.iyi unbracketed/iyi/
 awk '/^      def self\.free\(pointer : Void\*\) : Nil$/ { in_free = 1; methods++ }

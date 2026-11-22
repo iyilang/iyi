@@ -194,6 +194,16 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
     {stale, on_kept}
   end
 
+  # The class-idle test the wait polls. The idle-never control forces it false
+  # at build time (`-Didle_never_force`), so its watchdog is the only exit.
+  def class_idle_now(chunk : UInt64) : Bool
+    {% if flag?(:idle_never_force) %}
+      false
+    {% else %}
+      IyiMark.class_idle?(chunk)
+    {% end %}
+  end
+
   # The class the fresh objects are carved from. A pair and a link are both
   # two words, so the pairs the filler drops and the links the check takes
   # share one class, whose chunk size is read from a link's own address.
@@ -214,11 +224,14 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
   # Until the class is idle by the runtime's own definition (three
   # collections and a second with no use of it, `IyiMark.class_idle?`), its
   # free pages keep warm room, and the carve may find nothing but warm pages.
-  # That wait has a class-idle deadline of 60 seconds: a class that never goes
-  # idle ends the run in its own sentence.
+  # The wait is for that event alone. Its 60-second watchdog is not a verdict:
+  # a class that never goes idle is a named setup failure with status 76.
   began = __iyi_monotonic_ns
-  while !IyiMark.class_idle?(chunk)
-    raise "reuse integrity: the class-idle deadline of 60 seconds passed before the fresh objects' size class went idle" if (__iyi_monotonic_ns - began) // 1000000_i64 > 60000_i64
+  while !class_idle_now(chunk)
+    if (__iyi_monotonic_ns - began) // 1000000_i64 > 60000_i64
+      print "FAIL: reuse integrity: the size class of the fresh objects did not go idle within 60 seconds\n"
+      __iyi_exit(76)
+    end
     IyiMark.collect
   end
   IyiMark.settle
@@ -227,7 +240,10 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
   rewarmed = IyiHeap.pages_rewarmed
   {% if flag?(:advice_force) %}
     kept = IyiHeap.advice_kept
-    raise "reuse integrity: the copy kept no cold page intact, so the fresh objects proved nothing" if kept == 0_u64
+    if kept == 0_u64
+      print "FAIL: reuse integrity: the copy kept no cold page intact, so the fresh objects proved nothing\n"
+      __iyi_exit(76)
+    end
   {% else %}
     kept = 0_u64
   {% end %}
@@ -237,8 +253,11 @@ puts "reuse integrity: #{rounds} rounds, every key spells its value, the startup
   # Cold pages the carve took up, as against warm ones: a warm page was
   # never released, and a check that met none proved nothing.
   cold = (IyiHeap.pages_reopened - reopened) - (IyiHeap.pages_rewarmed - rewarmed)
+  if cold == 0_u64
+    print "FAIL: reuse integrity: the carve took up no released page, so the fresh objects proved nothing\n"
+    __iyi_exit(76)
+  end
   raise "reuse integrity: #{stale} of #{born} fresh objects read a field their constructor never set as something other than nil, on #{cold.to_i64} released pages taken up again, #{on_kept} of the stale objects on the cold page whose release the copy skipped" if stale != 0
-  raise "reuse integrity: the carve took up no released page, so the fresh objects proved nothing" if cold == 0_u64
   puts "reuse integrity: #{born} fresh objects on #{cold.to_i64} released pages taken up again, every unset field nil"
 {% else %}
   puts "reuse integrity: the fresh-object check does not run on this target"

@@ -9,6 +9,9 @@
 # and a release that leaves a designated cold page's bytes where they were
 # (the unset field is read on that page).
 #
+#   A class that never goes idle is a setup failure, not a verdict: its run
+#   ends at its own sentence with status 76, and the gate proves that path too.
+#
 #   bash bench/reuse_integrity.sh
 #
 # Needs `make` first. Exits non-zero if any step fails.
@@ -177,6 +180,21 @@ prove_passes() {
     fi
   done
   echo "  ok   control $name passed its one run"
+}
+
+# One run of a copy whose setup failed, with the exact setup sentence and status
+# 76. Any other ending fails the gate: a verdict's status 1 is not a setup failure.
+prove_setup_fails() {
+  local name="$1" sentence="$2"
+  "$WORK/$name/program" >"$WORK/$name/out" 2>&1
+  local exit_code=$?
+  if [ "$exit_code" -ne 76 ] || ! grep -Fxq "$sentence" "$WORK/$name/out"; then
+    echo "  FAIL: $name: its one run exited $exit_code, not 76 at its setup sentence:"
+    show_run "$name"
+    status=1
+    return
+  fi
+  echo "  setup failure on its one run: $sentence"
 }
 
 # Every carve takes a released page: warm_pages hands out no warm room, so
@@ -383,6 +401,13 @@ fi
 if make_copy advice "$WARM" "$ADVICE" && build_copy advice -Dadvice_force; then
   prove_fails advice \
     '^iyi: panic: reuse integrity: [1-9][0-9]* of 6000000 fresh objects read a field their constructor never set as something other than nil, on [1-9][0-9]* released pages taken up again, [1-9][0-9]* of the stale objects on the cold page whose release the copy skipped$'
+fi
+
+echo
+echo "== the fresh-object check ends at its setup sentence, status 76, when its size class never goes idle"
+if make_copy idle_never && build_copy idle_never -Didle_never_force; then
+  prove_setup_fails idle_never \
+    'FAIL: reuse integrity: the size class of the fresh objects did not go idle within 60 seconds'
 fi
 
 echo

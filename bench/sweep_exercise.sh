@@ -431,7 +431,7 @@ if ! play_prelude doublecount; then
 else
   unlist_count_run doublecount
   rc=$?
-  if [ "$rc" -eq 1 ] && grep -q '^FAIL: unlist: the arena counts ' "$WORK/doublecount/unlist.out"; then
+  if [ "$rc" -eq 1 ] && grep -qxF 'FAIL: unlist: the audit found 1 arena count off: the arena counts 0 listed pages, its bits list 2' "$WORK/doublecount/unlist.out"; then
     echo "  the listed pages counted twice: caught on its only run: $(grep -m1 '^FAIL: unlist' "$WORK/doublecount/unlist.out")"
   else
     echo "  the listed pages counted twice: not caught at the expected check (status $rc):"

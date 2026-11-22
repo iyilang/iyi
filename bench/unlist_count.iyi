@@ -1,14 +1,16 @@
 # The listed pages' count against the bits that list them, after one batch of
-# them is unlisted. `bench/sweep_exercise.sh` builds this against a copy of
-# the prelude that plays the neighbouring adoption at the batch's edges (the
-# fix), and against a copy that also counts the clear it lost (the broken
-# counting). Built against the prelude as it is, it reads 2 = 2 as well.
+# them is unlisted, checked by `IyiHeap.audit_listed`: the sweep's audit, which
+# only the copies `bench/sweep_exercise.sh` builds define. Those copies are a
+# prelude that plays the neighbouring adoption at the batch's edges (the fix),
+# and one that also counts the clear it lost (the broken counting). The first
+# must pass and the second must fail on its one run.
 #
-#   ./bin/iyi build bench/unlist_count.iyi && ./unlist_count
+#   bash bench/sweep_exercise.sh
 #
-# It prints `unlist: ok, the arena counts N listed pages, its bits list M` when
-# the count equals the bits. When it does not, it prints the FAIL line with the
-# same two numbers and exits 1.
+# It prints `unlist: ok, the audit found no arena count off, the arena counts N
+# listed pages, its bits list M` when the audit agrees. When it counts one arena
+# off, it prints `FAIL: unlist: the audit found 1 arena count off: the arena
+# counts N listed pages, its bits list M` and exits 1.
 #
 # One thread, no timing. A zeroed fake header lists pages 1 to 5 with
 # `IyiHeap.set_listed` and sets the count to 5, as a sweep leaves it. Then
@@ -46,6 +48,10 @@ module bench/unlist_count
     slot = slot + 1_u64
   end
 
+  # The header's map covers one bitmap word, 64 pages, which is all that
+  # `IyiHeap.audit_listed` reads of it.
+  IyiHeap.write64(arena + IyiHeap::OFF_MAP, 1_u64.unsafe_shl(IyiHeap::PAGE_SHIFT + 6_u64))
+
   # Pages 1 to 5 listed, and the count set to the five of them.
   IyiHeap.set_listed(arena, arena + IyiHeap::PAGE, arena + 6_u64 * IyiHeap::PAGE, true)
   IyiHeap.write64(arena + IyiHeap::OFF_LISTED, 5_u64)
@@ -60,10 +66,14 @@ module bench/unlist_count
 
   count = IyiHeap.read64(arena + IyiHeap::OFF_LISTED)
   bits = listed_bits(IyiHeap.read64(arena + IyiHeap::OFF_LISTED_PAGES))
-  if count == bits
-    puts "unlist: ok, the arena counts #{count.to_i64} listed pages, its bits list #{bits.to_i64}"
+  # The sweep's audit, `IyiHeap.audit_listed`, is the function trim_stress checks
+  # at every pause: the arena's count against the bits its bitmap lists. Here
+  # it counts one arena, so `listed_off` is 0 or 1.
+  IyiHeap.audit_listed(arena, count)
+  if IyiHeap.listed_off == 0_u64
+    puts "unlist: ok, the audit found no arena count off, the arena counts #{count.to_i64} listed pages, its bits list #{bits.to_i64}"
   else
-    print "FAIL: unlist: the arena counts #{count.to_i64} listed pages, its bits list #{bits.to_i64}\n"
+    print "FAIL: unlist: the audit found #{IyiHeap.listed_off.to_i64} arena count off: the arena counts #{IyiHeap.listed_off_count.to_i64} listed pages, its bits list #{IyiHeap.listed_off_pages.to_i64}\n"
     __iyi_exit(1)
   end
 {% else %}

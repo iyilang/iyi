@@ -225,6 +225,10 @@ lib LibLLVM
   fun is_a_alloca_inst = LLVMIsAAllocaInst(val : ValueRef) : ValueRef
   fun is_a_get_element_ptr_inst = LLVMIsAGetElementPtrInst(val : ValueRef) : ValueRef
   fun is_a_bit_cast_inst = LLVMIsABitCastInst(val : ValueRef) : ValueRef
+  # iyi: an array's own fields and its elements are told apart by marking
+  # the load or store the code generator just made (codegen/array_tbaa.cr).
+  fun is_a_load_inst = LLVMIsALoadInst(val : ValueRef) : ValueRef
+  fun is_a_store_inst = LLVMIsAStoreInst(val : ValueRef) : ValueRef
   # iyi: wasm32's roots (src/compiler/iyi/wasm_roots.cr) walk each value's
   # uses and each call, and store what a call may outlive into a slot.
   fun is_a_call_inst = LLVMIsACallInst(val : ValueRef) : ValueRef

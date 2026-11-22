@@ -931,13 +931,28 @@ class Iyi::CodeGenVisitor
     return llvm_nil if type.element_type.void?
 
     value = call_args[1]
-    assign call_args[0], type.element_type, node.type, value
+    if iyi_array_slot?(target_def)
+      iyi_array_stores(call_args[0], element: true) { assign call_args[0], type.element_type, node.type, value }
+    else
+      assign call_args[0], type.element_type, node.type, value
+    end
     value
   end
 
   def codegen_primitive_pointer_get(node, target_def, call_args)
     type = context.type.remove_typedef.as(PointerInstanceType)
-    to_lhs call_args[0], type.element_type
+    value = to_lhs call_args[0], type.element_type
+    if iyi_array_slot?(target_def)
+      iyi_array_load value, call_args[0], element: true
+      iyi_array_object value, type.element_type
+    end
+    value
+  end
+
+  # `Pointer#array_slot` and `#array_slot=`, array.iyi's reads and writes of
+  # its buffer, which are marked as an array element's (array_tbaa.cr).
+  private def iyi_array_slot?(target_def) : Bool
+    target_def.name.in?("array_slot", "array_slot=")
   end
 
   def codegen_primitive_pointer_address(node, target_def, call_args)

@@ -87,7 +87,7 @@
 #  7j. Darwin: hold an unlinked child, inspect the actual stop roster and count,
 #      then link it and witness a later stop. Early counting is named.
 #  7k. Linux: tasks and a thread call libc and check its answers and imports.
-#      The compiler-answer mutant uses raw clones and must fail or die.
+#      A held thread's actual pthread handle exposes the raw-clone mutant.
 #
 # Stress loops, never retries or claims that a particular schedule occurred:
 #   1/4: each exercise runs 20 allocation bursts per thread and main, 200
@@ -127,8 +127,8 @@
 # the IR comparison is the separate structural check. The 7f task-top query
 # does not force a stop at the first instruction, although the bound mutant
 # is checked directly. The 7i task-wide trap count does not identify which
-# call made each trap. The 7k raw-clone mutant has no named failure witness:
-# the gate accepts any nonzero exit without the success line.
+# call made each trap. The 7k held-thread check proves the chosen launch path;
+# the libc-call stress does not force a particular collection interleaving.
 #
 # Exit 0: selected checks passed, including detected mutants; unsupported
 # platforms are a no-op. Exit 76: setup or watchdog failure, with SETUP:.
@@ -2674,10 +2674,10 @@ fi
 timeout -k 5 120 ./unrooted 8 > unrooted.txt 2>&1
 code=$?; check_bound "$code" forced mutant unrooted.txt
 if [ "$code" -eq 76 ]; then cat unrooted.txt; exit 76; fi
-if [ "$code" -ne 1 ] || ! grep -q "on a free list" unrooted.txt; then
+if [ "$code" -ne 1 ] || ! tr -d '\r' < unrooted.txt | grep -qxF "FAIL: thread roots: the explicit collection swept a held thread's live nodes"; then
   pair_mismatch "$code" unrooted.txt mutant
 fi
-printf '  exits 1 at "%s"\n' "$(grep -m1 'on a free list' unrooted.txt)"
+printf '  exits 1 at "%s"\n' "FAIL: thread roots: the explicit collection swept a held thread's live nodes"
 
 
 # ── 5b. Failure proof: a finished thread's fibers leave the registry ──────
@@ -2695,10 +2695,10 @@ fi
 timeout -k 5 120 ./stale-threads 8 > stale.txt 2>&1
 code=$?; check_bound "$code" forced mutant stale.txt
 if [ "$code" -eq 76 ]; then cat stale.txt; exit 76; fi
-if [ "$code" -ne 1 ] || ! grep -q "registry:" stale.txt; then
+if [ "$code" -ne 1 ] || ! tr -d '\r' < stale.txt | grep -qxF 'FAIL: registry: 8 fibers of 8 finished threads are still registered, naming stacks that are gone'; then
   pair_mismatch "$code" stale.txt mutant
 fi
-printf '  exits 1 at "%s"\n' "$(grep -m1 'registry:' stale.txt | sed 's/^FAIL: //')"
+printf '  exits 1 at "%s"\n' 'FAIL: registry: 8 fibers of 8 finished threads are still registered, naming stacks that are gone'
 
 # ── 5c. A task being switched to is a root ────────────────────────────────
 # A switch marked the fiber it enters running before its stack was the
@@ -2862,7 +2862,7 @@ if IyiThread.release_gate_expired?
   __iyi_exit(76)
 end
 if freed != 0
-  puts "FAIL: skipping: #{freed} live nodes of a task marked running before its switch are on a free list after the collection"
+  puts "FAIL: skipping: a task marked running before its switch lost live nodes"
   __iyi_exit(1)
 end
 puts "skipping: held=1 collected=1 expired=0 freed=0"
@@ -2917,10 +2917,10 @@ fi
 timeout -k 5 120 ./skipping-run > skipping.txt 2>&1
 code=$?; check_bound "$code" forced mutant skipping.txt
 if [ "$code" -eq 76 ]; then cat skipping.txt; exit 76; fi
-if [ "$code" -ne 1 ] || ! grep -qEx 'FAIL: skipping: [1-9][0-9]* live nodes of a task marked running before its switch are on a free list after the collection' skipping.txt; then
+if [ "$code" -ne 1 ] || ! tr -d '\r' < skipping.txt | grep -qxF 'FAIL: skipping: a task marked running before its switch lost live nodes'; then
   pair_mismatch "$code" skipping.txt mutant 'skipping: held=1 collected=1 expired=0 freed=0'
 fi
-printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: skipping' skipping.txt)"
+printf '  exits 1 at "%s"\n' 'FAIL: skipping: a task marked running before its switch lost live nodes'
 
 # The same hold after the switch scans both lists, so no node is free.
 step "the same hold after the switch, with the fiber already running: every list holds"
@@ -2939,7 +2939,7 @@ timeout -k 5 120 ./skipping-ctl-run > skipping-ctl.txt 2>&1
 code=$?; check_bound "$code" forced control skipping-ctl.txt
 if [ "$code" -eq 76 ]; then cat skipping-ctl.txt; exit 76; fi
 if [ "$code" -ne 0 ] || ! grep -qxF 'skipping: held=1 collected=1 expired=0 freed=0' skipping-ctl.txt; then
-  pair_mismatch "$code" skipping-ctl.txt control "$(tr -d '\r' < skipping-ctl.txt | grep -m1 -E '^FAIL: skipping: [1-9][0-9]* live nodes of a task marked running before its switch are on a free list after the collection$')"
+  pair_mismatch "$code" skipping-ctl.txt control 'FAIL: skipping: a task marked running before its switch lost live nodes'
 fi
 echo "  hook-only control: held=1 collected=1 expired=0 freed=0"
 
@@ -4667,11 +4667,14 @@ PS1
     # build, so it is the same on every run.
     ends_in_exit() {
       awk '
+        function is_exit_call(line) {
+          return line ~ /(^|[[:space:]])call[[:space:]].*@\.2A\.__iyi_exit\.3C\.Int32\.3E\.\.3A\.NoReturn\(/
+        }
         /^define .*@main\(/ { definitions++; inmain = 1; next }
         inmain && /^}/ { closed++; inmain = 0; next }
         inmain && /^  / {
           if ($0 ~ /^  ret /) rets++
-          if ($0 ~ /(^|[[:space:]])call[[:space:]].*@__iyi_exit\(/) exits++
+          if (is_exit_call($0)) exits++
           prev = last; last = $0
         }
         END {
@@ -4681,7 +4684,7 @@ PS1
           if (rets > 0) {
             print "FAIL: main returns to the C runtime instead of ending in __iyi_exit"; exit 1
           }
-          if (exits >= 1 && last ~ /^  unreachable([[:space:]]|$)/ && prev ~ /(^|[[:space:]])call[[:space:]].*@__iyi_exit\(/) {
+          if (exits >= 1 && last ~ /^  unreachable([[:space:]]|,|$)/ && is_exit_call(prev)) {
             print "main ends in __iyi_exit"; exit 0
           }
           print "SETUP: ends: main has no final exit call followed by unreachable"; exit 76
@@ -4697,6 +4700,7 @@ PS1
     if [ "$code" -ne 0 ] || [ "$(cat ends-end.txt)" != 'main ends in __iyi_exit' ]; then
       echo "the healthy program does not end in __iyi_exit:"; cat ends-end.txt; exit 1
     fi
+    echo '  control: exit 0, main ends in __iyi_exit'
     again=1
     while [ "$again" -le 200 ]; do
       timeout -k 1 30 ./ends > ends.txt 2>&1
@@ -4735,7 +4739,7 @@ PS1
     if [ "$(cat crt-end.txt)" != 'FAIL: main returns to the C runtime instead of ending in __iyi_exit' ]; then
       pair_mismatch "$code" crt-end.txt mutant 'main ends in __iyi_exit'
     fi
-    echo "  $(cat crt-end.txt)"
+    echo '  exits 1 at "FAIL: main returns to the C runtime instead of ending in __iyi_exit"'
     ;;
 esac
 
@@ -6913,8 +6917,8 @@ esac
 # and a started thread answer libc's own questions through collections
 # that stop them, and the binary names `pthread_create` and
 # `pthread_join`, where step 2's binaries, which call no C, name neither.
-# With the compiler's answer replaced by a `false` the program cannot
-# see, the run dies or says what it lost.
+# The separate held-thread pair reads the actual pthread handle before the
+# child calls libc, naming a raw clone without depending on a crash.
 case "$(uname -s)" in
   Linux)
     step "stress: C called from parallel tasks and a thread runs on libc's threads"
@@ -6993,23 +6997,69 @@ IYI
     fi
     echo "  $(cat calls-c.txt)"
 
-    step "failure proof: the threads a raw clone again in a program that calls C"
+    step "failure proof: a C-calling program launches a held libc thread"
+    cat > calls_c_witness.iyi <<'IYI'
+@[Unsafe("the parent reads a held thread's line and checks its libc handle")]
+@[Link("c")]
+lib LibCalls
+  fun pthread_self : UInt64
+end
+
+main_self = LibCalls.pthread_self
+if main_self == 0_u64
+  puts "SETUP: calls-c: the main thread has no pthread handle"
+  __iyi_exit(76)
+end
+go = Atomic(Int64).new(0_i64)
+observed = Atomic(UInt64).new(0_u64)
+thread = IyiThread.start do
+  while go.get == 0_i64
+    IyiThread.spin_pause
+  end
+  observed.set(LibCalls.pthread_self)
+  nil
+end
+line = thread.line
+if line == 0_u64
+  puts "SETUP: calls-c: the held thread has no line"
+  __iyi_exit(76)
+end
+handle = IyiHeap.read64(line + IYI_TL_PTHREAD)
+if handle == 0_u64
+  puts "FAIL: calls-c: a C-calling program started a raw-clone thread"
+  __iyi_exit(1)
+end
+go.set(1_i64)
+thread.join
+if observed.get != handle || observed.get == main_self
+  puts "FAIL: calls-c: the worker's pthread_self did not match its recorded handle"
+  __iyi_exit(1)
+end
+puts "calls-c: the held thread used its own pthread handle"
+IYI
     mkdir -p cloned/iyi
     cp "$REPO"/src/iyi/*.iyi cloned/iyi/
     awk '/^    @\[Primitive\(:iyi_calls_c\)\]$/ { primitive++; next }
       /^    def self\.program_calls_c\? : Bool$/ { print; print "      Pointer(UInt8).new(0_u64).address != 0_u64"; method++; next }
       { print } END { if (primitive != 1 || method != 1) exit 3 }' \
       "$REPO/src/iyi/thread.iyi" > cloned/iyi/thread.iyi || { echo "SETUP: ${current_step:-calls-c}: the compiler answer anchors changed"; exit 76; }
-    if ! IYI_PATH="$WORK/cloned${PSEP}$REPO/src" "$IYI" build calls_c.iyi -o cloned-run > build-cloned.log 2>&1; then
-      echo "SETUP: ${current_step:-build}: cloned did not build"; cat build-cloned.log; exit 76
-    fi
-    ( timeout -k 5 120 ./cloned-run > cloned.txt 2>&1; exit $? ) 2> /dev/null
-    code=$?; check_bound "$code" forced mutant cloned.txt
-    if [ "$code" -eq 76 ]; then cat cloned.txt; exit 76; fi
-    if [ "$code" -eq 0 ] || grep -q 'every property held' cloned.txt; then
-      echo "with raw clones, C on the workers still held:"; cat cloned.txt; exit 1
-    fi
-    echo "  exit $code: $(tail -1 cloned.txt)"
+    for mode in control mutant; do
+      if [ "$mode" = control ]; then path="$REPO/src"; else path="$WORK/cloned${PSEP}$REPO/src"; fi
+      if ! IYI_PATH="$path" "$IYI" build calls_c_witness.iyi -o "calls-c-$mode" > "build-calls-c-$mode.log" 2>&1; then
+        echo "SETUP: calls-c: the $mode witness did not build"; cat "build-calls-c-$mode.log"; exit 76
+      fi
+      step "linux: libc thread $mode"
+      timeout -k 5 120 "./calls-c-$mode" > "calls-c-$mode.txt" 2>&1
+      code=$?; check_bound "$code" forced "$mode" "calls-c-$mode.txt"
+      if [ "$code" -eq 76 ]; then cat "calls-c-$mode.txt"; exit 76; fi
+      if [ "$mode" = control ]; then
+        [ "$code" -eq 0 ] && grep -qxF 'calls-c: the held thread used its own pthread handle' "calls-c-$mode.txt" || pair_mismatch "$code" "calls-c-$mode.txt" control 'FAIL: calls-c: a C-calling program started a raw-clone thread' "FAIL: calls-c: the worker's pthread_self did not match its recorded handle"
+        echo '  control: exit 0, calls-c: the held thread used its own pthread handle'
+      else
+        [ "$code" -eq 1 ] && grep -qxF 'FAIL: calls-c: a C-calling program started a raw-clone thread' "calls-c-$mode.txt" || pair_mismatch "$code" "calls-c-$mode.txt" mutant 'calls-c: the held thread used its own pthread handle'
+        echo '  exits 1 at "FAIL: calls-c: a C-calling program started a raw-clone thread"'
+      fi
+    done
     ;;
 esac
 

@@ -91,6 +91,12 @@
     def self.numbers : Pointer(Atomic(UInt64))
       Pointer(Atomic(UInt64)).new(@@page + 256_u64)
     end
+
+    # No thread allocates after the explicit collection until every thread
+    # has checked the sweep flags on its own held list.
+    def self.checked : Pointer(Atomic(UInt64))
+      Pointer(Atomic(UInt64)).new(@@page + 384_u64)
+    end
   end
 
   # A list, and beside it a ledger of every node's address in a mapping
@@ -210,8 +216,12 @@
     while Tally.go.value.get == 0_u64
     end
     freed = ledger.freed
-    fail("thread #{seed.to_i64}: #{freed} live nodes are on a free list after the collection that stopped this thread, so its frames were not scanned") if freed != 0_i64
+    fail("thread roots: the explicit collection swept a held thread's live nodes") if freed != 0_i64
     fail("thread #{seed.to_i64}: the live list's checksum changed under the collection that stopped this thread") if checksum(list) != expected
+    Tally.checked.value.add(1_u64)
+    while Tally.go.value.get != 2_u64
+      IyiThread.spin_pause
+    end
     burst = 0
     while burst < 20
       churn(20000)
@@ -403,6 +413,10 @@
   end
   IyiMark.collect
   Tally.go.value.set(1_u64)
+  while Tally.checked.value.get < count.to_u64
+    IyiThread.spin_pause
+  end
+  Tally.go.value.set(2_u64)
   burst = 0
   while burst < 20
     churn(20000)

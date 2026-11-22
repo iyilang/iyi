@@ -60,17 +60,28 @@ import std/password::{Bcrypt}
     # one ending: begin
     # The run's one ending, for every catch, watchdog and setup failure, on
     # any thread and under any lock. The first caller to claim the word
-    # writes its line with one write and ends the process with its status;
-    # every later caller writes nothing and yields until that end. Nothing
-    # here allocates or takes a lock. The old IyiIO#write could be
-    # preempted after its low-level write and before returning to the
-    # caller's exit, leaving a later placement fiber holding the worker.
-    # Darwin leaves through the exit system call, avoiding libSystem exit
-    # teardown. Binding `_exit` would put `__exit` on the dependency floor
-    # bench/parallel_exercise.sh holds. That script holds every copy of
-    # this block to bench/parallel_exercise.iyi's and appends it to each
-    # runtime copy it runs, built with -Drun_end_copy, so a hook and its
-    # fixture claim one word.
+    # writes its line and ends the process with its status; every later
+    # caller writes nothing and yields until that end.
+    #
+    # Its bounds. One write goes out only when lead, what and tail total at
+    # most 512 bytes; a longer line goes out piece by piece (lead, what, tail),
+    # each piece in as many writes as the kernel takes. The claim and the
+    # write take no lock. The exit is not lock-free on Windows: __iyi_exit
+    # first runs __iyi_hold_runtime_for_exit, a bounded spin of up to
+    # 10,000,000 try_locks of IyiRuntimeLock that parks while a stop is
+    # requested, so a caller that held that lock while a stop waited on its
+    # own thread would leave the claimant parked there. No call site does
+    # that: every caller runs on a scheduler, worker or monitor path, never
+    # in collector code. Nothing between the claim and the exit is a
+    # preemption point, because the block is @[NoPreempt]. On Darwin the exit
+    # is the raw SYS_exit call, so no libSystem code runs after the write. The
+    # libSystem-teardown explanation of the old hang was tested and ruled out
+    # (a raw write then LibC.exit ended with status 76 and one line), so the
+    # raw call is a choice, not a fix.
+    #
+    # Each copy of this block is held to bench/parallel_exercise.iyi's, and
+    # bench/parallel_exercise.sh appends it to each runtime copy it runs
+    # (-Drun_end_copy), so a hook and its fixture claim one word.
     class RunEnd
       @[UnsafeReach("the run's claim: atomically set once, reset only for the ending-hook setup probe")]
       @@claimed : UInt64 = 0_u64
@@ -85,16 +96,25 @@ import std/password::{Bcrypt}
           Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.set(0_u64)
         end
       {% end %}
+
+      {% if flag?(:ending_unclaimed) %}
+        # The planted mutant's count of writers, read by every caller's wait.
+        @[UnsafeReach("the mutant's count of writers: atomics only")]
+        @@written : UInt64 = 0_u64
+
+        def self.arrive : UInt64
+          Pointer(Atomic(UInt64)).new(pointerof(@@written).address).value.add(1_u64)
+        end
+
+        def self.written : UInt64
+          Pointer(Atomic(UInt64)).new(pointerof(@@written).address).value.get
+        end
+      {% end %}
     end
 
     @[NoInline]
     @[NoPreempt]
-    def end_run(status : Int32, fd : Int32, lead : String, what : String = "", tail : String = "") : NoReturn
-      unless RunEnd.claim
-        while true
-          IyiThread.yield_cpu
-        end
-      end
+    def run_end_write(fd : Int32, lead : String, what : String = "", tail : String = "") : Nil
       size = lead.bytesize + what.bytesize + tail.bytesize
       line = uninitialized UInt8[512]
       base = pointerof(line).as(UInt8*)
@@ -122,6 +142,34 @@ import std/password::{Bcrypt}
         end
         piece = piece + 1
       end
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def end_run(status : Int32, fd : Int32, lead : String, what : String = "", tail : String = "") : NoReturn
+      {% if flag?(:ending_unclaimed) %}
+        # The planted mutant takes no claim: every caller writes its line, then
+        # waits until all five have written, so the first to exit ends the run
+        # with five lines.
+        run_end_write(fd, lead, what, tail)
+        RunEnd.arrive
+        started = __iyi_monotonic_ns
+        while RunEnd.written < 5_u64
+          if __iyi_monotonic_ns - started >= 10_000_000_000_i64
+            stuck = "FAIL: ending: setup: the unclaimed writers did not finish in 10000 ms\n"
+            __iyi_write(1, stuck.to_unsafe.as(Void*), stuck.bytesize.to_u64)
+            __iyi_exit(76)
+          end
+          IyiThread.spin_pause
+        end
+      {% else %}
+        unless RunEnd.claim
+          while true
+            IyiThread.yield_cpu
+          end
+        end
+        run_end_write(fd, lead, what, tail)
+      {% end %}
       {% if flag?(:darwin) %}
         asm("svc #0x80" :: "{x16}"(1_i64), "{x0}"(status.to_i64) : "memory" : "volatile")
         while true

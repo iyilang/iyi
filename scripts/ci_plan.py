@@ -42,7 +42,9 @@ they source. Only code is read: a name in a comment ran nothing, and was
 once credited to whichever job the comment happened to sit in.
 
 A job is selected with the jobs it `needs`, so a selection never waits on a
-skipped job. The selection is printed, and written to `$GITHUB_OUTPUT` as a
+skipped job, and with the rest of a job that was cut in two for time
+(`HALVES`): a pull request that ran the whole job before the cut runs all of
+it still. The selection is printed, and written to `$GITHUB_OUTPUT` as a
 JSON list, `jobs=`, when that is set.
 """
 import argparse
@@ -84,6 +86,10 @@ SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-a
 # Not selected by this script: `plan` is the script, `result` reads every
 # selected job's outcome, and `release` gates itself on a `v*` tag.
 NOT_PLANNED = {"plan", "result", "release"}
+
+# One job's steps cut into jobs that run side by side, because one runner
+# took too long for all of them: a selection that takes one takes them all.
+HALVES = [{"samples", "samples-surfaces"}]
 
 FULL_EVENTS = {"push", "schedule", "workflow_dispatch"}
 
@@ -271,6 +277,9 @@ class Reach:
 
 
 def close_over_needs(jobs, selected):
+    for halves in HALVES:
+        if selected & halves:
+            selected |= halves
     pending = list(selected)
     while pending:
         for need in jobs[pending.pop()]["needs"]:
@@ -370,9 +379,9 @@ def main():
         sys.exit("ci_plan: no event: pass --event or run under GitHub Actions")
 
     jobs = parse_jobs(WORKFLOW.read_text(encoding="utf-8"))
-    missing = [name for name in FAST if name not in jobs]
+    missing = [name for name in FAST + sorted(set().union(*HALVES)) if name not in jobs]
     if missing:
-        sys.exit(f"ci_plan: FAST names jobs the workflow does not have: {', '.join(missing)}")
+        sys.exit(f"ci_plan: FAST or HALVES names jobs the workflow does not have: {', '.join(missing)}")
     missing = [name for name in SELFHOST if name not in jobs]
     if missing:
         sys.exit(f"ci_plan: SELFHOST names jobs the workflow does not have: {', '.join(missing)}")

@@ -964,7 +964,13 @@ module Iyi::IyiMod
     # list is iyi's own `:` syntax and means something R-2b checks; this is
     # what the shard wrote, in the language it wrote it in.
     includes : Array(String) = [] of String,
-    # iyi: a `lib`'s `fun` lines, as the shard wrote them.
+    # iyi: a `lib`'s `fun` lines, as the shard wrote them, and its external
+    # variables' `$name : Type` lines beside them: a body the consumer
+    # compiles reads `LibC.daylight` as it calls `LibC.opendir`, and with
+    # only the `fun`s here it said `undefined fun 'daylight'` (#204). Lines
+    # of text in the same section, so the format version is as it was: an
+    # artifact written without them stops at that same error, and a reader
+    # that predates them parses them as the source they are.
     #
     # Text rather than a `Signature`, for the reason `macros` is text: a `fun`
     # has a shape no `def` has — a C name beside Crystal's, a return

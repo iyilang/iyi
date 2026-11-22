@@ -1,0 +1,12 @@
+{
+  "name": "hello",
+  "version": "1.0.0",
+  "description": "An iyi program distributed as native binaries",
+  "bin": { "hello": "bin/hello.js" },
+  "files": ["bin"],
+  "optionalDependencies": {
+    "hello-darwin-arm64": "1.0.0",
+    "hello-linux-x64": "1.0.0",
+    "hello-win32-x64": "1.0.0"
+  }
+}

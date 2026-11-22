@@ -52,7 +52,9 @@ else
   cleanup() {
     if [ -n "$SUPERVISOR_PID" ] && supervisor_active; then
       : >"$WORK/cancel"
-      cleanup_deadline=$((SECONDS + 5))
+      # Give graceful and forced cleanup separate observation windows. The
+      # force command can consume its whole timeout; it must not consume the
+      # time needed to confirm that the owned job has actually exited.
       graceful_deadline=$((SECONDS + 2))
       while supervisor_active && [ "$SECONDS" -lt "$graceful_deadline" ]; do sleep 0.1; done
       if supervisor_active; then
@@ -67,6 +69,7 @@ else
         else
           timeout -k 1 3 "$BASH" -c '. "$1"; end_process "$2"' _ "$REPO/bench/end_process.sh" "$SUPERVISOR_PID" || :
         fi
+        cleanup_deadline=$((SECONDS + 5))
         while supervisor_active && [ "$SECONDS" -lt "$cleanup_deadline" ]; do sleep 0.1; done
         if supervisor_active; then
           echo "supervisor cleanup is unconfirmed; retaining $WORK" >&2

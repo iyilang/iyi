@@ -229,7 +229,7 @@ esac
 # ── 1. The program, twice ─────────────────────────────────────────────────
 step "threads under the collector, plain build"
 if ! "$IYI" build "$REPO/bench/thread_exercise.iyi" -o threads > build.log 2>&1; then
-  cat build.log; exit 1
+  echo "SETUP: ${current_step:-build}: the program did not build"; cat build.log; exit 76
 fi
 if [ "$part" != again ]; then
   timeout -k 5 300 ./threads 8 > answers.txt 2>&1
@@ -242,7 +242,7 @@ if [ "$part" != again ]; then
 
   step "threads under the collector, release build"
   if ! "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o threads-release > build-release.log 2>&1; then
-    cat build-release.log; exit 1
+    echo "SETUP: ${current_step:-build}: release did not build"; cat build-release.log; exit 76
   fi
   timeout -k 5 300 ./threads-release 8 > answers-release.txt 2>&1
   code=$?
@@ -766,7 +766,7 @@ puts "stop: five collections stopped #{spinners.size} threads that only compute,
 IYI
 step "the runtime lock with four times the cores' threads, and the stop"
 if ! "$IYI" build --release crowd.iyi -o crowd > build-crowd.log 2>&1; then
-  cat build-crowd.log; exit 1
+  echo "SETUP: ${current_step:-build}: crowd did not build"; cat build-crowd.log; exit 76
 fi
 timeout -k 5 300 ./crowd > crowd.txt 2>&1
 code=$?
@@ -864,7 +864,7 @@ IYI
     stop_order_copy control ordered/iyi/thread.iyi || { echo "stop ordering control anchors changed"; exit 1; }
     stop_order_copy forced serial/iyi/thread.iyi || { echo "stop ordering mutant anchors changed"; exit 1; }
     if ! IYI_PATH="$WORK/ordered${PSEP}$REPO/src" "$IYI" build --release crowd.iyi -Dstop_order_force -o crowd-order > build-order.log 2>&1; then
-      cat build-order.log; exit 1
+      echo "SETUP: ${current_step:-build}: order did not build"; cat build-order.log; exit 76
     fi
     timeout -k 5 300 ./crowd-order > order.txt 2>&1
     code=$?
@@ -875,7 +875,7 @@ IYI
     echo "  control: exit 0, every suspend request preceded the first context capture"
     step "failure proof: a stop that captures before issuing every suspend request is caught"
     if ! IYI_PATH="$WORK/serial${PSEP}$REPO/src" "$IYI" build --release crowd.iyi -Dstop_order_force -o crowd-serial > build-serial.log 2>&1; then
-      cat build-serial.log; exit 1
+      echo "SETUP: ${current_step:-build}: serial did not build"; cat build-serial.log; exit 76
     fi
     timeout -k 5 300 ./crowd-serial > serial.txt 2>&1
     code=$?
@@ -1833,14 +1833,14 @@ IYI
     }
     step "the stop beside a burst on the stopping thread's processor"
     if ! "$IYI" build --release burst.iyi -o burst > build-burst.log 2>&1; then
-      cat build-burst.log; exit 1
+      echo "SETUP: ${current_step:-build}: burst did not build"; cat build-burst.log; exit 76
     fi
     mkdir -p burst-ctl/iyi
     cp "$REPO"/src/iyi/*.iyi burst-ctl/iyi/
     burst_copy control burst-ctl/iyi/thread.iyi || { echo "the burst probe's roots anchor is not unique"; exit 1; }
     burst_prelude control burst-ctl/iyi/prelude.iyi || { echo "the runtime lock wait anchor is not unique"; exit 1; }
     if ! IYI_PATH="$WORK/burst-ctl${PSEP}$REPO/src" "$IYI" build --release stopping.iyi -Dburst_force -o stopping > build-stopping.log 2>&1; then
-      cat build-stopping.log; exit 1
+      echo "SETUP: ${current_step:-build}: stopping did not build"; cat build-stopping.log; exit 76
     fi
     beside_burst stopping stopping.txt
     if [ "$BURST_STATUS" -ne 0 ] || grep -q '^FAIL' stopping.txt || ! grep -qxF 'lock: restore recorded after the runtime lock was released' stopping.txt || ! grep -q '^stop:' stopping.txt || ! grep -qE '^lock: [0-9]+ waits for the runtime lock beside [0-9]+ collections took past 50 ms, the longest [0-9]+ us$' stopping.txt; then
@@ -1859,7 +1859,7 @@ IYI
     burst_copy forced inside/iyi/thread.iyi || { echo "the burst probe's roots or release anchor is not unique"; exit 1; }
     burst_prelude forced inside/iyi/prelude.iyi || { echo "the runtime lock wait or lowering anchor is not unique"; exit 1; }
     if ! IYI_PATH="$WORK/inside${PSEP}$REPO/src" "$IYI" build --release stopping.iyi -Dburst_force -o stopping-inside > build-inside.log 2>&1; then
-      cat build-inside.log; exit 1
+      echo "SETUP: ${current_step:-build}: inside did not build"; cat build-inside.log; exit 76
     fi
     beside_burst stopping-inside inside.txt
     if [ "$BURST_STATUS" -ne 1 ] || ! grep -qxF 'FAIL: lock: the priority was restored while the stopper still held the runtime lock' inside.txt; then
@@ -1905,7 +1905,7 @@ IYI
     awk '{ print } /^        raise_stopper$/ { print "        raise \"inside the stop\""; found = 1 } END { if (!found) exit 3 }' \
       "$REPO/src/iyi/thread.iyi" > panicking/iyi/thread.iyi || { echo "the stop's raise is not in thread.iyi any more"; exit 1; }
     if ! IYI_PATH="$WORK/panicking${PSEP}$REPO/src" "$IYI" build --release panicky.iyi -o panicky > build-panicky.log 2>&1; then
-      cat build-panicky.log; exit 1
+      echo "SETUP: ${current_step:-build}: panicky did not build"; cat build-panicky.log; exit 76
     fi
     timeout -k 5 60 ./panicky > panicky.txt 2>&1
     code=$?
@@ -1921,7 +1921,7 @@ IYI
     awk '/^      IyiThread\.lower_stopper$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
       "$REPO/src/iyi/prelude.iyi" > unlowered/iyi/prelude.iyi || { echo "the panic's lowering is not in the prelude any more"; exit 1; }
     if ! IYI_PATH="$WORK/unlowered${PSEP}$REPO/src" "$IYI" build --release panicky.iyi -o panicky-unlowered > build-unlowered.log 2>&1; then
-      cat build-unlowered.log; exit 1
+      echo "SETUP: ${current_step:-build}: unlowered did not build"; cat build-unlowered.log; exit 76
     fi
     timeout -k 5 60 ./panicky-unlowered > unlowered.txt 2>&1
     code=$?
@@ -2567,7 +2567,7 @@ awk -v gate=gate.part '
   END { if (roots != 1 || hook != 1 || darwin_exit != 1) exit 3 }
 ' "$REPO/src/iyi/thread.iyi" > gated/iyi/thread.iyi || { echo "the park or the roots are not in thread.iyi any more"; exit 1; }
 if ! IYI_PATH="$WORK/gated${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release > build-release.log 2>&1; then
-  cat build-release.log; exit 1
+  echo "SETUP: ${current_step:-build}: release did not build"; cat build-release.log; exit 76
 fi
 timeout -k 5 120 ./release > release.txt 2>&1
 code=$?
@@ -2586,7 +2586,7 @@ awk '
   END { if (deferred != 1 || owed != 1) exit 3 }
 ' gated/iyi/thread.iyi > waiting/iyi/thread.iyi || { echo "the release is not in thread.iyi any more"; exit 1; }
 if ! IYI_PATH="$WORK/waiting${PSEP}$REPO/src" "$IYI" build --release release.iyi -o release-waiting > build-waiting.log 2>&1; then
-  cat build-waiting.log; exit 1
+  echo "SETUP: ${current_step:-build}: waiting did not build"; cat build-waiting.log; exit 76
 fi
 timeout -k 5 120 ./release-waiting > waiting.txt 2>&1
 code=$?
@@ -2608,7 +2608,7 @@ awk '{ sub(/each_thread_root\(visit\)/, "each_global_root(visit)"); print }' \
   "$REPO/src/iyi/prelude.iyi" > patched/iyi/prelude.iyi
 cmp -s patched/iyi/prelude.iyi "$REPO/src/iyi/prelude.iyi" && { echo "the awk found nothing to change"; exit 1; }
 if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o unrooted > build-unrooted.log 2>&1; then
-  cat build-unrooted.log; exit 1
+  echo "SETUP: ${current_step:-build}: unrooted did not build"; cat build-unrooted.log; exit 76
 fi
 # `-k`: Git Bash's TERM can be lost on a native program, and a deadline
 # that does not end the run is a job that hangs to its own limit.
@@ -2659,7 +2659,7 @@ cp "$REPO"/src/iyi/*.iyi stale/iyi/
 awk '/^      IyiScheduler.retire_thread$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
   "$REPO/src/iyi/thread.iyi" > stale/iyi/thread.iyi || { echo "the retirement this proof removes is not in thread.iyi any more"; exit 1; }
 if ! IYI_PATH="$WORK/stale${PSEP}$REPO/src" "$IYI" build "$REPO/bench/thread_exercise.iyi" -o stale-threads > build-stale.log 2>&1; then
-  cat build-stale.log; exit 1
+  echo "SETUP: ${current_step:-build}: stale did not build"; cat build-stale.log; exit 76
 fi
 timeout -k 5 120 ./stale-threads 8 > stale.txt 2>&1
 code=$?
@@ -2845,7 +2845,7 @@ threads.each { |th| th.join }
 puts "wrong=#{Tally.wrong.value.get}"
 IYI
 if ! "$IYI" build switching.iyi -o switching > build-switching.log 2>&1; then
-  cat build-switching.log; exit 1
+  echo "SETUP: ${current_step:-build}: switching did not build"; cat build-switching.log; exit 76
 fi
 run=1
 while [ "$run" -le 5 ]; do
@@ -2881,7 +2881,7 @@ awk '
   END { if (found != 1) exit 3 }
 ' "$REPO/src/iyi/concurrency.iyi" > skipping/iyi/concurrency.iyi || { echo "the switch's current-fiber line is not in concurrency.iyi any more"; exit 1; }
 if ! IYI_PATH="$WORK/skipping${PSEP}$REPO/src" "$IYI" build switching.iyi -Dskipping_force -o skipping-run > build-skipping.log 2>&1; then
-  cat build-skipping.log; exit 1
+  echo "SETUP: ${current_step:-build}: skipping did not build"; cat build-skipping.log; exit 76
 fi
 timeout -k 5 120 ./skipping-run > skipping.txt 2>&1
 code=$?
@@ -2902,7 +2902,7 @@ awk '
   END { if (found != 1) exit 3 }
 ' "$REPO/src/iyi/concurrency.iyi" > skipping-ctl/iyi/concurrency.iyi || { echo "the running write is not in concurrency.iyi any more"; exit 1; }
 if ! IYI_PATH="$WORK/skipping-ctl${PSEP}$REPO/src" "$IYI" build switching.iyi -Dskipping_force -o skipping-ctl-run > build-skipping-ctl.log 2>&1; then
-  cat build-skipping-ctl.log; exit 1
+  echo "SETUP: ${current_step:-build}: skipping-ctl did not build"; cat build-skipping-ctl.log; exit 76
 fi
 timeout -k 5 120 ./skipping-ctl-run > skipping-ctl.txt 2>&1
 code=$?
@@ -3663,7 +3663,7 @@ end
 threads.each { |th| th.join }
 IYI
 if ! "$IYI" build whole_lines.iyi -o whole_lines > build-whole_lines.log 2>&1; then
-  cat build-whole_lines.log; exit 1
+  echo "SETUP: ${current_step:-build}: whole_lines did not build"; cat build-whole_lines.log; exit 76
 fi
 ./whole_lines > whole_lines.txt 2>&1
 total=$(wc -l < whole_lines.txt | tr -d ' ')
@@ -4657,7 +4657,7 @@ PS1
       ' "$1"
     }
     if ! "$IYI" build --release --emit llvm-ir ends.iyi -o ends > build-ends.log 2>&1; then
-      cat build-ends.log; exit 1
+      echo "SETUP: ${current_step:-build}: ends did not build"; cat build-ends.log; exit 76
     fi
     ends_in_exit ends.ll > ends-end.txt
     code=$?
@@ -4692,7 +4692,7 @@ PS1
       END { if (main != 1 || closed != 1 || flushes != 1 || exits != 1) exit 3 }
     ' "$REPO/src/iyi/prelude.iyi" > crt-end/iyi/prelude.iyi || { echo "SETUP: ends: main flush/exit anchors changed"; exit 76; }
     if ! IYI_PATH="$WORK/crt-end${PSEP}$REPO/src" "$IYI" build --release --emit llvm-ir ends.iyi -o ends-in-crt > build-crt-end.log 2>&1; then
-      cat build-crt-end.log; exit 1
+      echo "SETUP: ${current_step:-build}: crt-end did not build"; cat build-crt-end.log; exit 76
     fi
     ends_in_exit ends-in-crt.ll > crt-end.txt
     code=$?
@@ -4898,7 +4898,7 @@ IYI
 
     step "threads started while two others collect: three runs, and every one ends well"
     if ! "$IYI" build starting.iyi -o starting > build-starting.log 2>&1; then
-      cat build-starting.log; exit 1
+      echo "SETUP: ${current_step:-build}: starting did not build"; cat build-starting.log; exit 76
     fi
     run=1
     while [ "$run" -le 3 ]; do
@@ -4917,7 +4917,7 @@ IYI
     cp "$REPO"/src/iyi/*.iyi held/iyi/
     unnamed_copy control held/iyi/thread.iyi || { echo "the start's unlock or the stop's suspend is not in thread.iyi any more"; exit 1; }
     if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build starting.iyi -Dunnamed_force -o held-run > build-held.log 2>&1; then
-      cat build-held.log; exit 1
+      echo "SETUP: ${current_step:-build}: held did not build"; cat build-held.log; exit 76
     fi
     timeout -k 5 60 ./held-run 3 > held.txt 2>&1
     code=$?
@@ -4932,7 +4932,7 @@ IYI
     cp "$REPO"/src/iyi/*.iyi unnamed/iyi/
     unnamed_copy forced unnamed/iyi/thread.iyi || { echo "the start's unlock or the stop's suspend is not in thread.iyi any more"; exit 1; }
     if ! IYI_PATH="$WORK/unnamed${PSEP}$REPO/src" "$IYI" build starting.iyi -Dunnamed_force -o unnamed-run > build-unnamed.log 2>&1; then
-      cat build-unnamed.log; exit 1
+      echo "SETUP: ${current_step:-build}: unnamed did not build"; cat build-unnamed.log; exit 76
     fi
     timeout -k 5 60 ./unnamed-run 3 > unnamed.txt 2>&1
     code=$?
@@ -5017,7 +5017,7 @@ collector.join
 puts "stacks grown beside a collecting thread: #{shared.grown.get > 0}"
 IYI
     if ! "$IYI" build guard.iyi -o guard > build-guard.log 2>&1; then
-      cat build-guard.log; exit 1
+      echo "SETUP: ${current_step:-build}: guard did not build"; cat build-guard.log; exit 76
     fi
     run=1
     while [ "$run" -le 3 ]; do
@@ -5332,7 +5332,7 @@ raise "born #{flag.born.get} of #{started}" if flag.born.get != started
 puts "ok born=#{started} stops=#{IyiThread.stops}"
 IYI
     if ! "$IYI" build born.iyi -o born > build-born.log 2>&1; then
-      cat build-born.log; exit 1
+      echo "SETUP: ${current_step:-build}: born did not build"; cat build-born.log; exit 76
     fi
     # In a subshell that waits, so a run a signal ends is reported here,
     # by its status, and not by the shell's job notice.
@@ -5920,7 +5920,7 @@ stormer.join
 puts "ok started=#{started} stops=#{IyiThread.stops}"
 IYI
     if ! "$IYI" build fresh.iyi -o fresh > build-fresh.log 2>&1; then
-      cat build-fresh.log; exit 1
+      echo "SETUP: ${current_step:-build}: fresh did not build"; cat build-fresh.log; exit 76
     fi
     run=1
     started=""
@@ -5944,7 +5944,7 @@ IYI
       { print } END { if (!found) exit 3 }' \
       "$REPO/src/iyi/concurrency.iyi" > topless/iyi/concurrency.iyi || { echo "the fiber stack's bound is not in concurrency.iyi any more"; exit 1; }
     if ! IYI_PATH="$WORK/topless${PSEP}$REPO/src" "$IYI" build fresh.iyi -o topless-run > build-topless.log 2>&1; then
-      cat build-topless.log; exit 1
+      echo "SETUP: ${current_step:-build}: topless did not build"; cat build-topless.log; exit 76
     fi
     ( timeout -k 5 60 ./topless-run 5 > topless.txt 2>&1; exit $? ) 2> /dev/null
     code=$?
@@ -6674,7 +6674,7 @@ after = mach_traps
 puts "yield: #{after - before} Mach traps for 1000 yield_cpu calls"
 IYI
     if ! "$IYI" build yield_traps.iyi -o yield-traps > build-traps.log 2>&1; then
-      cat build-traps.log; exit 1
+      echo "SETUP: ${current_step:-build}: traps did not build"; cat build-traps.log; exit 76
     fi
     timeout -k 5 120 ./yield-traps > traps.txt 2>&1
     code=$?
@@ -6695,7 +6695,7 @@ IYI
       { print } END { if (!found) exit 3 }' \
       "$REPO/src/iyi/thread.iyi" > hinted/iyi/thread.iyi || { echo "darwin's thread_switch is not in thread.iyi any more"; exit 1; }
     if ! IYI_PATH="$WORK/hinted${PSEP}$REPO/src" "$IYI" build yield_traps.iyi -o yield-traps-hinted > build-hinted.log 2>&1; then
-      cat build-hinted.log; exit 1
+      echo "SETUP: ${current_step:-build}: hinted did not build"; cat build-hinted.log; exit 76
     fi
     timeout -k 5 120 ./yield-traps-hinted > hinted-traps.txt 2>&1
     code=$?
@@ -6952,7 +6952,7 @@ end
 puts "every property held, #{IyiThread.stops} stops"
 IYI
     if ! "$IYI" build calls_c.iyi -o calls-c > build-calls-c.log 2>&1; then
-      cat build-calls-c.log; exit 1
+      echo "SETUP: ${current_step:-build}: calls-c did not build"; cat build-calls-c.log; exit 76
     fi
     timeout -k 5 120 ./calls-c > calls-c.txt 2>&1
     code=$?
@@ -6974,7 +6974,7 @@ IYI
       { print } END { if (found != 2) exit 3 }' \
       "$REPO/src/iyi/thread.iyi" > cloned/iyi/thread.iyi || { echo "the compiler's answer is not in thread.iyi any more"; exit 1; }
     if ! IYI_PATH="$WORK/cloned${PSEP}$REPO/src" "$IYI" build calls_c.iyi -o cloned-run > build-cloned.log 2>&1; then
-      cat build-cloned.log; exit 1
+      echo "SETUP: ${current_step:-build}: cloned did not build"; cat build-cloned.log; exit 76
     fi
     ( timeout -k 5 120 ./cloned-run > cloned.txt 2>&1; exit $? ) 2> /dev/null
     code=$?

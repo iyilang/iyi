@@ -1,119 +1,139 @@
 #!/usr/bin/env bash
-# Drives bench/thread_exercise.iyi: kernel threads under the collector —
-# GC_DESIGN.md Stage 4, the stop-the-world, built (src/iyi/thread.iyi).
+# Drives bench/thread_exercise.iyi and the platform-specific thread checks.
+# Usage: bash bench/thread_exercise.sh [again | but-again]
+# No argument runs all selected-platform checks. `again` runs only the ten
+# additional plain-build stress runs; `but-again` runs everything else.
 #
-#     bash bench/thread_exercise.sh [again | but-again]
+# Checks and their witnesses:
+#   1. Plain and release builds exercise live thread and parked-fiber roots,
+#      collections, stopping, and list checksums and free flags. An explicit
+#      collection runs after all worker lists are ready.
+#  1b. Two hundred joined threads each run four sleeping tasks; the scheduler
+#      registry and Windows handle count are checked after they finish.
+#  1c. A collection compares retained bytes after 256 joined threads; Windows
+#      also asks whether a joined thread's line remains mapped.
+#  1d. Join the same thread twice while a later thread is held: the mutant
+#      keeps the first line, and that line is the named failure witness.
+#   2. Inspect both binaries' undefined symbols or imported DLLs against
+#      each platform's dependency floor.
+#   3. Print allocations, collections, stops and allocation wall time; no
+#      speed threshold decides the result.
+#  3b. Windows: compare one- and two-core affinity with the reported core and
+#      helper counts. The process mask supplies the cores used by later checks.
+#   4. Run the release exercise with twice the core count, clamped to 9..32;
+#      on a machine with 32 or more cores this is not necessarily oversubscribed.
+#  4b. Measure the contended-lock ratio and mean stop time. On Windows, a
+#      copy-only record witnesses all suspend requests before the first context
+#      capture; its serial-suspend mutant is caught. A separate sample at the
+#      first suspend checks the raised stopper priority against a no-raise copy.
+#  4c. Windows: measure starts and joins beside a collector and a lock taker
+#      on one core. Forced words record the counted waiter's first lock look,
+#      and separate witnesses check yields after explicit and budget collection.
+#  4d. Windows: print stop and lock-wait timings beside a burner. After 100
+#      lock turns, the control runs 20 collections. Both copies witness actual
+#      priority restore relative to runtime unlock, catching restoration inside
+#      the lock. Another pair samples the priority restored
+#      after a panic. A shared-priority pair holds two stoppers across their
+#      raises and records each one's own restoration.
+#  4e. Hold a released thread at its allocator park. A count-out word records
+#      whether the release waited; the mutant attempts that wait.
+#   5. Remove the thread-root walks for one run: the ready-list rendezvous,
+#      explicit collection and sweep flags name the freed live nodes.
+#  5b. Remove thread retirement from a copy: the finished-fiber registry count
+#      names the leftover fibers.
+#  5c. Stress switching tasks; separately hold a switch and collect, using the
+#      ledger's free flags to detect an early running-state write. On Windows,
+#      a held allocator entry and the second capture expose a stale depth read.
+#  5d. Hold the first helper decision between its two writes, then enter a
+#      second trigger. Both actual counts and helper starts are witnessed; the
+#      swapped-write mutant names the premature publication.
+#  5e. Four threads print 80,000 lines; the output count and line shapes are
+#      checked. This is stress, not a forced line-interleaving witness.
+#  5f. Hold neighbouring fiber retirements around the first membership read.
+#      The lock contention, unlinks and final registry identify the unlocked ask.
+#   6. Compile negative Share examples, including mutable captures, self,
+#      mixin and macro writes, and pointer exposure; check named diagnostics.
+#  6b. Refuse locals assigned by the thread or after start, including macro
+#      forms; a local assigned before start still runs.
+#  6c. Strings and immutable containers run; an object whose String field is
+#      reassigned is refused.
+#  6d. Mutable constants and class variables are refused by name; Share
+#      constants and class variables written only at initialization still run.
+#   7. Windows: stress process termination beside collections. Independently,
+#      inspect emitted main IR for the final __iyi_exit; a return-to-C copy
+#      produces the named IR failure on its single build.
+#  7b. Windows: stress thread starts beside collectors. A held start records a
+#      scan before the new handle is written; the control writes it first.
+#  7c. Windows: stress fresh stacks. A held holder's scan records its start
+#      page; separate mutants start in the guard page or return an unnormalized
+#      address, each producing its own named failure.
+#  7d. Darwin: stress thread births beside a collector. A pre-TLS child is held
+#      while the stop's signal site is observed; the early-linked mutant is named.
+#  7e. Darwin: hold the first allocation in a frame with registers cleared;
+#      two collections must each visit that line. The late-top mutant's sweep
+#      flag supplies the named failure before the child's first store.
+#  7f. Linux and Darwin: stress fresh tasks and query each task's stack top
+#      under the runtime lock. The top-bound mutant must report the first task
+#      whose top is not recognized.
+#  7g. Linux and Darwin: an armed mark helper faults while holding the lock.
+#      The control witnesses handler classification and SIG_DFL installation,
+#      then exits on SIGSEGV. The heap-action mutant reports its pre-lock fault.
+#  7h. Linux and Darwin: a private waiter publishes its target and the final
+#      increment records the actual platform wake. On Linux, a held real
+#      spinner and its owed-turn word also expose the collector's lock attempt
+#      before payment in the mutant.
+#  7i. Darwin: compare task-wide Mach trap counts for 1,000 yield calls against
+#      the same calls with an ARM hint. This is a count check, not a timer.
+#  7j. Darwin: hold an unlinked child, inspect the actual stop roster and count,
+#      then link it and witness a later stop. Early counting is named.
+#  7k. Linux: tasks and a thread call libc and check its answers and imports.
+#      The compiler-answer mutant uses raw clones and must fail or die.
 #
-# With no argument every step runs. `again` runs the plain build's ten
-# more runs of step 1 alone, and `but-again` every step but those, so a
-# caller that bounds each gate can give the two halves a bound each:
-# Windows' collector job does. On windows-2025's four cores the ten runs
-# took 388 and 454 s of the whole's 802 s (job 128265739456) and of the
-# 900 s at which its bound of 15 minutes ended it (job 128494833123).
+# Stress loops, never retries or claims that a particular schedule occurred:
+#   1/4: each exercise runs 20 allocation bursts per thread and main, 200
+#        scheduler teardowns and 256 joined payloads; the plain build gets ten
+#        further runs. Step 4 varies the thread count.
+#   4b: up to 64 lock contenders run 20,000 turns each; five collections run
+#        beside computing threads. Their elapsed-time ratios are measurements.
+#   4c: five starts and joins beside each of a collector and a lock taker;
+#       the two elapsed times are measurements only.
+#   5c: five switching runs; the collector repeats while 12 tasks pass tokens.
+#   5e: four writers produce 20,000 lines each.
+#   7: 200 Windows termination runs; a 20 ms workload does not prove overlap.
+#   7b: three Windows start storms of 3 s, with at least one batch each.
+#   7c: three Windows stack storms of 2 s, with each worker growing a stack.
+#   7d: five Darwin birth storms, each at least 20 and at most 200 batches of
+#       16 threads, with a 10 s workload limit after the first 20 batches.
+#   7f: three Linux/Darwin fresh-task storms of 5 s, with at least one batch.
+#   7k: 16 Linux tasks make 100 libc-call iterations each beside collections.
 #
-# Seven steps, and the fifth and sixth are failure proofs, because a gate
-# that cannot fail is not a gate; the seventh, Windows' own and one of
-# darwin's, carries its own:
+# Removed: the Windows loop repeating the unrooted mutant 200 times, because
+# its single named failure is the proof; five diagnostic reruns of failing
+# positive controls, which now print the first run's captured output instead.
+# The old lock-ratio, stop-time and lock-wait limits are measurements, not
+# verdicts. The old timed no-raise comparison is not run; 4b samples priority
+# at the first suspend instead.
 #
-#   1. The program holds every property, plain and --release, with eight
-#      threads: each allocates from its own cache while collections run
-#      from whichever thread crosses the budget; each holds a live list in
-#      nothing but its own frames through those collections and finds it
-#      intact, by checksum and by the sweep's own free flag; each runs
-#      fibers of its own, one parked holding an object's only reference;
-#      collections stopped threads; and the program finishes, which is the
-#      proof no stop deadlocked on the runtime lock or on a thread inside
-#      the allocator. A joined thread keeps nothing its block captured, its
-#      line is unmapped, and a second join of it returns at once.
-#   2. The binary keeps the floor. On Linux the runtime's five C-template
-#      names and nothing else: a thread by raw `clone`, a stop by `tgkill`
-#      and `rt_sigaction`, a park by `futex`, all syscalls. On darwin the
-#      exact list: the runtime's names plus what a thread costs there,
-#      the thread floor's list, spelled out.
-#   3. The numbers, printed from the release run: allocations per thread,
-#      collections, stops, and the wall time per allocation per thread at
-#      1, 4 and 8 threads. Reported rather than budgeted.
-#   4. The same, twice the cores' worth of threads, release — past the core count —
-#      because a thread stopped while it has no CPU is the case the
-#      floor's table said costs the timeslice, and the properties must hold
-#      there too.
-#  4b. Four times the cores' threads taking the runtime lock in turn,
-#      with the ratio to one thread reported, and three threads computing
-#      on one processor, two of them kept off it, stopped by collections,
-#      held on Windows to 60 ms a stop; with the suspends asked one at a
-#      time, the stop check fails.
-#  4c. On Windows held to one core, five threads start and are joined
-#      beside a thread that collects in a loop, and beside one that takes
-#      the runtime lock in a loop, each within 10 s. Copy-only controls
-#      check the spinner's count and both collection yields separately.
-#  4d. On Windows, a process one level above normal computes in bursts on
-#      the stopping thread's processor while that thread collects in a
-#      loop, and no more than three stops last past the bound; with the
-#      stop's raise of its thread's priority taken out, stops last a
-#      burst. A thread taking the runtime lock beside them allows at most
-#      five waits past its bound; a copy-only counter detects a lock held
-#      while the stopper lowers its priority inside the release. A panic inside a
-#      stop puts the priority back; with `raise`'s lowering taken out,
-#      the thread keeps it. Threads that raise together for collections,
-#      crossing the budget at once or collecting at once, each put their
-#      own back; with one record of the raise for them all, a thread
-#      keeps it.
-#   5. Failure proof: the thread-root walk removed from a copy of the
-#      prelude, and a thread's list — reachable from its stopped frames
-#      alone — is swept out from under it; the program exits 1 naming the
-#      node on a free list.
-#   6. Failure proof: a block that captures a value whose type is not
-#      `Share` (SPEC.md III.4.4) does not compile, and the error names the
-#      variable, its type and the field that made it mutable. Nor does a
-#      captured local the thread's block assigns, or its starter assigns
-#      after the start: one cell two threads write (6b). A String, and a
-#      struct or `List` holding one, is captured and runs (6c). A constant
-#      the block names is asked what a captured value is (6d).
-#   7. On Windows, a program whose main thread ends while another thread's
-#      collections stop it ends, two hundred runs of two hundred; and with
-#      the end put back into the C runtime's `exit`, main's emitted IR
-#      returns where it should end in `__iyi_exit`, which the check names
-#      on the one build.
-#  7c. On Windows, threads and their tasks grow fresh stacks while a thread
-#      collects in a loop, and every run ends; with the stop's scan started
-#      at sp again, inside the guard page, a run dies.
-#  7d. On darwin, threads are born sixteen at a time beside a thread that
-#      collects in a loop, for 10 s or 3,200 threads, and every one starts;
-#      with a thread's line linked before its first touch of a thread-local
-#      again, a run is killed.
-#  7e. On darwin, a thread's first allocation held in its frame through two
-#      collections is not swept; with its stack's top written after that
-#      allocation again, a run aborts by name.
-#  7f. On Linux and darwin, tasks begin on fresh stacks beside a thread that
-#      collects in a loop, and each task's stack top is its own stack's to
-#      the stop's scan; with a fiber's top read as no fiber's again, the
-#      first task says so by name.
-#  7g. On Linux and darwin, a mark helper that faults holding the runtime
-#      lock kills the process with SIGSEGV; with the fault handler's
-#      default action built in a heap block again, the process outlives
-#      the fault.
-#  7j. On darwin, a collection straight after a thread's start, before the
-#      thread has linked its line, stops nobody and leaves the next stop
-#      nothing to wait for; with the thread counted in `start` again, a
-#      run hangs.
-#  7k. On Linux, a program that calls C calls it from sixteen parallel
-#      tasks and a started thread, through collections, and libc answers
-#      each of them as its own thread; the binary names `pthread_create`
-#      and `pthread_join`. With the compiler's answer replaced by a
-#      `false`, the threads are raw clones again and a run dies or says so.
+# Not forced: 1/4 allocator overlap and scheduler/retention checks have no
+# gate holding the relevant allocation or planted teardown/retention mutant.
+# The 2 import floor and 3b affinity checks compare actual values, without
+# planted mutants; 3 is measurement only. The 4b lock ratio and 4c one-core
+# timings have no scheduled starvation witness and are measurements only.
+# The ordinary 5c switching and 5e line stresses do not force a particular
+# switch or competing write. Only 5c has a separate held-switch proof; 5e
+# has no held competing writes or planted failure.
+# The 6 variants are direct compiler inputs, not mutated compiler builds.
+# The 7 termination storm does not prove a collection overlapped process exit;
+# the IR comparison is the separate structural check. The 7f task-top query
+# does not force a stop at the first instruction, although the bound mutant
+# is checked directly. The 7i task-wide trap count does not identify which
+# call made each trap. The 7k raw-clone mutant has no named failure witness:
+# the gate accepts any nonzero exit without the success line.
 #
-# Not forced (each is decided by a timeout, a timing bound or a schedule
-# search, so the verdict is not a named invariant of the code under test):
-#   4c   five threads started and joined beside a collecting or lock-taking
-#        thread, held to 10 s: a healthy timing bound, unchanged.
-#   7e   toplate: its healthy topfirst can pass without seeing two collections;
-#        no witness added.
-#   7h   Linux unowed: the mutant's verdict is exit 124 or a count of owed turns
-#        in a timed storm.
-#   7g   heaped: the healthy wild exits 3 if no fault has come by its deadline,
-#        and no fault-handler witness is required.
-#   The lock-order record (B6), the guard holder (B5), the release record (A2),
-#   the stop-order record (4b) and the fixed-count burst (A1) are forced.
+# Exit 0: selected checks passed, including detected mutants; unsupported
+# platforms are a no-op. Exit 76: setup or watchdog failure, with SETUP:.
+# Exit 1: defect or assertion; named forced mutants emit their exact FAIL:
+# sentence. Invalid usage exits 2. A watchdog is not evidence of a defect.
 #
 set -u
 
@@ -125,11 +145,9 @@ esac
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/end_process.sh"
-# On Windows `timeout` is this bounded wait, not GNU timeout: GNU timeout ends
-# an overrunning run through MSYS's exit_process_tree, which can end the runner
-# agent (bench/end_process.sh). Here an overrun is ended by end_process and
-# answers 124, as timeout does, and every other exit is the program's own. The
-# step that runs it is the one that fails. Elsewhere it is GNU timeout.
+# On Windows `timeout` bounds a native child without GNU timeout's MSYS
+# process-tree termination. An overrun returns 124 to check_bound, which
+# reports a SETUP watchdog failure; other exits belong to the child.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     # The end of an overrunning child is bounded by its own deadline, separate
@@ -217,12 +235,10 @@ step() {
 }
 check_bound() {
   if [ "$1" -eq 124 ] || [ "$1" -eq 137 ]; then
-    if [ "$2" = forced ]; then
-      echo "SETUP: ${current_step:-bounded run}: $3 run exceeded its bound"
-      exit 76
-    fi
-    echo "FAIL: ${current_step:-bounded run}: did not end within its bound"
-    exit 1
+    local description="${3:-run}"
+    [ "$2" != forced ] || description="$description run"
+    echo "SETUP: ${current_step:-bounded run}: $description exceeded its watchdog"
+    exit 76
   fi
   if [ "$2" = forced ] && [ -n "${4:-}" ] && [ "$1" -ne 76 ]; then
     local failures
@@ -274,47 +290,41 @@ case "$(uname -s)" in
 esac
 
 # ── 1. The program, twice ─────────────────────────────────────────────────
-step "threads under the collector, plain build"
+step "stress: threads under the collector, plain build"
 if ! "$IYI" build "$REPO/bench/thread_exercise.iyi" -o threads > build.log 2>&1; then
   echo "SETUP: ${current_step:-build}: the program did not build"; cat build.log; exit 76
 fi
 if [ "$part" != again ]; then
   timeout -k 5 300 ./threads 8 > answers.txt 2>&1
-  code=$?; check_bound "$code" healthy
+  code=$?; check_bound "$code" healthy "run 1"
   if [ "$code" -eq 76 ]; then cat answers.txt; exit 76; fi
-  if [ "$code" -ne 0 ]; then
-    cat answers.txt; exit 1
+  if [ "$code" -ne 0 ] || ! grep -q 'every property held' answers.txt; then
+    echo "FAIL: ${current_step}: run 1 exited $code without completing"; cat answers.txt; exit 1
   fi
-  grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
 
-  step "threads under the collector, release build"
+  step "stress: threads under the collector, release build"
   if ! "$IYI" build --release "$REPO/bench/thread_exercise.iyi" -o threads-release > build-release.log 2>&1; then
     echo "SETUP: ${current_step:-build}: release did not build"; cat build-release.log; exit 76
   fi
   timeout -k 5 300 ./threads-release 8 > answers-release.txt 2>&1
-  code=$?; check_bound "$code" healthy
+  code=$?; check_bound "$code" healthy "run 1"
   if [ "$code" -eq 76 ]; then cat answers-release.txt; exit 76; fi
-  if [ "$code" -ne 0 ]; then
-    cat answers-release.txt; exit 1
+  if [ "$code" -ne 0 ] || ! grep -q 'every property held' answers-release.txt; then
+    echo "FAIL: ${current_step}: run 1 exited $code without completing"; cat answers-release.txt; exit 1
   fi
-  grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
 fi
 
-# The plain build, ten more times. A death here is a failure whatever it
-# says: on a Windows runner the exercise died once in sixty of a guard-page
-# violation in the collector (status 0x80000001) after it had printed its
-# first line, so one run passing proved nothing. The registry check in
-# the exercise is the deterministic half of the same fix; this is the
-# half that turns the rare death into a red step.
+# Ten additional healthy runs of the plain build. Every run must pass;
+# the registry assertion is separate from this stress.
 if [ "$part" != but-again ]; then
-  step "the plain build, ten more runs, and every one ends well"
+  step "stress: the plain build, ten more runs, and every one ends well"
   again=1
   while [ "$again" -le 10 ]; do
     timeout -k 5 300 ./threads 8 > again.txt 2>&1
-    code=$?; check_bound "$code" healthy
+    code=$?; check_bound "$code" healthy "run $again"
     if [ "$code" -eq 76 ]; then cat again.txt; exit 76; fi
     if [ "$code" -ne 0 ] || ! grep -q 'every property held' again.txt; then
-      echo "run $again exited $code:"; tail -5 again.txt; exit 1
+      echo "FAIL: ${current_step}: run $again exited $code:"; tail -5 again.txt; exit 1
     fi
     again=$((again + 1))
   done
@@ -575,21 +585,17 @@ IYI
 esac
 
 # ── 4. Past the core count ────────────────────────────────────────────────
-# Twice the cores, at least nine and at most 32: past the core count on
-# any runner, and within a runner's patience - 32 threads on the darwin
-# runner's three cores are a stop of 33 for every one of the three that
-# can run, and the step outlived its five minutes there.
+# Twice the cores, clamped to at least nine and at most 32 threads.
 over=$((cores * 2))
 [ "$over" -lt 9 ] && over=9
 [ "$over" -gt 32 ] && over=32
-step "the same, $over threads, release (past the $cores cores here)"
+step "stress: the same, $over threads, release ($cores cores here)"
 timeout -k 5 300 ./threads-release "$over" > answers-32.txt 2>&1
-code=$?; check_bound "$code" healthy
+code=$?; check_bound "$code" healthy "run 1"
 if [ "$code" -eq 76 ]; then cat answers-32.txt; exit 76; fi
-if [ "$code" -ne 0 ]; then
-  cat answers-32.txt; exit 1
+if [ "$code" -ne 0 ] || ! grep -q 'every property held' answers-32.txt; then
+  echo "FAIL: ${current_step}: run 1 exited $code without completing"; cat answers-32.txt; exit 1
 fi
-grep -q 'every property held' answers-32.txt || { cat answers-32.txt; exit 1; }
 grep -E '^threads:' answers-32.txt | sed 's/^/  /'
 
 # ── 4b. The runtime lock with four times the cores' threads, and the stop ─
@@ -810,15 +816,15 @@ puts "stop: every suspend request preceded the first context capture"
 {% end %}
 puts "stop: five collections stopped #{spinners.size} threads that only compute, on one processor, in #{mean // 1000_u64} us each (measurement only)"
 IYI
-step "the runtime lock with four times the cores' threads, and the stop"
+step "stress: the runtime lock with four times the cores' threads, and the stop"
 if ! "$IYI" build --release crowd.iyi -o crowd > build-crowd.log 2>&1; then
   echo "SETUP: ${current_step:-build}: crowd did not build"; cat build-crowd.log; exit 76
 fi
 timeout -k 5 300 ./crowd > crowd.txt 2>&1
-code=$?; check_bound "$code" healthy
+code=$?; check_bound "$code" healthy "run 1"
 if [ "$code" -eq 76 ]; then cat crowd.txt; exit 76; fi
 if [ "$code" -ne 0 ]; then
-  cat crowd.txt; exit 1
+  echo "FAIL: ${current_step}: run 1 exited $code"; cat crowd.txt; exit 1
 fi
 sed 's/^/  /' crowd.txt
 case "$(uname -s)" in
@@ -1017,7 +1023,7 @@ esac
 # invariants directly rather than killing a deliberately hung process.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    step "held to one core, threads start beside a thread collecting in a loop and one taking the lock in a loop"
+    step "stress: one-core starts beside a collector and a lock taker, timings measured"
     cat > starve.iyi <<'IYI'
 @[Unsafe("the one-core exercise pins its process with the Windows affinity API")]
 module starve
@@ -1098,11 +1104,11 @@ IYI
       echo "SETUP: fairness: the one-core measurement did not build"; cat build-starve.log; exit 76
     fi
     win_native 120 "the one-core check" ./starve "$AFFINITY_ONE_DEC" > starve-raw.txt 2>&1
-    code=$?; check_bound "$code" healthy
+    code=$?; check_bound "$code" healthy "run 1"
     if [ "$code" -eq 76 ]; then cat starve-raw.txt; exit 76; fi
     tr -d '\r' < starve-raw.txt > starve.txt
     if [ "$code" -ne 0 ] || [ "$(grep -c ' (measurement only)$' starve.txt)" -ne 2 ]; then
-      echo "SETUP: fairness: the one-core measurement did not finish normally (exit $code)"; cat starve.txt; exit 76
+      echo "FAIL: ${current_step}: run 1 did not finish normally (exit $code)"; cat starve.txt; exit 1
     fi
     sed 's/^/  /' starve.txt
 
@@ -1529,30 +1535,10 @@ esac
 # that loop took 148 to 214 ms. The stop raises its thread to Windows'
 # highest priority now (`IyiThread.raise_stopper`).
 #
-# Placed so that only the priority decides: the stopping thread is held
-# to one processor, its boost off, beside a separate process one level
-# above normal (and below highest), also boostless, that computes 100 ms
-# at a time and sleeps between; the threads the stop suspends compute on
-# every other processor, allocating nothing, so none is ever waited for
-# at its park. The burst is another process because a thread of the
-# program's own would be suspended by the stop it is meant to hold up.
-# The first shape of this check, a spinner at normal priority sharing the
-# processor, paused 17 ms on both builds and told them apart in nothing.
-#
-# On that machine, five runs of four seconds each, interleaved: the
-# shipped build's longest stop 0.7 to 1.9 ms (3.1 ms alone, no burst),
-# and with the raise taken out, or on the build before it, 100.3 to
-# 103.1 ms in every run, the stops 73 to 93% of the run against 7%. The
-# bound is 20 ms, and three stops a run may pass it (`stopping.iyi` says
-# why).
-#
-# The priority is put back after the runtime lock is let go, not at the
-# end of the release: the drop is where the burst takes the processor,
-# and a thread descheduled there holds the lock. A fifth thread takes the
-# lock in a loop on the other processors and keeps its longest wait.
-# Five interleaved runs: 0.3 to 16.8 ms, none past 20, and with the drop
-# put back at the end of the release, 100.1 to 102.6 ms, 36 or 37 waits
-# past 20 ms in each run. The bound is 50 ms.
+# The stopping thread shares a processor with a separate, higher-priority
+# burner. Stop and lock-wait durations are measurements only. The forced
+# witness records whether priority was restored before the runtime unlock;
+# the control and mutant differ in that ordering, not in a timing limit.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     if [ "$AFFINITY_COUNT" -lt 2 ]; then
@@ -1589,6 +1575,10 @@ while !File.file?("burst-stop") && IyiMark.now_ns < deadline
   end
   bursts = bursts + 1
   Placing.Sleep(1_u32)
+end
+if !File.file?("burst-stop")
+  print "SETUP: burst: the burner reached its watchdog before it was stopped\n"
+  __iyi_exit(76)
 end
 puts "bursts: #{bursts}"
 IYI
@@ -1756,7 +1746,7 @@ IYI
     shared="$AFFINITY_LAST"
     # `./$1` beside the burst, its output in `$2`.
     beside_burst() {
-      local burst_pid deadline killed=0
+      local burst_pid deadline
       rm -f burst-ready burst-stop
       MSYS_NO_PATHCONV=1 ./burst.exe "$shared" 100 > burst.txt 2>&1 &
       burst_pid=$!
@@ -1777,13 +1767,15 @@ IYI
       while kill -0 "$burst_pid" 2>/dev/null; do
         if [ "$SECONDS" -ge "$deadline" ]; then
           end_bounded "$burst_pid" || exit 76
-          killed=1
-          break
+          wait "$burst_pid" 2>/dev/null || true
+          echo "SETUP: burst: owned burner did not stop before its watchdog (pid $burst_pid)" >&2
+          exit 76
         fi
         sleep 0.1
       done
-      if ! wait "$burst_pid" 2>/dev/null && [ "$killed" -eq 0 ]; then
+      if ! wait "$burst_pid" 2>/dev/null; then
         echo "SETUP: burst: owned burner exited unsuccessfully (pid $burst_pid)" >&2
+        cat burst.txt >&2
         exit 76
       fi
       tr -d '\r' < burst.txt >> "$2"
@@ -2687,34 +2679,6 @@ if [ "$code" -ne 1 ] || ! grep -q "on a free list" unrooted.txt; then
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'on a free list' unrooted.txt)"
 
-# The same program, two hundred more times, on Windows. Its threads fail
-# while collections run, and each run has to end: leaving with
-# `ExitProcess`, 3 runs in 70 here never did - the last thread sat in
-# `NtTerminateProcess`, and neither `timeout` nor `Stop-Process` could end
-# it; on a runner this proof hung until the job was cancelled at 81
-# minutes - and with `TerminateProcess` 0 in 1,150 hung. A run is a
-# fraction of a second. A run ends by exit 1 at the check that names the
-# node on a free list, or at the runtime's "iyi: out of memory": this copy
-# sweeps live lists, and a thread that reads a swept node can ask for a
-# size made of garbage - run 53 of 200 did so on a runner (CI job
-# 128176433783), and it ended, which is what this loop is here to prove.
-# The single run above still has to name the free list.
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    step "failure proof, again: two hundred runs, and every one ends"
-    again=1
-    while [ "$again" -le 200 ]; do
-      timeout -k 5 30 ./unrooted 8 > unrooted-again.txt 2>&1
-      code=$?; check_bound "$code" forced mutant unrooted-again.txt
-      if [ "$code" -eq 76 ]; then cat unrooted-again.txt; exit 76; fi
-      if [ "$code" -ne 1 ] || ! grep -qE "on a free list|^iyi: out of memory$" unrooted-again.txt; then
-        pair_mismatch "$code" unrooted-again.txt mutant
-      fi
-      again=$((again + 1))
-    done
-    echo "  two hundred of two hundred exit 1"
-    ;;
-esac
 
 # ── 5b. Failure proof: a finished thread's fibers leave the registry ──────
 # The thread's retirement from the scheduler taken out of a copy of the
@@ -2743,7 +2707,7 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 'registry:' stale.txt | sed 's/^FAIL: /
 # it named was freed. The fiber is marked on its own stack now. Two tasks per thread hand a token back and forth,
 # each holding a list only its own stack names, while the main thread
 # collects every millisecond; each checks its list every 64 trips.
-step "a task a thread is switching into keeps its objects"
+step "stress: a task a thread is switching into keeps its objects, five runs"
 cat > switching.iyi <<'IYI'
 @[Unsafe("the tallies live in a page from __iyi_mmap read as atomic words, so counting allocates nothing the collector sees")]
 module switching
@@ -2917,10 +2881,10 @@ fi
 run=1
 while [ "$run" -le 5 ]; do
   timeout -k 5 120 ./switching > switching.txt 2>&1
-  code=$?; check_bound "$code" healthy
+  code=$?; check_bound "$code" healthy "run $run"
   if [ "$code" -eq 76 ]; then cat switching.txt; exit 76; fi
   if [ "$code" -ne 0 ] || ! grep -q '^wrong=0$' switching.txt; then
-    echo "run $run exited $code:"; tail -3 switching.txt; exit 1
+    echo "FAIL: ${current_step}: run $run exited $code:"; tail -3 switching.txt; exit 1
   fi
   run=$((run + 1))
 done
@@ -3714,7 +3678,7 @@ done
 # `STDOUT` is sync, and `write_line` wrote the text and then the newline:
 # four threads of 20,000 `puts` each left 750 of 80,000 lines merged with
 # another thread's, on Windows into a file. Every line must come out whole.
-step "four threads printing at once: every line whole"
+step "stress: four threads printing at once, every line whole"
 cat > whole_lines.iyi <<'IYI'
 threads = [] of IyiThread
 4.times do |t|
@@ -3729,10 +3693,11 @@ if ! "$IYI" build whole_lines.iyi -o whole_lines > build-whole_lines.log 2>&1; t
   echo "SETUP: ${current_step:-build}: whole_lines did not build"; cat build-whole_lines.log; exit 76
 fi
 ./whole_lines > whole_lines.txt 2>&1
+code=$?
 total=$(wc -l < whole_lines.txt | tr -d ' ')
 broken=$(LC_ALL=C grep -cvE '^thread-[0-3]-line-[0-9]+-of-twenty-thousand$' whole_lines.txt)
-if [ "$total" -ne 80000 ] || [ "$broken" -ne 0 ]; then
-  echo "  $broken of $total lines are not one thread's whole line"; exit 1
+if [ "$code" -ne 0 ] || [ "$total" -ne 80000 ] || [ "$broken" -ne 0 ]; then
+  echo "FAIL: ${current_step}: run 1 exited $code; $broken of $total lines are not one thread's whole line"; exit 1
 fi
 echo "  80000 lines from four threads, none merged"
 
@@ -4218,8 +4183,9 @@ printf '  refused: %s\n' "$(grep -m1 'is not Share' build-selfcall.log | sed 's/
 if ! "$IYI" build selfcall_shared.iyi -o selfcall_shared > build-selfcall-shared.log 2>&1; then
   echo "receiverless calls on a Share self and on a class were refused:"; cat build-selfcall-shared.log; exit 1
 fi
-if [ "$(./selfcall_shared | tr -d '\r' | tr '\n' ' ')" != "hi ada 42 " ]; then
-  echo "receiverless calls on a Share self and on a class built, but printed:"; ./selfcall_shared; exit 1
+./selfcall_shared > selfcall-shared.txt
+if [ "$(tr -d '\r' < selfcall-shared.txt | tr '\n' ' ')" != "hi ada 42 " ]; then
+  echo "receiverless calls on a Share self and on a class built, but printed:"; cat selfcall-shared.txt; exit 1
 fi
 echo "  a Share self's method and a class method, called receiverless, still build and print hi ada 42"
 
@@ -4400,8 +4366,9 @@ echo "  and refused the same inside {% if %} and {% for %}"
 if ! "$IYI" build assigned_before.iyi -o assigned_before > build-assigned-before.log 2>&1; then
   echo "locals assigned before the start were refused:"; cat build-assigned-before.log; exit 1
 fi
-if [ "$(./assigned_before | tr -d '\r' | tr '\n' ' ')" != "60 61 62 " ]; then
-  echo "locals assigned before the start built, but read:"; ./assigned_before; exit 1
+./assigned_before > assigned-before.txt
+if [ "$(tr -d '\r' < assigned-before.txt | tr '\n' ' ')" != "60 61 62 " ]; then
+  echo "locals assigned before the start built, but read:"; cat assigned-before.txt; exit 1
 fi
 echo "  a local assigned before the start, and a block's own local, still build and read 60 61 62"
 
@@ -4438,8 +4405,9 @@ IYI
 if ! "$IYI" build strings.iyi -o strings > build-strings.log 2>&1; then
   echo "a block capturing a String, a User and a List(String) was refused:"; cat build-strings.log; exit 1
 fi
-if [ "$(./strings | tr -d '\r')" != "x 1 ada 2" ]; then
-  echo "the block capturing strings built, but printed:"; ./strings; exit 1
+./strings > strings.txt
+if [ "$(tr -d '\r' < strings.txt)" != "x 1 ada 2" ]; then
+  echo "the block capturing strings built, but printed:"; cat strings.txt; exit 1
 fi
 echo "  a String, a struct holding one and a List(String) captured, and read x 1 ada 2"
 cat > renamed.iyi <<'IYI'
@@ -4534,8 +4502,9 @@ printf '  refused: %s\n' "$(grep -m1 'is not Share' build-constant-counter.log |
 if ! "$IYI" build constant_shared.iyi -o constant_shared > build-constant-shared.log 2>&1; then
   echo "a block naming Share constants was refused:"; cat build-constant-shared.log; exit 1
 fi
-if [ "$(./constant_shared | tr -d '\r')" != "hi 3 2" ]; then
-  echo "a block naming Share constants built, but printed:"; ./constant_shared; exit 1
+./constant_shared > constant-shared.txt
+if [ "$(tr -d '\r' < constant-shared.txt)" != "hi 3 2" ]; then
+  echo "a block naming Share constants built, but printed:"; cat constant-shared.txt; exit 1
 fi
 echo "  an Int32, a String and a List(String) constant still build and read hi 3 2"
 
@@ -4635,8 +4604,9 @@ done
 if ! "$IYI" build classvar_shared.iyi -o classvar_shared > build-classvar-shared.log 2>&1; then
   echo "a block naming class variables only their initializers write was refused:"; cat build-classvar-shared.log; exit 1
 fi
-if [ "$(./classvar_shared | tr -d '\r')" != "x 3 2" ]; then
-  echo "a block naming class variables only their initializers write built, but printed:"; ./classvar_shared; exit 1
+./classvar_shared > classvar-shared.txt
+if [ "$(tr -d '\r' < classvar-shared.txt)" != "x 3 2" ]; then
+  echo "a block naming class variables only their initializers write built, but printed:"; cat classvar-shared.txt; exit 1
 fi
 echo "  an Int32, a String and a List(String) class variable only their initializers write still build and read x 3 2"
 
@@ -4652,7 +4622,7 @@ echo "  an Int32, a String and a List(String) class variable only their initiali
 # in main. Two hundred runs stay as the stress test of the end itself.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    step "a program ends while another thread's collections stop it: two hundred runs, and every one ends"
+    step "stress: a program ends while another thread's collections stop it, two hundred runs"
     cat > ends.iyi <<'IYI'
 head = [] of Int32
 n = 0
@@ -4730,10 +4700,10 @@ PS1
     again=1
     while [ "$again" -le 200 ]; do
       timeout -k 1 30 ./ends > ends.txt 2>&1
-      code=$?; check_bound "$code" healthy
+      code=$?; check_bound "$code" healthy "run $again"
       if [ "$code" -eq 76 ]; then cat ends.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q "^ended with 2000$" ends.txt; then
-        echo "run $again exited $code:"; tail -3 ends.txt; release ends; exit 1
+        echo "FAIL: ${current_step}: run $again exited $code:"; tail -3 ends.txt; release ends; exit 1
       fi
       again=$((again + 1))
     done
@@ -4899,7 +4869,7 @@ puts "unnamed: held=1 collected=1 expired=0, and no stop met a thread without it
 started = 1
 {% else %}
 deadline = __iyi_monotonic_ns + Program.args[0].to_i.to_i64 * 1_000_000_000_i64
-while __iyi_monotonic_ns < deadline
+while started == 0 || __iyi_monotonic_ns < deadline
   batch = [] of IyiThread
   4.times do |k|
     n = started + k
@@ -4958,17 +4928,17 @@ IYI
       ' "$REPO/src/iyi/thread.iyi" > "$2"
     }
 
-    step "threads started while two others collect: three runs, and every one ends well"
+    step "stress: threads started while two others collect, three runs"
     if ! "$IYI" build starting.iyi -o starting > build-starting.log 2>&1; then
       echo "SETUP: ${current_step:-build}: starting did not build"; cat build-starting.log; exit 76
     fi
     run=1
     while [ "$run" -le 3 ]; do
       timeout -k 5 60 ./starting 3 > starting.txt 2>&1
-      code=$?; check_bound "$code" healthy
+      code=$?; check_bound "$code" healthy "run $run"
       if [ "$code" -eq 76 ]; then cat starting.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q '^ok ' starting.txt; then
-        echo "run $run exited $code:"; tail -3 starting.txt; exit 1
+        echo "FAIL: ${current_step}: run $run exited $code:"; tail -3 starting.txt; exit 1
       fi
       run=$((run + 1))
     done
@@ -5017,7 +4987,7 @@ esac
 # in ten died, each inside a second; the proof puts it back.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    step "threads and tasks grow fresh stacks beside a thread collecting in a loop: three runs, and every one ends"
+    step "stress: threads and tasks grow fresh stacks beside a collector, three runs"
     cat > guard.iyi <<'IYI'
 @[Unsafe("each frame writes an uninitialized pad through pointerof so a fresh stack is touched as it grows")]
 class Shared
@@ -5055,7 +5025,9 @@ deadline = IyiMark.now_ns + Program.args[0].to_i.to_u64 * 1000000_u64
 workers = [] of IyiThread
 4.times do
   workers << IyiThread.start do
-    while IyiMark.now_ns < deadline
+    first = true
+    while first || IyiMark.now_ns < deadline
+      first = false
       # A healthy stress only: it shows the stacks grow beside a collector
       # and that every run ends. It does not decide the guard proof (step 7c's
       # holder does); a collector that runs after the workers finish proves
@@ -5084,10 +5056,10 @@ IYI
     run=1
     while [ "$run" -le 3 ]; do
       timeout -k 5 60 ./guard 2000 > guard.txt 2>&1
-      code=$?; check_bound "$code" healthy
+      code=$?; check_bound "$code" healthy "run $run"
       if [ "$code" -eq 76 ]; then cat guard.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q '^stacks grown beside a collecting thread: true' guard.txt; then
-        echo "run $run exited $code:"; tail -3 guard.txt; exit 1
+        echo "FAIL: ${current_step}: run $run exited $code:"; tail -3 guard.txt; exit 1
       fi
       run=$((run + 1))
     done
@@ -5349,7 +5321,7 @@ esac
 # about 23 s on that machine, and the 60 s is left to say a run hung.
 case "$(uname -s)" in
   Darwin)
-    step "darwin: threads born sixteen at a time beside a thread collecting in a loop, for 10 s or 3,200 threads: five runs, and every one ends well"
+    step "stress: darwin threads born sixteen at a time beside a collector, five runs"
     cat > born.iyi <<'IYI'
 module born
 
@@ -5402,10 +5374,10 @@ IYI
     born=""
     while [ "$run" -le 5 ]; do
       ( timeout -k 5 60 ./born 200 10 > born.txt 2>&1; exit $? ) 2> /dev/null
-      code=$?; check_bound "$code" healthy
+      code=$?; check_bound "$code" healthy "run $run"
       if [ "$code" -eq 76 ]; then cat born.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ' born.txt; then
-        echo "run $run exited $code:"; tail -3 born.txt; exit 1
+        echo "FAIL: ${current_step}: run $run exited $code:"; tail -3 born.txt; exit 1
       fi
       born="$born $(sed -n 's/^ok born=\([0-9]*\) .*/\1/p' born.txt)"
       run=$((run + 1))
@@ -5927,7 +5899,7 @@ esac
 # turn-counter release; under the lock, none of 6.
 case "$(uname -s)" in
   Linux | Darwin)
-    step "tasks begin on fresh stacks beside a thread collecting in a loop, and each task's top is its own stack's: three runs of 5 s"
+    step "stress: tasks begin on fresh stacks beside a collector, three runs of 5 s"
     cat > fresh.iyi <<'IYI'
 module fresh
 
@@ -5972,7 +5944,7 @@ flag = Flag.new
 stormer = IyiThread.start { storm(flag) }
 deadline = __iyi_monotonic_ns + Program.args[0].to_i.to_i64 * 1_000_000_000_i64
 started = 0
-while __iyi_monotonic_ns < deadline
+while started == 0 || __iyi_monotonic_ns < deadline
   burst
   started = started + 64
 end
@@ -5987,10 +5959,10 @@ IYI
     started=""
     while [ "$run" -le 3 ]; do
       ( timeout -k 5 60 ./fresh 5 > fresh.txt 2>&1; exit $? ) 2> /dev/null
-      code=$?; check_bound "$code" healthy
+      code=$?; check_bound "$code" healthy "run $run"
       if [ "$code" -eq 76 ]; then cat fresh.txt; exit 76; fi
       if [ "$code" -ne 0 ] || ! grep -q '^ok started=[0-9]* ' fresh.txt; then
-        echo "run $run exited $code:"; tail -3 fresh.txt; exit 1
+        echo "FAIL: ${current_step}: run $run exited $code:"; tail -3 fresh.txt; exit 1
       fi
       started="$started $(sed -n 's/^ok started=\([0-9]*\) .*/\1/p' fresh.txt)"
       run=$((run + 1))
@@ -6262,9 +6234,8 @@ esac
 # to count out, in a loop around `yield_cpu`; it spins a little now and
 # then sleeps on the count's word (`IyiThread.wait_count`), and the thread
 # that brings the count to what the stopper waits for wakes it
-# (`IyiThread.count_in`). A wake that never comes is a stop that never
-# ends, so the proof takes the wake out and a run hangs; the storm's
-# thousands of stops are where a sleeping stopper is all but certain.
+# (`IyiThread.count_in`). The proof publishes a waiter on a private word,
+# then checks whether the final increment actually called the platform wake.
 case "$(uname -s)" in
   Linux | Darwin)
     cat > final-wake.part <<'IYI'
@@ -6947,7 +6918,7 @@ esac
 # see, the run dies or says what it lost.
 case "$(uname -s)" in
   Linux)
-    step "C called from parallel tasks and a thread runs on libc's threads"
+    step "stress: C called from parallel tasks and a thread runs on libc's threads"
     cat > calls_c.iyi <<'IYI'
 @[Unsafe("the program asks libc for its thread, errno and strings through a lib, and compares C strings byte by byte")]
 @[Link("c")]
@@ -7012,14 +6983,14 @@ IYI
       echo "SETUP: ${current_step:-build}: calls-c did not build"; cat build-calls-c.log; exit 76
     fi
     timeout -k 5 120 ./calls-c > calls-c.txt 2>&1
-    code=$?; check_bound "$code" healthy
+    code=$?; check_bound "$code" healthy "run 1"
     if [ "$code" -eq 76 ]; then cat calls-c.txt; exit 76; fi
     if [ "$code" -ne 0 ] || ! grep -q 'every property held' calls-c.txt; then
-      cat calls-c.txt; exit 1
+      echo "FAIL: ${current_step}: run 1 exited $code without completing"; cat calls-c.txt; exit 1
     fi
     named=$(nm -u calls-c | sed -e 's/^ *[wU] *//' -e 's/@.*$//' | grep -cE '^(pthread_create|pthread_join)$')
     if [ "$named" -ne 2 ]; then
-      echo "the program calls C and its threads are not libc's:"; nm -u calls-c; exit 1
+      echo "FAIL: ${current_step}: run 1 calls C but its threads are not libc's:"; nm -u calls-c; exit 1
     fi
     echo "  $(cat calls-c.txt)"
 

@@ -46,11 +46,17 @@
 #         FAIL: mark: a unit allocated N bytes under a held mark and never held
 #       Hook only, the hold in place (exit 0):
 #         mark: a unit held under an open mark: N holds, its partition past its ceiling while the mark was open
-#   c7  a helper's walk claim let go before its walk ends (exit 86):
+#   c7  the staged walk claim let go after its walk, under the class's lock, before
+#       its check (exit 86). The release line names the staged slice, and the
+#       verifier's report must name the same arena:
+#         claim: the staged slice at 0x... let its walk claim go before its check
 #         a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it
 #       Hook only, the staged slice checked and the round closed (exit 0):
 #         claim: every walk claim held to its walk's end
-#       Completion not recorded (exit 76):
+#       The release kept, the staged check skipped (exit 0): no other slice reports,
+#       so the catch can only come from the staged check:
+#         claim: every walk claim held to its walk's end
+#       Completion not recorded (exit 76, its own watchdog sentence):
 #         FAIL: claim: the staged slice did not complete within the watchdog
 #   c8  the boundary predicate answers every slot below DIR_SLOTS as inside
 #       (exit 1), asked directly for slot 0.
@@ -182,9 +188,11 @@ fi
 
 # copy LABEL DIR WANT AWK [FLAGS [ARGS...]]: patch COPY_FILE (default
 # heap_partition.iyi) and, when named, EXTRA_FILE using EXTRA_AWK. Build and
-# run once. A catch needs its expected exit and whole verdict line. A control
-# needs its expected output and no verifier report. Exit 76 is setup, except
-# for the explicit watchdog control, which checks its own setup sentence.
+# run once. A catch needs its expected exit and whole verdict line, and with
+# NAMED_STAGED its verifier report must name the arena that the staged slice's
+# release line named. A control needs its expected output and no verifier
+# report. Exit 76 is setup, except for the explicit watchdog control, which
+# checks its own setup sentence.
 copy() {
   local label="$1" name="$2" dir="$WORK/$2" want="$3" script="$4" flags="${5:--Dheap_partitions --release}"
   local file="${COPY_FILE:-heap_partition.iyi}"
@@ -225,12 +233,6 @@ copy() {
     status=1
     return
   fi
-  if [ -n "${EXPECT:-}" ] && ! { [ "$(grep -c '^FAIL: ' "$dir/run.out")" -eq 1 ] && grep -qxE "$EXPECT" "$dir/run.out"; }; then
-    echo "  $label: missed: the verdict is not the one sentence (wanted $EXPECT)"
-    sed -n '1,6p' "$dir/run.out" | sed 's/^/    /'
-    status=1
-    return
-  fi
   if [ -n "${EXPECT_FIXED:-}" ] && ! { [ "$(grep -c '^FAIL: ' "$dir/run.out")" -eq 1 ] && grep -Fxq -- "$EXPECT_FIXED" "$dir/run.out"; }; then
     echo "  $label: missed: the fixed verdict was not present"
     sed -n '1,6p' "$dir/run.out" "$dir/run.err" | sed 's/^/    /'
@@ -243,6 +245,17 @@ copy() {
     status=1
     return
   fi
+  if [ "$want" = 86 ] && [ -n "${NAMED_STAGED:-}" ]; then
+    local named reported
+    named="$(sed -n 's/^  claim: the staged slice at \(0x[0-9a-f]\{16\}\) let its walk claim go before its check$/\1/p' "$dir/run.err")"
+    reported="$(sed -n 's/^    arena \(0x[0-9a-f]\{16\}\), claim .*$/\1/p' "$dir/run.err")"
+    if [ "$(printf '%s\n' "$named" | grep -c .)" -ne 1 ] || [ "$named" != "$reported" ]; then
+      echo "  $label: missed: the catch does not name the staged slice (staged ${named:-none}, reported ${reported:-none})"
+      sed -n '1,8p' "$dir/run.err" | sed 's/^/    /'
+      status=1
+      return
+    fi
+  fi
   if [ "$want" = 0 ]; then
     if grep -q '^iyi: heap_verify' "$dir/run.err" || { [ -n "${EXPECT_OUT:-}" ] && ! grep -Fxq -- "$EXPECT_OUT" "$dir/run.out"; }; then
       echo "  $label: missed: the verifier reported, or the expected line is absent"
@@ -254,7 +267,7 @@ copy() {
     return
   fi
   if [ "$want" = 86 ]; then
-    echo "  $label: caught, $EXPECT_ERR"
+    echo "  $label: caught, $EXPECT_ERR${NAMED_STAGED:+, naming the staged slice $named}"
   else
     echo "  $label: caught, $(grep -m1 '^FAIL: ' "$dir/run.out")"
   fi
@@ -792,23 +805,28 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
   keyed "a cooled run's release is recorded (hook only)" cool 0 cool "idle: the run the program put on a release list reached the cold list with its page reading zero" "-Dheap_partitions --release -Dkeyed_force" "$COOL_SITE" "$COOL_WITNESS"
   marked "a unit holds beneath an open mark" held 0
   marked "a partition holds under a mark" c6 1 "$C6_DELETE"
-  # c7, the walk claim (claim mode, `claim` in heap_drain.iyi). A helper's slice
-  # that lets its claim go before its walk must fail its check at the walk's end.
-  # The first helper's claim is the staged arena: `claim.iyi`'s hooks reserve it
-  # from every other claim (`claim_class` and `partition_sweep_for`) until that
-  # slice's own check has run.
-  #   c7        releases its claim before its walk: the check fails (exit 86),
-  #             and the verifier names the walk-claim line.
-  #   c7 hook   the same hooks without the release: the staged slice is checked,
+  # c7, the walk claim (claim mode, `claim` in heap_drain.iyi). The first helper
+  # slice's claim is the staged arena: `claim.iyi`'s hooks reserve it from every
+  # other claim (`claim_class`, `partition_sweep_for`) until that slice's check
+  # has run. The mutant lets the staged claim go after its walk, under the class's
+  # lock, and checks it before that lock is let go. The readers of the claim word
+  # that could run in between all take that lock (`quiet`, `free_unswept`,
+  # `idle_batches`, `next_slab`, `take_run`); `release_arena` cannot run then,
+  # because a collection waits for the sweep round to close first.
+  #   c7        the check fails (exit 86), and its report names the arena that the
+  #             release line named: the staged slice.
+  #   c7 hook   the same hooks without the release: the staged slice is checked and
   #             reports that it was (exit 0), and the verifier reports nothing.
-  #   c7 count  the same hooks with the staged slice never reported as checked:
-  #             the claim wait can end only at its watchdog (exit 76).
+  #   c7skip    the release kept, the staged check skipped: no slice reports (exit 0),
+  #             so the catch can only be the staged check's.
+  #   c7 count  the same hooks with the staged slice never reported as checked: the
+  #             claim wait can end only at its completion watchdog (exit 76).
   cat >"$WORK/claim.iyi" <<'IYI'
       # copy only (bench/heap_drain.sh's c7): the first helper's claim is the staged
       # arena. Another claim of it, by a helper (`claim_class`) or by an allocating
       # thread (`partition_sweep_for`), is refused until that slice's walk-claim
-      # check has run. A slice that let its claim go before its walk therefore
-      # cannot be claimed again before the check reads the word.
+      # check has run. The mutant lets the staged claim go after its walk, under
+      # the class's lock, and checks it before that lock is let go.
       @[UnsafeReach("the staged arena's address is set once, by the first helper's claim")]
       @@forced_staged : UInt64 = 0_u64
       @[UnsafeReach("nonzero while the staged arena is reserved, cleared by its check")]
@@ -832,6 +850,16 @@ if [ "$PART" = all ] || [ "$PART" = copies ]; then
         Pointer(Atomic(UInt64)).new(pointerof(@@forced_done).address).value.set(1_u64)
       end
 
+      # copy only (bench/heap_drain.sh's c7): the staged slice's release, named. The
+      # line is written before the release, so the verifier's report on the same
+      # claim, which the check after it makes, names the same arena.
+      def self.forced_release_staged(arena : UInt64, epoch : UInt64) : Nil
+        IyiHeapVerify.say("  claim: the staged slice at ")
+        IyiHeapVerify.say_hex(arena)
+        IyiHeapVerify.say(" let its walk claim go before its check\n")
+        release_claim(arena, epoch)
+      end
+
       def self.forced_staged_arena : UInt64
         Pointer(Atomic(UInt64)).new(pointerof(@@forced_staged).address).value.get
       end
@@ -849,22 +877,28 @@ IYI
   CLAIM_METHODS='/^      def self\.helper_main\(seen : UInt64\) : Nil$/ { declarations++; methods = 0; while ((getline line < ENVIRON["CLAIM_INS"]) > 0) { print line; methods++ }; if (methods == 0) exit 3; print "" }'
   CLAIM_CLASS='/^      def self\.claim_class\(index : Int32, who : Int32\) : UInt64$/ { in_class = 1; classes++ } in_class && /^          if sweep_left\?\(arena, epoch\)$/ { reserved++; print "          if sweep_left?(arena, epoch) && !forced_reserved?(arena)"; next } in_class && /^      end$/ { in_class = 0 }'
   CLAIM_TAKEN='/^        def self\.sweep_one_helper : Bool$/ { in_helper = 1; helpers++ } in_helper && /^            pool_word\(POOL_SWEEPERS\)\.value\.add\(1_u64\) if arena > 2_u64$/ { taken++; print; print "            forced_claim_taken(arena) if arena > 2_u64"; next } in_helper && /^        end$/ { in_helper = 0 }'
-  CLAIM_RELEASE='in_helper && /^          batch = sweep_slice\(arena, SWEEP_SPAN\)$/ { released++; print "          IyiHeap.class_lock(index)"; print "          release_claim(arena, epoch)"; print "          IyiHeap.class_unlock(index)"; print; next }'
+  CLAIM_STAGED='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { staged++; print "            if forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "              forced_release_staged(arena, epoch)"; print "              {% if flag?(:heap_verify) %} IyiHeapVerify.check_claimed(arena, epoch) {% end %}"; print "              IyiHeap.class_unlock(index)"; print "            end" }'
+  CLAIM_STAGED_UNCHECKED='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { staged++; print "            if forced_reserved?(arena)"; print "              IyiHeap.class_lock(index)"; print "              forced_release_staged(arena, epoch)"; print "              IyiHeap.class_unlock(index)"; print "            end" }'
+  CLAIM_SKIP_CHECK='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { skipped++; print "            {% if flag?(:heap_verify) %}"; print "            unless forced_reserved?(arena)"; print "              IyiHeapVerify.check_claimed(arena, epoch)"; print "            end"; print "            {% end %}"; print "            forced_slice_checked(arena)"; next }'
   CLAIM_CHECKED='in_helper && /^            [{]% if flag\?\(:heap_verify\) %[}] IyiHeapVerify\.check_claimed\(arena, epoch\) [{]% end %[}]$/ { checked++; print; print "            forced_slice_checked(arena)"; next }'
   CLAIM_PARTITION='/^  def self\.partition_sweep_for\(record : UInt64, index : Int32\) : UInt64$/ { in_part = 1; parts++ } in_part && /^        if IyiHeap\.partition_arena\?\(arena\) && sweep_left\?\(arena, epoch\) && IyiHeap\.read64\(arena \+ IyiHeap::OFF_SWEEPING\) != epoch$/ { reserved_part++; print "        if IyiHeap.partition_arena?(arena) && sweep_left?(arena, epoch) && IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING) != epoch && !IyiMark.forced_reserved?(arena)"; next } in_part && /^  end$/ { in_part = 0 }'
   PRELUDE_CONTROL="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_CHECKED { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || checked != 1) exit 3 }"
-  PRELUDE_MUTANT="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_RELEASE $CLAIM_CHECKED { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || released != 1 || checked != 1) exit 3 }"
+  PRELUDE_MUTANT="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_STAGED $CLAIM_CHECKED { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || staged != 1 || checked != 1) exit 3 }"
+  PRELUDE_SKIP="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN $CLAIM_STAGED_UNCHECKED $CLAIM_SKIP_CHECK { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1 || staged != 1 || skipped != 1) exit 3 }"
   PRELUDE_COUNTLESS="$CLAIM_METHODS $CLAIM_CLASS $CLAIM_TAKEN { print } END { if (declarations != 1 || classes != 1 || reserved != 1 || helpers != 1 || taken != 1) exit 3 }"
   PARTITION_RESERVE="$CLAIM_PARTITION { print } END { if (parts != 1 || reserved_part != 1) exit 3 }"
-  EXPECT_ERR='  a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it' \
+  EXPECT_ERR='  a sweep slice ended without its walk claim: another walker, or a local sweep past `quiet_class`, could walk the slice with it' NAMED_STAGED=1 \
     COPY_FILE=prelude.iyi EXTRA_FILE=heap_partition.iyi EXTRA_AWK="$PARTITION_RESERVE" \
     copy "a helper holds its claim to its walk's end" c7 86 "$PRELUDE_MUTANT" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim
   EXPECT_OUT="claim: every walk claim held to its walk's end" \
     COPY_FILE=prelude.iyi EXTRA_FILE=heap_partition.iyi EXTRA_AWK="$PARTITION_RESERVE" \
     copy "a helper's staged slice checked, not released (hook only)" c7ctl 0 "$PRELUDE_CONTROL" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim
+  EXPECT_OUT="claim: every walk claim held to its walk's end" \
+    COPY_FILE=prelude.iyi EXTRA_FILE=heap_partition.iyi EXTRA_AWK="$PARTITION_RESERVE" \
+    copy "the staged slice's check skipped, its release kept: nothing else reports (c7skip)" c7skip 0 "$PRELUDE_SKIP" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim
   EXPECT_SETUP='FAIL: claim: the staged slice did not complete within the watchdog' \
     COPY_FILE=prelude.iyi EXTRA_FILE=heap_partition.iyi EXTRA_AWK="$PARTITION_RESERVE" \
-    copy "a staged slice never counted complete (c7 count)" c7cnt 76 "$PRELUDE_COUNTLESS" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim 1 8 5
+    copy "a staged slice never counted complete (c7 count)" c7cnt 76 "$PRELUDE_COUNTLESS" "-Dheap_partitions -Dheap_verify -Dclaim_force" claim 1 8 120 5
   # c8, the arena directory's bounds (directory mode, `dir` in heap_drain.iyi).
   # The mutant answers every slot below DIR_SLOTS as inside, and the program asks
   # the predicate directly for slot 0, so the verdict is the predicate's answer.

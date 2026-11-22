@@ -561,10 +561,11 @@ module bench/heap_drain
   # slice has passed its check. Both then run one explicit collection: a
   # collection closes the helpers' round and waits out every slice still in
   # flight, so each of them has reached its check when it returns.
-  #   ./heap_drain claim [ROUNDS [UNITS [WATCHDOG_SECONDS]]]   # default 6 8 120
+  #   ./heap_drain claim [ROUNDS [UNITS [WATCHDOG_SECONDS [DONE_SECONDS]]]]   # default 6 8 120 120
+  #   DONE_SECONDS bounds only the staged slice's completion; the others keep WATCHDOG_SECONDS.
   CLAIM_WATCHDOG_S = 120
 
-  def claim_wait(first : UInt64, watchdog_ns : UInt64) : Nil
+  def claim_wait(first : UInt64, watchdog_ns : UInt64, done_ns : UInt64) : Nil
     started = IyiMark.now_ns
     {% if flag?(:claim_force) %}
       while IyiMark.forced_staged_arena == 0_u64
@@ -573,7 +574,7 @@ module bench/heap_drain
       end
       started = IyiMark.now_ns
       while !IyiMark.forced_staged_done?
-        mark_setup_fail("claim: the staged slice did not complete within the watchdog") if IyiMark.now_ns &- started >= watchdog_ns
+        mark_setup_fail("claim: the staged slice did not complete within the watchdog") if IyiMark.now_ns &- started >= done_ns
         sleep(1)
       end
     {% else %}
@@ -589,6 +590,7 @@ module bench/heap_drain
     rounds = arguments.size > 1 ? arguments[1].to_i : 6
     units = arguments.size > 2 ? arguments[2].to_i : 8
     watchdog_ns = (arguments.size > 3 ? arguments[3].to_i : CLAIM_WATCHDOG_S).to_u64 * 1000000000_u64
+    done_ns = (arguments.size > 4 ? arguments[4].to_i : CLAIM_WATCHDOG_S).to_u64 * 1000000000_u64
     first = IyiMark.swept_by_helpers
     made = 0_i64
     round = 0
@@ -605,7 +607,7 @@ module bench/heap_drain
       end
       round = round + 1
     end
-    claim_wait(first, watchdog_ns)
+    claim_wait(first, watchdog_ns, done_ns)
     began = IyiMark.swept_by_helpers - first
     print "claim rounds=#{rounds} units=#{units} collections=#{IyiMark.collections} helper_arenas=#{began} made_mib=#{made // 1048576}\n"
     print "claim: every walk claim held to its walk's end\n"

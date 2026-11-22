@@ -20,123 +20,518 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-. "$REPO/bench/end_process.sh"
 IYI="${IYI:-$REPO/bin/iyi}"
-WORK="$(mktemp -d)"
-SERVER_PID=""
-cleanup() {
-  [ -n "$SERVER_PID" ] && end_process "$SERVER_PID"
-  rm -rf "$WORK"
-}
-trap cleanup EXIT
 
-# A native compiler and a native Python read Windows paths, not this
-# shell's mapping of them; see bench/std_dns_exercise.sh.
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    REPO="$(cygpath -m "$REPO")"
-    WORK="$(cygpath -m "$WORK")"
-    PSEP=';'
-    ;;
-  *) PSEP=':' ;;
-esac
-
-PY=""
-for candidate in python3 python; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
-    PY="$candidate"
-    break
+if [ "${1:-}" = "--dns-body" ]; then
+  WORK="$2" SRV="$3" PY="$4" IYI="$5" REPO="$6" PSEP="$7"
+  # The supervisor owns the server and watched clients. FD 3 receives its
+  # replies, FD 4 sends requests, and ordinary gate output remains visible.
+  exec 3<&0 4>&1
+  exec 0</dev/null 1>&2
+  grant=""
+  if ! IFS= read -r grant <&3 || [ "$grant" != go ]; then
+    echo "the secure DNS supervisor did not grant the exercise"
+    exit 76
   fi
-done
+else
+  . "$REPO/bench/end_process.sh"
+  WORK="$(mktemp -d)"
+  SUPERVISOR_PID=""
+  CANCEL_STATUS=0
+  supervisor_active() {
+    local job
+    for job in $(jobs -p); do
+      [ "$job" = "$SUPERVISOR_PID" ] && return 0
+    done
+    return 1
+  }
+  cancel() {
+    CANCEL_STATUS="$1"
+    : >"$WORK/cancel"
+  }
+  cleanup() {
+    if [ -n "$SUPERVISOR_PID" ] && supervisor_active; then
+      : >"$WORK/cancel"
+      cleanup_deadline=$((SECONDS + 5))
+      while supervisor_active && [ "$SECONDS" -lt "$cleanup_deadline" ]; do sleep 0.1; done
+      if supervisor_active; then
+        echo "the secure DNS supervisor did not stop during cleanup" >&2
+        timeout -k 1 3 "$BASH" -c '. "$1"; end_process "$2"' _ "$REPO/bench/end_process.sh" "$SUPERVISOR_PID" || :
+        if supervisor_active; then
+          echo "supervisor cleanup is unconfirmed; retaining $WORK" >&2
+          return
+        fi
+      fi
+    fi
+    rm -rf "$WORK"
+  }
+  trap cleanup EXIT
+  trap 'cancel 130' INT
+  trap 'cancel 129' HUP
+  trap 'cancel 143' TERM
 
-if [ -z "$PY" ] || ! "$PY" -c 'import ssl; from cryptography import x509' >/dev/null 2>&1; then
-  echo "skipped: no python3 with ssl and cryptography here, so there is no scripted server to ask"
-  exit 0
+  # Native Python and the compiler need native Windows paths.
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT)
+      REPO="$(cygpath -m "$REPO")"
+      WORK="$(cygpath -m "$WORK")"
+      BASH_NATIVE="$(cygpath -m "$BASH")"
+      PSEP=';'
+      ;;
+    *) BASH_NATIVE="$BASH"; PSEP=':' ;;
+  esac
+
+  PY=""
+  found_python=0
+  PYTHON_PREFLIGHT_SECONDS=20
+  for candidate in python3 python; do
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    found_python=1
+    timeout -k 5 "$PYTHON_PREFLIGHT_SECONDS" "$candidate" -c 'import sys' >"$WORK/python-preflight.log" 2>&1
+    probe_code=$?
+    if [ "$probe_code" -eq 0 ]; then
+      PY="$candidate"
+      break
+    elif [ "$probe_code" -eq 124 ] || [ "$probe_code" -eq 137 ]; then
+      echo "Python interpreter startup watchdog expired"
+      cat "$WORK/python-preflight.log"
+      exit 76
+    fi
+  done
+  if [ -z "$PY" ]; then
+    if [ "$found_python" -eq 0 ]; then
+      echo "skipped: no python3 here, so there is no scripted server to ask"
+      exit 0
+    fi
+    echo "Python interpreter preflight failed"
+    cat "$WORK/python-preflight.log"
+    exit 76
+  fi
+  timeout -k 5 "$PYTHON_PREFLIGHT_SECONDS" "$PY" -c '
+import importlib.util
+import sys
+try:
+    import ssl
+except ModuleNotFoundError as error:
+    if error.name in ("ssl", "_ssl"):
+        print(error, file=sys.stderr)
+        sys.exit(42)
+    raise
+if importlib.util.find_spec("cryptography") is None:
+    print("no cryptography package", file=sys.stderr)
+    sys.exit(42)
+from cryptography import x509
+' >"$WORK/crypto-preflight.log" 2>&1
+  probe_code=$?
+  case "$probe_code" in
+    0) ;;
+    42)
+      echo "skipped: Python lacks ssl or cryptography, so there is no scripted server to ask"
+      exit 0
+      ;;
+    124 | 137)
+      echo "Python dependency preflight watchdog expired"
+      cat "$WORK/crypto-preflight.log"
+      exit 76
+      ;;
+    *)
+      echo "Python dependency preflight failed"
+      cat "$WORK/crypto-preflight.log"
+      exit 76
+      ;;
+  esac
+
+  SRV="$WORK/servers"
+  mkdir -p "$SRV"
+  cat >"$WORK/supervisor.py" <<'PY'
+import os
+import pathlib
+import queue
+import subprocess
+import sys
+import threading
+import time
+import traceback
+
+PYTHON, SERVER, WORK, SRV, BASH, SCRIPT, REPO, IYI, PSEP = sys.argv[1:]
+work = pathlib.Path(WORK)
+srv = pathlib.Path(SRV)
+SERVER_START_SECONDS = 20
+DIAGNOSTIC_SECONDS = 5
+CLEANUP_SECONDS = 5
+BODY_DRAIN_SECONDS = 5
+FAILURE = 76
+
+
+def cancelled():
+    return (work / "cancel").exists()
+
+
+def say(text):
+    print(text, flush=True)
+
+
+def stop(child, deadline):
+    if child is None or child.poll() is not None:
+        return True
+    try:
+        child.terminate()
+        try:
+            child.wait(timeout=max(0.001, min(2, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=max(0.001, deadline - time.monotonic()))
+        return True
+    except ProcessLookupError:
+        try:
+            child.wait(timeout=max(0.001, deadline - time.monotonic()))
+            return True
+        except (OSError, subprocess.TimeoutExpired) as error:
+            say("cannot reap owned child: %s" % error)
+            return False
+    except (OSError, subprocess.TimeoutExpired) as error:
+        say("cannot reap owned child: %s" % error)
+        return False
+
+
+def diagnostics(child):
+    deadline = time.monotonic() + DIAGNOSTIC_SECONDS
+    system = sys.platform
+    commands = []
+    if system == "darwin" or system.startswith("linux"):
+        commands = [["uptime"], ["ps", "-A", "-o", "pid=,ppid=,stat=,pcpu=,etime=,comm="]]
+        if system == "darwin":
+            commands += [["vm_stat"], ["sample", str(child.pid), "3", "-file", str(work / "server.sample")]]
+    for index, command in enumerate(commands):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            say("startup diagnostics watchdog expired")
+            return
+        path = work / ("diagnostic-%d" % index)
+        say("== startup diagnostics: " + command[0])
+        try:
+            with path.open("wb") as output:
+                subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, timeout=remaining, check=False)
+        except subprocess.TimeoutExpired:
+            if path.exists():
+                sys.stdout.buffer.write(path.read_bytes())
+            sample = work / "server.sample"
+            if command[0] == "sample" and sample.exists():
+                sys.stdout.buffer.write(sample.read_bytes())
+            sys.stdout.buffer.flush()
+            say("startup diagnostics watchdog expired")
+            return
+        except OSError as error:
+            say("startup diagnostics unavailable: %s" % error)
+            continue
+        data = path.read_bytes()
+        if command[0] == "ps":
+            lines = data.decode(errors="replace").splitlines()
+            def cpu(line):
+                try:
+                    return float(line.split(None, 5)[3])
+                except (ValueError, IndexError):
+                    return 0.0
+            data = ("\n".join(sorted(lines, key=cpu, reverse=True)[:5]) + "\n").encode()
+        sys.stdout.buffer.write(data)
+        if command[0] == "sample" and (work / "server.sample").exists():
+            sys.stdout.buffer.write((work / "server.sample").read_bytes())
+        sys.stdout.buffer.flush()
+
+
+def stream_reader(pipe, events):
+    try:
+        while True:
+            chunk = os.read(pipe.fileno(), 4096)
+            if not chunk:
+                events.put(("eof", b""))
+                return
+            events.put(("data", chunk))
+    except OSError as error:
+        events.put(("error", str(error)))
+
+
+def startup(child, events, deadline):
+    buffer = bytearray()
+    frame = None
+    eof = False
+    while True:
+        if cancelled():
+            return "cancel"
+        remaining = deadline - time.monotonic()
+        expired = remaining <= 0
+        try:
+            if eof:
+                raise queue.Empty
+            kind, value = events.get_nowait() if expired else events.get(timeout=min(0.1, remaining))
+        except queue.Empty:
+            if expired:
+                if child.poll() is not None and not eof:
+                    say("the scripted server readiness pipe did not drain by the startup deadline (child status %s)" % child.returncode)
+                    return "error"
+                stage = (srv / "stage").read_text().strip() if (srv / "stage").exists() else "none"
+                suffix = " (stdout closed)" if eof else ""
+                say("the scripted servers hung before signaling readiness, at stage: %s%s" % (stage, suffix))
+                log = work / "server.log"
+                if log.exists():
+                    sys.stdout.buffer.write(log.read_bytes())
+                    sys.stdout.buffer.flush()
+                diagnostics(child)
+                return "error"
+            kind, value = "idle", b""
+        if kind == "error":
+            say("the scripted servers' readiness pipe failed: %s" % value)
+            return "error"
+        if kind == "data":
+            buffer.extend(value)
+            if len(buffer) > 64:
+                say("the scripted servers sent an oversized readiness signal")
+                return "error"
+            if b"\n" in buffer:
+                raw, _, rest = bytes(buffer).partition(b"\n")
+                frame = raw[:-1] if raw.endswith(b"\r") else raw
+                buffer = bytearray(rest)
+                if frame != b"ready":
+                    say("the scripted servers sent an invalid readiness signal: %s" % frame.decode("utf-8", "backslashreplace"))
+                    return "error"
+                if buffer:
+                    say("the scripted servers sent extra bytes after readiness")
+                    return "error"
+        if kind == "eof":
+            eof = True
+            if buffer:
+                say("the scripted servers sent a truncated readiness signal: %s" % bytes(buffer).decode("utf-8", "backslashreplace"))
+                return "error"
+        code = child.poll()
+        if frame is not None:
+            if not (srv / "ready").is_file():
+                say("the scripted servers signaled readiness without a ready file")
+                return "error"
+            if code is not None:
+                if eof:
+                    say("the scripted servers exited before readiness handoff (status %s)" % code)
+                    return "error"
+            elif expired:
+                say("the scripted servers' readiness was not accepted before the startup deadline")
+                return "error"
+            else:
+                return "ready"
+        if eof and code is not None:
+            log = work / "server.log"
+            if log.stat().st_size:
+                say("the scripted servers exited before readiness (status %s); server output follows" % code)
+                sys.stdout.buffer.write(log.read_bytes())
+                sys.stdout.buffer.flush()
+            else:
+                say("the scripted servers exited silently before readiness (status %s)" % code)
+            return "error"
+        if eof and not expired:
+            time.sleep(min(0.1, remaining))
+
+
+def client_command(kind, name):
+    if kind == "plain" and name == "dns-plain":
+        return [str(work / name), SRV], work / (name + ".out"), 180
+    if kind == "release" and name == "dns-release":
+        return [str(work / name), SRV], work / (name + ".out"), 180
+    if kind == "mutation" and name and all(c.isalnum() or c in "_-" for c in name):
+        return [str(work / name / "program"), SRV], work / name / "out", 120
+    raise ValueError("invalid client request")
+
+
+def watch_client(command, output_path, bound, body, server):
+    deadline = time.monotonic() + bound
+    with output_path.open("wb") as output:
+        client = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT)
+        try:
+            while client.poll() is None:
+                if cancelled() or body.poll() is not None or server.poll() is not None:
+                    return "cancel"
+                if time.monotonic() >= deadline:
+                    return "timeout"
+                time.sleep(min(0.1, max(0.001, deadline - time.monotonic())))
+            return "exit %s" % client.returncode
+        finally:
+            if not stop(client, time.monotonic() + CLEANUP_SECONDS):
+                raise RuntimeError("client cleanup failed")
+
+
+def run_body(server, deadline):
+    if time.monotonic() >= deadline:
+        say("the scripted servers' readiness was not accepted before the startup deadline")
+        return FAILURE
+    if server.poll() is not None:
+        say("the scripted servers exited before readiness handoff (status %s)" % server.returncode)
+        return FAILURE
+    body = subprocess.Popen([BASH, SCRIPT, "--dns-body", WORK, SRV, PYTHON, IYI, REPO, PSEP],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stdout, bufsize=0)
+    try:
+        events = queue.Queue()
+        threading.Thread(target=stream_reader, args=(body.stdout, events), daemon=True).start()
+        if time.monotonic() >= deadline:
+            say("the scripted servers' readiness was not accepted before the startup deadline")
+            return FAILURE
+        if server.poll() is not None:
+            say("the scripted servers exited before readiness handoff (status %s)" % server.returncode)
+            return FAILURE
+        body.stdin.write(b"go\n")
+        body.stdin.flush()
+        pending = bytearray()
+        done = False
+        closed = False
+        drain_deadline = None
+        while True:
+            if cancelled():
+                return 143
+            if server.poll() is not None:
+                say("the scripted servers exited during the exercise (status %s)" % server.returncode)
+                return FAILURE
+            code = body.poll()
+            if code is not None and code != 0:
+                return code
+            if code == 0 and closed:
+                if done and not pending:
+                    return 0
+                say("the secure DNS exercise exited without completing its control stream")
+                return FAILURE
+            if (code is not None or closed) and drain_deadline is None:
+                drain_deadline = time.monotonic() + BODY_DRAIN_SECONDS
+            if drain_deadline is not None and time.monotonic() >= drain_deadline:
+                say("the secure DNS exercise control stream did not drain")
+                return FAILURE
+            try:
+                event, value = events.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if event == "eof":
+                closed = True
+                continue
+            if event != "data" or closed:
+                say("the secure DNS exercise control stream closed unexpectedly")
+                return FAILURE
+            pending.extend(value)
+            if len(pending) > 256:
+                say("the secure DNS exercise sent an oversized control request")
+                return FAILURE
+            if b"\n" not in pending:
+                continue
+            raw, _, rest = bytes(pending).partition(b"\n")
+            if raw.endswith(b"\r"):
+                raw = raw[:-1]
+            pending = bytearray(rest)
+            if raw == b"done" and not pending and not done:
+                done = True
+                continue
+            fields = raw.decode("ascii").split(" ")
+            if done or len(fields) != 3 or fields[0] != "run" or pending:
+                say("the secure DNS exercise sent an invalid control request")
+                return FAILURE
+            command, output_path, bound = client_command(fields[1], fields[2])
+            reply = watch_client(command, output_path, bound, body, server)
+            if reply == "cancel":
+                if server.poll() is not None:
+                    say("the scripted servers exited during the exercise (status %s)" % server.returncode)
+                    return FAILURE
+                return 143 if cancelled() else FAILURE
+            body.stdin.write((reply + "\n").encode("ascii"))
+            body.stdin.flush()
+    finally:
+        if not stop(body, time.monotonic() + CLEANUP_SECONDS):
+            raise RuntimeError("exercise cleanup failed")
+
+
+def main():
+    (work / "supervisor.armed").touch()
+    bootstrap = time.monotonic() + SERVER_START_SECONDS
+    while not (work / "supervisor.grant").exists():
+        if cancelled():
+            return 143
+        if time.monotonic() >= bootstrap:
+            say("Python supervisor grant watchdog expired")
+            return FAILURE
+        time.sleep(0.05)
+    server = None
+    verdict = FAILURE
+    try:
+        with (work / "server.log").open("wb") as output:
+            deadline = time.monotonic() + SERVER_START_SECONDS
+            server = subprocess.Popen([PYTHON, SERVER, SRV], stdout=subprocess.PIPE, stderr=output, bufsize=0)
+            events = queue.Queue()
+            threading.Thread(target=stream_reader, args=(server.stdout, events), daemon=True).start()
+            outcome = startup(server, events, deadline)
+            if outcome == "cancel":
+                verdict = 143
+            elif outcome == "ready":
+                verdict = run_body(server, deadline)
+    finally:
+        if not stop(server, time.monotonic() + CLEANUP_SECONDS):
+            if verdict == 0:
+                verdict = FAILURE
+    if verdict == 0:
+        say("the std/secure_dns exercise holds")
+    return verdict
+
+
+if __name__ == "__main__":
+    try:
+        verdict = main()
+    except Exception:
+        say("the secure DNS supervisor failed")
+        traceback.print_exc()
+        verdict = FAILURE
+    sys.exit(verdict)
+PY
+  "$PY" -I -S "$WORK/supervisor.py" "$PY" "$REPO/bench/std_secure_dns_server.py" "$WORK" "$SRV" "$BASH_NATIVE" "$REPO/bench/std_secure_dns_exercise.sh" "$REPO" "$IYI" "$PSEP" &
+  SUPERVISOR_PID=$!
+  bootstrap_deadline=$((SECONDS + PYTHON_PREFLIGHT_SECONDS))
+  while :; do
+    if [ "$CANCEL_STATUS" -ne 0 ]; then exit "$CANCEL_STATUS"; fi
+    if ! supervisor_active; then
+      supervisor_code=0
+      wait "$SUPERVISOR_PID" 2>/dev/null || supervisor_code=$?
+      SUPERVISOR_PID=""
+      echo "Python supervisor exited before arming (status $supervisor_code)"
+      exit 76
+    fi
+    if [ "$SECONDS" -ge "$bootstrap_deadline" ]; then
+      echo "Python supervisor startup watchdog expired"
+      exit 76
+    fi
+    [ -f "$WORK/supervisor.armed" ] && break
+    sleep 0.1
+  done
+  : >"$WORK/supervisor.grant"
+  supervisor_code=0
+  while :; do
+    supervisor_code=0
+    wait "$SUPERVISOR_PID" || supervisor_code=$?
+    if [ "$CANCEL_STATUS" -eq 0 ] || ! supervisor_active; then break; fi
+  done
+  SUPERVISOR_PID=""
+  if [ "$CANCEL_STATUS" -ne 0 ]; then exit "$CANCEL_STATUS"; fi
+  exit "$supervisor_code"
 fi
 
 status=0
 export IYI_PATH="$REPO/src"
-SRV="$WORK/servers"
-mkdir -p "$SRV"
-# Readiness is a pipe event, not a repeated file check. The one-second
-# reads also let us check that the child is alive while it starts.
-STARTUP_HANG_SECONDS=20
-STARTUP_FAILURE_STATUS=76
-exec 3< <(exec "$PY" "$REPO/bench/std_secure_dns_server.py" "$SRV" 2>"$WORK/server.log")
-SERVER_PID=$!
-SERVER_NATIVE_PID=""
-deadline=$((SECONDS + STARTUP_HANG_SECONDS))
-start_state=hang
-pipe_closed=0
-ready=""
-while [ "$SECONDS" -lt "$deadline" ]; do
-  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    start_state=exited
-    break
+
+# The supervisor owns each client and distinguishes its exit status from
+# a watchdog expiry, including a real exit 124 or 137.
+run_watched() {
+  if ! printf 'run %s %s\n' "$1" "$2" >&4; then
+    echo "the secure DNS supervisor could not receive a client request"
+    exit 76
   fi
-  if [ "$pipe_closed" -eq 1 ]; then
-    sleep 1
-    continue
+  WATCHED_KIND="" WATCHED_CODE=""
+  if ! IFS=' ' read -r WATCHED_KIND WATCHED_CODE <&3; then
+    echo "the secure DNS client watchdog gave no verdict"
+    exit 76
   fi
-  read_status=0
-  IFS= read -r -t 1 ready <&3 || read_status=$?
-  if [ "$read_status" -eq 0 ]; then
-    # Native Windows Python writes CRLF to its stdout pipe.
-    ready="${ready%$'\r'}"
-    case "$ready" in
-      "pid "*)
-        SERVER_NATIVE_PID="${ready#pid }"
-        case "$SERVER_NATIVE_PID" in
-          "" | *[!0-9]*) start_state=invalid; break ;;
-        esac
-        ;;
-      ready) start_state=ready; break ;;
-      *) start_state=invalid; break ;;
-    esac
-  elif [ "$read_status" -le 128 ]; then
-    # A closed pipe is not necessarily a dead process yet; wait for either
-    # its exit or the original hang bound before taking its exit status.
-    pipe_closed=1
-  fi
-done
-exec 3<&-
-if [ "$start_state" = hang ] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
-  start_state=exited
-fi
-if [ "$start_state" = exited ]; then
-  child_status=0
-  wait "$SERVER_PID" 2>/dev/null || child_status=$?
-  SERVER_PID=""
-  if [ -s "$WORK/server.log" ]; then
-    echo "the scripted servers exited before readiness (status $child_status); server output follows"
-  else
-    echo "the scripted servers exited silently before readiness (status $child_status)"
-  fi
-  cat "$WORK/server.log"
-  exit "$STARTUP_FAILURE_STATUS"
-elif [ "$start_state" = hang ]; then
-  echo "the scripted servers hung before signaling readiness, at stage: $(cat "$SRV/stage" 2>/dev/null || echo none)"
-  echo "files: $(ls "$SRV" | tr '\n' ' ')"
-  cat "$WORK/server.log"
-  case "$(uname -s)" in
-    Darwin|Linux)
-      echo "== startup diagnostics: load and five busiest processes"
-      uptime 2>&1 || :
-      ps -A -o pid=,ppid=,stat=,pcpu=,etime=,comm= 2>&1 | LC_ALL=C sort -k4,4nr | head -5
-      if [ "$(uname -s)" = Darwin ]; then
-        vm_stat 2>&1 || :
-        echo "== startup diagnostics: sample of server ${SERVER_NATIVE_PID:-$SERVER_PID}"
-        sample "${SERVER_NATIVE_PID:-$SERVER_PID}" 3 -file "$WORK/server.sample" 2>&1 || :
-        [ ! -f "$WORK/server.sample" ] || cat "$WORK/server.sample"
-      fi
-      ;;
+  case "$WATCHED_KIND" in
+    exit | timeout) ;;
+    *) echo "the secure DNS client watchdog gave an invalid verdict"; exit 76 ;;
   esac
-  exit "$STARTUP_FAILURE_STATUS"
-elif [ "$ready" != ready ] || [ ! -f "$SRV/ready" ]; then
-  echo "the scripted servers sent an invalid readiness signal: $ready"
-  cat "$WORK/server.log"
-  exit "$STARTUP_FAILURE_STATUS"
-fi
+}
 if [ -f "$SRV/h2.missing" ]; then
   echo "== $(cat "$SRV/h2.missing"): DNS over HTTPS is asked over HTTP/1.1 alone"
 fi
@@ -153,8 +548,12 @@ build_and_run() {
     status=1
     return 1
   fi
-  timeout -k 5 180 "$WORK/$name" "$SRV" >"$WORK/$name.out" 2>&1
-  local exit_code=$?
+  run_watched "$label" "$name"
+  if [ "$WATCHED_KIND" = timeout ]; then
+    echo "$label: client watchdog expired (180 s)"
+    exit 76
+  fi
+  local exit_code="$WATCHED_CODE"
   grep -v '^answer ' "$WORK/$name.out" | sed 's/^/  /'
   if [ "$exit_code" -ne 0 ]; then
     echo "$label: exited $exit_code"
@@ -208,8 +607,18 @@ echo "== dig asks the same servers the same questions"
 HAS_TLS=no
 HAS_HTTPS=no
 if command -v dig >/dev/null 2>&1; then
-  dig -h 2>&1 | grep -q '+\[no\]tls ' && HAS_TLS=yes
-  dig -h 2>&1 | grep -q '+\[no\]https\[=' && HAS_HTTPS=yes
+  timeout -k 5 20 dig -h >"$WORK/dig.help" 2>&1
+  dig_status=$?
+  if [ "$dig_status" -eq 124 ] || [ "$dig_status" -eq 137 ]; then
+    echo "dig help watchdog expired"
+    exit 76
+  elif [ "$dig_status" -ne 0 ] || ! grep -Eq '^Usage:[[:space:]]+dig[[:space:]]' "$WORK/dig.help"; then
+    echo "dig help failed"
+    cat "$WORK/dig.help"
+    exit 76
+  fi
+  grep -q '+\[no\]tls ' "$WORK/dig.help" && HAS_TLS=yes
+  grep -q '+\[no\]https\[=' "$WORK/dig.help" && HAS_HTTPS=yes
 fi
 if ! command -v dig >/dev/null 2>&1; then
   echo "  skipped: no dig here, so nothing but the iyi client asks the scripted servers"
@@ -273,7 +682,7 @@ else
     if [ "$type" = TXT ]; then
       said="$(printf '%s\n' "$got" | "$PY" -c 'import sys, shlex; print(" | ".join("".join(shlex.split(line)) for line in sys.stdin.read().splitlines() if line))')"
     elif [ "$type" = HTTPS ]; then
-      said="$(printf '%s\n' "$got" | sed '/^$/d' | sed ':a;N;$!ba;s/\n/ | /g')"
+      said="$(printf '%s\n' "$got" | "$PY" -c 'import sys; print(" | ".join(line for line in sys.stdin.read().splitlines() if line))')"
     else
       said="$(printf '%s\n' "$got" | grep -v '\.$' | tr '\n' ' ' | sed 's/ *$//')"
     fi
@@ -357,8 +766,12 @@ PY
     status=1
     return
   fi
-  timeout -k 5 120 "$WORK/$dir/program" "$SRV" >"$WORK/$dir/out" 2>&1
-  local code=$?
+  run_watched mutation "$dir"
+  if [ "$WATCHED_KIND" = timeout ]; then
+    echo "$label: broken-copy watchdog expired (120 s)"
+    exit 76
+  fi
+  local code="$WATCHED_CODE"
   if [ "$code" -eq 0 ]; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
@@ -437,7 +850,10 @@ breaks "HTTPS records not parsed when they came over an upstream" httpsparse "do
 
 echo
 if [ "$status" -eq 0 ]; then
-  echo "the std/secure_dns exercise holds"
+  if ! printf 'done\n' >&4; then
+    echo "the secure DNS supervisor could not receive completion"
+    exit 76
+  fi
 else
   echo "the std/secure_dns exercise did not hold"
 fi

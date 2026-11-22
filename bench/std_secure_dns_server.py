@@ -15,12 +15,11 @@ Makes a test CA and a server certificate for `dns.test` and 127.0.0.1
     the file is not written and WORKDIR/h2.missing says why.
   * plain DNS over UDP, for the resolver's opt-in fallback; WORKDIR/udp.port.
 
-The process writes ``pid <native-pid>`` to stdout at startup. WORKDIR/ready
-is written last, then ``ready`` goes to stdout. Runs until killed, a thread
-per connection. WORKDIR/stage names
-the step it has reached (pki, dot, doh, h2, udp); every thread's Python
-stack goes to stderr after 15 s, even if an import has stalled. The
-exercise's 20 s wait once ran out without a trace (iyilang/iyi run
+WORKDIR/ready is written last, then one ``ready\\n`` record goes to stdout.
+Runs until killed, a thread per connection. WORKDIR/stage names the step it
+has reached (pki, dot, doh, h2, udp). For a hang after the traceback timer
+is armed, every thread's Python stack goes to stderr after 15 seconds.
+The exercise's wait once ran out without a trace (iyilang/iyi run
 44329905718, Namespace's macOS VM).
 
 The zone is ZONE below. A few names misbehave on purpose, the way a broken
@@ -56,12 +55,10 @@ if __name__ == "__main__":
 
 import os
 
-if __name__ == "__main__":
-    print(f"pid {os.getpid()}", flush=True)
-
 import base64
 import datetime as dt
 import http.server
+import importlib.util
 import ipaddress
 import select
 import socket
@@ -619,12 +616,12 @@ def main():
     write(work, "doh.port", str(doh.server_address[1]))
 
     write(work, "stage", "h2\n")
-    try:
+    if importlib.util.find_spec("h2") is None:
+        have_h2 = False
+        write(work, "h2.missing", "no h2 package for this python, so there is no HTTP/2 server")
+    else:
         import h2.connection  # noqa: F401
         have_h2 = True
-    except ImportError as missing:
-        have_h2 = False
-        write(work, "h2.missing", "no h2 package for this python (%s), so there is no HTTP/2 server" % missing)
     if have_h2:
         h2_listener = listen_tcp()
         threading.Thread(target=serve_h2, args=(h2_listener, context(work, ["h2"])), daemon=True).start()
@@ -636,7 +633,7 @@ def main():
     write(work, "udp.port", str(udp.server_address[1]))
 
     write(work, "ready", "ready\n")
-    print("ready", flush=True)
+    os.write(1, b"ready\n")
     faulthandler.cancel_dump_traceback_later()
     threading.Event().wait()
 

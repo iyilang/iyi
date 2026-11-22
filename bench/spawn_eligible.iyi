@@ -41,8 +41,9 @@
 #             instant had started, are printed, not judged: growth is judged by
 #             the forced `growth`, `beside`, `widened` and `early` pairs.
 #   beside    forced pair (`-Dbeside_force` only): a second spawn made while the
-#             first holds its worker starts a worker beside it, decided at the
-#             spawn itself; a copy that never grows the pool fails there.
+#             first holds its worker starts a worker beside it, or owes that start
+#             and has it paid; the spawn that does neither fails on its one run.
+#             Its one clock is a 60-second hang limit (status 76).
 #
 # bench/spawn_eligible.sh runs it, and broken copies of the runtime, each
 # caught by the step that names it.
@@ -339,12 +340,17 @@ import std/int
   end
 
 {% if flag?(:beside_force) %}
-  # Queued work with no idle worker starts one (`push` grows the pool on the
-  # spawner's thread before `spawn` returns), so a second spawn made while the
-  # first holds its worker starts a worker beside it. The decision is the
-  # launch count read at the spawn, with no clock: a copy that never grows the
-  # pool fails on its one run. The first task holds on a word until the second
-  # has started.
+  # Queued work with no idle worker starts one. A spawn owes that start while it
+  # holds the scheduler's lock and pays it once the lock is let go; a start owed
+  # while the runtime's own lock is held waits for a later pay (`IyiWorkers.grow`,
+  # `pay`), so the launch count can trail the spawn that asked for it. The verdict
+  # reads both counters. A spawn that neither started a worker nor owed one left
+  # the pool as it was, and fails on its one run. A start it owed is paid from
+  # here, by `pay`, until a worker starts. That wait is the one place a clock is
+  # read: a 60-second hang limit that ends the run at its own sentence (status
+  # 76). `owes` is cumulative, so a rise shows that a start was owed; the pending
+  # word is private, so a start paid is read as the launch count rising. The first
+  # task holds on a word until the second has started.
   def beside : Nil
     group do |g|
       g.spawn do
@@ -353,12 +359,26 @@ import std/int
       end
       IyiWorkers.forced_beside_wait_entered
       before = IyiWorkers.launched
+      owed_before = IyiWorkers.owes
+      {% if flag?(:beside_owed_force) %}
+        IyiWorkers.forced_owe_arm(2_u64)
+      {% end %}
       g.spawn do
         IyiWorkers.forced_beside_mark
         0
       end
-      after = IyiWorkers.launched
-      fail("beside: a second spawn queued behind a running one started no worker") if after == before
+      if IyiWorkers.launched == before && IyiWorkers.owes == owed_before
+        fail("beside: a second spawn queued behind a running one started no worker")
+      end
+      hang_at = __iyi_monotonic_ns + HANG_NS
+      while IyiWorkers.launched == before
+        IyiWorkers.pay
+        hang_end("beside: the start a second spawn owed was not paid within 60 seconds") if __iyi_monotonic_ns >= hang_at
+        IyiThread.spin_pause
+      end
+      {% if flag?(:beside_owed_force) %}
+        puts "beside: owed starts for the second spawn: #{IyiWorkers.owes - owed_before} (information)"
+      {% end %}
       IyiWorkers.forced_beside_wait_started
       IyiWorkers.forced_beside_release
     end

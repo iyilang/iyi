@@ -801,6 +801,22 @@ cat > "$WORK/forced_words.iyi" <<'IYI'
     end
   end
 
+  # Copy-only owe arms for the `beside_owed` control: the first `forced_owe_arm`
+  # grows take their owed start, with no launch, and leave it for `pay`.
+  @[UnsafeReach("copy-only owe arm count, read and taken atomically")]
+  @@forced_owe_arms : UInt64 = 0_u64
+
+  def self.forced_owe_arm(count : UInt64) : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_owe_arms).address).value.set(count)
+  end
+
+  def self.forced_owe_take : Bool
+    cell = Pointer(Atomic(UInt64)).new(pointerof(@@forced_owe_arms).address)
+    return false if cell.value.get == 0_u64
+    cell.value.add(0_u64 &- 1_u64)
+    true
+  end
+
   def self.forced_enter : Nil
     Pointer(Atomic(UInt64)).new(pointerof(@@forced_entered).address).value.set(1_u64)
   end
@@ -982,6 +998,15 @@ if [ "$code" -ne 0 ] || ! grep -qxF 'beside: a second spawn started a worker bes
   echo "the sound beside control failed (exit $code):"; tail -20 beside_control.txt; exit 1
 fi
 echo "  sound beside control: a second spawn started a worker beside the first"
+
+step "failure proof: a start owed for a second spawn is paid by the spawner before its verdict"
+broken beside_owed '/^  def self.grow : Nil$/ { print; print "    if forced_owe_take"; print "      word(pointerof(@@owed)).value.set(1_i64)"; print "      IyiStat.add(IyiStat::OWES, 1_u64)"; print "      return"; print "    end"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dbeside_force -Dbeside_owed_force
+timeout -k 5 120 ./beside_owed-run beside --workers=4 > beside_owed.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'beside: owed starts for the second spawn: 2 (information)' beside_owed.txt || ! grep -qxF 'beside: a second spawn started a worker beside the first, which was running' beside_owed.txt; then
+  echo "the owed-start control failed (exit $code):"; tail -20 beside_owed.txt; exit 1
+fi
+echo "  owed-start control: the second spawn owed two starts, the spawner paid them, and the verdict held"
 
 # A worker the pool starts holds the token of the one out looking until its
 # look finds a task or it has counted itself idle (`IyiScheduler.idle_worker`),

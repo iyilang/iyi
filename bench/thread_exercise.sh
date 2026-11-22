@@ -3560,120 +3560,393 @@ fi
 echo "  80000 lines from four threads, none merged"
 
 # ── 5f. A finished thread asks the registry under the lock ────────────────
-# A thread's retirement unlinks its main fiber only if the registry holds
-# it: the fiber is the head or has a fiber before it. Both words are other
-# threads' to rewrite as they link and unlink their own fibers, and read
-# without the lock the answer was no for a fiber the registry held - the
-# head read before a neighbour's unregister made this fiber the head, the
-# back link after that unregister cleared it - and the main fiber stayed
-# on the list, naming a stack that was gone: the exercise's registry check
-# fired once in 24 runs on the M2 (S6 bench, flag off). Here two threads
-# make their main fibers in turn, so the second's is before the first's;
-# the first ends, and the second 100 ms after it. Copies of the runtime
-# hold a 300 ms window between the head's read and the back link's, for a
-# fiber that is not the head: under the lock the second's unregister waits
-# for the window and nothing is left on the registry, five runs of five;
-# with the lock taken out of the ask, as it was, the second unlinks itself
-# inside the window and the first's main fiber is left, five of five.
+# A reads the head while B is immediately before it. B may return from its
+# body only after that read. The locked ask releases A after B's actual
+# failed lock acquisition; the unlocked ask releases A only after B's real
+# unlink. Both copies use the same hooks, and differ only in the ask's lock
+# and unlock. The last walk names the fibers, not just the registry's size.
 step "two neighbours retire together: the registry is asked under the lock"
-cat > neighbours.iyi <<'IYI'
-@[Unsafe("the threads' turns are words of a page from __iyi_mmap read as atomics, and the first reads its own fiber's back link, which only the registry's writers change")]
+if ! mkdir -p "$WORK/registry-ctl/iyi" "$WORK/registry-cut/iyi"; then
+  echo "SETUP: registry: the runtime copy directories could not be created"; exit 76
+fi
+if ! cat > "$WORK/registry.part" <<'IYI'
+    IYI_REG_A_FIBER    = 2560_u64
+    IYI_REG_B_FIBER    = 2624_u64
+    IYI_REG_RETIRE_A   = 2688_u64
+    IYI_REG_A_HEAD     = 2752_u64
+    IYI_REG_B_ASK_LINE = 2816_u64
+    IYI_REG_B_CONTENDED = 2880_u64
+    # Bit 0 records B's unlink; bit 1 records A's unlink.
+    IYI_REG_UNLINKED   = 2944_u64
+    IYI_REG_A_CUT      = 3008_u64
+    # 0 means unanswered, 1 means false, 2 means true.
+    IYI_REG_A_ANSWER   = 3072_u64
+
+    # This can run while the caller owns the runtime lock. In particular,
+    # Windows' __iyi_exit tries that lock, so terminate directly there.
+    def self.registry_die(message : String, status : Int32) : NoReturn
+      __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+      {% if flag?(:darwin) %}
+        LibC.registry_probe_exit(status)
+      {% elsif flag?(:win32) %}
+        LibC.TerminateProcess(LibC.GetCurrentProcess, status)
+        LibC.ExitProcess(status)
+      {% else %}
+        __iyi_exit(status)
+      {% end %}
+    end
+
+    def self.registry_init : Nil
+      page = control
+      if page == 0_u64 || page == 0xFFFFFFFFFFFFFFFF_u64
+        registry_die("SETUP: registry: the control page could not be mapped\n", 76)
+      end
+      offset = IYI_REG_A_FIBER
+      while offset <= IYI_REG_A_ANSWER
+        word(page + offset).value.set(0_u64)
+        offset = offset + 64_u64
+      end
+    end
+
+    def self.registry_set(offset : UInt64, value : UInt64) : Nil
+      word(@@control + offset).value.set(value)
+    end
+
+    def self.registry_get(offset : UInt64) : UInt64
+      word(@@control + offset).value.get
+    end
+
+    def self.registry_wait(offset : UInt64, message : String) : UInt64
+      page = @@control
+      began = IyiMark.now_ns
+      value = word(page + offset).value.get
+      while value == 0_u64
+        registry_die(message, 76) if IyiMark.now_ns &- began > 20000000000_u64
+        yield_cpu
+        value = word(page + offset).value.get
+      end
+      value
+    end
+
+    # The marker brackets only B's actual registered? lock call. In the
+    # mutant the two markers are adjacent, so another lock cannot count.
+    def self.registry_ask_begin(fiber : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || fiber == 0_u64 || fiber != word(page + IYI_REG_B_FIBER).value.get
+      registry_die("SETUP: registry: the neighbour has no thread line\n", 76) if @@line == 0_u64
+      word(page + IYI_REG_B_ASK_LINE).value.set(@@line)
+    end
+
+    def self.registry_ask_end(fiber : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || fiber == 0_u64 || fiber != word(page + IYI_REG_B_FIBER).value.get
+      word(page + IYI_REG_B_ASK_LINE).value.set(0_u64)
+    end
+
+    # Called from the failed iteration of the real lock, before lock_turn.
+    def self.registry_lock_wait(seen : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || (seen & 1_u64) == 0_u64
+      asker = word(page + IYI_REG_B_ASK_LINE).value.get
+      return if asker == 0_u64 || asker != @@line
+      word(page + IYI_REG_B_CONTENDED).value.set(1_u64)
+    end
+
+    # A is inside registered?, immediately after its actual head read.
+    # Do not release it on a timer: the watchdog only terminates the run.
+    def self.registry_head(fiber : UInt64, head : UInt64, previous : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || fiber == 0_u64 || fiber != word(page + IYI_REG_A_FIBER).value.get
+      neighbour = word(page + IYI_REG_B_FIBER).value.get
+      if neighbour == 0_u64 || head != neighbour || previous != neighbour
+        registry_die("SETUP: registry: the neighbour was not the head and the first fiber's backlink\n", 76)
+      end
+      word(page + IYI_REG_A_HEAD).value.set(head)
+      began = IyiMark.now_ns
+      while true
+        if word(page + IYI_REG_B_CONTENDED).value.get != 0_u64
+          word(page + IYI_REG_A_CUT).value.set(1_u64)
+          return
+        end
+        if (word(page + IYI_REG_UNLINKED).value.get & 1_u64) != 0_u64
+          word(page + IYI_REG_A_CUT).value.set(2_u64)
+          return
+        end
+        if IyiMark.now_ns &- began > 20000000000_u64
+          registry_die("SETUP: registry: the neighbour neither contended nor unlinked\n", 76)
+        end
+        yield_cpu
+      end
+    end
+
+    def self.registry_answer(fiber : UInt64, held : Bool) : Nil
+      page = @@control
+      return if page == 0_u64 || fiber == 0_u64 || fiber != word(page + IYI_REG_A_FIBER).value.get
+      word(page + IYI_REG_A_ANSWER).value.set(held ? 2_u64 : 1_u64)
+    end
+
+    # Called after unregister actually updates the head and backlinks.
+    def self.registry_unlinked(fiber : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || fiber == 0_u64
+      bit = 0_u64
+      if fiber == word(page + IYI_REG_B_FIBER).value.get
+        bit = 1_u64
+      elsif fiber == word(page + IYI_REG_A_FIBER).value.get
+        bit = 2_u64
+      else
+        return
+      end
+      while true
+        seen = word(page + IYI_REG_UNLINKED).value.get
+        if (seen & bit) != 0_u64
+          registry_die("SETUP: registry: a main fiber was unlinked more than once\n", 76)
+        end
+        return if word(page + IYI_REG_UNLINKED).value.compare_and_set(seen, seen | bit)[1]
+      end
+    end
+IYI
+then
+  echo "SETUP: registry: the hook source could not be written"; exit 76
+fi
+
+if ! cat > "$WORK/neighbours.iyi" <<'IYI'
+@[Unsafe("the rendezvous uses initialized atomic words, and the final walk reads the registry after both threads have joined")]
 module neighbours
 
-class Turns
-  @@page = 0_u64
-
-  def self.setup : Nil
-    @@page = __iyi_mmap(4096_u64).address
-  end
-
-  def self.word(index : UInt64) : Pointer(Atomic(UInt64))
-    Pointer(Atomic(UInt64)).new(@@page + index * 64_u64)
-  end
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+IyiThread.registry_init
+baseline = IyiScheduler.current.object_id
+initial = IyiScheduler.first_fiber
+unless initial.is_a?(IyiFiber) && initial.object_id == baseline && !initial.next_fiber.is_a?(IyiFiber)
+  IyiThread.registry_die("SETUP: registry: the baseline was not the sole main fiber\n", 76)
 end
 
-def wait_for(index : UInt64) : Nil
-  while Turns.word(index).value.get == 0_u64
-  end
-end
-
-def registered : Int32
-  count = 0
-  fiber = IyiScheduler.first_fiber
-  while fiber.is_a?(IyiFiber)
-    count = count + 1
-    fiber = fiber.next_fiber
-  end
-  count
-end
-
-Turns.setup
-IyiScheduler.current
-before = registered
 first = IyiThread.start do
-  IyiScheduler.current
-  Turns.word(0_u64).value.set(1_u64)
-  wait_for(1_u64)
-  Turns.word(3_u64).value.set(1_u64) if IyiScheduler.current.prev_fiber.is_a?(IyiFiber)
-  Turns.word(2_u64).value.set(1_u64)
+  IyiThread.registry_set(IyiThread::IYI_REG_A_FIBER, IyiScheduler.current.object_id)
+  IyiThread.registry_wait(IyiThread::IYI_REG_RETIRE_A, "SETUP: registry: the first thread was not told to retire\n")
   nil
 end
+first_id = IyiThread.registry_wait(IyiThread::IYI_REG_A_FIBER, "SETUP: registry: the first thread did not register its main fiber\n")
 second = IyiThread.start do
-  wait_for(0_u64)
-  IyiScheduler.current
-  Turns.word(1_u64).value.set(1_u64)
-  wait_for(2_u64)
-  gap = __iyi_monotonic_ns + 100_000_000_i64
-  while __iyi_monotonic_ns < gap
-  end
+  IyiThread.registry_set(IyiThread::IYI_REG_B_FIBER, IyiScheduler.current.object_id)
+  IyiThread.registry_wait(IyiThread::IYI_REG_A_HEAD, "SETUP: registry: the first thread did not read the head\n")
   nil
 end
+second_id = IyiThread.registry_wait(IyiThread::IYI_REG_B_FIBER, "SETUP: registry: the second thread did not register its main fiber\n")
+IyiThread.registry_set(IyiThread::IYI_REG_RETIRE_A, 1_u64)
+# No join or other runtime-lock operation on main until A has answered.
+answer = IyiThread.registry_wait(IyiThread::IYI_REG_A_ANSWER, "SETUP: registry: the first membership ask did not answer\n")
 first.join
 second.join
-puts "behind=#{Turns.word(3_u64).value.get} left=#{registered - before}"
+
+cut = IyiThread.registry_get(IyiThread::IYI_REG_A_CUT)
+contended = IyiThread.registry_get(IyiThread::IYI_REG_B_CONTENDED)
+unlinked = IyiThread.registry_get(IyiThread::IYI_REG_UNLINKED)
+if IyiThread.registry_get(IyiThread::IYI_REG_B_ASK_LINE) != 0_u64
+  IyiThread.registry_die("SETUP: registry: the neighbour did not finish its membership ask\n", 76)
+end
+
+count = 0
+first_seen = 0
+second_seen = 0
+baseline_seen = 0
+node = IyiScheduler.first_fiber
+head_id = node.is_a?(IyiFiber) ? node.object_id : 0_u64
+while node.is_a?(IyiFiber) && count < 4
+  first_seen += 1 if node.object_id == first_id
+  second_seen += 1 if node.object_id == second_id
+  baseline_seen += 1 if node.object_id == baseline
+  count += 1
+  node = node.next_fiber
+end
+if node.is_a?(IyiFiber)
+  IyiThread.registry_die("SETUP: registry: the final registry walk did not terminate\n", 76)
+end
+
+if cut == 1_u64
+  if contended != 1_u64
+    IyiThread.registry_die("SETUP: registry: the neighbour's failed lock acquisition was not recorded\n", 76)
+  end
+  if answer != 2_u64
+    IyiThread.registry_die("FAIL: registry: the locked membership check answered no for the first fiber\n", 1)
+  end
+  if unlinked != 3_u64
+    IyiThread.registry_die("SETUP: registry: both real unlinks were not observed\n", 76)
+  end
+  if count != 1 || baseline_seen != 1 || head_id != baseline || first_seen != 0 || second_seen != 0
+    IyiThread.registry_die("FAIL: registry: the locked retirement did not restore the baseline registry\n", 1)
+  end
+  puts "registry: the neighbour waited for the lock and both fibers were removed"
+elsif cut == 2_u64
+  if contended != 0_u64 || unlinked != 1_u64
+    IyiThread.registry_die("SETUP: registry: the unlocked ask did not observe only the neighbour's unlink\n", 76)
+  end
+  if answer != 1_u64
+    IyiThread.registry_die("SETUP: registry: the unlocked ask did not observe the stale membership result\n", 76)
+  end
+  if count != 2 || baseline_seen != 1 || head_id != first_id || first_seen != 1 || second_seen != 0
+    IyiThread.registry_die("SETUP: registry: the stale first fiber was not found on the final registry\n", 76)
+  end
+  IyiThread.registry_die("FAIL: registry: the unlocked membership check left a retired main fiber registered\n", 1)
+else
+  IyiThread.registry_die("SETUP: registry: the first ask did not record its release event\n", 76)
+end
 IYI
-window='/^  def self\.registered\?\(fiber : IyiFiber\) : Bool$/ { inside = 1 }
-  inside && /^  end$/ { inside = 0 }
-  inside && unlocked && /^    IyiRuntimeLock\.(un)?lock$/ { dropped++; next }
-  { print }
-  inside && /^    head = @@all_head$/ {
-    print "    if !(head.is_a?(IyiFiber) && head.object_id == fiber.object_id)"
-    print "      window = __iyi_monotonic_ns + 300_000_000_i64"
-    print "      while __iyi_monotonic_ns < window"
-    print "      end"
-    print "    end"
-    found = 1
-  }
-  END { if (!found || (unlocked && dropped != 2)) exit 3 }'
-for copy in window unlocked; do
-  mkdir -p "$copy/iyi"
-  cp "$REPO"/src/iyi/*.iyi "$copy/iyi/"
-  awk -v unlocked="$([ "$copy" = unlocked ] && echo 1)" "$window" \
-    "$REPO/src/iyi/concurrency.iyi" > "$copy/iyi/concurrency.iyi" || { echo "the registry's ask is not in concurrency.iyi any more"; exit 1; }
-done
-if ! "$IYI" build neighbours.iyi -o neighbours > build-neighbours.log 2>&1; then
-  cat build-neighbours.log; exit 1
+then
+  echo "SETUP: registry: the exercise source could not be written"; exit 76
 fi
-for copy in window unlocked; do
-  if ! IYI_PATH="$WORK/$copy${PSEP}$REPO/src" "$IYI" build neighbours.iyi -o "neighbours-$copy" > "build-neighbours-$copy.log" 2>&1; then
-    cat "build-neighbours-$copy.log"; exit 1
+
+for copy in registry-ctl registry-cut; do
+  if ! cp "$REPO"/src/iyi/*.iyi "$WORK/$copy/iyi/"; then
+    echo "SETUP: registry: the runtime sources could not be copied"; exit 76
   fi
 done
-for run in neighbours neighbours-window neighbours-unlocked; do
-  want=0
-  [ "$run" = neighbours-unlocked ] && want=1
-  again=1
-  while [ "$again" -le 5 ]; do
-    timeout -k 5 30 "./$run" > "$run.txt" 2>&1
-    code=$?
-    if [ "$code" -eq 76 ]; then cat "$run.txt"; exit 76; fi
-    if [ "$code" -ne 0 ] || ! grep -qx "behind=1 left=$want" "$run.txt"; then
-      echo "$run, run $again, exited $code where it should leave $want fiber(s) registered:"; tail -3 "$run.txt"; exit 1
-    fi
-    again=$((again + 1))
-  done
+
+# Generate the common hooks once. Every method and splice is counted
+# separately, including the Darwin alias needed by a lock-held watchdog.
+if ! awk -v part="$WORK/registry.part" '
+  /^    # ── Roots/ {
+    while ((getline line < part) > 0) print line
+    close(part); roots++
+  }
+  /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ {
+    print; print "      fun registry_probe_exit = _exit(status : Int32) : NoReturn"; darwin++; next
+  }
+  { print }
+  END { if (roots != 1 || darwin != 1) exit 3 }
+' "$REPO/src/iyi/thread.iyi" > "$WORK/registry-ctl/iyi/thread.iyi"; then
+  echo "SETUP: registry: the thread hook anchors changed"; exit 76
+fi
+if ! cp "$WORK/registry-ctl/iyi/thread.iyi" "$WORK/registry-cut/iyi/thread.iyi"; then
+  echo "SETUP: registry: the common thread hooks could not be copied"; exit 76
+fi
+if ! awk '
+  /^  def self\.lock : Nil$/ { inside = 1; methods++ }
+  inside && /^  end$/ { inside = 0; ends++ }
+  inside && /^        spins, since = IyiThread\.lock_turn\(word, seen, spins, since\)$/ {
+    print "        IyiThread.registry_lock_wait(seen)"; waits++
+  }
+  { print }
+  END { if (methods != 1 || ends != 1 || waits != 1) exit 3 }
+' "$REPO/src/iyi/prelude.iyi" > "$WORK/registry-ctl/iyi/prelude.iyi"; then
+  echo "SETUP: registry: the failed-lock hook anchors changed"; exit 76
+fi
+if ! cp "$WORK/registry-ctl/iyi/prelude.iyi" "$WORK/registry-cut/iyi/prelude.iyi"; then
+  echo "SETUP: registry: the common lock hook could not be copied"; exit 76
+fi
+if ! awk '
+  /^  def self\.registered\?\(fiber : IyiFiber\) : Bool$/ { ask = 1; asks++; print; next }
+  ask && /^  end$/ { ask = 0; ask_ends++; print; next }
+  /^  def self\.unregister\(fiber : IyiFiber\) : Nil$/ { unlink = 1; unlinks++; print; next }
+  unlink && /^  end$/ { unlink = 0; unlink_ends++; print; next }
+  ask && $0 == "    IyiRuntimeLock.lock" {
+    print "    IyiThread.registry_ask_begin(fiber.object_id)"
+    print
+    print "    IyiThread.registry_ask_end(fiber.object_id)"
+    locks++; next
+  }
+  ask && $0 == "    IyiRuntimeLock.unlock" { unlocks++; print; next }
+  ask && $0 == "    head = @@all_head" {
+    print
+    print "    registry_previous = fiber.prev_fiber"
+    print "    IyiThread.registry_head(fiber.object_id, head.is_a?(IyiFiber) ? head.object_id : 0_u64, registry_previous.is_a?(IyiFiber) ? registry_previous.object_id : 0_u64)"
+    heads++; next
+  }
+  ask && $0 == "    held = fiber.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == fiber.object_id)" {
+    print; print "    IyiThread.registry_answer(fiber.object_id, held)"; answers++; next
+  }
+  unlink && $0 == "    fiber.prev_fiber = nil" {
+    print; print "    IyiThread.registry_unlinked(fiber.object_id)"; unlinked++; next
+  }
+  { print }
+  END {
+    if (asks != 1 || ask_ends != 1 || unlinks != 1 || unlink_ends != 1 ||
+        locks != 1 || unlocks != 1 || heads != 1 || answers != 1 || unlinked != 1) exit 3
+  }
+' "$REPO/src/iyi/concurrency.iyi" > "$WORK/registry-ctl/iyi/concurrency.iyi"; then
+  echo "SETUP: registry: the membership or unlink hook anchors changed"; exit 76
+fi
+
+# The mutant removes exactly one lock and one unlock, both inside the ask.
+if ! awk '
+  /^  def self\.registered\?\(fiber : IyiFiber\) : Bool$/ { ask = 1; asks++ }
+  ask && /^  end$/ { ask = 0; ends++ }
+  ask && $0 == "    IyiRuntimeLock.lock" { locks++; next }
+  ask && $0 == "    IyiRuntimeLock.unlock" { unlocks++; next }
+  { print }
+  END { if (asks != 1 || ends != 1 || locks != 1 || unlocks != 1) exit 3 }
+' "$WORK/registry-ctl/iyi/concurrency.iyi" > "$WORK/registry-cut/iyi/concurrency.iyi"; then
+  echo "SETUP: registry: the mutant lock and unlock anchors changed"; exit 76
+fi
+# Reinsert those two lines independently and compare the complete files.
+if ! awk '
+  /^  def self\.registered\?\(fiber : IyiFiber\) : Bool$/ { ask = 1; asks++ }
+  ask && /^  end$/ { ask = 0; ends++ }
+  ask && $0 == "    IyiThread.registry_ask_begin(fiber.object_id)" {
+    print; print "    IyiRuntimeLock.lock"; locks++; next
+  }
+  ask && $0 == "    IyiThread.registry_answer(fiber.object_id, held)" {
+    print; print "    IyiRuntimeLock.unlock"; unlocks++; next
+  }
+  { print }
+  END { if (asks != 1 || ends != 1 || locks != 1 || unlocks != 1) exit 3 }
+' "$WORK/registry-cut/iyi/concurrency.iyi" > "$WORK/registry-restored.iyi"; then
+  echo "SETUP: registry: the mutant comparison anchors changed"; exit 76
+fi
+if ! cmp -s "$WORK/registry-ctl/iyi/concurrency.iyi" "$WORK/registry-restored.iyi"; then
+  echo "SETUP: registry: the mutant differs by more than the lock and unlock"; exit 76
+fi
+for source in "$REPO"/src/iyi/*.iyi; do
+  name=${source##*/}
+  [ "$name" = concurrency.iyi ] && continue
+  if ! cmp -s "$WORK/registry-ctl/iyi/$name" "$WORK/registry-cut/iyi/$name"; then
+    echo "SETUP: registry: the runtime copies differ outside the membership ask"; exit 76
+  fi
 done
-echo "  five runs of five each: none left as the tree asks, none with the window under the lock, one left in every run with the lock taken out"
+
+for copy in registry-ctl registry-cut; do
+  if ! IYI_PATH="$WORK/$copy${PSEP}$REPO/src" "$IYI" build "$WORK/neighbours.iyi" -o "$WORK/$copy-run" > "$WORK/build-$copy.log" 2>&1; then
+    echo "SETUP: registry: $copy did not build"; cat "$WORK/build-$copy.log"; exit 76
+  fi
+done
+
+control='registry: the neighbour waited for the lock and both fibers were removed'
+failure='FAIL: registry: the unlocked membership check left a retired main fiber registered'
+for copy in registry-ctl registry-cut; do
+  timeout -k 5 120 "$WORK/$copy-run" > "$WORK/$copy-raw.txt" 2>&1
+  code=$?
+  tr -d '\r' < "$WORK/$copy-raw.txt" > "$WORK/$copy.txt"
+  if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+    echo "SETUP: registry: the $copy watchdog expired"; exit 76
+  fi
+  if [ "$code" -eq 76 ] || grep -q '^SETUP:' "$WORK/$copy.txt"; then
+    if grep -q '^SETUP:' "$WORK/$copy.txt"; then
+      cat "$WORK/$copy.txt"
+    else
+      echo "SETUP: registry: $copy exited 76 without a stage diagnostic"
+    fi
+    exit 76
+  fi
+  failures=$(grep -c '^FAIL:' "$WORK/$copy.txt" || true)
+  if [ "$copy" = registry-ctl ]; then
+    if [ "$code" -eq 1 ] && [ "$failures" -eq 1 ]; then
+      cat "$WORK/$copy.txt"; exit 1
+    fi
+    if [ "$code" -ne 0 ] || [ "$failures" -ne 0 ] || ! grep -qxF "$control" "$WORK/$copy.txt"; then
+      echo "SETUP: registry: the control did not complete its witnessed retirement"
+      cat "$WORK/$copy.txt"; exit 76
+    fi
+    printf '  control: exit 0, %s\n' "$control"
+  else
+    if [ "$code" -ne 1 ] || [ "$failures" -ne 1 ] || ! grep -qxF "$failure" "$WORK/$copy.txt"; then
+      echo "SETUP: registry: the mutant did not produce the named membership failure"
+      cat "$WORK/$copy.txt"; exit 76
+    fi
+    printf '  exits 1 at "%s"\n' "$failure"
+  fi
+done
 
 # ── 6. Share: what a thread's block may capture is decided at compile time ─
 # SPEC.md III.4.4's marker, gating III.4.11's block: a value whose type has

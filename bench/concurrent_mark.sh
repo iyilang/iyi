@@ -6,10 +6,10 @@
 #
 # Every failure proof runs its broken copy once and requires exit 1 and the
 # whole named failure sentence (numeric observations may vary). Explicit
-# fixture-premise, watchdog and Windows boost-query failures exit 76 with
-# their own sentences. Build, shell and unexpected failures fail the gate
-# without that status contract. A forced copy waits on a word the program
-# sets; code not compiled on this platform is named, not silently passed.
+# fixture-premise, build, watchdog and Windows boost-query failures exit 76
+# with their own sentences. Other unexpected process failures retain their
+# status. A forced copy waits on a word the program sets; code not compiled
+# on this platform is named, not silently passed.
 # In the order they run:
 #   - the program, release: rounds that move a payload into a black holder
 #     under a running mark, the pauses of a concurrent collection against the
@@ -47,7 +47,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # the wrapper in bin is a posix shell script, so a caller that already has a
 # compiler of its own names it through the environment.
 IYI="${IYI:-$REPO/bin/iyi}"
-WORK="$(mktemp -d)"
+WORK="$(mktemp -d)" || { echo "FAIL: gate setup: cannot create the work directory"; exit 76; }
 
 # A native compiler cannot resolve this shell's own path mapping: a search
 # path built from the shell's `pwd` finds no prelude at all, and a scratch
@@ -68,18 +68,93 @@ case "$(uname -s)" in
   *) PSEP=':' ;;
 esac
 
-cd "$WORK" || exit 1
+cd "$WORK" || { echo "FAIL: gate setup: cannot enter the work directory"; exit 76; }
 
 step() { echo "== $1"; }
 
+# An observed setup failure remains 76 through the shell; a failed assertion
+# remains 1 and an unexpected timeout or signal retains its own status.
+fail_for_status() {
+  case "$1" in
+    0 | 1) exit 1 ;;
+    *) cat "$2"; exit "$1" ;;
+  esac
+}
+
+fail_build() {
+  echo "FAIL: gate setup: fixture build failed ($1)"
+  cat "$1"
+  exit 76
+}
+
+require_bounded_round() {
+  if [ ! -f "$1" ]; then
+    echo "FAIL: bounded setup: the trigger output is missing"
+    return 76
+  fi
+  if grep -q '^one core:' "$1"; then
+    echo "FAIL: bounded setup: this host has one core; the bounded round needs a helper beside a second thread"
+    return 76
+  fi
+  return 0
+}
+
+require_idle_pool() {
+  if ! grep -q '^idle pool: with' "$1"; then
+    echo "FAIL: idle pool setup: the benchmark did not report its idle-pool step"
+    return 76
+  fi
+  return 0
+}
+
 step "the mark beside the program, release build"
 if ! "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o marks > build.log 2>&1; then
-  cat build.log; exit 1
+  fail_build build.log
 fi
-if ! timeout -k 5 300 ./marks > answers.txt 2>&1; then
-  cat answers.txt; exit 1
+timeout -k 5 300 ./marks > answers.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ]; then
+  cat answers.txt; fail_for_status "$code" answers.txt
 fi
-grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
+grep -q 'every property held' answers.txt || { echo "FAIL: gate setup: the benchmark did not report its success sentence"; cat answers.txt; exit 76; }
+
+# Exercise the real shell entry point with copy-only benchmark and compiler
+# failures. Every invocation stops at the first build or benchmark.
+step "control: the gate preserves benchmark statuses and names build failures"
+cat > setup-status-compiler <<'SH'
+#!/usr/bin/env bash
+if [ "${GATE_TEST_BUILD:-0}" = 1 ]; then
+  echo "copy-only compiler failure"
+  exit 1
+fi
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift 2; else shift; fi
+done
+[ -n "$out" ] || exit 2
+cat > "$out" <<'PROGRAM'
+#!/usr/bin/env bash
+echo "gate status control: benchmark exited $GATE_TEST_STATUS"
+exit "$GATE_TEST_STATUS"
+PROGRAM
+chmod +x "$out"
+SH
+chmod +x setup-status-compiler
+for expected_status in 76 1 124; do
+  GATE_TEST_STATUS="$expected_status" IYI="$WORK/setup-status-compiler" bash "$REPO/bench/concurrent_mark.sh" > "setup-status-$expected_status.txt" 2>&1
+  code=$?
+  expected="gate status control: benchmark exited $expected_status"
+  if [ "$code" -ne "$expected_status" ] || ! grep -Fxq "$expected" "setup-status-$expected_status.txt"; then
+    echo "the gate did not preserve benchmark exit $expected_status (exit $code):"; cat "setup-status-$expected_status.txt"; fail_for_status "$code" "setup-status-$expected_status.txt"
+  fi
+  printf '  exits %s at "%s"\n' "$expected_status" "$expected"
+done
+GATE_TEST_BUILD=1 IYI="$WORK/setup-status-compiler" bash "$REPO/bench/concurrent_mark.sh" > setup-build.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: gate setup: fixture build failed (build.log)" setup-build.txt; then
+  echo "the gate did not name the compiler setup failure (exit $code):"; cat setup-build.txt; fail_for_status "$code" setup-build.txt
+fi
+printf '  exits 76 at "%s"\n' "FAIL: gate setup: fixture build failed (build.log)"
 
 step "the pauses, stopped and beside the program ($(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "$NUMBER_OF_PROCESSORS") cores here)"
 grep -E '^(stray|small|moves|pause|large|wake|share):' answers.txt | sed 's/^/  /'
@@ -140,9 +215,11 @@ end
 puts "machine: #{count} threads reading the clock for a second, the longest gap any saw #{(worst // 1000_u64).to_i64} us"
 IYI
 if ! "$IYI" build --release machine.iyi -o machine > build-machine.log 2>&1; then
-  cat build-machine.log; exit 1
+  fail_build build-machine.log
 fi
-timeout -k 5 60 ./machine > machine.txt 2>&1 || { cat machine.txt; exit 1; }
+timeout -k 5 60 ./machine > machine.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ]; then cat machine.txt; fail_for_status "$code" machine.txt; fi
 grep '^machine:' machine.txt | sed 's/^/  /'
 
 # Report the first collection beside busy threads with and without helpers.
@@ -218,13 +295,15 @@ watcher.join
 puts "crowded: #{took // 1000000_u64} ms, #{IyiMark.collections} collections, beside #{spinners.size} threads, #{sum}"
 IYI
 if ! "$IYI" build --release crowded.iyi -o crowded > build-crowded.log 2>&1; then
-  cat build-crowded.log; exit 1
+  fail_build build-crowded.log
 fi
 crowded_once() {
-  timeout -k 5 120 "./$1" "$2" > crowded.txt 2>&1 || { cat crowded.txt; exit 1; }
+  timeout -k 5 120 "./$1" "$2" > crowded.txt 2>&1
+  code=$?
+  if [ "$code" -ne 0 ]; then cat crowded.txt; fail_for_status "$code" crowded.txt; fi
   ms="$(tr -d '\r' < crowded.txt | sed -n 's/^crowded: \([0-9]*\) ms, [1-9][0-9]* collections, .*$/\1/p')"
   beside="$(tr -d '\r' < crowded.txt | sed -n 's/^.* beside \([0-9]*\) threads.*$/\1/p')"
-  [ -n "$ms" ] || { echo "no collection, or no answer:"; cat crowded.txt; exit 1; }
+  [ -n "$ms" ] || { echo "FAIL: crowded setup: no collection or no answer"; cat crowded.txt; exit 76; }
 }
 step "the first collections beside threads computing on every core"
 crowded_once crowded alone
@@ -292,11 +371,13 @@ puts "lost #{lost}"
 exit(lost == 0 ? 0 : 1)
 IYI
 if ! "$IYI" build realloced.iyi -o realloced > build-realloced.log 2>&1; then
-  cat build-realloced.log; exit 1
+  fail_build build-realloced.log
 fi
 for run in 1 2 3 4 5 6 7 8 9 10; do
-  if ! timeout -k 5 120 ./realloced > realloced.txt 2>&1 || ! grep -qx "lost 0" realloced.txt; then
-    echo "  run $run of 10 lost what a realloc'd buffer held:"; tail -3 realloced.txt; exit 1
+  timeout -k 5 120 ./realloced > realloced.txt 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -qx "lost 0" realloced.txt; then
+    echo "  run $run of 10 lost what a realloc'd buffer held:"; tail -3 realloced.txt; fail_for_status "$code" realloced.txt
   fi
 done
 echo "  ten runs of three hundred realloc'd buffers, every leaf intact"
@@ -480,7 +561,7 @@ puts "lost #{lost + 20000 - count}"
 exit(lost == 0 && count == 20000 ? 0 : 1)
 IYI
 if ! "$IYI" build freed.iyi -o freed > build-freed.log 2>&1; then
-  cat build-freed.log; exit 1
+  fail_build build-freed.log
 fi
 # Every shape runs the bursts, darwin included: the macOS 15 runner this gate
 # runs on (six cores) ended each of ten runs in 1 to 4 s with every kept chunk
@@ -489,7 +570,7 @@ for run in 1 2 3 4 5 6 7 8 9 10; do
   timeout -k 5 120 ./freed > freed.txt 2>&1
   code=$?
   if [ "$code" -ne 0 ] || ! grep -qx "lost 0" freed.txt; then
-    echo "  run $run of 10 lost a chunk kept beside chunks freed (exit $code):"; tail -3 freed.txt; exit 1
+    echo "  run $run of 10 lost a chunk kept beside chunks freed (exit $code):"; tail -3 freed.txt; fail_for_status "$code" freed.txt
   fi
 done
 echo "  ten runs of 200,000 bursts of frees, every kept chunk intact"
@@ -585,39 +666,39 @@ awk 'function forced() {
     print "            end"
     print "          end"
     found++; next }
-  { print } END { if (declared != 1 || mark_declared != 1 || noted != 1 || found != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > widened/iyi/prelude.iyi || { echo "the sweep's look or the free this step arms is missing or ambiguous"; exit 1; }
+  { print } END { if (declared != 1 || mark_declared != 1 || noted != 1 || found != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > widened/iyi/prelude.iyi || { echo "the sweep's look or the free this step arms is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-widened > build-widened.log 2>&1; then
-  cat build-widened.log; exit 1
+  fail_build build-widened.log
 fi
 for run in 1 2 3 4 5 6 7 8 9 10; do
   timeout -k 5 120 ./freed-widened > widened.txt 2>&1
   code=$?
   if [ "$code" -ne 0 ] || ! grep -qx "lost 0" widened.txt; then
-    echo "  run $run of 10 beside the widened sweep lost a chunk or saw a free land (exit $code):"; tail -3 widened.txt; exit 1
+    echo "  run $run of 10 beside the widened sweep lost a chunk or saw a free land (exit $code):"; tail -3 widened.txt; fail_for_status "$code" widened.txt
   fi
 done
 echo "  ten runs, no free inside the sweep's look at a kept chunk, every chunk intact"
 
 step "failure proof: the armed look held for the program's free of its chunk, with that free made by the locked path"
 if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build freed.iyi -Dfreed_force -o freed-armed > build-armed.log 2>&1; then
-  cat build-armed.log; exit 1
+  fail_build build-armed.log
 fi
 timeout -k 5 120 ./freed-armed > armed.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -qx "lost 0" armed.txt; then
-  echo "the hook alone, armed, did not keep every chunk (exit $code):"; tail -3 armed.txt; exit 1
+  echo "the hook alone, armed, did not keep every chunk (exit $code):"; tail -3 armed.txt; fail_for_status "$code" armed.txt
 fi
 echo "  the hook alone, armed, exits 0: $(grep -m1 '^lost' armed.txt)"
 step "control: a sweep look outside the aged set is a setup failure"
 awk '$0 == "  if first < 0" { print "  first = -1"; found++ }
-  { print } END { if (found != 1) exit 3 }' freed.iyi > freed-premise.iyi || { echo "the aged-set premise is missing or ambiguous"; exit 1; }
+  { print } END { if (found != 1) exit 3 }' freed.iyi > freed-premise.iyi || { echo "the aged-set premise is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build freed-premise.iyi -Dfreed_force -o freed-premise > build-freed-premise.log 2>&1; then
-  cat build-freed-premise.log; exit 1
+  fail_build build-freed-premise.log
 fi
 timeout -k 5 120 ./freed-premise > freed-premise.txt 2>&1
 code=$?
 if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: freed: the sweep looked at a chunk the last mark kept that is not one of the aged ones" freed-premise.txt; then
-  echo "the aged-set premise was not reported as setup failure (exit $code):"; tail -3 freed-premise.txt; exit 1
+  echo "the aged-set premise was not reported as setup failure (exit $code):"; tail -3 freed-premise.txt; fail_for_status "$code" freed-premise.txt
 fi
 printf '  exits 76 at "%s"\n' "FAIL: freed: the sweep looked at a chunk the last mark kept that is not one of the aged ones"
 
@@ -625,14 +706,14 @@ step "failure proof: a chunk the sweep has not reached, freed with no lock, is f
 mkdir -p unlocked/iyi
 cp "$REPO"/src/iyi/*.iyi unlocked/iyi/
 awk '{ if (sub(/^            free_unswept\(arena, head, slot, table, index\)$/, "            list_freed(arena, head, slot, table, index)")) found++; print } END { if (found != 1) exit 3 }' \
-  widened/iyi/prelude.iyi > unlocked/iyi/prelude.iyi || { echo "the free this proof puts back is not in the prelude any more"; exit 1; }
+  widened/iyi/prelude.iyi > unlocked/iyi/prelude.iyi || { echo "the free this proof puts back is not in the prelude any more"; exit 76; }
 if ! IYI_PATH="$WORK/unlocked${PSEP}$REPO/src" "$IYI" build freed.iyi -Dfreed_force -o freed-unlocked > build-unlocked.log 2>&1; then
-  cat build-unlocked.log; exit 1
+  fail_build build-unlocked.log
 fi
 timeout -k 5 120 ./freed-unlocked > unlocked.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Fxq "freed: a chunk the last mark kept was freed while the sweep looked at it" unlocked.txt; then
-  echo "the free with no lock was not seen inside the sweep's look (exit $code):"; tail -3 unlocked.txt; exit 1
+  echo "the free with no lock was not seen inside the sweep's look (exit $code):"; tail -3 unlocked.txt; fail_for_status "$code" unlocked.txt
 fi
 printf '  exits 1 at "%s"\n' "freed: a chunk the last mark kept was freed while the sweep looked at it"
 
@@ -673,7 +754,7 @@ hold_moves() {
       print "            end"
       print; held++; next
     }
-    { print } END { if (declared != 1 || held != 1) exit 3 }' "$1" > "$2" || { echo "the helper's drain this proof holds is missing or ambiguous"; exit 1; }
+    { print } END { if (declared != 1 || held != 1) exit 3 }' "$1" > "$2" || { echo "the helper's drain this proof holds is missing or ambiguous"; exit 76; }
 }
 
 step "the moves beside the program, forced: every round's payload white at its move"
@@ -681,28 +762,28 @@ mkdir -p moves-held/iyi
 cp "$REPO"/src/iyi/*.iyi moves-held/iyi/
 hold_moves "$REPO/src/iyi/prelude.iyi" moves-held/iyi/prelude.iyi
 if ! IYI_PATH="$WORK/moves-held${PSEP}$REPO/src" "$IYI" build --release -Dmove_force "$REPO/bench/concurrent_mark.iyi" -o moves-held-run > build-moves-held.log 2>&1; then
-  cat build-moves-held.log; exit 1
+  fail_build build-moves-held.log
 fi
 timeout -k 5 300 ./moves-held-run > moves-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -q '^moves: 24 of 24 rounds moved a payload' moves-held.txt; then
-  echo "the forced moves did not hold (exit $code):"; tail -3 moves-held.txt; exit 1
+  echo "the forced moves did not hold (exit $code):"; tail -3 moves-held.txt; fail_for_status "$code" moves-held.txt
 fi
 echo "  the hook alone, exits 0: $(grep -m1 '^moves:' moves-held.txt | cut -c1-80)"
 
 step "failure proof: a barrier that shades nothing loses the moved payload"
 mkdir -p patched/iyi
 cp "$REPO"/src/iyi/*.iyi patched/iyi/
-awk '{ if (sub(/return unless Pointer\(Atomic\(UInt8\)\)\.new\(mark\)\.value\.compare_and_set\(WHITE\.unsafe_to_u8, GRAY\.unsafe_to_u8\)\[1\]/, "return # the barrier shades nothing")) found = 1; print } END { if (!found) exit 3 }' "$REPO/src/iyi/prelude.iyi" > patched/iyi/prelude.iyi.shade || { echo "the barrier's shading this proof removes is not in the prelude any more"; exit 1; }
-cmp -s patched/iyi/prelude.iyi.shade "$REPO/src/iyi/prelude.iyi" && { echo "the awk found nothing to change"; exit 1; }
+awk '{ if (sub(/return unless Pointer\(Atomic\(UInt8\)\)\.new\(mark\)\.value\.compare_and_set\(WHITE\.unsafe_to_u8, GRAY\.unsafe_to_u8\)\[1\]/, "return # the barrier shades nothing")) found = 1; print } END { if (!found) exit 3 }' "$REPO/src/iyi/prelude.iyi" > patched/iyi/prelude.iyi.shade || { echo "the barrier's shading this proof removes is not in the prelude any more"; exit 76; }
+cmp -s patched/iyi/prelude.iyi.shade "$REPO/src/iyi/prelude.iyi" && { echo "FAIL: gate setup: the barrier-shading copy was unchanged"; exit 76; }
 hold_moves patched/iyi/prelude.iyi.shade patched/iyi/prelude.iyi
 if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build --release -Dmove_force "$REPO/bench/concurrent_mark.iyi" -o nobarrier > build-nobarrier.log 2>&1; then
-  cat build-nobarrier.log; exit 1
+  fail_build build-nobarrier.log
 fi
 timeout -k 5 300 ./nobarrier > nobarrier.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: round [0-9]+: (the payload moved into a black holder under the mark was freed: the barrier lost it|the payload's seed is -?[0-9]+ rather than -?[0-9]+: its chunk was reused, the barrier lost it)$" nobarrier.txt; then
-  echo "the payload check did not fire (exit $code):"; tail -3 nobarrier.txt; exit 1
+  echo "the payload check did not fire (exit $code):"; tail -3 nobarrier.txt; fail_for_status "$code" nobarrier.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'the barrier lost it' nobarrier.txt)"
 
@@ -710,15 +791,15 @@ step "failure proof: a barrier that shades after its mark ended loses what the h
 mkdir -p stray/iyi
 cp "$REPO"/src/iyi/*.iyi stray/iyi/
 awk '{ if ($0 ~ /^        return if LibIyiGCTable\.__iyi_marking == 0_u8$/ && prev ~ /def self\.barrier\(/) { prev = $0; next } prev = $0; print }' "$REPO/src/iyi/prelude.iyi" > stray/iyi/prelude.iyi.stray
-cmp -s stray/iyi/prelude.iyi.stray "$REPO/src/iyi/prelude.iyi" && { echo "the awk found nothing to change"; exit 1; }
+cmp -s stray/iyi/prelude.iyi.stray "$REPO/src/iyi/prelude.iyi" && { echo "FAIL: gate setup: the stray-barrier copy was unchanged"; exit 76; }
 hold_moves stray/iyi/prelude.iyi.stray stray/iyi/prelude.iyi
 if ! IYI_PATH="$WORK/stray${PSEP}$REPO/src" "$IYI" build --release -Dmove_force "$REPO/bench/concurrent_mark.iyi" -o straybarrier > build-stray.log 2>&1; then
-  cat build-stray.log; exit 1
+  fail_build build-stray.log
 fi
 timeout -k 5 300 ./straybarrier > stray.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: stray: a barrier run after its mark had ended left the holder gray, and the next mark swept the payload it held" stray.txt; then
-  echo "the stray barrier check did not fire (exit $code):"; tail -3 stray.txt; exit 1
+  echo "the stray barrier check did not fire (exit $code):"; tail -3 stray.txt; fail_for_status "$code" stray.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'stray: a barrier run after' stray.txt)"
 
@@ -762,14 +843,14 @@ awk 'function forced() {
     print "                spin_pause"
     print "              end"
     hooked++ }
-  { print } END { if (declared != 1 || hooked != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held/iyi/prelude.iyi || { echo "the closer's finish or helper_main is missing or ambiguous"; exit 1; }
+  { print } END { if (declared != 1 || hooked != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held/iyi/prelude.iyi || { echo "the closer's finish or helper_main is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force "$REPO/bench/concurrent_mark.iyi" -o held-run > build-held.log 2>&1; then
-  cat build-held.log; exit 1
+  fail_build build-held.log
 fi
 timeout -k 5 300 ./held-run > held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -q "^large: 8 of 8 blocks outgrown under a running mark stayed mapped beside the helpers, and [0-8] were freed after$" held.txt; then
-  echo "the held rounds did not keep the block mapped (exit $code):"; tail -3 held.txt; exit 1
+  echo "the held rounds did not keep the block mapped (exit $code):"; tail -3 held.txt; fail_for_status "$code" held.txt
 fi
 echo "  the hook alone, exits 0: $(grep -m1 '^large: 8 of 8' held.txt)"
 # Separate copies keep the move and large-block holds independent. Each
@@ -819,12 +900,12 @@ awk '$0 == "  index = 0" && ++indexes == 1 {
   }
   { print }
   END { if (init != 1 || indexes != 2 || small_live != 1 || small_none != 1 || move_none != 1 || move_white != 1 || concurrent != 1 || large_rounds != 1 || large_mark != 1 || large_count != 1 || boost_none != 1 || boost_pool != 1 || cores != 1 || share != 1 || idle != 1 || busy != 1 || share_cores != 1) exit 3 }' \
-  "$REPO/bench/concurrent_mark.iyi" > benchmark-premises.iyi || { echo "a benchmark premise anchor is missing or ambiguous"; exit 1; }
+  "$REPO/bench/concurrent_mark.iyi" > benchmark-premises.iyi || { echo "a benchmark premise anchor is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/moves-held${PSEP}$REPO/src" "$IYI" build --release -Dmove_force benchmark-premises.iyi -o move-premises-run > build-move-premises.log 2>&1; then
-  cat build-move-premises.log; exit 1
+  fail_build build-move-premises.log
 fi
 if ! IYI_PATH="$WORK/held${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force benchmark-premises.iyi -o large-premises-run > build-large-premises.log 2>&1; then
-  cat build-large-premises.log; exit 1
+  fail_build build-large-premises.log
 fi
 premises="small-live small-none move-white move-none concurrent-none large-mark large-count share-mark idle-mark busy-mark share-cores pool-cores"
 if [ "$PSEP" = ";" ]; then premises="$premises boost-pool boost-none"; fi
@@ -852,7 +933,7 @@ for premise in $premises; do
   timeout -k 5 300 "./$runner" "$premise" > "benchmark-premise-$premise.txt" 2>&1
   code=$?
   if [ "$code" -ne 76 ] || ! grep -Fxq "$expected" "benchmark-premise-$premise.txt"; then
-    echo "the $premise benchmark premise did not fail as setup (exit $code):"; tail -3 "benchmark-premise-$premise.txt"; exit 1
+    echo "the $premise benchmark premise did not fail as setup (exit $code):"; tail -3 "benchmark-premise-$premise.txt"; fail_for_status "$code" "benchmark-premise-$premise.txt"
   fi
   printf '  exits 76 at "%s"\n' "$expected"
 done
@@ -862,14 +943,14 @@ awk '
   /^            free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8 && partition_free_large\(pointer\.address - HEADER - LARGE_HEAD\)$/ { print "            free_large(pointer.address - HEADER) if partition_free_large(pointer.address - HEADER - LARGE_HEAD)"; partitioned++; next }
   /^            free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8$/ { print "            free_large(pointer.address - HEADER)"; shared++; next }
   { print } END { if (partitioned != 1 || shared != 1) exit 3 }' \
-  held/iyi/prelude.iyi > unmapped/iyi/prelude.iyi || { echo "the shared or partitioned guard is missing or ambiguous"; exit 1; }
+  held/iyi/prelude.iyi > unmapped/iyi/prelude.iyi || { echo "the shared or partitioned guard is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/unmapped${PSEP}$REPO/src" "$IYI" build --release -Dunmapped_force "$REPO/bench/concurrent_mark.iyi" -o unmapped-run > build-unmapped.log 2>&1; then
-  cat build-unmapped.log; exit 1
+  fail_build build-unmapped.log
 fi
 timeout -k 5 300 ./unmapped-run > unmapped.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Fxq "FAIL: large: a block outgrown under a mark was unmapped beside the helpers" unmapped.txt; then
-  echo "the large block check did not fire (exit $code):"; tail -3 unmapped.txt; exit 1
+  echo "the large block check did not fire (exit $code):"; tail -3 unmapped.txt; fail_for_status "$code" unmapped.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -Fx 'FAIL: large: a block outgrown under a mark was unmapped beside the helpers' unmapped.txt)"
 
@@ -877,14 +958,14 @@ step "failure proof: a small live set given the thousand-object bound goes besid
 mkdir -p thousand/iyi
 cp "$REPO"/src/iyi/*.iyi thousand/iyi/
 awk '{ if (sub(/drain_bounded\(w, IyiStat\.get\(IyiStat::KEPT\) < STW_MARK_SMALL \? STW_MARK_SMALL : STW_MARK_BOUND\)/, "drain_bounded(w, STW_MARK_BOUND)")) found++; print } END { if (found != 1) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > thousand/iyi/prelude.iyi || { echo "the bound this proof replaces is not in the prelude any more"; exit 1; }
+  "$REPO/src/iyi/prelude.iyi" > thousand/iyi/prelude.iyi || { echo "the bound this proof replaces is not in the prelude any more"; exit 76; }
 if ! IYI_PATH="$WORK/thousand${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o thousand-run > build-thousand.log 2>&1; then
-  cat build-thousand.log; exit 1
+  fail_build build-thousand.log
 fi
 timeout -k 5 300 ./thousand-run > thousand.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: small: [0-9]+ of [0-9]+ collections over [0-9]+ live bytes ran beside the program$" thousand.txt; then
-  echo "the small live set check did not fire (exit $code):"; tail -3 thousand.txt; exit 1
+  echo "the small live set check did not fire (exit $code):"; tail -3 thousand.txt; fail_for_status "$code" thousand.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: small:' thousand.txt)"
 
@@ -904,7 +985,7 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: small:' thousand.txt)"
 # The proofs below force their interleavings with event acknowledgements.
 step "marks beside twenty-four connections on twelve workers all end, with every helper and with one"
 if ! "$IYI" build --release "$REPO/bench/mark_stall.iyi" -o stall > build-stall.log 2>&1; then
-  cat build-stall.log; exit 1
+  fail_build build-stall.log
 fi
 for helpers in every one; do
   case "$helpers" in
@@ -913,7 +994,7 @@ for helpers in every one; do
   esac
   code=$?
   if [ "$code" -ne 0 ] || ! grep -q "every collection finished" "stall-$helpers.txt"; then
-    echo "  with $helpers helper, exit $code:"; cat "stall-$helpers.txt"; exit 1
+    echo "  with $helpers helper, exit $code:"; cat "stall-$helpers.txt"; fail_for_status "$code" "stall-$helpers.txt"
   fi
   echo "  with $helpers helper: $(grep '^collections:' "stall-$helpers.txt")"
 done
@@ -1039,7 +1120,15 @@ if count != 200000
   print "FAIL: #{name}: the chain held #{count} of its 200000 nodes after the acknowledgement\n"
   __iyi_exit(1)
 end
+{% if flag?(:watch_race_force) %}
+  IyiMark.forced_trip
+  IyiMark.forced_wait_race_sample
+{% end %}
 IyiMark.forced_phase(5_u64)
+{% if flag?(:watch_race_force) %}
+  IyiMark.forced_wait_race_loss
+  puts "watchdog: completion won after the watchdog sampled the pending phase"
+{% end %}
 puts "forced: #{name} acknowledged"
 IYI
 add_forced_ack() {
@@ -1081,34 +1170,86 @@ add_forced_ack() {
       print "        proc = ->(page : UInt64) { IyiMark.forced_watch_main(page) }"
       print "        Pointer(UInt64).new(pointerof(proc).address).value"
       print "      end"
+      print "      def self.forced_exit76 : NoReturn"
+      print "        {% if flag?(:darwin) %}"
+      print "          LibC._exit(76)"
+      print "        {% elsif flag?(:win32) %}"
+      print "          LibC.TerminateProcess(LibC.GetCurrentProcess, 76)"
+      print "          while true"
+      print "          end"
+      print "        {% else %}"
+      print "          __iyi_exit(76)"
+      print "        {% end %}"
+      print "      end"
       print "      # No line, heap allocation, park, or runtime-lock acquisition."
       print "      def self.forced_watch_main(page : UInt64) : Nil"
+      print "        word = Pointer(Atomic(UInt64)).new(page)"
       print "        while true"
       print "          tripped = Pointer(Atomic(UInt64)).new(page + 8_u64).value.get != 0_u64"
-      print "          phase = Pointer(Atomic(UInt64)).new(page).value.get"
-      print "          return if phase >= 5_u64"
       print "          if tripped || now_ns >= IyiHeap.read64(page + 16_u64)"
+      print "            phase = word.value.get"
+      print "            return if phase >= 5_u64"
+      print "            {% if flag?(:watch_race_force) %}"
+      print "              if phase == 4_u64"
+      print "                Pointer(Atomic(UInt64)).new(page + 24_u64).value.set(1_u64)"
+      print "                limit = now_ns &+ 10000000000_u64"
+      print "                while word.value.get != 5_u64"
+      print "                  if now_ns >= limit"
+      print "                    message = \"FAIL: watchdog: the race control did not publish completion\\n\""
+      print "                    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "                    forced_exit76"
+      print "                  end"
+      print "                  IyiThread.yield_cpu"
+      print "                end"
+      print "              end"
+      print "            {% end %}"
+      print "            unless word.value.compare_and_set(phase, 6_u64)[1]"
+      print "              {% if flag?(:watch_race_force) %}"
+      print "                Pointer(Atomic(UInt64)).new(page + 32_u64).value.set(1_u64) if phase == 4_u64 && word.value.get == 5_u64"
+      print "              {% end %}"
+      print "              next"
+      print "            end"
       print "            slot = page + 512_u64 * (phase + 1_u64)"
       print "            __iyi_write(2, Pointer(Void).new(slot + 8_u64), IyiHeap.read64(slot))"
-      print "            {% if flag?(:darwin) %}"
-      print "              LibC._exit(76)"
-      print "            {% elsif flag?(:win32) %}"
-      print "              LibC.TerminateProcess(LibC.GetCurrentProcess, 76)"
-      print "              while true"
-      print "              end"
-      print "            {% else %}"
-      print "              __iyi_exit(76)"
-      print "            {% end %}"
+      print "            forced_exit76"
       print "          end"
+      print "          return if word.value.get >= 5_u64"
       print "          IyiThread.yield_cpu"
       print "        end"
       print "      end"
       print "      def self.forced_phase(phase : UInt64) : Nil"
-      print "        Pointer(Atomic(UInt64)).new(@@forced_watch).value.set(phase)"
+      print "        word = Pointer(Atomic(UInt64)).new(@@forced_watch)"
+      print "        while true"
+      print "          previous = word.value.get"
+      print "          return if previous == 5_u64"
+      print "          if previous == 6_u64"
+      print "            IyiThread.yield_cpu"
+      print "            next"
+      print "          end"
+      print "          return if word.value.compare_and_set(previous, phase)[1]"
+      print "        end"
       print "      end"
       print "      def self.forced_trip : Nil"
       print "        Pointer(Atomic(UInt64)).new(@@forced_watch + 8_u64).value.set(1_u64)"
       print "      end"
+      print "      {% if flag?(:watch_race_force) %}"
+      print "        def self.forced_wait_race_sample : Nil"
+      print "          forced_wait_race_word(24_u64, \"FAIL: watchdog: the race control did not sample the pending phase\\n\")"
+      print "        end"
+      print "        def self.forced_wait_race_loss : Nil"
+      print "          forced_wait_race_word(32_u64, \"FAIL: watchdog: the race control did not observe a lost claim\\n\")"
+      print "        end"
+      print "        def self.forced_wait_race_word(offset : UInt64, message : String) : Nil"
+      print "          limit = now_ns &+ 10000000000_u64"
+      print "          while Pointer(Atomic(UInt64)).new(@@forced_watch + offset).value.get == 0_u64"
+      print "            if now_ns >= limit"
+      print "              __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "              __iyi_exit(76)"
+      print "            end"
+      print "            IyiThread.yield_cpu"
+      print "          end"
+      print "        end"
+      print "      {% end %}"
       print "      def self.arm_stop_hold : Nil"
       print "        Pointer(Atomic(UInt64)).new(pointerof(@@forced_stop_armed).address).value.set(1_u64)"
       print "      end"
@@ -1121,9 +1262,25 @@ add_forced_ack() {
       print "        if others < 2_i64"
       print "          message = \"FAIL: stopped: the producer did not stop both other fixture threads\\n\""
       print "          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
-      print "          __iyi_exit(76)"
+      print "          forced_exit76"
       print "        end"
       print "        message = \"stopped: a producer held its collection after stopping the other registered threads\\n\""
+      print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "        forced_trip"
+      print "        while true"
+      print "          IyiThread.yield_cpu"
+      print "        end"
+      print "      end"
+      print "      def self.forced_bracket_hold(others : Int64) : Nil"
+      print "        page = @@forced_watch"
+      print "        return if page == 0_u64 || IyiThread.current_line == 0_u64"
+      print "        return unless Pointer(Atomic(UInt64)).new(page).value.get == 2_u64"
+      print "        if others < 1_i64"
+      print "          message = \"FAIL: freed: the bracket collector did not stop the free thread\\n\""
+      print "          __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
+      print "          forced_exit76"
+      print "        end"
+      print "        message = \"freed: the bracket collector stopped the free thread and is held\\n\""
       print "        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
       print "        forced_trip"
       print "        while true"
@@ -1138,9 +1295,12 @@ add_forced_ack() {
       print "          {% if flag?(:stopped_force) %}"
       print "            forced_stop_hold(others)"
       print "          {% end %}"
+      print "          {% if flag?(:bracket_stall_force) %}"
+      print "            forced_bracket_hold(others)"
+      print "          {% end %}"
       stopped++; next
     }
-    { print } END { if (found != 1 || darwin != 1 || stopped != 2) exit 3 }' "$1/iyi/prelude.iyi" > "$1/iyi/prelude.iyi.new" || { echo "the acknowledgement, exit or stop anchor in $1 is missing or ambiguous"; exit 1; }
+    { print } END { if (found != 1 || darwin != 1 || stopped != 2) exit 3 }' "$1/iyi/prelude.iyi" > "$1/iyi/prelude.iyi.new" || { echo "the acknowledgement, exit or stop anchor in $1 is missing or ambiguous"; exit 76; }
   mv "$1/iyi/prelude.iyi.new" "$1/iyi/prelude.iyi"
 }
 
@@ -1213,42 +1373,52 @@ awk 'function declarations() {
   }
   /^            return generation$/ { print "            stored_finished"; finished++ }
   { print } END { if (declared != 1 || assist != 1 || retreat != 1 || counted != 1 || finished != 1) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > stored-held/iyi/prelude.iyi || { echo "the stored proof hooks are missing or ambiguous"; exit 1; }
+  "$REPO/src/iyi/prelude.iyi" > stored-held/iyi/prelude.iyi || { echo "the stored proof hooks are missing or ambiguous"; exit 76; }
 add_forced_ack stored-held
 if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o stored-held-run > build-stored-held.log 2>&1; then
-  cat build-stored-held.log; exit 1
+  fail_build build-stored-held.log
 fi
 timeout -k 5 120 ./stored-held-run name=stored > stored-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq "forced: stored acknowledged" stored-held.txt || ! grep -Fxq "stored: the mark whose remainder counted the held assist finished" stored-held.txt || ! grep -Fxq "stored: an assist counted itself in before helper 0 and waits for its count" stored-held.txt; then
-  echo "the held stored control did not complete (exit $code):"; tail -5 stored-held.txt; exit 1
+  echo "the held stored control did not complete (exit $code):"; tail -5 stored-held.txt; fail_for_status "$code" stored-held.txt
 fi
 echo "  held stored control exits 0 after the assist rendezvous"
+step "control: completion wins after the watchdog samples an expired pending phase"
+if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release -Dwatch_race_force forced.iyi -o watch-race-run > build-watch-race.log 2>&1; then
+  fail_build build-watch-race.log
+fi
+timeout -k 5 120 ./watch-race-run name=stored > watch-race.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -Fxq "watchdog: completion won after the watchdog sampled the pending phase" watch-race.txt || ! grep -Fxq "forced: stored acknowledged" watch-race.txt || grep -Fxq "FAIL: stored: chain readback did not finish before the fixture deadline" watch-race.txt; then
+  echo "completion did not defeat the stale watchdog claim (exit $code):"; cat watch-race.txt; fail_for_status "$code" watch-race.txt
+fi
+echo "  watchdog: completion won after the watchdog sampled the pending phase"
 step "control: an unknown forced-fixture option is a setup failure"
 timeout -k 5 120 ./stored-held-run unknown=1 > unknown-option.txt 2>&1
 code=$?
 if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: forced: no option unknown=1" unknown-option.txt; then
-  echo "the unknown forced-fixture option did not fail as setup (exit $code):"; tail -3 unknown-option.txt; exit 1
+  echo "the unknown forced-fixture option did not fail as setup (exit $code):"; tail -3 unknown-option.txt; fail_for_status "$code" unknown-option.txt
 fi
 printf '  exits 76 at "%s"\n' "FAIL: forced: no option unknown=1"
 step "control: a producer held after acknowledgement is a setup failure"
 if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release -Dshutdown_force forced.iyi -o shutdown-held-run > build-shutdown-held.log 2>&1; then
-  cat build-shutdown-held.log; exit 1
+  fail_build build-shutdown-held.log
 fi
 timeout -k 5 120 ./shutdown-held-run name=stored > shutdown-held.txt 2>&1
 code=$?
 if [ "$code" -ne 76 ] || ! grep -Fxq "stored: the mark whose remainder counted the held assist finished" shutdown-held.txt || ! grep -Fxq "FAIL: stored: producers did not stop after acknowledgement before the fixture deadline" shutdown-held.txt || grep -Fxq "forced: stored acknowledged" shutdown-held.txt; then
-  echo "the held producer was not reported as a shutdown failure (exit $code):"; tail -5 shutdown-held.txt; exit 1
+  echo "the held producer was not reported as a shutdown failure (exit $code):"; tail -5 shutdown-held.txt; fail_for_status "$code" shutdown-held.txt
 fi
 printf '  exits 76 at "%s"\n' "FAIL: stored: producers did not stop after acknowledgement before the fixture deadline"
 step "control: a producer held after stopping the other threads is named by its phase"
 if ! IYI_PATH="$WORK/stored-held${PSEP}$REPO/src" "$IYI" build --release -Dstopped_force forced.iyi -o stopped-held-run > build-stopped-held.log 2>&1; then
-  cat build-stopped-held.log; exit 1
+  fail_build build-stopped-held.log
 fi
 timeout -k 5 120 ./stopped-held-run name=stored > stopped-held.txt 2>&1
 code=$?
 if [ "$code" -ne 76 ] || ! grep -Fxq "stopped: a producer held its collection after stopping the other registered threads" stopped-held.txt || ! grep -Fxq "FAIL: stored: the copy did not acknowledge before the fixture deadline" stopped-held.txt || grep -Fxq "forced: stored acknowledged" stopped-held.txt; then
-  echo "the stopped-world collection was not named by its phase (exit $code):"; tail -5 stopped-held.txt; exit 1
+  echo "the stopped-world collection was not named by its phase (exit $code):"; tail -5 stopped-held.txt; fail_for_status "$code" stopped-held.txt
 fi
 echo "  stopped: a producer held its collection after stopping the other registered threads"
 printf '  exits 76 at "%s"\n' "FAIL: stored: the copy did not acknowledge before the fixture deadline"
@@ -1257,14 +1427,14 @@ cp stored-held/iyi/*.iyi stored/iyi/
 awk '/^          pool_word\(POOL_ACTIVE\)\.value\.add\(1_u64\)$/ {
     print "          pool_word(POOL_ACTIVE).value.set(1_u64)"; found++; next
   }
-  { print } END { if (found != 1) exit 3 }' stored-held/iyi/prelude.iyi > stored/iyi/prelude.iyi || { echo "the remainder count is missing or ambiguous"; exit 1; }
+  { print } END { if (found != 1) exit 3 }' stored-held/iyi/prelude.iyi > stored/iyi/prelude.iyi || { echo "the remainder count is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/stored${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o stored-run > build-stored.log 2>&1; then
-  cat build-stored.log; exit 1
+  fail_build build-stored.log
 fi
 timeout -k 5 120 ./stored-run name=stored > stored.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || grep -Fxq "forced: stored acknowledged" stored.txt || ! grep -Fxq "stored: an assist counted itself in before helper 0 and waits for its count" stored.txt || ! grep -Eq "^iyi: the collector's count of workers marking went below zero: POOL_ACTIVE [0-9]+, POOL_HEAD [0-9]+, generation [0-9]+, permits left [0-9]+ and taken [0-9]+, helpers done [0-9]+[.] A mark that does not end is a bug in iyi's runtime, ours to fix: https://github[.]com/iyilang/iyi/issues$" stored.txt; then
-  echo "the stored count was not caught after the rendezvous (exit $code):"; tail -5 stored.txt; exit 1
+  echo "the stored count was not caught after the rendezvous (exit $code):"; tail -5 stored.txt; fail_for_status "$code" stored.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'went below zero' stored.txt)"
 
@@ -1332,15 +1502,15 @@ awk 'function forced() {
     hook++
   }
   { print } END { if (declared != 1 || baseline != 1 || hook != 1) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > late-held/iyi/prelude.iyi || { echo "the late generation hook is missing or ambiguous"; exit 1; }
+  "$REPO/src/iyi/prelude.iyi" > late-held/iyi/prelude.iyi || { echo "the late generation hook is missing or ambiguous"; exit 76; }
 add_forced_ack late-held
 if ! IYI_PATH="$WORK/late-held${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o late-held-run > build-late-held.log 2>&1; then
-  cat build-late-held.log; exit 1
+  fail_build build-late-held.log
 fi
 timeout -k 5 120 ./late-held-run name=late helpers=1 > late-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq "forced: late acknowledged" late-held.txt || ! grep -Fxq "late: helper 0 finished the next mark" late-held.txt || ! grep -Fxq "late: helper 0 retained its earlier generation through the next mark" late-held.txt; then
-  echo "the held late control did not complete (exit $code):"; tail -5 late-held.txt; exit 1
+  echo "the held late control did not complete (exit $code):"; tail -5 late-held.txt; fail_for_status "$code" late-held.txt
 fi
 echo "  held late control exits 0 after the next mark"
 step "failure proof: helper 0 reads the next mark generation too late"
@@ -1350,14 +1520,14 @@ awk '/^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ { ear
     print "            generation = pool_word(POOL_GENERATION).value.get"
     moved++
   }
-  { print } END { if (early != 1 || moved != 1) exit 3 }' late-held/iyi/prelude.iyi > late/iyi/prelude.iyi || { echo "the late generation read is missing or ambiguous"; exit 1; }
+  { print } END { if (early != 1 || moved != 1) exit 3 }' late-held/iyi/prelude.iyi > late/iyi/prelude.iyi || { echo "the late generation read is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/late${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o late-run > build-late.log 2>&1; then
-  cat build-late.log; exit 1
+  fail_build build-late.log
 fi
 timeout -k 5 120 ./late-run name=late helpers=1 > late.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || grep -Fxq "forced: late acknowledged" late.txt || ! grep -Fxq "FAIL: late: helper 0 would wait past the turn of a mark whose permit nobody has taken" late.txt; then
-  echo "the late generation was not caught (exit $code):"; tail -5 late.txt; exit 1
+  echo "the late generation was not caught (exit $code):"; tail -5 late.txt; fail_for_status "$code" late.txt
 fi
 printf '  exits 1 at "%s"\n' "FAIL: late: helper 0 would wait past the turn of a mark whose permit nobody has taken"
 
@@ -1417,7 +1587,7 @@ awk 'function declarations() {
   $0 == "            return generation" { print "            hold_release_probe if released_forced"; print; returned++; prev_lg = 0; next }
   { prev_lg = ($0 == "            let_go_holders"); print }
   END { if (declared != 1 || probed != 1 || armed != 1 || returned != 1) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > released-held/iyi/prelude.iyi || { echo "the release order or pressure is missing or ambiguous"; exit 1; }
+  "$REPO/src/iyi/prelude.iyi" > released-held/iyi/prelude.iyi || { echo "the release order or pressure is missing or ambiguous"; exit 76; }
 add_forced_ack released-held
 cp released-held/iyi/*.iyi released/iyi/
 awk 'pend {
@@ -1426,23 +1596,23 @@ awk 'pend {
   }
   $0 == "            @@collecting = false" { pend = 1; next }
   $0 == "            hold_release_probe if released_forced" { print; print "            @@collecting = false"; added++; next }
-  { print } END { if (dropped != 1 || added != 1) exit 3 }' released-held/iyi/prelude.iyi > released/iyi/prelude.iyi || { echo "the flag this proof moves is missing or ambiguous"; exit 1; }
+  { print } END { if (dropped != 1 || added != 1) exit 3 }' released-held/iyi/prelude.iyi > released/iyi/prelude.iyi || { echo "the flag this proof moves is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/released-held${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o released-held-run > build-released-held.log 2>&1; then
-  cat build-released-held.log; exit 1
+  fail_build build-released-held.log
 fi
 timeout -k 5 120 ./released-held-run name=released > released-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq "forced: released acknowledged" released-held.txt || ! grep -Fxq "released: the first slice past the budget after the release found the collection let go" released-held.txt; then
-  echo "the held release control did not complete (exit $code):"; tail -5 released-held.txt; exit 1
+  echo "the held release control did not complete (exit $code):"; tail -5 released-held.txt; fail_for_status "$code" released-held.txt
 fi
 echo "  held release control exits 0 after the probe answers let go"
 if ! IYI_PATH="$WORK/released${PSEP}$REPO/src" "$IYI" build --release forced.iyi -o released-run > build-released.log 2>&1; then
-  cat build-released.log; exit 1
+  fail_build build-released.log
 fi
 timeout -k 5 120 ./released-run name=released > released.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || grep -Fxq "forced: released acknowledged" released.txt || ! grep -Fxq "FAIL: released: the first slice past the budget after the release found the collection still up" released.txt; then
-  echo "the untriggered allocation was not caught (exit $code):"; tail -5 released.txt; exit 1
+  echo "the untriggered allocation was not caught (exit $code):"; tail -5 released.txt; fail_for_status "$code" released.txt
 fi
 printf '  exits 1 at "%s"\n' "FAIL: released: the first slice past the budget after the release found the collection still up"
 
@@ -1457,11 +1627,13 @@ printf '  exits 1 at "%s"\n' "FAIL: released: the first slice past the budget af
 # trigger the next; three runs.
 step "every collection a program's thread finishes is let go before its threads are released"
 if ! "$IYI" build --release "$REPO/bench/release_trigger.iyi" -o trigger > build-trigger.log 2>&1; then
-  cat build-trigger.log; exit 1
+  fail_build build-trigger.log
 fi
 for run in 1 2 3; do
-  if ! timeout -k 5 60 ./trigger > "trigger-$run.txt" 2>&1 || ! grep -q "every collection was let go" "trigger-$run.txt"; then
-    echo "  run $run:"; cat "trigger-$run.txt"; exit 1
+  timeout -k 5 60 ./trigger > "trigger-$run.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 0 ] || ! grep -q "every collection was let go" "trigger-$run.txt"; then
+    echo "  run $run:"; cat "trigger-$run.txt"; fail_for_status "$code" "trigger-$run.txt"
   fi
 done
 grep -E '^(bounded|stopped|verb|one core):' trigger-1.txt | sed 's/^/  /'
@@ -1470,10 +1642,15 @@ grep -E '^(bounded|stopped|verb|one core):' trigger-1.txt | sed 's/^/  /'
 # resumed thread crosses the next budget. The broken copies additionally hold
 # until that thread reaches the ceiling; the normal copies release on the first
 # crossing. Time is only a named setup failure, never a release condition.
-if grep -q '^one core:' trigger-1.txt; then
-  echo "FAIL: this host has one core; the bounded round needs a helper beside a second thread, and CI shapes have at least four"
-  exit 1
+step "control: a missing bounded-round prerequisite is a setup failure"
+printf '%s\n' 'one core: forced prerequisite' > bounded-premise.txt
+require_bounded_round bounded-premise.txt > bounded-premise-result.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: bounded setup: this host has one core; the bounded round needs a helper beside a second thread" bounded-premise-result.txt; then
+  echo "the bounded prerequisite did not fail as setup (exit $code):"; cat bounded-premise-result.txt; fail_for_status "$code" bounded-premise-result.txt
 fi
+printf '  exits 76 at "%s"\n' "FAIL: bounded setup: this host has one core; the bounded round needs a helper beside a second thread"
+require_bounded_round trigger-1.txt || exit "$?"
 step "the stopped collectors let go before a resumed thread crosses the budget"
 mkdir -p letgo-held/iyi
 cp "$REPO"/src/iyi/*.iyi letgo-held/iyi/
@@ -1549,14 +1726,14 @@ awk 'function declarations() {
     stopped++; next
   }
   { print } END { if (declared != 1 || probed != 1 || locked != 1 || stopped != 1) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > letgo-held/iyi/prelude.iyi || { echo "the let-go proof anchors are missing or ambiguous"; exit 1; }
+  "$REPO/src/iyi/prelude.iyi" > letgo-held/iyi/prelude.iyi || { echo "the let-go proof anchors are missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/letgo-held${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/release_trigger.iyi" -o letgo-held-run > build-letgo-held.log 2>&1; then
-  cat build-letgo-held.log; exit 1
+  fail_build build-letgo-held.log
 fi
 timeout -k 5 120 ./letgo-held-run > letgo-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq "release trigger: every collection was let go before its threads were released" letgo-held.txt || [ "$(grep -Fxc "let-go: a resumed slice crossed the budget after collection was let go" letgo-held.txt)" -ne 3 ]; then
-  echo "the held let-go control did not complete (exit $code):"; tail -10 letgo-held.txt; exit 1
+  echo "the held let-go control did not complete (exit $code):"; tail -10 letgo-held.txt; fail_for_status "$code" letgo-held.txt
 fi
 echo "  held let-go control exits 0 for all three collection paths"
 let_go_late() {
@@ -1569,14 +1746,14 @@ let_go_late() {
     n == 8 && $0 == "          go_hold if go_locked" { print; print "          @@collecting = false"; inserted++; next }
     n == 10 && $0 == "          go_hold if go_stopped" { print; print "          @@collecting = false"; inserted++; next }
     { print } END { if (removed != 1 || inserted != 1) exit 3 }' \
-    letgo-held/iyi/prelude.iyi > "$name/iyi/prelude.iyi" || { echo "the let-go order for $name is missing or ambiguous"; exit 1; }
+    letgo-held/iyi/prelude.iyi > "$name/iyi/prelude.iyi" || { echo "the let-go order for $name is missing or ambiguous"; exit 76; }
   if ! IYI_PATH="$WORK/$name${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/release_trigger.iyi" -o "$name-run" > "build-$name.log" 2>&1; then
-    cat "build-$name.log"; exit 1
+    fail_build "build-$name.log"
   fi
   timeout -k 5 120 "./$name-run" > "$name.txt" 2>&1
   code=$?
   if [ "$code" -ne 1 ]; then
-    echo "the untriggered slices were not caught (exit $code):"; cat "$name.txt"; exit 1
+    echo "the untriggered slices were not caught (exit $code):"; cat "$name.txt"; fail_for_status "$code" "$name.txt"
   fi
   for round in "$@"; do
     if ! grep -Eq "^FAIL: $round: after collection [0-9]+ was counted, [1-9][0-9]* of a thread's slices were held at the ceiling of a collection that was not theirs, which had not been let go$" "$name.txt"; then
@@ -1618,6 +1795,14 @@ end
 IyiMark.collect
 # The second thread waits until the free reaches the shared hook.
 {% if flag?(:unbracketed_force) %}
+  # The native watchdog cannot be stopped with either fixture thread.
+  IyiMark.forced_watch(IyiMark.now_ns + 100000000000_u64,
+    "FAIL: freed: the bracket fixture did not start its collector before the fixture deadline\n",
+    "FAIL: freed: the armed free did not request its collection before the fixture deadline\n",
+    "FAIL: freed: the bracket collector did not finish after its stop was requested\n",
+    "FAIL: freed: the bracket collector did not finish after its stop was requested\n",
+    "FAIL: freed: the bracket collector did not finish after its stop was requested\n")
+  IyiMark.forced_phase(1_u64)
   collector = IyiThread.start do
     limit = IyiMark.now_ns + 10000000000_u64
     while !IyiHeap.drop_requested? && IyiMark.now_ns < limit
@@ -1627,6 +1812,7 @@ IyiMark.collect
       print "FAIL: freed: the armed free never reached its link\n"
       __iyi_exit(76)
     end
+    IyiMark.forced_phase(2_u64)
     IyiMark.collect
     IyiHeap.finish_drop
     nil
@@ -1646,11 +1832,14 @@ GC.free(live[0].as(Void*))
 {% end %}
 GC.free(live[1].as(Void*))
 {% if flag?(:unbracketed_force) %}
+  IyiMark.forced_phase(3_u64)
   collector.join
+  IyiMark.forced_phase(4_u64)
   if IyiHeap.drop_done != 1_u64
     print "FAIL: freed: the armed collection did not complete exactly once\n"
     __iyi_exit(76)
   end
+  IyiMark.forced_phase(5_u64)
 {% end %}
 got = Pointer(Pointer(UInt64)).malloc(64_u64)
 k = 0
@@ -1740,16 +1929,28 @@ awk 'function forced() {
     print "        write64(head + OFF_LINK, stale)"
     linked++; next
   }
-  { print } END { if (declared != 1 || linked != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > bracketed/iyi/prelude.iyi || { echo "the list link or free this proof changes is missing or ambiguous"; exit 1; }
+  { print } END { if (declared != 1 || linked != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > bracketed/iyi/prelude.iyi || { echo "the list link or free this proof changes is missing or ambiguous"; exit 76; }
+add_forced_ack bracketed
 if ! IYI_PATH="$WORK/bracketed${PSEP}$REPO/src" "$IYI" build unbracketed.iyi -Dunbracketed_force -o bracketed-run > build-bracketed.log 2>&1; then
-  cat build-bracketed.log; exit 1
+  fail_build build-bracketed.log
 fi
 timeout -k 5 120 ./bracketed-run > bracketed.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq 'unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole' bracketed.txt; then
-  echo "the bracketed control did not pass (exit $code):"; tail -3 bracketed.txt; exit 1
+  echo "the bracketed control did not pass (exit $code):"; tail -3 bracketed.txt; fail_for_status "$code" bracketed.txt
 fi
 echo "  the bracketed control exits 0: $(grep -Fx 'unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole' bracketed.txt)"
+step "control: the bracket watchdog names a stalled collector after the stop request"
+if ! IYI_PATH="$WORK/bracketed${PSEP}$REPO/src" "$IYI" build -Dunbracketed_force -Dbracket_stall_force unbracketed.iyi -o bracket-stall-run > build-bracket-stall.log 2>&1; then
+  fail_build build-bracket-stall.log
+fi
+timeout -k 5 120 ./bracket-stall-run > bracket-stall.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "freed: the bracket collector stopped the free thread and is held" bracket-stall.txt || ! grep -Fxq "FAIL: freed: the bracket collector did not finish after its stop was requested" bracket-stall.txt || grep -Fxq "unbracketed: 64 chunks handed out, none shared, the 62 kept ones whole" bracket-stall.txt; then
+  echo "the stalled bracket collector was not named (exit $code):"; cat bracket-stall.txt; fail_for_status "$code" bracket-stall.txt
+fi
+echo "  freed: the bracket collector stopped the free thread and is held"
+printf '  exits 76 at "%s"\n' "FAIL: freed: the bracket collector did not finish after its stop was requested"
 step "controls: the bracket proof rejects a locked path and a missing acknowledgement"
 awk '$0 == "IyiMark.auto = false" {
     print; print "premise = Program.args.size > 0 ? Program.args[0] : \"\""; option++; next
@@ -1760,9 +1961,9 @@ awk '$0 == "IyiMark.auto = false" {
   $0 == "  if IyiHeap.drop_done != 1_u64" {
     print $0 " || premise == \"ack\""; ack++; next
   }
-  { print } END { if (option != 1 || locked != 1 || ack != 1) exit 3 }' unbracketed.iyi > bracket-premise.iyi || { echo "the bracket premise anchors are missing or ambiguous"; exit 1; }
+  { print } END { if (option != 1 || locked != 1 || ack != 1) exit 3 }' unbracketed.iyi > bracket-premise.iyi || { echo "the bracket premise anchors are missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/bracketed${PSEP}$REPO/src" "$IYI" build bracket-premise.iyi -Dunbracketed_force -o bracket-premise > build-bracket-premise.log 2>&1; then
-  cat build-bracket-premise.log; exit 1
+  fail_build build-bracket-premise.log
 fi
 for premise in locked ack; do
   case "$premise" in
@@ -1772,7 +1973,7 @@ for premise in locked ack; do
   timeout -k 5 120 ./bracket-premise "$premise" > "bracket-premise-$premise.txt" 2>&1
   code=$?
   if [ "$code" -ne 76 ] || ! grep -Fxq "$expected" "bracket-premise-$premise.txt"; then
-    echo "the $premise bracket premise was not reported as setup failure (exit $code):"; tail -3 "bracket-premise-$premise.txt"; exit 1
+    echo "the $premise bracket premise was not reported as setup failure (exit $code):"; tail -3 "bracket-premise-$premise.txt"; fail_for_status "$code" "bracket-premise-$premise.txt"
   fi
   printf '  exits 76 at "%s"\n' "$expected"
 done
@@ -1780,25 +1981,30 @@ mkdir -p unbracketed/iyi
 cp bracketed/iyi/*.iyi unbracketed/iyi/
 awk '/^          write64\(table\.address &\+ CACHE_INSIDE, read64\(table\.address &\+ CACHE_INSIDE\) &\+ 1_u64\)$/ { entered++; next }
   prev ~ /^          end$/ && /^          leave\(table\)$/ { left++; prev = $0; next }
-  { prev = $0; print } END { if (entered != 1 || left != 1) exit 3 }' bracketed/iyi/prelude.iyi > unbracketed/iyi/prelude.iyi.new || { echo "the bracket this proof removes from free is missing or ambiguous"; exit 1; }
+  { prev = $0; print } END { if (entered != 1 || left != 1) exit 3 }' bracketed/iyi/prelude.iyi > unbracketed/iyi/prelude.iyi.new || { echo "the bracket this proof removes from free is missing or ambiguous"; exit 76; }
 mv unbracketed/iyi/prelude.iyi.new unbracketed/iyi/prelude.iyi
 if ! IYI_PATH="$WORK/unbracketed${PSEP}$REPO/src" "$IYI" build unbracketed.iyi -Dunbracketed_force -o unbracketed-run > build-unbracketed.log 2>&1; then
-  cat build-unbracketed.log; exit 1
+  fail_build build-unbracketed.log
 fi
 timeout -k 5 120 ./unbracketed-run > unbracketed.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Fxq "freed: a free outside the allocator's bracket put a dropped list back" unbracketed.txt; then
-  echo "the dropped list was not put back (exit $code):"; tail -3 unbracketed.txt; exit 1
+  echo "the dropped list was not put back (exit $code):"; tail -3 unbracketed.txt; fail_for_status "$code" unbracketed.txt
 fi
 printf '  exits 1 at "%s"\n' "freed: a free outside the allocator's bracket put a dropped list back"
 
 # Hold each worker after the first until every task has arrived. The healthy
 # program releases the workers while waiting for the launched count; the
 # arrived-only mutant waits only for task arrival and releases after the group.
-if ! grep -q '^idle pool: with' answers.txt; then
-  echo "FAIL: the idle pool step did not run: it needs three cores, and this host has fewer"
-  exit 1
+step "control: a missing idle-pool prerequisite is a setup failure"
+: > idle-premise.txt
+require_idle_pool idle-premise.txt > idle-premise-result.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: idle pool setup: the benchmark did not report its idle-pool step" idle-premise-result.txt; then
+  echo "the idle-pool prerequisite did not fail as setup (exit $code):"; cat idle-premise-result.txt; fail_for_status "$code" idle-premise-result.txt
 fi
+printf '  exits 76 at "%s"\n' "FAIL: idle pool setup: the benchmark did not report its idle-pool step"
+require_idle_pool answers.txt || exit "$?"
 step "the idle pool fills when workers wait for task arrival"
 mkdir -p latestart/iyi
 cp "$REPO"/src/iyi/*.iyi latestart/iyi/
@@ -1831,14 +2037,14 @@ awk '/^  def self\.work : Nil$/ {
     print; print "      hold_start"; inserted++; next
   }
   { print } END { if (found != 1 || inserted != 1) exit 3 }' \
-  "$REPO/src/iyi/concurrency.iyi" > latestart/iyi/concurrency.iyi || { echo "the worker start is missing or ambiguous"; exit 1; }
+  "$REPO/src/iyi/concurrency.iyi" > latestart/iyi/concurrency.iyi || { echo "the worker start is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release -Didle_force "$REPO/bench/concurrent_mark.iyi" -o latestart-run > build-latestart.log 2>&1; then
-  cat build-latestart.log; exit 1
+  fail_build build-latestart.log
 fi
 timeout -k 5 300 ./latestart-run > latestart.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -q "^idle pool: with" latestart.txt || ! grep -Fxq "idle pool: a worker start waited until task arrival" latestart.txt; then
-  echo "the idle pool step did not hold on the late-start runtime (exit $code):"; tail -3 latestart.txt; exit 1
+  echo "the idle pool step did not hold on the late-start runtime (exit $code):"; tail -3 latestart.txt; fail_for_status "$code" latestart.txt
 fi
 echo "  $(grep -m1 '^idle pool: with' latestart.txt)"
 
@@ -1846,14 +2052,14 @@ step "failure proof: an idle pool step whose tasks wait only for each other is c
 awk '$0 == "            break unless arrived < cores || IyiWorkers.launched < cores.to_i32" {
     print "            break unless arrived < cores"; changed++; next }
   { print } END { if (changed != 1) exit 3 }' \
-  "$REPO/bench/concurrent_mark.iyi" > arrived_only.iyi || { echo "the idle wait is missing or ambiguous"; exit 1; }
+  "$REPO/bench/concurrent_mark.iyi" > arrived_only.iyi || { echo "the idle wait is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build --release -Didle_force arrived_only.iyi -o arrived-only > build-arrived.log 2>&1; then
-  cat build-arrived.log; exit 1
+  fail_build build-arrived.log
 fi
 timeout -k 5 300 ./arrived-only > arrived.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: idle pool: [12] of [0-9]+ workers waiting, and every worker the pool launched is one of them$" arrived.txt; then
-  echo "the idle pool check did not fire (exit $code):"; tail -3 arrived.txt; exit 1
+  echo "the idle pool check did not fire (exit $code):"; tail -3 arrived.txt; fail_for_status "$code" arrived.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' arrived.txt)"
 
@@ -1928,27 +2134,27 @@ awk -v called="$turn_called" -v lost="$turn_lost" 'function held() {
   }
   prev == "    return false unless work_waiting?" && $0 == "    wake_one" { print "    turn_armed = turn_arm"; print; print "    turn_verdict if turn_armed"; hooked++; prev = $0; next }
   { prev = $0; print } END { if (uncalled != 1 || declared != 1 || inserted != 1 || hooked != 1) exit 3 }' \
-  "$REPO/src/iyi/concurrency.iyi" > turn-held/iyi/concurrency.iyi || { echo "a turn proof anchor is missing or ambiguous"; exit 1; }
+  "$REPO/src/iyi/concurrency.iyi" > turn-held/iyi/concurrency.iyi || { echo "a turn proof anchor is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/turn-held${PSEP}$REPO/src" "$IYI" build --release -Dunstarted_force "$REPO/bench/concurrent_mark.iyi" -o turn-held-run > build-turn-held.log 2>&1; then
-  cat build-turn-held.log; exit 1
+  fail_build build-turn-held.log
 fi
 timeout -k 5 300 ./turn-held-run > turn-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -q "^idle pool: with" turn-held.txt || [ "$(grep -Fxc "$turn_called" turn-held.txt)" -ne 1 ]; then
-  echo "the held turn control did not call for the next worker and fill the pool (exit $code):"; tail -5 turn-held.txt; exit 1
+  echo "the held turn control did not call for the next worker and fill the pool (exit $code):"; tail -5 turn-held.txt; fail_for_status "$code" turn-held.txt
 fi
 echo "  $turn_called"
 step "failure proof: a turn with queued work calls for no worker"
 cp turn-held/iyi/*.iyi unstarted/iyi/
 awk 'prev == "    turn_armed = turn_arm" && $0 == "    wake_one" { removed++; prev = $0; next }
-  { prev = $0; print } END { if (removed != 1) exit 3 }' turn-held/iyi/concurrency.iyi > unstarted/iyi/concurrency.iyi || { echo "the turn start is missing or ambiguous"; exit 1; }
+  { prev = $0; print } END { if (removed != 1) exit 3 }' turn-held/iyi/concurrency.iyi > unstarted/iyi/concurrency.iyi || { echo "the turn start is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/unstarted${PSEP}$REPO/src" "$IYI" build --release -Dunstarted_force "$REPO/bench/concurrent_mark.iyi" -o unstarted-run > build-unstarted.log 2>&1; then
-  cat build-unstarted.log; exit 1
+  fail_build build-unstarted.log
 fi
 timeout -k 5 300 ./unstarted-run > unstarted.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Fxq "$turn_lost" unstarted.txt; then
-  echo "the turn that called for no worker was not caught (exit $code):"; tail -5 unstarted.txt; exit 1
+  echo "the turn that called for no worker was not caught (exit $code):"; tail -5 unstarted.txt; fail_for_status "$code" unstarted.txt
 fi
 printf '  exits 1 at "%s"\n' "$turn_lost"
 
@@ -2003,28 +2209,28 @@ awk 'function forced() {
     print "        end"
     print "        pool_word(512_u64).value.add(1_u64)"
     hooked = 1; next }
-  { print } END { if (declared != 1 || hooked != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held-helpers/iyi/prelude.iyi || { echo "the helper's entry this proof holds is missing or ambiguous"; exit 1; }
+  { print } END { if (declared != 1 || hooked != 1) exit 3 }' "$REPO/src/iyi/prelude.iyi" > held-helpers/iyi/prelude.iyi || { echo "the helper's entry this proof holds is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/held-helpers${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-held > build-held-helpers.log 2>&1; then
-  cat build-held-helpers.log; exit 1
+  fail_build build-held-helpers.log
 fi
 timeout -k 5 120 ./crowded-held > crowded-held.txt 2>&1
 code=$?
 if [ "$code" -ne 0 ] || ! grep -q '^crowded: ' crowded-held.txt; then
-  echo "the hook alone, helpers held until a collection returns, did not pass (exit $code):"; tail -3 crowded-held.txt; exit 1
+  echo "the hook alone, helpers held until a collection returns, did not pass (exit $code):"; tail -3 crowded-held.txt; fail_for_status "$code" crowded-held.txt
 fi
 echo "  the hook alone, exits 0: $(grep -m1 '^crowded: ' crowded-held.txt)"
 mkdir -p ready/iyi
 cp held-helpers/iyi/*.iyi ready/iyi/
 awk '/^          @@helpers = @@helpers \+ 1_u64$/ { made++; print; next }
   made == 1 && !waited && /^        end$/ { print; print "        ready_limit = IyiMark.now_ns &+ 10000000000_u64"; print "        while pool_word(512_u64).value.get < @@helpers"; print "          IyiMark.note_ready_wait"; print "          if IyiMark.now_ns >= ready_limit"; print "            message = \"FAIL: crowded: the readiness wait was held past ten seconds\\n\""; print "            __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"; print "            __iyi_exit(76)"; print "          end"; print "          spin_pause"; print "        end"; waited++; next }
-  { print } END { if (made != 1 || waited != 1) exit 3 }' held-helpers/iyi/prelude.iyi > ready/iyi/prelude.iyi || { echo "the helpers' start this proof changes is missing or ambiguous"; exit 1; }
+  { print } END { if (made != 1 || waited != 1) exit 3 }' held-helpers/iyi/prelude.iyi > ready/iyi/prelude.iyi || { echo "the helpers' start this proof changes is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/ready${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-ready > build-ready.log 2>&1; then
-  cat build-ready.log; exit 1
+  fail_build build-ready.log
 fi
 timeout -k 5 120 ./crowded-ready > crowded-ready.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Fxq 'FAIL: crowded: the first collection waited for a held helper' crowded-ready.txt; then
-  echo "the first collection's wait was not caught (exit $code):"; tail -3 crowded-ready.txt; exit 1
+  echo "the first collection's wait was not caught (exit $code):"; tail -3 crowded-ready.txt; fail_for_status "$code" crowded-ready.txt
 fi
 printf '  exits 1 at "%s"\n' 'FAIL: crowded: the first collection waited for a held helper'
 # This copy waits after the collector has resumed the watcher but before it
@@ -2049,14 +2255,14 @@ awk '/^        def self\.finish_stopped\(started : UInt64, others : Int64\) : Ni
     inserted++; next
   }
   inside && /^        end$/ { inside = 0 }
-  { print } END { if (inserted != 1) exit 3 }' held-helpers/iyi/prelude.iyi > ready-after-release/iyi/prelude.iyi || { echo "the post-release readiness anchor is missing or ambiguous"; exit 1; }
+  { print } END { if (inserted != 1) exit 3 }' held-helpers/iyi/prelude.iyi > ready-after-release/iyi/prelude.iyi || { echo "the post-release readiness anchor is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/ready-after-release${PSEP}$REPO/src" "$IYI" build --release -Dready_force crowded.iyi -o crowded-ready-after-release > build-ready-after-release.log 2>&1; then
-  cat build-ready-after-release.log; exit 1
+  fail_build build-ready-after-release.log
 fi
 timeout -k 5 120 ./crowded-ready-after-release > crowded-ready-after-release.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Fxq 'FAIL: crowded: the first collection waited for a held helper' crowded-ready-after-release.txt; then
-  echo "the post-release readiness wait was not caught (exit $code):"; tail -3 crowded-ready-after-release.txt; exit 1
+  echo "the post-release readiness wait was not caught (exit $code):"; tail -3 crowded-ready-after-release.txt; fail_for_status "$code" crowded-ready-after-release.txt
 fi
 printf '  exits 1 at "%s"\n' 'FAIL: crowded: the first collection waited for a held helper'
 # Four proofs follow, and they exist only where the code they prove does: the
@@ -2075,9 +2281,9 @@ step "failure proof: helpers created with Windows priority boost enabled are det
 mkdir -p boosted/iyi
 cp "$REPO"/src/iyi/*.iyi boosted/iyi/
 awk '/^ *LibC\.SetThreadPriorityBoost\(h, 1_i32\)$/ { print "        # the helpers keep the boost"; found++; next } { print } END { if (found != 1) exit 3 }' \
-  "$REPO/src/iyi/thread.iyi" > boosted/iyi/thread.iyi || { echo "the helper boost call is missing or ambiguous"; exit 1; }
+  "$REPO/src/iyi/thread.iyi" > boosted/iyi/thread.iyi || { echo "the helper boost call is missing or ambiguous"; exit 76; }
 if ! IYI_PATH="$WORK/boosted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o boosted-run > build-boosted.log 2>&1; then
-  cat build-boosted.log; exit 1
+  fail_build build-boosted.log
 fi
 # The shipped build also reports wake timing while pinned beside a spinner.
 # Timing is informational: the boosted copy exits at the structural boost
@@ -2100,14 +2306,14 @@ end
 puts "spun #{x}"
 IYI
 if ! "$IYI" build --release spin.iyi -o spin > build-spin.log 2>&1; then
-  cat build-spin.log; exit 1
+  fail_build build-spin.log
 fi
 # `./$1` held to two processors beside the spinner, its output in `$2`.
 pinned_run() {
   rm -f spin-ready spin-stop
   MSYS_NO_PATHCONV=1 cmd /c start "" /b /affinity 3 spin.exe > spin.txt 2>&1
   for wait in $(seq 1 100); do [ -f spin-ready ] && break; sleep 0.1; done
-  [ -f spin-ready ] || { echo "the spinner did not start"; exit 1; }
+  [ -f spin-ready ] || { echo "FAIL: wake setup: the spinner did not start"; exit 76; }
   MSYS_NO_PATHCONV=1 timeout -k 5 300 cmd /c start "" /b /wait /affinity 3 "$1.exe" pinned > "$2" 2>&1
   pinned_status=$?
   touch spin-stop
@@ -2117,7 +2323,7 @@ pinned_run() {
 pinned_run marks pinned.txt
 code=$?
 if [ "$code" -ne 0 ] || ! grep -Fxq "concurrent mark: every property held" pinned.txt || ! grep -q "^wake: the program's thread woke the helpers" pinned.txt; then
-  echo "the shipped build, held to two processors beside a spinner failed (exit $code):"; tail -3 pinned.txt; exit 1
+  echo "the shipped build, held to two processors beside a spinner failed (exit $code):"; tail -3 pinned.txt; fail_for_status "$code" pinned.txt
 fi
 echo "  the shipped build, held to two processors beside a spinner: $(grep -m1 '^wake: the program' pinned.txt)"
 # The decider is the structural check: a copy that drops the boost leaves the
@@ -2128,7 +2334,7 @@ echo "  the shipped build, held to two processors beside a spinner: $(grep -m1 '
 timeout -k 5 300 ./boosted-run > boosted.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -q '^FAIL: wake boost: [0-9]* threads of this process have the priority boost off, the mark asked for [0-9]* helpers$' boosted.txt; then
-  echo "the boost check did not fire (exit $code):"; tail -3 boosted.txt; exit 1
+  echo "the boost check did not fire (exit $code):"; tail -3 boosted.txt; fail_for_status "$code" boosted.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: wake boost' boosted.txt)"
 
@@ -2138,14 +2344,14 @@ step "control: an unreadable Windows priority boost is a setup failure"
 awk '$0 == "            queried = LibBoost.GetThreadPriorityBoost(thread, pointerof(disabled))" {
     print "            queried = 0_i32"; changed++; next
   }
-  { print } END { if (changed != 1) exit 3 }' "$REPO/bench/concurrent_mark.iyi" > boost-query-failed.iyi || { echo "the boost query anchor is missing or ambiguous"; exit 1; }
+  { print } END { if (changed != 1) exit 3 }' "$REPO/bench/concurrent_mark.iyi" > boost-query-failed.iyi || { echo "the boost query anchor is missing or ambiguous"; exit 76; }
 if ! "$IYI" build --release boost-query-failed.iyi -o boost-query-failed > build-boost-query-failed.log 2>&1; then
-  cat build-boost-query-failed.log; exit 1
+  fail_build build-boost-query-failed.log
 fi
 timeout -k 5 300 ./boost-query-failed > boost-query-failed.txt 2>&1
 code=$?
 if [ "$code" -ne 76 ] || ! grep -Fxq "FAIL: wake boost setup: cannot query a process thread's priority boost" boost-query-failed.txt || grep -q '^FAIL: wake boost: ' boost-query-failed.txt; then
-  echo "the failed boost query was not reported as setup failure (exit $code):"; tail -3 boost-query-failed.txt; exit 1
+  echo "the failed boost query was not reported as setup failure (exit $code):"; tail -3 boost-query-failed.txt; fail_for_status "$code" boost-query-failed.txt
 fi
 printf '  exits 76 at "%s"\n' "FAIL: wake boost setup: cannot query a process thread's priority boost"
 
@@ -2153,14 +2359,14 @@ step "failure proof: a mark beside a busy program that asks for every helper is 
 mkdir -p greedy/iyi
 cp "$REPO"/src/iyi/*.iyi greedy/iyi/
 awk '/^ *helpers = free if helpers > free$/ { found++; next } { print } END { if (found != 1) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > greedy/iyi/prelude.iyi || { echo "the cap this proof removes is not in the prelude any more"; exit 1; }
+  "$REPO/src/iyi/prelude.iyi" > greedy/iyi/prelude.iyi || { echo "the cap this proof removes is not in the prelude any more"; exit 76; }
 if ! IYI_PATH="$WORK/greedy${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o greedy-run > build-greedy.log 2>&1; then
-  cat build-greedy.log; exit 1
+  fail_build build-greedy.log
 fi
 timeout -k 5 300 ./greedy-run > greedy.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: share: with [0-9]+ threads of the program's on [0-9]+ cores, the mark beside them asked for [0-9]+ helpers rather than 1$" greedy.txt; then
-  echo "the share check did not fire (exit $code):"; tail -3 greedy.txt; exit 1
+  echo "the share check did not fire (exit $code):"; tail -3 greedy.txt; fail_for_status "$code" greedy.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: share:' greedy.txt)"
 
@@ -2171,14 +2377,14 @@ step "failure proof: a mark beside an idle pool that counts its waiting workers 
 mkdir -p counted/iyi
 cp "$REPO"/src/iyi/*.iyi counted/iyi/
 awk '/^ *threads = threads > waiting \? threads - waiting : 1_u64$/ { found++; next } { print } END { if (found != 1) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > counted/iyi/prelude.iyi || { echo "the line this proof removes is not in the prelude any more"; exit 1; }
+  "$REPO/src/iyi/prelude.iyi" > counted/iyi/prelude.iyi || { echo "the line this proof removes is not in the prelude any more"; exit 76; }
 if ! IYI_PATH="$WORK/counted${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o counted-run > build-counted.log 2>&1; then
-  cat build-counted.log; exit 1
+  fail_build build-counted.log
 fi
 timeout -k 5 300 ./counted-run > counted.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: idle pool: with [0-9]+ threads of the program's on [0-9]+ cores, [0-9]+ of them pool workers waiting, the mark beside them asked for [0-9]+ helper$" counted.txt; then
-  echo "the idle pool check did not fire (exit $code):"; tail -3 counted.txt; exit 1
+  echo "the idle pool check did not fire (exit $code):"; tail -3 counted.txt; fail_for_status "$code" counted.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' counted.txt)"
 
@@ -2188,14 +2394,14 @@ step "failure proof: a mark beside a busy pool that counts its running workers f
 mkdir -p pooled/iyi
 cp "$REPO"/src/iyi/*.iyi pooled/iyi/
 awk '/^ *waiting = IyiScheduler\.waiting_threads$/ { sub(/IyiScheduler\.waiting_threads/, "IyiWorkers.started? ? IyiWorkers.count.to_u64 : IyiScheduler.waiting_threads"); found++ } { print } END { if (found != 1) exit 3 }' \
-  "$REPO/src/iyi/prelude.iyi" > pooled/iyi/prelude.iyi || { echo "the line this proof changes is not in the prelude any more"; exit 1; }
+  "$REPO/src/iyi/prelude.iyi" > pooled/iyi/prelude.iyi || { echo "the line this proof changes is not in the prelude any more"; exit 76; }
 if ! IYI_PATH="$WORK/pooled${PSEP}$REPO/src" "$IYI" build --release "$REPO/bench/concurrent_mark.iyi" -o pooled-run > build-pooled.log 2>&1; then
-  cat build-pooled.log; exit 1
+  fail_build build-pooled.log
 fi
 timeout -k 5 300 ./pooled-run > pooled.txt 2>&1
 code=$?
 if [ "$code" -ne 1 ] || ! grep -Eq "^FAIL: busy pool: with [0-9]+ pool workers running on [0-9]+ cores, [0-9]+ waiting, the mark beside them asked for [0-9]+ helpers rather than 1$" pooled.txt; then
-  echo "the busy pool check did not fire (exit $code):"; tail -3 pooled.txt; exit 1
+  echo "the busy pool check did not fire (exit $code):"; tail -3 pooled.txt; fail_for_status "$code" pooled.txt
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: busy pool:' pooled.txt)"
 

@@ -4547,85 +4547,351 @@ IYI
     ;;
 esac
 
-# ── 7e. darwin: a thread's first allocation is a root ─────────────────────
+# ── 7e. darwin: a thread's first allocation, held by its own frame ────────
 # A darwin thread wrote its stack's top on its line after
-# `IyiStackGuard.install`, whose `stack_t` is the thread's first heap
-# chunk. A stop between that allocation and the chunk's three stores
-# scanned the stack from sp up to 0, `GC.collect` freed the chunk in its
-# pause's sweep, and the stores wrote over the free batch it went onto: 7d's
-# program died of SIGSEGV in 13 runs of 342 of 3,200 threads on macos-15's
-# three cores, the same before the thread-local fix (6 of 115) as after it
-# (5 of 103), 12 of the 13 at the centre's next pop of the class, reading
-# 0x10008 - the `stack_t`'s 65,536 plus 8. Linux's top is written by the
-# parent before `clone`. A darwin thread's first store is its top now. A
-# copy of the runtime holds the `stack_t` in the install's frame until two
-# collections have stopped the thread (50 ms at most), then asks the sweep's
-# own flag whether the chunk was freed, and aborts by name if it was; every
-# thread of three runs keeps it. With the top written after the install
-# again, the same copy aborts, or dies of the overwritten batch: on
-# macos-15, three runs of this gate aborted 9 runs of 9, and kept every
-# first allocation in the fixed copy's 9.
+# `IyiStackGuard.install`, whose `stack_t` is the thread's first heap chunk.
+# A stop between that allocation and the top write scanned nothing for the
+# stack, `GC.collect` swept the chunk in its pause, and the stores after it
+# wrote over the free batch it went onto: 7d's program died of SIGSEGV in 13
+# runs of 342 of 3,200 threads on macos-15's three cores, 12 of the 13 at the
+# centre's next pop of the class, reading 0x10008, the `stack_t`'s 65,536 plus
+# 8. The runtime writes the top before the install (copy `topfirst`); copy
+# `toplate` writes it after the install again.
+#
+# The two copies carry the same witnesses and differ only in that order. The
+# child makes the `stack_t` in `IyiStackGuard.install` (through the armed call
+# of `IyiThread.line_first_alloc`), keeps its address in one slot of its own
+# frame, clears every integer register that could hold it, and publishes HELD.
+# The parent runs two collections, and each must visit the held line. The
+# child then releases the hold (OPEN) and checks the chunk before its first
+# store: it must still be allocated. The control's frame scan keeps the chunk.
+# In the mutant the stopped thread has no top yet, so the stack scan covers
+# none of its frame, the sweep frees the chunk, and the child exits 1 with the
+# named sentence. A setup failure and a hung run exit 76.
 case "$(uname -s)" in
   Darwin)
-    step "darwin: a thread's first allocation, held in its frame through two collections, is not swept: three runs"
-    held='function held(pad) {
-      print pad "held_until = __iyi_monotonic_ns + 50_000_000_i64"
-      print pad "held_from = IyiThread.stops"
-      print pad "while IyiThread.stops < held_from + 2_u64 && __iyi_monotonic_ns < held_until"
-      print pad "end"
-      print pad "if IyiMark.flags(stack.address) & IyiHeap::FREE_FLAG != 0"
-      print pad "  message = \"iyi: proof: a thread'"'"'s first allocation was swept from under it\\n\""
-      print pad "  __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)"
-      print pad "  LibC.pthread_kill(LibC.pthread_self, 6)"
-      print pad "end"
-    }'
+    step "darwin: a thread's first allocation, held in its frame through two collections, is not swept"
+    cat > first-asm.part <<'IYI'
+{% if flag?(:darwin) && flag?(:aarch64) %}
+# The copy-only hold of the first allocation (bench/thread_exercise.sh, 7e).
+# `cell` is the frame slot that holds the allocation's address, and `page` is
+# the control page. The hold publishes the allocation and the slot's address
+# to the page (ALLOCATION at 576, CELL at 640), saves the caller's callee-saved
+# registers on its own frame, clears every integer register that could hold
+# the allocation, publishes HELD (448), and waits for OPEN (512).
+@[NoInline]
+@[Naked]
+fun __iyi_first_frame_hold(cell : UInt64, page : UInt64) : Nil
+  asm("stp x19, x20, [sp, #-96]!
+       stp x21, x22, [sp, #16]
+       stp x23, x24, [sp, #32]
+       stp x25, x26, [sp, #48]
+       stp x27, x28, [sp, #64]
+       stp x29, x30, [sp, #80]
+       add x29, sp, #80
+       ldr x2, [x0]
+       add x3, x1, #576
+       stlr x2, [x3]
+       add x3, x1, #640
+       stlr x0, [x3]
+       mov x0, x1
+       mov x1, xzr
+       mov x2, xzr
+       mov x3, xzr
+       mov x4, xzr
+       mov x5, xzr
+       mov x6, xzr
+       mov x7, xzr
+       mov x8, xzr
+       mov x9, xzr
+       mov x10, xzr
+       mov x11, xzr
+       mov x12, xzr
+       mov x13, xzr
+       mov x14, xzr
+       mov x15, xzr
+       mov x16, xzr
+       mov x17, xzr
+       mov x19, xzr
+       mov x20, xzr
+       mov x21, xzr
+       mov x22, xzr
+       mov x23, xzr
+       mov x24, xzr
+       mov x25, xzr
+       mov x26, xzr
+       mov x27, xzr
+       mov x28, xzr
+       mov x1, #1
+       add x2, x0, #448
+       stlr x1, [x2]
+       add x2, x0, #512
+       1:
+       ldar x3, [x2]
+       cbnz x3, 2f
+       yield
+       b 1b
+       2:
+       ldp x29, x30, [sp, #80]
+       ldp x27, x28, [sp, #64]
+       ldp x25, x26, [sp, #48]
+       ldp x23, x24, [sp, #32]
+       ldp x21, x22, [sp, #16]
+       ldp x19, x20, [sp], #96
+       ret" :::: "volatile")
+end
+
+# The walk's check of one stopped thread: 0 when the frame slot holds the
+# allocation and no saved integer register points into it, 1 when the slot
+# does not hold it, 2 when a register does. `spill` is the thread's 31 saved
+# integer registers, and `allocation_word` is the page's ALLOCATION word.
+@[NoInline]
+@[Naked]
+fun __iyi_first_frame_check(cell : UInt64, spill : UInt64, allocation_word : UInt64) : UInt64
+  asm("ldar x3, [x2]
+       ldr x4, [x0]
+       cmp x4, x3
+       b.ne 3f
+       mov x5, #31
+       1:
+       ldr x4, [x1], #8
+       sub x4, x4, x3
+       cmp x4, #24
+       b.lo 4f
+       subs x5, x5, #1
+       b.ne 1b
+       mov x0, #0
+       b 5f
+       3:
+       mov x0, #1
+       b 5f
+       4:
+       mov x0, #2
+       5:
+       mov x1, xzr
+       mov x2, xzr
+       mov x3, xzr
+       mov x4, xzr
+       mov x5, xzr
+       ret" :::: "volatile")
+  0_u64
+end
+{% end %}
+IYI
+    cat > first-thread.part <<'IYI'
+    # ── The first allocation under test (bench/thread_exercise.sh, 7e) ─────
+    # Copies only: the awk in that step puts this into a copy of the runtime's
+    # thread.iyi, and the tree has none of it. The control-page words are
+    # armed by the parent (ARM), set by the child (LINE, CELL and ALLOCATION,
+    # then HELD), released by the parent (OPEN), and counted by each collection
+    # that visits the armed line while it is held (VISITS).
+    IYI_FIRST_ARM        = 384_u64
+    IYI_FIRST_HELD       = 448_u64
+    IYI_FIRST_OPEN       = 512_u64
+    IYI_FIRST_ALLOCATION = 576_u64
+    IYI_FIRST_CELL       = 640_u64
+    IYI_FIRST_LINE       = 704_u64
+    IYI_FIRST_VISITS     = 768_u64
+
+    def self.first_arm : Nil
+      word(control + IYI_FIRST_ARM).value.set(1_u64)
+    end
+
+    def self.first_held? : Bool
+      word(control + IYI_FIRST_HELD).value.get != 0_u64
+    end
+
+    def self.first_open : Nil
+      word(control + IYI_FIRST_OPEN).value.set(1_u64)
+    end
+
+    def self.first_visits : UInt64
+      word(control + IYI_FIRST_VISITS).value.get
+    end
+
+    # The chunk `IyiStackGuard.install` makes for its `stack_t`. The armed call
+    # keeps the chunk's address in one slot of this frame until the parent
+    # releases it; every other call is a plain allocation. Before the first
+    # store the chunk must still be allocated. A sweep that freed it leaves its
+    # FREE flag set, or releases its arena, and then `IyiHeap.arena_of` answers
+    # 0 from the directory without touching the unmapped memory.
+    @[NoInline]
+    def self.line_first_alloc : UInt64
+      page = @@control
+      if page == 0_u64 || !word(page + IYI_FIRST_ARM).value.compare_and_set(1_u64, 0_u64)[1]
+        return Pointer(UInt64).malloc(3_u64).address
+      end
+      if @@line == 0_u64
+        message = "SETUP: first: the first allocation ran before its thread was named\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        LibC.first_frame_exit(76_i32)
+      end
+      cell = uninitialized UInt64
+      cell_address = pointerof(cell).address
+      Pointer(UInt64).new(cell_address).value = Pointer(UInt64).malloc(3_u64).address
+      word(page + IYI_FIRST_LINE).value.set(@@line)
+      __iyi_first_frame_hold(cell_address, page)
+      allocation = Pointer(UInt64).new(cell_address).value
+      if IyiHeap.arena_of(allocation) == 0_u64 || IyiMark.flags(allocation) & IyiHeap::FREE_FLAG != 0_u64
+        message = "FAIL: toplate: the first allocation was swept while its frame held it\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        LibC.first_frame_exit(1_i32)
+      end
+      allocation
+    end
+
+    # Each collection calls this for every stopped thread, after it has scanned
+    # that thread's stack. The armed line counts a visit while it is held. The
+    # frame slot must lie in the scanned stack and no saved integer register
+    # may hold the allocation; a broken witness is a setup failure. A top the
+    # thread has not written scans nothing, which is how the mutant's stop
+    # finds the frame.
+    def self.first_visit(cursor : UInt64, sp : UInt64, top : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || word(page + IYI_FIRST_HELD).value.get == 0_u64
+      return if word(page + IYI_FIRST_LINE).value.get != cursor
+      cell = word(page + IYI_FIRST_CELL).value.get
+      if cell == 0_u64 || cell.unsafe_mod(8_u64) != 0_u64 || cell < sp || (top != 0_u64 && (cell >= top || top &- cell < 8_u64))
+        message = "SETUP: first: the frame slot is outside the stopped stack\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        LibC.first_frame_exit(76_i32)
+      end
+      checked = __iyi_first_frame_check(cell, cursor + IYI_TL_SPILL, page + IYI_FIRST_ALLOCATION)
+      if checked == 1_u64
+        message = "SETUP: first: the frame slot does not hold the allocation\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        LibC.first_frame_exit(76_i32)
+      elsif checked == 2_u64
+        message = "SETUP: first: a stopped register holds the allocation\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        LibC.first_frame_exit(76_i32)
+      end
+      word(page + IYI_FIRST_VISITS).value.add(1_u64)
+    end
+
+IYI
+    cat > first-concurrency.awk <<'AWK'
+# Puts the copy-only hold and check before `module IyiStackGuard`, once, and
+# makes the darwin install's `stack_t` the armed first allocation, once.
+/^  module IyiStackGuard$/ {
+  while ((getline line < part) > 0) print line
+  modules++
+}
+/^    def self\.install : Nil$/ { inside = 1; installs++ }
+inside && /^      \{% if flag\?\(:darwin\) %\}$/ { in_darwin = 1; darwins++ }
+inside && /^      \{% else %\}$/ { in_darwin = 0 }
+inside && /^    end$/ { inside = 0 }
+in_darwin && /^        stack = Pointer\(UInt64\)\.malloc\(3_u64\)$/ {
+  print "        stack = Pointer(UInt64).new(IyiThread.line_first_alloc)"
+  allocations++
+  next
+}
+{ print }
+END { if (modules != 1 || installs != 1 || darwins != 1 || allocations != 1) exit 3 }
+AWK
+    cat > first-thread.awk <<'AWK'
+# Each anchor once: the darwin lib's thread_switch (for the exit alias), the
+# part before the roots, the run's darwin top and install (the top moves after
+# the install in toplate only), and the stack scan that gets the visit hook.
+/^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ {
+  print
+  print "      fun first_frame_exit = _exit(status : Int32) : NoReturn"
+  exits++
+  next
+}
+/^    # ── Roots/ {
+  while ((getline line < part) > 0) print line
+  roots++
+}
+/^    def self\.run\(line : UInt64\) : Nil$/ { in_run = 1; runs++ }
+in_run && /^      \{% if flag\?\(:darwin\) %\}$/ && !seen_darwin { in_darwin = 1; seen_darwin = 1; darwins++ }
+in_run && in_darwin && /^      \{% elsif flag\?\(:linux\) %\}$/ { in_darwin = 0 }
+in_run && in_darwin && /^        IyiHeap\.write64\(line \+ IYI_TL_TOP, IyiRoots\.discover_stack_base\)$/ {
+  top = $0
+  tops++
+  if (mode == "toplate") next
+}
+in_run && /^        IyiStackGuard\.install$/ {
+  print
+  if (mode == "toplate" && tops == 1) print top
+  installs++
+  next
+}
+in_run && /^    end$/ { in_run = 0; run_ends++ }
+/^    def self\.each_stopped_root\(visit : Proc\(UInt64, Nil\)\) : Nil$/ { in_scan = 1; scans++ }
+in_scan && /^          IyiRoots\.scan_range\(sp, top, visit\)$/ {
+  print
+  print "          IyiThread.first_visit(cursor, sp, top)"
+  visits++
+  next
+}
+in_scan && /^    end$/ { in_scan = 0; scan_ends++ }
+{ print }
+END {
+  if (mode != "topfirst" && mode != "toplate") exit 3
+  if (exits != 1 || roots != 1 || runs != 1 || run_ends != 1 || darwins != 1 || tops != 1 || installs != 1 || scans != 1 || scan_ends != 1 || visits != 1) exit 3
+}
+AWK
+    cat > first-frame.iyi <<'IYI'
+module first_frame
+
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+IyiThread.first_arm
+thread = IyiThread.start { nil }
+deadline = IyiMark.now_ns &+ 20000000000_u64
+while !IyiThread.first_held?
+  if IyiMark.now_ns >= deadline
+    print "SETUP: first: the child never held its first allocation\n"
+    __iyi_exit(76)
+  end
+  IyiThread.yield_cpu
+end
+before = IyiThread.first_visits
+IyiMark.collect
+if IyiThread.first_visits <= before
+  print "SETUP: first: the first collection did not visit the held line\n"
+  __iyi_exit(76)
+end
+before = IyiThread.first_visits
+IyiMark.collect
+if IyiThread.first_visits <= before
+  print "SETUP: first: the second collection did not visit the held line\n"
+  __iyi_exit(76)
+end
+IyiThread.first_open
+thread.join
+puts "first: the first allocation survived two collections that visited its line"
+IYI
+    first_ok='first: the first allocation survived two collections that visited its line'
+    first_fail='FAIL: toplate: the first allocation was swept while its frame held it'
     for copy in topfirst toplate; do
       mkdir -p "$copy/iyi"
       cp "$REPO"/src/iyi/*.iyi "$copy/iyi/"
-      awk "$held"' /^        stack = Pointer\(UInt64\)\.malloc\(3_u64\)$/ && !found { print; held("        "); found = 1; next }
-        { print } END { if (!found) exit 3 }' \
-        "$REPO/src/iyi/concurrency.iyi" > "$copy/iyi/concurrency.iyi" || { echo "the stack guard's stack_t is not in concurrency.iyi any more"; exit 1; }
+      awk -v part=first-asm.part -f first-concurrency.awk "$REPO/src/iyi/concurrency.iyi" > "$copy/iyi/concurrency.iyi" || { echo "SETUP: first: the stack guard's first allocation is not in concurrency.iyi any more"; exit 76; }
+      awk -v part=first-thread.part -v mode="$copy" -f first-thread.awk "$REPO/src/iyi/thread.iyi" > "$copy/iyi/thread.iyi" || { echo "SETUP: first: the thread's top, its stack guard or its stack scan is not in thread.iyi any more"; exit 76; }
+      if ! IYI_PATH="$WORK/$copy${PSEP}$REPO/src" "$IYI" build first-frame.iyi -o "$copy-run" > "build-$copy.log" 2>&1; then
+        cat "build-$copy.log"; echo "SETUP: first: the $copy copy did not build"; exit 76
+      fi
     done
-    awk '/^        IyiHeap\.write64\(line \+ IYI_TL_TOP, IyiRoots\.discover_stack_base\)$/ && !top { top = $0; next }
-      /^        IyiStackGuard\.install$/ && top { print; print top; moved = 1; next }
-      { print } END { if (!top || !moved) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > toplate/iyi/thread.iyi || { echo "the thread's top or its stack guard is not in thread.iyi any more"; exit 1; }
     for copy in topfirst toplate; do
-      if ! IYI_PATH="$WORK/$copy${PSEP}$REPO/src" "$IYI" build born.iyi -o "$copy-run" > "build-$copy.log" 2>&1; then
-        cat "build-$copy.log"; exit 1
+      timeout -k 5 60 "./$copy-run" > "$copy.txt" 2>&1
+      code=$?
+      if [ "$code" -eq 76 ]; then cat "$copy.txt"; exit 76; fi
+      if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then echo "SETUP: first: the $copy run exceeded its 60 s bound"; exit 76; fi
+      answer="$(cat "$copy.txt")"
+      if [ "$copy" = topfirst ]; then
+        if [ "$code" -eq 0 ] && [ "$answer" = "$first_ok" ]; then
+          echo "  control: exit 0, $first_ok"
+        else
+          echo "control failed (exit $code):"; cat "$copy.txt"; exit 1
+        fi
+      elif [ "$code" -eq 1 ] && [ "$answer" = "$first_fail" ]; then
+        echo "  exits 1 at \"$first_fail\""
+      else
+        echo "mutant failed unexpectedly (exit $code):"; cat "$copy.txt"; exit 1
       fi
     done
-    run=1
-    while [ "$run" -le 3 ]; do
-      ( timeout -k 5 60 ./topfirst-run 20 1 > topfirst.txt 2>&1; exit $? ) 2> /dev/null
-      code=$?
-      if [ "$code" -eq 76 ]; then cat topfirst.txt; exit 76; fi
-      if [ "$code" -ne 0 ] || ! grep -q '^ok born=320 ' topfirst.txt; then
-        echo "run $run exited $code:"; tail -3 topfirst.txt; exit 1
-      fi
-      run=$((run + 1))
-    done
-    echo "  three runs of 320 threads, every first allocation kept"
-
-    step "failure proof: the top written after the stack guard's allocation, as it was"
-    aborted=0; faulted=0; ended=0; other=""
-    run=1
-    while [ "$run" -le 3 ]; do
-      ( timeout -k 5 60 ./toplate-run 20 1 > toplate.txt 2>&1; exit $? ) 2> /dev/null
-      code=$?
-      if [ "$code" -eq 76 ]; then cat toplate.txt; exit 76; fi
-      case "$code" in
-        134) grep -q "^iyi: proof: a thread's first allocation was swept from under it" toplate.txt && aborted=$((aborted + 1)) || other="$other 134" ;;
-        139) faulted=$((faulted + 1)) ;;
-        0) ended=$((ended + 1)) ;;
-        *) other="$other $code" ;;
-      esac
-      run=$((run + 1))
-    done
-    echo "  three runs: $aborted aborted at a swept first allocation (SIGABRT), $faulted faulted (SIGSEGV), $ended ended${other:+, other exits:$other}"
-    if [ $((aborted + faulted)) -eq 0 ]; then
-      echo "three runs with the top written after the stack guard's allocation: none aborted or faulted"; exit 1
-    fi
     ;;
 esac
 

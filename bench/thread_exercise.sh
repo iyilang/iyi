@@ -1073,7 +1073,7 @@ def beside(collect : Bool) : UInt64
   took
 end
 
-if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, Program.args[0].to_u64) == 0_i32 || IyiThread.core_count != 1
+if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, Program.args[0].to_i.to_u64) == 0_i32 || IyiThread.core_count != 1_u64
   print "SETUP: affinity: the process could not be held to one allowed core\n"
   __iyi_exit(76)
 end
@@ -1166,7 +1166,7 @@ def check_collection(stage : UInt64) : Nil
   end
 end
 
-if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, Program.args[0].to_u64) == 0_i32 || IyiThread.core_count != 1_u64
+if CorePin.SetProcessAffinityMask(::LibC.GetCurrentProcess, Program.args[0].to_i.to_u64) == 0_i32 || IyiThread.core_count != 1_u64
   print "SETUP: fairness: the process could not be held to one allowed core\n"
   __iyi_exit(76)
 end
@@ -6523,10 +6523,9 @@ IYI
         awk '
           /^      def self\.collect_cleared : Nil$/ { in_collect = 1; definitions++ }
           in_collect && /^      end$/ { in_collect = 0; ends++ }
-          in_collect && /^        IyiRuntimeLock\.lock$/ {
-            locks++
-            if (locks == 1) { print "        IyiThread.turn_lock_check"; first++ }
-            else if (locks == 2) second++
+          in_collect && /^ *IyiRuntimeLock\.lock$/ {
+            if ($0 == "        IyiRuntimeLock.lock") { first++; print "        IyiThread.turn_lock_check" }
+            else if ($0 == "          IyiRuntimeLock.lock") second++
             else extra++
           }
           { print }

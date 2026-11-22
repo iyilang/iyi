@@ -17,16 +17,32 @@ require "./codegen"
 # assigned) or one of its elements (`Pointer#array_slot`, which array.iyi
 # reads and writes its buffer with and nothing else does). LLVM takes two
 # accesses with the two tags for distinct memory. Every other access stays
-# untagged, which LLVM takes as one that may touch anything, as before;
-# the tag names a place, not a type, so a union element's type id under
-# the element tag is still an element's memory.
+# untagged, which LLVM takes as one that may touch anything, as before.
 #
-# An element read whose type is a class (not a struct, a union or a
-# virtual type) is also marked `!nonnull`, `!dereferenceable` and `!align`
-# for that class's fields: array.iyi reads only elements below the size,
-# which are written (`unsafe_build`'s and `unsafe_set_size`'s promise), so
-# the value is an object. That is what lets LLVM load `bk`'s size ahead of
-# the branch that guards that load in the loop, and so out of the loop.
+# Why the two never meet:
+#
+# * The element tag goes only on a slot that holds one scalar - a number,
+#   a char, a bool, a symbol, an enum, a pointer or a reference - of a
+#   buffer array.iyi made: every `@buffer` is null, `Pointer(T).malloc`'s
+#   or a step into one (`initialize`, `reserve`, `shift`, `keep_span`), and
+#   an `unsafe_build` array's is `new(capacity)`'s. An element that is a
+#   struct is left untagged, so a `ReferenceStorage` holding an object
+#   inline, or a tuple, never puts anything's fields under the element tag.
+# * The field tag goes only on an `Array` instance's own fields, which live
+#   in an object, never in a scalar slot. A subclass or a reopening reads
+#   its fields through its own type, which is not an `Array` instance and
+#   is untagged. Nothing takes `pointerof` an array's field.
+# * Raw memory reached any other way - `to_unsafe`, a `Slice` over the
+#   buffer, the collector's scan, heap22's partitions, `copy_from`'s
+#   `memmove` - is untagged. The collector does not move objects.
+#
+# An element read whose type is a class (not a struct, a union - so not a
+# nilable one - nor a virtual type) is also marked `!nonnull`,
+# `!dereferenceable` and `!align` for that class's fields: array.iyi reads
+# only elements below the size, which are written (`unsafe_build`'s and
+# `unsafe_set_size`'s promise, SPEC.md III.13), so the value is an object.
+# That is what lets LLVM load `bk`'s size ahead of the branch that guards
+# that load in the loop, and so out of the loop.
 class Iyi::CodeGenVisitor
   # The two access tags per LLVM context, keyed by the context's address.
   @iyi_array_tbaa = {} of {UInt64, Bool} => LLVM::Value
@@ -39,6 +55,20 @@ class Iyi::CodeGenVisitor
   def iyi_array_instance?(type : Type) : Bool
     type = type.remove_typedef
     type.is_a?(GenericClassInstanceType) && type.generic_type == @program.array
+  end
+
+  # Whether an element of *type* is one scalar slot, which alone takes the
+  # element tag (see above).
+  def iyi_array_scalar?(type : Type) : Bool
+    type = type.remove_typedef
+    case type
+    when IntegerType, FloatType, BoolType, CharType, SymbolType, EnumType, PointerInstanceType
+      true
+    when NilType
+      false
+    else
+      type.reference_like?
+    end
   end
 
   # Marks *value* with the field's (*element* false) or the element's tag

@@ -931,7 +931,7 @@ class Iyi::CodeGenVisitor
     return llvm_nil if type.element_type.void?
 
     value = call_args[1]
-    if iyi_array_slot?(target_def)
+    if iyi_array_slot?(target_def) && iyi_array_scalar?(type.element_type)
       iyi_array_stores(call_args[0], element: true) { assign call_args[0], type.element_type, node.type, value }
     else
       assign call_args[0], type.element_type, node.type, value
@@ -942,7 +942,7 @@ class Iyi::CodeGenVisitor
   def codegen_primitive_pointer_get(node, target_def, call_args)
     type = context.type.remove_typedef.as(PointerInstanceType)
     value = to_lhs call_args[0], type.element_type
-    if iyi_array_slot?(target_def)
+    if iyi_array_slot?(target_def) && iyi_array_scalar?(type.element_type)
       iyi_array_load value, call_args[0], element: true
       iyi_array_object value, type.element_type
     end
@@ -950,7 +950,8 @@ class Iyi::CodeGenVisitor
   end
 
   # `Pointer#array_slot` and `#array_slot=`, array.iyi's reads and writes of
-  # its buffer, which are marked as an array element's (array_tbaa.cr).
+  # its buffer, which are marked as an array element's when the element is
+  # one scalar slot (array_tbaa.cr).
   private def iyi_array_slot?(target_def) : Bool
     target_def.name.in?("array_slot", "array_slot=")
   end

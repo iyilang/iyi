@@ -129,18 +129,9 @@ class Array(T)
   end
 
   # A negative index counts from the end, so `a[-1]` is the last element.
-  # Still out of range after that wrap (or empty) raises, same message.
-  #
-  # An index in `0...size` is read after one unsigned comparison: a
-  # negative index read as unsigned is above every size, and a size is
-  # never negative (every write of `@size` here is checked arithmetic or a
-  # caller's `unsafe_set_size` promise). Only an index that fails it is
-  # wrapped, by adding it to the size, which cannot overflow for a negative
-  # index and so is the unchecked `&+`. The checked wrap put a test, an
-  # addition and a second branch in front of every read whose index no
-  # optimiser can prove in range - a loop that indexes with what it read
-  # from another array, as plb2's sudoku does. Every index answers as
-  # before.
+  # Still out of range after that wrap (or empty) raises, same message. An
+  # index in `0...size` is taken after one unsigned test (a size is never
+  # negative); only another is wrapped, with `&+`, which cannot overflow.
   def [](index : Int32) : T
     return @buffer.array_at(index) if index.to_i64.unsafe_to_u64 < @size.to_i64.unsafe_to_u64
     at = index < 0 ? @size &+ index : index
@@ -945,14 +936,7 @@ class Array(T)
   end
 end
 
-# An array's reads and writes of its own buffer, and nothing else's: the
-# same load and store as `Pointer#[]` and `#[]=`, which the code generator
-# marks as an array element's (`codegen/array_tbaa.cr`). The mark tells
-# LLVM that the store into `c[i][j]` cannot have changed the size or the
-# buffer of `b[k]`, which every buffer here keeps true: a buffer is
-# `Pointer(T).malloc`'s or a step into one, never an array's own fields.
-# Each call reads an element that is written, below the size: the code
-# generator also tells LLVM that one whose type is a class is an object.
+# Array's buffer reads and writes, tagged as an element's (codegen/array_tbaa.cr).
 struct Pointer(T)
   @[Primitive(:pointer_get)]
   def array_slot : T

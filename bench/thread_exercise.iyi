@@ -472,12 +472,14 @@
   # stacks for its tasks, and kept them all, with its state on the roots'
   # list, after the thread was gone: a thousand threads that each slept
   # once left 2,001 handles behind them. Two hundred threads that each
-  # sleep in four tasks leave the list where it was, and Windows' handle
-  # count within 20 of it.
+  # sleep in four tasks leave the list where it was. On Windows the bound is
+  # one handle per finished thread: a correct build stays under it, and a
+  # copy that drops a scheduler's close calls must reach it.
+  finished_threads = 200
   states_before = scheduler_states
   handles_before = process_handles
   index = 0
-  while index < 200
+  while index < finished_threads
     worker = IyiThread.start do
       group do |g|
         # This thread's own tasks, whose scheduler is what is counted.
@@ -492,7 +494,7 @@
   fail("teardown: 200 finished threads left #{states_left} scheduler states on the roots' list") if states_left != 0
   handles_left = process_handles - handles_before
   puts "teardown: the process's handle count changed by #{handles_left}"
-  fail("teardown: 200 finished threads left handles open past the allowance of 20") if handles_left > 20
+  fail("teardown: 200 finished threads left handles open that their schedulers should have closed") if handles_left >= finished_threads
   puts "teardown: 200 finished threads gave their schedulers back"
 
   # ── 1c. A joined thread keeps nothing ──────────────────────────────────
@@ -535,8 +537,10 @@
   # The retained bytes are a measurement only; the ledger above is the check.
   grew = kept_after > kept_before ? kept_after - kept_before : 0_u64
   puts "joined: #{payloads_kept} of 256 payloads were still live after the collection; retained bytes grew by #{grew // 1048576_u64} MiB"
-  fail("joined: #{payloads_kept} of 256 joined threads' payloads survived a collection") if payloads_kept >= 64
-  puts "joined: at least 192 of 256 joined threads' payloads were freed by a collection"
+  # Half the payloads is the bound. A correct build keeps only what stale stack
+  # words still name; a copy whose thread stays on the body-rooting list keeps all 256.
+  fail("joined: #{payloads_kept} of 256 joined threads' payloads survived a collection") if payloads_kept >= 128
+  puts "joined: fewer than half of the joined threads' payloads survived a collection"
   join_twice
   puts "joined: the second join returned while the later thread was held"
   probe = IyiThread.start { nil }

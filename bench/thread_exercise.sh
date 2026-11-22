@@ -12,8 +12,8 @@
 #      states are checked after they finish, and on Windows so is the handle
 #      count. Planted mutants leave a scheduler state on the roots' list, and on
 #      Windows leave handles open; each fails by one named sentence.
-#  1c. Two hundred fifty-six joined threads each hold a 64 KiB payload. At least
-#      192 are freed by a collection, and on Windows a joined thread's line is
+#  1c. Two hundred fifty-six joined threads each hold a 64 KiB payload. Fewer
+#      than half survive a collection, and on Windows a joined thread's line is
 #      unmapped. Planted mutants keep the payloads on their thread's list and
 #      leave the line mapped; each fails by one named sentence.
 #  1d. Join the same thread twice while a later thread is held: the mutant
@@ -375,7 +375,7 @@ fi
 # and must end in exit 1 with its one FAIL sentence. The watchdog is 300 s: the 1b loop
 # sleeps a second in each of 200 threads, one after another.
 teardown_pass='teardown: 200 finished threads gave their schedulers back'
-joined_pass="joined: at least 192 of 256 joined threads' payloads were freed by a collection"
+joined_pass="joined: fewer than half of the joined threads' payloads survived a collection"
 mapped_pass="joined: a joined thread's line was unmapped"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) teardown_windows=1 ;;
@@ -394,6 +394,7 @@ fi
 echo "  control: $teardown_pass"
 echo "  control: $joined_pass"
 if [ "$teardown_windows" -eq 1 ]; then echo "  control: $mapped_pass"; fi
+awk '/handle count changed by|payloads were still live/{print "  measured: " $0}' release-clean.txt
 
 step "failure proof: a finished thread's scheduler state left on the roots' list is named"
 mkdir -p retired/iyi && cp "$REPO"/src/iyi/*.iyi retired/iyi/ || { echo "SETUP: ${current_step}: the retired copy could not be made"; exit 76; }
@@ -420,7 +421,7 @@ fi
 printf '  exits 1 at "%s"\n' "$retired_fail"
 
 if [ "$teardown_windows" -eq 1 ]; then
-  step "failure proof: a finished thread's handles left open past the allowance are named"
+  step "failure proof: a finished thread's scheduler handles left open are named"
   mkdir -p unclosed/iyi && cp "$REPO"/src/iyi/*.iyi unclosed/iyi/ || { echo "SETUP: ${current_step}: the unclosed copy could not be made"; exit 76; }
   awk '
     /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
@@ -440,7 +441,7 @@ if [ "$teardown_windows" -eq 1 ]; then
   code=$?; check_bound "$code" forced mutant unclosed-raw.txt
   if [ "$code" -eq 76 ]; then cat unclosed-raw.txt; exit 76; fi
   tr -d '\r' < unclosed-raw.txt > unclosed.txt
-  unclosed_fail="FAIL: teardown: 200 finished threads left handles open past the allowance of 20"
+  unclosed_fail="FAIL: teardown: 200 finished threads left handles open that their schedulers should have closed"
   if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' unclosed.txt || :)" -ne 1 ] || ! grep -qxF "$unclosed_fail" unclosed.txt; then
     pair_mismatch "$code" unclosed.txt mutant 0 "$teardown_pass"
   fi

@@ -47,8 +47,8 @@
 #  5d. Hold the first helper decision between its two writes, then enter a
 #      second trigger. Both actual counts and helper starts are witnessed; the
 #      swapped-write mutant names the premature publication.
-#  5e. Four threads print 80,000 lines; the output count and line shapes are
-#      checked. This is stress, not a forced line-interleaving witness.
+#  5e. Hold one line after its first write, then force a competing write.
+#      The captured bytes name the split-write mutant; a stress stays separate.
 #  5f. Hold neighbouring fiber retirements around the first membership read.
 #      The lock contention, unlinks and final registry identify the unlocked ask.
 #   6. Compile negative Share examples, including mutable captures, self,
@@ -72,9 +72,8 @@
 #  7e. Darwin: hold the first allocation in a frame with registers cleared;
 #      two collections must each visit that line. The late-top mutant's sweep
 #      flag supplies the named failure before the child's first store.
-#  7f. Linux and Darwin: stress fresh tasks and query each task's stack top
-#      under the runtime lock. The top-bound mutant must report the first task
-#      whose top is not recognized.
+#  7f. Linux and Darwin: one task asks whether its stack top is in its own
+#      stack before any collector runs. The top-bound mutant is named.
 #  7g. Linux and Darwin: an armed mark helper faults while holding the lock.
 #      The control witnesses handler classification and SIG_DFL installation,
 #      then exits on SIGSEGV. The heap-action mutant reports its pre-lock fault.
@@ -82,8 +81,8 @@
 #      increment records the actual platform wake. On Linux, a held real
 #      spinner and its owed-turn word also expose the collector's lock attempt
 #      before payment in the mutant.
-#  7i. Darwin: compare task-wide Mach trap counts for 1,000 yield calls against
-#      the same calls with an ARM hint. This is a count check, not a timer.
+#  7i. Darwin: one yield goes through an observer that records only after the
+#      real thread_switch returns; the old ARM hint leaves it unanswered.
 #  7j. Darwin: hold an unlinked child, inspect the actual stop roster and count,
 #      then link it and witness a later stop. Early counting is named.
 #  7k. Linux: tasks and a thread call libc and check its answers and imports.
@@ -120,14 +119,12 @@
 # planted mutants; 3 is measurement only. The 4b lock ratio and 4c one-core
 # timings have no scheduled starvation witness and are measurements only.
 # The ordinary 5c switching and 5e line stresses do not force a particular
-# switch or competing write. Only 5c has a separate held-switch proof; 5e
-# has no held competing writes or planted failure.
+# switch or competing write; their separate held proofs do.
 # The 6 variants are direct compiler inputs, not mutated compiler builds.
 # The 7 termination storm does not prove a collection overlapped process exit;
 # the IR comparison is the separate structural check. The 7f task-top query
 # does not force a stop at the first instruction, although the bound mutant
-# is checked directly. The 7i task-wide trap count does not identify which
-# call made each trap. The 7k held-thread check proves the chosen launch path;
+# is checked directly. The 7k held-thread check proves the chosen launch path;
 # the libc-call stress does not force a particular collection interleaving.
 #
 # Exit 0: selected checks passed, including detected mutants; unsupported
@@ -3675,9 +3672,158 @@ for first_mode in control mutant; do
 done
 
 # ── 5e. A line `puts` writes is one write ─────────────────────────────────
-# `STDOUT` is sync, and `write_line` wrote the text and then the newline:
-# four threads of 20,000 `puts` each left 750 of 80,000 lines merged with
-# another thread's, on Windows into a file. Every line must come out whole.
+# Hold a real synchronous line write after its first write, then make another
+# thread write a line before releasing it. The verdict is the resulting bytes.
+step "whole lines: a competing write cannot split a line"
+if ! mkdir -p "$WORK/line-hold-control/iyi" "$WORK/line-hold-mutant/iyi"; then
+  echo "SETUP: whole lines: the runtime copy directories could not be created"; exit 76
+fi
+if ! cp "$REPO"/src/iyi/*.iyi "$WORK/line-hold-control/iyi/" ||
+   ! cp "$REPO"/src/iyi/*.iyi "$WORK/line-hold-mutant/iyi/"; then
+  echo "SETUP: whole lines: the runtime copies could not be populated"; exit 76
+fi
+if ! cat > line_hold.part <<'IYI'
+  LINE_HOLD_ARMED   =   0_u64
+  LINE_HOLD_HELD    =  64_u64
+  LINE_HOLD_WRITTEN = 128_u64
+  @@line_hold : UInt64 = 0_u64
+
+  def self.line_hold_word(offset : UInt64) : Pointer(Atomic(UInt64))
+    Pointer(Atomic(UInt64)).new(@@line_hold + offset)
+  end
+
+  def self.line_hold_say(message : String, status : Int32) : Nil
+    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+    __iyi_exit(status)
+  end
+
+  def self.line_hold_wait(offset : UInt64, message : String) : Nil
+    line_hold_say("SETUP: whole lines: the hold page was not initialized\n", 76) if @@line_hold == 0_u64
+    began = IyiMark.now_ns
+    while line_hold_word(offset).value.get == 0_u64
+      line_hold_say(message, 76) if IyiMark.now_ns &- began > 20000000000_u64
+      IyiThread.yield_cpu
+    end
+  end
+
+  def self.line_hold_init : Nil
+    @@line_hold = __iyi_mmap(4096_u64).address
+    line_hold_say("SETUP: whole lines: the hold page was not mapped\n", 76) if @@line_hold == 0_u64
+  end
+
+  def self.line_hold_arm : Nil
+    line_hold_word(LINE_HOLD_ARMED).value.set(1_u64)
+  end
+
+  def self.line_hold_between : Nil
+    return if @@line_hold == 0_u64
+    return if line_hold_word(LINE_HOLD_ARMED).value.swap(2_u64) != 1_u64
+    line_hold_word(LINE_HOLD_HELD).value.set(1_u64)
+    line_hold_wait(LINE_HOLD_WRITTEN, "SETUP: whole lines: the competing line was never written\n")
+  end
+
+  def self.line_hold_await_held : Nil
+    line_hold_wait(LINE_HOLD_HELD, "SETUP: whole lines: the held line never reached its hold\n")
+  end
+
+  def self.line_hold_written : Nil
+    line_hold_word(LINE_HOLD_WRITTEN).value.set(1_u64)
+  end
+IYI
+then
+  echo "SETUP: whole lines: the rendezvous could not be written"; exit 76
+fi
+if ! cat > line_hold.iyi <<'IYI'
+IyiIO.line_hold_init
+holder = IyiThread.start do
+  IyiIO.line_hold_arm
+  puts "held: this line was held after its first write"
+  nil
+end
+competitor = IyiThread.start do
+  IyiIO.line_hold_await_held
+  puts "competing: this line was written whole while the other was held"
+  IyiIO.line_hold_written
+  nil
+end
+holder.join
+competitor.join
+IYI
+then
+  echo "SETUP: whole lines: the witness could not be written"; exit 76
+fi
+if ! awk -v part=line_hold.part '
+  $0 == "  def write_line(text : String = \"\") : Nil" {
+    while ((getline line < part) > 0) { print line; part_lines++ }
+    close(part); print; defs++; after = 1; next
+  }
+  after { print; if ($0 !~ /^    write\(/) bad = 1; print "    IyiIO.line_hold_between"; hooks++; after = 0; next }
+  { print }
+  END { if (defs != 1 || hooks != 1 || bad || part_lines == 0) exit 3 }
+' "$REPO/src/iyi/io.iyi" > "$WORK/line-hold-control/iyi/io.iyi"; then
+  echo "SETUP: whole lines: the control rendezvous could not be placed"; exit 76
+fi
+line_pass='whole lines: the held line was written whole before the competing line'
+line_fail='FAIL: whole lines: a competing line was written between a held line and its newline'
+if ! printf 'held: this line was held after its first write\ncompeting: this line was written whole while the other was held\n' > line-hold-whole.expected ||
+   ! printf 'held: this line was held after its first writecompeting: this line was written whole while the other was held\n\n' > line-hold-split.expected; then
+  echo "SETUP: whole lines: the expected bytes could not be written"; exit 76
+fi
+for line_mode in control mutant; do
+  if [ "$line_mode" = mutant ]; then
+    if ! awk '
+      $0 == "    write(@sync ? text + \"\\n\" : text)" { print "    write(text)"; firsts++; next }
+      $0 == "    write(\"\\n\") unless @sync" { print "    write(\"\\n\")"; print "    flush if @sync"; seconds++; next }
+      { print }
+      END { if (firsts != 1 || seconds != 1) exit 3 }
+    ' "$WORK/line-hold-control/iyi/io.iyi" > "$WORK/line-hold-mutant/iyi/io.iyi"; then
+      echo "SETUP: whole lines: the split-write mutant could not be constructed"; exit 76
+    fi
+  fi
+  if ! IYI_PATH="$WORK/line-hold-$line_mode${PSEP}$REPO/src" "$IYI" build line_hold.iyi -o "line-hold-$line_mode-run" > "build-line-hold-$line_mode.log" 2>&1; then
+    echo "SETUP: whole lines: the $line_mode copy did not build"; cat "build-line-hold-$line_mode.log"; exit 76
+  fi
+  timeout -k 5 120 "./line-hold-$line_mode-run" > "line-hold-$line_mode.bytes" 2> "line-hold-$line_mode.err"
+  code=$?
+  check_bound "$code" healthy "$line_mode"
+  if [ "$code" -ne 0 ]; then
+    if [ "$code" -eq 76 ] && grep -q '^SETUP:' "line-hold-$line_mode.err"; then
+      grep -m1 '^SETUP:' "line-hold-$line_mode.err"
+    else
+      echo "SETUP: whole lines: the $line_mode writer exited $code"
+    fi
+    exit 76
+  fi
+  # The writer has exited and released the redirected handle before cmp.
+  # Iyi's low-level writes emit LF bytes directly on Windows as on POSIX.
+  (
+    if cmp -s "line-hold-$line_mode.bytes" line-hold-whole.expected; then
+      printf '%s\n' "$line_pass"
+      exit 0
+    elif cmp -s "line-hold-$line_mode.bytes" line-hold-split.expected; then
+      printf '%s\n' "$line_fail"
+      exit 1
+    else
+      echo "SETUP: whole lines: the $line_mode output held neither byte sequence"
+      exit 76
+    fi
+  ) > "line-hold-$line_mode.txt"
+  code=$?
+  if [ "$code" -eq 76 ]; then cat "line-hold-$line_mode.txt"; exit 76; fi
+  check_bound "$code" forced "$line_mode" "line-hold-$line_mode.txt"
+  if [ "$line_mode" = control ]; then
+    if [ "$code" -ne 0 ] || ! grep -qxF "$line_pass" "line-hold-$line_mode.txt"; then
+      pair_mismatch "$code" "line-hold-$line_mode.txt" control "$line_fail"
+    fi
+    printf '  control: exit 0, %s\n' "$line_pass"
+  else
+    if [ "$code" -ne 1 ] || ! grep -qxF "$line_fail" "line-hold-$line_mode.txt"; then
+      pair_mismatch "$code" "line-hold-$line_mode.txt" mutant "$line_pass"
+    fi
+    printf '  exits 1 at "%s"\n' "$line_fail"
+  fi
+done
+
 step "stress: four threads printing at once, every line whole"
 cat > whole_lines.iyi <<'IYI'
 threads = [] of IyiThread
@@ -3692,8 +3838,10 @@ IYI
 if ! "$IYI" build whole_lines.iyi -o whole_lines > build-whole_lines.log 2>&1; then
   echo "SETUP: ${current_step:-build}: whole_lines did not build"; cat build-whole_lines.log; exit 76
 fi
-./whole_lines > whole_lines.txt 2>&1
+timeout -k 5 120 ./whole_lines > whole_lines.txt 2>&1
 code=$?
+check_bound "$code" healthy "run 1"
+if [ "$code" -eq 76 ]; then cat whole_lines.txt; exit 76; fi
 total=$(wc -l < whole_lines.txt | tr -d ' ')
 broken=$(LC_ALL=C grep -cvE '^thread-[0-3]-line-[0-9]+-of-twenty-thousand$' whole_lines.txt)
 if [ "$code" -ne 0 ] || [ "$total" -ne 80000 ] || [ "$broken" -ne 0 ]; then
@@ -5903,7 +6051,7 @@ esac
 # turn-counter release; under the lock, none of 6.
 case "$(uname -s)" in
   Linux | Darwin)
-    step "stress: tasks begin on fresh stacks beside a collector, three runs of 5 s"
+    step "a fresh task's first-instruction stack top, control"
     cat > fresh.iyi <<'IYI'
 module fresh
 
@@ -5927,10 +6075,17 @@ end
 # the scan the way the stop asks it.
 def first_run : Int32
   top = IyiScheduler.current_stack_top
+  if top == 0_u64
+    print "SETUP: fresh tasks: a task ran on no fiber stack\n"
+    __iyi_exit(76)
+  end
   IyiRuntimeLock.lock
   held = IyiScheduler.fiber_top_holding(top)
   IyiRuntimeLock.unlock
-  raise "a task's stack top is no task's to the stop's scan" if held != top
+  if held != top
+    print "FAIL: fresh tasks: a task's stack top is no task's to the stop's scan\n"
+    __iyi_exit(1)
+  end
   0
 end
 
@@ -5944,6 +6099,16 @@ def burst : Nil
   end
 end
 
+{% if flag?(:fresh_witness) %}
+IyiMark.auto = false
+group do |g|
+  g.spawn(unit: :same) { first_run }
+  0
+end
+puts "fresh tasks: the first task's top is its own stack's to the stop's scan"
+__iyi_exit(0)
+{% end %}
+
 flag = Flag.new
 stormer = IyiThread.start { storm(flag) }
 deadline = __iyi_monotonic_ns + Program.args[0].to_i.to_i64 * 1_000_000_000_i64
@@ -5956,22 +6121,16 @@ flag.stop.set(1_i64)
 stormer.join
 puts "ok started=#{started} stops=#{IyiThread.stops}"
 IYI
-    if ! "$IYI" build fresh.iyi -o fresh > build-fresh.log 2>&1; then
-      echo "SETUP: ${current_step:-build}: fresh did not build"; cat build-fresh.log; exit 76
+    fresh_ok="fresh tasks: the first task's top is its own stack's to the stop's scan"
+    fresh_fail="FAIL: fresh tasks: a task's stack top is no task's to the stop's scan"
+    if ! "$IYI" build -Dfresh_witness fresh.iyi -o fresh-control > build-fresh-control.log 2>&1; then
+      echo "SETUP: fresh tasks: the control did not build"; cat build-fresh-control.log; exit 76
     fi
-    run=1
-    started=""
-    while [ "$run" -le 3 ]; do
-      ( timeout -k 5 60 ./fresh 5 > fresh.txt 2>&1; exit $? ) 2> /dev/null
-      code=$?; check_bound "$code" healthy "run $run"
-      if [ "$code" -eq 76 ]; then cat fresh.txt; exit 76; fi
-      if [ "$code" -ne 0 ] || ! grep -q '^ok started=[0-9]* ' fresh.txt; then
-        echo "FAIL: ${current_step}: run $run exited $code:"; tail -3 fresh.txt; exit 1
-      fi
-      started="$started $(sed -n 's/^ok started=\([0-9]*\) .*/\1/p' fresh.txt)"
-      run=$((run + 1))
-    done
-    echo "  three runs, every task's top its own stack's:$started tasks"
+    ( timeout -k 5 60 ./fresh-control > fresh-control.txt 2>&1; exit $? ) 2> /dev/null
+    code=$?; check_bound "$code" forced control fresh-control.txt
+    if [ "$code" -eq 76 ]; then cat fresh-control.txt; exit 76; fi
+    [ "$code" -eq 0 ] && grep -qxF "$fresh_ok" fresh-control.txt || pair_mismatch "$code" fresh-control.txt control "$fresh_fail"
+    printf '  control: exit 0, %s\n' "$fresh_ok"
 
     step "failure proof: a fiber's top read as no fiber's, as it was"
     mkdir -p topless/iyi
@@ -5980,16 +6139,38 @@ IYI
         print "      return top if top != 0 && address < top && address >= top - IyiFiber::STACK_BYTES"; found++; next }
       { print } END { if (found != 1) exit 3 }' \
       "$REPO/src/iyi/concurrency.iyi" > topless/iyi/concurrency.iyi || { echo "SETUP: ${current_step:-topless}: the fiber stack bound anchor changed"; exit 76; }
-    if ! IYI_PATH="$WORK/topless${PSEP}$REPO/src" "$IYI" build fresh.iyi -o topless-run > build-topless.log 2>&1; then
-      echo "SETUP: ${current_step:-build}: topless did not build"; cat build-topless.log; exit 76
+    if ! IYI_PATH="$WORK/topless${PSEP}$REPO/src" "$IYI" build -Dfresh_witness fresh.iyi -o topless-run > build-topless.log 2>&1; then
+      echo "SETUP: fresh tasks: the mutant did not build"; cat build-topless.log; exit 76
     fi
-    ( timeout -k 5 60 ./topless-run 5 > topless.txt 2>&1; exit $? ) 2> /dev/null
+    ( timeout -k 5 60 ./topless-run > topless.txt 2>&1; exit $? ) 2> /dev/null
     code=$?; check_bound "$code" forced mutant topless.txt
     if [ "$code" -eq 76 ]; then cat topless.txt; exit 76; fi
-    if [ "$code" -eq 0 ] || ! grep -q "a task's stack top is no task's to the stop's scan" topless.txt; then
-      pair_mismatch "$code" topless.txt mutant
+    [ "$code" -eq 1 ] && grep -qxF "$fresh_fail" topless.txt || pair_mismatch "$code" topless.txt mutant "$fresh_ok"
+    printf '  exits 1 at "%s"\n' "$fresh_fail"
+
+    step "stress: tasks begin on fresh stacks beside a collector, three runs of 5 s"
+    if ! "$IYI" build fresh.iyi -o fresh > build-fresh.log 2>&1; then
+      echo "SETUP: fresh tasks: the stress program did not build"; cat build-fresh.log; exit 76
     fi
-    echo "  the first task named its top no task's (exit $code)"
+    run=1
+    started=""
+    while [ "$run" -le 3 ]; do
+      ( timeout -k 5 60 ./fresh 5 > fresh.txt 2>&1; exit $? ) 2> /dev/null
+      code=$?; check_bound "$code" healthy "run $run"
+      if [ "$code" -eq 76 ]; then cat fresh.txt; exit 76; fi
+      if [ "$code" -ne 0 ] || ! grep -q '^ok started=[0-9]* ' fresh.txt; then
+        if [ "$code" -eq 1 ] && grep -qxF "$fresh_fail" fresh.txt; then
+          echo "$fresh_fail"
+        else
+          echo "FAIL: ${current_step}: run $run exited $code:"
+          tail -3 fresh.txt | sed 's/^/  /'
+        fi
+        exit 1
+      fi
+      started="$started $(sed -n 's/^ok started=\([0-9]*\) .*/\1/p' fresh.txt)"
+      run=$((run + 1))
+    done
+    echo "  three runs, every task's top its own stack's:$started tasks"
     ;;
 esac
 
@@ -6663,82 +6844,113 @@ IYI
     ;;
 esac
 
-# ── 7i. darwin: a yield is a Mach trap ──────────────────────────────────
-# darwin's `IyiThread.yield_cpu` was the ARM `yield` hint, which gives the
-# scheduler nothing; it is Mach's `thread_switch` with the depress option
-# now (src/iyi/thread.iyi says what each call cost). The check was a ratio
-# of threads born a second beside a busy process per core to the alone
-# rate, and the runner moved the ratio: on Namespace's macOS 15 VM (6
-# vCPUs) the hint kept 37 to 52 per cent and the switch 64 to 70 (runs
-# 44271652334, 44292915166, 44358208505), so a proof that the hint falls
-# under half failed some of its tries. Counted instead: each call is one
-# `thread_switch` trap, and the task's `syscalls_mach` (task_events_info,
-# flavor 2, its sixth word) reads the traps. A thousand calls must make at
-# least a thousand traps, and the hint, which makes none, must make fewer
-# than a thousand. A call makes its trap whatever else the machine is
-# doing, so load on the runner does not move the count.
+# ── 7i. darwin: witness the actual yield call ────────────────────────────
+# Both copies route the call through the same observer, which increments its
+# counter only after thread_switch returns. The mutant replaces only the
+# observer call with the former ARM hint. One direct yield is bracketed by
+# counter reads on the initial thread, with no worker threads or retries.
 case "$(uname -s)" in
   Darwin)
-    step "darwin: a thousand yield_cpu calls make at least a thousand Mach traps"
-    cat > yield_traps.iyi <<'IYI'
-@[Unsafe("the Mach trap count is read through task_info, a C call that fills Pointer.malloc memory")]
-module yield_traps
+    yield_pass='yield: the real thread_switch call returned'
+    yield_fail='FAIL: yield: yield_cpu returned without calling thread_switch'
+    cat > yield_observer.part <<'IYI'
+    @@yield_observed : UInt64 = 0_u64
 
-lib LibTraps
-  fun task_self_trap : UInt32
-  fun task_info(task : UInt32, flavor : Int32, info : Int32*, count : UInt32*) : Int32
-end
+    def self.yield_observed : UInt64
+      @@yield_observed
+    end
 
-# The task's Mach trap count: task_events_info (TASK_EVENTS_INFO, flavor
-# 2), eight 32-bit words, and syscalls_mach is the sixth of them.
-def mach_traps : Int64
-  info = Pointer(Int32).malloc(8_u64)
-  count = Pointer(UInt32).malloc(1_u64)
-  count.value = 8_u32
-  return -1_i64 if LibTraps.task_info(LibTraps.task_self_trap, 2, info, count) != 0
-  info[5].to_i64
-end
+    def self.yield_observe_switch : Nil
+      LibC.thread_switch(0_u32, IYI_SWITCH_OPTION_DEPRESS, 1_u32)
+      @@yield_observed = @@yield_observed + 1_u64
+    end
 
-before = mach_traps
-1000.times { IyiThread.yield_cpu }
-after = mach_traps
-puts "yield: #{after - before} Mach traps for 1000 yield_cpu calls"
 IYI
-    if ! "$IYI" build yield_traps.iyi -o yield-traps > build-traps.log 2>&1; then
-      echo "SETUP: ${current_step:-build}: traps did not build"; cat build-traps.log; exit 76
-    fi
-    timeout -k 5 120 ./yield-traps > traps.txt 2>&1
-    code=$?; check_bound "$code" healthy
-    if [ "$code" -eq 76 ]; then cat traps.txt; exit 76; fi
-    if [ "$code" -ne 0 ]; then
-      cat traps.txt; exit 1
-    fi
-    traps="$(sed -n 's/^yield: \([0-9-]*\) Mach traps.*$/\1/p' traps.txt)"
-    if [ -z "$traps" ] || [ "$traps" -lt 1000 ]; then
-      echo "a thousand yield_cpu calls made ${traps:-no count} Mach traps, under 1,000"; cat traps.txt; exit 1
-    fi
-    sed 's/^/  /' traps.txt
+    cat > yield_witness.iyi <<'IYI'
+module yield_witness
 
-    step "failure proof: yield_cpu as the ARM hint again, and the same calls make under a thousand traps"
-    mkdir -p hinted/iyi
-    cp "$REPO"/src/iyi/*.iyi hinted/iyi/
-    awk '/^        LibC\.thread_switch\(0_u32, IYI_SWITCH_OPTION_DEPRESS, 1_u32\)$/ { print "        asm(\"yield\" :::: \"volatile\")"; found++; next }
-      { print } END { if (found != 1) exit 3 }' \
-      "$REPO/src/iyi/thread.iyi" > hinted/iyi/thread.iyi || { echo "SETUP: ${current_step:-yield}: the thread_switch anchor changed"; exit 76; }
-    if ! IYI_PATH="$WORK/hinted${PSEP}$REPO/src" "$IYI" build yield_traps.iyi -o yield-traps-hinted > build-hinted.log 2>&1; then
-      echo "SETUP: ${current_step:-build}: hinted did not build"; cat build-hinted.log; exit 76
+before = IyiThread.yield_observed
+IyiThread.yield_cpu
+after = IyiThread.yield_observed
+if after == before
+  print "FAIL: yield: yield_cpu returned without calling thread_switch\n"
+  __iyi_exit(1)
+elsif after == before + 1_u64
+  puts "yield: the real thread_switch call returned"
+else
+  print "SETUP: yield: the observer count changed by more than one\n"
+  __iyi_exit(76)
+end
+IYI
+    mkdir -p yield-control/iyi || { echo 'SETUP: yield: could not make the control copy'; exit 76; }
+    cp "$REPO"/src/iyi/*.iyi yield-control/iyi/ || { echo 'SETUP: yield: could not populate the control copy'; exit 76; }
+    # The call must be inside the unique yield_cpu definition. The next
+    # method definition ends that scope; matching a call elsewhere is not proof.
+    awk '
+      $0 == "    def self.yield_cpu : Nil" {
+        defs++; inside = 1
+        while ((getline line < "yield_observer.part") > 0) { print line; parts++ }
+        close("yield_observer.part")
+        print; next
+      }
+      inside && /^    def self\./ { inside = 0 }
+      $0 == "        LibC.thread_switch(0_u32, IYI_SWITCH_OPTION_DEPRESS, 1_u32)" {
+        calls++
+        if (!inside) bad = 1
+        print "        yield_observe_switch"; replaced++; next
+      }
+      { print }
+      END { if (defs != 1 || calls != 1 || replaced != 1 || parts == 0 || bad) exit 3 }
+    ' "$REPO/src/iyi/thread.iyi" > yield-control/iyi/thread.iyi || { echo 'SETUP: yield: the yield_cpu call anchors changed'; exit 76; }
+
+    step 'darwin: the real yield call returns through its observer, control'
+    if ! IYI_PATH="$WORK/yield-control${PSEP}$REPO/src" "$IYI" build yield_witness.iyi -o yield-control-run > build-yield-control.log 2>&1; then
+      echo 'SETUP: yield: the control copy did not build'; cat build-yield-control.log; exit 76
     fi
-    timeout -k 5 120 ./yield-traps-hinted > hinted-traps.txt 2>&1
-    code=$?; check_bound "$code" forced mutant hinted-traps.txt
-    if [ "$code" -eq 76 ]; then cat hinted-traps.txt; exit 76; fi
-    if [ "$code" -ne 0 ]; then
-      cat hinted-traps.txt; exit 1
+    printf '%s\n' "$yield_pass" > yield-pass.expected || { echo 'SETUP: yield: could not write the expected control output'; exit 76; }
+    printf '%s\n' "$yield_fail" > yield-fail.expected || { echo 'SETUP: yield: could not write the expected mutant output'; exit 76; }
+    ( timeout -k 5 120 ./yield-control-run > yield-control.txt 2>&1; exit $? ) 2>/dev/null
+    code=$?; check_bound "$code" forced control yield-control.txt
+    if [ "$code" -ne 0 ] || ! cmp -s yield-pass.expected yield-control.txt; then
+      pair_mismatch "$code" yield-control.txt control "$yield_fail"
     fi
-    hinted="$(sed -n 's/^yield: \([0-9-]*\) Mach traps.*$/\1/p' hinted-traps.txt)"
-    if [ -z "$hinted" ] || [ "$hinted" -ge 1000 ]; then
-      echo "with the hint, a thousand yield_cpu calls made ${hinted:-no count} Mach traps, not under 1,000"; cat hinted-traps.txt; exit 1
+    echo "  control: $yield_pass"
+
+    mkdir -p yield-mutant/iyi || { echo 'SETUP: yield: could not make the mutant copy'; exit 76; }
+    cp yield-control/iyi/*.iyi yield-mutant/iyi/ || { echo 'SETUP: yield: could not populate the mutant copy'; exit 76; }
+    awk '
+      $0 == "    def self.yield_cpu : Nil" { defs++; inside = 1; print; next }
+      inside && /^    def self\./ { inside = 0 }
+      $0 == "        yield_observe_switch" {
+        calls++; if (!inside) bad = 1
+        print "        asm(\"yield\" :::: \"volatile\")"; next
+      }
+      { print }
+      END { if (defs != 1 || calls != 1 || bad) exit 3 }
+    ' yield-control/iyi/thread.iyi > yield-mutant/iyi/thread.iyi || { echo 'SETUP: yield: the observer-call anchor changed'; exit 76; }
+    # Reverse the one intended substitution and compare all bytes, including
+    # the identical observer and every other hook, to the control copy.
+    awk '
+      $0 == "    def self.yield_cpu : Nil" { inside = 1; print; next }
+      inside && /^    def self\./ { inside = 0 }
+      inside && $0 == "        asm(\"yield\" :::: \"volatile\")" {
+        print "        yield_observe_switch"; restored++; next
+      }
+      { print }
+      END { if (restored != 1) exit 3 }
+    ' yield-mutant/iyi/thread.iyi > yield-restored.iyi || { echo 'SETUP: yield: the mutant restoration anchor changed'; exit 76; }
+    cmp -s yield-control/iyi/thread.iyi yield-restored.iyi || { echo 'SETUP: yield: control and mutant differ beyond the observer call'; exit 76; }
+
+    step 'darwin: the former ARM hint bypasses the observer, mutant'
+    if ! IYI_PATH="$WORK/yield-mutant${PSEP}$REPO/src" "$IYI" build yield_witness.iyi -o yield-mutant-run > build-yield-mutant.log 2>&1; then
+      echo 'SETUP: yield: the mutant copy did not build'; cat build-yield-mutant.log; exit 76
     fi
-    echo "  with the hint, the same calls make $hinted traps: under 1,000, caught"
+    ( timeout -k 5 120 ./yield-mutant-run > yield-mutant.txt 2>&1; exit $? ) 2>/dev/null
+    code=$?; check_bound "$code" forced mutant yield-mutant.txt
+    if [ "$code" -ne 1 ] || ! cmp -s yield-fail.expected yield-mutant.txt; then
+      pair_mismatch "$code" yield-mutant.txt mutant "$yield_pass"
+    fi
+    echo "  exits 1 at \"$yield_fail\""
     ;;
 esac
 

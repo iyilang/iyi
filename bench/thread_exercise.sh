@@ -5086,75 +5086,6 @@ esac
 # thousands of stops are where a sleeping stopper is all but certain.
 case "$(uname -s)" in
   Linux | Darwin)
-    step "threads born sixteen at a time beside a thread collecting in a loop, its stops asleep on their counts: three runs, every one ends, and on Linux no more stops begin owing turns than waits for them ran out"
-    cat > asleep.iyi <<'IYI'
-module asleep
-
-import std/gc::{GC}
-
-class Flag
-  getter stop : Atomic(Int64)
-  getter born : Atomic(Int64)
-
-  def initialize
-    @stop = Atomic(Int64).new(0_i64)
-    @born = Atomic(Int64).new(0_i64)
-  end
-end
-
-def storm(flag : Flag) : Nil
-  while flag.stop.get == 0_i64
-    GC.collect
-  end
-end
-
-def arrive(flag : Flag) : Nil
-  flag.born.add(1_i64)
-end
-
-flag = Flag.new
-stormer = IyiThread.start { storm(flag) }
-rounds = Program.args[0].to_i
-deadline = __iyi_monotonic_ns + Program.args[1].to_i.to_i64 * 1_000_000_000_i64
-started_ns = __iyi_monotonic_ns
-started = 0
-round = 0
-while round < rounds && (round < 20 || __iyi_monotonic_ns < deadline)
-  batch = [] of IyiThread
-  16.times { batch << IyiThread.start { arrive(flag) } }
-  started = started + 16
-  batch.each(&.join)
-  round = round + 1
-end
-took = (__iyi_monotonic_ns - started_ns) // 1_000_000_i64
-flag.stop.set(1_i64)
-stormer.join
-raise "born #{flag.born.get} of #{started}" if flag.born.get != started
-puts "ok born=#{started} ms=#{took} stops=#{IyiThread.stops} owing=#{IyiThread.owing_stops} outwaited=#{IyiThread.turn_waits_out}"
-IYI
-    if ! "$IYI" build asleep.iyi -o asleep > build-asleep.log 2>&1; then
-      cat build-asleep.log; exit 1
-    fi
-    # A stop that begins while a thread the stop before parked in the
-    # runtime lock's spin still owes its try of the lock follows a wait
-    # for that try that ran out, on Linux, which the proof below holds
-    # to: `owing` no more than `outwaited`.
-    owed() { sed -n "s/^ok .* $1=\([0-9]*\).*/\1/p" "$2"; }
-    run=1
-    while [ "$run" -le 3 ]; do
-      ( timeout -k 5 60 ./asleep 200 10 > asleep.txt 2>&1; exit $? ) 2> /dev/null
-      code=$?
-      if [ "$code" -eq 76 ]; then cat asleep.txt; exit 76; fi
-      if [ "$code" -ne 0 ] || ! grep -q '^ok born=[0-9]* ms=[0-9]* .* owing=[0-9]* outwaited=[0-9]*$' asleep.txt; then
-        echo "run $run exited $code:"; tail -3 asleep.txt; exit 1
-      fi
-      echo "  $(sed 's/^ok //' asleep.txt)"
-      if [ "$(uname -s)" = Linux ] && [ "$(owed owing asleep.txt)" -gt "$(owed outwaited asleep.txt)" ]; then
-        echo "run $run began $(owed owing asleep.txt) stops owing turns, after $(owed outwaited asleep.txt) waits for them ran out"; exit 1
-      fi
-      run=$((run + 1))
-    done
-
     cat > final-wake.part <<'IYI'
     IYI_WAKE_TARGET = 384_u64
     IYI_WAKE_PUBLISHED = 448_u64
@@ -5250,52 +5181,333 @@ IYI
       fi
     done
 
-    # The same storm holds the collection's wait for the turns the last
-    # stop's lock waiters are owed (`IyiThread.await_turns`): the release
-    # waits for nobody, and without that wait the thread collecting in a
-    # loop takes the runtime lock back before the threads it released
-    # from the lock's spin have tried it, and they never get it. The copy
-    # returns from the wait at once, and a run hangs, or ends having
-    # begun stops owing turns that no wait ran out for. Whether it ends
-    # is the box's: a collector preempted between its release and its
-    # next lock is a turn for the threads it released. It ended on
-    # ubuntu-24.04's 4-core runners in 28.3 s (run 41800443380), and on
-    # Linux (12 vCPU, 7h run alone at a load average of 3.1 to 5.5) it
-    # hung 8 runs of 20 past 30 s and ended 12 at 10 to 45 threads a
-    # second, where the runtime made 3,200 in 1.27 to 1.92 s;
-    # beside 8 busy loops it ended 10 of 10 at 262 to 877 a second, the
-    # runtime's slowest 1,288 to 1,785 in the same runs; beside 11, 6 of 6
-    # at 268 to 311 against the runtime's 292 to 367. The rate this proof
-    # held to, a tenth of the runtime's, let all 16 loaded runs through.
-    # The owing count did not: the copy began 164,689 to 464,783 stops
-    # owing turns alone, 6,147 to 52,692 beside 8 loops, 86 to 311
-    # beside 11, with no wait run out, and the runtime began 0 to 15,
-    # never more than its waits that ran out, 108 runs of 108. darwin's
-    # spinners give their core away (7i), and there the same copy made
-    # its threads in 1.6 to 1.7 s, 3 runs of 3 on the M2, so the proof
-    # is Linux's.
+    # Hold one real runtime-lock spinner through a stop and count-out, then
+    # hold its next pay_turn until await_turns reaches its nonzero branch.
+    # Both copies carry the same hooks; only that branch's return changes.
     if [ "$(uname -s)" = Linux ]; then
-      step "failure proof: no wait for the released lock waiters' turns, and a run hangs or begins stops owing turns"
-      mkdir -p unowed/iyi
-      cp "$REPO"/src/iyi/*.iyi unowed/iyi/
-      awk '/^      return if turns\.value\.get == 0_u64$/ { print "      return"; found = 1; next } { print } END { if (!found) exit 3 }' \
-        "$REPO/src/iyi/thread.iyi" > unowed/iyi/thread.iyi || { echo "the wait for the turns is not in thread.iyi any more"; exit 1; }
-      if ! IYI_PATH="$WORK/unowed${PSEP}$REPO/src" "$IYI" build asleep.iyi -o unowed-run > build-unowed.log 2>&1; then
-        cat build-unowed.log; exit 1
-      fi
-      ( timeout -k 5 30 ./unowed-run 200 10 > unowed.txt 2>&1; exit $? ) 2> /dev/null
-      code=$?
-      if [ "$code" -eq 76 ]; then cat unowed.txt; exit 76; fi
-      if [ "$code" -eq 124 ]; then
-        echo "  the run hung until the 30 s timeout (exit 124)"
-      elif [ "$code" -eq 0 ] && grep -q '^ok born=[0-9]* ms=[0-9]* .* owing=[0-9]* outwaited=[0-9]*$' unowed.txt; then
-        if [ "$(owed owing unowed.txt)" -le "$(owed outwaited unowed.txt)" ]; then
-          echo "with the wait for the turns taken out, a run began no more stops owing turns than waits for them ran out:"; tail -3 unowed.txt; exit 1
+      cat > turn.part <<'IYI' || { echo "SETUP: unowed: could not write the hooks"; exit 76; }
+    # Copy-only words. The runtime's suspended, resumed, and turns words
+    # are observed but never written by this proof.
+    IYI_TURN_LINE = 1088_u64
+    IYI_TURN_SPIN = 1096_u64
+    IYI_TURN_STAGE = 1104_u64
+    IYI_TURN_PAY_HOLD = 1112_u64
+    IYI_TURN_AWAITED = 1120_u64
+    IYI_TURN_PAID = 1128_u64
+    IYI_TURN_CHECKED = 1136_u64
+    IYI_TURN_LIMIT = 20000000000_u64
+
+    def self.turn_setup(message : String) : Nil
+      __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+      __iyi_exit(76)
+    end
+
+    def self.turn_arm(line : UInt64) : Nil
+      page = control
+      turn_setup("SETUP: unowed: the worker has no line\n") if line == 0_u64
+      word(page + IYI_TURN_SPIN).value.set(0_u64)
+      word(page + IYI_TURN_STAGE).value.set(0_u64)
+      word(page + IYI_TURN_PAY_HOLD).value.set(0_u64)
+      word(page + IYI_TURN_AWAITED).value.set(0_u64)
+      word(page + IYI_TURN_PAID).value.set(0_u64)
+      word(page + IYI_TURN_CHECKED).value.set(0_u64)
+      word(page + IYI_TURN_LINE).value.set(line)
+    end
+
+    # Called just after the real first spin wrote LOCKWAIT=1. A stop
+    # interrupts this hold and parks the worker with that word still set.
+    def self.turn_spinning(line : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || line == 0_u64 || word(page + IYI_TURN_LINE).value.get != line
+      if IyiRuntimeLock.word.value.get & 1_u64 == 0_u64
+        turn_setup("SETUP: unowed: the spinner did not find the runtime lock held\n")
+      end
+      word(page + IYI_TURN_SPIN).value.set(1_u64)
+      began = IyiMark.now_ns
+      while word(page + IYI_TURN_STAGE).value.get == 0_u64
+        if IyiMark.now_ns &- began > IYI_TURN_LIMIT
+          turn_setup("SETUP: unowed: the spinner was not released after count-out\n")
+        end
+        yield_cpu
+      end
+    end
+
+    # This runs at the real next pay_turn, before its swap. It cannot
+    # manufacture a debt: the park must already have written 3 and added
+    # exactly one to the runtime's turns word.
+    def self.turn_pay_hold(line : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || line == 0_u64 || word(page + IYI_TURN_LINE).value.get != line
+      if word(line + IYI_TL_LOCKWAIT).value.get != 3_u64 || word(page + IYI_TC_TURNS).value.get != 1_u64
+        turn_setup("SETUP: unowed: the spinner reached payment without one real debt\n")
+      end
+      word(page + IYI_TURN_PAY_HOLD).value.set(1_u64)
+      began = IyiMark.now_ns
+      while word(page + IYI_TURN_STAGE).value.get != 2_u64
+        if IyiMark.now_ns &- began > IYI_TURN_LIMIT
+          turn_setup("SETUP: unowed: the payment hold was never opened\n")
+        end
+        yield_cpu
+      end
+    end
+
+    # The witness follows pay_turn's actual subtraction, not the hold.
+    def self.turn_paid(line : UInt64) : Nil
+      page = @@control
+      return if page == 0_u64 || line == 0_u64 || word(page + IYI_TURN_LINE).value.get != line
+      if word(page + IYI_TURN_PAY_HOLD).value.get != 1_u64 || word(page + IYI_TURN_STAGE).value.get != 2_u64 || word(page + IYI_TC_TURNS).value.get != 0_u64
+        turn_setup("SETUP: unowed: the real payment did not clear its debt\n")
+      end
+      word(page + IYI_TURN_PAID).value.set(1_u64)
+    end
+
+    # Reached only after await_turns has observed a nonzero turns word,
+    # before the production deadline is calculated.
+    def self.turn_awaited(page : UInt64) : Nil
+      return if word(page + IYI_TURN_LINE).value.get == 0_u64
+      if word(page + IYI_TURN_PAY_HOLD).value.get != 1_u64 || word(page + IYI_TURN_STAGE).value.get != 1_u64 || word(page + IYI_TC_TURNS).value.get != 1_u64
+        turn_setup("SETUP: unowed: the wait did not find the held debt\n")
+      end
+      word(page + IYI_TURN_AWAITED).value.set(1_u64)
+      word(page + IYI_TURN_STAGE).value.set(2_u64)
+      began = IyiMark.now_ns
+      while word(page + IYI_TURN_PAID).value.get == 0_u64
+        if IyiMark.now_ns &- began > IYI_TURN_LIMIT
+          turn_setup("SETUP: unowed: the spinner did not pay its turn\n")
+        end
+        yield_cpu
+      end
+    end
+
+    # The collection calls this immediately before its first real lock
+    # attempt, so the mutant is named before it can begin a second stop.
+    def self.turn_lock_check : Nil
+      page = @@control
+      return if page == 0_u64
+      line = word(page + IYI_TURN_LINE).value.get
+      return if line == 0_u64
+      if word(page + IYI_TURN_SPIN).value.get != 1_u64 || word(page + IYI_TURN_PAY_HOLD).value.get != 1_u64 || word(page + IYI_TC_RESUMED).value.get != 1_u64
+        turn_setup("SETUP: unowed: the collector missed the held count-out\n")
+      end
+      if word(page + IYI_TURN_AWAITED).value.get == 0_u64
+        if word(page + IYI_TURN_STAGE).value.get != 1_u64 || word(page + IYI_TURN_PAID).value.get != 0_u64 || word(line + IYI_TL_LOCKWAIT).value.get != 3_u64 || word(page + IYI_TC_TURNS).value.get != 1_u64
+          turn_setup("SETUP: unowed: the collector did not find the unpaid turn\n")
+        end
+        message = "FAIL: unowed: the collector attempted the runtime lock before waiting for an owed turn\n"
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_exit(1)
+      end
+      if word(page + IYI_TURN_STAGE).value.get != 2_u64 || word(page + IYI_TURN_PAID).value.get != 1_u64 || word(page + IYI_TC_TURNS).value.get != 0_u64
+        turn_setup("SETUP: unowed: the collector did not observe the paid turn\n")
+      end
+      word(page + IYI_TURN_CHECKED).value.set(1_u64)
+      # A later stop may legitimately create another debt; this proof is
+      # complete and must not hold that separate payment.
+      word(page + IYI_TURN_LINE).value.set(0_u64)
+    end
+
+    def self.turn_spinning? : Bool
+      word(control + IYI_TURN_SPIN).value.get == 1_u64
+    end
+    def self.turn_owed? : Bool
+      page = control
+      line = word(page + IYI_TURN_LINE).value.get
+      line != 0_u64 && word(page + IYI_TC_SUSPENDED).value.get == 1_u64 && word(line + IYI_TL_LOCKWAIT).value.get == 3_u64 && word(page + IYI_TC_TURNS).value.get == 1_u64
+    end
+    def self.turn_resumed : UInt64
+      word(control + IYI_TC_RESUMED).value.get
+    end
+    def self.turn_release_spin : Nil
+      word(control + IYI_TURN_STAGE).value.set(1_u64)
+    end
+    def self.turn_payment_held? : Bool
+      word(control + IYI_TURN_PAY_HOLD).value.get == 1_u64
+    end
+    def self.turn_checked? : Bool
+      word(control + IYI_TURN_CHECKED).value.get == 1_u64
+    end
+IYI
+      turn_thread_copy() {
+        awk -v part="$WORK/turn.part" -v mode="$1" '
+          /^    # ── Roots/ {
+            roots++
+            while ((result = getline s < part) > 0) { print s; part_lines++ }
+            if (result < 0) part_error++
+            close(part)
+          }
+          /^    def self\.pay_turn\(line : UInt64, waiting : UInt64\) : Nil$/ { in_pay = 1; pay_defs++ }
+          in_pay && /^    end$/ { in_pay = 0; pay_ends++ }
+          in_pay && /^      if word\(line \+ IYI_TL_LOCKWAIT\)\.value\.swap\(waiting\) == 3_u64$/ {
+            print "      turn_pay_hold(line)"; print; pay_hold++; next
+          }
+          in_pay && /^        word\(control \+ IYI_TC_TURNS\)\.value\.sub\(1_u64\)$/ {
+            print; print "        turn_paid(line)"; paid++; next
+          }
+          /^    def self\.await_turns : Nil$/ { in_await = 1; await_defs++ }
+          in_await && /^    end$/ { in_await = 0; await_ends++ }
+          in_await && /^      return if turns\.value\.get == 0_u64$/ {
+            if (mode == "forced") print "      return"
+            else print
+            return_anchor++; next
+          }
+          in_await && /^      ends = IyiMark\.now_ns \+ TURN_WAIT_NS$/ {
+            print "      turn_awaited(page)"; print; awaited++; next
+          }
+          /^    def self\.lock_turn\(word : Pointer\(Atomic\(UInt64\)\), seen : UInt64, spins : Int64, since : UInt64\) : Tuple\(Int64, UInt64\)$/ { in_lock = 1; lock_defs++ }
+          in_lock && /^    end$/ { in_lock = 0; lock_ends++ }
+          in_lock && /^        IyiHeap\.write64\(line \+ IYI_TL_LOCKWAIT, 1_u64\) if line != 0$/ {
+            print; print "        turn_spinning(line)"; spinning++; next
+          }
+          { print }
+          END {
+            if (roots != 1 || part_lines == 0 || part_error != 0 ||
+                pay_defs != 1 || pay_ends != 1 || pay_hold != 1 || paid != 1 ||
+                await_defs != 1 || await_ends != 1 || return_anchor != 1 || awaited != 1 ||
+                lock_defs != 1 || lock_ends != 1 || spinning != 1) exit 3
+          }
+        ' "$REPO/src/iyi/thread.iyi" > "$2"
+      }
+      turn_prelude_copy() {
+        awk '
+          /^      def self\.collect_cleared : Nil$/ { in_collect = 1; definitions++ }
+          in_collect && /^      end$/ { in_collect = 0; ends++ }
+          in_collect && /^        IyiRuntimeLock\.lock$/ {
+            locks++
+            if (locks == 1) { print "        IyiThread.turn_lock_check"; first++ }
+            else if (locks == 2) second++
+            else extra++
+          }
+          { print }
+          END { if (definitions != 1 || ends != 1 || first != 1 || second != 1 || extra != 0) exit 3 }
+        ' "$REPO/src/iyi/prelude.iyi" > "$1"
+      }
+      cat > unowed.iyi <<'IYI' || { echo "SETUP: unowed: could not write the witness program"; exit 76; }
+@[Unsafe("copy-only atomic witnesses coordinate a real runtime-lock spinner")]
+module unowed
+
+class TurnGate
+  getter ready : Atomic(Int64)
+  getter go : Atomic(Int64)
+  getter finish : Atomic(Int64)
+
+  def initialize
+    @ready = Atomic(Int64).new(0_i64)
+    @go = Atomic(Int64).new(0_i64)
+    @finish = Atomic(Int64).new(0_i64)
+  end
+end
+
+IyiMark.auto = false
+IyiMark.workers = 0_u64
+gate = TurnGate.new
+worker = IyiThread.start do
+  gate.ready.set(1_i64)
+  began = IyiMark.now_ns
+  while gate.go.get == 0_i64
+    if IyiMark.now_ns &- began > 20000000000_u64
+      IyiThread.turn_setup("SETUP: unowed: the worker was not started\n")
+    end
+    IyiThread.yield_cpu
+  end
+  IyiRuntimeLock.lock
+  IyiRuntimeLock.unlock
+  began = IyiMark.now_ns
+  while gate.finish.get == 0_i64
+    if IyiMark.now_ns &- began > 20000000000_u64
+      IyiThread.turn_setup("SETUP: unowed: the worker was not released after collection\n")
+    end
+    IyiThread.yield_cpu
+  end
+  nil
+end
+began = IyiMark.now_ns
+while gate.ready.get == 0_i64
+  if IyiMark.now_ns &- began > 20000000000_u64
+    IyiThread.turn_setup("SETUP: unowed: the worker never entered its body\n")
+  end
+  IyiThread.yield_cpu
+end
+IyiRuntimeLock.lock
+IyiThread.turn_arm(worker.line)
+gate.go.set(1_i64)
+began = IyiMark.now_ns
+while !IyiThread.turn_spinning?
+  if IyiMark.now_ns &- began > 20000000000_u64
+    IyiThread.turn_setup("SETUP: unowed: the worker never spun on the runtime lock\n")
+  end
+  IyiThread.yield_cpu
+end
+others = IyiThread.stop_others
+if others != 1_i64
+  IyiThread.turn_setup("SETUP: unowed: the stop did not park exactly one worker\n")
+end
+unless IyiThread.turn_owed?
+  IyiThread.turn_setup("SETUP: unowed: the parked spinner did not owe exactly one turn\n")
+end
+IyiThread.resume_others(others)
+began = IyiMark.now_ns
+while IyiThread.turn_resumed == 0_u64
+  if IyiMark.now_ns &- began > 20000000000_u64
+    IyiThread.turn_setup("SETUP: unowed: the parked spinner never counted out\n")
+  end
+  IyiThread.yield_cpu
+end
+if IyiThread.turn_resumed != 1_u64 || !IyiThread.turn_owed?
+  IyiThread.turn_setup("SETUP: unowed: count-out did not preserve exactly one debt\n")
+end
+IyiThread.turn_release_spin
+IyiRuntimeLock.unlock
+began = IyiMark.now_ns
+while !IyiThread.turn_payment_held?
+  if IyiMark.now_ns &- began > 20000000000_u64
+    IyiThread.turn_setup("SETUP: unowed: the spinner never reached its next payment\n")
+  end
+  IyiThread.yield_cpu
+end
+IyiMark.collect
+unless IyiThread.turn_checked?
+  IyiThread.turn_setup("SETUP: unowed: the collector never reached its lock attempt\n")
+end
+gate.finish.set(1_i64)
+worker.join
+puts "unowed: the collector waited for the parked spinner to pay its turn"
+IYI
+      for mode in control forced; do
+        mkdir -p "unowed-$mode/iyi" || { echo "SETUP: unowed: could not make the $mode copy"; exit 76; }
+        cp "$REPO"/src/iyi/*.iyi "unowed-$mode/iyi/" || { echo "SETUP: unowed: could not populate the $mode copy"; exit 76; }
+        turn_thread_copy "$mode" "unowed-$mode/iyi/thread.iyi" || { echo "SETUP: unowed: thread copy anchors changed"; exit 76; }
+        turn_prelude_copy "unowed-$mode/iyi/prelude.iyi" || { echo "SETUP: unowed: collector copy anchors changed"; exit 76; }
+        if ! IYI_PATH="$WORK/unowed-$mode${PSEP}$REPO/src" "$IYI" build unowed.iyi -o "unowed-$mode-run" > "build-unowed-$mode.log" 2>&1; then
+          echo "SETUP: unowed: the $mode copy did not build"; cat "build-unowed-$mode.log"; exit 76
         fi
-        echo "  the run ended, $(sed 's/^ok //' unowed.txt)"
-      else
-        echo "with the wait for the turns taken out, a run exited $code:"; tail -3 unowed.txt; exit 1
-      fi
+        step "owed turns: real parked spinner and collector lock, $mode"
+        ( timeout -k 5 60 "./unowed-$mode-run" > "unowed-$mode.txt" 2>&1; exit $? ) 2> /dev/null
+        code=$?
+        case "$code" in
+          76)
+            if ! grep -q '^SETUP: unowed:' "unowed-$mode.txt"; then echo "SETUP: unowed: the $mode run exited 76 without a stage"; fi
+            cat "unowed-$mode.txt"; exit 76 ;;
+          124)
+            echo "SETUP: unowed: the $mode run exceeded its watchdog"; cat "unowed-$mode.txt"; exit 76 ;;
+          137)
+            echo "SETUP: unowed: the $mode run was killed"; cat "unowed-$mode.txt"; exit 76 ;;
+        esac
+        if grep -q '^SETUP:' "unowed-$mode.txt"; then cat "unowed-$mode.txt"; exit 76; fi
+        if [ "$mode" = control ]; then
+          if [ "$code" -eq 1 ] && [ "$(grep -c '^FAIL:' "unowed-$mode.txt")" -eq 1 ] && grep -qxF 'FAIL: unowed: the collector attempted the runtime lock before waiting for an owed turn' "unowed-$mode.txt"; then
+            cat "unowed-$mode.txt"; exit 1
+          fi
+          if [ "$code" -ne 0 ] || [ "$(grep -c '^FAIL:' "unowed-$mode.txt")" -ne 0 ] || [ "$(grep -cFx 'unowed: the collector waited for the parked spinner to pay its turn' "unowed-$mode.txt")" -ne 1 ]; then
+            echo "SETUP: unowed: the control did not produce its witness"; cat "unowed-$mode.txt"; exit 76
+          fi
+          echo '  control: unowed: the collector waited for the parked spinner to pay its turn'
+        else
+          if [ "$code" -ne 1 ] || [ "$(grep -c '^FAIL:' "unowed-$mode.txt")" -ne 1 ] || [ "$(grep -cFx 'FAIL: unowed: the collector attempted the runtime lock before waiting for an owed turn' "unowed-$mode.txt")" -ne 1 ]; then
+            echo "SETUP: unowed: the mutant did not produce its named verdict"; cat "unowed-$mode.txt"; exit 76
+          fi
+          echo '  exits 1 at "FAIL: unowed: the collector attempted the runtime lock before waiting for an owed turn"'
+        fi
+      done
     fi
     ;;
 esac

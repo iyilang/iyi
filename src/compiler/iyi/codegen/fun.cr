@@ -73,7 +73,7 @@ class Iyi::CodeGenVisitor
     # home stays private: two modules each carrying a copy is the collision
     # IV.1g's internal linkage exists to prevent, and a home that defines the
     # symbol itself answers every other reference already.
-    if ENV["IYI_TDF"]? && mangled_name.includes?(ENV["IYI_TDF"].to_s)
+    if (traced = @trace_def_fun) && mangled_name.includes?(traced)
       STDERR.puts "TDF #{mangled_name} host=#{!iyi_closure_host(self_type).nil?} typemod=#{type_module(self_type).mod.name}"
     end
     if host = iyi_closure_host(self_type)
@@ -84,9 +84,40 @@ class Iyi::CodeGenVisitor
     end
 
     self_type_mod = type_module(self_type).mod
+    iyi_record_demand(target_def, self_type, mangled_name, self_type_mod)
 
     func = typed_fun?(self_type_mod, mangled_name) || codegen_fun(mangled_name, target_def, self_type, iyi_runtime_copy: runtime_copy)
     check_mod_fun self_type_mod, mangled_name, func
+  end
+
+  @iyi_module_units : Set(String)?
+
+  # iyi: a call from one module's unit into another's, while writing
+  # artifacts, for the caller's `Demands` (`IyiMod::Demand`). A build that
+  # reads the caller's artifact and compiles the callee's module from
+  # changed source (early cutoff, SPEC.md IV.3) emits what *it* reaches,
+  # and the caller's machine code is not something it reaches: this is
+  # the call that build makes so the callee's unit defines the symbol.
+  private def iyi_record_demand(target_def, self_type, mangled_name, callee_mod) : Nil
+    return if @program.iyi_exported_owners.empty?
+    return if callee_mod == @llvm_mod || @llvm_mod == @main_mod
+    callee = @program.iyi_owner_units[self_type.instance_type]?
+    return unless callee
+    units = @iyi_module_units ||= @program.iyi_owner_units.values.map(&.to_s).to_set
+    return unless units.includes?(@llvm_mod.name)
+
+    demands = @program.iyi_unit_demands[@llvm_mod.name] ||= {} of String => IyiMod::Demand
+    return if demands.has_key?(mangled_name)
+
+    # The receiver as a value of it is written: `uninitialized Base` is the
+    # virtual `Base+` already, and a `+` is not a name.
+    receiver = self_type.instance_type.to_s.rchop('+')
+    args =
+      unless target_def.splat_index || target_def.double_splat || target_def.block_arg
+        target_def.args.map { |arg| arg.type.to_s.gsub('+', "") }
+      end
+    demands[mangled_name] = IyiMod::Demand.new(callee.to_s, mangled_name, receiver,
+      self_type.metaclass?, target_def.name, args)
   end
 
   # iyi: the `lib` a unit calls into, recorded where the call is.
@@ -374,7 +405,7 @@ class Iyi::CodeGenVisitor
       # units call `FilterHandler#next=` and `HTTP::Handler` is Crystal's — and
       # it defines less than its types suggest, because `Reference::new` is
       # instantiated per type and only where something reached it.
-      if ENV["IYI_SYM"]? && mangled_name.includes?(ENV["IYI_SYM"].to_s)
+      if (traced = @trace_sym) && mangled_name.includes?(traced)
         STDERR.puts "SYM #{mangled_name} needs=#{needs_body} art=#{target_def.iyi_from_artifact?} elsewhere=#{compiled_elsewhere} internal=#{iyi_internal} mod=#{@llvm_mod.name}"
       end
       if needs_body && !iyi_internal && !@program.iyi_exported_owners.empty? && @llvm_mod != @main_mod
@@ -883,13 +914,18 @@ class Iyi::CodeGenVisitor
         # died with "BUG: trying to downcast Int32 <- String".
         next if self.context.vars.has_key?(var.name)
 
-        if context.fun.naked?
+        var_ptr = gep(closure_type, closure_ptr, 0, i, var.name)
+        if var.iyi_boxed?
+          # heap22 C1: the slot holds the address of the variable's cell
+          # (`MetaVar#iyi_boxed?`), which debug info does not describe.
+          var_ptr = load(llvm_type(var.type).pointer, var_ptr)
+          debug_variable_created = false
+        elsif context.fun.naked?
           debug_variable_created = false
         else
           var_offset = llvm_typer.offset_of(closure_type, i)
           debug_variable_created = declare_variable(var.name, var.type, closure_ptr, target_def.location, offset: var_offset)
         end
-        var_ptr = gep(closure_type, closure_ptr, 0, i, var.name)
         self.context.vars[var.name] = LLVMVar.new(var_ptr, var.type, debug_variable_created: debug_variable_created)
       end
 
@@ -1056,11 +1092,22 @@ class Iyi::CodeGenVisitor
       when Nil, Program, LibType
         type_name = ""
       else
-        type_name = type.instance_type.to_s
+        # iyi: a type whose module's `.iyimod` this build writes is compiled
+        # into that module's unit, with the module's other types. A unit
+        # that travels carries a private copy of every prelude callee it
+        # reaches (`target_def_fun`), and that closure is most of the
+        # runtime: `Int32#%` can raise, and `raise` reaches the allocator,
+        # the collector and the scheduler. One unit per type copied it once
+        # per type, so a module of ten types carried it eleven times
+        # (SPEC.md IV.1g). Per module it is copied once, and the artifact
+        # defines the same symbols, from the same build.
+        instance = type.instance_type
+        type_name = (@program.iyi_owner_units[instance]? || instance).to_s
       end
 
       @modules[type_name] ||= begin
         llvm_context = LLVM::Context.new
+        llvm_context.discard_value_names = true if @discard_value_names
         # LLVM::Context.register(llvm_context, type_name)
 
         llvm_typer = LLVMTyper.new(@program, llvm_context)

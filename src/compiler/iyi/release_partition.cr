@@ -38,7 +38,22 @@
 module Iyi::ReleasePartition
   # Instructions per partition, before optimisation. The count is a function
   # of the program only, so the output is too.
-  PARTITION_SIZE = 20_000
+  #
+  # Every program carries the runtime, about 30,000 instructions, so at
+  # 20,000 a hello world was cut in two and iyi-benchmarks' compile-axis
+  # program (58,209) in three, which left nine of a 12-vCPU machine's
+  # cores idle. At 5,000, on a shared 12-vCPU Linux VM, median of five:
+  # the compile-axis program's optimise-and-compile stage took 0.54 s on
+  # 3.68 s of processor against 0.98 s on 2.33 s, and hello world's 0.55 s
+  # against 0.86 s. What the stage cannot go under is the runtime's
+  # largest functions (the scheduler's `worker_next`, the collector's
+  # `helper_main`), about 0.45 s whatever the count. The four plb2
+  # programs, cut in 7 rather than 2, ran 0.96x to 1.00x their time.
+  PARTITION_SIZE = 5_000
+
+  # The largest group of a function and its inner callees (`assign`), as a
+  # share of an average partition: at most 1/`GROUP_SHARE` of one.
+  GROUP_SHARE = 2
 
   # More partitions than this cost more in what each one imports than they
   # save in balance.
@@ -86,8 +101,11 @@ module Iyi::ReleasePartition
     # definition, external or promoted, answers every call the copy does
     # not take.
     getter inline_only : Array(Array(Int32))
+    # Per partition: the instructions of the functions it owns, before
+    # optimisation.
+    getter owned : Array(Int64)
 
-    def initialize(@count, @owner, @copies, @inline_only)
+    def initialize(@count, @owner, @copies, @inline_only, @owned)
     end
   end
 
@@ -96,9 +114,11 @@ module Iyi::ReleasePartition
   # share; *mod* is written out after this and each partition is read back
   # from that. *named* is what something will look up by name after
   # optimisation (`PreemptChecks.named`), which keeps its name.
-  # *import_limit* is `IMPORT_LIMIT` unless a build says otherwise.
+  # *import_limit* is `IMPORT_LIMIT` unless a build says otherwise, and
+  # *group_share* `GROUP_SHARE`.
   def self.plan(mod : LLVM::Module, count : Int32? = nil, named : Array(String) = [] of String,
-                import_limit : Int32 = IMPORT_LIMIT, inline_limit : Int32 = INLINE_LIMIT) : Plan?
+                import_limit : Int32 = IMPORT_LIMIT, inline_limit : Int32 = INLINE_LIMIT,
+                group_share : Int32 = GROUP_SHARE) : Plan?
     return nil if count == 1
     functions = [] of LibLLVM::ValueRef
     position = {} of UInt64 => Int32
@@ -135,7 +155,9 @@ module Iyi::ReleasePartition
     inner = inner_callees(callees, local_copy)
     whole = Array(Int32).new(functions.size, -1)
     functions.each_index { |index| whole_size(index, sizes, inner, whole) }
-    owner = assign(functions, sizes, total, count, inner)
+    owner = assign(functions, sizes, whole, total, count, inner, group_share)
+    owned = Array(Int64).new(count, 0_i64)
+    owner.each_with_index { |partition, index| owned[partition] += sizes[index] if partition >= 0 }
     lists = Array.new(count) do |partition|
       import_list(partition, owner, whole, callees, inner, local_copy, inline_copy, always, import_limit, inline_limit)
     end
@@ -158,7 +180,7 @@ module Iyi::ReleasePartition
         raise "BUG: an available_externally copy of a function its owner does not export" if local?(functions[index])
       end
     end
-    Plan.new(count, owner, copies, inline_only)
+    Plan.new(count, owner, copies, inline_only, owned)
   end
 
   def self.partition_count(instructions : Int64) : Int32
@@ -299,7 +321,18 @@ module Iyi::ReleasePartition
   # 12861 and 10599 instructions (14245, 14274 and 14392 placed as one),
   # and `samples/iyi/cores.iyi`'s build took 12.47 s against 9.11 s on
   # Windows 11, 12 logical processors (the user's machine).
-  private def self.assign(functions, sizes, total, count, inner) : Array(Int32)
+  #
+  # A group grows from its leaves up, the smallest caller first, and stops
+  # at 1/*group_share* of an average partition: a callee that would take
+  # it past that starts a group of its own. Unbounded (*group_share* 0),
+  # the generated program of iyi-benchmarks' compile axis (`main` calling
+  # 30 locals, each calling its module's) was one group of 19067 of its
+  # 58209 instructions, and cut in 12 one partition owned 18892 of them
+  # and took 0.56 s of a 0.59 s stage while two owned nothing. Capped, the
+  # largest owned 5172 and the stage took 0.55 to 0.58 s against 0.63 s,
+  # medians of five on a shared 12-vCPU Linux VM, and `samples/iyi/cores.iyi`
+  # in its 15 partitions 4.89 s against 5.36 s.
+  private def self.assign(functions, sizes, whole, total, count, inner, group_share) : Array(Int32)
     group = Array(Int32).new(functions.size) { |index| index }
     root = ->(index : Int32) do
       top = index
@@ -312,14 +345,18 @@ module Iyi::ReleasePartition
       end
       top
     end
-    inner.each_with_index do |list, from|
-      list.each do |callee|
+    group_size = sizes.map(&.to_i64)
+    cap = group_share > 0 ? total // count // group_share : Int64::MAX
+    callers = (0...functions.size).to_a.sort_by! { |index| {whole[index], index} }
+    callers.each do |from|
+      inner[from].each do |callee|
         mine, theirs = root.call(callee), root.call(from)
-        group[mine] = theirs unless mine == theirs
+        next if mine == theirs
+        next if group_size[mine] + group_size[theirs] > cap
+        group[mine] = theirs
+        group_size[theirs] += group_size[mine]
       end
     end
-    group_size = Array(Int64).new(functions.size, 0_i64)
-    functions.each_index { |index| group_size[root.call(index)] += sizes[index] }
 
     owner = Array(Int32).new(functions.size, -1)
     placed = Array(Int32).new(functions.size, -1)

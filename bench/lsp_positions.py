@@ -43,7 +43,7 @@ the arm this target does not take has no type) and a local assignment (where
 `_, anchor_end = anchor_indices` inside an unreached `if` has none either).
 
 `--shard K/N` sweeps the Kth of N shards of the modules, dealt by weight
-(`WEIGHTS`): the CI job runs as four of them side by side.
+(`WEIGHTS`): the CI job runs as five of them side by side.
 """
 
 import os
@@ -110,32 +110,33 @@ ASSIGNMENT = re.compile(r"^\s*[\w, ]+ = [^=]")
 # modules of one weight by name, so every shard computes the same deal).
 #
 # A weight is the seconds the module's sweep took at stride 200 on GitHub's
-# ubuntu-24.04 runners, read from the per-module lines of 39 green shard
-# jobs, 13 master runs of 2026-10-26 to 10-30 (a98f03fe6 to 1ae9e94db).
-# The runners differ in speed by a factor, the same for every module of a
-# job (0.57 to 1.24 of the median job), so each job's seconds are divided
-# by its factor first and the weight is the median of what is left: the
-# seconds on a median runner, 4,286 for all 118 modules, std/http 442 of
-# them. A module not here weighs 7, the mean of the 54 under 15 s (1.1 to
-# 14.7). Dealt four ways, the shards hold 1,079, 1,072, 1,072 and 1,078 s
-# by these weights and 1,079, 1,069, 1,063 and 1,075 by every module's own.
-# The weights before these were one Linux workstation's (eab791d5b, std/http
-# 258 s), and its ratio to a runner is not one number: 1.7 for std/http,
-# 2.0 for std/autocert.
+# ubuntu-24.04 runners, read from the per-module lines of 20 shard jobs of
+# 4 green runs of 2026-11-20 (1be2b11b0, f68984ae7, e26299cdf, 6b131f8d8),
+# all after `iyi lsp` stopped recompiling a large module for every question
+# (bcee7ed4f). Each job's seconds are divided by its runner's factor first
+# (0.69 to 1.72 of the median job) and the weight is the median of what is
+# left: the seconds on a median runner, 3,464 for all 121 modules. A module
+# not here weighs 7, the mean of the 69 under 15 s (0.9 to 15.0). Dealt five
+# ways, the shards hold 691 to 697 s by these weights and 676 to 715 by
+# every module's own.
+# The weights before these were dealt on the tree with heap22 and master
+# merged (2026-11-17 and 11-18), where a worker over 512 MB was replaced
+# after every question: std/autocert 895 s, std/acme 625, std/http 626.
+# After bcee7ed4f those three take 93, 101 and 349, and the shard that held
+# std/autocert swept in 290 to 300 s on a median runner while another took
+# 900 to 920 (jobs 136072164079 and 136072164099, one run).
 WEIGHTS = {
-    "http": 442, "math": 302, "tls": 286, "websocket": 168, "autocert": 158,
-    "big": 148, "socket": 135, "xml": 122, "json": 105, "acme": 100,
-    "time": 93, "file": 77, "mail": 75, "unicode": 68, "router": 62,
-    "secure_dns": 61, "yaml": 61, "debug": 60, "process": 58, "zstd": 58,
-    "sse": 51, "regex": 50, "compress": 47, "cookie": 47, "udp": 44,
-    "x509": 43, "aead": 42, "tar": 42, "dir": 40, "p256": 39, "toml": 39,
-    "bzip2": 36, "digest": 36, "smtp": 36, "ecdsa": 34, "zip": 34, "dns": 33,
-    "curve25519": 29, "format": 29, "text": 29, "xz": 29, "ocsp": 27,
-    "png": 26, "system_roots": 26, "user": 25, "http_proxy": 24, "netip": 24,
-    "p384": 23, "float": 22, "hpack": 22, "fileserver": 21, "int": 21,
-    "mlkem": 21, "password": 21, "uri": 20, "io": 19, "path": 19,
-    "enumerable": 17, "random": 17, "term": 17, "asn1": 16, "csv": 16,
-    "system": 16, "hpke": 15,
+    "http": 349, "tls": 270, "math": 195, "big": 141, "socket": 128,
+    "websocket": 109, "acme": 101, "autocert": 93, "xml": 93, "mail": 79,
+    "json": 68, "file": 63, "time": 60, "cookie": 55, "compress": 52,
+    "process": 52, "router": 51, "zstd": 47, "unicode": 46, "secure_dns": 45,
+    "x509": 44, "sse": 43, "tar": 41, "smtp": 40, "ecdsa": 39, "yaml": 38,
+    "debug": 36, "png": 36, "system_roots": 32, "p256": 31, "regex": 31,
+    "p384": 30, "fileserver": 29, "dir": 28, "toml": 28, "xz": 28,
+    "digest": 26, "udp": 26, "zip": 26, "aead": 25, "dns": 25,
+    "curve25519": 24, "bzip2": 23, "int": 23, "user": 22, "ocsp": 21,
+    "format": 20, "http_proxy": 18, "text": 17, "uri": 16, "hpack": 15,
+    "otp": 15,
 }
 UNWEIGHED = 7
 

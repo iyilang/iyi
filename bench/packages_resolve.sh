@@ -35,6 +35,10 @@ case "$(uname -s)" in
     WORK="$(cygpath -m "$WORK")"
     ;;
 esac
+# The fixture repositories must not inherit a user's signing or URL
+# rewrite configuration. Each test supplies its own config when needed.
+printf '[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n' > "$WORK/fixture.gitconfig"
+export GIT_CONFIG_GLOBAL="$WORK/fixture.gitconfig" GIT_CONFIG_NOSYSTEM=1
 export IYI_CACHE_DIR="$WORK/cache"
 export IYI_MOD_MIRROR="$WORK/mirror"
 
@@ -45,7 +49,9 @@ mkrepo() { git init -q "$1" && git -C "$1" config user.email t@t && git -C "$1" 
 
 # ── The fixture: two packages, three versions, one raise ─────────────────
 mkrepo work/liba
-printf 'module example.test/user/liba\n' > work/liba/iyi.mod
+# Preserve committed CRLF bytes even when the caller's git asks for LF.
+printf 'iyi.mod -text\n' > work/liba/.gitattributes
+printf 'module example.test/user/liba\r\n' > work/liba/iyi.mod
 printf 'module liba\n\npub def greeting : String\n  "hello from liba v1.0.0"\nend\n' > work/liba/liba.iyi
 # A package module that uses the standard library: `std/file` is iyi's,
 # found where every program finds it, and never the consuming project's
@@ -81,7 +87,10 @@ IYI
 
 # ── 1. MVS: the highest of the minimums, observably ──────────────────────
 step "MVS picks the raised version"
-if ! (cd app && "$IYI" build main.iyi -o app) > build.log 2>&1; then
+# Git normally rewrites text under this configuration. The manifest in the
+# tag is explicitly binary, so its CRLF bytes must reach the hash intact.
+printf '[core]\n\tautocrlf = true\n\teol = crlf\n' > crlf.gitconfig
+if ! (cd app && GIT_CONFIG_GLOBAL="$WORK/crlf.gitconfig" "$IYI" build main.iyi -o app) > build.log 2>&1; then
   echo "build failed:"
   tail -8 build.log
   exit 1
@@ -90,6 +99,158 @@ fi
 grep -q 'hello from liba v1.1.0' answers.txt || { echo "v1.1.0 never ran:"; cat answers.txt; exit 1; }
 grep -q 'v1.0.0' answers.txt && { echo "the version MVS discarded still ran:"; cat answers.txt; exit 1; }
 grep -q 'green' answers.txt || { echo "the sub-module import lost:"; cat answers.txt; exit 1; }
+
+# The older liba manifest is read by MVS even though libb raises the
+# selected tree to v1.1.0. Move only that older tag to a manifest that
+# introduces libc, then clear the cache. Without a manifest sum the build
+# silently adds libc while the selected liba tree still matches.
+step "an outbid manifest moved to add a requirement is refused"
+if command -v sha256sum > /dev/null 2>&1; then
+  sha256() { sha256sum | cut -c1-64; }
+else
+  sha256() { shasum -a 256 | cut -c1-64; }
+fi
+manifest_h2() {
+  inner="$(sha256)"
+  printf '%s f iyi.mod\n' "$inner" | sha256 | awk '{ print "h2:" $0 }'
+}
+old_commit="$(git -C work/liba rev-parse v1.0.0)"
+git -C work/liba show "$old_commit:iyi.mod" > manifest-crlf
+tr -d '\r' < manifest-crlf > manifest-lf
+cmp -s manifest-crlf manifest-lf && { echo "the tag does not contain CRLF bytes"; exit 1; }
+old_hash="$(manifest_h2 < manifest-crlf)"
+lf_hash="$(manifest_h2 < manifest-lf)"
+[ "$old_hash" != "$lf_hash" ] || { echo "CRLF and LF have the same manifest hash"; exit 1; }
+grep -Fx "example.test/user/liba v1.0.0/iyi.mod $old_hash" app/iyi.sum > /dev/null || {
+  echo "the CRLF manifest was not recorded from its exact bytes:"; cat app/iyi.sum; exit 1;
+}
+# A falsely normalized pin must be refused, not accepted as the CRLF file.
+cp app/iyi.sum app/iyi.sum.crlf
+awk -v hash="$lf_hash" '$1 == "example.test/user/liba" && $2 == "v1.0.0/iyi.mod" { $3 = hash } { print }' app/iyi.sum.crlf > app/iyi.sum
+cp app/iyi.sum app/iyi.sum.lf
+(cd app && "$IYI" build main.iyi -o app) > normalized-manifest.log 2>&1
+if [ "$?" -eq 0 ] ||
+   ! grep -F "example.test/user/liba v1.0.0/iyi.mod is not what it was" normalized-manifest.log > /dev/null ||
+   ! grep -F "$lf_hash" normalized-manifest.log > /dev/null ||
+   ! grep -F "$old_hash" normalized-manifest.log > /dev/null; then
+  echo "a normalized manifest pin was not refused with both hashes:"
+  cat normalized-manifest.log
+  exit 1
+fi
+cmp -s app/iyi.sum app/iyi.sum.lf || { echo "a refused normalized pin changed iyi.sum"; exit 1; }
+mv app/iyi.sum.crlf app/iyi.sum
+echo "  LF pin $lf_hash refused against CRLF bytes $old_hash"
+cp app/iyi.sum app/iyi.sum.before-move
+mkrepo work/libc
+printf 'module example.test/user/libc\n' > work/libc/iyi.mod
+printf 'module libc\n' > work/libc/libc.iyi
+git -C work/libc add -A && git -C work/libc commit -qm one && git -C work/libc tag v1.0.0
+git clone -q --bare work/libc mirror/example.test/user/libc
+git -C work/liba checkout -q --detach "$old_commit"
+printf 'require example.test/user/libc v1.0.0\n' >> work/liba/iyi.mod
+new_hash="$(manifest_h2 < work/liba/iyi.mod)"
+[ "$old_hash" != "$new_hash" ] || { echo "the fixture did not change the manifest hash"; exit 1; }
+git -C work/liba commit -qam moved && git -C work/liba tag -f v1.0.0 > /dev/null
+git -C work/liba push -q -f "$WORK/mirror/example.test/user/liba" refs/tags/v1.0.0
+rm -rf "$IYI_CACHE_DIR"
+(cd app && "$IYI" build main.iyi -o app) > moved-manifest.log 2>&1
+moved_status=$?
+if [ "$moved_status" -eq 0 ]; then
+  echo "the moved outbid manifest was accepted:"
+  grep -F 'example.test/user/libc v1.0.0' app/iyi.sum || cat app/iyi.sum
+  exit 1
+fi
+grep -F "example.test/user/liba v1.0.0/iyi.mod is not what it was" moved-manifest.log > /dev/null &&
+  grep -F "$old_hash" moved-manifest.log > /dev/null &&
+  grep -F "$new_hash" moved-manifest.log > /dev/null || {
+  echo "the moved manifest was not refused naming both hashes:"
+  cat moved-manifest.log
+  exit 1
+}
+cmp -s app/iyi.sum app/iyi.sum.before-move || { echo "a refused build changed iyi.sum"; exit 1; }
+git -C work/liba tag -f v1.0.0 "$old_commit" > /dev/null
+git -C work/liba push -q -f "$WORK/mirror/example.test/user/liba" refs/tags/v1.0.0
+rm -rf "$IYI_CACHE_DIR"
+(cd app && "$IYI" build main.iyi -o app) > restored-manifest.log 2>&1 || {
+  echo "the restored graph failed:"; cat restored-manifest.log; exit 1;
+}
+grep -Fx "example.test/user/liba v1.0.0/iyi.mod $old_hash" app/iyi.sum > /dev/null || {
+  echo "no independently computed sum for the outbid manifest:"; cat app/iyi.sum; exit 1;
+}
+for entry in 'example.test/user/liba v1.1.0' 'example.test/user/liba v1.1.0/iyi.mod' 'example.test/user/libb v1.0.0/iyi.mod'; do
+  grep -F "$entry h2:" app/iyi.sum > /dev/null || { echo "missing $entry:"; cat app/iyi.sum; exit 1; }
+done
+
+# A cache spelled as a native, mixed-case drive path must address the same
+# checkout without changing the portable module and manifest keys.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    native_cache="$(cygpath -w "$IYI_CACHE_DIR" | tr '[:upper:]' '[:lower:]')"
+    cp app/iyi.sum app/iyi.sum.before-native
+    (cd app && IYI_CACHE_DIR="$native_cache" IYI_MOD_MIRROR="$WORK/no-mirror" "$IYI" build main.iyi -o app) > native-cache.log 2>&1 || {
+      echo "a native mixed-case cache path did not reuse the checkout:"; cat native-cache.log; exit 1;
+    }
+    cmp -s app/iyi.sum app/iyi.sum.before-native || {
+      echo "a native mixed-case cache path changed portable sum keys:"; cat app/iyi.sum; exit 1;
+    }
+    echo "  native backslashes and mixed case reused the cache without changing sum keys"
+    ;;
+esac
+echo "  $old_hash -> $new_hash refused; the old graph and sum remain"
+
+step "tidy keeps an outbid manifest and --check writes nothing"
+printf 'example.test/user/gone v1.0.0 h2:0000000000000000000000000000000000000000000000000000000000000000\n' >> app/iyi.sum
+cp app/iyi.mod app/iyi.mod.before-tidy
+cp app/iyi.sum app/iyi.sum.before-tidy
+(cd app && "$IYI" mod tidy --check) > tidy-check.log 2>&1
+[ "$?" -eq 1 ] || { echo "tidy --check did not report the stale entry:"; cat tidy-check.log; exit 1; }
+cmp -s app/iyi.mod app/iyi.mod.before-tidy && cmp -s app/iyi.sum app/iyi.sum.before-tidy || {
+  echo "tidy --check wrote to the project"; exit 1;
+}
+(cd app && "$IYI" mod tidy) > tidy.log 2>&1 || { echo "tidy failed:"; cat tidy.log; exit 1; }
+grep -Fx "example.test/user/liba v1.0.0/iyi.mod $old_hash" app/iyi.sum > /dev/null || {
+  echo "tidy dropped the outbid manifest:"; cat app/iyi.sum; exit 1;
+}
+grep -qF 'example.test/user/gone ' app/iyi.sum && { echo "tidy kept the stale entry"; exit 1; }
+cmp -s app/iyi.mod app/iyi.mod.before-tidy || { echo "tidy changed the fixture's requirements"; exit 1; }
+
+# A project predating manifest lines must get them without changing its
+# content pins. The check-only command reports the change without writing.
+cp app/iyi.sum app/iyi.sum.with-manifests
+awk '$2 !~ /\/iyi\.mod$/ { print }' app/iyi.sum.with-manifests > app/iyi.sum
+cp app/iyi.sum app/iyi.sum.old-format
+(cd app && "$IYI" mod tidy --check) > tidy-old-check.log 2>&1
+[ "$?" -eq 1 ] || { echo "tidy --check did not report missing manifests:"; cat tidy-old-check.log; exit 1; }
+cmp -s app/iyi.sum app/iyi.sum.old-format || { echo "tidy --check recorded manifests"; exit 1; }
+(cd app && "$IYI" mod tidy) > tidy-old.log 2>&1 || { echo "tidy did not record manifests:"; cat tidy-old.log; exit 1; }
+cmp -s app/iyi.sum app/iyi.sum.with-manifests || { echo "tidy changed content pins while recording manifests"; exit 1; }
+cp app/iyi.sum.old-format app/iyi.sum
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "  (read-only sum permissions need a Windows ACL; covered by the checksum spec where enforced)"
+    ;;
+  *)
+    chmod a-w app/iyi.sum
+    if [ -w app/iyi.sum ]; then
+      echo "  (this user can write the read-only sum; permission refusal is not asked)"
+    else
+      (cd app && "$IYI" build main.iyi -o app) > readonly-sum.log 2>&1
+      readonly_status=$?
+      chmod u+w app/iyi.sum
+      if [ "$readonly_status" -eq 0 ] || ! grep -qi 'iyi.sum' readonly-sum.log; then
+        echo "a read-only old sum did not refuse the build:"; cat readonly-sum.log; exit 1;
+      fi
+      cmp -s app/iyi.sum app/iyi.sum.old-format || { echo "a refused build changed the read-only sum"; exit 1; }
+      echo "  a read-only old sum refuses a build that needs manifest pins"
+    fi
+    chmod u+w app/iyi.sum
+    ;;
+esac
+(cd app && "$IYI" build main.iyi -o app) > build-old.log 2>&1 || {
+  echo "a build did not upgrade the old sum:"; cat build-old.log; exit 1;
+}
+cmp -s app/iyi.sum app/iyi.sum.with-manifests || { echo "the first build did not add exactly the missing manifest pins"; exit 1; }
+echo "  old sum: tidy --check exits 1, then tidy or build records the manifest pins"
 
 # ── 2. The cache is the second build's source ────────────────────────────
 step "a fetched checkout is read, not refetched"
@@ -165,7 +326,7 @@ step "a mutated checkout is refused while iyi.sum is honest"
 # ordinary answer. Asking the sum file ties the tree this mutates to the
 # entry this expects the refusal about, whatever MVS chose. The layout is
 # the fetcher's: `<cache>/mod/<path>@v<version>`.
-pinned="$(awk '$1 == "example.test/user/liba" { print $2 }' app/iyi.sum)"
+pinned="$(awk '$1 == "example.test/user/liba" && $2 !~ /\/iyi\.mod$/ { print $2 }' app/iyi.sum)"
 [ -n "$pinned" ] || { echo "iyi.sum pins no version for liba:"; cat app/iyi.sum; exit 1; }
 checkout="$(find "$IYI_CACHE_DIR" -path "*liba@$pinned*" -name liba.iyi | head -1)"
 [ -n "$checkout" ] || { echo "no liba@$pinned checkout under $IYI_CACHE_DIR"; exit 1; }
@@ -307,7 +468,10 @@ s1_of() {
 }
 cp app/iyi.sum app/iyi.sum.good
 : > app/iyi.sum.s1
-while read -r path version _; do
+while read -r path version hash; do
+  case "$version" in
+    */iyi.mod) continue ;;
+  esac
   tree="$IYI_CACHE_DIR/mod/$path@$version"
   [ -f "$tree/iyi.mod" ] || { echo "no checkout at $tree for the line $path $version"; exit 1; }
   printf '%s %s s1:%s\n' "$path" "$version" "$(s1_of "$tree")" >> app/iyi.sum.s1
@@ -343,7 +507,7 @@ if [ $? -ne 0 ] || grep -q 's1:' restated2.log; then
   exit 1
 fi
 # And the line a checkout does not match: liba's, with one digit moved.
-liba_s1="$(awk '$1 == "example.test/user/liba" { print $3 }' app/iyi.sum.s1)"
+liba_s1="$(awk '$1 == "example.test/user/liba" && $2 == "v1.1.0" { print $3 }' app/iyi.sum.s1)"
 case "$liba_s1" in
   s1:0*) wrong_s1="s1:1${liba_s1#s1:0}" ;;
   *) wrong_s1="s1:0${liba_s1#s1:?}" ;;

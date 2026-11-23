@@ -540,6 +540,13 @@ IYI
     "$PY" - > "$WORK/py_server.out" 2>&1 <<'PY' &
 import gzip, zlib, sys, email.parser, email.policy
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import socketserver
+def _bind(self):
+    # HTTPServer.server_bind also asks for this host's name, a reverse lookup
+    # these tests never use and that waits on the machine's resolver.
+    socketserver.TCPServer.server_bind(self)
+    self.server_name, self.server_port = self.server_address[:2]
+HTTPServer.server_bind = _bind
 try:
     from compression import zstd
     from compression.zstd import ZstdCompressor, CompressionParameter
@@ -764,6 +771,13 @@ IYI
     "$PY" - "$WORK/tls" > "$WORK/tls_server.out" 2>&1 <<'PY' &
 import gzip, socket, ssl, sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import socketserver
+def _bind(self):
+    # HTTPServer.server_bind also asks for this host's name, a reverse lookup
+    # these tests never use and that waits on the machine's resolver.
+    socketserver.TCPServer.server_bind(self)
+    self.server_name, self.server_port = self.server_address[:2]
+HTTPServer.server_bind = _bind
 text = b"python's own words " * 1000
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -1315,7 +1329,9 @@ echo "== connections on every core: serve's default workers, and workers: 1 (ben
 # panics ending its own connection; and the stop, the answers in
 # progress written - the one made at the stop saying `Connection:
 # close` - requests half sent behind them closed on rather than answered
-# 400, and a kept-alive connection closed, under watchdogs. Then
+# 400, and a kept-alive connection closed, under watchdogs; a pooled
+# server's own `max_head` and `max_body`, a body and a head past them
+# refused. Then
 # `workers: 1`: four requests waiting before anything accepts, every one
 # answered on the accepting thread, by a block that appends to an
 # `Array` and closes its own listener. Then the same over TLS (`tls:
@@ -1329,7 +1345,8 @@ echo "== connections on every core: serve's default workers, and workers: 1 (ben
 # with the connection spawned on the accepting thread, with the watcher
 # that carries the stop to a connection's worker made to do nothing,
 # with the stop sending no close_notify, with an answer made at the stop
-# saying `keep-alive`, and with a body the stop cut short answered 400,
+# saying `keep-alive`, with a body the stop cut short answered 400, and
+# with a pooled connection handed std/http's limits for the server's,
 # and a copy of std/tls whose ticket keys are every worker's own, each
 # caught at the line that names it. And what the compiler refuses and
 # takes: a block that captures an `Array` under the default workers, a
@@ -1351,7 +1368,7 @@ else
   # a copy of std/<module> (http unless given) with <old> made <new> must
   # print "FAIL <check>".
   parallel_breaks() {
-    local label="$1" old="$2" new="$3" check="$4" module="${5:-http}"
+    local label="$1" old="$2" new="$3" check="$4" module="${5:-http}" ended
     rm -rf "$WORK/parbreak" && mkdir -p "$WORK/parbreak/std"
     if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module.iyi" "$WORK/parbreak/std/$module.iyi" <<'PY'
 import os, sys
@@ -1372,12 +1389,13 @@ PY
       return
     fi
     timeout 120 "$WORK/parallel-broken" >"$WORK/parallel-broken.out" 2>&1
+    ended=$?
     got="$(grep -m1 "^FAIL $check" "$WORK/parallel-broken.out" | tr -d '\r')"
     if [ -n "$got" ]; then
       echo "  $label: caught: $got"
     else
-      echo "  $label: not caught at \"$check\""
-      sed -n '1,12p' "$WORK/parallel-broken.out" | sed 's/^/    /'
+      echo "  $label: not caught at \"$check\" (exit $ended)"
+      sed 's/^/    /' "$WORK/parallel-broken.out"
       status=1
     fi
   }
@@ -1385,18 +1403,18 @@ PY
   # thread whatever it is given, and `tls` is narrowed as `serve`'s is.
   parallel_breaks "a serve on the calling thread whatever its workers" \
     '    if workers == 1 || tls.is_a?(TlsServerConfig)
-      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)' '    if workers > 0 || tls.is_a?(TlsServerConfig)
-      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)' "threads that answered"
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, max_head, max_body, &handler)' '    if workers > 0 || tls.is_a?(TlsServerConfig)
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, max_head, max_body, &handler)' "threads that answered"
   parallel_breaks "workers: 1 served on the pool" \
     '    if workers == 1 || tls.is_a?(TlsServerConfig)
-      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, max_head, max_body, &handler)
       return
     end
-    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, workers)' '    if tls.is_a?(TlsServerConfig)
-      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, &handler)
+    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, workers, max_head, max_body)' '    if tls.is_a?(TlsServerConfig)
+      serve_one_thread(listener, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, max_head, max_body, &handler)
       return
     end
-    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, IyiWorkers.count)' "workers: 1, the threads that answered"
+    serve_pool(listener, SharedProc(Request, Response).of(&handler), stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_connections, IyiWorkers.count, max_head, max_body)' "workers: 1, the threads that answered"
   # `spawn(unit: :same)`, not `spawn`: the block passes every check
   # `spawn(unit: :new)`'s does, so a plain `spawn` of it runs on the pool
   # (SPEC.md III.4.15), and that copy answered every request on a worker.
@@ -1417,6 +1435,10 @@ PY
     'head.close || conn.stopped?' 'head.close' "the answer being made at the stop, its Connection"
   parallel_breaks "a body the stop cut short answered 400" \
     'return false if conn.ended? || conn.stopped?' 'return false if conn.ended?' "a request half sent behind that answer, on the stop"
+  # The pool's connection handed `handle`'s defaults for its limits:
+  # the body past `max_body: 1024` is waited for as if under 64 MiB.
+  parallel_breaks "a pooled connection held to std/http's limits, not serve's" \
+    '    handle(client, answer, stop, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_head, max_body)' '    handle(client, answer, stop, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms)' "a pooled server's own limits"
   # Each thread seals and opens under a key of its own, named as the
   # shared one: a ticket opens only on the worker that sealed it.
   parallel_breaks "workers keeping ticket keys of their own" \
@@ -1943,8 +1965,9 @@ fi
 echo
 echo "== HTTP/2: the server and the client together (bench/http2_exercise.iyi)"
 # h2c with prior knowledge both ways: every shape of body through the
-# windows, gzip, cookies, a redirect, 200 requests on one connection, and
-# what HTTP/2 refuses. Plain and --release.
+# windows, gzip, cookies, a redirect, 200 requests on one connection,
+# what HTTP/2 refuses, and a server's own `max_head` and `max_body`.
+# Plain and --release.
 H2BIN="$WORK/h2"
 h2_built=0
 if ! "$IYI" build -o "$H2BIN" "$REPO/bench/http2_exercise.iyi" >"$WORK/h2.build.log" 2>&1; then
@@ -3791,9 +3814,9 @@ mutate "a client that reads a head for as long as it comes" 'conn.read_head(Serv
 mutate "a server that never says 100 Continue" '    if head.expects
       socket = conn.transport' '    if false
       socket = conn.transport'
-mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, slots)' '          accepted = client
+mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, slots, max_head, max_body)' '          accepted = client
           g.spawn do
-            handle(accepted, handler)
+            handle(accepted, handler, max_head: max_head, max_body: max_body)
             slots.take_now if slots
             0
           end'
@@ -3891,6 +3914,17 @@ mutate "NO_PROXY's CIDR ranges passed over" 'return false if ip && in_range?(ip,
 mutate "an IPv6 range holding IPv4 addresses" '    return false unless mapped?(ip) == mapped?(cut)' ''
 mutate "a NO_PROXY address's port passed over" 'return false if ip && ip == pip && (pport.bytesize == 0 || pport == port)' 'return false if ip && ip == pip'
 mutate "a NO_PROXY domain's port passed over" 'return false if pport.bytesize == 0 || pport == port' 'return false'
+# The caller's limits (issue #213), each place they are used given
+# std/http's own instead: the exercise's server with smaller ones and its
+# `handle` with a larger body limit find the one each copy passes over.
+mutate "a head read to MAX_HEAD whatever the server's max_head" 'got = conn.read_head(max_head, "request", true)' 'got = conn.read_head(MAX_HEAD, "request", true)'
+mutate "a head past its limit served when its end came in the read that passed it" '          return HTTPError.new("#{what} headers past #{limit} bytes", 431) if at - @start > limit
+' ''
+mutate "a Content-Length held to MAX_BODY whatever the server's max_body" 'parsed = parse_head(got, max_body)' 'parsed = parse_head(got)'
+mutate "a chunked body held to MAX_BODY whatever the server's max_body" 'reader = body_reader(conn, head, max_body)' 'reader = body_reader(conn, head, MAX_BODY)'
+mutate "a body read whole to MAX_BODY whatever the server's max_body" 'body = reader.read_all(max_body.to_i64)' 'body = reader.read_all(MAX_BODY.to_i64)'
+mutate "a streaming block's body read to MAX_BODY whatever the server's max_body" '    got = limit < 2147483647_i64 ? @reader.read_all(limit) : @reader.read_all' '    got = @reader.read_all(Server::MAX_BODY.to_i64)'
+mutate "serve's limits not handed to its connections" '          handle(client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, max_head, max_body)' '          handle(client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms)'
 
 # HTTP/2, each mechanism taken out of a copy that compiles: the iyi-to-iyi
 # exercise stops at the check that names it, or the raw frames find the
@@ -4123,11 +4157,20 @@ h2_breaks "a gzip answer left coded" h2_gzip \
       if decoded.is_a?(HTTPError)
         h2.forget(id)' \
   'a gzip answer decoded as it is read'
+h2_breaks "an HTTP/2 head held to std/http's limit, not the server's" h2_max_head \
+  '    h2 = H2Connection.new(conn, true, max_body.to_i64, max_head)' '    h2 = H2Connection.new(conn, true, max_body.to_i64)' \
+  "a head past a server's own limit over HTTP/2"
+h2_breaks "an HTTP/2 body held to std/http's limit, not the server's" h2_max_body \
+  '    h2 = H2Connection.new(conn, true, max_body.to_i64, max_head)' '    h2 = H2Connection.new(conn, true, MAX_BODY.to_i64, max_head)' \
+  "a body past 64 MiB to a server that takes it over HTTP/2"
+h2_breaks "an HTTP/2 body read whole to std/http's limit, not the server's" h2_max_body_read \
+  '        body = req.body_io.read_all(max_body.to_i64)' '        body = req.body_io.read_all(MAX_BODY.to_i64)' \
+  "a body past 64 MiB to a server that takes it over HTTP/2"
 h2_frames_breaks "a request's fields unchecked" h2_fields \
   '      return refuse(id, PROTOCOL_ERROR) if H2Connection.request_flaw(decoded)' '      nil' \
   'a field name in upper case'
 h2_frames_breaks "a header block held whatever its size" h2_flood \
-  '    return fail(ENHANCE_YOUR_CALM, "a header block past #{HEADER_LIST} bytes") if @block.size + piece.bytesize > HEADER_LIST' '    nil' \
+  '    return fail(ENHANCE_YOUR_CALM, "a header block past #{@head_limit} bytes") if @block.size + piece.bytesize > @head_limit' '    nil' \
   'a CONTINUATION flood'
 h2_frames_breaks "the first frame taken whatever it is" h2_first \
   '    if !@settled && (type != SETTINGS || flags & ACK != 0)' '    if false' \
@@ -4304,7 +4347,7 @@ guard_breaks() { # guard_breaks <label> <name> <old> <new> <case> <phrase>
 }
 guard_breaks "a request's body bounded per read alone" guard_body \
   '        conn.deadline_at(whole, "read a request") if whole > 0_i64
-        reader = body_reader(conn, head)' '        reader = body_reader(conn, head)' \
+        reader = body_reader(conn, head, max_body)' '        reader = body_reader(conn, head, max_body)' \
   body "a body a byte at a time"
 guard_breaks "an HTTP/2 body bounded per read alone" guard_h2 \
   '      conn.deadline_at(whole, "read a request") if whole > 0_i64

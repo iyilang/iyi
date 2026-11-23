@@ -3597,7 +3597,7 @@ in_sort && /^      while index < finish$/ {
   n_sort_loop++; at_sort_loop = NR
   print; print "        IyiWorkers.force_turn(1_u64, object_id, start.to_u64, index + 1 < finish)"; next
 }
-in_sort && /^        value = @buffer\[index\]$/ { n_sort_body++; at_sort_body = NR }
+in_sort && /^        value = @buffer\.array_at\(index\)$/ { n_sort_body++; at_sort_body = NR }
 { print }
 END {
   if (n_join_def != 1 || n_join_loop != 1 || n_join_body != 1 || at_join_body != at_join_loop + 1 ||

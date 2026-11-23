@@ -664,11 +664,14 @@ module Iyi
       emit_bind emit_iyimod emit_targets flags frame_pointers iyi_direct_link
       iyi_keep iyi_link_driver_only iyi_prefers_source link_flags mattr mcmodel
       mcpu n_threads no_cleanup no_codegen optimization_mode prelude single_module
+      iyi_cutoff
       static target_machine wants_doc
     )
 
     LOCATION_ONLY = %w(
+      cache_hold
       emit_base_filename iyi_file_overrides iyi_header_root iyi_mod_table
+      iyi_link_template_key
       iyi_project_root program use_iyimod
     )
 

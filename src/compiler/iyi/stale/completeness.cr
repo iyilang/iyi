@@ -24,7 +24,9 @@ module Iyi::Stale
     initialize_const
     initialize_no_init_flag_const
     initialize_simple_const
+    iyi_born_shared?
     iyi_define_all_artifact_const_reads
+    iyi_publish_class_var_store
     iyi_refuse_unreached
     iyi_runtime_def?
     prepare_call_args_non_external
@@ -33,6 +35,16 @@ module Iyi::Stale
     type_cast_exception_call
     visit
   )
+
+  # The location reads the stale key backs by encoding their answer, each with
+  # the `CallPath` predicate that computes it. `check_completeness!` fails the
+  # build unless `TypedEncoder` calls that predicate, so a read listed here
+  # cannot lose its encoding silently.
+  ENCODED_LOCATION_READS = {
+    "iyi_born_shared?"            => "CallPath.std_declared?",
+    "iyi_publish_class_var_store" => "CallPath.prelude_written?",
+    "iyi_runtime_def?"            => "CallPath.runtime_def?",
+  }
 
   ALLOWED_VISIT_MAIN_NORMALIZE_METHODS = %w(
     type_cast_exception_call
@@ -272,6 +284,24 @@ module Iyi::Stale
       {% for allowed in ALLOWED_LOCATION_READ_METHODS %}
         {% unless actual_location_methods.includes?(allowed) %}
           {% raise "Stale entry in ALLOWED_LOCATION_READ_METHODS: " + allowed %}
+        {% end %}
+      {% end %}
+
+      # 2b. Each location read the key backs has a TypedEncoder method that calls
+      # the predicate named for it, so the answer is written into the key.
+      {% for read, encoder in ENCODED_LOCATION_READS %}
+        {% fn = encoder.split(".").last %}
+        {% unless ALLOWED_LOCATION_READ_METHODS.includes?(read) %}
+          {% raise "ENCODED_LOCATION_READS backs " + read + ", which ALLOWED_LOCATION_READ_METHODS does not list" %}
+        {% end %}
+        {% writers = [] of String %}
+        {% for m in Iyi::Stale::TypedEncoder.methods %}
+          {% if m.body.stringify.includes?(fn) %}
+            {% writers << m.name.stringify %}
+          {% end %}
+        {% end %}
+        {% unless writers.size > 0 %}
+          {% raise "The stale key never writes " + encoder + ", which backs CodeGenVisitor#" + read %}
         {% end %}
       {% end %}
 

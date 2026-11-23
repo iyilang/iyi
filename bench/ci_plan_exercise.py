@@ -72,6 +72,11 @@ check("an exercise no step names is still run, through the siblings",
 
 reason, jobs = planned("bench/panics.sh")
 check("a gate a job runs selects that job", "windows-native" in jobs, f"{reason}: {sorted(jobs)}")
+check("and both halves of the samples job, whichever half runs it",
+      {"samples", "samples-surfaces"} <= jobs, f"{reason}: {sorted(jobs)}")
+reason, jobs = planned("bench/lsp_soak.py")
+check("the other half's gate selects both halves too",
+      {"samples", "samples-surfaces"} <= jobs, f"{reason}: {sorted(jobs)}")
 
 # Split the names so this planner test does not claim to run the files.
 for name in ("wasm_browser", "wasm_node", "wasm_freestanding_exercise"):

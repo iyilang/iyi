@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/iyilang/iyi/master/install.sh | sh
 #
 # IYI_PREFIX       where to unpack, default ~/.local; the tarball is relocatable
-# IYI_VERSION      a release to pin, e.g. 0.21.0; default is the latest release
+# IYI_VERSION      a release to pin, e.g. 0.22.0; default is the latest release
 # IYI_RELEASE_URL  where the release's files are, default the GitHub release;
 #                  an https:// URL, or a directory (file://), which is what CI
 #                  points it at to install a tarball before it is released and

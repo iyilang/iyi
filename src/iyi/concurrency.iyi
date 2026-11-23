@@ -6463,6 +6463,26 @@ class IyiWorkers
   # that only this worker may run, or something waits and no worker is
   # idle to take it. A task of no unit - a thread outside the pool's, or
   # the worker's own - never does, nor one woken onto its home only.
+  #
+  # What waits with no worker idle also starts one more (`wake_one`,
+  # `grow`): the pool grows while a task waits and none is idle (SPEC.md
+  # III.4.15, part 6), and a turn alone only trades the waiting task for
+  # this one. Nothing else called for that start. The last worker was
+  # called for by the one before it, when its find left work waiting
+  # (`stop_spinning`), and a task half through its give-up - off its
+  # worker, not yet in the preempted queue - is not seen waiting: a find
+  # that took the last task seen called nobody, and the tasks then took
+  # turns on the workers at every tick with none started.
+  # bench/concurrent_mark.iyi's idle pool step, ten tasks spinning until
+  # the pool had launched ten workers, read "9 of 10 workers waiting"
+  # after 2 s of turns: on macOS 26.6, Apple M2 Pro, 10 cores (the
+  # project's Mac), beside two other CI jobs (job 134651603579) and in 1 of
+  # 150 release runs beside 20 busy loops, 756 give-ups in the 2 s. With
+  # each give-up held 3 ms between its take and its queue, 9 of 12 runs
+  # beside 24 busy loops on Linux (12 vCPU) stopped at 9 to 11 workers of
+  # 12; with this start, none of 26 so. bench/concurrent_mark.sh holds it
+  # on a copy in which no find calls the next worker, so the turns alone
+  # grow the pool.
   private def self.turn_wanted?(st : IyiSchedulerState, fiber : IyiFiber) : Bool
     return false unless fiber.unit.is_a?(IyiUnit) && !fiber.homebound
     return true unless st.run_head.is_a?(Nil)
@@ -6470,7 +6490,9 @@ class IyiWorkers
       wake_one if work_waiting?
       return false
     end
-    work_waiting?
+    return false unless work_waiting?
+    wake_one
+    true
   end
 
   # The task gives worker *st* up: the worker takes the next fiber as a

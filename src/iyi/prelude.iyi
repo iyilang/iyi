@@ -3667,9 +3667,9 @@ require "./file"
       # copy that records every chunk's owner and every change to the
       # listed pages caught a refill handing out a chunk of a page still
       # listed in 4 runs of 237 on macOS 26.6, Apple M2 Pro, 10 cores (the
-      # user's machine) and 6 of 353 on this Linux machine, 12 vCPUs held
+      # user's machine) and 6 of 354 on this Linux machine, 12 vCPUs held
       # to two and four, each after a refill had cleared a page its slice
-      # had not yet counted; counted first, it caught none in 187 and 399.
+      # had not yet counted; counted first, it caught none in 235 and 405.
       def self.list_pages(arena : UInt64, low : UInt64, high : UInt64) : Nil
         Pointer(Atomic(UInt64)).new(arena + OFF_LISTED).value.add((high - low).unsafe_shr(PAGE_SHIFT))
         set_listed(arena, low, high, true)

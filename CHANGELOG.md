@@ -60,17 +60,17 @@
   records every chunk's owner and every change to the listed pages
   caught a refill handing out a chunk of a page still listed in 4 of 237
   runs of 20 s on macOS 26.6, Apple M2 Pro, 10 cores (the user's
-  machine) and 6 of 353 on this Linux machine, 12 vCPUs held to two and
+  machine) and 6 of 354 on this Linux machine, 12 vCPUs held to two and
   four, each after a refill had cleared a page its slice had not yet
   counted. The count is raised first now, so it is never below the
-  bitmap; the same copy caught none in 187 and 399 runs.
+  bitmap; the same copy caught none in 235 and 405 runs.
 - **A run a sweep slice in flight cuts short is cut on the chunk grid.**
   `IyiHeap.take_run` bounds a warm or cold run below the word of the
   slice's cursor, and cut there a chunk longer than a page, taken last,
   reached over idle pages of the rest - which the idle trim and the sweep
   hand back keeping a run's first page only - and into pages the slice
   may hand back. The copy above caught the trim handing back two pages
-  under a live 20,480-byte chunk on Linux's 4 KB pages (1 of 353 runs).
+  under a live 20,480-byte chunk on Linux's 4 KB pages (1 of 354 runs).
   The cut is now at the last page a chunk begins on, as a run cut at a
   slab's worth is.
 

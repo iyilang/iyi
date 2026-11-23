@@ -1085,11 +1085,11 @@ pause's count audit passed; the pause made the pages idle, and the next
 refill threaded their chunks a second time - the trim stress's residual
 (about one 20 s run in fifty, PR #242). A copy recording every chunk's
 owner and every change to the listed pages caught it in 4 of 237 runs
-on macOS 26.6 and 6 of 353 on Linux, each after a refill had cleared a
+on macOS 26.6 and 6 of 354 on Linux, each after a refill had cleared a
 page its slice had not yet counted. `IyiHeap.list_pages` now raises the
 count first, so the count is never below the bitmap and a refill that
-reads 0 has nothing of its own listed; the copy caught none in 187 and
-399. The gate's widened copies hold that window open as well, end the
+reads 0 has nothing of its own listed; the copy caught none in 235 and
+405. The gate's widened copies hold that window open as well, end the
 program where a refill counts off a page its slice has not counted, and
 audit at every pause that a listed page's chunks are all free. And a run
 a sweep slice in flight cuts short (`IyiHeap.take_run`) was cut at the

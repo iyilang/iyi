@@ -32,9 +32,9 @@
   a chunk handed out there ends the program in the pause: read at the
   trimmer's next look, as before, a block could read wrong first (a copy
   that unlists nothing did so once on macOS). The fix, widened, met the
-  window 1,357-2,420 times a run; the count raised after the bits fails
+  window 1,357-8,579 times a run; the count raised after the bits fails
   at the window's first meeting and a refill that unlists nothing at the
-  first pause, on run 1 in every gate run (two on this Linux machine,
+  first pause, on run 1 in every gate run (three on this Linux machine,
   12 vCPUs, one on macOS 26.6, Apple M2 Pro, 10 cores, the user's
   machine).
 - **Check 10b (`cap:`) replays a warm run taken below a sweep slice's

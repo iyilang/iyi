@@ -11914,7 +11914,8 @@ were added to the lexer with no regressions: `trailing`,
 `impl` was in use as a local variable in two compiler tool files, which had to be
 renamed. Every keyword iyi adds is a name taken away from every program; the
 count should stay small. `using`, the keyword `import X::{...}` replaced, is
-still lexed, so the parser can refuse it with the line that replaces it.
+still lexed in a `.iyi` file, so the parser can refuse it with the line that
+replaces it. In a `.cr` file it is an ordinary name, as in Crystal.
 
 ### IV.5 Versioning
 

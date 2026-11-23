@@ -177,6 +177,13 @@
   "does not ship the body" reads the artifact's symbols back unescaped the
   same way.
 
+### Fixed
+
+- **`using` is a name again in a `.cr` file.** It was lexed as a keyword in
+  every file, so Crystal code with a parameter or local named `using` (as in
+  Marten and db) failed with `can't import inside def`. It is now a keyword
+  only in a `.iyi` file, where the refusal is unchanged.
+
 ## 0.22.0 — 2026-11-22
 
 **A string's hash is keyed afresh in every process, std/http holds a request

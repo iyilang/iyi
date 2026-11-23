@@ -798,9 +798,10 @@ describe Iyi::IyiMod do
 
   # The only example here that compiles a real program, and the one thing the
   # container specs above cannot check: that the name a unit is filed under is
-  # the name codegen gave it. Codegen emits one object file per owner type and
-  # names it after that type; an artifact that agreed on the bytes and not on
-  # the name would carry machine code nobody could match to a declaration.
+  # the name codegen gave it. A build writing artifacts emits one object file
+  # per module, holding every type the module declares, and names it after the
+  # module; an artifact that agreed on the bytes and not on the name would
+  # carry machine code nobody could match to a declaration.
   it "carries the object code of a module's own type" do
     with_tempdir("iyimod_object_code") do
       Dir.mkdir_p "app"
@@ -2125,7 +2126,11 @@ describe Iyi::IyiMod do
       artifact = Iyi::IyiMod.read(File.join("mods", "app", "greeter.iyimod"),
         want_object_code: true)
       artifact.mono_bodies.should be_empty
-      artifact.object_code.map(&.name).should contain "App::Greeter::Greeter"
+      # In the module's unit, which holds every type the module declares.
+      artifact.object_code.map(&.name).should eq ["App::Greeter"]
+      # Windows escapes a symbol's punctuation as `.XX.`; read it back.
+      symbols = artifact.symbols.map(&.gsub(/\.([0-9A-F]{2})\./) { $1.to_i(16).chr.to_s })
+      symbols.should contain "*App::Greeter::Greeter#hello:String"
 
       File.delete "app/greeter.iyi"
 

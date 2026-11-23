@@ -31,7 +31,10 @@
 #      `mod dump` prints it, and an unmarked importer that instantiates its
 #      generic - whose body travels and is typed again in the importer -
 #      builds against the artifact with the source gone. Its broken copy,
-#      the producer unmarked, is refused naming the producer.
+#      the producer unmarked, is refused naming the producer. A marked
+#      module's `lib` global, stored and read by a generic whose body
+#      travels, is declared on the far side too (#204): the importer builds
+#      against the artifact with the source gone and prints what it stored.
 #   6. A program that faults in its own marked module is told so: the
 #      memory-fault message names the module.
 #   7. `--crystal` and `.cr` files are unaffected: a `.cr` program that
@@ -405,6 +408,60 @@ if ! tr '\\' '/' < plain.log | grep -qF '`raw/cell` is not marked unsafe'; then
   echo "the unmarked producer was refused, but not naming it:"; cat plain.log; exit 1
 fi
 echo "  refused:  raw/cell unmarked: $(grep -m1 '^Error: ' plain.log | cut -c8-120)..."
+
+# The consumer compiles a travelling body, so it needs a `lib` global's
+# `$daylight` line the way it needs a `fun`'s: without it the importer said
+# `undefined fun 'daylight=' for Raw::Zone::LibZone` (#204). Windows builds
+# the front end only, which is where the importer resolved it: its CRT's
+# `_daylight` is no data symbol a program can import (`__imp__daylight` is
+# unresolved at the link, tssh). The other platforms run the program.
+step "a marked module's lib global travels with the generic that reads it"
+cat > raw/zone.iyi <<'IYI'
+@[Unsafe("a zone stores into the C library's daylight flag")]
+module raw/zone
+
+{% if flag?(:win32) %}
+  lib LibZone
+    $daylight = _daylight : Int32
+  end
+{% else %}
+  lib LibZone
+    $daylight : Int32
+  end
+{% end %}
+
+pub struct Zone
+  def self.store(value : T) : Int32 forall T
+    LibZone.daylight = value.to_i32
+    LibZone.daylight
+  end
+end
+IYI
+cat > zone_main.iyi <<'IYI'
+import raw/zone::{Zone}
+
+puts Zone.store(7_u8)
+IYI
+codegen=""
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) codegen="--no-codegen" ;;
+esac
+if ! "$IYI" build $codegen --emit-iyimod mods_zone -o zone1 zone_main.iyi > zone_emit.log 2>&1; then
+  echo "the module reading a lib global does not build:"; cat zone_emit.log; exit 1
+fi
+mv raw/zone.iyi zone.iyi.kept
+if ! "$IYI" build $codegen --use-iyimod mods_zone -o zone2 zone_main.iyi > zone_use.log 2>&1; then
+  echo "the importer does not build against the artifact of a module reading a lib global:"; cat zone_use.log; exit 1
+fi
+if [ -z "$codegen" ]; then
+  said="$(./zone2 2>&1 | tr -d '\r')"
+  if [ "$said" != "7" ]; then
+    echo "the importer built against the zone artifact printed \"$said\""; exit 1
+  fi
+  echo "  built:    zone_main.iyi against mods_zone/raw/zone.iyimod, source gone: $said"
+else
+  echo "  built:    zone_main.iyi's front end against mods_zone/raw/zone.iyimod, source gone"
+fi
 unset IYI_PATH
 cd "$WORK" || exit 1
 

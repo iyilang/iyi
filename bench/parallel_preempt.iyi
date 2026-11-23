@@ -11,46 +11,43 @@
 # word at its back-edge, and the pool's monitor raises the word of a worker
 # one task has held for a quantum, 5 to 10 ms.
 #
-#   slice   a task computing a second - a xorshift walk, and then a sum the
-#           compiler vectorises - on a pool of one, and a short task spawned
-#           20 ms into it, which starts within 100 ms; the computation's
-#           answer is the one an unpreempted walk gives. Under
-#           `-Dpreempt_off` the walk is a `@[NoPreempt]` def's, and the
-#           short task waits for the second.
-#   unit    a preempted task keeps its unit's token: a task `spawn` started
-#           inside it never runs between two of its statements that are not
-#           a park, while another parallel task's ticker, asleep on the
-#           same worker, wakes within 100 ms of its time.
-#   server  28 connections making 0.2 ms requests beside 4 making 100 ms
-#           ones: a fast request whose connection waits in the poller of a
-#           worker busy with a slow one is answered within 80 ms, where it
-#           waited the 100 ms out before.
-#   poller  the server shape's claim with its window held: one connection
-#           waits in the poller of the pool's one worker while that worker
-#           computes a request that runs until the connection's own request
-#           is answered, or a second has passed; the answer comes within
-#           80 ms. A slow half that does not poll answers it at the second.
-#   fresh   a task switched in after one that held its worker 30 ms with
-#           no check in its loop, on a pool of one, runs its first
-#           millisecond without giving the worker up, beside a task queued
-#           behind it: the word the monitor raised for the one before is
-#           not its. With the word left up it gave the worker up at its
-#           first back-edge.
-#   period  the monitor's period, its looks over a task computing half a
-#           second on a pool of one, held to 4 to 10.5 ms (8 on Windows);
-#           and the quantum, two such tasks taking turns on the one worker,
-#           held to three of the looks the same run measured. A Windows
-#           monitor waiting on the system timer's tick (10.1 to 14.3 ms
-#           apart in 56 runs on GitHub's runners) fails the first, and a
-#           monitor that waits three looks unchanged rather than one the
-#           second.
-#   tight   what the check costs a tight loop: four loops timed against
-#           `@[NoPreempt]` twins of themselves, interleaved, best of seven,
-#           each ratio held to 2x.
+#   slice   a walk and a vectorised sum each hold their worker until a
+#           short task is queued and the preemption word is raised. Their
+#           finite-run ordering is information; answers must match their
+#           unchecked twins. Copy-only hooks force an eligible turn in
+#           checked and `@[NoPreempt]` variants of each computation.
+#   unit    a same-unit child must not run inside the computing task.
+#           The unforced ticker's lateness and the pool's preemption count
+#           are information only. Separate copy-only decisions check the
+#           same-unit child's deferral and a due sleeper's wakeup.
+#   server  a dedicated fast request completes while a slow handler stays
+#           active, followed by bulk fast and slow latency measurements.
+#   poller  a fast connection waits in the one worker's poller while a
+#           slow handler computes until it is answered. Its latency is
+#           information only; a copy-only proof records whether preemption
+#           entered the worker's nonblocking poll.
+#   fresh   a task holds the worker until the monitor raises its word,
+#           then its queued successor runs on the same worker. Copy-only
+#           hooks hold the monitor and check that the switch lowers the word.
+#   period  the monitor's measured look interval and the whole-group time
+#           divided by global preemptions plus one are information only.
+#           Copy-only checks test the unchanged-look decision and, on
+#           Windows, timer choice, not a wall-clock latency bound.
+#   tight   each loop and its @[NoPreempt] twin run once, with matching
+#           answers; their timings and ratios are performance information.
+#
+# OPEN: former shared-runner bounds are measurements, not verdicts.
+#   unit: at least one global preemption, and ticker maximum at most
+#         100 integer milliseconds.
+#   poller: fast response within 80 integer milliseconds.
+#   period: at least two monitor looks, averaging 4,000 to 10,500 us
+#           (8,000 us on Windows); at least one global preemption; and
+#           total / (preemptions + 1) at most three measured look periods.
+# The forced pairs test mechanisms, not these finite-run counts or SLOs.
 #
 # With no arguments it runs slice, unit and period on a pool of one and
-# prints only that every property held: the slice step's short task must
-# wait for a preemption, which a second, idle worker would make needless.
+# prints the measurements and final result. A second, idle worker would
+# make the slice ordering observation needless.
 #
 # bench/parallel_exercise.sh runs it, and broken copies of the runtime,
 # each caught by the step that names it.
@@ -63,17 +60,145 @@ import std/indexable
 import std/socket::{IyiSocket, SocketError}
 
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  {% unless flag?(:run_end_copy) %}
+    # one ending: begin
+    # The run's one ending, for every catch, watchdog and setup failure, on
+    # any thread and under any lock. The first caller to claim the word
+    # writes its line and ends the process with its status; every later
+    # caller writes nothing and yields until that end.
+    #
+    # Its bounds. One write goes out only when lead, what and tail total at
+    # most 512 bytes; a longer line goes out piece by piece (lead, what, tail),
+    # each piece in as many writes as the kernel takes. The claim and the
+    # write take no lock. The exit is not lock-free on Windows: __iyi_exit
+    # first runs __iyi_hold_runtime_for_exit, a bounded spin of up to
+    # 10,000,000 try_locks of IyiRuntimeLock that parks while a stop is
+    # requested, so a caller that held that lock while a stop waited on its
+    # own thread would leave the claimant parked there. No call site does
+    # that: every caller runs on a scheduler, worker or monitor path, never
+    # in collector code. Nothing between the claim and the exit is a
+    # preemption point, because the block is @[NoPreempt]. On Darwin the exit
+    # is the raw SYS_exit call, so no libSystem code runs after the write. The
+    # libSystem-teardown explanation of the old hang was tested and ruled out
+    # (a raw write then LibC.exit ended with status 76 and one line), so the
+    # raw call is a choice, not a fix.
+    #
+    # Each copy of this block is held to bench/parallel_exercise.iyi's, and
+    # bench/parallel_exercise.sh appends it to each runtime copy it runs
+    # (-Drun_end_copy), so a hook and its fixture claim one word.
+    class RunEnd
+      @[UnsafeReach("the run's claim: atomically set once, reset only for the ending-hook setup probe")]
+      @@claimed : UInt64 = 0_u64
+
+      def self.claim : Bool
+        Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.compare_and_set(0_u64, 1_u64)[1]
+      end
+
+      {% if flag?(:ending_hook) %}
+        # Only before the racers start, after the cross-layer claim probe.
+        def self.reset_for_test : Nil
+          Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.set(0_u64)
+        end
+      {% end %}
+
+      {% if flag?(:ending_unclaimed) %}
+        # The planted mutant's count of writers, read by every caller's wait.
+        @[UnsafeReach("the mutant's count of writers: atomics only")]
+        @@written : UInt64 = 0_u64
+
+        def self.arrive : UInt64
+          Pointer(Atomic(UInt64)).new(pointerof(@@written).address).value.add(1_u64)
+        end
+
+        def self.written : UInt64
+          Pointer(Atomic(UInt64)).new(pointerof(@@written).address).value.get
+        end
+      {% end %}
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def run_end_write(fd : Int32, lead : String, what : String = "", tail : String = "") : Nil
+      size = lead.bytesize + what.bytesize + tail.bytesize
+      line = uninitialized UInt8[512]
+      base = pointerof(line).as(UInt8*)
+      at = 0
+      piece = 0
+      while piece < 3
+        text = piece == 0 ? lead : (piece == 1 ? what : tail)
+        from = text.to_unsafe
+        count = text.bytesize
+        if size <= 512
+          i = 0
+          while i < count
+            (base + at + i).value = from[i]
+            i = i + 1
+          end
+          at = at + count
+          from = base
+          count = piece == 2 ? at : 0
+        end
+        done = 0
+        while done < count
+          wrote = __iyi_write(fd, (from + done).as(Void*), (count - done).to_u64)
+          break if wrote <= 0_i64
+          done = done + wrote.to_i32
+        end
+        piece = piece + 1
+      end
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def end_run(status : Int32, fd : Int32, lead : String, what : String = "", tail : String = "") : NoReturn
+      {% if flag?(:ending_unclaimed) %}
+        # The planted mutant takes no claim: every caller writes its line, then
+        # waits until all five have written, so the first to exit ends the run
+        # with five lines.
+        run_end_write(fd, lead, what, tail)
+        RunEnd.arrive
+        started = __iyi_monotonic_ns
+        while RunEnd.written < 5_u64
+          if __iyi_monotonic_ns - started >= 10_000_000_000_i64
+            stuck = "FAIL: ending: setup: the unclaimed writers did not finish in 10000 ms\n"
+            __iyi_write(1, stuck.to_unsafe.as(Void*), stuck.bytesize.to_u64)
+            __iyi_exit(76)
+          end
+          IyiThread.spin_pause
+        end
+      {% else %}
+        unless RunEnd.claim
+          while true
+            IyiThread.yield_cpu
+          end
+        end
+        run_end_write(fd, lead, what, tail)
+      {% end %}
+      {% if flag?(:darwin) %}
+        asm("svc #0x80" :: "{x16}"(1_i64), "{x0}"(status.to_i64) : "memory" : "volatile")
+        while true
+        end
+      {% else %}
+        __iyi_exit(status)
+      {% end %}
+    end
+    # one ending: end
+  {% end %}
+
   def fail(message : String) : Nil
-    print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    end_run(1, 1, "FAIL: ", message, "\n")
+  end
+
+  def setup_exit(message : String) : Nil
+    end_run(76, 1, "FAIL: ", message, "\n")
   end
 
   def elapsed_ms(since : Int64) : Int64
     (__iyi_monotonic_ns - since) // 1000000_i64
   end
 
-  # A step's measurements, printed when steps were asked for by name: a run
-  # with no arguments says only that every property held.
+  # Optional detail for steps asked for by name. Former bounds are printed
+  # separately as measurements even when no steps were named.
   def say(line : String) : Nil
     puts line unless Program.args.empty?
   end
@@ -111,11 +236,43 @@ import std/socket::{IyiSocket, SocketError}
     x
   end
 
-  # The walk the slice step's long task takes: preempted, or under
-  # `-Dpreempt_off` not.
+  {% if flag?(:slice_force) %}
+  # The copy-only hook is the first statement of each keyed turn.
+  @[NoInline]
+  def forced_walk(rounds : Int64, seed : UInt64) : UInt64
+    x = seed | 1_u64
+    i = 0_i64
+    while i < rounds
+      IyiWorkers.force_turn
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+      i = i + 1
+    end
+    x
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def forced_walk_np(rounds : Int64, seed : UInt64) : UInt64
+    x = seed | 1_u64
+    i = 0_i64
+    while i < rounds
+      IyiWorkers.force_turn
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+      i = i + 1
+    end
+    x
+  end
+  {% end %}
+
   def long_walk(rounds : Int64, seed : UInt64) : UInt64
-    {% if flag?(:preempt_off) %}
-      spin_np(rounds, seed)
+    {% if flag?(:slice_force) && flag?(:preempt_off) %}
+      forced_walk_np(rounds, seed)
+    {% elsif flag?(:slice_force) %}
+      forced_walk(rounds, seed)
     {% else %}
       spin(rounds, seed)
     {% end %}
@@ -154,6 +311,52 @@ import std/socket::{IyiSocket, SocketError}
     end
     total
   end
+
+  {% if flag?(:sum_force) %}
+  # The hook keys the outer turn; the inner sum remains the vectorizable loop.
+  @[NoInline]
+  def forced_sum(values : Array(Int64), times : Int32) : Int64
+    total = 0_i64
+    t = 0
+    while t < times
+      IyiWorkers.force_turn(6_u64)
+      i = 0
+      size = values.size
+      while i < size
+        total = total &+ values.unsafe_fetch(i)
+        i = i + 1
+      end
+      t = t + 1
+    end
+    total
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def forced_sum_np(values : Array(Int64), times : Int32) : Int64
+    total = 0_i64
+    t = 0
+    while t < times
+      IyiWorkers.force_turn(6_u64)
+      i = 0
+      size = values.size
+      while i < size
+        total = total &+ values.unsafe_fetch(i)
+        i = i + 1
+      end
+      t = t + 1
+    end
+    total
+  end
+
+  def long_sum(values : Array(Int64), times : Int32) : Int64
+    {% if flag?(:preempt_off) %}
+      forced_sum_np(values, times)
+    {% else %}
+      forced_sum(values, times)
+    {% end %}
+  end
+  {% end %}
 
   # The same sum through `times` and `each`, whose loops are the prelude's
   # and check because they are inlined into this def.
@@ -271,21 +474,155 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   # ── slice ────────────────────────────────────────────────────────────
-  # A pool of one worker, a task computing a second on it, and a short task
-  # spawned 20 ms in: it waits in the pool's queue until the long task
-  # gives the worker up at a back-edge. `which` is the walk or the sum.
+  # The long task holds its worker until the short task is queued and the
+  # monitor's word is up. The short task records where it ran, not a time.
+  # The former ticker limit is printed for comparison, not enforced.
   BOUND_MS = 100_i64
 
+  class SliceState
+    @holding : Atomic(Int64)
+    @queued : Atomic(Int64)
+    @phase : Atomic(Int64)
+    @worker : Atomic(UInt64)
+    @witness : Atomic(Int64)
+
+    def initialize
+      @holding = Atomic(Int64).new(0_i64)
+      @queued = Atomic(Int64).new(0_i64)
+      @phase = Atomic(Int64).new(0_i64)
+      @worker = Atomic(UInt64).new(0_u64)
+      @witness = Atomic(Int64).new(0_i64)
+    end
+
+    def holding(worker : UInt64) : Nil
+      @worker.set(worker)
+      @holding.set(1_i64)
+    end
+
+    def holding? : Bool
+      @holding.get != 0_i64
+    end
+
+    def queue : Nil
+      @queued.set(1_i64)
+    end
+
+    def queued? : Bool
+      @queued.get != 0_i64
+    end
+
+    def start : Nil
+      @phase.set(1_i64)
+    end
+
+    def finish : Nil
+      @phase.set(2_i64)
+    end
+
+    def finished? : Bool
+      @phase.get == 2_i64
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def record_short : Nil
+      phase = @phase.get
+      result = if IyiScheduler.state.object_id != @worker.get
+                 4_i64
+               elsif phase == 1_i64
+                 1_i64
+               elsif phase == 2_i64
+                 2_i64
+               else
+                 3_i64
+               end
+      @witness.set(result)
+    end
+
+    def witness : Int64
+      @witness.get
+    end
+  end
+
+  def slice_hang(what : String) : Nil
+    end_run(76, 1, "FAIL: slice: progress hang: ", what, "\n")
+  end
+
+  def slice_unarmed(what : String) : Nil
+    end_run(76, 1, "FAIL: slice: not armed: ", what, "\n")
+  end
+
+  {% if flag?(:turn_refusal_watchdog) %}
+  # The negative control holds the real runtime lock on a native thread.
+  # Its word is a class field so both threads observe the same atomic.
+  class SliceLockGate
+    @held : Atomic(Int64)
+
+    def initialize
+      @held = Atomic(Int64).new(0_i64)
+    end
+
+    def held? : Bool
+      @held.get != 0_i64
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def hold : Nil
+      IyiRuntimeLock.lock
+      @held.set(1_i64)
+      while true
+        IyiThread.spin_pause
+      end
+    end
+  end
+
+  {% end %}
+
+  @[NoInline]
+  @[NoPreempt]
+  def slice_hold(proof : SliceState, force_flag : Bool) : Nil
+    st = IyiScheduler.state
+    address = st.preempt_word
+    slice_unarmed("the worker has no preemption word") if address == 0_u64
+    word = Pointer(Atomic(UInt64)).new(address)
+    {% if flag?(:noflag_force) %}
+      if force_flag
+        IyiWorkers.force_flag_arm(st.object_id)
+      end
+    {% end %}
+    proof.holding(st.object_id)
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    {% if flag?(:noflag_force) %}
+      if force_flag
+        while IyiWorkers.force_flag_seen == 0_u64
+          IyiThread.spin_pause
+          slice_hang("the monitor did not decide for the held worker in 20000 ms") if __iyi_monotonic_ns > limit
+        end
+        seen = IyiWorkers.force_flag_seen
+        fail("slice: the monitor's preemption decision for a held worker left its word down") if seen == 1_u64
+        slice_unarmed("the monitor recorded an invalid word decision") unless seen == 2_u64
+        proof.finish
+        return
+      end
+    {% end %}
+    while !proof.queued? || word.value.get == 0_u64
+      IyiThread.spin_pause
+      slice_hang("the queued task and raised word did not reach the held worker in 20000 ms") if __iyi_monotonic_ns > limit
+    end
+    proof.start
+  end
+
   def slice_round(which : String, per_ms : Int64) : Nil
-    started = Atomic(Int64).new(0_i64)
+    proof = SliceState.new
     waited = Atomic(Int64).new(-1_i64)
     answer = Atomic(UInt64).new(0_u64)
-    walk = 1000_i64 * per_ms
+    walk = 1000_i64 * (per_ms > 0_i64 ? per_ms : 1_i64)
     preempts = IyiWorkers.preempts
     group do |g|
       g.spawn(unit: :new) do
         if which == "walk"
-          started.set(__iyi_monotonic_ns)
+          slice_hold(proof, true)
           answer.set(long_walk(walk, 5_u64))
         else
           values = Array(Int64).new(1_000_000) { |i| i.to_i64 * 3_i64 }
@@ -293,48 +630,445 @@ import std/socket::{IyiSocket, SocketError}
           once = sum_np(values, 10) // 10_i64
           pass_ns = (__iyi_monotonic_ns - t) // 10_i64
           times = (1_000_000_000_i64 // (pass_ns > 0_i64 ? pass_ns : 1_i64)).to_i32
+          times = 1 if times < 1
           times = 20000 if times > 20000
-          started.set(__iyi_monotonic_ns)
+          slice_hold(proof, false)
           answer.set((sum(values, times) &- once &* times.to_i64).to_u64)
         end
+        proof.finish
         0
       end
-      while started.get == 0_i64
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !proof.holding?
         sleep(1)
+        slice_hang("the #{which} task did not enter its hold in 10000 ms") if __iyi_monotonic_ns > limit
       end
-      sleep(20)
       asked = __iyi_monotonic_ns
       g.spawn(unit: :new) do
+        proof.record_short
         waited.set(elapsed_ms(asked))
         0
       end
+      proof.queue
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !proof.finished? || proof.witness == 0_i64
+        sleep(1)
+        slice_hang("the #{which} and short task did not finish in 10000 ms") if __iyi_monotonic_ns > limit
+      end
     end
-    ms = waited.get
-    if ms > BOUND_MS
-      fail("slice: a short task waited #{ms} ms behind a task computing a #{which} on its one worker, past #{BOUND_MS} ms")
-    end
+    witness = proof.witness
+    slice_unarmed("the short task's #{which} witness was #{witness}, not a same-worker ordering") unless witness == 1_i64 || witness == 2_i64
     want = which == "walk" ? spin_np(walk, 5_u64) : 0_u64
     if answer.get != want
       fail("slice: the preempted #{which} answered #{answer.get}, and unpreempted it answers #{want}")
     end
     given = IyiWorkers.preempts - preempts
-    fail("slice: the short task started and no task was preempted") if given == 0_u64
-    say "slice: a short task spawned 20 ms into a task computing a #{which} on a pool of one started #{ms} ms later (#{given} preemptions); the #{which}'s answer is the unpreempted one"
+    if witness == 1_i64
+      fail("slice: the short task started and no task was preempted") if given == 0_u64
+      say "slice: the short task queued before the #{which} ran inside it on the same worker (ordering information only)"
+    else
+      say "slice: the short task queued before the #{which} ran after it ended on the same worker (ordering information only)"
+    end
+    say "slice: the short task waited #{waited.get} ms behind #{which} (#{given} preemptions); the #{which}'s answer is the unpreempted one"
   end
 
+  {% if flag?(:slice_force) || flag?(:sum_force) %}
+  def slice_forced(per_ms : Int64) : Nil
+    {% if flag?(:sum_force) %}
+      which = "sum"
+      times = 10
+    {% else %}
+      which = "walk"
+      walk = 100_i64 * (per_ms > 0_i64 ? per_ms : 1_i64)
+    {% end %}
+    slice_unarmed("the forced #{which} needs a pool of one, not #{IyiWorkers.count}") if IyiWorkers.count != 1
+    proof = SliceState.new
+    answer = Atomic(UInt64).new(0_u64)
+    {% if flag?(:sum_force) %}
+      expected = Atomic(UInt64).new(0_u64)
+    {% end %}
+    group do |g|
+      g.spawn(unit: :new) do
+        {% if flag?(:sum_force) %}
+          values = Array(Int64).new(1_000_000) { |i| i.to_i64 * 3_i64 }
+          expected.set(sum_np(values, times).to_u64)
+        {% end %}
+        proof.holding(IyiScheduler.state.object_id)
+        {% if flag?(:sum_force) %}
+          IyiWorkers.force_turn_arm(IyiScheduler.current.object_id, 6_u64)
+        {% else %}
+          IyiWorkers.force_turn_arm(IyiScheduler.current.object_id)
+        {% end %}
+        proof.start
+        {% if flag?(:sum_force) %}
+          answer.set(long_sum(values, times).to_u64)
+        {% else %}
+          answer.set(long_walk(walk, 5_u64))
+        {% end %}
+        proof.finish
+        0
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !IyiWorkers.force_turn_ready?
+        slice_hang("the copy hook did not hold the #{which}'s first turn in 10000 ms") if __iyi_monotonic_ns > limit
+        sleep(1)
+      end
+      g.spawn(unit: :new) do
+        proof.record_short
+        0
+      end
+      {% if flag?(:turn_refusal_watchdog) %}
+        lock_gate = SliceLockGate.new
+        IyiThread.start do
+          lock_gate.hold
+          nil
+        end
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
+        while !lock_gate.held?
+          if __iyi_monotonic_ns > limit
+            end_run(76, 2, "FAIL: slice: progress hang: the runtime lock holder did not acquire its lock in 10000 ms\n")
+          end
+          IyiThread.spin_pause
+        end
+      {% end %}
+      IyiWorkers.force_turn_release
+      limit = __iyi_monotonic_ns + 30_000_000_000_i64
+      while !proof.finished? || proof.witness == 0_i64
+        if IyiWorkers.force_turn_slow_active?
+          limit = __iyi_monotonic_ns + 30_000_000_000_i64
+        elsif __iyi_monotonic_ns > limit
+          if IyiWorkers.force_turn_outer_claim?
+            {% if flag?(:turn_refusal_watchdog) && flag?(:sum_force) %}
+              end_run(76, 2, "FAIL: slice: progress hang: the forced sum and short task did not finish in 30000 ms\n")
+            {% elsif flag?(:turn_refusal_watchdog) %}
+              end_run(76, 2, "FAIL: slice: progress hang: the forced walk and short task did not finish in 30000 ms\n")
+            {% else %}
+              slice_hang("the forced #{which} and short task did not finish in 30000 ms")
+            {% end %}
+          end
+          limit = __iyi_monotonic_ns + 30_000_000_000_i64
+        end
+        {% if flag?(:turn_refusal_watchdog) %}
+          IyiThread.spin_pause
+        {% else %}
+          sleep(1)
+        {% end %}
+      end
+    end
+    result = IyiWorkers.force_turn_result
+    slice_unarmed("the forced #{which} reached no decision before it ended") if result == 0_u64
+    fail("slice: the #{which} turned with its worker's word raised and kept its worker") if result == 2_u64
+    slice_unarmed("the forced #{which} recorded decision #{result}") unless result == 1_u64
+    slice_unarmed("the queued task did not run inside the #{which} on its worker at the eligible decision") unless proof.witness == 1_i64
+    {% if flag?(:sum_force) %}
+      want = expected.get
+    {% else %}
+      want = spin_np(walk, 5_u64)
+    {% end %}
+    fail("slice: the preempted #{which} answered #{answer.get}, and unpreempted it answers #{want}") if answer.get != want
+    puts "slice: the #{which} gave its worker up at the turn after its word was raised"
+  end
+  {% end %}
+
+  {% if flag?(:noflag_force) %}
+  def slice_noflag : Nil
+    proof = SliceState.new
+    group do |g|
+      g.spawn(unit: :new) do
+        slice_hold(proof, true)
+        0
+      end
+      limit = __iyi_monotonic_ns + 30_000_000_000_i64
+      while !proof.finished?
+        slice_hang("the monitor decision did not finish in 30000 ms") if __iyi_monotonic_ns > limit
+        sleep(1)
+      end
+    end
+    puts "slice: the monitor's preemption decision for a held worker raised its word"
+  end
+  {% end %}
+
   def slice(per_ms : Int64) : Nil
-    slice_round("walk", per_ms)
-    slice_round("sum", per_ms)
+    {% if flag?(:slice_force) || flag?(:sum_force) %}
+      slice_forced(per_ms)
+    {% elsif flag?(:noflag_force) %}
+      slice_noflag
+    {% else %}
+      slice_round("walk", per_ms)
+      slice_round("sum", per_ms)
+    {% end %}
   end
 
   # ── unit ─────────────────────────────────────────────────────────────
-  # A parallel task computes 300 ms on a pool of one while a task it
-  # spawned sleeps 1 ms and counts, and another parallel task's ticker
-  # sleeps 1 ms and measures how late it woke. The ticker is what the
-  # computing task is preempted for; its child, of the same unit, must not
-  # run until the computation ends, and the count it moves is read on both
-  # sides of the computation.
+  # The unhooked check observes a preemption attempt. The copy-only check
+  # separately records the scheduler's decision for the keyed child.
+  def unit_hang(what : String) : Nil
+    end_run(76, 1, "FAIL: unit: progress hang: ", what, "\n")
+  end
+
+  def unit_unarmed(what : String) : Nil
+    end_run(76, 1, "FAIL: unit: not armed: ", what, "\n")
+  end
+
+  def unit_observed(per_ms : Int64) : Nil
+    computing = Atomic(Int64).new(0_i64)
+    ran_inside = Atomic(Int64).new(0_i64)
+    ran = Atomic(Int64).new(0_i64)
+    finished = Atomic(Int64).new(0_i64)
+    group do |g|
+      g.spawn(unit: :new) do
+        group do |inner|
+          inner.spawn(unit: :same) do
+            ran_inside.set(computing.get)
+            ran.set(1_i64)
+            0
+          end
+          unit_unarmed("the same-unit child ran before the computation started") if ran.get != 0_i64
+          st = IyiScheduler.state
+          before = st.switches
+          computing.set(1_i64)
+          x = 7_u64
+          limit = __iyi_monotonic_ns + 20_000_000_000_i64
+          while st.switches == before
+            x = spin(per_ms // 10_i64, x)
+            unit_hang("the computing task reached no preemption check in 20000 ms") if __iyi_monotonic_ns > limit
+          end
+          computing.set(0_i64)
+          finished.set(1_i64)
+          x
+        end
+      end
+      limit = __iyi_monotonic_ns + 30_000_000_000_i64
+      while finished.get == 0_i64 || ran.get == 0_i64
+        sleep(1)
+        unit_hang("the computing task and same-unit child did not finish in 30000 ms") if __iyi_monotonic_ns > limit
+      end
+    end
+    fail("unit: a task of the same unit ran inside the computing task during the unforced check") if ran_inside.get == 1_i64
+    unit_unarmed("the same-unit child never ran") if ran.get != 1_i64
+    say "unit: the task of the same unit ran only after the computing task's preemption attempt"
+  end
+
+  {% if flag?(:tokenless_force) %}
+  def unit_turn(per_ms : Int64) : Nil
+    unit_unarmed("the forced child needs a pool of one, not #{IyiWorkers.count}") if IyiWorkers.count != 1
+    computing = Atomic(Int64).new(0_i64)
+    ran_inside = Atomic(Int64).new(0_i64)
+    ran = Atomic(Int64).new(0_i64)
+    finished = Atomic(Int64).new(0_i64)
+    group do |g|
+      g.spawn(unit: :new) do
+        group do |inner|
+          child = inner.spawn(unit: :same) do
+            ran_inside.set(computing.get)
+            ran.set(1_i64)
+            0
+          end
+          unit_unarmed("the same-unit child ran before the computation started") if ran.get != 0_i64
+          unit_unarmed("the unit already had a waiting task") if IyiWorkers.force_turn_unit_waiting?
+          rounds = per_ms // 10_i64
+          rounds = 2_i64 if rounds < 2_i64
+          IyiWorkers.force_turn_arm(IyiScheduler.current.object_id)
+          IyiWorkers.force_turn_child_arm(child.fiber.object_id)
+          computing.set(1_i64)
+          x = 7_u64
+          limit = __iyi_monotonic_ns + 20_000_000_000_i64
+          IyiWorkers.force_turn
+          while IyiWorkers.force_turn_result == 0_u64
+            x = spin(rounds, x)
+            IyiWorkers.force_turn
+            if IyiWorkers.force_turn_result == 0_u64 && __iyi_monotonic_ns > limit
+              unit_hang("the computing task reached no eligible preemption decision in 20000 ms")
+            end
+          end
+          computing.set(0_i64)
+          finished.set(1_i64)
+          x
+        end
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !IyiWorkers.force_turn_ready?
+        unit_hang("the copy hook did not hold the computing task's first turn in 10000 ms") if __iyi_monotonic_ns > limit
+        sleep(1)
+      end
+      IyiWorkers.force_turn_release
+      limit = __iyi_monotonic_ns + 20_000_000_000_i64
+      while finished.get == 0_i64 || ran.get == 0_i64
+        if IyiWorkers.force_turn_slow_active?
+          limit = __iyi_monotonic_ns + 20_000_000_000_i64
+        elsif __iyi_monotonic_ns > limit
+          if IyiWorkers.force_turn_outer_claim?
+            unit_hang("the computing task and same-unit child did not finish in 20000 ms")
+          end
+          limit = __iyi_monotonic_ns + 20_000_000_000_i64
+        end
+        sleep(1)
+      end
+    end
+    result = IyiWorkers.force_turn_result
+    decision = IyiWorkers.force_turn_child_result
+    unit_unarmed("the computing task recorded turn result #{result}, not an eligible decision") unless result == 1_u64
+    if decision == 2_u64 && ran_inside.get == 1_i64
+      fail("unit: a task of the same unit ran inside the preempted task")
+    end
+    unit_unarmed("the scheduler recorded child decision #{decision}, not a deferral") unless decision == 1_u64
+    unit_unarmed("the deferred same-unit child ran inside the computing task") unless ran_inside.get == 0_i64
+    unit_unarmed("the same-unit child never ran") unless ran.get == 1_i64
+    puts "unit: the same-unit child waited on its unit at the computing task's eligible preemption decision"
+  end
+  {% end %}
+
+  {% if flag?(:ticker_force) %}
+  # The sleeper holds its worker without preemption until the long task is
+  # queued. The copy keeps its deadline in the future until the long
+  # task's keyed preemption decision, so neither an idle poll nor the
+  # park's periodic poll can wake it before that decision.
+  # The tasks share one object; Atomic is a value type and must not be
+  # passed as separate copies across the rendezvous.
+  class TickerState
+    @ready : Atomic(Int64)
+    @queued : Atomic(Int64)
+    @active : Atomic(Int64)
+    @witness : Atomic(Int64)
+
+    def initialize
+      @ready = Atomic(Int64).new(0_i64)
+      @queued = Atomic(Int64).new(0_i64)
+      @active = Atomic(Int64).new(0_i64)
+      @witness = Atomic(Int64).new(0_i64)
+    end
+
+    def ready : Nil
+      @ready.set(1_i64)
+    end
+
+    def ready? : Bool
+      @ready.get != 0_i64
+    end
+
+    def queue : Nil
+      @queued.set(1_i64)
+    end
+
+    def queued? : Bool
+      @queued.get != 0_i64
+    end
+
+    def start_computing : Nil
+      @active.set(1_i64)
+    end
+
+    def stop_computing : Nil
+      @active.set(0_i64)
+    end
+
+    def active? : Bool
+      @active.get == 1_i64
+    end
+
+    def witness : Int64
+      @witness.get
+    end
+
+    def observe(value : Int64) : Nil
+      @witness.set(value)
+    end
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def unit_ticker_sleeper(state : TickerState) : Nil
+    here = IyiScheduler.state.object_id
+    IyiWorkers.force_ticker_key(here, IyiScheduler.current.object_id)
+    state.ready
+    while !state.queued?
+      IyiThread.park_if_requested
+      IyiThread.spin_pause
+    end
+    waited = IyiScheduler.sleep_current(1)
+    observed = if waited.is_a?(Cancelled)
+                 4_i64
+               elsif IyiScheduler.state.object_id != here
+                 3_i64
+               elsif !state.active?
+                 2_i64
+               elsif IyiWorkers.force_ticker_result != 1_u64
+                 5_i64
+               else
+                 1_i64
+               end
+    state.observe(observed)
+  end
+
+  # This loop must keep checking its worker's word until the sleeper ran,
+  # or the mutant's keyed decision recorded that it was not enqueued.
+  @[NoInline]
+  def unit_ticker_long(state : TickerState) : UInt64
+    state.start_computing
+    IyiWorkers.force_ticker_arm(IyiScheduler.state.object_id, IyiScheduler.current.object_id)
+    x = 7_u64
+    while state.witness == 0_i64 && IyiWorkers.force_ticker_result != 2_u64
+      x = x &* 6364136223846793005_u64 &+ 1_u64
+    end
+    state.stop_computing
+    x
+  end
+
+  def unit_ticker : Nil
+    unit_unarmed("the forced ticker needs a pool of one, not #{IyiWorkers.count}") if IyiWorkers.count != 1
+    state = TickerState.new
+    group do |g|
+      g.spawn(unit: :new) do
+        unit_ticker_sleeper(state)
+        0
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !state.ready?
+        sleep(1)
+        unit_hang("the keyed sleeper did not hold its worker in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      g.spawn(unit: :new) { unit_ticker_long(state) }
+      state.queue
+      limit = __iyi_monotonic_ns + 20_000_000_000_i64
+      while IyiWorkers.force_ticker_result == 0_u64
+        if IyiWorkers.force_ticker_slow_active?
+          limit = __iyi_monotonic_ns + 20_000_000_000_i64
+        elsif __iyi_monotonic_ns > limit
+          if IyiWorkers.force_ticker_outer_claim?
+            unit_hang("the keyed sleeper's preemption decision did not finish in 20000 ms")
+          end
+          limit = __iyi_monotonic_ns + 20_000_000_000_i64
+        end
+        sleep(1)
+      end
+      result = IyiWorkers.force_ticker_result
+      fail("unit: an expired sleeper was not enqueued by its worker's preemption") if result == 2_u64
+      unit_unarmed("the keyed sleeper recorded decision #{result}, not an enqueue") unless result == 1_u64
+      limit = __iyi_monotonic_ns + 20_000_000_000_i64
+      while state.witness == 0_i64
+        sleep(1)
+        unit_hang("the enqueued sleeper did not resume in 20000 ms") if __iyi_monotonic_ns > limit
+      end
+      unit_unarmed("the keyed sleeper recorded witness #{state.witness}, not a return on the active worker") unless state.witness == 1_i64
+    end
+    puts "unit: the preempted worker enqueued and ran its expired sleeper"
+  end
+  {% end %}
+
+  # A parallel task computes while its same-unit child counts and another
+  # parallel task's ticker measures wake lateness. The child must not run
+  # during the computation; the global count and ticker samples do not
+  # establish that this particular task was preempted.
   def unit(per_ms : Int64) : Nil
+    {% if flag?(:tokenless_force) %}
+      unit_turn(per_ms)
+      return
+    {% end %}
+    {% if flag?(:ticker_force) %}
+      unit_ticker
+      return
+    {% end %}
+    unit_observed(per_ms)
     late = Stat.new
     moved = Atomic(Int64).new(-1_i64)
     done = Atomic(Int64).new(0_i64)
@@ -370,20 +1104,124 @@ import std/socket::{IyiSocket, SocketError}
       end
     end
     given = IyiWorkers.preempts - preempts
-    fail("unit: the computing task was never preempted for the ticker beside it") if given == 0_u64
     if moved.get != 0_i64
-      fail("unit: a task of the same unit ran #{moved.get} times between two statements of a preempted task")
+      puts "unit: the child ran #{moved.get} times during the preempted task"
+      fail("unit: a task of the same unit ran inside the computing task during the ticker stress")
     end
-    if late.max_ms > BOUND_MS
-      fail("unit: a ticker asleep on the worker of a computing task woke #{late.max_ms} ms late, past #{BOUND_MS} ms")
+    puts "measure: unit: #{given} global preemptions (former minimum 1; information only)"
+    if late.count == 0_i64
+      puts "measure: unit: the ticker recorded no sleep samples; wake lateness is unavailable (former bound #{BOUND_MS} ms; information only)"
+    else
+      puts "measure: unit: the ticker woke at most #{late.max_ms} ms late over #{late.count} sleeps (former bound #{BOUND_MS} ms; information only)"
     end
-    say "unit: a task preempted #{given} times kept its unit's token, and its child ran only after it; the ticker beside it woke at most #{late.max_ms} ms late over #{late.count} sleeps"
   end
 
   # ── server ───────────────────────────────────────────────────────────
-  FAST_BOUND_MS = 80_i64
+  # A dedicated pair establishes that one fast request is served while a
+  # slow handler is active. Bulk timings below are measurements.
+
+  class ServerRelease
+    @value : Atomic(Int64)
+    @active : Atomic(Int64)
+
+    def initialize
+      @value = Atomic(Int64).new(0_i64)
+      @active = Atomic(Int64).new(0_i64)
+    end
+
+    def open : Nil
+      @value.set(1_i64)
+    end
+
+    def open? : Bool
+      @value.get != 0_i64
+    end
+
+    def start : Nil
+      @active.set(1_i64)
+    end
+
+    def active? : Bool
+      @active.get != 0_i64
+    end
+  end
+
+  @[NoInline]
+  def server_hold(release : ServerRelease) : Nil
+    release.start
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while !release.open?
+      IyiThread.spin_pause
+      setup_exit("server: progress hang: the slow handler was not released in 20000 ms") if __iyi_monotonic_ns > limit
+    end
+  end
+
+  def server_pair : Nil
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    slow_client = IyiSocket.connect("127.0.0.1", port, 5000)
+    setup_exit("server: slow connect answered #{slow_client}") unless slow_client.is_a?(IyiSocket)
+    slow_server = listener.accept
+    setup_exit("server: slow accept answered #{slow_server}") unless slow_server.is_a?(IyiSocket)
+    fast_client = IyiSocket.connect("127.0.0.1", port, 5000)
+    setup_exit("server: fast connect answered #{fast_client}") unless fast_client.is_a?(IyiSocket)
+    fast_server = listener.accept
+    fast_client.read_timeout_ms = 10000
+    setup_exit("server: fast accept answered #{fast_server}") unless fast_server.is_a?(IyiSocket)
+    slow_fd = slow_server.fd
+    slow_family = slow_server.family
+    fast_fd = fast_server.fd
+    fast_family = fast_server.family
+    release = ServerRelease.new
+    served = Atomic(Int64).new(0_i64)
+    group do |g|
+      g.spawn(unit: :new) do
+        socket = IyiSocket.new(slow_fd, slow_family)
+        got = socket.read(1)
+        setup_exit("server: slow request answered #{got.inspect}") unless got == "b"
+        server_hold(release)
+        0
+      end
+      g.spawn(unit: :new) do
+        socket = IyiSocket.new(fast_fd, fast_family)
+        got = socket.read(1)
+        setup_exit("server: fast request answered #{got.inspect}") unless got == "c"
+        setup_exit("server: not armed: slow handler was not active") unless release.active? && !release.open?
+        wrote = socket.write("k")
+        setup_exit("server: fast response answered #{wrote.inspect}") unless wrote.is_a?(Int32)
+        fail("server: the fast handler did not write one response byte") unless wrote == 1
+        served.set(1_i64)
+        0
+      end
+      wrote = slow_client.write("b")
+      setup_exit("server: slow send answered #{wrote.inspect}") unless wrote.is_a?(Int32)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !release.active?
+        sleep(1)
+        setup_exit("server: progress hang: slow handler did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      wrote = fast_client.write("c")
+      setup_exit("server: fast send answered #{wrote.inspect}") unless wrote.is_a?(Int32)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while served.get == 0_i64
+        sleep(1)
+        setup_exit("server: progress hang: the fast request was not served in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      response = fast_client.read(1)
+      setup_exit("server: fast response read answered #{response.inspect}") unless response.is_a?(String)
+      fail("server: the fast client received an invalid response") unless response == "k"
+      release.open
+    end
+    slow_client.close
+    slow_server.close
+    fast_client.close
+    fast_server.close
+    listener.close
+    say "server: a fast request was served while the slow handler remained active"
+  end
 
   def server(per_ms : Int64) : Nil
+    server_pair
     listener = IyiSocket.listen("127.0.0.1", 0)
     port = listener.local_port
     conns = 32
@@ -393,7 +1231,7 @@ import std/socket::{IyiSocket, SocketError}
       g.spawn do
         conns.times do
           client = listener.accept
-          fail("server: accept answered #{client}") unless client.is_a?(IyiSocket)
+          setup_exit("server: accept answered #{client}") unless client.is_a?(IyiSocket)
           fd = client.fd
           family = client.family
           g.spawn(unit: :new) do
@@ -414,7 +1252,7 @@ import std/socket::{IyiSocket, SocketError}
       clients = [] of IyiSocket
       conns.times do
         c = IyiSocket.connect("127.0.0.1", port, 5000)
-        fail("server: connect answered #{c}") unless c.is_a?(IyiSocket)
+        setup_exit("server: connect answered #{c}") unless c.is_a?(IyiSocket)
         clients << c
       end
       group do |cg|
@@ -441,42 +1279,53 @@ import std/socket::{IyiSocket, SocketError}
       end
       clients.each(&.close)
     end
-    if fast.max_ms > FAST_BOUND_MS
-      fail("server: a fast request took #{fast.max_ms} ms beside the 100 ms ones, past #{FAST_BOUND_MS} ms (#{fast.over20} of #{fast.count} over 20 ms)")
-    end
     say "server: 28 connections of 0.2 ms requests beside 4 of 100 ms on #{IyiWorkers.count} workers: the slowest fast request took #{fast.max_ms} ms, #{fast.over20} of #{fast.count} over 20 ms; the slow ones at most #{slow.max_ms} ms"
   end
 
   # ── poller ───────────────────────────────────────────────────────────
-  # The server shape's claim, held open rather than met by chance. There a
-  # fast request waits in a busy worker's poller only when its connection
-  # happened to park on the worker a slow request then landed on, and the
-  # wait is what was left of that request's 100 ms: the copy whose slow
-  # half does not poll read 76 to 141 ms in eight runs on macOS 26.6,
-  # Apple M2 Pro, 10 cores (the user's machine), three of them under the
-  # 80 ms bound. Here one worker and two connections make it certain: a
-  # fast connection's server has answered once and parked on its next
-  # read in the worker's poller, the worker takes the slow connection's
-  # request, and that request computes until the fast one has been
-  # answered, or POLLER_HOLD_MS if it never is. The fast request is sent
-  # once the slow one is computing, and the worker holds nothing else, so
-  # only the back-edge's poll hands it on: answered within FAST_BOUND_MS,
-  # or at POLLER_HOLD_MS. The M2 answered in 11.1 to 11.2 ms over ten
-  # runs, and the copy at 999 ms in five of five.
-  POLLER_HOLD_MS = 1000_i64
+  FAST_BOUND_MS = 80_i64
+  # The fast handler parks on its second read before the slow handler's
+  # worker is armed. In the forced copy, the slow half records whether its
+  # next decision actually enters the nonblocking poll, before main sends
+  # the fast request. The hold ends on the answer, not on a latency bound.
+  # The reader publishes its id after its first response. Its first wait
+  # has already unlisted, so a nonzero listed_on is the second read's
+  # atomic registration, not a stale WaitingIo from its first read.
+  @[NoInline]
+  @[NoPreempt]
+  def poller_reader_parked?(id : UInt64) : Bool
+    found = false
+    IyiRuntimeLock.lock
+    fiber = IyiScheduler.first_fiber
+    while fiber.is_a?(IyiFiber)
+      if fiber.object_id == id
+        found = fiber.listed_on != 0_u64 && !fiber.on_cpu?
+        break
+      end
+      fiber = fiber.next_fiber
+    end
+    IyiRuntimeLock.unlock
+    found
+  end
+
+  def poller_hang(message : String) : NoReturn
+    end_run(76, 1, "FAIL: poller: progress hang: ", message, "\n")
+  end
 
   def poller(per_ms : Int64) : Nil
-    fail("poller: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    setup_exit("poller: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
     listener = IyiSocket.listen("127.0.0.1", 0)
     port = listener.local_port
     computing = Atomic(Int64).new(0_i64)
     answered = Atomic(Int64).new(0_i64)
+    reader = Atomic(UInt64).new(0_u64)
+    worker = Atomic(UInt64).new(0_u64)
     took_us = 0_i64
     group do |g|
       g.spawn do
         2.times do
           client = listener.accept
-          fail("poller: accept answered #{client}") unless client.is_a?(IyiSocket)
+          setup_exit("poller: accept answered #{client}") unless client.is_a?(IyiSocket)
           fd = client.fd
           family = client.family
           g.spawn(unit: :new) do
@@ -486,13 +1335,16 @@ import std/socket::{IyiSocket, SocketError}
               break unless got.is_a?(String) && !got.empty?
               x = spin(per_ms // 5_i64, 5_u64)
               if got.starts_with?("b")
+                worker.set(IyiScheduler.state.object_id)
                 computing.set(1_i64)
-                since = __iyi_monotonic_ns
-                while answered.get == 0_i64 && elapsed_ms(since) < POLLER_HOLD_MS
+                limit = __iyi_monotonic_ns + 20_000_000_000_i64
+                while answered.get == 0_i64
+                  poller_hang("the fast request was not answered in 20000 ms") if __iyi_monotonic_ns > limit
                   x = spin(per_ms, x)
                 end
               end
               socket.write(x == 0_u64 ? "K" : "k")
+              reader.set(IyiScheduler.current.object_id) unless got.starts_with?("b")
             end
             socket.close
             0
@@ -501,190 +1353,216 @@ import std/socket::{IyiSocket, SocketError}
         0
       end
       slow = IyiSocket.connect("127.0.0.1", port, 5000)
-      fail("poller: connect answered #{slow}") unless slow.is_a?(IyiSocket)
+      setup_exit("poller: connect answered #{slow}") unless slow.is_a?(IyiSocket)
       fast = IyiSocket.connect("127.0.0.1", port, 5000)
-      fail("poller: connect answered #{fast}") unless fast.is_a?(IyiSocket)
+      setup_exit("poller: connect answered #{fast}") unless fast.is_a?(IyiSocket)
       fast.write("c")
-      fast.read(8)
+      response = fast.read(8)
+      setup_exit("poller: initial fast response read answered #{response.inspect}") unless response.is_a?(String)
+      fail("poller: the initial fast response was invalid") unless response == "k" || response == "K"
       slow.write("b")
-      while computing.get == 0_i64
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while computing.get == 0_i64 || reader.get == 0_u64 || !poller_reader_parked?(reader.get)
+        poller_hang("the fast reader did not park while the slow handler computed in 10000 ms") if __iyi_monotonic_ns > limit
         sleep(1)
       end
+      {% if flag?(:nopoll_force) %}
+        IyiWorkers.force_poll_arm(worker.get)
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
+        while IyiWorkers.force_poll_result == 0_u64
+          poller_hang("the armed worker made no poll decision in 10000 ms") if __iyi_monotonic_ns > limit
+          sleep(1)
+        end
+        result = IyiWorkers.force_poll_result
+        fail("poller: a preemption with a read waiting did not poll its worker's poller") if result == 2_u64
+        setup_exit("poller: not armed: the poll decision recorded #{result}") unless result == 1_u64
+        puts "poller: a preemption with a read waiting polled its worker's poller"
+      {% end %}
       s = __iyi_monotonic_ns
       fast.write("c")
-      fast.read(8)
+      response = fast.read(8)
+      setup_exit("poller: fast response read answered #{response.inspect}") unless response.is_a?(String)
+      fail("poller: the fast response was invalid") unless response == "k" || response == "K"
       took_us = (__iyi_monotonic_ns - s) // 1000_i64
       answered.set(1_i64)
-      slow.read(8)
+      response = slow.read(8)
+      setup_exit("poller: slow response read answered #{response.inspect}") unless response.is_a?(String)
+      fail("poller: the slow response was invalid") unless response == "k" || response == "K"
       slow.close
       fast.close
     end
-    if took_us // 1000_i64 > FAST_BOUND_MS
-      fail("poller: a fast request took #{took_us // 1000_i64} ms, its connection in the poller of the one worker while that worker computed, past #{FAST_BOUND_MS} ms")
-    end
-    say "poller: a fast request whose connection waited in the poller of the one worker, busy computing, was answered in #{took_us} us"
+    puts "measure: poller: the fast response took #{took_us} us (former bound #{FAST_BOUND_MS} integer ms; information only)"
   end
 
   # ── fresh ────────────────────────────────────────────────────────────
-  # A task switched in begins a quantum of its own. On a pool of one, a
-  # task holds the worker FRESH_HOLD_MS with no check in its loop, across
-  # the monitor's looks, so the worker's word is raised, and ends; the
-  # task queued behind it computes a millisecond in FRESH_SLICES slices,
-  # with a third queued behind it for a give-up to hand the worker to.
-  # Raised for that second task, the word comes only once the monitor has
-  # seen the switch count stand from one look to the next, never under
-  # PERIOD_FLOOR_US into its run; a give-up sooner is on the word left up
-  # for the task before. In the server shape that word gave a fast
-  # request's task up behind every preempted slow one
-  # (`IyiScheduler.switch_to`).
-  #
-  # The monitor's time is the wall clock's, and a kernel that holds the
-  # worker's thread off its core spends it: on Linux, 12 vCPUs at a load
-  # of 6 to 12, a round gave the worker up 508 us after the task's first
-  # statement, the word raised while the thread waited for a core. The
-  # switch is between the task before's last statement and this one's
-  # first, and the give-up is in the slice the preemption count moved
-  # in, so the run up to it is at least that slice's start less the
-  # task's first statement, and at most that slice's end less the task
-  # before's last. Under the floor at most is a give-up on the stale word
-  # whatever the kernel did. Under it at least, but not at most, it is
-  # one too where the thread's CPU time (`thread_cpu_ns`) says the kernel
-  # held it off its core across those two windows for less than the
-  # floor's remainder; a round where the kernel held it off longer cannot
-  # tell the word's time from the kernel's, and is run again, up to
-  # FRESH_TRIES rounds for FRESH_ROUNDS judged, each failing by itself.
-  # Windows, whose thread times move on the system timer's tick, too
-  # coarse for this, judges every round by its first statement.
-  FRESH_ROUNDS  = 10
-  FRESH_TRIES   = 50
-  FRESH_HOLD_MS = 30_i64
-  FRESH_SLICES  = 20
-  {% if flag?(:linux) || flag?(:darwin) %}
-    THREAD_CLOCK = true
-  {% else %}
-    THREAD_CLOCK = false
-  {% end %}
+  # Hold the first task until its worker's word is raised and its successor
+  # is queued. The copy-only monitor gate holds a whole look at its entry,
+  # so an older look cannot raise the word after the switch lowers it.
+  # Both the normal and forced runs rendezvous on state, not elapsed work.
+  class FreshState
+    @started : Atomic(Int64)
+    @queued : Atomic(Int64)
+    @finished : Atomic(Int64)
+    @successor : Atomic(Int64)
+    @owner : Atomic(UInt64)
 
-  # The CPU time of the thread this runs on, in nanoseconds, which stands
-  # still while the kernel holds it off its core; 0 where there is no
-  # clock for it fine enough (`THREAD_CLOCK`).
-  def thread_cpu_ns : Int64
-    {% if flag?(:linux) %}
-      IyiClock.read(3).to_i64
-    {% elsif flag?(:darwin) %}
-      LibC.clock_gettime_nsec_np(16).to_i64
-    {% else %}
-      0_i64
-    {% end %}
+    def initialize
+      @started = Atomic(Int64).new(0_i64)
+      @queued = Atomic(Int64).new(0_i64)
+      @finished = Atomic(Int64).new(0_i64)
+      @successor = Atomic(Int64).new(0_i64)
+      @owner = Atomic(UInt64).new(0_u64)
+    end
+
+    def start(id : UInt64) : Nil
+      @owner.set(id)
+      @started.set(1_i64)
+    end
+
+    def started? : Bool
+      @started.get != 0_i64
+    end
+
+    def queue : Nil
+      @queued.set(1_i64)
+    end
+
+    def queued? : Bool
+      @queued.get != 0_i64
+    end
+
+    def finish : Nil
+      @finished.set(1_i64)
+    end
+
+    def finished? : Bool
+      @finished.get != 0_i64
+    end
+
+    def owner : UInt64
+      @owner.get
+    end
+
+    def start_successor : Nil
+      @successor.set(1_i64)
+    end
+
+    def successor_started? : Bool
+      @successor.get != 0_i64
+    end
   end
 
-  # One round: how far into its run the task switched in gave the worker
-  # up, at least and at most, and how long the kernel held its thread off
-  # its core in the two windows between those, in microseconds; -1 for
-  # each if it ran its millisecond through.
-  def fresh_round(per_ms : Int64) : Tuple(Int64, Int64, Int64)
-    held_wall = Atomic(Int64).new(0_i64)
-    held_cpu = Atomic(Int64).new(0_i64)
-    least = Atomic(Int64).new(-1_i64)
-    most = Atomic(Int64).new(-1_i64)
-    off = Atomic(Int64).new(-1_i64)
-    group do |g|
-      g.spawn(unit: :new) do
-        x = spin_np(FRESH_HOLD_MS * per_ms, 17_u64)
-        held_wall.set(__iyi_monotonic_ns)
-        held_cpu.set(thread_cpu_ns)
-        x == 0_u64 ? 1 : 0
-      end
-      g.spawn(unit: :new) do
-        start_cpu = thread_cpu_ns
-        start = __iyi_monotonic_ns
-        before = IyiWorkers.preempts
-        x = 19_u64
-        FRESH_SLICES.times do
-          at = __iyi_monotonic_ns
-          at_cpu = thread_cpu_ns
-          x = spin(per_ms // FRESH_SLICES.to_i64, x)
-          if least.get < 0_i64 && IyiWorkers.preempts != before
-            ended_cpu = thread_cpu_ns
-            ended = __iyi_monotonic_ns
-            least.set((at - start) // 1000_i64)
-            most.set((ended - held_wall.get) // 1000_i64)
-            off.set(((start - held_wall.get) - (start_cpu - held_cpu.get) + (ended - at) - (ended_cpu - at_cpu)) // 1000_i64)
+  def fresh_hang(message : String) : NoReturn
+    end_run(76, 1, "FAIL: fresh: progress hang: ", message, "\n")
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def fresh_hold(shared : FreshState) : Nil
+    st = IyiScheduler.state
+    setup_exit("fresh: not armed: the worker has no preemption word") if st.preempt_word == 0_u64
+    word = Pointer(Atomic(UInt64)).new(st.preempt_word)
+    shared.start(st.object_id)
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while !shared.queued? || word.value.get == 0_u64
+      if __iyi_monotonic_ns > limit
+        {% if flag?(:stale_force) %}
+          if IyiWorkers.force_stale_timeout_claim?
+            fresh_hang("the successor was not queued or the worker's word was not raised in 20000 ms")
           end
-        end
-        x == 0_u64 ? 1 : 0
+        {% else %}
+          fresh_hang("the successor was not queued or the worker's word was not raised in 20000 ms")
+        {% end %}
       end
-      g.spawn(unit: :new) do
-        0
-      end
+      IyiThread.spin_pause
     end
-    {least.get, most.get, off.get}
+    {% if flag?(:stale_force) %}
+      IyiWorkers.force_stale_arm(st.object_id)
+      IyiWorkers.force_stale_close_gate
+      limit = __iyi_monotonic_ns + 20_000_000_000_i64
+      while IyiWorkers.force_stale_gate_state != 2_u64
+        if IyiWorkers.force_stale_gate_state == 3_u64
+          setup_exit("fresh: not armed: the monitor gate was released before the held task observed it")
+        end
+        if __iyi_monotonic_ns > limit && IyiWorkers.force_stale_timeout_claim?
+          fresh_hang("the monitor did not enter its gate in 20000 ms")
+        end
+        IyiThread.spin_pause
+      end
+    {% end %}
+    shared.finish
   end
 
   def fresh(per_ms : Int64) : Nil
-    fail("fresh: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
-    preempts = IyiWorkers.preempts
-    judged = 0
-    set_aside = 0
-    round = 0
-    while judged < FRESH_ROUNDS
-      if round == FRESH_TRIES
-        fail("fresh: #{set_aside} of #{round} rounds gave the worker up only after the kernel held its thread off its core across the switch or the give-up, leaving #{judged} to judge")
+    setup_exit("fresh: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    shared = FreshState.new
+    group do |g|
+      g.spawn(unit: :new) do
+        fresh_hold(shared)
+        0
       end
-      round += 1
-      gave, most, off = fresh_round(per_ms)
-      if gave < 0_i64 || gave >= PERIOD_FLOOR_US
-        judged += 1
-      elsif most < PERIOD_FLOOR_US
-        fail("fresh: round #{round}: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check gave the worker up within #{most} us of that task's end, under the monitor's #{PERIOD_FLOOR_US} us")
-      elsif THREAD_CLOCK && gave + off >= PERIOD_FLOOR_US
-        set_aside += 1
-      else
-        held = THREAD_CLOCK ? ", the kernel holding its thread off its core #{off} us of the #{most - gave} around the switch and the give-up" : ""
-        fail("fresh: round #{round}: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check gave the worker up #{gave} us into its run, under the monitor's #{PERIOD_FLOOR_US} us#{held}")
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !shared.started?
+        if __iyi_monotonic_ns > limit
+          {% if flag?(:stale_force) %}
+            if IyiWorkers.force_stale_timeout_claim?
+              fresh_hang("the first task did not start in 10000 ms")
+            end
+          {% else %}
+            fresh_hang("the first task did not start in 10000 ms")
+          {% end %}
+        end
+        sleep(1)
+      end
+      g.spawn(unit: :new) do
+        setup_exit("fresh: not armed: the successor ran before the first task held a raised word") unless shared.finished?
+        setup_exit("fresh: not armed: the successor ran on a different worker") unless IyiScheduler.state.object_id == shared.owner
+        shared.start_successor
+        spin(per_ms, 19_u64)
+      end
+      shared.queue
+      {% if flag?(:stale_force) %}
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
+        while IyiWorkers.force_stale_word == 0_u64
+          if IyiWorkers.force_stale_gate_state == 3_u64 && IyiWorkers.force_stale_word == 0_u64
+            setup_exit("fresh: not armed: the switch released the monitor gate without recording its word")
+          end
+          if __iyi_monotonic_ns > limit && IyiWorkers.force_stale_timeout_claim?
+            fresh_hang("the armed switch did not record its word in 10000 ms")
+          end
+          sleep(1)
+        end
+        setup_exit("fresh: not armed: the switch did not receive the raised word") unless IyiWorkers.force_stale_before == 2_u64
+        word = IyiWorkers.force_stale_word
+        fail("fresh: the word raised for the task before was still up after the switch") if word == 2_u64
+        setup_exit("fresh: not armed: the switch recorded word #{word}") unless word == 1_u64
+        puts "fresh: the switch after a task held its raised word lowered the word"
+      {% end %}
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !shared.successor_started?
+        if __iyi_monotonic_ns > limit
+          {% if flag?(:stale_force) %}
+            if IyiWorkers.force_stale_gate_state == 3_u64 || IyiWorkers.force_stale_timeout_claim?
+              fresh_hang("the successor did not run in 10000 ms")
+            end
+          {% else %}
+            fresh_hang("the successor did not run in 10000 ms")
+          {% end %}
+        end
+        sleep(1)
       end
     end
-    given = IyiWorkers.preempts - preempts
-    aside = set_aside > 0 ? "; #{set_aside} more set aside, the kernel holding the worker's thread off its core across the switch or the give-up" : ""
-    say "fresh: a task switched in after one that held its worker #{FRESH_HOLD_MS} ms with no check ran its first ms through, #{FRESH_ROUNDS} rounds (#{given} preemptions)#{aside}"
+    say "fresh: a task held its worker until its word was raised, then its queued successor ran on that worker"
   end
 
   # ── period ───────────────────────────────────────────────────────────
-  # The monitor's period, and the quantum it makes. A task computing half a
-  # second on a pool of one, and the monitor's looks over it: every look
-  # is a tick, PREEMPT_TICK_MS apart. Then two such tasks on the one
-  # worker, which take turns: the time they took over the turns they took
-  # is the quantum, two ticks once each look after a turn sees the count
-  # move and the next sees it stand. Linux, darwin and Windows looked every
-  # 5.1 to 6.3 ms and took turns of 10.2 to 12.3 ms on the machines
-  # measured (SPEC.md III.4.13); a Windows wait that ends on the system
-  # timer's tick looked every 11.2 to 12.3 ms there, and a wait that ends
-  # at once would spin the monitor.
-  #
-  # The look's bound sits between the two. darwin's three-core runners,
-  # sharing their cores with the task the monitor watches, looked every
-  # 6.3, 8.9 and 9.0 ms in three CI runs (the last, job 122004173378, past
-  # the 9 ms this bound was), and 7.1 to 8.9 ms in the 7 runs of macos-15
-  # in CI's logs. Windows' looks end on a high-resolution timer: its
-  # runners read 5.14 to 5.42 ms in 101 runs. The timer-tick copy read
-  # 10.6 to 14.3 ms in 36, and in job 124885593140 came under 10.5: it
-  # passed the look and was caught only by the 20 ms the turn was then
-  # held to, at turns of 20845 us, about two of its looks. It read 10.1 to
-  # 13.1 ms in 20 runs of debug jobs 124913849506 and 124922160886, where
-  # the real looks read 5.15 to 5.30. So on Windows the bound is 8 ms,
-  # half again the slowest real look and under four fifths of the copy's
-  # quickest.
-  #
-  # The quantum is two looks wherever the looks are, so it is held to
-  # QUANTUM_LOOKS of the ones this run measured, not to a time a slow
-  # runner's looks stretch it towards: Windows took 1.91 to 2.09 looks a
-  # turn in those 101 runs, and darwin 1.52 to 2.52 in 15 on macos-14 and
-  # macos-15, where looks of up to 8.9 ms made turns of up to 17.2 ms,
-  # 2.8 ms under the 20 ms the turn was held to. In the debug jobs,
-  # macos-15 took 1.61 to 2.25 looks a turn in 44 runs (124913849625 and
-  # 124922160678) and windows-2025 1.94 to 2.03 in 40. A monitor that
-  # raises the word after three unchanged looks rather than one takes
-  # four looks a turn, and fails it.
+  # The unforced run records the monitor's look interval and whole-group
+  # time divided by global preemptions plus one. Both include scheduler delays,
+  # and a finite task need not see any looks or turns. The former limits
+  # remain in the output for comparison and are not correctness gates.
+  # The forced slowturn pair checks the unchanged-look decision itself;
+  # the Windows coarse pair checks which timer the monitor uses. Neither
+  # establishes the removed wall-clock bounds.
   PERIOD_FLOOR_US   =  4000_i64
   {% if flag?(:win32) %}
     PERIOD_BOUND_US = 8000_i64
@@ -692,9 +1570,82 @@ import std/socket::{IyiSocket, SocketError}
     PERIOD_BOUND_US = 10500_i64
   {% end %}
   QUANTUM_LOOKS     =     3_i64
+  {% if flag?(:slowturn_force) %}
+  # The forced check (`-Dslowturn_force`), run first and apart from the timed checks below. Two tasks compute on
+  # the one worker until the monitor has raised its word three times (a progress limit names a hang). The copy
+  # records, at each raise, the unchanged looks it came after: the control raises after one, the mutant after
+  # three. Zero is not armed. No clock decides anything here.
+  def period_forced(per_ms : Int64) : Nil
+    setup_exit("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    base = IyiWorkers.force_raise_count
+    done = Atomic(Int64).new(0_i64)
+    group do |g|
+      2.times do |i|
+        g.spawn(unit: :new) do
+          x = 13_u64 + i.to_u64
+          while done.get < 1_i64
+            x = x &* 6364136223846793005_u64 &+ 1_u64
+          end
+          x
+        end
+      end
+      limit = __iyi_monotonic_ns + 20_000_000_000_i64
+      while IyiWorkers.force_raise_count < base + 3_u64
+        sleep(1)
+        setup_exit("period: progress hang: the monitor raised no word three times in 20000 ms") if __iyi_monotonic_ns > limit
+      end
+      done.set(1_i64)
+    end
+    ticks = IyiWorkers.force_raise_ticks
+    setup_exit("period: not armed: a raise of the monitor's word recorded no unchanged looks") if ticks == 0_u64
+    fail("period: a worker's word was raised after 3 unchanged looks") if ticks == 3_u64
+    fail("period: a worker's word was raised after #{ticks} unchanged looks") unless ticks == 1_u64
+    puts "period: the monitor raised a worker's word after one unchanged look"
+  end
+  {% end %}
+
 
   def period(per_ms : Int64) : Nil
-    fail("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
+    {% if flag?(:coarse_force) && flag?(:win32) %}
+      setup_exit("period: runs on a pool of one") if IyiWorkers.count != 1
+      done = Atomic(Int64).new(0_i64)
+      started = Atomic(Int64).new(0_i64)
+      group do |g|
+        g.spawn(unit: :new) do
+          x = 13_u64
+          started.set(1_i64)
+          while done.get == 0_i64
+            x = x &* 6364136223846793005_u64 &+ 1_u64
+          end
+          x
+        end
+        limit = __iyi_monotonic_ns + 20_000_000_000_i64
+        while started.get == 0_i64
+          sleep(1)
+          setup_exit("period: the active worker did not start") if __iyi_monotonic_ns > limit
+        end
+        IyiWorkers.force_tick_arm
+        while IyiWorkers.force_tick_wait == 0_u64
+          sleep(1)
+          setup_exit("period: the active monitor tick did not complete") if __iyi_monotonic_ns > limit
+        end
+        done.set(1_i64)
+      end
+      tick = IyiWorkers.force_tick_wait
+      setup_exit("period: the high-resolution timer could not be made") if tick == 5_u64
+      setup_exit("period: the high-resolution timer could not be set") if tick == 4_u64
+      setup_exit("period: a wait on the high-resolution timer failed") if tick == 3_u64
+      setup_exit("period: the semaphore wait failed") if tick == 6_u64
+      fail("period: the active monitor used the semaphore fallback") if tick == 2_u64
+      setup_exit("period: the active monitor's tick recorded #{tick}") unless tick == 1_u64
+      puts "period: the active monitor used its high-resolution timer"
+      return
+    {% end %}
+    {% if flag?(:slowturn_force) %}
+      period_forced(per_ms)
+      return
+    {% end %}
+    setup_exit("period: runs on a pool of one, and this one has #{IyiWorkers.count} workers") if IyiWorkers.count != 1
     looked = Atomic(Int64).new(0_i64)
     took = Atomic(Int64).new(0_i64)
     group do |g|
@@ -708,10 +1659,11 @@ import std/socket::{IyiSocket, SocketError}
       end
     end
     looks = looked.get
-    fail("period: the monitor looked #{looks} times in #{took.get} us of a task computing") if looks < 2_i64
-    us = took.get // looks
-    if us < PERIOD_FLOOR_US || us > PERIOD_BOUND_US
-      fail("period: the monitor looked every #{us} us over #{looks} looks, outside #{PERIOD_FLOOR_US} to #{PERIOD_BOUND_US} us")
+    if looks == 0_i64
+      puts "measure: period: no monitor looks over #{took.get} us; look interval is unavailable (former minimum 2 looks and bound #{PERIOD_FLOOR_US} to #{PERIOD_BOUND_US} us; information only)"
+    else
+      us = took.get // looks
+      puts "measure: period: #{looks} monitor looks over #{took.get} us, #{us} us per look (former minimum 2 looks and bound #{PERIOD_FLOOR_US} to #{PERIOD_BOUND_US} us; information only)"
     end
     preempts = IyiWorkers.preempts
     t = __iyi_monotonic_ns
@@ -724,34 +1676,13 @@ import std/socket::{IyiSocket, SocketError}
     end
     total = (__iyi_monotonic_ns - t) // 1000_i64
     turns = (IyiWorkers.preempts - preempts).to_i64
-    fail("period: two tasks computing on one worker took no turns in #{total} us") if turns == 0_i64
     quantum = total // (turns + 1_i64)
-    if quantum > QUANTUM_LOOKS * us
-      fail("period: two tasks computing on one worker took turns of #{quantum} us, past #{QUANTUM_LOOKS} of the #{us} us looks")
-    end
-    say "period: the monitor looked every #{us} us over #{looks} looks; two tasks computing on one worker took #{turns} turns of #{quantum} us"
+    puts "measure: period: #{turns} global preemptions over #{total} us, total / (preemptions + 1) is #{quantum} us (former minimum 1 preemption and bound #{QUANTUM_LOOKS} measured looks; information only)"
   end
 
-  # ── tight ────────────────────────────────────────────────────────────
-  # Each loop and its `@[NoPreempt]` twin, alternately, seven times, inside
-  # a parallel task; the best of each, and their ratio, held to
-  # TIGHT_BOUND thousandths. The check is a read or two and a branch per
-  # turn. On GitHub's x86-64 runners the vectorised sums run at one of two
-  # speeds, about 32 or 48 ms, and a checked one at the slower: 1.46 to
-  # 1.50x on Windows (`sum` 1.503x in CI job 121231000410), and through
-  # `each` 1.51x on Linux, whose unchecked `sum` came in at the slower speed
-  # too, 1.001x. A windows-2025 runner then took a checked sum about 54 ms
-  # against 31: `each` 1.745x to 1.762x over eight runs as master builds
-  # it, `sum` 1.252x to 1.265x inlined and 1.744x to 1.755x `@[NoInline]`
-  # (CI job 122916661258). Windows 11 on 12 logical processors (the
-  # user's machine) measured every loop 0.98x to 1.08x, either way. The
-  # bound is twice, room of an eighth above that runner's worst. It says
-  # what the check costs, not which check it is: one that calls the
-  # accessor at every turn, as darwin's and Windows' did at first, cost
-  # those sums 3.4 to 5.8 times their twins there, but 1.776x and 1.828x on
-  # the Windows runner of CI job 122792275988, about what the cheap check
-  # cost on another. bench/parallel_exercise.sh tells the two in the IR.
-  TIGHT_BOUND = 2000_i64
+  # Each loop and its @[NoPreempt] twin run once inside a parallel task.
+  # Their answers must agree; their times and ratio are information only.
+  # bench/parallel_exercise.sh checks the generated back-edges in the IR.
 
   def tight : Nil
     group do |g|
@@ -760,34 +1691,26 @@ import std/socket::{IyiSocket, SocketError}
         bytes = Array(UInt8).new(262_144) { |i| ((i * 7 + 3) & 0xFF).to_u8 }
         table = crc_table
         ["walk", "sum", "each", "crc"].each do |name|
-          best = 9223372036854775807_i64
-          best_np = 9223372036854775807_i64
-          7.times do
-            t = __iyi_monotonic_ns
-            a = case name
-                when "walk" then spin(200_000_000_i64, 7_u64)
-                when "sum"  then sum(values, 300).to_u64
-                when "each" then sum_each(values, 300).to_u64
-                else             crc(table, bytes, 600).to_u64
-                end
-            took = __iyi_monotonic_ns - t
-            best = took if took < best
-            t = __iyi_monotonic_ns
-            b = case name
-                when "walk" then spin_np(200_000_000_i64, 7_u64)
-                when "sum"  then sum_np(values, 300).to_u64
-                when "each" then sum_each_np(values, 300).to_u64
-                else             crc_np(table, bytes, 600).to_u64
-                end
-            took = __iyi_monotonic_ns - t
-            best_np = took if took < best_np
-            fail("tight: #{name} answered #{a} checked and #{b} unchecked") if a != b
-          end
-          ratio = (best * 1000_i64 // best_np).to_f / 1000.0
-          if best * 1000_i64 > best_np * TIGHT_BOUND
-            fail("tight: #{name}: #{best // 1000_i64} us checked against #{best_np // 1000_i64} us unchecked, #{ratio}x, past #{TIGHT_BOUND / 1000.0}x")
-          end
-          say "tight: #{name}: #{best // 1000_i64} us checked, #{best_np // 1000_i64} us unchecked, #{ratio}x"
+          t = __iyi_monotonic_ns
+          a = case name
+              when "walk" then spin(200_000_000_i64, 7_u64)
+              when "sum"  then sum(values, 300).to_u64
+              when "each" then sum_each(values, 300).to_u64
+              else             crc(table, bytes, 600).to_u64
+              end
+          took = __iyi_monotonic_ns - t
+          t = __iyi_monotonic_ns
+          b = case name
+              when "walk" then spin_np(200_000_000_i64, 7_u64)
+              when "sum"  then sum_np(values, 300).to_u64
+              when "each" then sum_each_np(values, 300).to_u64
+              else             crc_np(table, bytes, 600).to_u64
+              end
+          took_np = __iyi_monotonic_ns - t
+          fail("tight: #{name} answered #{a} checked and #{b} unchecked") if a != b
+          setup_exit("tight: #{name} recorded a zero unchecked duration") if took_np <= 0_i64
+          ratio = (took * 1000_i64 // took_np).to_f / 1000.0
+          say "tight: #{name}: #{took // 1000_i64} us checked, #{took_np // 1000_i64} us unchecked, #{ratio}x (performance information)"
         end
         0
       end

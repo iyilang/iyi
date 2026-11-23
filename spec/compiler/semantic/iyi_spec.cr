@@ -632,6 +632,33 @@ describe "Semantic: iyi" do
     end
   end
 
+  describe "`using` in a Crystal file" do
+    it "is a parameter, a local, a named argument and a method" do
+      assert_type(<<-CODE, inject_primitives: true, filename: "prog.cr") { int32 }
+        class Connection
+          def self.get(name : Int32)
+            name
+          end
+        end
+
+        def connection(using : Int32? = nil)
+          using.nil? ? 0 : Connection.get(using)
+        end
+
+        def query(*, using = nil)
+          connection(using)
+        end
+
+        def using
+          using = 1
+          using
+        end
+
+        query(using: 2) + using
+        CODE
+    end
+  end
+
   describe "import name conflicts (SPEC.md II.3)" do
     it "reports an ambiguous function at the point of use" do
       assert_error <<-CODE, "'title' is ambiguous here"

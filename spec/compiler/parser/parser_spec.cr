@@ -4299,13 +4299,25 @@ end").as(ClassDef)
       assert_syntax_error "pub import app/greeter::*", "`import app/greeter::*` beside it"
 
       # `using` is gone, and the refusal is the line that replaces it.
-      assert_syntax_error "using app/greeter", "`using` is gone: one keyword loads a module and names what it brings into scope, so this line is `import app/greeter::*`"
-      assert_syntax_error "using app/greeter::{polite, Greet}", "so this line is `import app/greeter::{polite, Greet}`"
+      it "refuses `using` in a .iyi file with the import that replaced it" do
+        expect_raises(SyntaxException, "`using` is gone: one keyword loads a module and names what it brings into scope, so this line is `import app/greeter::*`") do
+          parse("using app/greeter", filename: "x.iyi")
+        end
+        expect_raises(SyntaxException, "so this line is `import app/greeter::{polite, Greet}`") do
+          parse("using app/greeter::{polite, Greet}", filename: "x.iyi")
+        end
+      end
+
+      it "refuses `using` as a name in a .iyi file, where it is still a keyword" do
+        expect_raises(SyntaxException, "can't import inside def") do
+          parse("def f(using = 1)\n  using + 1\nend", filename: "x.iyi")
+        end
+      end
 
       # And the line as an edit: the directive's span and its replacement,
       # which `check -f json` hands an agent and the editor a quick fix.
       it "carries the replacing line as a suggested edit" do
-        ex = expect_raises(SyntaxException) { parse("puts 1\nusing app/greeter::{polite} # kept\n") }
+        ex = expect_raises(SyntaxException) { parse("puts 1\nusing app/greeter::{polite} # kept\n", filename: "x.iyi") }
         ex.line_number.should eq(2)
         ex.column_number.should eq(1)
         ex.size.should eq("using app/greeter::{polite}".size)
@@ -4313,9 +4325,19 @@ end").as(ClassDef)
       end
 
       it "offers no edit for a directive written over several lines" do
-        ex = expect_raises(SyntaxException) { parse("using app/greeter::{\n  polite\n}\n") }
+        ex = expect_raises(SyntaxException) { parse("using app/greeter::{\n  polite\n}\n", filename: "x.iyi") }
         ex.suggestion.should be_nil
       end
+
+      # In a `.cr` file `using` is a name, as in Crystal.
+      it_parses "def f(using = 1); using + 1; end", Def.new("f", [Arg.new("using", 1.int32)], Call.new("using".var, "+", 1.int32))
+      it_parses "using = 1; using", [Assign.new("using".var, 1.int32), "using".var]
+      it_parses "foo(using: :x)", Call.new("foo", named_args: [NamedArgument.new("using", "x".symbol)])
+      it_parses "def using; end", Def.new("using")
+      it_parses "using.nil?", IsA.new("using".call, Path.global("Nil"), nil_check: true)
+      it_parses "def f(using = nil); using.nil? ? 1 : using.to_s; end",
+        Def.new("f", [Arg.new("using", NilLiteral.new)], If.new(IsA.new("using".var, Path.global("Nil"), nil_check: true), 1.int32, Call.new("using".var, "to_s"), ternary: true))
+      it_parses "using app/greeter", Call.new("using", Call.new("app".call, "/", "greeter".call))
 
       # iyi: a module path segment has to survive the round trip to the type
       # name it is reached by, `app/greeter` <-> `App::Greeter` (SPEC.md IV.6

@@ -1109,7 +1109,8 @@ module Iyi
             # scan_ident
           end
         when 's'
-          if char_sequence?('i', 'n', 'g')
+          # iyi: only a `.iyi` file refuses `using`; Crystal has no such keyword.
+          if char_sequence?('i', 'n', 'g') && @iyi
             return check_ident_or_keyword(:using, start)
           end
         else

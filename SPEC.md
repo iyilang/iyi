@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 36,537 lines, of which 4,763 are the library held to the 4,763 ceiling (7,271 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 142,382 lines, none of it written in iyi |
+| compiler | 142,383 lines, none of it written in iyi |
 | artifact format | `.iyimod` v64, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1073,9 +1073,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 142,382 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 142,383 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 36,537-line own prelude + 128,696 in std |
-| Specs | 21,146 lines | 17,691 for iyi |
+| Specs | 21,146 lines | 17,718 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -11835,7 +11835,8 @@ were added to the lexer with no regressions: `trailing`,
 `impl` was in use as a local variable in two compiler tool files, which had to be
 renamed. Every keyword iyi adds is a name taken away from every program; the
 count should stay small. `using`, the keyword `import X::{...}` replaced, is
-still lexed, so the parser can refuse it with the line that replaces it.
+still lexed in a `.iyi` file, so the parser can refuse it with the line that
+replaces it. In a `.cr` file it is an ordinary name, as in Crystal.
 
 ### IV.5 Versioning
 

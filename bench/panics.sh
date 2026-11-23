@@ -1068,18 +1068,17 @@ if [ "$(uname -s)" != Darwin ]; then
     fail "two threads' panics were not all caught: $(cat "$work/pdb_threads.out")"
   tr '\\' '/' < "$work/pdb_threads.err" | tr -d '\r' > "$work/pdb_threads.trace"
   # Each function at the line it is on in this file, once per trace, and
-  # nowhere else. A frame line is std/debug's one write and ends its line,
-  # but it is matched wherever it starts: `raise` prints its message and
-  # its site in several writes (prelude.iyi, `__iyi_say` piece by piece),
-  # so two threads that panic at once can put one's frame inside the
-  # other's site - "  at …/pdb_threads.iyi:  at …/pdb_threads.iyi:6" then
-  # "16" alone, 1 trace in 40 on Windows. That tearing is the prelude's,
-  # older than this reader and a separate issue; this checks the frames.
+  # nowhere else, each frame a line of its own from its start: a frame
+  # line is std/debug's one write, and `raise`'s report is one write too
+  # (step 14). The frames were matched wherever they started while the
+  # report went out piece by piece and two threads' tore each other's
+  # lines - "  at …/pdb_threads.iyi:  at …/pdb_threads.iyi:6" then "16"
+  # alone, 1 trace in 40 on Windows.
   for frame in left_depth3:6 left_depth2:11 right_depth3:16 right_depth2:21; do
     name=${frame%%:*}
-    at=$(grep -cE "[0-9]+   $name at .*/pdb_threads\.iyi:${frame#*:}(:[0-9]+)?$" "$work/pdb_threads.trace" || true)
+    at=$(grep -cE "^[0-9]+   $name at .*/pdb_threads\.iyi:${frame#*:}(:[0-9]+)?$" "$work/pdb_threads.trace" || true)
     [ "$at" = "$traces" ] || fail "$name was resolved at its line in $at traces of $traces: $(head -40 "$work/pdb_threads.trace")"
-    all=$(grep -cE "[0-9]+ +$name( |$)" "$work/pdb_threads.trace" || true)
+    all=$(grep -cE "^[0-9]+ +$name( |$)" "$work/pdb_threads.trace" || true)
     [ "$all" = "$traces" ] || fail "$name was printed $all times, $at of them at its line, for $traces traces: $(grep -E "[0-9]+ +$name( |$)" "$work/pdb_threads.trace" | sort | uniq -c)"
   done
 fi
@@ -1111,5 +1110,164 @@ for broken in modvar cached; do
   grep -qF "$want" "$work/$broken.log" || fail "the $broken copy was refused, but not by the reach rule: $(grep -m1 Error "$work/$broken.log")"
 done
 step "two threads' panics resolve each trace whole, and the reader in module state is refused"
+
+# ── 14. threads that panic at once print whole lines ───────────────────────
+# `raise` wrote its report in eight pieces - `iyi: panic: `, the message,
+# its newline, `  at `, the file, the colon, the line, its newline - and
+# threads that panicked together tore each other's lines: eight units each
+# panicking 200 times left 58 to 62 % of the lines on Linux and 85 to 95 %
+# on Windows no whole line of any report, and 73 to 98 % of the messages
+# without their own site under them.
+# The report is put in a room on the stack and written in one call now.
+# Eight units panic 400 times each, every panic caught at its task's
+# boundary, and every line on the error stream must be a whole message or
+# a whole site, every message with its own site on the line under it. The
+# proof is a copy of the prelude whose `__iyi_say` writes each piece as it
+# is put in the room, as the eight writes did: it must tear in one of
+# three runs. darwin prints `backtrace_symbols_fd`'s frames after each
+# report, each a whole line - all 15.4 million of 800 runs on macOS 26.6
+# were, six to a report - in libSystem's columns, `%-4d%-35s 0x%016llx
+# %s + %lu`: there those are set aside first, matched column by column
+# from the line's start, so a torn piece in front of one - `4` of a site's
+# line before a frame's `1` - moves the image's name off column 5 and is
+# no frame, and what remains is held as everywhere else.
+cat > "$work/raise_lines.iyi" <<'EOF'
+module raiselines
+
+def boom(k : Int32) : Int32
+  raise "unit 0 boom" if k == 0
+  raise "unit 1 boom" if k == 1
+  raise "unit 2 boom" if k == 2
+  raise "unit 3 boom" if k == 3
+  raise "unit 4 boom" if k == 4
+  raise "unit 5 boom" if k == 5
+  raise "unit 6 boom" if k == 6
+  raise "unit 7 boom" if k == 7
+  k
+end
+
+def rounds(k : Int32, n : Int32) : Int32
+  caught = 0
+  i = 0
+  while i < n
+    group do |g|
+      t = g.spawn { boom(k) }
+      caught = caught + 1 if t.value.is_a?(Panicked)
+    end
+    i = i + 1
+  end
+  caught
+end
+
+n = Program.args[0].to_i
+total = 0
+group do |g|
+  t0 = g.spawn(unit: :new) { rounds(0, n) }
+  t1 = g.spawn(unit: :new) { rounds(1, n) }
+  t2 = g.spawn(unit: :new) { rounds(2, n) }
+  t3 = g.spawn(unit: :new) { rounds(3, n) }
+  t4 = g.spawn(unit: :new) { rounds(4, n) }
+  t5 = g.spawn(unit: :new) { rounds(5, n) }
+  t6 = g.spawn(unit: :new) { rounds(6, n) }
+  t7 = g.spawn(unit: :new) { rounds(7, n) }
+  v0 = t0.value
+  total = total + v0 if v0.is_a?(Int32)
+  v1 = t1.value
+  total = total + v1 if v1.is_a?(Int32)
+  v2 = t2.value
+  total = total + v2 if v2.is_a?(Int32)
+  v3 = t3.value
+  total = total + v3 if v3.is_a?(Int32)
+  v4 = t4.value
+  total = total + v4 if v4.is_a?(Int32)
+  v5 = t5.value
+  total = total + v5 if v5.is_a?(Int32)
+  v6 = t6.value
+  total = total + v6 if v6.is_a?(Int32)
+  v7 = t7.value
+  total = total + v7 if v7.is_a?(Int32)
+end
+puts "caught #{total}"
+EOF
+mkdir -p "$work/piecewise/iyi"
+cp src/iyi/*.iyi "$work/piecewise/iyi/"
+awk '$0 == "  return fill + take unless last || fill + take == 4096" { found++; next } { print } END { if (found != 1) exit 3 }' \
+  src/iyi/prelude.iyi > "$work/piecewise/iyi/prelude.iyi" ||
+  fail "the report's room is not kept until its last piece where it was in prelude.iyi"
+path="$work/piecewise:$PWD/src"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) path="$(cygpath -m "$work/piecewise");$(cygpath -m "$PWD/src")" ;;
+esac
+"$IYI" build -o "$work/raise_lines" "$work/raise_lines.iyi" > "$work/raise_lines.log" 2>&1 ||
+  fail "the panicking units did not build: $(cat "$work/raise_lines.log")"
+IYI_PATH="$path" "$IYI" build -o "$work/raise_lines_piecewise" "$work/raise_lines.iyi" > "$work/raise_lines.log" 2>&1 ||
+  fail "the panicking units did not build on the piecewise copy: $(cat "$work/raise_lines.log")"
+rounds=400
+darwin=0
+[ "$(uname -s)" = Darwin ] && darwin=1
+# stdin, DARWIN -> torn, unpaired, frames: lines that are no whole line of
+# a report, reports whose message has not its own site on the line under
+# it, and the frame lines set aside (when DARWIN is 1).
+count_lines() {
+  awk -v reports=$((8 * rounds)) -v darwin="$1" '
+    # `%-4d%-35s 0x%016llx %s + %lu`: the frame number and its padding in
+    # columns 1-4, the image from column 5 padded to 39 (the names here
+    # are shorter than 35), then the address and the symbol.
+    function frame(l) {
+      return substr(l, 1, 4) ~ /^[0-9]+ *$/ && substr(l, 5, 35) ~ /^[^ ]+ *$/ &&
+        length(substr(l, 40, 20)) == 20 && substr(l, 40, 20) ~ /^ 0x[0-9a-f]+ $/ &&
+        substr(l, 60) ~ /^[^ ].* \+ [0-9]+$/
+    }
+    darwin && frame($0) { frames++; next }
+    { line[++n] = $0 }
+    END {
+      torn = 0; pairs = 0
+      for (i = 1; i <= n; i++) {
+        if (line[i] ~ /^iyi: panic: unit [0-7] boom$/) {
+          k = substr(line[i], 18, 1) + 0
+          if (i < n && line[i + 1] ~ ("^  at .*/raise_lines\\.iyi:" (k + 4) "$")) { pairs++; i++ }
+        } else if (line[i] !~ /^  at .*\/raise_lines\.iyi:[0-9]+$/) {
+          torn++
+        }
+      }
+      print torn, reports - pairs, frames + 0
+    }'
+}
+# The frame match itself, on every host: a frame as darwin prints it is set
+# aside, and the same frame behind a site's `4`, behind a message, or
+# behind the `  at ` a site starts with is a torn line, not a frame.
+f='1   raise_lines                         0x00000001025aa8f4 ~procProc(Int32)^raise_lines.iyi:20 + 16'
+set -- $(printf '%s\n' "$f" "4$f" "unit 3 boom$f" "  at $f" | count_lines 1)
+[ "$1 $3" = "3 1" ] || fail "the frame match set aside $3 of 4 lines and called $1 torn, wanted 1 and 3"
+report_lines() { # binary -> torn, unpaired, frames
+  set +e
+  "$1" "$rounds" > "$work/raise_lines.out" 2> "$work/raise_lines.err"
+  code=$?
+  set -e
+  [ "$code" = 0 ] || fail "the panicking units exited $code: $(tail -20 "$work/raise_lines.err")"
+  [ "$(tr -d '\r' < "$work/raise_lines.out")" = "caught $((8 * rounds))" ] ||
+    fail "the panicking units' panics were not all caught: $(cat "$work/raise_lines.out")"
+  tr '\\' '/' < "$work/raise_lines.err" | tr -d '\r' | count_lines "$darwin" > "$work/raise_lines.count"
+  read -r torn unpaired frames < "$work/raise_lines.count"
+}
+for try in 1 2 3; do
+  report_lines "$work/raise_lines"
+  [ "$torn" = 0 ] && [ "$unpaired" = 0 ] ||
+    fail "run $try: $torn lines on the error stream were no whole line of a report and $unpaired of $((8 * rounds)) messages had not their own site under them: $(head -20 "$work/raise_lines.err")"
+  # Every darwin report prints its frames: none set aside is a format the
+  # match no longer knows, not a clean run.
+  [ "$darwin" = 0 ] || [ "$frames" -ge $((8 * rounds)) ] ||
+    fail "run $try: $frames frame lines were set aside for $((8 * rounds)) reports: $(head -20 "$work/raise_lines.err")"
+done
+caught=""
+for try in 1 2 3; do
+  report_lines "$work/raise_lines_piecewise"
+  if [ "$torn" != 0 ] || [ "$unpaired" != 0 ]; then
+    caught="$torn torn lines and $unpaired unpaired reports in run $try"
+    break
+  fi
+done
+[ -n "$caught" ] || fail "the copy writing the report piece by piece printed whole lines in 3 runs of $((8 * rounds)) panics"
+step "eight units' panics print whole lines, each message with its site (the piecewise copy: $caught)"
 
 echo "panics gate: every step held"

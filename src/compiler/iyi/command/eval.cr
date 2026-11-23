@@ -25,6 +25,7 @@ class Iyi::Command
 
     sources = [Compiler::Source.new("eval", program_source)]
 
+    Iyi.sweep_run_leftovers
     output_filename = Iyi.temp_executable "eval"
 
     compiler.compile sources, output_filename

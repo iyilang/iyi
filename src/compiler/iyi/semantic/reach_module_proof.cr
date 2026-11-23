@@ -487,7 +487,7 @@ module Iyi
     end
 
     private def verdict_path(file : String) : String?
-      CacheDir.instance.join("reach-#{module_key(file)}")
+      CacheDir.instance.join("#{CacheDir::REACH}#{module_key(file)}")
     rescue File::Error | IO::Error
       nil
     end
@@ -527,7 +527,10 @@ module Iyi
       current = nil
       lines.each_with_index do |line, index|
         next if index.zero?
-        return verdict if line == "end"
+        if line == "end"
+          CacheDir.instance.used(path)
+          return verdict
+        end
         fields = line.split('\t')
         case fields[0]?
         when "state"

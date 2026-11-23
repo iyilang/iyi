@@ -41,6 +41,10 @@ class Iyi::Program
                                cleanup = true,
                                main_visitor : MainVisitor = MainVisitor.new(self),
                                also_check : TypeDeclarationProcessor? = nil) : ASTNode
+    # iyi: every import is resolved, so the artifacts read under early
+    # cutoff are known, and so are their calls into modules compiled here.
+    DefinitionTyping.append_cutoff_keeps(self, node)
+
     @progress_tracker.stage("Semantic (ivars initializers)") do
       visitor = InstanceVarsInitializerVisitor.new(self)
       Prof.span("  ivars: node.accept") { node.accept visitor }

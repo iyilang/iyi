@@ -9,10 +9,11 @@
 #   * `stats` moves the way the collector does: `bytes_since_collection`
 #     climbs with allocation and is zero right after `collect`; `collections`
 #     counts every collection; the sweep after garbage reports bytes freed;
-#     `mapped_bytes` is at least one arena, and does not shrink within a
-#     second: a class's empty arenas go back once nobody has refilled it
-#     for three collections and a second (`IyiMark.class_idle?`), and the
-#     check stands under 134 ms into the run on Linux.
+#     `mapped_bytes` is at least one arena, and stays at or above the first
+#     arena's 16 MiB floor: a class's empty arenas go back once nobody has
+#     refilled it for three collections and a second (`IyiMark.class_idle?`),
+#     so the figure can fall below an earlier reading; the check stands under
+#     134 ms into the run on Linux.
 #   * `disable` holds the trigger through allocation that would have
 #     collected; `enable` lets it run again; `collect` works while disabled.
 #   * `stats` and `is_heap_ptr` take the runtime lock: held by another
@@ -23,8 +24,9 @@
 #     two seconds of it end without a fault, every answer right.
 #
 # bench/std_gc_exercise.sh drives it, builds once with -Dgc_none to require
-# the compile-time refusal, and breaks copies of the module to prove the
-# checks can fail.
+# the compile-time refusal, and breaks copies of the module and the runtime to
+# prove the checks can fail. With -Dstats_force or -Dis_heap_force, only the
+# forced block below runs (see there).
 #
 #     ./bin/iyi run bench/std_gc_exercise.iyi
 
@@ -48,6 +50,34 @@ def churn(rounds : Int32) : Int32
   end
   kept
 end
+
+# A failure proof's program, in a copy only: `-Dstats_force` or `-Dis_heap_force`
+# runs this block alone. It arms one large chunk and starts a second thread that
+# frees it while the walk holds at the chunk (see the proof in
+# bench/std_gc_exercise.sh). The copy's own calls live here, so this block does
+# not build against the real runtime.
+{% if flag?(:stats_force) || flag?(:is_heap_force) %}
+victim = GC.malloc(2_000_000)
+IyiHeap.forced_arm(victim.address)
+freer = IyiThread.start do
+  IyiHeap.forced_started_set
+  IyiHeap.forced_wait_held
+  IyiHeap.forced_acked_set
+  GC.free(Pointer(Void).new(IyiHeap.forced_victim))
+  nil
+end
+IyiHeap.forced_wait_started
+{% if flag?(:stats_force) %}
+GC.stats
+{% else %}
+check(GC.is_heap_ptr(victim), "a large chunk is a heap pointer")
+{% end %}
+freer.join
+check(IyiHeap.forced_walked == 1_u64, "the walk reached the armed chunk once (#{IyiHeap.forced_walked})")
+check(IyiHeap.forced_waited?, "the freeing thread waited for the runtime lock")
+puts "the armed chunk was walked and read whole"
+exit 0
+{% end %}
 
 # Whether the block answered while another thread held the runtime lock.
 # The holder takes the lock, the block runs here, and the holder lets go
@@ -139,7 +169,7 @@ c0 = s0.collections
 churn(300_000)
 s1 = GC.stats
 check(s1.collections > c0, "churn crossed the trigger: collections #{c0} -> #{s1.collections}")
-check(s1.mapped_bytes >= s0.mapped_bytes, "mapped_bytes never shrinks below the first arena")
+check(s1.mapped_bytes >= 16_777_216_u64, "mapped_bytes stays at the first arena's floor (#{s1.mapped_bytes})")
 churn(1_000)
 check(GC.stats.bytes_since_collection > 0_u64, "bytes_since_collection climbs after allocation")
 c1 = GC.stats.collections
@@ -193,11 +223,12 @@ puts "  400 strings built where longer ones were freed, each a C string"
 # ---------------------------------------------------------------------------
 puts "== stats and is_heap_ptr wait for the runtime lock"
 # Both walk lists another thread's `free` or sweep unlinks and unmaps under
-# the runtime lock, so both walk under it. Held by another thread, it holds
-# them back until it is let go, and a copy that walks without it answers
-# inside the hold: every run, on every system. The races below meet
-# another thread's unmap only as the machine arranges it, and then the
-# unlocked walk faults or answers wrong, so they could not name that copy.
+# the runtime lock, so both walk under it. Held by another thread, a verb
+# waits until the holder lets go. `answered_while_held` checks that the real
+# module does, so this is the positive check. Its negative is the forced pair
+# in bench/std_gc_exercise.sh: a copy whose walk runs without the lock is held
+# at a large chunk while another thread frees it, and faults on the walk's next
+# read.
 mapped = 0_u64
 check(!answered_while_held { mapped = GC.stats.mapped_bytes }, "stats answered while another thread held the runtime lock")
 check(mapped >= 16_777_216_u64, "stats after the hold counts the arenas (#{mapped})")
@@ -216,8 +247,8 @@ puts "== stats beside threads that allocate"
 # array a turn, so collections are frequent and mappings come and go -
 # beside two seconds of `stats` died of a memory fault in 100 runs of 100
 # on Windows 11 and 99 of 100 on Linux, idle and on four busy cores, and
-# passed the hundredth there. That copy fails at the hold above now; this
-# is the walk under the lock beside unmaps.
+# passed the hundredth there. The unlocked copy is the forced pair in
+# bench/std_gc_exercise.sh now; this is the walk under the lock beside unmaps.
 stop = Atomic(Int32).new(0)
 allocators = [] of IyiThread
 3.times do
@@ -245,7 +276,7 @@ puts "== is_heap_ptr beside threads whose large chunks come and go"
 # fault in 200 runs of 200 on Windows 11 and 187 of 200 on Linux, idle
 # and on four busy cores, where it also answered wrong once and passed
 # 12 times; a Windows CI runner's answered wrong (job 136250482652).
-# That copy fails at the hold above now.
+# The unlocked copy is the forced pair in bench/std_gc_exercise.sh now.
 quit = Atomic(Int32).new(0)
 mappers = [] of IyiThread
 3.times do

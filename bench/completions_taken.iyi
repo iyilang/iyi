@@ -3,21 +3,11 @@
 #   ./bin/iyi run bench/completions_taken.iyi                # both steps
 #   ./bin/iyi run bench/completions_taken.iyi -- taken       # one of them
 #
-# `taken`: a parallel task parks on a socket's read, and the worker it
-# parked on starts a sibling task that computes for COMPUTE_MS with its
-# loop marked `@[NoPreempt]`, so nothing of that worker looks at a port or
-# a queue until it ends. The read's answer is sent while it computes. With
-# the process's one port another worker takes the answer, and the task
-# reads it on that worker within BOUND_MS; with a port per worker, or a
-# port only its own worker takes from, the answer waits for the
-# computation's end. The sibling is spawned onto the worker's own queue,
-# where an idle worker may steal it first: a round where it ran elsewhere
-# proves nothing and is run again, and `ROUNDS` that do prove are needed.
-# On the user's Windows 11 machine with 12 logical processors, 36 rounds
-# of 279 proved in 12 runs, about one in eight: at 40 attempts a run
-# would find fewer than three about one time in ten, at 120 about once
-# in ninety thousand, and a round that does not prove costs a
-# connection and no computation.
+# `taken`: a reader parks on a socket, and a sibling holds its worker on a
+# release word with preemption off. A spare waits in the shared port when
+# the answer is sent. The healthy read must finish on another worker before
+# the owner is released. The mutant exits when the armed reader's packet
+# is dispatched homebound; it does not observe a later read.
 #
 # `boost`: the process's dynamic priority boost is off once the pool has
 # started (`IyiWorkers.start`), as `GetProcessPriorityBoost` reads it.
@@ -25,6 +15,10 @@
 # bench/parallel_exercise.sh runs both on Windows, at twelve workers, and
 # a broken copy of the runtime each: a port whose packets only the thread
 # their task parked on takes, and a pool that leaves the boost on.
+#
+# Registry walks protect list links, not IyiFiber.state: that enum has no
+# atomic read paired with its writers. A missed wait-state observation can
+# end at its named status-76 watchdog, not as a caught defect.
 
 @[Unsafe("on Windows it asks whether the process's priority boost is off through GetProcessPriorityBoost, a C call answering through pointerof")]
 module bench/completions_taken
@@ -37,19 +31,156 @@ import std/socket::{IyiSocket, SocketError}
   end
 
   COMPUTE_MS = 1500_i64
-  BOUND_MS   =  250_i64
-  ROUNDS     =        3
-  ATTEMPTS   =      120
+
+  {% unless flag?(:run_end_copy) %}
+    # one ending: begin
+    # The run's one ending, for every catch, watchdog and setup failure, on
+    # any thread and under any lock. The first caller to claim the word
+    # writes its line and ends the process with its status; every later
+    # caller writes nothing and yields until that end.
+    #
+    # Its bounds. One write goes out only when lead, what and tail total at
+    # most 512 bytes; a longer line goes out piece by piece (lead, what, tail),
+    # each piece in as many writes as the kernel takes. The claim and the
+    # write take no lock. The exit is not lock-free on Windows: __iyi_exit
+    # first runs __iyi_hold_runtime_for_exit, a bounded spin of up to
+    # 10,000,000 try_locks of IyiRuntimeLock that parks while a stop is
+    # requested, so a caller that held that lock while a stop waited on its
+    # own thread would leave the claimant parked there. No call site does
+    # that: every caller runs on a scheduler, worker or monitor path, never
+    # in collector code. Nothing between the claim and the exit is a
+    # preemption point, because the block is @[NoPreempt]. On Darwin the exit
+    # is the raw SYS_exit call, so no libSystem code runs after the write. The
+    # libSystem-teardown explanation of the old hang was tested and ruled out
+    # (a raw write then LibC.exit ended with status 76 and one line), so the
+    # raw call is a choice, not a fix.
+    #
+    # Each copy of this block is held to bench/parallel_exercise.iyi's, and
+    # bench/parallel_exercise.sh appends it to each runtime copy it runs
+    # (-Drun_end_copy), so a hook and its fixture claim one word.
+    class RunEnd
+      @[UnsafeReach("the run's claim: atomically set once, reset only for the ending-hook setup probe")]
+      @@claimed : UInt64 = 0_u64
+
+      def self.claim : Bool
+        Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.compare_and_set(0_u64, 1_u64)[1]
+      end
+
+      {% if flag?(:ending_hook) %}
+        # Only before the racers start, after the cross-layer claim probe.
+        def self.reset_for_test : Nil
+          Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.set(0_u64)
+        end
+      {% end %}
+
+      {% if flag?(:ending_unclaimed) %}
+        # The planted mutant's count of writers, read by every caller's wait.
+        @[UnsafeReach("the mutant's count of writers: atomics only")]
+        @@written : UInt64 = 0_u64
+
+        def self.arrive : UInt64
+          Pointer(Atomic(UInt64)).new(pointerof(@@written).address).value.add(1_u64)
+        end
+
+        def self.written : UInt64
+          Pointer(Atomic(UInt64)).new(pointerof(@@written).address).value.get
+        end
+      {% end %}
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def run_end_write(fd : Int32, lead : String, what : String = "", tail : String = "") : Nil
+      size = lead.bytesize + what.bytesize + tail.bytesize
+      line = uninitialized UInt8[512]
+      base = pointerof(line).as(UInt8*)
+      at = 0
+      piece = 0
+      while piece < 3
+        text = piece == 0 ? lead : (piece == 1 ? what : tail)
+        from = text.to_unsafe
+        count = text.bytesize
+        if size <= 512
+          i = 0
+          while i < count
+            (base + at + i).value = from[i]
+            i = i + 1
+          end
+          at = at + count
+          from = base
+          count = piece == 2 ? at : 0
+        end
+        done = 0
+        while done < count
+          wrote = __iyi_write(fd, (from + done).as(Void*), (count - done).to_u64)
+          break if wrote <= 0_i64
+          done = done + wrote.to_i32
+        end
+        piece = piece + 1
+      end
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def end_run(status : Int32, fd : Int32, lead : String, what : String = "", tail : String = "") : NoReturn
+      {% if flag?(:ending_unclaimed) %}
+        # The planted mutant takes no claim: every caller writes its line, then
+        # waits until all five have written, so the first to exit ends the run
+        # with five lines.
+        run_end_write(fd, lead, what, tail)
+        RunEnd.arrive
+        started = __iyi_monotonic_ns
+        while RunEnd.written < 5_u64
+          if __iyi_monotonic_ns - started >= 10_000_000_000_i64
+            stuck = "FAIL: ending: setup: the unclaimed writers did not finish in 10000 ms\n"
+            __iyi_write(1, stuck.to_unsafe.as(Void*), stuck.bytesize.to_u64)
+            __iyi_exit(76)
+          end
+          IyiThread.spin_pause
+        end
+      {% else %}
+        unless RunEnd.claim
+          while true
+            IyiThread.yield_cpu
+          end
+        end
+        run_end_write(fd, lead, what, tail)
+      {% end %}
+      {% if flag?(:darwin) %}
+        asm("svc #0x80" :: "{x16}"(1_i64), "{x0}"(status.to_i64) : "memory" : "volatile")
+        while true
+        end
+      {% else %}
+        __iyi_exit(status)
+      {% end %}
+    end
+    # one ending: end
+  {% end %}
 
   def fail(message : String) : Nil
-    print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    end_run(1, 1, "FAIL: ", message, "\n")
   end
 
-  # What a round's two tasks say, `Share` by their atomic fields and with
-  # no setter (III.4.4): the worker the reader parked on and the one it
-  # read on, the worker the computation ran on and whether it computed,
-  # and when the answer was read and the computation ended.
+  def progress_hang(message : String) : NoReturn
+    end_run(76, 1, "FAIL: ", message, "\n")
+  end
+
+  # A failure before the proof was armed: the fixture could not set its scenario up, so no
+  # verdict was reached. Exit 76, never 1. Main-thread code only: its message is built here.
+  def setup_failure(message : String) : NoReturn
+    end_run(76, 1, "FAIL: ", message, "\n")
+  end
+
+  # A hang, or a not-armed failure, met by a task holding its worker with preemption off or under
+  # a lock. The run's one ending claims the result and writes the pieces without allocation.
+  @[NoInline]
+  @[NoPreempt]
+  def held_exit(status : Int32, lead : String, what : String, tail : String) : NoReturn
+    end_run(status, 1, lead, what, tail)
+  end
+
+  # Atomic observations shared by the reader and its holding sibling.
+  # The forced round uses their worker identities and the read time.
   class Marks
     @reader : Atomic(UInt64)
     @read_on : Atomic(UInt64)
@@ -57,6 +188,7 @@ import std/socket::{IyiSocket, SocketError}
     @computing : Atomic(Int64)
     @read_at : Atomic(Int64)
     @computed_until : Atomic(Int64)
+    @deadline : Atomic(Int64)
 
     def initialize
       @reader = Atomic(UInt64).new(0_u64)
@@ -65,6 +197,7 @@ import std/socket::{IyiSocket, SocketError}
       @computing = Atomic(Int64).new(0_i64)
       @read_at = Atomic(Int64).new(0_i64)
       @computed_until = Atomic(Int64).new(0_i64)
+      @deadline = Atomic(Int64).new(0_i64)
     end
 
     def reader : UInt64
@@ -116,10 +249,18 @@ import std/socket::{IyiSocket, SocketError}
     def note_computed_until(ns : Int64) : Nil
       @computed_until.set(ns)
     end
+
+    # Retained deadline field; the forced round does not use it.
+    def deadline : Int64
+      @deadline.get
+    end
+
+    def note_deadline(ns : Int64) : Nil
+      @deadline.set(ns)
+    end
   end
 
-  # The computation: integer work until *deadline*, with no check at the
-  # loop's back-edge, so its worker is the task's alone until then.
+  # Retained timed computation helper; the forced round uses a release word.
   @[NoPreempt]
   def compute(deadline : Int64) : UInt64
     x = 1_u64
@@ -131,89 +272,202 @@ import std/socket::{IyiSocket, SocketError}
     x
   end
 
-  # One round: true when the computation ran on the reader's worker, and
-  # then the read must have come in within the bound.
-  def round(listener : IyiSocket, port : Int32, number : Int32) : Bool
+  # Counts the holders share: `Share` by its atomic field.
+  class Tally
+    @count : Atomic(Int64)
+
+    def initialize
+      @count = Atomic(Int64).new(0_i64)
+    end
+
+    def add(value : Int64) : Nil
+      @count.add(value)
+    end
+
+    def count : Int64
+      @count.get
+    end
+  end
+
+  # A slot a task notes its fiber or worker in.
+  class Slot
+    @value : Atomic(UInt64)
+
+    def initialize
+      @value = Atomic(UInt64).new(0_u64)
+    end
+
+    def value : UInt64
+      @value.get
+    end
+
+    def note(id : UInt64) : Nil
+      @value.set(id)
+    end
+  end
+
+  # Whether the fiber with object id *id* is in *state* now, read from the scheduler's list of every fiber.
+  @[NoInline]
+  @[NoPreempt]
+  def fiber_in_state?(id : UInt64, state : IyiFiberState) : Bool
+    found = false
+    IyiRuntimeLock.lock
+    fiber = IyiScheduler.first_fiber
+    while fiber.is_a?(IyiFiber)
+      if fiber.object_id == id
+        found = fiber.state == state
+        break
+      end
+      fiber = fiber.next_fiber
+    end
+    IyiRuntimeLock.unlock
+    found
+  end
+
+  # A spin with preemption off until *count* reaches *target*. Its limit ends a hang as a named failure.
+  @[NoInline]
+  @[NoPreempt]
+  def hold_until_or_fail(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while count.count < target
+      IyiThread.spin_pause
+      held_exit(76, "FAIL: ", what, ": the hold did not release in 20000 ms\n") if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # The main thread's wait for *count* to reach *target*, with a named limit.
+  def wait_or_fail(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 10_000_000_000_i64
+    while count.count < target
+      sleep(1)
+      progress_hang("#{what}: no progress in 10000 ms") if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # Every worker but one is held while the reader parks. Its sibling holds
+  # that worker on a release word; a spare waits in the port before main
+  # sends the answer. In a forced copy, the armed reader's dispatch records
+  # whether it was made homebound. The healthy read must finish on a spare
+  # before main releases the sibling. Each wait has a named progress limit.
+  def forced_round(listener : IyiSocket, port : Int32) : Nil
     near = IyiSocket.connect("127.0.0.1", port, 5000)
-    fail("taken: connect answered #{near}") unless near.is_a?(IyiSocket)
+    setup_failure("taken: connect answered #{near}") unless near.is_a?(IyiSocket)
     far = listener.accept
-    fail("taken: accept answered #{far}") unless far.is_a?(IyiSocket)
+    setup_failure("taken: accept answered #{far}") unless far.is_a?(IyiSocket)
     far_fd = far.fd
     marks = Marks.new
-    sent_at = 0_i64
+    reader = Slot.new
+    owner = Slot.new
+    holders = IyiWorkers.count - 1
+    parked = Tally.new
+    release = Tally.new
+    spare = Tally.new
+    owner_go = Tally.new
     group do |g|
+      (holders - 1).times do
+        g.spawn(unit: :new) do
+          parked.add(1_i64)
+          hold_until_or_fail(release, 1_i64, "taken: progress hang: a holder was not released")
+          0
+        end
+      end
       g.spawn(unit: :new) do
+        parked.add(1_i64)
+        hold_until_or_fail(spare, 1_i64, "taken: progress hang: the spare was not released")
+        0
+      end
+      wait_or_fail(parked, holders.to_i64, "taken: progress hang: the holders did not start")
+      g.spawn(unit: :new) do
+        reader.note(IyiScheduler.current.object_id)
         group do |inner|
-          # Onto this worker's own queue, which it takes from next once the
-          # read below parks; a steal may take it first.
           inner.spawn(unit: :new) do
             here = IyiScheduler.state.object_id
+            owner.note(here)
             marks.note_computer(here)
-            if here == marks.reader
-              marks.note_computing(1_i64)
-              x = compute(__iyi_monotonic_ns + COMPUTE_MS * 1_000_000_i64)
-              marks.note_computed_until(__iyi_monotonic_ns + (x == 0_u64 ? 1_i64 : 0_i64))
-            else
-              marks.note_computing(2_i64)
-            end
+            marks.note_computing(here == marks.reader ? 1_i64 : 2_i64)
+            hold_until_or_fail(owner_go, 1_i64, "taken: progress hang: the computing sibling was not released")
             0
           end
           marks.note_reader(IyiScheduler.state.object_id)
-          got = IyiSocket.new(far_fd).read(1).or_panic
+          reply = IyiSocket.new(far_fd).read(1)
+          setup_failure("taken: setup: the forced read failed with a socket error") if reply.is_a?(SocketError)
+          got = reply
           marks.note_read_at(__iyi_monotonic_ns)
           marks.note_read_on(IyiScheduler.state.object_id)
-          fail("taken: round #{number}'s read answered #{got.inspect}") unless got == "x"
+          fail("taken: the read answered #{got.inspect} where x was sent") unless got == "x"
         end
         0
       end
-      waited = 0
-      while marks.computing == 0_i64
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while reader.value == 0_u64 || !fiber_in_state?(reader.value, IyiFiberState::WaitingIo)
         sleep(1)
-        waited = waited + 1
-        fail("taken: round #{number}'s sibling did not start in 10000 ms") if waited > 10000
+        progress_hang("taken: progress hang: the reader did not park on its read in 10000 ms") if __iyi_monotonic_ns > limit
       end
-      sent_at = __iyi_monotonic_ns
-      near.write("x").or_panic
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while owner.value == 0_u64
+        sleep(1)
+        progress_hang("taken: progress hang: the sibling did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      setup_failure("taken: not armed: the sibling did not start on its reader's worker") unless owner.value == marks.reader
+      {% if flag?(:nocross_force) %}
+        IyiScheduler.force_dispatch_target(reader.value)
+      {% end %}
+      spare.add(1_i64)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiScheduler.waiting_threads < 1_u64
+        sleep(1)
+        progress_hang("taken: progress hang: no spare waited in the port in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      wrote = near.write("x")
+      setup_failure("taken: the send answered #{wrote}") unless wrote.is_a?(Int32)
+      {% if flag?(:nocross_force) %}
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiScheduler.force_dispatch_fiber != reader.value
+        sleep(1)
+        progress_hang("taken: progress hang: the packet was not dispatched in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      fail("taken: the packet's fiber was made homebound to the worker it parked on, so its answer waits for that worker") if IyiScheduler.force_dispatch_homebound == 1_u64
+      {% end %}
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while marks.read_on == 0_u64
+        sleep(1)
+        progress_hang("taken: progress hang: the answer was not read in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      elsewhere = marks.read_on != owner.value
+      owner_go.add(1_i64)
+      release.add(1_i64)
+      setup_failure("taken: not armed: the answer was read on the worker that computed") unless elsewhere
+      puts "taken: a packet's answer was read on another worker while its reader's worker computed"
     end
     near.close
     far.close
-    return false unless marks.computing == 1_i64
-    took = (marks.read_at - sent_at) // 1_000_000_i64
-    computed = (marks.computed_until - sent_at) // 1_000_000_i64
-    if took > BOUND_MS
-      fail("taken: round #{number}'s answer, sent while its worker computed, was read #{took} ms later (the worker computed #{computed} ms more)")
-    end
-    if marks.read_on == marks.reader
-      fail("taken: round #{number}'s answer was read on the worker that computed, #{took} ms after it was sent")
-    end
-    puts "taken: round #{number}: read #{took} ms after it was sent, on another worker, while its own computed #{computed} ms more"
-    true
   end
 
   def taken : Nil
     listener = IyiSocket.listen("127.0.0.1", 0)
     port = listener.local_port
-    proved = 0
-    attempts = 0
-    while proved < ROUNDS && attempts < ATTEMPTS
-      attempts = attempts + 1
-      proved = proved + 1 if round(listener, port, attempts)
-    end
+    forced_round(listener, port)
     listener.close
-    if proved < ROUNDS
-      fail("taken: in #{attempts} rounds the computation ran on its reader's worker #{proved} times, not #{ROUNDS}")
-    end
-    puts "taken: #{proved} answers read on another worker in #{attempts} rounds, on #{IyiWorkers.count} workers"
   end
 
   def boost : Nil
+    # Make the starting state explicit: a mutant that omits the pool's
+    # change must not pass because the process inherited a disabled boost.
+    if ::LibC.SetProcessPriorityBoost(::LibC.GetCurrentProcess, 0_i32) == 0
+      setup_failure("boost: could not enable the process's priority boost before starting the pool")
+    end
+    disabled = 1
+    if LibBoost.GetProcessPriorityBoost(::LibC.GetCurrentProcess, pointerof(disabled)) == 0
+      setup_failure("boost: GetProcessPriorityBoost failed before starting the pool")
+    end
+    setup_failure("boost: the process's priority boost was not initially enabled") if disabled != 0
     # The pool starts at the first parallel task.
     group do |g|
       g.spawn(unit: :new) { 0 }
     end
     disabled = 0
     if LibBoost.GetProcessPriorityBoost(::LibC.GetCurrentProcess, pointerof(disabled)) == 0
-      fail("boost: GetProcessPriorityBoost failed")
+      setup_failure("boost: GetProcessPriorityBoost failed")
     end
     fail("boost: the process's priority boost is on with the pool started") if disabled == 0
     puts "boost: off with the pool started"
@@ -227,7 +481,7 @@ import std/socket::{IyiSocket, SocketError}
     if argument.starts_with?("--workers=")
       workers = argument[10, argument.size - 10].to_i
     else
-      fail("no step named #{argument}") unless STEPS.includes?(argument)
+      setup_failure("no step named #{argument}") unless STEPS.includes?(argument)
       chosen << argument
     end
   end

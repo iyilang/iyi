@@ -49,12 +49,20 @@ struct LLVM::Function
     LibLLVM.add_target_dependent_function_attr self, name, value
   end
 
+  # iyi: the attributes the function has at *index*, asked of LLVM as a list,
+  # rather than one question per attribute kind LLVM knows. That was about a
+  # hundred calls for each parameter of each function `declare_fun` copies
+  # into another unit, nearly all of them answering no.
   def attributes(index = AttributeIndex::FunctionIndex)
     attrs = Attribute::None
-    0.upto(LibLLVM.get_last_enum_attribute_kind) do |kind|
-      if LibLLVM.get_enum_attribute_at_index(self, index, kind)
-        attrs |= Attribute.from_kind(kind)
-      end
+    count = LibLLVM.get_attribute_count_at_index(self, index)
+    return attrs if count == 0
+    refs = Pointer(LibLLVM::AttributeRef).malloc(count)
+    LibLLVM.get_attributes_at_index(self, index, refs)
+    count.times do |i|
+      ref = refs[i]
+      next if LibLLVM.is_string_attribute(ref) != 0
+      attrs |= Attribute.from_kind(LibLLVM.get_enum_attribute_kind(ref))
     end
     attrs
   end

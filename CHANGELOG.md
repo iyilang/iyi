@@ -66,6 +66,34 @@
   darwin.** Cut to iyi's own frames and to 40 lines, the hang above ended
   at the top-level visitor, a dozen frames above the `read` that held it.
 
+- **A rebuild after a one-line edit does less work it did not need: 9% less
+  processor time, 3-4% less wall time.** Measured on iyi-benchmarks' medium
+  project (30 modules, 7,266 lines, debug builds; Linux, 12 vCPU VM), 21
+  rebuilds interleaved with the same compiler built from 0.22.0's source,
+  with the suite's 95% interval: one number changed in a leaf module, 185.6
+  to 180.5 ms, 0.972x (0.949-0.984); in the module every other imports, 191.2
+  to 184.3 ms, 0.964x (0.936-0.985); processor time 298 to 272 ms and 299 to
+  271 ms. IR generation for the leaf edit went from 40.0 to 33.7 ms. The
+  suite's own batch, 9 rounds against the same base: leaf-body 0.98x
+  (0.93-0.99), core-body 0.95x (0.93-0.99), noop unchanged. What the edit
+  paid for:
+  - Every unit's module was verified again, though 373 of the 374 come out
+    byte for byte the bitcode the last build verified. Only a unit that
+    compiles is verified now: 20-22 ms less processor time on the codegen
+    threads.
+  - `LLVM::Function#attributes` asked LLVM about each of its ~100 attribute
+    kinds, one call each, for every parameter of every function copied into
+    another unit. It lists the attributes the function has.
+  - Local values and blocks were named in IR nothing printed. The names are
+    dropped unless `--emit`, `--ll`, `DUMP` or `IYI_DEBUG_CODEGEN` asks for
+    the IR: every object and program is the same bytes either way (debug and
+    `--release`, seven samples and the medium project compared), and the
+    bitcode compared for reuse is 7-16% smaller.
+  - The debug scope asked whether a function was the main one by reading
+    its name back from LLVM as a new string, once per node, and codegen read
+    `IYI_DEBUG_CODEGEN`, `IYI_TDF` and `IYI_SYM` from the environment about
+    12,000 times a build. It compares the function, and reads each once.
+
 ## 0.22.0 — 2026-11-22
 
 **A string's hash is keyed afresh in every process, std/http holds a request

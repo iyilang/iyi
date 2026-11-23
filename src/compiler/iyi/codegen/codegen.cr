@@ -155,9 +155,9 @@ module Iyi
     end
 
     def codegen(node, single_module = false, debug = Debug::Default,
-                frame_pointers = FramePointers::Auto)
+                frame_pointers = FramePointers::Auto, discard_value_names = false)
       visitor = CodeGenVisitor.new self, node, single_module: single_module,
-        debug: debug, frame_pointers: frame_pointers
+        debug: debug, frame_pointers: frame_pointers, discard_value_names: discard_value_names
       Prof.span("  codegen: visitor.accept") { visitor.accept node }
       Prof.span("  codegen: finished hooks") { visitor.process_finished_hooks }
       Prof.span("  codegen: visitor.finish") { visitor.finish }
@@ -293,7 +293,17 @@ module Iyi
                    @single_module : Bool = false,
                    @debug = Debug::Default,
                    @frame_pointers : FramePointers = :auto,
-                   @llvm_context : LLVM::Context = LLVM::Context.new)
+                   @llvm_context : LLVM::Context = LLVM::Context.new,
+                   @discard_value_names : Bool = false)
+      @llvm_context.discard_value_names = true if @discard_value_names
+      # iyi: the debugging switches the hot paths ask about, read once a
+      # build rather than at every `unreachable` and every function: each
+      # read is a `getenv` and an entry in the build's record (`ENV`, in
+      # build_inputs.cr), about 12,000 of them a build of a 7,000-line
+      # program.
+      @debug_codegen = !ENV["IYI_DEBUG_CODEGEN"]?.nil?
+      @trace_def_fun = ENV["IYI_TDF"]?
+      @trace_sym = ENV["IYI_SYM"]?
       @abi = ABI.from(@program.target_machine)
       # LLVM::Context.register(@llvm_context, "main")
       @llvm_mod = configure_module(@llvm_context.new_module("main_module"))
@@ -2758,7 +2768,7 @@ module Iyi
     # ```
     #
     def debug_codegen_log(file = __FILE__, line = __LINE__, &)
-      return unless ENV["IYI_DEBUG_CODEGEN"]?
+      return unless @debug_codegen
       printf_args = yield || ""
       printf_args = {printf_args, [] of LLVM::Value} if printf_args.is_a?(String)
       printf_args = {printf_args[0], [] of LLVM::Value} if printf_args.is_a?({String})

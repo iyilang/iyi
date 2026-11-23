@@ -798,6 +798,10 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # "the name moved" about a name that had never pointed there, and refused
     # every boundary this compiler wrote. A boundary's answer is its inputs,
     # taken above.
+    # Not returned at once: a module whose own source moved is compiled from
+    # it, and whether its dependents' artifacts survive that depends on what
+    # its edges still say (early cutoff, below).
+    source_changed = nil
     if summary.inputs.empty? && (source = resolve_import(module_path))
       # iyi: a module path is a file path (SPEC.md R-1), so the same name can
       # come to mean a different file — delete a program's own `std/text.iyi`
@@ -820,7 +824,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       end
 
       unless IyiMod.digest(File.read(source)) == summary.hashes.source
-        return "#{source} has changed since it was written"
+        source_changed = "#{source} has changed since it was written"
       end
 
       # The names it was written under. A module of the program's own
@@ -832,13 +836,34 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       unless summary.package_name == expected
         was = summary.package_name.empty? ? "outside any package" : "under the package name `#{summary.package_name}`"
         now = expected.empty? ? "outside any package" : "under `#{expected}`"
-        return "it was written #{was}, and this build reads \"#{module_path}\" #{now}"
+        return source_changed || "it was written #{was}, and this build reads \"#{module_path}\" #{now}"
       end
     end
 
+    # iyi: early cutoff (SPEC.md IV.3). An import compiled from its changed
+    # source in this build does not make this artifact stale by itself: what
+    # this module was compiled against is what the edge recorded, the
+    # import's interface and the bodies it ships to be compiled elsewhere,
+    # so a change that leaves both hashing the same left nothing here to
+    # recompile. Its new hashes exist only once its front end has run, so
+    # the artifact is read on that condition and the condition is checked
+    # then (`Compiler#check_iyi_cutoff`); a build whose condition failed is
+    # built again without the cutoff.
+    #
+    # Only an import stale for *its own source* and nothing else, and its
+    # own conditions come along. An import stale because something *it*
+    # imports moved may still hash the same while a type its signatures
+    # name from that module changed layout: its hashes name the type, they
+    # do not describe it.
+    conditions = [] of IyiMod::ImportEdge
     summary.imports.each do |edge|
       if reason = iyi_artifact_stale(edge.module_name, dir)
-        return "\"#{edge.module_name}\", which it imports, has: #{reason}"
+        if !edge.interface.empty? && (inherited = @program.iyi_artifact_rebuilt[edge.module_name]?)
+          conditions.concat inherited
+          conditions << edge
+          next
+        end
+        return source_changed || "\"#{edge.module_name}\", which it imports, has: #{reason}"
       end
 
       dependency = IyiMod.read_summary(Iyi.native_path(File.join(dir, "#{edge.module_name}.iyimod")))
@@ -851,13 +876,18 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       next if edge.interface.empty? && edge.implementation.empty?
 
       unless dependency.hashes.interface == edge.interface
-        return "the surface of \"#{edge.module_name}\", which it imports, has changed"
+        return source_changed || "the surface of \"#{edge.module_name}\", which it imports, has changed"
       end
       unless dependency.hashes.implementation == edge.implementation
-        return "the bodies \"#{edge.module_name}\" ships for it to compile have changed"
+        return source_changed || "the bodies \"#{edge.module_name}\" ships for it to compile have changed"
       end
     end
 
+    if source_changed
+      @program.iyi_artifact_rebuilt[module_path] = conditions if @program.iyi_cuts_off?
+      return source_changed
+    end
+    @program.iyi_artifact_conditions[module_path] = conditions unless conditions.empty?
     nil
   end
 
@@ -973,6 +1003,13 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # What this module hashed to, for the artifacts this build writes: an edge
     # records the far end's hashes whichever way the far end arrived (IV.3).
     @program.iyi_artifact_hashes[artifact.module_name] = artifact.hashes
+
+    # Read under early cutoff, its calls into a module compiled from source
+    # here are machine code this build does not analyse, so they are made
+    # once more where it does (`DefinitionTyping.append_cutoff_keeps`).
+    if @program.iyi_artifact_conditions.has_key?(artifact.module_name)
+      @program.iyi_cutoff_demands.concat artifact.demands
+    end
 
     # And what its functions reach of module state, which the walk from a
     # spawn's block reads where their bodies are not here (SPEC.md

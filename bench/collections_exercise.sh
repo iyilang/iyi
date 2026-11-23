@@ -154,6 +154,43 @@ panics_with "a dig of a missing key" dig_missing "no such key \"q\"" "{\"a\" => 
 panics_with "values_at of a missing key" values_at_missing "no such key \"z\"" "{\"a\" => 1}.values_at(\"a\", \"z\")"
 
 echo
+echo "== a short row in a release build's product loop, which is still refused"
+
+# The loop `product_rows` in the exercise is, with a row shorter than the
+# rest: the size a release build hoists out of the loop
+# (src/compiler/iyi/codegen/array_tbaa.cr) is still checked on every index.
+cat > "$WORK/ragged_product.iyi" <<'IYI'
+module main
+
+def product_row(a : Array(Float64), b : Array(Array(Float64)), c : Array(Float64)) : Nil
+  (0...b.size).each do |k|
+    t = a[k]
+    bk = b[k]
+    (0...c.size).each { |j| c[j] += t * bk[j] }
+  end
+end
+
+row = Array.new(40) { 0.0 }
+product_row(Array.new(3) { 1.0 }, [Array.new(40) { 1.0 }, Array.new(40) { 2.0 }, Array.new(39) { 3.0 }], row)
+puts row[0]
+IYI
+if "$IYI" build --release -o "$WORK/ragged_product" "$WORK/ragged_product.iyi" > "$WORK/ragged_product.build" 2>&1; then
+  "$WORK/ragged_product" > "$WORK/ragged_product.out" 2>&1
+  code=$?
+  if [ "$code" -eq 1 ] && grep -q "index 39 out of range for 39 elements" "$WORK/ragged_product.out"; then
+    echo "  a short row: exits 1 at \"index 39 out of range for 39 elements\""
+  else
+    echo "  a short row: exit $code, not the refusal of index 39"
+    tail -2 "$WORK/ragged_product.out"
+    status=1
+  fi
+else
+  echo "  a short row: the program did not build"
+  sed -n '1,10p' "$WORK/ragged_product.build"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail, one broken method at a time"
 
 # A copy of the whole prelude with one method patched, on `IYI_PATH` ahead of
@@ -275,7 +312,7 @@ prove_fails "a set forgets its members" dup_set set.iyi \
 # 6. A negative index that does not wrap, so `a[-1]` is not the last.
 prove_fails "a negative index does not wrap" no_wrap array.iyi \
   "out of range for 3 elements" \
-  's/^    index = @size + index if index < 0$/    index = @size + index if false/'
+  's/^    at = index < 0 ? @size &+ index : index$/    at = index/'
 
 # 7. `uniq` keeping everything, which the collection checks read.
 prove_fails "uniq keeps everything" no_uniq array.iyi \
@@ -335,7 +372,7 @@ prove_fails "a span set from itself is read as it moves" self_splice array.iyi \
 
 prove_fails "a shorter span leaves the gap" open_gap array.iyi \
   "array: a span set to one value" \
-  's/^        @buffer\[at - count + length\] = @buffer\[at\]$/        @buffer[at - count + length] = @buffer[at - count + length]/'
+  's/^        @buffer\.array_put(at - count + length, @buffer\.array_at(at))$/        @buffer.array_put(at - count + length, @buffer.array_at(at - count + length))/'
 
 prove_fails "truncate keeps the front" truncate_front array.iyi \
   "array: truncate keeps the span" \
@@ -356,7 +393,7 @@ prove_fails "pop? answers nothing" pop_nothing array.iyi \
 
 prove_fails "first? answers nothing" first_nothing array.iyi \
   "array: first? answers the first" \
-  's/^    empty? ? nil : @buffer\[0\]$/    nil/'
+  's/^    empty? ? nil : @buffer\.array_at(0)$/    nil/'
 
 prove_fails "last n is the first n" last_first array.iyi \
   "array: last n" \
@@ -488,6 +525,120 @@ prove_fails "a table hash that counts the order" ordered_hash hash.iyi \
 prove_fails "== is identity again" identity_eq hash.iyi \
   "hash: equal pairs in another order are equal" \
   '/^  def ==(other : Hash(K, V)) : Bool$/,/^  end$/d'
+
+# 3. A string hashed as it was before #212: FNV-1a from a fixed start, which
+#    every key the exercise builds to collide under it then shares.
+prove_fails "String#hash is FNV-1a again" fnv_string string.iyi \
+  "hash: keys built to collide under FNV-1a spread" \
+  's/^  def hash : Int32$/  def hash : Int32; value = -2128831035; bytesize.times { |i| value = (value ^ to_unsafe[i].to_i32) \&* 16777619 }; return value; end; def sip_hash : Int32/'
+
+echo
+echo "== a string's hash is SipHash-1-3, keyed afresh in every process (#212)"
+
+# Six strings across the block edges: none, one byte, seven, eight, nine,
+# and a long one. Keyed with the reference key 00 01 .. 0f, SipHash-1-3
+# answers what the published implementation answers - Rust's `siphasher`
+# `Sip13` gives 0xabac0158050fc4dc for the empty string - folded to 32 bits
+# by `UInt64#hash`; computed with a Python transcription of the paper's
+# algorithm checked against that vector.
+printf 'module main\n\nputs ["", "a", "abcdefg", "abcdefgh", "abcdefghi", "hello world, this is a longer key!"].map(&.hash).join(" ")\n' > "$WORK/keyed.iyi"
+REFERENCE="-1653063420 -1401826804 -154133257 1847241452 -1294140095 -1843959762"
+
+# keyed_build <dir> <name> [build flags...]: keyed.iyi built against the
+# prelude copy in <dir> (`-` for the real one) and run twice, into
+# <name>.1 and <name>.2; fails, saying why, when either step does.
+keyed_build() {
+  local dir="$1" name="$2" search="$REPO/src"
+  shift 2
+  [ "$dir" = "-" ] || search="$WORK/$dir${PSEP}$REPO/src"
+  if ! IYI_PATH="$search" "$IYI" build "$@" -o "$WORK/$name" "$WORK/keyed.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $name: did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    return 1
+  fi
+  "$WORK/$name" > "$WORK/$name.1" 2>&1 && "$WORK/$name" > "$WORK/$name.2" 2>&1 && return 0
+  echo "  $name: the program failed: $(cat "$WORK/$name.2" "$WORK/$name.1" 2>/dev/null | head -2 | tr '\n' ' ')"
+  return 1
+}
+
+# keyed_apart <name>: whether two runs hashed every string differently.
+# One string landing on the same 32 bits in both runs is 1 in 2^32, so
+# six of six apart is a bound no run misses, and a key shared by any of
+# the six lengths' paths is caught.
+keyed_apart() {
+  [ -s "$WORK/$1.1" ] && [ "$(paste -d ' ' "$WORK/$1.1" "$WORK/$1.2" | awk '{ n = NF / 2; same = 0; for (i = 1; i <= n; i++) if ($i == $(i + n)) same++; print (NF == 12 ? same : -1) }')" = 0 ]
+}
+
+# keyed_copy <dir> <sed script>: the prelude copied, string.iyi patched; a
+# patch that changes nothing fails.
+keyed_copy() {
+  mkdir -p "$WORK/$1/iyi"
+  cp -R "$REPO/src/iyi/." "$WORK/$1/iyi/"
+  sed -e "$2" "$REPO/src/iyi/string.iyi" > "$WORK/$1/iyi/string.iyi"
+  ! cmp -s "$REPO/src/iyi/string.iyi" "$WORK/$1/iyi/string.iyi"
+}
+
+REFERENCE_KEY='s/^  private HASH_KEY *= __iyi_hash_key$/  private HASH_KEY = {0x0706050403020100_u64, 0x0f0e0d0c0b0a0908_u64}/'
+
+if keyed_build - live; then
+  if keyed_apart live; then
+    echo "  two runs hash all six strings apart: $(cat "$WORK/live.1") / $(cat "$WORK/live.2")"
+  else
+    echo "  FAIL: two runs share a string's hash, so the key is not the process's own: $(cat "$WORK/live.1") / $(cat "$WORK/live.2")"
+    status=1
+  fi
+else
+  status=1
+fi
+
+if ! keyed_copy reference "$REFERENCE_KEY"; then
+  echo "  the reference-key patch changed nothing, so the vectors prove nothing"
+  status=1
+else
+  for flags in plain release; do
+    if keyed_build reference "reference-$flags" $([ "$flags" = release ] && echo --release); then
+      if [ "$(cat "$WORK/reference-$flags.1")" = "$REFERENCE" ]; then
+        echo "  $flags, the reference key: SipHash-1-3's answers for all six"
+      else
+        echo "  FAIL: $flags, the reference key: $(cat "$WORK/reference-$flags.1"), not SipHash-1-3's $REFERENCE"
+        status=1
+      fi
+    else
+      status=1
+    fi
+  done
+fi
+
+# And each of the two checks above caught by a copy that breaks it: a key
+# fixed in the source - FNV's mistake again, under SipHash - and one round
+# of finalisation left out, which is SipHash-1-2 and nobody's vector.
+if ! keyed_copy fixed_key 's/^  private HASH_KEY *= __iyi_hash_key$/  private HASH_KEY = {1_u64, 2_u64}/'; then
+  echo "  a key fixed in the source: the patch changed nothing, so this proves nothing"
+  status=1
+elif keyed_build fixed_key fixed-key-run; then
+  if keyed_apart fixed-key-run; then
+    echo "  a key fixed in the source: two runs still hashed apart, so the check does not test the key"
+    status=1
+  else
+    echo "  a key fixed in the source: caught, both runs printed $(cat "$WORK/fixed-key-run.1")"
+  fi
+else
+  status=1
+fi
+if ! keyed_copy two_rounds "$REFERENCE_KEY"'; s/^    3.times { v0, v1, v2, v3 = sip_round(v0, v1, v2, v3, 0_u64) }$/    2.times { v0, v1, v2, v3 = sip_round(v0, v1, v2, v3, 0_u64) }/' \
+   || cmp -s "$WORK/reference/iyi/string.iyi" "$WORK/two_rounds/iyi/string.iyi"; then
+  echo "  two finalisation rounds: the patch changed nothing, so this proves nothing"
+  status=1
+elif keyed_build two_rounds two-rounds-run; then
+  if [ "$(cat "$WORK/two-rounds-run.1")" = "$REFERENCE" ]; then
+    echo "  two finalisation rounds: the reference answers still came out, so the vectors do not test the rounds"
+    status=1
+  else
+    echo "  two finalisation rounds: caught, $(cut -d ' ' -f 1 "$WORK/two-rounds-run.1") where SipHash-1-3 is ${REFERENCE%% *}"
+  fi
+else
+  status=1
+fi
 
 echo
 echo "== and what an empty receiver says when it is asked for a size"

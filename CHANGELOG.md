@@ -94,6 +94,25 @@
     `IYI_DEBUG_CODEGEN`, `IYI_TDF` and `IYI_SYM` from the environment about
     12,000 times a build. It compares the function, and reads each once.
 
+- **A `--release` build is cut finer and more evenly.** A partition is
+  now about 5,000 instructions rather than 20,000 (`ReleasePartition`):
+  every program carries the runtime's 30,000, so a hello world was cut in
+  two and iyi-benchmarks' compile-axis program (58,209) in three, nine of
+  12 cores idle. And a function with the locals only it calls stops
+  growing into one group at half an average partition: that program's
+  `main` and the 30 functions only it calls were one group of 19,067
+  instructions, which cut in 12 left one partition with 18,892 of them and
+  two with none. iyi-benchmarks' `release-fresh` on a shared 12-vCPU Linux
+  VM, median of 7, the same commit and LLVM (21.1.8) before and after:
+  1.095 s to 0.670 s (0.61x), its LLVM phase 0.928 s to 0.506 s, against
+  0.22.0's 1.882 s and Go's 0.186 s. The price is processor time, 2.3 s to
+  3.7 s for that stage, and binary size, 575 KiB to 645 KiB. What the
+  stage cannot go under now is the runtime's largest functions (the
+  scheduler's `worker_next`, the collector's `helper_main`), about 0.45 s.
+  `-s` prints what the partitions own, and `bench/release_cores.sh` holds
+  the balance against groups grown whatever their size
+  (`IYI_RELEASE_GROUP=0`).
+
 ## 0.22.0 — 2026-11-22
 
 **A string's hash is keyed afresh in every process, std/http holds a request

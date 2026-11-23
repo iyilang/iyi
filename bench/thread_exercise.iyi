@@ -20,8 +20,22 @@
 @[Unsafe("its threads count in a page mapped with __iyi_mmap, read and written as atomics through raw pointers")]
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   def fail(message : String) : Nil
-    print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    page = Tally.page
+    if page == 0_u64 || Pointer(Atomic(UInt64)).new(page + 320_u64).value.compare_and_set(0_u64, 1_u64)[1]
+      print "FAIL: #{message}\n"
+      __iyi_exit(1)
+    end
+    # Another thread's failure is being reported, and its exit ends the
+    # process: this one waits for that, so a run prints one FAIL line.
+    while true
+      IyiThread.spin_pause
+    end
+  end
+
+  # Watchdogs report setup failures, never a verdict about join.
+  def join_setup(message : String) : Nil
+    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+    __iyi_exit(76)
   end
 
   # A node with a payload the checksum covers, and a pointer the marker
@@ -65,11 +79,23 @@
       Pointer(Atomic(UInt64)).new(@@page + 192_u64)
     end
 
+    # The page's address, zero until setup. Word 320 of it is the one
+    # failure a run may print: the first thread to fail takes it (`fail`).
+    def self.page : UInt64
+      @@page
+    end
+
     # Each thread takes its number here, not from a captured variable: a
     # block captures the variable, not its value, and every thread
     # started from one loop read the last iteration's.
     def self.numbers : Pointer(Atomic(UInt64))
       Pointer(Atomic(UInt64)).new(@@page + 256_u64)
+    end
+
+    # No thread allocates after the explicit collection until every thread
+    # has checked the sweep flags on its own held list.
+    def self.checked : Pointer(Atomic(UInt64))
+      Pointer(Atomic(UInt64)).new(@@page + 384_u64)
     end
   end
 
@@ -187,11 +213,24 @@
     # a freed node is still flagged — the deterministic form of the
     # thread-root property, and what the driver's failure proof removes.
     Tally.ready.value.add(1_u64)
+    deadline = __iyi_monotonic_ns + 20_000_000_000_i64
     while Tally.go.value.get == 0_u64
+      if __iyi_monotonic_ns >= deadline
+        join_setup("SETUP: threads: the explicit collection did not release the ready workers\n")
+      end
+      IyiThread.spin_pause
     end
     freed = ledger.freed
-    fail("thread #{seed.to_i64}: #{freed} live nodes are on a free list after the collection that stopped this thread, so its frames were not scanned") if freed != 0_i64
+    fail("thread roots: the explicit collection swept a held thread's live nodes") if freed != 0_i64
     fail("thread #{seed.to_i64}: the live list's checksum changed under the collection that stopped this thread") if checksum(list) != expected
+    Tally.checked.value.add(1_u64)
+    deadline = __iyi_monotonic_ns + 20_000_000_000_i64
+    while Tally.go.value.get != 2_u64
+      if __iyi_monotonic_ns >= deadline
+        join_setup("SETUP: threads: the checked workers were not released after the explicit collection\n")
+      end
+      IyiThread.spin_pause
+    end
     burst = 0
     while burst < 20
       churn(20000)
@@ -279,71 +318,159 @@
     end
   {% end %}
 
-  # The process's open handles on Windows; 0 elsewhere, where the check
-  # that reads it has nothing to compare.
-  def process_handles : Int32
-    handles = 0
-    {% if flag?(:win32) %}
+  # The process's open handles, the count teardown_count reads on Windows.
+  {% if flag?(:win32) %}
+    def process_handles : Int32
+      handles = 0
       LibC.GetProcessHandleCount(LibC.GetCurrentProcess, pointerof(handles))
+      handles
+    end
+  {% end %}
+
+  # What a finished thread's scheduler leaves open, counted: the process's
+  # handles on Windows, and elsewhere the lowest descriptor number nothing
+  # holds. A new descriptor takes the lowest free number, so every descriptor
+  # a scheduler leaves open raises that number by one. The probe opens one and
+  # closes it again: no list of descriptors and no scan bound, and no import
+  # the floor does not already name (`kqueue` and `close` on darwin,
+  # `epoll_create1` by raw syscall on Linux).
+  {% if flag?(:darwin) %}
+    def probe_descriptor : Int64
+      LibC.kqueue.to_i64
+    end
+  {% elsif flag?(:linux) %}
+    def probe_descriptor : Int64
+      __iyi_conc_syscall3(IYI_SYS_EPOLL_CREATE1, 0_i64, 0_i64, 0_i64)
+    end
+  {% end %}
+
+  def free_descriptor : Int64
+    {% if flag?(:win32) %}
+      0_i64
+    {% else %}
+      fd = probe_descriptor
+      join_setup("SETUP: threads: the descriptor probe could not open a descriptor\n") if fd < 0
+      __iyi_close(fd)
+      fd
     {% end %}
-    handles
   end
 
-  # A thread whose block holds 64 KiB only it names, started and joined.
-  def start_holding(index : Int32) : Nil
+  def teardown_count : Int64
+    {% if flag?(:win32) %}
+      process_handles.to_i64
+    {% else %}
+      free_descriptor
+    {% end %}
+  end
+
+  # One thread's block holds a 64 KiB payload only it names, started and
+  # joined. The ledger records the payload's object id in a mapping the
+  # collector does not scan, so recording it roots nothing. NoInline keeps
+  # the payload out of the caller's frame once the call returns.
+  @[NoInline]
+  def start_holding(index : Int32, ledger : UInt64) : Nil
     payload = "#{index}:" + ("x" * 65536)
+    Pointer(UInt64).new(ledger)[index] = payload.object_id
     IyiThread.start { fail("joined: a block lost what it captured") if payload.size < 65536; nil }.join
   end
 
-  # Whether a line is still mapped: the kernel's answer on Windows, and
-  # no elsewhere, where the check that reads it has nothing to ask.
+  # Whether a line is still mapped. Windows asks the kernel for the region's
+  # state. darwin and Linux ask mprotect, which answers 0 for a page some
+  # mapping covers and ENOMEM for one none does. The protection asked for,
+  # read and write, is the one the line was mapped with, so the question
+  # leaves a mapped line as it was.
   def line_mapped?(line : UInt64) : Bool
     {% if flag?(:win32) %}
       info = uninitialized UInt64[6]
-      LibC.VirtualQuery(Pointer(Void).new(line), pointerof(info).as(Void*), 48_u64)
+      queried = LibC.VirtualQuery(Pointer(Void).new(line), pointerof(info).as(Void*), 48_u64)
+      join_setup("SETUP: joined: VirtualQuery failed for a joined thread's line\n") if queried == 0_u64
       # The region's state, at 32: MEM_FREE is 0x10000.
       (Pointer(UInt64).new(pointerof(info).address + 32_u64).value & 0xFFFFFFFF_u64) != 0x10000_u64
+    {% elsif flag?(:darwin) %}
+      LibC.mprotect(Pointer(Void).new(line), 4096_u64, 3_i32) == 0_i32
     {% else %}
-      false
+      __iyi_conc_syscall3(IYI_SYS_MPROTECT, line.to_i64, 4096_i64, 3_i64) == 0_i64
     {% end %}
   end
 
   class Rendezvous
+    getter ready : Atomic(Int64)
     getter go : Atomic(Int64)
     getter done : Atomic(Int64)
 
     def initialize
+      @ready = Atomic(Int64).new(0_i64)
       @go = Atomic(Int64).new(0_i64)
       @done = Atomic(Int64).new(0_i64)
     end
   end
 
-  # A finished thread joined again, with another started between the two
-  # joins. That one waits for the main thread to get past the second join
-  # and gives up after 20 s, which only a second join that waited on it
-  # lets happen.
+  # A later thread announces that it is running and cannot finish until
+  # the first thread's real second join returns and opens its gate.
   def join_twice : Nil
     meet = Rendezvous.new
     first = IyiThread.start { nil }
+    join_setup("SETUP: joined: the first thread had no line\n") if first.line == 0_u64
     first.join
     next_one = IyiThread.start do
-      limit = __iyi_monotonic_ns + 20_000_000_000_i64
-      while meet.go.get == 0_i64 && __iyi_monotonic_ns < limit
-        sleep(1)
+      deadline = __iyi_monotonic_ns + 20_000_000_000_i64
+      meet.ready.set(1_i64)
+      while meet.go.get == 0_i64
+        if __iyi_monotonic_ns >= deadline
+          join_setup("SETUP: joined: the second join did not release the later thread\n")
+        end
+        IyiThread.yield_cpu
       end
-      meet.done.set(meet.go.get == 0_i64 ? 2_i64 : 1_i64)
+      meet.done.set(1_i64)
       nil
     end
+    join_setup("SETUP: joined: the later thread had no line\n") if next_one.line == 0_u64
+    deadline = __iyi_monotonic_ns + 20_000_000_000_i64
+    while meet.ready.get == 0_i64
+      if __iyi_monotonic_ns >= deadline
+        join_setup("SETUP: joined: the later thread did not become ready\n")
+      end
+      IyiThread.yield_cpu
+    end
+    fail("joined: the first join left a line for a second join to use") if first.line != 0_u64
     first.join
     meet.go.set(1_i64)
     next_one.join
-    fail("joined: a second join of a finished thread waited 20 s on the thread started after it") if meet.done.get != 1_i64
+    join_setup("SETUP: joined: the later thread did not observe its release\n") if meet.done.get != 1_i64
   end
+
+  {% if flag?(:join_only) %}
+    join_twice
+    puts "joined: the second join returned while the later thread was held"
+    __iyi_exit(0)
+  {% end %}
 
   args = Program.args
   count = args.size > 0 ? args[0].to_i : 8
-  fail("at least one thread") if count < 1
+  join_setup("SETUP: threads: at least one thread is required\n") if count < 1
   Tally.setup
+
+  # ── 1c. A joined thread's line is unmapped, checked before any collection ──
+  # No collection has run, so no mark helper, sweep or pool monitor exists.
+  # A helper is made only inside a collection (`mark`), a sweep round opens
+  # only at a collection's end, and the monitor starts only with a pool task;
+  # this program's spawns are all `unit: :same`, which starts none. The probe's
+  # thread is the only other thread, and `join` returns only once that OS
+  # thread has ended, so it maps nothing after the unmap. Nothing allocates
+  # between the unmap and the query, and automatic collections are off, so no
+  # mapping can take the freed page in between. The query asks mprotect for
+  # the line's own protection, read and write: a line still mapped keeps it,
+  # and a freed page answers ENOMEM. No other mapping can share the page, so
+  # the request reaches only this line.
+  IyiMark.auto = false
+  probe = IyiThread.start { nil }
+  probe_line = probe.line
+  join_setup("SETUP: joined: the probe thread had no line\n") if probe_line == 0_u64
+  probe.join
+  still_mapped = line_mapped?(probe_line)
+  IyiMark.auto = true
+  fail("joined: a joined thread's line is still mapped") if still_mapped
+  puts "joined: a joined thread's line was unmapped"
 
   # ── 1. Threads, collections, live lists ────────────────────────────────
   before = IyiMark.collections
@@ -359,10 +486,23 @@
   main_list = build_list(1000, 1_u64, main_ledger)
   main_sum = checksum(main_list)
   # The one explicit collection, with every worker spinning on its list.
+  deadline = __iyi_monotonic_ns + 20_000_000_000_i64
   while Tally.ready.value.get < count.to_u64
+    if __iyi_monotonic_ns >= deadline
+      join_setup("SETUP: threads: #{Tally.ready.value.get.to_i64} of #{count} workers prepared their lists for the explicit collection\n")
+    end
+    IyiThread.spin_pause
   end
   IyiMark.collect
   Tally.go.value.set(1_u64)
+  deadline = __iyi_monotonic_ns + 20_000_000_000_i64
+  while Tally.checked.value.get < count.to_u64
+    if __iyi_monotonic_ns >= deadline
+      join_setup("SETUP: threads: #{Tally.checked.value.get.to_i64} of #{count} workers checked their lists after the explicit collection\n")
+    end
+    IyiThread.spin_pause
+  end
+  Tally.go.value.set(2_u64)
   burst = 0
   while burst < 20
     churn(20000)
@@ -394,12 +534,16 @@
   # stacks for its tasks, and kept them all, with its state on the roots'
   # list, after the thread was gone: a thousand threads that each slept
   # once left 2,001 handles behind them. Two hundred threads that each
-  # sleep in four tasks leave the list where it was, and Windows' handle
-  # count within 20 of it.
+  # sleep in four tasks leave the list where it was. The count is what a
+  # finished thread leaves open: the process's handles on Windows, and the
+  # lowest unused descriptor elsewhere, which each descriptor left open
+  # raises by one. A correct build stays under one per finished thread, and
+  # a copy that drops a scheduler's close calls must reach that bound.
+  finished_threads = 200
   states_before = scheduler_states
-  handles_before = process_handles
+  counted_before = teardown_count
   index = 0
-  while index < 200
+  while index < finished_threads
     worker = IyiThread.start do
       group do |g|
         # This thread's own tasks, whose scheduler is what is counted.
@@ -412,41 +556,61 @@
   end
   states_left = scheduler_states - states_before
   fail("teardown: 200 finished threads left #{states_left} scheduler states on the roots' list") if states_left != 0
-  handles_left = process_handles - handles_before
-  fail("teardown: 200 finished threads left #{handles_left} handles open") if handles_left > 20
+  counted_left = teardown_count - counted_before
+  {% if flag?(:win32) %}
+    puts "teardown: the process's handle count changed by #{counted_left}"
+  {% else %}
+    puts "teardown: the lowest unused descriptor changed by #{counted_left}"
+  {% end %}
+  fail("teardown: 200 finished threads left handles open that their schedulers should have closed") if counted_left >= finished_threads
   puts "teardown: 200 finished threads gave their schedulers back"
 
   # ── 1c. A joined thread keeps nothing ──────────────────────────────────
   # Every thread object started stayed on the list that roots a body until
-  # its thread runs it, and so did everything its block captured: these
-  # 256 threads, every one joined, kept 20 MiB more through a collection.
-  # A thread takes itself off that list before its body runs now, and its
-  # join unmaps its line, which nothing unmapped before. And a second join
-  # returns at once: on Windows it waited on, and closed, whatever handle
-  # had the first one's value by then - the next thread's, in each of six
-  # runs of twenty pairs - so that thread's own join returned on a closed
-  # handle.
+  # its thread runs it, and so did everything its block captured. A thread
+  # takes itself off that list before its body runs now, so a join leaves
+  # its payload to the next collection. The ledger holds one 64 KiB payload
+  # per joined thread, 256 in all, and records only their addresses in a
+  # mapping the collector does not scan. Automatic collections are off while
+  # the threads run, so nothing a payload could reuse is freed before the
+  # ledger is read; an arena the collector released counts as freed. The
+  # join unmaps its line, and the second join clears no handle belonging to
+  # a later thread: it returns while that thread is held at a rendezvous,
+  # before it is allowed to finish.
+  IyiMark.auto = false
   IyiMark.collect
   kept_before = IyiMark.bytes_kept
+  payload_ledger = __iyi_mmap(4096_u64).address
   index = 0
   while index < 256
-    start_holding(index)
+    start_holding(index, payload_ledger)
     index = index + 1
   end
   IyiMark.collect
   kept_after = IyiMark.bytes_kept
-  grew = kept_after > kept_before ? kept_after - kept_before : 0_u64
-  fail("joined: 256 joined threads kept #{grew // 1048576_u64} MiB more through a collection, and the bound is 4") if grew >= 4194304_u64
+  payloads_kept = 0
   index = 0
-  while index < 20
-    join_twice
+  while index < 256
+    address = Pointer(UInt64).new(payload_ledger)[index]
+    join_setup("SETUP: joined: a payload was not recorded in the ledger\n") if address == 0_u64
+    # This loop allocates nothing. An arena the collector released answers
+    # 0, and its flags would be read from unmapped memory, so it counts as freed.
+    if IyiHeap.arena_of(address) != 0_u64 && IyiMark.flags(address) & IyiHeap::FREE_FLAG == 0_u64
+      payloads_kept = payloads_kept + 1
+    end
     index = index + 1
   end
-  probe = IyiThread.start { nil }
-  probe_line = probe.line
-  probe.join
-  fail("joined: a joined thread's line is still mapped") if line_mapped?(probe_line)
-  puts "joined: 256 joined threads keep under 4 MiB of what their blocks held, and twenty second joins return at once"
+  __iyi_munmap(payload_ledger, 4096_u64)
+  IyiMark.auto = true
+  # The retained bytes are a measurement only; the ledger above is the check.
+  grew = kept_after > kept_before ? kept_after - kept_before : 0_u64
+  puts "joined: #{payloads_kept} of 256 payloads were still live after the collection; retained bytes grew by #{grew // 1048576_u64} MiB"
+  # Half the payloads is the bound. A correct build keeps only what stale stack
+  # words still name; a copy whose thread stays on the body-rooting list keeps all 256.
+  fail("joined: #{payloads_kept} of 256 joined threads' payloads survived a collection") if payloads_kept >= 128
+  puts "joined: fewer than half of the joined threads' payloads survived a collection"
+  join_twice
+  puts "joined: the second join returned while the later thread was held"
 
   # ── 2. The price: allocations per second per thread ────────────────────
   # Each thread allocates a fixed count from its own cache with the

@@ -98,7 +98,7 @@ class Array(T)
 
   def <<(value : T) : Array(T)
     grow if @size == @capacity
-    @buffer[@size] = value
+    @buffer.array_put(@size, value)
     @size = @size + 1
     self
   end
@@ -129,25 +129,28 @@ class Array(T)
   end
 
   # A negative index counts from the end, so `a[-1]` is the last element.
-  # Still out of range after that wrap (or empty) raises, same message.
+  # Still out of range after that wrap (or empty) raises, same message. An
+  # index in `0...size` is taken after one unsigned test (a size is never
+  # negative); only another is wrapped, with `&+`, which cannot overflow.
   def [](index : Int32) : T
-    asked = index
-    index = @size + index if index < 0
-    raise "index #{asked} out of range for #{@size} elements" if index < 0 || index >= @size
-    @buffer[index]
+    return @buffer.array_at(index) if index.to_i64.unsafe_to_u64 < @size.to_i64.unsafe_to_u64
+    at = index < 0 ? @size &+ index : index
+    raise "index #{index} out of range for #{@size} elements" if at < 0 || at >= @size
+    @buffer.array_at(at)
   end
 
   def []?(index : Int32) : T?
-    index = @size + index if index < 0
-    return nil if index < 0 || index >= @size
-    @buffer[index]
+    return @buffer.array_at(index) if index.to_i64.unsafe_to_u64 < @size.to_i64.unsafe_to_u64
+    at = index < 0 ? @size &+ index : index
+    return nil if at < 0 || at >= @size
+    @buffer.array_at(at)
   end
 
   def []=(index : Int32, value : T) : T
-    asked = index
-    index = @size + index if index < 0
-    raise "index #{asked} out of range for #{@size} elements" if index < 0 || index >= @size
-    @buffer[index] = value
+    return @buffer.array_put(index, value) if index.to_i64.unsafe_to_u64 < @size.to_i64.unsafe_to_u64
+    at = index < 0 ? @size &+ index : index
+    raise "index #{index} out of range for #{@size} elements" if at < 0 || at >= @size
+    @buffer.array_put(at, value)
   end
 
   # `a[1, 2]`: *count* elements from *start*, or as many as there are. A
@@ -224,7 +227,7 @@ class Array(T)
   def each(& : T -> Nil) : Nil
     index = 0
     while index < @size
-      yield @buffer[index]
+      yield @buffer.array_at(index)
       index = index + 1
     end
   end
@@ -256,10 +259,10 @@ class Array(T)
   def sum : T
     return T.zero if empty?
 
-    total = @buffer[0]
+    total = @buffer.array_at(0)
     index = 1
     while index < @size
-      total = total + @buffer[index]
+      total = total + @buffer.array_at(index)
       index = index + 1
     end
     total
@@ -270,10 +273,10 @@ class Array(T)
   def sum(& : T -> U) : U forall U
     return U.zero if empty?
 
-    total = yield @buffer[0]
+    total = yield @buffer.array_at(0)
     index = 1
     while index < @size
-      total = total + (yield @buffer[index])
+      total = total + (yield @buffer.array_at(index))
       index = index + 1
     end
     total
@@ -297,19 +300,19 @@ class Array(T)
   end
 
   def last? : T?
-    empty? ? nil : @buffer[@size - 1]
+    empty? ? nil : @buffer.array_at(@size - 1)
   end
 
   # `last` on an empty array is a mistake rather than a nil, as `first` is.
   def last : T
     raise "last of an empty array" if empty?
-    @buffer[@size - 1]
+    @buffer.array_at(@size - 1)
   end
 
   def each_with_index(& : T, Int32 -> Nil) : Nil
     index = 0
     while index < @size
-      yield @buffer[index], index
+      yield @buffer.array_at(index), index
       index = index + 1
     end
   end
@@ -341,13 +344,13 @@ class Array(T)
   # NaN key is above every other, as `<=>` places it. Empty is a mistake.
   def max_by(& : T -> U) : T forall U
     raise "max_by of an empty array" if empty?
-    best = @buffer[0]
+    best = @buffer.array_at(0)
     best_key = yield best
     index = 1
     while index < @size
-      key = yield @buffer[index]
+      key = yield @buffer.array_at(index)
       if best_key < key || (key.is_a?(Float) && key != key && best_key == best_key)
-        best = @buffer[index]
+        best = @buffer.array_at(index)
         best_key = key
       end
       index = index + 1
@@ -357,13 +360,13 @@ class Array(T)
 
   def min_by(& : T -> U) : T forall U
     raise "min_by of an empty array" if empty?
-    best = @buffer[0]
+    best = @buffer.array_at(0)
     best_key = yield best
     index = 1
     while index < @size
-      key = yield @buffer[index]
+      key = yield @buffer.array_at(index)
       if key < best_key || (key.is_a?(Float) && best_key != best_key && key == key)
-        best = @buffer[index]
+        best = @buffer.array_at(index)
         best_key = key
       end
       index = index + 1
@@ -375,7 +378,7 @@ class Array(T)
   def pop : T
     raise "pop of an empty array" if empty?
     @size = @size - 1
-    @buffer[@size]
+    @buffer.array_at(@size)
   end
 
   # The last element or nil, the stack's twin of `shift?`: `while item =
@@ -393,7 +396,7 @@ class Array(T)
   def shift : T
     raise "shift of an empty array" if empty?
 
-    value = @buffer[0]
+    value = @buffer.array_at(0)
     @buffer = @buffer + 1
     @size = @size - 1
     @capacity = @capacity - 1
@@ -426,13 +429,13 @@ class Array(T)
       finish = start + SORT_RUN < @size ? start + SORT_RUN : @size
       index = start + 1
       while index < finish
-        value = @buffer[index]
+        value = @buffer.array_at(index)
         slot = index - 1
-        while slot >= start && (yield @buffer[slot], value) > 0
-          @buffer[slot + 1] = @buffer[slot]
+        while slot >= start && (yield @buffer.array_at(slot), value) > 0
+          @buffer.array_put(slot + 1, @buffer.array_at(slot))
           slot = slot - 1
         end
-        @buffer[slot + 1] = value
+        @buffer.array_put(slot + 1, value)
         index = index + 1
       end
       start = finish
@@ -488,7 +491,7 @@ class Array(T)
     keyed.sort_in_place { |a, b| b[0] < a[0] ? 1 : 0 }
     index = 0
     while index < @size
-      @buffer[index] = keyed[index][1]
+      @buffer.array_put(index, keyed[index][1])
       index = index + 1
     end
     self
@@ -503,13 +506,13 @@ class Array(T)
   # other question, and is the one the trait defaults use.
   def first : T
     raise "first of an empty array" if empty?
-    @buffer[0]
+    @buffer.array_at(0)
   end
 
   # And the nilable question beside it, as `last?` is beside `last`: without
   # an import a program had `last?` and not `first?`.
   def first? : T?
-    empty? ? nil : @buffer[0]
+    empty? ? nil : @buffer.array_at(0)
   end
 
   # The first `n`, or all of them when there are fewer: a prefix, not a
@@ -520,7 +523,7 @@ class Array(T)
     result = Array(T).new(count)
     index = 0
     while index < count
-      result << @buffer[index]
+      result << @buffer.array_at(index)
       index = index + 1
     end
     result
@@ -553,7 +556,7 @@ class Array(T)
   # The element type without Nil, for `compact`'s array: never called,
   # only typed.
   private def compact_element
-    value = @buffer[0]
+    value = @buffer.array_at(0)
     raise "" if value.nil?
     value
   end
@@ -573,7 +576,7 @@ class Array(T)
   def index(value : T) : Int32?
     index = 0
     while index < @size
-      return index if @buffer[index] == value
+      return index if @buffer.array_at(index) == value
       index = index + 1
     end
     nil
@@ -588,7 +591,7 @@ class Array(T)
       if element == value
         found = element
       else
-        @buffer[kept] = element
+        @buffer.array_put(kept, element)
         kept = kept + 1
       end
     end
@@ -602,7 +605,7 @@ class Array(T)
     index = @size
     while index > 0
       index = index - 1
-      result << @buffer[index]
+      result << @buffer.array_at(index)
     end
     result
   end
@@ -708,7 +711,7 @@ class Array(T)
   # Rows of different lengths have no columns to give, and are refused with
   # the first row that differs.
   def transpose
-    width = empty? ? 0 : @buffer[0].size
+    width = empty? ? 0 : @buffer.array_at(0).size
     each_with_index do |row, at|
       raise "transpose of rows of unequal size: row #{at} has #{row.size} elements, row 0 has #{width}" unless row.size == width
     end
@@ -736,7 +739,7 @@ class Array(T)
     result = Array(Tuple(T, U)).new(@size)
     index = 0
     while index < @size
-      result << {@buffer[index], other[index]}
+      result << {@buffer.array_at(index), other[index]}
       index = index + 1
     end
     result
@@ -748,7 +751,7 @@ class Array(T)
   def zip(other : Array(U), & : T, U -> _) : Nil forall U
     index = 0
     while index < @size
-      yield @buffer[index], other[index]
+      yield @buffer.array_at(index), other[index]
       index = index + 1
     end
   end
@@ -792,7 +795,7 @@ class Array(T)
 
     index = 0
     while index < @size
-      return false unless @buffer[index] == other[index]
+      return false unless @buffer.array_at(index) == other[index]
       index = index + 1
     end
     true
@@ -871,19 +874,19 @@ class Array(T)
       reserve(final)
       at = @size - 1
       while at >= after
-        @buffer[at + length - count] = @buffer[at]
+        @buffer.array_put(at + length - count, @buffer.array_at(at))
         at = at - 1
       end
     elsif length < count
       at = after
       while at < @size
-        @buffer[at - count + length] = @buffer[at]
+        @buffer.array_put(at - count + length, @buffer.array_at(at))
         at = at + 1
       end
     end
     at = 0
     while at < length
-      @buffer[index + at] = yield at
+      @buffer.array_put(index + at, yield at)
       at = at + 1
     end
     @size = final
@@ -930,5 +933,24 @@ class Array(T)
     else
       result << value
     end
+  end
+end
+
+# Array's buffer reads and writes, tagged as an element's (codegen/array_tbaa.cr).
+struct Pointer(T)
+  @[Primitive(:pointer_get)]
+  def array_slot : T
+  end
+
+  @[Primitive(:pointer_set)]
+  def array_slot=(value : T)
+  end
+
+  def array_at(offset : Int32) : T
+    (self + offset.to_i64).array_slot
+  end
+
+  def array_put(offset : Int32, value : T) : T
+    (self + offset.to_i64).array_slot = value
   end
 end

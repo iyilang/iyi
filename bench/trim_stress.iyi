@@ -19,9 +19,17 @@
 #
 # With no arguments it runs two threads for a second and prints a fixed
 # line: Windows CI runs every bench program bare. Built with -Dtrim_widen
-# against a prelude copy that holds the adoptions' edge-page window open
-# (`bench/sweep_exercise.sh`), it reports how often two adoptions met in
-# it, `IyiHeap.widen_hits`, which only that copy defines.
+# against a prelude copy that plays the neighbouring adoption at each
+# batch's edge pages and the refill below at the page each slice begins on
+# (`bench/sweep_exercise.sh`), it reports how many edge pages two adoptions
+# read listed at once, `IyiHeap.widen_hits`, how many shared pages a refill
+# reached while a slice listed them, `IyiHeap.list_hits`, and how many
+# arenas the pauses audited, `IyiHeap.listed_audits`: the copy ends the
+# program where a refill reads listed a page its slice has not yet
+# counted, and where a pause finds an arena's count of listed pages other
+# than the pages its bitmap lists or a chunk handed out on a listed page.
+# The main thread collects once more after the threads end, so the last
+# epoch's adoptions are audited too. Only that copy defines them.
 
 @[Unsafe("it writes and reads raw blocks by address to check them")]
 module bench/trim_stress
@@ -57,7 +65,15 @@ module bench/trim_stress
 
   def widen_note : String
     {% if flag?(:trim_widen) %}
-      ", #{IyiHeap.widen_hits} edge pages read listed by two adoptions at once"
+      ", #{IyiHeap.widen_hits} edge pages read listed by two adoptions at once, #{IyiHeap.list_hits} shared pages reached by a refill while a slice listed them"
+    {% else %}
+      ""
+    {% end %}
+  end
+
+  def audit_note : String
+    {% if flag?(:trim_widen) %}
+      ", and #{IyiHeap.listed_audits} arenas' listed pages audited at pauses, every count its pages and every chunk on them free"
     {% else %}
       ""
     {% end %}
@@ -155,10 +171,13 @@ module bench/trim_stress
   trim_thread = start_trimmer(seconds)
   workers.each { |w| w.join }
   trim_thread.join
+  {% if flag?(:trim_widen) %}
+    IyiMark.collect
+  {% end %}
   if quiet
     puts "trim stress: every block read back whole"
   else
-    puts "trim stress: #{threads} threads for #{seconds} s beside #{IyiMark.trims - trims} idle trims, #{IyiMark.collections - collections} collections and #{IyiHeap.pages_released - released} pages handed back, every block read back whole#{widen_note}"
+    puts "trim stress: #{threads} threads for #{seconds} s beside #{IyiMark.trims - trims} idle trims, #{IyiMark.collections - collections} collections and #{IyiHeap.pages_released - released} pages handed back, every block read back whole#{widen_note}#{audit_note}"
   end
 {% else %}
   puts "trim stress: no collector's allocator on this target, nothing to trim"

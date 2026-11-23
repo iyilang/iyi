@@ -63,6 +63,9 @@ def watchdog(seconds):
                 # What was asked and who was left to answer it: a hang on a
                 # Windows runner said nothing more than the line above.
                 print(f"  the last request sent: {LAST.get('sent', '(none)')}", flush=True)
+                if sys.platform == "darwin" and "held" in LAST:
+                    for line in held_report(LAST["held"]):
+                        print(line, flush=True)
                 for proc in LIVE:
                     if proc.poll() is None:
                         try:
@@ -70,26 +73,69 @@ def watchdog(seconds):
                         except Exception as error:  # noqa: BLE001 - a report, not a check
                             kids = f"unlisted ({error})"
                         print(f"  server {proc.pid} running, its children {kids}", flush=True)
-                        # Where each one is waiting: darwin's `sample` reads
-                        # every thread's stack for a second, symbols and all,
-                        # and every frame of it is printed, as `sample` draws
-                        # the tree. Cut to iyi's own frames and to 40 lines,
-                        # darwin CI's hang after step 72j (job 137179880168)
-                        # stopped at the top-level visitor, a dozen frames
-                        # above the `read` in libsystem_kernel that held it.
+                        # Where each one is waiting: `ps -M` lists its threads, and
+                        # `sample` reads every thread's whole call graph, uncut.
                         if sys.platform == "darwin" and isinstance(kids, list):
                             for pid in [proc.pid, *kids]:
-                                sampled = subprocess.run(["sample", str(pid), "1", "-mayDie"],
-                                                         capture_output=True, text=True, timeout=30)
-                                graph = sampled.stdout.split("Call graph:", 1)[-1]
-                                graph = graph.split("Total number in stack", 1)[0].strip("\n")
-                                print(f"  {pid}'s threads:", flush=True)
-                                for line in graph.splitlines():
-                                    print(f"    {line.rstrip()[:240]}", flush=True)
+                                try:
+                                    darwin_stacks(pid)
+                                except Exception as error:  # noqa: BLE001 - a report, not a check
+                                    print(f"  {pid}'s stacks: {error}", flush=True)
                 for proc in LIVE:
                     proc.kill()
                 os._exit(1)
     threading.Thread(target=watch, daemon=True).start()
+
+
+def darwin_stacks(pid):
+    """Every thread of *pid* as `ps -M` lists it, then the call graph
+    `sample` takes of it for a second, uncut to about 600 lines. The view
+    this replaced kept only the frames that named iyi, Lsp or Fiber, so the
+    libsystem leaf a thread was blocked in was the part it dropped."""
+    listed = subprocess.run(["ps", "-M", "-p", str(pid)], capture_output=True,
+                            text=True, timeout=30)
+    print(f"  {pid}'s threads (ps -M):", flush=True)
+    for line in listed.stdout.splitlines():
+        print(f"    {line}", flush=True)
+    with tempfile.TemporaryDirectory(prefix="iyi-lsp-sample") as scratch:
+        report = os.path.join(scratch, "sample.txt")
+        sampled = subprocess.run(["sample", str(pid), "1", "-mayDie", "-file", report],
+                                 capture_output=True, text=True, timeout=60)
+        if not os.path.exists(report):
+            print(f"  {pid}'s call graph: no report: {sampled.stderr.strip()[:200]}",
+                  flush=True)
+            return
+        with open(report, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith("Call graph:")), None)
+    if start is None:
+        print(f"  {pid}'s call graph: none in its report", flush=True)
+        return
+    stops = ("Total number in stack", "Sort by top of stack", "Binary Images:")
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith(stops)),
+               len(lines))
+    graph = lines[start + 1:end]
+    print(f"  {pid}'s call graph ({len(graph)} lines):", flush=True)
+    for line in graph[:600]:
+        print(f"    {line}", flush=True)
+    if len(graph) > 600:
+        print(f"    ... {len(graph) - 600} more lines not printed", flush=True)
+
+
+def held_report(record):
+    """Each step of the held FIFO's release, with how long before now it ran
+    or that it did not, and whether the path still exists. If every step ran,
+    a stuck compile is waiting on its own side of the pipe; the first step that
+    did not run is where the release stopped."""
+    now = time.monotonic()
+    state = "still exists" if os.path.exists(record["path"]) else "is gone"
+    lines = [f"  the held FIFO {record['path']} {state}"]
+    steps = (("entered", "release entered os.open"), ("opened", "os.open returned"),
+             ("renamed", "renamed away"), ("closed", "closed"), ("unlinked", "unlinked"))
+    for key, what in steps:
+        at = record.get(key)
+        lines.append(f"    {what}: " + (f"{now - at:.1f} s ago" if at is not None else "not reached"))
+    return lines
 
 
 def uri_path(uri):
@@ -456,9 +502,14 @@ def package_fixture(home):
     env = dict(os.environ)
     lib = os.path.join(home, "work", "liba")
     os.makedirs(lib, exist_ok=True)
+    # Signing off in this repository's own config: a machine whose global
+    # config signs commits and tags (`git tag` then wants a message and a
+    # key) must not decide whether this gate can build its fixture.
     steps = [["git", "init", "-q", lib],
              ["git", "-C", lib, "config", "user.email", "t@t"],
-             ["git", "-C", lib, "config", "user.name", "t"]]
+             ["git", "-C", lib, "config", "user.name", "t"],
+             ["git", "-C", lib, "config", "commit.gpgsign", "false"],
+             ["git", "-C", lib, "config", "tag.gpgsign", "false"]]
     for command in steps:
         if subprocess.run(command, capture_output=True).returncode != 0:
             return None
@@ -1402,18 +1453,27 @@ def held_open(work, seconds):
     else:
         path = os.path.join(work, "held")
         os.mkfifo(path)
+        # When each step of the release ran, for the watchdog: a hang is
+        # read from which of them never returned.
+        record = {"path": path}
+        LAST["held"] = record
 
         def release():
             time.sleep(seconds)
             # Blocks until the reader has opened it, so the reader sees
             # the end of the file rather than no file.
+            record["entered"] = time.monotonic()
             writer = os.open(path, os.O_WRONLY)
+            record["opened"] = time.monotonic()
             released = path + ".released"
             os.rename(path, released)
+            record["renamed"] = time.monotonic()
             letgo["names"] = os.fstat(writer).st_nlink
             letgo["path"] = os.path.lexists(path)
             os.close(writer)
+            record["closed"] = time.monotonic()
             os.unlink(released)
+            record["unlinked"] = time.monotonic()
     threading.Thread(target=release, daemon=True).start()
     return path, letgo
 

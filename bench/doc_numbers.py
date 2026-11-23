@@ -170,9 +170,13 @@ def measured() -> dict[str, int]:
 # test's children, which only the test program can do. And to 4,763, owner
 # approved 2026-11-21 for #212: the 26 lines `String#hash` grew as SipHash-1-3
 # keyed per process - `Hash` lives in the prelude, so the keyed hash cannot
-# sit behind an import. A check rather than a habit since the night
+# sit behind an import. And to 4,785, owner approved 2026-11-22: the 22
+# lines of `Array`'s buffer accessors (`Pointer#array_slot`, `array_at`,
+# `array_put`) and its one-comparison index fast path, which let LLVM keep an
+# array's size and buffer out of a loop and vectorise it (plb2 matmul 0.31x,
+# sudoku 0.82x of 0.22.0). A check rather than a habit since the night
 # Windows' floor walked 508 lines over it and nothing failed.
-CEILING = 4_763
+CEILING = 4_785
 
 
 # The runtime's files that `prelude_library_lines` leaves out whole: the
@@ -187,7 +191,7 @@ RUNTIME_FILES = {
 
 
 def prelude_library_lines() -> int:
-    """The figure SPEC.md holds to the 4,763-line ceiling: the library
+    """The figure SPEC.md holds to the 4,785-line ceiling: the library
     without any platform's floor.
 
     Everything under `src/iyi/` except two things. First, what Crystal's

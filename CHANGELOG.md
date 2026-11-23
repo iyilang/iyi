@@ -45,27 +45,6 @@
   without the cutoff (0.78 s in the run above), the front end that ran
   before its condition failed.
 
-### Gates
-
-- **`bench/lsp_session.py`'s held compile (step 74a) lets go of its FIFO
-  while the FIFO still has a name, and no longer hangs on macOS.** Twice on
-  darwin CI (jobs 135494265207 and 137179880168) the step after 72j had no
-  answer in 180 s, its worker in the top-level pass. The rest of that stack
-  is a macro's `read_file` in `read(2)` on the FIFO the gate holds the
-  compile with: the gate opened the FIFO's writer, unlinked the FIFO and
-  closed the writer, and on macOS a reader still on its way out of
-  `open(2)` can then miss the end of file and wait for a writer no path can
-  bring. The kernel loses it, not iyi: a C reader and writer doing nothing
-  else lost it in 36 of 4,800 rounds, `iyi check` in 4 of 1,600 and the
-  step in 4 of 820 on the project's Mac (none on Linux), with nothing
-  anywhere holding the FIFO but its reader. The FIFO is now renamed away,
-  its writer closed, and the renamed path unlinked: lost in none of 4,800,
-  800 and 600. New step 74b holds that order on every POSIX run; a release
-  that closes an unlinked FIFO fails it every time.
-- **The session gate's watchdog prints every thread's whole stack on
-  darwin.** Cut to iyi's own frames and to 40 lines, the hang above ended
-  at the top-level visitor, a dozen frames above the `read` that held it.
-
 - **A rebuild after a one-line edit does less work it did not need: 9% less
   processor time, 3-4% less wall time.** Measured on iyi-benchmarks' medium
   project (30 modules, 7,266 lines, debug builds; Linux, 12 vCPU VM), 21
@@ -126,12 +105,57 @@
   wrap a negative index only when that fails (the wrap's addition cannot
   overflow, so it is `&+`); every index answers, and every refusal reads,
   as before. iyi-benchmarks' runtime axis, 7 rounds, Linux 12-vCPU VM,
-  against 0.22.0: matmul 0.32x (0.32–0.32), sudoku 0.83x (0.81–0.83),
-  nqueen 0.99x (0.98–0.99), bedcov 1.02x (1.01–1.03), geomean 0.72x;
-  against Go 1.27.4 the geomean goes from 1.39x to 1.00x (matmul 1.92x to
-  0.61x, sudoku 1.44x to 1.19x). `bench/collections_exercise.sh` checks a
-  product loop, a row that is its own source and an array grown while read
-  in a release build, and that a short row is still refused there.
+  against 0.22.0: matmul 0.31x (0.31–0.32), sudoku 0.82x (0.81–0.83),
+  nqueen 0.98x (0.98–0.99), bedcov 1.03x (1.01–1.04), geomean 0.71x;
+  against Go 1.27.4 the geomean goes from 1.39x to 0.99x (matmul 1.92x to
+  0.60x, sudoku 1.44x to 1.20x). bedcov's 3% was traced to the toolchain
+  the head compiler was built with, not to this change: its IR through the
+  same LLVM runs alike with and without the metadata. An element tag goes
+  only on a one-scalar slot (number, char, bool, symbol, enum, pointer or
+  reference); a struct element is untagged, and only a single non-virtual
+  class gets the object marks. `bench/array_tbaa.sh` reads the IR and holds
+  both, and runs nilable, struct and shrunk arrays plain and `--release`.
+  `bench/collections_exercise.sh` checks a product loop, a row that is its
+  own source and an array grown while read in a release build, and that a
+  short row is still refused there.
+
+- **The LLVM inside the released compiler is built for speed, not size.**
+  `scripts/build-static-llvm.sh` built LLVM 20.1.2 `MinSizeRel`, as
+  Crystal's packaging recipe does, and its speed had never been measured.
+  Built `Release`, everything else the same, the 0.22.0 commit's
+  `release-fresh` on iyi-benchmarks' medium program took 1.071 s against
+  1.598 s (0.67x, 0.65–0.69; Linux 12-vCPU VM, 7 runs), its LLVM phase
+  0.904 s against 1.421 s, with programs byte for byte the same; edit-loop
+  builds do not change (leaf-body 0.95x, no difference by the suite's test).
+  The price is size: about 30 MB more text in each binary, about 12.6 MB
+  more each compressed, so the tarball grows by about 25 MB. Owner's
+  decision of 2026-11-22. The CI cache of the static LLVM is keyed on the
+  script, so each platform builds it once again.
+
+- **The prelude's library is held to 4,785 lines, owner approved
+  2026-11-22** (SPEC.md I.4): the 22 lines of `Array`'s buffer accessors
+  and one-comparison index fast path above.
+
+### Gates
+
+- **`bench/lsp_session.py`'s held compile (step 74a) lets go of its FIFO
+  while the FIFO still has a name, and no longer hangs on macOS.** Twice on
+  darwin CI (jobs 135494265207 and 137179880168) the step after 72j had no
+  answer in 180 s, its worker in the top-level pass. The rest of that stack
+  is a macro's `read_file` in `read(2)` on the FIFO the gate holds the
+  compile with: the gate opened the FIFO's writer, unlinked the FIFO and
+  closed the writer, and on macOS a reader still on its way out of
+  `open(2)` can then miss the end of file and wait for a writer no path can
+  bring. The kernel loses it, not iyi: a C reader and writer doing nothing
+  else lost it in 36 of 4,800 rounds, `iyi check` in 4 of 1,600 and the
+  step in 4 of 820 on the project's Mac (none on Linux), with nothing
+  anywhere holding the FIFO but its reader. The FIFO is now renamed away,
+  its writer closed, and the renamed path unlinked: lost in none of 4,800,
+  800 and 600. New step 74b holds that order on every POSIX run; a release
+  that closes an unlinked FIFO fails it every time.
+- **The session gate's watchdog prints every thread's whole stack on
+  darwin.** Cut to iyi's own frames and to 40 lines, the hang above ended
+  at the top-level visitor, a dozen frames above the `read` that held it.
 
 ## 0.22.0 — 2026-11-22
 
@@ -29609,7 +29633,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,537-line library and nothing else. Every other
+  written against iyi's own 36,559-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

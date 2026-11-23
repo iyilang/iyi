@@ -4033,9 +4033,9 @@ jobs:
           persist-credentials: false
 
       # The tarball's LLVM is the static minimal one, built by
-      # `scripts/build-static-llvm.sh` — Crystal's own recipe, measured
-      # before it was adopted (0.6.0's Learned entry, collected):
-      # BUILD_SHARED_LIBS=OFF, MinSizeRel, the five targets the compiler
+      # `scripts/build-static-llvm.sh` — Crystal's own recipe (0.6.0's
+      # Learned entry, collected), but built `Release` rather than
+      # `MinSizeRel`: BUILD_SHARED_LIBS=OFF, the five targets the compiler
       # reaches, every optional dependency OFF — so the 179 MB closure the
       # package used to carry (libLLVM and its libedit, libxml2, libicu,
       # libncursesw, libzstd) never comes into existence, and `lib/` is

@@ -200,6 +200,16 @@ describe "Semantic: iyi" do
         end
         CODE
     end
+
+    it "keeps a Crystal file's `using` as a name" do
+      assert_type(<<-CODE, filename: "prog.cr") { int32 }
+        def connection(using : Int32? = nil)
+          using.nil? ? 0 : using
+        end
+
+        connection(using: 1)
+        CODE
+    end
   end
 
   describe "a nilable receiver" do

@@ -117,6 +117,32 @@ describe "Normalize: regex literal" do
         LiteralExpander.new(iyi_regex_program).expand(literal)
       end
     end
+
+    # #215: a literal a macro wrote - inside `{% if %}`, `{% for %}` or a
+    # `macro` def's body - is located in the expansion's VirtualFile, and
+    # it was asked for `.iyi` as if it were a file: no, so it became
+    # `::Regex.new(..., ::Regex::Options.new(0))`, the other library's,
+    # refused as an undefined constant in a program importing `std/regex`.
+    # The expansion is written in what the code that expanded it was, at
+    # any depth.
+    it "is std/regex's inside a macro expansion of an .iyi file" do
+      program = iyi_regex_program
+      expander = LiteralExpander.new(program)
+      outer = Iyi::VirtualFile.new(Iyi::Macro.new("outer"), "", Iyi::Location.new("foo.iyi", 3, 3))
+      inner = Iyi::VirtualFile.new(Iyi::Macro.new("inner"), "", Iyi::Location.new(outer, 2, 1))
+      {outer, inner}.each do |virtual|
+        literal = Iyi::RegexLiteral.new(Iyi::StringLiteral.new("foo"))
+        literal.location = Iyi::Location.new(virtual, 2, 5)
+        node = expander.expand(literal)
+        node.to_s.should eq(Program.iyi_regex_const_name("foo"))
+        program.types[node.to_s].as(Iyi::Const).value.to_s.should eq(%q(::Std::Regex::Regex.compile("foo")))
+      end
+
+      dotcr = Iyi::VirtualFile.new(Iyi::Macro.new("outer"), "", Iyi::Location.new("foo.cr", 3, 3))
+      literal = Iyi::RegexLiteral.new(Iyi::StringLiteral.new("foo"))
+      literal.location = Iyi::Location.new(dotcr, 2, 5)
+      expander.expand(literal).to_s.should eq(Program.regex_const_name("foo", Iyi::RegexOptions::None))
+    end
   end
 end
 

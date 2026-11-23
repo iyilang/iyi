@@ -4,7 +4,7 @@
 #
 #     bash bench/release_cores.sh
 #
-# Four checks, each with a broken copy it has to catch:
+# Five checks, each with a broken copy it has to catch:
 #
 #   1. Cores. `samples/iyi/cores.iyi` (std/http and TLS) built `--release`:
 #      the build's processor time over its wall time is above 1.5. The broken
@@ -28,6 +28,13 @@
 #      calling either; one has no `available_externally` copies
 #      (`IYI_RELEASE_INLINE=0`), the only kind an external function gets,
 #      and has to be caught calling `__iyi_new`.
+#   5. Balanced. A program shaped like iyi-benchmarks' compile axis - the
+#      main program calling 30 functions nothing else calls, each building
+#      ten structs of its own - is cut so that no partition owns more than
+#      twice the average (`-s` prints what they own). The broken copy lets
+#      a function and the locals only it calls grow into one group
+#      whatever its size (`IYI_RELEASE_GROUP=0`), which put a third of the
+#      program in one partition and nothing in three, and has to be caught.
 #
 # Exits non-zero if any check fails or any broken copy passes.
 set -u
@@ -208,6 +215,60 @@ else
       echo "  broken copy, no available_externally copy: no partition calls __iyi_new - not caught"; status=1
     fi
   fi
+fi
+
+# ── 5. Balanced ──────────────────────────────────────────────────────────
+balanced_program() {
+  local m t i
+  for m in $(seq 0 29); do
+    for t in $(seq 0 9); do
+      i=$((m * 10 + t))
+      printf 'struct W%d\n  @a : Int32\n  @b : Int32\n\n  def initialize(@a : Int32, @b : Int32)\n  end\n\n' "$i"
+      printf '  def score : Int32\n    ((@a * %d) + (@b * %d)) %% 1000\n  end\n\n' $((t + 3)) $((m + 5))
+      printf '  def blend(other : W%d) : Int32\n    (score + other.score) %% 1000\n  end\n\n' "$i"
+      printf '  def label : String\n    "w-%d"\n  end\nend\n\n' "$i"
+    done
+    printf 'def total%d : Int32\n  total = 0\n' "$m"
+    for t in $(seq 0 9); do
+      i=$((m * 10 + t))
+      printf '  w = W%d.new(%d, %d)\n  total = (total + w.score + w.blend(w) + w.label.size) %% 100000\n' "$i" "$i" "$t"
+    done
+    printf '  total\nend\n\n'
+  done
+  printf 'sum = 0\n'
+  for m in $(seq 0 29); do printf 'sum = (sum + total%d) %% 100000\n' "$m"; done
+  printf 'puts sum\n'
+}
+balanced_program > "$WORK/balanced.iyi"
+
+# "<count> <largest> <total>" from a `-s` build's partition line, or nothing.
+owned() { # name, then environment assignments
+  local name="$1"
+  shift
+  env IYI_CACHE_DIR="$WORK/cache-$name" "$@" "$IYI" build --release --force -s \
+    -o "$WORK/$name" "$WORK/balanced.iyi" > "$WORK/$name.log" 2>&1 || return 1
+  sed -n 's/.*: \([0-9]*\) partitions owning [0-9]* to \([0-9]*\) of \([0-9]*\) instructions$/\1 \2 \3/p' "$WORK/$name.log"
+}
+# Whether the largest partition owns at most twice the average.
+even() { # count, largest, total
+  awk -v n="$1" -v max="$2" -v total="$3" 'BEGIN { exit !(n > 1 && max <= 2 * total / n) }'
+}
+
+read -r count largest total <<< "$(owned balanced)"
+if [ -z "${total:-}" ]; then
+  echo "balanced: the build failed or printed no partitions"; tail -8 "$WORK/balanced.log"; status=1
+elif even "$count" "$largest" "$total"; then
+  echo "balanced: $count partitions, the largest owning $largest of $total instructions"
+else
+  echo "balanced: $count partitions, the largest owning $largest of $total instructions, over twice the average"; status=1
+fi
+read -r count largest total <<< "$(owned balanced-unbounded IYI_RELEASE_GROUP=0)"
+if [ -z "${total:-}" ]; then
+  echo "  broken copy, groups unbounded: the build failed"; status=1
+elif even "$count" "$largest" "$total"; then
+  echo "  broken copy, groups unbounded: the largest owns $largest of $total in $count - not caught"; status=1
+else
+  echo "  broken copy, groups unbounded: the largest owns $largest of $total in $count - caught"
 fi
 
 rm -rf "$WORK"

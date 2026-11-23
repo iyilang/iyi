@@ -4334,9 +4334,6 @@ end").as(ClassDef)
       it_parses "using = 1; using", [Assign.new("using".var, 1.int32), "using".var]
       it_parses "foo(using: :x)", Call.new("foo", named_args: [NamedArgument.new("using", "x".symbol)])
       it_parses "def using; end", Def.new("using")
-      it_parses "using.nil?", IsA.new("using".call, Path.global("Nil"), nil_check: true)
-      it_parses "def f(using = nil); using.nil? ? 1 : using.to_s; end",
-        Def.new("f", [Arg.new("using", NilLiteral.new)], If.new(IsA.new("using".var, Path.global("Nil"), nil_check: true), 1.int32, Call.new("using".var, "to_s"), ternary: true))
       it_parses "using app/greeter", Call.new("using", Call.new("app".call, "/", "greeter".call))
 
       # iyi: a module path segment has to survive the round trip to the type

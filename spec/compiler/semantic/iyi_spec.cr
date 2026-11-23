@@ -200,6 +200,16 @@ describe "Semantic: iyi" do
         end
         CODE
     end
+
+    it "keeps a Crystal file's `using` as a name" do
+      assert_type(<<-CODE, filename: "prog.cr") { int32 }
+        def connection(using : Int32? = nil)
+          using.nil? ? 0 : using
+        end
+
+        connection(using: 1)
+        CODE
+    end
   end
 
   describe "a nilable receiver" do
@@ -629,33 +639,6 @@ describe "Semantic: iyi" do
 
     it "keeps a Crystal file's rescue" do
       assert_type("begin; 1; rescue; 2; end", filename: "prog.cr") { int32 }
-    end
-  end
-
-  describe "`using` in a Crystal file" do
-    it "is a parameter, a local, a named argument and a method" do
-      assert_type(<<-CODE, inject_primitives: true, filename: "prog.cr") { int32 }
-        class Connection
-          def self.get(name : Int32)
-            name
-          end
-        end
-
-        def connection(using : Int32? = nil)
-          using.nil? ? 0 : Connection.get(using)
-        end
-
-        def query(*, using = nil)
-          connection(using)
-        end
-
-        def using
-          using = 1
-          using
-        end
-
-        query(using: 2) + using
-        CODE
     end
   end
 

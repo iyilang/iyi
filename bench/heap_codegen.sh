@@ -22,14 +22,26 @@
 # checks run before it (which bench/heap_verify.sh's comparison leaves
 # out too), which the pool's threads move by one or two run to run, and
 # the holder's own holders, which a search of what is still live finds
-# or not, are masked and left out;
-# and when the run without it stops at its check's `FAIL:` line, read
-# before any collection. A copy whose loss no verifier sees is listed
-# apart (`OWN_ONLY`), with why, and caught by its `FAIL:` line alone.
+# or not, are masked and left out; when that report is the verifier's
+# check the copy names, its local collection's (`local`) or its unit's
+# death's (`death`) - the plain `classvar-publish` copy once fell through
+# its local collection to the death's, a backstop whose word changed run
+# to run (#223); and when the run without it stops at its check's
+# `FAIL:` line, read before any collection. A copy whose loss no
+# verifier sees is listed apart (`OWN_ONLY`), with why, and caught by its
+# `FAIL:` line alone.
 # Every copy is caught built `--release` as well: what a check keeps live
 # across a park is the optimiser's to keep or drop, and optimised copies
 # once went unseen (`holes`) or named another word run to run
 # (`new-shared`).
+#
+# Each copy's report is pinned to one check's sentence (`sentence`, and the word
+# caught_both gives each copy): `c1` and `new-shared` at their unit's death,
+# every other copy at its partition's local collection. `collect_here` in
+# heap_codegen.iyi is a macro since cc7ba9a88, so each copy's local collection
+# scrubs in the caller's frame; the words, and why c1 and born_shared read at
+# their deaths, are in heap_codegen.iyi's header. A difference between two runs
+# prints both runs' report lines.
 
 set -u
 
@@ -152,13 +164,22 @@ fi
 TABLE="$WORK/table.md"
 : >"$TABLE"
 
-# The copy's verifier runs: each exits 86 with a report, the same in every
-# run once addresses and the count of checks are masked and the holder's
-# own holders (`held by`, found by a search of whatever is still live)
-# left out. Prints the report's first line and what it found, or nothing
-# when a run missed.
-verifier_caught() { # program check
-  local program="$1" check="$2" k=1 first="" report line code
+# The sentence of the verifier's check named `local` or `death`.
+sentence() { # check
+  case "$1" in
+    local) echo "a slot names a LOCAL chunk its local mark left unmarked, about to be freed" ;;
+    death) echo "at its unit's death, a slot names one of its LOCAL chunks, about to be freed" ;;
+  esac
+}
+
+# The copy's verifier runs: each exits 86 with a report at the check
+# *word* names, the same in every run once addresses and the count of
+# checks are masked and the holder's own holders (`held by`, found by a
+# search of whatever is still live) left out. Prints the report's first
+# line and what it found, or nothing when a run missed.
+verifier_caught() { # program check word
+  local program="$1" check="$2" want k=1 first="" report line code
+  want="$(sentence "$3")"
   while [ "$k" -le "$RUNS" ]; do
     verified "$program" "$program.v$k" 1 "$check"
     code="$(cat "$WORK/$program.v$k.code")"
@@ -168,10 +189,15 @@ verifier_caught() { # program check
       echo "run $k: exit $code, $( [ -n "$report" ] && echo "report" || echo "no report")" >"$WORK/$program.missed"
       return
     fi
+    line="$(echo "$report" | sed -n 2p | sed 's/^ *//')"
+    if [ "$line" != "$want" ]; then
+      echo "run $k reported another check: $line, not the $3 check's" >"$WORK/$program.missed"
+      return
+    fi
     if [ -z "$first" ]; then
       first="$report"
     elif [ "$report" != "$first" ]; then
-      echo "run $k reported another word: $(echo "$report" | sed -n '1,2p' | tr -s ' ' | tr '\n' ' ')" >"$WORK/$program.missed"
+      echo "run $k reported another word: $(echo "$report" | sed -n '2,5p' | tr -s ' ' | tr '\n' ' ')(run 1: $(echo "$first" | sed -n '2,5p' | tr -s ' ' | tr '\n' ' '))" >"$WORK/$program.missed"
       return
     fi
     k=$((k + 1))
@@ -180,9 +206,9 @@ verifier_caught() { # program check
   echo "$line -$(echo "$first" | sed -n 2p | tr -s ' ')"
 }
 
-prove_caught() { # label copy check [release]
-  local label="$1" copy="$2" check="$3" extra="" program="broken-$2"
-  if [ "${4:-}" = release ]; then
+prove_caught() { # label copy check word [release]
+  local label="$1" copy="$2" check="$3" word="$4" extra="" program="broken-$2"
+  if [ "${5:-}" = release ]; then
     extra="--release"
     program="broken-$copy-release"
   fi
@@ -204,7 +230,7 @@ prove_caught() { # label copy check [release]
     status=1
   fi
   local verifier reason
-  verifier="$(verifier_caught "$program" "$check")"
+  verifier="$(verifier_caught "$program" "$check" "$word")"
   reason="$(own_only "$copy")"
   if [ -n "$reason" ]; then
     if [ -n "$verifier" ]; then
@@ -221,22 +247,25 @@ prove_caught() { # label copy check [release]
   printf '| %s (`%s`) | %s | %s |\n' "$label" "$copy" "$verifier" "$own" >>"$TABLE"
 }
 
-# Each copy built plain, then `--release`.
-caught_both() { # label copy check
-  prove_caught "$1" "$2" "$3"
-  prove_caught "$1, built \`--release\`" "$2" "$3" release
+# Each copy built plain, then `--release`, each caught at the verifier's
+# check *word* names (`sentence`): c1's and born_shared's words are read
+# at their units' deaths, as heap_codegen.iyi says why; every other
+# check's at its unit's `collect_here`.
+caught_both() { # label copy check word
+  prove_caught "$1" "$2" "$3" "$4"
+  prove_caught "$1, built \`--release\`" "$2" "$3" "$4" release
 }
 
 echo
 echo "== each mechanism turned off in the compiler, caught"
-caught_both "C1 typed crossing context" c1 c1
-caught_both "class-variable store publish" classvar-publish classvar
-caught_both "trusted types born shared" new-shared born_shared
-caught_both "pin (forced off)" pin pin
-caught_both "pin through a @[Share] def's block (SharedProc.of binds no block)" handed handed
-caught_both "pin through a block handed to a helper (not followed)" forwarded handed
-caught_both "pin of a spawn(in: u) task (pinned: not passed)" pin-in pin_in
-caught_both "union holes written as zero" holes holes
+caught_both "C1 typed crossing context" c1 c1 death
+caught_both "class-variable store publish" classvar-publish classvar local
+caught_both "trusted types born shared" new-shared born_shared death
+caught_both "pin (forced off)" pin pin local
+caught_both "pin through a @[Share] def's block (SharedProc.of binds no block)" handed handed local
+caught_both "pin through a block handed to a helper (not followed)" forwarded handed local
+caught_both "pin of a spawn(in: u) task (pinned: not passed)" pin-in pin_in local
+caught_both "union holes written as zero" holes holes local
 
 echo
 echo "Seed $SEED (IYI_CHAOS), IYI_HEAP_STRESS=1, $RUNS verifier runs each with HEAP22_PRINT_ONLY=1."

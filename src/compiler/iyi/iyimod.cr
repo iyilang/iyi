@@ -115,7 +115,12 @@ module Iyi::IyiMod
   # consumer's crossing calling the function is pinned. A v63 artifact said
   # nothing of such state, and a crossing calling into it ran unpinned; it
   # is refused and rebuilt.
-  FORMAT_VERSION = 64_u32
+  # v65: `Demands`, what the module's object code calls in the units of the
+  # other modules its build compiled (SPEC.md IV.3, early cutoff). A build
+  # that reads this artifact while compiling one of those from changed
+  # source has the source define each of them, and asks before LLVM runs
+  # whether it did. A v64 artifact says nothing of it and is rebuilt.
+  FORMAT_VERSION = 65_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -282,6 +287,15 @@ module Iyi::IyiMod
     # knows, whose spawns stay in their units. In the interface hash,
     # since a dependent's placement is decided by it. 67, beside `Spawns`.
     Reaches = 67
+
+    # iyi: what the module's object code calls in the units of the *other*
+    # modules its build compiled, and how to make a build compile each
+    # (`Demand`). Read only by a build that compiles one of those modules
+    # from changed source while reading this artifact under early cutoff
+    # (SPEC.md IV.3): demand-driven codegen emits what that build reaches,
+    # and this module's calls are machine code it does not analyse. Not in
+    # a hash: it is about the producer's units, not the module's surface.
+    Demands = 68
   end
 
   # One piece of module state a function of the module may reach (SPEC.md
@@ -318,6 +332,15 @@ module Iyi::IyiMod
   # build ran in the shared heap (heap22 `pinned:`): *call* names which,
   # *reason* says why. Beside the spawns in `Section::Spawns`.
   record PinRecord, call : String, line : Int32, column : Int32, reason : String
+
+  # One function a module's object code calls in another module's unit
+  # (`Section::Demands`): *unit* the unit (the callee module's type),
+  # *symbol* the function's symbol, and the call a build makes to compile
+  # it - *receiver* the type, *class_call* whether the call is on the type
+  # itself, *name* the method, *args* the argument types, or nil where no
+  # written call reaches that symbol (a splat, a captured block).
+  record Demand, unit : String, symbol : String, receiver : String, class_call : Bool,
+    name : String, args : Array(String)?
 
   # A regex literal's constant: the name its object code reads, and what a
   # consumer has to build under that name.
@@ -964,7 +987,13 @@ module Iyi::IyiMod
     # list is iyi's own `:` syntax and means something R-2b checks; this is
     # what the shard wrote, in the language it wrote it in.
     includes : Array(String) = [] of String,
-    # iyi: a `lib`'s `fun` lines, as the shard wrote them.
+    # iyi: a `lib`'s `fun` lines, as the shard wrote them, and its external
+    # variables' `$name : Type` lines beside them: a body the consumer
+    # compiles reads `LibC.daylight` as it calls `LibC.opendir`, and with
+    # only the `fun`s here it said `undefined fun 'daylight'` (#204). Lines
+    # of text in the same section, so the format version is as it was: an
+    # artifact written without them stops at that same error, and a reader
+    # that predates them parses them as the source they are.
     #
     # Text rather than a `Signature`, for the reason `macros` is text: a `fun`
     # has a shape no `def` has — a C name beside Crystal's, a return
@@ -1665,6 +1694,10 @@ module Iyi::IyiMod
     # See `Section::Reaches`.
     property reaches : Array(ReachRecord)? = nil
 
+    # What the module's object code calls in other modules' units. See
+    # `Section::Demands`. Settable alongside `object_code`.
+    property demands = [] of Demand
+
     def initialize(@module_name, @source_path, @compiler_version, @target_triple,
                    @flags, @imports, @usings = [] of String, @exports = Exports.empty,
                    @object_code = [] of ObjectUnit, @has_initialiser = false,
@@ -1729,6 +1762,10 @@ module Iyi::IyiMod
     # module's functions reach nothing else.
     if reaches = artifact.reaches
       sections << {Section::Reaches, encode_reaches(reaches)}
+    end
+
+    unless artifact.demands.empty?
+      sections << {Section::Demands, encode_demands(artifact.demands)}
     end
 
     # Between the declarations and the machine code, which is where it belongs:
@@ -2056,6 +2093,7 @@ module Iyi::IyiMod
       spawns = [] of SpawnRecord
       pins = [] of PinRecord
       reaches = nil
+      demands = [] of Demand
       positions = {bodies: {} of String => Array(SourcePosition), initialiser: [] of SourcePosition}
 
       table.each do |(kind, length, sum)|
@@ -2098,6 +2136,7 @@ module Iyi::IyiMod
         when Section::SourcePositions then positions = decode_source_positions(payload)
         when Section::Spawns          then spawns, pins = decode_spawns_and_pins(payload)
         when Section::Reaches         then reaches = decode_reaches(payload)
+        when Section::Demands         then demands = decode_demands(payload)
         else
           # Written by a later compiler, or a section this one does not need.
           # Skipping is the point of the table.
@@ -2120,6 +2159,7 @@ module Iyi::IyiMod
       artifact.spawns = spawns
       artifact.pins = pins
       artifact.reaches = reaches
+      artifact.demands = demands
       artifact
     end
   rescue ex : Overclaim
@@ -2352,6 +2392,12 @@ module Iyi::IyiMod
     unless symbol_literals.empty?
       io.puts "symbol literals"
       symbol_literals.each { |name| io.puts "  :#{name}" }
+    end
+
+    demands = artifact.demands
+    unless demands.empty?
+      io.puts "demands       #{demands.size} calls into other modules' units"
+      demands.each { |demand| io.puts "  #{demand.unit}: #{demand.symbol}" }
     end
 
     class_vars = artifact.class_vars
@@ -3853,6 +3899,36 @@ module Iyi::IyiMod
       ReachRecord.new(function, label, type, kind, use, path, why, module_name, read_string(io))
     end
     records
+  end
+
+  private def self.encode_demands(demands : Array(Demand)) : Bytes
+    io = IO::Memory.new
+    io.write_bytes demands.size.to_u32, FORMAT
+    demands.each do |demand|
+      write_string io, demand.unit
+      write_string io, demand.symbol
+      write_string io, demand.receiver
+      write_string io, demand.class_call ? "class" : "instance"
+      write_string io, demand.name
+      args = demand.args
+      write_string io, args ? "args" : "none"
+      write_strings io, args || [] of String
+    end
+    io.to_slice
+  end
+
+  private def self.decode_demands(payload : Bytes) : Array(Demand)
+    io = Payload.new(payload)
+    Array(Demand).new(read_count(io, 28)) do
+      unit = read_string(io)
+      symbol = read_string(io)
+      receiver = read_string(io)
+      class_call = read_string(io) == "class"
+      name = read_string(io)
+      written = read_string(io) == "args"
+      args = read_strings(io)
+      Demand.new(unit, symbol, receiver, class_call, name, written ? args : nil)
+    end
   end
 
   private def self.decode_mono_bodies(payload : Bytes) : Hash(String, String)

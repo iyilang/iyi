@@ -28,10 +28,18 @@
 # <wanted>", and the run ends "ALL CHECKS PASSED" or exits 1. The panic
 # the third step makes is printed by its task, as any is.
 #
+# Then a server on the pool with limits of its own (`max_head: 4096,
+# max_body: 1024`): a body at them is answered, one whose length passes
+# them is a 413 before it is sent, and a head past them a 431.
+#
 # Then `workers: 1`: four clients connect and ask before anything
 # accepts, and every answer must name the accepting thread; the block
 # appends to an `Array`, which is not `Share`, and closes its listener
 # itself, both of which the compiler refuses on more than one worker.
+# A broken server may send that block to the pool. It reports its thread
+# before touching either non-Share value, so the check can name the wrong
+# thread without racing the Array. The accepting task closes the listener
+# when the block ran elsewhere.
 #
 # Then the same server over TLS, `tls: config.frozen`, on a listener of
 # its own. Eight clients connect before anything accepts and send their
@@ -412,6 +420,37 @@ watched("the whole run", 60000) do
 end
 check("serve returned", returned ? "yes" : "no", "yes", failures)
 
+# The pool's connections are held to `serve`'s *max_head* and *max_body*
+# as the calling thread's are (issue #213): a body whose length passes
+# the limit is refused before it is sent, and a head past it whatever
+# comes after.
+limited = IyiSocket.listen("127.0.0.1", 0)
+limited_port = limited.local_port
+watched("a pooled server's own limits", 10000) do
+  group do |g|
+    g.spawn do
+      Server.serve(limited, max_head: 4096, max_body: 1024) { |request| Response.new(200, request.body.bytesize.to_s) }
+      0
+    end
+    g.spawn do
+      sized = connect(limited_port)
+      sized.write("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1024\r\n\r\n" + "b" * 1024)
+      check("a pooled server's own limits, a body at them", answer(sized), "1024", failures)
+      sized.close
+      declared = connect(limited_port)
+      declared.write("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1025\r\n\r\n")
+      check("a pooled server's own limits, a body past them", answer(declared), "body past 1024 bytes\n", failures)
+      declared.close
+      padded = connect(limited_port)
+      padded.write("GET / HTTP/1.1\r\nHost: localhost\r\nX-Pad: " + "p" * 5000)
+      check("a pooled server's own limits, a head past them", answer(padded), "request headers past 4096 bytes\n", failures)
+      padded.close
+      limited.close
+      0
+    end
+  end
+end
+
 # `workers: 1`: the accepting thread alone, and a block the compiler
 # does not check. Asked before anything accepts, as above.
 alone = IyiSocket.listen("127.0.0.1", 0)
@@ -427,9 +466,12 @@ watched("the run under workers: 1", 30000) do
   group do |g|
     g.spawn do
       Server.serve(alone, workers: 1) do |request|
-        heard << request.path
-        alone.close if request.path == "/stop"
-        Response.new(200, "#{IyiScheduler.state.object_id}")
+        answering = IyiScheduler.state.object_id
+        if answering == accepting
+          heard << request.path
+          alone.close if request.path == "/stop"
+        end
+        Response.new(200, "#{answering}")
       end
       0
     end
@@ -437,10 +479,15 @@ watched("the run under workers: 1", 30000) do
       threads = early_alone.map { |socket| answer(socket) }
       early_alone.each(&.close)
       distinct = threads.uniq
-      check("workers: 1, the threads that answered", distinct == [accepting.to_s] ? "the accepting thread alone" : "#{distinct.size}, not all the accepting one", "the accepting thread alone", failures)
-      stopper = connect(alone_port)
-      ask(stopper, "/stop")
-      stopper.close
+      on_accepting = distinct == [accepting.to_s]
+      check("workers: 1, the threads that answered", on_accepting ? "the accepting thread alone" : "#{distinct.size}, not all the accepting one", "the accepting thread alone", failures)
+      if on_accepting
+        stopper = connect(alone_port)
+        ask(stopper, "/stop")
+        stopper.close
+      else
+        alone.close
+      end
       check("workers: 1, the requests the block recorded", heard.size.to_s, "5", failures)
       0
     end

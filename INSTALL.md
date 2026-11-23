@@ -1,6 +1,6 @@
 # Installing iyi
 
-The released version is 0.21.0, and a build from current source reports the
+The released version is 0.22.0, and a build from current source reports the
 same. [README.md](README.md#install) has the two-line install; this file is
 what those lines check, how to do the same by hand, and what a compiler and a
 program built by it depend on.
@@ -17,13 +17,13 @@ tarball for your machine, linux-x86_64 or darwin-arm64, and refuses anything
 else. It checks the tarball against the release's `SHA256SUMS` and unpacks
 nothing on a mismatch, and nothing when `SHA256SUMS` cannot be fetched: every
 release from 0.12.0 on publishes one. It fetches over HTTPS only.
-`IYI_PREFIX` moves the destination and `IYI_VERSION=0.21.0` pins a release.
+`IYI_PREFIX` moves the destination and `IYI_VERSION=0.22.0` pins a release.
 By hand it is the same check (`shasum -a 256` where there is no `sha256sum`)
 and the same two lines:
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf iyi-0.21.0-linux-x86_64.tar.gz -C ~/.local
+tar -xzf iyi-0.22.0-linux-x86_64.tar.gz -C ~/.local
 ~/.local/bin/iyi run ~/.local/share/iyi/samples/hello.iyi
 ```
 
@@ -46,7 +46,7 @@ job recorded attestations has none, and `gh` says so. The installers check
 the checksum and not the attestation, which needs `gh`.
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 1,544 KB prelude, the 5,078 KB of `src/std` that `import std/...`
+iyi's own 1,555 KB prelude, the 5,090 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds
 all three beside itself, so there is nothing to configure. LLVM is inside the
 binary — a static minimal build from `scripts/build-static-llvm.sh` — so `lib/`
@@ -68,7 +68,7 @@ irm https://raw.githubusercontent.com/iyilang/iyi/master/install.ps1 | iex
 & "$env:LOCALAPPDATA\Programs\iyi\bin\iyi.exe" run "$env:LOCALAPPDATA\Programs\iyi\share\iyi\samples\hello.iyi"
 ```
 
-The release also carries `iyi-0.21.0-windows-x86_64.zip`, and
+The release also carries `iyi-0.22.0-windows-x86_64.zip`, and
 [`install.ps1`](install.ps1) installs it the way `install.sh` installs the
 tarball: checksums first, `IYI_PREFIX` and `IYI_VERSION` honoured, default
 prefix `%LOCALAPPDATA%\Programs\iyi`, `<prefix>\bin` added to the user's
@@ -76,7 +76,7 @@ prefix `%LOCALAPPDATA%\Programs\iyi`, `<prefix>\bin` added to the user's
 `powershell -ExecutionPolicy Bypass -File install.ps1`. By hand:
 
 ```powershell
-Expand-Archive iyi-0.21.0-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\iyi"
+Expand-Archive iyi-0.22.0-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\iyi"
 & "$env:LOCALAPPDATA\Programs\iyi\bin\iyi.exe" run "$env:LOCALAPPDATA\Programs\iyi\share\iyi\samples\hello.iyi"
 ```
 
@@ -147,6 +147,33 @@ build links `libSystem` alone and still copies to another Mac. A Windows build
 imports `kernel32` (plus `advapi32` and `ws2_32` for entropy or sockets), the
 dynamic Visual C++ runtime and five UCRT façades; `--static` changes nothing
 there. A wasm32 build is one self-contained module already.
+
+## Shipping a program through npm
+
+[`samples/npm`](samples/npm) shows a launcher package with optional native
+packages for Linux x64, macOS arm64 and Windows x64. The launcher forwards
+arguments and standard streams, and reports an unsupported platform or a
+missing package. Each native package declares its `os` and `cpu`, so npm
+installs the matching binary. This recipe does not cover Linux arm64, musl,
+or other platforms.
+
+Build the program for each platform on that platform, then assemble its
+package. For example, on Linux x64:
+
+```sh
+iyi build --release -o /tmp/hello samples/iyi/hello.iyi
+node samples/npm/assemble.mjs /tmp/packages linux x64 /tmp/hello
+```
+
+Change the name, version, binary path, shim and platform dependencies together
+for your program. `bash bench/npm_recipe_exercise.sh` packs the host packages
+and installs them from local tarballs without contacting the registry.
+The example [`release.yml`](samples/npm/release.yml) builds all three
+platforms and publishes the platform packages before the launcher. Copy and
+adapt it to your repository, pin the compiler release and configure npm
+trusted publishing for each package and the protected `npm` environment.
+It requests an OIDC token and provenance, not a stored npm token. The
+publishing path has not been exercised by this recipe.
 
 ## What the compiler depends on
 

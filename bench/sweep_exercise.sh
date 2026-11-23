@@ -47,13 +47,13 @@ fi
 
 echo
 echo "== every check reported"
-for phrase in reclaimed warm survivor liveness large steady refault room threaded cut trim batches edge idle; do
+for phrase in reclaimed warm survivor liveness large steady refault room threaded cut trim cap batches edge idle; do
   grep -q "$phrase" "$WORK/sweep.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady, refault, room, threaded, cut, trim, batches, edge and idle all reported"
+[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady, refault, room, threaded, cut, trim, cap, batches, edge and idle all reported"
 
 echo
 echo "== the same program with optimisation on"
@@ -197,6 +197,13 @@ prove_fails "a warm run threaded whole" uncapped "threaded:|room:" \
 prove_fails "a warm run cut off the grid" offgrid "cut:|trim:" \
   '{ if ($0 ~ /^          cut = \(first \+ \(target - first \+ chunk - 1_u64\)\.unsafe_div\(chunk\) \* chunk - arena\)\.unsafe_shr\(PAGE_SHIFT\)$/) { print "          cut = page + most"; found = 1; next } print } END { if (!found) exit 3 }'
 
+# A run a slice's word cuts short cut at the word, off the chunk grid:
+# a chunk longer than a page taken last reaches over idle pages of the
+# rest, which the trim and the sweep hand back under it, and into the
+# slice's word.
+prove_fails "a run cut at a slice's word off the grid" capoffgrid "cap:" \
+  '{ if (sub(/^        if capped && stop == pages && page_idle\?\(arena, arena \+ stop \* PAGE\) && page_cold\?\(arena, arena \+ stop \* PAGE\) != warm$/, "        if false")) found = 1; print } END { if (!found) exit 3 }'
+
 # The trim handing back a run's first page whatever reaches into it:
 # the chunk threaded last before it loses its tail.
 prove_fails "the trim takes a reached-into page" trimedge "trim:" \
@@ -288,157 +295,240 @@ else
   echo "  trim stress failed:"; tail -3 "$WORK/trim_stress.out" | sed 's/^/    /'; status=1
 fi
 
-echo
-echo "== the listed pages counted once per clear"
-# The listed pages are counted off once per clear, not once per page read
-# listed. Two refills adopting the batches of adjacent slices both read the
-# page the slices share as listed, but only one of them clears its bit, and
-# `IyiHeap.unlist_page` answers which. A refill that also counts the page it
-# lost leaves the arena's count short of its bits. The count reaches zero
-# with pages still listed, and the trim and the pause then make idle pages
-# under objects a cache handed out.
+# The listed pages counted off by every refill that read them listed, as
+# before `IyiHeap.unlist_page`: two refills adopting the batches of
+# adjacent slices both count the page the slices share, the arena's count
+# reaches zero with pages listed, and the trim and the pause make idle
+# pages under objects a cache handed out. The two refills must read the
+# shared page between one's read and its clear, and that window is a few
+# instructions: on darwin's sixteen-kilobyte pages the plain stress caught
+# the old counting in 11 runs of 11 of 20 s on macOS 26.6, Apple M2 Pro, 10
+# cores (the user's machine), but on four-kilobyte pages it passed 3 runs
+# of 3 on Windows 11, 12 logical processors (the user's machine), where
+# two adoptions met in the window 0-3 times in 10 s. So both copies here
+# hold the window open: an adoption that reads a batch's first or last
+# page listed spins WIDEN_NS before it clears the bit, and counts the
+# times the clear finds another adoption got there first
+# (`IyiHeap.widen_hits`, reported by trim_stress.iyi built with
+# -Dtrim_widen). The fix, widened, must read every block back whole with
+# the window met. At 20 microseconds the old counting was caught on the
+# first run in 20 runs of 20, within 0-6 s, on Windows 11, 12 logical
+# processors and on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+# machines), and the fix read every block back whole in 5 runs of 5 and
+# 3 of 3 with the window met 4,706-5,750 and 9,483-15,972 times.
 #
-# `bench/unlist_count.iyi` checks the count on one thread, with no timing. It
-# unlists pages 1 to 3 of five listed pages and compares the count with the
-# bits left. The copy plays the neighbouring adoption inside `unlist_batch`,
-# at the batch's first and last pages, between the read and the clear: the
-# neighbour clears the edge page and takes it off the count, then this
-# adoption's own clear loses. That is the interleaving the race made, and it
-# happens on every run. The fix counts only the clears it wins and reads
-# 2 = 2. The copy also counts the clear it lost and reads 0 against 2, so it
-# fails on its only run.
+# But a meeting only leaves the arena's count one short: a block reads
+# wrong when the count then reaches zero exactly with pages still listed,
+# a refill reads it there and keeps its batch's pages listed, and the
+# pause makes them idle under its objects. The meetings do not decide
+# that. On a GitHub ubuntu runner (master's job 136048960124) the fix
+# met the window 961 times in its run and the old counting passed three
+# runs of three. On this Linux machine, 12 vCPUs, the old counting
+# passed 0 runs of 40, 1 of 40 on two of them (taskset) with the window
+# met 1,157 times, 15 of 40 beside twelve busy loops and 13 of 30 on four
+# beside four, met 552-1,377 times, and 40 of 40 on one, met 0-7 times.
+# So both copies also audit the count where it must be exact: at the
+# pause, with every thread stopped and none inside the allocator, an
+# arena counts as listed the pages its bitmap lists
+# (`IyiHeap.audit_listed`, before `IyiHeap.idle_listed` moves them), and
+# the first count off ends the program there, with both numbers; a last
+# collection once the threads end audits the last epoch's adoptions too.
+# The fix must hold every count. The old counting's count is one short
+# from a meeting to the next pause, so a run that meets the window fails;
+# one that never meets it tests nothing, and runs again, three at most.
+# So built - the program then asked after every trim - the old counting
+# failed 250 runs of 250 on this Linux machine, 50 each on 12, four and
+# two vCPUs, beside twelve busy loops and on four beside four, and on one
+# vCPU the 8 of 30 that met the window; and 80 of 80 on macOS 26.6, Apple
+# M2 Pro, 10 cores (the user's machine), 30 beside ten busy loops. The
+# fix held every count in 60 runs of 60 and 30 of 30.
 #
-# The old proof raced two adoptions in a window of 20 microseconds, then
-# waited for the trim stress to show the downstream effect, a block handed out
-# twice. On Namespace's Linux 4x16 it passed 4 of 5 runs, though the fix met
-# the window 1,136 and 2,271 times in 10 s (jwaldrip/iyi run 44368465397). A
-# check whose outcome depends on how often a timed race lands is not
-# deterministic, so it is gone.
-#
-# The stress keeps two jobs on the fix, with the same interleaving at every
-# batch edge: every block read back whole under eight threads and the idle
-# trim for 10 s, and every count exact at every pause. `IyiHeap.widen_hits`
-# counts the edge pages met that way; it is printed, not asserted. The count
-# is audited where it must be exact, with every thread stopped and none inside
-# the allocator, before `IyiHeap.idle_listed` moves the listed pages
-# (`IyiHeap.audit_listed`, `IyiHeap.listed_off`): an arena counts as listed
-# the pages its bitmap lists, and trim_stress.iyi fails at the first count off.
-play_prelude() {
+# The count raised after the bits it counts, as before `IyiHeap.list_pages`
+# raised it first: a slice that lists the page it shares with the slice
+# below sits between the two while the refill adopting the batch below
+# unlists that page and counts it off, and the arena's count is one
+# short until the slice counts it - long enough, on a thread preempted
+# there, for another refill of the arena to read 0 and leave its own
+# pages listed under the objects it hands out. The count is whole again
+# by the pause, so the count audit never sees it; the pause then makes
+# those pages idle and the next refill threads their chunks a second
+# time. So the copies also hold that window open: a slice listing the
+# page it began on spins WIDEN_NS between the count and the bits, a
+# refill that reaches the page meanwhile is counted
+# (`IyiHeap.list_hits`), and one that clears a bit not yet counted is
+# the defect itself, which ends the program there. And the pause's audit
+# reads every chunk whose head is on a listed page, which must be free:
+# one handed out is about to go idle under its owner, and ends the
+# program before it can. The fix, widened, must meet that window and
+# hold both; the old order ("listorder") must fail at the first, and a
+# refill that unlists nothing ("nounlist") at the second.
+WIDEN_NS=20000
+widen_prelude() {
   mkdir -p "$WORK/$1/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$1/iyi/"
-  awk -v mode="$1" '
+  awk -v mode="$1" -v widen="$WIDEN_NS" '
     /^      def self\.pages_released : UInt64$/ {
       print "      @@widen_hits : UInt64 = 0_u64"
       print "      def self.widen_hits : UInt64"
       print "        @@widen_hits"
       print "      end"
+      print "      def self.spin_widen : Nil"
+      print "        stop = IyiMark.now_ns + " widen "_u64"
+      print "        spun = 0_u64"
+      print "        while IyiMark.now_ns < stop"
+      print "          spun = spun + 1_u64"
+      print "        end"
+      print "      end"
+      print "      def self.fail_say(text : String) : Nil"
+      print "        __iyi_write(1, text.to_unsafe.as(Void*), text.bytesize.to_u64)"
+      print "      end"
+      print "      def self.fail_count(value : UInt64) : Nil"
+      print "        buffer = uninitialized StaticArray(UInt8, 20)"
+      print "        bytes = pointerof(buffer).as(Pointer(UInt8))"
+      print "        index = 20"
+      print "        rest = value"
+      print "        while true"
+      print "          index = index - 1"
+      print "          bytes[index] = (48_u64 + rest.unsafe_mod(10_u64)).to_u8"
+      print "          rest = rest.unsafe_div(10_u64)"
+      print "          break if rest == 0_u64"
+      print "        end"
+      print "        __iyi_write(1, (bytes + index).as(Void*), (20 - index).to_u64)"
+      print "      end"
+      print "      @@list_hits : UInt64 = 0_u64"
+      print "      @@listing : UInt64 = 0_u64"
+      print "      def self.list_hits : UInt64"
+      print "        @@list_hits"
+      print "      end"
+      print "      def self.hold_listing(arena : UInt64, low : UInt64) : Nil"
+      print "        return unless (low - arena).unsafe_shr(PAGE_SHIFT) == (read64(arena + OFF_SWEEP_CURSOR) - arena).unsafe_shr(PAGE_SHIFT)"
+      print "        word = Pointer(Atomic(UInt64)).new(pointerof(@@listing).address)"
+      print "        word.value.set(low)"
+      print "        spin_widen"
+      print "        word.value.compare_and_set(low, 0_u64)"
+      print "      end"
       print "      @@listed_audits : UInt64 = 0_u64"
-      print "      @@listed_off : UInt64 = 0_u64"
-      print "      @@listed_off_count : UInt64 = 0_u64"
-      print "      @@listed_off_pages : UInt64 = 0_u64"
       print "      def self.listed_audits : UInt64"
       print "        @@listed_audits"
       print "      end"
-      print "      def self.listed_off : UInt64"
-      print "        @@listed_off"
-      print "      end"
-      print "      def self.listed_off_count : UInt64"
-      print "        @@listed_off_count"
-      print "      end"
-      print "      def self.listed_off_pages : UInt64"
-      print "        @@listed_off_pages"
-      print "      end"
       print "      def self.audit_listed(arena : UInt64, count : UInt64) : Nil"
       print "        words = read64(arena + OFF_MAP).unsafe_shr(PAGE_SHIFT + 6_u64)"
+      print "        chunk = read64(arena + OFF_CHUNK)"
+      print "        first = arena_first(arena)"
       print "        pages = 0_u64"
+      print "        live = 0_u64"
       print "        slot = 0_u64"
       print "        while slot < words"
       print "          word = read64(arena + OFF_LISTED_PAGES + slot * 8_u64)"
-      print "          while word != 0_u64"
-      print "            word = word & (word - 1_u64)"
-      print "            pages = pages + 1_u64"
+      print "          bit = 0_u64"
+      print "          while word != 0_u64 && bit < 64_u64"
+      print "            if word & 1_u64.unsafe_shl(bit) != 0_u64"
+      print "              pages = pages + 1_u64"
+      print "              low = arena + (slot * 64_u64 + bit) * PAGE"
+      print "              head = low <= first ? first : first + (low - first + chunk - 1_u64).unsafe_div(chunk) * chunk"
+      print "              while head < low + PAGE"
+      print "                live = live + 1_u64 if read8(arena + META + chunk_index(arena, head) * META_ENTRY) & FREE_FLAG == 0_u64"
+      print "                head = head + chunk"
+      print "              end"
+      print "            end"
+      print "            bit = bit + 1_u64"
       print "          end"
       print "          slot = slot + 1_u64"
       print "        end"
       print "        @@listed_audits = @@listed_audits + 1_u64"
       print "        if pages != count"
-      print "          if @@listed_off == 0_u64"
-      print "            @@listed_off_count = count"
-      print "            @@listed_off_pages = pages"
-      print "          end"
-      print "          @@listed_off = @@listed_off + 1_u64"
+      print "          fail_say(\"FAIL: trim stress: a pause found an arena counting \")"
+      print "          fail_count(count)"
+      print "          fail_say(\" pages listed with \")"
+      print "          fail_count(pages)"
+      print "          fail_say(\" listed\\n\")"
+      print "          __iyi_exit(1)"
+      print "        end"
+      print "        if live != 0_u64"
+      print "          fail_say(\"FAIL: trim stress: a pause found \")"
+      print "          fail_count(live)"
+      print "          fail_say(\" chunks handed out on \")"
+      print "          fail_count(pages)"
+      print "          fail_say(\" pages still listed\\n\")"
+      print "          __iyi_exit(1)"
       print "        end"
       print "      end"
       print
       n++; next }
+    /^        Pointer\(Atomic\(UInt64\)\)\.new\(arena \+ OFF_LISTED\)\.value\.add\(\(high - low\)\.unsafe_shr\(PAGE_SHIFT\)\)$/ {
+      if (mode == "listorder") held = $0; else print
+      n++; next }
+    /^        set_listed\(arena, low, high, true\)$/ {
+      if (mode == "listorder") { print; print "        hold_listing(arena, low)"; print held }
+      else { print "        hold_listing(arena, low)"; print }
+      n++; next }
     /^      def self\.idle_listed\(arena : UInt64\) : Nil$/ { pause = 1 }
     pause && /^        return if count == 0$/ { print "        audit_listed(arena, count)"; print; pause = 0; n++; next }
     /^      def self\.unlist_batch\(/ { batch = 1 }
+    batch && /^        return 0_u64 if read64\(arena \+ OFF_LISTED\) == 0$/ { print (mode == "nounlist" ? "        return 0_u64" : $0); n++; next }
     batch && /^        while page <= last$/ { print "        low_edge = page"; print; n++; next }
     /^          count = count \+ 1_u64 if unlist_page\(arena, page\)$/ {
       batch = 0
+      print "          Pointer(Atomic(UInt64)).new(pointerof(@@list_hits).address).value.add(1_u64) if Pointer(Atomic(UInt64)).new(pointerof(@@listing).address).value.get == arena + page * PAGE"
       print "          if page_listed?(arena, arena + page * PAGE)"
-      print "            if page == low_edge || page == last"
-      print "              Pointer(Atomic(UInt64)).new(arena + OFF_LISTED).value.sub(1_u64) if unlist_page(arena, page)"
-      print "            end"
+      print "            spin_widen if page == low_edge || page == last"
       print "            won = unlist_page(arena, page)"
+      print "            if won && Pointer(Atomic(UInt64)).new(pointerof(@@listing).address).value.get == arena + page * PAGE"
+      print "              fail_say(\"FAIL: trim stress: a refill unlisted and counted off a page a slice had listed and not yet counted\\n\")"
+      print "              __iyi_exit(1)"
+      print "            end"
       print "            Pointer(Atomic(UInt64)).new(pointerof(@@widen_hits).address).value.add(1_u64) unless won"
       print (mode == "doublecount" ? "            count = count + 1_u64" : "            count = count + 1_u64 if won")
       print "          end"
       n++; next }
     { print }
-    END { if (n != 4) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi"
+    END { if (n != 7) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi" &&
+    IYI_PATH="$WORK/$1:$REPO/src" "$IYI" build --release -Dtrim_widen -o "$WORK/$1/program" "$REPO/bench/trim_stress.iyi" >"$WORK/$1/build.log" 2>&1
 }
-
-# Builds bench/unlist_count.iyi against copy $1 and runs it once. The status is
-# 2 when it did not build, otherwise the program's own: 0 when the count agrees
-# with the bits, 1 on the FAIL line.
-unlist_count_run() {
-  IYI_PATH="$WORK/$1:$REPO/src" "$IYI" build -Dunlist_audit -o "$WORK/$1/unlist_count" \
-    "$REPO/bench/unlist_count.iyi" >"$WORK/$1/unlist.build.log" 2>&1 || return 2
-  "$WORK/$1/unlist_count" >"$WORK/$1/unlist.out" 2>&1
+window_met() {
+  sed -n 's/.*, \([0-9]*\) edge pages read listed by two adoptions at once.*$/\1/p' "$WORK/$1.out" | head -1
 }
-
-if ! play_prelude played; then
-  echo "  the adjacent adoption played: the lines it edits are not in the prelude any more"; status=1
+list_met() {
+  sed -n 's/.*, \([0-9]*\) shared pages reached by a refill while a slice listed them.*$/\1/p' "$WORK/$1.out" | head -1
+}
+if ! widen_prelude widened; then
+  echo "  the windows held open: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
+elif stress_run widened "$WORK/widened/program" 10 &&
+     hits=$(window_met widened) && [ -n "$hits" ] && [ "$hits" -gt 0 ] &&
+     lhits=$(list_met widened) && [ -n "$lhits" ] && [ "$lhits" -gt 0 ]; then
+  echo "  the windows held open ${WIDEN_NS} ns: every block read back whole, $hits edge pages read listed by two adoptions at once, $lhits shared pages reached by a refill while a slice listed them, every count of listed pages its pages, every listed page's chunks free"
 else
-  if unlist_count_run played; then
-    sed 's/^/  /' "$WORK/played/unlist.out"
-  else
-    echo "  the adjacent adoption played: the count is wrong, or the copy did not build:"
-    sed -n '1,12p' "$WORK/played/unlist.build.log" "$WORK/played/unlist.out" 2>/dev/null | sed 's/^/    /'
-    status=1
-  fi
-  if ! IYI_PATH="$WORK/played:$REPO/src" "$IYI" build --release -Dtrim_widen -o "$WORK/played/program" \
-       "$REPO/bench/trim_stress.iyi" >"$WORK/played/build.log" 2>&1; then
-    echo "  the adjacent adoption played: the stress did not build"
-    sed -n '1,12p' "$WORK/played/build.log" | sed 's/^/    /'
-    status=1
-  elif stress_run played "$WORK/played/program" 10 &&
-       hits=$(sed -n 's/.*, \([0-9]*\) edge pages read listed by two adoptions at once.*$/\1/p' "$WORK/played.out") &&
-       [ -n "$hits" ]; then
-    echo "  the adjacent adoption played at each batch edge: every block read back whole, $hits edge pages read listed by two adoptions at once"
-  else
-    echo "  the adjacent adoption played: the stress failed, or did not report its edge pages:"
-    tail -3 "$WORK/played.out" | sed 's/^/    /'
-    status=1
-  fi
+  echo "  the windows held open: the fix failed, or a window was never met:"; tail -3 "$WORK/widened.out" | sed 's/^/    /'; status=1
 fi
-
-echo
-if ! play_prelude doublecount; then
-  echo "  the listed pages counted twice: the lines it edits are not in the prelude any more"; status=1
-else
-  unlist_count_run doublecount
-  rc=$?
-  if [ "$rc" -eq 1 ] && grep -qxF 'FAIL: unlist: the audit found 1 arena count off: the arena counts 0 listed pages, its bits list 2' "$WORK/doublecount/unlist.out"; then
-    echo "  the listed pages counted twice: caught on its only run: $(grep -m1 '^FAIL: unlist' "$WORK/doublecount/unlist.out")"
-  else
-    echo "  the listed pages counted twice: not caught at the expected check (status $rc):"
-    sed -n '1,12p' "$WORK/doublecount/unlist.build.log" "$WORK/doublecount/unlist.out" 2>/dev/null | sed 's/^/    /'
-    status=1
+# prove_widened LABEL MODE PHRASE METER: the widened copy MODE must fail
+# at PHRASE. A run that passes having met the window METER counts says
+# the audit does not see the break; one that never met it tested
+# nothing, and runs again, three at most.
+prove_widened() {
+  local label="$1" mode="$2" phrase="$3" meter="$4" caught=0 met=0 again
+  if ! widen_prelude "$mode"; then
+    echo "  $label: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
+    return
   fi
-fi
+  for again in 1 2 3; do
+    stress_run "$mode" "$WORK/$mode/program" 10 || { caught=$again; break; }
+    met=$("$meter" "$mode")
+    [ "${met:-0}" -gt 0 ] && break
+    met=0
+  done
+  if [ "$caught" -ne 0 ] && grep -q "$phrase" "$WORK/$mode.out"; then
+    echo "  $label: caught on run $caught: $(grep -m1 'FAIL\|panic' "$WORK/$mode.out" | cut -c1-200)"
+  elif [ "$caught" -ne 0 ]; then
+    echo "  $label: failed on run $caught, but not at the expected check:"; tail -3 "$WORK/$mode.out" | sed 's/^/    /'; status=1
+  elif [ "$met" -gt 0 ]; then
+    echo "  $label: the window was met $met times and every audit passed, so they do not test it"; status=1
+  else
+    echo "  $label: three runs passed and none met the window, so nothing tested it"; status=1
+  fi
+}
+prove_widened "the listed pages counted twice" doublecount "an arena counting" window_met
+prove_widened "the count raised after the bits" listorder "counted off a page a slice had listed and not yet counted" list_met
+prove_widened "a refill that unlists nothing" nounlist "chunks handed out on [0-9]* pages still listed" list_met
 
 echo
 if [ "$status" -eq 0 ]; then

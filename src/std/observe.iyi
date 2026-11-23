@@ -218,6 +218,7 @@ end
 @[ThreadLocal]
 @@recording : ::Bool = false
 @@failed : ::Bool = false
+@[UnsafeReach("set once by Observe.start, before any thread starts; read under @@record_lock")]
 @@writer : RecordWriter? = nil
 
 pub def enter_frame : ::Bool

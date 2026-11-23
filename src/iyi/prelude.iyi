@@ -11121,7 +11121,7 @@ require "./file"
     # A zeroed page from the kernel: the allocator's own mapping where
     # there is one, else the call the fiber stacks are mapped with
     # (`IyiFiber#map_stack`), which every scheduler build has.
-    private def self.map : UInt64
+    @[Effect(:memory)]; private def self.map : UInt64
       {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
         __iyi_mmap(PAGE).address
       {% elsif flag?(:win32) %}

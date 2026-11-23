@@ -6739,7 +6739,7 @@ class IyiWorkers
   # parked, but for IDLE_WAIT_NS at most.
   IDLE_WAIT_NS = 1000000000_u64
 
-  private def self.monitor_wait_idle : Nil
+  @[Effect(:scheduler)]; private def self.monitor_wait_idle : Nil
     {% if flag?(:linux) %}
       __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@@monitor_parked).address.to_i64, IYI_FUTEX_WAIT, 1_i64, (@@monitor_page &+ 16_u64).to_i64, 0_i64, 0_i64)
     {% elsif flag?(:darwin) %}

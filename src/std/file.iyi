@@ -2326,7 +2326,7 @@ pub struct IOError
     IOError.new(operation, path, code_of(result))
   end
 
-  private def self.code_of(result : Int64) : Int32
+  @[Effect(:host_state)]; private def self.code_of(result : Int64) : Int32
     return 0 if result >= 0_i64
     {% if flag?(:win32) %}
       Std::File::LibKernel32.GetLastError

@@ -553,7 +553,7 @@ module Iyi
 
     def guess_type(node : RegexLiteral)
       # iyi: an iyi program's literal is `std/regex`'s (`LiteralExpander`).
-      if program.iyi_prelude? && node.location.try(&.filename.to_s.ends_with?(".iyi")) && (std_regex = Program.iyi_std_regex_type(program))
+      if program.iyi_prelude? && program.iyi_written?(node.location.try(&.filename)) && (std_regex = Program.iyi_std_regex_type(program))
         return std_regex
       end
       program.regex

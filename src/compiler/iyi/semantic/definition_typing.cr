@@ -80,6 +80,76 @@ module Iyi::DefinitionTyping
     runner.flush_into(node)
   end
 
+  # iyi: early cutoff's half of the probe (SPEC.md IV.3). An artifact read
+  # on the condition that a module compiled here from changed source hashes
+  # as before calls that module's functions from machine code this build
+  # does not analyse, and codegen emits only what it reaches - so a body
+  # edit to a function nothing else here calls left the artifact calling
+  # a symbol nobody defined. Each call the artifact makes there
+  # (`IyiMod::Demand`) is made once more, here, with `uninitialized`
+  # values of the types it was made with: typed as a probe is, and inside
+  # a proc nothing calls, so it is compiled and never runs. Stamped with
+  # the callee module's file, so its calls are that module asking.
+  def self.append_cutoff_keeps(program : Program, node : ASTNode) : Nil
+    return unless node.is_a?(Expressions)
+    return if program.iyi_cutoff_demands.empty?
+
+    files = {} of String => String
+    program.iyi_module_paths.each do |filename, module_name|
+      if type = program.iyi_module_type(module_name)
+        files[type.to_s] = filename
+      end
+    end
+
+    keeps = [] of ASTNode
+    program.iyi_cutoff_demands.each_with_index do |demand, serial|
+      next unless filename = files[demand.unit]?
+      program.iyi_cutoff_kept << demand
+      args = demand.args
+      next unless args
+      # `IYI_CUTOFF_BROKEN=keeps`: the symbol is left for the check to miss.
+      next if Compiler::CUTOFF_BROKEN.includes?("keeps")
+
+      prefix = "#{VAR_PREFIX}k#{serial}_"
+      lines = ["if true", "  -> {"]
+      receiver =
+        if demand.class_call
+          "::#{demand.receiver}"
+        else
+          lines << "    #{prefix}r = uninitialized ::#{demand.receiver}"
+          "#{prefix}r"
+        end
+      names = args.map_with_index do |type, index|
+        lines << "    #{prefix}#{index} = uninitialized #{type}"
+        "#{prefix}#{index}"
+      end
+      lines << "    #{receiver}.#{demand.name}(#{names.join(", ")})"
+      lines << "    nil"
+      lines << "  }"
+      lines << "end"
+
+      begin
+        parser = Parser.new(lines.join('\n') + "\n")
+        parser.filename = filename
+        parsed = parser.parse
+      rescue CodeError
+        # A type whose printed name does not re-parse: nothing compiles
+        # the symbol, and `Compiler#check_iyi_demands` says so.
+        next
+      end
+      parsed.accept(Stamper.new(Location.new(filename, 1, 1)))
+      next unless parsed.is_a?(If)
+      parsed.iyi_definition_probe = true
+      keeps << parsed
+    end
+    return if keeps.empty?
+
+    # Where the probes stand, the front of the program's own list: the
+    # main visitor types them there one at a time (`visit_definition_probe`).
+    at = node.expressions.index { |exp| exp.is_a?(If) && exp.iyi_definition_probe? } || 0
+    node.expressions = node.expressions[0, at] + keeps + node.expressions[at..]
+  end
+
   # One compile's worth of probes: the serial counter, the witness cache
   # and the synthesized nodes live for exactly one `semantic` run.
   private class Runner

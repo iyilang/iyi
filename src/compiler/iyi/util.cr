@@ -359,12 +359,20 @@ module Iyi
   # runner left. An hour, because a younger file may be a program another
   # runner has just linked and not yet started; on Windows a running one
   # refuses the delete anyway.
+  #
+  # Both names this compiler runs under, which share one cache: built as
+  # `crystal` (`make crystal`, src/compiler/crystal.cr) its `spec` writes
+  # `crystal-run-spec-<pid>.tmp`, and a spec run killed before its `ensure`
+  # left the spec program behind, 61 to 74 MB: eight on this Linux box,
+  # 518 MB, the oldest nine days old. `spec` and `eval` swept nothing and
+  # `iyi run` swept only `iyi-run-`; now all three take both names'.
+  RUNNERS = {"iyi", "crystal"}
+
   def self.sweep_run_leftovers : Nil
     dir = CacheDir.instance.dir
-    prefix = "#{Iyi::Command.program_name}-run-"
     cutoff = Time.utc - 1.hour
     Dir.each_child(dir) do |name|
-      next unless name.starts_with?(prefix) && name.includes?(".tmp")
+      next unless RUNNERS.any? { |runner| name.starts_with?("#{runner}-run-") } && name.includes?(".tmp")
       path = File.join(dir, name)
       next unless (info = File.info?(path)) && info.modification_time < cutoff
       File.delete?(path) rescue nil

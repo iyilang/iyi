@@ -338,7 +338,10 @@ if [ "$PART" = all ] || [ "$PART" = broken ]; then
 
   # The local mark's owner filter gone: a word into another partition is
   # followed, and that partition's `OWN` byte written by a unit that does
-  # not own it.
+  # not own it. The check holds the owning unit's token across its two
+  # reads of the byte, so no collection of the owner's puts the byte back
+  # between them: an idle worker's did, and the copy passed (Windows CI,
+  # job 135882647822).
   prove_fails "a missed root filter" nofilter "filter:" \
     '/def self\.local_shade\(record : UInt64, id : UInt64, parity : UInt64, word : UInt64\)/ { inside = 1 } inside && /unsafe_shr\(GRANULE_SHIFT\) &\* 2_u64\) != id$/ { inside = 0; found = 1; next } { print } END { if (!found) exit 3 }' \
     heap_partition.iyi

@@ -536,6 +536,49 @@ end
     result
   end
 
+  # The sixteen bytes `String#hash` is keyed with, read once per process
+  # (#212): `getrandom`, 318 on x86_64 and 278 on aarch64, asked with
+  # GRND_INSECURE (4), which never waits for the pool to fill at boot - a
+  # key that spreads a table is not a secret worth stalling a program
+  # for, as Python's and Rust's tables decided. A kernel older than 5.6
+  # refuses the flag (-EINVAL) and is asked without it, and a wait a
+  # signal cut short (-EINTR) is asked again; one older than 3.17, or a
+  # sandbox that hides the call (-ENOSYS), is read from /dev/urandom, as
+  # `Random::Secure` reads it. Sixteen bytes are never a short answer.
+  def __iyi_hash_key : {UInt64, UInt64}
+    key = {0_u64, 0_u64}
+    buffer = pointerof(key).as(UInt8*)
+    flags = 4_i64
+    while true
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(318_i64), "{rdi}"(buffer), "{rsi}"(16_i64), "{rdx}"(flags)
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(278_i64), "{x0}"(buffer), "{x1}"(16_i64), "{x2}"(flags)
+                     : "memory"
+                     : "volatile")
+      {% end %}
+      return key if result == 16_i64
+      break if result == -38_i64
+      raise "String#hash: getrandom answered #{result}" unless result == -22_i64 || result == -4_i64
+      flags = 0_i64 if result == -22_i64
+    end
+    fd = __iyi_open_read("/dev/urandom".to_unsafe)
+    raise "String#hash: no getrandom, and /dev/urandom could not be opened (#{fd})" if fd < 0_i64
+    done = 0_i64
+    while done < 16_i64
+      got = __iyi_file_read(fd, (buffer + done).as(Void*), (16_i64 - done).to_u64)
+      raise "String#hash: /dev/urandom answered #{got}" if got <= 0_i64 && got != -4_i64
+      done = done + got if got > 0_i64
+    end
+    __iyi_close(fd)
+    key
+  end
+
   def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     __iyi_read(fd.to_i32, buffer, count)
   end
@@ -629,6 +672,11 @@ end
     # `getcwd` fills the buffer and answers it, or null when the
     # directory does not fit or has been removed.
     fun getcwd(buf : UInt8*, size : UInt64) : UInt8*
+    # The key `String#hash` is keyed with: libSystem's entropy, the call
+    # `Random::Secure` and `File.tempfile` make, bound as `std/random`
+    # binds it - a lib is one lib across modules, so the two must agree.
+    # It cannot fail.
+    fun arc4random_buf(buffer : Void*, count : UInt64) : Void
   end
 
   def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -658,6 +706,14 @@ end
       length = length + 1
     end
     length.to_i64
+  end
+
+  # The sixteen bytes `String#hash` is keyed with, read once per process
+  # (#212).
+  def __iyi_hash_key : {UInt64, UInt64}
+    key = {0_u64, 0_u64}
+    LibC.arc4random_buf(pointerof(key).as(Void*), 16_u64)
+    key
   end
 
   def __iyi_open_read(path : UInt8*) : Int64
@@ -1501,6 +1557,25 @@ end
     written.to_i64
   end
 
+  # The OS entropy `Random::Secure` reads, for the key `String#hash` is
+  # keyed with: `RtlGenRandom`, advapi32's `SystemFunction036` - kernel32
+  # has no call for it, and advapi32 ships with every Windows (SPEC.md
+  # III.10). Linked only where a program hashes a string. A BOOLEAN is one
+  # byte and a ULONG 32 bits, declared as `std/random` declares them: the
+  # compiler holds one signature to one symbol, whichever lib binds it.
+  @[Link("advapi32")]
+  lib LibIyiAdvapi32
+    fun RtlGenRandom = SystemFunction036(buffer : Void*, length : UInt32) : UInt8
+  end
+
+  # The sixteen bytes `String#hash` is keyed with, read once per process
+  # (#212).
+  def __iyi_hash_key : {UInt64, UInt64}
+    key = {0_u64, 0_u64}
+    raise "String#hash: RtlGenRandom answered no bytes" if LibIyiAdvapi32.RtlGenRandom(pointerof(key).as(Void*), 16_u32) == 0_u8
+    key
+  end
+
   # The directory in UTF-8, the way every other platform answers it.
   # `GetCurrentDirectoryW` writes the character count, or, when the
   # buffer is too small, the count it needs with the terminator in it:
@@ -1551,7 +1626,8 @@ end
   # WASI's own types are fd/size/errno as u32; iyi's primitives carry
   # arithmetic on Int32/Int64/UInt8/UInt64 only, so the u32-width parameters
   # are declared Int32, which is the same 32 bits at the ABI, and no UInt32
-  # value ever exists in this file to convert.
+  # value exists in this file to convert - `random_get`'s length, below, is
+  # a literal.
   lib LibWasi
     struct Ciovec
       buf : UInt8*
@@ -1563,6 +1639,12 @@ end
     fun fd_read = __wasi_fd_read(fd : Int32, iovs : Ciovec*,
                                  iovs_len : Int32, nread : Int32*) : Int32
     fun proc_exit = __wasi_proc_exit(code : Int32) : NoReturn
+    # The host's entropy, for the key `String#hash` is keyed with. It
+    # answers WASI's 16-bit errno, zero when every byte was written.
+    # `std/random` reopens this lib with the same binding, and a lib is
+    # one lib across modules, so the two signatures must be one: its
+    # length is the UInt32 WASI declares.
+    fun random_get = __wasi_random_get(buffer : UInt8*, length : UInt32) : UInt16
   end
 
   def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
@@ -1611,6 +1693,14 @@ end
 
   def __iyi_file_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
     -1_i64
+  end
+
+  # The sixteen bytes `String#hash` is keyed with, read once per process
+  # (#212).
+  def __iyi_hash_key : {UInt64, UInt64}
+    key = {0_u64, 0_u64}
+    raise "String#hash: random_get answered an errno" if LibWasi.random_get(pointerof(key).as(UInt8*), 16_u32) != 0_u16
+    key
   end
 
   def __iyi_exit(status : Int32) : NoReturn
@@ -3560,10 +3650,29 @@ require "./file"
       end
 
       # A run of whole pages of dead chunks kept warm on the sweep's batch:
-      # listed, its count up.
+      # its count up, then listed. In that order, so that the count is
+      # never below the pages the bitmap lists - every clear comes before
+      # its count goes down (`unlist_batch`, `idle_batches`) - and a refill
+      # that reads it 0 (`unlist_batch`) has nothing of its own to unlist.
+      # Listed first, the count was one short while the slice that listed
+      # the page it shares with the slice below (`IyiMark.close_run`) sat
+      # between the two: the refill adopting the batch below unlisted that
+      # page and counted it off before it was counted on. A refill that
+      # adopted another batch of the arena then read 0 with its own pages
+      # listed and left them so under the objects it handed out; the
+      # count was whole again by the pause, which made the pages idle, and
+      # the next refill threaded their chunks a second time. The trim
+      # stress (bench/trim_stress.iyi) caught a block holding another
+      # thread's words in about one 20 s run in fifty (PR #242), and a
+      # copy that records every chunk's owner and every change to the
+      # listed pages caught a refill handing out a chunk of a page still
+      # listed in 4 runs of 237 on macOS 26.6, Apple M2 Pro, 10 cores (the
+      # user's machine) and 6 of 354 on this Linux machine, 12 vCPUs held
+      # to two and four, each after a refill had cleared a page its slice
+      # had not yet counted; counted first, it caught none in 235 and 405.
       def self.list_pages(arena : UInt64, low : UInt64, high : UInt64) : Nil
-        set_listed(arena, low, high, true)
         Pointer(Atomic(UInt64)).new(arena + OFF_LISTED).value.add((high - low).unsafe_shr(PAGE_SHIFT))
+        set_listed(arena, low, high, true)
       end
 
       # A batch's page range, stashed in the high sixteen bits of its
@@ -3585,7 +3694,10 @@ require "./file"
       # A batch taken by a cache, under the lock: its pages are being
       # allocated from and are nobody's whole pages any more - unlisted,
       # so the pause does not turn them idle with objects on them.
-      # Answers how many, which the class took (`adopt_batch`).
+      # Answers how many, which the class took (`adopt_batch`). A count
+      # of 0 is no page listed, because the count is never below the
+      # bitmap (`list_pages`); a page another slice is listing beside this
+      # is the next batch's, which unlists it.
       def self.unlist_batch(arena : UInt64, page : UInt64, last : UInt64) : UInt64
         return 0_u64 if read64(arena + OFF_LISTED) == 0
         count = 0_u64
@@ -3859,8 +3971,19 @@ require "./file"
       # that page, and the rest of the run, still idle, begins with it -
       # its first page reached into from below, as any idle run's may be
       # (`IyiMark.age_idle`), and no page past it.
+      # A run the slice's word cuts short is cut the same way, at the last
+      # page a chunk begins on: cut at the word, a chunk longer than a page
+      # reached from the part taken over pages of the rest - pages the idle
+      # trim (`cool_warm`) and the sweep (`IyiMark.age_idle`) hand back,
+      # each keeping a run's first page only - and past the word into
+      # pages the slice may hand back. A copy that records every chunk's
+      # owner caught the idle trim handing back two pages under a
+      # 20,480-byte chunk threaded so, three of its five 4 KB pages left
+      # idle, on this Linux machine, 12 vCPUs held to two
+      # (`bench/sweep_exercise.iyi` check 10b replays the cut).
       def self.take_run(arena : UInt64, warm : Bool, most : UInt64) : Tuple(UInt64, UInt64)
         pages = read64(arena + OFF_MAP).unsafe_shr(PAGE_SHIFT)
+        capped = false
         if read64(arena + OFF_SWEEPING) != 0
           cursor = read64(arena + OFF_SWEEP_CURSOR)
           return {0_u64, 0_u64} if cursor == SWEEP_DONE || cursor < arena || cursor >= arena + read64(arena + OFF_MAP)
@@ -3873,6 +3996,7 @@ require "./file"
           pages = (cursor - arena).unsafe_shr(PAGE_SHIFT) & 0xFFFFFFFFFFFFFFC0_u64
           return {0_u64, 0_u64} if pages < 2_u64
           pages = pages - 1_u64
+          capped = true
         end
         # Word by word: an idle bit whose cold bit is what `warm` asks.
         slot = 0_u64
@@ -3896,9 +4020,14 @@ require "./file"
         while stop < pages && page_idle?(arena, arena + stop * PAGE) && page_cold?(arena, arena + stop * PAGE) != warm
           stop = stop + 1_u64
         end
+        chunk = read64(arena + OFF_CHUNK)
+        first = arena_first(arena)
+        if capped && stop == pages && page_idle?(arena, arena + stop * PAGE) && page_cold?(arena, arena + stop * PAGE) != warm
+          cut = (first + (arena + (stop + 1_u64) * PAGE - first - 1_u64).unsafe_div(chunk) * chunk - arena).unsafe_shr(PAGE_SHIFT)
+          return {0_u64, 0_u64} if cut <= page
+          stop = cut
+        end
         if most != 0_u64 && stop - page > most
-          chunk = read64(arena + OFF_CHUNK)
-          first = arena_first(arena)
           target = arena + (page + most) * PAGE
           cut = (first + (target - first + chunk - 1_u64).unsafe_div(chunk) * chunk - arena).unsafe_shr(PAGE_SHIFT)
           stop = cut if cut < stop
@@ -12001,15 +12130,20 @@ class IyiPanic
 end
 
 # The panic's own write: descriptor 2 directly, no stream object, no error;
-# `print` raises when a pipe closes and `STDERR` may not exist yet.
-private def __iyi_say(text : String) : Nil
-  written = 0_i64
-  total = text.bytesize.to_i64
-  while written < total
-    n = __iyi_write(2, (text.to_unsafe + written).as(Void*), (total - written).to_u64)
+# `print` raises when a pipe closes and `STDERR` may not exist yet. Pieces
+# fill a room on the caller's stack, one write when full and at the *last*,
+# so threads panicking at once tear no line (bench/panics.sh, step 14).
+private def __iyi_say(room : UInt8*, fill : Int32, text : String, last = false, from = 0) : Int32
+  take = text.bytesize - from < 4096 - fill ? text.bytesize - from : 4096 - fill
+  (room + fill).copy_from(text.to_unsafe + from, take)
+  return fill + take unless last || fill + take == 4096
+  written = 0
+  while written < fill + take
+    n = __iyi_write(2, (room + written).as(Void*), (fill + take - written).to_u64)
     break if n <= 0_i64
     written = written + n
   end
+  from + take < text.bytesize ? __iyi_say(room, 0, text, last, from + take) : 0
 end
 
 {% if flag?(:win32) %}
@@ -12062,18 +12196,13 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
       IyiThread.lower_stopper
     {% end %}
   {% end %}
-  __iyi_say("iyi: panic: ")
-  __iyi_say(message)
-  __iyi_say("\n")
+  space = uninitialized StaticArray(UInt8, 4096)
+  room = pointerof(space).as(Pointer(UInt8))
+  fill = __iyi_say(room, __iyi_say(room, 0, "iyi: panic: "), message)
   # The site, when it is the program's; a panic the library raises names
   # the library's own line, which is not where the bug is, and prints none.
-  unless file.includes?("/src/iyi/") || file.includes?("/src/std/") || file.starts_with?("src/iyi/") || file.starts_with?("src/std/") || __iyi_native_library_site?(file)
-    __iyi_say("  at ")
-    __iyi_say(file)
-    __iyi_say(":")
-    __iyi_say(line.to_s)
-    __iyi_say("\n")
-  end
+  fill = __iyi_say(room, __iyi_say(room, __iyi_say(room, __iyi_say(room, fill, "\n  at "), file), ":"), line.to_s) unless file.includes?("/src/iyi/") || file.includes?("/src/std/") || file.starts_with?("src/iyi/") || file.starts_with?("src/std/") || __iyi_native_library_site?(file)
+  __iyi_say(room, fill, "\n", true)
   {% if flag?(:darwin) %}
     if r = IyiPanic.resolver
       r.call(count > 1 ? pointerof(callstack).as(Void**) + 1 : pointerof(callstack).as(Void**), count > 1 ? count - 1 : count)

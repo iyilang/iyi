@@ -88,6 +88,11 @@ check("an unrelated source change does not select the frontend port jobs",
 
 reason, jobs = planned("bench/panics.sh")
 check("a gate a job runs selects that job", "windows-native" in jobs, f"{reason}: {sorted(jobs)}")
+check("and both halves of the samples job, whichever half runs it",
+      {"samples", "samples-surfaces"} <= jobs, f"{reason}: {sorted(jobs)}")
+reason, jobs = planned("bench/lsp_soak.py")
+check("the other half's gate selects both halves too",
+      {"samples", "samples-surfaces"} <= jobs, f"{reason}: {sorted(jobs)}")
 
 # Spelled in two pieces: this file runs in the docs job, and a name written
 # whole in its code would be a file the docs job runs.

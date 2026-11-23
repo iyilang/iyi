@@ -102,6 +102,7 @@ class Iyi::Command
     end
     sources = [Compiler::Source.new(source_filename, source)]
 
+    Iyi.sweep_run_leftovers
     output_filename = Iyi.temp_executable "spec"
 
     ENV["CRYSTAL_SPEC_COMPILER_BIN"] ||= if iyi_exec_path = Config.env("EXEC_PATH")

@@ -255,6 +255,25 @@ module Iyi
     # producer's tree is present and an honest error when it is not.
     getter iyi_artifact_source_paths = {} of String => String
 
+    # iyi: whether code at *filename* was written in iyi: in an `.iyi`
+    # file, in an artifact built from one, whose declarations are parsed
+    # under the artifact's own path (`SemanticVisitor`, above), or in a
+    # macro's expansion, which is written in whatever the code that
+    # expanded it was - the chain of `VirtualFile`s ends at that file, the
+    # one whose imports the expansion sees. A regex literal inside `{% if
+    # %}` asked its `VirtualFile` for `.iyi`, got no, and became the other
+    # library's `::Regex.new(..., ::Regex::Options.new(0))` in a program
+    # that imports `std/regex`, refused as an undefined constant (#215).
+    def iyi_written?(filename : String | VirtualFile | Nil) : Bool
+      while filename.is_a?(VirtualFile)
+        filename = filename.expanded_location.try(&.filename)
+      end
+      return false unless filename
+      return true if Lexer.iyi_source?(filename)
+      source = iyi_artifact_source_paths[filename]?
+      !source.nil? && Lexer.iyi_source?(source)
+    end
+
     # Canonical library roots used by macros. Each is checked against its
     # current filesystem identity before reuse, including after daemon reuse.
     getter iyi_macro_library_roots = {} of String => String
@@ -456,6 +475,36 @@ module Iyi
     # part of the answer for everything that imports it.
     getter iyi_artifact_staleness = {} of String => String?
 
+    # iyi: whether an artifact may be read although a module it imports is
+    # compiled from its changed source in this build, on the condition that
+    # the module hashes to what the artifact recorded for it (SPEC.md IV.3,
+    # early cutoff). Set by the compiler for a build that writes artifacts;
+    # off in the second attempt of a build whose condition failed.
+    property? iyi_cuts_off = false
+
+    # iyi: the modules whose artifact is stale because their own source
+    # changed and for nothing else, each with the conditions a dependent's
+    # artifact inherits by trusting what it hashes to now: the edges of its
+    # old artifact that lead to modules rebuilt the same way.
+    getter iyi_artifact_rebuilt = {} of String => Array(IyiMod::ImportEdge)
+
+    # iyi: the conditions an artifact read under early cutoff was read on,
+    # by module path: edges whose far end is compiled from source in this
+    # build, and has to hash to what the edge says (`Compiler#check_iyi_cutoff`).
+    getter iyi_artifact_conditions = {} of String => Array(IyiMod::ImportEdge)
+
+    # iyi: what each unit's code calls in another module's unit, by unit
+    # name and symbol, for the artifact's `Demands` (`IyiMod::Demand`).
+    # Recorded only while writing artifacts.
+    getter iyi_unit_demands = {} of String => Hash(String, IyiMod::Demand)
+
+    # iyi: the demands of the artifacts read under early cutoff. The ones
+    # whose unit this build compiles from source are made into calls that
+    # compile them (`DefinitionTyping.append_cutoff_keeps`), and then asked
+    # after codegen whether each symbol is there (`Compiler#check_iyi_demands`).
+    getter iyi_cutoff_demands = [] of IyiMod::Demand
+    getter iyi_cutoff_kept = [] of IyiMod::Demand
+
     # iyi: whether an imported artifact's `ObjectCode` is worth reading.
     #
     # False for a front-end-only build, which is most of them: the section is
@@ -477,6 +526,14 @@ module Iyi
     # calls the symbol, which the artifact then turns out not to define. Empty
     # unless `--emit-iyimod` asked for artifacts.
     getter iyi_exported_owners = Set(Type).new
+
+    # iyi: the module each of those owners is compiled into — the module type
+    # whose `.iyimod` carries it (SPEC.md IV.1g). An emitting build puts a
+    # module's types in one unit rather than one per type, because a unit that
+    # travels carries private copies of every prelude callee it reaches, and
+    # one per type copied the same runtime closure into each of a module's
+    # types (`CodeGenVisitor#type_module`).
+    getter iyi_owner_units = {} of Type => Type
 
     # iyi: true when the owners above are a `--iyi-keep` namespace, the fill
     # build `iyi bind` runs. A boundary's declarations write every parameter

@@ -99,22 +99,43 @@
     words[2047]
   end
 
-  # The running unit's partition collected, until one collection has run;
-  # nothing in a unit that runs in the shared heap.
-  @[NoInline]
-  def collect_here : Nil
+  # The running unit's partition collected, until one collection of its
+  # own has run; nothing in a unit that runs in the shared heap. A macro,
+  # so that the first scrub runs in the frame that called the droppers,
+  # as heap_local's callers scrub before `collect_now`: a def that
+  # scrubbed first thing lay over the droppers' frames itself, and the
+  # slot of its frame it had not written yet still named what they
+  # dropped. In the `classvar-publish` copy that slot, 0x28 below its
+  # return address, named the stored chain's head from the walk before
+  # it, so the collection marked the chain; a stressed collection after
+  # it lost its hit to a global mark, and the unit's death reported the
+  # chain instead: Linux, plain, seeds 1-100, 23 runs of 6,000; Windows
+  # 11, 968 of 1,000 idle; CI job 135044352904, one run of two.
+  macro collect_here
     scrub
+    collect_scrubbed
+  end
+
+  # `collect_here`'s collection, its frame laid over the zeroed stack.
+  # Each try scrubs again, since a try a global mark aborted left its
+  # frames under the next, and counts only a collection its own
+  # `collect_local` ran: under `IYI_HEAP_STRESS=1` the park between two
+  # tries collects too, over frames no scrub reached.
+  @[NoInline]
+  def collect_scrubbed : Nil
     {% if flag?(:heap_partitions) %}
       record = IyiScheduler.current.alloc
       return if record == 0_u64
-      before = IyiHeap.partition_collections(record)
       tries = 0
-      while IyiHeap.partition_collections(record) == before && tries < 1000
+      while tries < 1000
+        scrub
+        before = IyiHeap.partition_collections(record)
         IyiHeap.collect_local(record)
+        return if IyiHeap.partition_collections(record) != before
+        sleep(1)
         tries = tries + 1
-        sleep(1) if IyiHeap.partition_collections(record) == before
       end
-      fail("a local collection did not run in 1000 tries") if IyiHeap.partition_collections(record) == before
+      fail("a local collection did not run in 1000 tries")
     {% end %}
   end
 

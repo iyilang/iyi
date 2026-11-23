@@ -23,6 +23,9 @@ lib LibLLVM
 
   fun create_context = LLVMContextCreate : ContextRef
   fun dispose_context = LLVMContextDispose(c : ContextRef)
+  {% unless LibLLVM::IS_LT_100 %}
+    fun context_set_discard_value_names = LLVMContextSetDiscardValueNames(c : ContextRef, discard : Bool)
+  {% end %}
 
   fun get_md_kind_id_in_context = LLVMGetMDKindIDInContext(c : ContextRef, name : Char*, s_len : UInt) : UInt
 
@@ -185,6 +188,10 @@ lib LibLLVM
   fun set_function_call_convention = LLVMSetFunctionCallConv(fn : ValueRef, cc : LLVM::CallConvention)
   fun add_attribute_at_index = LLVMAddAttributeAtIndex(f : ValueRef, idx : AttributeIndex, a : AttributeRef)
   fun get_enum_attribute_at_index = LLVMGetEnumAttributeAtIndex(f : ValueRef, idx : AttributeIndex, kind_id : UInt) : AttributeRef
+  fun get_attribute_count_at_index = LLVMGetAttributeCountAtIndex(f : ValueRef, idx : AttributeIndex) : UInt
+  fun get_attributes_at_index = LLVMGetAttributesAtIndex(f : ValueRef, idx : AttributeIndex, attrs : AttributeRef*)
+  fun get_enum_attribute_kind = LLVMGetEnumAttributeKind(a : AttributeRef) : UInt
+  fun is_string_attribute = LLVMIsStringAttribute(a : AttributeRef) : Bool
   fun add_target_dependent_function_attr = LLVMAddTargetDependentFunctionAttr(fn : ValueRef, a : Char*, v : Char*)
 
   fun get_count_params = LLVMCountParams(fn : ValueRef) : UInt
@@ -225,6 +232,10 @@ lib LibLLVM
   fun is_a_alloca_inst = LLVMIsAAllocaInst(val : ValueRef) : ValueRef
   fun is_a_get_element_ptr_inst = LLVMIsAGetElementPtrInst(val : ValueRef) : ValueRef
   fun is_a_bit_cast_inst = LLVMIsABitCastInst(val : ValueRef) : ValueRef
+  # iyi: an array's own fields and its elements are told apart by marking
+  # the load or store the code generator just made (codegen/array_tbaa.cr).
+  fun is_a_load_inst = LLVMIsALoadInst(val : ValueRef) : ValueRef
+  fun is_a_store_inst = LLVMIsAStoreInst(val : ValueRef) : ValueRef
   # iyi: wasm32's roots (src/compiler/iyi/wasm_roots.cr) walk each value's
   # uses and each call, and store what a call may outlive into a slot.
   fun is_a_call_inst = LLVMIsACallInst(val : ValueRef) : ValueRef

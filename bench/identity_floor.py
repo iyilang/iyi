@@ -263,6 +263,10 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # the compatibility binary, `crystal-front` the front-end bench binary, and
     # `crystal-daemon` the build daemon that binary execs. Those are their names.
     (r"crystal-front|crystal-daemon|IYI_DAEMON_BIN", "binaries named for the compatibility binary"),
+    # Built as `crystal`, that binary's `spec` and `eval` name their programs
+    # `crystal-run-<basename>-<pid>.tmp` in the shared cache; the compiler's
+    # sweep lists both runner names, and the gate plants those files by name.
+    (r"crystal-run-spec-|RUNNERS = \{\"iyi\", \"crystal\"\}", "the compatibility binary's leftover programs, by their name on disk"),
     (r"^\.PHONY: crystal|^crystal[:-]|^all: crystal|^build: crystal|make clean crystal|install crystal", "Makefile targets building those binaries"),
     (r"share/crystal|doc/crystal|DATADIR\)/doc", "where Crystal's library and docs install"),
     (r"CRYSTAL \?=|previous crystal compiler", "the bootstrap compiler the build reads"),

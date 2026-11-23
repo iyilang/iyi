@@ -603,9 +603,11 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     # A PE has no undefined symbols to allow, so the floor is the DLLs the
     # binary imports and the names under them are printed as a count. Both
-    # builds import kernel32 and the C runtime's DLLs and nothing else
-    # (bench/dependency_floor.sh records the reason for each); Winsock is
-    # not among them, so a std/io change that reached it would be caught.
+    # builds import kernel32, the C runtime's DLLs and advapi32 and nothing
+    # else (bench/dependency_floor.sh records the reason for each):
+    # advapi32's `RtlGenRandom` is the key `String#hash` is keyed with
+    # (#212), which std/file's `Path#hash` reaches. Winsock is not among
+    # them, so a std/io change that reached it would be caught.
     allowed_symbols=""
     DUMPBIN="$(find_dumpbin || true)"
     # Required, the way `readelf` is on Linux: nothing builds an iyi binary
@@ -623,11 +625,13 @@ case "$(uname -s)" in
     # `lseek` is std/file's `pos`, which the exercise asks a file for to
     # prove std/io's `Memory#pos` answers the same type. `fstat64` is the
     # runtime's read asking whether standard input is a regular file.
-    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect fstat64 getsockname listen lseek open recv send setsockopt socket unlink"
+    # `arc4random_buf` is the key `String#hash` is keyed with (#212),
+    # which std/file's `Path#hash` reaches.
+    allowed_symbols="$FLOOR_BASE_DARWIN accept arc4random_buf bind chmod close connect fstat64 getsockname listen lseek open recv send setsockopt socket unlink"
     ;;
 esac
 if [ -n "$DUMPBIN" ]; then
-  allowed_libs="$FLOOR_DLLS_RUNTIME"
+  allowed_libs="$FLOOR_DLLS_RUNTIME advapi32.dll"
 else
   allowed_libs="$FLOOR_LIBS_PROGRAM"
 fi

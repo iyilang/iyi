@@ -1,0 +1,5 @@
+self-hosted-runner:
+  # Namespace's runner profiles (`runs-on:` in workflows/iyi.yml).
+  labels:
+    - namespace-profile-default
+    - namespace-profile-macos-15

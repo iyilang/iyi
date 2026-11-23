@@ -26,7 +26,7 @@ impl Error for LockStop
   end
 end
 
-import std/file::{File}
+import std/file::{File, FileIO, IOError}
 import std/dir::{Dir}
 import std/gc::{GC}
 # For TMPDIR, TEMP and TMP unset around `File.tempfile`'s GetTempPathW.
@@ -561,6 +561,101 @@ File.delete(fmode)
 assert_true File.read(fmode).starts_with?("x"), "a file created with perm holds its write"
 File.delete(fmode)
 puts "  every open mode reads and writes where Crystal's does"
+
+puts "\n== failures answered as values"
+
+# What a `?` form answered, as the refusal it has to be: a success fails
+# the check by name.
+def refused(answer : Nil | IOError, what : String) : IOError
+  raise "ASSERTION FAILED: #{what}: it answered success" if answer.nil?
+  answer
+end
+
+def open_refused(answer : FileIO | IOError, what : String) : IOError
+  if answer.is_a?(FileIO)
+    answer.close
+    raise "ASSERTION FAILED: #{what}: it answered a stream"
+  end
+  answer
+end
+
+def read_refused(answer : String | IOError, what : String) : IOError
+  raise "ASSERTION FAILED: #{what}: it answered #{answer.inspect}" if answer.is_a?(String)
+  answer
+end
+
+# ERROR_PATH_NOT_FOUND and ERROR_ACCESS_DENIED on Windows, ENOENT and
+# EBADF on POSIX: a write to a file open only to read is refused by every
+# platform, which makes it the refused write each of them can be asked.
+{% if flag?(:win32) %}
+  NO_DIR_CODE          = 3
+  READ_ONLY_WRITE_CODE = 5
+{% else %}
+  NO_DIR_CODE          = 2
+  READ_ONLY_WRITE_CODE = 9
+{% end %}
+missing_dir = sandbox + "/std_file_ex_no_such_dir/upload"
+gone = open_refused(File.open?(missing_dir, "w"), "open? of a missing directory answers its refusal")
+assert_true gone.not_found? && gone.code == NO_DIR_CODE, "open? of a missing directory answers not found"
+assert_str "open", gone.operation, "open?'s refusal is an open's"
+assert_str "cannot open #{missing_dir}: #{gone.reason}", gone.message, "open?'s refusal names the path and why"
+{% unless flag?(:win32) %}
+  assert_str "no such file or directory", gone.reason, "open?'s reason is the system's"
+{% end %}
+wrote = refused(File.write?(missing_dir, "x"), "write? to a missing directory answers its refusal")
+assert_true wrote.not_found? && wrote.operation == "write" && wrote.path == missing_dir, "write?'s refusal is a write's, naming the path"
+unread = read_refused(File.read?(missing_dir), "read? of a missing path answers its refusal")
+assert_str "cannot read #{missing_dir}: #{unread.reason}", unread.message, "read?'s refusal names the path and why"
+assert_true unread.not_found?, "read? of a missing path answers not found"
+dir_read = read_refused(File.read?(sandbox), "read? of a directory answers its refusal")
+{% if flag?(:win32) %}
+  # Windows refuses to open a directory as a file; POSIX opens it and
+  # refuses the read.
+  assert_true dir_read.denied?, "read? of a directory answers why"
+{% else %}
+  assert_true dir_read.code == 21 && dir_read.reason == "it is a directory", "read? of a directory answers why"
+{% end %}
+assert_str File.read(f1), File.read?(f1).or_panic, "read? of a file answers its text"
+
+read_only = sandbox + "/std_file_ex_read_only.txt"
+File.write(read_only, "kept")
+File.chmod(read_only, 0o444)
+if File.writable?(read_only)
+  puts "  open? of a file this user may not write: not measured, this user writes it all the same"
+else
+  denied = open_refused(File.open?(read_only, "w"), "open? of a read-only file answers its refusal")
+  assert_true denied.denied?, "open? of a read-only file answers permission denied"
+  assert_str "kept", File.read(read_only), "a refused open leaves the file as it was"
+end
+reader = File.open?(read_only, "r").or_panic
+assert_true reader.write?("x").nil?, "a write? the buffer holds answers nothing yet"
+bad = refused(reader.flush?, "flush? answers a refused write")
+assert_true bad.code == READ_ONLY_WRITE_CODE && bad.operation == "write", "flush?'s refusal is the system's number for it"
+assert_str "cannot write #{read_only}: #{bad.reason}", bad.message, "flush?'s refusal names the path and why"
+assert_true reader.flush?.nil?, "a refused flush leaves nothing to write again"
+big = refused(reader.write?("w" * 10000), "write? past the buffer answers a refused write")
+assert_true big.code == READ_ONLY_WRITE_CODE, "write?'s refusal is the system's number for it"
+reader.write?("x")
+shut = refused(reader.close?, "close? answers its flush's refusal")
+assert_true shut.code == READ_ONLY_WRITE_CODE, "close?'s refusal is the system's number for it"
+assert_true reader.closed?, "close? closes a file whose flush was refused"
+assert_str "kept", File.read(read_only), "no refused write reached the file"
+File.chmod(read_only, 0o644)
+File.delete(read_only)
+{% if flag?(:linux) %}
+  # A device that is always full.
+  full = File.open?("/dev/full", "w").or_panic
+  assert_true full.write?("x").nil?, "a write? to /dev/full the buffer holds answers nothing yet"
+  no_space = refused(full.flush?, "flush? to /dev/full answers its refusal")
+  assert_true no_space.full? && no_space.code == 28, "flush? to /dev/full answers no space"
+  assert_str "cannot write /dev/full: no space left on the device", no_space.message, "flush? to /dev/full names the device and why"
+  assert_true refused(full.write?("y" * 10000), "write? past the buffer to /dev/full answers its refusal").full?, "write? past the buffer to /dev/full answers no space"
+  full.write?("z")
+  assert_true refused(full.close?, "close? of /dev/full answers its flush's refusal").full?, "close? of /dev/full answers no space"
+  assert_true full.closed?, "close? closes /dev/full after its refused flush"
+  assert_true refused(File.write?("/dev/full", "x"), "File.write? to /dev/full answers its refusal").full?, "File.write? to /dev/full answers no space"
+{% end %}
+puts "  open?, read?, write?, flush? and close? answer what the system refuses"
 
 puts "\n== delete"
 File.delete(f1)

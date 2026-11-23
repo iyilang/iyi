@@ -51,24 +51,25 @@ awk '/^define .*AlignedLargeUnion#initialize/ { inside=1 }
      inside && /^}/ { exit }' "$WORK/native-release.ll" >"$WORK/union-large.ir"
 cat "$WORK/union-nil.ir" "$WORK/union-closure.ir" "$WORK/union-closure-body.ir" "$WORK/union-large.ir" >"$WORK/union.ir"
 union_alignment_ok() {
-  grep -Eq 'store i128 0, ptr .*align 8([,[:space:]]|$)' "$1" &&
+  grep -Eq 'store i128 0, ptr .*align 8([,[:space:]]|$)|llvm.memset.*align (4|8) [^,]*%self' "$1" &&
     grep -Eq 'store %.*UInt64x2.*Nil.*align 8([,[:space:]]|$)' "$1" &&
     grep -Eq 'load %.*UInt64x2.*Nil.*align 8([,[:space:]]|$)' "$1" &&
     grep -Eq 'llvm.mem(move|cpy).*align 8.*%self,.*align 8.*%value' "$1" &&
-    ! grep -Eq '(load|store) %.*UInt64x2.*Nil.*align (16|32|64)([,[:space:]]|$)' "$1"
+    ! grep -Eq '(load|store) %.*UInt64x2.*Nil.*align (16|32|64)([,[:space:]]|$)' "$1" &&
+    ! grep -Eq 'llvm.memset.*align (16|32|64) [^,]*%self' "$1"
 }
 if ! union_alignment_ok "$WORK/union.ir"; then
   echo 'union alignment: nil, closure or indirect union copy has the wrong alignment' >&2
   cat "$WORK/union.ir" >&2
   exit 1
 fi
-for pattern in 'store i128 0' 'store %.*UInt64x2.*Nil' 'load %.*UInt64x2.*Nil' 'llvm.mem(move|cpy).*%self'; do
-  awk -v pattern="$pattern" '$0 ~ pattern { sub(/align 8/, "align 16") } { print }' "$WORK/union.ir" >"$WORK/union-broken.ir"
+for pattern in 'llvm.memset.*%self' 'store %.*UInt64x2.*Nil' 'load %.*UInt64x2.*Nil' 'llvm.mem(move|cpy).*%self'; do
+  awk -v pattern="$pattern" '$0 ~ pattern { sub(/align [48]/, "align 16") } { print }' "$WORK/union.ir" >"$WORK/union-broken.ir"
   if union_alignment_ok "$WORK/union-broken.ir"; then
     echo "union alignment: mutation escaped for $pattern" >&2; exit 1
   fi
 done
-echo 'union alignment: nil store, closure load/store and indirect copy use align 8; each regression was caught'
+echo 'union alignment: nil zeroing (align 8, or the memset LLVM forms at align 4), closure load/store and indirect copy use align 8 or less; each regression was caught'
 
 cat >"$WORK/share-vector.iyi" <<'IYI'
 @[Unsafe("Share is a trusted type annotation")]

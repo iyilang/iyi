@@ -133,9 +133,9 @@ pub struct GC
   #
   # Under the runtime lock, as `stats` is: a word in no arena walks the
   # large-mapping list, and another thread's `free` or sweep unlinks and
-  # unmaps those nodes under that lock. Walked without it, beside three
-  # threads whose large chunks come and go, two seconds of `is_heap_ptr`
-  # died of a memory fault in 10 runs of 10 (`bench/std_gc_exercise.iyi`).
+  # unmaps those nodes under that lock. Walked without it beside threads
+  # whose large chunks come and go, it read nodes gone or remade: memory
+  # faults, and a live chunk answered false (`bench/std_gc_exercise.iyi`).
   def self.is_heap_ptr(pointer : Void*) : Bool
     return false if pointer.address == 0_u64
     IyiHeap.lock

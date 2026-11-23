@@ -155,9 +155,9 @@ module Iyi
     end
 
     def codegen(node, single_module = false, debug = Debug::Default,
-                frame_pointers = FramePointers::Auto)
+                frame_pointers = FramePointers::Auto, discard_value_names = false)
       visitor = CodeGenVisitor.new self, node, single_module: single_module,
-        debug: debug, frame_pointers: frame_pointers
+        debug: debug, frame_pointers: frame_pointers, discard_value_names: discard_value_names
       Prof.span("  codegen: visitor.accept") { visitor.accept node }
       Prof.span("  codegen: finished hooks") { visitor.process_finished_hooks }
       Prof.span("  codegen: visitor.finish") { visitor.finish }
@@ -293,7 +293,17 @@ module Iyi
                    @single_module : Bool = false,
                    @debug = Debug::Default,
                    @frame_pointers : FramePointers = :auto,
-                   @llvm_context : LLVM::Context = LLVM::Context.new)
+                   @llvm_context : LLVM::Context = LLVM::Context.new,
+                   @discard_value_names : Bool = false)
+      @llvm_context.discard_value_names = true if @discard_value_names
+      # iyi: the debugging switches the hot paths ask about, read once a
+      # build rather than at every `unreachable` and every function: each
+      # read is a `getenv` and an entry in the build's record (`ENV`, in
+      # build_inputs.cr), about 12,000 of them a build of a 7,000-line
+      # program.
+      @debug_codegen = !ENV["IYI_DEBUG_CODEGEN"]?.nil?
+      @trace_def_fun = ENV["IYI_TDF"]?
+      @trace_sym = ENV["IYI_SYM"]?
       @abi = ABI.from(@program.target_machine)
       # LLVM::Context.register(@llvm_context, "main")
       @llvm_mod = configure_module(@llvm_context.new_module("main_module"))
@@ -1592,7 +1602,11 @@ module Iyi
         llvm_value = check_proc_is_not_closure(llvm_value, target.type)
       end
 
-      assign ptr, target_type, value.type, llvm_value
+      if target.is_a?(InstanceVar) && iyi_array_instance?(context.type)
+        iyi_array_stores(ptr, element: false) { assign ptr, target_type, value.type, llvm_value }
+      else
+        assign ptr, target_type, value.type, llvm_value
+      end
       iyi_publish_class_var_store(ptr, target_type, node) if target.is_a?(ClassVar)
 
       false
@@ -1942,6 +1956,7 @@ module Iyi
       ivar = type.lookup_instance_var(name)
       ivar_ptr = instance_var_ptr type, name, value
       @last = downcast ivar_ptr, node_type, ivar.type, false, extern: type.extern?
+      iyi_array_load @last, ivar_ptr, element: false if iyi_array_instance?(type)
       if type.extern?
         # When reading the instance variable of a C struct or union
         # we need to convert C functions to Crystal procs. This
@@ -2758,7 +2773,7 @@ module Iyi
     # ```
     #
     def debug_codegen_log(file = __FILE__, line = __LINE__, &)
-      return unless ENV["IYI_DEBUG_CODEGEN"]?
+      return unless @debug_codegen
       printf_args = yield || ""
       printf_args = {printf_args, [] of LLVM::Value} if printf_args.is_a?(String)
       printf_args = {printf_args[0], [] of LLVM::Value} if printf_args.is_a?({String})
@@ -3370,6 +3385,7 @@ module Iyi
         stored = copy_value(pointer, value, type, fresh: fresh)
       else
         stored = store to_rhs(value, type), pointer
+        iyi_array_store stored, pointer
       end
       iyi_clear_holes pointer, iyi_holes(type), llvm_typer.align_of(llvm_type(type))
       stored

@@ -3051,7 +3051,7 @@ may run once a parallel task has started, behind no lock the compiler can
 name: the block `spawn(unit: :new)` runs as a parallel task, at
 unguarded.iyi:22:5, which calls `ask` ``, followed by the three ways to be
 accepted. What writes is found through std and the prelude too, since
-`Array#<<` writes its receiver only through `Pointer#[]=`: whether a def
+`Array#<<` writes its receiver only through `Pointer#array_put`: whether a def
 may write its receiver, a parameter or its block's value - a field
 assigned, memory set through a pointer, an address taken, a value handed
 to a C function - through every call that passes the value on. A value

@@ -113,6 +113,26 @@
   the balance against groups grown whatever their size
   (`IYI_RELEASE_GROUP=0`).
 
+- **An array's element stores no longer make LLVM reload every array's size
+  and buffer.** Each access is marked with type-based alias metadata
+  (`!tbaa`) as an `Array`'s own field or one of its elements
+  (`src/compiler/iyi/codegen/array_tbaa.cr`; array.iyi reads and writes its
+  buffer through `Pointer#array_at`/`#array_put`, which nothing else
+  uses), and an element read whose type is a class is marked `!nonnull`,
+  `!dereferenceable` and `!align` for that class. The inner loop of plb2's
+  matrix product loaded both rows' sizes and buffers again per element and
+  was not vectorised; now they are hoisted and it is. `Array#[]`, `#[]?`
+  and `#[]=` test an index in `0...size` with one unsigned comparison and
+  wrap a negative index only when that fails (the wrap's addition cannot
+  overflow, so it is `&+`); every index answers, and every refusal reads,
+  as before. iyi-benchmarks' runtime axis, 7 rounds, Linux 12-vCPU VM,
+  against 0.22.0: matmul 0.32x (0.32–0.32), sudoku 0.83x (0.81–0.83),
+  nqueen 0.99x (0.98–0.99), bedcov 1.02x (1.01–1.03), geomean 0.72x;
+  against Go 1.27.4 the geomean goes from 1.39x to 1.00x (matmul 1.92x to
+  0.61x, sudoku 1.44x to 1.19x). `bench/collections_exercise.sh` checks a
+  product loop, a row that is its own source and an array grown while read
+  in a release build, and that a short row is still refused there.
+
 ## 0.22.0 — 2026-11-22
 
 **A string's hash is keyed afresh in every process, std/http holds a request

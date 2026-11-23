@@ -701,6 +701,13 @@ jobs:
       - name: Arrays, hashes and sets at their edges
         run: bash bench/collections_exercise.sh
 
+      # What a release build tells LLVM about an array's memory, read off
+      # the IR: the field and element tags only where they are true, and a
+      # tag on memory that is not an array's refused (src/compiler/iyi/
+      # codegen/array_tbaa.cr).
+      - name: An array's alias tags only where they hold
+        run: bash bench/array_tbaa.sh
+
       # The assertions a test is written in, with no import: each one held
       # and failed, its message naming the values and the caller's line,
       # named cases running past a failure to an exit of 1, and every check
@@ -3545,6 +3552,7 @@ jobs:
           bash bench/enum_exercise.sh
           bash bench/float_text.sh
           bash bench/collections_exercise.sh
+          bash bench/array_tbaa.sh
           bash bench/assertions_exercise.sh
           bash bench/runtime_exercise.sh
           bash bench/server_load.sh

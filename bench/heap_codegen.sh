@@ -34,6 +34,14 @@
 # across a park is the optimiser's to keep or drop, and optimised copies
 # once went unseen (`holes`) or named another word run to run
 # (`new-shared`).
+#
+# Each copy's report is pinned to one check's sentence (`sentence`, and the word
+# caught_both gives each copy): `c1` and `new-shared` at their unit's death,
+# every other copy at its partition's local collection. `collect_here` in
+# heap_codegen.iyi is a macro since cc7ba9a88, so each copy's local collection
+# scrubs in the caller's frame; the words, and why c1 and born_shared read at
+# their deaths, are in heap_codegen.iyi's header. A difference between two runs
+# prints both runs' report lines.
 
 set -u
 

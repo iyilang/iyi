@@ -35,8 +35,8 @@
 # The rounds: the trigger's collection whose mark ends inside the bound,
 # with one helper (`finish_stopped`); the trigger's collection with no
 # helper (`collect_locked`); and `IyiMark.collect`, the verb
-# (`collect_locked` too). Every round is checked and named, and a run
-# with any round failed exits 1 at the end.
+# (`collect_locked` too). Each round is named. A wrong-path premise exits
+# 76; otherwise every round is checked and invariant failures exit 1.
 #
 # bench/concurrent_mark.sh runs it, and broken copies of the runtime it
 # catches.
@@ -84,6 +84,14 @@ module bench/release_trigger
     sum
   end
 
+  # The one exit for a round's setup failure: a single FAIL line, then status
+  # 76. The sentence arrives without its prefix and newline. The deadlines and
+  # the premise of this fixture leave through here, and the gate counts that.
+  def setup_fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(76)
+  end
+
   # One round: the main thread's collection on *path*, then the second
   # thread's slices past the budget. Answers whether it held.
   def round(name : String, path : String) : Bool
@@ -97,7 +105,12 @@ module bench/release_trigger
     held = Word.new
     second = IyiThread.start do
       ready.set(1_u64)
+      counted_deadline = IyiMark.now_ns + 10000000000_u64
       while IyiMark.collections == before
+        # gate-deadline: the counted collection must be seen within ten seconds
+        if IyiMark.now_ns >= counted_deadline
+          setup_fail("#{name}: the second thread did not see the counted collection within ten seconds")
+        end
         sleep(1)
       end
       seen.set(IyiMark.collections)
@@ -120,22 +133,31 @@ module bench/release_trigger
     # one that met the collection's lock there began after the flag had
     # fallen - the verb's round, the first that starts its collection at
     # once, passed on a copy it had to fail, 5 runs of 5, without this.
+    ready_deadline = IyiMark.now_ns + 10000000000_u64
     while ready.get == 0_u64
+      # gate-deadline: the second thread must become ready within ten seconds
+      if IyiMark.now_ns >= ready_deadline
+        setup_fail("#{name}: the second thread did not become ready within ten seconds")
+      end
       sleep(1)
     end
     if path == "verb"
       IyiMark.collect
     else
       sum = 0_i64
+      churn_deadline = IyiMark.now_ns + 10000000000_u64
       while IyiMark.collections == before
+        # gate-deadline: churn must trigger the round's collection within ten seconds
+        if IyiMark.now_ns >= churn_deadline
+          setup_fail("#{name}: churn did not trigger the round's collection within ten seconds")
+        end
         sum = sum &+ churn(4096_u64)
       end
     end
     second.join
     went = IyiMark.concurrent_collections - beside
     if went != 0_u64
-      print "FAIL: #{name}: #{went} of the round's collections went beside the program, so the round tried no collection that ends in its stop\n"
-      return false
+      setup_fail("#{name}: #{went} of the round's collections went beside the program, so the round tried no collection that ends in its stop")
     end
     if settled.get == seen.get
       print "FAIL: #{name}: after collection #{seen.get} was counted, a thread's slices came to #{budget.get * 3_u64 // IyiHeap::SLICE * IyiHeap::SLICE} bytes, three budgets of #{budget.get}, and no collection ran - #{settled.get} collections once it was done, #{counted.get} bytes counted since the last collection\n"

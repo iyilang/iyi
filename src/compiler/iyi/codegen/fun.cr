@@ -84,9 +84,40 @@ class Iyi::CodeGenVisitor
     end
 
     self_type_mod = type_module(self_type).mod
+    iyi_record_demand(target_def, self_type, mangled_name, self_type_mod)
 
     func = typed_fun?(self_type_mod, mangled_name) || codegen_fun(mangled_name, target_def, self_type, iyi_runtime_copy: runtime_copy)
     check_mod_fun self_type_mod, mangled_name, func
+  end
+
+  @iyi_module_units : Set(String)?
+
+  # iyi: a call from one module's unit into another's, while writing
+  # artifacts, for the caller's `Demands` (`IyiMod::Demand`). A build that
+  # reads the caller's artifact and compiles the callee's module from
+  # changed source (early cutoff, SPEC.md IV.3) emits what *it* reaches,
+  # and the caller's machine code is not something it reaches: this is
+  # the call that build makes so the callee's unit defines the symbol.
+  private def iyi_record_demand(target_def, self_type, mangled_name, callee_mod) : Nil
+    return if @program.iyi_exported_owners.empty?
+    return if callee_mod == @llvm_mod || @llvm_mod == @main_mod
+    callee = @program.iyi_owner_units[self_type.instance_type]?
+    return unless callee
+    units = @iyi_module_units ||= @program.iyi_owner_units.values.map(&.to_s).to_set
+    return unless units.includes?(@llvm_mod.name)
+
+    demands = @program.iyi_unit_demands[@llvm_mod.name] ||= {} of String => IyiMod::Demand
+    return if demands.has_key?(mangled_name)
+
+    # The receiver as a value of it is written: `uninitialized Base` is the
+    # virtual `Base+` already, and a `+` is not a name.
+    receiver = self_type.instance_type.to_s.rchop('+')
+    args =
+      unless target_def.splat_index || target_def.double_splat || target_def.block_arg
+        target_def.args.map { |arg| arg.type.to_s.gsub('+', "") }
+      end
+    demands[mangled_name] = IyiMod::Demand.new(callee.to_s, mangled_name, receiver,
+      self_type.metaclass?, target_def.name, args)
   end
 
   # iyi: the `lib` a unit calls into, recorded where the call is.
@@ -1056,7 +1087,17 @@ class Iyi::CodeGenVisitor
       when Nil, Program, LibType
         type_name = ""
       else
-        type_name = type.instance_type.to_s
+        # iyi: a type whose module's `.iyimod` this build writes is compiled
+        # into that module's unit, with the module's other types. A unit
+        # that travels carries a private copy of every prelude callee it
+        # reaches (`target_def_fun`), and that closure is most of the
+        # runtime: `Int32#%` can raise, and `raise` reaches the allocator,
+        # the collector and the scheduler. One unit per type copied it once
+        # per type, so a module of ten types carried it eleven times
+        # (SPEC.md IV.1g). Per module it is copied once, and the artifact
+        # defines the same symbols, from the same build.
+        instance = type.instance_type
+        type_name = (@program.iyi_owner_units[instance]? || instance).to_s
       end
 
       @modules[type_name] ||= begin

@@ -179,6 +179,30 @@ module Iyi
     # `Program#iyi_prefers_source`.
     property iyi_prefers_source = false
 
+    # iyi: whether a build writing artifacts reads one whose import is
+    # compiled from changed source, on the condition that the import hashes
+    # as before (`Program#iyi_cuts_off?`). Turned off for the second attempt
+    # of a build whose condition failed.
+    @iyi_cutoff = true
+
+    # iyi: the broken copies `bench/iyimod_cutoff.sh` proves its cases
+    # against, as `IYI_CUTOFF_BROKEN`'s comma-separated words. `1` reads an
+    # artifact under the cutoff and checks nothing - not the condition, not
+    # the demanded symbols, and a failure is not answered with a second
+    # attempt - so a dependent's artifact trusted over an interface change
+    # prints the wrong answer or does not build. `keeps` makes none of the
+    # calls that compile the artifact's demands
+    # (`DefinitionTyping.append_cutoff_keeps`), which `check_iyi_demands`
+    # has to catch.
+    CUTOFF_BROKEN    = (ENV["IYI_CUTOFF_BROKEN"]? || "").split(',')
+    CUTOFF_UNCHECKED = CUTOFF_BROKEN.includes?("1")
+
+    # iyi: an artifact read under early cutoff whose condition failed
+    # (`check_iyi_cutoff`), or a build that failed while one was read: the
+    # build is made again without the cutoff.
+    class CutoffFailed < ::Exception
+    end
+
     # Sets the Optimization mode.
     property optimization_mode = OptimizationMode::O0
 
@@ -429,6 +453,7 @@ module Iyi
       program.iyi_prefers_source = @iyi_prefers_source
       program.iyi_wants_object_code = !@no_codegen
       program.iyi_rewrites_artifacts = !@emit_iyimod.nil?
+      program.iyi_cuts_off = @iyi_cutoff && !@emit_iyimod.nil?
       # An emitting build parses docs whatever the adopted analysis wanted:
       # the artifact's `Docs` travel per module, and modules are parsed per
       # build — the prelude's own docs are nobody's surface.
@@ -466,25 +491,27 @@ module Iyi
       end
 
       begin
-        # Definition typing does not run here: `Program#semantic` calls
-        # `DefinitionTyping.append_probes` between these two passes, and this
-        # path does not. So an imported artifact's witnesses are not restored.
-        # Under `--use-iyimod` a witness the producer numbered stays an
-        # unmatchable phantom id, which keeps dispatch but not a trait-valued
-        # field's layout, and a carried union or generic match naming one is
-        # refused when `semantic_after_top_level` resolves the deferred refs.
-        node, processor = program.top_level_semantic(node, processor: pre.processor)
-        node = program.semantic_after_top_level(
-          Expressions.from([pre.node, node] of ASTNode), processor,
-          cleanup: !no_cleanup?)
+        iyi_cutoff_guard(program) do
+          # Definition typing does not run here: `Program#semantic` calls
+          # `DefinitionTyping.append_probes` between these two passes, and this
+          # path does not. So an imported artifact's witnesses are not restored.
+          # Under `--use-iyimod` a witness the producer numbered stays an
+          # unmatchable phantom id, which keeps dispatch but not a trait-valued
+          # field's layout, and a carried union or generic match naming one is
+          # refused when `semantic_after_top_level` resolves the deferred refs.
+          node, processor = program.top_level_semantic(node, processor: pre.processor)
+          node = program.semantic_after_top_level(
+            Expressions.from([pre.node, node] of ASTNode), processor,
+            cleanup: !no_cleanup?)
+        end
       rescue ex : SkipMacroCodeCoverageException
         program.macro_expansion_error_hook.try &.call(ex.cause)
       end
 
-      prepared = prepare_iyimods program
+      prepared = iyi_cutoff_guard(program) { prepare_iyimods program }
       keep_iyi_namespace program
 
-      units = codegen_held program, node, sources, output_filename, prepared
+      units = iyi_cutoff_guard(program) { codegen_held program, node, sources, output_filename, prepared }
 
       @progress_tracker.clear
       print_macro_run_stats(program)
@@ -559,7 +586,7 @@ module Iyi
 
     # Re-applied by the adopt path above. `new_program` is what would otherwise
     # have set them, and adoption skips it.
-    APPLIED_ON_ADOPT = %w(use_iyimod iyi_prefers_source no_codegen emit_iyimod warnings color stdout show_error_trace iyi_mod_table iyi_file_overrides iyi_project_root iyi_header_root crystal_library)
+    APPLIED_ON_ADOPT = %w(use_iyimod iyi_prefers_source no_codegen emit_iyimod warnings color stdout show_error_trace iyi_mod_table iyi_file_overrides iyi_project_root iyi_header_root crystal_library iyi_cutoff)
     # Neither, and two of these are judgements rather than facts. `mcpu`,
     # `mattr` and `mcmodel` reach the target machine and the target machine
     # reaches codegen, not analysis — a prelude analysed for one `-mcpu` is the
@@ -623,6 +650,23 @@ module Iyi
       source = [source] unless source.is_a?(Array)
       return prelude_fork_probe(source, output_filename) if ENV["IYI_FORK_PROBE"]?
 
+      # iyi: a build that read an artifact under early cutoff and found its
+      # condition false is made again, from a program of its own, without
+      # the cutoff: what the first attempt read was not the program. Its
+      # warnings were about that program, so they go too.
+      reports = @warnings.reports.size
+      notes = @warnings.notes.size
+      begin
+        compile_attempt(source, output_filename, adopt: true) { |program| yield program }
+      rescue CutoffFailed
+        @warnings.reports.pop(@warnings.reports.size - reports)
+        @warnings.notes.pop(@warnings.notes.size - notes)
+        @iyi_cutoff = false
+        compile_attempt(source, output_filename, adopt: false) { |program| yield program }
+      end
+    end
+
+    private def compile_attempt(source : Array(Source), output_filename : String, adopt : Bool, & : Program -> Nil) : Result
       # iyi: `IYI_WARM=1` — analyse the prelude and adopt it, in one process and
       # **without forking**, printing the two halves.
       #
@@ -637,7 +681,7 @@ module Iyi
       # the fork costs 0.2 to 0.3 s of it (SPEC.md IV.1d). A measurement tool
       # rather than a mode — it analyses the prelude in the foreground, so it is
       # always slower overall than an ordinary build.
-      if ENV["IYI_WARM"]? && !Compiler.preanalysed.has_key?(prelude_cache_key)
+      if adopt && ENV["IYI_WARM"]? && !Compiler.preanalysed.has_key?(prelude_cache_key)
         warm = Time.instant
         pre = preanalyse_prelude
         Compiler.preanalysed[pre.key] = pre
@@ -648,7 +692,7 @@ module Iyi
         return result
       end
 
-      if pre = Compiler.preanalysed[prelude_cache_key]?
+      if adopt && (pre = Compiler.preanalysed[prelude_cache_key]?)
         return compile_with_preanalysed_prelude(pre, source, output_filename) { |program| yield program }
       end
       program = new_program(source)
@@ -656,15 +700,15 @@ module Iyi
       node = parse program, source
 
       begin
-        node = program.semantic node, cleanup: !no_cleanup?
+        node = iyi_cutoff_guard(program) { program.semantic node, cleanup: !no_cleanup? }
       rescue ex : SkipMacroCodeCoverageException
         program.macro_expansion_error_hook.try &.call(ex.cause)
       end
 
-      prepared = prepare_iyimods program
+      prepared = iyi_cutoff_guard(program) { prepare_iyimods program }
       keep_iyi_namespace program
 
-      units = codegen_held program, node, source, output_filename, prepared
+      units = iyi_cutoff_guard(program) { codegen_held program, node, source, output_filename, prepared }
 
       @progress_tracker.clear
       print_macro_run_stats(program)
@@ -672,6 +716,21 @@ module Iyi
       Prof.report
 
       Result.new program, node
+    end
+
+    # iyi: runs the front end of a build that may have read an artifact
+    # under early cutoff. An artifact read on a condition that turns out
+    # false may not even type-check against the import it was compiled
+    # against — a signature it calls is gone — so any failure while one was
+    # read is the cutoff's to answer first, and the build without it says
+    # whether the failure is the program's.
+    private def iyi_cutoff_guard(program : Program, &)
+      yield
+    rescue ex : CutoffFailed | SkipMacroCodeCoverageException
+      raise ex
+    rescue ex
+      raise ex if CUTOFF_UNCHECKED || program.iyi_artifact_conditions.empty?
+      raise CutoffFailed.new(ex.message, cause: ex)
     end
 
     # iyi: codegen, and the artifacts that copy objects out of the build's
@@ -715,8 +774,7 @@ module Iyi
       return unless type.is_a?(ModuleType)
 
       program.iyi_fills_boundary = true
-      program.iyi_exported_owners << type
-      collect_iyi_owners type, program.iyi_exported_owners
+      collect_iyi_owners program, type
     end
 
     private def prepare_iyimods(program : Program) : Array({String, IyiMod::Artifact})?
@@ -729,8 +787,7 @@ module Iyi
       # code somebody else will call by name.
       program.iyi_module_paths.each_value do |module_name|
         if type = program.iyi_module_type(module_name)
-          program.iyi_exported_owners << type
-          collect_iyi_owners type, program.iyi_exported_owners
+          collect_iyi_owners program, type
         end
       end
 
@@ -842,7 +899,45 @@ module Iyi
         end
       end
 
+      check_iyi_cutoff program, hashes
       prepared
+    end
+
+    # iyi: the conditions the artifacts read under early cutoff were read on
+    # (`Program#iyi_artifact_conditions`), now that every module compiled
+    # from source has been hashed: each import that was compiled from its
+    # changed source has to hash to what the artifact recorded for it, or
+    # the artifact was compiled against a module this build does not have,
+    # and the build is made again without the cutoff.
+    private def check_iyi_cutoff(program : Program, hashes : Hash(String, IyiMod::Hashes)) : Nil
+      return if CUTOFF_UNCHECKED
+      program.iyi_artifact_conditions.each do |module_name, edges|
+        # Only what was read: a module whose artifact was found fresh while
+        # walking the graph, and then not imported, conditions nothing.
+        next unless program.iyi_artifact_hashes.has_key?(module_name)
+        edges.each do |edge|
+          now = hashes[edge.module_name]?
+          next if now && now.interface == edge.interface && now.implementation == edge.implementation
+          raise CutoffFailed.new("#{module_name}'s artifact was compiled against a \"#{edge.module_name}\" this build does not have")
+        end
+      end
+    end
+
+    # iyi: whether this build's units define every symbol an artifact read
+    # under early cutoff calls in a module compiled from source here
+    # (`Program#iyi_cutoff_kept`), asked after the IR is made and before
+    # LLVM runs. The calls that compile them cover what a written call can
+    # reach; a symbol none reaches - a splat's, a dispatch the calls do not
+    # make - leaves the artifact calling nothing, and the build is made
+    # again without the cutoff rather than failing at the link.
+    private def check_iyi_demands(program : Program) : Nil
+      return if CUTOFF_UNCHECKED || program.iyi_cutoff_kept.empty?
+      defined = Set(String).new
+      program.iyi_unit_symbols.each_value { |symbols| defined.concat symbols }
+      program.iyi_cutoff_kept.each do |demand|
+        next if defined.includes?(demand.symbol)
+        raise CutoffFailed.new("an artifact read under early cutoff calls `#{demand.symbol}`, which this build did not compile")
+      end
     end
 
     # iyi: the spawns written in *filename*, as the cleanup placed them, for
@@ -1106,6 +1201,7 @@ module Iyi
         artifact.symbol_literals = collect_iyi_symbol_literals(program, unit_names)
         artifact.symbols = collect_iyi_symbols(program, carried)
         artifact.libs = collect_iyi_libs(program, unit_names)
+        artifact.demands = collect_iyi_demands(program, unit_names)
         # With the object code, because it is about the object code's types:
         # a build that generated none has no lowered types to measure.
         if units
@@ -1448,11 +1544,13 @@ module Iyi
     # iyi: the machine code for a module's own definitions, for `ObjectCode`
     # (IV.1). Empty on a `--no-codegen` build, which generated none.
     #
-    # Codegen already emits one LLVM module — and so one object file — per
-    # owner type, and the split is a partition: measured on the Kemal port, no
-    # symbol is defined by two of its 23 units. So a module's own code is a set
-    # of whole object files, identified by naming the types the module declares
-    # and taking the unit of each. A generic type contributes one unit per
+    # Codegen emits one LLVM module — and so one object file — per owner type,
+    # except that a build writing artifacts puts every type a module declares
+    # in the module's own unit (`Program#iyi_owner_units`), and the split is a
+    # partition: measured on the Kemal port, no symbol is defined by two of its
+    # 23 units. So a module's own code is a set of whole object files,
+    # identified by naming the module type and the types it declares and taking
+    # the unit of each that has one. A generic type contributes one unit per
     # instantiation, and a module's own `pub def`s are owned by the module type
     # itself, which is why that is in the set alongside the types under it.
     #
@@ -1640,6 +1738,18 @@ module Iyi
       names.to_a.sort!
     end
 
+    # iyi: what the module's object code calls in other modules' units, for
+    # `Demands` (SPEC.md IV.3, early cutoff). Sorted by symbol, for the
+    # reason every list here is: two identical builds write one artifact.
+    private def collect_iyi_demands(program : Program,
+                                    unit_names : Array(String)) : Array(IyiMod::Demand)
+      demands = {} of String => IyiMod::Demand
+      unit_names.each do |unit_name|
+        program.iyi_unit_demands[unit_name]?.try &.each { |symbol, demand| demands[symbol] = demand }
+      end
+      demands.keys.sort!.map { |symbol| demands[symbol] }
+    end
+
     # iyi: the types the module's object code asks `~match<T>` about, by name,
     # for `MatchTypes` (SPEC.md IV.1g).
     #
@@ -1770,24 +1880,34 @@ module Iyi
     end
 
     # The same walk as `collect_iyi_unit_names`, keeping the types rather than
-    # their names — `try_inline_call` is handed an owner, not a string.
-    private def collect_iyi_owners(type : ModuleType, owners : Set(Type)) : Nil
+    # their names — `try_inline_call` is handed an owner, not a string — and
+    # the unit each one is compiled into, which is *root*'s
+    # (`Program#iyi_owner_units`).
+    private def collect_iyi_owners(program : Program, root : ModuleType, type : ModuleType = root) : Nil
+      if type == root
+        program.iyi_exported_owners << root
+        program.iyi_owner_units[root] = root
+      end
       type.types?.try &.each_value do |declared|
         next if declared.iyi_unit?
         unless declared.is_a?(GenericType)
-          owners << declared
+          program.iyi_exported_owners << declared
+          program.iyi_owner_units[declared] = root
           # And the virtual form, for the reason `iyi_virtual_unit_name` gives:
-          # it is a second unit, it travels, and a unit that travels must have
-          # its callees copied into it. Without this the `Shard::Base+` unit
-          # arrived referring to `*String#+<String>:String` — a symbol in the
+          # it travels, and code that travels must have its callees copied
+          # into its unit. Without this the `Shard::Base+` methods arrived
+          # referring to `*String#+<String>:String` — a symbol in the
           # consumer's `String` unit only if the consumer's own code happened
           # to concatenate.
           if declared.responds_to?(:virtual_type)
             virtual = declared.virtual_type
-            owners << virtual unless virtual == declared
+            unless virtual == declared
+              program.iyi_exported_owners << virtual
+              program.iyi_owner_units[virtual] = root
+            end
           end
         end
-        collect_iyi_owners declared, owners if declared.is_a?(ModuleType)
+        collect_iyi_owners program, root, declared if declared.is_a?(ModuleType)
       end
     end
 
@@ -3421,6 +3541,7 @@ module Iyi
       program.iyi_prefers_source = @iyi_prefers_source
       program.iyi_wants_object_code = !@no_codegen
       program.iyi_rewrites_artifacts = !@emit_iyimod.nil?
+      program.iyi_cuts_off = @iyi_cutoff && !@emit_iyimod.nil?
       # iyi: the manifest, if the root the entry is answered from has one
       # (III.7, `Compiler.entry_root_of`) — or the table a tool prepared,
       # which wins because the tool resolved the *user's* manifest and the
@@ -3561,6 +3682,7 @@ module Iyi
         end
         modules
       end
+      check_iyi_demands program
 
       # Held from here until `codegen_held` has read the last object out of
       # it: the reuse below decides on files that must still be there at the

@@ -64,8 +64,8 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 36,537 lines, of which 4,763 are the library held to the 4,763 ceiling (7,271 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 142,382 lines, none of it written in iyi |
-| artifact format | `.iyimod` v64, checksum per section |
+| compiler | 142,764 lines, none of it written in iyi |
+| artifact format | `.iyimod` v65, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
 
@@ -1073,9 +1073,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 142,382 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 142,764 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 36,537-line own prelude + 128,696 in std |
-| Specs | 21,146 lines | 17,691 for iyi |
+| Specs | 21,146 lines | 17,694 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -10021,6 +10021,22 @@ address on each side of the boundary. A C function is never copied: it is a
 declaration with no body whoever asks, and internal linkage on a declaration is
 invalid IR, which `write` and `exit` reach from the prelude's own `puts`.
 
+*One unit per module, so the copy is made once per module.* Codegen gives
+every type a unit of its own, and a build writing artifacts did too, so the
+closure was copied into each of a module's types and into the module's unit
+besides. What it copies is most of the runtime: `Int32#%` can raise, and
+`raise` reaches the allocator, the collector and the scheduler, 669 functions
+behind one `Widget#score`. The 30-module, 10-type program of the edit-loop
+benchmark compiled 223,188 functions where its plain build compiles 1,973,
+and its first `--emit-iyimod` build took 13.9 s and 4.1 GiB against the plain
+build's 0.31 s and 0.42 GiB (iyi-benchmarks' `cold`, Linux, 12 vCPU). A build
+writing artifacts therefore puts every type a module declares in the
+module's own unit (`Program#iyi_owner_units`): the same symbols, from the
+same build, with the closure copied once: 22,488 functions, 1.2 s and 0.7
+GiB. What is left over the plain build is the copy itself, about 670
+functions a module, and 660 of them are functions every program defines, a
+hello world included.
+
 *And a program that links an artifact defines every type id.* The copy above
 brought its own undefined symbol: `String:type_id`, which the same program
 built from source resolves without trouble. Type-id globals are emitted on
@@ -11692,6 +11708,58 @@ dependency can be rebuilt while the dependent is not touched. Edit
 the program links the new body through the linker. Add a `pub def` to
 `app/inner` instead, and `app/outer` is refused by name. Both are in
 `spec/compiler/iyimod_spec.cr`.
+
+**And within one build: early cutoff.** That spec rebuilds the dependency in one
+build and reads the dependent in another. Inside the artifact loop the two
+happen in the same build, and there an import whose source changed made every
+artifact above it stale, whatever the edit: iyi-benchmarks' `core-body`, one
+number in the module all 29 others import, compiled all 30 from source. The
+edge already says what was compiled against, so an import compiled from its
+changed source does not make a dependent stale by itself; the dependent's
+artifact is read on the condition that the import hashes, once its front end
+has run, to what the edge recorded, and the condition is checked before
+codegen (`Compiler#check_iyi_cutoff`). A build whose condition fails is made
+again from a program of its own, without the cutoff, and so is a build that
+fails at all while such an artifact was read: one compiled against a signature
+that is gone may not even typecheck, and the second attempt says whether the
+failure is the program's.
+
+Only an import stale for its own source and nothing else, and its conditions
+come along. An import whose own import moved can hash as before while a type
+its signatures name from that import changed layout: a hash names a type, it
+does not describe it. So `main → user → mid → core` with core's generic body
+and mid's body both edited reads mid from source, finds that mid's old edge to
+core no longer holds, and rebuilds user too. `bench/iyimod_cutoff.sh` holds
+the cases: a body-only edit leaves the dependent's artifact unwritten and the
+program prints the new answer; a signature, a layout, a constant compiled into
+the dependent, a macro it expanded, a generic body it instantiated, a block it
+compiled into a method, and that chain each rebuild it, and each is shown to
+print the wrong answer or fail to build under `IYI_CUTOFF_BROKEN=1`, which
+reads the artifact without checking.
+
+**And the import has to define what the artifact calls, which no build had
+asked of it.** Codegen emits what the build reaches, and an artifact's machine
+code is not reached: the first cutoff build linked `user` against
+`*App::Core^App::Core::base:Int32`, which `core`'s new unit never compiled
+because nothing compiled from source called it. So an artifact records what
+its object code calls in the units of the other modules its build compiled
+(`Section::Demands`, v65): the symbol, and the call that reaches it, as a
+receiver type, a method name and argument types. A build reading the artifact
+under the cutoff makes each call into a module it compiles from source once
+more, with `uninitialized` values in a proc nothing calls, typed as a
+definition probe is (`DefinitionTyping.append_cutoff_keeps`). After the IR it
+asks whether every demanded symbol is defined (`Compiler#check_iyi_demands`);
+one that is missing makes the build start again without the cutoff, before
+LLVM and the linker would have found it. The gate's body cases prove the
+check: under `IYI_CUTOFF_BROKEN=keeps` none of the calls are made, and the
+build rebuilds the dependent and prints the new answer; under `keeps,1`,
+which skips the checks too, it fails to link.
+
+What it is worth on iyi-benchmarks' medium program, `iyi-mods` lane, Linux,
+against 0.22.0: `core-body` 6.74 s → **0.30 s**, the same as `leaf-body`
+(0.32 s), and peak memory 3,941 → 246 MiB. `core-interface` pays for the
+condition: the front end runs once with the artifacts and again without
+them, 0.88 s against 0.78 s without the cutoff.
 
 **A boundary answers the source question with its inputs.** A module
 compiled from source is one file at its module path, and the source hash is

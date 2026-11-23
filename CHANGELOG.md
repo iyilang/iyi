@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+### Changed
+
+- **A build that writes `.iyimod` artifacts compiles each module once, not
+  once per type.** A module's travelling code carries private copies of the
+  prelude functions it reaches (SPEC.md IV.1g), and with one unit per type
+  that copy, most of the runtime behind `raise`, was made for every type of
+  the module: the iyi-benchmarks medium program (30 modules of 10 types)
+  compiled 223,188 functions where its plain build compiles 1,973. Every type
+  a module declares now shares the module's unit, so the copy is made once
+  per module and the artifact defines the same symbols: 22,488 functions.
+  The `iyi-mods` lane of iyi-benchmarks against 0.22.0, on the 12-vCPU Linux
+  machine, 7 rounds: a first build (`cold`) 13.95 s → 1.17 s, 0.08x
+  (0.08–0.09), peak 4,203 → 713 MiB; `fresh` 0.09x; `leaf-body` 1.11 s →
+  0.32 s, 0.28x (0.28–0.29); `core-body` 6.92 s → 0.89 s, 0.13x;
+  `core-interface` 6.60 s → 0.78 s, 0.12x. The program the first build
+  links is 9.0 MB instead of 87.8 MB.
+- **A body edit no longer rebuilds the modules that import it, in the
+  artifact loop.** An import compiled from its changed source made every
+  artifact above it stale, so one number changed in the module 29 others
+  import compiled all 30. Now an artifact is read on the condition that
+  the import still hashes to what the artifact recorded for it (its
+  interface, and the bodies and macros it ships to be compiled
+  elsewhere), the condition is checked before codegen, and a build whose
+  condition fails is made again without it (SPEC.md IV.3, early cutoff).
+  An import whose own import moved never qualifies, since a hash names
+  the types it uses and does not describe them. The artifact also records
+  what its machine code calls in other modules' units (`Demands`, format
+  v65), and the build compiles those calls, then checks before LLVM runs
+  that every symbol exists. `bench/iyimod_cutoff.sh` gates it: a body
+  edit, through a plain call or a splat, leaves the dependent's artifact
+  unwritten and the program prints the new answer, and without those
+  calls (`IYI_CUTOFF_BROKEN=keeps`) the check rebuilds the dependent
+  where skipping it too fails to link. A signature, a layout, a constant,
+  a macro, a generic body, a block-taking method, and a chain through a
+  middle module each rebuild the dependent, and each prints a wrong answer
+  or fails to build under `IYI_CUTOFF_BROKEN=1`. The `iyi-mods` lane
+  against 0.22.0, same machine, 7 rounds: `core-body` 6.74 s → 0.30 s,
+  0.05x (0.04–0.05),
+  peak 3,941 → 246 MiB; `leaf-body` 0.28x as above; `core-interface`
+  6.45 s → 0.88 s, 0.14x (0.13–0.15). That is about 0.1 s more than
+  without the cutoff (0.78 s in the run above), the front end that ran
+  before its condition failed.
+
 ### Gates
 
 - **`bench/lsp_session.py`'s held compile (step 74a) lets go of its FIFO

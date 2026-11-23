@@ -1609,7 +1609,7 @@ end
 
   # The sixteen bytes `String#hash` is keyed with, read once per process
   # (#212).
-  def __iyi_hash_key : {UInt64, UInt64}
+  @[Effect(:entropy)]; def __iyi_hash_key : {UInt64, UInt64}
     key = {0_u64, 0_u64}
     raise "String#hash: RtlGenRandom answered no bytes" if LibIyiAdvapi32.RtlGenRandom(pointerof(key).as(Void*), 16_u32) == 0_u8
     key

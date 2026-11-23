@@ -7,8 +7,8 @@
 A pull request runs the fast tier: the Linux build and the gates that answer in
 minutes, plus the Windows binaries cross-compiled from it. Everything else - the
 Windows, darwin and cursor shards, the samples round trip, the tarball - runs
-for a push to master or to mt/next (the workflow's `on: push` names no other
-branch), a tag, the nightly schedule and a manual dispatch. A pull
+for a push to master (the workflow's `on: push` names no other branch), a tag,
+the nightly schedule and a manual dispatch. A pull
 request does not stand in for those: a change that only the full set would
 catch shows on master after the merge, and is reverted or fixed there.
 
@@ -44,7 +44,9 @@ they source. Only code is read: a name in a comment ran nothing, and was
 once credited to whichever job the comment happened to sit in.
 
 A job is selected with the jobs it `needs`, so a selection never waits on a
-skipped job. The selection is printed, and written to `$GITHUB_OUTPUT` as a
+skipped job, and with the rest of a job that was cut in two for time
+(`HALVES`): a pull request that ran the whole job before the cut runs all of
+it still. The selection is printed, and written to `$GITHUB_OUTPUT` as a
 JSON list, `jobs=`, when that is set.
 """
 import argparse
@@ -103,6 +105,10 @@ STALE_PREFIXES = ("src/compiler/iyi/stale/", "spec/compiler/stale/", "bench/stal
 # Not selected by this script: `plan` is the script, `result` reads every
 # selected job's outcome, and `release` gates itself on a `v*` tag.
 NOT_PLANNED = {"plan", "result", "release"}
+
+# One job's steps cut into jobs that run side by side, because one runner
+# took too long for all of them: a selection that takes one takes them all.
+HALVES = [{"samples", "samples-surfaces"}]
 
 FULL_EVENTS = {"push", "schedule", "workflow_dispatch"}
 
@@ -295,6 +301,9 @@ class Reach:
 
 
 def close_over_needs(jobs, selected):
+    for halves in HALVES:
+        if selected & halves:
+            selected |= halves
     pending = list(selected)
     while pending:
         for need in jobs[pending.pop()]["needs"]:
@@ -396,9 +405,9 @@ def main():
         sys.exit("ci_plan: no event: pass --event or run under GitHub Actions")
 
     jobs = parse_jobs(WORKFLOW.read_text(encoding="utf-8"))
-    missing = [name for name in FAST if name not in jobs]
+    missing = [name for name in FAST + sorted(set().union(*HALVES)) if name not in jobs]
     if missing:
-        sys.exit(f"ci_plan: FAST names jobs the workflow does not have: {', '.join(missing)}")
+        sys.exit(f"ci_plan: FAST or HALVES names jobs the workflow does not have: {', '.join(missing)}")
     missing = [name for name in SELFHOST if name not in jobs]
     if missing:
         sys.exit(f"ci_plan: SELFHOST names jobs the workflow does not have: {', '.join(missing)}")

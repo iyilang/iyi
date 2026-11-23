@@ -96,7 +96,31 @@ module Iyi::IyiMod
   # producer's mark allowed there the consumer has to allow (SPEC.md
   # III.13). A v61 artifact is refused and rebuilt rather than read as a
   # module that handles no raw memory.
-  FORMAT_VERSION = 62_u32
+  # v63 (heap22): object code built with `-Dheap_partitions` calls
+  # `__iyi_new_shared` for a trusted `Share` class's instance and
+  # `__iyi_publish` at a class variable's store, allocates a crossing
+  # block's closure context typed and with no link to its scope's (C1),
+  # and passes `pinned: true` to a crossing that reaches an owning type
+  # without `lends:`; a spawn record carries that pin bit, a `Unit.new` or
+  # `SharedProc.of` the build pinned is a pin record beside the spawns,
+  # and an owning type's Share marker says `lends: true`. Whether the
+  # object code was built with the flag is the header's flags, which a
+  # consumer already compares whole (IV.5): code without the publication
+  # calls is unsound in a partitioned program. A v62 artifact is refused
+  # and rebuilt.
+  # v64 (heap22 S6): a `Reaches` record may be a pin record (*owning* set):
+  # state, or a capture of a block the function may run, that holds an
+  # owning type declared outside std without `lends:`, written by a build
+  # with `-Dheap_partitions` whatever the state's Share verdict, so that a
+  # consumer's crossing calling the function is pinned. A v63 artifact said
+  # nothing of such state, and a crossing calling into it ran unpinned; it
+  # is refused and rebuilt.
+  # v65: `Demands`, what the module's object code calls in the units of the
+  # other modules its build compiled (SPEC.md IV.3, early cutoff). A build
+  # that reads this artifact while compiling one of those from changed
+  # source has the source define each of them, and asks before LLVM runs
+  # whether it did. A v64 artifact says nothing of it and is rebuilt.
+  FORMAT_VERSION = 65_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -263,6 +287,15 @@ module Iyi::IyiMod
     # knows, whose spawns stay in their units. In the interface hash,
     # since a dependent's placement is decided by it. 67, beside `Spawns`.
     Reaches = 67
+
+    # iyi: what the module's object code calls in the units of the *other*
+    # modules its build compiled, and how to make a build compile each
+    # (`Demand`). Read only by a build that compiles one of those modules
+    # from changed source while reading this artifact under early cutoff
+    # (SPEC.md IV.3): demand-driven codegen emits what that build reaches,
+    # and this module's calls are machine code it does not analyse. Not in
+    # a hash: it is about the producer's units, not the module's surface.
+    Demands = 68
   end
 
   # One piece of module state a function of the module may reach (SPEC.md
@@ -272,9 +305,16 @@ module Iyi::IyiMod
   # constant" or "the class variable", *use* the expression it is used in,
   # *path* the functions between *function* and that expression, *why* the
   # reason it is not safe for every thread, and *module_name* the module
-  # that declares it.
+  # that declares it. A pin record (heap22) has *owning*, the owning type
+  # without `lends:` the state holds, and no *why*: it is not a refusal,
+  # and only a pin's walk reads it (`ShareReach#pin_reason`); its *kind*
+  # may also be "the capture of the block at file:line".
   record ReachRecord, function : String, label : String, type : String, kind : String,
-    use : String, path : Array(String), why : String, module_name : String
+    use : String, path : Array(String), why : String, module_name : String, owning : String = "" do
+    def pin? : Bool
+      !owning.empty?
+    end
+  end
 
   # One `g.spawn` written in a module, and where the build placed it
   # (SPEC.md III.4.16). *owner* is the def it is written in, as a reader
@@ -286,7 +326,21 @@ module Iyi::IyiMod
   # placement (`unit: :new`, `unit: :same`, `in: u`), and *reason* why it
   # stays in its spawner's unit (SPEC.md III.4.18), empty when it does not.
   record SpawnRecord, owner : String, digest : String, line : Int32, column : Int32,
-    parallel : Bool, asked : Bool, reason : String
+    parallel : Bool, asked : Bool, reason : String, pinned : Bool = false
+
+  # A `Unit.new` or `SharedProc.of` written in a module whose block the
+  # build ran in the shared heap (heap22 `pinned:`): *call* names which,
+  # *reason* says why. Beside the spawns in `Section::Spawns`.
+  record PinRecord, call : String, line : Int32, column : Int32, reason : String
+
+  # One function a module's object code calls in another module's unit
+  # (`Section::Demands`): *unit* the unit (the callee module's type),
+  # *symbol* the function's symbol, and the call a build makes to compile
+  # it - *receiver* the type, *class_call* whether the call is on the type
+  # itself, *name* the method, *args* the argument types, or nil where no
+  # written call reaches that symbol (a splat, a captured block).
+  record Demand, unit : String, symbol : String, receiver : String, class_call : Bool,
+    name : String, args : Array(String)?
 
   # A regex literal's constant: the name its object code reads, and what a
   # consumer has to build under that name.
@@ -933,7 +987,13 @@ module Iyi::IyiMod
     # list is iyi's own `:` syntax and means something R-2b checks; this is
     # what the shard wrote, in the language it wrote it in.
     includes : Array(String) = [] of String,
-    # iyi: a `lib`'s `fun` lines, as the shard wrote them.
+    # iyi: a `lib`'s `fun` lines, as the shard wrote them, and its external
+    # variables' `$name : Type` lines beside them: a body the consumer
+    # compiles reads `LibC.daylight` as it calls `LibC.opendir`, and with
+    # only the `fun`s here it said `undefined fun 'daylight'` (#204). Lines
+    # of text in the same section, so the format version is as it was: an
+    # artifact written without them stops at that same error, and a reader
+    # that predates them parses them as the source they are.
     #
     # Text rather than a `Signature`, for the reason `macros` is text: a `fun`
     # has a shape no `def` has — a C name beside Crystal's, a return
@@ -1626,10 +1686,17 @@ module Iyi::IyiMod
     # `Section::Spawns`.
     property spawns = [] of SpawnRecord
 
+    # The `Unit.new` and `SharedProc.of` calls the build pinned (heap22).
+    property pins = [] of PinRecord
+
     # What each function reaches of module state (SPEC.md III.4.15). Nil
     # when the section is absent, which a consumer reads as "not known".
     # See `Section::Reaches`.
     property reaches : Array(ReachRecord)? = nil
+
+    # What the module's object code calls in other modules' units. See
+    # `Section::Demands`. Settable alongside `object_code`.
+    property demands = [] of Demand
 
     def initialize(@module_name, @source_path, @compiler_version, @target_triple,
                    @flags, @imports, @usings = [] of String, @exports = Exports.empty,
@@ -1687,14 +1754,18 @@ module Iyi::IyiMod
 
     # After the declarations, for `iyi mod dump` and the next build of this
     # module, which compares its own verdicts with these.
-    unless artifact.spawns.empty?
-      sections << {Section::Spawns, encode_spawns(artifact.spawns)}
+    unless artifact.spawns.empty? && artifact.pins.empty?
+      sections << {Section::Spawns, encode_spawns(artifact.spawns, artifact.pins)}
     end
 
     # Whenever it is known, empty or not: its presence is what says the
     # module's functions reach nothing else.
     if reaches = artifact.reaches
       sections << {Section::Reaches, encode_reaches(reaches)}
+    end
+
+    unless artifact.demands.empty?
+      sections << {Section::Demands, encode_demands(artifact.demands)}
     end
 
     # Between the declarations and the machine code, which is where it belongs:
@@ -2020,7 +2091,9 @@ module Iyi::IyiMod
       layouts = [] of {String, TypeLayout}
       inputs = [] of String
       spawns = [] of SpawnRecord
+      pins = [] of PinRecord
       reaches = nil
+      demands = [] of Demand
       positions = {bodies: {} of String => Array(SourcePosition), initialiser: [] of SourcePosition}
 
       table.each do |(kind, length, sum)|
@@ -2061,8 +2134,9 @@ module Iyi::IyiMod
         when Section::Inputs          then inputs = decode_strings(payload)
         when Section::SymbolLiterals  then symbol_literals = decode_strings(payload)
         when Section::SourcePositions then positions = decode_source_positions(payload)
-        when Section::Spawns          then spawns = decode_spawns(payload)
+        when Section::Spawns          then spawns, pins = decode_spawns_and_pins(payload)
         when Section::Reaches         then reaches = decode_reaches(payload)
+        when Section::Demands         then demands = decode_demands(payload)
         else
           # Written by a later compiler, or a section this one does not need.
           # Skipping is the point of the table.
@@ -2083,7 +2157,9 @@ module Iyi::IyiMod
         declarations_only: header[:declarations_only], package_name: header[:package_name], unsafe: header[:unsafe],
         body_positions: positions[:bodies], initialiser_positions: positions[:initialiser])
       artifact.spawns = spawns
+      artifact.pins = pins
       artifact.reaches = reaches
+      artifact.demands = demands
       artifact
     end
   rescue ex : Overclaim
@@ -2194,7 +2270,13 @@ module Iyi::IyiMod
       artifact.spawns.each do |record|
         where = record.owner.empty? ? "(top level)" : record.owner
         verdict = record.parallel ? "parallel" : "in its spawner's unit: #{record.reason}"
-        io.puts "  #{where} #{record.line}:#{record.column} #{verdict}#{record.asked ? " (asked)" : ""}"
+        io.puts "  #{where} #{record.line}:#{record.column} #{verdict}#{record.asked ? " (asked)" : ""}#{record.pinned ? " (pinned)" : ""}"
+      end
+    end
+    unless artifact.pins.empty?
+      io.puts "pins"
+      artifact.pins.each do |record|
+        io.puts "  #{record.call} #{record.line}:#{record.column} #{record.reason}"
       end
     end
 
@@ -2211,6 +2293,10 @@ module Iyi::IyiMod
             next
           end
           through = (record.path + [record.use]).map { |step| "`#{step}`" }.join(" → ")
+          if record.pin?
+            io.puts "  #{record.function} reaches #{record.kind} `#{record.label} : #{record.type}` (module `#{record.module_name}`) through #{through}, which holds `#{record.owning}`, an owning type without `lends:` (a crossing calling it is pinned)"
+            next
+          end
           io.puts "  #{record.function} reaches #{record.kind} `#{record.label} : #{record.type}` (module `#{record.module_name}`) through #{through}"
         end
       end
@@ -2306,6 +2392,12 @@ module Iyi::IyiMod
     unless symbol_literals.empty?
       io.puts "symbol literals"
       symbol_literals.each { |name| io.puts "  :#{name}" }
+    end
+
+    demands = artifact.demands
+    unless demands.empty?
+      io.puts "demands       #{demands.size} calls into other modules' units"
+      demands.each { |demand| io.puts "  #{demand.unit}: #{demand.symbol}" }
     end
 
     class_vars = artifact.class_vars
@@ -3732,7 +3824,7 @@ module Iyi::IyiMod
     read_strings(Payload.new(payload))
   end
 
-  private def self.encode_spawns(records : Array(SpawnRecord)) : Bytes
+  private def self.encode_spawns(records : Array(SpawnRecord), pins : Array(PinRecord)) : Bytes
     io = IO::Memory.new
     io.write_bytes records.size.to_u32, FORMAT
     records.each do |record|
@@ -3740,22 +3832,40 @@ module Iyi::IyiMod
       write_string io, record.digest
       io.write_bytes record.line, FORMAT
       io.write_bytes record.column, FORMAT
-      io.write_bytes((record.parallel ? 1_u8 : 0_u8) | (record.asked ? 2_u8 : 0_u8), FORMAT)
+      io.write_bytes((record.parallel ? 1_u8 : 0_u8) | (record.asked ? 2_u8 : 0_u8) | (record.pinned ? 4_u8 : 0_u8), FORMAT)
       write_string io, record.reason
+    end
+    io.write_bytes pins.size.to_u32, FORMAT
+    pins.each do |pin|
+      write_string io, pin.call
+      io.write_bytes pin.line, FORMAT
+      io.write_bytes pin.column, FORMAT
+      write_string io, pin.reason
     end
     io.to_slice
   end
 
   private def self.decode_spawns(payload : Bytes) : Array(SpawnRecord)
+    decode_spawns_and_pins(payload)[0]
+  end
+
+  private def self.decode_spawns_and_pins(payload : Bytes) : {Array(SpawnRecord), Array(PinRecord)}
     io = Payload.new(payload)
-    Array(SpawnRecord).new(read_count(io, 21)) do
+    spawns = Array(SpawnRecord).new(read_count(io, 21)) do
       owner = read_string(io)
       digest = read_string(io)
       line = io.read_bytes(Int32, FORMAT)
       column = io.read_bytes(Int32, FORMAT)
       bits = io.read_bytes(UInt8, FORMAT)
-      SpawnRecord.new(owner, digest, line, column, bits & 1 != 0, bits & 2 != 0, read_string(io))
+      SpawnRecord.new(owner, digest, line, column, bits & 1 != 0, bits & 2 != 0, read_string(io), bits & 4 != 0)
     end
+    pins = Array(PinRecord).new(read_count(io, 16)) do
+      call = read_string(io)
+      line = io.read_bytes(Int32, FORMAT)
+      column = io.read_bytes(Int32, FORMAT)
+      PinRecord.new(call, line, column, read_string(io))
+    end
+    {spawns, pins}
   end
 
   private def self.encode_reaches(records : Array(ReachRecord)) : Bytes
@@ -3770,6 +3880,7 @@ module Iyi::IyiMod
       write_strings io, record.path
       write_string io, record.why
       write_string io, record.module_name
+      write_string io, record.owning
     end
     io.to_slice
   end
@@ -3784,9 +3895,40 @@ module Iyi::IyiMod
       use = read_string(io)
       path = read_strings(io)
       why = read_string(io)
-      ReachRecord.new(function, label, type, kind, use, path, why, read_string(io))
+      module_name = read_string(io)
+      ReachRecord.new(function, label, type, kind, use, path, why, module_name, read_string(io))
     end
     records
+  end
+
+  private def self.encode_demands(demands : Array(Demand)) : Bytes
+    io = IO::Memory.new
+    io.write_bytes demands.size.to_u32, FORMAT
+    demands.each do |demand|
+      write_string io, demand.unit
+      write_string io, demand.symbol
+      write_string io, demand.receiver
+      write_string io, demand.class_call ? "class" : "instance"
+      write_string io, demand.name
+      args = demand.args
+      write_string io, args ? "args" : "none"
+      write_strings io, args || [] of String
+    end
+    io.to_slice
+  end
+
+  private def self.decode_demands(payload : Bytes) : Array(Demand)
+    io = Payload.new(payload)
+    Array(Demand).new(read_count(io, 28)) do
+      unit = read_string(io)
+      symbol = read_string(io)
+      receiver = read_string(io)
+      class_call = read_string(io) == "class"
+      name = read_string(io)
+      written = read_string(io) == "args"
+      args = read_strings(io)
+      Demand.new(unit, symbol, receiver, class_call, name, written ? args : nil)
+    end
   end
 
   private def self.decode_mono_bodies(payload : Bytes) : Hash(String, String)

@@ -9,11 +9,9 @@
 # the thread-locals of that thread, not of the one it left; its socket's
 # bytes, delivered by whichever poller or port took them; a cancel, from
 # whichever thread, that finds it where it waits; and on Windows the TEB's
-# stack bounds of its own stack, which a deep frame's probes read. Every
-# step parks tasks over and over while they and their siblings allocate,
-# so collections stop the workers while tasks are on their way between
-# them, and counts the parks a task resumed from on another thread: a step
-# whose tasks never moved proved nothing, and fails saying so.
+# stack bounds of its own stack, which a deep frame's probes read. The
+# socket and deep steps force a move before their larger exercises; the
+# other steps report or check movement as their own scenarios require.
 #
 # What a thread is, here, is read twice: by the thread-local the runtime
 # keeps (`IyiScheduler.state`), and by asm, from the register the kernel
@@ -29,12 +27,16 @@
 # `-Dparallel_closes_home` a read is made on the thread that closes its
 # socket (`closes`); each step fails by name.
 #
-# Then the timed shapes the issue's server is made of (#145): tasks that
-# park and then compute finish in about their work over the workers, when
-# the thread that wakes them is outside the pool and when it is a worker;
-# and a task joining a thread, or waiting on a Mutex's word, leaves its
-# worker to the tasks behind it. bench/parallel_exercise.sh runs this and
-# broken copies of the runtime, each caught by the check that names it.
+# The timed shapes report measurements, not correctness verdicts. OPEN:
+# cancel under 3000 ms; balance at most 2x measured work per worker;
+# handoff below 40 ms at the longest and at most 1 ms at the median on an
+# unloaded host; backstop below 50 ms; and join child wake below 300 ms.
+# The keyed copies check routing, wake and join mechanisms, not these
+# elapsed-time guarantees.
+#
+# Registry walks protect list links, not IyiFiber.state: that enum has no
+# atomic read paired with its writers. A missed wait-state observation can
+# end at its named status-76 watchdog, not as a caught defect.
 
 @[Unsafe("reads the thread pointer through asm, fills an uninitialized stack pad through pointerof, and Lent trusts @[Share] to carry a socket between workers")]
 module bench/parallel_migrate
@@ -42,9 +44,151 @@ module bench/parallel_migrate
 import std/socket::{IyiSocket, SocketError}
 
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  {% unless flag?(:run_end_copy) %}
+    # one ending: begin
+    # The run's one ending, for every catch, watchdog and setup failure, on
+    # any thread and under any lock. The first caller to claim the word
+    # writes its line and ends the process with its status; every later
+    # caller writes nothing and yields until that end.
+    #
+    # Its bounds. One write goes out only when lead, what and tail total at
+    # most 512 bytes; a longer line goes out piece by piece (lead, what, tail),
+    # each piece in as many writes as the kernel takes. The claim and the
+    # write take no lock. The exit is not lock-free on Windows: __iyi_exit
+    # first runs __iyi_hold_runtime_for_exit, a bounded spin of up to
+    # 10,000,000 try_locks of IyiRuntimeLock that parks while a stop is
+    # requested, so a caller that held that lock while a stop waited on its
+    # own thread would leave the claimant parked there. No call site does
+    # that: every caller runs on a scheduler, worker or monitor path, never
+    # in collector code. Nothing between the claim and the exit is a
+    # preemption point, because the block is @[NoPreempt]. On Darwin the exit
+    # is the raw SYS_exit call, so no libSystem code runs after the write. The
+    # libSystem-teardown explanation of the old hang was tested and ruled out
+    # (a raw write then LibC.exit ended with status 76 and one line), so the
+    # raw call is a choice, not a fix.
+    #
+    # Each copy of this block is held to bench/parallel_exercise.iyi's, and
+    # bench/parallel_exercise.sh appends it to each runtime copy it runs
+    # (-Drun_end_copy), so a hook and its fixture claim one word.
+    class RunEnd
+      @[UnsafeReach("the run's claim: atomically set once, reset only for the ending-hook setup probe")]
+      @@claimed : UInt64 = 0_u64
+
+      def self.claim : Bool
+        Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.compare_and_set(0_u64, 1_u64)[1]
+      end
+
+      {% if flag?(:ending_hook) %}
+        # Only before the racers start, after the cross-layer claim probe.
+        def self.reset_for_test : Nil
+          Pointer(Atomic(UInt64)).new(pointerof(@@claimed).address).value.set(0_u64)
+        end
+      {% end %}
+
+      {% if flag?(:ending_unclaimed) %}
+        # The planted mutant's count of writers, read by every caller's wait.
+        @[UnsafeReach("the mutant's count of writers: atomics only")]
+        @@written : UInt64 = 0_u64
+
+        def self.arrive : UInt64
+          Pointer(Atomic(UInt64)).new(pointerof(@@written).address).value.add(1_u64)
+        end
+
+        def self.written : UInt64
+          Pointer(Atomic(UInt64)).new(pointerof(@@written).address).value.get
+        end
+      {% end %}
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def run_end_write(fd : Int32, lead : String, what : String = "", tail : String = "") : Nil
+      size = lead.bytesize + what.bytesize + tail.bytesize
+      line = uninitialized UInt8[512]
+      base = pointerof(line).as(UInt8*)
+      at = 0
+      piece = 0
+      while piece < 3
+        text = piece == 0 ? lead : (piece == 1 ? what : tail)
+        from = text.to_unsafe
+        count = text.bytesize
+        if size <= 512
+          i = 0
+          while i < count
+            (base + at + i).value = from[i]
+            i = i + 1
+          end
+          at = at + count
+          from = base
+          count = piece == 2 ? at : 0
+        end
+        done = 0
+        while done < count
+          wrote = __iyi_write(fd, (from + done).as(Void*), (count - done).to_u64)
+          break if wrote <= 0_i64
+          done = done + wrote.to_i32
+        end
+        piece = piece + 1
+      end
+    end
+
+    @[NoInline]
+    @[NoPreempt]
+    def end_run(status : Int32, fd : Int32, lead : String, what : String = "", tail : String = "") : NoReturn
+      {% if flag?(:ending_unclaimed) %}
+        # The planted mutant takes no claim: every caller writes its line, then
+        # waits until all five have written, so the first to exit ends the run
+        # with five lines.
+        run_end_write(fd, lead, what, tail)
+        RunEnd.arrive
+        started = __iyi_monotonic_ns
+        while RunEnd.written < 5_u64
+          if __iyi_monotonic_ns - started >= 10_000_000_000_i64
+            stuck = "FAIL: ending: setup: the unclaimed writers did not finish in 10000 ms\n"
+            __iyi_write(1, stuck.to_unsafe.as(Void*), stuck.bytesize.to_u64)
+            __iyi_exit(76)
+          end
+          IyiThread.spin_pause
+        end
+      {% else %}
+        unless RunEnd.claim
+          while true
+            IyiThread.yield_cpu
+          end
+        end
+        run_end_write(fd, lead, what, tail)
+      {% end %}
+      {% if flag?(:darwin) %}
+        asm("svc #0x80" :: "{x16}"(1_i64), "{x0}"(status.to_i64) : "memory" : "volatile")
+        while true
+        end
+      {% else %}
+        __iyi_exit(status)
+      {% end %}
+    end
+    # one ending: end
+  {% end %}
+
   def fail(message : String) : Nil
-    print "FAIL: #{message}\n"
-    __iyi_exit(1)
+    end_run(1, 1, "FAIL: ", message, "\n")
+  end
+
+  def progress_hang(message : String) : NoReturn
+    end_run(76, 1, "FAIL: ", message, "\n")
+  end
+
+  # A failure before the proof was armed: the fixture could not set its scenario up, so no
+  # verdict was reached. Exit 76, never 1. Main-thread code only: its message is built here.
+  def setup_failure(message : String) : NoReturn
+    end_run(76, 1, "FAIL: ", message, "\n")
+  end
+
+  # A hang, or a not-armed failure, met by a task holding its worker with preemption off or under
+  # a lock. The run's one ending claims the result and writes the pieces without allocation.
+  @[NoInline]
+  @[NoPreempt]
+  def held_exit(status : Int32, lead : String, what : String, tail : String) : NoReturn
+    end_run(status, 1, lead, what, tail)
   end
 
   def elapsed_ms(since : Int64) : Int64
@@ -132,7 +276,8 @@ import std/socket::{IyiSocket, SocketError}
     os_now = os_thread
     state_now = state_after(state_before)
     if (os_now == os_before) != (state_now == state_before)
-      fail("#{step}: a thread-local read after a park named another thread than the one the task resumed on: the kernel's thread went #{os_before} -> #{os_now}, the scheduler state #{state_before} -> #{state_now}")
+      puts "#{step}: the kernel's thread went #{os_before} -> #{os_now}, the scheduler state #{state_before} -> #{state_now}"
+      fail("#{step}: a thread-local read after a park named another thread than the one the task resumed on")
     end
     os_now != os_before
   end
@@ -201,10 +346,32 @@ import std/socket::{IyiSocket, SocketError}
   # The step *name* under a watchdog: a task on the main thread that
   # sleeps *ms* and fails the run by name unless the step ends first.
   def watched(name : String, ms : Int32, &block : -> Nil) : Nil
+    {% if flag?(:copy_hook_watchdog) %}
+      # The withheld-event control exercises the copy hook's own watchdog.
+      # Its enclosing process timeout remains the outer safety net.
+      block.call
+    {% else %}
+      group do |w|
+        w.spawn do
+          waited = sleep(ms)
+          progress_hang("#{name}: progress hang: still waiting after #{ms} ms") unless waited.is_a?(Cancelled)
+          0
+        end
+        block.call
+        w.cancel_children
+      end
+    {% end %}
+  end
+
+  # `watched`, with its clock gated on `start`: the watchdog's wait begins only when the block sends the
+  # word, once every named wait it needs has succeeded. Until then no clock runs, so only those named waits
+  # can fire. Close and join run under the watchdog, after the word.
+  def watched_gated(name : String, ms : Int32, start : Channel(Int32), &block : -> Nil) : Nil
     group do |w|
-      w.spawn do
+      w.spawn(unit: :new) do
+        start.receive
         waited = sleep(ms)
-        fail("#{name}: still waiting after #{ms} ms") unless waited.is_a?(Cancelled)
+        progress_hang("#{name}: progress hang: still waiting after #{ms} ms") unless waited.is_a?(Cancelled)
         0
       end
       block.call
@@ -216,23 +383,81 @@ import std/socket::{IyiSocket, SocketError}
   # family, which cross into a parallel task.
   def pair(listener : IyiSocket, port : Int32) : Tuple(IyiSocket, IyiSocket)
     near = IyiSocket.connect("127.0.0.1", port, 5000)
-    fail("pair: connect answered #{near}") unless near.is_a?(IyiSocket)
+    setup_failure("pair: connect answered #{near}") unless near.is_a?(IyiSocket)
     far = listener.accept
-    fail("pair: accept answered #{far}") unless far.is_a?(IyiSocket)
+    setup_failure("pair: accept answered #{far}") unless far.is_a?(IyiSocket)
     {near, far}
+  end
+
+  # A list that only a queued task holds. Copy only (-Dintransit_force): the
+  # collector's root walk counts the queued fibers whose saved stacks hold the
+  # list's head word, and whether it scanned them (rings in the copy's
+  # IyiRoots). Every worker is held with preemption off, so the task main
+  # wakes stays queued (Runnable) while main collects. It runs first in
+  # channels, so a copy that skips the stack fails here, before the rest.
+  def intransit_forced : Nil
+    {% if flag?(:intransit_force) %}
+      workers = IyiWorkers.count
+      built = Tally.new
+      held = Tally.new
+      stop_holders = Tally.new
+      feed = Channel(Int32).new
+      task = Armed.new
+      group do |g|
+        g.spawn(unit: :new) do
+          task.note_fiber(IyiScheduler.current.object_id)
+          head = build(3000, 5_i64)
+          IyiRoots.force_head_set(head.as(Node).object_id)
+          built.add(1_i64)
+          feed.receive
+          fail("channels: a queued task's list was not whole after its collection") unless whole?(head, 3000, 5_i64)
+          0
+        end
+        wait_or_fail(built, 1_i64, "channels: progress hang: the list task did not build")
+        workers.times do
+          g.spawn(unit: :new) do
+            held.add(1_i64)
+            hold_until_or_fail(stop_holders, 1_i64, "channels: progress hang: a holder was not released")
+            0
+          end
+        end
+        wait_or_fail(held, workers.to_i64, "channels: progress hang: the holders did not start")
+        feed.send(1)
+        IyiMark.collect
+        seen = IyiRoots.force_seen_fiber
+        scanned = IyiRoots.force_scanned_fiber
+        setup_failure("channels: no collection saw a queued task's list head on its stack, so the proof did not arm") unless seen == task.fiber
+        fail("channels: the collector's stack walk omitted a queued fiber's saved stack that held a list's head") unless scanned == task.fiber
+        puts "channels: the collector's stack walk scanned a queued fiber's saved stack that held a list's head"
+        stop_holders.add(1_i64)
+      end
+    {% end %}
   end
 
   # ── channels ─────────────────────────────────────────────────────────
   # 32 tasks, each holding a list on its own stack, park on a channel 30
   # times; the main thread sends, so each wake goes to the pool's shared
   # queue and whichever worker is free resumes it. Each round allocates.
+  #
+  # With partitions in the runtime (`-Dheap_partitions`) main also asks for
+  # a global collection after every eighth send. Stop and local-collection
+  # counts are pool-wide observations, not proof that a particular moving
+  # task was collected. The forced movement and in-transit stack scan are
+  # separate checks; bench/heap_local.iyi exercises local collections.
   def channels(watch : Int32) : Nil
     watched("channels", watch) do
+      channels_forced
+      {% if flag?(:intransit_force) %}
+        intransit_forced
+      {% end %}
       tasks = 32
       rounds = 30
       feed = Channel(Int32).new
       moves = Tally.new
       stops = IyiThread.stops
+      {% if flag?(:heap_partitions) %}
+        locals = IyiHeap.local_collections
+      {% end %}
       group do |g|
         tasks.times do |t|
           g.spawn(unit: :new) do
@@ -248,13 +473,76 @@ import std/socket::{IyiSocket, SocketError}
             0
           end
         end
-        (tasks * rounds).times { feed.send(1) }
+        {% if flag?(:heap_partitions) %}
+          (tasks * rounds).times do |i|
+            feed.send(1)
+            IyiMark.collect if i % 8 == 7
+          end
+        {% else %}
+          (tasks * rounds).times { feed.send(1) }
+        {% end %}
       end
-      fail("channels: no collection stopped a worker while the tasks moved") if IyiThread.stops == stops
-      if IyiWorkers.count > 1 && moves.count == 0_i64
-        fail("channels: none of #{tasks * rounds} parks on a channel resumed on another worker")
+      {% if flag?(:heap_partitions) %}
+        held = IyiHeap.local_collections - locals
+        puts "channels: #{tasks} tasks parked #{rounds} times each, lists whole"
+        puts "measure: channels: #{moves.count} cross-worker resumes, #{held} local collections and #{IyiThread.stops - stops} stops (pool-wide observations)"
+      {% else %}
+        puts "channels: #{tasks} tasks parked #{rounds} times each, lists whole"
+        puts "measure: channels: #{moves.count} cross-worker resumes and #{IyiThread.stops - stops} stops (pool-wide observations)"
+      {% end %}
+    end
+  end
+
+  # The move a channel task makes only by chance, made on purpose, for the
+  # stale thread-local copy (`staletls`). Every worker but one is held by a
+  # @[NoPreempt] task, so the next task to run takes the one left: it
+  # parks, and a sibling queued behind it takes that worker when the park
+  # gives it up (the sibling's start is the word that says the park
+  # happened). Main then sends the wake, which queues the task while every
+  # worker is busy; a holder ends, a worker takes the task, and it resumes
+  # on a worker it did not park on, where the thread-local it read before
+  # the park is checked. Nothing here waits on a clock.
+  def channels_forced : Nil
+    holders = IyiWorkers.count - 1
+    held = Tally.new
+    stop_holders = Tally.new
+    started = Tally.new
+    sibling = Tally.new
+    release_sibling = Tally.new
+    finished = Tally.new
+    feed = Channel(Int32).new
+    group do |g|
+      holders.times do
+        g.spawn(unit: :new) do
+          held.add(1_i64)
+          hold_until_or_fail(stop_holders, 1_i64, "channels: progress hang: a holder was not released")
+          0
+        end
       end
-      puts "channels: #{tasks} tasks parked #{rounds} times each, #{moves.count} resumed on another worker, lists whole through #{IyiThread.stops - stops} stops"
+      wait_or_fail(held, holders.to_i64, "channels: progress hang: the holders did not start")
+      g.spawn(unit: :new) do
+        kept = build(3000, 9_i64)
+        os = os_thread
+        st = IyiScheduler.state.object_id
+        started.add(1_i64)
+        feed.receive
+        setup_failure("channels: not armed: the forced task resumed on the worker it parked on") unless moved?("channels", os, st)
+        fail("channels: the forced task's list was not whole after its park") unless whole?(kept, 3000, 9_i64)
+        puts "channels: the forced task moved to another worker and its thread-local read named that worker"
+        finished.add(1_i64)
+        0
+      end
+      wait_or_fail(started, 1_i64, "channels: progress hang: the forced task did not park")
+      g.spawn(unit: :new) do
+        sibling.add(1_i64)
+        hold_until_or_fail(release_sibling, 1_i64, "channels: progress hang: the sibling was not released")
+        0
+      end
+      wait_or_fail(sibling, 1_i64, "channels: progress hang: the sibling did not start")
+      feed.send(1)
+      stop_holders.add(1_i64)
+      wait_or_fail(finished, 1_i64, "channels: progress hang: the forced task did not finish")
+      release_sibling.add(1_i64)
     end
   end
 
@@ -264,87 +552,314 @@ import std/socket::{IyiSocket, SocketError}
   # answer to a writer - a task of its own on the same socket, which may
   # run on another worker and, on Windows, moves the socket to that
   # worker's port while the reader's next read is posted on its own.
+  #
+  # One read is forced to move while its original worker is held. The
+  # larger run then exercises the same socket traffic once, regardless of
+  # how many of its reads happen to move.
   def sockets(watch : Int32) : Nil
     watched("sockets", watch) do
       conns = 16
       rounds = 12
-      listener = IyiSocket.listen("127.0.0.1", 0)
-      port = listener.local_port
-      moves = Tally.new
-      answered = Tally.new
       stops = IyiThread.stops
-      group do |g|
-        g.spawn do
-          conns.times do |c|
-            client = listener.accept
-            fail("sockets: accept answered #{client}") unless client.is_a?(IyiSocket)
-            fd = client.fd
-            family = client.family
-            g.spawn(unit: :new) do
-              socket = IyiSocket.new(fd, family)
-              kept = build(2000, c.to_i64 + 100_i64)
-              answers = Channel(Int32).new(rounds)
-              group do |inner|
-                inner.spawn do
-                  rounds.times do
-                    n = answers.receive
-                    fail("sockets: the writer's channel answered #{n}") unless n.is_a?(Int32)
-                    wrote = socket.write("#{n}.")
-                    fail("sockets: a write answered #{wrote}") unless wrote.is_a?(Int32)
-                  end
-                  0
-                end
-                rounds.times do |r|
-                  os = os_thread
-                  st = IyiScheduler.state.object_id
-                  got = socket.read(64)
-                  moves.add(1_i64) if moved?("sockets", os, st)
-                  fail("sockets: connection #{c} read #{got} where request #{r} was sent") unless got == "q#{c}.#{r};"
-                  churn(3000)
-                  spin(200000_i64, r.to_u64)
-                  fail("sockets: connection #{c}'s list was not whole after request #{r}") unless whole?(kept, 2000, c.to_i64 + 100_i64)
-                  answered.add(1_i64)
-                  answers.send(r)
-                end
-              end
-              socket.close
-              0
-            end
-          end
-          0
-        end
-        clients = [] of IyiSocket
-        conns.times do
-          c = IyiSocket.connect("127.0.0.1", port, 5000)
-          fail("sockets: connect answered #{c}") unless c.is_a?(IyiSocket)
-          clients << c
-        end
-        rounds.times do |r|
-          clients.each_with_index do |client, c|
-            wrote = client.write("q#{c}.#{r};")
-            fail("sockets: a client's write answered #{wrote}") unless wrote.is_a?(Int32)
-          end
-          clients.each do |client|
-            got = client.read(16)
-            fail("sockets: a client read #{got} where the answer to #{r} was due") unless got == "#{r}."
-          end
-        end
-        clients.each(&.close)
-      end
-      listener.close
-      fail("sockets: #{answered.count} of #{conns * rounds} requests answered") unless answered.count == (conns * rounds).to_i64
-      if IyiWorkers.count > 1 && moves.count == 0_i64
-        fail("sockets: none of #{conns * rounds} reads parked on a socket resumed on another worker")
-      end
-      puts "sockets: #{conns} connections, #{rounds} requests each read and answered in order, #{moves.count} reads resumed on another worker, through #{IyiThread.stops - stops} stops"
+      sockets_forced
+      moved = socket_run(conns, rounds)
+      puts "sockets: #{conns} connections, #{rounds} requests each read and answered in order"
+      puts "measure: sockets: #{moved} read calls resumed on another worker, #{IyiThread.stops - stops} stops"
     end
   end
 
+  def sockets_hang(what : String) : Nil
+    held_exit(76, "FAIL: sockets: progress hang: ", what, "\n")
+  end
+
+  def sockets_wait(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 10_000_000_000_i64
+    while count.count < target
+      sleep(1)
+      sockets_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # Publish the worker from inside the non-preemptible hold, so the
+  # observer cannot release the other workers before this one is held.
+  @[NoInline]
+  @[NoPreempt]
+  def sockets_hold(release : Tally, entered : Tally, owner : Owner, what : String) : Nil
+    owner.note_worker(IyiScheduler.state.object_id)
+    entered.add(1_i64)
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while release.count == 0_i64
+      IyiThread.spin_pause
+      sockets_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # The sibling is queued by the reader on its own worker. With every
+  # other worker held it cannot start until the read parks on that worker.
+  @[NoInline]
+  @[NoPreempt]
+  def sockets_force_reader(fd : Int32, family : Int32, reader : Armed, parked_on : Owner, owner : Owner, owner_entered : Tally, owner_go : Tally, finished : Tally) : Nil
+    kept = build(2000, 57_i64)
+    os = os_thread
+    st = IyiScheduler.state.object_id
+    parked_on.note_worker(st)
+    reader.note_fiber(IyiScheduler.current.object_id)
+    group do |inner|
+      inner.spawn(unit: :new) do
+        sockets_hold(owner_go, owner_entered, owner, "the reader's worker was not released")
+        0
+      end
+      got = IyiSocket.new(fd, family).read(1)
+      held_exit(76, "FAIL: ", "sockets: setup: the forced read failed with a socket error", "\n") if got.is_a?(SocketError)
+      held_exit(1, "FAIL: ", "sockets: the forced read did not answer x", "\n") unless got == "x"
+      held_exit(76, "FAIL: ", "sockets: not armed: the forced read did not resume on another worker", "\n") unless moved?("sockets", os, st)
+      churn(3000)
+      held_exit(1, "FAIL: ", "sockets: the forced reader's list was not whole after its move", "\n") unless whole?(kept, 2000, 57_i64)
+      finished.add(1_i64)
+    end
+  end
+
+  def sockets_forced : Nil
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    near, far = pair(listener, listener.local_port)
+    fd = far.fd
+    family = far.family
+    holders = IyiWorkers.count - 1
+    holder_entered = Tally.new
+    holders_go = Tally.new
+    holder_on = Owner.new
+    reader = Armed.new
+    parked_on = Owner.new
+    owner = Owner.new
+    owner_entered = Tally.new
+    owner_go = Tally.new
+    finished = Tally.new
+    group do |g|
+      holders.times do
+        g.spawn(unit: :new) do
+          sockets_hold(holders_go, holder_entered, holder_on, "a holder was not released")
+          0
+        end
+      end
+      sockets_wait(holder_entered, holders.to_i64, "the holders did not start")
+      g.spawn(unit: :new) do
+        sockets_force_reader(fd, family, reader, parked_on, owner, owner_entered, owner_go, finished)
+        0
+      end
+      sockets_wait(owner_entered, 1_i64, "the reader's sibling did not start")
+      setup_failure("sockets: not armed: the sibling did not hold the reader's worker") unless owner.worker == parked_on.worker
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !fiber_in_state?(reader.fiber, IyiFiberState::WaitingIo)
+        sleep(1)
+        sockets_hang("the reader did not register its socket wait") if __iyi_monotonic_ns > limit
+      end
+      holders_go.add(1_i64)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiScheduler.waiting_threads < 1_u64
+        sleep(1)
+        sockets_hang("no spare worker waited after the holders were released") if __iyi_monotonic_ns > limit
+      end
+      wrote = near.write("x")
+      setup_failure("sockets: the forced write answered #{wrote}") unless wrote.is_a?(Int32)
+      sockets_wait(finished, 1_i64, "the reader did not finish while its worker was held")
+      owner_go.add(1_i64)
+    end
+    near.close
+    far.close
+    listener.close
+    puts "sockets: a socket read resumed on a spare while its worker was held, and its list stayed whole"
+  end
+
+  # One run of the sockets step: the reads that resumed on another worker.
+  def socket_run(conns : Int32, rounds : Int32) : Int64
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    moves = Tally.new
+    answered = Tally.new
+    group do |g|
+      g.spawn do
+        conns.times do |c|
+          client = listener.accept
+          setup_failure("sockets: accept answered #{client}") unless client.is_a?(IyiSocket)
+          fd = client.fd
+          family = client.family
+          g.spawn(unit: :new) do
+            socket = IyiSocket.new(fd, family)
+            kept = build(2000, c.to_i64 + 100_i64)
+            answers = Channel(Int32).new(rounds)
+            group do |inner|
+              inner.spawn do
+                rounds.times do
+                  n = answers.receive
+                  fail("sockets: the writer's channel answered #{n}") unless n.is_a?(Int32)
+                  wrote = socket.write("#{n}.")
+                  fail("sockets: a write answered #{wrote}") unless wrote.is_a?(Int32)
+                end
+                0
+              end
+              rounds.times do |r|
+                expected = "q#{c}.#{r};"
+                got = ""
+                while got.bytesize < expected.bytesize
+                  os = os_thread
+                  st = IyiScheduler.state.object_id
+                  part = socket.read(expected.bytesize - got.bytesize)
+                  moves.add(1_i64) if moved?("sockets", os, st)
+                  if part.is_a?(String)
+                    fail("sockets: connection #{c} closed before request #{r} was complete") if part.empty?
+                    got = got + part
+                  else
+                    fail("sockets: connection #{c} read #{part} where request #{r} was sent")
+                  end
+                end
+                fail("sockets: connection #{c} read #{got} where request #{r} was sent") unless got == expected
+                churn(3000)
+                spin(200000_i64, r.to_u64)
+                fail("sockets: connection #{c}'s list was not whole after request #{r}") unless whole?(kept, 2000, c.to_i64 + 100_i64)
+                answered.add(1_i64)
+                answers.send(r)
+              end
+            end
+            socket.close
+            0
+          end
+        end
+        0
+      end
+      clients = [] of IyiSocket
+      conns.times do
+        c = IyiSocket.connect("127.0.0.1", port, 5000)
+        setup_failure("sockets: connect answered #{c}") unless c.is_a?(IyiSocket)
+        clients << c
+      end
+      rounds.times do |r|
+        clients.each_with_index do |client, c|
+          wrote = client.write("q#{c}.#{r};")
+          fail("sockets: a client's write answered #{wrote}") unless wrote.is_a?(Int32)
+        end
+        clients.each do |client|
+          expected = "#{r}."
+          got = ""
+          while got.bytesize < expected.bytesize
+            part = client.read(expected.bytesize - got.bytesize)
+            if part.is_a?(String)
+              fail("sockets: a client closed before the answer to #{r} was complete") if part.empty?
+              got = got + part
+            else
+              fail("sockets: a client read #{part} where the answer to #{r} was due")
+            end
+          end
+          fail("sockets: a client read #{got} where the answer to #{r} was due") unless got == expected
+        end
+      end
+      clients.each(&.close)
+    end
+    listener.close
+    fail("sockets: #{answered.count} of #{conns * rounds} requests answered") unless answered.count == (conns * rounds).to_i64
+    moves.count
+  end
+
+  # Walk the registry under the same lock as its link and unlink operations.
+  @[NoInline]
+  @[NoPreempt]
+  def io_waiting : Int32
+    count = 0
+    IyiRuntimeLock.lock
+    fiber = IyiScheduler.first_fiber
+    while fiber.is_a?(IyiFiber)
+      count = count &+ 1 if fiber.state == IyiFiberState::WaitingIo
+      fiber = fiber.next_fiber
+    end
+    IyiRuntimeLock.unlock
+    count
+  end
+
   # ── cancel ───────────────────────────────────────────────────────────
-  # Tasks that moved first, then parked - on a socket nobody writes, in a
-  # sleep, on a channel nobody sends on - are cancelled by a sibling's
-  # failure, from whichever thread it fails on: each answers `Cancelled`.
+  {% if flag?(:unlistedio_force) %}
+  # Cancel only after every reader has switched out of its io wait, past
+  # its own cancellation check. Then count the listed-owner routes.
+  @[NoInline]
+  @[NoPreempt]
+  def switched_out?(id : UInt64, state : IyiFiberState) : Bool
+    found = false
+    IyiRuntimeLock.lock
+    fiber = IyiScheduler.first_fiber
+    while fiber.is_a?(IyiFiber)
+      if fiber.object_id == id
+        found = fiber.state == state && !fiber.on_cpu?
+        break
+      end
+      fiber = fiber.next_fiber
+    end
+    IyiRuntimeLock.unlock
+    found
+  end
+
+  def cancel_io_forced : Nil
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    ends = [] of IyiSocket
+    fds = [] of Int32
+    families = [] of Int32
+    slots = [] of Armed
+    readers = 8
+    answered = Tally.new
+    cancelled = Tally.new
+    group do |g|
+      readers.times do
+        p = pair(listener, port)
+        ends << p[0]
+        ends << p[1]
+        fds << p[1].fd
+        families << p[1].family
+      end
+      base = IyiScheduler.force_armed_count
+      readers.times do |i|
+        slot = Armed.new
+        slots << slot
+        fd = fds[i]
+        family = families[i]
+        g.spawn(unit: :new) do
+          slot.note_fiber(IyiScheduler.current.object_id)
+          outcome = IyiSocket.new(fd, family).read(16)
+          cancelled.add(1_i64) if outcome.is_a?(Cancelled)
+          answered.add(1_i64)
+          0
+        end
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiScheduler.force_armed_count < base + readers.to_u64
+        sleep(1)
+        progress_hang("cancel: progress hang: the readers did not register their io waits in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      slots.each do |slot|
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
+        while !switched_out?(slot.fiber, IyiFiberState::WaitingIo)
+          sleep(1)
+          progress_hang("cancel: progress hang: a reader did not switch out of its io wait in 10000 ms") if __iyi_monotonic_ns > limit
+        end
+      end
+      before = IyiScheduler.force_dispatched_count
+      g.cancel_children
+      found = IyiScheduler.force_dispatched_count - before
+      fail("cancel: a cancel found no listed owner for a reader switched out of its io wait") if found < readers.to_u64
+      wait_or_fail(answered, readers.to_i64, "cancel: progress hang: the cancelled readers did not answer")
+      fail("cancel: a cancelled reader's read answered other than Cancelled") unless cancelled.count == readers.to_i64
+      puts "cancel: a cancel found the listed owner of every reader switched out of its io wait, and each read answered Cancelled"
+    end
+    ends.each(&.close)
+    listener.close
+  end
+  {% end %}
+
+  # After a channel wake, tasks enter a socket read, sleep or channel receive.
+  # A sibling's failure cancels each one, including cancellation before a wait.
+  # The io-state tally below is pool-wide, not a per-task registration witness.
   def cancel(watch : Int32) : Nil
+    {% if flag?(:unlistedio_force) %}
+      cancel_io_forced
+      return
+    {% end %}
     watched("cancel", watch) do
       kinds = 3
       per = 8
@@ -362,7 +877,7 @@ import std/socket::{IyiSocket, SocketError}
       end
       go = Channel(Int32).new
       never = Channel(Int32).new
-      parked = Tally.new
+      starting_wait = Tally.new
       cancelled = Tally.new
       moves = Tally.new
       began = 0_i64
@@ -376,12 +891,15 @@ import std/socket::{IyiSocket, SocketError}
             st = IyiScheduler.state.object_id
             go.receive
             moves.add(1_i64) if moved?("cancel", os, st)
-            parked.add(1_i64)
+            starting_wait.add(1_i64)
             outcome = if kind == 0
                         socket = IyiSocket.new(fd, family)
                         socket.read(16)
                       elsif kind == 1
-                        sleep(20000)
+                        slept = sleep(20000)
+                        # Nil can be a normal expiry before the failure, so it is not a bug verdict.
+                        setup_failure("cancel: not armed: a sleep ended without observing cancellation") if slept.nil?
+                        slept
                       else
                         never.receive
                       end
@@ -390,19 +908,25 @@ import std/socket::{IyiSocket, SocketError}
           end
         end
         (kinds * per).times { go.send(1) }
-        while parked.count < (kinds * per).to_i64
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
+        while starting_wait.count < (kinds * per).to_i64
           sleep(1)
+          progress_hang("cancel: progress hang: the readers did not start") if __iyi_monotonic_ns > limit
         end
-        sleep(20)
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
+        while io_waiting < per
+          sleep(1)
+          progress_hang("cancel: progress hang: the socket reads did not park in the io wait") if __iyi_monotonic_ns > limit
+        end
         began = __iyi_monotonic_ns
         g.spawn(unit: :new) { Boom.new }
       end
       took = elapsed_ms(began)
       ends.each(&.close)
       listener.close
-      fail("cancel: #{cancelled.count} of #{kinds * per} parked tasks answered Cancelled") unless cancelled.count == (kinds * per).to_i64
-      fail("cancel: a failure took #{took} ms to cancel tasks parked on other workers") if took >= 3000
-      puts "cancel: #{kinds * per} tasks, #{moves.count} of them moved before they parked on a socket, a sleep or a channel, all cancelled in #{took} ms"
+      fail("cancel: #{cancelled.count} of #{kinds * per} tasks answered Cancelled") unless cancelled.count == (kinds * per).to_i64
+      puts "cancel: #{kinds * per} tasks answered Cancelled; #{moves.count} moved before entering their waits"
+      puts "measure: cancel: group completion took #{took} ms after the failure was spawned (former bound: under 3000 ms)"
     end
   end
 
@@ -443,39 +967,73 @@ import std/socket::{IyiSocket, SocketError}
   # nothing closes a number twice. Under `-Dparallel_closes_home` the
   # seventeenth read is a task of the main thread's own, made where its
   # close is, and the step fails by name.
-  def closes(watch : Int32) : Nil
-    watched("closes", watch) do
-      units = 16
-      listener = IyiSocket.listen("127.0.0.1", 0)
-      port = listener.local_port
-      ends = [] of IyiSocket
-      fds = [] of Int32
-      families = [] of Int32
-      units.times do
-        p = pair(listener, port)
-        ends << p[0]
-        fds << p[1].fd
-        families << p[1].family
+  # WaitingIo is set just before the reader is linked into its poller.
+  # Once it has also left the CPU, registration has finished. The runtime
+  # lock protects registry links while the witness walks them.
+
+  # Count alone can include unrelated waiters. Also identify the reader of
+  # the socket the main thread will close.
+  @[NoInline]
+  @[NoPreempt]
+  def closes_target_registered?(id : UInt64) : Bool
+    return false if id == 0_u64
+    found = false
+    IyiRuntimeLock.lock
+    fiber = IyiScheduler.first_fiber
+    while fiber.is_a?(IyiFiber)
+      if fiber.object_id == id
+        found = fiber.state == IyiFiberState::WaitingIo && !fiber.on_cpu?
+        break
       end
-      last = pair(listener, port)
-      ends << last[0]
-      lent = Lent.new(last[1])
-      lent_reader = Where.new
-      go = Channel(Int32).new
-      waiting = Tally.new
-      woken = Tally.new
-      crossed = Tally.new
-      main_crossed = false
+      fiber = fiber.next_fiber
+    end
+    IyiRuntimeLock.unlock
+    found
+  end
+
+  def closes(watch : Int32) : Nil
+    units = 16
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    ends = [] of IyiSocket
+    fds = [] of Int32
+    families = [] of Int32
+    units.times do
+      p = pair(listener, port)
+      ends << p[0]
+      fds << p[1].fd
+      families << p[1].family
+    end
+    last = pair(listener, port)
+    ends << last[0]
+    lent = Lent.new(last[1])
+    {% if flag?(:noclose_force) %}
+      # Always keyed. Under -Dnoclose_withhold_registration the copy suppresses only its registered store.
+      IyiScheduler.force_close_target(lent.socket.fd)
+    {% end %}
+    lent_reader = Where.new
+    go = Channel(Int32).new
+    waiting = Tally.new
+    woken = Tally.new
+    readers = [] of Armed
+    crossed = Tally.new
+    # The outer watchdog's clock starts when this word is sent, once every named registration wait below has
+    # succeeded. Until then no clock runs, so only those named waits can fire, each with its own sentence.
+    outer_start = Channel(Int32).new(1)
+    watched_gated("closes", watch, outer_start) do
       group do |g|
         units.times do |u|
           fd = fds[u]
           family = families[u]
+          reader = Armed.new
+          readers << reader
           g.spawn(unit: :new) do
             socket = IyiSocket.new(fd, family)
             reader_on = 0_u64
             group do |inner|
               inner.spawn do
                 reader_on = os_thread
+                reader.note_fiber(IyiScheduler.current.object_id)
                 waiting.add(1_i64)
                 got = socket.read(16)
                 woken.add(1_i64) if got.is_a?(Cancelled)
@@ -498,18 +1056,43 @@ import std/socket::{IyiSocket, SocketError}
         {% else %}
           g.spawn(unit: :new) { lent_read(lent, lent_reader, waiting, woken) }
         {% end %}
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
         while waiting.count < (units + 1).to_i64
           sleep(1)
+          progress_hang("closes: progress hang: the readers did not start") if __iyi_monotonic_ns > limit
         end
-        sleep(20)
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
+        while !closes_target_registered?(lent_reader.fiber)
+          sleep(1)
+          progress_hang("closes: progress hang: the target reader did not finish registering its socket wait") if __iyi_monotonic_ns > limit
+        end
+        fail("closes: the main thread closed a socket on the thread its reader parked on") unless os_thread != lent_reader.thread
+        {% if flag?(:noclose_force) %}
+          # The named registration watchdog: the keyed wait ends `watch` ms after it starts. Under
+          # -Dnoclose_withhold_registration the copy withholds the registered store, so this wait is the one that reports.
+          started = __iyi_monotonic_ns
+          while !IyiScheduler.force_close_registered?
+            progress_hang("closes: progress hang: the targeted reader did not complete io registration") if elapsed_ms(started) >= watch.to_i64
+            sleep(1)
+          end
+        {% end %}
+        # Check each sibling's identity, not just the pool-wide count: other
+        # socket waiters must not stand in for one of these 16 readers.
+        readers.each do |reader|
+          limit = __iyi_monotonic_ns + 10_000_000_000_i64
+          while !closes_target_registered?(reader.fiber)
+            sleep(1)
+            progress_hang("closes: progress hang: a sibling reader did not finish registering its socket wait") if __iyi_monotonic_ns > limit
+          end
+        end
+        outer_start.send(1)
         units.times { go.send(1) }
-        main_crossed = os_thread != lent_reader.thread
         lent.socket.close
+        puts "closes: the registered reader parked on a different thread from the main thread that closed its socket"
       end
       ends.each(&.close)
       listener.close
       fail("closes: #{woken.count} of #{units + 1} reads woke when their socket was closed") unless woken.count == (units + 1).to_i64
-      fail("closes: the main thread closed a socket on the thread its reader parked on") unless main_crossed
       puts "closes: #{units + 1} reads woken by a close, the main thread's and #{units} a sibling task's, #{crossed.count} of those made on another worker"
     end
   end
@@ -518,6 +1101,7 @@ import std/socket::{IyiSocket, SocketError}
   # main thread's close to be measured against.
   def lent_read(lent : Lent, where : Where, waiting : Tally, woken : Tally) : Int32
     where.note(os_thread)
+    where.note_fiber(IyiScheduler.current.object_id)
     waiting.add(1_i64)
     got = lent.socket.read(16)
     woken.add(1_i64) if got.is_a?(Cancelled)
@@ -542,13 +1126,23 @@ import std/socket::{IyiSocket, SocketError}
   # `Share` by its atomic field.
   class Where
     @thread : Atomic(UInt64)
+    @fiber : Atomic(UInt64)
 
     def initialize
       @thread = Atomic(UInt64).new(0_u64)
+      @fiber = Atomic(UInt64).new(0_u64)
     end
 
     def note(thread : UInt64) : Nil
       @thread.set(thread)
+    end
+
+    def note_fiber(fiber : UInt64) : Nil
+      @fiber.set(fiber)
+    end
+
+    def fiber : UInt64
+      @fiber.get
     end
 
     def thread : UInt64
@@ -561,33 +1155,124 @@ import std/socket::{IyiSocket, SocketError}
   # Windows the pages under the committed top are committed by the
   # kernel as the probes reach the guard page, against the stack bounds
   # in the TEB of the thread now running the fiber.
+  #
+  # A forced wake moves to a spare before the deep frames are made. The
+  # larger run follows once, and reports its incidental moves as data.
   def deep_step(watch : Int32) : Nil
     watched("deep", watch) do
       tasks = 16
       rounds = 10
-      feed = Channel(Int32).new
-      moves = Tally.new
-      group do |g|
-        tasks.times do |t|
-          g.spawn(unit: :new) do
-            rounds.times do |r|
-              os = os_thread
-              st = IyiScheduler.state.object_id
-              feed.receive
-              moves.add(1_i64) if moved?("deep", os, st)
-              deep(200)
-              churn(2000)
-            end
-            0
-          end
-        end
-        (tasks * rounds).times { feed.send(1) }
-      end
-      if IyiWorkers.count > 1 && moves.count == 0_i64
-        fail("deep: no task resumed on another worker before its deep frames")
-      end
-      puts "deep: #{tasks * rounds} frames 120 KiB deep, #{moves.count} of them after a move"
+      deep_forced
+      moved = deep_run(tasks, rounds)
+      puts "deep: #{tasks * rounds} frames 120 KiB deep, #{moved} of them after a move"
     end
+  end
+
+  def deep_hang(what : String) : Nil
+    held_exit(76, "FAIL: deep: progress hang: ", what, "\n")
+  end
+
+  def deep_wait(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 10_000_000_000_i64
+    while count.count < target
+      sleep(1)
+      deep_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def deep_hold(release : Tally, entered : Tally, owner : Owner, what : String) : Nil
+    owner.note_worker(IyiScheduler.state.object_id)
+    entered.add(1_i64)
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while release.count == 0_i64
+      IyiThread.spin_pause
+      deep_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # Main wakes the parked task into the pool's shared queue while the
+  # worker it left is held. The deep frames therefore follow a real move.
+  def deep_forced : Nil
+    holders = IyiWorkers.count - 1
+    holder_entered = Tally.new
+    holders_go = Tally.new
+    holder_on = Owner.new
+    target = Armed.new
+    parked_on = Owner.new
+    owner = Owner.new
+    owner_entered = Tally.new
+    owner_go = Tally.new
+    finished = Tally.new
+    feed = Channel(Int32).new(1)
+    group do |g|
+      holders.times do
+        g.spawn(unit: :new) do
+          deep_hold(holders_go, holder_entered, holder_on, "a holder was not released")
+          0
+        end
+      end
+      deep_wait(holder_entered, holders.to_i64, "the holders did not start")
+      g.spawn(unit: :new) do
+        os = os_thread
+        st = IyiScheduler.state.object_id
+        parked_on.note_worker(st)
+        target.note_fiber(IyiScheduler.current.object_id)
+        got = feed.receive
+        fail("deep: the forced receive answered #{got}") unless got == 1
+        setup_failure("deep: not armed: the forced task resumed on the worker its sibling held") unless moved?("deep", os, st)
+        deep(200)
+        churn(2000)
+        finished.add(1_i64)
+        0
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while target.fiber == 0_u64 || !parked_on_channel?(target.fiber)
+        sleep(1)
+        deep_hang("the target did not park on its channel") if __iyi_monotonic_ns > limit
+      end
+      g.spawn(unit: :new) do
+        deep_hold(owner_go, owner_entered, owner, "the target's worker was not released")
+        0
+      end
+      deep_wait(owner_entered, 1_i64, "the target's sibling did not start")
+      setup_failure("deep: not armed: the sibling did not hold the target's worker") unless owner.worker == parked_on.worker
+      holders_go.add(1_i64)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiScheduler.waiting_threads < 1_u64
+        sleep(1)
+        deep_hang("no spare worker waited after the holders were released") if __iyi_monotonic_ns > limit
+      end
+      sent = feed.send(1)
+      setup_failure("deep: the forced send answered #{sent}") unless sent.nil?
+      deep_wait(finished, 1_i64, "the target did not finish while its worker was held")
+      owner_go.add(1_i64)
+    end
+    puts "deep: a channel wake resumed on a spare while its worker was held, then ran deep frames"
+  end
+
+  # One run of the deep step: the wakes that resumed on another worker.
+  def deep_run(tasks : Int32, rounds : Int32) : Int64
+    feed = Channel(Int32).new
+    moves = Tally.new
+    group do |g|
+      tasks.times do |t|
+        g.spawn(unit: :new) do
+          rounds.times do |r|
+            os = os_thread
+            st = IyiScheduler.state.object_id
+            feed.receive
+            moves.add(1_i64) if moved?("deep", os, st)
+            deep(200)
+            churn(2000)
+          end
+          0
+        end
+      end
+      (tasks * rounds).times { feed.send(1) }
+    end
+    moves.count
   end
 
   # ── loops ────────────────────────────────────────────────────────────
@@ -603,15 +1288,11 @@ import std/socket::{IyiSocket, SocketError}
   # once before the loop and failed at its first check under qemu-user,
   # in 2 runs of 2, where the volatile read passes.
   #
-  # 16 tasks on the 4 workers each compute three loops of about 30 ms:
-  # the thread's line (`IyiThread.current_line`, a thread-local) is read
-  # before a loop, in every turn of it beside a xorshift walk, and right
-  # after it, with the kernel's thread read by asm on either side. The
-  # line after the loop and the kernel's thread changed together or not at
-  # all; and of the loops that moved, some turn read the line of a thread
-  # it moved to. Under `-Dparallel_hoisted_tls` the reads in and after the
-  # loop are the one before it, as the hoisted code read them, and the step
-  # fails by name.
+  # 16 tasks compute three calibrated loops each. Cross-worker moves and
+  # pool-wide give-ups in this ordinary run are measurements. The forced
+  # loop below constructs a move and checks a subsequent loop-body read.
+  # Under `-Dparallel_hoisted_tls` the reads in and after the loop are the
+  # one before it, as the hoisted code read them, and the step fails by name.
 
   # The thread's line in or after the loop: read here, or under
   # `-Dparallel_hoisted_tls` the one read before the loop.
@@ -646,12 +1327,14 @@ import std/socket::{IyiSocket, SocketError}
     line_after = line_in_loop(line_before)
     os_after = os_thread
     if (os_after == os_before) != (line_after == line_before)
-      fail("loops: a thread-local read after a loop's back-edge check named another thread than the one the task was on: the kernel's thread went #{os_before} -> #{os_after}, the thread's line #{line_before} -> #{line_after}")
+      puts "loops: the kernel's thread went #{os_before} -> #{os_after}, the thread's line #{line_before} -> #{line_after}"
+      fail("loops: a thread-local read after a loop's back-edge check named another thread than the one the task was on")
     end
     {os_after != os_before, turned, sum}
   end
 
   def loops(watch : Int32) : Nil
+    loops_forced(0_i64)
     watched("loops", watch) do
       t = __iyi_monotonic_ns
       x = spin(20_000_000_i64, 3_u64)
@@ -678,26 +1361,95 @@ import std/socket::{IyiSocket, SocketError}
         end
       end
       given = IyiWorkers.preempts - preempts
-      fail("loops: #{tasks} tasks computed #{tasks * rounds} loops of 30 ms on #{IyiWorkers.count} workers and none was preempted") if given == 0_u64
-      if IyiWorkers.count > 1 && moved.count == 0_i64
-        fail("loops: none of #{tasks * rounds} loops, preempted #{given} times, ended on another worker than it began on")
+      puts "measure: loops: #{tasks * rounds} calibrated loops, #{given} pool-wide preemption give-ups, #{moved.count} ended on another worker, #{turned.count} turns read a different thread line"
+    end
+  end
+
+  # A loop run until *gate* is set. The original worker is held by a sibling.
+  # After observing a move, one further loop-body line read must name a
+  # different thread before *replaced* lets main end the loop.
+  @[NoInline]
+  def line_loop_live(gate : Tally, replaced : Tally, seed : UInt64) : Tuple(Bool, Int64, UInt64)
+    os_before = os_thread
+    line_before = IyiThread.current_line
+    x = seed | 1_u64
+    sum = 0_u64
+    turned = 0_i64
+    moved = false
+    observed = false
+    while gate.count < 1_i64
+      x = x ^ x.unsafe_shl(13_u64)
+      x = x ^ x.unsafe_shr(7_u64)
+      x = x ^ x.unsafe_shl(17_u64)
+      line = line_in_loop(line_before)
+      turned = turned &+ (line != line_before ? 1_i64 : 0_i64)
+      sum = sum &+ (line ^ x)
+      if moved && !observed
+        fail("loops: a thread-local read after a loop's back-edge check named another thread than the one the task was on") if line == line_before
+        observed = true
+        replaced.add(1_i64)
+      elsif !moved && os_thread != os_before
+        moved = true
       end
-      if moved.count > 0_i64 && turned.count == 0_i64
-        fail("loops: #{moved.count} loops ended on another worker and no turn of any of them read the line of a thread it moved to")
+    end
+    line_after = line_in_loop(line_before)
+    os_after = os_thread
+    if (os_after == os_before) != (line_after == line_before)
+      puts "loops: the kernel's thread went #{os_before} -> #{os_after}, the thread's line #{line_before} -> #{line_after}"
+      fail("loops: a thread-local read after a loop's back-edge check named another thread than the one the task was on")
+    end
+    {os_after != os_before, turned, sum}
+  end
+
+  # Every worker but one is held while the loop starts. A sibling then holds
+  # the original worker until the loop moves and completes another body
+  # turn, so that turn's line read cannot be from the original worker.
+  def loops_forced(per_ms : Int64) : Nil
+    holders = IyiWorkers.count - 1
+    held = Tally.new
+    stop_holders = Tally.new
+    started = Tally.new
+    sibling = Tally.new
+    release_sibling = Tally.new
+    replaced = Tally.new
+    finished = Tally.new
+    loop_gate = Tally.new
+    group do |g|
+      holders.times do
+        g.spawn(unit: :new) do
+          held.add(1_i64)
+          hold_until_or_fail(stop_holders, 1_i64, "loops: progress hang: a holder was not released")
+          0
+        end
       end
-      puts "loops: #{tasks * rounds} loops of 30 ms preempted #{given} times, #{moved.count} ended on another worker than they began on, #{turned.count} turns read the line of a thread they moved to"
+      wait_or_fail(held, holders.to_i64, "loops: progress hang: the holders did not start")
+      g.spawn(unit: :new) do
+        started.add(1_i64)
+        line_loop_live(loop_gate, replaced, 17_u64)
+        finished.add(1_i64)
+        0
+      end
+      wait_or_fail(started, 1_i64, "loops: progress hang: the loop did not start")
+      g.spawn(unit: :new) do
+        sibling.add(1_i64)
+        hold_until_or_fail(release_sibling, 1_i64, "loops: progress hang: the sibling was not released")
+        0
+      end
+      wait_or_fail(sibling, 1_i64, "loops: progress hang: the sibling did not start")
+      stop_holders.add(1_i64)
+      wait_or_fail(replaced, 1_i64, "loops: progress hang: the loop did not resume on another worker")
+      loop_gate.add(1_i64)
+      wait_or_fail(finished, 1_i64, "loops: progress hang: the loop did not finish")
+      puts "loops: the forced loop resumed on another worker and its thread-local read named that worker"
+      release_sibling.add(1_i64)
     end
   end
 
   # ── balance ──────────────────────────────────────────────────────────
-  # The parked shape (#145): every task starts, and parks on a channel,
-  # on one worker - the others are held by tasks that spin until all have
-  # parked - and then each computes 25 ms. Woken from the main thread, a
-  # task goes to the pool's shared queue; woken by a task on a worker, to
-  # that worker's ring, and only a steal spreads it. Without moving, every
-  # task resumes where it parked, on the one worker, at the workers' count
-  # times the ideal. Held to twice the ideal, the work being each task's
-  # own measured time.
+  # The parked shape (#145): tasks woken from main use the shared queue;
+  # tasks woken by a worker use its ring. The measured wall/work ratio is
+  # informational. The pinned and nosteal copies check the routing and
+  # steal decisions, not a bound on elapsed time.
   def balance_round(label : String, from_worker : Bool, per_ms : Int64) : Nil
     workers = IyiWorkers.count
     tasks = workers * 6
@@ -711,14 +1463,14 @@ import std/socket::{IyiSocket, SocketError}
       (workers - 1).times do
         g.spawn(unit: :new) do
           holding.add(1_i64)
-          while arrived.count < tasks.to_i64
-            IyiThread.spin_pause
-          end
+          hold_until_or_fail(arrived, tasks.to_i64, "balance: progress hang: a holder was not released")
           0
         end
       end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while holding.count < (workers - 1).to_i64
         sleep(1)
+        progress_hang("balance: progress hang: the holders did not start in 10000 ms") if __iyi_monotonic_ns > limit
       end
       tasks.times do |i|
         g.spawn(unit: :new) do
@@ -731,8 +1483,10 @@ import std/socket::{IyiSocket, SocketError}
           0
         end
       end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
       while arrived.count < tasks.to_i64
         sleep(1)
+        progress_hang("balance: progress hang: the tasks did not start in 10000 ms") if __iyi_monotonic_ns > limit
       end
       sleep(5)
       began = __iyi_monotonic_ns
@@ -750,36 +1504,219 @@ import std/socket::{IyiSocket, SocketError}
     ideal = 1_i64 if ideal < 1_i64
     ratio = (wall * 100_i64 // ideal).to_f / 100.0
     took = IyiWorkers.grabs - grabs
-    if wall > ideal * 2_i64
-      fail("balance: #{tasks} tasks that parked on one worker, woken #{label}, took #{wall} ms against #{ideal} ms of work per worker (#{ratio}x)")
-    end
-    puts "balance: #{tasks} tasks parked on one worker, woken #{label}: #{wall} ms against an ideal #{ideal} ms (#{ratio}x), #{took} steals from a ring"
+    puts "measure: balance: #{tasks} tasks parked on one worker, woken #{label}: #{wall} ms against #{ideal} ms of work per worker (#{ratio}x), #{took} steals (former bound: at most 2x)"
   end
+
+  {% if flag?(:pinned_force) %}
+  # Hold the target's owner until a spare resumes it; record the route that
+  # ready selected before waiting for a resume.
+  def balance_placement : Nil
+    holders = IyiWorkers.count - 1
+    gate = Channel(Int32).new
+    holding = Tally.new
+    holders_go = Tally.new
+    owner_go = Tally.new
+    target = Armed.new
+    parked_on = Owner.new
+    owner = Owner.new
+    resumed_on = Owner.new
+    group do |g|
+      holders.times do
+        g.spawn(unit: :new) do
+          holding.add(1_i64)
+          hold_until_or_fail(holders_go, 1_i64, "balance: progress hang: a holder was not released")
+          0
+        end
+      end
+      wait_or_fail(holding, holders.to_i64, "balance: progress hang: the holders did not start")
+      g.spawn(unit: :new) do
+        parked_on.note_worker(IyiScheduler.state.object_id)
+        target.note_fiber(IyiScheduler.current.object_id)
+        gate.receive
+        resumed_on.note_worker(IyiScheduler.state.object_id)
+        0
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while target.fiber == 0_u64 || !parked_on_channel?(target.fiber)
+        sleep(1)
+        progress_hang("balance: progress hang: the target did not park in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      g.spawn(unit: :new) do
+        owner.note_worker(IyiScheduler.state.object_id)
+        hold_until_or_fail(owner_go, 1_i64, "balance: progress hang: the owner was not released")
+        0
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while owner.worker == 0_u64
+        sleep(1)
+        progress_hang("balance: progress hang: the owner did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      setup_failure("balance: not armed: the owner did not start on the worker the target parked on") unless owner.worker == parked_on.worker
+      holders_go.add(1_i64)
+      IyiScheduler.force_pin_target(target.fiber)
+      gate.send(1)
+      route = IyiScheduler.force_pin_route
+      fail("balance: a task woken from the main thread was sent back to the worker it parked on") if route == parked_on.worker
+      setup_failure("balance: not armed: the wake's route was not recorded") if route == 0_u64
+      fail("balance: a task woken from the main thread was routed neither to the pool's queue nor to the worker it parked on") unless route == 1_u64
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while resumed_on.worker == 0_u64
+        sleep(1)
+        progress_hang("balance: progress hang: no spare resumed the target in 10000 ms while its worker was held") if __iyi_monotonic_ns > limit
+      end
+      elsewhere = resumed_on.worker != parked_on.worker
+      owner_go.add(1_i64)
+      setup_failure("balance: not armed: the target resumed on the worker it parked on while the owner held it") unless elsewhere
+      puts "balance: a task woken from the main thread was queued for the pool and resumed on a spare while the worker it parked on was held"
+    end
+  end
+  {% end %}
+
+  {% if flag?(:nosteal_force) %}
+  # A hang is not the planted verdict. Keep its exit status distinct.
+  def balance_steal_hang(what : String) : Nil
+    held_exit(76, "FAIL: balance: progress hang: ", what, "\n")
+  end
+
+  def balance_steal_wait(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 10_000_000_000_i64
+    while count.count < target
+      sleep(1)
+      balance_steal_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  @[NoInline]
+  @[NoPreempt]
+  def balance_steal_hold(started : Tally, go : Tally, what : String) : Nil
+    started.add(1_i64)
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while go.count < 1_i64
+      IyiThread.spin_pause
+      balance_steal_hang(what) if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # All other workers are held until the sends finish. The target id is
+  # armed before the sends, but no thief can make a decision until main
+  # releases the one temporary holder after the ring is populated.
+  @[NoInline]
+  @[NoPreempt]
+  def balance_steal_wake(gate : Channel(Int32), tasks : Int32, owner : Owner, ready : Tally, go : Tally) : Nil
+    st = IyiScheduler.state
+    owner.note_worker(st.object_id)
+    IyiWorkers.force_grab_arm(st.object_id)
+    i = 0
+    while i < tasks
+      sent = gate.send(1)
+      held_exit(76, "FAIL: ", "balance: not armed: a target wake was not delivered", "\n") unless sent.is_a?(Nil)
+      i += 1
+    end
+    held_exit(76, "FAIL: ", "balance: not armed: the waker moved while sending", "\n") unless IyiScheduler.state.object_id == st.object_id
+    held_exit(76, "FAIL: ", "balance: not armed: the woken targets were not all in the waker's ring", "\n") unless st.ring_size == tasks.to_u64
+    ready.add(1_i64)
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while go.count < 1_i64
+      IyiThread.spin_pause
+      balance_steal_hang("the waker's worker was not released") if __iyi_monotonic_ns > limit
+    end
+  end
+
+  def balance_steal_forced : Nil
+    setup_failure("balance: not armed: the forced steal needs four workers") unless IyiWorkers.count == 4
+    tasks = 4
+    gate = Channel(Int32).new
+    holders = Tally.new
+    holders_go = Tally.new
+    spare_held = Tally.new
+    spare_go = Tally.new
+    owner_ready = Tally.new
+    owner_go = Tally.new
+    owner = Owner.new
+    resumed_on = Owner.new
+    resumed = Tally.new
+    targets = [] of Armed
+    group do |g|
+      2.times do
+        g.spawn(unit: :new) do
+          balance_steal_hold(holders, holders_go, "a permanent holder was not released")
+          0
+        end
+      end
+      balance_steal_wait(holders, 2_i64, "the permanent holders did not start")
+      g.spawn(unit: :new) do
+        balance_steal_hold(spare_held, spare_go, "the spare holder was not released")
+        0
+      end
+      balance_steal_wait(spare_held, 1_i64, "the spare holder did not start")
+      tasks.times do
+        target = Armed.new
+        targets << target
+        g.spawn(unit: :new) do
+          target.note_fiber(IyiScheduler.current.object_id)
+          value = gate.receive
+          setup_failure("balance: not armed: a target did not receive its wake") unless value.is_a?(Int32) && value == 1
+          resumed_on.note_worker(IyiScheduler.state.object_id)
+          resumed.add(1_i64)
+          0
+        end
+      end
+      targets.each do |target|
+        limit = __iyi_monotonic_ns + 10_000_000_000_i64
+        while target.fiber == 0_u64 || !parked_on_channel?(target.fiber)
+          sleep(1)
+          balance_steal_hang("a target did not park on the gate") if __iyi_monotonic_ns > limit
+        end
+      end
+      g.spawn(unit: :new) do
+        balance_steal_wake(gate, tasks, owner, owner_ready, owner_go)
+        0
+      end
+      balance_steal_wait(owner_ready, 1_i64, "the waker did not fill and hold its ring")
+      spare_go.add(1_i64)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      decision = IyiWorkers.force_grab_result
+      while decision == 0_u64
+        sleep(1)
+        balance_steal_hang("the spare made no grab decision for the held worker") if __iyi_monotonic_ns > limit
+        decision = IyiWorkers.force_grab_result
+      end
+      fail("balance: a worker looking for work took none of the tasks woken into a held worker's ring") if decision == 2_u64
+      setup_failure("balance: not armed: the target grab recorded an unknown decision") unless decision == 1_u64
+      balance_steal_wait(resumed, 1_i64, "no target resumed while the waker was held")
+      setup_failure("balance: not armed: a target resumed on its held waker's worker") if resumed_on.worker == owner.worker
+      owner_go.add(1_i64)
+      holders_go.add(1_i64)
+      puts "balance: a worker looking for work took tasks woken into a held worker's ring"
+    end
+  end
+  {% end %}
 
   def balance(watch : Int32) : Nil
     watched("balance", watch) do
-      # The walk's end is kept, or an optimised build drops the walk and the
-      # clock reads no time at all: a release build calibrated so spent
-      # 1,470 ms on each task's 25, and 17.5 s on the step.
-      t = __iyi_monotonic_ns
-      x = spin(50_000_000_i64, 3_u64)
-      ms = elapsed_ms(t)
-      ms = ms + 1_i64 if x == 0_u64
-      per_ms = 50_000_000_i64 // (ms > 0_i64 ? ms : 1_i64)
-      balance_round("from the main thread", false, per_ms)
-      balance_round("from a worker", true, per_ms)
+      {% if flag?(:pinned_force) %}
+        balance_placement
+      {% elsif flag?(:nosteal_force) %}
+        balance_steal_forced
+      {% else %}
+        # Calibrate only the timed benchmark, not the forced proof.
+        t = __iyi_monotonic_ns
+        x = spin(50_000_000_i64, 3_u64)
+        ms = elapsed_ms(t)
+        ms = ms + 1_i64 if x == 0_u64
+        per_ms = 50_000_000_i64 // (ms > 0_i64 ? ms : 1_i64)
+        balance_round("from the main thread", false, per_ms)
+        balance_round("from a worker", true, per_ms)
+      {% end %}
     end
   end
 
   # ── handoff ──────────────────────────────────────────────────────────
-  # A task woken by a task of another unit goes into its waker's ring,
-  # and the waker computes on: here a `@[NoPreempt]` loop, as the
-  # runtime's own code is, which no back-edge check gives up. The worker
-  # comes back for the woken task only when the loop ends, so an idle
-  # worker must be called to take it then and there. Each of ten wakes is
-  # timed from the send to the woken task's first statement after its
-  # receive, beside a 50 ms hold: half must start within 1 ms, and none
-  # may wait the hold out.
+  # A waker sends to a parked task and then holds a worker for 50 ms.
+  # The worker ids and the wait times below are samples, not verdicts:
+  # a waker can move between its send and its id read, and a spare can be
+  # delayed by the OS. The nocall and nohandoff copies check the exact
+  # hand-off decisions, not an elapsed-time guarantee.
   @[NoInline]
   @[NoPreempt]
   def hold_np(ns : Int64) : Nil
@@ -789,26 +1726,198 @@ import std/socket::{IyiSocket, SocketError}
     end
   end
 
-  def handoff(watch : Int32) : Nil
+  # A bounded hold: the owner keeps its worker until *count* reaches *target*,
+  # which another task sets. Its limit ends a hang as a named failure of the
+  # rendezvous, never as a verdict on the copy.
+  @[NoInline]
+  @[NoPreempt]
+  def hold_until_or_fail(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 20_000_000_000_i64
+    while count.count < target
+      IyiThread.spin_pause
+      held_exit(76, "FAIL: ", what, ": the hold did not release in 20000 ms\n") if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # The main thread's wait for *count* to reach *target*, with the same limit.
+  def wait_or_fail(count : Tally, target : Int64, what : String) : Nil
+    limit = __iyi_monotonic_ns + 10_000_000_000_i64
+    while count.count < target
+      sleep(1)
+      progress_hang("#{what}: no progress in 10000 ms") if __iyi_monotonic_ns > limit
+    end
+  end
+
+  # The fiber a forced round's sleeper parked as, set by the sleeper.
+  class Armed
+    @fiber : Atomic(UInt64)
+
+    def initialize
+      @fiber = Atomic(UInt64).new(0_u64)
+    end
+
+    def fiber : UInt64
+      @fiber.get
+    end
+
+    def note_fiber(id : UInt64) : Nil
+      @fiber.set(id)
+    end
+  end
+
+  # Whether the fiber with object id *id* is parked on a channel now, read from
+  # the scheduler's list of every fiber: a state, not a clock.
+  @[NoInline]
+  @[NoPreempt]
+  def parked_on_channel?(id : UInt64) : Bool
+    found = false
+    IyiRuntimeLock.lock
+    fiber = IyiScheduler.first_fiber
+    while fiber.is_a?(IyiFiber)
+      if fiber.object_id == id
+        found = fiber.state == IyiFiberState::WaitingCh
+        break
+      end
+      fiber = fiber.next_fiber
+    end
+    IyiRuntimeLock.unlock
+    found
+  end
+
+  # The forced round (`-Dnocall_force`), run first in a fresh process, so no
+  # back-off is set. The sleeper parks on a channel and records its fiber; main
+  # waits for that park, then lets the waker send from its own worker, which
+  # holds that worker until main has read the copy's records for the sleeper.
+  # The verdict is those records: the hand-off branch took the sleeper, and the
+  # wake_one made on the branch's worker woke it. A missing wake_one is the
+  # mutant's verdict. The claim is exact: the immediate call was made or omitted
+  # at the hand-off's site; it does not say that an idle worker was rung.
+  {% if flag?(:nocall_force) || flag?(:nohandoff_force) %}
+  def handoff_forced : Nil
+    armed = Armed.new
+    gate = Channel(Int64).new(1)
+    go = Tally.new
+    sent = Tally.new
+    release = Tally.new
+    group do |g|
+      g.spawn(unit: :new) do
+        armed.note_fiber(IyiScheduler.current.object_id)
+        gate.receive
+        0
+      end
+      g.spawn(unit: :new) do
+        hold_until_or_fail(go, 1_i64, "nocall: progress hang: the waker was not released")
+        gate.send(__iyi_monotonic_ns)
+        sent.add(1_i64)
+        hold_until_or_fail(release, 1_i64, "nocall: progress hang: the waker's worker was not released")
+        0
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while armed.fiber == 0_u64
+        sleep(1)
+        progress_hang("nocall: progress hang: the sleeper did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !parked_on_channel?(armed.fiber)
+        sleep(1)
+        progress_hang("nocall: progress hang: the sleeper did not park in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      {% if flag?(:nohandoff_force) %}
+        IyiWorkers.force_handoff_key(armed.fiber)
+      {% end %}
+      go.add(1_i64)
+      wait_or_fail(sent, 1_i64, "nocall: progress hang: the send did not return")
+      {% if flag?(:nohandoff_force) %}
+        decision = IyiWorkers.force_handoff_decision
+        release.add(1_i64)
+        setup_failure("handoff: not eligible: back-off was active at the target decision") if decision == 3_u64
+        fail("handoff: an eligible hand-off for a parked task took no hand-off branch") if decision == 5_u64
+        setup_failure("handoff: not armed: the target was not an eligible hand-off without back-off") unless decision == 2_u64
+        puts "handoff: the eligible hand-off for a parked task took its branch with no back-off"
+      {% else %}
+        fiber = armed.fiber
+        setup_failure("nocall: not armed: the hand-off branch did not take the parked task") unless IyiWorkers.force_branch_id == fiber
+        woke = IyiWorkers.force_wake_id == fiber
+        release.add(1_i64)
+        fail("nocall: a hand-off for a parked task omitted its immediate wake_one call") unless woke
+        puts "nocall: the hand-off for a parked task made its immediate wake_one call"
+      {% end %}
+    end
+  end
+  {% end %}
+
+  # What a hand-off's two tasks saw: the woken fiber, the worker it ran
+  # on, its waker's worker and whether that worker called for it.
+  class Handed
+    @fiber : Atomic(UInt64)
+    @woken_on : Atomic(UInt64)
+    @held_on : Atomic(UInt64)
+    @called : Atomic(UInt64)
+
+    def initialize
+      @fiber = Atomic(UInt64).new(0_u64)
+      @woken_on = Atomic(UInt64).new(0_u64)
+      @held_on = Atomic(UInt64).new(0_u64)
+      @called = Atomic(UInt64).new(0_u64)
+    end
+
+    def note_fiber(id : UInt64) : Nil
+      @fiber.set(id)
+    end
+
+    def fiber : UInt64
+      @fiber.get
+    end
+
+    def note_woken_on(worker : UInt64) : Nil
+      @woken_on.set(worker)
+    end
+
+    def note_held_on(worker : UInt64, called : UInt64) : Nil
+      @held_on.set(worker)
+      @called.set(called == @fiber.get ? 1_u64 : 0_u64)
+    end
+
+    def called? : Bool
+      @called.get == 1_u64
+    end
+
+    def stayed? : Bool
+      @woken_on.get == @held_on.get
+    end
+  end
+
+  def handoff(watch : Int32, loaded : String) : Nil
+    {% if flag?(:nocall_force) || flag?(:nohandoff_force) %}
+      handoff_forced
+      return
+    {% end %}
     watched("handoff", watch) do
       rounds = 10
       waits = [] of Int64
+      uncalled = 0
+      stayed = 0
       rounds.times do
         gate = Channel(Int64).new(1)
-        arrived = Tally.new
+        handed = Handed.new
         sleeper = nil.as(IyiTask(Int64)?)
         group do |g|
           sleeper = g.spawn(unit: :new) do
-            arrived.add(1_i64)
+            handed.note_fiber(IyiScheduler.current.object_id)
             sent = gate.receive
-            sent.is_a?(Int64) ? __iyi_monotonic_ns - sent : -1_i64
+            took = sent.is_a?(Int64) ? __iyi_monotonic_ns - sent : -1_i64
+            handed.note_woken_on(IyiScheduler.state.object_id)
+            took
           end
           g.spawn(unit: :new) do
-            while arrived.count < 1_i64
+            limit = __iyi_monotonic_ns + 10_000_000_000_i64
+            while handed.fiber == 0_u64 || !parked_on_channel?(handed.fiber)
               sleep(1)
+              progress_hang("handoff: progress hang: the sleeper did not park in 10000 ms") if __iyi_monotonic_ns > limit
             end
-            sleep(5)
             gate.send(__iyi_monotonic_ns)
+            st = IyiScheduler.state
+            handed.note_held_on(st.object_id, st.handoff_last)
             hold_np(50_000_000_i64)
             0
           end
@@ -816,26 +1925,27 @@ import std/socket::{IyiSocket, SocketError}
         task = sleeper
         got = task.is_a?(IyiTask(Int64)) ? task.value : -1_i64
         waits << (got.is_a?(Int64) ? got : -1_i64)
+        uncalled += 1 unless handed.called?
+        stayed += 1 if handed.stayed?
       end
-      fail("handoff: a woken task answered no wait: #{waits}") if waits.any? { |w| w < 0_i64 }
+      setup_failure("handoff: a woken task answered no wait: #{waits}") if waits.any? { |w| w < 0_i64 }
       sorted = waits.sorted
       median = sorted[rounds // 2]
       longest = sorted[rounds - 1]
-      if median > 1_000_000_i64 || longest >= 40_000_000_i64
-        fail("handoff: tasks woken onto a worker held 50 ms with preemption off started after #{sorted.map { |w| w // 1000_i64 }} us, while other workers were idle")
-      end
-      puts "handoff: #{rounds} tasks woken onto a worker held 50 ms with preemption off started in #{median // 1000_i64} us at the median, #{longest // 1000_i64} us at most"
+      load_note = loaded.empty? ? "" : "; reported load: #{loaded}"
+      puts "measure: handoff: #{rounds} wakes, median #{median // 1000_i64} us, longest #{longest // 1000_i64} us; #{uncalled} waker samples did not name the sleeper and #{stayed} worker-id samples matched#{load_note} (former bounds: median at most 1 ms when unloaded, longest below 40 ms)"
     end
   end
 
   # ── backstop ─────────────────────────────────────────────────────────
-  # The same wake right after its waker ping-ponged with another task
-  # 20,000 times: the worker took back the fiber it called for each time,
-  # so its back-off calls nobody for the hand-off (`push_runnable`), and
-  # the waker then holds the worker 100 ms with preemption off. The
-  # monitor, seeing the worker held a tick with a fiber in its ring,
-  # calls an idle worker: each of five wakes must start within 50 ms.
+  # After a ping-pong, the waker holds its worker 100 ms with preemption
+  # off. The ordinary round measures wake latency. The keyed copy checks
+  # the monitor's wake call, not a deadline for an OS-scheduled worker.
   def backstop(watch : Int32) : Nil
+    {% if flag?(:nobackstop_force) %}
+      backstop_forced
+      return
+    {% end %}
     watched("backstop", watch) do
       rounds = 5
       waits = [] of Int64
@@ -859,8 +1969,10 @@ import std/socket::{IyiSocket, SocketError}
             0
           end
           g.spawn(unit: :new) do
+            limit = __iyi_monotonic_ns + 10_000_000_000_i64
             while arrived.count < 1_i64
               sleep(1)
+              progress_hang("backstop: progress hang: the ping-pong task did not start in 10000 ms") if __iyi_monotonic_ns > limit
             end
             sleep(5)
             20_000.times do |i|
@@ -876,51 +1988,151 @@ import std/socket::{IyiSocket, SocketError}
         got = task.is_a?(IyiTask(Int64)) ? task.value : -1_i64
         waits << (got.is_a?(Int64) ? got : -1_i64)
       end
-      fail("backstop: a woken task answered no wait: #{waits}") if waits.any? { |w| w < 0_i64 }
+      setup_failure("backstop: a woken task answered no wait: #{waits}") if waits.any? { |w| w < 0_i64 }
       sorted = waits.sorted
       held = waits.count { |w| w > 1_000_000_i64 }
-      if sorted[rounds - 1] >= 50_000_000_i64
-        fail("backstop: tasks woken after a ping-pong onto a worker held 100 ms with preemption off started after #{sorted.map { |w| w // 1000_i64 }} us")
-      end
-      puts "backstop: #{rounds} tasks woken after a ping-pong onto a worker held 100 ms started in #{sorted[rounds // 2] // 1000_i64} us at the median, #{sorted[rounds - 1] // 1000_i64} us at most, #{held} after more than 1 ms"
+      puts "measure: backstop: #{rounds} wakes after a ping-pong, median #{sorted[rounds // 2] // 1000_i64} us, longest #{sorted[rounds - 1] // 1000_i64} us, #{held} after more than 1 ms (former bound: below 50 ms)"
     end
   end
 
-  # ── heldio ───────────────────────────────────────────────────────────
-  # A task parks on a socket's read, and the worker it parked on starts a
-  # sibling task - another unit - that holds it 100 ms with its loop
-  # marked `@[NoPreempt]`, so nothing of that worker looks at its poller
-  # until the hold ends. The read's answer is sent while it holds, with
-  # the other workers idle. On Linux and darwin the reader waits in that
-  # worker's own epoll or kqueue, and another worker must take its news
-  # from there and read it within `HELD_BOUND_MS`; on Windows the
-  # process's one port is any worker's to take from
-  # (bench/completions_taken.iyi). The sibling is spawned onto the
-  # worker's own queue, where an idle worker may steal it first: a round
-  # where it ran elsewhere proves nothing and is run again, and
-  # `HELD_ROUNDS` that do prove are needed.
-  HELD_NS       = 100_000_000_i64
-  HELD_BOUND_MS =              20_i64
-  HELD_ROUNDS   =               5
-  HELD_ATTEMPTS =              40
+  # The owner's worker, as the waker noted it (its state id).
+  class Owner
+    @worker : Atomic(UInt64)
 
-  # What a round's two tasks say, `Share` by their atomic fields: the
-  # worker the reader parked on and the one it read on, whether the hold
-  # ran on the reader's worker (1) or elsewhere (2), and when the answer
-  # was read and the hold ended.
+    def initialize
+      @worker = Atomic(UInt64).new(0_u64)
+    end
+
+    def worker : UInt64
+      @worker.get
+    end
+
+    def note_worker(id : UInt64) : Nil
+      @worker.set(id)
+    end
+  end
+
+  {% if flag?(:nobackstop_force) %}
+  # Warm the lazily grown pool, hold all but the owner and a spare, and arm
+  # the hand-off backoff in the copy. The target must take the skip branch;
+  # the monitor must find its ring with an idle worker before it decides.
+  def backstop_forced : Nil
+    gate = Channel(Int64).new(1)
+    go = Tally.new
+    sent = Tally.new
+    release = Tally.new
+    parked = Tally.new
+    owner = Owner.new
+    sleeper = Armed.new
+    warm_started = Tally.new
+    warm_release = Tally.new
+    group do |warm|
+      IyiWorkers.count.times do
+        warm.spawn(unit: :new) do
+          warm_started.add(1_i64)
+          hold_until_or_fail(warm_release, 1_i64, "backstop: progress hang: a warm-up worker")
+          0
+        end
+      end
+      wait_or_fail(warm_started, IyiWorkers.count.to_i64, "backstop: progress hang: the pool did not warm")
+      warm_release.add(1_i64)
+    end
+    holders = IyiWorkers.count - 2
+    group do |g|
+      holders.times do
+        g.spawn(unit: :new) do
+          parked.add(1_i64)
+          hold_until_or_fail(release, 1_i64, "backstop: progress hang: a holder")
+          0
+        end
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while parked.count < holders.to_i64
+        sleep(1)
+        progress_hang("backstop: progress hang: the holders did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      g.spawn(unit: :new) do
+        sleeper.note_fiber(IyiScheduler.current.object_id)
+        gate.receive
+        0
+      end
+      g.spawn(unit: :new) do
+        owner.note_worker(IyiScheduler.state.object_id)
+        hold_until_or_fail(go, 1_i64, "backstop: progress hang: the waker was not released")
+        {% if flag?(:nobackstop_force) %}
+          IyiWorkers.force_reset
+          IyiWorkers.force_target(owner.worker, sleeper.fiber)
+        {% end %}
+        gate.send(__iyi_monotonic_ns)
+        sent.add(1_i64)
+        hold_until_or_fail(release, 1_i64, "backstop: progress hang: the waker's worker")
+        0
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while sleeper.fiber == 0_u64
+        sleep(1)
+        progress_hang("backstop: progress hang: the sleeper did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !parked_on_channel?(sleeper.fiber)
+        sleep(1)
+        progress_hang("backstop: progress hang: the sleeper did not park in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while owner.worker == 0_u64
+        sleep(1)
+        progress_hang("backstop: progress hang: the waker did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiScheduler.waiting_threads < 1_u64
+        sleep(1)
+        progress_hang("backstop: progress hang: no spare worker entered its idle wait in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      looks = IyiWorkers.looks
+      go.add(1_i64)
+      limit = __iyi_monotonic_ns + 60_000_000_000_i64
+      while sent.count < 1_i64
+        sleep(1)
+        progress_hang("backstop: progress hang: the send did not return in 60000 ms") if __iyi_monotonic_ns > limit
+      end
+      setup_failure("backstop: not armed: the target hand-off did not skip its wake") unless IyiWorkers.force_skipped?
+      worker = owner.worker
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiWorkers.force_done_id != worker
+        sleep(1)
+        if __iyi_monotonic_ns > limit
+          progress_hang("backstop: progress hang: no decision for held ring in 10000 ms; owner=#{owner.worker} released=#{release.count} spare_waiting=#{IyiScheduler.waiting_threads} looks=#{IyiWorkers.looks - looks} #{IyiWorkers.force_figures}")
+        end
+      end
+      setup_failure("backstop: not armed: the monitor found no idle spare at the target ring") unless IyiWorkers.force_idle?
+      puts "backstop: figures: #{IyiWorkers.force_figures}"
+      called = IyiWorkers.force_woke_done == 1_u64
+      release.add(1_i64)
+      fail("backstop: the monitor's stuck decision for a held ring omitted its wake_one call") unless called
+      puts "backstop: the monitor's stuck decision for a held ring called wake_one"
+    end
+  end
+  {% end %}
+
+  # ── heldio ───────────────────────────────────────────────────────────
+  # A reader parks on a socket, then a sibling holds its worker with
+  # preemption off until the answer is read on another worker. Linux and
+  # darwin use the reader's own poller; Windows uses a shared port, covered
+  # by bench/completions_taken.iyi. Each round is run once.
+  HELD_ROUNDS = 5
+
+  # The reader and sibling publish their workers and read time atomically.
   class Held
     @reader : Atomic(UInt64)
     @read_on : Atomic(UInt64)
     @holding : Atomic(Int64)
     @read_at : Atomic(Int64)
-    @held_until : Atomic(Int64)
 
     def initialize
       @reader = Atomic(UInt64).new(0_u64)
       @read_on = Atomic(UInt64).new(0_u64)
       @holding = Atomic(Int64).new(0_i64)
       @read_at = Atomic(Int64).new(0_i64)
-      @held_until = Atomic(Int64).new(0_i64)
     end
 
     def reader : UInt64
@@ -955,33 +2167,46 @@ import std/socket::{IyiSocket, SocketError}
       @read_at.set(ns)
     end
 
-    def held_until : Int64
-      @held_until.get
-    end
-
-    def note_held_until(ns : Int64) : Nil
-      @held_until.set(ns)
-    end
   end
 
-  # One round: the nanoseconds from the send to the read when the hold
-  # ran on the reader's worker, and -1 when it ran elsewhere.
+  # One round: the nanoseconds from the send to the read while the reader's
+  # worker is held. A sibling that starts elsewhere fails by name.
   def held_round(listener : IyiSocket, port : Int32, number : Int32) : Int64
     near, far = pair(listener, port)
     far_fd = far.fd
     family = far.family
     marks = Held.new
     sent_at = 0_i64
+    parked = Tally.new
+    release = Tally.new
+    owner_go = Tally.new
     group do |g|
+      # The other workers are held, with preemption off, until the sibling
+      # sits on the reader's worker: nothing can steal it there, so no round is
+      # run again. The holders are let go before the write, so the answer is
+      # woken by the runtime, not by a holder.
+      holders = IyiWorkers.count - 1
+      holders.times do
+        g.spawn(unit: :new) do
+          parked.add(1_i64)
+          hold_until_or_fail(release, 1_i64, "heldio: progress hang: a holder was not released")
+          0
+        end
+      end
+      waited = 0
+      while parked.count < holders.to_i64
+        sleep(1)
+        waited = waited + 1
+        progress_hang("heldio: round #{number}'s holders did not start in 10000 ms") if waited > 10000
+      end
       g.spawn(unit: :new) do
         group do |inner|
           # Onto this worker's own queue, which it takes from next once the
-          # read below parks; a steal may take it first.
+          # read below parks; no other worker is free to take it.
           inner.spawn(unit: :new) do
             if IyiScheduler.state.object_id == marks.reader
               marks.note_holding(1_i64)
-              hold_np(HELD_NS)
-              marks.note_held_until(__iyi_monotonic_ns)
+              hold_until_or_fail(owner_go, 1_i64, "heldio: progress hang: the reader's worker was not released")
             else
               marks.note_holding(2_i64)
             end
@@ -999,26 +2224,146 @@ import std/socket::{IyiSocket, SocketError}
       while marks.holding == 0_i64
         sleep(1)
         waited = waited + 1
-        fail("heldio: round #{number}'s sibling did not start in 10000 ms") if waited > 10000
+        progress_hang("heldio: round #{number}'s sibling did not start in 10000 ms") if waited > 10000
       end
+      setup_failure("heldio: round #{number}'s sibling did not hold its reader's worker") unless marks.holding == 1_i64
+      release.add(1_i64)
       sent_at = __iyi_monotonic_ns
       wrote = near.write("x")
-      fail("heldio: round #{number}'s write answered #{wrote}") unless wrote.is_a?(Int32)
+      setup_failure("heldio: round #{number}'s write answered #{wrote}") unless wrote.is_a?(Int32)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while marks.read_on == 0_u64
+        sleep(1)
+        progress_hang("heldio: round #{number}'s answer was not read in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      fail("heldio: round #{number}'s answer was read on the worker that held") if marks.read_on == marks.reader
+      owner_go.add(1_i64)
     end
     near.close
     far.close
-    return -1_i64 unless marks.holding == 1_i64
-    took = marks.read_at - sent_at
-    if took > HELD_BOUND_MS * 1_000_000_i64
-      fail("heldio: an answer sent while the worker its reader parked on was held #{HELD_NS // 1_000_000_i64} ms with preemption off was read #{took // 1_000_000_i64} ms later, with the other workers idle (round #{number}; the hold went on #{(marks.held_until - marks.read_at) // 1_000_000_i64} ms past the read)")
-    end
-    if marks.read_on == marks.reader
-      fail("heldio: round #{number}'s answer was read on the worker that held, #{took // 1000_i64} us after it was sent")
-    end
-    took
+    marks.read_at - sent_at
   end
 
+  # Whether the fiber with object id *id* is in *state* now, read from the scheduler's list of every fiber.
+  @[NoInline]
+  @[NoPreempt]
+  def fiber_in_state?(id : UInt64, state : IyiFiberState) : Bool
+    found = false
+    IyiRuntimeLock.lock
+    fiber = IyiScheduler.first_fiber
+    while fiber.is_a?(IyiFiber)
+      if fiber.object_id == id
+        found = fiber.state == state
+        break
+      end
+      fiber = fiber.next_fiber
+    end
+    IyiRuntimeLock.unlock
+    found
+  end
+
+  {% if flag?(:noheldio_force) %}
+  # The forced round (`-Dnoheldio_force`), first in its step. Holders keep every worker but the
+  # one left, so the reader parks on that worker and its sibling, queued behind it, holds that
+  # worker on a release word. Main confirms the read is registered (the reader is WaitingIo), the
+  # sibling holds the reader's worker, and an idle spare waits (the holders are let go). Then the
+  # answer is sent. The verdict is the monitor's decision for that poller after the send: news
+  # found, and the wake that rings an idle worker made or omitted. A read on another worker must
+  # come before the owner is released. Waits are on states and sequence words, with named hang limits.
+  def heldio_forced : Nil
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    port = listener.local_port
+    near, far = pair(listener, port)
+    far_fd = far.fd
+    family = far.family
+    marks = Held.new
+    reader = Armed.new
+    owner = Owner.new
+    holders = IyiWorkers.count - 1
+    parked = Tally.new
+    holders_go = Tally.new
+    owner_go = Tally.new
+    group do |g|
+      holders.times do
+        g.spawn(unit: :new) do
+          parked.add(1_i64)
+          hold_until_or_fail(holders_go, 1_i64, "heldio: progress hang: a holder was not released")
+          0
+        end
+      end
+      wait_or_fail(parked, holders.to_i64, "heldio: progress hang: the holders did not start")
+      g.spawn(unit: :new) do
+        reader.note_fiber(IyiScheduler.current.object_id)
+        group do |inner|
+          inner.spawn(unit: :new) do
+            owner.note_worker(IyiScheduler.state.object_id)
+            hold_until_or_fail(owner_go, 1_i64, "heldio: progress hang: the sibling was not released")
+            0
+          end
+          marks.note_reader(IyiScheduler.state.object_id)
+          got = IyiSocket.new(far_fd, family).read(1)
+          setup_failure("heldio: setup: the forced read failed with a socket error") if got.is_a?(SocketError)
+          marks.note_read_at(__iyi_monotonic_ns)
+          marks.note_read_on(IyiScheduler.state.object_id)
+          fail("heldio: the forced read answered #{got.inspect}") unless got == "x"
+        end
+        0
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while reader.fiber == 0_u64
+        sleep(1)
+        progress_hang("heldio: progress hang: the reader did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while !fiber_in_state?(reader.fiber, IyiFiberState::WaitingIo)
+        sleep(1)
+        progress_hang("heldio: progress hang: the read did not register in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while owner.worker == 0_u64
+        sleep(1)
+        progress_hang("heldio: progress hang: the sibling did not start in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      setup_failure("heldio: not armed: the sibling did not start on its reader's worker") unless owner.worker == marks.reader
+      IyiWorkers.force_io_target(owner.worker)
+      holders_go.add(1_i64)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiScheduler.waiting_threads < 1_u64
+        sleep(1)
+        progress_hang("heldio: progress hang: no idle spare waited in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      sequence = IyiWorkers.force_seq
+      wrote = near.write("x")
+      setup_failure("heldio: the send answered #{wrote}") unless wrote.is_a?(Int32)
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while IyiWorkers.force_seq == sequence
+        sleep(1)
+        progress_hang("heldio: progress hang: the monitor made no decision after the send in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      worker = owner.worker
+      woke = IyiWorkers.force_done_id == worker && IyiWorkers.force_woke_done == 1_u64
+      fail("heldio: the monitor's held-io decision for a reader's poller omitted the wake that rings an idle worker") unless woke
+      limit = __iyi_monotonic_ns + 10_000_000_000_i64
+      while marks.read_on == 0_u64
+        sleep(1)
+        progress_hang("heldio: progress hang: the answer was not read in 10000 ms") if __iyi_monotonic_ns > limit
+      end
+      read_elsewhere = marks.read_on != worker
+      owner_go.add(1_i64)
+      setup_failure("heldio: not armed: the answer was read on the worker that holds the reader") unless read_elsewhere
+      puts "heldio: the answer sent to a reader parked on a held worker was read on another worker before the hold ended"
+    end
+    near.close
+    far.close
+    listener.close
+  end
+  {% end %}
+
   def heldio(watch : Int32) : Nil
+    {% if flag?(:noheldio_force) %}
+      heldio_forced
+      return
+    {% end %}
     watched("heldio", watch) do
       {% if flag?(:win32) %}
         puts "heldio: Windows' one port is any worker's to take from (bench/completions_taken.iyi holds it)"
@@ -1026,26 +2371,19 @@ import std/socket::{IyiSocket, SocketError}
         listener = IyiSocket.listen("127.0.0.1", 0)
         port = listener.local_port
         took = [] of Int64
-        attempts = 0
-        while took.size < HELD_ROUNDS && attempts < HELD_ATTEMPTS
-          attempts = attempts + 1
-          ns = held_round(listener, port, attempts)
-          took << ns if ns >= 0_i64
+        HELD_ROUNDS.times do |round|
+          took << held_round(listener, port, round + 1)
         end
         listener.close
-        if took.size < HELD_ROUNDS
-          fail("heldio: in #{attempts} rounds the hold ran on its reader's worker #{took.size} times, not #{HELD_ROUNDS}")
-        end
         sorted = took.sorted
-        puts "heldio: #{HELD_ROUNDS} answers sent while their reader's worker was held #{HELD_NS // 1_000_000_i64} ms were read on another worker in #{sorted.map { |w| w // 1000_i64 }} us (#{attempts} rounds)"
+        puts "heldio: #{HELD_ROUNDS} answers sent while their reader's worker was held were read on another worker in #{sorted.map { |w| w // 1000_i64 }} us (#{HELD_ROUNDS} rounds)"
       {% end %}
     end
   end
 
   # ── join ─────────────────────────────────────────────────────────────
-  # A task joining a thread parks: the task it spawned, asleep on the same
-  # worker, wakes on time while the thread runs 400 ms. A join held in the
-  # kernel held the worker, its sleepers and its unit with it.
+  # Measure when a child wakes while its sibling joins a 400 ms thread.
+  # The keyed copy checks the join path, not the child's wake deadline.
   def join(watch : Int32) : Nil
     watched("join", watch) do
       answer = 0_i64
@@ -1060,32 +2398,53 @@ import std/socket::{IyiSocket, SocketError}
               0
             end
             thread = IyiThread.start do
+              {% if flag?(:kerneljoin_force) %}
+                wait_started = __iyi_monotonic_ns
+                while IyiThread.force_join_decision == 0_u64
+                  IyiThread.spin_pause
+                  progress_hang("join: progress hang: join did not record its decision") if elapsed_ms(wait_started) >= 10000_i64
+                end
+              {% end %}
               began = __iyi_monotonic_ns
               while __iyi_monotonic_ns - began < 400_000_000_i64
                 IyiThread.spin_pause
               end
             end
+            {% if flag?(:kerneljoin_force) %}
+              IyiThread.force_join_key(thread)
+            {% end %}
             thread.join
           end
           child_at
         end
         got = task.value
-        answer = got.is_a?(Int64) ? got : -2_i64
+        setup_failure("join: the joining task answered no Int64 result") unless got.is_a?(Int64)
+        answer = got
       end
-      fail("join: a task's child asleep 20 ms woke #{answer} ms in, behind the 400 ms thread its parent joined") if answer < 0_i64 || answer >= 300_i64
-      puts "join: a task joining a 400 ms thread left its worker to its child, which woke #{answer} ms in"
+      setup_failure("join: the child recorded no wake") if answer < 0_i64
+      {% if flag?(:kerneljoin_force) %}
+        decision = IyiThread.force_join_decision
+        puts "join: the child's wake was #{answer} ms"
+        fail("join: the join of a running thread entered the kernel's join without parking") if decision == 2_u64
+        setup_failure("join: not armed: the target join did not record its park path") unless decision == 1_u64
+        puts "join: the join of a running thread took its park path"
+      {% end %}
+      puts "measure: join: child wake #{answer} ms after starting a task that joined a 400 ms thread (former bound: below 300 ms)"
     end
   end
 
   STEPS = ["channels", "sockets", "cancel", "closes", "deep", "loops", "balance", "handoff", "backstop", "heldio", "join"]
 
   watch = 60000
+  loaded = ""
   chosen = [] of String
   Program.args.each do |argument|
     if argument.starts_with?("--watch=")
       watch = argument[8, argument.size - 8].to_i
+    elsif argument.starts_with?("--loaded=")
+      loaded = argument[9, argument.size - 9]
     else
-      fail("no step named #{argument}") unless STEPS.includes?(argument)
+      setup_failure("no step named #{argument}") unless STEPS.includes?(argument)
       chosen << argument
     end
   end
@@ -1100,7 +2459,7 @@ import std/socket::{IyiSocket, SocketError}
     when "deep"     then deep_step(watch)
     when "loops"    then loops(watch)
     when "balance"  then balance(watch)
-    when "handoff"  then handoff(watch)
+    when "handoff"  then handoff(watch, loaded)
     when "backstop" then backstop(watch)
     when "heldio"   then heldio(watch)
     when "join"     then join(watch)

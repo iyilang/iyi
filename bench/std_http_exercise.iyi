@@ -814,20 +814,24 @@ group do |g|
     slow.close
     assert_true slow_answer.starts_with?("HTTP/1.1 204 "), "a head in 256 pieces is answered: #{slow_answer.inspect}"
     assert_true slow_bytes < 8388608_u64, "a 256 KB head in 1 KB pieces costs the server #{slow_bytes} bytes, under 8 MB"
-    # A body is held at what has arrived of it, not at the length its head
-    # declares: a builder of that length was made at the second read, and a
-    # head that declared 64 MB and two bytes after it cost the server 64 MB.
+    # read_all takes at most 64 KiB per piece. Send one byte more so the
+    # declared-length allocation mutant reaches its second piece even
+    # when TCP combines the writes. EOF and the server's close establish
+    # completion before measuring; a fixed sleep establishes neither.
     big = IyiSocket.connect("127.0.0.1", sport).or_panic
-    big.write("POST /size HTTP/1.1\r\nHost: x\r\nContent-Length: 67108864\r\n\r\nx").or_panic
-    sleep(20)
+    big.read_timeout_ms = 5000
+    big_body = "x" * 65537
     GC.disable
     big_before = GC.stats.bytes_since_collection
-    big.write("y").or_panic
-    sleep(20)
+    big.write("POST /size HTTP/1.1\r\nHost: x\r\nContent-Length: 67108864\r\n\r\n").or_panic
+    big.write(big_body).or_panic
+    assert_true big.close_write.nil?, "the short request body ends its sending half"
+    big_end = big.read(1).or_panic
     big_bytes = GC.stats.bytes_since_collection - big_before
     GC.enable
     big.close
-    assert_true big_bytes < 1048576_u64, "a head that declares 64 MB and sends two bytes costs the server #{big_bytes} bytes, under 1 MB"
+    assert_true big_end.empty?, "the server closes after consuming the short request body"
+    assert_true big_bytes < 1048576_u64, "a head that declares 64 MiB and sends 65537 bytes costs the server #{big_bytes} bytes, under 1 MiB"
     # A client that asks to be told before it sends its body is told:
     # without the `100 Continue`, curl waits a second before every upload
     # past a megabyte.
@@ -880,7 +884,7 @@ end
 assert_true seen_paths.size == 1217, "the block ran 1217 times, not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, a block that panicked, 201 lean requests, a thousand written at once, a 256 KB head in pieces, a 64 MB body declared and not sent, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, a block that panicked, 201 lean requests, a thousand written at once, a 256 KB head in pieces, a 64 MiB body with a 65537-byte prefix, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
 
 puts "\n== the block's own close"
 # An answer whose `Connection` says `close` closes the connection after
@@ -977,6 +981,134 @@ group do |g|
   end
 end
 puts "  empty lines before a request are skipped"
+
+puts "\n== the caller's limits on a request"
+# `serve`'s and `handle`'s *max_head* and *max_body* (issue #213): a server
+# whose limits are smaller than std/http's own is held to them while the
+# request is read, and one whose body limit is larger takes a body past
+# 64 MiB. Both were `MAX_HEAD` and `MAX_BODY` whatever the caller wanted:
+# a server with a 16 KiB limit of its own on heads (iyi-web's) held up to
+# 1 MiB of each connection's head before it could answer 431, and no
+# server took a body past 64 MiB, read whole or streamed.
+limited = Server.parse_request("GET / HTTP/1.1\r\nHost: a\r\nX-Pad: " + "p" * 100 + "\r\n\r\n", max_head: 64)
+assert_true limited.status == 431 && limited.error == "request headers past 64 bytes", "parse_request holds a whole head to its max_head: #{limited.status} #{limited.error.inspect}"
+limited = Server.parse_request("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 11\r\n\r\nhello world", max_body: 10)
+assert_true limited.status == 413 && limited.error == "body past 10 bytes", "and a body to its max_body: #{limited.status} #{limited.error.inspect}"
+nowhere = IyiSocket.listen(0)
+assert_str "refused: HTTP: a head limit of 0 bytes", answer { Server.serve(nowhere, max_head: 0, workers: 1) { |_| Response.new(200) }; "served" }, "a head limit no request fits in is refused at the call"
+assert_str "refused: HTTP: a body limit of -1 bytes", answer { Server.serve(nowhere, max_body: -1, workers: 1) { |_| Response.new(200) }; "served" }, "and a body limit under none"
+nowhere.close
+
+# What a raw connection was answered, "<status> <body>", or why nothing
+# came: a server that waits for more of a request it should have refused
+# has the read time out, and the check names it.
+def told(c : IyiSocket) : String
+  answer do
+    r = HTTP.parse_response(read_response(c))
+    "#{r.status} #{r.body}"
+  end
+end
+
+tight = IyiSocket.listen(0)
+tight_port = tight.local_port
+group do |g|
+  g.spawn do
+    Server.serve(tight, max_head: 16384, max_body: 65536, workers: 1) do |req|
+      tight.close if req.path == "/stop"
+      Response.new(200, req.body.bytesize.to_s)
+    end
+    0
+  end
+  g.spawn do
+    # A head that does not end is answered 431 once 16 KiB of it has come,
+    # whatever more is sent: 256 KB of it costs the server what that limit
+    # lets it hold, where it read on to 1 MiB first.
+    pad = "X-Pad: " + "p" * 1017 + "\r\n"
+    drip = IyiSocket.connect("127.0.0.1", tight_port).or_panic
+    drip.read_timeout_ms = 5000
+    GC.disable
+    drip_before = GC.stats.bytes_since_collection
+    drip.write("GET /size HTTP/1.1\r\nHost: x\r\n").or_panic
+    # The server stops reading at its answer, and what it reads past
+    # while it closes may fail a write: either way the writes end.
+    256.times { drip.write(pad) }
+    drip_said = told(drip)
+    drip_bytes = GC.stats.bytes_since_collection - drip_before
+    GC.enable
+    drip.close
+    assert_str "431 request headers past 16384 bytes\n", drip_said, "a head with no end past a server's 16 KiB max_head is a 431"
+    assert_true drip_bytes < 196608_u64, "and 256 KB of it sent costs that server #{drip_bytes} bytes, under 192 KiB"
+    # A head past the limit whose end came in the read that passed it is
+    # a 431 too: refused only while its end had not come, it was served.
+    whole = IyiSocket.connect("127.0.0.1", tight_port).or_panic
+    whole.read_timeout_ms = 5000
+    whole.write("GET /size HTTP/1.1\r\nHost: x\r\nX-Pad: " + "p" * 20000 + "\r\n\r\n").or_panic
+    whole_said = told(whole)
+    whole.close
+    assert_str "431 request headers past 16384 bytes\n", whole_said, "a 20 KB head that comes whole to a server whose max_head is 16 KiB is a 431"
+    under = IyiSocket.connect("127.0.0.1", tight_port).or_panic
+    under.read_timeout_ms = 5000
+    under.write("POST /size HTTP/1.1\r\nHost: x\r\nX-Pad: " + "p" * 15000 + "\r\nContent-Length: 65536\r\n\r\n" + "b" * 65536).or_panic
+    under_said = told(under)
+    under.close
+    assert_str "200 65536", under_said, "a 15 KB head and a 64 KiB body, inside that server's limits, are served"
+    # A body whose length is past the limit is refused before any of it
+    # has been sent.
+    declared = IyiSocket.connect("127.0.0.1", tight_port).or_panic
+    declared.read_timeout_ms = 5000
+    declared.write("POST /size HTTP/1.1\r\nHost: x\r\nContent-Length: 65537\r\n\r\n").or_panic
+    declared_said = told(declared)
+    declared.close
+    assert_str "413 body past 65536 bytes\n", declared_said, "a Content-Length past a server's 64 KiB max_body is a 413 before the body"
+    # A chunked body is refused at the chunk that would pass the limit: a
+    # megabyte of chunks sent costs the server that limit's worth.
+    chunks = ("1000\r\n" + "c" * 4096 + "\r\n") * 256
+    flood = IyiSocket.connect("127.0.0.1", tight_port).or_panic
+    flood.read_timeout_ms = 5000
+    GC.disable
+    flood_before = GC.stats.bytes_since_collection
+    flood.write("POST /size HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n").or_panic
+    flood.write(chunks)
+    flood_said = told(flood)
+    flood_bytes = GC.stats.bytes_since_collection - flood_before
+    GC.enable
+    flood.close
+    assert_str "413 chunked body past 65536 bytes\n", flood_said, "a chunked body past a server's 64 KiB max_body is a 413"
+    assert_true flood_bytes < 262144_u64, "and a megabyte of its chunks sent costs that server #{flood_bytes} bytes, under 256 KiB"
+    HTTP.get("http://127.0.0.1:#{tight_port}/stop").or_panic
+    0
+  end
+end
+# A server of the program's own that hands each connection to
+# `Server.handle`, as iyi-web does, with a body limit past std/http's: a
+# body of 64 MiB and a byte is taken, read whole and streamed - the
+# streaming block's `body` reads it under that limit too.
+loose = IyiSocket.listen(0)
+loose_port = loose.local_port
+upload = "u" * 67108865
+group do |g|
+  g.spawn do
+    sizes = ->(req : Request) { Response.new(200, req.body.bytesize.to_s) }
+    Server.handle(loose.accept.or_panic, sizes, max_body: 83886080)
+    Server.handle(loose.accept.or_panic, sizes, stream_bodies: true, max_body: 83886080)
+    loose.close
+    0
+  end
+  g.spawn do
+    ["read whole", "streamed"].each do |how|
+      up = IyiSocket.connect("127.0.0.1", loose_port).or_panic
+      up.read_timeout_ms = 20000
+      up.write("POST /size HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 67108865\r\n\r\n").or_panic
+      # A server that refuses it closes before the rest is read.
+      up.write(upload)
+      up_said = told(up)
+      up.close
+      assert_str "200 67108865", up_said, "a body of 64 MiB and a byte, #{how}, taken by `handle` under a max_body of 80 MiB"
+    end
+    0
+  end
+end
+puts "  a head and a body held to the caller's smaller limits while they are read, and a body past 64 MiB taken under a larger one"
 
 puts "\n== bodies as streams"
 # A body is read as it arrives and written as it is made, both ways: the

@@ -10,7 +10,7 @@
 # 4. closed peer detection (read returns empty string on EOF)
 # 5. refused connection when target port has no listener
 
-@[Unsafe("sets SO_LINGER through setsockopt in a lib, makes pipes through Windows calls, and keeps flags in raw Pointer.malloc words")]
+@[Unsafe("sets SO_LINGER through setsockopt in a lib, makes pipes through Windows calls, and uses raw Pointer.malloc buffers")]
 import std/socket::{IyiSocket, SocketError, IPv6Address}
 import std/env::{ENV}
 import std/gc::{GC}
@@ -234,8 +234,26 @@ gone_server = IyiSocket.listen(0)
 gone_client = IyiSocket.connect("127.0.0.1", gone_server.local_port).or_panic
 gone_conn = gone_server.accept.or_panic
 gone_client.close
+{% if flag?(:linux) %}
+  # Read to the peer's end before writing. The read returns the end only
+  # after the kernel has processed the peer's FIN, so the socket is in
+  # CLOSE_WAIT before the first write, where the peer's reset sets EPIPE
+  # rather than ECONNRESET. The first write that meets the reset raises
+  # SIGPIPE in a build that drops MSG_NOSIGNAL, and answers EPIPE in the
+  # sound build. Without the read, a write can come before the FIN is
+  # processed, and the reset then answers ECONNRESET, which raises no signal.
+  puts "watchdog stage: waiting for the closed peer's EOF"
+  case gone_end = gone_conn.read(256)
+  in String
+    raise "disconnect: the peer sent #{gone_end.bytesize} bytes after it closed" unless gone_end.empty?
+  in Cancelled, SocketError
+    raise "disconnect: the peer's end did not arrive: #{gone_end.message}"
+  end
+  puts "watchdog stage: closed peer EOF received"
+{% end %}
 chunk = "x" * 65536
 tries = 0
+puts "disconnect: writing to a peer that has closed"
 wrote = gone_conn.write(chunk)
 while wrote.is_a?(Int32)
   tries = tries + 1
@@ -243,6 +261,10 @@ while wrote.is_a?(Int32)
   wrote = gone_conn.write(chunk)
 end
 raise "disconnect: expected a SocketError, got #{wrote.inspect}" unless wrote.is_a?(SocketError)
+{% if flag?(:linux) %}
+  puts "disconnect: errno #{wrote.code}"
+  raise "disconnect: expected errno 32, got #{wrote.code}" unless wrote.code == 32
+{% end %}
 raise "disconnect: #{wrote.message} is not a disconnect" unless wrote.disconnected?
 gone_conn.close
 gone_server.close
@@ -268,16 +290,16 @@ puts "disconnect: ok (#{wrote.message})"
   linger[1] = 0
   raise "reset_before_accept: SO_LINGER refused" if LibReset.setsockopt(reset_client.fd, 0xffff, 0x80, linger.as(Void*), 8_u32) != 0
   reset_client.close
-  sleep(50)
+  # The barrier, in place of a sleep. The reset went out before this connect
+  # was made, so the kernel has the reset connection queued, and reset,
+  # ahead of this one. Accept takes the first of the two: the reset one.
+  puts "watchdog stage: connecting and accepting the reset-peer barrier"
+  reset_barrier = IyiSocket.connect("127.0.0.1", reset_server.local_port).or_panic
   reset_conn = reset_server.accept.or_panic
-  reset_tries = 0
+  puts "watchdog stage: reset-peer barrier accepted"
+  reset_barrier.close
+  puts "reset_before_accept: writing to the reset peer"
   reset_wrote = reset_conn.write("after the reset")
-  while reset_wrote.is_a?(Int32)
-    reset_tries = reset_tries + 1
-    raise "reset_before_accept: #{reset_tries} writes to a reset peer all went through" if reset_tries > 100
-    sleep(10)
-    reset_wrote = reset_conn.write("after the reset")
-  end
   raise "reset_before_accept: expected a SocketError, got #{reset_wrote.inspect}" unless reset_wrote.is_a?(SocketError)
   reset_conn.close
   reset_server.close
@@ -351,9 +373,12 @@ listener = IyiSocket.listen(0)
 quiet_port = listener.local_port
 parked_answer = ""
 held = [] of IyiSocket
+reader_connected = false
 group do |g|
   g.spawn do
-    case peer = IyiSocket.connect("127.0.0.1", quiet_port)
+    dialed = IyiSocket.connect("127.0.0.1", quiet_port)
+    reader_connected = true
+    case peer = dialed
     in Cancelled
       parked_answer = "connect cancelled"
     in SocketError
@@ -378,8 +403,25 @@ group do |g|
     0
   end
   g.spawn do
-    sleep(20)
-    Boom.new
+    # Boom waits for the reader's connect to return, so the cancellation
+    # reaches the read. A fixed sleep can fire before that connect returns,
+    # and the reader then reports "connect cancelled" in place of "cancelled".
+    # The wait is on the reader's word, not on a clock; the 1 ms poll only
+    # looks at that word.
+    puts "watchdog stage: waiting for parked reader connection"
+    cancelled = false
+    while !reader_connected
+      if sleep(1).is_a?(Cancelled)
+        cancelled = true
+        break
+      end
+    end
+    if cancelled
+      0
+    else
+      puts "watchdog stage: parked reader connected"
+      Boom.new
+    end
   end
 end
 held.each { |h| h.close }
@@ -907,22 +949,47 @@ puts "stream: ok"
 # completes. Such a wait cannot be bounded by its own deadline, whose
 # cancel completes into the same port, so each step is watched by a
 # thread of its own that ends the program with the step's name.
+# What a watched step and the threads beside it tell each other: atomics,
+# since each is written by one thread or task while another reads it.
 class PortGate
-  @@done = Pointer(Atomic(UInt64)).malloc(1_u64)
-  @@arrived = Pointer(Atomic(UInt64)).malloc(1_u64)
-  # The other thread publishes these socket values before it closes them.
-  @@closed = Pointer(Int64).malloc(2_u64)
+  @@done = Atomic(UInt64).new(0_u64)
+  @@arrived = Atomic(UInt64).new(0_u64)
+  # The other thread publishes these socket values before it closes them:
+  # stored before it sets `arrived`, read after that is seen.
+  @@closed_first = Atomic(Int64).new(-1_i64)
+  @@closed_second = Atomic(Int64).new(-1_i64)
 
-  def self.closed : Pointer(Int64)
-    @@closed
+  def self.done : UInt64
+    @@done.get
   end
 
-  def self.done : Pointer(Atomic(UInt64))
-    @@done
+  def self.done=(value : UInt64) : Nil
+    @@done.set(value)
   end
 
-  def self.arrived : Pointer(Atomic(UInt64))
-    @@arrived
+  def self.arrived : UInt64
+    @@arrived.get
+  end
+
+  def self.arrived=(value : UInt64) : Nil
+    @@arrived.set(value)
+  end
+
+  def self.closed_first : Int64
+    @@closed_first.get
+  end
+
+  def self.closed_second : Int64
+    @@closed_second.get
+  end
+
+  def self.arrive : Nil
+    @@arrived.add(1_u64)
+  end
+
+  def self.closed(first : Int64, second : Int64) : Nil
+    @@closed_first.set(first)
+    @@closed_second.set(second)
   end
 end
 
@@ -939,20 +1006,20 @@ def port_joins : UInt64
 end
 
 def port_watch(name : String, ms : Int32, &block : -> Nil) : Nil
-  PortGate.done.value.set(0_u64)
+  PortGate.done = 0_u64
   watcher = IyiThread.start do
     waited = 0
-    while PortGate.done.value.get == 0_u64 && waited < ms
+    while PortGate.done == 0_u64 && waited < ms
       sleep(10)
       waited = waited + 10
     end
-    if PortGate.done.value.get == 0_u64
+    if PortGate.done == 0_u64
       puts "#{name}: a wait had not completed after #{ms} ms"
       __iyi_exit(1)
     end
   end
   block.call
-  PortGate.done.value.set(1_u64)
+  PortGate.done = 1_u64
   watcher.join
 end
 
@@ -987,8 +1054,12 @@ raise "port_stays: 200 round trips on sockets std made asked to join them to the
 puts "port_stays: ok"
 
 # A std socket's completion-port record must be cleared by its real close,
-# whether or not Windows happens to reuse its handle value. A pipe opened
-# outside std has no joined record and must join the port on its first read.
+# whether or not Windows happens to reuse its handle value. Windows gives a
+# closed handle's value out again on the processor that closed it: on tssh
+# (12 processors), values closed on the second processor were in none of 64
+# handles made next on the first, so a search for a reused value cannot be
+# relied on. A pipe opened outside std has no joined record and must join the
+# port on its first read.
 {% if flag?(:win32) %}
   lib LibC
     fun CreateFileA(name : UInt8*, access : Int32, share : Int32, security : Void*,
@@ -1047,21 +1118,21 @@ puts "port_stays: ok"
     r_got = 0_i64
     r_byte = 0_u8
     r_sent = 0_i64
-    PortGate.arrived.value.set(0_u64)
+    PortGate.arrived = 0_u64
     r_joins_before = port_joins
     # The writer cannot run after this signal until the empty-pipe read
     # parks: both fibers stay in this unit.
     group do |g|
       g.spawn(unit: :same) do
         r_buffer = Pointer(UInt8).malloc(1_u64)
-        PortGate.arrived.value.set(1_u64)
+        PortGate.arrived = 1_u64
         r_read = iyi_read(r_pipe[0], r_buffer.as(Void*), 1_u64)
         r_got = r_read.is_a?(Int64) ? r_read : -1_i64
         r_byte = r_buffer.value if r_got == 1_i64
         0
       end
       g.spawn(unit: :same) do
-        while PortGate.arrived.value.get == 0_u64
+        while PortGate.arrived == 0_u64
           sleep(5)
         end
         r_sent = __iyi_write(r_pipe[1], "p".to_unsafe.as(Void*), 1_u64)
@@ -1091,7 +1162,7 @@ t_first_after = 0_u64
 t_second_after = 0_u64
 t_heard = ""
 port_watch("port_reuse", 10000) do
-  PortGate.arrived.value.set(0_u64)
+  PortGate.arrived = 0_u64
   t_listen_fd = t_server.fd
   t_thread = IyiThread.start do
     t_first = IyiSocket.connect("127.0.0.1", t_port).or_panic
@@ -1107,37 +1178,36 @@ port_watch("port_reuse", 10000) do
         0
       end
     end
-    PortGate.closed[0] = t_first.fd.to_i64
-    PortGate.closed[1] = t_second.fd.to_i64
-    PortGate.arrived.value.set(1_u64)
-    while PortGate.arrived.value.get == 1_u64
+    PortGate.closed(t_first.fd.to_i64, t_second.fd.to_i64)
+    PortGate.arrived = 1_u64
+    while PortGate.arrived == 1_u64
       sleep(5)
     end
     t_first.close
     t_second.close
-    PortGate.arrived.value.set(3_u64)
-    while PortGate.arrived.value.get == 3_u64
+    PortGate.arrived = 3_u64
+    while PortGate.arrived == 3_u64
       sleep(5)
     end
-    if PortGate.arrived.value.get == 4_u64
+    if PortGate.arrived == 4_u64
       t_fresh = IyiSocket.new(t_listen_fd).accept.or_panic
       t_byte = t_fresh.read(1).or_panic
       t_fresh.write(t_byte).or_panic
       t_fresh.close
     end
   end
-  while PortGate.arrived.value.get == 0_u64
+  while PortGate.arrived == 0_u64
     sleep(5)
   end
   {% if flag?(:win32) %}
-    t_first_word = IyiScheduler.port_word(Pointer(Void).new(PortGate.closed[0].to_u64), false)
-    t_second_word = IyiScheduler.port_word(Pointer(Void).new(PortGate.closed[1].to_u64), false)
+    t_first_word = IyiScheduler.port_word(Pointer(Void).new(PortGate.closed_first.to_u64), false)
+    t_second_word = IyiScheduler.port_word(Pointer(Void).new(PortGate.closed_second.to_u64), false)
     t_first_before = t_first_word.address == 0_u64 ? 0_u64 : t_first_word.value.get
     t_second_before = t_second_word.address == 0_u64 ? 0_u64 : t_second_word.value.get
     t_joined = t_first_before == IyiScheduler::PORT_JOINED && t_second_before == IyiScheduler::PORT_JOINED
   {% end %}
-  PortGate.arrived.value.set(2_u64)
-  while PortGate.arrived.value.get == 2_u64
+  PortGate.arrived = 2_u64
+  while PortGate.arrived == 2_u64
     sleep(5)
   end
   {% if flag?(:win32) %}
@@ -1147,12 +1217,12 @@ port_watch("port_reuse", 10000) do
   {% end %}
   if t_joined && t_invalidated
     t_fresh = IyiSocket.connect("127.0.0.1", t_port).or_panic
-    PortGate.arrived.value.set(4_u64)
+    PortGate.arrived = 4_u64
     t_fresh.write("u").or_panic
     t_heard = t_fresh.read(1).or_panic
     t_fresh.close
   else
-    PortGate.arrived.value.set(5_u64)
+    PortGate.arrived = 5_u64
   end
   t_thread.join
 end
@@ -1208,14 +1278,14 @@ m_conn_fd = m_conn.fd
 m_readers = [] of UInt64
 port_watch("port_migrate", 30000) do
   20.times do |m_round|
-    PortGate.arrived.value.set(0_u64)
+    PortGate.arrived = 0_u64
     group do |g|
       m_tasks = [] of IyiTask(UInt64)
       2.times do |m_index|
         m_tasks << g.spawn(unit: :new) do
-          PortGate.arrived.value.add(1_u64)
+          PortGate.arrive
           m_spun = __iyi_monotonic_ns
-          while PortGate.arrived.value.get < 2_u64
+          while PortGate.arrived < 2_u64
             raise "port_migrate: a parallel task spun 10000 ms and no second one started" if __iyi_monotonic_ns - m_spun > 10_000_000_000_i64
             IyiThread.spin_pause
           end

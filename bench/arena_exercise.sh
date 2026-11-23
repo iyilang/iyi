@@ -390,6 +390,7 @@ for source in "$REPO"/samples/iyi/*.iyi; do
     cd "$WORK/samples" || exit 1
     if ! "$IYI" build -o "$WORK/$sample-default" "$sample.iyi" >"$WORK/$sample.default.log" 2>&1; then
       echo "  $sample: default build failed"
+      tail -8 "$WORK/$sample.default.log"
       exit 1
     fi
     if ! "$IYI" build -Dgc_iyi -o "$WORK/$sample-gc" "$sample.iyi" >"$WORK/$sample.gc.log" 2>&1; then
@@ -402,7 +403,14 @@ for source in "$REPO"/samples/iyi/*.iyi; do
     "$WORK/$sample-gc" </dev/null >"$WORK/$sample.gc.out" 2>&1
     gc_exit=$?
     if [ "$default_exit" -ne "$gc_exit" ]; then
+      # Each build's own output, so the run that failed says why: "exit 1"
+      # alone named neither the build nor the panic (cores on Windows, CI
+      # job 136817848846).
       echo "  $sample: exit $default_exit default, $gc_exit under -Dgc_iyi"
+      echo "    default build's output (last 20 lines):"
+      tail -20 "$WORK/$sample.default.out" | sed 's/^/      /'
+      echo "    -Dgc_iyi build's output (last 20 lines):"
+      tail -20 "$WORK/$sample.gc.out" | sed 's/^/      /'
       exit 1
     fi
     if ! diff -q "$WORK/$sample.default.out" "$WORK/$sample.gc.out" >/dev/null; then

@@ -155,9 +155,9 @@ module Iyi
     end
 
     def codegen(node, single_module = false, debug = Debug::Default,
-                frame_pointers = FramePointers::Auto)
+                frame_pointers = FramePointers::Auto, discard_value_names = false)
       visitor = CodeGenVisitor.new self, node, single_module: single_module,
-        debug: debug, frame_pointers: frame_pointers
+        debug: debug, frame_pointers: frame_pointers, discard_value_names: discard_value_names
       Prof.span("  codegen: visitor.accept") { visitor.accept node }
       Prof.span("  codegen: finished hooks") { visitor.process_finished_hooks }
       Prof.span("  codegen: visitor.finish") { visitor.finish }
@@ -294,7 +294,17 @@ module Iyi
                    @single_module : Bool = false,
                    @debug = Debug::Default,
                    @frame_pointers : FramePointers = :auto,
-                   @llvm_context : LLVM::Context = LLVM::Context.new)
+                   @llvm_context : LLVM::Context = LLVM::Context.new,
+                   @discard_value_names : Bool = false)
+      @llvm_context.discard_value_names = true if @discard_value_names
+      # iyi: the debugging switches the hot paths ask about, read once a
+      # build rather than at every `unreachable` and every function: each
+      # read is a `getenv` and an entry in the build's record (`ENV`, in
+      # build_inputs.cr), about 12,000 of them a build of a 7,000-line
+      # program.
+      @debug_codegen = !ENV["IYI_DEBUG_CODEGEN"]?.nil?
+      @trace_def_fun = ENV["IYI_TDF"]?
+      @trace_sym = ENV["IYI_SYM"]?
       @abi = ABI.from(@program.target_machine)
       # LLVM::Context.register(@llvm_context, "main")
       @llvm_mod = configure_module(@llvm_context.new_module("main_module"))
@@ -1077,9 +1087,13 @@ module Iyi
       if host && linkage_name != fun_literal_name && @llvm_mod != host.mod
         node.raise "cannot reference a private carried closure from another LLVM module"
       end
-      the_fun = codegen_fun linkage_name, node.def, context.type,
-        fun_module_info: host || @main_module_info, is_fun_literal: true,
-        is_closure: is_closure, iyi_internal: !host.nil?
+      if is_closure && (c1 = iyi_c1_proc(node, linkage_name, host))
+        the_fun, ctx_ptr = c1
+      else
+        the_fun = codegen_fun linkage_name, node.def, context.type,
+          fun_module_info: host || @main_module_info, is_fun_literal: true,
+          is_closure: is_closure, iyi_internal: !host.nil?
+      end
       if linkage_name != fun_literal_name && the_fun.func.name != linkage_name
         node.raise "carried closure LLVM symbol collision: #{linkage_name}"
       end
@@ -1092,7 +1106,9 @@ module Iyi
 
       set_current_debug_location(node) if @debug.line_numbers?
       fun_ptr = cast_to_void_pointer(the_fun.func)
-      if is_closure
+      if ctx_ptr
+        ctx_ptr = cast_to_void_pointer(ctx_ptr)
+      elsif is_closure
         ctx_ptr = cast_to_void_pointer(context.closure_ptr.not_nil!)
       else
         ctx_ptr = llvm_context.void_pointer.null
@@ -1526,7 +1542,10 @@ module Iyi
 
     def codegen_assign(target : Path, value, node)
       const = target.target_const.not_nil!
-      if const.used? && !const.simple? && !const.compile_time_value
+      # iyi: a constant only a definition-site probe read is left to its
+      # first read, if any (`Program#iyi_mark_reached_constants`).
+      reached = const.iyi_reached? || !@program.iyi_reached_marked?
+      if const.used? && reached && !const.simple? && !const.compile_time_value
         initialize_const(const)
       end
       @last = llvm_nil
@@ -1594,7 +1613,12 @@ module Iyi
         llvm_value = check_proc_is_not_closure(llvm_value, target.type)
       end
 
-      assign ptr, target_type, value.type, llvm_value
+      if target.is_a?(InstanceVar) && iyi_array_instance?(context.type)
+        iyi_array_stores(ptr, element: false) { assign ptr, target_type, value.type, llvm_value }
+      else
+        assign ptr, target_type, value.type, llvm_value
+      end
+      iyi_publish_class_var_store(ptr, target_type, node) if target.is_a?(ClassVar)
 
       false
     end
@@ -1943,6 +1967,7 @@ module Iyi
       ivar = type.lookup_instance_var(name)
       ivar_ptr = instance_var_ptr type, name, value
       @last = downcast ivar_ptr, node_type, ivar.type, false, extern: type.extern?
+      iyi_array_load @last, ivar_ptr, element: false if iyi_array_instance?(type)
       if type.extern?
         # When reading the instance variable of a C struct or union
         # we need to convert C functions to Crystal procs. This
@@ -2671,7 +2696,19 @@ module Iyi
         closure_ptr = closure_has_inner_pointers ? malloc(closure_type) : malloc_atomic(closure_type)
 
         closure_vars.each_with_index do |var, i|
-          current_context.vars[var.name] = LLVMVar.new(gep(closure_type, closure_ptr, 0, i, var.name), var.type)
+          slot = gep(closure_type, closure_ptr, 0, i, var.name)
+          if var.iyi_boxed?
+            # heap22 C1: a struct a crossing block captures lives in a cell
+            # of its own, which the block's context points at too
+            # (`MetaVar#iyi_boxed?`).
+            cell_type = llvm_type(var.type)
+            cell = var.type.has_inner_pointers? ? malloc(cell_type) : malloc_atomic(cell_type)
+            iyi_with_write_barrier(slot, @program.pointer_of(var.type)) do
+              store cell, slot
+            end
+            slot = cell
+          end
+          current_context.vars[var.name] = LLVMVar.new(slot, var.type)
         end
         closure_skip_parent = false
 
@@ -2771,7 +2808,7 @@ module Iyi
     # ```
     #
     def debug_codegen_log(file = __FILE__, line = __LINE__, &)
-      return unless ENV["IYI_DEBUG_CODEGEN"]?
+      return unless @debug_codegen
       printf_args = yield || ""
       printf_args = {printf_args, [] of LLVM::Value} if printf_args.is_a?(String)
       printf_args = {printf_args[0], [] of LLVM::Value} if printf_args.is_a?({String})
@@ -2798,8 +2835,9 @@ module Iyi
       else
         pointerful = type.is_a?(InstanceVarContainer) && !type.struct? &&
                      type.all_instance_vars.each_value.any? &.type.has_inner_pointers?
-        if @program.iyi_gc_arena? && (new_fun = iyi_new_fun)
-          # iyi: under the arena a class instance is `__iyi_new`'s: the
+        if @program.iyi_gc_arena? && (new_fun = iyi_born_shared?(type) ? iyi_new_shared_fun : iyi_new_fun)
+          # iyi: under the arena a class instance is `__iyi_new`'s - or,
+          # for a type heap22 has born shared, `__iyi_new_shared`'s: the
           # size, the type id, and whether the object carries the id in a
           # word ahead of it or in its arena's table - the class's
           # `:headed` byte, `gc_layouts.cr` - and whether it is atomic. The
@@ -3083,12 +3121,17 @@ module Iyi
     # iyi: the prelude's files that hold the runtime - the scheduler and the
     # pool (`concurrency.iyi`), kernel threads and the collector's stop
     # (`thread.iyi`), and the allocator, the collector, panics and the
-    # entry point (`prelude.iyi`). Their code never checks for preemption:
-    # a loop of theirs giving the worker up would park a fiber inside the
-    # runtime, with a worker's structures half changed or a reference to
-    # one worker's state held across a move to another. The prelude's
-    # other files are a library, and check as a program's own code does.
-    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi", "chaos.iyi"}
+    # entry point (`prelude.iyi`), and a unit's own heap - publication,
+    # local collection, a partition's death (`heap_partition.iyi`) and its
+    # verifier (`heap_verify.iyi`). Their code never checks for preemption
+    # and their `Atomic` verbs are no chaos points: a loop of theirs giving
+    # the worker up would park a fiber inside the runtime, with a worker's
+    # structures half changed or a reference to one worker's state held
+    # across a move to another, and a switch inside a publication walk or a
+    # local collection would run another fiber of the unit in the middle of
+    # it. The prelude's other files are a library, and check as a program's
+    # own code does.
+    IYI_RUNTIME_FILES = {"prelude.iyi", "concurrency.iyi", "thread.iyi", "chaos.iyi", "heap_partition.iyi", "heap_verify.iyi"}
 
     @iyi_runtime_files = {} of String => Bool
 
@@ -3365,11 +3408,82 @@ module Iyi
     # first-class aggregate and stored, which LLVM lowers an element at a
     # time through stack slots when it does not optimise. *fresh* says
     # *pointer* is a slot made for this value, which nothing can point into.
+    #
+    # Then the slot's holes are written as zero (`LLVMTyper#iyi_holes`), so
+    # a slot holds the value's bytes and zeros, never what was there before
+    # or what the source's padding held. A value with more than
+    # `IYI_HOLES_MAX` holes (only one passed indirectly can have them, a
+    # `StaticArray` of padded structs) is copied over a zeroed slot
+    # instead, through a temporary when the two may overlap.
     def store_value(value, type, pointer, *, fresh = false)
       if passed_indirectly?(type)
-        copy_value(pointer, value, type, fresh: fresh)
+        if !IYI_HOLES_BROKEN && iyi_holes(type).size > IYI_HOLES_MAX
+          unless fresh
+            temporary = alloca llvm_type(type)
+            copy_value(temporary, value, type, fresh: true)
+            value = temporary
+          end
+          res = call c_memset_fun, [cast_to_void_pointer(pointer), int8(0), size_t(llvm_typer.size_of(llvm_type(type))), int1(0)]
+          LibLLVM.set_instr_param_alignment(res, 1, llvm_typer.align_of(llvm_type(type)))
+          return copy_value(pointer, value, type, fresh: true)
+        end
+        stored = copy_value(pointer, value, type, fresh: fresh)
       else
-        store to_rhs(value, type), pointer
+        stored = store to_rhs(value, type), pointer
+        iyi_array_store stored, pointer
+      end
+      iyi_clear_holes pointer, iyi_holes(type), llvm_typer.align_of(llvm_type(type))
+      stored
+    end
+
+    IYI_HOLES_MAX = 64
+
+    # The holes of a *type* slot (`LLVMTyper#iyi_holes`). None for a value
+    # not passed by value (a scalar or a reference fills its slot), nor for
+    # a C type's: a C union's members overlap, so its LLVM struct's padding
+    # may be another member's bytes, and C's padding is C's.
+    def iyi_holes(type : Type) : Array({UInt64, UInt64})
+      return IYI_NO_HOLES unless type.passed_by_value?
+      return IYI_NO_HOLES if type.extern? || type.extern_union?
+      llvm_typer.iyi_holes(llvm_type(type))
+    end
+
+    IYI_NO_HOLES = [] of {UInt64, UInt64}
+
+    # The holes of a *type* slot at *pointer* written as zero.
+    def iyi_clear_holes(pointer, type : Type) : Nil
+      iyi_clear_holes pointer, iyi_holes(type), llvm_typer.align_of(llvm_type(type))
+    end
+
+    IYI_HOLES_BROKEN = SPAWN_BROKEN.includes?("holes")
+
+    # Zero stores over *holes*, byte ranges of the slot at *pointer*, which
+    # is aligned to *align*: naturally aligned stores of up to a word, or a
+    # `memset` for a range over four words. `IYI_SPAWN_BROKEN=holes` emits
+    # none, for bench/union_holes.sh's broken copy.
+    def iyi_clear_holes(pointer, holes : Array({UInt64, UInt64}), align) : Nil
+      return if holes.empty? || @builder.end || IYI_HOLES_BROKEN
+      bytes = pointer_cast(pointer, llvm_context.int8.pointer)
+      holes.each do |(from, to)|
+        if to - from > 32_u64
+          at_align = 1_u64
+          while at_align < align.to_u64 && from % (at_align * 2) == 0
+            at_align *= 2
+          end
+          res = call c_memset_fun, [gep(llvm_context.int8, bytes, int64(from)), int8(0), size_t(to - from), int1(0)]
+          LibLLVM.set_instr_param_alignment(res, 1, at_align.to_u32)
+          next
+        end
+        at = from
+        while at < to
+          size = 8_u64
+          while size > align.to_u64 || at % size != 0 || at + size > to
+            size //= 2
+          end
+          inst = store llvm_context.int((size * 8).to_i32).const_int(0), gep(llvm_context.int8, bytes, int64(at))
+          inst.alignment = size.to_u32
+          at += size
+        end
       end
     end
 

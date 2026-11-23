@@ -172,7 +172,9 @@ COMPILER="$REPO/.build/iyi"
 # file's offset is that call and nothing else. `arc4random_buf` joined with
 # `File.tempfile`'s random name, which has to be unpredictable or the
 # exclusive create is a race another user can win: libSystem's own entropy
-# call, where Linux asks `getrandom` by syscall. Both are libSystem's.
+# call, where Linux asks `getrandom` by syscall. Both are libSystem's. The
+# prelude asks `arc4random_buf` too, for the key `String#hash` is keyed with
+# (#212), in every program that hashes a string and in no other.
 # `std/process` starts a program with `posix_spawn` and the file actions and
 # attributes that go with it (the child's three streams, its directory, an
 # empty signal mask), waits for it with `waitpid`, ends a cancelled one with
@@ -655,7 +657,8 @@ while IFS= read -r annotation; do
     '@[Link(dll: "gc.dll")]') ;;
     # Windows has no kernel32 name for OS entropy: `RtlGenRandom` lives in
     # advapi32, which ships with every Windows the way kernel32 does, and
-    # `std/random` calls it; `std/socket` reads the registry there for the
+    # `std/random` and the prelude's `String#hash` key (#212) call it;
+    # `std/socket` reads the registry there for the
     # name servers Windows was configured with, which the platform's own
     # resolver API would have taken iphlpapi or dnsapi to ask (SPEC.md
     # III.10's inventory says so); `std/user` asks it for the account name

@@ -27,6 +27,9 @@ module Iyi
     @stacked_filename : String | VirtualFile | Nil
     @artifact : String? = nil
     @stacked_artifact : String? = nil
+    @source_filename : String | VirtualFile | Nil
+    @origin : String | VirtualFile | Nil
+    @stacked_origin : String | VirtualFile | Nil
     @token_end_location : Location?
     @string_pool : StringPool
 
@@ -61,9 +64,10 @@ module Iyi
       filename : String,
       line_number : Int32,
       column_number : Int32,
-      artifact : String? = nil do
+      artifact : String? = nil,
+      origin : String | VirtualFile | Nil = nil do
       def run_pragma(lexer)
-        lexer.set_location filename, line_number, column_number, artifact
+        lexer.set_location filename, line_number, column_number, artifact, origin
       end
     end
 
@@ -148,6 +152,8 @@ module Iyi
     # it expands in, which is where its chain of locations ends.
     def filename=(filename)
       @filename = filename
+      @source_filename = filename
+      @origin = nil
       @iyi = Lexer.iyi_source?(filename)
     end
 
@@ -1103,7 +1109,8 @@ module Iyi
             # scan_ident
           end
         when 's'
-          if char_sequence?('i', 'n', 'g')
+          # iyi: only a `.iyi` file refuses `using`; Crystal has no such keyword.
+          if char_sequence?('i', 'n', 'g') && @iyi
             return check_ident_or_keyword(:using, start)
           end
         else
@@ -1210,7 +1217,7 @@ module Iyi
     end
 
     def token_end_location
-      @token_end_location ||= Location.new(@filename, @line_number, @column_number - 1, @artifact)
+      @token_end_location ||= Location.new(@filename, @line_number, @column_number - 1, @artifact, @origin)
     end
 
     def slash_is_regex!
@@ -2202,13 +2209,13 @@ module Iyi
     # on the next line - `  {{x}}.nope` - put `nope` at column 8, not 5.
     def lookahead(preserve_token_on_fail = false, &)
       old_pos, old_line, old_column = current_pos, @line_number, @column_number
-      old_place = {@filename, @artifact, @stacked, @stacked_filename, @stacked_artifact, @stacked_line_number, @stacked_column_number, @location_pragma_index}
+      old_place = {@filename, @artifact, @origin, @stacked, @stacked_filename, @stacked_artifact, @stacked_origin, @stacked_line_number, @stacked_column_number, @location_pragma_index}
       @temp_token.copy_from(@token) if preserve_token_on_fail
 
       result = yield
       unless result
         self.current_pos, @line_number, @column_number = old_pos, old_line, old_column
-        @filename, @artifact, @stacked, @stacked_filename, @stacked_artifact, @stacked_line_number, @stacked_column_number, @location_pragma_index = old_place
+        @filename, @artifact, @origin, @stacked, @stacked_filename, @stacked_artifact, @stacked_origin, @stacked_line_number, @stacked_column_number, @location_pragma_index = old_place
         @token.copy_from(@temp_token) if preserve_token_on_fail
       end
       result
@@ -2572,7 +2579,7 @@ module Iyi
           next_char
         end
 
-        set_location filename, line_number, column_number
+        set_location filename, line_number, column_number, nil, @source_filename
       when 'p'
         # skip 'p'
         next_char_no_column_increment
@@ -2863,9 +2870,10 @@ module Iyi
       end
     end
 
-    def set_location(filename, line_number, column_number, artifact : String? = nil)
+    def set_location(filename, line_number, column_number, artifact : String? = nil, origin : String | VirtualFile | Nil = nil)
       @token.filename = @filename = filename
       @token.artifact = @artifact = artifact
+      @token.origin = @origin = origin
       @token.line_number = @line_number = line_number
       @token.column_number = @column_number = column_number
     end
@@ -2875,6 +2883,7 @@ module Iyi
         @stacked = false
         @token.filename = @filename = @stacked_filename
         @token.artifact = @artifact = @stacked_artifact
+        @token.origin = @origin = @stacked_origin
         @token.line_number = @line_number = @stacked_line_number
         @token.column_number = @column_number = @stacked_column_number
       end
@@ -2885,6 +2894,7 @@ module Iyi
         @stacked = true
         @stacked_filename, @stacked_line_number, @stacked_column_number = @filename, @line_number, @column_number
         @stacked_artifact = @artifact
+        @stacked_origin = @origin
       end
     end
 
@@ -2964,6 +2974,7 @@ module Iyi
       @token.column_number = @column_number
       @token.filename = @filename
       @token.artifact = @artifact
+      @token.origin = @origin
       @token.location = nil
       @token.passed_backslash_newline = false
       @token.doc_buffer = nil unless @token.type.space? || @token.type.newline?

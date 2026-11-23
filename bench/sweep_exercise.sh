@@ -47,13 +47,13 @@ fi
 
 echo
 echo "== every check reported"
-for phrase in reclaimed warm survivor liveness large steady refault room threaded cut trim batches edge idle; do
+for phrase in reclaimed warm survivor liveness large steady refault room threaded cut trim cap batches edge idle; do
   grep -q "$phrase" "$WORK/sweep.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady, refault, room, threaded, cut, trim, batches, edge and idle all reported"
+[ "$status" -eq 0 ] && echo "  reclaimed, warm, survivor, liveness, large, steady, refault, room, threaded, cut, trim, cap, batches, edge and idle all reported"
 
 echo
 echo "== the same program with optimisation on"
@@ -197,6 +197,13 @@ prove_fails "a warm run threaded whole" uncapped "threaded:|room:" \
 prove_fails "a warm run cut off the grid" offgrid "cut:|trim:" \
   '{ if ($0 ~ /^          cut = \(first \+ \(target - first \+ chunk - 1_u64\)\.unsafe_div\(chunk\) \* chunk - arena\)\.unsafe_shr\(PAGE_SHIFT\)$/) { print "          cut = page + most"; found = 1; next } print } END { if (!found) exit 3 }'
 
+# A run a slice's word cuts short cut at the word, off the chunk grid:
+# a chunk longer than a page taken last reaches over idle pages of the
+# rest, which the trim and the sweep hand back under it, and into the
+# slice's word.
+prove_fails "a run cut at a slice's word off the grid" capoffgrid "cap:" \
+  '{ if (sub(/^        if capped && stop == pages && page_idle\?\(arena, arena \+ stop \* PAGE\) && page_cold\?\(arena, arena \+ stop \* PAGE\) != warm$/, "        if false")) found = 1; print } END { if (!found) exit 3 }'
+
 # The trim handing back a run's first page whatever reaches into it:
 # the chunk threaded last before it loses its tail.
 prove_fails "the trim takes a reached-into page" trimedge "trim:" \
@@ -323,17 +330,38 @@ fi
 # So both copies also audit the count where it must be exact: at the
 # pause, with every thread stopped and none inside the allocator, an
 # arena counts as listed the pages its bitmap lists
-# (`IyiHeap.audit_listed`, before `IyiHeap.idle_listed` moves them;
-# `IyiHeap.listed_off`). The program asks after every trim, and after a
-# last collection once its threads end, and fails at the first count off.
+# (`IyiHeap.audit_listed`, before `IyiHeap.idle_listed` moves them), and
+# the first count off ends the program there, with both numbers; a last
+# collection once the threads end audits the last epoch's adoptions too.
 # The fix must hold every count. The old counting's count is one short
 # from a meeting to the next pause, so a run that meets the window fails;
 # one that never meets it tests nothing, and runs again, three at most.
-# So built, the old counting failed 250 runs of 250 on this Linux machine,
-# 50 each on 12, four and two vCPUs, beside twelve busy loops and on four
-# beside four, and on one vCPU the 8 of 30 that met the window; and 80 of
-# 80 on macOS 26.6, Apple M2 Pro, 10 cores (the user's machine), 30 beside
-# ten busy loops. The fix held every count in 60 runs of 60 and 30 of 30.
+# So built - the program then asked after every trim - the old counting
+# failed 250 runs of 250 on this Linux machine, 50 each on 12, four and
+# two vCPUs, beside twelve busy loops and on four beside four, and on one
+# vCPU the 8 of 30 that met the window; and 80 of 80 on macOS 26.6, Apple
+# M2 Pro, 10 cores (the user's machine), 30 beside ten busy loops. The
+# fix held every count in 60 runs of 60 and 30 of 30.
+#
+# The count raised after the bits it counts, as before `IyiHeap.list_pages`
+# raised it first: a slice that lists the page it shares with the slice
+# below sits between the two while the refill adopting the batch below
+# unlists that page and counts it off, and the arena's count is one
+# short until the slice counts it - long enough, on a thread preempted
+# there, for another refill of the arena to read 0 and leave its own
+# pages listed under the objects it hands out. The count is whole again
+# by the pause, so the count audit never sees it; the pause then makes
+# those pages idle and the next refill threads their chunks a second
+# time. So the copies also hold that window open: a slice listing the
+# page it began on spins WIDEN_NS between the count and the bits, a
+# refill that reaches the page meanwhile is counted
+# (`IyiHeap.list_hits`), and one that clears a bit not yet counted is
+# the defect itself, which ends the program there. And the pause's audit
+# reads every chunk whose head is on a listed page, which must be free:
+# one handed out is about to go idle under its owner, and ends the
+# program before it can. The fix, widened, must meet that window and
+# hold both; the old order ("listorder") must fail at the first, and a
+# refill that unlists nothing ("nounlist") at the second.
 WIDEN_NS=20000
 widen_prelude() {
   mkdir -p "$WORK/$1/iyi"
@@ -351,91 +379,156 @@ widen_prelude() {
       print "          spun = spun + 1_u64"
       print "        end"
       print "      end"
+      print "      def self.fail_say(text : String) : Nil"
+      print "        __iyi_write(1, text.to_unsafe.as(Void*), text.bytesize.to_u64)"
+      print "      end"
+      print "      def self.fail_count(value : UInt64) : Nil"
+      print "        buffer = uninitialized StaticArray(UInt8, 20)"
+      print "        bytes = pointerof(buffer).as(Pointer(UInt8))"
+      print "        index = 20"
+      print "        rest = value"
+      print "        while true"
+      print "          index = index - 1"
+      print "          bytes[index] = (48_u64 + rest.unsafe_mod(10_u64)).to_u8"
+      print "          rest = rest.unsafe_div(10_u64)"
+      print "          break if rest == 0_u64"
+      print "        end"
+      print "        __iyi_write(1, (bytes + index).as(Void*), (20 - index).to_u64)"
+      print "      end"
+      print "      @@list_hits : UInt64 = 0_u64"
+      print "      @@listing : UInt64 = 0_u64"
+      print "      def self.list_hits : UInt64"
+      print "        @@list_hits"
+      print "      end"
+      print "      def self.hold_listing(arena : UInt64, low : UInt64) : Nil"
+      print "        return unless (low - arena).unsafe_shr(PAGE_SHIFT) == (read64(arena + OFF_SWEEP_CURSOR) - arena).unsafe_shr(PAGE_SHIFT)"
+      print "        word = Pointer(Atomic(UInt64)).new(pointerof(@@listing).address)"
+      print "        word.value.set(low)"
+      print "        spin_widen"
+      print "        word.value.compare_and_set(low, 0_u64)"
+      print "      end"
       print "      @@listed_audits : UInt64 = 0_u64"
-      print "      @@listed_off : UInt64 = 0_u64"
-      print "      @@listed_off_count : UInt64 = 0_u64"
-      print "      @@listed_off_pages : UInt64 = 0_u64"
       print "      def self.listed_audits : UInt64"
       print "        @@listed_audits"
       print "      end"
-      print "      def self.listed_off : UInt64"
-      print "        @@listed_off"
-      print "      end"
-      print "      def self.listed_off_count : UInt64"
-      print "        @@listed_off_count"
-      print "      end"
-      print "      def self.listed_off_pages : UInt64"
-      print "        @@listed_off_pages"
-      print "      end"
       print "      def self.audit_listed(arena : UInt64, count : UInt64) : Nil"
       print "        words = read64(arena + OFF_MAP).unsafe_shr(PAGE_SHIFT + 6_u64)"
+      print "        chunk = read64(arena + OFF_CHUNK)"
+      print "        first = arena_first(arena)"
       print "        pages = 0_u64"
+      print "        live = 0_u64"
       print "        slot = 0_u64"
       print "        while slot < words"
       print "          word = read64(arena + OFF_LISTED_PAGES + slot * 8_u64)"
-      print "          while word != 0_u64"
-      print "            word = word & (word - 1_u64)"
-      print "            pages = pages + 1_u64"
+      print "          bit = 0_u64"
+      print "          while word != 0_u64 && bit < 64_u64"
+      print "            if word & 1_u64.unsafe_shl(bit) != 0_u64"
+      print "              pages = pages + 1_u64"
+      print "              low = arena + (slot * 64_u64 + bit) * PAGE"
+      print "              head = low <= first ? first : first + (low - first + chunk - 1_u64).unsafe_div(chunk) * chunk"
+      print "              while head < low + PAGE"
+      print "                live = live + 1_u64 if read8(arena + META + chunk_index(arena, head) * META_ENTRY) & FREE_FLAG == 0_u64"
+      print "                head = head + chunk"
+      print "              end"
+      print "            end"
+      print "            bit = bit + 1_u64"
       print "          end"
       print "          slot = slot + 1_u64"
       print "        end"
       print "        @@listed_audits = @@listed_audits + 1_u64"
       print "        if pages != count"
-      print "          if @@listed_off == 0_u64"
-      print "            @@listed_off_count = count"
-      print "            @@listed_off_pages = pages"
-      print "          end"
-      print "          @@listed_off = @@listed_off + 1_u64"
+      print "          fail_say(\"FAIL: trim stress: a pause found an arena counting \")"
+      print "          fail_count(count)"
+      print "          fail_say(\" pages listed with \")"
+      print "          fail_count(pages)"
+      print "          fail_say(\" listed\\n\")"
+      print "          __iyi_exit(1)"
+      print "        end"
+      print "        if live != 0_u64"
+      print "          fail_say(\"FAIL: trim stress: a pause found \")"
+      print "          fail_count(live)"
+      print "          fail_say(\" chunks handed out on \")"
+      print "          fail_count(pages)"
+      print "          fail_say(\" pages still listed\\n\")"
+      print "          __iyi_exit(1)"
       print "        end"
       print "      end"
       print
       n++; next }
+    /^        Pointer\(Atomic\(UInt64\)\)\.new\(arena \+ OFF_LISTED\)\.value\.add\(\(high - low\)\.unsafe_shr\(PAGE_SHIFT\)\)$/ {
+      if (mode == "listorder") held = $0; else print
+      n++; next }
+    /^        set_listed\(arena, low, high, true\)$/ {
+      if (mode == "listorder") { print; print "        hold_listing(arena, low)"; print held }
+      else { print "        hold_listing(arena, low)"; print }
+      n++; next }
     /^      def self\.idle_listed\(arena : UInt64\) : Nil$/ { pause = 1 }
     pause && /^        return if count == 0$/ { print "        audit_listed(arena, count)"; print; pause = 0; n++; next }
     /^      def self\.unlist_batch\(/ { batch = 1 }
+    batch && /^        return 0_u64 if read64\(arena \+ OFF_LISTED\) == 0$/ { print (mode == "nounlist" ? "        return 0_u64" : $0); n++; next }
     batch && /^        while page <= last$/ { print "        low_edge = page"; print; n++; next }
     /^          count = count \+ 1_u64 if unlist_page\(arena, page\)$/ {
       batch = 0
+      print "          Pointer(Atomic(UInt64)).new(pointerof(@@list_hits).address).value.add(1_u64) if Pointer(Atomic(UInt64)).new(pointerof(@@listing).address).value.get == arena + page * PAGE"
       print "          if page_listed?(arena, arena + page * PAGE)"
       print "            spin_widen if page == low_edge || page == last"
       print "            won = unlist_page(arena, page)"
+      print "            if won && Pointer(Atomic(UInt64)).new(pointerof(@@listing).address).value.get == arena + page * PAGE"
+      print "              fail_say(\"FAIL: trim stress: a refill unlisted and counted off a page a slice had listed and not yet counted\\n\")"
+      print "              __iyi_exit(1)"
+      print "            end"
       print "            Pointer(Atomic(UInt64)).new(pointerof(@@widen_hits).address).value.add(1_u64) unless won"
       print (mode == "doublecount" ? "            count = count + 1_u64" : "            count = count + 1_u64 if won")
       print "          end"
       n++; next }
     { print }
-    END { if (n != 4) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi" &&
+    END { if (n != 7) exit 3 }' "$REPO/src/iyi/prelude.iyi" > "$WORK/$1/iyi/prelude.iyi" &&
     IYI_PATH="$WORK/$1:$REPO/src" "$IYI" build --release -Dtrim_widen -o "$WORK/$1/program" "$REPO/bench/trim_stress.iyi" >"$WORK/$1/build.log" 2>&1
 }
 window_met() {
   sed -n 's/.*, \([0-9]*\) edge pages read listed by two adoptions at once.*$/\1/p' "$WORK/$1.out" | head -1
 }
+list_met() {
+  sed -n 's/.*, \([0-9]*\) shared pages reached by a refill while a slice listed them.*$/\1/p' "$WORK/$1.out" | head -1
+}
 if ! widen_prelude widened; then
-  echo "  the window held open: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
+  echo "  the windows held open: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
 elif stress_run widened "$WORK/widened/program" 10 &&
-     hits=$(window_met widened) && [ -n "$hits" ] && [ "$hits" -gt 0 ]; then
-  echo "  the window held open ${WIDEN_NS} ns: every block read back whole, $hits edge pages read listed by two adoptions at once, every count of listed pages its pages"
+     hits=$(window_met widened) && [ -n "$hits" ] && [ "$hits" -gt 0 ] &&
+     lhits=$(list_met widened) && [ -n "$lhits" ] && [ "$lhits" -gt 0 ]; then
+  echo "  the windows held open ${WIDEN_NS} ns: every block read back whole, $hits edge pages read listed by two adoptions at once, $lhits shared pages reached by a refill while a slice listed them, every count of listed pages its pages, every listed page's chunks free"
 else
-  echo "  the window held open: the fix failed, or the window was never met:"; tail -3 "$WORK/widened.out" | sed 's/^/    /'; status=1
+  echo "  the windows held open: the fix failed, or a window was never met:"; tail -3 "$WORK/widened.out" | sed 's/^/    /'; status=1
 fi
-if ! widen_prelude doublecount; then
-  echo "  the listed pages counted twice: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
-else
-  caught=0 met=0
+# prove_widened LABEL MODE PHRASE METER: the widened copy MODE must fail
+# at PHRASE. A run that passes having met the window METER counts says
+# the audit does not see the break; one that never met it tested
+# nothing, and runs again, three at most.
+prove_widened() {
+  local label="$1" mode="$2" phrase="$3" meter="$4" caught=0 met=0 again
+  if ! widen_prelude "$mode"; then
+    echo "  $label: the lines it edits are not in the prelude any more, or the copy did not build"; status=1
+    return
+  fi
   for again in 1 2 3; do
-    stress_run doublecount "$WORK/doublecount/program" 10 || { caught=$again; break; }
-    met=$(window_met doublecount)
+    stress_run "$mode" "$WORK/$mode/program" 10 || { caught=$again; break; }
+    met=$("$meter" "$mode")
     [ "${met:-0}" -gt 0 ] && break
     met=0
   done
-  if [ "$caught" -ne 0 ]; then
-    echo "  the listed pages counted twice: caught on run $caught: $(grep -m1 'FAIL\|panic' "$WORK/doublecount.out" | cut -c1-200)"
+  if [ "$caught" -ne 0 ] && grep -q "$phrase" "$WORK/$mode.out"; then
+    echo "  $label: caught on run $caught: $(grep -m1 'FAIL\|panic' "$WORK/$mode.out" | cut -c1-200)"
+  elif [ "$caught" -ne 0 ]; then
+    echo "  $label: failed on run $caught, but not at the expected check:"; tail -3 "$WORK/$mode.out" | sed 's/^/    /'; status=1
   elif [ "$met" -gt 0 ]; then
-    echo "  the listed pages counted twice: two adoptions met $met times and every count read its pages, so the audit does not test it"; status=1
+    echo "  $label: the window was met $met times and every audit passed, so they do not test it"; status=1
   else
-    echo "  the listed pages counted twice: three runs passed and none met the window, so nothing tested it"; status=1
+    echo "  $label: three runs passed and none met the window, so nothing tested it"; status=1
   fi
-fi
+}
+prove_widened "the listed pages counted twice" doublecount "an arena counting" window_met
+prove_widened "the count raised after the bits" listorder "counted off a page a slice had listed and not yet counted" list_met
+prove_widened "a refill that unlists nothing" nounlist "chunks handed out on [0-9]* pages still listed" list_met
 
 echo
 if [ "$status" -eq 0 ]; then

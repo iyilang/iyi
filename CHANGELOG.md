@@ -136,6 +136,17 @@
   2026-11-22** (SPEC.md I.4): the 22 lines of `Array`'s buffer accessors
   and one-comparison index fast path above.
 
+- **`--emit llvm-ir` and `--ll` print the module the backend is handed, on
+  Windows too.** A native build printed the module after writing its
+  object, and writing an object runs the backend's own IR passes on the
+  module in place. On Windows one of them, WinEHPrepare, simplifies every
+  function with a funclet personality, a program's main among them, so an
+  array's `@size` read through `getelementptr inbounds %"Array(T)", ptr %a,
+  i32 0, i32 0` was printed as a read of `%a` itself: IR codegen had not
+  made, unlike what a cross-compile for the same target printed. The IR is
+  now written after optimisation and the preemption checks and before the
+  object, as a cross-compile always wrote it.
+
 ### Gates
 
 - **`bench/lsp_session.py`'s held compile (step 74a) lets go of its FIFO
@@ -156,6 +167,15 @@
 - **The session gate's watchdog prints every thread's whole stack on
   darwin.** Cut to iyi's own frames and to 40 lines, the hang above ended
   at the top-level visitor, a dozen frames above the `read` that held it.
+- **`bench/array_tbaa.sh` holds on Windows.** Windows CI (job 137545872417)
+  failed it two ways: Windows escapes a symbol's punctuation as `.XX.`
+  (`*` is `.2A.`), so no `array_at`/`array_put` was recognised, and three
+  `@size` reads in the program's main had lost the field's
+  `getelementptr` to WinEHPrepare (above). The check reads names back
+  unescaped, and reads the IR as codegen made it; its broken prelude is
+  still refused on Linux and Windows. `spec/compiler/iyimod_spec.cr`'s
+  "does not ship the body" reads the artifact's symbols back unescaped the
+  same way.
 
 ## 0.22.0 — 2026-11-22
 

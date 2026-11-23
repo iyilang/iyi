@@ -3829,6 +3829,7 @@ module Iyi
         WasmRoots.run(llvm_mod) if @codegen_target.architecture == "wasm32"
         preempt_checks llvm_mod, program.iyi_preempt_flag
 
+        unit.write_ir
         unit.emit(@emit_targets, emit_base_filename || output_filename)
 
         target_machine.emit_obj_to_file llvm_mod, output_filename
@@ -4935,8 +4936,8 @@ module Iyi
           compile_to_object
         else
           @reused_previous_compilation = true
+          write_ir
         end
-        dump_llvm_ir
       end
 
       # iyi: cuts the module into partitions (`ReleasePartition`), which then
@@ -5054,6 +5055,7 @@ module Iyi
         compiler.optimize llvm_mod, target_machine unless compiler.optimization_mode.o0?
         WasmRoots.run(llvm_mod) if compiler.codegen_target.architecture == "wasm32"
         compiler.preempt_checks llvm_mod, @preempt_flag
+        write_ir
         target_machine.emit_obj_to_file llvm_mod, temporary_object_name
         File.rename(temporary_object_name, object_name)
       rescue ex
@@ -5064,8 +5066,17 @@ module Iyi
           "#{ex.message} while writing #{temporary_object_name} for unit #{@name}")
       end
 
-      private def dump_llvm_ir
-        llvm_mod.print_to_file ll_name if compiler.dump_ll?
+      # iyi: the module's IR, for `--emit llvm-ir` and `--ll`, as it is when
+      # the backend is handed it. Writing an object runs the backend's own IR
+      # passes on the module in place, and on Windows one of them,
+      # WinEHPrepare, simplifies every function with a funclet personality,
+      # a program's main among them: an array's `@size`, a
+      # `getelementptr inbounds %"Array(T)", ptr %a, i32 0, i32 0`, became
+      # `%a` itself. A native Windows build printed IR its codegen had not
+      # made and a cross-compile does not print, and bench/array_tbaa.sh
+      # could not see the field its tag is on.
+      def write_ir : Nil
+        llvm_mod.print_to_file ll_name if compiler.dump_ll? || compiler.emit_targets.llvm_ir?
       end
 
       def emit(emit_targets : EmitTarget, output_filename)
@@ -5076,7 +5087,7 @@ module Iyi
           FileUtils.cp(bc_name, "#{output_filename}.bc")
         end
         if emit_targets.llvm_ir?
-          llvm_mod.print_to_file "#{output_filename}.ll"
+          FileUtils.cp(ll_name, "#{output_filename}.ll")
         end
         if emit_targets.obj?
           FileUtils.cp(object_name, output_filename + @object_extension)

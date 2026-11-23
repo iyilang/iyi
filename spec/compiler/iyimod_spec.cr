@@ -2128,7 +2128,9 @@ describe Iyi::IyiMod do
       artifact.mono_bodies.should be_empty
       # In the module's unit, which holds every type the module declares.
       artifact.object_code.map(&.name).should eq ["App::Greeter"]
-      artifact.symbols.should contain "*App::Greeter::Greeter#hello:String"
+      # Windows escapes a symbol's punctuation as `.XX.`; read it back.
+      symbols = artifact.symbols.map(&.gsub(/\.([0-9A-F]{2})\./) { $1.to_i(16).chr.to_s })
+      symbols.should contain "*App::Greeter::Greeter#hello:String"
 
       File.delete "app/greeter.iyi"
 

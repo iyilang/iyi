@@ -117,7 +117,10 @@ IYI
 check_ir() { # check_ir <ll file> -> prints problems, exit 1 if any
   python3 - "$1" <<'PY'
 import re, sys
-text = open(sys.argv[1]).read()
+# Windows escapes a symbol's and a type's punctuation as `.XX.` (`*` is
+# `.2A.`, `(` is `.28.`), so names are read back unescaped before matching.
+text = re.sub(r'\.([0-9A-F]{2})\.', lambda m: chr(int(m.group(1), 16)),
+              open(sys.argv[1]).read())
 meta = dict(re.findall(r'^(![0-9]+) = (.*)$', text, re.M))
 def tag(name):
     scalar = [k for k, v in meta.items() if v.startswith('!{!"%s"' % name)]

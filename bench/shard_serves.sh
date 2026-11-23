@@ -24,6 +24,7 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/end_process.sh"
+. "$REPO/bench/loopback_get.sh"
 
 # The search path is a list, and the byte between its entries is the
 # platform's: `;` where a drive letter already owns the colon.
@@ -60,10 +61,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Named rather than discovered halfway through. `shards` fetches the shard and
-# `curl` asks the server for a page; without either, the failure would arrive
-# as a confusing error from a step that had already done minutes of work.
-for tool in shards curl; do
+# Named rather than discovered halfway through. `shards` fetches the shard;
+# without it the failure would arrive as a confusing error from a step that
+# had already done minutes of work. The page is asked for with `curl` or,
+# where there is none, bash itself (`bench/loopback_get.sh`).
+for tool in shards; do
   if ! command -v "$tool" > /dev/null 2>&1; then
     echo "needs $tool, which is not on the PATH"
     exit 1
@@ -131,7 +133,7 @@ SERVER_PID=$!
 # seconds on a fast one, and the thing being waited for is answerable.
 ready=""
 for _ in $(seq 1 50); do
-  if curl -s --max-time 2 "http://127.0.0.1:$PORT/" > /dev/null 2>&1; then
+  if loopback_get "$PORT" "/" > /dev/null 2>&1; then
     ready=yes
     break
   fi
@@ -155,7 +157,7 @@ status=0
 check() {
   path="$1"
   want="$2"
-  got="$(curl -s --max-time 5 "http://127.0.0.1:$PORT$path")"
+  got="$(loopback_get "$PORT" "$path")"
   if [ "$got" = "$want" ]; then
     echo "  GET $path -> $got"
   else

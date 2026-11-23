@@ -16,12 +16,13 @@
 #      running at one instant. On a pool of one, eligible spawns stay on
 #      the main thread and no pool starts, while `spawn(unit: :new)`
 #      tasks run on the pool's worker. On a pool of four, in a process of
-#      its own, one spawn starts one worker, spawns joined one at a time at
-#      most three, and four tasks running at one instant all four; one
+#      its own, one spawn starts one worker, and four tasks that spin until all
+#      four have started are all in progress at once (the workers the pool then
+#      holds are printed, not judged); each spawn made beside running ones
+#      starts a worker of its own, or owes it and has it paid, and a pool that
+#      stops at two is caught at the third; one
 #      spawn still starts one worker when it lands, every time, between
-#      the worker's first empty look and its idle count; and four tasks
-#      still start all four on a runtime whose every worker starts 50 ms
-#      late, the tasks waiting for the pool as well as for each other.
+#      the worker's first empty look and its idle count.
 #   2. The explanation: `--explain-spawn` notes each spawn, naming the
 #      capture that kept one in its unit - a captured `Array`, a local
 #      assigned in the loop that spawns, a constant reached through a call
@@ -63,10 +64,10 @@
 #      ineligible one sent to the pool, `unit: :same` sent to the pool,
 #      `unit: :new` left in the unit, `spawn_parallel` or `serial:` kept as an
 #      alias, a pool of one that starts for eligible spawns anyway, a pool
-#      that starts every worker at once, one that never starts a second,
-#      a worker that gives back the token of the one out looking
-#      before it counts itself idle, and (on the late-start runtime)
-#      `grows`'s tasks waiting only for each other. Of the compiler, through
+#      that starts every worker at once, one that never starts a second (which
+#      `beside` catches at its spawn),
+#      and a worker that gives back the token of the one out looking
+#      before it counts itself idle. Of the compiler, through
 #      `IYI_SPAWN_BROKEN`: no module named in a reason, no note from `iyi
 #      check` unasked, no line for a moved spawn, `spawn_parallel` and
 #      `serial: true` answered as any undefined method or parameter, an artifact written without what
@@ -461,7 +462,9 @@ fi
 # A line above the spawn moves it to line 9 and makes `app/work` stale, so
 # this rebuild compiles it again: the spawn is named by its def and its
 # block, not by its line, and it has not moved.
-awk 'NR == 2 { print "# Above the spawn: its line moves, and it does not." } { print }' cliff/app/work.iyi > work.iyi.new && mv work.iyi.new cliff/app/work.iyi
+awk 'NR == 2 { print "# Above the spawn: its line moves, and it does not."; found++ } { print } END { if (found != 1) exit 3 }' cliff/app/work.iyi > work.iyi.new &&
+  mv work.iyi.new cliff/app/work.iyi ||
+  { echo "the work fixture could not be moved down one line"; exit 1; }
 rebuild still.log || { echo "the rebuild failed:"; cat still.log; exit 1; }
 if grep -q 'up to date' still.log || grep -q ': note: ' still.log; then
   echo "a rebuild that compiled app/work again and moved nothing did not stay silent:"; cat still.log; exit 1
@@ -680,181 +683,382 @@ done
 echo "  40000 of 40000 appends, three runs on four workers"
 
 # ── 5. Failure proofs ─────────────────────────────────────────────────────
-# Of the runtime: each a copy of src/iyi with concurrency.iyi changed,
-# built against through IYI_PATH; nothing in the tree is touched.
-broken() { # name, awk program
-  mkdir -p "$1/iyi"
-  cp "$REPO"/src/iyi/*.iyi "$1/iyi/"
-  awk "$2" "$REPO/src/iyi/concurrency.iyi" > "$1/iyi/concurrency.iyi"
-  if cmp -s "$1/iyi/concurrency.iyi" "$REPO/src/iyi/concurrency.iyi"; then
-    echo "the awk for $1 found nothing to change"; exit 1
+# The copy-only words (C2): put into every copy that forces a race, and called
+# only by its awk hooks and by the program's `-D…_force` blocks, which
+# therefore cannot build against the real runtime. Nothing in src/ changes.
+cat > "$WORK/forced_words.iyi" <<'IYI'
+  # Copy-only words, put in by bench/spawn_eligible.sh's forced copies. A wait
+  # has a hang limit, and the run ends with a sentence of its own when it
+  # fires.
+  @[UnsafeReach("forced by the copy alone: the first worker's empty look, read and set through a word")]
+  @@forced_entered : UInt64 = 0_u64
+  @[UnsafeReach("forced by the copy alone: the first spawn's push, read and set through a word")]
+  @@forced_pushed : UInt64 = 0_u64
+  @[UnsafeReach("forced by the copy alone: how many tasks have reached the meet, read and set through a word")]
+  @@forced_met : UInt64 = 0_u64
+  @[UnsafeReach("counted atomically by each task that exercises the placement hook")]
+  @@forced_seen : UInt64 = 0_u64
+  @[UnsafeReach("copy-only growth fixture words, accessed atomically")]
+  @@forced_growth_hold : UInt64 = 0_u64
+  @[UnsafeReach("copy-only growth fixture words, accessed atomically")]
+  @@forced_growth_ready : UInt64 = 0_u64
+  @[UnsafeReach("copy-only growth fixture words, accessed atomically")]
+  @@forced_growth_armed : UInt64 = 0_u64
+
+  @[NoInline]
+  @[NoPreempt]
+  def self.forced_growth_holder : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_growth_ready).address).value.set(1_u64)
+    hold = Pointer(Atomic(UInt64)).new(pointerof(@@forced_growth_hold).address)
+    deadline = __iyi_monotonic_ns + 10_000_000_000_i64
+    while hold.value.get == 0_u64
+      if __iyi_monotonic_ns >= deadline
+        print "FAIL: growth fixture holder was not released\n"
+        __iyi_exit(76)
+      end
+      IyiThread.spin_pause
+    end
+  end
+
+  def self.forced_growth_ready : Nil
+    forced_wait(pointerof(@@forced_growth_ready).address, "growth fixture holder did not start")
+  end
+
+  def self.forced_growth_arm : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_growth_armed).address).value.set(1_u64)
+  end
+
+  def self.forced_growth_armed? : Bool
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_growth_armed).address).value.get != 0_u64
+  end
+
+  def self.forced_growth_release : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_growth_hold).address).value.set(1_u64)
+  end
+
+  def self.forced_growth_decision : Int32
+    before = word(pointerof(@@launched)).value.get
+    queued = word(pointerof(@@queued)).value.get
+    idle = word(pointerof(@@idle)).value.get
+    spinning = word(pointerof(@@spinning)).value.get
+    return -1 unless queued > 0_i64 && idle == 0_i64 && spinning == 0_i64 && before < @@started.to_i64
+    grow
+    after = word(pointerof(@@launched)).value.get
+    return 1 if after == before + 1_i64
+    return 0 if after == before
+    -2
+  end
+
+  # Copy-only words for the `beside` pair: a count of the holds that have started,
+  # and the release that ends them. The wait has a hang limit that ends the run
+  # with status 76 and its own sentence.
+  @[UnsafeReach("copy-only beside holds started, counted atomically")]
+  @@forced_beside_entered : UInt64 = 0_u64
+  @[UnsafeReach("copy-only beside release, set once")]
+  @@forced_beside_released : UInt64 = 0_u64
+
+  @[NoInline]
+  @[NoPreempt]
+  def self.forced_beside_hold : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_entered).address).value.add(1_u64)
+    released = Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_released).address)
+    until_ns = __iyi_monotonic_ns + 60_000_000_000_i64
+    while released.value.get == 0_u64
+      if __iyi_monotonic_ns >= until_ns
+        print "FAIL: beside: a held spawn was not released within 60 seconds\n"
+        __iyi_exit(76)
+      end
+      IyiThread.spin_pause
+    end
+  end
+
+  # Waits until at least `count` holds have started, each on a worker of its own.
+  def self.forced_beside_wait_entered(count : Int64) : Nil
+    cell = Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_entered).address)
+    until_ns = __iyi_monotonic_ns + 60_000_000_000_i64
+    while cell.value.get < count.to_u64
+      if __iyi_monotonic_ns >= until_ns
+        print "FAIL: beside: #{count} held spawns did not all start within 60 seconds\n"
+        __iyi_exit(76)
+      end
+      IyiThread.spin_pause
+    end
+  end
+
+  def self.forced_beside_release : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_beside_released).address).value.set(1_u64)
+  end
+
+  # Copy-only owe arms for the `beside_owed` control: the first `forced_owe_arm`
+  # grows take their owed start, with no launch, and leave it for `pay`.
+  @[UnsafeReach("copy-only owe arm count, read and taken atomically")]
+  @@forced_owe_arms : UInt64 = 0_u64
+
+  def self.forced_owe_arm(count : UInt64) : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_owe_arms).address).value.set(count)
+  end
+
+  def self.forced_owe_take : Bool
+    cell = Pointer(Atomic(UInt64)).new(pointerof(@@forced_owe_arms).address)
+    return false if cell.value.get == 0_u64
+    cell.value.add(0_u64 &- 1_u64)
+    true
+  end
+
+  def self.forced_enter : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_entered).address).value.set(1_u64)
+  end
+
+  def self.forced_set_pushed : Nil
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_pushed).address).value.set(1_u64)
+  end
+
+  def self.forced_wait_entered : Nil
+    forced_wait(pointerof(@@forced_entered).address, "the pool's first worker never made its first empty look")
+  end
+
+  def self.forced_wait_pushed : Nil
+    forced_wait(pointerof(@@forced_pushed).address, "the pool's first spawn never pushed a task")
+  end
+
+  private def self.forced_wait(address : UInt64, sentence : String) : Nil
+    cell = Pointer(Atomic(UInt64)).new(address)
+    until_ns = __iyi_monotonic_ns + 10_000_000_000_i64
+    while cell.value.get == 0_u64
+      if __iyi_monotonic_ns >= until_ns
+        print "FAIL: #{sentence}\n"
+        __iyi_exit(76)
+      end
+      IyiThread.spin_pause
+    end
+  end
+
+  # A sound same-unit fiber must not wait for a unit-mate: its placement
+  # decision is already recorded in fiber.parallel. A wrongly pooled fiber
+  # waits for another wrongly pooled fiber, making overlap observable.
+  def self.forced_meet : Bool
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_seen).address).value.add(1_u64)
+    return true unless IyiScheduler.current.parallel
+    cell = Pointer(Atomic(UInt64)).new(pointerof(@@forced_met).address)
+    cell.value.add(1_u64)
+    until_ns = __iyi_monotonic_ns + 10_000_000_000_i64
+    while cell.value.get < 2_u64
+      if __iyi_monotonic_ns >= until_ns
+        print "FAIL: serial: a second spawn(unit: :same) task never ran beside the first within 10 seconds\n"
+        __iyi_exit(76)
+      end
+      IyiThread.spin_pause
+    end
+    true
+  end
+
+  def self.forced_unit_placement : Bool
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_seen).address).value.add(1_u64)
+    !IyiScheduler.current.parallel
+  end
+
+  def self.forced_parallel_placement : Bool
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_seen).address).value.add(1_u64)
+    IyiScheduler.current.parallel
+  end
+
+  def self.forced_seen : UInt64
+    Pointer(Atomic(UInt64)).new(pointerof(@@forced_seen).address).value.get
+  end
+
+IYI
+
+# Of the runtime: each a copy of src/iyi with concurrency.iyi changed, built
+# against through IYI_PATH; nothing in the tree is touched. A proof's build
+# flags come after its name (`-D…_force`), so only its forced block is
+# compiled.
+forced_words() { # file: the copy-only words go in before the pool's start
+  awk -v words="$WORK/forced_words.iyi" '
+    /^  # The pool, started once, on the thread of the first parallel spawn,$/ {
+      while ((getline line < words) > 0) print line
+      close(words)
+      found++
+    }
+    { print } END { if (found != 1) exit 3 }' "$1" > "$1.new" ||
+    { echo "the pool's start is not in the runtime any more"; exit 1; }
+  mv "$1.new" "$1"
+}
+broken() { # name, awk program, build flags...
+  local name="$1" program="$2"
+  shift 2
+  mkdir -p "$name/iyi"
+  cp "$REPO"/src/iyi/*.iyi "$name/iyi/"
+  awk "$program" "$REPO/src/iyi/concurrency.iyi" > "$name/iyi/concurrency.iyi" ||
+    { echo "the awk for $name failed: an anchor is missing or duplicated"; exit 1; }
+  if cmp -s "$name/iyi/concurrency.iyi" "$REPO/src/iyi/concurrency.iyi"; then
+    echo "the awk for $name found nothing to change"; exit 1
   fi
-  if ! IYI_PATH="$WORK/$1${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_eligible.iyi" -o "$1-run" > "build-$1.log" 2>&1; then
-    echo "the broken copy $1 failed to build:"; tail -20 "build-$1.log"; exit 1
+  forced_words "$name/iyi/concurrency.iyi"
+  if ! IYI_PATH="$WORK/$name${PSEP}$REPO/src" "$IYI" build "$@" "$REPO/bench/spawn_eligible.iyi" -o "$name-run" > "build-$name.log" 2>&1; then
+    echo "the broken copy $name failed to build:"; tail -20 "build-$name.log"; exit 1
   fi
 }
-# A run that ends any way but exit 1 at the sentence is run again, up to
-# five times, as bench/parallel_exercise.sh's are: a broken copy that races
-# on purpose can lose the race some other way first.
-caught() { # name, expected FAIL text, step arguments...
-  local name="$1" want="$2" code attempt
+# One run, which must exit 1 at its one named sentence. The sentence is the
+# whole FAIL line (C1): a prefix, or a run that fails some other way, is not
+# the proof.
+caught() { # name, exact sentence, step arguments...
+  local name="$1" want="$2" code
   shift 2
-  for attempt in 1 2 3 4 5; do
-    timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
-    code=$?
-    [ "$code" -eq 1 ] && grep -qF "$want" "$name.txt" && break
-  done
-  if [ "$code" -ne 1 ] || ! grep -qF "$want" "$name.txt"; then
+  timeout -k 5 120 "./$name-run" "$@" > "$name.txt" 2>&1
+  code=$?
+  if [ "$code" -ne 1 ] || ! grep -qxF "FAIL: $want" "$name.txt"; then
     echo "the broken copy $name was not caught at \"$want\" (exit $code):"; tail -20 "$name.txt"; exit 1
   fi
-  echo "  exits 1 at \"$(grep -m1 -F "$want" "$name.txt" | sed 's/^FAIL: //')\""
+  echo "  exits 1 at \"$want\""
 }
 
 step "failure proof: an eligible spawn left in its unit"
-broken leftserial '/^      return in_unit\(&block\) unless IyiWorkers.parallel\?$/ { print "      return in_unit(&block)"; next } { print }'
-caught leftserial 'eligible spawns waited 2000 ms for the others and left alone' together --workers=4
+broken leftserial '/^    private def spawn_pooled\(/ { inside = 1; defs++ } inside && /^      return in_unit\(&block\) unless IyiWorkers.parallel\?$/ { print "      return in_unit(&block)"; hits++; next } inside && /^    end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }' -Dplacement_force
+caught leftserial 'eligible placement: a spawn stayed in its unit' eligible_placement --workers=4
+broken eligible_control '/^    private def spawn_pooled\(/ { print; print "      # placement control"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dplacement_force
+timeout -k 5 120 ./eligible_control-run eligible_placement --workers=4 > eligible_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'eligible placement: 4 tasks ran on the pool' eligible_control.txt; then
+  echo "the eligible placement control failed (exit $code):"; tail -20 eligible_control.txt; exit 1
+fi
+echo "  eligible placement control: 4 tasks ran on the pool"
 
 step "failure proof: an ineligible spawn sent to the pool"
-broken madeparallel '/^  def spawn\(&block/ { inspawn = 1 } inspawn && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; inspawn = 0; next } { print }'
-caught madeparallel 'tasks of one unit were running at one instant' unit --workers=4
+broken madeparallel '/^  def spawn\(&block/ { inside = 1; defs++ } inside && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; hits++; next } inside && /^  end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }' -Dmadeparallel_force
+caught madeparallel 'unit: tasks of one unit were running at one instant' unit --workers=4
+broken madeparallel_control '/^  def spawn\(&block/ { print; print "    # placement hook control"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dmadeparallel_force
+timeout -k 5 120 ./madeparallel_control-run unit --workers=4 > madeparallel_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'unit: placement hook saw 4 tasks' madeparallel_control.txt; then
+  echo "the sound placement hook control failed (exit $code):"; tail -20 madeparallel_control.txt; exit 1
+fi
+echo "  sound placement hook: unit saw 4 tasks"
 
 step "failure proof: unit: :same sent to the pool"
-broken optoutignored '/^  def spawn\(\*, unit : Symbol, &block/ { inserial = 1 } inserial && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; inserial = 0; next } { print }'
-caught optoutignored 'spawn(unit: :same) tasks were running at one instant' serial --workers=4
+broken optoutignored '/^  def spawn\(\*, unit : Symbol, &block/ { inside = 1; defs++ } inside && /^    in_unit\(&block\)$/ { print "    on_pool(false, &block)"; hits++; next } inside && /^  end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }' -Doptoutignored_force
+caught optoutignored 'serial: spawn(unit: :same) tasks were running at one instant inside a parallel task' serial --workers=4
+broken optout_control '/^  def spawn\(\*, unit : Symbol, &block/ { print; print "    # placement hook control"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Doptoutignored_force
+timeout -k 5 120 ./optout_control-run serial --workers=4 > optout_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'serial: placement hook saw 8 tasks' optout_control.txt; then
+  echo "the sound placement hook control failed (exit $code):"; tail -20 optout_control.txt; exit 1
+fi
+echo "  sound placement hook: serial saw 8 tasks"
 
 step "failure proof: unit: :new left in its unit"
-broken askedignored '/^    private def spawn_new\(/ { inasked = 1 } inasked && /^      on_pool\(pinned, &block\)$/ { print "      in_unit(&block)"; inasked = 0; next } { print }'
-caught askedignored 'spawn(unit: :new) tasks waited 2000 ms for the others and left alone' asked --workers=4
-caught askedignored 'spawn(unit: :new) tasks ran on the spawner'"'"'s thread on a pool of one' askedone --workers=1
+broken askedignored '/^    private def spawn_new\(/ { inside = 1; defs++ } inside && /^      on_pool\(pinned, &block\)$/ { print "      in_unit(&block)"; hits++; next } inside && /^    end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }' -Dplacement_force
+caught askedignored 'asked placement: a spawn stayed in its unit' asked_placement --workers=4
+broken asked_control '/^    private def spawn_new\(/ { print; print "      # placement control"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dplacement_force
+timeout -k 5 120 ./asked_control-run asked_placement --workers=4 > asked_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'asked placement: 4 tasks ran on the pool' asked_control.txt; then
+  echo "the asked placement control failed (exit $code):"; tail -20 asked_control.txt; exit 1
+fi
+echo "  asked placement control: 4 tasks ran on the pool"
+caught askedignored "askedone: spawn(unit: :new) tasks ran on the spawner's thread on a pool of one" askedone --workers=1
 
 step "failure proof: a pool of one that starts for eligible spawns"
-broken oneignored '/^  def self.parallel\? : Bool$/ { print; print "    return true"; next } { print }'
-caught oneignored 'one: ' one --workers=1
+broken oneignored '/^  def self.parallel\? : Bool$/ { print; print "    return true"; hits++; next } { print } END { if (hits != 1) exit 3 }'
+caught oneignored "one: eligible spawns ran on a pool worker, with one worker asked for" one --workers=1
 
 step "failure proof: a pool that starts every worker at once"
-broken wholepool '/^      start_monitor$/ { print "      while word(pointerof(@@launched)).value.get < @@started.to_i64"; print "        word(pointerof(@@launched)).value.add(1_i64)"; print "        word(pointerof(@@spinning)).value.add(1_i64)"; print "        IyiThread.start { IyiWorkers.work }"; print "      end" } { print }'
-caught wholepool 'grows: one eligible spawn started 4 of' grows --workers=4
+broken wholepool '/^  def self.start : Nil$/ { inside = 1; defs++ } inside && /^      start_monitor$/ { print "      while word(pointerof(@@launched)).value.get < @@started.to_i64"; print "        word(pointerof(@@launched)).value.add(1_i64)"; print "        word(pointerof(@@spinning)).value.add(1_i64)"; print "        IyiThread.start { IyiWorkers.work }"; print "      end"; hits++ } inside && /^  end$/ { inside = 0 } { print } END { if (defs != 1 || hits != 1) exit 3 }'
+caught wholepool "grows: one eligible spawn started 4 of the pool's 4 workers" grows --workers=4
 
 step "failure proof: a pool that never starts a second worker"
-broken nevergrows '/^  def self.grow : Nil$/ { print; print "    return"; next } { print }'
-caught nevergrows 'grows: 4 eligible spawns running at one instant started 1 of' grows --workers=4
+broken nevergrows '/^  def self.grow : Nil$/ { print; print "    return if forced_growth_armed? && IyiSchedLock.held_here?"; print "    return"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dgrowth_force
+caught nevergrows "growth: queued work did not start another worker" growth --workers=4
+broken growth_control '/^  def self.grow : Nil$/ { print; print "    return if forced_growth_armed? && IyiSchedLock.held_here?"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dgrowth_force
+timeout -k 5 120 ./growth_control-run growth --workers=4 > growth_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'growth: queued work started another worker' growth_control.txt; then
+  echo "the sound growth control failed (exit $code):"; tail -20 growth_control.txt; exit 1
+fi
+echo "  sound growth control: queued work started another worker"
 
-# A worker the pool starts holds the token of the one out looking until
-# its look finds a task or it has counted itself idle
-# (`IyiScheduler.idle_worker`), so a push between its empty look and its
-# count finds the token taken and starts nobody, and the look after the
-# count finds the task. The token went back before the count, and
-# `grows`'s one spawn, landing there, found none idle and the token free
-# and started a second worker: on a darwin CI runner (run 42187717533),
-# in 17 of 8,000 runs on Linux (12 vCPU, shared), and in none of 8,000 on
-# macOS 26.6, Apple M2 Pro, 10 cores, or 2,000 on Windows 11, 12 logical
-# processors (the user's machines). No count of runs proves that, so the
-# window is held open: the main thread waits 50 ms after the pool's start
-# before its push, and the first worker's first empty look waits 200 ms
-# before it counts itself idle. Held open in every worker's first look,
-# the wait also let `grows`'s four tasks all arrive on fewer workers, time
-# sliced, and its last check failed one run of 20 on the Windows machine
-# with the token held through the wait; `grows`'s tasks now also wait for
-# the pool, which the late-start steps below hold. Given back first, the
-# copy below started a second worker in 20 runs of 20 on each of the three
-# machines, owing the start each time; with the same waits before the
-# token went back, 20 of 20 held on each.
+step "failure proof: a spawn queued beside running ones starts no worker, and a pool that stops at two is caught at the third"
+broken beside_broken '/^  def self.grow : Nil$/ { print; print "    return"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dbeside_force
+caught beside_broken 'beside: a spawn made while others were running started no worker' beside --workers=4
+broken beside_stop2 '/^  def self.grow : Nil$/ { print; print "    return if word(pointerof(@@launched)).value.get >= 2_i64"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dbeside_force
+caught beside_stop2 'beside: a spawn made while others were running started no worker' beside --workers=4
+broken beside_control '/^  def self.grow : Nil$/ { print; print "    # beside placement control"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dbeside_force
+timeout -k 5 120 ./beside_control-run beside --workers=4 > beside_control.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'beside: 4 spawns each started a worker beside the ones before, which were running' beside_control.txt; then
+  echo "the sound beside control failed (exit $code):"; tail -20 beside_control.txt; exit 1
+fi
+echo "  sound beside control: 4 spawns each started a worker beside the ones before, which were running"
+
+step "failure proof: a start owed for a second spawn is paid by the spawner before its verdict"
+broken beside_owed '/^  def self.grow : Nil$/ { print; print "    if forced_owe_take"; print "      word(pointerof(@@owed)).value.set(1_i64)"; print "      IyiStat.add(IyiStat::OWES, 1_u64)"; print "      return"; print "    end"; hits++; next } { print } END { if (hits != 1) exit 3 }' -Dbeside_force -Dbeside_owed_force
+timeout -k 5 120 ./beside_owed-run beside --workers=4 > beside_owed.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -qxF 'beside: owed starts for the second spawn: 2 (information)' beside_owed.txt || ! grep -qxF 'beside: 4 spawns each started a worker beside the ones before, which were running' beside_owed.txt; then
+  echo "the owed-start control failed (exit $code):"; tail -20 beside_owed.txt; exit 1
+fi
+echo "  owed-start control: the second spawn owed two starts, the spawner paid them, and the verdict held"
+
+# A worker the pool starts holds the token of the one out looking until its
+# look finds a task or it has counted itself idle (`IyiScheduler.idle_worker`),
+# so a push that finds the token taken starts nobody. The window between the
+# first worker's empty look and its count is held open by words, not clocks:
+# the look sets ENTERED and waits for PUSHED; the pool's start waits for
+# ENTERED before the first spawn pushes; the spawn sets PUSHED after its own
+# `pay`. The healthy copy holds the token through the window, so the push
+# starts no second worker. The early copy gives the token back before the
+# window, so the push starts one, and the run reports 2 of the pool's 4
+# workers on its one run.
 step "a spawn landing between a worker's empty look and its idle count starts no second worker"
 mkdir -p widened/iyi
 cp "$REPO"/src/iyi/*.iyi widened/iyi/
-awk '/^  def self\.work : Nil$/ { inwork = 1 }
-  inwork && /^      while true$/ { print "      widened = slot != 0_i64"; inwork = 0; a = 1 }
-  /^          IyiScheduler\.idle_worker\(st\)$/ {
+awk '/^  def self\.work : Nil$/ { inwork = 1; workdefs++ }
+  /^  def self\.start : Nil$/ { instart = 1; startdefs++ }
+  /^    private def pooled\(/ { inpooled = 1; pooleddefs++ }
+  inwork && /^      while true$/ { print "      widened = slot != 0_i64"; a++ }
+  inwork && /^          IyiScheduler\.idle_worker\(st\)$/ {
     print "          unless widened"
     print "            widened = true"
-    print "            until_ns = __iyi_monotonic_ns + 200_000_000_i64"
-    print "            while __iyi_monotonic_ns < until_ns"
-    print "              IyiThread.spin_pause"
-    print "            end"
+    print "            IyiWorkers.forced_enter"
+    print "            IyiWorkers.forced_wait_pushed"
     print "          end"
-    b = 1 }
-  /^      start_monitor$/ { print
-    print "      until_ns = __iyi_monotonic_ns + 50_000_000_i64"
-    print "      while __iyi_monotonic_ns < until_ns"
-    print "        IyiThread.spin_pause"
-    print "      end"
-    c = 1; next }
-  { print } END { if (!a || !b || !c) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > widened/iyi/concurrency.iyi ||
-  { echo "the worker's look and the pool's start this step holds open are not in the runtime any more"; exit 1; }
+    b++ }
+  instart && /^      start_monitor$/ { print; print "      IyiWorkers.forced_wait_entered"; c++; next }
+  inpooled && /^      IyiWorkers\.pay$/ { print; print "      IyiWorkers.forced_set_pushed"; d++; next }
+  inwork && /^  end$/ { inwork = 0 }
+  instart && /^  end$/ { instart = 0 }
+  inpooled && /^    end$/ { inpooled = 0 }
+  { print } END { if (workdefs != 1 || startdefs != 1 || pooleddefs != 1 || a != 1 || b != 1 || c != 1 || d != 1) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > widened/iyi/concurrency.iyi ||
+  { echo "the worker's look, the pool's start and the spawn's push this step holds are not in the runtime any more"; exit 1; }
+forced_words widened/iyi/concurrency.iyi
 if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_eligible.iyi" -o widened-run > build-widened.log 2>&1; then
   echo "the widened copy failed to build:"; tail -20 build-widened.log; exit 1
 fi
-for run in 1 2 3; do
-  timeout -k 5 120 ./widened-run grows --workers=4 > widened.txt 2>&1
-  code=$?
-  if [ "$code" -ne 0 ] || ! grep -q 'every property held' widened.txt; then
-    echo "  run $run of 3 with the look held open failed (exit $code):"; cat widened.txt; exit 1
-  fi
-done
-echo "  three runs with the look held open: $(grep -m1 '^grows: one' widened.txt | sed 's/,.*//')"
+timeout -k 5 120 ./widened-run grows --workers=4 > widened.txt 2>&1
+code=$?
+if [ "$code" -ne 0 ] || ! grep -q 'every property held' widened.txt; then
+  echo "the healthy copy with the window held open failed (exit $code):"; cat widened.txt; exit 1
+fi
+echo "  the window held open, and the push after it: $(grep -m1 '^grows: one' widened.txt | sed 's/,.*//')"
 
 step "failure proof: the token given back before the idle count"
 mkdir -p early/iyi
 cp "$REPO"/src/iyi/*.iyi early/iyi/
-awk '/^          IyiScheduler\.release_unit\(st\)$/ { print "          stop_spinning(st, false)"; found = 1 }
-  { print } END { if (!found) exit 3 }' widened/iyi/concurrency.iyi > early/iyi/concurrency.iyi ||
+awk '/^  def self\.work : Nil$/ { inside = 1; defs++ }
+  inside && /^          IyiScheduler\.release_unit\(st\)$/ { print "          stop_spinning(st, false)"; found++ }
+  inside && /^  end$/ { inside = 0 }
+  { print } END { if (defs != 1 || found != 1) exit 3 }' widened/iyi/concurrency.iyi > early/iyi/concurrency.iyi ||
   { echo "the worker's way to idle this proof reorders is not in the runtime any more"; exit 1; }
 if ! IYI_PATH="$WORK/early${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_eligible.iyi" -o early-run > build-early.log 2>&1; then
   echo "the broken copy early failed to build:"; tail -20 build-early.log; exit 1
 fi
-caught early 'grows: one eligible spawn started 2 of' grows --workers=4
-
-# `grows`'s four tasks spin until all have arrived and the pool has
-# launched its four workers (`together`'s *pool*). Arrival alone is not
-# the precondition its count needs: the pool starts one worker at a time,
-# the next called for by the one before once it finds a task, and the
-# tasks take turns on the workers already up while one is on its way
-# (SPEC.md III.4.13, part 9), so they could all arrive and end before it
-# looked, and it found nothing to call the next for. On a Windows CI runner
-# the step above read "started 3 of the pool's 4 workers" so (job
-# 135727245245), and in 1 of 1,900 runs of that copy on Windows 11 with 12
-# logical processors. Held open here: a copy of the runtime whose every
-# worker's thread waits 50 ms before its first look. `grows` holds on it,
-# and the step as it was, its tasks waiting only for each other, exits 1
-# on it: 30 runs of 30 each way on that Windows machine and on Linux (12
-# vCPU).
-step "four tasks wanting to run at once fill the pool on a runtime whose workers each start 50 ms late"
-mkdir -p latestart/iyi
-cp "$REPO"/src/iyi/*.iyi latestart/iyi/
-awk '/^  def self\.work : Nil$/ { print; getline; print
-    print "      late = __iyi_monotonic_ns + 50000000_i64"
-    print "      while __iyi_monotonic_ns < late"
-    print "        IyiThread.spin_pause"
-    print "      end"
-    found = 1; next }
-  { print } END { if (!found) exit 3 }' \
-  "$REPO/src/iyi/concurrency.iyi" > latestart/iyi/concurrency.iyi || { echo "the worker's start this step delays is not in the runtime any more"; exit 1; }
-if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_eligible.iyi" -o latestart-run > build-latestart.log 2>&1; then
-  echo "the late-start copy failed to build:"; tail -20 build-latestart.log; exit 1
-fi
-for run in 1 2 3; do
-  timeout -k 5 120 ./latestart-run grows --workers=4 > latestart.txt 2>&1
-  code=$?
-  if [ "$code" -ne 0 ] || ! grep -q 'every property held' latestart.txt; then
-    echo "  run $run of 3 with every worker starting 50 ms late failed (exit $code):"; cat latestart.txt; exit 1
-  fi
-done
-echo "  three runs with every worker starting 50 ms late: $(grep -m1 '^grows: one' latestart.txt | sed 's/^.*, and //')"
-
-step "failure proof: grows's tasks waiting only for each other are caught on that runtime"
-awk '$0 == "    together(\"grows\", pool: true)" { print "    together(\"grows\")"; found = 1; next }
-  { print } END { if (!found) exit 3 }' \
-  "$REPO/bench/spawn_eligible.iyi" > arrived_only.iyi || { echo "the wait for the pool this proof removes is not in bench/spawn_eligible.iyi any more"; exit 1; }
-if ! IYI_PATH="$WORK/latestart${PSEP}$REPO/src" "$IYI" build arrived_only.iyi -o arrivedonly-run > build-arrivedonly.log 2>&1; then
-  echo "the broken copy arrivedonly failed to build:"; tail -20 build-arrivedonly.log; exit 1
-fi
-caught arrivedonly 'grows: 4 eligible spawns running at one instant started' grows --workers=4
+caught early "grows: one eligible spawn started 2 of the pool's 4 workers" grows --workers=4
 
 step "failure proof: spawn_parallel kept as an alias"
 mkdir -p alias/iyi
 cp "$REPO"/src/iyi/*.iyi alias/iyi/
-awk '/^    private def spawn_new\(/ { print "    def spawn_parallel(&block : -> T) : IyiTask(T) forall T"; print "      on_pool(false, &block)"; print "    end"; print "" } { print }' \
-  "$REPO/src/iyi/concurrency.iyi" > alias/iyi/concurrency.iyi
+awk '/^    private def spawn_new\(/ { print "    def spawn_parallel(&block : -> T) : IyiTask(T) forall T"; print "      on_pool(false, &block)"; print "    end"; print ""; found++ } { print } END { if (found != 1) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > alias/iyi/concurrency.iyi ||
+  { echo "the alias anchor is missing or duplicated"; exit 1; }
 if cmp -s alias/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi"; then
   echo "the awk for alias found nothing to change"; exit 1
 fi
@@ -866,8 +1070,9 @@ echo "  caught: with the alias, spawn_parallel at old.iyi:5 is not refused ($(gr
 step "failure proof: serial: kept as an alias"
 mkdir -p serial_alias/iyi
 cp "$REPO"/src/iyi/*.iyi serial_alias/iyi/
-awk '/^  def spawn\(\*, unit : Symbol, &block/ { print "  def spawn(*, serial : Bool, &block : -> T) : IyiTask(T) forall T"; print "    in_unit(&block)"; print "  end"; print "" } { print }' \
-  "$REPO/src/iyi/concurrency.iyi" > serial_alias/iyi/concurrency.iyi
+awk '/^  def spawn\(\*, unit : Symbol, &block/ { print "  def spawn(*, serial : Bool, &block : -> T) : IyiTask(T) forall T"; print "    in_unit(&block)"; print "  end"; print ""; found++ } { print } END { if (found != 1) exit 3 }' \
+  "$REPO/src/iyi/concurrency.iyi" > serial_alias/iyi/concurrency.iyi ||
+  { echo "the serial alias anchor is missing or duplicated"; exit 1; }
 if cmp -s serial_alias/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi"; then
   echo "the awk for serial_alias found nothing to change"; exit 1
 fi

@@ -8,6 +8,17 @@ class LLVM::Context
     @builders = [] of LLVM::Builder
   end
 
+  # iyi: whether the values made in this context keep the names given to
+  # them. A global's name is its symbol and is always kept; a local value's
+  # or a block's is read by nothing but a person reading the IR. Ignored
+  # before LLVM 10, whose C API cannot say it.
+  def discard_value_names=(discard : Bool) : Bool
+    {% unless LibLLVM::IS_LT_100 %}
+      LibLLVM.context_set_discard_value_names(self, discard ? 1 : 0)
+    {% end %}
+    discard
+  end
+
   def new_module(name : String) : Module
     Module.new(LibLLVM.module_create_with_name_in_context(name, self), self)
   end

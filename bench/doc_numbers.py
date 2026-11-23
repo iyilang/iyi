@@ -403,7 +403,7 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     # one file disagreed with itself by 25,747 lines: the row above covers the
     # comparison table, this one the release's own numbers table, and only the
     # first of them existed.
-    ("compiler", r"\| ([\d,]+) lines, none of it written in iyi", "SPEC.md", 1),
+    ("compiler", r"\| hosted compiler \| ([\d,]+) lines of Crystal \|", "SPEC.md", 1),
     ("spec_iyi", r"\| ([\d,]+) for iyi \|", "SPEC.md", 1),
     # The artifact format, which drifted furthest of anything here: the
     # sentence said v19 while the compiler wrote v51.

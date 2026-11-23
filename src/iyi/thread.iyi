@@ -409,6 +409,7 @@
     # Every thread object started and not yet running, so a body's closure
     # is rooted from `start` until the thread that runs it holds it on its
     # own stack, and no longer (`run`).
+    @[UnsafeReach("the started threads' list, linked and unlinked under the runtime lock; every IyiThread is born in the shared heap")]
     @@head : IyiThread?
 
     @line : UInt64
@@ -488,11 +489,17 @@
       @@line
     end
 
-    @@stops : UInt64 = 0_u64
-    @@stopped : UInt64 = 0_u64
-    @@stop_ns : UInt64 = 0_u64
-    @@owing_stops : UInt64 = 0_u64
-    @@turn_waits_out : UInt64 = 0_u64
+    {% if flag?(:win32) %}
+      # The cache page this thread's `take` uses now, where the stopper
+      # reads it (`suspend_others`): every swap of `IyiHeap`'s installed
+      # cache writes it here too (`IyiHeap.install`). An unregistered
+      # thread has no line and no stopper reading one; its registration
+      # writes the page installed then.
+      def self.publish_cache(page : UInt64) : Nil
+        line = @@line
+        IyiHeap.write64(line + IYI_TL_CACHE, page) if line != 0
+      end
+    {% end %}
 
     # The running thread's stack top, 0 for an unregistered thread, whose
     # stack is the base `IyiRoots` discovered.
@@ -506,17 +513,17 @@
     # stopped at least one other thread, and threads stopped in all.
     # Written under the lock, read by whoever.
     def self.stops : UInt64
-      @@stops
+      IyiStat.get(IyiStat::STOPS)
     end
 
     def self.stopped : UInt64
-      @@stopped
+      IyiStat.get(IyiStat::STOPPED)
     end
 
     # Nanoseconds spent from the first signal to the last count-in, in
     # all: the stop half of every pause, on the collector's clock.
     def self.stop_ns : UInt64
-      @@stop_ns
+      IyiStat.get(IyiStat::STOP_NS)
     end
 
     # Stops that began while a thread the stop before had parked in the
@@ -529,11 +536,11 @@
     # first than of the second, and a runtime without the wait began 86
     # to 464,783 a run on 12 vCPUs.
     def self.owing_stops : UInt64
-      @@owing_stops
+      IyiStat.get(IyiStat::OWING_STOPS)
     end
 
     def self.turn_waits_out : UInt64
-      @@turn_waits_out
+      IyiStat.get(IyiStat::TURN_WAITS_OUT)
     end
 
     # The program's own threads: every registered one, and the main
@@ -541,6 +548,23 @@
     # program leaves the cores to on Windows.
     def self.program_threads : UInt64
       @@count > 1_i64 ? @@count.to_u64 : 1_u64
+    end
+
+    # Whether a thread besides the calling one has been started and has
+    # not ended: one on the stops' list, or one started and not running
+    # yet - on darwin, and on Linux when libc made it, a thread puts itself
+    # on the list only once it runs (`run`, `link`), so `program_threads`
+    # was 1 in the instant after `start` returned. Read under the lock both
+    # change under; a thread leaves `@@head` after it has linked itself, so
+    # one coming is never between the two. std/mutex's deadlock check
+    # (`Mutex.alone?`) reads it: on macOS 26.6 (tmac), a `wait_for` right
+    # after starting the thread that would answer it panicked "deadlock"
+    # on every chaos seed 1-8 with one worker.
+    def self.others_started? : Bool
+      IyiRuntimeLock.lock
+      others = @@count > 1_i64 || !@@head.nil?
+      IyiRuntimeLock.unlock
+      others
     end
 
     @[Effect(:threads)]; def self.new_line : UInt64
@@ -633,7 +657,14 @@
       start(block)
     end
 
+    # A proc, unlike a block, is not checked where it is written: its
+    # captures and the module state it reaches were never held to the
+    # rule a thread's block is (SPEC.md III.4.4, III.4.5).
+    @[Unsafe(call: "the proc's captures are Share and it reaches no module state that is not Share or claimed")]
     @[Effect(:threads)]; def self.start(proc : Proc(Nil)) : IyiThread
+      # What the proc captured is read on the new thread, which allocates
+      # in the shared heap (heap22 row 1c), as the thread object is made.
+      IyiCross.publish(proc)
       register_current
       install_handler
       # A second scheduler thread is coming: from here fibers on two
@@ -641,7 +672,13 @@
       # (SPEC.md III.4.13). Said before the thread exists, so it never
       # runs a fiber the lock does not cover.
       IyiScheduler.expect_thread
+      # `IYI_CHAOS_LATE_THREADS`: a thread that links itself does so only
+      # once this one has nothing to run (`IyiChaos.hold_start`).
+      {% if flag?(:iyi_chaos) %}
+        IyiChaos.hold_start
+      {% end %}
       line = new_line
+      # Born in the shared heap by codegen (`__iyi_new_shared`, heap22).
       thread = IyiThread.new(line, proc)
       IyiHeap.write64(line + IYI_TL_OBJECT, thread.object_id)
       # Rooted before anything else can run: the list is a class variable.
@@ -812,9 +849,17 @@
       # made: no stop names it before, and nothing it did before allocates
       # from the heap or holds a pointer into it.
       {% if flag?(:darwin) %}
+        {% if flag?(:iyi_chaos) %}
+          IyiChaos.wait_late
+        {% end %}
         link(line)
       {% elsif flag?(:linux) %}
-        link(line) if program_calls_c?
+        if program_calls_c?
+          {% if flag?(:iyi_chaos) %}
+            IyiChaos.wait_late
+          {% end %}
+          link(line)
+        end
       {% end %}
       # An alternate signal stack is a thread's own, so a stack overflow on
       # this thread has somewhere to say so (`IyiStackGuard`).
@@ -1124,7 +1169,7 @@
       {% end %}
       started = IyiMark.now_ns
       page = control
-      @@owing_stops = @@owing_stops + 1_u64 if word(page + IYI_TC_TURNS).value.get != 0_u64
+      IyiStat.bump(IyiStat::OWING_STOPS, 1_u64) if word(page + IYI_TC_TURNS).value.get != 0_u64
       # The last stop's threads out of their park before its words are
       # cleared: one still inside reads the release word, and cleared
       # under it, the release it was given is taken back. On Windows the
@@ -1169,9 +1214,9 @@
         end
         wait_count(page + IYI_TC_SUSPENDED, others.to_u64)
       {% end %}
-      @@stops = @@stops + 1_u64
-      @@stopped = @@stopped + others.to_u64
-      @@stop_ns = @@stop_ns + (IyiMark.now_ns - started).to_u64
+      IyiStat.bump(IyiStat::STOPS, 1_u64)
+      IyiStat.bump(IyiStat::STOPPED, others.to_u64)
+      IyiStat.bump(IyiStat::STOP_NS, (IyiMark.now_ns - started).to_u64)
       others
     end
 
@@ -1351,7 +1396,7 @@
         yield_cpu
       end
       # Not under the lock: two collections can wait at once.
-      word(pointerof(@@turn_waits_out).address).value.add(1_u64) if turns.value.get != 0_u64
+      IyiStat.add(IyiStat::TURN_WAITS_OUT, 1_u64) if turns.value.get != 0_u64
     end
 
     # The cores this process may run on: what the marker sizes its

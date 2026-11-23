@@ -76,6 +76,49 @@ EDITS = 40
 PAUSE_EVERY = 10
 PAUSE = 2.2
 
+# `Proxy::RETIRE_FOOTPRINT`, in resident megabytes, and the modules whose
+# one compile reaches it on their own, heaviest first (2026-11-18, Linux:
+# std/autocert 527, std/acme 514, std/websocket 500, std/http 495). The
+# first that reaches it is the one the step below asks questions in.
+RETIRE_FOOTPRINT = 512
+HEAVY = ["autocert", "acme", "websocket", "http", "tls"]
+# Questions in it, and the workers they may take: the first may be retired
+# once on the bound, before it has said what one compile cost, and one
+# question that compiles more may grow past what a successor costs. Before
+# the proxy learned that cost every question took one (230 workers for
+# the 379 of std/acme's cursor sweep).
+HEAVY_QUESTIONS = 40
+HEAVY_WORKERS = 4
+
+# What a workspace pull may hold is not a number of its own but what the
+# design promises: a worker stops the pull between files once it has
+# said it holds `RETIRE_FOOTPRINT` (`Server#workspace_diagnostic`), so it
+# can be past that bound by the one compile it started just under it, and
+# by up to `FOOTPRINT_STEP` it had not said yet; the proxy holds its own
+# megabytes beside it. The pull was held to TYPING_CEILING_MB until the
+# samples outgrew it: samples/iyi/cores.iyi, std/http and its TLS under
+# it, costs a fresh worker 441 MB in one compile (467 before heap22 and
+# master met, 503 after, on a Linux workstation), the pull's worker
+# reached 695 MB beside a 62 MB proxy, and CI's runners read 761 and 764
+# against 760 (jobs 135393771372, 135394235741). So the bound is that sum,
+# each part measured on the run: the costliest sample's one compile past
+# a fresh worker's start, the step, the proxy's largest. A pull that does
+# not stop - one process, `--direct` - holds every sample's compile at
+# once, past 1.4 GB.
+FOOTPRINT_STEP = 32
+
+
+def pull_bound(proxy_mb):
+    """The bound a pull over samples/iyi is held to here, and what it is
+    made of."""
+    costs = {path.name: one_compile_mb(path) for path in sorted((REPO / "samples" / "iyi").glob("*.iyi"))}
+    name, (fresh, held) = max(costs.items(), key=lambda kv: kv[1][1] - kv[1][0])
+    added = held - fresh
+    bound = RETIRE_FOOTPRINT + added + FOOTPRINT_STEP + proxy_mb
+    return bound, (f"{RETIRE_FOOTPRINT} MB budget + {added} MB for {name}'s one compile "
+                   f"+ {FOOTPRINT_STEP} MB step + {proxy_mb} MB proxy")
+
+
 FAILURES = []
 
 
@@ -467,8 +510,8 @@ def workspace_pull(argv):
     """`workspace/diagnostic` over `samples/iyi`, cold, and the peak tree
     megabytes while it runs; then the same pull with the ids it handed
     out, which is every file `unchanged` only if the first answer judged
-    every file. Returns the peak, the files judged, and whether the
-    second answer said nothing new.
+    every file. Returns the peak, the files judged, whether the second
+    answer said nothing new, and the proxy's own largest megabytes.
 
     One pull compiled every file in one worker and gave nothing back until
     it answered: 1,443 MB for these 36 files, 5.4 GB for 145, against the
@@ -493,12 +536,13 @@ def workspace_pull(argv):
               "observations and may span non-atomic reads", file=sys.stderr, flush=True)
     # Sampled while the pull runs, not after it: what a pull cost is gone
     # the moment its worker is retired.
-    peak, pulling, sampled = [0], [True], [False]
+    peak, proxy, pulling, sampled = [0], [0], [True], [False]
 
     def sample():
         while pulling[0]:
             if not trace:
                 peak[0] = max(peak[0], tree_mb(client.proc.pid))
+                proxy[0] = max(proxy[0], rss_mb(client.proc.pid))
                 time.sleep(0.25)
                 continue
             started = time.time_ns()
@@ -508,6 +552,7 @@ def workspace_pull(argv):
             readings = [(parent, rss_mb(parent))]
             readings.extend((pid, rss_mb(pid)) for pid in children(parent))
             total = sum(rss for _, rss in readings)
+            proxy[0] = max(proxy[0], readings[0][1])
             if not sampled[0] or total > peak[0]:
                 sampled[0] = True
                 peak[0] = total
@@ -539,20 +584,107 @@ def workspace_pull(argv):
     client.send("exit", {}, wait=False)
     client.proc.wait(timeout=30)
     whole = bool(items) and len(kinds) == len(items) and all(kind == "unchanged" for kind in kinds)
-    return peak[0], len(items), whole
+    return peak[0], len(items), whole, proxy[0]
 
 
-def workspace_gate(argv, measured):
-    peak, judged, whole = workspace_pull(argv)
+def one_compile_mb(path):
+    """What one compile of *path* costs a worker alone: a fresh worker's
+    resident megabytes once it has answered `initialize`, and the last
+    `iyi/footprint` it says after opening the file and answering a hover.
+    The start is read from the process, not from what it says: a worker
+    says its footprint in `FOOTPRINT_STEP` steps from zero, and Windows'
+    fresh one, under 32 MB, says nothing until it has compiled, which read
+    as a compile that cost nothing (job 135555395513)."""
+    client = Client(("lsp", "--worker"))
+    said = []
+    read = client.read_message
+
+    def reading():
+        message = read()
+        if message.get("method") == "iyi/footprint":
+            said.append(message["params"]["megabytes"])
+        return message
+
+    client.read_message = reading
+    uri = "file://" + str(path)
+    fresh = 0
+    try:
+        client.send("initialize", {"processId": None,
+                                   "rootUri": "file://" + str(REPO),
+                                   "capabilities": {}})
+        fresh = rss_mb(client.proc.pid)
+        client.send("initialized", {}, wait=False)
+        client.send("textDocument/didOpen",
+                    {"textDocument": {"uri": uri, "languageId": "iyi",
+                                      "version": 1, "text": path.read_text()}}, wait=False)
+        client.diagnostics(uri)
+        hover(client, uri, 0, 0)
+        client.send("shutdown", {})
+        client.send("exit", {}, wait=False)
+        client.proc.wait(timeout=30)
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+    return fresh, (said[-1] if said else 0)
+
+
+def heavy_module_questions():
+    """Questions in a module whose one compile reaches the bound by itself
+    keep their worker: a successor would cost the same, so retiring one
+    after every answer only made each question pay a whole compile (the
+    cursor sweep over std/acme took 486 s and 230 workers on a Linux
+    workstation, and 22 s once the proxy learned what a compile costs)."""
+    costs = {}
+    for name in HEAVY:
+        costs[name] = one_compile_mb(REPO / "src/std" / f"{name}.iyi")[1]
+        if costs[name] >= RETIRE_FOOTPRINT:
+            break
+    name, cost = max(costs.items(), key=lambda kv: kv[1])
+    if cost < RETIRE_FOOTPRINT:
+        # Said, not passed: on a platform whose compile is smaller the case
+        # does not arise, and the step has nothing to watch.
+        print(f"memory ---- no module of {HEAVY} reaches {RETIRE_FOOTPRINT} MB in one "
+              f"compile here ({costs}); the heavy-module step is not asked", flush=True)
+        return
+    path = REPO / "src/std" / f"{name}.iyi"
+    text = path.read_text()
+    client = Client(("lsp",))
+    seen = set()
+    started = time.monotonic()
+    asked = 0
+    try:
+        uri = open_module(client, path, text)
+        for line, character in candidates(text):
+            if asked >= HEAVY_QUESTIONS:
+                break
+            hover(client, uri, line, character)
+            asked += 1
+            seen.update(children(client.proc.pid))
+        client.send("shutdown", {})
+        client.send("exit", {}, wait=False)
+        client.proc.wait(timeout=30)
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+    step("questions in a module one compile of which reaches the bound keep their worker",
+         asked == HEAVY_QUESTIONS and len(seen) <= HEAVY_WORKERS,
+         f"std/{name} ({cost} MB in one compile): {asked} hovers took {len(seen)} worker(s) "
+         f"in {time.monotonic() - started:.1f} s, at most {HEAVY_WORKERS}")
+
+
+def workspace_gate(argv, measured, direct):
+    peak, judged, whole, proxy = workspace_pull(argv)
     detail = (f"{judged} files of samples/iyi in one answer"
               f"{', every one' if whole else ', not every one'}, peak {peak} MB")
     if not measured:
         step("a workspace pull is bounded too", whole,
              detail + " (no /proc here; unmeasured)")
     else:
+        # `--direct` has no proxy: the process sampled is the worker.
+        bound, made = pull_bound(0 if direct else proxy)
         step("a workspace pull is bounded too",
-             whole and peak <= TYPING_CEILING_MB,
-             detail + f", bound {TYPING_CEILING_MB} MB")
+             whole and peak <= bound,
+             detail + f", bound {bound} MB ({made})")
 
 
 def main():
@@ -566,7 +698,7 @@ def main():
               "retirement. This is the shape the bounds below rule out.")
     measured = rss_mb(os.getpid()) > 0
     if "--workspace-only" in sys.argv:
-        workspace_gate(argv, measured)
+        workspace_gate(argv, measured, direct)
         if FAILURES:
             sys.exit(1)
         return
@@ -609,7 +741,7 @@ def main():
          f"{len(first)} item(s) for `s.up`, identical" if first == last
          else f"{first} -> {last}")
 
-    workspace_gate(argv, measured)
+    workspace_gate(argv, measured, direct)
 
     # A rebuild unlinks the binary under a running session, which
     # `lsp_session.py` step 46 holds for the process the editor talks to.
@@ -622,6 +754,7 @@ def main():
               "respawn; there is none in this shape")
     else:
         binary_gone()
+        heavy_module_questions()
 
     with tempfile.TemporaryDirectory(prefix="iyi-lsp-memory") as work:
         client = killed_mid_compile(argv, direct, work)

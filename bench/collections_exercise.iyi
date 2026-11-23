@@ -439,6 +439,22 @@ pair_hashes = [] of Int32
 assert_int(spread(pair_hashes), 90000, "hash: a 300 by 300 grid of arrays spreads")
 assert_true([1, 2].hash == [1, 2].hash && [1, 2] == [1, 2], "hash: equal arrays hash alike")
 
+# A string's hash is keyed per process, so keys built offline to share one
+# hash do not share it here (#212). Each pair below reaches one FNV-1a state
+# from the one before it - the birthday search in the issue, ten levels -
+# so all 1,024 keys made of one half of each pair had one FNV-1a hash, the
+# one `String#hash` was, and a table of 65,536 such keys took 2.8 s to fill.
+# Keyed, 1,024 random 32-bit hashes share one with odds near 1 in 8,000,
+# so 1,000 distinct is a bound no run misses.
+fnv_twins = [""]
+"h8pE/TOtB 2kYF/zEqT hOah/t4Ga R8BK/v7nP 1EWl/Cztx gZiQ/1eVe H9Yo/4J3f m5TK/IL8R 0wgB/xukp WTrd/97Yx".split(' ').each do |pair|
+  longer = [] of String
+  fnv_twins.each { |front| pair.split('/').each { |half| longer << front + half } }
+  fnv_twins = longer
+end
+assert_true(fnv_twins.size == 1024 && spread(fnv_twins.map(&.hash)) >= 1000, "hash: keys built to collide under FNV-1a spread (#{spread(fnv_twins.map(&.hash))} of #{fnv_twins.size})")
+assert_true("abcdefghi".hash == ("abcd" + "efghi").hash && "".hash == "xyz"[1, 0].hash, "hash: equal strings hash alike")
+
 # Distinct hashes that share their low bits are not one slot either: an
 # Int's hash is itself, the table took the slot from the low bits as they
 # were, and keys that were multiples of 65536 made one run of probes -
@@ -793,5 +809,58 @@ table_keys = {forward => "found"}
 assert_true(table_keys[backward]? == "found", "hash: a table is found as a key by an equal one")
 table_hashes = (0...1000).map { |i| {i => i, i + 1 => 0}.hash }
 assert_true(spread(table_hashes) > 990, "hash: a thousand tables hash apart")
+
+# ---- Array: an element's store beside the sizes and buffers it leaves alone
+# A release build tells LLVM that a store into an array's buffer cannot
+# change any array's size or buffer (src/compiler/iyi/codegen/array_tbaa.cr),
+# which hoists them out of a loop like the one below and vectorises it.
+# Each check would answer otherwise where that was applied wrongly: the
+# product against one computed element by element, a row that is its own
+# source, an array that grows while it is read, a size read after each push.
+def product_rows(a : Array(Array(Float64)), b : Array(Array(Float64))) : Array(Array(Float64))
+  c = Array.new(a.size) { Array.new(b[0].size) { 0.0 } }
+  (0...a.size).each do |i|
+    ci = c[i]
+    (0...b.size).each do |k|
+      t = a[i][k]
+      bk = b[k]
+      (0...ci.size).each do |j|
+        ci[j] += t * bk[j]
+      end
+    end
+  end
+  c
+end
+
+def scale_into(target : Array(Float64), source : Array(Float64), factor : Float64) : Nil
+  (0...target.size).each { |j| target[j] += factor * source[j] }
+end
+
+left = Array.new(37) { |i| Array.new(37) { |j| 1.0 * ((i * 37 + j) % 11) - 5.0 } }
+right = Array.new(37) { |i| Array.new(37) { |j| 1.0 * ((i + 3 * j) % 7) - 3.0 } }
+product = product_rows(left, right)
+product_agrees = true
+(0...37).each do |i|
+  (0...37).each do |j|
+    expected = 0.0
+    (0...37).each { |k| expected += left[i][k] * right[k][j] }
+    product_agrees = false unless product[i][j] == expected
+  end
+end
+assert_true(product_agrees, "array: a 37 by 37 product agrees with one element by element")
+own = [1.0, 2.0, 3.0, 4.0, 5.0]
+scale_into(own, own, 2.0)
+assert_true(own == [3.0, 6.0, 9.0, 12.0, 15.0], "array: a row that is its own source reads what it wrote")
+grown = [1, 2, 3]
+read_at = 0
+while read_at < 6
+  grown << grown[read_at] * 10
+  read_at += 1
+end
+assert_true(grown == [1, 2, 3, 10, 20, 30, 100, 200, 300], "array: an array grown while it is read")
+seen_sizes = [0]
+(0...20).each { |_| seen_sizes << seen_sizes.size }
+assert_int(seen_sizes[19], 19, "array: the size read after each push")
+assert_int(seen_sizes.sum, 210, "array: every size read after each push")
 
 puts "all collection checks passed"

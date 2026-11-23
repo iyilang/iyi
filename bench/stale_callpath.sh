@@ -846,22 +846,18 @@ PY
     dropped="$dropped.exe"
     cp -p "$(dirname "$IYI")/LLVM-C.dll" "$WORK/LLVM-C.dll"
     build_flags=(-D strict_multi_assign -D preview_overload_order -Dwithout_openssl -Dwithout_zlib -Dwithout_iconv -Dgc_none)
-    # This script exports IYI_LIBRARY_PATH=$REPO/lib for its own fixtures, and
-    # the compiler prefers IYI_LIBRARY_PATH to CRYSTAL_LIBRARY_PATH
-    # (config.cr: `IYI_*` wins). The `--crystal` build below is Crystal's
-    # bootstrap compiler, whose `.lib` files (llvm among them) are in
-    # CRYSTAL_LIBRARY_PATH, so that variable must not be shadowed for it.
+    # The gate's fixture directory must not shadow the bootstrap libraries
+    # while rebuilding the compiler itself. IYI_* takes precedence.
     library_path="${CRYSTAL_LIBRARY_PATH:-$library_path}"
   fi
   if ! IYI_LIBRARY_PATH="$library_path" "$BASH" "$REPO/bench/stale_store_concurrency.sh" --crystal build ${build_flags[@]+"${build_flags[@]}"} -D rg8_drop_def_body -o "$dropped" "$REPO/src/compiler/iyi.cr"; then
     if [ "$WINDOWS" -eq 1 ]; then
-      # `Cannot locate the .lib files for ...` names what is missing and not
-      # where it looked: say what is on the two places the linker searches.
+      echo "  [diagnostic] mutant IYI_LIBRARY_PATH=$library_path"
       echo "  [diagnostic] CRYSTAL_LIBRARY_PATH=${CRYSTAL_LIBRARY_PATH:-}"
       echo "  [diagnostic] LIB=${LIB:-}"
-      "$PY" - <<'PY' || true
-import os
-dirs = [os.environ.get("CRYSTAL_LIBRARY_PATH", "")] + os.environ.get("LIB", "").split(";")
+      "$PY" - "$library_path" <<'PY' || true
+import os, sys
+dirs = sys.argv[1].split(";") + os.environ.get("LIB", "").split(";")
 for directory in dict.fromkeys(d for d in dirs if d):
     try:
         names = sorted(n for n in os.listdir(directory) if n.lower().endswith((".lib", ".dll")))

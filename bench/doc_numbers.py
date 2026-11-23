@@ -167,19 +167,37 @@ def measured() -> dict[str, int]:
 # the counterpart of #128's class `==`. And to 4,738, for the 49 lines that
 # let `iyi test` read each named case's verdict, run the cases `--run` names,
 # skip one written with `skip:` and keep what it hands a test away from the
-# test's children, which only the test program can do. A check rather than
-# a habit since the night Windows' floor walked 508 lines over it and
-# nothing failed.
-CEILING = 4_738
+# test's children, which only the test program can do. And to 4,763, owner
+# approved 2026-11-21 for #212: the 26 lines `String#hash` grew as SipHash-1-3
+# keyed per process - `Hash` lives in the prelude, so the keyed hash cannot
+# sit behind an import. And to 4,785, owner approved 2026-11-22: the 22
+# lines of `Array`'s buffer accessors (`Pointer#array_slot`, `array_at`,
+# `array_put`) and its one-comparison index fast path, which let LLVM keep an
+# array's size and buffer out of a loop and vectorise it (plb2 matmul 0.31x,
+# sudoku 0.82x of 0.22.0). A check rather than a habit since the night
+# Windows' floor walked 508 lines over it and nothing failed.
+CEILING = 4_785
+
+
+# The runtime's files that `prelude_library_lines` leaves out whole: the
+# scheduler and kernel thread, the float text, the chaos scheduler, and the
+# collector's partitioned heap and its verifier (`-Dheap_partitions`,
+# `-Dheap_verify`), which are the collector as much as the memory layer in
+# `prelude.iyi` is.
+RUNTIME_FILES = {
+    "concurrency.iyi", "thread.iyi", "float.iyi", "chaos.iyi", "chaos_points.iyi",
+    "heap_partition.iyi", "heap_verify.iyi",
+}
 
 
 def prelude_library_lines() -> int:
-    """The figure SPEC.md holds to the 4,738-line ceiling: the library
+    """The figure SPEC.md holds to the 4,785-line ceiling: the library
     without any platform's floor.
 
     Everything under `src/iyi/` except two things. First, what Crystal's
     0.1.0 core got from outside its own count - the allocator and collector
-    (Boehm's libgc; the block between two marks in prelude.iyi), the
+    (Boehm's libgc; the block between two marks in prelude.iyi, and the
+    partitioned heap's `heap_partition.iyi` and `heap_verify.iyi`), the
     scheduler and kernel thread (pthreads and libevent, beyond the 183 lines
     the ceiling already carries for fibers), and the float printer and parser
     (libc's printf and strtod). The chaos scheduler, which drives that
@@ -202,11 +220,10 @@ def library_with_floor_lines() -> int:
     """The library with every platform's floor still in it: the number a
     reader counts by opening the files. See `prelude_library_lines`."""
     files = sorted((REPO / "src/iyi").glob("*.iyi"))
-    outside = {"concurrency.iyi", "thread.iyi", "float.iyi", "chaos.iyi", "chaos_points.iyi"}
     total = 0
     for path in files:
         lines = path.read_text().splitlines()
-        if path.name in outside:
+        if path.name in RUNTIME_FILES:
             continue
         if path.name == "prelude.iyi":
             start = next(i for i, l in enumerate(lines) if l.startswith("# ── The memory layer"))
@@ -248,10 +265,9 @@ def platform_floor_lines(only: str | None = None) -> int:
     *only* narrows it to the arms naming one flag, for the breakdown.
     """
     files = sorted((REPO / "src/iyi").glob("*.iyi"))
-    outside = {"concurrency.iyi", "thread.iyi", "float.iyi", "chaos.iyi", "chaos_points.iyi"}
     total = 0
     for path in files:
-        if path.name in outside:
+        if path.name in RUNTIME_FILES:
             continue
         lines = path.read_text().splitlines()
         if path.name == "prelude.iyi":

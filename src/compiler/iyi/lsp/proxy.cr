@@ -58,6 +58,19 @@ module Iyi::Lsp
     # process was measured doing.
     RETIRE_FOOTPRINT = 512
 
+    # How far past what it cost by its first answer a worker must have
+    # grown before the bound above retires it: more than one compile of
+    # a mid-sized module (39 MB). A module whose one compile costs the
+    # bound by itself left every successor at the bound the moment it
+    # answered, so each was retired after one question and the next paid
+    # the whole compile again: std/acme's first compile reached 514 MB,
+    # std/autocert's 527, and the cursor sweep over them took 620 to
+    # 1,400 s on CI's runners where 22 s was its cost (jobs 134257615300,
+    # 134616844992). A successor would cost the same, so replacing it buys
+    # nothing; what it grows past that is what an edit costs, and that is
+    # still bounded.
+    RETIRE_GROWTH = 64
+
     # The bound where the worker cannot say what it costs (`Lsp.footprint`
     # answers 0): a count of requests, assuming the worst of each. Cruder
     # on purpose — a bound that is always there beats a measure that
@@ -86,6 +99,11 @@ module Iyi::Lsp
       # Resident megabytes, as it last said. Zero where the platform has
       # no cheap way to ask.
       property footprint = 0
+      # What it had cost by the first answer it gave, as it said right
+      # after: one compile of the file asked about, the floor any
+      # successor would start from. Zero until then.
+      property settled = 0
+      property answered_once = false
       # Requests and buffer changes it has seen. A worker that has done
       # nothing is not worth replacing.
       property worked = 0
@@ -110,7 +128,8 @@ module Iyi::Lsp
       # Has it cost enough to be worth the fifth of a second its
       # successor's first compile takes?
       def spent? : Bool
-        @footprint >= RETIRE_FOOTPRINT || (@footprint.zero? && @answered >= RETIRE_AFTER)
+        return @answered >= RETIRE_AFTER if @footprint.zero?
+        @footprint >= RETIRE_FOOTPRINT && @footprint >= @settled + RETIRE_GROWTH
       end
     end
 
@@ -581,6 +600,11 @@ module Iyi::Lsp
       # business: it is the retirement signal, and it stops here.
       if table && table["method"]?.try(&.as_s?) == "iyi/footprint"
         worker.footprint = table["params"]["megabytes"].as_i
+        # The worker says what it cost after it has written its answer,
+        # so the first word after its first answer is what that answer's
+        # compile cost. A replayed handshake is answered to nobody and
+        # does not count (`hand_over`).
+        worker.settled = worker.footprint if worker.answered_once && worker.settled.zero?
         retire(warm_now: false) if worker.idle? && worker.spent?
         return
       end
@@ -631,6 +655,7 @@ module Iyi::Lsp
 
       key = id.to_json
       waited = worker.outstanding.delete(key)
+      worker.answered_once = true if waited
       if waited && (pull = @pulls.delete(key))
         return unless merged = pulled(worker, key, pull, table, body)
         body = merged

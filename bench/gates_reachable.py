@@ -93,6 +93,16 @@ TOOLS = {
     "resident_probe.py",
     "runtime.py",
     "web_cores.py",
+    # `bash bench/heap_verify_matrix.sh build|run|summary NAME...` is heap22's
+    # stress matrix: an exercise built `-Dheap_partitions -Dheap_verify
+    # -Diyi_chaos` and run over chaos seeds with a local collection at every
+    # chaos point, each seed with and without false words, up to 600 s a
+    # run, and `heap_verify_web.py` is the client it drives web_cores'
+    # server with. A round is hours of a quiet machine, read row by row;
+    # heap22's CI jobs run heap_verify and three programs of
+    # heap_verify_fuzz in its place. Run by hand.
+    "heap_verify_matrix.sh",
+    "heap_verify_web.py",
 }
 
 # A command's place in a line: its start, after `;`, `&&`, `|`, `$(`, a

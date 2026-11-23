@@ -62,6 +62,25 @@ module Iyi::Stale
       path.starts_with?(prefix) && CodeGenVisitor::IYI_RUNTIME_FILES.includes?(path[prefix.size..])
     end
 
+    # Whether *type*'s declaration is in std or the prelude, which
+    # `CodeGenVisitor#iyi_born_shared?` reads through the first location of the
+    # type, or of the generic type it instantiates (`ShareReach#std_at?`). The
+    # file is not otherwise part of a type's element, so
+    # `TypedEncoder#encode_type_element` writes the answer.
+    def self.std_declared?(program : Program, type : Type) : Bool
+      base = type.is_a?(GenericClassInstanceType) ? type.generic_type.as(Type) : type
+      program.iyi_share_reach.std_at?(base.locations.try(&.first?))
+    end
+
+    # Whether *node* was written in the prelude's own directory, which
+    # `CodeGenVisitor#iyi_publish_class_var_store` reads off a class variable
+    # assignment's location (`ShareReach#prelude_at?`). The file is not
+    # otherwise part of the assignment's element, so `TypedEncoder#encode_node`
+    # writes the answer for every `Assign`.
+    def self.prelude_written?(program : Program, node : ASTNode) : Bool
+      program.iyi_share_reach.prelude_at?(node.location)
+    end
+
     def self.canonical_type_name(type : Type) : String
       String.build do |io|
         canonical_type_name(type, io)
@@ -744,6 +763,7 @@ module Iyi::Stale
       @encoder.tag(type.class.name.split("::").last)
       @encoder.str(CallPath.canonical_type_name(type))
       @encoder.str(type.type_desc)
+      @encoder.bool(CallPath.std_declared?(program, type))
 
       if type.is_a?(Annotatable) && (anns = type.annotations)
         total = anns.values.sum(&.size)
@@ -1024,6 +1044,7 @@ module Iyi::Stale
           encode_node(node.else)
         end
       when Assign
+        @encoder.bool(CallPath.prelude_written?(program, node))
         encode_node(node.target)
         encode_node(node.value)
       when AssignWithRestriction

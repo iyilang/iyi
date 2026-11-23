@@ -455,18 +455,18 @@ stop lands. The exercise's fibers take stops on their own stacks. A
 is the answer if a program's fiber is ever that deep, and it is not
 built ahead of one.
 
-`bench/thread_exercise.sh` holds it, plain and release, on Linux and
-darwin, with the aarch64 arm run under emulation: eight threads
-allocating from their own caches while collections run from whichever
-crosses the budget, each holding a live list in nothing but its own
-frames through those collections and finding it intact by checksum and
-by the sweep's own free flag — after one explicit collection with
-every worker spinning on its list, and after twenty bursts of churn —
-each running fibers of its own with a parked one holding an object's
-only reference, then 32 threads past the core count; the floor read
-off the binary, five names on Linux; and the failure proof removes the
-thread-root walk from a copy of the prelude and the spinning threads'
-lists are swept out from under them by name. The price, release, 20
+`bench/thread_exercise.sh` holds it, plain and release, on Linux and darwin:
+eight threads allocating from their own caches while collections run from
+whichever crosses the budget, each holding a live list in nothing but its own
+frames through those collections and finding it intact by checksum and by the
+sweep's own free flag (after one explicit collection with every worker spinning
+on its list, and after twenty bursts of churn), each running fibers of its own
+with a parked one holding an object's only reference, then twice the core count,
+clamped to 9 to 32 threads; the floor read off the binary, five names on Linux;
+and the failure proof removes the thread-root walk from a copy of the prelude and
+the spinning threads' lists are swept out from under them by name. CI's cross-run
+job runs the aarch64 build of `bench/thread_exercise.iyi` under emulation, which
+this script does not do. The price, release, 20
 cores: 76 ns an allocation with one thread, 162 with four, 268 with
 eight — wall time per allocation per thread, every pause included,
 which is what Stages 7 and 8 exist to bring down: every thread stands
@@ -625,7 +625,7 @@ helper 0 and `bench/release_trigger.iyi` names by round for the others.
 The first three were left to the machine once: the store's missed on
 four-core Windows and three-core darwin runners, the late read's on a
 four-core Windows one, and helper 0's held the tasks there at 287 and 289
-MiB against the watchdog's 256. Every proof is caught in every run now:
+MiB against the watchdog's 256. Before the proofs were forced, each was caught in every run:
 12 of 12 each here held to three, four and twelve cores, and one run on
 each of three four-core Windows runners and a three-core darwin one,
 where `bench/concurrent_mark.sh` and `bench/parallel_mark.sh` passed
@@ -935,7 +935,7 @@ is a few instructions, so the gate also runs the program on a copy of
 the prelude whose slice waits up to 100 us at each kept chunk of a
 kilobyte or more and exits by name if the entry changes under it; with
 the old free put back that copy failed by name in 200 runs of 200, plain
-and release alike.
+and release alike, before the copy was forced; the gate now catches it on one run.
 
 Two more levers on that garbage were tried in the second cycle and
 are not in the tree. A prefetch of a shaded object's line at its push:
@@ -1022,6 +1022,127 @@ between their release and their next carve. `bench/sweep_exercise.sh`'s
 refault check churns twice the budget an epoch and allows a quarter of
 the excess back over eight steady epochs: 344 pages of 8,256, and the
 copy without the carry-over hands back 6,960.
+
+**The warm room per class, and the idle trim (h22/warm).** The room
+above was a budget's worth of payload plus the carry-over, every class's
+runs counted against it in the order the sweep met them. Most of an
+epoch is served by the chunks of the pages the sweep found partly alive,
+which keep no page warm, and the room went to whichever classes the
+sweep reached first: issue #145's app kept 14-57 MB of warm pages idle
+across a collection on a 40-48 MB budget. So each class now keeps warm
+what it took whole in the epoch before (`IyiHeap.taken_add`): the warm
+pages it took off its batches, the warm runs it threaded, and what it
+carved from cold runs and the frontier when those fell short, which is
+where #150's pages carved back cold are counted now - in pages, up at
+once to a larger take and a quarter of the way down to a smaller one
+(`IyiMark.warm_pages`, `begin_sweep`). And the room is a prediction
+that a next epoch comes, which an idle program never sends: with no
+sweep to age them, the last sweep's warm pages stayed resident for as
+long as the program waited
+(#145's app held 228 MB of working set 5 s after its last request on
+Windows 11 and 235 MB on macOS 26.6, against goturkiye's 46 and 57). The
+pool's monitor, parked with every worker idle, now wakes once after a
+second of it with no collection in between and runs the idle trim
+(`IyiMark.trim_idle`): under the runtime lock and each class's lock in
+turn, the centre's batches holding listed pages are dropped and those
+pages made idle (`IyiHeap.idle_batches`), then every warm run goes cold
+(`IyiHeap.cool_warm`).
+
+The trim runs beside threads that allocate, and the page two adjacent
+sweep slices share is where it can go wrong. A slice's run that
+continues the slice before lists that page whole (`IyiMark.close_run`),
+while the lower slice's batch still has chunks on it. The trim makes idle
+only the pages strictly inside a batch's range - such a page has every
+chunk whose head is on it in that batch, and every chunk reaching into
+it from below too - and leaves both edge pages listed for the next pause
+(`bench/sweep_exercise.iyi` check 11b replays the window on one thread;
+the copies that idle either edge fail there). The shared page also broke
+the count of listed pages: two refills adopting the two batches at once
+both read it listed and both counted it off, the arena's count reached
+zero with pages still listed, the next refill to read zero left its
+batch's pages listed under the objects it handed out, and the trim and
+the pause made those pages idle - the carve handed them out a second
+time. `IyiHeap.unlist_page` counts a page off only in the refill whose
+compare-and-set clears it. `bench/trim_stress.iyi` (eight threads in six
+classes, the trim run back to back) caught the old counting in 11 runs
+of 11 on macOS's sixteen-kilobyte pages, but two adoptions met in the
+window only 0-3 times in 10 s on four-kilobyte pages and three runs
+passed on Windows 11. So `bench/sweep_exercise.sh` no longer races the window.
+`bench/unlist_count.iyi` checks the count on one thread with the interleaving
+forced: the copy that counts the lost clear reads 0 against 2 and fails on its
+only run. The fix runs under the 10 s trim stress with the same interleaving at
+every batch edge, and `IyiHeap.audit_listed` checks each arena's count against
+its bitmap at every pause and after every trim, so a count that reads short
+fails the stress at the first check that sees it.
+
+Two more ways left a page idle under an object. The count of listed
+pages was raised after the bits it counts: a slice listing the page it
+shares with the slice below sat between the two while the refill
+adopting the batch below unlisted that page and counted it off, the
+count stayed one short until the slice caught up, and a refill of the
+arena that read 0 meanwhile left its own batch's pages listed under the
+objects it handed out. The count was whole again by the pause, so the
+pause's count audit passed; the pause made the pages idle, and the next
+refill threaded their chunks a second time - the trim stress's residual
+(about one 20 s run in fifty, PR #242). A copy recording every chunk's
+owner and every change to the listed pages caught it in 4 of 237 runs
+on macOS 26.6 and 6 of 354 on Linux, each after a refill had cleared a
+page its slice had not yet counted. `IyiHeap.list_pages` now raises the
+count first, so the count is never below the bitmap and a refill that
+reads 0 has nothing of its own listed; the copy caught none in 235 and
+405. The gate's copies play that refill between a slice's count and its
+bits, end the program where a refill reads listed a page its slice has
+not counted (`bench/unlist_count.iyi`'s `listing:` check, on one thread),
+and audit at every pause that a listed page's chunks are all free. And a run
+a sweep slice in flight cuts short (`IyiHeap.take_run`) was cut at the
+slice's word, off the chunk grid: a chunk longer than a page taken last
+reached over idle pages of the rest, which the trim hands back keeping a
+run's first page only - the copy caught the trim handing back two pages
+under a 20,480-byte chunk on Linux's 4 KB pages. It is cut at the last
+page a chunk begins on, as a run cut at a slab's worth is
+(`bench/sweep_exercise.iyi` check 10b).
+
+Measured with #145's harness, six rounds per machine, iyiturkiye built
+by 0.21.0 against goturkiye, steady / peak / 5 s after the load, MB:
+on this Linux machine (12 vCPU, shared) 127 / 163 / 124 against 170 /
+217 / 212, Go 47 / 60 / 50; on Windows 11, 12 logical processors (the
+user's machine) 123 / 158 / 137 against 166 / 228 / 225, Go 50 / 128 /
+47; on macOS 26.6, Apple M2 Pro, 10 cores (the user's machine) 134 /
+163 / 150 against 179 / 239 / 235, Go 54 / 57 / 57. That closes 35-37%
+of the steady gap to Go, 34-70% of the peak gap and 47-55% of the idle
+gap. A copy with no warm pages at all closes 41-63% of the steady gap,
+so the room saves 56-88% of what keeping nothing warm saves, and
+keeping nothing cost 14% more app CPU a request on Windows. The
+room's own CPU was -5.9% a request on Windows and -1.2% on macOS; on
+Linux +9.9% over the six rounds, most of it one round (+23%), the median
+round +2.7%, where Go's own CPU a request moved between 2.98 and 4.38 ms
+from round to round.
+
+The pause's sweep went a batch a slice with the room, so that a refill
+taking a batch is counted for the warm pages on it alone. Its first
+pass, the debt it pays before the mark, kept that and cost
+`bench/alloc_scaling.iyi` at 8 workers 13-17% on macOS 26.6, Apple M2
+Pro, 10 cores (the user's machine): 628-650 ms against 535-566 with
+0.21.0's prelude (medians of three sessions of 5 interleaved rounds).
+Not the room: it starts at the first epoch's take (7.3-8.2 MB in epoch
+1, nothing handed back in the first five epochs), a room that never
+hands a page back ran as slowly, and no idle trim ran. Not the refill
+either: the time in refills and carves moved by 20 ms of the 750 ms of
+CPU the run gained. Those batches are what the threads allocate from
+while the mark runs beside them, each allocation counted live in its
+arena (`count_live`, 15-16 million adds a run either way), and an arena
+the stop found a walker in went out to every thread at once; the marks
+beside the program lasted 6.4 ms against 4.6. The debt pass hands each
+arena over as one batch again (`IyiMark.sweep_one_held`), marks 5.0 ms,
+while the eager sweep after an explicit collection's turn stays a batch
+a slice for the room's count. Final run at 8 workers, medians of 5
+interleaved rounds, 0.21.0 / before / fix: macOS 541 / 625 / 562 ms,
+Windows 11 374 / 359 / 387, Linux 393 / 366 / 379; at 1 and 4 workers
+the fix is within 5% of 0.21.0 on each machine.
+[INFERENCE: the cost is eight threads adding to one arena's line;
+Windows 11's and Linux's x86 cores showed no difference past noise.]
+`bench/sweep_exercise.iyi` check 12 holds an arena as a stopped walker
+would and counts the batches the pause hands it over in.
 
 **The heap's neighbours, read from `/proc/self/smaps`.** The second
 cycle began by reading every mapping's resident size at the end of

@@ -1,7 +1,9 @@
 # File: comprehensive file operations, metadata inspection, and manipulation.
 #
 # Extends the prelude's core File with File::Info, File::Type, File::Permissions,
-# path queries, permissions, timestamps, symlinks, and iteration without external C libraries.
+# path queries, permissions, timestamps, symlinks, and iteration without external C libraries,
+# and with `open?`, `read?` and `write?`, which answer what the system refuses as an
+# `IOError` where the prelude's `open`, `read` and `write` panic.
 
 @[Unsafe("file metadata, permissions, links, temp files, seeking and locks are reached through the platform's raw calls with C path strings and struct buffers")]
 module std/file
@@ -508,7 +510,12 @@ class ::File
     # and sometimes a trailing space, which is a line break in the middle of
     # a panic, so the tail comes off. `std/dir`'s refusals say it too.
     def self.win_error : String
-      code = Std::File::LibKernel32.GetLastError
+      win_error(Std::File::LibKernel32.GetLastError)
+    end
+
+    # The sentence for *code*, which `IOError#reason` keeps beside the
+    # number it was answered.
+    def self.win_error(code : Int32) : String
       room = 1024
       wide = Pointer(UInt16).malloc(room.to_u64)
       written = Std::File::LibKernel32.FormatMessageW(0x1200, Pointer(Void).new(0_u64), code, 0,
@@ -525,6 +532,44 @@ class ::File
       "Windows error #{code}: #{text}"
     end
   {% end %}
+
+  # `open`, with what the system refuses - a directory that is not there,
+  # a file this user may not write, too many files open - answered as an
+  # `IOError` rather than raised, so a server can answer 404, 403 or 507
+  # and carry on. The stream is a `FileIO`: the same stream `open` answers,
+  # whose `write?`, `flush?` and `close?` answer a refused write too. A
+  # mode it does not know and a path with a NUL in it never reach the
+  # system; they are the program's mistake and panic, as `open` does.
+  def self.open?(path : String, mode : String = "r", buffer_size : Int32 = 4096, perm : Int32 = 0o644) : Std::File::FileIO | Std::File::IOError
+    flags = open_flags(mode)
+    fd = __iyi_open_file(c_path(path), flags & 1 != 0, flags & 2 != 0, flags & 4 != 0, flags & 8 != 0, flags & 16 != 0, perm)
+    return Std::File::IOError.last("open", path, fd) if fd < 0_i64
+    Std::File::FileIO.new(fd, buffer_size, path)
+  end
+
+  # `read`, with a path that will not open or a read the system refuses -
+  # a directory, on POSIX - answered rather than raised.
+  def self.read?(path : String) : String | Std::File::IOError
+    fd = __iyi_open_read(c_path(path))
+    return Std::File::IOError.last("read", path, fd) if fd < 0_i64
+    io = Std::File::FileIO.new(fd, 4096, path)
+    defer io.close
+    text = io.read_all(size_of(fd))
+    refused = io.read_error
+    return refused unless refused.nil?
+    text
+  end
+
+  # `write`, with a file that will not open or a write the system refuses
+  # - a full disk - answered rather than raised. The file is closed either
+  # way.
+  def self.write?(path : String, contents : String) : Nil | Std::File::IOError
+    io = open?(path, "w")
+    return Std::File::IOError.new("write", path, io.code) if io.is_a?(Std::File::IOError)
+    refused = io.write?(contents)
+    closing = io.close?
+    refused.nil? ? closing : refused
+  end
 
   enum Type : UInt8
     File            = 0
@@ -2222,6 +2267,187 @@ class ::IyiIO
     {% else %}
       Std::File::LibC.sys(Std::File::LibC::SYS_LSEEK, fd, offset, whence.to_i64)
     {% end %}
+  end
+end
+
+# What the system answered when it refused a file: the operation, the
+# path, and the platform's number for why - errno on Linux and darwin,
+# `GetLastError` on Windows - which `reason` puts in words. `File.open?`,
+# `File.read?`, `File.write?` and a `FileIO`'s `write?`, `flush?` and
+# `close?` answer one where `File.open`, `File.read`, `File.write` and the
+# stream's `write`, `flush` and `close` panic. Its `message` is what the
+# file's own panic says, and why: `cannot open /srv/up/a: no such file or
+# directory`.
+pub struct IOError
+  # "open", "read" or "write": what was asked of the system.
+  getter operation : String
+  getter path : String
+  # The platform's number; 0 when a write took nothing and named nothing.
+  getter code : Int32
+
+  def initialize(@operation : String, @path : String, @code : Int32)
+  end
+
+  # The refusal of the call that just answered *result*: its number is
+  # read before anything else can leave one of its own.
+  def self.last(operation : String, path : String, result : Int64) : IOError
+    IOError.new(operation, path, code_of(result))
+  end
+
+  private def self.code_of(result : Int64) : Int32
+    return 0 if result >= 0_i64
+    {% if flag?(:win32) %}
+      Std::File::LibKernel32.GetLastError
+    {% elsif flag?(:darwin) %}
+      Std::File::LibC.__error.value
+    {% elsif flag?(:linux) %}
+      (0_i64 - result).to_i32
+    {% else %}
+      0
+    {% end %}
+  end
+
+  # Nothing at the path, or no directory on the way to it: a 404.
+  def not_found? : ::Bool
+    {% if flag?(:win32) %} @code == 2 || @code == 3 {% else %} @code == 2 {% end %}
+  end
+
+  # This user may not: a 403.
+  def denied? : ::Bool
+    {% if flag?(:win32) %} @code == 5 {% else %} @code == 13 || @code == 1 {% end %}
+  end
+
+  # No room left on the device, or in this user's quota: a 507.
+  def full? : ::Bool
+    {% if flag?(:win32) %}
+      @code == 112 || @code == 39
+    {% elsif flag?(:darwin) %}
+      @code == 28 || @code == 69
+    {% else %}
+      @code == 28 || @code == 122
+    {% end %}
+  end
+
+  # Windows says it in its own words, which `File.win_error` reads; POSIX
+  # has no libc here to ask for `strerror`, so these are the sentences.
+  def reason : String
+    return "the system took none of the bytes and named no reason" if @code == 0
+    {% if flag?(:win32) %}
+      ::File.win_error(@code)
+    {% else %}
+      return "no space left on the device" if full? && @code == 28
+      return "the disk quota is exceeded" if full?
+      {% if flag?(:darwin) %}
+        return "the name is too long" if @code == 63
+        return "too many levels of symbolic links" if @code == 62
+      {% else %}
+        return "the name is too long" if @code == 36
+        return "too many levels of symbolic links" if @code == 40
+      {% end %}
+      case @code
+      when  1 then "operation not permitted"
+      when  2 then "no such file or directory"
+      when  5 then "input/output error"
+      when  9 then "the file is not open for this"
+      when 13 then "permission denied"
+      when 17 then "the file exists"
+      when 20 then "a component of the path is not a directory"
+      when 21 then "it is a directory"
+      when 22 then "invalid argument"
+      when 23 then "too many files are open in the system"
+      when 24 then "too many files are open in this process"
+      when 26 then "the file is a program that is running"
+      when 27 then "the file is too large"
+      when 30 then "the file system is read-only"
+      when 32 then "the reader is gone"
+      else         "error #{@code}"
+      end
+    {% end %}
+  end
+end
+
+impl Error for IOError
+  def message : String
+    "cannot #{operation} #{path}: #{reason}"
+  end
+end
+
+# A file `File.open?` opened: the stream `File.open` answers - every read,
+# write, seek and lock is that stream's - knowing its path, and with
+# `write?`, `flush?` and `close?`, which answer a write the system refuses
+# as an `IOError` where `write`, `flush` and `close` panic.
+#
+# They are the panicking forms run with a refusal kept rather than
+# reported: while one runs, a write the system refuses is kept, its number
+# read at once, and told to the stream as taken, so the stream does what
+# it does after a write - and tries none of the bytes after it, which is
+# what the panic would have done. The kept refusal is the answer.
+pub class FileIO < IyiIO
+  getter path : String
+  @answering : ::Bool
+  @refusal : IOError?
+  @read_refusal : IOError?
+
+  def initialize(fd : Int64, buffer_size : Int32, @path : String)
+    super(fd, buffer_size, false)
+    @answering = false
+    @refusal = nil
+    @read_refusal = nil
+  end
+
+  def write?(bytes : Pointer(UInt8), count : Int32) : Nil | IOError
+    @answering = true
+    defer @answering = false
+    write(bytes, count)
+    taken_refusal
+  end
+
+  def write?(text : String) : Nil | IOError
+    write?(text.to_unsafe, text.bytesize)
+  end
+
+  def flush? : Nil | IOError
+    @answering = true
+    defer @answering = false
+    flush
+    taken_refusal
+  end
+
+  # The buffered bytes are written first; refused, the file is closed all
+  # the same and the refusal answered.
+  def close? : Nil | IOError
+    @answering = true
+    defer @answering = false
+    close
+    taken_refusal
+  end
+
+  # Why the read `read_failed?` reports was refused; nil if none was.
+  def read_error : IOError?
+    @read_refusal
+  end
+
+  private def taken_refusal : Nil | IOError
+    refused = @refusal
+    @refusal = nil
+    refused
+  end
+
+  private def low_level_write(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
+    return count.to_i64 if @answering && !@refusal.nil?
+    n = super(target_fd, buffer, count)
+    if n <= 0_i64 && @answering
+      @refusal = IOError.last("write", @path, n)
+      return count.to_i64
+    end
+    n
+  end
+
+  # A withdrawn read (-2) is not refused.
+  private def low_level_read(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
+    got = super(target_fd, buffer, count)
+    @read_refusal = IOError.last("read", @path, got) if got < 0_i64 && got != -2_i64
+    got
   end
 end
 

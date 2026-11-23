@@ -363,7 +363,14 @@ if [ -z "$PY" ]; then
   echo "  skipped: no working python3"
 elif WORK="$WORK" CLIENT="$WORK/sse-plain" "$PY" - <<'PY'
 import os, socket, subprocess, sys, threading, time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+import socketserver
+def _bind(self):
+    # HTTPServer.server_bind also asks for this host's name, a reverse lookup
+    # this test never uses and that waits on the machine's resolver.
+    socketserver.TCPServer.server_bind(self)
+    self.server_name, self.server_port = self.server_address[:2]
+HTTPServer.server_bind = _bind
 seen = {"drop": [], "forever": [], "plain": [], "quiet": []}
 forever_end = []
 lock = threading.Lock()

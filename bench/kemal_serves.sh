@@ -19,8 +19,9 @@
 #
 #     bash bench/kemal_serves.sh
 #
-# Needs `make`, `shards`, `curl` and the network. The shard is pinned, so what
-# it fetches is one version rather than whatever is current.
+# Needs `make`, `shards` and the network, and `curl` or bash's own `/dev/tcp`
+# for the pages (`bench/loopback_get.sh`). The shard is pinned, so what it
+# fetches is one version rather than whatever is current.
 #
 # Exits non-zero if any bind or fill fails, if either arm fails to build, if
 # either server does not come up, or if the two answer differently.
@@ -28,6 +29,7 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/end_process.sh"
+. "$REPO/bench/loopback_get.sh"
 # The gate runs whatever compiler the caller names; `bin/iyi` is a shell
 # wrapper, and on Windows the caller has to point at the built exe itself.
 IYI="${IYI:-$REPO/bin/iyi}"
@@ -74,7 +76,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for tool in shards curl; do
+for tool in shards; do
   if ! command -v "$tool" > /dev/null 2>&1; then
     echo "needs $tool, which is not on the PATH"
     exit 1
@@ -190,7 +192,7 @@ for arm in source artifact; do
   # seconds on a fast one.
   ready=""
   for _ in $(seq 1 100); do
-    if curl -s --max-time 2 "http://127.0.0.1:$port/" > /dev/null 2>&1; then
+    if loopback_get "$port" "/" > /dev/null 2>&1; then
       ready=yes
       break
     fi
@@ -209,14 +211,14 @@ for arm in source artifact; do
   fi
 
   {
-    curl -s --max-time 5 "http://127.0.0.1:$port/"
+    loopback_get "$port" "/"
     echo ""
-    curl -s --max-time 5 "http://127.0.0.1:$port/echo/iyi"
+    loopback_get "$port" "/echo/iyi"
     echo ""
     # A route nobody wrote. 404 is kemal's own `setup_404`, which `Kemal.run`
     # reaches through a private module function whose body travels — so this
     # line is the one that says the *unhappy* path crossed too.
-    curl -s --max-time 5 -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:$port/missing"
+    loopback_get "$port" "/missing" status
   } > "answers-$arm.txt"
 
   stop_server

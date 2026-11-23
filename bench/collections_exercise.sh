@@ -154,6 +154,43 @@ panics_with "a dig of a missing key" dig_missing "no such key \"q\"" "{\"a\" => 
 panics_with "values_at of a missing key" values_at_missing "no such key \"z\"" "{\"a\" => 1}.values_at(\"a\", \"z\")"
 
 echo
+echo "== a short row in a release build's product loop, which is still refused"
+
+# The loop `product_rows` in the exercise is, with a row shorter than the
+# rest: the size a release build hoists out of the loop
+# (src/compiler/iyi/codegen/array_tbaa.cr) is still checked on every index.
+cat > "$WORK/ragged_product.iyi" <<'IYI'
+module main
+
+def product_row(a : Array(Float64), b : Array(Array(Float64)), c : Array(Float64)) : Nil
+  (0...b.size).each do |k|
+    t = a[k]
+    bk = b[k]
+    (0...c.size).each { |j| c[j] += t * bk[j] }
+  end
+end
+
+row = Array.new(40) { 0.0 }
+product_row(Array.new(3) { 1.0 }, [Array.new(40) { 1.0 }, Array.new(40) { 2.0 }, Array.new(39) { 3.0 }], row)
+puts row[0]
+IYI
+if "$IYI" build --release -o "$WORK/ragged_product" "$WORK/ragged_product.iyi" > "$WORK/ragged_product.build" 2>&1; then
+  "$WORK/ragged_product" > "$WORK/ragged_product.out" 2>&1
+  code=$?
+  if [ "$code" -eq 1 ] && grep -q "index 39 out of range for 39 elements" "$WORK/ragged_product.out"; then
+    echo "  a short row: exits 1 at \"index 39 out of range for 39 elements\""
+  else
+    echo "  a short row: exit $code, not the refusal of index 39"
+    tail -2 "$WORK/ragged_product.out"
+    status=1
+  fi
+else
+  echo "  a short row: the program did not build"
+  sed -n '1,10p' "$WORK/ragged_product.build"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail, one broken method at a time"
 
 # A copy of the whole prelude with one method patched, on `IYI_PATH` ahead of
@@ -275,7 +312,7 @@ prove_fails "a set forgets its members" dup_set set.iyi \
 # 6. A negative index that does not wrap, so `a[-1]` is not the last.
 prove_fails "a negative index does not wrap" no_wrap array.iyi \
   "out of range for 3 elements" \
-  's/^    index = @size + index if index < 0$/    index = @size + index if false/'
+  's/^    at = index < 0 ? @size &+ index : index$/    at = index/'
 
 # 7. `uniq` keeping everything, which the collection checks read.
 prove_fails "uniq keeps everything" no_uniq array.iyi \
@@ -335,7 +372,7 @@ prove_fails "a span set from itself is read as it moves" self_splice array.iyi \
 
 prove_fails "a shorter span leaves the gap" open_gap array.iyi \
   "array: a span set to one value" \
-  's/^        @buffer\[at - count + length\] = @buffer\[at\]$/        @buffer[at - count + length] = @buffer[at - count + length]/'
+  's/^        @buffer\.array_put(at - count + length, @buffer\.array_at(at))$/        @buffer.array_put(at - count + length, @buffer.array_at(at - count + length))/'
 
 prove_fails "truncate keeps the front" truncate_front array.iyi \
   "array: truncate keeps the span" \
@@ -356,7 +393,7 @@ prove_fails "pop? answers nothing" pop_nothing array.iyi \
 
 prove_fails "first? answers nothing" first_nothing array.iyi \
   "array: first? answers the first" \
-  's/^    empty? ? nil : @buffer\[0\]$/    nil/'
+  's/^    empty? ? nil : @buffer\.array_at(0)$/    nil/'
 
 prove_fails "last n is the first n" last_first array.iyi \
   "array: last n" \

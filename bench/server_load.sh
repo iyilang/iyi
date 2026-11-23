@@ -5,7 +5,7 @@
 #
 #     bash bench/server_load.sh
 #
-# Four steps, and two of them are failure proofs, because a gate that
+# Five steps, and three of them check that a failure can fire, because a gate that
 # cannot fail is not a gate:
 #
 #   1. The program holds, plain build: two hundred connections answered,
@@ -23,6 +23,10 @@
 #      exercise's collection between a read and a write finds it freed.
 #   4. Failure proof: a finished fiber's stack not handed back, and the
 #      two hundred connections take two hundred mappings.
+#   5. Control: a load in which the trigger is held off runs no collection, so
+#      the collection premise must end at its setup sentence (status 76), not as
+#      a verdict. The stack bound is a measured count; its population is quoted
+#      beside STACK_BOUND in server_load.iyi.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -101,7 +105,7 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     step "failure proof: the fiber's OVERLAPPED as a number is an OVERLAPPED nobody keeps"
     sed -e 's/^  property wait_overlapped : Pointer(UInt8)$/  property wait_overlapped_word : UInt64\n\n  def wait_overlapped : Pointer(UInt8)\n    Pointer(UInt8).new(@wait_overlapped_word)\n  end/' \
-        -e 's/^    @wait_overlapped = Pointer(UInt8)\.malloc(\([0-9]*\)_u64)$/    @wait_overlapped_word = Pointer(UInt8).malloc(\1_u64).address/' \
+        -e 's/^    @wait_overlapped = IyiCross\.shared { Pointer(UInt8)\.malloc(\([0-9]*\)_u64) }$/    @wait_overlapped_word = IyiCross.shared { Pointer(UInt8).malloc(\1_u64) }.address/' \
         "$REPO/src/iyi/concurrency.iyi" > patched/iyi/concurrency.iyi
     [ "$(diff "$REPO/src/iyi/concurrency.iyi" patched/iyi/concurrency.iyi | grep -c '^>')" -eq 6 ] || {
       echo "the sed did not find both lines it changes"; exit 1; }
@@ -110,7 +114,7 @@ case "$(uname -s)" in
     fi
     timeout -k 5 300 ./hidden > hidden.txt 2>&1
     code=$?
-    if [ "$code" -ne 1 ] || ! grep -q 'freed the OVERLAPPED' hidden.txt; then
+    if [ "$code" -ne 1 ] || ! grep -qF "FAIL: a collection between a connection's read and its write freed the OVERLAPPED the write hands the kernel" hidden.txt; then
       echo "an OVERLAPPED the collector cannot see survived the run, so the run proves nothing (exit $code):"
       tail -3 hidden.txt; exit 1
     fi
@@ -121,51 +125,28 @@ case "$(uname -s)" in
     sed -e 's/^  property events : Pointer(UInt8)$/  property events : UInt64/' \
         -e 's/^    @events = Pointer(UInt8)\.new(0_u64)$/    @events = 0_u64/' \
         -e 's/^    return buffer\.address if buffer\.address != 0_u64$/    return buffer if buffer != 0_u64/' \
-        -e 's/^    buffer = Pointer(UInt8)\.malloc((EVENTS \* IYI_POLL_EVENT_BYTES)\.to_u64)$/    buffer = Pointer(UInt8).malloc((EVENTS * IYI_POLL_EVENT_BYTES).to_u64).address/' \
+        -e 's/^    buffer = IyiCross\.shared { Pointer(UInt8)\.malloc((EVENTS \* IYI_POLL_EVENT_BYTES)\.to_u64) }$/    buffer = IyiCross.shared { Pointer(UInt8).malloc((EVENTS * IYI_POLL_EVENT_BYTES).to_u64) }.address/' \
         -e 's/^    buffer\.address$/    buffer/' \
         "$REPO/src/iyi/concurrency.iyi" > patched/iyi/concurrency.iyi
-    cmp -s patched/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && {
-      echo "the sed found nothing to change"; exit 1; }
-    # The one arm here whose defect arrives by timing rather than by counting:
-    # the freed chunk has to be handed to a canary *and* the kernel has to write
-    # events into it before the run ends. Two hundred connections is enough on
-    # every machine that wrote this file and was not enough once on a loaded CI
-    # runner, where the hidden buffer was freed (the exercise refuses a run that
-    # collected nothing) and simply never reused. Measured on a machine held at
-    # sixteen times its cores: at two hundred rounds four of twenty-four runs
-    # survived the collector, at a thousand none of twenty-four, at two thousand
-    # none of twelve. A run that dies does it in the first collections, so the
-    # longer arm still costs about a second and a half. The claim is unchanged;
-    # the trials are more.
-    mkdir -p load
-    # The formatter aligns `ROUNDS` with the constant under it, so the pattern
-    # takes the run of spaces that alignment leaves; the `cmp` below is what
-    # proves the line was actually found.
-    sed -E 's/^ROUNDS[[:space:]]+= 200$/ROUNDS = 2000/' "$REPO/bench/server_load.iyi" > load/server_load.iyi
-    cmp -s load/server_load.iyi "$REPO/bench/server_load.iyi" && {
-      echo "the rounds line moved; this proof is running at the plain size"; exit 1; }
-    if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build "$WORK/load/server_load.iyi" -o hidden > build-hidden.log 2>&1; then
+    # Every one of the five lines, counted: a sed that found four of them left
+    # the buffer a pointer, and the copy failed to compile instead of failing
+    # the run (heap22 put the malloc inside `IyiCross.shared { ... }`).
+    [ "$(diff "$REPO/src/iyi/concurrency.iyi" patched/iyi/concurrency.iyi | grep -c '^>')" -eq 5 ] || {
+      echo "the sed did not find all five lines it changes"; exit 1; }
+    # One run, and the run decides. The copy's buffer is freed by the first
+    # collection a connection makes after its read, so the copy dies on its
+    # first connection with its own sentence. The check is a count of
+    # collections, not a race, so there is no run count and no timing bound.
+    if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build "$REPO/bench/server_load.iyi" -o hidden > build-hidden.log 2>&1; then
       cat build-hidden.log; exit 1
     fi
-    # Still timing: a loaded CI runner let the hidden buffer survive two
-    # thousand rounds once (a Linux run of 2026-10-01), where the machines
-    # here never did. Three runs, and the first that dies is the proof; a
-    # buffer the collector cannot see survives all three only if the
-    # check cannot see it either.
-    caught=""
-    for try in 1 2 3; do
-      timeout 300 ./hidden > hidden.txt 2>&1
-      code=$?
-      if [ "$code" -ne 0 ] && ! grep -q 'every property held' hidden.txt; then
-        caught="$try"; break
-      fi
-    done
-    if [ -z "$caught" ]; then
-      echo "a buffer the collector cannot see survived three runs, so the run proves nothing:"
-      grep -E '^(collections|answers|stacks|canary) ' hidden.txt | sed 's/^/  /'
-      tail -2 hidden.txt; exit 1
+    timeout 300 ./hidden > hidden.txt 2>&1
+    code=$?
+    if [ "$code" -ne 1 ] || ! grep -qF "FAIL: a collection freed the poller's event buffer, which the kernel writes into" hidden.txt; then
+      echo "a buffer the collector cannot see was not caught on its one run (exit $code):"
+      tail -3 hidden.txt; exit 1
     fi
-    printf '  exits %s on run %s\n' "$code" "$caught"
+    printf '  exits 1 at "%s"\n' "$(grep -m1 'freed the poller' hidden.txt | sed 's/^FAIL: //')"
     ;;
 esac
 
@@ -180,10 +161,21 @@ if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build "$REPO/bench/server_l
 fi
 timeout 300 ./noreuse > noreuse.txt 2>&1
 code=$?
-if [ "$code" -ne 1 ] || ! grep -q 'the stacks were not reused' noreuse.txt; then
+if [ "$code" -ne 1 ] || ! grep -qF "FAIL: the stacks were not reused - 200 of them for 200 connections" noreuse.txt; then
   echo "the stack-reuse check did not fire (exit $code):"; tail -3 noreuse.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 'the stacks were not reused' noreuse.txt | sed 's/^iyi: panic: FAIL: //')"
+
+step "control: a load in which no collection runs is a setup failure, status 76, not a verdict"
+if ! "$IYI" build -Dnocollect_force "$REPO/bench/server_load.iyi" -o nocollect > build-nocollect.log 2>&1; then
+  cat build-nocollect.log; exit 1
+fi
+timeout 300 ./nocollect > nocollect.txt 2>&1
+code=$?
+if [ "$code" -ne 76 ] || ! grep -qxF "FAIL: nothing was collected during load, so nothing was proven" nocollect.txt; then
+  echo "the collection premise did not fail as setup (exit $code):"; tail -3 nocollect.txt; exit 1
+fi
+printf '  exits 76 at "%s"\n' "FAIL: nothing was collected during load, so nothing was proven"
 echo "workdir $WORK"
 echo "server load: every step held"
 exit 0

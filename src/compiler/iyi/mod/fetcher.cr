@@ -78,19 +78,20 @@ module Iyi::Mod
       end
 
       FileUtils.rm_rf(File.join(staging, ".git"))
-      File.rename(staging, target)
+      begin
+        File.rename(staging, target)
+      rescue ex : File::Error
+        # Two builds raced, and the other renamed its checkout to *target*
+        # first. rename(2) of a directory onto a non-empty one fails with
+        # ENOTEMPTY (EEXIST on some systems, access denied on Windows), so
+        # every refusal is asked the same question: is there a whole
+        # checkout at *target* now? Then it is as good as ours, and ours
+        # goes. Anything else is this build's to report, and the staging
+        # directory goes either way rather than staying in the cache.
+        FileUtils.rm_rf(staging)
+        raise ex unless File.exists?(File.join(target, "iyi.mod"))
+      end
       target
-    rescue ex : File::AlreadyExistsError
-      # Two builds raced; the winner's checkout is as good as ours.
-      cache_target(path, version)
-    end
-
-    # The manifest of *path* at *version* — the resolver's fetch seam,
-    # bound to git.
-    def self.manifest(path : String, version : SemanticVersion) : ModFile
-      dir = checkout(path, version)
-      file = File.join(dir, "iyi.mod")
-      ModFile.parse(File.read(file), file)
     end
 
     # The versions *path* has, from its repository's tags: every `vX.Y.Z`

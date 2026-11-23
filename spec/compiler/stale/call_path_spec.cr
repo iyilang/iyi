@@ -667,3 +667,43 @@ describe "Iyi::Stale S3f: CallPathFp, typed encoder, roots, explain" do
     fp1.should_not eq(fp2)
   end
 end
+
+# Two source directories: `std/` holds `iyi/prelude.iyi` and `prelude.iyi`, so its
+# files answer `ShareReach#std_at?` and `prelude_at?` true; `user/` holds neither.
+# The same source compiled in each isolates the origin bits, because `FileNode`
+# does not write its path into a digest.
+private def with_origin_dirs(&)
+  root = File.join(Dir.tempdir, "iyi-origin-#{Random.rand(1 << 30)}")
+  std_dir = File.join(root, "std")
+  user_dir = File.join(root, "user")
+  begin
+    Dir.mkdir_p(File.join(std_dir, "iyi"))
+    Dir.mkdir_p(user_dir)
+    File.write(File.join(std_dir, "iyi", "prelude.iyi"), "")
+    File.write(File.join(std_dir, "prelude.iyi"), "")
+    yield File.join(std_dir, "main.iyi"), File.join(user_dir, "main.iyi")
+  ensure
+    FileUtils.rm_rf(root)
+  end
+end
+
+describe "Iyi::Stale origin bits: where a born-shared type and a class variable store were written" do
+  it "keys an allocated type by whether its declaration is in std" do
+    code = "class Mutex\nend\n\nMutex.new\n"
+    with_origin_dirs do |std_file, user_file|
+      _, std_res = compute_fp(code, std_file)
+      _, user_res = compute_fp(code, user_file)
+      std_res.element_digests["Mutex"].should_not eq(user_res.element_digests["Mutex"])
+    end
+  end
+
+  it "keys a class variable assignment by whether it was written in the prelude's directory" do
+    code = "class Holder\n  @@count = 0\n\n  def self.bump\n    @@count = 1\n  end\nend\n\nHolder.bump\n"
+    with_origin_dirs do |std_file, user_file|
+      _, std_res = compute_fp(code, std_file)
+      _, user_res = compute_fp(code, user_file)
+      key = std_res.element_digests.keys.find!(&.includes?("Holder::bump"))
+      std_res.element_digests[key].should_not eq(user_res.element_digests[key])
+    end
+  end
+end

@@ -1,0 +1,129 @@
+# Union holes: a union stored through a smaller arm holds zeros past the
+# arm and in its tag's padding, never a stale word (bench/union_holes.sh).
+#
+# `Val` is 40 bytes: a 4-byte tag, its padding and 32 bytes of value,
+# because `Wide` (a `Time`'s shape: a pointer among integers) is that wide.
+# An `Int64` arm writes the tag and the first value word; the compiler
+# writes the rest as zero (`CodeGenVisitor#iyi_clear_union_holes`). Left
+# alone, those bytes kept what the slot held before or what the temporary
+# the arm was boxed in found on the stack, and an untyped buffer such as
+# `Array(DBValue)`'s, which the collector reads word by word, kept dead
+# objects alive through them. Four paths, each read here raw:
+#   - boxing into a temporary, then copied into an array's buffer
+#     (`to_db_value`/`collect_args`' shape): `Int64`, `String`;
+#   - an arm narrower than a word (`Int32`): the word's upper half;
+#   - a narrower union widened into `Val` (`Bool | Nil` from a tuple);
+#   - in place: a field holding a `Wide` and then an `Int64`, whose
+#     `Wide`'s label pointer stayed in the words past the `Int64`.
+# Prints each element's words, then `stale words: N`; exits 1 if N > 0.
+@[Unsafe("reads the raw words of an array's buffer and of an object's union field to find stale union bytes")]
+import std/tuple
+
+struct Wide
+  getter seconds : Int64
+  getter nanoseconds : Int32
+  getter label : String
+  getter offset : Int32
+
+  def initialize(@seconds : Int64, @nanoseconds : Int32, @label : String, @offset : Int32)
+  end
+end
+
+alias Val = Nil | Bool | Int32 | Int64 | String | Wide
+
+class ValSlot
+  @value : Val = nil
+
+  def initialize
+  end
+
+  @[NoInline]
+  def value=(value : Val) : Nil
+    @value = value
+  end
+
+  @[NoInline]
+  def put(seconds : Int64) : Nil
+    @value = seconds
+  end
+
+  def value : Val
+    @value
+  end
+end
+
+def to_val(arg : T) : Val forall T
+  arg.as(Val)
+end
+
+def collect(args : Tuple) : Array(Val)
+  all = [] of Val
+  args.each { |arg| all << to_val(arg) }
+  all
+end
+
+# Leaves pointers in the stack slots a later union temporary may reuse.
+@[NoInline]
+def dirty(text : String) : Int64
+  values = [] of Val
+  values << Wide.new(1_i64, 2, text, 3).as(Val)
+  values << Wide.new(4_i64, 5, text + "x", 6).as(Val)
+  total = 0_i64
+  values.each { |v| total = total + (v.is_a?(Wide) ? v.seconds : 0_i64) }
+  total
+end
+
+# The stale words of *count* `Val`s at *address*: the tag's padding, the
+# bytes of value word 0 under *word1_mask* (those the arm does not own),
+# and value words 1-3, which no arm but `Wide` writes.
+def stale_at(name : String, address : UInt64, count : Int32, word1_mask : UInt64) : Int32
+  words = Pointer(UInt64).new(address)
+  stale = 0
+  line = "#{name}:"
+  i = 0
+  while i < 5 * count
+    line = line + " " + (words + i.to_i64).value.to_s(16)
+    i = i + 1
+  end
+  STDOUT.puts line
+  k = 0
+  while k < count
+    stale = stale + 1 if (words + (5 * k).to_i64).value.unsafe_shr(32_u64) != 0_u64
+    stale = stale + 1 if (words + (5 * k + 1).to_i64).value & word1_mask != 0_u64
+    j = 2
+    while j < 5
+      stale = stale + 1 if (words + (5 * k + j).to_i64).value != 0_u64
+      j = j + 1
+    end
+    k = k + 1
+  end
+  stale
+end
+
+def dump(name : String, all : Array(Val), word1_mask : UInt64) : Int32
+  stale_at(name, all.to_unsafe.address, all.size, word1_mask)
+end
+
+args = Program.args
+seed = args.size > 0 ? args[0] : "seed"
+total = 0
+round = 0
+while round < 3
+  dirty(seed + round.to_s)
+  total = total + dump("int64", collect({79_i64, 80_i64}), 0_u64)
+  dirty(seed)
+  total = total + dump("int32", collect({7, 8}), 0xFFFFFFFF00000000_u64)
+  dirty(seed)
+  total = total + dump("nil+bool", collect({nil, true}), 0xFFFFFFFFFFFFFF00_u64)
+  dirty(seed)
+  total = total + dump("string", collect({"a", "b"}), 0_u64)
+  slot = ValSlot.new
+  slot.value = Wide.new(1_i64, 2, seed + "label", 3).as(Val)
+  slot.put(79_i64)
+  # The field is the object's only one: its words start at the object's
+  # address.
+  total = total + stale_at("field", slot.object_id, 1, 0_u64)
+  round = round + 1
+end
+STDOUT.puts "stale words: #{total}"
+exit(total == 0 ? 0 : 1)

@@ -100,6 +100,51 @@ describe "Compiler" do
     end
   end
 
+  # iyi: `BuildInputs.paused` takes the recorder from the fiber that pauses
+  # and from no other. The two fibers here stand for two parse-ahead workers,
+  # each listing a directory while the walk reads on: the pause took the
+  # recorder from the whole process, the walk's reads went unrecorded, and
+  # the pause that ended last put back the nil the other had left, so the
+  # rest of the build was recorded by nobody (bench/up_to_date.sh's `sys`,
+  # job 136048431367). Fibers rather than threads, so that the pauses end in
+  # this order every run.
+  it "records what a build reads while other fibers pause, and after" do
+    with_tempdir("iyi-inputs-paused") do
+      File.write "input", "x"
+      input = File.expand_path("input")
+      inputs = Iyi::BuildInputs.new(nil)
+      Iyi::BuildInputs.current = inputs
+      begin
+        inside = Channel(Iyi::BuildInputs?).new
+        left = Channel(Nil).new
+        gates = {Channel(Nil).new, Channel(Nil).new}
+        gates.each do |gate|
+          spawn do
+            Iyi::BuildInputs.paused do
+              inside.send Iyi::BuildInputs.current
+              gate.receive
+            end
+            left.send nil
+          end
+        end
+        # Both inside their pauses, where neither records...
+        2.times { inside.receive.should be_nil }
+        # ...and this fiber still does.
+        Iyi::BuildInputs.current.should be(inputs)
+        File.exists?(input).should be_true
+        inputs.files.has_key?(Iyi::BuildInputs.key(input)).should be_true
+        # The first in leaves first, as two threads' pauses could.
+        gates.each do |gate|
+          gate.send nil
+          left.receive
+        end
+        Iyi::BuildInputs.current.should be(inputs)
+      ensure
+        Iyi::BuildInputs.current = nil
+      end
+    end
+  end
+
   # iyi: the linker probe is asked once per `PATH`, not once per build.
   #
   # Before linking, the compiler searches `PATH` for `mold` and then for
@@ -178,7 +223,8 @@ describe "Compiler" do
     end
   {% end %}
 
-  # iyi: the cache cleaner asks before it deletes.
+  # iyi: the cache cleaner deletes nothing a build holds, and holds what it
+  # deletes.
   #
   # It keeps the ten most recently modified directories in the cache and
   # removes the rest, and it runs at the end of every compile. A build's
@@ -189,8 +235,11 @@ describe "Compiler" do
   # linker asking for a `_main.o0.o` nobody had written: a lost hour reading
   # linker output for something the linker had not done.
   #
-  # A build already says it is using its directory. It holds `compiler.lock`
-  # there for the whole of codegen and linking; the cleaner reads it now.
+  # A build holds `compiler.lock` in its directory from the moment codegen
+  # names it until the last object is read (`CacheDir#hold`); a removal takes
+  # the same lock without waiting, leaves the directory when it cannot, and
+  # keeps the lock until everything else is gone (`CacheDir#remove`).
+  # bench/rebuild_reuse.py step 7 holds the two against each other.
   it "keeps a cache directory another compile is working in" do
     with_tempfile("cache-in-use") do |root|
       Dir.mkdir_p(root)
@@ -199,27 +248,28 @@ describe "Compiler" do
       [working, idle].each do |dir|
         Dir.mkdir_p(dir)
         File.write(File.join(dir, "program.o"), "")
-        File.write(File.join(dir, "compiler.lock"), "")
       end
 
       cache = Iyi::CacheDir.instance
-      cache.directory_in_use?(working).should be_false # a lock nobody holds
+      held = cache.hold(working)
+      begin
+        held.path.should eq(File.join(working, "compiler.lock"))
 
-      # Both are the oldest in a cache of twelve, so the rule above would have
-      # both of them; one of them is being written to.
-      12.times { |i| Dir.mkdir_p(File.join(root, "newer-#{i}")) }
-
-      File.open(File.join(working, "compiler.lock"), "r") do |lock|
-        lock.flock_exclusive(blocking: false)
-        cache.directory_in_use?(working).should be_true
+        # Both are the oldest in a cache of twelve, so the rule above would
+        # have both of them; one of them is being written to.
+        [working, idle].each { |dir| File.touch(dir, Time.utc(2000, 1, 1)) }
+        12.times { |i| Dir.mkdir_p(File.join(root, "newer-#{i}")) }
 
         cache.cleanup(root)
 
         File.exists?(File.join(working, "program.o")).should be_true
         Dir.exists?(idle).should be_false
+      ensure
+        held.close
       end
 
-      cache.directory_in_use?(working).should be_false # released with the file
+      cache.cleanup(root)
+      Dir.exists?(working).should be_false # released with the file
     end
   end
 

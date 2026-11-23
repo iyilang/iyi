@@ -4869,17 +4869,30 @@ module Iyi
       overloads.each do |entry|
         a_def = entry.def
         next unless a_def.is_a?(External)
-        # An external *variable* — libc's `$errno` — is not a `fun` and does
-        # not render as one.
-        next if a_def.external_var?
+        # An external *variable* — libc's `$daylight` — is a getter and a
+        # setter, and travels as the one line that declares both: a body the
+        # consumer compiles reads it as it calls a `fun` (#204).
+        next if a_def.external_var? && a_def.name.ends_with?('=')
         next unless written_in(a_def.location).try &.starts_with?(directory)
 
-        funs << render_fun(a_def, owner)
+        funs << (a_def.external_var? ? render_external_var(a_def, owner) : render_fun(a_def, owner))
       end
     end
 
     funs.sort!
     funs
+  end
+
+  # `$daylight : Int32`, as Crystal writes one; the type is the resolved one,
+  # because the getter keeps no type spec, and named the way a `fun`'s
+  # answer is (`fun_type`), because the shard's code reads it as one.
+  private def self.render_external_var(a_def : External, owner : NamedType? = nil) : String
+    String.build do |io|
+      io << "@[ThreadLocal] " if a_def.thread_local?
+      io << '$' << a_def.name
+      io << " = " << a_def.real_name unless a_def.name == a_def.real_name
+      io << " : " << fun_type(a_def.type.to_s, a_def.type?, owner, returns: true)
+    end
   end
 
   # `fun bn_new = BN_new : Bignum*`, as Crystal writes one.

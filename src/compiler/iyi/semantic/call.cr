@@ -863,19 +863,9 @@ class Iyi::Call
     # `Int32` by the consumer that compiles it, and `o.twice(x).or(-1)` that
     # built from source was refused there as having "no error to recover".
     members = return_type.is_a?(UnionType) ? return_type.union_types : [return_type]
-    if members.any?(&.error?) && iyi_written?(match.def.location.try(&.filename))
+    if members.any?(&.error?) && program.iyi_written?(match.def.location.try(&.filename))
       typed_def.iyi_declared_return = true
     end
-  end
-
-  # iyi: whether a def was written in iyi: in an `.iyi` file, or in an
-  # artifact built from one, whose declarations are parsed under the
-  # artifact's own path (`SemanticVisitor`, `iyi_artifact_source_paths`).
-  private def iyi_written?(filename) : Bool
-    return true if Lexer.iyi_source?(filename)
-    return false unless filename.is_a?(String)
-    source = program.iyi_artifact_source_paths[filename]?
-    !source.nil? && Lexer.iyi_source?(source)
   end
 
   def check_tuple_indexer(owner, def_name, args, arg_types)
@@ -1681,6 +1671,7 @@ class Iyi::Call
 
   def prepare_typed_def_with_args(untyped_def, owner, self_type, arg_types, block_arg_type, named_args_types)
     original_untyped_def = untyped_def
+    original_untyped_def.iyi_instantiated = true
 
     # If there's an argument count mismatch, or we have a splat, or a double splat, or there are
     # named arguments, we create another def that sets ups everything for the real call.

@@ -40,7 +40,35 @@ cache:
   5. on Windows, one more while another process holds the program, shared
      for reading only, for a second: the build waits for it and links;
   6. eleven other programs built into the same cache, then the fixture
-     again: the EIY helper its template runs is reused, not built again.
+     again: the EIY helper its template runs is reused, not built again,
+     and the rotation left the ten builds it keeps;
+  7. on Linux and macOS, the fixture's directory, made the oldest and
+     padded to 50,000 files so that removing it takes a while, removed by
+     another build's rotation: while files are still going, the removal
+     holds the directory's `compiler.lock`, and the fixture built meanwhile
+     waits for it and links; then the fixture built while this script holds
+     the lock, the directory and the lock file removed before it is let go:
+     the build makes the directory again and compiles every object;
+  8. the reach verdicts at the cache's root, in a cache of their own: the
+     fixture's made older than as many others as the rotation keeps
+     (`CacheDir::REACH_KEPT`, 240), and the fixture built again: it reads
+     them, proving nothing again, and its rotation keeps them and removes
+     the oldest others; then 5,000 stale verdicts more, the fixture's the
+     oldest of all, and the fixture built while another build's rotation
+     removes them: both builds link, the fixture prints what it should,
+     and after one more build 240 verdicts are left, the fixture's among
+     them with the bytes it first stored. And no more std modules hold a
+     `@[SafeReach]` claim than `CacheDir::REACH_MODULES` counts;
+  9. a runner's leftovers, in a cache of their own: two programs left two
+     hours ago, one by `crystal spec` and one by `iyi run`, and one left
+     just now, and `iyi run` must take the two and keep the third; then,
+     on Linux, where a build links through the command the driver computed
+     once (a link template): a template whose linker fails, and the build
+     must link through the driver and mark that template unusable; then
+     the templates rotated as step 8 rotates verdicts, twenty kept
+     (`CacheDir::LINK_KEPT`), 5,000 stale ones removed while a program
+     builds, and its template, removed outright, asked of the driver again
+     to the same bytes.
 
 Step 5 is what Smart App Control's services do, evaluating, on Windows 11:
 the Restart Manager named `CryptSvc`, `AppIDSvc` and the `applockerfltr`
@@ -53,6 +81,54 @@ nor linked again. Against that compiler step 5 failed in 2 runs of 2, at
 Step 6 is #143: the cache keeps the ten directories used last, and the
 helper counted with them. Against the compiler before helpers were kept
 apart it failed in 1 run of 1, the helper built again in 2.38 s.
+
+Step 7 is the self-hosted Mac's three CI jobs sharing one cache: a broken
+copy of the std/secure_dns exercise stopped at "clang: error: no such file
+or directory: 'P-ointer40U-I-nt841.o0.o'" (job 135882647898) while another
+job built nine samples, each ending in a rotation. The removal asked
+whether anyone held the directory and then deleted it holding nothing, so
+a build that took the directory in between kept the objects it found and
+linked after they were gone. Against that compiler (18333d052) on Linux,
+on ext4, the first half failed 5 runs of 5 ("the removal did not hold the
+lock: ... compiler.lock was free"), and the second half, run alone, 5 of 5
+("a codegen thread failed: Error opening file with mode 'w': ...
+_main.o0.bc: No such file or directory"); a build begun during a removal
+padded to 200,000 files stopped 5 times of 5 at the Mac's own "cannot find
+P-ointer40U-I-nt841.o0.o: No such file or directory". On that Mac (Apple
+M2 Pro, APFS) the first half failed 3 runs of 3 and the second 3 of
+3, and a build begun during a removal padded to 100,000 files stopped 2
+times of 3 at "clang: error: no such file or directory: 'U-I-nt64.o0.o'";
+with the fix the whole gate passed there and on Linux, and those builds
+waited out the removal and linked 3 of 3. The second half needs to see
+that the build has the lock file open, which Linux's /proc and macOS's
+lsof show. Step 7 does not run on Windows: Python opens a file without
+FILE_SHARE_DELETE, so this script could neither delete a lock file it
+holds nor let the compiler delete one it has open.
+
+Step 8 is the reach verdicts nothing removed: one per std module with
+claims, keyed by the module's bytes, the flags and the compiler's own
+executable, so every rebuild of the compiler wrote a new set, and the
+rotation, removing directories only, passed over them. ~/.cache/iyi held
+24,428 on the project's Mac (59.6 MB) and 16,660 on the Linux box. Against
+the compiler before (6b131f8d8) the first half failed 3 runs of 3 on Linux
+and 3 of 3 on Windows 11 ("the rotation left 241 reach verdicts, not 240"),
+and against the fix with a read no longer marking the verdict used, 3 of 3
+on Linux ("the rotation removed 1 of the 1 verdicts the build it ended had
+just read"). With the fix the whole gate passed on both.
+
+Step 9 is the rest of what piled up at the root of this Linux box's cache:
+eight spec programs `crystal spec` runs left, ended before their cleanup, 518 MB,
+which no runner but `iyi run` swept and it only its own name's, and 166
+link templates, which nothing removed. Against the compiler before
+(6b131f8d8) on Linux each part failed 3 runs of 3: the leftovers ("the
+cache holds crystal-run-spec-1.tmp, crystal-run-spec-3.tmp"), the failing
+template ("not marked unusable ... and link-template-a184... was written
+beside it": the mark went under a key computed without the flags the link
+adds, and with a linker that counts its calls each build of the three
+after the first tried the failing template again, where the fix tried it
+once), and, run without the failing template, the rotation ("the rotation
+left 21 link templates, not 20"). The leftovers failed 3 of 3 on Windows 11
+too, and with the fix the whole gate passed on both.
 
 And because the old shuffle was there for a reason, rule 2's reordering is
 held too: `probe/a` and `probe/b` both import `probe/log` and each
@@ -76,6 +152,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -482,8 +559,15 @@ def held(work):
 
 
 # More other programs than the cache's rotation keeps (`CacheDir::KEPT`).
-OTHERS = 11
+KEPT = 10
+OTHERS = KEPT + 1
 HELPER = re.compile(r"^ - .*eiy[\\/]process\.iyi: (.*)$", re.M)
+
+
+def builds(cache):
+    """The build directories in *cache*: not the helpers, which the rotation
+    counts apart (`CacheDir::MACRO_RUN`)."""
+    return [entry for entry in cache.iterdir() if entry.is_dir() and not (entry / "macro_run").exists()]
 
 
 def outlived(work):
@@ -507,7 +591,400 @@ def outlived(work):
         fail("6. a helper outlives other builds", f"`iyi build -s` named no EIY helper\n{proc.stdout}")
     if not found.group(1).startswith("reused previous compilation"):
         fail("6. a helper outlives other builds", f"after {OTHERS} other programs the EIY helper was built again: {found.group(1)}")
-    print(f"  ok   6. after {OTHERS} other programs into the same cache, the EIY helper is reused")
+    kept = builds(work / "cache")
+    if len(kept) != KEPT:
+        fail("6. a helper outlives other builds",
+             f"after {OTHERS + 1} programs the rotation left {len(kept)} builds, not {KEPT}: "
+             f"{', '.join(sorted(entry.name for entry in kept))}")
+    print(f"  ok   6. after {OTHERS} other programs into the same cache, the EIY helper is reused, and {KEPT} builds are kept")
+
+
+# Files added to the fixture's directory so that removing it takes long
+# enough to be looked at: about 0.6 s on Linux (ext4).
+PADS = 50_000
+
+
+def entries(directory):
+    """How many entries *directory* holds; -1 once it is gone."""
+    try:
+        return len(os.listdir(directory))
+    except FileNotFoundError:
+        return -1
+
+
+def has_open(pid, path):
+    """Whether process *pid* has *path* open: Linux's /proc, else lsof."""
+    target = os.path.realpath(path)
+    fds = f"/proc/{pid}/fd"
+    if os.path.isdir(fds):
+        for fd in os.listdir(fds):
+            try:
+                if os.path.realpath(os.readlink(os.path.join(fds, fd))) == target:
+                    return True
+            except OSError:
+                pass
+        return False
+    proc = subprocess.run(["lsof", "-a", "-p", str(pid), "-Fn"], capture_output=True, text=True)
+    return any(line[1:] and os.path.realpath(line[1:]) == target for line in proc.stdout.splitlines() if line.startswith("n"))
+
+
+def directory_of(cache, root):
+    """The fixture's build directory in *cache*: named after its entry's path."""
+    tail = f"-{root.name}-main.iyi"
+    found = [entry for entry in builds(cache) if entry.name.endswith(tail)]
+    if len(found) != 1:
+        fail("7. a directory removed under a build", f"{len(found)} directories in {cache} end in {tail}")
+    return found[0]
+
+
+def reported(output):
+    found = REUSED.search(output)
+    return found.group(1) if found else "no reuse line"
+
+
+def contested(work):
+    """A build whose cache directory another build's rotation is removing."""
+    step = "7. a directory removed under a build"
+    if os.name == "nt":
+        print("  skip 7. Windows: this script cannot hold a file the compiler deletes (Python opens files without FILE_SHARE_DELETE)")
+        return
+    import fcntl
+
+    root = work / "contested"
+    write(root, FIXTURE)
+    cache = work / "contested-cache"
+    env = environment(cache)
+    build(root, "main.iyi", "prog", env)
+    directory = directory_of(cache, root)
+    lock = directory / "compiler.lock"
+
+    # The removal: the fixture's directory the oldest of eleven builds, and
+    # another build's rotation at its end.
+    for i in range(PADS):
+        open(directory / f"pad-{i}", "w").close()
+    os.utime(directory, (946684800, 946684800))
+    for i in range(KEPT):
+        (cache / f"newer-{i}").mkdir()
+    whole = entries(directory)
+    others = work / "contested-others"
+    write(others, {"rotate.iyi": "module rotate\n\nputs 0\n"})
+    rotation = subprocess.Popen([IYI, "build", "rotate.iyi", "-o", "rotate"], cwd=others, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    while entries(directory) >= whole:
+        if rotation.poll() is not None:
+            fail(step, f"the rotation did not remove the oldest directory (exit {rotation.returncode})\n{rotation.stdout.read()}")
+        time.sleep(0.001)
+
+    # Looked at mid-way: the lock tried, then the files counted, so a removal
+    # that still had files to delete after the try was under way during it.
+    try:
+        fd = os.open(lock, os.O_RDONLY)
+    except FileNotFoundError:
+        held = "gone"
+    else:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = "free"
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except BlockingIOError:
+            held = "held"
+        os.close(fd)
+    left = entries(directory)
+    if left <= 1:
+        fail(step, f"the removal of {whole} entries ended before it could be looked at; pad the directory more than {PADS}")
+    if held != "held":
+        fail(step, f"the removal did not hold the lock: with {left} of {whole} entries left, compiler.lock was {held}")
+
+    during = subprocess.run([IYI, "build", "-s", "--force", "main.iyi", "-o", "prog"], cwd=root, env=env,
+                            capture_output=True, text=True)
+    rotated = rotation.communicate()[0]
+    if rotation.returncode != 0:
+        fail(step, f"the build whose rotation removed the directory failed\n{rotated}")
+    if during.returncode != 0:
+        fail(step, f"the fixture built during the removal failed\n{during.stdout}{during.stderr}")
+    if run(root, "prog") != EXPECTED:
+        fail(step, "the fixture built during the removal printed something else")
+    if any(name.startswith("pad-") for name in (os.listdir(directory) if directory.exists() else [])):
+        fail(step, "the removal left files behind")
+    print(f"  ok   7. a removal holds compiler.lock while it deletes ({left} of {whole} entries left),"
+          f" and a build meanwhile waits for it and links")
+
+    # The build waiting while the lock's holder removes the directory, the
+    # lock file and all: it has to find it holds a file that is gone.
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        waiting = subprocess.Popen([IYI, "build", "-s", "--force", "main.iyi", "-o", "prog"], cwd=root, env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        deadline = time.monotonic() + 120
+        while not has_open(waiting.pid, lock):
+            if waiting.poll() is not None:
+                fail(step, f"the fixture built while its directory's lock was held by another\n{waiting.stdout.read()}")
+            if time.monotonic() > deadline:
+                waiting.kill()
+                fail(step, "the fixture's build did not open compiler.lock in 120 s")
+            time.sleep(0.01)
+        for name in os.listdir(directory):
+            if (directory / name).is_dir():
+                shutil.rmtree(directory / name)
+            elif name != lock.name:
+                os.unlink(directory / name)
+        os.unlink(lock)
+        os.rmdir(directory)
+    finally:
+        os.close(fd)
+    printed = waiting.communicate()[0]
+    if waiting.returncode != 0:
+        fail(step, f"the build that waited while its directory was removed failed\n{printed}")
+    if reported(printed) != "no previous":
+        fail(step, f"the build that waited while its directory was removed said: {reported(printed)}")
+    if run(root, "prog") != EXPECTED:
+        fail(step, "the build that waited while its directory was removed printed something else")
+    print("  ok   7. a build waiting on a directory its lock's holder removed makes it again and compiles every object")
+
+
+# The reach verdicts the rotation keeps (`CacheDir::REACH_KEPT`): one for
+# each std module that holds a `@[SafeReach]` claim
+# (`CacheDir::REACH_MODULES`), for every build and helper it keeps.
+REACH_MODULES = 12
+REACH_KEPT = 2 * KEPT * REACH_MODULES
+# The verdicts no build reads that step 8 leaves a rotation to cut down
+# while the fixture builds.
+STALE = 5_000
+CLAIM = re.compile(r"^\s*@\[SafeReach\b", re.M)
+# 2000-01-01, and a year: dates older than any build of today's.
+AGED = 946684800
+YEAR = 365 * 86400
+
+
+def verdicts(cache, prefix="reach-"):
+    """The reach verdicts (or the files named *prefix*) at *cache*'s root, by name."""
+    return {entry.name: entry for entry in cache.iterdir() if entry.name.startswith(prefix) and entry.is_file()}
+
+
+def counted(cache, prefix="reach-"):
+    return sum(1 for name in os.listdir(cache) if name.startswith(prefix))
+
+
+def plant(cache, tag, count, start, prefix="reach-", text="iyi reach verdict 2\nend\n"):
+    """*count* verdicts (or files named *prefix*) no build reads, the first
+    dated *start* and each a second newer than the one before; their names,
+    oldest first."""
+    names = []
+    for i in range(count):
+        path = cache / f"{prefix}{tag}-{i:08d}"
+        path.write_text(text, newline="\n")
+        os.utime(path, (start + i, start + i))
+        names.append(path.name)
+    return names
+
+
+def age(paths, when):
+    for path in paths:
+        os.utime(path, (when, when))
+
+
+def verdicts_rotated(work):
+    """The rotation keeps the reach verdicts used last, those a build has
+    just read among them, and a build whose verdicts it removes proves them
+    again to the same answer."""
+    step = "8. reach verdicts"
+    modules = [path for path in sorted((REPO / "src" / "std").rglob("*.iyi"))
+               if CLAIM.search(path.read_text(encoding="utf-8"))]
+    if len(modules) > REACH_MODULES:
+        fail(step, f"{len(modules)} std modules hold a @[SafeReach] claim, and the rotation keeps verdicts for "
+                   f"{REACH_MODULES} a build: raise CacheDir::REACH_MODULES, and REACH_MODULES here")
+
+    root = work / "reach"
+    write(root, FIXTURE)
+    cache = work / "reach-cache"
+    env = environment(cache)
+    build(root, "main.iyi", "prog", env)
+    first = verdicts(cache)
+    if not first:
+        fail(step, "the fixture's build stored no reach verdict")
+    if len(first) > REACH_MODULES:
+        fail(step, f"the fixture's build stored {len(first)} reach verdicts, more than the {REACH_MODULES} a build may")
+    stored = {name: (entry.stat().st_ino, entry.read_bytes()) for name, entry in first.items()}
+
+    # The fixture's verdicts made older than as many others as the rotation
+    # keeps: the build that reads them makes them its newest.
+    age(first.values(), AGED)
+    planted = plant(cache, "kept", REACH_KEPT, AGED + YEAR)
+    build(root, "main.iyi", "prog", env)
+    left = verdicts(cache)
+    gone = sorted(set(first) - set(left))
+    if gone:
+        fail(step, f"the rotation removed {len(gone)} of the {len(first)} verdicts the build it ended had just read: {', '.join(gone)}")
+    # Read, a verdict keeps its file; proven again, it is written to another
+    # and renamed over the first.
+    proven = sorted(name for name in first if left[name].stat().st_ino != stored[name][0])
+    if proven:
+        fail(step, f"the rebuild proved {len(proven)} of its {len(first)} stored verdicts again: {', '.join(proven)}")
+    if len(left) != REACH_KEPT:
+        fail(step, f"the rotation left {len(left)} reach verdicts, not {REACH_KEPT}")
+    removed = [name for name in planted if name not in left]
+    if removed != planted[:len(first)]:
+        fail(step, f"the rotation removed {len(removed)} of the planted verdicts, not the {len(first)} oldest")
+    print(f"  ok   8. the fixture's reach verdicts ({len(first)}), made the oldest of {len(first) + REACH_KEPT},"
+          f" outlive the rotation of the build that reads them, and the {REACH_KEPT} kept are the newest")
+
+    # A rotation with STALE more to remove, the fixture's own the oldest
+    # of all, and the fixture built while it removes them.
+    plant(cache, "stale", STALE, AGED - YEAR)
+    age((cache / name for name in first), AGED - 2 * YEAR)
+    whole = counted(cache)
+    others = work / "reach-others"
+    write(others, {"rotate.iyi": "module rotate\n\nputs 0\n"})
+    rotation = subprocess.Popen([IYI, "build", "rotate.iyi", "-o", "rotate"], cwd=others, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    while (begun := counted(cache)) >= whole:
+        if rotation.poll() is not None and counted(cache) >= whole:
+            fail(step, f"the rotation removed no reach verdict of {whole} (exit {rotation.returncode})\n{rotation.stdout.read()}")
+        time.sleep(0.001)
+    during = subprocess.run([IYI, "build", "-s", "--force", "main.iyi", "-o", "prog"], cwd=root, env=env,
+                            capture_output=True, text=True)
+    rotated = rotation.communicate()[0]
+    if rotation.returncode != 0:
+        fail(step, f"the build whose rotation removed the verdicts failed\n{rotated}")
+    if during.returncode != 0:
+        fail(step, f"the fixture built while its verdicts were being removed failed\n{during.stdout}{during.stderr}")
+    if run(root, "prog") != EXPECTED:
+        fail(step, "the fixture built while its verdicts were being removed printed something else")
+    build(root, "main.iyi", "prog", env)
+    last = verdicts(cache)
+    if len(last) != REACH_KEPT:
+        fail(step, f"after {STALE} stale verdicts the rotation left {len(last)}, not {REACH_KEPT}")
+    changed = sorted(name for name in first if name not in last or last[name].read_bytes() != stored[name][1])
+    if changed:
+        fail(step, f"the fixture's verdicts, removed and proven again, are missing or answer otherwise: {', '.join(changed)}")
+    print(f"  ok   8. the fixture built with {begun} of {whole} verdicts left to a rotation that removes its own,"
+          f" and its verdicts back after it with the same bytes; {REACH_KEPT} kept")
+
+
+# The link templates the rotation keeps (`CacheDir::LINK_KEPT`): one for
+# each build and helper it keeps, each linking once.
+LINK_KEPT = 2 * KEPT
+TEMPLATE = "link-template-"
+TINY = {"tiny.iyi": "module tiny\n\nputs 9\n"}
+# What a template stores beside a command naming none of the toolchain's
+# objects (`Compiler#iyi_link_inputs_fingerprint`): the digest of nothing.
+NOTHING = "d41d8cd98f00b204e9800998ecf8427e"
+
+
+def leftovers_swept(work):
+    """A runner takes away what runners of either of the compiler's names
+    left an hour ago, and nothing younger."""
+    step = "9. a runner's leftovers"
+    cache = work / "run-cache"
+    cache.mkdir()
+    env = environment(cache)
+    old = time.time() - 2 * 3600
+    left = {"crystal-run-spec-1.tmp": old, "iyi-run-tiny-2.tmp": old, "crystal-run-spec-3.tmp": time.time()}
+    for name, when in left.items():
+        (cache / name).write_bytes(b"\0" * 1024)
+        os.utime(cache / name, (when, when))
+    root = work / "run"
+    write(root, TINY)
+    proc = subprocess.run([IYI, "run", "tiny.iyi"], cwd=root, env=env, capture_output=True, text=True)
+    if proc.returncode != 0 or proc.stdout.replace("\r\n", "\n") != "9\n":
+        fail(step, f"`iyi run tiny.iyi` failed or printed something else\n{proc.stdout}{proc.stderr}")
+    kept = sorted(name for name in left if (cache / name).exists())
+    if kept != ["crystal-run-spec-3.tmp"]:
+        fail(step, f"after `iyi run` the cache holds {', '.join(kept) or 'none'} of the leftovers;"
+                   " wanted the hour-young crystal-run-spec-3.tmp alone")
+    print("  ok   9. `iyi run` takes the leftovers of either of the compiler's names an hour old, and keeps a younger one")
+
+
+def templates_rotated(work):
+    """A template whose link failed is marked so under the key it was read
+    by; the rotation keeps the templates used last, the one a build has
+    just read among them; and a build after a removal asks the driver again
+    for the same template."""
+    step = "9. link templates"
+    if not sys.platform.startswith("linux"):
+        print("  skip 9. link templates: only a Linux build links through one (`Compiler#iyi_direct_link_command`)")
+        return
+    root = work / "link"
+    write(root, TINY)
+
+    def stored_one(cache, env):
+        build(root, "tiny.iyi", "tiny", env)
+        found = verdicts(cache, TEMPLATE)
+        if len(found) != 1:
+            fail(step, f"the build of tiny.iyi stored {len(found)} link templates, not 1")
+        return found
+
+    # The template a machine could not link with: a linker that fails.
+    cache = work / "link-unusable-cache"
+    env = environment(cache)
+    env.pop("IYI_LINK_DRIVER", None)
+    (name, entry), = stored_one(cache, env).items()
+    key = entry.read_text().split("\n")[0]
+    entry.write_text(f"{key}\n{NOTHING}\nfalse\n\n", newline="\n")
+    build(root, "tiny.iyi", "tiny", env)
+    if run(root, "tiny") != "9\n":
+        fail(step, "tiny.iyi, linked again by the driver after its template failed, printed something else")
+    marked = (cache / name).read_text() if (cache / name).exists() else "(gone)"
+    if marked != f"{key}\n\nunusable":
+        stray = sorted(set(verdicts(cache, TEMPLATE)) - {name})
+        fail(step, f"the template whose link failed was not marked unusable: it reads {marked!r}"
+                   + (f", and {', '.join(stray)} was written beside it" if stray else ""))
+    print("  ok   9. a template whose link failed is marked unusable under the key it was read by")
+
+    cache = work / "link-cache"
+    env = environment(cache)
+    env.pop("IYI_LINK_DRIVER", None)
+    first = stored_one(cache, env)
+    stored = {name: (entry.stat().st_ino, entry.read_bytes()) for name, entry in first.items()}
+    age(first.values(), AGED)
+    planted = plant(cache, "kept", LINK_KEPT, AGED + YEAR, prefix=TEMPLATE, text="planted\n")
+    build(root, "tiny.iyi", "tiny", env)
+    left = verdicts(cache, TEMPLATE)
+    if any(name not in left for name in first):
+        fail(step, "the rotation removed the template the build it ended had just linked with")
+    if any(left[name].stat().st_ino != stored[name][0] for name in first):
+        fail(step, "the rebuild asked the driver again for the template it had stored")
+    if len(left) != LINK_KEPT:
+        fail(step, f"the rotation left {len(left)} link templates, not {LINK_KEPT}")
+    removed = [name for name in planted if name not in left]
+    if removed != planted[:len(first)]:
+        fail(step, f"the rotation removed {len(removed)} of the planted templates, not the {len(first)} oldest")
+    print(f"  ok   9. the template tiny.iyi links with, made the oldest of {len(first) + LINK_KEPT}, outlives the"
+          f" rotation of the build that reads it, and the {LINK_KEPT} kept are the newest")
+
+    plant(cache, "stale", STALE, AGED - YEAR, prefix=TEMPLATE, text="planted\n")
+    age((cache / name for name in first), AGED - 2 * YEAR)
+    whole = counted(cache, TEMPLATE)
+    others = work / "link-others"
+    write(others, {"rotate.iyi": "module rotate\n\nputs 0\n"})
+    rotation = subprocess.Popen([IYI, "build", "rotate.iyi", "-o", "rotate"], cwd=others, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    while (begun := counted(cache, TEMPLATE)) >= whole:
+        if rotation.poll() is not None and counted(cache, TEMPLATE) >= whole:
+            fail(step, f"the rotation removed no link template of {whole} (exit {rotation.returncode})\n{rotation.stdout.read()}")
+        time.sleep(0.001)
+    during = subprocess.run([IYI, "build", "-s", "--force", "tiny.iyi", "-o", "tiny"], cwd=root, env=env,
+                            capture_output=True, text=True)
+    rotated = rotation.communicate()[0]
+    if rotation.returncode != 0:
+        fail(step, f"the build whose rotation removed the templates failed\n{rotated}")
+    if during.returncode != 0:
+        fail(step, f"tiny.iyi built while the templates were being removed failed\n{during.stdout}{during.stderr}")
+    if run(root, "tiny") != "9\n":
+        fail(step, "tiny.iyi built while the templates were being removed printed something else")
+    # And removed outright: the next build asks the driver again.
+    for entry in first.values():
+        entry.unlink(missing_ok=True)
+    build(root, "tiny.iyi", "tiny", env)
+    last = verdicts(cache, TEMPLATE)
+    if len(last) != LINK_KEPT:
+        fail(step, f"after {STALE} stale templates the rotation left {len(last)}, not {LINK_KEPT}")
+    changed = sorted(name for name in first if name not in last or last[name].read_bytes() != stored[name][1])
+    if changed:
+        fail(step, f"the template tiny.iyi links with, removed and asked for again, is missing or reads otherwise: {', '.join(changed)}")
+    print(f"  ok   9. tiny.iyi built with {begun} of {whole} templates left to another build's rotation, and its"
+          f" template, removed, asked of the driver again to the same bytes; {LINK_KEPT} kept")
 
 
 def main():
@@ -517,6 +994,10 @@ def main():
         reuse(work)
         held(work)
         outlived(work)
+        contested(work)
+        verdicts_rotated(work)
+        leftovers_swept(work)
+        templates_rotated(work)
         probe(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)

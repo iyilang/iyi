@@ -1,0 +1,1075 @@
+# heap22 S6 (LeakHunt): the runs a dead unit hands to the shared heap are
+# taken again. Each round, UNITS pool units, WORKERS of them at work at a
+# time, allocate about 6,000 strings over eight size classes, local
+# garbage but for every 97th, which they send to the main thread -
+# published - and which it keeps for the rest
+# of the program, as #145's pool keeps a statement or a buffer a request
+# lent into a connection; then a burst of 1,500 more, sent and kept until
+# the next round ends. The units die: every run holding something sent is
+# handed to the shared heap whole (a drained run). A global collection
+# ends the round.
+#
+# Before the fix nothing ever took a drained run while one object on it
+# lived, so the partition arenas grew by the units' runs every round (the
+# #145 app's flag-on resident set ratcheting endpoint after endpoint). Now
+# a partition that needs a run takes a drained one (`IyiHeap.adopt_
+# drained`), its live objects published on the taker's run, its free
+# chunks the taker's list; a run fuller than three quarters is parked
+# instead and listed again by the global sweep once it has room. And a
+# run pooled free kept its pages for the program's whole life: now a run
+# nobody took for a turn of the pool
+# (`IyiHeap::POOL_TURN_NS`) gives its pages back (`IyiHeap.cool_pools`),
+# an idle worker waking for it (`IyiHeap.idle_wait_ms`).
+#
+#   ./bin/iyi build --release -Dheap_partitions bench/heap_drain.iyi
+#   ./heap_drain [ROUNDS [UNITS [WORKERS]]]     # default 12 48 4
+#   ./heap_drain mark [NODES [WORKERS [SECONDS]]]   # see mark_main
+#   ./heap_drain claim [ROUNDS [UNITS [WATCHDOG_SECONDS]]]   # see claim_main
+#   ./heap_drain dir [LARGE]                    # see dir_main
+#   ./heap_drain adopt                          # see adopt_main
+#   bash bench/heap_drain.sh                    # with its broken copies
+#
+# The line printed gives the bytes the partition arenas' runs span after
+# each round's collection (`IyiHeap.partition_carved`) and the resident
+# set, then - after a last round whose units hold POOL_BYTES between them
+# at once, every run of theirs pooled at their death - the resident
+# set and the bytes gone cold before and after IDLE_MS idle. Arena growth,
+# residency, cold bytes and the pool's warm state are measurements only.
+# A kept string that changed is a failure; the keyed proofs exercise the
+# relist, idle deadline and release paths separately.
+
+@[Unsafe("the resident set is read through a C call - task_info, K32GetProcessMemoryInfo - that fills Pointer#malloc memory")]
+module bench/heap_drain
+
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+  {% if flag?(:win32) %}
+    lib LibResident
+      fun GetCurrentProcess : Void*
+      fun K32GetProcessMemoryInfo(process : Void*, counters : UInt64*, size : UInt32) : Int32
+    end
+
+    def resident_bytes : UInt64
+      counters = Pointer(UInt64).malloc(9_u64)
+      counters.value = 72_u64
+      return 0_u64 if LibResident.K32GetProcessMemoryInfo(LibResident.GetCurrentProcess, counters, 72_u32) == 0
+      counters[2]
+    end
+  {% elsif flag?(:darwin) %}
+    lib LibResident
+      fun task_self_trap : UInt32
+      fun task_info(task : UInt32, flavor : Int32, info : UInt64*, count : UInt32*) : Int32
+    end
+
+    def resident_bytes : UInt64
+      info = Pointer(UInt64).malloc(6_u64)
+      count = Pointer(UInt32).malloc(1_u64)
+      count.value = 12_u32
+      return 0_u64 if LibResident.task_info(LibResident.task_self_trap, 20, info, count) != 0
+      info[1]
+    end
+  {% else %}
+    def resident_bytes : UInt64
+      fields = File.read("/proc/self/statm").split(' ')
+      fields[1].to_i.to_u64 * 4096_u64
+    end
+  {% end %}
+
+  # `HEAP22_PRINT_ONLY=1`: a failed check prints its `FAIL:` line and the
+  # program goes on, so that bench/heap_drain.sh can show a broken copy
+  # caught by `-Dheap_verify`'s verifier alone.
+  class Checks
+    @@print_only = false
+
+    def self.print_only : Bool
+      @@print_only
+    end
+
+    def self.read_env : Nil
+      @@print_only = Program.env("HEAP22_PRINT_ONLY") == "1"
+    end
+  end
+
+  def fail(message : String) : Nil
+    print "FAIL: #{message}\n"
+    __iyi_exit(1) unless Checks.print_only
+  end
+
+  # The strings' lengths, one size class each.
+  SIZES  = {20, 36, 52, 84, 116, 180, 244, 372}
+  ALLOCS = 6000
+  SPARSE = 97
+  DENSE  = 1500
+  WARM   = 3
+  # How long the program waits, idle, for the pool to go cold: two of
+  # its turns (`IyiHeap::POOL_TURN_NS`) and a worker's wake.
+  IDLE_MS = 3500
+  # What the units of the round before the idle wait keep to their end,
+  # all of them together: their runs go to the pool whole at their death.
+  # Strings of other lengths than the rounds', mostly of other classes:
+  # a class's drained runs are taken before its pool and its frontier,
+  # and at 16 MiB of the rounds' lengths 3 of it went cold (tmac).
+  POOL_BYTES = 16777216
+  POOL_SIZES = {6, 70, 100, 170, 230, 500, 900, 2000}
+
+  # What unit *t* of round *round* sends as its *i*th kept string, and
+  # its burst's: a tag, the three numbers, padding to the length.
+  def kept_text(round : Int32, t : Int32, i : Int32) : String
+    head = "k#{round}.#{t}.#{i}."
+    head + "k" * (SIZES[i % SIZES.size] - head.bytesize)
+  end
+
+  def burst_text(round : Int32, t : Int32, k : Int32) : String
+    head = "d#{round}.#{t}.#{k}."
+    head + "d" * (40 - head.bytesize)
+  end
+
+  # A unit of a round takes a token off *slots* before it allocates and puts it
+  # back when it is done, so that a round's units work as many at a time as
+  # there are workers (`play`). Without the tokens the partitions' span rose
+  # with the most a round's units held together (by up to 24 MiB in one round,
+  # with no global mark in it), and the peak's runs stayed on the drain list.
+  # With them the span after round 12 was 21 MiB in every run, alone or not
+  # (Linux, tmac, S6, DrainFlake). The span is printed each round as
+  # information; no verdict reads it.
+  def unit_body(round : Int32, t : Int32, sink : Channel(String), slots : Channel(Int32)) : Int32
+    slots.receive
+    junk = 0_i64
+    i = 0
+    while i < ALLOCS
+      if i % SPARSE == 0
+        sink.send(kept_text(round, t, i))
+      else
+        s = "j" * SIZES[i % SIZES.size]
+        junk = junk &+ s.bytesize.to_i64
+      end
+      i = i + 1
+    end
+    k = 0
+    while k < DENSE
+      sink.send(burst_text(round, t, k))
+      k = k + 1
+    end
+    slots.send(1)
+    junk > 0 ? 0 : 1
+  end
+
+  def sparse_per_unit : Int32
+    (ALLOCS + SPARSE - 1) // SPARSE
+  end
+
+  # A unit of the last round: *bytes* of strings kept to its end and
+  # nothing sent, so that every run it holds goes to the pool at its
+  # death (`IyiHeap.free_whole`) - the pool the idle wait cools. Holding
+  # them all, it says so on *arrived* and waits for a word on *leave*,
+  # which comes once every unit of the round has arrived: the round's
+  # POOL_BYTES are held at once and pooled together. Without the wait the
+  # units ran as many at a time as there were workers, and each took the
+  # runs those before it had pooled: the round grew the pool by 2 to 5 MiB of
+  # its 16 (4 to 10 units alive at once), so the cold bytes the idle wait
+  # printed depended on what earlier rounds had left (Linux, S6, DrainFlake).
+  # The cold bytes are information; the keyed cool witness decides a release.
+  def pool_body(bytes : Int32, arrived : Channel(Int32), leave : Channel(Int32)) : Int32
+    kept = [] of String
+    total = 0
+    i = 0
+    while total < bytes
+      s = "p" * POOL_SIZES[i % POOL_SIZES.size]
+      kept << s
+      total = total + s.bytesize
+      i = i + 1
+    end
+    arrived.send(1)
+    leave.receive
+    sum = 0
+    kept.each { |k| sum = sum + k.bytesize }
+    sum == total ? 0 : 1
+  end
+
+  def pool_round(units : Int32) : Nil
+    arrived = Channel(Int32).new(units)
+    leave = Channel(Int32).new(units)
+    group do |g|
+      handles = [] of IyiTask(Int32)
+      units.times { handles << g.spawn(unit: :new) { pool_body(POOL_BYTES // units, arrived, leave) } }
+      units.times { arrived.receive }
+      units.times { leave.send(0) }
+      handles.each_with_index do |handle, t|
+        value = handle.value
+        fail("pool round: unit #{t} answered #{value}") unless value == 0
+      end
+    end
+  end
+
+  # One round: its units spawned, as many at work at a time as there are
+  # workers, what they send received - the kept strings onto *kept*, with
+  # what each must read (`kept_text`'s numbers) onto *keys* - and their
+  # answers checked. Answers the burst.
+  def play(round : Int32, units : Int32, kept : Array(String), keys : Array(Int64)) : Array(String)
+    burst = [] of String
+    sink = Channel(String).new(1024)
+    slots = Channel(Int32).new(units)
+    IyiWorkers.count.times { slots.send(1) }
+    group do |g|
+      handles = [] of IyiTask(Int32)
+      units.times { |t| handles << g.spawn(unit: :new) { unit_body(round, t, sink, slots) } }
+      (units * (sparse_per_unit + DENSE)).times do
+        got = sink.receive
+        s = got.is_a?(String) ? got : ""
+        fail("round #{round}: the sink answered no string") if s.empty?
+        if s.byte_at(0) == 'k'.ord.to_u8
+          kept << s
+          parts = s.split('.')
+          keys << parts[0][1, parts[0].bytesize - 1].to_i.to_i64 &* 100000000_i64 &+ parts[1].to_i.to_i64 &* 10000_i64 &+ parts[2].to_i.to_i64
+        else
+          burst << s
+        end
+      end
+      handles.each_with_index do |handle, t|
+        value = handle.value
+        fail("round #{round}: unit #{t} answered #{value}") unless value == 0
+      end
+    end
+    burst
+  end
+
+  # The drain mode: ROUNDS rounds of UNITS units. Its verdicts are the kept
+  # strings read back intact, the runtime's own count of drained runs taken
+  # again (c1), and the burst and kept counts. The arenas' growth, residency,
+  # cold bytes and the pool's warm state are printed as information.
+  def drain_main(arguments : Array(String)) : Nil
+    rounds = arguments.size > 0 ? arguments[0].to_i : 12
+    units = arguments.size > 1 ? arguments[1].to_i : 48
+    IyiWorkers.count = arguments.size > 2 ? arguments[2].to_i : 4
+    fail("usage: heap_drain [ROUNDS [UNITS [WORKERS]]], ROUNDS > #{WARM}") if rounds <= WARM
+
+    kept = [] of String
+    keys = [] of Int64
+    previous_burst = [] of String
+    spans = [] of UInt64
+    residents = [] of UInt64
+    # The kept strings' bytes after each round: the live set grows by them.
+    # The payloads feed the arena growth figure printed as information below.
+    payloads = [] of UInt64
+    round = 0
+    while round < rounds
+      # The last round's burst let go: dead at this round's collection.
+      previous_burst = play(round, units, kept, keys)
+      IyiMark.collect
+      {% if flag?(:heap_partitions) %}
+        spans << IyiHeap.partition_carved
+      {% else %}
+        spans << 0_u64
+      {% end %}
+      residents << resident_bytes
+      payload = 0_u64
+      k = 0
+      while k < kept.size
+        payload = payload + kept[k].bytesize.to_u64
+        k = k + 1
+      end
+      payloads << payload
+      round = round + 1
+    end
+    fail("#{previous_burst.size} burst strings, not #{units * DENSE}") if previous_burst.size != units * DENSE
+
+    # Every kept string as it was sent.
+    want = rounds * units * sparse_per_unit
+    fail("#{kept.size} kept strings, not #{want}") if kept.size != want
+    kept.each_with_index do |s, k|
+      key = keys[k]
+      want_text = kept_text((key // 100000000_i64).to_i, (key // 10000_i64 % 10000_i64).to_i, (key % 10000_i64).to_i)
+      fail("kept string #{k} reads #{s.bytesize} bytes, not #{want_text}") if s != want_text
+    end
+
+    mib = 1048576_u64
+    line = "drain rounds=#{rounds} units=#{units} workers=#{IyiWorkers.count}"
+    line = line + " carved_mib=#{spans.map { |b| b // mib }.join(",")}"
+    line = line + " rss_mib=#{residents.map { |b| b // mib }.join(",")}"
+    {% if flag?(:heap_partitions) %}
+      line = line + " handed=#{IyiHeap.handed_shared} adopted=#{IyiHeap.runs_adopted} parked=#{IyiHeap.runs_parked} relisted=#{IyiHeap.runs_drained}"
+      # The runtime's own count: a parked run taken again from a drained list
+      # (c1). The relist is decided by the keyed witness (`keyed park`).
+      fail("drain: no parked run was taken again from a drained list") if IyiHeap.runs_adopted == 0
+      base = spans[WARM - 1]
+      last = spans[rounds - 1]
+      slack = base // 4_u64
+      slack = 4_u64 * mib if slack < 4_u64 * mib
+      slack = slack + (payloads[rounds - 1] - payloads[WARM - 1]) * 3_u64
+      # The arena growth figure printed below is information, not a verdict. Its
+      # slack is a quarter of the span after round WARM (at least 4 MiB), three
+      # times the kept strings' growth, and half a budget a unit: a unit parked
+      # on the full sink keeps its garbage until it owes half its budget
+      # (`IyiHeap.at_park`).
+      slack = slack + units.to_u64 * IyiHeap::UNIT_MIN // 2_u64
+      # Idle: the pool's runs turn cold, their pages given back, with no unit left
+      # to wake a worker (`IyiHeap.idle_wait_ms`). The cold bytes are information.
+      pool_round(units)
+      busy = resident_bytes
+      cold_busy = IyiHeap.pool_cold_bytes
+      sleep(IDLE_MS)
+      idle = resident_bytes
+      cold_idle = IyiHeap.pool_cold_bytes
+      released = cold_idle > cold_busy ? cold_idle - cold_busy : 0_u64
+      line = line + " idle: rss_mib=#{busy // mib},#{idle // mib} cold_mib=#{cold_busy // mib},#{cold_idle // mib} cooled=#{IyiHeap.runs_cooled}"
+      print line + "\n"
+      print "arenas: #{base // mib} MiB after round #{WARM}, #{last // mib} MiB after round #{rounds}, slack #{slack // mib} MiB (information: the bound is not a verdict)\n"
+      reading = IyiHeap.pool_warm? ? "still warm" : "cold"
+      print "idle: the pool is #{reading} #{IDLE_MS} ms after the last round (information: a clock reading)\n"
+      print "idle: #{released // mib} MiB of runs went cold, the last round kept #{POOL_BYTES // 1048576} MiB (information)\n"
+      print "idle: resident set #{busy // mib} MiB before the idle wait and #{idle // mib} MiB after (information: the RSS is not a verdict)\n"
+    {% else %}
+      print line + "\n"
+    {% end %}
+    print "drain: #{kept.size} kept strings intact\n"
+  end
+
+  # ── The mark mode: partitions held under a long global mark ─────────
+  #
+  # No local collection starts while a global mark runs beside the
+  # program, so a unit allocating through one grew its partition by all
+  # it allocated meanwhile: #145's app went from 16-33 MB held to 76-111
+  # MB under marks of 75 to 480 ms (tssh, S6). Now a partition whose debt
+  # passes its ceiling under a mark holds until the mark is over
+  # (`IyiHeap.hold_partition`).
+  #
+  # WORKERS units churn garbage with a small live set the whole run. The
+  # main thread, in the shared heap, allocates garbage there for a phase
+  # with nothing much to mark - the partitions' span after it is the
+  # baseline - then builds a shared list of NODES nodes and keeps
+  # allocating: every mark from then on walks the list, long enough for
+  # the units to grow their partitions many times over unless they hold.
+  # The sound build prints the span and the marks, and fails on the list
+  # alone. How far the span grows under marks is set by the machine (tmac
+  # measured 6 to 15 MiB held, 51 to 79 without the hold), so no bound on
+  # it is checked here: the hold itself is, by `mark_forced` under
+  # `-Dmark_force` (bench/heap_drain.sh's `marked`).
+  #
+  #   ./heap_drain mark [NODES [WORKERS [SECONDS]]]   # default 2000000 4 3
+
+  class GraphNode
+    getter next_node : GraphNode?
+    getter value : Int64
+
+    def initialize(@next_node : GraphNode?, @value : Int64)
+    end
+  end
+
+  # Garbage until the block answers true. The flag is the caller's
+  # captured `Atomic`, read through the block: passed as an argument, the
+  # struct was a copy that never turned, the units churned until their
+  # Int32 counter overflowed ("arithmetic overflow", the optimised build
+  # after ~2^31 strings) or the run's timeout (verifier, flag off).
+  def churn(& : -> Bool) : Int32
+    ring = [] of String
+    64.times { ring << "" }
+    i = 0
+    made = 0_i64
+    stopped = yield
+    while !stopped
+      s = "c" * (16 + (i % 8) * 24)
+      ring[i] = s
+      made = made &+ s.bytesize.to_i64
+      i = (i + 1) & 63
+      stopped = yield
+    end
+    made > 0 ? 0 : 1
+  end
+
+  # Shared garbage for *seconds*, from the main thread: what triggers the
+  # marks.
+  def shared_churn(seconds : Int32) : Int64
+    until_ns = IyiMark.now_ns + seconds.to_u64 * 1000000000_u64
+    made = 0_i64
+    while IyiMark.now_ns < until_ns
+      100.times do |k|
+        s = "s" * (24 + k % 40)
+        made = made &+ s.bytesize.to_i64
+      end
+    end
+    made
+  end
+
+  # The partitions' span, 0 without them.
+  def carved_now : UInt64
+    {% if flag?(:heap_partitions) %}
+      IyiHeap.partition_carved
+    {% else %}
+      0_u64
+    {% end %}
+  end
+
+  def mark_main(arguments : Array(String)) : Nil
+    nodes = arguments.size > 1 ? arguments[1].to_i : 2000000
+    workers = arguments.size > 2 ? arguments[2].to_i : 4
+    seconds = arguments.size > 3 ? arguments[3].to_i : 3
+    IyiWorkers.count = workers
+    {% if flag?(:heap_partitions) %}
+      fail("mark: the main thread allocates in a partition; the marks need the shared heap") if IyiHeap.current_record != 0
+    {% end %}
+    stop = Atomic(Int32).new(0)
+    group do |g|
+      handles = [] of IyiTask(Int32)
+      workers.times { handles << g.spawn(unit: :new) { churn { stop.get != 0 } } }
+      first = IyiMark.collections
+      shared_churn(1)
+      base = carved_now
+      second = IyiMark.collections
+      head : GraphNode? = nil
+      k = 0
+      while k < nodes
+        head = GraphNode.new(head, k.to_i64)
+        k = k + 1
+      end
+      shared_churn(seconds)
+      last = carved_now
+      third = IyiMark.collections
+      stop.set(1)
+      walked = 0
+      node = head
+      while node.is_a?(GraphNode)
+        walked = walked + 1
+        node = node.next_node
+      end
+      handles.each_with_index do |handle, t|
+        value = handle.value
+        fail("mark: unit #{t} answered #{value}") unless value == 0
+      end
+      mark_verdict(nodes, workers, walked, second - first, third - second, base, last)
+    end
+  end
+
+  def mark_verdict(nodes : Int32, workers : Int32, walked : Int32, marks_a : UInt64, marks_b : UInt64, base : UInt64, last : UInt64) : Nil
+    fail("mark: the list walked #{walked} nodes, not #{nodes}") if walked != nodes
+    mib = 1048576_u64
+    line = "mark nodes=#{nodes} workers=#{workers} marks=#{marks_a},#{marks_b}"
+    {% if flag?(:heap_partitions) %}
+      line = line + " carved_mib=#{base // mib},#{last // mib} holds=#{IyiHeap.partition_holds} timed_out=#{IyiHeap.partition_holds_timed_out}"
+      print line + "\n"
+    {% else %}
+      print line + "\n"
+    {% end %}
+    print "mark: the list intact\n"
+  end
+
+  # Forced mark (copy only, `-Dmark_force`, bench/heap_drain.sh's `marked`):
+  # the copy's closer holds the mark open on a word until this program lets
+  # it go (`IyiMark.forced_wait`), so the mark stays open while ONE unit
+  # allocates UNDER_MARK_BYTES beside it. A partition past its ceiling under
+  # an open mark holds (`IyiHeap.hold_partition`) and counts itself in
+  # PARTITION_HOLDS before it waits. The program waits for that count, or for
+  # the unit to finish, then lets the mark go and reads the count. No span is
+  # measured and no clock decides a result: a unit that finished under the
+  # held mark without holding is the failure.
+  UNDER_MARK_BYTES = 16777216_u64
+  FORCED_NODES = 2000000
+
+  def mark_setup_fail(message : String) : NoReturn
+    __iyi_write(1, "FAIL: ".to_unsafe.as(Void*), 6_u64)
+    __iyi_write(1, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+    __iyi_write(1, "\n".to_unsafe.as(Void*), 1_u64)
+    __iyi_exit(76)
+  end
+
+  def mark_forced(arguments : Array(String)) : Nil
+    {% if flag?(:mark_force) %}
+      IyiWorkers.count = 4
+      mark_setup_fail("mark: main thread allocates in a partition") if IyiHeap.current_record != 0
+      opened = Atomic(Int32).new(0)
+      unit_done = Atomic(Int32).new(0)
+      # A large live set makes a mark concurrent: a small one finishes in its
+      # stop and never reaches a helper's finish, where the copy holds it.
+      head : GraphNode? = nil
+      n = 0
+      while n < FORCED_NODES
+        head = GraphNode.new(head, n.to_i64)
+        n = n + 1
+      end
+      group do |g|
+        unit = g.spawn(unit: :new) do
+          start_wait = IyiMark.now_ns
+          while opened.get == 0
+            mark_setup_fail("mark: unit timed out waiting for the held mark") if IyiMark.now_ns &- start_wait >= 120000000000_u64
+            sleep(1)
+          end
+          IyiMark.forced_target(IyiHeap.current_record)
+          ring = [] of String
+          64.times { ring << "" }
+          made = 0_i64
+          i = 0
+          while made < UNDER_MARK_BYTES.to_i64
+            s = "u" * (16 + (i % 8) * 24)
+            ring[i & 63] = s
+            made = made &+ s.bytesize.to_i64
+            i = i + 1
+          end
+          unit_done.set(1)
+          made
+        end
+        # Start exactly one concurrent mark; no allocation loop competes with
+        # the closer or blocks the main thread inside the shared heap's hold.
+        IyiMark.settle
+        IyiMark.forced_arm
+        IyiHeap.allocated_word.value.set(IyiMark.budget)
+        IyiMark.collect_if_due
+        start_wait = IyiMark.now_ns
+        while !IyiMark.forced_open?
+          mark_setup_fail("mark: timed out waiting for the closer") if IyiMark.now_ns &- start_wait >= 60000000000_u64
+          IyiThread.park_if_requested
+          IyiThread.yield_cpu
+        end
+        opened.set(1)
+        start_wait = IyiMark.now_ns
+        while unit_done.get == 0 && IyiStat.atomic(IyiStat::PARTITION_HOLDS).value.get == 0_u64
+          mark_setup_fail("mark: unit timed out before holding or finishing") if IyiMark.now_ns &- start_wait >= 60000000000_u64
+          sleep(1)
+        end
+        holds = IyiStat.atomic(IyiStat::PARTITION_HOLDS).value.get
+        mark_setup_fail("mark: unit never entered a partition slice under the held mark") unless IyiMark.forced_slice?
+        IyiMark.forced_release
+        start_wait = IyiMark.now_ns
+        while !unit.done?
+          mark_setup_fail("mark: unit timed out completing after release") if IyiMark.now_ns &- start_wait >= 60000000000_u64
+          IyiThread.park_if_requested
+          IyiThread.yield_cpu
+        end
+        made_unit = unit.value
+        fail("mark: a unit allocated #{made_unit} bytes under a held mark and never held") if holds == 0
+        print "mark: a unit held under an open mark: #{holds} holds, its partition past its ceiling while the mark was open\n"
+      end
+      walked = 0
+      node = head
+      while node.is_a?(GraphNode)
+        walked = walked + 1
+        node = node.next_node
+      end
+      fail("mark: the list walked #{walked} nodes, not #{FORCED_NODES}") if walked != FORCED_NODES
+    {% end %}
+  end
+
+  # Claim mode (PauseHunt, S6): a sweep slice's walk claim held to its walk's
+  # end, the helpers' above all, who let theirs go before the runtime lock under
+  # `-Dheap_partitions` (`IyiMark.sweep_one_helper`). Each round, UNITS units
+  # leave their runs to the pool (`pool_round`), and the main thread makes shared
+  # garbage until a collection the budget triggers, whose sweep is lazy and opens
+  # the helpers' round. Under `-Dheap_verify` each slice's walker checks at its
+  # walk's end that its claim is still its own (`IyiHeapVerify.check_claimed`).
+  #
+  # Every wait here is on state, never on a clock, and each one ends at its
+  # watchdog as setup (exit 76), never as a catch. A stock build waits until one
+  # helper has begun an arena. A `-Dclaim_force` copy (bench/heap_drain.sh's c7)
+  # waits until the first helper's claim is reserved, and then until that one
+  # slice has run its tail (its release and arena_done, under the class lock). Both
+  # then run one explicit collection: a collection closes the helpers' round and waits
+  # out every slice still in flight, so each of them has finished its tail when it returns.
+  #   ./heap_drain claim [ROUNDS [UNITS [WATCHDOG_SECONDS [DONE_SECONDS]]]]   # default 6 8 120 120
+  #   DONE_SECONDS bounds only the staged slice's completion; the others keep WATCHDOG_SECONDS.
+  CLAIM_WATCHDOG_S = 120
+
+  def claim_wait(first : UInt64, watchdog_ns : UInt64, done_ns : UInt64) : Nil
+    started = IyiMark.now_ns
+    {% if flag?(:claim_force) %}
+      while IyiMark.forced_staged_arena == 0_u64
+        mark_setup_fail("claim: no helper took a claim within the watchdog") if IyiMark.now_ns &- started >= watchdog_ns
+        sleep(1)
+      end
+      started = IyiMark.now_ns
+      while !IyiMark.forced_staged_done?
+        mark_setup_fail("claim: the staged slice did not complete within the watchdog") if IyiMark.now_ns &- started >= done_ns
+        sleep(1)
+      end
+    {% else %}
+      while IyiMark.swept_by_helpers == first
+        mark_setup_fail("claim: no helper began an arena within the watchdog") if IyiMark.now_ns &- started >= watchdog_ns
+        sleep(1)
+      end
+    {% end %}
+    IyiMark.collect
+  end
+
+  def claim_main(arguments : Array(String)) : Nil
+    rounds = arguments.size > 1 ? arguments[1].to_i : 6
+    units = arguments.size > 2 ? arguments[2].to_i : 8
+    watchdog_ns = (arguments.size > 3 ? arguments[3].to_i : CLAIM_WATCHDOG_S).to_u64 * 1000000000_u64
+    done_ns = (arguments.size > 4 ? arguments[4].to_i : CLAIM_WATCHDOG_S).to_u64 * 1000000000_u64
+    first = IyiMark.swept_by_helpers
+    made = 0_i64
+    round = 0
+    while round < rounds
+      pool_round(units)
+      seen = IyiMark.collections
+      started = IyiMark.now_ns
+      while IyiMark.collections == seen
+        mark_setup_fail("claim: no collection ran within the watchdog") if IyiMark.now_ns &- started >= watchdog_ns
+        100.times do |k|
+          s = "s" * (24 + k % 40)
+          made = made &+ s.bytesize.to_i64
+        end
+      end
+      round = round + 1
+    end
+    claim_wait(first, watchdog_ns, done_ns)
+    began = IyiMark.swept_by_helpers - first
+    print "claim rounds=#{rounds} units=#{units} collections=#{IyiMark.collections} helper_arenas=#{began} made_mib=#{made // 1048576}\n"
+    print "claim: every walk claim held to its walk's end\n"
+  end
+
+  # Directory mode (TmacRss, heap22 fu): the arena directory, a byte per
+  # 16 MiB slot of the address space (`IyiHeap.arena_of`), is read for
+  # every word the global mark meets that is in no arena, and on darwin a
+  # read of a page nothing wrote makes that page resident: #145's app kept
+  # 3.7-4.1 MB of it under load (tmac, 16 KB pages; Linux maps its zero
+  # page). Under `-Dheap_partitions` a word outside the slots any arena or
+  # large mapping ever had is answered without the read
+  # (`IyiHeap.dir_outside?`). The mode makes LARGE large objects of
+  # DIR_LARGE_BYTES, more than the hole an arena's aligned mapping leaves
+  # beside it, so that the kernel puts each past every arena's slot (2 MiB
+  # ones filled those holes on Linux, inside the bounds), each a heap
+  # pointer the moment it is made (`IyiRoots.base_of`: a mapping the
+  # bounds left out is nobody's to the mark, which would free it live),
+  # then an untyped block holding a word for every page of the directory,
+  # and collects twice. It fails when a large object lost its bytes, and when
+  # the bounds answer a slot below every arena as inside. The residency read
+  # (Windows QueryWorkingSetEx, the others mincore) is a measurement printed as
+  # information: an unavailable read is printed as such and never fails the run.
+  #
+  # Where a large object lands is the kernel's choice, and one that lands
+  # between two arenas' slots needs no widening: the bounds already hold
+  # it, and a copy that never widens passes. On Windows 1 run in 10 began
+  # with arenas 126 slots (2 GiB) apart, and all eight objects landed in
+  # that gap (tssh, 2026-11-18); the copy that skips the widening then
+  # passed on three Windows gates (jobs 135024748862, 135036250242,
+  # 135036784946). So a failure proof places its objects itself: its
+  # copy maps each large object at the first slot above the directory's
+  # high bound (`-Dplaced_force`, bench/heap_drain.sh's `hinted`), where
+  # only the widening can make the mark see it. Each object's slots are
+  # held against the bounds as they were just before it was made
+  # (`IyiHeap.dir_outside?`); a placed build needs at least one outside.
+  #   ./heap_drain dir [LARGE]                    # default 8
+  # Retired as a verdict: the residency is information (see above).
+  DIR_LARGE_BYTES  = 41943040_u64
+
+  # The bounds `IyiHeap.dir_outside?` answers by, as slots: the
+  # contiguous run of slots it calls inside around *anchor*, an arena's
+  # slot, found by halving.
+  def dir_bounds(anchor : UInt64) : {UInt64, UInt64}
+    low = 0_u64
+    high = anchor
+    while low < high
+      mid = low + (high - low) // 2_u64
+      if IyiHeap.dir_outside?(mid)
+        low = mid + 1_u64
+      else
+        high = mid
+      end
+    end
+    first = low
+    low = anchor
+    high = IyiHeap::DIR_SLOTS - 1_u64
+    while low < high
+      mid = low + (high - low + 1_u64) // 2_u64
+      if IyiHeap.dir_outside?(mid)
+        high = mid - 1_u64
+      else
+        low = mid
+      end
+    end
+    {first, low}
+  end
+
+  {% if flag?(:darwin) %}
+    lib LibDirResident
+      fun mincore(addr : Void*, len : UInt64, vec : UInt8*) : Int32
+    end
+  {% elsif flag?(:win32) %}
+    lib LibDirResident
+      fun GetCurrentProcess : Void*
+      # The DWORD size in a register of its own on x64: its low half read.
+      fun K32QueryWorkingSetEx(process : Void*, info : UInt64*, size : UInt64) : Int32
+    end
+  {% end %}
+
+  # Pages of [address, address + pages * page) resident now; -1 when the
+  # platform's call failed.
+  def resident_pages(address : UInt64, pages : Int32, page : UInt64) : Int64
+    {% if flag?(:win32) %}
+      info = Pointer(UInt64).malloc(pages.to_u64 * 2_u64)
+      k = 0
+      while k < pages
+        info[k * 2] = address + k.to_u64 * page
+        k = k + 1
+      end
+      return -1_i64 if LibDirResident.K32QueryWorkingSetEx(LibDirResident.GetCurrentProcess, info, pages.to_u64 * 16_u64) == 0
+      count = 0_i64
+      k = 0
+      while k < pages
+        count = count + 1_i64 if info[k * 2 + 1] & 1_u64 != 0
+        k = k + 1
+      end
+      count
+    {% else %}
+      length = pages.to_u64 * page
+      vec = Pointer(UInt8).malloc(pages.to_u64)
+      {% if flag?(:darwin) %}
+        return -1_i64 if LibDirResident.mincore(Pointer(Void).new(address), length, vec) != 0
+      {% else %}
+        result = uninitialized Int64
+        {% if flag?(:x86_64) %}
+          asm("syscall" : "={rax}"(result)
+                        : "{rax}"(27_i64), "{rdi}"(address), "{rsi}"(length), "{rdx}"(vec.address)
+                        : "rcx", "r11", "memory"
+                        : "volatile")
+        {% else %}
+          asm("svc #0" : "={x0}"(result)
+                       : "{x8}"(232_i64), "{x0}"(address), "{x1}"(length), "{x2}"(vec.address)
+                       : "memory"
+                       : "volatile")
+        {% end %}
+        return -1_i64 if result != 0
+      {% end %}
+      count = 0_i64
+      k = 0
+      while k < pages
+        count = count + 1_i64 if vec[k] & 1_u8 != 0
+        k = k + 1
+      end
+      count
+    {% end %}
+  end
+
+  # Whether *address* is in a chunk of the heap's, as `GC.is_heap_ptr`
+  # asks it (std/gc refuses the builds without iyi's collector that this
+  # file still compiles under).
+  def heap_pointer?(address : UInt64) : Bool
+    IyiHeap.lock
+    base = IyiRoots.base_of(address)
+    IyiHeap.unlock
+    base != 0_u64
+  end
+
+  def dir_main(arguments : Array(String)) : Nil
+    large = arguments.size > 1 ? arguments[1].to_i : 8
+    buffers = [] of Pointer(UInt8)
+    # An arena's slot: inside the bounds from the first arena on.
+    anchor = Pointer(UInt8).malloc(64_u64).address.unsafe_shr(24_u64)
+    outside = 0
+    {% if flag?(:placed_force) %}
+      # copy only (bench/heap_drain.sh, `hinted`): every large object is
+      # mapped above the arenas' slots, not where the kernel puts it
+      IyiHeap.placed_arm(DIR_LARGE_BYTES)
+    {% end %}
+    large.times do |i|
+      {% if flag?(:heap_partitions) %}
+        low, high = dir_bounds(anchor)
+      {% end %}
+      buffer = Pointer(UInt8).malloc(DIR_LARGE_BYTES)
+      buffer[0] = (i & 0xFF).to_u8
+      buffer[DIR_LARGE_BYTES.to_i32 - 1] = (i & 0xFF).to_u8
+      {% if flag?(:heap_partitions) %}
+        first = buffer.address.unsafe_shr(24_u64)
+        last = (buffer.address + DIR_LARGE_BYTES - 1_u64).unsafe_shr(24_u64)
+        outside = outside + 1 if first < low || last > high
+      {% end %}
+      fail("dir: large object #{i} at 0x#{buffer.address.to_s(16)} is no heap pointer the moment it is made") unless heap_pointer?(buffer.address)
+      buffers << buffer
+    end
+    page = IyiHeap::PAGE
+    pages = (IyiHeap::DIR_SLOTS // page).to_i32
+    words = Pointer(Pointer(Void)).malloc(pages.to_u64)
+    k = 0
+    while k < pages
+      # Slot k * page + 7: a byte on the directory's page k.
+      words[k] = Pointer(Void).new((k.to_u64 * page + 7_u64).unsafe_shl(24_u64) | 0x123_u64)
+      k = k + 1
+    end
+    IyiMark.collect
+    IyiMark.collect
+    resident = resident_pages(IyiHeap.arena_dir, pages, page)
+    print "dir large=#{large} pages=#{pages} resident_pages=#{resident} words=0x#{words[1].address.to_s(16)}\n"
+    large.times do |i|
+      buffer = buffers[i]
+      fail("dir: large object #{i} lost its bytes over two collections") if buffer[0] != (i & 0xFF).to_u8 || buffer[DIR_LARGE_BYTES.to_i32 - 1] != (i & 0xFF).to_u8
+    end
+    # The residency is a measurement: a failed read says so and never fails the run.
+    print "dir: residency #{resident < 0 ? "unavailable" : resident.to_s} of the arena directory's #{pages} pages after the mark (information)\n"
+    {% if flag?(:heap_partitions) %}
+      # The boundary's predicate, asked directly (c8): a slot below the lowest
+      # arena's slot is outside every arena, and the answer must say so.
+      fail("dir: a slot outside every arena's bounds is answered as inside") unless IyiHeap.dir_outside?(0_u64)
+      print "dir: the boundary predicate answers outside for a slot below every arena\n"
+      print "dir: the boundary predicate is the verdict; the residency above is a measurement\n"
+      {% if flag?(:placed_force) %}
+        fail("dir: none of the #{large} large objects was placed outside the arenas' slots") if outside == 0
+      {% end %}
+      print "dir: #{outside} of the #{large} large objects landed outside the slots before them, each a heap pointer\n"
+    {% end %}
+  end
+
+  # Keyed mode (the witnesses of c2, c4 and c5): `heap_drain keyed NAME` makes a pool
+  # by one round, stages one run for the check NAME, and reads the copy's
+  # record of what the runtime did to that run. Built only with -Dkeyed_force,
+  # which only the copies carry; a sound build never names the copy-only words.
+  def keyed_quiet : Nil
+    {% if flag?(:keyed_force) %}
+      started = IyiMark.now_ns
+      while IyiHeap.partitions_live != 0_u64
+        mark_setup_fail("keyed: timed out waiting for every partition to die") if IyiMark.now_ns &- started >= 120000000000_u64
+        sleep(1)
+      end
+    {% end %}
+  end
+
+  def keyed_park : Nil
+    {% if flag?(:keyed_force) %}
+      IyiHeap.enter_barrier
+      run = IyiHeap.park_stage
+      IyiHeap.leave_barrier
+      mark_setup_fail("keyed park: no pooled run to park") if run == 0_u64
+      IyiMark.collect
+      seen = IyiHeap.park_seen
+      mark_setup_fail("keyed park: the sweep never reached the parked run") if seen & 1_u64 == 0_u64
+      listed = seen & 2_u64 != 0_u64
+      state = seen.unsafe_shr(4_u64)
+      if listed && state == IyiHeap::RUN_DRAINING
+        print "drain: the global sweep put the run the program parked back on its class's drain list\n"
+      elsif !listed && state == IyiHeap::RUN_PARKED
+        fail("drain: the global sweep left the run the program parked on no drain list")
+      else
+        mark_setup_fail("keyed park: the run is in state #{state}, listed #{listed}")
+      end
+    {% else %}
+      mark_setup_fail("keyed park needs -Dkeyed_force")
+    {% end %}
+  end
+
+  def keyed_warm : Nil
+    {% if flag?(:keyed_force) %}
+      # Keep a cooler from taking the staged run before idle_wait_ms reads it.
+      IyiHeap.cool_gate_lock
+      IyiHeap.enter_barrier
+      staged = IyiHeap.warm_stage
+      got = staged ? IyiHeap.warm_wait(-1_i64) : -2_i64
+      IyiHeap.cool_gate_unlock
+      IyiHeap.leave_barrier
+      mark_setup_fail("keyed warm: no pooled run is held warm") unless staged
+      cap = (IyiHeap::POOL_TURN_NS // 1000000_u64).to_i64 &+ 1_i64
+      if got == cap
+        print "idle: idle_wait_ms cut a worker's unbounded wait to the pool's turn with a pooled run held warm and no partition pending\n"
+      elsif got == -1_i64
+        fail("idle_wait_ms left a worker's wait unbounded with a pooled run held warm and no partition pending")
+      else
+        mark_setup_fail("keyed warm: idle_wait_ms answered #{got}")
+      end
+    {% else %}
+      mark_setup_fail("keyed warm needs -Dkeyed_force")
+    {% end %}
+  end
+
+  def keyed_cool : Nil
+    {% if flag?(:keyed_force) %}
+      keyed_quiet
+      IyiMark.collect
+      # The gate waits for any in-flight cooler and holds all others out.
+      # Stage the run and execute the unchanged cooling body exactly once.
+      IyiHeap.cool_gate_lock
+      IyiHeap.enter_barrier
+      staged = IyiHeap.cool_stage
+      if staged != 0_u64
+        IyiHeap.cool_arm
+        IyiHeap.cool_pools_body(1 << 30)
+      end
+      IyiHeap.cool_gate_unlock
+      IyiHeap.leave_barrier
+      mark_setup_fail("keyed cool: no pooled run could be staged on a release list") if staged == 0_u64
+      seen = IyiHeap.cool_seen
+      mark_setup_fail("keyed cool: the cooled path never reached the staged run") if seen & 1_u64 == 0_u64
+      mark_setup_fail("keyed cool: the staged run was not eligible for release") if seen & 2_u64 == 0_u64
+      read = seen.unsafe_shr(4_u64)
+      if read == 1_u64
+        print "idle: the run the program put on a release list reached the cold list with its page reading zero\n"
+      elsif read == 2_u64
+        fail("idle: the run the program put on a release list reached the cold list with its page unreleased: the release call did not run")
+      else
+        mark_setup_fail("keyed cool: the page read #{read}, neither zero nor the sentinel")
+      end
+    {% else %}
+      mark_setup_fail("keyed cool needs -Dkeyed_force")
+    {% end %}
+  end
+
+  def keyed_main(which : String) : Nil
+    {% if flag?(:keyed_force) %}
+      IyiWorkers.count = 4
+      pool_round(48)
+      keyed_quiet
+      if which == "park"
+        keyed_park
+      elsif which == "warm"
+        keyed_warm
+      elsif which == "cool"
+        keyed_cool
+      else
+        fail("usage: heap_drain keyed park|warm|cool")
+      end
+    {% else %}
+      mark_setup_fail("keyed mode needs -Dkeyed_force")
+    {% end %}
+  end
+
+  # The adopted run (c3, bench/heap_drain.sh's `adopt`). A unit's predecessor
+  # publishes one string and dies, so its run, with that string on it, goes to
+  # the shared heap's drain list. A new unit's first allocation of the class
+  # takes that run (`adopt_drained`), and that unit's own local collection
+  # checks the shared heap's kept string, which names the run's chunk. The
+  # check is the first verifier report and aborts, so no unit dies with the
+  # chunk still LOCAL. Automatic collection is off from the donor's start on,
+  # so no global mark can withhold the check, and the taker's stack is scrubbed
+  # first, so no stale word of an earlier call marks the string. If the check
+  # stays silent and the string is no longer published, that is a failure of the
+  # invariant under test (exit 1), not setup.
+  ADOPT_LENGTH = 52
+  ADOPT_GARBAGE = 8
+  ADOPT_HIDE_MASK = 0x5A5A5A5A5A5A5A5A_u64
+
+  {% if flag?(:heap_partitions) %}
+    # A published string that is no longer published after the taker's whole
+    # local collection, with the adoption and the claim proven: the invariant
+    # under test is broken, a failure (exit 1). Written here and exited directly:
+    # `fail` prints and goes on under HEAP22_PRINT_ONLY (bench/heap_drain.sh's c3).
+    def adopt_fail(message : String) : NoReturn
+      __iyi_write(1, "FAIL: ".to_unsafe.as(Void*), 6_u64)
+      __iyi_write(1, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+      __iyi_write(1, "\n".to_unsafe.as(Void*), 1_u64)
+      __iyi_exit(1)
+    end
+
+    @[NoInline]
+    def adopt_scrub : UInt64
+      room = uninitialized StaticArray(UInt64, 2048)
+      words = pointerof(room).as(Pointer(UInt64))
+      index = 0
+      while index < 2048
+        words[index] = 0_u64
+        index = index + 1
+      end
+      asm("" :: "r"(words) : "memory" : "volatile")
+      words[2047]
+    end
+
+    def adopt_quiet : Nil
+      started = IyiMark.now_ns
+      while IyiHeap.partitions_live != 0_u64
+        mark_setup_fail("adopt: timed out waiting for every partition to die") if IyiMark.now_ns &- started >= 120000000000_u64
+        sleep(1)
+      end
+    end
+
+    # The donor's string reaches the taker only in hidden form (XOR with a
+    # constant, so it is no address). A live copy of the address in the taker's
+    # frame would be a root of its local mark, which would mark the string and
+    # hide the mislabelled chunk from the check. These helpers hold the address
+    # only while they answer, in frames that are dead before any collection.
+    @[NoInline]
+    def adopt_claimed?(hidden : UInt64, id : UInt64) : Bool
+      object = hidden ^ ADOPT_HIDE_MASK
+      arena = IyiHeap.arena_of(object)
+      slot = IyiHeap.chunk_index(arena, object)
+      head = IyiHeap.arena_first(arena) &+ slot &* IyiHeap.arena_chunk(arena)
+      IyiHeap.owner_at(arena, IyiHeap.granule_of(arena, head)) == id
+    end
+
+    @[NoInline]
+    def adopt_published?(hidden : UInt64) : Bool
+      object = hidden ^ ADOPT_HIDE_MASK
+      arena = IyiHeap.arena_of(object)
+      slot = IyiHeap.chunk_index(arena, object)
+      own = IyiHeap.read8(IyiHeap.own_address(arena, slot))
+      own & IyiHeap::OWN_PUB != 0_u64
+    end
+
+    # The taker. Its first allocation of the class takes the donor's run, which
+    # the taker must own afterwards (the adoption, proven by the run's owner, not
+    # by a count). Its one local collection is the only verifier check. Once past
+    # it, the published string must still read as published. If it does not,
+    # that is a failure of the invariant under test (`adopt_fail`, exit 1),
+    # reported before the taker dies.
+    def adopt_taker(hidden : UInt64) : Int32
+      record = IyiHeap.current_record
+      mark_setup_fail("adopt: the taker allocates in the shared heap") if record == 0_u64
+      id = IyiHeap.read64(record &+ IyiHeap::REC_ID)
+      adopted = IyiHeap.runs_adopted
+      b = "b" * ADOPT_LENGTH
+      mark_setup_fail("adopt: the taker's first allocation took no drained run") if IyiHeap.runs_adopted == adopted || b.bytesize != ADOPT_LENGTH
+      mark_setup_fail("adopt: the donor's run was not claimed by the taker") unless adopt_claimed?(hidden, id)
+      adopt_scrub
+      before = IyiHeap.partition_collections(record)
+      IyiHeap.collect_local(record)
+      mark_setup_fail("adopt: the taker's local collection did not run whole") if IyiHeap.partition_collections(record) == before
+      adopt_fail("adopt: the published string is LOCAL after the taker's local collection") unless adopt_published?(hidden)
+      0
+    end
+
+    def adopt_run : Nil
+      IyiWorkers.count = 4
+      mark_setup_fail("adopt: main thread allocates in a partition") if IyiHeap.current_record != 0_u64
+      IyiMark.auto = false
+      kept = [] of String
+      sink = Channel(String).new(1)
+      group do |g|
+        g.spawn(unit: :new) do
+          junk = 0_i64
+          i = 0
+          while i < ADOPT_GARBAGE
+            s = "a" * ADOPT_LENGTH
+            junk = junk &+ s.bytesize.to_i64
+            i = i + 1
+          end
+          sink.send("p" * ADOPT_LENGTH)
+          junk > 0 ? 0 : 1
+        end
+        got = sink.receive
+        mark_setup_fail("adopt: the donor's string did not arrive") unless got.is_a?(String)
+        kept << got
+      end
+      adopt_quiet
+      hidden = kept[0].object_id ^ ADOPT_HIDE_MASK
+      group do |g|
+        g.spawn(unit: :new) { adopt_taker(hidden) }
+      end
+      if kept[0] == "p" * ADOPT_LENGTH
+        print "adopt: a unit's first allocation took a run its dead predecessor published, and the local collection left the published string intact\n"
+      else
+        fail("adopt: the published string reads wrong after the local collection")
+      end
+    end
+  {% end %}
+
+  def adopt_main(arguments : Array(String)) : Nil
+    {% if flag?(:heap_partitions) %}
+      adopt_run
+    {% else %}
+      mark_setup_fail("adopt needs -Dheap_partitions")
+    {% end %}
+  end
+
+  Checks.read_env
+  arguments = Program.args
+  if arguments.size > 0 && arguments[0] == "mark"
+    {% if flag?(:mark_force) %}
+      mark_forced(arguments)
+    {% else %}
+      mark_main(arguments)
+    {% end %}
+  elsif arguments.size > 0 && arguments[0] == "claim"
+    claim_main(arguments)
+  elsif arguments.size > 0 && arguments[0] == "dir"
+    dir_main(arguments)
+  elsif arguments.size > 1 && arguments[0] == "keyed"
+    keyed_main(arguments[1])
+  elsif arguments.size > 0 && arguments[0] == "adopt"
+    adopt_main(arguments)
+  else
+    drain_main(arguments)
+  end
+{% else %}
+  puts "heap drain: no collector of iyi's own here, nothing to measure"
+{% end %}

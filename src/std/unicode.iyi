@@ -51,6 +51,7 @@
 module std/unicode
 
 import std/int
+import std/lazy::{Lazy}
 
 pub struct Unicode
   # tables-begin
@@ -2722,154 +2723,225 @@ pub struct Unicode
   end
 
   # ---------------------------------------------------------------------
-  # Tables: decoded once, searched by rows.
+  # Tables: decoded at the first call that reads one, in the shared heap,
+  # and kept (std/lazy), then only read; searched by rows. Neither
+  # constants nor class variables' initializers: a constant is decoded at
+  # its declaration in every program whose running code may read it
+  # (SPEC.md III.5), and a class variable's initializer as its module
+  # starts in every program importing it, and a server whose handlers
+  # may fold a header decoded the tables before its first line.
   # ---------------------------------------------------------------------
 
-  @@letter : Array(Int32)?
-  @@number : Array(Int32)?
-  @@mark : Array(Int32)?
-  @@whitespace : Array(Int32)?
-  @@control : Array(Int32)?
-  @@lowercase : Array(Int32)?
-  @@uppercase : Array(Int32)?
-  @@titlecase : Array(Int32)?
-  @@cased : Array(Int32)?
-  @@case_ignorable : Array(Int32)?
-  @@upcase : Array(Int32)?
-  @@downcase : Array(Int32)?
-  @@alternate : Array(Int32)?
-  @@casefold : Array(Int32)?
-  @@special_upcase : Array(Int32)?
-  @@special_downcase : Array(Int32)?
-  @@special_titlecase : Array(Int32)?
-  @@special_fold : Array(Int32)?
-  @@combining_class : Array(Int32)?
-  @@canonical_decomposition : Array(Int32)?
-  @@compatibility_decomposition : Array(Int32)?
-  @@compatibility_data : Array(Int32)?
-  @@composition : Array(Int32)?
-  @@general_category : Array(Int32)?
-  @@script : Array(Int32)?
-  @@category_names : Array(String)?
-  @@script_names : Array(String)?
-  @@orbits : Hash(Int32, Array(Int32))?
-  @@simple_fold : Array(Int32)?
-  @@grapheme : Array(Int32)?
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@letter_rows = Lazy(Array(Int32)).new
 
-  private def self.letter_table : Array(Int32)
-    @@letter ||= decode(LETTER)
+  private def self.letter_rows : Array(Int32)
+    @@letter_rows.get { decode(LETTER) }
   end
 
-  private def self.number_table : Array(Int32)
-    @@number ||= decode(NUMBER)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@number_rows = Lazy(Array(Int32)).new
+
+  private def self.number_rows : Array(Int32)
+    @@number_rows.get { decode(NUMBER) }
   end
 
-  private def self.mark_table : Array(Int32)
-    @@mark ||= decode(MARK)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@mark_rows = Lazy(Array(Int32)).new
+
+  private def self.mark_rows : Array(Int32)
+    @@mark_rows.get { decode(MARK) }
   end
 
-  private def self.whitespace_table : Array(Int32)
-    @@whitespace ||= decode(WHITESPACE)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@whitespace_rows = Lazy(Array(Int32)).new
+
+  private def self.whitespace_rows : Array(Int32)
+    @@whitespace_rows.get { decode(WHITESPACE) }
   end
 
-  private def self.control_table : Array(Int32)
-    @@control ||= decode(CONTROL)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@control_rows = Lazy(Array(Int32)).new
+
+  private def self.control_rows : Array(Int32)
+    @@control_rows.get { decode(CONTROL) }
   end
 
-  private def self.lowercase_table : Array(Int32)
-    @@lowercase ||= decode(LOWERCASE)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@lowercase_rows = Lazy(Array(Int32)).new
+
+  private def self.lowercase_rows : Array(Int32)
+    @@lowercase_rows.get { decode(LOWERCASE) }
   end
 
-  private def self.uppercase_table : Array(Int32)
-    @@uppercase ||= decode(UPPERCASE)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@uppercase_rows = Lazy(Array(Int32)).new
+
+  private def self.uppercase_rows : Array(Int32)
+    @@uppercase_rows.get { decode(UPPERCASE) }
   end
 
-  private def self.titlecase_table : Array(Int32)
-    @@titlecase ||= decode(TITLECASE)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@titlecase_rows = Lazy(Array(Int32)).new
+
+  private def self.titlecase_rows : Array(Int32)
+    @@titlecase_rows.get { decode(TITLECASE) }
   end
 
-  private def self.cased_table : Array(Int32)
-    @@cased ||= decode(CASED)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@cased_rows = Lazy(Array(Int32)).new
+
+  private def self.cased_rows : Array(Int32)
+    @@cased_rows.get { decode(CASED) }
   end
 
-  private def self.case_ignorable_table : Array(Int32)
-    @@case_ignorable ||= decode(CASE_IGNORABLE)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@case_ignorable_rows = Lazy(Array(Int32)).new
+
+  private def self.case_ignorable_rows : Array(Int32)
+    @@case_ignorable_rows.get { decode(CASE_IGNORABLE) }
   end
 
-  private def self.upcase_table : Array(Int32)
-    @@upcase ||= decode(UPCASE)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@upcase_rows = Lazy(Array(Int32)).new
+
+  private def self.upcase_rows : Array(Int32)
+    @@upcase_rows.get { decode(UPCASE) }
   end
 
-  private def self.downcase_table : Array(Int32)
-    @@downcase ||= decode(DOWNCASE)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@downcase_rows = Lazy(Array(Int32)).new
+
+  private def self.downcase_rows : Array(Int32)
+    @@downcase_rows.get { decode(DOWNCASE) }
   end
 
-  private def self.alternate_table : Array(Int32)
-    @@alternate ||= decode(ALTERNATE)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@alternate_rows = Lazy(Array(Int32)).new
+
+  private def self.alternate_rows : Array(Int32)
+    @@alternate_rows.get { decode(ALTERNATE) }
   end
 
-  private def self.casefold_table : Array(Int32)
-    @@casefold ||= decode(CASEFOLD)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@casefold_rows = Lazy(Array(Int32)).new
+
+  private def self.casefold_rows : Array(Int32)
+    @@casefold_rows.get { decode(CASEFOLD) }
   end
 
-  private def self.special_upcase_table : Array(Int32)
-    @@special_upcase ||= decode(SPECIAL_UPCASE)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@special_upcase_rows = Lazy(Array(Int32)).new
+
+  private def self.special_upcase_rows : Array(Int32)
+    @@special_upcase_rows.get { decode(SPECIAL_UPCASE) }
   end
 
-  private def self.special_downcase_table : Array(Int32)
-    @@special_downcase ||= decode(SPECIAL_DOWNCASE)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@special_downcase_rows = Lazy(Array(Int32)).new
+
+  private def self.special_downcase_rows : Array(Int32)
+    @@special_downcase_rows.get { decode(SPECIAL_DOWNCASE) }
   end
 
-  private def self.special_titlecase_table : Array(Int32)
-    @@special_titlecase ||= decode(SPECIAL_TITLECASE)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@special_titlecase_rows = Lazy(Array(Int32)).new
+
+  private def self.special_titlecase_rows : Array(Int32)
+    @@special_titlecase_rows.get { decode(SPECIAL_TITLECASE) }
   end
 
-  private def self.special_fold_table : Array(Int32)
-    @@special_fold ||= decode(SPECIAL_FOLD)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@special_fold_rows = Lazy(Array(Int32)).new
+
+  private def self.special_fold_rows : Array(Int32)
+    @@special_fold_rows.get { decode(SPECIAL_FOLD) }
   end
 
-  private def self.combining_class_table : Array(Int32)
-    @@combining_class ||= decode(COMBINING_CLASS)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@combining_class_rows = Lazy(Array(Int32)).new
+
+  private def self.combining_class_rows : Array(Int32)
+    @@combining_class_rows.get { decode(COMBINING_CLASS) }
   end
 
-  private def self.canonical_decomposition_table : Array(Int32)
-    @@canonical_decomposition ||= decode(CANONICAL_DECOMPOSITION)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@canonical_decomposition_rows = Lazy(Array(Int32)).new
+
+  private def self.canonical_decomposition_rows : Array(Int32)
+    @@canonical_decomposition_rows.get { decode(CANONICAL_DECOMPOSITION) }
   end
 
-  private def self.compatibility_decomposition_table : Array(Int32)
-    @@compatibility_decomposition ||= decode(COMPATIBILITY_DECOMPOSITION)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@compatibility_decomposition_rows = Lazy(Array(Int32)).new
+
+  private def self.compatibility_decomposition_rows : Array(Int32)
+    @@compatibility_decomposition_rows.get { decode(COMPATIBILITY_DECOMPOSITION) }
   end
 
-  private def self.compatibility_data_table : Array(Int32)
-    @@compatibility_data ||= decode(COMPATIBILITY_DATA)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@compatibility_data_rows = Lazy(Array(Int32)).new
+
+  private def self.compatibility_data_rows : Array(Int32)
+    @@compatibility_data_rows.get { decode(COMPATIBILITY_DATA) }
   end
 
-  private def self.composition_table : Array(Int32)
-    @@composition ||= decode(COMPOSITION)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@composition_rows = Lazy(Array(Int32)).new
+
+  private def self.composition_rows : Array(Int32)
+    @@composition_rows.get { decode(COMPOSITION) }
   end
 
-  private def self.general_category_table : Array(Int32)
-    @@general_category ||= decode(GENERAL_CATEGORY)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@general_category_rows = Lazy(Array(Int32)).new
+
+  private def self.general_category_rows : Array(Int32)
+    @@general_category_rows.get { decode(GENERAL_CATEGORY) }
   end
 
-  private def self.script_table : Array(Int32)
-    @@script ||= decode(SCRIPT)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@script_rows = Lazy(Array(Int32)).new
+
+  private def self.script_rows : Array(Int32)
+    @@script_rows.get { decode(SCRIPT) }
   end
 
-  private def self.category_names : Array(String)
-    @@category_names ||= CATEGORY_NAMES.split(',')
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@category_list = Lazy(Array(String)).new
+
+  private def self.category_list : Array(String)
+    @@category_list.get { CATEGORY_NAMES.split(',') }
   end
 
-  private def self.script_names : Array(String)
-    @@script_names ||= SCRIPT_NAMES.split(',')
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@script_list = Lazy(Array(String)).new
+
+  private def self.script_list : Array(String)
+    @@script_list.get { SCRIPT_NAMES.split(',') }
   end
 
-  private def self.simple_fold_table : Array(Int32)
-    @@simple_fold ||= decode(SIMPLE_FOLD)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@simple_fold_rows = Lazy(Array(Int32)).new
+
+  private def self.simple_fold_rows : Array(Int32)
+    @@simple_fold_rows.get { decode(SIMPLE_FOLD) }
   end
 
-  private def self.grapheme_table : Array(Int32)
-    @@grapheme ||= decode(GRAPHEME)
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@grapheme_rows = Lazy(Array(Int32)).new
+
+  private def self.grapheme_rows : Array(Int32)
+    @@grapheme_rows.get { decode(GRAPHEME) }
+  end
+
+  # Built from the tables `simple_fold` reads, each decoded by its own
+  # accessor the first time this one builds.
+  @[UnsafeReach("decoded whole in the shared heap by its first reader (std/lazy), kept once and marked; read only after the mark; then only read")]
+  @@orbits = Lazy(Hash(Int32, Array(Int32))).new
+
+  private def self.orbits : Hash(Int32, Array(Int32))
+    @@orbits.get { build_orbits }
   end
 
   # The integers a table string spells, in order: a sign, decimal digits,
@@ -2954,54 +3026,54 @@ pub struct Unicode
 
   # Category L: Lu, Ll, Lt, Lm and Lo.
   def self.letter?(char : Char) : Bool
-    in_category?(letter_table, char.ord)
+    in_category?(letter_rows, char.ord)
   end
 
   # Category N: Nd, Nl and No — digits in every script, letter numbers, and
   # the fractions and superscripts.
   def self.number?(char : Char) : Bool
-    in_category?(number_table, char.ord)
+    in_category?(number_rows, char.ord)
   end
 
   # Category M: Mn, Mc and Me — the combining marks.
   def self.mark?(char : Char) : Bool
-    in_category?(mark_table, char.ord)
+    in_category?(mark_rows, char.ord)
   end
 
   # Category Z: Zs, Zl and Zp — the spaces and the line and paragraph
   # separators. Tab and newline are controls, not whitespace, here.
   def self.whitespace?(char : Char) : Bool
-    in_category?(whitespace_table, char.ord)
+    in_category?(whitespace_rows, char.ord)
   end
 
   # Category C: Cc, Cf, Cs and Co — controls, format characters,
   # surrogates and private use.
   def self.control?(char : Char) : Bool
-    in_category?(control_table, char.ord)
+    in_category?(control_rows, char.ord)
   end
 
   # Category Ll.
   def self.lowercase?(char : Char) : Bool
-    in_category?(lowercase_table, char.ord)
+    in_category?(lowercase_rows, char.ord)
   end
 
   # Category Lu.
   def self.uppercase?(char : Char) : Bool
-    in_category?(uppercase_table, char.ord)
+    in_category?(uppercase_rows, char.ord)
   end
 
   # Category Lt: the digraphs whose first half is capital, `ǅ` and `ᾈ`.
   def self.titlecase?(char : Char) : Bool
-    in_category?(titlecase_table, char.ord)
+    in_category?(titlecase_rows, char.ord)
   end
 
   # The two-letter general category of a character: `"Lu"` for `A`, `"Po"`
   # for `!`, `"Sm"` for `+`; `"Cn"` for a code point no character is
   # assigned to.
   def self.general_category(char : Char) : String
-    table = general_category_table
+    table = general_category_rows
     at = search_range(table, 3, char.ord)
-    at < 0 ? "Cn" : category_names[table.to_unsafe[at + 2]]
+    at < 0 ? "Cn" : category_list[table.to_unsafe[at + 2]]
   end
 
   # The script a character is written in, as `Scripts.txt` names it:
@@ -3009,9 +3081,9 @@ pub struct Unicode
   # punctuation every script shares; `"Unknown"` for a code point the file
   # does not list.
   def self.script(char : Char) : String
-    table = script_table
+    table = script_rows
     at = search_range(table, 3, char.ord)
-    at < 0 ? "Unknown" : script_names[table.to_unsafe[at + 2]]
+    at < 0 ? "Unknown" : script_list[table.to_unsafe[at + 2]]
   end
 
   # The code points a property names, as sorted `{from, to}` pairs that
@@ -3022,7 +3094,7 @@ pub struct Unicode
   # from the ranges once rather than asking per character, which is what a
   # regex's `\p{..}` needs: ranges it can negate and case-fold.
   def self.property_ranges(name : String) : Array(Int32)?
-    categories = category_names
+    categories = category_list
     wanted = [] of Int32
     if name.bytesize == 1 || name.bytesize == 2
       i = 0
@@ -3031,15 +3103,15 @@ pub struct Unicode
         i = i + 1
       end
     end
-    table = general_category_table
+    table = general_category_rows
     if wanted.empty?
-      names = script_names
+      names = script_list
       i = 0
       while i < names.size
         wanted << i if names[i] == name
         i = i + 1
       end
-      table = script_table
+      table = script_rows
     end
     return nil if wanted.empty?
     ranges = [] of Int32
@@ -3068,20 +3140,20 @@ pub struct Unicode
     # their capital and small forms and have no row in the table; their
     # uppercase is the capital one before them.
     return cp - 1 if cp == 0x1C5 || cp == 0x1C8 || cp == 0x1CB || cp == 0x1F2
-    table = upcase_table
+    table = upcase_rows
     at = search_range(table, 3, cp)
     return cp + table.to_unsafe[at + 2] if at >= 0
-    alternate = alternate_table
+    alternate = alternate_rows
     at = search_range(alternate, 2, cp)
     return cp - 1 if at >= 0 && (cp - alternate.to_unsafe[at]).odd?
     cp
   end
 
   private def self.simple_downcase(cp : Int32) : Int32
-    table = downcase_table
+    table = downcase_rows
     at = search_range(table, 3, cp)
     return cp + table.to_unsafe[at + 2] if at >= 0
-    alternate = alternate_table
+    alternate = alternate_rows
     at = search_range(alternate, 2, cp)
     return cp + 1 if at >= 0 && (cp - alternate.to_unsafe[at]).even?
     cp
@@ -3151,7 +3223,7 @@ pub struct Unicode
         return
       end
     end
-    return if yield_special(special_upcase_table, cp) { |part| yield part.unsafe_chr }
+    return if yield_special(special_upcase_rows, cp) { |part| yield part.unsafe_chr }
     yield simple_upcase(cp).unsafe_chr
   end
 
@@ -3187,7 +3259,7 @@ pub struct Unicode
         return
       end
     end
-    return if yield_special(special_downcase_table, cp) { |part| yield part.unsafe_chr }
+    return if yield_special(special_downcase_rows, cp) { |part| yield part.unsafe_chr }
     yield simple_downcase(cp).unsafe_chr
   end
 
@@ -3200,7 +3272,7 @@ pub struct Unicode
       turkic = turkic_upcase(cp)
       return turkic.unsafe_chr if turkic >= 0
     end
-    table = special_titlecase_table
+    table = special_titlecase_rows
     at = search_key(table, 4, cp)
     if at >= 0 && table.to_unsafe[at + 2] == 0
       return table.to_unsafe[at + 1].unsafe_chr
@@ -3222,8 +3294,8 @@ pub struct Unicode
         return
       end
     end
-    return if yield_special(special_titlecase_table, cp) { |part| yield part.unsafe_chr }
-    return if yield_special(special_upcase_table, cp) { |part| yield part.unsafe_chr }
+    return if yield_special(special_titlecase_rows, cp) { |part| yield part.unsafe_chr }
+    return if yield_special(special_upcase_rows, cp) { |part| yield part.unsafe_chr }
     yield simple_upcase(cp).unsafe_chr
   end
 
@@ -3232,10 +3304,10 @@ pub struct Unicode
   # is answered unchanged — the block form and the string form fold it.
   def self.foldcase(char : Char) : Char
     cp = char.ord
-    table = casefold_table
+    table = casefold_rows
     at = search_range(table, 3, cp)
     return (cp + table.to_unsafe[at + 2]).unsafe_chr if at >= 0
-    special = special_fold_table
+    special = special_fold_rows
     at = search_key(special, 4, cp)
     return special.to_unsafe[at + 1].unsafe_chr if at >= 0 && special.to_unsafe[at + 2] == 0
     char
@@ -3244,13 +3316,13 @@ pub struct Unicode
   # The full case folding, one character at a time: `ß` yields `s` twice.
   def self.foldcase(char : Char, & : Char -> Nil) : Nil
     cp = char.ord
-    table = casefold_table
+    table = casefold_rows
     at = search_range(table, 3, cp)
     if at >= 0
       yield (cp + table.to_unsafe[at + 2]).unsafe_chr
       return
     end
-    return if yield_special(special_fold_table, cp) { |part| yield part.unsafe_chr }
+    return if yield_special(special_fold_rows, cp) { |part| yield part.unsafe_chr }
     yield char
   end
 
@@ -3286,29 +3358,26 @@ pub struct Unicode
   end
 
   private def self.simple_fold(cp : Int32) : Int32
-    table = simple_fold_table
+    table = simple_fold_rows
     at = search_key(table, 2, cp)
     at >= 0 ? table.to_unsafe[at + 1] : foldcase(cp.unsafe_chr).ord
   end
 
   # The simple foldings read backwards: each folded code point to every
-  # code point that folds to it, itself included, sorted. Built once from
-  # the tables `simple_fold` reads, in the order it reads them, so a code
-  # point one table folds is not folded again by a later one.
-  private def self.orbits : Hash(Int32, Array(Int32))
-    @@orbits ||= build_orbits
-  end
-
+  # code point that folds to it, itself included, sorted. Built once, by
+  # `orbits`, from the tables `simple_fold` reads, in the
+  # order it reads them, so a code point one table folds is not folded
+  # again by a later one.
   private def self.build_orbits : Hash(Int32, Array(Int32))
     map = Hash(Int32, Array(Int32)).new
-    simple = simple_fold_table
+    simple = simple_fold_rows
     data = simple.to_unsafe
     row = 0
     while row < simple.size
       join_orbit(map, data[row + 1], data[row])
       row = row + 2
     end
-    table = casefold_table
+    table = casefold_rows
     data = table.to_unsafe
     row = 0
     while row < table.size
@@ -3319,7 +3388,7 @@ pub struct Unicode
       end
       row = row + 3
     end
-    special = special_fold_table
+    special = special_fold_rows
     data = special.to_unsafe
     row = 0
     while row < special.size
@@ -3467,11 +3536,11 @@ pub struct Unicode
   # Answered from the categories and a list of punctuation, `"ΑΣ\u200BΑ"`
   # lowered to a final `ς` and `"\u216BΣ"` to `σ`.
   private def self.cased?(cp : Int32) : Bool
-    in_category?(cased_table, cp)
+    in_category?(cased_rows, cp)
   end
 
   private def self.case_ignorable?(cp : Int32) : Bool
-    in_category?(case_ignorable_table, cp)
+    in_category?(case_ignorable_rows, cp)
   end
 
   # ---------------------------------------------------------------------
@@ -3760,7 +3829,7 @@ pub struct Unicode
   end
 
   private def self.combining_class(cp : Int32) : Int32
-    table = combining_class_table
+    table = combining_class_rows
     at = search_range(table, 3, cp)
     at < 0 ? 0 : table.to_unsafe[at + 2]
   end
@@ -3777,7 +3846,7 @@ pub struct Unicode
       points << trailing unless trailing == HANGUL_T_BASE
       return
     end
-    canonical = canonical_decomposition_table
+    canonical = canonical_decomposition_rows
     at = search_key(canonical, 3, cp)
     if at >= 0
       decompose(points, canonical.to_unsafe[at + 1], compatibility)
@@ -3786,10 +3855,10 @@ pub struct Unicode
       return
     end
     if compatibility
-      compat = compatibility_decomposition_table
+      compat = compatibility_decomposition_rows
       at = search_key(compat, 3, cp)
       if at >= 0
-        data = compatibility_data_table
+        data = compatibility_data_rows
         offset = compat.to_unsafe[at + 1]
         count = compat.to_unsafe[at + 2]
         index = 0
@@ -3847,7 +3916,7 @@ pub struct Unicode
        second > HANGUL_T_BASE && second < HANGUL_T_BASE + HANGUL_T_COUNT
       return first + (second - HANGUL_T_BASE)
     end
-    table = composition_table
+    table = composition_rows
     data = table.to_unsafe
     low = 0
     high = table.size // 3
@@ -4010,7 +4079,7 @@ pub struct Unicode
 
   private def self.grapheme_value(cp : Int32) : Int32
     return 0 if cp >= 0x20 && cp < 0x7F
-    table = grapheme_table
+    table = grapheme_rows
     at = search_range(table, 3, cp)
     at < 0 ? 0 : table.to_unsafe[at + 2]
   end

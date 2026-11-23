@@ -394,7 +394,7 @@ play_prelude() {
 # 2 when it did not build, otherwise the program's own: 0 when the count agrees
 # with the bits, 1 on the FAIL line.
 unlist_count_run() {
-  IYI_PATH="$WORK/$1:$REPO/src" "$IYI" build -o "$WORK/$1/unlist_count" \
+  IYI_PATH="$WORK/$1:$REPO/src" "$IYI" build -Dunlist_audit -o "$WORK/$1/unlist_count" \
     "$REPO/bench/unlist_count.iyi" >"$WORK/$1/unlist.build.log" 2>&1 || return 2
   "$WORK/$1/unlist_count" >"$WORK/$1/unlist.out" 2>&1
 }

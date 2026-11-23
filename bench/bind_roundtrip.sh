@@ -585,6 +585,20 @@ module Shard
       else                "many"
       end
     end
+
+    # And the `lib`'s C global, stored and read in the same body that
+    # travels (#204): the consumer needs its `$` line as it needs a `fun`'s,
+    # and with the `fun`s alone it said `undefined fun 'flag='`. Windows'
+    # CRT `_daylight` is no data symbol a program can import, so there it
+    # is the value.
+    def flag_of(value : Int32) : Int32
+      {% if flag?(:win32) %}
+        value
+      {% else %}
+        LibShardSign.flag = value
+        LibShardSign.flag
+      {% end %}
+    end
   end
 
   class Signs
@@ -608,6 +622,9 @@ end
 # above. Written at the top level, where a shard writes a `lib`.
 lib LibShardSign
   fun magnitude = abs(value : Int32) : ::Shard::Sign
+  {% unless flag?(:win32) %}
+    $flag = daylight : Int32
+  {% end %}
 end
 
 # And the macro call, which declares `Shard.render_text`.
@@ -685,6 +702,7 @@ signs = Shard::Signs.new
 puts signs.sign_of(-1)
 puts signs.sign_of(2)
 puts signs.sign_of(7)
+puts signs.flag_of(5)
 
 # The shapes a consumer is the only thing that can check: a class variable
 # that is thread-local, one the shard left uninitialized, one whose default

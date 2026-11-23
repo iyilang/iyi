@@ -455,18 +455,18 @@ stop lands. The exercise's fibers take stops on their own stacks. A
 is the answer if a program's fiber is ever that deep, and it is not
 built ahead of one.
 
-`bench/thread_exercise.sh` holds it, plain and release, on Linux and
-darwin, with the aarch64 arm run under emulation: eight threads
-allocating from their own caches while collections run from whichever
-crosses the budget, each holding a live list in nothing but its own
-frames through those collections and finding it intact by checksum and
-by the sweep's own free flag — after one explicit collection with
-every worker spinning on its list, and after twenty bursts of churn —
-each running fibers of its own with a parked one holding an object's
-only reference, then 32 threads past the core count; the floor read
-off the binary, five names on Linux; and the failure proof removes the
-thread-root walk from a copy of the prelude and the spinning threads'
-lists are swept out from under them by name. The price, release, 20
+`bench/thread_exercise.sh` holds it, plain and release, on Linux and darwin:
+eight threads allocating from their own caches while collections run from
+whichever crosses the budget, each holding a live list in nothing but its own
+frames through those collections and finding it intact by checksum and by the
+sweep's own free flag (after one explicit collection with every worker spinning
+on its list, and after twenty bursts of churn), each running fibers of its own
+with a parked one holding an object's only reference, then twice the core count,
+clamped to 9 to 32 threads; the floor read off the binary, five names on Linux;
+and the failure proof removes the thread-root walk from a copy of the prelude and
+the spinning threads' lists are swept out from under them by name. CI's cross-run
+job runs the aarch64 build of `bench/thread_exercise.iyi` under emulation, which
+this script does not do. The price, release, 20
 cores: 76 ns an allocation with one thread, 162 with four, 268 with
 eight — wall time per allocation per thread, every pause included,
 which is what Stages 7 and 8 exist to bring down: every thread stands
@@ -625,7 +625,7 @@ helper 0 and `bench/release_trigger.iyi` names by round for the others.
 The first three were left to the machine once: the store's missed on
 four-core Windows and three-core darwin runners, the late read's on a
 four-core Windows one, and helper 0's held the tasks there at 287 and 289
-MiB against the watchdog's 256. Every proof is caught in every run now:
+MiB against the watchdog's 256. Before the proofs were forced, each was caught in every run:
 12 of 12 each here held to three, four and twelve cores, and one run on
 each of three four-core Windows runners and a three-core darwin one,
 where `bench/concurrent_mark.sh` and `bench/parallel_mark.sh` passed
@@ -935,7 +935,7 @@ is a few instructions, so the gate also runs the program on a copy of
 the prelude whose slice waits up to 100 us at each kept chunk of a
 kilobyte or more and exits by name if the entry changes under it; with
 the old free put back that copy failed by name in 200 runs of 200, plain
-and release alike.
+and release alike, before the copy was forced; the gate now catches it on one run.
 
 Two more levers on that garbage were tried in the second cycle and
 are not in the tree. A prefetch of a shaded object's line at its push:
@@ -1067,12 +1067,40 @@ compare-and-set clears it. `bench/trim_stress.iyi` (eight threads in six
 classes, the trim run back to back) caught the old counting in 11 runs
 of 11 on macOS's sixteen-kilobyte pages, but two adoptions met in the
 window only 0-3 times in 10 s on four-kilobyte pages and three runs
-passed on Windows 11. So `bench/sweep_exercise.sh` builds both countings
-with the window held open 20 microseconds at a batch's edge pages: the
-old one was caught on the first run in 20 of 20 on Windows 11 and on
-macOS 26.6, and the fix read every block back whole with the window met
-4,706-15,972 times a run; the gate's run on Linux met it 9,539 times and
-caught the old counting on run 1.
+passed on Windows 11. So `bench/sweep_exercise.sh` no longer races the window.
+`bench/unlist_count.iyi` checks the count on one thread with the interleaving
+forced: the copy that counts the lost clear reads 0 against 2 and fails on its
+only run. The fix runs under the 10 s trim stress with the same interleaving at
+every batch edge, and `IyiHeap.audit_listed` checks each arena's count against
+its bitmap at every pause and after every trim, so a count that reads short
+fails the stress at the first check that sees it.
+
+Two more ways left a page idle under an object. The count of listed
+pages was raised after the bits it counts: a slice listing the page it
+shares with the slice below sat between the two while the refill
+adopting the batch below unlisted that page and counted it off, the
+count stayed one short until the slice caught up, and a refill of the
+arena that read 0 meanwhile left its own batch's pages listed under the
+objects it handed out. The count was whole again by the pause, so the
+pause's count audit passed; the pause made the pages idle, and the next
+refill threaded their chunks a second time - the trim stress's residual
+(about one 20 s run in fifty, PR #242). A copy recording every chunk's
+owner and every change to the listed pages caught it in 4 of 237 runs
+on macOS 26.6 and 6 of 354 on Linux, each after a refill had cleared a
+page its slice had not yet counted. `IyiHeap.list_pages` now raises the
+count first, so the count is never below the bitmap and a refill that
+reads 0 has nothing of its own listed; the copy caught none in 235 and
+405. The gate's copies play that refill between a slice's count and its
+bits, end the program where a refill reads listed a page its slice has
+not counted (`bench/unlist_count.iyi`'s `listing:` check, on one thread),
+and audit at every pause that a listed page's chunks are all free. And a run
+a sweep slice in flight cuts short (`IyiHeap.take_run`) was cut at the
+slice's word, off the chunk grid: a chunk longer than a page taken last
+reached over idle pages of the rest, which the trim hands back keeping a
+run's first page only - the copy caught the trim handing back two pages
+under a 20,480-byte chunk on Linux's 4 KB pages. It is cut at the last
+page a chunk begins on, as a run cut at a slab's worth is
+(`bench/sweep_exercise.iyi` check 10b).
 
 Measured with #145's harness, six rounds per machine, iyiturkiye built
 by 0.21.0 against goturkiye, steady / peak / 5 s after the load, MB:

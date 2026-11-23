@@ -34,8 +34,10 @@
 #   heap, and dies; the list reads back whole after a collection.
 # - `free:` a unit asks to free a chunk of the shared heap and then
 #   allocates; the chunk still holds what the main thread wrote in it.
-# - `filter:` a unit's local collection with another unit's object
-#   address on its stack leaves that object's `OWN` byte as it was.
+# - `filter:` a unit's local collections with another unit's object
+#   address on its stack, the other parked and its token held, leave that
+#   object's `OWN` byte as it was, the last of them wearing the parity
+#   the object does not.
 # - `frontier:` a unit allocates 16-byte strings until one is the last
 #   chunk of a run off the carve frontier with its head below the run's
 #   end and its address on it; published, it is not `LOCAL` any more.
@@ -969,58 +971,88 @@
     (IyiHeap.partition_collections(record) == before ? 0_u64 : 1_u64) + (address & 0_u64)
   end
 
+  # Unit A's side: the owning object's `OWN` byte read, A's collections
+  # with its address on A's stack until one that counted wore the parity
+  # the object does not, and the byte read again. A mark leaves a chunk
+  # already wearing its own parity as it is, so a collection wearing the
+  # object's would rewrite nothing even without the filter: the last one
+  # wears the other. Answers 0 if the byte held, after * 1000 + before + 1
+  # if it moved, -1 if no collection ran, -2 if each of 16 that ran wore
+  # the object's parity.
+  def filter_hold(address : UInt64) : Int64
+    record = IyiHeap.current_record
+    before = IyiHeap.own_flags(address)
+    worn = before & IyiHeap::OWN_LMARK
+    other = false
+    rounds = 0
+    while !other && rounds < 16
+      return -1_i64 if collect_holding(address) == 0_u64
+      other = IyiHeap.read64(record + IyiHeap::REC_PARITY) != worn
+      rounds = rounds + 1
+    end
+    return -2_i64 unless other
+    after = IyiHeap.own_flags(address)
+    after == before ? 0_i64 : after.to_i64 * 1000_i64 + before.to_i64 + 1_i64
+  end
+
+  # Unit B parks with its object's address sent to unit A, and the check
+  # holds B's token while A reads B's `OWN` byte, collects and reads it
+  # again: no collection of B's partition - its own, or an idle worker's
+  # takeover - comes between the two reads. One that did marked the
+  # object with B's parity; after A's, which the filter-less copy wrote
+  # with the same parity - both partitions' first - B's left the byte as
+  # A's had, and a check that took B's collection for the move passed the
+  # copy: an idle worker took B, parked dirty for two ticks of the idle
+  # clock before A woke it (Windows CI, job 135882647822; 16 runs of 20
+  # on Linux, 2 of 10 on Windows 11, with A held 250 ms after collecting).
   def filter_check : Nil
     IyiHeap.collect_every_park = false
+    ready = Channel(UInt64).new(1)
     to_a = Channel(UInt64).new(1)
-    to_b = Channel(UInt64).new(1)
+    start = Channel(UInt64).new(1)
+    go = Channel(UInt64).new(1)
     group do |g|
       b = g.spawn(unit: :new) do
         mine = Node.new(31337_i64, nil)
-        record = IyiHeap.current_record
-        collections = IyiHeap.partition_collections(record)
-        parity = IyiHeap.read64(record + IyiHeap::REC_PARITY)
-        marking = IyiHeap.read64(record + IyiHeap::REC_MARKING)
-        before = IyiHeap.own_flags(mine.object_id)
+        ready.send(IyiHeap.current_record)
         to_a.send(mine.object_id)
-        to_b.receive
-        after = IyiHeap.own_flags(mine.object_id)
-        # B's own collections meanwhile - a chaos build's `IYI_HEAP_STRESS`
-        # runs one at every point - mark `mine` with B's parity: only the
-        # local-mark bits may move then. One that ends swept leaves them
-        # at B's parity. One that ended unswept - a pause came into it, or
-        # the verifier's check answered false - flipped the parity, marked
-        # part way and counted nothing, and left `REC_MARKING` set, so the
-        # next one clears its bits first: then they are whatever the last
-        # of those left, either parity or none. bench/heap_verify.sh's
-        # sound part failed here with 4001 (S4e at d467f04dc, Linux, seed
-        # 1): the bits at 4, no collection counted. B's record says which,
-        # and A's collections touch none of it.
-        rest = 0xFF_u64 ^ IyiHeap::OWN_LMARK
-        if after & rest == before & rest
-          counted = IyiHeap.partition_collections(record) != collections
-          unswept = IyiHeap.read64(record + IyiHeap::REC_MARKING) != 0_u64
-          if unswept && (counted || marking == 0_u64 || IyiHeap.read64(record + IyiHeap::REC_PARITY) != parity)
-            before = after
-          elsif counted
-            before = (before & rest) | IyiHeap.read64(record + IyiHeap::REC_PARITY)
-          end
-        end
-        mine.intact?(31337_i64) ? (after == before ? 0_i64 : after.to_i64 * 1000_i64 + before.to_i64 + 1_i64) : -1_i64
+        go.receive
+        mine.intact?(31337_i64) ? 0_i64 : -1_i64
       end
       a = g.spawn(unit: :new) do
         got = to_a.receive
         address = got.is_a?(UInt64) ? got : 0_u64
-        collected = collect_holding(address)
-        to_b.send(1_u64)
-        collected.to_i64
+        start.receive
+        filter_hold(address)
       end
-      ran = a.value
-      fail("filter: the holding unit answered #{ran}") unless ran.is_a?(Int64)
-      fail("filter: the holding unit's collection did not run") if ran != 1_i64
+      got = ready.receive
+      record = got.is_a?(UInt64) ? got : 0_u64
+      fail("filter: the owning unit sent no record") if record == 0_u64
+      unit = Pointer(Void).new(IyiHeap.read64(record &+ IyiHeap::REC_UNIT)).as(IyiUnit)
+      # B's token, which the worker that ran it holds until its fiber has
+      # parked, taken here once let go, as `idlehold_check` takes it.
+      waited = 0
+      held = false
+      while !held && waited < 3000
+        sleep(1)
+        waited = waited + 1
+        held = unit.take(HOLD_ID)
+      end
+      fail("filter: the owning unit's token was never let go") unless held
+      count = IyiHeap.partition_collections(record)
+      start.send(1_u64)
+      moved = a.value
+      taken = IyiHeap.partition_collections(record) != count
+      unit.give if held
+      go.send(1_u64)
       value = b.value
+      fail("filter: the holding unit answered #{moved}") unless moved.is_a?(Int64)
+      fail("filter: the holding unit's collection did not run") if moved == -1_i64
+      fail("filter: each of the holding unit's 16 collections wore the parity the owning unit's object wore") if moved == -2_i64
+      fail("filter: the owning unit's partition was collected while the check held its token") if taken
+      fail("filter: another unit's collection rewrote an OWN byte (#{moved})") if moved != 0_i64
       fail("filter: the owning unit answered #{value}") unless value.is_a?(Int64)
       fail("filter: the owning unit's object read wrong") if value == -1_i64
-      fail("filter: another unit's collection rewrote an OWN byte (#{value})") if value != 0_i64
     end
     IyiHeap.collect_every_park = true
   end

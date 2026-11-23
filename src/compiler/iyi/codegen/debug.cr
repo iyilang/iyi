@@ -497,8 +497,11 @@ module Iyi
       end
     end
 
+    # iyi: the main function is asked by identity. Its name was read back
+    # from LLVM as a new string for every node given a location, and
+    # `@main` is the one function that name is defined for.
     def get_current_debug_scope(location)
-      if context.fun.name == main_name
+      if context.fun.to_unsafe == @main.to_unsafe
         main_scopes = (@main_scopes ||= {} of {String, String} => LibLLVM::MetadataRef)
         file, dir = file_and_dir(location.filename)
         main_scope = main_scopes[{file, dir}] ||= begin

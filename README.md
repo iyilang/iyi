@@ -302,8 +302,8 @@ published list requires, a plain build with iyi's own prelude links the
 platform's C library and nothing else: no libgc, no libevent, no openssl, no
 zlib ([INSTALL.md](INSTALL.md#what-a-program-depends-on) has each platform). A
 program links only what it uses, and
-iyi's own library is 36,399 lines, written to be linked that way. That
-library is 1,539 KB on disk beside the binary.
+iyi's own library is 36,598 lines, written to be linked that way. That
+library is 1,550 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build` on macOS arm64 with LLVM 22,
 and move with the platform; `python3 bench/machine_probe.py` prints your
@@ -558,7 +558,7 @@ $ curl localhost:3000/json
 traits, `impl … forall`, error unions and `!`, `.or`, `or_panic`, `defer` — all
 of them work in a program that requires a shard, and R-2 still refuses an
 export that does not write its types. What changes is what the program *has*:
-Crystal's standard library instead of 36,399 lines of iyi's own prelude.
+Crystal's standard library instead of 36,598 lines of iyi's own prelude.
 
 **One class of names is unreachable.** `!` in iyi propagates an error, so a
 method whose name ends in one cannot be called from a `.iyi` file. Crystal's
@@ -619,7 +619,7 @@ classes, and it should not.
 building iyi should, and they are separate commits for that reason. The rules
 will not.
 
-**Is the syntax stable?** No. 0.21.0 is a release of a language that is still
+**Is the syntax stable?** No. 0.22.0 is a release of a language that is still
 moving, and the parts of SPEC.md marked PROPOSED are exactly the parts that
 will move.
 
@@ -630,7 +630,7 @@ not the library.
 
 ## What is not here
 
-- **iyi's own library is 36,399 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 36,598 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`.** `gets`, `read_all`, `write` and `flush`
   on the streams; `File.read`, `File.write`, `File.exists?`, `File.delete`
   and `File.open(path, mode)`. Its collections carry a method because a
@@ -666,7 +666,7 @@ not the library.
 | [BENCHMARKS.md](BENCHMARKS.md) | the build, run-time and server measurements, with their machines and commands |
 | [`samples/iyi`](samples/iyi) | twenty-eight programs: twenty documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 36,399 lines. `--crystal` swaps it for Crystal's |
+| [`src/iyi`](src/iyi) | iyi's own library, 36,598 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, and not counted against the prelude's size limit (SPEC.md I.4) |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/`](bench/) | every script a number in these documents names |
@@ -696,7 +696,7 @@ iyi's compiler is built on the Crystal compiler and carries Crystal's licence
 and copyright: Apache 2.0, Copyright 2012-2026 Manas Technology Solutions. See
 [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). Everything here that is not
 Crystal's is a change to Crystal's source. `iyi --version` reports
-`iyi 0.21.0 (built on Crystal 1.22.0-dev)`: the language first, then what it
+`iyi 0.22.0 (built on Crystal 1.22.0-dev)`: the language first, then what it
 is built on. The compatibility binary in the same checkout still reports itself
 as `Crystal 1.22.0-dev`, because that is what it is. This paragraph is a licence
 obligation and an accurate one; the language above it is iyi's own.

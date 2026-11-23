@@ -62,21 +62,14 @@ name: iyi
 # 2026-11-04 to 11-07). Every pull request paid that, a README edit as much
 # as a compiler change, and two at once queued behind each other for hours.
 # The Team plan runs up to sixty at once, and still five on macOS, which is
-# what a full run waits on longest.
+# what a full run waited on longest; every macOS job now runs on Namespace's
+# macOS 15 (namespace-profile-macos-15), a fresh VM per job.
 on:
   push:
     branches: [master]
     tags: ["v*", "editor-v*"]
   pull_request:
   workflow_dispatch:
-    inputs:
-      # The darwin jobs that run on the project's Mac (darwin, darwin-std,
-      # darwin-heap22) on GitHub's macos-15 instead: for a Mac that is off,
-      # and to exercise the path a fork's pull request takes.
-      darwin_github_hosted:
-        description: "darwin, darwin-std and darwin-heap22 on GitHub's macos-15, not the project's Mac"
-        type: boolean
-        default: false
   schedule:
     # 02:17 UTC: off the hour, when every other scheduled workflow starts.
     - cron: "17 2 * * *"
@@ -113,7 +106,7 @@ jobs:
   # Which jobs this run answers for: scripts/ci_plan.py. Every other job
   # needs it and runs when its id is in the list; `result` reads them all.
   plan:
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 5
     name: "Which jobs this run answers for"
     permissions:
@@ -139,7 +132,7 @@ jobs:
   docs:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'docs') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 10
     name: "The name, and the numbers the docs state"
     steps:
@@ -183,7 +176,7 @@ jobs:
   build:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'build') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     container:
       image: crystallang/crystal:1.21.0-build
@@ -212,7 +205,7 @@ jobs:
   iyi:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'iyi') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     container:
       image: crystallang/crystal:1.21.0-build
@@ -282,7 +275,7 @@ jobs:
   compiler-specs:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compiler-specs') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
@@ -308,7 +301,7 @@ jobs:
   stdlib-specs:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stdlib-specs') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
@@ -387,7 +380,7 @@ jobs:
   lsp-positions:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'lsp-positions') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -416,7 +409,7 @@ jobs:
   samples:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'samples') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     # Measured: 43 and 44 minutes on master's runs of 2026-09-29, 38 and a
     # cancellation at 45 on the next branch's - a budget the job had grown
     # into, so a slow runner ended it in whatever step it had reached. At 60
@@ -545,6 +538,12 @@ jobs:
       # print.
       - name: Build the samples again with their modules' source deleted
         run: bash bench/samples_roundtrip.sh
+
+      # Early cutoff (SPEC.md IV.3): a body-only edit leaves the artifacts of
+      # the modules that import it standing, and each kind of interface edit
+      # rebuilds them - each proven against a build that skips the check.
+      - name: An edit rebuilds the artifacts it reaches, and only those
+        run: bash bench/iyimod_cutoff.sh
 
       # A `--release` build cut into partitions and optimised on every core:
       # more than one core busy, the samples printing what one module
@@ -695,6 +694,13 @@ jobs:
       - name: Arrays, hashes and sets at their edges
         run: bash bench/collections_exercise.sh
 
+      # What a release build tells LLVM about an array's memory, read off
+      # the IR: the field and element tags only where they are true, and a
+      # tag on memory that is not an array's refused (src/compiler/iyi/
+      # codegen/array_tbaa.cr).
+      - name: An array's alias tags only where they hold
+        run: bash bench/array_tbaa.sh
+
       # The assertions a test is written in, with no import: each one held
       # and failed, its message naming the values and the caller's line,
       # named cases running past a failure to an exit of 1, and every check
@@ -798,7 +804,7 @@ jobs:
   samples-surfaces:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'samples-surfaces') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 75
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1006,12 +1012,10 @@ jobs:
       - name: A real shard, built and served
         run: |
           # The crystal docker image is a compiler toolchain. It ships `shards`,
-          # and it does not ship `curl` — the reason the identity gate below
-          # installs Python. Asking for a page is the point of this step, so
-          # the client it asks with cannot be assumed.
-          if ! command -v curl >/dev/null; then
-            apt-get update -qq && apt-get install -y -qq curl
-          fi
+          # and it ships neither `curl` nor Python. The page is asked for with
+          # bash's own `/dev/tcp` where there is no `curl`
+          # (bench/loopback_get.sh): installing one put this step on whether
+          # Ubuntu's archives answered, and they did not for 11 minutes.
           bash bench/shard_serves.sh
 
       # The same application, through four boundaries instead of from source.
@@ -1023,11 +1027,7 @@ jobs:
       # library owns — arriving with it. Each of those failed quietly once, and
       # a gate that stopped at "it compiles" was green through all of them.
       - name: A kemal application, served through four boundaries
-        run: |
-          if ! command -v curl >/dev/null; then
-            apt-get update -qq && apt-get install -y -qq curl
-          fi
-          bash bench/kemal_serves.sh
+        run: bash bench/kemal_serves.sh
 
       # And a shard of a different kind, because the one above reaches nothing
       # outside Crystal's own library. `jwt` reaches OpenSSL through a reopened
@@ -1122,8 +1122,8 @@ jobs:
       # the probe's mechanism in the runtime — eight threads allocating from
       # their own caches, collections stopping them where they run, every
       # stopped thread's frames scanned as roots, a live list in each
-      # surviving by checksum and by the sweep's flag, and 32 threads past
-      # the core count. The floor: five names, nothing added. The failure
+      # surviving by checksum and by the sweep's flag, and twice the core count
+      # of threads, clamped to 9 to 32. The floor: five names, nothing added. The failure
       # proof removes the thread-root walk and the list is swept by name.
       - name: Threads under the collector
         run: bash bench/thread_exercise.sh
@@ -1152,7 +1152,7 @@ jobs:
   std:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'std') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1190,7 +1190,7 @@ jobs:
   std-platforms:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'std-platforms') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1230,7 +1230,7 @@ jobs:
   std-siblings:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'std-siblings') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1299,7 +1299,7 @@ jobs:
   heap22:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'heap22') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1341,7 +1341,7 @@ jobs:
   targets:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'targets') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1434,7 +1434,7 @@ jobs:
   cross-objects:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'cross-objects') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 45
     container:
       image: crystallang/crystal:1.21.0-build
@@ -1577,7 +1577,7 @@ jobs:
   cross-run:
     needs: [plan, cross-objects]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'cross-run') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     name: "An iyi program, run on musl and on aarch64"
     steps:
@@ -1692,18 +1692,11 @@ jobs:
     # before then (job 124229745795). The numbers that name macos-14 in
     # these comments and the documents were measured there: a three-core
     # M1 virtual machine on macOS 14.8.9, building with Xcode 15.4.
-    # On the project's own Mac since 2026-11-17 (labels self-hosted, macOS,
-    # ARM64; three runners on one M2 Pro), with every other darwin job:
-    # darwin-std, darwin-heap22 and the four darwin-std-siblings shards
-    # (their comment says why they came back from macos-15). The static
-    # LLVM there is keyed on its SDK and Xcode build, not an image.
-    # A pull request from a fork runs here on GitHub's macos-15 instead: the
-    # Mac is the owner's own machine, and a fork's code does not run on it
-    # (the repository also holds every outside contributor's run for
-    # approval, so a fork cannot edit this line back unseen). A dispatch
-    # with darwin_github_hosted does the same. The steps that differ read
-    # runner.environment.
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
+    # The project's Mac (three runners on one M2 Pro) ran the darwin jobs
+    # from 2026-11-17, and a fork's pull request went to GitHub's macos-15.
+    # Every darwin job now runs on Namespace's macOS 15
+    # (namespace-profile-macos-15), a fresh VM per job, a fork's included.
+    runs-on: namespace-profile-macos-15
     # A runner builds for its own major version, which on macos-15 is 15.0:
     # the tarball's `iyi` would refuse every Mac on 14, where 0.19.1's,
     # built on macos-14, says `minos` 14.0. 14.4 is iyi's floor, the
@@ -1741,36 +1734,28 @@ jobs:
       # What the runner is, in every log: the jobs' times and the gates'
       # numbers are this machine's.
       - name: Install the bootstrap toolchain
-        id: tools
         run: |
           sw_vers
           sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
           xcodebuild -version
           python3 --version
-          # Only what is missing: on the self-hosted Mac, `brew install` of an
-          # installed formula would upgrade the machine's own copy.
+          # Only what is missing: a formula the image has is not upgraded.
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
-          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
-          # The self-hosted runner's service can inherit a TMPDIR that no
-          # longer exists (an installer's sandbox); every later step uses
-          # the job's own temporary directory instead.
+          # Every later step uses the job's own temporary directory.
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
-          # The three runners also share one HOME, and with it the compilers'
-          # caches: one job's rotation removed a directory another job's
-          # build was linking from (job 135882647898, fixed in the compiler
-          # since; bench/rebuild_reuse.py step 7), and ~/.cache/iyi held
-          # 24,428 reach verdicts, nothing then deleting them (step 8). Each job gets
-          # both caches to itself, as GitHub's fresh VMs give them, gone with
-          # the job: iyi's, and Crystal's, which the bootstrap compiler
-          # builds `iyi` through and rotates with no lock at all (brew's
-          # 1.22.3). Cold, `make iyi` took 19 and 21 s on the idle Mac, warm
-          # 13 and 14 s.
+          # No compiler or linker flags of the machine's: LDFLAGS naming
+          # brew's LLVM 23 once put its static libraries ahead of the recipe's
+          # in the link. Each job keeps its own compiler caches under its
+          # temporary directory. On the project's Mac the three darwin jobs
+          # shared one HOME, and one job's cache rotation removed a directory
+          # another job's build was linking from (job 135882647898, fixed in
+          # the compiler since; bench/rebuild_reuse.py step 7). A Namespace VM
+          # per job makes that moot, but the paths stay per job in case a
+          # runner is ever reused. Crystal's cache is kept per job as well:
+          # the bootstrap compiler builds `iyi` through it, and brew's
+          # Crystal 1.22.3 rotates it with no lock at all.
           echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
           echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
-          # The service also carries its owner's shell flags: LDFLAGS naming
-          # brew's LLVM 23 put its static libraries ahead of the recipe's in
-          # the link. Every job starts with none, and the static LLVM lives
-          # in a directory of CI's own (below), never the machine's ~/llvm-static.
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
 
@@ -1787,36 +1772,23 @@ jobs:
       # Now it links a static minimal LLVM, and with the collector off the
       # binaries `lib/` is empty rather than libgc alone. Built
       # on this runner because a static archive is bound to the libc++ and
-      # SDK it was compiled against; built once per recipe hash, SDK and
-      # deployment target and kept on the machine, in a directory those name.
-      # The Mac has three runners: one job builds it while the others wait
-      # on the lock, and a run with another recipe gets a directory of its
-      # own instead of deleting the one a running job links against. A
-      # `.stamp` is written last, so a build cut short is built again.
-      - name: Restore the static LLVM (GitHub's runner)
-        if: runner.environment == 'github-hosted'
+      # SDK it was compiled against; cached on the recipe's hash, the
+      # platform, the image and the deployment target, so the build is paid
+      # once per recipe or image change (28 minutes on macos-14, job
+      # 115861374075; 25 to 37 in the six darwin jobs of macos-15's first
+      # run, 41131916587). `$HOME`
+      # rather than `/tmp`: darwin's `/tmp` is a symlink into `/private`,
+      # and a cache path should not depend on how a symlink is archived.
+      - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: The static LLVM on GitHub's runner, built on a cache miss
-        if: runner.environment == 'github-hosted'
+      - name: The static LLVM, built on a cache miss
         run: |
           [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
           echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
-      - name: The static LLVM, built once per recipe and SDK on this machine
-        if: runner.environment == 'self-hosted'
-        run: |
-          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
-          dir="$HOME/iyi-ci/llvm-static-$stamp"
-          mkdir -p "$HOME/iyi-ci"
-          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
-            [ -f "$1/.stamp" ] && exit 0
-            rm -rf "$1"
-            bash scripts/build-static-llvm.sh "$1"
-            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
-          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
 
       # `iyi-tarball` builds `iyi` and its daemon in release mode, refuses an
       # unoptimised binary (`check_iyi_is_release`), and packages them — one
@@ -2121,17 +2093,10 @@ jobs:
   darwin-std-siblings:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std-siblings') }}
-    # On the project's Mac with the other three darwin jobs (a fork's pull
-    # request, or darwin_github_hosted: GitHub's macos-15, as the darwin
-    # job's comment says). They ran on macos-15 for a day (2026-11-17/18)
-    # so the seven would not queue behind each other on three runners, and
-    # GitHub's macOS was the slower queue and the slower machine: master's
-    # push run 44280407780 had shards 2 and 4 waiting 4 hours for a runner,
-    # and its shard 1 had std/http stopped at the 35 minutes
-    # bench/std_siblings.sh gives a sibling (job 134720033700), where it
-    # took 25.7 to 29.6 minutes on macos-15 and a whole shard 35 to 37 on
-    # the Mac. Seven jobs on three runners end in about 100 minutes.
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
+    # Namespace's macOS 15, as every darwin job (the darwin job's comment
+    # says why). On GitHub's macos-15 (2026-11-17/18) master's push run
+    # 44280407780 had shards 2 and 4 waiting 4 hours for a runner.
+    runs-on: namespace-profile-macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 105
@@ -2145,58 +2110,56 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
-        id: tools
         run: |
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
-          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
           echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM (GitHub's runner)
-        if: runner.environment == 'github-hosted'
+      - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: The static LLVM on GitHub's runner, built on a cache miss
-        if: runner.environment == 'github-hosted'
+      - name: The static LLVM, built on a cache miss
         run: |
           [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
           echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
-      - name: The static LLVM, built once per recipe and SDK on this machine
-        if: runner.environment == 'self-hosted'
-        run: |
-          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
-          dir="$HOME/iyi-ci/llvm-static-$stamp"
-          mkdir -p "$HOME/iyi-ci"
-          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
-            [ -f "$1/.stamp" ] && exit 0
-            rm -rf "$1"
-            bash scripts/build-static-llvm.sh "$1"
-            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
-          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       # Python 3.14, as on Linux: the oracles' modules answer as 3.14's do.
-      # setup-python's macOS builds install under /Users/runner, which the
-      # project's Mac has not, so there it is brew's, in a virtual
-      # environment of the job's own (brew's Python refuses a pip install
-      # outside one).
-      - if: runner.environment == 'github-hosted'
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: "3.14"
-      - name: Python 3.14, in the job's own virtual environment (the project's Mac)
-        if: runner.environment == 'self-hosted'
+      # actions/setup-python fails on Namespace's image (a chmod in its tool
+      # cache is not permitted), so it is brew's, in a virtual environment
+      # of the job's own (brew's Python refuses a pip install outside one).
+      - name: Python 3.14, in the job's own virtual environment
         run: |
           brew list --versions python@3.14 >/dev/null || brew install python@3.14
           "$(brew --prefix python@3.14)/bin/python3.14" -m venv "$RUNNER_TEMP/py"
           echo "$RUNNER_TEMP/py/bin" >> "$GITHUB_PATH"
-      - name: Python's cryptography and Pillow, for the oracles
-        run: python3 -m pip install -q cryptography pillow
+      # GitHub's image ran the HTTP/2 oracle on the official Node 22.23.4,
+      # whose bundled nghttp2 fails the broken peer-window server; Homebrew's
+      # node (22, 24 and 25 tried on Namespace's image) does not.
+      - name: Node 22.23.4, the official build, for the HTTP/2 oracle
+        run: |
+          NODE_TGZ=node-v22.23.4-darwin-arm64.tar.gz
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$NODE_TGZ" "https://nodejs.org/dist/v22.23.4/$NODE_TGZ"
+          echo "c9e1dbc748b33ed2d14f42445191ecaf14c56259c7a9a26d0042c49ec2b66428  $RUNNER_TEMP/$NODE_TGZ" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/node22"
+          tar -xzf "$RUNNER_TEMP/$NODE_TGZ" -C "$RUNNER_TEMP/node22" --strip-components=1
+          echo "$RUNNER_TEMP/node22/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/node22/bin/node" --version
+      - name: Python's cryptography, Pillow and tzdata, for the oracles
+        run: python3 -m pip install -q cryptography pillow tzdata
+      # The image's zone database is tzdata 2024a, whose Morocco rule std/time
+      # and Python's zoneinfo read differently at the year's last hour; both
+      # read the tzdata package's current database instead.
+      - name: One zone database for std/time and Python's zoneinfo
+        run: |
+          TZDIR="$(python3 -c 'import os, tzdata; print(os.path.join(os.path.dirname(tzdata.__file__), "zoneinfo"))')"
+          echo "ZONEINFO=$TZDIR" >> "$GITHUB_ENV"
+          echo "PYTHONTZPATH=$TZDIR" >> "$GITHUB_ENV"
       # Go, as on Linux: std/http's NO_PROXY table is held against Go's
       # net/http, std/user's reader against Go's os/user, and std/acme and
       # std/autocert build Pebble with it. Pinned to setup-go's stable rather
@@ -2245,9 +2208,9 @@ jobs:
   darwin-std:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-std') }}
-    # A fork's pull request, or darwin_github_hosted: GitHub's macos-15 (the
-    # darwin job's comment says why).
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
+    # Namespace's macOS 15, as every darwin job (the darwin job's comment
+    # says why).
+    runs-on: namespace-profile-macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 120
@@ -2257,39 +2220,23 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
-        id: tools
         run: |
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
-          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
           echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM (GitHub's runner)
-        if: runner.environment == 'github-hosted'
+      - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: The static LLVM on GitHub's runner, built on a cache miss
-        if: runner.environment == 'github-hosted'
+      - name: The static LLVM, built on a cache miss
         run: |
           [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
           echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
-      - name: The static LLVM, built once per recipe and SDK on this machine
-        if: runner.environment == 'self-hosted'
-        run: |
-          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
-          dir="$HOME/iyi-ci/llvm-static-$stamp"
-          mkdir -p "$HOME/iyi-ci"
-          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
-            [ -f "$1/.stamp" ] && exit 0
-            rm -rf "$1"
-            bash scripts/build-static-llvm.sh "$1"
-            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
-          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       - name: The native standard library's foundation
@@ -2298,16 +2245,15 @@ jobs:
         run: bash bench/std_exercise.sh
 
   # heap22's gates on darwin arm64, as the `heap22` job runs them on Linux
-  # (its comment says why they are here). A job of its own on the project's
-  # Mac, beside darwin, darwin-std and the four shards: the darwin job's 67
-  # minutes of 120 in run 43610237136 leave no room for them, and
-  # darwin-std's runs reach 75.
+  # (its comment says why they are here). A job of its own beside darwin,
+  # darwin-std and the four shards: the darwin job's 67 minutes of 120 in
+  # run 43610237136 leave no room for them, and darwin-std's runs reach 75.
   darwin-heap22:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'darwin-heap22') }}
-    # A fork's pull request, or darwin_github_hosted: GitHub's macos-15 (the
-    # darwin job's comment says why).
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) || inputs.darwin_github_hosted) && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64"]') }}
+    # Namespace's macOS 15, as every darwin job (the darwin job's comment
+    # says why).
+    runs-on: namespace-profile-macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     timeout-minutes: 105
@@ -2317,39 +2263,23 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
-        id: tools
         run: |
           for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
-          echo "sdk=sdk$(xcrun --show-sdk-version)-$(xcodebuild -version | awk '/Build version/ {print $3}')" >> "$GITHUB_OUTPUT"
           echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
           echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
           echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
           for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
-      - name: Restore the static LLVM (GitHub's runner)
-        if: runner.environment == 'github-hosted'
+      - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
-      - name: The static LLVM on GitHub's runner, built on a cache miss
-        if: runner.environment == 'github-hosted'
+      - name: The static LLVM, built on a cache miss
         run: |
           [ "${{ steps.llvm-cache.outputs.cache-hit }}" = true ] || bash scripts/build-static-llvm.sh "$HOME/llvm-static"
           echo "LLVM_STATIC=$HOME/llvm-static" >> "$GITHUB_ENV"
-      - name: The static LLVM, built once per recipe and SDK on this machine
-        if: runner.environment == 'self-hosted'
-        run: |
-          stamp="${{ steps.tools.outputs.sdk }}-$MACOSX_DEPLOYMENT_TARGET-${{ hashFiles('scripts/build-static-llvm.sh') }}"
-          dir="$HOME/iyi-ci/llvm-static-$stamp"
-          mkdir -p "$HOME/iyi-ci"
-          lockf -k "$HOME/iyi-ci/llvm-static.lock" bash -ec '
-            [ -f "$1/.stamp" ] && exit 0
-            rm -rf "$1"
-            bash scripts/build-static-llvm.sh "$1"
-            echo "$2" > "$1/.stamp"' _ "$dir" "$stamp"
-          echo "LLVM_STATIC=$dir" >> "$GITHUB_ENV"
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$LLVM_STATIC/bin/llvm-config"
       - name: The partitions' plumbing, without the flag and with it
@@ -3539,6 +3469,7 @@ jobs:
           bash bench/enum_exercise.sh
           bash bench/float_text.sh
           bash bench/collections_exercise.sh
+          bash bench/array_tbaa.sh
           bash bench/assertions_exercise.sh
           bash bench/runtime_exercise.sh
           bash bench/server_load.sh
@@ -3759,7 +3690,7 @@ jobs:
   wasi-run:
     needs: [plan, cross-objects, binary]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'wasi-run') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     name: "An iyi program, run on wasm32-wasi"
     steps:
@@ -3921,7 +3852,7 @@ jobs:
   wasm32-collector:
     needs: [plan, binary]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'wasm32-collector') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 30
     name: "The collector on wasm32-wasi"
     steps:
@@ -3978,7 +3909,7 @@ jobs:
   binary:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'binary') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 180
     container:
       image: ubuntu:20.04
@@ -4019,9 +3950,9 @@ jobs:
           persist-credentials: false
 
       # The tarball's LLVM is the static minimal one, built by
-      # `scripts/build-static-llvm.sh` — Crystal's own recipe, measured
-      # before it was adopted (0.6.0's Learned entry, collected):
-      # BUILD_SHARED_LIBS=OFF, MinSizeRel, the five targets the compiler
+      # `scripts/build-static-llvm.sh` — Crystal's own recipe (0.6.0's
+      # Learned entry, collected), but built `Release` rather than
+      # `MinSizeRel`: BUILD_SHARED_LIBS=OFF, the five targets the compiler
       # reaches, every optional dependency OFF — so the 179 MB closure the
       # package used to carry (libLLVM and its libedit, libxml2, libicu,
       # libncursesw, libzstd) never comes into existence, and `lib/` is
@@ -4179,7 +4110,7 @@ jobs:
   clean-room:
     needs: [plan, binary]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'clean-room') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 20
     name: "The tarball, on a machine with nothing on it"
     steps:
@@ -4200,13 +4131,38 @@ jobs:
           mkdir -p room && tar -xzf dist/*.tar.gz -C room
           bash scripts/bundle-runtime-libs.sh room --verify-only
 
+      # The C toolchain's packages are cached whole, the .debs and the package
+      # lists, and installed from the cache when it is there: this step used to
+      # `apt-get update` and fetch gcc every run, and run 44514733307 lost it
+      # to Ubuntu's archives not answering for 3 minutes (the shard job's curl
+      # install lost 11 to the same). The first run, or one whose key changed,
+      # fetches them and fills the cache.
+      - name: The C toolchain's packages, from the cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/focal-gcc
+          key: focal-gcc-1
+
       - name: Unpack it in a bare image and build a program there
         run: |
+          mkdir -p "$HOME/focal-gcc/archives" "$HOME/focal-gcc/lists"
           printf 'module hi\n\nputs "hello from a machine with nothing on it"\n' \
             > room/hi.iyi
-          docker run --rm -v "$PWD/room:/iyi" ubuntu:20.04 sh -c '
+          docker run --rm -v "$PWD/room:/iyi" \
+            -v "$HOME/focal-gcc/archives:/var/cache/apt/archives" \
+            -v "$HOME/focal-gcc/lists:/var/lib/apt/lists" ubuntu:20.04 sh -c '
             set -e
-            apt-get update -qq && apt-get install -y -qq gcc > /dev/null
+            # The image deletes what it downloads, and its lists.
+            rm -f /etc/apt/apt.conf.d/docker-clean
+            echo "APT::Keep-Downloaded-Packages \"true\";" > /etc/apt/apt.conf.d/keep
+            apt-get install -y -qq gcc > /dev/null 2>&1 || {
+              echo "gcc is not in the cache: fetching it"
+              apt-get update -qq && apt-get install -y -qq gcc > /dev/null
+            }
+            # apt ran as root: the cache is saved by the runner user, who
+            # cannot read its `partial` directories or lock files.
+            rm -rf /var/cache/apt/archives/partial /var/lib/apt/lists/partial
+            chmod -R a+rwX /var/cache/apt/archives /var/lib/apt/lists
             /iyi/bin/iyi version
             cd /tmp
             /iyi/bin/iyi run /iyi/hi.iyi
@@ -4400,8 +4356,8 @@ jobs:
   selfhost-darwin:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-darwin') }}
-    # macos-15, pinned, as the darwin job is.
-    runs-on: macos-15
+    # namespace-profile-macos-15, a fresh VM per job, as the darwin job is.
+    runs-on: namespace-profile-macos-15
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
       SELFHOST_HOST: darwin-arm64
@@ -4511,7 +4467,7 @@ jobs:
   vscode:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'vscode') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 10
     name: "The VS Code client packages, and a tag publishes it"
     # The two registry tokens are in no `env` the whole job reads: each is
@@ -4601,7 +4557,7 @@ jobs:
             npm-recipe, wasi-run, wasm32-collector, binary, clean-room, vscode, heap22, darwin-heap22, windows-heap22,
             selfhost, selfhost-darwin, selfhost-windows]
     if: ${{ always() }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 5
     name: "Every selected job passed"
     steps:

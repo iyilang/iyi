@@ -3,14 +3,17 @@
 # platform that ships one.
 #
 # This is Crystal's own recipe (distribution-scripts, omnibus's llvm
-# software definition), recorded in 0.6.0's Learned entry and adopted
-# once it was measured: `BUILD_SHARED_LIBS=OFF` so the compiler carries
-# LLVM inside itself, `MinSizeRel`, only the five targets the compiler
-# reaches, and every optional dependency `OFF` — zlib, zstd, libxml2,
-# ffi, z3, libedit — so the closure a shared libLLVM drags behind it
-# (libedit, libxml2, libicu, libncursesw, libzstd; 179 MB of `lib/` on
-# Linux, brew's whole LLVM keg on darwin) never comes into existence
-# rather than being bundled well.
+# software definition), recorded in 0.6.0's Learned entry: `BUILD_SHARED_LIBS=OFF`
+# so the compiler carries LLVM inside itself, only the five targets the
+# compiler reaches, and every optional dependency `OFF` — zlib, zstd,
+# libxml2, ffi, z3, libedit — so the closure a shared libLLVM drags behind
+# it (libedit, libxml2, libicu, libncursesw, libzstd; 179 MB of `lib/` on
+# Linux, brew's whole LLVM keg on darwin) never comes into existence rather
+# than being bundled well. Crystal's recipe also builds `MinSizeRel`; this
+# one builds `Release`, because LLVM built for size optimised iyi's
+# `--release` builds a third slower: release-fresh of iyi-benchmarks' medium
+# program 1.598 s against 1.071 s, the same programs out, for about 25 MB of
+# tarball (owner's decision, 2026-11-22).
 #
 # One script and not one cmake line per CI job, because two copies of a
 # recipe are two recipes the day one is edited. CI keys its cache on this
@@ -59,7 +62,7 @@ fi
 tar -xf "$work/llvm.tar.xz" -C "$work"
 
 cmake -S "$work/llvm-project-$version.src/llvm" -B "$work/build" \
-  -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_INSTALL_PREFIX="$prefix" \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
   -DBUILD_SHARED_LIBS=OFF -DLLVM_BUILD_LLVM_DYLIB=OFF \
   -DLLVM_TARGETS_TO_BUILD='X86;AArch64;ARM;AVR;WebAssembly' \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_LIBXML2=OFF \

@@ -539,6 +539,12 @@ jobs:
       - name: Build the samples again with their modules' source deleted
         run: bash bench/samples_roundtrip.sh
 
+      # Early cutoff (SPEC.md IV.3): a body-only edit leaves the artifacts of
+      # the modules that import it standing, and each kind of interface edit
+      # rebuilds them - each proven against a build that skips the check.
+      - name: An edit rebuilds the artifacts it reaches, and only those
+        run: bash bench/iyimod_cutoff.sh
+
       # A `--release` build cut into partitions and optimised on every core:
       # more than one core busy, the samples printing what one module
       # prints, and the same objects on one thread and on four - each with
@@ -687,6 +693,13 @@ jobs:
       # names and eight broken methods of a copied prelude.
       - name: Arrays, hashes and sets at their edges
         run: bash bench/collections_exercise.sh
+
+      # What a release build tells LLVM about an array's memory, read off
+      # the IR: the field and element tags only where they are true, and a
+      # tag on memory that is not an array's refused (src/compiler/iyi/
+      # codegen/array_tbaa.cr).
+      - name: An array's alias tags only where they hold
+        run: bash bench/array_tbaa.sh
 
       # The assertions a test is written in, with no import: each one held
       # and failed, its message naming the values and the caller's line,
@@ -3456,6 +3469,7 @@ jobs:
           bash bench/enum_exercise.sh
           bash bench/float_text.sh
           bash bench/collections_exercise.sh
+          bash bench/array_tbaa.sh
           bash bench/assertions_exercise.sh
           bash bench/runtime_exercise.sh
           bash bench/server_load.sh
@@ -3936,9 +3950,9 @@ jobs:
           persist-credentials: false
 
       # The tarball's LLVM is the static minimal one, built by
-      # `scripts/build-static-llvm.sh` — Crystal's own recipe, measured
-      # before it was adopted (0.6.0's Learned entry, collected):
-      # BUILD_SHARED_LIBS=OFF, MinSizeRel, the five targets the compiler
+      # `scripts/build-static-llvm.sh` — Crystal's own recipe (0.6.0's
+      # Learned entry, collected), but built `Release` rather than
+      # `MinSizeRel`: BUILD_SHARED_LIBS=OFF, the five targets the compiler
       # reaches, every optional dependency OFF — so the 179 MB closure the
       # package used to carry (libLLVM and its libedit, libxml2, libicu,
       # libncursesw, libzstd) never comes into existence, and `lib/` is

@@ -2,6 +2,151 @@
 
 ## Unreleased
 
+### Changed
+
+- **A build that writes `.iyimod` artifacts compiles each module once, not
+  once per type.** A module's travelling code carries private copies of the
+  prelude functions it reaches (SPEC.md IV.1g), and with one unit per type
+  that copy, most of the runtime behind `raise`, was made for every type of
+  the module: the iyi-benchmarks medium program (30 modules of 10 types)
+  compiled 223,188 functions where its plain build compiles 1,973. Every type
+  a module declares now shares the module's unit, so the copy is made once
+  per module and the artifact defines the same symbols: 22,488 functions.
+  The `iyi-mods` lane of iyi-benchmarks against 0.22.0, on the 12-vCPU Linux
+  machine, 7 rounds: a first build (`cold`) 13.95 s → 1.17 s, 0.08x
+  (0.08–0.09), peak 4,203 → 713 MiB; `fresh` 0.09x; `leaf-body` 1.11 s →
+  0.32 s, 0.28x (0.28–0.29); `core-body` 6.92 s → 0.89 s, 0.13x;
+  `core-interface` 6.60 s → 0.78 s, 0.12x. The program the first build
+  links is 9.0 MB instead of 87.8 MB.
+- **A body edit no longer rebuilds the modules that import it, in the
+  artifact loop.** An import compiled from its changed source made every
+  artifact above it stale, so one number changed in the module 29 others
+  import compiled all 30. Now an artifact is read on the condition that
+  the import still hashes to what the artifact recorded for it (its
+  interface, and the bodies and macros it ships to be compiled
+  elsewhere), the condition is checked before codegen, and a build whose
+  condition fails is made again without it (SPEC.md IV.3, early cutoff).
+  An import whose own import moved never qualifies, since a hash names
+  the types it uses and does not describe them. The artifact also records
+  what its machine code calls in other modules' units (`Demands`, format
+  v65), and the build compiles those calls, then checks before LLVM runs
+  that every symbol exists. `bench/iyimod_cutoff.sh` gates it: a body
+  edit, through a plain call or a splat, leaves the dependent's artifact
+  unwritten and the program prints the new answer, and without those
+  calls (`IYI_CUTOFF_BROKEN=keeps`) the check rebuilds the dependent
+  where skipping it too fails to link. A signature, a layout, a constant,
+  a macro, a generic body, a block-taking method, and a chain through a
+  middle module each rebuild the dependent, and each prints a wrong answer
+  or fails to build under `IYI_CUTOFF_BROKEN=1`. The `iyi-mods` lane
+  against 0.22.0, same machine, 7 rounds: `core-body` 6.74 s → 0.30 s,
+  0.05x (0.04–0.05),
+  peak 3,941 → 246 MiB; `leaf-body` 0.28x as above; `core-interface`
+  6.45 s → 0.88 s, 0.14x (0.13–0.15). That is about 0.1 s more than
+  without the cutoff (0.78 s in the run above), the front end that ran
+  before its condition failed.
+
+- **A rebuild after a one-line edit does less work it did not need: 9% less
+  processor time, 3-4% less wall time.** Measured on iyi-benchmarks' medium
+  project (30 modules, 7,266 lines, debug builds; Linux, 12 vCPU VM), 21
+  rebuilds interleaved with the same compiler built from 0.22.0's source,
+  with the suite's 95% interval: one number changed in a leaf module, 185.6
+  to 180.5 ms, 0.972x (0.949-0.984); in the module every other imports, 191.2
+  to 184.3 ms, 0.964x (0.936-0.985); processor time 298 to 272 ms and 299 to
+  271 ms. IR generation for the leaf edit went from 40.0 to 33.7 ms. The
+  suite's own batch, 9 rounds against the same base: leaf-body 0.98x
+  (0.93-0.99), core-body 0.95x (0.93-0.99), noop unchanged. What the edit
+  paid for:
+  - Every unit's module was verified again, though 373 of the 374 come out
+    byte for byte the bitcode the last build verified. Only a unit that
+    compiles is verified now: 20-22 ms less processor time on the codegen
+    threads.
+  - `LLVM::Function#attributes` asked LLVM about each of its ~100 attribute
+    kinds, one call each, for every parameter of every function copied into
+    another unit. It lists the attributes the function has.
+  - Local values and blocks were named in IR nothing printed. The names are
+    dropped unless `--emit`, `--ll`, `DUMP` or `IYI_DEBUG_CODEGEN` asks for
+    the IR: every object and program is the same bytes either way (debug and
+    `--release`, seven samples and the medium project compared), and the
+    bitcode compared for reuse is 7-16% smaller.
+  - The debug scope asked whether a function was the main one by reading
+    its name back from LLVM as a new string, once per node, and codegen read
+    `IYI_DEBUG_CODEGEN`, `IYI_TDF` and `IYI_SYM` from the environment about
+    12,000 times a build. It compares the function, and reads each once.
+
+- **A `--release` build is cut finer and more evenly.** A partition is
+  now about 5,000 instructions rather than 20,000 (`ReleasePartition`):
+  every program carries the runtime's 30,000, so a hello world was cut in
+  two and iyi-benchmarks' compile-axis program (58,209) in three, nine of
+  12 cores idle. And a function with the locals only it calls stops
+  growing into one group at half an average partition: that program's
+  `main` and the 30 functions only it calls were one group of 19,067
+  instructions, which cut in 12 left one partition with 18,892 of them and
+  two with none. iyi-benchmarks' `release-fresh` on a shared 12-vCPU Linux
+  VM, median of 7, the same commit and LLVM (21.1.8) before and after:
+  1.095 s to 0.670 s (0.61x), its LLVM phase 0.928 s to 0.506 s, against
+  0.22.0's 1.882 s and Go's 0.186 s. The price is processor time, 2.3 s to
+  3.7 s for that stage, and binary size, 575 KiB to 645 KiB. What the
+  stage cannot go under now is the runtime's largest functions (the
+  scheduler's `worker_next`, the collector's `helper_main`), about 0.45 s.
+  `-s` prints what the partitions own, and `bench/release_cores.sh` holds
+  the balance against groups grown whatever their size
+  (`IYI_RELEASE_GROUP=0`).
+
+- **An array's element stores no longer make LLVM reload every array's size
+  and buffer.** Each access is marked with type-based alias metadata
+  (`!tbaa`) as an `Array`'s own field or one of its elements
+  (`src/compiler/iyi/codegen/array_tbaa.cr`; array.iyi reads and writes its
+  buffer through `Pointer#array_at`/`#array_put`, which nothing else
+  uses), and an element read whose type is a class is marked `!nonnull`,
+  `!dereferenceable` and `!align` for that class. The inner loop of plb2's
+  matrix product loaded both rows' sizes and buffers again per element and
+  was not vectorised; now they are hoisted and it is. `Array#[]`, `#[]?`
+  and `#[]=` test an index in `0...size` with one unsigned comparison and
+  wrap a negative index only when that fails (the wrap's addition cannot
+  overflow, so it is `&+`); every index answers, and every refusal reads,
+  as before. iyi-benchmarks' runtime axis, 7 rounds, Linux 12-vCPU VM,
+  against 0.22.0: matmul 0.31x (0.31–0.32), sudoku 0.82x (0.81–0.83),
+  nqueen 0.98x (0.98–0.99), bedcov 1.03x (1.01–1.04), geomean 0.71x;
+  against Go 1.27.4 the geomean goes from 1.39x to 0.99x (matmul 1.92x to
+  0.60x, sudoku 1.44x to 1.20x). bedcov's 3% was traced to the toolchain
+  the head compiler was built with, not to this change: its IR through the
+  same LLVM runs alike with and without the metadata. An element tag goes
+  only on a one-scalar slot (number, char, bool, symbol, enum, pointer or
+  reference); a struct element is untagged, and only a single non-virtual
+  class gets the object marks. `bench/array_tbaa.sh` reads the IR and holds
+  both, and runs nilable, struct and shrunk arrays plain and `--release`.
+  `bench/collections_exercise.sh` checks a product loop, a row that is its
+  own source and an array grown while read in a release build, and that a
+  short row is still refused there.
+
+- **The LLVM inside the released compiler is built for speed, not size.**
+  `scripts/build-static-llvm.sh` built LLVM 20.1.2 `MinSizeRel`, as
+  Crystal's packaging recipe does, and its speed had never been measured.
+  Built `Release`, everything else the same, the 0.22.0 commit's
+  `release-fresh` on iyi-benchmarks' medium program took 1.071 s against
+  1.598 s (0.67x, 0.65–0.69; Linux 12-vCPU VM, 7 runs), its LLVM phase
+  0.904 s against 1.421 s, with programs byte for byte the same; edit-loop
+  builds do not change (leaf-body 0.95x, no difference by the suite's test).
+  The price is size: about 30 MB more text in each binary, about 12.6 MB
+  more each compressed, so the tarball grows by about 25 MB. Owner's
+  decision of 2026-11-22. The CI cache of the static LLVM is keyed on the
+  script, so each platform builds it once again.
+
+- **The prelude's library is held to 4,785 lines, owner approved
+  2026-11-22** (SPEC.md I.4): the 22 lines of `Array`'s buffer accessors
+  and one-comparison index fast path above.
+
+- **`--emit llvm-ir` and `--ll` print the module the backend is handed, on
+  Windows too.** A native build printed the module after writing its
+  object, and writing an object runs the backend's own IR passes on the
+  module in place. On Windows one of them, WinEHPrepare, simplifies every
+  function with a funclet personality, a program's main among them, so an
+  array's `@size` read through `getelementptr inbounds %"Array(T)", ptr %a,
+  i32 0, i32 0` was printed as a read of `%a` itself: IR codegen had not
+  made, unlike what a cross-compile for the same target printed. The IR is
+  now written after optimisation and the preemption checks and before the
+  object, as a cross-compile always wrote it.
+
 ### Gates
 
 - **`bench/lsp_session.py`'s held compile (step 74a) lets go of its FIFO
@@ -32,12 +177,89 @@
   - socket_exercise (`unixtcp`): one local darwin run failed with a panic backtrace. The cause is unknown; the gate now keeps the captured output on failure.
   Information only, printed as measurements and judged by no verdict: the ticker, the poller's response, the monitor's look interval and quantum, balance, hand-off (medians and longest wakes), the backstop, join, cancel timing, sampled occupancy (its samples; the 0.6 x K guarantee itself is open, above) and the tight-loop ratios; the thread gate's measurement lines for steps 3, 4b, 4c and 4d, and darwin's threads-born rate beside busy processes (`measure:`); and heap_drain's residency, RSS, arena growth, cold bytes and idle figures. The leak verdict of `concurrent_mark` detects a sweep that never frees an outgrown block. Partial retention is legitimate (0 or 1 of 8 outgrown blocks were kept in healthy runs), so that verdict makes no claim about partial leaks.
 - **The darwin spinner step of `thread_exercise` is a forced observer.** One yield goes through a counter that records only after `thread_switch` returns, and the former ARM hint leaves it unanswered on the one run that proves it. Darwin's threads-born rate beside busy processes prints as one `measure:` line, one run each way, and is judged by nothing. The release gate holds a released thread at its allocator park and counts the threads out, with no five-second bound.
-- **The listed-page count is counted once per clear, and proved on one thread.** `bench/unlist_count.iyi` plays a neighbouring adoption at a batch's first and last pages between the read and the clear, with no timing. The audit `IyiHeap.audit_listed` checks the count against the bits: the fix passes with `unlist: ok, the audit found no arena count off`, and the copy that also counts its lost clear fails on its one run with `FAIL: unlist: the audit found 1 arena count off: the arena counts 0 listed pages, its bits list 2`. The sweep stress keeps its eight-thread trim run and asserts every arena count at each pause and after each trim.
+- **The listed-page count is counted once per clear, and proved on one thread.** `bench/unlist_count.iyi` plays a neighbouring adoption at a batch's first and last pages between the read and the clear, with no timing. The audit `IyiHeap.audit_listed` checks the count against the bits: the fix passes with `unlist: ok, the audit found no arena count off`, and the copy that also counts its lost clear fails on its one run with `FAIL: unlist: the audit found 1 arena count off: the arena counts 0 listed pages, its bits list 2`. The sweep stress keeps its eight-thread trim run and audits every arena count at each pause, where the first count off ends the program.
 - **The pool count of `grows` is information, and a pool that starts one worker is refused by a forced check.** `spawn_eligible` prints how many of its workers four tasks started and judges only the first worker. The 0.22.0 gate's late-start runtime copy and its arrivedonly proof are removed along with the launch-count verdict they served.
 - **Parallel clocks are information, and the mechanisms they guarded are forced.** The monitor's period, the quantum, the hand-off, cancel, give-up and speedup figures print as `measure:` lines. The hand-off call, the cancel post, the stale word after a switch and the socket move each have a forced copy that fails on its one run. The occupancy guarantee is the exception, listed above.
 - **`stats` and `is_heap_ptr` wait for the runtime lock.** The std/gc gate holds the lock on another thread and checks that each verb answers only after the holder lets go, on the real module every run. The unlocked walks are forced copies (`-Dstats_force`, `-Dis_heap_force`) that fault on their one run.
 - **The heap_codegen verifier pins one sentence per check, as heap_lend.sh does.** `c1` and `new-shared` are read at their unit's death, and every other copy at its partition's local collection (`sentence` in `bench/heap_codegen.sh`). `collect_here` in heap_codegen.iyi is a macro since cc7ba9a88, which makes the local collection the point that catches the copies pinned to it. A difference between two runs prints both runs' report lines.
 - **Darwin CI jobs run on Namespace's macOS 15 runners, each with its own compiler caches.** The Linux samples job's later gates run in a `samples-surfaces` job of their own, now on Namespace too.
+- **`bench/array_tbaa.sh` holds on Windows.** Windows CI (job 137545872417)
+  failed it two ways: Windows escapes a symbol's punctuation as `.XX.`
+  (`*` is `.2A.`), so no `array_at`/`array_put` was recognised, and three
+  `@size` reads in the program's main had lost the field's
+  `getelementptr` to WinEHPrepare (above). The check reads names back
+  unescaped, and reads the IR as codegen made it; its broken prelude is
+  still refused on Linux and Windows. `spec/compiler/iyimod_spec.cr`'s
+  "does not ship the body" reads the artifact's symbols back unescaped the
+  same way.
+
+- **The listed pages are counted before they are listed, and a chunk
+  handed out on a listed page ends the program in the pause; both proved
+  on one thread.** `bench/unlist_count.iyi`'s `listing:` check lists a
+  slice's run with its cursor on the page it shares with the slice below,
+  and the sweep gate's copy plays the refill adopting the batch below over
+  that page between the slice's count and its bits
+  (`IyiHeap.hold_listing`): counted first, the refill reads the page
+  unlisted; the old order ("listorder") reads it listed before it is
+  counted and fails on its one run with `FAIL: listed: a refill read listed
+  a page a slice had listed and not yet counted`. The pause's audit now
+  also reads every chunk whose head is on a listed page, which must be
+  free, and a count off or a chunk handed out there ends the program in
+  the pause: read at the trimmer's next look, as before, a block could read
+  wrong first (a copy that unlists nothing did so once on macOS). The
+  `adopted:` check takes a batch of the real heap with 64 allocations and
+  collects; a refill that unlists nothing ("nounlist") fails there on its
+  one run (`FAIL: listed: a pause found 64 chunks handed out on 96 pages
+  still listed` on this Linux machine). The trim stress plays the same
+  refill at every slice's first page beside the adjacent adoption, and
+  prints how often (`IyiHeap.list_hits`). These replace the trim fix's
+  first proofs, which spun 20 µs in the stress between the count and the
+  bits: the fix, widened, met that window 1,357-8,579 times a run, and the
+  old order failed at its first meeting and a refill that unlists nothing
+  at the first pause, on run 1 in every gate run (three on this Linux
+  machine, 12 vCPUs, one on macOS 26.6, Apple M2 Pro, 10 cores, the user's
+  machine), but how often a timed window is met is not a verdict.
+- **Check 10b (`cap:`) replays a warm run taken below a sweep slice's
+  word, on one thread.** 28,672-byte chunks, the word picked where the
+  last chunk beginning below the bound reaches into it; the run must end
+  where its last chunk reaches under a page into the rest. A copy that
+  cuts at the word fails there on 4 KB and 16 KB pages.
+
+### Fixed
+
+- **`using` is a name again in a `.cr` file.** It was lexed as a keyword in
+  every file, so Crystal code with a parameter or local named `using` (as in
+  Marten and db) failed with `can't import inside def`. It is now a keyword
+  only in a `.iyi` file, where the refusal is unchanged.
+
+- **A block is no longer handed to two threads beside the idle trim.**
+  `bench/trim_stress.iyi` failed about one 20 s run in fifty with a
+  20,360-byte block holding another thread's words (PR #242: 1 of 46 on
+  0.22.0's binary). `IyiHeap.list_pages` set a run's listed bits and then
+  raised the arena's count of listed pages. A slice listing the page it
+  shares with the slice below sat between the two while the refill
+  adopting the batch below unlisted that page and counted it off; the
+  count stayed one short until the slice caught up, and a refill of the
+  arena that read 0 meanwhile returned without unlisting its own batch's
+  pages. They stayed listed under the objects it handed out, the next
+  pause (its count whole again, so its audit passed) made them idle, and
+  the next refill threaded their chunks a second time. A copy that
+  records every chunk's owner and every change to the listed pages
+  caught a refill handing out a chunk of a page still listed in 4 of 237
+  runs of 20 s on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+  machine) and 6 of 354 on this Linux machine, 12 vCPUs held to two and
+  four, each after a refill had cleared a page its slice had not yet
+  counted. The count is raised first now, so it is never below the
+  bitmap; the same copy caught none in 235 and 405 runs.
+- **A run a sweep slice in flight cuts short is cut on the chunk grid.**
+  `IyiHeap.take_run` bounds a warm or cold run below the word of the
+  slice's cursor, and cut there a chunk longer than a page, taken last,
+  reached over idle pages of the rest - which the idle trim and the sweep
+  hand back keeping a run's first page only - and into pages the slice
+  may hand back. The copy above caught the trim handing back two pages
+  under a live 20,480-byte chunk on Linux's 4 KB pages (1 of 354 runs).
+  The cut is now at the last page a chunk begins on, as a run cut at a
+  slab's worth is.
 
 ## 0.22.0 — 2026-11-22
 
@@ -29515,7 +29737,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,537-line library and nothing else. Every other
+  written against iyi's own 36,598-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

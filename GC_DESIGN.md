@@ -1075,6 +1075,33 @@ every batch edge, and `IyiHeap.audit_listed` checks each arena's count against
 its bitmap at every pause and after every trim, so a count that reads short
 fails the stress at the first check that sees it.
 
+Two more ways left a page idle under an object. The count of listed
+pages was raised after the bits it counts: a slice listing the page it
+shares with the slice below sat between the two while the refill
+adopting the batch below unlisted that page and counted it off, the
+count stayed one short until the slice caught up, and a refill of the
+arena that read 0 meanwhile left its own batch's pages listed under the
+objects it handed out. The count was whole again by the pause, so the
+pause's count audit passed; the pause made the pages idle, and the next
+refill threaded their chunks a second time - the trim stress's residual
+(about one 20 s run in fifty, PR #242). A copy recording every chunk's
+owner and every change to the listed pages caught it in 4 of 237 runs
+on macOS 26.6 and 6 of 354 on Linux, each after a refill had cleared a
+page its slice had not yet counted. `IyiHeap.list_pages` now raises the
+count first, so the count is never below the bitmap and a refill that
+reads 0 has nothing of its own listed; the copy caught none in 235 and
+405. The gate's copies play that refill between a slice's count and its
+bits, end the program where a refill reads listed a page its slice has
+not counted (`bench/unlist_count.iyi`'s `listing:` check, on one thread),
+and audit at every pause that a listed page's chunks are all free. And a run
+a sweep slice in flight cuts short (`IyiHeap.take_run`) was cut at the
+slice's word, off the chunk grid: a chunk longer than a page taken last
+reached over idle pages of the rest, which the trim hands back keeping a
+run's first page only - the copy caught the trim handing back two pages
+under a 20,480-byte chunk on Linux's 4 KB pages. It is cut at the last
+page a chunk begins on, as a run cut at a slab's worth is
+(`bench/sweep_exercise.iyi` check 10b).
+
 Measured with #145's harness, six rounds per machine, iyiturkiye built
 by 0.21.0 against goturkiye, steady / peak / 5 s after the load, MB:
 on this Linux machine (12 vCPU, shared) 127 / 163 / 124 against 170 /

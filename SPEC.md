@@ -63,9 +63,9 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 36,537 lines, of which 4,763 are the library held to the 4,763 ceiling (7,271 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 142,382 lines, none of it written in iyi |
-| artifact format | `.iyimod` v64, checksum per section |
+| iyi's own prelude | 36,598 lines, of which 4,785 are the library held to the 4,785 ceiling (7,293 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 143,037 lines, none of it written in iyi |
+| artifact format | `.iyimod` v65, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
 
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 36,537 lines
+> "No standard library worth the name" is still true of iyi's own 36,598 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 36,537 lines,
-primitives included, of which the library is 4,763.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 36,598 lines,
+primitives included, of which the library is 4,785.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -302,11 +302,11 @@ the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 seed under `-Diyi_chaos`, `chaos.iyi` and `chaos_points.iyi`, III.4.17),
 the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**4,763 lines** of the 21,556, measured by `bench/doc_numbers.py` as
+**4,785 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
 floor of 2,508 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 7,271 with the floor
+below settles and explains. Opening `src/iyi/` counts 7,293 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -517,6 +517,17 @@ each platform's own and stays out of the count). `Hash` lives in the prelude, so
 the hash it places every string key by cannot sit behind an import, and a
 table a program fills with client-chosen strings is exposed until it does.
 The owner chose the number, as measured with it in: 4,763.
+
+**And to 4,785, owner approved 2026-11-22.** An `Array` read and wrote its
+buffer through `Pointer#[]` and `Pointer#[]=`, which LLVM had to assume could
+change the array's own `@size` and `@buffer`: a product loop reloaded both
+for every element, checked bounds against what it reloaded and was never
+vectorised. The buffer is now reached only through `Pointer#array_slot`,
+`array_at` and `array_put`, whose loads and stores carry an alias tag of
+their own, and `[]` takes an index in range after one unsigned comparison.
+That is 22 lines of `array.iyi`; plb2's matmul runs in 0.31x of 0.22.0's
+time and sudoku in 0.82x. The owner chose the number, as measured with it
+in: 4,785.
 
 What the rule does *not* forgive: a `pub def` a program calls is API and
 counts wherever it is written, macro arm or not — the exclusion is for the
@@ -1073,9 +1084,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 142,382 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 36,537-line own prelude + 128,696 in std |
-| Specs | 21,146 lines | 17,691 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 143,037 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 36,598-line own prelude + 128,696 in std |
+| Specs | 21,146 lines | 17,706 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -3053,7 +3064,7 @@ may run once a parallel task has started, behind no lock the compiler can
 name: the block `spawn(unit: :new)` runs as a parallel task, at
 unguarded.iyi:22:5, which calls `ask` ``, followed by the three ways to be
 accepted. What writes is found through std and the prelude too, since
-`Array#<<` writes its receiver only through `Pointer#[]=`: whether a def
+`Array#<<` writes its receiver only through `Pointer#array_put`: whether a def
 may write its receiver, a parameter or its block's value - a field
 assigned, memory set through a pointer, an address taken, a value handed
 to a C function - through every call that passes the value on. A value
@@ -10090,6 +10101,22 @@ address on each side of the boundary. A C function is never copied: it is a
 declaration with no body whoever asks, and internal linkage on a declaration is
 invalid IR, which `write` and `exit` reach from the prelude's own `puts`.
 
+*One unit per module, so the copy is made once per module.* Codegen gives
+every type a unit of its own, and a build writing artifacts did too, so the
+closure was copied into each of a module's types and into the module's unit
+besides. What it copies is most of the runtime: `Int32#%` can raise, and
+`raise` reaches the allocator, the collector and the scheduler, 669 functions
+behind one `Widget#score`. The 30-module, 10-type program of the edit-loop
+benchmark compiled 223,188 functions where its plain build compiles 1,973,
+and its first `--emit-iyimod` build took 13.9 s and 4.1 GiB against the plain
+build's 0.31 s and 0.42 GiB (iyi-benchmarks' `cold`, Linux, 12 vCPU). A build
+writing artifacts therefore puts every type a module declares in the
+module's own unit (`Program#iyi_owner_units`): the same symbols, from the
+same build, with the closure copied once: 22,488 functions, 1.2 s and 0.7
+GiB. What is left over the plain build is the copy itself, about 670
+functions a module, and 660 of them are functions every program defines, a
+hello world included.
+
 *And a program that links an artifact defines every type id.* The copy above
 brought its own undefined symbol: `String:type_id`, which the same program
 built from source resolves without trouble. Type-id globals are emitted on
@@ -11762,6 +11789,58 @@ the program links the new body through the linker. Add a `pub def` to
 `app/inner` instead, and `app/outer` is refused by name. Both are in
 `spec/compiler/iyimod_spec.cr`.
 
+**And within one build: early cutoff.** That spec rebuilds the dependency in one
+build and reads the dependent in another. Inside the artifact loop the two
+happen in the same build, and there an import whose source changed made every
+artifact above it stale, whatever the edit: iyi-benchmarks' `core-body`, one
+number in the module all 29 others import, compiled all 30 from source. The
+edge already says what was compiled against, so an import compiled from its
+changed source does not make a dependent stale by itself; the dependent's
+artifact is read on the condition that the import hashes, once its front end
+has run, to what the edge recorded, and the condition is checked before
+codegen (`Compiler#check_iyi_cutoff`). A build whose condition fails is made
+again from a program of its own, without the cutoff, and so is a build that
+fails at all while such an artifact was read: one compiled against a signature
+that is gone may not even typecheck, and the second attempt says whether the
+failure is the program's.
+
+Only an import stale for its own source and nothing else, and its conditions
+come along. An import whose own import moved can hash as before while a type
+its signatures name from that import changed layout: a hash names a type, it
+does not describe it. So `main → user → mid → core` with core's generic body
+and mid's body both edited reads mid from source, finds that mid's old edge to
+core no longer holds, and rebuilds user too. `bench/iyimod_cutoff.sh` holds
+the cases: a body-only edit leaves the dependent's artifact unwritten and the
+program prints the new answer; a signature, a layout, a constant compiled into
+the dependent, a macro it expanded, a generic body it instantiated, a block it
+compiled into a method, and that chain each rebuild it, and each is shown to
+print the wrong answer or fail to build under `IYI_CUTOFF_BROKEN=1`, which
+reads the artifact without checking.
+
+**And the import has to define what the artifact calls, which no build had
+asked of it.** Codegen emits what the build reaches, and an artifact's machine
+code is not reached: the first cutoff build linked `user` against
+`*App::Core^App::Core::base:Int32`, which `core`'s new unit never compiled
+because nothing compiled from source called it. So an artifact records what
+its object code calls in the units of the other modules its build compiled
+(`Section::Demands`, v65): the symbol, and the call that reaches it, as a
+receiver type, a method name and argument types. A build reading the artifact
+under the cutoff makes each call into a module it compiles from source once
+more, with `uninitialized` values in a proc nothing calls, typed as a
+definition probe is (`DefinitionTyping.append_cutoff_keeps`). After the IR it
+asks whether every demanded symbol is defined (`Compiler#check_iyi_demands`);
+one that is missing makes the build start again without the cutoff, before
+LLVM and the linker would have found it. The gate's body cases prove the
+check: under `IYI_CUTOFF_BROKEN=keeps` none of the calls are made, and the
+build rebuilds the dependent and prints the new answer; under `keeps,1`,
+which skips the checks too, it fails to link.
+
+What it is worth on iyi-benchmarks' medium program, `iyi-mods` lane, Linux,
+against 0.22.0: `core-body` 6.74 s → **0.30 s**, the same as `leaf-body`
+(0.32 s), and peak memory 3,941 → 246 MiB. `core-interface` pays for the
+condition: the front end runs once with the artifacts and again without
+them, 0.88 s against 0.78 s without the cutoff.
+
 **A boundary answers the source question with its inputs.** A module
 compiled from source is one file at its module path, and the source hash is
 over that file. A shard `iyi bind` wrote has no such file - its source is a
@@ -11904,7 +11983,8 @@ were added to the lexer with no regressions: `trailing`,
 `impl` was in use as a local variable in two compiler tool files, which had to be
 renamed. Every keyword iyi adds is a name taken away from every program; the
 count should stay small. `using`, the keyword `import X::{...}` replaced, is
-still lexed, so the parser can refuse it with the line that replaces it.
+still lexed in a `.iyi` file, so the parser can refuse it with the line that
+replaces it. In a `.cr` file it is an ordinary name, as in Crystal.
 
 ### IV.5 Versioning
 
@@ -13841,7 +13921,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 36,537-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 36,598-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

@@ -20,13 +20,16 @@
 # With no arguments it runs two threads for a second and prints a fixed
 # line: Windows CI runs every bench program bare. Built with -Dtrim_widen
 # against a prelude copy that plays the neighbouring adoption at each
-# batch's edge pages (`bench/sweep_exercise.sh`), it reports how many edge
-# pages two adoptions read listed at once, `IyiHeap.widen_hits`, which only
-# that copy defines. The same copy fails when a pause finds an arena's count
-# of listed pages other than the pages its bitmap lists,
-# `IyiHeap.listed_off`: the trimmer asks after every trim, and the main
-# thread collects once more after the threads end and asks again, so the
-# last epoch's adoptions are counted too.
+# batch's edge pages and the refill below at the page each slice begins on
+# (`bench/sweep_exercise.sh`), it reports how many edge pages two adoptions
+# read listed at once, `IyiHeap.widen_hits`, how many shared pages a refill
+# reached while a slice listed them, `IyiHeap.list_hits`, and how many
+# arenas the pauses audited, `IyiHeap.listed_audits`: the copy ends the
+# program where a refill reads listed a page its slice has not yet
+# counted, and where a pause finds an arena's count of listed pages other
+# than the pages its bitmap lists or a chunk handed out on a listed page.
+# The main thread collects once more after the threads end, so the last
+# epoch's adoptions are audited too. Only that copy defines them.
 
 @[Unsafe("it writes and reads raw blocks by address to check them")]
 module bench/trim_stress
@@ -62,24 +65,15 @@ module bench/trim_stress
 
   def widen_note : String
     {% if flag?(:trim_widen) %}
-      ", #{IyiHeap.widen_hits} edge pages read listed by two adoptions at once"
+      ", #{IyiHeap.widen_hits} edge pages read listed by two adoptions at once, #{IyiHeap.list_hits} shared pages reached by a refill while a slice listed them"
     {% else %}
       ""
     {% end %}
   end
 
-  def audit_listed : Nil
-    {% if flag?(:trim_widen) %}
-      if IyiHeap.listed_off != 0
-        print "FAIL: trim stress: a pause found an arena counting #{IyiHeap.listed_off_count} pages listed with #{IyiHeap.listed_off_pages} listed, #{IyiHeap.listed_off} of #{IyiHeap.listed_audits} arena counts off#{widen_note}\n"
-        __iyi_exit(1)
-      end
-    {% end %}
-  end
-
   def audit_note : String
     {% if flag?(:trim_widen) %}
-      ", and #{IyiHeap.listed_audits} arena counts of listed pages read at pauses, every one its pages"
+      ", and #{IyiHeap.listed_audits} arenas' listed pages audited at pauses, every count its pages and every chunk on them free"
     {% else %}
       ""
     {% end %}
@@ -140,7 +134,6 @@ module bench/trim_stress
     stop = IyiMark.now_ns + seconds.to_u64 * 1_000_000_000_u64
     while IyiMark.now_ns < stop
       IyiMark.trim_idle
-      audit_listed
     end
   end
 
@@ -180,7 +173,6 @@ module bench/trim_stress
   trim_thread.join
   {% if flag?(:trim_widen) %}
     IyiMark.collect
-    audit_listed
   {% end %}
   if quiet
     puts "trim stress: every block read back whole"

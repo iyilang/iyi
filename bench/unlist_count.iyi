@@ -1,32 +1,58 @@
-# The listed pages' count against the bits that list them, after one batch of
-# them is unlisted, checked by `IyiHeap.audit_listed`: the sweep's audit, which
-# only the copies `bench/sweep_exercise.sh` builds define. Those copies are a
-# prelude that plays the neighbouring adoption at the batch's edges (the fix),
-# and one that also counts the clear it lost (the broken counting). The first
-# must pass and the second must fail on its one run.
+# The listed pages' count against the bits that list them, checked by
+# `IyiHeap.audit_listed`, and the chunks on listed pages, checked by the
+# pause's `IyiHeap.audit_pause`: the sweep's audits, which only the copies
+# `bench/sweep_exercise.sh` builds define. Those copies are a prelude that
+# plays the neighbouring adoption at a batch's edges and the refill below at
+# the page a slice begins on (the fix), and three broken ones: one that also
+# counts the clear it lost, one that raises the count after the bits it
+# counts, and one whose refill unlists nothing. The first must pass and each
+# broken one must fail on its one run, at its own check.
 #
 #   bash bench/sweep_exercise.sh
 #
-# It prints `unlist: ok, the audit found no arena count off, the arena counts N
-# listed pages, its bits list M` when the audit agrees. When it counts one arena
-# off, it prints `FAIL: unlist: the audit found 1 arena count off: the arena
-# counts N listed pages, its bits list M` and exits 1. The audit is compiled
-# only under -Dunlist_audit, which the sweep gate passes; built bare, as Windows
-# CI builds every bench program, it prints `unlist: built bare, ...` and exits 0.
+# Three checks, each printing one line. `unlist:` and `listing:` print `ok,
+# ... the arena counts N listed pages, its bits list M` when the audit agrees,
+# and `FAIL: unlist: the audit found 1 arena count off: the arena counts N
+# listed pages, its bits list M` with exit 1 when it counts one arena off.
+# `adopted:` prints `ok, 64 allocations took N listed pages off the sweep's
+# batches, ...`; a pause that finds a chunk handed out on a listed page ends
+# the program there with `FAIL: listed: a pause found N chunks handed out on M
+# pages still listed` and exit 1, and a refill that reads listed a page a
+# slice is listing and has not yet counted ends it with `FAIL: listed: a
+# refill read listed a page a slice had listed and not yet counted`. A setup
+# that did not hold exits 2. The audits are compiled only under
+# -Dunlist_audit, which the sweep gate passes; built bare, as Windows CI
+# builds every bench program, each check prints `...: built bare, ...` and
+# exits 0.
 #
-# One thread, no timing. A zeroed fake header lists pages 1 to 5 with
-# `IyiHeap.set_listed` and sets the count to 5, as a sweep leaves it. Then
-# `IyiHeap.unlist_batch` unlists pages 1 to 3, so two pages stay listed and the
-# count must be 2. Only one interleaving can make it differ: two adoptions read
-# the edge page listed, one clears it, and the other's clear loses. A count
-# that includes the lost clear reads short of the bits.
+# One thread, no timing. `unlist:` - a zeroed fake header lists pages 1 to 5
+# with `IyiHeap.set_listed` and sets the count to 5, as a sweep leaves it.
+# Then `IyiHeap.unlist_batch` unlists pages 1 to 3, so two pages stay listed
+# and the count must be 2. Only one interleaving can make it differ: two
+# adoptions read the edge page listed, one clears it, and the other's clear
+# loses. A count that includes the lost clear reads short of the bits.
+#
+# `listing:` - the header zeroed again, `IyiHeap.list_pages` lists pages 2 and
+# 3, a slice's batch, and then pages 4 to 6 with the slice's cursor on page
+# 4, the page it shares with the slice below. Between counting and listing
+# them the copy plays the refill that adopts the batch below over page 4
+# (`IyiHeap.hold_listing`). Counted first, page 4 is not listed yet and the
+# refill leaves it: 5 pages counted, 5 listed. Listed first, the refill reads
+# it listed before the slice counted it, which ends the program.
+#
+# `adopted:` - the real heap: a burst of 3,072-byte garbage, a collection whose
+# sweep lists its pages on the class's batches, 64 allocations of the class
+# kept, which take a batch and unlist its pages, and a collection, whose pause
+# reads every chunk on a listed page. A refill that unlists nothing leaves its
+# batch's pages listed under the 64, and that pause ends the program.
 
 @[Unsafe("it writes a fake arena header by address, which nothing else owns")]
 module bench/unlist_count
 
 {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
   # The fake header is not a root the collector scans, so no collection runs
-  # while the check holds its address.
+  # while the checks hold its address: the third check's collections come
+  # after the first two are done with it.
   IyiMark.auto = false
 
   # How many bits of a bitmap word are set, one lowest bit at a time.
@@ -39,20 +65,36 @@ module bench/unlist_count
     count
   end
 
-  # The header holds the count and the bitmap's first word and nothing past
-  # them: `set_listed`, `unlist_batch` and `unlist_page` touch no other offset.
+  # The header zeroed, its map covering one bitmap word, 64 pages, which is
+  # all that `IyiHeap.audit_listed` reads of it.
+  def clear_header(arena : UInt64, words : UInt64) : Nil
+    slot = 0_u64
+    while slot < words
+      IyiHeap.write64(arena + slot * 8_u64, 0_u64)
+      slot = slot + 1_u64
+    end
+    IyiHeap.write64(arena + IyiHeap::OFF_MAP, 1_u64.unsafe_shl(IyiHeap::PAGE_SHIFT + 6_u64))
+  end
+
+  # The pages the sweep listed on the batches of a class's arenas, by their
+  # counts.
+  def listed_in(index : Int32) : UInt64
+    listed = 0_u64
+    arena = IyiHeap.first_arena
+    while arena != 0
+      listed = listed + IyiHeap.read64(arena + IyiHeap::OFF_LISTED) if IyiHeap.arena_chunk(arena) == IyiHeap.chunk_of(index)
+      arena = IyiHeap.arena_next(arena)
+    end
+    listed
+  end
+
+  # The header holds the count, the sweep's cursor and the bitmap's first word
+  # and nothing past them: `set_listed`, `list_pages`, `unlist_batch` and
+  # `unlist_page` touch no other offset.
   words = IyiHeap::OFF_LISTED_PAGES.unsafe_shr(3_u64) + 1_u64
   header = Pointer(UInt64).malloc(words)
   arena = header.address
-  slot = 0_u64
-  while slot < words
-    IyiHeap.write64(arena + slot * 8_u64, 0_u64)
-    slot = slot + 1_u64
-  end
-
-  # The header's map covers one bitmap word, 64 pages, which is all that
-  # `IyiHeap.audit_listed` reads of it.
-  IyiHeap.write64(arena + IyiHeap::OFF_MAP, 1_u64.unsafe_shl(IyiHeap::PAGE_SHIFT + 6_u64))
+  clear_header(arena, words)
 
   # Pages 1 to 5 listed, and the count set to the five of them.
   IyiHeap.set_listed(arena, arena + IyiHeap::PAGE, arena + 6_u64 * IyiHeap::PAGE, true)
@@ -84,6 +126,61 @@ module bench/unlist_count
   end
 {% else %}
   puts "unlist: built bare, the audit is the sweep's copies' (-Dunlist_audit), the arena counts #{count.to_i64} listed pages, its bits list #{bits.to_i64}"
+{% end %}
+
+  # A slice's batch on pages 2 and 3, listed with the cursor on page 0, and
+  # the next slice's run on pages 4 to 6, listed with the cursor on page 4.
+  clear_header(arena, words)
+  IyiHeap.write64(arena + IyiHeap::OFF_SWEEP_CURSOR, arena)
+  IyiHeap.list_pages(arena, arena + 2_u64 * IyiHeap::PAGE, arena + 4_u64 * IyiHeap::PAGE)
+{% if flag?(:unlist_audit) %}
+  reached = IyiHeap.list_hits
+{% end %}
+  IyiHeap.write64(arena + IyiHeap::OFF_SWEEP_CURSOR, arena + 4_u64 * IyiHeap::PAGE)
+  IyiHeap.list_pages(arena, arena + 4_u64 * IyiHeap::PAGE, arena + 7_u64 * IyiHeap::PAGE)
+
+  count = IyiHeap.read64(arena + IyiHeap::OFF_LISTED)
+  bits = listed_bits(IyiHeap.read64(arena + IyiHeap::OFF_LISTED_PAGES))
+{% if flag?(:unlist_audit) %}
+  reached = IyiHeap.list_hits - reached
+  IyiHeap.audit_listed(arena, count)
+  if IyiHeap.listed_off == 0_u64
+    puts "listing: ok, the refill below read the page a slice was listing unlisted, the audit found no arena count off, the arena counts #{count.to_i64} listed pages, its bits list #{bits.to_i64}#{reached == 1_u64 ? "" : ", but the refill reached it #{reached.to_i64} times, not once"}"
+  else
+    print "FAIL: unlist: the audit found #{IyiHeap.listed_off.to_i64} arena count off: the arena counts #{IyiHeap.listed_off_count.to_i64} listed pages, its bits list #{IyiHeap.listed_off_pages.to_i64}\n"
+    __iyi_exit(1)
+  end
+{% else %}
+  puts "listing: built bare, the refill below is the sweep's copies' (-Dunlist_audit), the arena counts #{count.to_i64} listed pages, its bits list #{bits.to_i64}"
+{% end %}
+
+  size = 3072_u64
+  index = IyiHeap.class_index(size)
+  garbage = 0_u64
+  while garbage < (96_u64 * IyiHeap::PAGE).unsafe_div(size)
+    Pointer(UInt8).malloc(size)
+    garbage = garbage + 1_u64
+  end
+  kept = Array(Pointer(UInt8)).new(64)
+  IyiMark.collect
+  before = listed_in(index)
+  if before == 0_u64
+    print "FAIL: adopted: setup: the sweep listed no page of the #{size.to_i64}-byte class's garbage\n"
+    __iyi_exit(2)
+  end
+  while kept.size < 64
+    kept << Pointer(UInt8).malloc(size)
+  end
+  after = listed_in(index)
+  IyiMark.collect
+  if after >= before
+    print "FAIL: adopted: setup: #{kept.size} allocations of the #{size.to_i64}-byte class took none of its #{before.to_i64} listed pages, so the pause's audit was never at stake\n"
+    __iyi_exit(2)
+  end
+{% if flag?(:unlist_audit) %}
+  puts "adopted: ok, #{kept.size} allocations took #{(before - after).to_i64} listed pages off the sweep's batches, and the pause found every chunk on a listed page free"
+{% else %}
+  puts "adopted: built bare, the pause's audit is the sweep's copies' (-Dunlist_audit), #{kept.size} allocations took #{(before - after).to_i64} listed pages off the sweep's batches"
 {% end %}
 {% else %}
   puts "unlist: no collector's allocator on this target, nothing to count"

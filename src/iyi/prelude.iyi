@@ -3650,10 +3650,29 @@ require "./file"
       end
 
       # A run of whole pages of dead chunks kept warm on the sweep's batch:
-      # listed, its count up.
+      # its count up, then listed. In that order, so that the count is
+      # never below the pages the bitmap lists - every clear comes before
+      # its count goes down (`unlist_batch`, `idle_batches`) - and a refill
+      # that reads it 0 (`unlist_batch`) has nothing of its own to unlist.
+      # Listed first, the count was one short while the slice that listed
+      # the page it shares with the slice below (`IyiMark.close_run`) sat
+      # between the two: the refill adopting the batch below unlisted that
+      # page and counted it off before it was counted on. A refill that
+      # adopted another batch of the arena then read 0 with its own pages
+      # listed and left them so under the objects it handed out; the
+      # count was whole again by the pause, which made the pages idle, and
+      # the next refill threaded their chunks a second time. The trim
+      # stress (bench/trim_stress.iyi) caught a block holding another
+      # thread's words in about one 20 s run in fifty (PR #242), and a
+      # copy that records every chunk's owner and every change to the
+      # listed pages caught a refill handing out a chunk of a page still
+      # listed in 4 runs of 237 on macOS 26.6, Apple M2 Pro, 10 cores (the
+      # user's machine) and 6 of 353 on this Linux machine, 12 vCPUs held
+      # to two and four, each after a refill had cleared a page its slice
+      # had not yet counted; counted first, it caught none in 187 and 399.
       def self.list_pages(arena : UInt64, low : UInt64, high : UInt64) : Nil
-        set_listed(arena, low, high, true)
         Pointer(Atomic(UInt64)).new(arena + OFF_LISTED).value.add((high - low).unsafe_shr(PAGE_SHIFT))
+        set_listed(arena, low, high, true)
       end
 
       # A batch's page range, stashed in the high sixteen bits of its
@@ -3675,7 +3694,10 @@ require "./file"
       # A batch taken by a cache, under the lock: its pages are being
       # allocated from and are nobody's whole pages any more - unlisted,
       # so the pause does not turn them idle with objects on them.
-      # Answers how many, which the class took (`adopt_batch`).
+      # Answers how many, which the class took (`adopt_batch`). A count
+      # of 0 is no page listed, because the count is never below the
+      # bitmap (`list_pages`); a page another slice is listing beside this
+      # is the next batch's, which unlists it.
       def self.unlist_batch(arena : UInt64, page : UInt64, last : UInt64) : UInt64
         return 0_u64 if read64(arena + OFF_LISTED) == 0
         count = 0_u64
@@ -3949,8 +3971,19 @@ require "./file"
       # that page, and the rest of the run, still idle, begins with it -
       # its first page reached into from below, as any idle run's may be
       # (`IyiMark.age_idle`), and no page past it.
+      # A run the slice's word cuts short is cut the same way, at the last
+      # page a chunk begins on: cut at the word, a chunk longer than a page
+      # reached from the part taken over pages of the rest - pages the idle
+      # trim (`cool_warm`) and the sweep (`IyiMark.age_idle`) hand back,
+      # each keeping a run's first page only - and past the word into
+      # pages the slice may hand back. A copy that records every chunk's
+      # owner caught the idle trim handing back two pages under a
+      # 20,480-byte chunk threaded so, three of its five 4 KB pages left
+      # idle, on this Linux machine, 12 vCPUs held to two
+      # (`bench/sweep_exercise.iyi` check 10b replays the cut).
       def self.take_run(arena : UInt64, warm : Bool, most : UInt64) : Tuple(UInt64, UInt64)
         pages = read64(arena + OFF_MAP).unsafe_shr(PAGE_SHIFT)
+        capped = false
         if read64(arena + OFF_SWEEPING) != 0
           cursor = read64(arena + OFF_SWEEP_CURSOR)
           return {0_u64, 0_u64} if cursor == SWEEP_DONE || cursor < arena || cursor >= arena + read64(arena + OFF_MAP)
@@ -3963,6 +3996,7 @@ require "./file"
           pages = (cursor - arena).unsafe_shr(PAGE_SHIFT) & 0xFFFFFFFFFFFFFFC0_u64
           return {0_u64, 0_u64} if pages < 2_u64
           pages = pages - 1_u64
+          capped = true
         end
         # Word by word: an idle bit whose cold bit is what `warm` asks.
         slot = 0_u64
@@ -3986,9 +4020,14 @@ require "./file"
         while stop < pages && page_idle?(arena, arena + stop * PAGE) && page_cold?(arena, arena + stop * PAGE) != warm
           stop = stop + 1_u64
         end
+        chunk = read64(arena + OFF_CHUNK)
+        first = arena_first(arena)
+        if capped && stop == pages && page_idle?(arena, arena + stop * PAGE) && page_cold?(arena, arena + stop * PAGE) != warm
+          cut = (first + (arena + (stop + 1_u64) * PAGE - first - 1_u64).unsafe_div(chunk) * chunk - arena).unsafe_shr(PAGE_SHIFT)
+          return {0_u64, 0_u64} if cut <= page
+          stop = cut
+        end
         if most != 0_u64 && stop - page > most
-          chunk = read64(arena + OFF_CHUNK)
-          first = arena_first(arena)
           target = arena + (page + most) * PAGE
           cut = (first + (target - first + chunk - 1_u64).unsafe_div(chunk) * chunk - arena).unsafe_shr(PAGE_SHIFT)
           stop = cut if cut < stop

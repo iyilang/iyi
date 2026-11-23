@@ -22,6 +22,57 @@
 - **The session gate's watchdog prints every thread's whole stack on
   darwin.** Cut to iyi's own frames and to 40 lines, the hang above ended
   at the top-level visitor, a dozen frames above the `read` that held it.
+- **`bench/sweep_exercise.sh`'s widened trim-stress copies hold a sweep
+  slice's listing window open, and their audits end the program where
+  they see a page go wrong.** The copies spin 20 µs between a slice's
+  count of the page it shares with the slice below and that page's
+  listed bit; a refill that unlists and counts off the page meanwhile
+  ends the program there. The pause's audit now also reads every chunk
+  whose head is on a listed page, which must be free, and a count off or
+  a chunk handed out there ends the program in the pause: read at the
+  trimmer's next look, as before, a block could read wrong first (a copy
+  that unlists nothing did so once on macOS). The fix, widened, met the
+  window 1,357-2,420 times a run; the count raised after the bits fails
+  at the window's first meeting and a refill that unlists nothing at the
+  first pause, on run 1 in every gate run (two on this Linux machine,
+  12 vCPUs, one on macOS 26.6, Apple M2 Pro, 10 cores, the user's
+  machine).
+- **Check 10b (`cap:`) replays a warm run taken below a sweep slice's
+  word, on one thread.** 28,672-byte chunks, the word picked where the
+  last chunk beginning below the bound reaches into it; the run must end
+  where its last chunk reaches under a page into the rest. A copy that
+  cuts at the word fails there on 4 KB and 16 KB pages.
+
+### Fixed
+
+- **A block is no longer handed to two threads beside the idle trim.**
+  `bench/trim_stress.iyi` failed about one 20 s run in fifty with a
+  20,360-byte block holding another thread's words (PR #242: 1 of 46 on
+  0.22.0's binary). `IyiHeap.list_pages` set a run's listed bits and then
+  raised the arena's count of listed pages. A slice listing the page it
+  shares with the slice below sat between the two while the refill
+  adopting the batch below unlisted that page and counted it off; the
+  count stayed one short until the slice caught up, and a refill of the
+  arena that read 0 meanwhile returned without unlisting its own batch's
+  pages. They stayed listed under the objects it handed out, the next
+  pause (its count whole again, so its audit passed) made them idle, and
+  the next refill threaded their chunks a second time. A copy that
+  records every chunk's owner and every change to the listed pages
+  caught a refill handing out a chunk of a page still listed in 4 of 237
+  runs of 20 s on macOS 26.6, Apple M2 Pro, 10 cores (the user's
+  machine) and 6 of 353 on this Linux machine, 12 vCPUs held to two and
+  four, each after a refill had cleared a page its slice had not yet
+  counted. The count is raised first now, so it is never below the
+  bitmap; the same copy caught none in 187 and 399 runs.
+- **A run a sweep slice in flight cuts short is cut on the chunk grid.**
+  `IyiHeap.take_run` bounds a warm or cold run below the word of the
+  slice's cursor, and cut there a chunk longer than a page, taken last,
+  reached over idle pages of the rest - which the idle trim and the sweep
+  hand back keeping a run's first page only - and into pages the slice
+  may hand back. The copy above caught the trim handing back two pages
+  under a live 20,480-byte chunk on Linux's 4 KB pages (1 of 353 runs).
+  The cut is now at the last page a chunk begins on, as a run cut at a
+  slab's worth is.
 
 ## 0.22.0 — 2026-11-22
 
@@ -29499,7 +29550,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,537-line library and nothing else. Every other
+  written against iyi's own 36,576-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

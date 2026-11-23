@@ -285,6 +285,60 @@
     on_shared
   end
 
+  # Check 10b's work: a slice in flight on an arena, as a walker holds
+  # one, its cursor in the sixty-four-page word of `IyiHeap.take_run`'s
+  # bound, and a warm run of the class's garbage taken below it. The word
+  # is the first inside the run where the last chunk beginning below the
+  # bound reaches into the word: a run cut at the bound would hand out
+  # that chunk over idle pages of the rest and into pages the slice may
+  # hand back. The run taken must end where its last chunk reaches under
+  # a page into the rest. Its pages go idle and warm again after. Answers
+  # the pages taken.
+  def capped_take(size : UInt64) : UInt64
+    index = IyiHeap.class_index(size)
+    chunk = IyiHeap.chunk_of(index)
+    raise "cap: the #{count(size)}-byte class's chunk is #{count(chunk)} bytes, not past a page" if chunk <= IyiHeap::PAGE
+    raise "cap: the #{count(size)}-byte class has arenas already, so its garbage is not one arena's" if class_arenas(index) != 0_u64
+    burst(size, (512_u64 * IyiHeap::PAGE).unsafe_div(size))
+    IyiMark.collect
+    IyiMark.collect
+    arena = IyiHeap.class_first(index)
+    raise "cap: the #{count(size)}-byte class's garbage spans #{count(class_arenas(index))} arenas" if class_arenas(index) != 1_u64
+    first = IyiHeap.arena_first(arena)
+    pages = IyiHeap.read64(arena + IyiHeap::OFF_MAP).unsafe_div(IyiHeap::PAGE)
+    low = 0_u64
+    while low < pages && !(IyiHeap.page_idle?(arena, arena + low * IyiHeap::PAGE) && !IyiHeap.page_cold?(arena, arena + low * IyiHeap::PAGE))
+      low = low + 1_u64
+    end
+    high = low
+    while high < pages && IyiHeap.page_idle?(arena, arena + high * IyiHeap::PAGE) && !IyiHeap.page_cold?(arena, arena + high * IyiHeap::PAGE)
+      high = high + 1_u64
+    end
+    word = ((low + chunk.unsafe_div(IyiHeap::PAGE) + 2_u64) | 63_u64) + 1_u64
+    found = 0_u64
+    while word + 1_u64 < high && found == 0_u64
+      bound = arena + (word - 1_u64) * IyiHeap::PAGE
+      last = first + (bound - 1_u64 - first).unsafe_div(chunk) * chunk
+      found = word if last >= arena + low * IyiHeap::PAGE && last + chunk > arena + word * IyiHeap::PAGE
+      word = word + 64_u64
+    end
+    raise "cap: no sixty-four-page word inside the #{count(size)}-byte class's warm run of pages #{count(low)} to #{count(high)} has a chunk reaching into it from below its bound, so the cut was never at stake" if found == 0_u64
+    sweeping = IyiHeap.read64(arena + IyiHeap::OFF_SWEEPING)
+    cursor = IyiHeap.read64(arena + IyiHeap::OFF_SWEEP_CURSOR)
+    IyiHeap.write64(arena + IyiHeap::OFF_SWEEPING, IyiMark.epoch)
+    IyiHeap.write64(arena + IyiHeap::OFF_SWEEP_CURSOR, arena + found * IyiHeap::PAGE)
+    run = IyiHeap.take_run(arena, true, 0_u64)
+    IyiHeap.write64(arena + IyiHeap::OFF_SWEEPING, sweeping)
+    IyiHeap.write64(arena + IyiHeap::OFF_SWEEP_CURSOR, cursor)
+    raise "cap: no warm run of the #{count(size)}-byte class was taken below a slice's word at page #{count(found)}" if run[1] == 0_u64
+    taken = (run[1] - run[0]).unsafe_div(IyiHeap::PAGE)
+    IyiHeap.set_idle(arena, run[0], run[1], true)
+    IyiHeap.idle_add(arena, taken, true)
+    reach = first + (run[1] - first + chunk - 1_u64).unsafe_div(chunk) * chunk
+    raise "cap: a warm run taken below a slice's word at page #{count(found)} ends at page #{count((run[1] - arena).unsafe_div(IyiHeap::PAGE))}, and its last #{count(chunk)}-byte chunk reaches #{count(reach - run[1])} bytes past it, over #{count(warm_pages_in(arena, run[1], reach))} idle pages of the rest" if reach > run[1] + IyiHeap::PAGE
+    taken
+  end
+
   # Garbage in a class nothing below asks for, made before the first
   # collection, for check 6c.
   def first_epoch_garbage(size : UInt64) : Nil
@@ -676,6 +730,18 @@
   raise "trim: #{count(IyiHeap.warm_of(small_index))} pages of the #{count(trim_small)}-byte class still warm after the idle trim, in #{count(warm_runs(small_index))} runs: a run keeps its first page at most" if IyiHeap.warm_of(small_index) > warm_runs(small_index)
   puts "    cut: slabs of #{count(trim_small)}-byte chunks and of #{count(trim_large)}-byte ones threaded, each list's last chunk reaching under a page into the rest of its run (#{count(reaching_small)} and #{count(reaching_large)} times into an idle one)"
   puts "    trim: every warm run of both classes handed back but #{count(IyiHeap.warm_of(small_index))} first pages of the #{count(trim_small)}-byte class's runs, and every byte of every threaded chunk intact"
+
+  # 10b. A slice in flight on the arena bounds the run a refill or a
+  # carve takes at the word below its cursor's (`IyiHeap.take_run`), and
+  # that cut is on the chunk grid too: cut at the bound, a chunk longer
+  # than a page reached from the part taken over idle pages of the rest,
+  # which the trim and the sweep hand back keeping a run's first page
+  # only, and into the slice's word. 28,672-byte chunks, seven 4 KB pages
+  # (one and three quarters of 16 KB), garbage over 512 pages, two
+  # collections.
+  cap_size = 28672_u64
+  cap_taken = capped_take(cap_size)
+  puts "    cap: a warm run of #{count(cap_size)}-byte chunks taken below a slice's word, #{count(cap_taken)} pages, ends where its last chunk reaches under a page into the rest"
 
   # 11. The idle trim takes the warm pages the sweep listed on the
   # centre's batches too: the batches are dropped and the pages inside

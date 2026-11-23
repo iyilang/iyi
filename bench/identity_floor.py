@@ -283,6 +283,7 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r"CRYSTAL \?=|previous crystal compiler", "the bootstrap compiler the build reads"),
     # Crystal's own API, called from a compiler that is a Crystal program.
     (r"Crystal::(Digest|System|Macros|Repl)", "Crystal's stdlib API"),
+    (r"Crystal::BUILD_COMMIT", "the hosted compiler's build-commit global, which lower_gate.iyi names `<hosted>::BUILD_COMMIT` and the build-constant probe names by its module"),
     (r'require "crystal/', "a require of Crystal's stdlib"),
     (r"crystal_(malloc|realloc|raise|type_id|instance_type_id)", "Crystal's runtime ABI symbols"),
     # The `Crystal` module the compiler DEFINES in the program it compiles:

@@ -1534,11 +1534,7 @@ pub class Parser < Lexer
           if @token.type == TokenKind::OP_PERIOD
             next_token_skip_space
             temp_arg = Var.new(temp_arg_name)
-            call = parse_var_or_call(@token.location, false, true)
-            if call.is_a?(Call)
-              call.obj = temp_arg
-            end
-            block = Block.new([temp_arg], call)
+            block = Block.new([temp_arg], parse_block_arg_call(temp_arg))
             skip_space_or_newline
             check(TokenKind::OP_RPAREN)
             break
@@ -1592,6 +1588,41 @@ pub class Parser < Lexer
     end
   end
 
+  # iyi: the call a `&.name` block argument makes on the value it yields, and whatever follows it: a method chain
+  # (`&.verdict.ready?`), an instance variable, an index, or a keyword form. Hosted parse_call_block_arg_after_dot
+  # (src/compiler/iyi/syntax/parser.cr) takes the same branches.
+  def parse_block_arg_call(obj : ASTNode) : ASTNode
+    location = @token.location
+    if @token.type == TokenKind::INSTANCE_VAR
+      res = ReadInstanceVar.new(obj, @token.value).at(location)
+      next_token
+      return parse_atomic_method_suffix(res, location)
+    end
+    if @token.type == TokenKind::OP_LSQUARE
+      return parse_atomic_method_suffix(obj, location)
+    end
+    if @token.keyword == Keyword::IS_A_QUESTION
+      return parse_atomic_method_suffix(parse_is_a(obj).at(location), location)
+    end
+    if @token.keyword == Keyword::AS
+      return parse_atomic_method_suffix(parse_as(obj, false).at(location), location)
+    end
+    if @token.keyword == Keyword::AS_QUESTION
+      return parse_atomic_method_suffix(parse_as(obj, true).at(location), location)
+    end
+    if @token.keyword == Keyword::RESPONDS_TO_QUESTION
+      return parse_atomic_method_suffix(parse_responds_to(obj).at(location), location)
+    end
+    if !@in_macro_expression && @token.keyword == Keyword::NIL_QUESTION
+      return parse_atomic_method_suffix(parse_nil_question(obj).at(location), location)
+    end
+    call = parse_var_or_call(location, false, true)
+    if call.is_a?(Call)
+      call.obj = obj
+    end
+    parse_atomic_method_suffix(call, location)
+  end
+
   def parse_call_args_space_consumed(allow_curly : Bool = false, allow_beginless_range : Bool = false, control : Bool = false) : CallArgs?
     if @token.keyword == Keyword::DO || (@token.keyword == Keyword::END && !next_comes_colon_space?) || @token.type == TokenKind::EOF
       return nil
@@ -1642,10 +1673,7 @@ pub class Parser < Lexer
         if @token.type == TokenKind::OP_PERIOD
           next_token_skip_space
           temp_arg = Var.new(temp_arg_name)
-          call = parse_var_or_call(@token.location, false, true)
-          if call.is_a?(Call)
-            call.obj = temp_arg
-          end
+          call = parse_block_arg_call(temp_arg)
           block = Block.new([temp_arg], call)
           end_location = call.end_location
           break

@@ -180,7 +180,7 @@ echo "  $(wc -l < "$RESULTS" | tr -d ' ') files measured"
 
 echo
 echo "== 4. Checking each file against its committed floor"
-awk -F'\t' -v floorfile="$FLOOR_FILE" '
+awk -F'\t' -v floorfile="$FLOOR_FILE" -v host="$HOST_OS" '
   BEGIN {
     while ((getline line < floorfile) > 0) {
       if (line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/) continue
@@ -190,21 +190,23 @@ awk -F'\t' -v floorfile="$FLOOR_FILE" '
   }
   {
     corpus = $1; rel = $2; nodes = $3 + 0; matched = $4 + 0; note = $5
+    key = rel
+    if ((rel "@" host) in floor) key = rel "@" host
     if (note ~ /^ORACLE/) verdict = "ORACLE"
     else if (note ~ /^PORT/) verdict = "PORT"
-    else if (!(rel in floor)) verdict = "NO FLOOR"
-    else if (matched < floor[rel]) verdict = "BELOW FLOOR"
-    else if (matched > floor[rel]) verdict = "RAISE THE FLOOR"
+    else if (!(key in floor)) verdict = "NO FLOOR"
+    else if (matched < floor[key]) verdict = "BELOW FLOOR"
+    else if (matched > floor[key]) verdict = "RAISE THE FLOOR"
     else verdict = "ok"
-    fl = (rel in floor) ? floor[rel] : "-"
+    fl = (key in floor) ? floor[key] : "-"
     printf "%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n", verdict, corpus, rel, nodes, matched, \
       (nodes > 0 ? sprintf("%.1f%%", 100 * matched / nodes) : "n/a"), fl, note
   }' "$RESULTS" > "$VERDICTS"
 
 if [ "$RAISE" = 1 ]; then
-  "$PY" - "$(native_path "$VERDICTS")" "$(native_path "$FLOOR_FILE")" <<'PY'
+  "$PY" - "$(native_path "$VERDICTS")" "$(native_path "$FLOOR_FILE")" "$HOST_OS" <<'PY'
 import sys
-verdicts, floor_path = sys.argv[1], sys.argv[2]
+verdicts, floor_path, host = sys.argv[1], sys.argv[2], sys.argv[3]
 floor = {}
 try:
     for line in open(floor_path, encoding="utf-8"):
@@ -219,15 +221,16 @@ for line in open(verdicts, encoding="utf-8"):
     verdict, rel, matched = cols[0], cols[2], int(cols[4])
     if verdict in ("BELOW FLOOR", "ORACLE", "PORT"):
         continue
-    old = floor.get(rel, 0)
+    key = f"{rel}@{host}" if f"{rel}@{host}" in floor else rel
+    old = floor.get(key, 0)
     if matched > old:
-        floor[rel] = matched
+        floor[key] = matched
         raised += 1
-    elif rel not in floor:
-        floor[rel] = old
+    elif key not in floor:
+        floor[key] = old
 with open(floor_path, "w", encoding="utf-8", newline="\n") as out:
-    out.write("# typed parity floors: <repo-relative file> <matched nodes>.\n")
-    out.write("# A count may only rise. Raise with: TYPED_PARITY_RAISE=1 bash bench/selfhost_typed_parity_exercise.sh\n")
+    out.write("# typed parity floors: <repo-relative file> <matched nodes>, and <repo-relative file>@<host> <matched nodes>\n")
+    out.write("# for a file a host measures differently (its platform arms are other code). A count may only rise. Raise with: TYPED_PARITY_RAISE=1 bash bench/selfhost_typed_parity_exercise.sh\n")
     for rel in sorted(floor):
         out.write(f"{rel} {floor[rel]}\n")
 print(f"  floor written: {len(floor)} entries, {raised} raised")

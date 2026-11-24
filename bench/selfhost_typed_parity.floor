@@ -1,5 +1,5 @@
-# typed parity floors: <repo-relative file> <matched nodes>.
-# A count may only rise. Raise with: TYPED_PARITY_RAISE=1 bash bench/selfhost_typed_parity_exercise.sh
+# typed parity floors: <repo-relative file> <matched nodes>, and <repo-relative file>@<host> <matched nodes>
+# for a file a host measures differently (its platform arms are other code). A count may only rise. Raise with: TYPED_PARITY_RAISE=1 bash bench/selfhost_typed_parity_exercise.sh
 samples/iyi/basics.iyi 327
 samples/iyi/calc.iyi 30
 samples/iyi/collections.iyi 511
@@ -209,7 +209,7 @@ src/compiler/types/to_restriction.iyi 27
 src/compiler/types/type_system.iyi 58
 src/compiler/types/types.iyi 243
 src/compiler/types/unification.iyi 19
-src/iyi/array.iyi 111
+src/iyi/array.iyi 117
 src/iyi/atomic.iyi 9
 src/iyi/chaos.iyi 0
 src/iyi/chaos_points.iyi 0
@@ -221,6 +221,7 @@ src/iyi/hash.iyi 78
 src/iyi/heap_partition.iyi 0
 src/iyi/heap_verify.iyi 0
 src/iyi/io.iyi 61
+src/iyi/io.iyi@windows 60
 src/iyi/macros.iyi 4
 src/iyi/number.iyi 39
 src/iyi/object.iyi 29
@@ -228,7 +229,7 @@ src/iyi/prelude.iyi 140
 src/iyi/primitives.iyi 44
 src/iyi/range.iyi 13
 src/iyi/set.iyi 12
-src/iyi/string.iyi 86
+src/iyi/string.iyi 89
 src/iyi/testing.iyi 22
 src/iyi/thread.iyi 0
 src/std/acme.iyi 177
@@ -265,7 +266,7 @@ src/std/enum.iyi 23
 src/std/enumerable.iyi 89
 src/std/env.iyi 47
 src/std/errno.iyi 5
-src/std/file.iyi 137
+src/std/file.iyi 170
 src/std/file_utils.iyi 40
 src/std/fileserver.iyi 23
 src/std/float.iyi 22
@@ -275,7 +276,7 @@ src/std/heap.iyi 17
 src/std/hpack.iyi 107
 src/std/hpke.iyi 125
 src/std/html.iyi 18
-src/std/http.iyi 656
+src/std/http.iyi 659
 src/std/http3.iyi 124
 src/std/http_proxy.iyi 14
 src/std/idna.iyi 76
@@ -335,6 +336,7 @@ src/std/string_scanner.iyi 51
 src/std/symbol.iyi 19
 src/std/system.iyi 11
 src/std/system_roots.iyi 50
+src/std/system_roots.iyi@linux 51
 src/std/tar.iyi 134
 src/std/term.iyi 34
 src/std/text.iyi 121

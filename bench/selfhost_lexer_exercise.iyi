@@ -1,0 +1,407 @@
+import compiler/foundation/location::{Location}
+import compiler/foundation/errors::{SyntaxException}
+import compiler/foundation/enums
+import compiler/foundation/string_pool::{StringPool}
+import compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState, MacroState}
+import compiler/syntax/lexer::{Lexer}
+
+module BenchSelfhostLexerExercise
+  def self.assert(cond : Bool, msg : String)
+    unless cond
+      puts "Assertion failed: " + msg
+      raise "Assertion failed: " + msg
+    end
+  end
+
+  def self.tokenize_all(source : String, filename : String = "test.iyi") : Array(Token)
+    lexer = Lexer.new(source, filename)
+    tokens = [] of Token
+
+    in_path = false
+    while true
+      if in_path
+        lexer.wants_regex = false
+        lexer.slash_is_regex = false
+      end
+
+      tok = Token.new
+      tok.copy_from(lexer.next_token)
+      tokens << tok
+      break if tok.type == TokenKind::EOF
+
+      if tok.keyword == Keyword::MODULE || tok.keyword == Keyword::IMPORT || tok.keyword == Keyword::USING
+        in_path = true
+      elsif tok.type == TokenKind::NEWLINE || tok.type == TokenKind::OP_SEMICOLON
+        in_path = false
+      end
+
+      if tok.type == TokenKind::DELIMITER_START || tok.type == TokenKind::STRING_ARRAY_START || tok.type == TokenKind::SYMBOL_ARRAY_START
+        consume_string_tokens(lexer, tok.delimiter_state, tokens)
+      end
+    end
+    tokens
+  end
+
+  def self.consume_string_tokens(lexer : Lexer, state : DelimiterState, tokens : Array(Token))
+    while true
+      tok = Token.new
+      tok.copy_from(lexer.next_string_token(state))
+      tokens << tok
+      state = tok.delimiter_state
+      if tok.type == TokenKind::DELIMITER_END || tok.type == TokenKind::STRING_ARRAY_END || tok.type == TokenKind::EOF
+        break
+      elsif tok.type == TokenKind::INTERPOLATION_START
+        curly = 1
+        while curly > 0
+          sub_tok = Token.new
+          sub_tok.copy_from(lexer.next_token)
+          tokens << sub_tok
+          break if sub_tok.type == TokenKind::EOF
+          if sub_tok.type == TokenKind::DELIMITER_START || sub_tok.type == TokenKind::STRING_ARRAY_START || sub_tok.type == TokenKind::SYMBOL_ARRAY_START
+            consume_string_tokens(lexer, sub_tok.delimiter_state, tokens)
+          elsif sub_tok.type == TokenKind::OP_LCURLY
+            curly = curly + 1
+          elsif sub_tok.type == TokenKind::OP_RCURLY
+            curly = curly - 1
+          end
+        end
+      end
+    end
+    tokens
+  end
+
+  def self.consume_macro_tokens(lexer : Lexer, tokens : Array(Token))
+    state = MacroState.default
+    while true
+      tok = Token.new
+      tok.copy_from(lexer.next_macro_token(state, false))
+      tokens << tok
+      break if tok.type == TokenKind::MACRO_END || tok.type == TokenKind::EOF
+      state = tok.macro_state
+    end
+  end
+
+  def self.test_keywords
+    print "testing all 67 keywords... "
+    kw_names = [
+      "abstract", "alias", "alignof", "annotation", "as", "as?", "asm",
+      "begin", "break", "case", "class", "def", "do", "else", "elsif",
+      "end", "ensure", "enum", "extend", "false", "for", "fun", "if",
+      "impl", "import", "in", "include", "instance_alignof", "instance_sizeof",
+      "is_a?", "lib", "macro", "module", "next", "nil", "nil?", "of",
+      "offsetof", "out", "pointerof", "private", "protected", "pub",
+      "require", "rescue", "responds_to?", "return", "select", "self",
+      "sizeof", "struct", "super", "then", "trait", "true", "type",
+      "typeof", "uninitialized", "union", "unless", "until", "using",
+      "verbatim", "when", "while", "with", "yield",
+    ]
+
+    assert(kw_names.size == 67, "expected 67 keywords")
+
+    i = 0
+    while i < kw_names.size
+      kw = kw_names[i]
+      tokens = tokenize_all(kw)
+      assert(tokens.size == 2, "expected ident + EOF for keyword #{kw}")
+      assert(tokens[0].type == TokenKind::IDENT, "expected IDENT for #{kw}")
+      assert(tokens[0].keyword?, "expected keyword? to be true for #{kw}")
+      assert(tokens[0].value == kw, "expected value #{kw}")
+      i = i + 1
+    end
+    puts "ok (67 keywords verified)"
+  end
+
+  def self.test_operators
+    print "testing all 58 operators... "
+    ops = [
+      "!", "!=", "!~", "$?", "$~", "%", "%=", "%}", "&", "&&", "&&=",
+      "&*", "&**", "&*=", "&+", "&+=", "&-", "&-=", "&=", "(", ")",
+      "*", "**", "**=", "*=", "+", "+=", ",", "-", "-=", "->",
+      ".", "..", "...", "/", "//", "//=", "/=", ":", "::", ";",
+      "<", "<<", "<<=", "<=", "<=>", "=", "==", "===", "=>", "=~",
+      ">", ">=", ">>", ">>=", "?", "@[", "[", "[]", "[]=", "[]?",
+      "]", "^", "^=", "`", "{", "{%", "{{", "|", "|=", "||", "||=",
+      "}", "~",
+    ]
+
+    i = 0
+    while i < ops.size
+      op = ops[i]
+      lexer = Lexer.new(op)
+      lexer.wants_regex = false
+      lexer.slash_is_regex = false
+      lexer.wants_symbol = false
+      lexer.wants_def_or_macro_name = true
+      tok = lexer.next_token
+      assert(tok.type.operator? || tok.type == TokenKind::OP_SEMICOLON || tok.type == TokenKind::OP_COLON || tok.type == TokenKind::OP_COMMA || tok.type == TokenKind::OP_LPAREN || tok.type == TokenKind::OP_RPAREN || tok.type == TokenKind::OP_LSQUARE || tok.type == TokenKind::OP_RSQUARE || tok.type == TokenKind::OP_LCURLY || tok.type == TokenKind::OP_RCURLY || tok.type == TokenKind::OP_QUESTION, "expected operator for #{op}")
+      i = i + 1
+    end
+    puts "ok (58 operators verified)"
+  end
+
+  def self.test_assignment_operators
+    print "testing assignment operators... "
+    assign_ops = [
+      TokenKind::OP_PLUS_EQ, TokenKind::OP_MINUS_EQ, TokenKind::OP_STAR_EQ,
+      TokenKind::OP_SLASH_EQ, TokenKind::OP_SLASH_SLASH_EQ, TokenKind::OP_PERCENT_EQ,
+      TokenKind::OP_BAR_EQ, TokenKind::OP_AMP_EQ, TokenKind::OP_CARET_EQ,
+      TokenKind::OP_STAR_STAR_EQ, TokenKind::OP_LT_LT_EQ, TokenKind::OP_GT_GT_EQ,
+      TokenKind::OP_BAR_BAR_EQ, TokenKind::OP_AMP_AMP_EQ, TokenKind::OP_AMP_PLUS_EQ,
+      TokenKind::OP_AMP_MINUS_EQ, TokenKind::OP_AMP_STAR_EQ,
+    ]
+
+    i = 0
+    while i < assign_ops.size
+      assert(assign_ops[i].assignment_operator?, "expected assignment_operator? for #{assign_ops[i].to_s}")
+      i = i + 1
+    end
+    puts "ok (17 assignment operators verified)"
+  end
+
+  def self.test_unary_operators
+    print "testing unary operators... "
+    unary_ops = [
+      TokenKind::OP_BANG, TokenKind::OP_PLUS, TokenKind::OP_MINUS,
+      TokenKind::OP_TILDE, TokenKind::OP_AMP_PLUS, TokenKind::OP_AMP_MINUS,
+    ]
+
+    i = 0
+    while i < unary_ops.size
+      assert(unary_ops[i].unary_operator?, "expected unary_operator? for #{unary_ops[i].to_s}")
+      i = i + 1
+    end
+    puts "ok (6 unary operators verified)"
+  end
+
+  def self.test_numbers
+    print "testing number literals (bases, suffixes, floats, signs)... "
+    # base 10 integers
+    toks = tokenize_all("42 1_000_000 123_i64 456_u16 100_i8 200_u8 777_i128 888_u128")
+    assert(toks[0].type == TokenKind::NUMBER && toks[0].value == "42" && toks[0].number_kind == NumberKind::I32, "42")
+    assert(toks[2].type == TokenKind::NUMBER && toks[2].value == "1000000" && toks[2].number_kind == NumberKind::I32, "1000000")
+    assert(toks[4].type == TokenKind::NUMBER && toks[4].value == "123" && toks[4].number_kind == NumberKind::I64, "123_i64")
+    assert(toks[6].type == TokenKind::NUMBER && toks[6].value == "456" && toks[6].number_kind == NumberKind::U16, "456_u16")
+    assert(toks[8].type == TokenKind::NUMBER && toks[8].value == "100" && toks[8].number_kind == NumberKind::I8, "100_i8")
+    assert(toks[10].type == TokenKind::NUMBER && toks[10].value == "200" && toks[10].number_kind == NumberKind::U8, "200_u8")
+    assert(toks[12].type == TokenKind::NUMBER && toks[12].value == "777" && toks[12].number_kind == NumberKind::I128, "777_i128")
+    assert(toks[14].type == TokenKind::NUMBER && toks[14].value == "888" && toks[14].number_kind == NumberKind::U128, "888_u128")
+
+    # bases 2, 8, 16
+    toks_base = tokenize_all("0b101 0o77 0x1f 0x1f_u8 0xABC 0xDEF")
+    assert(toks_base[0].type == TokenKind::NUMBER && toks_base[0].value == "5" && toks_base[0].number_kind == NumberKind::I32, "0b101")
+    assert(toks_base[2].type == TokenKind::NUMBER && toks_base[2].value == "63" && toks_base[2].number_kind == NumberKind::I32, "0o77")
+    assert(toks_base[4].type == TokenKind::NUMBER && toks_base[4].value == "31" && toks_base[4].number_kind == NumberKind::I32, "0x1f")
+    assert(toks_base[6].type == TokenKind::NUMBER && toks_base[6].value == "31" && toks_base[6].number_kind == NumberKind::U8, "0x1f_u8")
+    assert(toks_base[8].type == TokenKind::NUMBER && toks_base[8].value == "2748" && toks_base[8].number_kind == NumberKind::I32, "0xABC")
+    assert(toks_base[10].type == TokenKind::NUMBER && toks_base[10].value == "3567" && toks_base[10].number_kind == NumberKind::I32, "0xDEF")
+    # floats
+    toks_f = tokenize_all("123.45 1e10 1.5_f32 2.5_f64")
+    assert(toks_f[0].type == TokenKind::NUMBER && toks_f[0].value == "123.45" && toks_f[0].number_kind == NumberKind::F64, "123.45")
+    assert(toks_f[2].type == TokenKind::NUMBER && toks_f[2].value == "1e10" && toks_f[2].number_kind == NumberKind::F64, "1e10")
+    assert(toks_f[4].type == TokenKind::NUMBER && toks_f[4].value == "1.5" && toks_f[4].number_kind == NumberKind::F32, "1.5_f32")
+    assert(toks_f[6].type == TokenKind::NUMBER && toks_f[6].value == "2.5" && toks_f[6].number_kind == NumberKind::F64, "2.5_f64")
+
+    # signed numbers
+    toks_s = tokenize_all("-123 +456")
+    assert(toks_s[0].type == TokenKind::NUMBER && toks_s[0].value == "-123", "-123")
+    assert(toks_s[2].type == TokenKind::NUMBER && toks_s[2].value == "+456", "+456")
+
+    puts "ok (numbers verified)"
+  end
+
+  def self.test_chars_and_strings
+    print "testing char and string literals... "
+    toks_c = tokenize_all("'a' '\\n' '\\t' '\\'' '\\\\' '\\0' '\\u{1F600}'")
+    assert(toks_c[0].type == TokenKind::CHAR && toks_c[0].value == "a", "'a'")
+    assert(toks_c[2].type == TokenKind::CHAR && toks_c[2].value == "\n", "'\\n'")
+    assert(toks_c[4].type == TokenKind::CHAR && toks_c[4].value == "\t", "'\\t'")
+    assert(toks_c[6].type == TokenKind::CHAR && toks_c[6].value == "'", "'\\''")
+    assert(toks_c[8].type == TokenKind::CHAR && toks_c[8].value == "\\", "'\\\\'")
+    assert(toks_c[10].type == TokenKind::CHAR && toks_c[10].value == "\0", "'\\0'")
+    assert(toks_c[12].type == TokenKind::CHAR && toks_c[12].value == "\u{1F600}", "'\\u{1F600}'")
+    # string interpolation
+    toks_s = tokenize_all("\"hello \#{1 + 2} world\"")
+    assert(toks_s[0].type == TokenKind::DELIMITER_START, "string start")
+    assert(toks_s[1].type == TokenKind::STRING && toks_s[1].value == "hello ", "hello")
+    assert(toks_s[2].type == TokenKind::INTERPOLATION_START, "interpolation start")
+    assert(toks_s[3].type == TokenKind::NUMBER && toks_s[3].value == "1", "1")
+    assert(toks_s[5].type == TokenKind::OP_PLUS, "+")
+    assert(toks_s[7].type == TokenKind::NUMBER && toks_s[7].value == "2", "2")
+    assert(toks_s[8].type == TokenKind::OP_RCURLY, "}")
+    assert(toks_s[9].type == TokenKind::STRING && toks_s[9].value == " world", " world")
+    assert(toks_s[10].type == TokenKind::DELIMITER_END, "string end")
+
+    puts "ok (chars and strings verified)"
+  end
+
+  def self.test_percent_literals
+    print "testing percent literals (%q, %w, %i, %x, %r)... "
+    toks_q = tokenize_all("%q(hello world)")
+    assert(toks_q[0].type == TokenKind::DELIMITER_START, "%q start")
+    assert(toks_q[1].type == TokenKind::STRING && toks_q[1].value == "hello world", "%q content")
+    assert(toks_q[2].type == TokenKind::DELIMITER_END, "%q end")
+
+    toks_w = tokenize_all("%w(foo bar baz)")
+    assert(toks_w[0].type == TokenKind::STRING_ARRAY_START, "%w start")
+    assert(toks_w[1].type == TokenKind::STRING && toks_w[1].value == "foo", "foo")
+    assert(toks_w[3].type == TokenKind::STRING && toks_w[3].value == "bar", "bar")
+    assert(toks_w[5].type == TokenKind::STRING && toks_w[5].value == "baz", "baz")
+    assert(toks_w[6].type == TokenKind::STRING_ARRAY_END, "%w end")
+
+    toks_i = tokenize_all("%i(a b c)")
+    assert(toks_i[0].type == TokenKind::SYMBOL_ARRAY_START, "%i start")
+    assert(toks_i[1].type == TokenKind::STRING && toks_i[1].value == "a", "a")
+    assert(toks_i[3].type == TokenKind::STRING && toks_i[3].value == "b", "b")
+    assert(toks_i[5].type == TokenKind::STRING && toks_i[5].value == "c", "c")
+    assert(toks_i[6].type == TokenKind::STRING_ARRAY_END, "%i end")
+
+    puts "ok (percent literals verified)"
+  end
+
+  def self.test_symbols
+    print "testing symbol literals... "
+    toks = tokenize_all(":foo :\"with space\" :+ :- :[] :[]=")
+    assert(toks[0].type == TokenKind::SYMBOL && toks[0].value == "foo", ":foo")
+    assert(toks[2].type == TokenKind::SYMBOL && toks[2].value == "with space", ":\"with space\"")
+    assert(toks[4].type == TokenKind::SYMBOL && toks[4].value == "+", ":+")
+    assert(toks[6].type == TokenKind::SYMBOL && toks[6].value == "-", ":-")
+    assert(toks[8].type == TokenKind::SYMBOL && toks[8].value == "[]", ":[]")
+    assert(toks[10].type == TokenKind::SYMBOL && toks[10].value == "[]=", ":[]=")
+
+    puts "ok (symbols verified)"
+  end
+
+  def self.test_iyi_lexical_features
+    print "testing iyi-specific lexical features (end!, pub, trait, impl, forall, module)... "
+    # ! is not part of an identifier in .iyi mode
+    toks_end = tokenize_all("end!", "app.iyi")
+    assert(toks_end[0].type == TokenKind::IDENT && toks_end[0].keyword? && toks_end[0].value == "end", "end in end!")
+    assert(toks_end[1].type == TokenKind::OP_BANG, "! in end!")
+
+    # forall syntax
+    toks_forall = tokenize_all("def f(x : T) forall T : Show")
+    assert(toks_forall[0].type == TokenKind::IDENT && toks_forall[0].keyword == Keyword::DEF, "def")
+    assert(toks_forall[11].type == TokenKind::IDENT && toks_forall[11].value == "forall", "forall")
+
+    # pub, trait, impl, using, import
+    code = "pub trait Show\n  abstract def show : String\nend\n\nimpl Show for Int32\n  def show : String\n    to_s\n  end\nend\n"
+    toks_ti = tokenize_all(code)
+    assert(toks_ti[0].keyword == Keyword::PUB, "pub")
+    assert(toks_ti[2].keyword == Keyword::TRAIT, "trait")
+    assert(toks_ti[4].type == TokenKind::CONST && toks_ti[4].value == "Show", "Show")
+
+    puts "ok (iyi syntax verified)"
+  end
+
+  def self.test_locations
+    print "testing location tracking (line, column)... "
+    src = "pub def foo\n  123\nend"
+    tokens = tokenize_all(src)
+    # line 1
+    assert(tokens[0].line_number == 1 && tokens[0].column_number == 1, "pub loc")
+    assert(tokens[2].line_number == 1 && tokens[2].column_number == 5, "def loc")
+    assert(tokens[4].line_number == 1 && tokens[4].column_number == 9, "foo loc")
+    # line 2
+    assert(tokens[5].type == TokenKind::NEWLINE, "newline 1")
+    assert(tokens[6].type == TokenKind::SPACE, "indent space")
+    assert(tokens[7].line_number == 2 && tokens[7].column_number == 3, "123 loc")
+    # line 3
+    assert(tokens[8].type == TokenKind::NEWLINE, "newline 2")
+    assert(tokens[9].line_number == 3 && tokens[9].column_number == 1, "end loc")
+
+    puts "ok (locations verified)"
+  end
+
+  def self.test_boundaries
+    print "testing boundary conditions (empty, comments only, whitespace only)... "
+    toks_empty = tokenize_all("")
+    assert(toks_empty.size == 1 && toks_empty[0].type == TokenKind::EOF, "empty EOF")
+
+    toks_ws = tokenize_all("   \t\n  \n")
+    assert(toks_ws.last.type == TokenKind::EOF, "whitespace EOF")
+
+    toks_c = tokenize_all("# just a comment\n# another")
+    assert(toks_c.last.type == TokenKind::EOF, "comment EOF")
+
+    puts "ok (boundaries verified)"
+  end
+
+  def self.test_syntax_fixtures
+    print "testing real syntax fixtures tokenization... "
+    fixtures = [
+      "samples/iyi/calc.iyi",
+      "samples/iyi/shapes.iyi",
+      "samples/iyi/config.iyi",
+    ]
+
+    total_tokens = 0
+    i = 0
+    while i < fixtures.size
+      path = fixtures[i]
+      source = File.read(path)
+      tokens = tokenize_all(source, path)
+      assert(tokens.size > 10, "expected tokens for #{path}")
+      total_tokens = total_tokens + tokens.size
+      i = i + 1
+    end
+    print "ok ("
+    print total_tokens.to_s
+    puts " tokens across fixtures)"
+  end
+
+  def self.test_macro_tokens
+    print "testing macro tokens and modes... "
+    source = "hello \\{% raise \"msg\" %} {% if cond %} body {% end %}"
+    lexer = Lexer.new(source)
+    state = MacroState.default
+
+    tok1 = lexer.next_macro_token(state)
+    assert(tok1.type == TokenKind::MACRO_LITERAL, "expected literal")
+    assert(tok1.value == "hello ", "literal text")
+
+    tok2 = lexer.next_macro_token(tok1.macro_state)
+    assert(tok2.type == TokenKind::MACRO_LITERAL, "expected escaped delimiter literal")
+    assert(tok2.value == "{% ", "escaped delimiter value")
+
+    tok3 = lexer.next_macro_token(tok2.macro_state)
+    assert(tok3.type == TokenKind::MACRO_LITERAL, "expected literal body")
+
+    tok4 = lexer.next_macro_token(tok3.macro_state)
+    assert(tok4.type == TokenKind::MACRO_CONTROL_START, "expected {%")
+
+    puts "ok (macro tokens verified)"
+  end
+
+  def self.run_all
+    puts "============================================================"
+    puts "Running Selfhost Lexer Verification Suite (pure iyi stage 0)"
+    puts "============================================================"
+    test_keywords
+    test_operators
+    test_assignment_operators
+    test_unary_operators
+    test_numbers
+    test_chars_and_strings
+    test_percent_literals
+    test_symbols
+    test_iyi_lexical_features
+    test_locations
+    test_boundaries
+    test_syntax_fixtures
+    test_macro_tokens
+    puts "============================================================"
+    puts "ALL SELFHOST LEXER CHECKS PASSED SUCCESSFULLY!"
+    puts "============================================================"
+  end
+end
+
+if Program.args.size > 0
+  filename = Program.args[0]
+  source = File.read(filename)
+  tokens = BenchSelfhostLexerExercise.tokenize_all(source, filename)
+  tokens.each do |tok|
+    puts tok.normalized_s
+  end
+else
+  BenchSelfhostLexerExercise.run_all
+end

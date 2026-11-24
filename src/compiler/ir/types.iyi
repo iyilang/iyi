@@ -1,0 +1,354 @@
+module compiler/ir/types
+
+# The kinds of IR type. Vectors are absent: no module in the oracle corpus emits them.
+pub enum TypeKind
+  Void
+  Int
+  Float
+  Ptr
+  Struct
+  Array
+  Func
+end
+
+# Whether a name can be written bare (`%name`, `@name`) in the text form.
+pub def ir_bare_name?(name : String) : Bool
+  return false if name.empty?
+  i = 0
+  while i < name.bytesize
+    b = name.byte_at(i)
+    digit = b >= 48_u8 && b <= 57_u8
+    alpha = (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8)
+    return false if i == 0 && digit
+    return false unless alpha || digit || b == 95_u8 || b == 46_u8 || b == 36_u8
+    i = i + 1
+  end
+  true
+end
+
+# A name as the text form writes it: bare when it can be, otherwise quoted.
+pub def ir_name_text(name : String) : String
+  ir_bare_name?(name) ? name : ir_quote(name)
+end
+
+# A string as the text form writes it: double quotes, `\"`, `\\` and `\xHH` escapes.
+pub def ir_quote(text : String) : String
+  String.build do |io|
+    io << '"'
+    i = 0
+    while i < text.bytesize
+      b = text.byte_at(i)
+      if b == 34_u8
+        io << "\\\""
+      elsif b == 92_u8
+        io << "\\\\"
+      elsif b < 32_u8 || b >= 127_u8
+        io << "\\x" << ir_hex(b.to_i64, 2)
+      else
+        io << text[i]
+      end
+      i = i + 1
+    end
+    io << '"'
+  end
+end
+
+# The low `digits` hex nibbles of `value`, lowercase, zero-padded.
+pub def ir_hex(value : Int64, digits : Int32) : String
+  String.build do |io|
+    shift = (digits - 1) * 4
+    while shift >= 0
+      nibble = (value >> shift) & 15_i64
+      io << "0123456789abcdef"[nibble.to_i32]
+      shift = shift - 4
+    end
+  end
+end
+
+# The integer widths the IR accepts: every width from 1 up to LLVM's own limit of 2^23 - 1 bits. The hosted compiler
+# emits widths beyond 128 (an i192 is in one program of the corpus), so no narrower set is right.
+pub def valid_int_bits?(bits : Int32) : Bool
+  bits >= 1 && bits <= 8388607
+end
+
+# A canonical IR type. TypeTable interns every type, so equal types are the same object.
+pub class IrType
+  getter kind : TypeKind
+  getter bits : Int32           # Int: 1, 8, 16, 32, 64, 128. Float: 32, 64.
+  getter address_space : Int32  # Ptr: 0; 256 (%gs) and 257 (%fs) on x86_64.
+  getter fields : Array(IrType) # Struct
+  getter packed : Bool          # Struct
+  getter name : String?         # Struct, named
+  getter element : IrType?      # Array
+  getter count : Int64          # Array
+  getter params : Array(IrType) # Func
+  getter ret : IrType?          # Func
+  getter varargs : Bool         # Func
+  getter key : String           # the interning key; not printed
+
+  def initialize(@kind : TypeKind, @bits : Int32, @address_space : Int32, @fields : Array(IrType), @packed : Bool, @name : String?, @element : IrType?, @count : Int64, @params : Array(IrType), @ret : IrType?, @varargs : Bool, @key : String, @opaque : Bool)
+  end
+
+  def opaque? : Bool
+    @opaque
+  end
+
+  # Gives a named struct its body, once. TypeTable#set_body is the usual route to this.
+  def define_body(fields : Array(IrType), packed : Bool) : Nil
+    @fields = fields
+    @packed = packed
+    @opaque = false
+  end
+
+  # The body of an opaque named struct; codegen's name for it.
+  def struct_set_body(fields : Array(IrType), packed : Bool = false) : Nil
+    raise "struct #{@name} already has a body" unless @opaque
+    define_body(fields, packed)
+  end
+
+  def void? : Bool
+    @kind == TypeKind::Void
+  end
+
+  def int? : Bool
+    @kind == TypeKind::Int
+  end
+
+  def float? : Bool
+    @kind == TypeKind::Float
+  end
+
+  def float32? : Bool
+    @kind == TypeKind::Float && @bits == 32
+  end
+
+  def double? : Bool
+    @kind == TypeKind::Float && @bits == 64
+  end
+
+  def half? : Bool
+    false
+  end
+
+  def pointer? : Bool
+    @kind == TypeKind::Ptr
+  end
+
+  def struct? : Bool
+    @kind == TypeKind::Struct
+  end
+
+  def array? : Bool
+    @kind == TypeKind::Array
+  end
+
+  def function? : Bool
+    @kind == TypeKind::Func
+  end
+
+  def vector? : Bool
+    false
+  end
+
+  def int_width : Int32
+    int? ? @bits : 0
+  end
+
+  def array_length : Int32
+    array? ? @count.to_i32 : 0
+  end
+
+  def element_type : IrType
+    element = @element
+    return element if element
+    raise "#{self.to_s} is not an array"
+  end
+
+  def return_type : IrType
+    return self unless function?
+    ret = @ret
+    return ret if ret
+    raise "a function type has no return type"
+  end
+
+  def param_types : Array(IrType)
+    @params
+  end
+
+  def param_count : Int32
+    @params.size
+  end
+
+  def varargs? : Bool
+    @varargs
+  end
+
+  def struct_element_types : Array(IrType)
+    struct? ? @fields : [] of IrType
+  end
+
+  def packed_struct? : Bool
+    struct? && @packed
+  end
+
+  def struct_name : String?
+    struct? ? @name : nil
+  end
+
+  # The type as the text form writes it.
+  def to_s : String
+    case @kind
+    when TypeKind::Void
+      "void"
+    when TypeKind::Int
+      "i#{@bits}"
+    when TypeKind::Float
+      @bits == 32 ? "float" : "double"
+    when TypeKind::Ptr
+      @address_space == 0 ? "ptr" : "ptr addrspace(#{@address_space})"
+    when TypeKind::Struct
+      if name = @name
+        "%" + ir_name_text(name)
+      else
+        struct_body_text
+      end
+    when TypeKind::Array
+      "[#{@count} x #{element_type.to_s}]"
+    else
+      ret_text = return_type.to_s
+      params_text = @params.map { |p| p.to_s }.join(", ")
+      if @varargs
+        params_text = params_text.empty? ? "..." : params_text + ", ..."
+      end
+      "#{ret_text} (#{params_text})"
+    end
+  end
+
+  # The body of a struct as the text form writes it: `{ i32, i8 }` or `<{ i32 }>`.
+  def struct_body_text : String
+    inner = @fields.map { |f| f.to_s }.join(", ")
+    if @packed
+      inner.empty? ? "<{}>" : "<{ #{inner} }>"
+    else
+      inner.empty? ? "{}" : "{ #{inner} }"
+    end
+  end
+end
+
+# Interns IR types, and owns the named structs in creation order.
+pub class TypeTable
+  getter named : Array(IrType)
+
+  def initialize
+    @interned = Hash(String, IrType).new
+    @by_name = Hash(String, IrType).new
+    @named = [] of IrType
+  end
+
+  def void : IrType
+    canonical("v", TypeKind::Void, 0, 0, [] of IrType, false, nil, 0_i64, [] of IrType, nil, false)
+  end
+
+  def int(bits : Int32) : IrType
+    raise "no integer type of #{bits} bits in the IR" unless valid_int_bits?(bits)
+    canonical("i#{bits}", TypeKind::Int, bits, 0, [] of IrType, false, nil, 0_i64, [] of IrType, nil, false)
+  end
+
+  def int1 : IrType
+    int(1)
+  end
+
+  def int8 : IrType
+    int(8)
+  end
+
+  def int16 : IrType
+    int(16)
+  end
+
+  def int32 : IrType
+    int(32)
+  end
+
+  def int64 : IrType
+    int(64)
+  end
+
+  def int128 : IrType
+    int(128)
+  end
+
+  def float(bits : Int32) : IrType
+    unless bits == 32 || bits == 64
+      raise "no floating-point type of #{bits} bits in the IR"
+    end
+    canonical("f#{bits}", TypeKind::Float, bits, 0, [] of IrType, false, nil, 0_i64, [] of IrType, nil, false)
+  end
+
+  def float : IrType
+    float(32)
+  end
+
+  def double : IrType
+    float(64)
+  end
+
+  def pointer(address_space : Int32 = 0) : IrType
+    canonical("p#{address_space}", TypeKind::Ptr, 0, address_space, [] of IrType, false, nil, 0_i64, [] of IrType, nil, false)
+  end
+
+  def ptr(address_space : Int32 = 0) : IrType
+    pointer(address_space)
+  end
+
+  def struct_of(fields : Array(IrType), packed : Bool = false) : IrType
+    key = (packed ? "<" : "{") + fields.map { |f| f.key }.join(",") + (packed ? ">" : "}")
+    canonical(key, TypeKind::Struct, 0, 0, fields, packed, nil, 0_i64, [] of IrType, nil, false)
+  end
+
+  def struct(fields : Array(IrType), packed : Bool = false) : IrType
+    struct_of(fields, packed)
+  end
+
+  # The named struct called `name`, created opaque on first use and returned unchanged after.
+  def named_struct(name : String) : IrType
+    if existing = @by_name[name]?
+      return existing
+    end
+    created = IrType.new(TypeKind::Struct, 0, 0, [] of IrType, false, name, nil, 0_i64, [] of IrType, nil, false, "%#{name.bytesize}:#{name}", true)
+    @by_name[name] = created
+    @named << created
+    created
+  end
+
+  def struct_named(name : String) : IrType
+    named_struct(name)
+  end
+
+  def set_body(named : IrType, fields : Array(IrType), packed : Bool = false) : Nil
+    raise "struct #{named.name} already has a body" unless named.opaque?
+    named.define_body(fields, packed)
+  end
+
+  def array_of(element : IrType, count : Int64) : IrType
+    canonical("[#{count}x#{element.key}]", TypeKind::Array, 0, 0, [] of IrType, false, element, count, [] of IrType, nil, false)
+  end
+
+  def array(element : IrType, count : Int32) : IrType
+    array_of(element, count.to_i64)
+  end
+
+  def func(params : Array(IrType), ret : IrType, varargs : Bool = false) : IrType
+    key = "F(" + params.map { |p| p.key }.join(",") + ")" + ret.key + (varargs ? "..." : "")
+    canonical(key, TypeKind::Func, 0, 0, [] of IrType, false, nil, 0_i64, params, ret, varargs)
+  end
+
+  private def canonical(key : String, kind : TypeKind, bits : Int32, address_space : Int32, fields : Array(IrType), packed : Bool, element : IrType?, count : Int64, params : Array(IrType), ret : IrType?, varargs : Bool) : IrType
+    if existing = @interned[key]?
+      return existing
+    end
+    created = IrType.new(kind, bits, address_space, fields, packed, nil, element, count, params, ret, varargs, key, false)
+    @interned[key] = created
+    created
+  end
+end

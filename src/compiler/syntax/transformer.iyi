@@ -1,0 +1,630 @@
+module compiler/syntax/transformer
+
+import compiler/syntax/ast::{Alias, AlignOf, And, Annotation, AnnotationDef, Arg, ArrayLiteral, Asm, AsmOperand, Assign, AssocTypeDecl, Block, BoolLiteral, Break, CStructOrUnionDef, Call, Case, Cast, CharLiteral, ClassDef, ClassVar, Def, Defer, DoubleSplat, EnumDef, ExceptionHandler, Expressions, Extend, ExternalVar, FunDef, Generic, Global, HashLiteral, If, ImplDef, ImplicitObj, ImportDecl, Include, InstanceAlignOf, InstanceSizeOf, InstanceVar, IsA, LibDef, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MagicConstant, Metaclass, ModuleDef, ModuleHeader, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, NilableCast, Nop, Not, NumberLiteral, OffsetOf, OpAssign, Or, Out, Path, PointerOf, Primitive, ProcLiteral, ProcNotation, ProcPointer, Propagate, RangeLiteral, ReadInstanceVar, Recover, RegexLiteral, Require, Rescue, RespondsTo, Return, Select, Self, SizeOf, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TraitDef, TupleLiteral, TypeDeclaration, TypeDef, TypeOf, Underscore, UninitializedVar, Union, Unless, Until, UsingDecl, Var, VisibilityModifier, When, While, Yield, ASTNode, BinaryOp, UnaryExpression, ControlExpression}
+
+pub abstract class Transformer
+  def before_transform(node : ASTNode) : Nil
+  end
+
+  def after_transform(node : ASTNode) : Nil
+  end
+
+  def transform(node : ASTNode) : ASTNode
+    node
+  end
+
+  def transform_many(nodes : Array(ASTNode)) : Nil
+    i = 0
+    while i < nodes.size
+      nodes[i] = nodes[i].transform(self)
+      i = i + 1
+    end
+  end
+
+  def transform(node : Alias) : ASTNode
+    node
+  end
+
+  def transform(node : AlignOf) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : And) : ASTNode
+    node.left = node.left.transform(self)
+    node.right = node.right.transform(self)
+    node
+  end
+
+  def transform(node : Annotation) : ASTNode
+    node
+  end
+
+  def transform(node : AnnotationDef) : ASTNode
+    node
+  end
+
+  def transform(node : Arg) : ASTNode
+    node
+  end
+
+  def transform(node : ArrayLiteral) : ASTNode
+    transform_many(node.elements)
+    if o = node.of
+      node.of = o.transform(self)
+    end
+    node
+  end
+
+  def transform(node : Asm) : ASTNode
+    if outs = node.outputs
+      i = 0
+      while i < outs.size
+        outs[i] = outs[i].transform(self).as(AsmOperand)
+        i = i + 1
+      end
+    end
+    if ins = node.inputs
+      j = 0
+      while j < ins.size
+        ins[j] = ins[j].transform(self).as(AsmOperand)
+        j = j + 1
+      end
+    end
+    node
+  end
+
+  def transform(node : AsmOperand) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : Assign) : ASTNode
+    node.target = node.target.transform(self)
+    node.value = node.value.transform(self)
+    node
+  end
+
+  def transform(node : AssocTypeDecl) : ASTNode
+    node
+  end
+
+  def transform(node : Block) : ASTNode
+    node.body = node.body.transform(self)
+    node
+  end
+
+  def transform(node : BoolLiteral) : ASTNode
+    node
+  end
+
+  def transform(node : Break) : ASTNode
+    if e = node.exp
+      node.exp = e.transform(self)
+    end
+    node
+  end
+
+  def transform(node : CStructOrUnionDef) : ASTNode
+    node
+  end
+
+  def transform(node : Call) : ASTNode
+    if obj = node.obj
+      node.obj = obj.transform(self)
+    end
+    transform_many(node.args)
+    if blk = node.block
+      node.block = blk.transform(self).as(Block)
+    end
+    if ba = node.block_arg
+      node.block_arg = ba.transform(self)
+    end
+    if na = node.named_args
+      j = 0
+      while j < na.size
+        na[j] = na[j].transform(self).as(NamedArgument)
+        j = j + 1
+      end
+    end
+    node
+  end
+
+  def transform(node : Case) : ASTNode
+    if c = node.cond
+      node.cond = c.transform(self)
+    end
+    i = 0
+    while i < node.whens.size
+      node.whens[i] = node.whens[i].transform(self).as(When)
+      i = i + 1
+    end
+    if el = node.else
+      node.else = el.transform(self)
+    end
+    node
+  end
+
+  def transform(node : Cast) : ASTNode
+    node.obj = node.obj.transform(self)
+    node.to = node.to.transform(self)
+    node
+  end
+
+  def transform(node : CharLiteral) : ASTNode
+    node
+  end
+
+  def transform(node : ClassDef) : ASTNode
+    if sc = node.superclass
+      node.superclass = sc.transform(self)
+    end
+    node.body = node.body.transform(self)
+    node
+  end
+
+  def transform(node : ClassVar) : ASTNode
+    node
+  end
+
+  def transform(node : Def) : ASTNode
+    if r = node.receiver
+      node.receiver = r.transform(self)
+    end
+    node.body = node.body.transform(self)
+    node
+  end
+
+  def transform(node : Defer) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : DoubleSplat) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : EnumDef) : ASTNode
+    node
+  end
+
+  def transform(node : ExceptionHandler) : ASTNode
+    node.body = node.body.transform(self)
+    if r = node.rescues
+      i = 0
+      while i < r.size
+        r[i] = r[i].transform(self).as(Rescue)
+        i = i + 1
+      end
+    end
+    if el = node.else
+      node.else = el.transform(self)
+    end
+    if ens = node.ensure
+      node.ensure = ens.transform(self)
+    end
+    node
+  end
+
+  def transform(node : Expressions) : ASTNode
+    exps = [] of ASTNode
+    i = 0
+    while i < node.expressions.size
+      new_exp = node.expressions[i].transform(self)
+      if new_exp.is_a?(Expressions)
+        exps.concat(new_exp.as(Expressions).expressions)
+      else
+        exps << new_exp
+      end
+      i = i + 1
+    end
+    if exps.size == 1
+      return exps[0]
+    end
+    node.expressions = exps
+    node
+  end
+
+  def transform(node : Extend) : ASTNode
+    node
+  end
+
+  def transform(node : ExternalVar) : ASTNode
+    node
+  end
+
+  def transform(node : FunDef) : ASTNode
+    node
+  end
+
+  def transform(node : Generic) : ASTNode
+    node
+  end
+
+  def transform(node : Global) : ASTNode
+    node
+  end
+
+  def transform(node : HashLiteral) : ASTNode
+    i = 0
+    while i < node.entries.size
+      entry = node.entries[i]
+      node.entries[i] = HashLiteral::Entry.new(entry.key.transform(self), entry.value.transform(self))
+      i = i + 1
+    end
+    node
+  end
+
+  def transform(node : If) : ASTNode
+    node.cond = node.cond.transform(self)
+    node.then = node.then.transform(self)
+    node.else = node.else.transform(self)
+    node
+  end
+
+  def transform(node : ImplDef) : ASTNode
+    node.body = node.body.transform(self)
+    node
+  end
+
+  def transform(node : ImplicitObj) : ASTNode
+    node
+  end
+
+  def transform(node : ImportDecl) : ASTNode
+    node
+  end
+
+  def transform(node : Include) : ASTNode
+    node
+  end
+
+  def transform(node : InstanceAlignOf) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : InstanceSizeOf) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : InstanceVar) : ASTNode
+    node
+  end
+
+  def transform(node : IsA) : ASTNode
+    node.obj = node.obj.transform(self)
+    node.const = node.const.transform(self)
+    node
+  end
+
+  def transform(node : LibDef) : ASTNode
+    node
+  end
+
+  def transform(node : Macro) : ASTNode
+    node
+  end
+
+  def transform(node : MacroExpression) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : MacroFor) : ASTNode
+    node.exp = node.exp.transform(self)
+    node.body = node.body.transform(self)
+    node
+  end
+
+  def transform(node : MacroIf) : ASTNode
+    node.cond = node.cond.transform(self)
+    node.then = node.then.transform(self)
+    node.else = node.else.transform(self)
+    node
+  end
+
+  def transform(node : MacroLiteral) : ASTNode
+    node
+  end
+
+  def transform(node : MacroVar) : ASTNode
+    node
+  end
+
+  def transform(node : MacroVerbatim) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : MagicConstant) : ASTNode
+    node
+  end
+
+  def transform(node : Metaclass) : ASTNode
+    node
+  end
+
+  def transform(node : ModuleDef) : ASTNode
+    node.body = node.body.transform(self)
+    node
+  end
+
+  def transform(node : ModuleHeader) : ASTNode
+    node
+  end
+
+  def transform(node : MultiAssign) : ASTNode
+    transform_many(node.targets)
+    transform_many(node.values)
+    node
+  end
+
+  def transform(node : NamedArgument) : ASTNode
+    node.value = node.value.transform(self)
+    node
+  end
+
+  def transform(node : NamedTupleLiteral) : ASTNode
+    i = 0
+    while i < node.entries.size
+      entry = node.entries[i]
+      node.entries[i] = NamedTupleLiteral::Entry.new(entry.key, entry.value.transform(self))
+      i = i + 1
+    end
+    node
+  end
+
+  def transform(node : Next) : ASTNode
+    if e = node.exp
+      node.exp = e.transform(self)
+    end
+    node
+  end
+
+  def transform(node : NilLiteral) : ASTNode
+    node
+  end
+
+  def transform(node : NilableCast) : ASTNode
+    node.obj = node.obj.transform(self)
+    node.to = node.to.transform(self)
+    node
+  end
+
+  def transform(node : Nop) : ASTNode
+    node
+  end
+
+  def transform(node : Primitive) : ASTNode
+    node
+  end
+
+  def transform(node : Not) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : NumberLiteral) : ASTNode
+    node
+  end
+
+  def transform(node : OffsetOf) : ASTNode
+    node
+  end
+
+  def transform(node : OpAssign) : ASTNode
+    node.target = node.target.transform(self)
+    node.value = node.value.transform(self)
+    node
+  end
+
+  def transform(node : Or) : ASTNode
+    node.left = node.left.transform(self)
+    node.right = node.right.transform(self)
+    node
+  end
+
+  def transform(node : Out) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : Path) : ASTNode
+    node
+  end
+
+  def transform(node : PointerOf) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : ProcLiteral) : ASTNode
+    node
+  end
+
+  def transform(node : ProcNotation) : ASTNode
+    node
+  end
+
+  def transform(node : ProcPointer) : ASTNode
+    node
+  end
+
+  def transform(node : Propagate) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : RangeLiteral) : ASTNode
+    node.from = node.from.transform(self)
+    node.to = node.to.transform(self)
+    node
+  end
+
+  def transform(node : ReadInstanceVar) : ASTNode
+    node
+  end
+
+  def transform(node : Recover) : ASTNode
+    node.exp = node.exp.transform(self)
+    if d = node.default
+      node.default = d.transform(self)
+    end
+    node
+  end
+
+  def transform(node : RegexLiteral) : ASTNode
+    node
+  end
+
+  def transform(node : Require) : ASTNode
+    node
+  end
+
+  def transform(node : Rescue) : ASTNode
+    node.body = node.body.transform(self)
+    node
+  end
+
+  def transform(node : RespondsTo) : ASTNode
+    node.obj = node.obj.transform(self)
+    node
+  end
+
+  def transform(node : Return) : ASTNode
+    if e = node.exp
+      node.exp = e.transform(self)
+    end
+    node
+  end
+
+  def transform(node : Select) : ASTNode
+    i = 0
+    while i < node.whens.size
+      node.whens[i] = node.whens[i].transform(self).as(When)
+      i = i + 1
+    end
+    if el = node.else
+      node.else = el.transform(self)
+    end
+    node
+  end
+
+  def transform(node : Self) : ASTNode
+    node
+  end
+
+  def transform(node : SizeOf) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : Splat) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : StringInterpolation) : ASTNode
+    transform_many(node.expressions)
+    node
+  end
+
+  def transform(node : StringLiteral) : ASTNode
+    node
+  end
+
+  def transform(node : SymbolLiteral) : ASTNode
+    node
+  end
+
+  def transform(node : TraitDef) : ASTNode
+    node.body = node.body.transform(self)
+    node
+  end
+
+  def transform(node : TupleLiteral) : ASTNode
+    transform_many(node.elements)
+    node
+  end
+
+  def transform(node : TypeDeclaration) : ASTNode
+    node.var = node.var.transform(self)
+    node.declared_type = node.declared_type.transform(self)
+    if v = node.value
+      node.value = v.transform(self)
+    end
+    node
+  end
+
+  def transform(node : TypeDef) : ASTNode
+    node
+  end
+
+  def transform(node : TypeOf) : ASTNode
+    transform_many(node.expressions)
+    node
+  end
+
+  def transform(node : Underscore) : ASTNode
+    node
+  end
+
+  def transform(node : UninitializedVar) : ASTNode
+    node.var = node.var.transform(self)
+    node.declared_type = node.declared_type.transform(self)
+    node
+  end
+
+  def transform(node : Union) : ASTNode
+    node
+  end
+
+  def transform(node : Unless) : ASTNode
+    node.cond = node.cond.transform(self)
+    node.then = node.then.transform(self)
+    node.else = node.else.transform(self)
+    node
+  end
+
+  def transform(node : Until) : ASTNode
+    node.cond = node.cond.transform(self)
+    node.body = node.body.transform(self)
+    node
+  end
+
+  def transform(node : UsingDecl) : ASTNode
+    node
+  end
+
+  def transform(node : Var) : ASTNode
+    node
+  end
+
+  def transform(node : VisibilityModifier) : ASTNode
+    node.exp = node.exp.transform(self)
+    node
+  end
+
+  def transform(node : When) : ASTNode
+    transform_many(node.conds)
+    node.body = node.body.transform(self)
+    node
+  end
+
+  def transform(node : While) : ASTNode
+    node.cond = node.cond.transform(self)
+    node.body = node.body.transform(self)
+    node
+  end
+
+  def transform(node : Yield) : ASTNode
+    transform_many(node.exps)
+    if sc = node.scope
+      node.scope = sc.transform(self)
+    end
+    node
+  end
+end

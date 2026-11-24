@@ -1,0 +1,8 @@
+# Call arguments that begin with a doubled brace (a macro expression) or a magic constant. The hosted parser takes
+# both as arguments: they are in its list of the tokens that start a call argument (parser.cr 6762-6766).
+
+assert_true {{ 1 == 1 }}, "x"
+f {{ 1 == 1 }}
+f __LINE__
+f __FILE__
+f(1, __LINE__)

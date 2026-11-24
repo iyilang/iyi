@@ -1,0 +1,12 @@
+# A control keyword followed by a space and a colon is a name being declared, not the keyword:
+# `getter next : Int32` declares `next`. In a call's arguments a bare `next`, `break` or `return`
+# is a void value and is refused, so the parser has to look for the colon before it refuses.
+class Decoded
+  getter value : Int64
+  getter next : Int32
+  getter break : Bool
+  getter return : Int32
+
+  def initialize(@value : Int64, @next : Int32, @break : Bool, @return : Int32)
+  end
+end

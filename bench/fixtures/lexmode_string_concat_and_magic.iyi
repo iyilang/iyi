@@ -1,0 +1,10 @@
+"hello " \
+"world"
+
+__FILE__
+__LINE__
+__DIR__
+
+def test_defaults(file = __FILE__, line = __LINE__)
+  file
+end

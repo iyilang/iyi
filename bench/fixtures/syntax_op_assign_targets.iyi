@@ -1,0 +1,36 @@
+# Operator assignment to each target the hosted parser accepts: a local, an instance and a class variable, a receiver's
+# name (chained, self, a constant receiver, a name ending in ?), and an index with one argument, two, and none, including
+# a receiver's index. The hosted parser reads these in parse_op_assign (parser.cr 732-861) and in the method suffix
+# (parser.cr 1113-1262).
+
+x = 1
+x += 1
+x -= 1
+x *= 2
+x ||= 3
+x &&= 4
+
+@count = 1
+@count += 1
+@count ||= 2
+@@total = 1
+@@total += 1
+@@total &&= 2
+
+class Config
+  def apply(cfg : Config, table : Hash(String, Int32), key : String, grid : Array(Array(Int32)), other : Config) : Nil
+    cfg.limit += 10
+    cfg.fallback ||= 100
+    cfg.active &&= true
+    cfg.limit? += 1
+    cfg.limit.other += 1
+    self.name += 1
+    Config.count += 1
+    other.values[key] += 1
+    table[key] += 1
+    table[key] ||= 0
+    table[key] &&= 2
+    grid[0, 1] += 3
+    table[] += 1
+  end
+end

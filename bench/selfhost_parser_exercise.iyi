@@ -1,0 +1,906 @@
+import compiler/foundation/location::{Location}
+import compiler/foundation/errors::{SyntaxException}
+import compiler/foundation/enums
+import compiler/foundation/string_pool::{StringPool}
+import compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState}
+import compiler/syntax/lexer::{Lexer}
+import compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Union, Metaclass, ModuleHeader, ImportDecl, UsingDecl, Asm, AsmOperand, ReadInstanceVar, PointerOf, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, Out, Propagate, Defer, Recover, OffsetOf, Require, Select, ExceptionHandler, Rescue, ProcLiteral, ProcPointer, Macro, MacroIf, MacroFor, MacroExpression, MacroLiteral, MacroVar, MacroVerbatim, MagicConstant}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/visitor::{Visitor, NodeCounterVisitor}
+
+module BenchSelfhostParserExercise
+  def self.assert(cond : Bool, msg : String)
+    unless cond
+      puts "Assertion failed: " + msg
+      raise "Assertion failed: " + msg
+    end
+  end
+
+  def self.escape_s(s : String) : String
+    res = "\""
+    i = 0
+    while i < s.bytesize
+      b = s.byte_at(i)
+      if b == 10_u8
+        res = res + "\\n"
+      elsif b == 13_u8
+        res = res + "\\r"
+      elsif b == 9_u8
+        res = res + "\\t"
+      elsif b == 92_u8
+        res = res + "\\\\"
+      elsif b == 34_u8
+        res = res + "\\\""
+      else
+        res = res + b.unsafe_chr.to_s
+      end
+      i = i + 1
+    end
+    res + "\""
+  end
+
+  def self.dump_ast(node : ASTNode?, indent : Int32 = 0) : String
+    return ("  " * indent) + "nil\n" if node.nil?
+    p = "  " * indent
+    case node
+    when Expressions
+      kw = case node.keyword
+           when Expressions::Keyword::Paren then "paren"
+           when Expressions::Keyword::Begin then "begin"
+           else                                  "none"
+           end
+      s = "#{p}Expressions keyword=#{kw}\n"
+      node.expressions.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when Nop
+      "#{p}Nop\n"
+    when NilLiteral
+      "#{p}NilLiteral\n"
+    when BoolLiteral
+      "#{p}BoolLiteral value=#{node.value}\n"
+    when NumberLiteral
+      "#{p}NumberLiteral value=\"#{node.value}\" kind=#{node.kind.to_s}\n"
+    when CharLiteral
+      "#{p}CharLiteral value=#{node.value.ord}\n"
+    when StringLiteral
+      "#{p}StringLiteral value=#{escape_s(node.value)}\n"
+    when StringInterpolation
+      s = "#{p}StringInterpolation\n"
+      node.expressions.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when SymbolLiteral
+      "#{p}SymbolLiteral value=#{escape_s(node.value)}\n"
+    when Var
+      "#{p}Var name=#{escape_s(node.name)}\n"
+    when InstanceVar
+      "#{p}InstanceVar name=#{escape_s(node.name)}\n"
+    when ClassVar
+      "#{p}ClassVar name=#{escape_s(node.name)}\n"
+    when Global
+      "#{p}Global name=#{escape_s(node.name)}\n"
+    when Path
+      "#{p}Path names=#{node.names.join("::")} global=#{node.global}\n"
+    when Generic
+      s = "#{p}Generic\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s += "#{p}  type_vars:\n"
+      node.type_vars.each { |tv| s += dump_ast(tv, indent + 2) }
+      s
+    when Self
+      "#{p}Self\n"
+    when Underscore
+      "#{p}Underscore\n"
+    when ImplicitObj
+      "#{p}ImplicitObj\n"
+    when ArrayLiteral
+      s = "#{p}ArrayLiteral\n"
+      node.elements.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when HashLiteral
+      s = "#{p}HashLiteral\n"
+      node.entries.each do |entry|
+        s += "#{p}  entry:\n"
+        s += "#{p}    key:\n" + dump_ast(entry.key, indent + 3)
+        s += "#{p}    value:\n" + dump_ast(entry.value, indent + 3)
+      end
+      s
+    when TupleLiteral
+      s = "#{p}TupleLiteral\n"
+      node.elements.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when NamedTupleLiteral
+      s = "#{p}NamedTupleLiteral\n"
+      node.entries.each do |entry|
+        s += "#{p}  entry key=#{escape_s(entry.key)}:\n" + dump_ast(entry.value, indent + 2)
+      end
+      s
+    when RangeLiteral
+      s = "#{p}RangeLiteral exclusive=#{node.exclusive}\n"
+      s += "#{p}  from:\n" + dump_ast(node.from, indent + 2)
+      s += "#{p}  to:\n" + dump_ast(node.to, indent + 2)
+      s
+    when RegexLiteral
+      s = "#{p}RegexLiteral\n"
+      s += dump_ast(node.value, indent + 1)
+      s
+    when Call
+      s = "#{p}Call name=#{escape_s(node.name)}\n"
+      if Program.args.size > 0 && Program.args[0].ends_with?("syntax_call_spans.iyi")
+        if loc = node.end_location
+          s += "#{p}  end=#{loc.line_number}:#{loc.column_number}\n"
+        else
+          s += "#{p}  end=nil\n"
+        end
+      end
+      if obj = node.obj
+        s += "#{p}  obj:\n" + dump_ast(obj, indent + 2)
+      end
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      if named_args = node.named_args
+        s += "#{p}  named_args:\n"
+        named_args.each { |na| s += dump_ast(na, indent + 2) }
+      end
+      if block_arg = node.block_arg
+        s += "#{p}  block_arg:\n" + dump_ast(block_arg, indent + 2)
+      end
+      if block = node.block
+        s += "#{p}  block:\n" + dump_ast(block, indent + 2)
+      end
+      s
+    when NamedArgument
+      s = "#{p}NamedArgument name=#{escape_s(node.name)}:\n"
+      s += dump_ast(node.value, indent + 1)
+      s
+    when Block
+      arg_names = node.args.map(&.name).join(", ")
+      splat = node.splat_index ? node.splat_index.to_s : "none"
+      s = "#{p}Block args=[#{arg_names}] splat=#{splat}:\n"
+      if unpacks = node.unpacks
+        unpacks.each do |index, expressions|
+          s += "#{p}  unpack[#{index}]:\n" + dump_ast(expressions, indent + 2)
+        end
+      end
+      s += dump_ast(node.body, indent + 1)
+      s
+    when Assign
+      s = "#{p}Assign\n"
+      s += "#{p}  target:\n" + dump_ast(node.target, indent + 2)
+      s += "#{p}  value:\n" + dump_ast(node.value, indent + 2)
+      s
+    when OpAssign
+      s = "#{p}OpAssign op=#{escape_s(node.op)}\n"
+      s += "#{p}  target:\n" + dump_ast(node.target, indent + 2)
+      s += "#{p}  value:\n" + dump_ast(node.value, indent + 2)
+      s
+    when MultiAssign
+      s = "#{p}MultiAssign\n"
+      s += "#{p}  targets:\n"
+      node.targets.each { |t| s += dump_ast(t, indent + 2) }
+      s += "#{p}  values:\n"
+      node.values.each { |v| s += dump_ast(v, indent + 2) }
+      s
+    when If
+      s = "#{p}If ternary=#{node.ternary}\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  then:\n" + dump_ast(node.then, indent + 2)
+      s += "#{p}  else:\n" + dump_ast(node.else, indent + 2)
+      s
+    when Unless
+      s = "#{p}Unless\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  then:\n" + dump_ast(node.then, indent + 2)
+      s += "#{p}  else:\n" + dump_ast(node.else, indent + 2)
+      s
+    when While
+      s = "#{p}While\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when Until
+      s = "#{p}Until\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when Case
+      s = "#{p}Case exhaustive=#{node.exhaustive}\n"
+      if cond = node.cond
+        s += "#{p}  cond:\n" + dump_ast(cond, indent + 2)
+      end
+      s += "#{p}  whens:\n"
+      node.whens.each { |w| s += dump_ast(w, indent + 2) }
+      if el = node.else
+        s += "#{p}  else:\n" + dump_ast(el, indent + 2)
+      end
+      s
+    when When
+      s = "#{p}When\n"
+      s += "#{p}  conds:\n"
+      node.conds.each { |c| s += dump_ast(c, indent + 2) }
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when And
+      s = "#{p}And\n"
+      s += "#{p}  left:\n" + dump_ast(node.left, indent + 2)
+      s += "#{p}  right:\n" + dump_ast(node.right, indent + 2)
+      s
+    when Or
+      s = "#{p}Or\n"
+      s += "#{p}  left:\n" + dump_ast(node.left, indent + 2)
+      s += "#{p}  right:\n" + dump_ast(node.right, indent + 2)
+      s
+    when Not
+      s = "#{p}Not\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Splat
+      s = "#{p}Splat\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when DoubleSplat
+      s = "#{p}DoubleSplat\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Return
+      s = "#{p}Return\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Break
+      s = "#{p}Break\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Next
+      s = "#{p}Next\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Yield
+      s = "#{p}Yield\n"
+      node.exps.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when Cast
+      s = "#{p}Cast\n"
+      s += "#{p}  obj:\n" + dump_ast(node.obj, indent + 2)
+      s += "#{p}  to:\n" + dump_ast(node.to, indent + 2)
+      s
+    when NilableCast
+      s = "#{p}NilableCast\n"
+      s += "#{p}  obj:\n" + dump_ast(node.obj, indent + 2)
+      s += "#{p}  to:\n" + dump_ast(node.to, indent + 2)
+      s
+    when IsA
+      s = "#{p}IsA nil_check=#{node.nil_check}\n"
+      s += "#{p}  obj:\n" + dump_ast(node.obj, indent + 2)
+      s += "#{p}  const:\n" + dump_ast(node.const, indent + 2)
+      s
+    when RespondsTo
+      s = "#{p}RespondsTo name=#{escape_s(node.name)}\n"
+      s += "#{p}  obj:\n" + dump_ast(node.obj, indent + 2)
+      s
+    when Def
+      receiver_s = node.receiver ? " receiver" : ""
+      abstract_s = node.abstract ? " abstract=true" : ""
+      splat_s = node.splat_index ? " splat=#{node.splat_index}" : ""
+      s = "#{p}Def name=#{escape_s(node.name)}#{receiver_s}#{abstract_s}#{splat_s}\n"
+      if r = node.receiver
+        s += "#{p}  receiver:\n" + dump_ast(r, indent + 2)
+      end
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      if ds = node.double_splat
+        s += "#{p}  double_splat:\n" + dump_ast(ds, indent + 2)
+      end
+      if ba = node.block_arg
+        s += "#{p}  block_arg:\n" + dump_ast(ba, indent + 2)
+      end
+      if rt = node.return_type
+        s += "#{p}  return_type:\n" + dump_ast(rt, indent + 2)
+      end
+      if fv = node.free_vars
+        s += "#{p}  free_vars=[#{fv.join(", ")}]\n"
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when Arg
+      ext_s = (ext = node.external_name) && ext != node.name ? " external_name=#{escape_s(ext)}" : ""
+      s = "#{p}Arg name=#{escape_s(node.name)}#{ext_s}\n"
+      if rest = node.restriction
+        s += "#{p}  restriction:\n" + dump_ast(rest, indent + 2)
+      end
+      if def_val = node.default_value
+        s += "#{p}  default_value:\n" + dump_ast(def_val, indent + 2)
+      end
+      s
+    when ClassDef
+      splat_s = node.splat_index ? " splat=#{node.splat_index}" : ""
+      s = "#{p}ClassDef struct=#{node.struct} abstract=#{node.abstract}#{splat_s}\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      if tv = node.type_vars
+        s += "#{p}  type_vars=[#{tv.join(", ")}]\n"
+      end
+      if sc = node.superclass
+        s += "#{p}  superclass:\n" + dump_ast(sc, indent + 2)
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when ModuleDef
+      splat_s = node.splat_index ? " splat=#{node.splat_index}" : ""
+      s = "#{p}ModuleDef#{splat_s}\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      if tv = node.type_vars
+        s += "#{p}  type_vars=[#{tv.join(", ")}]\n"
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when EnumDef
+      s = "#{p}EnumDef\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      if bt = node.base_type
+        s += "#{p}  base_type:\n" + dump_ast(bt, indent + 2)
+      end
+      if !node.members.empty?
+        s += "#{p}  members:\n"
+        node.members.each { |m| s += dump_ast(m, indent + 2) }
+      end
+      s
+    when Alias
+      s = "#{p}Alias\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s += "#{p}  value:\n" + dump_ast(node.value, indent + 2)
+      s
+    when Include
+      s = "#{p}Include\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s
+    when Extend
+      s = "#{p}Extend\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s
+    when TraitDef
+      s = "#{p}TraitDef\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      if tv = node.type_vars
+        s += "#{p}  type_vars=[#{tv.join(", ")}]\n"
+      end
+      if at = node.assoc_types
+        s += "#{p}  assoc_types=[#{at.join(", ")}]\n"
+      end
+      if st = node.supertraits
+        s += "#{p}  supertraits:\n"
+        st.each { |st_node| s += dump_ast(st_node, indent + 2) }
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when ImplDef
+      s = "#{p}ImplDef\n"
+      s += "#{p}  trait:\n" + dump_ast(node.trait, indent + 2)
+      if ta = node.trait_args
+        s += "#{p}  trait_args:\n"
+        ta.each { |arg| s += dump_ast(arg, indent + 2) }
+      end
+      s += "#{p}  target:\n" + dump_ast(node.target, indent + 2)
+      if tv = node.type_vars
+        s += "#{p}  type_vars=[#{tv.join(", ")}]\n"
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when AssocTypeDecl
+      s = "#{p}AssocTypeDecl name=#{escape_s(node.name)}\n"
+      if val = node.value
+        s += "#{p}  value:\n" + dump_ast(val, indent + 2)
+      end
+      s
+    when AnnotationDef
+      s = "#{p}AnnotationDef\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s
+    when Annotation
+      s = "#{p}Annotation\n"
+      s += "#{p}  path:\n" + dump_ast(node.path, indent + 2)
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      if na = node.named_args
+        s += "#{p}  named_args:\n"
+        na.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      s
+    when TypeDeclaration
+      s = "#{p}TypeDeclaration\n"
+      s += "#{p}  var:\n" + dump_ast(node.var, indent + 2)
+      s += "#{p}  declared_type:\n" + dump_ast(node.declared_type, indent + 2)
+      if val = node.value
+        s += "#{p}  value:\n" + dump_ast(val, indent + 2)
+      end
+      s
+    when UninitializedVar
+      s = "#{p}UninitializedVar\n"
+      s += "#{p}  var:\n" + dump_ast(node.var, indent + 2)
+      s += "#{p}  declared_type:\n" + dump_ast(node.declared_type, indent + 2)
+      s
+    when VisibilityModifier
+      s = "#{p}VisibilityModifier modifier=#{node.modifier.to_s.downcase}\n"
+      s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
+      s
+    when LibDef
+      s = "#{p}LibDef\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when FunDef
+      real_s = (r = node.real_name) ? " real_name=#{escape_s(r)}" : ""
+      s = "#{p}FunDef name=#{escape_s(node.name)}#{real_s}\n"
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      if rt = node.return_type
+        s += "#{p}  return_type:\n" + dump_ast(rt, indent + 2)
+      end
+      if b = node.body
+        s += "#{p}  body:\n" + dump_ast(b, indent + 2)
+      end
+      s
+    when TypeDef
+      s = "#{p}TypeDef name=#{escape_s(node.name)}\n"
+      s += "#{p}  type_spec:\n" + dump_ast(node.type_spec, indent + 2)
+      s
+    when CStructOrUnionDef
+      s = "#{p}CStructOrUnionDef name=#{escape_s(node.name)} union=#{node.union}\n"
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when ExternalVar
+      real_s = (r = node.real_name) ? " real_name=#{escape_s(r)}" : ""
+      s = "#{p}ExternalVar name=#{escape_s(node.name)}#{real_s}\n"
+      s += "#{p}  type_spec:\n" + dump_ast(node.type_spec, indent + 2)
+      s
+    when ProcNotation
+      s = "#{p}ProcNotation\n"
+      if inputs = node.inputs
+        s += "#{p}  inputs:\n"
+        inputs.each { |inp| s += dump_ast(inp, indent + 2) }
+      end
+      if o = node.output
+        s += "#{p}  output:\n" + dump_ast(o, indent + 2)
+      end
+      s
+    when Compiler::Syntax::Ast::Union
+      s = "#{p}Union\n"
+      s += "#{p}  types:\n"
+      node.types.each { |t| s += dump_ast(t, indent + 2) }
+      s
+    when Metaclass
+      s = "#{p}Metaclass\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s
+    when Macro
+      s = "#{p}Macro name=#{escape_s(node.name)}\n"
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when MacroIf
+      s = "#{p}MacroIf\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  then:\n" + dump_ast(node.then, indent + 2)
+      s += "#{p}  else:\n" + dump_ast(node.else, indent + 2)
+      s
+    when MacroFor
+      vars_s = node.vars.map { |v| v.name }.join(", ")
+      s = "#{p}MacroFor vars=[#{vars_s}]\n"
+      s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when MacroExpression
+      s = "#{p}MacroExpression output=#{node.output}\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when MacroLiteral
+      "#{p}MacroLiteral value=#{escape_s(node.value)}\n"
+    when MacroVar
+      s = "#{p}MacroVar name=#{escape_s(node.name)}\n"
+      if exps = node.exps
+        s += "#{p}  exps:\n"
+        exps.each { |e| s += dump_ast(e, indent + 2) }
+      end
+      s
+    when MacroVerbatim
+      s = "#{p}MacroVerbatim\n"
+      s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
+      s
+    when MagicConstant
+      "#{p}MagicConstant name=#{node.name.to_s.downcase}\n"
+    when ModuleHeader
+      "#{p}ModuleHeader path=#{escape_s(node.path.join("/"))}\n"
+    when ImportDecl
+      names_s = "nil"
+      if n = node.names
+        names_s = "[" + n.join(", ") + "]"
+      end
+      "#{p}ImportDecl path=#{escape_s(node.path.join("/"))} exported=#{node.exported} glob=#{node.glob} names=#{names_s}\n"
+    when UsingDecl
+      names_s = "nil"
+      if n = node.names
+        names_s = "[" + n.join(", ") + "]"
+      end
+      "#{p}UsingDecl path=#{escape_s(node.path.join("/"))} names=#{names_s}\n"
+    when Asm
+      s = "#{p}Asm text=#{escape_s(node.text)} volatile=#{node.volatile} alignstack=#{node.alignstack} intel=#{node.intel} can_throw=#{node.can_throw}\n"
+      if outs = node.outputs
+        s += "#{p}  outputs:\n"
+        outs.each { |o| s += dump_ast(o, indent + 2) }
+      end
+      if ins = node.inputs
+        s += "#{p}  inputs:\n"
+        ins.each { |i| s += dump_ast(i, indent + 2) }
+      end
+      if cls = node.clobbers
+        s += "#{p}  clobbers=[" + cls.map { |c| escape_s(c) }.join(", ") + "]\n"
+      end
+      s
+    when AsmOperand
+      s = "#{p}AsmOperand constraint=#{escape_s(node.constraint)}\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when ReadInstanceVar
+      s = "#{p}ReadInstanceVar name=#{escape_s(node.name)}\n"
+      s += "#{p}  obj:\n" + dump_ast(node.obj, indent + 2)
+      s
+    when TypeOf
+      s = "#{p}TypeOf\n"
+      node.expressions.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when PointerOf
+      "#{p}PointerOf\n" + dump_ast(node.exp, indent + 1)
+    when SizeOf
+      "#{p}SizeOf\n" + dump_ast(node.exp, indent + 1)
+    when InstanceSizeOf
+      "#{p}InstanceSizeOf\n" + dump_ast(node.exp, indent + 1)
+    when AlignOf
+      "#{p}AlignOf\n" + dump_ast(node.exp, indent + 1)
+    when InstanceAlignOf
+      "#{p}InstanceAlignOf\n" + dump_ast(node.exp, indent + 1)
+    when Out
+      "#{p}Out\n" + dump_ast(node.exp, indent + 1)
+    when Propagate
+      "#{p}Propagate\n" + dump_ast(node.exp, indent + 1)
+    when Defer
+      "#{p}Defer\n" + dump_ast(node.exp, indent + 1)
+    when Recover
+      s = "#{p}Recover\n"
+      s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
+      s += "#{p}  default:\n" + dump_ast(node.default, indent + 2)
+      s
+    when OffsetOf
+      s = "#{p}OffsetOf\n"
+      s += "#{p}  offsetof_type:\n" + dump_ast(node.offsetof_type, indent + 2)
+      s += "#{p}  offset:\n" + dump_ast(node.offset, indent + 2)
+      s
+    when Require
+      "#{p}Require string=#{escape_s(node.string)}\n"
+    when Select
+      s = "#{p}Select\n"
+      s += "#{p}  whens:\n"
+      node.whens.each { |w| s += dump_ast(w, indent + 2) }
+      if el = node.else
+        s += "#{p}  else:\n" + dump_ast(el, indent + 2)
+      end
+      s
+    when ExceptionHandler
+      s = "#{p}ExceptionHandler implicit=#{node.implicit} suffix=#{node.suffix}\n"
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      if rescues = node.rescues
+        s += "#{p}  rescues:\n"
+        rescues.each { |r| s += dump_ast(r, indent + 2) }
+      end
+      if el = node.else
+        s += "#{p}  else:\n" + dump_ast(el, indent + 2)
+      end
+      if en = node.ensure
+        s += "#{p}  ensure:\n" + dump_ast(en, indent + 2)
+      end
+      s
+    when Rescue
+      rname = "nil"
+      if n = node.name
+        rname = escape_s(n)
+      end
+      s = "#{p}Rescue name=#{rname}\n"
+      if types = node.types
+        s += "#{p}  types:\n"
+        types.each { |t| s += dump_ast(t, indent + 2) }
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when ProcLiteral
+      "#{p}ProcLiteral\n" + dump_ast(node.def, indent + 1)
+    when ProcPointer
+      s = "#{p}ProcPointer name=#{escape_s(node.name)} global=#{node.global}\n"
+      if o = node.obj
+        s += "#{p}  obj:\n" + dump_ast(o, indent + 2)
+      end
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      s
+    else
+      "#{p}ASTNode\n"
+    end
+  end
+
+  def self.test_literals
+    print "testing literal parsing... "
+    p = Parser.new("123; 3.14; 'c'; \"str\"; :sym; true; false; nil; 1..10")
+    node = p.parse
+    assert(node.is_a?(Expressions), "expressions root")
+    p_concat = Parser.new("\"hello \" \\\n\"world\"")
+    node_concat = p_concat.parse
+    assert(node_concat.is_a?(StringLiteral), "concatenated string is StringLiteral")
+    assert(node_concat.as(StringLiteral).value == "hello world", "concatenated string value matches")
+    puts "ok (literals verified)"
+  end
+
+  def self.test_variables_and_paths
+    print "testing variable and path parsing... "
+    p = Parser.new("x = 1; x; @iv; @@cv; $?; Foo::Bar; ::Top")
+    node = p.parse
+    assert(node.is_a?(Expressions), "expressions root")
+    puts "ok (variables and paths verified)"
+  end
+
+  def self.test_operators
+    print "testing operator precedence and associativity... "
+    p = Parser.new("1 + 2 * 3 ** 4; a && b || c && d; x = y = 1; a < b ? c : d")
+    node = p.parse
+    assert(node.is_a?(Expressions), "expressions root")
+    exps = node.as(Expressions).expressions
+    call1 = exps[0].as(Call)
+    assert(call1.name == "+", "plus root")
+    mult = call1.args[0].as(Call)
+    assert(mult.name == "*", "mult child")
+    pow = mult.args[0].as(Call)
+    assert(pow.name == "**", "pow child")
+    assert(pow.obj.as(NumberLiteral).value == "3", "pow base")
+    puts "ok (precedence and associativity verified)"
+  end
+
+  def self.test_calls_and_blocks
+    print "testing call and block parsing... "
+    p = Parser.new("foo; bar(1, 2); baz(x: 10) { |item| item + 1 }; each do |*rest| rest end; call(*args)")
+    node = p.parse
+    assert(node.is_a?(Expressions), "expressions root")
+    exps = node.as(Expressions).expressions
+    assert(exps[3].is_a?(Call) && !exps[3].as(Call).block.nil?, "call with block")
+    assert(exps[4].is_a?(Call) && exps[4].as(Call).args[0].is_a?(Splat), "call with splat")
+    dotted = Parser.new("\"line\\n\".chomp(1)\n  .downcase").parse.as(Call)
+    assert(dotted.location.as(Location).line_number == 1 && dotted.location.as(Location).column_number == 1, "chained call retains receiver location")
+    assert(dotted.name_location.as(Location).line_number == 2 && dotted.name_location.as(Location).column_number == 4, "chained call retains method token location")
+    inner = dotted.obj.as(Call)
+    assert(inner.name_location.as(Location).line_number == 1 && inner.name_location.as(Location).column_number == 10, "escaped receiver does not shift method token location")
+    puts "ok (calls and blocks verified)"
+  end
+
+  def self.test_control
+    print "testing control expressions (if, unless, while, until, case, modifiers)... "
+    p = Parser.new("if a; 1; else; 2; end; x = 10 if flag; while true; break; end; case x; when 1; 2; end")
+    node = p.parse
+    assert(node.is_a?(Expressions), "expressions root")
+    exps = node.as(Expressions).expressions
+    assert(exps[0].is_a?(If), "if expression")
+    assert(exps[1].is_a?(If), "modifier if expression")
+    assert(!exps[1].as(If).then.is_a?(Nop), "modifier if then body")
+    assert(exps[2].is_a?(While), "while expression")
+    assert(exps[3].is_a?(Case), "case expression")
+    puts "ok (control expressions verified)"
+  end
+
+  def self.test_declarations
+    print "testing declaration parsing... "
+    p = Parser.new("def foo(x : Int32) : String; return \"ok\"; end; class Bar < Foo; end; enum Color; Red; Green; end")
+    node = p.parse
+    assert(node.is_a?(Expressions), "expressions root")
+    exps = node.as(Expressions).expressions
+    assert(exps[0].is_a?(Def), "def declaration")
+    assert(exps[1].is_a?(ClassDef), "class declaration")
+    assert(exps[2].is_a?(EnumDef), "enum declaration")
+
+    # The declaration's own details, not just its node kind. A parser that
+    # dropped the return type or the superclass would still answer `Def` and
+    # `ClassDef` here, so those two are read back directly.
+    def_node = exps[0].as(Def)
+    assert(def_node.name == "foo", "def name")
+    assert(def_node.return_type.is_a?(Path), "def return type must be a path")
+    assert(def_node.return_type.as(Path).names.join("::") == "String", "def return type")
+    class_node = exps[1].as(ClassDef)
+    assert(class_node.superclass.is_a?(Path), "class superclass must be a path")
+    assert(class_node.superclass.as(Path).names.join("::") == "Foo", "class superclass")
+
+    # A trait implementation, whose target is a path written without a leading
+    # `::`. The target's own global flag is asserted because nothing else here
+    # observes it, and a parser that marked every path global would otherwise
+    # produce a tree that still passes every other check in this file.
+    p2 = Parser.new("trait Show; abstract def show : String; end; impl Show for User; def show : String; return \"u\"; end; end")
+    node2 = p2.parse
+    exps2 = node2.as(Expressions).expressions
+    assert(exps2[0].is_a?(TraitDef), "trait declaration")
+    impl_node = exps2[1].as(ImplDef)
+    trait_path = impl_node.trait.as(Path)
+    target_path = impl_node.target.as(Path)
+    assert(trait_path.names.join("::") == "Show", "impl trait name")
+    assert(trait_path.global == false, "impl trait path is not global")
+    assert(target_path.names.join("::") == "User", "impl target name")
+    assert(target_path.global == false, "impl target path is not global")
+    p_magic = Parser.new("def log(file = __FILE__, line = __LINE__, dir = __DIR__); end")
+    node_magic = p_magic.parse
+    def_magic = node_magic.as(Def)
+    assert(def_magic.args[0].default_value.is_a?(MagicConstant), "default value is MagicConstant")
+    assert(def_magic.args[0].default_value.as(MagicConstant).name == TokenKind::MAGIC_FILE, "file is MAGIC_FILE")
+    assert(def_magic.args[1].default_value.as(MagicConstant).name == TokenKind::MAGIC_LINE, "line is MAGIC_LINE")
+    assert(def_magic.args[2].default_value.as(MagicConstant).name == TokenKind::MAGIC_DIR, "dir is MAGIC_DIR")
+
+    # A type declaration written as an argument of a call (`getter name : String`)
+    # declares no local variable, so a bare `name` after it is still a call. A parser
+    # that declared every type-declared name would answer `Var` here.
+    p_leak = Parser.new("getter name : String\nname")
+    exps_leak = p_leak.parse.as(Expressions).expressions
+    assert(exps_leak[0].is_a?(Call), "getter with a type declaration argument is a call")
+    assert(exps_leak[1].is_a?(Call), "a name after a call-argument type declaration is a call")
+    assert(exps_leak[1].as(Call).name == "name", "leaked name is the call name")
+
+    # Inline assembly: the template, the operand groups, the clobbers and the
+    # options, each read back. The `::` form leaves the middle parts empty.
+    p_asm = Parser.new("asm(\"nop\" : \"=r\"(x) : \"r\"(y) : \"memory\" : \"volatile\")\nasm(\"pause\" :::: \"volatile\")")
+    exps_asm = p_asm.parse.as(Expressions).expressions
+    asm_full = exps_asm[0].as(Asm)
+    assert(asm_full.text == "nop", "asm template")
+    assert(asm_full.volatile == true, "asm volatile option")
+    assert(asm_full.alignstack == false, "asm alignstack defaults off")
+    outs_full = asm_full.outputs.as(Array(AsmOperand))
+    assert(outs_full.size == 1 && outs_full[0].constraint == "=r", "asm output operand constraint")
+    ins_full = asm_full.inputs.as(Array(AsmOperand))
+    assert(ins_full.size == 1 && ins_full[0].constraint == "r", "asm input operand constraint")
+    clobbers_full = asm_full.clobbers.as(Array(String))
+    assert(clobbers_full.size == 1 && clobbers_full[0] == "memory", "asm clobber")
+    asm_bare = exps_asm[1].as(Asm)
+    assert(asm_bare.text == "pause", "bare asm template")
+    assert(asm_bare.volatile == true, "bare asm volatile option")
+    assert(asm_bare.outputs.nil? && asm_bare.inputs.nil?, "empty asm parts are absent")
+
+    # A concurrent select: its `when`s are an assignment of a call and a call, read back.
+    p_sel = Parser.new("select\nwhen got = ch.receive\n  got\nwhen timeout(5)\n  1\nend")
+    sel = p_sel.parse.as(Select)
+    assert(sel.whens.size == 2, "select has two whens")
+    assert(sel.whens[0].conds[0].is_a?(Assign), "select assignment when")
+    assert(sel.whens[1].conds[0].is_a?(Call), "select call when")
+    puts "ok (declarations verified)"
+  end
+
+  def self.test_fixtures
+    print "testing real syntax fixtures parsing... "
+    fixtures = [
+      "bench/fixtures/expr_literals.iyi",
+      "bench/fixtures/expr_variables_and_paths.iyi",
+      "bench/fixtures/expr_operators.iyi",
+      "bench/fixtures/expr_calls_and_blocks.iyi",
+      "bench/fixtures/expr_control.iyi",
+      "bench/fixtures/expr_modifiers.iyi",
+      "bench/fixtures/expr_collections.iyi",
+      "bench/fixtures/expr_precedence.iyi",
+      "bench/fixtures/expr_associativity.iyi",
+      "bench/fixtures/expr_combined.iyi",
+      "bench/fixtures/expr_ranges_and_tuples.iyi",
+      "bench/fixtures/expr_hashes_and_arrays.iyi",
+      "bench/fixtures/expr_blocks.iyi",
+      "bench/fixtures/expr_multi_assign.iyi",
+      "bench/fixtures/expr_case_when.iyi",
+      "bench/fixtures/expr_asm.iyi",
+      "bench/fixtures/expr_select.iyi",
+      "bench/fixtures/decl_classes_and_structs.iyi",
+      "bench/fixtures/decl_getter_type_leak.iyi",
+      "bench/fixtures/decl_def.iyi",
+      "bench/fixtures/decl_enums.iyi",
+      "bench/fixtures/decl_lib_and_fun.iyi",
+      "bench/fixtures/decl_modules_and_inclusion.iyi",
+      "bench/fixtures/decl_operators.iyi",
+      "bench/fixtures/decl_traits_and_impls.iyi",
+      "bench/fixtures/decl_types_and_vars.iyi",
+      "bench/fixtures/decl_visibility_and_annotations.iyi",
+      "bench/fixtures/syntax_macro_control_grammar.iyi",
+      "bench/fixtures/syntax_string_concat_and_magic.iyi",
+      "bench/fixtures/syntax_macro_text_splits.iyi",
+      "bench/fixtures/syntax_macro_keywords_and_escapes.iyi",
+      "bench/fixtures/syntax_proc_literals.iyi",
+      "bench/fixtures/syntax_proc_pointers.iyi",
+      "bench/fixtures/syntax_scope_locals.iyi",
+      "bench/fixtures/syntax_index_tuples_and_keyword_names.iyi",
+      "bench/fixtures/syntax_type_list_then_call.iyi",
+      "bench/fixtures/syntax_heredoc_command_and_folds.iyi",
+      "bench/fixtures/syntax_begin_shorthand_and_comma_lines.iyi",
+    ]
+
+    total_nodes = 0
+    i = 0
+    while i < fixtures.size
+      src = File.read(fixtures[i])
+      parser = Parser.new(src, fixtures[i])
+      node = parser.parse
+      counter = NodeCounterVisitor.new
+      node.accept(counter)
+      total_nodes = total_nodes + counter.count
+      i = i + 1
+    end
+    print "ok ("
+    print total_nodes.to_s
+    print " nodes across "
+    print fixtures.size.to_s
+    puts " fixtures)"
+  end
+
+  def self.run_all
+    puts "============================================================="
+    puts "Running Selfhost Parser Verification Suite (pure iyi stage 0)"
+    puts "============================================================="
+    test_literals
+    test_variables_and_paths
+    test_operators
+    test_calls_and_blocks
+    test_control
+    test_declarations
+    test_fixtures
+    puts "============================================================="
+    puts "ALL SELFHOST PARSER CHECKS PASSED SUCCESSFULLY!"
+    puts "============================================================="
+  end
+
+  # The verdict of each file in a list, one line per file: ACCEPT, or REFUSE with the message the parse ended with. A parse
+  # is a task of its own: a refusal is a panic the task ended with, and reading the task's value catches it (SPEC.md III.1.4,
+  # as bench/assertions_exercise.iyi does), so the next file runs in this same process.
+  def self.verdicts(list_path : String)
+    File.read(list_path).split('\n').each do |path|
+      next if path.empty?
+      puts verdict_of(path)
+    end
+  end
+
+  def self.verdict_of(path : String) : String
+    verdict = "ACCEPT #{path}"
+    group do |g|
+      task = g.spawn do
+        Parser.new(File.read(path), path).parse
+        0
+      end
+      outcome = task.value
+      if outcome.is_a?(Panicked)
+        verdict = "REFUSE #{path} " + outcome.message.split('\n').join(" ")
+      end
+      0
+    end
+    verdict
+  end
+end
+
+if Program.args.size == 2 && Program.args[0] == "--verdicts"
+  BenchSelfhostParserExercise.verdicts(Program.args[1])
+elsif Program.args.size > 0
+  if Program.args[0] == "-e" && Program.args.size > 1
+    source = Program.args[1]
+    parser = Parser.new(source, "eval")
+    node = parser.parse
+    print BenchSelfhostParserExercise.dump_ast(node)
+  else
+    filename = Program.args[0]
+    source = File.read(filename)
+    parser = Parser.new(source, filename)
+    node = parser.parse
+    print BenchSelfhostParserExercise.dump_ast(node)
+  end
+else
+  BenchSelfhostParserExercise.run_all
+end

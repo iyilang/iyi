@@ -19,7 +19,7 @@ module compiler/native/aarch64/isel
 import compiler/ir/types::{IrType}
 import compiler/ir/values::{Value, Param}
 import compiler/ir/inst::{Op, Inst, CallConv, Ordering, Attribute, CallAux, GepAux, MemAux, IntrinsicAux, ThreadPointerKind, AsmAux, AsmDialect}
-import compiler/ir/function::{Function, Global, Linkage, TlsModel}
+import compiler/ir/function::{Function, Global, Linkage, TlsModel, Visibility}
 import compiler/ir/module::{Module}
 import compiler/ir/layout::{DataLayout}
 import compiler/native/const_expr::{ConstAddress, reduce_const}
@@ -280,11 +280,11 @@ class Isel
     if v.is_a?(Global)
       g = v.as(Global)
       return [thread_local_address(g)] if g.tls != TlsModel::None
-      return [symbol_address(g.name, false, g.initializer.nil? && g.linkage == Linkage::External)]
+      return [symbol_address(g.name, false, g.initializer.nil? && g.linkage == Linkage::External && preemptible?(g.visibility, g.dso_local))]
     end
     if v.is_a?(Function)
       f = v.as(Function)
-      return [symbol_address(f.name, false, f.declaration?)]
+      return [symbol_address(f.name, false, f.declaration? && preemptible?(f.visibility, f.dso_local))]
     end
     if v.is_a?(Inst) && is_const_op?(v.as(Inst).op)
       return const_leaves(v.as(Inst))
@@ -308,7 +308,13 @@ class Isel
     index
   end
 
-  # The address of a symbol: an adrp/add pair for a symbol defined here, the GOT entry for an external one.
+  # Hidden, protected and dso_local declarations resolve inside the image. Static-PIE startup relies on this
+  # before it has rebased the GOT.
+  def preemptible?(visibility : Visibility, dso_local : Bool) : Bool
+    visibility == Visibility::Default && !dso_local
+  end
+
+  # Definitions and non-preemptible declarations use adrp/add; other declarations use the GOT.
   def symbol_address(name : String, tls : Bool, external : Bool) : Int32
     if tls
       fail("thread-local #{name} is reached through threadlocaladdr, not as an operand")

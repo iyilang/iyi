@@ -3881,9 +3881,13 @@ jobs:
       - name: SIMD128 and browser AES-GCM
         run: |
           python3 -m pip install --user --break-system-packages -q cryptography
-          export PATH="/opt/wasi-sdk/bin:$HOME/.wasmtime/bin:$PATH"
+          # Keep the SDK's linker off PATH for native builds. Its LLVM 18
+          # objdump can loop on the wasm output; the runner's LLVM 17 can read it.
+          LLVM_OBJDUMP="$(command -v llvm-objdump-17)" || { echo "LLVM 17 objdump is unavailable" >&2; exit 1; }
+          export LLVM_OBJDUMP
           export IYI="$PWD/room/bin/iyi"
-          export IYI_CHROME="$(command -v google-chrome)"
+          IYI_CHROME="$(command -v google-chrome)" || { echo "Google Chrome is unavailable" >&2; exit 1; }
+          export IYI_CHROME
           bash bench/uint64x2_exercise.sh
           bash bench/wasm_aead_exercise.sh
           IYI_AEAD_MIB=1 bash bench/wasm_aead_speed.sh

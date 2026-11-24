@@ -7,30 +7,47 @@ WASI_SDK_PATH="${WASI_SDK_PATH:-/opt/wasi-sdk}"
 WASMTIME="${WASMTIME:-$HOME/.wasmtime/bin/wasmtime}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/iyi-aead-exercise.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
+fail() {
+  local message="$1" log
+  shift
+  echo "FAIL: $message" >&2
+  for log in "$@"; do
+    if [ -f "$log" ]; then
+      echo "--- $log ---" >&2
+      cat "$log" >&2
+    fi
+  done
+  exit 1
+}
 export IYI_PATH="$REPO/src"
 
 build_wasm() {
   local output="$1" source="$2" command
   shift 2
-  command="$("$IYI" build --cross-compile --target wasm32-wasi "$@" -o "$output" "$source")"
+  command="$("$IYI" build --cross-compile --target wasm32-wasi "$@" -o "$output" "$source")" ||
+    fail "$output: wasm compilation failed${command:+: $command}"
   case "$command" in
     cc\ *) command="\"$WASI_SDK_PATH/bin/clang\" ${command#cc }" ;;
-    *) echo "unexpected wasm link command: $command" >&2; return 1 ;;
+    *) fail "$output: unexpected wasm link command: $command" ;;
   esac
-  eval "$command -o \"$output.wasm\""
+  eval "$command -o \"$output.wasm\"" || fail "$output: wasm link failed"
 }
 
-"$IYI" build -o "$WORK/native" "$REPO/bench/std_aead_exercise.iyi"
-"$WORK/native" >"$WORK/native.out"
-grep -qx 'ALL CHECKS PASSED' "$WORK/native.out"
+"$IYI" build -o "$WORK/native" "$REPO/bench/std_aead_exercise.iyi" || fail "native AEAD: build failed"
+"$WORK/native" >"$WORK/native.out" || fail "native AEAD: program failed" "$WORK/native.out"
+grep -qx 'ALL CHECKS PASSED' "$WORK/native.out" ||
+  fail "native AEAD: success marker missing" "$WORK/native.out"
 for mode in plain plain-simd release release-simd; do
   flags=()
   case "$mode" in release*) flags+=(--release) ;; esac
   case "$mode" in *-simd) flags+=(--mattr +simd128) ;; esac
   build_wasm "$WORK/$mode" "$REPO/bench/std_aead_exercise.iyi" "${flags[@]}"
-  "$WASMTIME" "$WORK/$mode.wasm" >"$WORK/$mode.out"
-  cmp "$WORK/native.out" "$WORK/$mode.out"
-  grep -qx 'ALL CHECKS PASSED' "$WORK/$mode.out"
+  "$WASMTIME" "$WORK/$mode.wasm" >"$WORK/$mode.out" ||
+    fail "$mode AEAD: wasm program failed" "$WORK/$mode.out"
+  cmp "$WORK/native.out" "$WORK/$mode.out" ||
+    fail "$mode AEAD: output differs from native" "$WORK/native.out" "$WORK/$mode.out"
+  grep -qx 'ALL CHECKS PASSED' "$WORK/$mode.out" ||
+    fail "$mode AEAD: success marker missing" "$WORK/$mode.out"
   echo "$mode: native output identical, ALL CHECKS PASSED"
 done
 
@@ -65,8 +82,10 @@ raise "ASSERTION FAILED: gcm eight-block lane open" unless opened.is_a?(String) 
 puts "ALL CHECKS PASSED"
 IYI
 build_wasm "$WORK/lanes" "$WORK/lanes.iyi" --release --mattr +simd128
-"$WASMTIME" "$WORK/lanes.wasm" >"$WORK/lanes.out"
-grep -qx 'ALL CHECKS PASSED' "$WORK/lanes.out"
+"$WASMTIME" "$WORK/lanes.wasm" >"$WORK/lanes.out" ||
+  fail "AEAD lane vector: wasm program failed" "$WORK/lanes.out"
+grep -qx 'ALL CHECKS PASSED' "$WORK/lanes.out" ||
+  fail "AEAD lane vector: success marker missing" "$WORK/lanes.out"
 echo 'eight-block lane vector: independent AES-GCM ciphertext matched'
 
 if python3 -c 'from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305; from cryptography.hazmat.primitives.poly1305 import Poly1305' >/dev/null 2>&1; then
@@ -86,7 +105,8 @@ for name, start, end in [
 PYEXTRACT
   python3 "$WORK/generate.py" "$WORK"
   build_wasm "$WORK/oracle" "$WORK/oracle.iyi" --release --mattr +simd128
-  "$WASMTIME" "$WORK/oracle.wasm" <"$WORK/cases.txt" >"$WORK/oracle.out"
+  "$WASMTIME" "$WORK/oracle.wasm" <"$WORK/cases.txt" >"$WORK/oracle.out" ||
+    fail "AEAD oracle: wasm program failed" "$WORK/oracle.out"
   python3 "$WORK/compare.py" "$WORK"
 else
   echo 'SKIPPED: Python cryptography is unavailable; 3,000 AES-GCM and 3,000 ChaCha20-Poly1305 oracle cases were not run' >&2
@@ -111,9 +131,10 @@ PYMUTATE
   exit_code=$?
   set -e
   if [ "$exit_code" -eq 0 ] || grep -q 'ALL CHECKS PASSED' "$WORK/broken.out"; then
-    echo "FAIL: $label mutation escaped" >&2; exit 1
+    fail "$label mutation escaped" "$WORK/broken.out"
   fi
-  grep -q 'ASSERTION FAILED: gcm' "$WORK/broken.out" || { echo "FAIL: $label failed before an AEAD assertion" >&2; cat "$WORK/broken.out" >&2; exit 1; }
+  grep -q 'ASSERTION FAILED: gcm' "$WORK/broken.out" ||
+    fail "$label failed before an AEAD assertion" "$WORK/broken.out"
   echo "$label: caught (exit $exit_code)"
 }
 prove_broken 'SIMD S-box gate' 'def self.simd_sbox' 's6 = t56 ^ ~t62' 's6 = t56 ^ t62'

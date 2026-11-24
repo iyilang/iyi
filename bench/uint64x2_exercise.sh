@@ -10,6 +10,18 @@ CLANG="$WASI_SDK_PATH/bin/clang"
 OBJDUMP="${LLVM_OBJDUMP:-$(command -v llvm-objdump || printf '%s' "$WASI_SDK_PATH/bin/llvm-objdump")}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/iyi-uint64x2.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
+fail() {
+  local message="$1" log
+  shift
+  echo "FAIL: $message" >&2
+  for log in "$@"; do
+    if [ -f "$log" ]; then
+      echo "--- $log ---" >&2
+      cat "$log" >&2
+    fi
+  done
+  exit 1
+}
 for tool in "$IYI" "$CLANG" "$OBJDUMP" "$WASMTIME"; do
   if [ ! -x "$tool" ]; then echo "missing executable: $tool" >&2; exit 1; fi
 done
@@ -17,20 +29,24 @@ done
 build_wasm() {
   local output="$1" source="$2"; shift 2
   local command
-  command="$("$IYI" build --cross-compile --target wasm32-wasi "$@" -o "$output" "$source")"
+  command="$("$IYI" build --cross-compile --target wasm32-wasi "$@" -o "$output" "$source")" ||
+    fail "$output: wasm compilation failed${command:+: $command}"
   case "$command" in
     cc\ *) command="\"$CLANG\" ${command#cc }" ;;
-    *) echo "unexpected cross-link command: $command" >&2; return 1 ;;
+    *) fail "$output: unexpected cross-link command: $command" ;;
   esac
-  eval "$command -o \"$output.wasm\""
+  eval "$command -o \"$output.wasm\"" || fail "$output: wasm link failed"
 }
 
 for mode in native native-release; do
   args=()
   [ "$mode" != native-release ] || args+=(--release --emit=llvm-ir)
-  "$IYI" build "${args[@]}" -o "$WORK/$mode" "$REPO/bench/uint64x2_exercise.iyi" 2>"$WORK/$mode.build.log"
-  "$WORK/$mode" >"$WORK/$mode.out"
-  grep -qx 'ALL UINT64X2 CHECKS PASSED' "$WORK/$mode.out"
+  "$IYI" build "${args[@]}" -o "$WORK/$mode" "$REPO/bench/uint64x2_exercise.iyi" 2>"$WORK/$mode.build.log" ||
+    fail "$mode: build failed" "$WORK/$mode.build.log"
+  "$WORK/$mode" >"$WORK/$mode.out" ||
+    fail "$mode: program failed" "$WORK/$mode.out"
+  grep -qx 'ALL UINT64X2 CHECKS PASSED' "$WORK/$mode.out" ||
+    fail "$mode: success marker missing" "$WORK/$mode.out"
   echo "$mode: $(tail -1 "$WORK/$mode.out")"
 done
 
@@ -96,14 +112,16 @@ end
 thread.join
 puts "thread vector and Share records passed"
 IYI
-"$IYI" build --release -o "$WORK/share-vector" "$WORK/share-vector.iyi"
-"$WORK/share-vector" >"$WORK/share-vector.out"
-grep -qx 'thread vector and Share records passed' "$WORK/share-vector.out"
+"$IYI" build --release -o "$WORK/share-vector" "$WORK/share-vector.iyi" || fail "Share: build failed"
+"$WORK/share-vector" >"$WORK/share-vector.out" || fail "Share: program failed" "$WORK/share-vector.out"
+grep -qx 'thread vector and Share records passed' "$WORK/share-vector.out" ||
+  fail "Share: success marker missing" "$WORK/share-vector.out"
 awk '{ sub(/getter value : UInt64x2/, "property value : UInt64x2"); print }' "$WORK/share-vector.iyi" >"$WORK/not-share-vector.iyi"
 if "$IYI" build --no-codegen "$WORK/not-share-vector.iyi" >"$WORK/not-share-vector.out" 2>&1; then
-  echo 'Share: a mutable vector record crossed a thread boundary' >&2; exit 1
+  fail "Share: a mutable vector record crossed a thread boundary" "$WORK/not-share-vector.out"
 fi
-grep -q 'not Share' "$WORK/not-share-vector.out"
+grep -q 'not Share' "$WORK/not-share-vector.out" ||
+  fail "Share: mutable vector was refused for the wrong reason" "$WORK/not-share-vector.out"
 echo 'Share: vector, immutable record and trusted generic crossed a thread; mutable record was refused'
 
 # The headed object has only eight-byte alignment. Check the exact store
@@ -121,7 +139,8 @@ if ! field_alignment_ok "$WORK/field.ir"; then
   exit 1
 fi
 awk '{if (/store <2 x i64>/) sub(/align 8/, "align 16"); print}' "$WORK/field.ir" >"$WORK/field-broken.ir"
-grep -q 'align 16' "$WORK/field-broken.ir"
+grep -q 'align 16' "$WORK/field-broken.ir" ||
+  fail "field alignment: mutation did not change the IR" "$WORK/field-broken.ir"
 if field_alignment_ok "$WORK/field-broken.ir"; then
   echo 'field alignment: align 16 mutation escaped the guard' >&2; exit 1
 fi
@@ -131,11 +150,16 @@ for mode in wasm-plain wasm-plain-simd wasm wasm-simd; do
   case "$mode" in wasm|wasm-simd) args+=(--release) ;; esac
   case "$mode" in *-simd) args+=(--mattr +simd128) ;; esac
   build_wasm "$WORK/$mode" "$REPO/bench/uint64x2_exercise.iyi" "${args[@]}"
-  "$WASMTIME" "$WORK/$mode.wasm" >"$WORK/$mode.out"
-  grep -qx 'ALL UINT64X2 CHECKS PASSED' "$WORK/$mode.out"
+  "$WASMTIME" "$WORK/$mode.wasm" >"$WORK/$mode.out" ||
+    fail "$mode: wasm program failed" "$WORK/$mode.out"
+  grep -qx 'ALL UINT64X2 CHECKS PASSED' "$WORK/$mode.out" ||
+    fail "$mode: success marker missing" "$WORK/$mode.out"
   echo "$mode: $(tail -1 "$WORK/$mode.out")"
 done
-for mode in native-release wasm-plain wasm-plain-simd wasm wasm-simd; do cmp "$WORK/native.out" "$WORK/$mode.out"; done
+for mode in native-release wasm-plain wasm-plain-simd wasm wasm-simd; do
+  cmp "$WORK/native.out" "$WORK/$mode.out" ||
+    fail "$mode: output differs from native" "$WORK/native.out" "$WORK/$mode.out"
+done
 cat "$WORK/native.out"
 
 # LLVM 18's wasm disassembler can loop writing invalid_type indefinitely.
@@ -153,8 +177,10 @@ fi
 awk '/^[[:xdigit:]]+ <\*check_pair</ { inside=1; print; next }
      inside && /^[[:xdigit:]]+ </ { exit }
      inside && /(i64x2|v128)\./ { print }' "$WORK/simd.dis" >"$WORK/simd.instructions"
-grep -q 'v128.xor' "$WORK/simd.instructions"
-grep -q 'i64x2.mul' "$WORK/simd.instructions"
+grep -q 'v128.xor' "$WORK/simd.instructions" ||
+  fail "SIMD disassembly: v128.xor missing" "$WORK/simd.instructions"
+grep -q 'i64x2.mul' "$WORK/simd.instructions" ||
+  fail "SIMD disassembly: i64x2.mul missing" "$WORK/simd.instructions"
 echo 'simd128 disassembly of check_pair (scalar module contains no v128/i64x2 instructions):'
 grep -E 'v128\.(xor|and|or)|i64x2\.(add|sub|mul|shl|shr_u)' "$WORK/simd.instructions"
 
@@ -165,10 +191,14 @@ cat >"$WORK/flag.iyi" <<'EOF'
   puts "simd128=false"
 {% end %}
 EOF
-"$IYI" build -o "$WORK/flag-native" "$WORK/flag.iyi" 2>"$WORK/flag-native.log"
-[ "$("$WORK/flag-native")" = 'simd128=false' ]
-"$IYI" build --mattr +simd128 -o "$WORK/flag-native-feature" "$WORK/flag.iyi" 2>"$WORK/flag-native-feature.log"
-[ "$("$WORK/flag-native-feature")" = 'simd128=false' ]
+"$IYI" build -o "$WORK/flag-native" "$WORK/flag.iyi" 2>"$WORK/flag-native.log" ||
+  fail "native flag: build failed" "$WORK/flag-native.log"
+actual="$("$WORK/flag-native")" || fail "native flag: program failed: $actual"
+[ "$actual" = 'simd128=false' ] || fail "native flag: expected simd128=false, got: $actual"
+"$IYI" build --mattr +simd128 -o "$WORK/flag-native-feature" "$WORK/flag.iyi" 2>"$WORK/flag-native-feature.log" ||
+  fail "native feature flag: build failed" "$WORK/flag-native-feature.log"
+actual="$("$WORK/flag-native-feature")" || fail "native feature flag: program failed: $actual"
+[ "$actual" = 'simd128=false' ] || fail "native feature flag: expected simd128=false, got: $actual"
 echo 'flag native with +simd128: simd128=false'
 for flags in scalar enabled disabled reenabled; do
   args=()
@@ -179,7 +209,7 @@ for flags in scalar enabled disabled reenabled; do
     reenabled) args+=(--mattr=-simd128,+simd128); expected=true ;;
   esac
   build_wasm "$WORK/flag-$flags" "$WORK/flag.iyi" "${args[@]}"
-  actual="$("$WASMTIME" "$WORK/flag-$flags.wasm")"
+  actual="$("$WASMTIME" "$WORK/flag-$flags.wasm")" || fail "flag $flags: wasm program failed: $actual"
   [ "$actual" = "simd128=$expected" ] || { echo "flag $flags: $actual" >&2; exit 1; }
   echo "flag wasm $flags: $actual"
 done
@@ -191,19 +221,23 @@ lib LibVectorProbe
 end
 EOF
 if "$IYI" build --no-codegen "$WORK/forbidden.iyi" >"$WORK/forbidden.log" 2>&1; then
-  echo 'external vector ABI unexpectedly accepted' >&2; exit 1
+  fail "external vector ABI unexpectedly accepted" "$WORK/forbidden.log"
 fi
-grep -q 'UInt64x2 has no C ABI' "$WORK/forbidden.log"
+grep -q 'UInt64x2 has no C ABI' "$WORK/forbidden.log" ||
+  fail "external vector ABI: refused for the wrong reason" "$WORK/forbidden.log"
 echo "no-codegen FFI refusal: $(grep -m1 'UInt64x2 has no C ABI' "$WORK/forbidden.log")"
 
 printf '%s\n' 'puts "compatibility prelude ok"' >"$WORK/compat.iyi"
-"$IYI" build --crystal -o "$WORK/compat" "$WORK/compat.iyi" 2>"$WORK/compat.log"
-[ "$("$WORK/compat")" = 'compatibility prelude ok' ]
+"$IYI" build --crystal -o "$WORK/compat" "$WORK/compat.iyi" 2>"$WORK/compat.log" ||
+  fail "compatibility prelude: build failed" "$WORK/compat.log"
+actual="$("$WORK/compat")" || fail "compatibility prelude: program failed: $actual"
+[ "$actual" = 'compatibility prelude ok' ] || fail "compatibility prelude: unexpected output: $actual"
 printf '%s\n' 'x = uninitialized UInt64x2' >"$WORK/compat-vector.iyi"
 if "$IYI" build --crystal --no-codegen "$WORK/compat-vector.iyi" >"$WORK/compat-vector.log" 2>&1; then
-  echo '--crystal unexpectedly exposed the iyi-prelude vector' >&2; exit 1
+  fail "--crystal unexpectedly exposed the iyi-prelude vector" "$WORK/compat-vector.log"
 fi
-grep -q 'undefined constant UInt64x2' "$WORK/compat-vector.log"
+grep -q 'undefined constant UInt64x2' "$WORK/compat-vector.log" ||
+  fail "--crystal: vector was refused for the wrong reason" "$WORK/compat-vector.log"
 echo 'Compatibility prelude: ordinary program works, UInt64x2 is unavailable'
 
 mkdir -p "$WORK/app" "$WORK/mods"
@@ -220,30 +254,37 @@ value = App::Vector.mix(UInt64x2.new(9_u64, 20_u64), UInt64x2.new(3_u64, 6_u64))
 puts value.low
 puts value.high
 EOF
-IYI_PATH="$WORK:$REPO/src" "$IYI" build --emit-iyimod "$WORK/mods" -o "$WORK/source" "$WORK/consumer.iyi"
-[ -f "$WORK/mods/app/vector.iyimod" ] || { echo 'vector artifact missing' >&2; exit 1; }
+IYI_PATH="$WORK:$REPO/src" "$IYI" build --emit-iyimod "$WORK/mods" -o "$WORK/source" "$WORK/consumer.iyi" ||
+  fail "artifact: source build failed"
+[ -f "$WORK/mods/app/vector.iyimod" ] || fail "vector artifact missing"
 mv "$WORK/app/vector.iyi" "$WORK/vector-source.saved"
-IYI_PATH="$WORK:$REPO/src" "$IYI" build --use-iyimod "$WORK/mods" -o "$WORK/artifact" "$WORK/consumer.iyi"
-"$WORK/source" >"$WORK/source.out"
-"$WORK/artifact" >"$WORK/artifact.out"
+IYI_PATH="$WORK:$REPO/src" "$IYI" build --use-iyimod "$WORK/mods" -o "$WORK/artifact" "$WORK/consumer.iyi" ||
+  fail "artifact: artifact-backed build failed"
+"$WORK/source" >"$WORK/source.out" || fail "artifact: source program failed" "$WORK/source.out"
+"$WORK/artifact" >"$WORK/artifact.out" || fail "artifact: artifact-backed program failed" "$WORK/artifact.out"
 printf '11\n19\n' >"$WORK/expected.out"
-cmp "$WORK/source.out" "$WORK/expected.out"
-cmp "$WORK/source.out" "$WORK/artifact.out"
+cmp "$WORK/source.out" "$WORK/expected.out" ||
+  fail "artifact: source output differs from expected" "$WORK/source.out"
+cmp "$WORK/source.out" "$WORK/artifact.out" ||
+  fail "artifact: source and artifact output differ" "$WORK/source.out" "$WORK/artifact.out"
 echo 'artifact: vector signature and body agree with source (11, 19), source removed for import'
 
 mkdir -p "$WORK/broken/iyi"
 cp -R "$REPO/src/iyi/." "$WORK/broken/iyi/"
 awk '{sub(/@\[Primitive\(:uint64x2_xor\)\]/, "@[Primitive(:uint64x2_or)]"); print}' \
   "$REPO/src/iyi/primitives.iyi" >"$WORK/broken/iyi/primitives.iyi"
-grep -A1 'Primitive(:uint64x2_or)' "$WORK/broken/iyi/primitives.iyi" | grep -q 'def \^'
-IYI_PATH="$WORK/broken:$REPO/src" "$IYI" build -o "$WORK/broken/prog" "$REPO/bench/uint64x2_exercise.iyi" 2>"$WORK/broken/build.log"
+grep -A1 'Primitive(:uint64x2_or)' "$WORK/broken/iyi/primitives.iyi" | grep -q 'def \^' ||
+  fail "broken xor: mutation did not change the primitive"
+IYI_PATH="$WORK/broken:$REPO/src" "$IYI" build -o "$WORK/broken/prog" "$REPO/bench/uint64x2_exercise.iyi" 2>"$WORK/broken/build.log" ||
+  fail "broken xor: build failed" "$WORK/broken/build.log"
 set +e
 "$WORK/broken/prog" >"$WORK/broken/out" 2>&1
 code=$?
 set -e
 if [ "$code" -eq 0 ] || grep -q 'ALL UINT64X2 CHECKS PASSED' "$WORK/broken/out"; then
-  echo 'broken xor primitive escaped the exercise' >&2; exit 1
+  fail "broken xor primitive escaped the exercise" "$WORK/broken/out"
 fi
-grep -q 'xor: wrong' "$WORK/broken/out"
+grep -q 'xor: wrong' "$WORK/broken/out" ||
+  fail "broken xor: program failed for the wrong reason" "$WORK/broken/out"
 echo "broken xor: caught (exit $code, $(grep -m1 'xor: wrong' "$WORK/broken/out"))"
 echo 'ALL UINT64X2 ACCEPTANCE CHECKS PASSED'

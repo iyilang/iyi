@@ -13,9 +13,11 @@ export IYI_PATH="$REPO/src"
 for name in scalar simd; do
   flags=()
   [ "$name" != simd ] || flags+=(--mattr +simd128)
-  PATH="$WASI_SDK_PATH/bin:$PATH" "$IYI" build --target wasm32-unknown-unknown --release -D iyi_aead_bench "${flags[@]}" -o "$WORK/$name.wasm" "$REPO/bench/wasm_aead_speed.iyi"
+  PATH="$WASI_SDK_PATH/bin:$PATH" "$IYI" build --target wasm32-unknown-unknown --release -D iyi_aead_bench "${flags[@]}" -o "$WORK/$name.wasm" "$REPO/bench/wasm_aead_speed.iyi" ||
+    { echo "FAIL: $name AEAD speed build failed" >&2; exit 1; }
 done
 cp "$REPO/src/iyi/wasm/iyi.mjs" "$WORK/iyi.mjs"
 cp "$REPO/bench/wasm_aead_speed.mjs" "$WORK/wasm_aead_speed.mjs"
 printf '{"sizes":[%s]}\n' "$SIZES" >"$WORK/aead-config.json"
-node "$REPO/bench/wasm_browser.mjs" --chrome "$IYI_CHROME" --root "$WORK" --script wasm_aead_speed.mjs --timeout 1200000
+node "$REPO/bench/wasm_browser.mjs" --chrome "$IYI_CHROME" --root "$WORK" --script wasm_aead_speed.mjs --timeout 1200000 ||
+  { echo "FAIL: AEAD speed browser run failed" >&2; exit 1; }

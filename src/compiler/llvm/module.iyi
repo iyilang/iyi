@@ -1,0 +1,210 @@
+@[Unsafe("binds LLVM's C API: its objects are raw handles this module wraps and disposes, which the compiler does not check")]
+module compiler/llvm/module
+
+import compiler/llvm/lib_llvm::{string_from_c, string_and_dispose, to_c_str}
+import compiler/llvm/memory_buffer::{MemoryBuffer}
+import compiler/llvm/target::{Target, TargetData, TargetMachine}
+import compiler/llvm/values::{LLVMType, LLVMValue, LLVMFunction, LLVMBasicBlock, Type, Value, Function, BasicBlock}
+import compiler/llvm/context::{Context}
+
+pub class Module
+  getter unwrap : LibLLVM::ModuleRef
+  getter context : Context
+
+  def initialize(@unwrap : LibLLVM::ModuleRef, @context : Context)
+    @disposed = false
+  end
+
+  def self.new(name : String, context : Context) : Module
+    mod = LibLLVM.module_create_with_name_in_context(to_c_str(name), context.to_unsafe)
+    if mod.address == 0
+      raise "Could not create LLVM module '#{name}'"
+    end
+    Module.new(mod, context)
+  end
+
+  def to_unsafe : LibLLVM::ModuleRef
+    @unwrap
+  end
+
+  def name : String
+    len = 0_u64
+    ptr = LibLLVM.get_module_identifier(@unwrap, pointerof(len))
+    if ptr.address != 0 && len > 0
+      String.new(len.to_i32) do |b|
+        b.copy_from(ptr, len.to_i32)
+      end
+    else
+      ""
+    end
+  end
+
+  def name=(name : String) : Nil
+    LibLLVM.set_module_identifier(@unwrap, to_c_str(name), name.bytesize.to_u64)
+  end
+
+  def target : String
+    ptr = LibLLVM.get_target(@unwrap)
+    string_from_c(ptr)
+  end
+
+  def target=(triple : String) : Nil
+    LibLLVM.set_target(@unwrap, to_c_str(triple))
+  end
+
+  def data_layout : String
+    ptr = LibLLVM.get_module_data_layout(@unwrap)
+    string_from_c(ptr)
+  end
+
+  def data_layout=(dl : TargetData) : Nil
+    LibLLVM.set_module_data_layout(@unwrap, dl.to_unsafe)
+  end
+
+  def dump : Nil
+    LibLLVM.dump_module(@unwrap)
+  end
+
+  def to_s : String
+    ptr = LibLLVM.print_module_to_string(@unwrap)
+    string_and_dispose(ptr)
+  end
+
+  def verify : Nil
+    err_msg = Pointer(UInt8).new(0_u64)
+    rc = LibLLVM.verify_module(@unwrap, LibLLVM::VerifierFailureAction::ReturnStatusAction, pointerof(err_msg))
+    if rc != 0
+      err = string_and_dispose(err_msg)
+      raise "LLVM module verification failed: #{err}"
+    end
+  end
+
+  def verify_safely : {Bool, String}
+    err_msg = Pointer(UInt8).new(0_u64)
+    rc = LibLLVM.verify_module(@unwrap, LibLLVM::VerifierFailureAction::ReturnStatusAction, pointerof(err_msg))
+    if rc != 0
+      err = string_and_dispose(err_msg)
+      {false, err}
+    else
+      {true, ""}
+    end
+  end
+
+  def add_function(name : String, function_type : Type) : Function
+    fn = LibLLVM.add_function(@unwrap, to_c_str(name), function_type.to_unsafe)
+    if fn.address == 0
+      raise "Could not add function '#{name}' to module"
+    end
+    Function.new(fn)
+  end
+
+  def get_function?(name : String) : Function?
+    fn = {% if LibLLVM::IS_LT_200 %}
+           LibLLVM.get_named_function(@unwrap, to_c_str(name))
+         {% else %}
+           LibLLVM.get_named_function_with_length(@unwrap, to_c_str(name), name.bytesize.to_u64)
+         {% end %}
+    if fn.address != 0
+      Function.new(fn)
+    else
+      nil
+    end
+  end
+
+  def get_function(name : String) : Function
+    fn = get_function?(name)
+    if fn
+      fn
+    else
+      raise "Function '#{name}' not found in module"
+    end
+  end
+
+  def functions : Array(Function)
+    res = [] of Function
+    fn = LibLLVM.get_first_function(@unwrap)
+    while fn.address != 0
+      res << Function.new(fn)
+      fn = LibLLVM.get_next_function(fn)
+    end
+    res
+  end
+
+  def add_global(name : String, type : Type) : Value
+    g = LibLLVM.add_global(@unwrap, type.to_unsafe, to_c_str(name))
+    if g.address == 0
+      raise "Could not add global '#{name}' to module"
+    end
+    Value.new(g)
+  end
+
+  def get_global?(name : String) : Value?
+    g = {% if LibLLVM::IS_LT_200 %}
+          LibLLVM.get_named_global(@unwrap, to_c_str(name))
+        {% else %}
+          LibLLVM.get_named_global_with_length(@unwrap, to_c_str(name), name.bytesize.to_u64)
+        {% end %}
+    if g.address != 0
+      Value.new(g)
+    else
+      nil
+    end
+  end
+
+  def get_global(name : String) : Value
+    g = get_global?(name)
+    if g
+      g
+    else
+      raise "Global '#{name}' not found in module"
+    end
+  end
+
+  def globals : Array(Value)
+    res = [] of Value
+    g = LibLLVM.get_first_global(@unwrap)
+    while g.address != 0
+      res << Value.new(g)
+      g = LibLLVM.get_next_global(g)
+    end
+    res
+  end
+
+  def write_bitcode_to_file(path : String) : Nil
+    rc = LibLLVM.write_bitcode_to_file(@unwrap, to_c_str(path))
+    if rc != 0
+      raise "Could not write bitcode to file '#{path}'"
+    end
+  end
+
+  def write_bitcode_to_memory_buffer : MemoryBuffer
+    buf = LibLLVM.write_bitcode_to_memory_buffer(@unwrap)
+    if buf.address == 0
+      raise "Could not write bitcode to memory buffer"
+    end
+    MemoryBuffer.new(buf)
+  end
+
+  def emit_to_file(tm : TargetMachine, filename : String, file_type : LibLLVM::CodeGenFileType) : Nil
+    tm.emit_to_file(@unwrap, filename, file_type)
+  end
+
+  def emit_obj_to_file(tm : TargetMachine, filename : String) : Nil
+    tm.emit_obj_to_file(@unwrap, filename)
+  end
+
+  def emit_asm_to_file(tm : TargetMachine, filename : String) : Nil
+    tm.emit_asm_to_file(@unwrap, filename)
+  end
+
+  def emit_to_memory_buffer(tm : TargetMachine, file_type : LibLLVM::CodeGenFileType) : MemoryBuffer
+    tm.emit_to_memory_buffer(@unwrap, file_type)
+  end
+
+  def dispose : Nil
+    if !@disposed && @unwrap.address != 0
+      LibLLVM.dispose_module(@unwrap)
+      @disposed = true
+    end
+  end
+end

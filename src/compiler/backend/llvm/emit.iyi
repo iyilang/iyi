@@ -1,0 +1,76 @@
+@[Unsafe("reads, prints and verifies LLVM modules through raw handles it owns until they are disposed, which the compiler does not check")]
+module compiler/backend/llvm/emit
+
+import compiler/llvm/lib_llvm::{string_from_c, string_and_dispose, to_c_str}
+import compiler/llvm/target::{Target, TargetMachine}
+
+# A file that does not read as LLVM IR, with LLVM's own message.
+pub class LlFileError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+# Reads an LLVM IR text file into a fresh context. The caller disposes the module and context.
+pub def read_ll_file(path : String) : LibLLVM::ModuleRef | LlFileError
+  buffer = Pointer(LibLLVM::MemoryBufferRef).malloc(1_u64)
+  message = Pointer(UInt8).malloc(1_u64)
+  if LibLLVM.create_memory_buffer_with_contents_of_file(to_c_str(path), buffer, pointerof(message)) != 0
+    return LlFileError.new(string_and_dispose(message))
+  end
+  context = LibLLVM.create_context
+  out_module = Pointer(LibLLVM::ModuleRef).malloc(1_u64)
+  error = Pointer(UInt8).malloc(1_u64)
+  if LibLLVM.parse_ir_in_context(context, buffer[0], out_module, pointerof(error)) != 0
+    return LlFileError.new(string_and_dispose(error))
+  end
+  out_module[0]
+end
+
+# The module as LLVM prints it.
+pub def print_llvm_module(llvm : LibLLVM::ModuleRef) : String
+  string_and_dispose(LibLLVM.print_module_to_string(llvm))
+end
+
+# Removes debug information (`LLVMStripModuleDebugInfo`), leaving everything else in place.
+pub def strip_llvm_debug_info(llvm : LibLLVM::ModuleRef) : Nil
+  LibLLVM.strip_module_debug_info(llvm)
+end
+
+# LLVM's verifier, with its message, or nil when the module is well formed.
+pub def verify_llvm_module(llvm : LibLLVM::ModuleRef) : String?
+  message = Pointer(UInt8).malloc(1_u64)
+  failed = LibLLVM.verify_module(llvm, LibLLVM::VerifierFailureAction::ReturnStatusAction, pointerof(message))
+  return nil if failed == 0
+  string_and_dispose(message)
+end
+
+# The function a line of printed IR belongs to, for a difference report: the `@name` of the last
+# `define` line seen before it.
+pub def function_of_line(lines : Array(String), index : Int32) : String
+  i = index
+  while i >= 0
+    line = lines[i]
+    if line.starts_with?("define ")
+      at = line.index('@')
+      if at
+        rest = line[at + 1, line.bytesize - at - 1]
+        return rest.split(' ')[0]
+      end
+    end
+    i = i - 1
+  end
+  "<module>"
+end
+
+# The host LLVM target machine for a triple: the object writer's machine.
+pub def host_target_machine(triple : String) : TargetMachine
+  Target.init_native_target
+  Target.init_all_targets
+  Target.from_triple(triple).create_target_machine(triple, "", "", LibLLVM::CodeGenOptLevel::Default, LibLLVM::RelocMode::PIC, LibLLVM::CodeModel::Default)
+end

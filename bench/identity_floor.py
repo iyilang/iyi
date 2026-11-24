@@ -321,7 +321,8 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # an undefined variable, ran `--version` on a directory, and reported the
     # daemon's version as empty. An allowlist entry wide enough to cover a
     # defect is not an allowlist entry.
-    (r"CRYSTAL_#\{name\}|`CRYSTAL_DAEMON(_SOCKET)?`|crystal docker image", "the fallback that keeps Crystal's env vars working"),
+    # Macro interpolation uses name.id to keep the environment key unquoted.
+    (r"CRYSTAL_#\{name(?:\.id)?\}|`CRYSTAL_DAEMON(_SOCKET)?`|crystal docker image", "the fallback that keeps Crystal's env vars working"),
     # The same fallback, in the sentence that refuses a cache directory.
     # `Config.env` reads `IYI_CACHE_DIR` and then `CRYSTAL_CACHE_DIR`, so the
     # refusal names whichever of the two is set: a sentence about
@@ -356,6 +357,8 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r"crystal-lang/install-crystal", "upstream's action, which installs the bootstrap compiler"),
     (r"^\s*crystal: \d", "the bootstrap compiler's version, that action's own input"),
     (r'"CRYSTAL_LIBRARY_PATH=\$lib"', "the bootstrap package's search path, put in the job's environment"),
+    (r"search=\$\{CRYSTAL_LIBRARY_PATH:-\}",
+     "the same search path, read by the LLVM bridge's flag helper when ours is unset: the Windows job sets no other"),
     (r"Crystal on the machine|\ba Crystal\b", "a sentence about the other language"),
     # Comments citing Crystal's own source, DWARF producer strings, and the
     # version banner's "a fork of Crystal X" clause. All name the other

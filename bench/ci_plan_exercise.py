@@ -117,6 +117,14 @@ for files, what in [
     (["bench/" + "native_ir" + "_exercise.sh"], "the native IR gate"),
     (["bench/" + "selfhost_ir_fold" + "_exercise.iyi"], "the IR folding exercise"),
     (["bench/fixtures/" + "ir/valid/everything.ir"], "an IR fixture"),
+    (["bench/" + "native_codegen" + "_exercise.sh"], "the AArch64 codegen gate"),
+    (["bench/" + "native_encode" + "_exercise.sh"], "the AArch64 encoder gate"),
+    (["bench/" + "native_regalloc" + "_exercise.sh"], "the register allocator gate"),
+    (["src/compiler/tools/native_cg.iyi"], "the native codegen driver"),
+    (["bench/fixtures/native_cg/narrow_signext.ir"], "a restored narrow codegen fixture"),
+    (["bench/fixtures/native_cg/rt_stub.c"], "the native runtime comparison stub"),
+    (["src/compiler/native/rt/builtins.ir"], "the native IR runtime"),
+    (["README.md", "src/compiler/native/rt/builtins.ir"], "a mixed documentation and native IR change"),
 ]:
     reason, jobs = planned(*files)
     check(f"{what} selects all three hosts and native Linux arm64 execution",

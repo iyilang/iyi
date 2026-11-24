@@ -1,0 +1,131 @@
+module wide
+
+import std/int
+
+# The hosted compiler's program with the same output as wide.ir. Each show prints the high half of a 128-bit value
+# as a signed 64-bit number and its low half as unsigned, matching the IR's show.
+
+def show(x : Int128) : Nil
+  puts "#{(x >> 64).unsafe_to_i64} #{x.unsafe_to_u64}"
+end
+
+# The truncating quotient and remainder that LLVM's sdiv and srem take: the language's // and % truncate toward zero,
+# as the IR's instructions do.
+def tdiv(a : Int128, b : Int128) : Int128
+  a // b
+end
+
+def trem(a : Int128, b : Int128) : Int128
+  a % b
+end
+
+def bit(c : Bool) : Int128
+  c ? 1_i128 : 0_i128
+end
+
+def sh(x : Int128, n : Int128) : Nil
+  show(x << n.to_i32)
+  show((x.unsafe_to_u128 >> n.to_i32).unsafe_to_i128)
+  show(x >> n.to_i32)
+end
+
+def mix(a : Int64, b : Int128, c : Int128) : Nil
+  show(a.unsafe_to_i128 + b - c)
+end
+
+def divs(x : Int128, y : Int128) : Nil
+  show(tdiv(x, y))
+  show(trem(x, y))
+  show((x.unsafe_to_u128 // y.unsafe_to_u128).unsafe_to_i128)
+  show((x.unsafe_to_u128 % y.unsafe_to_u128).unsafe_to_i128)
+end
+
+def cmps(x : Int128, y : Int128) : Nil
+  show(bit(x == y))
+  show(bit(x != y))
+  show(bit(x.unsafe_to_u128 < y.unsafe_to_u128))
+  show(bit(x.unsafe_to_u128 > y.unsafe_to_u128))
+  show(bit(x.unsafe_to_u128 <= y.unsafe_to_u128))
+  show(bit(x.unsafe_to_u128 >= y.unsafe_to_u128))
+  show(bit(x < y))
+  show(bit(x > y))
+  show(bit(x <= y))
+  show(bit(x >= y))
+end
+
+def loop_sum : Nil
+  acc = 0_i128
+  i = 1_i128
+  while i <= 10_i128
+    acc = acc + 18446744073709551621_i128 * i
+    i = i + 1_i128
+  end
+  show(acc)
+end
+
+def misc(x : Int128, y : Int128) : Nil
+  show(x < y ? x : y)
+  show(x)
+end
+
+def ovfs(x : Int128, y : Int128) : Nil
+  v1 = x &+ y
+  show(v1)
+  show(bit((x >= 0_i128) == (y >= 0_i128) && (v1 >= 0_i128) != (x >= 0_i128)))
+  ux = x.unsafe_to_u128
+  uy = y.unsafe_to_u128
+  uv = ux &+ uy
+  show(uv.unsafe_to_i128)
+  show(bit(uv < ux))
+  v3 = x &- y
+  show(v3)
+  show(bit((x >= 0_i128) != (y >= 0_i128) && (v3 >= 0_i128) != (x >= 0_i128)))
+  uv4 = ux &- uy
+  show(uv4.unsafe_to_i128)
+  show(bit(ux < uy))
+  v5 = x &* y
+  show(v5)
+  smul = y == 0_i128 ? false : (y == -1_i128 ? x == -170141183460469231731687303715884105728_i128 : tdiv(v5, y) != x)
+  show(bit(smul))
+  uv6 = ux &* uy
+  show(uv6.unsafe_to_i128)
+  show(bit(uy != 0_u128 && (uv6 // uy) != ux))
+end
+
+def main : Nil
+  show(1512366075204170947332355369683137040_i128 + 18446744073709551621_i128)
+  show(1512366075204170947332355369683137040_i128 + 1512366075204170947332355369683137040_i128)
+  show(1512366075204170947332355369683137040_i128 - 18446744073709551621_i128)
+  show(18446744073709551621_i128 - 1512366075204170947332355369683137040_i128)
+  show(1512366075204170947332355369683137040_i128 * 3_i128)
+  show(-1512366075204170947332355369683137040_i128 &* 18446744073709551621_i128)
+  show(1512366075204170947332355369683137040_i128 & -1512366075204170947332355369683137040_i128)
+  show(1512366075204170947332355369683137040_i128 | 18446744073709551621_i128)
+  show(1512366075204170947332355369683137040_i128 ^ -1512366075204170947332355369683137040_i128)
+  sh(1512366075204170947332355369683137040_i128, 0_i128)
+  sh(1512366075204170947332355369683137040_i128, 1_i128)
+  sh(1512366075204170947332355369683137040_i128, 63_i128)
+  sh(1512366075204170947332355369683137040_i128, 64_i128)
+  sh(1512366075204170947332355369683137040_i128, 65_i128)
+  sh(1512366075204170947332355369683137040_i128, 127_i128)
+  sh(-1512366075204170947332355369683137040_i128, 0_i128)
+  sh(-1512366075204170947332355369683137040_i128, 1_i128)
+  sh(-1512366075204170947332355369683137040_i128, 63_i128)
+  sh(-1512366075204170947332355369683137040_i128, 64_i128)
+  sh(-1512366075204170947332355369683137040_i128, 65_i128)
+  sh(-1512366075204170947332355369683137040_i128, 127_i128)
+  show(18446744073709551615_i128)
+  show(-5_i128)
+  mix(7_i64, 18446744073709551621_i128, -1512366075204170947332355369683137040_i128)
+  divs(1512366075204170947332355369683137040_i128, 1000000007_i128)
+  divs(-1512366075204170947332355369683137040_i128, 97_i128)
+  cmps(1512366075204170947332355369683137040_i128, 18446744073709551621_i128)
+  cmps(-1512366075204170947332355369683137040_i128, 18446744073709551621_i128)
+  loop_sum
+  misc(-1512366075204170947332355369683137040_i128, 18446744073709551621_i128)
+  ovfs(1512366075204170947332355369683137040_i128, 1512366075204170947332355369683137040_i128)
+  ovfs(-1512366075204170947332355369683137040_i128, 18446744073709551621_i128)
+  ovfs(18446744073709551621_i128, 1512366075204170947332355369683137040_i128)
+end
+
+main

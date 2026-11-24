@@ -1,0 +1,740 @@
+module compiler/native/regalloc_linear
+
+# Linear-scan register allocation (SPEC 2.2 step 4, SPEC 3.5). The second allocator behind
+# compiler/native/regalloc: linear is the default; IYI_NATIVE_REGALLOC=pin selects the reference.
+#
+# Positions. Each instruction has one position: its index in the blocks taken in order. A virtual
+# register's interval is the inclusive hull of the positions where it is defined, used, or live across a
+# block edge. Liveness is solved over the control-flow graph, so a value live around a loop back-edge
+# covers the whole loop. A definition and the uses of the same instruction share its position, so an
+# instruction's sources never share a register with its destination.
+#
+# Fixed registers. A physical operand reserves its register from the last point that clobbered it up to
+# the point that reads it. An argument move reserves its register up to the call that reads it, a call
+# result up to the move that takes it, an incoming argument from function entry, and a return value up to
+# the return or branch. These reservations are the pre-coloured intervals: no virtual interval overlaps one.
+#
+# Calls. A call clobbers every caller-saved register. An interval that crosses a call takes a callee-saved
+# general register (x19..x28) or lives in a frame slot. No floating-point register is callee-saved, so a
+# floating-point interval that crosses a call always lives in a slot.
+#
+# Spills. A spilled interval has one 8-byte frame slot for the whole function. Each instruction reloads the
+# spilled operands it reads into scratch registers and stores the spilled value it writes from one.
+#
+# The collector's constraint (SPEC 2.2). No pointer-carrying value lives in a floating-point register across a call.
+# A vreg is pointer-carrying when the selector flagged it (MFunction#vreg_pointer: a pointer-typed value, a copy of
+# one, or its bits moved to fp), or when it is a bit copy of a general-purpose value (fmov to fp), which the
+# selector's flags also cover. The constraint is asserted after assignment on every pointer-carrying vreg, and a
+# function that breaks it is refused.
+#
+# Never allocated: x18 (the darwin platform register), x9..x15 (spill reload scratch), x16 and x17 (encoder
+# and veneer scratch), x29 (frame pointer), x30 (link register), sp, and d16..d18 (spill scratch).
+#
+# Determinism. Intervals are processed in (start, vreg id) order and candidate registers in a fixed order.
+# No hash table decides anything.
+
+import compiler/native/mir::{MFunction, MBlock, MInst, Operand, OperandKind, RegClass, Role}
+import compiler/native/target::{new_inst, is_role?, terminator?, leaves_block?, block_branch?, table_branch?}
+import compiler/native/aarch64/regs::{callee_saved_gprs, caller_saved_gprs, caller_saved_fprs, scratch_gprs, scratch_fprs, probe_reg, fp_reg, lr_reg, integer_arg_regs, fp_arg_regs}
+
+# x17: the encoder's veneer scratch. regs.iyi names it in a comment and has no accessor for it.
+def veneer_reg : Int32
+  17
+end
+
+# x18: the darwin platform register, never allocated.
+def platform_reg : Int32
+  18
+end
+
+# Where a register's first reservation starts: far past any position, so an unused vreg has no interval.
+def big_position : Int32
+  1000000000
+end
+
+def member?(list : Array(Int32), x : Int32) : Bool
+  list.each do |y|
+    return true if y == x
+  end
+  false
+end
+
+def bool_row(n : Int32) : Array(Bool)
+  acc = [] of Bool
+  i = 0
+  while i < n
+    acc << false
+    i = i + 1
+  end
+  acc
+end
+
+# A set of virtual registers as bits, 64 to a word: the liveness rows. A dense row of Bool per block per pass made
+# liveness the slowest part of a large program (the compiler's own tool: several thousand registers in a function).
+def bit_row(n : Int32) : Array(UInt64)
+  acc = [] of UInt64
+  words = (n + 63) >> 6
+  i = 0
+  while i < words
+    acc << 0_u64
+    i = i + 1
+  end
+  acc
+end
+
+def bit_set(row : Array(UInt64), v : Int32) : Nil
+  row[v >> 6] = row[v >> 6] | (1_u64 << (v & 63))
+end
+
+def bit?(row : Array(UInt64), v : Int32) : Bool
+  (row[v >> 6] & (1_u64 << (v & 63))) != 0_u64
+end
+
+def int_row(n : Int32, value : Int32) : Array(Int32)
+  acc = [] of Int32
+  i = 0
+  while i < n
+    acc << value
+    i = i + 1
+  end
+  acc
+end
+
+# The blocks a block can transfer control to: its branch targets, and the next block when control can fall
+# through its end.
+def block_successors(fn : MFunction, b : Int32) : Array(Int32)
+  acc = [] of Int32
+  block = fn.blocks[b]
+  block.insts.each do |inst|
+    if block_branch?(fn.isa, inst)
+      acc << inst.target
+    end
+    if table_branch?(fn.isa, inst)
+      table_targets = fn.jump_tables[inst.table].targets
+      table_targets.each do |t|
+        acc << t
+      end
+    end
+  end
+  falls = true
+  if block.insts.size > 0
+    falls = !leaves_block?(fn.isa, block.insts[block.insts.size - 1])
+  end
+  if falls && b + 1 < fn.blocks.size
+    acc << (b + 1)
+  end
+  acc
+end
+
+# The gpr pool for values that do not cross a call: the caller-saved registers that are not reserved.
+pub def caller_gpr_pool : Array(Int32)
+  acc = [] of Int32
+  caller_saved_gprs.each do |r|
+    acc << r unless member?(scratch_gprs, r) || r == probe_reg || r == veneer_reg || r == platform_reg
+  end
+  acc
+end
+
+# The floating-point pool. Every fp register is caller-saved, so only values that do not cross a call use it.
+pub def fp_allocatable_pool : Array(Int32)
+  acc = [] of Int32
+  caller_saved_fprs.each do |r|
+    acc << r unless member?(scratch_fprs, r)
+  end
+  acc
+end
+
+# Refuses a pool that names a reserved register. The pools derive from regs.iyi, so this only fires when that
+# file changes in a way that hands the allocator a register the selector, encoder or frame still needs.
+def assert_pools(gprs : Array(Int32), fprs : Array(Int32)) : Nil
+  gprs.each do |r|
+    if r == platform_reg || r == fp_reg || r == lr_reg || r == 31 || r == probe_reg || r == veneer_reg || member?(scratch_gprs, r)
+      raise "regalloc: x#{r} is reserved and may not be allocated"
+    end
+  end
+  fprs.each do |r|
+    if member?(scratch_fprs, r) || r < 32
+      raise "regalloc: d#{r - 32} is reserved and may not be allocated"
+    end
+  end
+end
+
+# The scratch register for the spilled operand number `index` of one instruction.
+def scratch_reg(fp : Bool, index : Int32) : Int32
+  pool = fp ? scratch_fprs : scratch_gprs
+  if index >= pool.size
+    raise "regalloc: an instruction has more spilled operands than scratch registers"
+  end
+  pool[index]
+end
+
+# The MIR of one spill slot access: an 8-byte load or store through the frame, with its width kept whole.
+def slot_access(isa : Int32, load : Bool, reg : Int32, slot : Int32, fp : Bool) : MInst
+  m = new_inst(isa, load ? Role::SlotLoad : Role::SlotStore)
+  m.size = 64
+  m.fp = fp
+  if load
+    m.defs << Operand.new(OperandKind::Physical, reg)
+    m.uses << Operand.new(OperandKind::FrameSlot, slot, 0_i64)
+  else
+    m.uses << Operand.new(OperandKind::Physical, reg)
+    m.uses << Operand.new(OperandKind::FrameSlot, slot, 0_i64)
+  end
+  m
+end
+
+# Rewrites every instruction so that it names only physical registers and frame slots. A spilled operand is
+# reloaded into a scratch register before the instruction and a spilled definition is stored after it. Shared
+# by both allocators: each one decides the homes, and this writes the code.
+pub def rewrite_spills(fn : MFunction) : Nil
+  fn.blocks.each do |block|
+    rewrite_block(fn, block)
+  end
+end
+
+def rewrite_block(fn : MFunction, block : MBlock) : Nil
+  acc = [] of MInst
+  block.insts.each do |inst|
+    next_gpr = 0
+    next_fpr = 0
+    reloads = [] of MInst
+    stores = [] of MInst
+    inst.uses.each_with_index do |op, k|
+      next unless op.kind == OperandKind::Virtual
+      v = op.reg
+      if fn.vreg_home[v] >= 0
+        inst.uses[k] = Operand.new(OperandKind::Physical, fn.vreg_home[v])
+      else
+        fp = fn.vreg_classes[v] == RegClass::Fpr
+        reg = scratch_reg(fp, fp ? next_fpr : next_gpr)
+        if fp
+          next_fpr = next_fpr + 1
+        else
+          next_gpr = next_gpr + 1
+        end
+        reloads << slot_access(fn.isa, true, reg, fn.vreg_slot[v], fp)
+        inst.uses[k] = Operand.new(OperandKind::Physical, reg)
+      end
+    end
+    inst.defs.each_with_index do |op, k|
+      next unless op.kind == OperandKind::Virtual
+      v = op.reg
+      if fn.vreg_home[v] >= 0
+        inst.defs[k] = Operand.new(OperandKind::Physical, fn.vreg_home[v])
+      else
+        fp = fn.vreg_classes[v] == RegClass::Fpr
+        reg = scratch_reg(fp, fp ? next_fpr : next_gpr)
+        if fp
+          next_fpr = next_fpr + 1
+        else
+          next_gpr = next_gpr + 1
+        end
+        stores << slot_access(fn.isa, false, reg, fn.vreg_slot[v], fp)
+        inst.defs[k] = Operand.new(OperandKind::Physical, reg)
+      end
+    end
+    reloads.each do |r|
+      acc << r
+    end
+    acc << inst
+    stores.each do |s|
+      acc << s
+    end
+  end
+  block.insts = acc
+end
+
+# Sorts vregs by (start, id). A merge sort: stable, and each comparison is a total order.
+def sort_by_start(list : Array(Int32), starts : Array(Int32)) : Array(Int32)
+  return list if list.size <= 1
+  mid = list.size // 2
+  left = [] of Int32
+  right = [] of Int32
+  i = 0
+  while i < list.size
+    if i < mid
+      left << list[i]
+    else
+      right << list[i]
+    end
+    i = i + 1
+  end
+  a = sort_by_start(left, starts)
+  b = sort_by_start(right, starts)
+  acc = [] of Int32
+  i = 0
+  j = 0
+  while i < a.size || j < b.size
+    take_a = false
+    if j >= b.size
+      take_a = true
+    elsif i < a.size
+      take_a = starts[a[i]] < starts[b[j]] || (starts[a[i]] == starts[b[j]] && a[i] < b[j])
+    end
+    if take_a
+      acc << a[i]
+      i = i + 1
+    else
+      acc << b[j]
+      j = j + 1
+    end
+  end
+  acc
+end
+
+class LinearScan
+  property fn : MFunction
+  property vcount : Int32
+  property npos : Int32
+  property block_first : Array(Int32)
+  property block_last : Array(Int32)
+  property call_prefix : Array(Int32)
+  property succs : Array(Array(Int32))
+  property live_in : Array(Array(UInt64))
+  property live_out : Array(Array(UInt64))
+  property starts : Array(Int32)
+  property ends : Array(Int32)
+  property has_interval : Array(Bool)
+  property crossing : Array(Bool)
+  property pointer : Array(Bool)
+  property res_reg : Array(Int32)
+  property res_start : Array(Int32)
+  property res_end : Array(Int32)
+  property homes : Array(Int32)
+  property active : Array(Int32)
+  property caller_pool : Array(Int32)
+  property callee_pool : Array(Int32)
+  property fpr_pool : Array(Int32)
+
+  def initialize(@fn : MFunction)
+    @vcount = fn.vreg_count
+    @npos = 0
+    @block_first = [] of Int32
+    @block_last = [] of Int32
+    @call_prefix = [] of Int32
+    @succs = [] of Array(Int32)
+    @live_in = [] of Array(UInt64)
+    @live_out = [] of Array(UInt64)
+    @starts = [] of Int32
+    @ends = [] of Int32
+    @has_interval = [] of Bool
+    @crossing = [] of Bool
+    @pointer = [] of Bool
+    @res_reg = [] of Int32
+    @res_start = [] of Int32
+    @res_end = [] of Int32
+    @homes = [] of Int32
+    @active = [] of Int32
+    @caller_pool = caller_gpr_pool
+    @callee_pool = callee_saved_gprs
+    @fpr_pool = fp_allocatable_pool
+  end
+
+  # Runs every stage and leaves the homes and the frame slots on the function.
+  def run : Nil
+    assert_pools(@caller_pool + @callee_pool, @fpr_pool)
+    number_positions
+    build_successors
+    solve_liveness
+    build_intervals
+    record_reservations
+    assign
+    assert_assignment
+    finish_frame
+  end
+
+  def number_positions : Nil
+    pos = 0
+    @fn.blocks.each do |block|
+      @block_first << pos
+      pos = pos + block.insts.size
+      @block_last << (pos - 1)
+    end
+    @npos = pos
+    @call_prefix = int_row(pos + 1, 0)
+    p = 0
+    @fn.blocks.each do |block|
+      block.insts.each do |inst|
+        @call_prefix[p + 1] = @call_prefix[p] + (inst.call ? 1 : 0)
+        p = p + 1
+      end
+    end
+  end
+
+  def build_successors : Nil
+    b = 0
+    while b < @fn.blocks.size
+      @succs << block_successors(@fn, b)
+      b = b + 1
+    end
+  end
+
+  # Live-in and live-out sets per block, by iteration to a fixed point over the control-flow graph.
+  def solve_liveness : Nil
+    n = @vcount
+    nb = @fn.blocks.size
+    words = (n + 63) >> 6
+    uses_b = [] of Array(UInt64)
+    defs_b = [] of Array(UInt64)
+    b = 0
+    while b < nb
+      u = bit_row(n)
+      d = bit_row(n)
+      @fn.blocks[b].insts.each do |inst|
+        inst.uses.each do |op|
+          next unless op.kind == OperandKind::Virtual
+          bit_set(u, op.reg) unless bit?(d, op.reg)
+        end
+        inst.defs.each do |op|
+          next unless op.kind == OperandKind::Virtual
+          bit_set(d, op.reg)
+        end
+      end
+      uses_b << u
+      defs_b << d
+      @live_in << bit_row(n)
+      @live_out << bit_row(n)
+      b = b + 1
+    end
+    # The sets only grow, so each pass adds to the rows in place: live-out gathers the successors' live-in, and
+    # live-in is the uses and whatever is live-out and not defined here.
+    changed = true
+    while changed
+      changed = false
+      b = nb - 1
+      while b >= 0
+        out = @live_out[b]
+        inn = @live_in[b]
+        @succs[b].each do |s|
+          if s >= 0 && s < nb
+            from = @live_in[s]
+            w = 0
+            while w < words
+              out[w] = out[w] | from[w]
+              w = w + 1
+            end
+          end
+        end
+        u = uses_b[b]
+        d = defs_b[b]
+        w = 0
+        while w < words
+          now = u[w] | (out[w] & (d[w] ^ 18446744073709551615_u64))
+          if now != inn[w]
+            inn[w] = now
+            changed = true
+          end
+          w = w + 1
+        end
+        b = b - 1
+      end
+    end
+  end
+
+  def extend_at(v : Int32, p : Int32) : Nil
+    @starts[v] = p if p < @starts[v]
+    @ends[v] = p if p > @ends[v]
+  end
+
+  # Interval hulls, the crossing flags, and the pointer-carrying flags.
+  def build_intervals : Nil
+    n = @vcount
+    @starts = int_row(n, big_position)
+    @ends = int_row(n, -1)
+    @homes = int_row(n, -1)
+    pos = 0
+    @fn.blocks.each do |block|
+      block.insts.each do |inst|
+        inst.uses.each do |op|
+          extend_at(op.reg, pos) if op.kind == OperandKind::Virtual
+        end
+        inst.defs.each do |op|
+          extend_at(op.reg, pos) if op.kind == OperandKind::Virtual
+        end
+        pos = pos + 1
+      end
+    end
+    b = 0
+    while b < @fn.blocks.size
+      if @block_last[b] >= @block_first[b]
+        v = 0
+        while v < n
+          extend_at(v, @block_first[b]) if bit?(@live_in[b], v)
+          extend_at(v, @block_last[b]) if bit?(@live_out[b], v)
+          v = v + 1
+        end
+      end
+      b = b + 1
+    end
+    pointers = pointer_fprs
+    v = 0
+    while v < n
+      has = @starts[v] <= @ends[v]
+      @has_interval << has
+      cross = false
+      # A call defines no virtual register, so a call at the start of an interval is one the value must survive.
+      if has && @ends[v] > @starts[v]
+        cross = @call_prefix[@ends[v]] - @call_prefix[@starts[v]] > 0
+      end
+      @crossing << cross
+      @pointer << (pointers[v] || @fn.vreg_pointer[v])
+      v = v + 1
+    end
+  end
+
+  # The floating-point vregs that are bit copies of a general-purpose value. A copy is `fmov` or `mov` into an
+  # fp vreg: the source's flag passes to the destination until nothing changes.
+  def pointer_fprs : Array(Bool)
+    n = @vcount
+    flags = bool_row(n)
+    @fn.blocks.each do |block|
+      block.insts.each do |inst|
+        if is_role?(@fn.isa, inst, Role::GprToFpr) && inst.defs.size > 0 && inst.defs[0].kind == OperandKind::Virtual
+          flags[inst.defs[0].reg] = true
+        end
+      end
+    end
+    changed = true
+    while changed
+      changed = false
+      @fn.blocks.each do |block|
+        block.insts.each do |inst|
+          next unless is_role?(@fn.isa, inst, Role::Copy)
+          next unless inst.defs.size > 0 && inst.uses.size > 0
+          dst = inst.defs[0]
+          src = inst.uses[0]
+          next unless dst.kind == OperandKind::Virtual && src.kind == OperandKind::Virtual
+          next unless @fn.vreg_classes[dst.reg] == RegClass::Fpr
+          if flags[src.reg] && !flags[dst.reg]
+            flags[dst.reg] = true
+            changed = true
+          end
+        end
+      end
+    end
+    flags
+  end
+
+  # Physical occurrences. Each reservation is an inclusive span of positions over which the register is fixed.
+  def reserve(r : Int32, s : Int32, e : Int32) : Nil
+    @res_reg << r
+    @res_start << s
+    @res_end << e
+  end
+
+  def terminator_reads(opened : Array(Bool), clob : Array(Int32), pos : Int32) : Nil
+    r = 0
+    while r < 64
+      if opened[r]
+        reserve(r, clob[r], pos)
+        opened[r] = false
+      end
+      r = r + 1
+    end
+  end
+
+  def record_reservations : Nil
+    clob = int_row(64, 0)
+    opened = bool_row(64)
+    pos = 0
+    @fn.blocks.each do |block|
+      block.insts.each do |inst|
+        inst.uses.each do |op|
+          next unless op.kind == OperandKind::Physical
+          reserve(op.reg, clob[op.reg], pos)
+          opened[op.reg] = false
+        end
+        terminator_reads(opened, clob, pos) if terminator?(@fn.isa, inst)
+        if inst.call
+          integer_arg_regs.each do |r|
+            if opened[r]
+              reserve(r, clob[r], pos)
+              opened[r] = false
+            end
+          end
+          fp_arg_regs.each do |r|
+            if opened[r]
+              reserve(r, clob[r], pos)
+              opened[r] = false
+            end
+          end
+          inst.clobbers.each do |r|
+            clob[r] = pos
+            opened[r] = false
+          end
+        end
+        inst.defs.each do |op|
+          next unless op.kind == OperandKind::Physical
+          reserve(op.reg, clob[op.reg], pos) if opened[op.reg]
+          clob[op.reg] = pos
+          opened[op.reg] = true
+          reserve(op.reg, pos, pos)
+        end
+        pos = pos + 1
+      end
+    end
+    r = 0
+    while r < 64
+      reserve(r, clob[r], pos - 1) if opened[r]
+      r = r + 1
+    end
+  end
+
+  # Whether register `reg` has a reservation overlapping the span [s, e].
+  def reserved?(reg : Int32, s : Int32, e : Int32) : Bool
+    i = 0
+    while i < @res_reg.size
+      if @res_reg[i] == reg && @res_start[i] <= e && @res_end[i] >= s
+        return true
+      end
+      i = i + 1
+    end
+    false
+  end
+
+  def held?(reg : Int32) : Bool
+    @active.each do |a|
+      return true if @homes[a] == reg
+    end
+    false
+  end
+
+  def expire(s : Int32) : Nil
+    kept = [] of Int32
+    @active.each do |a|
+      kept << a if @ends[a] >= s
+    end
+    @active = kept
+  end
+
+  def remove_active(v : Int32) : Nil
+    kept = [] of Int32
+    @active.each do |a|
+      kept << a unless a == v
+    end
+    @active = kept
+  end
+
+  # The candidate registers for one interval, in the order they are tried.
+  #   - A floating-point interval that crosses a call gets no register: every fp register is caller-saved.
+  #   - A general-purpose interval that crosses a call gets a callee-saved register.
+  #   - Any other general-purpose interval tries the caller-saved registers, then the callee-saved ones.
+  def pool_for(iv : Int32) : Array(Int32)
+    if @fn.vreg_classes[iv] == RegClass::Fpr
+      if @crossing[iv]
+        return [] of Int32
+      end
+      return @fpr_pool
+    end
+    if @crossing[iv]
+      return @callee_pool
+    end
+    @caller_pool + @callee_pool
+  end
+
+  def find_free(iv : Int32, pool : Array(Int32)) : Int32
+    pool.each do |reg|
+      return reg unless held?(reg) || reserved?(reg, @starts[iv], @ends[iv])
+    end
+    -1
+  end
+
+  # The active interval to evict for `iv`: one in a usable register that ends after `iv`, the furthest end
+  # wins, the earliest in the active list breaks ties. Its register must be free of reservations over iv.
+  def find_victim(iv : Int32, pool : Array(Int32)) : Int32
+    best = -1
+    k = 0
+    while k < @active.size
+      a = @active[k]
+      reg = @homes[a]
+      if member?(pool, reg) && @ends[a] > @ends[iv] && !reserved?(reg, @starts[iv], @ends[iv])
+        if best < 0 || @ends[a] > @ends[best]
+          best = a
+        end
+      end
+      k = k + 1
+    end
+    best
+  end
+
+  def assign : Nil
+    order = [] of Int32
+    v = 0
+    while v < @vcount
+      order << v if @has_interval[v]
+      v = v + 1
+    end
+    order = sort_by_start(order, @starts)
+    order.each do |iv|
+      expire(@starts[iv])
+      pool = pool_for(iv)
+      reg = find_free(iv, pool)
+      if reg >= 0
+        @homes[iv] = reg
+        @active << iv
+      else
+        victim = find_victim(iv, pool)
+        if victim >= 0
+          taken = @homes[victim]
+          @homes[victim] = -1
+          remove_active(victim)
+          @homes[iv] = taken
+          @active << iv
+        else
+          @homes[iv] = -1
+        end
+      end
+    end
+  end
+
+  # The collector's constraint and the register classes, checked on the final homes.
+  def assert_assignment : Nil
+    v = 0
+    while v < @vcount
+      h = @homes[v]
+      if h >= 0
+        fp = @fn.vreg_classes[v] == RegClass::Fpr
+        if fp != (h >= 32)
+          kind = fp ? "floating-point" : "general-purpose"
+          raise "regalloc: vreg #{v} is #{kind} but has home #{h}"
+        end
+        if fp && @crossing[v] && @pointer[v]
+          raise "regalloc: collector constraint: a pointer-carrying value (vreg #{v}) lives in d#{h - 32} across a call"
+        end
+      end
+      v = v + 1
+    end
+  end
+
+  # Publishes the homes, one spill slot per spilled vreg with an interval, and the callee-saved registers used.
+  def finish_frame : Nil
+    slots = [] of Int32
+    v = 0
+    while v < @vcount
+      if @homes[v] == -1 && @has_interval[v]
+        slots << @fn.frame.add_slot(8_i64, 8)
+      else
+        slots << -1
+      end
+      v = v + 1
+    end
+    @callee_pool.each do |r|
+      used = false
+      @homes.each do |h|
+        used = true if h == r
+      end
+      if used && !member?(@fn.frame.callee_saved, r)
+        @fn.frame.callee_saved << r
+      end
+    end
+    @fn.vreg_home = @homes
+    @fn.vreg_slot = slots
+  end
+end
+
+# Allocates one function by linear scan, then writes the spill code.
+pub def allocate_linear(fn : MFunction) : Nil
+  scan = LinearScan.new(fn)
+  scan.run
+  rewrite_spills(fn)
+end

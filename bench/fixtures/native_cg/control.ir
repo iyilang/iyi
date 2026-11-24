@@ -1,0 +1,45 @@
+; iyi-ir 1
+module "control"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [9 x i8] c"%d %d %d\0A\00"
+
+; Recursion: n and the first call's result are live across the second call.
+define internal i32 @fib(i32 %n) {
+entry:
+  %small = icmp slt i32 %n, 2
+  br i1 %small, label %base, label %rec
+base:
+  ret i32 %n
+rec:
+  %n1 = sub i32 %n, 1
+  %a = call i32 (i32) @fib(i32 %n1)
+  %n2 = sub i32 %n, 2
+  %b = call i32 (i32) @fib(i32 %n2)
+  %s = add i32 %a, %b
+  ret i32 %s
+}
+
+; A switch: a compare chain, with a default.
+define internal i32 @classify(i32 %n) {
+entry:
+  switch i32 %n, label %dflt [ i32 1, label %one, i32 2, label %two, i32 7, label %seven ]
+one:
+  ret i32 100
+two:
+  ret i32 200
+seven:
+  ret i32 700
+dflt:
+  ret i32 0
+}
+
+define i32 @main() {
+entry:
+  %f = call i32 (i32) @fib(i32 15)
+  %c2 = call i32 (i32) @classify(i32 2)
+  %c5 = call i32 (i32) @classify(i32 5)
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i32 %f, i32 %c2, i32 %c5)
+  ret i32 0
+}

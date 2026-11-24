@@ -1,0 +1,22 @@
+module diamond
+
+def pick(c : Int64, x : Int64) : Int64
+  w = x * 2_i64 + 1_i64
+  r = 0_i64
+  if c > 0_i64
+    t1 = x * 3_i64
+    t2 = t1 + 5_i64
+    t3 = t2 ^ x
+    r = t3
+  else
+    e1 = x - 2_i64
+    e2 = e1 * e1
+    r = e2
+  end
+  z0 = r + x
+  z0 + w
+end
+
+puts "#{pick(1_i64, 4_i64)}"
+puts "#{pick(-1_i64, 4_i64)}"
+puts "#{pick(5_i64, -7_i64)}"

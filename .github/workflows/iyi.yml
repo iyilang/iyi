@@ -4352,12 +4352,14 @@ jobs:
       - name: Build `iyi` and its daemon
         run: make -o .build/crystal iyi iyi-daemon
 
-      # One driver runs every selfhost gate (bench/selfhost_*_exercise.sh) in order,
-      # each with its own log, and exits non-zero when any of them fails.
+      # One driver runs every selfhost and native component gate in order,
+      # preserving complete logs and failing if any gate fails.
       - name: The self-host gates
         env:
           IR_ORACLE_EXPORT_DIR: ${{ runner.temp }}/selfhost-ir-oracle
           SELFHOST_ARTIFACT_DIR: ${{ runner.temp }}/selfhost-elf
+          SELFHOST_GATE_LOGS: ${{ runner.temp }}/selfhost-gate-logs
+          SELFHOST_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           bindir="$("$LLVM_CONFIG" --bindir)"
           LLVM_MC="$bindir/llvm-mc" LLVM_OBJDUMP="$bindir/llvm-objdump" bash bench/selfhost_gates.sh
@@ -4375,6 +4377,15 @@ jobs:
         with:
           name: selfhost-elf-aarch64
           path: ${{ runner.temp }}/selfhost-elf
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Preserve complete compiler component logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selfhost-gates-${{ env.SELFHOST_HOST }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/selfhost-gate-logs
           if-no-files-found: error
           retention-days: 7
 
@@ -4425,7 +4436,19 @@ jobs:
       # The same driver as the Linux job. The gates read LLVM_CONFIG from the
       # environment before they look for llvm-config on the PATH.
       - name: The self-host gates
+        env:
+          SELFHOST_GATE_LOGS: ${{ runner.temp }}/selfhost-gate-logs
+          SELFHOST_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" LLVM_MC="$HOME/llvm-static/bin/llvm-mc" LLVM_OBJDUMP="$HOME/llvm-static/bin/llvm-objdump" bash bench/selfhost_gates.sh
+
+      - name: Preserve complete compiler component logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selfhost-gates-${{ env.SELFHOST_HOST }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/selfhost-gate-logs
+          if-no-files-found: error
+          retention-days: 7
 
   selfhost-windows:
     needs: [plan, selfhost]
@@ -4485,7 +4508,18 @@ jobs:
         shell: bash
         env:
           IR_ORACLE_DIR: ${{ runner.temp }}/selfhost-ir-oracle
+          SELFHOST_GATE_LOGS: ${{ runner.temp }}/selfhost-gate-logs
+          SELFHOST_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash bench/selfhost_gates.sh
+
+      - name: Preserve complete compiler component logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selfhost-gates-${{ env.SELFHOST_HOST }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/selfhost-gate-logs
+          if-no-files-found: error
+          retention-days: 7
 
   selfhost-linux-arm64:
     needs: [plan, selfhost]

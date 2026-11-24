@@ -1,0 +1,16 @@
+@[Unsafe("the fixture holds an inline asm template in a naked function")]
+
+@[NoInline]
+@[Naked]
+fun addimm : Nil
+  asm("add x0, x0, #7\nret" :::: "volatile")
+end
+
+# The argument goes in x0 through an input, and the naked function's result comes back in the output.
+def calladdimm : Int64
+  out = 0_i64
+  asm("bl _addimm" : "={x0}"(out) : "{x0}"(30_i64) : "x30" : "volatile")
+  out
+end
+
+puts "#{calladdimm()}"

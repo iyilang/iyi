@@ -1,0 +1,10 @@
+module atomics
+
+cell = 5_i64
+cell = cell + 2_i64
+seen = cell
+old = cell
+cell = cell + 3_i64
+prev = cell
+cell = 40_i64
+puts "#{seen} #{old} #{prev} 1 #{cell}"

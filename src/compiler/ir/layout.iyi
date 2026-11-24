@@ -1,0 +1,159 @@
+module compiler/ir/layout
+
+import compiler/ir/types::{IrType}
+import compiler/platform/target::{Target}
+
+pub class LayoutError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+# LLVM's DataLayout for the five targets the IR covers, with the struct, array and pointer rules
+# LLVM uses on them. The strings are the oracle's `target datalayout` lines, byte for byte.
+pub class DataLayout
+  getter family : String
+  getter llvm_string : String
+
+  def initialize(@family : String, @llvm_string : String)
+  end
+
+  def self.for(target : Target) : DataLayout | LayoutError
+    arch = target.architecture
+    if arch == "aarch64" && target.darwin?
+      return DataLayout.new("aarch64-darwin", "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32")
+    end
+    if arch == "aarch64" && target.linux?
+      return DataLayout.new("aarch64-linux", "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32")
+    end
+    if arch == "x86_64" && target.linux?
+      return DataLayout.new("x86_64-linux", "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128")
+    end
+    if arch == "x86_64" && target.windows? && target.msvc?
+      return DataLayout.new("x86_64-windows-msvc", "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128")
+    end
+    if arch == "wasm32" && target.wasi?
+      return DataLayout.new("wasm32-wasi", "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20")
+    end
+    LayoutError.new("no DataLayout for #{target.original_triple}: the IR covers aarch64-apple-darwin, aarch64-linux-gnu, x86_64-linux-gnu, x86_64-pc-windows-msvc and wasm32-wasi")
+  end
+
+  # Bytes in a pointer of the given address space.
+  def pointer_size(address_space : Int32) : Int32
+    if @family == "wasm32-wasi"
+      return 1 if address_space == 10 || address_space == 20
+      return 4
+    end
+    if @family == "x86_64-windows-msvc" && (address_space == 270 || address_space == 271)
+      return 4
+    end
+    8
+  end
+
+  def pointer_bytes : Int32
+    pointer_size(0)
+  end
+
+  # The ABI alignment of a pointer of the given address space, in bytes.
+  def pointer_align(address_space : Int32) : Int32
+    pointer_size(address_space)
+  end
+
+  # The ABI alignment of a type, in bytes.
+  def abi_align(t : IrType) : Int32
+    return int_align(t.bits) if t.int?
+    if t.float?
+      return t.bits // 8
+    end
+    if t.pointer?
+      return pointer_align(t.address_space)
+    end
+    if t.array?
+      return abi_align(t.element_type)
+    end
+    if t.struct?
+      return 1 if t.packed_struct?
+      align = 1
+      t.struct_element_types.each do |f|
+        a = abi_align(f)
+        align = a if a > align
+      end
+      return align
+    end
+    raise "no alignment for a #{t}"
+  end
+
+  # LLVM's ABI alignment of an integer of `bits` bits. The five targets' integer specs are i1, i8, i16, i32, i64 and
+  # i128, and LLVM gives a width the alignment of the first spec at least as wide, or of the widest spec for a wider
+  # width (DataLayout::getIntegerAlignment). So an i192 is 16-byte aligned on every target.
+  def int_align(bits : Int32) : Int32
+    return 1 if bits <= 8
+    return 2 if bits <= 16
+    return 4 if bits <= 32
+    return 8 if bits <= 64
+    16
+  end
+
+  # The bytes a value of the type occupies in memory, without the padding that follows it.
+  def store_size(t : IrType) : Int64
+    if t.int?
+      return ((t.bits + 7) // 8).to_i64
+    end
+    if t.float?
+      return (t.bits // 8).to_i64
+    end
+    if t.pointer?
+      return pointer_size(t.address_space).to_i64
+    end
+    if t.array?
+      return t.count * alloc_size(t.element_type)
+    end
+    if t.struct?
+      fields = t.struct_element_types
+      return 0_i64 if fields.empty?
+      last = fields.size - 1
+      return offset_of(t, last) + store_size(fields[last])
+    end
+    raise "a #{t} has no size"
+  end
+
+  # The bytes a value of the type takes up in an array or a struct: its store size, rounded to its alignment.
+  def alloc_size(t : IrType) : Int64
+    align = abi_align(t).to_i64
+    size = store_size(t)
+    ((size + align - 1) // align) * align
+  end
+
+  # The byte offset of field `field` in a struct type.
+  def offset_of(t : IrType, field : Int32) : Int64
+    raise "offset_of needs a struct, not a #{t}" unless t.struct?
+    fields = t.struct_element_types
+    off = 0_i64
+    i = 0
+    while i < fields.size
+      unless t.packed_struct?
+        a = abi_align(fields[i]).to_i64
+        off = ((off + a - 1) // a) * a
+      end
+      return off if i == field
+      off = off + alloc_size(fields[i])
+      i = i + 1
+    end
+    raise "field #{field} is out of range for #{t}"
+  end
+
+  # The size of a whole struct type: its last field's end, rounded up to its alignment.
+  def size_of(t : IrType) : Int64
+    alloc_size(t)
+  end
+
+  # The alignment of the stack, in bytes. The same on all five targets.
+  def stack_align : Int32
+    16
+  end
+end

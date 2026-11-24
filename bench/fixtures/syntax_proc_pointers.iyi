@@ -1,0 +1,44 @@
+# Proc pointers: `->name` and `->name(Types)` for a top-level function, `->::name` for a
+# global one, and `->receiver.name(Types)` on a local, a parameter, `self`, an instance
+# variable, a class variable and a constant path, with `->::Path.name` on a global path.
+# Setter names (`->name=`, `->receiver.name=`) and a pointer passed as an argument.
+
+@@registry = 0
+@handler = nil
+on_event = 1
+
+filter = ->__iyi_win_fault(Void*)
+ctrl = ->__iyi_win_console_ctrl(Int32)
+plain = ->handle_all
+typed = ->handle_one(Int32, String?)
+global_plain = ->::handle_global
+global_typed = ->::handle_global(Int32)
+local_method = ->on_event.to_s
+local_typed = ->on_event.add(Int32, Float64)
+self_method = ->self.describe
+ivar_method = ->@handler.call(String)
+cvar_method = ->@@registry.bump(Int32)
+const_method = ->Store.open(String)
+const_path = ->Registry::Store.open(String)
+const_generic = ->Array(Int32).new
+global_const = ->::Registry::Store.close
+setter_plain = ->reset=
+setter_local = ->on_event.value=
+setter_ivar = ->@handler.value=
+
+def wire(target : Registry, extra : Int32)
+  attach = ->target.attach(Int32)
+  detach = ->target.detach
+  register(->handle_one(Int32, String?), ->target.attach(Int32), ->@handler.call)
+  attach
+end
+
+class Holder
+  @@shared = Registry.new
+  @hook = nil
+
+  def fire
+    ->@hook.call
+    ->@@shared.reset
+  end
+end

@@ -102,6 +102,10 @@ ALLOWED_PATHS: list[tuple[str, str]] = [
     (r"^bench/(machine_probe|dependency_floor|build_tool_floor|build_tool_scan)", "measures the compatibility binary, its libraries, and build tools"),
     (r"^spec/compiler/util_spec\.cr$", "specs Crystal's own util module"),
     (r"^samples/iyi/", "programs whose comments compare iyi with Crystal"),
+    # The self-hosting platform support oracle. It verifies target triple parsing,
+    # flags, naming, and linker command generation against the frontend iyi is
+    # still bootstrapped from.
+    (r"^bench/selfhost_platform_exercise\.sh$", "the frontend the selfhost platform support is checked against"),
 ]
 
 # Lines that name Crystal legitimately inside a file that is otherwise iyi's.
@@ -328,6 +332,12 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # The bootstrap compiler's cache, set beside iyi's in the gate that reads
     # the broken copy's objects out of it: the bootstrap reads no other name.
     (r'CRYSTAL_CACHE_DIR="\$WORK/\$label-cache"', "the bootstrap compiler's cache, where bench/symbol_names.sh reads its broken copy"),
+    (r'^CRYSTAL_CACHE_DIR="\$WORK/cr" \\$',
+     "the Crystal declaration oracle's separate cache in selfhost/semantic/diff.sh"),
+    (r'"crystal_version"',
+     "the Crystal compiler identity recorded in the native IR oracle manifest"),
+    (r'^# Normalize external LLVM/Crystal transport only;',
+     "the LLVM layout oracle compiled from Crystal, not the iyi driver under test"),
     # The linker's search path, in the gate that proves the binaries build
     # with bdw-gc unreachable. `IYI_LIBRARY_PATH` is not a substitute: it adds
     # to the default search path where `CRYSTAL_LIBRARY_PATH` replaces it, and

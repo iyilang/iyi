@@ -1,0 +1,12 @@
+# Modifier forms fixture: if, unless
+x = 10
+status = "ok"
+
+x = 20 if status == "ok"
+x = 30 unless status != "ok"
+
+return 0 if x < 0
+return 100 unless x >= 0
+
+break if x == 50
+next unless x > 10

@@ -1,0 +1,37 @@
+# Calls and blocks fixture
+foo
+bar()
+baz(1, 2, 3)
+qux 4, 5, 6
+obj.method
+obj.method(10)
+obj.chain.method(20).another
+list[0]
+matrix[1, 2]
+list[3] = 40
+matrix[5, 6] = 70
+
+# Calls with blocks
+each do |item|
+  item + 1
+end
+
+each { |item| item * 2 }
+
+transform(10, 20) do |a, b|
+  a + b
+end
+
+run do
+  x = 100
+  x * 2
+end
+
+# Named arguments
+compute(x: 1, y: 2)
+api_call(target: "test", count: 5, verbose: true)
+
+# Splat arguments
+call_with_splats(*args)
+call_with_double_splat(**options)
+full_call(1, 2, *rest, **kwargs)

@@ -427,6 +427,12 @@ entry "What the fixes below change in a program's source" has the details.
   Windows it reads the bundled `llvm_VERSION` from the library path, in the
   directories the macro used to search.
 
+- Add the artifact reader/writer and a standalone `iyi-mod` driver in iyi.
+  Same-host gates compare binary output, refusals, declarations and JSON
+  against the hosted implementation. Existing hosted commands are unchanged.
+  JSON includes exported module macros and type-owned macros with their docs
+  and rendered signatures.
+
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.

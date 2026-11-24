@@ -1,0 +1,435 @@
+module compiler/ir/inst
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value, SymbolTable}
+import compiler/ir/intrinsics::{IntrinsicId}
+
+pub enum Op
+  # constants and module-level references (constants are never placed in a block)
+  ConstInt
+  ConstFloat
+  ConstNull
+  ConstUndef
+  ConstPoison
+  ConstZero
+  ConstAggregate
+  ConstBytes
+  ConstExpr # Gep / PtrToInt / IntToPtr / BitCast / Add / Sub / Mul over constants
+  GlobalAddr
+  FunctionAddr
+  # memory
+  Alloca
+  Load
+  Store
+  Gep
+  Fence
+  CmpXchg
+  AtomicRmw
+  VaArg
+  # arithmetic
+  Add
+  Sub
+  Mul
+  SDiv
+  UDiv
+  SRem
+  URem
+  Shl
+  LShr
+  AShr
+  And
+  Or
+  Xor
+  FAdd
+  FSub
+  FMul
+  FDiv
+  FRem
+  FNeg
+  ICmp
+  FCmp
+  # conversions
+  Trunc
+  ZExt
+  SExt
+  FPTrunc
+  FPExt
+  FPToSI
+  FPToUI
+  SIToFP
+  UIToFP
+  PtrToInt
+  IntToPtr
+  BitCast
+  AddrSpaceCast
+  # values
+  ExtractValue
+  InsertValue
+  Select
+  Phi
+  Freeze
+  # calls
+  Call
+  Intrinsic
+  # iyi's runtime contract: never folded, merged, or moved across a call or back-edge
+  ThreadLocalAddr
+  ThreadPointer
+  # terminators
+  Ret
+  Br
+  CondBr
+  Switch
+  Unreachable
+  # oracle round trip only; the native backend deletes what only unwinding reaches
+  Invoke
+  LandingPad
+  Resume
+  CatchSwitch
+  CatchPad
+  CatchRet
+  CleanupPad
+  CleanupRet
+end
+
+pub enum CallConv
+  C   # platform C ABI; the signature is already ABI-lowered by its producer
+  Iyi # internal; the native backend chooses, the LLVM translator emits C
+end
+
+pub enum Ordering
+  NotAtomic
+  Unordered
+  Monotonic
+  Acquire
+  Release
+  AcqRel
+  SeqCst
+end
+
+pub enum AsmDialect
+  Att
+  Intel
+end
+
+pub enum ThreadPointerKind
+  Fs         # x86_64 Linux
+  Gs         # x86_64 Windows
+  TpidrEl0   # aarch64 Linux
+  TpidrroEl0 # aarch64 darwin
+end
+
+pub enum IntPredicate
+  EQ
+  NE
+  UGT
+  UGE
+  ULT
+  ULE
+  SGT
+  SGE
+  SLT
+  SLE
+end
+
+pub enum RealPredicate
+  FALSE
+  OEQ
+  OGT
+  OGE
+  OLT
+  OLE
+  ONE
+  ORD
+  UEQ
+  UGT
+  UGE
+  ULT
+  ULE
+  UNE
+  UNO
+  TRUE
+end
+
+# Whether an opcode ends a block.
+pub def terminator_op?(op : Op) : Bool
+  case op
+  when Op::Ret, Op::Br, Op::CondBr, Op::Switch, Op::Unreachable, Op::Invoke, Op::Resume, Op::CatchSwitch, Op::CatchRet, Op::CleanupRet
+    true
+  else
+    false
+  end
+end
+
+# The mnemonic of an opcode that exists only for unwinding, or nil for every other opcode. Nothing iyi lowers
+# reaches one: Function#drop_unwind_edges removes them from a module the oracle wrote.
+pub def unwind_only_op(op : Op) : String?
+  case op
+  when Op::LandingPad
+    "landingpad"
+  when Op::Resume
+    "resume"
+  when Op::CatchSwitch
+    "catchswitch"
+  when Op::CatchPad
+    "catchpad"
+  when Op::CatchRet
+    "catchret"
+  when Op::CleanupPad
+    "cleanuppad"
+  when Op::CleanupRet
+    "cleanupret"
+  else
+    nil
+  end
+end
+
+pub struct Attribute
+  getter name : String # LLVM's name: "noinline", "naked", "byval", "sret", "zeroext", "frame-pointer" ...
+  getter int_value : UInt64
+  getter string_value : String?
+  getter type_value : IrType?
+
+  def initialize(@name : String, @int_value : UInt64 = 0_u64, @string_value : String? = nil, @type_value : IrType? = nil)
+  end
+end
+
+pub struct DebugLoc
+  getter file : Int32 # index into Module#files
+  getter line : Int32
+  getter column : Int32
+
+  def initialize(@file : Int32, @line : Int32, @column : Int32)
+  end
+end
+
+pub struct GepAux
+  getter source_type : IrType # Gep: the indexed type. Alloca: the allocated type.
+  getter inbounds : Bool
+
+  def initialize(@source_type : IrType, @inbounds : Bool = false)
+  end
+end
+
+pub struct MemAux # Load, Store, CmpXchg, AtomicRmw, Fence
+  getter align : Int32
+  getter volatile : Bool
+  getter ordering : Ordering
+  getter failure_ordering : Ordering
+  getter single_thread : Bool
+  getter rmw_op : String # LLVM's atomicrmw operation name
+  getter weak : Bool
+
+  def initialize(@align : Int32 = 0, @volatile : Bool = false, @ordering : Ordering = Ordering::NotAtomic, @failure_ordering : Ordering = Ordering::NotAtomic, @single_thread : Bool = false, @rmw_op : String = "", @weak : Bool = false)
+  end
+end
+
+pub struct CallAux
+  getter fn_type : IrType
+  getter cc : CallConv
+  getter tail : Bool
+  getter fn_attrs : Array(Attribute)
+  getter param_attrs : Array(Array(Attribute))
+  getter ret_attrs : Array(Attribute)
+
+  def initialize(@fn_type : IrType, @cc : CallConv = CallConv::C, @tail : Bool = false, @fn_attrs : Array(Attribute) = [] of Attribute, @param_attrs : Array(Array(Attribute)) = [] of Array(Attribute), @ret_attrs : Array(Attribute) = [] of Attribute)
+  end
+end
+
+pub struct AsmAux # the callee of a Call that is inline asm
+  getter template : String
+  getter constraints : String
+  getter side_effects : Bool
+  getter align_stack : Bool
+  getter dialect : AsmDialect
+  getter unwind : Bool # LLVM's `unwind`: the asm may throw, so its call may unwind
+
+  def initialize(@template : String, @constraints : String, @side_effects : Bool = false, @align_stack : Bool = false, @dialect : AsmDialect = AsmDialect::Att, @unwind : Bool = false)
+  end
+end
+
+pub struct IntrinsicAux
+  getter id : IntrinsicId # closed enum in compiler/ir/intrinsics.iyi
+  getter overload : Array(IrType)
+  getter param_attrs : Array(Array(Attribute)) # operand k's attributes, written as an ordinary call's are
+
+  def initialize(@id : IntrinsicId, @overload : Array(IrType), @param_attrs : Array(Array(Attribute)) = [] of Array(Attribute))
+  end
+end
+
+pub alias InstAux = GepAux | MemAux | CallAux | AsmAux | IntrinsicAux | Nil
+
+# An instruction, or a constant. Constants are Insts too, but never sit in a block.
+#
+# Operand layout, by op:
+#   Call, Invoke:      args[0] is the callee, args[1..] the arguments; Invoke's targets are [normal, unwind].
+#   Phi:               args[i] is the value from targets[i].
+#   Switch:            args[0] the value; targets[0] the default, targets[1..] the cases; cases aligned with targets[1..].
+#   Br, CondBr:        targets are the successors; CondBr's args[0] is the condition.
+#   Store:             args are [value, pointer].
+#   Load, Gep:         args[0] is the pointer (Gep's indices follow).
+#   Alloca:            no args; aux is GepAux (the allocated type); aux_int is the alignment (0 = default).
+#   ICmp, FCmp:        aux_int is the predicate ordinal.
+#   Binary arithmetic: aux_int holds flags: bit 0 nuw, bit 1 nsw, bit 2 exact.
+#   ExtractValue, InsertValue: aux_int is the index.
+#   ConstInt:          aux_int is the value; an integer wider than 64 bits also has aux_words (see below).
+#   ConstFloat:        aux_int is the bit pattern (32 or 64 bits).
+#   ConstExpr:         aux_int is the wrapped operation's Op ordinal; aux is GepAux for Gep.
+#   ConstBytes:        args are i8 ConstInts, one per byte.
+#   ThreadPointer:     aux_int is the ThreadPointerKind ordinal.
+#   LandingPad:        aux_int bit 0 marks a cleanup; args are the typed clauses.
+#   Intrinsic:         aux is IntrinsicAux; args are the call's arguments.
+pub class Inst < Value
+  getter op : Op
+  getter args : Array(Value)
+  getter aux_int : Int64
+  getter aux : InstAux
+  getter targets : Array(Block)
+  getter cases : Array(Int64)
+  property loc : DebugLoc?
+  # The 64-bit words of an integer constant wider than 64 bits, least significant first and sign-extended to whole
+  # words; aux_int is word 0. Empty for every other constant.
+  getter aux_words : Array(Int64)
+
+  def initialize(@op : Op, type : IrType, @args : Array(Value), @aux_int : Int64, @aux : InstAux, @targets : Array(Block), @cases : Array(Int64), name : String = "")
+    super(type, name)
+    @loc = nil
+    @aux_words = [] of Int64
+  end
+
+  # Word 1 of a wide ConstInt: the high 64 bits of an i128. Zero for every other constant.
+  def aux_hi : Int64
+    @aux_words.size > 1 ? @aux_words[1] : 0_i64
+  end
+
+  # Sets word 1 of a wide ConstInt. On a constant with no words yet, the words become [aux_int, hi].
+  def aux_hi=(hi : Int64) : Nil
+    @aux_words = [@aux_int, hi] of Int64 if @aux_words.size < 2
+    @aux_words[1] = hi
+  end
+
+  # Sets every word of a wide ConstInt. Word 0 becomes aux_int.
+  def wide_words=(words : Array(Int64)) : Nil
+    @aux_int = words[0]
+    @aux_words = words
+  end
+
+  # The `bits`-bit words of this ConstInt, least significant first: the words it was given, or else aux_int and aux_hi
+  # sign-extended to whole words.
+  def int_words(bits : Int32) : Array(Int64)
+    count = (bits + 63) // 64
+    return @aux_words if @aux_words.size == count
+    words = [@aux_int, aux_hi] of Int64
+    while words.size < count
+      words << (words[words.size - 1] < 0_i64 ? -1_i64 : 0_i64)
+    end
+    words[0, count]
+  end
+
+  # Adds one incoming (value, block) pair to a phi.
+  def add_incoming(value : Value, block : Block) : Nil
+    @args << value
+    @targets << block
+  end
+
+  # An invoke whose unwind edge is dropped is the call it makes: the same callee, operands, convention and
+  # attributes, and no successors. The instruction keeps its identity, so every use of its result stands.
+  def demote_invoke : Nil
+    raise "#{@op} is not an invoke" unless @op == Op::Invoke
+    @op = Op::Call
+    @targets = [] of Block
+  end
+
+  # A phi keeps only the incoming pairs whose block is one of `preds`.
+  def keep_incoming(preds : Array(Block)) : Nil
+    raise "#{@op} is not a phi" unless @op == Op::Phi
+    values = [] of Value
+    blocks = [] of Block
+    k = 0
+    while k < @targets.size
+      from = @targets[k]
+      if preds.any? { |p| p == from }
+        values << @args[k]
+        blocks << from
+      end
+      k = k + 1
+    end
+    @args = values
+    @targets = blocks
+  end
+
+  # A phi's pairs that came from `old` come from `block` instead: `old` was merged into it.
+  def move_incoming(old : Block, block : Block) : Nil
+    raise "#{@op} is not a phi" unless @op == Op::Phi
+    k = 0
+    while k < @targets.size
+      @targets[k] = block if @targets[k] == old
+      k = k + 1
+    end
+  end
+
+  # The alignment in bytes: an alloca's, or a memory op's. Zero means the default.
+  def alignment : Int32
+    return @aux_int.to_i32 if @op == Op::Alloca
+    return @aux.as(MemAux).align if @aux.is_a?(MemAux)
+    0
+  end
+
+  def alignment=(bytes : Int32) : Nil
+    if @op == Op::Alloca
+      @aux_int = bytes.to_i64
+      return
+    end
+    raise "#{@op} has no alignment" unless @aux.is_a?(MemAux)
+    m = @aux.as(MemAux)
+    @aux = MemAux.new(bytes, m.volatile, m.ordering, m.failure_ordering, m.single_thread, m.rmw_op, m.weak)
+  end
+end
+
+# A basic block. Its last instruction is its terminator. Preds are recomputed by Function#relink.
+pub class Block
+  getter name : String
+  getter insts : Array(Inst)
+  getter preds : Array(Block)
+  property no_vectorize : Bool
+  # The symbol table of the function this block belongs to, so the builder can claim the names of what it places here.
+  property symbols : SymbolTable?
+
+  def initialize(@name : String)
+    @insts = [] of Inst
+    @preds = [] of Block
+    @no_vectorize = false
+  end
+
+  def terminator : Inst
+    @insts.last
+  end
+
+  def terminated? : Bool
+    !@insts.empty? && terminator_op?(@insts.last.op)
+  end
+
+  def first_instruction : Inst?
+    @insts.empty? ? nil : @insts.first
+  end
+
+  # Inserts `inst` so it sits at `index`, shifting the instructions from there on.
+  def insert_at(index : Int32, inst : Inst) : Nil
+    rebuilt = [] of Inst
+    i = 0
+    while i < @insts.size
+      rebuilt << inst if i == index
+      rebuilt << @insts[i]
+      i = i + 1
+    end
+    rebuilt << inst if index >= @insts.size
+    @insts = rebuilt
+  end
+
+  def clear_preds : Nil
+    @preds = [] of Block
+  end
+
+  def add_pred(block : Block) : Nil
+    @preds << block unless @preds.any? { |p| p == block }
+  end
+end

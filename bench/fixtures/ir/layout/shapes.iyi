@@ -1,0 +1,125 @@
+# The struct shapes whose layout the native IR must reproduce. The native_ir_exercise gate compiles this
+# file for each target with the compiler hosted in Crystal and reads each probe's folded `ret i64` constant.
+# bench/fixtures/ir/layout/shapes.ir.in declares the same structs, in the same field order, for the IR.
+
+struct IntPair
+  getter a : Int8
+  getter b : Int64
+
+  def initialize(@a : Int8, @b : Int64)
+  end
+end
+
+struct MixedInts
+  getter a : Int8
+  getter b : Int16
+  getter c : Int32
+  getter d : Int8
+  getter e : Int64
+
+  def initialize(@a : Int8, @b : Int16, @c : Int32, @d : Int8, @e : Int64)
+  end
+end
+
+struct PointerPair
+  getter p : Pointer(UInt8)
+  getter q : Int8
+
+  def initialize(@p : Pointer(UInt8), @q : Int8)
+  end
+end
+
+struct WideInt
+  getter a : Int8
+  getter b : Int128
+
+  def initialize(@a : Int8, @b : Int128)
+  end
+end
+
+struct FloatMix
+  getter a : Int8
+  getter f : Float32
+  getter d : Float64
+
+  def initialize(@a : Int8, @f : Float32, @d : Float64)
+  end
+end
+
+def probe_size_IntPair : Int64
+  sizeof(IntPair).to_i64
+end
+
+def probe_offset_IntPair_0 : Int64
+  offsetof(IntPair, @a).to_i64
+end
+
+def probe_offset_IntPair_1 : Int64
+  offsetof(IntPair, @b).to_i64
+end
+
+def probe_size_MixedInts : Int64
+  sizeof(MixedInts).to_i64
+end
+
+def probe_offset_MixedInts_0 : Int64
+  offsetof(MixedInts, @a).to_i64
+end
+
+def probe_offset_MixedInts_1 : Int64
+  offsetof(MixedInts, @b).to_i64
+end
+
+def probe_offset_MixedInts_2 : Int64
+  offsetof(MixedInts, @c).to_i64
+end
+
+def probe_offset_MixedInts_3 : Int64
+  offsetof(MixedInts, @d).to_i64
+end
+
+def probe_offset_MixedInts_4 : Int64
+  offsetof(MixedInts, @e).to_i64
+end
+
+def probe_size_PointerPair : Int64
+  sizeof(PointerPair).to_i64
+end
+
+def probe_offset_PointerPair_0 : Int64
+  offsetof(PointerPair, @p).to_i64
+end
+
+def probe_offset_PointerPair_1 : Int64
+  offsetof(PointerPair, @q).to_i64
+end
+
+def probe_size_WideInt : Int64
+  sizeof(WideInt).to_i64
+end
+
+def probe_offset_WideInt_0 : Int64
+  offsetof(WideInt, @a).to_i64
+end
+
+def probe_offset_WideInt_1 : Int64
+  offsetof(WideInt, @b).to_i64
+end
+
+def probe_size_FloatMix : Int64
+  sizeof(FloatMix).to_i64
+end
+
+def probe_offset_FloatMix_0 : Int64
+  offsetof(FloatMix, @a).to_i64
+end
+
+def probe_offset_FloatMix_1 : Int64
+  offsetof(FloatMix, @f).to_i64
+end
+
+def probe_offset_FloatMix_2 : Int64
+  offsetof(FloatMix, @d).to_i64
+end
+
+puts "#{probe_size_IntPair()} #{probe_offset_IntPair_0()} #{probe_offset_IntPair_1()} #{probe_size_MixedInts()} #{probe_offset_MixedInts_0()} #{probe_offset_MixedInts_1()} #{probe_offset_MixedInts_2()} #{probe_offset_MixedInts_3()} #{probe_offset_MixedInts_4()} #{probe_size_PointerPair()} #{probe_offset_PointerPair_0()} #{probe_offset_PointerPair_1()} #{probe_size_WideInt()} #{probe_offset_WideInt_0()} #{probe_offset_WideInt_1()} #{probe_size_FloatMix()} #{probe_offset_FloatMix_0()} #{probe_offset_FloatMix_1()} #{probe_offset_FloatMix_2()}"

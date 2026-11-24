@@ -1,0 +1,8 @@
+handler = ->(n : Int32) { n }
+
+named(value: 1, &handler)
+mixed(2, value: 1, extra: true, &handler)
+named value: 1, &handler
+mixed 2, value: 1, extra: true, &handler
+named(value: 1, &.to_s)
+named value: 1, &.to_s

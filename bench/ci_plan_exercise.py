@@ -23,6 +23,7 @@ comment, a message, a `$( )` in quotes, a loop, a function and Python's
 strings, reads and subprocesses.
 """
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -103,6 +104,29 @@ reason, jobs = planned(".github/workflows/iyi.yml")
 check("a change to CI whose base workflow cannot be read runs everything",
       reason.startswith("the change is to CI itself") and "darwin" in jobs, f"{reason}: {sorted(jobs)}")
 
+# Each compiler component change selects macOS, Linux and Windows.
+for files, what in [
+    (["src/compiler/codegen/codegen.iyi"], "a self-host compiler source"),
+    (["bench/selfhost_lexer_exercise.sh"], "a self-host gate"),
+    (["bench/native_ir_exercise.sh"], "a native compiler gate"),
+    (["bench/lib/host.sh"], "the shared test-host helper"),
+    (["bench/fixtures/compile_stdout.iyi"], "a fixture the self-host gates read"),
+    (["bench/selfhost_gates.sh", "src/compiler/syntax/lexer.iyi"], "a mixed change to the self-host gates and the compiler"),
+    (["src/compiler/ir/builder.iyi"], "an IR compiler source"),
+    (["bench/" + "native_ir" + "_exercise.sh"], "the native IR gate"),
+    (["bench/" + "selfhost_ir_fold" + "_exercise.iyi"], "the IR folding exercise"),
+    (["bench/fixtures/" + "ir/valid/everything.ir"], "an IR fixture"),
+]:
+    reason, jobs = planned(*files)
+    check(f"{what} selects all three self-host jobs",
+          {"selfhost", "selfhost-darwin", "selfhost-windows"} <= jobs,
+          f"{reason}: {sorted(jobs)}")
+
+reason, jobs = planned("src/iyi/string.iyi")
+check("an ordinary prelude change does not select component-only jobs",
+      not {"selfhost", "selfhost-darwin", "selfhost-windows"} & jobs,
+      f"{reason}: {sorted(jobs)}")
+
 stale_jobs = {
     "iyi", "compiler-specs", "stale-rg3", "stale-callpath", "stale-equivalence", "stale-fresh",
     "stale-darwin", "stale-darwin-gates", "stale-darwin-fresh",
@@ -132,6 +156,29 @@ print("== a workflow and a bench directory of this exercise's own")
 spec = importlib.util.spec_from_file_location("ci_plan_under_test", PLANNER)
 planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
+
+# Execute the workflow's result command: selected jobs must have actually run.
+actual_jobs = planner.parse_jobs((ROOT / ".github" / "workflows" / "iyi.yml").read_text(encoding="utf-8"))
+result_lines = actual_jobs["result"]["text"].splitlines()
+command_lines = []
+for line in result_lines[result_lines.index("        run: |") + 1:]:
+    if line.strip() and not line.startswith("          "):
+        break
+    command_lines.append(line[10:])
+result_command = "\n".join(command_lines)
+for what, selected, verdicts, passes in [
+    ("selected success permits unselected skips", ["probe"], {"probe": "success", "unused": "skipped"}, True),
+    ("a selected skip blocks the result", ["probe"], {"probe": "skipped"}, False),
+    ("a missing selected job blocks the result", ["probe"], {}, False),
+    ("a skipped plan blocks the result", ["probe"], {"plan": "skipped", "probe": "success"}, False),
+    ("an intentionally empty plan can pass", [], {"unused": "skipped"}, True),
+]:
+    results = {name: {"result": verdict} for name, verdict in verdicts.items()}
+    results.setdefault("plan", {"result": "success"})["outputs"] = {"jobs": json.dumps(selected)}
+    ran = subprocess.run(["bash", "-c", result_command], cwd=ROOT, capture_output=True, text=True,
+                         env={**os.environ, "RESULTS": json.dumps(results)})
+    check(what, (ran.returncode == 0) == passes, ran.stdout + ran.stderr)
+
 if not hasattr(planner, "Reach"):
     check("the planner reads what runs what (`Reach`)", False, f"{PLANNER} has no Reach")
 else:

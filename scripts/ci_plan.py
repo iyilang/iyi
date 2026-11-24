@@ -80,6 +80,11 @@ FAST = ["build", "iyi", "stale-rg3", "compiler-specs", "stdlib-specs", "targets"
         "cross-objects", "cross-run", "windows-probe", "windows-collector",
         "windows-runtime", "docs", "vscode"]
 
+# The self-host gates compile and check the compiler written in iyi
+# (`src/compiler/`), and the bench files and fixtures they read. A change to
+# any of those selects all three hosts, whatever else it touches.
+SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows"]
+
 # Changes to a stale input must exercise the same acceptance, gates and
 # fresh-runner audit on each native platform, even for a bench-only PR.
 STALE_JOBS = {
@@ -215,6 +220,12 @@ def full_set_passed(sha, token, repository, bookkeeping):
 
 def is_doc(path):
     return path.endswith(".md") or path.startswith(("doc/", "editors/"))
+
+
+def is_selfhost(path):
+    return ((path.startswith("src/compiler/") and path.endswith(".iyi"))
+            or path.startswith(("bench/selfhost_", "bench/native_", "bench/fixtures/"))
+            or path == "bench/lib/host.sh")
 
 
 def is_stale(path):
@@ -368,10 +379,16 @@ def plan(jobs, event, ref, files, bench, ci_jobs=None):
     running = {f: reach.running_jobs(f) for f in changed_bench}
     for found in running.values():
         selected |= found
+    selfhost = any(is_selfhost(f) for f in code_files)
+    if selfhost:
+        selected |= {name for name in SELFHOST if name in jobs}
     if len(changed_bench) == len(code_files) and all(running.values()):
         return close_over_needs(jobs, selected), "only bench files changed, each run by a job"
     selected |= set(FAST)
-    return close_over_needs(jobs, selected), "the fast tier, and the jobs that run a changed bench file"
+    reason = "the fast tier, and the jobs that run a changed bench file"
+    if selfhost:
+        reason = "the fast tier, the self-host gates, and the jobs that run a changed bench file"
+    return close_over_needs(jobs, selected), reason
 
 
 def main():
@@ -389,6 +406,9 @@ def main():
     missing = [name for name in FAST + sorted(set().union(*HALVES)) if name not in jobs]
     if missing:
         sys.exit(f"ci_plan: FAST or HALVES names jobs the workflow does not have: {', '.join(missing)}")
+    missing = [name for name in SELFHOST if name not in jobs]
+    if missing:
+        sys.exit(f"ci_plan: SELFHOST names jobs the workflow does not have: {', '.join(missing)}")
     # `result` is the one check a ruleset requires, so a job it does not
     # need could fail and still let a change through.
     unread = sorted(set(jobs) - NOT_PLANNED - set(jobs["result"]["needs"]))

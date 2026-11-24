@@ -1,0 +1,115 @@
+def +(other : self) : self
+  self
+end
+
+def -(other : self) : self
+  self
+end
+
+def *(multiplier : Int32) : self
+  self
+end
+
+def /(divisor : Int32) : self
+  self
+end
+
+def //(divisor : Int32) : self
+  self
+end
+
+def %(modulus : Int32) : self
+  self
+end
+
+def &(other : self) : self
+  self
+end
+
+def |(other : self) : self
+  self
+end
+
+def ^(other : self) : self
+  self
+end
+
+def ~ : self
+  self
+end
+
+def <<(value : Int32) : self
+  self
+end
+
+def >>(value : Int32) : self
+  self
+end
+
+def ==(other : self) : Bool
+  true
+end
+
+def ===(other) : Bool
+  true
+end
+
+def <=>(other : self) : Int32
+  0
+end
+
+def <(other : self) : Bool
+  false
+end
+
+def <=(other : self) : Bool
+  true
+end
+
+def >(other : self) : Bool
+  false
+end
+
+def >=(other : self) : Bool
+  true
+end
+
+def [](index : Int32) : String
+  ""
+end
+
+def []?(index : Int32) : String?
+  nil
+end
+
+def []=(index : Int32, value : String) : String
+  value
+end
+
+def &+(other : self) : self
+  self
+end
+
+def &-(other : self) : self
+  self
+end
+
+def &*(other : self) : self
+  self
+end
+
+def &**(other : self) : self
+  self
+end
+
+def **(other : Int32) : self
+  self
+end
+
+def =~(pattern) : Int32?
+  nil
+end
+
+def !~(pattern) : Bool
+  true
+end

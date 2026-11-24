@@ -1,0 +1,25 @@
+# A plain `begin` block is an Expressions of the begin keyword; `&.kind` calls the method
+# even when `kind` is a local; a comma at the end of a line continues a call's arguments.
+
+x = begin
+  1
+end
+y = begin
+  2
+end
+z = begin
+  3
+  4
+end
+
+def probe(list)
+  kind = 1
+  list.map(&.kind)
+  list.each(&.run(kind))
+end
+
+def check(path, limit)
+  abort "the socket path is #{path.bytesize} bytes and the kernel takes " \
+        "#{limit}: #{path}",
+    Exit::FAILURE
+end

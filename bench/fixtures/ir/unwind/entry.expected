@@ -1,0 +1,30 @@
+; iyi-ir 1
+source_filename = "entry"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @putchar(i32)
+
+define internal iyicc { i32, i32 } @__crystal_main(i32 %argc, ptr %argv) {
+entry:
+  %0 = call i32 (i32) @putchar(i32 101)
+  br label %exit
+exit:
+  %1 = phi i32 [ 7, label %entry ]
+  %2 = call i32 (i32) @putchar(i32 100)
+  %3 = insertvalue { i32, i32 } undef, i32 %1, 0
+  %4 = insertvalue { i32, i32 } %3, i32 %2, 1
+  ret { i32, i32 } %4
+}
+
+define internal iyicc i32 @__iyi_main(i32 %argc, ptr %argv) {
+entry:
+  ret i32 %argc
+}
+
+define external i32 @main(i32 %argc, ptr %argv) {
+entry:
+  %0 = call iyicc { i32, i32 } (i32, ptr) @__crystal_main(i32 %argc, ptr %argv)
+  %1 = call iyicc i32 (i32, ptr) @__iyi_main(i32 %argc, ptr %argv)
+  ret i32 0
+}
+

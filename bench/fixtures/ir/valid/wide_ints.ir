@@ -1,0 +1,65 @@
+; iyi-ir 1
+source_filename = "wide_ints"
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+%Wide = type { i8, i192, i33 }
+@max192 = internal global i192 3138550867693340381917894711603833208051177722232017256447
+@min192 = internal global i192 -3138550867693340381917894711603833208051177722232017256448
+@max65 = internal global i65 18446744073709551615
+@min65 = internal global i65 -18446744073709551616
+@big = internal global i256 -57896044618658097711785492504343953926634992332820282019728792003956564819968
+@w = internal global %Wide zeroinitializer
+define internal iyicc i192 @arith(i192 %a, i192 %b) {
+entry:
+  %s = add i192 %a, %b
+  %sh = shl i192 %s, 3
+  %lr = lshr i192 %sh, 1
+  %ar = ashr i192 %lr, 2
+  %x = xor i192 %ar, -1
+  %m = mul i192 %x, 3
+  %q = sdiv i192 %m, 7
+  %r = urem i192 %q, 100000000000000000000000000000000000000000000000000
+  %c = icmp slt i192 %r, %a
+  %sel = select i1 %c, i192 %r, i192 %a
+  ret i192 %sel
+}
+
+define internal iyicc i192 @field(ptr %p) {
+entry:
+  %f = getelementptr %Wide, ptr %p, i64 0, i32 1
+  %v = load i192, ptr %f, align 16
+  %t = trunc i192 %v to i64
+  %z = zext i64 %t to i192
+  %d = sub i192 %v, %z
+  store i192 %d, ptr %f, align 16
+  %n = sext i33 -4294967296 to i192
+  %e = add i192 %d, %n
+  ret i192 %e
+}
+
+define internal i33 @narrow(i33 %x) {
+entry:
+  %y = add i33 %x, 7
+  %w = and i33 %y, 4294967295
+  ret i33 %w
+}
+
+define internal i65 @wide65(i65 %x) {
+entry:
+  %y = xor i65 %x, 18446744073709551615
+  ret i65 %y
+}
+
+define external i32 @main() {
+entry:
+  %buf = alloca %Wide, align 16
+  %v = load i192, ptr @max192, align 16
+  %r = call iyicc i192 (i192, i192) @arith(i192 %v, i192 -7)
+  %l = call iyicc i192 (ptr) @field(ptr %buf)
+  %n = call i33 (i33) @narrow(i33 -3)
+  %k = call i65 (i65) @wide65(i65 -1)
+  %bg = load i256, ptr @big, align 8
+  %t = trunc i192 %r to i32
+  ret i32 %t
+}
+

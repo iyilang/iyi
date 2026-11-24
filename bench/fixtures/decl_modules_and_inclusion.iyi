@@ -1,0 +1,18 @@
+module Loggable
+  def log(msg : String) : Nil
+  end
+end
+
+module GenericCollection(T)
+  def size : Int32
+    0
+  end
+end
+
+class Service
+  include Loggable
+  extend Loggable
+  include GenericCollection(String)
+  include self
+  extend self
+end

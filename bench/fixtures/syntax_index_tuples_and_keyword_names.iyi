@@ -1,0 +1,21 @@
+# A tuple literal is an index argument (`h[{a, b}]`), and a keyword can be a declared
+# name when a colon follows it: `property ensure : T`, `getter rescue : T`.
+
+def lookup(h, obj_name, name)
+  if rt = h[{obj_name, name}]?
+    rt
+  end
+  h[{1, 2}]
+  f = h[{1, 2}, 3]
+  e = [{1, 2}]
+end
+
+class ExceptionHandlerLike
+  property body : Int32
+  property ensure : Int32?
+  getter rescue : Int32
+  setter else : Int32
+
+  def initialize(@ensure : Int32? = nil)
+  end
+end

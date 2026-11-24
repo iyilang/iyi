@@ -1,5 +1,6 @@
 require "json"
 require "file_utils"
+require "sync/mutex"
 require "./encoding"
 require "./receipt"
 require "./toolchain"
@@ -21,13 +22,12 @@ module Iyi::Stale
     # index does not count, so this measures how often the files were read.
     getter imported_parses : Int32 = 0
 
-    # Imported snapshot files as this store last read them, by path. The
-    # runner checks tests at once and its fibers run on several threads, so
-    # the index has a lock of its own. A thread's lock and not a fiber's:
-    # a lookup is made inside `lock` too (`revoke`), where nothing may
-    # suspend the fiber, and what this guards only reads files.
-    @imported = {} of String => ImportedFile
+    # The native lock protects only the index and its counters. Each path has
+    # a fiber-aware lock so a file open can move the reader to another thread
+    # without holding a thread-owned mutex, and concurrent lookups parse once.
+    @imported = {} of String => ImportedEntry
     @imported_lock = Thread::Mutex.new
+    @imported_scan = 0_u64
 
     def initialize(cache_root : String? = nil)
       @cache_root = cache_root || ENV["IYI_CACHE_DIR"]? || ENV["CRYSTAL_CACHE_DIR"]? || CacheDir.instance.dir
@@ -281,6 +281,15 @@ module Iyi::Stale
       end
     end
 
+    # Kept for the store's lifetime so concurrent readers of one path always
+    # share the same fiber-aware load lock, even if the file disappears.
+    class ImportedEntry
+      getter lock = Sync::Mutex.new
+      property file : ImportedFile? = nil
+      property generation : UInt64 = 0_u64
+      property seen : UInt64 = 0_u64
+    end
+
     # The imported snapshot files as they stand now. A file is parsed when its
     # stamp (size and mtime) differs from the one this store last read, and
     # reused otherwise. The stamp is taken before the file is read: a file
@@ -295,29 +304,43 @@ module Iyi::Stale
     # size and mtime as the one already read is not seen until the next change.
     # Atomic writes make that rare, not impossible.
     private def imported_files : Array(ImportedFile)
-      @imported_lock.synchronize do
-        files = [] of ImportedFile
-        fresh = {} of String => ImportedFile
-        if Dir.exists?(@imported_dir)
-          Dir.each_child(@imported_dir) do |fname|
-            next unless fname.ends_with?(".json")
-            path = File.join(@imported_dir, fname)
-            info = File.info?(path)
-            next unless info
-
-            stamp = {info.size, info.modification_time}
-            file = @imported[path]?
-            if file.nil? || file.stamp != stamp
-              file = ImportedFile.read(stamp, path)
-              @imported_parses += 1
+      scan = @imported_lock.synchronize { @imported_scan &+= 1 }
+      files = [] of ImportedFile
+      if Dir.exists?(@imported_dir)
+        Dir.each_child(@imported_dir) do |fname|
+          next unless fname.ends_with?(".json")
+          path = File.join(@imported_dir, fname)
+          entry = @imported_lock.synchronize { @imported[path] ||= ImportedEntry.new }
+          file = entry.lock.synchronize do
+            if info = File.info?(path)
+              stamp = {info.size, info.modification_time}
+              cached, generation = @imported_lock.synchronize do
+                entry.seen = scan if entry.seen < scan
+                {entry.file, entry.generation}
+              end
+              if cached && cached.stamp == stamp
+                cached
+              else
+                loaded = ImportedFile.read(stamp, path)
+                @imported_lock.synchronize do
+                  @imported_parses += 1
+                  entry.file = loaded if entry.generation == generation
+                end
+                loaded
+              end
             end
-            fresh[path] = file
-            files << file
           end
+          files << file if file
         end
-        @imported = fresh
-        files
       end
+      @imported_lock.synchronize do
+        @imported.each_value do |entry|
+          next unless entry.seen < scan
+          entry.file = nil
+          entry.generation &+= 1
+        end
+      end
+      files
     end
 
     # Candidates: local passes newest first, then unmasked imported receipts by
@@ -476,8 +499,14 @@ module Iyi::Stale
         ensure_directories!
         path = imported_path(snapshot.namespace)
         Store.atomic_write(path, snapshot.to_json)
-        # The file now holds new content, so its next lookup parses it.
-        @imported_lock.synchronize { @imported.delete(path) }
+        # An in-flight read may finish after this replacement. Its generation
+        # prevents it from putting the old content back into the index.
+        @imported_lock.synchronize do
+          if entry = @imported[path]?
+            entry.file = nil
+            entry.generation &+= 1
+          end
+        end
         path
       end
     end

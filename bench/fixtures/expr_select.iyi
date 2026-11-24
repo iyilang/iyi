@@ -1,0 +1,25 @@
+# Concurrent `select`, taken from the wait in src/std/autocert.iyi: each `when`
+# is an assignment of a receive or a call of a timer, and `else` is optional.
+
+def await(done, limit)
+  timed_out = limit <= 0
+  cancelled = false
+  unless timed_out
+    select
+    when ended = done.receive
+      cancelled = ended.is_a?(Cancelled)
+    when timeout(limit)
+      timed_out = true
+    end
+  end
+  timed_out
+end
+
+def poll(done)
+  select
+  when value = done.receive
+    value
+  else
+    nil
+  end
+end

@@ -1,0 +1,1307 @@
+module compiler/syntax/visitor
+
+import compiler/syntax/ast::{Alias, AlignOf, And, Annotation, AnnotationDef, Arg, ArrayLiteral, Asm, AsmOperand, Assign, AssocTypeDecl, Block, BoolLiteral, Break, CStructOrUnionDef, Call, Case, Cast, CharLiteral, ClassDef, ClassVar, Def, Defer, DoubleSplat, EnumDef, ExceptionHandler, Expressions, Extend, ExternalVar, FunDef, Generic, Global, HashLiteral, If, ImplDef, ImplicitObj, ImportDecl, Include, InstanceAlignOf, InstanceSizeOf, InstanceVar, IsA, LibDef, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MagicConstant, Metaclass, ModuleDef, ModuleHeader, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, NilableCast, Nop, Not, NumberLiteral, OffsetOf, OpAssign, Or, Out, Path, PointerOf, Primitive, ProcLiteral, ProcNotation, ProcPointer, Propagate, RangeLiteral, ReadInstanceVar, Recover, RegexLiteral, Require, Rescue, RespondsTo, Return, Select, Self, SizeOf, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TraitDef, TupleLiteral, TypeDeclaration, TypeDef, TypeOf, Underscore, UninitializedVar, Union, Unless, Until, UsingDecl, Var, VisibilityModifier, When, While, Yield, ASTNode, BinaryOp, UnaryExpression, ControlExpression, StringBuilder}
+
+pub abstract class Visitor
+  def visit_any(node : ASTNode) : Bool
+    true
+  end
+
+  def visit(node : ASTNode) : Bool
+    true
+  end
+
+  def visit(node : Alias) : Bool
+    true
+  end
+
+  def visit(node : AlignOf) : Bool
+    true
+  end
+
+  def visit(node : And) : Bool
+    true
+  end
+
+  def visit(node : Annotation) : Bool
+    true
+  end
+
+  def visit(node : AnnotationDef) : Bool
+    true
+  end
+
+  def visit(node : Arg) : Bool
+    true
+  end
+
+  def visit(node : ArrayLiteral) : Bool
+    true
+  end
+
+  def visit(node : Asm) : Bool
+    true
+  end
+
+  def visit(node : AsmOperand) : Bool
+    true
+  end
+
+  def visit(node : Assign) : Bool
+    true
+  end
+
+  def visit(node : AssocTypeDecl) : Bool
+    true
+  end
+
+  def visit(node : Block) : Bool
+    true
+  end
+
+  def visit(node : BoolLiteral) : Bool
+    true
+  end
+
+  def visit(node : Break) : Bool
+    true
+  end
+
+  def visit(node : CStructOrUnionDef) : Bool
+    true
+  end
+
+  def visit(node : Call) : Bool
+    true
+  end
+
+  def visit(node : Case) : Bool
+    true
+  end
+
+  def visit(node : Cast) : Bool
+    true
+  end
+
+  def visit(node : CharLiteral) : Bool
+    true
+  end
+
+  def visit(node : ClassDef) : Bool
+    true
+  end
+
+  def visit(node : ClassVar) : Bool
+    true
+  end
+
+  def visit(node : Def) : Bool
+    true
+  end
+
+  def visit(node : Defer) : Bool
+    true
+  end
+
+  def visit(node : DoubleSplat) : Bool
+    true
+  end
+
+  def visit(node : EnumDef) : Bool
+    true
+  end
+
+  def visit(node : ExceptionHandler) : Bool
+    true
+  end
+
+  def visit(node : Expressions) : Bool
+    true
+  end
+
+  def visit(node : Extend) : Bool
+    true
+  end
+
+  def visit(node : ExternalVar) : Bool
+    true
+  end
+
+  def visit(node : FunDef) : Bool
+    true
+  end
+
+  def visit(node : Generic) : Bool
+    true
+  end
+
+  def visit(node : Global) : Bool
+    true
+  end
+
+  def visit(node : HashLiteral) : Bool
+    true
+  end
+
+  def visit(node : If) : Bool
+    true
+  end
+
+  def visit(node : ImplDef) : Bool
+    true
+  end
+
+  def visit(node : ImplicitObj) : Bool
+    true
+  end
+
+  def visit(node : ImportDecl) : Bool
+    true
+  end
+
+  def visit(node : Include) : Bool
+    true
+  end
+
+  def visit(node : InstanceAlignOf) : Bool
+    true
+  end
+
+  def visit(node : InstanceSizeOf) : Bool
+    true
+  end
+
+  def visit(node : InstanceVar) : Bool
+    true
+  end
+
+  def visit(node : IsA) : Bool
+    true
+  end
+
+  def visit(node : LibDef) : Bool
+    true
+  end
+
+  def visit(node : Macro) : Bool
+    true
+  end
+
+  def visit(node : MacroExpression) : Bool
+    true
+  end
+
+  def visit(node : MacroFor) : Bool
+    true
+  end
+
+  def visit(node : MacroIf) : Bool
+    true
+  end
+
+  def visit(node : MacroLiteral) : Bool
+    true
+  end
+
+  def visit(node : MacroVar) : Bool
+    true
+  end
+
+  def visit(node : MacroVerbatim) : Bool
+    true
+  end
+
+  def visit(node : MagicConstant) : Bool
+    true
+  end
+
+  def visit(node : Metaclass) : Bool
+    true
+  end
+
+  def visit(node : ModuleDef) : Bool
+    true
+  end
+
+  def visit(node : ModuleHeader) : Bool
+    true
+  end
+
+  def visit(node : MultiAssign) : Bool
+    true
+  end
+
+  def visit(node : NamedArgument) : Bool
+    true
+  end
+
+  def visit(node : NamedTupleLiteral) : Bool
+    true
+  end
+
+  def visit(node : Next) : Bool
+    true
+  end
+
+  def visit(node : NilLiteral) : Bool
+    true
+  end
+
+  def visit(node : NilableCast) : Bool
+    true
+  end
+
+  def visit(node : Nop) : Bool
+    true
+  end
+
+  def visit(node : Primitive) : Bool
+    true
+  end
+
+  def visit(node : Not) : Bool
+    true
+  end
+
+  def visit(node : NumberLiteral) : Bool
+    true
+  end
+
+  def visit(node : OffsetOf) : Bool
+    true
+  end
+
+  def visit(node : OpAssign) : Bool
+    true
+  end
+
+  def visit(node : Or) : Bool
+    true
+  end
+
+  def visit(node : Out) : Bool
+    true
+  end
+
+  def visit(node : Path) : Bool
+    true
+  end
+
+  def visit(node : PointerOf) : Bool
+    true
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    true
+  end
+
+  def visit(node : ProcNotation) : Bool
+    true
+  end
+
+  def visit(node : ProcPointer) : Bool
+    true
+  end
+
+  def visit(node : Propagate) : Bool
+    true
+  end
+
+  def visit(node : RangeLiteral) : Bool
+    true
+  end
+
+  def visit(node : ReadInstanceVar) : Bool
+    true
+  end
+
+  def visit(node : Recover) : Bool
+    true
+  end
+
+  def visit(node : RegexLiteral) : Bool
+    true
+  end
+
+  def visit(node : Require) : Bool
+    true
+  end
+
+  def visit(node : Rescue) : Bool
+    true
+  end
+
+  def visit(node : RespondsTo) : Bool
+    true
+  end
+
+  def visit(node : Return) : Bool
+    true
+  end
+
+  def visit(node : Select) : Bool
+    true
+  end
+
+  def visit(node : Self) : Bool
+    true
+  end
+
+  def visit(node : SizeOf) : Bool
+    true
+  end
+
+  def visit(node : Splat) : Bool
+    true
+  end
+
+  def visit(node : StringInterpolation) : Bool
+    true
+  end
+
+  def visit(node : StringLiteral) : Bool
+    true
+  end
+
+  def visit(node : SymbolLiteral) : Bool
+    true
+  end
+
+  def visit(node : TraitDef) : Bool
+    true
+  end
+
+  def visit(node : TupleLiteral) : Bool
+    true
+  end
+
+  def visit(node : TypeDeclaration) : Bool
+    true
+  end
+
+  def visit(node : TypeDef) : Bool
+    true
+  end
+
+  def visit(node : TypeOf) : Bool
+    true
+  end
+
+  def visit(node : Underscore) : Bool
+    true
+  end
+
+  def visit(node : UninitializedVar) : Bool
+    true
+  end
+
+  def visit(node : Union) : Bool
+    true
+  end
+
+  def visit(node : Unless) : Bool
+    true
+  end
+
+  def visit(node : Until) : Bool
+    true
+  end
+
+  def visit(node : UsingDecl) : Bool
+    true
+  end
+
+  def visit(node : Var) : Bool
+    true
+  end
+
+  def visit(node : VisibilityModifier) : Bool
+    true
+  end
+
+  def visit(node : When) : Bool
+    true
+  end
+
+  def visit(node : While) : Bool
+    true
+  end
+
+  def visit(node : Yield) : Bool
+    true
+  end
+
+  def end_visit(node : ASTNode) : Nil
+  end
+
+  def end_visit(node : Alias) : Nil
+  end
+
+  def end_visit(node : AlignOf) : Nil
+  end
+
+  def end_visit(node : And) : Nil
+  end
+
+  def end_visit(node : Annotation) : Nil
+  end
+
+  def end_visit(node : AnnotationDef) : Nil
+  end
+
+  def end_visit(node : Arg) : Nil
+  end
+
+  def end_visit(node : ArrayLiteral) : Nil
+  end
+
+  def end_visit(node : Asm) : Nil
+  end
+
+  def end_visit(node : AsmOperand) : Nil
+  end
+
+  def end_visit(node : Assign) : Nil
+  end
+
+  def end_visit(node : AssocTypeDecl) : Nil
+  end
+
+  def end_visit(node : Block) : Nil
+  end
+
+  def end_visit(node : BoolLiteral) : Nil
+  end
+
+  def end_visit(node : Break) : Nil
+  end
+
+  def end_visit(node : CStructOrUnionDef) : Nil
+  end
+
+  def end_visit(node : Call) : Nil
+  end
+
+  def end_visit(node : Case) : Nil
+  end
+
+  def end_visit(node : Cast) : Nil
+  end
+
+  def end_visit(node : CharLiteral) : Nil
+  end
+
+  def end_visit(node : ClassDef) : Nil
+  end
+
+  def end_visit(node : ClassVar) : Nil
+  end
+
+  def end_visit(node : Def) : Nil
+  end
+
+  def end_visit(node : Defer) : Nil
+  end
+
+  def end_visit(node : DoubleSplat) : Nil
+  end
+
+  def end_visit(node : EnumDef) : Nil
+  end
+
+  def end_visit(node : ExceptionHandler) : Nil
+  end
+
+  def end_visit(node : Expressions) : Nil
+  end
+
+  def end_visit(node : Extend) : Nil
+  end
+
+  def end_visit(node : ExternalVar) : Nil
+  end
+
+  def end_visit(node : FunDef) : Nil
+  end
+
+  def end_visit(node : Generic) : Nil
+  end
+
+  def end_visit(node : Global) : Nil
+  end
+
+  def end_visit(node : HashLiteral) : Nil
+  end
+
+  def end_visit(node : If) : Nil
+  end
+
+  def end_visit(node : ImplDef) : Nil
+  end
+
+  def end_visit(node : ImplicitObj) : Nil
+  end
+
+  def end_visit(node : ImportDecl) : Nil
+  end
+
+  def end_visit(node : Include) : Nil
+  end
+
+  def end_visit(node : InstanceAlignOf) : Nil
+  end
+
+  def end_visit(node : InstanceSizeOf) : Nil
+  end
+
+  def end_visit(node : InstanceVar) : Nil
+  end
+
+  def end_visit(node : IsA) : Nil
+  end
+
+  def end_visit(node : LibDef) : Nil
+  end
+
+  def end_visit(node : Macro) : Nil
+  end
+
+  def end_visit(node : MacroExpression) : Nil
+  end
+
+  def end_visit(node : MacroFor) : Nil
+  end
+
+  def end_visit(node : MacroIf) : Nil
+  end
+
+  def end_visit(node : MacroLiteral) : Nil
+  end
+
+  def end_visit(node : MacroVar) : Nil
+  end
+
+  def end_visit(node : MacroVerbatim) : Nil
+  end
+
+  def end_visit(node : MagicConstant) : Nil
+  end
+
+  def end_visit(node : Metaclass) : Nil
+  end
+
+  def end_visit(node : ModuleDef) : Nil
+  end
+
+  def end_visit(node : ModuleHeader) : Nil
+  end
+
+  def end_visit(node : MultiAssign) : Nil
+  end
+
+  def end_visit(node : NamedArgument) : Nil
+  end
+
+  def end_visit(node : NamedTupleLiteral) : Nil
+  end
+
+  def end_visit(node : Next) : Nil
+  end
+
+  def end_visit(node : NilLiteral) : Nil
+  end
+
+  def end_visit(node : NilableCast) : Nil
+  end
+
+  def end_visit(node : Nop) : Nil
+  end
+
+  def end_visit(node : Primitive) : Nil
+  end
+
+  def end_visit(node : Not) : Nil
+  end
+
+  def end_visit(node : NumberLiteral) : Nil
+  end
+
+  def end_visit(node : OffsetOf) : Nil
+  end
+
+  def end_visit(node : OpAssign) : Nil
+  end
+
+  def end_visit(node : Or) : Nil
+  end
+
+  def end_visit(node : Out) : Nil
+  end
+
+  def end_visit(node : Path) : Nil
+  end
+
+  def end_visit(node : PointerOf) : Nil
+  end
+
+  def end_visit(node : ProcLiteral) : Nil
+  end
+
+  def end_visit(node : ProcNotation) : Nil
+  end
+
+  def end_visit(node : ProcPointer) : Nil
+  end
+
+  def end_visit(node : Propagate) : Nil
+  end
+
+  def end_visit(node : RangeLiteral) : Nil
+  end
+
+  def end_visit(node : ReadInstanceVar) : Nil
+  end
+
+  def end_visit(node : Recover) : Nil
+  end
+
+  def end_visit(node : RegexLiteral) : Nil
+  end
+
+  def end_visit(node : Require) : Nil
+  end
+
+  def end_visit(node : Rescue) : Nil
+  end
+
+  def end_visit(node : RespondsTo) : Nil
+  end
+
+  def end_visit(node : Return) : Nil
+  end
+
+  def end_visit(node : Select) : Nil
+  end
+
+  def end_visit(node : Self) : Nil
+  end
+
+  def end_visit(node : SizeOf) : Nil
+  end
+
+  def end_visit(node : Splat) : Nil
+  end
+
+  def end_visit(node : StringInterpolation) : Nil
+  end
+
+  def end_visit(node : StringLiteral) : Nil
+  end
+
+  def end_visit(node : SymbolLiteral) : Nil
+  end
+
+  def end_visit(node : TraitDef) : Nil
+  end
+
+  def end_visit(node : TupleLiteral) : Nil
+  end
+
+  def end_visit(node : TypeDeclaration) : Nil
+  end
+
+  def end_visit(node : TypeDef) : Nil
+  end
+
+  def end_visit(node : TypeOf) : Nil
+  end
+
+  def end_visit(node : Underscore) : Nil
+  end
+
+  def end_visit(node : UninitializedVar) : Nil
+  end
+
+  def end_visit(node : Union) : Nil
+  end
+
+  def end_visit(node : Unless) : Nil
+  end
+
+  def end_visit(node : Until) : Nil
+  end
+
+  def end_visit(node : UsingDecl) : Nil
+  end
+
+  def end_visit(node : Var) : Nil
+  end
+
+  def end_visit(node : VisibilityModifier) : Nil
+  end
+
+  def end_visit(node : When) : Nil
+  end
+
+  def end_visit(node : While) : Nil
+  end
+
+  def end_visit(node : Yield) : Nil
+  end
+
+  def end_visit_any(node : ASTNode) : Nil
+  end
+
+  def accept(node : ASTNode) : Nil
+    node.accept(self)
+  end
+end
+
+pub class ToSVisitor < Visitor
+  getter sb : StringBuilder
+
+  def initialize(@sb : StringBuilder = StringBuilder.new)
+  end
+
+  def to_s : String
+    @sb.to_s
+  end
+
+  def visit(node : Alias) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : AlignOf) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : And) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Annotation) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : AnnotationDef) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Arg) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ArrayLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Asm) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : AsmOperand) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Assign) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : AssocTypeDecl) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Block) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : BoolLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Break) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : CStructOrUnionDef) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Call) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Case) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Cast) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : CharLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ClassDef) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ClassVar) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Def) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Defer) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : DoubleSplat) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : EnumDef) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ExceptionHandler) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Expressions) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Extend) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ExternalVar) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : FunDef) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Generic) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Global) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : HashLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : If) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ImplDef) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ImplicitObj) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ImportDecl) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Include) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : InstanceAlignOf) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : InstanceSizeOf) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : InstanceVar) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : IsA) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : LibDef) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Macro) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : MacroExpression) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : MacroFor) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : MacroIf) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : MacroLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : MacroVar) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : MacroVerbatim) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : MagicConstant) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Metaclass) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ModuleDef) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ModuleHeader) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : MultiAssign) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : NamedArgument) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : NamedTupleLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Next) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : NilLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : NilableCast) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Nop) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Primitive) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Not) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : NumberLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : OffsetOf) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : OpAssign) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Or) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Out) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Path) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : PointerOf) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ProcNotation) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ProcPointer) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Propagate) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : RangeLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : ReadInstanceVar) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Recover) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : RegexLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Require) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Rescue) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : RespondsTo) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Return) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Select) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Self) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : SizeOf) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Splat) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : StringInterpolation) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : StringLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : SymbolLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : TraitDef) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : TupleLiteral) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : TypeDeclaration) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : TypeDef) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : TypeOf) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Underscore) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : UninitializedVar) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Union) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Unless) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Until) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : UsingDecl) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Var) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : VisibilityModifier) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : When) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : While) : Bool
+    node.to_s(@sb)
+    false
+  end
+
+  def visit(node : Yield) : Bool
+    node.to_s(@sb)
+    false
+  end
+end
+
+pub class NodeCounterVisitor < Visitor
+  getter count : Int32
+
+  def initialize
+    @count = 0
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    @count = @count + 1
+    true
+  end
+end

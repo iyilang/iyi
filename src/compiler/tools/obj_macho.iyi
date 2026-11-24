@@ -1,0 +1,192 @@
+# The driver for the native Mach-O object gate (bench/native_obj_exercise.sh).
+#
+# `obj_macho IN OUT` reads a Mach-O arm64 object with the native reader, writes
+# the object it read with the native writer to OUT, reads that back, and
+# requires the two reads to be equal. It prints one line per arm64 relocation
+# kind with the count seen in IN, zero included, so a kind with no coverage is
+# visible. It exits non-zero when IN does not read, when the round trip changes
+# the object, or when OUT cannot be written.
+
+module compiler/tools/obj_macho
+
+import compiler/native/obj/object::{ObjectFile, ObjError, Section, Symbol, Reloc, RelocKind, SectionKind}
+import compiler/native/obj/macho::{read_object, write_object}
+import compiler/platform/target::{Target}
+import std/slice::{Slice, Bytes}
+
+module ObjMachoTool
+  def self.arm64_kinds : Array(RelocKind)
+    [
+      RelocKind::Abs64, RelocKind::Abs32, RelocKind::Sub64,
+      RelocKind::A64Call26, RelocKind::A64Jump26, RelocKind::A64AdrpPage21,
+      RelocKind::A64AddLo12, RelocKind::A64Ldst8Lo12, RelocKind::A64Ldst16Lo12,
+      RelocKind::A64Ldst32Lo12, RelocKind::A64Ldst64Lo12, RelocKind::A64Ldst128Lo12,
+      RelocKind::A64GotPage21, RelocKind::A64GotLo12, RelocKind::A64PointerToGot,
+      RelocKind::A64TlvpPage21, RelocKind::A64TlvpLo12,
+    ]
+  end
+
+  # After a read, no absolute relocation site holds non-zero bytes: the reader
+  # folds the in-place addend into Reloc#addend and zeroes the site. A site that
+  # still holds bytes means the model and the file disagree about the addend.
+  def self.site_residue(obj : ObjectFile) : String?
+    s = 0
+    while s < obj.sections.size
+      sec = obj.sections[s]
+      obj.sections[s].relocs.each do |reloc|
+        if reloc.kind == RelocKind::Abs64 || reloc.kind == RelocKind::Abs32
+          width = 8
+          if reloc.kind == RelocKind::Abs32
+            width = 4
+          end
+          j = 0
+          while j < width
+            at = reloc.offset.to_i32 + j
+            if at < sec.bytes.size && sec.bytes[at] != 0_u8
+              return "section #{s} #{sec.name} site at #{reloc.offset} holds non-zero bytes after the read"
+            end
+            j = j + 1
+          end
+        end
+      end
+      s = s + 1
+    end
+    nil
+  end
+
+  def self.read_file(path : String, target : Target) : ObjectFile
+    result = read_object(Slice(UInt8).of(File.read(path)), target)
+    if result.is_a?(ObjError)
+      raise "#{path}: #{result.message}"
+    end
+    obj = result.as(ObjectFile)
+    if message = site_residue(obj)
+      raise "#{path}: #{message}"
+    end
+    obj
+  end
+
+  # The first place two objects differ, or nil when they are equal.
+  def self.difference(a : ObjectFile, b : ObjectFile) : String?
+    return "format" unless a.format == b.format
+    return "target" unless a.target == b.target
+    return "producer" unless a.producer == b.producer
+    return "section count #{a.sections.size} vs #{b.sections.size}" unless a.sections.size == b.sections.size
+    i = 0
+    while i < a.sections.size
+      sa = a.sections[i]
+      sb = b.sections[i]
+      where = "section #{i} #{sa.name}"
+      return "#{where}: name #{sb.name}" unless sa.name == sb.name
+      return "#{where}: kind" unless sa.kind == sb.kind
+      return "#{where}: align" unless sa.align == sb.align
+      return "#{where}: flags #{sa.flags} vs #{sb.flags}" unless sa.flags == sb.flags
+      return "#{where}: size" unless sa.size == sb.size
+      return "#{where}: byte count" unless sa.bytes.size == sb.bytes.size
+      j = 0
+      while j < sa.bytes.size
+        return "#{where}: byte #{j}" unless sa.bytes[j] == sb.bytes[j]
+        j = j + 1
+      end
+      return "#{where}: reloc count #{sa.relocs.size} vs #{sb.relocs.size}" unless sa.relocs.size == sb.relocs.size
+      k = 0
+      while k < sa.relocs.size
+        ra = sa.relocs[k]
+        rb = sb.relocs[k]
+        unless ra.offset == rb.offset && ra.kind == rb.kind && ra.symbol == rb.symbol && ra.addend == rb.addend
+          return "#{where}: reloc #{k} (offset #{ra.offset}, kind #{ra.kind}, symbol #{ra.symbol}, addend #{ra.addend}) vs (offset #{rb.offset}, kind #{rb.kind}, symbol #{rb.symbol}, addend #{rb.addend})"
+        end
+        k = k + 1
+      end
+      i = i + 1
+    end
+    return "symbol count #{a.symbols.size} vs #{b.symbols.size}" unless a.symbols.size == b.symbols.size
+    i = 0
+    while i < a.symbols.size
+      x = a.symbols[i]
+      y = b.symbols[i]
+      unless x.name == y.name && x.kind == y.kind && x.binding == y.binding && x.section == y.section && x.value == y.value && x.size == y.size && x.desc == y.desc && x.private_extern == y.private_extern
+        return "symbol #{i} #{x.name}: #{x.kind} #{x.binding} section #{x.section} value #{x.value} desc #{x.desc} pext #{x.private_extern} vs #{y.name}: #{y.kind} #{y.binding} section #{y.section} value #{y.value} desc #{y.desc} pext #{y.private_extern}"
+      end
+      i = i + 1
+    end
+    return "build version" unless same_build(a, b)
+    return "linker options" unless a.linker_options == b.linker_options
+    return "data in code count" unless a.data_in_code.size == b.data_in_code.size
+    i = 0
+    while i < a.data_in_code.size
+      x = a.data_in_code[i]
+      y = b.data_in_code[i]
+      return "data in code #{i}" unless x.offset == y.offset && x.length == y.length && x.kind == y.kind
+      i = i + 1
+    end
+    nil
+  end
+
+  def self.same_build(a : ObjectFile, b : ObjectFile) : Bool
+    x = a.build_version
+    y = b.build_version
+    if x.nil? || y.nil?
+      return x.nil? && y.nil?
+    end
+    return false unless x.platform == y.platform && x.minos == y.minos && x.sdk == y.sdk
+    return false unless x.tools.size == y.tools.size
+    i = 0
+    while i < x.tools.size
+      return false unless x.tools[i].tool == y.tools[i].tool && x.tools[i].version == y.tools[i].version
+      i = i + 1
+    end
+    true
+  end
+
+  # Prints every arm64 relocation kind with its count in the object.
+  def self.report(obj : ObjectFile) : Nil
+    kinds = arm64_kinds
+    counts = [] of Int64
+    kinds.each do |_kind|
+      counts << 0_i64
+    end
+    obj.sections.each do |sec|
+      sec.relocs.each do |reloc|
+        k = 0
+        while k < kinds.size
+          if kinds[k] == reloc.kind
+            counts[k] = counts[k] + 1_i64
+          end
+          k = k + 1
+        end
+      end
+    end
+    k = 0
+    while k < kinds.size
+      print "reloc #{kinds[k]} #{counts[k]}\n"
+      k = k + 1
+    end
+    print "sections #{obj.sections.size} symbols #{obj.symbols.size}\n"
+  end
+
+  def self.run : Nil
+    args = Program.args
+    unless args.size == 2
+      raise "usage: obj_macho IN.o OUT.o"
+    end
+    target = Target.new("aarch64-apple-darwin")
+    first = read_file(args[0], target)
+    bytes = write_object(first)
+    File.write(args[1], String.new(bytes))
+    second = read_object(bytes, target)
+    if second.is_a?(ObjError)
+      raise "#{args[1]}: #{second.message}"
+    end
+    if message = site_residue(second.as(ObjectFile))
+      raise "#{args[1]}: #{message}"
+    end
+    if message = difference(first, second.as(ObjectFile))
+      raise "round trip of #{args[0]} changed the object at #{message}"
+    end
+    report(first)
+    print "ROUNDTRIP EQUAL #{args[0]}\n"
+  end
+end
+
+ObjMachoTool.run

@@ -80,10 +80,9 @@ FAST = ["build", "iyi", "stale-rg3", "compiler-specs", "stdlib-specs", "targets"
         "cross-objects", "cross-run", "windows-probe", "windows-collector",
         "windows-runtime", "docs", "vscode"]
 
-
 # The self-host gates compile and check the compiler written in iyi
 # (`src/compiler/`), and the bench files and fixtures they read. A change to
-# any of those selects all three hosts, whatever else it touches.
+# any of those selects all four host jobs, whatever else it touches.
 SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"]
 
 # Changes to a stale input must exercise the same acceptance, gates and
@@ -221,7 +220,6 @@ def full_set_passed(sha, token, repository, bookkeeping):
 
 def is_doc(path):
     return path.endswith(".md") or path.startswith(("doc/", "editors/"))
-
 
 
 def is_selfhost(path):

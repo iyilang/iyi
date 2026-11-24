@@ -728,6 +728,66 @@ describe "Iyi::Stale S6a: Store and Receipts" do
     end
   end
 
+  it "forgets a replaced or missing snapshot even when its stamp is reused" do
+    with_tempfile("store_imported_invalidation") do |cache_root|
+      store = Iyi::Stale::Store.new(cache_root)
+      store.ensure_directories!
+      target = "x86_64-linux-gnu"
+      test = make_test_id("invalidation_test.iyi")
+      first = make_receipt(test, callpath: "a" * 64, target: target, mode: "portable")
+      second = make_receipt(test, callpath: "b" * 64, target: target, mode: "portable")
+      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "alpha", target: target, records: [first]))
+      store.candidates(test, target).map(&.signature).should eq([first.signature])
+
+      path = store.imported_path("alpha")
+      stamp = File.info(path)
+      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "alpha", target: target, records: [second]))
+      File.utime(stamp.modification_time, stamp.modification_time, path)
+      File.info(path).size.should eq(stamp.size)
+      File.info(path).modification_time.should eq(stamp.modification_time)
+      store.candidates(test, target).map(&.signature).should eq([second.signature])
+      store.imported_parses.should eq(2)
+
+      contents = File.read(path)
+      File.delete(path)
+      store.candidates(test, target).should be_empty
+      File.write(path, contents)
+      File.utime(stamp.modification_time, stamp.modification_time, path)
+      store.candidates(test, target).map(&.signature).should eq([second.signature])
+      store.imported_parses.should eq(3)
+    end
+  end
+
+  it "parses an imported snapshot once when concurrent lookups share it" do
+    with_tempfile("store_imported_concurrent") do |cache_root|
+      store = Iyi::Stale::Store.new(cache_root)
+      store.ensure_directories!
+      target = "x86_64-linux-gnu"
+      test = make_test_id("concurrent_test.iyi")
+      receipt = make_receipt(test, callpath: "a" * 64, target: target, mode: "portable")
+      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "alpha", target: target, records: [receipt]))
+
+      ready = Channel(Nil).new
+      start = Channel(Nil).new
+      results = Channel(Array(String) | Exception).new
+      16.times do
+        spawn do
+          ready.send(nil)
+          start.receive
+          begin
+            results.send(store.candidates(test, target).map(&.signature))
+          rescue ex
+            results.send(ex)
+          end
+        end
+      end
+      16.times { ready.receive }
+      16.times { start.send(nil) }
+      16.times { results.receive.should eq([receipt.signature]) }
+      store.imported_parses.should eq(1)
+    end
+  end
+
   # On Windows the shared gate uses the native Crystal launcher and starts
   # both helper processes from Python; POSIX can run them directly.
   {% if flag?(:win32) %}

@@ -2255,6 +2255,9 @@ pub class ExceptionHandler < ASTNode
   property ensure : ASTNode?
   property suffix : Bool
   property implicit : Bool = false
+  # Hosted syntax/ast.cr 2935-2938: where this handler's `else` and `ensure` are written.
+  property else_location : Location? = nil
+  property ensure_location : Location? = nil
   # The handler a `defer` is normalized to (hosted syntax/ast.cr 2967). iyi refuses a written `ensure`;
   # this one is the defer registry's pop and is not refused.
   property iyi_defer : Bool = false
@@ -3054,6 +3057,18 @@ def print_expression_operand(node : ASTNode, sb : StringBuilder) : Nil
 end
 
 
+def print_expression_operand(node : ASTNode, sb : StringBuilder) : Nil
+  parens = if node.is_a?(Call)
+             call = node.as(Call)
+             call.args.size > 0 && !["[]", "[]?", "<", "<=", ">", ">="].includes?(call.name)
+           else
+             !(node.is_a?(Var) || node.is_a?(NilLiteral) || node.is_a?(BoolLiteral) || node.is_a?(CharLiteral) || node.is_a?(NumberLiteral) || node.is_a?(StringLiteral) || node.is_a?(StringInterpolation) || node.is_a?(Path) || node.is_a?(Generic) || node.is_a?(InstanceVar) || node.is_a?(ClassVar))
+           end
+  sb << "(" if parens
+  node.to_s(sb)
+  sb << ")" if parens
+end
+
 pub class Call < ASTNode
   property obj : ASTNode?
   property name : String
@@ -3062,6 +3077,8 @@ pub class Call < ASTNode
   property block_arg : ASTNode?
   property named_args : Array(NamedArgument)?
   property has_parentheses : Bool = false
+  # Hosted ast.cr 964: the arguments are written in brackets (`a[i]`), which an index assignment reads.
+  property args_in_brackets : Bool = false
   property name_location : Location? = nil
   property global : Bool = false
   property iyi_group : Bool = false
@@ -3464,11 +3481,10 @@ pub class ProcPointer < ASTNode
 
   def to_s(sb : StringBuilder) : Nil
     sb << "->"
+    sb << "::" if @global
     if o = @obj
       o.to_s(sb)
       sb << "."
-    elsif @global
-      sb << "::"
     end
     sb << @name
     if @args.size > 0

@@ -343,9 +343,13 @@ module Iyi
     # file goes last: a build that waited on it, or took it while the removal
     # was about to delete it, finds the file it holds is no longer the one at
     # `compiler.lock`, and makes the directory again.
-    def hold(dir : String) : File
+    #
+    # `attempts` bounds how many times it makes the directory again after the
+    # lock it waited on was gone (`#claim`). Past that, something that is not a
+    # compiler is deleting the cache, and the answer is an error, not a wait.
+    def hold(dir : String, attempts : Int32 = Int32::MAX) : File
       lock = File.join(dir, LOCK)
-      loop do
+      attempts.times do
         Dir.mkdir_p(dir)
         begin
           file = File.open(lock, "a")
@@ -369,6 +373,50 @@ module Iyi
         end
         file.close
       end
+      raise Iyi::Error.new("#{Iyi.relative_filename(dir)}, this build's directory in the " \
+                           "cache, was removed #{attempts} times while the build asked for it. " \
+                           "Something that is not a compiler is deleting the cache")
+    end
+
+    # How many times `#claim` makes the directory again after another build's
+    # rotation took it away. A loss needs ten newer directories to be made
+    # between the making and the lock, so a second one is already rare; past
+    # this many, something that is not a compiler is deleting.
+    CLAIMS = 20
+
+    # iyi: the directory for *filename*, held for as long as the block runs and
+    # given to the block. It is the hold codegen takes (`#hold`), with the
+    # remakes after a lost lock bounded by `CLAIMS`.
+    def claim(filename : String, &)
+      dir = directory_for(filename)
+      held = hold(dir, CLAIMS)
+      begin
+        yield dir
+      ensure
+        held.close
+      end
+    end
+
+    # iyi: whether a build holds *dir* right now, which is the lock `#hold` keeps
+    # from codegen until the last object is read. The rotation does not ask:
+    # `#remove` takes the same lock itself. The claim spec asks while it holds.
+    def directory_in_use?(dir : String) : Bool
+      lock = File.join(dir, LOCK)
+      return false unless File.exists?(lock)
+
+      File.open(lock, "r") do |file|
+        begin
+          file.flock_exclusive(blocking: false)
+        rescue IO::Error
+          return true
+        end
+        file.flock_unlock
+      end
+      false
+    rescue File::Error
+      # The directory answered nothing we can read. Deleting it is the one
+      # thing that can lose someone else's work, so don't.
+      true
     end
 
     # iyi: removes a build's directory unless a build holds it (`#hold`),

@@ -60,6 +60,20 @@ describe "Iyi::Stale S3c: env-only recorder, CompilerEnvFp" do
         Iyi::Stale::CompilerEnv.display_class?(var).should be_false
       end
     end
+
+    it "records every release knob the compiler reads whether or not codegen runs" do
+      # A macro `run` helper is compiled with --release inside the parent's
+      # recorder. Its codegen reads the knobs on the cold build, and the warm
+      # build, which links the cached helper, reads none: a knob that is not
+      # forced into the recorder is a `cenv` that differs between the two, so a
+      # test recorded cold never hits. IYI_RELEASE_GROUP was such a knob.
+      source = File.read(File.expand_path("../../../src/compiler/iyi/compiler.cr", __DIR__))
+      knobs = source.scan(/ENV\["(IYI_RELEASE_[A-Z_]+)"\]\?/).map(&.[1]).uniq!
+      knobs.should_not be_empty
+      knobs.each do |name|
+        Iyi::BuildInputs::CODEGEN_ONLY_ENV.should contain(name)
+      end
+    end
   end
 
   describe "Iyi::Stale::CompilerEnv.fp" do

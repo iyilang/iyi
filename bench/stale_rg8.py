@@ -13,7 +13,6 @@ import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from pathlib import Path
 
 # The oracle and the mutations are bench/stale_ir_normalize.py and
 # bench/stale_mutate.py, imported here rather than run. Each is also run by
@@ -168,9 +167,16 @@ def run_mutations(
         rel = relative_name(source, repo)
         baseline, _ = reports[rel]
         mutated_source = os.path.join(mutation_dir, f"{index}-{os.path.basename(source)}")
-        # Newlines inside string literals are program bytes. Windows text
-        # translation would change those constants in every unrelated mutant.
-        Path(mutated_source).write_text(mutation.mutated_source, encoding="utf-8", newline="")
+        # The baseline is a checkout with LF line ends (`*.iyi text eol=lf` in
+        # .gitattributes). A text-mode write turns each "\n" into os.linesep,
+        # "\r\n" on Windows, so every mutated copy differed from its baseline in
+        # the line ends of any multi-line string literal (samples/iyi/calc.iyi's
+        # DEMO): a real change to the program, which the fingerprint and the
+        # IR both saw for every mutation, a comment at the end of the file
+        # included, and which no encoder gate can undo. Write the bytes that
+        # were generated.
+        with open(mutated_source, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(mutation.mutated_source)
         try:
             changed, _ = compile_source(compiler, repo, work, mutated_source, f"mut-{index}-{mutation.kind}")
         except GateFailure as ex:

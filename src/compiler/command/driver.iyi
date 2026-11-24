@@ -176,14 +176,16 @@ end
 
 # The command driver ported from src/compiler/iyi/command.cr.
 pub class CommandDriver
-  IYI_VERSION  = {{ read_file("#{__DIR__}/../../IYI_VERSION").chomp }}
-  BASE_VERSION = {{ read_file("#{__DIR__}/../../VERSION").chomp }}
+  # Copies of src/IYI_VERSION and src/VERSION. An imported .iyi module may not
+  # read a file outside its own directory at compile time (upstream #189), so
+  # they are literals here. bench/doc_numbers.py fails when either differs from
+  # its file.
+  IYI_VERSION  = "0.22.0"
+  BASE_VERSION = "1.22.0-dev"
 
-  # Match the hosted target configuration without linking LLVM: an explicit
-  # target wins, otherwise use the platform this parser was compiled for.
-  CONFIG_TARGET = {% if configured = env("IYI_CONFIG_TARGET") %}
-                    {{ configured }}
-                  {% elsif flag?(:darwin) && flag?(:aarch64) %}
+  # Match the hosted target configuration without linking LLVM: the platform
+  # this parser was compiled for.
+  CONFIG_TARGET = {% if flag?(:darwin) && flag?(:aarch64) %}
                     "aarch64-apple-darwin"
                   {% elsif flag?(:darwin) && flag?(:x86_64) %}
                     "x86_64-apple-darwin"
@@ -196,7 +198,7 @@ pub class CommandDriver
                   {% elsif flag?(:wasm32) && flag?(:wasi) %}
                     "wasm32-unknown-wasi"
                   {% else %}
-                    {% raise "Unsupported command parser platform; set IYI_CONFIG_TARGET" %}
+                    {% raise "Unsupported command parser platform" %}
                   {% end %}
 
   @@program_name = "iyi"
@@ -558,6 +560,10 @@ pub class CommandDriver
     X::{a}` is `import X::{a}`, folded into a bare `import X`. Exit 0 when the file ends clean. When
     the remaining error lives in another file of the program, the
     verb names it (`cause` in `--json`): that is the file to fix next.
+    One edit is made in that other file itself: the `@[SafeReach]`
+    claim above a constant or class variable a parallel unit reaches,
+    offered only where the compiler proves it (SPEC.md III.4.5), and
+    never under std's or the library path's directories.
 
     Several files, or a directory - every .iyi under it, hidden
     directories and lib/ aside - are one run: every `using` in all

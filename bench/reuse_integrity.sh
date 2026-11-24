@@ -316,7 +316,7 @@ inside && $0 == "        __iyi_madvise(address, length, 4_i64)" { print "       
 inside && $0 == "        LibC.VirtualFree(Pointer(Void).new(address), length, 0x4000_i32)" { print "        LibC.VirtualAlloc(Pointer(Void).new(address), length, 0x80000_i32, 4_i32)"; n_reset++; next }
 inside && $0 == "        LibC.VirtualAlloc(Pointer(Void).new(address), length, 0x1000_i32, 4_i32)" { n_commit++; next }
 inside && $0 == "        return if LibC.mmap(Pointer(Void).new(address), length, 3, 0x1012, -1, 0_i64).address == address" { print "        return"; n_mmap++; next }
-/^      def self\.release_run\(address : UInt64, length : UInt64\) : Nil$/ {
+/^      (@\[Effect\(:collector\)\]; )?def self\.release_run\(address : UInt64, length : UInt64\) : Nil$/ {
   n_keep++
   print "      # A failure proof copy only: the cold page the first release after the arm"
   print "      # skips, and the one the program checks an unset field on."

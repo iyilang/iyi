@@ -8,7 +8,7 @@ import std/env::{ENV}
 import std/dir::{Dir}
 import std/file::{File}
 import std/process::{Process}
-import compiler/command/driver::{OutputBuffer, Exit}
+import compiler/command/driver::{OutputBuffer, Exit, CommandDriver}
 # Communication frame kinds between daemon and client
 pub DAEMON_FRAME_EXIT   = 0_u8
 pub DAEMON_FRAME_STDOUT = 1_u8
@@ -79,7 +79,7 @@ pub class BuildDaemon
     @cache_dir : String? = nil,
     @daemon_override : String? = nil,
     @daemon_socket : String? = nil,
-    @version_description : String = {{ "iyi " + read_file("#{__DIR__}/../../IYI_VERSION").chomp }},
+    @version_description : String = "iyi #{CommandDriver::IYI_VERSION}",
     @mock_exec : Bool = false,
   )
     @options = options.dup

@@ -364,7 +364,7 @@ $0 == "      def self.first_arena : UInt64" {
   setter = 1
   next
 }
-index($0, "      def self.free(pointer : Void*) : Nil") == 1 { infree = 1 }
+$0 ~ /^      (@\[Effect\(:collector\)\]; )?def self\.free\(pointer : Void\*\) : Nil$/ { infree = 1 }
 infree && $0 == "          lock" {
   print "          IyiHeap.forced_begin_free(pointer.address)"
   print

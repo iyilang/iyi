@@ -817,6 +817,8 @@ module BenchSelfhostParserExercise
       "bench/fixtures/syntax_macro_text_splits.iyi",
       "bench/fixtures/syntax_macro_keywords_and_escapes.iyi",
       "bench/fixtures/syntax_proc_literals.iyi",
+      "bench/fixtures/syntax_proc_pointers.iyi",
+      "bench/fixtures/syntax_scope_locals.iyi",
       "bench/fixtures/syntax_index_tuples_and_keyword_names.iyi",
       "bench/fixtures/syntax_type_list_then_call.iyi",
       "bench/fixtures/syntax_heredoc_command_and_folds.iyi",
@@ -856,9 +858,37 @@ module BenchSelfhostParserExercise
     puts "ALL SELFHOST PARSER CHECKS PASSED SUCCESSFULLY!"
     puts "============================================================="
   end
+
+  # The verdict of each file in a list, one line per file: ACCEPT, or REFUSE with the message the parse ended with. A parse
+  # is a task of its own: a refusal is a panic the task ended with, and reading the task's value catches it (SPEC.md III.1.4,
+  # as bench/assertions_exercise.iyi does), so the next file runs in this same process.
+  def self.verdicts(list_path : String)
+    File.read(list_path).split('\n').each do |path|
+      next if path.empty?
+      puts verdict_of(path)
+    end
+  end
+
+  def self.verdict_of(path : String) : String
+    verdict = "ACCEPT #{path}"
+    group do |g|
+      task = g.spawn do
+        Parser.new(File.read(path), path).parse
+        0
+      end
+      outcome = task.value
+      if outcome.is_a?(Panicked)
+        verdict = "REFUSE #{path} " + outcome.message.split('\n').join(" ")
+      end
+      0
+    end
+    verdict
+  end
 end
 
-if Program.args.size > 0
+if Program.args.size == 2 && Program.args[0] == "--verdicts"
+  BenchSelfhostParserExercise.verdicts(Program.args[1])
+elsif Program.args.size > 0
   if Program.args[0] == "-e" && Program.args.size > 1
     source = Program.args[1]
     parser = Parser.new(source, "eval")

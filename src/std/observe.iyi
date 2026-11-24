@@ -210,9 +210,17 @@ end
 # directory read as a shared write. A nil initializer is not run again.
 @@scratch : ::String? = nil
 @[UnsafeReach("assigned once at class init; its contents are read and added only between lock_recorder and unlock_recorder, a CAS spin lock on @@record_lock (in file, dir_list and file_write)")]
-@@written_paths = ::Set(String).new
+@@written_paths = ::Array(String).new
 @[UnsafeReach("assigned once at class init; its contents are read and added only between lock_recorder and unlock_recorder, a CAS spin lock on @@record_lock (in env_get and env_write)")]
-@@written_env = ::Set(String).new
+@@written_env = ::Array(String).new
+
+# iyi: a list rather than a `Set(String)`: a set hashes each string with the
+# process's keyed `String#hash`, which reads the entropy key at its first use,
+# and that read taints the run it is recording. A run writes few paths.
+def remember_written(list : ::Array(String), value : String) : Nil
+  list << value unless list.includes?(value)
+end
+
 @[ThreadLocal]
 @@thread_depth = 0_i32
 
@@ -627,7 +635,7 @@ pub def env_write(name : String) : Nil
     return
   end
 
-  @@written_env.add(name)
+  remember_written(@@written_env, name)
   unless @@tainted
     writer = @@writer
     if writer
@@ -827,11 +835,11 @@ pub def file_write(op : UInt8 | ::Symbol | String, path : String, target : Strin
     return
   end
 
-  @@written_paths.add(real) unless real.empty?
-  @@written_paths.add(target_real) unless target_real.empty?
-  @@written_paths.add(endpoint1) unless endpoint1.empty?
-  @@written_paths.add(endpoint2) unless endpoint2.empty?
-  @@written_paths.add(endpoint3) unless endpoint3.empty?
+  remember_written(@@written_paths, real) unless real.empty?
+  remember_written(@@written_paths, target_real) unless target_real.empty?
+  remember_written(@@written_paths, endpoint1) unless endpoint1.empty?
+  remember_written(@@written_paths, endpoint2) unless endpoint2.empty?
+  remember_written(@@written_paths, endpoint3) unless endpoint3.empty?
 
   writer = @@writer
   if writer
@@ -996,7 +1004,18 @@ private def current_task_id : UInt64
       if IyiScheduler.state_id != 0_u64
         state = IyiScheduler.state
         fiber = state.current
-        fiber.is_a?(IyiFiber) ? fiber.object_id : 0_u64
+        if fiber.is_a?(IyiFiber)
+          # A thread's first fiber is task 0, as it is before the thread has a
+          # scheduler state. Some startup code (a constant read out of order,
+          # `IyiOnce.run`) makes the state, and with it the fiber, before the
+          # program's first line on Linux and Windows and not on macOS; the
+          # fiber's object id is an address, so it differed from run to run
+          # (ASLR), and the trace fingerprint hashes it (`Trace.compute_trace_fp`).
+          root = state.root
+          root.is_a?(IyiFiber) && root.object_id == fiber.object_id ? 0_u64 : fiber.object_id
+        else
+          0_u64
+        end
       else
         0_u64
       end

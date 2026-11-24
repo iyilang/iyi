@@ -527,10 +527,12 @@ prove_fails "== is identity again" identity_eq hash.iyi \
   '/^  def ==(other : Hash(K, V)) : Bool$/,/^  end$/d'
 
 # 3. A string hashed as it was before #212: FNV-1a from a fixed start, which
-#    every key the exercise builds to collide under it then shares.
+#    every key the exercise builds to collide under it then shares. `String#hash`
+#    carries `@[Effect(:entropy)]` on its own line's front, which the anchor
+#    takes and the patched copy keeps.
 prove_fails "String#hash is FNV-1a again" fnv_string string.iyi \
   "hash: keys built to collide under FNV-1a spread" \
-  's/^  def hash : Int32$/  def hash : Int32; value = -2128831035; bytesize.times { |i| value = (value ^ to_unsafe[i].to_i32) \&* 16777619 }; return value; end; def sip_hash : Int32/'
+  's/^  \(@\[Effect(:entropy)\]; \)\{0,1\}def hash : Int32$/  \1def hash : Int32; value = -2128831035; bytesize.times { |i| value = (value ^ to_unsafe[i].to_i32) \&* 16777619 }; return value; end; def sip_hash : Int32/'
 
 echo
 echo "== a string's hash is SipHash-1-3, keyed afresh in every process (#212)"

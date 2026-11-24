@@ -89,6 +89,14 @@ build_tool() {
   fi
 }
 
+# restore_driver: puts the saved unmodified driver back at $tool_bin as a new file.
+# A copy over the file a mutant just ran from keeps that file's identity: macOS
+# keeps the code signature it cached when the mutant ran, and kills the driver
+# on its next run (SIGKILL, Code Signature Invalid).
+restore_driver() {
+  rm -f "$tool_bin" && cp "$good_tool" "$tool_bin"
+}
+
 # check_roundtrip NAME: the driver round-trips the corpus object for NAME.
 check_roundtrip() {
   "$tool_bin" "$(native_path "$work/corpus/$1.o")" "$(native_path "$work/corpus/$1.rt.o")" >"$work/corpus/$1.rt.log" 2>&1
@@ -123,7 +131,7 @@ prove_mutation() {
   shift 4
   # A negative proof is meaningful only if the unmodified driver passes the
   # same check. The preceding mutant must not be left in place for this run.
-  if ! cp "$good_tool" "$tool_bin"; then
+  if ! restore_driver; then
     fail "could not restore the good driver before '$label'"
     return 1
   fi
@@ -244,7 +252,10 @@ case "$HOST_OS" in
         cat "$work/dumpbin.log"
       else
         printf '   direct DLLs: %s\n' "$dlls"
-        extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
+        # The driver is built with the prelude, which keys String#hash with
+        # RtlGenRandom (advapi32.dll, #212). That is the one program DLL the
+        # driver may carry; see FLOOR_DLLS_PROGRAM in bench/floor_base.sh.
+        extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME advapi32.dll" "$dlls")"
         [ -z "$extra" ] || fail "Windows driver has DLLs outside its runtime floor: $extra"
       fi
     fi
@@ -372,7 +383,7 @@ else
   host_limited "the three relinked-program mutants require macOS Mach-O linking and execution"
 fi
 # Restore the driver built from the unmutated source for the remaining checks.
-cp "$good_tool" "$tool_bin" || fail "could not restore the good driver"
+restore_driver || fail "could not restore the good driver"
 
 [ ! -e "$NATIVE_SIGNATURE_FAILURE_FILE" ] || fail "a native executable failed signature verification"
 if [ "$failures" -eq 0 ]; then

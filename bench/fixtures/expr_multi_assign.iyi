@@ -1,0 +1,9 @@
+# Multi-assignment fixture
+a, b = 1, 2
+x, y, z = 10, 20, 30
+first, *middle, last = [1, 2, 3, 4, 5]
+*head, tail = {10, 20, 30}
+p = 1
+q = 2
+p, q = q, p
+m, n, o = {1, 2, 3}

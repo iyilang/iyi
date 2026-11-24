@@ -295,8 +295,12 @@ done
 echo "   $objects_total objects read; $excluded_total excluded (COMDAT groups)"
 
 echo "== 3. mutation proofs"
+# Each driver goes back as a new file. A copy over the file a mutant has just
+# run from can fail on Linux with "Text file busy" while the exited process's
+# image is still being released.
 restore_tools() {
-  cp "$work/bin/obj_elf.good$EXE" "$work/bin/obj_elf$EXE" &&
+  rm -f "$work/bin/obj_elf$EXE" "$work/bin/link_elf$EXE" &&
+    cp "$work/bin/obj_elf.good$EXE" "$work/bin/obj_elf$EXE" &&
     cp "$work/bin/link_elf.good$EXE" "$work/bin/link_elf$EXE"
 }
 check_round_trip_hello() {

@@ -165,7 +165,10 @@ case "$HOST_OS" in
         fail "dumpbin read no DLL imports from the Windows driver"
       else
         printf 'direct DLLs: %s\n' "$dlls"
-        extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$dlls")"
+        # The driver is built with the prelude, which keys String#hash with
+        # RtlGenRandom (advapi32.dll, #212). That is the one program DLL the
+        # driver may carry; see FLOOR_DLLS_PROGRAM in bench/floor_base.sh.
+        extra="$(extra_dlls "$FLOOR_DLLS_RUNTIME advapi32.dll" "$dlls")"
         [ -z "$extra" ] || fail "Windows driver has DLLs outside its runtime floor: $extra"
       fi
     fi

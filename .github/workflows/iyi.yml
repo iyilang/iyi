@@ -3878,6 +3878,10 @@ jobs:
           export IYI="$PWD/room/bin/iyi"
           export IYI_CHROME="$(command -v google-chrome)"
           bash bench/wasm_freestanding_exercise.sh
+      - name: Install compatibility collector
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgc-dev
       - name: SIMD128 and browser AES-GCM
         run: |
           python3 -m pip install --user --break-system-packages -q cryptography

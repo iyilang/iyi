@@ -1,0 +1,27 @@
+; iyi-ir 1
+source_filename = "div_by_zero_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @sdiv_zero(i32 %x) {
+entry:
+  %v = sdiv i32 %x, 0
+  ret i32 %v
+}
+
+define internal i32 @udiv_zero(i32 %x) {
+entry:
+  %v = udiv i32 %x, 0
+  ret i32 %v
+}
+
+define internal i32 @srem_zero(i32 %x) {
+entry:
+  %v = srem i32 %x, 0
+  ret i32 %v
+}
+
+define internal i32 @urem_zero(i32 %x) {
+entry:
+  %v = urem i32 %x, 0
+  ret i32 %v
+}

@@ -198,6 +198,47 @@ case "$(uname -s)" in
 esac
 echo "  $old_hash -> $new_hash refused; the old graph and sum remain"
 
+# Builds at once into a cold cache (`iyi test -p`) each fetch a module, and
+# every one but the first to rename its checkout into place lost the race
+# with "Directory not empty" (#246): rename(2) of a directory onto a
+# non-empty one is ENOTEMPTY, which the fetcher did not take for the race it
+# is. A `git` that finishes the other build's checkout while this one clones
+# makes every fetch lose, every run: the build must take the checkout it
+# found and leave no staging directory behind. POSIX only: Windows starts no
+# shell script as `git`.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *)
+    step "a checkout another build finished first is taken, not refused (#246)"
+    real_git="$(command -v git)"
+    mkdir -p racing-bin
+    cat > racing-bin/git <<SH
+#!/bin/sh
+"$real_git" "\$@" || exit \$?
+[ "\$1" = clone ] || exit 0
+prev=; tag=; remote=; staging=
+for a in "\$@"; do
+  [ "\$prev" = --branch ] && tag=\$a
+  prev=\$a; remote=\$staging; staging=\$a
+done
+[ -n "\$tag" ] || exit 0
+target="\$(dirname "\$staging")/\$(basename "\$remote")@\$tag"
+[ -e "\$target" ] && exit 0
+cp -R "\$staging" "\$target" && rm -rf "\$target/.git" && echo "\$target" >> "$WORK/raced.txt"
+SH
+    chmod +x racing-bin/git
+    rm -rf "$IYI_CACHE_DIR" raced.txt
+    (cd app && PATH="$WORK/racing-bin:$PATH" "$IYI" build main.iyi -o app) > raced.log 2>&1 || {
+      echo "a fetch that lost the race to another build's checkout failed the build:"; tail -8 raced.log; exit 1;
+    }
+    [ -s raced.txt ] || { echo "the racing git finished no checkout first, so this proved nothing"; exit 1; }
+    ./app/app | grep -q 'hello from liba v1.1.0' || { echo "the build that lost the race runs the wrong code"; ./app/app; exit 1; }
+    left="$(find "$IYI_CACHE_DIR/mod" -maxdepth 3 -name 'fetch*' | head -3)"
+    [ -z "$left" ] || { echo "a lost race left its staging directory in the cache:"; echo "$left"; exit 1; }
+    echo "  $(wc -l < raced.txt | tr -d ' ') fetches lost the race; the build took each checkout and left no staging"
+    ;;
+esac
+
 step "tidy keeps an outbid manifest and --check writes nothing"
 printf 'example.test/user/gone v1.0.0 h2:0000000000000000000000000000000000000000000000000000000000000000\n' >> app/iyi.sum
 cp app/iyi.mod app/iyi.mod.before-tidy

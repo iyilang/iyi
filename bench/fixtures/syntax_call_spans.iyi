@@ -1,0 +1,26 @@
+plain
+empty()
+multiline(
+  123
+)
+receiver.empty
+receiver.multiline(
+  456
+)
+bare 123
+receiver.bare 456
+named key: 123
+callback(&handler)
+callback &handler
+shorthand &.to_s
+items[123]
+items[123]?
+curly(1) {
+  2
+}
+receiver.curly {
+  3
+}
+do_block(1) do
+  4
+end

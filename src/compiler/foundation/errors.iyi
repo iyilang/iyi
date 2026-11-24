@@ -1,0 +1,38 @@
+module compiler/foundation/errors
+
+import compiler/foundation/location::{Location}
+
+pub class SyntaxException
+  getter message : String
+  getter line_number : Int32
+  getter column_number : Int32
+  getter filename : String
+  getter size : Int32?
+
+  def initialize(@message : String, @line_number : Int32 = 0, @column_number : Int32 = 0, @filename : String = "", @size : Int32? = nil)
+  end
+
+  def location : Location
+    Location.new(@filename, @line_number, @column_number)
+  end
+
+  def to_s : String
+    if @filename.empty?
+      if @line_number > 0
+        "Syntax error in line #{@line_number}, column #{@column_number}: #{@message}"
+      else
+        "Syntax error: #{@message}"
+      end
+    else
+      "Syntax error in #{@filename}:#{@line_number}:#{@column_number}: #{@message}"
+    end
+  end
+end
+
+# The port refuses, by name and before it writes any IR, a call or operand it cannot
+# lower. Emitting nothing for one would leave a block unterminated and hand the verifier
+# invalid IR, so the emitter stops with exit status 1.
+pub def refuse_port(message : String) : NoReturn
+  STDERR.puts "Error: #{message}"
+  exit(1)
+end

@@ -1,0 +1,38 @@
+# Combined realistic expression program fixture
+total = 0
+items = [10, 20, 30, 40, 50]
+threshold = 25
+
+processed = items.map do |val|
+  if val > threshold
+    val * 2
+  else
+    val + 5
+  end
+end
+
+summary = {
+  count:  items.size,
+  active: true,
+  scale:  1.5,
+  name:   "dataset_alpha",
+}
+
+mode = "fast"
+rate = case mode
+       when "fast"
+         100
+       when "normal"
+         50
+       else
+         10
+       end
+
+counter = 3
+while counter > 0
+  total += counter * rate
+  counter -= 1
+end
+
+final_result = total > 500 ? total : 500
+final_result += 50 if summary[:active]

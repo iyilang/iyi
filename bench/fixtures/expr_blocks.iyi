@@ -1,0 +1,25 @@
+# Blocks fixture: do/end, braces, arguments, splats
+items = [1, 2, 3]
+
+# Curly block single line
+items.map { |x| x * 2 }
+
+# Curly block without args
+items.each { 42 }
+
+# Do-end block with multiple args
+items.each_with_index do |item, idx|
+  item + idx
+end
+
+# Nested blocks
+outer do |a|
+  inner do |b|
+    a + b
+  end
+end
+
+# Block with splat param
+variadic do |*rest|
+  rest
+end

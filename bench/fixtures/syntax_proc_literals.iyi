@@ -1,0 +1,14 @@
+# Proc literals `->(args) { body }` in return, argument and assignment position, with
+# typed parameters and a nilable parameter.
+
+def shared_source(shared : Proc(String?, Int32?, Int32)) : Proc(String?, Int32?, Int32)
+  if s = shared
+    return ->(name : String?, left : Int32?) { s.call({name, left}) }
+  end
+  ->(name : String?, left : Int32?) { 0 }
+end
+
+x = ->(a : Int32) { a }
+y = ->(a) { a + 1 }
+z = -> { 1 }
+foo(->(a : Int32?) { a })

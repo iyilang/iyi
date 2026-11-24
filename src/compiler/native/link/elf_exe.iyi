@@ -1,0 +1,958 @@
+module compiler/native/link/elf_exe
+
+# The static-PIE executable writer for Linux (SPEC 2.3, slice D3): one ELF64 ET_DYN for x86_64 or aarch64 with no
+# PT_INTERP and no PT_DYNAMIC. It takes the in-memory ELF objects (the native backend's, the reader's, and the
+# runtime start code among them), resolves every symbol, lays the output out, applies every relocation, and writes
+# the file. Nothing here invokes a host tool.
+#
+# Layout. Addresses are link-time addresses from base 0. Every allocated byte sits at its file offset, so an
+# address is also its file offset. The segments:
+#   PT_LOAD R+X    the ELF header, the program headers, .text
+#   PT_LOAD R      .rodata, .eh_frame
+#   PT_LOAD RW     .data.rel.ro and .got (PT_GNU_RELRO covers both, page aligned at its end), then .tdata (the TLS
+#                  image), .data, the relative relocation table, and .bss last
+# PT_TLS covers .tdata and .tbss. The relative relocation table lists the address of every stored address word. The
+# start code adds the load base to each, then makes PT_GNU_RELRO read-only. The linker defines the symbols the
+# runtime reads: __ehdr_start, __data_start, __bss_start, _end, __iyi_rela_start/end, __iyi_tdata_start/end,
+# __iyi_relro_start/end, __iyi_tls_memsz and __iyi_tls_align.
+#
+# TLS is local-exec. x86_64 is variant II: a symbol's %fs offset is its offset in the block minus the block's size.
+# aarch64 is variant I: a symbol's tpidr_el0 offset is the 16-byte TCB rounded up to the block alignment, plus its
+# offset in the block.
+#
+# Not written here: .debug_* sections (the debug slice writes them) and relaxation of GOT loads to direct addressing.
+
+import compiler/native/obj/object::{ObjectFile, ObjFormat, Section, SectionKind, Symbol, SymbolKind, SymbolBinding, Reloc, RelocKind}
+import std/slice::{Slice, Bytes}
+
+class ExeConst
+  G_TEXT    =  0_i64
+  G_RODATA  =  1_i64
+  G_EHFRAME =  2_i64
+  G_RELRO   =  3_i64
+  G_GOT     =  4_i64
+  G_TDATA   =  5_i64
+  G_DATA    =  6_i64
+  G_TBSS    =  7_i64
+  G_BSS     =  8_i64
+  G_RELA    =  9_i64
+  G_COUNT   = 10_i64
+  # Section header numbers. The header table is ELF's: 0 is null, 1 .text, and so on to .shstrtab.
+  SH_TEXT     =  1_i64
+  SH_RODATA   =  2_i64
+  SH_EHFRAME  =  3_i64
+  SH_RELRO    =  4_i64
+  SH_GOT      =  5_i64
+  SH_TDATA    =  6_i64
+  SH_DATA     =  7_i64
+  SH_RELA     =  8_i64
+  SH_BSS      =  9_i64
+  SH_TBSS     = 10_i64
+  SH_SYMTAB   = 11_i64
+  SH_STRTAB   = 12_i64
+  SH_SHSTRTAB = 13_i64
+  SH_COUNT    = 14_i64
+  # How a symbol resolves.
+  R_NONE        =         -1_i64
+  R_GROUP       =          0_i64
+  R_CONST       =          1_i64
+  R_ZERO        =          2_i64
+  R_LINK        =          3_i64
+  R_TLS         =          4_i64
+  R_DROPPED     =          5_i64
+  PAGE_X86      =     0x1000_i64
+  PAGE_ARM      =    0x10000_i64
+  LOW12         =      0xfff_i64
+  EHDR_SIZE     =         64_i64
+  PHDR_SIZE     =         56_i64
+  SHDR_SIZE     =         64_i64
+  SYM_SIZE      =         24_i64
+  TLS_TCB       =         16_i64
+  ET_DYN        =          3_i64
+  EM_X86_64     =         62_i64
+  EM_AARCH64    =        183_i64
+  PF_X          =          1_i64
+  PF_W          =          2_i64
+  PF_R          =          4_i64
+  PT_LOAD       =          1_i64
+  PT_TLS        =          7_i64
+  PT_PHDR       =          6_i64
+  PT_GNU_RELRO  = 0x6474e552_i64
+  PT_GNU_STACK  = 0x6474e551_i64
+  SHT_PROGBITS  =          1_i64
+  SHT_SYMTAB    =          2_i64
+  SHT_STRTAB    =          3_i64
+  SHT_NOBITS    =          8_i64
+  SHF_WRITE     =          1_i64
+  SHF_ALLOC     =          2_i64
+  SHF_EXECINSTR =          4_i64
+  SHF_TLS       =      0x400_i64
+  SHN_ABS       =     0xfff1_i64
+end
+
+# The linker-defined symbols that are addresses, in the order their values are computed after layout.
+def exe_link_names : Array(String)
+  [
+    "__ehdr_start", "__data_start", "__bss_start", "_end",
+    "__iyi_rela_start", "__iyi_rela_end", "__iyi_tdata_start", "__iyi_tdata_end",
+    "__iyi_relro_start", "__iyi_relro_end",
+  ]
+end
+
+def exe_link_index(name : String) : Int64
+  names = exe_link_names
+  i = 0
+  while i < names.size
+    return i.to_i64 if names[i] == name
+    i = i + 1
+  end
+  -1_i64
+end
+
+def exe_align(value : Int64, align : Int64) : Int64
+  if align <= 1_i64
+    return value
+  end
+  rem = value % align
+  if rem == 0_i64
+    return value
+  end
+  value + (align - rem)
+end
+
+# The 4 KiB (or 64 KiB) page an address lies in, its start.
+def exe_page(value : Int64, page : Int64) : Int64
+  value - (value % page)
+end
+
+# The output group an input section is placed in, or -1 when the executable does not keep it.
+def exe_group_of(sec : Section) : Int64
+  return ExeConst::G_TEXT if sec.kind == SectionKind::Text
+  return ExeConst::G_RODATA if sec.kind == SectionKind::ReadOnly
+  return ExeConst::G_EHFRAME if sec.kind == SectionKind::Unwind
+  if sec.kind == SectionKind::Data
+    return sec.name.starts_with?(".data.rel.ro") ? ExeConst::G_RELRO : ExeConst::G_DATA
+  end
+  return ExeConst::G_BSS if sec.kind == SectionKind::ZeroFill
+  return ExeConst::G_TDATA if sec.kind == SectionKind::TlsData
+  return ExeConst::G_TBSS if sec.kind == SectionKind::TlsZeroFill
+  -1_i64
+end
+
+# Writes `value` little-endian, `width` bytes, at `at` in `image`.
+def exe_put(image : Bytes, at : Int64, value : Int64, width : Int32) : Nil
+  i = 0
+  while i < width
+    image[(at + i.to_i64).to_i32] = (value.unsafe_shr(i.to_i64 * 8_i64) & 0xff_i64).to_u8
+    i = i + 1
+  end
+end
+
+# Reads `width` bytes little-endian at `at` in `image`.
+def exe_get(image : Bytes, at : Int64, width : Int32) : Int64
+  v = 0_i64
+  i = width - 1
+  while i >= 0
+    v = v.unsafe_shl(8_i64) | image[(at + i.to_i64).to_i32].to_i64
+    i = i - 1
+  end
+  v
+end
+
+# Appends `name` and a NUL to a string table, and returns the name's offset.
+def exe_add_name(table : Array(UInt8), name : String) : Int64
+  at = table.size.to_i64
+  i = 0
+  while i < name.bytesize
+    table << name.byte_at(i)
+    i = i + 1
+  end
+  table << 0_u8
+  at
+end
+
+# Writes one ELF64 section header.
+def exe_shdr(image : Bytes, at : Int64, name : Int64, type : Int64, flags : Int64, addr : Int64, offset : Int64, size : Int64, link : Int64, info : Int64, align : Int64, entsize : Int64) : Nil
+  exe_put(image, at, name, 4)
+  exe_put(image, at + 4_i64, type, 4)
+  exe_put(image, at + 8_i64, flags, 8)
+  exe_put(image, at + 16_i64, addr, 8)
+  exe_put(image, at + 24_i64, offset, 8)
+  exe_put(image, at + 32_i64, size, 8)
+  exe_put(image, at + 40_i64, link, 4)
+  exe_put(image, at + 44_i64, info, 4)
+  exe_put(image, at + 48_i64, align, 8)
+  exe_put(image, at + 56_i64, entsize, 8)
+end
+
+# Writes one ELF64 program header.
+def exe_phdr(image : Bytes, at : Int64, type : Int64, flags : Int64, offset : Int64, vaddr : Int64, filesz : Int64, memsz : Int64, align : Int64) : Nil
+  exe_put(image, at, type, 4)
+  exe_put(image, at + 4_i64, flags, 4)
+  exe_put(image, at + 8_i64, offset, 8)
+  exe_put(image, at + 16_i64, vaddr, 8)
+  exe_put(image, at + 24_i64, vaddr, 8)
+  exe_put(image, at + 32_i64, filesz, 8)
+  exe_put(image, at + 40_i64, memsz, 8)
+  exe_put(image, at + 48_i64, align, 8)
+end
+
+class ElfExe
+  property objects : Array(ObjectFile)
+  property entry : String
+  property x86 : Bool
+  property page : Int64
+  property failure : String?
+
+  # Flat numbering: object o's section s is sec_base[o] + s, and its symbol k is sym_base[o] + k.
+  property sec_base : Array(Int64)
+  property sym_base : Array(Int64)
+  property sym_obj : Array(Int64)
+  property sym_weak : Array(Bool)
+  property sym_name : Array(String)
+
+  # Per flat section: its output group (-1 when dropped), and its offset in that group.
+  property sec_group : Array(Int64)
+  property sec_off : Array(Int64)
+
+  # Group sizes and alignments, indexed by group.
+  property gsize : Array(Int64)
+  property galign : Array(Int64)
+
+  # Per flat symbol: its resolution, its group (R_GROUP and R_TLS), and its offset, constant or link index.
+  property rk : Array(Int64)
+  property rg : Array(Int64)
+  property ro : Array(Int64)
+
+  # GOT slots: the slot of each flat symbol (-1 when it has none), and the flat symbol of each slot in order.
+  property got_slot : Array(Int64)
+  property got_syms : Array(Int64)
+
+  property tls_total : Int64
+  property tls_align : Int64
+  property tbss_base : Int64
+  property rel_count : Int64
+
+  # Group addresses, and the linker symbol values in exe_link_names order.
+  property gaddr : Array(Int64)
+  property lvals : Array(Int64)
+  property rela_addr : Int64
+  property rela_end : Int64
+  property bss_end : Int64
+  property relro_end : Int64
+  property nph : Int64
+
+  def initialize(@objects : Array(ObjectFile), @entry : String)
+    @x86 = true
+    @page = ExeConst::PAGE_X86
+    @failure = nil
+    @sec_base = [] of Int64
+    @sym_base = [] of Int64
+    @sym_obj = [] of Int64
+    @sym_weak = [] of Bool
+    @sym_name = [] of String
+    @sec_group = [] of Int64
+    @sec_off = [] of Int64
+    @gsize = [] of Int64
+    @galign = [] of Int64
+    @rk = [] of Int64
+    @rg = [] of Int64
+    @ro = [] of Int64
+    @got_slot = [] of Int64
+    @got_syms = [] of Int64
+    @tls_total = 0_i64
+    @tls_align = 1_i64
+    @tbss_base = 0_i64
+    @rel_count = 0_i64
+    @gaddr = [] of Int64
+    @lvals = [] of Int64
+    @rela_addr = 0_i64
+    @rela_end = 0_i64
+    @bss_end = 0_i64
+    @relro_end = 0_i64
+    @nph = 0_i64
+  end
+
+  def fail(message : String) : Nil
+    unless @failure
+      @failure = message
+    end
+  end
+
+  # Links the objects into the executable bytes, or returns the reason the link stopped.
+  def run : Bytes | String
+    arch = @objects[0].target.architecture
+    unless arch == "x86_64" || arch == "aarch64"
+      return "the static-PIE writer links x86_64 and aarch64 objects, not #{arch}"
+    end
+    @x86 = arch == "x86_64"
+    @page = @x86 ? ExeConst::PAGE_X86 : ExeConst::PAGE_ARM
+    @objects.each do |obj|
+      unless obj.format == ObjFormat::Elf
+        return "the static-PIE writer links ELF objects only"
+      end
+      unless obj.target.architecture == arch
+        return "objects for #{obj.target.architecture} and #{arch} cannot link together"
+      end
+    end
+    number
+    place_sections
+    tls_layout
+    resolve_symbols
+    if message = @failure
+      return message
+    end
+    collect_got_and_rel
+    if message = @failure
+      return message
+    end
+    layout
+    write_image
+  end
+
+  # Gives every section and symbol its flat number, and every group its initial size and alignment.
+  def number : Nil
+    count_sections = 0_i64
+    count_syms = 0_i64
+    o = 0
+    while o < @objects.size
+      obj = @objects[(o).to_i32]
+      @sec_base << count_sections
+      @sym_base << count_syms
+      k = 0
+      while k < obj.symbols.size
+        @sym_obj << o.to_i64
+        @sym_weak << (obj.symbols[k].binding == SymbolBinding::Weak)
+        @sym_name << obj.symbols[k].name
+        @rk << ExeConst::R_NONE
+        @rg << -1_i64
+        @ro << 0_i64
+        @got_slot << -1_i64
+        k = k + 1
+      end
+      count_sections = count_sections + obj.sections.size.to_i64
+      count_syms = count_syms + obj.symbols.size.to_i64
+      o = o + 1
+    end
+    i = 0
+    while i < ExeConst::G_COUNT
+      @gsize << 0_i64
+      @galign << 1_i64
+      @gaddr << 0_i64
+      i = i + 1
+    end
+    i = 0
+    while i < exe_link_names.size
+      @lvals << 0_i64
+      i = i + 1
+    end
+  end
+
+  # Puts each kept input section in its group, aligned, in object order.
+  def place_sections : Nil
+    o = 0
+    while o < @objects.size
+      obj = @objects[(o).to_i32]
+      s = 0
+      while s < obj.sections.size
+        sec = obj.sections[s]
+        g = exe_group_of(sec)
+        if g < 0_i64
+          @sec_group << -1_i64
+          @sec_off << 0_i64
+        else
+          if sec.relocs.size > 0 && (g == ExeConst::G_TDATA || g == ExeConst::G_TBSS)
+            fail("#{sec.name} in object #{o} has relocations, and thread-local data cannot hold an address")
+          end
+          gi = g.to_i32
+          off = exe_align(@gsize[(gi).to_i32], sec.align.to_i64)
+          @sec_group << g
+          @sec_off << off
+          @gsize[(gi).to_i32] = off + sec.size
+          if sec.align.to_i64 > @galign[(gi).to_i32]
+            @galign[(gi).to_i32] = sec.align.to_i64
+          end
+        end
+        s = s + 1
+      end
+      o = o + 1
+    end
+  end
+
+  # The thread-local block: .tdata, then .tbss at its alignment, and the block's alignment and size.
+  def tls_layout : Nil
+    @tls_align = @galign[ExeConst::G_TDATA.to_i32]
+    if @galign[ExeConst::G_TBSS.to_i32] > @tls_align
+      @tls_align = @galign[ExeConst::G_TBSS.to_i32]
+    end
+    @tbss_base = exe_align(@gsize[ExeConst::G_TDATA.to_i32], @galign[ExeConst::G_TBSS.to_i32])
+    total = @tbss_base + @gsize[ExeConst::G_TBSS.to_i32]
+    @tls_total = total > 0_i64 ? exe_align(total, @tls_align) : 0_i64
+  end
+
+  # Resolves each flat symbol. A defined one takes its group and offset (a thread-local one its block offset), an
+  # absolute one its value, and an undefined one the winning definition of its name. An undefined name the linker
+  # defines takes the link value; an undefined weak name takes zero. Any other undefined name is an error.
+  def resolve_symbols : Nil
+    winners = Hash(String, Int64).new
+    o = 0
+    while o < @objects.size
+      obj = @objects[(o).to_i32]
+      k = 0
+      while k < obj.symbols.size
+        sym = obj.symbols[k]
+        f = @sym_base[(o).to_i32] + k.to_i64
+        if sym.kind == SymbolKind::Absolute
+          @rk[(f).to_i32] = ExeConst::R_CONST
+          @ro[(f).to_i32] = sym.value
+        elsif sym.kind != SymbolKind::Undefined
+          sec_flat = @sec_base[(o).to_i32] + sym.section.to_i64
+          g = @sec_group[(sec_flat).to_i32]
+          if g < 0_i64
+            @rk[(f).to_i32] = ExeConst::R_DROPPED
+          elsif g == ExeConst::G_TDATA
+            @rk[(f).to_i32] = ExeConst::R_TLS
+            @rg[(f).to_i32] = g
+            @ro[(f).to_i32] = @sec_off[(sec_flat).to_i32] + sym.value
+          elsif g == ExeConst::G_TBSS
+            @rk[(f).to_i32] = ExeConst::R_TLS
+            @rg[(f).to_i32] = g
+            @ro[(f).to_i32] = @tbss_base + @sec_off[(sec_flat).to_i32] + sym.value
+          else
+            @rk[(f).to_i32] = ExeConst::R_GROUP
+            @rg[(f).to_i32] = g
+            @ro[(f).to_i32] = @sec_off[(sec_flat).to_i32] + sym.value
+          end
+          if sym.binding != SymbolBinding::Local && @rk[(f).to_i32] != ExeConst::R_DROPPED
+            known = winners[sym.name]?
+            if known.nil?
+              winners[sym.name] = f
+            else
+              prior = known.as(Int64)
+              if @sym_weak[prior.to_i32] && sym.binding != SymbolBinding::Weak
+                winners[sym.name] = f
+              elsif !@sym_weak[prior.to_i32] && sym.binding != SymbolBinding::Weak
+                fail("symbol #{sym.name} is defined in object #{@sym_obj[prior.to_i32]} and in object #{o}")
+              end
+            end
+          end
+        end
+        k = k + 1
+      end
+      o = o + 1
+    end
+    o = 0
+    while o < @objects.size
+      obj = @objects[(o).to_i32]
+      k = 0
+      while k < obj.symbols.size
+        sym = obj.symbols[k]
+        if sym.kind == SymbolKind::Undefined
+          f = @sym_base[(o).to_i32] + k.to_i64
+          known = winners[sym.name]?
+          link = exe_link_index(sym.name)
+          if !known.nil?
+            w = known.as(Int64).to_i32
+            @rk[(f).to_i32] = @rk[(w).to_i32]
+            @rg[(f).to_i32] = @rg[(w).to_i32]
+            @ro[(f).to_i32] = @ro[(w).to_i32]
+          elsif sym.name == "__iyi_tls_memsz"
+            @rk[(f).to_i32] = ExeConst::R_CONST
+            @ro[(f).to_i32] = @tls_total
+          elsif sym.name == "__iyi_tls_align"
+            @rk[(f).to_i32] = ExeConst::R_CONST
+            @ro[(f).to_i32] = @tls_align
+          elsif link >= 0_i64
+            @rk[(f).to_i32] = ExeConst::R_LINK
+            @ro[(f).to_i32] = link
+          elsif sym.binding == SymbolBinding::Weak
+            @rk[(f).to_i32] = ExeConst::R_ZERO
+          else
+            fail("undefined symbol #{sym.name}, referenced from object #{o}")
+          end
+        end
+        k = k + 1
+      end
+      o = o + 1
+    end
+  end
+
+  # Whether a symbol's value is a link-time address, which a stored copy of it must be rebased by the load base.
+  def rebase?(f : Int64) : Bool
+    @rk[(f).to_i32] == ExeConst::R_GROUP || @rk[(f).to_i32] == ExeConst::R_LINK
+  end
+
+  # The value a symbol has at link time: an address, a thread-local block offset, or a constant.
+  def value_of(f : Int64) : Int64
+    kind = @rk[(f).to_i32]
+    return @gaddr[@rg[(f).to_i32].to_i32] + @ro[(f).to_i32] if kind == ExeConst::R_GROUP
+    return @lvals[@ro[(f).to_i32].to_i32] if kind == ExeConst::R_LINK
+    return 0_i64 if kind == ExeConst::R_ZERO
+    @ro[(f).to_i32]
+  end
+
+  def got_reloc?(kind : RelocKind) : Bool
+    kind == RelocKind::X86GotPcRel || kind == RelocKind::X86GotPcRelX || kind == RelocKind::X86RexGotPcRelX || kind == RelocKind::A64GotPage21 || kind == RelocKind::A64GotLo12
+  end
+
+  # Visits every kept relocation: gives each symbol a GOT slot where a relocation needs one, and counts the relative
+  # relocations the table will hold: one per absolute word of an allocated section, and one per GOT slot.
+  def collect_got_and_rel : Nil
+    o = 0
+    while o < @objects.size
+      obj = @objects[(o).to_i32]
+      s = 0
+      while s < obj.sections.size
+        sec = obj.sections[s]
+        g = @sec_group[(@sec_base[(o).to_i32] + s.to_i64).to_i32]
+        if g >= 0_i64 && g != ExeConst::G_TBSS && g != ExeConst::G_TDATA
+          r = 0
+          while r < sec.relocs.size
+            reloc = sec.relocs[r]
+            f = @sym_base[(o).to_i32] + reloc.symbol.to_i64
+            if @rk[(f).to_i32] == ExeConst::R_DROPPED
+              fail("#{sec.name} in object #{o} refers to #{@sym_name[f.to_i32]}, which lies in a section the executable does not keep")
+              return
+            end
+            if got_reloc?(reloc.kind)
+              if @got_slot[(f).to_i32] < 0_i64
+                @got_slot[(f).to_i32] = @got_syms.size.to_i64
+                @got_syms << f
+              end
+            elsif reloc.kind == RelocKind::Abs64 && rebase?(f)
+              @rel_count = @rel_count + 1_i64
+            end
+            r = r + 1
+          end
+        end
+        s = s + 1
+      end
+      o = o + 1
+    end
+    k = 0
+    while k < @got_syms.size
+      if rebase?(@got_syms[(k).to_i32])
+        @rel_count = @rel_count + 1_i64
+      end
+      k = k + 1
+    end
+    @gsize[ExeConst::G_GOT.to_i32] = @got_syms.size.to_i64 * 8_i64
+    @gsize[ExeConst::G_RELA.to_i32] = @rel_count * 8_i64
+  end
+
+  # Assigns every group its address, and the linker symbols that depend on those addresses.
+  def layout : Nil
+    @nph = @tls_total > 0_i64 ? 7_i64 : 6_i64
+    hdr = ExeConst::EHDR_SIZE + ExeConst::PHDR_SIZE * @nph
+    text = exe_align(hdr, 16_i64)
+    seg1_end = text + @gsize[ExeConst::G_TEXT.to_i32]
+    rodata = exe_align(seg1_end, @page)
+    ehframe = exe_align(rodata + @gsize[ExeConst::G_RODATA.to_i32], 8_i64)
+    seg2_end = ehframe + @gsize[ExeConst::G_EHFRAME.to_i32]
+    seg3 = exe_align(seg2_end, @page)
+    got = exe_align(seg3 + @gsize[ExeConst::G_RELRO.to_i32], 8_i64)
+    @relro_end = exe_align(got + @gsize[ExeConst::G_GOT.to_i32], @page)
+    tdata = exe_align(@relro_end, @tls_align)
+    data = exe_align(tdata + @gsize[ExeConst::G_TDATA.to_i32], 16_i64)
+    @rela_addr = exe_align(data + @gsize[ExeConst::G_DATA.to_i32], 8_i64)
+    @rela_end = @rela_addr + @rel_count * 8_i64
+    bss = exe_align(@rela_end, 16_i64)
+    @bss_end = bss + @gsize[ExeConst::G_BSS.to_i32]
+    tbss = exe_align(tdata + @gsize[ExeConst::G_TDATA.to_i32], 16_i64)
+    @gaddr[ExeConst::G_TEXT.to_i32] = text
+    @gaddr[ExeConst::G_RODATA.to_i32] = rodata
+    @gaddr[ExeConst::G_EHFRAME.to_i32] = ehframe
+    @gaddr[ExeConst::G_RELRO.to_i32] = seg3
+    @gaddr[ExeConst::G_GOT.to_i32] = got
+    @gaddr[ExeConst::G_TDATA.to_i32] = tdata
+    @gaddr[ExeConst::G_DATA.to_i32] = data
+    @gaddr[ExeConst::G_TBSS.to_i32] = tbss
+    @gaddr[ExeConst::G_BSS.to_i32] = bss
+    @gaddr[ExeConst::G_RELA.to_i32] = @rela_addr
+    @lvals[0] = 0_i64
+    @lvals[1] = data
+    @lvals[2] = bss
+    @lvals[3] = @bss_end
+    @lvals[4] = @rela_addr
+    @lvals[5] = @rela_end
+    @lvals[6] = tdata
+    @lvals[7] = tdata + @gsize[ExeConst::G_TDATA.to_i32]
+    @lvals[8] = seg3
+    @lvals[9] = @relro_end
+  end
+
+  # The thread-pointer offset of a thread-local symbol at block offset `off`.
+  def tp_offset(off : Int64) : Int64
+    if @x86
+      return off - @tls_total
+    end
+    exe_align(ExeConst::TLS_TCB, @tls_align) + off
+  end
+
+  def fits_signed?(v : Int64, bits : Int64) : Bool
+    limit = 1_i64.unsafe_shl(bits - 1_i64)
+    v >= -limit && v < limit
+  end
+
+  # Applies one relocation. `site` is the link-time address of the stored field, and `image` holds the file bytes.
+  def apply(image : Bytes, reloc : Reloc, f : Int64, site : Int64, sec_name : String, alloc : Bool) : Nil
+    kind = reloc.kind
+    name = @sym_name[f.to_i32]
+    offset_form = kind == RelocKind::X86TpOff32 || kind == RelocKind::A64TprelMovwG1 || kind == RelocKind::A64TprelMovwG0Nc
+    if @rk[(f).to_i32] == ExeConst::R_TLS && !offset_form
+      fail("#{sec_name} takes the address of thread-local symbol #{name}, which only the offset relocations may do")
+      return
+    end
+    s = value_of(f)
+    a = reloc.addend
+    p = site
+    if kind == RelocKind::Abs64
+      exe_put(image, site, s + a, 8)
+    elsif kind == RelocKind::Abs32 || kind == RelocKind::X86Abs32S
+      if alloc
+        fail("#{sec_name} holds a 32-bit absolute address of #{name}, which a position-independent image cannot state")
+        return
+      end
+      exe_put(image, site, s + a, 4)
+    elsif kind == RelocKind::PcRel32 || kind == RelocKind::X86Branch32
+      v = s + a - p
+      unless fits_signed?(v, 32_i64)
+        fail("#{sec_name} reaches #{name} out of 32-bit range")
+        return
+      end
+      exe_put(image, site, v, 4)
+    elsif got_reloc?(kind) && (kind == RelocKind::X86GotPcRel || kind == RelocKind::X86GotPcRelX || kind == RelocKind::X86RexGotPcRelX)
+      slot = @gaddr[ExeConst::G_GOT.to_i32] + @got_slot[(f).to_i32] * 8_i64
+      exe_put(image, site, slot + a - p, 4)
+    elsif kind == RelocKind::X86TpOff32
+      exe_put(image, site, tp_offset(s) + a, 4)
+    elsif kind == RelocKind::A64Call26 || kind == RelocKind::A64Jump26
+      v = s + a - p
+      if v % 4 != 0_i64 || !fits_signed?(v, 28_i64)
+        fail("#{sec_name} branches to #{name} out of range or misaligned")
+        return
+      end
+      word = exe_get(image, site, 4)
+      exe_put(image, site, (word & 0xfc000000_i64) | ((v // 4_i64) & 0x3ffffff_i64), 4)
+    elsif kind == RelocKind::A64AdrpPage21 || kind == RelocKind::A64GotPage21
+      t = s + a
+      if kind == RelocKind::A64GotPage21
+        t = @gaddr[ExeConst::G_GOT.to_i32] + @got_slot[(f).to_i32] * 8_i64 + a
+      end
+      imm = (exe_page(t, 4096_i64) - exe_page(p, 4096_i64)) // 4096_i64
+      word = exe_get(image, site, 4)
+      immlo = imm & 3_i64
+      immhi = imm.unsafe_shr(2_i64) & 0x7ffff_i64
+      exe_put(image, site, (word & 0x9f00001f_i64) | immlo.unsafe_shl(29_i64) | immhi.unsafe_shl(5_i64), 4)
+    elsif kind == RelocKind::A64AddLo12 || kind == RelocKind::A64Ldst8Lo12 || kind == RelocKind::A64Ldst16Lo12 || kind == RelocKind::A64Ldst32Lo12 || kind == RelocKind::A64Ldst64Lo12 || kind == RelocKind::A64Ldst128Lo12 || kind == RelocKind::A64GotLo12
+      t = s + a
+      shift = 0_i64
+      if kind == RelocKind::A64GotLo12
+        t = @gaddr[ExeConst::G_GOT.to_i32] + @got_slot[(f).to_i32] * 8_i64 + a
+        shift = 3_i64
+      elsif kind == RelocKind::A64Ldst16Lo12
+        shift = 1_i64
+      elsif kind == RelocKind::A64Ldst32Lo12
+        shift = 2_i64
+      elsif kind == RelocKind::A64Ldst64Lo12
+        shift = 3_i64
+      elsif kind == RelocKind::A64Ldst128Lo12
+        shift = 4_i64
+      end
+      imm = (t & ExeConst::LOW12).unsafe_shr(shift)
+      word = exe_get(image, site, 4)
+      exe_put(image, site, (word & 0xffc003ff_i64) | imm.unsafe_shl(10_i64), 4)
+    elsif kind == RelocKind::A64TprelMovwG1 || kind == RelocKind::A64TprelMovwG0Nc
+      v = tp_offset(s) + a
+      imm = v & 0xffff_i64
+      if kind == RelocKind::A64TprelMovwG1
+        imm = v.unsafe_shr(16_i64) & 0xffff_i64
+      end
+      word = exe_get(image, site, 4)
+      exe_put(image, site, (word & 0xffe0001f_i64) | imm.unsafe_shl(5_i64), 4)
+    elsif kind == RelocKind::PcRel64
+      exe_put(image, site, s + a - p, 8)
+    else
+      fail("#{sec_name} has relocation kind #{kind}, which the static-PIE writer does not apply")
+    end
+  end
+
+  # Writes the file: the image, every relocation, the relative table, the symbol and string tables, the section
+  # headers, and the program headers.
+  def write_image : Bytes | String
+    shnames = [] of UInt8
+    shnames << 0_u8
+    shn = [0_i64]
+    shn << exe_add_name(shnames, ".text")
+    shn << exe_add_name(shnames, ".rodata")
+    shn << exe_add_name(shnames, ".eh_frame")
+    shn << exe_add_name(shnames, ".data.rel.ro")
+    shn << exe_add_name(shnames, ".got")
+    shn << exe_add_name(shnames, ".tdata")
+    shn << exe_add_name(shnames, ".data")
+    shn << exe_add_name(shnames, ".iyi.rela")
+    shn << exe_add_name(shnames, ".bss")
+    shn << exe_add_name(shnames, ".tbss")
+    shn << exe_add_name(shnames, ".symtab")
+    shn << exe_add_name(shnames, ".strtab")
+    shn << exe_add_name(shnames, ".shstrtab")
+    entry_value = entry_address
+    if message = @failure
+      return message
+    end
+    # The symbols the executable names: locals first, then globals, each in object order.
+    keep = [] of Int64
+    pass = 0
+    while pass < 2
+      f = 0_i64
+      while f < @rk.size.to_i64
+        r = @rk[(f).to_i32]
+        # A defined symbol is exported with its group; an undefined one only when the linker defines it.
+        sym = symbol_at(f)
+        named = @sym_name[f.to_i32].bytesize > 0 && sym.kind != SymbolKind::Absolute && exported?(sym, r)
+        if named
+          local = sym.binding == SymbolBinding::Local
+          if (pass == 0 && local) || (pass == 1 && !local)
+            keep << f
+          end
+        end
+        f = f + 1
+      end
+      pass = pass + 1
+    end
+    nlocal = 1_i64
+    k = 0
+    while k < keep.size
+      if symbol_at(keep[k]).binding == SymbolBinding::Local
+        nlocal = nlocal + 1_i64
+      end
+      k = k + 1
+    end
+    names = [] of UInt8
+    names << 0_u8
+    sym_names = [] of Int64
+    k = 0
+    while k < keep.size
+      sym_names << exe_add_name(names, @sym_name[keep[k].to_i32])
+      k = k + 1
+    end
+    symtab_off = exe_align(@rela_end, 8_i64)
+    symtab_size = (keep.size.to_i64 + 1_i64) * ExeConst::SYM_SIZE
+    strtab_off = symtab_off + symtab_size
+    shstrtab_off = strtab_off + names.size.to_i64
+    shoff = exe_align(shstrtab_off + shnames.size.to_i64, 8_i64)
+    total = shoff + ExeConst::SH_COUNT * ExeConst::SHDR_SIZE
+    image = Slice(UInt8).new(total.to_i32)
+    image.fill(0_u8)
+    # The ELF header.
+    exe_put(image, 0_i64, 0x464c457f_i64, 4)
+    exe_put(image, 4_i64, 2_i64, 1)
+    exe_put(image, 5_i64, 1_i64, 1)
+    exe_put(image, 6_i64, 1_i64, 1)
+    exe_put(image, 16_i64, ExeConst::ET_DYN, 2)
+    exe_put(image, 18_i64, @x86 ? ExeConst::EM_X86_64 : ExeConst::EM_AARCH64, 2)
+    exe_put(image, 20_i64, 1_i64, 4)
+    exe_put(image, 24_i64, entry_value, 8)
+    exe_put(image, 32_i64, ExeConst::EHDR_SIZE, 8)
+    exe_put(image, 40_i64, shoff, 8)
+    exe_put(image, 52_i64, ExeConst::EHDR_SIZE, 2)
+    exe_put(image, 54_i64, ExeConst::PHDR_SIZE, 2)
+    exe_put(image, 56_i64, @nph, 2)
+    exe_put(image, 58_i64, ExeConst::SHDR_SIZE, 2)
+    exe_put(image, 60_i64, ExeConst::SH_COUNT, 2)
+    exe_put(image, 62_i64, ExeConst::SH_SHSTRTAB, 2)
+    # Section contents, then the GOT.
+    o = 0
+    while o < @objects.size
+      obj = @objects[(o).to_i32]
+      s = 0
+      while s < obj.sections.size
+        sec = obj.sections[s]
+        g = @sec_group[(@sec_base[(o).to_i32] + s.to_i64).to_i32]
+        if g >= 0_i64 && sec.kind != SectionKind::ZeroFill && sec.kind != SectionKind::TlsZeroFill
+          dst = @gaddr[g.to_i32] + @sec_off[(@sec_base[(o).to_i32] + s.to_i64).to_i32]
+          i = 0
+          while i < sec.bytes.size
+            image[(dst + i.to_i64).to_i32] = sec.bytes[i]
+            i = i + 1
+          end
+        end
+        s = s + 1
+      end
+      o = o + 1
+    end
+    k = 0
+    while k < @got_syms.size
+      exe_put(image, @gaddr[ExeConst::G_GOT.to_i32] + k.to_i64 * 8_i64, value_of(@got_syms[(k).to_i32]), 8)
+      k = k + 1
+    end
+    # Relocations, and the relative table as each absolute word is found.
+    rel_sites = [] of Int64
+    k = 0
+    while k < @got_syms.size
+      if rebase?(@got_syms[(k).to_i32])
+        rel_sites << @gaddr[ExeConst::G_GOT.to_i32] + k.to_i64 * 8_i64
+      end
+      k = k + 1
+    end
+    o = 0
+    while o < @objects.size
+      obj = @objects[(o).to_i32]
+      s = 0
+      while s < obj.sections.size
+        sec = obj.sections[s]
+        g = @sec_group[(@sec_base[(o).to_i32] + s.to_i64).to_i32]
+        if g >= 0_i64 && g != ExeConst::G_TBSS && g != ExeConst::G_TDATA
+          base = @gaddr[g.to_i32] + @sec_off[(@sec_base[(o).to_i32] + s.to_i64).to_i32]
+          r = 0
+          while r < sec.relocs.size
+            reloc = sec.relocs[r]
+            f = @sym_base[(o).to_i32] + reloc.symbol.to_i64
+            if reloc.kind == RelocKind::Abs64 && rebase?(f)
+              rel_sites << base + reloc.offset
+            end
+            apply(image, reloc, f, base + reloc.offset, sec.name, true)
+            r = r + 1
+          end
+        end
+        s = s + 1
+      end
+      o = o + 1
+    end
+    if message = @failure
+      return message
+    end
+    if rel_sites.size.to_i64 != @rel_count
+      return "the relative table holds #{rel_sites.size} entries, not the #{@rel_count} counted"
+    end
+    k = 0
+    while k < rel_sites.size
+      exe_put(image, @rela_addr + k.to_i64 * 8_i64, rel_sites[k], 8)
+      k = k + 1
+    end
+    # The symbol table, the string tables, and the section headers.
+    k = 0
+    while k < names.size
+      image[(strtab_off + k.to_i64).to_i32] = names[k]
+      k = k + 1
+    end
+    k = 0
+    while k < shnames.size
+      image[(shstrtab_off + k.to_i64).to_i32] = shnames[k]
+      k = k + 1
+    end
+    k = 0
+    while k < keep.size
+      f = keep[k]
+      sym = symbol_at(f)
+      bind = 1_i64
+      if sym.binding == SymbolBinding::Local
+        bind = 0_i64
+      elsif sym.binding == SymbolBinding::Weak
+        bind = 2_i64
+      end
+      at = symtab_off + (k.to_i64 + 1_i64) * ExeConst::SYM_SIZE
+      exe_put(image, at, sym_names[k], 4)
+      exe_put(image, at + 4_i64, bind.unsafe_shl(4_i64) | sym_type_of(sym), 1)
+      exe_put(image, at + 6_i64, section_index_of(f), 2)
+      exe_put(image, at + 8_i64, value_of(f), 8)
+      k = k + 1
+    end
+    exe_shdr(image, shoff, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_TEXT, shn[1], ExeConst::SHT_PROGBITS, ExeConst::SHF_ALLOC + ExeConst::SHF_EXECINSTR, @gaddr[ExeConst::G_TEXT.to_i32], @gaddr[ExeConst::G_TEXT.to_i32], @gsize[ExeConst::G_TEXT.to_i32], 0_i64, 0_i64, 16_i64, 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_RODATA, shn[2], ExeConst::SHT_PROGBITS, ExeConst::SHF_ALLOC, @gaddr[ExeConst::G_RODATA.to_i32], @gaddr[ExeConst::G_RODATA.to_i32], @gsize[ExeConst::G_RODATA.to_i32], 0_i64, 0_i64, @galign[ExeConst::G_RODATA.to_i32], 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_EHFRAME, shn[3], ExeConst::SHT_PROGBITS, ExeConst::SHF_ALLOC, @gaddr[ExeConst::G_EHFRAME.to_i32], @gaddr[ExeConst::G_EHFRAME.to_i32], @gsize[ExeConst::G_EHFRAME.to_i32], 0_i64, 0_i64, 8_i64, 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_RELRO, shn[4], ExeConst::SHT_PROGBITS, ExeConst::SHF_ALLOC + ExeConst::SHF_WRITE, @gaddr[ExeConst::G_RELRO.to_i32], @gaddr[ExeConst::G_RELRO.to_i32], @gsize[ExeConst::G_RELRO.to_i32], 0_i64, 0_i64, 8_i64, 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_GOT, shn[5], ExeConst::SHT_PROGBITS, ExeConst::SHF_ALLOC + ExeConst::SHF_WRITE, @gaddr[ExeConst::G_GOT.to_i32], @gaddr[ExeConst::G_GOT.to_i32], @gsize[ExeConst::G_GOT.to_i32], 0_i64, 0_i64, 8_i64, 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_TDATA, shn[6], ExeConst::SHT_PROGBITS, ExeConst::SHF_ALLOC + ExeConst::SHF_WRITE + ExeConst::SHF_TLS, @gaddr[ExeConst::G_TDATA.to_i32], @gaddr[ExeConst::G_TDATA.to_i32], @gsize[ExeConst::G_TDATA.to_i32], 0_i64, 0_i64, @tls_align, 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_DATA, shn[7], ExeConst::SHT_PROGBITS, ExeConst::SHF_ALLOC + ExeConst::SHF_WRITE, @gaddr[ExeConst::G_DATA.to_i32], @gaddr[ExeConst::G_DATA.to_i32], @gsize[ExeConst::G_DATA.to_i32], 0_i64, 0_i64, 16_i64, 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_RELA, shn[8], ExeConst::SHT_PROGBITS, ExeConst::SHF_ALLOC, @rela_addr, @rela_addr, @rel_count * 8_i64, 0_i64, 0_i64, 8_i64, 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_BSS, shn[9], ExeConst::SHT_NOBITS, ExeConst::SHF_ALLOC + ExeConst::SHF_WRITE, @gaddr[ExeConst::G_BSS.to_i32], @rela_end, @gsize[ExeConst::G_BSS.to_i32], 0_i64, 0_i64, 16_i64, 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_TBSS, shn[10], ExeConst::SHT_NOBITS, ExeConst::SHF_ALLOC + ExeConst::SHF_WRITE + ExeConst::SHF_TLS, @gaddr[ExeConst::G_TBSS.to_i32], @rela_end, @gsize[ExeConst::G_TBSS.to_i32], 0_i64, 0_i64, @galign[ExeConst::G_TBSS.to_i32], 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_SYMTAB, shn[11], ExeConst::SHT_SYMTAB, 0_i64, 0_i64, symtab_off, symtab_size, ExeConst::SH_STRTAB, nlocal, 8_i64, ExeConst::SYM_SIZE)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_STRTAB, shn[12], ExeConst::SHT_STRTAB, 0_i64, 0_i64, strtab_off, names.size.to_i64, 0_i64, 0_i64, 1_i64, 0_i64)
+    exe_shdr(image, shoff + ExeConst::SHDR_SIZE * ExeConst::SH_SHSTRTAB, shn[13], ExeConst::SHT_STRTAB, 0_i64, 0_i64, shstrtab_off, shnames.size.to_i64, 0_i64, 0_i64, 1_i64, 0_i64)
+    # The program headers, from offset 64.
+    p = ExeConst::EHDR_SIZE
+    exe_phdr(image, p, ExeConst::PT_PHDR, ExeConst::PF_R, ExeConst::EHDR_SIZE, ExeConst::EHDR_SIZE, ExeConst::PHDR_SIZE * @nph, ExeConst::PHDR_SIZE * @nph, 8_i64)
+    p = p + ExeConst::PHDR_SIZE
+    seg1_end = @gaddr[ExeConst::G_TEXT.to_i32] + @gsize[ExeConst::G_TEXT.to_i32]
+    exe_phdr(image, p, ExeConst::PT_LOAD, ExeConst::PF_R + ExeConst::PF_X, 0_i64, 0_i64, seg1_end, seg1_end, @page)
+    p = p + ExeConst::PHDR_SIZE
+    seg2 = @gaddr[ExeConst::G_RODATA.to_i32]
+    seg2_end = @gaddr[ExeConst::G_EHFRAME.to_i32] + @gsize[ExeConst::G_EHFRAME.to_i32]
+    exe_phdr(image, p, ExeConst::PT_LOAD, ExeConst::PF_R, seg2, seg2, seg2_end - seg2, seg2_end - seg2, @page)
+    p = p + ExeConst::PHDR_SIZE
+    seg3 = @gaddr[ExeConst::G_RELRO.to_i32]
+    exe_phdr(image, p, ExeConst::PT_LOAD, ExeConst::PF_R + ExeConst::PF_W, seg3, seg3, @rela_end - seg3, @bss_end - seg3, @page)
+    p = p + ExeConst::PHDR_SIZE
+    if @tls_total > 0_i64
+      exe_phdr(image, p, ExeConst::PT_TLS, ExeConst::PF_R, @gaddr[ExeConst::G_TDATA.to_i32], @gaddr[ExeConst::G_TDATA.to_i32], @gsize[ExeConst::G_TDATA.to_i32], @tls_total, @tls_align)
+      p = p + ExeConst::PHDR_SIZE
+    end
+    exe_phdr(image, p, ExeConst::PT_GNU_RELRO, ExeConst::PF_R, seg3, seg3, @relro_end - seg3, @relro_end - seg3, 1_i64)
+    p = p + ExeConst::PHDR_SIZE
+    exe_phdr(image, p, ExeConst::PT_GNU_STACK, ExeConst::PF_R + ExeConst::PF_W, 0_i64, 0_i64, 0_i64, 0_i64, 16_i64)
+    image
+  end
+
+  # Whether a symbol is written to .symtab: a defined one by its resolution, an undefined one only when the linker
+  # defines it.
+  def exported?(sym : Symbol, r : Int64) : Bool
+    if sym.kind == SymbolKind::Undefined
+      return r == ExeConst::R_LINK || r == ExeConst::R_CONST
+    end
+    r == ExeConst::R_GROUP || r == ExeConst::R_TLS
+  end
+
+  # The address of the entry symbol, which must be a global definition.
+  def entry_address : Int64
+    i = 0
+    while i < @rk.size
+      if @sym_name[(i).to_i32] == @entry && @rk[(i).to_i32] == ExeConst::R_GROUP && !@sym_weak[(i).to_i32]
+        return value_of(i.to_i64)
+      end
+      i = i + 1
+    end
+    fail("no entry point named #{@entry} is defined")
+    0_i64
+  end
+
+  # The symbol with flat number f.
+  def symbol_at(f : Int64) : Symbol
+    o = @sym_obj[f.to_i32].to_i32
+    @objects[(o).to_i32].symbols[(f - @sym_base[(o).to_i32]).to_i32]
+  end
+
+  def sym_type_of(sym : Symbol) : Int64
+    return 2_i64 if sym.kind == SymbolKind::Func
+    return 1_i64 if sym.kind == SymbolKind::Object
+    return 6_i64 if sym.kind == SymbolKind::Tls
+    0_i64
+  end
+
+  # The section header number a kept symbol is defined in.
+  def section_index_of(f : Int64) : Int64
+    r = @rk[(f).to_i32]
+    return ExeConst::SHN_ABS if r == ExeConst::R_CONST || r == ExeConst::R_LINK
+    if r == ExeConst::R_TLS
+      return @rg[(f).to_i32] == ExeConst::G_TDATA ? ExeConst::SH_TDATA : ExeConst::SH_TBSS
+    end
+    g = @rg[(f).to_i32]
+    return ExeConst::SH_TEXT if g == ExeConst::G_TEXT
+    return ExeConst::SH_RODATA if g == ExeConst::G_RODATA
+    return ExeConst::SH_EHFRAME if g == ExeConst::G_EHFRAME
+    return ExeConst::SH_RELRO if g == ExeConst::G_RELRO
+    return ExeConst::SH_DATA if g == ExeConst::G_DATA
+    ExeConst::SH_BSS
+  end
+end
+
+# Links ELF objects of one architecture into a static-PIE executable whose entry point is `entry`. Returns the bytes,
+# or the reason the link stopped, which names the symbol or object at fault.
+pub def link_elf(objects : Array(ObjectFile), entry : String) : Bytes | String
+  if objects.size == 0
+    return "no objects to link"
+  end
+  ElfExe.new(objects, entry).run
+end

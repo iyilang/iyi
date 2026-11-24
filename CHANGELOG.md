@@ -422,6 +422,11 @@ entry "What the fixes below change in a program's source" has the details.
   DIR defaults to the current directory; a missing manifest or an empty
   package is refused.
 
+- **The native linker writes executables without a system linker.**
+  `compiler/native/link` writes Mach-O and ELF images, resolves relocations
+  and imports, and generates Mach-O code signatures. The Mach-O gate runs
+  linked sample programs, checks their signatures and library dependencies,
+  and compares repeated links byte for byte. The default backend is unchanged.
 - **The x86-64 encoder and ABI tables are written in iyi.**
   `compiler/native/amd64` encodes instruction forms and relocations and
   supplies the System V and Win64 argument and return conventions.

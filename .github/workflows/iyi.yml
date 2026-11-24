@@ -4351,6 +4351,7 @@ jobs:
       - name: The self-host gates
         env:
           IR_ORACLE_EXPORT_DIR: ${{ runner.temp }}/selfhost-ir-oracle
+          SELFHOST_ARTIFACT_DIR: ${{ runner.temp }}/selfhost-elf
         run: |
           bindir="$("$LLVM_CONFIG" --bindir)"
           LLVM_MC="$bindir/llvm-mc" LLVM_OBJDUMP="$bindir/llvm-objdump" bash bench/selfhost_gates.sh
@@ -4360,6 +4361,14 @@ jobs:
         with:
           name: selfhost-ir-oracle
           path: ${{ runner.temp }}/selfhost-ir-oracle
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Preserve the AArch64 ELF image and provenance
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selfhost-elf-aarch64
+          path: ${{ runner.temp }}/selfhost-elf
           if-no-files-found: error
           retention-days: 7
 
@@ -4472,6 +4481,28 @@ jobs:
           IR_ORACLE_DIR: ${{ runner.temp }}/selfhost-ir-oracle
         run: bash bench/selfhost_gates.sh
 
+  selfhost-linux-arm64:
+    needs: [plan, selfhost]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-linux-arm64') }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    env:
+      SELFHOST_HOST: linux-arm64
+    name: "The native ELF image, on Linux arm64"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: selfhost-elf-aarch64
+          path: ${{ runner.temp }}/selfhost-elf
+      - name: Execute the same-head image on the target kernel
+        run: |
+          bash bench/native_elf_run.sh \
+            "$RUNNER_TEMP/selfhost-elf/elf-aarch64" \
+            "$RUNNER_TEMP/selfhost-elf/elf-aarch64.json"
+
   # The editor client is the only artifact here that is published somewhere
   # else, so it is proven the same way as the rest: every run packages it,
   # which is the one check that the manifest parses, the files it names
@@ -4581,7 +4612,7 @@ jobs:
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
             npm-recipe, wasi-run, wasm32-collector, binary, clean-room, vscode, heap22, darwin-heap22, windows-heap22,
-            selfhost, selfhost-darwin, selfhost-windows]
+            selfhost, selfhost-darwin, selfhost-windows, selfhost-linux-arm64]
     if: ${{ always() }}
     runs-on: namespace-profile-default
     timeout-minutes: 5

@@ -1,0 +1,716 @@
+module compiler/ir/printer
+
+import compiler/ir/types::{IrType, ir_quote, ir_name_text, ir_hex}
+import compiler/ir/values::{Value, int_words_text}
+import compiler/ir/inst::{Op, Inst, Block, CallConv, CallAux, AsmAux, AsmDialect, GepAux, MemAux, IntrinsicAux, Ordering, Attribute, IntPredicate, RealPredicate, ThreadPointerKind, DebugLoc}
+import compiler/ir/function::{Function, Global, Linkage, TlsModel, Visibility}
+import compiler/ir/module::{Module}
+import compiler/ir/intrinsics::{intrinsic_name}
+
+# The text form of a module. It is deterministic: globals and functions are written in emission order,
+# the named types the module mentions in LLVM TypeFinder discovery order, flags sorted by name, and
+# unnamed values numbered in definition order. The parser reads exactly this form, so print(parse(text)) == text
+# for every text the printer wrote.
+pub def print(m : Module) : String
+  IrPrinter.new(m).module_text
+end
+
+class IrPrinter
+  def initialize(@module : Module)
+  end
+
+  def module_text : String
+    String.build do |io|
+      io << "; iyi-ir 1\n"
+      io << "source_filename = " << ir_quote(@module.name) << "\n"
+      io << "target triple = " << ir_quote(@module.triple) << "\n"
+      io << "target datalayout = " << ir_quote(@module.layout.llvm_string) << "\n"
+      @module.files.each { |f| io << "file " << ir_quote(f) << "\n" }
+      @module.flags.keys.sorted.each { |k| io << "flag " << ir_quote(k) << " = " << @module.flags[k].to_s << "\n" }
+      named_types_in_order.each do |t|
+        body = t.opaque? ? "opaque" : t.struct_body_text
+        io << "%" << ir_name_text(t.name || "") << " = type " << body << "\n"
+      end
+      @module.globals.each { |g| io << global_text(g) << "\n" }
+      @module.functions.each { |f| io << function_text(f) << "\n" }
+    end
+  end
+
+  # ---- which named types the text defines ------------------------------------------------
+  #
+  # A named struct is written only when the module mentions it, in the order LLVM's TypeFinder
+  # (22.1.8) discovers it: globals (value type then initializer), then functions in module order
+  # (signature, function/return/parameter attributes, personality, and each instruction's type,
+  # constant operands, GEP/alloca source type, and call/intrinsic attributes).
+  def named_types_in_order : Array(IrType)
+    found = [] of IrType
+    visited = Set(String).new
+    seen = Hash(Value, Bool).new
+    worklist = [] of IrType
+    @module.globals.each do |g|
+      incorporate_type(g.value_type, found, visited, worklist)
+      if init = g.initializer
+        incorporate_value(init, found, visited, seen, worklist)
+      end
+    end
+    @module.functions.each do |f|
+      incorporate_type(f.fn_type, found, visited, worklist)
+      incorporate_attrs(f.attrs, found, visited, worklist)
+      incorporate_attrs(f.ret_attrs, found, visited, worklist)
+      f.param_attrs.each { |list| incorporate_attrs(list, found, visited, worklist) }
+      if p = f.personality
+        incorporate_value(p, found, visited, seen, worklist)
+      end
+      f.blocks.each do |b|
+        b.insts.each do |i|
+          incorporate_type(i.type, found, visited, worklist)
+          i.args.each { |a| incorporate_value(a, found, visited, seen, worklist) }
+          aux = i.aux
+          if aux.is_a?(GepAux)
+            incorporate_type(aux.as(GepAux).source_type, found, visited, worklist)
+          elsif aux.is_a?(CallAux)
+            call = aux.as(CallAux)
+            incorporate_attrs(call.fn_attrs, found, visited, worklist)
+            incorporate_attrs(call.ret_attrs, found, visited, worklist)
+            call.param_attrs.each { |list| incorporate_attrs(list, found, visited, worklist) }
+          elsif aux.is_a?(IntrinsicAux)
+            intrinsic = aux.as(IntrinsicAux)
+            intrinsic.param_attrs.each { |list| incorporate_attrs(list, found, visited, worklist) }
+          end
+        end
+      end
+    end
+    found
+  end
+
+  # Only constant Insts are walked, each once: its type, then a GEP constant's source type,
+  # then its operands. Call fn_type, non-constant operand types, and intrinsic overload types
+  # are intentionally not walked, matching LLVM TypeFinder.
+  def incorporate_value(v : Value, found : Array(IrType), visited : Set(String), seen : Hash(Value, Bool), worklist : Array(IrType)) : Nil
+    return nil unless v.is_a?(Inst)
+    constant = v.as(Inst)
+    return nil unless constant_op?(constant.op)
+    return nil if seen.has_key?(v)
+    seen[v] = true
+    incorporate_type(constant.type, found, visited, worklist)
+    if constant.op == Op::ConstExpr
+      aux = constant.aux
+      if aux.is_a?(GepAux)
+        incorporate_type(aux.as(GepAux).source_type, found, visited, worklist)
+      end
+    end
+    constant.args.each { |a| incorporate_value(a, found, visited, seen, worklist) }
+    nil
+  end
+
+  def constant_op?(op : Op) : Bool
+    op == Op::ConstInt || op == Op::ConstFloat || op == Op::ConstNull || op == Op::ConstUndef || op == Op::ConstPoison || op == Op::ConstZero || op == Op::ConstAggregate || op == Op::ConstBytes || op == Op::ConstExpr
+  end
+
+  def incorporate_attrs(attrs : Array(Attribute), found : Array(IrType), visited : Set(String), worklist : Array(IrType)) : Nil
+    attrs.each do |a|
+      if t = a.type_value
+        incorporate_type(t, found, visited, worklist)
+      end
+    end
+    nil
+  end
+
+  # LIFO worklist matching LLVM TypeFinder::incorporateType: marks by IrType#key when pushed,
+  # pushes subtypes in reverse (function subtypes are return type then parameters), and records
+  # named structs when popped.
+  def incorporate_type(root : IrType, found : Array(IrType), visited : Set(String), worklist : Array(IrType)) : Nil
+    return nil if visited.includes?(root.key)
+    visited.add(root.key)
+    worklist << root
+    while !worklist.empty?
+      t = worklist.pop
+      if t.struct? && t.name
+        found << t
+      end
+      if t.struct?
+        fields = t.fields
+        k = fields.size - 1
+        while k >= 0
+          push_type(fields[k], visited, worklist)
+          k = k - 1
+        end
+      elsif t.array? || t.vector?
+        push_type(t.element_type, visited, worklist)
+      elsif t.function?
+        params = t.param_types
+        k = params.size - 1
+        while k >= 0
+          push_type(params[k], visited, worklist)
+          k = k - 1
+        end
+        push_type(t.return_type, visited, worklist)
+      end
+    end
+    nil
+  end
+
+  def push_type(t : IrType, visited : Set(String), worklist : Array(IrType)) : Nil
+    return nil if visited.includes?(t.key)
+    visited.add(t.key)
+    worklist << t
+    nil
+  end
+
+  # ---- module-level items -------------------------------------------------------------
+
+  def global_text(g : Global) : String
+    empty = Hash(Value, Int32).new
+    String.build do |io|
+      io << "@" << ir_name_text(g.name) << " = " << linkage_word(g.linkage) << " "
+      io << "dso_local " if g.dso_local
+      vis = visibility_word(g.visibility)
+      io << vis << " " unless vis.empty?
+      io << "thread_local(" << tls_word(g.tls) << ") " unless g.tls == TlsModel::None
+      io << (g.constant ? "constant " : "global ")
+      io << g.value_type.to_s
+      if init = g.initializer
+        io << " " << bare(init, empty)
+      end
+      io << ", align " << g.alignment.to_s if g.alignment != 0
+      if s = g.section
+        io << " section " << ir_quote(s)
+      end
+      io << " unnamed_addr" if g.unnamed_addr
+      if library = g.import_library
+        io << " import " << ir_quote(library)
+      end
+    end
+  end
+
+  def function_text(f : Function) : String
+    numbers = numbering(f)
+    String.build do |io|
+      io << (f.declaration? ? "declare " : "define ")
+      io << linkage_word(f.linkage) << " "
+      io << "dso_local " if f.dso_local
+      fvis = visibility_word(f.visibility)
+      io << fvis << " " unless fvis.empty?
+      io << "iyicc " if f.cc == CallConv::Iyi
+      f.ret_attrs.each { |a| io << attr_text(a) << " " }
+      io << f.fn_type.return_type.to_s << " @" << ir_name_text(f.name) << "("
+      io << signature_params(f, numbers)
+      io << ")"
+      unless f.attrs.empty?
+        io << " [" << f.attrs.map { |a| attr_text(a) }.join(", ") << "]"
+      end
+      if p = f.personality
+        io << " personality " << bare(p, numbers)
+      end
+      if s = f.section
+        io << " section " << ir_quote(s)
+      end
+      io << " align " << f.alignment.to_s if f.alignment != 0
+      if library = f.import_library
+        io << " import " << ir_quote(library)
+      end
+      if sp = f.subprogram
+        io << " subprogram(" << ir_quote(sp.display_name) << ", " << ir_quote(sp.linkage_name) << ", " << sp.file.to_s << ", " << sp.line.to_s << ")"
+      end
+      if f.declaration?
+        io << "\n"
+      else
+        io << " {\n"
+        f.blocks.each do |b|
+          io << ir_name_text(b.name) << ":"
+          io << " [no_vectorize]" if b.no_vectorize
+          io << "\n"
+          b.insts.each { |i| io << "  " << inst_text(i, numbers) << "\n" }
+        end
+        io << "}\n"
+      end
+    end
+  end
+
+  # The parameter list of a function: attributes and type, then the name for a definition.
+  def signature_params(f : Function, numbers : Hash(Value, Int32)) : String
+    parts = [] of String
+    if f.declaration?
+      f.fn_type.param_types.each_with_index do |t, i|
+        attrs = i < f.param_attrs.size ? attrs_inline(f.param_attrs[i]) : ""
+        parts << attrs + t.to_s
+      end
+    else
+      f.params.each_with_index do |p, i|
+        attrs = i < f.param_attrs.size ? attrs_inline(f.param_attrs[i]) : ""
+        parts << attrs + p.type.to_s + " " + ref(p, numbers)
+      end
+    end
+    parts << "..." if f.fn_type.varargs?
+    parts.join(", ")
+  end
+
+  # The numbering of unnamed values: parameters, then instruction results, in definition order.
+  def numbering(f : Function) : Hash(Value, Int32)
+    numbers = Hash(Value, Int32).new
+    counter = 0
+    f.params.each do |p|
+      next unless p.name.empty?
+      numbers[p] = counter
+      counter = counter + 1
+    end
+    f.blocks.each do |b|
+      b.insts.each do |i|
+        next unless i.name.empty? && !i.type.void?
+        numbers[i] = counter
+        counter = counter + 1
+      end
+    end
+    numbers
+  end
+
+  # ---- values -------------------------------------------------------------------------
+
+  # A reference to a named or numbered value, or to a global or function.
+  def ref(v : Value, numbers : Hash(Value, Int32)) : String
+    return "@" + ir_name_text(v.name) if v.is_a?(Global) || v.is_a?(Function)
+    return "%" + ir_name_text(v.name) unless v.name.empty?
+    index = numbers[v]?
+    raise "a value is used but not defined in this function" unless index
+    "%" + index.to_s
+  end
+
+  # An operand with its type: `i32 %x`.
+  def typed(v : Value, numbers : Hash(Value, Int32)) : String
+    v.type.to_s + " " + bare(v, numbers)
+  end
+
+  # An operand without its type: `%x`, `@g`, or a constant's text.
+  def bare(v : Value, numbers : Hash(Value, Int32)) : String
+    if v.is_a?(Inst) && const_op?(v.op)
+      return const_text(v, numbers)
+    end
+    ref(v, numbers)
+  end
+
+  def const_op?(op : Op) : Bool
+    case op
+    when Op::ConstInt, Op::ConstFloat, Op::ConstNull, Op::ConstUndef, Op::ConstPoison, Op::ConstZero, Op::ConstAggregate, Op::ConstBytes, Op::ConstExpr, Op::GlobalAddr, Op::FunctionAddr
+      true
+    else
+      false
+    end
+  end
+
+  def const_text(i : Inst, numbers : Hash(Value, Int32)) : String
+    case i.op
+    when Op::ConstInt
+      return int_words_text(i.int_words(i.type.bits), i.type.bits) if i.type.bits > 64
+      return i.aux_int.to_s unless i.type.bits == 1
+      i.aux_int == 0 ? "false" : "true"
+    when Op::ConstFloat
+      digits = i.type.float32? ? 8 : 16
+      "0x" + ir_hex(i.aux_int, digits)
+    when Op::ConstNull
+      "null"
+    when Op::ConstUndef
+      "undef"
+    when Op::ConstPoison
+      "poison"
+    when Op::ConstZero
+      "zeroinitializer"
+    when Op::ConstAggregate
+      elements = i.args.map { |e| typed(e, numbers) }.join(", ")
+      if i.type.struct?
+        return i.type.packed_struct? ? "<{ #{elements} }>" : "{ #{elements} }" unless elements.empty?
+        return i.type.packed_struct? ? "<{}>" : "{}"
+      end
+      elements.empty? ? "[]" : "[ #{elements} ]"
+    when Op::ConstBytes
+      bytes = String.build do |io|
+        io << "c\""
+        i.args.each do |a|
+          byte = a.as(Inst).aux_int
+          if byte >= 32 && byte < 127 && byte != 34 && byte != 92
+            io << (byte.to_i32).unsafe_chr
+          else
+            io << "\\" << ir_hex(byte, 2)
+          end
+        end
+        io << "\""
+      end
+      bytes
+    when Op::ConstExpr
+      expr_text(i, numbers)
+    when Op::GlobalAddr, Op::FunctionAddr
+      "@" + ir_name_text(i.args[0].name)
+    else
+      raise "#{i.op} is not a constant"
+    end
+  end
+
+  def expr_text(i : Inst, numbers : Hash(Value, Int32)) : String
+    if i.aux_int == Op::Gep.value.to_i64
+      gep = i.aux.as(GepAux)
+      operands = i.args.map { |a| typed(a, numbers) }.join(", ")
+      return "getelementptr" + (gep.inbounds ? " inbounds" : "") + " (#{gep.source_type.to_s}, #{operands})"
+    end
+    if i.aux_int == Op::Add.value.to_i64 || i.aux_int == Op::Sub.value.to_i64 || i.aux_int == Op::Mul.value.to_i64
+      name = i.aux_int == Op::Add.value.to_i64 ? "add" : (i.aux_int == Op::Sub.value.to_i64 ? "sub" : "mul")
+      return "#{name} (#{typed(i.args[0], numbers)}, #{typed(i.args[1], numbers)})"
+    end
+    name = cast_word(i.aux_int)
+    "#{name} (#{typed(i.args[0], numbers)} to #{i.type.to_s})"
+  end
+
+  # ---- instructions -------------------------------------------------------------------
+
+  def inst_text(i : Inst, numbers : Hash(Value, Int32)) : String
+    body = op_text(i, numbers)
+    prefix = i.type.void? ? "" : ref(i, numbers) + " = "
+    loc = i.loc
+    suffix = loc ? loc_text(loc) : ""
+    prefix + body + suffix
+  end
+
+  # The typed operands of `args` from index `start` on, joined with commas.
+  def typed_from(args : Array(Value), start : Int32, numbers : Hash(Value, Int32)) : String
+    parts = [] of String
+    k = start
+    while k < args.size
+      parts << typed(args[k], numbers)
+      k = k + 1
+    end
+    parts.join(", ")
+  end
+
+  def loc_text(loc : DebugLoc) : String
+    " !loc(#{loc.file}, #{loc.line}, #{loc.column})"
+  end
+
+  def op_text(i : Inst, numbers : Hash(Value, Int32)) : String
+    case i.op
+    when Op::Alloca
+      align = i.aux_int != 0 ? ", align #{i.aux_int}" : ""
+      return "alloca #{i.aux.as(GepAux).source_type.to_s}#{align}"
+    when Op::Load
+      m = i.aux.as(MemAux)
+      text = (m.volatile ? "volatile " : "") + "load #{i.type.to_s}, #{typed(i.args[0], numbers)}, align #{m.align}"
+      return text + atomic_text(m)
+    when Op::Store
+      m = i.aux.as(MemAux)
+      text = (m.volatile ? "volatile " : "") + "store #{typed(i.args[0], numbers)}, #{typed(i.args[1], numbers)}, align #{m.align}"
+      return text + atomic_text(m)
+    when Op::Gep
+      gep = i.aux.as(GepAux)
+      indices = i.args.map { |a| typed(a, numbers) }.join(", ")
+      return "getelementptr" + (gep.inbounds ? " inbounds" : "") + " #{gep.source_type.to_s}, #{indices}"
+    when Op::Fence
+      m = i.aux.as(MemAux)
+      return "fence " + (m.single_thread ? "singlethread " : "") + ordering_word(m.ordering)
+    when Op::CmpXchg
+      m = i.aux.as(MemAux)
+      text = "cmpxchg " + (m.weak ? "weak " : "") + "#{typed(i.args[0], numbers)}, #{typed(i.args[1], numbers)}, #{typed(i.args[2], numbers)}, align #{m.align} #{ordering_word(m.ordering)} #{ordering_word(m.failure_ordering)}"
+      return text + (m.single_thread ? " singlethread" : "")
+    when Op::AtomicRmw
+      m = i.aux.as(MemAux)
+      text = "atomicrmw #{m.rmw_op} #{typed(i.args[0], numbers)}, #{typed(i.args[1], numbers)}, align #{m.align} #{ordering_word(m.ordering)}"
+      return text + (m.single_thread ? " singlethread" : "")
+    when Op::VaArg
+      return "va_arg #{typed(i.args[0], numbers)}, #{i.type.to_s}"
+    when Op::Add, Op::Sub, Op::Mul, Op::SDiv, Op::UDiv, Op::SRem, Op::URem, Op::Shl, Op::LShr, Op::AShr, Op::And, Op::Or, Op::Xor, Op::FAdd, Op::FSub, Op::FMul, Op::FDiv, Op::FRem
+      flags = ""
+      flags += " nuw" if i.aux_int & 1_i64 != 0_i64
+      flags += " nsw" if i.aux_int & 2_i64 != 0_i64
+      flags += " exact" if i.aux_int & 4_i64 != 0_i64
+      return "#{binop_word(i.op)}#{flags} #{typed(i.args[0], numbers)}, #{bare(i.args[1], numbers)}"
+    when Op::FNeg
+      return "fneg #{typed(i.args[0], numbers)}"
+    when Op::ICmp
+      return "icmp #{int_pred_word(i.aux_int)} #{typed(i.args[0], numbers)}, #{bare(i.args[1], numbers)}"
+    when Op::FCmp
+      return "fcmp #{real_pred_word(i.aux_int)} #{typed(i.args[0], numbers)}, #{bare(i.args[1], numbers)}"
+    when Op::Trunc, Op::ZExt, Op::SExt, Op::FPTrunc, Op::FPExt, Op::FPToSI, Op::FPToUI, Op::SIToFP, Op::UIToFP, Op::PtrToInt, Op::IntToPtr, Op::BitCast, Op::AddrSpaceCast
+      return "#{cast_word(cast_ordinal(i.op))} #{typed(i.args[0], numbers)} to #{i.type.to_s}"
+    when Op::ExtractValue
+      return "extractvalue #{typed(i.args[0], numbers)}, #{i.aux_int}"
+    when Op::InsertValue
+      return "insertvalue #{typed(i.args[0], numbers)}, #{typed(i.args[1], numbers)}, #{i.aux_int}"
+    when Op::Select
+      return "select #{typed(i.args[0], numbers)}, #{typed(i.args[1], numbers)}, #{typed(i.args[2], numbers)}"
+    when Op::Phi
+      pairs = [] of String
+      i.args.each_with_index do |v, k|
+        pairs << "[ #{bare(v, numbers)}, label %#{ir_name_text(i.targets[k].name)} ]"
+      end
+      return "phi #{i.type.to_s} " + pairs.join(", ")
+    when Op::Freeze
+      return "freeze #{typed(i.args[0], numbers)}"
+    when Op::Call
+      return call_text(i, numbers)
+    when Op::Invoke
+      aux = i.aux.as(CallAux)
+      callee = bare(i.args[0], numbers)
+      args = call_args(i, aux, numbers)
+      return "invoke #{cc_word(aux.cc)}#{aux.fn_type.to_s} #{callee}(#{args}) to label %#{ir_name_text(i.targets[0].name)} unwind label %#{ir_name_text(i.targets[1].name)}"
+    when Op::Intrinsic
+      aux = i.aux.as(IntrinsicAux)
+      name = intrinsic_name(aux.id, aux.overload)
+      args = intrinsic_args(i, aux, numbers)
+      return "intrinsic #{ir_name_text(name)}(#{args})"
+    when Op::ThreadLocalAddr
+      return "threadlocaladdr #{typed(i.args[0], numbers)}"
+    when Op::ThreadPointer
+      return "threadpointer #{thread_pointer_word(i.aux_int)}"
+    when Op::Ret
+      return "ret void" if i.args.empty?
+      return "ret #{typed(i.args[0], numbers)}"
+    when Op::Br
+      return "br label %#{ir_name_text(i.targets[0].name)}"
+    when Op::CondBr
+      return "br #{typed(i.args[0], numbers)}, label %#{ir_name_text(i.targets[0].name)}, label %#{ir_name_text(i.targets[1].name)}"
+    when Op::Switch
+      cases = [] of String
+      i.cases.each_with_index do |c, k|
+        cases << "#{i.args[0].type.to_s} #{c}, label %#{ir_name_text(i.targets[k + 1].name)}"
+      end
+      return "switch #{typed(i.args[0], numbers)}, label %#{ir_name_text(i.targets[0].name)} [ #{cases.join(", ")} ]"
+    when Op::Unreachable
+      return "unreachable"
+    when Op::Resume
+      return "resume #{typed(i.args[0], numbers)}"
+    when Op::LandingPad
+      text = "landingpad #{i.type.to_s} personality #{typed(i.args[0], numbers)}"
+      text += " cleanup" if i.aux_int & 1_i64 != 0_i64
+      k = 1
+      while k < i.args.size
+        text += " catch #{typed(i.args[k], numbers)}"
+        k = k + 1
+      end
+      return text
+    when Op::CatchSwitch
+      handlers = [] of String
+      handler_count = i.aux_int & 1_i64 != 0_i64 ? i.targets.size - 1 : i.targets.size
+      k = 0
+      while k < handler_count
+        handlers << "label %#{ir_name_text(i.targets[k].name)}"
+        k = k + 1
+      end
+      unwind = i.aux_int & 1_i64 != 0_i64 ? "label %#{ir_name_text(i.targets[handler_count].name)}" : "to caller"
+      return "catchswitch within #{parent_text(i.args[0], numbers)} [ #{handlers.join(", ")} ] unwind #{unwind}"
+    when Op::CatchPad, Op::CleanupPad
+      word = i.op == Op::CatchPad ? "catchpad" : "cleanuppad"
+      operands = typed_from(i.args, 1, numbers)
+      return "#{word} within #{parent_text(i.args[0], numbers)} [#{operands}]"
+    when Op::CatchRet
+      return "catchret from #{bare(i.args[0], numbers)} to label %#{ir_name_text(i.targets[0].name)}"
+    when Op::CleanupRet
+      unwind = i.aux_int & 1_i64 != 0_i64 ? "label %#{ir_name_text(i.targets[0].name)}" : "to caller"
+      return "cleanupret from #{bare(i.args[0], numbers)} unwind #{unwind}"
+    else
+      raise "#{i.op} is not an instruction"
+    end
+  end
+
+  # A call. The callee is args[0]; an inline asm callee is written in place of it.
+  def call_text(i : Inst, numbers : Hash(Value, Int32)) : String
+    aux = i.aux.as(CallAux)
+    callee = i.args[0]
+    callee_text = callee.is_a?(Inst) && callee.as(Inst).aux.is_a?(AsmAux) ? asm_text(callee.as(Inst)) : bare(callee, numbers)
+    ret_attrs = aux.ret_attrs.empty? ? "" : attrs_inline(aux.ret_attrs)
+    text = (aux.tail ? "tail " : "") + "call " + cc_word(aux.cc) + ret_attrs + aux.fn_type.to_s
+    text + " #{callee_text}(#{call_args(i, aux, numbers)})" + fn_attrs_text(aux.fn_attrs)
+  end
+
+  def call_args(i : Inst, aux : CallAux, numbers : Hash(Value, Int32)) : String
+    parts = [] of String
+    k = 1
+    while k < i.args.size
+      index = k - 1
+      attrs = index < aux.param_attrs.size ? attrs_inline(aux.param_attrs[index]) : ""
+      parts << attrs + typed(i.args[k], numbers)
+      k = k + 1
+    end
+    parts.join(", ")
+  end
+
+  # The operands of an intrinsic call, each preceded by the attributes its operand carries, as an ordinary call writes them.
+  def intrinsic_args(i : Inst, aux : IntrinsicAux, numbers : Hash(Value, Int32)) : String
+    parts = [] of String
+    k = 0
+    while k < i.args.size
+      attrs = k < aux.param_attrs.size ? attrs_inline(aux.param_attrs[k]) : ""
+      parts << attrs + typed(i.args[k], numbers)
+      k = k + 1
+    end
+    parts.join(", ")
+  end
+
+  def asm_text(i : Inst) : String
+    inline_asm = i.aux.as(AsmAux)
+    text = "asm"
+    text += " sideeffect" if inline_asm.side_effects
+    text += " alignstack" if inline_asm.align_stack
+    text += " inteldialect" if inline_asm.dialect == AsmDialect::Intel
+    text += " unwind" if inline_asm.unwind
+    text + " " + ir_quote(inline_asm.template) + ", " + ir_quote(inline_asm.constraints)
+  end
+
+  def parent_text(v : Value, numbers : Hash(Value, Int32)) : String
+    if v.is_a?(Inst) && v.as(Inst).op == Op::ConstNull
+      return "none"
+    end
+    bare(v, numbers)
+  end
+
+  def atomic_text(m : MemAux) : String
+    return "" if m.ordering == Ordering::NotAtomic
+    " atomic " + ordering_word(m.ordering) + (m.single_thread ? " singlethread" : "")
+  end
+
+  # ---- attributes and words -----------------------------------------------------------
+
+  def attr_text(a : Attribute) : String
+    if t = a.type_value
+      return ir_name_text(a.name) + "(" + t.to_s + ")"
+    end
+    if s = a.string_value
+      # LLVM writes the unwind table kind inside parentheses: uwtable(sync), uwtable(async).
+      return "uwtable(" + s + ")" if a.name == "uwtable"
+      return ir_name_text(a.name) + "=" + ir_quote(s)
+    end
+    return ir_name_text(a.name) + "(" + a.int_value.to_s + ")" unless a.int_value == 0_u64
+    ir_name_text(a.name)
+  end
+
+  def attrs_inline(list : Array(Attribute)) : String
+    return "" if list.empty?
+    list.map { |a| attr_text(a) }.join(" ") + " "
+  end
+
+  def fn_attrs_text(list : Array(Attribute)) : String
+    return "" if list.empty?
+    " [" + list.map { |a| attr_text(a) }.join(", ") + "]"
+  end
+
+  def linkage_word(l : Linkage) : String
+    case l
+    when Linkage::External
+      "external"
+    when Linkage::Internal
+      "internal"
+    when Linkage::Private
+      "private"
+    when Linkage::LinkOnceOdr
+      "linkonce_odr"
+    when Linkage::Weak
+      "weak"
+    else
+      "extern_weak"
+    end
+  end
+
+  # LLVM's spelling of a visibility; the default is written as nothing at all.
+  def visibility_word(v : Visibility) : String
+    case v
+    when Visibility::Hidden
+      "hidden"
+    when Visibility::Protected
+      "protected"
+    else
+      ""
+    end
+  end
+
+  def tls_word(t : TlsModel) : String
+    case t
+    when TlsModel::LocalExec
+      "localexec"
+    when TlsModel::InitialExec
+      "initialexec"
+    when TlsModel::LocalDynamic
+      "localdynamic"
+    else
+      "generaldynamic"
+    end
+  end
+
+  def cc_word(cc : CallConv) : String
+    cc == CallConv::Iyi ? "iyicc " : ""
+  end
+
+  def ordering_word(o : Ordering) : String
+    case o
+    when Ordering::Unordered
+      "unordered"
+    when Ordering::Monotonic
+      "monotonic"
+    when Ordering::Acquire
+      "acquire"
+    when Ordering::Release
+      "release"
+    when Ordering::AcqRel
+      "acq_rel"
+    when Ordering::SeqCst
+      "seq_cst"
+    else
+      "not_atomic"
+    end
+  end
+
+  def binop_word(op : Op) : String
+    case op
+    when Op::Add  then "add"
+    when Op::Sub  then "sub"
+    when Op::Mul  then "mul"
+    when Op::SDiv then "sdiv"
+    when Op::UDiv then "udiv"
+    when Op::SRem then "srem"
+    when Op::URem then "urem"
+    when Op::Shl  then "shl"
+    when Op::LShr then "lshr"
+    when Op::AShr then "ashr"
+    when Op::And  then "and"
+    when Op::Or   then "or"
+    when Op::Xor  then "xor"
+    when Op::FAdd then "fadd"
+    when Op::FSub then "fsub"
+    when Op::FMul then "fmul"
+    when Op::FDiv then "fdiv"
+    else               "frem"
+    end
+  end
+
+  def int_pred_word(ordinal : Int64) : String
+    names = ["eq", "ne", "ugt", "uge", "ult", "ule", "sgt", "sge", "slt", "sle"]
+    names[ordinal.to_i32]
+  end
+
+  def real_pred_word(ordinal : Int64) : String
+    names = ["false", "oeq", "ogt", "oge", "olt", "ole", "one", "ord", "ueq", "ugt", "uge", "ult", "ule", "une", "uno", "true"]
+    names[ordinal.to_i32]
+  end
+
+  def thread_pointer_word(ordinal : Int64) : String
+    return "fs" if ordinal == ThreadPointerKind::Fs.value.to_i64
+    return "gs" if ordinal == ThreadPointerKind::Gs.value.to_i64
+    return "tpidr_el0" if ordinal == ThreadPointerKind::TpidrEl0.value.to_i64
+    "tpidrro_el0"
+  end
+
+  def cast_ordinal(op : Op) : Int64
+    op.value.to_i64
+  end
+
+  # The mnemonic of a cast, from the ordinal of its Op (the aux_int of a cast constant expression).
+  def cast_word(ordinal : Int64) : String
+    return "trunc" if ordinal == Op::Trunc.value.to_i64
+    return "zext" if ordinal == Op::ZExt.value.to_i64
+    return "sext" if ordinal == Op::SExt.value.to_i64
+    return "fptrunc" if ordinal == Op::FPTrunc.value.to_i64
+    return "fpext" if ordinal == Op::FPExt.value.to_i64
+    return "fptosi" if ordinal == Op::FPToSI.value.to_i64
+    return "fptoui" if ordinal == Op::FPToUI.value.to_i64
+    return "sitofp" if ordinal == Op::SIToFP.value.to_i64
+    return "uitofp" if ordinal == Op::UIToFP.value.to_i64
+    return "ptrtoint" if ordinal == Op::PtrToInt.value.to_i64
+    return "inttoptr" if ordinal == Op::IntToPtr.value.to_i64
+    return "bitcast" if ordinal == Op::BitCast.value.to_i64
+    "addrspacecast"
+  end
+end

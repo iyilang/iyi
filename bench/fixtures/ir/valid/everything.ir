@@ -1,0 +1,181 @@
+; iyi-ir 1
+source_filename = "everything"
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+file "everything.iyi"
+flag "branch-target-enforcement" = 1
+%Pair = type { i8, i64 }
+%Packed = type <{ i8, i32 }>
+%Node = type { ptr, i64 }
+@ext = external global i64, align 8
+@counter = internal global i64 0, align 8
+@tls = external thread_local(localexec) global i32 7
+@msg = private constant [6 x i8] c"hello\00"
+@table = linkonce_odr global [2 x ptr] [ ptr @counter, ptr @msg ]
+@pairs = weak global { i8, i64 } { i8 1, i64 2 }, align 8 section ".data" unnamed_addr
+@pair_ref = extern_weak global ptr getelementptr inbounds (%Pair, ptr @pairs, i64 0, i32 1)
+@ints = external global i64, align 8
+@big = internal global i128 0
+@f32 = internal global float 0x3fc00000
+@fl = internal global double 0x3ff8000000000000
+@casts = internal global i64 ptrtoint (ptr @counter to i64)
+@adds = internal global i64 add (i64 4, i64 5)
+@neg = internal global i64 sub (i64 9, i64 2)
+@scaled = internal global i64 mul (i64 6, i64 7)
+@cs = internal global <{ i8, i32 }> <{ i8 3, i32 4 }>
+@zero = internal global [2 x i32] zeroinitializer
+@packed = internal global %Packed zeroinitializer
+@node = internal global %Node zeroinitializer
+@undef = internal global i32 undef
+@poison = internal global ptr poison
+@nul = internal global ptr null
+@bool = internal global i1 true
+@wide = internal global i128 170141183460469231731687303715884105727
+@wide_neg = internal dso_local global i128 -170141183460469231731687303715884105728
+@shared = external dso_local hidden global i32 3
+@prot = external protected global i32 4
+declare external i32 @puts(noundef ptr)
+
+declare external iyicc void @raise_error()
+
+declare external i32 @printf(ptr, ...)
+
+declare external protected iyicc i32 @prot_decl(i32)
+
+declare external hidden iyicc void @hidden_decl()
+
+define external dso_local hidden iyicc i32 @hidden_fn(i32 %x) {
+entry:
+  %w = add i128 123456789012345678901234567890, -98765432109876543210
+  %wt = trunc i128 %w to i32
+  %r = add i32 %wt, %x
+  ret i32 %r
+}
+
+define internal dso_local iyicc i32 @sum(i32 %a, i32 %b) {
+entry:
+  %s = add nuw nsw i32 %a, %b
+  %d = sdiv exact i32 %s, 2
+  %m = mul i32 %d, 3
+  %u = udiv i32 %m, 2
+  %sr = srem i32 %u, 7
+  %ur = urem i32 %sr, 5
+  %sl = shl i32 %ur, 1
+  %lr = lshr i32 %sl, 1
+  %ar = ashr i32 %lr, 1
+  %an = and i32 %ar, 255
+  %or = or i32 %an, 1
+  %xo = xor i32 %or, -1
+  %sub = sub i32 %xo, 4
+  %neg = sub i32 0, %sub
+  %eq = icmp eq i32 %neg, 0
+  %ne = icmp ne i32 %neg, 0
+  %ugt = icmp ugt i32 %neg, 0
+  %uge = icmp uge i32 %neg, 0
+  %ult = icmp ult i32 %neg, 0
+  %ule = icmp ule i32 %neg, 0
+  %sgt = icmp sgt i32 %neg, 0
+  %sge = icmp sge i32 %neg, 0
+  %slt = icmp slt i32 %neg, 0
+  %sle = icmp sle i32 %neg, 0
+  %both = and i1 %eq, %ne
+  %sel = select i1 %both, i32 %neg, i32 %sub
+  %fz = freeze i32 %sel
+  %pick = select i1 %sle, i32 %fz, i32 %sel
+  br label %next
+next:
+  %phi = phi i32 [ %pick, label %entry ]
+  %t = trunc i32 %phi to i8
+  %z = zext i8 %t to i32
+  %sx = sext i8 %t to i64
+  %pi = ptrtoint ptr @counter to i64
+  %ip = inttoptr i64 %pi to ptr
+  %bc = bitcast i64 %pi to double
+  %asp = addrspacecast ptr %ip to ptr addrspace(256)
+  %fe = fcmp oeq double %bc, 0x3ff8000000000000
+  %fn = fcmp olt double %bc, 0x0000000000000000
+  %fa = fadd double %bc, 0x3ff0000000000000
+  %fs = fsub double %fa, 0x3ff0000000000000
+  %fm = fmul double %fs, 0x4000000000000000
+  %fd = fdiv double %fm, 0x4000000000000000
+  %fr = frem double %fd, 0x4000000000000000
+  %fng = fneg double %fr
+  %fi = fptosi double %fng to i32
+  %fu = fptoui double %fng to i32
+  %sf = sitofp i32 %fi to double
+  %uf = uitofp i32 %fu to double
+  %ft = fptrunc double %uf to float
+  %fx = fpext float %ft to double
+  %ex = extractvalue { i32, i8 } { i32 1, i8 2 }, 0
+  %iv = insertvalue { i32, i8 } { i32 1, i8 2 }, i32 %ex, 0
+  %st = alloca %Pair, align 8
+  store i64 41, ptr %st, align 8
+  volatile store i32 1, ptr @counter, align 4 atomic seq_cst singlethread
+  %ld = load i64, ptr %st, align 8
+  %lv = volatile load i64, ptr @counter, align 8 atomic acquire
+  %gep = getelementptr %Pair, ptr %st, i64 0, i32 1
+  %igep = getelementptr inbounds %Pair, ptr %st, i64 1, i32 0
+  %old = atomicrmw add ptr @counter, i64 1, align 8 seq_cst
+  %cx = cmpxchg weak ptr @counter, i64 %old, i64 %ld, align 8 seq_cst acquire singlethread
+  %cxv = extractvalue { i64, i1 } %cx, 1
+  fence singlethread acquire
+  fence seq_cst
+  %va = va_arg ptr %st, i32
+  %fl2 = fadd float 0x3fc00000, 0x3fc00000
+  %cal = call i32 (ptr) @puts(ptr @msg)
+  %tcal = tail call iyicc i32 (i32, i32) @sum(i32 1, i32 2)
+  %rat = call noundef i32 (ptr) @puts(noundef ptr @msg) [noinline, "frame-pointer"="all"]
+  %ov = intrinsic llvm.sadd.with.overflow.i32(i32 %z, i32 %z)
+  %ovv = extractvalue { i32, i1 } %ov, 0
+  %fg = fadd double 0x4000000000000000, 0x4000000000000000
+  %sq = intrinsic llvm.sqrt.f64(double %fg)
+  %tla = threadlocaladdr ptr @tls
+  %tp = threadpointer fs
+  %tp2 = threadpointer tpidr_el0
+  %lp = landingpad { ptr, i32 } personality ptr @pers cleanup catch ptr @msg
+  switch i32 %z, label %dflt [ i32 1, label %one, i32 2, label %two ]
+one:
+  ret i32 %ovv
+two:
+  %ivk = invoke i32 (ptr) @puts(ptr @msg) to label %ok unwind label %lpad
+ok:
+  %bc2 = bitcast ptr @msg to ptr
+  br i1 %eq, label %dflt, label %ret
+dflt:
+  unreachable
+lpad:
+  resume { ptr, i32 } %lp
+ret:
+  ret i32 %sel
+}
+
+define internal i32 @pers(ptr %p) personality @sum {
+entry:
+  %cs = catchswitch within none [ label %handler ] unwind to caller
+handler:
+  %cp = catchpad within %cs [i32 1]
+  catchret from %cp to label %after
+after:
+  %cl = cleanuppad within none []
+  cleanupret from %cl unwind to caller
+}
+
+define external void @loop(i32 %n) align 16 {
+entry:
+  br label %head
+head:
+  %i = phi i32 [ 0, label %entry ], [ %inc, label %body ]
+  %c = icmp slt i32 %i, %n
+  br i1 %c, label %body, label %exit
+body: [no_vectorize]
+  %inc = add i32 %i, 1
+  br label %head
+exit:
+  ret void
+}
+
+define internal i32 @uwt() [uwtable(sync)] {
+entry:
+  ret i32 0
+}
+

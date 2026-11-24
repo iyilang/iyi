@@ -1,0 +1,17 @@
+; iyi-ir 1
+; expect: tls-fresh
+module "bad"
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+@tls = external thread_local(localexec) global i32
+define internal iyicc i32 @f(i1 %go) {
+entry:
+  %a = threadlocaladdr ptr @tls
+  br label %loop
+loop:
+  %v = load i32, ptr %a, align 4
+  br i1 %go, label %loop, label %exit
+exit:
+  ret i32 %v
+}
+

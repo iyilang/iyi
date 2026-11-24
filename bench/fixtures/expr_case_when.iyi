@@ -1,0 +1,31 @@
+# Case / when expressions fixture
+status = 200
+
+# Case with value and multiple when conditions
+res1 = case status
+       when 200, 201, 204
+         "success"
+       when 400, 404
+         "client error"
+       when 500
+         "server error"
+       else
+         "unknown"
+       end
+
+# Case without expression (acts like if-elsif)
+val = 42
+res2 = case
+       when val < 0
+         "negative"
+       when val == 0
+         "zero"
+       when val > 0
+         "positive"
+       end
+
+# Case with single statement bodies
+res3 = case status
+       when 200 then "ok"
+       else          "not ok"
+       end

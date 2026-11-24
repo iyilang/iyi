@@ -1784,6 +1784,14 @@ end
   def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
     -1_i64
   end
+
+  # The sixteen bytes `String#hash` is keyed with, read once per process (#212), from the host's entropy: the same
+  # import `Random::Secure` reads on this target.
+  def __iyi_hash_key : {UInt64, UInt64}
+    key = {0_u64, 0_u64}
+    raise "String#hash: the host answered no random bytes" if LibIyiHost.random(pointerof(key).as(UInt8*), 16) != 0
+    key
+  end
 {% else %}
   {% raise "iyi: this target is not one iyi's prelude has platform bindings for. " \
            "iyi supports Linux (x86_64, aarch64) via raw syscalls, macOS via " \

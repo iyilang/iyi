@@ -149,6 +149,13 @@
 
 ### Gates
 
+- **`bench/packages_resolve.sh` loses every fetch's race to another build
+  (#246).** A `git` that finishes the other build's checkout while this
+  one clones makes every fetch find its target taken: the build must take
+  that checkout, run the code it holds and leave no staging directory.
+  0.22.0 fails it at `Directory not empty`. POSIX only: Windows starts no
+  shell script as `git`.
+
 - **`bench/lsp_session.py`'s held compile (step 74a) lets go of its FIFO
   while the FIFO still has a name, and no longer hangs on macOS.** Twice on
   darwin CI (jobs 135494265207 and 137179880168) the step after 72j had no
@@ -226,6 +233,18 @@
   cuts at the word fails there on 4 KB and 16 KB pages.
 
 ### Fixed
+
+- **`iyi test` on a package with a dependency builds in a cold module
+  cache (#246).** Its builds run at once (`-p`, six on twelve cores), and
+  each fetched the dependency: every one but the first to rename its
+  checkout into place stopped at `Directory not empty` and left its
+  staging directory in the cache. rename(2) of a directory onto a
+  non-empty one fails with ENOTEMPTY, and the fetcher took only EEXIST for
+  the race. It now takes any refused rename for the race when the target
+  holds a whole checkout, and removes its staging directory either way.
+  `iyi test sqlite` in iyilang/sqlite with an empty cache, Linux: 0.22.0
+  passed 1 of 6 tests and left 5 staging directories; now 6 of 6, none
+  left.
 
 - **`using` is a name again in a `.cr` file.** It was lexed as a keyword in
   every file, so Crystal code with a parameter or local named `using` (as in

@@ -1,0 +1,251 @@
+# Implicit rescue, else and ensure in each body that takes them without begin: a def, a fun, a do-block and a do proc
+# literal (hosted parser.cr 5400, 7959, 6488 and 3430). Nine forms in each body: rescue alone, rescue with a type, with a
+# variable, with a variable and a type, with several types, with several clauses, with else, ensure alone, and all three.
+
+def def_rescue_alone
+  1
+rescue
+  2
+end
+
+def def_rescue_typed
+  1
+rescue ArgumentError
+  2
+end
+
+def def_rescue_variable
+  1
+rescue error
+  error
+end
+
+def def_rescue_variable_typed
+  1
+rescue error : ArgumentError
+  error
+end
+
+def def_rescue_several_types
+  1
+rescue ArgumentError | KeyError
+  2
+end
+
+def def_rescue_several_clauses
+  1
+rescue ArgumentError
+  2
+rescue
+  3
+end
+
+def def_rescue_else
+  1
+rescue
+  2
+else
+  3
+end
+
+def def_ensure_alone
+  1
+ensure
+  4
+end
+
+def def_rescue_else_ensure
+  1
+rescue
+  2
+else
+  3
+ensure
+  4
+end
+
+fun fun_rescue_alone
+  1
+rescue
+  2
+end
+
+fun fun_rescue_typed
+  1
+rescue ArgumentError
+  2
+end
+
+fun fun_rescue_variable
+  1
+rescue error
+  error
+end
+
+fun fun_rescue_variable_typed
+  1
+rescue error : ArgumentError
+  error
+end
+
+fun fun_rescue_several_types
+  1
+rescue ArgumentError | KeyError
+  2
+end
+
+fun fun_rescue_several_clauses
+  1
+rescue ArgumentError
+  2
+rescue
+  3
+end
+
+fun fun_rescue_else
+  1
+rescue
+  2
+else
+  3
+end
+
+fun fun_ensure_alone
+  1
+ensure
+  4
+end
+
+fun fun_rescue_else_ensure
+  1
+rescue
+  2
+else
+  3
+ensure
+  4
+end
+
+[1].each do |item|
+  item
+rescue
+  2
+end
+
+[1].each do |item|
+  item
+rescue ArgumentError
+  2
+end
+
+[1].each do |item|
+  item
+rescue error
+  error
+end
+
+[1].each do |item|
+  item
+rescue error : ArgumentError
+  error
+end
+
+[1].each do |item|
+  item
+rescue ArgumentError | KeyError
+  2
+end
+
+[1].each do |item|
+  item
+rescue ArgumentError
+  2
+rescue
+  3
+end
+
+[1].each do |item|
+  item
+rescue
+  2
+else
+  3
+end
+
+[1].each do |item|
+  item
+ensure
+  4
+end
+
+[1].each do |item|
+  item
+rescue
+  2
+else
+  3
+ensure
+  4
+end
+
+proc_rescue_alone = ->(item : Int32) do
+  item
+rescue
+  2
+end
+
+proc_rescue_typed = ->(item : Int32) do
+  item
+rescue ArgumentError
+  2
+end
+
+proc_rescue_variable = ->(item : Int32) do
+  item
+rescue error
+  error
+end
+
+proc_rescue_variable_typed = ->(item : Int32) do
+  item
+rescue error : ArgumentError
+  error
+end
+
+proc_rescue_several_types = ->(item : Int32) do
+  item
+rescue ArgumentError | KeyError
+  2
+end
+
+proc_rescue_several_clauses = ->(item : Int32) do
+  item
+rescue ArgumentError
+  2
+rescue
+  3
+end
+
+proc_rescue_else = ->(item : Int32) do
+  item
+rescue
+  2
+else
+  3
+end
+
+proc_ensure_alone = ->(item : Int32) do
+  item
+ensure
+  4
+end
+
+proc_rescue_else_ensure = ->(item : Int32) do
+  item
+rescue
+  2
+else
+  3
+ensure
+  4
+end

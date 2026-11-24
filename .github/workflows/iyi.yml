@@ -4503,6 +4503,170 @@ jobs:
           gh release create "$tag" --title "iyi ${tag#v}" --notes-file notes.md $prerelease \
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
 
+
+  selfhost:
+    needs: [plan, build]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost') }}
+    runs-on: namespace-profile-default
+    timeout-minutes: 90
+    env:
+      SELFHOST_HOST: linux-x86_64
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "The self-host gates, on Linux"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+
+      # The gates compile oracles with LibLLVM, so they need llvm-config. The
+      # samples job provisions it the same way.
+      - name: Provision llvm-config
+        run: |
+          cfg="$(src/llvm/ext/find-llvm-config.sh 2>/dev/null || true)"
+          if [ -n "$cfg" ] && [ -x "$cfg" ]; then
+            [ "$cfg" != "/usr/local/bin/llvm-config" ] && ln -sf "$cfg" /usr/local/bin/llvm-config
+            [ "$cfg" != "/usr/bin/llvm-config" ] && ln -sf "$cfg" /usr/bin/llvm-config
+            echo "LLVM_CONFIG=$cfg" >> "$GITHUB_ENV"
+          elif command -v llvm-config-20 >/dev/null 2>&1; then
+            cfg="$(command -v llvm-config-20)"
+            [ "$cfg" != "/usr/local/bin/llvm-config" ] && ln -sf "$cfg" /usr/local/bin/llvm-config
+            [ "$cfg" != "/usr/bin/llvm-config" ] && ln -sf "$cfg" /usr/bin/llvm-config
+            echo "LLVM_CONFIG=$cfg" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build `iyi` and its daemon
+        run: make -o .build/crystal iyi iyi-daemon
+
+      # One driver runs every selfhost gate (bench/selfhost_*_exercise.sh) in order,
+      # each with its own log, and exits non-zero when any of them fails.
+      - name: The self-host gates
+        env:
+          IR_ORACLE_EXPORT_DIR: ${{ runner.temp }}/selfhost-ir-oracle
+        run: bash bench/selfhost_gates.sh
+
+      - name: Preserve the same-head Linux LLVM references
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selfhost-ir-oracle
+          path: ${{ runner.temp }}/selfhost-ir-oracle
+          if-no-files-found: error
+          retention-days: 7
+
+  selfhost-darwin:
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-darwin') }}
+    # Namespace's macOS 15, as every darwin job (the darwin job's comment
+    # says why).
+    runs-on: namespace-profile-macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.4"
+      SELFHOST_HOST: darwin-arm64
+    timeout-minutes: 120
+    name: "The self-host gates, on darwin arm64"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the bootstrap toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          python3 --version
+          # The same setup as the other darwin jobs (the darwin job's comments
+          # say why): only what is missing, the job's own temporary and cache
+          # directories, and no compiler or linker flags of the machine's.
+          for f in crystal coreutils pkgconf; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+
+      - name: Build `iyi`, its daemon, and the tarball
+        run: make iyi-tarball LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+
+      # The same driver as the Linux job. The gates read LLVM_CONFIG from the
+      # environment before they look for llvm-config on the PATH.
+      - name: The self-host gates
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" bash bench/selfhost_gates.sh
+
+  selfhost-windows:
+    needs: [plan, selfhost]
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost-windows') }}
+    runs-on: windows-2025
+    timeout-minutes: 150
+    env:
+      SELFHOST_HOST: windows-x86_64
+    name: "The self-host gates, on Windows x86_64"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --version 4.4.1 --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "choco could not install make 4.4.1" }
+            $make = Join-Path $env:ChocolateyInstall 'lib\make\tools\install\bin\make.exe'
+            $hash = (Get-FileHash -Algorithm SHA256 $make).Hash.ToLower()
+            if ($hash -ne 'cc6dc291113dcbcc7735835acbfc23c52ed037e4e124ff2d7a0aeae6df563a9f') {
+              throw "Chocolatey's make.exe is not the one pinned here: $hash"
+            }
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          if (-not (Test-Path "$lib\llvm_VERSION")) {
+            throw "no llvm_VERSION beside the Crystal package's libraries, at $lib"
+          }
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          Write-Host "bootstrap libraries: $lib"
+          Write-Host "llvm: $llvm"
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          crystal --version
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      - name: Download the same-head Linux LLVM references
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: selfhost-ir-oracle
+          path: ${{ runner.temp }}/selfhost-ir-oracle
+
+      - name: The self-host gates
+        shell: bash
+        env:
+          IR_ORACLE_DIR: ${{ runner.temp }}/selfhost-ir-oracle
+        run: bash bench/selfhost_gates.sh
+
   # The editor client is the only artifact here that is published somewhere
   # else, so it is proven the same way as the rest: every run packages it,
   # which is the one check that the manifest parses, the files it names
@@ -4602,16 +4766,17 @@ jobs:
           path: editors/vscode/*.vsix
           retention-days: 7
 
-  # A skipped unselected job is harmless. A selected job must succeed:
-  # otherwise a missing or skipped platform could silently pass the verdict.
-  # The planner also refuses a workflow whose jobs this list does not name.
+  # One check requires every selected job to succeed. Only jobs the plan
+  # left out may be skipped. The planner must succeed and supply its job
+  # list; scripts/ci_plan.py also checks that needs includes every job.
   result:
     needs: [plan, docs, build, port, port-darwin, port-windows, iyi, compiler-specs, stdlib-specs, lsp-positions, samples, samples-surfaces, std,
             std-platforms, std-siblings, targets, cross-objects, cross-run, darwin,
             darwin-std-siblings, darwin-std, windows-probe, windows-collector, windows-runtime,
             windows-native, windows-native-gates, windows-native-surfaces, windows-std,
             windows-std-platforms, windows-std-siblings, windows-gates, windows-compiler-specs,
-            npm-recipe, wasi-run, wasm32-collector, binary, clean-room, vscode, heap22, darwin-heap22, windows-heap22]
+            npm-recipe, wasi-run, wasm32-collector, binary, clean-room, vscode, heap22, darwin-heap22, windows-heap22,
+            selfhost, selfhost-darwin, selfhost-windows]
     if: ${{ always() }}
     runs-on: namespace-profile-default
     timeout-minutes: 5

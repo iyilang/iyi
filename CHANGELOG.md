@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Added
+
+- **iyi is a self-hosting project.** The owner accepted Jason Waldrip's
+  proposal (#172) on 2026-11-24, reversing Appendix B #10: the compiler is
+  ported to iyi and gets its own back end and linker, so that iyi is built
+  from iyi with no Crystal and no LLVM on the machine. The order is part of
+  the decision: additive pull requests by component, each behind a gate
+  against the hosted compiler, changing no default; a target's default
+  moves only on that target's measurements; the Crystal-hosted compiler
+  builds the first one written in iyi; and deleting the hosted compiler is
+  the last pull request, opened on its own once the compiler builds itself
+  to the same bytes (SPEC.md III.9, B.2a, Appendix B #27).
+- **The first compiler component written in iyi: `src/compiler/platform/`
+  (#181).** 727 lines of iyi parse and normalise target triples, derive the
+  flags a target implies, name objects and executables, and build linker
+  commands, MSVC's included. `bench/selfhost_platform_exercise.sh` builds
+  the port plain and `--release`, compares all 24 target triples of its
+  corpus with the hosted compiler byte for byte, checks that malformed
+  triples are refused, and holds 6 broken copies of the port to failing.
+  The `selfhost`, `selfhost-darwin` and `selfhost-windows` jobs run it
+  (through `bench/selfhost_gates.sh`) on Linux, darwin arm64 and Windows
+  x86_64 on every full run, and on a pull request that touches the iyi
+  compiler sources or their gates.
+  Nothing in the hosted compiler uses it yet.
+
 ### Changed
 
 - **A build that writes `.iyimod` artifacts compiles each module once, not

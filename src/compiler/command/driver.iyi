@@ -1,0 +1,2940 @@
+module compiler/command/driver
+
+import std/option_parser::{OptionParser}
+import compiler/platform/target::{Target}
+import std/dir::{Dir}
+import std/file::{File}
+import std/text
+import std/path::{Path}
+
+# What a command invocation exits with.
+pub enum Exit
+  OK             = 0
+  FAILURE        = 1
+  USAGE_ERROR    = 1
+  CODE_ERROR     = 1
+  SOFTWARE_ERROR = 1
+end
+
+# Output buffer for capturing stdout and stderr.
+pub class OutputBuffer
+  @parts : Array(String)
+
+  def initialize
+    @parts = [] of String
+  end
+
+  def <<(s : String) : OutputBuffer
+    @parts << s
+    self
+  end
+
+  def puts(s : String = "") : Nil
+    @parts << s
+    @parts << "\n" unless s.ends_with?("\n")
+  end
+
+  def print(s : String) : Nil
+    @parts << s
+  end
+
+  def clear : Nil
+    @parts = [] of String
+  end
+
+  def to_s : String
+    @parts.join("")
+  end
+end
+
+# All options parsed for a compiler command.
+pub class CompilerOptions
+  property cross_compile : Bool
+  property debug : String
+  property frame_pointers : String
+  property flags : Array(String)
+  property emit_targets : Array(String)
+  property x86_asm_syntax : String
+  property hierarchy_exp : String?
+  property cursor_location : String?
+  property includes : Array(String)
+  property excludes : Array(String)
+  property output_format : String
+  property tallies : Bool
+  property check : Bool
+  property error_trace : Bool
+  property dump_ll : Bool
+  property link_flags : String
+  property mcpu : String?
+  property mattr : String?
+  property mcmodel : String?
+  property warnings_level : String
+  property error_on_warnings : Bool
+  property exclude_warnings : Array(String)
+  property color : Bool
+  property no_codegen : Bool
+  property output_filename : String?
+  property specified_output : Bool
+  property prelude : String
+  property specified_prelude : Bool
+  property compatibility_prelude : Bool
+  property iyi_keep : String?
+  property emit_bind : String?
+  property emit_iyimod : String?
+  property use_iyimod : String?
+  property release : Bool
+  property optimization_mode : String
+  property stats : Bool
+  property progress : Bool
+  property time : Bool
+  property single_module : Bool
+  property n_threads : Int32
+  property target_triple : String?
+  property verbose : Bool
+  property static_link : Bool
+  property stdin_filename : String?
+  property filenames : Array(String)
+  property arguments : Array(String)
+  property single_file : Bool
+  property force : Bool = false
+
+  def initialize
+    @cross_compile = false
+    @debug = "default"
+    @frame_pointers = "auto"
+    @flags = [] of String
+    @emit_targets = [] of String
+    @x86_asm_syntax = "att"
+    @hierarchy_exp = nil
+    @cursor_location = nil
+    @includes = [] of String
+    @excludes = [] of String
+    @output_format = "text"
+    @tallies = false
+    @check = false
+    @error_trace = false
+    @dump_ll = false
+    @link_flags = ""
+    @mcpu = nil
+    @mattr = nil
+    @mcmodel = nil
+    @warnings_level = "all"
+    @error_on_warnings = false
+    @exclude_warnings = [] of String
+    @color = true
+    @no_codegen = false
+    @output_filename = nil
+    @specified_output = false
+    @prelude = "prelude"
+    @specified_prelude = false
+    @compatibility_prelude = false
+    @iyi_keep = nil
+    @emit_bind = nil
+    @emit_iyimod = nil
+    @use_iyimod = nil
+    @release = false
+    @optimization_mode = "0"
+    @stats = false
+    @progress = false
+    @time = false
+    @single_module = false
+    @n_threads = 8
+    @target_triple = nil
+    @verbose = false
+    @static_link = false
+    @stdin_filename = nil
+    @filenames = [] of String
+    @arguments = [] of String
+    @single_file = false
+  end
+end
+
+# The result of driving a command line.
+pub class CommandResult
+  property selected_command : String
+  property exit_code : Int32?
+  property stdout_output : String
+  property stderr_output : String
+  property compiler_options : CompilerOptions?
+  property subcommand_options : Hash(String, String)
+
+  def initialize(
+    @selected_command : String,
+    @exit_code : Int32?,
+    @stdout_output : String,
+    @stderr_output : String,
+    @compiler_options : CompilerOptions?,
+    @subcommand_options : Hash(String, String) = Hash(String, String).new,
+  )
+  end
+end
+
+# The command driver ported from src/compiler/iyi/command.cr.
+pub class CommandDriver
+  # Copies of src/IYI_VERSION and src/VERSION. An imported .iyi module may not
+  # read a file outside its own directory at compile time (upstream #189), so
+  # they are literals here. bench/doc_numbers.py fails when either differs from
+  # its file.
+  IYI_VERSION  = "0.22.0"
+  BASE_VERSION = "1.22.0-dev"
+
+  # Match the hosted target configuration without linking LLVM: the platform
+  # this parser was compiled for.
+  CONFIG_TARGET = {% if flag?(:darwin) && flag?(:aarch64) %}
+                    "aarch64-apple-darwin"
+                  {% elsif flag?(:darwin) && flag?(:x86_64) %}
+                    "x86_64-apple-darwin"
+                  {% elsif flag?(:linux) && flag?(:aarch64) %}
+                    {{ flag?(:musl) ? "aarch64-unknown-linux-musl" : "aarch64-unknown-linux-gnu" }}
+                  {% elsif flag?(:linux) && flag?(:x86_64) %}
+                    {{ flag?(:musl) ? "x86_64-unknown-linux-musl" : "x86_64-unknown-linux-gnu" }}
+                  {% elsif flag?(:win32) && flag?(:x86_64) && flag?(:msvc) %}
+                    "x86_64-pc-windows-msvc"
+                  {% elsif flag?(:wasm32) && flag?(:wasi) %}
+                    "wasm32-unknown-wasi"
+                  {% else %}
+                    {% raise "Unsupported command parser platform" %}
+                  {% end %}
+
+  @@program_name = "iyi"
+  @@version_description : String? = nil
+
+  def self.program_name : String
+    @@program_name
+  end
+
+  def self.program_name=(name : String) : Nil
+    @@program_name = name
+  end
+
+  def self.language_name : String
+    @@program_name == "iyi" ? "iyi" : @@program_name.capitalize
+  end
+
+  def self.version : String
+    @@program_name == "iyi" ? IYI_VERSION : BASE_VERSION
+  end
+
+  def self.release_mode? : Bool
+    {{ flag?(:release) }}
+  end
+
+  def self.default_target : String
+    target = Target.parse?(CONFIG_TARGET)
+    if target
+      target.to_s
+    else
+      CONFIG_TARGET
+    end
+  end
+
+  def self.default_version_description : String
+    sb = OutputBuffer.new
+    sb.print("#{CommandDriver.language_name} #{CommandDriver.version}")
+    unless release_mode?
+      sb.print("\n\nThe compiler was not built in release mode.")
+    end
+    target_str = default_target
+    unless target_str.empty?
+      sb.print("\nDefault target: #{target_str}")
+    end
+    sb.puts("")
+    sb.to_s
+  end
+
+  def self.version_description : String
+    if override = @@version_description
+      return override
+    end
+    default_version_description
+  end
+
+  def self.version_description=(desc : String) : Nil
+    @@version_description = desc
+  end
+
+  def self.usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} [command] [switches] [program file] [--] [arguments]
+
+    Command:
+        init                     generate a new project
+        get                      add a requirement to iyi.mod, or move one; -u brings all up to date
+        doc                      print a module's exported surface, docs included
+        build                    build an executable
+        clear_cache              clear the compiler cache
+        check                    type-check only: no codegen, no binary; errors are the exit code
+        fix                      apply the compiler's did-you-mean edits until the file is clean
+        bind                     put every shard under lib/ behind a boundary, as .iyimod files
+        migrate                  write a Crystal tree as iyi modules, the namespace as the path
+        env                      print #{CommandDriver.language_name} environment information
+        eval                     eval code from args or standard input
+        mod                      inspect a .iyimod module artifact
+        lsp                      serve the language over stdio (editors, agents)
+        mcp                      serve the compiler's verbs as MCP tools over stdio (agents)
+        run (default)            build and run program
+        spec                     build and run specs (in spec directory)
+        test                     run every *_test.iyi: exit 0 passes, anything else fails
+        vet                      report unreachable code; findings are the exit code
+        tool                     run a tool
+        help, --help, -h         show this help
+        version, --version, -v   show version
+
+    Run a command followed by --help to see command specific information, ex:
+        #{CommandDriver.program_name} <command> --help
+    USAGE
+  end
+
+  def self.commands_usage : String
+    <<-USAGE
+      Usage: #{CommandDriver.program_name} tool [tool] [switches] [program file] [--] [arguments]
+
+      Tool:
+          bind                     say what a Crystal shard would cost as an iyi module
+          context                  show context for given location
+          dependencies             show file dependency tree
+          expand                   show macro expansion for given location
+          flags                    print all macro `flag?` values
+          format                   format project, directories and/or files
+          hierarchy                show type hierarchy
+          implementations          show implementations for given call in location
+          macro_code_coverage      generate a macro code coverage report
+          types                    show type of main variables
+          unreachable              show methods that are never called
+          --help, -h               show this help
+      USAGE
+  end
+
+  def self.doc_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} doc MODULE | FILE | TYPE
+           #{CommandDriver.program_name} doc --json [DIR]
+
+    Prints a module's exported surface with its doc comments — functions,
+    types, methods, impls; no bodies, nothing private. MODULE is a module
+    path written the way `import` writes it — `app/greeter`, `std/set` —
+    found under the project root and `IYI_PATH`, then as an artifact in the
+    project's `mods`. FILE is a `.iyimod` artifact (read directly, source
+    not needed) or a `.iyi` module (compiled alone, front end only). TYPE
+    is a type of the prelude - `String`, `Array`, `Hash`, `Program` -
+    printed the same way: what it can do, with the prelude's own comments;
+    `prelude` lists them all, one line each.
+
+    With --json, read DIR's iyi.mod (the current directory by default) and
+    print the package path, compiler identity and each exporting module's
+    artifact API as JSON. Modules are ordered by path.
+    USAGE
+  end
+
+  def self.env_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} env [var ...]
+
+    Prints #{CommandDriver.program_name} environment information.
+
+    By default it prints information as a shell script.
+    If one or more variable names is given as arguments,
+    it prints the value of each named variable on its own line.
+
+    Options:
+    USAGE
+  end
+
+  def self.test_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} test [--json] [-v] [--timeout SECONDS] [-p N] [--run TEXT] [--release] [-D FLAG]... [--affected FILE]... [--chaos[=SEED]] [--chaos-runs N] [paths]
+
+    Runs every `*_test.iyi` under the given paths (default: `.`), but not
+    under `lib`, a dot directory or another module's directory. A test is
+    a plain iyi program: exit 0 is a pass, anything else is a failure that
+    prints its own evidence. `--json` reports the run as data, each named
+    case (`test "name" { }`) with its verdict.
+
+    `-p N` (`--parallel N`) builds and runs N tests at once; half as many as
+    the machine has cores unless given. The report is in file order.
+
+    `-v` (`--verbose`) shows what a passing test printed too, which is
+    otherwise shown only for a failure. `--release` and `-D FLAG` build
+    every test that way, as `build` takes them.
+
+    `--run TEXT` runs only the named cases whose name holds TEXT; a test's
+    code outside its named cases still runs. A run in which no case's name
+    holds TEXT fails, because it tested nothing it was asked to.
+
+    A named case written `test "name", skip: "why" do ... end` does not
+    run, and says `skip - name: why`.
+
+    `--affected FILE` (repeatable) runs only the tests whose transitive
+    import closure contains a named file — name every file you changed.
+    The closure is read by parsing, so selection costs milliseconds; a
+    deleted file turns the discount off, because nothing can prove the
+    tests that imported it unaffected.
+
+    `--chaos` builds each test for the chaos scheduler and runs it once per
+    seed, `--chaos-runs N` seeds (100 unless given) from one drawn at
+    random: the order its tasks run in, where one is preempted, which
+    `select` arm and which waiter go first all come from the seed, so a
+    test that passes only because its tasks happened to run in one order
+    fails on some seed. A failure names its seed, and `--chaos=SEED` runs
+    that schedule again (one run, or N from SEED with `--chaos-runs`).
+    Every task runs on one thread (`IYI_WORKERS=1`) unless the environment
+    sets IYI_WORKERS; on more, the threads are real and a seed names no
+    schedule. What a seed does not decide: when a sleep or a timeout ends,
+    when I/O answers, and threads a test starts itself (SPEC.md III.4.17).
+    USAGE
+  end
+
+  def self.vet_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} vet [switches] [program file]
+
+    Report methods nothing can reach, and exit 1 when there are any.
+    The analysis is `#{CommandDriver.program_name} tool unreachable`; this verb adds
+    go vet's contract: findings are the exit code. All of that tool's
+    switches (`-f json`, `--tallies`, ...) pass through.
+    USAGE
+  end
+
+  def self.check_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} check [switches] [program file]
+           #{CommandDriver.program_name} check --affected CHANGED [--affected CHANGED]...
+
+    Type-check the program and produce nothing: no codegen, no
+    binary. Exit 0 means well-typed; errors print like a build's,
+    and `-f json` makes each one data — file, line, column, size,
+    message, the SPEC sections it cites, and, when the compiler
+    knows the fix, a `suggested_edit` with the exact replacement.
+    An error inside a macro's expansion is placed at the call, with
+    no edit, and its `expansion` names the macro and the place in
+    the text the macro wrote.
+
+    Every def with a fully written signature is typed even if
+    nothing calls it — definition-site typing is the language's
+    rule, and R-2's declared types stand in for the missing caller.
+
+    `--affected CHANGED` (repeatable) checks the ripple instead of
+    one file: every .iyi under the current directory whose imports
+    reach a changed file is compiled alone, and every failure is
+    named.
+
+    Each `g.spawn` the compiler kept in its spawner's unit, in a
+    file under the project's root, gets a note saying what kept it
+    there - `file:line:column: note: spawn stays in its spawner's
+    unit (SPEC.md III.4.18): ...` - so a spawn that could not run in
+    parallel is seen before it is measured. `g.spawn(unit: :same)`
+    says the unit is meant, and takes no note; `--explain-spawn`
+    notes every spawn. A note is not a warning.
+
+    Under `-f json` standard error holds one JSON array whatever
+    ends the run: a warning is a frame marked `"severity":
+    "warning"`, after the error's frames when there is one, a note
+    one marked `"severity": "note"`, and a refusal with no place in
+    a file - no such file, bytes that are not text - is a frame
+    whose `line` is null. `--error-on-warnings` makes a warning exit
+    1, as it does a build; a note never does.
+    USAGE
+  end
+
+  def self.get_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} get [--check] PATH[@VERSION]... [--as NAME]
+           #{CommandDriver.program_name} get [--check] -u
+
+    Add a requirement to iyi.mod, or move one: PATH at its latest release,
+    or at VERSION (`v1.2.3`, up or down; `latest` is the default). `-u`
+    brings every requirement already in iyi.mod to its latest release, and
+    never moves one down.
+
+    VERSION may be a branch, a tag or a commit - `@main`, `@a1b2c3d` - and
+    means that commit's version: its tag, or for a commit no tag names its
+    pseudo-version, `v0.0.0-20260801120000-a1b2c3d4e5f6`, the commit's time
+    and hash after the version tag behind it. A repository with no version
+    tag has its default branch as its latest.
+
+    A version is a git tag, `v1.2.3`, on the repository PATH names; the
+    latest is the highest release, or the highest pre-release when there
+    is no release. The graph is resolved by minimal version selection, the
+    checkouts are fetched into the cache and recorded in iyi.sum, and only
+    then is iyi.mod written - one line rewritten or added, nothing else
+    touched. Run it where iyi.mod is.
+
+    `--as NAME` gives the one PATH a short name this project's files write
+    in its place: `iyi get github.com/someone/web --as web` makes
+    `import web/dsl::{get}` the module `github.com/someone/web/dsl`.
+
+    `--check` says what the same `get` would change - `get -u --check`
+    lists every requirement behind its latest release - from the tags
+    alone, writes nothing, and exits 1 when anything would change.
+    USAGE
+  end
+
+  def self.mod_tidy_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} mod tidy [--check]
+
+    Make iyi.mod and iyi.sum say what this module's source imports: a
+    `require` for each package imported without one - at the version the
+    build already selects, or the latest release - none for a package
+    nothing imports, unless the line raises a version another module pulls
+    in, and no iyi.sum entry for a version neither selected nor read
+    during resolution.
+
+    The source is every .iyi file under this directory, tests included,
+    except hidden directories, lib/, and directories with an iyi.mod of
+    their own. `--check` writes nothing and exits 1 when a change is due.
+    USAGE
+  end
+
+  def self.mod_reach_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} mod reach
+
+    Say, for every module this project's build selects, what its source
+    touches outside the language: the std modules it imports, File from
+    the prelude, the C libraries it links and the C functions it declares.
+    Tests are not counted; a consumer never builds them.
+
+    `#{CommandDriver.program_name} get` says the same of every module it adds,
+    and of every module it moves whose reach moved with it.
+    USAGE
+  end
+
+  def self.mod_release_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} mod release [VERSION]
+
+    Compare this package's exported surface at HEAD with the release before
+    it - the highest `vX.Y.Z` tag HEAD contains, a pre-release only when
+    there is no release - and say what the next release has to be: a thing
+    gone, or a requirement new on a type an impl implements, is a new major
+    (a new minor before v1), a thing new - a def that only gained defaulted
+    parameters among them - is a new minor (a new patch before v1), nothing
+    moved is a patch; after a pre-release, its own release. With VERSION,
+    exit 1 when it is smaller than that, or when its major is not the one
+    iyi.mod's path names. Tags nothing.
+    USAGE
+  end
+
+  def self.run_sandbox_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} run --sandbox <file> [-- args]
+
+    Compile <file> for wasm32-wasi and run it under wasmtime with
+    nothing preopened: no filesystem, no network, no environment.
+    The program computes and prints; everything else is refused by
+    the runtime, by name.
+
+    Needs a wasi-sdk clang (IYI_WASI_CC, $WASI_SDK/bin/clang,
+    /opt/wasi-sdk/bin/clang or ~/.local/opt/wasi-sdk/bin/clang)
+    and wasmtime (IYI_WASMTIME or on PATH). Missing tools are
+    named, never worked around.
+    USAGE
+  end
+
+  def self.fix_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} fix [--json] <file or directory>...
+
+    Apply the compiler's did-you-mean edits to <file>, recompiling
+    after each one, until the file is clean or carries an error the
+    compiler has no edit for. Every `using` is first written as the
+    `import` that replaced it: `using X` is `import X::*`, `using
+    X::{a}` is `import X::{a}`, folded into a bare `import X`. Exit 0 when the file ends clean. When
+    the remaining error lives in another file of the program, the
+    verb names it (`cause` in `--json`): that is the file to fix next.
+    One edit is made in that other file itself: the `@[SafeReach]`
+    claim above a constant or class variable a parallel unit reaches,
+    offered only where the compiler proves it (SPEC.md III.4.5), and
+    never under std's or the library path's directories.
+
+    Several files, or a directory - every .iyi under it, hidden
+    directories and lib/ aside - are one run: every `using` in all
+    of them is rewritten first, since one file's compile reads the
+    others, and then each is fixed in turn; `--json` prints one
+    object per file, a line each. Exit 0 when every file ends clean.
+
+    To see the edits without applying them, use
+    `#{CommandDriver.program_name} check -f json`: the same edits travel
+    there as `suggested_edit`, and the file is not touched.
+    USAGE
+  end
+
+  def self.bind_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} bind [--lib DIR] [--mods DIR] [SHARD ...]
+
+    Bind the shards shard.yml depends on (what `shards install` put
+    under lib/, development dependencies aside) as a .iyimod each
+    under mods/, in dependency order, each against the ones before
+    it. Name shards to bind those and what they depend on instead.
+    Then `import <name>` in a program built with --crystal --use-iyimod mods;
+    the name is the root namespace spelled for import (`Kemal` is
+    `kemal`, `DB` is `d_b`), and the output says it.
+    USAGE
+  end
+
+  def self.migrate_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} migrate SRC --out DIR [--annotate] [--check] [--verbose]
+
+    Write every .cr under SRC as an iyi module under DIR: the
+    namespace as the path, the wrapper off, `pub` on the top level,
+    relative requires as imports, and every constant path this tree
+    declares as the bare name its module exports, named on its `import`
+    line. Import cycles are written as one module; a reopening of a
+    type the tree does not own is kept as Crystal in a `.cr` file
+    beside its module.
+
+    --annotate write the types R-2 wants where the Crystal never had
+              them, read off the calls the compiler resolved in every
+              program the tree has - each entry file, and the spec
+              suite, which is where a library's calls are. A
+              parameter two of them bound differently is left
+              alone and named, with what is missing
+    --check   compile every module written (`check --crystal`) and
+              print the first refusal of each
+    --verbose every note, rather than the first few of each kind
+
+    The modules build with `--crystal`, which is the library the tree
+    was written against; `#{CommandDriver.program_name} bind` puts its shards
+    behind a boundary after that. The whole of it, on a project:
+
+        #{CommandDriver.program_name} migrate src --out iyi --annotate --check
+        cd iyi && #{CommandDriver.program_name} build --crystal -o app <entry>.iyi
+    USAGE
+  end
+
+  def self.clear_cache_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} clear_cache
+
+    Clears the compiler cache
+
+    Options:
+    USAGE
+  end
+
+  def self.daemon_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} daemon [start|build] [switches]
+
+    Analyses the prelude once and forks a child per build, so a build does
+    not re-analyse it. Start a daemon in one terminal and send builds to it
+    from another:
+
+        #{CommandDriver.program_name} daemon start
+        #{CommandDriver.program_name} daemon build hello.iyi
+
+    Command:
+        start (default)      run the daemon in the foreground
+        build                send a build to a running daemon
+
+    Switches:
+        --socket PATH        socket to listen on / connect to
+
+    Set IYI_DAEMON_SOCKET and an ordinary `#{CommandDriver.program_name} build`
+    is served by that daemon too, falling back to a normal build if it is
+    not there.
+    USAGE
+  end
+
+  def self.mod_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} mod [subcommand]
+
+    Subcommand:
+        tidy [--check]           make iyi.mod and iyi.sum say what the source
+                                 imports: add what is missing, remove what
+                                 nothing uses, drop sums nothing builds
+        reach                    say what every module the build selects
+                                 touches outside the language: std modules,
+                                 File, C libraries and functions
+        release [VERSION]        say what the next release of this package has
+                                 to be called, from what its exported surface
+                                 did since the last tag; exit 1 when VERSION
+                                 understates it
+        context FILE.iyi         print what a change to this module is allowed
+                                 to know: the exact exported surface of every
+                                 module it imports, and nothing's body. This is
+                                 the grounding a model needs (AI_FIRST.md §2);
+                                 `--json` makes it data
+        diff OLD NEW             say whether a change reaches this module's
+                                 consumers, and what changed if it does.
+                                 `--exit-code` exits 1 when it does
+        dump FILE                print a .iyimod as text
+        dump --declarations FILE print the iyi declarations a consumer compiles
+                                 against, which is what `import` reads instead
+                                 of the module's source
+        dump --json FILE         print the module's exported surface as JSON:
+                                 exact signatures, types, fields, impls, and
+                                 the interface hash they are keyed by
+
+    A .iyimod is a module's compiled interface: what another module reads
+    instead of this one's source (SPEC.md Part IV). Produced by
+    `#{CommandDriver.program_name} build --emit-iyimod DIR`.
+    USAGE
+  end
+
+  def self.mod_context_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} mod context [--json] [--budget N] FILE.iyi
+
+    Print what a change to this module is allowed to know: the exact
+    exported surface of every module FILE.iyi imports, and nothing's body.
+
+    Switches:
+        --json          the same pack as data, one object per import
+        --budget N      cut the text pack to about N tokens by a defined
+                        ladder — docs off from the last import backwards,
+                        then surfaces collapse to a header naming the
+                        module and what eliding it cost. Every import is
+                        named at every budget. A token is four bytes
+    USAGE
+  end
+
+  def self.mod_diff_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} mod diff [--exit-code] OLD.iyimod NEW.iyimod
+
+    Say whether a change reaches this module's consumers, and what changed
+    if it does: interface, implementation, source, and the dependencies it
+    was compiled against.
+
+    Switches:
+        --exit-code     exit 1 when consumers have to be rebuilt, 0 when
+                        they do not — for a branch in a script
+    USAGE
+  end
+
+  def self.mod_dump_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} mod dump [--declarations | --json] FILE.iyimod
+
+    Print a .iyimod as text: what a module offers a consumer, read back out
+    of the artifact itself.
+
+    Switches:
+        --declarations  the iyi declarations a consumer compiles against,
+                        which is what `import` reads instead of the source
+        --json          the module's exported surface as data: signatures,
+                        types, fields, impls, and the interface hash
+    USAGE
+  end
+
+  def self.format_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} tool format [options] [- | file or directory ...]
+
+    Formats iyi and Crystal code in place.
+
+    If a file or directory is omitted,
+    iyi and Crystal source files beneath the working directory are formatted.
+
+    To format STDIN to STDOUT, use '-' in place of any path arguments.
+    Which language those bytes are read as is a question a path answers
+    and a pipe does not: stdin is read as iyi, and --stdin-filename says
+    where it came from when it is Crystal, or when an editor wants its
+    own path in the errors.
+
+    Options:
+    USAGE
+  end
+
+  def self.init_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} init TYPE (DIR | NAME DIR)
+
+    Initializes a project folder as a git repository and default folder
+    structure for #{CommandDriver.language_name} projects.
+
+    TYPE is one of:
+        lib                      Creates a library skeleton
+        app                      Creates an application skeleton
+
+    DIR  - directory where project will be generated
+    NAME - name of project to be generated, default: basename of DIR
+
+    USAGE
+  end
+
+  def self.lsp_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} lsp [--stdio]
+
+    Speak the Language Server Protocol over stdin/stdout. Point an editor
+    at it; there is nothing to configure. `--stdio`, which some clients
+    pass, names the transport it speaks anyway; any other argument is
+    refused.
+
+    Beyond LSP 3.17's earning subset — diagnostics pushed on every
+    change and pulled on request (one file or the whole workspace),
+    completion with auto-import and snippets, signature help, hover
+    with docs, definition, type definition, implementation, call and
+    type hierarchy, references, document highlight, rename with
+    prepare, document and workspace symbols, selection ranges,
+    folding, formatting, inlay hints, document links, "did you mean"
+    quickfixes, a code lens that runs the module, and semantic
+    tokens (with deltas) so any client highlights iyi with no
+    grammar installed —
+    two methods serve agents: `iyi/contextPack` returns the grounding
+    pack for a file (`mod context --json` over the wire), and
+    `iyi/surface` returns a module's rendered surface (`doc`), unsaved
+    buffer included.
+
+    The session runs in two processes: this one holds the buffers and
+    the protocol, and a child (`#{CommandDriver.program_name} lsp --worker`)
+    does the compiling and is replaced while nobody is typing, so an
+    hour of editing does not cost an hour of allocation.
+    USAGE
+  end
+
+  def self.mcp_usage : String
+    <<-USAGE
+    Usage: #{CommandDriver.program_name} mcp
+
+    Serve the compiler's verbs as Model Context Protocol tools over
+    stdin/stdout, one JSON-RPC message per line. Point an agent
+    harness at it; there is nothing to configure.
+
+    Tools: check (front-end verdict with suggested edits), fix
+    (apply them), context (a file's grounding pack), test (run
+    tests, optionally only those an edit can reach).
+    USAGE
+  end
+
+  @options : Array(String)
+  @stdout : OutputBuffer
+  @stderr : OutputBuffer
+  @color : Bool
+  @error_trace : Bool
+  @exit_code : Int32?
+  @selected_command : String
+  @compiler_options : CompilerOptions?
+  @subcommand_options : Hash(String, String)
+
+  def initialize(
+    options : Array(String),
+    @stdout : OutputBuffer = OutputBuffer.new,
+    @stderr : OutputBuffer = OutputBuffer.new,
+  )
+    @options = options.dup
+    @color = true
+    @error_trace = false
+    @exit_code = nil
+    @selected_command = ""
+    @compiler_options = nil
+    @subcommand_options = Hash(String, String).new
+  end
+
+  def run : CommandResult
+    dispatch
+
+    CommandResult.new(
+      @selected_command,
+      @exit_code,
+      @stdout.to_s,
+      @stderr.to_s,
+      @compiler_options,
+      @subcommand_options
+    )
+  end
+
+  private def last_index_of(s : String, char : Char) : Int32?
+    i = s.size - 1
+    while i >= 0
+      return i if s[i] == char
+      i = i - 1
+    end
+    nil
+  end
+
+  private def first_opt(arr : Array(String)) : String?
+    arr.empty? ? nil : arr[0]
+  end
+
+  private def dispatch : Nil
+    return if @exit_code
+    command = first_opt(@options)
+
+    case
+    when !command
+      @selected_command = "help"
+      puts CommandDriver.usage
+      exit(0)
+    when command == "init"
+      @selected_command = "init"
+      @options.shift
+      init
+    when "build".starts_with?(command)
+      @selected_command = "build"
+      @options.shift
+      build
+    when "deps".starts_with?(command)
+      @selected_command = "deps"
+      @stderr.puts "Please use 'shards': '#{CommandDriver.program_name} deps' has been removed"
+      exit(1)
+    when command == "env"
+      @selected_command = "env"
+      @options.shift
+      env
+    when command == "eval"
+      @selected_command = "eval"
+      @options.shift
+      eval
+    when command == "get"
+      @selected_command = "get"
+      @options.shift
+      get
+    when command == "run"
+      @selected_command = "run"
+      @options.shift
+      if @options.includes?("--sandbox")
+        @options.delete("--sandbox")
+        run_sandbox
+      else
+        run_command(single_file: false)
+      end
+    when "spec/".starts_with?(command)
+      @selected_command = "spec"
+      @options.shift
+      spec
+    when command == "doc"
+      @selected_command = "doc"
+      @options.shift
+      doc
+    when command == "test"
+      @selected_command = "test"
+      @options.shift
+      test
+    when command == "vet"
+      @selected_command = "vet"
+      @options.shift
+      vet
+    when command == "check"
+      @selected_command = "check"
+      @options.shift
+      check
+    when command == "fix"
+      @selected_command = "fix"
+      @options.shift
+      fix
+    when command == "bind"
+      @selected_command = "bind"
+      @options.shift
+      bind
+    when command == "migrate"
+      @selected_command = "migrate"
+      @options.shift
+      migrate
+    when command == "lsp"
+      @selected_command = "lsp"
+      @options.shift
+      lsp
+    when command == "mcp"
+      @selected_command = "mcp"
+      @options.shift
+      mcp
+    when "tool".starts_with?(command)
+      @selected_command = "tool"
+      @options.shift
+      tool
+    when command == "clear_cache"
+      @selected_command = "clear_cache"
+      @options.shift
+      clear_cache
+    when command == "daemon"
+      @selected_command = "daemon"
+      @options.shift
+      daemon
+    when "mod".starts_with?(command)
+      @selected_command = "mod"
+      @options.shift
+      mod
+    when "help".starts_with?(command), "--help" == command, "-h" == command
+      # `help VERB` is that verb's help, through the door `VERB --help` uses.
+      # A word that is no verb is refused: help.cr's `known` test, against the
+      # usage's own command lines.
+      if (verb = @options[1]?) && verb != "help"
+        known = CommandDriver.usage.split("\n").any? { |line| line.starts_with?("    #{verb} ") }
+        unless known
+          @selected_command = "help"
+          abort "help: there is no `#{verb}` command. Run `#{CommandDriver.program_name} help` for what there is", Exit::USAGE_ERROR
+          return
+        end
+        verb_result = CommandDriver.new([verb, "--help"]).run
+        @selected_command = verb_result.selected_command
+        @stdout.print(verb_result.stdout_output)
+        @stderr.print(verb_result.stderr_output)
+        @exit_code = verb_result.exit_code
+        return
+      end
+      @selected_command = "help"
+      puts CommandDriver.usage
+      exit(0)
+    when "version".starts_with?(command), "--version" == command, "-v" == command
+      # `version extra` is refused: the version takes no argument.
+      @selected_command = "version"
+      if extra = @options[1]?
+        abort "version takes no arguments, and '#{extra}' is one", Exit::USAGE_ERROR
+      else
+        puts CommandDriver.version_description
+        exit(0)
+      end
+    when file_exists?(command)
+      @selected_command = "run"
+      run_command(single_file: true)
+    else
+      if command.ends_with?(".cr")
+        abort "file '#{command}' does not exist", Exit::USAGE_ERROR
+      else
+        abort "unknown command: #{command}", Exit::USAGE_ERROR
+      end
+    end
+  end
+
+  private def file_exists?(path : String) : Bool
+    File.exists?(path)
+  end
+
+  private def tool : Nil
+    return if @exit_code
+    tool_sub = first_opt(@options)
+    case
+    when !tool_sub
+      puts CommandDriver.commands_usage
+      exit(0)
+    when "context".starts_with?(tool_sub)
+      @selected_command = "tool context"
+      @options.shift
+      tool_context
+    when "format".starts_with?(tool_sub)
+      @selected_command = "tool format"
+      @options.shift
+      tool_format
+    when "flags" == tool_sub
+      @selected_command = "tool flags"
+      @options.shift
+      tool_flags
+    when "expand".starts_with?(tool_sub)
+      @selected_command = "tool expand"
+      @options.shift
+      tool_expand
+    when "bind" == tool_sub
+      @selected_command = "tool bind"
+      @options.shift
+      tool_bind
+    when "hierarchy".starts_with?(tool_sub)
+      @selected_command = "tool hierarchy"
+      @options.shift
+      tool_hierarchy
+    when "dependencies".starts_with?(tool_sub)
+      @selected_command = "tool dependencies"
+      @options.shift
+      tool_dependencies
+    when "implementations".starts_with?(tool_sub)
+      @selected_command = "tool implementations"
+      @options.shift
+      tool_implementations
+    when "types".starts_with?(tool_sub)
+      @selected_command = "tool types"
+      @options.shift
+      tool_types
+    when "unreachable".starts_with?(tool_sub)
+      @selected_command = "tool unreachable"
+      @options.shift
+      tool_unreachable
+    when "macro_code_coverage".starts_with?(tool_sub)
+      @selected_command = "tool macro_code_coverage"
+      @options.shift
+      tool_macro_code_coverage
+    when "--help" == tool_sub, "-h" == tool_sub
+      puts CommandDriver.commands_usage
+      exit(0)
+    else
+      abort "unknown tool: #{tool_sub}", Exit::USAGE_ERROR
+    end
+  end
+
+  # sandbox.cr `run --sandbox`: one file and the verb's help. Compiling it for
+  # wasm32-wasi and running it under wasmtime is the runner's; this driver has
+  # read the line and the file it names.
+  private def run_sandbox : Nil
+    file : String? = nil
+    seen_dashdash = false
+    program_args = [] of String
+    while option = @options.shift?
+      if seen_dashdash
+        program_args << option
+      elsif option == "--"
+        seen_dashdash = true
+      elsif option == "--help" || option == "-h"
+        puts CommandDriver.run_sandbox_usage
+        exit(0)
+        return
+      elsif file.nil?
+        file = option
+      else
+        abort "run --sandbox takes one file; unexpected '#{option}'", Exit::USAGE_ERROR
+        return
+      end
+    end
+    unless file
+      abort "run --sandbox: which file?", Exit::USAGE_ERROR
+      return
+    end
+    unless File.file?(file)
+      abort "run --sandbox: file '#{file}' does not exist", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["sandbox"] = file
+  end
+
+  private def init : Nil
+    return if @exit_code
+    parser = OptionParser.new
+    parser.banner = CommandDriver.init_usage
+    parser.missing_option do |flag|
+      abort "Missing option: #{flag}", Exit::USAGE_ERROR
+    end
+    parser.on("-h", "--help", "show this help") do
+      puts parser
+      exit(0)
+      parser.stop
+    end
+    parser.on("-f", "--force", "force overwrite existing files") { |_| }
+    parser.on("-s", "--skip-existing", "skip existing files") { |_| }
+
+    # `Iyi::Init` reads its arguments positionally: whatever is not one of the
+    # switches above is a candidate TYPE, including something spelled like a
+    # flag. So an unrecognised `--bogus-flag` is reported as an invalid TYPE
+    # with the usage attached, not as an invalid option, and this parser has
+    # to hand it over rather than refuse it.
+    rest = [] of String
+    current = ""
+    parser.before_each do |arg|
+      current = arg
+      rest << arg unless arg == "--" || (arg.starts_with?("-") && arg.bytesize >= 2)
+    end
+    parser.invalid_option do |_flag|
+      rest << current
+    end
+    parser.parse(@options)
+    return if @exit_code
+
+    # `Init.run` rescues its own error and prints the sentence itself, with
+    # the usage after it and no `Error:` in front, so this cannot go through
+    # the driver's own error printer.
+    if rest.empty?
+      @stderr.puts "Cannot initialize #{CommandDriver.language_name} project: Argument TYPE is missing"
+      @stderr.puts format_option_help(parser)
+      exit(1)
+      return
+    end
+
+    skeleton = rest[0]
+    if skeleton != "lib" && skeleton != "app"
+      @stderr.puts "Cannot initialize #{CommandDriver.language_name} project: Invalid TYPE value: #{skeleton}"
+      @stderr.puts format_option_help(parser)
+      exit(1)
+    end
+  end
+
+  private def build : Nil
+    return if @exit_code
+    @compiler_options = create_compiler("build")
+  end
+
+  private def run_command(single_file : Bool = false) : Nil
+    return if @exit_code
+    @compiler_options = create_compiler("run", run: true, single_file: single_file)
+  end
+
+  private def spec : Nil
+    return if @exit_code
+    compiler_opts = CompilerOptions.new
+    link_flags = [] of String
+    parser = OptionParser.new
+    parser.banner = "Usage: #{CommandDriver.program_name} spec [options] [files] [-- runtime_options]\n\nOptions:"
+    remaining = [] of String
+    setup_simple_compiler_options(parser, compiler_opts, remaining)
+    parser.on("-h", "--help", "Show this message") do
+      puts parser
+      puts ""
+      puts "Runtime options (passed to spec runner):"
+      puts "    -e, --example STRING             run examples whose full nested names include STRING"
+      puts "    -l, --line LINE                  run examples whose line matches LINE"
+      puts "        --profile                    Print the 10 slowest specs"
+      puts "        --fail-fast                  abort the run on first failure"
+      puts "        --location file:line         run example at line 'line' in file 'file', multiple allowed"
+      puts "        --tag TAG                    run examples with the specified TAG, or exclude examples by adding ~ before the TAG."
+      puts "        --list-tags                  lists all the tags used."
+      puts "        --order MODE                 run examples in random order by passing MODE as 'random' or to a specific seed by passing MODE as the seed value"
+      puts "        --junit_output OUTPUT_PATH   generate JUnit XML output within the given OUTPUT_PATH"
+      puts "    -h, --help                       show this help"
+      puts "    -v, --verbose                    verbose output"
+      puts "        --tap                        Generate TAP output (Test Anything Protocol)"
+      puts "        --color                      Enabled ANSI colored output"
+      puts "        --no-color                   Disable ANSI colored output"
+      puts "        --dry-run                    Pass all tests without execution"
+      exit(0)
+      parser.stop
+    end
+    parser.on("--link-flags FLAGS", "Additional flags to pass to the linker") do |some_link_flags|
+      link_flags << some_link_flags
+    end
+    parser.parse(@options)
+    return if @exit_code
+    compiler_opts.link_flags = link_flags.join(" ") unless link_flags.empty?
+    compiler_opts.filenames = remaining
+    @compiler_options = compiler_opts
+  end
+
+  private def doc : Nil
+    return if @exit_code
+    if @options.includes?("--json")
+      doc_package
+      return
+    end
+    filename = @options.shift?
+    case
+    when filename.nil?, filename == "--help", filename == "-h", @options.any? { |option| option == "--help" || option == "-h" }
+      puts CommandDriver.doc_usage
+      exit(0)
+    when extra = @options.first?
+      abort "doc reads one module, file or type at a time, and '#{extra}' is a second", Exit::USAGE_ERROR
+    when filename.starts_with?("-")
+      abort "doc: unknown flag #{filename}", Exit::USAGE_ERROR
+    when filename.ends_with?(".iyimod")
+      unless File.file?(filename)
+        if File.directory?(filename)
+          abort "#{filename} is a directory, not a .iyimod", Exit::USAGE_ERROR
+        else
+          abort "no such file: #{filename}", Exit::USAGE_ERROR
+        end
+        return
+      end
+      @subcommand_options["doc_target"] = filename
+    when filename.ends_with?(".iyi")
+      unless File.file?(filename)
+        if File.directory?(filename)
+          abort "#{filename} is a directory, not a .iyi module", Exit::USAGE_ERROR
+        else
+          abort "no such file: #{filename}", Exit::USAGE_ERROR
+        end
+        return
+      end
+      @subcommand_options["doc_target"] = filename
+    when filename == "prelude"
+      @subcommand_options["doc_target"] = "prelude"
+    when prelude_type_name?(filename)
+      @subcommand_options["doc_target"] = filename
+    else
+      abort "expected a .iyi module, a .iyimod artifact, or a type of the prelude (`iyi doc String`)", Exit::USAGE_ERROR
+    end
+  end
+
+  # Parse the package request without generating JSON or compiling modules.
+  private def doc_package : Nil
+    directory : String? = nil
+    json_seen = false
+    while option = @options.shift?
+      if option == "--json"
+        if json_seen
+          abort "doc: --json was given more than once", Exit::USAGE_ERROR
+          return
+        end
+        json_seen = true
+      elsif option == "--help" || option == "-h"
+        puts CommandDriver.doc_usage
+        exit(0)
+        return
+      elsif option.starts_with?("-")
+        abort "doc: unknown flag #{option}", Exit::USAGE_ERROR
+        return
+      else
+        if directory
+          abort "doc: one package directory, and '#{option}' is a second", Exit::USAGE_ERROR
+          return
+        end
+        if option.empty?
+          abort "doc: the package directory cannot be empty", Exit::USAGE_ERROR
+          return
+        end
+        directory = option
+      end
+    end
+    package = File.expand_path(directory || Dir.current)
+    unless File.directory?(package)
+      abort "doc: #{package} is not a directory", Exit::USAGE_ERROR
+      return
+    end
+    unless File.file?(File.join(package, "iyi.mod"))
+      current = Dir.current
+      separator = {% if flag?(:win32) %} "\\" {% else %} "/" {% end %}
+      prefix = current.ends_with?("/") || current.ends_with?("\\") ? current : current + separator
+      shown = package.starts_with?(prefix) ? package[prefix.size, package.size - prefix.size] : package
+      abort "doc: there is no iyi.mod in #{shown}; a package is a directory with one", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["json"] = "true"
+    @subcommand_options["directory"] = directory if directory
+  end
+
+  private def prelude_type_name?(name : String) : Bool
+    return false if name.empty?
+    c = name[0]
+    c >= 'A' && c <= 'Z'
+  end
+
+  # The longest `--timeout` a wait can be (test.cr MAX_TEST_WAIT): the clock
+  # counts 100 ns ticks in an Int64, which is 922,337,203,684 seconds.
+  TEST_MAX_WAIT = 922337203684.0
+
+  # The seeds `--chaos` runs a test under when not told (test.cr CHAOS_RUNS).
+  TEST_CHAOS_RUNS = 100
+
+  # Not in this tree, and refused here as unknown flags: upstream PR #147
+  # (origin/plan/native-stale-testing, src/compiler/iyi/command/test.cr) adds
+  # `--cached`, `--fresh` (refused together with `--cached`), `--explain`,
+  # `--shard K/N`, and the repeatable `--import-index NS=FILE` and
+  # `--export-index NS=FILE`. It runs them through Iyi::Stale::Runner, which
+  # this tree does not have, and its usage line changes with them. Port them
+  # when that PR lands, with the vectors that exercise each refusal.
+
+  private def test : Nil
+    return if @exit_code
+    as_json = false
+    timeout = 60.0
+    paths = [] of String
+    affected = [] of String
+    chaos = false
+    chaos_seed : UInt64? = nil
+    chaos_runs : Int32? = nil
+    parallel : Int32? = nil
+    only : String? = nil
+    verbose = false
+    build_flags = [] of String
+
+    while option = @options.shift?
+      case
+      when option == "--json"
+        as_json = true
+      when option == "--timeout"
+        value = @options.shift?
+        unless value
+          abort "--timeout takes seconds", Exit::USAGE_ERROR
+          return
+        end
+        parsed = value.to_f?
+        unless parsed
+          abort "--timeout takes seconds, not '#{value}'", Exit::USAGE_ERROR
+          return
+        end
+        # NaN fails `> 0.0` and infinity fails `<= TEST_MAX_WAIT`: together
+        # they are test.cr's `finite?`, `> 0` and `<= MAX_TEST_WAIT`.
+        unless parsed > 0.0 && parsed <= TEST_MAX_WAIT
+          abort "--timeout takes seconds to wait, and #{value} is not a wait", Exit::USAGE_ERROR
+          return
+        end
+        timeout = parsed
+      when option == "--affected"
+        value = @options.shift?
+        unless value
+          abort "--affected takes a changed file", Exit::USAGE_ERROR
+          return
+        end
+        if value.empty?
+          abort "--affected takes a changed file", Exit::USAGE_ERROR
+          return
+        end
+        if File.directory?(value)
+          abort "#{value} is a directory, not a changed file", Exit::USAGE_ERROR
+          return
+        end
+        affected << value
+      when option == "--chaos"
+        chaos = true
+      when option.starts_with?("--chaos=")
+        value = option[8, option.size - 8]
+        seed = decimal_digits?(value) ? value.to_u64? : nil
+        unless seed
+          abort "--chaos= takes a seed, a decimal number below 2^64, not '#{value}'", Exit::USAGE_ERROR
+          return
+        end
+        chaos_seed = seed
+        chaos = true
+      when option == "--chaos-runs"
+        value = @options.shift?
+        unless value
+          abort "--chaos-runs takes a number of runs", Exit::USAGE_ERROR
+          return
+        end
+        runs = value.to_i?
+        if runs.nil? || runs < 1
+          abort "--chaos-runs takes a number of runs, at least 1, not '#{value}'", Exit::USAGE_ERROR
+          return
+        end
+        chaos_runs = runs
+        chaos = true
+      when option == "-p", option == "--parallel"
+        value = @options.shift?
+        unless value
+          abort "#{option} takes a number of tests to run at once", Exit::USAGE_ERROR
+          return
+        end
+        count = value.to_i?
+        if count.nil? || count < 1
+          abort "#{option} takes a number of tests to run at once, at least 1, not '#{value}'", Exit::USAGE_ERROR
+          return
+        end
+        parallel = count
+      when option == "--run"
+        value = @options.shift?
+        unless value
+          abort "--run takes text a named case's name holds", Exit::USAGE_ERROR
+          return
+        end
+        if value.empty?
+          abort "--run takes text a named case's name holds", Exit::USAGE_ERROR
+          return
+        end
+        only = value
+      when option == "-v", option == "--verbose"
+        verbose = true
+      when option == "--release"
+        build_flags << "--release"
+      when option == "-D", option == "--define"
+        value = @options.shift?
+        unless value
+          abort "#{option} takes a flag to define", Exit::USAGE_ERROR
+          return
+        end
+        if value.empty?
+          abort "#{option} takes a flag to define", Exit::USAGE_ERROR
+          return
+        end
+        build_flags << "-D#{value}"
+      when option.starts_with?("-D")
+        build_flags << option
+      when option == "--help", option == "-h"
+        puts CommandDriver.test_usage
+        exit(0)
+        return
+      when option.starts_with?("-")
+        abort "test: unknown flag #{option}", Exit::USAGE_ERROR
+        return
+      else
+        paths << option
+      end
+    end
+    paths << "." if paths.empty?
+
+    files = [] of String
+    index = 0
+    while index < paths.size
+      path = paths[index]
+      index = index + 1
+      if path.empty?
+        abort "test takes paths, and '' is not one (no path at all runs the working directory)", Exit::USAGE_ERROR
+        return
+      end
+      if File.directory?(path)
+        test_files_under(path, files)
+      elsif File.file?(path)
+        files << path
+      else
+        abort "no such file or directory: #{path}", Exit::USAGE_ERROR
+        return
+      end
+    end
+    files = files.uniq { |file| File.expand_path(file) }.sorted
+
+    miscased = files.find { |file| iyi_miscased?(file) }
+    if miscased
+      abort miscased_sentence(miscased), Exit::USAGE_ERROR
+      return
+    end
+    if files.empty?
+      abort "no *_test.iyi found. A test is a plain iyi program that exits non-zero to fail", Exit::USAGE_ERROR
+      return
+    end
+
+    @subcommand_options["json"] = as_json.to_s
+    @subcommand_options["timeout"] = timeout.to_s
+    @subcommand_options["affected"] = affected.join(",") unless affected.empty?
+    @subcommand_options["paths"] = paths.join(",")
+    @subcommand_options["files"] = files.join(",")
+    @subcommand_options["verbose"] = verbose.to_s
+    @subcommand_options["parallel"] = parallel ? parallel.to_s : "half the cores"
+    @subcommand_options["run"] = only if only
+    @subcommand_options["flags"] = build_flags.join(" ") unless build_flags.empty?
+    if chaos
+      default_runs = chaos_seed.nil? ? TEST_CHAOS_RUNS : 1
+      @subcommand_options["chaos_runs"] = (chaos_runs || default_runs).to_s
+      @subcommand_options["chaos_seed"] = chaos_seed.to_s if chaos_seed
+    end
+  end
+
+  # test.cr's `decimal_digits`: a seed is what a failing run printed, decimal
+  # digits all of it, so no sign and no space is taken.
+  private def decimal_digits?(text : String) : Bool
+    return false if text.empty?
+    i = 0
+    while i < text.size
+      c = text[i]
+      return false unless c >= '0' && c <= '9'
+      i = i + 1
+    end
+    true
+  end
+
+  # test.cr's `test_files_under`: not into a dot directory, `lib`, a directory
+  # with a manifest of its own, or a link to a directory, which a junction
+  # back to its own parent would make endless. A link to a file is walked.
+  private def test_files_under(dir : String, found : Array(String)) : Nil
+    Dir.each_child(dir) do |entry|
+      full = File.join(dir, entry)
+      info = File.info?(full, false)
+      if info && info.directory?
+        unless entry.starts_with?(".") || entry == "lib" || File.file?(File.join(full, "iyi.mod"))
+          test_files_under(full, found)
+        end
+      elsif test_source_name?(entry)
+        found << full
+      end
+    end
+  end
+
+  # `*_test.iyi` in any case of the extension, so that `x_test.IYI` is found
+  # and refused by name (`iyi_miscased?`) rather than walked past.
+  private def test_source_name?(entry : String) : Bool
+    return false if entry.size < 9
+    return false unless entry[entry.size - 4, 4].downcase == ".iyi"
+    entry[0..entry.size - 5].ends_with?("_test")
+  end
+
+  # lexer.cr `iyi_miscased?`: a name whose extension is `.iyi` in another case.
+  private def iyi_miscased?(filename : String) : Bool
+    return false if filename.ends_with?(".iyi")
+    return false if filename.size < 4
+    filename[filename.size - 4, 4].downcase == ".iyi"
+  end
+
+  # lexer.cr `iyi_miscased_sentence`, the refusal every verb that is handed or
+  # walks to such a file gives. The path is shown as it was given.
+  private def miscased_sentence(filename : String) : String
+    tail = filename[filename.size - 4, 4]
+    base = File.basename(filename)
+    stem = base.size > 4 ? base[0..base.size - 5] : ""
+    "#{filename} ends in `#{tail}`, and an iyi source file ends in `.iyi`: the language is read off the extension, in lower case, on every system. Rename it #{stem}.iyi"
+  end
+
+  private def vet : Nil
+    return if @exit_code
+    if first_opt(@options).in?("--help", "-h")
+      puts CommandDriver.vet_usage
+      exit(0)
+      return
+    end
+    new_opts = ["--check"]
+    @options.each do |o|
+      new_opts << o
+    end
+    @options = new_opts
+    tool_unreachable
+  end
+
+  # get.cr: the verb's flags and the refusals it makes before it reads the
+  # network or rewrites iyi.mod. The resolution itself is the runner's.
+  private def get : Nil
+    return if @exit_code
+    upgrade_all = false
+    check_only = false
+    short_name : String? = nil
+    wanted = [] of String
+    while option = @options.shift?
+      if option == "--help" || option == "-h"
+        puts CommandDriver.get_usage
+        exit(0)
+        return
+      elsif option == "-u"
+        upgrade_all = true
+      elsif option == "--check"
+        check_only = true
+      elsif option == "--as"
+        short_name = @options.shift?
+        unless short_name
+          abort "get: `--as` takes a short name, as `--as web`", Exit::USAGE_ERROR
+          return
+        end
+      elsif option.starts_with?("-")
+        abort "get: unknown flag #{option}", Exit::USAGE_ERROR
+        return
+      else
+        wanted << option
+      end
+    end
+
+    if wanted.empty? && !upgrade_all
+      abort "get takes a module path, as `#{CommandDriver.program_name} get example.com/someone/lib`, or `-u` for every requirement at its latest release", Exit::USAGE_ERROR
+      return
+    end
+    if !short_name.nil? && wanted.size != 1
+      abort "get: `--as` names one requirement, and this get names #{wanted.size}", Exit::USAGE_ERROR
+      return
+    end
+    if upgrade_all && !wanted.empty?
+      abort "get: `-u` brings every requirement up to date and takes no path; a path alone is already brought to its latest release", Exit::USAGE_ERROR
+      return
+    end
+    dir = File.expand_path(".")
+    unless File.file?(File.join(dir, "iyi.mod"))
+      abort "get: there is no iyi.mod in #{dir}; a requirement is a line of one. `#{CommandDriver.program_name} init MODULE` writes it", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["check"] = check_only.to_s
+    @subcommand_options["upgrade"] = upgrade_all.to_s
+    @subcommand_options["as"] = short_name if short_name
+    @subcommand_options["paths"] = wanted.join(",") unless wanted.empty?
+  end
+
+  private def check : Nil
+    return if @exit_code
+    if first_opt(@options).in?("--help", "-h")
+      puts CommandDriver.check_usage
+      exit(0)
+      return
+    end
+
+    if @options.includes?("--affected")
+      check_affected
+      return
+    end
+
+    @compiler_options = create_compiler("check", no_codegen: true, warning_options: true)
+  end
+
+  # check.cr `check_affected`: the changed files and the output flags. Every
+  # argument is read before any file is compiled, which is not ported here.
+  private def check_affected : Nil
+    as_json = false
+    affected = [] of String
+    while option = @options.shift?
+      if option == "--affected"
+        value = @options.shift?
+        unless value
+          abort "--affected takes a changed file", Exit::USAGE_ERROR
+          return
+        end
+        if value.empty?
+          abort "--affected takes a changed file", Exit::USAGE_ERROR
+          return
+        end
+        if File.directory?(value)
+          abort "#{value} is a directory, not a changed file", Exit::USAGE_ERROR
+          return
+        end
+        affected << value
+      elsif option == "-f"
+        as_json = @options.shift? == "json"
+      elsif option == "--json"
+        as_json = true
+      elsif option == "--no-color"
+        # Nothing to turn off: the compilers below are made without colour.
+      else
+        abort "check --affected takes only changed files; unexpected '#{option}'", Exit::USAGE_ERROR
+        return
+      end
+    end
+    if affected.empty?
+      abort "check --affected: name at least one changed file", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["affected"] = affected.join(",")
+    @subcommand_options["json"] = as_json.to_s
+  end
+
+  private def fix : Nil
+    return if @exit_code
+    json_mode = false
+    paths = [] of String
+    while option = @options.shift?
+      if option == "--json"
+        json_mode = true
+      elsif option == "--help" || option == "-h"
+        puts CommandDriver.fix_usage
+        exit(0)
+        return
+      elsif option.starts_with?("-")
+        abort "fix: unknown flag #{option}", Exit::USAGE_ERROR
+        return
+      else
+        paths << option
+      end
+    end
+    if paths.empty?
+      abort "fix: which file? Usage: #{CommandDriver.program_name} fix [--json] <file or directory>...", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["json"] = json_mode.to_s
+    @subcommand_options["target"] = paths.join(",")
+  end
+
+  private def bind : Nil
+    return if @exit_code
+    mods = "mods"
+    lib_dir = "lib"
+    shards = [] of String
+
+    while option = first_opt(@options)
+      case option
+      when "--mods"
+        @options.shift
+        val = @options.shift?
+        unless val
+          abort "--mods takes a directory", Exit::USAGE_ERROR
+          return
+        end
+        mods = val
+      when "--lib"
+        @options.shift
+        val = @options.shift?
+        unless val
+          abort "--lib takes a directory", Exit::USAGE_ERROR
+          return
+        end
+        lib_dir = val
+      when "--help", "-h"
+        puts CommandDriver.bind_usage
+        exit(0)
+        return
+      else
+        if option.starts_with?("-")
+          abort "bind: unknown flag #{option}", Exit::USAGE_ERROR
+          return
+        end
+        shards << @options.shift
+      end
+    end
+
+    unless File.exists?(lib_dir)
+      abort "bind: nothing under #{lib_dir}/ has a src/<name>.cr", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["mods"] = mods
+    @subcommand_options["lib"] = lib_dir
+    @subcommand_options["shards"] = shards.join(",") unless shards.empty?
+  end
+
+  private def migrate : Nil
+    return if @exit_code
+    out_dir = nil
+    check = false
+    annotate = false
+    verbose = false
+    src = nil
+
+    while option = first_opt(@options)
+      case option
+      when "--out"
+        @options.shift
+        val = @options.shift?
+        unless val
+          abort "--out takes a directory", Exit::USAGE_ERROR
+          return
+        end
+        out_dir = val
+      when "--check"
+        @options.shift
+        check = true
+      when "--annotate"
+        @options.shift
+        annotate = true
+      when "--verbose", "-v"
+        @options.shift
+        verbose = true
+      when "--help", "-h"
+        puts CommandDriver.migrate_usage
+        exit(0)
+        return
+      else
+        if option.starts_with?("-")
+          abort "migrate: unknown flag #{option}", Exit::USAGE_ERROR
+          return
+        end
+        if src
+          abort "migrate: one tree at a time; unexpected '#{option}'", Exit::USAGE_ERROR
+          return
+        end
+        src = @options.shift
+      end
+    end
+
+    unless src
+      abort "migrate: which tree? Usage: #{CommandDriver.program_name} migrate SRC --out DIR", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["out"] = out_dir if out_dir
+    @subcommand_options["check"] = check.to_s
+    @subcommand_options["annotate"] = annotate.to_s
+    @subcommand_options["verbose"] = verbose.to_s
+    @subcommand_options["src"] = src
+  end
+
+  # lsp.cr: the flags the server takes, and nothing else. Its arguments are read
+  # before help, so `lsp --help --bogus` is refused.
+  private def lsp : Nil
+    return if @exit_code
+    index = 0
+    while index < @options.size
+      option = @options[index]
+      unless option.in?("--help", "-h", "--worker", "--stdio")
+        if option.starts_with?("-")
+          abort "lsp: unknown flag #{option}", Exit::USAGE_ERROR
+          return
+        end
+        abort "lsp takes no arguments, and '#{option}' is one", Exit::USAGE_ERROR
+        return
+      end
+      index = index + 1
+    end
+    if @options.any? { |option| option == "--help" || option == "-h" }
+      puts CommandDriver.lsp_usage
+      exit(0)
+      return
+    end
+    @subcommand_options["worker"] = "true" if @options.first? == "--worker"
+  end
+
+  # mcp.cr: `--help` and `-h` are the whole of the command line; anything else
+  # is refused before the server would read stdin.
+  private def mcp : Nil
+    return if @exit_code
+    unknown = @options.find { |option| !option.in?("--help", "-h") }
+    if unknown
+      abort "mcp takes no arguments but --help, and '#{unknown}' is one", Exit::USAGE_ERROR
+      return
+    end
+    unless @options.empty?
+      puts CommandDriver.mcp_usage
+      exit(0)
+      return
+    end
+  end
+
+  private def clear_cache : Nil
+    return if @exit_code
+    verbose = false
+    parser = OptionParser.new
+    parser.banner = CommandDriver.clear_cache_usage
+    left = [] of String
+    current = ""
+    parser.before_each do |arg|
+      current = arg
+      left << arg unless arg == "--" || (arg.starts_with?("-") && arg.bytesize >= 2)
+    end
+    parser.invalid_option do |_flag|
+      left << current
+    end
+    parser.missing_option do |flag|
+      abort "Missing option: #{flag}", Exit::USAGE_ERROR
+      parser.stop
+    end
+    parser.on("-h", "--help", "Show this message") do
+      puts parser
+      exit(0)
+      parser.stop
+    end
+    parser.on("-v", "--verbose", "Display detailed information") do
+      verbose = true
+    end
+    parser.unknown_args do |before, after|
+      next if @exit_code != nil
+      extra = left + after
+      unless extra.empty?
+        abort "clear_cache takes no arguments, and '#{extra.first}' is one", Exit::USAGE_ERROR
+      end
+    end
+    parser.parse(@options)
+    @subcommand_options["verbose"] = verbose.to_s
+  end
+
+  private def daemon : Nil
+    return if @exit_code
+    subcommand = first_opt(@options)
+    case subcommand
+    when nil, "start"
+      @options.shift?
+      @subcommand_options["subcommand"] = "start"
+      parse_daemon_options
+    when "build"
+      @options.shift
+      @subcommand_options["subcommand"] = "build"
+      parse_daemon_options
+    when "--help", "-h"
+      puts CommandDriver.daemon_usage
+      exit(0)
+    else
+      abort "unknown daemon subcommand: #{subcommand}", Exit::USAGE_ERROR
+    end
+  end
+
+  private def parse_daemon_options : Nil
+    parser = OptionParser.new
+    parser.banner = CommandDriver.daemon_usage
+    parser.invalid_option do |flag|
+      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
+      parser.stop
+    end
+    parser.missing_option do |flag|
+      abort "Missing option: #{flag}", Exit::USAGE_ERROR
+      parser.stop
+    end
+    parser.on("--socket PATH", "socket to listen on / connect to") do |p|
+      @subcommand_options["socket"] = p
+    end
+    parser.on("-h", "--help", "Show this message") do
+      puts parser
+      exit(0)
+      parser.stop
+    end
+    parser.parse(@options)
+  end
+
+  private def mod : Nil
+    return if @exit_code
+    case first_opt(@options)
+    when "dump"
+      @options.shift
+      mod_dump
+    when "diff"
+      @options.shift
+      mod_diff
+    when "context"
+      @options.shift
+      mod_context
+    when "tidy"
+      @options.shift
+      mod_tidy
+    when "reach"
+      @options.shift
+      mod_reach
+    when "release"
+      @options.shift
+      mod_release
+    when nil, "--help", "-h"
+      puts CommandDriver.mod_usage
+      exit(0)
+    else
+      abort "unknown mod subcommand: #{@options.first}", Exit::USAGE_ERROR
+    end
+  end
+
+  # mod.cr's `mod dump`: each flag, a path once, and the refusals the path and
+  # the two outputs can earn before the file is read.
+  private def mod_dump : Nil
+    @selected_command = "mod dump"
+    declarations = false
+    as_json = false
+    filename : String? = nil
+    while option = @options.shift?
+      if option == "--declarations"
+        declarations = true
+      elsif option == "--json"
+        as_json = true
+      elsif option == "--help" || option == "-h"
+        puts CommandDriver.mod_dump_usage
+        exit(0)
+        return
+      elsif option.starts_with?("-")
+        abort "mod dump: unknown flag #{option}", Exit::USAGE_ERROR
+        return
+      else
+        if filename
+          abort "unexpected '#{option}' after the .iyimod path", Exit::USAGE_ERROR
+          return
+        end
+        filename = option
+      end
+    end
+    unless filename
+      abort "expected a .iyimod path", Exit::USAGE_ERROR
+      return
+    end
+    if declarations && as_json
+      abort "--declarations and --json are two different outputs; ask for one", Exit::USAGE_ERROR
+      return
+    end
+    unless File.file?(filename)
+      if File.directory?(filename)
+        abort "#{filename} is a directory, not a .iyimod", Exit::USAGE_ERROR
+        return
+      end
+      abort "no such file: #{filename}", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["subcommand"] = "dump"
+    @subcommand_options["declarations"] = declarations.to_s
+    @subcommand_options["json"] = as_json.to_s
+    @subcommand_options["file"] = filename
+  end
+
+  # mod.cr's `mod tidy`: the flags it has, and nothing else. What it writes is
+  # the runner's; this driver has parsed the line.
+  private def mod_tidy : Nil
+    check_only = false
+    while option = @options.shift?
+      if option == "--help" || option == "-h"
+        puts CommandDriver.mod_tidy_usage
+        exit(0)
+        return
+      elsif option == "--check"
+        check_only = true
+      else
+        abort "mod tidy: unexpected '#{option}'; it tidies the iyi.mod in this directory", Exit::USAGE_ERROR
+        return
+      end
+    end
+    @subcommand_options["subcommand"] = "tidy"
+    @subcommand_options["check"] = check_only.to_s
+  end
+
+  # mod.cr's `mod reach`: help, and no argument at all.
+  private def mod_reach : Nil
+    while option = @options.shift?
+      if option == "--help" || option == "-h"
+        puts CommandDriver.mod_reach_usage
+        exit(0)
+        return
+      end
+      abort "mod reach: unexpected '#{option}'; it reads the iyi.mod in this directory", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["subcommand"] = "reach"
+  end
+
+  # mod.cr's `mod release`: one version, and no flag but help.
+  private def mod_release : Nil
+    proposed : String? = nil
+    while option = @options.shift?
+      if option == "--help" || option == "-h"
+        puts CommandDriver.mod_release_usage
+        exit(0)
+        return
+      elsif option.starts_with?("-")
+        abort "mod release: unknown flag #{option}", Exit::USAGE_ERROR
+        return
+      else
+        if proposed
+          abort "mod release: one version, and '#{option}' is a second", Exit::USAGE_ERROR
+          return
+        end
+        unless option.starts_with?("v")
+          abort "mod release: '#{option}' does not start with `v`; a version is spelled the way its git tag is, `v1.2.3`", Exit::USAGE_ERROR
+          return
+        end
+        proposed = option
+      end
+    end
+    @subcommand_options["subcommand"] = "release"
+    @subcommand_options["version"] = proposed if proposed
+  end
+
+  private def mod_diff : Nil
+    @selected_command = "mod diff"
+    if @options.any? { |opt| opt == "--help" || opt == "-h" }
+      puts CommandDriver.mod_diff_usage
+      exit(0)
+      return
+    end
+    exit_code = false
+    if first_opt(@options) == "--exit-code"
+      @options.shift
+      exit_code = true
+    end
+    old_file = @options.shift?
+    new_file = @options.shift?
+    unless old_file && new_file
+      abort "expected two .iyimod paths", Exit::USAGE_ERROR
+      return
+    end
+    unless File.exists?(old_file)
+      abort "no such file: #{old_file}", Exit::USAGE_ERROR
+      return
+    end
+    unless File.exists?(new_file)
+      abort "no such file: #{new_file}", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["subcommand"] = "diff"
+    @subcommand_options["exit_code"] = exit_code.to_s
+    @subcommand_options["old_file"] = old_file
+    @subcommand_options["new_file"] = new_file
+  end
+
+  private def mod_context : Nil
+    @selected_command = "mod context"
+    if @options.any? { |opt| opt == "--help" || opt == "-h" }
+      puts CommandDriver.mod_context_usage
+      exit(0)
+      return
+    end
+    as_json = false
+    if first_opt(@options) == "--json"
+      @options.shift
+      as_json = true
+    end
+    filename = @options.shift?
+    unless filename && filename.ends_with?(".iyi")
+      abort "expected a .iyi file", Exit::USAGE_ERROR
+      return
+    end
+    unless File.exists?(filename)
+      abort "no such file: #{filename}", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["subcommand"] = "context"
+    @subcommand_options["json"] = as_json.to_s
+    @subcommand_options["file"] = filename
+  end
+
+  private def env : Nil
+    return if @exit_code
+    var_names = [] of String
+    parser = OptionParser.new
+    parser.banner = CommandDriver.env_usage
+    current = ""
+    first_unrecognised = nil
+    parser.before_each { |arg| current = arg }
+    parser.invalid_option do |_flag|
+      first_unrecognised ||= current
+    end
+    parser.missing_option do |flag|
+      abort "Missing option: #{flag}", Exit::USAGE_ERROR
+      parser.stop
+    end
+    parser.on("-h", "--help", "Show this message") do
+      puts parser
+      exit(0)
+      parser.stop
+    end
+    parser.unknown_args do |before, after|
+      var_names = before
+    end
+    parser.parse(@options)
+    return if @exit_code
+    if flag = first_unrecognised
+      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["vars"] = var_names.join(",") unless var_names.empty?
+  end
+
+  private def eval : Nil
+    return if @exit_code
+    compiler_opts = CompilerOptions.new
+    parser = OptionParser.new
+    parser.banner = "Usage: #{CommandDriver.program_name} eval [options] [source]\n\nOptions:"
+    left = [] of String
+    setup_simple_compiler_options(parser, compiler_opts, left)
+    parser.unknown_args do |_before_dash, after_dash|
+      compiler_opts.filenames = left unless left.empty?
+      compiler_opts.arguments = after_dash
+    end
+    parser.parse(@options)
+    return if @exit_code
+    @compiler_options = compiler_opts
+  end
+
+  # Tool subcommands:
+  private def tool_context : Nil
+    @compiler_options = create_compiler("tool context", no_codegen: true, cursor_command: true)
+  end
+
+  private def tool_format : Nil
+    excludes = ["lib"] of String
+    includes = [] of String
+    check = false
+    parser = OptionParser.new
+    parser.banner = CommandDriver.format_usage
+    current = ""
+    first_unrecognised = nil
+    parser.before_each { |arg| current = arg }
+    parser.invalid_option do |_flag|
+      first_unrecognised ||= current
+    end
+    parser.missing_option do |flag|
+      abort "Missing option: #{flag}", Exit::USAGE_ERROR
+      parser.stop
+    end
+    parser.on("--check", "Checks that formatting code produces no changes") do
+      check = true
+    end
+    parser.on("-i <path>", "--include <path>", "Include path") do |f|
+      includes << f
+    end
+    parser.on("-e <path>", "--exclude <path>", "Exclude path (default: lib)") do |f|
+      excludes << f
+    end
+    parser.on("--stdin-filename <path>", "Path the piped source came from (its extension picks the language)") do |f|
+      @subcommand_options["stdin_filename"] = f
+    end
+    parser.on("-h", "--help", "Show this message") do
+      puts parser
+      exit(0)
+      parser.stop
+    end
+    parser.on("--no-color", "Disable colored output") do
+      @color = false
+    end
+    parser.on("--show-backtrace", "Show backtrace on a bug (used only for debugging)") do
+      @error_trace = true
+    end
+    files = parser.parse(@options)
+    return if @exit_code
+    if flag = first_unrecognised
+      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
+      return
+    end
+    @subcommand_options["check"] = check.to_s
+    @subcommand_options["includes"] = includes.join(",") unless includes.empty?
+    @subcommand_options["excludes"] = excludes.join(",") unless excludes.empty?
+    @subcommand_options["files"] = files.join(",") unless files.empty?
+  end
+
+  private def tool_flags : Nil
+    @subcommand_options["tool"] = "flags"
+  end
+
+  private def tool_expand : Nil
+    @compiler_options = create_compiler("tool expand", no_codegen: true, cursor_command: true)
+  end
+
+  private def tool_bind : Nil
+    @compiler_options = create_compiler("tool bind", no_codegen: true, hierarchy: true)
+  end
+
+  private def tool_hierarchy : Nil
+    @compiler_options = create_compiler("tool hierarchy", no_codegen: true, hierarchy: true)
+  end
+
+  private def tool_dependencies : Nil
+    @compiler_options = create_compiler("tool dependencies", no_codegen: true, dependencies: true, allowed_formats: ["tree", "flat", "dot", "mermaid"] of String)
+  end
+
+  private def tool_implementations : Nil
+    @compiler_options = create_compiler("tool implementations", no_codegen: true, cursor_command: true)
+  end
+
+  private def tool_types : Nil
+    @compiler_options = create_compiler("tool types", no_codegen: true)
+  end
+
+  private def tool_unreachable : Nil
+    @compiler_options = create_compiler(
+      "tool unreachable",
+      no_codegen: true,
+      path_filter: true,
+      unreachable_command: true,
+      allowed_formats: ["text", "json", "csv", "codecov"] of String
+    )
+  end
+
+  private def tool_macro_code_coverage : Nil
+    @compiler_options = create_compiler("tool macro_code_coverage", no_codegen: true, path_filter: true, allowed_formats: ["codecov"] of String)
+  end
+
+  # Match the hosted compiler's source and output identity check, including
+  # hard links and symlinks when the platform supplies file identity.
+  private def same_source?(source : String, output : String) : Bool
+    return true if File.expand_path(source) == File.expand_path(output)
+    source_info = File.info?(source)
+    output_info = File.info?(output)
+    return false unless source_info && output_info
+    source_info.same_file?(output_info)
+  end
+
+  private def relative_source(source : String) : String
+    absolute = File.expand_path(source)
+    prefix = Dir.current
+    separator = {{ flag?(:win32) ? "\\" : "/" }}
+    prefix = prefix + separator unless prefix.ends_with?(separator)
+    absolute.starts_with?(prefix) ? absolute[prefix.size, absolute.size - prefix.size] : absolute
+  end
+
+  private def create_compiler(
+    command : String,
+    no_codegen : Bool = false,
+    run : Bool = false,
+    hierarchy : Bool = false,
+    cursor_command : Bool = false,
+    single_file : Bool = false,
+    dependencies : Bool = false,
+    path_filter : Bool = false,
+    unreachable_command : Bool = false,
+    allowed_formats : Array(String) = ["text", "json"],
+    warning_options : Bool = false,
+  ) : CompilerOptions
+    opts = CompilerOptions.new
+    opts.no_codegen = no_codegen
+    opts.single_file = single_file
+
+    link_flags = [] of String
+    filenames = [] of String
+    has_stdin_filename = false
+    opt_filenames = [] of String
+    opt_arguments = [] of String
+    output_format = allowed_formats[0]
+
+    parser = OptionParser.new
+    parser.banner = "Usage: #{CommandDriver.program_name} #{command} [options] [programfile] [--] [arguments]\n\nOptions:"
+
+    current = ""
+    first_unrecognised = nil
+    parser.invalid_option do |_flag|
+      first_unrecognised ||= current
+    end
+
+    parser.missing_option do |flag|
+      abort "Missing option: #{flag}", Exit::USAGE_ERROR
+      parser.stop
+    end
+
+    unless no_codegen
+      unless run
+        parser.on("--cross-compile", "cross-compile") do
+          opts.cross_compile = true
+        end
+      end
+      parser.on("-d", "--debug", "Add full symbolic debug info") do
+        opts.debug = "all"
+      end
+      parser.on("--no-debug", "Skip any symbolic debug info") do
+        opts.debug = "none"
+      end
+      parser.on("--frame-pointers auto|always|non-leaf", "Control the preservation of frame pointers") do |value|
+        val_s = (value == "non_leaf" ? "non-leaf" : value)
+        if val_s == "auto" || val_s == "always" || val_s == "non-leaf"
+          opts.frame_pointers = val_s
+        else
+          abort "Invalid value `#{value}` for frame-pointers", Exit::USAGE_ERROR
+          parser.stop
+        end
+      end
+    end
+
+    parser.on("-D FLAG", "--define FLAG", "Define a compile-time flag") do |flag|
+      opts.flags << flag
+    end
+
+    unless no_codegen
+      parser.on("--emit [asm|obj|llvm-bc|llvm-ir]", "Comma separated list of types of output for the compiler to emit") do |emit_values|
+        targets = validate_emit_values(emit_values.split(',').map(&.strip))
+        if @exit_code
+          parser.stop
+        else
+          opts.emit_targets = targets
+        end
+      end
+
+      parser.on("--x86-asm-syntax att|intel", "X86 dialect for --emit=asm: AT&T (default), Intel") do |value|
+        case value
+        when "att"
+          opts.x86_asm_syntax = "att"
+        when "intel"
+          opts.x86_asm_syntax = "intel"
+        else
+          abort "Invalid value `#{value}` for x86-asm-syntax", Exit::USAGE_ERROR
+          parser.stop
+        end
+      end
+    end
+
+    if hierarchy
+      parser.on("-e NAME", "Filter types by NAME regex") do |exp|
+        opts.hierarchy_exp = exp
+      end
+    end
+
+    if cursor_command
+      parser.on("-c LOC", "--cursor LOC", "Cursor location with LOC as path/to/file.cr:line:column") do |cursor|
+        opts.cursor_location = cursor
+      end
+    end
+
+    if dependencies
+      parser.on("-i <path>", "--include <path>", "Include path") do |f|
+        opts.includes << f
+      end
+      parser.on("-e <path>", "--exclude <path>", "Exclude path (default: lib)") do |f|
+        opts.excludes << f
+      end
+      parser.on("--verbose", "Show skipped and filtered paths") do
+        opts.verbose = true
+      end
+    end
+
+    rest = [] of String
+    i = 1
+    while i < allowed_formats.size
+      rest << allowed_formats[i]
+      i = i + 1
+    end
+    format_desc = "Output format: #{allowed_formats[0]} (default), #{rest.join(", ")}"
+    parser.on("-f #{allowed_formats.join("|")}", "--format #{allowed_formats.join("|")}", format_desc) do |f|
+      output_format = f
+    end
+
+    if unreachable_command
+      parser.on("--tallies", "Print reachable methods and their call counts as well") do
+        opts.tallies = true
+      end
+      parser.on("--check", "Exits with error if there is any unreachable code") do
+        opts.check = true
+      end
+    end
+
+    parser.on("--error-trace", "Show full error trace") do
+      opts.error_trace = true
+      @error_trace = true
+    end
+
+    parser.on("-h", "--help", "Show this message") do
+      puts parser
+      exit(0)
+      parser.stop
+    end
+
+    if path_filter
+      parser.on("-i <path>", "--include <path>", "Include path") do |f|
+        opts.includes << f
+      end
+      parser.on("-e <path>", "--exclude <path>", "Exclude path (default: lib)") do |f|
+        opts.excludes << f
+      end
+    end
+
+    unless no_codegen
+      parser.on("--ll", "Dump ll to #{CommandDriver.language_name}'s cache directory") do
+        opts.dump_ll = true
+      end
+      parser.on("--link-flags FLAGS", "Additional flags to pass to the linker") do |some_link_flags|
+        link_flags << some_link_flags
+      end
+      target_specific_opts(parser, opts)
+      setup_compiler_warning_options(parser, opts)
+    end
+    setup_compiler_warning_options(parser, opts) if no_codegen && warning_options
+
+    parser.on("--no-color", "Disable colored output") do
+      @color = false
+      opts.color = false
+    end
+
+    unless no_codegen
+      parser.on("--no-codegen", "Don't do code generation") do
+        opts.no_codegen = true
+      end
+      parser.on("-o FILE", "--output FILE", "Output path. If a directory, the filename is derived from the first source file (default: ./)") do |an_output_filename|
+        opts.output_filename = an_output_filename
+        opts.specified_output = true
+      end
+    end
+
+    parser.on("--prelude ", "Use given file as prelude") do |prelude|
+      opts.prelude = prelude
+      opts.specified_prelude = true
+    end
+
+    parser.on("--crystal", "iyi: build against Crystal's standard library, so `require` works") do
+      opts.prelude = "prelude"
+      opts.specified_prelude = true
+      opts.compatibility_prelude = true
+    end
+
+    parser.on("--iyi-keep NAMESPACE", "iyi: define rather than inline the methods under NAMESPACE") do |root|
+      opts.iyi_keep = root
+    end
+
+    parser.on("--emit-bind DIR", "iyi: where `tool bind` writes the boundary it generates") do |dir|
+      opts.emit_bind = dir
+    end
+
+    parser.on("--emit-iyimod DIR", "iyi: write a .iyimod per imported module this build reads from source into DIR (a package's is III.7 step 5's, and is not one of these)") do |dir|
+      opts.emit_iyimod = dir
+    end
+
+    parser.on("--use-iyimod DIR", "iyi: compile imported modules from DIR's .iyimod files first; `mods` beside the project root is read for a module with no source either way") do |dir|
+      opts.use_iyimod = dir
+    end
+
+    unless no_codegen
+      parser.on("--release", "Compile in release mode (-O3 --single-module)") do
+        opts.release = true
+        opts.single_module = true
+        opts.optimization_mode = "3"
+      end
+      parser.on("-O LEVEL", "Optimization mode: 0 (default), 1, 2, 3, s, z") do |level|
+        if level == "0" || level == "1" || level == "2" || level == "3" || level == "s" || level == "z"
+          opts.optimization_mode = level
+        else
+          abort "Invalid optimization mode: O#{level}", Exit::CODE_ERROR
+          parser.stop
+        end
+      end
+    end
+
+    parser.on("-s", "--stats", "Enable statistics output") do
+      opts.stats = true
+    end
+
+    parser.on("-p", "--progress", "Enable progress output") do
+      opts.progress = true
+    end
+
+    parser.on("-t", "--time", "Enable execution time output") do
+      opts.time = true
+    end
+
+    unless no_codegen
+      parser.on("--single-module", "Generate a single LLVM module") do
+        opts.single_module = true
+      end
+      parser.on("--threads NUM", "Maximum number of threads to use") do |n_threads|
+        if n = n_threads.to_i?
+          opts.n_threads = n
+        else
+          abort "Invalid thread count: #{n_threads}", Exit::CODE_ERROR
+          parser.stop
+        end
+      end
+      unless run
+        parser.on("--target TRIPLE", "Target triple") do |triple|
+          opts.target_triple = triple
+        end
+      end
+      parser.on("--verbose", "Display executed commands") do
+        opts.verbose = true
+      end
+      parser.on("--static", "Link statically") do
+        opts.static_link = true
+      end
+    end
+    if command == "build"
+      parser.on("--force", "Build even when nothing the output was built from has changed") do
+        opts.force = true
+      end
+    end
+
+    parser.on("--stdin-filename ", "Source file name to be read from STDIN") do |stdin_filename|
+      has_stdin_filename = true
+      filenames << stdin_filename
+      opts.stdin_filename = stdin_filename
+    end
+
+    # Recognised handlers, including help, run before unknown flags are refused.
+    parser.before_each do |arg|
+      current = arg
+      if single_file
+        parser.stop if !arg.starts_with?('-') && arg.ends_with?(".cr")
+        parser.stop if File.exists?(arg)
+      end
+    end
+
+    parser.unknown_args do |before, after|
+      opt_filenames = before
+      opt_arguments = after
+    end
+
+    parser.parse(@options)
+    return opts if @exit_code
+    if flag = first_unrecognised
+      abort "Invalid option: #{flag}", Exit::USAGE_ERROR
+      return opts
+    end
+
+    opts.link_flags = link_flags.join(" ") unless link_flags.empty?
+    opt_filenames.each do |f|
+      filenames << f
+    end
+    arguments = opt_arguments
+
+    if single_file && filenames.size > 1
+      combined_args = [] of String
+      s_idx = 1
+      while s_idx < filenames.size
+        combined_args << filenames[s_idx]
+        s_idx = s_idx + 1
+      end
+      arguments.each do |a|
+        combined_args << a
+      end
+      arguments = combined_args
+      filenames = [filenames[0]]
+    end
+
+    opts.filenames = filenames
+    opts.arguments = arguments
+
+    if !opts.specified_prelude && filenames.size > 0 && filenames[0].ends_with?(".iyi")
+      opts.prelude = "iyi/prelude"
+      opts.specified_prelude = true
+    end
+
+    output_extension = opts.cross_compile ? ".o" : ""
+    if target = Target.parse?(opts.target_triple || CONFIG_TARGET)
+      output_extension = opts.cross_compile ? target.object_extension : target.executable_extension
+    end
+
+    if !opts.specified_output && filenames.size > 0
+      first_fn = filenames[0]
+      slash_idx = last_index_of(first_fn, '/')
+      base_fn = slash_idx ? first_fn[slash_idx + 1, first_fn.size - slash_idx - 1] : first_fn
+      dot_idx = last_index_of(base_fn, '.')
+      stem = dot_idx ? base_fn[0, dot_idx] : base_fn
+      opts.output_filename = "#{stem}#{output_extension}"
+    end
+
+    if filenames.size == 0 || (cursor_command && opts.cursor_location.nil?)
+      @stderr.puts format_option_help(parser)
+      exit(1)
+      return opts
+    end
+    if command == "build" || command == "run"
+      source_index = 0
+      filenames.each do |filename|
+        source_index = source_index + 1
+        next if has_stdin_filename && source_index == 1
+        if filename.empty?
+          abort "the file name is empty, so it names nothing", Exit::USAGE_ERROR
+          return opts
+        elsif File.directory?(filename)
+          abort "#{filename} is a directory, not a source file", Exit::USAGE_ERROR
+          return opts
+        elsif !File.file?(filename)
+          abort "no such file: #{filename}", Exit::USAGE_ERROR
+          return opts
+        end
+      end
+
+      output = opts.output_filename || "./"
+      derived = !opts.specified_output || output.ends_with?("/") || File.directory?(output)
+      if derived
+        directory = opts.specified_output ? output : "./"
+        stem = Path.new(filenames[0]).stem
+        output = Path.new(File.join(directory, "#{stem}#{output_extension}")).normalize.to_s
+        if command == "build" && !opts.no_codegen && same_source?(filenames[0], output)
+          abort "compilation will overwrite source file '#{relative_source(filenames[0])}', either change its extension to '.cr' or specify an output file with '-o'", Exit::USAGE_ERROR
+          return opts
+        end
+      else
+        output = output + output_extension if Path.new(output).extension.empty?
+        if command == "build" && !opts.no_codegen
+          filenames.each do |filename|
+            if same_source?(filename, output)
+              abort "-o #{output} names #{relative_source(filename)}, the source it would build from, and linking there would replace it. Name the program something else", Exit::USAGE_ERROR
+              return opts
+            end
+          end
+        end
+      end
+      opts.output_filename = output
+    end
+
+    unless allowed_formats.includes?(output_format)
+      abort "You have input an invalid format: #{output_format}. Supported formats: #{allowed_formats.join(", ")}", Exit::USAGE_ERROR
+      return opts
+    end
+    opts.output_format = output_format
+
+    if opts.n_threads < 1
+      abort "maximum number of threads cannot be lower than 1", Exit::USAGE_ERROR
+      return opts
+    end
+    if command == "build" && !opts.no_codegen
+      output = opts.output_filename.as(String)
+      if File.directory?(output)
+        abort "can't use `#{output}` as output filename because it's a directory", Exit::USAGE_ERROR
+        return opts
+      end
+      directory = File.dirname(output)
+      unless Dir.exists?(directory)
+        abort "there is no #{directory} to write #{File.basename(output)} into", Exit::USAGE_ERROR
+        return opts
+      end
+      unless File.writable?(directory)
+        abort "#{directory} will not take #{File.basename(output)}: no permission to write there", Exit::USAGE_ERROR
+        return opts
+      end
+    end
+
+    opts
+  end
+
+  private def setup_simple_compiler_options(opts : OptionParser, compiler_opts : CompilerOptions, left : Array(String)) : Nil
+    current = ""
+    opts.before_each do |arg|
+      current = arg
+      left << arg unless arg == "--" || (arg.starts_with?("-") && arg.bytesize >= 2)
+    end
+    opts.invalid_option do |_flag|
+      left << current
+    end
+    opts.missing_option do |flag|
+      abort "Missing option: #{flag}", Exit::USAGE_ERROR
+      opts.stop
+    end
+    opts.on("-d", "--debug", "Add full symbolic debug info") do
+      compiler_opts.debug = "all"
+    end
+    opts.on("--no-debug", "Skip any symbolic debug info") do
+      compiler_opts.debug = "none"
+    end
+    opts.on("-D FLAG", "--define FLAG", "Define a compile-time flag") do |flag|
+      compiler_opts.flags << flag
+    end
+    opts.on("--error-trace", "Show full error trace") do
+      @error_trace = true
+      compiler_opts.error_trace = true
+    end
+    opts.on("--release", "Compile in release mode (-O3 --single-module)") do
+      compiler_opts.release = true
+      compiler_opts.single_module = true
+      compiler_opts.optimization_mode = "3"
+    end
+    opts.on("-O LEVEL", "Optimization mode: 0 (default), 1, 2, 3, s, z") do |level|
+      if level == "0" || level == "1" || level == "2" || level == "3" || level == "s" || level == "z"
+        compiler_opts.optimization_mode = level
+      else
+        abort "Invalid optimization mode: O#{level}", Exit::CODE_ERROR
+        opts.stop
+      end
+    end
+    opts.on("--single-module", "Generate a single LLVM module") do
+      compiler_opts.single_module = true
+    end
+    opts.on("--threads NUM", "Maximum number of threads to use") do |n_threads|
+      if n = n_threads.to_i?
+        compiler_opts.n_threads = n
+      else
+        abort "Invalid thread count: #{n_threads}", Exit::CODE_ERROR
+        opts.stop
+      end
+    end
+    opts.on("-s", "--stats", "Enable statistics output") do
+      compiler_opts.stats = true
+    end
+    opts.on("-p", "--progress", "Enable progress output") do
+      compiler_opts.progress = true
+    end
+    opts.on("-t", "--time", "Enable execution time output") do
+      compiler_opts.time = true
+    end
+    opts.on("-h", "--help", "Show this message") do
+      puts opts
+      exit(0)
+      opts.stop
+    end
+    opts.on("--no-color", "Disable colored output") do
+      @color = false
+      compiler_opts.color = false
+    end
+    target_specific_opts(opts, compiler_opts)
+    setup_compiler_warning_options(opts, compiler_opts)
+  end
+
+  private def target_specific_opts(opts : OptionParser, compiler_opts : CompilerOptions) : Nil
+    opts.on("--mcpu CPU", "Target specific cpu type") do |cpu|
+      compiler_opts.mcpu = cpu
+    end
+    opts.on("--mattr CPU", "Target specific features") do |features|
+      compiler_opts.mattr = features
+    end
+    opts.on("--mcmodel MODEL", "Target specific code model") do |mcmodel|
+      if mcmodel == "default" || mcmodel == "tiny" || mcmodel == "small" || mcmodel == "kernel" || mcmodel == "medium" || mcmodel == "large"
+        compiler_opts.mcmodel = mcmodel
+      else
+        abort "--mcmodel should be one of: default, kernel, tiny, small, medium, large", Exit::USAGE_ERROR
+        opts.stop
+      end
+    end
+  end
+
+  private def setup_compiler_warning_options(opts : OptionParser, compiler_opts : CompilerOptions) : Nil
+    opts.on("--warnings all|none", "Which warnings to detect. (default: all)") do |w|
+      if w == "all" || w == "none"
+        compiler_opts.warnings_level = w
+      else
+        abort "--warnings should be all, or none", Exit::USAGE_ERROR
+        opts.stop
+      end
+    end
+    opts.on("--error-on-warnings", "Treat warnings as errors.") do
+      compiler_opts.error_on_warnings = true
+    end
+    opts.on("--exclude-warnings <path>", "Exclude warnings from path (default: lib)") do |f|
+      compiler_opts.exclude_warnings << f
+    end
+    # The hosted compiler's spawn notes (SPEC.md III.4.15) are not ported yet.
+    # The flags are advertised with the hosted wording and refuse loudly,
+    # rather than being accepted and ignored.
+    opts.on("--explain-spawn", "Note where each spawn runs: in parallel in a unit of its own, or in its spawner's unit and why") do
+      abort "--explain-spawn is not in the self-hosted driver yet; spawn notes come from the hosted compiler", Exit::USAGE_ERROR
+    end
+    opts.on("--explain-spawn-std", "As --explain-spawn, and std's and the prelude's spawns too") do
+      abort "--explain-spawn-std is not in the self-hosted driver yet; spawn notes come from the hosted compiler", Exit::USAGE_ERROR
+    end
+  end
+
+  private def validate_emit_values(values : Array(String)) : Array(String)
+    targets = [] of String
+    values.each do |val|
+      target_name = val.downcase
+      if target_name == "llvm_bc"
+        target_name = "llvm-bc"
+      elsif target_name == "llvm_ir"
+        target_name = "llvm-ir"
+      end
+      if target_name == "asm" || target_name == "obj" || target_name == "llvm-bc" || target_name == "llvm-ir"
+        targets << target_name unless targets.includes?(target_name)
+      else
+        abort "invalid emit value '#{val}'", Exit::USAGE_ERROR
+        return [] of String
+      end
+    end
+    targets
+  end
+
+  private def abort(msg : String, exit_code : Exit = Exit::USAGE_ERROR) : Nil
+    print_error(msg)
+    exit(exit_code.value)
+  end
+
+  private def print_error(msg : String) : Nil
+    return if msg.empty?
+    @stderr.puts("Error: #{msg}")
+  end
+
+  private def exit(status : Int32 = 0) : Nil
+    @exit_code = status
+  end
+
+  private def puts(msg : String = "") : Nil
+    @stdout.puts(msg)
+  end
+
+  # The shared parser keeps compact help. The hosted command renders its
+  # switches in a 32-column list, including a continuation for long flags.
+  private def format_option_help(parser : OptionParser) : String
+    lines = [] of String
+    parser.to_s.split("\n").each do |line|
+      unless line.starts_with?("  -")
+        lines << line
+        next
+      end
+      body = line[2, line.size - 2]
+      split = body.index("  ")
+      unless split
+        lines << line
+        next
+      end
+      flag = body[0, split]
+      description = body[split + 2, body.size - split - 2]
+      if description.starts_with?(" ")
+        flag = flag + " "
+        description = description[1, description.size - 1]
+      end
+      flag = "    #{flag}" if flag.starts_with?("--")
+      if flag.size > 32
+        lines << "    #{flag}\n#{" " * 37}#{description}"
+      else
+        lines << "    #{flag}#{" " * (32 - flag.size)} #{description}"
+      end
+    end
+    lines.join("\n")
+  end
+
+  private def puts(parser : OptionParser) : Nil
+    @stdout.puts(format_option_help(parser))
+  end
+
+  # Formatting helper for parity testing:
+  def format_result : String
+    sb = OutputBuffer.new
+    sb.puts("command: #{@selected_command}")
+    if ec = @exit_code
+      sb.puts("exit: #{ec}")
+    else
+      sb.puts("exit: none")
+    end
+    if @exit_code.nil? && (opts = @compiler_options)
+      sb.puts("options:")
+      sb.puts("  arguments: #{opts.arguments.inspect}")
+      sb.puts("  check: #{opts.check}")
+      sb.puts("  color: #{opts.color}")
+      sb.puts("  cross_compile: #{opts.cross_compile}")
+      sb.puts("  cursor_location: #{opts.cursor_location ? opts.cursor_location.inspect : "nil"}")
+      sb.puts("  debug: #{opts.debug}")
+      sb.puts("  dump_ll: #{opts.dump_ll}")
+      sb.puts("  emit_bind: #{opts.emit_bind ? opts.emit_bind.inspect : "nil"}")
+      sb.puts("  emit_iyimod: #{opts.emit_iyimod ? opts.emit_iyimod.inspect : "nil"}")
+      sb.puts("  emit_targets: #{opts.emit_targets.sorted.inspect}")
+      sb.puts("  error_on_warnings: #{opts.error_on_warnings}")
+      sb.puts("  error_trace: #{opts.error_trace}")
+      sb.puts("  exclude_warnings: #{opts.exclude_warnings.inspect}")
+      sb.puts("  excludes: #{opts.excludes.inspect}")
+      sb.puts("  filenames: #{opts.filenames.inspect}")
+      sb.puts("  flags: #{opts.flags.inspect}")
+      sb.puts("  frame_pointers: #{opts.frame_pointers}")
+      sb.puts("  hierarchy_exp: #{opts.hierarchy_exp ? opts.hierarchy_exp.inspect : "nil"}")
+      sb.puts("  includes: #{opts.includes.inspect}")
+      sb.puts("  iyi_keep: #{opts.iyi_keep ? opts.iyi_keep.inspect : "nil"}")
+      sb.puts("  link_flags: #{opts.link_flags.inspect}")
+      sb.puts("  mattr: #{opts.mattr ? opts.mattr.inspect : "nil"}")
+      sb.puts("  mcmodel: #{opts.mcmodel ? opts.mcmodel.inspect : "nil"}")
+      sb.puts("  mcpu: #{opts.mcpu ? opts.mcpu.inspect : "nil"}")
+      sb.puts("  n_threads: #{opts.n_threads}")
+      sb.puts("  no_codegen: #{opts.no_codegen}")
+      sb.puts("  optimization_mode: #{opts.optimization_mode}")
+      sb.puts("  output_filename: #{opts.output_filename ? opts.output_filename.inspect : "nil"}")
+      sb.puts("  output_format: #{opts.output_format}")
+      sb.puts("  prelude: #{opts.prelude}")
+      sb.puts("  progress: #{opts.progress}")
+      sb.puts("  release: #{opts.release}")
+      sb.puts("  single_file: #{opts.single_file}")
+      sb.puts("  single_module: #{opts.single_module}")
+      sb.puts("  specified_output: #{opts.specified_output}")
+      sb.puts("  specified_prelude: #{opts.specified_prelude}")
+      sb.puts("  static_link: #{opts.static_link}")
+      sb.puts("  stats: #{opts.stats}")
+      sb.puts("  stdin_filename: #{opts.stdin_filename ? opts.stdin_filename.inspect : "nil"}")
+      sb.puts("  tallies: #{opts.tallies}")
+      sb.puts("  target_triple: #{opts.target_triple ? opts.target_triple.inspect : "nil"}")
+      sb.puts("  time: #{opts.time}")
+      sb.puts("  use_iyimod: #{opts.use_iyimod ? opts.use_iyimod.inspect : "nil"}")
+      sb.puts("  verbose: #{opts.verbose}")
+      sb.puts("  warnings_level: #{opts.warnings_level}")
+      sb.puts("  x86_asm_syntax: #{opts.x86_asm_syntax}")
+    end
+    if @exit_code.nil? && !@subcommand_options.empty?
+      sb.puts("subcommand_options:")
+      keys = @subcommand_options.keys.sorted
+      keys.each do |k|
+        sb.puts("  #{k}: #{@subcommand_options[k]}")
+      end
+    end
+    out_s = @stdout.to_s.strip
+    err_s = @stderr.to_s.strip
+    if !out_s.empty? || !err_s.empty?
+      sb.puts("output:")
+      if !out_s.empty?
+        sb.puts(out_s)
+      end
+      if !err_s.empty?
+        sb.puts(err_s)
+      end
+    end
+    sb.to_s
+  end
+end

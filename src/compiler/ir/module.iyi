@@ -1,0 +1,180 @@
+module compiler/ir/module
+
+import compiler/ir/types::{IrType, TypeTable}
+import compiler/ir/function::{Function, Global}
+import compiler/ir/values::{Value, Param}
+import compiler/ir/inst::{CallConv, Inst}
+import compiler/ir/layout::{DataLayout, LayoutError}
+import compiler/platform/target::{Target}
+
+# A module: the globals and functions of one compilation unit, in emission order. Emission order is part
+# of the determinism contract, so the printer writes them in this order and never sorts them.
+pub class Module
+  getter name : String
+  getter target : Target
+  getter layout : DataLayout
+  getter types : TypeTable
+  getter files : Array(String)       # DebugLoc#file indexes this
+  getter flags : Hash(String, Int64) # module flags (branch-target-enforcement, cf-protection)
+  getter globals : Array(Global)     # emission order is part of determinism
+  getter functions : Array(Function)
+
+  def initialize(@name : String, @target : Target, @layout : DataLayout)
+    @types = TypeTable.new
+    @files = [] of String
+    @flags = Hash(String, Int64).new
+    @globals = [] of Global
+    @functions = [] of Function
+    @function_index = Hash(String, Function).new
+    @global_index = Hash(String, Global).new
+  end
+
+  # A module for `target`, or the reason the IR has no layout for it.
+  def self.for_target(name : String, target : Target) : Module | LayoutError
+    layout = DataLayout.for(target)
+    return layout if layout.is_a?(LayoutError)
+    Module.new(name, target, layout)
+  end
+
+  def triple : String
+    @target.original_triple
+  end
+
+  def function?(name : String) : Function?
+    @function_index[name]?
+  end
+
+  def get_function?(name : String) : Function?
+    @function_index[name]?
+  end
+
+  def get_function(name : String) : Function
+    fn = @function_index[name]?
+    raise "function #{name} is not in the module" unless fn
+    fn
+  end
+
+  def global?(name : String) : Global?
+    @global_index[name]?
+  end
+
+  def get_global?(name : String) : Global?
+    @global_index[name]?
+  end
+
+  def get_global(name : String) : Global
+    g = @global_index[name]?
+    raise "global #{name} is not in the module" unless g
+    g
+  end
+
+  def add_function(name : String, type : IrType, cc : CallConv = CallConv::Iyi) : Function
+    raise "a function or global named #{name} already exists" if @function_index[name]? || @global_index[name]?
+    fn = Function.new(name, type, @types.ptr(0), cc)
+    @functions << fn
+    @function_index[name] = fn
+    fn
+  end
+
+  # Undoes `add_function`: the name table and the emission-order list. A failed probe
+  # drops the function it left, so a later probe cannot reuse a half-built one.
+  def remove_function(f : Function) : Nil
+    @function_index.delete(f.name)
+    kept = [] of Function
+    @functions.each do |fn|
+      kept << fn unless fn.object_id == f.object_id
+    end
+    @functions = kept
+  end
+
+  # A function with a body: `add_function`, then one unnamed parameter per parameter type of `type`, the way
+  # the parser gives a `define` its parameters. A declaration keeps `add_function`, with no parameters.
+  def define_function(name : String, type : IrType, cc : CallConv = CallConv::Iyi) : Function
+    fn = add_function(name, type, cc)
+    type.param_types.each_with_index do |t, i|
+      fn.add_param(Param.new(t, "", i))
+    end
+    fn
+  end
+
+  def add_global(name : String, type : IrType) : Global
+    raise "a function or global named #{name} already exists" if @function_index[name]? || @global_index[name]?
+    g = Global.new(name, type, @types.ptr(0))
+    @globals << g
+    @global_index[name] = g
+    g
+  end
+
+  # Drops every unwind edge of every function (Function#drop_unwind_edges), then removes the declarations only
+  # the unwind path named: a function with no body that something referenced before and nothing references
+  # after (the personality, the re-raise). A declaration nothing referenced to begin with stays as written.
+  # Returns the reason of the first function in which an unwinding instruction stays reachable.
+  def drop_unwind_edges : String?
+    before = referenced_functions
+    k = 0
+    while k < @functions.size
+      if reason = @functions[k].drop_unwind_edges(@types.void)
+        return reason
+      end
+      k = k + 1
+    end
+    after = referenced_functions
+    kept = [] of Function
+    index = Hash(String, Function).new
+    @functions.each do |f|
+      next if f.declaration? && before.has_key?(f) && !after.has_key?(f)
+      kept << f
+      index[f.name] = f
+    end
+    @functions = kept
+    @function_index = index
+    nil
+  end
+
+  # Every function that an operand, a global's initializer or a personality names.
+  def referenced_functions : Hash(Value, Bool)
+    found = Hash(Value, Bool).new
+    seen = Hash(Value, Bool).new
+    @globals.each do |g|
+      if init = g.initializer
+        note_functions(init, found, seen)
+      end
+    end
+    @functions.each do |f|
+      if p = f.personality
+        note_functions(p, found, seen)
+      end
+      f.blocks.each do |b|
+        b.insts.each do |i|
+          i.args.each { |a| note_functions(a, found, seen) }
+        end
+      end
+    end
+    found
+  end
+
+  # A function is noted; an instruction or a constant has its operands followed, each once.
+  private def note_functions(v : Value, found : Hash(Value, Bool), seen : Hash(Value, Bool)) : Nil
+    if v.is_a?(Function)
+      found[v] = true
+      return nil
+    end
+    return nil unless v.is_a?(Inst)
+    return nil if seen.has_key?(v)
+    seen[v] = true
+    v.as(Inst).args.each { |a| note_functions(a, found, seen) }
+    nil
+  end
+
+  # The index of `path` in the file table, adding it on first use.
+  def file_index(path : String) : Int32
+    i = @files.index(path)
+    return i if i
+    @files << path
+    @files.size - 1
+  end
+
+  def set_flag(name : String, value : Int64) : Nil
+    @flags[name] = value
+  end
+end

@@ -332,6 +332,12 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # The bootstrap compiler's cache, set beside iyi's in the gate that reads
     # the broken copy's objects out of it: the bootstrap reads no other name.
     (r'CRYSTAL_CACHE_DIR="\$WORK/\$label-cache"', "the bootstrap compiler's cache, where bench/symbol_names.sh reads its broken copy"),
+    (r'^CRYSTAL_CACHE_DIR="\$WORK/cr" \\$',
+     "the Crystal declaration oracle's separate cache in selfhost/semantic/diff.sh"),
+    (r'"crystal_version"',
+     "the Crystal compiler identity recorded in the native IR oracle manifest"),
+    (r'^# Normalize external LLVM/Crystal transport only;',
+     "the LLVM layout oracle compiled from Crystal, not the iyi driver under test"),
     # The linker's search path, in the gate that proves the binaries build
     # with bdw-gc unreachable. `IYI_LIBRARY_PATH` is not a substitute: it adds
     # to the default search path where `CRYSTAL_LIBRARY_PATH` replaces it, and

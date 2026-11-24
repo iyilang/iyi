@@ -1004,7 +1004,18 @@ private def current_task_id : UInt64
       if IyiScheduler.state_id != 0_u64
         state = IyiScheduler.state
         fiber = state.current
-        fiber.is_a?(IyiFiber) ? fiber.object_id : 0_u64
+        if fiber.is_a?(IyiFiber)
+          # A thread's first fiber is task 0, as it is before the thread has a
+          # scheduler state. Some startup code (a constant read out of order,
+          # `IyiOnce.run`) makes the state, and with it the fiber, before the
+          # program's first line on Linux and Windows and not on macOS; the
+          # fiber's object id is an address, so it differed from run to run
+          # (ASLR), and the trace fingerprint hashes it (`Trace.compute_trace_fp`).
+          root = state.root
+          root.is_a?(IyiFiber) && root.object_id == fiber.object_id ? 0_u64 : fiber.object_id
+        else
+          0_u64
+        end
       else
         0_u64
       end

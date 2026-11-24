@@ -220,6 +220,7 @@ end
 def remember_written(list : ::Array(String), value : String) : Nil
   list << value unless list.includes?(value)
 end
+
 @[ThreadLocal]
 @@thread_depth = 0_i32
 

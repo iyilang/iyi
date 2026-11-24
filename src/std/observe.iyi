@@ -209,7 +209,9 @@ end
 # String initializer again, which left every write in the test's own scratch
 # directory read as a shared write. A nil initializer is not run again.
 @@scratch : ::String? = nil
+@[UnsafeReach("assigned once at class init; its contents are read and added only between lock_recorder and unlock_recorder, a CAS spin lock on @@record_lock (in file, dir_list and file_write)")]
 @@written_paths = ::Set(String).new
+@[UnsafeReach("assigned once at class init; its contents are read and added only between lock_recorder and unlock_recorder, a CAS spin lock on @@record_lock (in env_get and env_write)")]
 @@written_env = ::Set(String).new
 @[ThreadLocal]
 @@thread_depth = 0_i32

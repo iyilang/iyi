@@ -9665,7 +9665,7 @@ it in pieces, allocating nothing.
 point; four of them (box, deque, static_array, weak_ref) are marked by
 hand outright, since only a program that instantiates their generic
 bodies types them and `iyi fix src/std` cannot see them. bench has
-97 marked programs of 190, and none of `samples/iyi`'s 28 programs
+97 marked programs of 196, and none of `samples/iyi`'s 28 programs
 needs one. The specs' snippets whose stand-in for the prelude or std (a
 `@[Primitive]`, a `lib`, a `Pointer` field, a `@[Share]` type,
 `uninitialized` storage) sits in the compiled module are marked as the

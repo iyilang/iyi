@@ -1,0 +1,14 @@
+# String keys: a string glued to its colon names a named tuple's member at the first position and at a later one, a
+# hash may key on a string with `=>`, and a call takes a string as the name of a named argument. The hosted parser reads
+# them in parse_hash_or_tuple_literal (parser.cr 4080-4099), parse_named_tuple (4246-4302), and the call-argument loop
+# (6819-6820).
+
+a = {"a-b": 7, x: 1}
+b = {x: 1, "b c": 2}
+c = {"a": 1, "b c": 2, d: 3}
+d = {"a" => 1, "b" => 2}
+e = {"a": {"b": 1}}
+f("a": 1)
+f "a": 1
+f(x: 1, "b": 2)
+f("a": 1, b: 2)

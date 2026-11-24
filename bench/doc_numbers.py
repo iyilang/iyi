@@ -15,6 +15,9 @@ Only CURRENT claims are checked. A release note saying "0.1.0 had a
 1,184-line prelude" is a statement about the past and stays; the check looks
 for the phrasings the docs use to describe the tree as it is now.
 
+The same check holds the version literals in `src/compiler/command/driver.iyi`
+to the files they copy, `src/IYI_VERSION` and `src/VERSION` (`version_pins`).
+
 What this does NOT check is whether a sentence is true, only whether a number
 matches what the tree measures. `bench/identity_floor.py` is the same idea for
 a different kind of claim.
@@ -397,7 +400,7 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     # one file disagreed with itself by 25,747 lines: the row above covers the
     # comparison table, this one the release's own numbers table, and only the
     # first of them existed.
-    ("compiler", r"\| ([\d,]+) lines, none of it written in iyi", "SPEC.md", 1),
+    ("compiler", r"\| hosted compiler \| ([\d,]+) lines of Crystal \|", "SPEC.md", 1),
     ("spec_iyi", r"\| ([\d,]+) for iyi \|", "SPEC.md", 1),
     # The artifact format, which drifted furthest of anything here: the
     # sentence said v19 while the compiler wrote v51.
@@ -483,6 +486,38 @@ def as_number(raw: str) -> int | None:
     return WORDS.get(bare.lower())
 
 
+# The two version literals in CommandDriver copy the version files. An imported
+# `.iyi` module may not read a file outside its own directory at compile time
+# (upstream #189), so the copies are literals, and this is what keeps each one
+# equal to its file. `chomp` is what the literal was made from: one trailing
+# newline, as `read_file(...).chomp` removed.
+DRIVER = "src/compiler/command/driver.iyi"
+VERSION_PINS = (
+    ("IYI_VERSION", "src/IYI_VERSION"),
+    ("BASE_VERSION", "src/VERSION"),
+)
+
+
+def version_pins() -> list[str]:
+    text = (REPO / DRIVER).read_text()
+    problems: list[str] = []
+    for const, rel in VERSION_PINS:
+        value = (REPO / rel).read_text().removesuffix("\n")
+        found = re.findall(rf'^\s*{const}\s*=\s*"([^"\n]*)"', text, re.M)
+        if len(found) != 1:
+            problems.append(
+                f"{DRIVER}: {const} is written as a string literal {len(found)} time(s), "
+                f"expected 1. The pin cannot find it, so it cannot check it"
+            )
+            continue
+        if found[0] != value:
+            problems.append(
+                f"{DRIVER}: {const} is \"{found[0]}\", but {rel} says \"{value}\". "
+                f"Set the literal to the file's contents, or change the file and the literal together"
+            )
+    return problems
+
+
 def main() -> int:
     show_all = "--list" in sys.argv
     truth = measured()
@@ -525,6 +560,10 @@ def main() -> int:
                 wrong.append(
                     f"{rel}:{line}  says {key} is {stated:,}, tree measures {truth[key]:,}"
                 )
+
+    # The version literals in the command driver are copies of the version
+    # files, not measurements of the tree, so they are checked against them.
+    wrong.extend(version_pins())
 
     # The ceiling itself, which was prose and a habit until Windows walked
     # 508 lines over it and nothing failed. SPEC.md I.4 holds the library -

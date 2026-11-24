@@ -1,0 +1,63 @@
+# Operators fixture: unary, arithmetic, bitwise, comparison, logical, ternary, assignments
+a = 1
+b = 2
+c = 3
+
+# Unary
++a
+-b
+!true
+!false
+~c
+
+# Binary arithmetic
+a + b
+a - b
+a * b
+a / b
+a // b
+a % b
+a ** b
+a &+ b
+a &- b
+a &* b
+
+# Bitwise
+a & b
+a | b
+a ^ b
+a << b
+a >> b
+
+# Comparison & Equality
+a < b
+a <= b
+a > b
+a >= b
+a <=> b
+a == b
+a != b
+a === b
+
+# Logical
+a && b
+a || b
+
+# Ternary
+a < b ? c : a
+
+# Op-assignments
+a += 1
+a -= 2
+a *= 3
+a /= 4
+a //= 5
+a %= 6
+a &= 7
+a |= 8
+a ^= 9
+a <<= 10
+a >>= 11
+a **= 12
+a ||= b
+a &&= c

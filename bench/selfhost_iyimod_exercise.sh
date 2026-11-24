@@ -477,7 +477,7 @@ check_refusal() {
 
 check_refusal "truncated header" "$REFUSAL_NATIVE/short.iyimod" "too short to be a .iyimod"
 check_refusal "invalid magic bytes" "$REFUSAL_NATIVE/bad_magic.iyimod" "is not a .iyimod"
-check_refusal "mismatched format version" "$REFUSAL_NATIVE/bad_version.iyimod" "format v99, this compiler writes v64"
+check_refusal "mismatched format version" "$REFUSAL_NATIVE/bad_version.iyimod" "format v99, this compiler writes v65"
 check_refusal "damaged section payload" "$REFUSAL_NATIVE/corrupt_payload.iyimod" "Header section is damaged, its checksum does not match"
 check_refusal "truncated section payload" "$REFUSAL_NATIVE/truncated_payload.iyimod" "bytes follow the table"
 check_refusal "table count" "$REFUSAL_NATIVE/table_count.iyimod" "its table names 2147483647 sections and 0 bytes follow it, which is room for 0"
@@ -591,8 +591,8 @@ run_proof "altering magic bytes breaks container verification" \
   'MAGIC               = "BADMOD\0\0"'
 
 run_proof "altering format version allows or writes wrong version" \
-  'FORMAT_VERSION      = 64_u32' \
-  'FORMAT_VERSION      = 65_u32'
+  'FORMAT_VERSION      = 65_u32' \
+  'FORMAT_VERSION      = 64_u32'
 
 run_proof "bypassing section checksum verification accepts damaged payload" \
   'return if checksum(payload) == sum' \
@@ -615,7 +615,7 @@ check_oracle_refuses_written_version() {
   build_mutant || return 0
   "$WORK/mut-exercise$EXE" write "$CORPUS_NATIVE/calc/lexer.iyimod" "$WORK_NATIVE/mut_version.iyimod" > "$WORK/mut-run.log" 2>&1 || return 1
   verdict=$("$WORK/oracle$EXE" read "$WORK_NATIVE/mut_version.iyimod" 2>&1) || rc=$?
-  if [ "$rc" -ne 0 ] && printf '%s\n' "$verdict" | grep -qF "is .iyimod format v61, this compiler writes v64"; then
+  if [ "$rc" -ne 0 ] && printf '%s\n' "$verdict" | grep -qF "is .iyimod format v61, this compiler writes v65"; then
     return 1
   fi
   return 0

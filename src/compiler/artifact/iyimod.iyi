@@ -11,7 +11,7 @@ import compiler/syntax/visitor::{Visitor}
 #
 # This file is the port of the hosted format in src/compiler/iyi/iyimod.cr and
 # follows it version for version. The change log below is the port's record of
-# what moved, from v50 (the version this port was written against) to v64, in
+# what moved, from v50 (the version this port was written against) to v65, in
 # the order the hosted compiler made each change (`git log -S'FORMAT_VERSION'`
 # on the hosted file):
 #
@@ -30,9 +30,10 @@ import compiler/syntax/visitor::{Visitor}
 #   v62  Header: unsafe, the reason of the @[Unsafe] mark, a string last.
 #   v63  Spawns: pinned bit and pin records. Share annotations carry lends.
 #   v64  Reaches: owning type for pin records.
+#   v65  Demands (68): what the module's object code calls in other modules' units.
 #
-# Section numbers in use at v64: 1-19 as before, 20 Inputs, 21 SymbolLiterals,
-# 64 Layouts, 65 SourcePositions, 66 Spawns, 67 Reaches. 22 to 63 are free.
+# Section numbers in use at v65: 1-19 as before, 20 Inputs, 21 SymbolLiterals,
+# 64 Layouts, 65 SourcePositions, 66 Spawns, 67 Reaches, 68 Demands. 22 to 63 are free.
 #
 # Container layout:
 #   magic:          "IYIMOD\0\0" (8 bytes)
@@ -42,7 +43,7 @@ import compiler/syntax/visitor::{Visitor}
 #   payloads:       in table order
 
 pub MAGIC          = "IYIMOD\0\0"
-pub FORMAT_VERSION = 64_u32
+pub FORMAT_VERSION = 65_u32
 
 pub enum Section : UInt16
   Header          =  1_u16
@@ -70,6 +71,7 @@ pub enum Section : UInt16
   SourcePositions = 65_u16
   Spawns          = 66_u16
   Reaches         = 67_u16
+  Demands         = 68_u16
 end
 
 pub TOP_LEVEL_CONTAINER = "::"
@@ -335,6 +337,22 @@ pub class PinRecord
   end
 end
 
+# One function the module's object code calls in another module's unit (`Section::Demands`): `unit` is the callee's
+# module, `symbol` its symbol, and the call a build makes to compile it is `receiver`, `class_call`, `name` and `args`,
+# or nil where no written call reaches the symbol.
+pub class Demand
+  property unit : String
+  property symbol : String
+  property receiver : String
+  property class_call : Bool
+  property name : String
+  property args : Array(String)?
+
+  def initialize(@unit : String, @symbol : String, @receiver : String, @class_call : Bool,
+                 @name : String, @args : Array(String)?)
+  end
+end
+
 # What one function reaches of module state (`Section::Reaches`).
 pub class ReachRecord
   property function : String
@@ -398,6 +416,8 @@ pub class Artifact
   property pins : Array(PinRecord)
   # What each function reaches of module state. Nil when the section is absent (`Section::Reaches`).
   property reaches : Array(ReachRecord)?
+  # What the module's object code calls in other modules' units. Empty when the section is absent (`Section::Demands`).
+  property demands : Array(Demand)
   # Where the nodes of each body in `mono_bodies`, and of the initialiser, were written (`Section::SourcePositions`).
   property body_positions : Hash(String, Array(SourcePosition))
   property initialiser_positions : Array(SourcePosition)
@@ -444,6 +464,7 @@ pub class Artifact
     @spawns = [] of SpawnRecord
     @pins = [] of PinRecord
     @reaches = nil
+    @demands = [] of Demand
   end
 
   def import_names : Array(String)
@@ -758,7 +779,7 @@ end
 
 pub class IyiMod
   MAGIC               = "IYIMOD\0\0"
-  FORMAT_VERSION      = 64_u32
+  FORMAT_VERSION      = 65_u32
   TOP_LEVEL_CONTAINER = "::"
   MACRO_HOOKS         = ["included", "extended", "inherited", "method_added", "finished"]
 
@@ -862,6 +883,7 @@ pub class IyiMod
     when 65_u16 then "SourcePositions"
     when 66_u16 then "Spawns"
     when 67_u16 then "Reaches"
+    when 68_u16 then "Demands"
     else             "an unknown"
     end
   end
@@ -941,6 +963,7 @@ pub class IyiMod
     spawns = [] of SpawnRecord
     pins = [] of PinRecord
     reaches : Array(ReachRecord)? = nil
+    demands = [] of Demand
     source_positions : SourcePositionsDecoded? = nil
     body_positions = {} of String => Array(SourcePosition)
     initialiser_positions = [] of SourcePosition
@@ -994,6 +1017,7 @@ pub class IyiMod
         spawns = decoded_spawns[0]
         pins = decoded_spawns[1]
       when 67_u16 then reaches = decode_reaches(payload, path)
+      when 68_u16 then demands = decode_demands(payload, path)
       else
         # Unknown section skipped
       end
@@ -1055,6 +1079,7 @@ pub class IyiMod
     artifact.spawns = spawns
     artifact.pins = pins
     artifact.reaches = reaches
+    artifact.demands = demands
     artifact
   end
 
@@ -1132,6 +1157,9 @@ pub class IyiMod
     sections << {66_u16, encode_spawns(artifact.spawns, artifact.pins)} unless artifact.spawns.empty? && artifact.pins.empty?
     if reaches = artifact.reaches
       sections << {67_u16, encode_reaches(reaches)}
+    end
+    unless artifact.demands.empty?
+      sections << {68_u16, encode_demands(artifact.demands)}
     end
     sections << {5_u16, encode_macro_bodies(artifact)} unless artifact.macro_bodies.empty?
     sections << {6_u16, encode_mono_bodies(artifact)} unless artifact.mono_bodies.empty?
@@ -1378,6 +1406,53 @@ pub class IyiMod
       why = r.read_string
       module_name = r.read_string
       res << ReachRecord.new(fn_name, label, type_name, kind, use_site, path, why, module_name, r.read_string)
+      i = i + 1
+    end
+    res
+  end
+
+  # `Section::Demands`: what the module's object code calls in other modules' units (v65).
+  def self.encode_demands(demands : Array(Demand)) : String
+    w = IOBuffer.new
+    w.write_u32_le(demands.size.to_u64.to_u32)
+    i = 0
+    while i < demands.size
+      demand = demands[i]
+      w.write_string(demand.unit)
+      w.write_string(demand.symbol)
+      w.write_string(demand.receiver)
+      w.write_string(demand.class_call ? "class" : "instance")
+      w.write_string(demand.name)
+      if args = demand.args
+        w.write_string("args")
+        w.write_strings(args)
+      else
+        w.write_string("none")
+        w.write_strings([] of String)
+      end
+      i = i + 1
+    end
+    w.to_s
+  end
+
+  def self.decode_demands(payload : String, path : String = "") : Array(Demand)
+    r = BinaryReader.new(payload, path)
+    count = r.read_count(28)
+    res = [] of Demand
+    i = 0
+    while i < count
+      unit = r.read_string
+      symbol = r.read_string
+      receiver = r.read_string
+      class_call = r.read_string == "class"
+      name = r.read_string
+      written = r.read_string == "args"
+      list = r.read_strings
+      if written
+        res << Demand.new(unit, symbol, receiver, class_call, name, list)
+      else
+        res << Demand.new(unit, symbol, receiver, class_call, name, nil)
+      end
       i = i + 1
     end
     res
@@ -2875,6 +2950,16 @@ pub class IyiMod
       i = 0
       while i < artifact.symbol_literals.size
         res = res + "  :" + artifact.symbol_literals[i] + "\n"
+        i = i + 1
+      end
+    end
+
+    unless artifact.demands.empty?
+      res = res + "demands       " + artifact.demands.size.to_s + " calls into other modules' units\n"
+      i = 0
+      while i < artifact.demands.size
+        demand = artifact.demands[i]
+        res = res + "  " + demand.unit + ": " + demand.symbol + "\n"
         i = i + 1
       end
     end

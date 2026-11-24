@@ -680,8 +680,17 @@ printf 'outside-secret\n' > "$CONF/layout/outside/secret.txt"
 : > "$CONF/layout/app/main.iyi"
 : > "$CONF/layout/dep/dep.iyi"
 : > "$CONF/layout/outside/outside.iyi"
-ln -s ../outside "$CONF/layout/app/escape"
-ln -s ../nowhere "$CONF/layout/app/dangling"
+# A link needs a shell that can make one. Git Bash on Windows answers `ln -s` with a copy of a target that exists and
+# an error for one that does not (the `dangling` link below), so there the three cases that read through a link are
+# left out and said so, as bench/packages_resolve.sh does for its real-link step. Nothing else changes: every other
+# case, and every other proof, runs on Windows as it does elsewhere.
+CONF_LINKS=yes
+if [ "$HOST_OS" = windows ]; then
+  CONF_LINKS=no
+else
+  ln -s ../outside "$CONF/layout/app/escape"
+  ln -s ../nowhere "$CONF/layout/app/dangling"
+fi
 CONF_L="$(cd "$CONF/layout" && pwd -P)"
 export IYI_MACRO_CONFINE_SET=gate-value
 unset IYI_MACRO_CONFINE_UNSET
@@ -906,6 +915,10 @@ body={{ system("echo hi") }}
 CONFINE_CASES
 sed -e "s#@L@#$CONF_L#g" -e "s#@REPO@#$REPO_NATIVE#g" "$CONF/cases.manifest" |
   awk -v dir="$CONF/cases" '/^case /{f=dir "/" $2 ".case"; next} {print > f}'
+if [ "$CONF_LINKS" != yes ]; then
+  rm -f "$CONF/cases/app-read-through-link.case" "$CONF/cases/app-read-link-dotdot.case" "$CONF/cases/app-dangling-link.case"
+  host_limited "confinement cases app-read-through-link, app-read-link-dotdot and app-dangling-link need a link, which this shell cannot make; the Linux and darwin self-host gates run them"
+fi
 # The layout and the repository print as <LAYOUT> and <REPO>, so the table reads the same on every run.
 confine_normal() {
   sed -e "s#$CONF_L#<LAYOUT>#g" -e "s#$REPO_NATIVE#<REPO>#g"
@@ -1335,17 +1348,22 @@ prove_mutation "the standard library roots are not found" "$CONFINEMENT" \
   -- check_confinement_still_matches || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "a link that leads nowhere is not refused" "$CONFINEMENT" \
-  'if File.symlink?(full)' \
-  'if false' \
-  -- check_confinement_still_matches || status=1
-MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+# These two need the links of section 2c, so they run where the shell made them.
+if [ "$CONF_LINKS" = yes ]; then
+  prove_mutation "a link that leads nowhere is not refused" "$CONFINEMENT" \
+    'if File.symlink?(full)' \
+    'if false' \
+    -- check_confinement_still_matches || status=1
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "a dotdot after a link is applied before the link" "$CONFINEMENT" \
-  'full = Path.new(path).absolute? ? path : File.join(@base_dir, path)' \
-  'full = File.expand_path(path, @base_dir)' \
-  -- check_confinement_still_matches || status=1
-MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+  prove_mutation "a dotdot after a link is applied before the link" "$CONFINEMENT" \
+    'full = Path.new(path).absolute? ? path : File.join(@base_dir, path)' \
+    'full = File.expand_path(path, @base_dir)' \
+    -- check_confinement_still_matches || status=1
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+else
+  host_limited "the proofs 'a link that leads nowhere is not refused' and 'a dotdot after a link is applied before the link' need the link cases, which this shell cannot make"
+fi
 
 prove_mutation "relative paths ignore the base directory" "$CONFINEMENT" \
   'File.join(@base_dir, path)' \

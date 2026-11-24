@@ -1971,13 +1971,21 @@ END { if (n_defs != 1 || n_seen != 1 || n_scan != 1 || n_guard != 1 || n_skip !=
       UNLIST_ANCHOR='/^  def self.wait_posix\(fd : Int32, direction : Int32, ms : Int32\) : Nil \| Cancelled$/'
       UNLIST_LIST='/^    fiber\.list_on\(st\.object_id\) if moving$/' ;;
   esac
+  # The block goes after the anchor's own `end`, not before its def. On Linux
+  # and darwin the def carries `@[Effect(:scheduler)]` on the line above it, and
+  # a block between the two hands that annotation to the block's first class
+  # variable, which the compiler refuses.
   UNLIST_DEFS="$UNLIST_ANCHOR {
-$UNLIST_PRINTS
   print
   n_defs++; inowner = 1
   next
 }"
-  UNLIST_SCOPE='inowner && /^  end$/ { inowner = 0 }
+  UNLIST_SCOPE='inowner && /^  end$/ {
+  print
+'"$UNLIST_PRINTS"'
+  inowner = 0
+  next
+}
 /^  def self.cancel_moving\(fiber : IyiFiber\) : Nil$/ { incancel = 1; n_cancel++ }
 incancel && /^  end$/ { incancel = 0 }'
   UNLIST_HOOK_RULE="inowner && $UNLIST_LIST { print; print \"    force_armed\"; n_list++; next }"

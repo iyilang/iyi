@@ -4,6 +4,96 @@
 
 ### Added
 
+- **iyi is a self-hosting project.** The owner accepted Jason Waldrip's
+  proposal (#172) on 2026-11-24, reversing Appendix B #10: the compiler is
+  ported to iyi and gets its own back end and linker, so that iyi is built
+  from iyi with no Crystal and no LLVM on the machine. The order is part of
+  the decision: additive pull requests by component, each behind a gate
+  against the hosted compiler, changing no default; a target's default
+  moves only on that target's measurements; the Crystal-hosted compiler
+  builds the first one written in iyi; and deleting the hosted compiler is
+  the last pull request, opened on its own once the compiler builds itself
+  to the same bytes (SPEC.md III.9, B.2a, Appendix B #27).
+- **The first compiler component written in iyi: `src/compiler/platform/`
+  (#181).** 727 lines of iyi parse and normalise target triples, derive the
+  flags a target implies, name objects and executables, and build linker
+  commands, MSVC's included. `bench/selfhost_platform_exercise.sh` builds
+  the port plain and `--release`, compares all 24 target triples of its
+  corpus with the hosted compiler byte for byte, checks that malformed
+  triples are refused, and holds 6 broken copies of the port to failing.
+  The `selfhost`, `selfhost-darwin` and `selfhost-windows` jobs run it
+  (through `bench/selfhost_gates.sh`) on Linux, darwin arm64 and Windows
+  x86_64 on every full run, and on a pull request that touches the iyi
+  compiler sources or their gates.
+  Nothing in the hosted compiler uses it yet.
+- **A Mach-O arm64 object reader and writer in iyi: `src/compiler/native/obj/`
+  (#184).** 1,718 lines of iyi hold an object model (sections, symbols,
+  relocations, build version, linker options, data in code) and read and
+  write arm64 Mach-O objects; `src/compiler/tools/obj_macho.iyi` is its
+  driver. `bench/native_obj_exercise.sh` has the hosted compiler
+  cross-compile every `samples/iyi` program and an external-globals fixture
+  to an arm64 Mach-O object, and requires the port to read each one, write
+  it back and read the result equal to the first read (29 objects). It holds
+  the driver to the platform's dependency floor and catches 2 broken copies
+  on every host; on macOS it also links each rewritten object with the link
+  line the compiler printed, requires the program to behave as the original
+  does, and catches 3 more. Nothing in the hosted compiler uses it yet.
+- **The IR core in iyi: `src/compiler/ir/` (#185).** 5,672 lines of iyi:
+  IR types, values and instructions, a builder, the text parser and
+  printer, the verifier, the intrinsics and target data layouts;
+  `src/compiler/tools/ir_core.iyi` is its driver.
+  `bench/native_ir_exercise.sh` requires every valid fixture to print back
+  byte for byte and verify, a module the builder made to print the same
+  after a parse, 19 malformed fixtures to be refused under their named
+  rules and 14 literal and intrinsic fixtures under theirs, the accepted
+  intrinsic names to match a checked-in list of 151, and the data and
+  struct layouts of five targets to agree with LLVM's. It catches 29 broken
+  copies. Windows checks its WASI layouts against the LLVM references the
+  Linux `selfhost` job exports from the same commit, so `selfhost-windows`
+  now runs after `selfhost`. Nothing in the hosted compiler uses it yet.
+- **The lexer, parser and syntax tree in iyi: `src/compiler/syntax/` and
+  `src/compiler/foundation/` (#186).** 17,752 lines of iyi (tokens, the
+  lexer, the parser, the AST with its visitor and transformer) and 141 of
+  foundation types; `src/compiler/tools/parse.iyi` is the parser's driver.
+  Three gates hold it to the hosted front end.
+  `bench/selfhost_lexer_exercise.sh` compares the token streams of 37
+  syntax fixtures (17,596 tokens) and catches 6 broken copies.
+  `bench/selfhost_parser_exercise.sh` compares the trees of 46 fixtures
+  (3,184 nodes), the refusal text of malformed sources, and the verdict on
+  all 464 tracked `.iyi` files, and catches 70 broken copies.
+  `bench/selfhost_ast_exercise.sh` builds, clones, compares, hashes and
+  prints all 104 node kinds and catches 5. Nothing in the hosted compiler
+  uses it yet.
+- **The command driver and build-daemon protocol in iyi:
+  `src/compiler/command/` (#207).** 3,672 lines of iyi. The hosted CLI
+  remains unchanged; these components add no command wiring. Output
+  suffixes follow the configured target and source diagnostics use native
+  path separators. Windows daemon identity reuses the file module's Win32
+  metadata binding. `bench/selfhost_command_exercise.sh` compares 250
+  argument vectors with the hosted driver (stdout, stderr and exit status)
+  and `bench/selfhost_daemon_exercise.sh` 30 daemon scenarios (frames,
+  socket-path limits, executable search and identity); each catches 6
+  broken copies. The hosted daemon oracle passes standard-stream selectors
+  using Windows' native handle width. `bench/doc_numbers.py` now holds the
+  driver's two version literals to `src/IYI_VERSION` and `src/VERSION`.
+- The seven gates above run in the `selfhost`, `selfhost-darwin` and
+  `selfhost-windows` jobs through `bench/selfhost_gates.sh`, as #181's does.
+
+### Changed
+
+- **Observed runs no longer record the startup read of the `String#hash` key as
+  the program's entropy.** `__iyi_hash_key` is `@[Effect(:primitive)]`, a
+  runtime-internal effect that observers do not wrap: every process reads the
+  key once, at startup, before the program's own code runs (#212). The key and
+  its once-per-process read are unchanged. `String#hash` is now
+  `@[Effect(:entropy)]`, so a program that hashes a string records an entropy
+  read at that use, and a program that never hashes records none. A program
+  that reads entropy itself, through `std/random` or the OS, is recorded as
+  before. The observer keeps its written-path and environment sets in arrays,
+  so observing a run does not hash strings itself.
+
+### Added
+
 - **Programs can request larger fiber stacks before starting work.**
   `IyiFiber.stack_bytes=` accepts whole 64 KiB multiples of at least 256 KiB,
   retaining 256 KiB as the default. A different size is refused after a task,

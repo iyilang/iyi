@@ -61,8 +61,14 @@ module Iyi
     # The compiler's own reads that happen only during codegen (or release
     # partitioning): a cached test or warm build does no codegen, so these
     # are recorded whether or not codegen runs, ensuring they participate
-    # before receipt lookup.
-    CODEGEN_ONLY_ENV = %w(IYI_RELEASE_PARTITIONS IYI_RELEASE_IMPORT IYI_RELEASE_INLINE)
+    # before receipt lookup. A macro `run` helper is compiled with `--release`
+    # inside the parent's recorder, so every knob `Compiler#release_partitions`,
+    # `#release_import`, `#release_inline` and `#release_group` read is in the
+    # parent's environment on the cold build and in none of its warm ones:
+    # a name missing here is a `cenv` that differs between the two, and a
+    # test whose receipt was recorded cold never hits (`IYI_RELEASE_GROUP`
+    # was added to the compiler without being added here).
+    CODEGEN_ONLY_ENV = %w(IYI_RELEASE_PARTITIONS IYI_RELEASE_IMPORT IYI_RELEASE_INLINE IYI_RELEASE_GROUP)
 
     @@current : BuildInputs?
 

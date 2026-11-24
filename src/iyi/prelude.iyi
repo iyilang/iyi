@@ -547,7 +547,7 @@ end
   # signal cut short (-EINTR) is asked again; one older than 3.17, or a
   # sandbox that hides the call (-ENOSYS), is read from /dev/urandom, as
   # `Random::Secure` reads it. Sixteen bytes are never a short answer.
-  @[Effect(:entropy)]; def __iyi_hash_key : {UInt64, UInt64}
+  @[Effect(:primitive)]; def __iyi_hash_key : {UInt64, UInt64}
     key = {0_u64, 0_u64}
     buffer = pointerof(key).as(UInt8*)
     flags = 4_i64
@@ -721,7 +721,7 @@ end
 
   # The sixteen bytes `String#hash` is keyed with, read once per process
   # (#212).
-  @[Effect(:entropy)]; def __iyi_hash_key : {UInt64, UInt64}
+  @[Effect(:primitive)]; def __iyi_hash_key : {UInt64, UInt64}
     key = {0_u64, 0_u64}
     LibC.arc4random_buf(pointerof(key).as(Void*), 16_u64)
     key
@@ -1609,7 +1609,7 @@ end
 
   # The sixteen bytes `String#hash` is keyed with, read once per process
   # (#212).
-  @[Effect(:entropy)]; def __iyi_hash_key : {UInt64, UInt64}
+  @[Effect(:primitive)]; def __iyi_hash_key : {UInt64, UInt64}
     key = {0_u64, 0_u64}
     raise "String#hash: RtlGenRandom answered no bytes" if LibIyiAdvapi32.RtlGenRandom(pointerof(key).as(Void*), 16_u32) == 0_u8
     key
@@ -1736,7 +1736,7 @@ end
 
   # The sixteen bytes `String#hash` is keyed with, read once per process
   # (#212).
-  @[Effect(:entropy)]; def __iyi_hash_key : {UInt64, UInt64}
+  @[Effect(:primitive)]; def __iyi_hash_key : {UInt64, UInt64}
     key = {0_u64, 0_u64}
     raise "String#hash: random_get answered an errno" if LibWasi.random_get(pointerof(key).as(UInt8*), 16_u32) != 0_u16
     key

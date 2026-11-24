@@ -1,0 +1,35 @@
+# Literals fixture: integers, floats, chars, strings, symbols, bools, nil, ranges
+42
+-17
+0b101010
+0o755
+0x2a
+123_456_789
+10_i64
+20_u8
+30_u16
+40_u32
+50_u64
+60_i8
+70_i16
+80_i32
+3.14159
+-0.001
+1e10
+2.5e-3
+1.0_f32
+2.0_f64
+'a'
+'Z'
+'\n'
+'\t'
+"hello world"
+"escaped \"quotes\" and \n newlines"
+:my_symbol
+:another_symbol
+true
+false
+nil
+1..10
+1...100
+0..-1

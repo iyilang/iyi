@@ -26,6 +26,58 @@
   x86_64 on every full run, and on a pull request that touches the iyi
   compiler sources or their gates.
   Nothing in the hosted compiler uses it yet.
+- **A Mach-O arm64 object reader and writer in iyi: `src/compiler/native/obj/`
+  (#184).** 1,718 lines of iyi hold an object model (sections, symbols,
+  relocations, build version, linker options, data in code) and read and
+  write arm64 Mach-O objects; `src/compiler/tools/obj_macho.iyi` is its
+  driver. `bench/native_obj_exercise.sh` has the hosted compiler
+  cross-compile every `samples/iyi` program and an external-globals fixture
+  to an arm64 Mach-O object, and requires the port to read each one, write
+  it back and read the result equal to the first read (29 objects). It holds
+  the driver to the platform's dependency floor and catches 2 broken copies
+  on every host; on macOS it also links each rewritten object with the link
+  line the compiler printed, requires the program to behave as the original
+  does, and catches 3 more. Nothing in the hosted compiler uses it yet.
+- **The IR core in iyi: `src/compiler/ir/` (#185).** 5,672 lines of iyi:
+  IR types, values and instructions, a builder, the text parser and
+  printer, the verifier, the intrinsics and target data layouts;
+  `src/compiler/tools/ir_core.iyi` is its driver.
+  `bench/native_ir_exercise.sh` requires every valid fixture to print back
+  byte for byte and verify, a module the builder made to print the same
+  after a parse, 19 malformed fixtures to be refused under their named
+  rules and 14 literal and intrinsic fixtures under theirs, the accepted
+  intrinsic names to match a checked-in list of 151, and the data and
+  struct layouts of five targets to agree with LLVM's. It catches 29 broken
+  copies. Windows checks its WASI layouts against the LLVM references the
+  Linux `selfhost` job exports from the same commit, so `selfhost-windows`
+  now runs after `selfhost`. Nothing in the hosted compiler uses it yet.
+- **The lexer, parser and syntax tree in iyi: `src/compiler/syntax/` and
+  `src/compiler/foundation/` (#186).** 17,752 lines of iyi (tokens, the
+  lexer, the parser, the AST with its visitor and transformer) and 141 of
+  foundation types; `src/compiler/tools/parse.iyi` is the parser's driver.
+  Three gates hold it to the hosted front end.
+  `bench/selfhost_lexer_exercise.sh` compares the token streams of 37
+  syntax fixtures (17,596 tokens) and catches 6 broken copies.
+  `bench/selfhost_parser_exercise.sh` compares the trees of 46 fixtures
+  (3,184 nodes), the refusal text of malformed sources, and the verdict on
+  all 464 tracked `.iyi` files, and catches 70 broken copies.
+  `bench/selfhost_ast_exercise.sh` builds, clones, compares, hashes and
+  prints all 104 node kinds and catches 5. Nothing in the hosted compiler
+  uses it yet.
+- **The command driver and build-daemon protocol in iyi:
+  `src/compiler/command/` (#207).** 3,672 lines of iyi. The hosted CLI
+  remains unchanged; these components add no command wiring. Output
+  suffixes follow the configured target and source diagnostics use native
+  path separators. Windows daemon identity reuses the file module's Win32
+  metadata binding. `bench/selfhost_command_exercise.sh` compares 250
+  argument vectors with the hosted driver (stdout, stderr and exit status)
+  and `bench/selfhost_daemon_exercise.sh` 30 daemon scenarios (frames,
+  socket-path limits, executable search and identity); each catches 6
+  broken copies. The hosted daemon oracle passes standard-stream selectors
+  using Windows' native handle width. `bench/doc_numbers.py` now holds the
+  driver's two version literals to `src/IYI_VERSION` and `src/VERSION`.
+- The seven gates above run in the `selfhost`, `selfhost-darwin` and
+  `selfhost-windows` jobs through `bench/selfhost_gates.sh`, as #181's does.
 
 ### Changed
 
@@ -364,15 +416,6 @@ entry "What the fixes below change in a program's source" has the details.
   settings, and cache writes replace an existing checkpoint through an
   exclusive same-directory file. Package downloads do not use them yet.
   Independent cryptographic review is required before anything depends on them.
-
-- Add the command parser and build-daemon protocol in iyi, with native-host
-  comparisons over 250 argument vectors and 30 daemon scenarios.
-  The hosted CLI remains unchanged; these components add no command wiring.
-  Output suffixes follow the configured target and source diagnostics use
-  native path separators. Windows daemon identity reuses the file module's
-  Win32 metadata binding. The hosted daemon oracle passes standard-stream
-  selectors using Windows' native handle width.
-
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.

@@ -680,16 +680,25 @@ printf 'outside-secret\n' > "$CONF/layout/outside/secret.txt"
 : > "$CONF/layout/app/main.iyi"
 : > "$CONF/layout/dep/dep.iyi"
 : > "$CONF/layout/outside/outside.iyi"
-# A link needs a shell that can make one. Git Bash on Windows answers `ln -s` with a copy of a target that exists and
-# an error for one that does not (the `dangling` link below), so there the three cases that read through a link are
-# left out and said so, as bench/packages_resolve.sh does for its real-link step. Nothing else changes: every other
-# case, and every other proof, runs on Windows as it does elsewhere.
-CONF_LINKS=yes
+# The cases below read through two links: `escape`, to a directory outside the package, and `dangling`, to nothing.
+# Git Bash on Windows answers a plain `ln -s` with a copy of a target that exists and an error for one that does not,
+# so there the links are asked for as native ones (MSYS=winsymlinks:nativestrict, which fails rather than copies and
+# needs the symlink privilege a CI runner's account has) and then checked to be links. Where that fails, the three
+# cases that need them and the two proofs that need those cases are not run and say so (`host-limited:`, as
+# bench/packages_resolve.sh does for its real-link step); everywhere a link can be made, all of them run.
+CONF_LINKS=no
 if [ "$HOST_OS" = windows ]; then
-  CONF_LINKS=no
+  if MSYS=winsymlinks:nativestrict ln -s ../outside "$CONF/layout/app/escape" 2>/dev/null &&
+     MSYS=winsymlinks:nativestrict ln -s ../nowhere "$CONF/layout/app/dangling" 2>/dev/null &&
+     [ -L "$CONF/layout/app/escape" ] && [ -L "$CONF/layout/app/dangling" ]; then
+    CONF_LINKS=yes
+  else
+    rm -rf "$CONF/layout/app/escape" "$CONF/layout/app/dangling"
+  fi
 else
   ln -s ../outside "$CONF/layout/app/escape"
   ln -s ../nowhere "$CONF/layout/app/dangling"
+  CONF_LINKS=yes
 fi
 CONF_L="$(cd "$CONF/layout" && pwd -P)"
 export IYI_MACRO_CONFINE_SET=gate-value
@@ -917,7 +926,7 @@ sed -e "s#@L@#$CONF_L#g" -e "s#@REPO@#$REPO_NATIVE#g" "$CONF/cases.manifest" |
   awk -v dir="$CONF/cases" '/^case /{f=dir "/" $2 ".case"; next} {print > f}'
 if [ "$CONF_LINKS" != yes ]; then
   rm -f "$CONF/cases/app-read-through-link.case" "$CONF/cases/app-read-link-dotdot.case" "$CONF/cases/app-dangling-link.case"
-  host_limited "confinement cases app-read-through-link, app-read-link-dotdot and app-dangling-link need a link, which this shell cannot make; the Linux and darwin self-host gates run them"
+  host_limited "skipped: no symlinks on this runner: the cases app-read-through-link, app-read-link-dotdot and app-dangling-link need a link; every runner that can make one runs them"
 fi
 # The layout and the repository print as <LAYOUT> and <REPO>, so the table reads the same on every run.
 confine_normal() {
@@ -1362,7 +1371,7 @@ if [ "$CONF_LINKS" = yes ]; then
     -- check_confinement_still_matches || status=1
   MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 else
-  host_limited "the proofs 'a link that leads nowhere is not refused' and 'a dotdot after a link is applied before the link' need the link cases, which this shell cannot make"
+  host_limited "skipped: no symlinks on this runner: the proofs 'a link that leads nowhere is not refused' and 'a dotdot after a link is applied before the link' need the link cases"
 fi
 
 prove_mutation "relative paths ignore the base directory" "$CONFINEMENT" \

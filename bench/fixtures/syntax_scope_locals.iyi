@@ -1,0 +1,57 @@
+# Variable scopes. An outer local is a variable in a lexical scope (a proc literal, a block,
+# typeof) and a call in an isolated one (a def, a constant's value, a top-level instance or
+# class variable's value). A class and a module share the enclosing scope, and a def inside
+# a class is isolated from it. A name is a local in one def and a call in the next. A local
+# is an operand in `x -1` and `x /2`, and `$~` is a variable when it is assigned.
+
+x = 1
+y = 2
+
+def read_outer
+  x
+end
+
+def first_total
+  total = 1
+  total
+end
+
+def second_total
+  total
+end
+
+class Holder
+  shared = x
+
+  def read_in_class
+    x
+  end
+end
+
+module Namespace
+  inside = x
+end
+
+proc_read = ->(z) { x }
+block_read = [1].each { |item| x }
+block_leak = [1].each { |leaked| leaked }
+block_after = leaked
+
+typeof(typed = 1)
+typed_after = typed
+typeof_outer = typeof(x)
+
+LIMIT = x
+@instance_from_outer = x
+@@class_from_outer = x
+
+minus = x - 1
+divided = x / 2
+x += y
+
+$~ = 1
+after_dollar = $~
+
+macro shown
+  x
+end

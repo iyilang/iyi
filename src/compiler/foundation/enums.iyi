@@ -1,0 +1,23 @@
+module compiler/foundation/enums
+
+class ::String
+  def byte_at?(index : Int32) : UInt8?
+    index = bytesize + index if index < 0
+    return nil if index < 0 || index >= bytesize
+    byte_at(index)
+  end
+
+  def rchop : String
+    return "" if empty?
+    byte_slice(0, bytesize - 1)
+  end
+
+  def rchop(suffix : String) : String
+    return self unless ends_with?(suffix)
+    byte_slice(0, bytesize - suffix.bytesize)
+  end
+
+  def rchop(suffix : Char) : String
+    rchop(suffix.to_s)
+  end
+end

@@ -1,0 +1,21 @@
+# Macro text is split into literals where the hosted lexer splits it: before an
+# `e` that follows a space, `(`, `[`, `{` or `;`, and inside a `#{...}` interpolation
+# that a string opens in macro text. A string in macro text that holds `e` is one literal.
+
+macro escaped_error
+  err = LibWs2.last_error
+  raise "cannot receive from UDP socket: #{refusal(-(err.to_i64), false)}" if err != 997
+end
+
+macro braces_and_e
+  a {b} c
+  f(-(err.x))
+  a e b
+  z = 1 + ee
+  x = "one e two"
+end
+
+macro interpolated_string
+  y = "#{-(err)}"
+  w = "#{err} and #{-(err)} and more"
+end

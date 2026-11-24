@@ -1,0 +1,6 @@
+; iyi-ir 1
+source_filename = "wide_structs"
+target triple = "@TRIPLE@"
+target datalayout = "@DATALAYOUT@"
+%Wide = type { i8, i192, i33 }
+%Mid = type { i65, i256, i9 }

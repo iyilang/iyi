@@ -1,0 +1,528 @@
+module compiler/ir/verifier
+
+import compiler/ir/types::{IrType, TypeTable}
+import compiler/ir/values::{Value, Param}
+import compiler/ir/inst::{Op, Inst, Block, CallConv, CallAux, AsmAux, IntrinsicAux, terminator_op?}
+import compiler/ir/function::{Function, Global, Linkage, TlsModel, Visibility}
+import compiler/ir/module::{Module}
+import compiler/ir/intrinsics::{intrinsic_accepts?, intrinsic_signature, intrinsic_name}
+
+# A rule the module breaks. `kind` names the rule, so a fixture can be refused for exactly that reason.
+pub class IrError
+  getter kind : String
+  getter message : String
+  getter function : String?
+
+  def initialize(@kind : String, @message : String, @function : String?)
+  end
+
+  def to_s : String
+    text = "error[#{@kind}]: #{@message}"
+    if fn = @function
+      text += " (in @#{fn})"
+    end
+    text
+  end
+end
+
+# Every rule the module breaks, in module order. An empty array means the module is well formed.
+pub def verify(m : Module) : Array(IrError)
+  Verifier.new(m).run
+end
+
+# The rules one function breaks: what `verify` reports for that function alone.
+pub def verify_function(m : Module, f : Function) : Array(IrError)
+  Verifier.new(m).run_function(f)
+end
+
+class Verifier
+  def initialize(@module : Module)
+    @errors = [] of IrError
+    @types = @module.types
+  end
+
+  def run : Array(IrError)
+    @module.globals.each do |g|
+      check_visibility(g.name, g.linkage, g.visibility, nil)
+      init = g.initializer
+      next unless init
+      unless init.type == g.value_type
+        report("types", "the initialiser of @#{g.name} is #{init.type}, not #{g.value_type}", nil)
+      end
+    end
+    @module.functions.each do |f|
+      check_visibility(f.name, f.linkage, f.visibility, f)
+      check_function(f) unless f.declaration?
+    end
+    @errors
+  end
+
+  def run_function(f : Function) : Array(IrError)
+    check_visibility(f.name, f.linkage, f.visibility, f)
+    check_function(f) unless f.declaration?
+    @errors
+  end
+
+  # A local symbol is invisible outside its module, so it has no visibility to state.
+  def check_visibility(name : String, linkage : Linkage, visibility : Visibility, fn : Function?) : Nil
+    local = linkage == Linkage::Internal || linkage == Linkage::Private
+    return if visibility == Visibility::Default
+    report("visibility", "@#{name} has local linkage and cannot have a visibility", fn) if local
+  end
+
+  def report(kind : String, message : String, fn : Function?) : Nil
+    name = fn ? fn.name : nil
+    @errors << IrError.new(kind, message, name)
+  end
+
+  # The operand's own type: a function or a global is an address, so a pointer.
+  def operand_type(v : Value) : IrType
+    if v.is_a?(Function) || v.is_a?(Global)
+      return @types.ptr(0)
+    end
+    v.type
+  end
+
+  def check_function(f : Function) : Nil
+    names = Hash(String, Bool).new
+    f.blocks.each do |b|
+      if names[b.name]?
+        report("duplicate-name", "two blocks are named #{b.name}", f)
+      end
+      names[b.name] = true
+      unless b.terminated?
+        report("terminator", "block #{b.name} does not end with a terminator", f)
+      end
+      seen_non_phi = false
+      b.insts.each_with_index do |i, k|
+        if terminator_op?(i.op) && k != b.insts.size - 1
+          report("terminator", "block #{b.name} has a terminator before its last instruction", f)
+        end
+        if i.op == Op::Phi
+          if seen_non_phi
+            report("terminator", "a phi in block #{b.name} follows a non-phi instruction", f)
+          end
+        else
+          seen_non_phi = true
+        end
+      end
+    end
+    return if f.blocks.empty?
+
+    check_value_names(f)
+    check_signature(f)
+    dom = dominators(f)
+    reachable = reachable_blocks(f)
+    check_instructions(f, dom, reachable)
+    check_tls(f, dom, reachable)
+  end
+
+  def check_value_names(f : Function) : Nil
+    seen = Hash(String, Bool).new
+    f.params.each do |p|
+      next if p.name.empty?
+      report("duplicate-name", "two values are named #{p.name}", f) if seen[p.name]?
+      seen[p.name] = true
+    end
+    f.blocks.each do |b|
+      b.insts.each do |i|
+        next if i.name.empty?
+        report("duplicate-name", "two values are named #{i.name}", f) if seen[i.name]?
+        seen[i.name] = true
+      end
+    end
+  end
+
+  # A function with the C convention takes and returns only the forms the C ABI lowering produces.
+  def check_signature(f : Function) : Nil
+    return unless f.cc == CallConv::C
+    lowered = f.fn_type.return_type
+    unless c_lowered?(lowered)
+      report("cc-lowered", "@#{f.name} uses the C convention but returns #{lowered}", f)
+    end
+    f.fn_type.param_types.each do |t|
+      report("cc-lowered", "@#{f.name} uses the C convention but takes #{t}", f) unless c_lowered?(t)
+    end
+  end
+
+  # What a C-convention signature may carry: a scalar, or an aggregate in the form LLVM's C ABI lowering gives it.
+  # That is an array of integers or of floats (`[2 x i64]`, `[4 x float]`) or a literal struct of scalars
+  # (`{ i64, i64 }`). A named struct, a packed struct, and any aggregate nested in those are refused.
+  def c_lowered?(t : IrType) : Bool
+    return true if scalar_type?(t)
+    if t.array?
+      element = t.element_type
+      return element.int? || element.float?
+    end
+    if t.struct?
+      return false if t.packed_struct? || !t.struct_name.nil?
+      return t.struct_element_types.all? { |f| scalar_type?(f) }
+    end
+    false
+  end
+
+  def scalar_type?(t : IrType) : Bool
+    t.void? || t.int? || t.float? || t.pointer?
+  end
+
+  # Dominance sets: dom[b][a] is true when block a dominates block b. Only reachable blocks matter.
+  def dominators(f : Function) : Array(Array(Bool))
+    n = f.blocks.size
+    index = block_index(f)
+    preds = Array(Array(Int32)).new
+    n.times { preds << [] of Int32 }
+    f.blocks.each do |b|
+      b.preds.each do |p|
+        preds[index[b.name]] << index[p.name]
+      end
+    end
+    dom = Array(Array(Bool)).new
+    n.times do |b|
+      row = Array(Bool).new
+      n.times { |a| row << (b == 0 ? a == 0 : true) }
+      dom << row
+    end
+    changed = true
+    while changed
+      changed = false
+      (1...n).each do |b|
+        next if preds[b].empty?
+        row = Array(Bool).new
+        n.times do |a|
+          all = true
+          preds[b].each do |p|
+            all = false unless dom[p][a]
+          end
+          row << (all || a == b)
+        end
+        if row != dom[b]
+          dom[b] = row
+          changed = true
+        end
+      end
+    end
+    dom
+  end
+
+  def block_index(f : Function) : Hash(String, Int32)
+    index = Hash(String, Int32).new
+    f.blocks.each_with_index { |b, i| index[b.name] = i }
+    index
+  end
+
+  def reachable_blocks(f : Function) : Array(Bool)
+    index = block_index(f)
+    seen = Array(Bool).new
+    f.blocks.each { |b| seen << false }
+    stack = [0] of Int32
+    until stack.empty?
+      b = stack.pop
+      next if seen[b]
+      seen[b] = true
+      if f.blocks[b].terminated?
+        f.blocks[b].terminator.targets.each { |t| stack << index[t.name] }
+      end
+    end
+    seen
+  end
+
+  def check_instructions(f : Function, dom : Array(Array(Bool)), reachable : Array(Bool)) : Nil
+    index = block_index(f)
+    position = Hash(Value, Int32).new
+    f.params.each { |p| position[p] = -1 }
+    f.blocks.each_with_index do |b, bi|
+      b.insts.each_with_index do |i, k|
+        position[i] = bi * 100000 + k unless i.type.void?
+      end
+    end
+    f.blocks.each_with_index do |b, bi|
+      next unless reachable[bi]
+      b.insts.each_with_index do |i, k|
+        check_instruction(f, i)
+        if i.op == Op::Phi
+          check_phi(f, i, index, dom, bi, reachable)
+        else
+          i.args.each do |a|
+            next unless defined_value?(a)
+            check_use(f, a, bi, k, position, dom, index, i)
+          end
+        end
+      end
+    end
+  end
+
+  # Whether an operand names a value a block defines. Constants, globals, functions and inline asm are not.
+  def defined_value?(v : Value) : Bool
+    return false if v.is_a?(Function) || v.is_a?(Global)
+    if v.is_a?(Inst)
+      inst = v.as(Inst)
+      return false if const_op?(inst.op)
+      return false if inst.aux.is_a?(AsmAux)
+    end
+    true
+  end
+
+  def const_op?(op : Op) : Bool
+    case op
+    when Op::ConstInt, Op::ConstFloat, Op::ConstNull, Op::ConstUndef, Op::ConstPoison, Op::ConstZero, Op::ConstAggregate, Op::ConstBytes, Op::ConstExpr, Op::GlobalAddr, Op::FunctionAddr
+      true
+    else
+      false
+    end
+  end
+
+  # A use must be dominated by its definition: earlier in the same block, or in a block that dominates this one.
+  def check_use(f : Function, v : Value, bi : Int32, k : Int32, position : Hash(Value, Int32), dom : Array(Array(Bool)), index : Hash(String, Int32), user : Inst) : Nil
+    pos = position[v]?
+    unless pos
+      report("dominance", "an instruction uses a value that no instruction defines", f)
+      return
+    end
+    return if v.is_a?(Param)
+    db = pos // 100000
+    dk = pos % 100000
+    if db == bi
+      report("dominance", "%#{v.name} is used before it is defined", f) if dk >= k
+    elsif !dom[bi][db]
+      report("dominance", "%#{v.name} is used where its definition does not dominate", f)
+    end
+  end
+
+  def check_phi(f : Function, phi : Inst, index : Hash(String, Int32), dom : Array(Array(Bool)), bi : Int32, reachable : Array(Bool)) : Nil
+    block = f.blocks[bi]
+    expected = block.preds.map { |p| p.name }.sorted
+    got = phi.targets.map { |t| t.name }.sorted
+    unless got == expected
+      report("phi-pred", "a phi in #{block.name} lists #{got.join(", ")} but its predecessors are #{expected.join(", ")}", f)
+    end
+    phi.args.each_with_index do |v, k|
+      unless v.type == phi.type || operand_type(v) == phi.type
+        report("types", "a phi in #{block.name} has an incoming #{operand_type(v)}, not #{phi.type}", f)
+      end
+      next unless defined_value?(v) && k < phi.targets.size
+      next if v.is_a?(Param)
+      source = index[phi.targets[k].name]
+      pos = find_position(f, v)
+      next unless pos
+      db = pos // 100000
+      if db != source && !dom[source][db]
+        report("dominance", "a phi incoming from #{phi.targets[k].name} uses a value whose definition does not dominate it", f)
+      end
+    end
+  end
+
+  def find_position(f : Function, v : Value) : Int32?
+    f.blocks.each_with_index do |b, bi|
+      b.insts.each_with_index do |i, k|
+        return bi * 100000 + k if i == v
+      end
+    end
+    nil
+  end
+
+  # Per-instruction type rules.
+  def check_instruction(f : Function, i : Inst) : Nil
+    case i.op
+    when Op::Add, Op::Sub, Op::Mul, Op::SDiv, Op::UDiv, Op::SRem, Op::URem, Op::Shl, Op::LShr, Op::AShr, Op::And, Op::Or, Op::Xor
+      same_types(f, i)
+      report("types", "#{i.op} needs integer operands, not #{i.type}", f) unless i.type.int?
+    when Op::FAdd, Op::FSub, Op::FMul, Op::FDiv, Op::FRem
+      same_types(f, i)
+      report("types", "#{i.op} needs floating-point operands, not #{i.type}", f) unless i.type.float?
+    when Op::ICmp
+      report("types", "icmp compares #{i.args[0].type} with #{operand_type(i.args[1])}", f) unless operand_type(i.args[0]) == operand_type(i.args[1])
+      report("types", "icmp needs an integer or pointer operand", f) unless operand_type(i.args[0]).int? || operand_type(i.args[0]).pointer?
+    when Op::Load
+      report("types", "load needs a pointer operand, not #{operand_type(i.args[0])}", f) unless operand_type(i.args[0]).pointer?
+    when Op::Store
+      report("types", "store needs a pointer operand, not #{operand_type(i.args[1])}", f) unless operand_type(i.args[1]).pointer?
+    when Op::Gep
+      report("types", "getelementptr needs a pointer base, not #{operand_type(i.args[0])}", f) unless operand_type(i.args[0]).pointer?
+    when Op::CondBr
+      report("types", "a conditional branch needs an i1 condition, not #{operand_type(i.args[0])}", f) unless operand_type(i.args[0]) == @types.int1
+    when Op::Switch
+      report("types", "a switch needs an integer value, not #{operand_type(i.args[0])}", f) unless operand_type(i.args[0]).int?
+    when Op::Select
+      report("types", "a select needs an i1 condition", f) unless operand_type(i.args[0]) == @types.int1
+      report("types", "a select's arms differ in type", f) unless operand_type(i.args[1]) == operand_type(i.args[2])
+    when Op::Ret
+      expected = f.fn_type.return_type
+      if i.args.empty?
+        report("types", "ret void in @#{f.name}, which returns #{expected}", f) unless expected.void?
+      else
+        report("types", "ret returns #{operand_type(i.args[0])} from @#{f.name}, which returns #{expected}", f) unless operand_type(i.args[0]) == expected
+      end
+    when Op::Call, Op::Invoke
+      check_call(f, i)
+    when Op::Intrinsic
+      check_intrinsic(f, i)
+    when Op::Trunc
+      report("types", "trunc must narrow an integer", f) unless operand_type(i.args[0]).int? && i.type.int? && i.type.bits < operand_type(i.args[0]).bits
+    when Op::ZExt, Op::SExt
+      report("types", "an extension must widen an integer", f) unless operand_type(i.args[0]).int? && i.type.int? && i.type.bits > operand_type(i.args[0]).bits
+    when Op::PtrToInt
+      unless operand_type(i.args[0]).pointer? && i.type.int?
+        report("types", "ptrtoint needs a pointer operand and integer result", f)
+      end
+    end
+  end
+
+  def same_types(f : Function, i : Inst) : Nil
+    report("types", "#{i.op} has operands of #{operand_type(i.args[0])} and #{operand_type(i.args[1])}", f) unless operand_type(i.args[0]) == operand_type(i.args[1])
+    report("types", "#{i.op} has a result of #{i.type}, not #{operand_type(i.args[0])}", f) unless i.type == operand_type(i.args[0])
+  end
+
+  # A call's operands against its signature: the callee's type, the argument count, and each argument's type.
+  # An inline asm that may unwind (`asm unwind`) is called only in a function that may unwind: a nounwind function
+  # (one with the `nounwind` attribute) cannot let an exception out of its call.
+  def check_call(f : Function, i : Inst) : Nil
+    callee = i.args[0]
+    if callee.is_a?(Inst) && callee.as(Inst).aux.is_a?(AsmAux)
+      inline_asm = callee.as(Inst).aux.as(AsmAux)
+      if inline_asm.unwind && f.attrs.any? { |a| a.name == "nounwind" }
+        report("asm-unwind", "an inline asm that may unwind is called in @#{f.name}, which is nounwind", f)
+      end
+    end
+    aux = i.aux
+    return unless aux.is_a?(CallAux)
+    fn_type = aux.as(CallAux).fn_type
+    first = i.op == Op::Invoke ? 1 : 1
+    args = i.args[first, i.args.size - first]
+    params = fn_type.param_types
+    if !fn_type.varargs? && args.size != params.size
+      report("call-operands", "a call passes #{args.size} arguments to a #{params.size}-parameter type", f)
+      return
+    end
+    params.each_with_index do |p, k|
+      next if k >= args.size
+      unless operand_type(args[k]) == p
+        report("call-operands", "a call passes #{operand_type(args[k])} where #{p} is expected", f)
+      end
+    end
+    if aux.as(CallAux).cc == CallConv::C
+      unless c_lowered?(fn_type.return_type)
+        report("cc-lowered", "a C-convention call returns #{fn_type.return_type}", f)
+      end
+      params.each do |p|
+        report("cc-lowered", "a C-convention call takes #{p}", f) unless c_lowered?(p)
+      end
+    end
+  end
+
+  # An intrinsic call: the overload must be one its family accepts, and the call's type and operands must
+  # be the signature that overload gives.
+  def check_intrinsic(f : Function, i : Inst) : Nil
+    aux = i.aux
+    return unless aux.is_a?(IntrinsicAux)
+    found = aux.as(IntrinsicAux)
+    name = intrinsic_name(found.id, found.overload)
+    unless intrinsic_accepts?(found.id, found.overload)
+      report("intrinsic", "#{name} is not an intrinsic the IR accepts at these types", f)
+      return
+    end
+    signature = intrinsic_signature(found.id, found.overload, @types)
+    report("types", "#{name} returns #{signature[0]}, not #{i.type}", f) unless i.type == signature[0]
+    params = signature[1]
+    if params.size != i.args.size
+      report("call-operands", "#{name} takes #{params.size} operands, not #{i.args.size}", f)
+      return
+    end
+    params.each_with_index do |p, k|
+      report("call-operands", "#{name} operand #{k} is #{operand_type(i.args[k])}, not #{p}", f) unless operand_type(i.args[k]) == p
+    end
+  end
+
+  # `tls-fresh`: a ThreadLocalAddr or ThreadPointer result is never used after a call, or after a back-edge
+  # that follows it. Those values are recomputed from the thread pointer, not carried across them.
+  def check_tls(f : Function, dom : Array(Array(Bool)), reachable : Array(Bool)) : Nil
+    index = block_index(f)
+    n = f.blocks.size
+    outs = Array(Array(Inst)?).new
+    n.times { outs << nil }
+    changed = true
+    passes = 0
+    while changed && passes < 64
+      changed = false
+      passes = passes + 1
+      n.times do |bi|
+        next unless reachable[bi]
+        entry_set = entry_fresh(f, bi, index, dom, outs, reachable)
+        result = transfer(f.blocks[bi], entry_set)
+        if !same_fresh?(result, outs[bi])
+          outs[bi] = result
+          changed = true
+        end
+      end
+    end
+    n.times do |bi|
+      next unless reachable[bi]
+      current = entry_fresh(f, bi, index, dom, outs, reachable)
+      f.blocks[bi].insts.each do |i|
+        if current
+          i.args.each do |a|
+            next unless tls_value?(a)
+            unless current.any? { |t| t == a }
+              report("tls-fresh", "a thread-local address is used after a call or back-edge that follows it", f)
+            end
+          end
+        end
+        current = kill_or_gen(i, current)
+      end
+    end
+  end
+
+  # The fresh set on entry to block bi: the intersection over its forward predecessors. A back-edge
+  # contributes nothing, so its values are stale; nil means "every value", before the first pass reaches it.
+  def entry_fresh(f : Function, bi : Int32, index : Hash(String, Int32), dom : Array(Array(Bool)), outs : Array(Array(Inst)?), reachable : Array(Bool)) : Array(Inst)?
+    return [] of Inst if bi == 0
+    result = nil
+    first = true
+    f.blocks[bi].preds.each do |p|
+      pi = index[p.name]
+      next unless reachable[pi]
+      contribution = dom[pi][bi] ? [] of Inst : outs[pi]
+      if first
+        result = contribution
+        first = false
+      else
+        result = intersect(result, contribution)
+      end
+    end
+    first ? [] of Inst : result
+  end
+
+  def intersect(a : Array(Inst)?, b : Array(Inst)?) : Array(Inst)?
+    return b if a.nil?
+    return a if b.nil?
+    a.select { |x| b.any? { |y| y == x } }
+  end
+
+  def transfer(block : Block, start : Array(Inst)?) : Array(Inst)?
+    current = start
+    block.insts.each { |i| current = kill_or_gen(i, current) }
+    current
+  end
+
+  def kill_or_gen(i : Inst, current : Array(Inst)?) : Array(Inst)?
+    if i.op == Op::Call || i.op == Op::Invoke
+      return [] of Inst
+    end
+    if tls_value?(i)
+      return current if current.nil?
+      return current + [i] of Inst
+    end
+    current
+  end
+
+  def same_fresh?(a : Array(Inst)?, b : Array(Inst)?) : Bool
+    return a.nil? && b.nil? if a.nil? || b.nil?
+    return false unless a.size == b.size
+    a.all? { |x| b.any? { |y| y == x } }
+  end
+
+  def tls_value?(v : Value) : Bool
+    return false unless v.is_a?(Inst)
+    i = v.as(Inst)
+    i.op == Op::ThreadLocalAddr || i.op == Op::ThreadPointer
+  end
+end

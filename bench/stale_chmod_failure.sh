@@ -134,6 +134,78 @@ end
             raise RuntimeError(f"{label}: exit {result.returncode}\n{result.stdout}\n{result.stderr}")
         return result.stdout
 
+    def diagnose_chmod(case_env, observed_env):
+        # Only a failed Windows run takes this path. The normal proof stays
+        # uninstrumented; the second build names the recursive boundary.
+        original_observer = observer.read_text(encoding="utf-8")
+        diagnostic = original_observer
+        entries = (
+            ('pub def __iyi_observe_file_write(op : UInt8 | ::Symbol | String, path : String, target : String? = nil) : Nil',
+             'observe_file_write'),
+            ('pub def file_write(op : UInt8 | ::Symbol | String, path : String, target : String? = nil) : Nil',
+             'file_write'),
+            ('pub def safe_real_path(path : String) : String', 'safe_real_path'),
+            ('private def normalize_path(path : String) : String', 'normalize_path'),
+            ('private def windows_real_path(path : String) : {String?, Int32}', 'windows_real_path'),
+            ('private def windows_identity(path : String) : { {UInt64, UInt64, UInt64}?, Int32 }', 'windows_identity'),
+            ('private def is_under_scratch?(real : String) : ::Bool', 'is_under_scratch'),
+        )
+        for anchor, label in entries:
+            if diagnostic.count(anchor) != 1:
+                raise AssertionError(f"chmod diagnostic anchor changed: {label}")
+            diagnostic = diagnostic.replace(anchor, anchor + f'\n  __iyi_chmod_diag("CHMOD_DIAG {label}\\n")', 1)
+        # Bypass the observed stdio wrappers: using puts here re-enters the
+        # observer and can crash before it names the original failure.
+        helper = '''@[Effect(:observation_channel)]
+pub def __iyi_chmod_diag(message : String) : Nil
+  {% if flag?(:win32) %}
+    written = 0_i32
+    LibC.WriteFile(LibC.GetStdHandle(-12), message.to_unsafe.as(Void*), message.bytesize,
+      pointerof(written), Pointer(Void).new(0_u64))
+  {% elsif flag?(:darwin) %}
+    LibC.write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+  {% end %}
+end
+
+'''
+        anchor = 'pub def file_write(op : UInt8 | ::Symbol | String, path : String, target : String? = nil) : Nil'
+        diagnostic = diagnostic.replace(anchor, helper + anchor, 1)
+        observer.write_text(diagnostic, encoding="utf-8")
+        diagnostic_file = overlay / "std" / "file.iyi"
+        file_source = (repo / "src" / "std" / "file.iyi").read_text(encoding="utf-8")
+        for anchor, marker in (
+            ('    record_chmod_attempt(path)', 'after_attempt'),
+            ('    chmod_after_attempt(path, mode)', 'after_chmod'),
+            ('      attrs = __iyi_path_attributes(sys_path(p))', 'after_attributes'),
+        ):
+            if file_source.count(anchor) != 1:
+                raise AssertionError(f"chmod diagnostic file anchor changed: {marker}")
+            indent = anchor[:len(anchor) - len(anchor.lstrip())]
+            file_source = file_source.replace(anchor, f'{anchor}\n{indent}Std::Observe.__iyi_chmod_diag("CHMOD_DIAG {marker}\\n")', 1)
+        diagnostic_file.write_text(file_source, encoding="utf-8")
+        diagnostic_test = project / "chmod_diagnostic.iyi"
+        diagnostic_source = test.read_text(encoding="utf-8")
+        for anchor, marker in (
+            ('group do |g|', 'before_group'),
+            ('  task = g.spawn do', 'before_spawn'),
+            ('    File.chmod(path, 0o600)', 'before_chmod'),
+            ('  assert task.value.is_a?(Panicked)', 'before_await'),
+        ):
+            if diagnostic_source.count(anchor) != 1:
+                raise AssertionError(f"chmod diagnostic fixture changed: {marker}")
+            indent = anchor[:len(anchor) - len(anchor.lstrip())]
+            diagnostic_source = diagnostic_source.replace(anchor, f'{indent}Std::Observe.__iyi_chmod_diag("CHMOD_DIAG {marker}\\n")\n{anchor}', 1)
+        diagnostic_test.write_text(diagnostic_source, encoding="utf-8")
+        diagnostic_exe = work / "chmod-diagnostic.exe"
+        run("chmod diagnostic build", ["build", "-Diyi_observe", "-o", str(diagnostic_exe), str(diagnostic_test)], case_env)
+        result = subprocess.run([str(diagnostic_exe)], cwd=project, env=observed_env,
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+        def clipped(output):
+            if len(output) > 16000:
+                return output[:8000] + "\n... diagnostic output omitted ...\n" + output[-8000:]
+            return output
+        return f"diagnostic exit {result.returncode}\n{clipped(result.stdout)}\n{clipped(result.stderr)}"
+
     def probe(label, test_path, target_path):
         case_env = env.copy()
         case_env["IYI_CHMOD_FAILURE_PATH"] = str(target_path)
@@ -147,7 +219,13 @@ end
         observed = subprocess.run([str(executable)], cwd=project, env=observed_env,
                                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
         if observed.returncode:
-            raise RuntimeError(f"{label}: exit {observed.returncode}\n{observed.stdout}\n{observed.stderr}")
+            detail = ""
+            if label == "chmod" and os.name == "nt":
+                try:
+                    detail = "\n" + diagnose_chmod(case_env, observed_env)
+                except Exception as exc:
+                    detail = f"\nchmod diagnostic failed: {exc}"
+            raise RuntimeError(f"{label}: exit {observed.returncode}\n{observed.stdout}\n{observed.stderr}{detail}")
         trace = trace_path.read_bytes()
         records = []
         position = 0

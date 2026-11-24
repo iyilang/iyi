@@ -741,7 +741,16 @@ r26_run2="$(run_json "$WORK/r26" r26_test.iyi)"
 expect_eq "$(printf '%s' "$r26_run2" | json_cached)" 0 "r26 run 2 cached 0 (disk T1 does not match receipt)"
 
 printf '%s\n' "$T0" > "$WORK/r26/r26_test.iyi"
-r26_run3="$(run_json "$WORK/r26" r26_test.iyi)"
+if [ "$KEEP_GOING" = 1 ]; then
+  (cd "$WORK/r26" && "$IYI" test --cached --json --explain r26_test.iyi) > "$WORK/r26/run3.explain" 2>/dev/null || true
+  r26_run3="$(explained "$WORK/r26/run3.explain" json)"
+  if [ "$(printf '%s' "$r26_run3" | json_cached)" != 1 ]; then
+    echo "    [row 26 decision of the checked run]" >&2
+    explained "$WORK/r26/run3.explain" lines >&2 || true
+  fi
+else
+  r26_run3="$(run_json "$WORK/r26" r26_test.iyi)"
+fi
 expect_eq "$(printf '%s' "$r26_run3" | json_cached)" 1 "r26 run 3 cached 1 (restored T0 hits receipt)"
 (cd "$WORK/r26" && "$IYI" test --cached --explain r26_test.iyi) > "$WORK/r26/explain.txt" 2>&1
 expect_contains "$(cat "$WORK/r26/explain.txt")" "hit from local" "r26 run 3 hit from local"
@@ -1623,7 +1632,16 @@ raise "macro run lost" unless ({{ run("./helper") }}) == 42
 IYI
 rm -rf "$CACHE/tests-v1"
 run_json "$WORK/r55" run_test.iyi >/dev/null
-row55="$(run_json "$WORK/r55" run_test.iyi)"
+if [ "$KEEP_GOING" = 1 ]; then
+  (cd "$WORK/r55" && "$IYI" test --cached --json --explain run_test.iyi) > "$WORK/r55/run2.explain" 2>/dev/null || true
+  row55="$(explained "$WORK/r55/run2.explain" json)"
+  if [ "$(printf '%s' "$row55" | json_cached)" != 1 ]; then
+    echo "    [row 55 decision of the checked run]" >&2
+    explained "$WORK/r55/run2.explain" lines >&2 || true
+  fi
+else
+  row55="$(run_json "$WORK/r55" run_test.iyi)"
+fi
 expect_eq "$(printf '%s' "$row55" | json_cached)" 1 "the macro run test still hits"
 expect_eq "$(printf '%s' "$row55" | json_test run_test.iyi check)" compiler "the macro run is checked by the compiler"
 expect_contains "$(printf '%s' "$row55" | json_test run_test.iyi check_reason)" "a macro ran a program" "the reason names the macro run"

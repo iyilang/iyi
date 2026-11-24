@@ -282,16 +282,22 @@ class FrameHold
   getter go : Atomic(Int64)
   getter open : Atomic(Int64)
   getter done : Atomic(Int64)
+  getter fiber_path : Atomic(Int32)
   def initialize
     @go = Atomic(Int64).new(0_i64)
     @open = Atomic(Int64).new(0_i64)
     @done = Atomic(Int64).new(0_i64)
+    @fiber_path = Atomic(Int32).new(0_i32)
   end
 end
 
 hold = FrameHold.new
 holder = IyiThread.start do
   while hold.go.get == 0_i64
+  end
+  # FORCE_HOLDER_FIBER
+  if IyiScheduler.current?.is_a?(IyiFiber)
+    hold.fiber_path.set(1_i32)
   end
   Std::Observe.enter_frame
   hold.open.set(1_i64)
@@ -303,14 +309,22 @@ end
 hold.go.set(1_i64)
 while hold.open.get == 0_i64
 end
+# FORCE_MAIN_FIBER
+main_fiber_path = IyiScheduler.current?.is_a?(IyiFiber)
 ENV["IYI_FRAME_PROBE"]?
 hold.done.set(1_i64)
 holder.join
+puts "FRAME_PATHS holder=#{hold.fiber_path.get} main=#{main_fiber_path ? 1 : 0}"
 EOF
 
 PROBE_TRACE="$WORK/probe_trace.bin"
 rm -f "$PROBE_TRACE"
-IYI_OBSERVE="$PROBE_TRACE" "$IYI" run -Diyi_observe "$PROBE_SRC"
+PROBE_OUT="$(IYI_OBSERVE="$PROBE_TRACE" "$IYI" run -Diyi_observe "$PROBE_SRC")"
+echo "  $PROBE_OUT"
+case "$PROBE_OUT" in
+  "FRAME_PATHS holder=0 main=0" | "FRAME_PATHS holder=0 main=1" | "FRAME_PATHS holder=1 main=0" | "FRAME_PATHS holder=1 main=1") ;;
+  *) echo "FAIL: invalid frame-path report: '$PROBE_OUT'"; exit 1 ;;
+esac
 
 if [ ! -f "$PROBE_TRACE" ]; then
   echo "FAIL: probe trace was not created"
@@ -366,17 +380,83 @@ fi
 
 MUT_TRACE="$WORK/mut_trace.bin"
 rm -f "$MUT_TRACE"
-IYI_PATH="$PATCH_DIR/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_TRACE" "$IYI" run -Diyi_observe "$PROBE_SRC"
+MUT_OUT="$(IYI_PATH="$PATCH_DIR/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_TRACE" "$IYI" run -Diyi_observe "$PROBE_SRC")"
+if [ "$MUT_OUT" != "$PROBE_OUT" ]; then
+  echo "FAIL: thread-depth mutation changed the probe's frame paths: '$PROBE_OUT' -> '$MUT_OUT'"
+  exit 1
+fi
 
 MUT_HEX="$(od -An -v -tx1 "$MUT_TRACE" | tr -d ' \n')"
 case "$MUT_HEX" in
   *4959495f4652414d455f50524f4245*)
-    echo "FAIL: probe does not discriminate: IYI_FRAME_PROBE appeared even without @[ThreadLocal]"
-    exit 1
+    if [ "$WINDOWS" = 1 ] && [ "$PROBE_OUT" != "FRAME_PATHS holder=0 main=0" ]; then
+      echo "  host-limited: thread-depth mutant cannot affect both frames ($PROBE_OUT)"
+    else
+      echo "FAIL: probe does not discriminate: IYI_FRAME_PROBE appeared even without @[ThreadLocal] ($PROBE_OUT)"
+      exit 1
+    fi
     ;;
   *)
     echo "  mutation proof passed: without @[ThreadLocal], helper frame suppressed main thread observation"
     ;;
+esac
+
+echo "== deterministic rendezvous regression: fiber depth mutation proof"
+FIBER_SRC="$WORK/frame_fibers.iyi"
+PATCH_FIBER_DIR="$WORK/patched_fiber"
+mkdir -p "$PATCH_FIBER_DIR/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$PATCH_FIBER_DIR/src/"
+"$PY" - "$PROBE_SRC" "$FIBER_SRC" "$PATCH_FIBER_DIR/src/std/observe.iyi" <<'EOF'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+for marker in ("# FORCE_HOLDER_FIBER", "# FORCE_MAIN_FIBER"):
+    if source.count(marker) != 1:
+        sys.exit(f"FAIL: fiber probe marker missing or repeated: {marker}")
+    source = source.replace(marker, "IyiScheduler.current", 1)
+Path(sys.argv[2]).write_text(source, encoding="utf-8")
+
+path = Path(sys.argv[3])
+source = path.read_text(encoding="utf-8")
+anchor = "@[ThreadLocal]\n@@thread_depth = 0_i32"
+if source.count(anchor) != 1 or source.count("fiber.observe_depth") != 11:
+    sys.exit("FAIL: fiber depth mutation no longer applies")
+source = source.replace(anchor, anchor + "\n@@mutant_fiber_depth = 0_i32", 1)
+source = source.replace("fiber.observe_depth", "@@mutant_fiber_depth")
+path.write_text(source, encoding="utf-8")
+EOF
+
+FIBER_TRACE="$WORK/fiber_trace.bin"
+FIBER_OUT="$(IYI_OBSERVE="$FIBER_TRACE" "$IYI" run -Diyi_observe "$FIBER_SRC")"
+if [ "$FIBER_OUT" != "FRAME_PATHS holder=1 main=1" ]; then
+  echo "FAIL: fiber probe did not enter both fiber paths: $FIBER_OUT"
+  exit 1
+fi
+FIBER_HEX="$(od -An -v -tx1 "$FIBER_TRACE" | tr -d ' \n')"
+case "$FIBER_HEX" in
+  *4959495f4652414d455f50524f4245*) ;;
+  *) echo "FAIL: fiber probe did not record IYI_FRAME_PROBE"; exit 1 ;;
+esac
+FIBER_TAIL="$(tail -c 17 "$FIBER_TRACE" | od -An -v -tx1 | tr -d ' \n')"
+if [ "$FIBER_TAIL" != "0d0000007f000000000000000000000000" ]; then
+  echo "FAIL: expected END(0) in fiber probe trace, got $FIBER_TAIL"
+  exit 1
+fi
+
+MUT_FIBER_TRACE="$WORK/mut_fiber_trace.bin"
+MUT_FIBER_OUT="$(IYI_PATH="$PATCH_FIBER_DIR/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_FIBER_TRACE" "$IYI" run -Diyi_observe "$FIBER_SRC")"
+if [ "$MUT_FIBER_OUT" != "$FIBER_OUT" ]; then
+  echo "FAIL: fiber mutation changed the probe's frame paths: '$FIBER_OUT' -> '$MUT_FIBER_OUT'"
+  exit 1
+fi
+MUT_FIBER_HEX="$(od -An -v -tx1 "$MUT_FIBER_TRACE" | tr -d ' \n')"
+case "$MUT_FIBER_HEX" in
+  *4959495f4652414d455f50524f4245*)
+    echo "FAIL: probe does not discriminate: IYI_FRAME_PROBE appeared with shared fiber depth"
+    exit 1
+    ;;
+  *) echo "  fiber mutation proof passed: shared fiber depth suppressed the other fiber's observation" ;;
 esac
 
 PY=""

@@ -1,0 +1,34 @@
+# Precedence fixture: testing relative binding of operators
+a = 1
+b = 2
+c = 3
+d = 4
+e = 5
+
+# Mult binds tighter than Add
+p1 = a + b * c
+p2 = a * b + c
+p3 = (a + b) * c
+p4 = a * (b + c)
+
+# Power binds tighter than Mult
+p5 = a * b ** c
+p6 = a ** b * c
+
+# Comparison vs Arithmetic
+p7 = a + b < c * d
+p8 = a * b == c + d
+
+# Logical AND binds tighter than Logical OR
+p9 = a && b || c && d
+p10 = a || b && c || d
+p11 = (a || b) && (c || d)
+
+# Range vs Arithmetic
+p12 = a + 1..b * 2
+p13 = a..b + c
+
+# Ternary vs Logical
+p14 = a && b ? c : d
+p15 = a ? b && c : d || e
+p16 = a ? b : c ? d : e

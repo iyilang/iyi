@@ -1,0 +1,29 @@
+# A type list after `of` ends at its comma when the next argument is a call (`Foo.new`),
+# so the call stays a call; the hosted parser looks ahead past the path before it takes a type.
+
+def build(info, fname, ftype)
+  info.add(fname, [] of Arg, InstanceVar.new("@#{fname}"), nil, Path.new(ftype))
+  x = f(1, [] of Arg, Foo.new)
+  y = f(fname, [] of Arg, InstanceVar.new("@a"))
+end
+
+# An opening parenthesis or brace after the comma decides nothing; the token after it does.
+# `self`, `typeof`, `::` and `*` start a type only where a type can follow, so the first
+# ten calls keep an expression or a named argument and the last five keep a proc type.
+def groups(a, b)
+  f([] of Arg, (a + b))
+  f([] of Arg, (a.size), 3)
+  f([] of Arg, {1, 2})
+  f([] of Arg, {x: 1})
+  f({} of String => Arg, {"k" => b})
+  f([] of Arg, self.name)
+  f([] of Arg, ::Foo.new)
+  f([] of Arg, self: 1)
+  f([] of Arg, typeof: a)
+  g [] of Arg, (a + b)
+  u = [] of Arg, *Arg -> Arg
+  v = f([] of Arg, {Arg, Arg} -> Arg)
+  w = f([] of Arg, self -> Arg)
+  x = f([] of Arg, ::Foo -> Arg)
+  y = f([] of Arg, typeof(a) -> Arg)
+end

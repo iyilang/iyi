@@ -1,0 +1,19 @@
+{% if flag?(:linux) %}
+  a = 1
+{% elsif flag?(:darwin) %}
+  a = 2
+{% else %}
+  a = 3
+{% end %}
+
+{% unless flag?(:win32) %}
+  b = 4
+{% end %}
+
+{% for x in [1, 2] %}
+  c = {{ x }}
+{% end %}
+
+{% begin %}
+  d = 5
+{% end %}

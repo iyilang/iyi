@@ -1,0 +1,13 @@
+; iyi-ir 1
+source_filename = "intrinsic_args"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define external iyicc void @fill(ptr %p, ptr %q) {
+entry:
+  intrinsic llvm.memset.p0.i64(align(8) ptr %p, i8 0, i64 8, i1 false)
+  intrinsic llvm.memcpy.p0.p0.i64(noalias nocapture writeonly align(8) ptr %p, noalias nocapture readonly align(8) ptr %q, i64 16, i1 false)
+  intrinsic llvm.memmove.p0.p0.i32(dereferenceable(16) nonnull noundef ptr %p, dereferenceable(16) ptr %q, i32 4, i1 true)
+  %c = intrinsic llvm.ctpop.i32(noundef i32 7)
+  ret void
+}
+

@@ -1,0 +1,25 @@
+# Heredocs lose their terminator's indent and always build an interpolation; a command
+# literal is a call to the backtick; an interpolation that holds only a string literal
+# folds into one string.
+
+def daemon_usage : String
+  <<-USAGE
+    Usage: #{@program_name} daemon [start|build]
+
+        #{@program_name} start
+    Done
+    USAGE
+end
+
+def plain_heredoc
+  <<-PLAIN
+    one
+      two
+    PLAIN
+end
+
+x = `id --version 2> /dev/null || true`
+y = `#{tool} --version`
+s = "#{"x"}"
+t = "a#{"b"}c#{"d"}"
+u = "pre#{1}post"

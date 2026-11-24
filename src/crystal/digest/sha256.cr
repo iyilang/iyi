@@ -76,23 +76,28 @@ class Crystal::Digest::SHA256 < ::Digest
 
   private def process_block : Nil
     w = uninitialized UInt32[64]
+    # The loop bounds keep these accesses in range without per-round checks.
+    words = w.to_unsafe
+    constants = K.to_unsafe
     16.times do |t|
-      w[t] = (@block[t * 4].to_u32 << 24) | (@block[t * 4 + 1].to_u32 << 16) |
-             (@block[t * 4 + 2].to_u32 << 8) | @block[t * 4 + 3].to_u32
+      words[t] = (@block[t * 4].to_u32 << 24) | (@block[t * 4 + 1].to_u32 << 16) |
+                 (@block[t * 4 + 2].to_u32 << 8) | @block[t * 4 + 3].to_u32
     end
     (16...64).each do |t|
-      s0 = w[t - 15].rotate_right(7) ^ w[t - 15].rotate_right(18) ^ (w[t - 15] >> 3)
-      s1 = w[t - 2].rotate_right(17) ^ w[t - 2].rotate_right(19) ^ (w[t - 2] >> 10)
-      w[t] = w[t - 16] &+ s0 &+ w[t - 7] &+ s1
+      x = words[t - 15]
+      y = words[t - 2]
+      s0 = ((x >> 7) | (x << 25)) ^ ((x >> 18) | (x << 14)) ^ (x >> 3)
+      s1 = ((y >> 17) | (y << 15)) ^ ((y >> 19) | (y << 13)) ^ (y >> 10)
+      words[t] = words[t - 16] &+ s0 &+ words[t - 7] &+ s1
     end
 
     a, b, c, d, e, f, g, h = @state
 
     64.times do |t|
-      s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25)
+      s1 = ((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7))
       ch = (e & f) ^ (~e & g)
-      temp1 = h &+ s1 &+ ch &+ K[t] &+ w[t]
-      s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22)
+      temp1 = h &+ s1 &+ ch &+ constants[t] &+ words[t]
+      s0 = ((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10))
       maj = (a & b) ^ (a & c) ^ (b & c)
       temp2 = s0 &+ maj
       h = g

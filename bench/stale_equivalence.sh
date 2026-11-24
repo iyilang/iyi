@@ -511,10 +511,10 @@ def has_record(data, want):
 # A kind nothing on this platform reaches: there is no observer call to
 # drop. host_state is the trust store the system keeps (Security.framework,
 # the Windows certificate store); on Linux the roots are files, and the path
-# observers answer for those. file_exists is on every platform: `Dir.exists?`
+# observers answer for those. file_exists is on every platform: Dir.exists?
 # records a stat now, because it answers by the type the stat reports, and the
-# one remaining `file_exists` annotation is the process lookup's own
-# `executable_file?`, which runs inside the process observer's frame, where an
+# one remaining file_exists annotation is the process lookup's own
+# executable_file?, which runs inside the process observer's frame, where an
 # inner observer writes nothing. Held to having no taint or record of the kind
 # at all, so a site that arrives later has to bring its proof.
 NO_SITE = {'file_exists'} | ({'host_state'} if sys.platform.startswith('linux') else set())

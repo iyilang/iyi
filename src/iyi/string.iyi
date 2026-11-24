@@ -17,7 +17,31 @@ class String
   # under every other allocator the word is under `malloc`'s pointer and
   # the id is stored here.
   HEADER_SIZE = 8
-  private HASH_KEY    = __iyi_hash_key
+  # The sixteen bytes `String#hash` is keyed with (#212), read at the first hash
+  # a process makes and not at its start. A constant would read them for every
+  # program: that read is entropy (`__iyi_hash_key`), so every run would be
+  # marked not reusable and the observer's trace would stop at it. Published
+  # once: the key is written before the state word becomes 2, and a reader that
+  # sees 2 reads it after that.
+  @[UnsafeReach("0, then 1 while the first hash reads the key, then 2: moved only by compare_and_set and set")]
+  @@hash_key_state : UInt64 = 0_u64
+  @[UnsafeReach("written once, before @@hash_key_state becomes 2, then only read")]
+  @@hash_key : {UInt64, UInt64} = {0_u64, 0_u64}
+
+  private def hash_key_words : {UInt64, UInt64}
+    state = Pointer(Atomic(UInt64)).new(pointerof(@@hash_key_state).address)
+    return @@hash_key if state.value.get == 2_u64
+    key = __iyi_hash_key
+    if state.value.compare_and_set(0_u64, 1_u64)[1]
+      @@hash_key = key
+      state.value.set(2_u64)
+      return key
+    end
+    while state.value.get != 2_u64
+      IyiThread.spin_pause
+    end
+    @@hash_key
+  end
 
   # Allocates *bytesize* bytes, hands the buffer to the block to fill, and
   # returns the string that results. The character count is left at zero,
@@ -434,7 +458,7 @@ class String
   # of the system's entropy read once per process: FNV-1a from a fixed start
   # let anyone build keys offline that all shared one hash (#212).
   def hash : Int32
-    k0, k1 = HASH_KEY
+    k0, k1 = hash_key_words
     v0, v1 = k0 ^ 0x736f6d6570736575_u64, k1 ^ 0x646f72616e646f6d_u64
     v2, v3 = k0 ^ 0x6c7967656e657261_u64, k1 ^ 0x7465646279746573_u64
     index = 0

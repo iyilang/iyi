@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Changed
+
+- **Observed runs no longer record the startup read of the `String#hash` key as
+  the program's entropy.** `__iyi_hash_key` is `@[Effect(:primitive)]`, a
+  runtime-internal effect that observers do not wrap: every process reads the
+  key once, at startup, before the program's own code runs (#212). The key and
+  its once-per-process read are unchanged. `String#hash` is now
+  `@[Effect(:entropy)]`, so a program that hashes a string records an entropy
+  read at that use, and a program that never hashes records none. A program
+  that reads entropy itself, through `std/random` or the OS, is recorded as
+  before. The observer keeps its written-path and environment sets in arrays,
+  so observing a run does not hash strings itself.
+
 ### Added
 
 - **Programs can request larger fiber stacks before starting work.**

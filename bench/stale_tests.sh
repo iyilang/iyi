@@ -816,7 +816,7 @@ expect_eq "$(printf '%s' "$r28_run1" | json_failed)" 0 "r28 run 1: the test sees
 expect_eq "$(printf '%s' "$r28_run1" | json_cached)" 0 "r28 run 1 recorded"
 r28_run2="$(r28_with "$r28_first" : "$WORK/r28-none-2.sock" "$WORK/r28" --cached --json loader_test.iyi)"
 expect_eq "$(printf '%s' "$r28_run2" | json_cached)" 1 "changing only daemon variables still hits"
-r28_changed_file="$WORK/r28/loader-explain.txt"
+r28_changed_file="$WORK/r28-loader-explain.txt"
 r28_with "$r28_second" :: "$WORK/r28-none-2.sock" "$WORK/r28" --cached --json --explain loader_test.iyi > "$r28_changed_file"
 expect_contains "$(explained "$r28_changed_file" lines)" "miss: link changed" "loader change names the link input"
 r28_changed="$(explained "$r28_changed_file" json)"
@@ -872,7 +872,7 @@ finally:
 PY
   fi
 }
-r28_explain="$WORK/r28/explain.txt"
+r28_explain="$WORK/r28-explain.txt"
 r28_limited --explain loader_test.iyi > "$r28_explain"
 expect_contains "$(explained "$r28_explain" lines)" "miss: profile changed" "different profile reason on limit change"
 expect_eq "$(explained "$r28_explain" json | json_cached)" 0 "zero receipts on profile miss"
@@ -1456,11 +1456,17 @@ raise "macro run lost" unless ({{ run("./helper") }}) == 42
 IYI
 rm -rf "$CACHE"
 run_json "$WORK/macro-run" run_test.iyi >/dev/null
-row50_hit="$(run_json "$WORK/macro-run" run_test.iyi)"
-if [ "$KEEP_GOING" = 1 ] && [ "$(printf '%s' "$row50_hit" | json_cached)" != 1 ]; then
-  echo "    [row 50 explain]" >&2
-  (cd "$WORK/macro-run" && "$IYI" test --cached --explain run_test.iyi) >&2 || true
-  (cd "$WORK/macro-run" && "$IYI" test --cached --explain run_test.iyi) >&2 || true
+if [ "$KEEP_GOING" = 1 ]; then
+  # The checked run explains itself: a miss names the key part that moved. An
+  # explain run after a miss would hit, and say nothing about the miss.
+  (cd "$WORK/macro-run" && "$IYI" test --cached --json --explain run_test.iyi) > "$WORK/macro-run/row50.explain" 2>/dev/null || true
+  row50_hit="$(explained "$WORK/macro-run/row50.explain" json)"
+  if [ "$(printf '%s' "$row50_hit" | json_cached)" != 1 ]; then
+    echo "    [row 50 decision of the checked run]" >&2
+    explained "$WORK/macro-run/row50.explain" lines >&2 || true
+  fi
+else
+  row50_hit="$(run_json "$WORK/macro-run" run_test.iyi)"
 fi
 expect_eq "$(printf '%s' "$row50_hit" | json_cached)" 1 "cold macro run helper hits"
 
@@ -1714,7 +1720,7 @@ File.write(File.join(ctl, "pid-$name"), "#{Process.pid}")
 File.write(File.join(ctl, "started-$name"), "1")
 waited = 0
 while !File.exists?(File.join(ctl, "release"))
-  # `sleep` takes milliseconds: 3,000 steps of 100 ms is the five minutes this
+  # sleep takes milliseconds: 3,000 steps of 100 ms is the five minutes this
   # guard is meant to be. At 300 steps of 1 ms the test died in a third of a
   # second, before a slow build (Windows) had recorded the quick receipts.
   raise "never released" if waited >= 3000
@@ -1746,7 +1752,7 @@ with open(os.path.join(root, "interrupted.json"), "wb") as out, \
     try:
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
-            receipts = glob.glob(os.path.join(cache, "tests-v1", "**", "records", "*.json"), recursive=True)
+            receipts = glob.glob(os.path.join(cache, "tests-v1", "records", "*", "*.json"))
             if len(receipts) >= 2 and all(os.path.isfile(os.path.join(ctl, "started-" + n)) for n in ("slow_a", "slow_b")):
                 break
             if runner.poll() is not None:

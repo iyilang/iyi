@@ -265,12 +265,14 @@ jobs:
 
       - name: iyi's own specs
         run: |
-          ./bin/crystal spec \
-            spec/compiler/iyimod_spec.cr \
-            spec/compiler/iyi_import_spec.cr \
-            spec/compiler/semantic/iyi_spec.cr \
-            spec/compiler/iyi_derive_spec.cr \
-            spec/compiler/compiler_spec.cr
+          for part in 0 1 2 3; do
+            SPEC_SPLIT="$part%4" ./bin/crystal spec \
+              spec/compiler/iyimod_spec.cr \
+              spec/compiler/iyi_import_spec.cr \
+              spec/compiler/semantic/iyi_spec.cr \
+              spec/compiler/iyi_derive_spec.cr \
+              spec/compiler/compiler_spec.cr
+          done
 
       # The command surface and the build daemon, which is iyi's own (SPEC.md
       # IV.1d) and which nothing else here runs. It caught two things the day
@@ -721,7 +723,6 @@ jobs:
         with:
           name: iyi-aarch64-darwin
           path: .build/iyi
-          archive: false
           if-no-files-found: error
           retention-days: 1
       - name: Upload run receipt snapshot
@@ -1345,7 +1346,12 @@ jobs:
       # `-o .build/crystal` is make's "take this as up to date": the compiler
       # came from the job above and its timestamp is younger than the checkout.
       - name: Compiler specs
-        run: make -o .build/crystal compiler_spec
+        run: |
+          # Filter after randomization, so all parts must use the same seed.
+          SPEC_SPLIT="0%4" make -o .build/crystal compiler_spec order="$GITHUB_RUN_ID"
+          for part in 1 2 3; do
+            SPEC_SPLIT="$part%4" .build/compiler_spec --order="$GITHUB_RUN_ID"
+          done
 
   stdlib-specs:
     needs: [plan, build]

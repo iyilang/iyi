@@ -502,8 +502,8 @@ echo "== 6. Corpus: the transforms over the port's own source and prelude"
 # Every .iyi file of the port's compiler and of the prelude is walked by the
 # port and by the hosted walk, in the literal mode of section 5, and the two
 # trees are compared. A file either side refuses is counted apart. The floor
-# counts the identical files and may only rise: TRANSFORM_CORPUS_RAISE=1 writes
-# the measured count to the floor file, and a count below the floor fails.
+# counts identical files, may only rise, and must equal the measured count.
+# TRANSFORM_CORPUS_RAISE=1 writes a higher measured count to the floor.
 CORPUS_FLOOR="$REPO/bench/selfhost_semantic_transform_corpus.floor"
 corpus_files=$({ find "$REPO/src/compiler" -name '*.iyi'; find "$REPO/src/iyi" -maxdepth 1 -name '*.iyi'; } | sort)
 corpus_count=0
@@ -538,19 +538,48 @@ echo "  Constructs in that source, counted by the port's parser before any trans
 awk '{t[$1]+=$2} END{for (k in t) printf "    %-22s %d\n", k, t[k]}' "$WORK/corpus_kinds.txt" | sort
 echo "  Nodes the shared dump prints as Node (kind, count; their children are not compared):"
 awk '{t[$2]+=1} END{for (k in t) printf "    %-22s %d\n", k, t[k]}' "$WORK/corpus_uncovered.txt" | sort -k2 -nr
-corpus_floor=0
-if [ -f "$CORPUS_FLOOR" ]; then
-  corpus_floor=$(awk 'NR==1{print $1}' "$CORPUS_FLOOR")
-fi
-if [ "$corpus_identical" -lt "$corpus_floor" ]; then
-  echo "  CORPUS FLOOR DROPPED: $corpus_identical < $corpus_floor"
-  status=1
-elif [ "${TRANSFORM_CORPUS_RAISE:-0}" = "1" ]; then
-  printf '%s\n' "$corpus_identical" > "$CORPUS_FLOOR"
-  echo "  Floor raised: $corpus_floor -> $corpus_identical"
-else
-  echo "  Floor: $corpus_identical >= $corpus_floor"
-fi
+check_corpus_floor() {
+  local floor_file="$1" measured="$2" raise="$3" floor=0
+  if [ -f "$floor_file" ]; then
+    floor=$(awk 'NR==1{print $1}' "$floor_file")
+  fi
+  if [ "$measured" -lt "$floor" ]; then
+    echo "  CORPUS FLOOR DROPPED: $measured < $floor"
+    return 1
+  elif [ "$measured" -gt "$floor" ]; then
+    if [ "$raise" = 1 ]; then
+      printf '%s\n' "$measured" > "$floor_file"
+      echo "  Floor raised: $floor -> $measured"
+    else
+      echo "  CORPUS RAISE THE FLOOR: $measured > $floor"
+      return 1
+    fi
+  else
+    echo "  Floor: $measured = $floor"
+  fi
+}
+
+check_corpus_floor "$CORPUS_FLOOR" "$corpus_identical" "${TRANSFORM_CORPUS_RAISE:-0}" || status=1
+
+# Test the actual floor check against edited temporary floors, not the committed
+# floor: both a regression and an unrecorded improvement must be caught.
+for direction in lower higher; do
+  if [ "$direction" = lower ]; then
+    printf '%s\n' "$((corpus_identical - 1))" > "$WORK/corpus-proof.floor"
+    expected="CORPUS RAISE THE FLOOR"
+  else
+    printf '%s\n' "$((corpus_identical + 1))" > "$WORK/corpus-proof.floor"
+    expected="CORPUS FLOOR DROPPED"
+  fi
+  rc=0
+  check_corpus_floor "$WORK/corpus-proof.floor" "$corpus_identical" 0 > "$WORK/corpus-proof.log" || rc=$?
+  if [ "$rc" -eq 1 ] && grep -qF "$expected" "$WORK/corpus-proof.log"; then
+    echo "  $direction temporary corpus floor: caught ($expected, exit 1)"
+  else
+    echo "  $direction temporary corpus floor: NOT CAUGHT (exit $rc)"
+    status=1
+  fi
+done
 
 echo
 if [ "$status" -eq 0 ]; then

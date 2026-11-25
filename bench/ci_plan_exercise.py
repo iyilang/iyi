@@ -125,6 +125,9 @@ check("a change to CI whose base workflow cannot be read runs everything",
 # Each compiler component change selects macOS, Linux and Windows.
 for files, what in [
     (["src/compiler/codegen/codegen.iyi"], "a self-host compiler source"),
+    (["src/iyi/string.iyi"], "a prelude file covered by parity floors"),
+    (["src/std/http.iyi"], "a std file covered by parity floors"),
+    (["samples/iyi/calc.iyi"], "a sample covered by parity floors"),
     (["bench/selfhost_lexer_exercise.sh"], "a self-host gate"),
     (["bench/native_elf_run.sh"], "the native Linux ELF execution gate"),
     (["bench/native_ir_exercise.sh"], "a native compiler gate"),
@@ -152,8 +155,8 @@ for files, what in [
           {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} <= jobs,
           f"{reason}: {sorted(jobs)}")
 
-reason, jobs = planned("src/iyi/string.iyi")
-check("an ordinary prelude change does not select component-only jobs",
+reason, jobs = planned("spec/compiler/parser_spec.cr")
+check("a source outside the parity corpora does not select self-host jobs",
       not {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} & jobs,
       f"{reason}: {sorted(jobs)}")
 

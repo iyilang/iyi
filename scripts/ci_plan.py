@@ -79,9 +79,8 @@ FAST = ["build", "iyi", "compiler-specs", "stdlib-specs", "targets",
         "windows-runtime", "docs", "vscode"]
 
 
-# The self-host gates compile and check the compiler written in iyi
-# (`src/compiler/`), and the bench files and fixtures they read. A change to
-# any of those selects all three hosts, whatever else it touches.
+# The self-host parity floors also measure the prelude, std and samples. A
+# change to any of those inputs must run the same gates as a compiler change.
 SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"]
 # Not selected by this script: `plan` is the script, `result` reads every
 # selected job's outcome, and `release` gates itself on a `v*` tag.
@@ -207,7 +206,8 @@ def is_doc(path):
 
 def is_selfhost(path):
     return ((path.startswith("src/compiler/") and path.endswith((".iyi", ".ir")))
-            or path.startswith(("bench/selfhost_", "bench/native_", "bench/macro_", "bench/fixtures/"))
+            or path.startswith(("src/iyi/", "src/std/", "samples/",
+                                "bench/selfhost_", "bench/native_", "bench/macro_", "bench/fixtures/"))
             or path == "bench/lib/host.sh")
 
 def code(text):

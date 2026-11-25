@@ -1,0 +1,21 @@
+o	"=r"(out)	ACCEPTED
+o	"={x0}"(result)	ACCEPTED
+o	"=x"(fused)	ACCEPTED
+i	"{x8}"(number)	ACCEPTED
+i	"r"(address + filled)	ACCEPTED
+i	"x"(b)	ACCEPTED
+i	"0"(a)	ACCEPTED
+i	"1"(a)	REFUSED:ties to output 1
+i	"m"(v)	REFUSED:is not one of
+o	"=&r"(v)	REFUSED:early-clobber
+o	"+r"(v)	REFUSED:must start with
+o	"r"(v)	REFUSED:must start with
+i	"=r"(v)	REFUSED:cannot be written with
+i	"{}"(v)	REFUSED:is not a register name
+c	memory	ACCEPTED
+c	cc	ACCEPTED
+c	x9	ACCEPTED
+c	~{x30}	ACCEPTED
+c	foo bar	REFUSED:is not memory, cc or a register name
+p	volatile	ACCEPTED
+p	nomerge	REFUSED:is not volatile

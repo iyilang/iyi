@@ -1,0 +1,33 @@
+; iyi-ir 1
+module "fp"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [13 x i8] c"%d %d %d %d\0A\00"
+
+define internal i32 @calc(double %x, double %y) {
+entry:
+  %s = fadd double %x, %y
+  %d = fsub double %s, 0x3ff0000000000000
+  %m = fmul double %d, %y
+  %q = fdiv double %m, %x
+  %n = fneg double %q
+  %i = fptosi double %n to i32
+  ret i32 %i
+}
+
+define i32 @main() {
+entry:
+  %a = call i32 (double, double) @calc(double 0x4000000000000000, double 0x4008000000000000)
+  %f = sitofp i32 %a to double
+  %g = fmul double %f, 0x3fe0000000000000
+  %lt = fcmp olt double %g, 0x4000000000000000
+  %ltn = zext i1 %lt to i32
+  %ueq = fcmp ueq double %g, %g
+  %ueqn = zext i1 %ueq to i32
+  %half = fptrunc double %g to float
+  %back = fpext float %half to double
+  %back2 = fptosi double %back to i32
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i32 %a, i32 %ltn, i32 %ueqn, i32 %back2)
+  ret i32 0
+}

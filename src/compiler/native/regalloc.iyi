@@ -1,0 +1,65 @@
+module compiler/native/regalloc
+
+# Register allocation for the -O0 backend (SPEC 2.2 step 4). `allocate` is the entry point; two allocators sit
+# behind it, chosen by the environment variable IYI_NATIVE_REGALLOC:
+#   pin (the reference)  the first ten general-purpose virtual registers in definition order
+#       are pinned to the callee-saved set x19..x28 for the whole function; every other one lives in a frame
+#       slot. Simple and obviously correct; it spills far more than it needs to.
+#   linear                                linear scan over live intervals with callee-saved and caller-saved
+#       pools, spill slots for the rest, and the collector's constraint asserted. See regalloc_linear.iyi.
+# Any other value is refused. Both write their code through rewrite_spills.
+#
+# Under pin, no floating-point register holds a value across a call, and no pointer lives in a floating-point
+# register at all: every floating-point vreg is a frame slot.
+
+import compiler/native/mir::{MFunction, RegClass}
+import compiler/native/aarch64/regs::{callee_saved_gprs}
+import compiler/native/regalloc_linear::{allocate_linear, rewrite_spills}
+import std/env::{ENV}
+
+# Assigns homes and rewrites every instruction so that it names only physical registers and frame slots.
+pub def allocate(fn : MFunction) : Nil
+  if linear_selected?
+    allocate_linear(fn)
+  else
+    allocate_pinned(fn)
+  end
+end
+
+# Whether IYI_NATIVE_REGALLOC asks for the linear allocator. Unset means linear, the default; pin is the reference.
+def linear_selected? : Bool
+  choice = ENV["IYI_NATIVE_REGALLOC"]?
+  if choice.nil?
+    return true
+  end
+  name = choice.as(String)
+  if name == "linear"
+    return true
+  end
+  unless name == "pin"
+    raise "IYI_NATIVE_REGALLOC is #{name}; the choices are pin and linear"
+  end
+  false
+end
+
+# The reference allocator: pins the first ten gpr vregs to x19..x28 and gives every other vreg a frame slot.
+def allocate_pinned(fn : MFunction) : Nil
+  n = fn.vreg_count
+  fn.vreg_home = [] of Int32
+  fn.vreg_slot = [] of Int32
+  pinned = 0
+  v = 0
+  while v < n
+    if fn.vreg_classes[v] == RegClass::Gpr && pinned < 10
+      fn.vreg_home << callee_saved_gprs[pinned]
+      fn.frame.callee_saved << callee_saved_gprs[pinned]
+      fn.vreg_slot << -1
+      pinned = pinned + 1
+    else
+      fn.vreg_home << -1
+      fn.vreg_slot << fn.frame.add_slot(8_i64, 8)
+    end
+    v = v + 1
+  end
+  rewrite_spills(fn)
+end

@@ -1,0 +1,242 @@
+import std/int
+import std/digest::{MD5}
+import std/json::{Builder}
+import compiler/artifact/iyimod::{IyiMod, Artifact, Summary, Section, SectionEntry, Hashes, ImportEdge, Signature, TypeDecl, ImplRecord, Exports, ObjectUnit, TypeLayout, RegexConst, ClassVarRef, ClassVarDecl}
+
+module BenchSelfhostIyimodExercise
+  def self.assert(cond : Bool, msg : String)
+    unless cond
+      puts "Assertion failed: " + msg
+      raise "Assertion failed: " + msg
+    end
+  end
+
+  def self.test_constants
+    print "testing format constants (MAGIC, FORMAT_VERSION, Section count)... "
+    assert(IyiMod::MAGIC == "IYIMOD\0\0", "MAGIC matches")
+    assert(IyiMod::FORMAT_VERSION == 65_u32, "FORMAT_VERSION matches")
+    assert(Section::Header.value == 1_u16, "Header section id")
+    assert(Section::Hashes.value == 2_u16, "Hashes section id")
+    assert(Section::Imports.value == 3_u16, "Imports section id")
+    assert(Section::Exports.value == 4_u16, "Exports section id")
+    assert(Section::MacroBodies.value == 5_u16, "MacroBodies section id")
+    assert(Section::MonoBodies.value == 6_u16, "MonoBodies section id")
+    assert(Section::ObjectCode.value == 7_u16, "ObjectCode section id")
+    assert(Section::Initialiser.value == 8_u16, "Initialiser section id")
+    assert(Section::TypeIds.value == 9_u16, "TypeIds section id")
+    assert(Section::Constants.value == 10_u16, "Constants section id")
+    assert(Section::Requires.value == 11_u16, "Requires section id")
+    assert(Section::Regexes.value == 12_u16, "Regexes section id")
+    assert(Section::ClassVars.value == 13_u16, "ClassVars section id")
+    assert(Section::MatchTypes.value == 14_u16, "MatchTypes section id")
+    assert(Section::Symbols.value == 15_u16, "Symbols section id")
+    assert(Section::TopLevel.value == 16_u16, "TopLevel section id")
+    assert(Section::Reopened.value == 17_u16, "Reopened section id")
+    assert(Section::Libs.value == 18_u16, "Libs section id")
+    assert(Section::TopLevelFuns.value == 19_u16, "TopLevelFuns section id")
+    assert(Section::Inputs.value == 20_u16, "Inputs section id")
+    assert(Section::SymbolLiterals.value == 21_u16, "SymbolLiterals section id")
+    assert(Section::SourcePositions.value == 65_u16, "SourcePositions section id")
+    assert(Section::Spawns.value == 66_u16, "Spawns section id")
+    assert(Section::Reaches.value == 67_u16, "Reaches section id")
+    assert(Section::Layouts.value == 64_u16, "Layouts section id")
+    puts "ok"
+  end
+
+  def self.test_checksum
+    print "testing checksum calculation algorithm... "
+    sum1 = IyiMod.checksum("hello world")
+    assert(sum1 == 6824707963431612112_u64, "checksum matches known golden vector")
+
+    sum2 = IyiMod.checksum("")
+    assert(sum2 == 15284527576400310788_u64, "empty checksum matches known golden vector")
+    puts "ok"
+  end
+
+  def self.test_all_sections_roundtrip
+    print "testing roundtrip serialization of all 20 section types... "
+    art = Artifact.new(
+      "test/module",
+      "/src/test/module.iyi",
+      "0.12.0",
+      "aarch64-apple-darwin25.5.0",
+      ["bits64", "darwin"],
+    )
+
+    art.hashes = Hashes.new("hash_iface", "hash_impl", "hash_src")
+    art.imports = [ImportEdge.new("dep/a", "iface_a", "impl_a", true)]
+    art.usings = ["dep/a::{TypeA}"]
+    art.requires = ["uri", "json"]
+
+    sig = Signature.new("foo", "", ["x : Int32"], "", "Int32", [] of String, false, "pub", "Doc for foo")
+    sig_priv = Signature.new("bar_priv", "", [] of String, "", "Nil", [] of String, false, "private", "")
+    tdecl = TypeDecl.new(
+      "Widget", "class", ["T"], ["Item"], ["SuperTrait"],
+      [{"@val", "Int32", "0"}], [sig], "pub", [] of TypeDecl, "",
+      ["macro m; 42; end"], [{"Small", "0"}],
+      [ClassVarDecl.new("@@count", "Int32", "0", ["@[ThreadLocal]"])],
+      "BaseWidget", ["IncludeMod"], ["fun c_fn : Void*"],
+      ["@[Link(\"m\")]"], "Doc for Widget", true
+    )
+    impl_rec = ImplRecord.new("TraitT", "Widget", ["T"], ["T"], [{"T", "Super"}], [{"Item", "Int32"}], [sig])
+    cv = ClassVarDecl.new("@@mod_var", "String", "\"init\"")
+    art.exports = Exports.new([sig], [tdecl], [impl_rec], [sig_priv], [cv])
+
+    art.macro_bodies = ["macro twice(x); x + x; end"]
+    art.mono_bodies = {"Widget#foo(x : Int32)" => "x + 1"}
+    art.initialiser = "puts \"initialising\""
+    art.type_ids = ["Widget"]
+    art.constants = ["LIMIT"]
+    art.layouts = [{"Widget", TypeLayout.new(42, 16_u32, 16_u32, [0_u32, 8_u32], [] of UInt32)}]
+    art.regexes = [RegexConst.new("$Regex:test", "abc", 1_u32)]
+    art.class_vars = [ClassVarRef.new("Widget::@@count", true)]
+    art.match_types = ["(Int32 | String)"]
+    art.symbols = ["widget_foo"]
+    art.libs = ["m"]
+    art.reopened = [TypeDecl.new("::HTTP::Server", "class")]
+    art.top_level_funs = ["fun top_fn : Int32; 1; end"]
+    art.top_level = [Signature.new("top_def", "", [] of String, "", "Nil")]
+    art.object_code = [ObjectUnit.new("Widget", "fake_object_code_bytes")]
+
+    # Under TEST_SANDBOX when it is set: `/tmp` is not a directory on Windows,
+    # where the runtime job sets the variable and runs this file bare.
+    sandbox_env = Program.env("TEST_SANDBOX")
+    tmp_path = if sandbox_env && !sandbox_env.empty?
+                 sandbox_env + "/selfhost_all_sections_test.iyimod"
+               else
+                 "/tmp/selfhost_all_sections_test.iyimod"
+               end
+    IyiMod.write(art, tmp_path)
+
+    art_read = IyiMod.read(tmp_path, true)
+    assert(art_read.module_name == "test/module", "module name preserved")
+    assert(art_read.hashes.interface == "hash_iface", "interface hash preserved")
+    assert(art_read.imports.size == 1, "imports preserved")
+    assert(art_read.imports[0].exported == true, "facade import preserved")
+    assert(art_read.requires.size == 2, "requires preserved")
+    assert(art_read.exports.functions.size == 1, "exports functions preserved")
+    assert(art_read.exports.types.size == 1, "exports types preserved")
+    assert(art_read.exports.types[0].extends_self == true, "extends_self preserved")
+    assert(art_read.exports.types[0].fields.size == 1, "fields preserved")
+    assert(art_read.exports.types[0].members.size == 1, "members preserved")
+    assert(art_read.exports.types[0].class_vars.size == 1, "type class vars preserved")
+    assert(art_read.exports.impls.size == 1, "impls preserved")
+    assert(art_read.exports.carried_functions.size == 1, "carried functions preserved")
+    assert(art_read.exports.class_vars.size == 1, "module class vars preserved")
+    assert(art_read.macro_bodies.size == 1, "macro bodies preserved")
+    assert(art_read.mono_bodies.size == 1, "mono bodies preserved")
+    assert(art_read.initialiser == "puts \"initialising\"", "initialiser preserved")
+    assert(art_read.type_ids.size == 1, "type ids preserved")
+    assert(art_read.constants.size == 1, "constants preserved")
+    assert(art_read.layouts.size == 1, "layouts preserved")
+    assert(art_read.regexes.size == 1, "regexes preserved")
+    assert(art_read.class_vars.size == 1, "class vars preserved")
+    assert(art_read.match_types.size == 1, "match types preserved")
+    assert(art_read.symbols.size == 1, "symbols preserved")
+    assert(art_read.libs.size == 1, "libs preserved")
+    assert(art_read.reopened.size == 1, "reopened preserved")
+    assert(art_read.top_level_funs.size == 1, "top level funs preserved")
+    assert(art_read.top_level.size == 1, "top level defs preserved")
+    assert(art_read.object_code.size == 1, "object code preserved")
+    assert(art_read.object_code[0].code == "fake_object_code_bytes", "object code bytes preserved")
+
+    # Fast summary check
+    summary = IyiMod.read_summary(tmp_path)
+    assert(summary.module_name == "test/module", "summary module name matches")
+    assert(summary.hashes.interface == "hash_iface", "summary hashes match")
+    assert(summary.imports.size == 1, "summary imports match")
+
+    puts "ok"
+  end
+
+  def self.test_dump_and_json
+    print "testing dump, surface, declarations and json formatting... "
+    art = Artifact.new(
+      "calc/lexer",
+      "/src/calc/lexer.iyi",
+      "0.12.0",
+      "aarch64-apple-darwin",
+      ["debug"],
+    )
+    sig = Signature.new("scan", "", ["source : String"], "", "Array(Token) | BadCharacter", [] of String, false, "pub")
+    tdecl = TypeDecl.new("Token", "struct", [] of String, [] of String, [] of String, [{"@kind", "String", ""}], [] of Signature, "pub")
+    art.exports = Exports.new([sig], [tdecl], [] of ImplRecord)
+
+    dump_str = IyiMod.dump_to_s(art)
+    assert(dump_str.includes?("module        calc/lexer"), "dump contains module")
+    assert(dump_str.includes?("def scan(source : String) : Array(Token) | BadCharacter"), "dump contains def")
+
+    decls_str = IyiMod.declarations_to_s(art)
+    assert(decls_str.includes?("module calc/lexer"), "declarations contains module header")
+    assert(decls_str.includes?("pub def scan(source : String) : Array(Token) | BadCharacter"), "declarations contains pub def")
+
+    surface_str = IyiMod.surface_to_s(art)
+    assert(surface_str.includes?("pub def scan(source : String)"), "surface contains signature")
+
+    json_str = IyiMod.to_json(art)
+    assert(json_str.includes?("\"module\":\"calc/lexer\""), "json contains module")
+    assert(json_str.includes?("\"name\":\"scan\""), "json contains scan function")
+    puts "ok"
+  end
+
+  def self.run_all
+    puts "============================================================="
+    puts "Running Selfhost IyiMod Verification Suite (pure iyi stage 0)"
+    puts "============================================================="
+    test_constants
+    test_checksum
+    test_all_sections_roundtrip
+    test_dump_and_json
+    puts "============================================================="
+    puts "ALL SELFHOST IYIMOD CHECKS PASSED SUCCESSFULLY!"
+    puts "============================================================="
+  end
+end
+
+if Program.args.size == 0
+  BenchSelfhostIyimodExercise.run_all
+elsif Program.args[0] == "read" && Program.args.size > 1
+  art = IyiMod.read(Program.args[1], true)
+  puts "read: " + art.module_name + " (" + art.compiler_version + ")"
+elsif Program.args[0] == "dump" && Program.args.size > 1
+  art = IyiMod.read(Program.args[1], true)
+  print IyiMod.dump_to_s(art)
+elsif Program.args[0] == "declarations" && Program.args.size > 1
+  art = IyiMod.read(Program.args[1], true)
+  print IyiMod.declarations_to_s(art)
+elsif Program.args[0] == "json" && Program.args.size > 1
+  art = IyiMod.read(Program.args[1], true)
+  puts IyiMod.to_json(art)
+elsif Program.args[0] == "write-macros" && Program.args.size > 1
+  decl = TypeDecl.new("Owner", "struct")
+  decl.macros = [
+    "# A type macro.\nmacro field(value)\n  {{ value }}\nend",
+    "macro plain\nend",
+  ]
+  art = Artifact.new("synthetic/macros", "", "", "", [] of String)
+  art.exports = Exports.new([] of Signature, [decl])
+  art.macro_bodies = [
+    "# First line.\n# Second line.\npub macro documented(value)\n  {{ value }}\nend",
+    "pub macro plain\nend",
+    "macro hidden\nend",
+  ]
+  IyiMod.write(art, Program.args[1])
+elsif Program.args[0] == "write-deep" && Program.args.size > 1
+  types = [] of TypeDecl
+  i = 0
+  while i < 202
+    decl = TypeDecl.new("T" + (202 - i).to_s, "struct")
+    decl.types = types
+    types = [decl]
+    i = i + 1
+  end
+  art = Artifact.new("deep", "", "", "", [] of String)
+  art.exports = Exports.new([] of Signature, types)
+  IyiMod.write(art, Program.args[1])
+elsif Program.args[0] == "write" && Program.args.size > 2
+  art = IyiMod.read(Program.args[1], true)
+  IyiMod.write(art, Program.args[2])
+else
+  puts "Usage: selfhost_iyimod_exercise [read|dump|declarations|json|write] [args...]"
+  raise "invalid usage"
+end

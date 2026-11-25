@@ -1,0 +1,29 @@
+; iyi-ir 1
+module "tls_threads"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+declare external i64 @__fixture_run_on_thread(ptr, i64)
+@fmt = private constant [9 x i8] c"%ld %ld\0A\00"
+@tv = internal thread_local(localexec) global i64 1, align 8
+
+; Runs on a thread of its own: stores its argument in its own copy of @tv and returns what it reads back.
+define internal i64 @worker(i64 %x) {
+entry:
+  %p = threadlocaladdr ptr @tv
+  store i64 %x, ptr %p, align 8
+  %q = threadlocaladdr ptr @tv
+  %v = load i64, ptr %q, align 8
+  ret i64 %v
+}
+
+define i32 @main() {
+entry:
+  %p = threadlocaladdr ptr @tv
+  store i64 100, ptr %p, align 8
+  %got = call i64 (ptr, i64) @__fixture_run_on_thread(ptr @worker, i64 7)
+  %q = threadlocaladdr ptr @tv
+  %mine = load i64, ptr %q, align 8
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i64 %mine, i64 %got)
+  ret i32 0
+}

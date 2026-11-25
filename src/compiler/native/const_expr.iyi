@@ -1,0 +1,144 @@
+module compiler/native/const_expr
+
+# A constant expression, reduced to what a back end can place: a symbol plus a byte offset, or a plain integer
+# when it names no symbol. The hosted compiler writes four forms in a program that loads the prelude, and all
+# reduce this way: the address of a field of a global (`getelementptr inbounds (T, ptr @g, i32 0, i32 1)`), a
+# global's address as an integer and back (`inttoptr (i64 ptrtoint (ptr @g to i64) to ptr)`), the size of a type
+# (`ptrtoint (ptr getelementptr (T, ptr null, i32 1) to i64)`), and a sum or difference of those.
+#
+# What does not reduce is refused by name: a cast that changes the value of an address (a truncation of a
+# symbol), the sum of two symbols, a difference of two different symbols (it needs a relocation pair the object
+# writers do not emit here), and any other operation.
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, GepAux}
+import compiler/ir/function::{Function, Global}
+import compiler/ir/layout::{DataLayout}
+
+pub class ConstAddress
+  # The global or function the expression is relative to; nil for a plain integer.
+  getter base : Value?
+  getter offset : Int64
+
+  def initialize(@base : Value?, @offset : Int64)
+  end
+
+  def symbol_name : String
+    b = @base
+    return "" if b.nil?
+    return b.as(Global).name if b.is_a?(Global)
+    b.as(Function).name
+  end
+end
+
+# The integer of `bits` bits that `value` wraps to, sign-extended to 64, as a ConstInt's `aux_int` holds it.
+def wrap_to_bits(value : Int64, bits : Int32) : Int64
+  return value if bits >= 64
+  shift = 64 - bits
+  (value << shift) >> shift
+end
+
+pub def reduce_const(layout : DataLayout, v : Value) : ConstAddress | String
+  if v.is_a?(Global) || v.is_a?(Function)
+    return ConstAddress.new(v, 0_i64)
+  end
+  return "a constant expression reads a value that is not a constant" unless v.is_a?(Inst)
+  i = v.as(Inst)
+  if i.op == Op::ConstInt
+    return ConstAddress.new(nil, i.aux_int)
+  end
+  if i.op == Op::ConstNull || i.op == Op::ConstZero
+    return ConstAddress.new(nil, 0_i64)
+  end
+  if i.op == Op::GlobalAddr || i.op == Op::FunctionAddr
+    return ConstAddress.new(i.args[0], 0_i64)
+  end
+  return "a constant expression reads #{i.op}, which has no address and no integer value" unless i.op == Op::ConstExpr
+
+  if i.aux.is_a?(GepAux)
+    reduced = reduce_const(layout, i.args[0])
+    return reduced if reduced.is_a?(String)
+    start = reduced.as(ConstAddress)
+    g = i.aux.as(GepAux)
+    off = start.offset
+    cur = g.source_type
+    k = 1
+    while k < i.args.size
+      ix = i.args[k]
+      return "a constant getelementptr index must be a constant integer" unless ix.is_a?(Inst) && ix.as(Inst).op == Op::ConstInt
+      n = ix.as(Inst).aux_int
+      if k == 1
+        off = off + n * layout.alloc_size(cur)
+      elsif cur.struct?
+        off = off + layout.offset_of(cur, n.to_i32)
+        cur = cur.struct_element_types[n.to_i32]
+      elsif cur.array?
+        off = off + n * layout.alloc_size(cur.element_type)
+        cur = cur.element_type
+      else
+        return "a constant getelementptr walks into #{cur}"
+      end
+      k = k + 1
+    end
+    return ConstAddress.new(start.base, off)
+  end
+
+  if i.aux_int == Op::Mul.value.to_i64
+    left = reduce_const(layout, i.args[0])
+    return left if left.is_a?(String)
+    right = reduce_const(layout, i.args[1])
+    return right if right.is_a?(String)
+    a = left.as(ConstAddress)
+    b = right.as(ConstAddress)
+    return "a constant expression multiplies a symbol" if !a.base.nil? || !b.base.nil?
+    return ConstAddress.new(nil, wrap_to_bits(a.offset * b.offset, i.type.int? ? i.type.bits : 64))
+  end
+
+  if i.aux_int == Op::Add.value.to_i64 || i.aux_int == Op::Sub.value.to_i64
+    left = reduce_const(layout, i.args[0])
+    return left if left.is_a?(String)
+    right = reduce_const(layout, i.args[1])
+    return right if right.is_a?(String)
+    a = left.as(ConstAddress)
+    b = right.as(ConstAddress)
+    if i.aux_int == Op::Add.value.to_i64
+      return "a constant expression adds two symbols" if !a.base.nil? && !b.base.nil?
+      return ConstAddress.new(a.base.nil? ? b.base : a.base, a.offset + b.offset)
+    end
+    if b.base.nil?
+      return ConstAddress.new(a.base, a.offset - b.offset)
+    end
+    if !a.base.nil? && a.symbol_name == b.symbol_name
+      return ConstAddress.new(nil, a.offset - b.offset)
+    end
+    return "a constant expression subtracts #{b.symbol_name} from #{a.base.nil? ? "an integer" : a.symbol_name}: a difference of two symbols"
+  end
+
+  inner = reduce_const(layout, i.args[0])
+  return inner if inner.is_a?(String)
+  r = inner.as(ConstAddress)
+  t = i.type
+  if i.aux_int == Op::PtrToInt.value.to_i64 || i.aux_int == Op::IntToPtr.value.to_i64 || i.aux_int == Op::BitCast.value.to_i64 || i.aux_int == Op::AddrSpaceCast.value.to_i64
+    # An address keeps its value only at pointer width.
+    if !r.base.nil? && t.int? && t.bits < layout.pointer_size(0) * 8
+      return "a constant expression truncates the address of #{r.symbol_name} to #{t.bits} bits"
+    end
+    return ConstAddress.new(r.base, r.base.nil? && t.int? ? wrap_to_bits(r.offset, t.bits) : r.offset)
+  end
+  if i.aux_int == Op::Trunc.value.to_i64 || i.aux_int == Op::SExt.value.to_i64
+    return "a constant expression truncates or extends the address of #{r.symbol_name}" unless r.base.nil?
+    return ConstAddress.new(nil, wrap_to_bits(r.offset, t.bits))
+  end
+  if i.aux_int == Op::ZExt.value.to_i64
+    return "a constant expression extends the address of #{r.symbol_name}" unless r.base.nil?
+    from = i.args[0].type
+    bits = from.int? ? from.bits : 64
+    value = r.offset
+    if bits < 64
+      value = value & ((1_i64 << bits) - 1_i64)
+    end
+    return ConstAddress.new(nil, value)
+  end
+  "a constant expression of this operation is not reduced (operation #{i.aux_int})"
+end

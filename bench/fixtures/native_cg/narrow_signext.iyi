@@ -1,0 +1,4 @@
+module narrow_signext
+
+v = 4294967295_i64
+puts v

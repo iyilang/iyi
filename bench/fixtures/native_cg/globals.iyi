@@ -1,0 +1,7 @@
+module globals
+
+counter = 0_i64
+counter = counter + 1_i64
+counter = counter + 1_i64
+counter = counter + 1_i64
+puts "hello #{counter} #{7 + 1}"

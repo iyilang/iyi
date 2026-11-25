@@ -1,0 +1,13 @@
+; iyi-ir 1
+module "threadpointer"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+
+; The thread pointer as darwin's thread-local block reads it: tpidrro_el0 with its low three bits (the CPU number)
+; cleared. Called from tp_main.c, which reads it twice on the same thread.
+define i64 @tp_word() {
+entry:
+  %t = threadpointer tpidrro_el0
+  %i = ptrtoint ptr %t to i64
+  ret i64 %i
+}

@@ -1,0 +1,114 @@
+module arith
+
+import std/int
+
+def w8(a : Int8, b : Int8) : Int64
+  ua = (a.to_i64 & 255_i64).to_u8
+  ub = (b.to_i64 & 255_i64).to_u8
+  s = a &+ b
+  d = a // b
+  r = a - d &* b
+  m = a &* b
+  x = s ^ m
+  sh = a << 2
+  lr = (ua >> 1).to_i8
+  ar = a >> 1
+  u = (ua // ub).to_i8
+  ur = (ua - (ua // ub) &* ub).to_i8
+  an = a & b
+  o = a | b
+  s.to_i64 + d.to_i64 + r.to_i64 + m.to_i64 + x.to_i64 + sh.to_i64 + lr.to_i64 + ar.to_i64 + u.to_i64 + ur.to_i64 + an.to_i64 + o.to_i64
+end
+
+def w16(a : Int16, b : Int16) : Int64
+  ua = (a.to_i64 & 65535_i64).to_u16
+  ub = (b.to_i64 & 65535_i64).to_u16
+  s = a &+ b
+  d = a // b
+  r = a - d &* b
+  m = a &* b
+  x = s ^ m
+  sh = a << 2
+  lr = (ua >> 1).to_i16
+  ar = a >> 1
+  u = (ua // ub).to_i16
+  ur = (ua - (ua // ub) &* ub).to_i16
+  an = a & b
+  o = a | b
+  s.to_i64 + d.to_i64 + r.to_i64 + m.to_i64 + x.to_i64 + sh.to_i64 + lr.to_i64 + ar.to_i64 + u.to_i64 + ur.to_i64 + an.to_i64 + o.to_i64
+end
+
+def w32(a : Int32, b : Int32) : Int64
+  ua = (a.to_i64 & 4294967295_i64).to_u32
+  ub = (b.to_i64 & 4294967295_i64).to_u32
+  s = a &+ b
+  d = a // b
+  r = a - d &* b
+  m = a &* b
+  x = s ^ m
+  sh = a << 2
+  lr = (ua >> 1).to_i32
+  ar = a >> 1
+  u = (ua // ub).to_i32
+  ur = (ua - (ua // ub) &* ub).to_i32
+  an = a & b
+  o = a | b
+  s.to_i64 + d.to_i64 + r.to_i64 + m.to_i64 + x.to_i64 + sh.to_i64 + lr.to_i64 + ar.to_i64 + u.to_i64 + ur.to_i64 + an.to_i64 + o.to_i64
+end
+
+def w64(a : Int64, b : Int64) : Int64
+  ua = a.to_u64
+  ub = b.to_u64
+  s = a &+ b
+  d = a // b
+  r = a - d &* b
+  m = a &* b
+  x = s ^ m
+  sh = a << 2
+  lr = (ua >> 1).to_i64
+  ar = a >> 1
+  u = (ua // ub).to_i64
+  ur = (ua - (ua // ub) &* ub).to_i64
+  an = a & b
+  o = a | b
+  s.to_i64 + d.to_i64 + r.to_i64 + m.to_i64 + x.to_i64 + sh.to_i64 + lr.to_i64 + ar.to_i64 + u.to_i64 + ur.to_i64 + an.to_i64 + o.to_i64
+end
+
+# The signed add overflow of two 32-bit values: the wrapped sum, plus 1000000 when it overflowed.
+def ovf32(a : Int32, b : Int32) : Int64
+  wide = a.to_i64 + b.to_i64
+  low = wide & 4294967295_i64
+  v = low >= 2147483648_i64 ? low - 4294967296_i64 : low
+  flag = wide == v ? 0_i64 : 1_i64
+  v + flag * 1000000_i64
+end
+
+# The unsigned multiply overflow of two 64-bit values.
+def umul64(a : UInt64, b : UInt64) : Int64
+  prod = a &* b
+  flag = a != 0_u64 && prod // a != b ? 1_i64 : 0_i64
+  prod.to_i64 + flag * 1000000_i64
+end
+
+# The unsigned subtraction of two 32-bit values: the wrapped difference, plus 1000000 on borrow.
+def usub32(a : UInt32, b : UInt32) : Int64
+  diff = (a &- b).to_i64
+  flag = a < b ? 1_i64 : 0_i64
+  diff + flag * 1000000_i64
+end
+
+puts w8(100_i8, 50_i8)
+puts w8(-100_i8, 7_i8)
+puts w8(-7_i8, 2_i8)
+puts w16(1000_i16, 300_i16)
+puts w16(-1000_i16, 7_i16)
+puts w16(-7_i16, 2_i16)
+puts w32(100000_i32, 300_i32)
+puts w32(-100000_i32, 7_i32)
+puts w32(-7_i32, 2_i32)
+puts w64(100000000000_i64, 300_i64)
+puts w64(123456789_i64, 7_i64)
+puts w64(7_i64, 2_i64)
+puts ovf32(2147483647_i32, 1_i32)
+puts umul64(4294967296_u64, 4294967296_u64)
+puts usub32(3_u32, 5_u32)

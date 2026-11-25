@@ -1,0 +1,24 @@
+module jump_loop
+
+def run(count : Int32) : Int32
+  acc = 0
+  i = 0
+  base = count * 7
+  while i < count
+    k = i & 7
+    case k
+    when 0 then acc = acc + base + 1
+    when 1 then acc = acc + 2
+    when 2 then acc = acc + 3
+    when 3 then acc = acc + 4
+    when 4 then acc = acc + 5
+    when 5 then acc = acc + 6
+    else        acc = acc - 3
+    end
+    i = i + 1
+  end
+  acc
+end
+
+puts "#{run(20)}"
+puts "#{run(3)}"

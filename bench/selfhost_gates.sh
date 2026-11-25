@@ -18,8 +18,8 @@
 # run measures it. A weight for a gate that does not exist is ignored.
 #
 # Each gate's full output goes to a log under $SELFHOST_GATE_LOGS (default: a fresh
-# temporary directory), and is printed after the gate ends. Exit status is 0 only
-# when every gate it runs exits 0.
+# temporary directory), is printed after the gate ends, and is retained by CI.
+# Exit status is 0 only when every gate it runs exits 0.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -124,6 +124,21 @@ mkdir -p "$LOGDIR"
 cd "$REPO"
 . "$REPO/bench/lib/host.sh" || exit 1
 require_test_host || exit 1
+head="$(git rev-parse HEAD)" || exit 1
+identity="$LOGDIR/run-${head}-${HOST_ID}-${GITHUB_RUN_ATTEMPT:-local}.txt"
+{
+  printf 'checked-out-head=%s\nhost=%s\n' "$head" "$HOST_ID"
+  if [ -n "${SELFHOST_SOURCE_SHA:-}" ]; then
+    printf 'source-head=%s\n' "$SELFHOST_SOURCE_SHA"
+  fi
+  printf 'run-id=%s\nrun-attempt=%s\n' "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-local}"
+} > "$identity" || exit 1
+cat "$identity"
+if [ "${GITHUB_ACTIONS:-}" = true ] && [ "$head" != "${GITHUB_SHA:-}" ]; then
+  echo "checked-out HEAD differs from the workflow revision" >&2
+  exit 1
+fi
+
 
 total=${#gates[@]}
 mine=""

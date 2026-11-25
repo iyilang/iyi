@@ -1,0 +1,18 @@
+; iyi-ir 1
+source_filename = "fold_cast"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i8 @truncate() {
+entry:
+  ret i8 -1
+}
+
+define internal i32 @zero_extend() {
+entry:
+  ret i32 255
+}
+
+define internal i32 @sign_extend() {
+entry:
+  ret i32 -1
+}

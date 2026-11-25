@@ -1,0 +1,19 @@
+; iyi-ir 1
+module "narrow_i1"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [7 x i8] c"%d %d\0A\00"
+@cell = internal global i8 1, align 1
+define i32 @main() {
+entry:
+  %v = load i8, ptr @cell, align 1
+  %b = trunc i8 %v to i1
+  %c = icmp slt i1 %b, 0
+  %f = sitofp i1 %b to double
+  %fc = fcmp olt double %f, 0.000000e+00
+  %x = zext i1 %c to i32
+  %y = zext i1 %fc to i32
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i32 %x, i32 %y)
+  ret i32 0
+}

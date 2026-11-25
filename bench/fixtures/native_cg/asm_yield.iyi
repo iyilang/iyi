@@ -1,0 +1,9 @@
+@[Unsafe("the fixture holds an inline asm statement")]
+module asm_yield
+
+def spin : Nil
+  asm("yield" :::: "volatile")
+end
+
+spin
+puts "1"

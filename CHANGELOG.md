@@ -78,6 +78,130 @@
   driver's two version literals to `src/IYI_VERSION` and `src/VERSION`.
 - The seven gates above run in the `selfhost`, `selfhost-darwin` and
   `selfhost-windows` jobs through `bench/selfhost_gates.sh`, as #181's does.
+- **An x86-64 encoder and ABI tables in iyi: `src/compiler/native/amd64/`
+  (#191).** 1,056 lines of iyi encode instruction forms and their
+  relocations and hold the System V and Win64 argument and return
+  conventions, beside 533 lines of target-neutral machine IR, target
+  descriptions and AArch64 opcode tables (`native/mir.iyi`,
+  `native/target.iyi`, `native/aarch64/`); `src/compiler/tools/native_amd64.iyi`
+  is its driver. `bench/native_x86_64_exercise.sh` compares 113 forms with
+  LLVM's assembler (bytes and all 11 relocations) and 43 ABI rows with the
+  psABI and the Microsoft x64 convention, and catches 5 broken copies.
+  Nothing in the hosted compiler uses it yet.
+- **A native executable linker in iyi: `src/compiler/native/link/` (#192).**
+  3,041 lines of iyi write Mach-O executables, with their imports, rebases
+  and ad-hoc code signature, and static-PIE ELF images for x86-64 and
+  AArch64, with no system linker; `src/compiler/tools/link_macho.iyi` is its
+  driver. `bench/native_link_exercise.sh` links the hosted compiler's arm64
+  object of every `samples/iyi` program (28) and requires each to link twice
+  to the same bytes, checks both ELF images' headers, segments and
+  relocations and rejects 3 damaged copies of each, and runs the linker
+  under `ld`, `cc`, `clang`, `codesign` and `dsymutil` shims that must never
+  be called. On macOS it also runs the programs against the system linker's,
+  checks signatures and library dependencies, and catches 3 broken copies.
+  The Linux job runs the x86-64 image; the AArch64 image it links runs in a
+  new `selfhost-linux-arm64` job (`bench/native_elf_run.sh`, on GitHub's
+  arm64 runner). Nothing in the hosted compiler uses it yet.
+- **LLVM bindings and an IR round trip in iyi: `src/compiler/llvm/` and
+  `src/compiler/backend/llvm/` (#206).** 2,534 lines of bindings (context,
+  types, values, builder, pass manager, target machine) and 2,395 that
+  translate `compiler/ir` modules to LLVM and import LLVM's back;
+  `src/compiler/tools/ir.iyi` is the `iyi-ir` driver. The bridge reads no
+  environment and runs no command: its LLVM version, built targets and link
+  flags are build arguments (`-Dllvm_major_N`, `-Dllvm_minor_N`,
+  `-Dllvm_patch_N`, `-Dllvm_target_<name>`, `--link-flags`), which
+  `bench/lib/host.sh`'s `llvm_bridge_build_args` prints for each host.
+  `bench/selfhost_llvm_exercise.sh` builds, verifies, optimises and emits
+  modules plain and `--release`, links and runs the emitted object, and
+  catches 5 broken copies; `bench/native_llvm_roundtrip_exercise.sh`
+  round-trips 16 IR fixtures through LLVM identically and catches 6. The
+  whole corpus's round trip is not measured yet. Windows' run of every
+  bench exercise skips `selfhost_llvm_exercise.iyi`, which needs those build
+  arguments; the Windows self-host job runs its gate.
+- **IR cleanup passes in iyi: `src/compiler/ir/opt/` (#225).** 2,406 lines
+  of iyi: constant folding and algebraic simplification, mem2reg, CFG
+  simplification and dead-code elimination over `compiler/ir`, with no
+  LLVM; `src/compiler/tools/ir_opt.iyi` is the `iyi-opt` driver.
+  `bench/native_opt_exercise.sh` requires 49 pass and pipeline fixtures to
+  produce their expected IR deterministically and idempotently, checks the
+  driver's command-line contract and that a diamond chain twice as long
+  takes less than three times the CPU time, and catches 5 broken copies.
+- **The module artifact reader and writer in iyi:
+  `src/compiler/artifact/iyimod.iyi` (#196).** 3,554 lines of iyi read and
+  write `.iyimod` format v65; `src/compiler/tools/mod.iyi` is the `iyi-mod`
+  driver. `bench/selfhost_iyimod_exercise.sh` requires the port to write 17
+  modules from `samples/iyi` and `src/std` byte for byte as the hosted
+  compiler does, each reader to read the other's, the driver's dump,
+  declarations and JSON to match the hosted reader's, and 11 damaged
+  artifacts to be refused with the same verdict, and catches 16 broken
+  copies.
+- These six gates run in the same three jobs through
+  `bench/selfhost_gates.sh`; `bench/native_elf_run.sh` runs in
+  `selfhost-linux-arm64`.
+- **AArch64 code generation and register allocation in iyi:
+  `src/compiler/native/` (#194).** 6,582 lines of iyi select AArch64
+  instructions from `compiler/ir`, lower calls, frames, switches, atomics,
+  thread-locals and inline assembly, allocate registers (a pinning
+  reference and a linear-scan allocator), encode instructions and emit
+  Mach-O objects, with a 253-line IR runtime (`native/rt/builtins.ir`);
+  `src/compiler/tools/native_cg.iyi` is its driver.
+  `bench/native_encode_exercise.sh` compares 100 instruction forms with the
+  hosted compiler's LLVM output, bytes and relocations.
+  `bench/native_codegen_exercise.sh` emits 46 fixtures as Mach-O objects,
+  compares 3 naked functions with the hosted compiler's bytes, checks stack
+  probes, atomic orderings, jump tables and thread-local sequences, and
+  encodes each fixture's Linux variant in memory; on macOS arm64 it also runs
+  all 46 against hosted twins and holds 32 broken copies to failing.
+  `bench/native_regalloc_exercise.sh` requires both allocators' output to be
+  deterministic on 10 fixtures and the linear one to use no more spill slots
+  than the reference, and on macOS arm64 runs them against hosted twins and
+  catches 7 broken copies. Off macOS the execution checks and most broken
+  copies report as host-limited (Linux catches 6 of codegen's and 2 of the
+  allocator's). The LLVM backend stays the default; no PE/COFF object is
+  written by this backend yet.
+- The self-host gates driver records the checked-out and source revisions
+  for each run, and the self-host jobs keep every gate's complete log as an
+  artifact, even when a gate fails.
+- **An inventory of inline assembly in iyi:
+  `src/compiler/native/asm/inventory.iyi` (#208).** 763 lines of iyi scan
+  every `asm(...)` expression of the tree's iyi sources for five targets,
+  evaluating the `{% if %}` and `{% unless %}` flag conditions around it;
+  `src/compiler/tools/native_asm.iyi` (794 lines) is its driver.
+  `bench/native_asm_exercise.sh` runs the iyi parser over every tracked
+  `.iyi` file under `src/`, requires the inventory to account for each of
+  the 152 lines `git grep` finds with `asm(` (129 expressions, 23 comments,
+  strings or identifiers), assembles each AArch64 template with #194's
+  assembler and requires its bytes and relocations to equal LLVM's for the
+  same template in a naked function the hosted compiler cross-compiles
+  (Darwin 12 functions and 2 relocations, Linux 16 and 6, and the 15
+  templates both formats take, on both), refuses 8 templates outside the
+  supported set by name, checks 21 constraint fixtures, and catches 3 broken
+  copies of the assembler. On macOS it also holds the driver to
+  `libSystem` alone.
+- **ELF objects and Linux start code in iyi:
+  `src/compiler/native/obj/elf.iyi` (#209).** 976 lines of iyi read and
+  write x86-64 and AArch64 ELF relocatable objects (the reader refuses
+  COMDAT groups by name, and drops them when it reads for a link);
+  `src/compiler/tools/obj_elf.iyi` and `src/compiler/tools/link_elf.iyi` are
+  its drivers. `src/compiler/native/rt/start_linux_x86_64.ir` and
+  `start_linux_aarch64.ir` (171 and 181 lines) are the static-PIE start
+  code: they apply the image's relative relocations, set `environ`, protect
+  RELRO, map the main thread's TLS block and call `main`. The AArch64
+  instruction selector now reaches hidden, protected and `dso_local`
+  declarations directly rather than through the GOT, which the start code
+  needs before it has rebased the GOT. `bench/native_elf_exercise.sh` has the
+  hosted compiler cross-compile the 28 programs of `samples/iyi` and 2
+  object fixtures for both Linux targets and requires each object to read,
+  write back and read equal, with an equal `llvm-readelf` listing (25 of 30
+  per target; the 5 with COMDAT groups are refused by name); compiles the
+  AArch64 start code with the native backend, and both start files through
+  `iyi-ir` and `llc`, with their bootstrap symbols addressed directly; links
+  all 60 objects with #192's linker into executables that pass a structural
+  check and link to the same bytes twice; runs the 30 x86-64 executables
+  against hosted-linked references on Linux x86-64 (exit status, stdout and
+  stderr; the address fixture must change its addresses between runs); and
+  catches 4 broken copies. AArch64 execution reports as host-limited on the
+  current runners.
 
 ### Changed
 
@@ -308,6 +432,14 @@
   last chunk beginning below the bound reaches into it; the run must end
   where its last chunk reaches under a page into the rest. A copy that
   cuts at the word fails there on 4 KB and 16 KB pages.
+
+- **`bench/std_zstd_exercise.sh` expected Python to read a frame that
+  reaches past its window.** It did up to libzstd 1.5.7. The CPython
+  3.14.10 build `uv` installs since 2026-11-24 carries libzstd 1.6.0, which
+  holds the offset to the declared window as RFC 8878 3.1.1.4 says and
+  refuses the frame, so the oracle stopped before measuring anything. The
+  expected verdict now follows the oracle's `zstd_version_info`. iyi still
+  has to refuse the frame with its sentence.
 
 ### Fixed
 

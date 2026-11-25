@@ -433,6 +433,14 @@
   where its last chunk reaches under a page into the rest. A copy that
   cuts at the word fails there on 4 KB and 16 KB pages.
 
+- **`bench/std_zstd_exercise.sh` expected Python to read a frame that
+  reaches past its window.** It did up to libzstd 1.5.7. The CPython
+  3.14.10 build `uv` installs since 2026-11-24 carries libzstd 1.6.0, which
+  holds the offset to the declared window as RFC 8878 3.1.1.4 says and
+  refuses the frame, so the oracle stopped before measuring anything. The
+  expected verdict now follows the oracle's `zstd_version_info`. iyi still
+  has to refuse the frame with its sentence.
+
 ### Fixed
 
 - **`iyi test` on a package with a dependency builds in a cold module

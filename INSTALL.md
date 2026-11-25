@@ -46,7 +46,7 @@ job recorded attestations has none, and `gh` says so. The installers check
 the checksum and not the attestation, which needs `gh`.
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 1,556 KB prelude, the 5,090 KB of `src/std` that `import std/...`
+iyi's own 1,565 KB prelude, the 5,091 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. `bin/iyi` finds
 all three beside itself, so there is nothing to configure. LLVM is inside the
 binary — a static minimal build from `scripts/build-static-llvm.sh` — so `lib/`
@@ -125,7 +125,8 @@ A wasm32-wasi program links with a WASI toolchain's `cc` (CI uses wasi-sdk's
 clang). A `wasm32-unknown-unknown` build links directly with `wasm-ld` on
 `PATH`, without libc or WASI. Its ES-module loader is installed at
 `share/iyi/src/iyi/wasm/iyi.mjs`. The import and export contract is in
-SPEC.md III.12.1. Neither wasm target has a concurrency runtime.
+SPEC.md III.12.1. Freestanding tasks need JSPI for a park; wasm32-wasi has
+no concurrency runtime.
 
 ## What a program depends on
 

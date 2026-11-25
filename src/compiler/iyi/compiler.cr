@@ -3919,6 +3919,7 @@ module Iyi
           link_flags += " --target=wasm32-wasi"
           {DEFAULT_LINKER, %(#{DEFAULT_LINKER} "${@}" -o #{Process.quote_posix(output_filename)} #{link_flags} #{program.lib_flags(@cross_compile)}), object_names}
         else
+          link_flags += " --export=__stack_pointer" if program.iyi_wasm_tasks_reached?
           {"wasm-ld", %(wasm-ld "${@}" -o #{Process.quote_posix(output_filename)} --no-entry #{link_flags}), object_names}
         end
       elsif program.has_flag? "avr"

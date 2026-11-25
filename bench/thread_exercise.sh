@@ -3434,7 +3434,18 @@ splice_gate() {
 }
 splice_gate skipping/iyi/thread.iyi || { echo "SETUP: skipping: the mutant roots anchor changed"; exit 76; }
 awk '
-  /^    st.current = fiber$/ { print "    fiber.state = IyiFiberState::Running"; print "    IyiThread.release_gate_hold(IyiThread.current_line, \"SETUP: skipping: held switch gate timed out\\n\")"; found++ }
+  /^      st.current = fiber$/ {
+    current = $0
+    if (getline following <= 0) exit 3
+    if (following == "      __iyi_ctx_swap(previous.sp_slot, fiber.sp_slot)") {
+      print "      fiber.state = IyiFiberState::Running"
+      print "      IyiThread.release_gate_hold(IyiThread.current_line, \"SETUP: skipping: held switch gate timed out\\n\")"
+      found++
+    }
+    print current
+    print following
+    next
+  }
   { print }
   END { if (found != 1) exit 3 }
 ' "$REPO/src/iyi/concurrency.iyi" > skipping/iyi/concurrency.iyi || { echo "SETUP: skipping: the mutant current-fiber anchor changed"; exit 76; }

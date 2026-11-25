@@ -25,6 +25,7 @@ strings, reads and subprocesses.
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -77,6 +78,16 @@ check("and both halves of the samples job, whichever half runs it",
 reason, jobs = planned("bench/lsp_soak.py")
 check("the other half's gate selects both halves too",
       {"samples", "samples-surfaces"} <= jobs, f"{reason}: {sorted(jobs)}")
+
+# Split the names so this planner test does not claim to run the files.
+for name in ("wasm_browser", "wasm_node", "wasm_freestanding_exercise"):
+    reason, jobs = planned("bench/" + name + ".mjs")
+    check(f"{name}.mjs selects the freestanding wasm job",
+          "wasm-freestanding" in jobs, f"{reason}: {sorted(jobs)}")
+
+reason, jobs = planned("bench/" + "std_tls_exercise" + ".sh")
+check("an unrelated exercise does not select freestanding wasm",
+      "wasm-freestanding" not in jobs, f"{reason}: {sorted(jobs)}")
 
 # Spelled in two pieces: this file runs in the docs job, and a name written
 # whole in its code would be a file the docs job runs.
@@ -220,6 +231,24 @@ else:
     selected, reason = planner.plan(planner.parse_jobs(workflow), "pull_request", "", ["bench/std_one.eiy"], bench)
     check("a plan of one bench file is its jobs, what they need, and the docs gates",
           selected == {"alpha", "docs"} and reason.startswith("only bench files changed"), f"{reason}: {sorted(selected)}")
+
+    # The Windows native loop selects every bench/*.iyi except its named
+    # exclusions. A wasm-only fixture must remain reached by its wasm driver
+    # without being fed to the native compiler.
+    jobs = planner.parse_jobs((ROOT / ".github/workflows/iyi.yml").read_text())
+    native = jobs["windows-native-gates"]["text"]
+    skip_list = re.search(r"\$skip\s*=\s*@\((.*?)\)", native, re.S | re.I)
+    loop = re.search(r"Get-ChildItem\s+bench\\\*\.iyi", native, re.I)
+    gate = re.search(r"\$skip\s+-contains\s+\$program\.Name", native, re.I)
+    skipped = set(re.findall(r'"([^"]+\.iyi)"', skip_list.group(1))) if skip_list else set()
+    target = "wasm_" + "freestanding_" + "exercise.iyi"
+    check("Windows native enumeration excludes the freestanding wasm fixture",
+          bool(loop and gate) and target in skipped, f"skip list: {sorted(skipped)}")
+    check("Windows native enumeration still includes a native exercise",
+          bool(loop and gate) and "std_time_exercise.iyi" not in skipped)
+    reason, jobs = planned("bench/" + target)
+    check("the freestanding wasm fixture still selects its own runner",
+          "wasm-freestanding" in jobs, f"{reason}: {sorted(jobs)}")
 
 print()
 print("== and the reach gate, which asks the stricter question: what runs it")

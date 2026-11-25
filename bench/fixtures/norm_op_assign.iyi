@@ -1,0 +1,77 @@
+class Config
+  @limit : Int32
+  @fallback : Int32
+  @active : Bool
+
+  def initialize
+    @limit = 0
+    @fallback = 0
+    @active = false
+  end
+
+  def limit : Int32
+    @limit
+  end
+
+  def limit=(@limit : Int32) : Int32
+    @limit
+  end
+
+  def fallback : Int32
+    @fallback
+  end
+
+  def fallback=(@fallback : Int32) : Int32
+    @fallback
+  end
+
+  def active : Bool
+    @active
+  end
+
+  def active=(@active : Bool) : Bool
+    @active
+  end
+end
+
+class Grid
+  def [](x : Int32, y : Int32) : Int32
+    0
+  end
+
+  def []=(x : Int32, y : Int32, val : Int32) : Int32
+    val
+  end
+end
+
+def update_metrics(count : Int32, factor : Int32) : Int32
+  count += 1
+  count -= 2
+  count *= factor
+  count /= 2
+  count %= 10
+  count
+end
+
+def resolve_options(cached : Int32, enabled : Bool) : Int32
+  cached ||= 42
+  enabled &&= true
+  cached
+end
+
+def apply_config(cfg : Config) : Nil
+  cfg.limit += 10
+  cfg.fallback ||= 100
+  cfg.active &&= true
+end
+
+def bump_counters(table : Hash(String, Int32), key : String) : Nil
+  table[key] += 1
+  table[key] ||= 0
+  table[key] &&= 5
+end
+
+def step_grid(g : Grid, r : Int32, c : Int32) : Nil
+  g[r, c] += 1
+  g[r, c] ||= 0
+end

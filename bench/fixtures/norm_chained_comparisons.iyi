@@ -1,0 +1,11 @@
+def in_range(x : Int32) : Bool
+  0 <= x <= 100
+end
+
+def get_val : Int32
+  42
+end
+
+def check_bounds : Bool
+  10 < get_val < 50
+end

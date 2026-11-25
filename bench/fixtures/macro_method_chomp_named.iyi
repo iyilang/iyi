@@ -1,0 +1,5 @@
+macro wrong_chomp_named
+  {{ "line\n".chomp(suffix: "x") }}
+end
+
+wrong_chomp_named

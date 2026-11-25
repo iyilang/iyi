@@ -224,11 +224,12 @@ grep -q '"ok":true' "$WORK/stdin-restored.log" || { cat "$WORK/stdin-restored.lo
 echo 'stdin snapshot mutation: memory-growth regression caught as expected'
 
 printf 'export default async function () { throw new Error("page throw proof"); }\n' > "$WORK/throw.mjs"
-if node "$REPO/bench/wasm_browser.mjs" --chrome "$IYI_CHROME" --root "$WORK" --script throw.mjs >"$WORK/throw.log" 2>&1; then
+ln -s "$REPO/bench/wasm_browser.mjs" "$WORK/wasm-browser-symlink.mjs"
+if node "$WORK/wasm-browser-symlink.mjs" --chrome "$IYI_CHROME" --root "$WORK" --script throw.mjs >"$WORK/throw.log" 2>&1; then
   echo 'browser runner accepted a thrown exception' >&2; exit 1
 fi
 grep -q 'page throw proof' "$WORK/throw.log" || { cat "$WORK/throw.log"; exit 1; }
-echo 'browser exception: runner exited nonzero'
+echo 'browser exception: runner exited nonzero through symlink'
 
 printf 'export default async function () { await new Promise(() => {}); }\n' > "$WORK/timeout.mjs"
 if node "$REPO/bench/wasm_browser.mjs" --chrome "$IYI_CHROME" --root "$WORK" --script timeout.mjs --timeout 3000 >"$WORK/timeout.log" 2>&1; then

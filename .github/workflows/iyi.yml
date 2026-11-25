@@ -2324,7 +2324,18 @@ jobs:
     timeout-minutes: 30
     name: "What a Windows binary does, twenty times"
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      # The artifact can be finalized before it is visible to a consumer:
+      # retry the download once, and still fail the job if it is unavailable.
+      - name: Download cross-objects
+        id: download-cross-objects
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cross-objects
+          path: cross
+      - name: Retry cross-objects download
+        if: steps.download-cross-objects.outcome == 'failure'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cross-objects
           path: cross

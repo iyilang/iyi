@@ -424,6 +424,46 @@
 
 ### Gates
 
+- **std/autocert's and std/acme's gates draw challtestsrv's DNS port free
+  for UDP as well as TCP, std/autocert's says what did not come up when
+  Pebble does not start, and eleven gates' failure output no longer dies
+  in `tail`.** Windows CI jobs 139064806332, 139108403121 and
+  139260265084 stopped at "the Pebbles or challtestsrv's DNS did not come
+  up in 30 s:", and the three logs meant to say why were lost to "tail:
+  option used in invalid context -- 3": `tail -3` is the old form GNU tail
+  takes for one file only, so with two or three files Git bash's tail
+  refused it, as GNU tail on Linux does; darwin's tail takes it.
+  `bench/enum_exercise.sh`, `number_exercise.sh`, `release_cores.sh` and
+  the std/acme, std/aead, std/autocert, std/compress, std/curve25519,
+  std/idna, std/math and std/password gates used it on their failure
+  paths, and use `tail -n` now (`tail -q -n 1` where one last line is
+  wanted). The startup failed in 3 of 190 Windows runs from 11-16 to
+  11-25 and in none of 183 on Linux and darwin. On a Windows 11 machine
+  it failed once in 1,000 startups (300 idle, 300 beside 24 busy
+  processes with CI's Python 3.14.10, 400 four at a time): both Pebbles
+  answered and challtestsrv's DNS did not, its log ending "listen udp
+  127.0.0.1:51592: bind: An attempt was made to access a socket in a way
+  forbidden by its access permissions", and netstat showed UDP
+  0.0.0.0:51592 and [::]:51592 held by the svchost of the DNS Client
+  service, whose [::]:51592 had been bound 18 hours before. The gates drew
+  that port as a free TCP port, which says nothing of UDP; challtestsrv
+  binds it for both, logs the refused UDP bind and goes on serving DNS
+  over TCP alone, and Pebble and the wait ask over UDP. The port is now
+  drawn with a UDP bind on it as well, and drawn again while that is
+  refused. Beside a process holding a random half of the UDP ephemeral
+  range on 0.0.0.0, the old draw failed 17 of 40 startups on Linux and the
+  new one none of 40; on Windows such a process of the same account does
+  not block challtestsrv's bind on 127.0.0.1 (40 of 40 startups came up
+  either way), only another account's does, as the DNS Client's. That
+  CI's three failures were this collision is not shown - their logs were
+  lost - but the wait ran its 30 s in each, as it does here. So that the
+  next failure says which, the gate now names what did not answer - a
+  Pebble's directory, with the addresses `localhost` names, or
+  challtestsrv's DNS on its UDP port - with its last error and the times
+  it waited between, and says of challtestsrv and each Pebble whether it
+  is running or exited with which status, beside its log's last five
+  lines.
+
 - **The LSP gates read a Windows process's children by when it was
   created, and `bench/lsp_orphan_negative.py` no longer hangs or dies on
   its way out.** Windows CI job 139176708533 sat in "The language server

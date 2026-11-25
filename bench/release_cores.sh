@@ -148,7 +148,7 @@ objects() { # name, threads, then environment assignments
 
 if ! objects one-thread 1 || ! objects four-threads 4; then
   echo "objects: a build failed or left no partitions"
-  tail -8 "$WORK/one-thread.log" "$WORK/four-threads.log"; status=1
+  tail -n 8 "$WORK/one-thread.log" "$WORK/four-threads.log"; status=1
 elif cmp -s "$WORK/one-thread.sums" "$WORK/four-threads.sums"; then
   echo "objects: $(wc -l < "$WORK/one-thread.sums" | tr -d ' ') partitions, the same bytes on one thread and on four"
 else

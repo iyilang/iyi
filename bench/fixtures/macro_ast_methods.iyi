@@ -1,0 +1,9 @@
+macro inspect_call(cl)
+  {
+    name: {{cl.name.stringify}},
+    first_arg: {{cl.args.first}},
+    arg_count: {{cl.args.size}}
+  }
+end
+
+inspect_call(my_func(100, 200, 300))

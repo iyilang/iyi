@@ -1,0 +1,8 @@
+macro swap(a, b)
+  %t = {{a}};
+  {{a}} = {{b}};
+  {{b}} = %t;
+  %t = {{a}} + 1
+end
+
+swap(x, y)

@@ -1313,7 +1313,7 @@ pub struct Time
         sec * 1000000000_u64 + (rem * 1000000000_u64) // freq.to_u64
       end
     end
-  {% elsif flag?(:wasm32) %}
+  {% elsif flag?(:wasi) %}
     lib LibWasi
       fun clock_time_get = __wasi_clock_time_get(id : Int32, precision : UInt64, time : UInt64*) : Int32
     end
@@ -1330,6 +1330,14 @@ pub struct Time
       ns = uninitialized UInt64
       LibWasi.clock_time_get(1, 1000_u64, pointerof(ns))
       ns
+    end
+  {% elsif flag?(:wasm32) %}
+    def self.wall_clock_nanoseconds : UInt64
+      LibIyiHost.clock_ns(0).to_u64
+    end
+
+    def self.monotonic_nanoseconds : UInt64
+      LibIyiHost.clock_ns(1).to_u64
     end
   {% else %}
     @[Effect(:clock)]

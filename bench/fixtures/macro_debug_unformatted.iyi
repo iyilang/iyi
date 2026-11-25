@@ -1,0 +1,7 @@
+macro shown(x)
+  value {{x}}
+  {% debug(format: false) %}
+  done
+end
+
+shown(3)

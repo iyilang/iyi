@@ -113,8 +113,10 @@ class File
   end
 
   def self.exists?(path : String) : Bool
-    {% if flag?(:wasm32) %}
+    {% if flag?(:wasi) %}
       raise "File.exists? is not available on wasm32-wasi: path_open needs a preopened directory fd"
+    {% elsif flag?(:wasm32) %}
+      raise "File.exists? is not available on wasm32-unknown-unknown: the host provides no filesystem"
     {% elsif flag?(:win32) %}
       # Not an open: `CreateFileW` without FILE_FLAG_BACKUP_SEMANTICS
       # cannot open a directory, so opening to answer this said `false`

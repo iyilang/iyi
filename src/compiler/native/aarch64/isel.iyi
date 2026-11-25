@@ -31,6 +31,7 @@ import compiler/native/aarch64/regs::{cond_eq, cond_ne, cond_cs, cond_cc, cond_m
 import compiler/native/target::{TargetDesc, TlsForm}
 import compiler/native/aarch64/abi::{aarch64_target}
 import compiler/native/lower::{LeafLoc, CallAssignment, flatten_leaves, assign_call, assign_return, assign_iyi_call, assign_iyi_return, iyi_result_indirect?, reachable_blocks, plan_gep, GepPlan, overflow_form, acquire_on_load?, release_on_store?, icmp_unsigned?}
+import compiler/native/aarch64/fold::{integer_constant, add_immediate?, logical_immediate, single_bit}
 
 import compiler/native/asm/constraints::{parse_operand, parse_clobber, digits?, ConstraintClass, ConstraintError, OperandConstraint}
 import compiler/native/aarch64/asm::{AsmAssembler}
@@ -83,6 +84,19 @@ def int_cond(ordinal : Int64) : Int32
   cond_le
 end
 
+# A skipped producer is only consumed by the fold that planned it. Overflow
+# value leaves are different: their register is defined at the flag branch and
+# may be used by later blocks.
+enum DeferredKind
+  Address
+  Compare
+  Hint
+  BitTest
+  Overflow
+  OverflowFlag
+  OverflowValue
+end
+
 class Isel
   getter mf : MFunction
   getter layout : DataLayout
@@ -106,6 +120,12 @@ class Isel
     @values = [] of Value
     @leaves = [] of Array(Int32)
     @index = Hash(Value, Int32).new
+    @uses = Hash(Value, Int32).new
+    @users = Hash(Value, Array(Inst)).new
+    @inst_blocks = Hash(Value, Int32).new
+    @deferred = Hash(Value, DeferredKind).new
+    @slots = Hash(Value, Int32).new
+    @overflow_value = Hash(Value, Inst).new
     @block_index = Hash(String, Int32).new
     @edge_count = 0
     @failure = nil
@@ -275,6 +295,15 @@ class Isel
 
   # The leaves of any operand. Constants and symbol addresses are materialised here, in the current block.
   def materialize(v : Value) : Array(Int32)
+    if slot = @slots[v]?
+      d = gpr
+      @mf.mark_pointer(d)
+      m = mop(MOp::AddrFrame)
+      m.defs << vop(d)
+      m.uses << Operand.new(OperandKind::FrameSlot, slot, 0_i64)
+      emit(m)
+      return [d]
+    end
     if v.is_a?(Global)
       g = v.as(Global)
       return [thread_local_address(g)] if g.tls != TlsModel::None
@@ -287,10 +316,39 @@ class Isel
     if v.is_a?(Inst) && is_const_op?(v.as(Inst).op)
       return const_leaves(v.as(Inst))
     end
+    if v.is_a?(Inst)
+      inst = v.as(Inst)
+      kind = @deferred[v]?
+      if kind == DeferredKind::Address || kind == DeferredKind::Compare || kind == DeferredKind::Hint || kind == DeferredKind::BitTest
+        @deferred.delete(v)
+        lower_inst(inst)
+      elsif kind == DeferredKind::Overflow
+        materialize_overflow(inst)
+      elsif kind == DeferredKind::OverflowFlag
+        source = inst.args[0].as(Inst)
+        materialize_overflow(source)
+        @deferred.delete(v)
+        lower_extract(inst)
+      end
+      # OverflowValue is already bound at its defining overflow branch. Its
+      # preallocated register can be used even if blocks are selected out of order.
+    end
     found = lookup(v)
     return found if found
     fail("a value is used before it is defined (#{v.name})")
     return [gpr]
+  end
+
+  # Abandon an overflow fold if its aggregate or flag is needed normally.
+  # Define the separately deferred value leaf as well as the aggregate.
+  def materialize_overflow(i : Inst) : Nil
+    return unless @deferred[i]? == DeferredKind::Overflow
+    @deferred.delete(i)
+    lower_intrinsic(i)
+    if leaf = @overflow_value[i]?
+      @deferred.delete(leaf)
+      lower_extract(leaf)
+    end
   end
 
   def first_leaf(v : Value) : Int32
@@ -534,10 +592,10 @@ class Isel
   # base + off, for any offset the frame can produce.
   def add_imm(a : Int32, off : Int64) : Int32
     return a if off == 0_i64
-    if off > 0_i64 && off < 4096_i64
+    if add_immediate?(off)
       d = gpr
-      m = mop(MOp::AddImm)
-      m.imm = off
+      m = mop(off < 0_i64 ? MOp::SubImm : MOp::AddImm)
+      m.imm = off < 0_i64 ? -off : off
       m.defs << vop(d)
       m.uses << vop(a)
       emit(m)
@@ -630,6 +688,144 @@ class Isel
     nil
   end
 
+  # Counts operand slots, including phi operands and unreachable blocks. The
+  # block map lets a fold decline any producer that crosses a block boundary.
+  def plan_folds : Nil
+    block = 0
+    @fn.blocks.each do |b|
+      b.insts.each do |i|
+        @inst_blocks[i] = block
+        i.args.each do |arg|
+          @uses[arg] = (@uses[arg]? || 0) + 1
+          if arg.is_a?(Inst) && (arg.as(Inst).op == Op::Intrinsic || arg.as(Inst).op == Op::ExtractValue)
+            users = @users[arg]?
+            unless users
+              users = [] of Inst
+              @users[arg] = users
+            end
+            users << i
+          end
+        end
+      end
+      block = block + 1
+    end
+    block = 0
+    @fn.blocks.each do |b|
+      b.insts.each do |i|
+        if i.op == Op::CondBr
+          plan_branch(i, block)
+        elsif i.op == Op::Load && !acquire_on_load?(i.aux.as(MemAux).ordering)
+          plan_address(i.args[0], block)
+        elsif i.op == Op::Store && !release_on_store?(i.aux.as(MemAux).ordering)
+          plan_address(i.args[1], block)
+        end
+      end
+      block = block + 1
+    end
+  end
+
+  def single_local_use?(v : Value, block : Int32) : Bool
+    (@uses[v]? || 0) == 1 && @inst_blocks[v]? == block
+  end
+
+  def plan_address(v : Value, block : Int32) : Nil
+    return unless v.is_a?(Inst) && single_local_use?(v, block)
+    gep = v.as(Inst)
+    return unless gep.op == Op::Gep
+    plan = plan_gep(@layout, gep.aux.as(GepAux).source_type, gep.args)
+    return if plan.is_a?(String)
+    @deferred[gep] = DeferredKind::Address if plan.as(GepPlan).terms.empty?
+  end
+
+  def bit_test(v : Value) : Int32
+    return -1 unless v.is_a?(Inst)
+    i = v.as(Inst)
+    return -1 unless i.op == Op::And && i.type.int? && i.type.bits <= 64
+    mask = integer_constant(i.args[1])
+    mask = integer_constant(i.args[0]) if mask.nil?
+    return -1 if mask.nil?
+    single_bit(mask.as(Int64), i.type.bits)
+  end
+
+  def bit_test_operand(i : Inst) : Value
+    return i.args[0] unless integer_constant(i.args[1]).nil?
+    i.args[1]
+  end
+
+  def plan_branch(branch : Inst, block : Int32) : Nil
+    value = branch.args[0]
+    hint = nil
+    if value.is_a?(Inst) && single_local_use?(value, block)
+      inst = value.as(Inst)
+      if inst.op == Op::Intrinsic && inst.aux.as(IntrinsicAux).id == IntrinsicId::ExpectI1
+        hint = inst
+        value = inst.args[0]
+      end
+    end
+    return unless value.is_a?(Inst) && single_local_use?(value, block)
+    producer = value.as(Inst)
+    if producer.op == Op::ICmp && !i128?(producer.args[0].type)
+      @deferred[producer] = DeferredKind::Compare
+      @deferred[hint.as(Inst)] = DeferredKind::Hint if hint
+      if producer.aux_int == 0_i64 || producer.aux_int == 1_i64
+        other = producer.args[0]
+        if integer_constant(other) == 0_i64
+          other = producer.args[1]
+        elsif integer_constant(producer.args[1]) != 0_i64
+          return
+        end
+        if single_local_use?(other, block) && bit_test(other) >= 0
+          @deferred[other] = DeferredKind::BitTest
+        end
+      end
+    elsif producer.op == Op::ExtractValue && producer.aux_int == 1_i64
+      if plan_overflow(producer, block)
+        @deferred[hint.as(Inst)] = DeferredKind::Hint if hint
+      end
+    end
+  end
+
+  # The value leaf may only be consumed after the branch: its definition moves
+  # to the branch along with the flags. Any other aggregate use declines fusion.
+  def plan_overflow(flag : Inst, block : Int32) : Bool
+    src = flag.args[0]
+    return false unless src.is_a?(Inst) && @inst_blocks[src]? == block
+    op = src.as(Inst)
+    return false unless op.op == Op::Intrinsic && overflow_form(op.aux.as(IntrinsicAux).id).family
+    return false unless op.args[0].type.int? && op.args[0].type.bits <= 64
+    form = overflow_form(op.aux.as(IntrinsicAux).id)
+    return false if op.args[0].type.bits == 1 && form.signed && form.mul
+    users = @users[op]?
+    return false unless users
+    value_leaf = nil
+    flag_count = 0
+    users.each do |user|
+      return false unless user.op == Op::ExtractValue && @inst_blocks[user]? == block
+      if user.aux_int == 0_i64
+        return false if value_leaf
+        value_leaf = user
+        if uses = @users[user]?
+          uses.each do |u|
+            return false if @inst_blocks[u]? == block
+          end
+        end
+      elsif user.aux_int == 1_i64 && user == flag
+        flag_count = flag_count + 1
+      else
+        return false
+      end
+    end
+    return false unless flag_count == 1
+    @deferred[op] = DeferredKind::Overflow
+    @deferred[flag] = DeferredKind::OverflowFlag
+    if value_leaf
+      leaf = value_leaf.as(Inst)
+      @deferred[leaf] = DeferredKind::OverflowValue
+      @overflow_value[op] = leaf
+    end
+    true
+  end
+
   def run : MFunction
     wide = first_wide_int
     if wide
@@ -637,6 +833,7 @@ class Isel
       return @mf
     end
     return run_naked if naked_fn?
+    plan_folds
     # One MIR block per IR block, in order, so block indices agree with the IR's.
     @fn.blocks.each do |b|
       @block_index[b.name] = @mf.blocks.size
@@ -664,6 +861,7 @@ class Isel
       @cur = @mf.blocks[@block_index[b.name]]
       @cur_ir_name = b.name
       b.insts.each do |i|
+        next if @deferred.has_key?(i)
         next if i.op == Op::Phi || is_const_op?(i.op)
         lower_inst(i)
       end
@@ -930,13 +1128,7 @@ class Isel
     align = i.alignment
     align = @layout.abi_align(t) if align == 0
     slot = @mf.frame.add_slot(@layout.alloc_size(t), align)
-    d = gpr
-    @mf.mark_pointer(d)
-    m = mop(MOp::AddrFrame)
-    m.defs << vop(d)
-    m.uses << Operand.new(OperandKind::FrameSlot, slot, 0_i64)
-    emit(m)
-    bind_result(i, [d])
+    @slots[i] = slot
   end
 
   # The memory width of a scalar: at least a byte, and i1 is stored as a byte.
@@ -946,9 +1138,26 @@ class Isel
     t.bits
   end
 
+  # A single-use constant GEP contributes its offset directly to the access.
+  # Frame addresses remain symbolic until frame layout has assigned the slot.
+  def memory_address(pointer : Value, leaf_offset : Int64) : {Operand, Int64}
+    base = pointer
+    offset = leaf_offset
+    if pointer.is_a?(Inst) && @deferred[pointer]? == DeferredKind::Address && pointer.as(Inst).op == Op::Gep
+      gep = pointer.as(Inst)
+      plan = plan_gep(@layout, gep.aux.as(GepAux).source_type, gep.args).as(GepPlan)
+      offset = offset + plan.const_off
+      base = gep.args[0]
+    end
+    if slot = @slots[base]?
+      return {Operand.new(OperandKind::FrameSlot, slot, offset), 0_i64} # fold-frame-offset
+    end
+    {vop(first_leaf(base)), offset}
+  end
+
   def lower_load(i : Inst) : Nil
     aux = i.aux.as(MemAux)
-    base = first_leaf(i.args[0])
+    base = acquire_on_load?(aux.ordering) ? first_leaf(i.args[0]) : -1
     regs = [] of Int32
     flatten_leaves(@layout, i.type).each do |l|
       off = l[0]
@@ -963,14 +1172,15 @@ class Isel
         emit(m)
         regs << (lt.float? ? move_bits_to_fp(g, lt.bits) : canon(g, lt))
       else
+        addr = memory_address(i.args[0], off)
         d = @mf.new_vreg(leaf_class(lt))
-        m = mop(MOp::Ldr)
+        m = mop(addr[0].kind == OperandKind::FrameSlot ? MOp::LdrFrame : MOp::Ldr)
         m.size = mem_bits(lt)
         m.fp = lt.float?
         m.signed = lt.int? && lt.bits > 1
-        m.imm = off
+        m.imm = addr[1]
         m.defs << vop(d)
-        m.uses << vop(base)
+        m.uses << addr[0]
         emit(m)
         regs << d
       end
@@ -981,7 +1191,7 @@ class Isel
   def lower_store(i : Inst) : Nil
     aux = i.aux.as(MemAux)
     vals = materialize(i.args[0])
-    base = first_leaf(i.args[1])
+    base = release_on_store?(aux.ordering) ? first_leaf(i.args[1]) : -1
     flat = flatten_leaves(@layout, i.args[0].type)
     k = 0
     while k < flat.size
@@ -996,12 +1206,13 @@ class Isel
         m.uses << vop(add_imm(base, off))
         emit(m)
       else
-        m = mop(MOp::Str)
+        addr = memory_address(i.args[1], off)
+        m = mop(addr[0].kind == OperandKind::FrameSlot ? MOp::StrFrame : MOp::Str)
         m.size = mem_bits(lt)
         m.fp = lt.float?
-        m.imm = off
+        m.imm = addr[1]
         m.uses << vop(v)
-        m.uses << vop(base)
+        m.uses << addr[0]
         emit(m)
       end
       k = k + 1
@@ -1042,12 +1253,52 @@ class Isel
     emit(m)
   end
 
+  def lower_immediate(i : Inst) : Bool
+    op = i.op
+    left = i.args[0]
+    right = i.args[1]
+    imm = integer_constant(right)
+    if imm.nil? && (op == Op::Add || op == Op::And || op == Op::Or || op == Op::Xor)
+      imm = integer_constant(left)
+      left = right unless imm.nil?
+    end
+    return false if imm.nil?
+    value = imm.as(Int64)
+    kind = MOp::AddImm
+    operand = value
+    if op == Op::Add || op == Op::Sub
+      return false unless add_immediate?(value)
+      subtract = (op == Op::Sub) != (value < 0_i64)
+      kind = subtract ? MOp::SubImm : MOp::AddImm
+      operand = value < 0_i64 ? -value : value
+    elsif op == Op::And || op == Op::Or || op == Op::Xor
+      return false if logical_immediate(value).nil?
+      kind = op == Op::And ? MOp::AndImm : (op == Op::Or ? MOp::OrrImm : MOp::EorImm)
+    elsif op == Op::Shl || op == Op::LShr || op == Op::AShr
+      return false if value < 0_i64 || value >= i.type.bits.to_i64
+      kind = op == Op::Shl ? MOp::LslImm : (op == Op::LShr ? MOp::LsrImm : MOp::AsrImm)
+    else
+      return false
+    end
+    a = first_leaf(left)
+    a = zext(a, i.type) if op == Op::LShr
+    d = gpr
+    m = mop(kind)
+    m.imm = operand
+    m.defs << vop(d)
+    m.uses << vop(a)
+    emit(m)
+    bind_result(i, [canon(d, i.type)])
+    true
+  end
+
   def lower_int_binop(i : Inst) : Nil
     t = i.type
     if i128?(t)
       wide_binop(i)
       return
     end
+    return if lower_immediate(i)
     a = first_leaf(i.args[0])
     b = first_leaf(i.args[1])
     op = i.op
@@ -1350,24 +1601,41 @@ class Isel
     bind_result(i, [fbinop(kind, a, b, i.type.bits)])
   end
 
+  def emit_icmp(i : Inst) : Nil
+    ordinal = i.aux_int
+    t = i.args[0].type
+    a = first_leaf(i.args[0])
+    constant = integer_constant(i.args[1])
+    if icmp_unsigned?(ordinal)
+      a = zext(a, t)
+      if constant && t.int? && t.bits < 64
+        constant = constant.as(Int64) & ((1_i64 << t.bits) - 1_i64)
+      end
+    elsif ordinal >= 6_i64
+      a = signed_value(a, t)
+      constant = -1_i64 if constant == 1_i64 && t.int? && t.bits == 1
+    end
+    if !constant.nil? && add_immediate?(constant.as(Int64))
+      value = constant.as(Int64)
+      c = mop(value < 0_i64 ? MOp::CmnImm : MOp::CmpImm)
+      c.imm = value < 0_i64 ? -value : value
+      c.uses << vop(a)
+      emit(c)
+      return
+    end
+    b = first_leaf(i.args[1])
+    b = zext(b, t) if icmp_unsigned?(ordinal)
+    b = signed_value(b, t) if ordinal >= 6_i64
+    compare(a, b)
+  end
+
   def lower_icmp(i : Inst) : Nil
     if i128?(i.args[0].type)
       lower_icmp128(i)
       return
     end
-    ordinal = i.aux_int
-    t = i.args[0].type
-    a = first_leaf(i.args[0])
-    b = first_leaf(i.args[1])
-    if icmp_unsigned?(ordinal)
-      a = zext(a, t)
-      b = zext(b, t)
-    elsif ordinal >= 6_i64
-      a = signed_value(a, t)
-      b = signed_value(b, t)
-    end
-    compare(a, b)
-    bind_result(i, [set_flag(int_cond(ordinal))])
+    emit_icmp(i)
+    bind_result(i, [set_flag(int_cond(i.aux_int))])
   end
 
   # Floating-point predicates by ordinal, in the order inst.iyi declares them:
@@ -1758,13 +2026,92 @@ class Isel
     emit(branch(dest))
   end
 
+  def fused_overflow(i : Inst) : Int32
+    form = overflow_form(i.aux.as(IntrinsicAux).id)
+    t = i.args[0].type
+    a = first_leaf(i.args[0])
+    b = first_leaf(i.args[1])
+    unless form.signed
+      a = zext(a, t)
+      b = zext(b, t)
+    end
+    cond = cond_ne
+    value = 0
+    if t.bits == 64 && !form.mul
+      value = binop(form.sub ? MOp::Subs : MOp::Adds, a, b)
+      cond = form.signed ? cond_vs : (form.sub ? cond_cc : cond_cs)
+    elsif t.bits == 64
+      value = binop(MOp::Mul, a, b)
+      hi = binop(form.signed ? MOp::Smulh : MOp::Umulh, a, b)
+      if form.signed
+        sign = binop(MOp::Asr, value, const_gpr(63_i64))
+        compare(hi, sign)
+      else
+        compare_zero(hi)
+      end
+    else
+      raw = binop(form.mul ? MOp::Mul : (form.sub ? MOp::Sub : MOp::Add), a, b)
+      norm = form.signed ? canon(raw, t) : zext(raw, t)
+      value = canon(raw, t)
+      compare(raw, norm)
+    end
+    if leaf = @overflow_value[i]?
+      bind_result(leaf, [value])
+    end
+    cond
+  end
+
   def lower_condbr(i : Inst) : Nil
-    c = first_leaf(i.args[0])
-    compare_zero(c)
     t_dest = edge_block(@cur_ir_name, i.targets[0].name, true)
     f_dest = edge_block(@cur_ir_name, i.targets[1].name, true)
-    bc = mop(MOp::Bcond)
-    bc.cond = cond_ne
+    test = i.args[0]
+    if test.is_a?(Inst) && @deferred[test]? == DeferredKind::Hint
+      hint = test.as(Inst)
+      test = hint.args[0]
+    end
+    if test.is_a?(Inst) && @deferred.has_key?(test)
+      cmp = test.as(Inst)
+      if @deferred[test]? == DeferredKind::Compare && cmp.op == Op::ICmp
+        other = cmp.args[0]
+        zero = integer_constant(cmp.args[1]) == 0_i64
+        if integer_constant(other) == 0_i64
+          other = cmp.args[1]
+          zero = true
+        end
+        if zero && (cmp.aux_int == 0_i64 || cmp.aux_int == 1_i64)
+          equal = cmp.aux_int == 0_i64
+          if other.is_a?(Inst) && @deferred[other]? == DeferredKind::BitTest && bit_test(other) >= 0 # deferred-bit-test
+            mask = other.as(Inst)
+            bc = mop(equal ? MOp::Tbz : MOp::Tbnz)
+            bc.imm = bit_test(mask).to_i64
+            bc.uses << vop(first_leaf(bit_test_operand(mask)))
+          else
+            bc = mop(equal ? MOp::Cbz : MOp::Cbnz)
+            bc.uses << vop(first_leaf(other))
+          end
+          bc.target = t_dest
+          emit(bc)
+          emit(branch(f_dest))
+          return
+        end
+        emit_icmp(cmp)
+        bc = mop(MOp::Bcond)
+        bc.cond = int_cond(cmp.aux_int) # fold-compare-condition
+        bc.target = t_dest
+        emit(bc)
+        emit(branch(f_dest))
+        return
+      elsif @deferred[test]? == DeferredKind::OverflowFlag && cmp.op == Op::ExtractValue
+        bc = mop(MOp::Bcond)
+        bc.cond = fused_overflow(cmp.args[0].as(Inst))
+        bc.target = t_dest
+        emit(bc)
+        emit(branch(f_dest))
+        return
+      end
+    end
+    bc = mop(MOp::Cbnz)
+    bc.uses << vop(first_leaf(test))
     bc.target = t_dest
     emit(bc)
     emit(branch(f_dest))

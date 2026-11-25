@@ -1,0 +1,29 @@
+; iyi-ir 1
+source_filename = "constant_global"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+@number = internal constant i32 42
+@truth = internal constant i1 1
+@real = internal constant double 0x3ff0000000000000
+@single = internal constant float 0x3ff0000000000000
+@pointer = internal constant ptr null
+define external i32 @read_number() {
+entry:
+  ret i32 42
+}
+define external i1 @read_truth() {
+entry:
+  ret i1 1
+}
+define external double @read_real() {
+entry:
+  ret double 0x3ff0000000000000
+}
+define external float @read_single() {
+entry:
+  ret float 0x3ff0000000000000
+}
+define external ptr @read_pointer() {
+entry:
+  ret ptr null
+}

@@ -1,0 +1,17 @@
+; iyi-ir 1
+source_filename = "nondom_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i64 @nondom_keep(ptr %p, i1 %c) {
+entry:
+  br i1 %c, label %left, label %right
+left:
+  %a = load i64, ptr %p, align 8
+  br label %join
+right:
+  %b = load i64, ptr %p, align 8
+  br label %join
+join:
+  %value = phi i64 [ %a, label %left ], [ %b, label %right ]
+  ret i64 %value
+}

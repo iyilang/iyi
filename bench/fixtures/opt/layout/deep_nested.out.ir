@@ -1,0 +1,26 @@
+; iyi-ir 1
+source_filename = "deep_nested"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @deep_nested(i1 %c1, i1 %c2, i1 %c3, i1 %c4, i1 %escape) {
+entry:
+  br label %h1
+h1:
+  br i1 %c1, label %h2, label %done
+h2:
+  br i1 %c2, label %h3, label %after2
+h3:
+  br i1 %c3, label %h4, label %after3
+h4:
+  br i1 %c4, label %body4, label %after4
+body4:
+  br i1 %escape, label %after2, label %h4
+after4:
+  br label %h3
+after3:
+  br label %h2
+after2:
+  br label %h1
+done:
+  ret void
+}

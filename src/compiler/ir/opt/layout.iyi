@@ -1,0 +1,428 @@
+module compiler/ir/opt/layout
+
+import compiler/ir/function::{Function}
+import compiler/ir/inst::{Block, Inst, IntrinsicAux, Op}
+import compiler/ir/intrinsics::{IntrinsicId}
+import compiler/ir/module::{Module}
+import compiler/ir/opt/analysis::{Cfg, DomTree}
+
+class BlockLayout
+  def initialize(@fn : Function, @cfg : Cfg, @dom : DomTree)
+    @inner = [] of Int32
+    @headers = [] of Int32
+    @parents = [] of Int32
+    @depths = [] of Int32
+    @jumps = [] of Array(Int32)
+    i = 0
+    while i < @cfg.size
+      @inner << -1
+      i = i + 1
+    end
+  end
+
+  # A cycle with a retreating edge to a non-dominator has no natural loop
+  # nesting suitable for region layout. RPO still handles that graph.
+  def irreducible? : Bool
+    color = [] of Int32
+    i = 0
+    while i < @cfg.size
+      color << 0
+      i = i + 1
+    end
+    nodes = [0] of Int32
+    edges = [0] of Int32
+    color[0] = 1
+    while !nodes.empty?
+      top = nodes.size - 1
+      b = nodes[top]
+      at = edges[top]
+      if at < @cfg.succs(b).size
+        s = @cfg.succs(b)[at]
+        edges[top] = at + 1
+        if color[s] == 0
+          color[s] = 1
+          nodes << s
+          edges << 0
+        elsif color[s] == 1 && !@dom.dominates?(s, b)
+          return true
+        end
+      else
+        color[b] = 2
+        nodes.pop
+        edges.pop
+      end
+    end
+    false
+  end
+
+  def find_set(parent : Array(Int32), node : Int32) : Int32
+    root = node
+    while parent[root] != root
+      root = parent[root]
+    end
+    current = node
+    while current != root
+      next_node = parent[current]
+      parent[current] = root
+      current = next_node
+    end
+    root
+  end
+
+  # The disjoint-set root is chosen by rank. Its label is the header of the
+  # contracted loop, irrespective of which node became the root.
+  def merge_set(parent : Array(Int32), rank : Array(Int32), label : Array(Int32), header : Int32, member : Int32) : Nil
+    a = find_set(parent, header)
+    b = find_set(parent, member)
+    return if a == b
+    if rank[a] < rank[b]
+      parent[a] = b
+      label[b] = header
+    else
+      parent[b] = a
+      label[a] = header
+      rank[a] = rank[a] + 1 if rank[a] == rank[b]
+    end
+  end
+
+  # Build loops inside out. Once an inner loop is contracted to its header,
+  # its external incoming edges all enter that header in a reducible graph.
+  # Each representative's predecessors are visited only in its parent loop.
+  def collect_loops : Nil
+    return if irreducible?
+    latches = [] of Array(Int32)
+    stamp = [] of Int32
+    parent = [] of Int32
+    rank = [] of Int32
+    label = [] of Int32
+    header_loop = [] of Int32
+    i = 0
+    while i < @cfg.size
+      latches << [] of Int32
+      stamp << -1
+      parent << i
+      rank << 0
+      label << i
+      header_loop << -1
+      i = i + 1
+    end
+    @cfg.rpo.each do |b|
+      @cfg.succs(b).each do |s|
+        latches[s] << b if @dom.dominates?(s, b)
+      end
+    end
+    @cfg.rpo.reversed.each do |header|
+      next if latches[header].empty?
+      raise "BUG: contracted loop header" unless label[find_set(parent, header)] == header
+      loop_id = @headers.size
+      @headers << header
+      @parents << -1
+      @depths << 0
+      header_loop[header] = loop_id
+      @inner[header] = loop_id
+      stamp[header] = loop_id
+      work = [] of Int32
+      latches[header].each do |latch|
+        member = label[find_set(parent, latch)]
+        next if member == header || stamp[member] == loop_id
+        stamp[member] = loop_id
+        work << member
+      end
+      at = 0
+      while at < work.size
+        member = work[at]
+        at = at + 1
+        @cfg.preds(member).each do |pred|
+          next unless @cfg.reachable?(pred) && @dom.dominates?(header, pred)
+          representative = label[find_set(parent, pred)]
+          next if representative == header || stamp[representative] == loop_id
+          stamp[representative] = loop_id
+          work << representative
+        end
+      end
+      work.each do |member|
+        child = header_loop[member]
+        if child >= 0
+          raise "BUG: loop has two parents" if @parents[child] >= 0
+          @parents[child] = loop_id
+        else
+          @inner[member] = loop_id
+        end
+        merge_set(parent, rank, label, header, member)
+      end
+    end
+
+    # Parents were discovered after their children. Binary lifting avoids a
+    # depth-sized ancestor walk for every control-flow edge.
+    i = @headers.size - 1
+    while i >= 0
+      outer = @parents[i]
+      @depths[i] = outer < 0 ? 1 : @depths[outer] + 1
+      i = i - 1
+    end
+    unless @parents.empty?
+      @jumps << @parents[0, @parents.size]
+      span = 1
+      while span < @parents.size
+        previous = @jumps[@jumps.size - 1]
+        row = [] of Int32
+        i = 0
+        while i < @parents.size
+          outer = previous[i]
+          row << (outer < 0 ? -1 : previous[outer])
+          i = i + 1
+        end
+        @jumps << row
+        break if span > @parents.size // 2
+        span = span * 2
+      end
+    end
+  end
+
+  # Propagate from unreachable terminators only when all successors are cold.
+  # Return blocks and cycles without a cold terminal are not seeds.
+  def cold_exits : Array(Bool)
+    cold = [] of Bool
+    pending = [] of Int32
+    work = [] of Int32
+    i = 0
+    while i < @cfg.size
+      ends_unreachable = @cfg.block(i).terminator.op == Op::Unreachable
+      cold << ends_unreachable
+      pending << @cfg.succs(i).size
+      work << i if ends_unreachable
+      i = i + 1
+    end
+    at = 0
+    while at < work.size
+      b = work[at]
+      at = at + 1
+      @cfg.preds(b).each do |pred|
+        next if cold[pred]
+        pending[pred] = pending[pred] - 1
+        if pending[pred] == 0
+          cold[pred] = true
+          work << pred
+        end
+      end
+    end
+    cold
+  end
+
+  def unlikely_successor(b : Int32) : Int32
+    term = @cfg.block(b).terminator
+    return -1 unless term.op == Op::CondBr && term.targets[0] != term.targets[1]
+    condition = term.args[0]
+    return -1 unless condition.is_a?(Inst)
+    expect = condition.as(Inst)
+    return -1 unless expect.op == Op::Intrinsic && expect.aux.is_a?(IntrinsicAux)
+    return -1 unless expect.aux.as(IntrinsicAux).id == IntrinsicId::ExpectI1 && expect.args.size == 2
+    value = expect.args[1]
+    return -1 unless value.is_a?(Inst)
+    expected = value.as(Inst)
+    return -1 unless expected.op == Op::ConstInt
+    return @cfg.index(term.targets[0]) if expected.aux_int == 0_i64 # mutation M18: cold false edge
+    return @cfg.index(term.targets[1]) if expected.aux_int == 1_i64
+    -1
+  end
+
+  def hot_blocks(cold : Array(Bool), unlikely : Array(Int32)) : Array(Bool)
+    hot = [] of Bool
+    i = 0
+    while i < @cfg.size
+      hot << false
+      i = i + 1
+    end
+    hot[0] = true
+    work = [0] of Int32
+    while !work.empty?
+      b = work.pop
+      @cfg.succs(b).each do |s|
+        next if hot[s] || cold[s] || unlikely[b] == s
+        hot[s] = true
+        work << s
+      end
+    end
+    hot
+  end
+
+  def lift_loop(loop_id : Int32, distance : Int32) : Int32
+    current = loop_id
+    remaining = distance
+    level = 0
+    while remaining > 0 && current >= 0
+      current = @jumps[level][current] if remaining % 2 == 1
+      remaining = remaining // 2
+      level = level + 1
+    end
+    current
+  end
+
+  def common_region(first : Int32, second : Int32) : Int32
+    a = first
+    b = second
+    da = a < 0 ? 0 : @depths[a]
+    db = b < 0 ? 0 : @depths[b]
+    if da > db
+      a = lift_loop(a, da - db)
+    elsif db > da
+      b = lift_loop(b, db - da)
+    end
+    return a if a == b
+    level = @jumps.size - 1
+    while level >= 0
+      aa = @jumps[level][a]
+      bb = @jumps[level][b]
+      if aa != bb
+        a = aa
+        b = bb
+      end
+      level = level - 1
+    end
+    @parents[a]
+  end
+
+  # A region's direct children are blocks and nested-loop nodes. Loop node k
+  # has number cfg.size + k; -1 identifies the function's root region.
+  def representative(block : Int32, region : Int32) : Int32
+    loop_id = @inner[block]
+    return block if loop_id == region
+    raise "BUG: missing loop representative" if loop_id < 0
+    region_depth = region < 0 ? 0 : @depths[region]
+    loop_id = lift_loop(loop_id, @depths[loop_id] - region_depth - 1)
+    @cfg.size + loop_id
+  end
+
+  def region_edges(hot : Array(Bool), unlikely : Array(Int32)) : Array(Array(Int32))
+    graph = [] of Array(Int32)
+    i = 0
+    while i < @cfg.size + @headers.size
+      graph << [] of Int32
+      i = i + 1
+    end
+    @cfg.rpo.each do |b|
+      next unless hot[b]
+      @cfg.succs(b).each do |s|
+        next unless hot[s]
+        next if unlikely[b] == s || @dom.dominates?(s, b)
+        region = common_region(@inner[b], @inner[s])
+        from = representative(b, region)
+        to = representative(s, region)
+        graph[from] << to if from != to
+      end
+    end
+    graph
+  end
+
+  def region_orders(graph : Array(Array(Int32)), hot : Array(Bool)) : Array(Array(Int32))
+    orders = [] of Array(Int32)
+    seen = [] of Bool
+    i = 0
+    while i < graph.size
+      seen << false
+      i = i + 1
+    end
+    region = 0
+    while region <= @headers.size
+      post = [] of Int32
+      start = region == 0 ? 0 : @headers[region - 1]
+      if hot[start]
+        raise "BUG: repeated layout region" if seen[start]
+        seen[start] = true
+        nodes = [start] of Int32
+        edges = [0] of Int32
+        while !nodes.empty?
+          top = nodes.size - 1
+          node = nodes[top]
+          at = edges[top]
+          if at < graph[node].size
+            child = graph[node][at]
+            edges[top] = at + 1
+            unless seen[child]
+              seen[child] = true
+              nodes << child
+              edges << 0
+            end
+          else
+            post << node
+            nodes.pop
+            edges.pop
+          end
+        end
+      end
+      orders << post.reversed
+      region = region + 1
+    end
+    orders
+  end
+
+  def run : Bool
+    collect_loops
+    cold = cold_exits
+    unlikely = [] of Int32
+    i = 0
+    while i < @cfg.size
+      unlikely << unlikely_successor(i)
+      i = i + 1
+    end
+    hot = hot_blocks(cold, unlikely)
+    graph = region_edges(hot, unlikely)
+    orders = region_orders(graph, hot)
+    ordered = [] of Block
+    regions = [0] of Int32
+    positions = [0] of Int32
+    while !regions.empty?
+      top = regions.size - 1
+      region = regions[top]
+      at = positions[top]
+      if at >= orders[region].size
+        regions.pop
+        positions.pop
+      else
+        node = orders[region][at]
+        positions[top] = at + 1
+        if node < @cfg.size
+          ordered << @cfg.block(node)
+        else
+          regions << node - @cfg.size + 1
+          positions << 0
+        end
+      end
+    end
+    @cfg.rpo.each { |b| ordered << @cfg.block(b) unless hot[b] }
+    i = 0
+    while i < @cfg.size
+      ordered << @cfg.block(i) unless @cfg.reachable?(i)
+      i = i + 1
+    end
+
+    raise "BUG: layout dropped a block" unless ordered.size == @cfg.size
+    raise "BUG: layout moved the entry" unless ordered[0] == @cfg.block(0)
+    included = [] of Bool
+    i = 0
+    while i < @cfg.size
+      included << false
+      i = i + 1
+    end
+    changed = false
+    i = 0
+    while i < ordered.size
+      id = @cfg.index(ordered[i])
+      raise "BUG: layout repeated a block" if included[id]
+      included[id] = true
+      changed = true if ordered[i] != @fn.blocks[i]
+      i = i + 1
+    end
+    return false unless changed
+    @fn.blocks[0, @fn.blocks.size] = ordered # mutation M20: preserve every block
+    @fn.relink
+    true
+  end
+end
+
+pub def run_layout(mod : Module, fn : Function) : Bool
+  return false if fn.declaration? || fn.blocks.size < 3
+  cfg = Cfg.new(fn)
+  dom = DomTree.new(cfg)
+  BlockLayout.new(fn, cfg, dom).run
+end

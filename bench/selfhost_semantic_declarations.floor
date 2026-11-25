@@ -51,6 +51,12 @@ src/compiler/ir/inst.iyi 0
 src/compiler/ir/intrinsics.iyi 76
 src/compiler/ir/layout.iyi 24
 src/compiler/ir/module.iyi 0
+src/compiler/ir/opt/cfg_simplify.iyi 33
+src/compiler/ir/opt/dce.iyi 2
+src/compiler/ir/opt/edit.iyi 36
+src/compiler/ir/opt/effects.iyi 11
+src/compiler/ir/opt/fold.iyi 11
+src/compiler/ir/opt/mem2reg.iyi 30
 src/compiler/ir/parser.iyi 0
 src/compiler/ir/printer.iyi 48
 src/compiler/ir/types.iyi 88

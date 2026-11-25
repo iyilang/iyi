@@ -90,6 +90,7 @@ mode = if ARGV.includes?("--bare")
 
 begin
   compiler = Iyi::Compiler.new
+  compiler.flags.concat((ENV["IYI_TYPED_ORACLE_FLAGS"]? || "").split)
   compiler.prelude = "iyi/prelude"
   compiler.no_codegen = true
   compiler.stdout = IO::Memory.new

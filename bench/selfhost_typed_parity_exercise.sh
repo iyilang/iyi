@@ -66,6 +66,10 @@ fatal() {
   echo "  $1"
   exit 1
 }
+llvm_bridge_text=$(llvm_bridge_build_args) || fatal "FAILED to discover LLVM bridge build arguments"
+IYI_TYPED_ORACLE_FLAGS=$(printf '%s\n' "$llvm_bridge_text" | awk '/^-D/ { sub(/^-D/, ""); printf "%s ", $0 }')
+export IYI_TYPED_ORACLE_FLAGS
+
 
 echo "== 1. Building the hosted oracle, the port's typed dump and the contract trait"
 LLVM_CONFIG="${LLVM_CONFIG:-$(command -v llvm-config || true)}" CRYSTAL_PATH="$REPO_NATIVE/src" IYI_CONFIG_PATH="$REPO_NATIVE/src" "$HOSTED_COMPILER" build -Di_know_what_im_doing \

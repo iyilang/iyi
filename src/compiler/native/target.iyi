@@ -101,9 +101,9 @@ pub def typed_fpr_value?(isa : Int32, inst : MInst) : Bool
     op = aarch64_op(inst.opcode)
     return true if op == MOp::Ldr || op == MOp::LdrFrame # typed-fpr-load
     return op == MOp::FAdd || op == MOp::FSub || op == MOp::FMul || op == MOp::FDiv ||
-           op == MOp::FNeg || op == MOp::FAbs || op == MOp::FSqrt || op == MOp::FRint ||
-           op == MOp::FMinNm || op == MOp::FMaxNm || op == MOp::FCvt ||
-           op == MOp::Scvtf || op == MOp::Ucvtf
+      op == MOp::FNeg || op == MOp::FAbs || op == MOp::FSqrt || op == MOp::FRint ||
+      op == MOp::FMinNm || op == MOp::FMaxNm || op == MOp::FCvt ||
+      op == MOp::Scvtf || op == MOp::Ucvtf
   end
   raise "target: no typed floating provenance rules for isa #{isa}"
 end

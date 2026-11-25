@@ -28,6 +28,7 @@ fi
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -35,13 +36,7 @@ import tempfile
 
 repo = Path(sys.argv[1])
 iyi = sys.argv[2]
-# The overlay's prelude reaches the runtime by a relative path, and a relative
-# path does not exist between two drives (the Windows runner's temp is on C: and
-# the checkout on D:). Put the work directory on the checkout's drive then.
-temp_parent = None
-if os.path.splitdrive(str(repo))[0].lower() != os.path.splitdrive(tempfile.gettempdir())[0].lower():
-    temp_parent = str(repo.parent)
-with tempfile.TemporaryDirectory(prefix="iyi-stale-chmod-failure-", dir=temp_parent) as temporary:
+with tempfile.TemporaryDirectory(prefix="iyi-stale-chmod-failure-") as temporary:
     work = Path(temporary)
     project = work / "project"
     project.mkdir()
@@ -65,14 +60,21 @@ with tempfile.TemporaryDirectory(prefix="iyi-stale-chmod-failure-", dir=temp_par
     if original.count(before) != 1:
         raise AssertionError("scheduler process observer fixture no longer applies")
     observer.write_text(original.replace(before, after), encoding="utf-8")
-    prelude = overlay / "iyi" / "prelude.iyi"
-    prelude.parent.mkdir(parents=True)
-    prelude_source = (repo / "src" / "iyi" / "prelude.iyi").read_text(encoding="utf-8")
-    if prelude_source.count('require "../std/observe"') != 1:
+    # The whole runtime beside the prelude copy, as every other overlay under
+    # bench/ makes it (`cp -R src/iyi`). The compiler tells the runtime's files
+    # from a program's by their being in the prelude's own directory
+    # (`CodeGenVisitor#iyi_runtime_def?`); a prelude copy that reached the
+    # runtime by a relative path had only itself there, so the scheduler was
+    # built as library code, with a preemption check in `IyiScheduler.state`.
+    # `IyiWorkers.preempted` reads the state before it lowers its word on
+    # x86-64 Windows, so the first time the monitor raised the word while the
+    # task ran, the check in `state` called `preempted` again, which called
+    # `state` again, until the stack ran out: "stack overflow" in 1 to 6 of
+    # every 20 runs, and never in a build with the runtime where it belongs.
+    runtime = overlay / "iyi"
+    shutil.copytree(repo / "src" / "iyi", runtime)
+    if (runtime / "prelude.iyi").read_text(encoding="utf-8").count('require "../std/observe"') != 1:
         raise AssertionError("observer prelude fixture no longer applies")
-    runtime_path = os.path.relpath(repo / "src" / "iyi", prelude.parent).replace("\\", "/")
-    prelude_source = prelude_source.replace('require "./', f'require "{runtime_path}/')
-    prelude.write_text(prelude_source, encoding="utf-8")
     target = project / "absent"
     test = project / "chmod_failure_test.iyi"
     test.write_text('''import std/file::{File}

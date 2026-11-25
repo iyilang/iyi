@@ -1,0 +1,81 @@
+# Files where the port's output differs from the hosted formatter.
+# Baseline: 67 files, grouped by the first mismatch only, not by root cause.
+# Program-changing: semicolon-separated statements concatenated (2).
+# Program-changing: case branches joined (3).
+# Program-changing: macro text loses end (1).
+# Assignment and enum alignment (17).
+# Multiline collections collapsed (18).
+# Multiline calls or declarations collapsed (6).
+# Multiline boolean expressions collapsed (2).
+# Missing space after a proc literal's opening brace (3).
+# Extra space in empty blocks (2).
+# Inline comment alignment lost (7).
+# Inline comments moved to a new line (3).
+# Indentation changed (3).
+bench/enum_exercise.iyi
+bench/fixtures/decl_enums.iyi
+bench/fixtures/expr_collections.iyi
+bench/fixtures/expr_hashes_and_arrays.iyi
+bench/fixtures/expr_variables_and_paths.iyi
+bench/fixtures/syntax_macro_text_splits.iyi
+bench/fixtures/syntax_proc_literals.iyi
+bench/fixtures/syntax_scope_locals.iyi
+bench/reuse_integrity.iyi
+bench/selfhost_ast_exercise.iyi
+bench/selfhost_ir_fold_exercise.iyi
+bench/selfhost_lexer_exercise.iyi
+bench/selfhost_platform_exercise.iyi
+bench/std_atomic_exercise.iyi
+bench/std_benchmark_exercise.iyi
+bench/std_enum_exercise.iyi
+bench/std_exercise.iyi
+bench/std_file_utils_exercise.iyi
+bench/std_hpack_exercise.iyi
+bench/std_json_exercise.iyi
+bench/std_mime_exercise.iyi
+bench/std_netip_exercise.iyi
+bench/std_option_parser_exercise.iyi
+bench/std_otp_exercise.iyi
+bench/std_p256_exercise.iyi
+bench/std_path_exercise.iyi
+bench/std_shlex_exercise.iyi
+bench/std_steppable_exercise.iyi
+bench/std_system_roots_exercise.iyi
+bench/std_uri_exercise.iyi
+bench/std_yaml_exercise.iyi
+bench/woken_busy.iyi
+samples/iyi/basics.iyi
+samples/iyi/config.iyi
+samples/iyi/cores.iyi
+samples/iyi/enums.iyi
+samples/iyi/errors.iyi
+samples/iyi/inventory.iyi
+samples/iyi/shapes.iyi
+samples/iyi/visited.iyi
+samples/iyi/workers.iyi
+src/compiler/ir/module.iyi
+src/compiler/llvm/llvm.iyi
+src/compiler/llvm/pass_manager.iyi
+src/compiler/macros/interpreter.iyi
+src/compiler/native/aarch64/encode.iyi
+src/compiler/native/amd64/encode.iyi
+src/compiler/native/asm/constraints.iyi
+src/compiler/native/driver.iyi
+src/compiler/native/link/codesign.iyi
+src/compiler/native/link/elf_exe.iyi
+src/compiler/native/link/imports.iyi
+src/compiler/native/link/link.iyi
+src/compiler/native/link/macho_exe.iyi
+src/compiler/native/obj/elf.iyi
+src/compiler/native/obj/macho.iyi
+src/compiler/native/obj/object.iyi
+src/compiler/native/target.iyi
+src/compiler/platform/linker.iyi
+src/compiler/tools/link_macho.iyi
+src/compiler/tools/obj_elf.iyi
+src/compiler/tools/obj_macho.iyi
+src/std/csv.iyi
+src/std/http_proxy.iyi
+src/std/mutex.iyi
+src/std/number.iyi
+src/std/shlex.iyi

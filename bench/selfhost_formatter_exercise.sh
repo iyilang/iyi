@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
-# Fails when the iyi selfhost formatter stops agreeing with the hosted formatter.
+# Compare the port with the hosted formatter across the repository.
 #
-# For each file in an explicit corpus list, the port's output must match the
-# hosted formatter's output byte for byte, and a second pass over the port's
-# own output must change nothing (idempotency).
-#
-# The mutation proofs verify that the parity checks are load-bearing: each
-# mutation modifies a key ported mechanism, proves the patch applied, runs
-# the comparison to confirm it is caught, and reverts cleanly.
+# A short corpus also checks idempotency and the standalone path and stdin
+# driver. The full-tree comparison pins both matches and divergent outputs,
+# including every .iyi file and the deliberately unformatted .fixture input.
+# Mutation proofs verify that the existing parity checks are load-bearing.
 #
 #   bash bench/selfhost_formatter_exercise.sh
 set -u
@@ -32,10 +29,8 @@ cd "$REPO" || exit 1
 # The mutation helper retains only a log tail; preserve full invalid-build logs.
 exec 3>&1
 
-# The corpus is an explicit list of files the port currently handles byte-for-byte.
-# It grows deliberately as the formatter port reaches further constructs, and fails
-# if any listed file regresses.
-# Other .iyi files in the tree are not included in this corpus.
+# This short corpus carries the existing idempotency, standalone-driver, and
+# mutation checks. The full-tree comparison below is measured separately.
 CORPUS=(
   "bench/fixtures/formatter_macro_if.iyi"
   "bench/fixtures/formatter_macro_if_def.iyi"
@@ -147,7 +142,162 @@ if ! compare_corpus "$WORK/exercise$EXE"; then
 fi
 
 echo
-echo "== 3. Standalone iyi-format path and stdin comparison"
+echo "== 3. Whole-tree parity floor and divergent-output ceiling"
+if [ -z "$PY" ]; then
+  echo "  FAILED: Python is required for the whole-tree comparison"
+  status=1
+else
+  cat > "$WORK/whole_tree.py" <<'PY'
+import collections
+import concurrent.futures
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+def read_pins(path):
+    rows = [line for line in Path(path).read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")]
+    if rows != sorted(set(rows)):
+        raise ValueError(f"{path}: paths must be unique and sorted")
+    return set(rows)
+
+
+def check_pins(results_path, floor_path, ceiling_path):
+    rows = json.loads(Path(results_path).read_text(encoding="utf-8"))
+    actual_identical = {path for path, verdict, _ in rows if verdict == "identical"}
+    actual_differs = {path for path, verdict, _ in rows if verdict == "differs"}
+    floor = read_pins(floor_path)
+    ceiling = read_pins(ceiling_path)
+    issues = [
+        ("BELOW FLOOR", floor - actual_identical),
+        ("RAISE THE FLOOR", actual_identical - floor),
+        ("NOW DIFFERS", actual_differs - ceiling),
+        ("LOWER THE CEILING", ceiling - actual_differs),
+    ]
+    failed = False
+    for label, paths in issues:
+        for path in sorted(paths):
+            print(f"  {label}: {path}")
+            failed = True
+    return 1 if failed else 0
+
+
+if sys.argv[1] == "check":
+    sys.exit(check_pins(*sys.argv[2:]))
+
+root, driver, hosted, work = map(Path, sys.argv[2:6])
+floor_path, ceiling_path = map(Path, sys.argv[6:8])
+timeout = 10
+excluded_root_dirs = {".git", ".build", ".iyi", ".direnv", ".junit",
+                      "coverage", "docs", "man", "tmp"}
+sources = []
+for directory, dirs, names in os.walk(root):
+    relative = Path(directory).relative_to(root)
+    if relative == Path("."):
+        dirs[:] = [name for name in dirs if name not in excluded_root_dirs]
+    dirs[:] = [name for name in dirs if name not in {"__pycache__", "node_modules"}]
+    if relative.as_posix() == "samples/crystal/kemal":
+        dirs[:] = [name for name in dirs if name not in {"lib", "mods"}]
+        names = [name for name in names if name != "app_artifact.iyi"]
+    sources.extend((relative / name).as_posix() for name in names if name.endswith(".iyi"))
+sources.append("bench/fixtures/formatter_macro_if_branches.fixture")
+sources.sort()
+
+
+def first_line(result):
+    lines = (result.stderr or result.stdout).decode("utf-8", errors="replace").splitlines()
+    return lines[0] if lines else f"exit {result.returncode}"
+
+
+def measure(rel):
+    source = root / rel
+    try:
+        reference = subprocess.run([str(hosted), "tool", "format", "-"], input=source.read_bytes(),
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return rel, "host_timeout", f"hosted formatter exceeded {timeout}s"
+    if reference.returncode:
+        return rel, "host_refused", first_line(reference)
+    try:
+        port = subprocess.run([str(driver), str(source)], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return rel, "port_timeout", f"port exceeded {timeout}s"
+    if port.returncode:
+        return rel, "port_refused", first_line(port)
+    return rel, "identical" if reference.stdout == port.stdout else "differs", ""
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    rows = list(pool.map(measure, sources))
+results = work / "whole_tree_results.json"
+results.write_text(json.dumps(rows, ensure_ascii=True), encoding="utf-8")
+counts = collections.Counter(verdict for _, verdict, _ in rows)
+print(f"  identical {counts['identical']} of {len(rows)}")
+for verdict, label in (("differs", "differs"), ("port_refused", "port refused"),
+                       ("port_timeout", "port timed out"), ("host_refused", "hosted refused"),
+                       ("host_timeout", "hosted timed out")):
+    print(f"  {label}: {counts[verdict]}")
+for rel, verdict, message in rows:
+    if verdict in {"port_refused", "port_timeout", "host_refused", "host_timeout"}:
+        print(f"  {verdict}: {rel}: {message}")
+
+
+def run_check(floor, ceiling):
+    return subprocess.run([sys.executable, __file__, "check", str(results),
+                           str(floor), str(ceiling)], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True)
+
+
+baseline = run_check(floor_path, ceiling_path)
+print(baseline.stdout, end="")
+if baseline.returncode not in (0, 1):
+    print(f"  FAILED: pin check could not run (exit {baseline.returncode})")
+    sys.exit(1)
+failed = baseline.returncode != 0
+floor = read_pins(floor_path)
+ceiling = read_pins(ceiling_path)
+identical = sorted(path for path, verdict, _ in rows if verdict == "identical")
+differs = sorted(path for path, verdict, _ in rows if verdict == "differs")
+if not identical or not differs:
+    print("  FAILED: need a matching file and a differing file for the pin proofs")
+    sys.exit(1)
+
+
+def proof(name, mutant_floor, mutant_ceiling, expected, target):
+    global failed
+    floor_copy = work / "proof.floor"
+    ceiling_copy = work / "proof.ceiling"
+    floor_copy.write_text("".join(path + "\n" for path in sorted(mutant_floor)), encoding="utf-8")
+    ceiling_copy.write_text("".join(path + "\n" for path in sorted(mutant_ceiling)), encoding="utf-8")
+    result = run_check(floor_copy, ceiling_copy)
+    if result.returncode == 1 and f"{expected}: {target}" in result.stdout:
+        print(f"  {name}: caught ({expected}: {target}, exit 1)")
+    else:
+        print(f"  {name}: NOT CAUGHT (exit {result.returncode})")
+        print(result.stdout, end="")
+        failed = True
+
+
+proof("floor row removed", floor - {identical[0]}, ceiling, "RAISE THE FLOOR", identical[0])
+proof("differing file added to floor", floor | {differs[0]}, ceiling, "BELOW FLOOR", differs[0])
+proof("ceiling row removed", floor, ceiling - {differs[0]}, "NOW DIFFERS", differs[0])
+proof("matching file added to ceiling", floor, ceiling | {identical[0]}, "LOWER THE CEILING", identical[0])
+sys.exit(1 if failed else 0)
+PY
+  if ! "$PY" "$(native_path "$WORK/whole_tree.py")" measure "$REPO_NATIVE" \
+    "$WORK_NATIVE/exercise$EXE" "$(native_path "$REPO/.build/iyi$EXE")" "$WORK_NATIVE" \
+    "$(native_path "$REPO/bench/selfhost_formatter_parity.floor")" \
+    "$(native_path "$REPO/bench/selfhost_formatter_differs.ceiling")"; then
+    status=1
+  fi
+fi
+
+echo
+echo "== 4. Standalone iyi-format path and stdin comparison"
 format_matched=0
 format_total=${#CORPUS[@]}
 if ! "$IYI" build -o "$WORK_NATIVE/iyi-format$EXE" "$REPO_NATIVE/src/compiler/tools/format.iyi" > "$WORK/format-build.log" 2>&1; then
@@ -205,7 +355,7 @@ fi
 echo "  iyi-format: $format_matched/$format_total files identical to the hosted formatter, through a path and through stdin"
 
 echo
-echo "== 4. Mutation proofs: each one must make the comparison above fail"
+echo "== 5. Mutation proofs: each one must make the comparison above fail"
 
 # Each check rebuilds the formatter with the mutation applied and compares it
 # with the hosted formatter. A failed build or oracle is an invalid mutant.

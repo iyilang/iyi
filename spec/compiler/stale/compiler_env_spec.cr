@@ -242,6 +242,32 @@ describe "Iyi::Stale S3c: env-only recorder, CompilerEnvFp" do
       inputs.env["__IYI_SPEC_HAS_KEY_VAR__"].should be_nil
     end
 
+    it "the local time zone's TZ is not a read of the build's, though a direct read of it is" do
+      # The first call for the local time reads TZ, and on Windows the first
+      # call is wherever the first process starts (a pipe is named with today's
+      # date). A cold build starts one before the key is taken and a warm one
+      # after, so a recorded TZ made the cold and the warm `cenv` differ.
+      [Iyi::BuildInputs.new(nil, env_only: true), Iyi::BuildInputs.new(nil, stale: true)].each do |inputs|
+        Iyi::BuildInputs.current = inputs
+        begin
+          Time::Location.load_local
+          File.tempname("iyi-spec", nil)
+        ensure
+          Iyi::BuildInputs.current = nil
+        end
+        inputs.env.has_key?("TZ").should be_false
+        inputs.observed_env.has_key?("TZ").should be_false
+
+        Iyi::BuildInputs.current = inputs
+        begin
+          ENV["TZ"]?
+        ensure
+          Iyi::BuildInputs.current = nil
+        end
+        inputs.env.has_key?("TZ").should be_true
+      end
+    end
+
     it "an enumeration is recorded whole" do
       inputs = Iyi::BuildInputs.new(nil, env_only: true)
       inputs.env_enumerated?.should be_false

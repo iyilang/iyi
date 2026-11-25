@@ -109,6 +109,31 @@ def task_parked_roots : Nil
   task_check(result.size == 1 && result[0] == 9307, "parked fiber lost its only box")
 end
 
+# The other side of the same root: the main fiber parks holding the only
+# reference while a task collects and allocates over what a missed root
+# would have freed. Its stack is scanned from its saved pointer to its top.
+@[NoInline]
+def task_main_parked_box : Int32
+  box = TaskExerciseBox.new(4242)
+  ready = Channel(Int32).new
+  group do |g|
+    g.spawn(unit: :same) do
+      IyiMark.collect
+      junk = [] of TaskExerciseBox
+      i = 0
+      while i < 2000
+        junk << TaskExerciseBox.new(-7)
+        i = i + 1
+      end
+      IyiMark.collect
+      ready.send(junk.size)
+    end
+    ready.receive
+  end
+  address = box.as(Pointer(Void)).address
+  IyiRoots.base_of(address) == 0_u64 ? -1 : box.value
+end
+
 def task_early_return(result : Array(Int32)) : Int32
   group do |g|
     g.spawn(unit: :same) do
@@ -377,6 +402,9 @@ def task_exercise : Nil
 
   task_parked_roots
   puts "parked fiber roots survived collection"
+
+  task_check(task_main_parked_box == 4242, "parked main fiber lost its only box")
+  puts "parked main fiber roots survived collection"
 end
 
 {% if flag?(:wasm32) && !flag?(:wasi) %}

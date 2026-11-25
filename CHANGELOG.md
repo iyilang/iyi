@@ -257,8 +257,10 @@
   `flag?(:wasm32)`. `bench/wasm_tasks_exercise.sh` compares the task
   exercise with native output plain and `--release` in Node and headless
   Chrome, checks the no-JSPI refusal, deadlock, panic and canary reports
-  and bounded memory over 2,000 fibers, and catches 3 broken copies
-  (parked-root scan removed, canary check removed, stack reuse disabled);
+  and bounded memory over 2,000 fibers, and catches 4 broken copies
+  (parked-root scan removed, canary check removed, stack reuse disabled,
+  and the parked main fiber's stack left unscanned, which a box only the
+  main fiber holds across a task's collection now proves);
   the `wasm-freestanding` job runs it. `bench/thread_exercise.sh` and
   `bench/parallel_exercise.sh` re-anchor their mutations to the native
   switch and poll paths.

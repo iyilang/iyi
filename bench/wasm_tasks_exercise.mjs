@@ -171,5 +171,10 @@ export default async function ({ load, log }) {
     throw new Error(`parked-root mutation was not caught: status=${noRoots.status} ${noRoots.stderr}`);
   }
   log("removing parked-fiber roots was caught");
+  const noMain = await program(await load("bad-main.wasm"));
+  if (noMain.status === 0 || !noMain.stderr.includes("parked main fiber lost its only box")) {
+    throw new Error(`parked-main mutation was not caught: status=${noMain.status} ${noMain.stderr}`);
+  }
+  log("removing the parked main fiber's roots was caught");
   return { ok: true };
 }

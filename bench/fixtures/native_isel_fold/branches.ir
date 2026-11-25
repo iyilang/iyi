@@ -1,0 +1,114 @@
+; iyi-ir 1
+module "branches"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @compare(i64 %x) {
+entry:
+  %c = icmp sgt i64 %x, 5
+  %hint = intrinsic llvm.expect.i1(i1 %c, i1 true)
+  br i1 %hint, label %yes, label %no
+yes:
+  ret i64 71
+no:
+  ret i64 19
+}
+
+define internal i64 @zero_eq(i64 %x) {
+entry:
+  %c = icmp eq i64 %x, 0
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 21
+no:
+  ret i64 22
+}
+
+define internal i64 @zero_ne(i64 %x) {
+entry:
+  %c = icmp ne i64 %x, 0
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 31
+no:
+  ret i64 32
+}
+
+define internal i64 @bit_zero(i64 %x) {
+entry:
+  %mask = and i64 %x, 32
+  %c = icmp eq i64 %mask, 0
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 41
+no:
+  ret i64 42
+}
+
+define internal i64 @bit_one(i64 %x) {
+entry:
+  %mask = and i64 %x, 32
+  %c = icmp ne i64 %mask, 0
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 51
+no:
+  ret i64 52
+}
+
+define internal i64 @null_eq(ptr %p) {
+entry:
+  %c = icmp eq ptr %p, null
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 61
+no:
+  ret i64 62
+}
+
+define internal i64 @shared_cmp(i64 %x) {
+entry:
+  %c = icmp sgt i64 %x, 5
+  %v = zext i1 %c to i64
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 %v
+no:
+  ret i64 7
+}
+
+define i32 @main() {
+entry:
+  %cell = alloca i64, align 8
+  %a = call i64 (i64) @compare(i64 6)
+  %b = call i64 (i64) @compare(i64 4)
+  %c = call i64 (i64) @zero_eq(i64 0)
+  %d = call i64 (i64) @zero_eq(i64 4)
+  %e = call i64 (i64) @zero_ne(i64 0)
+  %f = call i64 (i64) @zero_ne(i64 4)
+  %g = call i64 (i64) @bit_zero(i64 0)
+  %h = call i64 (i64) @bit_zero(i64 32)
+  %i = call i64 (i64) @bit_one(i64 0)
+  %j = call i64 (i64) @bit_one(i64 32)
+  %k = call i64 (i64) @shared_cmp(i64 6)
+  %l = call i64 (i64) @shared_cmp(i64 4)
+  %m = call i64 (ptr) @null_eq(ptr null)
+  %n = call i64 (ptr) @null_eq(ptr %cell)
+  %p0 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %a)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %c)
+  %p3 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %d)
+  %p4 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %e)
+  %p5 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %f)
+  %p6 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %g)
+  %p7 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %h)
+  %p8 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %i)
+  %p9 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %j)
+  %p10 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %k)
+  %p11 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %l)
+  %p12 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %m)
+  %p13 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %n)
+  ret i32 0
+}

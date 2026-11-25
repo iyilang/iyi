@@ -322,6 +322,49 @@ def forms : Array(Form)
   m = mk(MOp::Brk)
   m.imm = 1_i64
   acc << Form.new("brk #1", m)
+  m = mk(MOp::CmnImm)
+  m.uses << reg(1)
+  m.imm = 42_i64
+  acc << Form.new("cmn x1, #42", m)
+  m = mk(MOp::OrrImm)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.imm = 0xf0_i64
+  acc << Form.new("orr x0, x1, #0xf0", m)
+  m = mk(MOp::EorImm)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.imm = 0x5555555555555555_i64
+  acc << Form.new("eor x0, x1, #0x5555555555555555", m)
+  m = mk(MOp::LslImm)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.imm = 7_i64
+  acc << Form.new("lsl x0, x1, #7", m)
+  m = mk(MOp::LsrImm)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.imm = 17_i64
+  acc << Form.new("lsr x0, x1, #17", m)
+  m = mk(MOp::AsrImm)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.imm = 63_i64
+  acc << Form.new("asr x0, x1, #63", m)
+  m = mk(MOp::Cbz)
+  m.uses << reg(1)
+  acc << Form.new("cbz x1, .", m)
+  m = mk(MOp::Cbnz)
+  m.uses << reg(1)
+  acc << Form.new("cbnz x1, .", m)
+  m = mk(MOp::Tbz)
+  m.uses << reg(1)
+  m.imm = 5_i64
+  acc << Form.new("tbz x1, #5, .", m)
+  m = mk(MOp::Tbnz)
+  m.uses << reg(1)
+  m.imm = 63_i64
+  acc << Form.new("tbnz x1, #63, .", m)
   acc
 end
 

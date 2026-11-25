@@ -1,0 +1,31 @@
+; iyi-ir 1
+module "loop"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @count(i64 %n) {
+entry:
+  br label %head
+head:
+  %i = phi i64 [ 0, label %entry ], [ %next, label %body ]
+  %sum = phi i64 [ 0, label %entry ], [ %total, label %body ]
+  %more = icmp slt i64 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %total = add i64 %sum, %i
+  %next = add i64 %i, 1
+  br label %head
+done:
+  ret i64 %sum
+}
+
+define i32 @main() {
+entry:
+  %a = call i64 (i64) @count(i64 0)
+  %b = call i64 (i64) @count(i64 7)
+  %p = call i32 (ptr, ...) @printf(ptr @fmt, i64 %a)
+  %q = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b)
+  ret i32 0
+}

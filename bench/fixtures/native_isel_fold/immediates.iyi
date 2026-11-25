@@ -1,0 +1,50 @@
+module immediates
+
+def add_small(x : Int64) : Int64
+  x + 4095_i64
+end
+
+def add_negative(x : Int64) : Int64
+  x - 37_i64
+end
+
+def sub_negative(x : Int64) : Int64
+  x + 42_i64
+end
+
+def add_large(x : Int64) : Int64
+  x + 4096_i64
+end
+
+def logic(x : Int64) : Int64
+  ((x & 255_i64) | 3840_i64) ^ 61440_i64
+end
+
+def repeat_mask(x : Int64) : Int64
+  x ^ 6148914691236517205_i64
+end
+
+def shifts(x : Int64) : Int64
+  ((x << 3) >> 2) >> 1
+end
+
+def negative_compare(x : Int64) : Int64
+  x < -42_i64 ? 1_i64 : 0_i64
+end
+
+def large_compare(x : Int64) : Int64
+  x > 4096_i64 ? 1_i64 : 0_i64
+end
+
+puts "#{add_small(11_i64)}"
+puts "#{add_negative(11_i64)}"
+puts "#{sub_negative(11_i64)}"
+puts "#{add_large(11_i64)}"
+puts "#{logic(171_i64)}"
+puts "#{repeat_mask(17_i64)}"
+puts "#{shifts(123_i64)}"
+puts "#{-16_i64 >> 2}"
+puts "#{negative_compare(-43_i64)}"
+puts "#{negative_compare(-41_i64)}"
+puts "#{large_compare(4097_i64)}"
+puts "#{large_compare(4095_i64)}"

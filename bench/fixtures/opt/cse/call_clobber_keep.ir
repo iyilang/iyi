@@ -1,0 +1,14 @@
+; iyi-ir 1
+source_filename = "call_clobber_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external void @callee()
+
+define internal i64 @call_clobber_keep(ptr %p) {
+entry:
+  %first = load i64, ptr %p, align 8
+  call void () @callee()
+  %second = load i64, ptr %p, align 8
+  %sum = add i64 %first, %second
+  ret i64 %sum
+}

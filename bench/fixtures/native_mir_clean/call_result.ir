@@ -1,0 +1,30 @@
+; iyi-ir 1
+module "call_result"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @twice(i64 %x) {
+entry:
+  %result = mul i64 %x, 2
+  ret i64 %result
+}
+
+define internal i64 @combine(i64 %x) {
+entry:
+  %a = call i64 (i64) @twice(i64 %x)
+  %b = add i64 %a, 9
+  %c = call i64 (i64) @twice(i64 %b)
+  %d = sub i64 %c, %x
+  ret i64 %d
+}
+
+define i32 @main() {
+entry:
+  %a = call i64 (i64) @combine(i64 8)
+  %b = call i64 (i64) @combine(i64 -4)
+  %p = call i32 (ptr, ...) @printf(ptr @fmt, i64 %a)
+  %q = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b)
+  ret i32 0
+}

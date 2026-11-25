@@ -126,6 +126,45 @@
   produce their expected IR deterministically and idempotently, checks the
   driver's command-line contract and that a diamond chain twice as long
   takes less than three times the CPU time, and catches 5 broken copies.
+- **A release tier for the IR optimizer: inlining, scalar replacement and
+  dead-function removal (#252).** 1,212 lines of iyi in four new files under
+  `src/compiler/ir/opt/` (`callgraph`, `inline`, `sroa`, `deadfn`).
+  `OptTier::Release` runs `cfg-simplify, sroa, mem2reg, simplify, dce,
+  cfg-simplify`, then `inline`, that cleanup twice more, then `deadfn`;
+  `OptTier::Default` still runs #225's five passes. The inliner takes a
+  callee of cost 40 or less, an internal callee with one call site up to
+  400, and anything `alwaysinline`, within a 3,000-instruction caller and
+  one and a half times the module's starting size, and refuses what it
+  cannot clone safely (recursion, varargs, `byval`/`sret`, exception
+  handling, non-entry allocas, `returns_twice`, `noreturn` and the entry
+  frames among them). Scalar replacement splits a stack aggregate only when
+  every use is a constant-offset field access, never one whose address
+  escapes or that a volatile or atomic access touches.
+  `src/compiler/ir/module.iyi` gains `remove_functions` and `iyi-opt`
+  accepts `run release`. `bench/native_opt_exercise.sh` goes from 49 to 72
+  fixtures and from 5 to 11 broken copies caught, and checks the entry
+  frames and the growth limits. Only `iyi-opt` runs either tier.
+- **Common subexpressions, range proofs, loop-invariant code motion and
+  block layout in the IR optimizer's release tier (#253).** 2,046 lines of
+  iyi in four new files under `src/compiler/ir/opt/` (`cse`, `prove`,
+  `licm`, `layout`). CSE reuses a dominating identical computation and
+  forwards a stored or loaded value to a later load of the same address
+  until a store, call, atomic, fence or opaque access, or a join whose paths
+  disagree; `prove` folds a comparison or overflow check the dominating
+  branch edges or a counted loop's induction range already decide, and
+  skips irreducible control flow, wide integers and counters that may wrap;
+  LICM moves pure computations other than integer division to a loop's
+  preheader; layout keeps loops contiguous and puts cold and `unreachable`
+  blocks last. `simplify` folds a load from a constant global with a
+  definitive initializer. Each release round becomes `cfg-simplify, sroa,
+  simplify, cse, dce, cfg-simplify`, followed by `prove, simplify, dce,
+  cfg-simplify`, `licm`, `layout` and `deadfn`.
+  `bench/native_opt_exercise.sh` goes from 72 to 176 fixtures and from 11
+  to 20 broken copies caught, and adds scale checks for sequential and
+  nested loops (2K/K under 3.0 CPU). Among the fixtures,
+  `cse/join_clean_first_keep` keeps a load after a join whose clean arm is
+  the first predecessor, so a disagreeing join cannot pass for an agreeing
+  one. Only `iyi-opt` runs either tier.
 - **The module artifact reader and writer in iyi:
   `src/compiler/artifact/iyimod.iyi` (#196).** 3,554 lines of iyi read and
   write `.iyimod` format v65; `src/compiler/tools/mod.iyi` is the `iyi-mod`
@@ -462,6 +501,76 @@
   now written after optimisation and the preemption checks and before the
   object, as a cross-compile always wrote it.
 
+- **The IR verifier computes dominance once per function (#250).**
+  `src/compiler/ir/verifier.iyi` (528 to 633 lines) built a block-by-block
+  dominance matrix and scanned a block for every phi operand; it now builds
+  one `Dominance` value (reverse post-order, Cooper-Harvey-Kennedy immediate
+  dominators, dominator-tree intervals, every walk iterative) and a table
+  of first positions. Verdicts and messages are unchanged.
+  `bench/native_ir_exercise.sh` requires a generated 20,000-block function
+  (6,666 chained diamonds) to verify, verifies 11 valid fixtures (a
+  thread-local address used across a forward edge among them), refuses 23
+  malformed fixtures (19 before; a use of a value defined in an unreachable
+  block and a thread-local address used after a two-block loop's back-edge
+  among them) and catches 32 broken copies (29 before).
+
+- **The AArch64 backend folds result copies and elides fallthrough branches
+  (#251).** `src/compiler/native/mir_clean.iyi` (160 lines) runs from
+  `function_mir`: before register allocation a value copied exactly once
+  is written by its producer into the copy's destination, and after frame
+  layout an unconditional branch to the next block goes and a conditional
+  branch to it is inverted. `IYI_NATIVE_MIR_CLEAN=0` turns both off and any
+  value other than 0 or 1 is refused. The new
+  `bench/native_mir_clean_exercise.sh` emits 61 fixtures in both modes,
+  requires deterministic objects, the same blocks and no more instructions
+  per function (153 functions), and on macOS arm64 runs them against hosted
+  twins and catches 3 broken copies (1 off macOS, the other 2
+  host-limited). It runs in the self-host jobs through
+  `bench/selfhost_gates.sh`.
+
+- **The AArch64 selector folds immediates, offsets and compares (#254).**
+  `src/compiler/native/aarch64/fold.iyi` (86 lines) says which constants
+  fit which field; the selector folds add, subtract, logical, shift and
+  compare immediates, a single-use constant address offset into the load
+  or store (a frame object as slot plus offset), a comparison or overflow
+  check that only feeds its branch into `cmp`/`cmn` with `b.cond`, `cbz`,
+  `cbnz`, `tbz` or `tbnz`, and declines each fold that a second use or an
+  out-of-range value rules out. The encoder gains ten forms and relaxes a
+  conditional branch whose target is out of range. The new
+  `bench/native_isel_fold_exercise.sh` checks branch bounds and relaxation
+  and 41 selected-MIR shapes on every host (an unsigned `i8` compare with
+  200 must select `cmp #200`, not `cmn #56`), and on macOS arm64 runs 5
+  fixtures against hosted twins and catches 5 broken copies;
+  `bench/native_encode_exercise.sh` goes from 100 to 110 forms. It runs in
+  the self-host jobs through `bench/selfhost_gates.sh`.
+
+- **The IR optimizer's inliner caches callee facts and scalar replacement
+  skips functions without aggregates (#255).** `InlineBudget` keeps each
+  callee's eligibility and cost; the inliner drops a function's entries when
+  it changes it, and the pass driver drops them when that function's own
+  cleanup finishes, so a later caller sees its final size. The dispatch rule
+  (a compare chain of more than four single-call arms ending in
+  `unreachable`) walks back from the call's block instead of scanning every
+  block of the caller per call, and `run_sroa` returns before building
+  def-use, the CFG and the position index when the function has no
+  aggregate slot. The IR that comes out is the same.
+  `bench/native_opt_exercise.sh` gains section 2e (four-arm, five-arm and
+  cycling dispatch chains, and a callee that shrinks during its own cleanup)
+  and goes from 20 to 23 broken copies caught.
+
+- **The AArch64 selector calls the module's own `memcpy`, `memmove` and
+  `memset` (#256).** A copy, move or fill the selector does not expand
+  inline (a constant length over 64 bytes, or a variable one) calls the
+  module's routine when the module defines it, and the native helper
+  (`__iyi_native_memcpy` and its siblings) when the module only declares it
+  or lacks it; inside the three routines themselves the helper is always
+  used. The new `bench/native_copy_fill_exercise.sh` checks on every host
+  which symbol 78 selected copies, moves and fills call and, in 36 more,
+  that each passes destination, source or byte, and length in order; on
+  macOS arm64 it runs five modules against hosted twins and catches 3
+  broken copies. It runs in the self-host jobs through
+  `bench/selfhost_gates.sh`.
+
 ### Gates
 
 - **Darwin's thread-yield control measures CPU held under load.** The
@@ -480,6 +589,46 @@
 - **Darwin panic dependency floor records `dladdr` and `dprintf` replacing `backtrace_symbols_fd` (SPEC.md III.9).** Commit 68c53c352 resolved boundary return addresses at `addr - 1` using `dladdr` and formatted panic frames to stderr with `dprintf` instead of `backtrace_symbols_fd`. The Darwin dependency floor (`bench/floor_base.sh`, `bench/dependency_floor.sh`, and exercise gates) updates its permitted symbol lists accordingly to match libSystem's interface without linking additional libraries. (Note: `dprintf` is not documented by Darwin as async-signal-safe).
 
 - **Semantic backtrace equivalence for Darwin artifact verification.** Output comparison in standard library exercise gates (`bench/std_exercise.sh`, `bench/std_toml_exercise.sh`, `bench/std_websocket_exercise.sh`, `bench/std_big_exercise.sh`, and `bench/stale_equivalence.sh`) evaluates ordered semantic frames via `bench/frames_equivalent.py` when direct byte comparison fails on Darwin. Comparisons verify equal frame counts, positions, indices, images, and canonicalized function names while abstracting layout addresses, function size offsets, `~iyi` copy suffixes, a carried closure's `^unit:` suffix, and the number a build gave a closure that names its file and line, with plain-vs-optimized comparisons verifying non-frame text and frame sequence structure.
+
+- **std/autocert's and std/acme's gates draw challtestsrv's DNS port free
+  for UDP as well as TCP, std/autocert's says what did not come up when
+  Pebble does not start, and eleven gates' failure output no longer dies
+  in `tail`.** Windows CI jobs 139064806332, 139108403121 and
+  139260265084 stopped at "the Pebbles or challtestsrv's DNS did not come
+  up in 30 s:", and the three logs meant to say why were lost to "tail:
+  option used in invalid context -- 3": `tail -3` is the old form GNU tail
+  takes for one file only, so with two or three files Git bash's tail
+  refused it, as GNU tail on Linux does; darwin's tail takes it.
+  `bench/enum_exercise.sh`, `number_exercise.sh`, `release_cores.sh` and
+  the std/acme, std/aead, std/autocert, std/compress, std/curve25519,
+  std/idna, std/math and std/password gates used it on their failure
+  paths, and use `tail -n` now (`tail -q -n 1` where one last line is
+  wanted). The startup failed in 3 of 190 Windows runs from 11-16 to
+  11-25 and in none of 183 on Linux and darwin. On a Windows 11 machine
+  it failed once in 1,000 startups (300 idle, 300 beside 24 busy
+  processes with CI's Python 3.14.10, 400 four at a time): both Pebbles
+  answered and challtestsrv's DNS did not, its log ending "listen udp
+  127.0.0.1:51592: bind: An attempt was made to access a socket in a way
+  forbidden by its access permissions", and netstat showed UDP
+  0.0.0.0:51592 and [::]:51592 held by the svchost of the DNS Client
+  service, whose [::]:51592 had been bound 18 hours before. The gates drew
+  that port as a free TCP port, which says nothing of UDP; challtestsrv
+  binds it for both, logs the refused UDP bind and goes on serving DNS
+  over TCP alone, and Pebble and the wait ask over UDP. The port is now
+  drawn with a UDP bind on it as well, and drawn again while that is
+  refused. Beside a process holding a random half of the UDP ephemeral
+  range on 0.0.0.0, the old draw failed 17 of 40 startups on Linux and the
+  new one none of 40; on Windows such a process of the same account does
+  not block challtestsrv's bind on 127.0.0.1 (40 of 40 startups came up
+  either way), only another account's does, as the DNS Client's. That
+  CI's three failures were this collision is not shown - their logs were
+  lost - but the wait ran its 30 s in each, as it does here. So that the
+  next failure says which, the gate now names what did not answer - a
+  Pebble's directory, with the addresses `localhost` names, or
+  challtestsrv's DNS on its UDP port - with its last error and the times
+  it waited between, and says of challtestsrv and each Pebble whether it
+  is running or exited with which status, beside its log's last five
+  lines.
 
 - **The LSP gates read a Windows process's children by when it was
   created, and `bench/lsp_orphan_negative.py` no longer hangs or dies on

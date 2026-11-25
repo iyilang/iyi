@@ -1,0 +1,37 @@
+; iyi-ir 1
+source_filename = "top_level"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i64 @force(i64 %x) [alwaysinline] {
+entry:
+  ret i64 %x
+}
+define internal i64 @step(i64 %x) {
+entry:
+  %v = add i64 %x, 1
+  ret i64 %v
+}
+define external i64 @__iyi_main(i64 %n) {
+entry:
+  br label %entry1
+head:
+  %i = phi i64 [ %0, label %inline.cont ], [ %next, label %inline.cont3 ]
+  %more = icmp slt i64 %i, 10
+  br i1 %more, label %body, label %done
+body:
+  br label %entry2
+done:
+  ret i64 %i
+entry1:
+  br label %inline.cont
+inline.cont:
+  %0 = phi i64 [ %n, label %entry1 ]
+  br label %head
+entry2:
+  %1 = add i64 %i, 1
+  br label %inline.cont3
+inline.cont3:
+  %2 = phi i64 [ %1, label %entry2 ]
+  %next = add i64 %2, 1
+  br label %head
+}

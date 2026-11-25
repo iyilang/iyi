@@ -1,0 +1,19 @@
+macro same
+  {% if Int32 == Int32 %}
+    SAME = 1
+  {% end %}
+  {% unless Int32 == Bool %}
+    DIFF = 1
+  {% end %}
+  {% if Int32 != Bool %}
+    NE = 1
+  {% end %}
+  {% if Tuple(Int32, Bool) == Tuple(Int32, Bool) %}
+    GENEQ = 1
+  {% end %}
+  {% if Tuple(Int32, Bool) == Tuple(Int32, Char) %}
+    GENNE = 1
+  {% end %}
+end
+
+same

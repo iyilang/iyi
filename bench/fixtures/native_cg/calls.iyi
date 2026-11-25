@@ -1,0 +1,12 @@
+module calls
+
+def sum10(a : Int64, b : Int64, c : Int64, d : Int64, e : Int64, f : Int64, g : Int64, h : Int64, i : Int64, j : Int64) : Int64
+  a + b + c + d + e + f + g + h + i + j
+end
+
+def pair_sum(a : Int64, b : Int64) : Int64
+  a + b
+end
+
+puts "0 #{sum10(1_i64, 2_i64, 3_i64, 4_i64, 5_i64, 6_i64, 7_i64, 8_i64, 9_i64, 10_i64)} 55"
+puts "#{pair_sum(3_i64, 4_i64)} 10.5 #{9_i64 + 11_i64}"

@@ -1,0 +1,6 @@
+macro lim
+  {% limits = {"Int8" => "128.0", "Int32" => "2147483648.0"} %}
+  {{limits["Int32"]}}|{{limits["nope"]}}
+end
+
+lim

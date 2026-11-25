@@ -2193,8 +2193,10 @@ class ::IyiIO
       Std::File::LibKernel32.UnlockFileEx(Pointer(Void).new(handle.to_u64), 0_u32, 0xFFFFFFFF_u32, 0xFFFFFFFF_u32, overlapped.as(Void*))
     {% elsif flag?(:darwin) %}
       Std::File::LibC.flock(fd, 8)
-    {% elsif flag?(:wasm32) %}
+    {% elsif flag?(:wasi) %}
       raise "flock is not available on wasm32-wasi"
+    {% elsif flag?(:wasm32) %}
+      raise "flock is not available on wasm32-unknown-unknown"
     {% else %}
       Std::File::LibC.sys(Std::File::LibC::SYS_FLOCK, handle, 8_i64, 0_i64)
     {% end %}
@@ -2233,8 +2235,10 @@ class ::IyiIO
         return false if errno == 35
         raise "flock failed (errno #{errno})" unless errno == 4
       end
-    {% elsif flag?(:wasm32) %}
+    {% elsif flag?(:wasi) %}
       raise "flock is not available on wasm32-wasi"
+    {% elsif flag?(:wasm32) %}
+      raise "flock is not available on wasm32-unknown-unknown"
     {% else %}
       operation = exclusive ? 6_i64 : 5_i64
       while true
@@ -2262,8 +2266,10 @@ class ::IyiIO
     {% elsif flag?(:darwin) %}
       moved = Std::File::LibC.lseek(fd.to_i32, offset, whence)
       moved < 0_i64 ? -1_i64 : moved
-    {% elsif flag?(:wasm32) %}
+    {% elsif flag?(:wasi) %}
       raise "seek is not available on wasm32-wasi"
+    {% elsif flag?(:wasm32) %}
+      raise "seek is not available on wasm32-unknown-unknown"
     {% else %}
       Std::File::LibC.sys(Std::File::LibC::SYS_LSEEK, fd, offset, whence.to_i64)
     {% end %}

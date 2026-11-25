@@ -654,6 +654,10 @@ module Iyi
     # path beside `spawn`'s, for a call the cleanup may never point at it.
     property? iyi_pool_reached : Bool = false
 
+    # A freestanding wasm program whose kept code can park a task needs the
+    # JSPI entry and imports. Ordinary programs do not carry that runtime.
+    property? iyi_wasm_tasks_reached : Bool = false
+
     # iyi: whether code written outside the prelude calls a C function — a
     # `lib` fun that is neither an LLVM intrinsic nor a variable. Set where
     # such a call is typed (`Call#recalculate_lib_call`).

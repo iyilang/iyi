@@ -339,8 +339,7 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # The bootstrap compiler's cache, set beside iyi's in the gate that reads
     # the broken copy's objects out of it: the bootstrap reads no other name.
     (r'CRYSTAL_CACHE_DIR="\$WORK/\$label-cache"', "the bootstrap compiler's cache, where bench/symbol_names.sh reads its broken copy"),
-    (r'^CRYSTAL_CACHE_DIR="\$WORK/cr" \\$',
-     "the Crystal declaration oracle's separate cache in selfhost/semantic/diff.sh"),
+    (r'^CRYSTAL_CACHE_DIR="\$WORK/cr" \\$', "the Crystal oracle compiler's cache in selfhost/semantic/diff.sh"),
     (r'"crystal_version"',
      "the Crystal compiler identity recorded in the native IR oracle manifest"),
     (r'^# Normalize external LLVM/Crystal transport only;',
@@ -363,6 +362,8 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r"crystal-lang/install-crystal", "upstream's action, which installs the bootstrap compiler"),
     (r"^\s*crystal: \d", "the bootstrap compiler's version, that action's own input"),
     (r'"CRYSTAL_LIBRARY_PATH=\$lib"', "the bootstrap package's search path, put in the job's environment"),
+    (r"search=\$\{CRYSTAL_LIBRARY_PATH:-\}",
+     "the same search path, read by the LLVM bridge's flag helper when ours is unset: the Windows job sets no other"),
     (r"Crystal on the machine|\ba Crystal\b", "a sentence about the other language"),
     # Comments citing Crystal's own source, DWARF producer strings, and the
     # version banner's "a fork of Crystal X" clause. All name the other

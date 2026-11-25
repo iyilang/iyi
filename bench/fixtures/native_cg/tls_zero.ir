@@ -1,0 +1,18 @@
+; iyi-ir 1
+module "tls_zero"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [9 x i8] c"%ld %ld\0A\00"
+@slot = internal thread_local(localexec) global i64 0, align 8
+
+define i32 @main() {
+entry:
+  %p = threadlocaladdr ptr @slot
+  %zero = load i64, ptr %p, align 8
+  store i64 5, ptr %p, align 8
+  %q = threadlocaladdr ptr @slot
+  %five = load i64, ptr %q, align 8
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i64 %zero, i64 %five)
+  ret i32 0
+}

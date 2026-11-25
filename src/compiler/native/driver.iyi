@@ -1,0 +1,309 @@
+module compiler/native/driver
+
+# Compiles one IR module to an object (SPEC 2.2): select, allocate, lay acc the frame, encode each function
+# into .text, and lay the globals acc into their sections. Every failure is returned as its reason.
+
+import compiler/ir/types::{IrType}
+import compiler/ir/inst::{Op, Inst}
+import compiler/ir/values::{Value}
+import compiler/ir/function::{Function, Global, Linkage, TlsModel}
+import compiler/ir/module::{Module}
+import compiler/ir/layout::{DataLayout}
+import compiler/platform/target::{Target}
+import compiler/native/obj/object::{ObjectFile, ObjFormat, Section, SectionKind, Symbol, SymbolKind, SymbolBinding, BuildVersion, Reloc, DebugFunc, FrameDesc}
+import compiler/native/obj/macho::{write_object}
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass}
+import compiler/native/aarch64/regs::{reg_name}
+import compiler/native/target::{op_name}
+import compiler/native/jump_table::{declare_jump_tables, place_jump_tables, jump_table_section_name}
+import compiler/native/aarch64/isel::{select_function, IselError}
+import compiler/native/aarch64/encode::{encode_function, EncodedFunction, EncodeError}
+import compiler/native/regalloc::{allocate}
+import compiler/native/frame::{lay_out}
+import compiler/native/emit::{SectionWriter, to_bytes, write_initializer, data_section_name}
+import compiler/native/thread_locals::{place_thread_locals}
+import compiler/native/aarch64/abi::{aarch64_target}
+import std/slice::{Slice, Bytes}
+import compiler/native/link/link::{link, LinkOptions, LinkedImage, LinkError}
+
+# The runtime helpers the lowering calls by name.
+def runtime_helper?(name : String) : Bool
+  name == "__iyi_native_memcpy" || name == "__iyi_native_memmove" || name == "__iyi_native_memset" ||
+    name == "__iyi_native_udivti3" || name == "__iyi_native_umodti3" ||
+    name == "__iyi_native_divti3" || name == "__iyi_native_modti3" ||
+    name == "__iyi_native_fptosi_sat_i128" || name == "__iyi_native_fptoui_sat_i128"
+end
+
+# The helpers are entered in the symbol table before any function is selected, because selection asks for their
+# indices. One that no relocation names afterwards is taken out again and every later index moves down, so an object
+# that calls no helper carries no undefined symbol for the linker to resolve: the ELF start code links with no runtime
+# object beside it. A helper the module declares itself is the module's own symbol and stays.
+def drop_unreferenced_helpers(mod : Module, obj : ObjectFile) : Nil
+  used = [] of Bool
+  obj.symbols.each { |_| used << false }
+  obj.sections.each do |s|
+    s.relocs.each do |r|
+      used[r.symbol] = true if r.symbol >= 0 && r.symbol < used.size
+    end
+  end
+  remap = [] of Int32
+  kept = [] of Symbol
+  i = 0
+  while i < obj.symbols.size
+    sym = obj.symbols[i]
+    declared = mod.functions.any? { |fn| fn.name == sym.name }
+    if sym.kind == SymbolKind::Undefined && runtime_helper?(sym.name) && !used[i] && !declared
+      remap << -1
+    else
+      remap << kept.size
+      kept << sym
+    end
+    i = i + 1
+  end
+  return if kept.size == obj.symbols.size
+  obj.symbols = kept
+  obj.sections.each do |s|
+    relocs = [] of Reloc
+    s.relocs.each do |r|
+      index = r.symbol >= 0 && r.symbol < remap.size ? remap[r.symbol] : r.symbol
+      relocs << Reloc.new(r.offset, r.kind, index, r.addend)
+    end
+    s.relocs = relocs
+  end
+  debug_funcs = [] of DebugFunc
+  obj.debug_funcs.each do |d|
+    debug_funcs << DebugFunc.new(remap[d.symbol], d.display_name, d.rows)
+  end
+  obj.debug_funcs = debug_funcs
+  frame_descs = [] of FrameDesc
+  obj.frame_descs.each do |f|
+    frame_descs << FrameDesc.new(remap[f.symbol], f.size, f.events)
+  end
+  obj.frame_descs = frame_descs
+end
+
+# The symbol table of a module: every function and global by name, in the object's order.
+pub def symbol_table(mod : Module, obj : ObjectFile) : Hash(String, Int32)
+  table = Hash(String, Int32).new
+  mod.functions.each do |fn|
+    table[fn.name] = obj.symbols.size
+    binding = fn.linkage == Linkage::External ? SymbolBinding::Global : SymbolBinding::Local
+    if fn.declaration?
+      obj.symbols << Symbol.new(fn.name, SymbolKind::Undefined, SymbolBinding::Global)
+    else
+      obj.symbols << Symbol.new(fn.name, SymbolKind::Func, binding, 0)
+    end
+  end
+  # Isel-generated calls need symbols before selection; the runtime object
+  # supplies them and unused undefined entries are pruned after encoding.
+  ["__iyi_native_memcpy", "__iyi_native_memmove", "__iyi_native_memset",
+   "__iyi_native_fptosi_sat_i128", "__iyi_native_fptoui_sat_i128",
+   "__iyi_native_udivti3", "__iyi_native_umodti3", "__iyi_native_divti3", "__iyi_native_modti3"].each do |helper|
+    next if table[helper]?
+    table[helper] = obj.symbols.size
+    obj.symbols << Symbol.new(helper, SymbolKind::Undefined, SymbolBinding::Global)
+  end
+  mod.globals.each do |g|
+    table[g.name] = obj.symbols.size
+    binding = g.linkage == Linkage::External ? SymbolBinding::Global : SymbolBinding::Local
+    if g.initializer.nil? && g.linkage == Linkage::External
+      obj.symbols << Symbol.new(g.name, SymbolKind::Undefined, SymbolBinding::Global)
+    else
+      kind = g.tls == TlsModel::None ? SymbolKind::Object : SymbolKind::Tls
+      obj.symbols << Symbol.new(g.name, kind, binding, -1)
+    end
+  end
+  table
+end
+
+# The MIR of one function after allocation and frame layout: what the encoder receives.
+pub def function_mir(mod : Module, fn : Function, syms : Hash(String, Int32), darwin : Bool) : MFunction | String
+  selected = select_function(mod, fn, syms, darwin)
+  if selected.is_a?(IselError)
+    return selected.as(IselError).message
+  end
+  mf = selected.as(MFunction)
+  allocate(mf)
+  if mf.naked
+    if mf.frame.slots.size > 0 || mf.frame.callee_saved.size > 0
+      return "#{fn.name}: a naked function holds no value in a frame slot or a callee-saved register"
+    end
+    return mf
+  end
+  lay_out(mf, aarch64_target(darwin).stack_align)
+  mf
+end
+
+# Compiles the whole module. The object is returned, or the reason compilation stopped.
+pub def compile_module(mod : Module, darwin : Bool) : ObjectFile | String
+  target = mod.target
+  desc = aarch64_target(darwin)
+  obj = ObjectFile.new(desc.object_format, target, "iyi-native")
+  if desc.darwin
+    obj.build_version = BuildVersion.new(1, 0x000E0400, 0x000E0400)
+  end
+  syms = symbol_table(mod, obj)
+  text = SectionWriter.new
+  rodata = SectionWriter.new
+  data = SectionWriter.new
+  jump_tables = SectionWriter.new
+  bss_size = 0_i64
+  mod.functions.each do |fn|
+    next if fn.declaration?
+    mf = function_mir(mod, fn, syms, darwin)
+    return mf if mf.is_a?(String)
+    declare_jump_tables(obj, mf.as(MFunction))
+    encoded = encode_function(mf.as(MFunction))
+    return "#{fn.name}: #{encoded.as(EncodeError).message}" if encoded.is_a?(EncodeError)
+    enc = encoded.as(EncodedFunction)
+    text.pad_to(4_i64)
+    base = text.append(enc.bytes, enc.relocs)
+    index = syms[fn.name]
+    place_jump_tables(obj, mf.as(MFunction), index, enc.block_offsets, jump_tables)
+    obj.symbols[index].value = base
+    obj.symbols[index].size = enc.bytes.size.to_i64
+    obj.symbols[index].section = 0
+  end
+  layout = mod.layout
+  mod.globals.each do |g|
+    next if g.tls != TlsModel::None
+    index = syms[g.name]
+    next if g.initializer.nil? && g.linkage == Linkage::External
+    align = g.alignment > 0 ? g.alignment.to_i64 : layout.abi_align(g.value_type).to_i64
+    if g.initializer.nil?
+      bss_size = ((bss_size + align - 1_i64) // align) * align
+      obj.symbols[index].section = 3
+      obj.symbols[index].value = bss_size
+      bss_size = bss_size + layout.store_size(g.value_type)
+      next
+    end
+    w = SectionWriter.new
+    message = write_initializer(layout, w, syms, g.value_type, g.initializer, 0_i64)
+    return "#{g.name}: #{message}" if message
+    # A constant that holds an address (a table of names, a vtable) needs the loader to slide each entry, and no
+    # format lets it write into read-only text or .rodata. It goes with the writable data. LLVM gives such a
+    # constant its own section (__DATA,__const, .data.rel.ro) that is protected after loading; this places it in
+    # .data, which is correct and unprotected.
+    read_only = g.constant && w.relocs.size == 0
+    target_writer = read_only ? rodata : data
+    target_writer.pad_to(align)
+    base = target_writer.append(w.bytes, w.relocs)
+    obj.symbols[index].section = read_only ? 1 : 2
+    obj.symbols[index].value = base
+    obj.symbols[index].size = layout.store_size(g.value_type)
+  end
+  obj.sections << Section.new(".text", SectionKind::Text, 4, to_bytes(text.bytes), text.bytes.size.to_i64, text.relocs)
+  obj.sections << Section.new(".rodata", SectionKind::ReadOnly, 8, to_bytes(rodata.bytes), rodata.bytes.size.to_i64, rodata.relocs)
+  obj.sections << Section.new(".data", SectionKind::Data, 8, to_bytes(data.bytes), data.bytes.size.to_i64, data.relocs)
+  obj.sections << Section.new(".bss", SectionKind::ZeroFill, 8, to_bytes([] of UInt8), bss_size, [] of Reloc)
+  if jump_tables.bytes.size > 0
+    obj.sections << Section.new(jump_table_section_name, SectionKind::ReadOnly, 8, to_bytes(jump_tables.bytes), jump_tables.bytes.size.to_i64, jump_tables.relocs)
+  end
+  # The thread-local sections follow whatever is already there: the jump tables' section holds index 4 when a
+  # function has one, so the base is counted rather than assumed.
+  tls = place_thread_locals(mod, obj, syms, desc.darwin, obj.sections.size)
+  return tls if tls.is_a?(String)
+  tls.as(Array(Section)).each do |s|
+    obj.sections << s
+  end
+  drop_unreferenced_helpers(mod, obj)
+  obj
+end
+
+# True for a library name that is libSystem on darwin: libSystem is every program's first library and carries what
+# other systems split into libc, libm, libpthread and libdl, so naming one of them loads nothing more.
+def libsystem_library?(name : String) : Bool
+  name == "System" || name == "c" || name == "m" || name == "pthread" || name == "dl"
+end
+
+# The libraries a link must load beyond libSystem: the ones the module's declarations import from (`import "Name"`,
+# a lib's @[Link] in the IR) and the ones named beside it (`extra`, the sidecar of bridged IR that carries no
+# @[Link]), each once, in first-seen order. Whether the native floor provides a name is the linker's to say.
+pub def libraries_of(mod : Module, extra : Array(String)) : Array(String)
+  names = [] of String
+  extra.each do |name|
+    names << name unless libsystem_library?(name) || names.includes?(name)
+  end
+  mod.functions.each do |fn|
+    if library = fn.import_library
+      names << library unless libsystem_library?(library) || names.includes?(library)
+    end
+  end
+  mod.globals.each do |g|
+    if library = g.import_library
+      names << library unless libsystem_library?(library) || names.includes?(library)
+    end
+  end
+  names
+end
+
+# A native program: the program's module and the runtime module each compile to an object by this backend, and
+# the linker writes the arm64 Mach-O executable from them. Nothing else takes part. A refusal or link error comes
+# back as its reason, which names the function, object, symbol or library.
+pub def link_native_program(mod : Module, runtime : Module, identifier : String, libraries : Array(String) = [] of String) : LinkedImage | String
+  program = compile_module(mod, true)
+  return program.as(String) if program.is_a?(String)
+  rt = compile_module(runtime, true)
+  return rt.as(String) if rt.is_a?(String)
+  objects = [program.as(ObjectFile), rt.as(ObjectFile)]
+  result = link(objects, LinkOptions.new(identifier, "main", libraries_of(mod, libraries), true))
+  return result.as(LinkError).message if result.is_a?(LinkError)
+  result.as(LinkedImage)
+end
+
+# Object bytes for the Mach-O writer.
+pub def macho_bytes(obj : ObjectFile) : Bytes
+  write_object(obj)
+end
+
+# The MIR as text, one instruction per line: the form the gate reads for the probe and the register homes.
+pub def dump_mfunction(mf : MFunction) : String
+  acc = "function #{mf.name}\n"
+  acc = acc + "  frame size=#{mf.frame.frame_size} outgoing=#{mf.frame.outgoing_bytes} saves=#{mf.frame.saves_offset} slots=#{mf.frame.slots.size}\n"
+  mf.blocks.each do |b|
+    acc = acc + "block #{b.index} #{b.name}\n"
+    b.insts.each do |inst|
+      acc = acc + "  #{dump_inst(mf.isa, inst)}\n"
+    end
+  end
+  mf.jump_tables.each_with_index do |t, k|
+    targets = t.targets.map { |b| b.to_s }.join(",")
+    acc = acc + "jump table #{k} entries=#{t.targets.size} low=#{t.low} targets=#{targets}\n"
+  end
+  acc
+end
+
+def dump_operand(op : Operand) : String
+  if op.kind == OperandKind::Virtual
+    return "v#{op.reg}"
+  end
+  if op.kind == OperandKind::FrameSlot
+    return "slot#{op.reg}+#{op.imm}"
+  end
+  reg_name(op.reg)
+end
+
+def dump_inst(isa : Int32, inst : MInst) : String
+  parts = [] of String
+  inst.defs.each do |d|
+    parts << dump_operand(d)
+  end
+  inst.uses.each do |u|
+    parts << dump_operand(u)
+  end
+  text = "#{op_name(isa, inst.opcode)}/#{inst.size}"
+  text = text + "f" if inst.fp
+  text = text + " " + parts.join(", ") unless parts.empty?
+  text = text + " #imm=#{inst.imm}" if inst.imm != 0_i64
+  text = text + " target=#{inst.target}" if inst.target >= 0
+  text = text + " table=#{inst.table}" if inst.table >= 0
+  text = text + " sym=#{inst.sym}" if inst.sym >= 0
+  unless inst.clobbers.empty?
+    names = [] of String
+    inst.clobbers.each do |r|
+      names << reg_name(r)
+    end
+    text = text + " clobbers=" + names.join(",")
+  end
+  text
+end

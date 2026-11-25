@@ -1,0 +1,31 @@
+; iyi-ir 1
+module "frame64k"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [8 x i8] c"%d %d\0A\00"
+
+; A frame of 64 KiB: the prologue must touch every page before the buffer is used.
+define internal i32 @big(i32 %seed) {
+entry:
+  %buf = alloca [65536 x i8], align 16
+  %first = getelementptr [65536 x i8], ptr %buf, i64 0, i64 0
+  %last = getelementptr [65536 x i8], ptr %buf, i64 0, i64 65535
+  %s8 = trunc i32 %seed to i8
+  store i8 %s8, ptr %first, align 1
+  %s9 = add i8 %s8, 5
+  store i8 %s9, ptr %last, align 1
+  %a = load i8, ptr %first, align 1
+  %b = load i8, ptr %last, align 1
+  %ae = sext i8 %a to i32
+  %be = sext i8 %b to i32
+  %t = add i32 %ae, %be
+  ret i32 %t
+}
+
+define i32 @main() {
+entry:
+  %v = call i32 (i32) @big(i32 9)
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i32 %v, i32 42)
+  ret i32 0
+}

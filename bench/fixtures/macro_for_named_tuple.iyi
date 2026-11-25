@@ -1,0 +1,5 @@
+macro fields(nt)
+  {% for key, value, i in nt %}{{i}} {{key.id}}={{value}}; {% end %}
+end
+
+fields({x: 10, y: 20})

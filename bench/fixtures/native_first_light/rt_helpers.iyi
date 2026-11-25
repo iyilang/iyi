@@ -1,0 +1,183 @@
+module rt_helpers
+
+import std/int
+
+# The same program as rt_helpers.ir, with the helpers' results computed in the language itself. The helpers' defined
+# behaviour is kept: a division by zero gives 0, and the signed minimum over minus one wraps (quotient the minimum,
+# remainder 0). Memory operations are carried out on a 32-element array, with the overlap moves done through a copy.
+
+MIN = -170141183460469231731687303715884105728_i128
+
+def show(x : Int128) : Nil
+  puts "#{(x >> 64).unsafe_to_i64} #{x.unsafe_to_u64}"
+end
+
+def dump(buf : Array(Int64)) : Nil
+  line = ""
+  buf.each do |b|
+    line = line + "#{b} "
+  end
+  puts line
+end
+
+def copy_bytes(buf : Array(Int64), dst : Int32, src : Int32, n : Int32) : Nil
+  tmp = [] of Int64
+  i = 0
+  while i < n
+    tmp << buf[src + i]
+    i = i + 1
+  end
+  i = 0
+  while i < n
+    buf[dst + i] = tmp[i]
+    i = i + 1
+  end
+end
+
+def fill_bytes(buf : Array(Int64), dst : Int32, value : Int64, n : Int32) : Nil
+  i = 0
+  while i < n
+    buf[dst + i] = value & 255_i64
+    i = i + 1
+  end
+end
+
+def sdiv(a : Int128, b : Int128) : Int128
+  return a if a == MIN && b == -1_i128
+  return 0_i128 if b == 0_i128
+  a // b
+end
+
+def srem(a : Int128, b : Int128) : Int128
+  return 0_i128 if a == MIN && b == -1_i128
+  return 0_i128 if b == 0_i128
+  a % b
+end
+
+def udiv(a : Int128, b : Int128) : Int128
+  return 0_i128 if b == 0_i128
+  (a.unsafe_to_u128 // b.unsafe_to_u128).unsafe_to_i128
+end
+
+def urem(a : Int128, b : Int128) : Int128
+  return 0_i128 if b == 0_i128
+  (a.unsafe_to_u128 % b.unsafe_to_u128).unsafe_to_i128
+end
+
+def main : Nil
+  buf = [] of Int64
+  i = 0
+  while i < 32
+    buf << (i + 1).to_i64
+    i = i + 1
+  end
+  dump(buf)
+  copy_bytes(buf, 0, 16, 16)
+  dump(buf)
+  copy_bytes(buf, 0, 0, 0)
+  dump(buf)
+  copy_bytes(buf, 8, 24, 1)
+  dump(buf)
+  copy_bytes(buf, 2, 20, 9)
+  dump(buf)
+  copy_bytes(buf, 0, 23, 9)
+  dump(buf)
+  copy_bytes(buf, 5, 0, 20)
+  dump(buf)
+  copy_bytes(buf, 0, 5, 20)
+  dump(buf)
+  copy_bytes(buf, 4, 4, 12)
+  dump(buf)
+  copy_bytes(buf, 3, 0, 0)
+  dump(buf)
+  copy_bytes(buf, 1, 0, 31)
+  dump(buf)
+  fill_bytes(buf, 3, 511, 9)
+  dump(buf)
+  fill_bytes(buf, 20, 65, 0)
+  dump(buf)
+  fill_bytes(buf, 0, 0, 32)
+  dump(buf)
+  show(sdiv(-170141183460469231731687303715884105728_i128, -1_i128))
+  show(udiv(-170141183460469231731687303715884105728_i128, -1_i128))
+  show(srem(-170141183460469231731687303715884105728_i128, -1_i128))
+  show(urem(-170141183460469231731687303715884105728_i128, -1_i128))
+  show(sdiv(-170141183460469231731687303715884105728_i128, 1_i128))
+  show(udiv(-170141183460469231731687303715884105728_i128, 1_i128))
+  show(srem(-170141183460469231731687303715884105728_i128, 1_i128))
+  show(urem(-170141183460469231731687303715884105728_i128, 1_i128))
+  show(sdiv(-170141183460469231731687303715884105728_i128, 2_i128))
+  show(udiv(-170141183460469231731687303715884105728_i128, 2_i128))
+  show(srem(-170141183460469231731687303715884105728_i128, 2_i128))
+  show(urem(-170141183460469231731687303715884105728_i128, 2_i128))
+  show(sdiv(-170141183460469231731687303715884105728_i128, -170141183460469231731687303715884105728_i128))
+  show(udiv(-170141183460469231731687303715884105728_i128, -170141183460469231731687303715884105728_i128))
+  show(srem(-170141183460469231731687303715884105728_i128, -170141183460469231731687303715884105728_i128))
+  show(urem(-170141183460469231731687303715884105728_i128, -170141183460469231731687303715884105728_i128))
+  show(sdiv(170141183460469231731687303715884105727_i128, -1_i128))
+  show(udiv(170141183460469231731687303715884105727_i128, -1_i128))
+  show(srem(170141183460469231731687303715884105727_i128, -1_i128))
+  show(urem(170141183460469231731687303715884105727_i128, -1_i128))
+  show(sdiv(170141183460469231731687303715884105727_i128, 1_i128))
+  show(udiv(170141183460469231731687303715884105727_i128, 1_i128))
+  show(srem(170141183460469231731687303715884105727_i128, 1_i128))
+  show(urem(170141183460469231731687303715884105727_i128, 1_i128))
+  show(sdiv(170141183460469231731687303715884105727_i128, 18446744073709551616_i128))
+  show(udiv(170141183460469231731687303715884105727_i128, 18446744073709551616_i128))
+  show(srem(170141183460469231731687303715884105727_i128, 18446744073709551616_i128))
+  show(urem(170141183460469231731687303715884105727_i128, 18446744073709551616_i128))
+  show(sdiv(18446744073709551616_i128, 3_i128))
+  show(udiv(18446744073709551616_i128, 3_i128))
+  show(srem(18446744073709551616_i128, 3_i128))
+  show(urem(18446744073709551616_i128, 3_i128))
+  show(sdiv(-7_i128, 2_i128))
+  show(udiv(-7_i128, 2_i128))
+  show(srem(-7_i128, 2_i128))
+  show(urem(-7_i128, 2_i128))
+  show(sdiv(7_i128, -2_i128))
+  show(udiv(7_i128, -2_i128))
+  show(srem(7_i128, -2_i128))
+  show(urem(7_i128, -2_i128))
+  show(sdiv(-7_i128, -2_i128))
+  show(udiv(-7_i128, -2_i128))
+  show(srem(-7_i128, -2_i128))
+  show(urem(-7_i128, -2_i128))
+  show(sdiv(5_i128, -1_i128))
+  show(udiv(5_i128, -1_i128))
+  show(srem(5_i128, -1_i128))
+  show(urem(5_i128, -1_i128))
+  show(sdiv(1_i128, -1_i128))
+  show(udiv(1_i128, -1_i128))
+  show(srem(1_i128, -1_i128))
+  show(urem(1_i128, -1_i128))
+  show(sdiv(0_i128, 5_i128))
+  show(udiv(0_i128, 5_i128))
+  show(srem(0_i128, 5_i128))
+  show(urem(0_i128, 5_i128))
+  show(sdiv(1267650600228229401496703205376_i128, 8589934592_i128))
+  show(udiv(1267650600228229401496703205376_i128, 8589934592_i128))
+  show(srem(1267650600228229401496703205376_i128, 8589934592_i128))
+  show(urem(1267650600228229401496703205376_i128, 8589934592_i128))
+  show(sdiv(-170141183460469231731687303715884105728_i128, 9223372036854775808_i128))
+  show(udiv(-170141183460469231731687303715884105728_i128, 9223372036854775808_i128))
+  show(srem(-170141183460469231731687303715884105728_i128, 9223372036854775808_i128))
+  show(urem(-170141183460469231731687303715884105728_i128, 9223372036854775808_i128))
+  show(sdiv(12345678901234567890123_i128, 7_i128))
+  show(udiv(12345678901234567890123_i128, 7_i128))
+  show(srem(12345678901234567890123_i128, 7_i128))
+  show(urem(12345678901234567890123_i128, 7_i128))
+  show(sdiv(-12345678901234567890123_i128, 1000000007_i128))
+  show(udiv(-12345678901234567890123_i128, 1000000007_i128))
+  show(srem(-12345678901234567890123_i128, 1000000007_i128))
+  show(urem(-12345678901234567890123_i128, 1000000007_i128))
+  show(sdiv(170141183460469231731687303715884105727_i128, 18446744073709551615_i128))
+  show(udiv(170141183460469231731687303715884105727_i128, 18446744073709551615_i128))
+  show(srem(170141183460469231731687303715884105727_i128, 18446744073709551615_i128))
+  show(urem(170141183460469231731687303715884105727_i128, 18446744073709551615_i128))
+  show(sdiv(-1_i128, -1_i128))
+  show(udiv(-1_i128, -1_i128))
+  show(srem(-1_i128, -1_i128))
+  show(urem(-1_i128, -1_i128))
+end
+
+main

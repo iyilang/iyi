@@ -1,0 +1,84 @@
+; iyi-ir 1
+module "rmw"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [31 x i8] c"%d %d %d %d %d %d %d %d %d %d\0A\00"
+@c64 = internal global i64 10, align 8
+@c32 = internal global i32 -5, align 4
+
+; The five operations the lowering adds, on a 64-bit cell and on a 32-bit cell where signedness is visible.
+define i32 @main() {
+entry:
+  %o1 = atomicrmw nand ptr @c64, i64 12, align 8 seq_cst
+  %o2 = atomicrmw max ptr @c64, i64 5, align 8 acq_rel
+  %o3 = atomicrmw min ptr @c64, i64 -2, align 8 monotonic
+  %o4 = atomicrmw umax ptr @c64, i64 7, align 8 release
+  %o5 = atomicrmw umin ptr @c64, i64 7, align 8 acquire
+  %fin = load i64, ptr @c64, align 8 atomic seq_cst
+  %p1 = atomicrmw umax ptr @c32, i32 3, align 4 seq_cst
+  %p2 = atomicrmw max ptr @c32, i32 3, align 4 seq_cst
+  %p3 = atomicrmw min ptr @c32, i32 -7, align 4 seq_cst
+  %f32 = load i32, ptr @c32, align 4 atomic seq_cst
+  %a1 = trunc i64 %o1 to i32
+  %a2 = trunc i64 %o2 to i32
+  %a3 = trunc i64 %o3 to i32
+  %a4 = trunc i64 %o4 to i32
+  %a5 = trunc i64 %o5 to i32
+  %a6 = trunc i64 %fin to i32
+  %w = call i32 (ptr, ...) @printf(ptr @fmt, i32 %a1, i32 %a2, i32 %a3, i32 %a4, i32 %a5, i32 %a6, i32 %p1, i32 %p2, i32 %p3, i32 %f32)
+  ret i32 0
+}
+
+; The same operation under two orderings: the lowering selects the same instructions for both.
+define internal i64 @ord_seq() {
+entry:
+  %o = atomicrmw add ptr @c64, i64 1, align 8 seq_cst
+  ret i64 %o
+}
+
+define internal i64 @ord_mono() {
+entry:
+  %o = atomicrmw add ptr @c64, i64 1, align 8 monotonic
+  ret i64 %o
+}
+
+define internal i64 @ord_acq() {
+entry:
+  %o = atomicrmw add ptr @c64, i64 1, align 8 acquire
+  ret i64 %o
+}
+
+define internal i64 @ord_rel() {
+entry:
+  %o = atomicrmw add ptr @c64, i64 1, align 8 release
+  ret i64 %o
+}
+
+define internal i64 @ord_cas_mono() {
+entry:
+  %p = cmpxchg ptr @c64, i64 1, i64 2, align 8 monotonic monotonic
+  %o = extractvalue { i64, i1 } %p, 0
+  ret i64 %o
+}
+
+define internal i64 @ord_cas_acq() {
+entry:
+  %p = cmpxchg ptr @c64, i64 1, i64 2, align 8 acquire monotonic
+  %o = extractvalue { i64, i1 } %p, 0
+  ret i64 %o
+}
+
+define internal i64 @ord_cas_rel() {
+entry:
+  %p = cmpxchg ptr @c64, i64 1, i64 2, align 8 release monotonic
+  %o = extractvalue { i64, i1 } %p, 0
+  ret i64 %o
+}
+
+define internal i64 @ord_cas_seq() {
+entry:
+  %p = cmpxchg ptr @c64, i64 1, i64 2, align 8 seq_cst monotonic
+  %o = extractvalue { i64, i1 } %p, 0
+  ret i64 %o
+}

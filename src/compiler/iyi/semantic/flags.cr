@@ -77,6 +77,7 @@ class Iyi::Program
 
     flags.add "unix" if target.unix?
     flags.add "win32" if target.win32?
+    flags.add "wasi" if target.wasi?
 
     flags.add "darwin" if target.macos?
     if target.freebsd?

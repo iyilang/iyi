@@ -1,0 +1,15 @@
+; iyi-ir 1
+module "narrow_argext"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+declare external i64 @__fixture_argbits(i8)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+@cell = internal global i8 -1, align 1
+define i32 @main() {
+entry:
+  %v = load i8, ptr @cell, align 1
+  %got = call i64 (i8) @__fixture_argbits(zeroext i8 %v)
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i64 %got)
+  ret i32 0
+}

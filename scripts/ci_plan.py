@@ -67,10 +67,10 @@ BENCH = ROOT / "bench"
 # where it has one. `*`, `${VAR}` and `$VAR` in it stand for any name, which
 # is how `std_siblings.sh` finds the module exercises and `module_test.sh`
 # names a module's test.
-FILE_NAME = re.compile(r"((?:bench[/\\])?)([A-Za-z0-9_*${}]+\.(?:sh|py|iyi|eiy|cr|c|go))\b")
+FILE_NAME = re.compile(r"((?:bench[/\\])?)([A-Za-z0-9_*${}]+\.(?:sh|py|iyi|eiy|cr|c|go|mjs))\b")
 # What can run, build or read another file here: a script, and a program
-# that reads its own template or fixture. Their comments start with `#`.
-CALLER_SUFFIXES = (".sh", ".py", ".iyi")
+# that reads its own template or fixture.
+CALLER_SUFFIXES = (".sh", ".py", ".iyi", ".mjs")
 VARIABLE = re.compile(r"\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*")
 
 # The jobs a pull request runs whatever it touches. `docs` and `vscode` take
@@ -86,7 +86,7 @@ PORT = ["port", "port-darwin", "port-windows"]
 # The self-host gates compile and check the compiler written in iyi
 # (`src/compiler/`), and the bench files and fixtures they read. A change to
 # any of those selects all three hosts, whatever else it touches.
-SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows"]
+SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"]
 # Not selected by this script: `plan` is the script, `result` reads every
 # selected job's outcome, and `release` gates itself on a `v*` tag.
 NOT_PLANNED = {"plan", "result", "release"}
@@ -210,8 +210,8 @@ def is_doc(path):
 
 
 def is_selfhost(path):
-    return ((path.startswith("src/compiler/") and path.endswith(".iyi"))
-            or path.startswith(("bench/selfhost_", "bench/native_", "bench/fixtures/"))
+    return ((path.startswith("src/compiler/") and path.endswith((".iyi", ".ir")))
+            or path.startswith(("bench/selfhost_", "bench/native_", "bench/macro_", "bench/fixtures/"))
             or path == "bench/lib/host.sh")
 
 def code(text):

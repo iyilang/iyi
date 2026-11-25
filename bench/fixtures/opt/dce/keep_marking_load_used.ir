@@ -1,0 +1,11 @@
+; iyi-ir 1
+source_filename = "keep_marking_load_used"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+@__iyi_marking = external global i8
+
+define internal i8 @keep_marking_load_used() {
+entry:
+  %value = load i8, ptr @__iyi_marking, align 1
+  ret i8 %value
+}

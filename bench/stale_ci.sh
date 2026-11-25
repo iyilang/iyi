@@ -1175,7 +1175,12 @@ print('git-diff-check PASSED: all cached hits and misses respected git diff.')
 test_comparator_negatives() {
   echo "== Running CI evidence comparator negative and discrimination fixtures =="
   "$PY" "$REPO/bench/test_frames_equivalent.py"
-  "$PY" -c "
+  # A file, not `python -c "..."`: at 31,688 bytes the program is within a
+  # kilobyte of the 32,767 characters a Windows process may be given.
+  local prog
+  prog="$(mktemp /tmp/comparator-negatives.XXXXXX)"
+  [ "$WINDOWS" -eq 0 ] || prog="$(cygpath -m "$prog")"
+  cat > "$prog" <<'PYEOF'
 import os, sys, json, tempfile, subprocess, shutil
 repo = sys.argv[1]
 stale_ci = os.path.join(repo, 'bench/stale_ci.sh')
@@ -1195,7 +1200,7 @@ def assert_negative(subcmd, args, expected_msg, cwd=None):
     res = run_cmd(subcmd, args, cwd=cwd)
     combined = res.stdout + res.stderr
     assert res.returncode == 1, f'{subcmd} expected exit 1, got {res.returncode}. Output:\n{combined}'
-    assert expected_msg in combined, f'{subcmd} expected \"{expected_msg}\" in output. Output:\n{combined}'
+    assert expected_msg in combined, f'{subcmd} expected "{expected_msg}" in output. Output:\n{combined}'
 
 def assert_positive(subcmd, args, cwd=None):
     res = run_cmd(subcmd, args, cwd=cwd)
@@ -1729,7 +1734,11 @@ assert_negative('git-diff-check', ['--master-snapshot', snap_gd, '--cached-json'
 
 shutil.rmtree(work, ignore_errors=True)
 print('test-comparator-negatives PASSED: all comparator negative and discrimination fixtures verified.')
-" "$REPO"
+PYEOF
+  local status=0
+  "$PY" "$prog" "$REPO" || status=$?
+  rm -f "$prog"
+  return "$status"
 }
 
 # 9. rg9: deterministic CallPathFp across processes and preanalysed prelude

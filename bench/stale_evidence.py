@@ -93,6 +93,12 @@ def safe_item_dir(stage_dir: str | None, item_name: str) -> str | None:
     norm = os.path.normpath(item_name)
     if os.path.isabs(norm) or norm.startswith("..") or norm == ".":
         raise ValueError(f"Path traversal detected in selector/probe: {item_name!r}")
+    # One spelling of the stage directory for both comparisons: the item path
+    # below is `abspath`-normalised (backslashes on Windows), and
+    # `commonpath` returns its answer in that spelling, so a caller's
+    # `os.path.join(work, "rg2")` with a forward-slash `work` (Git bash's) read
+    # as a directory that does not contain its own item.
+    stage_dir = os.path.abspath(stage_dir)
     item_dir = os.path.abspath(os.path.join(stage_dir, norm))
     stage_dir_real = os.path.realpath(stage_dir)
     # Check lexical containment

@@ -28,7 +28,11 @@ import compiler/semantic/new::{define_new_methods}
 module BenchSelfhostSemanticCallsExercise
   def self.search_path : Array(String)
     text = ENV["IYI_PATH"]? || ""
-    text.split(":").select { |entry| !entry.empty? }
+    {% if flag?(:win32) %}
+      text.split(";").select { |entry| !entry.empty? }
+    {% else %}
+      text.split(":").select { |entry| !entry.empty? }
+    {% end %}
   end
 
   # One match as the oracle writes it: owner, name, restrictions, return.

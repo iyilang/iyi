@@ -95,12 +95,29 @@ echo "  built: oracle, port driver"
 echo "== 1b. The absolute-path rule: a drive path is read as given, never prefixed with the working directory"
 ABS_EXPECT="$WORK/absolute_path.expect"
 printf '%s\n' "/x => true" "bench/x => false" "D:/a/b => true" 'D:\a => true' "d:/a => true" "D:x => false" "C: => false" " => false" "9:/a => false" "/ => true" > "$ABS_EXPECT"
-"$WORK/port$EXE" --absolute-path "/x" "bench/x" "D:/a/b" 'D:\a' "d:/a" "D:x" "C:" "" "9:/a" "/" > "$WORK/absolute_path.out" 2>&1
+MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' "$WORK/port$EXE" --absolute-path "/x" "bench/x" "D:/a/b" 'D:\a' "d:/a" "D:x" "C:" "" "9:/a" "/" > "$WORK/absolute_path.out" 2>&1
 if cmp -s "$ABS_EXPECT" "$WORK/absolute_path.out"; then
   echo "  absolute path rule: 10 of 10 cases"
 else
   echo "  absolute path rule: DIVERGED from the expected answers"
   diff -u "$ABS_EXPECT" "$WORK/absolute_path.out"
+  status=1
+fi
+
+echo "== 1c. IYI_PATH preserves drive letters and splits host path lists"
+if [ "$HOST_OS" = windows ]; then
+  path_list='C:/first;D:/second'
+  printf '%s\n' 'C:/first' 'D:/second' > "$WORK/search_path.expect"
+else
+  path_list='/first:/second'
+  printf '%s\n' '/first' '/second' > "$WORK/search_path.expect"
+fi
+IYI_PATH="$path_list" "$PORT" --search-path > "$WORK/search_path.out" 2>&1
+if cmp -s "$WORK/search_path.expect" "$WORK/search_path.out"; then
+  echo "  search path: both entries preserved"
+else
+  echo "  search path: DIVERGED from the expected entries"
+  diff -u "$WORK/search_path.expect" "$WORK/search_path.out"
   status=1
 fi
 

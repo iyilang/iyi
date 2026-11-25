@@ -700,7 +700,7 @@ else
   ln -s ../nowhere "$CONF/layout/app/dangling"
   CONF_LINKS=yes
 fi
-CONF_L="$(cd "$CONF/layout" && pwd -P)"
+CONF_L="$(native_path "$(cd "$CONF/layout" && pwd -P)")"
 export IYI_MACRO_CONFINE_SET=gate-value
 unset IYI_MACRO_CONFINE_UNSET
 cat <<'CONFINE_CASES' > "$CONF/cases.manifest"
@@ -941,8 +941,25 @@ for cf in "$CONF"/cases/*.case; do
   name="$(basename "$cf" .case)"
   case_native="$(native_path "$cf")"
   conf_cases=$((conf_cases + 1))
-  "$WORK/dump_hosted$EXE" --confine "$case_native" 2> "$CONF/hosted/$name.err" | confine_normal > "$CONF/hosted/$name.out" || true
-  "$WORK/exercise$EXE" --confine "$case_native" 2> "$CONF/port/$name.err" | confine_normal > "$CONF/port/$name.out" || true
+  if ! "$WORK/dump_hosted$EXE" --confine "$case_native" > "$CONF/hosted/$name.raw" 2> "$CONF/hosted/$name.err"; then
+    echo "  HOSTED ORACLE FAILED: $name"
+    cat "$CONF/hosted/$name.err"
+    status=1
+    continue
+  fi
+  if ! "$WORK/exercise$EXE" --confine "$case_native" > "$CONF/port/$name.raw" 2> "$CONF/port/$name.err"; then
+    echo "  PORT FAILED: $name"
+    cat "$CONF/port/$name.err"
+    status=1
+    continue
+  fi
+  confine_normal < "$CONF/hosted/$name.raw" > "$CONF/hosted/$name.out"
+  confine_normal < "$CONF/port/$name.raw" > "$CONF/port/$name.out"
+  if [ ! -s "$CONF/hosted/$name.out" ] || [ ! -s "$CONF/port/$name.out" ]; then
+    echo "  EMPTY CONFINEMENT RESULT: $name"
+    status=1
+    continue
+  fi
   case "$name" in
     no-context-read|no-context-env)
       cp "$CONF/port/$name.out" "$CONF/expected/$name.out"

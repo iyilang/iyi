@@ -548,7 +548,11 @@ emit_defer_and_chain
   # The search path the compiler reads from IYI_PATH, split as the compiler splits it.
   def self.search_path_from_env : Array(String)
     raw = ENV["IYI_PATH"]? || ""
-    raw.split(':')
+    {% if flag?(:win32) %}
+      raw.split(';')
+    {% else %}
+      raw.split(':')
+    {% end %}
   end
 
   # The confinement a fixture is expanded under: the fixture's own directory is

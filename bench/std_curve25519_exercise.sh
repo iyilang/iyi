@@ -445,7 +445,7 @@ print(f"  cryptography (OpenSSL): x25519 {best_of(lambda: mine.exchange(peer))} 
 PY
   fi
 else
-  echo "  the timing did not build or run: $(tail -1 "$WORK/cost.build.log" "$WORK/cost.out" 2>/dev/null | tail -1)"
+  echo "  the timing did not build or run: $(tail -q -n 1 "$WORK/cost.build.log" "$WORK/cost.out" 2>/dev/null | tail -1)"
   status=1
 fi
 

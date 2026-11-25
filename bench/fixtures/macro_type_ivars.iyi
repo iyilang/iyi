@@ -1,0 +1,7 @@
+# ivar: left Int32
+# ivar: right Int64
+macro ivar_facts
+  {% for ivar in @type.instance_vars %}{{ ivar.name }}:{{ ivar.type }};{% end %}
+end
+
+ivar_facts

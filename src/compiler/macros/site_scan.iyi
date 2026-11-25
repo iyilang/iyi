@@ -1,0 +1,174 @@
+module compiler/macros/site_scan
+
+import compiler/syntax/ast::{ASTNode, Call, ClassDef, Def, InstanceVar, Macro, MacroExpression, MacroFor, MacroIf, MacroVerbatim, ModuleDef}
+import compiler/syntax/visitor::{Visitor}
+
+# A macro site of a file and where it is written: `top` (the top of the file),
+# `class` (a class or module body), `def:<name>` (a def body), or `macro` (the
+# body of a macro definition, which expands when that macro is called).
+#
+# `type_name` is the qualified name of the class the site is written in, or ""
+# at the top of the file. `generic` is set when that class has type variables
+# (`class Array(T)`) or is a module: the port does not answer `@type` there
+# without the type model, so such a site is `needs-context`.
+pub class MacroSiteRef
+  property node : ASTNode
+  property context : String
+  property type_name : String
+  property generic : Bool
+
+  def initialize(@node : ASTNode, @context : String, @type_name : String, @generic : Bool)
+  end
+end
+
+# Finds the macro sites of a parsed file in source order. A site is one `{% if %}`,
+# `{% for %}`, `{{ }}` or `verbatim` node that is not inside another site: the
+# hosted compiler expands a site as one unit, so the sites in its branches are
+# not listed. The bodies of defs, classes, modules and macros are searched;
+# default argument values are not.
+pub class MacroSiteScan < Visitor
+  property context : String
+  property sites : Array(MacroSiteRef)
+  property type_name : String
+  property generic : Bool
+
+  def initialize(@context : String, @sites : Array(MacroSiteRef), @type_name : String = "", @generic : Bool = false)
+  end
+
+  # Every site of a parsed file, in source order.
+  def self.scan(root : ASTNode) : Array(MacroSiteRef)
+    sites = [] of MacroSiteRef
+    root.accept(MacroSiteScan.new("top", sites))
+    sites
+  end
+
+  # Whether a site needs the type or def it is written in to expand. It does when
+  # it reads `@top_level`, `@def` or `@caller`, or reads `@type` in a way the port
+  # does not answer from the enclosing class's name alone. A site that reads
+  # `@type` only through `name`, `stringify` or `id`, inside a plain class, is
+  # answered from that name: those are the sites compared.
+  def self.needs_context?(node : ASTNode, type_name : String, generic : Bool) : Bool
+    probe = MacroContextProbe.new
+    node.accept(probe)
+    return false unless probe.found
+    !(probe.names_only? && !type_name.empty? && !generic)
+  end
+
+  # Whether a method called on `@type` is answered from the enclosing class's
+  # name. Every other method on `@type` needs the type model. `instance_vars` is
+  # not answered: the hosted compiler's refusal of it is reported at the method
+  # name, which the parser does not record on a call with a receiver, so such a
+  # site is left `needs-context` on both sides rather than compared by position.
+  def self.type_method_answered?(name : String) : Bool
+    name == "name" || name == "stringify" || name == "id"
+  end
+
+  # The qualified name of a class nested in the one this scan is in.
+  def qualified(names : Array(String)) : String
+    if @type_name.empty?
+      names.join("::")
+    else
+      "#{@type_name}::#{names.join("::")}"
+    end
+  end
+
+  def visit(node : MacroIf) : Bool
+    add_site(node)
+    false
+  end
+
+  def visit(node : MacroFor) : Bool
+    add_site(node)
+    false
+  end
+
+  def visit(node : MacroExpression) : Bool
+    add_site(node)
+    false
+  end
+
+  def visit(node : MacroVerbatim) : Bool
+    add_site(node)
+    false
+  end
+
+  def visit(node : Macro) : Bool
+    scan_body("macro", node.body, @type_name, @generic)
+    false
+  end
+
+  def visit(node : Def) : Bool
+    scan_body("def:#{node.name}", node.body, @type_name, @generic)
+    false
+  end
+
+  def visit(node : ClassDef) : Bool
+    scan_body("class", node.body, qualified(node.name.names), type_vars_generic?(node.type_vars))
+    false
+  end
+
+  # A module is `generic`: its `@type` is not a class, and the port answers
+  # nothing about it from the name.
+  def visit(node : ModuleDef) : Bool
+    scan_body("class", node.body, qualified(node.name.names), true)
+    false
+  end
+
+  def type_vars_generic?(type_vars : Array(String)?) : Bool
+    if tv = type_vars
+      !tv.empty?
+    else
+      false
+    end
+  end
+
+  def add_site(node : ASTNode) : Nil
+    @sites << MacroSiteRef.new(node, @context, @type_name, @generic)
+  end
+
+  def scan_body(context : String, body : ASTNode, type_name : String, generic : Bool) : Nil
+    body.accept(MacroSiteScan.new(context, @sites, type_name, generic))
+  end
+end
+
+# Finds a read of `@type`, `@top_level`, `@def` or `@caller` in a site, and
+# whether every read of `@type` is a call the port answers from the name.
+class MacroContextProbe < Visitor
+  getter found : Bool
+  getter type_reads : Int32
+  getter type_calls : Int32
+  getter other_reads : Bool
+
+  def initialize
+    @found = false
+    @type_reads = 0
+    @type_calls = 0
+    @other_reads = false
+  end
+
+  # True when the site reads no context but `@type`, and every read of `@type`
+  # is a call of a method the port answers from the name.
+  def names_only? : Bool
+    !@other_reads && @type_reads == @type_calls
+  end
+
+  def visit(node : InstanceVar) : Bool
+    if node.name == "@type"
+      @found = true
+      @type_reads = @type_reads + 1
+    elsif node.name == "@top_level" || node.name == "@def" || node.name == "@caller"
+      @found = true
+      @other_reads = true
+    end
+    true
+  end
+
+  def visit(node : Call) : Bool
+    if obj = node.obj
+      if obj.is_a?(InstanceVar) && obj.as(InstanceVar).name == "@type" && MacroSiteScan.type_method_answered?(node.name)
+        @type_calls = @type_calls + 1
+      end
+    end
+    true
+  end
+end

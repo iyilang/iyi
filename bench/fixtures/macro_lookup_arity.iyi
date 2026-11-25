@@ -1,0 +1,9 @@
+macro pick(first, second)
+  puts "two"
+end
+
+macro pick(first)
+  puts "one"
+end
+
+pick(1)

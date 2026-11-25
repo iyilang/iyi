@@ -3,10 +3,9 @@
 #   selfhost_semantic_declarations_oracle <file.iyi>
 #   selfhost_semantic_declarations_oracle --initial
 #
-# Loads the file through the compile's own front end, bare (no prelude), together
-# with the closure of what it imports and requires: each imported file is read,
-# parsed and declared by the same top-level pass a build runs, with the search
-# path IYI_PATH. Then it prints one text dump of the declarations the file itself
+# Fixture comparisons are bare. Corpus comparisons load the prelude like a
+# build, or compare the prelude itself without loading its files twice. Imports
+# and requires are resolved through IYI_PATH. Then it prints the declarations the file itself
 # makes: its top-level defs, then each user type with its nested types, defs and
 # constants. A type or a def is printed when its location is the file, so what an
 # imported file declares is not repeated here. The port's dump prints the same
@@ -17,13 +16,21 @@
 require "compiler/requires"
 
 class Iyi::Compiler
-  # iyi: the entry file as a build reads it, bare, in iyi's library (the prelude
-  # name selects it, so `import std/x` is iyi's own). `parse` is private to the
-  # compiler, so this reaches it from inside the class, as the typed oracle does.
+  # Parse the same prelude and entry that a build analyses. Bare mode keeps the
+  # fixture comparisons independent of the prelude.
   def declarations_program(source : Iyi::Compiler::Source) : {Program, ASTNode}
     self.prelude = "iyi/prelude"
     program = new_program([source])
-    {program, parse(program, source)}
+    node = case ENV["IYI_DECLARATION_MODE"]?
+           when "entry"
+             parse(program, [source])
+           when "prelude"
+             location = Iyi::Location.new(program.filename, 1, 1)
+             program.normalize(Iyi::Expressions.new([Iyi::Require.new(prelude).tap(&.iyi_prelude=(true)).at(location)] of Iyi::ASTNode))
+           else
+             parse(program, source)
+           end
+    {program, node}
   end
 end
 
@@ -170,10 +177,15 @@ end
 
 def dump_declarations(node : Iyi::ASTNode, io : IO, program : Iyi::Program, entry : String?, typed : Bool = false)
   initial_types = Iyi::Program.new.types.keys.to_set
-  visitor = Iyi::TopLevelVisitor.new(program)
-  node.accept(visitor)
-  # The hosted type declaration pass: explicit and guessed instance variables.
-  Iyi::TypeDeclarationProcessor.new(program).process(node)
+  if ENV["IYI_DECLARATION_MODE"]?
+    # Imports, generated constructors and type declarations must be processed
+    # in the same order as the hosted build, not a partial visitor walk.
+    node, _processor = program.top_level_semantic(node)
+  else
+    visitor = Iyi::TopLevelVisitor.new(program)
+    node.accept(visitor)
+    Iyi::TypeDeclarationProcessor.new(program).process(node)
+  end
 
   if pdefs = program.defs
     top_defs = [] of Iyi::Def

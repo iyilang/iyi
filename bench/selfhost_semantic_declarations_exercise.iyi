@@ -12,10 +12,10 @@ import compiler/types/types::{GenericClassInstanceType, VirtualType}
 #   selfhost_semantic_declarations_exercise --initial
 #   selfhost_semantic_declarations_exercise --chain <file.iyi>
 #
-# Loads the file through the port's top-level pass, bare (no prelude), with the
-# closure of what it imports and requires: each imported file is read, parsed and
-# declared into the same program. The search path is IYI_PATH, the one the oracle
-# reads. It prints the declarations the file itself makes, the same form the oracle
+# Fixtures run bare. Corpus comparisons load the prelude before the entry,
+# or load the prelude alone when the entry belongs to it. Each imported file is
+# declared into the same program. The search path is IYI_PATH, as for the oracle.
+# It prints the declarations the file itself makes, the same form the oracle
 # prints for the same file. `--initial` dumps the built-in types a new program holds.
 # `--chain` prints the parent chain of a fixed list of types, to a fixed depth.
 module BenchSelfhostSemanticDeclarationsExercise
@@ -69,14 +69,27 @@ module BenchSelfhostSemanticDeclarationsExercise
     parser = Parser.new(src, entry)
     node = parser.parse
     prog = SemanticProgram.new
-    prog.normalizer.macro_flags = MacroTargetFlags.host((ENV["IYI_DECLARATION_FLAGS"]? || "").split)
-    prog.loaded_files.add(entry)
+    mode = ENV["IYI_DECLARATION_MODE"]?
+    if defines = ENV["IYI_DECLARATION_FLAGS"]?
+      prog.normalizer.macro_flags = MacroTargetFlags.host(defines.split)
+    end
+    prog.loaded_files.add(entry) unless mode == "prelude"
     prog.search_path = search_path
     prog.project_root = project_root(node, entry)
+    if mode
+      node = prog.normalizer.normalize(node)
+      prelude = TopLevelVisitor.new(prog)
+      prelude_file = prelude.import_file("iyi/prelude")
+      raise "cannot find iyi/prelude" if prelude_file.nil?
+      prelude.load_file(prelude_file.as(String))
+      prelude.finish
+    end
     prog.entry_dir = dir_of(entry)
-    visitor = TopLevelVisitor.new(prog, entry)
-    node.accept(visitor)
-    visitor.finish
+    unless mode == "prelude"
+      visitor = TopLevelVisitor.new(prog, entry)
+      node.accept(visitor)
+      visitor.finish
+    end
     declare_guessed_instance_vars(prog)
     {prog, entry}
   end
@@ -99,7 +112,6 @@ module BenchSelfhostSemanticDeclarationsExercise
     parser = Parser.new(src, entry)
     node = parser.parse
     prog = SemanticProgram.new
-    prog.normalizer.macro_flags = MacroTargetFlags.host((ENV["IYI_DECLARATION_FLAGS"]? || "").split)
     prog.loaded_files.add(entry)
     prog.search_path = search_path
     prog.project_root = project_root(node, entry)
@@ -186,7 +198,6 @@ module BenchSelfhostSemanticDeclarationsExercise
     parser = Parser.new(src, entry)
     node = parser.parse
     prog = SemanticProgram.new
-    prog.normalizer.macro_flags = MacroTargetFlags.host((ENV["IYI_DECLARATION_FLAGS"]? || "").split)
     prog.loaded_files.add(entry)
     prog.search_path = search_path
     prog.project_root = project_root(node, entry)

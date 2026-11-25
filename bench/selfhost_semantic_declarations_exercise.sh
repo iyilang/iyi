@@ -2,8 +2,8 @@
 # Burn-down gate for declaration parity between the iyi semantic port and the
 # hosted front end's top-level pass (specification S1b).
 #
-# Every file is analysed bare (no prelude), with the closure of what it imports
-# and requires, by the hosted front end's top-level pass
+# Fixtures are analysed bare. The corpus is analysed with the prelude as in a
+# build, with prelude files measured in the prelude itself, by the hosted pass
 # (bench/selfhost_semantic_declarations_oracle.cr) and by the iyi port
 # (bench/selfhost_semantic_declarations_exercise.iyi). Both search IYI_PATH, set
 # below to this checkout's src/. Both print one text dump of the declarations the
@@ -67,7 +67,6 @@ status=0
 . "$REPO/bench/lib/mutation.sh"
 llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED to discover LLVM bridge build arguments"; exit 1; }
 IYI_DECLARATION_FLAGS=$(printf '%s\n' "$llvm_bridge_text" | awk '/^-D/ { sub(/^-D/, ""); printf "%s ", $0 }')
-export IYI_DECLARATION_FLAGS
 
 # Splits a dump into records, one per "Type:", "Def:", "Ivar:" or "IvarOrder:" header line,
 # each with its own property lines, joined onto one line with the record separator \036.
@@ -346,9 +345,10 @@ measure() {
   corpus="$1"
   rel="$2"
   abs="$REPO_NATIVE/$2"
-  if "$ORACLE" "$abs" > "$WORK/o.txt" 2> "$WORK/o.err"; then
+  case "$rel" in src/iyi/*) mode=prelude ;; *) mode=entry ;; esac
+  if IYI_DECLARATION_MODE="$mode" IYI_DECLARATION_FLAGS="$IYI_DECLARATION_FLAGS" "$ORACLE" "$abs" > "$WORK/o.txt" 2> "$WORK/o.err"; then
     nodes=$(records "$WORK/o.txt" | wc -l | tr -d ' ')
-    if "$PORT" "$abs" > "$WORK/p.txt" 2> "$WORK/p.err"; then
+    if IYI_DECLARATION_MODE="$mode" IYI_DECLARATION_FLAGS="$IYI_DECLARATION_FLAGS" "$PORT" "$abs" > "$WORK/p.txt" 2> "$WORK/p.err"; then
       matched=$(agreeing "$WORK/o.txt" "$WORK/p.txt")
       note="-"
     else
@@ -1090,8 +1090,8 @@ prove_mutation "only the last annotation is read for a primitive" "$MUT_SEM" \
   -- check_primitive_annotations_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "enum host flags select the wrong platform branch" "$MUT_SEM" \
-  '      return flags.includes?(name)' \
-  '      return !flags.includes?(name)' \
+  '    MacroTargetFlags.for_triple(MacroTargetFlags.compile_time_triple, [] of String).includes?(name)' \
+  '    !MacroTargetFlags.for_triple(MacroTargetFlags.compile_time_triple, [] of String).includes?(name)' \
   -- check_decl_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "enum value loses its base integer result" "$MUT_SEM" \

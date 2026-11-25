@@ -7,6 +7,10 @@ import compiler/ir/opt/cfg_simplify::{run_cfg_simplify}
 import compiler/ir/opt/mem2reg::{run_mem2reg}
 import compiler/ir/opt/simplify::{run_simplify}
 import compiler/ir/opt/dce::{run_dce}
+import compiler/ir/opt/callgraph::{CallGraph}
+import compiler/ir/opt/inline::{InlineBudget, run_inline}
+import compiler/ir/opt/sroa::{run_sroa}
+import compiler/ir/opt/deadfn::{run_deadfn}
 import std/time::{Time}
 
 pub enum PassId
@@ -14,6 +18,9 @@ pub enum PassId
   Mem2Reg
   Simplify
   Dce
+  Sroa
+  Inline
+  DeadFn
 end
 
 pub enum OptTier
@@ -40,6 +47,9 @@ pub def pass_name(id : PassId) : String
   when PassId::Mem2Reg     then "mem2reg"
   when PassId::Simplify    then "simplify"
   when PassId::Dce         then "dce"
+  when PassId::Sroa        then "sroa"
+  when PassId::Inline      then "inline"
+  when PassId::DeadFn      then "deadfn"
   else
     raise "BUG: unknown IR pass"
   end
@@ -51,6 +61,9 @@ pub def pass_named(name : String) : PassId?
   when "mem2reg"      then PassId::Mem2Reg
   when "simplify"     then PassId::Simplify
   when "dce"          then PassId::Dce
+  when "sroa"         then PassId::Sroa
+  when "inline"       then PassId::Inline
+  when "deadfn"       then PassId::DeadFn
   else
     nil
   end
@@ -58,6 +71,13 @@ end
 
 pub def tier_passes(tier : OptTier) : Array(PassId)
   return [] of PassId if tier == OptTier::None
+  if tier == OptTier::Release
+    return [PassId::CfgSimplify, PassId::Sroa, PassId::Mem2Reg, PassId::Simplify, PassId::Dce, PassId::CfgSimplify,
+            PassId::Inline,
+            PassId::CfgSimplify, PassId::Sroa, PassId::Mem2Reg, PassId::Simplify, PassId::Dce, PassId::CfgSimplify,
+            PassId::CfgSimplify, PassId::Sroa, PassId::Mem2Reg, PassId::Simplify, PassId::Dce, PassId::CfgSimplify,
+            PassId::DeadFn]
+  end
   [PassId::CfgSimplify, PassId::Mem2Reg, PassId::Simplify, PassId::Dce, PassId::CfgSimplify]
 end
 
@@ -68,6 +88,9 @@ pub def run_function_pass(mod : Module, fn : Function, id : PassId) : Bool
   when PassId::Mem2Reg     then run_mem2reg(mod, fn)
   when PassId::Simplify    then run_simplify(mod, fn)
   when PassId::Dce         then run_dce(mod, fn)
+  when PassId::Sroa        then run_sroa(mod, fn)
+  when PassId::Inline      then run_inline(mod, fn, CallGraph.new(mod), InlineBudget.new(mod))
+  when PassId::DeadFn      then run_deadfn(mod)
   else
     raise "BUG: unknown IR pass"
   end
@@ -102,32 +125,74 @@ end
 
 pub def run_passes(mod : Module, passes : Array(PassId), options : PassOptions) : String?
   timings = options.time_passes ? PassTimings.new(passes.size) : nil
-  f = 0
-  while f < mod.functions.size
-    fn = mod.functions[f]
-    unless fn.declaration?
-      k = 0
-      while k < passes.size
-        if clock = timings
-          started = Time.monotonic
-          changed = run_function_pass(mod, fn, passes[k])
-          clock.add(k, (Time.monotonic - started).total_nanoseconds.to_i64, changed)
-        else
-          changed = run_function_pass(mod, fn, passes[k])
-        end
-        if changed && options.verify_each
+  begin_at = 0
+  while begin_at < passes.size
+    if passes[begin_at] == PassId::DeadFn
+      if clock = timings
+        started = Time.monotonic
+        changed = run_deadfn(mod)
+        clock.add(begin_at, (Time.monotonic - started).total_nanoseconds.to_i64, changed)
+      else
+        changed = run_deadfn(mod)
+      end
+      if changed && options.verify_each
+        mod.functions.each do |fn|
+          next if fn.declaration?
           errors = verify_function(mod, fn)
           unless errors.empty?
             if clock = timings
               clock.report(passes)
             end
-            return "#{pass_name(passes[k])}: @#{fn.name}: #{errors[0]}"
+            return "deadfn: @#{fn.name}: #{errors[0]}"
           end
         end
-        k = k + 1
       end
+      begin_at = begin_at + 1
+      next
     end
-    f = f + 1
+    end_at = begin_at
+    has_inline = false
+    while end_at < passes.size && passes[end_at] != PassId::DeadFn
+      has_inline = true if passes[end_at] == PassId::Inline
+      end_at = end_at + 1
+    end
+    graph = has_inline ? CallGraph.new(mod) : nil
+    budget = has_inline ? InlineBudget.new(mod) : nil
+    functions = graph ? graph.order : mod.functions
+    f = 0
+    while f < functions.size
+      fn = functions[f]
+      unless fn.declaration?
+        k = begin_at
+        while k < end_at
+          if clock = timings
+            started = Time.monotonic
+            if passes[k] == PassId::Inline
+              changed = run_inline(mod, fn, graph.as(CallGraph), budget.as(InlineBudget))
+            else
+              changed = run_function_pass(mod, fn, passes[k])
+            end
+            clock.add(k, (Time.monotonic - started).total_nanoseconds.to_i64, changed)
+          elsif passes[k] == PassId::Inline
+            changed = run_inline(mod, fn, graph.as(CallGraph), budget.as(InlineBudget))
+          else
+            changed = run_function_pass(mod, fn, passes[k])
+          end
+          if changed && options.verify_each
+            errors = verify_function(mod, fn)
+            unless errors.empty?
+              if clock = timings
+                clock.report(passes)
+              end
+              return "#{pass_name(passes[k])}: @#{fn.name}: #{errors[0]}"
+            end
+          end
+          k = k + 1
+        end
+      end
+      f = f + 1
+    end
+    begin_at = end_at
   end
   if clock = timings
     clock.report(passes)

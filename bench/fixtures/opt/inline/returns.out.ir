@@ -1,0 +1,30 @@
+; iyi-ir 1
+source_filename = "returns"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i64 @choose(i1 %c, i64 %a, i64 %b) {
+entry:
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 %a
+no:
+  ret i64 %b
+}
+define external i64 @caller(i1 %c, i64 %a, i64 %b) {
+entry:
+  br label %entry1
+entry1:
+  br i1 %c, label %yes, label %no
+yes:
+  br label %inline.cont
+no:
+  br label %inline.cont
+inline.cont:
+  %0 = phi i64 [ %a, label %yes ], [ %b, label %no ]
+  %a1 = add i64 %0, 1
+  %a2 = add i64 %a1, 2
+  %a3 = add i64 %a2, 3
+  %a4 = add i64 %a3, 4
+  %a5 = add i64 %a4, 5
+  ret i64 %a5
+}

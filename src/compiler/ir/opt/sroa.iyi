@@ -1,0 +1,446 @@
+module compiler/ir/opt/sroa
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, Block, GepAux, MemAux, IntrinsicAux, Ordering}
+import compiler/ir/function::{Function}
+import compiler/ir/module::{Module}
+import compiler/ir/builder::{Builder}
+import compiler/ir/intrinsics::{IntrinsicId}
+import compiler/ir/opt/analysis::{DefUse, FunctionIndex, Cfg}
+import compiler/ir/opt/edit::{new_inst}
+import compiler/ir/opt/mem2reg::{run_mem2reg}
+
+class FieldAddress
+  getter value : Value
+  getter type : IrType
+  getter offset : Int64
+  getter path : Array(Int32)
+
+  def initialize(@value : Value, @type : IrType, @offset : Int64, @path : Array(Int32))
+  end
+end
+
+class ScalarField
+  getter type : IrType
+  getter offset : Int64
+  getter path : Array(Int32)
+  getter slot : Inst
+
+  def initialize(@type : IrType, @offset : Int64, @path : Array(Int32), @slot : Inst)
+  end
+end
+
+class AggregateSlot
+  getter alloca : Inst
+  getter type : IrType
+  getter addresses : Array(FieldAddress)
+  getter fields : Array(ScalarField)
+  getter dependencies : Array(Inst)
+  property valid : Bool
+  property partial : Bool
+  property area_type : IrType?
+  property area_punned : Bool
+  property area_derived : Bool
+  property bulk : Bool
+
+  def initialize(@alloca : Inst, @type : IrType)
+    @addresses = [FieldAddress.new(@alloca, @type, 0_i64, [] of Int32)]
+    @fields = [] of ScalarField
+    @dependencies = [] of Inst
+    @valid = true
+    @partial = false
+    @area_type = nil
+    @area_punned = false
+    @area_derived = false
+    @bulk = false
+  end
+
+  def union_area? : Bool
+    @type.struct? && @type.fields.size == 2 && @type.fields[0].int? && @type.fields[0].bits == 32 && @type.fields[1].array? && @type.fields[1].element_type.int?
+  end
+end
+
+def scalar?(type : IrType) : Bool
+  type.int? || type.float? || type.pointer?
+end
+
+def const_int?(value : Value, expected : Int64) : Bool
+  value.is_a?(Inst) && value.as(Inst).op == Op::ConstInt && value.as(Inst).aux_int == expected && value.type.bits <= 64
+end
+
+def ordinary?(inst : Inst) : Bool
+  return false unless inst.aux.is_a?(MemAux)
+  mem = inst.aux.as(MemAux)
+  !mem.volatile && mem.ordering == Ordering::NotAtomic
+end
+
+def under_area?(slot : AggregateSlot, path : Array(Int32)) : Bool
+  slot.union_area? && !path.empty? && path[0] == 1
+end
+
+# The first GEP index addresses the pointed-to object; only zero can remain
+# inside this candidate. Every subsequent index descends a declared field.
+def descend(mod : Module, base : FieldAddress, gep : Inst) : FieldAddress?
+  return nil unless gep.aux.is_a?(GepAux) && gep.aux.as(GepAux).source_type == base.type
+  return nil if gep.args.size < 2 || !const_int?(gep.args[1], 0_i64)
+  type = base.type
+  offset = base.offset
+  path = base.path[0, base.path.size]
+  k = 2
+  while k < gep.args.size
+    index_value = gep.args[k]
+    return nil unless index_value.is_a?(Inst) && index_value.as(Inst).op == Op::ConstInt && index_value.type.bits <= 64
+    index64 = index_value.as(Inst).aux_int
+    return nil if index64 < 0_i64 || index64 > 2147483647_i64
+    index = index64.to_i32
+    if type.struct?
+      return nil if type.opaque? || index >= type.fields.size
+      offset = offset + mod.layout.offset_of(type, index) # mutation S6-offset: select the actual field
+      type = type.fields[index]
+    elsif type.array?
+      return nil if index64 >= type.count
+      offset = offset + index64 * mod.layout.alloc_size(type.element_type)
+      type = type.element_type
+    else
+      return nil
+    end
+    path << index
+    k = k + 1
+  end
+  FieldAddress.new(gep, type, offset, path)
+end
+
+def scan_slot(mod : Module, slot : AggregateSlot, roots : Hash(Value, AggregateSlot), du : DefUse, positions : FunctionIndex, cfg : Cfg) : Nil
+  at = 0
+  while at < slot.addresses.size && slot.valid
+    address = slot.addresses[at]
+    at = at + 1
+    du.uses(address.value).each do |use|
+      inst = use.user
+      block = positions.block_of(inst)
+      if block < 0 || !cfg.reachable?(block)
+        slot.valid = false
+        break
+      end
+      if inst.op == Op::Gep && use.index == 0
+        next_address = descend(mod, address, inst)
+        unless next_address
+          slot.valid = false
+          break
+        end
+        slot.area_derived = true if under_area?(slot, address.path)
+        slot.addresses << next_address
+      elsif inst.op == Op::Load && use.index == 0 && inst.args.size == 1 && ordinary?(inst)
+        if inst.type != address.type
+          if under_area?(slot, address.path) && address.path.size == 1 && scalar?(inst.type)
+            slot.partial = true
+            if previous = slot.area_type
+              slot.area_punned = true if previous != inst.type
+            else
+              slot.area_type = inst.type
+            end
+          else
+            slot.valid = false
+            break
+          end
+        elsif !scalar?(address.type)
+          slot.bulk = true
+        end
+      elsif inst.op == Op::Store && use.index == 1 && inst.args.size == 2 && ordinary?(inst)
+        stored = inst.args[0]
+        if stored.is_a?(Inst) && (stored.as(Inst).op == Op::ThreadLocalAddr || stored.as(Inst).op == Op::ThreadPointer)
+          slot.valid = false
+          break
+        end
+        if stored.type != address.type
+          if under_area?(slot, address.path) && address.path.size == 1 && scalar?(stored.type)
+            slot.partial = true
+            if previous = slot.area_type
+              slot.area_punned = true if previous != stored.type
+            else
+              slot.area_type = stored.type
+            end
+          else
+            slot.valid = false
+            break
+          end
+        elsif !scalar?(address.type)
+          slot.bulk = true
+        end
+      elsif inst.op == Op::Intrinsic && inst.aux.is_a?(IntrinsicAux) && address.value == slot.alloca
+        id = inst.aux.as(IntrinsicAux).id
+        if id == IntrinsicId::Memset && use.index == 0 && inst.args.size == 4 && const_int?(inst.args[1], 0_i64) && const_int?(inst.args[2], mod.layout.alloc_size(slot.type)) && const_int?(inst.args[3], 0_i64)
+          slot.bulk = true
+        elsif (id == IntrinsicId::Memcpy || id == IntrinsicId::Memmove) && (use.index == 0 || use.index == 1) && inst.args.size == 4 && const_int?(inst.args[2], mod.layout.alloc_size(slot.type)) && const_int?(inst.args[3], 0_i64)
+          other = inst.args[use.index == 0 ? 1 : 0]
+          candidate = roots[other]?
+          if candidate && candidate.type == slot.type
+            slot.dependencies << candidate.alloca
+            slot.bulk = true
+          else
+            slot.valid = false
+            break
+          end
+        else
+          slot.valid = false
+          break
+        end
+      else
+        slot.valid = false
+        break
+      end
+    end
+  end
+  # A type-punned area stays in the original slot. Whole-object operations
+  # would also touch the separated tag, so partial splits refuse those shapes.
+  if slot.partial
+    slot.valid = false if slot.bulk
+    slot.area_punned = true if slot.area_derived
+    if area = slot.area_type
+      slot.area_punned = true if mod.layout.store_size(area) > mod.layout.store_size(slot.type.fields[1])
+    end
+  end
+  nil
+end
+
+# Flatten scalar leaves in field order. Arrays are included, not reinterpreted.
+def flatten(mod : Module, slot : AggregateSlot, type : IrType, offset : Int64, path : Array(Int32)) : Nil
+  if scalar?(type)
+    allocation = new_inst(Op::Alloca, slot.alloca.type, [] of Value, 0_i64, GepAux.new(type, false))
+    slot.fields << ScalarField.new(type, offset, path, allocation)
+  elsif type.struct? && !type.opaque?
+    k = 0
+    while k < type.fields.size
+      child = path[0, path.size]
+      child << k
+      flatten(mod, slot, type.fields[k], offset + mod.layout.offset_of(type, k), child)
+      k = k + 1
+    end
+  elsif type.array?
+    k = 0_i64
+    while k < type.count
+      child = path[0, path.size]
+      child << k.to_i32
+      flatten(mod, slot, type.element_type, offset + k * mod.layout.alloc_size(type.element_type), child)
+      k = k + 1_i64
+    end
+  else
+    slot.valid = false
+  end
+  nil
+end
+
+def field_at(slot : AggregateSlot, offset : Int64, type : IrType) : ScalarField?
+  slot.fields.each do |field|
+    return field if field.offset == offset && field.type == type
+  end
+  nil
+end
+
+def zero_scalar(builder : Builder, type : IrType) : Value
+  return builder.const_int(type, 0_i64) if type.int?
+  return builder.const_float(type, 0.0) if type.float?
+  builder.const_null(type)
+end
+
+# Loads and stores are emitted at the old aggregate operation, in field order.
+def load_value(mod : Module, builder : Builder, slot : AggregateSlot, type : IrType, offset : Int64, output : Array(Inst)) : Value
+  if scalar?(type)
+    field = field_at(slot, offset, type)
+    raise "BUG: missing SROA field" unless field
+    result = new_inst(Op::Load, type, [field.slot] of Value, 0_i64, MemAux.new)
+    output << result
+    return result
+  end
+  result = builder.const_zero(type).as(Value)
+  count = type.struct? ? type.fields.size : type.count.to_i32
+  k = 0
+  while k < count
+    child_type = type.struct? ? type.fields[k] : type.element_type
+    child_offset = type.struct? ? mod.layout.offset_of(type, k) : k.to_i64 * mod.layout.alloc_size(child_type)
+    value = load_value(mod, builder, slot, child_type, offset + child_offset, output)
+    result = new_inst(Op::InsertValue, type, [result, value] of Value, k.to_i64)
+    output << result.as(Inst)
+    k = k + 1
+  end
+  result
+end
+
+def store_value(mod : Module, slot : AggregateSlot, value : Value, type : IrType, offset : Int64, output : Array(Inst)) : Nil
+  if scalar?(type)
+    field = field_at(slot, offset, type)
+    raise "BUG: missing SROA field" unless field
+    output << new_inst(Op::Store, mod.types.void, [value, field.slot] of Value, 0_i64, MemAux.new)
+    return
+  end
+  count = type.struct? ? type.fields.size : type.count.to_i32
+  k = 0
+  while k < count
+    child_type = type.struct? ? type.fields[k] : type.element_type
+    child_offset = type.struct? ? mod.layout.offset_of(type, k) : k.to_i64 * mod.layout.alloc_size(child_type)
+    part = new_inst(Op::ExtractValue, child_type, [value] of Value, k.to_i64)
+    output << part
+    store_value(mod, slot, part, child_type, offset + child_offset, output)
+    k = k + 1
+  end
+  nil
+end
+
+pub def run_sroa(mod : Module, fn : Function) : Bool
+  return false if fn.declaration?
+  fn.relink
+  du = DefUse.new(fn)
+  cfg = Cfg.new(fn)
+  positions = FunctionIndex.new(fn)
+  slots = [] of AggregateSlot
+  roots = Hash(Value, AggregateSlot).new
+  fn.blocks[0].insts.each do |inst|
+    if inst.op == Op::Alloca && inst.args.empty? && inst.aux.is_a?(GepAux)
+      type = inst.aux.as(GepAux).source_type
+      if (type.struct? && !type.opaque?) || type.array?
+        slot = AggregateSlot.new(inst, type)
+        slots << slot
+        roots[inst] = slot
+      end
+    end
+  end
+  slots.each { |slot| scan_slot(mod, slot, roots, du, positions, cfg) }
+  changed = true
+  while changed
+    changed = false
+    slots.each do |slot|
+      next unless slot.valid
+      slot.dependencies.each do |dependency|
+        if other = roots[dependency]?
+          unless other.valid
+            slot.valid = false
+            changed = true
+          end
+        end
+      end
+    end
+  end
+  slots.each do |slot|
+    next unless slot.valid
+    if slot.partial
+      flatten(mod, slot, slot.type.fields[0], 0_i64, [0] of Int32)
+      if !slot.area_punned && (area = slot.area_type)
+        offset = mod.layout.offset_of(slot.type, 1)
+        flatten(mod, slot, area, offset, [1] of Int32)
+      end
+    else
+      flatten(mod, slot, slot.type, 0_i64, [] of Int32)
+    end
+  end
+  # A candidate with no scalar leaves cannot be rewritten meaningfully.
+  slots.each { |slot| slot.valid = false if slot.fields.empty? }
+  changed = true
+  while changed
+    changed = false
+    slots.each do |slot|
+      next unless slot.valid
+      slot.dependencies.each do |dependency|
+        if other = roots[dependency]?
+          unless other.valid
+            slot.valid = false
+            changed = true
+          end
+        end
+      end
+    end
+  end
+  valid = [] of AggregateSlot
+  slots.each { |slot| valid << slot if slot.valid }
+  return false if valid.empty?
+
+  owner = Hash(Value, AggregateSlot).new
+  addresses = Hash(Value, FieldAddress).new
+  replacements = Hash(Value, Value).new
+  removed_geps = Hash(Inst, Bool).new
+  allocations = [] of Inst
+  valid.each do |slot|
+    slot.fields.each { |field| allocations << field.slot }
+    slot.addresses.each do |address|
+      owner[address.value] = slot
+      addresses[address.value] = address
+      field = field_at(slot, address.offset, address.type)
+      if slot.partial && under_area?(slot, address.path) && address.path.size == 1 && !slot.area_punned
+        if area = slot.area_type
+          field = field_at(slot, address.offset, area)
+        end
+      end
+      replacements[address.value] = field.slot if field
+      if address.value.is_a?(Inst) && address.value.as(Inst).op == Op::Gep
+        if !slot.partial || !slot.area_punned || field
+          removed_geps[address.value.as(Inst)] = true
+        end
+      end
+    end
+  end
+  builder = Builder.new(mod)
+  fn.blocks.each do |block|
+    output = [] of Inst
+    block.insts.each do |inst|
+      if slot = roots[inst]?
+        next if slot.valid && (!slot.partial || !slot.area_punned)
+      end
+      next if removed_geps.has_key?(inst)
+      if inst.op == Op::Load && !inst.args.empty?
+        if slot = owner[inst.args[0]]?
+          address = addresses[inst.args[0]]
+          if !scalar?(address.type) && inst.type == address.type && !slot.partial
+            replacements[inst] = load_value(mod, builder, slot, address.type, address.offset, output)
+            next
+          end
+        end
+      elsif inst.op == Op::Store && inst.args.size == 2
+        if slot = owner[inst.args[1]]?
+          address = addresses[inst.args[1]]
+          if !scalar?(address.type) && inst.args[0].type == address.type && !slot.partial
+            store_value(mod, slot, inst.args[0], address.type, address.offset, output)
+            next
+          end
+        end
+      elsif inst.op == Op::Intrinsic && inst.aux.is_a?(IntrinsicAux) && !inst.args.empty?
+        id = inst.aux.as(IntrinsicAux).id
+        if destination = roots[inst.args[0]]?
+          if destination.valid && id == IntrinsicId::Memset
+            destination.fields.each do |field|
+              value = zero_scalar(builder, field.type)
+              output << new_inst(Op::Store, mod.types.void, [value, field.slot] of Value, 0_i64, MemAux.new)
+            end
+            next
+          elsif destination.valid && (id == IntrinsicId::Memcpy || id == IntrinsicId::Memmove)
+            source = roots[inst.args[1]]
+            destination.fields.each do |field|
+              from = field_at(source, field.offset, field.type)
+              raise "BUG: mismatched SROA transfer" unless from
+              value = new_inst(Op::Load, field.type, [from.slot] of Value, 0_i64, MemAux.new)
+              output << value
+              output << new_inst(Op::Store, mod.types.void, [value, field.slot] of Value, 0_i64, MemAux.new)
+            end
+            next
+          end
+        end
+      end
+      output << inst
+    end
+    block.insts[0, block.insts.size] = output
+  end
+  fn.blocks[0].insts[0, 0] = allocations
+  fn.blocks.each do |block|
+    block.insts.each do |inst|
+      k = 0
+      while k < inst.args.size
+        if replacement = replacements[inst.args[k]]?
+          inst.args[k] = replacement
+        end
+        k = k + 1
+      end
+    end
+  end
+  fn.relink
+  run_mem2reg(mod, fn)
+  true
+end

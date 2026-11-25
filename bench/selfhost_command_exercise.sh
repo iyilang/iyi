@@ -339,8 +339,8 @@ with open(sys.argv[1], encoding="utf-8") as source:
         if line.startswith("vectors <<"):
             expr = line[len("vectors <<"):].strip()
             vectors.append([] if expr == "[] of String" else literal(ast.parse(expr, mode="eval").body))
-if len(vectors) != 250:
-    raise ValueError(f"expected 250 vectors, found {len(vectors)}")
+if len(vectors) != 288:
+    raise ValueError(f"expected 288 vectors, found {len(vectors)}")
 with open(sys.argv[2], "w", encoding="utf-8") as output:
     json.dump(vectors, output)
 PY
@@ -396,8 +396,8 @@ PY
 
 normalize_command "$WORK/iyi_raw.out" "$WORK/iyi.out" || exit 1
 normalize_command "$WORK/hosted_raw.out" "$WORK/hosted.out" || exit 1
-if [ "$(grep -c '^=== VECTOR' "$WORK/iyi.out")" -ne 250 ] || [ "$(grep -c '^=== VECTOR' "$WORK/hosted.out")" -ne 250 ]; then
-  echo "  FAILED: expected 250 command vectors from each implementation"
+if [ "$(grep -c '^=== VECTOR' "$WORK/iyi.out")" -ne 288 ] || [ "$(grep -c '^=== VECTOR' "$WORK/hosted.out")" -ne 288 ]; then
+  echo "  FAILED: expected 288 command vectors from each implementation"
   exit 1
 fi
 
@@ -406,7 +406,7 @@ if ! cmp -s "$WORK/iyi.out" "$WORK/hosted.out"; then
   diff -u "$WORK/hosted.out" "$WORK/iyi.out" | head -30
   status=1
 else
-  echo "  Parity summary: 250/250 vectors match identically against the front end"
+  echo "  Parity summary: 288/288 vectors match identically against the front end"
 fi
 
 echo
@@ -426,7 +426,7 @@ check_command_mutant() {
     touch "$WORK/invalid-mutant"
     return 0
   fi
-  if [ "$(grep -c '^=== VECTOR' "$WORK/iyi_mut_raw.out")" -ne 250 ] ||
+  if [ "$(grep -c '^=== VECTOR' "$WORK/iyi_mut_raw.out")" -ne 288 ] ||
      ! normalize_command "$WORK/iyi_mut_raw.out" "$WORK/iyi_mut.out"; then
     echo "  INVALID MUTANT: command exercise output was incomplete"
     touch "$WORK/invalid-mutant"

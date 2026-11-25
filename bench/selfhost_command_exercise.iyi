@@ -53,6 +53,25 @@ module BenchSelfhostCommandExercise
     vectors << ["build", "-f", "bogus", "nonexistent_source_xyz.iyi"]
     vectors << ["build", "-o", "missing_dir_xyz/out", "samples/iyi/hello.iyi"]
     vectors << ["build", "-o", "samples/iyi/hello.iyi", "samples/iyi/hello.iyi"]
+    # The stale outputs belong to build only. Both value spellings must be
+    # accepted before the missing source is refused, and missing values named.
+    vectors << ["build", "--stale-key", "key", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", "--stale-accept", "accept", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", "--stale-block", "block", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", "--stale-dump-elements", "elements", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", "--stale-inputs", "inputs", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", "--stale-key=key", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", "--stale-accept=accept", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", "--stale-block=block", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", "--stale-dump-elements=elements", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", "--stale-inputs=inputs", "nonexistent_source_xyz.iyi"]
+    vectors << ["build", "--stale-key"]
+    vectors << ["build", "--stale-accept"]
+    vectors << ["build", "--stale-block"]
+    vectors << ["build", "--stale-dump-elements"]
+    vectors << ["build", "--stale-inputs"]
+    vectors << ["run", "--stale-key", "key", "nonexistent_source_xyz.iyi"]
+    vectors << ["check", "--stale-inputs", "inputs", "nonexistent_source_xyz.iyi"]
 
     # Deps
     vectors << ["deps"]
@@ -146,6 +165,28 @@ module BenchSelfhostCommandExercise
     vectors << ["test", "--json", "missing_dir_xyz"]
     vectors << ["test", "missing_a", "missing_b"]
     vectors << ["test", "--verbose", "--help"]
+    # Receipt-runner flags and their refusals must match before any test runs.
+    vectors << ["test", "--cached", "--help"]
+    vectors << ["test", "--fresh", "--help"]
+    vectors << ["test", "--explain", "--help"]
+    vectors << ["test", "--shard", "1/2", "--help"]
+    vectors << ["test", "--shard"]
+    vectors << ["test", "--import-index"]
+    vectors << ["test", "--export-index"]
+    vectors << ["test", "--import-index", "ns=file", "--help"]
+    vectors << ["test", "--export-index", "ns=file", "--help"]
+    vectors << ["test", "--cached", "--fresh"]
+    vectors << ["test", "--cached", "--run", "case", "missing_dir_xyz"]
+    vectors << ["test", "--fresh", "--release", "missing_dir_xyz"]
+    vectors << ["test", "--explain", "--verbose", "missing_dir_xyz"]
+    vectors << ["test", "--cached", "--chaos", "missing_dir_xyz"]
+    vectors << ["test", "--fresh", "--chaos", "missing_dir_xyz"]
+    vectors << ["test", "--explain", "--chaos", "missing_dir_xyz"]
+    vectors << ["test", "--shard", "1/2", "--chaos", "missing_dir_xyz"]
+    vectors << ["test", "--import-index", "ns=file", "--chaos", "missing_dir_xyz"]
+    vectors << ["test", "--export-index", "ns=file", "--chaos", "missing_dir_xyz"]
+    vectors << ["test", "--cached", "missing_dir_xyz"]
+    vectors << ["test", "--fresh", "missing_dir_xyz"]
 
     # Get. Each one refuses or prints help before it reads iyi.mod or the
     # network: a path with no iyi.mod is never named, since the working
@@ -341,9 +382,37 @@ module BenchSelfhostCommandExercise
     vectors
   end
 
+  def self.check_stale_options : Nil
+    result = CommandDriver.new([
+      "build", "--no-codegen",
+      "--stale-key=first", "--stale-key", "key path",
+      "--stale-accept", "accept path", "--stale-block=block path",
+      "--stale-dump-elements", "elements path", "--stale-inputs=inputs path",
+      "samples/iyi/hello.iyi",
+    ]).run
+    opts = result.compiler_options
+    raise "stale options were refused" unless result.exit_code.nil? && opts
+    raise "stale key was not retained" unless opts.stale_key == "key path"
+    raise "stale accept was not retained" unless opts.stale_accept == "accept path"
+    raise "stale block was not retained" unless opts.stale_block == "block path"
+    raise "stale elements were not retained" unless opts.stale_dump_elements == "elements path"
+    raise "stale inputs were not retained" unless opts.stale_inputs == "inputs path"
+  end
+
+  def self.check_iyi_help : Nil
+    CommandDriver.program_name = "iyi"
+    help = CommandDriver.new(["build", "--help"]).run
+    unless help.stdout_output.includes?("Dump ll to Crystal's cache directory")
+      raise "iyi build help differs from the hosted compiler"
+    end
+    CommandDriver.program_name = "crystal"
+  end
+
   def self.run
     CommandDriver.program_name = "crystal"
     CommandDriver.version_description = "Crystal 1.22.0-dev\n\nThe compiler was not built in release mode.\n\nLLVM: 22.1.8\nDefault target: aarch64-apple-darwin25.5.0\n"
+    check_stale_options
+    check_iyi_help
 
     corpus.each_with_index do |argv, idx|
       driver = CommandDriver.new(argv)

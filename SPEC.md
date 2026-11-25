@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 37,056 lines, of which 4,785 are the library held to the 4,785 ceiling (7,525 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| hosted compiler | 143,081 lines of Crystal |
+| hosted compiler | 143,087 lines of Crystal |
 | artifact format | `.iyimod` v65, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets on which Crystal's library is type-checked, eight whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1084,7 +1084,7 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 143,081 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 143,087 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 37,056-line own prelude + 128,713 in std |
 | Specs | 21,146 lines | 17,706 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
@@ -9607,6 +9607,12 @@ compiler-rt. Only referenced host functions are imported, all from module
 | `swap(from: i32, to: i32, to_stack_top: i32)` | JSPI suspending import. Save the running shadow-stack pointer in `from`, then resume or start `to` with the given stack top. |
 | `idle(timeout_ms: i32)` | JSPI suspending import. Resume after the timeout; -1 means no deadline. |
 | `fiber_exit(next: i32, next_stack_top: i32)` | Plain import. End this fiber and schedule its successor. |
+
+On this target `--release` passes `--strip-debug` to `wasm-ld`, removing
+DWARF from the linked module while retaining its function name section for
+host stack traces. Add `-d` to keep full symbolic debug information instead.
+The same rule applies to `--release -O z`; the latter asks LLVM to optimize
+for size. Plain builds and `wasm32-wasi` keep their existing debug policy.
 
 The module exports `memory`, `iyi_start() -> i32`, `iyi_alloc(size: i32) ->
 i32`, and `iyi_free(ptr: i32)`. The host calls `iyi_start` before any other

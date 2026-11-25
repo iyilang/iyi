@@ -74,10 +74,10 @@ cat > "$WORK/range-hosted.cr" <<'HOSTED_RANGE'
 require "compiler/iyi/syntax"
 inclusive = Iyi::RangeLiteral.new(Iyi::NumberLiteral.new("1"), Iyi::NumberLiteral.new("10"), false)
 exclusive = Iyi::RangeLiteral.new(Iyi::NumberLiteral.new("1"), Iyi::NumberLiteral.new("10"), true)
-puts inclusive.clone.exclusive?
-puts exclusive.clone.exclusive?
+puts inclusive.clone.as(Iyi::RangeLiteral).exclusive?
+puts exclusive.clone.as(Iyi::RangeLiteral).exclusive?
 puts inclusive == exclusive
-puts exclusive == exclusive.clone
+puts exclusive == exclusive.clone.as(Iyi::RangeLiteral)
 HOSTED_RANGE
 cat > "$WORK/range-port.iyi" <<'PORT_RANGE'
 import compiler/syntax/ast::{NumberLiteral, RangeLiteral}

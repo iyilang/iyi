@@ -1,0 +1,49 @@
+module pointer_fp_call
+
+import std/float
+
+def churn(a : Float64) : Float64
+  c1 = a * 1.0
+  c2 = a * 2.0
+  c3 = a * 3.0
+  c4 = a * 4.0
+  c5 = a * 5.0
+  c6 = a * 6.0
+  c7 = a * 7.0
+  c8 = a * 8.0
+  c9 = a * 9.0
+  c10 = a * 10.0
+  c11 = a * 11.0
+  c12 = a * 12.0
+  c13 = a * 13.0
+  c14 = a * 14.0
+  c15 = a * 15.0
+  c16 = a * 16.0
+  c17 = a * 17.0
+  c18 = a * 18.0
+  c19 = a * 19.0
+  c20 = a * 20.0
+  cs2 = c1 + c2
+  cs3 = cs2 + c3
+  cs4 = cs3 + c4
+  cs5 = cs4 + c5
+  cs6 = cs5 + c6
+  cs7 = cs6 + c7
+  cs8 = cs7 + c8
+  cs9 = cs8 + c9
+  cs10 = cs9 + c10
+  cs11 = cs10 + c11
+  cs12 = cs11 + c12
+  cs13 = cs12 + c13
+  cs14 = cs13 + c14
+  cs15 = cs14 + c15
+  cs16 = cs15 + c16
+  cs17 = cs16 + c17
+  cs18 = cs17 + c18
+  cs19 = cs18 + c19
+  cs20 = cs19 + c20
+  cs20
+end
+
+puts "1"
+puts "#{churn(2.0).to_i64}"

@@ -1,0 +1,49 @@
+module compiler/ir/opt/dce
+
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Inst, terminator_op?}
+import compiler/ir/function::{Function}
+import compiler/ir/module::{Module}
+import compiler/ir/opt/effects::{has_side_effects?}
+
+pub def run_dce(mod : Module, fn : Function) : Bool
+  placed = Hash(Inst, Bool).new
+  live = Hash(Inst, Bool).new
+  work = [] of Inst
+  fn.blocks.each do |block|
+    block.insts.each do |inst|
+      placed[inst] = true
+      if terminator_op?(inst.op) || has_side_effects?(inst)
+        live[inst] = true
+        work << inst
+      end
+    end
+  end
+
+  while !work.empty?
+    inst = work.pop
+    inst.args.each do |value|
+      if value.is_a?(Inst)
+        dependency = value.as(Inst)
+        if placed[dependency]? && !live[dependency]?
+          live[dependency] = true
+          work << dependency
+        end
+      end
+    end
+  end
+
+  changed = false
+  fn.blocks.each do |block|
+    kept = [] of Inst
+    block.insts.each do |inst|
+      if live[inst]?
+        kept << inst
+      else
+        changed = true
+      end
+    end
+    block.insts[0, block.insts.size] = kept if kept.size != block.insts.size
+  end
+  changed
+end

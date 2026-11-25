@@ -1,0 +1,27 @@
+; iyi-ir 1
+source_filename = "fold_double_ops"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal double @subtract() {
+entry:
+  %v = fsub double 0x4008000000000000, 0x3ff0000000000000
+  ret double %v
+}
+
+define internal double @multiply() {
+entry:
+  %v = fmul double 0x4008000000000000, 0x4000000000000000
+  ret double %v
+}
+
+define internal double @divide() {
+entry:
+  %v = fdiv double 0x4008000000000000, 0x4000000000000000
+  ret double %v
+}
+
+define internal double @negate() {
+entry:
+  %v = fneg double 0x3ff0000000000000
+  ret double %v
+}

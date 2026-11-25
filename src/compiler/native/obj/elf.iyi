@@ -1,0 +1,976 @@
+module compiler/native/obj/elf
+
+# The ELF relocatable object format (SPEC 2.3, slice D3): the reader and the writer for ET_REL objects of x86_64 and
+# aarch64, in the object model of compiler/native/obj/object.
+#
+# Reading keeps every section that is neither a symbol table, a string table nor a relocation table as a model
+# section, under its ELF name. Section#flags carries sh_flags in its low 32 bits and sh_type from bit 32 up;
+# Section#entsize carries sh_entsize. Symbols keep the file's order. Symbol#desc carries st_other in bits 0 to 7,
+# st_type in bits 8 to 15, and bit 16, which marks the type as read from a file (a symbol without it takes its type
+# from its kind when written). Each relocation takes its addend from r_addend and its symbol from r_info, and each
+# ELF type maps to one kind on one architecture. A type with no kind is refused by number.
+#
+# Writing lays the file out as LLVM's ELF writer does: the header, the section bytes in model order, the symbol
+# table, the relocation tables, the string table, and the section header table. Each relocation table follows its
+# section in the header table. The string table holds section names and symbol names, with no tail merging, so its
+# bytes differ from LLVM's, and its size and offset with them. Every other byte of a read object is written back
+# as it was read.
+
+import compiler/platform/target::{Target}
+import compiler/native/obj/object::{ObjectFile, ObjFormat, Section, SectionKind, Symbol, SymbolKind, SymbolBinding, Reloc, RelocKind, ObjError}
+import std/slice::{Slice, Bytes}
+
+class ElfConst
+  MAGIC             = 0x464c457f_i64
+  CLASS64           =          2_i64
+  LITTLE            =          1_i64
+  ET_REL            =          1_i64
+  EM_X86_64         =         62_i64
+  EM_AARCH64        =        183_i64
+  EHDR_SIZE         =         64_i64
+  SHDR_SIZE         =         64_i64
+  SYM_SIZE          =         24_i64
+  RELA_SIZE         =         24_i64
+  SHT_PROGBITS      =          1_i64
+  SHT_SYMTAB        =          2_i64
+  SHT_STRTAB        =          3_i64
+  SHT_RELA          =          4_i64
+  SHT_NOBITS        =          8_i64
+  SHT_GROUP         =         17_i64
+  SHT_SYMTAB_SHNDX  =         18_i64
+  SHT_X86_64_UNWIND = 0x70000001_i64
+  SHF_WRITE         =        0x1_i64
+  SHF_ALLOC         =        0x2_i64
+  SHF_EXECINSTR     =        0x4_i64
+  SHF_INFO_LINK     =       0x40_i64
+  SHF_TLS           =      0x400_i64
+  SHN_UNDEF         =          0_i64
+  SHN_LORESERVE     =     0xff00_i64
+  SHN_ABS           =     0xfff1_i64
+  STB_LOCAL         =          0_i64
+  STB_GLOBAL        =          1_i64
+  STB_WEAK          =          2_i64
+  STT_NOTYPE        =          0_i64
+  STT_OBJECT        =          1_i64
+  STT_FUNC          =          2_i64
+  STT_SECTION       =          3_i64
+  STT_FILE          =          4_i64
+  STT_TLS           =          6_i64
+  TYPED             =    0x10000_i64
+  TYPE_SHIFT        =         32_i64
+  TYPED_MASK        = 0xffffffff_i64
+end
+
+# The ELF type of a relocation kind on one architecture, or -1 when the kind has no ELF form there.
+def elf_type_of(kind : RelocKind, x86 : Bool) : Int64
+  if x86
+    return 1_i64 if kind == RelocKind::Abs64
+    return 2_i64 if kind == RelocKind::PcRel32
+    return 4_i64 if kind == RelocKind::X86Branch32
+    return 9_i64 if kind == RelocKind::X86GotPcRel
+    return 10_i64 if kind == RelocKind::Abs32
+    return 11_i64 if kind == RelocKind::X86Abs32S
+    return 23_i64 if kind == RelocKind::X86TpOff32
+    return 41_i64 if kind == RelocKind::X86GotPcRelX
+    return 42_i64 if kind == RelocKind::X86RexGotPcRelX
+    return 24_i64 if kind == RelocKind::PcRel64
+    return -1_i64
+  end
+  return 257_i64 if kind == RelocKind::Abs64
+  return 258_i64 if kind == RelocKind::Abs32
+  return 261_i64 if kind == RelocKind::PcRel32
+  return 275_i64 if kind == RelocKind::A64AdrpPage21
+  return 277_i64 if kind == RelocKind::A64AddLo12
+  return 278_i64 if kind == RelocKind::A64Ldst8Lo12
+  return 282_i64 if kind == RelocKind::A64Jump26
+  return 283_i64 if kind == RelocKind::A64Call26
+  return 284_i64 if kind == RelocKind::A64Ldst16Lo12
+  return 285_i64 if kind == RelocKind::A64Ldst32Lo12
+  return 286_i64 if kind == RelocKind::A64Ldst64Lo12
+  return 299_i64 if kind == RelocKind::A64Ldst128Lo12
+  return 311_i64 if kind == RelocKind::A64GotPage21
+  return 312_i64 if kind == RelocKind::A64GotLo12
+  return 545_i64 if kind == RelocKind::A64TprelMovwG1
+  return 548_i64 if kind == RelocKind::A64TprelMovwG0Nc
+  return 260_i64 if kind == RelocKind::PcRel64
+  -1_i64
+end
+
+# The relocation kind an ELF type reads as on one architecture, or -1 when the reader does not take the type.
+def elf_kind_code(type : Int64, x86 : Bool) : Int64
+  if x86
+    return 0_i64 if type == 1_i64
+    return 1_i64 if type == 2_i64
+    return 2_i64 if type == 4_i64
+    return 3_i64 if type == 9_i64
+    return 4_i64 if type == 10_i64
+    return 5_i64 if type == 11_i64
+    return 6_i64 if type == 23_i64
+    return 7_i64 if type == 41_i64
+    return 8_i64 if type == 42_i64
+    return 9_i64 if type == 24_i64
+    return -1_i64
+  end
+  return 10_i64 if type == 257_i64
+  return 11_i64 if type == 258_i64
+  return 12_i64 if type == 261_i64
+  return 13_i64 if type == 275_i64
+  return 14_i64 if type == 277_i64
+  return 15_i64 if type == 278_i64
+  return 16_i64 if type == 282_i64
+  return 17_i64 if type == 283_i64
+  return 18_i64 if type == 284_i64
+  return 19_i64 if type == 285_i64
+  return 20_i64 if type == 286_i64
+  return 21_i64 if type == 299_i64
+  return 22_i64 if type == 311_i64
+  return 23_i64 if type == 312_i64
+  return 24_i64 if type == 545_i64
+  return 25_i64 if type == 548_i64
+  return 26_i64 if type == 260_i64
+  -1_i64
+end
+
+# The relocation kind for a code from elf_kind_code.
+def elf_kind_of_code(code : Int64) : RelocKind
+  if code == 0_i64
+    return RelocKind::Abs64
+  end
+  if code == 1_i64
+    return RelocKind::PcRel32
+  end
+  if code == 2_i64
+    return RelocKind::X86Branch32
+  end
+  if code == 3_i64
+    return RelocKind::X86GotPcRel
+  end
+  if code == 4_i64
+    return RelocKind::Abs32
+  end
+  if code == 5_i64
+    return RelocKind::X86Abs32S
+  end
+  if code == 6_i64
+    return RelocKind::X86TpOff32
+  end
+  if code == 7_i64
+    return RelocKind::X86GotPcRelX
+  end
+  if code == 8_i64
+    return RelocKind::X86RexGotPcRelX
+  end
+  if code == 10_i64
+    return RelocKind::Abs64
+  end
+  if code == 11_i64
+    return RelocKind::Abs32
+  end
+  if code == 12_i64
+    return RelocKind::PcRel32
+  end
+  if code == 13_i64
+    return RelocKind::A64AdrpPage21
+  end
+  if code == 14_i64
+    return RelocKind::A64AddLo12
+  end
+  if code == 15_i64
+    return RelocKind::A64Ldst8Lo12
+  end
+  if code == 16_i64
+    return RelocKind::A64Jump26
+  end
+  if code == 17_i64
+    return RelocKind::A64Call26
+  end
+  if code == 18_i64
+    return RelocKind::A64Ldst16Lo12
+  end
+  if code == 19_i64
+    return RelocKind::A64Ldst32Lo12
+  end
+  if code == 20_i64
+    return RelocKind::A64Ldst64Lo12
+  end
+  if code == 21_i64
+    return RelocKind::A64Ldst128Lo12
+  end
+  if code == 22_i64
+    return RelocKind::A64GotPage21
+  end
+  if code == 23_i64
+    return RelocKind::A64GotLo12
+  end
+  if code == 24_i64
+    return RelocKind::A64TprelMovwG1
+  end
+  if code == 9_i64 || code == 26_i64
+    return RelocKind::PcRel64
+  end
+  RelocKind::A64TprelMovwG0Nc
+end
+
+# The kind names for the reader's refusal: the ELF type number and the architecture it was read on.
+def elf_arch_name(x86 : Bool) : String
+  x86 ? "x86_64" : "aarch64"
+end
+
+# Rounds `value` up to a multiple of `align` (a power of two, or 1).
+def elf_align(value : Int64, align : Int64) : Int64
+  if align <= 1_i64
+    return value
+  end
+  rem = value % align
+  if rem == 0_i64
+    return value
+  end
+  value + (align - rem)
+end
+
+# Reads an unsigned little-endian integer of `width` bytes. The caller has checked that the bytes exist.
+def elf_le(bytes : Bytes, at : Int64, width : Int32) : Int64
+  value = 0_i64
+  i = width - 1
+  while i >= 0
+    value = value.unsafe_shl(8_i64) | bytes[(at + i.to_i64).to_i32].to_i64
+    i = i - 1
+  end
+  value
+end
+
+# One section header as the file states it.
+class ElfHeaderEntry
+  property name_off : Int64
+  property type : Int64
+  property flags : Int64
+  property offset : Int64
+  property size : Int64
+  property link : Int64
+  property info : Int64
+  property align : Int64
+  property entsize : Int64
+
+  def initialize(@name_off : Int64, @type : Int64, @flags : Int64, @offset : Int64, @size : Int64, @link : Int64, @info : Int64, @align : Int64, @entsize : Int64)
+  end
+end
+
+# Reads an ELF64 ET_REL object for x86_64 or aarch64. Every problem is recorded and returned as an ObjError that
+# names the section, offset or symbol at fault; nothing raises.
+class ElfReader
+  property data : Bytes
+  property target : ::Compiler::Platform::Target::Target
+  property failure : String?
+  property x86 : Bool
+  property headers : Array(ElfHeaderEntry)
+  property model_of : Array(Int64)
+  property model_count : Int64
+  property sections : Array(Section)
+  property symbols : Array(Symbol)
+  property symtab : Int64
+  property strtab : Int64
+  property shstrndx : Int64
+  property drop_groups : Bool
+
+  def initialize(@data : Bytes, @target : ::Compiler::Platform::Target::Target)
+    @drop_groups = false
+    @failure = nil
+    @x86 = @target.architecture == "x86_64"
+    @headers = [] of ElfHeaderEntry
+    @model_of = [] of Int64
+    @model_count = 0_i64
+    @sections = [] of Section
+    @symbols = [] of Symbol
+    @symtab = -1_i64
+    @strtab = -1_i64
+    @shstrndx = 0_i64
+  end
+
+  def read : ObjectFile | ObjError
+    read_header
+    read_headers
+    classify
+    read_sections
+    read_symbols
+    read_relocs
+    if message = @failure
+      return ObjError.new(message)
+    end
+    file = ObjectFile.new(ObjFormat::Elf, @target, "llvm")
+    file.sections = @sections
+    file.symbols = @symbols
+    file
+  end
+
+  def reject(message : String) : Nil
+    unless @failure
+      @failure = message
+    end
+  end
+
+  def size : Int64
+    @data.size.to_i64
+  end
+
+  def fits?(at : Int64, count : Int64) : Bool
+    at >= 0_i64 && count >= 0_i64 && at <= size - count
+  end
+
+  def need(at : Int64, count : Int64, what : String) : Bool
+    return true if fits?(at, count)
+    reject("#{what} runs past the end of the file (#{size} bytes)")
+    false
+  end
+
+  def word(at : Int64, width : Int32) : Int64
+    elf_le(@data, at, width)
+  end
+
+  def byte(at : Int64) : Int64
+    @data[at.to_i32].to_i64
+  end
+
+  # The NUL-terminated string at `at` in the string table `table`.
+  def string_at(table : ElfHeaderEntry, at : Int64) : String
+    limit = table.offset + table.size
+    start = table.offset + at
+    if at < 0_i64 || start >= limit
+      reject("a name lies outside its string table")
+      return ""
+    end
+    end_at = start
+    while end_at < limit && @data[end_at.to_i32] != 0_u8
+      end_at = end_at + 1
+    end
+    if end_at >= limit
+      reject("a name is not NUL-terminated within its string table")
+      return ""
+    end
+    copy = Slice(UInt8).new((end_at - start).to_i32)
+    i = 0
+    while i < copy.size
+      copy[i] = @data[(start + i.to_i64).to_i32]
+      i = i + 1
+    end
+    String.new(copy)
+  end
+
+  def name_of(h : ElfHeaderEntry) : String
+    string_at(@headers[@shstrndx.to_i32], h.name_off)
+  end
+
+  def read_header : Nil
+    return if @failure
+    unless need(0_i64, ElfConst::EHDR_SIZE, "the ELF header")
+      return
+    end
+    unless word(0_i64, 4) == ElfConst::MAGIC && byte(4_i64) == ElfConst::CLASS64 && byte(5_i64) == ElfConst::LITTLE
+      reject("the file is not a 64-bit little-endian ELF object")
+      return
+    end
+    unless word(16_i64, 2) == ElfConst::ET_REL
+      reject("the ELF file is not a relocatable object (e_type #{word(16_i64, 2)})")
+      return
+    end
+    machine = word(18_i64, 2)
+    want = @x86 ? ElfConst::EM_X86_64 : ElfConst::EM_AARCH64
+    unless machine == want
+      reject("the object's machine #{machine} is not #{elf_arch_name(@x86)}")
+    end
+  end
+
+  def read_headers : Nil
+    return if @failure
+    shoff = word(40_i64, 8)
+    shentsize = word(58_i64, 2)
+    count = word(60_i64, 2)
+    @shstrndx = word(62_i64, 2)
+    if shentsize != ElfConst::SHDR_SIZE || count == 0_i64 || @shstrndx == 0_i64 || @shstrndx >= count
+      reject("the section header table is malformed (entry size #{shentsize}, count #{count}, name table #{@shstrndx})")
+      return
+    end
+    unless need(shoff, count * ElfConst::SHDR_SIZE, "the section header table")
+      return
+    end
+    i = 0_i64
+    while i < count
+      at = shoff + i * ElfConst::SHDR_SIZE
+      @headers << ElfHeaderEntry.new(word(at, 4), word(at + 4_i64, 4), word(at + 8_i64, 8), word(at + 24_i64, 8), word(at + 32_i64, 8), word(at + 40_i64, 4), word(at + 44_i64, 4), word(at + 48_i64, 8), word(at + 56_i64, 8))
+      i = i + 1_i64
+    end
+  end
+
+  # Finds the one symbol table and its string table, and assigns each section its model index. The section name
+  # table and the symbol string table are not model sections.
+  def classify : Nil
+    return if @failure
+    n = @headers.size.to_i64
+    i = 1_i64
+    while i < n
+      h = @headers[i.to_i32]
+      if h.type == ElfConst::SHT_SYMTAB
+        if @symtab >= 0_i64
+          reject("the object has two symbol tables")
+          return
+        end
+        @symtab = i
+      end
+      i = i + 1_i64
+    end
+    if @symtab < 0_i64
+      reject("the object has no symbol table")
+      return
+    end
+    @strtab = @headers[@symtab.to_i32].link
+    if @strtab <= 0_i64 || @strtab >= n || @headers[@strtab.to_i32].type != ElfConst::SHT_STRTAB
+      reject("the symbol table names no string table")
+      return
+    end
+    unless need(@headers[@shstrndx.to_i32].offset, @headers[@shstrndx.to_i32].size, "the section name table")
+      return
+    end
+    i = 0_i64
+    while i < n
+      h = @headers[i.to_i32]
+      if i == 0_i64 || i == @symtab || i == @shstrndx || i == @strtab || h.type == ElfConst::SHT_RELA
+        @model_of << -1_i64
+      elsif h.type == ElfConst::SHT_STRTAB
+        reject("section #{i} is a string table the reader does not take")
+        @model_of << -1_i64
+      elsif h.type == ElfConst::SHT_GROUP && @drop_groups
+        @model_of << -1_i64
+      elsif h.type == ElfConst::SHT_GROUP || h.type == ElfConst::SHT_SYMTAB_SHNDX
+        reject("section #{i} is of type #{h.type}, which the reader does not take")
+        @model_of << -1_i64
+      else
+        @model_of << @model_count
+        @model_count = @model_count + 1_i64
+      end
+      i = i + 1_i64
+    end
+  end
+
+  def section_kind(h : ElfHeaderEntry, name : String) : SectionKind
+    tls = (h.flags & ElfConst::SHF_TLS) != 0_i64
+    if h.type == ElfConst::SHT_NOBITS
+      return tls ? SectionKind::TlsZeroFill : SectionKind::ZeroFill
+    end
+    return SectionKind::TlsData if tls
+    return SectionKind::Unwind if h.type == ElfConst::SHT_X86_64_UNWIND || name == ".eh_frame"
+    return SectionKind::Text if (h.flags & ElfConst::SHF_EXECINSTR) != 0_i64
+    return SectionKind::Other if (h.flags & ElfConst::SHF_ALLOC) == 0_i64
+    return SectionKind::Data if (h.flags & ElfConst::SHF_WRITE) != 0_i64
+    SectionKind::ReadOnly
+  end
+
+  def read_sections : Nil
+    return if @failure
+    i = 0
+    while i < @headers.size
+      if @model_of[i] >= 0_i64
+        h = @headers[i]
+        name = name_of(h)
+        flags = (h.flags & ElfConst::TYPED_MASK) | h.type.unsafe_shl(ElfConst::TYPE_SHIFT)
+        bytes = Slice(UInt8).new(0)
+        if h.type != ElfConst::SHT_NOBITS
+          unless need(h.offset, h.size, "section #{name}")
+            return
+          end
+          bytes = Slice(UInt8).new(h.size.to_i32)
+          k = 0
+          while k < bytes.size
+            bytes[k] = @data[(h.offset + k.to_i64).to_i32]
+            k = k + 1
+          end
+        end
+        sec = Section.new(name, section_kind(h, name), h.align.to_i32, bytes, h.size, [] of Reloc, flags)
+        sec.entsize = h.entsize
+        @sections << sec
+      end
+      i = i + 1
+    end
+  end
+
+  def read_symbols : Nil
+    return if @failure
+    st = @headers[@symtab.to_i32]
+    str = @headers[@strtab.to_i32]
+    unless st.size % ElfConst::SYM_SIZE == 0_i64 && need(st.offset, st.size, "the symbol table")
+      reject("the symbol table is not a whole number of entries")
+      return
+    end
+    count = st.size // ElfConst::SYM_SIZE
+    k = 1_i64
+    while k < count
+      at = st.offset + k * ElfConst::SYM_SIZE
+      name = string_at(str, word(at, 4))
+      info = word(at + 4_i64, 1)
+      other = word(at + 5_i64, 1)
+      shndx = word(at + 6_i64, 2)
+      value = word(at + 8_i64, 8)
+      size = word(at + 16_i64, 8)
+      bind = info.unsafe_shr(4_i64)
+      typ = info & 0xf_i64
+      binding = SymbolBinding::Global
+      if bind == ElfConst::STB_LOCAL
+        binding = SymbolBinding::Local
+      elsif bind == ElfConst::STB_GLOBAL
+        binding = SymbolBinding::Global
+      elsif bind == ElfConst::STB_WEAK
+        binding = SymbolBinding::Weak
+      else
+        reject("symbol #{name} has binding #{bind}, which the reader does not take")
+        return
+      end
+      section = -1_i64
+      kind = SymbolKind::Undefined
+      if shndx == ElfConst::SHN_UNDEF
+        if binding == SymbolBinding::Local
+          reject("symbol #{name} is undefined and local, which the model cannot state")
+          return
+        end
+      elsif shndx == ElfConst::SHN_ABS
+        kind = SymbolKind::Absolute
+      elsif shndx >= ElfConst::SHN_LORESERVE
+        reject("symbol #{name} has section index #{shndx}, which the reader does not take")
+        return
+      else
+        section = @model_of[shndx.to_i32]
+        if section < 0_i64
+          reject("symbol #{name} is defined in section #{shndx}, which is not a model section")
+          return
+        end
+        if typ == ElfConst::STT_SECTION
+          kind = SymbolKind::Section
+        elsif typ == ElfConst::STT_FUNC
+          kind = SymbolKind::Func
+        elsif typ == ElfConst::STT_TLS
+          kind = SymbolKind::Tls
+        elsif typ == ElfConst::STT_OBJECT || typ == ElfConst::STT_NOTYPE
+          kind = SymbolKind::Object
+        else
+          reject("symbol #{name} has type #{typ} in a section, which the reader does not take")
+          return
+        end
+      end
+      if shndx == ElfConst::SHN_UNDEF || shndx == ElfConst::SHN_ABS
+        if typ == ElfConst::STT_FILE
+          kind = SymbolKind::Absolute
+        end
+      end
+      desc = other | typ.unsafe_shl(8_i64) | ElfConst::TYPED
+      @symbols << Symbol.new(name, kind, binding, section.to_i32, value, size, nil, desc, false)
+      k = k + 1_i64
+    end
+  end
+
+  def read_relocs : Nil
+    return if @failure
+    i = 0
+    while i < @headers.size
+      h = @headers[i]
+      if h.type == ElfConst::SHT_RELA
+        target = h.info
+        if target <= 0_i64 || target >= @headers.size.to_i64 || @model_of[target.to_i32] < 0_i64
+          reject("a relocation section applies to a section the reader does not take")
+          return
+        end
+        unless h.entsize == ElfConst::RELA_SIZE && need(h.offset, h.size, "a relocation section")
+          reject("a relocation section is malformed")
+          return
+        end
+        sec = @sections[@model_of[target.to_i32].to_i32]
+        count = h.size // ElfConst::RELA_SIZE
+        k = 0_i64
+        while k < count
+          at = h.offset + k * ElfConst::RELA_SIZE
+          offset = word(at, 8)
+          info = word(at + 8_i64, 8)
+          addend = word(at + 16_i64, 8)
+          sym = info.unsafe_shr(32_i64)
+          typ = info & 0xffffffff_i64
+          if sym == 0_i64 || sym > @symbols.size.to_i64
+            reject("relocation #{k} of #{sec.name} names symbol #{sym}, which is not one the object defines")
+            return
+          end
+          code = elf_kind_code(typ, @x86)
+          if code < 0_i64
+            reject("relocation #{k} of #{sec.name} has type #{typ}, which the reader does not take on #{elf_arch_name(@x86)}")
+            return
+          end
+          sec.relocs << Reloc.new(offset, elf_kind_of_code(code), (sym - 1_i64).to_i32, addend)
+          k = k + 1_i64
+        end
+      end
+      i = i + 1
+    end
+  end
+end
+
+# The ELF writer's view of one object: where each part lands in the file and what each symbol and relocation
+# holds in ELF numbers.
+class ElfWriter
+  property obj : ObjectFile
+  property x86 : Bool
+  property buf : Array(UInt8)
+  property strtab : Array(UInt8)
+  property strings : Hash(String, Int64)
+  property order : Array(Int32)
+  property nlocal : Int64
+  property elf_sym : Array(Int64)
+  property sec_name : Array(Int64)
+  property rela_name : Array(Int64)
+  property sec_off : Array(Int64)
+  property rela_off : Array(Int64)
+  property sec_elf : Array(Int64)
+  property rela_elf : Array(Int64)
+  property sym_name : Array(Int64)
+  property strtab_name : Int64
+  property symtab_name : Int64
+  property sym_off : Int64
+  property strtab_off : Int64
+  property shoff : Int64
+  property shnum : Int64
+  property symtab_elf : Int64
+
+  def initialize(@obj : ObjectFile)
+    @x86 = @obj.target.architecture == "x86_64"
+    @buf = [] of UInt8
+    @strtab = [] of UInt8
+    @strings = Hash(String, Int64).new
+    @order = [] of Int32
+    @nlocal = 0_i64
+    @elf_sym = [] of Int64
+    @sec_name = [] of Int64
+    @rela_name = [] of Int64
+    @sec_off = [] of Int64
+    @rela_off = [] of Int64
+    @sec_elf = [] of Int64
+    @rela_elf = [] of Int64
+    @sym_name = [] of Int64
+    @strtab_name = 0_i64
+    @symtab_name = 0_i64
+    @sym_off = 0_i64
+    @strtab_off = 0_i64
+    @shoff = 0_i64
+    @shnum = 0_i64
+    @symtab_elf = 0_i64
+  end
+
+  def write : ::Std::Slice::Bytes
+    unless @obj.format == ObjFormat::Elf
+      raise "the ELF writer writes ELF objects, not another format"
+    end
+    arch = @obj.target.architecture
+    unless arch == "x86_64" || arch == "aarch64"
+      raise "the ELF writer writes x86_64 and aarch64 objects, not #{arch}"
+    end
+    partition_symbols
+    build_strtab
+    layout
+    emit
+  end
+
+  def sec_is_nobits(sec : Section) : Bool
+    sec.kind == SectionKind::ZeroFill || sec.kind == SectionKind::TlsZeroFill
+  end
+
+  def sec_type(sec : Section) : Int64
+    t = sec.flags.unsafe_shr(ElfConst::TYPE_SHIFT)
+    return t if t != 0_i64
+    return ElfConst::SHT_NOBITS if sec_is_nobits(sec)
+    ElfConst::SHT_PROGBITS
+  end
+
+  def sec_flags(sec : Section) : Int64
+    return sec.flags & ElfConst::TYPED_MASK if sec.flags.unsafe_shr(ElfConst::TYPE_SHIFT) != 0_i64
+    return 6_i64 if sec.kind == SectionKind::Text
+    return 2_i64 if sec.kind == SectionKind::ReadOnly || sec.kind == SectionKind::Unwind
+    return 3_i64 if sec.kind == SectionKind::Data || sec.kind == SectionKind::ZeroFill
+    return 0x403_i64 if sec.kind == SectionKind::TlsData || sec.kind == SectionKind::TlsZeroFill
+    0_i64
+  end
+
+  # Locals first, then the rest, each in model order; ELF numbers the first real symbol 1.
+  def partition_symbols : Nil
+    syms = @obj.symbols
+    i = 0
+    while i < syms.size
+      @elf_sym << 0_i64
+      if syms[i].binding == SymbolBinding::Local && syms[i].kind == SymbolKind::Undefined
+        raise "symbol #{syms[i].name} is undefined and local, which ELF cannot state"
+      end
+      i = i + 1
+    end
+    pass = 0
+    while pass < 2
+      i = 0
+      while i < syms.size
+        local = syms[i].binding == SymbolBinding::Local
+        if (pass == 0 && local) || (pass == 1 && !local)
+          @order << i.to_i32
+          if pass == 0
+            @nlocal = @nlocal + 1_i64
+          end
+        end
+        i = i + 1
+      end
+      pass = pass + 1
+    end
+    p = 0
+    while p < @order.size
+      @elf_sym[@order[p]] = p.to_i64 + 1_i64
+      p = p + 1
+    end
+  end
+
+  def add(name : String) : Int64
+    known = @strings[name]?
+    return known.as(Int64) unless known.nil?
+    at = @strtab.size.to_i64
+    @strings[name] = at
+    if name.bytesize == 0
+      return 0_i64
+    end
+    i = 0
+    while i < name.bytesize
+      @strtab << name.byte_at(i)
+      i = i + 1
+    end
+    @strtab << 0_u8
+    at
+  end
+
+  def build_strtab : Nil
+    @strtab << 0_u8
+    @strings[""] = 0_i64
+    @strtab_name = add(".strtab")
+    @symtab_name = add(".symtab")
+    @obj.sections.each do |sec|
+      @sec_name << add(sec.name)
+      if sec.relocs.size > 0
+        @rela_name << add(".rela" + sec.name)
+      else
+        @rela_name << 0_i64
+      end
+    end
+    @obj.symbols.each do |sym|
+      @sym_name << add(sym.name)
+    end
+  end
+
+  def layout : Nil
+    pos = ElfConst::EHDR_SIZE
+    @obj.sections.each do |sec|
+      if sec_is_nobits(sec)
+        @sec_off << elf_align(pos, sec.align.to_i64)
+      else
+        if sec.bytes.size.to_i64 != sec.size
+          raise "section #{sec.name} holds #{sec.bytes.size} bytes but declares #{sec.size}"
+        end
+        pos = elf_align(pos, sec.align.to_i64)
+        @sec_off << pos
+        pos = pos + sec.size
+      end
+    end
+    pos = elf_align(pos, 8_i64)
+    @sym_off = pos
+    pos = pos + (@obj.symbols.size.to_i64 + 1_i64) * ElfConst::SYM_SIZE
+    @obj.sections.each do |sec|
+      if sec.relocs.size > 0
+        pos = elf_align(pos, 8_i64)
+        @rela_off << pos
+        pos = pos + sec.relocs.size.to_i64 * ElfConst::RELA_SIZE
+      else
+        @rela_off << 0_i64
+      end
+    end
+    @strtab_off = pos
+    pos = pos + @strtab.size.to_i64
+    @shoff = elf_align(pos, 8_i64)
+    next_index = 2_i64
+    @obj.sections.each do |sec|
+      @sec_elf << next_index
+      next_index = next_index + 1_i64
+      if sec.relocs.size > 0
+        @rela_elf << next_index
+        next_index = next_index + 1_i64
+      else
+        @rela_elf << 0_i64
+      end
+    end
+    @symtab_elf = next_index
+    @shnum = next_index + 1_i64
+  end
+
+  def poke(at : Int64, value : Int64, width : Int32) : Nil
+    i = 0
+    while i < width
+      @buf[(at + i.to_i64).to_i32] = (value.unsafe_shr(i.to_i64 * 8_i64) & 0xff_i64).to_u8
+      i = i + 1
+    end
+  end
+
+  def put_header(index : Int64, name : Int64, type : Int64, flags : Int64, offset : Int64, size : Int64, link : Int64, info : Int64, align : Int64, entsize : Int64) : Nil
+    at = @shoff + index * ElfConst::SHDR_SIZE
+    poke(at, name, 4)
+    poke(at + 4_i64, type, 4)
+    poke(at + 8_i64, flags, 8)
+    poke(at + 16_i64, 0_i64, 8)
+    poke(at + 24_i64, offset, 8)
+    poke(at + 32_i64, size, 8)
+    poke(at + 40_i64, link, 4)
+    poke(at + 44_i64, info, 4)
+    poke(at + 48_i64, align, 8)
+    poke(at + 56_i64, entsize, 8)
+  end
+
+  def symbol_type(sym : Symbol) : Int64
+    if (sym.desc & ElfConst::TYPED) != 0_i64
+      return sym.desc.unsafe_shr(8_i64) & 0xff_i64
+    end
+    return ElfConst::STT_FUNC if sym.kind == SymbolKind::Func
+    return ElfConst::STT_OBJECT if sym.kind == SymbolKind::Object
+    return ElfConst::STT_TLS if sym.kind == SymbolKind::Tls
+    return ElfConst::STT_SECTION if sym.kind == SymbolKind::Section
+    ElfConst::STT_NOTYPE
+  end
+
+  def symbol_bind(sym : Symbol) : Int64
+    return ElfConst::STB_LOCAL if sym.binding == SymbolBinding::Local
+    return ElfConst::STB_WEAK if sym.binding == SymbolBinding::Weak
+    ElfConst::STB_GLOBAL
+  end
+
+  def emit : ::Std::Slice::Bytes
+    total = @shoff + @shnum * ElfConst::SHDR_SIZE
+    @buf = [] of UInt8
+    i = 0_i64
+    while i < total
+      @buf << 0_u8
+      i = i + 1_i64
+    end
+    poke(0_i64, ElfConst::MAGIC, 4)
+    poke(4_i64, ElfConst::CLASS64, 1)
+    poke(5_i64, ElfConst::LITTLE, 1)
+    poke(6_i64, 1_i64, 1)
+    poke(16_i64, ElfConst::ET_REL, 2)
+    poke(18_i64, @x86 ? ElfConst::EM_X86_64 : ElfConst::EM_AARCH64, 2)
+    poke(20_i64, 1_i64, 4)
+    poke(40_i64, @shoff, 8)
+    poke(52_i64, ElfConst::EHDR_SIZE, 2)
+    poke(58_i64, ElfConst::SHDR_SIZE, 2)
+    poke(60_i64, @shnum, 2)
+    poke(62_i64, 1_i64, 2)
+    emit_sections
+    emit_symbols
+    emit_relocs
+    i = 0_i64
+    while i < @strtab.size.to_i64
+      @buf[(@strtab_off + i).to_i32] = @strtab[i.to_i32]
+      i = i + 1_i64
+    end
+    put_header(1_i64, @strtab_name, ElfConst::SHT_STRTAB, 0_i64, @strtab_off, @strtab.size.to_i64, 0_i64, 0_i64, 1_i64, 0_i64)
+    k = 0
+    while k < @obj.sections.size
+      sec = @obj.sections[k]
+      put_header(@sec_elf[k], @sec_name[k], sec_type(sec), sec_flags(sec), @sec_off[k], sec.size, 0_i64, 0_i64, sec.align.to_i64, sec.entsize)
+      if sec.relocs.size > 0
+        put_header(@rela_elf[k], @rela_name[k], ElfConst::SHT_RELA, ElfConst::SHF_INFO_LINK, @rela_off[k], sec.relocs.size.to_i64 * ElfConst::RELA_SIZE, @symtab_elf, @sec_elf[k], 8_i64, ElfConst::RELA_SIZE)
+      end
+      k = k + 1
+    end
+    put_header(@symtab_elf, @symtab_name, ElfConst::SHT_SYMTAB, 0_i64, @sym_off, (@obj.symbols.size.to_i64 + 1_i64) * ElfConst::SYM_SIZE, 1_i64, @nlocal + 1_i64, 8_i64, ElfConst::SYM_SIZE)
+    array_bytes(@buf)
+  end
+
+  def emit_sections : Nil
+    k = 0
+    while k < @obj.sections.size
+      sec = @obj.sections[k]
+      unless sec_is_nobits(sec)
+        i = 0
+        while i < sec.bytes.size
+          @buf[(@sec_off[k] + i.to_i64).to_i32] = sec.bytes[i]
+          i = i + 1
+        end
+      end
+      k = k + 1
+    end
+  end
+
+  def emit_symbols : Nil
+    p = 0
+    while p < @order.size
+      m = @order[p]
+      sym = @obj.symbols[m]
+      at = @sym_off + (p.to_i64 + 1_i64) * ElfConst::SYM_SIZE
+      section_index = 0_i64
+      if sym.kind == SymbolKind::Absolute
+        section_index = ElfConst::SHN_ABS
+      elsif sym.kind != SymbolKind::Undefined && sym.section >= 0
+        section_index = @sec_elf[sym.section]
+      end
+      poke(at, @sym_name[m], 4)
+      poke(at + 4_i64, symbol_bind(sym).unsafe_shl(4_i64) | symbol_type(sym), 1)
+      poke(at + 5_i64, sym.desc & 0xff_i64, 1)
+      poke(at + 6_i64, section_index, 2)
+      poke(at + 8_i64, sym.value, 8)
+      poke(at + 16_i64, sym.size, 8)
+      p = p + 1
+    end
+  end
+
+  def emit_relocs : Nil
+    k = 0
+    while k < @obj.sections.size
+      sec = @obj.sections[k]
+      r = 0
+      while r < sec.relocs.size
+        reloc = sec.relocs[r]
+        typ = elf_type_of(reloc.kind, @x86)
+        if typ < 0_i64
+          raise "section #{sec.name} relocation #{reloc.kind} has no ELF form on #{elf_arch_name(@x86)}"
+        end
+        if reloc.symbol < 0 || reloc.symbol >= @obj.symbols.size
+          raise "section #{sec.name} relocation names symbol #{reloc.symbol}, which the object does not define"
+        end
+        at = @rela_off[k] + r.to_i64 * ElfConst::RELA_SIZE
+        poke(at, reloc.offset, 8)
+        poke(at + 8_i64, @elf_sym[reloc.symbol].unsafe_shl(32_i64) | typ, 8)
+        poke(at + 16_i64, reloc.addend, 8)
+        r = r + 1
+      end
+      k = k + 1
+    end
+  end
+end
+
+def array_bytes(buf : Array(UInt8)) : Bytes
+  out = Slice(UInt8).new(buf.size)
+  i = 0
+  while i < buf.size
+    out[i] = buf[i]
+    i = i + 1
+  end
+  out
+end
+
+# Reads an ELF object of x86_64 or aarch64. Returns the object, or the reason it does not read.
+pub def read_object(bytes : ::Std::Slice::Bytes, target : ::Compiler::Platform::Target::Target) : ObjectFile | ObjError
+  ElfReader.new(bytes, target).read
+end
+
+# Reads an object for the linker: as read_object, but COMDAT group sections are dropped rather than refused. Their
+# members stay in the link, so a weak definition links once; a duplicated strong one is a link error. The object
+# writer does not carry the groups, so an object read this way is not written back for an exact round trip.
+pub def read_object_linkable(bytes : ::Std::Slice::Bytes, target : ::Compiler::Platform::Target::Target) : ObjectFile | ObjError
+  reader = ElfReader.new(bytes, target)
+  reader.drop_groups = true
+  reader.read
+end
+
+# Writes an ELF object of x86_64 or aarch64. A model the format cannot state raises, naming the part at fault.
+pub def write_object(obj : ObjectFile) : ::Std::Slice::Bytes
+  ElfWriter.new(obj).write
+end

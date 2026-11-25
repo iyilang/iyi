@@ -1,0 +1,400 @@
+@[Unsafe("The exercise checks LLVM's raw context and module handles for null through to_unsafe, and drives the C API with them. Those raw handles are what this test compares, and the compiler does not check them.")]
+import compiler/llvm
+import compiler/llvm/target::{Target, TargetData, TargetMachine}
+import compiler/llvm/context::{Context}
+import compiler/llvm/values::{LLVMType, LLVMValue, LLVMFunction, LLVMBasicBlock, Type, Value, Function, BasicBlock}
+import compiler/llvm/module::{Module}
+import compiler/llvm/builder::{Builder}
+import compiler/llvm/pass_manager::{PassBuilderOptions, ModulePassManager, run_passes}
+import compiler/llvm/memory_buffer::{MemoryBuffer}
+
+module BenchSelfhostLlvmExercise
+  def self.assert(cond : Bool, msg : String)
+    unless cond
+      puts "Assertion failed: " + msg
+      raise "Assertion failed: " + msg
+    end
+  end
+
+  # True when LLVM's target registry holds a target of this name.
+  def self.registered?(llvm_name : String) : Bool
+    found = false
+    Target.each do |t|
+      found = true if t.name == llvm_name
+    end
+    found
+  end
+
+  def self.run_all(output_dir : String)
+    puts "== 1. Target initialization & identification"
+    Target.init_native_target
+    Target.init_all_targets
+
+    # `init_target` answers whether the linked LLVM carries the target. The release build links a static LLVM
+    # built with five targets and no RISC-V, so the answer is checked against LLVM's own registry rather than
+    # assumed true: a carried target is registered under its LLVM name, and one that is not carried is not.
+    assert(Target.init_target("aarch64") == registered?("aarch64"), "init_target aarch64 agrees with the registry")
+    assert(Target.init_target("x86_64") == registered?("x86-64"), "init_target x86_64 agrees with the registry")
+    assert(Target.init_target("arm") == registered?("arm"), "init_target arm agrees with the registry")
+    assert(Target.init_target("webassembly") == registered?("wasm32"), "init_target webassembly agrees with the registry")
+    assert(Target.init_target("riscv") == registered?("riscv64"), "init_target riscv agrees with the registry")
+    assert(registered?("aarch64") || registered?("x86-64"), "the registry lists a target this LLVM was built with")
+    assert(!Target.init_target("nonexistent_target_xyz"), "init_target unknown should return false")
+
+    default_triple = Target.default_target_triple
+    assert(!default_triple.empty?, "default_target_triple not empty")
+    normalized_triple = Target.normalize_triple(default_triple)
+    assert(!normalized_triple.empty?, "normalize_triple not empty")
+
+    cpu_name = Target.host_cpu_name
+    puts "  Target triple: #{default_triple}, Host CPU: #{cpu_name}"
+
+    target_count = 0
+    Target.each do |_t|
+      target_count = target_count + 1
+    end
+    assert(target_count > 0, "Target.each found targets")
+
+    first_target = Target.first
+    assert(!first_target.name.empty?, "Target.first has name")
+    assert(!first_target.description.empty?, "Target.first has description")
+
+    native_target = Target.from_triple(default_triple)
+    assert(!native_target.name.empty?, "native_target has name")
+
+    tm = native_target.create_target_machine(default_triple, "", "",
+      LibLLVM::CodeGenOptLevel::Default,
+      LibLLVM::RelocMode::PIC,
+      LibLLVM::CodeModel::Default)
+    assert(!tm.triple.empty?, "tm has triple")
+
+    td = tm.data_layout
+    layout_str = td.to_s
+    assert(!layout_str.empty?, "data layout not empty")
+    puts "  Target machine created, data layout: #{layout_str}"
+
+    puts "== 2. Context & Type system"
+    ctx = Context.new
+    global_ctx = Context.global
+    assert(ctx.to_unsafe.address != 0, "Context.new created")
+    assert(global_ctx.to_unsafe.address != 0, "Context.global created")
+
+    v_ty = ctx.void
+    i1_ty = ctx.int1
+    i8_ty = ctx.int8
+    i16_ty = ctx.int16
+    i32_ty = ctx.int32
+    i64_ty = ctx.int64
+    i128_ty = ctx.int128
+    i24_ty = ctx.int(24)
+    f16_ty = ctx.half
+    f32_ty = ctx.float
+    f64_ty = ctx.double
+    ptr_ty = ctx.pointer
+
+    assert(v_ty.void?, "void?")
+    assert(i1_ty.int?, "int1 int?")
+    assert(i1_ty.int_width == 1, "int1 width == 1")
+    assert(i8_ty.int_width == 8, "i8 width == 8")
+    assert(i16_ty.int_width == 16, "i16 width == 16")
+    assert(i32_ty.int_width == 32, "i32 width == 32")
+    assert(i64_ty.int_width == 64, "i64 width == 64")
+    assert(i128_ty.int_width == 128, "i128 width == 128")
+    assert(i24_ty.int_width == 24, "i24 width == 24")
+    assert(f16_ty.half?, "half?")
+    assert(f32_ty.float?, "float?")
+    assert(f64_ty.double?, "double?")
+    assert(ptr_ty.pointer?, "pointer?")
+
+    # Arrays & Vectors
+    arr_ty = i32_ty.array(10)
+    assert(arr_ty.array?, "array?")
+    assert(arr_ty.array_length == 10, "array length == 10")
+    assert(arr_ty.element_type.int_width == 32, "array element int width == 32")
+
+    vec_ty = f32_ty.vector(4)
+    assert(vec_ty.vector?, "vector?")
+    assert(vec_ty.vector_size == 4, "vector size == 4")
+
+    # Structs
+    anon_struct = ctx.struct([i32_ty, f64_ty, ptr_ty], false)
+    assert(anon_struct.struct?, "struct?")
+    assert(anon_struct.struct_element_types.size == 3, "struct element count == 3")
+    assert(!anon_struct.packed_struct?, "anon struct not packed")
+
+    packed_struct = ctx.struct([i8_ty, i32_ty], true)
+    assert(packed_struct.packed_struct?, "packed struct is packed")
+
+    named_struct = ctx.struct_named("TestNamedStruct")
+    assert(named_struct.struct?, "named struct?")
+    assert(named_struct.struct_name == "TestNamedStruct", "struct name matches")
+    named_struct.struct_set_body([i64_ty, f64_ty])
+    assert(named_struct.struct_element_types.size == 2, "named struct element count == 2")
+
+    # Functions
+    fn_ty = LLVMType.function([i32_ty, i32_ty], i32_ty, false)
+    assert(fn_ty.function?, "function?")
+    assert(fn_ty.param_count == 2, "param_count == 2")
+    assert(fn_ty.param_types.size == 2, "param_types.size == 2")
+    assert(fn_ty.return_type.int_width == 32, "return_type int width == 32")
+    assert(!fn_ty.varargs?, "varargs == false")
+
+    vararg_fn_ty = LLVMType.function([ptr_ty], i32_ty, true)
+    assert(vararg_fn_ty.varargs?, "varargs == true")
+
+    # TargetData checks
+    i64_bits = td.size_of_type_in_bits(i64_ty.to_unsafe)
+    assert(i64_bits == 64_u64, "i64 size in bits == 64")
+    i64_abi_size = td.abi_size_of_type(i64_ty.to_unsafe)
+    assert(i64_abi_size == 8_u64, "i64 abi size == 8")
+    i64_align = td.abi_alignment_of_type(i64_ty.to_unsafe)
+    assert(i64_align > 0, "i64 alignment > 0")
+
+    puts "== 3. Constants & Values"
+    c_int_zero = i32_ty.const_int(0)
+    c_int_42 = i32_ty.const_int(42)
+    c_int_neg = i32_ty.const_int(-7_i64, true)
+    assert(c_int_42.constant?, "c_int_42 is constant")
+    assert(c_int_42.const_int_zext_value == 42_u64, "const_int_zext_value == 42")
+    assert(c_int_neg.const_int_sext_value == -7_i64, "const_int_sext_value == -7")
+
+    c_float = f64_ty.const_float(3.14159)
+    assert(c_float.constant?, "c_float is constant")
+
+    c_null = ptr_ty.null
+    assert(c_null.null?, "c_null is null")
+
+    c_undef = i32_ty.undef
+    assert(c_undef.undef?, "c_undef is undef")
+
+    c_str = ctx.const_string("hello llvm")
+    assert(c_str.constant?, "c_str is constant")
+
+    c_size = i32_ty.size_of
+    assert(c_size.constant?, "size_of is constant")
+
+    puts "== 4. Module construction, globals & functions"
+    mod = Module.new("selfhost_test_module", ctx)
+    assert(mod.name == "selfhost_test_module", "module name matches")
+    mod.name = "selfhost_mod_renamed"
+    assert(mod.name == "selfhost_mod_renamed", "module rename matches")
+
+    mod.target = default_triple
+    assert(!mod.target.empty?, "module target set")
+    mod.data_layout = td
+
+    # Add global variable
+    glob = mod.add_global("my_global_var", i32_ty)
+    glob.name = "my_global_int"
+    assert(glob.name == "my_global_int", "global name matches")
+    LibLLVM.set_initializer(glob.to_unsafe, c_int_42.to_unsafe)
+    assert(mod.globals.size == 1, "globals count == 1")
+    assert(mod.get_global?("my_global_int") != nil, "get_global? finds variable")
+    assert(mod.get_global?("nonexistent_global") == nil, "get_global? missing is nil")
+
+    # Add functions
+    # 1. int add_numbers(int a, int b)
+    add_fn = mod.add_function("add_numbers", fn_ty)
+    add_fn.linkage = LibLLVM::Linkage::External
+    add_fn.call_convention = LibLLVM::CallConvention::C
+    assert(add_fn.name == "add_numbers", "add_fn name matches")
+    assert(add_fn.param_count == 2, "add_fn params == 2")
+    assert(add_fn.params.size == 2, "add_fn params list size == 2")
+
+    builder = Builder.new(ctx)
+    bb_entry = add_fn.append_basic_block("entry")
+    builder.position_at_end(bb_entry)
+    assert(builder.insert_block != nil, "insert_block is non-nil")
+
+    arg_a = add_fn.param(0)
+    arg_b = add_fn.param(1)
+    arg_a.name = "a"
+    arg_b.name = "b"
+
+    sum_val = builder.add(arg_a, arg_b, "sum")
+    builder.ret(sum_val)
+
+    # 2. int factorial(int n)
+    # Loop implementation of factorial
+    fact_fn_ty = LLVMType.function([i32_ty], i32_ty, false)
+    fact_fn = mod.add_function("factorial", fact_fn_ty)
+    fact_fn.linkage = LibLLVM::Linkage::External
+
+    fact_entry = fact_fn.append_basic_block("entry")
+    fact_loop = fact_fn.append_basic_block("loop")
+    fact_exit = fact_fn.append_basic_block("exit")
+
+    builder.position_at_end(fact_entry)
+    n_arg = fact_fn.param(0)
+    n_arg.name = "n"
+
+    one = i32_ty.const_int(1)
+    two = i32_ty.const_int(2)
+    builder.br(fact_loop)
+
+    builder.position_at_end(fact_loop)
+    i_phi = builder.phi(i32_ty, "i")
+    acc_phi = builder.phi(i32_ty, "acc")
+
+    next_acc = builder.mul(acc_phi, i_phi, "next_acc")
+    next_i = builder.add(i_phi, one, "next_i")
+    cond = builder.icmp(LibLLVM::IntPredicate::SLE, next_i, n_arg, "cmp")
+
+    builder.add_incoming(i_phi, two, fact_entry)
+    builder.add_incoming(i_phi, next_i, fact_loop)
+    builder.add_incoming(acc_phi, one, fact_entry)
+    builder.add_incoming(acc_phi, next_acc, fact_loop)
+
+    builder.cond_br(cond, fact_loop, fact_exit)
+
+    builder.position_at_end(fact_exit)
+    builder.ret(next_acc)
+
+    # 3. Comprehensive Builder instruction smoke tests in helper function
+    helper_fn_ty = LLVMType.function([i32_ty, f64_ty], i32_ty, false)
+    helper_fn = mod.add_function("instruction_helper", helper_fn_ty)
+    h_bb = helper_fn.append_basic_block("entry")
+    builder.position_at_end(h_bb)
+
+    hi = helper_fn.param(0)
+    hf = helper_fn.param(1)
+    zero = i32_ty.const_int(0)
+
+    # Arithmetic
+    _sub = builder.sub(hi, one, "sub")
+    _sdiv = builder.sdiv(hi, two, "sdiv")
+    _udiv = builder.udiv(hi, two, "udiv")
+    _srem = builder.srem(hi, two, "srem")
+    _urem = builder.urem(hi, two, "urem")
+    _neg = builder.neg(hi, "neg")
+
+    c_f2 = f64_ty.const_float(2.0)
+    _fadd = builder.fadd(hf, c_f2, "fadd")
+    _fsub = builder.fsub(hf, c_f2, "fsub")
+    _fmul = builder.fmul(hf, c_f2, "fmul")
+    _fdiv = builder.fdiv(hf, c_f2, "fdiv")
+    _frem = builder.frem(hf, c_f2, "frem")
+    _fneg = builder.fneg(hf, "fneg")
+
+    # Bitwise
+    _and = builder.build_and(hi, one, "and")
+    _or = builder.build_or(hi, two, "or")
+    _xor = builder.build_xor(hi, one, "xor")
+    _not = builder.build_not(hi, "not")
+    _band = builder.bitwise_and(hi, one, "band")
+    _bor = builder.bitwise_or(hi, two, "bor")
+    _bxor = builder.bitwise_xor(hi, one, "bxor")
+    _bnot = builder.bitwise_not(hi, "bnot")
+    _shl = builder.shl(hi, one, "shl")
+    _lshr = builder.lshr(hi, one, "lshr")
+    _ashr = builder.ashr(hi, one, "ashr")
+    assert(_and.to_s.includes?("= and "), "_and emitted as and")
+    assert(_or.to_s.includes?("= or "), "_or emitted as or")
+    assert(_xor.to_s.includes?("= xor "), "_xor emitted as xor")
+    assert(_band.to_s.includes?("= and "), "_band emitted as and")
+    assert(_bor.to_s.includes?("= or "), "_bor emitted as or")
+
+    # Memory
+    slot = builder.alloca(i32_ty, "slot")
+    builder.store(hi, slot)
+    loaded = builder.load(i32_ty, slot, "loaded")
+
+    # Array allocation & GEP
+    arr_slot = builder.alloca_array(i32_ty, two, "arr_slot")
+    gep_elem = builder.inbounds_gep(i32_ty, arr_slot, [one], "gep_elem")
+    builder.store(loaded, gep_elem)
+
+    # Casts
+    _trunc = builder.trunc(hi, i8_ty, "trunc")
+    _zext = builder.zext(_trunc, i32_ty, "zext")
+    _sext = builder.sext(_trunc, i32_ty, "sext")
+    _fp2si = builder.fp_to_si(hf, i32_ty, "fp2si")
+    _si2fp = builder.si_to_fp(hi, f64_ty, "si2fp")
+    _bitcast = builder.bit_cast(hi, i32_ty, "bitcast")
+
+    # Comparisons & Select
+    icmp_res = builder.icmp(LibLLVM::IntPredicate::EQ, hi, zero, "icmp_res")
+    _fcmp_res = builder.fcmp(LibLLVM::RealPredicate::OGT, hf, c_f2, "fcmp_res")
+    sel_res = builder.select(icmp_res, one, hi, "sel_res")
+
+    # Call
+    call_res = builder.call(fn_ty, add_fn.to_value, [sel_res, one], "call_res")
+    builder.ret(call_res)
+
+    assert(mod.functions.size == 3, "module has 3 functions")
+    assert(mod.get_function?("add_numbers") != nil, "get_function? finds add_numbers")
+    assert(mod.get_function?("factorial") != nil, "get_function? finds factorial")
+    assert(mod.get_function?("nonexistent_fn") == nil, "get_function? nonexistent is nil")
+
+    puts "== 5. Verification"
+    assert(add_fn.verify, "add_fn verified")
+    assert(fact_fn.verify, "fact_fn verified")
+    assert(helper_fn.verify, "helper_fn verified")
+
+    verify_result, verify_err = mod.verify_safely
+    assert(verify_result, "module verify_safely passed")
+    mod.verify
+    puts "  Module and functions successfully verified"
+
+    # Test that verify fails on malformed module
+    bad_mod = Module.new("bad_module", ctx)
+    bad_fn = bad_mod.add_function("bad_func", fn_ty)
+    bad_bb = bad_fn.append_basic_block("bad_entry")
+    builder.position_at_end(bad_bb)
+    # Unterminated block is invalid LLVM IR
+    bad_ok, bad_msg = bad_mod.verify_safely
+    assert(!bad_ok, "bad module verification fails as expected")
+    assert(!bad_msg.empty?, "bad module returns error message")
+    bad_mod.dispose
+    puts "  Malformed module rejection: verified"
+
+    puts "== 6. Optimization passes (PassBuilder)"
+    opts = PassBuilderOptions.new
+    opts.loop_unrolling = true
+    opts.loop_vectorization = true
+    opts.slp_vectorization = true
+
+    run_passes(mod, "default<O2>", tm, opts)
+    mod.verify
+    puts "  Passes default<O2> executed successfully and re-verified"
+
+    puts "== 7. Object, Assembly, Bitcode emission"
+    obj_path = output_dir + "/selfhost_llvm_test.o"
+    asm_path = output_dir + "/selfhost_llvm_test.s"
+    bc_path = output_dir + "/selfhost_llvm_test.bc"
+
+    mod.emit_obj_to_file(tm, obj_path)
+    mod.emit_asm_to_file(tm, asm_path)
+    mod.write_bitcode_to_file(bc_path)
+
+    mem_buf = mod.write_bitcode_to_memory_buffer
+    assert(mem_buf.size > 0, "bitcode memory buffer has bytes")
+    mem_buf.dispose
+
+    obj_mem_buf = tm.emit_to_memory_buffer(mod.to_unsafe, LibLLVM::CodeGenFileType::ObjectFile)
+    assert(obj_mem_buf.size > 0, "object memory buffer has bytes")
+    obj_mem_buf.dispose
+
+    puts "  Files emitted: object, assembly, bitcode"
+
+    # Cleanup
+    opts.dispose
+    builder.dispose
+    td.dispose
+    tm.dispose
+    mod.dispose
+    ctx.dispose
+
+    puts "ALL SELFHOST LLVM CHECKS PASSED SUCCESSFULLY!"
+  end
+end
+
+sandbox = Program.env("TEST_SANDBOX")
+output_dir = if Program.args.size > 0
+               Program.args[0]
+             elsif sandbox && !sandbox.empty?
+               sandbox
+             else
+               "/tmp"
+             end
+BenchSelfhostLlvmExercise.run_all(output_dir)

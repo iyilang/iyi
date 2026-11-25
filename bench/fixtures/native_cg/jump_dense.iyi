@@ -1,0 +1,19 @@
+module jump_dense
+
+def dense(n : Int32) : Int32
+  case n
+  when 0 then 100
+  when 1 then 111
+  when 2 then 122
+  when 3 then 133
+  when 4 then 144
+  when 5 then 155
+  when 6 then 166
+  when 7 then 177
+  when 8 then 188
+  when 9 then 199
+  else        -1
+  end
+end
+
+puts "#{dense(3)} #{dense(9)} #{dense(10)} #{dense(-1)}"

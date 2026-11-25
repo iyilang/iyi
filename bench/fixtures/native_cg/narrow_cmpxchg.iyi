@@ -1,0 +1,7 @@
+module narrow_cmpxchg
+
+cell = 128_u8
+expected = 128_u8
+won = cell == expected
+cell = 42_u8 if won
+puts "#{won ? 1 : 0} #{cell.to_i32}"

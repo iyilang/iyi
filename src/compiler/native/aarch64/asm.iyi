@@ -1,0 +1,777 @@
+module compiler/native/aarch64/asm
+
+import compiler/native/obj/object::{RelocKind}
+import compiler/native/asm/constraints::{expand_template, ConstraintError, digits?}
+
+# The AArch64 assembler for the inline asm templates of the tree (SPEC 2.2,
+# C4). It encodes the instruction forms the inventory finds and nothing else:
+# every other mnemonic or operand is refused by name. A symbol reference is
+# written as a relocation C1's object model names, so the same bytes and
+# relocations come out for Mach-O and ELF: `sym@PAGE` and a bare symbol in
+# `adrp` are the page relocation, `sym@PAGEOFF` and `:lo12:sym` in `add` are
+# the low-twelve-bit relocation, and a branch to a symbol is a branch
+# relocation. Local labels `1:`, `1f` and `1b` resolve inside the template.
+
+# One relocation a template asks for. `offset` is in bytes from the start of
+# the encoding, `name` is the symbol as the object reader names it.
+pub class AsmReloc
+  getter offset : Int32
+  getter kind : RelocKind
+  getter name : String
+  getter addend : Int64
+
+  def initialize(@offset : Int32, @kind : RelocKind, @name : String, @addend : Int64)
+  end
+end
+
+# The result of assembling one template: one 32-bit word per instruction, the
+# relocations, and the refusal when the template is not in the supported set.
+pub class AsmEncoding
+  getter words : Array(Int64)
+  getter relocs : Array(AsmReloc)
+  getter failure : String?
+
+  def initialize(@words : Array(Int64), @relocs : Array(AsmReloc), @failure : String?)
+  end
+
+  # The instruction bytes, little-endian, as the object writer stores them.
+  def bytes : Array(UInt8)
+    acc = [] of UInt8
+    i = 0
+    while i < @words.size
+      w = @words[i]
+      acc << (w & 0xff_i64).to_u8
+      acc << ((w >> 8) & 0xff_i64).to_u8
+      acc << ((w >> 16) & 0xff_i64).to_u8
+      acc << ((w >> 24) & 0xff_i64).to_u8
+      i += 1
+    end
+    acc
+  end
+end
+
+# A branch or address whose target is a local label, patched once every label
+# is known. `kind` is 0 for a 19-bit word offset, 1 for a 26-bit word offset,
+# 2 for an ADR byte offset.
+pub class AsmFixup
+  getter index : Int32
+  getter label : String
+  getter forward : Bool
+  getter kind : Int32
+
+  def initialize(@index : Int32, @label : String, @forward : Bool, @kind : Int32)
+  end
+end
+
+pub class AsmAssembler
+  property macho : Bool
+
+  def initialize(@macho : Bool)
+    @words = [] of Int64
+    @relocs = [] of AsmReloc
+    @label_names = [] of String
+    @label_words = [] of Int32
+    @fixups = [] of AsmFixup
+    @failure = nil
+  end
+
+  # Assembles `template`. `registers` holds the register each `$N` names, in
+  # operand order: outputs first, then inputs.
+  def assemble(template : String, registers : Array(String)) : AsmEncoding
+    expanded = expand_template(template, registers)
+    if expanded.is_a?(ConstraintError)
+      return AsmEncoding.new([] of Int64, [] of AsmReloc, expanded.message)
+    end
+    text = expanded.as(String)
+    lines = text.split('\n')
+    i = 0
+    while i < lines.size && @failure.nil?
+      pieces = lines[i].split(';')
+      j = 0
+      while j < pieces.size && @failure.nil?
+        statement(pieces[j].strip)
+        j += 1
+      end
+      i += 1
+    end
+    resolve_fixups
+    if @failure.nil?
+      return AsmEncoding.new(@words, @relocs, nil)
+    end
+    AsmEncoding.new([] of Int64, [] of AsmReloc, @failure)
+  end
+
+  def fail(message : String) : Nil
+    if @failure.nil?
+      @failure = message
+    end
+  end
+
+  def emit(word : Int64) : Nil
+    @words << word
+  end
+
+  # Whether `byte` is a register letter the operand grammar accepts.
+  def reg_letter?(text : String, letter : Int32) : Bool
+    text.bytesize >= 2 && text.byte_at(0).to_i32 == letter && digits?(text[1, text.bytesize - 1])
+  end
+
+  # The register number of `text`: x0..x30, w0..w30, d0..d31, sp and the zero
+  # registers as 31. -1 when `text` is not a register.
+  def reg_code(text : String) : Int32
+    return 31 if text == "sp" || text == "xzr" || text == "wzr"
+    return -1 if text.bytesize < 2
+    letter = text.byte_at(0).to_i32
+    return -1 unless letter == 120 || letter == 119 || letter == 100
+    return -1 unless digits?(text[1, text.bytesize - 1])
+    n = text[1, text.bytesize - 1].to_i
+    limit = letter == 100 ? 31 : 30
+    return -1 if n > limit
+    n
+  end
+
+  def is_x?(text : String) : Bool
+    text == "sp" || text == "xzr" || reg_letter?(text, 120)
+  end
+
+  def is_w?(text : String) : Bool
+    text == "wzr" || reg_letter?(text, 119)
+  end
+
+  def is_d?(text : String) : Bool
+    reg_letter?(text, 100)
+  end
+
+  # The value of an immediate written `#n`, `#-n` or `#0xn`.
+  def imm_of(text : String) : Int64
+    if text.bytesize == 0 || text.byte_at(0).to_i32 != 35
+      fail("'#{text}' is not an immediate (#n)")
+      return 0_i64
+    end
+    body = text[1, text.bytesize - 1]
+    negative = false
+    if body.bytesize > 0 && body.byte_at(0).to_i32 == 45
+      negative = true
+      body = body[1, body.bytesize - 1]
+    end
+    value = 0_i64
+    if body.bytesize > 2 && body.byte_at(0).to_i32 == 48 && body.byte_at(1).to_i32 == 120
+      digits = body[2, body.bytesize - 2]
+      k = 0
+      while k < digits.bytesize
+        value = value * 16_i64 + hex_digit(digits.byte_at(k).to_i32)
+        k += 1
+      end
+    elsif digits?(body)
+      k = 0
+      while k < body.bytesize
+        value = value * 10_i64 + (body.byte_at(k).to_i32 - 48).to_i64
+        k += 1
+      end
+    else
+      fail("'#{text}' is not an immediate (#n)")
+      return 0_i64
+    end
+    negative ? -value : value
+  end
+
+  def hex_digit(b : Int32) : Int64
+    if b >= 48 && b <= 57
+      return (b - 48).to_i64
+    end
+    if b >= 97 && b <= 102
+      return (b - 87).to_i64
+    end
+    if b >= 65 && b <= 70
+      return (b - 55).to_i64
+    end
+    fail("a hexadecimal digit is expected")
+    0_i64
+  end
+
+  # Splits an operand list at the commas outside brackets.
+  def operands(rest : String) : Array(String)
+    acc = [] of String
+    return acc if rest.bytesize == 0
+    depth = 0
+    start = 0
+    i = 0
+    while i < rest.bytesize
+      b = rest.byte_at(i).to_i32
+      if b == 91
+        depth += 1
+      elsif b == 93
+        depth -= 1
+      elsif b == 44 && depth == 0
+        acc << rest[start, i - start].strip
+        start = i + 1
+      end
+      i += 1
+    end
+    acc << rest[start, rest.bytesize - start].strip
+    acc
+  end
+
+  # The relocation a symbol operand asks for: 0 plain, 1 `@PAGE`, 2 `@PAGEOFF`,
+  # 3 `:lo12:`. The name is the text without the modifier.
+  def sym_mod(text : String) : Int32
+    if text.starts_with?(":lo12:")
+      return 3
+    end
+    if text.ends_with?("@PAGEOFF")
+      return 2
+    end
+    if text.ends_with?("@PAGE")
+      return 1
+    end
+    0
+  end
+
+  def sym_name(text : String) : String
+    if text.starts_with?(":lo12:")
+      return text[6, text.bytesize - 6]
+    end
+    if text.ends_with?("@PAGEOFF")
+      return text[0, text.bytesize - 8]
+    end
+    if text.ends_with?("@PAGE")
+      return text[0, text.bytesize - 5]
+    end
+    text
+  end
+
+  def symbol_ok?(name : String) : Bool
+    return false if name.bytesize == 0
+    i = 0
+    while i < name.bytesize
+      b = name.byte_at(i).to_i32
+      ok = (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95 || (b >= 48 && b <= 57) || b == 46
+      return false unless ok
+      i += 1
+    end
+    true
+  end
+
+  # The name the object reader gives a symbol: Mach-O's leading underscore is
+  # the C prefix the reader removes.
+  def reloc_name(name : String) : String
+    if @macho && name.starts_with?("_")
+      return name[1, name.bytesize - 1]
+    end
+    name
+  end
+
+  # Mach-O's page relocation for `adrp`, and ELF's `ADR_PREL_PG_HI21`.
+  def page_reloc : RelocKind
+    RelocKind::A64AdrpPage21
+  end
+
+  # Mach-O's `PAGEOFF12` for `add`, and ELF's `ADD_ABS_LO12_NC`.
+  def lo12_reloc : RelocKind
+    RelocKind::A64AddLo12
+  end
+
+  def add_reloc(kind : RelocKind, name : String) : Nil
+    @relocs << AsmReloc.new(@words.size * 4, kind, reloc_name(name), 0_i64)
+  end
+
+  # The field a register number occupies, shifted by `shift` bits: the number
+  # times the field's place value.
+  def rn_field(reg : Int32) : Int64
+    reg.to_i64 * 32_i64
+  end
+
+  def rt2_field(reg : Int32) : Int64
+    reg.to_i64 * 1024_i64
+  end
+
+  def statement(line : String) : Nil
+    return if line.bytesize == 0
+    if line.byte_at(line.bytesize - 1).to_i32 == 58
+      label = line[0, line.bytesize - 1]
+      unless digits?(label)
+        fail("'#{line}': a label must be a local numeric label such as 1:")
+        return
+      end
+      @label_names << label
+      @label_words << @words.size
+      return
+    end
+    space = line.index(' ')
+    mnemonic = line
+    rest = ""
+    if space
+      mnemonic = line[0, space]
+      rest = line[space, line.bytesize - space].strip
+    end
+    ops = operands(rest)
+    if mnemonic == "mov"
+      enc_mov(ops)
+    elsif mnemonic == "movk"
+      enc_movk(ops)
+    elsif mnemonic == "add"
+      enc_add_sub(ops, false)
+    elsif mnemonic == "sub"
+      enc_add_sub(ops, true)
+    elsif mnemonic == "adrp"
+      enc_adrp(ops)
+    elsif mnemonic == "adr"
+      enc_adr(ops)
+    elsif mnemonic == "stp" || mnemonic == "ldp"
+      enc_pair(ops, mnemonic == "ldp")
+    elsif mnemonic == "str" || mnemonic == "ldr"
+      enc_single(ops, mnemonic == "ldr", false)
+    elsif mnemonic == "strb" || mnemonic == "ldrb"
+      enc_single(ops, mnemonic == "ldrb", true)
+    elsif mnemonic == "cbz" || mnemonic == "cbnz"
+      enc_cbz(ops, mnemonic == "cbnz")
+    elsif mnemonic == "b" || mnemonic == "bl"
+      enc_branch(ops, mnemonic == "bl")
+    elsif mnemonic == "blr"
+      enc_blr(ops)
+    elsif mnemonic == "ret"
+      enc_ret(ops)
+    elsif mnemonic == "svc"
+      enc_svc(ops)
+    elsif mnemonic == "msr"
+      enc_msr(ops)
+    elsif mnemonic == "mrs"
+      enc_mrs(ops)
+    elsif mnemonic == "yield" || mnemonic == "nop" || mnemonic == "wfe" || mnemonic == "wfi" || mnemonic == "sev"
+      enc_hint(mnemonic, ops)
+    elsif mnemonic == "isb"
+      if ops.size != 0
+        fail("isb takes no operand here; only the default SY barrier is encoded")
+        return
+      end
+      emit(0xD5033FDF_i64)
+    else
+      fail("unsupported mnemonic '#{mnemonic}': the aarch64 assembler encodes stp, ldp, str, ldr, strb, ldrb, mov, movk, add, sub, adrp, adr, cbz, cbnz, b, bl, blr, ret, svc, msr, mrs, yield, nop, wfe, wfi, sev and isb")
+    end
+  end
+
+  def enc_mov(ops : Array(String)) : Nil
+    if ops.size != 2
+      fail("mov takes two operands here, got #{ops.size}")
+      return
+    end
+    dst = ops[0]
+    src = ops[1]
+    if src.bytesize > 0 && src.byte_at(0).to_i32 == 35
+      if !is_x?(dst) || dst == "sp" || dst == "xzr"
+        fail("mov '#{dst}, #{src}': the immediate form takes an x register")
+        return
+      end
+      value = imm_of(src)
+      if value < 0 || value > 0xffff_i64
+        fail("mov '#{dst}, #{src}': the immediate must fit 16 bits; a wider value is not encoded")
+        return
+      end
+      emit(0xD2800000_i64 | (value << 5) | reg_code(dst).to_i64)
+      return
+    end
+    if dst == "sp" || src == "sp"
+      if !is_x?(dst) || !is_x?(src)
+        fail("mov '#{dst}, #{src}': sp moves take x registers")
+        return
+      end
+      emit(0x91000000_i64 | rn_field(reg_code(src)) | reg_code(dst).to_i64)
+      return
+    end
+    if is_x?(dst) && is_x?(src)
+      emit(0xAA0003E0_i64 | (reg_code(src).to_i64 << 16) | reg_code(dst).to_i64)
+      return
+    end
+    fail("mov '#{dst}, #{src}' is not an encoded form")
+  end
+
+  def enc_movk(ops : Array(String)) : Nil
+    if ops.size < 2 || ops.size > 3 || !is_x?(ops[0]) || ops[0] == "sp"
+      fail("movk takes an x register, an immediate and an optional lsl")
+      return
+    end
+    value = imm_of(ops[1])
+    shift = 0_i64
+    if ops.size == 3
+      lsl = ops[2]
+      unless lsl.starts_with?("lsl #")
+        fail("movk '#{lsl}': only lsl #N is encoded")
+        return
+      end
+      shift = imm_of(lsl[4, lsl.bytesize - 4])
+      unless shift == 0 || shift == 16 || shift == 32 || shift == 48
+        fail("movk 'lsl #{shift}': the shift must be 0, 16, 32 or 48")
+        return
+      end
+    end
+    if value < 0 || value > 0xffff_i64
+      fail("movk '#{ops[1]}': the immediate must fit 16 bits")
+      return
+    end
+    hw = shift // 16_i64
+    emit(0xF2800000_i64 | (hw << 21) | (value << 5) | reg_code(ops[0]).to_i64)
+  end
+
+  def enc_add_sub(ops : Array(String), subtract : Bool) : Nil
+    name = subtract ? "sub" : "add"
+    if ops.size != 3 || !is_x?(ops[0]) || !is_x?(ops[1])
+      fail("#{name} takes x registers and an immediate or a :lo12: symbol")
+      return
+    end
+    third = ops[2]
+    if third.bytesize > 0 && third.byte_at(0).to_i32 == 35
+      value = imm_of(third)
+      if value < 0 || value > 4095_i64
+        fail("#{name} '#{third}': the immediate must fit 12 bits")
+        return
+      end
+      base = subtract ? 0xD1000000_i64 : 0x91000000_i64
+      emit(base | (value << 10) | rn_field(reg_code(ops[1])) | reg_code(ops[0]).to_i64)
+      return
+    end
+    mod = sym_mod(third)
+    if subtract || (mod != 2 && mod != 3)
+      fail("#{name} '#{third}': only an immediate or a :lo12: or @PAGEOFF symbol is encoded")
+      return
+    end
+    name_text = sym_name(third)
+    unless symbol_ok?(name_text)
+      fail("'#{third}' is not a symbol name")
+      return
+    end
+    add_reloc(lo12_reloc, name_text)
+    emit(0x91000000_i64 | rn_field(reg_code(ops[1])) | reg_code(ops[0]).to_i64)
+  end
+
+  def enc_adrp(ops : Array(String)) : Nil
+    if ops.size != 2 || !is_x?(ops[0]) || ops[0] == "sp"
+      fail("adrp takes an x register and a symbol")
+      return
+    end
+    mod = sym_mod(ops[1])
+    if mod == 2 || mod == 3
+      fail("adrp '#{ops[1]}': adrp takes a page symbol, with @PAGE or none")
+      return
+    end
+    name_text = sym_name(ops[1])
+    unless symbol_ok?(name_text)
+      fail("'#{ops[1]}' is not a symbol name")
+      return
+    end
+    add_reloc(page_reloc, name_text)
+    emit(0x90000000_i64 | reg_code(ops[0]).to_i64)
+  end
+
+  def enc_adr(ops : Array(String)) : Nil
+    if ops.size != 2 || !is_x?(ops[0]) || ops[0] == "sp"
+      fail("adr takes an x register and a label or '.'")
+      return
+    end
+    target = ops[1]
+    if target == "."
+      emit(0x10000000_i64 | reg_code(ops[0]).to_i64)
+      return
+    end
+    if local_label?(target)
+      @fixups << fixup_for(target, @words.size, 2)
+      emit(0x10000000_i64 | reg_code(ops[0]).to_i64)
+      return
+    end
+    fail("adr '#{target}': adr takes '.' or a local label here")
+  end
+
+  def local_label?(text : String) : Bool
+    return false if text.bytesize < 2
+    last = text.byte_at(text.bytesize - 1).to_i32
+    return false unless last == 102 || last == 98
+    digits?(text[0, text.bytesize - 1])
+  end
+
+  def fixup_for(text : String, index : Int32, kind : Int32) : AsmFixup
+    label = text[0, text.bytesize - 1]
+    forward = text.byte_at(text.bytesize - 1).to_i32 == 102
+    AsmFixup.new(index, label, forward, kind)
+  end
+
+  # `[base]` or `[base, #off]`, with an optional `!` for pre-indexing.
+  # Returns the base register number, and sets `offset` and `pre` through the
+  # memory cell the caller reads back.
+  def memory_base(text : String) : Int32
+    close = text.index(']')
+    if text.byte_at(0).to_i32 != 91 || close.nil?
+      fail("'#{text}' is not a memory operand [reg] or [reg, #n]")
+      return -1
+    end
+    inner = text[1, close - 1]
+    parts = inner.split(',')
+    base = parts[0].strip
+    if !is_x?(base)
+      fail("'#{text}': the base register must be an x register or sp")
+      return -1
+    end
+    reg_code(base)
+  end
+
+  def memory_offset(text : String) : Int64
+    close = text.index(']')
+    return 0_i64 if close.nil?
+    inner = text[1, close - 1]
+    parts = inner.split(',')
+    if parts.size < 2
+      return 0_i64
+    end
+    imm_of(parts[1].strip)
+  end
+
+  def enc_pair(ops : Array(String), load : Bool) : Nil
+    if ops.size < 3 || ops.size > 4
+      fail("#{load ? "ldp" : "stp"} takes two registers and a memory operand")
+      return
+    end
+    rt = ops[0]
+    rt2 = ops[1]
+    mem = ops[2]
+    fp = is_d?(rt)
+    if fp
+      unless is_d?(rt2)
+        fail("pair '#{rt}, #{rt2}': both registers must be d registers")
+        return
+      end
+    else
+      unless is_x?(rt) && is_x?(rt2) && rt != "sp" && rt2 != "sp"
+        fail("pair '#{rt}, #{rt2}': the pair takes two x or two d registers")
+        return
+      end
+    end
+    base_reg = memory_base(mem)
+    return if !@failure.nil?
+    offset = memory_offset(mem)
+    kind = 0x01000000_i64
+    if mem.ends_with?("!")
+      kind = 0x01800000_i64
+    elsif ops.size == 4
+      if !ops[3].starts_with?("#") || mem.index(',') != nil
+        fail("'#{mem}, #{ops[3]}': a post-index form takes [reg] then #n")
+        return
+      end
+      offset = imm_of(ops[3])
+      kind = 0x00800000_i64
+    end
+    if offset % 8_i64 != 0 || offset < -512_i64 || offset > 504_i64
+      fail("pair offset #{offset} must be a multiple of 8 between -512 and 504")
+      return
+    end
+    imm7 = (offset // 8_i64) & 0x7f_i64
+    word = fp ? 0x6C000000_i64 : 0xA8000000_i64
+    word = word | kind
+    word = word | (load ? 0x00400000_i64 : 0_i64)
+    word = word | (imm7 << 15)
+    word = word | rt2_field(reg_code(rt2))
+    word = word | rn_field(base_reg)
+    word = word | reg_code(rt).to_i64
+    emit(word)
+  end
+
+  def enc_single(ops : Array(String), load : Bool, byte : Bool) : Nil
+    if ops.size != 2
+      fail("a single load or store takes a register and a memory operand")
+      return
+    end
+    rt = ops[0]
+    mem = ops[1]
+    if byte
+      unless is_w?(rt)
+        fail("'#{rt}': strb and ldrb take a w register")
+        return
+      end
+    else
+      unless is_x?(rt)
+        fail("'#{rt}': str and ldr take an x register here")
+        return
+      end
+    end
+    base_reg = memory_base(mem)
+    return if !@failure.nil?
+    if mem.ends_with?("!") || (mem.index(']') != nil && mem.byte_at(mem.bytesize - 1).to_i32 != 93)
+      fail("'#{mem}': pre- and post-indexed single transfers are not encoded")
+      return
+    end
+    offset = memory_offset(mem)
+    if offset < 0
+      fail("'#{mem}': a negative offset is not encoded for single transfers")
+      return
+    end
+    if byte
+      if offset > 4095_i64
+        fail("'#{mem}': the byte offset must fit 12 bits")
+        return
+      end
+      word = 0x39000000_i64 | (load ? 0x00400000_i64 : 0_i64)
+      word = word | (offset << 10) | rn_field(base_reg) | reg_code(rt).to_i64
+      emit(word)
+      return
+    end
+    if offset % 8_i64 != 0 || offset // 8_i64 > 4095_i64
+      fail("'#{mem}': the offset must be a multiple of 8 below 32768")
+      return
+    end
+    word = 0xF9000000_i64 | (load ? 0x00400000_i64 : 0_i64)
+    word = word | ((offset // 8_i64) << 10) | rn_field(base_reg) | reg_code(rt).to_i64
+    emit(word)
+  end
+
+  def enc_cbz(ops : Array(String), nonzero : Bool) : Nil
+    if ops.size != 2 || !is_x?(ops[0]) || ops[0] == "sp"
+      fail("cbz and cbnz take an x register and a local label")
+      return
+    end
+    unless local_label?(ops[1])
+      fail("'#{ops[1]}': cbz and cbnz take a local label here")
+      return
+    end
+    @fixups << fixup_for(ops[1], @words.size, 0)
+    base = nonzero ? 0xB5000000_i64 : 0xB4000000_i64
+    emit(base | reg_code(ops[0]).to_i64)
+  end
+
+  def enc_branch(ops : Array(String), link : Bool) : Nil
+    if ops.size != 1
+      fail("#{link ? "bl" : "b"} takes one target")
+      return
+    end
+    target = ops[0]
+    base = link ? 0x94000000_i64 : 0x14000000_i64
+    if local_label?(target)
+      @fixups << fixup_for(target, @words.size, 1)
+      emit(base)
+      return
+    end
+    if sym_mod(target) != 0
+      fail("'#{target}': a branch takes a plain symbol or a local label")
+      return
+    end
+    unless symbol_ok?(target)
+      fail("'#{target}' is not a symbol name")
+      return
+    end
+    add_reloc(link ? RelocKind::A64Call26 : RelocKind::A64Jump26, target)
+    emit(base)
+  end
+
+  def enc_blr(ops : Array(String)) : Nil
+    if ops.size != 1 || !is_x?(ops[0])
+      fail("blr takes one x register")
+      return
+    end
+    emit(0xD63F0000_i64 | rn_field(reg_code(ops[0])))
+  end
+
+  def enc_ret(ops : Array(String)) : Nil
+    if ops.size == 0
+      emit(0xD65F03C0_i64)
+      return
+    end
+    if ops.size == 1 && ops[0] == "x30"
+      emit(0xD65F03C0_i64)
+      return
+    end
+    fail("ret takes no operand, or x30 here")
+  end
+
+  def enc_svc(ops : Array(String)) : Nil
+    if ops.size != 1
+      fail("svc takes one immediate")
+      return
+    end
+    value = imm_of(ops[0])
+    if value < 0 || value > 0xffff_i64
+      fail("svc '#{ops[0]}': the immediate must fit 16 bits")
+      return
+    end
+    emit(0xD4000001_i64 | (value << 5))
+  end
+
+  # `msr tpidr_el0, xN`: the thread-pointer write the Linux start code makes. The system register encodes as
+  # S3_3_C13_C0_2 (op0 3, op1 3, CRn 13, CRm 0, op2 2) with the MSR form, 0xD51BD040, and the source register in
+  # bits 0 to 4. Any other system register is refused by name.
+  def enc_msr(ops : Array(String)) : Nil
+    if ops.size != 2 || ops[0] != "tpidr_el0" || !is_x?(ops[1]) || ops[1] == "sp"
+      fail("msr takes tpidr_el0 and an x register here, got #{ops.join(", ")}")
+      return
+    end
+    emit(0xD51BD040_i64 | reg_code(ops[1]).to_i64)
+  end
+
+  # `mrs xN, tpidrro_el0` and `mrs xN, tpidr_el0`: the thread-pointer reads (darwin's is the read-only register;
+  # the prelude reads it for the running thread's block). S3_3_C13_C0_3 and S3_3_C13_C0_2 with the MRS form,
+  # 0xD53BD060 and 0xD53BD040, and the destination in bits 0 to 4. Any other system register is refused by name.
+  def enc_mrs(ops : Array(String)) : Nil
+    if ops.size != 2 || !is_x?(ops[0]) || ops[0] == "sp" || !(ops[1] == "tpidrro_el0" || ops[1] == "tpidr_el0")
+      fail("mrs takes an x register and tpidrro_el0 or tpidr_el0 here, got #{ops.join(", ")}")
+      return
+    end
+    emit((ops[1] == "tpidrro_el0" ? 0xD53BD060_i64 : 0xD53BD040_i64) | reg_code(ops[0]).to_i64)
+  end
+
+  def enc_hint(mnemonic : String, ops : Array(String)) : Nil
+    if ops.size != 0
+      fail("#{mnemonic} takes no operand")
+      return
+    end
+    number = 0_i64
+    if mnemonic == "yield"
+      number = 1_i64
+    elsif mnemonic == "wfe"
+      number = 2_i64
+    elsif mnemonic == "wfi"
+      number = 3_i64
+    elsif mnemonic == "sev"
+      number = 4_i64
+    end
+    emit(0xD503201F_i64 | (number << 5))
+  end
+
+  # Patches each branch and address to the label it names. Labels are the
+  # word index they were defined at: a forward reference takes the first one
+  # after its instruction, a backward reference the last one at or before it.
+  def resolve_fixups : Nil
+    i = 0
+    while i < @fixups.size && @failure.nil?
+      fix = @fixups[i]
+      target = -1
+      j = 0
+      while j < @label_names.size
+        if @label_names[j] == fix.label
+          at = @label_words[j]
+          if fix.forward && at > fix.index && (target < 0 || at < target)
+            target = at
+          end
+          if !fix.forward && at <= fix.index && at > target
+            target = at
+          end
+        end
+        j += 1
+      end
+      if target < 0
+        fail("local label #{fix.label}#{fix.forward ? "f" : "b"} has no definition in its direction")
+        return
+      end
+      disp = (target - fix.index).to_i64
+      if fix.kind == 0
+        if disp < -262144_i64 || disp > 262143_i64
+          fail("the branch to #{fix.label} is out of the 19-bit range")
+          return
+        end
+        @words[fix.index] = @words[fix.index] | ((disp & 0x7ffff_i64) << 5)
+      elsif fix.kind == 1
+        @words[fix.index] = @words[fix.index] | (disp & 0x3ffffff_i64)
+      else
+        bytes = disp * 4_i64
+        immlo = bytes & 3_i64
+        immhi = (bytes >> 2) & 0x7ffff_i64
+        @words[fix.index] = @words[fix.index] | (immlo << 29) | (immhi << 5)
+      end
+      i += 1
+    end
+  end
+end

@@ -1,0 +1,140 @@
+# The driver for the native ELF executable gate (bench/native_elf_exercise.sh).
+#
+#   link_elf verify IR           parses and verifies one runtime IR file; prints VERIFIED IR
+#   link_elf start IR OBJ        compiles the aarch64 Linux start code IR with the native backend and writes its
+#                                ELF object to OBJ
+#   link_elf link OUT ENTRY OBJ... reads each ELF object (x86_64 or aarch64, from its machine field), links them
+#                                through compiler/native/link/link, and writes the executable to OUT
+#
+# Every failure raises, so the tool exits non-zero and the reason names the file, symbol or object at fault.
+
+module compiler/tools/link_elf
+
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/module::{Module}
+import compiler/ir/verifier::{verify}
+import compiler/native/driver::{compile_module}
+import compiler/native/obj/object::{ObjectFile, ObjFormat, ObjError, Section, SectionKind, Symbol, SymbolKind, SymbolBinding, Reloc}
+import compiler/native/obj/elf::{read_object, read_object_linkable, write_object}
+import compiler/native/link/link::{link, LinkOptions, LinkedImage, LinkError}
+import compiler/platform/target::{Target}
+import std/slice::{Slice, Bytes}
+
+module LinkElfTool
+  # A stand-in `_start` for an architecture whose start code cannot be compiled yet: one trap instruction, and the
+  # `environ` word the start code defines, so an executable links and its structure can be checked, but it cannot run.
+  # Used for x86_64 until slice D2 lands.
+  def self.stub_start(arch : String, dest : String) : Nil
+    x86 = arch == "x86_64"
+    bytes = Slice(UInt8).new(4)
+    if x86
+      bytes[0] = 0xf4_u8
+      bytes[1] = 0xf4_u8
+      bytes[2] = 0xf4_u8
+      bytes[3] = 0xf4_u8
+    else
+      bytes[0] = 0x00_u8
+      bytes[1] = 0x00_u8
+      bytes[2] = 0x20_u8
+      bytes[3] = 0xd4_u8
+    end
+    target = x86 ? Target.new("x86_64-linux-gnu") : Target.new("aarch64-linux-gnu")
+    obj = ObjectFile.new(ObjFormat::Elf, target, "iyi-native")
+    obj.sections << Section.new(".text", SectionKind::Text, 4, bytes, 4_i64, [] of Reloc, 0_i64)
+    obj.sections << Section.new(".data", SectionKind::Data, 8, Slice(UInt8).new(8), 8_i64, [] of Reloc, 0_i64)
+    obj.symbols << Symbol.new("_start", SymbolKind::Func, SymbolBinding::Global, 0, 0_i64, 4_i64)
+    obj.symbols << Symbol.new("environ", SymbolKind::Object, SymbolBinding::Global, 1, 0_i64, 8_i64)
+    File.write(dest, String.new(write_object(obj)))
+    print "STUB #{arch} #{dest}\n"
+  end
+
+  # Parses one IR text and verifies it. Raises naming the first rule it breaks.
+  def self.module_of(text : String, name : String) : Module
+    parsed = parse(text)
+    if parsed.is_a?(IrParseError)
+      raise "#{name}: #{parsed.to_s}"
+    end
+    mod = parsed.as(Module)
+    errors = verify(mod)
+    unless errors.empty?
+      raise "#{name}: #{errors.size} IR error(s); the first is: #{errors[0].message}"
+    end
+    mod
+  end
+
+  # The target an ELF file names in its machine field.
+  def self.target_of(bytes : Bytes) : Target
+    if bytes.size > 18 && bytes[18] == 62_u8
+      return Target.new("x86_64-linux-gnu")
+    end
+    Target.new("aarch64-linux-gnu")
+  end
+
+  def self.read_object_file(path : String) : ObjectFile
+    bytes = Slice(UInt8).of(File.read(path))
+    result = read_object_linkable(bytes, target_of(bytes))
+    if result.is_a?(ObjError)
+      raise "#{path}: #{result.message}"
+    end
+    result.as(ObjectFile)
+  end
+
+  def self.verify_file(path : String) : Nil
+    module_of(File.read(path), path)
+    print "VERIFIED #{path}\n"
+  end
+
+  def self.start_object(path : String, dest : String) : Nil
+    mod = module_of(File.read(path), path)
+    result = compile_module(mod, false)
+    if result.is_a?(String)
+      raise "#{path}: #{result.as(String)}"
+    end
+    obj = result.as(ObjectFile)
+    File.write(dest, String.new(write_object(obj)))
+    print "START #{dest} #{obj.sections.size} sections #{obj.symbols.size} symbols\n"
+  end
+
+  def self.link_program(dest : String, entry : String, inputs : Array(String)) : Nil
+    objects = [] of ObjectFile
+    inputs.each do |path|
+      objects << read_object_file(path)
+    end
+    result = link(objects, LinkOptions.new("program", entry, [] of String))
+    if result.is_a?(LinkError)
+      raise "link of #{dest}: #{result.message}"
+    end
+    image = result.as(LinkedImage)
+    File.write(dest, String.new(image.executable))
+    print "LINKED #{dest} #{image.executable.size}\n"
+  end
+
+  def self.run : Nil
+    args = Program.args
+    if args.size == 2 && args[0] == "verify"
+      verify_file(args[1])
+      return
+    end
+    if args.size == 3 && args[0] == "start"
+      start_object(args[1], args[2])
+      return
+    end
+    if args.size == 3 && args[0] == "stub"
+      stub_start(args[1], args[2])
+      return
+    end
+    if args.size >= 4 && args[0] == "link"
+      inputs = [] of String
+      i = 3
+      while i < args.size
+        inputs << args[i]
+        i = i + 1
+      end
+      link_program(args[1], args[2], inputs)
+      return
+    end
+    raise "usage: link_elf verify IR | link_elf start IR OBJ | link_elf stub ARCH OBJ | link_elf link OUT ENTRY OBJ..."
+  end
+end
+
+LinkElfTool.run

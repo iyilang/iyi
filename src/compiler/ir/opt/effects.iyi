@@ -1,0 +1,125 @@
+module compiler/ir/opt/effects
+
+import compiler/ir/inst::{Op, Inst, MemAux, IntrinsicAux, Ordering, terminator_op?}
+import compiler/ir/function::{Function, Global}
+import compiler/ir/intrinsics::{IntrinsicId}
+
+def ordered_memory?(i : Inst) : Bool
+  return false unless i.aux.is_a?(MemAux)
+  aux = i.aux.as(MemAux)
+  aux.volatile || aux.ordering != Ordering::NotAtomic
+end
+
+def effectful_intrinsic?(id : IntrinsicId) : Bool
+  case id
+  when IntrinsicId::Memcpy, IntrinsicId::Memmove, IntrinsicId::Memset,
+       IntrinsicId::Trap, IntrinsicId::DebugTrap, IntrinsicId::Assume,
+       IntrinsicId::Stacksave, IntrinsicId::Stackrestore, IntrinsicId::VaStart,
+       IntrinsicId::VaEnd, IntrinsicId::Readcyclecounter, IntrinsicId::AArch64Hint,
+       IntrinsicId::X86Sse2Pause, IntrinsicId::WasmMemoryGrowI32
+    true
+  else
+    false
+  end
+end
+
+pub def marking_flag_load?(i : Inst) : Bool
+  return false unless i.op == Op::Load && !i.args.empty?
+  ptr = i.args[0]
+  return ptr.as(Global).name == "__iyi_marking" if ptr.is_a?(Global)
+  if ptr.is_a?(Inst)
+    addr = ptr.as(Inst)
+    if addr.op == Op::GlobalAddr && !addr.args.empty? && addr.args[0].is_a?(Global)
+      return addr.args[0].as(Global).name == "__iyi_marking"
+    end
+  end
+  false
+end
+
+pub def has_side_effects?(i : Inst) : Bool
+  return true if i.op == Op::Store # mutation M2: stores have side effects
+  return true if terminator_op?(i.op)
+  case i.op
+  when Op::Load
+    ordered_memory?(i)
+  when Op::Fence, Op::CmpXchg, Op::AtomicRmw, Op::VaArg, Op::Call,
+       Op::LandingPad, Op::CatchPad, Op::CleanupPad
+    true
+  when Op::Intrinsic
+    return true unless i.aux.is_a?(IntrinsicAux)
+    effectful_intrinsic?(i.aux.as(IntrinsicAux).id)
+  else
+    false
+  end
+end
+
+pub def reads_memory?(i : Inst) : Bool
+  case i.op
+  when Op::Load, Op::Fence, Op::CmpXchg, Op::AtomicRmw, Op::VaArg, Op::Call, Op::Invoke
+    true
+  when Op::Intrinsic
+    return true unless i.aux.is_a?(IntrinsicAux)
+    case i.aux.as(IntrinsicAux).id
+    when IntrinsicId::Memcpy, IntrinsicId::Memmove, IntrinsicId::Stacksave,
+         IntrinsicId::Stackrestore, IntrinsicId::VaStart, IntrinsicId::VaEnd,
+         IntrinsicId::WasmMemoryGrowI32, IntrinsicId::Frameaddress, IntrinsicId::Returnaddress
+      true
+    else
+      false
+    end
+  else
+    false
+  end
+end
+
+pub def writes_memory?(i : Inst) : Bool
+  case i.op
+  when Op::Store, Op::Fence, Op::CmpXchg, Op::AtomicRmw, Op::VaArg, Op::Call, Op::Invoke
+    true
+  when Op::Intrinsic
+    return true unless i.aux.is_a?(IntrinsicAux)
+    case i.aux.as(IntrinsicAux).id
+    when IntrinsicId::Memcpy, IntrinsicId::Memmove, IntrinsicId::Memset,
+         IntrinsicId::Stackrestore, IntrinsicId::VaStart, IntrinsicId::VaEnd,
+         IntrinsicId::WasmMemoryGrowI32
+      true
+    else
+      false
+    end
+  else
+    false
+  end
+end
+
+pub def opaque?(i : Inst) : Bool
+  case i.op
+  when Op::Load
+    ordered_memory?(i) || marking_flag_load?(i)
+  when Op::Store
+    ordered_memory?(i)
+  when Op::Fence, Op::CmpXchg, Op::AtomicRmw, Op::VaArg, Op::Call, Op::Invoke,
+       Op::ThreadLocalAddr, Op::ThreadPointer, Op::LandingPad, Op::CatchPad, Op::CleanupPad
+    true
+  when Op::Intrinsic
+    return true unless i.aux.is_a?(IntrinsicAux)
+    id = i.aux.as(IntrinsicAux).id
+    effectful_intrinsic?(id) || id == IntrinsicId::Frameaddress || id == IntrinsicId::Returnaddress
+  else
+    false
+  end
+end
+
+pub def pure?(i : Inst) : Bool
+  return false if i.op == Op::Alloca || i.op == Op::Freeze || i.op == Op::Phi
+  !has_side_effects?(i) && !reads_memory?(i) && !writes_memory?(i) && !opaque?(i)
+end
+
+pub def runtime_entry?(f : Function) : Bool
+  case f.name
+  when "__iyi_new", "__iyi_malloc64", "__iyi_malloc_atomic64", "__iyi_realloc64",
+       "__iyi_write_barrier_begin", "__iyi_write_barrier"
+    true
+  else
+    false
+  end
+end

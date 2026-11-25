@@ -306,25 +306,31 @@ holder = IyiThread.start do
   Std::Observe.leave_frame
   nil
 end
-hold.go.set(1_i64)
-while hold.open.get == 0_i64
+# Start the observer before the holder enters its frame: thread startup
+# suspends observation depth, which would otherwise mask the mutant.
+observer = IyiThread.start do
+  # FORCE_MAIN_FIBER
+  main_fiber_path = IyiScheduler.current?.is_a?(IyiFiber)
+  hold.go.set(1_i64)
+  while hold.open.get == 0_i64
+  end
+  ENV["IYI_FRAME_PROBE"]?
+  puts "FRAME_PATHS holder=#{hold.fiber_path.get} main=#{main_fiber_path ? 1 : 0}"
+  hold.done.set(1_i64)
+  nil
 end
-# FORCE_MAIN_FIBER
-main_fiber_path = IyiScheduler.current?.is_a?(IyiFiber)
-ENV["IYI_FRAME_PROBE"]?
-hold.done.set(1_i64)
+observer.join
 holder.join
-puts "FRAME_PATHS holder=#{hold.fiber_path.get} main=#{main_fiber_path ? 1 : 0}"
 EOF
 
 PROBE_TRACE="$WORK/probe_trace.bin"
 rm -f "$PROBE_TRACE"
 PROBE_OUT="$(IYI_OBSERVE="$PROBE_TRACE" "$IYI" run -Diyi_observe "$PROBE_SRC")"
 echo "  $PROBE_OUT"
-case "$PROBE_OUT" in
-  "FRAME_PATHS holder=0 main=0" | "FRAME_PATHS holder=0 main=1" | "FRAME_PATHS holder=1 main=0" | "FRAME_PATHS holder=1 main=1") ;;
-  *) echo "FAIL: invalid frame-path report: '$PROBE_OUT'"; exit 1 ;;
-esac
+if [ "$PROBE_OUT" != "FRAME_PATHS holder=0 main=0" ]; then
+  echo "FAIL: thread probe did not enter both plain-thread paths: $PROBE_OUT"
+  exit 1
+fi
 
 if [ ! -f "$PROBE_TRACE" ]; then
   echo "FAIL: probe trace was not created"
@@ -389,15 +395,11 @@ fi
 MUT_HEX="$(od -An -v -tx1 "$MUT_TRACE" | tr -d ' \n')"
 case "$MUT_HEX" in
   *4959495f4652414d455f50524f4245*)
-    if [ "$WINDOWS" = 1 ] && [ "$PROBE_OUT" != "FRAME_PATHS holder=0 main=0" ]; then
-      echo "  host-limited: thread-depth mutant cannot affect both frames ($PROBE_OUT)"
-    else
-      echo "FAIL: probe does not discriminate: IYI_FRAME_PROBE appeared even without @[ThreadLocal] ($PROBE_OUT)"
-      exit 1
-    fi
+    echo "FAIL: probe does not discriminate: IYI_FRAME_PROBE appeared even without @[ThreadLocal] ($PROBE_OUT)"
+    exit 1
     ;;
   *)
-    echo "  mutation proof passed: without @[ThreadLocal], helper frame suppressed main thread observation"
+    echo "  mutation proof passed: without @[ThreadLocal], helper frame suppressed observer thread observation"
     ;;
 esac
 

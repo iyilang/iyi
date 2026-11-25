@@ -50,7 +50,7 @@ export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 export IYI_LIBRARY_PATH="$REPO/lib"
 
 "$PY" - "$REPO" "$IYI" "$MODE" <<'EOF'
-import concurrent.futures, glob, json, os, re, shutil, subprocess, sys, time
+import concurrent.futures, glob, hashlib, json, os, re, shutil, subprocess, sys, time
 from collections import Counter, defaultdict
 
 repo = sys.argv[1]
@@ -64,7 +64,7 @@ all_progs = [('C2', p) for p in c2_files] + [('C3', p) for p in c3_files]
 # A directory of this run's own: one shared by name was removed under a
 # second census by the first one finishing.
 import tempfile
-work = tempfile.mkdtemp(prefix='stale_census.')
+work = tempfile.mkdtemp(prefix='sc.')
 
 OVERHEAD_NAMES = {
     'hello.iyi',
@@ -171,7 +171,11 @@ def run_single_program(item):
     bname = os.path.basename(path)
     stem = bname[:-4] if bname.endswith('.iyi') else bname
     worker_id = os.getpid()
-    unique_id = f"{worker_id}_{corpus}_{stem}_{int(time.time()*1000)%1000000}"
+    # Short on purpose: the cache's own `tests-v1/records/<64 hex>/<64 hex>.json.tmp.<pid>.<8 hex>`
+    # is 169 characters under this directory, and on Windows a path of 260 or
+    # more cannot be opened ("The system cannot find the path specified"), so
+    # the program's name in it made 45 of the 141 programs fail to build there.
+    unique_id = f"{worker_id}_{hashlib.sha1((corpus + stem).encode()).hexdigest()[:6]}_{int(time.time()*1000)%1000000}"
 
     p_scratch = os.path.join(work, f"s_{unique_id}")
     p_cache = os.path.join(work, f"c_{unique_id}")

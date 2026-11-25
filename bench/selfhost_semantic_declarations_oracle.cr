@@ -177,7 +177,7 @@ end
 
 def dump_declarations(node : Iyi::ASTNode, io : IO, program : Iyi::Program, entry : String?, typed : Bool = false)
   initial_types = Iyi::Program.new.types.keys.to_set
-  if ENV["IYI_DECLARATION_MODE"]?
+  if ENV["IYI_DECLARATION_MODE"]? == "entry"
     # Imports, generated constructors and type declarations must be processed
     # in the same order as the hosted build, not a partial visitor walk.
     node, _processor = program.top_level_semantic(node)

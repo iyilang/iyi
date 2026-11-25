@@ -2,9 +2,10 @@
 # Burn-down gate for declaration parity between the iyi semantic port and the
 # hosted front end's top-level pass (specification S1b).
 #
-# Fixtures are analysed bare. The corpus is analysed with the prelude as in a
-# build, with prelude files measured in the prelude itself, by the hosted pass
-# (bench/selfhost_semantic_declarations_oracle.cr) and by the iyi port
+# Fixtures are analysed bare. Corpus files are analysed as a build analyses
+# them, the prelude first, except the prelude's own files, which are analysed
+# bare because they cannot be loaded beside the prelude that contains them. By
+# the hosted pass (bench/selfhost_semantic_declarations_oracle.cr) and by the iyi port
 # (bench/selfhost_semantic_declarations_exercise.iyi). Both search IYI_PATH, set
 # below to this checkout's src/. Both print one text dump of the declarations the
 # file itself makes: defs, types, nested types, their visibility, superclasses,
@@ -345,7 +346,7 @@ measure() {
   corpus="$1"
   rel="$2"
   abs="$REPO_NATIVE/$2"
-  case "$rel" in src/iyi/*) mode=prelude ;; *) mode=entry ;; esac
+  case "$rel" in src/iyi/*) mode=bare ;; *) mode=entry ;; esac
   if IYI_DECLARATION_MODE="$mode" IYI_DECLARATION_FLAGS="$IYI_DECLARATION_FLAGS" "$ORACLE" "$abs" > "$WORK/o.txt" 2> "$WORK/o.err"; then
     nodes=$(records "$WORK/o.txt" | wc -l | tr -d ' ')
     if IYI_DECLARATION_MODE="$mode" IYI_DECLARATION_FLAGS="$IYI_DECLARATION_FLAGS" "$PORT" "$abs" > "$WORK/p.txt" 2> "$WORK/p.err"; then

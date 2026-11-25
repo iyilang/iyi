@@ -76,7 +76,7 @@ module BenchSelfhostSemanticDeclarationsExercise
     prog.loaded_files.add(entry) unless mode == "prelude"
     prog.search_path = search_path
     prog.project_root = project_root(node, entry)
-    if mode
+    if mode == "entry"
       node = prog.normalizer.normalize(node)
       prelude = TopLevelVisitor.new(prog)
       prelude_file = prelude.import_file("iyi/prelude")

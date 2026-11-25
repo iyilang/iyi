@@ -790,4 +790,22 @@ module ENV
   end
 end
 
+# iyi: the local time zone is not an input of a build. A process learns it once,
+# from `TZ`, when the first code asks for the local time. On Windows that is the
+# first process it starts: an anonymous pipe is a named pipe there, and its name
+# is `File.tempname`, which begins with today's date in the local zone. Where the
+# first process starts moves with what is cached: a cold build runs the linker
+# to ask its version, or links a macro helper, before the key is taken, and a
+# warm one has none of that and runs the cached helper under a quiet recorder.
+# So a cold build had `TZ` among the compiler's reads and a warm one did not, a
+# `cenv` that differed for every program (RG9's inputs check; bench/stale_win_probe.py
+# on hello.iyi: "only in cold-plain: TZ=(absent)") and a test recorded cold
+# never hit. The zone is for the programs a build makes and runs, whose own
+# reads are recorded as theirs; it is read here with no recorder.
+class Time::Location
+  def self.load_local : Location
+    Iyi::BuildInputs.paused { previous_def }
+  end
+end
+
 require "./stale/inputs_file"

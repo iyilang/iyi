@@ -213,6 +213,35 @@
 - These nine gates run in the same three jobs through
   `bench/selfhost_gates.sh`; `bench/native_elf_run.sh` runs in
   `selfhost-linux-arm64`.
+- **Semantic analysis and type operations in iyi: `src/compiler/semantic/`
+  and `src/compiler/types/` (#217).** 24,389 lines of iyi port the hosted
+  front end's top-level and declaration passes, method lookup and overload
+  order, call, block and body typing, closures, literal expansion, `new` and
+  default arguments, and the type system's merge, filters, restrictions,
+  intersection and unification; a build's `-D` defines reach every macro
+  expansion site. `src/compiler/tools/typed_dump.iyi` prints each typed node,
+  and `src/compiler/semantic/typed.iyi` with `src/compiler/lower/CONTRACT.md`
+  is the typed tree's contract with lowering. Seventeen gates compare it with
+  the hosted compiler. `bench/selfhost_typed_parity_exercise.sh` types every
+  file of the prelude, std, `samples/iyi` and `src/compiler` with both and
+  holds each file's count of identically typed nodes to
+  `bench/selfhost_typed_parity.floor`, a drop and an unrecorded gain alike
+  (29,616 of 31,576 nodes in 329 files on Linux; a host whose platform arms
+  type differently has its own row).
+  `bench/selfhost_semantic_declarations_exercise.sh` does the same for
+  declarations (24,561 of 25,550 in 330 files; a file the hosted oracle
+  cannot analyse fails the gate, and a file the port refuses must be listed
+  with its reason in `bench/selfhost_semantic_declarations.refusals`) and
+  requires the port's declaration pass to complete all 180 compiler and
+  prelude files. `bench/selfhost_typed_bodies_exercise.sh` compares the
+  typed nodes of each fixture's entry and of every method body it
+  instantiates, each count held exactly (1,309 of 1,657 body nodes in 128
+  fixtures). The others compare declaration and typed-expression fixtures,
+  refusals, call resolution, `new`, closures, type operations and the
+  transforms, and hold broken copies of the port to failing. The self-host
+  jobs now run as four shards on each host, dealt by measured weight
+  (`bench/selfhost_gates.weights`). Hosted commands are unchanged; nothing
+  uses the port yet.
 - **AArch64 code generation and register allocation in iyi:
   `src/compiler/native/` (#194).** 6,582 lines of iyi select AArch64
   instructions from `compiler/ir`, lower calls, frames, switches, atomics,
@@ -927,22 +956,6 @@ entry "What the fixes below change in a program's source" has the details.
   settings, and cache writes replace an existing checkpoint through an
   exclusive same-directory file. Package downloads do not use them yet.
   Independent cryptographic review is required before anything depends on them.
-
-- **The macro engine and syntax normalizer are written in iyi.**
-  Their component gates compare expansions, diagnostics and normalized trees
-  with the hosted compiler and exercise compiled mutations. The macro-site
-  census measures this component's source population. Hosted commands remain
-  unchanged.
-
-- **The semantic analyzer and type system are written in iyi.**
-  This component adds declaration and call resolution, typed syntax,
-  closure analysis, literal expansion and type operations. Its gates compare
-  fixtures, their import closures and the checkout's source corpus with the
-  hosted compiler. Initial corpus floors cover this component's source
-  population; unchanged per-file floors are retained. Mutation checks count
-  refusals through the port's own refusal paths, keeping driver crashes invalid.
-  Hosted commands remain unchanged.
-
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.

@@ -281,7 +281,7 @@ for function in 'Int128Field::new<Int128>' 'Int128Union::new<Int128>' 'captured<
 done
 echo 'native Int128: field, union and closure stores use align 8'
 
-mkdir -p "$WORK/app" "$WORK/mods"
+mkdir -p "$WORK/app" "$WORK/vector-artifacts"
 cat >"$WORK/app/vector.iyi" <<'EOF'
 module app/vector
 pub def mix(a : UInt64x2, b : UInt64x2) : UInt64x2
@@ -301,19 +301,21 @@ EOF
 # bench/std_platforms.sh does for other targets. The source build runs and
 # gives (11, 19); the artifact must be written, resolve the import with the
 # module's source gone, and the same build without it must fail, so that the
-# artifact is what answered.
+# artifact is what answered. The artifacts go in a directory not named `mods`,
+# because a `mods` beside the project root is read without being named and
+# would answer the build that must fail.
 IYI_PATH="$WORK:$REPO/src" build_wasm "$WORK/source" "$WORK/consumer.iyi"
 "$WASMTIME" "$WORK/source.wasm" >"$WORK/source.out" || fail "artifact: source program failed" "$WORK/source.out"
 printf '11\n19\n' >"$WORK/expected.out"
 cmp "$WORK/source.out" "$WORK/expected.out" ||
   fail "artifact: source output differs from expected" "$WORK/source.out"
 (cd "$WORK" && IYI_PATH="$WORK:$REPO/src" "$IYI" build --no-codegen --target wasm32-wasi \
-  --emit-iyimod "$WORK/mods" -o "$WORK/emit-out" "$WORK/consumer.iyi") >"$WORK/emit.log" 2>&1 ||
+  --emit-iyimod "$WORK/vector-artifacts" -o "$WORK/emit-out" "$WORK/consumer.iyi") >"$WORK/emit.log" 2>&1 ||
   fail "artifact: writing the vector artifact failed" "$WORK/emit.log"
-[ -f "$WORK/mods/app/vector.iyimod" ] || fail "vector artifact missing"
+[ -f "$WORK/vector-artifacts/app/vector.iyimod" ] || fail "vector artifact missing"
 mv "$WORK/app/vector.iyi" "$WORK/vector-source.saved"
 (cd "$WORK" && IYI_PATH="$WORK:$REPO/src" "$IYI" build --no-codegen --target wasm32-wasi \
-  --use-iyimod "$WORK/mods" -o "$WORK/use-out" "$WORK/consumer.iyi") >"$WORK/use.log" 2>&1 ||
+  --use-iyimod "$WORK/vector-artifacts" -o "$WORK/use-out" "$WORK/consumer.iyi") >"$WORK/use.log" 2>&1 ||
   fail "artifact: the front end could not read the vector artifact" "$WORK/use.log"
 if (cd "$WORK" && IYI_PATH="$WORK:$REPO/src" "$IYI" build --no-codegen --target wasm32-wasi \
   -o "$WORK/nouse-out" "$WORK/consumer.iyi") >"$WORK/nouse.log" 2>&1; then

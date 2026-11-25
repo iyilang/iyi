@@ -6,7 +6,6 @@ import compiler/ir/module::{Module}
 import compiler/ir/opt/analysis::{Cfg, DomTree}
 import compiler/ir/opt/effects::{pure?}
 
-
 # The effects classifier describes side effects, not whether integer division
 # can trap. A zero-trip loop must not execute division in its preheader.
 def speculatable?(inst : Inst) : Bool

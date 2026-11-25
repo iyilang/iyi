@@ -109,12 +109,12 @@ pub def run_function_pass(mod : Module, fn : Function, id : PassId) : Bool
     changed = run_sroa(mod, fn)
     changed = run_mem2reg(mod, fn) unless changed
     changed
-  when PassId::Inline      then run_inline(mod, fn, CallGraph.new(mod), InlineBudget.new(mod))
-  when PassId::DeadFn      then run_deadfn(mod)
-  when PassId::Cse         then run_cse(mod, fn)
-  when PassId::Prove       then run_prove(mod, fn)
-  when PassId::Licm        then run_licm(mod, fn)
-  when PassId::Layout      then run_layout(mod, fn)
+  when PassId::Inline then run_inline(mod, fn, CallGraph.new(mod), InlineBudget.new(mod))
+  when PassId::DeadFn then run_deadfn(mod)
+  when PassId::Cse    then run_cse(mod, fn)
+  when PassId::Prove  then run_prove(mod, fn)
+  when PassId::Licm   then run_licm(mod, fn)
+  when PassId::Layout then run_layout(mod, fn)
   else
     raise "BUG: unknown IR pass"
   end

@@ -135,7 +135,24 @@
   declarations and JSON to match the hosted reader's, and 11 damaged
   artifacts to be refused with the same verdict, and catches 16 broken
   copies.
-- These six gates run in the same three jobs through
+- **The macro engine and syntax normalizer in iyi: `src/compiler/macros/`
+  and `src/compiler/semantic/normalizer.iyi` (#210).** 3,285 lines of iyi
+  parse and expand macros, with a 384-line table of the macro methods the
+  hosted compiler answers (`answers.iyi`, generated from its source and
+  checked by `bench/macro_method_table.py`), and 780 lower `unless`,
+  `until`, operator assignment, interpolation, chained comparisons, `defer`,
+  `recover` and the rest to the hosted front end's trees.
+  `bench/selfhost_macros_exercise.sh` requires 61 fixtures' expansions (279
+  sites) to print byte for byte as the hosted compiler does, 2 refusals by
+  name, 31 file-method and env cases to match the hosted confinement rule
+  (2 more differ by design), and `bench/macro_sites.py`'s census of the
+  prelude and the port's own source to find at least the
+  `bench/macro_sites.floor` count of identical sites (150 of 165 today, the
+  floor 70), and catches 53 broken copies.
+  `bench/selfhost_normalizer_exercise.sh` requires 11 fixtures (620 nodes)
+  to normalise as the front end does and catches 8. Hosted commands are
+  unchanged.
+- These eight gates run in the same three jobs through
   `bench/selfhost_gates.sh`; `bench/native_elf_run.sh` runs in
   `selfhost-linux-arm64`.
 - **AArch64 code generation and register allocation in iyi:
@@ -202,6 +219,51 @@
   stderr; the address fixture must change its addresses between runs); and
   catches 4 broken copies. AArch64 execution reports as host-limited on the
   current runners.
+- **A freestanding wasm32 target, `wasm32-unknown-unknown`, and its host
+  loader (#199).** A program builds to a WebAssembly module with no libc and
+  no WASI: `wasm-ld --no-entry` links it, and the only imports are the five
+  host calls of module `iyi` (`write`, `read`, `exit`, `clock_ns`,
+  `random`) that the program reaches. It exports `memory`, a one-shot
+  `iyi_start`, and `iyi_alloc`/`iyi_free` for buffers pinned across
+  collections. The installed `share/iyi/src/iyi/wasm/iyi.mjs` instantiates
+  it in Node or a browser, refuses user imports in the reserved `iyi`
+  module and reads the host's cryptographic random source. Files are
+  refused by name, the environment is empty, and `-Diyi_chaos` is a compile
+  error, as on WASI (#205 later added tasks). SPEC.md III.12.1 is the
+  contract. `bench/wasm_freestanding_exercise.sh` builds `hello`, `format`
+  and `io` natively and for the target, requires the same output in Node
+  and in isolated headless Chrome, runs the contract in both, and catches 5
+  broken copies; the `wasm-freestanding` job runs it and gates a release.
+  `bench/dependency_floor.sh` allows exactly `@[Link(wasm_import_module:
+  "iyi")]` and checks that another host module is refused, and the object
+  audit reads eight targets.
+- **Tasks on freestanding wasm, on JSPI hosts (#205).** `group`, `spawn`,
+  channels, `select`, cancellation, joins and `sleep` compile for
+  `wasm32-unknown-unknown` and run on the native single-thread scheduler;
+  JavaScript Promise Integration suspends the wasm call at a switch, with no
+  Asyncify rewrite. Each fiber gets a 256 KiB shadow stack in linear memory
+  with a canary at its low end checked at every switch, the collector scans
+  each parked fiber's saved range, and finished stacks go back to a pool
+  (at most 13,107, wasm32's page limit over five pages a stack) whose idle
+  stacks are not roots. A program with no path that can park carries none
+  of it: the `swap`, `idle` and `fiber_exit` imports and the
+  `__stack_pointer` and `iyi_fiber_entry` exports appear only with a task
+  path. The loader's `start` and `call` are now asynchronous and refuse
+  overlapping calls; a host without JSPI runs code that never parks, and the
+  first park ends the program with `iyi: JSPI is required to park a task on
+  wasm32-unknown-unknown`. `spawn(unit: :new)` and `-Diyi_chaos` are refused
+  on this target, and WASI keeps its refusals (SPEC.md III.4.12a).
+  Native code is unchanged: the scheduler and collector changes are behind
+  `flag?(:wasm32)`. `bench/wasm_tasks_exercise.sh` compares the task
+  exercise with native output plain and `--release` in Node and headless
+  Chrome, checks the no-JSPI refusal, deadlock, panic and canary reports
+  and bounded memory over 2,000 fibers, and catches 4 broken copies
+  (parked-root scan removed, canary check removed, stack reuse disabled,
+  and the parked main fiber's stack left unscanned, which a box only the
+  main fiber holds across a task's collection now proves);
+  the `wasm-freestanding` job runs it. `bench/thread_exercise.sh` and
+  `bench/parallel_exercise.sh` re-anchor their mutations to the native
+  switch and poll paths.
 
 ### Changed
 
@@ -223,7 +285,7 @@
   retaining 256 KiB as the default. A different size is refused after a task,
   pooled stack or second thread; setting the same size remains permitted.
   Fibers record their spans for pooling, guard checks and stack-window lookup.
-  Thread stacks and the 4,738-line library ceiling are unchanged.
+  Thread stacks and the 4,785-line library ceiling are unchanged.
 
 - **`iyi test --cached` starts no compiler for a test whose recorded inputs
   are unchanged.** A stale build records the files, directory listings,
@@ -245,6 +307,17 @@
 ### Changed
 
 - **Compiler: omit unread predefined constants from codegen and stale build keys.** Predefined constants (`Crystal::*`) are initialized at startup and included in reach signatures only when referenced by typed code. `ARGC_UNSAFE` and `ARGV_UNSAFE` remain initialized unconditionally. Reading an uninitialized predefined constant in codegen raises an internal compiler bug.
+- **A freestanding wasm `--release` drops DWARF and keeps function names
+  (#221).** The link adds `wasm-ld --strip-debug` when `--release` was given
+  without `-d`, including `--release -O z`; the name section host stack
+  traces read stays. Plain builds, `--release -d` and `wasm32-wasi` keep
+  their debug information. `bench/wasm_size_exercise.sh` holds the release
+  and direct-build `hello` under 36,000 bytes with names present and DWARF
+  absent, checks that plain and `--release -d` keep DWARF and that the
+  host sees a named stack, and catches a release relinked without
+  `--strip-debug`; `bench/wasm_freestanding_exercise.sh` now runs the host
+  and collector contract on release builds as well. The
+  `wasm-freestanding` job runs both.
 
 - **A build that writes `.iyimod` artifacts compiles each module once, not
   once per type.** A module's travelling code carries private copies of the
@@ -408,6 +481,42 @@
 
 - **Semantic backtrace equivalence for Darwin artifact verification.** Output comparison in standard library exercise gates (`bench/std_exercise.sh`, `bench/std_toml_exercise.sh`, `bench/std_websocket_exercise.sh`, `bench/std_big_exercise.sh`, and `bench/stale_equivalence.sh`) evaluates ordered semantic frames via `bench/frames_equivalent.py` when direct byte comparison fails on Darwin. Comparisons verify equal frame counts, positions, indices, images, and canonicalized function names while abstracting layout addresses, function size offsets, `~iyi` copy suffixes, a carried closure's `^unit:` suffix, and the number a build gave a closure that names its file and line, with plain-vs-optimized comparisons verifying non-frame text and frame sequence structure.
 
+- **The LSP gates read a Windows process's children by when it was
+  created, and `bench/lsp_orphan_negative.py` no longer hangs or dies on
+  its way out.** Windows CI job 139176708533 sat in "The language server
+  holds its session, on Windows" for 51 minutes, from the session gate's
+  last line to the job's limit: `lsp_orphan_negative.py`, run next,
+  printed nothing. Before its first line it walks the held worker's
+  processes (`descendants`), and that walk took kernel32's snapshot at its
+  word on each process's parent. The snapshot names a parent by pid, and
+  Windows hands a pid on once its process is gone, so a process whose
+  parent has exited lists as the child of whatever has that pid now. Once
+  the `cmd` a held compile starts is handed the pid that one of the gate's
+  own ancestors, its parent gone, still names as its parent, the walk goes
+  round for ever. On Windows 11 every gate process's chain of named
+  parents ended at the free pid 14104; in 604 runs of the negative control
+  (ten at once), one held compile's `cmd` was handed 14104, and that run
+  hung exactly as CI's did, silent, its one thread in `descendants` at
+  60 s and at 120 s, two hundred processes listed under it, `wininit.exe`
+  among them. A `ping` handed its parent's exited parent's pid made the
+  same cycle on purpose. The same reading put processes no step started
+  among a proxy's children (the owner's `firefox.exe`), where the gate's
+  kills land. A child now counts only if it was created no earlier than
+  its parent, and a killed worker's are asked after by when it was
+  created: the made cycle lists one child and ends. Step 60e kills the
+  proxy's workers only: it killed every child, a console-less CI step's
+  `conhost.exe` among them, and job 138159371238 stopped at that kill
+  with "Access is denied". The negative control runs under the session's
+  watchdog, which now prints the gate's own threads, every process under
+  each live server and the server's last stderr lines (a server that
+  never answers ends the negative control in 185 s with all three);
+  `lsp_artifacts.py`'s builds are under it too. And a reader the orphan
+  steps stopped waiting for no longer prints as the interpreter exits:
+  job 138828714339's negative control died at "could not acquire lock for
+  <_io.BufferedWriter name='<stdout>'> at interpreter shutdown" (exit
+  127). Such readers stay quiet, and the negative control joins them, and
+  each server's stderr reader, before it exits.
+
 - **`bench/packages_resolve.sh` loses every fetch's race to another build
   (#246).** A `git` that finishes the other build's checkout while this
   one clones makes every fetch find its target taken: the build must take
@@ -525,6 +634,20 @@
 - **Fix (runtime): correct frame boundary symbol lookup in Darwin panics.** When a panic or NoReturn call is the last instruction of a function, the return address on the stack sits at offset 0 of the next function. The Darwin runtime backtrace resolves boundary frames with offset 0 by inspecting the caller symbol at `addr - 1` while preserving fiber entry start markers and raw address formats.
 
 - **Fix (compiler): observed artifact emission supports operator effect defs.** An observed build of a module with an operator-named `@[Effect]` def (such as `[]=` or `[]?`) renames the wrapped implementation with hex-encoded operator bytes rather than raw punctuation, so that serializing declarations into `.iyimod` artifacts preserves valid source text that consumer builds parse and adopt without syntax errors.
+
+- **wasm32 large objects keep their arena header (#198).** A large
+  object's three header words were written over its arena's link, size and
+  page count, so a sweep could follow a payload size as a pointer, and a
+  pointer into any page after the first did not resolve to its object. The
+  object header now follows the arena header (the payload begins at offset
+  72), and an interior pointer resolves through the large-object list
+  before a page's bytes are read as an arena header. `bench/wasm32_exercise.sh`
+  holds twelve 1,048,592-byte strings across collections and an object
+  reached only through a pointer into its third page, and catches the
+  overlapping header and a first-page-only lookup. Native targets are
+  unchanged: the code is the wasm32 collector's. A swept large object's
+  pages are still not reused, so linear memory grows with each large
+  allocation.
 
 - **`iyi test` on a package with a dependency builds in a cold module
   cache (#246).** Its builds run at once (`-p`, six on twelve cores), and
@@ -30048,7 +30171,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,817-line library and nothing else. Every other
+  written against iyi's own 37,276-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

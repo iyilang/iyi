@@ -283,6 +283,43 @@ else
   sed 's/^/    /' "$WORK/sleep_build.log" | head -6
 fi
 
+step "4b. iyi compiler accepts tasks and refuses parallel placement on wasm32-unknown-unknown"
+for feature in group sleep; do
+  "$IYI" build --cross-compile --target wasm32-unknown-unknown \
+    -o "$WORK/$feature-free" "$WORK/${feature}_refusal.iyi" > "$WORK/$feature-free.log" 2>&1
+  if [ $? -eq 0 ]; then
+    pass "compiler accepts $feature on wasm32-unknown-unknown"
+  else
+    fail "expected compiler to accept $feature on wasm32-unknown-unknown"
+    head -6 "$WORK/$feature-free.log"
+  fi
+done
+cat << 'EOF' > "$WORK/parallel-free.iyi"
+group do |g|
+  g.spawn(unit: :new) { 42 }
+end
+EOF
+"$IYI" build --cross-compile --target wasm32-unknown-unknown \
+  -o "$WORK/parallel-free" "$WORK/parallel-free.iyi" > "$WORK/parallel-free.log" 2>&1
+ec=$?
+if [ $ec -ne 0 ] && grep -q -- '`unit: :new` is not available on wasm32-unknown-unknown' "$WORK/parallel-free.log"; then
+  pass "compiler refuses unit: :new on wasm32-unknown-unknown by name"
+else
+  fail "expected compiler to refuse unit: :new on wasm32-unknown-unknown"
+  head -6 "$WORK/parallel-free.log"
+fi
+
+printf 'puts 42\n' > "$WORK/chaos-free.iyi"
+"$IYI" build --cross-compile --target wasm32-unknown-unknown -Diyi_chaos \
+  -o "$WORK/chaos-free" "$WORK/chaos-free.iyi" > "$WORK/chaos-free.log" 2>&1
+ec=$?
+if [ $ec -ne 0 ] && grep -q -- '-Diyi_chaos is not available on wasm32-unknown-unknown' "$WORK/chaos-free.log"; then
+  pass "compiler refuses -Diyi_chaos on wasm32-unknown-unknown by name"
+else
+  fail "expected compiler to refuse -Diyi_chaos on wasm32-unknown-unknown"
+  head -6 "$WORK/chaos-free.log"
+fi
+
 # Failure proof: honest program without group compiles cleanly
 cat << 'EOF' > "$WORK/honest.iyi"
 puts 42

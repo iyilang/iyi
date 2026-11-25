@@ -42,6 +42,8 @@ import time
 
 ROOT = os.path.dirname(os.path.abspath(os.path.dirname(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "bench"))
+import lsp_session as session  # noqa: E402
+
 # The binary the session gate runs: `bin/iyi` is a shell script, and on
 # Windows the caller names the exe through `IYI`.
 IYI = os.environ.get("IYI", os.path.join(ROOT, "bin", "iyi"))
@@ -99,9 +101,7 @@ status = 0
 def say(label, ok, detail=""):
     global status
     print(f"  {'ok  ' if ok else 'FAIL'} {label}" + (f" — {detail}" if detail else ""), flush=True)
-    session = sys.modules.get("lsp_session")
-    if session:
-        session.LAST["at"] = time.monotonic()
+    session.LAST["at"] = time.monotonic()
     if not ok:
         status = 1
 
@@ -116,6 +116,8 @@ def workspace(where, keep_source):
     with open(os.path.join(where, "app", "base.iyi"), "w") as f:
         f.write(BASE)
     env = dict(os.environ, IYI_PATH=os.path.join(ROOT, "src") + os.pathsep + where)
+    # Named to the watchdog, which a build is under as a session is.
+    session.LAST["sent"] = f"iyi build --emit-iyimod, in {where}"
     emit = subprocess.run([IYI, "build", "--emit-iyimod", "mods", "-o", "out", "main.iyi"],
                           cwd=where, env=env, capture_output=True, text=True)
     if emit.returncode != 0:
@@ -124,6 +126,7 @@ def workspace(where, keep_source):
         return None
     if not keep_source:
         os.remove(os.path.join(where, "app", "base.iyi"))
+        session.LAST["sent"] = f"iyi build --use-iyimod, in {where}"
         use = subprocess.run([IYI, "build", "--use-iyimod", "mods", "-o", "out2", "main.iyi"],
                              cwd=where, env=env, capture_output=True, text=True)
         if use.returncode != 0:
@@ -137,11 +140,9 @@ def ask(where, env, label):
     """Every question, asked of one workspace. Returns the interface hash the
     context pack carried, so the two runs can be compared."""
     os.environ.update(env)
-    import lsp_session as session
 
     main = os.path.join(where, "main.iyi")
     uri = session.file_uri(main)
-    session.watchdog(180)
     client = session.Client()
     client.send("initialize", {"rootUri": session.file_uri(where), "capabilities": {}})
     client.send("initialized", {}, wait=False)
@@ -195,6 +196,7 @@ def ask(where, env, label):
 
 
 def main():
+    session.watchdog(180)
     work = tempfile.mkdtemp(prefix="iyi-lsp-artifacts")
     try:
         hashes = {}

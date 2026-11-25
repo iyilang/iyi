@@ -306,7 +306,7 @@ while True:
 PY
       then
         echo "  FAIL: the Pebbles or challtestsrv's DNS did not come up in 30 s:"
-        tail -3 "$WORK/pebble/pebble-a.log" "$WORK/pebble/pebble-b.log" "$WORK/pebble/challtestsrv.log" | sed 's/^/    /'
+        tail -n 3 "$WORK/pebble/pebble-a.log" "$WORK/pebble/pebble-b.log" "$WORK/pebble/challtestsrv.log" | sed 's/^/    /'
         status=1
       else
         PEBBLE=yes

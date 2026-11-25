@@ -51,6 +51,17 @@ describe "Iyi::Stale S2: behavior key, toolchain digest, refused modes" do
       key1.should_not eq(key2)
     end
 
+    it "distinguishes --release from equivalent optimization and module settings" do
+      released = Iyi::Compiler.new
+      released.release!
+
+      optimized = Iyi::Compiler.new
+      optimized.optimization_mode = released.optimization_mode
+      optimized.single_module = true
+
+      released.behavior_key.should_not eq(optimized.behavior_key)
+    end
+
     it "-Dx changes behavior_key" do
       c1 = Iyi::Compiler.new
       key1 = c1.behavior_key

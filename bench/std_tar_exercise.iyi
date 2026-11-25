@@ -699,7 +699,11 @@ def slip(work : String, archive : String, phrase : String, label : String) : Nil
   # A sentence that names the run's own directory is shown by what it says,
   # not where: the directory is new each run, and the output is compared
   # between a build from source and one from artifacts.
-  shown = (got.message.includes?("iyi_tar_exercise_") || got.message.includes?(work)) ? "#{label}: refused, #{phrase}" : got.message
+  # The message quotes the name with `inspect`, which doubles a backslash, so a
+  # Windows directory is in it as `C:\\a\\b`, not as `C:\a\b`: look for both.
+  quoted = work.inspect
+  quoted = quoted[1, quoted.size - 2]
+  shown = (got.message.includes?("iyi_tar_exercise_") || got.message.includes?(work) || got.message.includes?(quoted)) ? "#{label}: refused, #{phrase}" : got.message
   puts "  #{shown}"
 end
 

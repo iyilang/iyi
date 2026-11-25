@@ -28,6 +28,7 @@ fi
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import sys
@@ -35,13 +36,7 @@ import tempfile
 
 repo = Path(sys.argv[1])
 iyi = sys.argv[2]
-# The overlay's prelude reaches the runtime by a relative path, and a relative
-# path does not exist between two drives (the Windows runner's temp is on C: and
-# the checkout on D:). Put the work directory on the checkout's drive then.
-temp_parent = None
-if os.path.splitdrive(str(repo))[0].lower() != os.path.splitdrive(tempfile.gettempdir())[0].lower():
-    temp_parent = str(repo.parent)
-with tempfile.TemporaryDirectory(prefix="iyi-stale-chmod-failure-", dir=temp_parent) as temporary:
+with tempfile.TemporaryDirectory(prefix="iyi-stale-chmod-failure-") as temporary:
     work = Path(temporary)
     project = work / "project"
     project.mkdir()
@@ -65,14 +60,21 @@ with tempfile.TemporaryDirectory(prefix="iyi-stale-chmod-failure-", dir=temp_par
     if original.count(before) != 1:
         raise AssertionError("scheduler process observer fixture no longer applies")
     observer.write_text(original.replace(before, after), encoding="utf-8")
-    prelude = overlay / "iyi" / "prelude.iyi"
-    prelude.parent.mkdir(parents=True)
-    prelude_source = (repo / "src" / "iyi" / "prelude.iyi").read_text(encoding="utf-8")
-    if prelude_source.count('require "../std/observe"') != 1:
+    # The whole runtime beside the prelude copy, as every other overlay under
+    # bench/ makes it (`cp -R src/iyi`). The compiler tells the runtime's files
+    # from a program's by their being in the prelude's own directory
+    # (`CodeGenVisitor#iyi_runtime_def?`); a prelude copy that reached the
+    # runtime by a relative path had only itself there, so the scheduler was
+    # built as library code, with a preemption check in `IyiScheduler.state`.
+    # `IyiWorkers.preempted` reads the state before it lowers its word on
+    # x86-64 Windows, so the first time the monitor raised the word while the
+    # task ran, the check in `state` called `preempted` again, which called
+    # `state` again, until the stack ran out: "stack overflow" in 1 to 6 of
+    # every 20 runs, and never in a build with the runtime where it belongs.
+    runtime = overlay / "iyi"
+    shutil.copytree(repo / "src" / "iyi", runtime)
+    if (runtime / "prelude.iyi").read_text(encoding="utf-8").count('require "../std/observe"') != 1:
         raise AssertionError("observer prelude fixture no longer applies")
-    runtime_path = os.path.relpath(repo / "src" / "iyi", prelude.parent).replace("\\", "/")
-    prelude_source = prelude_source.replace('require "./', f'require "{runtime_path}/')
-    prelude.write_text(prelude_source, encoding="utf-8")
     target = project / "absent"
     test = project / "chmod_failure_test.iyi"
     test.write_text('''import std/file::{File}
@@ -134,131 +136,6 @@ end
             raise RuntimeError(f"{label}: exit {result.returncode}\n{result.stdout}\n{result.stderr}")
         return result.stdout
 
-    def diagnose_chmod_stack(case_env, observed_env, executable):
-        # Run the same compiled program without observation, then compile the
-        # same program with a larger task stack. Neither replaces the failed
-        # acceptance run; both help identify where the overflow occurs.
-        unobserved_env = observed_env.copy()
-        unobserved_env.pop("IYI_OBSERVE", None)
-        unobserved = subprocess.run([str(executable)], cwd=project, env=unobserved_env,
-                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
-        source = test.read_text(encoding="utf-8")
-        anchor = "group do |g|"
-        if source.count(anchor) != 1:
-            raise AssertionError("chmod stack diagnostic fixture no longer applies")
-        larger_source = project / "chmod_large_stack.iyi"
-        larger_source.write_text(source.replace(anchor, "IyiFiber.stack_bytes = 1048576_u64\n" + anchor), encoding="utf-8")
-        larger_exe = work / "chmod-large-stack.exe"
-        run("chmod larger-stack diagnostic build", ["build", "-Diyi_observe", "-o", str(larger_exe), str(larger_source)], case_env)
-        larger_env = observed_env.copy()
-        larger_env["IYI_OBSERVE"] = str(work / "chmod-large-stack.trace")
-        larger = subprocess.run([str(larger_exe)], cwd=project, env=larger_env,
-                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
-        return (f"unobserved exit {unobserved.returncode}\n{unobserved.stdout}\n{unobserved.stderr}"
-                f"\nlarger-stack observed exit {larger.returncode}\n{larger.stdout}\n{larger.stderr}")
-
-    def diagnose_chmod_fault(case_env, observed_env):
-        # Preserve the ordinary observer and file implementations. Only the
-        # fault handler is labelled, so a false guard-page classification can
-        # be distinguished from actual Windows stack exhaustion.
-        original_prelude = prelude.read_text(encoding="utf-8")
-        diagnostic = original_prelude
-        def marker(label, indent):
-            return (f'{indent}message = "CHMOD_STACK_FAULT {label}\\n"\n'
-                    f'{indent}LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)\n')
-        overflow = "    if code == IYI_WIN_STACK_OVERFLOW\n"
-        guard = "        if IyiScheduler.fiber_guard_hit?(faulting)\n"
-        if diagnostic.count(overflow) != 1 or diagnostic.count(guard) != 2:
-            raise AssertionError("Windows fault handler diagnostic anchors changed")
-        diagnostic = diagnostic.replace(overflow, overflow + marker("overflow", "      "), 1)
-        diagnostic = diagnostic.replace(guard, guard + marker("guard", "          "), 1)
-        position = diagnostic.index(guard, diagnostic.index(guard) + len(guard))
-        diagnostic = diagnostic[:position] + diagnostic[position:].replace(
-            guard, guard + marker("access", "          "), 1)
-        diagnostic_exe = work / "chmod-fault-diagnostic.exe"
-        try:
-            prelude.write_text(diagnostic, encoding="utf-8")
-            run("chmod fault diagnostic build", ["build", "-Diyi_observe", "-o", str(diagnostic_exe), str(test)], case_env)
-            fault_env = observed_env.copy()
-            fault_env["IYI_OBSERVE"] = str(work / "chmod-fault-diagnostic.trace")
-            result = subprocess.run([str(diagnostic_exe)], cwd=project, env=fault_env,
-                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
-            return f"fault diagnostic exit {result.returncode}\n{result.stdout}\n{result.stderr}"
-        finally:
-            prelude.write_text(original_prelude, encoding="utf-8")
-
-    def diagnose_chmod(case_env, observed_env):
-        # Only a failed Windows run takes this path. The normal proof stays
-        # uninstrumented; the second build names the recursive boundary.
-        original_observer = observer.read_text(encoding="utf-8")
-        diagnostic = original_observer
-        entries = (
-            ('pub def __iyi_observe_file_write(op : UInt8 | ::Symbol | String, path : String, target : String? = nil) : Nil',
-             'observe_file_write'),
-            ('pub def file_write(op : UInt8 | ::Symbol | String, path : String, target : String? = nil) : Nil',
-             'file_write'),
-            ('pub def safe_real_path(path : String) : String', 'safe_real_path'),
-            ('private def normalize_path(path : String) : String', 'normalize_path'),
-            ('private def windows_real_path(path : String) : {String?, Int32}', 'windows_real_path'),
-            ('private def windows_identity(path : String) : { {UInt64, UInt64, UInt64}?, Int32 }', 'windows_identity'),
-            ('private def is_under_scratch?(real : String) : ::Bool', 'is_under_scratch'),
-        )
-        for anchor, label in entries:
-            if diagnostic.count(anchor) != 1:
-                raise AssertionError(f"chmod diagnostic anchor changed: {label}")
-            diagnostic = diagnostic.replace(anchor, anchor + f'\n  __iyi_chmod_diag("CHMOD_DIAG {label}\\n")', 1)
-        # Bypass the observed stdio wrappers: using puts here re-enters the
-        # observer and can crash before it names the original failure.
-        helper = '''@[Effect(:observation_channel)]
-pub def __iyi_chmod_diag(message : String) : Nil
-  {% if flag?(:win32) %}
-    written = 0_i32
-    LibC.WriteFile(LibC.GetStdHandle(-12), message.to_unsafe.as(Void*), message.bytesize,
-      pointerof(written), Pointer(Void).new(0_u64))
-  {% elsif flag?(:darwin) %}
-    LibC.write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-  {% end %}
-end
-
-'''
-        anchor = 'pub def file_write(op : UInt8 | ::Symbol | String, path : String, target : String? = nil) : Nil'
-        diagnostic = diagnostic.replace(anchor, helper + anchor, 1)
-        observer.write_text(diagnostic, encoding="utf-8")
-        diagnostic_file = overlay / "std" / "file.iyi"
-        file_source = (repo / "src" / "std" / "file.iyi").read_text(encoding="utf-8")
-        for anchor, marker in (
-            ('    record_chmod_attempt(path)', 'after_attempt'),
-            ('    chmod_after_attempt(path, mode)', 'after_chmod'),
-            ('      attrs = __iyi_path_attributes(sys_path(p))', 'after_attributes'),
-        ):
-            if file_source.count(anchor) != 1:
-                raise AssertionError(f"chmod diagnostic file anchor changed: {marker}")
-            indent = anchor[:len(anchor) - len(anchor.lstrip())]
-            file_source = file_source.replace(anchor, f'{anchor}\n{indent}Std::Observe.__iyi_chmod_diag("CHMOD_DIAG {marker}\\n")', 1)
-        diagnostic_file.write_text(file_source, encoding="utf-8")
-        diagnostic_test = project / "chmod_diagnostic.iyi"
-        diagnostic_source = test.read_text(encoding="utf-8")
-        for anchor, marker in (
-            ('group do |g|', 'before_group'),
-            ('  task = g.spawn do', 'before_spawn'),
-            ('    File.chmod(path, 0o600)', 'before_chmod'),
-            ('  assert task.value.is_a?(Panicked)', 'before_await'),
-        ):
-            if diagnostic_source.count(anchor) != 1:
-                raise AssertionError(f"chmod diagnostic fixture changed: {marker}")
-            indent = anchor[:len(anchor) - len(anchor.lstrip())]
-            diagnostic_source = diagnostic_source.replace(anchor, f'{indent}Std::Observe.__iyi_chmod_diag("CHMOD_DIAG {marker}\\n")\n{anchor}', 1)
-        diagnostic_test.write_text(diagnostic_source, encoding="utf-8")
-        diagnostic_exe = work / "chmod-diagnostic.exe"
-        run("chmod diagnostic build", ["build", "-Diyi_observe", "-o", str(diagnostic_exe), str(diagnostic_test)], case_env)
-        result = subprocess.run([str(diagnostic_exe)], cwd=project, env=observed_env,
-                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
-        def clipped(output):
-            if len(output) > 16000:
-                return output[:8000] + "\n... diagnostic output omitted ...\n" + output[-8000:]
-            return output
-        return f"diagnostic exit {result.returncode}\n{clipped(result.stdout)}\n{clipped(result.stderr)}"
-
     def probe(label, test_path, target_path):
         case_env = env.copy()
         case_env["IYI_CHMOD_FAILURE_PATH"] = str(target_path)
@@ -272,18 +149,7 @@ end
         observed = subprocess.run([str(executable)], cwd=project, env=observed_env,
                                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
         if observed.returncode:
-            detail = ""
-            if label == "chmod" and os.name == "nt":
-                for name, diagnosis in (
-                    ("stack", lambda: diagnose_chmod_stack(case_env, observed_env, executable)),
-                    ("fault", lambda: diagnose_chmod_fault(case_env, observed_env)),
-                    ("observer", lambda: diagnose_chmod(case_env, observed_env)),
-                ):
-                    try:
-                        detail += "\n" + diagnosis()
-                    except Exception as exc:
-                        detail += f"\nchmod {name} diagnostic failed: {exc}"
-            raise RuntimeError(f"{label}: exit {observed.returncode}\n{observed.stdout}\n{observed.stderr}{detail}")
+            raise RuntimeError(f"{label}: exit {observed.returncode}\n{observed.stdout}\n{observed.stderr}")
         trace = trace_path.read_bytes()
         records = []
         position = 0

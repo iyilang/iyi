@@ -68,7 +68,7 @@ import std/time::{Time}
   lib LibC
     fun arc4random_buf(buffer : Void*, count : UInt64) : Void
   end
-{% elsif flag?(:wasm32) %}
+{% elsif flag?(:wasi) %}
   # The host's entropy, through the WASI import made for it, bound by its
   # `__wasi_` name as the prelude binds `fd_write` and std/time binds the
   # clocks. It answers an errno, zero when every byte was written.
@@ -524,9 +524,12 @@ class Random::Secure < Random
       if LibAdvapi32.RtlGenRandom(buffer.as(Void*), count.to_u32) == 0_u8
         raise "Random::Secure: RtlGenRandom answered no bytes"
       end
-    {% elsif flag?(:wasm32) %}
+    {% elsif flag?(:wasi) %}
       error = LibWasi.random_get(buffer, count.to_u32)
       raise "Random::Secure: random_get answered errno #{error}" if error != 0_u16
+    {% elsif flag?(:wasm32) %}
+      error = LibIyiHost.random(buffer, count)
+      raise "Random::Secure: host random failed" if error != 0
     {% else %}
       raise "Random::Secure: this platform has no entropy source iyi reads, and a guessable byte is not a secret"
     {% end %}

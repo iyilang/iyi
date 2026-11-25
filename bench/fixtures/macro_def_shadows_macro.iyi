@@ -1,0 +1,11 @@
+class MacroDefShadow
+  def record(value : Int32)
+    puts "method"
+  end
+
+  def run
+    record(1)
+  end
+end
+
+MacroDefShadow.new.run

@@ -2635,7 +2635,7 @@ require_idle_pool answers.txt || exit "$?"
 step "the idle pool fills when workers wait for task arrival"
 mkdir -p latestart/iyi
 cp "$REPO"/src/iyi/*.iyi latestart/iyi/
-awk '/^  @\[Effect\(:scheduler\)\]; def self\.work : Nil$/ {
+awk '/^  (@\[Effect\([^)]*\)\]; )?def self\.work : Nil$/ {
     print "  @[UnsafeReach(\"copy-only: idle start rendezvous\")]"
     print "  @@idle_starts : Int64 = 0_i64"
     print "  @[UnsafeReach(\"copy-only: idle start rendezvous\")]"

@@ -1,0 +1,4 @@
+module narrow_argext
+
+v = 255_u8
+puts v.to_i64

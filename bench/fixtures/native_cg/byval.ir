@@ -1,0 +1,41 @@
+; iyi-ir 1
+module "byval"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [9 x i8] c"%d %d %d\0A\00"
+%Big = type { i64, i64, i64 }
+
+; The callee receives the address of the caller's copy. Its writes land in the copy, not in the caller's object.
+define internal i64 @bump(byval(%Big) ptr %b) {
+entry:
+  %p0 = getelementptr %Big, ptr %b, i64 0, i32 0
+  store i64 99, ptr %p0, align 8
+  %v0 = load i64, ptr %p0, align 8
+  %p1 = getelementptr %Big, ptr %b, i64 0, i32 1
+  %v1 = load i64, ptr %p1, align 8
+  %p2 = getelementptr %Big, ptr %b, i64 0, i32 2
+  %v2 = load i64, ptr %p2, align 8
+  %s1 = add i64 %v0, %v1
+  %s2 = add i64 %s1, %v2
+  ret i64 %s2
+}
+
+define i32 @main() {
+entry:
+  %orig = alloca %Big, align 8
+  %g0 = getelementptr %Big, ptr %orig, i64 0, i32 0
+  store i64 1, ptr %g0, align 8
+  %g1 = getelementptr %Big, ptr %orig, i64 0, i32 1
+  store i64 2, ptr %g1, align 8
+  %g2 = getelementptr %Big, ptr %orig, i64 0, i32 2
+  store i64 3, ptr %g2, align 8
+  %r = call i64 (ptr) @bump(byval(%Big) ptr %orig)
+  %o0 = load i64, ptr %g0, align 8
+  %o2 = load i64, ptr %g2, align 8
+  %p1 = trunc i64 %r to i32
+  %p2 = trunc i64 %o0 to i32
+  %p3 = trunc i64 %o2 to i32
+  %w = call i32 (ptr, ...) @printf(ptr @fmt, i32 %p1, i32 %p2, i32 %p3)
+  ret i32 0
+}

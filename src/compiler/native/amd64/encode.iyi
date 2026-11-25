@@ -1,0 +1,683 @@
+module compiler/native/amd64/encode
+
+# The x86_64 encoder (SPEC 2.2 step 6, x86_64). Every instruction the selector
+# produces is an XForm: one instruction shape with its opcode, prefixes and
+# operands fixed. The constructors below hold the opcode map (the Intel SDM,
+# volume 2, names each opcode). `encode_form` lays every shape out the same
+# way: lock, segment, mandatory or operand-size prefix, REX, opcode, ModRM, SIB,
+# displacement, immediate. A field that names a symbol is written as zero and
+# recorded as a relocation, with the object model's addend:
+#   - a pc-relative field (PcRel32, X86Branch32, X86GotPcRel) has addend
+#     value - 4 - (bytes after the field), the ELF convention;
+#   - an absolute field (Abs64, X86TpOff32) has addend value.
+#
+# Register numbers are those of compiler/native/amd64/regs: a general purpose
+# register is its hardware number and an SSE register is 32 + its number.
+# `reg` is the ModRM reg field (or the opcode digit when `digit` is set), `rm`
+# the register operand of the ModRM r/m field, and `with_mem` replaces that
+# operand by a memory reference. Constructor arguments follow the encoding
+# order: the reg field first, then the r/m operand.
+
+import compiler/native/obj/object::{Reloc, RelocKind}
+import compiler/native/amd64/regs::{hw}
+
+# A memory operand: [base + index * scale + disp], optionally rip-relative,
+# optionally based on %fs or %gs. A displacement that names a symbol is a
+# relocated field of `sym`.
+pub class XMem
+  getter base : Int32  # a gpr, or -1 for no base
+  getter index : Int32 # a gpr, or -1 for no index
+  getter scale : Int32 # 1, 2, 4 or 8
+  getter disp : Int64
+  getter rip : Bool       # rip-relative: base and index are not used
+  getter seg : Int32      # 0 none, 1 %fs, 2 %gs
+  getter has_reloc : Bool # the displacement is a relocated field
+  getter reloc_kind : RelocKind
+  getter sym : Int32
+
+  def initialize(@base : Int32, @index : Int32, @scale : Int32, @disp : Int64, @rip : Bool, @seg : Int32, @has_reloc : Bool, @reloc_kind : RelocKind, @sym : Int32)
+  end
+end
+
+pub def mem_base(base : Int32, disp : Int64) : XMem
+  XMem.new(base, -1, 1, disp, false, 0, false, RelocKind::Abs64, -1)
+end
+
+pub def mem_base_seg(seg : Int32, base : Int32, disp : Int64) : XMem
+  XMem.new(base, -1, 1, disp, false, seg, false, RelocKind::Abs64, -1)
+end
+
+pub def mem_index(base : Int32, index : Int32, scale : Int32, disp : Int64) : XMem
+  XMem.new(base, index, scale, disp, false, 0, false, RelocKind::Abs64, -1)
+end
+
+pub def mem_rip(disp : Int64) : XMem
+  XMem.new(-1, -1, 1, disp, true, 0, false, RelocKind::Abs64, -1)
+end
+
+pub def mem_rip_sym(kind : RelocKind, sym : Int32, disp : Int64) : XMem
+  XMem.new(-1, -1, 1, disp, true, 0, true, kind, sym)
+end
+
+pub def mem_abs(seg : Int32, disp : Int64) : XMem
+  XMem.new(-1, -1, 1, disp, false, seg, false, RelocKind::Abs64, -1)
+end
+
+pub def mem_abs_sym(seg : Int32, kind : RelocKind, sym : Int32, disp : Int64) : XMem
+  XMem.new(-1, -1, 1, disp, false, seg, true, kind, sym)
+end
+
+# One instruction shape. Fields not set by a constructor are zero or false.
+pub class XForm
+  property two_byte : Bool # the opcode is 0F xx
+  property opc : Int32     # the opcode byte (the second one when two_byte)
+  property pfx : Int32     # 0, or a prefix byte before REX: 0x66, 0xF2 or 0xF3
+  property rex_w : Bool    # REX.W: a 64-bit operand
+  property lock : Bool     # the F0 lock prefix
+  property reg_byte : Bool # the reg operand is 8 bits: spl, bpl, sil, dil need REX
+  property rm_byte : Bool  # the rm register operand is 8 bits
+  property opc_reg : Bool  # the register (in rm) is added to the opcode's low three bits
+  property modrm : Bool    # a ModRM byte follows the opcode
+  property digit : Bool    # reg is an opcode extension (/digit), not a register
+  property reg : Int32
+  property rm : Int32     # the register operand when has_mem is false
+  property has_mem : Bool # the r/m operand is `mem`
+  property mem : XMem
+  property imm : Int64      # the immediate, or the addend's value when has_reloc
+  property imm_size : Int32 # bytes of immediate: 0, 1, 2, 4 or 8
+  property has_reloc : Bool # the immediate is a relocated field of `sym`
+  property reloc_kind : RelocKind
+  property sym : Int32
+
+  def initialize
+    @two_byte = false
+    @opc = 0
+    @pfx = 0
+    @rex_w = false
+    @lock = false
+    @reg_byte = false
+    @rm_byte = false
+    @opc_reg = false
+    @modrm = false
+    @digit = false
+    @reg = 0
+    @rm = 0
+    @has_mem = false
+    @mem = mem_base(-1, 0_i64)
+    @imm = 0_i64
+    @imm_size = 0
+    @has_reloc = false
+    @reloc_kind = RelocKind::Abs64
+    @sym = -1
+  end
+end
+
+# The base shape: an opcode at an operand size. 64-bit operations carry REX.W,
+# 16-bit ones the 0x66 prefix, and 8-bit ones are flagged so REX is emitted
+# for spl, bpl, sil and dil.
+pub def xf(opc : Int32, size : Int32) : XForm
+  f = XForm.new
+  f.opc = opc
+  f.rex_w = size == 64
+  if size == 16
+    f.pfx = 0x66
+  end
+  f.reg_byte = size == 8
+  f.rm_byte = size == 8
+  f
+end
+
+# A ModRM instruction whose reg field is `reg` and whose r/m operand is `rm`.
+pub def op_rr(opc : Int32, size : Int32, reg : Int32, rm : Int32) : XForm
+  f = xf(opc, size)
+  f.modrm = true
+  f.reg = reg
+  f.rm = rm
+  f
+end
+
+# A ModRM instruction whose reg field is an opcode extension.
+pub def op_digit(opc : Int32, size : Int32, digit : Int32, rm : Int32) : XForm
+  f = op_rr(opc, size, digit, rm)
+  f.digit = true
+  f
+end
+
+pub def with_mem(f : XForm, m : XMem) : XForm
+  f.has_mem = true
+  f.mem = m
+  f
+end
+
+pub def with_imm(f : XForm, imm : Int64, count : Int32) : XForm
+  f.imm = imm
+  f.imm_size = count
+  f
+end
+
+pub def with_reloc(f : XForm, kind : RelocKind, sym : Int32, value : Int64, count : Int32) : XForm
+  f.has_reloc = true
+  f.reloc_kind = kind
+  f.sym = sym
+  f.imm = value
+  f.imm_size = count
+  f
+end
+
+pub def two_byte(f : XForm) : XForm
+  f.two_byte = true
+  f
+end
+
+pub def locked(f : XForm) : XForm
+  f.lock = true
+  f
+end
+
+# The immediate width of an operation of `size` bits (64-bit operations take a
+# sign-extended 32-bit immediate).
+pub def imm_width(size : Int32) : Int32
+  if size == 8
+    return 1
+  end
+  if size == 16
+    return 2
+  end
+  4
+end
+
+# ---- integer opcode map ----------------------------------------------------
+
+# rm <- rm op reg. `sub` is the ALU digit: add 0, or 1, adc 2, sbb 3, and 4,
+# sub 5, xor 6, cmp 7.
+pub def alu(sub : Int32, size : Int32, reg : Int32, rm : Int32) : XForm
+  op_rr(sub * 8 + (size == 8 ? 0 : 1), size, reg, rm)
+end
+
+# reg <- reg op rm.
+pub def alu_load(sub : Int32, size : Int32, reg : Int32, rm : Int32) : XForm
+  op_rr(sub * 8 + (size == 8 ? 2 : 3), size, reg, rm)
+end
+
+# rm <- rm op imm. The accumulator short form (04/05, no ModRM) is taken for %al, %ax, %eax and %rax when the
+# immediate does not fit a byte, or for any 8-bit accumulator; otherwise the imm8 form is taken when the value fits.
+pub def alu_imm(sub : Int32, size : Int32, rm : Int32, imm : Int64) : XForm
+  if rm == 0 && size == 8
+    return with_imm(xf(sub * 8 + 4, size), imm, 1)
+  end
+  if rm == 0 && (imm < -128 || imm > 127)
+    return with_imm(xf(sub * 8 + 5, size), imm, imm_width(size))
+  end
+  if size == 8
+    return with_imm(op_digit(0x80, size, sub, rm), imm, 1)
+  end
+  if imm >= -128 && imm <= 127
+    return with_imm(op_digit(0x83, size, sub, rm), imm, 1)
+  end
+  with_imm(op_digit(0x81, size, sub, rm), imm, imm_width(size))
+end
+
+pub def test_rr(size : Int32, reg : Int32, rm : Int32) : XForm
+  op_rr(size == 8 ? 0x84 : 0x85, size, reg, rm)
+end
+
+pub def test_imm(size : Int32, rm : Int32, imm : Int64) : XForm
+  if rm == 0
+    return with_imm(xf(size == 8 ? 0xA8 : 0xA9, size), imm, imm_width(size))
+  end
+  with_imm(op_digit(size == 8 ? 0xF6 : 0xF7, size, 0, rm), imm, imm_width(size))
+end
+
+# Memory-operand forms of the immediate operations. The register-only accumulator forms above never apply to
+# memory, so these pass a register number that cannot select them.
+pub def alu_imm_mem(sub : Int32, size : Int32, m : XMem, imm : Int64) : XForm
+  with_mem(alu_imm(sub, size, -1, imm), m)
+end
+
+pub def test_imm_mem(size : Int32, m : XMem, imm : Int64) : XForm
+  with_mem(test_imm(size, -1, imm), m)
+end
+
+# rm <- reg.
+pub def mov(size : Int32, reg : Int32, rm : Int32) : XForm
+  op_rr(size == 8 ? 0x88 : 0x89, size, reg, rm)
+end
+
+# reg <- rm.
+pub def mov_load(size : Int32, reg : Int32, rm : Int32) : XForm
+  op_rr(size == 8 ? 0x8A : 0x8B, size, reg, rm)
+end
+
+# rm <- imm (C6/C7 /0). A 64-bit operand takes a sign-extended 32-bit immediate.
+pub def mov_imm(size : Int32, rm : Int32, imm : Int64) : XForm
+  with_imm(op_digit(size == 8 ? 0xC6 : 0xC7, size, 0, rm), imm, imm_width(size))
+end
+
+# rd <- imm, in the short register form (B0+r for 8 bits, B8+r for 16 and 32).
+pub def mov_reg_imm(size : Int32, rd : Int32, imm : Int64) : XForm
+  f = xf(size == 8 ? 0xB0 : 0xB8, size)
+  f.opc_reg = true
+  f.rm = rd
+  with_imm(f, imm, imm_width(size))
+end
+
+# rd <- a 64-bit immediate (REX.W B8+r io).
+pub def movabs(rd : Int32, imm : Int64) : XForm
+  f = xf(0xB8, 64)
+  f.opc_reg = true
+  f.rm = rd
+  with_imm(f, imm, 8)
+end
+
+pub def lea(reg : Int32, rm : Int32) : XForm
+  op_rr(0x8D, 64, reg, rm)
+end
+
+# reg <- zero-extended src_bits-bit rm, into a dst_size operand.
+pub def movzx(src_bits : Int32, dst_size : Int32, reg : Int32, rm : Int32) : XForm
+  f = xf(src_bits == 8 ? 0xB6 : 0xB7, dst_size)
+  f.two_byte = true
+  f.modrm = true
+  f.reg = reg
+  f.rm = rm
+  f.reg_byte = false
+  f.rm_byte = src_bits == 8
+  f
+end
+
+# reg <- sign-extended src_bits-bit rm, into a dst_size operand.
+pub def movsx(src_bits : Int32, dst_size : Int32, reg : Int32, rm : Int32) : XForm
+  f = xf(src_bits == 8 ? 0xBE : 0xBF, dst_size)
+  f.two_byte = true
+  f.modrm = true
+  f.reg = reg
+  f.rm = rm
+  f.reg_byte = false
+  f.rm_byte = src_bits == 8
+  f
+end
+
+# movslq: reg64 <- sign-extended rm32 (REX.W 63 /r).
+pub def movsxd(reg : Int32, rm : Int32) : XForm
+  op_rr(0x63, 64, reg, rm)
+end
+
+# Shifts and rotates by %cl: digits rol 0, ror 1, shl 4, shr 5, sar 7.
+pub def shift_cl(digit : Int32, size : Int32, rm : Int32) : XForm
+  op_digit(size == 8 ? 0xD2 : 0xD3, size, digit, rm)
+end
+
+pub def shift_imm(digit : Int32, size : Int32, rm : Int32, count : Int64) : XForm
+  with_imm(op_digit(size == 8 ? 0xC0 : 0xC1, size, digit, rm), count, 1)
+end
+
+# A shift by one: the D0/D1 form, with no count byte.
+pub def shift_one(digit : Int32, size : Int32, rm : Int32) : XForm
+  op_digit(size == 8 ? 0xD0 : 0xD1, size, digit, rm)
+end
+
+# reg <- reg * rm (two-operand imul).
+pub def imul_rm(size : Int32, reg : Int32, rm : Int32) : XForm
+  two_byte(op_rr(0xAF, size, reg, rm))
+end
+
+# reg <- rm * imm: the imm8 form when the value fits, else the imm16/32 form.
+pub def imul_imm(size : Int32, reg : Int32, rm : Int32, imm : Int64) : XForm
+  if imm >= -128 && imm <= 127
+    return with_imm(op_rr(0x6B, size, reg, rm), imm, 1)
+  end
+  with_imm(op_rr(0x69, size, reg, rm), imm, imm_width(size))
+end
+
+# The one-operand group F6/F7: not 2, neg 3, mul 4, imul 5, div 6, idiv 7.
+pub def unary(digit : Int32, size : Int32, rm : Int32) : XForm
+  op_digit(size == 8 ? 0xF6 : 0xF7, size, digit, rm)
+end
+
+# Sign-extends %ax into %dx:%ax (cwd), %eax into %edx (cdq), or %rax into %rdx (cqo).
+pub def sign_extend_acc(size : Int32) : XForm
+  xf(0x99, size)
+end
+
+pub def setcc(cc : Int32, rm : Int32) : XForm
+  two_byte(op_digit(0x90 + cc, 8, 0, rm))
+end
+
+pub def cmov(cc : Int32, size : Int32, reg : Int32, rm : Int32) : XForm
+  two_byte(op_rr(0x40 + cc, size, reg, rm))
+end
+
+# ---- control transfer ------------------------------------------------------
+
+# The rel8 and rel32 forms take the displacement from the end of the instruction.
+pub def jcc8(cc : Int32, disp : Int64) : XForm
+  with_imm(xf(0x70 + cc, 32), disp, 1)
+end
+
+pub def jcc32(cc : Int32, disp : Int64) : XForm
+  with_imm(two_byte(xf(0x80 + cc, 32)), disp, 4)
+end
+
+# A conditional branch to a symbol: a rel32 field with the branch relocation (PLT32 on ELF, as LLVM emits).
+pub def jcc_sym(cc : Int32, sym : Int32) : XForm
+  with_reloc(two_byte(xf(0x80 + cc, 32)), RelocKind::X86Branch32, sym, 0_i64, 4)
+end
+
+pub def jmp8(disp : Int64) : XForm
+  with_imm(xf(0xEB, 32), disp, 1)
+end
+
+pub def jmp32(disp : Int64) : XForm
+  with_imm(xf(0xE9, 32), disp, 4)
+end
+
+pub def jmp_sym(sym : Int32) : XForm
+  with_reloc(xf(0xE9, 32), RelocKind::X86Branch32, sym, 0_i64, 4)
+end
+
+# An indirect jump or call through a register or memory operand (FF /4, FF /2).
+pub def jmp_ind(rm : Int32) : XForm
+  op_digit(0xFF, 32, 4, rm)
+end
+
+pub def call_ind(rm : Int32) : XForm
+  op_digit(0xFF, 32, 2, rm)
+end
+
+pub def call_sym(sym : Int32) : XForm
+  with_reloc(xf(0xE8, 32), RelocKind::X86Branch32, sym, 0_i64, 4)
+end
+
+pub def ret : XForm
+  xf(0xC3, 32)
+end
+
+pub def push(reg : Int32) : XForm
+  f = xf(0x50, 32)
+  f.opc_reg = true
+  f.rm = reg
+  f
+end
+
+pub def pop(reg : Int32) : XForm
+  f = xf(0x58, 32)
+  f.opc_reg = true
+  f.rm = reg
+  f
+end
+
+# ---- atomics ---------------------------------------------------------------
+
+# Compare-and-exchange: rm <- rm if rm == %rax, else %rax <- rm (0F B0/B1).
+# Use with `locked` for the lock-prefixed form.
+pub def cmpxchg(size : Int32, reg : Int32, rm : Int32) : XForm
+  two_byte(op_rr(size == 8 ? 0xB0 : 0xB1, size, reg, rm))
+end
+
+pub def xadd(size : Int32, reg : Int32, rm : Int32) : XForm
+  two_byte(op_rr(size == 8 ? 0xC0 : 0xC1, size, reg, rm))
+end
+
+pub def xchg(size : Int32, reg : Int32, rm : Int32) : XForm
+  op_rr(size == 8 ? 0x86 : 0x87, size, reg, rm)
+end
+
+# ---- SSE and SSE2 scalar floating point ------------------------------------
+
+# A two-byte SSE instruction with a mandatory prefix (0 for none), at a 32-bit
+# operand size unless `rex_w` says the general purpose operand is 64-bit.
+pub def sse(pfx : Int32, opc : Int32, rex_w : Bool, reg : Int32, rm : Int32) : XForm
+  f = op_rr(opc, 32, reg, rm)
+  f.two_byte = true
+  f.pfx = pfx
+  f.rex_w = rex_w
+  f
+end
+
+# Scalar arithmetic on xmm: reg <- reg op rm (add 58, mul 59, sub 5C, div 5E,
+# sqrt 51, min 5D, max 5F). `double` selects sd (F2) over ss (F3).
+pub def sse_arith(double : Bool, opc : Int32, reg : Int32, rm : Int32) : XForm
+  sse(double ? 0xF2 : 0xF3, opc, false, reg, rm)
+end
+
+# xmm <- xmm/mem (movsd/movss, 0F 10).
+pub def sse_load(double : Bool, reg : Int32, rm : Int32) : XForm
+  sse(double ? 0xF2 : 0xF3, 0x10, false, reg, rm)
+end
+
+# xmm/mem <- xmm (movsd/movss, 0F 11).
+pub def sse_store(double : Bool, reg : Int32, rm : Int32) : XForm
+  sse(double ? 0xF2 : 0xF3, 0x11, false, reg, rm)
+end
+
+# ucomisd (66 0F 2E) or ucomiss (0F 2E): flags <- compare reg with rm.
+pub def ucomi(double : Bool, reg : Int32, rm : Int32) : XForm
+  sse(double ? 0x66 : 0, 0x2E, false, reg, rm)
+end
+
+# Truncating conversion to a general register: cvttsd2si (F2 0F 2C) or
+# cvttss2si (F3 0F 2C), 64-bit when `size` is 64.
+pub def cvtt(double : Bool, size : Int32, reg : Int32, rm : Int32) : XForm
+  sse(double ? 0xF2 : 0xF3, 0x2C, size == 64, reg, rm)
+end
+
+# Conversion of a general register to xmm: cvtsi2sd (F2 0F 2A) or cvtsi2ss
+# (F3 0F 2A), from a 64-bit source when `size` is 64.
+pub def cvt_from_int(double : Bool, size : Int32, reg : Int32, rm : Int32) : XForm
+  sse(double ? 0xF2 : 0xF3, 0x2A, size == 64, reg, rm)
+end
+
+# cvtss2sd (F3 0F 5A) when to_double, else cvtsd2ss (F2 0F 5A).
+pub def cvt_fp(to_double : Bool, reg : Int32, rm : Int32) : XForm
+  sse(to_double ? 0xF3 : 0xF2, 0x5A, false, reg, rm)
+end
+
+# xmm <- general register bits: movd (66 0F 6E) or movq (66 REX.W 0F 6E).
+pub def movq_to_xmm(size : Int32, reg : Int32, rm : Int32) : XForm
+  sse(0x66, 0x6E, size == 64, reg, rm)
+end
+
+# general register <- xmm bits: movd (66 0F 7E) or movq (66 REX.W 0F 7E).
+pub def movq_from_xmm(size : Int32, reg : Int32, rm : Int32) : XForm
+  sse(0x66, 0x7E, size == 64, reg, rm)
+end
+
+# xmm <- xmm (movaps, 0F 28).
+pub def movaps(reg : Int32, rm : Int32) : XForm
+  sse(0, 0x28, false, reg, rm)
+end
+
+# xmm <- xmm xor xmm (xorps, 0F 57).
+pub def xorps(reg : Int32, rm : Int32) : XForm
+  sse(0, 0x57, false, reg, rm)
+end
+
+# ---- layout ----------------------------------------------------------------
+
+pub class EncodedForm
+  getter bytes : Array(UInt8)
+  getter relocs : Array(Reloc) # offsets are from the instruction's first byte
+
+  def initialize(@bytes : Array(UInt8), @relocs : Array(Reloc))
+  end
+end
+
+class XWriter
+  getter bytes : Array(UInt8)
+  getter relocs : Array(Reloc)
+
+  def initialize
+    @bytes = [] of UInt8
+    @relocs = [] of Reloc
+  end
+
+  def byte(v : Int64) : Nil
+    @bytes << (v & 255_i64).to_u8
+  end
+
+  # `count` bytes of v, little-endian.
+  def value(v : Int64, count : Int32) : Nil
+    i = 0
+    while i < count
+      byte(v >> (i * 8))
+      i = i + 1
+    end
+  end
+
+  def reloc(kind : RelocKind, sym : Int32, addend : Int64) : Nil
+    @relocs << Reloc.new(@bytes.size.to_i64, kind, sym, addend)
+  end
+end
+
+pub def pc_relative?(kind : RelocKind) : Bool
+  kind == RelocKind::PcRel32 || kind == RelocKind::X86Branch32 || kind == RelocKind::X86GotPcRel
+end
+
+# A relocated field of `count` bytes. `after` is the number of bytes the
+# instruction places after the field, which a pc-relative addend must allow for.
+def reloc_field(w : XWriter, kind : RelocKind, sym : Int32, value : Int64, count : Int32, after : Int64) : Nil
+  if pc_relative?(kind)
+    w.reloc(kind, sym, value - 4_i64 - after)
+  else
+    w.reloc(kind, sym, value)
+  end
+  w.value(0_i64, count)
+end
+
+def disp_bytes(w : XWriter, m : XMem, count : Int32, after : Int64) : Nil
+  if m.has_reloc
+    reloc_field(w, m.reloc_kind, m.sym, m.disp, count, after)
+  else
+    w.value(m.disp, count)
+  end
+end
+
+def scale_bits(scale : Int32) : Int64
+  if scale == 8
+    return 3_i64
+  end
+  if scale == 4
+    return 2_i64
+  end
+  if scale == 2
+    return 1_i64
+  end
+  0_i64
+end
+
+# The ModRM byte (and SIB and displacement) of the r/m operand, or of the
+# register operand when there is no memory operand.
+def emit_modrm(w : XWriter, f : XForm) : Nil
+  reg_field = hw(f.reg).to_i64 & 7_i64
+  if !f.has_mem
+    w.byte(192_i64 | (reg_field << 3) | (hw(f.rm).to_i64 & 7_i64))
+    return
+  end
+  m = f.mem
+  after = f.imm_size.to_i64
+  if m.rip
+    w.byte((reg_field << 3) | 5_i64)
+    disp_bytes(w, m, 4, after)
+    return
+  end
+  if m.base < 0
+    # No base: SIB with base 101 and mod 00 is a 32-bit absolute address, or an
+    # index-only one. This is how %fs:sym@tpoff and %gs:0x28 are addressed.
+    index_field = m.index >= 0 ? hw(m.index).to_i64 & 7_i64 : 4_i64
+    w.byte((reg_field << 3) | 4_i64)
+    w.byte((scale_bits(m.scale) << 6) | (index_field << 3) | 5_i64)
+    disp_bytes(w, m, 4, after)
+    return
+  end
+  base_low = hw(m.base).to_i64 & 7_i64
+  need_sib = m.index >= 0 || base_low == 4_i64
+  mode = 0_i64
+  if m.has_reloc
+    mode = 2_i64
+  elsif m.disp == 0_i64 && base_low != 5_i64
+    mode = 0_i64
+  elsif m.disp >= -128_i64 && m.disp <= 127_i64
+    mode = 1_i64
+  else
+    mode = 2_i64
+  end
+  w.byte((mode << 6) | (reg_field << 3) | (need_sib ? 4_i64 : base_low))
+  if need_sib
+    index_field = m.index >= 0 ? hw(m.index).to_i64 & 7_i64 : 4_i64
+    w.byte((scale_bits(m.scale) << 6) | (index_field << 3) | base_low)
+  end
+  if mode == 1_i64
+    w.byte(m.disp)
+  elsif mode == 2_i64
+    disp_bytes(w, m, 4, after)
+  end
+end
+
+pub def encode_form(f : XForm) : EncodedForm
+  w = XWriter.new
+  m = f.mem
+  if f.lock
+    w.byte(0xF0_i64)
+  end
+  if f.has_mem && m.seg == 1
+    w.byte(0x64_i64)
+  end
+  if f.has_mem && m.seg == 2
+    w.byte(0x65_i64)
+  end
+  if f.pfx != 0
+    w.byte(f.pfx.to_i64)
+  end
+  reg_hw = hw(f.reg)
+  rm_hw = hw(f.rm)
+  rex_r = f.modrm && !f.digit && reg_hw >= 8
+  rex_x = f.has_mem && m.index >= 0 && hw(m.index) >= 8
+  rex_b = false
+  if f.opc_reg
+    rex_b = rm_hw >= 8
+  elsif f.has_mem
+    rex_b = !m.rip && m.base >= 0 && hw(m.base) >= 8
+  else
+    rex_b = rm_hw >= 8
+  end
+  byte_reg = false
+  if f.reg_byte && f.modrm && !f.digit && reg_hw >= 4 && reg_hw <= 7
+    byte_reg = true
+  end
+  if f.rm_byte && !f.has_mem && rm_hw >= 4 && rm_hw <= 7
+    byte_reg = true
+  end
+  if f.rex_w || rex_r || rex_x || rex_b || byte_reg
+    rex = 0x40_i64
+    if f.rex_w
+      rex = rex | 8_i64
+    end
+    if rex_r
+      rex = rex | 4_i64
+    end
+    if rex_x
+      rex = rex | 2_i64
+    end
+    if rex_b
+      rex = rex | 1_i64
+    end
+    w.byte(rex)
+  end
+  if f.two_byte
+    w.byte(0x0F_i64)
+  end
+  if f.opc_reg
+    w.byte(f.opc.to_i64 + (rm_hw.to_i64 & 7_i64))
+  else
+    w.byte(f.opc.to_i64)
+  end
+  if f.modrm
+    emit_modrm(w, f)
+  end
+  if f.has_reloc
+    reloc_field(w, f.reloc_kind, f.sym, f.imm, f.imm_size, 0_i64)
+  elsif f.imm_size > 0
+    w.value(f.imm, f.imm_size)
+  end
+  EncodedForm.new(w.bytes, w.relocs)
+end

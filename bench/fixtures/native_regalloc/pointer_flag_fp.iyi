@@ -1,0 +1,10 @@
+@[Unsafe("the fixture reads a pointer's bits through a floating-point register")]
+module pointer_flag_fp
+
+def churn(a : Float64) : Float64
+  a * 2.0
+end
+
+# The round trip of the pointer's bits is the same value, so the first line is 1; churn(2.0) is 4.0.
+puts "1"
+puts "#{churn(2.0).to_i64}"

@@ -1,0 +1,10 @@
+; iyi-ir 1
+source_filename = "null_uninitialized"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal ptr @null_uninitialized() {
+entry:
+  %slot = alloca ptr, align 8
+  %value = load ptr, ptr %slot, align 8
+  ret ptr %value
+}

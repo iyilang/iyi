@@ -1,0 +1,10 @@
+@[Unsafe("the fixture holds an inline asm template")]
+module asm_explicit
+
+def addfive(x : Int64) : Int64
+  out = 0_i64
+  asm("add $0, x3, #5" : "=r"(out) : "{x3}"(x))
+  out
+end
+
+puts "#{addfive(10_i64)}"

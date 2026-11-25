@@ -1,0 +1,175 @@
+module compiler/native/emit
+
+# The SectionWriter (SPEC 3.5): appends bytes, relocations and symbols to one section of an ObjectFile,
+# and lays the module's globals acc into their sections from their initializers.
+#
+# Globals with no initializer and external linkage are symbols only; defined globals take their bytes
+# from the initializer, and a pointer inside an initializer is an Abs64 relocation to the symbol it names.
+# Constant expressions in an initializer are refused by name.
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst}
+import compiler/ir/function::{Function, Global, Linkage, TlsModel}
+import compiler/ir/module::{Module}
+import compiler/ir/layout::{DataLayout}
+import compiler/native/const_expr::{ConstAddress, reduce_const}
+import compiler/native/obj/object::{ObjectFile, Section, SectionKind, Symbol, SymbolKind, SymbolBinding, Reloc, RelocKind}
+import compiler/native/aarch64/regs::{reg_name}
+import std/slice::{Slice, Bytes}
+
+pub class SectionWriter
+  getter bytes : Array(UInt8)
+  getter relocs : Array(Reloc)
+
+  def initialize
+    @bytes = [] of UInt8
+    @relocs = [] of Reloc
+  end
+
+  def offset : Int64
+    @bytes.size.to_i64
+  end
+
+  # Appends the bytes of one function, its relocations shifted to their place in the section.
+  def append(code : Array(UInt8), relocs : Array(Reloc)) : Int64
+    base = offset
+    code.each do |b|
+      @bytes << b
+    end
+    relocs.each do |r|
+      @relocs << Reloc.new(r.offset + base, r.kind, r.symbol, r.addend)
+    end
+    base
+  end
+
+  def pad_to(align : Int64) : Nil
+    while (@bytes.size.to_i64 % align) != 0_i64
+      @bytes << 0_u8
+    end
+  end
+
+  def put_le(value : Int64, width : Int32) : Nil
+    i = 0
+    while i < width
+      @bytes << ((value >> (i * 8)) & 255_i64).to_u8
+      i = i + 1
+    end
+  end
+
+  def reloc(kind : RelocKind, symbol : Int32, addend : Int64) : Nil
+    @relocs << Reloc.new(offset, kind, symbol, addend)
+  end
+end
+
+# A byte array as the object model's Bytes.
+pub def to_bytes(data : Array(UInt8)) : Bytes
+  acc = Slice(UInt8).new(data.size)
+  i = 0
+  while i < data.size
+    acc[i] = data[i]
+    i = i + 1
+  end
+  acc
+end
+
+# Writes one initializer of type `t` at `at` in `w`, recording a pointer relocation where it names a symbol.
+# `index` maps a symbol name to its index in the object's table.
+pub def write_initializer(layout : DataLayout, w : SectionWriter, index : Hash(String, Int32), t : IrType, value : Value?, at : Int64) : String?
+  pad_to_offset(w, at)
+  if value.nil?
+    zero_fill(w, layout.store_size(t))
+    return nil
+  end
+  v = value.as(Value)
+  if v.is_a?(Global) || v.is_a?(Function)
+    name = v.is_a?(Global) ? v.as(Global).name : v.as(Function).name
+    sym = index[name]?
+    return "no symbol for #{name}" unless sym
+    w.reloc(RelocKind::Abs64, sym, 0_i64)
+    w.put_le(0_i64, 8)
+    return nil
+  end
+  if !v.is_a?(Inst)
+    return "unsupported initializer value"
+  end
+  i = v.as(Inst)
+  if i.op == Op::ConstExpr || i.op == Op::GlobalAddr || i.op == Op::FunctionAddr
+    # A constant expression reduces to a symbol plus a byte offset, or to a plain integer (const_expr.iyi). With
+    # a symbol the offset is the relocation's addend and the bytes at the site stay zero (C1's object contract).
+    reduced = reduce_const(layout, i)
+    return reduced.as(String) if reduced.is_a?(String)
+    address = reduced.as(ConstAddress)
+    if address.base.nil?
+      w.put_le(address.offset, layout.store_size(t).to_i32)
+      return nil
+    end
+    return "the address of #{address.symbol_name} is written into #{layout.store_size(t)} bytes" unless layout.store_size(t) == 8_i64
+    sym = index[address.symbol_name]?
+    return "no symbol for #{address.symbol_name}" unless sym
+    w.reloc(RelocKind::Abs64, sym, address.offset)
+    w.put_le(0_i64, 8)
+    return nil
+  end
+  if i.op == Op::ConstInt
+    w.put_le(i.aux_int, layout.store_size(t).to_i32)
+    return nil
+  end
+  if i.op == Op::ConstFloat
+    w.put_le(i.aux_int, layout.store_size(t).to_i32)
+    return nil
+  end
+  if i.op == Op::ConstNull || i.op == Op::ConstUndef || i.op == Op::ConstPoison || i.op == Op::ConstZero
+    zero_fill(w, layout.store_size(t))
+    return nil
+  end
+  if i.op == Op::ConstBytes
+    i.args.each do |a|
+      w.put_le(a.as(Inst).aux_int, 1)
+    end
+    return nil
+  end
+  if i.op == Op::ConstAggregate
+    if t.struct?
+      fields = t.struct_element_types
+      k = 0
+      while k < fields.size
+        message = write_initializer(layout, w, index, fields[k], i.args[k], at + layout.offset_of(t, k))
+        return message if message
+        k = k + 1
+      end
+      return nil
+    end
+    if t.array?
+      element = t.element_type
+      stride = layout.alloc_size(element)
+      k = 0
+      while k < i.args.size
+        message = write_initializer(layout, w, index, element, i.args[k], at + k.to_i64 * stride)
+        return message if message
+        k = k + 1
+      end
+      return nil
+    end
+  end
+  "constant expressions and this initializer form are not lowered in this slice (#{i.op})"
+end
+
+def pad_to_offset(w : SectionWriter, at : Int64) : Nil
+  while w.offset < at
+    w.bytes << 0_u8
+  end
+end
+
+def zero_fill(w : SectionWriter, count : Int64) : Nil
+  k = 0_i64
+  while k < count
+    w.bytes << 0_u8
+    k = k + 1_i64
+  end
+end
+
+# The section a defined global goes to: read-only data for constants, writable data otherwise.
+pub def data_section_name(g : Global) : String
+  g.constant ? ".rodata" : ".data"
+end

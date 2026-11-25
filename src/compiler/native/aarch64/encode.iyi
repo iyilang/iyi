@@ -1,0 +1,564 @@
+module compiler/native/aarch64/encode
+
+# The aarch64 encoder (SPEC 2.2 step 6). It turns one MFunction, after regalloc
+# and frame layout, into little-endian A64 instruction words, the relocations
+# the object model names, and the byte offset of every block.
+#
+# Integer operations are 64-bit (the canonical register form). Floating-point
+# operations are single or double by MInst#size. A register field is the
+# operand's number mod 32, which is the same for x and d registers.
+#
+# Branches to blocks are fixed up after every block is placed; every other form
+# is a single word except where an immediate does not fit (see `mem_access` and
+# `move_imm`), in which case the encoder uses x16 as the scratch the spec's
+# assembler uses for the same purpose.
+
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, FrameInfo, AsmBody}
+import compiler/native/obj/object::{Reloc, RelocKind}
+import compiler/native/aarch64/regs::{cond_invert, reg_name}
+import compiler/native/aarch64/asm::{AsmAssembler}
+import compiler/native/aarch64/opcodes::{aarch64_op}
+
+pub class EncodeError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+pub class EncodedFunction
+  getter bytes : Array(UInt8)
+  getter relocs : Array(Reloc)        # offsets are from the function's first byte
+  getter block_offsets : Array(Int64) # byte offset of each block in the function
+
+  def initialize(@bytes : Array(UInt8), @relocs : Array(Reloc), @block_offsets : Array(Int64))
+  end
+end
+
+# A word the encoder must patch once the target block is placed.
+class BranchFixup
+  getter word_at : Int64
+  getter target : Int32
+  getter wide : Bool # true: imm26 (B); false: imm19 (B.cond)
+
+  def initialize(@word_at : Int64, @target : Int32, @wide : Bool)
+  end
+end
+
+pub class Encoder
+  getter bytes : Array(UInt8)
+  getter relocs : Array(Reloc)
+  getter fixups : Array(BranchFixup)
+  property frame : FrameInfo
+  property table_syms : Array(Int32) # the symbol of each jump table of the function, by table index
+  property failure : String?
+
+  def initialize(@frame : FrameInfo)
+    @bytes = [] of UInt8
+    @relocs = [] of Reloc
+    @fixups = [] of BranchFixup
+    @table_syms = [] of Int32
+    @failure = nil
+  end
+
+  def here : Int64
+    @bytes.size.to_i64
+  end
+
+  def word(value : Int64) : Nil
+    i = 0
+    while i < 4
+      @bytes << ((value >> (i * 8)) & 255_i64).to_u8
+      i = i + 1
+    end
+  end
+
+  def reloc(kind : RelocKind, symbol : Int32, addend : Int64 = 0_i64) : Nil
+    @relocs << Reloc.new(here, kind, symbol, addend)
+  end
+
+  # The register field of a physical register: x and d registers share the low five bits.
+  def field(reg : Int32) : Int64
+    (reg & 31).to_i64
+  end
+
+  # Moves a 64-bit constant into xd with movz and movk, skipping zero chunks.
+  def move_imm(rd : Int32, value : Int64) : Nil
+    first = true
+    shift = 0
+    while shift < 64
+      chunk = (value >> shift) & 65535_i64
+      if first
+        if chunk != 0 || shift == 48
+          word(0xD2800000_i64 | ((shift // 16).to_i64 << 21) | (chunk << 5) | field(rd))
+          first = false
+        end
+      elsif chunk != 0
+        word(0xF2800000_i64 | ((shift // 16).to_i64 << 21) | (chunk << 5) | field(rd))
+      end
+      shift = shift + 16
+    end
+  end
+
+  # Loads or stores `rt` at [rn, #off] for a scale of 1, 2, 4 or 8 bytes. `base` is the unsigned-offset
+  # opcode with the register fields clear. An offset that is not a multiple of the scale, or does not fit
+  # the twelve-bit field, is formed in x16 first.
+  def mem_access(base : Int64, rt : Int32, rn : Int32, off : Int64, scale : Int64) : Nil
+    if off >= 0 && (off % scale) == 0 && (off // scale) < 4096
+      word(base | ((off // scale) << 10) | (field(rn) << 5) | field(rt))
+      return
+    end
+    add_base(16, rn, off)
+    word(base | (0_i64 << 10) | (16_i64 << 5) | field(rt))
+  end
+
+  # x16 <- rn + off, for any offset in 64-bit range the frame can produce.
+  def add_base(rd : Int32, rn : Int32, off : Int64) : Nil
+    if off >= 0 && off < 4096
+      if rn == 31
+        word(0x91000000_i64 | (off << 10) | (31_i64 << 5) | field(rd))
+      else
+        word(0x91000000_i64 | (off << 10) | (field(rn) << 5) | field(rd))
+      end
+      return
+    end
+    move_imm(16, off)
+    if rn == 31
+      word(0x8B206000_i64 | (16_i64 << 16) | (31_i64 << 5) | field(rd))
+    else
+      word(0x8B000000_i64 | (16_i64 << 16) | (field(rn) << 5) | field(rd))
+    end
+  end
+
+  # sp <- sp + imm. Probes are SpAdjust of one page, so a frame of any size is a run of these.
+  def sp_adjust(imm : Int64) : Nil
+    magnitude = imm < 0 ? -imm : imm
+    sub = imm < 0
+    base = sub ? 0xD1000000_i64 : 0x91000000_i64
+    if magnitude < 4096
+      word(base | (magnitude << 10) | (31_i64 << 5) | 31_i64)
+      return
+    end
+    if (magnitude % 4096) == 0 && (magnitude // 4096) < 4096
+      word(base | 0x400000_i64 | ((magnitude // 4096) << 10) | (31_i64 << 5) | 31_i64)
+      return
+    end
+    move_imm(16, magnitude)
+    if sub
+      word(0xCB206000_i64 | (16_i64 << 16) | (31_i64 << 5) | 31_i64)
+    else
+      word(0x8B206000_i64 | (16_i64 << 16) | (31_i64 << 5) | 31_i64)
+    end
+  end
+
+  # The frame-slot offset from sp of a FrameSlot operand.
+  def slot_offset(op : Operand) : Int64
+    slot = op.reg
+    base = @frame.offsets[slot]
+    base + op.imm
+  end
+
+  def fp_word(double : Bool, single : Int64, dbl : Int64) : Int64
+    double ? dbl : single
+  end
+
+  # Encodes one instruction. Blocks are referenced by index and resolved by `finish`.
+  def emit(inst : MInst) : Nil
+    op = aarch64_op(inst.opcode)
+    if op == MOp::Label
+      return
+    elsif op == MOp::Mov
+      word(0xAA0003E0_i64 | (field(inst.uses[0].reg) << 16) | field(inst.defs[0].reg))
+    elsif op == MOp::FMov
+      word(fp_word(inst.size == 64, 0x1E204000_i64, 0x1E604000_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FMovToFp
+      word(fp_word(inst.size == 64, 0x1E270000_i64, 0x9E670000_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FMovToGp
+      word(fp_word(inst.size == 64, 0x1E260000_i64, 0x9E660000_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::MovImm
+      move_imm(inst.defs[0].reg, inst.imm)
+    elsif op == MOp::AddrFrame
+      add_base(inst.defs[0].reg, 31, slot_offset(inst.uses[0]))
+    elsif op == MOp::AddrOutgoing
+      add_base(inst.defs[0].reg, 31, inst.imm)
+    elsif op == MOp::AddrSym
+      reloc(RelocKind::A64AdrpPage21, inst.sym)
+      word(0x90000000_i64 | field(inst.defs[0].reg))
+      reloc(RelocKind::A64AddLo12, inst.sym)
+      word(0x91000000_i64 | (field(inst.defs[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::AddrTable
+      sym = inst.sym
+      if inst.table >= 0
+        sym = @table_syms[inst.table]
+      end
+      reloc(RelocKind::A64AdrpPage21, sym)
+      word(0x90000000_i64 | field(inst.defs[0].reg))
+      reloc(RelocKind::A64AddLo12, sym)
+      word(0x91000000_i64 | (field(inst.defs[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::LoadGot
+      reloc(RelocKind::A64GotPage21, inst.sym)
+      word(0x90000000_i64 | field(inst.defs[0].reg))
+      reloc(RelocKind::A64GotLo12, inst.sym)
+      word(0xF9400000_i64 | (field(inst.defs[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Ldr
+      load_store(inst, inst.defs[0].reg, inst.uses[0].reg, inst.imm, true)
+    elsif op == MOp::Str
+      load_store(inst, inst.uses[0].reg, inst.uses[1].reg, inst.imm, false)
+    elsif op == MOp::LdrFrame
+      load_store(inst, inst.defs[0].reg, 31, slot_offset(inst.uses[0]), true)
+    elsif op == MOp::StrFrame
+      load_store(inst, inst.uses[0].reg, 31, slot_offset(inst.uses[1]), false)
+    elsif op == MOp::StrOutgoing
+      load_store(inst, inst.uses[0].reg, 31, inst.imm, false)
+    elsif op == MOp::SpLoad
+      load_store(inst, inst.defs[0].reg, 31, inst.imm, true)
+    elsif op == MOp::SpStore
+      load_store(inst, inst.uses[0].reg, 31, inst.imm, false)
+    elsif op == MOp::StpFpLr
+      word(0xA9800000_i64 | (0x7E_i64 << 15) | (30_i64 << 10) | (31_i64 << 5) | 29_i64)
+    elsif op == MOp::LdpFpLr
+      word(0xA8C00000_i64 | (2_i64 << 15) | (30_i64 << 10) | (31_i64 << 5) | 29_i64)
+    elsif op == MOp::MovFp
+      word(0x910003FD_i64)
+    elsif op == MOp::SpAdjust
+      sp_adjust(inst.imm)
+    elsif op == MOp::ZeroSp
+      word(0xF90003FF_i64)
+    elsif op == MOp::Ldar
+      word(acquire_word(inst.size, 0xC8DFFC00_i64, 0x88DFFC00_i64, 0x48DFFC00_i64, 0x08DFFC00_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Stlr
+      word(acquire_word(inst.size, 0xC89FFC00_i64, 0x889FFC00_i64, 0x489FFC00_i64, 0x089FFC00_i64) | (field(inst.uses[1].reg) << 5) | field(inst.uses[0].reg))
+    elsif op == MOp::Ldaxr
+      word(acquire_word(inst.size, 0xC85FFC00_i64, 0x885FFC00_i64, 0x485FFC00_i64, 0x085FFC00_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Stlxr
+      word(acquire_word(inst.size, 0xC800FC00_i64, 0x8800FC00_i64, 0x4800FC00_i64, 0x0800FC00_i64) | (field(inst.defs[0].reg) << 16) | (field(inst.uses[1].reg) << 5) | field(inst.uses[0].reg))
+    elsif op == MOp::Ldxr
+      word(acquire_word(inst.size, 0xC85F7C00_i64, 0x885F7C00_i64, 0x485F7C00_i64, 0x085F7C00_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Stxr
+      word(acquire_word(inst.size, 0xC8007C00_i64, 0x88007C00_i64, 0x48007C00_i64, 0x08007C00_i64) | (field(inst.defs[0].reg) << 16) | (field(inst.uses[1].reg) << 5) | field(inst.uses[0].reg))
+    elsif op == MOp::Dmb
+      if inst.imm == 0_i64
+        word(0xD5033BBF_i64)
+      elsif inst.imm == 1_i64
+        word(0xD50339BF_i64)
+      else
+        word(0xD5033ABF_i64)
+      end
+    elsif op == MOp::Add
+      arith(0x8B000000_i64, inst)
+    elsif op == MOp::Sub
+      arith(0xCB000000_i64, inst)
+    elsif op == MOp::Adds
+      arith(0xAB000000_i64, inst)
+    elsif op == MOp::Subs
+      arith(0xEB000000_i64, inst)
+    elsif op == MOp::Adc
+      arith(0x9A000000_i64, inst)
+    elsif op == MOp::Sbc
+      arith(0xDA000000_i64, inst)
+    elsif op == MOp::Adcs
+      arith(0xBA000000_i64, inst)
+    elsif op == MOp::Sbcs
+      arith(0xFA000000_i64, inst)
+    elsif op == MOp::And
+      arith(0x8A000000_i64, inst)
+    elsif op == MOp::Orr
+      arith(0xAA000000_i64, inst)
+    elsif op == MOp::Eor
+      arith(0xCA000000_i64, inst)
+    elsif op == MOp::Mul
+      word(0x9B007C00_i64 | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Smulh
+      word(0x9B407C00_i64 | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Umulh
+      word(0x9BC07C00_i64 | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Sdiv
+      word(0x9AC00C00_i64 | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Udiv
+      word(0x9AC00800_i64 | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Msub
+      word(0x9B008000_i64 | (field(inst.uses[2].reg) << 16) | (field(inst.uses[0].reg) << 10) | (field(inst.uses[1].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Lsl
+      word(0x9AC02000_i64 | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Lsr
+      word(0x9AC02400_i64 | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Asr
+      word(0x9AC02800_i64 | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::AddImm
+      word(0x91000000_i64 | (inst.imm << 10) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::SubImm
+      word(0xD1000000_i64 | (inst.imm << 10) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Sbfm
+      word(0x93400000_i64 | ((inst.imm - 1) << 10) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Ubfm
+      word(0xD3400000_i64 | ((inst.imm - 1) << 10) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Cmp
+      word(0xEB00001F_i64 | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5))
+    elsif op == MOp::CmpImm
+      word(0xF100001F_i64 | (inst.imm << 10) | (field(inst.uses[0].reg) << 5))
+    elsif op == MOp::Cset
+      word(0x9A9F07E0_i64 | (cond_invert(inst.cond).to_i64 << 12) | field(inst.defs[0].reg))
+    elsif op == MOp::Csel
+      word(0x9A800000_i64 | (field(inst.uses[1].reg) << 16) | (inst.cond.to_i64 << 12) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FAdd
+      word(fp_word(inst.size == 64, 0x1E202800_i64, 0x1E602800_i64) | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FSub
+      word(fp_word(inst.size == 64, 0x1E203800_i64, 0x1E603800_i64) | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FMul
+      word(fp_word(inst.size == 64, 0x1E200800_i64, 0x1E600800_i64) | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FDiv
+      word(fp_word(inst.size == 64, 0x1E201800_i64, 0x1E601800_i64) | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FNeg
+      word(fp_word(inst.size == 64, 0x1E214000_i64, 0x1E614000_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FAbs
+      word(fp_word(inst.size == 64, 0x1E20C000_i64, 0x1E60C000_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FSqrt
+      word(fp_word(inst.size == 64, 0x1E21C000_i64, 0x1E61C000_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FRint
+      # frintn, frintp, frintm, frintz, frinta, frintx: the rounding mode is bits 15 to 17.
+      word(fp_word(inst.size == 64, 0x1E244000_i64, 0x1E644000_i64) | (inst.imm << 15) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FMinNm
+      word(fp_word(inst.size == 64, 0x1E207800_i64, 0x1E607800_i64) | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FMaxNm
+      word(fp_word(inst.size == 64, 0x1E206800_i64, 0x1E606800_i64) | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::FCmp
+      word(fp_word(inst.size == 64, 0x1E202000_i64, 0x1E602000_i64) | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5))
+    elsif op == MOp::FCvt
+      if inst.size == 32
+        word(0x1E624000_i64 | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+      else
+        word(0x1E22C000_i64 | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+      end
+    elsif op == MOp::Scvtf
+      word(fp_word(inst.size == 64, 0x9E220000_i64, 0x9E620000_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Ucvtf
+      word(fp_word(inst.size == 64, 0x9E230000_i64, 0x9E630000_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Fcvtzs
+      word(fcvt_int_word(inst, 0x1E380000_i64, 0x1E780000_i64, 0x9E380000_i64, 0x9E780000_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Fcvtzu
+      word(fcvt_int_word(inst, 0x1E390000_i64, 0x1E790000_i64, 0x9E390000_i64, 0x9E790000_i64) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::B
+      @fixups << BranchFixup.new(here, inst.target, true)
+      word(0x14000000_i64)
+    elsif op == MOp::Bcond
+      @fixups << BranchFixup.new(here, inst.target, false)
+      word(0x54000000_i64 | inst.cond.to_i64)
+    elsif op == MOp::Bl
+      reloc(RelocKind::A64Call26, inst.sym)
+      word(0x94000000_i64)
+    elsif op == MOp::Blr
+      word(0xD63F0000_i64 | (field(inst.uses[0].reg) << 5))
+    elsif op == MOp::Br
+      word(0xD61F0000_i64 | (field(inst.uses[0].reg) << 5))
+    elsif op == MOp::BrTable
+      word(0xD61F0000_i64 | (field(inst.uses[0].reg) << 5))
+    elsif op == MOp::LdrIdx
+      word(0xF8607800_i64 | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::Ret
+      word(0xD65F03C0_i64)
+    elsif op == MOp::Brk
+      word(0xD4200000_i64 | (inst.imm << 5))
+    elsif op == MOp::Mrs
+      word(0xD53BD000_i64 | (inst.imm == 1_i64 ? 0x60_i64 : 0x40_i64) | field(inst.defs[0].reg))
+    elsif op == MOp::LoadTlvp
+      reloc(RelocKind::A64TlvpPage21, inst.sym)
+      word(0x90000000_i64 | field(inst.defs[0].reg))
+      reloc(RelocKind::A64TlvpLo12, inst.sym)
+      word(0xF9400000_i64 | (field(inst.defs[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::AndImm
+      word(0x92000000_i64 | logical_imm(inst.imm) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::AddTprelHi
+      reloc(RelocKind::A64TprelHi12, inst.sym)
+      word(0x91400000_i64 | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::AddTprelLo
+      reloc(RelocKind::A64TprelLo12Nc, inst.sym)
+      word(0x91000000_i64 | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+    elsif op == MOp::InlineAsm
+      emit_asm(inst)
+    else
+      raise "the encoder has no form for #{op}"
+    end
+  end
+
+  # An inline asm body: the template assembled over the registers regalloc gave its operands, outputs first and then
+  # inputs, which is the order `$N` numbers them. A relocation's symbol is looked up in the body's table; a name the
+  # module does not define is a failure, which encode_function reports.
+  def emit_asm(inst : MInst) : Nil
+    body = inst.asm.as(AsmBody)
+    names = [] of String
+    k = 0
+    while k < body.outputs
+      names << reg_name(inst.defs[k].reg)
+      k = k + 1
+    end
+    k = 0
+    while k < body.inputs
+      names << reg_name(inst.uses[k].reg)
+      k = k + 1
+    end
+    encoding = AsmAssembler.new(body.macho).assemble(body.template, names)
+    if msg = encoding.failure
+      @failure = msg
+      return
+    end
+    base = here
+    encoding.words.each do |w|
+      word(w)
+    end
+    encoding.relocs.each do |r|
+      index = body.syms[r.name]?
+      unless index
+        @failure = "the asm symbol #{r.name} is not in the module"
+        return
+      end
+      @relocs << Reloc.new(base + r.offset.to_i64, r.kind, index, r.addend)
+    end
+  end
+
+  # Integer loads and stores. A load of `size` bits into a register is zero-extended unless `signed`.
+  def load_store(inst : MInst, rt : Int32, rn : Int32, off : Int64, is_load : Bool) : Nil
+    if inst.fp
+      if inst.size == 64
+        base = is_load ? 0xFD400000_i64 : 0xFD000000_i64
+        mem_access(base, rt, rn, off, 8_i64)
+      else
+        base = is_load ? 0xBD400000_i64 : 0xBD000000_i64
+        mem_access(base, rt, rn, off, 4_i64)
+      end
+      return
+    end
+    if inst.size == 64
+      base = is_load ? 0xF9400000_i64 : 0xF9000000_i64
+      mem_access(base, rt, rn, off, 8_i64)
+    elsif inst.size == 32
+      if is_load && inst.signed
+        mem_access(0xB9800000_i64, rt, rn, off, 4_i64)
+      else
+        base = is_load ? 0xB9400000_i64 : 0xB9000000_i64
+        mem_access(base, rt, rn, off, 4_i64)
+      end
+    elsif inst.size == 16
+      if is_load && inst.signed
+        mem_access(0x79800000_i64, rt, rn, off, 2_i64)
+      else
+        base = is_load ? 0x79400000_i64 : 0x79000000_i64
+        mem_access(base, rt, rn, off, 2_i64)
+      end
+    else
+      if is_load && inst.signed
+        mem_access(0x39800000_i64, rt, rn, off, 1_i64)
+      else
+        base = is_load ? 0x39400000_i64 : 0x39000000_i64
+        mem_access(base, rt, rn, off, 1_i64)
+      end
+    end
+  end
+
+  def acquire_word(size : Int32, x : Int64, w : Int64, h : Int64, b : Int64) : Int64
+    if size == 64
+      x
+    elsif size == 32
+      w
+    elsif size == 16
+      h
+    else
+      b
+    end
+  end
+
+  def arith(base : Int64, inst : MInst) : Nil
+    word(base | (field(inst.uses[1].reg) << 16) | (field(inst.uses[0].reg) << 5) | field(inst.defs[0].reg))
+  end
+
+  # The N, immr and imms fields of a 64-bit logical immediate, packed where the instruction holds them (N at bit
+  # 22, immr at 16, imms at 10). The value must be one run of ones, rotated within the 64 bits: zero and all-ones
+  # are not encodable. The run starts at bit `start`; immr rotates the canonical run (ones from bit 0) to there.
+  def logical_imm(value : Int64) : Int64
+    ones = 0
+    starts = 0
+    start = 0
+    i = 0
+    while i < 64
+      bit = (value.unsafe_shr(i.to_i64)) & 1_i64
+      if bit == 1_i64
+        ones = ones + 1
+        prev = (value.unsafe_shr(((i + 63) % 64).to_i64)) & 1_i64
+        if prev == 0_i64
+          starts = starts + 1
+          start = i
+        end
+      end
+      i = i + 1
+    end
+    if ones == 0 || ones == 64 || starts != 1
+      raise "the encoder cannot encode #{value} as a 64-bit logical immediate"
+    end
+    immr = (64 - start) % 64
+    (1_i64 << 22) | (immr.to_i64 << 16) | ((ones - 1).to_i64 << 10)
+  end
+
+  def fcvt_int_word(inst : MInst, w_single : Int64, w_double : Int64, x_single : Int64, x_double : Int64) : Int64
+    wide = inst.imm == 64
+    dbl = inst.size == 64
+    if wide
+      dbl ? x_double : x_single
+    else
+      dbl ? w_double : w_single
+    end
+  end
+
+  # Resolves every branch fixup against the placed blocks and returns the finished function.
+  def finish(block_offsets : Array(Int64)) : Nil
+    @fixups.each do |f|
+      target = block_offsets[f.target]
+      delta = (target - f.word_at) // 4
+      word_value = 0_i64
+      i = 0
+      while i < 4
+        word_value = word_value | (@bytes[(f.word_at + i).to_i32].to_i64 << (i * 8))
+        i = i + 1
+      end
+      if f.wide
+        word_value = word_value | (delta & 0x3FFFFFF_i64)
+      else
+        word_value = word_value | ((delta & 0x7FFFF_i64) << 5)
+      end
+      i = 0
+      while i < 4
+        @bytes[(f.word_at + i).to_i32] = ((word_value >> (i * 8)) & 255_i64).to_u8
+        i = i + 1
+      end
+    end
+  end
+end
+
+# Encodes a whole function. Each block is placed in order; branches are fixed up at the end.
+pub def encode_function(fn : MFunction) : EncodedFunction | EncodeError
+  enc = Encoder.new(fn.frame)
+  fn.jump_tables.each do |t|
+    enc.table_syms << t.sym
+  end
+  offsets = [] of Int64
+  fn.blocks.each do |b|
+    offsets << enc.here
+    b.insts.each do |inst|
+      enc.emit(inst)
+    end
+  end
+  enc.finish(offsets)
+  if msg = enc.failure
+    return EncodeError.new(msg)
+  end
+  EncodedFunction.new(enc.bytes, enc.relocs, offsets)
+end
+
+# The bytes of one instruction with no relocations and no block targets: the form the encode gate compares.
+pub def encode_one(inst : MInst, frame : FrameInfo) : Array(UInt8)
+  enc = Encoder.new(frame)
+  enc.emit(inst)
+  enc.bytes
+end

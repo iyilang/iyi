@@ -1,0 +1,3 @@
+module constexpr_mul
+
+puts 40

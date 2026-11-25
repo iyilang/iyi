@@ -1,0 +1,33 @@
+; iyi-ir 1
+module "walk"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [4 x i8] c"%d\0A\00"
+
+; The integer n and the floating-point x are both live across the recursive call.
+define internal double @walk(i32 %n, double %x) {
+entry:
+  %z = icmp eq i32 %n, 0
+  br i1 %z, label %base, label %rec
+base:
+  ret double %x
+rec:
+  %n1 = sub i32 %n, 1
+  %x1 = fadd double %x, 0x3ff0000000000000
+  %r = call double (i32, double) @walk(i32 %n1, double %x1)
+  %h = fmul double %x, 0x3fe0000000000000
+  %s = fadd double %r, %h
+  %n3 = mul i32 %n, 3
+  %ni = sitofp i32 %n3 to double
+  %t = fadd double %s, %ni
+  ret double %t
+}
+
+define i32 @main() {
+entry:
+  %w = call double (i32, double) @walk(i32 4, double 0x3fe0000000000000)
+  %wi = fptosi double %w to i32
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i32 %wi)
+  ret i32 0
+}

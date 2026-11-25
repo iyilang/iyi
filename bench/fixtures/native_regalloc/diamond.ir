@@ -1,0 +1,39 @@
+; iyi-ir 1
+module "diamond"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @pick(i64 %c, i64 %x) {
+entry:
+  %w0 = mul i64 %x, 2
+  %w = add i64 %w0, 1
+  %cond = icmp sgt i64 %c, 0
+  br i1 %cond, label %then, label %else
+then:
+  %t1 = mul i64 %x, 3
+  %t2 = add i64 %t1, 5
+  %t3 = xor i64 %t2, %x
+  br label %join
+else:
+  %e1 = sub i64 %x, 2
+  %e2 = mul i64 %e1, %e1
+  br label %join
+join:
+  %r = phi i64 [ %t3, label %then ], [ %e2, label %else ]
+  %z0 = add i64 %r, %x
+  %z = add i64 %z0, %w
+  ret i64 %z
+}
+
+define i32 @main() {
+entry:
+  %r1 = call i64 (i64, i64) @pick(i64 1, i64 4)
+  %r2 = call i64 (i64, i64) @pick(i64 -1, i64 4)
+  %r3 = call i64 (i64, i64) @pick(i64 5, i64 -7)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r1)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r2)
+  %p3 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r3)
+  ret i32 0
+}

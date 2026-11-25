@@ -1,0 +1,794 @@
+# The driver for the inline asm gate (bench/native_asm_exercise.sh, SPEC 2.2 C4).
+#
+#   native_asm inventory PARSE_REPORT   every asm expression, per target
+#   native_asm oracle-source INVENTORY  an iyi file of one naked function per
+#                                       aarch64 template, operands pinned
+#   native_asm cases INVENTORY macho|elf the assembler's bytes and relocations
+#                                       for the same functions
+#   native_asm oracle-macho OBJ         the bytes and relocations of each
+#                                       asm_case_N in a Mach-O object (C1's reader)
+#   native_asm oracle-elf OBJ           the same for an ELF object (a reader here)
+#   native_asm refuse FILE              ACCEPTED, or REFUSED with the reason
+#
+# Every dump is one line per fact: FUNC name hex, RELOC name offset kind symbol
+# addend. The gate compares them as text.
+
+@[Unsafe("c_string copies a symbol name out of a file's bytes through a pointer, and the copy is bounded by the name's terminator")]
+module compiler/tools/native_asm
+
+import compiler/native/asm/inventory::{AsmScanner, AsmSite, AsmInventory, AsmFlags}
+import compiler/native/asm/constraints::{parse_operand, parse_clobber, parse_option, expand_template, OperandConstraint, ConstraintError, ConstraintClass}
+import compiler/native/aarch64/asm::{AsmAssembler, AsmEncoding, AsmReloc}
+import compiler/native/obj/object::{ObjectFile, ObjError, RelocKind, SectionKind}
+import compiler/native/obj/macho::{read_object}
+import compiler/platform/target::{Target}
+import std/slice::{Slice, Bytes}
+
+# One distinct aarch64 template with its operands pinned to registers.
+class AsmCase
+  getter index : Int32
+  getter template : String
+  getter outs : Array(String)
+  getter ins : Array(String)
+  getter clobbers : Array(String)
+  getter options : Array(String)
+  getter registers : Array(String)
+
+  def initialize(@index : Int32, @template : String, @outs : Array(String), @ins : Array(String), @clobbers : Array(String), @options : Array(String), @registers : Array(String))
+  end
+end
+
+module NativeAsmTool
+  def self.targets : Array(String)
+    ["aarch64-apple-darwin", "aarch64-linux-gnu", "x86_64-linux-gnu", "x86_64-windows-msvc", "wasm32-wasi"]
+  end
+
+  def self.run : Nil
+    args = Program.args
+    if args.size < 2
+      raise "usage: native_asm inventory|oracle-source|cases|oracle-macho|oracle-elf|refuse ARGS"
+    end
+    command = args[0]
+    if command == "inventory"
+      inventory(args[1])
+    elsif command == "oracle-source" && args.size == 3
+      oracle_source(args[1], args[2])
+    elsif command == "cases" && args.size == 3
+      cases(args[1], args[2])
+    elsif command == "oracle-macho"
+      oracle_macho(args[1])
+    elsif command == "oracle-elf"
+      oracle_elf(args[1])
+    elsif command == "constraints"
+      constraints(args[1])
+    elsif command == "refuse"
+      refuse(args[1])
+    else
+      raise "unknown command or arguments: #{command}"
+    end
+  end
+
+  # ---- inventory --------------------------------------------------------
+
+  # The 1-based numbers of the lines in `text` that contain the substring `asm(`.
+  def self.asm_line_numbers(text : String) : Array(Int32)
+    found = [] of Int32
+    lines = text.split('\n')
+    i = 0
+    while i < lines.size
+      line = lines[i]
+      j = 0
+      while j + 4 <= line.bytesize
+        if line[j, 4] == "asm("
+          found << i + 1
+          break
+        end
+        j += 1
+      end
+      i += 1
+    end
+    found
+  end
+
+  def self.inventory(report : String) : Nil
+    paths = [] of String
+    statuses = [] of String
+    reasons = [] of String
+    lines = File.read(report).split('\n')
+    i = 0
+    while i < lines.size
+      if lines[i].bytesize > 0
+        fields = lines[i].split('\t')
+        if fields.size < 2
+          raise "#{report}: a line without a status: #{lines[i]}"
+        end
+        paths << fields[0]
+        statuses << fields[1]
+        reasons << (fields.size > 2 ? fields[2] : "")
+      end
+      i += 1
+    end
+
+    texts = [] of String
+    asm_numbers = [] of Array(Int32)
+    substring_total = 0
+    f = 0
+    while f < paths.size
+      text = File.read(paths[f])
+      texts << text
+      numbers = asm_line_numbers(text)
+      asm_numbers << numbers
+      substring_total += numbers.size
+      f += 1
+    end
+
+    triples = targets
+    failures = 0
+    constraints = [] of String
+    arch_names = [] of String
+    arch_mnemonics = [] of Array(String)
+    modifier_count = 0
+    intel_count = 0
+    guarded_count = 0
+    t = 0
+    while t < triples.size
+      triple = triples[t]
+      flags = AsmFlags.new(Target.new(triple))
+      rows = 0
+      expressions = 0
+      parsed = 0
+      scanned = 0
+      f = 0
+      while f < paths.size
+        if asm_numbers[f].size == 0
+          if statuses[f] == "parsed"
+            parsed += 1
+          else
+            scanned += 1
+          end
+        else
+          scanned += 1
+          if t == 0
+            print "SCANNED\t#{paths[f]}\t#{asm_numbers[f].size} asm lines\t#{statuses[f]}: #{reasons[f]}\n"
+          end
+          scanner = AsmScanner.new(texts[f], paths[f], triple, "scanned", flags)
+          scanner.run
+          if message = scanner.failure
+            print "ERROR\t#{triple}\t#{message}\n"
+            failures += 1
+          else
+            if message = scanner.refused
+              print "REFUSED\t#{triple}\t#{message}\n"
+            end
+            expressions += scanner.expressions
+            if t == 0
+              source = texts[f].split('\n')
+              k = 0
+              while k < asm_numbers[f].size
+                number = asm_numbers[f][k]
+                unless scanner.expression_lines.includes?(number)
+                  print "NOT_EXPRESSION\t#{paths[f]}:#{number}\t#{source[number - 1].strip}\n"
+                end
+                k += 1
+              end
+            end
+            scanner.sites.each do |site|
+              rows += 1
+              print_row(triple, site)
+              note_site(site, constraints, arch_names, arch_mnemonics)
+              modifier_count += 1 if AsmInventory.modifier?(site.template)
+              intel_count += 1 if site.dialect == "intel"
+              guarded_count += 1 if site.guard.bytesize > 0
+            end
+          end
+        end
+        f += 1
+      end
+      print "SUMMARY\t#{triple}\tfiles=#{paths.size}\tparsed=#{parsed}\tscanned=#{scanned}\texpressions=#{expressions}\trows=#{rows}\n"
+      t += 1
+    end
+
+    arch = 0
+    while arch < arch_names.size
+      print "MNEMONICS\t#{arch_names[arch]}\t#{arch_mnemonics[arch].join(" ")}\n"
+      arch += 1
+    end
+    c = 0
+    while c < constraints.size
+      print "CONSTRAINT\t#{constraints[c]}\n"
+      c += 1
+    end
+    print "CENSUS\tintel_rows=#{intel_count}\tmodifier_rows=#{modifier_count}\tguarded_rows=#{guarded_count}\tsubstring_lines=#{substring_total}\n"
+    if failures > 0
+      raise "INVENTORY FAILED with #{failures} errors"
+    end
+  end
+
+  def self.print_row(triple : String, site : AsmSite) : Nil
+    guard = site.guard.bytesize > 0 ? site.guard : "-"
+    print "ROW\t#{triple}\t#{site.file}:#{site.line}\t#{site.status}\t#{guard}\t#{site.dialect}\t#{join_items(site.outputs, " ; ")}\t#{join_items(site.inputs, " ; ")}\t#{join_items(site.clobbers, ", ")}\t#{join_items(site.options, ", ")}\t#{AsmInventory.escape(site.template)}\n"
+  end
+
+  def self.join_items(items : Array(String), separator : String) : String
+    acc = ""
+    i = 0
+    while i < items.size
+      acc = acc + separator if i > 0
+      acc = acc + items[i]
+      i += 1
+    end
+    acc
+  end
+
+  # Records each operand's constraint text, and each template's instruction
+  # names under its architecture (the triple's first field).
+  def self.note_site(site : AsmSite, constraints : Array(String), arch_names : Array(String), arch_mnemonics : Array(Array(String))) : Nil
+    arch = site.target.split('-')[0]
+    site.outputs.each do |item|
+      constraints << item unless constraints.includes?(item)
+    end
+    site.inputs.each do |item|
+      constraints << item unless constraints.includes?(item)
+    end
+    index = arch_names.index(arch)
+    if index.nil?
+      arch_names << arch
+      arch_mnemonics << [] of String
+      index = arch_names.size - 1
+    end
+    AsmInventory.mnemonics(site.template).each do |name|
+      arch_mnemonics[index] << name unless arch_mnemonics[index].includes?(name)
+    end
+  end
+
+  # ---- aarch64 cases ----------------------------------------------------
+
+  # Splits `text` at each occurrence of `separator`. An empty text is no item.
+  def self.split_on(text : String, separator : String) : Array(String)
+    acc = [] of String
+    return acc if text.bytesize == 0
+    start = 0
+    i = 0
+    while i + separator.bytesize <= text.bytesize
+      if text[i, separator.bytesize] == separator
+        acc << text[start, i - start]
+        i += separator.bytesize
+        start = i
+      else
+        i += 1
+      end
+    end
+    acc << text[start, text.bytesize - start]
+    acc
+  end
+
+  # Reverses the report's escaping of a template: \n, \t and \\.
+  def self.unescape(text : String) : String
+    acc = String::Builder.new
+    i = 0
+    while i < text.bytesize
+      if text.byte_at(i).to_i32 == 92 && i + 1 < text.bytesize
+        e = text.byte_at(i + 1).to_i32
+        if e == 110
+          acc << "\n"
+        elsif e == 116
+          acc << "\t"
+        else
+          acc << text[i + 1, 1]
+        end
+        i += 2
+      else
+        acc << text[i, 1]
+        i += 1
+      end
+    end
+    acc.to_s
+  end
+
+  # The rows a selection names: the rows of one triple, or with the selection
+  # `shared`, every aarch64 template with no adrp, which LLVM accepts on both
+  # formats (an adrp takes a page relocation only one format spells).
+  def self.selected(row_triple : String, escaped : String, triple : String) : Bool
+    return row_triple == triple unless triple == "shared"
+    row_triple.starts_with?("aarch64") && !has_text(escaped, "adrp")
+  end
+
+  def self.has_text(text : String, needle : String) : Bool
+    i = 0
+    while i + needle.bytesize <= text.bytesize
+      return true if text[i, needle.bytesize] == needle
+      i += 1
+    end
+    false
+  end
+
+  # The distinct aarch64 templates of the inventory, in order of appearance,
+  # each with the register every operand is pinned to: an explicit constraint
+  # keeps its register, and an unconstrained register operand takes x10, x11, ...
+  def self.load_cases(path : String, triple : String) : Array(AsmCase)
+    cases = [] of AsmCase
+    seen = [] of String
+    lines = File.read(path).split('\n')
+    i = 0
+    while i < lines.size
+      fields = lines[i].split('\t')
+      if fields.size == 11 && fields[0] == "ROW" && selected(fields[1], fields[10], triple)
+        template = unescape(fields[10])
+        unless seen.includes?(template)
+          seen << template
+          outs = split_on(fields[6], " ; ")
+          ins = split_on(fields[7], " ; ")
+          clobbers = split_on(fields[8], ", ")
+          options = split_on(fields[9], ", ")
+          registers = pins(outs, ins)
+          cases << AsmCase.new(cases.size, template, outs, ins, clobbers, options, registers)
+        end
+      end
+      i += 1
+    end
+    cases
+  end
+
+  # The register per operand, outputs first. A constraint that cannot be
+  # parsed raises, so a bad inventory fails the gate.
+  def self.pins(outs : Array(String), ins : Array(String)) : Array(String)
+    registers = [] of String
+    gpr = 10
+    i = 0
+    while i < outs.size
+      c = parse_operand(outs[i], true, outs.size)
+      if c.is_a?(ConstraintError)
+        raise c.as(ConstraintError).message
+      end
+      operand = c.as(OperandConstraint)
+      if operand.cls == ConstraintClass::Specific
+        registers << operand.register
+      elsif operand.cls == ConstraintClass::Gpr
+        registers << "x#{gpr}"
+        gpr += 1
+      else
+        raise "output #{outs[i]}: no pin for this constraint class in aarch64"
+      end
+      i += 1
+    end
+    i = 0
+    while i < ins.size
+      c = parse_operand(ins[i], false, outs.size)
+      if c.is_a?(ConstraintError)
+        raise c.as(ConstraintError).message
+      end
+      operand = c.as(OperandConstraint)
+      if operand.cls == ConstraintClass::Specific
+        registers << operand.register
+      elsif operand.cls == ConstraintClass::Gpr
+        registers << "x#{gpr}"
+        gpr += 1
+      elsif operand.cls == ConstraintClass::Tied
+        registers << registers[operand.tied]
+      else
+        raise "input #{ins[i]}: no pin for this constraint class in aarch64"
+      end
+      i += 1
+    end
+    registers
+  end
+
+  def self.kind_name(kind : RelocKind) : String
+    if kind == RelocKind::A64AdrpPage21
+      return "A64AdrpPage21"
+    end
+    if kind == RelocKind::A64AddLo12
+      return "A64AddLo12"
+    end
+    if kind == RelocKind::A64Call26
+      return "A64Call26"
+    end
+    if kind == RelocKind::A64Jump26
+      return "A64Jump26"
+    end
+    "unnamed"
+  end
+
+  def self.hex_of(bytes : Array(UInt8)) : String
+    digits = "0123456789abcdef"
+    acc = ""
+    i = 0
+    while i < bytes.size
+      b = bytes[i].to_i
+      acc = acc + digits[b // 16, 1] + digits[b % 16, 1]
+      i += 1
+    end
+    acc
+  end
+
+  # Every naked function ends in the return LLVM appends (aarch64 `ret`,
+  # c0035fd6). The dump drops that one return, and nothing else.
+  def self.drop_epilogue(hex : String) : String
+    if hex.bytesize >= 8 && hex.ends_with?("c0035fd6")
+      return hex[0, hex.bytesize - 8]
+    end
+    hex
+  end
+
+  def self.cases(path : String, triple : String) : Nil
+    list = load_cases(path, triple)
+    i = 0
+    while i < list.size
+      c = list[i]
+      assembler = AsmAssembler.new(triple.starts_with?("aarch64-apple"))
+      enc = assembler.assemble(c.template, c.registers)
+      if message = enc.failure
+        print "REFUSED\tasm_case_#{c.index}\t#{message}\n"
+      else
+        print_encoding("asm_case_#{c.index}", enc)
+      end
+      i += 1
+    end
+  end
+
+  def self.print_encoding(name : String, enc : AsmEncoding) : Nil
+    print "FUNC\t#{name}\t#{hex_of(enc.bytes)}\n"
+    enc.relocs.each do |reloc|
+      print "RELOC\t#{name}\t#{reloc.offset}\t#{kind_name(reloc.kind)}\t#{reloc.name}\t#{reloc.addend}\n"
+    end
+  end
+
+  # The iyi source the oracle compiles: one naked function per case. Each
+  # operand's register is written into the template by name (the same expansion
+  # the assembler does) and declared a clobber, so the function takes no inputs
+  # and nothing is loaded into a pinned register before the template. LLVM's
+  # appended return is the only instruction it adds, and drop_epilogue removes it.
+  def self.oracle_source(path : String, triple : String) : Nil
+    list = load_cases(path, triple)
+    print "@[Unsafe(\"each naked function holds an aarch64 inline asm template, which the compiler does not check\")]\n"
+    print "# Generated by native_asm oracle-source: the aarch64 inline asm templates\n"
+    print "# of the inventory, one naked function each, operands pinned to registers.\n\n"
+    i = 0
+    while i < list.size
+      c = list[i]
+      expanded = expand_template(c.template, c.registers)
+      if expanded.is_a?(ConstraintError)
+        raise "case #{c.index}: #{expanded.as(ConstraintError).message}"
+      end
+      text = expanded.as(String)
+      clobbers = [] of String
+      k = 0
+      while k < c.clobbers.size
+        clobbers << c.clobbers[k] unless clobbers.includes?(c.clobbers[k])
+        k += 1
+      end
+      k = 0
+      while k < c.registers.size
+        clobbers << c.registers[k] unless clobbers.includes?(c.registers[k])
+        k += 1
+      end
+      print "@[NoInline]\n@[Naked]\nfun asm_case_#{c.index} : Nil\n"
+      print "  asm(\"#{escape_iyi(text)}\" :  :  : #{join_items(quoted(clobbers), ", ")} : #{join_items(quoted(c.options), ", ")})\n"
+      print "end\n\n"
+      i += 1
+    end
+  end
+
+  def self.quoted(items : Array(String)) : Array(String)
+    acc = [] of String
+    i = 0
+    while i < items.size
+      acc << "\"#{items[i]}\""
+      i += 1
+    end
+    acc
+  end
+
+  def self.escape_iyi(text : String) : String
+    acc = String::Builder.new
+    i = 0
+    while i < text.bytesize
+      b = text.byte_at(i).to_i32
+      if b == 10
+        acc << "\\n"
+      elsif b == 9
+        acc << "\\t"
+      elsif b == 34
+        acc << "\\\""
+      elsif b == 92
+        acc << "\\\\"
+      else
+        acc << text[i, 1]
+      end
+      i += 1
+    end
+    acc.to_s
+  end
+
+  # ---- oracles ----------------------------------------------------------
+
+  def self.oracle_macho(path : String) : Nil
+    target = Target.new("aarch64-apple-darwin")
+    read = read_object(Slice(UInt8).of(File.read(path)), target)
+    if read.is_a?(ObjError)
+      raise "#{path}: #{read.as(ObjError).message}"
+    end
+    obj = read.as(ObjectFile)
+    text = -1
+    i = 0
+    while i < obj.sections.size
+      if text < 0 && obj.sections[i].kind == SectionKind::Text
+        text = i
+      end
+      i += 1
+    end
+    if text < 0
+      raise "#{path}: no text section"
+    end
+    section = obj.sections[text]
+    starts = [] of Int64
+    names = [] of String
+    i = 0
+    while i < obj.symbols.size
+      sym = obj.symbols[i]
+      if sym.section == text && sym.name.starts_with?("asm_case_")
+        starts << sym.value
+        names << sym.name
+      end
+      i += 1
+    end
+    ordered = order_by(starts)
+    k = 0
+    while k < ordered.size
+      start = starts[ordered[k]]
+      stop = section.bytes.size.to_i64
+      j = 0
+      while j < obj.symbols.size
+        other = obj.symbols[j]
+        if other.section == text && other.value > start && other.value < stop
+          stop = other.value
+        end
+        j += 1
+      end
+      name = names[ordered[k]]
+      bytes = [] of UInt8
+      at = start.to_i32
+      while at < stop.to_i32
+        bytes << section.bytes[at]
+        at += 1
+      end
+      print "FUNC\t#{name}\t#{drop_epilogue(hex_of(bytes))}\n"
+      section.relocs.each do |reloc|
+        if reloc.offset >= start && reloc.offset < stop
+          symbol = obj.symbols[reloc.symbol].name
+          print "RELOC\t#{name}\t#{reloc.offset - start}\t#{kind_name(reloc.kind)}\t#{symbol}\t#{reloc.addend}\n"
+        end
+      end
+      k += 1
+    end
+  end
+
+  # The indices of `values` in ascending order.
+  def self.order_by(values : Array(Int64)) : Array(Int32)
+    acc = [] of Int32
+    taken = [] of Bool
+    i = 0
+    while i < values.size
+      taken << false
+      i += 1
+    end
+    while acc.size < values.size
+      best = -1
+      j = 0
+      while j < values.size
+        if !taken[j] && (best < 0 || values[j] < values[best])
+          best = j
+        end
+        j += 1
+      end
+      taken[best] = true
+      acc << best
+    end
+    acc
+  end
+
+  def self.le(bytes : Bytes, at : Int64, width : Int32) : Int64
+    value = 0_i64
+    i = width - 1
+    while i >= 0
+      value = (value << 8_i64) | bytes[(at + i.to_i64).to_i32].to_i64
+      i -= 1
+    end
+    value
+  end
+
+  def self.c_string(bytes : Bytes, at : Int64) : String
+    p = at.to_i32
+    n = 0
+    while bytes[p + n] != 0_u8
+      n += 1
+    end
+    String.new(n) do |buffer|
+      buffer.copy_from(bytes.to_unsafe + p, n)
+    end
+  end
+
+  # A small ELF64 little-endian reader: the .text bytes, the functions named
+  # asm_case_N in .symtab, and the RELA entries of .text.
+  def self.oracle_elf(path : String) : Nil
+    data = Slice(UInt8).of(File.read(path))
+    shoff = le(data, 0x28_i64, 8)
+    shentsize = le(data, 0x3a_i64, 2)
+    shnum = le(data, 0x3c_i64, 2)
+    shstrndx = le(data, 0x3e_i64, 2)
+    shstr_off = le(data, shoff + shstrndx * shentsize + 24_i64, 8)
+    text = -1
+    symtab = -1
+    i = 0
+    while i < shnum
+      base = shoff + i * shentsize
+      name_at = shstr_off + le(data, base, 4)
+      if c_string(data, name_at) == ".text"
+        text = i
+      end
+      if le(data, base + 4_i64, 4) == 2_i64
+        symtab = i
+      end
+      i += 1
+    end
+    if text < 0 || symtab < 0
+      raise "#{path}: no .text or .symtab"
+    end
+    text_base = shoff + text * shentsize
+    text_off = le(data, text_base + 24_i64, 8)
+    text_size = le(data, text_base + 32_i64, 8)
+    sym_base = shoff + symtab * shentsize
+    sym_off = le(data, sym_base + 24_i64, 8)
+    sym_size = le(data, sym_base + 32_i64, 8)
+    strtab = le(data, sym_base + 40_i64, 4)
+    str_base = shoff + strtab * shentsize
+    str_off = le(data, str_base + 24_i64, 8)
+    count = sym_size // 24_i64
+    names = [] of String
+    values = [] of Int64
+    sizes = [] of Int64
+    k = 0_i64
+    while k < count
+      entry = sym_off + k * 24_i64
+      info = data[(entry + 4_i64).to_i32]
+      shndx = le(data, entry + 6_i64, 2)
+      name = c_string(data, str_off + le(data, entry, 4))
+      if (info & 0xf_u8) == 2_u8 && shndx == text.to_i64 && name.starts_with?("asm_case_")
+        names << name
+        values << le(data, entry + 8_i64, 8)
+        sizes << le(data, entry + 16_i64, 8)
+      end
+      k += 1
+    end
+    rela = -1
+    i = 0
+    while i < shnum
+      base = shoff + i * shentsize
+      if le(data, base + 4_i64, 4) == 4_i64 && le(data, base + 44_i64, 4) == text.to_i64
+        rela = i
+      end
+      i += 1
+    end
+    rel_entries = [] of Int64
+    rel_offsets = [] of Int64
+    rel_info = [] of Int64
+    rel_addend = [] of Int64
+    if rela >= 0
+      rela_base = shoff + rela * shentsize
+      rela_off = le(data, rela_base + 24_i64, 8)
+      rela_size = le(data, rela_base + 32_i64, 8)
+      n = rela_size // 24_i64
+      k = 0_i64
+      while k < n
+        at = rela_off + k * 24_i64
+        rel_offsets << le(data, at, 8)
+        rel_info << le(data, at + 8_i64, 8)
+        rel_addend << le(data, at + 16_i64, 8)
+        k += 1
+      end
+    end
+    ordered = order_by(values)
+    j = 0
+    while j < ordered.size
+      idx = ordered[j]
+      start = values[idx]
+      stop = start + sizes[idx]
+      bytes = [] of UInt8
+      at = start
+      while at < stop
+        bytes << data[(text_off + at).to_i32]
+        at += 1
+      end
+      print "FUNC\t#{names[idx]}\t#{drop_epilogue(hex_of(bytes))}\n"
+      r = 0
+      while r < rel_offsets.size
+        if rel_offsets[r] >= start && rel_offsets[r] < stop
+          sym_index = rel_info[r] >> 32_i64
+          sym_name = elf_symbol_name(data, sym_off, str_off, sym_index)
+          print "RELOC\t#{names[idx]}\t#{rel_offsets[r] - start}\t#{elf_kind(rel_info[r] & 0xffffffff_i64)}\t#{sym_name}\t#{rel_addend[r]}\n"
+        end
+        r += 1
+      end
+      j += 1
+    end
+  end
+
+  def self.elf_symbol_name(data : Bytes, sym_off : Int64, str_off : Int64, index : Int64) : String
+    c_string(data, str_off + le(data, sym_off + index * 24_i64, 4))
+  end
+
+  # ELF's aarch64 relocation numbers as the names the object model uses.
+  def self.elf_kind(type : Int64) : String
+    if type == 275_i64
+      return "A64AdrpPage21"
+    end
+    if type == 277_i64
+      return "A64AddLo12"
+    end
+    if type == 283_i64
+      return "A64Call26"
+    end
+    if type == 282_i64
+      return "A64Jump26"
+    end
+    "unnamed"
+  end
+
+  # ---- constraint fixtures ----------------------------------------------
+
+  # Each line of PATH is `kind<TAB>item`: o an output, i an input, c a clobber,
+  # p an option. Prints ACCEPTED or REFUSED with the message, one line per item.
+  def self.constraints(path : String) : Nil
+    lines = File.read(path).split('\n')
+    i = 0
+    while i < lines.size
+      line = lines[i]
+      if line.bytesize > 0 && line.byte_at(0).to_i32 != 35
+        fields = line.split('\t')
+        if fields.size != 3
+          raise "#{path}: a fixture line is kind TAB item TAB expected: #{line}"
+        end
+        kind = fields[0]
+        item = fields[1]
+        message = ""
+        if kind == "o" || kind == "i"
+          result = parse_operand(item, kind == "o", 1)
+          if result.is_a?(ConstraintError)
+            message = result.as(ConstraintError).message
+          end
+        elsif kind == "c"
+          result = parse_clobber(item)
+          if result.is_a?(ConstraintError)
+            message = result.as(ConstraintError).message
+          end
+        else
+          result = parse_option(item)
+          if result.is_a?(ConstraintError)
+            message = result.as(ConstraintError).message
+          end
+        end
+        if message.bytesize > 0
+          print "REFUSED\t#{item}\t#{message}\n"
+        else
+          print "ACCEPTED\t#{item}\n"
+        end
+      end
+      i += 1
+    end
+  end
+
+  # ---- refusals ---------------------------------------------------------
+
+  def self.refuse(path : String) : Nil
+    template = File.read(path)
+    assembler = AsmAssembler.new(false)
+    enc = assembler.assemble(template, [] of String)
+    if message = enc.failure
+      print "REFUSED\t#{message}\n"
+    else
+      print "ACCEPTED\t#{enc.words.size} words\n"
+    end
+  end
+end
+
+NativeAsmTool.run

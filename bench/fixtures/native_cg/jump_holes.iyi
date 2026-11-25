@@ -1,0 +1,17 @@
+module jump_holes
+
+def holes(n : Int32) : Int32
+  case n
+  when  0 then 1000
+  when  1 then 1001
+  when  3 then 1003
+  when  4 then 1004
+  when  6 then 1006
+  when  8 then 1008
+  when  9 then 1009
+  when 10 then 1010
+  else         -7
+  end
+end
+
+puts "#{holes(2)} #{holes(3)} #{holes(7)} #{holes(10)} #{holes(11)}"

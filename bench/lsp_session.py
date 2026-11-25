@@ -21,6 +21,7 @@ semantic tokens, inlay hints, type definition, and formatting.
 """
 
 import collections
+import faulthandler
 import json
 import os
 import pathlib
@@ -33,10 +34,14 @@ import time
 
 IYI = os.environ.get("IYI", "./bin/iyi")
 
-# Every server this gate started, and the last step that finished: what the
-# watchdog kills and names when a session stops answering.
+# Every server this gate started (its `Client`), and the last step that
+# finished: what the watchdog kills and names when a session stops answering.
 LIVE = []
 LAST = {"step": 0, "at": time.monotonic()}
+# The readers `answer_within` stopped waiting for, which may still be
+# waiting on a server's stdout: a gate joins them before it exits
+# (`lsp_orphan_negative.py`).
+READERS = []
 
 
 def watchdog(seconds):
@@ -63,16 +68,36 @@ def watchdog(seconds):
                 # What was asked and who was left to answer it: a hang on a
                 # Windows runner said nothing more than the line above.
                 print(f"  the last request sent: {LAST.get('sent', '(none)')}", flush=True)
+                # And where the gate itself is waiting. A gate going round its
+                # own walk of the process table (`nt_children`) and one reading
+                # a server that never answers said the same nothing.
+                print("  the gate's own threads, innermost frame first:", flush=True)
+                faulthandler.dump_traceback(file=sys.stdout, all_threads=True)
                 if sys.platform == "darwin" and "held" in LAST:
                     for line in held_report(LAST["held"]):
                         print(line, flush=True)
-                for proc in LIVE:
+                for client in LIVE:
+                    proc = client.proc
                     if proc.poll() is None:
                         try:
-                            kids = children(proc.pid)
+                            kids = descendants(proc.pid)
                         except Exception as error:  # noqa: BLE001 - a report, not a check
                             kids = f"unlisted ({error})"
-                        print(f"  server {proc.pid} running, its children {kids}", flush=True)
+                        shown = kids
+                        if isinstance(kids, list):
+                            shown = []
+                            for pid in kids:
+                                try:
+                                    shown.append(f"{pid} {os.path.basename(process_binary(pid))}")
+                                except OSError:
+                                    shown.append(str(pid))
+                        print(f"  server {proc.pid} (`iyi {' '.join(client.argv)}`) running, "
+                              f"every process under it {shown}", flush=True)
+                        tail = list(client.stderr_tail)[-10:]
+                        print(f"  its stderr's last {len(tail)} line(s):" if tail else "  its stderr: nothing",
+                              flush=True)
+                        for line in tail:
+                            print(f"    {line}", flush=True)
                         # Where each one is waiting: `ps -M` lists its threads, and
                         # `sample` reads every thread's whole call graph, uncut.
                         if sys.platform == "darwin" and isinstance(kids, list):
@@ -81,8 +106,8 @@ def watchdog(seconds):
                                     darwin_stacks(pid)
                                 except Exception as error:  # noqa: BLE001 - a report, not a check
                                     print(f"  {pid}'s stacks: {error}", flush=True)
-                for proc in LIVE:
-                    proc.kill()
+                for client in LIVE:
+                    client.proc.kill()
                 os._exit(1)
     threading.Thread(target=watch, daemon=True).start()
 
@@ -211,12 +236,15 @@ def nt_working_set_mb(pid):
         kernel32.CloseHandle(handle)
 
 
-def children(pid):
+def children(pid, born=None):
     """The pids *pid* started and that are still running. `ps --ppid` is
     procps'; Windows has no `ps`, and the process snapshot kernel32 keeps
-    names every process's parent, which is the same question."""
+    names every process's parent, which is the same question - asked with
+    care there (`nt_children`). *born* is when *pid* was created, for a
+    caller asking after a process it may have killed since; Windows reads
+    it, and elsewhere a child outlives its parent under a new one."""
     if os.name == "nt":
-        return nt_children(pid)
+        return nt_children(pid, born)
     if sys.platform == "darwin":
         # BSD ps has no --ppid, and asked for it answered nothing at all:
         # every darwin dump said "its children []", and a kill found none.
@@ -228,7 +256,32 @@ def children(pid):
     return [int(line) for line in listed.stdout.split() if line.isdigit()]
 
 
-def nt_children(pid):
+def nt_children(pid, born=None):
+    """The processes *pid* started, from kernel32's snapshot - and only
+    those. The snapshot names each process's parent by pid alone, as it was
+    when the process started, and Windows hands a pid to a new process once
+    the old one is gone: a process whose parent has exited lists as a child
+    of whatever has that pid now. Taken at its word, a walk over a worker's
+    processes goes round for ever once the `cmd` its compile started is
+    handed the pid that one of this gate's own ancestors, its parent gone,
+    still names as its parent: the `cmd` lists that ancestor as its child,
+    and under it the gate, the server, the worker and the `cmd` again
+    (`descendants`; made on Windows 11 by handing a `ping` the pid of its
+    parent's exited parent, 1,066 starts in, and met there unmade in one of
+    604 runs of `lsp_orphan_negative.py`, whose `cmd` was handed the free
+    pid every gate process's chain of named parents ended at). That walk
+    comes before the negative control's first line, which had no
+    watchdog: Windows CI job 139176708533 sat silent there for 51 minutes.
+    And a kill aimed at a worker's processes lands on whatever the walk
+    names: on Windows 11 a proxy's children included the owner's
+    `firefox.exe`, whose own parent had had the proxy's pid.
+
+    A child is created after its parent, so one created before the process
+    asked about is not its child, and neither is one created after a newer
+    process took the pid of a parent that has exited (*born* given). Not
+    created *after*: Windows stamps a process with the system time, which
+    moves in clock ticks of up to 15.6 ms, and a parent and a child it
+    started at once can share one."""
     import ctypes
     from ctypes import wintypes
 
@@ -243,6 +296,11 @@ def nt_children(pid):
                     ("dwFlags", wintypes.DWORD),
                     ("szExeFile", ctypes.c_wchar * 260)]
 
+    owner = process_created(pid)
+    if born is None:
+        born = owner
+    if born is None:
+        return []
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
     kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
@@ -252,18 +310,51 @@ def nt_children(pid):
     snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
     if snapshot == wintypes.HANDLE(-1).value:
         raise OSError(ctypes.get_last_error(), "CreateToolhelp32Snapshot")
-    found = []
+    named = []
     try:
         entry = Entry()
         entry.dwSize = ctypes.sizeof(Entry)
         more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
         while more:
             if entry.th32ParentProcessID == pid:
-                found.append(entry.th32ProcessID)
+                named.append(entry.th32ProcessID)
             more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
     finally:
         kernel32.CloseHandle(snapshot)
+    found = []
+    for kid in named:
+        created = process_created(kid)
+        # Unreadable is not ours either: this user's processes open.
+        if created is None or created < born:
+            continue
+        if owner is not None and owner != born and created > owner:
+            continue
+        found.append(kid)
     return found
+
+
+def process_created(pid):
+    """When *pid* was created, as Windows keeps it (100 ns ticks), or None
+    where no process has the pid or this user cannot open the one that has.
+    A process that has exited still answers while anything holds it open,
+    and its pid is not handed on until nothing does."""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+            return None
+        return times[0].dwHighDateTime << 32 | times[0].dwLowDateTime
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def process_binary(pid):
@@ -321,7 +412,7 @@ class Client:
         self.stderr_tail = collections.deque(maxlen=40)
         self.stderr_reader = threading.Thread(target=self.keep_stderr, daemon=True)
         self.stderr_reader.start()
-        LIVE.append(self.proc)
+        LIVE.append(self)
         self.next_id = 0
 
     def keep_stderr(self):
@@ -1039,17 +1130,23 @@ def kill_workers(c):
     # Killed a generation at a time, and the killed listed again: a worker
     # that started a process after the list was taken and before its kill
     # left that one running with its pipes (Windows CI: the proxy waited
-    # 180 s with no worker, a `ping` orphaned to the end of the job).
-    doomed, pending = [], list(found)
+    # 180 s with no worker, a `ping` orphaned to the end of the job). On
+    # Windows each is listed by when it was created, read before its kill:
+    # a killed process's pid goes to the next process to start
+    # (`nt_children`), and one whose creation could not be read was gone
+    # before the kill, its children with no parent to be told by.
+    doomed, pending, born = [], list(found), {}
     while pending:
         for pid in pending:
+            born[pid] = process_created(pid) if os.name == "nt" else None
             try:
                 os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
             except OSError:
                 pass
         doomed.extend(pending)
         time.sleep(0.2)
-        pending = [k for pid in doomed for k in children(pid) if k not in doomed]
+        pending = [k for pid in doomed if os.name != "nt" or born[pid]
+                   for k in children(pid, born[pid]) if k not in doomed]
     deadline = time.monotonic() + 10
     while any(pid in children(c.proc.pid) for pid in found) and time.monotonic() < deadline:
         time.sleep(0.1)
@@ -1189,8 +1286,17 @@ def holders(worker):
 def answer_within(client, request_id, seconds):
     """The answer to *request_id*, or None where none came in *seconds*.
     A wait that is the claim: a server that never answers fails the step
-    here, by name, instead of holding the session until the watchdog."""
+    here, by name, instead of holding the session until the watchdog.
+
+    A reader the step stopped waiting for stays on the pipe, and says
+    nothing when the pipe ends: that end is no longer the step's news, and
+    printed while the gate exited it took stdout's lock into the
+    interpreter's shutdown - "could not acquire lock for
+    <_io.BufferedWriter name='<stdout>'> at interpreter shutdown", exit 127
+    (Windows CI job 138828714339, `lsp_orphan_negative.py`). It is kept in
+    `READERS` for the gate to join before it exits."""
     got = {}
+    said = threading.Lock()
 
     def read():
         # A closed pipe raises `SystemExit` here, on a thread, where Python
@@ -1199,10 +1305,16 @@ def answer_within(client, request_id, seconds):
         try:
             got["message"] = client.wait_for(lambda m: m.get("id") == request_id)
         except SystemExit as closed:
-            print(closed, flush=True)
+            with said:
+                if not got.get("late"):
+                    print(closed, flush=True)
     reader = threading.Thread(target=read, daemon=True)
     reader.start()
     reader.join(seconds)
+    if reader.is_alive():
+        with said:
+            got["late"] = True
+        READERS.append(reader)
     return got.get("message")
 
 
@@ -4187,9 +4299,20 @@ def main():
          reply.get("error", {}).get("code") == -32600,
          json.dumps(reply.get("error") or reply.get("result"))[:80])
     import signal
-    workers = children(c.proc.pid)
+    # Its workers, not every child: started with no console of its own, as
+    # a CI step starts it on Windows, the proxy has `conhost.exe` under it
+    # too (`workers_of`). Where no binary can be read (darwin), its
+    # children are its workers. A worker already exiting - a retirement -
+    # is refused the kill, Windows' "Access is denied" for a process on its
+    # way out (`lsp_memory.py`'s `kill_every_worker`).
+    workers = workers_of(c)
+    if workers is None:
+        workers = children(c.proc.pid)
     for pid in workers:
-        os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        try:
+            os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        except OSError:
+            pass
     # The request the dead worker held is told so (-32603); the one after
     # it reaches the successor.
     for _ in range(3):

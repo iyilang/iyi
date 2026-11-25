@@ -1166,6 +1166,7 @@ cat << 'EOF' > "$BOUNDARY_TRANSFER_SRC"
 module test/boundary_transfer
 import std/observe
 
+had_fiber = IyiScheduler.current?.is_a?(IyiFiber)
 Std::Observe.enter_frame
 group do |g|
   ch = Channel(Int32).new(1)
@@ -1174,17 +1175,21 @@ end
 puts Std::Observe.frame_depth
 Std::Observe.leave_frame
 puts Std::Observe.frame_depth
+puts had_fiber ? "fiber" : "thread"
 EOF
 
 BOUNDARY_TRANSFER_TRACE="$WORK/boundary_transfer_trace.bin"
 rm -f "$BOUNDARY_TRANSFER_TRACE"
 B_C_OUT="$(IYI_OBSERVE="$BOUNDARY_TRANSFER_TRACE" "$IYI" run -Diyi_observe "$BOUNDARY_TRANSFER_SRC")"
-EXPECTED_B_C_OUT="$(printf '1\n0')"
+EXPECTED_B_C_OUT="$(printf '1\n0\n%s' "$(printf '%s\n' "$B_C_OUT" | tail -n 1)")"
 if [ "$B_C_OUT" != "$EXPECTED_B_C_OUT" ]; then
   echo "FAIL: expected boundary transfer output '$EXPECTED_B_C_OUT', got '$B_C_OUT'"
   exit 1
 fi
-
+case "$(printf '%s\n' "$B_C_OUT" | tail -n 1)" in
+  fiber|thread) ;;
+  *) echo "FAIL: boundary B-c did not name its initial holder"; exit 1 ;;
+esac
 if [ ! -f "$BOUNDARY_TRANSFER_TRACE" ]; then
   echo "FAIL: boundary transfer trace was not created"
   exit 1
@@ -1221,11 +1226,62 @@ MUT_BC_TRACE="$WORK/mut_bc_trace.bin"
 rm -f "$MUT_BC_TRACE"
 MUT_BC_OUT="$(IYI_PATH="$PATCH_DIR_BC/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_BC_TRACE" "$IYI" run -Diyi_observe "$BOUNDARY_TRANSFER_SRC")"
 FIRST_LINE="$(printf '%s\n' "$MUT_BC_OUT" | head -n 1)"
-if [ "$FIRST_LINE" != "0" ]; then
-  echo "FAIL: boundary B-c does not discriminate: expected 0 first without transfer, got '$FIRST_LINE'"
+HOLDER="$(printf '%s\n' "$MUT_BC_OUT" | tail -n 1)"
+if [ "$HOLDER" = "thread" ]; then
+  if [ "$FIRST_LINE" != "0" ]; then
+    echo "FAIL: boundary B-c does not discriminate: expected 0 first without transfer, got '$FIRST_LINE'"
+    exit 1
+  fi
+  echo "  mutation proof B-c passed: removing thread-to-fiber transfer gave 0 first"
+elif [ "$HOLDER" = "fiber" ] && [ "$WINDOWS" = 1 ]; then
+  echo "  host-limited: Windows holder already had a fiber before thread-to-fiber transfer"
+else
+  echo "FAIL: boundary B-c did not name its initial holder in the mutant"
   exit 1
 fi
-echo "  mutation proof B-c passed: removing transfer gave 0 first"
+
+# An existing fiber uses its own depth instead of the thread's depth. On
+# Windows the holder already has one before the first enter_frame, so the
+# thread-to-fiber mutant above cannot change that path.
+BOUNDARY_FIBER_SRC="$WORK/boundary_fiber.iyi"
+cat << 'EOF' > "$BOUNDARY_FIBER_SRC"
+module test/boundary_fiber
+import std/observe
+IyiScheduler.current
+Std::Observe.enter_frame
+puts Std::Observe.frame_depth
+Std::Observe.leave_frame
+puts Std::Observe.frame_depth
+EOF
+FIBER_OUT="$(IYI_OBSERVE="$WORK/boundary_fiber_trace.bin" "$IYI" run -Diyi_observe "$BOUNDARY_FIBER_SRC")"
+if [ "$FIBER_OUT" != "$(printf '1\n0')" ]; then
+  echo "FAIL: expected existing-fiber depth 1 then 0, got '$FIBER_OUT'"
+  exit 1
+fi
+
+PATCH_DIR_BCF="$WORK/patched_bcf"
+mkdir -p "$PATCH_DIR_BCF/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$PATCH_DIR_BCF/src/"
+OBSERVE_PATH_BCF="$PATCH_DIR_BCF/src/std/observe.iyi"
+awk '
+  /fiber\.observe_depth = d \+ 1/ {
+    print "        fiber.observe_depth = d # MUTATED_BCF"
+    print "MUTATED" > "/dev/stderr"
+    next
+  }
+  { print }
+' "$OBSERVE_PATH_BCF" > "$OBSERVE_PATH_BCF.tmp" 2>"$WORK/awk_err_bcf"
+mv "$OBSERVE_PATH_BCF.tmp" "$OBSERVE_PATH_BCF"
+if ! grep -q "MUTATED" "$WORK/awk_err_bcf"; then
+  echo "FAIL: could not apply mutation: fiber enter_frame increment not found"
+  exit 1
+fi
+MUT_BCF_OUT="$(IYI_PATH="$PATCH_DIR_BCF/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$WORK/mut_bcf_trace.bin" "$IYI" run -Diyi_observe "$BOUNDARY_FIBER_SRC")"
+if [ "$(printf '%s\n' "$MUT_BCF_OUT" | head -n 1)" != "0" ]; then
+  echo "FAIL: existing-fiber boundary does not discriminate: got '$MUT_BCF_OUT'"
+  exit 1
+fi
+echo "  mutation proof B-c fiber passed: removing the fiber increment gave 0 first"
 
 if [ "$WINDOWS" = 1 ]; then
   echo "== Windows observation: existing and absent metadata"

@@ -216,6 +216,9 @@ pub def run_passes(mod : Module, passes : Array(PassId), options : PassOptions) 
           end
           k = k + 1
         end
+        if inline_budget = budget
+          inline_budget.invalidate(fn) # mutation S6P2: invalidate after function cleanup
+        end
       end
       f = f + 1
     end

@@ -118,6 +118,13 @@ PY
   return 1
 }
 
+# These fixtures are generated under WORK so the guard exercises large or
+# specially ordered control flow without adding generated files to the tree.
+generated_mutation_check() {
+  local FIXTURES="$WORK/s6p-fixtures"
+  mutation_check "$@"
+}
+
 mutation_result() {
   local label="$1" result
   result=$(cat "$WORK/$label.status" 2>/dev/null || printf '2')
@@ -262,6 +269,126 @@ for name in guards tls_keep always_runtime_keep; do fixture_check inline "$name"
 fixture_check deadfn roots changed
 fixture_check deadfn global_keep keep
 fixture_check deadfn asm_keep keep
+
+echo '== 2e. inliner chain decisions and callee cache invalidation'
+if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" <<'PY'
+import os, subprocess, sys
+binary, work = sys.argv[1:]
+root = os.path.join(work, 's6p-fixtures')
+os.makedirs(os.path.join(root, 'inline'), exist_ok=True)
+os.makedirs(os.path.join(root, 'release'), exist_ok=True)
+layout = ('target triple = "aarch64-apple-darwin"\n'
+          'target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"\n')
+
+def execute(command, path):
+    try:
+        result = subprocess.run([binary] + command + [path], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError('%s could not run: %s' % (path, exc))
+    if result.returncode != 0:
+        raise RuntimeError('%s failed (%d): %s' % (path, result.returncode, result.stderr.decode('utf-8', 'replace')))
+    return result.stdout
+
+def dispatch(name, count, cycle, expected_calls):
+    path = os.path.join(root, 'inline', name + '.ir')
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('; iyi-ir 1\nsource_filename = "dispatch"\n' + layout)
+        f.write('declare external void @sink()\ndefine internal void @leaf() {\nentry:\n  call void () @sink()\n  ret void\n}\n')
+        f.write('define external void @caller(i1 %c) {\nentry:\n  br label %c0\n')
+        for i in range(count):
+            target = ('c%d' % (i + 1)) if i + 1 < count else ('c0' if cycle else 'end')
+            f.write('c%d:\n  br i1 %%c, label %%arm%d, label %%%s\n' % (i, i, target))
+        for i in range(count):
+            f.write('arm%d:\n  call void () @leaf()\n  br label %%join\n' % i)
+        f.write('end:\n  unreachable\njoin:\n  ret void\n}\n')
+        f.write('define external i64 @padding(i64 %x) {\nentry:\n')
+        for i in range(100):
+            f.write('  %%p%d = add i64 %%x, %d\n' % (i, i))
+        f.write('  ret i64 %x\n}\n')
+    output = execute(['run', '--verify-each', 'inline'], path)
+    found = output.count(b'call void () @leaf()')
+    if found != expected_calls:
+        raise RuntimeError('%s retained %d leaf calls, expected %d' % (name, found, expected_calls))
+    print('  ok: %s' % name)
+
+def cache_cleanup():
+    path = os.path.join(root, 'release', 'cache_cleanup.ir')
+    expected = os.path.join(root, 'release', 'cache_cleanup.out.ir')
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('''; iyi-ir 1
+source_filename = "cache-cleanup"
+'''+layout+'''declare external void @sink()
+define external i64 @early(i1 %c, i64 %x) {
+entry:
+  %chosen = select i1 %c, ptr @callee, ptr @callee
+  %r = call i64 (i64) %chosen(i64 %x)
+  ret i64 %r
+}
+define internal i64 @callee(i64 %x) {
+entry:
+  br i1 true, label %good, label %cold
+good:
+  ret i64 %x
+cold:
+  call void () @sink()
+  call void () @sink()
+  call void () @sink()
+  call void () @sink()
+  call void () @sink()
+  ret i64 %x
+}
+define external i64 @late(i64 %x) {
+entry:
+  %a = call i64 (i64) @callee(i64 %x)
+  %b = call i64 (i64) @callee(i64 %a)
+  ret i64 %b
+}
+define external i64 @padding(i64 %x) {
+entry:
+''')
+        for i in range(100):
+            f.write('  %%p%d = add i64 %%x, %d\n' % (i, i))
+        f.write('  ret i64 %x\n}\n')
+    with open(expected, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('''; iyi-ir 1
+source_filename = "cache-cleanup"
+'''+layout+'''declare external void @sink()
+define external i64 @early(i1 %c, i64 %x) {
+entry:
+  %r = call i64 (i64) @callee(i64 %x)
+  ret i64 %r
+}
+define internal i64 @callee(i64 %x) {
+entry:
+  ret i64 %x
+}
+define external i64 @late(i64 %x) {
+entry:
+  ret i64 %x
+}
+define external i64 @padding(i64 %x) {
+entry:
+  ret i64 %x
+}
+''')
+    actual = execute(['run', '--verify-each', 'release'], path)
+    golden = execute(['print'], expected)
+    if actual != golden:
+        raise RuntimeError('callee cost was not invalidated after its cleanup')
+    print('  ok: cache_cleanup')
+
+try:
+    dispatch('dispatch4', 4, False, 0)
+    dispatch('dispatch5', 5, False, 5)
+    dispatch('dispatch_cycle', 5, True, 0)
+    cache_cleanup()
+except RuntimeError as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  fail 'inliner chain or cache regression check failed'
+fi
 
 echo '== 2a. common subexpression elimination'
 for file in "$FIXTURES/cse/"*.ir; do
@@ -712,6 +839,21 @@ prove_mutation 'M20: preserve every block during layout' src/compiler/ir/opt/lay
   '    @fn.blocks[0, @fn.blocks.size] = ordered[0, ordered.size - 1] # mutation M20: preserve every block' \
   -- mutation_check M20 layout unreachable_phi || fail 'M20 was not caught'
 mutation_result M20
+prove_mutation 'S6P1: forward five-arm dispatch limit' src/compiler/ir/opt/inline.iyi \
+  '    return true if suffix > 4 # mutation S6P1: a five-arm chain exceeds the limit' \
+  '    return true if suffix > 5 # mutation S6P1: a five-arm chain exceeds the limit' \
+  -- generated_mutation_check S6P1 inline dispatch5 || fail 'S6P1 was not caught'
+mutation_result S6P1
+prove_mutation 'S6P2: invalidate callee after cleanup' src/compiler/ir/opt/pipeline.iyi \
+  '          inline_budget.invalidate(fn) # mutation S6P2: invalidate after function cleanup' \
+  '          nil # mutation S6P2: invalidate after function cleanup' \
+  -- generated_mutation_check S6P2 release cache_cleanup || fail 'S6P2 was not caught'
+mutation_result S6P2
+prove_mutation 'S6P3: count earlier dispatch starts' src/compiler/ir/opt/inline.iyi \
+  '        return true if length + 1 > 4 # mutation S6P3: earlier chain starts also count' \
+  '        return true if length + 1 > 5 # mutation S6P3: earlier chain starts also count' \
+  -- generated_mutation_check S6P3 inline dispatch5 || fail 'S6P3 was not caught'
+mutation_result S6P3
 
 echo '== 8. verdict'
 if [ "$failed" -eq 0 ]; then

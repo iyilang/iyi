@@ -290,21 +290,23 @@ end
 pub def run_sroa(mod : Module, fn : Function) : Bool
   return false if fn.declaration?
   fn.relink
-  du = DefUse.new(fn)
-  cfg = Cfg.new(fn)
-  positions = FunctionIndex.new(fn)
   slots = [] of AggregateSlot
-  roots = Hash(Value, AggregateSlot).new
   fn.blocks[0].insts.each do |inst|
     if inst.op == Op::Alloca && inst.args.empty? && inst.aux.is_a?(GepAux)
       type = inst.aux.as(GepAux).source_type
       if (type.struct? && !type.opaque?) || type.array?
-        slot = AggregateSlot.new(inst, type)
-        slots << slot
-        roots[inst] = slot
+        slots << AggregateSlot.new(inst, type)
       end
     end
   end
+  # Most functions have no aggregate slot. Def-use and CFG construction
+  # cannot affect their result, but fn.relink still runs as before.
+  return false if slots.empty?
+  roots = Hash(Value, AggregateSlot).new
+  slots.each { |slot| roots[slot.alloca] = slot }
+  du = DefUse.new(fn)
+  cfg = Cfg.new(fn)
+  positions = FunctionIndex.new(fn)
   slots.each { |slot| scan_slot(mod, slot, roots, du, positions, cfg) }
   changed = true
   while changed

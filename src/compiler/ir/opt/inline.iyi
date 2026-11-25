@@ -21,6 +21,34 @@ pub class InlineBudget
     end
     @used = total
     @limit = total + total // 2
+    @eligible = Hash(Function, Int32).new
+    @costs = Hash(Function, Int32).new
+  end
+
+  # Functions can still change while their own pipeline is running. The
+  # driver invalidates both entries when that function's pipeline finishes.
+  def callee_allowed(fn : Function) : Bool
+    if cached = @eligible[fn]?
+      return cached == 1
+    end
+    allowed = callee_allowed?(fn)
+    @eligible[fn] = allowed ? 1 : 0
+    allowed
+  end
+
+  def callee_cost(fn : Function) : Int32
+    if cached = @costs[fn]?
+      return cached
+    end
+    cost = inline_cost(fn)
+    @costs[fn] = cost
+    cost
+  end
+
+  def invalidate(fn : Function) : Nil
+    @eligible.delete(fn)
+    @costs.delete(fn)
+    nil
   end
 end
 
@@ -212,50 +240,72 @@ def in_loop?(fn : Function, block : Block) : Bool
   loops.depth(id) > 0
 end
 
-# A compare chain dispatches to one arm per conditional. When it ends in
-# unreachable, count the arms rather than treating them as one call site.
-def dispatch_arms(fn : Function, target : Block) : Int32
-  biggest = 0
-  fn.blocks.each do |start|
+# A dispatch link has exactly one conditional successor continuing the chain,
+# and one arm containing exactly one call. The original classifier counts
+# only chains whose continuing edge eventually reaches unreachable.
+def dispatch_next(block : Block) : Block?
+  term = block.terminator
+  return nil unless term.op == Op::CondBr && term.targets.size == 2
+  a = term.targets[0]
+  b = term.targets[1]
+  a_chain = a.terminator.op == Op::CondBr || a.terminator.op == Op::Unreachable
+  b_chain = b.terminator.op == Op::CondBr || b.terminator.op == Op::Unreachable
+  return nil if a_chain == b_chain
+  arm = a_chain ? b : a
+  calls = 0
+  arm.insts.each { |inst| calls = calls + 1 if inst.op == Op::Call }
+  return nil unless calls == 1
+  a_chain ? a : b
+end
+
+# Only the predicate (> 4 arms) is used by the cost model. Start at the
+# target's immediate conditional predecessors instead of every block. Follow
+# each chain to its unreachable end, then walk backwards only far enough to
+# establish whether an earlier start would make that chain longer than four.
+def dispatch_over_four?(target : Block) : Bool
+  calls = 0
+  target.insts.each { |inst| calls = calls + 1 if inst.op == Op::Call }
+  return false unless calls == 1
+  target.preds.each do |start|
+    following = dispatch_next(start)
+    next unless following && following != target
     current = start
-    visited = Hash(Block, Bool).new
-    arms = 0
-    contains = false
-    valid = true
-    while valid && !visited.has_key?(current)
-      visited[current] = true
-      term = current.terminator
-      if term.op == Op::Unreachable
+    seen = Hash(Block, Bool).new
+    suffix = 0
+    terminal = false
+    while !seen.has_key?(current)
+      seen[current] = true
+      if current.terminator.op == Op::Unreachable
+        terminal = true
         break
       end
-      unless term.op == Op::CondBr && term.targets.size == 2
-        valid = false
-        break
-      end
-      a = term.targets[0]
-      b = term.targets[1]
-      a_chain = a.terminator.op == Op::CondBr || a.terminator.op == Op::Unreachable
-      b_chain = b.terminator.op == Op::CondBr || b.terminator.op == Op::Unreachable
-      if a_chain == b_chain
-        valid = false
-        break
-      end
-      arm = a_chain ? b : a
-      current = a_chain ? a : b
-      calls = 0
-      arm.insts.each { |inst| calls = calls + 1 if inst.op == Op::Call }
-      unless calls == 1
-        valid = false
-        break
-      end
-      arms = arms + 1
-      contains = true if arm == target
+      next_block = dispatch_next(current)
+      break unless next_block
+      suffix = suffix + 1
+      current = next_block
     end
-    if valid && current.terminator.op == Op::Unreachable && contains && arms > biggest
-      biggest = arms
+    next unless terminal
+    return true if suffix > 4 # mutation S6P1: a five-arm chain exceeds the limit
+    pending = [start] of Block
+    lengths = [suffix] of Int32
+    seen = Hash(Block, Bool).new
+    seen[start] = true
+    at = 0
+    while at < pending.size
+      node = pending[at]
+      length = lengths[at]
+      at = at + 1
+      node.preds.each do |pred|
+        next if seen.has_key?(pred)
+        next unless dispatch_next(pred) == node
+        return true if length + 1 > 4 # mutation S6P3: earlier chain starts also count
+        seen[pred] = true
+        pending << pred
+        lengths << length + 1
+      end
     end
   end
-  biggest
+  false
 end
 
 def call_allowed?(fn : Function, block : Block, call : Inst, callee : Function, graph : CallGraph, budget : InlineBudget) : Bool
@@ -270,16 +320,16 @@ def call_allowed?(fn : Function, block : Block, call : Inst, callee : Function, 
     return false if tls_value?(call.args[k]) || call.args[k].type != callee.params[k - 1].type
     k = k + 1
   end
-  return false unless callee_allowed?(callee)
+  return false unless budget.callee_allowed(callee)
   return false if graph.same_component?(fn, callee) || graph.recursive?(callee)
   always = has_attr?(callee.attrs, "alwaysinline") || has_attr?(aux.fn_attrs, "alwaysinline")
   return false if top_level?(fn) && !always && !in_loop?(fn, block)
   # Source-mandated inlining is exempt from the cost-model size limits.
   # inline_one still charges its growth, so later ordinary calls see it.
   return true if always
-  cost = inline_cost(callee)
+  cost = budget.callee_cost(callee)
   match_helper = callee.name.includes?("~match<")
-  return false if !match_helper && dispatch_arms(fn, block) > 4 && cost > 10
+  return false if !match_helper && cost > 10 && dispatch_over_four?(block)
   unless match_helper || cost <= 40 || (callee.linkage == Linkage::Internal && graph.call_sites(callee) == 1 && cost <= 400)
     return false
   end
@@ -429,5 +479,6 @@ pub def run_inline(mod : Module, fn : Function, graph : CallGraph, budget : Inli
     break unless round_changed
     round = round + 1
   end
+  budget.invalidate(fn) if changed
   changed
 end

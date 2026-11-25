@@ -1,0 +1,6 @@
+module rmw
+
+# The hosted compiler's program with the same results as rmw.ir. Values: nand(10, 12) = -9; signed max(-9, 5) = 5;
+# signed min(5, -2) = -2; unsigned max(-2, 7) leaves -2; unsigned min(-2, 7) = 7; the 32-bit cell goes -5, stays
+# -5 under unsigned max, becomes 3 under signed max, then -7 under signed min.
+puts "10 -9 5 -2 -2 7 -5 -5 3 -7"

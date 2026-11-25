@@ -1,0 +1,90 @@
+module compiler/native/thread_locals
+
+# Thread-local globals (SPEC 3.5). A thread-local global keeps its entry in the module's symbol table; this places
+# its storage in the sections the Mach-O object model names for thread-locals.
+#
+# Darwin: one TLV descriptor per global, in __DATA,__thread_vars, of three 8-byte words: the thunk pointer (an Abs64
+# against __tlv_bootstrap, the undefined symbol this adds), a zero key, and the storage's offset within the
+# thread-local template (an Abs64 against the storage symbol, addend 0). The storage is in __DATA,__thread_data when
+# its initializer has bytes or relocations, and in __DATA,__thread_bss when it is all zero. This is the layout the
+# oracle's object takes for a probe program (see the report): the descriptor carries the global's name, the storage is
+# a local symbol named NAME$tlv$init, and the descriptor and storage symbols are local.
+#
+# Linux: the storage alone, in .tdata or .tbss. An access adds the local-exec offset, so there is no descriptor. The
+# ELF writer is a later slice; the sections here are the object model's.
+
+import compiler/ir/function::{Global, TlsModel, Linkage}
+import compiler/ir/module::{Module}
+import compiler/native/obj/object::{ObjectFile, Section, SectionKind, Symbol, SymbolKind, SymbolBinding, RelocKind}
+import compiler/native/emit::{SectionWriter, to_bytes, write_initializer}
+
+# The thread-local sections, in the order the driver appends them after .bss: .tdata at `base`, .tbss at base + 1,
+# and on darwin .tlv (__DATA,__thread_vars) at base + 2. Returns those sections, or the reason a global's initializer
+# cannot be written.
+pub def place_thread_locals(mod : Module, obj : ObjectFile, syms : Hash(String, Int32), darwin : Bool, base : Int32) : Array(Section) | String
+  sections = [] of Section
+  any = false
+  mod.globals.each do |g|
+    any = true if g.tls != TlsModel::None
+  end
+  return sections unless any
+  layout = mod.layout
+  tdata = SectionWriter.new
+  tbss_size = 0_i64
+  tlv = SectionWriter.new
+  boot = -1
+  if darwin
+    boot = obj.symbols.size
+    obj.symbols << Symbol.new("_tlv_bootstrap", SymbolKind::Undefined, SymbolBinding::Global)
+  end
+  mod.globals.each do |g|
+    next if g.tls == TlsModel::None
+    index = syms[g.name]
+    next if g.initializer.nil? && g.linkage == Linkage::External
+    w = SectionWriter.new
+    message = write_initializer(layout, w, syms, g.value_type, g.initializer, 0_i64)
+    return "#{g.name}: #{message}" if message
+    align = g.alignment > 0 ? g.alignment.to_i64 : layout.abi_align(g.value_type).to_i64
+    size = layout.store_size(g.value_type)
+    zero = w.relocs.empty?
+    w.bytes.each do |b|
+      zero = false unless b == 0_u8
+    end
+    storage_section = base
+    storage_value = 0_i64
+    if zero
+      tbss_size = ((tbss_size + align - 1_i64) // align) * align
+      storage_section = base + 1
+      storage_value = tbss_size
+      tbss_size = tbss_size + size
+    else
+      tdata.pad_to(align)
+      storage_value = tdata.append(w.bytes, w.relocs)
+    end
+    sym = obj.symbols[index]
+    if darwin
+      storage = obj.symbols.size
+      obj.symbols << Symbol.new("#{g.name}$tlv$init", SymbolKind::Tls, SymbolBinding::Local, storage_section, storage_value, size)
+      tlv.pad_to(8_i64)
+      descriptor = tlv.offset
+      tlv.reloc(RelocKind::Abs64, boot, 0_i64)
+      tlv.put_le(0_i64, 8)
+      tlv.put_le(0_i64, 8)
+      tlv.reloc(RelocKind::Abs64, storage, 0_i64)
+      tlv.put_le(0_i64, 8)
+      sym.section = base + 2
+      sym.value = descriptor
+      sym.size = 24_i64
+    else
+      sym.section = storage_section
+      sym.value = storage_value
+      sym.size = size
+    end
+  end
+  sections << Section.new(".tdata", SectionKind::TlsData, 8, to_bytes(tdata.bytes), tdata.bytes.size.to_i64, tdata.relocs)
+  sections << Section.new(".tbss", SectionKind::TlsZeroFill, 8, to_bytes([] of UInt8), tbss_size)
+  if darwin
+    sections << Section.new(".tlv", SectionKind::TlsVars, 8, to_bytes(tlv.bytes), tlv.bytes.size.to_i64, tlv.relocs)
+  end
+  sections
+end

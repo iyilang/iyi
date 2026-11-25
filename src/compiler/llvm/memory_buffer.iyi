@@ -1,0 +1,54 @@
+@[Unsafe("binds LLVM's C API: its objects are raw handles this module wraps and disposes, which the compiler does not check")]
+module compiler/llvm/memory_buffer
+
+import compiler/llvm/lib_llvm::{string_from_c, string_and_dispose}
+
+pub class MemoryBuffer
+  getter unwrap : LibLLVM::MemoryBufferRef
+
+  def initialize(@unwrap : LibLLVM::MemoryBufferRef)
+    @disposed = false
+  end
+
+  def self.from_file(path : String) : MemoryBuffer
+    mem_buf = Pointer(Void).new(0_u64)
+    err_msg = Pointer(UInt8).new(0_u64)
+    rc = LibLLVM.create_memory_buffer_with_contents_of_file(path.to_unsafe, pointerof(mem_buf), pointerof(err_msg))
+    if rc != 0
+      err = string_and_dispose(err_msg)
+      raise "Could not open memory buffer from file #{path}: #{err}"
+    end
+    MemoryBuffer.new(mem_buf)
+  end
+
+  def size : Int32
+    return 0 if @unwrap.address == 0
+    LibLLVM.get_buffer_size(@unwrap).to_i32
+  end
+
+  def buffer_start : UInt8*
+    return Pointer(UInt8).new(0_u64) if @unwrap.address == 0
+    LibLLVM.get_buffer_start(@unwrap)
+  end
+
+  def to_s : String
+    s = size
+    return "" if s == 0
+    start_ptr = buffer_start
+    return "" if start_ptr.address == 0
+    String.new(s) do |b|
+      b.copy_from(start_ptr, s)
+    end
+  end
+
+  def dispose : Nil
+    if !@disposed && @unwrap.address != 0
+      LibLLVM.dispose_memory_buffer(@unwrap)
+      @disposed = true
+    end
+  end
+
+  def to_unsafe : LibLLVM::MemoryBufferRef
+    @unwrap
+  end
+end

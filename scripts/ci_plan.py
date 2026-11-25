@@ -83,7 +83,7 @@ FAST = ["build", "iyi", "stale-rg3", "compiler-specs", "stdlib-specs", "targets"
 # The self-host gates compile and check the compiler written in iyi
 # (`src/compiler/`), and the bench files and fixtures they read. A change to
 # any of those selects all three hosts, whatever else it touches.
-SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows"]
+SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"]
 
 # Changes to a stale input must exercise the same acceptance, gates and
 # fresh-runner audit on each native platform, even for a bench-only PR.
@@ -223,7 +223,7 @@ def is_doc(path):
 
 
 def is_selfhost(path):
-    return ((path.startswith("src/compiler/") and path.endswith(".iyi"))
+    return ((path.startswith("src/compiler/") and path.endswith((".iyi", ".ir")))
             or path.startswith(("bench/selfhost_", "bench/native_", "bench/fixtures/"))
             or path == "bench/lib/host.sh")
 

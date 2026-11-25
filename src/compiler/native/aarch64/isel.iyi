@@ -1,0 +1,2716 @@
+module compiler/native/aarch64/isel
+
+# Instruction selection for aarch64 at -O0 (SPEC 2.2 step 3): IR -> MIR over virtual
+# registers. Regalloc, frame layout and encoding come after.
+#
+# Value representation. A value of scalar type is one virtual register; an
+# aggregate is the list of its scalar leaves in layout order, so aggregates never
+# reach the machine. Integers are canonical in a 64-bit register: a value of width
+# w < 64 is sign-extended from its low w bits, except i1, which is 0 or 1. Every
+# operation that can leave the width normalises its result. Unsigned operations
+# zero-extend their operands first.
+#
+# Failure. iyi has no exceptions, so an unsupported construct records its reason
+# with `fail` and selection stops emitting; `select_function` returns the reason.
+# Refused by name: i128, inline asm, constant expressions,
+# reachable exception pads, and intrinsics outside the overflow family, trap,
+# expect, assume and donothing.
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value, Param}
+import compiler/ir/inst::{Op, Inst, CallConv, Ordering, Attribute, CallAux, GepAux, MemAux, IntrinsicAux, ThreadPointerKind, AsmAux, AsmDialect}
+import compiler/ir/function::{Function, Global, Linkage, TlsModel, Visibility}
+import compiler/ir/module::{Module}
+import compiler/ir/layout::{DataLayout}
+import compiler/native/const_expr::{ConstAddress, reduce_const}
+import compiler/ir/intrinsics::{IntrinsicId, intrinsic_stem}
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass, JumpTable, AsmBody}
+import compiler/native/obj/object::{RelocKind}
+import compiler/native/jump_table::{SwitchTable, switch_table_plan}
+import compiler/native/aarch64/regs::{cond_eq, cond_ne, cond_cs, cond_cc, cond_mi, cond_vs, cond_vc, cond_hi, cond_ls, cond_ge, cond_lt, cond_gt, cond_le, reg_name, callee_saved_gprs}
+import compiler/native/target::{TargetDesc, TlsForm}
+import compiler/native/aarch64/abi::{aarch64_target}
+import compiler/native/lower::{LeafLoc, CallAssignment, flatten_leaves, assign_call, assign_return, assign_iyi_call, assign_iyi_return, iyi_result_indirect?, reachable_blocks, plan_gep, GepPlan, overflow_form, acquire_on_load?, release_on_store?, icmp_unsigned?}
+
+import compiler/native/asm/constraints::{parse_operand, parse_clobber, digits?, ConstraintClass, ConstraintError, OperandConstraint}
+import compiler/native/aarch64/asm::{AsmAssembler}
+
+pub class IselError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+def vop(id : Int32) : Operand
+  Operand.new(OperandKind::Virtual, id)
+end
+
+def pop(reg : Int32) : Operand
+  Operand.new(OperandKind::Physical, reg)
+end
+
+def mop(op : MOp) : MInst
+  MInst.new(op.value.to_i32)
+end
+
+# The IR's integer predicates by ordinal, in the order inst.iyi declares them:
+# EQ NE UGT UGE ULT ULE SGT SGE SLT SLE.
+def int_cond(ordinal : Int64) : Int32
+  if ordinal == 0_i64
+    return cond_eq
+  elsif ordinal == 1_i64
+    return cond_ne
+  elsif ordinal == 2_i64
+    return cond_hi
+  elsif ordinal == 3_i64
+    return cond_cs
+  elsif ordinal == 4_i64
+    return cond_cc
+  elsif ordinal == 5_i64
+    return cond_ls
+  elsif ordinal == 6_i64
+    return cond_gt
+  elsif ordinal == 7_i64
+    return cond_ge
+  elsif ordinal == 8_i64
+    return cond_lt
+  end
+  cond_le
+end
+
+class Isel
+  getter mf : MFunction
+  getter layout : DataLayout
+  getter fn : Function
+  getter syms : Hash(String, Int32)
+  getter darwin : Bool
+  getter desc : TargetDesc
+  getter values : Array(Value)
+  getter leaves : Array(Array(Int32))
+  getter block_index : Hash(String, Int32)
+  getter edge_count : Int32
+  getter failure : String?
+  getter max_outgoing : Int64
+  property cur : MBlock
+  property cur_ir_name : String
+  property sret_vreg : Int32
+
+  def initialize(module_ref : Module, @fn : Function, @syms : Hash(String, Int32), @darwin : Bool)
+    @layout = module_ref.layout
+    @mf = MFunction.new(@fn.name)
+    @values = [] of Value
+    @leaves = [] of Array(Int32)
+    @block_index = Hash(String, Int32).new
+    @edge_count = 0
+    @failure = nil
+    @max_outgoing = 0_i64
+    @cur = MBlock.new(0, "")
+    @cur_ir_name = ""
+    @sret_vreg = -1
+    @iyi_result_vreg = -1
+    @desc = aarch64_target(@darwin)
+  end
+
+  # ---- failure and register bookkeeping ----------------------------------------------------------
+
+  def fail(message : String) : Nil
+    unless @failure
+      @failure = "#{@fn.name}: #{message}"
+    end
+  end
+
+  def failed? : Bool
+    !@failure.nil?
+  end
+
+  def leaf_class(t : IrType) : RegClass
+    t.float? ? RegClass::Fpr : RegClass::Gpr
+  end
+
+  # One fresh virtual register per leaf of `t`, in layout order.
+  def fresh_leaves(t : IrType) : Array(Int32)
+    acc = [] of Int32
+    flatten_leaves(@layout, t).each do |l|
+      v = @mf.new_vreg(leaf_class(l[1]))
+      @mf.mark_pointer(v) if l[1].pointer?
+      acc << v
+    end
+    acc
+  end
+
+  def bind(value : Value, regs : Array(Int32)) : Nil
+    @values << value
+    @leaves << regs
+  end
+
+  def lookup(value : Value) : Array(Int32)?
+    i = 0
+    while i < @values.size
+      if @values[i] == value
+        return @leaves[i]
+      end
+      i = i + 1
+    end
+    nil
+  end
+
+  def emit(inst : MInst) : Nil
+    @cur.insts << inst
+  end
+
+  def new_block(name : String) : MBlock
+    block = MBlock.new(@mf.blocks.size, name)
+    @mf.blocks << block
+    block
+  end
+
+  def gpr : Int32
+    @mf.new_vreg(RegClass::Gpr)
+  end
+
+  # A fresh gpr holding an integer constant.
+  def const_gpr(value : Int64) : Int32
+    d = gpr
+    m = mop(MOp::MovImm)
+    m.defs << vop(d)
+    m.imm = value
+    emit(m)
+    d
+  end
+
+  def is_const_op?(op : Op) : Bool
+    op == Op::ConstInt || op == Op::ConstFloat || op == Op::ConstNull || op == Op::ConstUndef || op == Op::ConstPoison || op == Op::ConstZero || op == Op::ConstAggregate || op == Op::ConstBytes || op == Op::ConstExpr
+  end
+
+  # The leaves of a constant. A float constant's bits go through a gpr.
+  def const_leaves(c : Inst) : Array(Int32)
+    t = c.type
+    if c.op == Op::ConstInt && i128?(t)
+      return [const_gpr(c.aux_int), const_gpr(c.aux_hi)]
+    end
+    if c.op == Op::ConstInt && long_int?(t)
+      given = c.int_words(64)
+      acc = [] of Int32
+      k = 0
+      while k < t.bits // 64
+        acc << const_gpr(k < given.size ? given[k] : 0_i64)
+        k = k + 1
+      end
+      return acc
+    end
+    if c.op == Op::ConstInt
+      v = c.aux_int
+      v = v & 1_i64 if t.int? && t.bits == 1
+      # A register holds an integer narrower than 64 bits sign-extended from its width (`canon`, and what a load of the
+      # type produces), so a constant is wrapped to that form. `i8 128` is -128: left as 128 it compared unequal to a
+      # loaded byte of 0x80, and any unsigned value of a width's top half compared wrong, signed or not.
+      if t.int? && t.bits > 1 && t.bits < 64
+        span = 1_i64 << t.bits
+        v = v & (span - 1_i64)
+        v = v - span if v >= span // 2_i64
+      end
+      return [const_gpr(v)]
+    end
+    if c.op == Op::ConstFloat
+      g = const_gpr(c.aux_int)
+      return [move_bits_to_fp(g, t.bits)]
+    end
+    if c.op == Op::ConstNull || c.op == Op::ConstUndef || c.op == Op::ConstPoison || c.op == Op::ConstZero
+      return zero_leaves(t)
+    end
+    if c.op == Op::ConstAggregate || c.op == Op::ConstBytes
+      acc = [] of Int32
+      c.args.each do |a|
+        acc = acc + materialize(a)
+      end
+      return acc
+    end
+    # A constant expression: a symbol's address plus a byte offset, or a plain integer (const_expr.iyi).
+    reduced = reduce_const(@layout, c)
+    if reduced.is_a?(String)
+      fail(reduced.as(String))
+      return [gpr]
+    end
+    address = reduced.as(ConstAddress)
+    base = address.base
+    return [const_gpr(address.offset)] if base.nil?
+    return [add_imm(first_leaf(base.as(Value)), address.offset)]
+  end
+
+  def zero_leaves(t : IrType) : Array(Int32)
+    acc = [] of Int32
+    flatten_leaves(@layout, t).each do |l|
+      if l[1].float?
+        acc << move_bits_to_fp(const_gpr(0_i64), l[1].bits)
+      else
+        acc << const_gpr(0_i64)
+      end
+    end
+    acc
+  end
+
+  def move_bits_to_fp(g : Int32, bits : Int32) : Int32
+    f = @mf.new_vreg(RegClass::Fpr)
+    m = mop(MOp::FMovToFp)
+    m.size = bits
+    m.defs << vop(f)
+    m.uses << vop(g)
+    @mf.mark_pointer(f) if @mf.vreg_pointer[g]
+    emit(m)
+    f
+  end
+
+  def move_bits_to_gp(f : Int32, bits : Int32) : Int32
+    g = gpr
+    m = mop(MOp::FMovToGp)
+    m.size = bits
+    m.defs << vop(g)
+    m.uses << vop(f)
+    emit(m)
+    g
+  end
+
+  # The leaves of any operand. Constants and symbol addresses are materialised here, in the current block.
+  def materialize(v : Value) : Array(Int32)
+    if v.is_a?(Global)
+      g = v.as(Global)
+      return [thread_local_address(g)] if g.tls != TlsModel::None
+      return [symbol_address(g.name, false, g.initializer.nil? && g.linkage == Linkage::External && preemptible?(g.visibility, g.dso_local))]
+    end
+    if v.is_a?(Function)
+      f = v.as(Function)
+      return [symbol_address(f.name, false, f.declaration? && preemptible?(f.visibility, f.dso_local))]
+    end
+    if v.is_a?(Inst) && is_const_op?(v.as(Inst).op)
+      return const_leaves(v.as(Inst))
+    end
+    found = lookup(v)
+    return found if found
+    fail("a value is used before it is defined (#{v.name})")
+    return [gpr]
+  end
+
+  def first_leaf(v : Value) : Int32
+    materialize(v)[0]
+  end
+
+  def symbol_index(name : String) : Int32
+    index = @syms[name]?
+    unless index
+      fail("symbol #{name} is not in the module's symbol table")
+      return 0
+    end
+    index
+  end
+
+  # Hidden, protected and dso_local declarations resolve inside the image. Static-PIE startup relies on this
+  # before it has rebased the GOT.
+  def preemptible?(visibility : Visibility, dso_local : Bool) : Bool
+    visibility == Visibility::Default && !dso_local
+  end
+
+  # Definitions and non-preemptible declarations use adrp/add; other declarations use the GOT.
+  def symbol_address(name : String, tls : Bool, external : Bool) : Int32
+    if tls
+      fail("thread-local #{name} is reached through threadlocaladdr, not as an operand")
+    end
+    d = gpr
+    @mf.mark_pointer(d)
+    m = mop(external ? MOp::LoadGot : MOp::AddrSym)
+    m.defs << vop(d)
+    m.sym = symbol_index(name)
+    emit(m)
+    d
+  end
+
+  # ---- thread-local access (SPEC 3.5): the Mach-O TLV descriptor on darwin, the local-exec offset on Linux ------
+
+  # The clobbers of the thunk call. The thunk writes x0 (the variable's address), uses x16 and x17 as its own scratch,
+  # and writes the link register. The oracle's accessor keeps its out-pointer in x8 across the call, and LLVM keeps
+  # arguments in x1..x8 across it: those are observed. That x9..x15 and x19..x28 survive it as well is LLVM's TLS
+  # call mask, which this slice takes from the thunk's contract and did not read from the thunk's own code.
+  def tlv_clobbers : Array(Int32)
+    [0, 16, 17, 30]
+  end
+
+  # threadlocaladdr. Darwin: the address of the TLV descriptor (adrp and ldr through the TLVP relocations), the
+  # thunk (the descriptor's first word) loaded from it, the descriptor passed in x0, and the variable's address in
+  # x0 on return. Linux: the thread pointer plus the local-exec offset, two adds that carry the TPREL relocations.
+  # The sequence is emitted here, at this instruction, and every value it makes is bound to this instruction only.
+  def lower_thread_local_addr(i : Inst) : Nil
+    target = i.args[0]
+    unless target.is_a?(Global)
+      fail("threadlocaladdr names a value that is not a global")
+      return
+    end
+    g = target.as(Global)
+    if g.tls == TlsModel::None
+      fail("threadlocaladdr names #{g.name}, which is not a thread-local global")
+      return
+    end
+    bind_result(i, [thread_local_address(g)])
+  end
+
+  # The address of a thread-local global for the running thread, computed here. `threadlocaladdr` is one caller;
+  # the other is a thread-local global written as an operand, which is how the hosted compiler's module names
+  # one (`load ptr, ptr @g` on a `thread_local` global): each such use computes the address afresh, so no
+  # address outlives a call that may have moved the fiber to another thread.
+  def thread_local_address(g : Global) : Int32
+    if @desc.tls == TlsForm::LocalExec && g.tls != TlsModel::LocalExec
+      fail("thread-local #{g.name} has the #{g.tls} model; Linux lowers only the local-exec model in this slice")
+      return gpr
+    end
+    if @desc.tls == TlsForm::LocalExec
+      tp = gpr
+      m = mop(MOp::Mrs)
+      m.imm = 0_i64
+      m.defs << vop(tp)
+      emit(m)
+      hi = gpr
+      m = mop(MOp::AddTprelHi)
+      m.sym = symbol_index(g.name)
+      m.defs << vop(hi)
+      m.uses << vop(tp)
+      emit(m)
+      lo = gpr
+      m = mop(MOp::AddTprelLo)
+      m.sym = symbol_index(g.name)
+      m.defs << vop(lo)
+      m.uses << vop(hi)
+      emit(m)
+      return lo
+    end
+    desc = gpr
+    m = mop(MOp::LoadTlvp)
+    m.sym = symbol_index(g.name)
+    m.defs << vop(desc)
+    emit(m)
+    thunk = gpr
+    m = mop(MOp::Ldr)
+    m.size = 64
+    m.imm = 0_i64
+    m.defs << vop(thunk)
+    m.uses << vop(desc)
+    emit(m)
+    m = mop(MOp::Mov)
+    m.defs << pop(0)
+    m.uses << vop(desc)
+    emit(m)
+    @mf.frame.has_calls = true
+    m = mop(MOp::Blr)
+    m.uses << vop(thunk)
+    m.call = true
+    m.clobbers = tlv_clobbers
+    emit(m)
+    addr = gpr
+    m = mop(MOp::Mov)
+    m.defs << vop(addr)
+    m.uses << pop(0)
+    emit(m)
+    addr
+  end
+
+  # threadpointer. The kind names the register the target reads: tpidr_el0 on Linux, and tpidrro_el0 on darwin, whose
+  # low three bits hold the CPU number, so the value is taken with them cleared, as the oracle's thread_block takes
+  # it. Each kind is refused on the other target, and x86's %fs and %gs are refused by name.
+  def lower_thread_pointer(i : Inst) : Nil
+    kind = i.aux_int
+    darwin_reg = kind == ThreadPointerKind::TpidrroEl0.value.to_i64
+    linux_reg = kind == ThreadPointerKind::TpidrEl0.value.to_i64
+    unless (darwin_reg && @darwin) || (linux_reg && !@darwin)
+      fail("threadpointer #{kind} is not read on this target: darwin reads tpidrro_el0 and Linux reads tpidr_el0")
+      return
+    end
+    tp = gpr
+    m = mop(MOp::Mrs)
+    m.imm = darwin_reg ? 1_i64 : 0_i64
+    m.defs << vop(tp)
+    emit(m)
+    if darwin_reg
+      masked = gpr
+      m = mop(MOp::AndImm)
+      m.imm = -8_i64
+      m.defs << vop(masked)
+      m.uses << vop(tp)
+      emit(m)
+      bind_result(i, [masked])
+      return
+    end
+    bind_result(i, [tp])
+  end
+
+  # ---- normalisation -----------------------------------------------------------------------------
+
+  def width_of(t : IrType) : Int32
+    return 64 if t.pointer?
+    return 64 unless t.int?
+    t.bits
+  end
+
+  # The canonical form of register `v` at type `t`: sign-extended from its width, or 0/1 for i1.
+  def canon(v : Int32, t : IrType) : Int32
+    w = width_of(t)
+    return v if w >= 64
+    d = gpr
+    m = mop(w == 1 ? MOp::Ubfm : MOp::Sbfm)
+    m.imm = w.to_i64
+    m.defs << vop(d)
+    m.uses << vop(v)
+    emit(m)
+    d
+  end
+
+  # Signed uses of i1 interpret the canonical value 1 as -1.
+  def signed_value(v : Int32, t : IrType) : Int32
+    return v unless t.int? && t.bits == 1
+    d = gpr
+    m = mop(MOp::Sbfm)
+    m.imm = 1_i64
+    m.defs << vop(d)
+    m.uses << vop(v)
+    emit(m)
+    d
+  end
+
+  # The zero-extended form of `v` at type `t`.
+  def zext(v : Int32, t : IrType) : Int32
+    w = width_of(t)
+    return v if w >= 64
+    d = gpr
+    m = mop(MOp::Ubfm)
+    m.imm = w.to_i64
+    m.defs << vop(d)
+    m.uses << vop(v)
+    emit(m)
+    d
+  end
+
+  def binop(op : MOp, a : Int32, b : Int32) : Int32
+    d = gpr
+    m = mop(op)
+    m.defs << vop(d)
+    m.uses << vop(a)
+    m.uses << vop(b)
+    emit(m)
+    d
+  end
+
+  def fbinop(op : MOp, a : Int32, b : Int32, bits : Int32) : Int32
+    d = @mf.new_vreg(RegClass::Fpr)
+    m = mop(op)
+    m.fp = true
+    m.size = bits
+    m.defs << vop(d)
+    m.uses << vop(a)
+    m.uses << vop(b)
+    emit(m)
+    d
+  end
+
+  # A copy of a register, of the same class.
+  def copy_reg(src : Int32) : Int32
+    cls = @mf.vreg_classes[src]
+    d = @mf.new_vreg(cls)
+    m = mop(cls == RegClass::Fpr ? MOp::FMov : MOp::Mov)
+    m.fp = cls == RegClass::Fpr
+    m.defs << vop(d)
+    m.uses << vop(src)
+    @mf.mark_pointer(d) if @mf.vreg_pointer[src]
+    emit(m)
+    d
+  end
+
+  def copy_all(regs : Array(Int32)) : Array(Int32)
+    acc = [] of Int32
+    regs.each do |r|
+      acc << copy_reg(r)
+    end
+    acc
+  end
+
+  # base + off, for any offset the frame can produce.
+  def add_imm(a : Int32, off : Int64) : Int32
+    return a if off == 0_i64
+    if off > 0_i64 && off < 4096_i64
+      d = gpr
+      m = mop(MOp::AddImm)
+      m.imm = off
+      m.defs << vop(d)
+      m.uses << vop(a)
+      emit(m)
+      return d
+    end
+    binop(MOp::Add, a, const_gpr(off))
+  end
+
+  def set_flag(cond : Int32) : Int32
+    d = gpr
+    m = mop(MOp::Cset)
+    m.cond = cond
+    m.defs << vop(d)
+    emit(m)
+    d
+  end
+
+  def compare(a : Int32, b : Int32) : Nil
+    c = mop(MOp::Cmp)
+    c.uses << vop(a)
+    c.uses << vop(b)
+    emit(c)
+  end
+
+  # Sets flags against zero, so that `ne` means the register is nonzero.
+  def compare_zero(a : Int32) : Nil
+    c = mop(MOp::CmpImm)
+    c.imm = 0_i64
+    c.uses << vop(a)
+    emit(c)
+  end
+
+  def branch(target : Int32) : MInst
+    m = mop(MOp::B)
+    m.target = target
+    m.terminator = true
+    m
+  end
+
+  # Writes the leaves of `i` into their registers.
+  def bind_result(i : Inst, regs : Array(Int32)) : Nil
+    return if failed?
+    dest = lookup(i)
+    unless dest
+      fail("no register was allocated for #{i.name}")
+      return
+    end
+    k = 0
+    while k < regs.size
+      cls = @mf.vreg_classes[dest[k]]
+      m = mop(cls == RegClass::Fpr ? MOp::FMov : MOp::Mov)
+      m.fp = cls == RegClass::Fpr
+      m.defs << vop(dest[k])
+      m.uses << vop(regs[k])
+      @mf.mark_pointer(dest[k]) if @mf.vreg_pointer[regs[k]]
+      emit(m)
+      k = k + 1
+    end
+  end
+
+  # ---- the function ------------------------------------------------------------------------------
+
+  # Whether a type is an integer of more than 128 bits.
+  def long_int?(t : IrType) : Bool
+    t.int? && t.bits > 128
+  end
+
+  # An integer wider than 128 bits used in a way this back end does not lower, or nil. Such an integer is lowered as
+  # its 64-bit words for exactly what the hosted compiler does with one: an extension of a value of at most 64 bits,
+  # a constant, a plain load and store, and a truncation back to at most 64 bits. Arithmetic, comparison, a parameter
+  # or a result of that width is refused by name before any value is given registers.
+  def first_wide_int : IrType?
+    @fn.fn_type.param_types.each { |t| return t if long_int?(t) }
+    rt = @fn.fn_type.return_type
+    return rt if long_int?(rt)
+    @fn.blocks.each do |b|
+      b.insts.each do |i|
+        carried = long_int?(i.type) ? i.type : nil
+        i.args.each { |a| carried = a.type if long_int?(a.type) }
+        next unless carried
+        op = i.op
+        next if is_const_op?(op)
+        next if (op == Op::ZExt || op == Op::SExt) && long_int?(i.type) && i.args[0].type.int? && i.args[0].type.bits <= 64 && i.type.bits % 64 == 0
+        next if op == Op::Trunc && long_int?(i.args[0].type) && i.type.bits <= 64
+        next if op == Op::Load && i.aux.as(MemAux).ordering == Ordering::NotAtomic && i.type.bits % 64 == 0
+        next if op == Op::Store && i.aux.as(MemAux).ordering == Ordering::NotAtomic && long_int?(i.args[0].type) && !long_int?(i.args[1].type)
+        return carried
+      end
+    end
+    nil
+  end
+
+  def run : MFunction
+    wide = first_wide_int
+    if wide
+      fail("an #{wide} value is used in a way that is not lowered: past 128 bits the native backend lowers an extension of a value of at most 64 bits, a constant, a plain load and store, and a truncation")
+      return @mf
+    end
+    return run_naked if naked_fn?
+    # One MIR block per IR block, in order, so block indices agree with the IR's.
+    @fn.blocks.each do |b|
+      @block_index[b.name] = @mf.blocks.size
+      new_block(b.name)
+    end
+    @fn.params.each do |p|
+      bind(p, fresh_leaves(p.type))
+    end
+    reachable = reachable_blocks(@fn)
+    @fn.blocks.each do |b|
+      next unless reachable[@block_index[b.name]]
+      b.insts.each do |i|
+        next if i.op == Op::Phi || i.type.void? || is_const_op?(i.op)
+        bind(i, fresh_leaves(i.type))
+      end
+      b.insts.each do |i|
+        bind(i, fresh_leaves(i.type)) if i.op == Op::Phi
+      end
+    end
+    @cur = @mf.blocks[0]
+    @cur_ir_name = @fn.blocks[0].name
+    lower_params
+    @fn.blocks.each do |b|
+      next unless reachable[@block_index[b.name]]
+      @cur = @mf.blocks[@block_index[b.name]]
+      @cur_ir_name = b.name
+      b.insts.each do |i|
+        next if i.op == Op::Phi || is_const_op?(i.op)
+        lower_inst(i)
+      end
+    end
+    @mf.frame.outgoing_bytes = @max_outgoing
+    @mf
+  end
+
+  # The parameter assignment of this function, by its convention.
+  def param_assignment(params : Array(IrType), sret_first : Bool) : CallAssignment | String
+    return assign_iyi_call(@layout, @desc, params, sret_first) if @fn.cc == CallConv::Iyi
+    assign_call(@layout, @desc, params, params.size, sret_first)
+  end
+
+  # The result assignment, by the convention the caller and the callee share.
+  def result_assignment(t : IrType, iyi : Bool) : Array(LeafLoc) | String
+    return assign_iyi_return(@layout, @desc, t) if iyi
+    assign_return(@layout, @desc, t)
+  end
+
+  # The argument assignment of a call, by the convention the call uses.
+  def call_assignment(types : Array(IrType), fixed : Int32, sret_first : Bool, iyi : Bool) : CallAssignment | String
+    return assign_iyi_call(@layout, @desc, types, sret_first) if iyi
+    assign_call(@layout, @desc, types, fixed, sret_first)
+  end
+
+  # Whether a call uses the internal convention. A direct call takes its callee's convention; an indirect call
+  # takes the one its call site names.
+  def callee_iyi?(i : Inst) : Bool
+    callee = i.args[0]
+    return callee.as(Function).cc == CallConv::Iyi if callee.is_a?(Function)
+    aux = i.aux
+    aux.is_a?(CallAux) && aux.as(CallAux).cc == CallConv::Iyi
+  end
+
+  # The byval attribute of argument k of a call, if it has one.
+  def byval_attr(cc : CallAux?, k : Int32) : Attribute?
+    return nil unless cc
+    attrs = cc.param_attrs
+    return nil if k >= attrs.size
+    attrs[k].find { |a| a.name == "byval" }
+  end
+
+  # The leaves one argument passes. A byval argument passes the address of a copy made here, in this frame, so the
+  # callee's writes never reach the caller's own object.
+  def arg_leaves(value : Value, attr : Attribute?) : Array(Int32)
+    return materialize(value) unless attr
+    t = attr.type_value
+    unless t
+      fail("a byval attribute names no type")
+      return [gpr]
+    end
+    source = first_leaf(value)
+    slot = @mf.frame.add_slot(@layout.alloc_size(t), @layout.abi_align(t))
+    dst = gpr
+    m = mop(MOp::AddrFrame)
+    m.defs << vop(dst)
+    m.uses << Operand.new(OperandKind::FrameSlot, slot, 0_i64)
+    emit(m)
+    copy_bytes(source, dst, @layout.alloc_size(t))
+    [dst]
+  end
+
+  # Copies n bytes from the address in src to the address in dst, in the widest chunks that fit.
+  def copy_bytes(src : Int32, dst : Int32, n : Int64) : Nil
+    off = 0_i64
+    while off < n
+      left = n - off
+      size = left >= 8_i64 ? 8 : (left >= 4_i64 ? 4 : (left >= 2_i64 ? 2 : 1))
+      v = gpr
+      load = mop(MOp::Ldr)
+      load.size = size * 8
+      load.imm = off
+      load.defs << vop(v)
+      load.uses << vop(src)
+      emit(load)
+      store = mop(MOp::Str)
+      store.size = size * 8
+      store.imm = off
+      store.uses << vop(v)
+      store.uses << vop(dst)
+      emit(store)
+      off = off + size.to_i64
+    end
+  end
+
+  # Parameters arrive by the convention: registers, or the caller's outgoing area above the frame record.
+  def lower_params : Nil
+    # An internal result that travels in memory: the buffer's address arrives in the indirect-result register,
+    # and is taken before anything else can use that register.
+    if @fn.cc == CallConv::Iyi && iyi_result_indirect?(@layout, @desc, @fn.fn_type.return_type)
+      d = gpr
+      @mf.mark_pointer(d)
+      m = mop(MOp::Mov)
+      m.defs << vop(d)
+      m.uses << pop(@desc.indirect_result)
+      emit(m)
+      @iyi_result_vreg = d
+    end
+    params = @fn.params.map { |p| p.type }
+    sret_first = sret_param?(0)
+    assignment = param_assignment(params, sret_first)
+    if assignment.is_a?(String)
+      fail(assignment.as(String))
+      return
+    end
+    call = assignment.as(CallAssignment)
+    i = 0
+    while i < @fn.params.size
+      regs = lookup(@fn.params[i]).as(Array(Int32))
+      locs = call.args[i]
+      k = 0
+      while k < locs.size
+        loc = locs[k]
+        dst = regs[k]
+        if loc.kind == 0
+          m = mop(MOp::Mov)
+          m.defs << vop(dst)
+          m.uses << pop(loc.reg)
+          emit(m)
+        elsif loc.kind == 1
+          m = mop(MOp::FMov)
+          m.fp = true
+          m.defs << vop(dst)
+          m.uses << pop(loc.reg)
+          emit(m)
+        else
+          m = mop(MOp::Ldr)
+          m.size = loc.fp ? loc.bits : 64
+          m.fp = loc.fp
+          m.imm = 16_i64 + loc.offset
+          m.defs << vop(dst)
+          m.uses << pop(@desc.frame_pointer)
+          emit(m)
+        end
+        if loc.leaf_type.int? && loc.leaf_type.bits < 64
+          regs[k] = canon(dst, loc.leaf_type)
+        end
+        k = k + 1
+      end
+      i = i + 1
+    end
+    if sret_first
+      @sret_vreg = lookup(@fn.params[0]).as(Array(Int32))[0]
+    end
+  end
+
+  def sret_param?(index : Int32) : Bool
+    attrs = @fn.param_attrs
+    return false if index >= attrs.size
+    attrs[index].any? { |a| a.name == "sret" }
+  end
+
+  # ---- instructions ------------------------------------------------------------------------------
+
+  def lower_inst(i : Inst) : Nil
+    return if failed?
+    if wide_unsupported?(i)
+      fail("#{i.op} on an i128 is not lowered in this slice")
+      return
+    end
+    op = i.op
+    if op == Op::Alloca
+      lower_alloca(i)
+    elsif op == Op::Load
+      lower_load(i)
+    elsif op == Op::Store
+      lower_store(i)
+    elsif op == Op::Gep
+      lower_gep(i)
+    elsif op == Op::Fence
+      lower_fence(i)
+    elsif op == Op::CmpXchg
+      lower_cmpxchg(i)
+    elsif op == Op::AtomicRmw
+      lower_atomicrmw(i)
+    elsif op == Op::Add || op == Op::Sub || op == Op::Mul || op == Op::And || op == Op::Or || op == Op::Xor || op == Op::Shl || op == Op::LShr || op == Op::AShr || op == Op::SDiv || op == Op::UDiv || op == Op::SRem || op == Op::URem
+      lower_int_binop(i)
+    elsif op == Op::FAdd || op == Op::FSub || op == Op::FMul || op == Op::FDiv
+      lower_fp_binop(i)
+    elsif op == Op::FNeg
+      src = first_leaf(i.args[0])
+      d = @mf.new_vreg(RegClass::Fpr)
+      m = mop(MOp::FNeg)
+      m.fp = true
+      m.size = i.type.bits
+      m.defs << vop(d)
+      m.uses << vop(src)
+      emit(m)
+      bind_result(i, [d])
+    elsif op == Op::ICmp
+      lower_icmp(i)
+    elsif op == Op::FCmp
+      lower_fcmp(i)
+    elsif op == Op::Select
+      lower_select(i)
+    elsif op == Op::Freeze
+      bind_result(i, copy_all(materialize(i.args[0])))
+    elsif op == Op::Trunc || op == Op::SExt || op == Op::ZExt || op == Op::PtrToInt || op == Op::IntToPtr || op == Op::BitCast || op == Op::AddrSpaceCast
+      lower_cast(i)
+    elsif op == Op::FPTrunc || op == Op::FPExt
+      src = first_leaf(i.args[0])
+      d = @mf.new_vreg(RegClass::Fpr)
+      m = mop(MOp::FCvt)
+      m.fp = true
+      m.size = i.type.bits
+      m.defs << vop(d)
+      m.uses << vop(src)
+      emit(m)
+      bind_result(i, [d])
+    elsif op == Op::FPToSI || op == Op::FPToUI
+      lower_fp_to_int(i, op == Op::FPToSI, false)
+    elsif op == Op::SIToFP || op == Op::UIToFP
+      src = first_leaf(i.args[0])
+      if op == Op::UIToFP
+        src = zext(src, i.args[0].type)
+      else
+        src = signed_value(src, i.args[0].type)
+      end
+      d = @mf.new_vreg(RegClass::Fpr)
+      m = mop(op == Op::SIToFP ? MOp::Scvtf : MOp::Ucvtf)
+      m.fp = true
+      m.size = i.type.bits
+      m.defs << vop(d)
+      m.uses << vop(src)
+      emit(m)
+      bind_result(i, [d])
+    elsif op == Op::ExtractValue
+      lower_extract(i)
+    elsif op == Op::InsertValue
+      lower_insert(i)
+    elsif op == Op::Call
+      lower_call(i)
+    elsif op == Op::Invoke
+      lower_call(i)
+      emit_edge_branch(i.targets[0].name)
+    elsif op == Op::Intrinsic
+      lower_intrinsic(i)
+    elsif op == Op::Ret
+      lower_ret(i)
+    elsif op == Op::Br
+      emit_edge_branch(i.targets[0].name)
+    elsif op == Op::CondBr
+      lower_condbr(i)
+    elsif op == Op::Switch
+      lower_switch(i)
+    elsif op == Op::Unreachable
+      m = mop(MOp::Brk)
+      m.imm = 1_i64
+      emit(m)
+    elsif op == Op::ThreadLocalAddr
+      lower_thread_local_addr(i)
+    elsif op == Op::ThreadPointer
+      lower_thread_pointer(i)
+    elsif op == Op::LandingPad || op == Op::Resume || op == Op::CatchSwitch || op == Op::CatchPad || op == Op::CatchRet || op == Op::CleanupPad || op == Op::CleanupRet
+      fail("a reachable exception pad (#{op}) is a named error: iyi emits no exception tables")
+    else
+      fail("#{op} is not lowered in this slice")
+    end
+  end
+
+  def lower_alloca(i : Inst) : Nil
+    t = i.aux.as(GepAux).source_type
+    align = i.alignment
+    align = @layout.abi_align(t) if align == 0
+    slot = @mf.frame.add_slot(@layout.alloc_size(t), align)
+    d = gpr
+    @mf.mark_pointer(d)
+    m = mop(MOp::AddrFrame)
+    m.defs << vop(d)
+    m.uses << Operand.new(OperandKind::FrameSlot, slot, 0_i64)
+    emit(m)
+    bind_result(i, [d])
+  end
+
+  # The memory width of a scalar: at least a byte, and i1 is stored as a byte.
+  def mem_bits(t : IrType) : Int32
+    return 64 if t.pointer?
+    return 8 if t.int? && t.bits == 1
+    t.bits
+  end
+
+  def lower_load(i : Inst) : Nil
+    aux = i.aux.as(MemAux)
+    base = first_leaf(i.args[0])
+    regs = [] of Int32
+    flatten_leaves(@layout, i.type).each do |l|
+      off = l[0]
+      lt = l[1]
+      if acquire_on_load?(aux.ordering)
+        addr = add_imm(base, off)
+        g = gpr
+        m = mop(MOp::Ldar)
+        m.size = mem_bits(lt)
+        m.defs << vop(g)
+        m.uses << vop(addr)
+        emit(m)
+        regs << (lt.float? ? move_bits_to_fp(g, lt.bits) : canon(g, lt))
+      else
+        d = @mf.new_vreg(leaf_class(lt))
+        m = mop(MOp::Ldr)
+        m.size = mem_bits(lt)
+        m.fp = lt.float?
+        m.signed = lt.int? && lt.bits > 1
+        m.imm = off
+        m.defs << vop(d)
+        m.uses << vop(base)
+        emit(m)
+        regs << d
+      end
+    end
+    bind_result(i, regs)
+  end
+
+  def lower_store(i : Inst) : Nil
+    aux = i.aux.as(MemAux)
+    vals = materialize(i.args[0])
+    base = first_leaf(i.args[1])
+    flat = flatten_leaves(@layout, i.args[0].type)
+    k = 0
+    while k < flat.size
+      off = flat[k][0]
+      lt = flat[k][1]
+      v = vals[k]
+      if release_on_store?(aux.ordering)
+        src = lt.float? ? move_bits_to_gp(v, lt.bits) : v
+        m = mop(MOp::Stlr)
+        m.size = mem_bits(lt)
+        m.uses << vop(src)
+        m.uses << vop(add_imm(base, off))
+        emit(m)
+      else
+        m = mop(MOp::Str)
+        m.size = mem_bits(lt)
+        m.fp = lt.float?
+        m.imm = off
+        m.uses << vop(v)
+        m.uses << vop(base)
+        emit(m)
+      end
+      k = k + 1
+    end
+  end
+
+  # getelementptr: the first index scales the source type; each later one walks into the type it indexes.
+  # Constant offsets fold into one add. A dynamic index into an array multiplies by its element size; a
+  # dynamic index into a struct is refused, since a struct field is named by a constant.
+  def lower_gep(i : Inst) : Nil
+    aux = i.aux.as(GepAux)
+    base = first_leaf(i.args[0])
+    plan = plan_gep(@layout, aux.source_type, i.args)
+    if plan.is_a?(String)
+      fail(plan.as(String))
+      return
+    end
+    gep = plan.as(GepPlan)
+    dyn = base
+    gep.terms.each do |t|
+      dyn = scaled_add(dyn, i.args[t[0]], t[1])
+    end
+    bind_result(i, [add_imm(dyn, gep.const_off)])
+  end
+
+  # dyn + index * stride, for a dynamic index value.
+  def scaled_add(dyn : Int32, index : Value, stride : Int64) : Int32
+    scaled = canon(first_leaf(index), index.type)
+    product = binop(MOp::Mul, scaled, const_gpr(stride))
+    binop(MOp::Add, dyn, product)
+  end
+
+  def lower_fence(i : Inst) : Nil
+    aux = i.aux.as(MemAux)
+    return if aux.single_thread
+    m = mop(MOp::Dmb)
+    m.imm = aux.ordering == Ordering::Acquire ? 1_i64 : 0_i64
+    emit(m)
+  end
+
+  def lower_int_binop(i : Inst) : Nil
+    t = i.type
+    if i128?(t)
+      wide_binop(i)
+      return
+    end
+    a = first_leaf(i.args[0])
+    b = first_leaf(i.args[1])
+    op = i.op
+    if op == Op::LShr
+      a = zext(a, t)
+    end
+    if op == Op::UDiv || op == Op::URem
+      a = zext(a, t)
+      b = zext(b, t)
+    end
+    if op == Op::SRem || op == Op::URem
+      q = binop(op == Op::SRem ? MOp::Sdiv : MOp::Udiv, a, b)
+      r = gpr
+      m = mop(MOp::Msub)
+      m.defs << vop(r)
+      m.uses << vop(a)
+      m.uses << vop(q)
+      m.uses << vop(b)
+      emit(m)
+      bind_result(i, [canon(r, t)])
+      return
+    end
+    kind = MOp::Add
+    if op == Op::Sub
+      kind = MOp::Sub
+    elsif op == Op::Mul
+      kind = MOp::Mul
+    elsif op == Op::And
+      kind = MOp::And
+    elsif op == Op::Or
+      kind = MOp::Orr
+    elsif op == Op::Xor
+      kind = MOp::Eor
+    elsif op == Op::Shl
+      kind = MOp::Lsl
+    elsif op == Op::LShr
+      kind = MOp::Lsr
+    elsif op == Op::AShr
+      kind = MOp::Asr
+    elsif op == Op::SDiv
+      kind = MOp::Sdiv
+    elsif op == Op::UDiv
+      kind = MOp::Udiv
+    end
+    bind_result(i, [canon(binop(kind, a, b), t)])
+  end
+
+  # ---- i128: a value is two registers, low then high (SPEC 2.2: i128 values are pairs) -------------------------
+
+  def i128?(t : IrType) : Bool
+    t.int? && t.bits == 128
+  end
+
+  # Operations on i128 not lowered here: integer-to-float conversions, casts
+  # other than extensions and truncation, switches, and atomic accesses.
+  def wide_unsupported?(i : Inst) : Bool
+    op = i.op
+    if op == Op::SIToFP || op == Op::UIToFP
+      return i128?(i.args[0].type)
+    end
+    if op == Op::Trunc || op == Op::ZExt || op == Op::SExt || op == Op::PtrToInt || op == Op::IntToPtr || op == Op::BitCast || op == Op::AddrSpaceCast
+      return true if i128?(i.type) && op != Op::ZExt && op != Op::SExt
+      return i128?(i.args[0].type) && op != Op::Trunc
+    end
+    return i128?(i.args[0].type) if op == Op::Switch
+    return i128?(i.args[1].type) if op == Op::CmpXchg || op == Op::AtomicRmw
+    return i128?(i.type) && i.aux.as(MemAux).ordering != Ordering::NotAtomic if op == Op::Load
+    return i128?(i.args[0].type) && i.aux.as(MemAux).ordering != Ordering::NotAtomic if op == Op::Store
+    false
+  end
+
+  def wide_binop(i : Inst) : Nil
+    a = materialize(i.args[0])
+    b = materialize(i.args[1])
+    op = i.op
+    if op == Op::Add
+      lo = binop(MOp::Adds, a[0], b[0])
+      bind_result(i, [lo, binop(MOp::Adc, a[1], b[1])])
+    elsif op == Op::Sub
+      lo = binop(MOp::Subs, a[0], b[0])
+      bind_result(i, [lo, binop(MOp::Sbc, a[1], b[1])])
+    elsif op == Op::Mul
+      bind_result(i, wide_mul(a, b))
+    elsif op == Op::And
+      bind_result(i, [binop(MOp::And, a[0], b[0]), binop(MOp::And, a[1], b[1])])
+    elsif op == Op::Or
+      bind_result(i, [binop(MOp::Orr, a[0], b[0]), binop(MOp::Orr, a[1], b[1])])
+    elsif op == Op::Xor
+      bind_result(i, [binop(MOp::Eor, a[0], b[0]), binop(MOp::Eor, a[1], b[1])])
+    elsif op == Op::Shl || op == Op::LShr || op == Op::AShr
+      bind_result(i, wide_shift(op, a, b[0]))
+    else
+      bind_result(i, wide_divide(op, a, b))
+    end
+  end
+
+  # The low 128 bits of a product: the low halves give the low word, and the cross products of the low halves
+  # give the high word. Products of the high halves lie wholly above 2^128 and drop out.
+  def wide_mul(a : Array(Int32), b : Array(Int32)) : Array(Int32)
+    lo = binop(MOp::Mul, a[0], b[0])
+    h0 = binop(MOp::Umulh, a[0], b[0])
+    t1 = binop(MOp::Mul, a[0], b[1])
+    t2 = binop(MOp::Mul, a[1], b[0])
+    [lo, binop(MOp::Add, binop(MOp::Add, h0, t1), t2)]
+  end
+
+  # The full unsigned 128 x 128 product's low 128 bits and an overflow flag (0 or 1): [lo, hi, overflow]. Overflow when
+  # any partial product lies at or above 2^128, or the carries out of the middle word are nonzero.
+  def umul_wide(a : Array(Int32), b : Array(Int32)) : Array(Int32)
+    lo = binop(MOp::Mul, a[0], b[0])
+    h0 = binop(MOp::Umulh, a[0], b[0])
+    l1 = binop(MOp::Mul, a[0], b[1])
+    h1 = binop(MOp::Umulh, a[0], b[1])
+    l2 = binop(MOp::Mul, a[1], b[0])
+    h2 = binop(MOp::Umulh, a[1], b[0])
+    l3 = binop(MOp::Mul, a[1], b[1])
+    h3 = binop(MOp::Umulh, a[1], b[1])
+    s1 = binop(MOp::Adds, h0, l1)
+    c1 = set_flag(cond_cs)
+    s2 = binop(MOp::Adds, s1, l2)
+    c2 = set_flag(cond_cs)
+    wide = binop(MOp::Orr, binop(MOp::Orr, l3, h3), binop(MOp::Orr, binop(MOp::Orr, h1, h2), binop(MOp::Orr, c1, c2)))
+    compare_zero(wide)
+    [lo, s2, set_flag(cond_ne)]
+  end
+
+  # |x| as a 128-bit magnitude, computed as (x ^ m) - m with m the sign mask: [lo, hi, m].
+  def abs_wide(x : Array(Int32)) : Array(Int32)
+    m = binop(MOp::Asr, x[1], const_gpr(63_i64))
+    x0 = binop(MOp::Eor, x[0], m)
+    x1 = binop(MOp::Eor, x[1], m)
+    lo = binop(MOp::Subs, x0, m)
+    [lo, binop(MOp::Sbc, x1, m), m]
+  end
+
+  # Signed 128-bit multiply with overflow: [lo, hi, overflow]. The magnitudes multiply unsigned; the product is negated
+  # when the signs differ. It overflows when the magnitude product overflows, or when bit 127 is set and the value
+  # is not exactly -2^127.
+  def signed_mul_overflow(a : Array(Int32), b : Array(Int32)) : Array(Int32)
+    pa = abs_wide(a)
+    pb = abs_wide(b)
+    mag = umul_wide([pa[0], pa[1]], [pb[0], pb[1]])
+    neg_mask = binop(MOp::Eor, pa[2], pb[2])
+    neg = binop(MOp::Lsr, neg_mask, const_gpr(63_i64))
+    r0 = binop(MOp::Eor, mag[0], neg_mask)
+    r1 = binop(MOp::Eor, mag[1], neg_mask)
+    lo = binop(MOp::Subs, r0, neg_mask)
+    hi = binop(MOp::Sbc, r1, neg_mask)
+    bit = binop(MOp::Lsr, mag[1], const_gpr(63_i64))
+    min_hi = binop(MOp::Lsl, const_gpr(1_i64), const_gpr(63_i64))
+    compare_zero(mag[0])
+    e_lo = set_flag(cond_eq)
+    compare(mag[1], min_hi)
+    e_hi = set_flag(cond_eq)
+    exact = binop(MOp::And, binop(MOp::And, e_lo, e_hi), neg)
+    bad = binop(MOp::And, bit, binop(MOp::Eor, exact, const_gpr(1_i64)))
+    [lo, hi, binop(MOp::Orr, mag[2], bad)]
+  end
+
+  # A 128-bit shift by the low half of the amount. The halves shift separately; an amount of 64 or more moves one half
+  # into the other and fills the vacated half with zero or the sign. Each half comes from a conditional select on
+  # whether the amount exceeds 63, with the shifts masked to 0..63 and the carried bits taken as a two-step shift so a
+  # zero amount moves nothing.
+  def wide_shift(op : Op, a : Array(Int32), s : Int32) : Array(Int32)
+    amt = binop(MOp::And, s, const_gpr(63_i64))
+    inv = binop(MOp::Sub, const_gpr(63_i64), amt)
+    one = const_gpr(1_i64)
+    zero = const_gpr(0_i64)
+    if op == Op::Shl
+      part = binop(MOp::Lsl, a[0], amt)
+      carry = binop(MOp::Lsr, binop(MOp::Lsr, a[0], one), inv)
+      hi_small = binop(MOp::Orr, binop(MOp::Lsl, a[1], amt), carry)
+      compare(s, const_gpr(63_i64))
+      return [csel_cond(zero, part, cond_hi), csel_cond(part, hi_small, cond_hi)]
+    end
+    if op == Op::LShr
+      part = binop(MOp::Lsr, a[1], amt)
+      carry = binop(MOp::Lsl, binop(MOp::Lsl, a[1], one), inv)
+      lo_small = binop(MOp::Orr, binop(MOp::Lsr, a[0], amt), carry)
+      compare(s, const_gpr(63_i64))
+      return [csel_cond(part, lo_small, cond_hi), csel_cond(zero, part, cond_hi)]
+    end
+    part = binop(MOp::Asr, a[1], amt)
+    carry = binop(MOp::Lsl, binop(MOp::Lsl, a[1], one), inv)
+    lo_small = binop(MOp::Orr, binop(MOp::Lsr, a[0], amt), carry)
+    sign = binop(MOp::Asr, a[1], const_gpr(63_i64))
+    compare(s, const_gpr(63_i64))
+    [csel_cond(part, lo_small, cond_hi), csel_cond(sign, part, cond_hi)]
+  end
+
+  # Division and remainder: the runtime helpers take two 128-bit values in x0..x3 and return one in x0:x1.
+  def wide_divide(op : Op, a : Array(Int32), b : Array(Int32)) : Array(Int32)
+    name = "__iyi_native_divti3"
+    if op == Op::UDiv
+      name = "__iyi_native_udivti3"
+    elsif op == Op::SRem
+      name = "__iyi_native_modti3"
+    elsif op == Op::URem
+      name = "__iyi_native_umodti3"
+    end
+    @mf.frame.has_calls = true
+    regs = [a[0], a[1], b[0], b[1]]
+    k = 0
+    while k < 4
+      m = mop(MOp::Mov)
+      m.defs << pop(k)
+      m.uses << vop(regs[k])
+      emit(m)
+      k = k + 1
+    end
+    call = mop(MOp::Bl)
+    call.sym = symbol_index(name)
+    call.reloc = RelocKind::A64Call26
+    call.call = true
+    call.clobbers = @desc.caller_saved
+    emit(call)
+    lo = gpr
+    m0 = mop(MOp::Mov)
+    m0.defs << vop(lo)
+    m0.uses << pop(0)
+    emit(m0)
+    hi = gpr
+    m1 = mop(MOp::Mov)
+    m1.defs << vop(hi)
+    m1.uses << pop(1)
+    emit(m1)
+    [lo, hi]
+  end
+
+  # An i128 comparison. Equality compares the xor of the halves with zero. An ordering compares the low halves, then
+  # subtracts the high halves with that borrow, so the flags describe the whole 128-bit difference. The two operands
+  # swap for the predicates that read the first operand as the smaller.
+  def lower_icmp128(i : Inst) : Nil
+    ordinal = i.aux_int
+    a = materialize(i.args[0])
+    b = materialize(i.args[1])
+    if ordinal == 0_i64 || ordinal == 1_i64
+      diff = binop(MOp::Orr, binop(MOp::Eor, a[0], b[0]), binop(MOp::Eor, a[1], b[1]))
+      compare_zero(diff)
+      bind_result(i, [set_flag(int_cond(ordinal))])
+      return
+    end
+    x = a
+    y = b
+    if ordinal == 2_i64 || ordinal == 5_i64 || ordinal == 6_i64 || ordinal == 9_i64
+      x = b
+      y = a
+    end
+    cond = cond_lt
+    if ordinal == 2_i64 || ordinal == 4_i64
+      cond = cond_cc
+    elsif ordinal == 3_i64 || ordinal == 5_i64
+      cond = cond_cs
+    elsif ordinal == 7_i64 || ordinal == 9_i64
+      cond = cond_ge
+    end
+    compare(x[0], y[0])
+    binop(MOp::Sbcs, x[1], y[1])
+    bind_result(i, [set_flag(cond)])
+  end
+
+  # The overflow family at 128 bits: the value's two halves and the flag. Add and subtract chain the carry or borrow
+  # through the flag-setting pair; multiply takes the unsigned or signed form above.
+  def lower_overflow128(i : Inst, id : IntrinsicId) : Nil
+    form = overflow_form(id)
+    a = materialize(i.args[0])
+    b = materialize(i.args[1])
+    if form.mul
+      if form.signed
+        bind_result(i, signed_mul_overflow(a, b))
+      else
+        bind_result(i, umul_wide(a, b))
+      end
+      return
+    end
+    if form.sub
+      lo = binop(MOp::Subs, a[0], b[0])
+      hi = binop(MOp::Sbcs, a[1], b[1])
+      cond = form.signed ? cond_vs : cond_cc
+      bind_result(i, [lo, hi, set_flag(cond)])
+      return
+    end
+    lo = binop(MOp::Adds, a[0], b[0])
+    hi = binop(MOp::Adcs, a[1], b[1])
+    cond = form.signed ? cond_vs : cond_cs
+    bind_result(i, [lo, hi, set_flag(cond)])
+  end
+
+  def lower_fp_binop(i : Inst) : Nil
+    a = first_leaf(i.args[0])
+    b = first_leaf(i.args[1])
+    kind = MOp::FAdd
+    if i.op == Op::FSub
+      kind = MOp::FSub
+    elsif i.op == Op::FMul
+      kind = MOp::FMul
+    elsif i.op == Op::FDiv
+      kind = MOp::FDiv
+    end
+    bind_result(i, [fbinop(kind, a, b, i.type.bits)])
+  end
+
+  def lower_icmp(i : Inst) : Nil
+    if i128?(i.args[0].type)
+      lower_icmp128(i)
+      return
+    end
+    ordinal = i.aux_int
+    t = i.args[0].type
+    a = first_leaf(i.args[0])
+    b = first_leaf(i.args[1])
+    if icmp_unsigned?(ordinal)
+      a = zext(a, t)
+      b = zext(b, t)
+    elsif ordinal >= 6_i64
+      a = signed_value(a, t)
+      b = signed_value(b, t)
+    end
+    compare(a, b)
+    bind_result(i, [set_flag(int_cond(ordinal))])
+  end
+
+  # Floating-point predicates by ordinal, in the order inst.iyi declares them:
+  # FALSE OEQ OGT OGE OLT OLE ONE ORD UEQ UGT UGE ULT ULE UNE UNO TRUE.
+  def lower_fcmp(i : Inst) : Nil
+    ordinal = i.aux_int
+    if ordinal == 0_i64
+      bind_result(i, [const_gpr(0_i64)])
+      return
+    end
+    if ordinal == 15_i64
+      bind_result(i, [const_gpr(1_i64)])
+      return
+    end
+    bits = i.args[0].type.bits
+    a = first_leaf(i.args[0])
+    b = first_leaf(i.args[1])
+    cmp = mop(MOp::FCmp)
+    cmp.fp = true
+    cmp.size = bits
+    cmp.uses << vop(a)
+    cmp.uses << vop(b)
+    emit(cmp)
+    if ordinal == 6_i64
+      # ONE: less or greater, both false when unordered.
+      bind_result(i, [binop(MOp::Orr, set_flag(cond_mi), set_flag(cond_gt))])
+      return
+    end
+    if ordinal == 8_i64
+      # UEQ: equal or unordered.
+      bind_result(i, [binop(MOp::Orr, set_flag(cond_eq), set_flag(cond_vs))])
+      return
+    end
+    cond = cond_eq
+    if ordinal == 2_i64
+      cond = cond_gt
+    elsif ordinal == 3_i64
+      cond = cond_ge
+    elsif ordinal == 4_i64
+      cond = cond_mi
+    elsif ordinal == 5_i64
+      cond = cond_ls
+    elsif ordinal == 7_i64
+      cond = cond_vc
+    elsif ordinal == 9_i64
+      cond = cond_hi
+    elsif ordinal == 10_i64
+      cond = cond_cs
+    elsif ordinal == 11_i64
+      cond = cond_lt
+    elsif ordinal == 12_i64
+      cond = cond_le
+    elsif ordinal == 13_i64
+      cond = cond_ne
+    elsif ordinal == 14_i64
+      cond = cond_vs
+    end
+    bind_result(i, [set_flag(cond)])
+  end
+
+  def csel(a : Int32, b : Int32) : Int32
+    d = gpr
+    m = mop(MOp::Csel)
+    m.cond = cond_ne
+    m.defs << vop(d)
+    m.uses << vop(a)
+    m.uses << vop(b)
+    emit(m)
+    d
+  end
+
+  def lower_select(i : Inst) : Nil
+    c = first_leaf(i.args[0])
+    tv = materialize(i.args[1])
+    fv = materialize(i.args[2])
+    compare_zero(c)
+    regs = [] of Int32
+    flat = flatten_leaves(@layout, i.type)
+    k = 0
+    while k < flat.size
+      lt = flat[k][1]
+      if lt.float?
+        regs << move_bits_to_fp(csel(move_bits_to_gp(tv[k], lt.bits), move_bits_to_gp(fv[k], lt.bits)), lt.bits)
+      else
+        regs << csel(tv[k], fv[k])
+      end
+      k = k + 1
+    end
+    bind_result(i, regs)
+  end
+
+  def lower_cast(i : Inst) : Nil
+    op = i.op
+    src_type = i.args[0].type
+    src = first_leaf(i.args[0])
+    t = i.type
+    if i128?(t) || long_int?(t)
+      # The low word, then the words above it: zero for a zero extension, the sign for a sign extension.
+      words = [op == Op::ZExt ? zext(src, src_type) : sext64(src, src_type)] of Int32
+      k = 1
+      while k < t.bits // 64
+        words << (op == Op::ZExt ? const_gpr(0_i64) : binop(MOp::Asr, words[0], const_gpr(63_i64)))
+        k = k + 1
+      end
+      bind_result(i, words)
+      return
+    end
+    if op == Op::Trunc
+      bind_result(i, [canon(src, t)])
+    elsif op == Op::ZExt
+      bind_result(i, [canon(zext(src, src_type), t)])
+    elsif op == Op::SExt
+      bind_result(i, [canon(sext64(src, src_type), t)])
+    elsif op == Op::PtrToInt
+      bind_result(i, [canon(src, t)])
+    elsif op == Op::BitCast && src_type.float? && t.int?
+      bind_result(i, [canon(move_bits_to_gp(src, src_type.bits), t)])
+    elsif op == Op::BitCast && src_type.int? && t.float?
+      bind_result(i, [move_bits_to_fp(canon(src, src_type), t.bits)])
+    else
+      bind_result(i, [src])
+    end
+  end
+
+  # The sign-extended 64-bit form of a value of type t. Canonical values already are, except i1, whose 1 widens to -1.
+  def sext64(v : Int32, t : IrType) : Int32
+    return v unless t.int? && t.bits == 1
+    d = gpr
+    m = mop(MOp::Sbfm)
+    m.imm = 1_i64
+    m.defs << vop(d)
+    m.uses << vop(v)
+    emit(m)
+    d
+  end
+
+  # The index of the first leaf of field or element `index` of an aggregate type.
+  def leaf_offset(t : IrType, index : Int32) : Int32
+    if t.struct?
+      total = 0
+      fields = t.struct_element_types
+      k = 0
+      while k < index
+        total = total + leaf_count(fields[k])
+        k = k + 1
+      end
+      return total
+    end
+    index * leaf_count(t.element_type)
+  end
+
+  def leaf_count(t : IrType) : Int32
+    return 0 if t.void?
+    flatten_leaves(@layout, t).size
+  end
+
+  def lower_extract(i : Inst) : Nil
+    src = materialize(i.args[0])
+    start = leaf_offset(i.args[0].type, i.aux_int.to_i32)
+    count = leaf_count(i.type)
+    bind_result(i, copy_all(src[start, count]))
+  end
+
+  def lower_insert(i : Inst) : Nil
+    agg = materialize(i.args[0])
+    val = materialize(i.args[1])
+    start = leaf_offset(i.args[0].type, i.aux_int.to_i32)
+    acc = agg.dup
+    k = 0
+    while k < val.size
+      acc[start + k] = val[k]
+      k = k + 1
+    end
+    bind_result(i, copy_all(acc))
+  end
+
+  # ---- atomics: load-exclusive / store-exclusive loops, as LLVM's AArch64 backend emits them at -O0 ----
+
+  def lower_cmpxchg(i : Inst) : Nil
+    aux = i.aux.as(MemAux)
+    ptr = first_leaf(i.args[0])
+    expected = first_leaf(i.args[1])
+    newv = first_leaf(i.args[2])
+    value_type = i.args[1].type
+    bits = mem_bits(value_type)
+    old = gpr
+    success = gpr
+    loop_block = new_block("cmpxchg.loop")
+    fail_block = new_block("cmpxchg.fail")
+    done_block = new_block("cmpxchg.done")
+    @cur.insts << branch(loop_block.index)
+    @cur = loop_block
+    load = mop(rmw_load_op(acquire_on_load?(aux.ordering) || acquire_on_load?(aux.failure_ordering)))
+    load.size = bits
+    load.defs << vop(old)
+    load.uses << vop(ptr)
+    emit(load)
+    compare(canon(old, value_type), expected)
+    miss = mop(MOp::Bcond)
+    miss.cond = cond_ne
+    miss.target = fail_block.index
+    emit(miss)
+    status = gpr
+    store = mop(rmw_store_op(release_on_store?(aux.ordering)))
+    store.size = bits
+    store.defs << vop(status)
+    store.uses << vop(newv)
+    store.uses << vop(ptr)
+    emit(store)
+    compare_zero(status)
+    retry = mop(MOp::Bcond)
+    retry.cond = cond_ne
+    retry.target = loop_block.index
+    emit(retry)
+    emit(move_imm_inst(success, 1_i64))
+    emit(branch(done_block.index))
+    @cur = fail_block
+    emit(move_imm_inst(success, 0_i64))
+    emit(branch(done_block.index))
+    @cur = done_block
+    bind_result(i, [canon(old, value_type), success])
+  end
+
+  # The exclusive load and store of a read-modify-write, by ordering (LLVM's AArch64 mapping): the load takes the
+  # acquire form and the store the release form only when the ordering asks for them. Monotonic selects the plain pair.
+  def rmw_load_op(acquire : Bool) : MOp
+    acquire ? MOp::Ldaxr : MOp::Ldxr
+  end
+
+  def rmw_store_op(release : Bool) : MOp
+    release ? MOp::Stlxr : MOp::Stxr
+  end
+
+  def move_imm_inst(dst : Int32, value : Int64) : MInst
+    m = mop(MOp::MovImm)
+    m.defs << vop(dst)
+    m.imm = value
+    m
+  end
+
+  # dst <- cond ? a : b, on the flags the last compare set.
+  def csel_cond(a : Int32, b : Int32, cond : Int32) : Int32
+    d = gpr
+    m = mop(MOp::Csel)
+    m.cond = cond
+    m.defs << vop(d)
+    m.uses << vop(a)
+    m.uses << vop(b)
+    emit(m)
+    d
+  end
+
+  def lower_atomicrmw(i : Inst) : Nil
+    aux = i.aux.as(MemAux)
+    ptr = first_leaf(i.args[0])
+    value = first_leaf(i.args[1])
+    t = i.args[1].type
+    bits = mem_bits(t)
+    old = gpr
+    loop_block = new_block("atomicrmw.loop")
+    done_block = new_block("atomicrmw.done")
+    @cur.insts << branch(loop_block.index)
+    @cur = loop_block
+    load = mop(rmw_load_op(acquire_on_load?(aux.ordering)))
+    load.size = bits
+    load.defs << vop(old)
+    load.uses << vop(ptr)
+    emit(load)
+    rmw = aux.rmw_op
+    newv = value
+    if rmw == "add"
+      newv = binop(MOp::Add, old, value)
+    elsif rmw == "sub"
+      newv = binop(MOp::Sub, old, value)
+    elsif rmw == "and"
+      newv = binop(MOp::And, old, value)
+    elsif rmw == "or"
+      newv = binop(MOp::Orr, old, value)
+    elsif rmw == "xor"
+      newv = binop(MOp::Eor, old, value)
+    elsif rmw == "xchg"
+      newv = value
+    elsif rmw == "nand"
+      ones = binop(MOp::Sub, const_gpr(0_i64), const_gpr(1_i64))
+      newv = binop(MOp::Eor, binop(MOp::And, old, value), ones)
+    elsif rmw == "max" || rmw == "min" || rmw == "umax" || rmw == "umin"
+      signed = rmw == "max" || rmw == "min"
+      keep = rmw == "max" || rmw == "umax"
+      lhs = signed ? canon(old, t) : zext(old, t)
+      rhs = signed ? canon(value, t) : zext(value, t)
+      compare(lhs, rhs)
+      cond = signed ? cond_lt : cond_cc
+      if keep
+        cond = signed ? cond_gt : cond_hi
+      end
+      newv = csel_cond(old, value, cond)
+    else
+      fail("atomicrmw #{rmw} is not lowered in this slice")
+      return
+    end
+    status = gpr
+    store = mop(rmw_store_op(release_on_store?(aux.ordering)))
+    store.size = bits
+    store.defs << vop(status)
+    store.uses << vop(newv)
+    store.uses << vop(ptr)
+    emit(store)
+    compare_zero(status)
+    retry = mop(MOp::Bcond)
+    retry.cond = cond_ne
+    retry.target = loop_block.index
+    emit(retry)
+    emit(branch(done_block.index))
+    @cur = done_block
+    bind_result(i, [canon(old, t)])
+  end
+
+  # ---- control flow and phi copies ---------------------------------------------------------------
+
+  # The phi nodes at the start of the IR block named `name`.
+  def phis_of(name : String) : Array(Inst)
+    acc = [] of Inst
+    @fn.blocks[@block_index[name]].insts.each do |i|
+      acc << i if i.op == Op::Phi
+    end
+    acc
+  end
+
+  # The MIR block a branch from `pred` to IR block `target` lands in. When the target has phi nodes the copies
+  # go into the current block (an unconditional branch) or into a fresh edge block (a conditional branch, so a
+  # copy never runs on the path that does not take the edge).
+  def edge_block(pred : String, target : String, split : Bool) : Int32
+    phis = phis_of(target)
+    dest = @block_index[target]
+    return dest if phis.empty?
+    unless split
+      copy_phis(pred, phis)
+      return dest
+    end
+    edge = new_block("edge.#{@edge_count}")
+    @edge_count = @edge_count + 1
+    saved = @cur
+    @cur = edge
+    copy_phis(pred, phis)
+    emit(branch(dest))
+    @cur = saved
+    edge.index
+  end
+
+  def copy_phis(pred : String, phis : Array(Inst)) : Nil
+    incoming = [] of Array(Int32)
+    phis.each do |p|
+      found = -1
+      k = 0
+      while k < p.targets.size
+        found = k if p.targets[k].name == pred
+        k = k + 1
+      end
+      if found < 0
+        fail("phi #{p.name} has no incoming value from #{pred}")
+        return
+      end
+      incoming << copy_all(materialize(p.args[found]))
+    end
+    k = 0
+    while k < phis.size
+      dest = lookup(phis[k])
+      unless dest
+        fail("no register for phi #{phis[k].name}")
+        return
+      end
+      j = 0
+      while j < dest.size
+        cls = @mf.vreg_classes[dest[j]]
+        m = mop(cls == RegClass::Fpr ? MOp::FMov : MOp::Mov)
+        m.fp = cls == RegClass::Fpr
+        m.defs << vop(dest[j])
+        m.uses << vop(incoming[k][j])
+        emit(m)
+        j = j + 1
+      end
+      k = k + 1
+    end
+  end
+
+  def emit_edge_branch(target : String) : Nil
+    dest = edge_block(@cur_ir_name, target, false)
+    emit(branch(dest))
+  end
+
+  def lower_condbr(i : Inst) : Nil
+    c = first_leaf(i.args[0])
+    compare_zero(c)
+    t_dest = edge_block(@cur_ir_name, i.targets[0].name, true)
+    f_dest = edge_block(@cur_ir_name, i.targets[1].name, true)
+    bc = mop(MOp::Bcond)
+    bc.cond = cond_ne
+    bc.target = t_dest
+    emit(bc)
+    emit(branch(f_dest))
+  end
+
+  # A switch is a jump table when switch_table_plan takes it (lower_jump_table). Otherwise it is a compare chain:
+  # each case compares the value and branches, and the default follows.
+  def lower_switch(i : Inst) : Nil
+    keys = [] of Int64
+    bits = i.args[0].type.bits
+    k = 0
+    while k < i.cases.size
+      key = i.cases[k]
+      if bits > 1 && bits < 64
+        span = 1_i64 << bits
+        key = key & (span - 1_i64)
+        key = key - span if key >= span // 2_i64
+      end
+      keys << key
+      k = k + 1
+    end
+    plan = switch_table_plan(keys)
+    unless plan.nil?
+      lower_jump_table(i, plan.as(SwitchTable), keys)
+      return
+    end
+    v = first_leaf(i.args[0])
+    k = 0
+    while k < i.cases.size
+      key = const_gpr(keys[k])
+      compare(v, key)
+      dest = edge_block(@cur_ir_name, i.targets[k + 1].name, true)
+      bc = mop(MOp::Bcond)
+      bc.cond = cond_eq
+      bc.target = dest
+      emit(bc)
+      k = k + 1
+    end
+    emit_edge_branch(i.targets[0].name)
+  end
+
+  # A switch as a jump table (slice C3e, jump_table.iyi): the value less the lowest case indexes a table of block
+  # addresses. The unsigned compare sends a value outside the table to the default, and a hole in the range is an
+  # entry for the default. Each entry is an edge of the switch, so phi copies land on the path that takes it.
+  def lower_jump_table(i : Inst, plan : SwitchTable, keys : Array(Int64)) : Nil
+    v = first_leaf(i.args[0])
+    default_dest = edge_block(@cur_ir_name, i.targets[0].name, true)
+    entries = [] of Int32
+    filled = [] of Bool
+    k = 0
+    while k < plan.span
+      entries << default_dest
+      filled << false
+      k = k + 1
+    end
+    k = 0
+    while k < i.cases.size
+      slot = (keys[k] - plan.low).to_i32
+      unless filled[slot]
+        filled[slot] = true
+        entries[slot] = edge_block(@cur_ir_name, i.targets[k + 1].name, true)
+      end
+      k = k + 1
+    end
+    index = binop(MOp::Sub, v, const_gpr(plan.low))
+    compare(index, const_gpr(plan.span - 1_i64))
+    range_check = mop(MOp::Bcond)
+    range_check.cond = cond_hi
+    range_check.target = default_dest
+    emit(range_check)
+    table = @mf.jump_tables.size
+    @mf.jump_tables << JumpTable.new(plan.low, entries)
+    base = gpr
+    addr = mop(MOp::AddrTable)
+    addr.defs << vop(base)
+    addr.table = table
+    emit(addr)
+    target = gpr
+    load = mop(MOp::LdrIdx)
+    load.defs << vop(target)
+    load.uses << vop(base)
+    load.uses << vop(index)
+    emit(load)
+    branch_table = mop(MOp::BrTable)
+    branch_table.uses << vop(target)
+    branch_table.table = table
+    branch_table.terminator = true
+    emit(branch_table)
+  end
+
+  def lower_ret(i : Inst) : Nil
+    ret_type = @fn.fn_type.return_type
+    if @iyi_result_vreg >= 0 && i.args.size == 1
+      # The result travels in memory: each leaf is written at its offset in the caller's buffer.
+      vals = materialize(i.args[0])
+      flat = flatten_leaves(@layout, ret_type)
+      k = 0
+      while k < flat.size
+        lt = flat[k][1]
+        m = mop(MOp::Str)
+        m.size = mem_bits(lt)
+        m.fp = lt.float?
+        m.imm = flat[k][0]
+        m.uses << vop(vals[k])
+        m.uses << vop(@iyi_result_vreg)
+        emit(m)
+        k = k + 1
+      end
+    elsif !ret_type.void? && i.args.size == 1
+      assigned = result_assignment(ret_type, @fn.cc == CallConv::Iyi)
+      if assigned.is_a?(String)
+        fail(assigned.as(String))
+        return
+      end
+      vals = materialize(i.args[0])
+      locs = assigned.as(Array(LeafLoc))
+      k = 0
+      while k < locs.size
+        loc = locs[k]
+        m = mop(loc.kind == 1 ? MOp::FMov : MOp::Mov)
+        m.fp = loc.kind == 1
+        m.defs << pop(loc.reg)
+        m.uses << vop(vals[k])
+        emit(m)
+        k = k + 1
+      end
+    end
+    r = mop(MOp::Ret)
+    r.terminator = true
+    emit(r)
+  end
+
+  # ---- the naked function and inline asm ----------------------------------------------------------
+
+  # Whether a call's callee is an inline asm body rather than a function or a value.
+  def asm_call?(i : Inst) : Bool
+    return false unless i.op == Op::Call && i.args.size > 0
+    callee = i.args[0]
+    callee.is_a?(Inst) && callee.as(Inst).aux.is_a?(AsmAux)
+  end
+
+  # Whether the function carries the naked attribute: its body is an asm template and nothing else.
+  def naked_fn? : Bool
+    @fn.attrs.any? { |a| a.name == "naked" }
+  end
+
+  # Naked bodies are only the inline asm: no compiler-generated prologue,
+  # epilogue or return may execute after the template.
+  def run_naked : MFunction
+    @mf.naked = true
+    @fn.blocks.each do |b|
+      @block_index[b.name] = @mf.blocks.size
+      new_block(b.name)
+    end
+    if @fn.blocks.size != 1
+      fail("a naked function is one block holding one inline asm call")
+      return @mf
+    end
+    @cur = @mf.blocks[0]
+    @cur_ir_name = @fn.blocks[0].name
+    @fn.blocks[0].insts.each do |i|
+      next if i.op == Op::Unreachable
+      if i.op == Op::Ret
+        next
+      end
+      unless asm_call?(i)
+        fail("a naked function holds one inline asm call and nothing else; #{i.op} is not allowed")
+        return @mf
+      end
+      lower_asm(i, i.args[0].as(Inst).aux.as(AsmAux))
+    end
+    @mf
+  end
+
+  # The symbol constraint `s`, for the one template the prelude writes with it: the address of a thread-local
+  # global's TLV descriptor on darwin (`adrp $0, ${1:c}@TLVPPAGE` then `ldr $0, [$0, ${1:c}@TLVPPAGEOFF]`, with
+  # constraints `=r,s`). That pair is what LoadTlvp emits, with the same two relocations. Any other template with
+  # a symbol operand is refused by name.
+  def lower_asm_tlv_descriptor(i : Inst, aux : AsmAux) : Nil
+    # The template with each run of blanks, tabs and line ends as one blank.
+    words = String.build do |io|
+      gap = false
+      k = 0
+      while k < aux.template.bytesize
+        b = aux.template.byte_at(k)
+        if b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8
+          gap = true
+        else
+          io << ' ' if gap && io.bytesize > 0
+          gap = false
+          io << aux.template[k, 1]
+        end
+        k = k + 1
+      end
+    end
+    unless words == "adrp $0, ${1:c}@TLVPPAGE ldr $0, [$0, ${1:c}@TLVPPAGEOFF]"
+      fail("inline asm with a symbol operand ('s') is lowered only for the TLV descriptor load; this template is not it")
+      return
+    end
+    unless @darwin
+      fail("the TLV descriptor load is a darwin form")
+      return
+    end
+    target = i.args.size == 2 ? i.args[1] : nil
+    unless target.is_a?(Global) && target.as(Global).tls != TlsModel::None
+      fail("the TLV descriptor load names a value that is not a thread-local global")
+      return
+    end
+    desc = gpr
+    m = mop(MOp::LoadTlvp)
+    m.sym = symbol_index(target.as(Global).name)
+    m.defs << vop(desc)
+    emit(m)
+    bind_result(i, [desc])
+  end
+
+  # The constraint items of an asm call, split at their commas. An empty constraint string has none.
+  def asm_items(text : String) : Array(String)
+    acc = [] of String
+    return acc if text.bytesize == 0
+    start = 0
+    k = 0
+    while k <= text.bytesize
+      if k == text.bytesize || text.byte_at(k).to_i32 == 44
+        acc << text[start, k - start].strip
+        start = k + 1
+      end
+      k = k + 1
+    end
+    acc
+  end
+
+  # The register an asm operand names: x0..x30 and sp are general purpose, d0..d31 floating-point. -1 for any other.
+  def asm_register(name : String) : Int32
+    return 31 if name == "sp"
+    return -1 if name.bytesize < 2
+    letter = name.byte_at(0).to_i32
+    digits = name[1, name.bytesize - 1]
+    return -1 unless digits?(digits)
+    n = digits.to_i
+    return n if letter == 120 && n <= 30
+    return 32 + n if letter == 100 && n <= 31
+    -1
+  end
+
+  # A callee-saved register an asm body writes must be saved by a function that has a prologue.
+  def note_callee_saved(reg : Int32) : Nil
+    return unless callee_saved_gprs.includes?(reg)
+    @mf.frame.callee_saved << reg unless @mf.frame.callee_saved.includes?(reg)
+  end
+
+  # A copy between two operands, in the file `fp` names.
+  def asm_copy(dst : Operand, src : Operand, fp : Bool) : MInst
+    m = mop(fp ? MOp::FMov : MOp::Mov)
+    m.fp = fp
+    m.defs << dst
+    m.uses << src
+    m
+  end
+
+  # One inline asm call (SPEC 2.2 step 3). The constraint string names the operands: outputs (`=`), inputs, and
+  # clobbers (`~{name}`). An `r` or `x` operand takes a fresh virtual register of its class, which regalloc places in
+  # any free register of that class. A `{reg}` operand is a physical register: an input is moved into it before the
+  # template, and an output is moved out of it after. A tied input is moved into its output's register before the
+  # template. A register clobber is a physical definition with no value, so nothing live across the template stays in
+  # that register. `memory` and `cc` add no code: the selector keeps no memory value in a register across an
+  # instruction and emits every IR load and store in program order, so each load after the template reads what the
+  # template wrote. The template is checked here against the names its operands will carry; the encoder assembles it
+  # after allocation.
+  def lower_asm(i : Inst, aux : AsmAux) : Nil
+    return if failed?
+    if aux.unwind
+      fail("inline asm that may unwind is not lowered: iyi has no exceptions, so no call unwinds")
+      return
+    end
+    if aux.dialect == AsmDialect::Intel
+      fail("the Intel asm dialect is not lowered in this slice")
+      return
+    end
+    if aux.constraints == "=r,s"
+      lower_asm_tlv_descriptor(i, aux)
+      return
+    end
+    items = asm_items(aux.constraints)
+    out_count = 0
+    items.each do |item|
+      out_count = out_count + 1 if item.starts_with?("=")
+    end
+    ops = [] of OperandConstraint
+    clobbers = [] of String
+    items.each do |item|
+      if item.starts_with?("~")
+        clobbers << item
+      else
+        parsed = parse_operand(item, item.starts_with?("="), out_count)
+        if parsed.is_a?(ConstraintError)
+          fail(parsed.as(ConstraintError).message)
+          return
+        end
+        ops << parsed.as(OperandConstraint)
+      end
+    end
+    outs = [] of OperandConstraint
+    ins = [] of OperandConstraint
+    ops.each do |c|
+      if c.output
+        outs << c
+      else
+        ins << c
+      end
+    end
+    out_types = [] of IrType
+    if i.type.struct?
+      out_types = i.type.struct_element_types
+    elsif !i.type.void?
+      out_types = [i.type]
+    end
+    if outs.size != out_types.size
+      fail("the asm call has #{outs.size} outputs and its result has #{out_types.size}")
+      return
+    end
+    if ins.size != i.args.size - 1
+      fail("the asm call has #{ins.size} inputs and #{i.args.size - 1} arguments")
+      return
+    end
+    if @mf.naked && (outs.size > 0 || ins.size > 0)
+      fail("a naked function's asm takes no operands in this slice")
+      return
+    end
+    out_types.each do |t|
+      if t.struct? || t.array? || (t.int? && t.bits > 64)
+        fail("an asm output must be a scalar of at most 64 bits in this slice")
+        return
+      end
+    end
+    defs = [] of Operand
+    uses = [] of Operand
+    names = [] of String
+    pre = [] of MInst
+    post = [] of MInst
+    out_regs = [] of Int32
+    out_phys = [] of Int32
+    k = 0
+    while k < outs.size
+      c = outs[k]
+      want_fp = out_types[k].float?
+      if c.cls == ConstraintClass::Specific
+        reg = asm_register(c.register)
+        if reg < 0
+          fail("'#{c.register}' is not an aarch64 register the native backend maps")
+          return
+        end
+        fp = reg >= 32
+        if fp != want_fp
+          fail("the output '#{c.text}' is in the other register file from its value")
+          return
+        end
+        v = @mf.new_vreg(fp ? RegClass::Fpr : RegClass::Gpr)
+        defs << pop(reg)
+        post << asm_copy(vop(v), pop(reg), fp)
+        out_regs << v
+        out_phys << reg
+        names << reg_name(reg)
+        note_callee_saved(reg) unless @mf.naked
+      else
+        fp = c.cls == ConstraintClass::Vector
+        if fp != want_fp
+          fail("the output '#{c.text}' is in the other register file from its value")
+          return
+        end
+        v = @mf.new_vreg(fp ? RegClass::Fpr : RegClass::Gpr)
+        defs << vop(v)
+        out_regs << v
+        out_phys << -1
+        names << (fp ? "d0" : "x0")
+      end
+      k = k + 1
+    end
+    k = 0
+    while k < ins.size
+      c = ins[k]
+      arg = i.args[k + 1]
+      if arg.type.struct? || arg.type.array? || (arg.type.int? && arg.type.bits > 64)
+        fail("an asm input must be a scalar of at most 64 bits in this slice")
+        return
+      end
+      src = first_leaf(arg)
+      src_fp = @mf.vreg_classes[src] == RegClass::Fpr
+      if c.cls == ConstraintClass::Tied
+        o = c.tied
+        if out_phys[o] >= 0
+          reg = out_phys[o]
+          if (reg >= 32) != src_fp
+            fail("the tied input of output #{o} is in the other register file from its output")
+            return
+          end
+          pre << asm_copy(pop(reg), vop(src), src_fp)
+          uses << pop(reg)
+          names << reg_name(reg)
+        else
+          dst = out_regs[o]
+          dst_fp = @mf.vreg_classes[dst] == RegClass::Fpr
+          if dst_fp != src_fp
+            fail("the tied input of output #{o} is in the other register file from its output")
+            return
+          end
+          pre << asm_copy(vop(dst), vop(src), dst_fp)
+          uses << vop(dst)
+          names << (dst_fp ? "d0" : "x0")
+        end
+      elsif c.cls == ConstraintClass::Specific
+        reg = asm_register(c.register)
+        if reg < 0
+          fail("'#{c.register}' is not an aarch64 register the native backend maps")
+          return
+        end
+        if (reg >= 32) != src_fp
+          fail("the input '#{c.text}' is in the other register file from its value")
+          return
+        end
+        pre << asm_copy(pop(reg), vop(src), src_fp)
+        uses << pop(reg)
+        names << reg_name(reg)
+      else
+        fp = c.cls == ConstraintClass::Vector
+        if fp != src_fp
+          fail("the input '#{c.text}' is in the other register file from its value")
+          return
+        end
+        uses << vop(src)
+        names << (fp ? "d0" : "x0")
+      end
+      k = k + 1
+    end
+    clobbers.each do |item|
+      name = parse_clobber(item)
+      if name.is_a?(ConstraintError)
+        fail(name.as(ConstraintError).message)
+        return
+      end
+      text = name.as(String)
+      next if text == "cc" || text == "memory"
+      reg = asm_register(text)
+      if reg < 0
+        fail("clobber '#{text}' is not an aarch64 register the native backend maps")
+        return
+      end
+      defs << pop(reg)
+      note_callee_saved(reg) unless @mf.naked
+    end
+    encoding = AsmAssembler.new(@darwin).assemble(aux.template, names)
+    if msg = encoding.failure
+      fail(msg)
+      return
+    end
+    encoding.relocs.each do |r|
+      unless @syms[r.name]?
+        fail("the asm symbol #{r.name} is not in the module's symbol table")
+        return
+      end
+    end
+    pre.each do |m|
+      emit(m)
+    end
+    body = mop(MOp::InlineAsm)
+    body.asm = AsmBody.new(aux.template, outs.size, ins.size, @syms, @darwin)
+    defs.each do |d|
+      body.defs << d
+    end
+    uses.each do |u|
+      body.uses << u
+    end
+    emit(body)
+    post.each do |m|
+      emit(m)
+    end
+    k = 0
+    while k < out_regs.size
+      out_regs[k] = canon(out_regs[k], out_types[k])
+      k = k + 1
+    end
+    bind_result(i, out_regs) unless i.type.void?
+  end
+
+  # ---- calls -------------------------------------------------------------------------------------
+
+  def lower_call(i : Inst) : Nil
+    if asm_call?(i)
+      lower_asm(i, i.args[0].as(Inst).aux.as(AsmAux))
+      return
+    end
+    aux = i.aux
+    cc_aux = nil
+    if aux.is_a?(CallAux)
+      cc_aux = aux.as(CallAux)
+    end
+    actual = i.args[1, i.args.size - 1]
+    types = actual.map { |a| a.type }
+    fixed = types.size
+    sret_first = false
+    if cc_aux
+      fixed = cc_aux.fn_type.param_types.size
+      attrs = cc_aux.param_attrs
+      sret_first = attrs.size > 0 && attrs[0].any? { |a| a.name == "sret" }
+    end
+    assignment = call_assignment(types, fixed, sret_first, callee_iyi?(i))
+    if assignment.is_a?(String)
+      fail(assignment.as(String))
+      return
+    end
+    call = assignment.as(CallAssignment)
+    if call.stack_bytes > @max_outgoing
+      @max_outgoing = call.stack_bytes
+    end
+    @mf.frame.has_calls = true
+    # Every argument is read from its register before the call; stack arguments are stored to the outgoing area.
+    k = 0
+    while k < actual.size
+      vals = arg_leaves(actual[k], byval_attr(cc_aux, k))
+      locs = call.args[k]
+      j = 0
+      while j < locs.size
+        loc = locs[j]
+        if cc_aux && k < cc_aux.param_attrs.size && loc.leaf_type.int?
+          if cc_aux.param_attrs[k].any? { |attr| attr.name == "zeroext" }
+            vals[j] = zext(vals[j], loc.leaf_type)
+          elsif cc_aux.param_attrs[k].any? { |attr| attr.name == "signext" }
+            vals[j] = signed_value(vals[j], loc.leaf_type)
+          end
+        end
+        if loc.kind == 0
+          m = mop(MOp::Mov)
+          m.defs << pop(loc.reg)
+          m.uses << vop(vals[j])
+          emit(m)
+        elsif loc.kind == 1
+          m = mop(MOp::FMov)
+          m.fp = true
+          m.defs << pop(loc.reg)
+          m.uses << vop(vals[j])
+          emit(m)
+        else
+          m = mop(MOp::StrOutgoing)
+          m.size = loc.fp ? loc.bits : 64
+          m.fp = loc.fp
+          m.imm = loc.offset
+          m.uses << vop(vals[j])
+          emit(m)
+        end
+        j = j + 1
+      end
+      k = k + 1
+    end
+    # An internal result that travels in memory: a buffer in this frame, its address in the indirect-result register.
+    result_slot = -1
+    if callee_iyi?(i) && iyi_result_indirect?(@layout, @desc, i.type)
+      result_slot = @mf.frame.add_slot(@layout.alloc_size(i.type), @layout.abi_align(i.type))
+      buffer = gpr
+      @mf.mark_pointer(buffer)
+      m = mop(MOp::AddrFrame)
+      m.defs << vop(buffer)
+      m.uses << Operand.new(OperandKind::FrameSlot, result_slot, 0_i64)
+      emit(m)
+      m = mop(MOp::Mov)
+      m.defs << pop(@desc.indirect_result)
+      m.uses << vop(buffer)
+      emit(m)
+    end
+    callee = i.args[0]
+    if callee.is_a?(Function)
+      m = mop(MOp::Bl)
+      m.sym = symbol_index(callee.as(Function).name)
+      m.reloc = RelocKind::A64Call26
+      m.call = true
+      m.clobbers = @desc.caller_saved
+      emit(m)
+    else
+      target = first_leaf(callee)
+      m = mop(MOp::Blr)
+      m.uses << vop(target)
+      m.call = true
+      m.clobbers = @desc.caller_saved
+      emit(m)
+    end
+    return if i.type.void?
+    if result_slot >= 0
+      base = gpr
+      @mf.mark_pointer(base)
+      m = mop(MOp::AddrFrame)
+      m.defs << vop(base)
+      m.uses << Operand.new(OperandKind::FrameSlot, result_slot, 0_i64)
+      emit(m)
+      read = [] of Int32
+      flatten_leaves(@layout, i.type).each do |l|
+        lt = l[1]
+        d = @mf.new_vreg(leaf_class(lt))
+        m = mop(MOp::Ldr)
+        m.size = mem_bits(lt)
+        m.fp = lt.float?
+        m.signed = lt.int? && lt.bits > 1
+        m.imm = l[0]
+        m.defs << vop(d)
+        m.uses << vop(base)
+        emit(m)
+        read << d
+      end
+      bind_result(i, read)
+      return
+    end
+    assigned = result_assignment(i.type, callee_iyi?(i))
+    if assigned.is_a?(String)
+      fail(assigned.as(String))
+      return
+    end
+    regs = [] of Int32
+    assigned.as(Array(LeafLoc)).each do |loc|
+      d = @mf.new_vreg(loc.kind == 1 ? RegClass::Fpr : RegClass::Gpr)
+      m = mop(loc.kind == 1 ? MOp::FMov : MOp::Mov)
+      m.fp = loc.kind == 1
+      m.defs << vop(d)
+      m.uses << pop(loc.reg)
+      emit(m)
+      regs << canon(d, loc.leaf_type)
+    end
+    bind_result(i, regs)
+  end
+
+  # ---- intrinsics --------------------------------------------------------------------------------
+
+  # The byte length of a memory intrinsic when it is a constant, or -1 when it is not.
+  def const_len(v : Value) : Int64
+    return -1_i64 unless v.is_a?(Inst) && v.as(Inst).op == Op::ConstInt
+    v.as(Inst).aux_int
+  end
+
+  # Moves n bytes from the address in src to the address in dst. Every chunk is loaded before any is stored, so the
+  # ranges may overlap (memmove). Chunks are 8, 4, 2 or 1 bytes wide.
+  def move_bytes(src : Int32, dst : Int32, n : Int64) : Nil
+    vals = [] of Int32
+    sizes = [] of Int32
+    offs = [] of Int64
+    off = 0_i64
+    while off < n
+      left = n - off
+      size = left >= 8_i64 ? 8 : (left >= 4_i64 ? 4 : (left >= 2_i64 ? 2 : 1))
+      v = gpr
+      load = mop(MOp::Ldr)
+      load.size = size * 8
+      load.imm = off
+      load.defs << vop(v)
+      load.uses << vop(src)
+      emit(load)
+      vals << v
+      sizes << size
+      offs << off
+      off = off + size.to_i64
+    end
+    k = 0
+    while k < vals.size
+      store = mop(MOp::Str)
+      store.size = sizes[k] * 8
+      store.imm = offs[k]
+      store.uses << vop(vals[k])
+      store.uses << vop(dst)
+      emit(store)
+      k = k + 1
+    end
+  end
+
+  # Stores the low byte of `value` into each of the n bytes at dst.
+  def set_bytes(dst : Int32, value : Int32, n : Int64) : Nil
+    k = 0_i64
+    while k < n
+      m = mop(MOp::Str)
+      m.size = 8
+      m.imm = k
+      m.uses << vop(value)
+      m.uses << vop(dst)
+      emit(m)
+      k = k + 1_i64
+    end
+  end
+
+  # Calls a native runtime helper with three integer arguments. The helper is declared by the module and defined
+  # by the runtime, not here.
+  def call_helper(name : String, a : Int32, b : Int32, c : Int32) : Nil
+    @mf.frame.has_calls = true
+    regs = [a, b, c]
+    k = 0
+    while k < 3
+      m = mop(MOp::Mov)
+      m.defs << pop(k)
+      m.uses << vop(regs[k])
+      emit(m)
+      k = k + 1
+    end
+    call = mop(MOp::Bl)
+    call.sym = symbol_index(name)
+    call.reloc = RelocKind::A64Call26
+    call.call = true
+    call.clobbers = @desc.caller_saved
+    emit(call)
+  end
+
+  # memcpy and memmove: inline for a constant length up to 64 bytes, otherwise a call to the native helper.
+  def lower_transfer(i : Inst, overlap : Bool) : Nil
+    dst = first_leaf(i.args[0])
+    src = first_leaf(i.args[1])
+    n = const_len(i.args[2])
+    if n >= 0_i64 && n <= 64_i64
+      move_bytes(src, dst, n)
+      return
+    end
+    len = zext(first_leaf(i.args[2]), i.args[2].type)
+    call_helper(overlap ? "__iyi_native_memmove" : "__iyi_native_memcpy", dst, src, len)
+  end
+
+  # memset: inline for a constant length up to 64 bytes, otherwise a call to the native helper.
+  def lower_memset(i : Inst) : Nil
+    dst = first_leaf(i.args[0])
+    value = zext(first_leaf(i.args[1]), i.args[1].type)
+    n = const_len(i.args[2])
+    if n >= 0_i64 && n <= 64_i64
+      set_bytes(dst, value, n)
+      return
+    end
+    len = zext(first_leaf(i.args[2]), i.args[2].type)
+    call_helper("__iyi_native_memset", dst, value, len)
+  end
+
+  def lower_intrinsic(i : Inst) : Nil
+    id = i.aux.as(IntrinsicAux).id
+    if id == IntrinsicId::Trap || id == IntrinsicId::DebugTrap
+      m = mop(MOp::Brk)
+      m.imm = 1_i64
+      emit(m)
+    elsif id == IntrinsicId::Donothing || id == IntrinsicId::Assume
+      return
+    elsif id == IntrinsicId::ExpectI1
+      bind_result(i, copy_all(materialize(i.args[0])))
+    elsif id == IntrinsicId::Memcpy || id == IntrinsicId::Memmove
+      lower_transfer(i, id == IntrinsicId::Memmove)
+    elsif id == IntrinsicId::Memset
+      lower_memset(i)
+    elsif id == IntrinsicId::Fabs
+      fp_unary(i, MOp::FAbs, 0_i64)
+    elsif id == IntrinsicId::Sqrt
+      fp_unary(i, MOp::FSqrt, 0_i64)
+    elsif id == IntrinsicId::Roundeven
+      fp_unary(i, MOp::FRint, 0_i64)
+    elsif id == IntrinsicId::Ceil
+      fp_unary(i, MOp::FRint, 1_i64)
+    elsif id == IntrinsicId::Floor
+      fp_unary(i, MOp::FRint, 2_i64)
+    elsif id == IntrinsicId::Trunc
+      fp_unary(i, MOp::FRint, 3_i64)
+    elsif id == IntrinsicId::Round
+      fp_unary(i, MOp::FRint, 4_i64)
+    elsif id == IntrinsicId::Rint
+      fp_unary(i, MOp::FRint, 6_i64)
+    elsif id == IntrinsicId::Minnum || id == IntrinsicId::Maxnum
+      bind_result(i, [fbinop(id == IntrinsicId::Minnum ? MOp::FMinNm : MOp::FMaxNm, first_leaf(i.args[0]), first_leaf(i.args[1]), i.type.bits)])
+    elsif id == IntrinsicId::Copysign
+      lower_copysign(i)
+    elsif id == IntrinsicId::FPToSISat || id == IntrinsicId::FPToUISat
+      lower_fp_to_int(i, id == IntrinsicId::FPToSISat, true)
+    elsif !overflow_form(id).family
+      fail("intrinsic #{intrinsic_stem(id)} is not lowered in this slice")
+    else
+      lower_overflow(i, id)
+    end
+  end
+
+  # A floating-point intrinsic that is one instruction of one operand: fabs, fsqrt and the frint family, whose
+  # rounding mode is `mode`.
+  def fp_unary(i : Inst, op : MOp, mode : Int64) : Nil
+    unless i.type.float?
+      fail("intrinsic #{intrinsic_stem(i.aux.as(IntrinsicAux).id)} on #{i.type} is not lowered: only float and double are")
+      return
+    end
+    d = @mf.new_vreg(RegClass::Fpr)
+    m = mop(op)
+    m.fp = true
+    m.size = i.type.bits
+    m.imm = mode
+    m.defs << vop(d)
+    m.uses << vop(first_leaf(i.args[0]))
+    emit(m)
+    bind_result(i, [d])
+  end
+
+  # copysign(x, y): the magnitude of x with the sign of y, computed on the bit patterns in integer registers.
+  def lower_copysign(i : Inst) : Nil
+    bits = i.type.bits
+    unless i.type.float? && (bits == 32 || bits == 64)
+      fail("intrinsic copysign on #{i.type} is not lowered: only float and double are")
+      return
+    end
+    sign = bits == 64 ? (1_i64 << 63) : 2147483648_i64
+    magnitude = bits == 64 ? 9223372036854775807_i64 : 2147483647_i64
+    x = move_bits_to_gp(first_leaf(i.args[0]), bits)
+    y = move_bits_to_gp(first_leaf(i.args[1]), bits)
+    kept = binop(MOp::And, x, const_gpr(magnitude))
+    taken = binop(MOp::And, y, const_gpr(sign))
+    bind_result(i, [move_bits_to_fp(binop(MOp::Orr, kept, taken), bits)])
+  end
+
+  # FCVTZ saturates at its register width and maps NaN to zero. For a
+  # saturating i8 or i16 conversion clamp the 64-bit result to that width.
+  def lower_fp_to_int(i : Inst, signed : Bool, saturating : Bool) : Nil
+    src = first_leaf(i.args[0])
+    if i128?(i.type)
+      bind_result(i, fp_to_wide(src, i.args[0].type.bits, signed))
+      return
+    end
+    bits = i.type.bits
+    clamp = saturating && bits < 32
+    d = gpr
+    m = mop(signed ? MOp::Fcvtzs : MOp::Fcvtzu)
+    m.fp = true
+    m.size = i.args[0].type.bits
+    m.imm = clamp ? 64_i64 : (bits < 32 ? 32_i64 : bits.to_i64)
+    m.defs << vop(d)
+    m.uses << vop(src)
+    emit(m)
+    d = clamp_narrow(d, bits, signed) if clamp
+    bind_result(i, [canon(d, i.type)])
+  end
+
+  def clamp_narrow(d : Int32, bits : Int32, signed : Bool) : Int32
+    if signed
+      hi = const_gpr(bits == 8 ? 127_i64 : 32767_i64)
+      compare(d, hi)
+      capped = csel_cond(d, hi, cond_lt)
+      lo = const_gpr(bits == 8 ? -128_i64 : -32768_i64)
+      compare(capped, lo)
+      return csel_cond(capped, lo, cond_gt)
+    end
+    hi = const_gpr(bits == 8 ? 255_i64 : 65535_i64)
+    compare(d, hi)
+    csel_cond(d, hi, cond_cc)
+  end
+
+  # The runtime returns the 128-bit value in x0:x1 (AAPCS64).
+  def fp_to_wide(src : Int32, src_bits : Int32, signed : Bool) : Array(Int32)
+    value = src
+    if src_bits == 32
+      value = @mf.new_vreg(RegClass::Fpr)
+      w = mop(MOp::FCvt)
+      w.fp = true
+      w.size = 64
+      w.defs << vop(value)
+      w.uses << vop(src)
+      emit(w)
+    end
+    @mf.frame.has_calls = true
+    arg = mop(MOp::FMov)
+    arg.fp = true
+    arg.defs << pop(@desc.fp_args[0])
+    arg.uses << vop(value)
+    emit(arg)
+    call = mop(MOp::Bl)
+    call.sym = symbol_index(signed ? "__iyi_native_fptosi_sat_i128" : "__iyi_native_fptoui_sat_i128")
+    call.reloc = RelocKind::A64Call26
+    call.call = true
+    call.clobbers = @desc.caller_saved
+    emit(call)
+    lo = gpr
+    m0 = mop(MOp::Mov)
+    m0.defs << vop(lo)
+    m0.uses << pop(0)
+    emit(m0)
+    hi = gpr
+    m1 = mop(MOp::Mov)
+    m1.defs << vop(hi)
+    m1.uses << pop(1)
+    emit(m1)
+    [lo, hi]
+  end
+
+  # The overflow family: the value and a flag. Narrow widths compute in 64 bits and compare the result with
+  # its own width; 64-bit forms use the flag-setting adds and subs, and the high half of a multiply.
+  def lower_overflow(i : Inst, id : IntrinsicId) : Nil
+    form = overflow_form(id)
+    signed = form.signed
+    mul = form.mul
+    sub = form.sub
+    if i128?(i.args[0].type)
+      lower_overflow128(i, id)
+      return
+    end
+    wide = i.args[0].type.bits == 64
+    t = i.args[0].type
+    bits = t.bits
+    a = first_leaf(i.args[0])
+    b = first_leaf(i.args[1])
+    unless signed
+      a = zext(a, t)
+      b = zext(b, t)
+    end
+    if mul
+      if wide
+        lo = binop(MOp::Mul, a, b)
+        hi = binop(signed ? MOp::Smulh : MOp::Umulh, a, b)
+        if signed
+          sign = binop(MOp::Asr, lo, const_gpr(63_i64))
+          compare(hi, sign)
+        else
+          compare_zero(hi)
+        end
+        bind_result(i, [lo, set_flag(cond_ne)])
+        return
+      end
+      prod = binop(MOp::Mul, a, b)
+      norm = signed ? canon(prod, t) : zext(prod, t)
+      compare(prod, norm)
+      bind_result(i, [canon(prod, t), set_flag(cond_ne)])
+      return
+    end
+    if wide
+      flag_op = sub ? MOp::Subs : MOp::Adds
+      value = gpr
+      s = mop(flag_op)
+      s.defs << vop(value)
+      s.uses << vop(a)
+      s.uses << vop(b)
+      emit(s)
+      cond = signed ? cond_vs : (sub ? cond_cc : cond_cs)
+      bind_result(i, [value, set_flag(cond)])
+      return
+    end
+    raw = binop(sub ? MOp::Sub : MOp::Add, a, b)
+    norm = signed ? canon(raw, t) : zext(raw, t)
+    compare(raw, norm)
+    bind_result(i, [canon(raw, t), set_flag(cond_ne)])
+  end
+end
+
+# Selects the MIR of one function. Returns the reason when a construct is not lowered.
+pub def select_function(mod : Module, fn : Function, syms : Hash(String, Int32), darwin : Bool) : MFunction | IselError
+  isel = Isel.new(mod, fn, syms, darwin)
+  mf = isel.run
+  if msg = isel.failure
+    return IselError.new(msg)
+  end
+  mf
+end

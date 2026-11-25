@@ -1,0 +1,176 @@
+@[Unsafe("opens input files without raising so IO failures have a defined CLI status")]
+module compiler/tools/ir_opt
+
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/printer::{print}
+import compiler/ir/verifier::{verify, IrError}
+import compiler/ir/module::{Module}
+import compiler/ir/function::{Function}
+import compiler/ir/opt/pipeline::{PassId, OptTier, PassOptions, pass_name, pass_named, tier_passes, run_passes}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+module IrOpt
+  def self.usage : NoReturn
+    STDERR.puts "iyi-opt: usage: run [--verify-each] [--no-verify] PASSES FILE | print FILE | passes | stats PASSES FILE"
+    LibC.exit(2)
+  end
+
+  # File.read raises on open and read errors. Opening the same prelude IO
+  # directly lets this command report both as input errors instead.
+  def self.read_input(path : String) : String?
+    return nil if path.byte_index("\u0000")
+    fd = __iyi_open_read(path.to_unsafe)
+    return nil if fd < 0_i64
+    io = IyiIO.new(fd, 4096, false)
+    text = io.read_all
+    failed = io.read_failed?
+    io.close
+    failed ? nil : text
+  end
+
+  def self.read_module(path : String) : Module
+    text = read_input(path)
+    unless text
+      STDERR.puts "iyi-opt: cannot read #{path}"
+      LibC.exit(2)
+    end
+    parsed = parse(text)
+    if parsed.is_a?(IrParseError)
+      STDERR.puts "iyi-opt: #{path}: #{parsed.to_s}"
+      LibC.exit(2)
+    end
+    parsed.as(Module)
+  end
+
+  def self.parse_passes(text : String) : Array(PassId)
+    return tier_passes(OptTier::Default) if text == "default"
+    return tier_passes(OptTier::Release) if text == "release"
+    passes = [] of PassId
+    names = text.split(',')
+    k = 0
+    while k < names.size
+      pass = pass_named(names[k])
+      unless pass
+        STDERR.puts "iyi-opt: unknown pass: #{names[k]}"
+        LibC.exit(2)
+      end
+      passes << pass
+      k = k + 1
+    end
+    passes
+  end
+
+  def self.error_text(error : IrError) : String
+    message = "error[#{error.kind}]: #{error.message}"
+    name = error.function
+    name ? "@#{name}: #{message}" : message
+  end
+
+  def self.verify_input(mod : Module) : Nil
+    errors = verify(mod)
+    unless errors.empty?
+      STDERR.puts "iyi-opt: the input does not verify: #{error_text(errors[0])}"
+      LibC.exit(2)
+    end
+  end
+
+  def self.instruction_count(fn : Function) : Int32
+    count = 0
+    k = 0
+    while k < fn.blocks.size
+      count = count + fn.blocks[k].insts.size
+      k = k + 1
+    end
+    count
+  end
+
+  def self.run : Nil
+    args = Program.args
+    usage if args.empty?
+    command = args[0]
+    if command == "passes"
+      usage unless args.size == 1
+      passes = [PassId::CfgSimplify, PassId::Mem2Reg, PassId::Simplify, PassId::Dce]
+      k = 0
+      while k < passes.size
+        STDOUT.puts "#{pass_name(passes[k])}\tdefault,release"
+        k = k + 1
+      end
+      return
+    end
+    if command == "print"
+      usage unless args.size == 2
+      mod = read_module(args[1])
+      STDOUT.print(print(mod))
+      return
+    end
+    usage unless command == "run" || command == "stats"
+
+    verify_each = false
+    no_verify = command == "stats"
+    index = 1
+    if command == "run"
+      while index < args.size
+        if args[index] == "--verify-each"
+          verify_each = true
+        elsif args[index] == "--no-verify"
+          no_verify = true
+        else
+          break
+        end
+        index = index + 1
+      end
+    end
+    usage unless args.size == index + 2
+    usage if verify_each && no_verify
+    passes = parse_passes(args[index])
+    mod = read_module(args[index + 1])
+    verify_input(mod) unless no_verify
+
+    before_insts = [] of Int32
+    before_blocks = [] of Int32
+    if command == "stats"
+      k = 0
+      while k < mod.functions.size
+        fn = mod.functions[k]
+        unless fn.declaration?
+          before_insts << instruction_count(fn)
+          before_blocks << fn.blocks.size
+        end
+        k = k + 1
+      end
+    end
+    env_options = PassOptions.from_env
+    options = PassOptions.new(!no_verify && (verify_each || env_options.verify_each), env_options.time_passes)
+    if reason = run_passes(mod, passes, options)
+      STDERR.puts "iyi-opt: #{reason}"
+      LibC.exit(1)
+    end
+    unless no_verify
+      errors = verify(mod)
+      unless errors.empty?
+        STDERR.puts "iyi-opt: output: #{error_text(errors[0])}"
+        LibC.exit(1)
+      end
+    end
+    if command == "stats"
+      k = 0
+      j = 0
+      while k < mod.functions.size
+        fn = mod.functions[k]
+        unless fn.declaration?
+          STDOUT.puts "#{fn.name}\t#{before_insts[j]}\t#{instruction_count(fn)}\t#{before_blocks[j]}\t#{fn.blocks.size}"
+          j = j + 1
+        end
+        k = k + 1
+      end
+    else
+      STDOUT.print(print(mod))
+    end
+  end
+end
+
+IrOpt.run

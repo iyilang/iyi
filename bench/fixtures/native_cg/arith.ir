@@ -1,0 +1,236 @@
+; iyi-ir 1
+module "arith"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [4 x i8] c"%ld\0A\00"
+
+define internal i64 @w8(i8 %a, i8 %b) {
+entry:
+  %s = add i8 %a, %b
+  %d = sdiv i8 %a, %b
+  %r = srem i8 %a, %b
+  %m = mul i8 %a, %b
+  %x = xor i8 %s, %m
+  %sh = shl i8 %a, 2
+  %lr = lshr i8 %a, 1
+  %ar = ashr i8 %a, 1
+  %u = udiv i8 %a, %b
+  %ur = urem i8 %a, %b
+  %an = and i8 %a, %b
+  %o = or i8 %a, %b
+  %e0 = sext i8 %s to i64
+  %e1 = sext i8 %d to i64
+  %e2 = sext i8 %r to i64
+  %e3 = sext i8 %m to i64
+  %e4 = sext i8 %x to i64
+  %e5 = sext i8 %sh to i64
+  %e6 = sext i8 %lr to i64
+  %e7 = sext i8 %ar to i64
+  %e8 = sext i8 %u to i64
+  %e9 = sext i8 %ur to i64
+  %e10 = sext i8 %an to i64
+  %e11 = sext i8 %o to i64
+  %t1 = add i64 %e0, %e1
+  %t2 = add i64 %t1, %e2
+  %t3 = add i64 %t2, %e3
+  %t4 = add i64 %t3, %e4
+  %t5 = add i64 %t4, %e5
+  %t6 = add i64 %t5, %e6
+  %t7 = add i64 %t6, %e7
+  %t8 = add i64 %t7, %e8
+  %t9 = add i64 %t8, %e9
+  %t10 = add i64 %t9, %e10
+  %t11 = add i64 %t10, %e11
+  ret i64 %t11
+}
+
+define internal i64 @w16(i16 %a, i16 %b) {
+entry:
+  %s = add i16 %a, %b
+  %d = sdiv i16 %a, %b
+  %r = srem i16 %a, %b
+  %m = mul i16 %a, %b
+  %x = xor i16 %s, %m
+  %sh = shl i16 %a, 2
+  %lr = lshr i16 %a, 1
+  %ar = ashr i16 %a, 1
+  %u = udiv i16 %a, %b
+  %ur = urem i16 %a, %b
+  %an = and i16 %a, %b
+  %o = or i16 %a, %b
+  %e0 = sext i16 %s to i64
+  %e1 = sext i16 %d to i64
+  %e2 = sext i16 %r to i64
+  %e3 = sext i16 %m to i64
+  %e4 = sext i16 %x to i64
+  %e5 = sext i16 %sh to i64
+  %e6 = sext i16 %lr to i64
+  %e7 = sext i16 %ar to i64
+  %e8 = sext i16 %u to i64
+  %e9 = sext i16 %ur to i64
+  %e10 = sext i16 %an to i64
+  %e11 = sext i16 %o to i64
+  %t1 = add i64 %e0, %e1
+  %t2 = add i64 %t1, %e2
+  %t3 = add i64 %t2, %e3
+  %t4 = add i64 %t3, %e4
+  %t5 = add i64 %t4, %e5
+  %t6 = add i64 %t5, %e6
+  %t7 = add i64 %t6, %e7
+  %t8 = add i64 %t7, %e8
+  %t9 = add i64 %t8, %e9
+  %t10 = add i64 %t9, %e10
+  %t11 = add i64 %t10, %e11
+  ret i64 %t11
+}
+
+define internal i64 @w32(i32 %a, i32 %b) {
+entry:
+  %s = add i32 %a, %b
+  %d = sdiv i32 %a, %b
+  %r = srem i32 %a, %b
+  %m = mul i32 %a, %b
+  %x = xor i32 %s, %m
+  %sh = shl i32 %a, 2
+  %lr = lshr i32 %a, 1
+  %ar = ashr i32 %a, 1
+  %u = udiv i32 %a, %b
+  %ur = urem i32 %a, %b
+  %an = and i32 %a, %b
+  %o = or i32 %a, %b
+  %e0 = sext i32 %s to i64
+  %e1 = sext i32 %d to i64
+  %e2 = sext i32 %r to i64
+  %e3 = sext i32 %m to i64
+  %e4 = sext i32 %x to i64
+  %e5 = sext i32 %sh to i64
+  %e6 = sext i32 %lr to i64
+  %e7 = sext i32 %ar to i64
+  %e8 = sext i32 %u to i64
+  %e9 = sext i32 %ur to i64
+  %e10 = sext i32 %an to i64
+  %e11 = sext i32 %o to i64
+  %t1 = add i64 %e0, %e1
+  %t2 = add i64 %t1, %e2
+  %t3 = add i64 %t2, %e3
+  %t4 = add i64 %t3, %e4
+  %t5 = add i64 %t4, %e5
+  %t6 = add i64 %t5, %e6
+  %t7 = add i64 %t6, %e7
+  %t8 = add i64 %t7, %e8
+  %t9 = add i64 %t8, %e9
+  %t10 = add i64 %t9, %e10
+  %t11 = add i64 %t10, %e11
+  ret i64 %t11
+}
+
+define internal i64 @w64(i64 %a, i64 %b) {
+entry:
+  %s = add i64 %a, %b
+  %d = sdiv i64 %a, %b
+  %r = srem i64 %a, %b
+  %m = mul i64 %a, %b
+  %x = xor i64 %s, %m
+  %sh = shl i64 %a, 2
+  %lr = lshr i64 %a, 1
+  %ar = ashr i64 %a, 1
+  %u = udiv i64 %a, %b
+  %ur = urem i64 %a, %b
+  %an = and i64 %a, %b
+  %o = or i64 %a, %b
+  %e0 = add i64 %s, 0
+  %e1 = add i64 %d, 0
+  %e2 = add i64 %r, 0
+  %e3 = add i64 %m, 0
+  %e4 = add i64 %x, 0
+  %e5 = add i64 %sh, 0
+  %e6 = add i64 %lr, 0
+  %e7 = add i64 %ar, 0
+  %e8 = add i64 %u, 0
+  %e9 = add i64 %ur, 0
+  %e10 = add i64 %an, 0
+  %e11 = add i64 %o, 0
+  %t1 = add i64 %e0, %e1
+  %t2 = add i64 %t1, %e2
+  %t3 = add i64 %t2, %e3
+  %t4 = add i64 %t3, %e4
+  %t5 = add i64 %t4, %e5
+  %t6 = add i64 %t5, %e6
+  %t7 = add i64 %t6, %e7
+  %t8 = add i64 %t7, %e8
+  %t9 = add i64 %t8, %e9
+  %t10 = add i64 %t9, %e10
+  %t11 = add i64 %t10, %e11
+  ret i64 %t11
+}
+
+define internal i64 @ovf32(i32 %a, i32 %b) {
+entry:
+  %s = intrinsic llvm.sadd.with.overflow.i32(i32 %a, i32 %b)
+  %v = extractvalue { i32, i1 } %s, 0
+  %f = extractvalue { i32, i1 } %s, 1
+  %ve = sext i32 %v to i64
+  %fe = zext i1 %f to i64
+  %fx = mul i64 %fe, 1000000
+  %r = add i64 %ve, %fx
+  ret i64 %r
+}
+
+define internal i64 @umul64(i64 %a, i64 %b) {
+entry:
+  %s = intrinsic llvm.umul.with.overflow.i64(i64 %a, i64 %b)
+  %v = extractvalue { i64, i1 } %s, 0
+  %f = extractvalue { i64, i1 } %s, 1
+  %fe = zext i1 %f to i64
+  %fx = mul i64 %fe, 1000000
+  %r = add i64 %v, %fx
+  ret i64 %r
+}
+
+define internal i64 @usub32(i32 %a, i32 %b) {
+entry:
+  %s = intrinsic llvm.usub.with.overflow.i32(i32 %a, i32 %b)
+  %v = extractvalue { i32, i1 } %s, 0
+  %f = extractvalue { i32, i1 } %s, 1
+  %ve = zext i32 %v to i64
+  %fe = zext i1 %f to i64
+  %fx = mul i64 %fe, 1000000
+  %r = add i64 %ve, %fx
+  ret i64 %r
+}
+
+define i32 @main() {
+entry:
+  %w8_100_50_False_False = call i64 (i8, i8) @w8(i8 100, i8 50)
+  %p_w8_100_50_False_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w8_100_50_False_False)
+  %w8_100_7_True_False = call i64 (i8, i8) @w8(i8 -100, i8 7)
+  %p_w8_100_7_True_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w8_100_7_True_False)
+  %w8_7_2_True_False = call i64 (i8, i8) @w8(i8 -7, i8 2)
+  %p_w8_7_2_True_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w8_7_2_True_False)
+  %w16_1000_300_False_False = call i64 (i16, i16) @w16(i16 1000, i16 300)
+  %p_w16_1000_300_False_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w16_1000_300_False_False)
+  %w16_1000_7_True_False = call i64 (i16, i16) @w16(i16 -1000, i16 7)
+  %p_w16_1000_7_True_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w16_1000_7_True_False)
+  %w16_7_2_True_False = call i64 (i16, i16) @w16(i16 -7, i16 2)
+  %p_w16_7_2_True_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w16_7_2_True_False)
+  %w32_100000_300_False_False = call i64 (i32, i32) @w32(i32 100000, i32 300)
+  %p_w32_100000_300_False_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w32_100000_300_False_False)
+  %w32_100000_7_True_False = call i64 (i32, i32) @w32(i32 -100000, i32 7)
+  %p_w32_100000_7_True_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w32_100000_7_True_False)
+  %w32_7_2_True_False = call i64 (i32, i32) @w32(i32 -7, i32 2)
+  %p_w32_7_2_True_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w32_7_2_True_False)
+  %w64_100000000000_300_False_False = call i64 (i64, i64) @w64(i64 100000000000, i64 300)
+  %p_w64_100000000000_300_False_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w64_100000000000_300_False_False)
+  %w64_100000000000_7_True_False = call i64 (i64, i64) @w64(i64 123456789, i64 7)
+  %p_w64_100000000000_7_True_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w64_100000000000_7_True_False)
+  %w64_7_2_True_False = call i64 (i64, i64) @w64(i64 7, i64 2)
+  %p_w64_7_2_True_False = call i32 (ptr, ...) @printf(ptr @fmt, i64 %w64_7_2_True_False)
+  %o1 = call i64 (i32, i32) @ovf32(i32 2147483647, i32 1)
+  %p_o1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %o1)
+  %o2 = call i64 (i64, i64) @umul64(i64 4294967296, i64 4294967296)
+  %p_o2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %o2)
+  %o3 = call i64 (i32, i32) @usub32(i32 3, i32 5)
+  %p_o3 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %o3)
+  ret i32 0
+}

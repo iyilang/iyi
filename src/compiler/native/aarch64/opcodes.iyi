@@ -1,0 +1,136 @@
+module compiler/native/aarch64/opcodes
+
+# The aarch64 opcodes: the reverse of MInst#opcode and the roles the shared passes ask for (SPEC 3.5).
+# MInst#opcode holds MOp's value, so the aarch64 encoder reads it back here. Every MOp member must have a line in
+# aarch64_op: the codegen gate refuses an opcode it cannot read, which catches a member added without one.
+
+import compiler/native/mir::{MOp, Role}
+
+pub def aarch64_op(v : Int32) : MOp
+  return MOp::Label if v == MOp::Label.value.to_i32
+  return MOp::Mov if v == MOp::Mov.value.to_i32
+  return MOp::FMov if v == MOp::FMov.value.to_i32
+  return MOp::FMovToFp if v == MOp::FMovToFp.value.to_i32
+  return MOp::FMovToGp if v == MOp::FMovToGp.value.to_i32
+  return MOp::MovImm if v == MOp::MovImm.value.to_i32
+  return MOp::AddrFrame if v == MOp::AddrFrame.value.to_i32
+  return MOp::AddrOutgoing if v == MOp::AddrOutgoing.value.to_i32
+  return MOp::AddrSym if v == MOp::AddrSym.value.to_i32
+  return MOp::LoadGot if v == MOp::LoadGot.value.to_i32
+  return MOp::Ldr if v == MOp::Ldr.value.to_i32
+  return MOp::Str if v == MOp::Str.value.to_i32
+  return MOp::LdrFrame if v == MOp::LdrFrame.value.to_i32
+  return MOp::StrFrame if v == MOp::StrFrame.value.to_i32
+  return MOp::StrOutgoing if v == MOp::StrOutgoing.value.to_i32
+  return MOp::SpLoad if v == MOp::SpLoad.value.to_i32
+  return MOp::SpStore if v == MOp::SpStore.value.to_i32
+  return MOp::StpFpLr if v == MOp::StpFpLr.value.to_i32
+  return MOp::LdpFpLr if v == MOp::LdpFpLr.value.to_i32
+  return MOp::MovFp if v == MOp::MovFp.value.to_i32
+  return MOp::SpAdjust if v == MOp::SpAdjust.value.to_i32
+  return MOp::ZeroSp if v == MOp::ZeroSp.value.to_i32
+  return MOp::Ldar if v == MOp::Ldar.value.to_i32
+  return MOp::Stlr if v == MOp::Stlr.value.to_i32
+  return MOp::Ldaxr if v == MOp::Ldaxr.value.to_i32
+  return MOp::Stlxr if v == MOp::Stlxr.value.to_i32
+  return MOp::Ldxr if v == MOp::Ldxr.value.to_i32
+  return MOp::Stxr if v == MOp::Stxr.value.to_i32
+  return MOp::Dmb if v == MOp::Dmb.value.to_i32
+  return MOp::Add if v == MOp::Add.value.to_i32
+  return MOp::Sub if v == MOp::Sub.value.to_i32
+  return MOp::Mul if v == MOp::Mul.value.to_i32
+  return MOp::Sdiv if v == MOp::Sdiv.value.to_i32
+  return MOp::Udiv if v == MOp::Udiv.value.to_i32
+  return MOp::Msub if v == MOp::Msub.value.to_i32
+  return MOp::And if v == MOp::And.value.to_i32
+  return MOp::Orr if v == MOp::Orr.value.to_i32
+  return MOp::Eor if v == MOp::Eor.value.to_i32
+  return MOp::Lsl if v == MOp::Lsl.value.to_i32
+  return MOp::Lsr if v == MOp::Lsr.value.to_i32
+  return MOp::Asr if v == MOp::Asr.value.to_i32
+  return MOp::AddImm if v == MOp::AddImm.value.to_i32
+  return MOp::SubImm if v == MOp::SubImm.value.to_i32
+  return MOp::Sbfm if v == MOp::Sbfm.value.to_i32
+  return MOp::Ubfm if v == MOp::Ubfm.value.to_i32
+  return MOp::Smulh if v == MOp::Smulh.value.to_i32
+  return MOp::Umulh if v == MOp::Umulh.value.to_i32
+  return MOp::Adds if v == MOp::Adds.value.to_i32
+  return MOp::Subs if v == MOp::Subs.value.to_i32
+  return MOp::Adc if v == MOp::Adc.value.to_i32
+  return MOp::Sbc if v == MOp::Sbc.value.to_i32
+  return MOp::Adcs if v == MOp::Adcs.value.to_i32
+  return MOp::Sbcs if v == MOp::Sbcs.value.to_i32
+  return MOp::Cmp if v == MOp::Cmp.value.to_i32
+  return MOp::CmpImm if v == MOp::CmpImm.value.to_i32
+  return MOp::Cset if v == MOp::Cset.value.to_i32
+  return MOp::Csel if v == MOp::Csel.value.to_i32
+  return MOp::FAdd if v == MOp::FAdd.value.to_i32
+  return MOp::FSub if v == MOp::FSub.value.to_i32
+  return MOp::FMul if v == MOp::FMul.value.to_i32
+  return MOp::FDiv if v == MOp::FDiv.value.to_i32
+  return MOp::FNeg if v == MOp::FNeg.value.to_i32
+  return MOp::FAbs if v == MOp::FAbs.value.to_i32
+  return MOp::FSqrt if v == MOp::FSqrt.value.to_i32
+  return MOp::FRint if v == MOp::FRint.value.to_i32
+  return MOp::FMinNm if v == MOp::FMinNm.value.to_i32
+  return MOp::FMaxNm if v == MOp::FMaxNm.value.to_i32
+  return MOp::FCmp if v == MOp::FCmp.value.to_i32
+  return MOp::FCvt if v == MOp::FCvt.value.to_i32
+  return MOp::Scvtf if v == MOp::Scvtf.value.to_i32
+  return MOp::Ucvtf if v == MOp::Ucvtf.value.to_i32
+  return MOp::Fcvtzs if v == MOp::Fcvtzs.value.to_i32
+  return MOp::Fcvtzu if v == MOp::Fcvtzu.value.to_i32
+  return MOp::B if v == MOp::B.value.to_i32
+  return MOp::Bcond if v == MOp::Bcond.value.to_i32
+  return MOp::Bl if v == MOp::Bl.value.to_i32
+  return MOp::Blr if v == MOp::Blr.value.to_i32
+  return MOp::Br if v == MOp::Br.value.to_i32
+  return MOp::Ret if v == MOp::Ret.value.to_i32
+  return MOp::Brk if v == MOp::Brk.value.to_i32
+  return MOp::AddrTable if v == MOp::AddrTable.value.to_i32
+  return MOp::LdrIdx if v == MOp::LdrIdx.value.to_i32
+  return MOp::BrTable if v == MOp::BrTable.value.to_i32
+  return MOp::Mrs if v == MOp::Mrs.value.to_i32
+  return MOp::LoadTlvp if v == MOp::LoadTlvp.value.to_i32
+  return MOp::AndImm if v == MOp::AndImm.value.to_i32
+  return MOp::AddTprelHi if v == MOp::AddTprelHi.value.to_i32
+  return MOp::AddTprelLo if v == MOp::AddTprelLo.value.to_i32
+  return MOp::InlineAsm if v == MOp::InlineAsm.value.to_i32
+  raise "aarch64: opcode #{v} is not an MOp member"
+end
+
+# The role of an aarch64 opcode. Roles are the only thing the shared passes read about an opcode.
+pub def aarch64_role(op : MOp) : Role
+  return Role::Copy if op == MOp::Mov || op == MOp::FMov
+  return Role::GprToFpr if op == MOp::FMovToFp
+  return Role::Branch if op == MOp::B
+  return Role::CondBranch if op == MOp::Bcond
+  return Role::IndirectBranch if op == MOp::Br
+  return Role::TableBranch if op == MOp::BrTable
+  return Role::Return if op == MOp::Ret
+  return Role::Trap if op == MOp::Brk
+  return Role::PushRecord if op == MOp::StpFpLr
+  return Role::SetFramePointer if op == MOp::MovFp
+  return Role::Adjust if op == MOp::SpAdjust
+  return Role::Probe if op == MOp::ZeroSp
+  return Role::SaveReg if op == MOp::SpStore
+  return Role::RestoreReg if op == MOp::SpLoad
+  return Role::PopRecord if op == MOp::LdpFpLr
+  return Role::SlotLoad if op == MOp::LdrFrame
+  return Role::SlotStore if op == MOp::StrFrame
+  Role::Other
+end
+
+# The aarch64 opcode that carries a role, for the roles the frame and the spill code create.
+pub def aarch64_new(role : Role) : MOp
+  return MOp::StpFpLr if role == Role::PushRecord
+  return MOp::MovFp if role == Role::SetFramePointer
+  return MOp::SpAdjust if role == Role::Adjust
+  return MOp::ZeroSp if role == Role::Probe
+  return MOp::SpStore if role == Role::SaveReg
+  return MOp::SpLoad if role == Role::RestoreReg
+  return MOp::LdpFpLr if role == Role::PopRecord
+  return MOp::LdrFrame if role == Role::SlotLoad
+  return MOp::StrFrame if role == Role::SlotStore
+  raise "aarch64: role #{role} has no single opcode"
+end

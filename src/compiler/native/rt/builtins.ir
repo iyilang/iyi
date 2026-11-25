@@ -1,0 +1,253 @@
+; iyi-ir 1
+source_filename = "builtins"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+
+; The native runtime helpers (SPEC 3.7). The backend calls them, with the C convention, for a copy or a fill it
+; does not inline and for every 128-bit division or remainder. They are written here in IR and linked into every
+; native program by the driver. Division by zero gives 0 for both the quotient and the remainder; the hosted
+; compiler's LLVM leaves that case undefined, and the native runtime does not trap.
+
+; memcpy: 8 bytes at a time, then the tail a byte at a time. The regions must not overlap.
+define void @__iyi_native_memcpy(ptr %dst, ptr %src, i64 %n) {
+entry:
+  %words = and i64 %n, -8
+  br label %wh
+wh:
+  %wi = phi i64 [ 0, label %entry ], [ %wi2, label %wbody ]
+  %wmore = icmp ult i64 %wi, %words
+  br i1 %wmore, label %wbody, label %bh
+wbody:
+  %wsp = getelementptr i8, ptr %src, i64 %wi
+  %wdp = getelementptr i8, ptr %dst, i64 %wi
+  %wv = load i64, ptr %wsp, align 1
+  store i64 %wv, ptr %wdp, align 1
+  %wi2 = add i64 %wi, 8
+  br label %wh
+bh:
+  %bi = phi i64 [ %wi, label %wh ], [ %bi2, label %bbody ]
+  %bmore = icmp ult i64 %bi, %n
+  br i1 %bmore, label %bbody, label %bdone
+bbody:
+  %bsp = getelementptr i8, ptr %src, i64 %bi
+  %bdp = getelementptr i8, ptr %dst, i64 %bi
+  %bv = load i8, ptr %bsp, align 1
+  store i8 %bv, ptr %bdp, align 1
+  %bi2 = add i64 %bi, 1
+  br label %bh
+bdone:
+  ret void
+}
+
+; memmove: the forward copy when dst is not inside [src, src + n), which is the memcpy above, and a backward byte
+; copy otherwise, so every byte is read before it is overwritten in both directions.
+define void @__iyi_native_memmove(ptr %dst, ptr %src, i64 %n) {
+entry:
+  %d = ptrtoint ptr %dst to i64
+  %s = ptrtoint ptr %src to i64
+  %end = add i64 %s, %n
+  %before = icmp ule i64 %d, %s
+  br i1 %before, label %forward, label %check
+check:
+  %past = icmp uge i64 %d, %end
+  br i1 %past, label %forward, label %backward
+forward:
+  call void (ptr, ptr, i64) @__iyi_native_memcpy(ptr %dst, ptr %src, i64 %n)
+  ret void
+backward:
+  br label %kh
+kh:
+  %k = phi i64 [ %n, label %backward ], [ %k2, label %kbody ]
+  %kmore = icmp ne i64 %k, 0
+  br i1 %kmore, label %kbody, label %kdone
+kbody:
+  %k2 = sub i64 %k, 1
+  %ksp = getelementptr i8, ptr %src, i64 %k2
+  %kdp = getelementptr i8, ptr %dst, i64 %k2
+  %kv = load i8, ptr %ksp, align 1
+  store i8 %kv, ptr %kdp, align 1
+  br label %kh
+kdone:
+  ret void
+}
+
+; memset: the low byte of the value, stored n times.
+define void @__iyi_native_memset(ptr %dst, i64 %value, i64 %n) {
+entry:
+  %byte = trunc i64 %value to i8
+  br label %sh
+sh:
+  %si = phi i64 [ 0, label %entry ], [ %si2, label %sbody ]
+  %smore = icmp ult i64 %si, %n
+  br i1 %smore, label %sbody, label %sdone
+sbody:
+  %sp = getelementptr i8, ptr %dst, i64 %si
+  store i8 %byte, ptr %sp, align 1
+  %si2 = add i64 %si, 1
+  br label %sh
+sdone:
+  ret void
+}
+
+; Unsigned 128-bit division by restoring shift and subtract, from bit 127 down to bit 0. The result is the quotient
+; when want is 0 and the remainder otherwise.
+define internal i128 @iyi_native_udivmod(i128 %a, i128 %b, i128 %want) {
+entry:
+  %bz = icmp eq i128 %b, 0
+  %wr = icmp ne i128 %want, 0
+  br i1 %bz, label %zero, label %head
+zero:
+  ret i128 0
+head:
+  %i = phi i128 [ 127, label %entry ], [ %i2, label %body ]
+  %q = phi i128 [ 0, label %entry ], [ %q2, label %body ]
+  %r = phi i128 [ 0, label %entry ], [ %r2, label %body ]
+  %more = icmp sge i128 %i, 0
+  br i1 %more, label %body, label %exit
+body:
+  %sh = lshr i128 %a, %i
+  %bit = and i128 %sh, 1
+  %r1 = shl i128 %r, 1
+  %r1b = or i128 %r1, %bit
+  %ge = icmp uge i128 %r1b, %b
+  %rs = sub i128 %r1b, %b
+  %r2 = select i1 %ge, i128 %rs, i128 %r1b
+  %qb = shl i128 1, %i
+  %qo = or i128 %q, %qb
+  %q2 = select i1 %ge, i128 %qo, i128 %q
+  %i2 = sub i128 %i, 1
+  br label %head
+exit:
+  %out = select i1 %wr, i128 %r, i128 %q
+  ret i128 %out
+}
+
+; Signed 128-bit division on the magnitudes. The quotient is negative when the signs differ; the remainder takes the
+; sign of the dividend. The signed minimum divided by minus one wraps to the minimum, as two's complement does.
+define internal i128 @iyi_native_sdivmod(i128 %a, i128 %b, i128 %want) {
+entry:
+  %an = icmp slt i128 %a, 0
+  %na = sub i128 0, %a
+  %ua = select i1 %an, i128 %na, i128 %a
+  %bn = icmp slt i128 %b, 0
+  %nb = sub i128 0, %b
+  %ub = select i1 %bn, i128 %nb, i128 %b
+  %m = call i128 (i128, i128, i128) @iyi_native_udivmod(i128 %ua, i128 %ub, i128 %want)
+  %anz = zext i1 %an to i128
+  %bnz = zext i1 %bn to i128
+  %xs = xor i128 %anz, %bnz
+  %wr = icmp ne i128 %want, 0
+  %sg = select i1 %wr, i128 %anz, i128 %xs
+  %neg = icmp ne i128 %sg, 0
+  %nm = sub i128 0, %m
+  %out = select i1 %neg, i128 %nm, i128 %m
+  ret i128 %out
+}
+
+define i128 @__iyi_native_divti3(i128 %a, i128 %b) {
+entry:
+  %r = call i128 (i128, i128, i128) @iyi_native_sdivmod(i128 %a, i128 %b, i128 0)
+  ret i128 %r
+}
+
+define i128 @__iyi_native_udivti3(i128 %a, i128 %b) {
+entry:
+  %r = call i128 (i128, i128, i128) @iyi_native_udivmod(i128 %a, i128 %b, i128 0)
+  ret i128 %r
+}
+
+define i128 @__iyi_native_modti3(i128 %a, i128 %b) {
+entry:
+  %r = call i128 (i128, i128, i128) @iyi_native_sdivmod(i128 %a, i128 %b, i128 1)
+  ret i128 %r
+}
+
+define i128 @__iyi_native_umodti3(i128 %a, i128 %b) {
+entry:
+  %r = call i128 (i128, i128, i128) @iyi_native_udivmod(i128 %a, i128 %b, i128 1)
+  ret i128 %r
+}
+
+; Saturating float-to-128 conversions: NaN to zero, out of range to bounds.
+define i128 @__iyi_native_fptosi_sat_i128(double %x) {
+entry:
+  %bits = bitcast double %x to i64
+  %biased = lshr i64 %bits, 52
+  %exp = and i64 %biased, 2047
+  %small = icmp ult i64 %exp, 1023
+  br i1 %small, label %zero, label %special
+special:
+  %frac = and i64 %bits, 4503599627370495
+  %top = icmp eq i64 %exp, 2047
+  %payload = icmp ne i64 %frac, 0
+  %nan = and i1 %top, %payload
+  br i1 %nan, label %zero, label %range
+range:
+  %neg = icmp slt i64 %bits, 0
+  %past = icmp uge i64 %exp, 1150
+  br i1 %past, label %bound, label %shift
+bound:
+  %b = select i1 %neg, i128 -170141183460469231731687303715884105728, i128 170141183460469231731687303715884105727
+  ret i128 %b
+shift:
+  %sig = or i64 %frac, 4503599627370496
+  %wide = zext i64 %sig to i128
+  %e = sub i64 %exp, 1075
+  %up = icmp sge i64 %e, 0
+  br i1 %up, label %left, label %right
+left:
+  %el = zext i64 %e to i128
+  %ml = shl i128 %wide, %el
+  br label %sign
+right:
+  %en = sub i64 0, %e
+  %er = zext i64 %en to i128
+  %mr = lshr i128 %wide, %er
+  br label %sign
+sign:
+  %m = phi i128 [ %ml, label %left ], [ %mr, label %right ]
+  %nm = sub i128 0, %m
+  %v = select i1 %neg, i128 %nm, i128 %m
+  ret i128 %v
+zero:
+  ret i128 0
+}
+
+define i128 @__iyi_native_fptoui_sat_i128(double %x) {
+entry:
+  %bits = bitcast double %x to i64
+  %biased = lshr i64 %bits, 52
+  %exp = and i64 %biased, 2047
+  %small = icmp ult i64 %exp, 1023
+  %neg = icmp slt i64 %bits, 0
+  %none = or i1 %small, %neg
+  br i1 %none, label %zero, label %special
+special:
+  %frac = and i64 %bits, 4503599627370495
+  %top = icmp eq i64 %exp, 2047
+  %payload = icmp ne i64 %frac, 0
+  %nan = and i1 %top, %payload
+  br i1 %nan, label %zero, label %range
+range:
+  %past = icmp uge i64 %exp, 1151
+  br i1 %past, label %bound, label %shift
+bound:
+  ret i128 -1
+shift:
+  %sig = or i64 %frac, 4503599627370496
+  %wide = zext i64 %sig to i128
+  %e = sub i64 %exp, 1075
+  %up = icmp sge i64 %e, 0
+  br i1 %up, label %left, label %right
+left:
+  %el = zext i64 %e to i128
+  %ml = shl i128 %wide, %el
+  ret i128 %ml
+right:
+  %en = sub i64 0, %e
+  %er = zext i64 %en to i128
+  %mr = lshr i128 %wide, %er
+  ret i128 %mr
+zero:
+  ret i128 0
+}

@@ -1,0 +1,11 @@
+; iyi-ir 1
+source_filename = "keep_call"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external void @callee(i32)
+
+define internal void @keep_call(i32 %x) {
+entry:
+  call void (i32) @callee(i32 %x)
+  ret void
+}

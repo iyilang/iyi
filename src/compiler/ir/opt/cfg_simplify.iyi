@@ -1,0 +1,267 @@
+module compiler/ir/opt/cfg_simplify
+
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, Block}
+import compiler/ir/function::{Function}
+import compiler/ir/module::{Module}
+import compiler/ir/opt/analysis::{Cfg, DefUse, Use}
+import compiler/ir/opt/edit::{new_inst}
+
+# A predecessor list is maintained while a batch of block edits is in flight.
+def replace_predecessor(block : Block, old : Block, replacement : Block) : Nil
+  preds = [] of Block
+  block.preds.each do |pred|
+    next if pred == old
+    preds << pred unless preds.includes?(pred)
+  end
+  preds << replacement unless preds.includes?(replacement)
+  block.preds[0, block.preds.size] = preds
+end
+
+def remove_unreachable(fn : Function) : Bool
+  fn.relink
+  cfg = Cfg.new(fn)
+  kept = [] of Block
+  k = 0
+  while k < fn.blocks.size
+    kept << fn.blocks[k] if cfg.reachable?(k)
+    k = k + 1
+  end
+  return false if kept.size == fn.blocks.size
+  fn.blocks[0, fn.blocks.size] = kept
+  fn.relink
+  fn.blocks.each do |block|
+    block.insts.each do |inst|
+      break unless inst.op == Op::Phi
+      inst.keep_incoming(block.preds)
+    end
+  end
+  true
+end
+
+def collapse_same_targets(mod : Module, fn : Function) : Bool
+  changed = false
+  fn.blocks.each do |block|
+    term = block.terminator
+    if term.op == Op::CondBr && term.targets[0] == term.targets[1]
+      block.insts[block.insts.size - 1] = new_inst(Op::Br, mod.types.void, [] of Value, 0_i64, nil, [term.targets[0]] of Block)
+      changed = true
+    end
+  end
+  fn.relink if changed
+  changed
+end
+
+class BlockMerger
+  def initialize(@fn : Function)
+    # Most blocks do not begin with a single-predecessor phi. Constructing a
+    # function-wide use table is necessary only if a merge can remove one.
+    @du = nil.as(DefUse?)
+    @fn.blocks.each do |block|
+      next if block.insts.empty? || block.insts[0].op != Op::Phi || block.preds.size != 1
+      pred = block.preds[0]
+      next if pred == block || !pred.terminated?
+      term = pred.terminator
+      next unless term.op == Op::Br && term.targets[0] == block
+      @du = DefUse.new(@fn)
+      break
+    end
+    @removed = Hash(Block, Bool).new
+    @queued = Hash(Block, Bool).new
+    @work = [] of Block
+    @changed = false
+  end
+
+  def enqueue(block : Block) : Nil
+    return if @removed[block]? || @queued[block]?
+    @queued[block] = true
+    @work << block
+  end
+
+  def replace_phi(phi : Inst, value : Value) : Nil
+    du = @du
+    raise "BUG: missing phi use table" unless du
+    uses = du.uses(phi)
+    uses.each do |use|
+      du.remove(use.user, use.index)
+      use.user.args[use.index] = value
+      du.add(use.user, use.index)
+    end
+    k = 0
+    while k < phi.args.size
+      du.remove(phi, k)
+      k = k + 1
+    end
+  end
+
+  def merge(block : Block) : Nil
+    return if block == @fn.blocks[0] || @removed[block]? || block.preds.size != 1
+    pred = block.preds[0]
+    return if pred == block || @removed[pred]?
+    term = pred.terminator
+    return unless term.op == Op::Br && term.targets[0] == block
+    # A self-referential sole incoming value cannot be substituted for its definition.
+    block.insts.each do |inst|
+      break unless inst.op == Op::Phi
+      return if inst.args.size != 1 || inst.args[0] == inst
+    end
+
+    first = 0
+    while first < block.insts.size && block.insts[first].op == Op::Phi
+      phi = block.insts[first]
+      replace_phi(phi, phi.args[0])
+      first = first + 1
+    end
+    pred.insts.pop
+    while first < block.insts.size
+      pred.insts << block.insts[first]
+      first = first + 1
+    end
+    pred.no_vectorize = true if block.no_vectorize
+    @removed[block] = true
+    @changed = true
+
+    seen = Hash(Block, Bool).new
+    pred.terminator.targets.each do |succ|
+      next if seen[succ]?
+      seen[succ] = true
+      succ.insts.each do |inst|
+        break unless inst.op == Op::Phi
+        inst.move_incoming(block, pred)
+      end
+      replace_predecessor(succ, block, pred)
+      enqueue(succ)
+    end
+    enqueue(pred)
+  end
+
+  def run : Bool
+    @fn.blocks.each { |block| enqueue(block) }
+    cursor = 0
+    while cursor < @work.size
+      block = @work[cursor]
+      cursor = cursor + 1
+      @queued[block] = false
+      merge(block)
+    end
+    return false unless @changed
+    kept = [] of Block
+    @fn.blocks.each { |block| kept << block unless @removed[block]? }
+    @fn.blocks[0, @fn.blocks.size] = kept
+    @fn.relink
+    true
+  end
+end
+
+class EmptyBlockForwarder
+  def initialize(@fn : Function)
+    @removed = Hash(Block, Bool).new
+    @queued = Hash(Block, Bool).new
+    @work = [] of Block
+    @changed = false
+  end
+
+  def enqueue(block : Block) : Nil
+    return if @removed[block]? || @queued[block]?
+    @queued[block] = true
+    @work << block
+  end
+
+  def ordinary_branch?(term : Inst) : Bool
+    term.op == Op::Br || term.op == Op::CondBr || term.op == Op::Switch
+  end
+
+  def can_forward?(block : Block, succ : Block) : Bool
+    return false if block == succ || @removed[succ]? || block.preds.empty?
+    resulting_pred_count = succ.preds.size - 1 + block.preds.size
+    block.preds.each do |pred|
+      return false if @removed[pred]? || !ordinary_branch?(pred.terminator)
+      multiple_successors = false
+      pred.terminator.targets.each do |target|
+        return false if target == succ
+        multiple_successors = true if target != block
+      end
+      # Redirecting this edge must not introduce a critical edge.
+      return false if multiple_successors && resulting_pred_count > 1
+    end
+    true
+  end
+
+  def forward(block : Block) : Nil
+    return if block == @fn.blocks[0] || @removed[block]? || block.no_vectorize
+    return unless block.insts.size == 1 && block.terminator.op == Op::Br
+    succ = block.terminator.targets[0]
+    return unless can_forward?(block, succ)
+    preds = [] of Block
+    block.preds.each { |pred| preds << pred }
+
+    # The removed block has no definitions. Its incoming phi value is available
+    # on each of its predecessor edges; replace the pair with those edges.
+    succ.insts.each do |phi|
+      break unless phi.op == Op::Phi
+      values = [] of Value
+      targets = [] of Block
+      k = 0
+      while k < phi.targets.size
+        if phi.targets[k] == block
+          preds.each do |pred|
+            values << phi.args[k]
+            targets << pred
+          end
+        else
+          values << phi.args[k]
+          targets << phi.targets[k]
+        end
+        k = k + 1
+      end
+      phi.args[0, phi.args.size] = values
+      phi.targets[0, phi.targets.size] = targets
+    end
+    preds.each do |pred|
+      targets = pred.terminator.targets
+      k = 0
+      while k < targets.size
+        targets[k] = succ if targets[k] == block
+        k = k + 1
+      end
+    end
+    new_preds = [] of Block
+    succ.preds.each { |pred| new_preds << pred unless pred == block }
+    preds.each { |pred| new_preds << pred unless new_preds.includes?(pred) }
+    succ.preds[0, succ.preds.size] = new_preds
+    @removed[block] = true
+    @changed = true
+    preds.each { |pred| enqueue(pred) }
+    enqueue(succ)
+  end
+
+  def run : Bool
+    @fn.blocks.each { |block| enqueue(block) }
+    cursor = 0
+    while cursor < @work.size
+      block = @work[cursor]
+      cursor = cursor + 1
+      @queued[block] = false
+      forward(block)
+    end
+    return false unless @changed
+    kept = [] of Block
+    @fn.blocks.each { |block| kept << block unless @removed[block]? }
+    @fn.blocks[0, @fn.blocks.size] = kept
+    @fn.relink
+    true
+  end
+end
+
+pub def run_cfg_simplify(mod : Module, fn : Function) : Bool
+  return false if fn.declaration?
+  changed = remove_unreachable(fn)
+  changed = true if collapse_same_targets(mod, fn)
+  while true
+    merged = BlockMerger.new(fn).run
+    forwarded = EmptyBlockForwarder.new(fn).run
+    break unless merged || forwarded
+    changed = true
+  end
+  changed
+end

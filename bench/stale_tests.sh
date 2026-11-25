@@ -792,9 +792,13 @@ assert ({{ env("CRYSTAL_DAEMON_SOCKET") || "unset" }}) == "unset"
 IYI
 fi
 if [ "$WINDOWS" -eq 1 ]; then
-  # A repeated layer name may be folded by the Windows loader into the first, so
-  # the second value adds a different layer rather than repeating one.
-  r28_first=RunAsInvoker; r28_second="RunAsInvoker 256Color"; r28_name=__COMPAT_LAYER
+  # The Windows loader reads `__COMPAT_LAYER` when it starts a process and
+  # hands the process only what it kept: a process started with
+  # `RunAsInvoker 256Color` sees `RunAsInvoker` (job 139040654616, run
+  # 45565948260), so a second value of that spelling changed nothing the build
+  # could see and the receipt rightly hit. `RunAsInvoker HighDpiAware` arrives
+  # whole, and adds a different layer rather than repeating the first.
+  r28_first=RunAsInvoker; r28_second="RunAsInvoker HighDpiAware"; r28_name=__COMPAT_LAYER
 else
   r28_first=/tmp/r28_dir1; r28_second=/tmp/r28_dir2; r28_name=DYLD_LIBRARY_PATH
 fi
@@ -840,7 +844,11 @@ r28_limited() {
   if [ "$WINDOWS" -eq 0 ]; then
     (cur_nofile=$(ulimit -S -n); ulimit -S -n $((cur_nofile - 1)); run_json "$WORK/r28" "$@")
   else
-    python3 - "$IYI" "$WORK/r28" "$@" <<'PY'
+    # The directory is entered here, not named to python: the key holds the
+    # test file's path as `__FILE__` (D18), so a run started from a spelling of
+    # the directory that bash does not give (`RUNNER~1` for `runneradmin`) is
+    # another build, and the miss would name its call path, not the limit.
+    (cd "$WORK/r28" && python3 - "$IYI" "$@" <<'PY'
 import ctypes, subprocess, sys
 from ctypes import wintypes
 
@@ -875,10 +883,11 @@ if not k.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(lim
 if not k.AssignProcessToJobObject(job, k.GetCurrentProcess()):
     raise ctypes.WinError(ctypes.get_last_error())
 try:
-    sys.exit(subprocess.call([sys.argv[1], "test", "--cached", "--json", *sys.argv[3:]], cwd=sys.argv[2]))
+    sys.exit(subprocess.call([sys.argv[1], "test", "--cached", "--json", *sys.argv[2:]]))
 finally:
     k.CloseHandle(job)
 PY
+    )
   fi
 }
 r28_explain="$WORK/r28-explain.txt"
@@ -1749,12 +1758,16 @@ IYI
 done
 rm -rf "$CACHE/tests-v1"
 if [ "$WINDOWS" -eq 1 ]; then
-  python3 - "$IYI" "$r58" "$r58_ctl" "$CACHE" <<'PY'
+  (cd "$r58" && R58_CTL="$r58_ctl" python3 - "$IYI" "$r58" "$r58_ctl" "$CACHE" <<'PY'
 import ctypes, glob, os, signal, subprocess, sys, time
 from ctypes import wintypes
 
 iyi, root, ctl, cache = sys.argv[1:]
-env = dict(os.environ, R58_CTL=ctl)
+# The runner inherits this process's directory and environment, as the rerun
+# inherits bash's: `cwd=root` spelled the directory `RUNNER~1` where bash's `cd`
+# says `runneradmin`, and `dict(os.environ)` spells every name in upper case.
+# The key holds the test file's path as `__FILE__` (D18), so a rerun from
+# another spelling is another build and the finished tests' receipts do not hit.
 k = ctypes.WinDLL("kernel32", use_last_error=True)
 k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 k.OpenProcess.restype = wintypes.HANDLE
@@ -1765,7 +1778,7 @@ handles = []
 with open(os.path.join(root, "interrupted.json"), "wb") as out, \
      open(os.path.join(root, "interrupted.err"), "wb") as err:
     runner = subprocess.Popen([iyi, "test", "--fresh", "--json", "-p", "4", "."],
-                              cwd=root, env=env, stdout=out, stderr=err,
+                              stdout=out, stderr=err,
                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
     try:
         deadline = time.monotonic() + 180
@@ -1811,6 +1824,7 @@ with open(os.path.join(root, "interrupted.json"), "wb") as out, \
         for _, handle in handles:
             k.CloseHandle(handle)
 PY
+  )
 else
 (cd "$r58" && R58_CTL="$r58_ctl" exec "$IYI" test --fresh --json -p 4 .) > "$r58/interrupted.json" 2> "$r58/interrupted.err" &
 r58_pid=$!

@@ -1,0 +1,15 @@
+; iyi-ir 1
+source_filename = "pure_merge"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @pure_merge(i32 %x) {
+entry:
+  %a = add nsw i32 %x, 1
+  %plain = add i32 %x, 1
+  %cmp1 = icmp slt i32 %a, %plain
+  %cmp3 = icmp sgt i32 %a, %plain
+  %both = xor i1 %cmp1, %cmp1
+  %picked = select i1 %both, i32 %a, i32 %a
+  %out = select i1 %cmp3, i32 %picked, i32 %plain
+  ret i32 %out
+}

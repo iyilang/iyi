@@ -65,6 +65,16 @@ fixture_check() {
   echo "  ok: $pass/$name"
 }
 
+# Record each new fixture both after its individual pass and after the full
+# release tier. The stats command reports instructions and blocks before/after.
+fixture_stats() {
+  local pass="$1" file="$2"
+  echo "  stats $pass/$(basename "$file") pass"
+  "$DRV" stats "$pass" "$(native_path "$file")" || fail "stats failed for $pass/$file"
+  echo "  stats $pass/$(basename "$file") release"
+  "$DRV" stats release "$(native_path "$file")" || fail "release stats failed for $pass/$file"
+}
+
 # The status is written before doing work, and changed only once the mutant's
 # behavior is observed. Older mutation.sh counts every nonzero as caught, so
 # the caller separately requires status 1, never a build/runtime failure (2).
@@ -241,8 +251,8 @@ for name in unreachable_block merge_chain forward_empty condbr_same_targets; do 
 fixture_check cfg-simplify forward_blocked_by_phi_conflict keep
 for name in straight_line diamond loop nested_loops uninitialized_read pointer_slot i1_slot null_uninitialized unreachable_predecessor; do fixture_check mem2reg "$name" changed; done
 for name in escaping_slot volatile_slot aggregate_slot atomic_slot tls_slot stored_address unreachable_slot_use; do fixture_check mem2reg "$name" keep; done
-for name in fold_int fold_icmp_signed identities trivial_phi condbr_const overflow_flag_unused fold_double power_of_two switch_const expect_const fold_cast fold_divrem fold_double_ops trivial_self_phi; do fixture_check simplify "$name" changed; done
-for name in float32_keep div_by_zero_keep fold_safety_keep ptrtoint_mul_keep; do fixture_check simplify "$name" keep; done
+for name in fold_int fold_icmp_signed identities trivial_phi condbr_const overflow_flag_unused fold_double power_of_two switch_const expect_const fold_cast fold_divrem fold_double_ops trivial_self_phi constant_global; do fixture_check simplify "$name" changed; done
+for name in float32_keep div_by_zero_keep fold_safety_keep ptrtoint_mul_keep constant_global_keep; do fixture_check simplify "$name" keep; done
 for name in dead_arith dead_phi_cycle dead_plain_load; do fixture_check dce "$name" changed; done
 for name in keep_store keep_call keep_volatile_load keep_marking_load_used keep_call_unreachable keep_atomic; do fixture_check dce "$name" keep; done
 for name in fields mixed_union single_union memset memcpy whole; do fixture_check sroa "$name" changed; done
@@ -252,6 +262,40 @@ for name in guards tls_keep always_runtime_keep; do fixture_check inline "$name"
 fixture_check deadfn roots changed
 fixture_check deadfn global_keep keep
 fixture_check deadfn asm_keep keep
+
+echo '== 2a. common subexpression elimination'
+for file in "$FIXTURES/cse/"*.ir; do
+  case "$file" in *.out.ir) continue ;; esac
+  name=$(basename "$file" .ir)
+  if [ -f "$FIXTURES/cse/$name.out.ir" ]; then fixture_check cse "$name" changed; else fixture_check cse "$name" keep; fi
+  fixture_stats cse "$file"
+done
+
+echo '== 2b. range proof'
+for file in "$FIXTURES/prove/"*.ir; do
+  case "$file" in *.out.ir) continue ;; esac
+  name=$(basename "$file" .ir)
+  if [ -f "$FIXTURES/prove/$name.out.ir" ]; then fixture_check prove "$name" changed; else fixture_check prove "$name" keep; fi
+  fixture_stats prove "$file"
+done
+
+echo '== 2c. loop-invariant code motion'
+for file in "$FIXTURES/licm/"*.ir; do
+  case "$file" in *.out.ir) continue ;; esac
+  name=$(basename "$file" .ir)
+  if [ -f "$FIXTURES/licm/$name.out.ir" ]; then fixture_check licm "$name" changed; else fixture_check licm "$name" keep; fi
+  fixture_stats licm "$file"
+done
+
+echo '== 2d. block layout'
+for file in "$FIXTURES/layout/"*.ir; do
+  case "$file" in *.out.ir) continue ;; esac
+  name=$(basename "$file" .ir)
+  if [ -f "$FIXTURES/layout/$name.out.ir" ]; then fixture_check layout "$name" changed; else fixture_check layout "$name" keep; fi
+  fixture_stats layout "$file"
+done
+fixture_stats simplify "$FIXTURES/simplify/constant_global.ir"
+fixture_stats simplify "$FIXTURES/simplify/constant_global_keep.ir"
 
 echo '== 3. default pipeline fixtures, determinism and idempotence'
 echo '== 3a. preserve entry frames across release rounds'
@@ -266,9 +310,18 @@ else
 fi
 fixture_check default locals_loop changed
 fixture_check release full changed
+fixture_check release scalar_slot changed
+if ! "$DRV" print "$(native_path "$FIXTURES/licm/invariant_arith.out.ir")" >"$WORK/licm-release-expected.ir" 2>"$WORK/licm-release.err" || \
+   ! "$DRV" run --verify-each release "$(native_path "$FIXTURES/licm/invariant_arith.ir")" >"$WORK/licm-release-actual.ir" 2>"$WORK/licm-release.err" || \
+   ! cmp -s "$WORK/licm-release-expected.ir" "$WORK/licm-release-actual.ir"; then
+  fail 'release tier did not hoist live invariant arithmetic'
+  diff -u "$WORK/licm-release-expected.ir" "$WORK/licm-release-actual.ir" >&2 || true
+else
+  echo '  ok: release/live invariant arithmetic'
+fi
 
 echo '== 4. CLI contract'
-printf 'cfg-simplify\tdefault,release\nmem2reg\tdefault,release\nsimplify\tdefault,release\ndce\tdefault,release\nsroa\trelease\ninline\trelease\ndeadfn\trelease\n' >"$WORK/passes.expected"
+printf 'cfg-simplify\tdefault,release\nmem2reg\tdefault,release\nsimplify\tdefault,release\ndce\tdefault,release\nsroa\trelease\ninline\trelease\ndeadfn\trelease\ncse\trelease\nprove\trelease\nlicm\trelease\nlayout\trelease\n' >"$WORK/passes.expected"
 if ! "$DRV" passes >"$WORK/passes.actual" 2>"$WORK/cli.err" || ! cmp -s "$WORK/passes.expected" "$WORK/passes.actual"; then
   fail 'passes did not list the expected names and tiers'
 fi
@@ -375,13 +428,13 @@ echo '== 5. diamond-chain scaling'
 # Each size is run three times and the least figure is kept: the child's CPU
 # time where the host reports it, so other jobs on the machine do not stretch
 # it, and elapsed time elsewhere.
-if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" "${NATIVE_OPT_SCALE_K:-2048}" "${NATIVE_OPT_RELEASE_SCALE_K:-4096}" <<'PY'
+if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" "${NATIVE_OPT_SCALE_K:-2048}" "${NATIVE_OPT_RELEASE_SCALE_K:-4096}" "${NATIVE_OPT_LOOP_SCALE_K:-2048}" <<'PY'
 import os, subprocess, sys, time
 try:
     import resource
 except ImportError:
     resource = None
-binary, work, text_k, text_release_k = sys.argv[1:]
+binary, work, text_k, text_release_k, text_loop_k = sys.argv[1:]
 try:
     k = int(text_k)
 except ValueError:
@@ -394,6 +447,12 @@ except ValueError:
     sys.exit('NATIVE_OPT_RELEASE_SCALE_K must be an integer')
 if release_k < 64:
     sys.exit('NATIVE_OPT_RELEASE_SCALE_K must be at least 64')
+try:
+    loop_k = int(text_loop_k)
+except ValueError:
+    sys.exit('NATIVE_OPT_LOOP_SCALE_K must be an integer')
+if loop_k < 64:
+    sys.exit('NATIVE_OPT_LOOP_SCALE_K must be at least 64')
 
 def generate(n, path):
     with open(path, 'w', encoding='utf-8', newline='\n') as f:
@@ -431,14 +490,50 @@ def generate_release(n, path):
             else:
                 f.write('  ret i64 %x\n}\n')
 
+def generate_loops(n, path, nested):
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('; iyi-ir 1\nsource_filename = "loop-scale"\n')
+        f.write('target triple = "aarch64-apple-darwin"\n')
+        f.write('target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"\n')
+        if nested:
+            f.write('declare external void @consume(i64)\n')
+        f.write('define external i64 @loops(i64 %limit, i64 %seed) {\nentry:\n  br label %head0\n')
+        for i in range(n):
+            prev = 'entry' if i == 0 else 'head%d' % (i - 1)
+            f.write('head%d:\n' % i)
+            f.write('  %%iv%d = phi i64 [ 0, label %%%s ], [ %%next%d, label %%latch%d ]\n' % (i, prev, i, i))
+            if not nested:
+                previous = '%seed' if i == 0 else '%%acc%d' % (i - 1)
+                f.write('  %%acc%d = phi i64 [ %s, label %%%s ], [ %%sum%d, label %%latch%d ]\n' % (i, previous, prev, i, i))
+            f.write('  %%cond%d = icmp slt i64 %%iv%d, %%limit\n' % (i, i))
+            if nested:
+                inside = 'head%d' % (i + 1) if i + 1 < n else 'body'
+                outside = 'done' if i == 0 else 'latch%d' % (i - 1)
+            else:
+                inside = 'latch%d' % i
+                outside = 'head%d' % (i + 1) if i + 1 < n else 'done'
+            f.write('  br i1 %%cond%d, label %%%s, label %%%s\n' % (i, inside, outside))
+        if nested:
+            f.write('body:\n  call void (i64) @consume(i64 %%iv%d)\n  br label %%latch%d\n' % (n - 1, n - 1))
+        for i in range(n):
+            f.write('latch%d:\n' % i)
+            if not nested:
+                f.write('  %%sum%d = add i64 %%acc%d, %%iv%d\n' % (i, i, i))
+            f.write('  %%next%d = add i64 %%iv%d, 1\n  br label %%head%d\n' % (i, i, i))
+        result = '%seed' if nested else '%%acc%d' % (n - 1)
+        f.write('done:\n  ret i64 %s\n}\n' % result)
+
 def child_cpu():
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     return usage.ru_utime + usage.ru_stime
 
-def run(n, verified, repeats=1, tier='default'):
+def run(n, verified, repeats=1, tier='default', shape='calls'):
     if tier == 'release':
-        path = os.path.join(work, 'call-chain-%d.ir' % n)
-        generate_release(n, path)
+        path = os.path.join(work, '%s-%d.ir' % (shape, n))
+        if shape == 'calls':
+            generate_release(n, path)
+        else:
+            generate_loops(n, path, shape == 'nested-loops')
     else:
         path = os.path.join(work, 'scale-%d.ir' % n)
         generate(n, path)
@@ -448,14 +543,16 @@ def run(n, verified, repeats=1, tier='default'):
         before = child_cpu() if resource else 0.0
         start = time.monotonic()
         try:
-            completed = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                       timeout=180)
+            output = subprocess.PIPE if verified and shape != 'calls' and tier == 'release' else subprocess.DEVNULL
+            completed = subprocess.run(cmd, stdout=output, stderr=subprocess.PIPE, timeout=180)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise RuntimeError('scale run could not complete: %s' % exc)
         elapsed = time.monotonic() - start
         if completed.returncode != 0:
             raise RuntimeError('scale run failed (%d): %s' %
                                (completed.returncode, completed.stderr.decode('utf-8', 'replace')))
+        if verified and shape != 'calls' and tier == 'release' and completed.stdout.count(b' = phi ') < n:
+            raise RuntimeError('%s scale input lost loop headers' % shape)
         spent = child_cpu() - before if resource else elapsed
         if least is None or spent < least:
             least = spent
@@ -490,6 +587,23 @@ try:
 except RuntimeError as exc:
     print(str(exc), file=sys.stderr)
     failed = True
+for shape in ('sequential-loops', 'nested-loops'):
+    print('== 6. release %s scaling' % shape)
+    try:
+        run(max(8, loop_k // 8), True, tier='release', shape=shape)
+        small = run(loop_k, False, 3, 'release', shape)
+        large = run(2 * loop_k, False, 3, 'release', shape)
+        ratio = large / small if small > 0 else float('inf')
+        print('  %s K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s, least of 3)' %
+              (shape, loop_k, small, 2 * loop_k, large, ratio,
+               'cpu' if resource else 'elapsed'))
+        if large < 0.5:
+            raise RuntimeError('%s 2K run is under 0.5s; increase NATIVE_OPT_LOOP_SCALE_K' % shape)
+        if ratio > 3.0:
+            raise RuntimeError('%s 2K/K exceeds 3.0' % shape)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        failed = True
 sys.exit(1 if failed else 0)
 PY
 then
@@ -553,6 +667,51 @@ prove_mutation 'M10: callees before callers' src/compiler/ir/opt/callgraph.iyi \
   '          pending[own] = pending[own] + 0 # mutation S6-order: caller waits for callee' \
   -- mutation_check M10 inline bottom_up || fail 'M10 was not caught'
 mutation_result M10
+prove_mutation 'M11: mutable globals are not constants' src/compiler/ir/opt/simplify.iyi \
+  '    return nil unless global.constant # mutation S8-global: only immutable globals fold' \
+  '    return nil if false # mutation S8-global: only immutable globals fold' \
+  -- mutation_check M11 simplify constant_global_keep || fail 'M11 was not caught'
+mutation_result M11
+prove_mutation 'M12: stores invalidate earlier loads' src/compiler/ir/opt/cse.iyi \
+  '        version = @boundaries[inst] # mutation CSE-store: invalidate loads at each store' \
+  '        version = @entry_version[block] # mutation CSE-store: invalidate loads at each store' \
+  -- mutation_check M12 cse store_clobber_keep || fail 'M12 was not caught'
+mutation_result M12
+prove_mutation 'M13: opaque accesses cannot be merged' src/compiler/ir/opt/cse.iyi \
+  '      if opaque?(inst) || marking_read?(inst) # mutation CSE-opaque: preserve opaque operations' \
+  '      if false # mutation CSE-opaque: preserve opaque operations' \
+  -- mutation_check M13 cse opaque_keep || fail 'M13 was not caught'
+mutation_result M13
+prove_mutation 'M14: a fact belongs only to its own successor' src/compiler/ir/opt/prove.iyi \
+  '        truth = @cfg.index(term.targets[0]) == block # mutation M14: opposite successor fact' \
+  '        truth = @cfg.index(term.targets[0]) != block # mutation M14: opposite successor fact' \
+  -- mutation_check M14 prove edge_relation || fail 'M14 was not caught'
+mutation_result M14
+prove_mutation 'M15: induction bound is not one too wide' src/compiler/ir/opt/prove.iyi \
+  '        return upper + step if add_fits?(upper, step, lo, hi) # mutation M15: widen induction range' \
+  '        return upper + step + 1_i64 if add_fits?(upper, step, lo, hi - 1_i64) # mutation M15: widen induction range' \
+  -- mutation_check M15 prove bounded_exit || fail 'M15 was not caught'
+mutation_result M15
+prove_mutation 'M16: trapping division stays in the loop' src/compiler/ir/opt/licm.iyi \
+  '  return false if inst.op == Op::SDiv || inst.op == Op::UDiv || inst.op == Op::SRem || inst.op == Op::URem # mutation M16: never speculate integer division' \
+  '  return false if inst.op == Op::UDiv || inst.op == Op::SRem || inst.op == Op::URem # mutation M16: never speculate integer division' \
+  -- mutation_check M16 licm div_keep || fail 'M16 was not caught'
+mutation_result M16
+prove_mutation 'M17: hoisted operands dominate the preheader' src/compiler/ir/opt/licm.iyi \
+  '    return false unless @dom.dominates?(location, preheader) # mutation M17: the operand must dominate the preheader' \
+  '    return false if false # mutation M17: the operand must dominate the preheader' \
+  -- mutation_check M17 licm dominance_keep || fail 'M17 was not caught'
+mutation_result M17
+prove_mutation 'M18: expect false chooses its unlikely successor' src/compiler/ir/opt/layout.iyi \
+  '    return @cfg.index(term.targets[0]) if expected.aux_int == 0_i64 # mutation M18: cold false edge' \
+  '    return @cfg.index(term.targets[1]) if expected.aux_int == 0_i64 # mutation M18: cold false edge' \
+  -- mutation_check M18 layout cold_last || fail 'M18 was not caught'
+mutation_result M18
+prove_mutation 'M20: preserve every block during layout' src/compiler/ir/opt/layout.iyi \
+  '    @fn.blocks[0, @fn.blocks.size] = ordered # mutation M20: preserve every block' \
+  '    @fn.blocks[0, @fn.blocks.size] = ordered[0, ordered.size - 1] # mutation M20: preserve every block' \
+  -- mutation_check M20 layout unreachable_phi || fail 'M20 was not caught'
+mutation_result M20
 
 echo '== 8. verdict'
 if [ "$failed" -eq 0 ]; then

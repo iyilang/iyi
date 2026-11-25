@@ -1,0 +1,65 @@
+; iyi-ir 1
+source_filename = "loop_barriers_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external void @callee()
+
+define internal i64 @loop_store(ptr %p, ptr %q, i64 %x, i1 %again) {
+entry:
+  %before = load i64, ptr %p, align 8
+  br label %head
+head:
+  %inside = load i64, ptr %p, align 8
+  br i1 %again, label %body, label %done
+body:
+  store i64 %x, ptr %q, align 8
+  br label %head
+done:
+  %sum = add i64 %before, %inside
+  ret i64 %sum
+}
+
+define internal i64 @loop_call(ptr %p, i1 %again) {
+entry:
+  %before = load i64, ptr %p, align 8
+  br label %head
+head:
+  %inside = load i64, ptr %p, align 8
+  br i1 %again, label %body, label %done
+body:
+  call void () @callee()
+  br label %head
+done:
+  %sum = add i64 %before, %inside
+  ret i64 %sum
+}
+
+define internal i64 @loop_fence(ptr %p, i1 %again) {
+entry:
+  %before = load i64, ptr %p, align 8
+  br label %head
+head:
+  %inside = load i64, ptr %p, align 8
+  br i1 %again, label %body, label %done
+body:
+  fence seq_cst
+  br label %head
+done:
+  %sum = add i64 %before, %inside
+  ret i64 %sum
+}
+
+define internal i64 @loop_atomic(ptr %p, ptr %q, i1 %again) {
+entry:
+  %before = load i64, ptr %p, align 8
+  br label %head
+head:
+  %inside = load i64, ptr %p, align 8
+  br i1 %again, label %body, label %done
+body:
+  %atomic = load i64, ptr %q, align 8 atomic acquire
+  br label %head
+done:
+  %sum = add i64 %before, %inside
+  ret i64 %sum
+}

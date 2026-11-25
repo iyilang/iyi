@@ -1,0 +1,38 @@
+; iyi-ir 1
+source_filename = "opaque_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+@__iyi_marking = external global i8
+
+define internal i8 @marker() {
+entry:
+  %a = load i8, ptr @__iyi_marking, align 1
+  %b = load i8, ptr @__iyi_marking, align 1
+  %sum = add i8 %a, %b
+  ret i8 %sum
+}
+
+define internal i8 @marker_alias() {
+entry:
+  %address = getelementptr i8, ptr @__iyi_marking, i64 0
+  %a = load i8, ptr %address, align 1
+  %b = load i8, ptr %address, align 1
+  %sum = add i8 %a, %b
+  ret i8 %sum
+}
+
+define internal i64 @volatile_reads(ptr %p) {
+entry:
+  %a = volatile load i64, ptr %p, align 8
+  %b = volatile load i64, ptr %p, align 8
+  %sum = add i64 %a, %b
+  ret i64 %sum
+}
+
+define internal i64 @atomic_reads(ptr %p) {
+entry:
+  %a = load i64, ptr %p, align 8 atomic acquire
+  %b = load i64, ptr %p, align 8 atomic acquire
+  %sum = add i64 %a, %b
+  ret i64 %sum
+}

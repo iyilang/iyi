@@ -24,10 +24,10 @@ end
 def shared_cmp(x : Int64) : Int64
   x > 5_i64 ? 1_i64 : 7_i64
 end
+
 def null_eq(p : Pointer(Int64)) : Int64
   p.address == 0_u64 ? 61_i64 : 62_i64
 end
-
 
 puts "#{compare(6_i64)}"
 puts "#{compare(4_i64)}"

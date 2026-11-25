@@ -402,6 +402,7 @@ pub class Encoder
       raise "the encoder has no form for #{op}"
     end
   end
+
   # A far conditional branch uses its inverse to skip a full-range B. The
   # short form remains one word, and the caller re-encodes after relaxation.
   def conditional_branch(op : MOp, inst : MInst) : Nil
@@ -437,7 +438,6 @@ pub class Encoder
       word(base | ((inst.imm & 32_i64) << 26) | ((inst.imm & 31_i64) << 19) | field(inst.uses[0].reg))
     end
   end
-
 
   # An inline asm body: the template assembled over the registers regalloc gave its operands, outputs first and then
   # inputs, which is the order `$N` numbers them. A relocation's symbol is looked up in the body's table; a name the

@@ -1,0 +1,61 @@
+; Aggregate copies and fills inside memory routines must not route back to those routines.
+define ptr @memcpy(ptr %dst, ptr %src, i64 %n) {
+entry:
+  %scratch = alloca [256 x i8], align 8
+  intrinsic llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 128, i1 false)
+  intrinsic llvm.memset.p0.i64(ptr %scratch, i8 -16, i64 128, i1 false)
+  ret ptr %dst
+}
+define ptr @memmove(ptr %dst, ptr %src, i64 %n) {
+entry:
+  intrinsic llvm.memmove.p0.p0.i64(ptr %dst, ptr %src, i64 %n, i1 false)
+  ret ptr %dst
+}
+define ptr @memset(ptr %dst, i32 %value, i64 %n) {
+entry:
+  %byte = trunc i32 %value to i8
+  intrinsic llvm.memset.p0.i64(ptr %dst, i8 %byte, i64 %n, i1 false)
+  ret ptr %dst
+}
+define i32 @main() {
+entry:
+  %src = alloca [128 x i8], align 8
+  %dst = alloca [256 x i8], align 8
+  br label %init
+init:
+  %i = phi i64 [ 0, label %entry ], [ %in, label %init_body ]
+  %more = icmp ult i64 %i, 128
+  br i1 %more, label %init_body, label %work
+init_body:
+  %p = getelementptr i8, ptr %src, i64 %i
+  %mul = mul i64 %i, 17
+  %raw = add i64 %mul, 3
+  %byte = trunc i64 %raw to i8
+  store i8 %byte, ptr %p, align 1
+  %in = add i64 %i, 1
+  br label %init
+work:
+  intrinsic llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 128, i1 false)
+  %filled = getelementptr i8, ptr %dst, i64 128
+  intrinsic llvm.memset.p0.i64(ptr %filled, i8 -91, i64 128, i1 false)
+  %d1 = getelementptr i8, ptr %dst, i64 1
+  intrinsic llvm.memmove.p0.p0.i64(ptr %d1, ptr %dst, i64 127, i1 false)
+  br label %output
+output:
+  %j = phi i64 [ 0, label %work ], [ %jn, label %output_body ]
+  %jm = icmp ult i64 %j, 128
+  br i1 %jm, label %output_body, label %done
+output_body:
+  %out = getelementptr i8, ptr %dst, i64 %j
+  %v = load i8, ptr %out, align 1
+  %w = zext i8 %v to i32
+  %printed = call i32 (ptr, ...) @printf(ptr @fmt, i32 %w)
+  %fillp = getelementptr i8, ptr %filled, i64 %j
+  %fillv = load i8, ptr %fillp, align 1
+  %fillw = zext i8 %fillv to i32
+  %fillprinted = call i32 (ptr, ...) @printf(ptr @fmt, i32 %fillw)
+  %jn = add i64 %j, 1
+  br label %output
+done:
+  ret i32 0
+}

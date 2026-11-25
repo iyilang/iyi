@@ -1072,6 +1072,13 @@ jobs:
         env:
           IYI_CI_PRODUCER: "1"
         run: |
+          # The windows-2025 image sets PGPASSWORD for its preinstalled
+          # PostgreSQL (job 139151730471 of the tail probe: "Sensitive variable
+          # name: PGPASSWORD"). It is the image's, not a credential this
+          # workflow passes, but the step runs test code and the assertion
+          # rightly refuses a variable of that name: take it out of this
+          # step's environment rather than teach the assertion an exception.
+          unset PGPASSWORD
           bash bench/stale_ci.sh assert-export-env
           mkdir -p stale-index
           args=(
@@ -1248,6 +1255,12 @@ jobs:
         env:
           IYI_CI_PRODUCER: "1"
         run: |
+          # The windows-2025 image sets PGPASSWORD for its preinstalled
+          # PostgreSQL. It is the image's, not a credential this workflow
+          # passes, but the step runs test code and the assertion rightly
+          # refuses a variable of that name: take it out of this step's
+          # environment rather than teach the assertion an exception.
+          unset PGPASSWORD
           bash bench/stale_ci.sh assert-export-env
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           "$IYI" test --fresh --json \

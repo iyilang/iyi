@@ -68,6 +68,7 @@ fatal() {
 }
 llvm_bridge_text=$(llvm_bridge_build_args) || fatal "FAILED to discover LLVM bridge build arguments"
 IYI_TYPED_ORACLE_FLAGS=$(printf '%s\n' "$llvm_bridge_text" | awk '/^-D/ { sub(/^-D/, ""); printf "%s ", $0 }')
+IYI_TYPED_DEFINES=$(printf '%s\n' "$llvm_bridge_text" | awk '/^-D/ { printf "%s ", $0 }')
 export IYI_TYPED_ORACLE_FLAGS
 
 
@@ -138,7 +139,7 @@ measure() {
     if [ "$BARE" != 1 ] && [ "$corpus" != prelude ]; then
       port_flag="--with-prelude"
     fi
-    if "$TYPED" $port_flag "$REPO_NATIVE/$rel" "$@" > "$WORK/p.txt" 2> "$WORK/p.err"; then
+    if "$TYPED" $IYI_TYPED_DEFINES $port_flag "$REPO_NATIVE/$rel" "$@" > "$WORK/p.txt" 2> "$WORK/p.err"; then
       sort "$WORK/p.txt" > "$WORK/p.sorted"
       matched=$(comm -12 "$WORK/o.sorted" "$WORK/p.sorted" | wc -l | tr -d ' ')
       note="-"

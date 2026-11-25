@@ -23,8 +23,8 @@
 #        (src/iyi), std (src/std) and the samples (samples/iyi). Each file's
 #        agreeing-record count is checked against the committed floor
 #        (bench/selfhost_semantic_declarations.floor), which may only rise. A
-#        file the oracle cannot analyse is reported ORACLE with its reason and
-#        is not measured. A file the port rejects counts zero and is reported PORT.
+#        file the oracle cannot analyse fails the gate with its reason.
+#        A file the port rejects counts zero and is reported PORT.
 #   6. Guarded mutation proofs on the fixtures (bench/lib/mutation.sh).
 #
 # Environment:
@@ -65,6 +65,9 @@ status=0
 : > "$RESULTS"
 
 . "$REPO/bench/lib/mutation.sh"
+llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED to discover LLVM bridge build arguments"; exit 1; }
+IYI_DECLARATION_FLAGS=$(printf '%s\n' "$llvm_bridge_text" | awk '/^-D/ { sub(/^-D/, ""); printf "%s ", $0 }')
+export IYI_DECLARATION_FLAGS
 
 # Splits a dump into records, one per "Type:", "Def:", "Ivar:" or "IvarOrder:" header line,
 # each with its own property lines, joined onto one line with the record separator \036.
@@ -464,7 +467,7 @@ raised = 0
 for line in open(verdicts, encoding="utf-8"):
     cols = line.rstrip("\n").split("\t")
     verdict, rel, matched = cols[0], cols[2], int(cols[4])
-    if verdict == "BELOW FLOOR":
+    if verdict == "BELOW FLOOR" or verdict == "ORACLE":
         continue
     key = f"{rel}@{host}" if f"{rel}@{host}" in floor else rel
     old = floor.get(key, 0)
@@ -481,14 +484,15 @@ with open(floor_path, "w", encoding="utf-8", newline="\n") as out:
 print(f"  floor written: {len(floor)} entries, {raised} raised")
 PY
 verdicts
-  fails=$(awk -F'\t' '$1 == "BELOW FLOOR"' "$VERDICTS" | wc -l | tr -d ' ')
+  fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "ORACLE"' "$VERDICTS" | wc -l | tr -d ' ')
 else
-  fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "RAISE THE FLOOR" || $1 == "NO FLOOR"' "$VERDICTS" | wc -l | tr -d ' ')
+  fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "RAISE THE FLOOR" || $1 == "NO FLOOR" || $1 == "ORACLE"' "$VERDICTS" | wc -l | tr -d ' ')
 fi
 awk -F'\t' '
   $1 == "BELOW FLOOR"     { printf "  BELOW FLOOR: %s matched %s, floor %s. A regression: restore the declaration or lower nothing.\n", $3, $5, $7 }
   $1 == "RAISE THE FLOOR" { printf "  RAISE THE FLOOR: %s matched %s, floor %s. Raise the floor in bench/selfhost_semantic_declarations.floor (SEMDECL_RAISE=1).\n", $3, $5, $7 }
   $1 == "NO FLOOR"        { printf "  NO FLOOR: %s has no floor entry. Add it (SEMDECL_RAISE=1).\n", $3 }
+  $1 == "ORACLE"          { printf "  ORACLE FAILED: %s: %s\n", $3, $8 }
 ' "$VERDICTS"
 while IFS= read -r rel; do
   echo "  Declaration differences for $rel (first 20 lines; < oracle, > port):"
@@ -1086,8 +1090,8 @@ prove_mutation "only the last annotation is read for a primitive" "$MUT_SEM" \
   -- check_primitive_annotations_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "enum host flags select the wrong platform branch" "$MUT_SEM" \
-  '    MacroTargetFlags.for_triple(MacroTargetFlags.compile_time_triple, [] of String).includes?(name)' \
-  '    !MacroTargetFlags.for_triple(MacroTargetFlags.compile_time_triple, [] of String).includes?(name)' \
+  '      return flags.includes?(name)' \
+  '      return !flags.includes?(name)' \
   -- check_decl_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "enum value loses its base integer result" "$MUT_SEM" \

@@ -1,6 +1,6 @@
 # Typed-node oracle for bench/selfhost_typed_parity_exercise.sh.
 #
-#   selfhost_typed_oracle <file.iyi> [--bare | --prelude-only]
+#   selfhost_typed_oracle [-Dname ...] <file.iyi> [--bare | --prelude-only]
 #
 # Prints one line per expression node of <file.iyi> that the full semantic
 # pass typed, as "<line>:<col> <Kind> <type>", in tree order.
@@ -79,7 +79,7 @@ class TypedNodeWalk < Iyi::Visitor
   end
 end
 
-path = ARGV.find { |arg| !arg.starts_with?("--") } || abort("usage: selfhost_typed_oracle <file.iyi> [--bare | --prelude-only]")
+path = ARGV.find { |arg| !arg.starts_with?("-") } || abort("usage: selfhost_typed_oracle [-Dname ...] <file.iyi> [--bare | --prelude-only]")
 mode = if ARGV.includes?("--bare")
          :bare
        elsif ARGV.includes?("--prelude-only")
@@ -91,6 +91,7 @@ mode = if ARGV.includes?("--bare")
 begin
   compiler = Iyi::Compiler.new
   compiler.flags.concat((ENV["IYI_TYPED_ORACLE_FLAGS"]? || "").split)
+  compiler.flags.concat(ARGV.select(&.starts_with?("-D")).map { |arg| arg[2..] })
   compiler.prelude = "iyi/prelude"
   compiler.no_codegen = true
   compiler.stdout = IO::Memory.new

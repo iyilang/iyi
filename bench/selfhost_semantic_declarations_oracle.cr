@@ -13,7 +13,7 @@
 # form, and the gate requires the two to agree record by record.
 #
 # On failure the first line of the message goes to stderr and the exit status is
-# 2; the gate reports such a file as unmeasured, with that reason.
+# 2; the gate reports the failure instead of accepting an unmeasured file.
 require "compiler/requires"
 
 class Iyi::Compiler
@@ -370,6 +370,7 @@ entry = File.expand_path(path)
 buffer = IO::Memory.new
 begin
   compiler = Iyi::Compiler.new
+  compiler.flags.concat((ENV["IYI_DECLARATION_FLAGS"]? || "").split)
   program, node = compiler.declarations_program(Iyi::Compiler::Source.new(entry, File.read(entry)))
   dump_declarations(node, buffer, program, entry, typed_mode)
 rescue ex : Exception

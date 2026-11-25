@@ -3671,8 +3671,11 @@ pub class TopLevelVisitor < Visitor
     wrapped_def.members
   end
 
-  # Use the same target flags as the macro engine for the compiler's host.
+  # Enum macro conditions see the same flags as every other macro site.
   def iyi_host_flag?(name : String) : Bool
+    if flags = @program.normalizer.macro_flags
+      return flags.includes?(name)
+    end
     MacroTargetFlags.for_triple(MacroTargetFlags.compile_time_triple, [] of String).includes?(name)
   end
 
@@ -4167,7 +4170,7 @@ pub class TopLevelVisitor < Visitor
   def visit(node : Call) : Bool
     if node.obj.nil?
       if a_macro = @current_type.lookup_call_macro?(node)
-        engine = MacroEngine.new
+        engine = MacroEngine.new(@program.normalizer.macro_flags)
         expanded_ast = engine.expand(a_macro, node, @program.normalizer)
         node.expanded = expanded_ast
         expanded_ast.accept(self)

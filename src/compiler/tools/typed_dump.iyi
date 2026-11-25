@@ -1,7 +1,7 @@
 # The typed-node dump the typed parity gate compares with
 # `bench/selfhost_typed_oracle.cr` (bench/selfhost_typed_parity_exercise.sh).
 #
-#   typed_dump [--instances] <file.iyi> [root ...]
+#   typed_dump [-Dname ...] [--instances] <file.iyi> [root ...]
 #
 # Prints one line per expression node of the file that the iyi semantic port
 # typed, as "<line>:<col> <Kind> <type>", in tree order. A node the port cannot
@@ -30,6 +30,7 @@ import compiler/syntax/visitor::{Visitor}
 import compiler/semantic/top_level::{NamedType, SemanticProgram, TopLevelVisitor, Type}
 import compiler/semantic/instance_vars::{declare_guessed_instance_vars}
 import compiler/semantic/main_visitor::{MainVisitor, node_class_name}
+import compiler/macros/target_flags::{MacroTargetFlags}
 import compiler/semantic/recursive_struct_checker::{RecursiveStructChecker}
 
 # The type label one typed node is printed with. The gate's mutation proof
@@ -102,9 +103,10 @@ module TypedDump
     dir
   end
 
-  def self.analyse(source : String, filename : String, roots : Array(String), iyi_defer : Bool = false, with_prelude : Bool = false) : TypedDumpResult
+  def self.analyse(source : String, filename : String, roots : Array(String), iyi_defer : Bool = false, with_prelude : Bool = false, macro_flags : Array(String)? = nil) : TypedDumpResult
     parser = Parser.new(source, filename)
     prog = SemanticProgram.new
+    prog.normalizer.macro_flags = macro_flags
     prog.iyi_prelude = iyi_defer
     node = prog.normalizer.normalize(parser.parse)
     prog.total_mode = true
@@ -151,9 +153,16 @@ module TypedDumpTool
     instances = false
     iyi_defer = false
     with_prelude = false
-    if !args.empty? && args[0] == "--with-prelude"
+    defines = [] of String
+    while first < args.size && args[first].starts_with?("-D")
+      define = args[first][2..]
+      raise "empty -D flag" if define.empty?
+      defines << define
+      first = first + 1
+    end
+    if args.size > first && args[first] == "--with-prelude"
       with_prelude = true
-      first = 1
+      first = first + 1
     end
     if args.size > first && args[first] == "--iyi-defer"
       iyi_defer = true
@@ -164,7 +173,7 @@ module TypedDumpTool
       first = first + 1
     end
     if args.size <= first
-      raise "usage: typed_dump [--iyi-defer] [--instances] <file.iyi> [root ...]"
+      raise "usage: typed_dump [-Dname ...] [--iyi-defer] [--instances] <file.iyi> [root ...]"
     end
     path = args[first]
     roots = [] of String
@@ -174,7 +183,7 @@ module TypedDumpTool
       i = i + 1
     end
     source = File.read(path)
-    result = TypedDump.analyse(source, path, roots, iyi_defer, with_prelude)
+    result = TypedDump.analyse(source, path, roots, iyi_defer, with_prelude, MacroTargetFlags.host(defines))
     result.lines.each { |line| puts line }
     if instances
       puts "typed instances: #{result.instances}"

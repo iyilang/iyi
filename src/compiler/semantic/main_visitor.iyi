@@ -1425,7 +1425,7 @@ pub class MainVisitor < TypeNodeHost
     if node.obj.nil?
       lookup_type = @scope || @current_type
       if a_macro = lookup_type.is_a?(ModuleType) ? lookup_type.as(ModuleType).lookup_call_macro?(node) : nil
-        engine = MacroEngine.new
+        engine = MacroEngine.new(@program.normalizer.macro_flags)
         expanded_ast = engine.expand_or_failure(a_macro, node, @program.normalizer)
         if expanded_ast.is_a?(MacroFailure)
           refuse(node, expanded_ast.message)

@@ -3,6 +3,7 @@ import compiler/syntax/ast::{ASTNode, Def, Expressions, ModuleHeader, Path, Prim
 import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type, ModuleType, ClassType, LibFun, LibType, GenericClassType, EnumType, AnnotationType, dump_program_declarations, dump_type, dir_of, normalize_path, declared_in?}
 import compiler/semantic/instance_vars::{declare_guessed_instance_vars}
 import compiler/semantic/type_nodes::{type_node_system}
+import compiler/macros/target_flags::{MacroTargetFlags}
 import compiler/types/types::{GenericClassInstanceType, VirtualType}
 
 # Port-side driver for bench/selfhost_semantic_declarations_exercise.sh.
@@ -68,6 +69,7 @@ module BenchSelfhostSemanticDeclarationsExercise
     parser = Parser.new(src, entry)
     node = parser.parse
     prog = SemanticProgram.new
+    prog.normalizer.macro_flags = MacroTargetFlags.host((ENV["IYI_DECLARATION_FLAGS"]? || "").split)
     prog.loaded_files.add(entry)
     prog.search_path = search_path
     prog.project_root = project_root(node, entry)
@@ -97,6 +99,7 @@ module BenchSelfhostSemanticDeclarationsExercise
     parser = Parser.new(src, entry)
     node = parser.parse
     prog = SemanticProgram.new
+    prog.normalizer.macro_flags = MacroTargetFlags.host((ENV["IYI_DECLARATION_FLAGS"]? || "").split)
     prog.loaded_files.add(entry)
     prog.search_path = search_path
     prog.project_root = project_root(node, entry)
@@ -183,6 +186,7 @@ module BenchSelfhostSemanticDeclarationsExercise
     parser = Parser.new(src, entry)
     node = parser.parse
     prog = SemanticProgram.new
+    prog.normalizer.macro_flags = MacroTargetFlags.host((ENV["IYI_DECLARATION_FLAGS"]? || "").split)
     prog.loaded_files.add(entry)
     prog.search_path = search_path
     prog.project_root = project_root(node, entry)

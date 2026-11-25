@@ -2502,7 +2502,7 @@ pub class CommandDriver
     end
 
     unless no_codegen
-      parser.on("--ll", "Dump ll to #{CommandDriver.language_name}'s cache directory") do
+      parser.on("--ll", "Dump ll to Crystal's cache directory") do
         opts.dump_ll = true
       end
       parser.on("--link-flags FLAGS", "Additional flags to pass to the linker") do |some_link_flags|

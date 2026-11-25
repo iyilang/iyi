@@ -399,10 +399,20 @@ module BenchSelfhostCommandExercise
     raise "stale inputs were not retained" unless opts.stale_inputs == "inputs path"
   end
 
+  def self.check_iyi_help : Nil
+    CommandDriver.program_name = "iyi"
+    help = CommandDriver.new(["build", "--help"]).run
+    unless help.stdout_output.includes?("Dump ll to Crystal's cache directory")
+      raise "iyi build help differs from the hosted compiler"
+    end
+    CommandDriver.program_name = "crystal"
+  end
+
   def self.run
     CommandDriver.program_name = "crystal"
     CommandDriver.version_description = "Crystal 1.22.0-dev\n\nThe compiler was not built in release mode.\n\nLLVM: 22.1.8\nDefault target: aarch64-apple-darwin25.5.0\n"
     check_stale_options
+    check_iyi_help
 
     corpus.each_with_index do |argv, idx|
       driver = CommandDriver.new(argv)

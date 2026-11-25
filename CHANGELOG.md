@@ -228,8 +228,8 @@
   collections. The installed `share/iyi/src/iyi/wasm/iyi.mjs` instantiates
   it in Node or a browser, refuses user imports in the reserved `iyi`
   module and reads the host's cryptographic random source. Files are
-  refused by name, the environment is empty, and `group`, `sleep` and
-  `-Diyi_chaos` are compile errors, as on WASI. SPEC.md III.12.1 is the
+  refused by name, the environment is empty, and `-Diyi_chaos` is a compile
+  error, as on WASI (#205 later added tasks). SPEC.md III.12.1 is the
   contract. `bench/wasm_freestanding_exercise.sh` builds `hello`, `format`
   and `io` natively and for the target, requires the same output in Node
   and in isolated headless Chrome, runs the contract in both, and catches 5
@@ -237,6 +237,33 @@
   `bench/dependency_floor.sh` allows exactly `@[Link(wasm_import_module:
   "iyi")]` and checks that another host module is refused, and the object
   audit reads eight targets.
+- **Tasks on freestanding wasm, on JSPI hosts (#205).** `group`, `spawn`,
+  channels, `select`, cancellation, joins and `sleep` compile for
+  `wasm32-unknown-unknown` and run on the native single-thread scheduler;
+  JavaScript Promise Integration suspends the wasm call at a switch, with no
+  Asyncify rewrite. Each fiber gets a 256 KiB shadow stack in linear memory
+  with a canary at its low end checked at every switch, the collector scans
+  each parked fiber's saved range, and finished stacks go back to a pool
+  (at most 13,107, wasm32's page limit over five pages a stack) whose idle
+  stacks are not roots. A program with no path that can park carries none
+  of it: the `swap`, `idle` and `fiber_exit` imports and the
+  `__stack_pointer` and `iyi_fiber_entry` exports appear only with a task
+  path. The loader's `start` and `call` are now asynchronous and refuse
+  overlapping calls; a host without JSPI runs code that never parks, and the
+  first park ends the program with `iyi: JSPI is required to park a task on
+  wasm32-unknown-unknown`. `spawn(unit: :new)` and `-Diyi_chaos` are refused
+  on this target, and WASI keeps its refusals (SPEC.md III.4.12a).
+  Native code is unchanged: the scheduler and collector changes are behind
+  `flag?(:wasm32)`. `bench/wasm_tasks_exercise.sh` compares the task
+  exercise with native output plain and `--release` in Node and headless
+  Chrome, checks the no-JSPI refusal, deadlock, panic and canary reports
+  and bounded memory over 2,000 fibers, and catches 4 broken copies
+  (parked-root scan removed, canary check removed, stack reuse disabled,
+  and the parked main fiber's stack left unscanned, which a box only the
+  main fiber holds across a task's collection now proves);
+  the `wasm-freestanding` job runs it. `bench/thread_exercise.sh` and
+  `bench/parallel_exercise.sh` re-anchor their mutations to the native
+  switch and poll paths.
 
 ### Changed
 
@@ -258,7 +285,7 @@
   retaining 256 KiB as the default. A different size is refused after a task,
   pooled stack or second thread; setting the same size remains permitted.
   Fibers record their spans for pooling, guard checks and stack-window lookup.
-  Thread stacks and the 4,738-line library ceiling are unchanged.
+  Thread stacks and the 4,785-line library ceiling are unchanged.
 
 - **`iyi test --cached` starts no compiler for a test whose recorded inputs
   are unchanged.** A stale build records the files, directory listings,
@@ -280,6 +307,17 @@
 ### Changed
 
 - **Compiler: omit unread predefined constants from codegen and stale build keys.** Predefined constants (`Crystal::*`) are initialized at startup and included in reach signatures only when referenced by typed code. `ARGC_UNSAFE` and `ARGV_UNSAFE` remain initialized unconditionally. Reading an uninitialized predefined constant in codegen raises an internal compiler bug.
+- **A freestanding wasm `--release` drops DWARF and keeps function names
+  (#221).** The link adds `wasm-ld --strip-debug` when `--release` was given
+  without `-d`, including `--release -O z`; the name section host stack
+  traces read stays. Plain builds, `--release -d` and `wasm32-wasi` keep
+  their debug information. `bench/wasm_size_exercise.sh` holds the release
+  and direct-build `hello` under 36,000 bytes with names present and DWARF
+  absent, checks that plain and `--release -d` keep DWARF and that the
+  host sees a named stack, and catches a release relinked without
+  `--strip-debug`; `bench/wasm_freestanding_exercise.sh` now runs the host
+  and collector contract on release builds as well. The
+  `wasm-freestanding` job runs both.
 
 - **A build that writes `.iyimod` artifacts compiles each module once, not
   once per type.** A module's travelling code carries private copies of the
@@ -30097,7 +30135,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,982-line library and nothing else. Every other
+  written against iyi's own 37,276-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

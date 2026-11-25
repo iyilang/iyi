@@ -1,0 +1,425 @@
+# JSPI gate: the host parks two iyi calls and traces their shadow stacks.
+@[Unsafe("the probe scans host-supplied shadow-stack bounds during a forced collection")]
+import std/unit::{Unit}
+
+{% if flag?(:wasm32) && !flag?(:wasi) %}
+  @[Link(wasm_import_module: "jspi_probe")]
+  lib JspiProbeHost
+    fun park(id : Int32) : Void
+  end
+
+  class JspiProbeBox
+    getter value : Int32
+
+    def initialize(@value : Int32)
+    end
+  end
+
+  fun jspi_probe_fiber(id : Int32) : Int32
+    box = JspiProbeBox.new(1701 + id)
+    frame = uninitialized Int32[256]
+    words = pointerof(frame).as(Pointer(Int32))
+    index = 0
+    while index < 256
+      words[index] = id * 1000 + index
+      index = index + 1
+    end
+    JspiProbeHost.park(id)
+    index = 0
+    while index < 256
+      return -2 if words[index] != id * 1000 + index
+      index = index + 1
+    end
+    address = box.as(Pointer(Void)).address
+    return -1 if IyiHeap.base_of(address) == 0_u64
+    box.value
+  end
+
+  fun jspi_probe_collect(first_sp : Int32, first_top : Int32, second_sp : Int32, second_top : Int32, scan : Int32) : Nil
+    if scan != 0
+      visit = ->(base : UInt64) { IyiMark.shade(base) }
+      IyiRoots.scan_range(first_sp.to_u64, first_top.to_u64, visit)
+      IyiRoots.scan_range(second_sp.to_u64, second_top.to_u64, visit)
+      IyiMark.drain
+    end
+    IyiMark.collect
+  end
+
+  class JspiProbeMode
+    @@gate = false
+
+    def self.gate? : Bool
+      @@gate
+    end
+
+    def self.gate : Nil
+      @@gate = true
+      IyiMark.auto = false
+    end
+  end
+
+  fun jspi_probe_gate : Nil
+    JspiProbeMode.gate
+  end
+{% end %}
+
+pub struct TaskExerciseFailure
+  def initialize
+  end
+end
+
+impl Error for TaskExerciseFailure
+  def message : String
+    "task exercise failure"
+  end
+end
+
+class TaskExerciseBox
+  getter value : Int32
+
+  def initialize(@value : Int32)
+  end
+end
+
+def task_check(ok : Bool, message : String) : Nil
+  raise "task exercise: #{message}" unless ok
+end
+
+@[NoInline]
+def hold_parked_box(ready : Channel(Int32), release : Channel(Int32), result : Array(Int32)) : Nil
+  box = TaskExerciseBox.new(9307)
+  ready.send(1)
+  release.receive
+  address = box.as(Pointer(Void)).address
+  result << (IyiRoots.base_of(address) == 0_u64 ? -1 : box.value)
+end
+
+def task_parked_roots : Nil
+  ready = Channel(Int32).new
+  release = Channel(Int32).new
+  result = [] of Int32
+  group do |g|
+    g.spawn(unit: :same) do
+      hold_parked_box(ready, release, result)
+    end
+    ready.receive
+    IyiMark.collect
+    release.send(1)
+  end
+  task_check(result.size == 1 && result[0] == 9307, "parked fiber lost its only box")
+end
+
+# The other side of the same root: the main fiber parks holding the only
+# reference while a task collects and allocates over what a missed root
+# would have freed. Its stack is scanned from its saved pointer to its top.
+@[NoInline]
+def task_main_parked_box : Int32
+  box = TaskExerciseBox.new(4242)
+  ready = Channel(Int32).new
+  group do |g|
+    g.spawn(unit: :same) do
+      IyiMark.collect
+      junk = [] of TaskExerciseBox
+      i = 0
+      while i < 2000
+        junk << TaskExerciseBox.new(-7)
+        i = i + 1
+      end
+      IyiMark.collect
+      ready.send(junk.size)
+    end
+    ready.receive
+  end
+  address = box.as(Pointer(Void)).address
+  IyiRoots.base_of(address) == 0_u64 ? -1 : box.value
+end
+
+def task_early_return(result : Array(Int32)) : Int32
+  group do |g|
+    g.spawn(unit: :same) do
+      waited = sleep(10000)
+      result << (waited.is_a?(Cancelled) ? 1 : 0)
+    end
+    sleep(0)
+    return 7
+  end
+  0
+end
+
+fun task_configured_stack : Int32
+  IyiFiber.stack_bytes = 524288_u64
+  span = 0_i32
+  group do |g|
+    g.spawn(unit: :same) do
+      span = IyiScheduler.current.stack_span.to_i32
+    end
+  end
+  span
+end
+
+fun task_round_trips(rounds : Int32) : Int32
+  ping = Channel(Int32).new
+  pong = Channel(Int32).new
+  count = 0
+  group do |g|
+    g.spawn(unit: :same) do
+      index = 0
+      while index < rounds
+        ping.receive
+        pong.send(1)
+        index = index + 1
+      end
+    end
+    while count < rounds
+      ping.send(1)
+      pong.receive
+      count = count + 1
+    end
+  end
+  count
+end
+
+{% if flag?(:wasm32) && !flag?(:wasi) %}
+  # Reserve a real frame larger than the fiber's remaining stack. Write
+  # only the part crossing the canary, not unrelated heap bytes below it.
+  @[NoInline]
+  def task_overflow_frame : Nil
+    frame = uninitialized UInt8[262144]
+    bytes = pointerof(frame).as(Pointer(UInt8))
+    boundary = IyiScheduler.current.stack_top - IyiFiber::STACK_BYTES
+    bottom = bytes.address
+    task_check(bottom < boundary && boundary < bottom + 262144_u64, "oversized frame did not cross the stack boundary")
+    bytes[(boundary - bottom).to_i32] = 0_u8
+    sleep(0)
+  end
+
+  fun task_damage_canary : Nil
+    group do |g|
+      g.spawn(unit: :same) do
+        task_overflow_frame
+      end
+    end
+  end
+
+  fun task_sequential_fibers(rounds : Int32) : Int32
+    IyiMark.auto = true
+    completed = 0
+    while completed < rounds
+      group do |g|
+        task = g.spawn(unit: :same) { 42 }
+        value = task.value
+        task_check(value.is_a?(Int32) && value == 42, "sequential task did not join")
+      end
+      IyiMark.collect
+      completed = completed + 1
+    end
+    completed
+  end
+
+  fun task_fill_stack_pool(rounds : Int32) : Int32
+    group do |g|
+      index = 0
+      while index < rounds
+        g.spawn(unit: :same) { sleep(5) }
+        index = index + 1
+      end
+    end
+    IyiMark.collect
+    IyiWasmStackPool.size
+  end
+
+  fun task_stack_pool_limit : Int32
+    IyiWasmStackPool::MAX_CAPACITY
+  end
+
+  class TaskPoolProbe
+    @@hidden : UInt64 = 0_u64
+
+    def self.remember(address : UInt64) : Nil
+      @@hidden = address ^ 0x5555555555555555_u64
+    end
+
+    def self.address : UInt64
+      @@hidden ^ 0x5555555555555555_u64
+    end
+  end
+
+  @[NoInline]
+  def task_leave_pool_decoy : Nil
+    box = TaskExerciseBox.new(719)
+    address = box.as(Pointer(Void)).address
+    TaskPoolProbe.remember(address)
+    base = IyiScheduler.current.stack_top - IyiFiber::STACK_BYTES
+    Pointer(Int32).new(base + 16_u64).value = address.unsafe_to_i32
+  end
+
+  fun task_pool_not_scanned : Int32
+    group do |g|
+      g.spawn(unit: :same) { task_leave_pool_decoy }
+    end
+    IyiMark.collect
+    IyiRoots.base_of(TaskPoolProbe.address) == 0_u64 ? 1 : 0
+  end
+{% end %}
+
+def task_exercise : Nil
+  ping = Channel(Int32).new(1)
+  pong = Channel(Int32).new(1)
+  order = ""
+  group do |g|
+    g.spawn(unit: :same) do
+      3.times do
+        ping.receive
+        order = order + "a"
+        pong.send(1)
+      end
+    end
+    g.spawn(unit: :same) do
+      3.times do
+        order = order + "b"
+        ping.send(1)
+        pong.receive
+      end
+    end
+  end
+  task_check(order == "bababa", "channel interleaving")
+  puts "channels interleaved: bababa"
+
+  tally = Unit.new { 42 }
+  group do |g|
+    task = g.spawn(in: tally) { |value| value }
+    answer = task.value
+    task_check(answer.is_a?(Int32) && answer == 42, "spawn(in:) lost its unit value")
+  end
+
+  array_tally = Unit.new { [] of Int32 }
+  group do |g|
+    task = g.spawn(in: array_tally) do |value|
+      value << 41
+      sleep(1)
+      value << 1
+      value[0] + value[1]
+    end
+    answer = task.value
+    task_check(answer.is_a?(Int32) && answer == 42, "spawn(in:) lost its array across sleep")
+  end
+
+  steps_before = IyiScheduler.sleep_steps
+  deadlines = [] of Int64
+  group do |g|
+    g.spawn(unit: :same) do
+      sleep(30)
+      deadlines << IyiScheduler.current.deadline
+    end
+    g.spawn(unit: :same) do
+      sleep(5)
+      deadlines << IyiScheduler.current.deadline
+    end
+    g.spawn(unit: :same) do
+      sleep(15)
+      deadlines << IyiScheduler.current.deadline
+    end
+  end
+  task_check(deadlines.size == 3 && deadlines[0] <= deadlines[1] && deadlines[1] <= deadlines[2], "sleeper order")
+  task_check(IyiScheduler.sleep_steps > steps_before, "sleep heap step counter did not increase")
+  puts "sleepers woke in deadline order"
+
+  marks = [0_i64, 0_i64, 0_i64, 0_i64]
+  group do |g|
+    g.spawn(unit: :same) do
+      marks[0] = __iyi_monotonic_ns
+      sleep(150)
+      marks[1] = __iyi_monotonic_ns
+    end
+    g.spawn(unit: :same) do
+      marks[2] = __iyi_monotonic_ns
+      sleep(150)
+      marks[3] = __iyi_monotonic_ns
+    end
+  end
+  task_check(marks[0] < marks[3] && marks[2] < marks[1], "sleeps did not overlap")
+  puts "two 150 ms sleeps overlapped"
+
+  cancelled = false
+  group do |g|
+    g.spawn(unit: :same) do
+      cancelled = sleep(10000).is_a?(Cancelled)
+    end
+    g.spawn(unit: :same) do
+      sleep(10)
+      TaskExerciseFailure.new
+    end
+  end
+  task_check(cancelled, "cancellation did not reach the sleeping task")
+  puts "cancellation woke a blocked task"
+
+  result = 0
+  group do |g|
+    task = g.spawn(unit: :same) do
+      sleep(5)
+      21
+    end
+    value = task.value
+    result = value.is_a?(Int32) ? value * 2 : -1
+  end
+  task_check(result == 42, "task.value")
+  puts "task.value joined and answered"
+
+  readers = ""
+  group do |g|
+    failed = g.spawn(unit: :same) do
+      sleep(10)
+      raise "expected task panic"
+      0
+    end
+    2.times do
+      g.spawn(unit: :same) do
+        value = failed.value
+        readers = readers + (value.is_a?(Panicked) ? "P" : "?")
+      end
+    end
+  end
+  task_check(readers == "PP", "multiple panic readers: #{readers}")
+  puts "two fibers read one panicked task"
+
+  early = [] of Int32
+  task_check(task_early_return(early) == 7 && early.size == 1 && early[0] == 1, "early return did not join")
+  puts "early return cancelled and joined its group"
+
+  late = Channel(Int32).new
+  closed = false
+  group do |g|
+    g.spawn(unit: :same) do
+      closed = late.receive.is_a?(ChannelClosed)
+    end
+    g.spawn(unit: :same) do
+      sleep(5)
+      late.close
+    end
+  end
+  task_check(closed, "close did not wake receiver")
+  puts "close woke a parked receiver"
+
+  choice = Channel(Int32).new
+  selected = ""
+  select
+  when value = choice.receive
+    selected = "received"
+  when timeout(5)
+    selected = "timeout"
+  end
+  task_check(selected == "timeout", "select timeout")
+  puts "select timeout woke"
+
+  task_parked_roots
+  puts "parked fiber roots survived collection"
+
+  task_check(task_main_parked_box == 4242, "parked main fiber lost its only box")
+  puts "parked main fiber roots survived collection"
+end
+
+{% if flag?(:wasm32) && !flag?(:wasi) %}
+  task_exercise unless JspiProbeMode.gate?
+{% else %}
+  task_exercise
+{% end %}

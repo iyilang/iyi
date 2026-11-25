@@ -221,6 +221,7 @@ module Iyi
     # one LLVM module is created for each type in a program.
     # --release automatically enable this option
     property? single_module = false
+    @release_requested = false
 
     # A `ProgressTracker` object which tracks compilation progress.
     property progress_tracker = ProgressTracker.new
@@ -631,7 +632,7 @@ module Iyi
       cache_hold cleanup cross_compile dependency_printer dump_ll emit_base_filename
       emit_bind emit_targets frame_pointers iyi_direct_link iyi_keep
       iyi_link_driver_only iyi_link_template_key link_flags mattr mcmodel mcpu n_threads no_cleanup
-      program progress_tracker single_module stale_accept stale_block stale_drop stale_dump_elements
+      program progress_tracker release_requested single_module stale_accept stale_block stale_drop stale_dump_elements
       stale_inputs stale_key stderr target_machine verbose
     )
 
@@ -663,7 +664,7 @@ module Iyi
       cleanup codegen_target cross_compile crystal_library debug dump_ll
       emit_bind emit_iyimod emit_targets flags frame_pointers iyi_direct_link
       iyi_keep iyi_link_driver_only iyi_prefers_source link_flags mattr mcmodel
-      mcpu n_threads no_cleanup no_codegen optimization_mode prelude single_module
+      mcpu n_threads no_cleanup no_codegen optimization_mode prelude release_requested single_module
       iyi_cutoff
       static target_machine wants_doc
     )
@@ -765,6 +766,7 @@ module Iyi
         encoder.bool(@no_codegen)
         encoder.str(@optimization_mode.to_s)
         encoder.str(@prelude)
+        encoder.bool(@release_requested)
         encoder.bool(@single_module)
         encoder.bool(@static)
         encoder.str(target_machine.triple)
@@ -3640,6 +3642,7 @@ module Iyi
 
     # Set maximum level of optimization.
     def release!
+      @release_requested = true
       @optimization_mode = OptimizationMode::O3
       @single_module = true
     end
@@ -4094,6 +4097,11 @@ module Iyi
           link_flags += " --target=wasm32-wasi"
           {DEFAULT_LINKER, %(#{DEFAULT_LINKER} "${@}" -o #{Process.quote_posix(output_filename)} #{link_flags} #{program.lib_flags(@cross_compile)}), object_names}
         else
+          link_flags += " --export=__stack_pointer" if program.iyi_wasm_tasks_reached?
+          # A browser does not use DWARF at runtime. Preserve function names for
+          # host stack traces, and keep full debug information when -d is asked.
+          # Track --release itself so "--release -O z" gets the same policy.
+          link_flags += " --strip-debug" if @release_requested && @debug == Debug::Default
           {"wasm-ld", %(wasm-ld "${@}" -o #{Process.quote_posix(output_filename)} --no-entry #{link_flags}), object_names}
         end
       elsif program.has_flag? "avr"

@@ -1,0 +1,43 @@
+module compiler/macros/type_facts
+
+import compiler/syntax/ast::{Annotation, Def}
+
+pub class MacroInstanceVarFact
+  getter name : String
+  getter type_name : String?
+
+  def initialize(@name : String, @type_name : String?)
+  end
+end
+
+# Declaration facts supplied by semantic analysis to an inline macro site.
+pub class MacroTypeFacts
+  getter constants : Hash(String, String)
+  getter annotations : Hash(String, Annotation)
+  getter annotation_types : Hash(String, String)
+  property annotations_known : Bool = false
+  property constants_known : Bool = false
+  property instance_vars_known : Bool = false
+  getter instance_vars : Array(MacroInstanceVarFact)
+  property ancestors_known : Bool = false
+  property methods_known : Bool = false
+  getter ancestors : Array(MacroAncestorFact)
+  getter methods : Array(Def)
+
+  def initialize
+    @constants = Hash(String, String).new
+    @annotations = Hash(String, Annotation).new
+    @annotation_types = Hash(String, String).new
+    @instance_vars = [] of MacroInstanceVarFact
+    @ancestors = [] of MacroAncestorFact
+    @methods = [] of Def
+  end
+end
+
+pub class MacroAncestorFact
+  getter name : String
+  getter methods : Array(Def)
+
+  def initialize(@name : String, @methods : Array(Def))
+  end
+end

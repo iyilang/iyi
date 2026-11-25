@@ -1,0 +1,7 @@
+macro make_getter(field_name, return_val)
+  def {{field_name.id}}
+    {{return_val}}
+  end
+end
+
+make_getter(status_code, 200)

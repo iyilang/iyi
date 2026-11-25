@@ -2287,6 +2287,17 @@ Each stage is independently verifiable; the tree is never left broken between th
    - Root discovery: linear memory scan from stacksave to __heap_base, and globals from 0 to __data_end; the compiler keeps in a stack slot every value a call may outlive (`src/compiler/iyi/wasm_roots.cr`), so a value held only in a wasm local is in linear memory too.
    - Mark and sweep: mark-queue with layout table traversal; sweep into free lists and large object tracking.
    - Verified: bench/wasm32_exercise.sh passes under wasmtime in default and release modes.
+   - Large objects reserve the arena header at offsets 0, 8, 16 and 40,
+     followed by object header words at offsets 48, 56 and 64. The payload
+     begins at offset 72; allocation reserves 96 bytes in addition to the
+     payload. Interior pointers in any page resolve through the large-object
+     list, even if payload bytes resemble an arena's magic value. Sweep marks
+     an unreachable large object free and counts its payload bytes; wasm
+     linear memory and large-object pages are retained rather than reused.
+     The exercise holds twelve 1,048,592-byte strings across collections,
+     keeps an object alive with only a third-page pointer, and checks sweep,
+     weak references and realloc. Mutations restoring the overlapping header
+     or limiting lookup to the first page must fail.
    - **Locals are roots (closed).** The walk reads linear memory, and a wasm
      local is not in it: an object held only by a value the backend kept in
      a local was freed by a collection that came while it was held. Under

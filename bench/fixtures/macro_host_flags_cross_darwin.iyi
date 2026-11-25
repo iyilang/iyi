@@ -1,0 +1,13 @@
+# target: aarch64-apple-darwin
+# The host's flags against a darwin target: on a Linux host the two sets differ, so an answer taken from the
+# target's set is caught there.
+macro host_probe
+  {% if flag?(:darwin) %}target-darwin{% end %}
+  {% if flag?(:linux) %}target-linux{% end %}
+  {% if host_flag?(:darwin) %}host-darwin{% end %}
+  {% if host_flag?(:linux) %}host-linux{% end %}
+  {% if host_flag?(:aarch64) %}host-aarch64{% end %}
+  {% if host_flag?(:x86_64) %}host-x86_64{% end %}
+end
+
+host_probe

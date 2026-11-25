@@ -1,0 +1,15 @@
+def acquire_lock : Nil
+end
+
+def release_lock : Nil
+end
+
+def perform_work : Int32
+  acquire_lock
+  defer release_lock
+  42
+end
+
+def standalone_cleanup : Nil
+  defer release_lock
+end

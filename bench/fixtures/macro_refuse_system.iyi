@@ -1,0 +1,6 @@
+# refuse: system
+macro shell_out
+  {{ system("echo hi") }}
+end
+
+shell_out

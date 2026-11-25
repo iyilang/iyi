@@ -1,0 +1,9 @@
+macro array_any
+  {% if [1, 2, 3].any? { |item| item == 2 } && ![1, 2].any? { |item| item == 3 } %}
+    puts 1
+  {% else %}
+    puts 0
+  {% end %}
+end
+
+array_any

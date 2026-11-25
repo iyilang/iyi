@@ -1,0 +1,6 @@
+# free: U tuple Int32,Bool
+macro idx
+  {{U}}|{{U.size}}|{{U[0]}}|{{U[2]}}
+end
+
+idx

@@ -1,0 +1,13 @@
+macro chomps
+  {{ "".chomp }}
+  {{ "alpha".chomp }}
+  {{ "alpha\n".chomp }}
+  {{ "alpha\r".chomp }}
+  {{ "alpha\r\n".chomp }}
+  {{ "alpha\n\r".chomp }}
+  {{ "alpha\n\n".chomp }}
+  {{ "alpha \t".chomp }}
+  {{ "é\r\n".chomp }}
+end
+
+chomps

@@ -1,0 +1,81 @@
+@[Unsafe("the host passes pointers into linear memory and the collector is exercised directly")]
+import std/time::{Time}
+import std/random::{Random}
+import std/env::{ENV}
+
+{% unless flag?(:wasm32) && flag?(:unknown) && flag?(:bits32) %}
+  {% raise "freestanding wasm is missing a target flag" %}
+{% end %}
+{% if flag?(:wasi) || flag?(:unix) %}
+  {% raise "freestanding wasm must not expose wasi or unix flags" %}
+{% end %}
+
+@[Link(wasm_import_module: "contract")]
+lib ContractHost
+  fun double(value : Int32) : Int32
+end
+
+class WasmProbe
+  @@hidden : UInt64 = 0_u64
+
+  def self.remember(pointer : UInt8*) : Nil
+    @@hidden = pointer.address ^ 0x5555555555555555_u64
+  end
+
+  def self.reclaimed? : Bool
+    IyiMark.collect
+    IyiHeap.base_of(@@hidden ^ 0x5555555555555555_u64) == 0_u64
+  end
+end
+
+fun contract_mix(a : Int32, b : Int64, c : Float64, pointer : UInt8*) : Int64
+  ContractHost.double(a).to_i64 + b + c.to_i64 + pointer.value.to_i64
+end
+
+fun contract_read_zero : Int64
+  __iyi_read(0, Pointer(Void).new(0_u64), 0_u64)
+end
+
+fun contract_read(buffer : UInt8*, count : Int32) : Int64
+  __iyi_read(0, buffer.as(Void*), count.to_u64)
+end
+
+fun contract_collect : Nil
+  IyiMark.collect
+end
+
+fun contract_remember(pointer : UInt8*) : Nil
+  WasmProbe.remember(pointer)
+end
+
+fun contract_reclaimed : Int32
+  WasmProbe.reclaimed? ? 1 : 0
+end
+
+fun contract_wall_seconds : Int64
+  Time.utc.to_unix
+end
+
+fun contract_monotonic_ns : Int64
+  Time.monotonic.total_nanoseconds.to_i64
+end
+
+fun contract_random(buffer : UInt8*, count : Int32) : Nil
+  Random::Secure.fill(buffer, count)
+end
+
+fun contract_grow : UInt8*
+  buffer = IyiHeap.alloc_atomic(33554432_u64).as(UInt8*)
+  buffer.value = 173_u8
+  buffer
+end
+
+fun contract_exit(code : Int32) : Nil
+  __iyi_exit(code)
+end
+
+raise "environment should be absent" unless ENV["IYI_WASM_PROOF"]?.nil?
+ENV["IYI_WASM_PROOF"] = "value"
+raise "environment write must not persist" unless ENV["IYI_WASM_PROOF"]?.nil?
+raise "working directory should be absent" unless Program.cwd.nil?
+puts "contract ready"

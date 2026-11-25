@@ -1,0 +1,40 @@
+; iyi-ir 1
+source_filename = "fact_forms"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @swapped(i32 %x, i32 %y) {
+entry:
+  %less = icmp slt i32 %x, %y
+  br i1 %less, label %yes, label %no
+yes:
+  %greater = icmp sgt i32 %y, %x
+  ret i1 %greater
+no:
+  ret i1 false
+}
+define internal i1 @inverted(i32 %x, i32 %y) {
+entry:
+  %less = icmp slt i32 %x, %y
+  %not_less = xor i1 %less, true
+  %expected = intrinsic llvm.expect.i1(i1 %not_less, i1 true)
+  br i1 %expected, label %yes, label %no
+yes:
+  %at_least = icmp sge i32 %x, %y
+  ret i1 %at_least
+no:
+  %again = icmp slt i32 %x, %y
+  ret i1 %again
+}
+define internal void @conjunction(i32 %x, ptr %out) {
+entry:
+  %nonnegative = icmp sge i32 %x, 0
+  %small = icmp slt i32 %x, 10
+  %both = and i1 %nonnegative, %small
+  br i1 %both, label %yes, label %no
+yes:
+  %large = icmp sge i32 %x, 10
+  store i1 %large, ptr %out, align 1
+  br label %no
+no:
+  ret void
+}

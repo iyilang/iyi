@@ -1,0 +1,29 @@
+; iyi-ir 1
+source_filename = "bounds_check"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define external void @bounds_check(i64 %size) {
+entry:
+  br label %head
+head:
+  %i = phi i64 [ 0, label %entry ], [ %next, label %latch ]
+  %more = icmp slt i64 %i, %size
+  br i1 %more, label %body, label %done
+body:
+  br i1 false, label %wrap, label %plain
+wrap:
+  %adjusted = add i64 %size, %i
+  br label %check
+plain:
+  br label %check
+check:
+  %index = phi i64 [ %adjusted, label %wrap ], [ %i, label %plain ]
+  br i1 false, label %failed, label %latch
+failed:
+  unreachable
+latch:
+  %next = add i64 %i, 1
+  br label %head
+done:
+  ret void
+}

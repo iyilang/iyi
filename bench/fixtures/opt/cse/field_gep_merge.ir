@@ -1,0 +1,13 @@
+; iyi-ir 1
+source_filename = "field_gep_merge"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @field_gep_merge(i64 %x, i64 %y) {
+entry:
+  %slot = alloca { i64, i64 }, align 8
+  %first = getelementptr { i64, i64 }, ptr %slot, i64 0, i32 1
+  %second = getelementptr { i64, i64 }, ptr %slot, i64 0, i32 1
+  store i64 %x, ptr %first, align 8
+  store i64 %y, ptr %second, align 8
+  ret void
+}

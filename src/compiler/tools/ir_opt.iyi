@@ -93,7 +93,7 @@ module IrOpt
     command = args[0]
     if command == "passes"
       usage unless args.size == 1
-      passes = [PassId::CfgSimplify, PassId::Mem2Reg, PassId::Simplify, PassId::Dce, PassId::Sroa, PassId::Inline, PassId::DeadFn]
+      passes = [PassId::CfgSimplify, PassId::Mem2Reg, PassId::Simplify, PassId::Dce, PassId::Sroa, PassId::Inline, PassId::DeadFn, PassId::Cse, PassId::Prove, PassId::Licm, PassId::Layout]
       k = 0
       while k < passes.size
         tiers = k < 4 ? "default,release" : "release"

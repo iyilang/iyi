@@ -1230,6 +1230,16 @@ prove_mutation 'S9E17: preserve the object size cap' src/compiler/ir/opt/escape.
   '  return nil unless size && flags && size > 0_i64 && size <= 1024_i64 && flags >= 0_i64 && flags <= 3_i64 # mutation S9-size-cap: cap individual objects' \
   -- mutation_check S9E17 escape oversize || fail 'S9E17 was not caught'
 mutation_result S9E17
+prove_mutation 'S9E31: an empty allocation stays on the heap' src/compiler/ir/opt/escape.iyi \
+  '  return nil unless size && flags && size > 0_i64 && size <= 512_i64 && flags >= 0_i64 && flags <= 3_i64 # mutation S9-size-cap: cap individual objects' \
+  '  return nil unless size && flags && size >= 0_i64 && size <= 512_i64 && flags >= 0_i64 && flags <= 3_i64 # mutation S9-size-cap: cap individual objects' \
+  -- mutation_check S9E31 escape unsupported_allocations || fail 'S9E31 was not caught'
+mutation_result S9E31
+prove_mutation 'S9E32: unknown allocation flags stay on the heap' src/compiler/ir/opt/escape.iyi \
+  '  return nil unless size && flags && size > 0_i64 && size <= 512_i64 && flags >= 0_i64 && flags <= 3_i64 # mutation S9-size-cap: cap individual objects' \
+  '  return nil unless size && flags && size > 0_i64 && size <= 512_i64 && flags >= 0_i64 && flags <= 7_i64 # mutation S9-size-cap: cap individual objects' \
+  -- mutation_check S9E32 escape unsupported_allocations || fail 'S9E32 was not caught'
+mutation_result S9E32
 prove_mutation 'S9E18: preserve the function frame cap' src/compiler/ir/opt/escape.iyi \
   '    if frame + bytes > 2048_i64' \
   '    if frame + bytes > 4096_i64' \

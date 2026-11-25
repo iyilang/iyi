@@ -4,6 +4,10 @@
 
 ### Added
 
+- Add the formatter and standalone `iyi-format` driver in iyi. A same-host
+  gate compares formatting and path/stdin behavior against the hosted tool.
+  Existing hosted commands are unchanged.
+
 - **iyi is a self-hosting project.** The owner accepted Jason Waldrip's
   proposal (#172) on 2026-11-24, reversing Appendix B #10: the compiler is
   ported to iyi and gets its own back end and linker, so that iyi is built
@@ -636,10 +640,6 @@ entry "What the fixes below change in a program's source" has the details.
   settings, and cache writes replace an existing checkpoint through an
   exclusive same-directory file. Package downloads do not use them yet.
   Independent cryptographic review is required before anything depends on them.
-
-- Add the declaration binder, formatter and standalone `iyi-format` driver
-  in iyi. Same-host gates compare binding, formatting and path/stdin behavior
-  against the hosted tools. Existing hosted commands are unchanged.
 
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by

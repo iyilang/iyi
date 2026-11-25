@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Compare the port with the hosted formatter across the repository.
+# Compare the port with the hosted formatter on inputs that select its CI job.
 #
 # A short corpus also checks idempotency and the standalone path and stdin
-# driver. The full-tree comparison pins both matches and divergent outputs,
-# including every .iyi file and the deliberately unformatted .fixture input.
+# driver. The wider comparison pins matches and divergent output for .iyi
+# files and the .fixture input selected by the self-host CI path rule.
 # Mutation proofs verify that the existing parity checks are load-bearing.
 #
 #   bash bench/selfhost_formatter_exercise.sh
@@ -30,7 +30,7 @@ cd "$REPO" || exit 1
 exec 3>&1
 
 # This short corpus carries the existing idempotency, standalone-driver, and
-# mutation checks. The full-tree comparison below is measured separately.
+# mutation checks. The planner-selected comparison below is measured separately.
 CORPUS=(
   "bench/fixtures/formatter_macro_if.iyi"
   "bench/fixtures/formatter_macro_if_def.iyi"
@@ -142,14 +142,15 @@ if ! compare_corpus "$WORK/exercise$EXE"; then
 fi
 
 echo
-echo "== 3. Whole-tree parity floor and divergent-output ceiling"
+echo "== 3. Planner-selected parity floor and divergent-output ceiling"
 if [ -z "$PY" ]; then
-  echo "  FAILED: Python is required for the whole-tree comparison"
+  echo "  FAILED: Python is required for the planner-selected comparison"
   status=1
 else
   cat > "$WORK/whole_tree.py" <<'PY'
 import collections
 import concurrent.futures
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -185,11 +186,72 @@ def check_pins(results_path, floor_path, ceiling_path):
     return 1 if failed else 0
 
 
+def load_planner(root):
+    spec = importlib.util.spec_from_file_location("formatter_ci_plan", root / "scripts/ci_plan.py")
+    planner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(planner)
+    return planner
+
+
+def check_plan(root, rel):
+    root = Path(root)
+    if not (root / rel).is_file():
+        print(f"  planner probe file is missing: {rel}")
+        return 2
+    planner = load_planner(root)
+    env = os.environ.copy()
+    env.pop("GITHUB_OUTPUT", None)
+    result = subprocess.run([sys.executable, str(root / "scripts/ci_plan.py"),
+                             "--event", "pull_request", "--files", rel],
+                            cwd=root, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    if result.returncode:
+        print(f"  planner failed for {rel} (exit {result.returncode}):\n{result.stdout}")
+        return 2
+    selected = {line.strip() for line in result.stdout.splitlines() if line.startswith("  ")}
+    missing = sorted(set(planner.SELFHOST) - selected)
+    if missing:
+        print(f"  planner does not select self-host jobs for {rel}: {', '.join(missing)}")
+        return 1
+    print(f"  planner selects self-host jobs for {rel}")
+    return 0
+
+
+if sys.argv[1] == "plan-check":
+    sys.exit(check_plan(*sys.argv[2:]))
+
+
 if sys.argv[1] == "check":
     sys.exit(check_pins(*sys.argv[2:]))
 
 root, driver, hosted, work = map(Path, sys.argv[2:6])
 floor_path, ceiling_path = map(Path, sys.argv[6:8])
+planner = load_planner(root)
+probes = (
+    "src/compiler/syntax/parser.iyi",
+    "bench/selfhost_formatter_exercise.sh",
+    "bench/native_obj_exercise.sh",
+    "bench/macro_sites.py",
+    "bench/fixtures/formatter_macro_if.iyi",
+)
+for rel in probes:
+    result = subprocess.run([sys.executable, __file__, "plan-check", str(root), rel],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    print(result.stdout, end="")
+    if result.returncode:
+        print(f"  FAILED: planner scope probe for {rel} (exit {result.returncode})")
+        sys.exit(1)
+outside = "README.md"
+if planner.is_selfhost(outside):
+    print(f"  FAILED: planner proof input is no longer outside the self-host path rule: {outside}")
+    sys.exit(1)
+result = subprocess.run([sys.executable, __file__, "plan-check", str(root), outside],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+if result.returncode != 1 or "planner does not select self-host jobs" not in result.stdout:
+    print(f"  FAILED: planner check did not reject {outside} (exit {result.returncode})")
+    print(result.stdout, end="")
+    sys.exit(1)
+print(f"  out-of-scope planner probe: caught ({outside}, exit 1)")
 timeout = 10
 excluded_root_dirs = {".git", ".build", ".iyi", ".direnv", ".junit",
                       "coverage", "docs", "man", "tmp"}
@@ -204,7 +266,7 @@ for directory, dirs, names in os.walk(root):
         names = [name for name in names if name != "app_artifact.iyi"]
     sources.extend((relative / name).as_posix() for name in names if name.endswith(".iyi"))
 sources.append("bench/fixtures/formatter_macro_if_branches.fixture")
-sources.sort()
+sources = sorted(rel for rel in sources if planner.is_selfhost(rel))
 
 
 def first_line(result):

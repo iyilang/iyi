@@ -213,7 +213,8 @@ async function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+const entry = process.argv[1] && await realpath(process.argv[1]).catch(() => null);
+if (entry && import.meta.url === pathToFileURL(entry).href) {
   try {
     await main();
   } catch (error) {

@@ -1,0 +1,5 @@
+macro listed(t)
+  {% for x, i in t %}{{i}}:{{x}} {% end %}
+end
+
+listed({1, "two", :three})

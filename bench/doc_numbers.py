@@ -387,7 +387,7 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("library_with_floor", r"([\d,]+) with every platform's floor", "SPEC.md", 1),
     ("library_with_floor", r"pening `src/iyi/` counts ([\d,]+)", "SPEC.md", 1),
     ("prelude_library", r"of which the library is ([\d,]+)", "SPEC.md", 1),
-    ("prelude_library", r"the library:\n\*\*([\d,]+) lines\*\*, measured", "SPEC.md", 1),
+    ("prelude_library", r"the library:\n\*\*([\d,]+) lines\*\* of the", "SPEC.md", 1),
     ("prelude", r"still true of iyi's own ([\d,]+) lines", "SPEC.md", 1),
     ("prelude", r"Done: ([\d,]+) lines", "SPEC.md", 1),
     ("prelude", r"\| ([\d,]+)-line own prelude", "SPEC.md", 1),

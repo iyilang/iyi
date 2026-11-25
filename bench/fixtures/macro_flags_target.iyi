@@ -1,0 +1,10 @@
+# target: x86_64-unknown-linux-gnu
+# define: iyi_gate_probe
+macro probe
+  {% if flag?(:linux) %}linux{% end %}
+  {% if flag?(:darwin) %}darwin{% end %}
+  {% if host_flag?(:darwin) %}host-darwin{% end %}
+  {% if flag?(:iyi_gate_probe) %}define{% end %}
+end
+
+probe

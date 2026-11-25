@@ -135,6 +135,9 @@ for files, what in [
     (["bench/fixtures/native_cg/narrow_signext.ir"], "a restored narrow codegen fixture"),
     (["bench/fixtures/native_cg/rt_stub.c"], "the native runtime comparison stub"),
     (["src/compiler/native/rt/builtins.ir"], "the native IR runtime"),
+    (["bench/macro_sites.py"], "the macro-site census the macro gate runs"),
+    (["bench/macro_method_table.py"], "the macro method table check the macro gate runs"),
+    (["bench/macro_sites.floor"], "the macro-site floor the macro gate reads"),
     (["README.md", "src/compiler/native/rt/builtins.ir"], "a mixed documentation and native IR change"),
 ]:
     reason, jobs = planned(*files)

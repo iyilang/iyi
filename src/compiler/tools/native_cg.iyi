@@ -1,0 +1,505 @@
+# The native backend driver used by bench/native_encode_exercise.sh and bench/native_codegen_exercise.sh.
+#
+#   native_cg obj IN.ir OUT.o   parse IN.ir, compile it for its target, write the Mach-O object (darwin)
+#   native_cg mir IN.ir FUNC    print FUNC's machine IR after allocation and frame layout
+#   native_cg forms             print every encodable form as "asm<TAB>hex" (the encode gate's table)
+#   native_cg bytes OBJ         read a Mach-O object back and print each defined symbol's bytes and relocations
+#
+# Refusals and failures print their reason on stderr and exit 1.
+
+@[Unsafe("declares the C library exit to set the process status; the tool handles no raw memory")]
+module compiler/tools/native_cg
+import compiler/native/mir::{MFunction}
+
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/module::{Module}
+import compiler/ir/function::{Function}
+import compiler/platform/target::{Target}
+import compiler/native/driver::{compile_module, function_mir, macho_bytes, dump_mfunction, symbol_table}
+import compiler/native/mir::{MInst, MOp, Operand, OperandKind, FrameInfo}
+import compiler/native/aarch64/encode::{Encoder}
+import compiler/native/obj/object::{ObjectFile, ObjFormat, ObjError, RelocKind, SymbolKind, SectionKind}
+import compiler/native/obj/macho::{read_object}
+import std/slice::{Slice, Bytes}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+# One line of the encode table: the assembler text the oracle assembles, and the MIR form that must encode to
+# the same bytes.
+class Form
+  getter asm : String
+  getter inst : MInst
+
+  def initialize(@asm : String, @inst : MInst)
+  end
+end
+
+def reg(n : Int32) : Operand
+  Operand.new(OperandKind::Physical, n)
+end
+
+def mk(op : MOp) : MInst
+  MInst.new(op.value.to_i32)
+end
+
+# Every form the selector can produce, one instruction each (two for the address pairs).
+def forms : Array(Form)
+  acc = [] of Form
+  m = mk(MOp::Mov)
+  m.defs << reg(3)
+  m.uses << reg(4)
+  acc << Form.new("mov x3, x4", m)
+  m = mk(MOp::FMov)
+  m.fp = true
+  m.size = 64
+  m.defs << reg(33)
+  m.uses << reg(34)
+  acc << Form.new("fmov d1, d2", m)
+  m = mk(MOp::FMov)
+  m.fp = true
+  m.size = 32
+  m.defs << reg(33)
+  m.uses << reg(34)
+  acc << Form.new("fmov s1, s2", m)
+  m = mk(MOp::FMovToFp)
+  m.fp = true
+  m.size = 64
+  m.defs << reg(33)
+  m.uses << reg(2)
+  acc << Form.new("fmov d1, x2", m)
+  m = mk(MOp::FMovToFp)
+  m.fp = true
+  m.size = 32
+  m.defs << reg(33)
+  m.uses << reg(2)
+  acc << Form.new("fmov s1, w2", m)
+  m = mk(MOp::FMovToGp)
+  m.fp = true
+  m.size = 64
+  m.defs << reg(3)
+  m.uses << reg(36)
+  acc << Form.new("fmov x3, d4", m)
+  m = mk(MOp::FMovToGp)
+  m.fp = true
+  m.size = 32
+  m.defs << reg(3)
+  m.uses << reg(36)
+  acc << Form.new("fmov w3, s4", m)
+  m = mk(MOp::MovImm)
+  m.defs << reg(0)
+  m.imm = 0x1234_i64
+  acc << Form.new("movz x0, #0x1234", m)
+  m = mk(MOp::AddrOutgoing)
+  m.defs << reg(0)
+  m.imm = 16_i64
+  acc << Form.new("add x0, sp, #16", m)
+  acc << Form.new("adrp x0, _sym@PAGE ; add x0, x0, _sym@PAGEOFF", sym_form(MOp::AddrSym, 0))
+  acc << Form.new("adrp x0, _sym@PAGE ; add x0, x0, _sym@PAGEOFF", sym_form(MOp::AddrTable, 0))
+  acc << Form.new("adrp x1, _sym@GOTPAGE ; ldr x1, [x1, _sym@GOTPAGEOFF]", sym_form(MOp::LoadGot, 1))
+  m = mk(MOp::Mrs)
+  m.defs << reg(3)
+  acc << Form.new("mrs x3, tpidr_el0", m)
+  m = mk(MOp::Mrs)
+  m.defs << reg(3)
+  m.imm = 1_i64
+  acc << Form.new("mrs x3, tpidrro_el0", m)
+  acc << Form.new("adrp x0, _sym@TLVPPAGE ; ldr x0, [x0, _sym@TLVPPAGEOFF]", sym_form(MOp::LoadTlvp, 0))
+  acc << Form.new("ldr x1, [x2, #8]", mem(MOp::Ldr, 64, false, false, 1, 2, 8_i64))
+  acc << Form.new("ldr w1, [x2, #4]", mem(MOp::Ldr, 32, false, false, 1, 2, 4_i64))
+  acc << Form.new("ldrsw x1, [x2, #4]", mem(MOp::Ldr, 32, true, false, 1, 2, 4_i64))
+  acc << Form.new("ldrh w1, [x2, #2]", mem(MOp::Ldr, 16, false, false, 1, 2, 2_i64))
+  acc << Form.new("ldrsh x1, [x2, #2]", mem(MOp::Ldr, 16, true, false, 1, 2, 2_i64))
+  acc << Form.new("ldrb w1, [x2, #1]", mem(MOp::Ldr, 8, false, false, 1, 2, 1_i64))
+  acc << Form.new("ldrsb x1, [x2, #1]", mem(MOp::Ldr, 8, true, false, 1, 2, 1_i64))
+  acc << Form.new("ldr d1, [x2, #8]", mem(MOp::Ldr, 64, false, true, 33, 2, 8_i64))
+  acc << Form.new("ldr s1, [x2, #4]", mem(MOp::Ldr, 32, false, true, 33, 2, 4_i64))
+  acc << Form.new("str x1, [x2, #8]", mem(MOp::Str, 64, false, false, 1, 2, 8_i64))
+  acc << Form.new("str w1, [x2, #4]", mem(MOp::Str, 32, false, false, 1, 2, 4_i64))
+  acc << Form.new("strh w1, [x2, #2]", mem(MOp::Str, 16, false, false, 1, 2, 2_i64))
+  acc << Form.new("strb w1, [x2, #1]", mem(MOp::Str, 8, false, false, 1, 2, 1_i64))
+  acc << Form.new("str d1, [x2, #8]", mem(MOp::Str, 64, false, true, 33, 2, 8_i64))
+  acc << Form.new("str s1, [x2, #4]", mem(MOp::Str, 32, false, true, 33, 2, 4_i64))
+  m = mk(MOp::StrOutgoing)
+  m.size = 64
+  m.imm = 8_i64
+  m.uses << reg(1)
+  acc << Form.new("str x1, [sp, #8]", m)
+  m = mk(MOp::SpLoad)
+  m.size = 64
+  m.imm = 16_i64
+  m.defs << reg(19)
+  acc << Form.new("ldr x19, [sp, #16]", m)
+  m = mk(MOp::SpStore)
+  m.size = 64
+  m.imm = 16_i64
+  m.uses << reg(19)
+  acc << Form.new("str x19, [sp, #16]", m)
+  acc << Form.new("stp x29, x30, [sp, #-16]!", mk(MOp::StpFpLr))
+  acc << Form.new("ldp x29, x30, [sp], #16", mk(MOp::LdpFpLr))
+  acc << Form.new("mov x29, sp", mk(MOp::MovFp))
+  m = mk(MOp::SpAdjust)
+  m.imm = -16_i64
+  acc << Form.new("sub sp, sp, #16", m)
+  m = mk(MOp::SpAdjust)
+  m.imm = 16_i64
+  acc << Form.new("add sp, sp, #16", m)
+  m = mk(MOp::SpAdjust)
+  m.imm = -4096_i64
+  acc << Form.new("sub sp, sp, #4096", m)
+  acc << Form.new("str xzr, [sp]", mk(MOp::ZeroSp))
+  acc << Form.new("ldar x1, [x2]", atomic(MOp::Ldar, 64, 1, 2, 0))
+  acc << Form.new("stlr x1, [x2]", atomic(MOp::Stlr, 64, 1, 2, 0))
+  acc << Form.new("ldaxr x1, [x2]", atomic(MOp::Ldaxr, 64, 1, 2, 0))
+  acc << Form.new("stlxr w3, x1, [x2]", atomic(MOp::Stlxr, 64, 1, 2, 3))
+  acc << Form.new("ldxr x1, [x2]", atomic(MOp::Ldxr, 64, 1, 2, 0))
+  acc << Form.new("stxr w3, x1, [x2]", atomic(MOp::Stxr, 64, 1, 2, 3))
+  m = mk(MOp::Dmb)
+  m.imm = 0_i64
+  acc << Form.new("dmb ish", m)
+  m = mk(MOp::Dmb)
+  m.imm = 1_i64
+  acc << Form.new("dmb ishld", m)
+  m = mk(MOp::Dmb)
+  m.imm = 2_i64
+  acc << Form.new("dmb ishst", m)
+  acc << Form.new("add x0, x1, x2", arith(MOp::Add, 0, 1, 2))
+  acc << Form.new("sub x0, x1, x2", arith(MOp::Sub, 0, 1, 2))
+  acc << Form.new("mul x0, x1, x2", arith(MOp::Mul, 0, 1, 2))
+  acc << Form.new("sdiv x0, x1, x2", arith(MOp::Sdiv, 0, 1, 2))
+  acc << Form.new("udiv x0, x1, x2", arith(MOp::Udiv, 0, 1, 2))
+  m = mk(MOp::Msub)
+  m.defs << reg(0)
+  m.uses << reg(3)
+  m.uses << reg(1)
+  m.uses << reg(2)
+  acc << Form.new("msub x0, x1, x2, x3", m)
+  acc << Form.new("and x0, x1, x2", arith(MOp::And, 0, 1, 2))
+  m = mk(MOp::AndImm)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.imm = -8_i64
+  acc << Form.new("and x0, x1, #0xfffffffffffffff8", m)
+  m = mk(MOp::AndImm)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.imm = 0xf0_i64
+  acc << Form.new("and x0, x1, #0xf0", m)
+  acc << Form.new("orr x0, x1, x2", arith(MOp::Orr, 0, 1, 2))
+  acc << Form.new("eor x0, x1, x2", arith(MOp::Eor, 0, 1, 2))
+  acc << Form.new("lsl x0, x1, x2", arith(MOp::Lsl, 0, 1, 2))
+  acc << Form.new("lsr x0, x1, x2", arith(MOp::Lsr, 0, 1, 2))
+  acc << Form.new("asr x0, x1, x2", arith(MOp::Asr, 0, 1, 2))
+  m = mk(MOp::AddImm)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.imm = 42_i64
+  acc << Form.new("add x0, x1, #42", m)
+  m = mk(MOp::SubImm)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.imm = 42_i64
+  acc << Form.new("sub x0, x1, #42", m)
+  m = mk(MOp::Sbfm)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.imm = 8_i64
+  acc << Form.new("sbfm x0, x1, #0, #7", m)
+  m = mk(MOp::Ubfm)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.imm = 16_i64
+  acc << Form.new("ubfm x0, x1, #0, #15", m)
+  acc << Form.new("smulh x0, x1, x2", arith(MOp::Smulh, 0, 1, 2))
+  acc << Form.new("umulh x0, x1, x2", arith(MOp::Umulh, 0, 1, 2))
+  acc << Form.new("adds x0, x1, x2", arith(MOp::Adds, 0, 1, 2))
+  acc << Form.new("subs x0, x1, x2", arith(MOp::Subs, 0, 1, 2))
+  acc << Form.new("adc x0, x1, x2", arith(MOp::Adc, 0, 1, 2))
+  acc << Form.new("sbc x0, x1, x2", arith(MOp::Sbc, 0, 1, 2))
+  acc << Form.new("adcs x0, x1, x2", arith(MOp::Adcs, 0, 1, 2))
+  acc << Form.new("sbcs x0, x1, x2", arith(MOp::Sbcs, 0, 1, 2))
+  m = mk(MOp::Cmp)
+  m.uses << reg(1)
+  m.uses << reg(2)
+  acc << Form.new("cmp x1, x2", m)
+  m = mk(MOp::CmpImm)
+  m.uses << reg(1)
+  m.imm = 0_i64
+  acc << Form.new("cmp x1, #0", m)
+  m = mk(MOp::Cset)
+  m.defs << reg(0)
+  m.cond = 0
+  acc << Form.new("cset x0, eq", m)
+  m = mk(MOp::Csel)
+  m.defs << reg(0)
+  m.uses << reg(1)
+  m.uses << reg(2)
+  m.cond = 1
+  acc << Form.new("csel x0, x1, x2, ne", m)
+  acc << Form.new("fadd d0, d1, d2", farith(MOp::FAdd, 64))
+  acc << Form.new("fadd s0, s1, s2", farith(MOp::FAdd, 32))
+  acc << Form.new("fsub d0, d1, d2", farith(MOp::FSub, 64))
+  acc << Form.new("fmul d0, d1, d2", farith(MOp::FMul, 64))
+  acc << Form.new("fdiv d0, d1, d2", farith(MOp::FDiv, 64))
+  m = mk(MOp::FNeg)
+  m.fp = true
+  m.size = 64
+  m.defs << reg(32)
+  m.uses << reg(33)
+  acc << Form.new("fneg d0, d1", m)
+  m = mk(MOp::FCmp)
+  m.fp = true
+  m.size = 64
+  m.uses << reg(33)
+  m.uses << reg(34)
+  acc << Form.new("fcmp d1, d2", m)
+  m = mk(MOp::FCvt)
+  m.fp = true
+  m.size = 32
+  m.defs << reg(32)
+  m.uses << reg(33)
+  acc << Form.new("fcvt s0, d1", m)
+  m = mk(MOp::FCvt)
+  m.fp = true
+  m.size = 64
+  m.defs << reg(32)
+  m.uses << reg(33)
+  acc << Form.new("fcvt d0, s1", m)
+  m = mk(MOp::Scvtf)
+  m.fp = true
+  m.size = 64
+  m.defs << reg(32)
+  m.uses << reg(1)
+  acc << Form.new("scvtf d0, x1", m)
+  m = mk(MOp::Ucvtf)
+  m.fp = true
+  m.size = 64
+  m.defs << reg(32)
+  m.uses << reg(1)
+  acc << Form.new("ucvtf d0, x1", m)
+  m = mk(MOp::Fcvtzs)
+  m.fp = true
+  m.size = 64
+  m.imm = 32_i64
+  m.defs << reg(0)
+  m.uses << reg(33)
+  acc << Form.new("fcvtzs w0, d1", m)
+  m = mk(MOp::Fcvtzs)
+  m.fp = true
+  m.size = 64
+  m.imm = 64_i64
+  m.defs << reg(0)
+  m.uses << reg(33)
+  acc << Form.new("fcvtzs x0, d1", m)
+  m = mk(MOp::Fcvtzu)
+  m.fp = true
+  m.size = 32
+  m.imm = 32_i64
+  m.defs << reg(0)
+  m.uses << reg(33)
+  acc << Form.new("fcvtzu w0, s1", m)
+  m = mk(MOp::Bl)
+  m.sym = 0
+  m.reloc = RelocKind::A64Call26
+  acc << Form.new("bl _sym", m)
+  m = mk(MOp::Blr)
+  m.uses << reg(1)
+  acc << Form.new("blr x1", m)
+  m = mk(MOp::Br)
+  m.uses << reg(1)
+  acc << Form.new("br x1", m)
+  m = mk(MOp::BrTable)
+  m.uses << reg(1)
+  acc << Form.new("br x1", m)
+  m = mk(MOp::LdrIdx)
+  m.size = 64
+  m.defs << reg(1)
+  m.uses << reg(2)
+  m.uses << reg(3)
+  acc << Form.new("ldr x1, [x2, x3, lsl #3]", m)
+  acc << Form.new("ret", mk(MOp::Ret))
+  m = mk(MOp::Brk)
+  m.imm = 1_i64
+  acc << Form.new("brk #1", m)
+  acc
+end
+
+def sym_form(op : MOp, rd : Int32) : MInst
+  m = mk(op)
+  m.defs << reg(rd)
+  m.sym = 0
+  m
+end
+
+def mem(op : MOp, bits : Int32, signed : Bool, fp : Bool, rt : Int32, rn : Int32, off : Int64) : MInst
+  m = mk(op)
+  m.size = bits
+  m.signed = signed
+  m.fp = fp
+  m.imm = off
+  if op == MOp::Ldr
+    m.defs << reg(rt)
+    m.uses << reg(rn)
+  else
+    m.uses << reg(rt)
+    m.uses << reg(rn)
+  end
+  m
+end
+
+def atomic(op : MOp, bits : Int32, rt : Int32, rn : Int32, status : Int32) : MInst
+  m = mk(op)
+  m.size = bits
+  if op == MOp::Ldar || op == MOp::Ldaxr || op == MOp::Ldxr
+    m.defs << reg(rt)
+    m.uses << reg(rn)
+  elsif op == MOp::Stlr
+    m.uses << reg(rt)
+    m.uses << reg(rn)
+  else
+    m.defs << reg(status)
+    m.uses << reg(rt)
+    m.uses << reg(rn)
+  end
+  m
+end
+
+def arith(op : MOp, d : Int32, a : Int32, b : Int32) : MInst
+  m = mk(op)
+  m.defs << reg(d)
+  m.uses << reg(a)
+  m.uses << reg(b)
+  m
+end
+
+def farith(op : MOp, bits : Int32) : MInst
+  m = mk(op)
+  m.fp = true
+  m.size = bits
+  m.defs << reg(32)
+  m.uses << reg(33)
+  m.uses << reg(34)
+  m
+end
+
+def hex_slice(bytes : Bytes, count : Int32) : String
+  String.build do |io|
+    k = 0
+    while k < count
+      b = bytes[k]
+      io << "0123456789abcdef"[(b >> 4).to_i32]
+      io << "0123456789abcdef"[(b & 15_u8).to_i32]
+      k = k + 1
+    end
+  end
+end
+
+# A symbol name in hex, so that a name holding a newline cannot break the line-oriented table.
+def name_hex(name : String) : String
+  String.build do |io|
+    k = 0
+    while k < name.bytesize
+      b = name.byte_at(k)
+      io << "0123456789abcdef"[(b >> 4).to_i32]
+      io << "0123456789abcdef"[(b & 15_u8).to_i32]
+      k = k + 1
+    end
+  end
+end
+
+def hex(bytes : Array(UInt8)) : String
+  String.build do |io|
+    bytes.each do |b|
+      io << "0123456789abcdef"[(b >> 4).to_i32]
+      io << "0123456789abcdef"[(b & 15_u8).to_i32]
+    end
+  end
+end
+
+module NativeCg
+  def self.fail(message : String) : Nil
+    STDERR.puts "native_cg: #{message}"
+    LibC.exit(1)
+  end
+
+  def self.load(path : String) : Module
+    unless File.exists?(path)
+      fail("no such file: #{path}")
+    end
+    parsed = parse(File.read(path))
+    if parsed.is_a?(IrParseError)
+      fail("#{path}: #{parsed.to_s}")
+    end
+    parsed.as(Module)
+  end
+
+  def self.run : Nil
+    args = Program.args
+    if args.size < 1
+      fail("usage: native_cg obj|mir|forms|bytes ...")
+    end
+    command = args[0]
+    if command == "obj"
+      mod = load(args[1])
+      darwin = mod.target.darwin?
+      result = compile_module(mod, darwin)
+      if result.is_a?(String)
+        fail(result.as(String))
+      end
+      obj = result.as(ObjectFile)
+      if darwin
+        File.write(args[2], String.new(macho_bytes(obj)))
+      else
+        STDOUT.puts "linux: #{obj.sections.size} sections, #{obj.symbols.size} symbols, not written: the ELF writer is a later slice"
+      end
+    elsif command == "mir"
+      mod = load(args[1])
+      fn = mod.get_function?(args[2])
+      unless fn
+        fail("no function #{args[2]}")
+      end
+      syms = symbol_table(mod, ObjectFile.new(ObjFormat::MachO, mod.target, "iyi-native"))
+      mf = function_mir(mod, fn.as(Function), syms, mod.target.darwin?)
+      if mf.is_a?(String)
+        fail(mf.as(String))
+      end
+      STDOUT.print(dump_mfunction(mf.as(MFunction)))
+    elsif command == "forms"
+      forms.each do |f|
+        enc = Encoder.new(FrameInfo.new)
+        enc.emit(f.inst)
+        rel = enc.relocs.map { |r| "#{r.offset}:#{r.kind}" }
+        STDOUT.puts "#{f.asm}\t#{hex(enc.bytes)}\t#{rel.join(",")}"
+      end
+    elsif command == "bytes"
+      read_bytes(args[1])
+    else
+      fail("unknown command #{command}")
+    end
+  end
+
+  # Reads a Mach-O object and prints each section's bytes and relocations, then each symbol's value, so the
+  # gate can take a symbol's extent from the next symbol (Mach-O records no size).
+  def self.read_bytes(path : String) : Nil
+    data = File.read(path)
+    result = read_object(Slice(UInt8).of(data), Target.new("aarch64-apple-darwin"))
+    if result.is_a?(ObjError)
+      fail("#{path}: #{result.as(ObjError).message}")
+    end
+    obj = result.as(ObjectFile)
+    obj.sections.each_with_index do |sec, si|
+      next unless sec.kind == SectionKind::Text
+      STDOUT.puts "section\t#{si}\t#{hex_slice(sec.bytes, sec.bytes.size)}"
+      sec.relocs.each do |r|
+        STDOUT.puts "reloc\t#{si}\t#{r.offset}\t#{r.kind}"
+      end
+    end
+    obj.symbols.each do |s|
+      next if s.section < 0
+      STDOUT.puts "sym\t#{name_hex(s.name)}\t#{s.section}\t#{s.value}"
+    end
+  end
+end
+
+NativeCg.run

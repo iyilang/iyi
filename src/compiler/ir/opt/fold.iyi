@@ -1,0 +1,166 @@
+@[Unsafe("reads an IR double constant's bit pattern as a Float64")]
+module compiler/ir/opt/fold
+
+import std/float
+import std/int
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value, u64_as_i64}
+import compiler/ir/inst::{Op, Inst, Block, IntPredicate}
+import compiler/ir/builder::{Builder}
+
+pub def canonical(bits : Int32, value : Int64) : Int64
+  return value & 1_i64 if bits == 1
+  return value if bits >= 64
+  padding = 64 - bits
+  value.unsafe_shl(padding).unsafe_shr(padding)
+end
+
+pub def int_value(v : Value) : Int64?
+  return nil unless v.is_a?(Inst) && v.type.int? && v.type.bits <= 64
+  inst = v.as(Inst)
+  return nil unless inst.op == Op::ConstInt
+  canonical(v.type.bits, inst.aux_int)
+end
+
+def signed_value(bits : Int32, value : Int64) : Int64
+  return value if bits == 64
+  padding = 64 - bits
+  value.unsafe_shl(padding).unsafe_shr(padding)
+end
+
+def unsigned_value(bits : Int32, value : Int64) : UInt64
+  result = value.unsafe_to_u64
+  result &= 0xFFFFFFFFFFFFFFFF_u64.unsafe_shr(64 - bits) if bits < 64
+  result
+end
+
+def double_value(v : Value) : Float64?
+  return nil unless v.is_a?(Inst) && v.type.double?
+  inst = v.as(Inst)
+  return nil unless inst.op == Op::ConstFloat
+  bits = inst.aux_int
+  pointerof(bits).as(Float64*).value
+end
+
+pub def fold_binary(b : Builder, op : Op, type : IrType, lhs : Value, rhs : Value, flags : Int64) : Value?
+  return nil unless flags == 0_i64 && lhs.type == type
+  if type.double?
+    return nil unless rhs.type == type
+    if op == Op::FNeg
+      return nil unless lhs.is_a?(Inst) && lhs.as(Inst).op == Op::ConstFloat
+      bits = lhs.as(Inst).aux_int ^ -9223372036854775808_i64
+      return Inst.new(Op::ConstFloat, type, [] of Value, bits, nil, [] of Block, [] of Int64)
+    end
+    a = double_value(lhs)
+    return nil unless a
+    c = double_value(rhs)
+    return nil unless c
+    value = case op
+            when Op::FAdd then a + c
+            when Op::FSub then a - c
+            when Op::FMul then a * c
+            when Op::FDiv then a / c
+            else
+              return nil
+            end
+    return b.const_float(type, value)
+  end
+  return nil unless type.int? && type.bits <= 64 && rhs.type == type
+  a = int_value(lhs)
+  return nil unless a
+  c = int_value(rhs)
+  return nil unless c
+  bits = type.bits
+  value = case op
+          when Op::Add then a &+ c
+          when Op::Sub then a &- c
+          when Op::Mul then a &* c
+          when Op::And then a & c
+          when Op::Or  then a | c
+          when Op::Xor then a ^ c
+          when Op::Shl
+            return nil unless c >= 0_i64 && c < bits
+            a.unsafe_shl(c.to_i32)
+          when Op::LShr
+            return nil unless c >= 0_i64 && c < bits
+            u64_as_i64(unsigned_value(bits, a).unsafe_shr(c.to_i32))
+          when Op::AShr
+            return nil unless c >= 0_i64 && c < bits
+            signed_value(bits, a).unsafe_shr(c.to_i32)
+          when Op::UDiv, Op::URem
+            dividend = unsigned_value(bits, a)
+            divisor = unsigned_value(bits, c)
+            return nil if divisor == 0_u64
+            result = op == Op::UDiv ? dividend.unsafe_div(divisor) : dividend.unsafe_mod(divisor)
+            u64_as_i64(result)
+          when Op::SDiv, Op::SRem
+            dividend = signed_value(bits, a)
+            divisor = signed_value(bits, c)
+            return nil if divisor == 0_i64
+            minimum = (-1_i64).unsafe_shl(bits - 1)
+            return nil if dividend == minimum && divisor == -1_i64
+            op == Op::SDiv ? dividend.unsafe_div(divisor) : dividend.unsafe_mod(divisor)
+          else
+            return nil
+          end
+  b.const_int(type, canonical(bits, value))
+end
+
+def signed_compare(predicate : Int64, lhs_value : Int64, rhs_value : Int64) : Bool
+  if predicate == IntPredicate::SLT.value.to_i64
+    return lhs_value < rhs_value # mutation M5: signed comparison
+  end
+  return lhs_value <= rhs_value if predicate == IntPredicate::SLE.value.to_i64
+  return lhs_value > rhs_value if predicate == IntPredicate::SGT.value.to_i64
+  lhs_value >= rhs_value
+end
+
+pub def fold_icmp(b : Builder, predicate : Int64, lhs : Value, rhs : Value) : Value?
+  return nil unless lhs.type == rhs.type && lhs.type.int? && lhs.type.bits <= 64
+  a = int_value(lhs)
+  return nil unless a
+  c = int_value(rhs)
+  return nil unless c
+  bits = lhs.type.bits
+  au = unsigned_value(bits, a)
+  cu = unsigned_value(bits, c)
+  result = if predicate == IntPredicate::EQ.value.to_i64
+             au == cu
+           elsif predicate == IntPredicate::NE.value.to_i64
+             au != cu
+           elsif predicate == IntPredicate::ULT.value.to_i64
+             au < cu
+           elsif predicate == IntPredicate::ULE.value.to_i64
+             au <= cu
+           elsif predicate == IntPredicate::UGT.value.to_i64
+             au > cu
+           elsif predicate == IntPredicate::UGE.value.to_i64
+             au >= cu
+           elsif predicate == IntPredicate::SLT.value.to_i64 || predicate == IntPredicate::SLE.value.to_i64 || predicate == IntPredicate::SGT.value.to_i64 || predicate == IntPredicate::SGE.value.to_i64
+             signed_compare(predicate, signed_value(bits, a), signed_value(bits, c))
+           else
+             return nil
+           end
+  b.const_int(b.types.int1, result ? 1_i64 : 0_i64)
+end
+
+pub def fold_cast(b : Builder, op : Op, value : Value, dest : IrType) : Value?
+  return nil unless value.type.int? && dest.int? && value.type.bits <= 64 && dest.bits <= 64
+  v = int_value(value)
+  return nil unless v
+  source_bits = value.type.bits
+  result = case op
+           when Op::Trunc
+             return nil unless dest.bits < source_bits
+             v
+           when Op::ZExt
+             return nil unless dest.bits > source_bits
+             u64_as_i64(unsigned_value(source_bits, v))
+           when Op::SExt
+             return nil unless dest.bits > source_bits
+             signed_value(source_bits, v)
+           else
+             return nil
+           end
+  b.const_int(dest, canonical(dest.bits, result))
+end

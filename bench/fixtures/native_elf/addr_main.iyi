@@ -1,0 +1,22 @@
+# The address-randomisation fixture of the native ELF run (bench/native_elf_run.sh). It prints the address of the
+# C-visible `main` that the start code calls. A static-PIE, like a PIE, is loaded at a random base each run, so two
+# runs print two different addresses. The run script requires that for both the native executable and the oracle.
+#
+# Only the address is printed. The address is taken with inline assembly, one form per architecture, so the same
+# source compiles through the oracle on both Linux targets.
+
+@[Unsafe("inline assembly reads the address of the C main symbol into an uninitialized word")]
+module fixtures/native_elf/addr_main
+
+def program_address : UInt64
+  address = uninitialized UInt64
+  {% if flag?(:x86_64) %}
+    asm("leaq main(%rip), $0" : "=r"(address) ::: "volatile")
+  {% else %}
+    asm("adrp $0, main
+         add $0, $0, :lo12:main" : "=r"(address) ::: "volatile")
+  {% end %}
+  address
+end
+
+puts "#{program_address}"

@@ -1,0 +1,18 @@
+; iyi-ir 1
+source_filename = "forward_blocked_by_phi_conflict"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @forward_blocked(i1 %c, i1 %choose, i32 %x) {
+entry:
+  br i1 %c, label %left, label %right
+left:
+  br i1 %choose, label %middle, label %join
+middle:
+  br label %join
+right:
+  %r = add i32 %x, 2
+  br label %join
+join:
+  %p = phi i32 [ 1, label %left ], [ 2, label %middle ], [ %r, label %right ]
+  ret i32 %p
+}

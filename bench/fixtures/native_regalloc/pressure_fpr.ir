@@ -1,0 +1,93 @@
+; iyi-ir 1
+module "pressure_fpr"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal double @fwork(double %x) {
+entry:
+  %f1 = fmul double %x, 0x3ff0000000000000
+  %f2 = fmul double %x, 0x4000000000000000
+  %f3 = fmul double %x, 0x4008000000000000
+  %f4 = fmul double %x, 0x4010000000000000
+  %f5 = fmul double %x, 0x4014000000000000
+  %f6 = fmul double %x, 0x4018000000000000
+  %f7 = fmul double %x, 0x401c000000000000
+  %f8 = fmul double %x, 0x4020000000000000
+  %f9 = fmul double %x, 0x4022000000000000
+  %f10 = fmul double %x, 0x4024000000000000
+  %f11 = fmul double %x, 0x4026000000000000
+  %f12 = fmul double %x, 0x4028000000000000
+  %f13 = fmul double %x, 0x402a000000000000
+  %f14 = fmul double %x, 0x402c000000000000
+  %f15 = fmul double %x, 0x402e000000000000
+  %f16 = fmul double %x, 0x4030000000000000
+  %f17 = fmul double %x, 0x4031000000000000
+  %f18 = fmul double %x, 0x4032000000000000
+  %f19 = fmul double %x, 0x4033000000000000
+  %f20 = fmul double %x, 0x4034000000000000
+  %f21 = fmul double %x, 0x4035000000000000
+  %f22 = fmul double %x, 0x4036000000000000
+  %f23 = fmul double %x, 0x4037000000000000
+  %f24 = fmul double %x, 0x4038000000000000
+  %f25 = fmul double %x, 0x4039000000000000
+  %f26 = fmul double %x, 0x403a000000000000
+  %f27 = fmul double %x, 0x403b000000000000
+  %f28 = fmul double %x, 0x403c000000000000
+  %f29 = fmul double %x, 0x403d000000000000
+  %f30 = fmul double %x, 0x403e000000000000
+  %f31 = fmul double %x, 0x403f000000000000
+  %f32 = fmul double %x, 0x4040000000000000
+  %f33 = fmul double %x, 0x4040800000000000
+  %f34 = fmul double %x, 0x4041000000000000
+  %f35 = fmul double %x, 0x4041800000000000
+  %f36 = fmul double %x, 0x4042000000000000
+  %s2 = fadd double %f1, %f2
+  %s3 = fadd double %s2, %f3
+  %s4 = fadd double %s3, %f4
+  %s5 = fadd double %s4, %f5
+  %s6 = fadd double %s5, %f6
+  %s7 = fadd double %s6, %f7
+  %s8 = fadd double %s7, %f8
+  %s9 = fadd double %s8, %f9
+  %s10 = fadd double %s9, %f10
+  %s11 = fadd double %s10, %f11
+  %s12 = fadd double %s11, %f12
+  %s13 = fadd double %s12, %f13
+  %s14 = fadd double %s13, %f14
+  %s15 = fadd double %s14, %f15
+  %s16 = fadd double %s15, %f16
+  %s17 = fadd double %s16, %f17
+  %s18 = fadd double %s17, %f18
+  %s19 = fadd double %s18, %f19
+  %s20 = fadd double %s19, %f20
+  %s21 = fadd double %s20, %f21
+  %s22 = fadd double %s21, %f22
+  %s23 = fadd double %s22, %f23
+  %s24 = fadd double %s23, %f24
+  %s25 = fadd double %s24, %f25
+  %s26 = fadd double %s25, %f26
+  %s27 = fadd double %s26, %f27
+  %s28 = fadd double %s27, %f28
+  %s29 = fadd double %s28, %f29
+  %s30 = fadd double %s29, %f30
+  %s31 = fadd double %s30, %f31
+  %s32 = fadd double %s31, %f32
+  %s33 = fadd double %s32, %f33
+  %s34 = fadd double %s33, %f34
+  %s35 = fadd double %s34, %f35
+  %s36 = fadd double %s35, %f36
+  ret double %s36
+}
+
+define i32 @main() {
+entry:
+  %r1 = call double (double) @fwork(double 0x4000000000000000)
+  %r2 = call double (double) @fwork(double 0xbff8000000000000)
+  %i1 = fptosi double %r1 to i64
+  %i2 = fptosi double %r2 to i64
+  %p_i1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %i1)
+  %p_i2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %i2)
+  ret i32 0
+}

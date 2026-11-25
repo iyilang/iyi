@@ -1,0 +1,98 @@
+@[Unsafe("binds LLVM's C API: its objects are raw handles this module wraps and disposes, which the compiler does not check")]
+module compiler/llvm/pass_manager
+
+import compiler/llvm/lib_llvm::{string_from_c, string_and_dispose}
+import compiler/llvm/module::{Module}
+import compiler/llvm/target::{TargetMachine}
+
+pub class PassBuilderOptions
+  getter unwrap : LibLLVM::PassBuilderOptionsRef
+
+  def initialize(@unwrap : LibLLVM::PassBuilderOptionsRef)
+    @disposed = false
+  end
+
+  def self.new : PassBuilderOptions
+    opts = LibLLVM.create_pass_builder_options
+    if opts.address == 0
+      raise "Could not create PassBuilderOptions"
+    end
+    PassBuilderOptions.new(opts)
+  end
+
+  def to_unsafe : LibLLVM::PassBuilderOptionsRef
+    @unwrap
+  end
+
+  def loop_unrolling=(enable : Bool) : Nil
+    LibLLVM.pass_builder_options_set_loop_unrolling(@unwrap, enable ? 1 : 0)
+  end
+
+  def loop_vectorization=(enable : Bool) : Nil
+    LibLLVM.pass_builder_options_set_loop_vectorization(@unwrap, enable ? 1 : 0)
+  end
+
+  def slp_vectorization=(enable : Bool) : Nil
+    LibLLVM.pass_builder_options_set_slp_vectorization(@unwrap, enable ? 1 : 0)
+  end
+
+  def dispose : Nil
+    if !@disposed && @unwrap.address != 0
+      LibLLVM.dispose_pass_builder_options(@unwrap)
+      @disposed = true
+    end
+  end
+end
+
+pub def run_passes(mod : Module,
+                   passes : String,
+                   target_machine : TargetMachine,
+                   options : PassBuilderOptions? = nil) : Nil
+  opts_ref = options ? options.to_unsafe : Pointer(Void).new(0_u64)
+  err = LibLLVM.run_passes(mod.to_unsafe, passes.to_unsafe, target_machine.to_unsafe, opts_ref)
+  if err.address != 0
+    msg_ptr = LibLLVM.get_error_message(err)
+    err_str = string_from_c(msg_ptr)
+    LibLLVM.dispose_error_message(msg_ptr)
+    raise "LLVM run_passes failed: #{err_str}"
+  end
+end
+
+pub class ModulePassManager
+  @unwrap : LibLLVM::PassManagerRef
+  @disposed : Bool
+  getter unwrap : LibLLVM::PassManagerRef
+
+  def initialize
+    @unwrap = Pointer(Void).new(0_u64)
+    {% if LibLLVM::IS_LT_170 %}
+      @unwrap = LibLLVM.pass_manager_create
+    {% end %}
+    @disposed = false
+  end
+
+  def to_unsafe : LibLLVM::PassManagerRef
+    @unwrap
+  end
+
+  def run(mod : Module) : Bool
+    {% if LibLLVM::IS_LT_170 %}
+      if @unwrap.address != 0
+        LibLLVM.run_pass_manager(@unwrap, mod.to_unsafe) != 0
+      else
+        true
+      end
+    {% else %}
+      true
+    {% end %}
+  end
+
+  def dispose : Nil
+    {% if LibLLVM::IS_LT_170 %}
+      if !@disposed && @unwrap.address != 0
+        LibLLVM.dispose_pass_manager(@unwrap)
+        @disposed = true
+      end
+    {% end %}
+  end
+end

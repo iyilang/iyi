@@ -1,0 +1,212 @@
+; iyi-ir 1
+module "wide"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+declare external i128 @__iyi_native_divti3(i128, i128)
+declare external i128 @__iyi_native_udivti3(i128, i128)
+declare external i128 @__iyi_native_modti3(i128, i128)
+declare external i128 @__iyi_native_umodti3(i128, i128)
+@fmt = private constant [11 x i8] c"%lld %llu\0A\00"
+
+; i128 values are pairs of 64-bit registers (SPEC 2.2). Each line of output is a value's high half, signed, and
+; its low half, unsigned.
+define internal void @show(i128 %x) {
+entry:
+  %h = lshr i128 %x, 64
+  %hi = trunc i128 %h to i64
+  %lo = trunc i128 %x to i64
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i64 %hi, i64 %lo)
+  ret void
+}
+
+; Shifts by a variable amount in 0..127: left, logical right, arithmetic right.
+define internal void @sh(i128 %x, i128 %n) {
+entry:
+  %l = shl i128 %x, %n
+  call void (i128) @show(i128 %l)
+  %r = lshr i128 %x, %n
+  call void (i128) @show(i128 %r)
+  %a = ashr i128 %x, %n
+  call void (i128) @show(i128 %a)
+  ret void
+}
+
+; The first argument is an i64, so the i128 pair after it starts on an even register (AAPCS64).
+define internal void @mix(i64 %a, i128 %b, i128 %c) {
+entry:
+  %a128 = zext i64 %a to i128
+  %s = add i128 %a128, %b
+  %t = sub i128 %s, %c
+  call void (i128) @show(i128 %t)
+  ret void
+}
+
+define internal void @divs(i128 %x, i128 %y) {
+entry:
+  %q = sdiv i128 %x, %y
+  call void (i128) @show(i128 %q)
+  %r = srem i128 %x, %y
+  call void (i128) @show(i128 %r)
+  %uq = udiv i128 %x, %y
+  call void (i128) @show(i128 %uq)
+  %ur = urem i128 %x, %y
+  call void (i128) @show(i128 %ur)
+  ret void
+}
+
+define internal void @cmps(i128 %x, i128 %y) {
+entry:
+  %e = icmp eq i128 %x, %y
+  %ez = zext i1 %e to i128
+  call void (i128) @show(i128 %ez)
+  %n = icmp ne i128 %x, %y
+  %nz = zext i1 %n to i128
+  call void (i128) @show(i128 %nz)
+  %ult = icmp ult i128 %x, %y
+  %ultz = zext i1 %ult to i128
+  call void (i128) @show(i128 %ultz)
+  %ugt = icmp ugt i128 %x, %y
+  %ugtz = zext i1 %ugt to i128
+  call void (i128) @show(i128 %ugtz)
+  %ule = icmp ule i128 %x, %y
+  %ulez = zext i1 %ule to i128
+  call void (i128) @show(i128 %ulez)
+  %uge = icmp uge i128 %x, %y
+  %ugez = zext i1 %uge to i128
+  call void (i128) @show(i128 %ugez)
+  %slt = icmp slt i128 %x, %y
+  %sltz = zext i1 %slt to i128
+  call void (i128) @show(i128 %sltz)
+  %sgt = icmp sgt i128 %x, %y
+  %sgtz = zext i1 %sgt to i128
+  call void (i128) @show(i128 %sgtz)
+  %sle = icmp sle i128 %x, %y
+  %slez = zext i1 %sle to i128
+  call void (i128) @show(i128 %slez)
+  %sge = icmp sge i128 %x, %y
+  %sgez = zext i1 %sge to i128
+  call void (i128) @show(i128 %sgez)
+  ret void
+}
+
+; A loop with i128 phi nodes: the sum of 18446744073709551621 * i for i in 1..10.
+define internal void @loop() {
+entry:
+  br label %head
+head:
+  %i = phi i128 [ 1, label %entry ], [ %i2, label %body ]
+  %acc = phi i128 [ 0, label %entry ], [ %acc2, label %body ]
+  %done = icmp sgt i128 %i, 10
+  br i1 %done, label %exit, label %body
+body:
+  %k = mul i128 %i, 18446744073709551621
+  %acc2 = add i128 %acc, %k
+  %i2 = add i128 %i, 1
+  br label %head
+exit:
+  call void (i128) @show(i128 %acc)
+  ret void
+}
+
+define internal void @misc(i128 %x, i128 %y) {
+entry:
+  %c = icmp slt i128 %x, %y
+  %s = select i1 %c, i128 %x, i128 %y
+  call void (i128) @show(i128 %s)
+  %p = alloca i128, align 16
+  store i128 %x, ptr %p, align 16
+  %l = load i128, ptr %p, align 16
+  call void (i128) @show(i128 %l)
+  ret void
+}
+
+define internal void @ovfs(i128 %x, i128 %y) {
+entry:
+  %s1 = intrinsic llvm.sadd.with.overflow.i128(i128 %x, i128 %y)
+  %v1 = extractvalue { i128, i1 } %s1, 0
+  %f1 = extractvalue { i128, i1 } %s1, 1
+  call void (i128) @show(i128 %v1)
+  %f1z = zext i1 %f1 to i128
+  call void (i128) @show(i128 %f1z)
+  %s2 = intrinsic llvm.uadd.with.overflow.i128(i128 %x, i128 %y)
+  %v2 = extractvalue { i128, i1 } %s2, 0
+  %f2 = extractvalue { i128, i1 } %s2, 1
+  call void (i128) @show(i128 %v2)
+  %f2z = zext i1 %f2 to i128
+  call void (i128) @show(i128 %f2z)
+  %s3 = intrinsic llvm.ssub.with.overflow.i128(i128 %x, i128 %y)
+  %v3 = extractvalue { i128, i1 } %s3, 0
+  %f3 = extractvalue { i128, i1 } %s3, 1
+  call void (i128) @show(i128 %v3)
+  %f3z = zext i1 %f3 to i128
+  call void (i128) @show(i128 %f3z)
+  %s4 = intrinsic llvm.usub.with.overflow.i128(i128 %x, i128 %y)
+  %v4 = extractvalue { i128, i1 } %s4, 0
+  %f4 = extractvalue { i128, i1 } %s4, 1
+  call void (i128) @show(i128 %v4)
+  %f4z = zext i1 %f4 to i128
+  call void (i128) @show(i128 %f4z)
+  %s5 = intrinsic llvm.smul.with.overflow.i128(i128 %x, i128 %y)
+  %v5 = extractvalue { i128, i1 } %s5, 0
+  %f5 = extractvalue { i128, i1 } %s5, 1
+  call void (i128) @show(i128 %v5)
+  %f5z = zext i1 %f5 to i128
+  call void (i128) @show(i128 %f5z)
+  %s6 = intrinsic llvm.umul.with.overflow.i128(i128 %x, i128 %y)
+  %v6 = extractvalue { i128, i1 } %s6, 0
+  %f6 = extractvalue { i128, i1 } %s6, 1
+  call void (i128) @show(i128 %v6)
+  %f6z = zext i1 %f6 to i128
+  call void (i128) @show(i128 %f6z)
+  ret void
+}
+
+define i32 @main() {
+entry:
+  %a = add i128 1512366075204170947332355369683137040, 18446744073709551621
+  call void (i128) @show(i128 %a)
+  %ca = add i128 1512366075204170947332355369683137040, 1512366075204170947332355369683137040
+  call void (i128) @show(i128 %ca)
+  %b = sub i128 1512366075204170947332355369683137040, 18446744073709551621
+  call void (i128) @show(i128 %b)
+  %c = sub i128 18446744073709551621, 1512366075204170947332355369683137040
+  call void (i128) @show(i128 %c)
+  %m1 = mul i128 1512366075204170947332355369683137040, 3
+  call void (i128) @show(i128 %m1)
+  %m2 = mul i128 -1512366075204170947332355369683137040, 18446744073709551621
+  call void (i128) @show(i128 %m2)
+  %an = and i128 1512366075204170947332355369683137040, -1512366075204170947332355369683137040
+  call void (i128) @show(i128 %an)
+  %or = or i128 1512366075204170947332355369683137040, 18446744073709551621
+  call void (i128) @show(i128 %or)
+  %xo = xor i128 1512366075204170947332355369683137040, -1512366075204170947332355369683137040
+  call void (i128) @show(i128 %xo)
+  call void (i128, i128) @sh(i128 1512366075204170947332355369683137040, i128 0)
+  call void (i128, i128) @sh(i128 1512366075204170947332355369683137040, i128 1)
+  call void (i128, i128) @sh(i128 1512366075204170947332355369683137040, i128 63)
+  call void (i128, i128) @sh(i128 1512366075204170947332355369683137040, i128 64)
+  call void (i128, i128) @sh(i128 1512366075204170947332355369683137040, i128 65)
+  call void (i128, i128) @sh(i128 1512366075204170947332355369683137040, i128 127)
+  call void (i128, i128) @sh(i128 -1512366075204170947332355369683137040, i128 0)
+  call void (i128, i128) @sh(i128 -1512366075204170947332355369683137040, i128 1)
+  call void (i128, i128) @sh(i128 -1512366075204170947332355369683137040, i128 63)
+  call void (i128, i128) @sh(i128 -1512366075204170947332355369683137040, i128 64)
+  call void (i128, i128) @sh(i128 -1512366075204170947332355369683137040, i128 65)
+  call void (i128, i128) @sh(i128 -1512366075204170947332355369683137040, i128 127)
+  %z = zext i64 -1 to i128
+  call void (i128) @show(i128 %z)
+  %sx = sext i64 -5 to i128
+  call void (i128) @show(i128 %sx)
+  call void (i64, i128, i128) @mix(i64 7, i128 18446744073709551621, i128 -1512366075204170947332355369683137040)
+  call void (i128, i128) @divs(i128 1512366075204170947332355369683137040, i128 1000000007)
+  call void (i128, i128) @divs(i128 -1512366075204170947332355369683137040, i128 97)
+  call void (i128, i128) @cmps(i128 1512366075204170947332355369683137040, i128 18446744073709551621)
+  call void (i128, i128) @cmps(i128 -1512366075204170947332355369683137040, i128 18446744073709551621)
+  call void () @loop()
+  call void (i128, i128) @misc(i128 -1512366075204170947332355369683137040, i128 18446744073709551621)
+  call void (i128, i128) @ovfs(i128 1512366075204170947332355369683137040, i128 1512366075204170947332355369683137040)
+  call void (i128, i128) @ovfs(i128 -1512366075204170947332355369683137040, i128 18446744073709551621)
+  call void (i128, i128) @ovfs(i128 18446744073709551621, i128 1512366075204170947332355369683137040)
+  ret i32 0
+}

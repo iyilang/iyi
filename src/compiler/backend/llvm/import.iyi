@@ -1,0 +1,1561 @@
+@[Unsafe("reads LLVM's C objects through raw handles this module does not own, which the compiler does not check")]
+module compiler/backend/llvm/import
+
+import compiler/ir/types::{IrType, valid_int_bits?}
+import compiler/ir/values::{Value, Param, canonical_words, int_words_parse}
+import compiler/ir/inst::{Op, Inst, Block, CallConv, Ordering, Attribute, CallAux, AsmAux, AsmDialect, GepAux, MemAux, IntrinsicAux, DebugLoc}
+import compiler/ir/function::{Function, Global, Linkage, TlsModel, Visibility}
+import compiler/ir/module::{Module}
+import compiler/ir/layout::{DataLayout, LayoutError}
+import compiler/ir/intrinsics::{intrinsic_match, intrinsic_signature}
+import compiler/platform/target::{Target}
+import compiler/llvm/lib_llvm::{string_from_c, to_c_str, string_and_dispose}
+
+# LLVM's value kind, linkage and calling convention, read through the C API's enums (as plain numbers:
+# LLVM 22 gives values past the enums' members, which the enums carry without checking).
+pub def llvm_value_kind(ref : LibLLVM::ValueRef) : Int32
+  LibLLVM.get_value_kind(ref).value
+end
+
+pub def llvm_linkage(ref : LibLLVM::ValueRef) : Int32
+  LibLLVM.get_linkage(ref).value
+end
+
+pub def llvm_calling_convention(ref : LibLLVM::ValueRef) : Int32
+  LibLLVM.get_function_call_convention(ref).value
+end
+
+# A refusal, by name: the LLVM module uses something the IR's closed sets do not contain.
+pub class ImportError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+# ---- LLVM 22's numbering (llvm-c/Core.h). lib_llvm's enums predate it, so the importer and the
+# translator name these numbers here.
+
+pub def vk_basic_block : Int32
+  1
+end
+
+pub def vk_function : Int32
+  5
+end
+
+pub def vk_global_alias : Int32
+  6
+end
+
+pub def vk_global_variable : Int32
+  8
+end
+
+pub def vk_constant_expr : Int32
+  10
+end
+
+pub def vk_constant_array : Int32
+  11
+end
+
+pub def vk_constant_struct : Int32
+  12
+end
+
+pub def vk_constant_vector : Int32
+  13
+end
+
+pub def vk_undef : Int32
+  14
+end
+
+pub def vk_aggregate_zero : Int32
+  15
+end
+
+pub def vk_data_array : Int32
+  16
+end
+
+pub def vk_data_vector : Int32
+  17
+end
+
+pub def vk_constant_int : Int32
+  18
+end
+
+pub def vk_constant_fp : Int32
+  19
+end
+
+pub def vk_null_pointer : Int32
+  20
+end
+
+pub def vk_inline_asm : Int32
+  23
+end
+
+pub def vk_instruction : Int32
+  24
+end
+
+pub def op_ret : Int32
+  1
+end
+
+pub def op_br : Int32
+  2
+end
+
+pub def op_switch : Int32
+  3
+end
+
+pub def op_invoke : Int32
+  5
+end
+
+pub def op_unreachable : Int32
+  7
+end
+
+pub def op_alloca : Int32
+  26
+end
+
+pub def op_load : Int32
+  27
+end
+
+pub def op_store : Int32
+  28
+end
+
+pub def op_gep : Int32
+  29
+end
+
+pub def op_icmp : Int32
+  42
+end
+
+pub def op_fcmp : Int32
+  43
+end
+
+pub def op_phi : Int32
+  44
+end
+
+pub def op_call : Int32
+  45
+end
+
+pub def op_select : Int32
+  46
+end
+
+pub def op_va_arg : Int32
+  49
+end
+
+pub def op_extract_value : Int32
+  53
+end
+
+pub def op_insert_value : Int32
+  54
+end
+
+pub def op_fence : Int32
+  55
+end
+
+pub def op_cmpxchg : Int32
+  56
+end
+
+pub def op_atomicrmw : Int32
+  57
+end
+
+pub def op_resume : Int32
+  58
+end
+
+pub def op_landingpad : Int32
+  59
+end
+
+pub def op_fneg : Int32
+  66
+end
+
+pub def op_freeze : Int32
+  68
+end
+
+# The attribute index of the return value, and of the function itself (LLVM's ~0U as a signed int).
+pub def attribute_return_index : Int32
+  0
+end
+
+pub def attribute_function_index : Int32
+  -1
+end
+
+# ---- the closed sets -------------------------------------------------------------------------
+#
+# Every name here is one the IR and the translator can express. The importer refuses anything else
+# by name, and `iyi-ir coverage` counts it, which is how the IR's gaps are measured.
+
+# LLVM's enum attributes, by LLVM's own name. Their kinds are looked up by name at run time.
+pub def ir_enum_attribute_names : Array(String)
+  ["align", "alwaysinline", "byval", "captures", "cold", "dereferenceable", "immarg", "inlinehint", "memory",
+   "naked", "noalias", "nocallback", "nocapture", "nocreateundeforpoison", "nofree", "noinline",
+   "nonlazybind", "nonnull", "noreturn", "norecurse", "noundef", "nounwind", "optnone", "optsize",
+   "minsize", "readnone", "readonly", "returned", "signext", "speculatable", "sret", "nosync",
+   "uwtable", "willreturn", "writeonly", "zeroext", "noredzone"]
+end
+
+# LLVM's string attributes, by key.
+pub def ir_string_attribute_names : Array(String)
+  ["frame-pointer", "probe-stack", "target-cpu", "target-features", "tune-cpu", "stack-protector-buffer-size", "wasm-export-name"]
+end
+
+# Module flags the IR records, with the behavior LLVM gives them (-1 when the IR has no such flag).
+# The IR stores only the value.
+pub def ir_module_flag_behavior(key : String) : Int32
+  if key == "PIC Level" || key == "PIE Level" || key == "uwtable" || key == "frame-pointer" || key == "branch-target-enforcement" || key == "sign-return-address" || key == "sign-return-address-all" || key == "sign-return-address-with-bkey" || key == "guarded-control-stack"
+    return 7
+  end
+  return 2 if key == "CodeView"
+  -1
+end
+
+# The IR's ICmp predicate ordinal (IntPredicate, in declaration order) to LLVM's value.
+pub def ir_int_predicate_to_llvm(ordinal : Int32) : Int32
+  32 + ordinal
+end
+
+# LLVM's ICmp predicate value to the IR's ordinal, or -1.
+pub def llvm_int_predicate_to_ir(value : Int32) : Int32
+  return value - 32 if value >= 32 && value <= 41
+  -1
+end
+
+# The IR's FCmp ordinal (RealPredicate in declaration order: FALSE, OEQ, OGT, OGE, OLT, OLE, ONE,
+# ORD, UEQ, UGT, UGE, ULT, ULE, UNE, UNO, TRUE) to LLVM's LLVMRealPredicate value.
+pub def ir_real_predicate_to_llvm(ordinal : Int32) : Int32
+  table = [0, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 8, 15]
+  table[ordinal]
+end
+
+# LLVM's FCmp predicate value to the IR's ordinal, or -1.
+pub def llvm_real_predicate_to_ir(value : Int32) : Int32
+  i = 0
+  while i < 16
+    return i if ir_real_predicate_to_llvm(i) == value
+    i = i + 1
+  end
+  -1
+end
+
+# LLVM's atomic ordering value for an IR ordering.
+pub def ir_ordering_to_llvm(ordering : Ordering) : Int32
+  case ordering
+  when Ordering::NotAtomic
+    0
+  when Ordering::Unordered
+    1
+  when Ordering::Monotonic
+    2
+  when Ordering::Acquire
+    4
+  when Ordering::Release
+    5
+  when Ordering::AcqRel
+    6
+  else
+    7
+  end
+end
+
+# The IR ordering for an LLVM atomic ordering value, or nil.
+pub def llvm_ordering_to_ir(value : Int32) : Ordering?
+  case value
+  when 0
+    Ordering::NotAtomic
+  when 1
+    Ordering::Unordered
+  when 2
+    Ordering::Monotonic
+  when 4
+    Ordering::Acquire
+  when 5
+    Ordering::Release
+  when 6
+    Ordering::AcqRel
+  when 7
+    Ordering::SeqCst
+  else
+    nil
+  end
+end
+
+# LLVM's atomicrmw operation names, in LLVM's LLVMAtomicRMWBinOp numbering.
+pub def atomic_rmw_operation_names : Array(String)
+  ["xchg", "add", "sub", "and", "nand", "or", "xor", "max", "min", "umax", "umin", "fadd", "fsub", "fmax", "fmin", "uinc_wrap", "udec_wrap", "usub_cond", "usub_sat"]
+end
+
+# The IR's binary Op for an LLVM opcode number, or nil.
+pub def llvm_binary_op(opcode : Int32) : Op?
+  case opcode
+  when 8
+    Op::Add
+  when 9
+    Op::FAdd
+  when 10
+    Op::Sub
+  when 11
+    Op::FSub
+  when 12
+    Op::Mul
+  when 13
+    Op::FMul
+  when 14
+    Op::UDiv
+  when 15
+    Op::SDiv
+  when 16
+    Op::FDiv
+  when 17
+    Op::URem
+  when 18
+    Op::SRem
+  when 19
+    Op::FRem
+  when 20
+    Op::Shl
+  when 21
+    Op::LShr
+  when 22
+    Op::AShr
+  when 23
+    Op::And
+  when 24
+    Op::Or
+  when 25
+    Op::Xor
+  else
+    nil
+  end
+end
+
+# The IR's conversion Op for an LLVM cast opcode number, or nil.
+# The binary operations a constant expression carries in the IR (LLVMOpcode add, sub, mul).
+pub def llvm_const_binary_op(opcode : Int32) : Op?
+  case opcode
+  when 8
+    Op::Add
+  when 10
+    Op::Sub
+  when 12
+    Op::Mul
+  else
+    nil
+  end
+end
+
+pub def llvm_cast_op(opcode : Int32) : Op?
+  case opcode
+  when 30
+    Op::Trunc
+  when 31
+    Op::ZExt
+  when 32
+    Op::SExt
+  when 33
+    Op::FPToUI
+  when 34
+    Op::FPToSI
+  when 35
+    Op::UIToFP
+  when 36
+    Op::SIToFP
+  when 37
+    Op::FPTrunc
+  when 38
+    Op::FPExt
+  when 39
+    Op::PtrToInt
+  when 40
+    Op::IntToPtr
+  when 41
+    Op::BitCast
+  when 60
+    Op::AddrSpaceCast
+  else
+    nil
+  end
+end
+
+# The name of an LLVM opcode, for a refusal's message.
+pub def llvm_opcode_name(opcode : Int32) : String
+  names = Hash(Int32, String).new
+  names[1] = "ret"
+  names[2] = "br"
+  names[3] = "switch"
+  names[4] = "indirectbr"
+  names[5] = "invoke"
+  names[7] = "unreachable"
+  names[8] = "add"
+  names[9] = "fadd"
+  names[10] = "sub"
+  names[11] = "fsub"
+  names[12] = "mul"
+  names[13] = "fmul"
+  names[14] = "udiv"
+  names[15] = "sdiv"
+  names[16] = "fdiv"
+  names[17] = "urem"
+  names[18] = "srem"
+  names[19] = "frem"
+  names[20] = "shl"
+  names[21] = "lshr"
+  names[22] = "ashr"
+  names[23] = "and"
+  names[24] = "or"
+  names[25] = "xor"
+  names[30] = "trunc"
+  names[31] = "zext"
+  names[32] = "sext"
+  names[33] = "fptoui"
+  names[34] = "fptosi"
+  names[35] = "uitofp"
+  names[36] = "sitofp"
+  names[37] = "fptrunc"
+  names[38] = "fpext"
+  names[39] = "ptrtoint"
+  names[40] = "inttoptr"
+  names[41] = "bitcast"
+  names[60] = "addrspacecast"
+  names[66] = "fneg"
+  names[68] = "freeze"
+  names[26] = "alloca"
+  names[27] = "load"
+  names[28] = "store"
+  names[29] = "getelementptr"
+  names[42] = "icmp"
+  names[43] = "fcmp"
+  names[44] = "phi"
+  names[45] = "call"
+  names[46] = "select"
+  names[47] = "userop1"
+  names[48] = "userop2"
+  names[49] = "va_arg"
+  names[50] = "extractelement"
+  names[51] = "insertelement"
+  names[52] = "shufflevector"
+  names[53] = "extractvalue"
+  names[54] = "insertvalue"
+  names[55] = "fence"
+  names[56] = "cmpxchg"
+  names[57] = "atomicrmw"
+  names[58] = "resume"
+  names[59] = "landingpad"
+  names[61] = "cleanupret"
+  names[62] = "catchret"
+  names[63] = "catchpad"
+  names[64] = "cleanuppad"
+  names[65] = "catchswitch"
+  names[66] = "fneg"
+  names[67] = "callbr"
+  names[68] = "freeze"
+  names[opcode]? || "opcode #{opcode}"
+end
+
+# The name of a module's identifier, and of its source_filename, as LLVM holds them.
+pub def llvm_module_identifier(llvm : LibLLVM::ModuleRef) : String
+  len = 0_u64
+  ptr = LibLLVM.get_module_identifier(llvm, pointerof(len))
+  len > 0_u64 ? String.new(len.to_i32) { |b| b.copy_from(ptr, len.to_i32) } : ""
+end
+
+pub def llvm_source_file_name(llvm : LibLLVM::ModuleRef) : String
+  len = 0_u64
+  ptr = LibLLVM.get_source_file_name(llvm, pointerof(len))
+  len > 0_u64 ? String.new(len.to_i32) { |b| b.copy_from(ptr, len.to_i32) } : ""
+end
+
+# Reads one LLVM module into the IR, or refuses by name.
+pub def import_llvm_module(llvm : LibLLVM::ModuleRef) : Module | ImportError
+  triple = string_from_c(LibLLVM.get_target(llvm))
+  target = Target.parse?(triple)
+  return ImportError.new("the module's triple #{triple} is not a target the IR knows") unless target
+  layout = DataLayout.for(target)
+  return ImportError.new(layout.message) if layout.is_a?(LayoutError)
+  dl = layout.as(DataLayout)
+  llvm_dl = string_from_c(LibLLVM.get_module_data_layout(llvm))
+  if llvm_dl != dl.llvm_string
+    return ImportError.new("the module's datalayout \"#{llvm_dl}\" is not the IR's \"#{dl.llvm_string}\" for #{triple}")
+  end
+  # A parsed module takes its identifier from its file name, and its `; ModuleID` comment is not read;
+  # the module's name is its source_filename, which the oracle writes as the module name.
+  source = llvm_source_file_name(llvm)
+  ident = source.empty? ? llvm_module_identifier(llvm) : source
+  ir = Module.new(ident, target, dl)
+  ModuleImporter.new(llvm, ir).run
+end
+
+class ModuleImporter
+  getter ir : Module
+
+  @attribute_kinds : Hash(Int32, String)
+
+  def initialize(@llvm : LibLLVM::ModuleRef, @ir : Module)
+    @err = nil
+    @values = Hash(UInt64, Value).new
+    @blocks = Hash(UInt64, Block).new
+    @types = Hash(UInt64, IrType).new
+    @llvm_functions = [] of LibLLVM::ValueRef
+    @llvm_globals = [] of LibLLVM::ValueRef
+    @ir_functions = [] of Function
+    @ir_globals = [] of Global
+    @attribute_kinds = build_attribute_kinds
+  end
+
+  def refuse(message : String) : Nil
+    @err = ImportError.new(message) unless @err
+  end
+
+  def failed? : Bool
+    !@err.nil?
+  end
+
+  def run : Module | ImportError
+    read_flags
+    return @err.as(ImportError) if failed?
+    read_globals_and_functions
+    return @err.as(ImportError) if failed?
+    read_global_initializers
+    return @err.as(ImportError) if failed?
+    read_bodies
+    return @err.as(ImportError) if failed?
+    @ir.functions.each { |f| f.relink }
+    @ir
+  end
+
+  # ---- module flags -------------------------------------------------------------------------
+
+  def read_flags : Nil
+    name = to_c_str("llvm.module.flags")
+    count = LibLLVM.get_named_metadata_num_operands(@llvm, name)
+    return if count == 0
+    nodes = Pointer(LibLLVM::ValueRef).malloc(count.to_u64)
+    LibLLVM.get_named_metadata_operands(@llvm, name, nodes)
+    i = 0
+    while i < count
+      node = nodes[i]
+      if LibLLVM.get_md_node_num_operands(node) != 3
+        refuse("a module flag is not a three-operand node")
+        return
+      end
+      operands = Pointer(LibLLVM::ValueRef).malloc(3_u64)
+      LibLLVM.get_md_node_operands(node, operands)
+      key_len = 0
+      key_ptr = LibLLVM.get_md_string(operands[1], pointerof(key_len))
+      key = key_len > 0 ? String.new(key_len) { |b| b.copy_from(key_ptr, key_len) } : ""
+      unless key == "Debug Info Version" || key == "Dwarf Version"
+        behavior = ir_module_flag_behavior(key)
+        if behavior < 0
+          refuse("module flag \"#{key}\" has no behavior in the IR")
+          return
+        end
+        llvm_behavior = LibLLVM.const_int_get_sext_value(operands[0]).to_i32
+        if llvm_behavior != behavior
+          refuse("module flag \"#{key}\" has behavior #{llvm_behavior}, not the IR's #{behavior}")
+          return
+        end
+        @ir.set_flag(key, LibLLVM.const_int_get_sext_value(operands[2]))
+      end
+      i = i + 1
+    end
+  end
+
+  # ---- types --------------------------------------------------------------------------------
+
+  def type_of(ref : LibLLVM::TypeRef) : IrType
+    key = ref.address
+    if cached = @types[key]?
+      return cached
+    end
+    types = @ir.types
+    kind = LibLLVM.get_type_kind(ref).value
+    result = types.void
+    if kind == 0
+      result = types.void
+    elsif kind == 8
+      bits = LibLLVM.get_int_type_width(ref).to_i32
+      if valid_int_bits?(bits)
+        result = types.int(bits)
+      else
+        refuse("an i#{bits} is not an IR integer type")
+      end
+    elsif kind == 2
+      result = types.float(32)
+    elsif kind == 3
+      result = types.float(64)
+    elsif kind == 12
+      result = types.ptr(LibLLVM.get_pointer_address_space(ref).to_i32)
+    elsif kind == 10
+      result = struct_type(ref)
+    elsif kind == 11
+      element = type_of(LibLLVM.get_element_type(ref))
+      result = types.array_of(element, LibLLVM.get_array_length2(ref).to_i64)
+    elsif kind == 9
+      result = function_type(ref)
+    else
+      refuse("an LLVM type of kind #{kind} is not an IR type")
+    end
+    @types[key] = result
+    result
+  end
+
+  def struct_type(ref : LibLLVM::TypeRef) : IrType
+    name_ptr = LibLLVM.get_struct_name(ref)
+    packed = LibLLVM.is_packed_struct(ref) != 0
+    if name_ptr.address == 0
+      return @ir.types.struct_of(element_types(ref), packed)
+    end
+    named = @ir.types.named_struct(string_from_c(name_ptr))
+    @types[ref.address] = named
+    if LibLLVM.is_opaque_struct(ref) == 0 && named.opaque?
+      @ir.types.set_body(named, element_types(ref), packed)
+    end
+    named
+  end
+
+  def element_types(ref : LibLLVM::TypeRef) : Array(IrType)
+    count = LibLLVM.count_struct_element_types(ref)
+    fields = [] of IrType
+    return fields if count == 0
+    buffer = Pointer(LibLLVM::TypeRef).malloc(count.to_u64)
+    LibLLVM.get_struct_element_types(ref, buffer)
+    i = 0
+    while i < count
+      fields << type_of(buffer[i])
+      i = i + 1
+    end
+    fields
+  end
+
+  def function_type(ref : LibLLVM::TypeRef) : IrType
+    count = LibLLVM.count_param_types(ref)
+    params = [] of IrType
+    if count > 0
+      buffer = Pointer(LibLLVM::TypeRef).malloc(count.to_u64)
+      LibLLVM.get_param_types(ref, buffer)
+      i = 0
+      while i < count
+        params << type_of(buffer[i])
+        i = i + 1
+      end
+    end
+    ret = type_of(LibLLVM.get_return_type(ref))
+    @ir.types.func(params, ret, LibLLVM.is_function_var_arg(ref) != 0)
+  end
+
+  # ---- attributes ---------------------------------------------------------------------------
+
+  # LLVM's kind number for each closed enum attribute name, by kind (built once, in the constructor).
+  def attribute_kinds : Hash(Int32, String)
+    @attribute_kinds
+  end
+
+  def build_attribute_kinds : Hash(Int32, String)
+    names = Hash(Int32, String).new
+    ir_enum_attribute_names.each do |name|
+      kind = LibLLVM.get_enum_attribute_kind_for_name(to_c_str(name), name.bytesize.to_u64)
+      names[kind] = name if kind != 0
+    end
+    names
+  end
+
+  # The attributes LLVM holds at `index` of `value` as the IR's Attribute list. A call site reads
+  # its own set.
+  def attributes_at(value : LibLLVM::ValueRef, index : Int32, callsite : Bool) : Array(Attribute)
+    count = callsite ? LibLLVM.get_callsite_attribute_count(value, index) : LibLLVM.get_attribute_count_at_index(value, index)
+    result = [] of Attribute
+    return result if count == 0
+    buffer = Pointer(LibLLVM::AttributeRef).malloc(count.to_u64)
+    if callsite
+      LibLLVM.get_callsite_attributes(value, index, buffer)
+    else
+      LibLLVM.get_attributes_at_index(value, index, buffer)
+    end
+    i = 0
+    while i < count
+      result << attribute_of(buffer[i])
+      i = i + 1
+    end
+    result
+  end
+
+  def attribute_of(attr : LibLLVM::AttributeRef) : Attribute
+    if LibLLVM.is_string_attribute(attr) != 0
+      klen = 0
+      kptr = LibLLVM.get_string_attribute_kind(attr, pointerof(klen))
+      key = klen > 0 ? String.new(klen) { |b| b.copy_from(kptr, klen) } : ""
+      vlen = 0
+      vptr = LibLLVM.get_string_attribute_value(attr, pointerof(vlen))
+      value = vlen > 0 ? String.new(vlen) { |b| b.copy_from(vptr, vlen) } : ""
+      unless ir_string_attribute_names.includes?(key)
+        refuse("string attribute \"#{key}\" is not in the IR's closed set")
+        return Attribute.new(key)
+      end
+      return Attribute.new(key, 0_u64, value, nil)
+    end
+    kind = LibLLVM.get_enum_attribute_kind(attr)
+    name = attribute_kinds[kind]?
+    unless name
+      refuse("attribute kind #{kind} is not in the IR's closed set")
+      return Attribute.new("")
+    end
+    if LibLLVM.is_type_attribute(attr) != 0
+      return Attribute.new(name, 0_u64, nil, type_of(LibLLVM.get_type_attribute_value(attr)))
+    end
+    Attribute.new(name, LibLLVM.get_enum_attribute_value(attr).to_u64, nil, nil)
+  end
+
+  def param_attributes(value : LibLLVM::ValueRef, count : Int32, callsite : Bool) : Array(Array(Attribute))
+    result = [] of Array(Attribute)
+    i = 0
+    while i < count
+      result << attributes_at(value, i + 1, callsite)
+      i = i + 1
+    end
+    result
+  end
+
+  # ---- globals and functions ----------------------------------------------------------------
+
+  def read_globals_and_functions : Nil
+    g = LibLLVM.get_first_global(@llvm)
+    while g.address != 0
+      name = string_from_c(LibLLVM.get_value_name(g))
+      global = @ir.add_global(name, type_of(LibLLVM.global_get_value_type(g)))
+      @values[g.address] = global
+      @ir_globals << global
+      @llvm_globals << g
+      g = LibLLVM.get_next_global(g)
+    end
+    f = LibLLVM.get_first_function(@llvm)
+    while f.address != 0
+      name = string_from_c(LibLLVM.get_value_name(f))
+      fn_type = type_of(LibLLVM.global_get_value_type(f))
+      fn = @ir.add_function(name, fn_type, convention_of(name))
+      @values[f.address] = fn
+      @ir_functions << fn
+      @llvm_functions << f
+      f = LibLLVM.get_next_function(f)
+    end
+    return if failed?
+    if LibLLVM.get_first_global_alias(@llvm).address != 0
+      refuse("a global alias is not in the IR")
+      return
+    end
+    @llvm_globals.each_with_index do |g, i|
+      read_global(g, @ir_globals[i])
+      return if failed?
+    end
+    @llvm_functions.each_with_index do |f, i|
+      read_function(f, @ir_functions[i])
+      return if failed?
+    end
+  end
+
+  def visibility_of(value : Int32, name : String) : Visibility
+    return Visibility::Default if value == 0
+    return Visibility::Hidden if value == 1
+    return Visibility::Protected if value == 2
+    refuse("#{name} has visibility #{value}, which the IR does not model")
+    Visibility::Default
+  end
+
+  # LLVM 22's C API has no accessor for dso_local, so it is read from the printed header of the value:
+  # `define dso_local ...` or `@x = dso_local global ...`.
+  def dso_local_of(ref : LibLLVM::ValueRef) : Bool
+    text = string_and_dispose(LibLLVM.print_value_to_string(ref))
+    text.split('\n')[0].includes?(" dso_local ")
+  end
+
+  # An integer constant wider than 64 bits. The C API reads an integer constant only up to 64 bits, so the printed
+  # value (`iN <signed decimal>`) is parsed into its words instead.
+  def wide_constant(ref : LibLLVM::ValueRef, ty : IrType, factory : ConstantFactory) : Value
+    text = string_and_dispose(LibLLVM.print_value_to_string(ref))
+    words = int_words_parse(text.split(' ')[1], ty.bits)
+    unless words
+      refuse("the constant #{text} is outside the signed #{ty.bits}-bit range")
+      return dummy
+    end
+    factory.wide_words(ty, words)
+  end
+
+  def read_global(ref : LibLLVM::ValueRef, global : Global) : Nil
+    global.visibility = visibility_of(LibLLVM.get_visibility_int(ref), global.name)
+    global.dso_local = dso_local_of(ref)
+    return if failed?
+    if LibLLVM.is_externally_initialized(ref) != 0
+      refuse("global #{global.name} is externally initialized, which the IR does not model")
+      return
+    end
+    if LibLLVM.get_dll_storage_class_int(ref) != 0
+      refuse("global #{global.name} has a DLL storage class, which the IR does not model")
+      return
+    end
+    global.linkage = linkage_of(llvm_linkage(ref), global.name)
+    global.global_constant = LibLLVM.is_global_constant(ref) != 0
+    global.tls = tls_of(LibLLVM.get_thread_local_mode(ref), global.name)
+    global.alignment = LibLLVM.get_alignment(ref).to_i32
+    section = string_from_c(LibLLVM.get_section(ref))
+    global.section = section.empty? ? nil : section
+    unnamed = LibLLVM.get_unnamed_address(ref)
+    if unnamed == 1
+      refuse("global #{global.name} has local_unnamed_addr, which the IR does not model")
+      return
+    end
+    global.unnamed_addr = unnamed == 2
+  end
+
+  def read_global_initializers : Nil
+    @llvm_globals.each_with_index do |g, i|
+      init = LibLLVM.get_initializer(g)
+      @ir_globals[i].initializer = value_of(init) if init.address != 0
+      return if failed?
+    end
+  end
+
+  def read_function(ref : LibLLVM::ValueRef, fn : Function) : Nil
+    fn.visibility = visibility_of(LibLLVM.get_visibility_int(ref), fn.name)
+    fn.dso_local = dso_local_of(ref)
+    return if failed?
+    if LibLLVM.get_dll_storage_class_int(ref) != 0
+      refuse("function #{fn.name} has a DLL storage class, which the IR does not model")
+      return
+    end
+    if llvm_calling_convention(ref) != 0
+      refuse("function #{fn.name} has a calling convention, which the IR does not model")
+      return
+    end
+    fn.linkage = linkage_of(llvm_linkage(ref), fn.name)
+    fn.attrs = attributes_at(ref, attribute_function_index, false)
+    fn.ret_attrs = attributes_at(ref, attribute_return_index, false)
+    fn.param_attrs = param_attributes(ref, fn.fn_type.param_count, false)
+    fn.alignment = LibLLVM.get_alignment(ref).to_i32
+    section = string_from_c(LibLLVM.get_section(ref))
+    fn.section = section.empty? ? nil : section
+  end
+
+  def linkage_of(value : Int32, name : String) : Linkage
+    case value
+    when 0
+      Linkage::External
+    when 8
+      Linkage::Internal
+    when 9
+      Linkage::Private
+    when 3
+      Linkage::LinkOnceOdr
+    when 5
+      Linkage::Weak
+    when 12
+      Linkage::ExternalWeak
+    else
+      refuse("#{name} has LLVM linkage #{value}, which the IR's linkages do not contain")
+      Linkage::External
+    end
+  end
+
+  def tls_of(value : Int32, name : String) : TlsModel
+    case value
+    when 0
+      TlsModel::None
+    when 1
+      TlsModel::GeneralDynamic
+    when 2
+      TlsModel::LocalDynamic
+    when 3
+      TlsModel::InitialExec
+    when 4
+      TlsModel::LocalExec
+    else
+      refuse("#{name} has thread-local mode #{value}")
+      TlsModel::None
+    end
+  end
+
+  # ---- values -------------------------------------------------------------------------------
+
+  def dummy : Value
+    Inst.new(Op::ConstUndef, @ir.types.void, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  # The IR value of an LLVM value. An instruction is built on first use, after its operands.
+  def value_of(ref : LibLLVM::ValueRef) : Value
+    return dummy if failed?
+    if known = @values[ref.address]?
+      return known
+    end
+    kind = llvm_value_kind(ref)
+    if kind == vk_basic_block
+      refuse("a basic block is used as a value")
+      return dummy
+    end
+    if kind == vk_inline_asm
+      return inline_asm_value(ref, LibLLVM.get_inline_asm_type(ref))
+    end
+    if kind == vk_instruction
+      return instruction_of(ref)
+    end
+    constant_of(ref, kind)
+  end
+
+  def constant_of(ref : LibLLVM::ValueRef, kind : Int32) : Value
+    ty = type_of(LibLLVM.type_of(ref))
+    return dummy if failed?
+    factory = ConstantFactory.new(@ir)
+    built = dummy
+    if LibLLVM.is_poison(ref) != 0
+      built = factory.poison(ty)
+    elsif LibLLVM.is_undef(ref) != 0
+      built = factory.undef(ty)
+    elsif kind == vk_null_pointer
+      built = factory.null_pointer(ty)
+    elsif kind == vk_constant_int
+      if ty.int? && ty.bits > 64
+        built = wide_constant(ref, ty, factory)
+      else
+        built = factory.integer(ty, LibLLVM.const_int_get_sext_value(ref))
+      end
+    elsif kind == vk_constant_fp
+      loses = 0
+      built = factory.float_value(ty, LibLLVM.const_real_get_double(ref, pointerof(loses)))
+    elsif kind == vk_aggregate_zero
+      built = factory.zero(ty)
+    elsif kind == vk_constant_array || kind == vk_constant_struct
+      elements = operands_of(ref)
+      return dummy if failed?
+      built = ty.struct? ? factory.struct_value(ty, elements) : factory.array_value(ty, elements)
+    elsif kind == vk_data_array
+      built = data_array(ref, ty)
+    elsif kind == vk_constant_expr
+      built = constant_expression(ref, ty)
+    else
+      refuse("a constant of LLVM value kind #{kind} is not in the IR")
+    end
+    return dummy if failed?
+    @values[ref.address] = built
+    built
+  end
+
+  def operands_of(ref : LibLLVM::ValueRef) : Array(Value)
+    values = [] of Value
+    count = LibLLVM.get_num_operands(ref)
+    i = 0
+    while i < count
+      values << value_of(LibLLVM.get_operand(ref, i))
+      return values if failed?
+      i = i + 1
+    end
+    values
+  end
+
+  def data_array(ref : LibLLVM::ValueRef, ty : IrType) : Value
+    if ty.element_type.int_width == 8
+      len = 0_u64
+      ptr = LibLLVM.get_as_string(ref, pointerof(len))
+      text = ptr.address == 0 ? "" : String.new(len.to_i32) { |b| b.copy_from(ptr, len.to_i32) }
+      return ConstantFactory.new(@ir).bytes(text, ty)
+    end
+    count = LibLLVM.get_array_length2(LibLLVM.type_of(ref)).to_i32
+    elements = [] of Value
+    i = 0
+    while i < count
+      elements << value_of(LibLLVM.get_aggregate_element(ref, i))
+      return dummy if failed?
+      i = i + 1
+    end
+    ConstantFactory.new(@ir).array_value(ty, elements)
+  end
+
+  def constant_expression(ref : LibLLVM::ValueRef, ty : IrType) : Value
+    opcode = LibLLVM.get_const_opcode(ref)
+    if opcode == op_gep
+      source = type_of(LibLLVM.get_gep_source_element_type(ref))
+      args = operands_of(ref)
+      return dummy if failed?
+      inbounds = LibLLVM.is_in_bounds(ref) != 0
+      return Inst.new(Op::ConstExpr, ty, args, Op::Gep.value.to_i64, GepAux.new(source, inbounds), [] of Block, [] of Int64)
+    end
+    binary = llvm_const_binary_op(opcode)
+    if binary
+      args = operands_of(ref)
+      return dummy if failed?
+      return Inst.new(Op::ConstExpr, ty, args, binary.value.to_i64, nil, [] of Block, [] of Int64)
+    end
+    cast = llvm_cast_op(opcode)
+    if cast
+      operand = value_of(LibLLVM.get_operand(ref, 0))
+      return dummy if failed?
+      return Inst.new(Op::ConstExpr, ty, [operand] of Value, cast.value.to_i64, nil, [] of Block, [] of Int64)
+    end
+    refuse("a constant expression of LLVM opcode #{opcode} is not in the IR")
+    dummy
+  end
+
+  # Inline asm as a callee: an Op::Call with no arguments that carries the template (SPEC 3.2).
+  def inline_asm_value(ref : LibLLVM::ValueRef, fn_type_ref : LibLLVM::TypeRef) : Value
+    if known = @values[ref.address]?
+      return known
+    end
+    fn_type = type_of(fn_type_ref)
+    template = asm_string(ref, true)
+    constraints = asm_string(ref, false)
+    side = LibLLVM.get_inline_asm_side_effects(ref) != 0
+    align = LibLLVM.get_inline_asm_align_stack(ref) != 0
+    dialect = LibLLVM.get_inline_asm_dialect(ref) == 1 ? AsmDialect::Intel : AsmDialect::Att
+    return dummy if failed?
+    unwind = LibLLVM.get_inline_asm_can_unwind(ref) != 0
+    inst = Inst.new(Op::Call, fn_type, [] of Value, 0_i64, AsmAux.new(template, constraints, side, align, dialect, unwind), [] of Block, [] of Int64)
+    @values[ref.address] = inst
+    inst
+  end
+
+  def asm_string(ref : LibLLVM::ValueRef, template : Bool) : String
+    len = 0_u64
+    ptr = template ? LibLLVM.get_inline_asm_string(ref, pointerof(len)) : LibLLVM.get_inline_asm_constraint_string(ref, pointerof(len))
+    return "" if ptr.address == 0
+    String.new(len.to_i32) { |b| b.copy_from(ptr, len.to_i32) }
+  end
+
+  # ---- bodies -------------------------------------------------------------------------------
+
+  def read_bodies : Nil
+    @llvm_functions.each_with_index do |ref, i|
+      next if LibLLVM.get_first_basic_block(ref).address == 0
+      fn = @ir_functions[i]
+      personality = LibLLVM.has_personality_fn(ref) != 0 ? LibLLVM.get_personality_fn(ref) : Pointer(Void).new(0_u64)
+      if personality.address != 0
+        fn.personality = value_of(personality)
+        return if failed?
+      end
+      read_body(ref, fn)
+      return if failed?
+    end
+  end
+
+  def read_body(ref : LibLLVM::ValueRef, fn : Function) : Nil
+    count = LibLLVM.count_params(ref)
+    k = 0
+    while k < count
+      pref = LibLLVM.get_param(ref, k)
+      param = Param.new(type_of(LibLLVM.type_of(pref)), string_from_c(LibLLVM.get_value_name(pref)), k)
+      fn.add_param(param)
+      @values[pref.address] = param
+      k = k + 1
+    end
+    bb = LibLLVM.get_first_basic_block(ref)
+    while bb.address != 0
+      @blocks[bb.address] = fn.append_basic_block(string_from_c(LibLLVM.get_basic_block_name(bb)))
+      bb = LibLLVM.get_next_basic_block(bb)
+    end
+    bb = LibLLVM.get_first_basic_block(ref)
+    while bb.address != 0
+      block = @blocks[bb.address]
+      inst = LibLLVM.get_first_instruction(bb)
+      while inst.address != 0
+        built = value_of(inst)
+        return if failed?
+        block.insts << built.as(Inst)
+        inst = LibLLVM.get_next_instruction(inst)
+      end
+      bb = LibLLVM.get_next_basic_block(bb)
+    end
+  end
+
+  def block_of(ref : LibLLVM::BasicBlockRef) : Block
+    if known = @blocks[ref.address]?
+      return known
+    end
+    refuse("a branch targets a block outside its function")
+    Block.new("")
+  end
+
+  # The IR instruction for an LLVM instruction, built once.
+  def instruction_of(ref : LibLLVM::ValueRef) : Value
+    if known = @values[ref.address]?
+      return known
+    end
+    opcode = LibLLVM.get_instruction_opcode(ref)
+    name = string_from_c(LibLLVM.get_value_name(ref))
+    result_type = type_of(LibLLVM.type_of(ref))
+    return dummy if failed?
+    built = build_instruction(ref, opcode, result_type, name)
+    return dummy if failed? || built.nil?
+    inst = built.as(Inst)
+    inst.loc = debug_loc_of(ref)
+    @values[ref.address] = inst
+    inst
+  end
+
+  def build_instruction(ref : LibLLVM::ValueRef, opcode : Int32, result_type : IrType, name : String) : Inst?
+    types = @ir.types
+    void_t = types.void
+    no_args = [] of Value
+    no_targets = [] of Block
+    no_cases = [] of Int64
+    if opcode == op_ret
+      args = operands_of(ref)
+      return nil if failed?
+      return Inst.new(Op::Ret, void_t, args, 0_i64, nil, no_targets, no_cases, name)
+    end
+    if opcode == op_br
+      if LibLLVM.get_num_successors(ref) == 1
+        return Inst.new(Op::Br, void_t, no_args, 0_i64, nil, [block_of(LibLLVM.get_successor(ref, 0))] of Block, no_cases, name)
+      end
+      cond = value_of(LibLLVM.get_operand(ref, 0))
+      targets = [block_of(LibLLVM.get_successor(ref, 0)), block_of(LibLLVM.get_successor(ref, 1))] of Block
+      return nil if failed?
+      return Inst.new(Op::CondBr, void_t, [cond] of Value, 0_i64, nil, targets, no_cases, name)
+    end
+    if opcode == op_switch
+      cond = value_of(LibLLVM.get_operand(ref, 0))
+      targets = [block_of(LibLLVM.get_switch_default_dest(ref))] of Block
+      cases = [] of Int64
+      n = LibLLVM.get_num_successors(ref)
+      i = 1
+      # Successor 0 is the default block, and successor i is case i - 1. Before LLVM 22 a switch's operands are
+      # the value switched on, the default block, then a value and a block per case, so that case's value is
+      # operand 2 * i. LLVM 22 took the values out of the operands and added LLVMGetSwitchCaseValue to read them.
+      while i < n
+        targets << block_of(LibLLVM.get_successor(ref, i))
+        {% if LibLLVM::IS_LT_220 %}
+          cases << LibLLVM.const_int_get_sext_value(LibLLVM.get_operand(ref, 2 * i))
+        {% else %}
+          cases << LibLLVM.const_int_get_sext_value(LibLLVM.get_switch_case_value(ref, i))
+        {% end %}
+        i = i + 1
+      end
+      return nil if failed?
+      return Inst.new(Op::Switch, void_t, [cond] of Value, 0_i64, nil, targets, cases, name)
+    end
+    if opcode == op_unreachable
+      return Inst.new(Op::Unreachable, void_t, no_args, 0_i64, nil, no_targets, no_cases, name)
+    end
+    if opcode == op_invoke
+      targets = [block_of(LibLLVM.get_successor(ref, 0)), block_of(LibLLVM.get_successor(ref, 1))] of Block
+      return call_like(ref, Op::Invoke, name, targets)
+    end
+    if opcode == op_call
+      return call_instruction(ref, name)
+    end
+    if opcode == op_phi
+      return phi_instruction(ref, result_type, name)
+    end
+    binary = llvm_binary_op(opcode)
+    if binary
+      lhs = value_of(LibLLVM.get_operand(ref, 0))
+      rhs = value_of(LibLLVM.get_operand(ref, 1))
+      return nil if failed?
+      flags = 0_i64
+      if opcode == 8 || opcode == 10 || opcode == 12 || opcode == 20
+        flags = flags | 1_i64 if LibLLVM.get_nuw(ref) != 0
+        flags = flags | 2_i64 if LibLLVM.get_nsw(ref) != 0
+      end
+      if opcode == 14 || opcode == 15 || opcode == 21 || opcode == 22
+        flags = flags | 4_i64 if LibLLVM.get_exact(ref) != 0
+      end
+      return Inst.new(binary.as(Op), result_type, [lhs, rhs] of Value, flags, nil, no_targets, no_cases, name)
+    end
+    if opcode == op_fneg
+      return Inst.new(Op::FNeg, result_type, [value_of(LibLLVM.get_operand(ref, 0))] of Value, 0_i64, nil, no_targets, no_cases, name)
+    end
+    if opcode == op_freeze
+      return Inst.new(Op::Freeze, result_type, [value_of(LibLLVM.get_operand(ref, 0))] of Value, 0_i64, nil, no_targets, no_cases, name)
+    end
+    if opcode == op_alloca
+      return alloca_instruction(ref, result_type, name)
+    end
+    if opcode == op_load
+      pointer = value_of(LibLLVM.get_operand(ref, 0))
+      return nil if failed?
+      return Inst.new(Op::Load, result_type, [pointer] of Value, 0_i64, mem_aux(ref), no_targets, no_cases, name)
+    end
+    if opcode == op_store
+      stored = value_of(LibLLVM.get_operand(ref, 0))
+      pointer = value_of(LibLLVM.get_operand(ref, 1))
+      return nil if failed?
+      return Inst.new(Op::Store, void_t, [stored, pointer] of Value, 0_i64, mem_aux(ref), no_targets, no_cases, "")
+    end
+    if opcode == op_gep
+      return gep_instruction(ref, result_type, name)
+    end
+    cast = llvm_cast_op(opcode)
+    if cast
+      return Inst.new(cast.as(Op), result_type, [value_of(LibLLVM.get_operand(ref, 0))] of Value, 0_i64, nil, no_targets, no_cases, name)
+    end
+    if opcode == op_icmp
+      predicate = llvm_int_predicate_to_ir(LibLLVM.get_icmp_predicate(ref))
+      if predicate < 0
+        refuse("an icmp predicate is not in the IR")
+        return nil
+      end
+      args = [value_of(LibLLVM.get_operand(ref, 0)), value_of(LibLLVM.get_operand(ref, 1))] of Value
+      return nil if failed?
+      return Inst.new(Op::ICmp, types.int1, args, predicate.to_i64, nil, no_targets, no_cases, name)
+    end
+    if opcode == op_fcmp
+      predicate = llvm_real_predicate_to_ir(LibLLVM.get_fcmp_predicate(ref))
+      if predicate < 0
+        refuse("an fcmp predicate is not in the IR")
+        return nil
+      end
+      args = [value_of(LibLLVM.get_operand(ref, 0)), value_of(LibLLVM.get_operand(ref, 1))] of Value
+      return nil if failed?
+      return Inst.new(Op::FCmp, types.int1, args, predicate.to_i64, nil, no_targets, no_cases, name)
+    end
+    if opcode == op_select
+      args = operands_of(ref)
+      return nil if failed?
+      return Inst.new(Op::Select, result_type, args, 0_i64, nil, no_targets, no_cases, name)
+    end
+    if opcode == op_extract_value || opcode == op_insert_value
+      return aggregate_instruction(ref, opcode, result_type, name)
+    end
+    if opcode == op_fence
+      ordering = llvm_ordering_to_ir(LibLLVM.get_ordering_int(ref))
+      unless ordering
+        refuse("a fence ordering is not in the IR")
+        return nil
+      end
+      aux = MemAux.new(0, false, ordering.as(Ordering), Ordering::NotAtomic, LibLLVM.is_atomic_single_thread(ref) != 0, "", false)
+      return Inst.new(Op::Fence, void_t, no_args, 0_i64, aux, no_targets, no_cases, "")
+    end
+    if opcode == op_cmpxchg
+      return cmpxchg_instruction(ref, name)
+    end
+    if opcode == op_atomicrmw
+      return atomicrmw_instruction(ref, name)
+    end
+    if opcode == op_va_arg
+      return Inst.new(Op::VaArg, result_type, [value_of(LibLLVM.get_operand(ref, 0))] of Value, 0_i64, nil, no_targets, no_cases, name)
+    end
+    if opcode == op_resume
+      return Inst.new(Op::Resume, void_t, [value_of(LibLLVM.get_operand(ref, 0))] of Value, 0_i64, nil, no_targets, no_cases, "")
+    end
+    if opcode == op_landingpad
+      return landing_pad_instruction(ref, result_type, name)
+    end
+    refuse("#{llvm_opcode_name(opcode)} is not an IR operation")
+    nil
+  end
+
+  def debug_loc_of(ref : LibLLVM::ValueRef) : DebugLoc?
+    return nil if LibLLVM.instruction_get_debug_loc(ref).address == 0
+    flen = 0
+    fptr = LibLLVM.get_debug_loc_filename(ref, pointerof(flen))
+    file = flen > 0 ? String.new(flen) { |b| b.copy_from(fptr, flen) } : ""
+    DebugLoc.new(@ir.file_index(file), LibLLVM.get_debug_loc_line(ref).to_i32, LibLLVM.get_debug_loc_column(ref).to_i32)
+  end
+
+  def mem_aux(ref : LibLLVM::ValueRef) : MemAux
+    ordering = llvm_ordering_to_ir(LibLLVM.get_ordering_int(ref))
+    unless ordering
+      refuse("a memory ordering is not in the IR")
+      return MemAux.new
+    end
+    MemAux.new(LibLLVM.get_alignment(ref).to_i32, LibLLVM.get_volatile(ref) != 0, ordering.as(Ordering), Ordering::NotAtomic, LibLLVM.is_atomic_single_thread(ref) != 0, "", false)
+  end
+
+  def alloca_instruction(ref : LibLLVM::ValueRef, result_type : IrType, name : String) : Inst?
+    if LibLLVM.get_num_operands(ref) != 1
+      refuse("an alloca with an array size is not in the IR")
+      return nil
+    end
+    count = LibLLVM.get_operand(ref, 0)
+    unless llvm_value_kind(count) == vk_constant_int && LibLLVM.const_int_get_sext_value(count) == 1
+      refuse("an alloca with an array size is not in the IR")
+      return nil
+    end
+    allocated = type_of(LibLLVM.get_allocated_type(ref))
+    Inst.new(Op::Alloca, result_type, [] of Value, LibLLVM.get_alignment(ref).to_i64, GepAux.new(allocated, false), [] of Block, [] of Int64, name)
+  end
+
+  def gep_instruction(ref : LibLLVM::ValueRef, result_type : IrType, name : String) : Inst?
+    source = type_of(LibLLVM.get_gep_source_element_type(ref))
+    args = operands_of(ref)
+    return nil if failed?
+    Inst.new(Op::Gep, result_type, args, 0_i64, GepAux.new(source, LibLLVM.is_in_bounds(ref) != 0), [] of Block, [] of Int64, name)
+  end
+
+  def aggregate_instruction(ref : LibLLVM::ValueRef, opcode : Int32, result_type : IrType, name : String) : Inst?
+    if LibLLVM.get_num_indices(ref) != 1
+      refuse("an aggregate access with several indices is not in the IR")
+      return nil
+    end
+    index = LibLLVM.get_indices(ref)[0].to_i64
+    args = operands_of(ref)
+    return nil if failed?
+    if opcode == op_extract_value
+      Inst.new(Op::ExtractValue, result_type, [args[0]] of Value, index, nil, [] of Block, [] of Int64, name)
+    else
+      Inst.new(Op::InsertValue, result_type, args, index, nil, [] of Block, [] of Int64, name)
+    end
+  end
+
+  def cmpxchg_instruction(ref : LibLLVM::ValueRef, name : String) : Inst?
+    success = llvm_ordering_to_ir(LibLLVM.get_cmpxchg_success_ordering_int(ref))
+    failure = llvm_ordering_to_ir(LibLLVM.get_cmpxchg_failure_ordering_int(ref))
+    unless success && failure
+      refuse("a cmpxchg ordering is not in the IR")
+      return nil
+    end
+    args = operands_of(ref)
+    return nil if failed?
+    aux = MemAux.new(LibLLVM.get_alignment(ref).to_i32, LibLLVM.get_volatile(ref) != 0, success.as(Ordering), failure.as(Ordering), LibLLVM.is_atomic_single_thread(ref) != 0, "", LibLLVM.get_weak(ref) != 0)
+    Inst.new(Op::CmpXchg, @ir.types.struct_of([args[1].type, @ir.types.int1]), args, 0_i64, aux, [] of Block, [] of Int64, name)
+  end
+
+  def atomicrmw_instruction(ref : LibLLVM::ValueRef, name : String) : Inst?
+    rmw = atomic_rmw_operation_names[LibLLVM.get_atomic_rmw_bin_op_int(ref)]?
+    unless rmw
+      refuse("an atomicrmw operation is not in the IR")
+      return nil
+    end
+    ordering = llvm_ordering_to_ir(LibLLVM.get_ordering_int(ref))
+    unless ordering
+      refuse("an atomicrmw ordering is not in the IR")
+      return nil
+    end
+    args = operands_of(ref)
+    return nil if failed?
+    aux = MemAux.new(LibLLVM.get_alignment(ref).to_i32, LibLLVM.get_volatile(ref) != 0, ordering.as(Ordering), Ordering::NotAtomic, LibLLVM.is_atomic_single_thread(ref) != 0, rmw, false)
+    Inst.new(Op::AtomicRmw, args[1].type, args, 0_i64, aux, [] of Block, [] of Int64, name)
+  end
+
+  def phi_instruction(ref : LibLLVM::ValueRef, result_type : IrType, name : String) : Inst
+    node = Inst.new(Op::Phi, result_type, [] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+    @values[ref.address] = node
+    count = LibLLVM.count_incoming(ref)
+    i = 0
+    while i < count
+      value = value_of(LibLLVM.get_incoming_value(ref, i))
+      block = block_of(LibLLVM.get_incoming_block(ref, i))
+      node.add_incoming(value, block)
+      i = i + 1
+    end
+    node
+  end
+
+  def landing_pad_instruction(ref : LibLLVM::ValueRef, result_type : IrType, name : String) : Inst?
+    clauses = operands_of(ref)
+    return nil if failed?
+    personality = enclosing_personality(ref)
+    unless personality
+      refuse("a landingpad has no personality function")
+      return nil
+    end
+    args = [personality] of Value
+    clauses.each { |c| args << c }
+    cleanup = LibLLVM.is_cleanup(ref) != 0 ? 1_i64 : 0_i64
+    Inst.new(Op::LandingPad, result_type, args, cleanup, nil, [] of Block, [] of Int64, name)
+  end
+
+  def enclosing_personality(ref : LibLLVM::ValueRef) : Value?
+    fn_ref = LibLLVM.get_basic_block_parent(LibLLVM.get_instruction_parent(ref))
+    personality = LibLLVM.has_personality_fn(fn_ref) != 0 ? LibLLVM.get_personality_fn(fn_ref) : Pointer(Void).new(0_u64)
+    return nil if personality.address == 0
+    value_of(personality)
+  end
+
+  # LLVM has one convention for both of the IR's (SPEC 2.1): the hosted compiler emits a def and a C function
+  # alike as `ccc`, with a def's aggregates passed whole and a C function's already lowered to the platform ABI.
+  # The name tells them apart: a def or a proc is mangled with a leading `*` or `~`, and nothing C can be named
+  # so. A def is `Iyi`; a `fun`, a lib function and the runtime's entry points are `C`. The program's entry
+  # body (`__crystal_main`, or `__iyi_main` under iyi's prelude) is a def in all but name: the hosted compiler
+  # gives it the root expression's type as its result, aggregates included, and its one caller drops that
+  # value (codegen.cr 303-308, 737), which a C-convention signature cannot carry unlowered. It is `Iyi`.
+  def convention_of(name : String) : CallConv
+    return CallConv::Iyi if name.starts_with?("*") || name.starts_with?("~")
+    return CallConv::Iyi if name == "__crystal_main" || name == "__iyi_main"
+    CallConv::C
+  end
+
+  # A direct call has its callee's convention. A call through a pointer is to a proc, which is a def.
+  def call_convention_of(callee : Value) : CallConv
+    return callee.as(Function).cc if callee.is_a?(Function)
+    CallConv::Iyi
+  end
+
+  # A call's attributes, calling convention and signature, shared by call and invoke.
+  def call_like(ref : LibLLVM::ValueRef, op : Op, name : String, targets : Array(Block)) : Inst?
+    if LibLLVM.get_instruction_call_conv(ref) != 0
+      refuse("a call or invoke has a calling convention, which the IR does not model")
+      return nil
+    end
+    fn_type = type_of(LibLLVM.get_called_function_type(ref))
+    callee = value_of(LibLLVM.get_called_value(ref))
+    args = [callee] of Value
+    operands = call_arguments(ref)
+    return nil if failed?
+    operands.each { |a| args << a }
+    aux = CallAux.new(fn_type, call_convention_of(callee), false, attributes_at(ref, attribute_function_index, true), param_attributes(ref, fn_type.param_count, true), attributes_at(ref, attribute_return_index, true))
+    Inst.new(op, fn_type.return_type, args, 0_i64, aux, targets, [] of Int64, name)
+  end
+
+  def call_arguments(ref : LibLLVM::ValueRef) : Array(Value)
+    values = [] of Value
+    count = LibLLVM.get_num_arg_operands(ref)
+    i = 0
+    while i < count
+      values << value_of(LibLLVM.get_operand(ref, i))
+      return values if failed?
+      i = i + 1
+    end
+    values
+  end
+
+  def call_instruction(ref : LibLLVM::ValueRef, name : String) : Inst?
+    callee_ref = LibLLVM.get_called_value(ref)
+    if llvm_value_kind(callee_ref) == vk_inline_asm
+      return call_asm(ref, callee_ref, name)
+    end
+    if LibLLVM.get_intrinsic_id(callee_ref) != 0
+      return intrinsic_call(ref, callee_ref, name)
+    end
+    tail = LibLLVM.get_tail_call_kind(ref)
+    if tail == 2 || tail == 3
+      refuse("a call with a musttail or notail marker is not in the IR")
+      return nil
+    end
+    if LibLLVM.get_instruction_call_conv(ref) != 0
+      refuse("a call has a calling convention, which the IR does not model")
+      return nil
+    end
+    fn_type = type_of(LibLLVM.get_called_function_type(ref))
+    callee = value_of(callee_ref)
+    args = [callee] of Value
+    call_arguments(ref).each { |a| args << a }
+    return nil if failed?
+    aux = CallAux.new(fn_type, call_convention_of(callee), tail == 1, attributes_at(ref, attribute_function_index, true), param_attributes(ref, fn_type.param_count, true), attributes_at(ref, attribute_return_index, true))
+    Inst.new(Op::Call, fn_type.return_type, args, 0_i64, aux, [] of Block, [] of Int64, name)
+  end
+
+  # A call through inline asm: the callee is the asm Inst, and the call carries its signature.
+  def call_asm(ref : LibLLVM::ValueRef, callee_ref : LibLLVM::ValueRef, name : String) : Inst?
+    callee = inline_asm_value(callee_ref, LibLLVM.get_called_function_type(ref))
+    args = [callee] of Value
+    call_arguments(ref).each { |a| args << a }
+    return nil if failed?
+    fn_type = callee.type
+    aux = CallAux.new(fn_type, CallConv::C, false, [] of Attribute, [] of Array(Attribute), [] of Attribute)
+    Inst.new(Op::Call, fn_type.return_type, args, 0_i64, aux, [] of Block, [] of Int64, name)
+  end
+
+  def intrinsic_call(ref : LibLLVM::ValueRef, callee_ref : LibLLVM::ValueRef, name : String) : Inst?
+    llvm_name = string_from_c(LibLLVM.get_value_name(callee_ref))
+    found = intrinsic_match(llvm_name, @ir.types)
+    unless found
+      refuse("the intrinsic #{llvm_name} is not in the IR's closed set")
+      return nil
+    end
+    if LibLLVM.get_instruction_call_conv(ref) != 0 || LibLLVM.get_tail_call_kind(ref) != 0
+      refuse("the intrinsic #{llvm_name} is called with a convention or tail marker the IR does not model")
+      return nil
+    end
+    if LibLLVM.get_callsite_attribute_count(ref, attribute_function_index) != 0 || LibLLVM.get_callsite_attribute_count(ref, attribute_return_index) != 0
+      refuse("the intrinsic #{llvm_name} is called with call-site attributes, which the IR does not model")
+      return nil
+    end
+    args = call_arguments(ref)
+    return nil if failed?
+    param_attrs = param_attributes(ref, args.size, true)
+    return nil if failed?
+    signature = intrinsic_signature(found.id, found.overload, @ir.types)
+    Inst.new(Op::Intrinsic, signature[0], args, 0_i64, IntrinsicAux.new(found.id, found.overload, param_attrs), [] of Block, [] of Int64, name)
+  end
+end
+
+# Builds constants into the module without placing them, as the B1 builder does.
+class ConstantFactory
+  def initialize(@ir : Module)
+  end
+
+  def poison(ty : IrType) : Inst
+    Inst.new(Op::ConstPoison, ty, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def undef(ty : IrType) : Inst
+    Inst.new(Op::ConstUndef, ty, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def null_pointer(ty : IrType) : Inst
+    Inst.new(Op::ConstNull, ty, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def zero(ty : IrType) : Inst
+    Inst.new(Op::ConstZero, ty, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def integer(ty : IrType, value : Int64) : Inst
+    Inst.new(Op::ConstInt, ty, [] of Value, value, nil, [] of Block, [] of Int64)
+  end
+
+  def wide_words(ty : IrType, words : Array(Int64)) : Inst
+    inst = Inst.new(Op::ConstInt, ty, [] of Value, words[0], nil, [] of Block, [] of Int64)
+    inst.wide_words = canonical_words(words, ty.bits)
+    inst
+  end
+
+  def float_value(ty : IrType, value : Float64) : Inst
+    bits = ty.float32? ? single_bits_of(value) : double_bits_of(value)
+    Inst.new(Op::ConstFloat, ty, [] of Value, bits, nil, [] of Block, [] of Int64)
+  end
+
+  def single_bits_of(value : Float64) : Int64
+    narrowed = value.to_f32
+    (pointerof(narrowed).as(Int32*).value.to_i64) & 0xFFFFFFFF_i64
+  end
+
+  def double_bits_of(value : Float64) : Int64
+    pointerof(value).as(Int64*).value
+  end
+
+  def struct_value(ty : IrType, values : Array(Value)) : Inst
+    Inst.new(Op::ConstAggregate, ty, values, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def array_value(ty : IrType, values : Array(Value)) : Inst
+    Inst.new(Op::ConstAggregate, ty, values, 0_i64, nil, [] of Block, [] of Int64)
+  end
+
+  def bytes(text : String, ty : IrType) : Inst
+    values = [] of Value
+    i = 0
+    while i < text.bytesize
+      values << integer(@ir.types.int8, text.byte_at(i).to_i64)
+      i = i + 1
+    end
+    Inst.new(Op::ConstBytes, ty, values, 0_i64, nil, [] of Block, [] of Int64)
+  end
+end

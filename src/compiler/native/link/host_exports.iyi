@@ -1,0 +1,31 @@
+# Whether the running system's libSystem exports a C name.
+#
+# The own linker binds every import no object defines to libSystem. This
+# platform keeps no export list on disk to read (the libraries live in the
+# loader's shared cache), so a misspelled C function linked cleanly and the
+# program died at launch with the loader's "Symbol not found". When the linker
+# runs on darwin it can ask the loader it is itself running under: libSystem is
+# already mapped into this process, and `dlsym` answers for the system the
+# link runs on. On any other host there is nobody to ask, and the answer is
+# yes: a cross-link is checked when the program first runs on its target.
+
+@[Unsafe("hands the loader a C string and reads back a pointer it never follows")]
+module compiler/native/link/host_exports
+
+lib LibHostLoader
+  fun dlsym(handle : Void*, name : UInt8*) : Void*
+end
+
+# RTLD_DEFAULT on darwin: search every image the process has loaded.
+HOST_LOADER_DEFAULT = 0xfffffffffffffffe_u64
+
+# True when the running system's libSystem exports `name` (undecorated), or
+# when this host is not darwin and cannot say.
+pub def libsystem_exports?(name : String) : Bool
+  {% if flag?(:darwin) %}
+    found = LibHostLoader.dlsym(Pointer(Void).new(HOST_LOADER_DEFAULT), name.to_unsafe)
+    found.address != 0_u64
+  {% else %}
+    true
+  {% end %}
+end

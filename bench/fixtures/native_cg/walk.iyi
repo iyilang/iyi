@@ -1,0 +1,13 @@
+module walk
+
+def walk(n : Int32, x : Float64) : Float64
+  if n == 0
+    x
+  else
+    r = walk(n - 1, x + 1.0)
+    r + x * 0.5 + (n * 3).to_f64
+  end
+end
+
+w = walk(4, 0.5)
+puts w.to_i32

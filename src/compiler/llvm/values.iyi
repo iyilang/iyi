@@ -1,0 +1,501 @@
+@[Unsafe("binds LLVM's C API: its objects are raw handles this module wraps and disposes, which the compiler does not check")]
+module compiler/llvm/values
+
+import compiler/llvm/lib_llvm::{string_from_c, string_and_dispose, to_c_str}
+
+pub struct LLVMType
+  getter unwrap : LibLLVM::TypeRef
+
+  def initialize(@unwrap : LibLLVM::TypeRef)
+  end
+
+  def to_unsafe : LibLLVM::TypeRef
+    @unwrap
+  end
+
+  def kind : LibLLVM::TypeKind
+    LibLLVM.get_type_kind(@unwrap)
+  end
+
+  def void? : Bool
+    kind.value == LibLLVM::TypeKind::Void.value
+  end
+
+  def half? : Bool
+    kind.value == LibLLVM::TypeKind::Half.value
+  end
+
+  def float? : Bool
+    kind.value == LibLLVM::TypeKind::Float.value
+  end
+
+  def double? : Bool
+    kind.value == LibLLVM::TypeKind::Double.value
+  end
+
+  def int? : Bool
+    kind.value == LibLLVM::TypeKind::Integer.value
+  end
+
+  def function? : Bool
+    kind.value == LibLLVM::TypeKind::Function.value
+  end
+
+  def struct? : Bool
+    kind.value == LibLLVM::TypeKind::Struct.value
+  end
+
+  def array? : Bool
+    kind.value == LibLLVM::TypeKind::Array.value
+  end
+
+  def pointer? : Bool
+    kind.value == LibLLVM::TypeKind::Pointer.value
+  end
+
+  def vector? : Bool
+    kind.value == LibLLVM::TypeKind::Vector.value
+  end
+
+  def int_width : Int32
+    if int?
+      LibLLVM.get_int_type_width(@unwrap)
+    else
+      0
+    end
+  end
+
+  def pointer(address_space : Int32 = 0) : LLVMType
+    {% if LibLLVM::IS_LT_150 %}
+      LLVMType.new(LibLLVM.pointer_type(@unwrap, address_space))
+    {% else %}
+      ctx = LibLLVM.get_type_context(@unwrap)
+      LLVMType.new(LibLLVM.pointer_type_in_context(ctx, address_space))
+    {% end %}
+  end
+
+  def array(count : Int32) : LLVMType
+    LLVMType.new(LibLLVM.array_type(@unwrap, count))
+  end
+
+  def array_length : Int32
+    if array?
+      LibLLVM.get_array_length(@unwrap)
+    else
+      0
+    end
+  end
+
+  def vector(count : Int32) : LLVMType
+    LLVMType.new(LibLLVM.vector_type(@unwrap, count))
+  end
+
+  def vector_size : Int32
+    if vector?
+      LibLLVM.get_vector_size(@unwrap)
+    else
+      0
+    end
+  end
+
+  def element_type : LLVMType
+    LLVMType.new(LibLLVM.get_element_type(@unwrap))
+  end
+
+  def self.function(arg_types : Array(LLVMType), return_type : LLVMType, varargs : Bool = false) : LLVMType
+    args_raw = arg_types.map { |t| t.to_unsafe }
+    ptr = args_raw.empty? ? Pointer(LibLLVM::TypeRef).new(0_u64) : args_raw.to_unsafe
+    LLVMType.new(LibLLVM.function_type(return_type.to_unsafe, ptr, arg_types.size, varargs ? 1 : 0))
+  end
+
+  def return_type : LLVMType
+    if function?
+      LLVMType.new(LibLLVM.get_return_type(@unwrap))
+    else
+      self
+    end
+  end
+
+  def param_count : Int32
+    if function?
+      LibLLVM.count_param_types(@unwrap)
+    else
+      0
+    end
+  end
+
+  def param_types : Array(LLVMType)
+    count = param_count
+    return [] of LLVMType if count == 0
+    buffer = Pointer(LibLLVM::TypeRef).malloc(count.to_u64)
+    LibLLVM.get_param_types(@unwrap, buffer)
+    res = [] of LLVMType
+    i = 0
+    while i < count
+      res << LLVMType.new(buffer[i])
+      i = i + 1
+    end
+    res
+  end
+
+  def varargs? : Bool
+    if function?
+      LibLLVM.is_function_var_arg(@unwrap) != 0
+    else
+      false
+    end
+  end
+
+  def struct_element_types : Array(LLVMType)
+    return [] of LLVMType unless struct?
+    count = LibLLVM.count_struct_element_types(@unwrap)
+    return [] of LLVMType if count == 0
+    buffer = Pointer(LibLLVM::TypeRef).malloc(count.to_u64)
+    LibLLVM.get_struct_element_types(@unwrap, buffer)
+    res = [] of LLVMType
+    i = 0
+    while i < count
+      res << LLVMType.new(buffer[i])
+      i = i + 1
+    end
+    res
+  end
+
+  def struct_set_body(element_types : Array(LLVMType), packed : Bool = false) : Nil
+    raw = element_types.map { |t| t.to_unsafe }
+    ptr = raw.empty? ? Pointer(LibLLVM::TypeRef).new(0_u64) : raw.to_unsafe
+    LibLLVM.struct_set_body(@unwrap, ptr, element_types.size, packed ? 1 : 0)
+  end
+
+  def packed_struct? : Bool
+    if struct?
+      LibLLVM.is_packed_struct(@unwrap) != 0
+    else
+      false
+    end
+  end
+
+  def struct_name : String?
+    if struct?
+      ptr = LibLLVM.get_struct_name(@unwrap)
+      if ptr.address != 0
+        string_from_c(ptr)
+      else
+        nil
+      end
+    else
+      nil
+    end
+  end
+
+  def const_int(val : Int64, sign_extend : Bool = false) : LLVMValue
+    u = pointerof(val).as(UInt64*).value
+    LLVMValue.new(LibLLVM.const_int(@unwrap, u, sign_extend ? 1 : 0))
+  end
+
+  def const_int(val : UInt64, sign_extend : Bool = false) : LLVMValue
+    LLVMValue.new(LibLLVM.const_int(@unwrap, val, sign_extend ? 1 : 0))
+  end
+
+  def const_int(val : Int32, sign_extend : Bool = false) : LLVMValue
+    v64 = val.to_i64
+    u = pointerof(v64).as(UInt64*).value
+    LLVMValue.new(LibLLVM.const_int(@unwrap, u, sign_extend ? 1 : 0))
+  end
+
+  def const_float(val : Float64) : LLVMValue
+    LLVMValue.new(LibLLVM.const_real(@unwrap, val))
+  end
+
+  def null : LLVMValue
+    LLVMValue.new(LibLLVM.const_null(@unwrap))
+  end
+
+  def null_pointer : LLVMValue
+    LLVMValue.new(LibLLVM.const_pointer_null(@unwrap))
+  end
+
+  def undef : LLVMValue
+    LLVMValue.new(LibLLVM.get_undef(@unwrap))
+  end
+
+  def size_of : LLVMValue
+    LLVMValue.new(LibLLVM.size_of(@unwrap))
+  end
+
+  def align_of : LLVMValue
+    LLVMValue.new(LibLLVM.align_of(@unwrap))
+  end
+
+  def to_s : String
+    ptr = LibLLVM.print_type_to_string(@unwrap)
+    string_and_dispose(ptr)
+  end
+
+  def ==(other : LLVMType) : Bool
+    @unwrap.address == other.unwrap.address
+  end
+end
+
+pub struct LLVMValue
+  getter unwrap : LibLLVM::ValueRef
+
+  def initialize(@unwrap : LibLLVM::ValueRef)
+  end
+
+  def to_unsafe : LibLLVM::ValueRef
+    @unwrap
+  end
+
+  def type : LLVMType
+    LLVMType.new(LibLLVM.type_of(@unwrap))
+  end
+
+  def kind : LibLLVM::ValueKind
+    LibLLVM.get_value_kind(@unwrap)
+  end
+
+  def name : String
+    ptr = LibLLVM.get_value_name(@unwrap)
+    string_from_c(ptr)
+  end
+
+  def name=(name : String) : Nil
+    LibLLVM.set_value_name(@unwrap, to_c_str(name))
+  end
+
+  def constant? : Bool
+    LibLLVM.is_constant(@unwrap) != 0
+  end
+
+  def undef? : Bool
+    LibLLVM.is_undef(@unwrap) != 0
+  end
+
+  def null? : Bool
+    LibLLVM.is_null(@unwrap) != 0
+  end
+
+  def const_int_zext_value : UInt64
+    LibLLVM.const_int_get_zext_value(@unwrap)
+  end
+
+  def const_int_sext_value : Int64
+    LibLLVM.const_int_get_sext_value(@unwrap)
+  end
+
+  def dump : Nil
+    LibLLVM.dump_value(@unwrap)
+  end
+
+  def to_s : String
+    ptr = LibLLVM.print_value_to_string(@unwrap)
+    string_and_dispose(ptr)
+  end
+
+  def ==(other : LLVMValue) : Bool
+    @unwrap.address == other.unwrap.address
+  end
+
+  def initializer=(val : LLVMValue) : Nil
+    LibLLVM.set_initializer(@unwrap, val.to_unsafe)
+  end
+
+  def global_constant=(c : Bool) : Nil
+    LibLLVM.set_global_constant(@unwrap, c ? 1 : 0)
+  end
+
+  def linkage=(l : LibLLVM::Linkage) : Nil
+    LibLLVM.set_linkage(@unwrap, l)
+  end
+
+  def alignment=(bytes : Int32) : Nil
+    LibLLVM.set_alignment(@unwrap, bytes)
+  end
+
+  def alignment : Int32
+    LibLLVM.get_alignment(@unwrap).to_i32
+  end
+end
+
+pub struct LLVMFunction
+  getter unwrap : LibLLVM::ValueRef
+
+  def initialize(@unwrap : LibLLVM::ValueRef)
+  end
+
+  def to_unsafe : LibLLVM::ValueRef
+    @unwrap
+  end
+
+  def to_value : LLVMValue
+    LLVMValue.new(@unwrap)
+  end
+
+  def name : String
+    ptr = LibLLVM.get_value_name(@unwrap)
+    string_from_c(ptr)
+  end
+
+  def name=(name : String) : Nil
+    LibLLVM.set_value_name(@unwrap, to_c_str(name))
+  end
+
+  def type : LLVMType
+    LLVMType.new(LibLLVM.type_of(@unwrap))
+  end
+
+  def function_type : LLVMType
+    ty = type
+    if ty.function?
+      ty
+    elsif ty.pointer?
+      ty.element_type
+    else
+      ty
+    end
+  end
+
+  def linkage : LibLLVM::Linkage
+    LibLLVM.get_linkage(@unwrap)
+  end
+
+  def linkage=(l : LibLLVM::Linkage) : Nil
+    LibLLVM.set_linkage(@unwrap, l)
+  end
+
+  def call_convention : LibLLVM::CallConvention
+    LibLLVM.get_function_call_convention(@unwrap)
+  end
+
+  def call_convention=(cc : LibLLVM::CallConvention) : Nil
+    LibLLVM.set_function_call_convention(@unwrap, cc)
+  end
+
+  def personality_function=(pers_fn : LLVMValue) : Nil
+    LibLLVM.set_personality_fn(@unwrap, pers_fn.to_unsafe)
+  end
+
+  def param_count : Int32
+    LibLLVM.count_params(@unwrap)
+  end
+
+  def param(index : Int32) : LLVMValue
+    val = LibLLVM.get_param(@unwrap, index)
+    if val.address == 0
+      raise "Param index #{index} out of range for function '#{name}'"
+    end
+    LLVMValue.new(val)
+  end
+
+  def params : Array(LLVMValue)
+    count = param_count
+    return [] of LLVMValue if count == 0
+    buffer = Pointer(LibLLVM::ValueRef).malloc(count.to_u64)
+    LibLLVM.get_params(@unwrap, buffer)
+    res = [] of LLVMValue
+    i = 0
+    while i < count
+      res << LLVMValue.new(buffer[i])
+      i = i + 1
+    end
+    res
+  end
+
+  def append_basic_block(name : String = "") : LLVMBasicBlock
+    ctx = LibLLVM.get_type_context(LibLLVM.type_of(@unwrap))
+    bb = LibLLVM.append_basic_block_in_context(ctx, @unwrap, to_c_str(name))
+    if bb.address == 0
+      raise "Could not append basic block '#{name}' to function"
+    end
+    LLVMBasicBlock.new(bb)
+  end
+
+  def entry_block : LLVMBasicBlock?
+    bb = LibLLVM.get_entry_basic_block(@unwrap)
+    if bb.address != 0
+      LLVMBasicBlock.new(bb)
+    else
+      nil
+    end
+  end
+
+  def first_basic_block : LLVMBasicBlock?
+    bb = LibLLVM.get_first_basic_block(@unwrap)
+    if bb.address != 0
+      LLVMBasicBlock.new(bb)
+    else
+      nil
+    end
+  end
+
+  def basic_blocks : Array(LLVMBasicBlock)
+    res = [] of LLVMBasicBlock
+    bb = LibLLVM.get_first_basic_block(@unwrap)
+    while bb.address != 0
+      res << LLVMBasicBlock.new(bb)
+      bb = LibLLVM.get_next_basic_block(bb)
+    end
+    res
+  end
+
+  def verify : Bool
+    rc = LibLLVM.verify_function(@unwrap, LibLLVM::VerifierFailureAction::ReturnStatusAction)
+    rc == 0
+  end
+
+  def delete : Nil
+    LibLLVM.delete_function(@unwrap)
+  end
+
+  def ==(other : LLVMFunction) : Bool
+    @unwrap.address == other.unwrap.address
+  end
+end
+
+pub struct LLVMBasicBlock
+  getter unwrap : LibLLVM::BasicBlockRef
+
+  def initialize(@unwrap : LibLLVM::BasicBlockRef)
+  end
+
+  def to_unsafe : LibLLVM::BasicBlockRef
+    @unwrap
+  end
+
+  def name : String
+    ptr = LibLLVM.get_basic_block_name(@unwrap)
+    string_from_c(ptr)
+  end
+
+  def parent : LLVMFunction?
+    fn = LibLLVM.get_basic_block_parent(@unwrap)
+    if fn.address != 0
+      LLVMFunction.new(fn)
+    else
+      nil
+    end
+  end
+
+  def first_instruction : LLVMValue?
+    inst = LibLLVM.get_first_instruction(@unwrap)
+    if inst.address != 0
+      LLVMValue.new(inst)
+    else
+      nil
+    end
+  end
+
+  def delete : Nil
+    LibLLVM.delete_basic_block(@unwrap)
+  end
+
+  def ==(other : LLVMBasicBlock) : Bool
+    @unwrap.address == other.unwrap.address
+  end
+end
+
+pub alias Type = LLVMType
+pub alias Value = LLVMValue
+pub alias Function = LLVMFunction
+pub alias BasicBlock = LLVMBasicBlock

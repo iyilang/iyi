@@ -29,8 +29,9 @@ done
 build_wasm() {
   local output="$1" source="$2"; shift 2
   local command
-  command="$("$IYI" build --cross-compile --target wasm32-wasi "$@" -o "$output" "$source")" ||
+  command="$("$IYI" build --cross-compile --target wasm32-wasi "$@" -o "$output.raw" "$source")" ||
     fail "$output: wasm compilation failed${command:+: $command}"
+  if [ -f "$output.raw.ll" ]; then mv "$output.raw.ll" "$output.ll"; fi
   case "$command" in
     cc\ *) command="\"$CLANG\" ${command#cc }" ;;
     *) fail "$output: unexpected cross-link command: $command" ;;

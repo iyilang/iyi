@@ -126,7 +126,8 @@ JS
 
 build_wasm() {
   local name="$1" source="$2" command
-  command="$("$IYI" build --cross-compile --target wasm32-unknown-unknown -o "$WORK/build/$name" "$source")"
+  shift 2
+  command="$("$IYI" build --cross-compile --target wasm32-unknown-unknown "$@" -o "$WORK/build/$name" "$source")"
   case "$command" in 'wasm-ld '*) ;; *) echo "unexpected link command: $command" >&2; exit 1 ;; esac
   case "$command" in *'--no-entry'*) ;; *) echo "missing --no-entry: $command" >&2; exit 1 ;; esac
   eval "$command"
@@ -185,6 +186,16 @@ for name in file_read file_write file_open file_exists file_delete; do
 done
 
 echo '== shared Node and browser contract =='
+(cd "$WORK" && node "$REPO/bench/wasm_node.mjs" "$WORK/bench/wasm_freestanding_exercise.mjs")
+node "$REPO/bench/wasm_browser.mjs" --chrome "$IYI_CHROME" --root "$WORK" --script bench/wasm_freestanding_exercise.mjs
+
+# The shipped release must run the same host and GC contract, not merely
+# produce a smaller, valid-looking file.
+echo '== release: Node and browser contract =='
+for name in hello format io; do
+  build_wasm "$name" "$REPO/samples/iyi/$name.iyi" --release
+done
+build_wasm contract "$REPO/bench/wasm_freestanding_exercise.iyi" --release
 (cd "$WORK" && node "$REPO/bench/wasm_node.mjs" "$WORK/bench/wasm_freestanding_exercise.mjs")
 node "$REPO/bench/wasm_browser.mjs" --chrome "$IYI_CHROME" --root "$WORK" --script bench/wasm_freestanding_exercise.mjs
 

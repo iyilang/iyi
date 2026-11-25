@@ -1,0 +1,9 @@
+macro default_fallback(flag, val)
+  {% unless flag %}
+    {{val}}
+  {% else %}
+    0
+  {% end %}
+end
+
+default_fallback(false, 42)

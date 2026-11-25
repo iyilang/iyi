@@ -3113,7 +3113,7 @@ NOPOLL_SITE_BUG='in_poll_preempted && /^        IyiScheduler.wait_for_events\(fa
   n_poll++; at_poll = NR; next
 }'
 NOPOLL_END='END {
-  if (n_defs != 1 || n_wait != 1 || n_wait_state != 1 || at_wait_state != at_wait + 1 ||
+  if (n_defs != 1 || n_wait != 1 || n_wait_state != 1 || at_wait_state != at_wait + 18 ||
       n_preempted != 1 || n_poll_if != 1 || n_poll != 1 || n_poll_else != 1 ||
       at_poll != at_poll_if + 1 || at_poll_else != at_poll + 1) exit 3
 }'
@@ -3761,8 +3761,7 @@ step "failure proof: a scheduler the compiler takes for a library's checks, and 
   cp "$REPO"/src/iyi/*.iyi rtout/iyi/ || { echo "FAIL: rtout: setup: could not copy the runtime"; exit 76; }
   mv rtout/iyi/concurrency.iyi rtout/iyi/scheduler.iyi || { echo "FAIL: rtout: setup: could not rename the scheduler"; exit 76; }
   lib_awk rtout "$REPO/src/iyi/prelude.iyi" rtout/iyi/prelude.iyi '$0 == "{% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}" { platforms++; expect = 1; print; next }
-expect { if ($0 != "  require \"./concurrency\"") exit 3; expect = 0 }
-/^  require "\.\/concurrency"$/ { n++; print "  require \"./scheduler\""; next }
+expect { if ($0 != "  require \"./concurrency\"") exit 3; expect = 0; n++; print "  require \"./scheduler\""; next }
 { print }
 END { if (platforms != 1 || n != 1 || expect) exit 3 }'
   if ! IYI_PATH="$WORK/rtout${PSEP}$REPO/src" "$IYI" build --emit llvm-ir "$REPO/bench/parallel_preempt_lib.iyi" -o rtout-run > build-rtout.log 2>&1; then

@@ -1,0 +1,115 @@
+module compiler/macros/ast
+
+import compiler/syntax/ast::{ASTNode, StringBuilder, StringLiteral, SymbolLiteral, Var}
+import compiler/macros/type_facts::{MacroTypeFacts}
+
+pub class MacroId < ASTNode
+  property value : String
+
+  def initialize(@value : String)
+  end
+
+  def to_macro_id : String
+    @value
+  end
+
+  def clone_without_location : self
+    MacroId.new(@value)
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @value
+  end
+
+  def ==(other : self) : Bool
+    @value == other.value
+  end
+
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(MacroId)
+      @value == other.as(MacroId).value
+    elsif other.is_a?(StringLiteral)
+      @value == other.as(StringLiteral).value
+    elsif other.is_a?(SymbolLiteral)
+      @value == other.as(SymbolLiteral).value
+    elsif other.is_a?(Var)
+      @value == other.as(Var).name
+    else
+      false
+    end
+  end
+
+  def hash : Int32
+    @value.hash
+  end
+end
+
+# An instance variable exposed to macro code, without its leading @.
+pub class MetaMacroVar < ASTNode
+  getter name : String
+  getter type_name : String?
+
+  def initialize(@name : String, @type_name : String?)
+  end
+
+  def to_macro_id : String
+    @name
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @name
+  end
+
+  def clone_without_location : self
+    MetaMacroVar.new(@name, @type_name)
+  end
+end
+
+# A type the macro language names. A path that resolves to a built-in type
+# prints as that type's name. A tuple or named tuple instance also keeps its
+# type arguments, so `size` can count them the way the hosted interpreter does.
+pub class TypeNode < ASTNode
+  property name : String
+  # Printed type arguments of a tuple or named tuple instance (`Int32`, `a: Int32`).
+  # Empty when `size` is not defined for this type.
+  property type_args : Array(String)
+  property sized : Bool
+  property facts : MacroTypeFacts? = nil
+
+  def initialize(@name : String, @type_args : Array(String) = [] of String, @sized : Bool = false)
+  end
+
+  def to_macro_id : String
+    @name
+  end
+
+  def to_s(sb : StringBuilder) : Nil
+    sb << @name
+  end
+
+  def clone_without_location : self
+    copy = TypeNode.new(@name, @type_args.dup, @sized)
+    copy.facts = @facts
+    copy
+  end
+
+  # Two type nodes are the same type when they print the same, which is how
+  # `Int32 == Int32` and `Tuple(Int32, Bool) == Tuple(Int32, Bool)` answer.
+  def ==(other : ASTNode) : Bool
+    if other.is_a?(TypeNode)
+      tn = other.as(TypeNode)
+      return @name == tn.name && @sized == tn.sized && same_args?(tn.type_args)
+    end
+    false
+  end
+
+  def same_args?(other : Array(String)) : Bool
+    return false unless @type_args.size == other.size
+    i = 0
+    while i < @type_args.size
+      return false unless @type_args[i] == other[i]
+      i = i + 1
+    end
+    true
+  end
+end

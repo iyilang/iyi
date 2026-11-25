@@ -1,0 +1,15 @@
+def unreachable : Nil
+end
+
+def never_reached : Nil
+end
+
+def calculate(x : Int32) : Int32
+  if x > 0
+    return x
+    unreachable
+  else
+    return 0 - x
+    never_reached
+  end
+end

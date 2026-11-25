@@ -76,7 +76,7 @@ require "./atomic"
   # in `discover_stack_base`. It is refused here instead, by name, and the
   # x86-64 build runs on those machines under emulation.
   {% raise "iyi's runtime on Windows is x86-64 only: the fiber switch, the stack bounds and the thread context are x86-64's. Build for x86_64-windows-msvc; an arm64 Windows machine runs that build under emulation (SPEC.md III.4.8)" %}
-{% elsif flag?(:wasm32) %}
+{% elsif flag?(:wasi) %}
   # wasm32-wasi has no concurrency runtime (SPEC.md III.4): no
   # stack-switching instruction, no wasi-threads, asyncify needs a host
   # loop. The compile error names the refusal.
@@ -91,6 +91,12 @@ require "./atomic"
 
   {% if flag?(:iyi_chaos) %}
     {% raise "-Diyi_chaos is not available on wasm32-wasi: there is no scheduler here for it to drive (SPEC.md III.4.17)" %}
+  {% end %}
+{% elsif flag?(:wasm32) %}
+  require "./concurrency"
+
+  {% if flag?(:iyi_chaos) %}
+    {% raise "-Diyi_chaos is not available on wasm32-unknown-unknown: this scheduler does not support chaos preemption (SPEC.md III.4.17)" %}
   {% end %}
 {% end %}
 {% if !((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
@@ -1614,7 +1620,7 @@ end
     # Not reached; the `NoReturn` this def promises is `ExitProcess`'s.
     LibC.ExitProcess(status)
   end
-{% elsif flag?(:wasm32) %}
+{% elsif flag?(:wasi) %}
   # iyi: On wasm32-wasi the platform's own interface is the WASI import set,
   # which the runtime (wasmtime, wasmer, a browser shim) provides; that is
   # the same standing libSystem and kernel32 have on the other platforms, and
@@ -1719,6 +1725,72 @@ end
   # the program. `Program.cwd` answers nil here.
   def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
     -1_i64
+  end
+{% elsif flag?(:wasm32) %}
+  # The freestanding host supplies only these operations. Additional imports
+  # from application libraries keep their own module names.
+  @[Link(wasm_import_module: "iyi")]
+  lib LibIyiHost
+    fun write(fd : Int32, buffer : Void*, count : Int32) : Int32
+    fun read(fd : Int32, buffer : Void*, count : Int32) : Int32
+    fun exit(code : Int32) : NoReturn
+    fun clock_ns(clock : Int32) : Int64
+    fun random(buffer : UInt8*, count : Int32) : Int32
+  end
+
+  def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
+    LibIyiHost.write(fd, buffer, count.to_i32).to_i64
+  end
+
+  def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
+    LibIyiHost.read(fd, buffer, count.to_i32).to_i64
+  end
+
+  def __iyi_open_read(path : UInt8*) : Int64
+    raise "File is not available on wasm32-unknown-unknown: the host provides no filesystem"
+  end
+
+  def __iyi_open_write(path : UInt8*) : Int64
+    raise "File is not available on wasm32-unknown-unknown: the host provides no filesystem"
+  end
+
+  def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
+    raise "File is not available on wasm32-unknown-unknown: the host provides no filesystem"
+  end
+
+  def __iyi_close(fd : Int64) : Nil
+  end
+
+  def __iyi_unlink(path : UInt8*) : Int64
+    raise "File.delete is not available on wasm32-unknown-unknown: the host provides no filesystem"
+  end
+
+  def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
+    0_i64
+  end
+
+  def __iyi_file_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
+    -1_i64
+  end
+
+  def __iyi_exit(status : Int32) : NoReturn
+    LibIyiHost.exit(status)
+  end
+
+  def __iyi_isatty(fd : Int32) : Bool
+    false
+  end
+
+  def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
+    -1_i64
+  end
+
+  # The sixteen bytes `String#hash` is keyed with, read once per process (#212), from the host's entropy: the same
+  # import `Random::Secure` reads on this target.
+  def __iyi_hash_key : {UInt64, UInt64}
+    key = {0_u64, 0_u64}
+    raise "String#hash: the host answered no random bytes" if LibIyiHost.random(pointerof(key).as(UInt8*), 16) != 0
+    key
   end
 {% else %}
   {% raise "iyi: this target is not one iyi's prelude has platform bindings for. " \
@@ -10093,7 +10165,13 @@ require "./file"
         IYI_LARGE = 0x4959495F4C415247_u64
 
         HEADER = 8_u64
-        LARGE_USER = 24_u64
+        # A large arena has its own header before the three object words.
+        LARGE_LINK_OFFSET  = 0_u64
+        LARGE_SIZE_OFFSET  = 8_u64
+        LARGE_PAGES_OFFSET = 16_u64
+        LARGE_MAGIC_OFFSET = 40_u64
+        LARGE_USER         = 72_u64
+        LARGE_OVERHEAD     = 96_u64
 
         FREE_FLAG    = 4_u64
         ATOMIC_FLAG  = 8_u64
@@ -10269,7 +10347,7 @@ require "./file"
         end
 
         def self.take_large(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
-          total = size + 64_u64
+          total = size + LARGE_OVERHEAD
           pages = (total + PAGE - 1_u64).unsafe_div(PAGE)
           prev = LibWasmMem.memory_grow(0, pages.to_i32)
           if prev < 0
@@ -10280,13 +10358,13 @@ require "./file"
           total_bytes = pages * PAGE
           update_heap_limits(arena, pages)
 
-          write64(arena + 0_u64, @@large_objects)
+          write64(arena + LARGE_LINK_OFFSET, @@large_objects)
           @@large_objects = arena
-          write64(arena + 8_u64, size)
-          write64(arena + 16_u64, pages)
-          write64(arena + 40_u64, IYI_LARGE)
+          write64(arena + LARGE_SIZE_OFFSET, size)
+          write64(arena + LARGE_PAGES_OFFSET, pages)
+          write64(arena + LARGE_MAGIC_OFFSET, IYI_LARGE)
 
-          p_obj = arena + 24_u64
+          p_obj = arena + LARGE_USER
           write64(p_obj - 24_u64, size)
           write64(p_obj - 16_u64, type_id)
           write64(p_obj - 8_u64, bits | CARVED_FLAG | type_id.unsafe_shl(TYPE_SHIFT))
@@ -10333,6 +10411,21 @@ require "./file"
         def self.base_of(word : UInt64) : UInt64
           return 0_u64 if word < @@heap_start || word >= @@heap_limit
           page = word - (word & 65535_u64)
+          # Only the first page carries the large arena header. Check its
+          # extent before interpreting page contents as an arena header: an
+          # object's bytes on a later page can contain either magic value.
+          large = @@large_objects
+          while large != 0_u64
+            if word >= large && word < large + read64(large + LARGE_PAGES_OFFSET) * PAGE
+              p_obj = large + LARGE_USER
+              size = read64(p_obj - 24_u64)
+              return 0_u64 if word < p_obj || word >= p_obj + size
+              mark = read64(p_obj - 8_u64)
+              return 0_u64 if mark & FREE_FLAG != 0_u64
+              return p_obj
+            end
+            large = read64(large + LARGE_LINK_OFFSET)
+          end
           magic = read64(page + 40_u64)
           if magic == IYI_ARENA
             chunk_size = read64(page + 8_u64)
@@ -10343,13 +10436,6 @@ require "./file"
             chunk_idx = (word - first).unsafe_div(chunk_size)
             head = first + chunk_idx * chunk_size
             p_obj = head + 24_u64
-            mark = read64(p_obj - 8_u64)
-            return 0_u64 if mark & FREE_FLAG != 0_u64
-            return p_obj
-          elsif magic == IYI_LARGE
-            p_obj = page + 24_u64
-            size = read64(p_obj - 24_u64)
-            return 0_u64 if word < page || word >= p_obj + size
             mark = read64(p_obj - 8_u64)
             return 0_u64 if mark & FREE_FLAG != 0_u64
             return p_obj
@@ -10412,11 +10498,28 @@ require "./file"
         def self.each_root(visit : Proc(UInt64, Nil)) : Nil
           scan_stack(visit)
           scan_globals(visit)
+          {% unless flag?(:wasi) %}
+            if first = IyiWasmFibers.first
+              fiber = first.call
+              while fiber.is_a?(IyiFiber)
+                if fiber.state != IyiFiberState::Running && fiber.state != IyiFiberState::Done && fiber.saved_sp != 0_u64
+                  scan_range(fiber.saved_sp, fiber.stack_top, visit)
+                end
+                fiber = fiber.next_fiber
+              end
+            end
+          {% end %}
         end
 
         def self.scan_stack(visit : Proc(UInt64, Nil)) : Nil
           sp = LibWasmIntrinsics.stacksave.address
           stack_base = pointerof(LibSymbols.__heap_base).address
+          {% unless flag?(:wasi) %}
+            if current = IyiWasmFibers.current
+              top = current.call.stack_top
+              stack_base = top if top != 0_u64
+            end
+          {% end %}
           scan_range(sp, stack_base, visit)
         end
 
@@ -10458,6 +10561,7 @@ require "./file"
         @@chunks_kept : UInt64 = 0_u64
         @@bytes_marked : UInt64 = 0_u64
 
+        @[UnsafeReach("the wasm collector's mark queue is accessed only on its single thread")]
         @@queue : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
         @@queue_cap : UInt64 = 0_u64
         @@queue_len : UInt64 = 0_u64
@@ -10645,7 +10749,7 @@ require "./file"
 
           large = IyiHeap.large_objects
           while large != 0_u64
-            p_obj = large + 24_u64
+            p_obj = large + IyiHeap::LARGE_USER
             mark = IyiHeap.read64(p_obj - 8_u64)
             if mark & IyiHeap::FREE_FLAG != 0_u64
               # already free
@@ -10658,7 +10762,7 @@ require "./file"
               set_colour(p_obj, WHITE)
               @@chunks_kept = @@chunks_kept + 1_u64
             end
-            large = IyiHeap.read64(large + 0_u64)
+            large = IyiHeap.read64(large + IyiHeap::LARGE_LINK_OFFSET)
           end
         end
 
@@ -12042,9 +12146,33 @@ class IyiDeferNode
   end
 end
 
+{% if flag?(:wasm32) && !flag?(:wasi) %}
+  # Installed when the first task is spawned; until then the main stack and
+  # the one defer list suffice without linking the task scheduler.
+  class IyiWasmFibers
+    @[UnsafeReach("installed by the first wasm task on the single scheduler thread")]
+    @@current : Proc(IyiFiber)? = nil
+    @[UnsafeReach("installed by the first wasm task on the single scheduler thread")]
+    @@first : Proc(IyiFiber?)? = nil
+
+    def self.current : Proc(IyiFiber)?
+      @@current
+    end
+
+    def self.first : Proc(IyiFiber?)?
+      @@first
+    end
+
+    def self.install(current : Proc(IyiFiber), first : Proc(IyiFiber?)) : Nil
+      @@current = current
+      @@first = first
+    end
+  end
+{% end %}
 {% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
   # No fibers on this target, so one global stack is exact.
   class IyiDefers
+    @[UnsafeReach("the single-threaded main defer list is handed to the first wasm fiber")]
     @@head : IyiDeferNode?
 
     def self.push(node : IyiDeferNode) : Nil
@@ -12067,17 +12195,47 @@ end
         node.run
       end
     end
+
+    {% if flag?(:wasm32) && !flag?(:wasi) %}
+      def self.take_all : IyiDeferNode?
+        head = @@head
+        @@head = nil
+        head
+      end
+    {% end %}
   end
 
   def __iyi_defer_push(cleanup : Proc(Nil)) : Nil
-    IyiDefers.push(IyiDeferNode.new(cleanup))
+    {% if flag?(:wasm32) && !flag?(:wasi) %}
+      __iyi_defer_push_node(IyiDeferNode.new(cleanup))
+    {% else %}
+      IyiDefers.push(IyiDeferNode.new(cleanup))
+    {% end %}
   end
 
   def __iyi_defer_push_node(node : IyiDeferNode) : Nil
+    {% if flag?(:wasm32) && !flag?(:wasi) %}
+      if current = IyiWasmFibers.current
+        fiber = current.call
+        node.next_node = fiber.defers
+        fiber.defers = node
+        return
+      end
+    {% end %}
     IyiDefers.push(node)
   end
 
   def __iyi_defer_pop_run : Nil
+    {% if flag?(:wasm32) && !flag?(:wasi) %}
+      if current = IyiWasmFibers.current
+        fiber = current.call
+        node = fiber.defers
+        return unless node.is_a?(IyiDeferNode)
+        fiber.defers = node.next_node
+        node.run
+        return
+      end
+    {% end %}
     IyiDefers.pop_run
   end
 
@@ -12085,6 +12243,20 @@ end
   # process (the concurrency targets' is in concurrency.iyi, and so is why
   # `__iyi_flush_std` is).
   def exit(status : Int32 = 0) : NoReturn
+    {% if flag?(:wasm32) && !flag?(:wasi) %}
+      if current = IyiWasmFibers.current
+        IyiScheduler.exiting = true
+        fiber = current.call
+        while true
+          node = fiber.defers
+          break unless node.is_a?(IyiDeferNode)
+          fiber.defers = node.next_node
+          node.run
+        end
+        __iyi_flush_std
+        __iyi_exit(status)
+      end
+    {% end %}
     IyiDefers.drain
     __iyi_flush_std
     __iyi_exit(status)
@@ -12111,6 +12283,18 @@ class IyiPanic
   # many. A program that does not import it captures nothing.
   @[UnsafeReach("set once, by std/debug's module initializer before any task starts, then only read")]
   @@capturer : Proc(Pointer(Void*), Int32, UInt64, Int32)? = nil
+  {% if flag?(:wasm32) && !flag?(:wasi) %}
+    @[UnsafeReach("installed by the first wasm task on the single scheduler thread")]
+    @@fiber_handler : Proc(String, Nil)? = nil
+
+    def self.fiber_handler=(handler : Proc(String, Nil)?) : Nil
+      @@fiber_handler = handler
+    end
+
+    def self.fiber_handler : Proc(String, Nil)?
+      @@fiber_handler
+    end
+  {% end %}
 
   def self.resolver=(r : Proc(Pointer(Void*), Int32, Nil)?) : Nil
     @@resolver = r
@@ -12233,6 +12417,13 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
   {% end %}
   {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
     IyiScheduler.panic_current(message)
+  {% elsif flag?(:wasm32) && !flag?(:wasi) %}
+    if handler = IyiPanic.fiber_handler
+      handler.call(message)
+    end
+    IyiDefers.drain
+    __iyi_flush_std
+    __iyi_exit(1)
   {% else %}
     IyiDefers.drain
     __iyi_flush_std
@@ -12940,7 +13131,7 @@ fun main(argc : Int32, argv : UInt8**) : Int32
   status
 end
 
-{% if flag?(:wasm32) %}
+{% if flag?(:wasi) %}
   # iyi: wasi-libc's `crt1-command.o` is what exports `_start`, and what it
   # calls is not `main`. Clang renames a C `main` to `__main_argc_argv` or
   # `__main_void` depending on its parameters, and the entry stub calls that
@@ -12957,5 +13148,76 @@ end
     status = IyiTestCases.verdict
     __iyi_flush_std
     status
+  end
+{% elsif flag?(:wasm32) %}
+  lib LibWasmCtors
+    fun call = __wasm_call_ctors : Void
+  end
+
+  # Each link is a scanned allocation containing the next link and an
+  # atomic payload. The head is a global root, so a host pointer remains
+  # live even when it exists only in JavaScript.
+  class IyiWasmRuntime
+    @@started = false
+    @@pins = 0_u64
+
+    def self.started? : Bool
+      @@started
+    end
+
+    def self.start_once : Bool
+      return false if @@started
+      @@started = true
+      true
+    end
+
+    def self.alloc(size : Int32) : Int32
+      return 0 if !@@started || size < 0
+      node = IyiHeap.alloc(16_u64).address
+      Pointer(UInt64).new(node).value = @@pins
+      Pointer(UInt64).new(node + 8_u64).value = 0_u64
+      @@pins = node
+      payload = IyiHeap.alloc_atomic(size.to_u64).address
+      Pointer(UInt64).new(node + 8_u64).value = payload
+      payload.unsafe_to_i32
+    end
+
+    def self.free(pointer : Int32) : Nil
+      return unless @@started
+      address = (pointer.to_i64 & 0xFFFFFFFF_i64).to_u64
+      previous = 0_u64
+      node = @@pins
+      while node != 0_u64
+        following = Pointer(UInt64).new(node).value
+        if Pointer(UInt64).new(node + 8_u64).value == address
+          if previous == 0_u64
+            @@pins = following
+          else
+            Pointer(UInt64).new(previous).value = following
+          end
+          return
+        end
+        previous = node
+        node = following
+      end
+    end
+  end
+
+  fun iyi_start : Int32
+    return -1 unless IyiWasmRuntime.start_once
+    LibWasmCtors.call
+    empty = Pointer(UInt8).new(0_u64)
+    LibIyiMain.__iyi_main(0, pointerof(empty))
+    status = IyiTestCases.verdict
+    __iyi_flush_std
+    status
+  end
+
+  fun iyi_alloc(size : Int32) : Int32
+    IyiWasmRuntime.alloc(size)
+  end
+
+  fun iyi_free(pointer : Int32) : Nil
+    IyiWasmRuntime.free(pointer)
   end
 {% end %}

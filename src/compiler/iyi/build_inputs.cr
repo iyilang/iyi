@@ -808,4 +808,19 @@ class Time::Location
   end
 end
 
+# iyi: the runtime's debug-information switch is not an input of a build either.
+# On Windows the first exception a process raises, one the compiler rescues as
+# well, loads the debug information before it can walk the stack, and that load
+# reads `CRYSTAL_LOAD_DEBUG_INFO` once. A cold build raises one before the key is
+# taken (the first link of a macro helper) and a warm build does not (the helper
+# is cached), so the cold build had the variable among the compiler's reads and
+# the warm one did not: `cenv` differed, and a test with a macro `run` recorded
+# cold never hit (bench/stale_win_probe_rows.py, rows 50 and 55: "dump counted
+# differs from the build before: CRYSTAL_LOAD_DEBUG_INFO").
+struct Exception::CallStack
+  def self.load_debug_info : Nil
+    Iyi::BuildInputs.paused { previous_def }
+  end
+end
+
 require "./stale/inputs_file"

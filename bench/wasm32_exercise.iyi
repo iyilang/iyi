@@ -9,6 +9,7 @@
 # 6. Weak references: a held target answered, one nothing holds cleared by
 #    the collection, before its memory is reused.
 # 7. Objects held by locals alone survive, in plain and optimised builds.
+# 8. Large-object header integrity, interior roots and reclamation.
 
 @[Unsafe("it keeps allocations' addresses in a raw buffer of words from IyiHeap.alloc_atomic, which the collector does not scan")]
 import std/weak_ref::{WeakRef}
@@ -461,5 +462,95 @@ end
 unions = sum_either(either(Program.args.size + 30), either_after_collection(Program.args.size + 12))
 raise "locals: two unions as a call's arguments added to #{unions}, not 42" unless unions == 42
 puts "locals: a top-level array, an array in a function, a call's arguments, a chain, a union and unions as arguments held across a collection"
+
+# === 8. Large objects ===
+puts "== large objects =="
+
+LARGE_STRING_BYTES    =   1_048_592
+LARGE_INTERIOR_BYTES  = 200_000_u64
+LARGE_INTERIOR_OFFSET = 131_200_u64
+
+def large_string(seed : Int32) : String
+  String.new(LARGE_STRING_BYTES) do |buffer|
+    index = 0
+    while index < LARGE_STRING_BYTES
+      (buffer + index.to_i64).value = ((index + seed) % 251).to_u8
+      index = index + 1
+    end
+    nil
+  end
+end
+
+# The caller receives only the interior pointer. The frame holding the
+# allocation's base is scrubbed before collection.
+@[NoInline]
+def make_large_interior : Pointer(UInt8)
+  base = IyiHeap.alloc_atomic(LARGE_INTERIOR_BYTES).as(Pointer(UInt8))
+  # A later page's bytes can look like either kind of arena header.
+  IyiHeap.write64(base.address + 65_504_u64, IyiHeap::IYI_LARGE)
+  IyiHeap.write64(base.address + 131_040_u64, IyiHeap::IYI_ARENA)
+  inside = base + LARGE_INTERIOR_OFFSET.to_i64
+  inside.value = 0xa5_u8
+  inside
+end
+
+@[NoInline]
+def check_large_interior : Nil
+  inside = make_large_interior
+  collect_clean
+  raise "large: the interior byte changed" unless inside.value == 0xa5_u8
+  base = IyiHeap.base_of(inside.address)
+  raise "large: the interior root was collected" if base == 0_u64
+  raise "large: incorrect object size" unless IyiHeap.size_of(base) == LARGE_INTERIOR_BYTES
+  arena = base - IyiHeap::LARGE_USER
+  pages = (LARGE_INTERIOR_BYTES + IyiHeap::LARGE_OVERHEAD + IyiHeap::PAGE - 1_u64).unsafe_div(IyiHeap::PAGE)
+  raise "large: arena size header was overwritten" unless IyiHeap.read64(arena + IyiHeap::LARGE_SIZE_OFFSET) == LARGE_INTERIOR_BYTES
+  raise "large: arena page header was overwritten" unless IyiHeap.read64(arena + IyiHeap::LARGE_PAGES_OFFSET) == pages
+  raise "large: first page did not resolve" unless IyiHeap.base_of(base) == base
+  raise "large: second page did not resolve" unless IyiHeap.base_of(base + 65_536_u64) == base
+  raise "large: last byte did not resolve" unless IyiHeap.base_of(base + LARGE_INTERIOR_BYTES - 1_u64) == base
+  raise "large: header resolved as payload" unless IyiHeap.base_of(base - 1_u64) == 0_u64
+  raise "large: trailing padding resolved as payload" unless IyiHeap.base_of(base + LARGE_INTERIOR_BYTES) == 0_u64
+  DecoyHolder.set(base)
+end
+
+@[NoInline]
+def verify_large_reclaimed : Nil
+  freed_large = DecoyHolder.get
+  raise "large: the interior-only object was not swept" if IyiHeap.read64(freed_large - 8_u64) & IyiHeap::FREE_FLAG == 0_u64
+  raise "large: the interior-only object's bytes were not counted as freed" if IyiMark.bytes_freed < LARGE_INTERIOR_BYTES
+  raise "large: a freed object still resolves" unless IyiHeap.base_of(freed_large) == 0_u64
+end
+
+check_large_interior
+collect_clean
+verify_large_reclaimed
+
+large_strings = [] of String
+12.times do |seed|
+  large_strings << large_string(seed)
+  collect_clean
+end
+large_strings.each_with_index do |value, seed|
+  raise "large: string #{seed} has the wrong size" unless value.bytesize == LARGE_STRING_BYTES
+  index = 0
+  while index < LARGE_STRING_BYTES
+    raise "large: string #{seed} byte #{index} changed" unless value.byte_at(index) == ((index + seed) % 251).to_u8
+    index = index + 1
+  end
+end
+
+held_large_weak = WeakRef.new(large_strings[0])
+collect_clean
+raise "large: held weak target disappeared" if held_large_weak.value.nil?
+
+large_buf = Pointer(UInt8).malloc(200_000_u64)
+large_buf[0] = 0x2a_u8
+large_buf[199_999] = 0x7d_u8
+large_grown = large_buf.realloc(300_000_u64)
+raise "large: realloc changed its first byte" unless large_grown[0] == 0x2a_u8
+raise "large: realloc changed its last byte" unless large_grown[199_999] == 0x7d_u8
+
+puts "large: 12 strings of 1048592 bytes survived collections; interior root, sweep, weak cells and realloc hold"
 
 puts "all wasm32 collector checks passed"

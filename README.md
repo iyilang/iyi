@@ -24,7 +24,7 @@ interface without a repository, and a person waits less.
 |---|---|
 | **Developer experience** | edit one module in a 7,207-line project and rebuild: **0.13 s**, against Crystal's 1.17 s and `go build`'s 0.16 s |
 | **Agentic experience** | `iyi mod context` hands an edit the exact surface of every import at **52–59%** of the sources' size, and a model writing against it spent **31–43% fewer prompt tokens** (`bench/context_pack.py`, AI_FIRST.md §5) |
-| **Portability** | an iyi program compiles for **nine targets** and is **run** on five of them every build: x86-64 glibc, x86-64 musl, aarch64 under emulation, wasm32-wasi under wasmtime, and aarch64-darwin natively |
+| **Portability** | an iyi program compiles for **ten targets**; CI runs x86-64 glibc, x86-64 musl, aarch64 under emulation, wasm32-wasi under wasmtime, freestanding wasm in Node and Chrome, and aarch64-darwin natively |
 | **Performance** | native code through LLVM, and a front end that answers `hello` in **0.034 s**. At run time, within noise of Crystal's library wherever both do the same work |
 | **Efficiency** | that `hello` is a **36 KB** binary that starts in **1.6 ms**; the same program with Crystal's library is 1,553 KB and 3.2 ms |
 
@@ -281,13 +281,13 @@ The token figures are the model's, over the runs written up in AI_FIRST.md §5:
 31–43% fewer prompt tokens, with rounds to green tied three times and lost
 three.
 
-**Portability — compiles for nine, runs on five.** CI type-checks the library
-for all nine targets every build, runs a program on five and compares what it
-prints with what it printed on the machine that compiled it. Windows x86-64 is
-not one of the five, but it is built and tested natively: eight CI jobs run on
-Windows, and a failure in any of them stops a release. On Linux,
-`iyi build --static` gives a binary with no dynamic loader at all.
-[INSTALL.md](INSTALL.md#targets) lists the nine and what each is held to.
+**Portability: ten compilation targets.** CI type-checks Crystal's library for
+nine targets and audits iyi's own prelude for eight, including freestanding
+wasm. It also runs programs on six target configurations, comparing their
+output with the native build. Windows x86-64 is built and tested natively:
+eight CI jobs run on Windows, and a failure in any of them stops a release.
+On Linux, `iyi build --static` gives a binary with no dynamic loader.
+[INSTALL.md](INSTALL.md#targets) lists the targets and their checks.
 
 **Performance.** Native code through LLVM. At run time iyi's library is within
 noise of Crystal's where the two do the same work, ahead on `Hash` and behind
@@ -302,8 +302,8 @@ published list requires, a plain build with iyi's own prelude links the
 platform's C library and nothing else: no libgc, no libevent, no openssl, no
 zlib ([INSTALL.md](INSTALL.md#what-a-program-depends-on) has each platform). A
 program links only what it uses, and
-iyi's own library is 36,598 lines, written to be linked that way. That
-library is 1,550 KB on disk beside the binary.
+iyi's own library is 36,763 lines, written to be linked that way. That
+library is 1,556 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build` on macOS arm64 with LLVM 22,
 and move with the platform; `python3 bench/machine_probe.py` prints your
@@ -558,7 +558,7 @@ $ curl localhost:3000/json
 traits, `impl … forall`, error unions and `!`, `.or`, `or_panic`, `defer` — all
 of them work in a program that requires a shard, and R-2 still refuses an
 export that does not write its types. What changes is what the program *has*:
-Crystal's standard library instead of 36,598 lines of iyi's own prelude.
+Crystal's standard library instead of 36,763 lines of iyi's own prelude.
 
 **One class of names is unreachable.** `!` in iyi propagates an error, so a
 method whose name ends in one cannot be called from a `.iyi` file. Crystal's
@@ -630,14 +630,14 @@ not the library.
 
 ## What is not here
 
-- **iyi's own library is 36,598 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 36,763 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`.** `gets`, `read_all`, `write` and `flush`
   on the streams; `File.read`, `File.write`, `File.exists?`, `File.delete`
   and `File.open(path, mode)`. Its collections carry a method because a
   program in this repository needed it, so much of what you reach for is in
   `src/std/` instead (`std/enumerable` as trait defaults) or under `--crystal`.
-- **wasm32 has no concurrency runtime.** A `group` there fails to compile
-  rather than run sequentially.
+- **wasm32 has no concurrency runtime.** `group` and `sleep` fail to compile
+  on WASI and freestanding wasm rather than run sequentially.
 - **Only the threads and parallel tasks are gated by `Share`.** A block passed
   to `IyiThread.start`, `spawn(unit: :new)` or a def marked `@[Share]` (std/http's
   `Server.serve`, unless given `workers: 1`) may capture only `Share` values;
@@ -666,7 +666,7 @@ not the library.
 | [BENCHMARKS.md](BENCHMARKS.md) | the build, run-time and server measurements, with their machines and commands |
 | [`samples/iyi`](samples/iyi) | twenty-eight programs: twenty documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 36,598 lines. `--crystal` swaps it for Crystal's |
+| [`src/iyi`](src/iyi) | iyi's own library, 36,763 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, and not counted against the prelude's size limit (SPEC.md I.4) |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/`](bench/) | every script a number in these documents names |

@@ -135,7 +135,24 @@
   declarations and JSON to match the hosted reader's, and 11 damaged
   artifacts to be refused with the same verdict, and catches 16 broken
   copies.
-- These six gates run in the same three jobs through
+- **The macro engine and syntax normalizer in iyi: `src/compiler/macros/`
+  and `src/compiler/semantic/normalizer.iyi` (#210).** 3,285 lines of iyi
+  parse and expand macros, with a 384-line table of the macro methods the
+  hosted compiler answers (`answers.iyi`, generated from its source and
+  checked by `bench/macro_method_table.py`), and 780 lower `unless`,
+  `until`, operator assignment, interpolation, chained comparisons, `defer`,
+  `recover` and the rest to the hosted front end's trees.
+  `bench/selfhost_macros_exercise.sh` requires 61 fixtures' expansions (279
+  sites) to print byte for byte as the hosted compiler does, 2 refusals by
+  name, 31 file-method and env cases to match the hosted confinement rule
+  (2 more differ by design), and `bench/macro_sites.py`'s census of the
+  prelude and the port's own source to find at least the
+  `bench/macro_sites.floor` count of identical sites (150 of 165 today, the
+  floor 70), and catches 53 broken copies.
+  `bench/selfhost_normalizer_exercise.sh` requires 11 fixtures (620 nodes)
+  to normalise as the front end does and catches 8. Hosted commands are
+  unchanged.
+- These eight gates run in the same three jobs through
   `bench/selfhost_gates.sh`; `bench/native_elf_run.sh` runs in
   `selfhost-linux-arm64`.
 - **AArch64 code generation and register allocation in iyi:
@@ -202,6 +219,24 @@
   stderr; the address fixture must change its addresses between runs); and
   catches 4 broken copies. AArch64 execution reports as host-limited on the
   current runners.
+- **A freestanding wasm32 target, `wasm32-unknown-unknown`, and its host
+  loader (#199).** A program builds to a WebAssembly module with no libc and
+  no WASI: `wasm-ld --no-entry` links it, and the only imports are the five
+  host calls of module `iyi` (`write`, `read`, `exit`, `clock_ns`,
+  `random`) that the program reaches. It exports `memory`, a one-shot
+  `iyi_start`, and `iyi_alloc`/`iyi_free` for buffers pinned across
+  collections. The installed `share/iyi/src/iyi/wasm/iyi.mjs` instantiates
+  it in Node or a browser, refuses user imports in the reserved `iyi`
+  module and reads the host's cryptographic random source. Files are
+  refused by name, the environment is empty, and `group`, `sleep` and
+  `-Diyi_chaos` are compile errors, as on WASI. SPEC.md III.12.1 is the
+  contract. `bench/wasm_freestanding_exercise.sh` builds `hello`, `format`
+  and `io` natively and for the target, requires the same output in Node
+  and in isolated headless Chrome, runs the contract in both, and catches 5
+  broken copies; the `wasm-freestanding` job runs it and gates a release.
+  `bench/dependency_floor.sh` allows exactly `@[Link(wasm_import_module:
+  "iyi")]` and checks that another host module is refused, and the object
+  audit reads eight targets.
 
 ### Changed
 
@@ -442,6 +477,20 @@
   has to refuse the frame with its sentence.
 
 ### Fixed
+
+- **wasm32 large objects keep their arena header (#198).** A large
+  object's three header words were written over its arena's link, size and
+  page count, so a sweep could follow a payload size as a pointer, and a
+  pointer into any page after the first did not resolve to its object. The
+  object header now follows the arena header (the payload begins at offset
+  72), and an interior pointer resolves through the large-object list
+  before a page's bytes are read as an arena header. `bench/wasm32_exercise.sh`
+  holds twelve 1,048,592-byte strings across collections and an object
+  reached only through a pointer into its third page, and catches the
+  overlapping header and a first-page-only lookup. Native targets are
+  unchanged: the code is the wasm32 collector's. A swept large object's
+  pages are still not reused, so linear memory grows with each large
+  allocation.
 
 - **`iyi test` on a package with a dependency builds in a cold module
   cache (#246).** Its builds run at once (`-p`, six on twelve cores), and
@@ -29981,7 +30030,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 36,598-line library and nothing else. Every other
+  written against iyi's own 36,763-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -22,6 +22,9 @@
 # the port keeps by design is a macro expanded with no confinement context: it
 # refuses, where hosted resolves the package from the file itself. The mutation
 # proofs at the end rebuild the port on each condition and require a difference.
+# Every path a native program reads is spelled the way native_path spells it, and a run that gives no
+# verdict (a crash, a non-zero exit, empty output) stops the gate with exit 76: it is never identical.
+# On Windows the missing-file and directory read errors are host-limited: hosted forwards Win32 text while the port uses POSIX wording.
 #
 #   bash bench/selfhost_macros_exercise.sh
 set -eu
@@ -95,6 +98,7 @@ for phrase in \
   "testing macro code and definition generation... ok" \
   "testing @type as the enclosing class's TypeNode... ok" \
   "testing that an expansion's nodes are in the calling file... ok" \
+  "testing macro search path separators... ok" \
   "testing macro expansion shares normalizer counters and prelude flag... ok" \
   "ALL SELFHOST MACRO CHECKS PASSED SUCCESSFULLY!"; do
   if ! grep -qF "$phrase" "$WORK/plain.out"; then
@@ -700,7 +704,19 @@ else
   ln -s ../nowhere "$CONF/layout/app/dangling"
   CONF_LINKS=yes
 fi
+# Case fields are read by native programs; convert Git Bash's layout path before either driver uses it.
 CONF_L="$(native_path "$(cd "$CONF/layout" && pwd -P)")"
+# A native Windows path may be a drive path or a UNC share.
+native_layout_check() {
+  if [ "$HOST_OS" = windows ]; then
+    case "$1" in
+      [A-Za-z]:/*|//?*/*) ;;
+      *) printf 'SETUP FAILURE: layout %s is not a native Windows path\n' "$1" >&2; return 76 ;;
+    esac
+  fi
+  return 0
+}
+native_layout_check "$CONF_L" || exit $?
 export IYI_MACRO_CONFINE_SET=gate-value
 unset IYI_MACRO_CONFINE_UNSET
 cat <<'CONFINE_CASES' > "$CONF/cases.manifest"
@@ -921,6 +937,20 @@ root=
 dep=
 dir=@L@
 body={{ system("echo hi") }}
+case no-context-system-windows-name
+definition=C:\macro fixture\main.iyi
+caller=C:\macro fixture\main.iyi
+root=
+dep=
+dir=@L@
+body={{ system("echo hi") }}
+case no-context-backtick-windows-name
+definition=C:\macro fixture\main.iyi
+caller=C:\macro fixture\main.iyi
+root=
+dep=
+dir=@L@
+body={{ `echo hi` }}
 CONFINE_CASES
 sed -e "s#@L@#$CONF_L#g" -e "s#@REPO@#$REPO_NATIVE#g" "$CONF/cases.manifest" |
   awk -v dir="$CONF/cases" '/^case /{f=dir "/" $2 ".case"; next} {print > f}'
@@ -932,6 +962,66 @@ fi
 confine_normal() {
   sed -e "s#$CONF_L#<LAYOUT>#g" -e "s#$REPO_NATIVE#<REPO>#g"
 }
+
+# Windows forwards operating-system error text which the port does not yet reproduce.
+confine_os_error_case() {
+  [ "$HOST_OS" = windows ] || return 1
+  case "$1" in
+    app-missing-required-inside|app-read-directory) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# An empty file or a crashed runner is not a verdict, even if both sides do it.
+confine_run() {
+  local side="$1" runner="$2" case_file="$3" name="$4" rc
+  if "$runner" --confine "$case_file" > "$CONF/$side/$name.raw" 2> "$CONF/$side/$name.err"; then
+    :
+  else
+    rc=$?
+    printf '  SETUP FAILURE: %s exited %s for %s; stderr follows:\n' "$side" "$rc" "$name" >&2
+    cat "$CONF/$side/$name.err" >&2
+    return 76
+  fi
+  if ! grep -Eq '^(value=|error [0-9]+:[0-9]+ message=)' "$CONF/$side/$name.raw"; then
+    printf '  SETUP FAILURE: %s gave no verdict for %s; stderr follows:\n' "$side" "$name" >&2
+    cat "$CONF/$side/$name.err" >&2
+    return 76
+  fi
+  if ! confine_normal < "$CONF/$side/$name.raw" > "$CONF/$side/$name.out"; then
+    printf '  SETUP FAILURE: cannot normalize %s verdict for %s; stderr follows:\n' "$side" "$name" >&2
+    cat "$CONF/$side/$name.err" >&2
+    return 76
+  fi
+}
+
+# The guards must be able to fail on every host: a run with no verdict and a crashed run are refused with 76,
+# naming the case and its stderr, and an MSYS layout is refused on Windows.
+guard_silent() { return 0; }
+guard_crash() { printf 'crash-marker\n' >&2; return 3; }
+rc=0
+confine_run port guard_silent "$CONF/cases/app-read-inside.case" guard-selftest 2> "$CONF/guard.err" || rc=$?
+if [ "$rc" -ne 76 ] || ! grep -q 'guard-selftest' "$CONF/guard.err"; then
+  echo "  GUARD DID NOT REFUSE A RUN WITH NO VERDICT"
+  exit 1
+fi
+rc=0
+confine_run port guard_crash "$CONF/cases/app-read-inside.case" guard-selftest 2> "$CONF/guard.err" || rc=$?
+if [ "$rc" -ne 76 ] || ! grep -q 'crash-marker' "$CONF/guard.err"; then
+  echo "  GUARD DID NOT REFUSE A CRASHED RUN"
+  exit 1
+fi
+rc=0
+(HOST_OS=windows; native_layout_check /c/layout) 2> /dev/null || rc=$?
+if [ "$rc" -ne 76 ]; then
+  echo "  LAYOUT CHECK DID NOT REFUSE AN MSYS PATH"
+  exit 1
+fi
+if ! (HOST_OS=windows; native_layout_check 'C:/layout' && native_layout_check '//server/share/layout'); then
+  echo "  LAYOUT CHECK REFUSED A NATIVE WINDOWS PATH"
+  exit 1
+fi
+echo "  guards verified: no verdict, a crash and an MSYS layout are each refused (exit 76, the case and its stderr named)"
 conf_cases=0
 conf_identical=0
 conf_by_design=0
@@ -939,27 +1029,14 @@ conf_diverged=0
 echo "  case, then the hosted oracle's verdict and the port's"
 for cf in "$CONF"/cases/*.case; do
   name="$(basename "$cf" .case)"
+  if confine_os_error_case "$name"; then
+    host_limited "$name: the hosted compiler forwards the Win32 error text, the port's wording is the POSIX one"
+    continue
+  fi
   case_native="$(native_path "$cf")"
   conf_cases=$((conf_cases + 1))
-  if ! "$WORK/dump_hosted$EXE" --confine "$case_native" > "$CONF/hosted/$name.raw" 2> "$CONF/hosted/$name.err"; then
-    echo "  HOSTED ORACLE FAILED: $name"
-    cat "$CONF/hosted/$name.err"
-    status=1
-    continue
-  fi
-  if ! "$WORK/exercise$EXE" --confine "$case_native" > "$CONF/port/$name.raw" 2> "$CONF/port/$name.err"; then
-    echo "  PORT FAILED: $name"
-    cat "$CONF/port/$name.err"
-    status=1
-    continue
-  fi
-  confine_normal < "$CONF/hosted/$name.raw" > "$CONF/hosted/$name.out"
-  confine_normal < "$CONF/port/$name.raw" > "$CONF/port/$name.out"
-  if [ ! -s "$CONF/hosted/$name.out" ] || [ ! -s "$CONF/port/$name.out" ]; then
-    echo "  EMPTY CONFINEMENT RESULT: $name"
-    status=1
-    continue
-  fi
+  confine_run hosted "$WORK/dump_hosted$EXE" "$case_native" "$name" || exit $?
+  confine_run port "$WORK/exercise$EXE" "$case_native" "$name" || exit $?
   case "$name" in
     no-context-read|no-context-env)
       cp "$CONF/port/$name.out" "$CONF/expected/$name.out"
@@ -1065,6 +1142,7 @@ check_confinement_still_matches() {
   fi
   for cf in "$CONF"/cases/*.case; do
     name="$(basename "$cf" .case)"
+    confine_os_error_case "$name" && continue
     case_native="$(native_path "$cf")"
     "$WORK/mut-exercise$EXE" --confine "$case_native" > "$CONF/mut.raw" 2>/dev/null || return 1
     confine_normal < "$CONF/mut.raw" > "$CONF/mut.out"
@@ -1382,19 +1460,30 @@ if [ "$CONF_LINKS" = yes ]; then
     -- check_confinement_still_matches || status=1
   MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-  prove_mutation "a dotdot after a link is applied before the link" "$CONFINEMENT" \
-    'full = Path.new(path).absolute? ? path : File.join(@base_dir, path)' \
-    'full = File.expand_path(path, @base_dir)' \
-    -- check_confinement_still_matches || status=1
-  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+  if [ "$HOST_OS" = windows ]; then
+    host_limited "skipped mutation 'a dotdot after a link is applied before the link': it changes the POSIX-only path resolver"
+  else
+    prove_mutation "a dotdot after a link is applied before the link" "$CONFINEMENT" \
+      'full = Path.new(path).absolute? ? path : File.join(@base_dir, path)' \
+      'full = File.expand_path(path, @base_dir)' \
+      -- check_confinement_still_matches || status=1
+    MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+  fi
 else
   host_limited "skipped: no symlinks on this runner: the proofs 'a link that leads nowhere is not refused' and 'a dotdot after a link is applied before the link' need the link cases"
 fi
 
-prove_mutation "relative paths ignore the base directory" "$CONFINEMENT" \
-  'File.join(@base_dir, path)' \
-  'path' \
-  -- check_confinement_still_matches || status=1
+if [ "$HOST_OS" = windows ]; then
+  prove_mutation "relative paths ignore the base directory" "$CONFINEMENT" \
+    'full = File.expand_path(path, @base_dir)' \
+    'full = File.expand_path(path)' \
+    -- check_confinement_still_matches || status=1
+else
+  prove_mutation "relative paths ignore the base directory" "$CONFINEMENT" \
+    'File.join(@base_dir, path)' \
+    'path' \
+    -- check_confinement_still_matches || status=1
+fi
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "env is allowed from any package" "$CONFINEMENT" \

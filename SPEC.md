@@ -63,11 +63,11 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 36,598 lines, of which 4,785 are the library held to the 4,785 ceiling (7,293 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| hosted compiler | 143,046 lines of Crystal |
+| iyi's own prelude | 36,763 lines, of which 4,785 are the library held to the 4,785 ceiling (7,444 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| hosted compiler | 143,051 lines of Crystal |
 | artifact format | `.iyimod` v65, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
-| what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
+| what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets on which Crystal's library is type-checked, eight whose own-prelude emitted objects are audited for undefined symbols, the tarball |
 
 `python3 bench/incremental.py` and `python3 bench/build_speed.py` print the
 first four rows and refuse to time programs that do not agree on their output.
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 36,598 lines
+> "No standard library worth the name" is still true of iyi's own 36,763 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 36,598 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 36,763 lines,
 primitives included, of which the library is 4,785.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -304,9 +304,9 @@ the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
 **4,785 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 2,508 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 2,659 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 7,293 with the floor
+below settles and explains. Opening `src/iyi/` counts 7,444 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -427,7 +427,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason — the platform floor measures **2,508 lines**
+exists for the same reason — the platform floor measures **2,659 lines**
 today (1,871 of the 4,803 that day), and Windows is the largest arm of it
 by a wide margin, which is what a platform whose every path, console byte
 and integer division needs its own answer costs.
@@ -1084,8 +1084,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 143,046 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 36,598-line own prelude + 128,696 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 143,051 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 36,763-line own prelude + 128,713 in std |
 | Specs | 21,146 lines | 17,706 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -9305,11 +9305,12 @@ which is the program that calls its module's surface, and reads its symbols
 and libraries into the same two sets. That leaves the case a measurement
 cannot reach: a `@[Link]` sitting in the library against the day somebody
 calls it, which is the shape a link line grows in. So the annotations are
-also read as text, across `src/iyi` and `src/std`, and the list is the three
-the library has reasons for — `kernel32` and the MSVC runtime on Windows,
-and `bdw-gc` for the opt-in collector, which on Windows also names its
-`gc.dll` so that the compiler copies it beside the program. A fourth fails
-the gate, whether or not any program reaches it.
+also read as text across `src/iyi` and `src/std`. The allowlist names each
+platform binding exactly: Windows system libraries, darwin's trust-store
+frameworks, and `bdw-gc` for the opt-in collector. The freestanding wasm host
+uses `@[Link(wasm_import_module: "iyi")]` for III.12.1's host calls; it adds
+no native library or WASI dependency. Another module name fails the gate even
+when no program reaches it.
 
 **The five on Linux are allowed by exact name.** `__libc_start_main`,
 `__gmon_start__`, `__cxa_finalize` and the two weak `_ITM_` clone-table
@@ -9391,7 +9392,7 @@ builds against would buy nothing and cost the teeth.
 
 **And the two audits do not cover the same platforms**, which is worth naming
 because musl is one of them. Nine targets are type-checked for the library, and
-the seven the object-layer audit reads are not a subset of the same list:
+the eight the object-layer audit reads are not a subset of the same list:
 `x86_64-linux-musl` and `arm-linux-gnueabihf` type-check and are never audited.
 So the object claim above is measured on glibc and wasm and Windows, and on
 musl it is type-checked only. `x86_64-w64-mingw32` and `x86_64-windows-gnu`
@@ -9538,6 +9539,54 @@ capability system. When the wasm32 arm grows real IO it will grow it
 through WASI's preopens, and this section is where that negotiation gets
 designed before it gets built.
 
+#### III.12.1 The freestanding wasm32 target: the host contract
+
+`wasm32-unknown-unknown` is a freestanding WebAssembly module. Its flags are
+`wasm32`, `unknown` and `bits32`, without `wasi` or `unix`. The link command
+uses `wasm-ld --no-entry` and carries no libc, WASI runtime, startup object or
+compiler-rt. Only referenced host functions are imported, all from module
+`iyi`:
+
+| Import | Contract |
+| --- | --- |
+| `write(fd: i32, ptr: i32, len: i32) -> i32` | Write bytes to fd 1 (stdout) or 2 (stderr); return the count or -1. |
+| `read(fd: i32, ptr: i32, len: i32) -> i32` | Read fd 0 (stdin); return the count, 0 at end of input, or -1 on error. |
+| `exit(code: i32)` | Stop execution without returning. |
+| `clock_ns(clock: i32) -> i64` | Clock 0 is nanoseconds since the Unix epoch; clock 1 is monotonic nanoseconds. |
+| `random(ptr: i32, len: i32) -> i32` | Fill bytes from a cryptographically secure source; return 0 or -1 on error. |
+
+The module exports `memory`, `iyi_start() -> i32`, `iyi_alloc(size: i32) ->
+i32`, and `iyi_free(ptr: i32)`. The host calls `iyi_start` before any other
+export. It runs initialization and top-level code once, with argc 0 and an
+empty argv, flushes the standard streams and returns the program's status.
+Another call returns -1 and runs nothing. `iyi_alloc` returns an 8-aligned
+atomic byte buffer pinned across collections; `iyi_free` unpins it. Unknown
+and repeated pointers are ignored. Linear memory can grow on any call, so
+the host takes a fresh view after each call.
+
+The prefixes `iyi_` and `__` are reserved. A module may declare additional
+host functions with `@[Link(wasm_import_module: "name")]`, and top-level
+`fun` declarations are exports. Boundary values are `Int32`, `Int64`,
+`Float64` and pointers; JavaScript represents `Int64` as `BigInt` and
+pointers as 32-bit offsets. A module that uses these raw operations carries
+`@[Unsafe("reason")]` first, as III.13 requires.
+
+The installed `src/iyi/wasm/iyi.mjs` exports `instantiate` and `IyiExit`.
+It accepts bytes, a `Response`, a promise of one, or a compiled module; user
+imports occupy modules other than the reserved `iyi`. Options provide byte
+callbacks for stdout and stderr, a stdin supplier, and whether to start
+immediately. Its returned object exposes the instance, module, exports,
+memory, `start`, `alloc`, `free`, `put`, `bytes`, `string`, and `call`.
+`start` returns an exit status; a host `exit` raises `IyiExit` with `code`.
+The loader uses the host's cryptographic random source and never substitutes
+guessable bytes.
+
+File operations have no filesystem, environment reads are empty and there is
+no current directory. `group`, `sleep` and `-Diyi_chaos` are compile errors
+on this target until it has a scheduler. `bench/wasm_freestanding_exercise.sh`
+runs the contract in Node and isolated headless Chrome and compares the
+sample programs with native output.
+
 ### III.13 Unsafe code: **BUILT — a module that handles raw memory says so with `@[Unsafe("why")]` above its header, and the typed check refuses every unchecked operation anywhere else; held by `bench/unsafe.sh`**
 
 Before this, nothing decided who could use `Pointer`. A string's
@@ -9665,7 +9714,7 @@ it in pieces, allocating nothing.
 point; four of them (box, deque, static_array, weak_ref) are marked by
 hand outright, since only a program that instantiates their generic
 bodies types them and `iyi fix src/std` cannot see them. bench has
-98 marked programs of 213, and none of `samples/iyi`'s 28 programs
+99 marked programs of 214, and none of `samples/iyi`'s 28 programs
 needs one. The specs' snippets whose stand-in for the prelude or std (a
 `@[Primitive]`, a `lib`, a `Pointer` field, a `@[Share]` type,
 `uninitialized` storage) sits in the compiled module are marked as the
@@ -9693,7 +9742,7 @@ module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
 and a mark per declaration 1,535, 469 and 258 defs, against 85, 15 and
-98 module marks.
+99 module marks.
 
 ---
 
@@ -13745,18 +13794,16 @@ Named honestly, so nobody mistakes this draft for complete.
     finished work, but by asking whether a library that every build reads from
     source has to be.
 
-12c. **Portability, moved from compiled to run.** An iyi program produced code
-    for nine targets and was tested on one, which is the weakest kind of
-    portability claim: the code generator not objecting. Four of the nine now
-    run in CI every build — x86-64 glibc natively, x86-64 musl in an Alpine
-    container, aarch64 under emulation, and wasm32-wasi under wasmtime — and
-    the check is that each prints what the same program printed on the machine
-    that compiled it.
+12c. **Portability, moved from compiled to run.** An iyi program compiles
+    for ten targets; initially it was tested on one. Six of the ten now
+    run in CI: x86-64 glibc natively, x86-64 musl in an Alpine container,
+    aarch64 under emulation, wasm32-wasi under wasmtime, freestanding wasm in
+    Node and headless Chrome, and aarch64-darwin natively. The wasm checks
+    compare output with the same program's native output.
 
-    What makes it cheap is the same thing that makes an artifact linkable: the
-    object is produced here and linked there with the target's own `cc` and
-    `libgc`, which is the command `--cross-compile` already prints. An iyi
-    program needs no more of a target than a C toolchain and a collector.
+    A cross-compile emits the object and prints its link command. Native targets
+    use their platform toolchain, WASI uses its C driver, and freestanding wasm
+    uses `wasm-ld`. The default collector is part of iyi's runtime.
 
     **Windows cost more than that, and what it cost is a lesson about the
     audit.** A Windows runner has the linker and the runtime this workflow was
@@ -13983,7 +14030,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 36,598-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 36,763-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

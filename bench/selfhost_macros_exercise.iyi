@@ -545,14 +545,28 @@ emit_defer_and_chain
     puts "ok"
   end
 
-  # The search path the compiler reads from IYI_PATH, split as the compiler splits it.
+  # IYI_PATH is split as the hosted compiler splits it (iyi_path.cr): on `;` on
+  # Windows, where a drive's colon belongs to the path.
+  def self.split_search_path(raw : String, windows : Bool) : Array(String)
+    windows ? raw.split(';') : raw.split(':')
+  end
+
   def self.search_path_from_env : Array(String)
     raw = ENV["IYI_PATH"]? || ""
     {% if flag?(:win32) %}
-      raw.split(';')
+      split_search_path(raw, true)
     {% else %}
-      raw.split(':')
+      split_search_path(raw, false)
     {% end %}
+  end
+
+  def self.test_search_path : Nil
+    print "testing macro search path separators... "
+    windows = split_search_path("C:/iyi/src;D:/vendor/src", true)
+    assert(windows.size == 2 && windows[0] == "C:/iyi/src" && windows[1] == "D:/vendor/src", "Windows drive letters stay in search paths")
+    posix = split_search_path("/iyi/src:/vendor/src", false)
+    assert(posix.size == 2 && posix[0] == "/iyi/src" && posix[1] == "/vendor/src", "POSIX search paths split on colons")
+    puts "ok"
   end
 
   # The confinement a fixture is expanded under: the fixture's own directory is
@@ -614,6 +628,7 @@ emit_defer_and_chain
     test_type_node
     test_site_path_lookup
     test_expansion_file
+    test_search_path
     test_shared_normalizer
     puts "============================================================="
     puts "ALL SELFHOST MACRO CHECKS PASSED SUCCESSFULLY!"

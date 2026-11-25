@@ -1,0 +1,433 @@
+module compiler/ir/opt/inline
+
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, Block, Attribute, CallAux, AsmAux, IntrinsicAux}
+import compiler/ir/function::{Function, Linkage}
+import compiler/ir/module::{Module}
+import compiler/ir/intrinsics::{IntrinsicId}
+import compiler/ir/opt/analysis::{Cfg, DomTree, LoopInfo}
+import compiler/ir/opt/callgraph::{CallGraph}
+import compiler/ir/opt/effects::{runtime_entry?}
+import compiler/ir/opt/edit::{new_inst, new_phi}
+
+pub class InlineBudget
+  getter limit : Int32
+  property used : Int32
+
+  def initialize(mod : Module)
+    total = 0
+    mod.functions.each do |fn|
+      fn.blocks.each { |block| total = total + block.insts.size }
+    end
+    @used = total
+    @limit = total + total // 2
+  end
+end
+
+def has_attr?(attrs : Array(Attribute), name : String) : Bool
+  attrs.any? { |attr| attr.name == name }
+end
+
+def tls_value?(value : Value) : Bool
+  return false unless value.is_a?(Inst)
+  op = value.as(Inst).op
+  op == Op::ThreadLocalAddr || op == Op::ThreadPointer
+end
+
+def restricted_params?(attrs : Array(Array(Attribute))) : Bool
+  attrs.any? { |row| has_attr?(row, "byval") || has_attr?(row, "sret") }
+end
+
+def returns_twice_call?(inst : Inst) : Bool
+  return false unless inst.op == Op::Call || inst.op == Op::Invoke
+  if inst.aux.is_a?(CallAux)
+    return true if has_attr?(inst.aux.as(CallAux).fn_attrs, "returns_twice")
+  end
+  return false if inst.args.empty? || !inst.args[0].is_a?(Function)
+  has_attr?(inst.args[0].as(Function).attrs, "returns_twice")
+end
+
+def caller_allowed?(fn : Function) : Bool
+  return false if has_attr?(fn.attrs, "naked") || has_attr?(fn.attrs, "noreturn")
+  fn.blocks.each do |block|
+    block.insts.each { |inst| return false if returns_twice_call?(inst) }
+  end
+  true
+end
+
+# Refuse shapes whose control flow or calling convention cannot be cloned here.
+def callee_allowed?(fn : Function) : Bool
+  return false if fn.declaration? || fn.fn_type.varargs? || runtime_entry?(fn)
+  # Keep the program-lifetime frame and the runtime's stack-clearing wrappers
+  # distinct even if a producer omits their noinline attributes.
+  return false if top_level?(fn) || fn.name == "__iyi_program" || fn.name == "__iyi_enter" # mutation entry-frame: preserve entry identities
+  return false if has_attr?(fn.attrs, "noinline") || has_attr?(fn.attrs, "naked")
+  return false if has_attr?(fn.attrs, "returns_twice") || has_attr?(fn.attrs, "noreturn")
+  return false if restricted_params?(fn.param_attrs) || fn.personality
+  return false if !fn.blocks[0].insts.empty? && fn.blocks[0].insts[0].op == Op::Phi
+  returns = 0
+  bi = 0
+  while bi < fn.blocks.size
+    block = fn.blocks[bi]
+    block.insts.each do |inst|
+      return false if inst.op == Op::Alloca && (bi != 0 || !inst.args.empty?)
+      return false if returns_twice_call?(inst)
+      case inst.op
+      when Op::Invoke, Op::LandingPad, Op::Resume, Op::CatchSwitch, Op::CatchPad, Op::CatchRet, Op::CleanupPad, Op::CleanupRet
+        return false
+      when Op::Ret
+        returns = returns + 1
+        return false if !inst.args.empty? && tls_value?(inst.args[0])
+      when Op::Intrinsic
+        return false unless inst.aux.is_a?(IntrinsicAux)
+        case inst.aux.as(IntrinsicAux).id
+        when IntrinsicId::Frameaddress, IntrinsicId::Returnaddress, IntrinsicId::Stacksave, IntrinsicId::Stackrestore, IntrinsicId::VaStart
+          return false
+        end
+      end
+      if inst.op == Op::Call && !inst.args.empty? && inst.args[0].is_a?(Inst)
+        target = inst.args[0].as(Inst)
+        return false if target.aux.is_a?(AsmAux) && target.aux.as(AsmAux).unwind
+      end
+    end
+    bi = bi + 1
+  end
+  returns > 0
+end
+
+def instruction_count(fn : Function) : Int32
+  count = 0
+  fn.blocks.each { |block| count = count + block.insts.size }
+  count
+end
+
+# Cold regions are components of blocks that can reach unreachable but not a
+# return. Their instructions cost zero, and each connected region costs five.
+def inline_cost(fn : Function) : Int32
+  cfg = Cfg.new(fn)
+  normal = [] of Bool
+  cold_path = [] of Bool
+  k = 0
+  while k < cfg.size
+    normal << false
+    cold_path << false
+    k = k + 1
+  end
+  work = [] of Int32
+  k = 0
+  while k < cfg.size
+    term = cfg.block(k).terminator
+    if term.op == Op::Ret
+      normal[k] = true
+      work << k
+    end
+    k = k + 1
+  end
+  head = 0
+  while head < work.size
+    node = work[head]
+    head = head + 1
+    cfg.preds(node).each do |pred|
+      unless normal[pred]
+        normal[pred] = true
+        work << pred
+      end
+    end
+  end
+  work = [] of Int32
+  k = 0
+  while k < cfg.size
+    if cfg.block(k).terminator.op == Op::Unreachable
+      cold_path[k] = true
+      work << k
+    end
+    k = k + 1
+  end
+  head = 0
+  while head < work.size
+    node = work[head]
+    head = head + 1
+    cfg.preds(node).each do |pred|
+      unless cold_path[pred]
+        cold_path[pred] = true
+        work << pred
+      end
+    end
+  end
+  visited = [] of Bool
+  k = 0
+  while k < cfg.size
+    visited << false
+    k = k + 1
+  end
+  cost = 0
+  k = 0
+  while k < cfg.size
+    if cold_path[k] && !normal[k]
+      unless visited[k]
+        cost = cost + 5
+        visited[k] = true
+        region = [k] of Int32
+        while !region.empty?
+          node = region.pop
+          neighbors = cfg.succs(node) + cfg.preds(node)
+          neighbors.each do |other|
+            if cold_path[other] && !normal[other] && !visited[other]
+              visited[other] = true
+              region << other
+            end
+          end
+        end
+      end
+    else
+      cfg.block(k).insts.each do |inst|
+        if inst.op == Op::Call
+          cost = cost + 10
+        elsif inst.op == Op::Alloca || inst.op == Op::Phi
+          # Free in the cost model.
+        elsif inst.op == Op::Intrinsic && inst.aux.is_a?(IntrinsicAux) && inst.aux.as(IntrinsicAux).id == IntrinsicId::ExpectI1
+          # A branch hint has no machine cost.
+        elsif inst.op == Op::BitCast && inst.type.pointer? && !inst.args.empty? && inst.args[0].type.pointer?
+          # A pointer-to-pointer cast has no machine cost.
+        else
+          cost = cost + 1
+        end
+      end
+    end
+    k = k + 1
+  end
+  cost
+end
+
+def top_level?(fn : Function) : Bool
+  fn.name == "__iyi_main" || fn.name == "__crystal_main"
+end
+
+def in_loop?(fn : Function, block : Block) : Bool
+  fn.relink
+  cfg = Cfg.new(fn)
+  dom = DomTree.new(cfg)
+  loops = LoopInfo.new(cfg, dom)
+  id = cfg.index(block)
+  loops.depth(id) > 0
+end
+
+# A compare chain dispatches to one arm per conditional. When it ends in
+# unreachable, count the arms rather than treating them as one call site.
+def dispatch_arms(fn : Function, target : Block) : Int32
+  biggest = 0
+  fn.blocks.each do |start|
+    current = start
+    visited = Hash(Block, Bool).new
+    arms = 0
+    contains = false
+    valid = true
+    while valid && !visited.has_key?(current)
+      visited[current] = true
+      term = current.terminator
+      if term.op == Op::Unreachable
+        break
+      end
+      unless term.op == Op::CondBr && term.targets.size == 2
+        valid = false
+        break
+      end
+      a = term.targets[0]
+      b = term.targets[1]
+      a_chain = a.terminator.op == Op::CondBr || a.terminator.op == Op::Unreachable
+      b_chain = b.terminator.op == Op::CondBr || b.terminator.op == Op::Unreachable
+      if a_chain == b_chain
+        valid = false
+        break
+      end
+      arm = a_chain ? b : a
+      current = a_chain ? a : b
+      calls = 0
+      arm.insts.each { |inst| calls = calls + 1 if inst.op == Op::Call }
+      unless calls == 1
+        valid = false
+        break
+      end
+      arms = arms + 1
+      contains = true if arm == target
+    end
+    if valid && current.terminator.op == Op::Unreachable && contains && arms > biggest
+      biggest = arms
+    end
+  end
+  biggest
+end
+
+def call_allowed?(fn : Function, block : Block, call : Inst, callee : Function, graph : CallGraph, budget : InlineBudget) : Bool
+  return false unless call.aux.is_a?(CallAux)
+  aux = call.aux.as(CallAux)
+  return false unless aux.fn_type == callee.fn_type && aux.cc == callee.cc
+  return false if restricted_params?(aux.param_attrs) || has_attr?(aux.fn_attrs, "noinline")
+  return false if has_attr?(aux.fn_attrs, "returns_twice") || has_attr?(aux.fn_attrs, "noreturn")
+  return false unless call.args.size == callee.params.size + 1
+  k = 1
+  while k < call.args.size
+    return false if tls_value?(call.args[k]) || call.args[k].type != callee.params[k - 1].type
+    k = k + 1
+  end
+  return false unless callee_allowed?(callee)
+  return false if graph.same_component?(fn, callee) || graph.recursive?(callee)
+  always = has_attr?(callee.attrs, "alwaysinline") || has_attr?(aux.fn_attrs, "alwaysinline")
+  return false if top_level?(fn) && !always && !in_loop?(fn, block)
+  # Source-mandated inlining is exempt from the cost-model size limits.
+  # inline_one still charges its growth, so later ordinary calls see it.
+  return true if always
+  cost = inline_cost(callee)
+  match_helper = callee.name.includes?("~match<")
+  return false if !match_helper && dispatch_arms(fn, block) > 4 && cost > 10
+  unless match_helper || cost <= 40 || (callee.linkage == Linkage::Internal && graph.call_sites(callee) == 1 && cost <= 400)
+    return false
+  end
+  # Removing the call and adding the entry branch cancel; cloning preserves
+  # the body's instruction count, plus a result phi for non-void calls.
+  growth = instruction_count(callee) + (call.type.void? ? 0 : 1)
+  return false if instruction_count(fn) + growth > 3000
+  return false if budget.used + growth > budget.limit
+  true
+end
+
+def mapped_value(value : Value, values : Hash(Value, Value)) : Value
+  found = values[value]?
+  found ? found : value
+end
+
+# Clone the entire callee at one call site. Phis are filled only after every
+# instruction has an identity, so backedges and forward references are safe.
+def inline_one(mod : Module, fn : Function, block : Block, at : Int32, call : Inst, callee : Function) : Int32
+  values = Hash(Value, Value).new
+  k = 0
+  while k < callee.params.size
+    values[callee.params[k]] = call.args[k + 1] # mutation S6-arg: actual argument to parameter
+    k = k + 1
+  end
+  blocks = Hash(Block, Block).new
+  callee.blocks.each do |source|
+    copy = fn.append_basic_block(source.name)
+    copy.no_vectorize = source.no_vectorize
+    blocks[source] = copy
+  end
+  continuation = fn.append_basic_block("inline.cont")
+  originals = [] of Inst
+  clones = [] of Inst
+  allocas = [] of Inst
+  callee.blocks.each do |source|
+    dest = blocks[source]
+    source.insts.each do |inst|
+      next if inst.op == Op::Ret
+      copy = Inst.new(inst.op, inst.type, [] of Value, inst.aux_int, inst.aux, [] of Block, inst.cases[0, inst.cases.size], "")
+      values[inst] = copy
+      originals << inst
+      clones << copy
+      if inst.op == Op::Alloca
+        allocas << copy
+      else
+        dest.insts << copy
+      end
+    end
+  end
+  k = 0
+  while k < originals.size
+    original = originals[k]
+    copy = clones[k]
+    original.args.each { |arg| copy.args << mapped_value(arg, values) }
+    original.targets.each { |target| copy.targets << blocks[target] }
+    k = k + 1
+  end
+
+  suffix = block.insts[at + 1, block.insts.size - at - 1]
+  prefix = block.insts[0, at]
+  continuation.insts[0, continuation.insts.size] = suffix
+  old_term = continuation.terminator
+  old_term.targets.each do |target|
+    target.insts.each do |inst|
+      break unless inst.op == Op::Phi
+      inst.move_incoming(block, continuation)
+    end
+  end
+  prefix << new_inst(Op::Br, mod.types.void, [] of Value, 0_i64, nil, [blocks[callee.blocks[0]]] of Block)
+  block.insts[0, block.insts.size] = prefix
+
+  entry = fn.blocks[0]
+  if !allocas.empty?
+    term = entry.insts.pop
+    allocas.each { |inst| entry.insts << inst }
+    entry.insts << term
+  end
+  phi = call.type.void? ? nil : new_phi(call.type)
+  callee.blocks.each do |source|
+    term = source.terminator
+    next unless term.op == Op::Ret
+    dest = blocks[source]
+    if result = phi
+      result.add_incoming(mapped_value(term.args[0], values), dest) # mutation S6-return: every return edge
+    end
+    dest.insts << new_inst(Op::Br, mod.types.void, [] of Value, 0_i64, nil, [continuation] of Block)
+  end
+  if result = phi
+    continuation.insts[0, 0] = [result]
+    fn.blocks.each do |owner|
+      owner.insts.each do |inst|
+        j = 0
+        while j < inst.args.size
+          inst.args[j] = result if inst.args[j] == call
+          j = j + 1
+        end
+      end
+    end
+  end
+  fn.relink
+  instruction_count(callee) + (call.type.void? ? 0 : 1)
+end
+
+pub def run_inline(mod : Module, fn : Function, graph : CallGraph, budget : InlineBudget) : Bool
+  return false if fn.declaration? || !caller_allowed?(fn)
+  changed = false
+  round = 0
+  while round < 2
+    sites = [] of Inst
+    fn.blocks.each do |block|
+      block.insts.each { |inst| sites << inst if inst.op == Op::Call }
+    end
+    round_changed = false
+    sites.each do |site|
+      next if site.args.empty? || !site.args[0].is_a?(Function)
+      callee = site.args[0].as(Function)
+      owner = nil.as(Block?)
+      position = -1
+      fn.blocks.each do |block|
+        k = 0
+        while k < block.insts.size
+          if block.insts[k] == site
+            owner = block
+            position = k
+            break
+          end
+          k = k + 1
+        end
+        break if owner
+      end
+      if block = owner
+        # Leaving an existing alloca in the continuation would violate I4.
+        after_alloca = false
+        k = position + 1
+        while k < block.insts.size
+          after_alloca = true if block.insts[k].op == Op::Alloca
+          k = k + 1
+        end
+        next if after_alloca
+        next unless call_allowed?(fn, block, site, callee, graph, budget)
+        budget.used = budget.used + inline_one(mod, fn, block, position, site, callee)
+        changed = true
+        round_changed = true
+      end
+    end
+    break unless round_changed
+    round = round + 1
+  end
+  changed
+end

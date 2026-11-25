@@ -93,10 +93,11 @@ module IrOpt
     command = args[0]
     if command == "passes"
       usage unless args.size == 1
-      passes = [PassId::CfgSimplify, PassId::Mem2Reg, PassId::Simplify, PassId::Dce]
+      passes = [PassId::CfgSimplify, PassId::Mem2Reg, PassId::Simplify, PassId::Dce, PassId::Sroa, PassId::Inline, PassId::DeadFn]
       k = 0
       while k < passes.size
-        STDOUT.puts "#{pass_name(passes[k])}\tdefault,release"
+        tiers = k < 4 ? "default,release" : "release"
+        STDOUT.puts "#{pass_name(passes[k])}\t#{tiers}"
         k = k + 1
       end
       return
@@ -130,15 +131,15 @@ module IrOpt
     mod = read_module(args[index + 1])
     verify_input(mod) unless no_verify
 
-    before_insts = [] of Int32
-    before_blocks = [] of Int32
+    before_insts = Hash(Function, Int32).new
+    before_blocks = Hash(Function, Int32).new
     if command == "stats"
       k = 0
       while k < mod.functions.size
         fn = mod.functions[k]
         unless fn.declaration?
-          before_insts << instruction_count(fn)
-          before_blocks << fn.blocks.size
+          before_insts[fn] = instruction_count(fn)
+          before_blocks[fn] = fn.blocks.size
         end
         k = k + 1
       end
@@ -158,12 +159,10 @@ module IrOpt
     end
     if command == "stats"
       k = 0
-      j = 0
       while k < mod.functions.size
         fn = mod.functions[k]
         unless fn.declaration?
-          STDOUT.puts "#{fn.name}\t#{before_insts[j]}\t#{instruction_count(fn)}\t#{before_blocks[j]}\t#{fn.blocks.size}"
-          j = j + 1
+          STDOUT.puts "#{fn.name}\t#{before_insts[fn]}\t#{instruction_count(fn)}\t#{before_blocks[fn]}\t#{fn.blocks.size}"
         end
         k = k + 1
       end

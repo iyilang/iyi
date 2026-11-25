@@ -1,0 +1,219 @@
+module compiler/ir/opt/callgraph
+
+import compiler/ir/function::{Function}
+import compiler/ir/inst::{Op}
+import compiler/ir/module::{Module}
+
+# Edges follow module, block and instruction order. Hashes are lookup tables only.
+pub class CallGraph
+  getter order : Array(Function)
+
+  def initialize(@mod : Module)
+    @ids = Hash(Function, Int32).new
+    @edges = [] of Array(Int32)
+    @sites = [] of Int32
+    @component = [] of Int32
+    @recursive = [] of Bool
+    @order = [] of Function
+    k = 0
+    while k < @mod.functions.size
+      @ids[@mod.functions[k]] = k
+      @edges << [] of Int32
+      @sites << 0
+      @component << -1
+      k = k + 1
+    end
+    k = 0
+    while k < @mod.functions.size
+      fn = @mod.functions[k]
+      fn.blocks.each do |block|
+        block.insts.each do |inst|
+          if inst.op == Op::Call && !inst.args.empty? && inst.args[0].is_a?(Function)
+            callee = inst.args[0].as(Function)
+            if to = @ids[callee]?
+              @edges[k] << to
+              @sites[to] = @sites[to] + 1
+            end
+          end
+        end
+      end
+      k = k + 1
+    end
+    find_components
+    schedule
+  end
+
+  def same_component?(a : Function, b : Function) : Bool
+    ai = @ids[a]?
+    bi = @ids[b]?
+    return false unless ai && bi
+    @component[ai] == @component[bi]
+  end
+
+  def recursive?(fn : Function) : Bool
+    id = @ids[fn]?
+    return true unless id
+    @recursive[@component[id]]
+  end
+
+  def call_sites(fn : Function) : Int32
+    id = @ids[fn]?
+    id ? @sites[id] : 0
+  end
+
+  # Iterative Tarjan avoids consuming the host stack on generated call chains.
+  private def find_components : Nil
+    index = [] of Int32
+    low = [] of Int32
+    active = [] of Bool
+    k = 0
+    while k < @edges.size
+      index << -1
+      low << -1
+      active << false
+      k = k + 1
+    end
+    stack = [] of Int32
+    nodes = [] of Int32
+    next_edge = [] of Int32
+    serial = 0
+    root = 0
+    while root < @edges.size
+      if index[root] < 0
+        nodes << root
+        next_edge << 0
+        index[root] = serial
+        low[root] = serial
+        serial = serial + 1
+        stack << root
+        active[root] = true
+        while !nodes.empty?
+          top = nodes.size - 1
+          n = nodes[top]
+          at = next_edge[top]
+          if at < @edges[n].size
+            to = @edges[n][at]
+            next_edge[top] = at + 1
+            if index[to] < 0
+              index[to] = serial
+              low[to] = serial
+              serial = serial + 1
+              stack << to
+              active[to] = true
+              nodes << to
+              next_edge << 0
+            elsif active[to] && index[to] < low[n]
+              low[n] = index[to]
+            end
+          else
+            nodes.pop
+            next_edge.pop
+            if !nodes.empty? && low[n] < low[nodes.last]
+              low[nodes.last] = low[n]
+            end
+            if low[n] == index[n]
+              component_id = @recursive.size
+              count = 0
+              while true
+                member = stack.pop
+                active[member] = false
+                @component[member] = component_id
+                count = count + 1
+                break if member == n
+              end
+              recursive = count > 1
+              if !recursive
+                @edges[n].each { |to| recursive = true if to == n }
+              end
+              @recursive << recursive
+            end
+          end
+        end
+      end
+      root = root + 1
+    end
+    nil
+  end
+
+  private def heap_push(heap : Array(Int32), priorities : Array(Int32), id : Int32) : Nil
+    heap << id
+    at = heap.size - 1
+    while at > 0
+      parent = (at - 1) // 2
+      break if priorities[heap[parent]] <= priorities[heap[at]]
+      temp = heap[parent]
+      heap[parent] = heap[at]
+      heap[at] = temp
+      at = parent
+    end
+    nil
+  end
+
+  private def heap_pop(heap : Array(Int32), priorities : Array(Int32)) : Int32
+    result = heap[0]
+    last = heap.pop
+    unless heap.empty?
+      heap[0] = last
+      at = 0
+      while true
+        left = at * 2 + 1
+        break if left >= heap.size
+        right = left + 1
+        child = left
+        child = right if right < heap.size && priorities[heap[right]] < priorities[heap[left]]
+        break if priorities[heap[at]] <= priorities[heap[child]]
+        temp = heap[at]
+        heap[at] = heap[child]
+        heap[child] = temp
+        at = child
+      end
+    end
+    result
+  end
+
+  # SCCs become ready when every callee SCC has been visited; the first module
+  # position breaks ties. Multiple edges are counted and discharged together.
+  private def schedule : Nil
+    members = [] of Array(Int32)
+    reverse = [] of Array(Int32)
+    pending = [] of Int32
+    priorities = [] of Int32
+    c = 0
+    while c < @recursive.size
+      members << [] of Int32
+      reverse << [] of Int32
+      pending << 0
+      priorities << @mod.functions.size
+      c = c + 1
+    end
+    n = 0
+    while n < @edges.size
+      own = @component[n]
+      members[own] << n
+      priorities[own] = n if n < priorities[own]
+      @edges[n].each do |to|
+        target = @component[to]
+        if own != target
+          pending[own] = pending[own] + 1 # mutation S6-order: caller waits for callee
+          reverse[target] << own
+        end
+      end
+      n = n + 1
+    end
+    heap = [] of Int32
+    c = 0
+    while c < pending.size
+      heap_push(heap, priorities, c) if pending[c] == 0
+      c = c + 1
+    end
+    while !heap.empty?
+      id = heap_pop(heap, priorities)
+      members[id].each { |member| @order << @mod.functions[member] }
+      reverse[id].each do |caller|
+        pending[caller] = pending[caller] - 1
+        heap_push(heap, priorities, caller) if pending[caller] == 0
+      end
+    end
+    nil
+  end
+end

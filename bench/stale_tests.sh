@@ -1872,8 +1872,21 @@ done
 fi
 touch "$r58_ctl/release"
 set +e
-r58_after="$(cd "$r58" && R58_CTL="$r58_ctl" "$IYI" test --cached --json -p 4 .)"
-r58_after_status=$?
+if [ "$KEEP_GOING" = 1 ]; then
+  # The checked run explains itself: the decision of each test, in file order,
+  # then the JSON document. A second run after a miss would hit.
+  (cd "$r58" && R58_CTL="$r58_ctl" "$IYI" test --cached --json --explain -p 4 .) > "$r58/after.explain"
+  r58_after_status=$?
+  r58_after="$(tail -n 1 "$r58/after.explain")"
+  if [ "$(printf '%s' "$r58_after" | json_cached)" != 2 ]; then
+    echo "    [row 58 decisions of the checked rerun]" >&2
+    sed '$d' "$r58/after.explain" >&2 || true
+    printf '%s' "$r58_after" | show_misses
+  fi
+else
+  r58_after="$(cd "$r58" && R58_CTL="$r58_ctl" "$IYI" test --cached --json -p 4 .)"
+  r58_after_status=$?
+fi
 set -e
 if [ "$r58_after_status" -ne 0 ]; then
   printf '%s\n' "$r58_after" >&2

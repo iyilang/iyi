@@ -10093,7 +10093,13 @@ require "./file"
         IYI_LARGE = 0x4959495F4C415247_u64
 
         HEADER = 8_u64
-        LARGE_USER = 24_u64
+        # A large arena has its own header before the three object words.
+        LARGE_LINK_OFFSET  = 0_u64
+        LARGE_SIZE_OFFSET  = 8_u64
+        LARGE_PAGES_OFFSET = 16_u64
+        LARGE_MAGIC_OFFSET = 40_u64
+        LARGE_USER         = 72_u64
+        LARGE_OVERHEAD     = 96_u64
 
         FREE_FLAG    = 4_u64
         ATOMIC_FLAG  = 8_u64
@@ -10269,7 +10275,7 @@ require "./file"
         end
 
         def self.take_large(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
-          total = size + 64_u64
+          total = size + LARGE_OVERHEAD
           pages = (total + PAGE - 1_u64).unsafe_div(PAGE)
           prev = LibWasmMem.memory_grow(0, pages.to_i32)
           if prev < 0
@@ -10280,13 +10286,13 @@ require "./file"
           total_bytes = pages * PAGE
           update_heap_limits(arena, pages)
 
-          write64(arena + 0_u64, @@large_objects)
+          write64(arena + LARGE_LINK_OFFSET, @@large_objects)
           @@large_objects = arena
-          write64(arena + 8_u64, size)
-          write64(arena + 16_u64, pages)
-          write64(arena + 40_u64, IYI_LARGE)
+          write64(arena + LARGE_SIZE_OFFSET, size)
+          write64(arena + LARGE_PAGES_OFFSET, pages)
+          write64(arena + LARGE_MAGIC_OFFSET, IYI_LARGE)
 
-          p_obj = arena + 24_u64
+          p_obj = arena + LARGE_USER
           write64(p_obj - 24_u64, size)
           write64(p_obj - 16_u64, type_id)
           write64(p_obj - 8_u64, bits | CARVED_FLAG | type_id.unsafe_shl(TYPE_SHIFT))
@@ -10333,6 +10339,21 @@ require "./file"
         def self.base_of(word : UInt64) : UInt64
           return 0_u64 if word < @@heap_start || word >= @@heap_limit
           page = word - (word & 65535_u64)
+          # Only the first page carries the large arena header. Check its
+          # extent before interpreting page contents as an arena header: an
+          # object's bytes on a later page can contain either magic value.
+          large = @@large_objects
+          while large != 0_u64
+            if word >= large && word < large + read64(large + LARGE_PAGES_OFFSET) * PAGE
+              p_obj = large + LARGE_USER
+              size = read64(p_obj - 24_u64)
+              return 0_u64 if word < p_obj || word >= p_obj + size
+              mark = read64(p_obj - 8_u64)
+              return 0_u64 if mark & FREE_FLAG != 0_u64
+              return p_obj
+            end
+            large = read64(large + LARGE_LINK_OFFSET)
+          end
           magic = read64(page + 40_u64)
           if magic == IYI_ARENA
             chunk_size = read64(page + 8_u64)
@@ -10343,13 +10364,6 @@ require "./file"
             chunk_idx = (word - first).unsafe_div(chunk_size)
             head = first + chunk_idx * chunk_size
             p_obj = head + 24_u64
-            mark = read64(p_obj - 8_u64)
-            return 0_u64 if mark & FREE_FLAG != 0_u64
-            return p_obj
-          elsif magic == IYI_LARGE
-            p_obj = page + 24_u64
-            size = read64(p_obj - 24_u64)
-            return 0_u64 if word < page || word >= p_obj + size
             mark = read64(p_obj - 8_u64)
             return 0_u64 if mark & FREE_FLAG != 0_u64
             return p_obj
@@ -10645,7 +10659,7 @@ require "./file"
 
           large = IyiHeap.large_objects
           while large != 0_u64
-            p_obj = large + 24_u64
+            p_obj = large + IyiHeap::LARGE_USER
             mark = IyiHeap.read64(p_obj - 8_u64)
             if mark & IyiHeap::FREE_FLAG != 0_u64
               # already free
@@ -10658,7 +10672,7 @@ require "./file"
               set_colour(p_obj, WHITE)
               @@chunks_kept = @@chunks_kept + 1_u64
             end
-            large = IyiHeap.read64(large + 0_u64)
+            large = IyiHeap.read64(large + IyiHeap::LARGE_LINK_OFFSET)
           end
         end
 

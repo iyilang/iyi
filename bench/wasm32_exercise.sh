@@ -115,13 +115,13 @@ fi
 
 echo
 echo "== every check reported =="
-for check in "allocation:" "reclamation:" "survival:" "precision:" "realloc:" "weak:" "locals:"; do
+for check in "allocation:" "reclamation:" "survival:" "precision:" "realloc:" "weak:" "locals:" "large:"; do
   if ! grep -q "$check" "$WORK/wasm32-ex.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  allocation, reclamation, survival, precision, realloc, weak references and locals all reported"
+[ "$status" -eq 0 ] && echo "  allocation, reclamation, survival, precision, realloc, weak references, locals and large objects all reported"
 
 echo
 echo "== the same program with optimisation on (--release) =="
@@ -140,6 +140,11 @@ prove_fails() {
   awk "$script" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"
 
   local link_cmd
+  if cmp -s "$REPO/src/iyi/prelude.iyi" "$WORK/$dir/iyi/prelude.iyi"; then
+    echo "  $label: mutation did not change the prelude"
+    status=1
+    return
+  fi
   link_cmd="$(IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build --cross-compile --target wasm32-wasi \
     -o "$WORK/$dir/prog" "$REPO/bench/wasm32_exercise.iyi" 2>"$WORK/$dir/build.log")"
   local build_code=$?
@@ -167,6 +172,11 @@ prove_fails() {
     return
   fi
   if ! grep -q "$phrase" "$WORK/$dir/out"; then
+    if [ "${5:-}" = allow_trap ] && ! grep -q "all wasm32 collector checks passed" "$WORK/$dir/out" &&
+       { [ "$exit_code" -ge 128 ] || grep -Eq 'wasm trap:|memory access out of bounds|out of bounds memory access' "$WORK/$dir/out"; }; then
+      echo "  $label: caught trap or signal as expected (exit $exit_code)"
+      return
+    fi
     echo "  $label: failed, but not with expected phrase '$phrase'"
     cat "$WORK/$dir/out"
     status=1
@@ -192,6 +202,14 @@ prove_fails "layout precision failure" no_precision "precision:" \
 #    reference whose target was swept answers its memory or never goes nil.
 prove_fails "weak cells never cleared" no_weak "weak:" \
   '{ if ($0 ~ /^          IyiWeak\.clear$/) next; print }'
+
+# 5. Move the object back over the arena header, corrupting its link and pages.
+prove_fails "overlapping large headers" old_large_header "large:" \
+  '{ if ($0 ~ /LARGE_USER[[:space:]]*=[[:space:]]*72_u64/) sub(/72_u64/, "24_u64"); print }' allow_trap
+
+# 6. Resolve only the first page and lose an interior-only root.
+prove_fails "large interior root" first_large_page "large:" \
+  '{ if ($0 ~ /if word >= large && word < large \+ read64\(large \+ LARGE_PAGES_OFFSET\) \* PAGE/) sub(/if word.*/, "if page == large"); print }'
 
 echo
 if [ "$status" -eq 0 ]; then

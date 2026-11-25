@@ -1,0 +1,26 @@
+; Both operations are out of line. The loaded byte makes every iteration observable.
+define i32 @main() {
+entry:
+  %src = alloca [65536 x i8], align 8
+  %dst = alloca [65536 x i8], align 8
+  br label %loop
+loop:
+  %i = phi i64 [ 0, label %entry ], [ %in, label %body ]
+  %sum = phi i64 [ 0, label %entry ], [ %next_sum, label %body ]
+  %more = icmp ult i64 %i, 2048
+  br i1 %more, label %body, label %done
+body:
+  %byte = trunc i64 %i to i8
+  intrinsic llvm.memset.p0.i64(ptr %src, i8 %byte, i64 65536, i1 false)
+  intrinsic llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 65536, i1 false)
+  %last = getelementptr i8, ptr %dst, i64 65535
+  %loaded = load i8, ptr %last, align 1
+  %value = zext i8 %loaded to i64
+  %next_sum = add i64 %sum, %value
+  %in = add i64 %i, 1
+  br label %loop
+done:
+  %result = trunc i64 %sum to i32
+  %printed = call i32 (ptr, ...) @printf(ptr @fmt, i32 %result)
+  ret i32 0
+}

@@ -1,0 +1,21 @@
+; iyi-ir 1
+source_filename = "multi_latch"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @multi_latch(i1 %continue, i1 %choice) {
+entry:
+  br label %header
+header:
+  %value = phi i32 [ 0, label %entry ], [ %one, label %latch_one ], [ %two, label %latch_two ]
+  br i1 %continue, label %body, label %done
+body:
+  br i1 %choice, label %latch_one, label %latch_two
+latch_two:
+  %two = add i32 %value, 2
+  br label %header
+latch_one:
+  %one = add i32 %value, 1
+  br label %header
+done:
+  ret i32 %value
+}

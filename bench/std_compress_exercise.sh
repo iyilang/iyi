@@ -466,7 +466,7 @@ then
     echo "  segments of 70,001 bytes and a rebase past 100,000: every check passes, every size as pinned"
   else
     echo "  FAIL: the exercise does not hold with small segments and rebases"
-    tail -3 "$WORK/small.log" "$WORK/small.out" 2>/dev/null | sed 's/^/    /'
+    tail -n 3 "$WORK/small.log" "$WORK/small.out" 2>/dev/null | sed 's/^/    /'
     status=1
   fi
 else

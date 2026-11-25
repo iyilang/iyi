@@ -1,0 +1,424 @@
+# Hosted release uses LLVM's ordinary O3 pipeline (compiler.cr:4407-4468).
+# The collector scans the optimized stack conservatively (GC_DESIGN.md:58-59).
+# CSE reuses an identical dominating computation; it creates no new address.
+
+module compiler/ir/opt/cse
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value, canonical_words}
+import compiler/ir/inst::{Op, Inst, GepAux, IntrinsicAux, terminator_op?}
+import compiler/ir/function::{Function, Global}
+import compiler/ir/module::{Module}
+import compiler/ir/opt/analysis::{Cfg, DomTree, DefUse}
+import compiler/ir/opt/edit::{Editor}
+import compiler/ir/opt/effects::{opaque?, pure?, writes_memory?}
+import compiler/ir/opt/fold::{canonical}
+
+class CseFrame
+  getter block : Int32
+  getter mark : Int32
+  property entered : Bool
+  property child : Int32
+
+  def initialize(@block : Int32, @mark : Int32)
+    @entered = false
+    @child = 0
+  end
+end
+
+# Constant expressions may hide a reference to the marking flag. Treat them
+# conservatively without recursively rescanning shared constant graphs.
+def marking_root?(value : Value) : Bool
+  return value.as(Global).name == "__iyi_marking" if value.is_a?(Global)
+  return false unless value.is_a?(Inst)
+  inst = value.as(Inst)
+  if inst.op == Op::GlobalAddr && inst.args.size == 1 && inst.args[0].is_a?(Global)
+    return inst.args[0].as(Global).name == "__iyi_marking"
+  end
+  inst.op == Op::ConstExpr || inst.op == Op::ConstAggregate
+end
+
+# An undef use may choose a new value each time. Do not key operations on it,
+# or on compound constants that might contain one.
+def stable_operand?(value : Value) : Bool
+  return true unless value.is_a?(Inst)
+  case value.as(Inst).op
+  when Op::ConstUndef, Op::ConstPoison, Op::ConstExpr, Op::ConstAggregate, Op::ConstBytes
+    false
+  else
+    true
+  end
+end
+
+class Cse
+  def initialize(@fn : Function)
+    @cfg = Cfg.new(@fn)
+    @dom = DomTree.new(@cfg)
+    @du = DefUse.new(@fn)
+    @editor = Editor.new(@fn, @du)
+    @numbers = Hash(Value, Int32).new
+    @constant_numbers = Hash(String, Int32).new
+    @type_numbers = Hash(IrType, Int32).new
+    @next_number = 1
+    @next_type_number = 1
+    @marking_derived = Hash(Inst, Bool).new
+    @boundaries = Hash(Inst, Int32).new
+    @last_boundary = [] of Int32
+    @entry_version = [] of Int32
+    @exit_version = [] of Int32
+    @available = Hash(String, Value).new
+    @insertions = [] of String
+    @changed = false
+    find_marking_derivations
+    number_memory_versions
+  end
+
+  # A derived address of the flag is just as opaque as the direct load.
+  # Follow all SSA users so casts, selects and loop phis cannot hide it.
+  def find_marking_derivations : Nil
+    work = [] of Inst
+    @fn.blocks.each do |block|
+      block.insts.each do |inst|
+        derived = false
+        inst.args.each { |arg| derived = true if marking_root?(arg) }
+        if derived && !@marking_derived.has_key?(inst)
+          @marking_derived[inst] = true
+          work << inst
+        end
+      end
+    end
+    # The flag address can be stored and reloaded before reaching a use. If
+    # this function mentions it, conservatively treat pointer-valued loads as
+    # potential aliases too; this also survives store-to-load forwarding.
+    unless work.empty?
+      @fn.blocks.each do |block|
+        block.insts.each do |inst|
+          if inst.op == Op::Load && inst.type.pointer? && !@marking_derived.has_key?(inst)
+            @marking_derived[inst] = true
+            work << inst
+          end
+        end
+      end
+    end
+    head = 0
+    while head < work.size
+      inst = work[head]
+      head = head + 1
+      @du.users(inst).each do |user|
+        unless @marking_derived.has_key?(user)
+          @marking_derived[user] = true
+          work << user
+        end
+      end
+    end
+  end
+
+  def marking_read?(inst : Inst) : Bool
+    return false unless inst.op == Op::Load && inst.args.size == 1
+    pointer = inst.args[0]
+    return true if marking_root?(pointer)
+    pointer.is_a?(Inst) && @marking_derived.has_key?(pointer.as(Inst))
+  end
+
+  # Opaque reads are conservative memory boundaries. Thread-local address
+  # operations themselves do not access memory.
+  def memory_boundary?(inst : Inst) : Bool
+    writes_memory?(inst) || ((opaque?(inst) || marking_read?(inst)) && inst.op != Op::ThreadLocalAddr && inst.op != Op::ThreadPointer)
+  end
+
+  # Number the clobbers first. Entry, per-block join IDs, and clobber IDs
+  # occupy disjoint ranges and stay stable across a dominator-tree walk.
+  def number_memory_versions : Nil
+    next_boundary = 1 + @cfg.size
+    components = [] of Array(Int32)
+    component = [] of Int32
+    @fn.blocks.each do |block|
+      last = -1
+      block.insts.each do |inst|
+        if memory_boundary?(inst)
+          @boundaries[inst] = next_boundary
+          last = next_boundary
+          next_boundary = next_boundary + 1
+        end
+      end
+      @last_boundary << last
+      @entry_version << 0
+      @exit_version << 0
+      component << -1
+    end
+
+    # Cfg's RPO is decreasing DFS finish order. A reverse-graph DFS in that
+    # order finds SCCs in topological order, without recursion or LoopInfo.
+    @cfg.rpo.each do |start|
+      next unless component[start] < 0
+      id = components.size
+      components << [] of Int32
+      component[start] = id
+      work = [start] of Int32
+      while !work.empty?
+        block = work.pop
+        @cfg.preds(block).each do |pred|
+          next unless @cfg.reachable?(pred) && component[pred] < 0
+          component[pred] = id
+          work << pred
+        end
+      end
+    end
+    # Bucket each SCC in RPO, so forward edges within a clobbered SCC have
+    # already been numbered. No decision depends on hash iteration order.
+    @cfg.rpo.each { |block| components[component[block]] << block }
+
+    id = 0
+    while id < components.size
+      blocks = components[id]
+      clobbered = false
+      blocks.each { |block| clobbered = true if @last_boundary[block] >= 0 }
+      if !clobbered
+        # Every internal path is clobber-free. Merge only external entries;
+        # their SCCs have already been processed in topological order.
+        version = 0
+        have_pred = false
+        fresh = false
+        blocks.each do |block|
+          @cfg.preds(block).each do |pred|
+            next unless @cfg.reachable?(pred) && component[pred] != id
+            if !have_pred
+              version = @exit_version[pred]
+              have_pred = true
+            elsif version != @exit_version[pred]
+              fresh = true
+            end
+          end
+        end
+        fresh = true if !have_pred && blocks[0] != 0
+        version = 1 + blocks[0] if fresh
+        blocks.each do |block|
+          @entry_version[block] = version
+          @exit_version[block] = version
+        end
+      else
+        # A clobbered SCC remains conservative at every retreating edge.
+        blocks.each do |block|
+          version = 0
+          if block != 0
+            have_pred = false
+            fresh = false
+            @cfg.preds(block).each do |pred|
+              next unless @cfg.reachable?(pred)
+              if component[pred] == id && @cfg.rpo_number(pred) >= @cfg.rpo_number(block)
+                fresh = true
+              elsif !have_pred
+                version = @exit_version[pred]
+                have_pred = true
+              elsif version != @exit_version[pred]
+                fresh = true
+              end
+            end
+            version = 1 + block if fresh || !have_pred
+          end
+          @entry_version[block] = version
+          @exit_version[block] = @last_boundary[block] < 0 ? version : @last_boundary[block]
+        end
+      end
+      id = id + 1
+    end
+  end
+
+  def type_number(type : IrType) : Int32
+    if id = @type_numbers[type]?
+      return id
+    end
+    id = @next_type_number
+    @next_type_number = @next_type_number + 1
+    @type_numbers[type] = id
+    id
+  end
+
+  def fresh_number : Int32
+    id = @next_number
+    @next_number = @next_number + 1
+    id
+  end
+
+  # Scalar constants are not interned by the IR builder. Canonicalize their
+  # contents, including all words of wide integers, before numbering them.
+  def constant_key(inst : Inst) : String?
+    case inst.op
+    when Op::ConstInt
+      String.build do |io|
+        io << "I|" << type_number(inst.type) << '|'
+        if inst.type.bits <= 64
+          io << canonical(inst.type.bits, inst.aux_int)
+        else
+          canonical_words(inst.int_words(inst.type.bits), inst.type.bits).each { |word| io << word << ',' }
+        end
+      end
+    when Op::ConstFloat
+      "F|#{type_number(inst.type)}|#{inst.aux_int}"
+    when Op::ConstNull
+      "N|#{type_number(inst.type)}"
+    when Op::ConstZero
+      if inst.type.int?
+        String.build do |io|
+          io << "I|" << type_number(inst.type) << '|'
+          if inst.type.bits <= 64
+            io << '0'
+          else
+            words = (inst.type.bits + 63) // 64
+            k = 0
+            while k < words
+              io << "0,"
+              k = k + 1
+            end
+          end
+        end
+      elsif inst.type.float?
+        "F|#{type_number(inst.type)}|0"
+      elsif inst.type.pointer?
+        "N|#{type_number(inst.type)}"
+      else
+        "Z|#{type_number(inst.type)}"
+      end
+    else
+      nil
+    end
+  end
+
+  def number(value : Value) : Int32
+    if id = @numbers[value]?
+      return id
+    end
+    if value.is_a?(Inst)
+      inst = value.as(Inst)
+      if (inst.op == Op::GlobalAddr || inst.op == Op::FunctionAddr) && inst.args.size == 1 && inst.type == inst.args[0].type
+        id = number(inst.args[0])
+        @numbers[value] = id
+        return id
+      end
+      if key = constant_key(inst)
+        id = @constant_numbers[key]?
+        unless id
+          id = fresh_number
+          @constant_numbers[key] = id
+        end
+        @numbers[value] = id
+        return id
+      end
+    end
+    id = fresh_number
+    @numbers[value] = id
+    id
+  end
+
+  # Unknown auxiliary forms are deliberately not keyed. Flags and predicates
+  # live in aux_int; GEP and intrinsic metadata have additional fields.
+  def expression_key(inst : Inst) : String?
+    return nil if inst.type.void? || terminator_op?(inst.op)
+    inst.args.each { |arg| return nil unless stable_operand?(arg) }
+    aux = inst.aux
+    if aux.is_a?(IntrinsicAux)
+      aux.as(IntrinsicAux).param_attrs.each { |attrs| return nil unless attrs.empty? }
+    elsif !aux.nil? && !aux.is_a?(GepAux)
+      return nil
+    end
+    String.build do |io|
+      io << "P|" << inst.op.value << '|' << type_number(inst.type) << '|' << inst.aux_int << '|'
+      if aux.is_a?(GepAux)
+        gep = aux.as(GepAux)
+        io << "G|" << type_number(gep.source_type) << '|' << (gep.inbounds ? 1 : 0) << '|'
+      elsif aux.is_a?(IntrinsicAux)
+        intrinsic = aux.as(IntrinsicAux)
+        io << "I|" << intrinsic.id.value << '|'
+        intrinsic.overload.each { |type| io << type_number(type) << ',' }
+        io << '|'
+      else
+        io << "N|"
+      end
+      inst.args.each { |arg| io << number(arg) << ',' }
+    end
+  end
+
+  def load_key(type : IrType, ptr : Value, version : Int32) : String
+    "L|#{type_number(type)}|#{number(ptr)}|#{version}"
+  end
+
+  def remember(key : String, value : Value) : Nil
+    return if @available.has_key?(key)
+    @available[key] = value
+    @insertions << key
+  end
+
+  def replace(inst : Inst, value : Value) : Nil
+    @numbers[inst] = number(value)
+    @editor.replace_all_uses(inst, value)
+    @editor.erase(inst)
+    @changed = true
+  end
+
+  def visit_block(block : Int32) : Nil
+    version = @entry_version[block]
+    @cfg.block(block).insts.each do |inst|
+      if opaque?(inst) || marking_read?(inst) # mutation CSE-opaque: preserve opaque operations
+        version = @boundaries[inst] if @boundaries.has_key?(inst)
+      elsif inst.op == Op::Store
+        version = @boundaries[inst] # mutation CSE-store: invalidate loads at each store
+        if inst.args.size == 2 && stable_operand?(inst.args[0]) && stable_operand?(inst.args[1])
+          value = inst.args[0]
+          unless value.is_a?(Inst) && (opaque?(value.as(Inst)) || marking_read?(value.as(Inst)))
+            remember(load_key(value.type, inst.args[1], version), value)
+          end
+        end
+      elsif inst.op == Op::Load
+        if inst.args.size == 1 && stable_operand?(inst.args[0])
+          key = load_key(inst.type, inst.args[0], version)
+          if value = @available[key]?
+            replace(inst, value)
+          else
+            number(inst)
+            remember(key, inst)
+          end
+        end
+      elsif memory_boundary?(inst)
+        version = @boundaries[inst]
+      elsif pure?(inst)
+        if key = expression_key(inst)
+          if value = @available[key]?
+            replace(inst, value)
+          else
+            number(inst)
+            remember(key, inst)
+          end
+        end
+      end
+    end
+  end
+
+  def run : Bool
+    frames = [CseFrame.new(0, 0)]
+    while !frames.empty?
+      frame = frames.last
+      unless frame.entered
+        frame.entered = true
+        visit_block(frame.block)
+      end
+      children = @dom.children(frame.block)
+      if frame.child < children.size
+        child = children[frame.child]
+        frame.child = frame.child + 1
+        frames << CseFrame.new(child, @insertions.size)
+      else
+        while @insertions.size > frame.mark
+          @available.delete(@insertions.pop)
+        end
+        frames.pop
+      end
+    end
+    @editor.flush if @changed
+    @changed
+  end
+end
+
+pub def run_cse(mod : Module, fn : Function) : Bool
+  return false if fn.declaration?
+  Cse.new(fn).run
+end

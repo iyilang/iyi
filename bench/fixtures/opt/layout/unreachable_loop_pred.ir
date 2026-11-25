@@ -1,0 +1,18 @@
+; iyi-ir 1
+source_filename = "unreachable_loop_pred"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @unreachable_loop_pred(i1 %condition) {
+entry:
+  br label %header
+dead:
+  br label %header
+done:
+  ret i32 %value
+header:
+  %value = phi i32 [ 0, label %entry ], [ 42, label %dead ], [ %next, label %body ]
+  br i1 %condition, label %body, label %done
+body:
+  %next = add i32 %value, 1
+  br label %header
+}

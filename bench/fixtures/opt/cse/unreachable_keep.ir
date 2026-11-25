@@ -1,0 +1,15 @@
+; iyi-ir 1
+source_filename = "unreachable_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @unreachable_keep(i32 %x) {
+entry:
+  br label %done
+done:
+  ret i32 %x
+dead:
+  %a = add i32 %x, 1
+  %b = add i32 %x, 1
+  %sum = add i32 %a, %b
+  ret i32 %sum
+}

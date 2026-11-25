@@ -1,0 +1,16 @@
+; iyi-ir 1
+source_filename = "constant_aggregate"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @constant_aggregate(i1 %run, ptr %out) {
+entry:
+  br label %head
+head:
+  br i1 %run, label %body, label %done
+body:
+  %value = extractvalue { i32, i8 } { i32 1, i8 2 }, 0
+  store i32 %value, ptr %out, align 4
+  br label %head
+done:
+  ret void
+}

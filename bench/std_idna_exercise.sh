@@ -325,7 +325,7 @@ while cp <= 0x110000
 end
 IYI
   if ! "$IYI" build --release -o "$WORK/prop" "$WORK/prop.iyi" >"$WORK/prop.build.log" 2>&1 || ! "$WORK/prop" >"$WORK/prop.txt" 2>&1; then
-    echo "  the property table did not build or run: $(tail -1 "$WORK/prop.build.log" "$WORK/prop.txt" 2>/dev/null | tail -1)"
+    echo "  the property table did not build or run: $(tail -q -n 1 "$WORK/prop.build.log" "$WORK/prop.txt" 2>/dev/null | tail -1)"
     status=1
   elif ! "$PY" - "$WORK" <<'PY'
 import os, sys, unicodedata

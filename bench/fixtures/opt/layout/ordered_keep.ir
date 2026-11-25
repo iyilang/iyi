@@ -1,0 +1,15 @@
+; iyi-ir 1
+source_filename = "ordered_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @ordered_keep(i32 %value) {
+entry:
+  %slot = alloca i32, align 4
+  br label %body
+body:
+  store i32 %value, ptr %slot, align 4
+  br label %done
+done:
+  %result = load i32, ptr %slot, align 4
+  ret i32 %result
+}

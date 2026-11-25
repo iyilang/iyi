@@ -1,0 +1,870 @@
+module compiler/ir/opt/prove
+
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, IntPredicate, IntrinsicAux}
+import compiler/ir/function::{Function}
+import compiler/ir/module::{Module}
+import compiler/ir/intrinsics::{IntrinsicId}
+import compiler/ir/builder::{Builder}
+import compiler/ir/opt/analysis::{Cfg, DomTree, DefUse}
+import compiler/ir/opt/edit::{Editor}
+import compiler/ir/opt/fold::{int_value}
+
+struct Interval
+  getter lo : Int64
+  getter hi : Int64
+
+  def initialize(@lo : Int64, @hi : Int64)
+  end
+end
+
+struct Fact
+  getter pred : Int64
+  getter left : Value
+  getter right : Value
+
+  def initialize(@pred : Int64, @left : Value, @right : Value)
+  end
+end
+
+struct Guard
+  getter pred : Int64
+  getter other : Value
+
+  def initialize(@pred : Int64, @other : Value)
+  end
+end
+
+def min_int(bits : Int32) : Int64
+  return -9223372036854775807_i64 - 1_i64 if bits == 64
+  -(1_i64 << (bits - 1))
+end
+
+def max_int(bits : Int32) : Int64
+  return 9223372036854775807_i64 if bits == 64
+  (1_i64 << (bits - 1)) - 1_i64
+end
+
+def supported?(value : Value) : Bool
+  value.type.int? && value.type.bits >= 2 && value.type.bits <= 64
+end
+
+def indeterminate?(value : Value) : Bool
+  return false unless value.is_a?(Inst)
+  op = value.as(Inst).op
+  op == Op::ConstUndef || op == Op::ConstPoison
+end
+
+def same?(a : Value, b : Value) : Bool
+  return true if a == b
+  return false unless a.type == b.type
+  x = int_value(a)
+  y = int_value(b)
+  !x.nil? && !y.nil? && x == y
+end
+
+def inverse(pred : Int64) : Int64
+  return IntPredicate::NE.value.to_i64 if pred == IntPredicate::EQ.value.to_i64
+  return IntPredicate::EQ.value.to_i64 if pred == IntPredicate::NE.value.to_i64
+  return IntPredicate::UGE.value.to_i64 if pred == IntPredicate::ULT.value.to_i64
+  return IntPredicate::UGT.value.to_i64 if pred == IntPredicate::ULE.value.to_i64
+  return IntPredicate::ULE.value.to_i64 if pred == IntPredicate::UGT.value.to_i64
+  return IntPredicate::ULT.value.to_i64 if pred == IntPredicate::UGE.value.to_i64
+  return IntPredicate::SGE.value.to_i64 if pred == IntPredicate::SLT.value.to_i64
+  return IntPredicate::SGT.value.to_i64 if pred == IntPredicate::SLE.value.to_i64
+  return IntPredicate::SLE.value.to_i64 if pred == IntPredicate::SGT.value.to_i64
+  return IntPredicate::SLT.value.to_i64 if pred == IntPredicate::SGE.value.to_i64
+  -1_i64
+end
+
+def swap_pred(pred : Int64) : Int64
+  return pred if pred == IntPredicate::EQ.value.to_i64 || pred == IntPredicate::NE.value.to_i64
+  return IntPredicate::UGT.value.to_i64 if pred == IntPredicate::ULT.value.to_i64
+  return IntPredicate::UGE.value.to_i64 if pred == IntPredicate::ULE.value.to_i64
+  return IntPredicate::ULT.value.to_i64 if pred == IntPredicate::UGT.value.to_i64
+  return IntPredicate::ULE.value.to_i64 if pred == IntPredicate::UGE.value.to_i64
+  return IntPredicate::SGT.value.to_i64 if pred == IntPredicate::SLT.value.to_i64
+  return IntPredicate::SGE.value.to_i64 if pred == IntPredicate::SLE.value.to_i64
+  return IntPredicate::SLT.value.to_i64 if pred == IntPredicate::SGT.value.to_i64
+  return IntPredicate::SLE.value.to_i64 if pred == IntPredicate::SGE.value.to_i64
+  -1_i64
+end
+
+def signed_pred(pred : Int64) : Int64
+  return IntPredicate::SLT.value.to_i64 if pred == IntPredicate::ULT.value.to_i64
+  return IntPredicate::SLE.value.to_i64 if pred == IntPredicate::ULE.value.to_i64
+  return IntPredicate::SGT.value.to_i64 if pred == IntPredicate::UGT.value.to_i64
+  return IntPredicate::SGE.value.to_i64 if pred == IntPredicate::UGE.value.to_i64
+  pred
+end
+
+def unsigned_order?(pred : Int64) : Bool
+  pred == IntPredicate::ULT.value.to_i64 || pred == IntPredicate::ULE.value.to_i64 || pred == IntPredicate::UGT.value.to_i64 || pred == IntPredicate::UGE.value.to_i64
+end
+
+def signed_order?(pred : Int64) : Bool
+  pred == IntPredicate::SLT.value.to_i64 || pred == IntPredicate::SLE.value.to_i64 || pred == IntPredicate::SGT.value.to_i64 || pred == IntPredicate::SGE.value.to_i64
+end
+
+# Bits 1, 2 and 4 denote the less, equal and greater outcomes.
+def outcomes(pred : Int64) : Int32
+  return 2 if pred == IntPredicate::EQ.value.to_i64
+  return 5 if pred == IntPredicate::NE.value.to_i64
+  return 1 if pred == IntPredicate::ULT.value.to_i64 || pred == IntPredicate::SLT.value.to_i64
+  return 3 if pred == IntPredicate::ULE.value.to_i64 || pred == IntPredicate::SLE.value.to_i64
+  return 4 if pred == IntPredicate::UGT.value.to_i64 || pred == IntPredicate::SGT.value.to_i64
+  return 6 if pred == IntPredicate::UGE.value.to_i64 || pred == IntPredicate::SGE.value.to_i64
+  0
+end
+
+def add_fits?(a : Int64, b : Int64, lo : Int64, hi : Int64) : Bool
+  return a <= hi - b if b > 0_i64
+  return a >= lo - b if b < 0_i64
+  a >= lo && a <= hi
+end
+
+def sub_fits?(a : Int64, b : Int64, lo : Int64, hi : Int64) : Bool
+  return a >= lo + b if b > 0_i64
+  return a <= hi + b if b < 0_i64
+  a >= lo && a <= hi
+end
+
+# This detects irreducible retreating edges without constructing LoopInfo's
+# per-loop block sets. A reducible function may still have several loops.
+def irreducible?(cfg : Cfg, dom : DomTree) : Bool
+  return false if cfg.size == 0
+  colors = [] of Int32
+  k = 0
+  while k < cfg.size
+    colors << 0
+    k = k + 1
+  end
+  nodes = [0] of Int32
+  edges = [0] of Int32
+  colors[0] = 1
+  while !nodes.empty?
+    top = nodes.size - 1
+    block = nodes[top]
+    index = edges[top]
+    if index < cfg.succs(block).size
+      successor = cfg.succs(block)[index]
+      edges[top] = index + 1
+      if colors[successor] == 0
+        colors[successor] = 1
+        nodes << successor
+        edges << 0
+      elsif colors[successor] == 1 && !dom.dominates?(successor, block)
+        return true
+      end
+    else
+      colors[block] = 2
+      nodes.pop
+      edges.pop
+    end
+  end
+  false
+end
+
+class Prover
+  def initialize(@mod : Module, @fn : Function, @cfg : Cfg, @dom : DomTree)
+    @du = DefUse.new(@fn)
+    @builder = Builder.new(@mod)
+    @ranges = Hash(Value, Interval).new
+    @facts = Hash(Value, Array(Fact)).new
+    @undo = [] of Value
+    @aliases = Hash(Value, Value).new
+    @alias_undo = [] of Value
+    @folded = Hash(Inst, Int32).new
+    @fold_order = [] of Inst
+    @checked = Hash(Inst, Int32).new
+    @live = [] of Bool
+    k = 0
+    while k < @cfg.size
+      @live << false
+      k = k + 1
+    end
+  end
+
+  def canonical_value(value : Value) : Value
+    current = value
+    # Aliases only point from a phi to an incoming value. The bounded walk is
+    # conservative when a long chain has not been collapsed yet.
+    depth = 0
+    while depth < 32
+      next_value = @aliases[current]?
+      break unless next_value
+      break if next_value == current
+      current = next_value
+      depth = depth + 1
+    end
+    current
+  end
+
+  def base(value : Value) : Interval
+    v = canonical_value(value)
+    if number = int_value(v)
+      return Interval.new(number, number)
+    end
+    range = @ranges[v]?
+    return range if range
+    return Interval.new(0_i64, 1_i64) if v.type.int? && v.type.bits == 1
+    return Interval.new(min_int(v.type.bits), max_int(v.type.bits)) if supported?(v)
+    Interval.new(1_i64, 0_i64)
+  end
+
+  def bool_constant(value : Value) : Int32
+    return -1 unless value.type.int? && value.type.bits == 1
+    number = int_value(value)
+    return -1 if number.nil?
+    number == 0_i64 ? 0 : 1
+  end
+
+  # -1 is unknown; a folded condition is visible during this walk even though
+  # the actual replacements are applied only after every scope is examined.
+  def condition(value : Value, depth : Int32) : Int32
+    return -1 if depth > 4
+    v = canonical_value(value)
+    result = bool_constant(v)
+    return result if result >= 0
+    return -1 unless v.is_a?(Inst)
+    inst = v.as(Inst)
+    folded = @folded[inst]?
+    return folded if folded
+    if inst.op == Op::Intrinsic && inst.aux.is_a?(IntrinsicAux)
+      aux = inst.aux.as(IntrinsicAux)
+      return condition(inst.args[0], depth + 1) if aux.id == IntrinsicId::ExpectI1
+    elsif inst.op == Op::Xor && inst.args.size == 2
+      if bool_constant(inst.args[0]) == 1
+        child = condition(inst.args[1], depth + 1)
+        return child < 0 ? -1 : 1 - child
+      elsif bool_constant(inst.args[1]) == 1
+        child = condition(inst.args[0], depth + 1)
+        return child < 0 ? -1 : 1 - child
+      end
+    elsif (inst.op == Op::And || inst.op == Op::Or) && inst.args.size == 2
+      a = condition(inst.args[0], depth + 1)
+      b = condition(inst.args[1], depth + 1)
+      return 0 if inst.op == Op::And && (a == 0 || b == 0)
+      return 1 if inst.op == Op::Or && (a == 1 || b == 1)
+      return 1 if inst.op == Op::And && a == 1 && b == 1
+      return 0 if inst.op == Op::Or && a == 0 && b == 0
+    end
+    -1
+  end
+
+  # Record a checked arithmetic result only when the no-overflow edge itself
+  # is dominated by the branch: a shared successor is not an edge fact.
+  def record_checked_edges : Nil
+    @cfg.rpo.each do |block|
+      term = @cfg.block(block).terminator
+      next unless term.op == Op::CondBr && term.targets[0] != term.targets[1]
+      value = term.args[0]
+      success_truth = false
+      depth = 0
+      while depth <= 4 && value.is_a?(Inst)
+        inst = value.as(Inst)
+        if inst.op == Op::Intrinsic && inst.aux.is_a?(IntrinsicAux) && inst.aux.as(IntrinsicAux).id == IntrinsicId::ExpectI1
+          value = inst.args[0]
+        elsif inst.op == Op::Xor && inst.args.size == 2 && bool_constant(inst.args[0]) == 1
+          value = inst.args[1]
+          success_truth = !success_truth
+        elsif inst.op == Op::Xor && inst.args.size == 2 && bool_constant(inst.args[1]) == 1
+          value = inst.args[0]
+          success_truth = !success_truth
+        else
+          break
+        end
+        depth = depth + 1
+      end
+      next unless depth <= 4 && value.is_a?(Inst)
+      flag = value.as(Inst)
+      next unless flag.op == Op::ExtractValue && flag.aux_int == 1_i64 && flag.args[0].is_a?(Inst)
+      pair = flag.args[0].as(Inst)
+      next unless pair.op == Op::Intrinsic
+      successor = @cfg.index(term.targets[success_truth ? 0 : 1])
+      next unless @cfg.preds(successor).size == 1 && @cfg.preds(successor)[0] == block
+      @checked[pair] = successor unless @checked.has_key?(pair)
+    end
+  end
+
+  # Recognize the compare controlling the header's edge to the latch.
+  def header_guard(header : Int32, latch : Int32, phi : Inst) : Guard?
+    term = @cfg.block(header).terminator
+    return nil unless term.op == Op::CondBr && term.targets[0] != term.targets[1]
+    cond = term.args[0]
+    inverted = false
+    depth = 0
+    while depth <= 4 && cond.is_a?(Inst)
+      inst = cond.as(Inst)
+      if inst.op == Op::Intrinsic && inst.aux.is_a?(IntrinsicAux) && inst.aux.as(IntrinsicAux).id == IntrinsicId::ExpectI1
+        cond = inst.args[0]
+      elsif inst.op == Op::Xor && inst.args.size == 2 && bool_constant(inst.args[0]) == 1
+        cond = inst.args[1]
+        inverted = !inverted
+      elsif inst.op == Op::Xor && inst.args.size == 2 && bool_constant(inst.args[1]) == 1
+        cond = inst.args[0]
+        inverted = !inverted
+      else
+        break
+      end
+      depth = depth + 1
+    end
+    return nil unless depth <= 4 && cond.is_a?(Inst)
+    compare = cond.as(Inst)
+    return nil unless compare.op == Op::ICmp && compare.args.size == 2
+    pred = compare.aux_int
+    other = compare.args[1]
+    if compare.args[0] != phi
+      return nil unless compare.args[1] == phi
+      pred = swap_pred(pred)
+      other = compare.args[0]
+    end
+    return nil unless other.type == phi.type && !indeterminate?(other)
+    edge = -1
+    k = 0
+    while k < 2
+      successor = @cfg.index(term.targets[k])
+      if @cfg.preds(successor).size == 1 && @cfg.preds(successor)[0] == header && @dom.dominates?(successor, latch)
+        edge = k
+        break
+      end
+      k = k + 1
+    end
+    return nil if edge < 0
+    truth = (edge == 0) != inverted
+    pred = inverse(pred) unless truth
+    return nil unless signed_order?(pred) || unsigned_order?(pred)
+    Guard.new(pred, other)
+  end
+
+  def step_of(phi : Inst, next_value : Value) : Int64?
+    return nil unless next_value.is_a?(Inst)
+    next_inst = next_value.as(Inst)
+    op = next_inst.op
+    args = next_inst.args
+    unsigned_add = false
+    if op == Op::ExtractValue && next_inst.aux_int == 0_i64 && args[0].is_a?(Inst)
+      pair = args[0].as(Inst)
+      return nil unless pair.op == Op::Intrinsic && pair.aux.is_a?(IntrinsicAux)
+      id = pair.aux.as(IntrinsicAux).id
+      if id == IntrinsicId::SAddOverflow || id == IntrinsicId::UAddOverflow
+        unsigned_add = id == IntrinsicId::UAddOverflow
+        op = Op::Add
+      elsif id == IntrinsicId::SSubOverflow
+        op = Op::Sub
+      else
+        return nil
+      end
+      args = pair.args
+    end
+    return nil unless (op == Op::Add || op == Op::Sub) && args.size == 2
+    constant = nil.as(Int64?)
+    if args[0] == phi
+      constant = int_value(args[1])
+      if op == Op::Sub && constant
+        return nil if constant == min_int(64)
+        constant = -constant
+      end
+    elsif op == Op::Add && args[1] == phi
+      constant = int_value(args[0])
+    end
+    return nil if constant.nil? || constant == 0_i64
+    return nil if unsigned_add && constant < 0_i64
+    constant
+  end
+
+  def safe_induction_step(next_value : Value, latch : Int32, guard : Guard, step : Int64, bits : Int32) : Bool
+    lo = min_int(bits)
+    hi = max_int(bits)
+    pred = guard.pred
+    unsigned_guard = unsigned_order?(pred)
+    next_inst = next_value.as(Inst)
+    if !unsigned_guard && next_inst.op == Op::ExtractValue && next_inst.args[0].is_a?(Inst)
+      pair = next_inst.args[0].as(Inst)
+      return false if pair.aux.is_a?(IntrinsicAux) && pair.aux.as(IntrinsicAux).id == IntrinsicId::UAddOverflow
+      successor = @checked[pair]?
+      return !successor.nil? && @dom.dominates?(successor, latch)
+    end
+    bound = base(guard.other)
+    if unsigned_guard
+      # The start is checked separately. A nonnegative bound and a step
+      # proven to stay in this signed interval also preclude unsigned wrap.
+      return false if bound.lo < 0_i64
+      lo = 0_i64
+      pred = signed_pred(pred)
+    end
+    if step > 0_i64
+      if pred == IntPredicate::SLT.value.to_i64 && bound.hi > lo
+        return add_fits?(bound.hi - 1_i64, step, lo, hi)
+      elsif pred == IntPredicate::SLE.value.to_i64
+        return add_fits?(bound.hi, step, lo, hi)
+      end
+    else
+      if pred == IntPredicate::SGT.value.to_i64 && bound.lo < hi
+        return add_fits?(bound.lo + 1_i64, step, lo, hi)
+      elsif pred == IntPredicate::SGE.value.to_i64
+        return add_fits?(bound.lo, step, lo, hi)
+      end
+    end
+    false
+  end
+
+  # Each value returned to the header is at most (or at least) the edge
+  # bound plus its step. A checked step that could exceed the type is kept
+  # at the type limit instead of computing an overflowing bound.
+  def induction_limit(guard : Guard, step : Int64, lo : Int64, hi : Int64) : Int64
+    bound = base(guard.other)
+    pred = unsigned_order?(guard.pred) ? signed_pred(guard.pred) : guard.pred
+    if step > 0_i64
+      if pred == IntPredicate::SLT.value.to_i64 && bound.hi > lo
+        upper = bound.hi - 1_i64
+        return upper + step if add_fits?(upper, step, lo, hi) # mutation M15: widen induction range
+      elsif pred == IntPredicate::SLE.value.to_i64
+        return bound.hi + step if add_fits?(bound.hi, step, lo, hi)
+      end
+      return hi
+    end
+    if pred == IntPredicate::SGT.value.to_i64 && bound.lo < hi
+      lower = bound.lo + 1_i64
+      return lower + step if add_fits?(lower, step, lo, hi)
+    elsif pred == IntPredicate::SGE.value.to_i64
+      return bound.lo + step if add_fits?(bound.lo, step, lo, hi)
+    end
+    lo
+  end
+
+  def induction(phi : Inst, header : Int32) : Interval?
+    return nil unless supported?(phi)
+    start = nil.as(Int64?)
+    step = nil.as(Int64?)
+    lo = min_int(phi.type.bits)
+    hi = max_int(phi.type.bits)
+    upper = lo
+    lower = hi
+    uses_unsigned = false
+    latches = 0
+    k = 0
+    while k < phi.args.size
+      pred = @cfg.index(phi.targets[k])
+      if @cfg.reachable?(pred)
+        value = phi.args[k]
+        if @dom.dominates?(header, pred)
+          latches = latches + 1
+          unless value == phi
+            increment = step_of(phi, value)
+            return nil if increment.nil?
+            return nil if !step.nil? && step != increment
+            guard = header_guard(header, pred, phi)
+            return nil unless guard
+            uses_unsigned = true if unsigned_order?(guard.pred)
+            return nil unless safe_induction_step(value, pred, guard, increment, phi.type.bits)
+            limit = induction_limit(guard, increment, lo, hi)
+            upper = limit if increment > 0_i64 && limit > upper
+            lower = limit if increment < 0_i64 && limit < lower
+            step = increment
+          end
+        else
+          initial = int_value(value)
+          return nil if initial.nil?
+          return nil if !start.nil? && start != initial
+          start = initial
+        end
+      end
+      k = k + 1
+    end
+    return nil unless start
+    return nil unless step
+    return nil if uses_unsigned && start < 0_i64
+    return nil if latches == 0
+    if step > 0_i64
+      upper = start if upper < start
+      return Interval.new(start, upper)
+    end
+    lower = start if lower > start
+    Interval.new(lower, start)
+  end
+
+  def structural(inst : Inst, block : Int32) : Interval?
+    return nil unless supported?(inst)
+    lo = min_int(inst.type.bits)
+    hi = max_int(inst.type.bits)
+    if inst.op == Op::Phi
+      value = induction(inst, block)
+      return value if value
+      # A phi with an unvisited or retreating input cannot be bounded by the
+      # inputs seen so far. Full ranges are the conservative alternative.
+      result_lo = hi
+      result_hi = lo
+      k = 0
+      while k < inst.args.size
+        pred = @cfg.index(inst.targets[k])
+        return nil if @cfg.rpo_number(pred) >= @cfg.rpo_number(block)
+        if @cfg.reachable?(pred)
+          return nil if indeterminate?(inst.args[k])
+          r = base(inst.args[k])
+          result_lo = r.lo if r.lo < result_lo
+          result_hi = r.hi if r.hi > result_hi
+        end
+        k = k + 1
+      end
+      return nil if result_lo > result_hi
+      return Interval.new(result_lo, result_hi)
+    elsif inst.op == Op::Select
+      return nil if indeterminate?(inst.args[1]) || indeterminate?(inst.args[2])
+      a = base(inst.args[1])
+      b = base(inst.args[2])
+      return Interval.new(a.lo < b.lo ? a.lo : b.lo, a.hi > b.hi ? a.hi : b.hi)
+    elsif inst.op == Op::And
+      return nil if indeterminate?(inst.args[0]) || indeterminate?(inst.args[1])
+      a = base(inst.args[0])
+      b = base(inst.args[1])
+      bound = hi
+      bound = a.hi if a.lo >= 0_i64 && a.hi < bound
+      bound = b.hi if b.lo >= 0_i64 && b.hi < bound
+      return Interval.new(0_i64, bound) if a.lo >= 0_i64 || b.lo >= 0_i64
+    elsif inst.op == Op::URem
+      return nil if indeterminate?(inst.args[0]) || indeterminate?(inst.args[1])
+      divisor = base(inst.args[1])
+      return Interval.new(0_i64, divisor.hi - 1_i64) if divisor.lo > 0_i64
+    elsif inst.op == Op::ZExt
+      return nil if indeterminate?(inst.args[0])
+      source = base(inst.args[0])
+      return source if source.lo >= 0_i64
+      bits = inst.args[0].type.bits
+      return Interval.new(0_i64, (1_i64 << bits) - 1_i64) if bits < 63
+      return Interval.new(0_i64, max_int(64)) if bits == 63
+    elsif inst.op == Op::SExt
+      return nil if indeterminate?(inst.args[0])
+      if inst.args[0].type.bits == 1
+        v = int_value(inst.args[0])
+        return Interval.new(-1_i64, -1_i64) if v == 1_i64
+        return Interval.new(0_i64, 0_i64) if v == 0_i64
+        return Interval.new(-1_i64, 0_i64)
+      end
+      return base(inst.args[0])
+    elsif inst.op == Op::Trunc
+      return nil if indeterminate?(inst.args[0])
+      source = base(inst.args[0])
+      return source if source.lo >= lo && source.hi <= hi
+    end
+    nil
+  end
+
+  def build_ranges : Nil
+    record_checked_edges
+    @cfg.rpo.each do |block|
+      @cfg.block(block).insts.each do |inst|
+        range = structural(inst, block)
+        @ranges[inst] = range if range
+      end
+    end
+  end
+
+  def push_one(value : Value, fact : Fact) : Nil
+    list = @facts[value]?
+    unless list
+      list = [] of Fact
+      @facts[value] = list
+    end
+    list << fact
+    @undo << value
+  end
+
+  def push_facts(value : Value, truth : Bool, depth : Int32) : Nil
+    return if depth > 4
+    v = canonical_value(value)
+    return unless v.is_a?(Inst)
+    inst = v.as(Inst)
+    if inst.op == Op::Intrinsic && inst.aux.is_a?(IntrinsicAux) && inst.aux.as(IntrinsicAux).id == IntrinsicId::ExpectI1
+      push_facts(inst.args[0], truth, depth + 1)
+    elsif inst.op == Op::Xor && inst.args.size == 2 && bool_constant(inst.args[0]) == 1
+      push_facts(inst.args[1], !truth, depth + 1)
+    elsif inst.op == Op::Xor && inst.args.size == 2 && bool_constant(inst.args[1]) == 1
+      push_facts(inst.args[0], !truth, depth + 1)
+    elsif (inst.op == Op::And && truth) || (inst.op == Op::Or && !truth)
+      push_facts(inst.args[0], truth, depth + 1)
+      push_facts(inst.args[1], truth, depth + 1)
+    elsif inst.op == Op::ICmp && inst.args.size == 2
+      left = canonical_value(inst.args[0])
+      right = canonical_value(inst.args[1])
+      return unless supported?(left) && left.type == right.type
+      return if indeterminate?(left) || indeterminate?(right) || same?(left, right)
+      pred = truth ? inst.aux_int : inverse(inst.aux_int)
+      return if pred < 0_i64
+      fact = Fact.new(pred, left, right)
+      push_one(left, fact)
+      push_one(right, fact)
+    end
+  end
+
+  def range_at(value : Value) : Interval
+    v = canonical_value(value)
+    original = base(v)
+    lo = original.lo
+    hi = original.hi
+    list = @facts[v]?
+    return original unless list
+    index = list.size - 1
+    count = 0
+    while index >= 0 && count < 16
+      fact = list[index]
+      pred = fact.pred
+      other = fact.right
+      if !same?(fact.left, v)
+        pred = swap_pred(pred)
+        other = fact.left
+      end
+      range = base(other)
+      if unsigned_order?(pred)
+        if lo >= 0_i64 && range.lo >= 0_i64
+          pred = signed_pred(pred)
+        elsif range.lo >= 0_i64 && (pred == IntPredicate::ULT.value.to_i64 || pred == IntPredicate::ULE.value.to_i64)
+          lo = 0_i64 if lo < 0_i64
+          pred = signed_pred(pred)
+        end
+      end
+      if pred == IntPredicate::EQ.value.to_i64
+        lo = range.lo if lo < range.lo
+        hi = range.hi if hi > range.hi
+      elsif pred == IntPredicate::NE.value.to_i64 && range.lo == range.hi
+        if lo == range.lo && lo == hi
+          return Interval.new(1_i64, 0_i64)
+        elsif lo == range.lo
+          lo = lo + 1_i64
+        elsif hi == range.hi
+          hi = hi - 1_i64
+        end
+      elsif pred == IntPredicate::SLT.value.to_i64
+        return Interval.new(1_i64, 0_i64) if range.hi == min_int(64)
+        bound = range.hi - 1_i64
+        hi = bound if hi > bound
+      elsif pred == IntPredicate::SLE.value.to_i64
+        hi = range.hi if hi > range.hi
+      elsif pred == IntPredicate::SGT.value.to_i64
+        return Interval.new(1_i64, 0_i64) if range.lo == max_int(64)
+        bound = range.lo + 1_i64
+        lo = bound if lo < bound
+      elsif pred == IntPredicate::SGE.value.to_i64
+        lo = range.lo if lo < range.lo
+      end
+      index = index - 1
+      count = count + 1
+    end
+    Interval.new(lo, hi)
+  end
+
+  # Returns -1 when the comparison is not established, otherwise its i1 value.
+  def compare(pred : Int64, left : Value, right : Value) : Int32
+    a = canonical_value(left)
+    b = canonical_value(right)
+    return -1 unless supported?(a) && a.type == b.type
+    return -1 if indeterminate?(a) || indeterminate?(b)
+    ar = range_at(a)
+    br = range_at(b)
+    return -1 if ar.lo > ar.hi || br.lo > br.hi
+    query = pred
+    query = signed_pred(query) if ar.lo >= 0_i64 && br.lo >= 0_i64
+    query_mask = outcomes(query)
+    return -1 if query_mask == 0
+    if same?(a, b)
+      return (query_mask & 2) != 0 ? 1 : 0
+    end
+    list = @facts[a]?
+    if list
+      index = list.size - 1
+      count = 0
+      while index >= 0 && count < 16
+        fact = list[index]
+        fp = fact.pred
+        if same?(fact.left, a) && same?(fact.right, b)
+          # already oriented
+        elsif same?(fact.left, b) && same?(fact.right, a)
+          fp = swap_pred(fp)
+        else
+          index = index - 1
+          count = count + 1
+          next
+        end
+        fp = signed_pred(fp) if ar.lo >= 0_i64 && br.lo >= 0_i64
+        unless (unsigned_order?(fp) && signed_order?(query)) || (signed_order?(fp) && unsigned_order?(query))
+          mask = outcomes(fp)
+          return 1 if mask != 0 && (mask & query_mask) == mask
+          return 0 if mask != 0 && (mask & query_mask) == 0
+        end
+        index = index - 1
+        count = count + 1
+      end
+    end
+    return -1 if unsigned_order?(query) && (ar.lo < 0_i64 || br.lo < 0_i64)
+    possible = 0
+    possible = possible | 1 if ar.lo < br.hi
+    possible = possible | 2 if ar.lo <= br.hi && br.lo <= ar.hi
+    possible = possible | 4 if ar.hi > br.lo
+    return -1 if possible == 0
+    return 1 if (possible & query_mask) == possible
+    return 0 if (possible & query_mask) == 0
+    -1
+  end
+
+  def overflow_safe?(extract : Inst) : Bool
+    return false unless extract.aux_int == 1_i64 && extract.args[0].is_a?(Inst)
+    pair = extract.args[0].as(Inst)
+    return false unless pair.op == Op::Intrinsic && pair.aux.is_a?(IntrinsicAux) && pair.args.size == 2
+    a = canonical_value(pair.args[0])
+    b = canonical_value(pair.args[1])
+    return false unless supported?(a) && a.type == b.type
+    return false if indeterminate?(a) || indeterminate?(b)
+    x = range_at(a)
+    y = range_at(b)
+    return false if x.lo > x.hi || y.lo > y.hi
+    lo = min_int(a.type.bits)
+    hi = max_int(a.type.bits)
+    id = pair.aux.as(IntrinsicAux).id
+    if id == IntrinsicId::SAddOverflow
+      return add_fits?(x.lo, y.lo, lo, hi) && add_fits?(x.hi, y.hi, lo, hi)
+    elsif id == IntrinsicId::UAddOverflow
+      return false if x.lo < 0_i64 || y.lo < 0_i64
+      return true if a.type.bits == 64
+      limit = a.type.bits == 63 ? max_int(64) : (1_i64 << a.type.bits) - 1_i64
+      return x.hi <= limit - y.hi
+    elsif id == IntrinsicId::SSubOverflow
+      return sub_fits?(x.lo, y.hi, lo, hi) && sub_fits?(x.hi, y.lo, lo, hi)
+    elsif id == IntrinsicId::SMulOverflow
+      cap = 2147483648_i64
+      return false if x.lo < -cap || x.hi > cap || y.lo < -cap || y.hi > cap
+      aa = x.lo * y.lo
+      ab = x.lo * y.hi
+      ba = x.hi * y.lo
+      bb = x.hi * y.hi
+      return aa >= lo && aa <= hi && ab >= lo && ab <= hi && ba >= lo && ba <= hi && bb >= lo && bb <= hi
+    end
+    false
+  end
+
+  def dead_edge?(from : Int32, to : Int32) : Bool
+    term = @cfg.block(from).terminator
+    return false unless term.op == Op::CondBr && term.targets[0] != term.targets[1]
+    known = condition(term.args[0], 0)
+    return false if known < 0
+    @cfg.index(term.targets[known == 1 ? 0 : 1]) != to
+  end
+
+  def enter(block : Int32) : Bool
+    incoming = -1
+    live_count = 0
+    retreat = false
+    if block == 0
+      @live[block] = true
+    else
+      @cfg.preds(block).each do |pred|
+        next unless @cfg.reachable?(pred)
+        if @cfg.rpo_number(pred) >= @cfg.rpo_number(block)
+          retreat = true
+        elsif @live[pred] && !dead_edge?(pred, block)
+          incoming = pred
+          live_count = live_count + 1
+        end
+      end
+      # Unknown retreating edges are kept live, but never supply an edge fact.
+      @live[block] = live_count > 0 || retreat
+    end
+    return false unless @live[block]
+    if block != 0 && !retreat && live_count == 1
+      predecessor = @cfg.block(incoming)
+      term = predecessor.terminator
+      if term.op == Op::CondBr && term.targets[0] != term.targets[1]
+        truth = @cfg.index(term.targets[0]) == block # mutation M14: opposite successor fact
+        push_facts(term.args[0], truth, 0)
+      end
+      @cfg.block(block).insts.each do |inst|
+        break unless inst.op == Op::Phi
+        k = 0
+        while k < inst.targets.size
+          if @cfg.index(inst.targets[k]) == incoming
+            @aliases[inst] = canonical_value(inst.args[k])
+            @alias_undo << inst
+            break
+          end
+          k = k + 1
+        end
+      end
+    end
+    @cfg.block(block).insts.each do |inst|
+      next if @du.use_count(inst) == 0
+      result = -1
+      if inst.op == Op::ICmp
+        result = compare(inst.aux_int, inst.args[0], inst.args[1])
+      elsif inst.op == Op::ExtractValue && overflow_safe?(inst)
+        result = 0
+      end
+      if result >= 0
+        @folded[inst] = result
+        @fold_order << inst
+      end
+    end
+    true
+  end
+
+  def run : Bool
+    build_ranges
+    nodes = [0] of Int32
+    next_child = [-1] of Int32
+    fact_marks = [0] of Int32
+    alias_marks = [0] of Int32
+    while !nodes.empty?
+      top = nodes.size - 1
+      block = nodes[top]
+      if next_child[top] == -1
+        fact_marks[top] = @undo.size
+        alias_marks[top] = @alias_undo.size
+        next_child[top] = enter(block) ? 0 : @dom.children(block).size
+      end
+      index = next_child[top]
+      if index < @dom.children(block).size
+        child = @dom.children(block)[index]
+        next_child[top] = index + 1
+        nodes << child
+        next_child << -1
+        fact_marks << 0
+        alias_marks << 0
+      else
+        while @undo.size > fact_marks[top]
+          value = @undo.pop
+          list = @facts[value]?
+          list.pop if list
+        end
+        while @alias_undo.size > alias_marks[top]
+          @aliases.delete(@alias_undo.pop)
+        end
+        nodes.pop
+        next_child.pop
+        fact_marks.pop
+        alias_marks.pop
+      end
+    end
+    return false if @fold_order.empty?
+    editor = Editor.new(@fn, @du)
+    @fold_order.each do |inst|
+      result = @folded[inst]
+      editor.replace_all_uses(inst, @builder.const_int(inst.type, result.to_i64))
+      editor.erase(inst)
+    end
+    editor.flush
+    true
+  end
+end
+
+pub def run_prove(mod : Module, fn : Function) : Bool
+  return false if fn.declaration? || fn.blocks.empty?
+  interesting = false
+  fn.blocks.each do |block|
+    block.insts.each do |inst|
+      interesting = true if inst.op == Op::ICmp || (inst.op == Op::ExtractValue && inst.aux_int == 1_i64)
+    end
+  end
+  return false unless interesting
+  cfg = Cfg.new(fn)
+  dom = DomTree.new(cfg)
+  return false if irreducible?(cfg, dom)
+  Prover.new(mod, fn, cfg, dom).run
+end

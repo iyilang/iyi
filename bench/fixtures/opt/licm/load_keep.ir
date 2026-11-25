@@ -1,0 +1,16 @@
+; iyi-ir 1
+source_filename = "load_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @load_keep(i1 %run, ptr %source, ptr %out) {
+entry:
+  br label %head
+head:
+  br i1 %run, label %body, label %done
+body:
+  %value = load i64, ptr %source, align 8
+  store i64 %value, ptr %out, align 8
+  br label %head
+done:
+  ret void
+}

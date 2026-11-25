@@ -166,7 +166,7 @@ def run_self_checks : Nil
   )
   assert_equal(direct.linker, "\"C:\\Program Files\\MSVC\\Bin\\LiNk.ExE\"", "direct linker quoted")
   assert_equal(direct.cmd,
-    "\"C:\\Program Files\\MSVC\\Bin\\LiNk.ExE\" /nologo \"obj dir\\first.obj\" second.obj \"/OUT:out dir\\app.exe\" \"/LIBPATH:C:\\Program Files\\SDK\\lib\" /DEFAULTLIB:kernel32.lib /DEBUG:FULL /PDBALTPATH:%_PDB% /INCREMENTAL:NO /STACK:0x800000 /LIBPATH:custom /NODEFAULTLIB:old.lib",
+    "\"C:\\Program Files\\MSVC\\Bin\\LiNk.ExE\" /nologo \"obj dir\\first.obj\" second.obj \"/OUT:out dir\\app.exe\" \"/LIBPATH:C:\\Program Files\\SDK\\lib\" /DEFAULTLIB:kernel32.lib /DEBUG:FULL /PDBALTPATH:%_PDB% /Brepro /INCREMENTAL:NO /STACK:0x800000 /LIBPATH:custom /NODEFAULTLIB:old.lib",
     "direct link.exe uses /OUT and SDK arguments without /link")
   assert_true(direct.objects.nil?, "direct linker returns no separate objects")
 
@@ -181,10 +181,24 @@ def run_self_checks : Nil
   )
   assert_equal(driver.linker, "\"C:/Program Files/MSVC/cl.exe\"", "driver quoted")
   assert_equal(driver.cmd,
-    "\"C:/Program Files/MSVC/cl.exe\" /nologo \"object dir/main.obj\" \"/Feout dir/app.exe\" /link \"/LIBPATH:C:/Program Files/SDK/lib\" /INCREMENTAL:NO /STACK:0x800000 /LIBPATH:custom /OPT:REF",
+    "\"C:/Program Files/MSVC/cl.exe\" /nologo \"object dir/main.obj\" \"/Feout dir/app.exe\" /link \"/LIBPATH:C:/Program Files/SDK/lib\" /Brepro /INCREMENTAL:NO /STACK:0x800000 /LIBPATH:custom /OPT:REF",
     "cl.exe uses /Fe and /link with SDK arguments")
   assert_true(driver.objects.nil?, "driver returns no separate objects")
   assert_true(!Linker.direct_msvc_linker?("C:/tools/blink.exe"), "direct linker requires the full basename")
+  ["link", "link.exe", "lld-link", "lld-link.exe"].each do |name|
+    result = Linker.linker_command(t3, ["foo.obj"], "out.exe", msvc_linker: "C:/tools/#{name}")
+    assert_true(result.cmd.includes?("/OUT:out.exe /Brepro /INCREMENTAL:NO"), "#{name} is a reproducible direct linker")
+    assert_true(!result.cmd.includes?(" /link "), "#{name} has no driver pass-through")
+  end
+  ["cl", "cl.exe", "clang-cl", "clang-cl.exe"].each do |name|
+    result = Linker.linker_command(t3, ["foo.obj"], "out.exe", msvc_linker: "C:\\tools\\#{name}")
+    assert_true(result.cmd.includes?("/Feout.exe /link /Brepro /INCREMENTAL:NO"), "#{name} is a reproducible driver")
+  end
+  ["custom-cl.exe", "blink.exe", "clang-cl-wrapper", "custom"].each do |name|
+    result = Linker.linker_command(t3, ["foo.obj"], "out.exe", msvc_linker: "C:/tools/#{name}")
+    assert_true(!result.cmd.includes?("/Brepro"), "#{name} must not receive /Brepro")
+    assert_true(result.cmd.includes?("/Feout.exe /link "), "#{name} uses driver pass-through")
+  end
   puts "  direct link.exe and cl.exe command shapes matched"
 
   puts "ALL SELFHOST PLATFORM CHECKS PASSED SUCCESSFULLY!"

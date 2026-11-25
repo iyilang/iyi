@@ -134,6 +134,59 @@ end
             raise RuntimeError(f"{label}: exit {result.returncode}\n{result.stdout}\n{result.stderr}")
         return result.stdout
 
+    def diagnose_chmod_stack(case_env, observed_env, executable):
+        # Run the same compiled program without observation, then compile the
+        # same program with a larger task stack. Neither replaces the failed
+        # acceptance run; both help identify where the overflow occurs.
+        unobserved_env = observed_env.copy()
+        unobserved_env.pop("IYI_OBSERVE", None)
+        unobserved = subprocess.run([str(executable)], cwd=project, env=unobserved_env,
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+        source = test.read_text(encoding="utf-8")
+        anchor = "group do |g|"
+        if source.count(anchor) != 1:
+            raise AssertionError("chmod stack diagnostic fixture no longer applies")
+        larger_source = project / "chmod_large_stack.iyi"
+        larger_source.write_text(source.replace(anchor, "IyiFiber.stack_bytes = 1048576_u64\n" + anchor), encoding="utf-8")
+        larger_exe = work / "chmod-large-stack.exe"
+        run("chmod larger-stack diagnostic build", ["build", "-Diyi_observe", "-o", str(larger_exe), str(larger_source)], case_env)
+        larger_env = observed_env.copy()
+        larger_env["IYI_OBSERVE"] = str(work / "chmod-large-stack.trace")
+        larger = subprocess.run([str(larger_exe)], cwd=project, env=larger_env,
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+        return (f"unobserved exit {unobserved.returncode}\n{unobserved.stdout}\n{unobserved.stderr}"
+                f"\nlarger-stack observed exit {larger.returncode}\n{larger.stdout}\n{larger.stderr}")
+
+    def diagnose_chmod_fault(case_env, observed_env):
+        # Preserve the ordinary observer and file implementations. Only the
+        # fault handler is labelled, so a false guard-page classification can
+        # be distinguished from actual Windows stack exhaustion.
+        original_prelude = prelude.read_text(encoding="utf-8")
+        diagnostic = original_prelude
+        def marker(label, indent):
+            return (f'{indent}message = "CHMOD_STACK_FAULT {label}\\n"\n'
+                    f'{indent}LibC.WriteFile(handle, message.to_unsafe.as(Void*), message.bytesize, pointerof(written), nil)\n')
+        overflow = "    if code == IYI_WIN_STACK_OVERFLOW\n"
+        guard = "        if IyiScheduler.fiber_guard_hit?(faulting)\n"
+        if diagnostic.count(overflow) != 1 or diagnostic.count(guard) != 2:
+            raise AssertionError("Windows fault handler diagnostic anchors changed")
+        diagnostic = diagnostic.replace(overflow, overflow + marker("overflow", "      "), 1)
+        diagnostic = diagnostic.replace(guard, guard + marker("guard", "          "), 1)
+        position = diagnostic.index(guard, diagnostic.index(guard) + len(guard))
+        diagnostic = diagnostic[:position] + diagnostic[position:].replace(
+            guard, guard + marker("access", "          "), 1)
+        diagnostic_exe = work / "chmod-fault-diagnostic.exe"
+        try:
+            prelude.write_text(diagnostic, encoding="utf-8")
+            run("chmod fault diagnostic build", ["build", "-Diyi_observe", "-o", str(diagnostic_exe), str(test)], case_env)
+            fault_env = observed_env.copy()
+            fault_env["IYI_OBSERVE"] = str(work / "chmod-fault-diagnostic.trace")
+            result = subprocess.run([str(diagnostic_exe)], cwd=project, env=fault_env,
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
+            return f"fault diagnostic exit {result.returncode}\n{result.stdout}\n{result.stderr}"
+        finally:
+            prelude.write_text(original_prelude, encoding="utf-8")
+
     def diagnose_chmod(case_env, observed_env):
         # Only a failed Windows run takes this path. The normal proof stays
         # uninstrumented; the second build names the recursive boundary.
@@ -221,10 +274,15 @@ end
         if observed.returncode:
             detail = ""
             if label == "chmod" and os.name == "nt":
-                try:
-                    detail = "\n" + diagnose_chmod(case_env, observed_env)
-                except Exception as exc:
-                    detail = f"\nchmod diagnostic failed: {exc}"
+                for name, diagnosis in (
+                    ("stack", lambda: diagnose_chmod_stack(case_env, observed_env, executable)),
+                    ("fault", lambda: diagnose_chmod_fault(case_env, observed_env)),
+                    ("observer", lambda: diagnose_chmod(case_env, observed_env)),
+                ):
+                    try:
+                        detail += "\n" + diagnosis()
+                    except Exception as exc:
+                        detail += f"\nchmod {name} diagnostic failed: {exc}"
             raise RuntimeError(f"{label}: exit {observed.returncode}\n{observed.stdout}\n{observed.stderr}{detail}")
         trace = trace_path.read_bytes()
         records = []

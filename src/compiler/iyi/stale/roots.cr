@@ -1,3 +1,5 @@
+require "../util"
+
 module Iyi::Stale
   record RootPath, root : String, path : String do
     def to_s(io : IO) : Nil
@@ -26,7 +28,7 @@ module Iyi::Stale
     # The real path when the directory exists, else the expanded path.
     def self.real(path : String) : String
       expanded = File.expand_path(path)
-      File.exists?(expanded) ? (File.realpath(expanded) rescue expanded) : expanded
+      File.exists?(expanded) ? (Iyi.long_path(File.realpath(expanded)) rescue expanded) : expanded
     end
 
     def self.default(program : Program, entry_filename : String? = nil, entry_code : String? = nil, cache_root : String? = nil) : Roots

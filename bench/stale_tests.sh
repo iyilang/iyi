@@ -741,7 +741,16 @@ r26_run2="$(run_json "$WORK/r26" r26_test.iyi)"
 expect_eq "$(printf '%s' "$r26_run2" | json_cached)" 0 "r26 run 2 cached 0 (disk T1 does not match receipt)"
 
 printf '%s\n' "$T0" > "$WORK/r26/r26_test.iyi"
-r26_run3="$(run_json "$WORK/r26" r26_test.iyi)"
+if [ "$KEEP_GOING" = 1 ]; then
+  (cd "$WORK/r26" && "$IYI" test --cached --json --explain r26_test.iyi) > "$WORK/r26/run3.explain" 2>/dev/null || true
+  r26_run3="$(explained "$WORK/r26/run3.explain" json)"
+  if [ "$(printf '%s' "$r26_run3" | json_cached)" != 1 ]; then
+    echo "    [row 26 decision of the checked run]" >&2
+    explained "$WORK/r26/run3.explain" lines >&2 || true
+  fi
+else
+  r26_run3="$(run_json "$WORK/r26" r26_test.iyi)"
+fi
 expect_eq "$(printf '%s' "$r26_run3" | json_cached)" 1 "r26 run 3 cached 1 (restored T0 hits receipt)"
 (cd "$WORK/r26" && "$IYI" test --cached --explain r26_test.iyi) > "$WORK/r26/explain.txt" 2>&1
 expect_contains "$(cat "$WORK/r26/explain.txt")" "hit from local" "r26 run 3 hit from local"
@@ -783,9 +792,13 @@ assert ({{ env("CRYSTAL_DAEMON_SOCKET") || "unset" }}) == "unset"
 IYI
 fi
 if [ "$WINDOWS" -eq 1 ]; then
-  # A repeated layer name may be folded by the Windows loader into the first, so
-  # the second value adds a different layer rather than repeating one.
-  r28_first=RunAsInvoker; r28_second="RunAsInvoker 256Color"; r28_name=__COMPAT_LAYER
+  # The Windows loader reads `__COMPAT_LAYER` when it starts a process and
+  # hands the process only what it kept: a process started with
+  # `RunAsInvoker 256Color` sees `RunAsInvoker` (job 139040654616, run
+  # 45565948260), so a second value of that spelling changed nothing the build
+  # could see and the receipt rightly hit. `RunAsInvoker HighDpiAware` arrives
+  # whole, and adds a different layer rather than repeating the first.
+  r28_first=RunAsInvoker; r28_second="RunAsInvoker HighDpiAware"; r28_name=__COMPAT_LAYER
 else
   r28_first=/tmp/r28_dir1; r28_second=/tmp/r28_dir2; r28_name=DYLD_LIBRARY_PATH
 fi
@@ -816,7 +829,7 @@ expect_eq "$(printf '%s' "$r28_run1" | json_failed)" 0 "r28 run 1: the test sees
 expect_eq "$(printf '%s' "$r28_run1" | json_cached)" 0 "r28 run 1 recorded"
 r28_run2="$(r28_with "$r28_first" : "$WORK/r28-none-2.sock" "$WORK/r28" --cached --json loader_test.iyi)"
 expect_eq "$(printf '%s' "$r28_run2" | json_cached)" 1 "changing only daemon variables still hits"
-r28_changed_file="$WORK/r28/loader-explain.txt"
+r28_changed_file="$WORK/r28-loader-explain.txt"
 r28_with "$r28_second" :: "$WORK/r28-none-2.sock" "$WORK/r28" --cached --json --explain loader_test.iyi > "$r28_changed_file"
 expect_contains "$(explained "$r28_changed_file" lines)" "miss: link changed" "loader change names the link input"
 r28_changed="$(explained "$r28_changed_file" json)"
@@ -831,7 +844,11 @@ r28_limited() {
   if [ "$WINDOWS" -eq 0 ]; then
     (cur_nofile=$(ulimit -S -n); ulimit -S -n $((cur_nofile - 1)); run_json "$WORK/r28" "$@")
   else
-    python3 - "$IYI" "$WORK/r28" "$@" <<'PY'
+    # The directory is entered here, not named to python: the key holds the
+    # test file's path as `__FILE__` (D18), so a run started from a spelling of
+    # the directory that bash does not give (`RUNNER~1` for `runneradmin`) is
+    # another build, and the miss would name its call path, not the limit.
+    (cd "$WORK/r28" && python3 - "$IYI" "$@" <<'PY'
 import ctypes, subprocess, sys
 from ctypes import wintypes
 
@@ -866,13 +883,14 @@ if not k.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(lim
 if not k.AssignProcessToJobObject(job, k.GetCurrentProcess()):
     raise ctypes.WinError(ctypes.get_last_error())
 try:
-    sys.exit(subprocess.call([sys.argv[1], "test", "--cached", "--json", *sys.argv[3:]], cwd=sys.argv[2]))
+    sys.exit(subprocess.call([sys.argv[1], "test", "--cached", "--json", *sys.argv[2:]]))
 finally:
     k.CloseHandle(job)
 PY
+    )
   fi
 }
-r28_explain="$WORK/r28/explain.txt"
+r28_explain="$WORK/r28-explain.txt"
 r28_limited --explain loader_test.iyi > "$r28_explain"
 expect_contains "$(explained "$r28_explain" lines)" "miss: profile changed" "different profile reason on limit change"
 expect_eq "$(explained "$r28_explain" json | json_cached)" 0 "zero receipts on profile miss"
@@ -1456,11 +1474,17 @@ raise "macro run lost" unless ({{ run("./helper") }}) == 42
 IYI
 rm -rf "$CACHE"
 run_json "$WORK/macro-run" run_test.iyi >/dev/null
-row50_hit="$(run_json "$WORK/macro-run" run_test.iyi)"
-if [ "$KEEP_GOING" = 1 ] && [ "$(printf '%s' "$row50_hit" | json_cached)" != 1 ]; then
-  echo "    [row 50 explain]" >&2
-  (cd "$WORK/macro-run" && "$IYI" test --cached --explain run_test.iyi) >&2 || true
-  (cd "$WORK/macro-run" && "$IYI" test --cached --explain run_test.iyi) >&2 || true
+if [ "$KEEP_GOING" = 1 ]; then
+  # The checked run explains itself: a miss names the key part that moved. An
+  # explain run after a miss would hit, and say nothing about the miss.
+  (cd "$WORK/macro-run" && "$IYI" test --cached --json --explain run_test.iyi) > "$WORK/macro-run/row50.explain" 2>/dev/null || true
+  row50_hit="$(explained "$WORK/macro-run/row50.explain" json)"
+  if [ "$(printf '%s' "$row50_hit" | json_cached)" != 1 ]; then
+    echo "    [row 50 decision of the checked run]" >&2
+    explained "$WORK/macro-run/row50.explain" lines >&2 || true
+  fi
+else
+  row50_hit="$(run_json "$WORK/macro-run" run_test.iyi)"
 fi
 expect_eq "$(printf '%s' "$row50_hit" | json_cached)" 1 "cold macro run helper hits"
 
@@ -1617,7 +1641,16 @@ raise "macro run lost" unless ({{ run("./helper") }}) == 42
 IYI
 rm -rf "$CACHE/tests-v1"
 run_json "$WORK/r55" run_test.iyi >/dev/null
-row55="$(run_json "$WORK/r55" run_test.iyi)"
+if [ "$KEEP_GOING" = 1 ]; then
+  (cd "$WORK/r55" && "$IYI" test --cached --json --explain run_test.iyi) > "$WORK/r55/run2.explain" 2>/dev/null || true
+  row55="$(explained "$WORK/r55/run2.explain" json)"
+  if [ "$(printf '%s' "$row55" | json_cached)" != 1 ]; then
+    echo "    [row 55 decision of the checked run]" >&2
+    explained "$WORK/r55/run2.explain" lines >&2 || true
+  fi
+else
+  row55="$(run_json "$WORK/r55" run_test.iyi)"
+fi
 expect_eq "$(printf '%s' "$row55" | json_cached)" 1 "the macro run test still hits"
 expect_eq "$(printf '%s' "$row55" | json_test run_test.iyi check)" compiler "the macro run is checked by the compiler"
 expect_contains "$(printf '%s' "$row55" | json_test run_test.iyi check_reason)" "a macro ran a program" "the reason names the macro run"
@@ -1714,7 +1747,7 @@ File.write(File.join(ctl, "pid-$name"), "#{Process.pid}")
 File.write(File.join(ctl, "started-$name"), "1")
 waited = 0
 while !File.exists?(File.join(ctl, "release"))
-  # `sleep` takes milliseconds: 3,000 steps of 100 ms is the five minutes this
+  # sleep takes milliseconds: 3,000 steps of 100 ms is the five minutes this
   # guard is meant to be. At 300 steps of 1 ms the test died in a third of a
   # second, before a slow build (Windows) had recorded the quick receipts.
   raise "never released" if waited >= 3000
@@ -1725,12 +1758,16 @@ IYI
 done
 rm -rf "$CACHE/tests-v1"
 if [ "$WINDOWS" -eq 1 ]; then
-  python3 - "$IYI" "$r58" "$r58_ctl" "$CACHE" <<'PY'
+  (cd "$r58" && R58_CTL="$r58_ctl" python3 - "$IYI" "$r58" "$r58_ctl" "$CACHE" <<'PY'
 import ctypes, glob, os, signal, subprocess, sys, time
 from ctypes import wintypes
 
 iyi, root, ctl, cache = sys.argv[1:]
-env = dict(os.environ, R58_CTL=ctl)
+# The runner inherits this process's directory and environment, as the rerun
+# inherits bash's: `cwd=root` spelled the directory `RUNNER~1` where bash's `cd`
+# says `runneradmin`, and `dict(os.environ)` spells every name in upper case.
+# The key holds the test file's path as `__FILE__` (D18), so a rerun from
+# another spelling is another build and the finished tests' receipts do not hit.
 k = ctypes.WinDLL("kernel32", use_last_error=True)
 k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 k.OpenProcess.restype = wintypes.HANDLE
@@ -1741,12 +1778,12 @@ handles = []
 with open(os.path.join(root, "interrupted.json"), "wb") as out, \
      open(os.path.join(root, "interrupted.err"), "wb") as err:
     runner = subprocess.Popen([iyi, "test", "--fresh", "--json", "-p", "4", "."],
-                              cwd=root, env=env, stdout=out, stderr=err,
+                              stdout=out, stderr=err,
                               creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
     try:
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
-            receipts = glob.glob(os.path.join(cache, "tests-v1", "**", "records", "*.json"), recursive=True)
+            receipts = glob.glob(os.path.join(cache, "tests-v1", "records", "*", "*.json"))
             if len(receipts) >= 2 and all(os.path.isfile(os.path.join(ctl, "started-" + n)) for n in ("slow_a", "slow_b")):
                 break
             if runner.poll() is not None:
@@ -1787,6 +1824,7 @@ with open(os.path.join(root, "interrupted.json"), "wb") as out, \
         for _, handle in handles:
             k.CloseHandle(handle)
 PY
+  )
 else
 (cd "$r58" && R58_CTL="$r58_ctl" exec "$IYI" test --fresh --json -p 4 .) > "$r58/interrupted.json" 2> "$r58/interrupted.err" &
 r58_pid=$!
@@ -1835,8 +1873,21 @@ done
 fi
 touch "$r58_ctl/release"
 set +e
-r58_after="$(cd "$r58" && R58_CTL="$r58_ctl" "$IYI" test --cached --json -p 4 .)"
-r58_after_status=$?
+if [ "$KEEP_GOING" = 1 ]; then
+  # The checked run explains itself: the decision of each test, in file order,
+  # then the JSON document. A second run after a miss would hit.
+  (cd "$r58" && R58_CTL="$r58_ctl" "$IYI" test --cached --json --explain -p 4 .) > "$r58/after.explain"
+  r58_after_status=$?
+  r58_after="$(tail -n 1 "$r58/after.explain")"
+  if [ "$(printf '%s' "$r58_after" | json_cached)" != 2 ]; then
+    echo "    [row 58 decisions of the checked rerun]" >&2
+    sed '$d' "$r58/after.explain" >&2 || true
+    printf '%s' "$r58_after" | show_misses
+  fi
+else
+  r58_after="$(cd "$r58" && R58_CTL="$r58_ctl" "$IYI" test --cached --json -p 4 .)"
+  r58_after_status=$?
+fi
 set -e
 if [ "$r58_after_status" -ne 0 ]; then
   printf '%s\n' "$r58_after" >&2

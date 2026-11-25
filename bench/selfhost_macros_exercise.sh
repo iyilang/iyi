@@ -15,6 +15,17 @@
 # file is compared against the original, and a patch that matched nothing is
 # reported as proving nothing rather than passing quietly.
 #
+# Section 2c checks the file methods and env against the hosted rule (macro
+# confinement, methods.cr 40-243). Each case is written as a key=value file and
+# expanded by the hosted oracle (--confine) and by the port (--confine) on a
+# temporary layout, and the verdict and message must match. The one difference
+# the port keeps by design is a macro expanded with no confinement context: it
+# refuses, where hosted resolves the package from the file itself. The mutation
+# proofs at the end rebuild the port on each condition and require a difference.
+# Every path a native program reads is spelled the way native_path spells it, and a run that gives no
+# verdict (a crash, a non-zero exit, empty output) stops the gate with exit 76: it is never identical.
+# On Windows the missing-file and directory read errors are host-limited: hosted forwards Win32 text while the port uses POSIX wording.
+#
 #   bash bench/selfhost_macros_exercise.sh
 set -eu
 status=0
@@ -50,6 +61,7 @@ HOSTED_COMPILER="$REPO/bin/crystal"
 INTERP="$REPO/src/compiler/macros/interpreter.iyi"
 PARSER="$REPO/src/compiler/macros/macro_parser.iyi"
 ENGINE="$REPO/src/compiler/macros/engine.iyi"
+CONFINEMENT="$REPO/src/compiler/macros/confinement.iyi"
 . "$REPO/bench/lib/mutation.sh"
 if [ -n "${MACRO_GATE_KEEP:-}" ]; then
   WORK="$MACRO_GATE_KEEP"
@@ -86,6 +98,7 @@ for phrase in \
   "testing macro code and definition generation... ok" \
   "testing @type as the enclosing class's TypeNode... ok" \
   "testing that an expansion's nodes are in the calling file... ok" \
+  "testing macro search path separators... ok" \
   "testing macro expansion shares normalizer counters and prelude flag... ok" \
   "ALL SELFHOST MACRO CHECKS PASSED SUCCESSFULLY!"; do
   if ! grep -qF "$phrase" "$WORK/plain.out"; then
@@ -276,6 +289,39 @@ def line_col(node : Iyi::ASTNode) : String
 end
 
 
+# One confinement case (section 2c). The package context is the one package_macro
+# in spec/compiler/macro/iyi_package_security_spec.cr builds.
+def confine_case(case_path : String) : Nil
+  fields = {} of String => String
+  File.read(case_path).each_line do |raw|
+    parts = raw.chomp.split("=", 2)
+    fields[parts[0]] = parts[1] if parts.size == 2
+  end
+  root = fields["root"]? || ""
+  dep = fields["dep"]? || ""
+  Dir.cd(fields["dir"])
+  program = Iyi::Program.new
+  unless root.empty?
+    program.filename = File.join(root, "main.iyi")
+    program.iyi_root_package = {"example.test/app", root}
+  end
+  unless dep.empty?
+    program.iyi_mod_table = [{"example.test/dep", dep}]
+  end
+  program.top_level_semantic_complete = true
+  parser = program.new_parser("macro check\n#{fields["body"]}\nend")
+  parser.filename = fields["definition"]
+  parsed_macro = parser.parse.as(Iyi::Macro)
+  call = Iyi::Call.new("check", [] of Iyi::ASTNode)
+  call.location = Iyi::Location.new(fields["caller"], 1, 1)
+  begin
+    expanded = program.expand_macro(parsed_macro, call, program, program)[0].chomp
+    puts "value=#{escape_s(expanded)}"
+  rescue ex : Iyi::TypeException
+    puts "error #{ex.gate_line}:#{ex.gate_column} message=#{escape_s(ex.message.to_s)}"
+  end
+end
+
 args = ARGV.to_a
 filename = ""
 count = false
@@ -306,6 +352,10 @@ end
 
 if host
   puts Iyi::Config.host_target.to_s
+  exit 0
+end
+if args.size == 2 && args[0] == "--confine"
+  confine_case(args[1])
   exit 0
 end
 
@@ -609,6 +659,15 @@ is_refusal() {
   awk '/^# refuse: / { found = 1 } END { exit !found }' "$1"
 }
 
+# The sentence a refusal fixture's port error carries: hosted's sentence for
+# `system`, and the port's `is refused` for `run`, which the port refuses by name.
+refusal_sentence() {
+  case "$(awk '/^# refuse: / { print $3; exit }' "$1")" in
+    system) echo 'is not allowed in an .iyi macro: compile-time shell commands are forbidden' ;;
+    *) echo 'is refused' ;;
+  esac
+}
+
 # These are full semantic programs, not a macro definition followed by a call.
 is_semantic_fixture() {
   case "$(basename "$1")" in
@@ -627,7 +686,7 @@ compare_all() {
     fi
     if is_refusal "$fixture"; then
       "$runner" $(fixture_args "$fixture") "$fixture_native" > "$WORK/a.dump" 2>/dev/null || { out_status=1; continue; }
-      grep -q "^error .* message=.*is refused" "$WORK/a.dump" || out_status=1
+      grep -q "^error .* message=.*$(refusal_sentence "$fixture")" "$WORK/a.dump" || out_status=1
       continue
     fi
     if ! "$WORK/dump_hosted$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/b.dump" 2>"$WORK/oracle.err"; then
@@ -652,7 +711,7 @@ for fixture in "$REPO"/bench/fixtures/macro_*.iyi; do
   if is_refusal "$fixture"; then
     refusal_count=$((refusal_count + 1))
     if "$WORK/exercise$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/iyi.dump" 2>/dev/null &&
-       grep -q "^error .* message=.*is refused" "$WORK/iyi.dump"; then
+       grep -q "^error .* message=.*$(refusal_sentence "$fixture")" "$WORK/iyi.dump"; then
       echo "  $fixture_name: refused by name, as the port's contract says"
     else
       echo "  $fixture_name: NOT REFUSED"
@@ -696,6 +755,401 @@ done < "$SITES_DIR/list"
 "$PY" "$REPO_NATIVE/bench/macro_sites.py" "$SITES_NATIVE" --check || status=1
 echo
 echo
+echo "== 2c. The file methods and env against the hosted rule: each case on a temporary layout, the same verdict"
+CONF="$WORK/confine"
+rm -rf "$CONF"
+mkdir -p "$CONF/layout/app" "$CONF/layout/dep" "$CONF/layout/outside" "$CONF/cases" "$CONF/hosted" "$CONF/port" "$CONF/expected"
+printf 'inside-app\n' > "$CONF/layout/app/inside.txt"
+printf 'dep-data\n' > "$CONF/layout/dep/data.txt"
+printf 'outside-secret\n' > "$CONF/layout/outside/secret.txt"
+: > "$CONF/layout/app/main.iyi"
+: > "$CONF/layout/dep/dep.iyi"
+: > "$CONF/layout/outside/outside.iyi"
+# The cases below read through two links: `escape`, to a directory outside the package, and `dangling`, to nothing.
+# Git Bash on Windows answers a plain `ln -s` with a copy of a target that exists and an error for one that does not,
+# so there the links are asked for as native ones (MSYS=winsymlinks:nativestrict, which fails rather than copies and
+# needs the symlink privilege a CI runner's account has) and then checked to be links. Where that fails, the three
+# cases that need them and the two proofs that need those cases are not run and say so (`host-limited:`, as
+# bench/packages_resolve.sh does for its real-link step); everywhere a link can be made, all of them run.
+CONF_LINKS=no
+if [ "$HOST_OS" = windows ]; then
+  if MSYS=winsymlinks:nativestrict ln -s ../outside "$CONF/layout/app/escape" 2>/dev/null &&
+     MSYS=winsymlinks:nativestrict ln -s ../nowhere "$CONF/layout/app/dangling" 2>/dev/null &&
+     [ -L "$CONF/layout/app/escape" ] && [ -L "$CONF/layout/app/dangling" ]; then
+    CONF_LINKS=yes
+  else
+    rm -rf "$CONF/layout/app/escape" "$CONF/layout/app/dangling"
+  fi
+else
+  ln -s ../outside "$CONF/layout/app/escape"
+  ln -s ../nowhere "$CONF/layout/app/dangling"
+  CONF_LINKS=yes
+fi
+# Case fields are read by native programs; convert Git Bash's layout path before either driver uses it.
+CONF_L="$(native_path "$(cd "$CONF/layout" && pwd -P)")"
+# A native Windows path may be a drive path or a UNC share.
+native_layout_check() {
+  if [ "$HOST_OS" = windows ]; then
+    case "$1" in
+      [A-Za-z]:/*|//?*/*) ;;
+      *) printf 'SETUP FAILURE: layout %s is not a native Windows path\n' "$1" >&2; return 76 ;;
+    esac
+  fi
+  return 0
+}
+native_layout_check "$CONF_L" || exit $?
+export IYI_MACRO_CONFINE_SET=gate-value
+unset IYI_MACRO_CONFINE_UNSET
+cat <<'CONFINE_CASES' > "$CONF/cases.manifest"
+case app-read-inside
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/inside.txt") }}
+case app-read-outside
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/outside/secret.txt") }}
+case app-read-through-link
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/escape/secret.txt") }}
+case app-read-link-dotdot
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/escape/../inside.txt") }}
+case app-read-dotdot
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/../outside/secret.txt") }}
+case app-read-relative-inside
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("app/inside.txt") }}
+case app-read-relative-dotdot
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("app/../outside/secret.txt") }}
+case app-read-directory
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app") }}
+case app-read-directory-optional
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file?("@L@/app") }}
+case app-library-exists
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ file_exists?("@REPO@/src/std/file.iyi") }}
+case app-missing-optional-inside
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file?("@L@/app/missing.txt") }}
+case app-missing-optional-outside
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file?("@L@/outside/missing.txt") }}
+case app-missing-required-inside
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/missing.txt") }}
+case app-exists-outside
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ file_exists?("@L@/outside/secret.txt") }}
+case app-exists-inside
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ file_exists?("@L@/app/inside.txt") }}
+case app-dangling-link
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ file_exists?("@L@/app/dangling") }}
+case dep-read-inside
+definition=@L@/dep/dep.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=@L@/dep
+dir=@L@
+body={{ read_file("@L@/dep/data.txt") }}
+case dep-read-outside
+definition=@L@/dep/dep.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=@L@/dep
+dir=@L@
+body={{ read_file("@L@/app/inside.txt") }}
+case dep-library-exists
+definition=@L@/dep/dep.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=@L@/dep
+dir=@L@
+body={{ file_exists?("@REPO@/src/std/file.iyi") }}
+case outside-macro-reads-own-dir
+definition=@L@/outside/outside.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/outside/secret.txt") }}
+case env-root-set
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ env("IYI_MACRO_CONFINE_SET") }}
+case env-root-unset
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ env("IYI_MACRO_CONFINE_UNSET").nil? }}
+case env-dep
+definition=@L@/dep/dep.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=@L@/dep
+dir=@L@
+body={{ env("IYI_MACRO_CONFINE_SET") }}
+case env-outside-macro
+definition=@L@/outside/outside.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ env("IYI_MACRO_CONFINE_SET") }}
+case system-root
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ system("echo hi") }}
+case system-dep
+definition=@L@/dep/dep.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=@L@/dep
+dir=@L@
+body={{ system("echo hi") }}
+case backtick-root
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ `echo hi` }}
+case backtick-dep
+definition=@L@/dep/dep.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=@L@/dep
+dir=@L@
+body={{ `echo hi` }}
+case no-context-read
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=
+dep=
+dir=@L@
+body={{ read_file("@L@/app/inside.txt") }}
+case no-context-env
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=
+dep=
+dir=@L@
+body={{ env("IYI_MACRO_CONFINE_SET") }}
+case no-context-system
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=
+dep=
+dir=@L@
+body={{ system("echo hi") }}
+case no-context-system-windows-name
+definition=C:\macro fixture\main.iyi
+caller=C:\macro fixture\main.iyi
+root=
+dep=
+dir=@L@
+body={{ system("echo hi") }}
+case no-context-backtick-windows-name
+definition=C:\macro fixture\main.iyi
+caller=C:\macro fixture\main.iyi
+root=
+dep=
+dir=@L@
+body={{ `echo hi` }}
+CONFINE_CASES
+sed -e "s#@L@#$CONF_L#g" -e "s#@REPO@#$REPO_NATIVE#g" "$CONF/cases.manifest" |
+  awk -v dir="$CONF/cases" '/^case /{f=dir "/" $2 ".case"; next} {print > f}'
+if [ "$CONF_LINKS" != yes ]; then
+  rm -f "$CONF/cases/app-read-through-link.case" "$CONF/cases/app-read-link-dotdot.case" "$CONF/cases/app-dangling-link.case"
+  host_limited "skipped: no symlinks on this runner: the cases app-read-through-link, app-read-link-dotdot and app-dangling-link need a link; every runner that can make one runs them"
+fi
+# The layout and the repository print as <LAYOUT> and <REPO>, so the table reads the same on every run.
+confine_normal() {
+  sed -e "s#$CONF_L#<LAYOUT>#g" -e "s#$REPO_NATIVE#<REPO>#g"
+}
+
+# Windows forwards operating-system error text which the port does not yet reproduce.
+confine_os_error_case() {
+  [ "$HOST_OS" = windows ] || return 1
+  case "$1" in
+    app-missing-required-inside|app-read-directory) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# An empty file or a crashed runner is not a verdict, even if both sides do it.
+confine_run() {
+  local side="$1" runner="$2" case_file="$3" name="$4" rc
+  if "$runner" --confine "$case_file" > "$CONF/$side/$name.raw" 2> "$CONF/$side/$name.err"; then
+    :
+  else
+    rc=$?
+    printf '  SETUP FAILURE: %s exited %s for %s; stderr follows:\n' "$side" "$rc" "$name" >&2
+    cat "$CONF/$side/$name.err" >&2
+    return 76
+  fi
+  if ! grep -Eq '^(value=|error [0-9]+:[0-9]+ message=)' "$CONF/$side/$name.raw"; then
+    printf '  SETUP FAILURE: %s gave no verdict for %s; stderr follows:\n' "$side" "$name" >&2
+    cat "$CONF/$side/$name.err" >&2
+    return 76
+  fi
+  if ! confine_normal < "$CONF/$side/$name.raw" > "$CONF/$side/$name.out"; then
+    printf '  SETUP FAILURE: cannot normalize %s verdict for %s; stderr follows:\n' "$side" "$name" >&2
+    cat "$CONF/$side/$name.err" >&2
+    return 76
+  fi
+}
+
+# The guards must be able to fail on every host: a run with no verdict and a crashed run are refused with 76,
+# naming the case and its stderr, and an MSYS layout is refused on Windows.
+guard_silent() { return 0; }
+guard_crash() { printf 'crash-marker\n' >&2; return 3; }
+rc=0
+confine_run port guard_silent "$CONF/cases/app-read-inside.case" guard-selftest 2> "$CONF/guard.err" || rc=$?
+if [ "$rc" -ne 76 ] || ! grep -q 'guard-selftest' "$CONF/guard.err"; then
+  echo "  GUARD DID NOT REFUSE A RUN WITH NO VERDICT"
+  exit 1
+fi
+rc=0
+confine_run port guard_crash "$CONF/cases/app-read-inside.case" guard-selftest 2> "$CONF/guard.err" || rc=$?
+if [ "$rc" -ne 76 ] || ! grep -q 'crash-marker' "$CONF/guard.err"; then
+  echo "  GUARD DID NOT REFUSE A CRASHED RUN"
+  exit 1
+fi
+rc=0
+(HOST_OS=windows; native_layout_check /c/layout) 2> /dev/null || rc=$?
+if [ "$rc" -ne 76 ]; then
+  echo "  LAYOUT CHECK DID NOT REFUSE AN MSYS PATH"
+  exit 1
+fi
+if ! (HOST_OS=windows; native_layout_check 'C:/layout' && native_layout_check '//server/share/layout'); then
+  echo "  LAYOUT CHECK REFUSED A NATIVE WINDOWS PATH"
+  exit 1
+fi
+echo "  guards verified: no verdict, a crash and an MSYS layout are each refused (exit 76, the case and its stderr named)"
+conf_cases=0
+conf_identical=0
+conf_by_design=0
+conf_diverged=0
+echo "  case, then the hosted oracle's verdict and the port's"
+for cf in "$CONF"/cases/*.case; do
+  name="$(basename "$cf" .case)"
+  if confine_os_error_case "$name"; then
+    host_limited "$name: the hosted compiler forwards the Win32 error text, the port's wording is the POSIX one"
+    continue
+  fi
+  case_native="$(native_path "$cf")"
+  conf_cases=$((conf_cases + 1))
+  confine_run hosted "$WORK/dump_hosted$EXE" "$case_native" "$name" || exit $?
+  confine_run port "$WORK/exercise$EXE" "$case_native" "$name" || exit $?
+  case "$name" in
+    no-context-read|no-context-env)
+      cp "$CONF/port/$name.out" "$CONF/expected/$name.out"
+      if grep -q '^error .* message="cannot determine the package of this compile-time macro at ' "$CONF/port/$name.out"; then
+        conf_by_design=$((conf_by_design + 1))
+        verdict="by design: no context, refused"
+      else
+        conf_diverged=$((conf_diverged + 1))
+        status=1
+        verdict="PORT DOES NOT REFUSE WITHOUT A CONTEXT"
+      fi
+      ;;
+    *)
+      cp "$CONF/hosted/$name.out" "$CONF/expected/$name.out"
+      if cmp -s "$CONF/hosted/$name.out" "$CONF/port/$name.out"; then
+        conf_identical=$((conf_identical + 1))
+        verdict="identical"
+      else
+        conf_diverged=$((conf_diverged + 1))
+        status=1
+        verdict="DIFFERS"
+        diff -u "$CONF/hosted/$name.out" "$CONF/port/$name.out" | head -n 20
+      fi
+      ;;
+  esac
+  printf '  %-34s %s\n' "$name" "$verdict"
+  printf '      hosted %s\n' "$(head -n 1 "$CONF/hosted/$name.out" | cut -c1-240)"
+  printf '      port   %s\n' "$(head -n 1 "$CONF/port/$name.out" | cut -c1-240)"
+done
+echo "  Confinement parity: $conf_identical/$((conf_cases - conf_by_design)) comparable cases identical to the hosted rule; $conf_by_design by design (no context); $conf_diverged diverged of $conf_cases cases"
+echo
+
 echo "== 3. Mutation proofs: each one must make the comparison above fail"
 
 # The shared mutation helper treats any nonzero status as caught. A failed
@@ -756,6 +1210,26 @@ check_typeof_sites() {
   fi
   "$WORK/mut-exercise$EXE" $(fixture_args "$REPO/bench/fixtures/macro_sites_typeof.iyi") "$REPO_NATIVE/bench/fixtures/macro_sites_typeof.iyi" > "$WORK/a.dump" 2>/dev/null || return 1
   cmp -s "$WORK/a.dump" "$WORK/b.dump"
+}
+
+# The confinement table on a mutant: every case's port output must match the
+# output the expected table holds (the hosted rule's, or the port's refusal for
+# the by-design cases).
+check_confinement_still_matches() {
+  local cf name case_native
+  if ! build_mutant_exercise; then
+    invalid_mutant "macro exercise failed to build"
+    return $?
+  fi
+  for cf in "$CONF"/cases/*.case; do
+    name="$(basename "$cf" .case)"
+    confine_os_error_case "$name" && continue
+    case_native="$(native_path "$cf")"
+    "$WORK/mut-exercise$EXE" --confine "$case_native" > "$CONF/mut.raw" 2>/dev/null || return 1
+    confine_normal < "$CONF/mut.raw" > "$CONF/mut.out"
+    cmp -s "$CONF/mut.out" "$CONF/expected/$name.out" || return 1
+  done
+  return 0
 }
 
 MUTATIONS_RUN=0
@@ -1027,6 +1501,118 @@ prove_mutation "a macro call's expansion is parsed with no file name" "$ENGINE" 
   "parser = Parser.new(rep.output, file)" \
   "parser = Parser.new(rep.output)" \
   -- check_plain_exercise_passes || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "a missing context reads from an empty package" "$INTERP" \
+  "    if conf = @confinement" \
+  "    if conf = @confinement || MacroConfinement.new(\"\", [] of String, \"\")" \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "a macro outside every package reads from no package" "$CONFINEMENT" \
+  'best = MacroConfinement.standalone_root(real_source.path) if best.empty?' \
+  'best = "" if best.empty?' \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "the ancestor walk stops at the first directory" "$CONFINEMENT" \
+  'return false if parent == cur' \
+  'return false' \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "library roots are not consulted for a library read" "$CONFINEMENT" \
+  '    if library' \
+  '    if false' \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "the standard library roots are not found" "$CONFINEMENT" \
+  'roots << File.real_path(dir) if Dir.exists?(dir)' \
+  'roots << File.real_path(dir) if false' \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+# These two need the links of section 2c, so they run where the shell made them.
+if [ "$CONF_LINKS" = yes ]; then
+  prove_mutation "a link that leads nowhere is not refused" "$CONFINEMENT" \
+    'if File.symlink?(full)' \
+    'if false' \
+    -- check_confinement_still_matches || status=1
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+  if [ "$HOST_OS" = windows ]; then
+    host_limited "skipped mutation 'a dotdot after a link is applied before the link': it changes the POSIX-only path resolver"
+  else
+    prove_mutation "a dotdot after a link is applied before the link" "$CONFINEMENT" \
+      'full = Path.new(path).absolute? ? path : File.join(@base_dir, path)' \
+      'full = File.expand_path(path, @base_dir)' \
+      -- check_confinement_still_matches || status=1
+    MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+  fi
+else
+  host_limited "skipped: no symlinks on this runner: the proofs 'a link that leads nowhere is not refused' and 'a dotdot after a link is applied before the link' need the link cases"
+fi
+
+if [ "$HOST_OS" = windows ]; then
+  prove_mutation "relative paths ignore the base directory" "$CONFINEMENT" \
+    'full = File.expand_path(path, @base_dir)' \
+    'full = File.expand_path(path)' \
+    -- check_confinement_still_matches || status=1
+else
+  prove_mutation "relative paths ignore the base directory" "$CONFINEMENT" \
+    'File.join(@base_dir, path)' \
+    'path' \
+    -- check_confinement_still_matches || status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "env is allowed from any package" "$CONFINEMENT" \
+  'MacroConfinement.same_file?(root, @compiling_root)' \
+  'true' \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "env is not checked against the compiling package" "$INTERP" \
+  'return Nop.new unless env_allowed(node)' \
+  'return Nop.new if false' \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "system and backtick refusal sentence altered" "$INTERP" \
+  'compile-time shell commands are forbidden' \
+  'compile-time shell commands are refused' \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "system and backtick are not refused" "$INTERP" \
+  'refuse_shell(node, name)' \
+  'nil' \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "file_exists? does not check the path" "$INTERP" \
+  'resolved = confined_path(node, name, path, true)' \
+  'resolved = path' \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "a directory is not refused by read_file" "$INTERP" \
+  'if File.directory?(resolved)' \
+  'if false' \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "a macro's file is not taken from its definition" "$ENGINE" \
+  'loc.filename' \
+  '""' \
+  -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "a parsed fixture macro carries no definition file" "$PARSER" \
+  'a_macro.location = Location.new(file, 1, 1) unless file.empty?' \
+  'a_macro.location = nil' \
+  -- check_confinement_still_matches || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 echo "  $MUTATIONS_RUN mutation proofs run"

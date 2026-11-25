@@ -7,6 +7,8 @@ import compiler/macros/type_facts::{MacroTypeFacts}
 import compiler/macros/target_flags::{MacroTargetFlags}
 import compiler/macros/methods::{MacroMethods}
 import compiler/macros/answers::{MacroAnswers}
+import compiler/macros/confinement::{MacroConfinement}
+import std/file::{File}
 
 # Why an expansion stopped: a `raise`, an undefined name, or a refused macro
 # method. The line and column are the node that failed, as the hosted compiler
@@ -52,6 +54,12 @@ pub class MacroInterpreter
   property skipped : Bool
   property free_bindings : Hash(String, MacroFreeBinding)
   property type_facts : MacroTypeFacts? = nil
+  # The paths this expansion's file methods and `env` may use. Nil when the
+  # embedder gave no context, and those methods are then refused.
+  property confinement : MacroConfinement? = nil
+  # The file the expanding macro was written in: its definition's file, or for
+  # top-level macro code the file itself. "" when the file is unknown.
+  property macro_file : String = ""
   @path_lookup : Proc(Path, ASTNode?)?
   property host_flags : Array(String)? = nil
 
@@ -387,10 +395,77 @@ pub class MacroInterpreter
     end
   end
 
+  # The site a confinement refusal names, as hosted `iyi_macro_site` writes it
+  # (methods.cr 86-93): the macro's file and the line of the node.
+  def confinement_site(node : ASTNode) : String
+    line = 0
+    if loc = node.location
+      line = loc.line_number
+    end
+    return "an unknown location" if @macro_file.empty? && line == 0
+    "#{@macro_file}:#{line}"
+  end
+
+  # The package root of the macro being expanded (hosted `iyi_macro_root`,
+  # methods.cr 174-209). With no context, or for a macro with no file, the
+  # package cannot be determined, and that is a refusal: nothing is read
+  # without a package to check it against. The refusal is recorded at the node
+  # and "" is answered.
+  def confined_macro_root(node : ASTNode) : String
+    if conf = @confinement
+      if !@macro_file.empty?
+        root = conf.macro_root(@macro_file)
+        return root.path if root.resolved?
+        fail_at(node, "cannot resolve the package of the compile-time macro at #{confinement_site(node)}: #{root.reason}")
+        return ""
+      end
+    end
+    fail_at(node, "cannot determine the package of this compile-time macro at #{confinement_site(node)}")
+    ""
+  end
+
+  # A file method's path, resolved and checked (hosted `iyi_macro_checked_path`,
+  # methods.cr 211-223). "" after a refusal recorded at the node.
+  def confined_path(node : ASTNode, name : String, path : String, library : Bool) : String
+    root = confined_macro_root(node)
+    return "" if root.empty?
+    if conf = @confinement
+      check = conf.check_path(root, path, library)
+      return check.path if check.inside?
+      if check.resolved?
+        suffix = library ? " or the standard library" : ""
+        fail_at(node, "`#{name}` at #{confinement_site(node)} cannot access #{path.inspect}: compile-time paths must stay inside the macro's package#{suffix}")
+      else
+        fail_at(node, "cannot resolve `#{name}` path #{path.inspect} at #{confinement_site(node)}: #{check.reason}")
+      end
+    end
+    ""
+  end
+
+  # hosted iyi_refuse_dependency_env (methods.cr 232-243): `env` is refused
+  # unless this macro's package is the compiling package. Records the refusal
+  # and answers false.
+  def env_allowed(node : ASTNode) : Bool
+    root = confined_macro_root(node)
+    return false if root.empty?
+    if conf = @confinement
+      return true if conf.env_allowed?(root)
+    end
+    fail_at(node, "`env` at #{confinement_site(node)} is not allowed in a dependency macro: only the compiling package may read the build environment")
+    false
+  end
+
+  # hosted iyi_refuse_shell (methods.cr 225-230): a macro in an .iyi file runs
+  # no shell command, and every macro this engine expands is one.
+  def refuse_shell(node : ASTNode, name : String) : Nil
+    method = name == "`" ? "a backtick" : "`system`"
+    fail_at(node, "#{method} at #{confinement_site(node)} is not allowed in an .iyi macro: compile-time shell commands are forbidden")
+  end
+
   # The macro methods a call with no receiver names. Nil for any other name,
-  # which the caller reports. `run` and `system` are refused by name: this
-  # engine does not run another program, and a macro that does is reported
-  # where it is written instead of run.
+  # which the caller reports. `system` and the backtick are refused with hosted's
+  # sentence, and `run` by name: this engine runs no other program, and a macro
+  # that does is reported where it is written instead of run.
   def top_level_call(node : Call) : ASTNode?
     name = node.name
 
@@ -430,7 +505,7 @@ pub class MacroInterpreter
       return Nop.new
     end
 
-    if name == "read_file" || name == "read_file?"
+    if name == "read_file" || name == "read_file?" || name == "file_exists?"
       if node.args.size != 1
         fail_at(node, "#{name} takes one argument")
         return Nop.new
@@ -442,17 +517,26 @@ pub class MacroInterpreter
         return Nop.new
       end
       path = MacroMethods.to_macro_id(path_node)
-      if !File.exists?(path)
-        if name == "read_file?"
-          return NilLiteral.new
-        end
-        fail_at(node, "Error opening file with mode 'r': '#{path}': No such file or directory")
+      resolved = confined_path(node, name, path, true)
+      return Nop.new if resolved.empty?
+      if name == "file_exists?"
+        return BoolLiteral.new(File.exists?(resolved))
+      end
+      if !File.exists?(resolved)
+        return NilLiteral.new if name == "read_file?"
+        fail_at(node, "Error opening file with mode 'r': '#{resolved}': No such file or directory")
         return Nop.new
       end
-      return StringLiteral.new(File.read(path))
+      if File.directory?(resolved)
+        return NilLiteral.new if name == "read_file?"
+        fail_at(node, "read (#{resolved}): Is a directory")
+        return Nop.new
+      end
+      return StringLiteral.new(File.read(resolved))
     end
 
     if name == "env"
+      return Nop.new unless env_allowed(node)
       key = node.args.empty? ? "" : macro_id_of(node.args[0])
       if value = ENV[key]?
         return StringLiteral.new(value)
@@ -505,7 +589,7 @@ pub class MacroInterpreter
     end
 
     if name == "system" || name == "`"
-      fail_at(node, "macro method '#{name}' is refused: it runs a command")
+      refuse_shell(node, name)
       return Nop.new
     end
 

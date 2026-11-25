@@ -196,6 +196,20 @@ def run_self_checks : Nil
   end
   other = Linker.linker_command(t3, ["a.obj"], "a.exe", msvc_linker: "custom-cl").cmd
   assert_true(other.includes?("/link ") && !other.includes?("/Brepro"), "unrecognized driver does not get /Brepro")
+  ["link", "link.exe", "lld-link", "lld-link.exe"].each do |name|
+    result = Linker.linker_command(t3, ["foo.obj"], "out.exe", msvc_linker: "C:/tools/#{name}")
+    assert_true(result.cmd.includes?("/OUT:out.exe /Brepro /INCREMENTAL:NO"), "#{name} is a reproducible direct linker")
+    assert_true(!result.cmd.includes?(" /link "), "#{name} has no driver pass-through")
+  end
+  ["cl", "cl.exe", "clang-cl", "clang-cl.exe"].each do |name|
+    result = Linker.linker_command(t3, ["foo.obj"], "out.exe", msvc_linker: "C:\\tools\\#{name}")
+    assert_true(result.cmd.includes?("/Feout.exe /link /Brepro /INCREMENTAL:NO"), "#{name} is a reproducible driver")
+  end
+  ["custom-cl.exe", "blink.exe", "clang-cl-wrapper", "custom"].each do |name|
+    result = Linker.linker_command(t3, ["foo.obj"], "out.exe", msvc_linker: "C:/tools/#{name}")
+    assert_true(!result.cmd.includes?("/Brepro"), "#{name} must not receive /Brepro")
+    assert_true(result.cmd.includes?("/Feout.exe /link "), "#{name} uses driver pass-through")
+  end
   puts "  direct link.exe and cl.exe command shapes matched"
 
   puts "ALL SELFHOST PLATFORM CHECKS PASSED SUCCESSFULLY!"

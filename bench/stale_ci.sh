@@ -1175,7 +1175,12 @@ print('git-diff-check PASSED: all cached hits and misses respected git diff.')
 test_comparator_negatives() {
   echo "== Running CI evidence comparator negative and discrimination fixtures =="
   "$PY" "$REPO/bench/test_frames_equivalent.py"
-  "$PY" -c "
+  # A file, not `python -c "..."`: at 31,688 bytes the program is within a
+  # kilobyte of the 32,767 characters a Windows process may be given.
+  local prog
+  prog="$(mktemp /tmp/comparator-negatives.XXXXXX)"
+  [ "$WINDOWS" -eq 0 ] || prog="$(cygpath -m "$prog")"
+  cat > "$prog" <<'PYEOF'
 import os, sys, json, tempfile, subprocess, shutil
 repo = sys.argv[1]
 stale_ci = os.path.join(repo, 'bench/stale_ci.sh')
@@ -1195,7 +1200,7 @@ def assert_negative(subcmd, args, expected_msg, cwd=None):
     res = run_cmd(subcmd, args, cwd=cwd)
     combined = res.stdout + res.stderr
     assert res.returncode == 1, f'{subcmd} expected exit 1, got {res.returncode}. Output:\n{combined}'
-    assert expected_msg in combined, f'{subcmd} expected \"{expected_msg}\" in output. Output:\n{combined}'
+    assert expected_msg in combined, f'{subcmd} expected "{expected_msg}" in output. Output:\n{combined}'
 
 def assert_positive(subcmd, args, cwd=None):
     res = run_cmd(subcmd, args, cwd=cwd)
@@ -1729,7 +1734,11 @@ assert_negative('git-diff-check', ['--master-snapshot', snap_gd, '--cached-json'
 
 shutil.rmtree(work, ignore_errors=True)
 print('test-comparator-negatives PASSED: all comparator negative and discrimination fixtures verified.')
-" "$REPO"
+PYEOF
+  local status=0
+  "$PY" "$prog" "$REPO" || status=$?
+  rm -f "$prog"
+  return "$status"
 }
 
 # 9. rg9: deterministic CallPathFp across processes and preanalysed prelude
@@ -1870,7 +1879,11 @@ test_master_path() {
   local clean_exit=0
   trap 'if [ "$clean_exit" -eq 1 ]; then rm -rf "$work"; else echo "Preserving test-master-path artifacts at $work" >&2; fi' RETURN
 
-  "$PY" -c "
+  # The program is longer than the 32,767 characters a Windows process may
+  # be given as one argument string (`-c "..."` died there with "Argument
+  # list too long"), so it is a file, written with the quoting a bash
+  # string would have taken out.
+  cat > "$work/test_master_path.py" <<'PYEOF'
 import glob, hashlib, http.server, io, json, os, shutil, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 
 repo = sys.argv[1]
@@ -1992,20 +2005,20 @@ class ActionsApiHandler(http.server.BaseHTTPRequestHandler):
             if not auth.startswith('Bearer '):
                 self.send_response(401)
                 self.end_headers()
-                self.wfile.write(b'{\"message\":\"Bad credentials\"}')
+                self.wfile.write(b'{"message":"Bad credentials"}')
                 return
 
         if f'/actions/workflows/iyi.yml/runs' in self.path:
             if mode == 'runs_500':
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(b'{\"message\":\"Internal Server Error\"}')
+                self.wfile.write(b'{"message":"Internal Server Error"}')
                 return
             if mode == 'no_runs':
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(b'{\"total_count\":0,\"workflow_runs\":[]}')
+                self.wfile.write(b'{"total_count":0,"workflow_runs":[]}')
                 return
             if mode == 'path_mismatch':
                 self.send_response(200)
@@ -2153,14 +2166,14 @@ class ActionsApiHandler(http.server.BaseHTTPRequestHandler):
             if 'Authorization' in self.headers:
                 self.send_response(401)
                 self.end_headers()
-                self.wfile.write(b'{\"error\":\"Authorization header forbidden on blob URL\"}')
+                self.wfile.write(b'{"error":"Authorization header forbidden on blob URL"}')
                 return
 
             if mode == 'zip_payload':
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/zip')
                 self.end_headers()
-                self.wfile.write(b'PK\\x03\\x04mockziparchivepayloadcontent')
+                self.wfile.write(b'PK\x03\x04mockziparchivepayloadcontent')
                 return
 
             art_id = self.path.split('/')[-1]
@@ -2531,7 +2544,7 @@ try:
     res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'empty-snapshot', '--out', os.path.join(work, 'nofrom.json')],
                          cwd=CWD, capture_output=True, text=True)
     if res.returncode != 1 or '--from is required' not in (res.stderr + res.stdout):
-        print(f'test-master-path FAILED: empty-snapshot with no --from should exit 1 with \"--from is required\", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)
+        print(f'test-master-path FAILED: empty-snapshot with no --from should exit 1 with "--from is required", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)
         sys.exit(1)
 
     # 2. --from a copy with namespace run:7777 exits 1
@@ -2543,7 +2556,7 @@ try:
     res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'empty-snapshot', '--from', bad_ns_file, '--out', os.path.join(work, 'out_bad_ns.json')],
                          cwd=CWD, capture_output=True, text=True)
     if res.returncode != 1 or 'namespace must be' not in (res.stderr + res.stdout):
-        print(f'test-master-path FAILED: empty-snapshot with namespace run:7777 should exit 1 with \"namespace must be\", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)
+        print(f'test-master-path FAILED: empty-snapshot with namespace run:7777 should exit 1 with "namespace must be", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)
         sys.exit(1)
 
     # 3. --from a copy with run_id 0 exits 1
@@ -2555,7 +2568,7 @@ try:
     res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'empty-snapshot', '--from', bad_rid_file, '--out', os.path.join(work, 'out_bad_rid.json')],
                          cwd=CWD, capture_output=True, text=True)
     if res.returncode != 1 or 'run_id must be a positive integer' not in (res.stderr + res.stdout):
-        print(f'test-master-path FAILED: empty-snapshot with producer.run_id 0 should exit 1 with \"run_id must be a positive integer\", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)
+        print(f'test-master-path FAILED: empty-snapshot with producer.run_id 0 should exit 1 with "run_id must be a positive integer", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)
         sys.exit(1)
 
     # 4. --from a copy with target deleted exits 1
@@ -2567,7 +2580,7 @@ try:
     res = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'empty-snapshot', '--from', bad_target_file, '--out', os.path.join(work, 'out_bad_target.json')],
                          cwd=CWD, capture_output=True, text=True)
     if res.returncode != 1 or 'missing target' not in (res.stderr + res.stdout):
-        print(f'test-master-path FAILED: empty-snapshot with missing target should exit 1 with \"missing target\", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)
+        print(f'test-master-path FAILED: empty-snapshot with missing target should exit 1 with "missing target", got {res.returncode}:\n{res.stderr}\n{res.stdout}', file=sys.stderr)
         sys.exit(1)
 
     # 5. Forged run_id import refusal:
@@ -2597,14 +2610,15 @@ try:
 
     expected_forged_msg = f'forged run metadata: producer run_id 4444 != sidecar run_id {RUN_ID}'
     if expected_forged_msg not in (res_forged.stderr + res_forged.stdout):
-        print(f'test-master-path FAILED: expected error message \"{expected_forged_msg}\", got:\n{res_forged.stderr}\n{res_forged.stdout}', file=sys.stderr)
+        print(f'test-master-path FAILED: expected error message "{expected_forged_msg}", got:\n{res_forged.stderr}\n{res_forged.stdout}', file=sys.stderr)
         sys.exit(1)
 
-    print(f'Forged run metadata refusal PASSED (\"{expected_forged_msg}\").')
+    print(f'Forged run metadata refusal PASSED ("{expected_forged_msg}").')
     print('All test-master-path tests completed successfully.')
 finally:
     server.shutdown()
-" "$REPO" "$IYI" "$work"
+PYEOF
+  "$PY" "$work/test_master_path.py" "$REPO" "$IYI" "$work"
 
   clean_exit=1
   echo "test-master-path PASSED."

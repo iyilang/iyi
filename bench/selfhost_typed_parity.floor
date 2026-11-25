@@ -37,7 +37,7 @@ src/compiler/backend/llvm/translate.iyi 65
 src/compiler/backend/native.iyi 24
 src/compiler/codegen/codegen.iyi 199
 src/compiler/command/daemon.iyi 64
-src/compiler/command/driver.iyi 200
+src/compiler/command/driver.iyi 202
 src/compiler/command/execute.iyi 29
 src/compiler/compiler.iyi 71
 src/compiler/foundation/enums.iyi 9
@@ -50,6 +50,15 @@ src/compiler/ir/inst.iyi 62
 src/compiler/ir/intrinsics.iyi 25
 src/compiler/ir/layout.iyi 25
 src/compiler/ir/module.iyi 36
+src/compiler/ir/opt/analysis.iyi 72
+src/compiler/ir/opt/cfg_simplify.iyi 34
+src/compiler/ir/opt/dce.iyi 14
+src/compiler/ir/opt/edit.iyi 40
+src/compiler/ir/opt/effects.iyi 18
+src/compiler/ir/opt/fold.iyi 22
+src/compiler/ir/opt/mem2reg.iyi 34
+src/compiler/ir/opt/pipeline.iyi 35
+src/compiler/ir/opt/simplify.iyi 53
 src/compiler/ir/parser.iyi 108
 src/compiler/ir/printer.iyi 60
 src/compiler/ir/types.iyi 64
@@ -97,8 +106,9 @@ src/compiler/lower/typer.iyi 56
 src/compiler/lower/unions.iyi 7
 src/compiler/macros/answers.iyi 16
 src/compiler/macros/ast.iyi 30
-src/compiler/macros/engine.iyi 41
-src/compiler/macros/interpreter.iyi 51
+src/compiler/macros/confinement.iyi 25
+src/compiler/macros/engine.iyi 46
+src/compiler/macros/interpreter.iyi 60
 src/compiler/macros/macro_parser.iyi 31
 src/compiler/macros/methods.iyi 42
 src/compiler/macros/site_scan.iyi 34
@@ -184,6 +194,7 @@ src/compiler/tools/format.iyi 8
 src/compiler/tools/formatter.iyi 192
 src/compiler/tools/ir.iyi 66
 src/compiler/tools/ir_core.iyi 44
+src/compiler/tools/ir_opt.iyi 27
 src/compiler/tools/link_elf.iyi 32
 src/compiler/tools/link_macho.iyi 37
 src/compiler/tools/mod.iyi 8
@@ -217,6 +228,8 @@ src/iyi/enum.iyi 16
 src/iyi/file.iyi 12
 src/iyi/float.iyi 70
 src/iyi/hash.iyi 78
+src/iyi/heap_partition.iyi 0
+src/iyi/heap_verify.iyi 0
 src/iyi/io.iyi 61
 src/iyi/macros.iyi 4
 src/iyi/number.iyi 39
@@ -258,11 +271,12 @@ src/std/dir.iyi 70
 src/std/dns.iyi 124
 src/std/ecdsa.iyi 129
 src/std/eiy.iyi 67
+src/std/eiy/process.iyi 18
 src/std/enum.iyi 23
 src/std/enumerable.iyi 89
 src/std/env.iyi 47
 src/std/errno.iyi 5
-src/std/file.iyi 131
+src/std/file.iyi 160
 src/std/file_utils.iyi 40
 src/std/fileserver.iyi 23
 src/std/float.iyi 22
@@ -283,6 +297,7 @@ src/std/io.iyi 150
 src/std/iterator.iyi 193
 src/std/json.iyi 309
 src/std/kernel.iyi 11
+src/std/lazy.iyi 12
 src/std/levenshtein.iyi 23
 src/std/list.iyi 35
 src/std/log.iyi 164
@@ -310,7 +325,7 @@ src/std/png.iyi 87
 src/std/process.iyi 88
 src/std/qpack.iyi 77
 src/std/quic.iyi 341
-src/std/random.iyi 71
+src/std/random.iyi 79
 src/std/reference_storage.iyi 15
 src/std/regex.iyi 228
 src/std/router.iyi 81

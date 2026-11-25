@@ -97,11 +97,11 @@ pub class CompilerOptions
   property arguments : Array(String)
   property single_file : Bool
   property force : Bool = false
-  property stale_key : String? = nil
-  property stale_accept : String? = nil
-  property stale_block : String? = nil
-  property stale_dump_elements : String? = nil
-  property stale_inputs : String? = nil
+  property stale_key : String?
+  property stale_accept : String?
+  property stale_block : String?
+  property stale_dump_elements : String?
+  property stale_inputs : String?
 
   def initialize
     @cross_compile = false
@@ -151,6 +151,11 @@ pub class CompilerOptions
     @filenames = [] of String
     @arguments = [] of String
     @single_file = false
+    @stale_key = nil
+    @stale_accept = nil
+    @stale_block = nil
+    @stale_dump_elements = nil
+    @stale_inputs = nil
   end
 end
 
@@ -1311,20 +1316,18 @@ pub class CommandDriver
   # The seeds `--chaos` runs a test under when not told (test.cr CHAOS_RUNS).
   TEST_CHAOS_RUNS = 100
 
-  # Not in this tree, and refused here as unknown flags: upstream PR #147
-  # (origin/plan/native-stale-testing, src/compiler/iyi/command/test.cr) adds
-  # `--cached`, `--fresh` (refused together with `--cached`), `--explain`,
-  # `--shard K/N`, and the repeatable `--import-index NS=FILE` and
-  # `--export-index NS=FILE`. It runs them through Iyi::Stale::Runner, which
-  # this tree does not have, and its usage line changes with them. Port them
-  # when that PR lands, with the vectors that exercise each refusal.
-
   private def test : Nil
     return if @exit_code
     as_json = false
     timeout = 60.0
     paths = [] of String
     affected = [] of String
+    cached = false
+    fresh = false
+    explain = false
+    shard : String? = nil
+    import_indices = [] of String
+    export_indices = [] of String
     chaos = false
     chaos_seed : UInt64? = nil
     chaos_runs : Int32? = nil
@@ -1370,6 +1373,33 @@ pub class CommandDriver
           return
         end
         affected << value
+      when option == "--cached"
+        cached = true
+      when option == "--fresh"
+        fresh = true
+      when option == "--explain"
+        explain = true
+      when option == "--shard"
+        value = @options.shift?
+        unless value
+          abort "--shard takes K/N", Exit::USAGE_ERROR
+          return
+        end
+        shard = value
+      when option == "--import-index"
+        value = @options.shift?
+        unless value
+          abort "--import-index takes NS=FILE", Exit::USAGE_ERROR
+          return
+        end
+        import_indices << value
+      when option == "--export-index"
+        value = @options.shift?
+        unless value
+          abort "--export-index takes NS=FILE", Exit::USAGE_ERROR
+          return
+        end
+        export_indices << value
       when option == "--chaos"
         chaos = true
       when option.starts_with?("--chaos=")
@@ -1445,6 +1475,39 @@ pub class CommandDriver
         paths << option
       end
     end
+    if cached && fresh
+      abort "cannot pass both --cached and --fresh", Exit::USAGE_ERROR
+      return
+    end
+    receipts = if cached
+                 "--cached"
+               elsif fresh
+                 "--fresh"
+               elsif explain
+                 "--explain"
+               elsif shard
+                 "--shard"
+               elsif !import_indices.empty?
+                 "--import-index"
+               elsif !export_indices.empty?
+                 "--export-index"
+               end
+    if receipts
+      if only
+        abort "cannot pass both --run and #{receipts}: a receipt is for a test's every named case", Exit::USAGE_ERROR
+        return
+      elsif !build_flags.empty?
+        abort "cannot pass both #{build_flags[0]} and #{receipts}: a receipt's build is the runner's own", Exit::USAGE_ERROR
+        return
+      elsif verbose
+        abort "cannot pass both -v and #{receipts}: a test answered from its receipt printed nothing to show", Exit::USAGE_ERROR
+        return
+      end
+    end
+    if chaos && receipts
+      abort "cannot pass both --chaos and #{receipts}", Exit::USAGE_ERROR
+      return
+    end
     paths << "." if paths.empty?
 
     files = [] of String
@@ -1480,6 +1543,12 @@ pub class CommandDriver
     @subcommand_options["json"] = as_json.to_s
     @subcommand_options["timeout"] = timeout.to_s
     @subcommand_options["affected"] = affected.join(",") unless affected.empty?
+    @subcommand_options["cached"] = cached.to_s
+    @subcommand_options["fresh"] = fresh.to_s
+    @subcommand_options["explain"] = explain.to_s
+    @subcommand_options["shard"] = shard if shard
+    @subcommand_options["import_indices"] = import_indices.join(",") unless import_indices.empty?
+    @subcommand_options["export_indices"] = export_indices.join(",") unless export_indices.empty?
     @subcommand_options["paths"] = paths.join(",")
     @subcommand_options["files"] = files.join(",")
     @subcommand_options["verbose"] = verbose.to_s
@@ -2433,7 +2502,7 @@ pub class CommandDriver
     end
 
     unless no_codegen
-      parser.on("--ll", "Dump ll to #{CommandDriver.language_name}'s cache directory") do
+      parser.on("--ll", "Dump ll to Crystal's cache directory") do
         opts.dump_ll = true
       end
       parser.on("--link-flags FLAGS", "Additional flags to pass to the linker") do |some_link_flags|

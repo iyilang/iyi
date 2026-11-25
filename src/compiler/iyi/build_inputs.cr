@@ -790,4 +790,37 @@ module ENV
   end
 end
 
+# iyi: the local time zone is not an input of a build. A process learns it once,
+# from `TZ`, when the first code asks for the local time. On Windows that is the
+# first process it starts: an anonymous pipe is a named pipe there, and its name
+# is `File.tempname`, which begins with today's date in the local zone. Where the
+# first process starts moves with what is cached: a cold build runs the linker
+# to ask its version, or links a macro helper, before the key is taken, and a
+# warm one has none of that and runs the cached helper under a quiet recorder.
+# So a cold build had `TZ` among the compiler's reads and a warm one did not, a
+# `cenv` that differed for every program (RG9's inputs check; bench/stale_win_probe.py
+# on hello.iyi: "only in cold-plain: TZ=(absent)") and a test recorded cold
+# never hit. The zone is for the programs a build makes and runs, whose own
+# reads are recorded as theirs; it is read here with no recorder.
+class Time::Location
+  def self.load_local : Location
+    Iyi::BuildInputs.paused { previous_def }
+  end
+end
+
+# iyi: the runtime's debug-information switch is not an input of a build either.
+# On Windows the first exception a process raises, one the compiler rescues as
+# well, loads the debug information before it can walk the stack, and that load
+# reads `CRYSTAL_LOAD_DEBUG_INFO` once. A cold build raises one before the key is
+# taken (the first link of a macro helper) and a warm build does not (the helper
+# is cached), so the cold build had the variable among the compiler's reads and
+# the warm one did not: `cenv` differed, and a test with a macro `run` recorded
+# cold never hit (bench/stale_win_probe_rows.py, rows 50 and 55: "dump counted
+# differs from the build before: CRYSTAL_LOAD_DEBUG_INFO").
+struct Exception::CallStack
+  def self.load_debug_info : Nil
+    Iyi::BuildInputs.paused { previous_def }
+  end
+end
+
 require "./stale/inputs_file"

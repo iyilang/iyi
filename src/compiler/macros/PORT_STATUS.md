@@ -19,8 +19,36 @@ tuples and ranges (with index variables), `begin` blocks, `verbatim` blocks, mac
 variables and their scope, `@type`, `@top_level`, `@def`, `env`, `flag?`,
 `host_flag?` (always the host's set), `raise` (message and location), undefined
 macro variables and methods, `skip_file`, `puts`, `print`, and `debug(format: false)`.
-`yield` is written as `begin ... end`, as the hosted compiler writes it. Refused by
-name: `system`, the backtick, `run`.
+`yield` is written as `begin ... end`, as the hosted compiler writes it. Refused:
+`system` and the backtick with hosted's sentence, and `run` by name.
+
+## File methods and the package
+
+`read_file`, `read_file?` and `file_exists?` resolve their path and check it as
+hosted `iyi_macro_checked_path` does (`src/compiler/iyi/macros/methods.cr` 40-243).
+The macro's package is the longest of the compiling package and the standard
+library roots that holds the file the macro was written in (its definition's
+file), else the nearest ancestor with an `iyi.mod`, else the file's own directory.
+A path resolves through links, the missing tail is appended, and a `..` in the
+tail is applied after the links before it. A dangling link is refused. The
+standard library roots come from `IYI_PATH` and apply to `read_file`,
+`read_file?` and `file_exists?` only, as hosted's `library: true` does. `env` is
+allowed only where the macro's package is the compiling package.
+
+The embedding program supplies the context (`MacroConfinement`: the compiling
+package, the library roots, and the directory relative paths resolve against).
+The engine passes it to each interpreter. The port has no module table, so
+hosted's dependency roots from it have no counterpart: a dependency is its nearest
+`iyi.mod` ancestor, or its own directory. With no context, these methods and
+`env` are refused with `cannot determine the package of this compile-time macro`;
+they never fall back to reading. The gate's section 2c compares each case with the
+hosted oracle.
+
+Read from code only, not run on Linux or Windows: path separators, drive letters,
+junctions and case-insensitive volumes. On Windows the port resolves a path with
+the standard library's `File.real_path` (`GetFinalPathNameByHandleW`), as hosted
+does, and refuses a `\\?\` verbatim path, since it does not strip the prefix the
+way hosted's `Iyi.unverbatim` does.
 
 ## Methods
 
@@ -128,11 +156,11 @@ name: `system`, the backtick, `run`.
 | 0 | `end_line_number` | ASTNode | not yet |
 | 0 | `ends_with?` | StringLiteral | named |
 | 0 | `ensure` | ExceptionHandler | not yet |
-| 0 | `env` | MacroInterpreter | not yet |
+| 0 | `env` | MacroInterpreter | named |
 | 0 | `excludes_end?` | RangeLiteral | named |
 | 0 | `exhaustive?` | Case, When | not yet |
 | 0 | `expressions` | Expressions, MacroVar, StringInterpolation, Yield | not yet |
-| 0 | `file_exists?` | MacroInterpreter | not yet |
+| 0 | `file_exists?` | MacroInterpreter | named |
 | 0 | `flag?` | MacroInterpreter | named |
 | 0 | `free_vars` | Def | not yet |
 | 0 | `global` | Path | not yet |
@@ -178,8 +206,8 @@ name: `system`, the backtick, `run`.
 | 0 | `public?` | TypeNode | not yet |
 | 0 | `puts` | MacroInterpreter | named |
 | 0 | `raise` | ASTNode, MacroInterpreter | named |
-| 0 | `read_file` | MacroInterpreter | not yet |
-| 0 | `read_file?` | MacroInterpreter | not yet |
+| 0 | `read_file` | MacroInterpreter | named |
+| 0 | `read_file?` | MacroInterpreter | named |
 | 0 | `real_name` | ExternalVar, FunDef | not yet |
 | 0 | `receiver` | Call, Def, IsA, RespondsTo | named |
 | 0 | `rescues` | ExceptionHandler | not yet |
@@ -188,7 +216,7 @@ name: `system`, the backtick, `run`.
 | 0 | `restriction` | Arg | not yet |
 | 0 | `return_type` | Def, FunDef, ProcLiteral | named |
 | 0 | `right` | BinaryOp | not yet |
-| 0 | `run` | MacroInterpreter | not yet |
+| 0 | `run` | MacroInterpreter | refused |
 | 0 | `scan` | StringLiteral | not yet |
 | 0 | `scope` | Yield | not yet |
 | 0 | `skip_file` | MacroInterpreter | named |
@@ -255,11 +283,15 @@ Annotation and Macro accessors (`args`, `name`, `type`, `var`, `exp`,
   re-prints unchanged.
 - `debug` with formatting (the default) is refused: the hosted compiler formats the
   expansion with its formatter, which the port does not have.
-- `p`, `pp`, `p!`, `pp!`, `read_file`, `file_exists?`, `parse_type`,
-  `compare_versions`, `warning` and `@caller` are not ported. Each falls under
-  the first divergence above. The hosted compiler on this base does not answer
-  `ecr_process` or `ecr_process_string`.
-- `system`, the backtick and `run` are refused by name (`is refused`).
+- `p`, `pp`, `p!`, `pp!`, `parse_type`, `compare_versions`, `warning` and `@caller`
+  are not ported. Each falls under the first divergence above. The hosted compiler
+  on this base does not answer `ecr_process` or `ecr_process_string`.
+- With no confinement context, `read_file`, `read_file?`, `file_exists?` and `env`
+  are refused. Hosted resolves the package from the macro's own file when there is
+  no program context, so this is the one divergence in the file methods, and the
+  gate keeps it by design.
+- `system` and the backtick are refused with hosted's sentence. `run` is refused by
+  name (`is refused`).
 - The host triple is the hosted `Config.host_target` at run time: LLVM's default,
   with the macOS version from `MACOSX_DEPLOYMENT_TARGET`. Not ported: the Linux C
   library the hosted compiler detects with `ldd`, and `IYI_CONFIG_TARGET`, which the

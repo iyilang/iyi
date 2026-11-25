@@ -1,0 +1,11 @@
+; iyi-ir 1
+source_filename = "volatile_slot"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i64 @volatile_slot() {
+entry:
+  %slot = alloca i64, align 8
+  volatile store i64 9, ptr %slot, align 8
+  %value = volatile load i64, ptr %slot, align 8
+  ret i64 %value
+}

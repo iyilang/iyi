@@ -137,8 +137,8 @@ pub class Linker
     res.join(" ")
   end
 
-  # Compare a Windows or POSIX basename without allocating a lowercase copy.
-  private def self.msvc_basename?(path : String, name : String) : Bool
+  # Compare a linker basename without allocating, for either path separator.
+  private def self.msvc_linker_named?(path : String, name : String) : Bool
     start = path.bytesize - name.bytesize
     return false if start < 0
     if start > 0
@@ -155,9 +155,10 @@ pub class Linker
     true
   end
 
+  # MSVC link and lld-link take linker flags directly; drivers need /link.
   pub def self.direct_msvc_linker?(path : String) : Bool
-    msvc_basename?(path, "link.exe") || msvc_basename?(path, "link") ||
-      msvc_basename?(path, "lld-link.exe") || msvc_basename?(path, "lld-link")
+    msvc_linker_named?(path, "link.exe") || msvc_linker_named?(path, "link") ||
+      msvc_linker_named?(path, "lld-link.exe") || msvc_linker_named?(path, "lld-link")
   end
 
   # Builds library and search path flags for linking.
@@ -232,10 +233,10 @@ pub class Linker
     if target.msvc?
       # Discovery belongs to the caller. The formatter only uses its result.
       direct = direct_msvc_linker?(msvc_linker)
-      reproducible = direct || msvc_basename?(msvc_linker, "cl.exe") ||
-                     msvc_basename?(msvc_linker, "cl") ||
-                     msvc_basename?(msvc_linker, "clang-cl.exe") ||
-                     msvc_basename?(msvc_linker, "clang-cl")
+      reproducible = direct || msvc_linker_named?(msvc_linker, "cl.exe") ||
+                     msvc_linker_named?(msvc_linker, "cl") ||
+                     msvc_linker_named?(msvc_linker, "clang-cl.exe") ||
+                     msvc_linker_named?(msvc_linker, "clang-cl")
       linker = quote_windows(msvc_linker)
       obj_arg = quote_windows(object_names)
       out_arg = quote_windows(direct ? "/OUT:#{output_filename}" : "/Fe#{output_filename}")

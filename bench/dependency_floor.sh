@@ -643,8 +643,8 @@ echo "== what the library declares, reached or not"
 # It is also the shape a link line grows in: one annotation, no caller yet,
 # and the floor moves the first time a module uses it. So the annotations are
 # read as text, and the list is the ones the library has reasons for.
-while IFS= read -r annotation; do
-  [ -n "$annotation" ] || continue
+link_allowed() {
+  local annotation="$1"
   case "$annotation" in
     '@[Link("kernel32")]') ;;
     '@[Link(ldflags: "msvcrt.lib ucrt.lib vcruntime.lib")]') ;;
@@ -684,18 +684,37 @@ while IFS= read -r annotation; do
     '@[Link("crypt32")]') ;;
     '@[Link(framework: "Security")]') ;;
     '@[Link(framework: "CoreFoundation")]') ;;
-    *)
-      echo "  THE FLOOR MOVED: the library declares $annotation"
-      echo "  A library iyi ships links the platform libc and, opt-in, a"
-      echo "  collector. Another annotation needs a reason in SPEC.md III.10"
-      echo "  before it needs a line here."
-      status=1
-      ;;
+    # On wasm32-unknown-unknown these are the host calls in III.12.1, not
+    # a native library or a WASI dependency. No other host module is allowed.
+    '@[Link(wasm_import_module: "iyi")]') ;;
+    *) return 1 ;;
   esac
+  return 0
+}
+while IFS= read -r annotation; do
+  [ -n "$annotation" ] || continue
+  if ! link_allowed "$annotation"; then
+    echo "  THE FLOOR MOVED: the library declares $annotation"
+    echo "  A library iyi ships links the platform libc and, opt-in, a"
+    echo "  collector. Another annotation needs a reason in SPEC.md III.10"
+    echo "  before it needs a line here."
+    status=1
+  fi
 done <<LINKS
 $(grep -rhoE '@\[Link\([^]]*\)\]' "$REPO/src/iyi" "$REPO/src/std" | sort -u)
 LINKS
 printf '  %s\n' "$(grep -rhoE '@\[Link\([^]]*\)\]' "$REPO/src/iyi" "$REPO/src/std" | sort -u | tr '\n' ' ')"
+
+# Read a different host module through the same text scanner and allowlist.
+# It must still move the floor; accepting all wasm modules hides dependencies.
+printf '%s\n' '@[Link(wasm_import_module: "libc")]' > "$WORK/foreign-link.iyi"
+foreign="$(grep -hoE '@\[Link\([^]]*\)\]' "$WORK/foreign-link.iyi")"
+if [ "$foreign" != '@[Link(wasm_import_module: "libc")]' ] || link_allowed "$foreign"; then
+  echo "  THE FLOOR MOVED: the wasm import annotation check accepted the foreign-module control"
+  status=1
+else
+  echo "  foreign wasm import module: rejected by the floor as expected"
+fi
 
 echo
 report() {

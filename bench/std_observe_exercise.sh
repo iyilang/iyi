@@ -282,16 +282,22 @@ class FrameHold
   getter go : Atomic(Int64)
   getter open : Atomic(Int64)
   getter done : Atomic(Int64)
+  getter fiber_path : Atomic(Int32)
   def initialize
     @go = Atomic(Int64).new(0_i64)
     @open = Atomic(Int64).new(0_i64)
     @done = Atomic(Int64).new(0_i64)
+    @fiber_path = Atomic(Int32).new(0_i32)
   end
 end
 
 hold = FrameHold.new
 holder = IyiThread.start do
   while hold.go.get == 0_i64
+  end
+  # FORCE_HOLDER_FIBER
+  if IyiScheduler.current?.is_a?(IyiFiber)
+    hold.fiber_path.set(1_i32)
   end
   Std::Observe.enter_frame
   hold.open.set(1_i64)
@@ -300,17 +306,31 @@ holder = IyiThread.start do
   Std::Observe.leave_frame
   nil
 end
-hold.go.set(1_i64)
-while hold.open.get == 0_i64
+# Start the observer before the holder enters its frame: thread startup
+# suspends observation depth, which would otherwise mask the mutant.
+observer = IyiThread.start do
+  # FORCE_MAIN_FIBER
+  main_fiber_path = IyiScheduler.current?.is_a?(IyiFiber)
+  hold.go.set(1_i64)
+  while hold.open.get == 0_i64
+  end
+  ENV["IYI_FRAME_PROBE"]?
+  puts "FRAME_PATHS holder=#{hold.fiber_path.get} main=#{main_fiber_path ? 1 : 0}"
+  hold.done.set(1_i64)
+  nil
 end
-ENV["IYI_FRAME_PROBE"]?
-hold.done.set(1_i64)
+observer.join
 holder.join
 EOF
 
 PROBE_TRACE="$WORK/probe_trace.bin"
 rm -f "$PROBE_TRACE"
-IYI_OBSERVE="$PROBE_TRACE" "$IYI" run -Diyi_observe "$PROBE_SRC"
+PROBE_OUT="$(IYI_OBSERVE="$PROBE_TRACE" "$IYI" run -Diyi_observe "$PROBE_SRC")"
+echo "  $PROBE_OUT"
+if [ "$PROBE_OUT" != "FRAME_PATHS holder=0 main=0" ]; then
+  echo "FAIL: thread probe did not enter both plain-thread paths: $PROBE_OUT"
+  exit 1
+fi
 
 if [ ! -f "$PROBE_TRACE" ]; then
   echo "FAIL: probe trace was not created"
@@ -366,17 +386,79 @@ fi
 
 MUT_TRACE="$WORK/mut_trace.bin"
 rm -f "$MUT_TRACE"
-IYI_PATH="$PATCH_DIR/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_TRACE" "$IYI" run -Diyi_observe "$PROBE_SRC"
+MUT_OUT="$(IYI_PATH="$PATCH_DIR/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_TRACE" "$IYI" run -Diyi_observe "$PROBE_SRC")"
+if [ "$MUT_OUT" != "$PROBE_OUT" ]; then
+  echo "FAIL: thread-depth mutation changed the probe's frame paths: '$PROBE_OUT' -> '$MUT_OUT'"
+  exit 1
+fi
 
 MUT_HEX="$(od -An -v -tx1 "$MUT_TRACE" | tr -d ' \n')"
 case "$MUT_HEX" in
   *4959495f4652414d455f50524f4245*)
-    echo "FAIL: probe does not discriminate: IYI_FRAME_PROBE appeared even without @[ThreadLocal]"
+    echo "FAIL: probe does not discriminate: IYI_FRAME_PROBE appeared even without @[ThreadLocal] ($PROBE_OUT)"
     exit 1
     ;;
   *)
-    echo "  mutation proof passed: without @[ThreadLocal], helper frame suppressed main thread observation"
+    echo "  mutation proof passed: without @[ThreadLocal], helper frame suppressed observer thread observation"
     ;;
+esac
+
+echo "== deterministic rendezvous regression: fiber depth mutation proof"
+FIBER_SRC="$WORK/frame_fibers.iyi"
+PATCH_FIBER_DIR="$WORK/patched_fiber"
+mkdir -p "$PATCH_FIBER_DIR/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$PATCH_FIBER_DIR/src/"
+"$PY" - "$PROBE_SRC" "$FIBER_SRC" "$PATCH_FIBER_DIR/src/std/observe.iyi" <<'EOF'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+for marker in ("# FORCE_HOLDER_FIBER", "# FORCE_MAIN_FIBER"):
+    if source.count(marker) != 1:
+        sys.exit(f"FAIL: fiber probe marker missing or repeated: {marker}")
+    source = source.replace(marker, "IyiScheduler.current", 1)
+Path(sys.argv[2]).write_text(source, encoding="utf-8")
+
+path = Path(sys.argv[3])
+source = path.read_text(encoding="utf-8")
+anchor = "@[ThreadLocal]\n@@thread_depth = 0_i32"
+if source.count(anchor) != 1 or source.count("fiber.observe_depth") != 11:
+    sys.exit("FAIL: fiber depth mutation no longer applies")
+source = source.replace(anchor, anchor + "\n@@mutant_fiber_depth = 0_i32", 1)
+source = source.replace("fiber.observe_depth", "@@mutant_fiber_depth")
+path.write_text(source, encoding="utf-8")
+EOF
+
+FIBER_TRACE="$WORK/fiber_trace.bin"
+FIBER_OUT="$(IYI_OBSERVE="$FIBER_TRACE" "$IYI" run -Diyi_observe "$FIBER_SRC")"
+if [ "$FIBER_OUT" != "FRAME_PATHS holder=1 main=1" ]; then
+  echo "FAIL: fiber probe did not enter both fiber paths: $FIBER_OUT"
+  exit 1
+fi
+FIBER_HEX="$(od -An -v -tx1 "$FIBER_TRACE" | tr -d ' \n')"
+case "$FIBER_HEX" in
+  *4959495f4652414d455f50524f4245*) ;;
+  *) echo "FAIL: fiber probe did not record IYI_FRAME_PROBE"; exit 1 ;;
+esac
+FIBER_TAIL="$(tail -c 17 "$FIBER_TRACE" | od -An -v -tx1 | tr -d ' \n')"
+if [ "$FIBER_TAIL" != "0d0000007f000000000000000000000000" ]; then
+  echo "FAIL: expected END(0) in fiber probe trace, got $FIBER_TAIL"
+  exit 1
+fi
+
+MUT_FIBER_TRACE="$WORK/mut_fiber_trace.bin"
+MUT_FIBER_OUT="$(IYI_PATH="$PATCH_FIBER_DIR/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_FIBER_TRACE" "$IYI" run -Diyi_observe "$FIBER_SRC")"
+if [ "$MUT_FIBER_OUT" != "$FIBER_OUT" ]; then
+  echo "FAIL: fiber mutation changed the probe's frame paths: '$FIBER_OUT' -> '$MUT_FIBER_OUT'"
+  exit 1
+fi
+MUT_FIBER_HEX="$(od -An -v -tx1 "$MUT_FIBER_TRACE" | tr -d ' \n')"
+case "$MUT_FIBER_HEX" in
+  *4959495f4652414d455f50524f4245*)
+    echo "FAIL: probe does not discriminate: IYI_FRAME_PROBE appeared with shared fiber depth"
+    exit 1
+    ;;
+  *) echo "  fiber mutation proof passed: shared fiber depth suppressed the other fiber's observation" ;;
 esac
 
 PY=""
@@ -1086,25 +1168,32 @@ cat << 'EOF' > "$BOUNDARY_TRANSFER_SRC"
 module test/boundary_transfer
 import std/observe
 
-Std::Observe.enter_frame
-group do |g|
-  ch = Channel(Int32).new(1)
-  ch.send(1)
+# The program's main thread may already be a scheduler fiber. Start on a
+# fresh thread so the transition under test occurs on every host.
+holder = IyiThread.start do
+  had_fiber = IyiScheduler.current?.is_a?(IyiFiber)
+  Std::Observe.enter_frame
+  group do |g|
+    ch = Channel(Int32).new(1)
+    ch.send(1)
+  end
+  puts Std::Observe.frame_depth
+  Std::Observe.leave_frame
+  puts Std::Observe.frame_depth
+  puts had_fiber ? "fiber" : "thread"
+  nil
 end
-puts Std::Observe.frame_depth
-Std::Observe.leave_frame
-puts Std::Observe.frame_depth
+holder.join
 EOF
 
 BOUNDARY_TRANSFER_TRACE="$WORK/boundary_transfer_trace.bin"
 rm -f "$BOUNDARY_TRANSFER_TRACE"
 B_C_OUT="$(IYI_OBSERVE="$BOUNDARY_TRANSFER_TRACE" "$IYI" run -Diyi_observe "$BOUNDARY_TRANSFER_SRC")"
-EXPECTED_B_C_OUT="$(printf '1\n0')"
+EXPECTED_B_C_OUT="$(printf '1\n0\nthread')"
 if [ "$B_C_OUT" != "$EXPECTED_B_C_OUT" ]; then
-  echo "FAIL: expected boundary transfer output '$EXPECTED_B_C_OUT', got '$B_C_OUT'"
+  echo "FAIL: expected boundary transfer from a plain thread '$EXPECTED_B_C_OUT', got '$B_C_OUT'"
   exit 1
 fi
-
 if [ ! -f "$BOUNDARY_TRANSFER_TRACE" ]; then
   echo "FAIL: boundary transfer trace was not created"
   exit 1
@@ -1140,12 +1229,52 @@ fi
 MUT_BC_TRACE="$WORK/mut_bc_trace.bin"
 rm -f "$MUT_BC_TRACE"
 MUT_BC_OUT="$(IYI_PATH="$PATCH_DIR_BC/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$MUT_BC_TRACE" "$IYI" run -Diyi_observe "$BOUNDARY_TRANSFER_SRC")"
-FIRST_LINE="$(printf '%s\n' "$MUT_BC_OUT" | head -n 1)"
-if [ "$FIRST_LINE" != "0" ]; then
-  echo "FAIL: boundary B-c does not discriminate: expected 0 first without transfer, got '$FIRST_LINE'"
+if [ "$MUT_BC_OUT" != "$(printf '0\n0\nthread')" ]; then
+  echo "FAIL: boundary B-c does not discriminate: expected 0 then 0 on the thread without transfer, got '$MUT_BC_OUT'"
   exit 1
 fi
-echo "  mutation proof B-c passed: removing transfer gave 0 first"
+echo "  mutation proof B-c passed: removing thread-to-fiber transfer gave 0 first"
+
+# An existing fiber uses its own depth instead of the thread's depth.
+BOUNDARY_FIBER_SRC="$WORK/boundary_fiber.iyi"
+cat << 'EOF' > "$BOUNDARY_FIBER_SRC"
+module test/boundary_fiber
+import std/observe
+IyiScheduler.current
+Std::Observe.enter_frame
+puts Std::Observe.frame_depth
+Std::Observe.leave_frame
+puts Std::Observe.frame_depth
+EOF
+FIBER_OUT="$(IYI_OBSERVE="$WORK/boundary_fiber_trace.bin" "$IYI" run -Diyi_observe "$BOUNDARY_FIBER_SRC")"
+if [ "$FIBER_OUT" != "$(printf '1\n0')" ]; then
+  echo "FAIL: expected existing-fiber depth 1 then 0, got '$FIBER_OUT'"
+  exit 1
+fi
+
+PATCH_DIR_BCF="$WORK/patched_bcf"
+mkdir -p "$PATCH_DIR_BCF/src"
+cp -R "$REPO/src/iyi" "$REPO/src/std" "$PATCH_DIR_BCF/src/"
+OBSERVE_PATH_BCF="$PATCH_DIR_BCF/src/std/observe.iyi"
+awk '
+  /fiber\.observe_depth = d \+ 1/ {
+    print "        fiber.observe_depth = d # MUTATED_BCF"
+    print "MUTATED" > "/dev/stderr"
+    next
+  }
+  { print }
+' "$OBSERVE_PATH_BCF" > "$OBSERVE_PATH_BCF.tmp" 2>"$WORK/awk_err_bcf"
+mv "$OBSERVE_PATH_BCF.tmp" "$OBSERVE_PATH_BCF"
+if ! grep -q "MUTATED" "$WORK/awk_err_bcf"; then
+  echo "FAIL: could not apply mutation: fiber enter_frame increment not found"
+  exit 1
+fi
+MUT_BCF_OUT="$(IYI_PATH="$PATCH_DIR_BCF/src${PSEP}$REPO/samples/iyi" IYI_OBSERVE="$WORK/mut_bcf_trace.bin" "$IYI" run -Diyi_observe "$BOUNDARY_FIBER_SRC")"
+if [ "$(printf '%s\n' "$MUT_BCF_OUT" | head -n 1)" != "0" ]; then
+  echo "FAIL: existing-fiber boundary does not discriminate: got '$MUT_BCF_OUT'"
+  exit 1
+fi
+echo "  mutation proof B-c fiber passed: removing the fiber increment gave 0 first"
 
 if [ "$WINDOWS" = 1 ]; then
   echo "== Windows observation: existing and absent metadata"

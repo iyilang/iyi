@@ -9,6 +9,8 @@ import compiler/macros/target_flags::{MacroTargetFlags}
 import compiler/macros/interpreter::{MacroInterpreter, MacroFailure, MacroFreeBinding}
 import compiler/macros/type_facts::{MacroTypeFacts}
 import compiler/macros/macro_parser::{MacroParser}
+import compiler/macros/confinement::{MacroConfinement}
+import compiler/foundation/location::{Location}
 
 # One `{% %}` or `{{ }}` site at the top of a macro body that ran to its end,
 # with the text it expanded to and where it is written.
@@ -39,14 +41,16 @@ pub class MacroEngine
   @flags : Array(String)
   @host_flags : Array(String)?
   @target_from_host : Bool
+  property confinement : MacroConfinement? = nil
 
   # Resolve the default target only when a report needs it. A normalizer can
   # supply its per-program host flags before the first expansion.
-  def initialize(flags : Array(String)? = nil, host_flags : Array(String)? = nil)
+  def initialize(flags : Array(String)? = nil, host_flags : Array(String)? = nil, @confinement : MacroConfinement? = nil)
     @target_from_host = flags.nil?
     @host_flags = host_flags
     @flags = flags || host_flags || [] of String
     @interpreter = MacroInterpreter.new(nil, @flags, "<Program>", host_flags)
+    @interpreter.confinement = @confinement
   end
 
   def use_host_flags(flags : Array(String)) : Nil
@@ -85,6 +89,7 @@ pub class MacroEngine
     @interpreter = interpreter
     @interpreter.flags = flags
     @interpreter.host_flags = @host_flags
+    @interpreter.confinement = @confinement
   end
 
   # Expands one call of a macro and reports each top-level site with the text
@@ -92,6 +97,8 @@ pub class MacroEngine
   # names carry from one site to the next, as they do within one expansion.
   def report(a_macro : Macro, call : Call) : MacroReport
     interp = MacroInterpreter.new(call.block, flags, "<Program>", host_flags_now)
+    interp.confinement = @confinement
+    interp.macro_file = MacroEngine.file_of(a_macro.location)
     interp.bind_args(a_macro, call)
 
     body = a_macro.body
@@ -125,6 +132,16 @@ pub class MacroEngine
     MacroReport.new(sites, interp.to_s, interp.skipped, interp.failure)
   end
 
+  # The file a node was written in: the file a macro's confinement is judged
+  # by. "" when the node has no location.
+  def self.file_of(location : Location?) : String
+    if loc = location
+      loc.filename
+    else
+      ""
+    end
+  end
+
   # Expands one top-level site as the hosted compiler expands an inline macro:
   # with a fresh interpreter, so no variable carries from one site to the next.
   # `scope_name` is what `@type` and `@top_level` name. `bindings` are the type
@@ -134,6 +151,8 @@ pub class MacroEngine
   # level and in a type body.
   def site_report(site : ASTNode, scope_name : String = "<Program>", bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, path_lookup : Proc(Path, ASTNode?)? = nil) : MacroReport
     interp = MacroInterpreter.new(nil, flags, scope_name, host_flags_now, path_lookup)
+    interp.confinement = @confinement
+    interp.macro_file = MacroEngine.file_of(site.location)
     interp.type_facts = facts
     if bound = bindings
       interp.bind_free_vars(bound)

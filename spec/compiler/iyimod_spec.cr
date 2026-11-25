@@ -7155,9 +7155,10 @@ describe "a module compiled against Crystal's library" do
           module app
 
           import std/dir::{Dir}
+          import std/time::{Location}
 
           pub def count_entries : Int32
-            Dir.children(".").size >= 0 ? 1 : 0
+            Dir.children(".").size >= 0 && Location.load("UTC").is_a?(Location) ? 1 : 0
           end
           IYI
       }
@@ -7182,6 +7183,7 @@ describe "a module compiled against Crystal's library" do
       producer.emit_iyimod = "mods"
       producer.compile source, File.expand_path("from-source")
       from_source = `./from-source`
+      from_source.should eq "1\n"
 
       time_art = Iyi::IyiMod.read(File.join("mods", "std", "time.iyimod"))
       time_art.type_ids.any?(&.includes?("Std::Time::")).should be_true

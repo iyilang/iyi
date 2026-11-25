@@ -236,11 +236,12 @@ far = rng.randbytes(100000)
 c = zstd.ZstdCompressor(options={CP.compression_level: 3, CP.window_log: 22})
 farwin = c.compress(far + rng.randbytes(2000000) + far) + c.flush()
 assert farwin[4] & 0x20 == 0 and farwin[4] & 3 == 0
-# Python reads it: its one-shot decoder keeps the whole output and does
-# not hold an offset to the window the frame declares. RFC 8878
-# 3.1.1.4 does ("must be smaller than Window_Size"), and a decoder that
-# keeps only the window - this one - cannot read it.
-refuse("farwindow.zst", farwin[:5] + bytes([(20 - 10) << 3]) + farwin[6:], "reaches past the window of 1048576 bytes", python_refuses=False)
+# RFC 8878 3.1.1.4 holds an offset to the window the frame declares ("must
+# be smaller than Window_Size"), and a decoder that keeps only the window -
+# this one - cannot read it. libzstd holds it too from 1.6.0 and refuses
+# the frame; up to 1.5.7 Python's one-shot decoder kept the whole output
+# and read it. Python's verdict follows the libzstd it was built with.
+refuse("farwindow.zst", farwin[:5] + bytes([(20 - 10) << 3]) + farwin[6:], "reaches past the window of 1048576 bytes", python_refuses=zstd.zstd_version_info >= (1, 6, 0))
 # A frame that needs a dictionary.
 samples = [b'{"id": %d, "name": "user %d", "tags": ["a", "b", "%d"], "active": %s}' % (k, k * 7, k % 13, b"true" if k % 3 else b"false") for k in range(2000)]
 d = zstd.train_dict(samples, 4096)

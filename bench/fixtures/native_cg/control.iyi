@@ -1,0 +1,23 @@
+module control
+
+def fib(n : Int32) : Int32
+  if n < 2
+    n
+  else
+    fib(n - 1) + fib(n - 2)
+  end
+end
+
+def classify(n : Int32) : Int32
+  if n == 1
+    100
+  elsif n == 2
+    200
+  elsif n == 7
+    700
+  else
+    0
+  end
+end
+
+puts "#{fib(15)} #{classify(2)} #{classify(5)}"

@@ -1,0 +1,20 @@
+; iyi-ir 1
+module "asm_tied"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+; The input is tied to output 0: it arrives in the output's register, and the template updates it in place.
+define internal i64 @addthree(i64 %x) {
+entry:
+  %r = call i64 (i64) asm "add $0, $0, #3", "=r,0"(i64 %x)
+  ret i64 %r
+}
+
+define i32 @main() {
+entry:
+  %v = call i64 (i64) @addthree(i64 39)
+  %p = call i32 (ptr, ...) @printf(ptr @fmt, i64 %v)
+  ret i32 0
+}

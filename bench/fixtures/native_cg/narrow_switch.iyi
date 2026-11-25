@@ -1,0 +1,12 @@
+module narrow_switch
+
+v = 200_u8
+a = case v
+    when 200_u8 then 1
+    else             0
+    end
+b = case v
+    when 198_u8, 199_u8, 200_u8, 201_u8, 202_u8, 203_u8 then 1
+    else                                                     0
+    end
+puts "#{a} #{b}"

@@ -1,0 +1,21 @@
+@[Unsafe("the fixture holds an inline asm template that branches to a symbol")]
+
+@[NoInline]
+@[Naked]
+fun seven : Nil
+  asm("mov x0, #7\nret" :::: "volatile")
+end
+
+@[NoInline]
+@[Naked]
+fun eight : Nil
+  asm("mov x0, #8\nret" :::: "volatile")
+end
+
+def callseven : Int64
+  out = 0_i64
+  asm("bl _seven" : "={x0}"(out) :: "x30" : "volatile")
+  out
+end
+
+puts "#{callseven()}"

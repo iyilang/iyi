@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 36,817 lines, of which 4,785 are the library held to the 4,785 ceiling (7,397 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| hosted compiler | 155,341 lines of Crystal |
+| hosted compiler | 155,350 lines of Crystal |
 | artifact format | `.iyimod` v65, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1084,9 +1084,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 155,341 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 155,350 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 36,817-line own prelude + 130,688 in std |
-| Specs | 21,146 lines | 18,028 for iyi |
+| Specs | 21,146 lines | 18,030 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -9841,7 +9841,7 @@ it in pieces, allocating nothing.
 point; four of them (box, deque, static_array, weak_ref) are marked by
 hand outright, since only a program that instantiates their generic
 bodies types them and `iyi fix src/std` cannot see them. bench has
-98 marked programs of 198, and none of `samples/iyi`'s 28 programs
+99 marked programs of 200, and none of `samples/iyi`'s 28 programs
 needs one. The specs' snippets whose stand-in for the prelude or std (a
 `@[Primitive]`, a `lib`, a `Pointer` field, a `@[Share]` type,
 `uninitialized` storage) sits in the compiled module are marked as the
@@ -9869,7 +9869,7 @@ module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
 and a mark per declaration 1,535, 469 and 258 defs, against 86, 15 and
-98 module marks.
+99 module marks.
 
 ---
 

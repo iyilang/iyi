@@ -1,0 +1,22 @@
+; iyi-ir 1
+module "const_ptr_table"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [7 x i8] c"%s %s\0A\00"
+@first = private constant [4 x i8] c"one\00"
+@second = private constant [4 x i8] c"two\00"
+
+; A constant that holds addresses: a symbol table. The loader must slide each entry, so the table cannot live in
+; read-only text; it is placed with the writable data.
+@names = internal constant [2 x ptr] [ ptr @first, ptr @second ]
+
+define i32 @main() {
+entry:
+  %s0 = getelementptr [2 x ptr], ptr @names, i64 0, i64 0
+  %a = load ptr, ptr %s0, align 8
+  %s1 = getelementptr [2 x ptr], ptr @names, i64 0, i64 1
+  %b = load ptr, ptr %s1, align 8
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, ptr %b, ptr %a)
+  ret i32 0
+}

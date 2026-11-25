@@ -1,0 +1,113 @@
+@[Unsafe("binds LLVM's C API: its objects are raw handles this module wraps and disposes, which the compiler does not check")]
+module compiler/llvm/context
+
+import compiler/llvm/lib_llvm::{string_from_c, string_and_dispose, to_c_str}
+import compiler/llvm/values::{LLVMType, LLVMValue, LLVMFunction, LLVMBasicBlock, Type, Value, Function, BasicBlock}
+
+pub class Context
+  getter unwrap : LibLLVM::ContextRef
+
+  def initialize(@unwrap : LibLLVM::ContextRef, @owned : Bool = true)
+    @disposed = false
+  end
+
+  def self.new : Context
+    ctx = LibLLVM.create_context
+    if ctx.address == 0
+      raise "Could not create LLVM context"
+    end
+    Context.new(ctx, true)
+  end
+
+  def self.global : Context
+    ctx = LibLLVM.get_global_context
+    Context.new(ctx, false)
+  end
+
+  def to_unsafe : LibLLVM::ContextRef
+    @unwrap
+  end
+
+  def void : Type
+    Type.new(LibLLVM.void_type_in_context(@unwrap))
+  end
+
+  def int1 : Type
+    Type.new(LibLLVM.int1_type_in_context(@unwrap))
+  end
+
+  def int8 : Type
+    Type.new(LibLLVM.int8_type_in_context(@unwrap))
+  end
+
+  def int16 : Type
+    Type.new(LibLLVM.int16_type_in_context(@unwrap))
+  end
+
+  def int32 : Type
+    Type.new(LibLLVM.int32_type_in_context(@unwrap))
+  end
+
+  def int64 : Type
+    Type.new(LibLLVM.int64_type_in_context(@unwrap))
+  end
+
+  def int128 : Type
+    Type.new(LibLLVM.int128_type_in_context(@unwrap))
+  end
+
+  def int(bits : Int32) : Type
+    Type.new(LibLLVM.int_type_in_context(@unwrap, bits))
+  end
+
+  def half : Type
+    Type.new(LibLLVM.half_type_in_context(@unwrap))
+  end
+
+  def float : Type
+    Type.new(LibLLVM.float_type_in_context(@unwrap))
+  end
+
+  def double : Type
+    Type.new(LibLLVM.double_type_in_context(@unwrap))
+  end
+
+  def pointer(address_space : Int32 = 0) : Type
+    {% if LibLLVM::IS_LT_150 %}
+      int8.pointer(address_space)
+    {% else %}
+      Type.new(LibLLVM.pointer_type_in_context(@unwrap, address_space))
+    {% end %}
+  end
+
+  def struct(element_types : Array(Type), packed : Bool = false) : Type
+    raw = element_types.map { |t| t.to_unsafe }
+    ptr = raw.empty? ? Pointer(LibLLVM::TypeRef).new(0_u64) : raw.to_unsafe
+    Type.new(LibLLVM.struct_type_in_context(@unwrap, ptr, element_types.size, packed ? 1 : 0))
+  end
+
+  def struct_named(name : String) : Type
+    Type.new(LibLLVM.struct_create_named(@unwrap, to_c_str(name)))
+  end
+
+  def const_string(str : String, null_terminated : Bool = true) : Value
+    {% if LibLLVM::IS_LT_190 %}
+      Value.new(LibLLVM.const_string_in_context(@unwrap, str.to_unsafe, str.bytesize, null_terminated ? 0 : 1))
+    {% else %}
+      Value.new(LibLLVM.const_string_in_context2(@unwrap, str.to_unsafe, str.bytesize.to_u64, null_terminated ? 0 : 1))
+    {% end %}
+  end
+
+  def const_struct(values : Array(Value), packed : Bool = false) : Value
+    raw = values.map { |v| v.to_unsafe }
+    ptr = raw.empty? ? Pointer(LibLLVM::ValueRef).new(0_u64) : raw.to_unsafe
+    Value.new(LibLLVM.const_struct_in_context(@unwrap, ptr, values.size, packed ? 1 : 0))
+  end
+
+  def dispose : Nil
+    if !@disposed && @owned && @unwrap.address != 0
+      LibLLVM.dispose_context(@unwrap)
+      @disposed = true
+    end
+  end
+end

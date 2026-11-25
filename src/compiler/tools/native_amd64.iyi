@@ -1,0 +1,265 @@
+# The x86_64 encoder's table tool, used by bench/native_amd64_exercise.sh.
+#
+#   native_amd64 forms   print every form as "asm<TAB>hex<TAB>off:kind:addend,..."
+#
+# Each row is one instruction the selector can produce (the encode gate's table): the AT&T text the assembler
+# oracle assembles, the bytes this encoder produces, and its relocations. Refusals print on stderr, exit 1.
+
+@[Unsafe("declares the C library exit to set the process status; the tool handles no raw memory")]
+module compiler/tools/native_amd64
+import compiler/native/amd64/encode::{XForm, EncodedForm, encode_form, mem_base, mem_base_seg, mem_index, mem_rip_sym, mem_abs, mem_abs_sym, with_mem, with_reloc, locked, alu, alu_load, alu_imm, alu_imm_mem, test_rr, test_imm, test_imm_mem, mov, mov_load, mov_imm, mov_reg_imm, movabs, lea, movzx, movsx, movsxd, shift_cl, shift_imm, shift_one, imul_rm, imul_imm, unary, sign_extend_acc, setcc, cmov, jcc8, jcc32, jcc_sym, jmp8, jmp_sym, jmp_ind, call_ind, call_sym, ret, push, pop, cmpxchg, xadd, xchg, sse_arith, sse_load, sse_store, ucomi, cvtt, cvt_from_int, cvt_fp, movq_to_xmm, movq_from_xmm, movaps, xorps}
+import compiler/native/amd64/regs::{xmm, rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r15, cc_e, cc_g, cc_b, cc_ne, cc_le, cc_l}
+import compiler/native/obj/object::{RelocKind}
+import compiler/native/amd64/abi::{Leaf, class_integer, class_sse, class_memory, class_none, sysv_classify, sysv_fits, sysv_return_regs, win64_by_value, win64_slot, x86_64_target, sysv_integer_args, sysv_sse_args, win64_integer_args, win64_sse_args, sysv_callee_saved, win64_callee_saved}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Form
+  getter text : String
+  getter xf : XForm
+
+  def initialize(@text : String, @xf : XForm)
+  end
+end
+
+def put(acc : Array(Form), text : String, f : XForm) : Nil
+  acc << Form.new(text, f)
+end
+
+# Every form, one instruction each. A symbol operand is `sym` (index 0); the oracle names it the same way.
+def forms : Array(Form)
+  acc = [] of Form
+  put(acc, "movq %rbx, %rax", mov(64, rbx, rax))
+  put(acc, "movl %ecx, %edx", mov(32, rcx, rdx))
+  put(acc, "movw %si, %di", mov(16, rsi, rdi))
+  put(acc, "movb %al, %cl", mov(8, rax, rcx))
+  put(acc, "movb %sil, %dil", mov(8, rsi, rdi))
+  put(acc, "movq %r9, %r12", mov(64, r9, r12))
+  put(acc, "movq (%rax), %rbx", with_mem(mov_load(64, rbx, 0), mem_base(rax, 0_i64)))
+  put(acc, "movq 8(%rsp), %rax", with_mem(mov_load(64, rax, 0), mem_base(rsp, 8_i64)))
+  put(acc, "movq (%rbp), %rax", with_mem(mov_load(64, rax, 0), mem_base(rbp, 0_i64)))
+  put(acc, "movq (%r12), %rax", with_mem(mov_load(64, rax, 0), mem_base(r12, 0_i64)))
+  put(acc, "movq (%r13), %rax", with_mem(mov_load(64, rax, 0), mem_base(r13, 0_i64)))
+  put(acc, "movq 4096(%rcx,%rdx,4), %rax", with_mem(mov_load(64, rax, 0), mem_index(rcx, rdx, 4, 4096_i64)))
+  put(acc, "movq (%r8,%r15,8), %rdi", with_mem(mov_load(64, rdi, 0), mem_index(r8, r15, 8, 0_i64)))
+  put(acc, "movl -4(%rbp,%rsi,2), %eax", with_mem(mov_load(32, rax, 0), mem_index(rbp, rsi, 2, -4_i64)))
+  put(acc, "movq sym(%rip), %rax", with_mem(mov_load(64, rax, 0), mem_rip_sym(RelocKind::PcRel32, 0, 0_i64)))
+  put(acc, "movq %rax, sym+8(%rip)", with_mem(mov(64, rax, 0), mem_rip_sym(RelocKind::PcRel32, 0, 8_i64)))
+  put(acc, "movq $0x1234, %rax", mov_imm(64, rax, 4660_i64))
+  put(acc, "movq $-1, %rcx", mov_imm(64, rcx, -1_i64))
+  put(acc, "movl $5, %eax", mov_reg_imm(32, rax, 5_i64))
+  put(acc, "movb $1, %al", mov_reg_imm(8, rax, 1_i64))
+  put(acc, "movabsq $0x1122334455667788, %rdx", movabs(rdx, 1234605616436508552_i64))
+  put(acc, "movb $1, (%rax)", with_mem(mov_imm(8, 0, 1_i64), mem_base(rax, 0_i64)))
+  put(acc, "movw $0x1234, 4(%rbx)", with_mem(mov_imm(16, 0, 4660_i64), mem_base(rbx, 4_i64)))
+  put(acc, "movl $7, sym(%rip)", with_mem(mov_imm(32, 0, 7_i64), mem_rip_sym(RelocKind::PcRel32, 0, 0_i64)))
+  put(acc, "leaq 16(%rsp), %rdi", with_mem(lea(rdi, 0), mem_base(rsp, 16_i64)))
+  put(acc, "leaq sym(%rip), %rax", with_mem(lea(rax, 0), mem_rip_sym(RelocKind::PcRel32, 0, 0_i64)))
+  put(acc, "movzbl %al, %eax", movzx(8, 32, rax, rax))
+  put(acc, "movzbq (%rcx), %rax", with_mem(movzx(8, 64, rax, 0), mem_base(rcx, 0_i64)))
+  put(acc, "movzwl %cx, %edx", movzx(16, 32, rdx, rcx))
+  put(acc, "movsbq %dl, %rax", movsx(8, 64, rax, rdx))
+  put(acc, "movswl (%rdi), %ecx", with_mem(movsx(16, 32, rcx, 0), mem_base(rdi, 0_i64)))
+  put(acc, "movslq %edx, %rax", movsxd(rax, rdx))
+  put(acc, "movsbl %sil, %eax", movsx(8, 32, rax, rsi))
+  put(acc, "addq %rbx, %rax", alu(0, 64, rbx, rax))
+  put(acc, "subl %ecx, (%rdi)", with_mem(alu(5, 32, rcx, 0), mem_base(rdi, 0_i64)))
+  put(acc, "xorq %r10, %r11", alu(6, 64, r10, r11))
+  put(acc, "andb %al, %cl", alu(4, 8, rax, rcx))
+  put(acc, "orw %ax, 2(%rdx)", with_mem(alu(1, 16, rax, 0), mem_base(rdx, 2_i64)))
+  put(acc, "cmpq %rcx, %rdx", alu(7, 64, rcx, rdx))
+  put(acc, "adcq $1, %rax", alu_imm(2, 64, rax, 1_i64))
+  put(acc, "sbbq %rbx, %rax", alu(3, 64, rbx, rax))
+  put(acc, "addq $0x1234, %rax", alu_imm(0, 64, rax, 4660_i64))
+  put(acc, "subq $-128, %rcx", alu_imm(5, 64, rcx, -128_i64))
+  put(acc, "cmpb $5, %al", alu_imm(7, 8, rax, 5_i64))
+  put(acc, "cmpw $300, (%rax)", alu_imm_mem(7, 16, mem_base(rax, 0_i64), 300_i64))
+  put(acc, "andq $255, %rdx", alu_imm(4, 64, rdx, 255_i64))
+  put(acc, "addq %rbx, 8(%rsp)", with_mem(alu(0, 64, rbx, 0), mem_base(rsp, 8_i64)))
+  put(acc, "addq 8(%rsp), %rbx", with_mem(alu_load(0, 64, rbx, 0), mem_base(rsp, 8_i64)))
+  put(acc, "testq %rax, %rax", test_rr(64, rax, rax))
+  put(acc, "testb $1, %al", test_imm(8, rax, 1_i64))
+  put(acc, "imulq %rcx, %rax", imul_rm(64, rax, rcx))
+  put(acc, "imull $100, %edx, %eax", imul_imm(32, rax, rdx, 100_i64))
+  put(acc, "imulq $1000, %rcx, %rdx", imul_imm(64, rdx, rcx, 1000_i64))
+  put(acc, "divq %rcx", unary(6, 64, rcx))
+  put(acc, "idivl (%rsi)", with_mem(unary(7, 32, 0), mem_base(rsi, 0_i64)))
+  put(acc, "mulb %cl", unary(4, 8, rcx))
+  put(acc, "negq %rax", unary(3, 64, rax))
+  put(acc, "notl %ecx", unary(2, 32, rcx))
+  put(acc, "cqto", sign_extend_acc(64))
+  put(acc, "cltd", sign_extend_acc(32))
+  put(acc, "shlq %cl, %rax", shift_cl(4, 64, rax))
+  put(acc, "shrl $3, %edx", shift_imm(5, 32, rdx, 3_i64))
+  put(acc, "sarq $63, %rbx", shift_imm(7, 64, rbx, 63_i64))
+  put(acc, "shlq %rax", shift_one(4, 64, rax))
+  put(acc, "sete %al", setcc(cc_e, rax))
+  put(acc, "setg %r9b", setcc(cc_g, r9))
+  put(acc, "setb %sil", setcc(cc_b, rsi))
+  put(acc, "cmovneq %rdx, %rax", cmov(cc_ne, 64, rax, rdx))
+  put(acc, "cmovlel %ecx, %edx", cmov(cc_le, 32, rdx, rcx))
+  put(acc, "jmp sym", jmp_sym(0))
+  put(acc, "je sym", jcc_sym(cc_e, 0))
+  put(acc, "call sym", call_sym(0))
+  put(acc, "jmp *%rax", jmp_ind(rax))
+  put(acc, "call *8(%rbx)", with_mem(call_ind(0), mem_base(rbx, 8_i64)))
+  put(acc, "ret", ret)
+  put(acc, "pushq %rbp", push(rbp))
+  put(acc, "popq %r15", pop(r15))
+  put(acc, "pushq %r12", push(r12))
+  put(acc, "jmp .+2", jmp8(0_i64))
+  put(acc, "jl .+4", jcc8(cc_l, 2_i64))
+  put(acc, "jne .+130", jcc32(cc_ne, 124_i64))
+  put(acc, "lock cmpxchgq %rcx, (%rdx)", with_mem(locked(cmpxchg(64, rcx, 0)), mem_base(rdx, 0_i64)))
+  put(acc, "lock xaddl %eax, (%rbx)", with_mem(locked(xadd(32, rax, 0)), mem_base(rbx, 0_i64)))
+  put(acc, "xchgq %rax, (%rcx)", with_mem(xchg(64, rax, 0), mem_base(rcx, 0_i64)))
+  put(acc, "lock cmpxchgb %dl, (%rsi)", with_mem(locked(cmpxchg(8, rdx, 0)), mem_base(rsi, 0_i64)))
+  put(acc, "movq %fs:sym@tpoff, %rax", with_mem(mov_load(64, rax, 0), mem_abs_sym(1, RelocKind::X86TpOff32, 0, 0_i64)))
+  put(acc, "movq %gs:0x28, %rax", with_mem(mov_load(64, rax, 0), mem_abs(2, 40_i64)))
+  put(acc, "movq %fs:(%rax), %rcx", with_mem(mov_load(64, rcx, 0), mem_base_seg(1, rax, 0_i64)))
+  put(acc, "movsd (%rax), %xmm0", with_mem(sse_load(true, xmm(0), 0), mem_base(rax, 0_i64)))
+  put(acc, "movsd %xmm1, 8(%rsp)", with_mem(sse_store(true, xmm(1), 0), mem_base(rsp, 8_i64)))
+  put(acc, "movss %xmm8, %xmm9", sse_load(false, xmm(9), xmm(8)))
+  put(acc, "addsd %xmm1, %xmm0", sse_arith(true, 88, xmm(0), xmm(1)))
+  put(acc, "subss (%rcx), %xmm2", with_mem(sse_arith(false, 92, xmm(2), 0), mem_base(rcx, 0_i64)))
+  put(acc, "mulsd %xmm15, %xmm14", sse_arith(true, 89, xmm(14), xmm(15)))
+  put(acc, "divsd %xmm3, %xmm4", sse_arith(true, 94, xmm(4), xmm(3)))
+  put(acc, "sqrtsd %xmm1, %xmm0", sse_arith(true, 81, xmm(0), xmm(1)))
+  put(acc, "ucomisd %xmm1, %xmm0", ucomi(true, xmm(0), xmm(1)))
+  put(acc, "ucomiss %xmm2, %xmm3", ucomi(false, xmm(3), xmm(2)))
+  put(acc, "cvttsd2si %xmm0, %rax", cvtt(true, 64, rax, xmm(0)))
+  put(acc, "cvttss2si %xmm1, %ecx", cvtt(false, 32, rcx, xmm(1)))
+  put(acc, "cvtsi2sdq %rax, %xmm0", cvt_from_int(true, 64, xmm(0), rax))
+  put(acc, "cvtsi2sdl %ecx, %xmm1", cvt_from_int(true, 32, xmm(1), rcx))
+  put(acc, "cvtsi2ssq %rax, %xmm2", cvt_from_int(false, 64, xmm(2), rax))
+  put(acc, "cvtss2sd %xmm1, %xmm0", cvt_fp(true, xmm(0), xmm(1)))
+  put(acc, "cvtsd2ss %xmm0, %xmm1", cvt_fp(false, xmm(1), xmm(0)))
+  put(acc, "movq %rax, %xmm0", movq_to_xmm(64, xmm(0), rax))
+  put(acc, "movq %xmm0, %rcx", movq_from_xmm(64, xmm(0), rcx))
+  put(acc, "movd %eax, %xmm2", movq_to_xmm(32, xmm(2), rax))
+  put(acc, "movaps %xmm1, %xmm0", movaps(xmm(0), xmm(1)))
+  put(acc, "xorps %xmm0, %xmm0", xorps(xmm(0), xmm(0)))
+  put(acc, "addsd sym(%rip), %xmm0", with_mem(sse_arith(true, 88, xmm(0), 0), mem_rip_sym(RelocKind::PcRel32, 0, 0_i64)))
+  put(acc, "movabsq $sym, %rax", with_reloc(movabs(rax, 0_i64), RelocKind::Abs64, 0, 0_i64, 8))
+  put(acc, "movq sym@GOTPCREL(%rip), %rax", with_mem(mov_load(64, rax, 0), mem_rip_sym(RelocKind::X86GotPcRel, 0, 0_i64)))
+  acc
+end
+
+def hex(bytes : Array(UInt8)) : String
+  String.build do |io|
+    bytes.each do |b|
+      io << "0123456789abcdef"[(b >> 4).to_i32]
+      io << "0123456789abcdef"[(b & 15_u8).to_i32]
+    end
+  end
+end
+
+class NativeX86
+  def self.fail(message : String) : Nil
+    STDERR.puts "native_amd64: #{message}"
+    LibC.exit(1)
+  end
+
+  def self.run : Nil
+    args = Program.args
+    if args.size < 1
+      fail("usage: native_amd64 forms|abi")
+    end
+    if args[0] == "abi"
+      abi_report
+    elsif args[0] == "forms"
+      forms.each do |f|
+        enc = encode_form(f.xf)
+        rel = enc.relocs.map { |r| "#{r.offset}:#{r.kind}:#{r.addend}" }
+        STDOUT.puts "#{f.text}\t#{hex(enc.bytes)}\t#{rel.join(",")}"
+      end
+    else
+      fail("unknown command #{args[0]}")
+    end
+  end
+end
+
+class AbiCase
+  getter name : String
+  getter size : Int64
+  getter leaves : Array(Leaf)
+
+  def initialize(@name : String, @size : Int64, @leaves : Array(Leaf))
+  end
+end
+
+def leaf(offset : Int64, is_float : Bool) : Leaf
+  Leaf.new(offset, is_float)
+end
+
+def class_name(c : Int32) : String
+  if c == class_integer
+    return "INTEGER"
+  end
+  if c == class_sse
+    return "SSE"
+  end
+  if c == class_memory
+    return "MEMORY"
+  end
+  "NONE"
+end
+
+# The aggregates the System V classifier is checked on, each by its size and scalar leaves.
+def abi_cases : Array(AbiCase)
+  acc = [] of AbiCase
+  acc << AbiCase.new("i64_i64", 16_i64, [leaf(0_i64, false), leaf(8_i64, false)])
+  acc << AbiCase.new("f64_f64", 16_i64, [leaf(0_i64, true), leaf(8_i64, true)])
+  acc << AbiCase.new("i64_f64", 16_i64, [leaf(0_i64, false), leaf(8_i64, true)])
+  acc << AbiCase.new("f64_i64", 16_i64, [leaf(0_i64, true), leaf(8_i64, false)])
+  acc << AbiCase.new("f32_f32", 8_i64, [leaf(0_i64, true), leaf(4_i64, true)])
+  acc << AbiCase.new("i32x3", 12_i64, [leaf(0_i64, false), leaf(4_i64, false), leaf(8_i64, false)])
+  acc << AbiCase.new("i64x3", 24_i64, [leaf(0_i64, false), leaf(8_i64, false), leaf(16_i64, false)])
+  acc << AbiCase.new("f32_i32", 8_i64, [leaf(0_i64, true), leaf(4_i64, false)])
+  acc << AbiCase.new("i8_f64", 16_i64, [leaf(0_i64, false), leaf(8_i64, true)])
+  acc
+end
+
+# One register-availability probe: whether the named aggregate fits with these registers still free.
+def fits_line(name : String, int_free : Int32, sse_free : Int32) : Nil
+  c = abi_cases.find { |x| x.name == name }.as(AbiCase)
+  fits = sysv_fits(sysv_classify(c.size, c.leaves), int_free, sse_free)
+  STDOUT.puts "fits\t#{name}\t#{int_free}\t#{sse_free}\t#{fits ? "yes" : "no"}"
+end
+
+# Prints the System V and Win64 tables in a fixed form the gate compares with the psABI's worked cases.
+def abi_report : Nil
+  abi_cases.each do |c|
+    classes = sysv_classify(c.size, c.leaves)
+    names = classes.map { |k| class_name(k) }
+    STDOUT.puts "class\t#{c.name}\t#{names.join(",")}"
+    regs = sysv_return_regs(classes)
+    STDOUT.puts "ret\t#{c.name}\t#{regs.join(",")}"
+  end
+  STDOUT.puts "table\tsysv_integer\t#{sysv_integer_args.join(",")}"
+  STDOUT.puts "table\tsysv_sse\t#{sysv_sse_args.join(",")}"
+  STDOUT.puts "table\twin64_integer\t#{win64_integer_args.join(",")}"
+  STDOUT.puts "table\twin64_sse\t#{win64_sse_args.join(",")}"
+  STDOUT.puts "table\tsysv_callee_saved\t#{sysv_callee_saved.join(",")}"
+  STDOUT.puts "table\twin64_callee_saved\t#{win64_callee_saved.join(",")}"
+  [false, true].each do |windows|
+    d = x86_64_target(windows)
+    STDOUT.puts "target\t#{d.name}\tindirect=#{d.indirect_result}\tframe=#{d.frame_pointer}\tstack_align=#{d.stack_align}\tpointer_bits=#{d.pointer_bits}"
+  end
+  fits_line("i64_i64", 6, 8)
+  fits_line("i64_i64", 1, 8)
+  fits_line("f64_f64", 6, 1)
+  fits_line("f64_f64", 6, 2)
+  fits_line("i64x3", 6, 8)
+  fits_line("i64_f64", 6, 0)
+  [1_i64, 2_i64, 3_i64, 4_i64, 8_i64, 12_i64, 16_i64].each do |size|
+    STDOUT.puts "win64_value\t#{size}\t#{win64_by_value(size) ? "yes" : "no"}"
+  end
+  [0, 1, 2, 3].each do |i|
+    STDOUT.puts "win64_slot\t#{i}\t#{win64_slot(i, false)}\t#{win64_slot(i, true)}"
+  end
+end
+
+NativeX86.run

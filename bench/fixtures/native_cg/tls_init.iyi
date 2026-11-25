@@ -1,0 +1,18 @@
+module tls_init
+
+class Probe
+  @[ThreadLocal]
+  @@probe = 42_i64
+
+  def self.probe
+    @@probe
+  end
+
+  def self.set_probe(value : Int64)
+    @@probe = value
+  end
+end
+
+before = Probe.probe
+Probe.set_probe(before + 1_i64)
+puts "#{before} #{Probe.probe}"

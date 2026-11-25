@@ -7631,7 +7631,7 @@ IYI
         close("yield_observer.part")
         print; next
       }
-      inside && /^    def self\./ { inside = 0 }
+      inside && /^    (@\[Effect\([^)]*\)\]; )?def self\./ { inside = 0 }
       $0 == "        LibC.thread_switch(0_u32, IYI_SWITCH_OPTION_DEPRESS, 1_u32)" {
         calls++
         if (!inside) bad = 1
@@ -7658,7 +7658,7 @@ IYI
     cp yield-control/iyi/*.iyi yield-mutant/iyi/ || { echo 'SETUP: yield: could not populate the mutant copy'; exit 76; }
     awk '
       $0 ~ /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.yield_cpu : Nil$/ { defs++; inside = 1; print; next }
-      inside && /^    def self\./ { inside = 0 }
+      inside && /^    (@\[Effect\([^)]*\)\]; )?def self\./ { inside = 0 }
       $0 == "        yield_observe_switch" {
         calls++; if (!inside) bad = 1
         print "        asm(\"yield\" :::: \"volatile\")"; next
@@ -7670,7 +7670,7 @@ IYI
     # the identical observer and every other hook, to the control copy.
     awk '
       $0 ~ /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.yield_cpu : Nil$/ { inside = 1; print; next }
-      inside && /^    def self\./ { inside = 0 }
+      inside && /^    (@\[Effect\([^)]*\)\]; )?def self\./ { inside = 0 }
       inside && $0 == "        asm(\"yield\" :::: \"volatile\")" {
         print "        yield_observe_switch"; restored++; next
       }

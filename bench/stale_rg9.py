@@ -67,7 +67,7 @@ def build(compiler: str, repo: str, work: str, source: str, number: int, dump: b
                 try: os.remove(p)
                 except OSError: pass
 
-def inputs_leg(compiler: str, repo: str, work: str, source: str, number: int, with_inputs: bool) -> tuple[str, dict | None]:
+def inputs_leg(compiler: str, repo: str, work: str, source: str, number: int, with_inputs: bool) -> tuple[str, dict, dict | None]:
     base = os.path.basename(source)
     unique = f"{base}-inputs{number}-{os.getpid()}-{time.time_ns()}"
     key = os.path.join(work, f"{unique}.key")
@@ -83,12 +83,12 @@ def inputs_leg(compiler: str, repo: str, work: str, source: str, number: int, wi
         if proc.returncode:
             raise GateFailure(f"{os.path.relpath(source, repo)} inputs leg {number}: build exited {proc.returncode}: {proc.stderr.strip()[-500:]}")
         with open(key, encoding="utf-8") as f:
-            local = json.load(f)["local"]["build"]
+            local = json.load(f)["local"]
         data = None
         if record and os.path.exists(record):
             with open(record, encoding="utf-8") as f:
                 data = json.load(f)
-        return local, data
+        return local["build"], local, data
     finally:
         for p in (key, out, record):
             if p and os.path.exists(p):
@@ -99,12 +99,15 @@ def run_inputs_check(compiler: str, repo: str, work: str, programs: list[str]) -
     def check(source: str) -> tuple[str, dict | None, str | None]:
         name = os.path.relpath(source, repo)
         try:
-            plain, _ = inputs_leg(compiler, repo, work, source, 1, False)
-            with_inputs, data = inputs_leg(compiler, repo, work, source, 2, True)
+            plain, plain_local, _ = inputs_leg(compiler, repo, work, source, 1, False)
+            with_inputs, with_local, data = inputs_leg(compiler, repo, work, source, 2, True)
         except GateFailure as ex:
             return name, None, str(ex)
         if plain != with_inputs:
-            return name, None, f"{name}: local.build differs with --stale-inputs ({plain}, {with_inputs})"
+            # Name the parts of the key that differ, so a failure says what moved
+            # (toolchain, behavior, callpath, link, cenv or build) rather than two hashes.
+            moved = sorted(k for k in set(plain_local) | set(with_local) if plain_local.get(k) != with_local.get(k))
+            return name, None, f"{name}: local.build differs with --stale-inputs ({plain}, {with_inputs}); parts that differ: {', '.join(moved) or 'none'}"
         if data is not None and data.get("format") != "iyi-stale-inputs":
             return name, None, f"{name}: --stale-inputs wrote a record of another format"
         return name, data, None

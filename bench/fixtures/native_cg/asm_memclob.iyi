@@ -1,0 +1,11 @@
+@[Unsafe("the fixture holds an inline asm template that writes memory")]
+module asm_memclob
+
+def stash : Int64
+  cell = 5_i64
+  p = pointerof(cell)
+  asm("mov x9, #77\nstr x9, [$0]" :: "r"(p) : "memory", "x9" : "volatile")
+  p.value
+end
+
+puts "#{stash()}"

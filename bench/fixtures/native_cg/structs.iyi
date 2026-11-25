@@ -1,0 +1,15 @@
+module structs
+
+def hfa2(a : Float64, b : Float64) : Float64
+  a + b
+end
+
+def pairsum(a : Int64, b : Int64) : Int64
+  a + b
+end
+
+def sumbig(a : Int64, b : Int64, c : Int64) : Int64
+  a + b + c
+end
+
+puts "#{hfa2(1.5, 2.5).to_i32} #{pairsum(7_i64, 8_i64).to_i32} #{sumbig(1_i64, 2_i64, 3_i64)}"

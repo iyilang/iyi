@@ -108,6 +108,7 @@ check("a change to CI whose base workflow cannot be read runs everything",
 for files, what in [
     (["src/compiler/codegen/codegen.iyi"], "a self-host compiler source"),
     (["bench/selfhost_lexer_exercise.sh"], "a self-host gate"),
+    (["bench/native_elf_run.sh"], "the native Linux ELF execution gate"),
     (["bench/native_ir_exercise.sh"], "a native compiler gate"),
     (["bench/lib/host.sh"], "the shared test-host helper"),
     (["bench/fixtures/compile_stdout.iyi"], "a fixture the self-host gates read"),
@@ -116,15 +117,23 @@ for files, what in [
     (["bench/" + "native_ir" + "_exercise.sh"], "the native IR gate"),
     (["bench/" + "selfhost_ir_fold" + "_exercise.iyi"], "the IR folding exercise"),
     (["bench/fixtures/" + "ir/valid/everything.ir"], "an IR fixture"),
+    (["bench/" + "native_codegen" + "_exercise.sh"], "the AArch64 codegen gate"),
+    (["bench/" + "native_encode" + "_exercise.sh"], "the AArch64 encoder gate"),
+    (["bench/" + "native_regalloc" + "_exercise.sh"], "the register allocator gate"),
+    (["src/compiler/tools/native_cg.iyi"], "the native codegen driver"),
+    (["bench/fixtures/native_cg/narrow_signext.ir"], "a restored narrow codegen fixture"),
+    (["bench/fixtures/native_cg/rt_stub.c"], "the native runtime comparison stub"),
+    (["src/compiler/native/rt/builtins.ir"], "the native IR runtime"),
+    (["README.md", "src/compiler/native/rt/builtins.ir"], "a mixed documentation and native IR change"),
 ]:
     reason, jobs = planned(*files)
-    check(f"{what} selects all three self-host jobs",
-          {"selfhost", "selfhost-darwin", "selfhost-windows"} <= jobs,
+    check(f"{what} selects all three hosts and native Linux arm64 execution",
+          {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} <= jobs,
           f"{reason}: {sorted(jobs)}")
 
 reason, jobs = planned("src/iyi/string.iyi")
 check("an ordinary prelude change does not select component-only jobs",
-      not {"selfhost", "selfhost-darwin", "selfhost-windows"} & jobs,
+      not {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} & jobs,
       f"{reason}: {sorted(jobs)}")
 
 print()

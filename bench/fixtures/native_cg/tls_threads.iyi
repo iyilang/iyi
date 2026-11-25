@@ -1,0 +1,26 @@
+module tls_threads
+
+class Shared
+  @[ThreadLocal]
+  @@tv = 1_i64
+
+  def self.tv
+    @@tv
+  end
+
+  def self.set_tv(value : Int64)
+    @@tv = value
+  end
+end
+
+Shared.set_tv(100_i64)
+got = 0_i64
+group do |g|
+  task = g.spawn(unit: :new) do
+    Shared.set_tv(7_i64)
+    Shared.tv
+  end
+  value = task.value
+  got = value if value.is_a?(Int64)
+end
+puts "#{Shared.tv} #{got}"

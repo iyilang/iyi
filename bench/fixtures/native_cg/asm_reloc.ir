@@ -1,0 +1,25 @@
+; iyi-ir 1
+module "asm_reloc"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define i64 @seven() {
+entry:
+  ret i64 7
+}
+
+define i64 @eight() {
+entry:
+  ret i64 8
+}
+
+; The template branches to seven by name, and its output is pinned to x0. Its relocation must name seven. The
+; name carries no leading underscore, so the same template assembles for Mach-O and ELF.
+define i32 @main() {
+entry:
+  %r = call i64 () asm sideeffect "bl seven", "={x0},~{x30}"()
+  %p = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r)
+  ret i32 0
+}

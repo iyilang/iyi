@@ -1,0 +1,448 @@
+module compiler/native/lower
+
+# Target-independent legalization (SPEC 2.2 step 2). Everything here reads the IR, the data layout and a
+# TargetDesc (compiler/native/target.iyi). None of it names a register or a platform, so the selector
+# calls it and the aarch64 target supplies only the description.
+#
+#   - reachability, and the unwind edge of an invoke, which is dropped: iyi emits no exception tables
+#   - scalarisation: an aggregate is the list of its scalar leaves in layout order
+#   - getelementptr folded to one constant byte offset plus the dynamic terms to scale and add
+#   - the overflow family and the atomic orderings, classified once, not per target
+#   - the C-convention walk: which register or stack slot carries each leaf of each argument and result,
+#     with the register lists, the aggregate size limit and the variadic rule read from the description
+
+import compiler/ir/types::{IrType, TypeKind}
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, Ordering}
+import compiler/ir/function::{Function}
+import compiler/ir/layout::{DataLayout}
+import compiler/ir/intrinsics::{IntrinsicId}
+import compiler/native/target::{TargetDesc}
+
+# ---- reachability ------------------------------------------------------------------------------------------
+
+# Which IR blocks are reachable from the entry. An invoke's unwind edge is not followed: its normal successor
+# is the only edge that leaves the block.
+pub def reachable_blocks(fn : Function) : Array(Bool)
+  index = Hash(String, Int32).new
+  k = 0
+  fn.blocks.each do |b|
+    index[b.name] = k
+    k = k + 1
+  end
+  seen = [] of Bool
+  fn.blocks.each do |b|
+    seen << false
+  end
+  work = [0]
+  while !work.empty?
+    n = work.pop
+    next if seen[n]
+    seen[n] = true
+    block = fn.blocks[n]
+    next unless block.terminated?
+    t = block.terminator
+    if t.op == Op::Invoke
+      work << index[t.targets[0].name]
+    else
+      t.targets.each do |s|
+        work << index[s.name]
+      end
+    end
+  end
+  seen
+end
+
+# ---- scalarisation -----------------------------------------------------------------------------------------
+
+# One scalar leaf of an argument or a return value: its register class and register, or its stack offset.
+pub class LeafLoc
+  getter kind : Int32   # 0 gpr, 1 fpr, 2 stack
+  getter reg : Int32    # physical register for kinds 0 and 1; -1 for the stack
+  getter offset : Int64 # byte offset from sp for kind 2; -1 otherwise
+  getter bits : Int32   # the leaf's width in bits
+  getter fp : Bool      # the leaf is floating point
+  getter leaf_type : IrType
+
+  def initialize(@kind : Int32, @reg : Int32, @offset : Int64, @bits : Int32, @fp : Bool, @leaf_type : IrType)
+  end
+end
+
+# The assignment of one signature: a list of leaves per argument, in flattened order, and the bytes the
+# outgoing stack arguments occupy.
+pub class CallAssignment
+  getter args : Array(Array(LeafLoc))
+  getter stack_bytes : Int64
+  getter indirect_result : Bool # sret: the caller passes the result pointer in the indirect result register
+
+  def initialize(@args : Array(Array(LeafLoc)), @stack_bytes : Int64, @indirect_result : Bool)
+  end
+end
+
+# The 64-bit half of an i128. A 128-bit integer is two leaves of this type, low then high (SPEC 2.2: i128
+# values are pairs). The type is built, not interned: the backend reads its kind and width only.
+def half_type : IrType
+  IrType.new(TypeKind::Int, 64, 0, [] of IrType, false, nil, nil, 0_i64, [] of IrType, nil, false, "i64", false)
+end
+
+# The flattened scalar leaves of a type, as (byte offset, scalar type). An aggregate's leaves follow its
+# layout; padding is skipped. Void has none.
+pub def flatten_leaves(layout : DataLayout, t : IrType) : Array({Int64, IrType})
+  acc = [] of {Int64, IrType}
+  flatten_into(layout, t, 0_i64, acc)
+  acc
+end
+
+def flatten_into(layout : DataLayout, t : IrType, base : Int64, acc : Array({Int64, IrType})) : Nil
+  if t.int? && t.bits > 64 && t.bits % 64 == 0
+    # An integer of more than one word is its 64-bit words, least significant first: two for i128, and as many
+    # as it has for the longer ones the hosted compiler writes when it stores a small value over a whole union.
+    k = 0
+    while k < t.bits // 64
+      acc << {base + k.to_i64 * 8_i64, half_type}
+      k = k + 1
+    end
+    return
+  end
+  if t.struct?
+    fields = t.struct_element_types
+    i = 0
+    while i < fields.size
+      flatten_into(layout, fields[i], base + layout.offset_of(t, i), acc)
+      i = i + 1
+    end
+    return
+  end
+  if t.array?
+    element = t.element_type
+    stride = layout.alloc_size(element)
+    n = t.count
+    k = 0_i64
+    while k < n
+      flatten_into(layout, element, base + k * stride, acc)
+      k = k + 1_i64
+    end
+    return
+  end
+  if t.void?
+    return
+  end
+  acc << {base, t}
+end
+
+# Whether a type is an aggregate: a struct or an array.
+pub def aggregate?(t : IrType) : Bool
+  t.struct? || t.array?
+end
+
+# Whether the leaves are a homogeneous floating-point aggregate of at most `max` elements of one width.
+pub def homogeneous_float?(leaves : Array({Int64, IrType}), max : Int32) : Bool
+  return false if leaves.empty? || leaves.size > max
+  first = leaves[0][1]
+  return false unless first.float?
+  leaves.all? { |l| l[1].float? && l[1].bits == first.bits }
+end
+
+# ---- the C-convention walk ----------------------------------------------------------------------------------
+
+# Assigns every argument of a call. `fixed` is the count of named parameters; the rest are variadic.
+# `sret_first` says parameter 0 is the indirect result pointer, which travels in the description's indirect
+# result register. Each leaf takes the next register of its class; what does not fit goes to the stack in
+# order, every leaf in an 8-byte slot.
+pub def assign_call(layout : DataLayout, desc : TargetDesc, params : Array(IrType), fixed : Int32, sret_first : Bool) : CallAssignment | String
+  gpr_next = 0
+  fpr_next = 0
+  stack = 0_i64
+  args = [] of Array(LeafLoc)
+  indirect = false
+  i = 0
+  while i < params.size
+    t = params[i]
+    leaves = flatten_leaves(layout, t)
+    variadic = i >= fixed
+    if i == 0 && sret_first
+      indirect = true
+      args << [LeafLoc.new(0, desc.indirect_result, -1_i64, 64, false, t)]
+      i = i + 1
+      next
+    end
+    needs_stack = desc.variadic_on_stack && variadic
+    if !needs_stack
+      if t.float?
+        if fpr_next < desc.fp_args.size
+          args << [LeafLoc.new(1, desc.fp_args[fpr_next], -1_i64, t.bits, true, t)]
+          fpr_next = fpr_next + 1
+          i = i + 1
+          next
+        end
+      elsif t.int? && t.bits == 128
+        # AAPCS64: a 128-bit integer takes an even-numbered register pair, or else two 8-byte slots on a
+        # 16-byte-aligned stack.
+        gpr_next = gpr_next + 1 if gpr_next % 2 == 1
+        if gpr_next + 2 <= desc.integer_args.size
+          args << [LeafLoc.new(0, desc.integer_args[gpr_next], -1_i64, 64, false, leaves[0][1]), LeafLoc.new(0, desc.integer_args[gpr_next + 1], -1_i64, 64, false, leaves[1][1])]
+          gpr_next = gpr_next + 2
+        else
+          stack = (stack + 15_i64) & -16_i64
+          args << [LeafLoc.new(2, -1, stack, 64, false, leaves[0][1]), LeafLoc.new(2, -1, stack + 8_i64, 64, false, leaves[1][1])]
+          stack = stack + 16_i64
+        end
+        i = i + 1
+        next
+      elsif t.int? || t.pointer?
+        if gpr_next < desc.integer_args.size
+          args << [LeafLoc.new(0, desc.integer_args[gpr_next], -1_i64, t.int? ? t.bits : 64, false, t)]
+          gpr_next = gpr_next + 1
+          i = i + 1
+          next
+        end
+      elsif aggregate?(t)
+        return "an aggregate argument over #{desc.aggregate_reg_bytes} bytes must be passed by pointer" if layout.store_size(t) > desc.aggregate_reg_bytes
+        if homogeneous_float?(leaves, desc.fp_aggregate_max) && fpr_next + leaves.size <= desc.fp_args.size
+          locs = [] of LeafLoc
+          leaves.each do |l|
+            locs << LeafLoc.new(1, desc.fp_args[fpr_next], -1_i64, l[1].bits, true, l[1])
+            fpr_next = fpr_next + 1
+          end
+          args << locs
+          i = i + 1
+          next
+        end
+        if !homogeneous_float?(leaves, desc.fp_aggregate_max) && gpr_next + leaves.size <= desc.integer_args.size
+          locs = [] of LeafLoc
+          leaves.each do |l|
+            locs << LeafLoc.new(0, desc.integer_args[gpr_next], -1_i64, l[1].int? ? l[1].bits : 64, false, l[1])
+            gpr_next = gpr_next + 1
+          end
+          args << locs
+          i = i + 1
+          next
+        end
+      end
+    end
+    # The stack: every leaf in an 8-byte slot, in argument order.
+    locs = [] of LeafLoc
+    leaves.each do |l|
+      locs << LeafLoc.new(2, -1, stack, l[1].int? ? l[1].bits : (l[1].float? ? l[1].bits : 64), l[1].float?, l[1])
+      stack = stack + 8_i64
+    end
+    args << locs
+    i = i + 1
+  end
+  CallAssignment.new(args, stack, indirect)
+end
+
+# The return convention of a result type: the leaves and their registers. A result over the register limit
+# is returned through sret, which the caller reports through `CallAssignment#indirect_result`; asking for its
+# leaves is a refusal.
+pub def assign_return(layout : DataLayout, desc : TargetDesc, t : IrType) : Array(LeafLoc) | String
+  return [] of LeafLoc if t.void?
+  if t.float?
+    return [LeafLoc.new(1, desc.fp_args[0], -1_i64, t.bits, true, t)]
+  end
+  if (t.int? && t.bits != 128) || t.pointer?
+    return [LeafLoc.new(0, desc.integer_args[0], -1_i64, t.int? ? t.bits : 64, false, t)]
+  end
+  return "a result over #{desc.aggregate_reg_bytes} bytes is returned through sret" if layout.store_size(t) > desc.aggregate_reg_bytes
+  leaves = flatten_leaves(layout, t)
+  acc = [] of LeafLoc
+  if homogeneous_float?(leaves, desc.fp_aggregate_max)
+    k = 0
+    leaves.each do |l|
+      acc << LeafLoc.new(1, desc.fp_args[k], -1_i64, l[1].bits, true, l[1])
+      k = k + 1
+    end
+    return acc
+  end
+  return "a result of #{leaves.size} leaves is more than the #{desc.integer_args.size} integer result registers" if leaves.size > desc.integer_args.size
+  k = 0
+  leaves.each do |l|
+    acc << LeafLoc.new(0, desc.integer_args[k], -1_i64, l[1].int? ? l[1].bits : 64, false, l[1])
+    k = k + 1
+  end
+  acc
+end
+
+# ---- getelementptr ----------------------------------------------------------------------------------------
+
+# A getelementptr folded to one constant byte offset, plus the dynamic terms: for each non-constant index,
+# the operand position it comes from and the byte stride it scales by.
+pub class GepPlan
+  getter const_off : Int64
+  getter terms : Array({Int32, Int64})
+
+  def initialize(@const_off : Int64, @terms : Array({Int32, Int64}))
+  end
+end
+
+# The first index scales the source type; each later one walks into the type it indexes. A struct field is
+# named by a constant, so a dynamic struct index is refused. `args` is the instruction's operand list with the
+# base pointer first.
+pub def plan_gep(layout : DataLayout, source : IrType, args : Array(Value)) : GepPlan | String
+  const_off = 0_i64
+  terms = [] of {Int32, Int64}
+  cur = source
+  k = 1
+  while k < args.size
+    index = args[k]
+    is_const = index.is_a?(Inst) && index.as(Inst).op == Op::ConstInt
+    if k == 1
+      stride = layout.alloc_size(cur)
+      if is_const
+        const_off = const_off + index.as(Inst).aux_int * stride
+      else
+        terms << {k, stride}
+      end
+    elsif cur.struct?
+      if !is_const
+        return "a struct field in a getelementptr needs a constant index"
+      end
+      n = index.as(Inst).aux_int.to_i32
+      const_off = const_off + layout.offset_of(cur, n)
+      cur = cur.struct_element_types[n]
+    elsif cur.array?
+      element = cur.element_type
+      stride = layout.alloc_size(element)
+      if is_const
+        const_off = const_off + index.as(Inst).aux_int * stride
+      else
+        terms << {k, stride}
+      end
+      cur = element
+    else
+      return "getelementptr indexes into #{cur}"
+    end
+    k = k + 1
+  end
+  GepPlan.new(const_off, terms)
+end
+
+# ---- intrinsics and orderings -----------------------------------------------------------------------------
+
+# The overflow family, classified: whether the intrinsic is one (`family`), its signedness, and whether it multiplies
+# or subtracts (otherwise it adds). The width is the operand's, read by the selector.
+pub class OverflowForm
+  getter family : Bool
+  getter signed : Bool
+  getter mul : Bool
+  getter sub : Bool
+
+  def initialize(@family : Bool, @signed : Bool, @mul : Bool, @sub : Bool)
+  end
+end
+
+pub def overflow_form(id : IntrinsicId) : OverflowForm
+  family = id == IntrinsicId::SAddOverflow || id == IntrinsicId::UAddOverflow || id == IntrinsicId::SSubOverflow || id == IntrinsicId::USubOverflow || id == IntrinsicId::SMulOverflow || id == IntrinsicId::UMulOverflow
+  signed = id == IntrinsicId::SAddOverflow || id == IntrinsicId::SSubOverflow || id == IntrinsicId::SMulOverflow
+  mul = id == IntrinsicId::SMulOverflow || id == IntrinsicId::UMulOverflow
+  sub = id == IntrinsicId::SSubOverflow || id == IntrinsicId::USubOverflow
+  OverflowForm.new(family, signed, mul, sub)
+end
+
+# Whether an atomic load must have acquire semantics, and whether an atomic store must have release semantics.
+pub def acquire_on_load?(ordering : Ordering) : Bool
+  ordering == Ordering::Acquire || ordering == Ordering::SeqCst || ordering == Ordering::AcqRel
+end
+
+pub def release_on_store?(ordering : Ordering) : Bool
+  ordering == Ordering::Release || ordering == Ordering::SeqCst || ordering == Ordering::AcqRel
+end
+
+# The integer predicates that compare unsigned, by ordinal (inst.iyi: EQ NE UGT UGE ULT ULE SGT SGE SLT SLE).
+pub def icmp_unsigned?(ordinal : Int64) : Bool
+  ordinal == 2_i64 || ordinal == 3_i64 || ordinal == 4_i64 || ordinal == 5_i64
+end
+
+# The internal convention (SPEC 2.2): a scalar takes the platform C rule, and an aggregate is split into its
+# scalar leaves, each passed as its own scalar. Each leaf takes the next register of its class, and what does not
+# fit goes to the stack in order, one 8-byte slot per leaf. Unlike the C walk, no aggregate is refused for its
+# size, so a three-word struct travels in three registers.
+pub def assign_iyi_call(layout : DataLayout, desc : TargetDesc, params : Array(IrType), sret_first : Bool) : CallAssignment | String
+  gpr_next = 0
+  fpr_next = 0
+  stack = 0_i64
+  args = [] of Array(LeafLoc)
+  indirect = false
+  i = 0
+  while i < params.size
+    t = params[i]
+    if i == 0 && sret_first
+      indirect = true
+      args << [LeafLoc.new(0, desc.indirect_result, -1_i64, 64, false, t)]
+      i = i + 1
+      next
+    end
+    leaves = flatten_leaves(layout, t)
+    locs = [] of LeafLoc
+    k = 0
+    while k < leaves.size
+      leaf = leaves[k][1]
+      if leaf.float?
+        if fpr_next < desc.fp_args.size
+          locs << LeafLoc.new(1, desc.fp_args[fpr_next], -1_i64, leaf.bits, true, leaf)
+          fpr_next = fpr_next + 1
+        else
+          locs << LeafLoc.new(2, -1, stack, leaf.bits, true, leaf)
+          stack = stack + 8_i64
+        end
+      else
+        bits = leaf.int? ? leaf.bits : 64
+        if gpr_next < desc.integer_args.size
+          locs << LeafLoc.new(0, desc.integer_args[gpr_next], -1_i64, bits, false, leaf)
+          gpr_next = gpr_next + 1
+        else
+          locs << LeafLoc.new(2, -1, stack, bits, false, leaf)
+          stack = stack + 8_i64
+        end
+      end
+      k = k + 1
+    end
+    args << locs
+    i = i + 1
+  end
+  CallAssignment.new(args, stack, indirect)
+end
+
+# Whether an internal result travels in memory: it has more leaves of one class than that class has result
+# registers. The caller then passes the address of a buffer in the indirect-result register, the callee writes
+# each leaf at its offset there, and the caller reads them back. (A def that returns a struct of nine words, as
+# the compiler's own Token does, is the case.)
+pub def iyi_result_indirect?(layout : DataLayout, desc : TargetDesc, t : IrType) : Bool
+  return false if t.void?
+  gprs = 0
+  fprs = 0
+  flatten_leaves(layout, t).each do |l|
+    if l[1].float?
+      fprs = fprs + 1
+    else
+      gprs = gprs + 1
+    end
+  end
+  gprs > desc.integer_args.size || fprs > desc.fp_args.size
+end
+
+# The internal convention's result in registers: each leaf of the result takes the next result register of its
+# class. A result that needs more registers than there are travels in memory (iyi_result_indirect?) and is refused
+# here by name, so a caller that did not ask first cannot assign it wrongly.
+pub def assign_iyi_return(layout : DataLayout, desc : TargetDesc, t : IrType) : Array(LeafLoc) | String
+  return [] of LeafLoc if t.void?
+  leaves = flatten_leaves(layout, t)
+  acc = [] of LeafLoc
+  gpr_next = 0
+  fpr_next = 0
+  k = 0
+  while k < leaves.size
+    leaf = leaves[k][1]
+    if leaf.float?
+      return "an internal result needs more than #{desc.fp_args.size} floating-point registers" if fpr_next >= desc.fp_args.size
+      acc << LeafLoc.new(1, desc.fp_args[fpr_next], -1_i64, leaf.bits, true, leaf)
+      fpr_next = fpr_next + 1
+    else
+      return "an internal result needs more than #{desc.integer_args.size} integer registers" if gpr_next >= desc.integer_args.size
+      acc << LeafLoc.new(0, desc.integer_args[gpr_next], -1_i64, leaf.int? ? leaf.bits : 64, false, leaf)
+      gpr_next = gpr_next + 1
+    end
+    k = k + 1
+  end
+  acc
+end

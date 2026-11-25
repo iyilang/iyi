@@ -1,0 +1,6 @@
+def gather_stats : Tuple(Int32, Int32)
+  group do |g|
+    t1 = g.spawn { 10 }
+    t2 = g.spawn { 20 }
+  end
+end

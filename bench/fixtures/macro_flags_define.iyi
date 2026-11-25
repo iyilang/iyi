@@ -1,0 +1,7 @@
+# target: x86_64-linux-gnu
+# define: preview_mt
+macro probe(x)
+  [{{flag?(:preview_mt)}}, {{flag?(:linux)}}, {{flag?(:darwin)}}]
+end
+
+probe(1)

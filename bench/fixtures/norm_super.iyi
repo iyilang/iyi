@@ -1,0 +1,10 @@
+class Base
+  def run(id : Int32, *args, **opts) : Nil
+  end
+end
+
+class Derived < Base
+  def run(id : Int32, *args, **opts) : Nil
+    super
+  end
+end

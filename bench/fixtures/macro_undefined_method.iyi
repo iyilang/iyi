@@ -1,0 +1,5 @@
+macro missing
+  before {{ missing_name }} after
+end
+
+missing

@@ -1,0 +1,5 @@
+macro scope_names
+  {{ @type }} {{ @top_level }} {{ @def }}
+end
+
+scope_names

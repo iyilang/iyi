@@ -1,0 +1,192 @@
+module compiler/macros/confinement
+
+import std/path::{Path}
+import std/file::{File}
+import std/dir::{Dir}
+
+# Where a compile-time macro may read files and the build environment, decided
+# the way the hosted compiler decides it (src/compiler/iyi/macros/methods.cr
+# 40-243). The embedding program builds one MacroConfinement per compile and
+# hands it to the macro engine. It does not name the macro's file: each
+# expansion knows the file its macro was written in, and passes that in.
+#
+# Hosted's iyi_mod_table step has no counterpart here. The port has no module
+# table, so a dependency's package is found as a standalone file's is: the
+# longest of the compiling package and the standard library roots that holds
+# the file, else the nearest ancestor holding iyi.mod, else the file's own
+# directory. The one difference that follows: a dependency directory with no
+# iyi.mod, below the compiling package, is its own root in hosted (from the
+# module table) but not in the port, where a file in one of its subdirectories
+# is its own root. The port then refuses a read hosted allows; it never allows
+# one hosted refuses.
+#
+# Nothing here raises: the port has no rescue, so each question answers with a
+# PathCheck that says what happened and why.
+
+# The answer to one question about a path or a package. `outcome` is
+# "resolved" or "unresolved" for a resolved path or a package root, and
+# "inside", "outside" or "unresolved" for a checked path. `reason` says why a
+# path is unresolved, in hosted's own words where it has them.
+pub struct PathCheck
+  getter path : String
+  getter outcome : String
+  getter reason : String
+
+  def initialize(@path : String, @outcome : String, @reason : String)
+  end
+
+  def resolved? : Bool
+    @outcome != "unresolved"
+  end
+
+  def inside? : Bool
+    @outcome == "inside"
+  end
+end
+
+pub class MacroConfinement
+  getter compiling_root : String
+  getter library_roots : Array(String)
+  getter base_dir : String
+
+  # `compiling_root` is the package being compiled. `library_roots` come from
+  # `library_roots_of`. `base_dir` is the directory relative paths resolve
+  # against: hosted resolves them against the process's current directory.
+  def initialize(@compiling_root : String, @library_roots : Array(String), @base_dir : String)
+  end
+
+  # hosted iyi_library_roots (methods.cr 153-170): for each search path entry
+  # that holds iyi/prelude.iyi, its iyi and std directories that exist, each
+  # resolved. A relative entry is taken from `base`.
+  def self.library_roots_of(search_path : Array(String), base : String) : Array(String)
+    roots = [] of String
+    names = ["iyi", "std"]
+    i = 0
+    while i < search_path.size
+      entry = File.expand_path(search_path[i], base)
+      if File.file?(File.join(entry, "iyi", "prelude.iyi"))
+        j = 0
+        while j < names.size
+          dir = File.join(entry, names[j])
+          roots << File.real_path(dir) if Dir.exists?(dir)
+          j = j + 1
+        end
+      end
+      i = i + 1
+    end
+    roots
+  end
+
+  # hosted iyi_macro_realpath (methods.cr 119-138) with iyi_macro_existing_path
+  # (95-121): the longest existing prefix is resolved through links, the
+  # missing tail is appended, and a link that leads nowhere is the reason it
+  # cannot be resolved. On POSIX a `..` in the tail is left for the OS to
+  # apply after the links before it, as hosted does. On Windows the path is
+  # made absolute first.
+  def resolve(path : String) : PathCheck
+    full = ""
+    {% if flag?(:win32) %}
+      if path.starts_with?("\\\\?\\")
+        return PathCheck.new("", "unresolved", "the port does not strip a \\\\?\\ verbatim prefix on Windows yet")
+      end
+      full = File.expand_path(path, @base_dir)
+    {% else %}
+      full = Path.new(path).absolute? ? path : File.join(@base_dir, path)
+    {% end %}
+    missing = [] of String
+    until File.exists?(full)
+      return PathCheck.new("", "unresolved", "cannot resolve a symbolic link") if File.symlink?(full)
+      parent = File.dirname(full)
+      return PathCheck.new("", "unresolved", "cannot resolve the path") if parent == full
+      missing << File.basename(full)
+      full = parent
+    end
+    real = File.real_path(full)
+    i = missing.size - 1
+    while i >= 0
+      real = File.join(real, missing[i])
+      i = i - 1
+    end
+    PathCheck.new(real, "resolved", "")
+  end
+
+  # hosted Iyi.same_file? (src/compiler/iyi/util.cr 338-343), asked of the file
+  # system: two spellings of one file are the same file.
+  def self.same_file?(a : String, b : String) : Bool
+    return true if File.expand_path(a) == File.expand_path(b)
+    File.exists?(a) && File.exists?(b) && File.same?(a, b)
+  end
+
+  # hosted iyi_macro_under? (methods.cr 146-153): whether `root` is `path` or
+  # one of its ancestors. Identity is asked of the file system, not compared as
+  # strings, since APFS and NTFS can each be case-insensitive.
+  def self.under?(path : String, root : String) : Bool
+    cur = path
+    while true
+      return true if MacroConfinement.same_file?(cur, root)
+      parent = File.dirname(cur)
+      return false if parent == cur
+      cur = parent
+    end
+    false
+  end
+
+  # The root of a file that no package or library holds (methods.cr 195-204):
+  # the nearest ancestor with an iyi.mod, else the file's own directory.
+  def self.standalone_root(real_source : String) : String
+    root = File.dirname(real_source)
+    while !File.file?(File.join(root, "iyi.mod"))
+      parent = File.dirname(root)
+      break if parent == root
+      root = parent
+    end
+    File.file?(File.join(root, "iyi.mod")) ? root : File.dirname(real_source)
+  end
+
+  # The package of the macro written in `source` (hosted iyi_macro_root,
+  # methods.cr 174-209): the longest of the compiling package and the library
+  # roots that holds it, else the standalone root.
+  def macro_root(source : String) : PathCheck
+    real_source = resolve(source)
+    return PathCheck.new("", "unresolved", real_source.reason) unless real_source.resolved?
+    compiling = resolve(@compiling_root)
+    return PathCheck.new("", "unresolved", compiling.reason) unless compiling.resolved?
+    best = ""
+    if MacroConfinement.under?(real_source.path, compiling.path)
+      best = compiling.path
+    end
+    i = 0
+    while i < @library_roots.size
+      candidate = @library_roots[i]
+      if candidate.bytesize > best.bytesize && MacroConfinement.under?(real_source.path, candidate)
+        best = candidate
+      end
+      i = i + 1
+    end
+    best = MacroConfinement.standalone_root(real_source.path) if best.empty?
+    PathCheck.new(best, "resolved", "")
+  end
+
+  # hosted iyi_macro_checked_path (methods.cr 211-223): the resolved path, when
+  # it lies under the macro's package `root` or, for a library read, under a
+  # standard library root. Anything else is outside and is not read.
+  def check_path(root : String, path : String, library : Bool) : PathCheck
+    resolved = resolve(path)
+    return resolved unless resolved.resolved?
+    return PathCheck.new(resolved.path, "inside", "") if MacroConfinement.under?(resolved.path, root)
+    if library
+      i = 0
+      while i < @library_roots.size
+        return PathCheck.new(resolved.path, "inside", "") if MacroConfinement.under?(resolved.path, @library_roots[i])
+        i = i + 1
+      end
+    end
+    PathCheck.new(resolved.path, "outside", "")
+  end
+
+  # hosted iyi_refuse_dependency_env (methods.cr 232-243): only the compiling
+  # package may read the build environment, so the macro's package must be it.
+  def env_allowed?(root : String) : Bool
+    MacroConfinement.same_file?(root, @compiling_root)
+  end
+end

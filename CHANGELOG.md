@@ -135,7 +135,24 @@
   declarations and JSON to match the hosted reader's, and 11 damaged
   artifacts to be refused with the same verdict, and catches 16 broken
   copies.
-- These six gates run in the same three jobs through
+- **The macro engine and syntax normalizer in iyi: `src/compiler/macros/`
+  and `src/compiler/semantic/normalizer.iyi` (#210).** 3,285 lines of iyi
+  parse and expand macros, with a 384-line table of the macro methods the
+  hosted compiler answers (`answers.iyi`, generated from its source and
+  checked by `bench/macro_method_table.py`), and 780 lower `unless`,
+  `until`, operator assignment, interpolation, chained comparisons, `defer`,
+  `recover` and the rest to the hosted front end's trees.
+  `bench/selfhost_macros_exercise.sh` requires 61 fixtures' expansions (279
+  sites) to print byte for byte as the hosted compiler does, 2 refusals by
+  name, 31 file-method and env cases to match the hosted confinement rule
+  (2 more differ by design), and `bench/macro_sites.py`'s census of the
+  prelude and the port's own source to find at least the
+  `bench/macro_sites.floor` count of identical sites (150 of 165 today, the
+  floor 70), and catches 53 broken copies.
+  `bench/selfhost_normalizer_exercise.sh` requires 11 fixtures (620 nodes)
+  to normalise as the front end does and catches 8. Hosted commands are
+  unchanged.
+- These eight gates run in the same three jobs through
   `bench/selfhost_gates.sh`; `bench/native_elf_run.sh` runs in
   `selfhost-linux-arm64`.
 - **AArch64 code generation and register allocation in iyi:

@@ -1,0 +1,6 @@
+macro lookup
+  {{ env("IYI_GATE_NO_SUCH_VARIABLE") }}
+  {{ env("IYI_GATE_NO_SUCH_VARIABLE_EITHER").nil? }}
+end
+
+lookup

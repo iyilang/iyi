@@ -1,0 +1,5 @@
+# macro-sites
+value = typeof(1)
+{% if true %}
+  value = typeof("text")
+{% end %}

@@ -1,0 +1,6 @@
+# target: aarch64-linux-gnu
+macro probe(x)
+  [{{flag?(:darwin)}}, {{flag?(:macos)}}, {{flag?(:linux)}}, {{flag?(:win32)}}, {{flag?(:windows)}}, {{flag?(:msvc)}}, {{flag?(:gnu)}}, {{flag?(:unix)}}, {{flag?(:posix)}}, {{flag?(:wasi)}}, {{flag?(:wasm32)}}, {{flag?(:aarch64)}}, {{flag?(:arm64)}}, {{flag?(:x86_64)}}, {{flag?(:bits64)}}, {{flag?(:bits32)}}, {{flag?(:gc_none)}}, {{flag?(:typo)}}]
+end
+
+probe(1)

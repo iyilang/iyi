@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exercise UInt64x2 on native and wasm32-wasi, including a broken primitive.
+# Exercise UInt64x2 on wasm32-wasi, including a broken primitive.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -38,33 +38,38 @@ build_wasm() {
   eval "$command -o \"$output.wasm\"" || fail "$output: wasm link failed"
 }
 
-for mode in native native-release; do
+for mode in wasm-plain wasm-plain-simd wasm wasm-simd; do
   args=()
-  [ "$mode" != native-release ] || args+=(--release --emit=llvm-ir)
-  "$IYI" build "${args[@]}" -o "$WORK/$mode" "$REPO/bench/uint64x2_exercise.iyi" 2>"$WORK/$mode.build.log" ||
-    fail "$mode: build failed" "$WORK/$mode.build.log"
-  "$WORK/$mode" >"$WORK/$mode.out" ||
-    fail "$mode: program failed" "$WORK/$mode.out"
+  case "$mode" in wasm|wasm-simd) args+=(--release --emit=llvm-ir) ;; esac
+  case "$mode" in *-simd) args+=(--mattr +simd128) ;; esac
+  build_wasm "$WORK/$mode" "$REPO/bench/uint64x2_exercise.iyi" "${args[@]}"
+  "$WASMTIME" "$WORK/$mode.wasm" >"$WORK/$mode.out" ||
+    fail "$mode: wasm program failed" "$WORK/$mode.out"
   grep -qx 'ALL UINT64X2 CHECKS PASSED' "$WORK/$mode.out" ||
     fail "$mode: success marker missing" "$WORK/$mode.out"
   echo "$mode: $(tail -1 "$WORK/$mode.out")"
 done
+for mode in wasm-plain-simd wasm wasm-simd; do
+  cmp "$WORK/wasm-plain.out" "$WORK/$mode.out" ||
+    fail "$mode: output differs from scalar wasm" "$WORK/wasm-plain.out" "$WORK/$mode.out"
+done
+cat "$WORK/wasm-plain.out"
 
 # The union payload is an integer array after lowering, so its vector
 # member must not be lost when heap loads, stores and indirect copies are
 # assigned an alignment. Each extract is from the relevant function.
 awk '/^define .*AlignedMaybeVector#value=<Nil>/ { inside=1 }
      inside { print }
-     inside && /^}/ { exit }' "$WORK/native-release.ll" >"$WORK/union-nil.ir"
+     inside && /^}/ { exit }' "$WORK/wasm-simd.ll" >"$WORK/union-nil.ir"
 awk '/^define .*vector_union_closure<[(]UInt64x2 [|] Nil[)]>/ { inside=1 }
      inside { print }
-     inside && /^}/ { exit }' "$WORK/native-release.ll" >"$WORK/union-closure.ir"
+     inside && /^}/ { exit }' "$WORK/wasm-simd.ll" >"$WORK/union-closure.ir"
 awk '/^define .*~procProc.*uint64x2_exercise/ { inside=1 }
      inside { print }
-     inside && /^}/ { exit }' "$WORK/native-release.ll" >"$WORK/union-closure-body.ir"
+     inside && /^}/ { exit }' "$WORK/wasm-simd.ll" >"$WORK/union-closure-body.ir"
 awk '/^define .*AlignedLargeUnion#initialize/ { inside=1 }
      inside { print }
-     inside && /^}/ { exit }' "$WORK/native-release.ll" >"$WORK/union-large.ir"
+     inside && /^}/ { exit }' "$WORK/wasm-simd.ll" >"$WORK/union-large.ir"
 cat "$WORK/union-nil.ir" "$WORK/union-closure.ir" "$WORK/union-closure-body.ir" "$WORK/union-large.ir" >"$WORK/union.ir"
 union_alignment_ok() {
   grep -Eq 'store i128 0, ptr .*align 8([,[:space:]]|$)|llvm.memset.*align (4|8) [^,]*%self' "$1" &&
@@ -89,6 +94,19 @@ echo 'union alignment: nil zeroing (align 8, or the memset LLVM forms at align 4
 
 cat >"$WORK/share-vector.iyi" <<'IYI'
 @[Unsafe("Share is a trusted type annotation")]
+
+# wasm32 has no runtime threads. This declaration exercises the compiler's
+# IyiThread.start capture boundary at type-check time, not a real thread.
+class IyiThread
+  def self.start(&block : -> Nil)
+    block.call
+    IyiThread.new
+  end
+
+  def join : Nil
+  end
+end
+
 struct VectorRecord
   def initialize(@value : UInt64x2)
   end
@@ -112,23 +130,21 @@ end
 thread.join
 puts "thread vector and Share records passed"
 IYI
-"$IYI" build --release -o "$WORK/share-vector" "$WORK/share-vector.iyi" || fail "Share: build failed"
-"$WORK/share-vector" >"$WORK/share-vector.out" || fail "Share: program failed" "$WORK/share-vector.out"
-grep -qx 'thread vector and Share records passed' "$WORK/share-vector.out" ||
-  fail "Share: success marker missing" "$WORK/share-vector.out"
+"$IYI" build --cross-compile --target wasm32-wasi -o "$WORK/share-vector" "$WORK/share-vector.iyi" ||
+  fail "Share: wasm compilation failed"
 awk '{ sub(/getter value : UInt64x2/, "property value : UInt64x2"); print }' "$WORK/share-vector.iyi" >"$WORK/not-share-vector.iyi"
-if "$IYI" build --no-codegen "$WORK/not-share-vector.iyi" >"$WORK/not-share-vector.out" 2>&1; then
+if "$IYI" build --cross-compile --target wasm32-wasi -o "$WORK/not-share-vector" "$WORK/not-share-vector.iyi" >"$WORK/not-share-vector.out" 2>&1; then
   fail "Share: a mutable vector record crossed a thread boundary" "$WORK/not-share-vector.out"
 fi
 grep -q 'not Share' "$WORK/not-share-vector.out" ||
   fail "Share: mutable vector was refused for the wrong reason" "$WORK/not-share-vector.out"
-echo 'Share: vector, immutable record and trusted generic crossed a thread; mutable record was refused'
+echo 'Share: wasm accepts vector, immutable record and trusted generic; mutable record was refused'
 
 # The headed object has only eight-byte alignment. Check the exact store
 # in the emitted constructor, not an unrelated vector in the runtime.
 awk '/^define .*AlignedVector#initialize/ { inside=1 }
      inside { print }
-     inside && /^}/ { exit }' "$WORK/native-release.ll" >"$WORK/field.ir"
+     inside && /^}/ { exit }' "$WORK/wasm-simd.ll" >"$WORK/field.ir"
 field_alignment_ok() {
   grep -Eq 'store <2 x i64>.*align 8([,[:space:]]|$)' "$1" &&
     ! grep -Eq 'store <2 x i64>.*align (16|32|64)([,[:space:]]|$)' "$1"
@@ -145,22 +161,6 @@ if field_alignment_ok "$WORK/field-broken.ir"; then
   echo 'field alignment: align 16 mutation escaped the guard' >&2; exit 1
 fi
 echo 'field alignment: align 8 in LLVM IR; restoring align 16 is caught'
-for mode in wasm-plain wasm-plain-simd wasm wasm-simd; do
-  args=()
-  case "$mode" in wasm|wasm-simd) args+=(--release) ;; esac
-  case "$mode" in *-simd) args+=(--mattr +simd128) ;; esac
-  build_wasm "$WORK/$mode" "$REPO/bench/uint64x2_exercise.iyi" "${args[@]}"
-  "$WASMTIME" "$WORK/$mode.wasm" >"$WORK/$mode.out" ||
-    fail "$mode: wasm program failed" "$WORK/$mode.out"
-  grep -qx 'ALL UINT64X2 CHECKS PASSED' "$WORK/$mode.out" ||
-    fail "$mode: success marker missing" "$WORK/$mode.out"
-  echo "$mode: $(tail -1 "$WORK/$mode.out")"
-done
-for mode in native-release wasm-plain wasm-plain-simd wasm wasm-simd; do
-  cmp "$WORK/native.out" "$WORK/$mode.out" ||
-    fail "$mode: output differs from native" "$WORK/native.out" "$WORK/$mode.out"
-done
-cat "$WORK/native.out"
 
 # LLVM 18's wasm disassembler can loop writing invalid_type indefinitely.
 # A bounded pipe makes that failure visible instead of filling the disk.
@@ -220,7 +220,7 @@ lib LibVectorProbe
   fun bad(value : UInt64x2) : UInt64x2
 end
 EOF
-if "$IYI" build --no-codegen "$WORK/forbidden.iyi" >"$WORK/forbidden.log" 2>&1; then
+if "$IYI" build --target wasm32-wasi --no-codegen "$WORK/forbidden.iyi" >"$WORK/forbidden.log" 2>&1; then
   fail "external vector ABI unexpectedly accepted" "$WORK/forbidden.log"
 fi
 grep -q 'UInt64x2 has no C ABI' "$WORK/forbidden.log" ||
@@ -240,6 +240,46 @@ grep -q 'undefined constant UInt64x2' "$WORK/compat-vector.log" ||
   fail "--crystal: vector was refused for the wrong reason" "$WORK/compat-vector.log"
 echo 'Compatibility prelude: ordinary program works, UInt64x2 is unavailable'
 
+# Wide integers share the heap alignment rule with vectors on native targets.
+cat >"$WORK/int128.iyi" <<'IYI'
+import std/int
+class Int128Field
+  def initialize(@value : Int128)
+  end
+  @[NoInline]
+  def value : Int128
+    @value
+  end
+end
+class Int128Union
+  def initialize(@value : Int128 | Nil)
+  end
+  @[NoInline]
+  def value : Int128 | Nil
+    @value
+  end
+end
+@[NoInline]
+def captured(value : Int128)
+  -> { value }
+end
+v = 123_i128
+puts Int128Field.new(v).value.to_i64
+x = Int128Union.new(v).value
+puts x.as(Int128).to_i64
+puts captured(v).call.to_i64
+IYI
+"$IYI" build --release --emit=llvm-ir -o "$WORK/int128" "$WORK/int128.iyi" ||
+  fail "Int128: native build failed"
+for function in 'Int128Field::new<Int128>' 'Int128Union::new<Int128>' 'captured<Int128>'; do
+  awk -v name="$function" '/^define / && index($0, name) { inside=1 }
+       inside { print }
+       inside && /^}/ { exit }' "$WORK/int128.ll" >"$WORK/int128-function.ir"
+  grep -Eq 'store i128 .*align 8([,[:space:]]|$)' "$WORK/int128-function.ir" ||
+    fail "Int128: $function did not use eight-byte heap alignment" "$WORK/int128-function.ir"
+done
+echo 'native Int128: field, union and closure stores use align 8'
+
 mkdir -p "$WORK/app" "$WORK/mods"
 cat >"$WORK/app/vector.iyi" <<'EOF'
 module app/vector
@@ -254,14 +294,12 @@ value = App::Vector.mix(UInt64x2.new(9_u64, 20_u64), UInt64x2.new(3_u64, 6_u64))
 puts value.low
 puts value.high
 EOF
-IYI_PATH="$WORK:$REPO/src" "$IYI" build --emit-iyimod "$WORK/mods" -o "$WORK/source" "$WORK/consumer.iyi" ||
-  fail "artifact: source build failed"
+IYI_PATH="$WORK:$REPO/src" build_wasm "$WORK/source" "$WORK/consumer.iyi" --emit-iyimod "$WORK/mods"
 [ -f "$WORK/mods/app/vector.iyimod" ] || fail "vector artifact missing"
 mv "$WORK/app/vector.iyi" "$WORK/vector-source.saved"
-IYI_PATH="$WORK:$REPO/src" "$IYI" build --use-iyimod "$WORK/mods" -o "$WORK/artifact" "$WORK/consumer.iyi" ||
-  fail "artifact: artifact-backed build failed"
-"$WORK/source" >"$WORK/source.out" || fail "artifact: source program failed" "$WORK/source.out"
-"$WORK/artifact" >"$WORK/artifact.out" || fail "artifact: artifact-backed program failed" "$WORK/artifact.out"
+IYI_PATH="$WORK:$REPO/src" build_wasm "$WORK/artifact" "$WORK/consumer.iyi" --use-iyimod "$WORK/mods"
+"$WASMTIME" "$WORK/source.wasm" >"$WORK/source.out" || fail "artifact: source program failed" "$WORK/source.out"
+"$WASMTIME" "$WORK/artifact.wasm" >"$WORK/artifact.out" || fail "artifact: artifact-backed program failed" "$WORK/artifact.out"
 printf '11\n19\n' >"$WORK/expected.out"
 cmp "$WORK/source.out" "$WORK/expected.out" ||
   fail "artifact: source output differs from expected" "$WORK/source.out"
@@ -275,10 +313,9 @@ awk '{sub(/@\[Primitive\(:uint64x2_xor\)\]/, "@[Primitive(:uint64x2_or)]"); prin
   "$REPO/src/iyi/primitives.iyi" >"$WORK/broken/iyi/primitives.iyi"
 grep -A1 'Primitive(:uint64x2_or)' "$WORK/broken/iyi/primitives.iyi" | grep -q 'def \^' ||
   fail "broken xor: mutation did not change the primitive"
-IYI_PATH="$WORK/broken:$REPO/src" "$IYI" build -o "$WORK/broken/prog" "$REPO/bench/uint64x2_exercise.iyi" 2>"$WORK/broken/build.log" ||
-  fail "broken xor: build failed" "$WORK/broken/build.log"
+IYI_PATH="$WORK/broken:$REPO/src" build_wasm "$WORK/broken/prog" "$REPO/bench/uint64x2_exercise.iyi"
 set +e
-"$WORK/broken/prog" >"$WORK/broken/out" 2>&1
+"$WASMTIME" "$WORK/broken/prog.wasm" >"$WORK/broken/out" 2>&1
 code=$?
 set -e
 if [ "$code" -eq 0 ] || grep -q 'ALL UINT64X2 CHECKS PASSED' "$WORK/broken/out"; then

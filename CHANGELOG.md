@@ -10,7 +10,7 @@
   Chrome went from 204 and 203 MB/s scalar to 257 and 266 MB/s SIMD;
   WebCrypto measured 3,290 and 3,424 MB/s. SPEC.md III.12.1 has the
   spreads and the slower GHASH experiment. The predefined `UInt64x2`
-  primitive is available on every target; an external ABI cannot accept it.
+  primitive is available on wasm32; an external ABI cannot accept it.
 
 - **iyi is a self-hosting project.** The owner accepted Jason Waldrip's
   proposal (#172) on 2026-11-24, reversing Appendix B #10: the compiler is
@@ -524,6 +524,13 @@
   has to refuse the frame with its sentence.
 
 ### Fixed
+
+- **Vector unions use the heap's eight-byte alignment.** A mixed union
+  represents its payload as wide integers, so treating only visible LLVM
+  vectors as eight-aligned left nil stores, closure captures and copies
+  promising sixteen-byte alignment on eight-aligned heap addresses.
+  `UInt64x2` is also shareable across threads, including in immutable
+  records and `@[Share]` generic values.
 
 - **wasm32 large objects keep their arena header (#198).** A large
   object's three header words were written over its arena's link, size and
@@ -1378,12 +1385,6 @@ entry "What the fixes below change in a program's source" has the details.
 
 ### Fixed
 
-- **Vector unions use the heap's eight-byte alignment.** A mixed union
-  represents its payload as wide integers, so treating only visible LLVM
-  vectors as eight-aligned left nil stores, closure captures and copies
-  promising sixteen-byte alignment on eight-aligned heap addresses.
-  `UInt64x2` is also shareable across threads, including in immutable
-  records and `@[Share]` generic values.
 
 - **A regex literal a macro writes is `std/regex`'s, as it is outside
   one (#215).** Inside `{% if %}`, `{% for %}`, a `macro`'s body or a
@@ -30070,7 +30071,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 37,120-line library and nothing else. Every other
+  written against iyi's own 37,122-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -144,6 +144,7 @@ struct Symbol
   end
 end
 
+{% if flag?(:wasm32) %}
 # Two independent wrapping UInt64 lanes. Loads and stores require an
 # eight-byte-aligned pointer, not a sixteen-byte-aligned one.
 struct UInt64x2
@@ -208,6 +209,7 @@ struct UInt64x2
   end
 end
 
+{% end %}
 # A raw address: `Pointer(T).malloc(n)` is `n` elements of untyped memory,
 # `[]` and `[]=` read and write them, nothing checks the bounds.
 struct Pointer(T)

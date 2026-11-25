@@ -179,10 +179,7 @@ def measured() -> dict[str, int]:
 # array's size and buffer out of a loop and vectorise it (plb2 matmul 0.31x,
 # sudoku 0.82x of 0.22.0). A check rather than a habit since the night
 # Windows' floor walked 508 lines over it and nothing failed.
-# And to 4,849, by the owner's decision: the 64 lines of the predefined
-# `UInt64x2` primitive the measured wasm AES-GCM path uses (#202). The
-# ceiling is a check rather than a habit.
-CEILING = 4_849
+CEILING = 4_785
 
 
 # The runtime's files that `prelude_library_lines` leaves out whole: the
@@ -197,7 +194,7 @@ RUNTIME_FILES = {
 
 
 def prelude_library_lines() -> int:
-    """The figure SPEC.md holds to the 4,849-line ceiling: the library
+    """The figure SPEC.md holds to the 4,785-line ceiling: the library
     without any platform's floor.
 
     Everything under `src/iyi/` except two things. First, what Crystal's

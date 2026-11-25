@@ -1,0 +1,193 @@
+module compiler/native/asm/constraints
+
+# LLVM's inline asm constraint grammar for the forms the tree uses (SPEC 2.2,
+# C4): `=r`, `={reg}`, `{reg}`, `r`, `x`, `=x`, tied operands by number,
+# clobbers `memory`, `cc` and register names (also in LLVM's `~{name}` form),
+# the options `volatile`, `alignstack`, `intel` and `can_throw`, and the
+# template references `$N` and `$$`. Anything else is refused by name.
+
+# How an operand is allowed into a register.
+pub enum ConstraintClass
+  Gpr      # r: any general register
+  Vector   # x: an SSE or FP/SIMD register
+  Specific # {reg}: the named register
+  Tied     # N: the same register as output N
+end
+
+# One operand constraint, as written in the source.
+pub class OperandConstraint
+  getter output : Bool
+  getter cls : ConstraintClass
+  getter register : String
+  getter tied : Int32
+  getter text : String
+
+  def initialize(@output : Bool, @cls : ConstraintClass, @register : String, @tied : Int32, @text : String)
+  end
+end
+
+# A constraint, clobber, option or template the grammar refuses. The message
+# names the item and the form that is not supported.
+pub class ConstraintError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+end
+
+# Whether `text` is a register name the grammar accepts inside braces: a letter
+# followed by letters or digits, such as rax, r11, x0, xmm0.
+pub def register_name?(text : String) : Bool
+  return false if text.bytesize == 0
+  i = 0
+  while i < text.bytesize
+    b = text.byte_at(i).to_i32
+    letter = (b >= 97 && b <= 122)
+    digit = (b >= 48 && b <= 57)
+    return false unless letter || digit
+    i += 1
+  end
+  text.byte_at(0).to_i32 >= 97 && text.byte_at(0).to_i32 <= 122
+end
+
+# Whether `text` is a run of decimal digits.
+pub def digits?(text : String) : Bool
+  return false if text.bytesize == 0
+  i = 0
+  while i < text.bytesize
+    b = text.byte_at(i).to_i32
+    return false unless b >= 48 && b <= 57
+    i += 1
+  end
+  true
+end
+
+# Removes one pair of double quotes from a source item, if it has one.
+pub def unquoted(item : String) : String
+  if item.bytesize >= 2 && item.byte_at(0).to_i32 == 34 && item.byte_at(item.bytesize - 1).to_i32 == 34
+    return item[1, item.bytesize - 2]
+  end
+  item
+end
+
+# The quoted constraint as written (`=r`, `{rax}`, `0`), with the expression
+# after it dropped.
+pub def constraint_text(item : String) : String
+  if item.byte_at(0).to_i32 != 34
+    return item
+  end
+  k = 1
+  while k < item.bytesize && item.byte_at(k).to_i32 != 34
+    k += 1
+  end
+  item[1, k - 1]
+end
+
+# Parses one operand constraint. `item` is the operand as the inventory holds
+# it: its quoted constraint, then its expression, as in `"=r"(header)`. Only
+# the constraint is read, so `"r"(address + filled)` is `r`. `output` says
+# which list it is in, and `count` is the number of outputs, which a tied input
+# must name.
+pub def parse_operand(item : String, output : Bool, count : Int32) : OperandConstraint | ConstraintError
+  text = constraint_text(item)
+  if text.bytesize == 0
+    return ConstraintError.new("an empty operand constraint")
+  end
+  body = text
+  if text.byte_at(0).to_i32 == 61
+    unless output
+      return ConstraintError.new("'#{text}': an input cannot be written with '='")
+    end
+    body = text[1, text.bytesize - 1]
+  elsif output
+    return ConstraintError.new("'#{text}': an output constraint must start with '='")
+  end
+  if body == "r"
+    return OperandConstraint.new(output, ConstraintClass::Gpr, "", -1, text)
+  end
+  if body == "x"
+    return OperandConstraint.new(output, ConstraintClass::Vector, "", -1, text)
+  end
+  if body.bytesize >= 2 && body.byte_at(0).to_i32 == 123 && body.byte_at(body.bytesize - 1).to_i32 == 125
+    name = body[1, body.bytesize - 2]
+    unless register_name?(name)
+      return ConstraintError.new("'#{text}': '#{name}' is not a register name")
+    end
+    return OperandConstraint.new(output, ConstraintClass::Specific, name, -1, text)
+  end
+  if digits?(body)
+    if output
+      return ConstraintError.new("'#{text}': an output cannot be tied to another output")
+    end
+    tied = body.to_i
+    if tied >= count
+      return ConstraintError.new("'#{text}': ties to output #{tied}, and there are #{count} outputs")
+    end
+    return OperandConstraint.new(false, ConstraintClass::Tied, "", tied, text)
+  end
+  if body.byte_at(0).to_i32 == 38
+    return ConstraintError.new("'#{text}': an early-clobber constraint ('&') is not supported")
+  end
+  if body.byte_at(0).to_i32 == 43
+    return ConstraintError.new("'#{text}': a read-write constraint ('+') is not supported")
+  end
+  ConstraintError.new("'#{text}': the constraint is not one of =r, ={reg}, {reg}, r, x, =x, or a tied operand number")
+end
+
+# Parses one clobber: `memory`, `cc`, a register name, or LLVM's `~{name}` form.
+pub def parse_clobber(item : String) : String | ConstraintError
+  text = unquoted(item)
+  if text.starts_with?("~{") && text.byte_at(text.bytesize - 1).to_i32 == 125
+    text = text[2, text.bytesize - 3]
+  end
+  return text if text == "memory" || text == "cc"
+  return text if register_name?(text)
+  ConstraintError.new("clobber '#{item}' is not memory, cc or a register name")
+end
+
+# Parses one option: volatile, alignstack, intel or can_throw.
+pub def parse_option(item : String) : String | ConstraintError
+  text = unquoted(item)
+  return text if text == "volatile" || text == "alignstack" || text == "intel" || text == "can_throw"
+  ConstraintError.new("option '#{item}' is not volatile, alignstack, intel or can_throw")
+end
+
+# Expands the template references of an asm template: `$$` is a literal `$`,
+# `$N` is the N-th operand's register from `registers` (outputs first). An
+# operand modifier such as `${0:w}` or `$0:w` is refused, since no encoder in
+# the tree accepts one.
+pub def expand_template(template : String, registers : Array(String)) : String | ConstraintError
+  acc = String::Builder.new
+  i = 0
+  n = template.bytesize
+  while i < n
+    b = template.byte_at(i).to_i32
+    if b != 36
+      acc << template[i, 1]
+      i += 1
+    elsif i + 1 < n && template.byte_at(i + 1).to_i32 == 36
+      acc << "$"
+      i += 2
+    elsif i + 1 < n && template.byte_at(i + 1).to_i32 == 123
+      return ConstraintError.new("operand modifier '${' is not supported")
+    else
+      j = i + 1
+      while j < n && template.byte_at(j).to_i32 >= 48 && template.byte_at(j).to_i32 <= 57
+        j += 1
+      end
+      if j == i + 1
+        return ConstraintError.new("a '$' in the template is neither '$$' nor an operand reference")
+      end
+      if j < n && template.byte_at(j).to_i32 == 58
+        return ConstraintError.new("operand modifier '$N:' is not supported")
+      end
+      index = template[i + 1, j - i - 1].to_i
+      if index >= registers.size
+        return ConstraintError.new("operand $#{index} has no register; there are #{registers.size} operands")
+      end
+      acc << registers[index]
+      i = j
+    end
+  end
+  acc.to_s
+end

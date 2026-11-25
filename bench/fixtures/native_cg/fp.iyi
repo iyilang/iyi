@@ -1,0 +1,20 @@
+module fp
+
+import std/float
+
+def calc(x : Float64, y : Float64) : Int32
+  s = x + y
+  d = s - 1.0
+  m = d * y
+  q = m / x
+  n = 0.0 - q
+  n.to_i32
+end
+
+a = calc(2.0, 3.0)
+f = a.to_f64
+g = f * 0.5
+lt = g < 2.0 ? 1 : 0
+ueq = g == g ? 1 : 0
+back = g.to_i32
+puts "#{a} #{lt} #{ueq} #{back}"

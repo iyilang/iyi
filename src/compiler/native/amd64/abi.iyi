@@ -1,0 +1,208 @@
+module compiler/native/amd64/abi
+
+# The x86_64 target descriptions (SPEC 2.2, per-target ABI rules): System V for x86_64-linux-gnu, and Win64 for
+# x86_64-windows-msvc. Each supplies the numbers the C-convention walk reads through TargetDesc, and the two
+# rules the walk cannot express generically: the System V eightbyte classification of an aggregate, and the Win64
+# positional rule (argument i takes integer register i or xmm i, and an aggregate that is not 1, 2, 4 or 8 bytes
+# is passed by reference).
+#
+# System V (psABI 3.2.3):
+#   - integer and pointer arguments: rdi rsi rdx rcx r8 r9; floating-point: xmm0..xmm7
+#   - an aggregate of at most 16 bytes is classed per eightbyte: INTEGER if any scalar in it is an integer or
+#     pointer, else SSE. It takes one register per eightbyte of its class, and if the registers it needs are not
+#     all free the whole aggregate goes on the stack. An aggregate over 16 bytes is MEMORY: on the stack.
+#   - a result of one or two eightbytes comes back in rax, rdx (INTEGER) and xmm0, xmm1 (SSE) in order; a MEMORY
+#     result comes back through the sret pointer, which travels in rdi and comes back in rax.
+#   - variadic calls set al to the number of vector registers used, and the variadic arguments are not shortened.
+#   - the stack is 16-byte aligned at each call; rbx, rbp and r12..r15 are callee-saved.
+#
+# Win64 (Microsoft x64 calling convention):
+#   - the four positional slots rcx rdx r8 r9 (integer, pointer) and xmm0..xmm3 (floating-point); a slot is used by
+#     its position whatever the argument's class, so the second argument is always rdx or xmm1
+#   - the caller reserves 32 bytes of shadow space above the return address
+#   - an aggregate of 1, 2, 4 or 8 bytes is passed by value in its slot; any other aggregate by a pointer to a copy
+#   - a result that is not 1, 2, 4 or 8 bytes comes back through an sret pointer in rcx (returned in rax)
+#   - callee-saved: rbx, rbp, rdi, rsi, r12..r15, and xmm6..xmm15 (their low 128 bits)
+
+import compiler/native/target::{TargetDesc, TlsForm}
+import compiler/native/obj/object::{ObjFormat}
+import compiler/native/amd64/regs::{rax, rcx, rdx, rbx, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, xmm}
+
+# An eightbyte's class. NONE is the class of an eightbyte with no scalar in it; MEMORY marks an aggregate passed or
+# returned in memory (the result of `sysv_classify` is then the single entry MEMORY).
+pub def class_none : Int32
+  0
+end
+
+pub def class_integer : Int32
+  1
+end
+
+pub def class_sse : Int32
+  2
+end
+
+pub def class_memory : Int32
+  3
+end
+
+# The positional register lists, in argument order.
+pub def sysv_integer_args : Array(Int32)
+  return [rdi, rsi, rdx, rcx, r8, r9]
+end
+
+pub def sysv_sse_args : Array(Int32)
+  return [xmm(0), xmm(1), xmm(2), xmm(3), xmm(4), xmm(5), xmm(6), xmm(7)]
+end
+
+pub def win64_integer_args : Array(Int32)
+  return [rcx, rdx, r8, r9]
+end
+
+pub def win64_sse_args : Array(Int32)
+  return [xmm(0), xmm(1), xmm(2), xmm(3)]
+end
+
+pub def sysv_callee_saved : Array(Int32)
+  return [rbx, rbp, r12, r13, r14, r15]
+end
+
+pub def win64_callee_saved : Array(Int32)
+  return [rbx, rbp, rdi, rsi, r12, r13, r14, r15, xmm(6), xmm(7), xmm(8), xmm(9), xmm(10), xmm(11), xmm(12), xmm(13), xmm(14), xmm(15)]
+end
+
+pub def sysv_caller_saved : Array(Int32)
+  return [rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, xmm(0), xmm(1), xmm(2), xmm(3), xmm(4), xmm(5), xmm(6), xmm(7), xmm(8), xmm(9), xmm(10), xmm(11), xmm(12), xmm(13), xmm(14), xmm(15)]
+end
+
+pub def win64_caller_saved : Array(Int32)
+  return [rax, rcx, rdx, r8, r9, r10, r11, xmm(0), xmm(1), xmm(2), xmm(3), xmm(4), xmm(5)]
+end
+
+# The scratch registers the selector and the spill reloads use: caller-saved on both conventions, so a scratch
+# never has to be saved. r10 and r11 are gprs on both; xmm14 and xmm15 on System V, xmm4 and xmm5 on Win64.
+pub def sysv_scratch_fprs : Array(Int32)
+  return [xmm(14), xmm(15)]
+end
+
+pub def win64_scratch_fprs : Array(Int32)
+  return [xmm(4), xmm(5)]
+end
+
+pub def scratch_gprs : Array(Int32)
+  return [r10, r11]
+end
+
+# The description of one x86_64 platform. Linux uses ELF and the %fs local-exec thread pointer. Windows uses COFF
+# and the TEB's thread-local index (TlsForm::WindowsTlsIndex). Neither has a link register: the return address is
+# on the stack.
+pub def x86_64_target(windows : Bool) : TargetDesc
+  name = windows ? "x86_64-windows-msvc" : "x86_64-linux-gnu"
+  format = windows ? ObjFormat::Coff : ObjFormat::Elf
+  tls = windows ? TlsForm::WindowsTlsIndex : TlsForm::LocalExec
+  if windows
+    return TargetDesc.new(name, false, format, 64, 16_i64, win64_integer_args, win64_sse_args, rcx, 8_i64, 0, false, win64_callee_saved, win64_caller_saved, scratch_gprs, win64_scratch_fprs, rbp, -1, tls)
+  end
+  TargetDesc.new(name, false, format, 64, 16_i64, sysv_integer_args, sysv_sse_args, rdi, 16_i64, 0, false, sysv_callee_saved, sysv_caller_saved, scratch_gprs, sysv_scratch_fprs, rbp, -1, tls)
+end
+
+# One scalar leaf of an aggregate: its byte offset and whether it is floating-point.
+pub class Leaf
+  getter offset : Int64
+  getter is_float : Bool
+
+  def initialize(@offset : Int64, @is_float : Bool)
+  end
+end
+
+# System V: the class of each eightbyte of an aggregate of `size` bytes whose scalars are `leaves`. An aggregate
+# over 16 bytes, or one with no bytes, is [class_memory]. An eightbyte with an integer leaf is INTEGER; one with
+# only floating-point leaves is SSE; one with none (padding) is treated as SSE, which is what the psABI's merge
+# rule gives a passed aggregate.
+pub def sysv_classify(size : Int64, leaves : Array(Leaf)) : Array(Int32)
+  if size > 16_i64 || size <= 0_i64
+    return [class_memory]
+  end
+  count = ((size + 7_i64) // 8_i64).to_i32
+  classes = [] of Int32
+  k = 0
+  while k < count
+    classes << class_none
+    k = k + 1
+  end
+  leaves.each do |leaf|
+    idx = (leaf.offset // 8_i64).to_i32
+    wanted = class_integer
+    if leaf.is_float
+      wanted = class_sse
+    end
+    if classes[idx] == class_none || (classes[idx] == class_sse && wanted == class_integer)
+      classes[idx] = wanted
+    end
+  end
+  k = 0
+  while k < count
+    if classes[k] == class_none
+      classes[k] = class_sse
+    end
+    k = k + 1
+  end
+  classes
+end
+
+# Whether an aggregate with these eightbyte classes fits in the registers still free: every INTEGER eightbyte
+# needs an integer register and every SSE eightbyte an xmm register, and the aggregate is all-or-nothing. A
+# MEMORY aggregate never fits in registers.
+pub def sysv_fits(classes : Array(Int32), int_free : Int32, sse_free : Int32) : Bool
+  if classes.size == 1 && classes[0] == class_memory
+    return false
+  end
+  need_int = 0
+  need_sse = 0
+  classes.each do |c|
+    if c == class_integer
+      need_int = need_int + 1
+    else
+      need_sse = need_sse + 1
+    end
+  end
+  need_int <= int_free && need_sse <= sse_free
+end
+
+# The registers that carry a returned aggregate's eightbytes, in order: rax then rdx for INTEGER and xmm0 then
+# xmm1 for SSE, each class from its own sequence. A MEMORY result comes back through sret: no register here.
+pub def sysv_return_regs(classes : Array(Int32)) : Array(Int32)
+  found = [] of Int32
+  if classes.size == 1 && classes[0] == class_memory
+    return found
+  end
+  ints = [rax, rdx]
+  sses = [xmm(0), xmm(1)]
+  ni = 0
+  ns = 0
+  classes.each do |c|
+    if c == class_integer
+      found << ints[ni]
+      ni = ni + 1
+    else
+      found << sses[ns]
+      ns = ns + 1
+    end
+  end
+  found
+end
+
+# Win64: an aggregate of `size` bytes is passed by value in its slot when it is 1, 2, 4 or 8 bytes, else by a
+# pointer to a copy. A scalar float is never by reference.
+pub def win64_by_value(size : Int64) : Bool
+  size == 1_i64 || size == 2_i64 || size == 4_i64 || size == 8_i64
+end
+
+# Win64: the register that carries argument `index`, which is its positional slot: an xmm for a floating-point
+# scalar and the integer register otherwise. Past the fourth argument the value is on the stack.
+pub def win64_slot(index : Int32, is_float : Bool) : Int32
+  if is_float
+    return win64_sse_args[index]
+  end
+  win64_integer_args[index]
+end

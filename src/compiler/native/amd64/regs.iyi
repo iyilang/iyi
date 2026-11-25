@@ -1,0 +1,165 @@
+module compiler/native/amd64/regs
+
+# x86_64 physical registers. A general purpose register is numbered by its
+# hardware encoding (rax 0 .. r15 15), so the ModRM, SIB and REX fields name it
+# directly. The SSE file xmm0..xmm15 is 32..47: the shared MIR convention
+# (compiler/native/mir.iyi) makes every register at or above 32 a
+# floating-point register, as on aarch64 where d0..d31 are 32..63. `hw` gives
+# the four-bit hardware number that either file's register names.
+#
+# Policy the frame and the selector rely on (SPEC 2.2, x86_64 rows):
+#   - rsp is the stack pointer and rbp the frame pointer on every x86_64 target.
+#   - rax, rdx and rcx are the fixed registers of mul, div and variable shifts;
+#     the selector moves values through them around those operations.
+#   - r10 and r11 are the scratch registers for spill reloads and the selector.
+#   - the callee-saved sets are abi.iyi's (SysV and Win64 differ).
+
+pub def xmm(n : Int32) : Int32
+  32 + n
+end
+
+pub def is_xmm?(reg : Int32) : Bool
+  reg >= 32
+end
+
+# The hardware number (0..15) a register names in ModRM, SIB and REX.
+pub def hw(reg : Int32) : Int32
+  if reg >= 32
+    return reg - 32
+  end
+  reg
+end
+
+pub def rax : Int32
+  0
+end
+
+pub def rcx : Int32
+  1
+end
+
+pub def rdx : Int32
+  2
+end
+
+pub def rbx : Int32
+  3
+end
+
+pub def rsp : Int32
+  4
+end
+
+pub def rbp : Int32
+  5
+end
+
+pub def rsi : Int32
+  6
+end
+
+pub def rdi : Int32
+  7
+end
+
+pub def r8 : Int32
+  8
+end
+
+pub def r9 : Int32
+  9
+end
+
+pub def r10 : Int32
+  10
+end
+
+pub def r11 : Int32
+  11
+end
+
+pub def r12 : Int32
+  12
+end
+
+pub def r13 : Int32
+  13
+end
+
+pub def r14 : Int32
+  14
+end
+
+pub def r15 : Int32
+  15
+end
+
+# Condition codes, as the low nibble of Jcc, SETcc and CMOVcc opcodes.
+pub def cc_o : Int32
+  0
+end
+
+pub def cc_no : Int32
+  1
+end
+
+pub def cc_b : Int32
+  2
+end
+
+pub def cc_ae : Int32
+  3
+end
+
+pub def cc_e : Int32
+  4
+end
+
+pub def cc_ne : Int32
+  5
+end
+
+pub def cc_be : Int32
+  6
+end
+
+pub def cc_a : Int32
+  7
+end
+
+pub def cc_s : Int32
+  8
+end
+
+pub def cc_ns : Int32
+  9
+end
+
+pub def cc_p : Int32
+  10
+end
+
+pub def cc_np : Int32
+  11
+end
+
+pub def cc_l : Int32
+  12
+end
+
+pub def cc_ge : Int32
+  13
+end
+
+pub def cc_le : Int32
+  14
+end
+
+pub def cc_g : Int32
+  15
+end
+
+# The inverse of a condition: flipping the low bit.
+pub def cc_invert(cc : Int32) : Int32
+  cc ^ 1
+end

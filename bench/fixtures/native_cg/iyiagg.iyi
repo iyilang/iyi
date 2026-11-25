@@ -1,0 +1,17 @@
+module iyiagg
+
+# The hosted compiler's program with the same results as iyiagg.ir: the struct sums to 19, the nine leaves to 81,
+# the three-word struct to 60, and the nested integer to 7.
+def sumouter(a : Int64, x0 : Int64, x1 : Int64, y0 : Int64, y1 : Int64) : Int64
+  a + x0 + x1 + y0 + y1
+end
+
+def sum9(b0 : Int64, b1 : Int64, b2 : Int64, a1 : Int64, a2 : Int64, a3 : Int64, a4 : Int64, a5 : Int64, a6 : Int64) : Int64
+  b0 + b1 + b2 + a1 + a2 + a3 + a4 + a5 + a6
+end
+
+def sum3(b0 : Int64, b1 : Int64, b2 : Int64) : Int64
+  b0 + b1 + b2
+end
+
+puts "#{sumouter(7_i64, 1_i64, 2_i64, 7_i64, 2_i64)} #{sum9(10_i64, 20_i64, 30_i64, 1_i64, 2_i64, 3_i64, 4_i64, 5_i64, 6_i64)} #{sum3(10_i64, 20_i64, 30_i64)} #{7}"

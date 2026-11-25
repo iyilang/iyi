@@ -1,0 +1,45 @@
+; iyi-ir 1
+module "call_header"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @tick() {
+entry:
+  ret i64 3
+}
+
+; The loop header begins with a call, and the phi value acc is live across it. The entry edge into the header is
+; conditional, so the phi copy for that edge sits in an edge block placed after the header: the value's first
+; definition comes later in the block order than the header's call, which is the case an interval hull must still
+; treat as crossing the call.
+define internal i64 @loopcall(i64 %n) {
+entry:
+  %ok = icmp sgt i64 %n, -1000
+  br i1 %ok, label %head, label %skip
+skip:
+  ret i64 0
+head:
+  %i = phi i64 [ 0, label %entry ], [ %i2, label %body ]
+  %acc = phi i64 [ 5, label %entry ], [ %acc2, label %body ]
+  %t = call i64 () @tick()
+  %more = icmp slt i64 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %acc2 = add i64 %acc, %t
+  %i2 = add i64 %i, 1
+  br label %head
+done:
+  %r = add i64 %acc, %t
+  ret i64 %r
+}
+
+define i32 @main() {
+entry:
+  %r1 = call i64 (i64) @loopcall(i64 0)
+  %r2 = call i64 (i64) @loopcall(i64 4)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r1)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r2)
+  ret i32 0
+}

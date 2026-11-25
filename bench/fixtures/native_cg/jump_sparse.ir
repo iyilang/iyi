@@ -1,0 +1,46 @@
+; iyi-ir 1
+module "jump_sparse"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [13 x i8] c"%d %d %d %d\0A\00"
+@fmt1 = private constant [4 x i8] c"%d\0A\00"
+
+; Four cases spread over 1 through 10000: too sparse for a table, so a compare chain.
+define internal i32 @sparse(i32 %n) {
+entry:
+  switch i32 %n, label %dflt [ i32 1, label %a, i32 100, label %b, i32 10000, label %c, i32 7, label %d ]
+a:
+  ret i32 11
+b:
+  ret i32 22
+c:
+  ret i32 33
+d:
+  ret i32 44
+dflt:
+  ret i32 -9
+}
+
+; No cases: the default alone, so the switch is one branch.
+define internal i32 @none(i32 %n) {
+entry:
+  switch i32 %n, label %dflt [ ]
+dflt:
+  %m = add i32 %n, 1
+  ret i32 %m
+}
+
+define i32 @main() {
+entry:
+  %a = call i32 (i32) @sparse(i32 1)
+  %b = call i32 (i32) @sparse(i32 100)
+  %c = call i32 (i32) @sparse(i32 7)
+  %d = call i32 (i32) @sparse(i32 5)
+  %e = call i32 (i32) @sparse(i32 10000)
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i32 %a, i32 %b, i32 %c, i32 %d)
+  %s = call i32 (ptr, ...) @printf(ptr @fmt, i32 %e, i32 0, i32 0, i32 0)
+  %f = call i32 (i32) @none(i32 41)
+  %t = call i32 (ptr, ...) @printf(ptr @fmt1, i32 %f)
+  ret i32 0
+}

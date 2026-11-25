@@ -77,6 +77,18 @@ no:
   ret i64 0
 }
 
+; An unsigned compare of a narrow value: 200 is -56 as an i8, so the immediate
+; must be masked to the width (cmp #200), never taken as negative (cmn #56).
+define internal i64 @unsigned_narrow_compare(i8 %x) {
+entry:
+  %c = icmp ult i8 %x, 200
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 0
+}
+
 define i32 @main() {
 entry:
   %a = call i64 (i64) @add_small(i64 11)

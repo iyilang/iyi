@@ -250,6 +250,7 @@ expect("immediates", "repeat_mask", [op("EorImm")], [op("Eor"), op("MovImm")])
 expect("immediates", "shifts", [op("LslImm"), op("LsrImm"), op("AsrImm")], [op("Lsl"), op("Lsr"), op("Asr")])
 expect("immediates", "negative_compare", [op("CmnImm"), r"#imm=42", op("Bcond")], [op("Cmp"), op("Cset")])
 expect("immediates", "large_compare", [op("MovImm"), r"#imm=4096", op("Cmp")], [op("CmpImm"), op("Cset")])
+expect("immediates", "unsigned_narrow_compare", [op("CmpImm") + r".*#imm=200$", op("Bcond")], [op("CmnImm"), op("Cset")])
 for fn, arithmetic in [("sadd64", "Adds"), ("ssub64", "Subs"), ("uadd64", "Adds"),
                        ("usub64", "Subs"), ("smul64", "Smulh"), ("umul64", "Umulh"),
                        ("sadd8", "Add"), ("uadd8", "Add")]:

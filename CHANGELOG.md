@@ -159,9 +159,12 @@
   definitive initializer. Each release round becomes `cfg-simplify, sroa,
   simplify, cse, dce, cfg-simplify`, followed by `prove, simplify, dce,
   cfg-simplify`, `licm`, `layout` and `deadfn`.
-  `bench/native_opt_exercise.sh` goes from 72 to 175 fixtures and from 11
+  `bench/native_opt_exercise.sh` goes from 72 to 176 fixtures and from 11
   to 20 broken copies caught, and adds scale checks for sequential and
-  nested loops (2K/K under 3.0 CPU). Only `iyi-opt` runs either tier.
+  nested loops (2K/K under 3.0 CPU). Among the fixtures,
+  `cse/join_clean_first_keep` keeps a load after a join whose clean arm is
+  the first predecessor, so a disagreeing join cannot pass for an agreeing
+  one. Only `iyi-opt` runs either tier.
 - **The module artifact reader and writer in iyi:
   `src/compiler/artifact/iyimod.iyi` (#196).** 3,554 lines of iyi read and
   write `.iyimod` format v65; `src/compiler/tools/mod.iyi` is the `iyi-mod`
@@ -426,8 +429,11 @@
   dominators, dominator-tree intervals, every walk iterative) and a table
   of first positions. Verdicts and messages are unchanged.
   `bench/native_ir_exercise.sh` requires a generated 20,000-block function
-  (6,666 chained diamonds) to verify, refuses 21 malformed fixtures (19
-  before) and catches 32 broken copies (29 before).
+  (6,666 chained diamonds) to verify, verifies 11 valid fixtures (a
+  thread-local address used across a forward edge among them), refuses 23
+  malformed fixtures (19 before; a use of a value defined in an unreachable
+  block and a thread-local address used after a two-block loop's back-edge
+  among them) and catches 32 broken copies (29 before).
 
 - **The AArch64 backend folds result copies and elides fallthrough branches
   (#251).** `src/compiler/native/mir_clean.iyi` (160 lines) runs from
@@ -453,8 +459,9 @@
   out-of-range value rules out. The encoder gains ten forms and relaxes a
   conditional branch whose target is out of range. The new
   `bench/native_isel_fold_exercise.sh` checks branch bounds and relaxation
-  and 40 selected-MIR shapes, and on macOS arm64 runs 5 fixtures against
-  hosted twins and catches 5 broken copies;
+  and 41 selected-MIR shapes on every host (an unsigned `i8` compare with
+  200 must select `cmp #200`, not `cmn #56`), and on macOS arm64 runs 5
+  fixtures against hosted twins and catches 5 broken copies;
   `bench/native_encode_exercise.sh` goes from 100 to 110 forms. It runs in
   the self-host jobs through `bench/selfhost_gates.sh`.
 

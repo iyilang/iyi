@@ -226,18 +226,39 @@ else
     mkdir -p "$WORK/pebble"
     # Seven free ports, each held open until all are drawn so none is
     # drawn twice; the Pebbles' configs and the client's setup from them.
+    # challtestsrv serves DNS on its port over UDP as well as TCP, and a
+    # port free for TCP need not be free for UDP: Windows' DNS Client
+    # service holds UDP ports of the ephemeral range on 0.0.0.0 for hours,
+    # and on a Windows 11 machine, in 1 of 1,000 startups, challtestsrv's
+    # UDP bind on one was refused ("An attempt was made to access a socket
+    # in a way forbidden by its access permissions"; netstat named the
+    # Dnscache svchost), logged, and its DNS never answered the wait below.
+    # So the DNS port is drawn free for both.
     if ! "$PY" - "$WORK/pebble" "$certs" <<'PY'
 import json, socket, sys
 out, certs = sys.argv[1], sys.argv[2]
 held = []
-for _ in range(7):
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    held.append(s)
-ports = [s.getsockname()[1] for s in held]
+def draw(udp=False):
+    for _ in range(100):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        held.append(s)
+        port = s.getsockname()[1]
+        if not udp:
+            return port
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            u.bind(("127.0.0.1", port))
+        except OSError:
+            u.close()
+            continue
+        held.append(u)
+        return port
+    sys.exit("no port free for both TCP and UDP in 100 draws")
+acme_a, mgmt_a, acme_b, mgmt_b, http01, tlsalpn = (draw() for _ in range(6))
+dns = draw(udp=True)
 for s in held:
     s.close()
-acme_a, mgmt_a, acme_b, mgmt_b, http01, tlsalpn, dns = ports
 for which, acme, mgmt, validity in (("a", acme_a, mgmt_a, 0), ("b", acme_b, mgmt_b, 24)):
     profile = {"description": "the default"}
     if validity:
@@ -262,33 +283,48 @@ PY
       "$GOBIN/pebble-challtestsrv" -defaultIPv4 127.0.0.1 -defaultIPv6 "" -dnsserver "127.0.0.1:$P_DNS" \
         -management "127.0.0.1:0" -http01 "" -https01 "" -tlsalpn01 "" -doh "" >"$WORK/pebble/challtestsrv.log" 2>&1 &
       PIDS="$PIDS $!"
+      STARTED="challtestsrv:$!"
       for which in a b; do
         PEBBLE_VA_NOSLEEP=1 PEBBLE_WFE_NONCEREJECT=0 PEBBLE_AUTHZREUSE=0 "$GOBIN/pebble" -config "$WORK/pebble/$which.json" \
           -dnsserver "127.0.0.1:$P_DNS" >"$WORK/pebble/pebble-$which.log" 2>&1 &
         PIDS="$PIDS $!"
+        STARTED="$STARTED pebble-$which:$!"
       done
       # Both Pebbles answer their directory, and challtestsrv answers a query
       # for a name the scenarios order: Pebble resolves every validation
       # through it, and one asked before it listens fails at once, the
       # name then remembered as failed - on the project's Mac, three CI jobs
       # at once, the first handshake was refused that way (job 134054737222),
-      # and a challtestsrv started 3 s late refuses it every time.
+      # and a challtestsrv started 3 s late refuses it every time. On Windows
+      # CI this wait ran out three times in 190 runs (jobs 139064806332,
+      # 139108403121, 139260265084) and said nothing of why; so what did not
+      # answer is named with its last error and, for a directory, the
+      # addresses localhost names, and each of the three is said to be
+      # running or exited beside its log's last lines, where a port another
+      # socket holds shows as its `bind` line.
       if ! "$PY" - "$P_A" "$P_B" "$certs/pebble.minica.pem" "$P_DNS" <<'PY'
 import socket, ssl, struct, sys, time, urllib.request
 ctx = ssl.create_default_context(cafile=sys.argv[3])
-deadline = time.time() + 30
-for port in sys.argv[1:3]:
+start = time.time()
+deadline = start + 30
+def unanswered(what, last):
+    print(f"  FAIL: {what} did not answer from {time.strftime('%H:%M:%S', time.localtime(start))}"
+          f" to {time.strftime('%H:%M:%S')}, the last try: {last!r}")
+    sys.exit(1)
+for which, port in (("a", sys.argv[1]), ("b", sys.argv[2])):
     while True:
         try:
             urllib.request.urlopen(f"https://localhost:{port}/dir", context=ctx, timeout=2).read()
             break
-        except OSError:
+        except OSError as error:
             if time.time() > deadline:
-                sys.exit(1)
+                tried = sorted({a[4][0] for a in socket.getaddrinfo("localhost", port, type=socket.SOCK_STREAM)})
+                unanswered(f"Pebble {which}'s directory on port {port} (localhost is {', '.join(tried)})", error)
             time.sleep(0.2)
 # One A query for a.autocert.example, answered with its id.
 query = struct.pack(">HHHHHH", 0x1d1, 0x0100, 1, 0, 0, 0) + b"".join(
     bytes([len(label)]) + label.encode() for label in "a.autocert.example".split(".")) + b"\0" + struct.pack(">HH", 1, 1)
+last = "an answer with another id"
 while True:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(0.5)
@@ -296,17 +332,26 @@ while True:
         s.sendto(query, ("127.0.0.1", int(sys.argv[4])))
         if s.recv(512)[:2] == query[:2]:
             break
-    except OSError:
-        pass
+    except OSError as error:
+        last = error
     finally:
         s.close()
     if time.time() > deadline:
-        sys.exit(1)
+        unanswered(f"challtestsrv's DNS on UDP port {sys.argv[4]}", last)
     time.sleep(0.2)
 PY
       then
-        echo "  FAIL: the Pebbles or challtestsrv's DNS did not come up in 30 s:"
-        tail -n 3 "$WORK/pebble/pebble-a.log" "$WORK/pebble/pebble-b.log" "$WORK/pebble/challtestsrv.log" | sed 's/^/    /'
+        for started in $STARTED; do
+          name="${started%%:*}"
+          pid="${started#*:}"
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "    $name is running; its log ends:"
+          else
+            wait "$pid"
+            echo "    $name exited with $?; its log ends:"
+          fi
+          tail -n 5 "$WORK/pebble/$name.log" | sed 's/^/      /'
+        done
         status=1
       else
         PEBBLE=yes

@@ -1,0 +1,22 @@
+; iyi-ir 1
+source_filename = "loop_contiguous"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define external i32 @loop_contiguous(i1 %head_cond, i1 %body_cond) {
+entry:
+  br label %header
+header:
+  %value = phi i32 [ 0, label %entry ], [ %next, label %latch ]
+  br i1 %head_cond, label %body, label %exit_a
+body:
+  br i1 %body_cond, label %latch, label %exit_b
+latch:
+  %next = add i32 %value, 1
+  br label %header
+exit_b:
+  br label %join
+exit_a:
+  br label %join
+join:
+  ret i32 %value
+}

@@ -1,0 +1,22 @@
+module memory
+
+import std/static_array
+
+def frame(x : Int64) : Int64
+  values = StaticArray(Int64, 4).new
+  values[0] = x
+  values[2] = x + 3_i64
+  values[0] + values[2]
+end
+
+def pair(a : Int64, b : Int64) : Nil
+  values = StaticArray(Int64, 2).new
+  values[0] = a
+  values[1] = b
+  puts "#{values[1]}"
+  puts "#{values[0]}"
+end
+
+puts "#{frame(10_i64)}"
+pair(7_i64, 12_i64)
+puts "#{77_i64}"

@@ -1,0 +1,17 @@
+; iyi-ir 1
+source_filename = "field_gep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @field_gep(i1 %run, i64 %value) {
+entry:
+  %slot = alloca { i64, i64 }, align 8
+  br label %head
+head:
+  br i1 %run, label %body, label %done
+body:
+  %field = getelementptr { i64, i64 }, ptr %slot, i64 0, i32 1
+  store i64 %value, ptr %field, align 8
+  br label %head
+done:
+  ret void
+}

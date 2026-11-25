@@ -1,0 +1,20 @@
+; iyi-ir 1
+source_filename = "memcpy"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define external i64 @copy(i64 %x, i64 %y) {
+entry:
+  %src = alloca { i64, i64 }, align 8
+  %dst = alloca { i64, i64 }, align 8
+  %left = getelementptr { i64, i64 }, ptr %src, i64 0, i32 0
+  %right = getelementptr { i64, i64 }, ptr %src, i64 0, i32 1
+  store i64 %x, ptr %left, align 8
+  store i64 %y, ptr %right, align 8
+  intrinsic llvm.memcpy.p0.p0.i64(ptr %dst, ptr %src, i64 16, i1 false)
+  %first = getelementptr { i64, i64 }, ptr %dst, i64 0, i32 0
+  %second = getelementptr { i64, i64 }, ptr %dst, i64 0, i32 1
+  %a = load i64, ptr %first, align 8
+  %b = load i64, ptr %second, align 8
+  %answer = sub i64 %a, %b
+  ret i64 %answer
+}

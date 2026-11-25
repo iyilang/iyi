@@ -369,7 +369,7 @@ sys.exit(1)
 PY
       then
         echo "  FAIL: Pebble or challtestsrv did not come up in 30 s:"
-        tail -3 "$WORK/pebble/pebble.log" "$WORK/pebble/challtestsrv.log" | sed 's/^/    /'
+        tail -n 3 "$WORK/pebble/pebble.log" "$WORK/pebble/challtestsrv.log" | sed 's/^/    /'
         status=1
       else
         # Two RSA keys: one an RS256 account's, one a certificate's.

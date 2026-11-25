@@ -504,6 +504,33 @@
   `bench/native_encode_exercise.sh` goes from 100 to 110 forms. It runs in
   the self-host jobs through `bench/selfhost_gates.sh`.
 
+- **The IR optimizer's inliner caches callee facts and scalar replacement
+  skips functions without aggregates (#255).** `InlineBudget` keeps each
+  callee's eligibility and cost; the inliner drops a function's entries when
+  it changes it, and the pass driver drops them when that function's own
+  cleanup finishes, so a later caller sees its final size. The dispatch rule
+  (a compare chain of more than four single-call arms ending in
+  `unreachable`) walks back from the call's block instead of scanning every
+  block of the caller per call, and `run_sroa` returns before building
+  def-use, the CFG and the position index when the function has no
+  aggregate slot. The IR that comes out is the same.
+  `bench/native_opt_exercise.sh` gains section 2e (four-arm, five-arm and
+  cycling dispatch chains, and a callee that shrinks during its own cleanup)
+  and goes from 20 to 23 broken copies caught.
+
+- **The AArch64 selector calls the module's own `memcpy`, `memmove` and
+  `memset` (#256).** A copy, move or fill the selector does not expand
+  inline (a constant length over 64 bytes, or a variable one) calls the
+  module's routine when the module defines it, and the native helper
+  (`__iyi_native_memcpy` and its siblings) when the module only declares it
+  or lacks it; inside the three routines themselves the helper is always
+  used. The new `bench/native_copy_fill_exercise.sh` checks on every host
+  which symbol 78 selected copies, moves and fills call and, in 36 more,
+  that each passes destination, source or byte, and length in order; on
+  macOS arm64 it runs five modules against hosted twins and catches 3
+  broken copies. It runs in the self-host jobs through
+  `bench/selfhost_gates.sh`.
+
 ### Gates
 
 - **The LSP gates read a Windows process's children by when it was

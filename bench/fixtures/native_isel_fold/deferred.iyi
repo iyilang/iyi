@@ -1,0 +1,56 @@
+module deferred
+
+import std/int
+import std/static_array
+
+def overflow_zero(a : Int64, b : Int64) : Int64
+  value = a.to_i128 + b.to_i128
+  return -101_i64 if value > 9223372036854775807_i128 || value < -9223372036854775808_i128
+  value == 0_i128 ? 101_i64 : 102_i64
+end
+
+def overflow_compare(a : Int64, b : Int64) : Int64
+  value = a.to_i128 + b.to_i128
+  return -111_i64 if value > 9223372036854775807_i128 || value < -9223372036854775808_i128
+  value < -1_i128 ? 111_i64 : 112_i64
+end
+
+def overflow_narrow_zero(a : Int8, b : Int8) : Int64
+  value = a.to_i64 + b.to_i64
+  return -121_i64 if value > 127_i64 || value < -128_i64
+  value != 0_i64 ? 122_i64 : 121_i64
+end
+
+def multi_bit(x : Int64) : Int64
+  (x & 7_i64) == 0_i64 ? 131_i64 : 132_i64
+end
+
+def nested_compare(x : Int64) : Int64
+  x > 5_i64 ? 142_i64 : 141_i64
+end
+
+def hint_compare(x : Int64) : Int64
+  x > 5_i64 ? 151_i64 : 152_i64
+end
+
+def gep_other : Int64
+  values = StaticArray(Int64, 2).new
+  values[1] = 55_i64
+  values[1]
+end
+
+puts "#{overflow_zero(-7_i64, 7_i64)}"
+puts "#{overflow_zero(1_i64, 2_i64)}"
+puts "#{overflow_zero(9223372036854775807_i64, 1_i64)}"
+puts "#{overflow_compare(-4_i64, 1_i64)}"
+puts "#{overflow_compare(3_i64, 1_i64)}"
+puts "#{overflow_narrow_zero(-7_i8, 7_i8)}"
+puts "#{overflow_narrow_zero(7_i8, 1_i8)}"
+puts "#{overflow_narrow_zero(127_i8, 1_i8)}"
+puts "#{multi_bit(8_i64)}"
+puts "#{multi_bit(10_i64)}"
+puts "#{nested_compare(4_i64)}"
+puts "#{nested_compare(6_i64)}"
+puts "#{hint_compare(4_i64)}"
+puts "#{hint_compare(6_i64)}"
+puts "#{gep_other}"

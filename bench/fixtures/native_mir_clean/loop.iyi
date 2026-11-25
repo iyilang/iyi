@@ -1,0 +1,14 @@
+module loop
+
+def count(n : Int64) : Int64
+  i = 0_i64
+  sum = 0_i64
+  while i < n
+    sum = sum + i
+    i = i + 1_i64
+  end
+  sum
+end
+
+puts "#{count(0_i64)}"
+puts "#{count(7_i64)}"

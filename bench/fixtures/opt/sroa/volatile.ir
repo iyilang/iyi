@@ -1,0 +1,11 @@
+; iyi-ir 1
+source_filename = "volatile"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define external i64 @volatile_load() {
+entry:
+  %slot = alloca { i64, i64 }, align 8
+  %field = getelementptr { i64, i64 }, ptr %slot, i64 0, i32 0
+  %value = volatile load i64, ptr %field, align 8
+  ret i64 %value
+}

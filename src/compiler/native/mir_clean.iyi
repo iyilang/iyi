@@ -1,0 +1,160 @@
+module compiler/native/mir_clean
+
+import compiler/native/mir::{MFunction, MInst, OperandKind, Role}
+import compiler/native/target::{is_role?, invert_branch}
+import std/env::{ENV}
+
+# Both passes share the same switch and reject misspellings rather than silently changing code generation.
+def mir_clean_enabled? : Bool
+  choice = ENV["IYI_NATIVE_MIR_CLEAN"]?
+  return true if choice.nil?
+  name = choice.as(String)
+  return true if name == "1"
+  return false if name == "0"
+  raise "IYI_NATIVE_MIR_CLEAN is #{name}; the choices are 0 and 1"
+end
+
+# Counts every virtual operand, including inline assembly. Positions refer to the original
+# instruction order while each block is compacted in place.
+pub def fold_result_copies(fn : MFunction) : Int32
+  return 0 unless mir_clean_enabled?
+  defs = [] of Int32
+  uses = [] of Int32
+  def_block = [] of Int32
+  def_inst = [] of MInst?
+  def_pos = [] of Int32
+  def_slot = [] of Int32
+  last_touch = [] of Int32
+  v = 0
+  while v < fn.vreg_count
+    defs << 0
+    uses << 0
+    def_block << -1
+    def_inst << nil
+    def_pos << -1
+    def_slot << -1
+    last_touch << -1
+    v = v + 1
+  end
+
+  pos = 0
+  b = 0
+  while b < fn.blocks.size
+    block = fn.blocks[b]
+    i = 0
+    while i < block.insts.size
+      inst = block.insts[i]
+      j = 0
+      while j < inst.defs.size
+        op = inst.defs[j]
+        if op.kind == OperandKind::Virtual
+          v = op.reg
+          defs[v] = defs[v] + 1
+          def_block[v] = b
+          def_inst[v] = inst
+          def_pos[v] = pos
+          def_slot[v] = j
+        end
+        j = j + 1
+      end
+      j = 0
+      while j < inst.uses.size
+        op = inst.uses[j]
+        uses[op.reg] = uses[op.reg] + 1 if op.kind == OperandKind::Virtual
+        j = j + 1
+      end
+      pos = pos + 1
+      i = i + 1
+    end
+    b = b + 1
+  end
+
+  removed = 0
+  pos = 0
+  b = 0
+  while b < fn.blocks.size
+    block = fn.blocks[b]
+    kept = 0
+    i = 0
+    while i < block.insts.size
+      inst = block.insts[i]
+      folded = false
+      if is_role?(fn.isa, inst, Role::Copy) && inst.defs.size == 1 && inst.uses.size == 1
+        dst = inst.defs[0]
+        src = inst.uses[0]
+        if dst.kind == OperandKind::Virtual && src.kind == OperandKind::Virtual
+          d = dst.reg
+          s = src.reg
+          if fn.vreg_classes[d] == fn.vreg_classes[s] && defs[s] == 1 && uses[s] == 1 && defs[d] == 1 && def_block[s] == b && def_pos[s] < pos && last_touch[d] <= def_pos[s]
+            producer = def_inst[s].as(MInst)
+            if producer.asm.nil?
+              producer.defs[def_slot[s]] = dst # fold-result-rename
+              fn.vreg_pointer[d] = fn.vreg_pointer[d] || fn.vreg_pointer[s]
+              def_block[d] = b
+              def_inst[d] = producer
+              def_pos[d] = def_pos[s]
+              def_slot[d] = def_slot[s]
+              last_touch[d] = def_pos[s]
+              defs[s] = 0
+              uses[s] = 0
+              removed = removed + 1
+              folded = true
+            end
+          end
+        end
+      end
+      unless folded
+        block.insts[kept] = inst if kept != i
+        kept = kept + 1
+        j = 0
+        while j < inst.uses.size
+          op = inst.uses[j]
+          last_touch[op.reg] = pos if op.kind == OperandKind::Virtual
+          j = j + 1
+        end
+        j = 0
+        while j < inst.defs.size
+          op = inst.defs[j]
+          last_touch[op.reg] = pos if op.kind == OperandKind::Virtual
+          j = j + 1
+        end
+      end
+      pos = pos + 1
+      i = i + 1
+    end
+    while block.insts.size > kept
+      block.insts.pop
+    end
+    b = b + 1
+  end
+  removed
+end
+
+# The next block is already adjacent after frame layout, so its unconditional branch is redundant.
+pub def elide_fallthrough(fn : MFunction) : Int32
+  return 0 unless mir_clean_enabled?
+  removed = 0
+  b = 0
+  while b + 1 < fn.blocks.size
+    block = fn.blocks[b]
+    n = block.insts.size
+    if n > 0
+      tail = block.insts[n - 1]
+      if is_role?(fn.isa, tail, Role::Branch)
+        if tail.target == block.index + 1 # fallthrough-branch
+          block.insts.pop
+          removed = removed + 1
+        elsif n > 1
+          cond = block.insts[n - 2]
+          if is_role?(fn.isa, cond, Role::CondBranch) && cond.target == block.index + 1 && invert_branch(fn.isa, cond)
+            cond.target = tail.target
+            block.insts.pop
+            removed = removed + 1
+          end
+        end
+      end
+    end
+    b = b + 1
+  end
+  removed
+end

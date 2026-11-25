@@ -1,0 +1,16 @@
+; iyi-ir 1
+source_filename = "wrapping_counter_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @wrapping_counter_keep(ptr %negative_out) {
+entry:
+  br label %head
+head:
+  %i = phi i32 [ 0, label %entry ], [ %next, label %body ]
+  br label %body
+body:
+  %negative = icmp slt i32 %i, 0
+  store i1 %negative, ptr %negative_out, align 1
+  %next = add i32 %i, 1
+  br label %head
+}

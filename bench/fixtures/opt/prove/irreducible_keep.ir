@@ -1,0 +1,18 @@
+; iyi-ir 1
+source_filename = "irreducible_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @irreducible_keep(i1 %choose, i1 %again, i32 %x, ptr %out) {
+entry:
+  br i1 %choose, label %left, label %right
+left:
+  %guard = icmp slt i32 %x, 10
+  br i1 %guard, label %right, label %done
+right:
+  %value = and i32 %x, 7
+  %test = icmp slt i32 %value, 8
+  store i1 %test, ptr %out, align 1
+  br i1 %again, label %left, label %done
+done:
+  ret void
+}

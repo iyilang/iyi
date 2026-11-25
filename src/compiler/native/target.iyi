@@ -5,8 +5,9 @@ module compiler/native/target
 # Each target fills one in: aarch64 darwin and aarch64 linux today, in compiler/native/aarch64/abi.iyi.
 
 import compiler/native/obj/object::{ObjFormat}
-import compiler/native/mir::{MInst, Role}
+import compiler/native/mir::{MInst, MOp, Role}
 import compiler/native/aarch64/opcodes::{aarch64_op, aarch64_role, aarch64_new}
+import compiler/native/aarch64/regs::{cond_invert}
 
 # How a thread-local variable is reached. Darwin goes through a TLV descriptor in __DATA,__thread_vars, bound to
 # _tlv_bootstrap, and calls the descriptor's thunk. Linux reads the thread pointer and adds a local-exec offset.
@@ -94,4 +95,28 @@ end
 
 pub def table_branch?(isa : Int32, inst : MInst) : Bool
   role_of(isa, inst) == Role::TableBranch
+end
+
+# Inverts a conditional branch in place when the target supports it.
+pub def invert_branch(isa : Int32, inst : MInst) : Bool
+  if isa == isa_aarch64 && inst.opcode == MOp::Bcond.value.to_i32
+    inst.cond = cond_invert(inst.cond) # invert-branch
+    return true
+  end
+  if isa == isa_aarch64
+    if inst.opcode == MOp::Cbz.value.to_i32
+      inst.opcode = MOp::Cbnz.value.to_i32 # invert-zero-branch
+      return true
+    elsif inst.opcode == MOp::Cbnz.value.to_i32
+      inst.opcode = MOp::Cbz.value.to_i32
+      return true
+    elsif inst.opcode == MOp::Tbz.value.to_i32
+      inst.opcode = MOp::Tbnz.value.to_i32
+      return true
+    elsif inst.opcode == MOp::Tbnz.value.to_i32
+      inst.opcode = MOp::Tbz.value.to_i32
+      return true
+    end
+  end
+  false
 end

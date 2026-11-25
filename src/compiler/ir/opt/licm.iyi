@@ -1,0 +1,324 @@
+module compiler/ir/opt/licm
+
+import compiler/ir/inst::{Op, Inst, IntrinsicAux}
+import compiler/ir/function::{Function}
+import compiler/ir/module::{Module}
+import compiler/ir/opt/analysis::{Cfg, DomTree}
+import compiler/ir/opt/effects::{pure?}
+
+# The effects classifier describes side effects, not whether integer division
+# can trap. A zero-trip loop must not execute division in its preheader.
+def speculatable?(inst : Inst) : Bool
+  return false unless pure?(inst) && !inst.type.void?
+  return false if inst.op == Op::SDiv || inst.op == Op::UDiv || inst.op == Op::SRem || inst.op == Op::URem # mutation M16: never speculate integer division
+  if inst.op == Op::Intrinsic
+    return false unless inst.aux.is_a?(IntrinsicAux)
+    aux = inst.aux.as(IntrinsicAux)
+    aux.param_attrs.each { |attrs| return false unless attrs.empty? }
+  end
+  inst.args.each do |arg|
+    if arg.is_a?(Inst)
+      op = arg.as(Inst).op
+      return false if op == Op::ConstUndef || op == Op::ConstPoison
+    end
+  end
+  true
+end
+
+# An irreducible DFS retreating edge is not a natural-loop backedge. Skip the
+# function instead of assuming the reducible-loop forest property.
+def irreducible?(cfg : Cfg, dom : DomTree) : Bool
+  return false if cfg.size == 0
+  color = [] of Int32
+  k = 0
+  while k < cfg.size
+    color << 0
+    k = k + 1
+  end
+  nodes = [0] of Int32
+  edges = [0] of Int32
+  color[0] = 1
+  while !nodes.empty?
+    top = nodes.size - 1
+    b = nodes[top]
+    at = edges[top]
+    if at < cfg.succs(b).size
+      successor = cfg.succs(b)[at]
+      edges[top] = at + 1
+      if color[successor] == 0
+        color[successor] = 1
+        nodes << successor
+        edges << 0
+      elsif color[successor] == 1 && !dom.dominates?(successor, b)
+        return true
+      end
+    else
+      color[b] = 2
+      nodes.pop
+      edges.pop
+    end
+  end
+  false
+end
+
+class Licm
+  def initialize(@fn : Function, @cfg : Cfg, @dom : DomTree)
+    @places = Hash(Inst, Int32).new
+    @fn.blocks.each_with_index do |block, b|
+      block.insts.each { |inst| @places[inst] = b }
+    end
+    @inner = [] of Int32
+    @headers = [] of Int32
+    @parents = [] of Int32
+    @preheaders = [] of Int32
+    @nearest = [] of Int32
+    @jumps = [] of Array(Int32)
+    k = 0
+    while k < @cfg.size
+      @inner << -1
+      k = k + 1
+    end
+  end
+
+  def find_set(parent : Array(Int32), node : Int32) : Int32
+    root = node
+    while parent[root] != root
+      root = parent[root]
+    end
+    current = node
+    while current != root
+      next_node = parent[current]
+      parent[current] = root
+      current = next_node
+    end
+    root
+  end
+
+  # The representative label is the contracted loop header, independently of
+  # the union-find root selected by rank.
+  def merge_set(parent : Array(Int32), rank : Array(Int32), label : Array(Int32), header : Int32, member : Int32) : Nil
+    a = find_set(parent, header)
+    b = find_set(parent, member)
+    return if a == b
+    if rank[a] < rank[b]
+      parent[a] = b
+      label[b] = header
+    else
+      parent[b] = a
+      label[a] = header
+      rank[a] = rank[a] + 1 if rank[a] == rank[b]
+    end
+  end
+
+  def preheader(header : Int32) : Int32
+    outside = -1
+    @cfg.preds(header).each do |pred|
+      next if @dom.dominates?(header, pred)
+      return -1 if outside >= 0
+      outside = pred
+    end
+    return -1 if outside < 0 || !@cfg.reachable?(outside)
+    block = @cfg.block(outside)
+    return -1 unless block.terminated? && block.terminator.op == Op::Br
+    outside
+  end
+
+  # Collapse each natural loop inside out. Once collapsed, an inner loop is
+  # represented by its header when walking the predecessors of its parent.
+  def collect_loops : Nil
+    latches = [] of Array(Int32)
+    stamp = [] of Int32
+    parent = [] of Int32
+    rank = [] of Int32
+    label = [] of Int32
+    header_loop = [] of Int32
+    k = 0
+    while k < @cfg.size
+      latches << [] of Int32
+      stamp << -1
+      parent << k
+      rank << 0
+      label << k
+      header_loop << -1
+      k = k + 1
+    end
+    @cfg.rpo.each do |tail|
+      @cfg.succs(tail).each do |header|
+        latches[header] << tail if @dom.dominates?(header, tail)
+      end
+    end
+    at = @cfg.rpo.size - 1
+    while at >= 0
+      header = @cfg.rpo[at]
+      at = at - 1
+      next if latches[header].empty?
+      raise "BUG: contracted loop header" unless label[find_set(parent, header)] == header
+      loop_id = @headers.size
+      @headers << header
+      @parents << -1
+      @preheaders << preheader(header)
+      @nearest << -1
+      header_loop[header] = loop_id
+      @inner[header] = loop_id
+      stamp[header] = loop_id
+      work = [] of Int32
+      latches[header].each do |latch|
+        member = label[find_set(parent, latch)]
+        next if member == header || stamp[member] == loop_id
+        stamp[member] = loop_id
+        work << member
+      end
+      cursor = 0
+      while cursor < work.size
+        member = work[cursor]
+        cursor = cursor + 1
+        @cfg.preds(member).each do |pred|
+          next unless @cfg.reachable?(pred) && @dom.dominates?(header, pred)
+          representative = label[find_set(parent, pred)]
+          next if representative == header || stamp[representative] == loop_id
+          stamp[representative] = loop_id
+          work << representative
+        end
+      end
+      work.each do |member|
+        child = header_loop[member]
+        if child >= 0
+          raise "BUG: loop has two parents" if @parents[child] >= 0
+          @parents[child] = loop_id
+        else
+          @inner[member] = loop_id
+        end
+        merge_set(parent, rank, label, header, member)
+      end
+    end
+  end
+
+  # A loop lacking a preheader does not prevent motion directly to an outer
+  # loop's preheader. Jumps index only ancestors which actually have one.
+  def build_jumps : Nil
+    valid_parent = [] of Int32
+    @headers.each { |_| valid_parent << -1 }
+    i = @headers.size - 1
+    while i >= 0
+      outer = @parents[i]
+      nearest_outer = outer < 0 ? -1 : @nearest[outer]
+      valid_parent[i] = nearest_outer
+      @nearest[i] = @preheaders[i] >= 0 ? i : nearest_outer
+      i = i - 1
+    end
+    return if @headers.empty?
+    @jumps << valid_parent
+    span = 1
+    while span < @headers.size
+      previous = @jumps[@jumps.size - 1]
+      row = [] of Int32
+      i = 0
+      while i < @headers.size
+        outer = previous[i]
+        row << (outer < 0 ? -1 : previous[outer])
+        i = i + 1
+      end
+      @jumps << row
+      break if span > @headers.size // 2
+      span = span * 2
+    end
+  end
+
+  def available?(location : Int32, preheader : Int32) : Bool
+    return true if location < 0
+    return false unless @dom.dominates?(location, preheader) # mutation M17: the operand must dominate the preheader
+    true
+  end
+
+  # Every operand definition dominates the original use, so their blocks form
+  # one dominator chain. The one with the greatest RPO number is the deepest
+  # and suffices to test all operands at a proposed destination.
+  def latest_operand_block(inst : Inst) : Int32
+    latest = -1
+    inst.args.each do |arg|
+      if arg.is_a?(Inst)
+        if location = @places[arg.as(Inst)]?
+          if latest < 0 || @cfg.rpo_number(location) > @cfg.rpo_number(latest)
+            latest = location
+          end
+        end
+      end
+    end
+    latest
+  end
+
+  def destination(owner : Int32, location : Int32) : Int32
+    loop_id = @nearest[owner]
+    return -1 if loop_id < 0
+    return -1 unless available?(location, @preheaders[loop_id])
+    i = @jumps.size - 1
+    while i >= 0
+      outer = @jumps[i][loop_id]
+      if outer >= 0 && available?(location, @preheaders[outer])
+        loop_id = outer
+      end
+      i = i - 1
+    end
+    @preheaders[loop_id]
+  end
+
+  def run : Bool
+    collect_loops
+    return false if @headers.empty?
+    build_jumps
+    moved_from = [] of Bool
+    moved_to = [] of Array(Inst)
+    k = 0
+    while k < @cfg.size
+      moved_from << false
+      moved_to << [] of Inst
+      k = k + 1
+    end
+    changed = false
+    @cfg.rpo.each do |b|
+      owner = @inner[b]
+      next if owner < 0 || @nearest[owner] < 0
+      block = @cfg.block(b)
+      next if block.terminator.op == Op::Unreachable
+      block.insts.each do |inst|
+        next unless speculatable?(inst)
+        target = destination(owner, latest_operand_block(inst))
+        next if target < 0
+        @places[inst] = target
+        moved_from[b] = true
+        moved_to[target] << inst
+        changed = true
+      end
+    end
+    return false unless changed
+    @fn.blocks.each_with_index do |block, b|
+      next unless moved_from[b] || !moved_to[b].empty?
+      rebuilt = [] of Inst
+      block.insts.each do |inst|
+        moved_to[b].each { |moved| rebuilt << moved } if inst == block.terminator
+        rebuilt << inst if @places[inst]? == b
+      end
+      block.insts[0, block.insts.size] = rebuilt
+    end
+    true
+  end
+end
+
+pub def run_licm(mod : Module, fn : Function) : Bool
+  return false if fn.declaration? || fn.blocks.size < 2
+  cfg = Cfg.new(fn)
+  retreating = false
+  cfg.rpo.each do |tail|
+    cfg.succs(tail).each do |head|
+      if cfg.rpo_number(head) <= cfg.rpo_number(tail)
+        retreating = true
+        break
+      end
+    end
+    break if retreating
+  end
+  return false unless retreating
+  dom = DomTree.new(cfg)
+  return false if irreducible?(cfg, dom)
+  Licm.new(fn, cfg, dom).run
+end

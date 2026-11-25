@@ -1,0 +1,109 @@
+module compiler/native/link/codesign
+
+# The ad-hoc code signature of a Mach-O executable, written the way the linker
+# writes it (SPEC 2.3): one SuperBlob holding one CodeDirectory, version 0x20400,
+# SHA-256 hashes of 4096-byte pages, the identifier, the flags CS_ADHOC and
+# CS_LINKER_SIGNED, and the exec segment fields for __TEXT with
+# CS_EXECSEG_MAIN_BINARY. Every blob field is big-endian. The hashes cover the
+# image from offset 0 up to the signature's own offset, the code limit.
+#
+# No host tool takes part: the hash is the tree's SHA-256 (std/digest).
+
+import std/digest::{SHA256}
+import std/slice::{Slice, Bytes}
+
+class CodeSig
+  SUPER_MAGIC          = 0xfade0cc0_i64
+  CD_MAGIC             = 0xfade0c02_i64
+  CD_VERSION           =    0x20400_i64
+  CS_ADHOC             =        0x2_i64
+  CS_LINKER_SIGNED     =    0x20000_i64
+  EXECSEG_MAIN_BINARY  =        0x1_i64
+  PAGE                 =       4096_i64
+  PAGE_LOG2            =         12_i64
+  HASH_SIZE            =         32_i64
+  HASH_SHA256          =          2_i64
+  SUPER_HEADER         =         20_i64
+  CD_HEADER            =         88_i64
+  CSSLOT_CODEDIRECTORY =          0_i64
+end
+
+# The number of hashed pages for a code limit.
+def code_slots(code_limit : Int64) : Int64
+  (code_limit + CodeSig::PAGE - 1_i64).unsafe_shr(CodeSig::PAGE_LOG2)
+end
+
+# The size of the signature blob for a code limit and an identifier.
+pub def code_signature_size(code_limit : Int64, identifier : String) : Int64
+  cd = CodeSig::CD_HEADER + identifier.bytesize.to_i64 + 1_i64 + code_slots(code_limit) * CodeSig::HASH_SIZE
+  CodeSig::SUPER_HEADER + cd
+end
+
+# Writes `value` big-endian, `width` bytes, at `at` in `dst`.
+def put_be(dst : Bytes, at : Int64, value : Int64, width : Int32) : Nil
+  i = 0
+  while i < width
+    shift = (width - 1 - i).to_i64 * 8_i64
+    dst[(at + i.to_i64).to_i32] = (value.unsafe_shr(shift) & 0xff_i64).to_u8
+    i = i + 1
+  end
+end
+
+# The signature blob for the image's bytes below `code_limit`. `exec_base` and
+# `exec_limit` are the __TEXT segment's file offset and file size.
+pub def code_signature(image : Bytes, code_limit : Int64, identifier : String, exec_base : Int64, exec_limit : Int64) : Bytes
+  slots = code_slots(code_limit)
+  ident_len = identifier.bytesize.to_i64
+  hash_off = CodeSig::CD_HEADER + ident_len + 1_i64
+  cd_len = hash_off + slots * CodeSig::HASH_SIZE
+  total = CodeSig::SUPER_HEADER + cd_len
+  blob = Slice(UInt8).new(total.to_i32)
+  blob.fill(0_u8)
+
+  put_be(blob, 0_i64, CodeSig::SUPER_MAGIC, 4)
+  put_be(blob, 4_i64, total, 4)
+  put_be(blob, 8_i64, 1_i64, 4)
+  put_be(blob, 12_i64, CodeSig::CSSLOT_CODEDIRECTORY, 4)
+  put_be(blob, 16_i64, CodeSig::SUPER_HEADER, 4)
+
+  cd = CodeSig::SUPER_HEADER
+  put_be(blob, cd, CodeSig::CD_MAGIC, 4)
+  put_be(blob, cd + 4_i64, cd_len, 4)
+  put_be(blob, cd + 8_i64, CodeSig::CD_VERSION, 4)
+  put_be(blob, cd + 12_i64, CodeSig::CS_ADHOC | CodeSig::CS_LINKER_SIGNED, 4)
+  put_be(blob, cd + 16_i64, hash_off, 4)
+  put_be(blob, cd + 20_i64, CodeSig::CD_HEADER, 4)
+  put_be(blob, cd + 24_i64, 0_i64, 4)
+  put_be(blob, cd + 28_i64, slots, 4)
+  put_be(blob, cd + 32_i64, code_limit, 4)
+  put_be(blob, cd + 36_i64, CodeSig::HASH_SIZE, 1)
+  put_be(blob, cd + 37_i64, CodeSig::HASH_SHA256, 1)
+  put_be(blob, cd + 38_i64, 0_i64, 1)
+  put_be(blob, cd + 39_i64, CodeSig::PAGE_LOG2, 1)
+  put_be(blob, cd + 64_i64, exec_base, 8)
+  put_be(blob, cd + 72_i64, exec_limit, 8)
+  put_be(blob, cd + 80_i64, CodeSig::EXECSEG_MAIN_BINARY, 8)
+
+  i = 0
+  while i < ident_len
+    blob[(cd + CodeSig::CD_HEADER + i).to_i32] = identifier.byte_at(i.to_i32)
+    i = i + 1
+  end
+
+  page = 0_i64
+  while page < slots
+    start = page * CodeSig::PAGE
+    count = code_limit - start
+    if count > CodeSig::PAGE
+      count = CodeSig::PAGE
+    end
+    digest = SHA256.digest(image[start.to_i32, count.to_i32])
+    j = 0
+    while j < digest.size
+      blob[(cd + hash_off + page * CodeSig::HASH_SIZE + j.to_i64).to_i32] = digest[j]
+      j = j + 1
+    end
+    page = page + 1
+  end
+  blob
+end

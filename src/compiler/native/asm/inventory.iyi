@@ -1,0 +1,763 @@
+module compiler/native/asm/inventory
+
+import compiler/platform/target::{Target}
+
+# Every `asm(...)` expression in the iyi tree, per target flag set (SPEC 2.2,
+# C4). Line B's parser does not read them. `asm(` is a syntax error where the
+# parser meets it as code, and inside a `{% if %}` branch the parser keeps the
+# text unread, so a file can pass the parser and still hold an asm expression.
+# Every file that holds the text `asm(` is therefore read here by a lexical
+# scanner. The scanner skips comments, strings and character literals,
+# evaluates `{% if %}` and `{% unless %}` chains against the target's flags,
+# and keeps each active `asm(...)` with its template and its operand, clobber
+# and option sections. A branch whose condition the scanner cannot evaluate
+# is kept, and its row names the condition in `guard`.
+
+# One `asm(...)` expression active under one target.
+pub class AsmSite
+  getter file : String
+  getter line : Int32
+  getter target : String
+  getter status : String
+  getter guard : String
+  getter template : String
+  getter outputs : Array(String)
+  getter inputs : Array(String)
+  getter clobbers : Array(String)
+  getter options : Array(String)
+
+  def initialize(@file : String, @line : Int32, @target : String, @status : String, @guard : String, @template : String, @outputs : Array(String), @inputs : Array(String), @clobbers : Array(String), @options : Array(String))
+  end
+
+  def dialect : String
+    if @options.includes?("intel")
+      return "intel"
+    end
+    "att"
+  end
+end
+
+# The flags `flag?(:name)` answers for a target. Each answer comes from the
+# target model the compiler uses, so a name the model does not know is false.
+pub class AsmFlags
+  getter target : Target
+
+  def initialize(@target : Target)
+  end
+
+  def set?(name : String) : Bool
+    if name == "x86_64"
+      return @target.architecture == "x86_64"
+    end
+    if name == "aarch64" || name == "arm64"
+      return @target.architecture == "aarch64"
+    end
+    if name == "wasm32"
+      return @target.architecture == "wasm32"
+    end
+    if name == "darwin" || name == "macos"
+      return @target.macos?
+    end
+    if name == "linux"
+      return @target.linux?
+    end
+    if name == "win32"
+      return @target.win32?
+    end
+    if name == "windows"
+      return @target.windows?
+    end
+    if name == "msvc"
+      return @target.msvc?
+    end
+    if name == "wasi"
+      return @target.wasi?
+    end
+    if name == "unix" || name == "posix"
+      return @target.unix?
+    end
+    if name == "64"
+      return @target.pointer_bit_width == 64
+    end
+    false
+  end
+end
+
+# Evaluates one `{% if %}` condition. The grammar is `flag?(:name)`, `!`, `&&`,
+# `||`, parentheses, `true` and `false`. A condition with any other token, or
+# with a syntax the grammar does not take, is unknown: `value` answers -1.
+pub class AsmCondition
+  getter unknown : Bool
+
+  def initialize(@text : String, @flags : AsmFlags)
+    @tokens = [] of String
+    @index = 0
+    @unknown = false
+    tokenize
+  end
+
+  # 1 when the condition holds, 0 when it does not, -1 when it is unknown.
+  def value : Int32
+    if @unknown
+      return -1
+    end
+    result = parse_or
+    if @unknown || @index != @tokens.size
+      return -1
+    end
+    if result
+      return 1
+    end
+    0
+  end
+
+  def tokenize : Nil
+    n = @text.bytesize
+    i = 0
+    while i < n && !@unknown
+      b = @text.byte_at(i).to_i32
+      if b == 32 || b == 9 || b == 10 || b == 13
+        i += 1
+      elsif b == 40 || b == 41 || b == 33
+        @tokens << @text[i, 1]
+        i += 1
+      elsif b == 38 || b == 124
+        if i + 1 < n && @text.byte_at(i + 1).to_i32 == b
+          @tokens << @text[i, 2]
+          i += 2
+        else
+          @unknown = true
+        end
+      elsif b == 58
+        if i + 1 < n && @text.byte_at(i + 1).to_i32 == 58
+          @unknown = true
+        else
+          start = i
+          i += 1
+          while i < n && ident_char?(@text.byte_at(i).to_i32)
+            i += 1
+          end
+          if i == start + 1
+            @unknown = true
+          else
+            @tokens << @text[start, i - start]
+          end
+        end
+      elsif ident_start?(b)
+        start = i
+        i += 1
+        while i < n && ident_char?(@text.byte_at(i).to_i32)
+          i += 1
+        end
+        if i < n && @text.byte_at(i).to_i32 == 63
+          i += 1
+        end
+        word = @text[start, i - start]
+        if word == "flag?" || word == "true" || word == "false"
+          @tokens << word
+        else
+          @unknown = true
+        end
+      else
+        @unknown = true
+      end
+    end
+  end
+
+  def ident_start?(b : Int32) : Bool
+    (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95
+  end
+
+  def ident_char?(b : Int32) : Bool
+    ident_start?(b) || (b >= 48 && b <= 57)
+  end
+
+  def expect(token : String) : Nil
+    if @index < @tokens.size && @tokens[@index] == token
+      @index += 1
+    else
+      @unknown = true
+    end
+  end
+
+  def parse_or : Bool
+    result = parse_and
+    while !@unknown && @index < @tokens.size && @tokens[@index] == "||"
+      @index += 1
+      right = parse_and
+      result = result || right
+    end
+    result
+  end
+
+  def parse_and : Bool
+    result = parse_unary
+    while !@unknown && @index < @tokens.size && @tokens[@index] == "&&"
+      @index += 1
+      right = parse_unary
+      result = result && right
+    end
+    result
+  end
+
+  def parse_unary : Bool
+    if !@unknown && @index < @tokens.size && @tokens[@index] == "!"
+      @index += 1
+      return !parse_unary
+    end
+    parse_atom
+  end
+
+  def parse_atom : Bool
+    if @index >= @tokens.size
+      @unknown = true
+      return false
+    end
+    token = @tokens[@index]
+    @index += 1
+    if token == "("
+      result = parse_or
+      expect(")")
+      return result
+    end
+    if token == "true"
+      return true
+    end
+    if token == "false"
+      return false
+    end
+    if token == "flag?"
+      expect("(")
+      if @index >= @tokens.size || !@tokens[@index].starts_with?(":")
+        @unknown = true
+        return false
+      end
+      name = @tokens[@index][1, @tokens[@index].bytesize - 1]
+      @index += 1
+      expect(")")
+      return @flags.set?(name)
+    end
+    @unknown = true
+    false
+  end
+end
+
+# One open conditional chain, or a transparent scope. `parent` is whether the
+# enclosing code is compiled, `taken` whether a branch of this chain has been
+# chosen, `active` whether the current branch is compiled. `guard` names a
+# branch the scanner could not evaluate, and is empty otherwise.
+class AsmFrame
+  property parent : Bool
+  property taken : Bool
+  property active : Bool
+  property guard : String
+
+  def initialize(@parent : Bool, @taken : Bool, @active : Bool, @guard : String)
+  end
+end
+
+# Scans one file for one target. `expressions` counts every `asm(` expression
+# in code, in any branch. `refused` names a `{% raise %}` the target reaches
+# outside any branch, which means the target does not compile this file.
+pub class AsmScanner
+  getter sites : Array(AsmSite)
+  getter failure : String?
+  getter refused : String?
+  getter expressions : Int32
+  getter expression_lines : Array(Int32)
+  getter file : String
+
+  def initialize(@src : String, @file : String, @target : String, @status : String, @flags : AsmFlags)
+    @pos = 0
+    @line = 1
+    @stack = [] of AsmFrame
+    @sites = [] of AsmSite
+    @failure = nil
+    @refused = nil
+    @expressions = 0
+    @expression_lines = [] of Int32
+  end
+
+  def run : Nil
+    n = @src.bytesize
+    while @pos < n && @failure.nil?
+      b = byte(@pos)
+      if b == 10
+        @line += 1
+        @pos += 1
+      elsif b == 35
+        skip_comment
+      elsif b == 34
+        read_string(false)
+      elsif b == 39
+        skip_char
+      elsif b == 92 && byte(@pos + 1) == 123 && byte(@pos + 2) == 37
+        @pos += 3
+      elsif b == 123 && byte(@pos + 1) == 37
+        directive
+      elsif ident_start?(b)
+        start = @pos
+        line_here = @line
+        while @pos < n && ident_char?(byte(@pos))
+          @pos += 1
+        end
+        word = @src[start, @pos - start]
+        if word == "asm" && @pos < n && byte(@pos) == 40
+          @pos += 1
+          expression(line_here)
+        end
+      else
+        @pos += 1
+      end
+    end
+    if @failure.nil? && @stack.size > 0
+      @failure = "#{@file}: a {% %} block is never closed"
+    end
+    if @failure.nil? && !@refused.nil?
+      @sites = [] of AsmSite
+    end
+  end
+
+  def byte(at : Int32) : Int32
+    if at < 0 || at >= @src.bytesize
+      return -1
+    end
+    @src.byte_at(at).to_i32
+  end
+
+  def ident_start?(b : Int32) : Bool
+    (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95
+  end
+
+  def ident_char?(b : Int32) : Bool
+    ident_start?(b) || (b >= 48 && b <= 57) || b == 63
+  end
+
+  def active? : Bool
+    return true if @stack.empty?
+    @stack[@stack.size - 1].active
+  end
+
+  def current_guard : String
+    acc = ""
+    i = 0
+    while i < @stack.size
+      if @stack[i].guard.bytesize > 0
+        acc = acc + ";" if acc.bytesize > 0
+        acc = acc + @stack[i].guard
+      end
+      i += 1
+    end
+    acc
+  end
+
+  def skip_comment : Nil
+    n = @src.bytesize
+    while @pos < n && byte(@pos) != 10
+      @pos += 1
+    end
+  end
+
+  def skip_char : Nil
+    if byte(@pos + 1) == 92
+      @pos += 2
+      while @pos < @src.bytesize && byte(@pos) != 39 && byte(@pos) != 10
+        @pos += 1
+      end
+      if byte(@pos) == 39
+        @pos += 1
+      end
+    elsif byte(@pos + 2) == 39
+      @pos += 3
+    else
+      @pos += 1
+    end
+  end
+
+  # Reads the string literal at @pos (its opening quote) and returns its value
+  # with the escapes this tree uses decoded. Interpolation is skipped outside a
+  # template and refused inside one.
+  def read_string(template : Bool) : String
+    sb = String::Builder.new
+    n = @src.bytesize
+    @pos += 1
+    closed = false
+    while !closed && @pos < n && @failure.nil?
+      b = byte(@pos)
+      if b == 34
+        closed = true
+        @pos += 1
+      elsif b == 92
+        e = byte(@pos + 1)
+        if e == 110
+          sb << "\n"
+        elsif e == 116
+          sb << "\t"
+        elsif e == 10
+          @line += 1
+        else
+          sb << @src[@pos + 1, 1]
+        end
+        @pos += 2
+      elsif b == 35 && byte(@pos + 1) == 123
+        if template
+          @failure = "#{@file}:#{@line}: string interpolation inside an asm template"
+        else
+          skip_interpolation
+        end
+      else
+        if b == 10
+          @line += 1
+        end
+        sb << @src[@pos, 1]
+        @pos += 1
+      end
+    end
+    if !closed && @failure.nil?
+      @failure = "#{@file}:#{@line}: an unterminated string literal"
+    end
+    sb.to_s
+  end
+
+  def skip_interpolation : Nil
+    @pos += 2
+    depth = 1
+    n = @src.bytesize
+    while depth > 0 && @pos < n && @failure.nil?
+      b = byte(@pos)
+      if b == 34
+        read_string(false)
+      elsif b == 123
+        depth += 1
+        @pos += 1
+      elsif b == 125
+        depth -= 1
+        @pos += 1
+      else
+        if b == 10
+          @line += 1
+        end
+        @pos += 1
+      end
+    end
+  end
+
+  def directive : Nil
+    start_line = @line
+    n = @src.bytesize
+    s = @pos + 2
+    e = s
+    while e < n && !(byte(e) == 37 && byte(e + 1) == 125)
+      if byte(e) == 10
+        @line += 1
+      end
+      e += 1
+    end
+    if e >= n
+      @failure = "#{@file}:#{start_line}: an unterminated {% directive"
+      return
+    end
+    body = @src[s, e - s].strip
+    @pos = e + 2
+    word = body
+    rest = ""
+    space = body.index(' ')
+    if space
+      word = body[0, space]
+      rest = body[space, body.bytesize - space].strip
+    end
+    if word == "if" || word == "unless"
+      open_chain(word, rest, start_line)
+    elsif word == "begin"
+      here = active?
+      @stack << AsmFrame.new(here, true, here, "")
+    elsif word == "for"
+      here = active?
+      @stack << AsmFrame.new(here, true, here, "for(#{rest})")
+    elsif word == "elsif"
+      if @stack.empty?
+        @failure = "#{@file}:#{start_line}: an elsif with no if"
+        return
+      end
+      top = @stack[@stack.size - 1]
+      if top.guard.starts_with?("if(") || top.guard.starts_with?("unless(") || top.guard.starts_with?("elsif(") || top.guard == "else"
+        top.guard = "elsif(#{rest})"
+        top.active = top.parent
+      elsif !top.parent || top.taken
+        top.active = false
+      else
+        value = AsmCondition.new(rest, @flags).value
+        if value < 0
+          top.guard = "elsif(#{rest})"
+          top.active = top.parent
+        else
+          top.taken = value == 1
+          top.active = top.taken
+        end
+      end
+    elsif word == "else"
+      if @stack.empty?
+        @failure = "#{@file}:#{start_line}: an else with no if"
+        return
+      end
+      top = @stack[@stack.size - 1]
+      if top.guard.starts_with?("if(") || top.guard.starts_with?("unless(") || top.guard.starts_with?("elsif(") || top.guard == "else"
+        top.guard = "else"
+        top.active = top.parent
+      else
+        top.active = top.parent && !top.taken
+        top.taken = true
+      end
+    elsif word == "raise"
+      if active?
+        if @stack.empty?
+          @refused = "#{@file}:#{start_line}: #{rest}"
+        else
+          @stack[@stack.size - 1].active = false
+        end
+      end
+    elsif word == "end"
+      if @stack.empty?
+        @failure = "#{@file}:#{start_line}: an end with no open block"
+        return
+      end
+      @stack.pop
+    else
+      @failure = "#{@file}:#{start_line}: the directive '{% #{body} %}' is not one the scanner reads"
+    end
+  end
+
+  def open_chain(word : String, rest : String, line : Int32) : Nil
+    parent = active?
+    if !parent
+      @stack << AsmFrame.new(false, true, false, "")
+      return
+    end
+    value = AsmCondition.new(rest, @flags).value
+    if value < 0
+      @stack << AsmFrame.new(true, true, true, "#{word}(#{rest})")
+      return
+    end
+    cond = value == 1
+    if word == "unless"
+      cond = !cond
+    end
+    @stack << AsmFrame.new(true, cond, cond, "")
+  end
+
+  def skip_space : Nil
+    n = @src.bytesize
+    while @pos < n
+      b = byte(@pos)
+      if b == 10
+        @line += 1
+        @pos += 1
+      elsif b == 32 || b == 9 || b == 13
+        @pos += 1
+      else
+        return
+      end
+    end
+  end
+
+  # Reads one operand, clobber or option item: everything up to a comma, a
+  # colon, or the closing parenthesis at depth zero. Its raw text is returned.
+  def read_item : String
+    start = @pos
+    depth = 0
+    n = @src.bytesize
+    done = false
+    while !done && @pos < n
+      b = byte(@pos)
+      if b == 34
+        read_string(false)
+      elsif b == 40
+        depth += 1
+        @pos += 1
+      elsif b == 41
+        if depth == 0
+          done = true
+        else
+          depth -= 1
+          @pos += 1
+        end
+      elsif depth == 0 && (b == 44 || b == 58)
+        done = true
+      else
+        if b == 10
+          @line += 1
+        end
+        @pos += 1
+      end
+    end
+    @src[start, @pos - start].strip
+  end
+
+  # Parses one asm expression. @pos is just past its opening parenthesis.
+  # Each colon starts the next section: outputs follow the first, inputs the
+  # second, clobbers the third and options the fourth.
+  def expression(line : Int32) : Nil
+    @expressions += 1
+    @expression_lines << line
+    skip_space
+    if byte(@pos) != 34
+      if @failure.nil?
+        @failure = "#{@file}:#{line}: an asm template that is not a string literal"
+      end
+      return
+    end
+    template = read_string(true)
+    if !@failure.nil?
+      return
+    end
+    items = [] of String
+    kinds = [] of Int32
+    colons = 0
+    n = @src.bytesize
+    closed = false
+    while !closed && @failure.nil?
+      skip_space
+      if @pos >= n
+        @failure = "#{@file}:#{line}: an asm expression that never closes"
+        return
+      end
+      b = byte(@pos)
+      if b == 41
+        closed = true
+        @pos += 1
+      elsif b == 58
+        colons += 1
+        @pos += 1
+        if colons > 4
+          @failure = "#{@file}:#{line}: an asm expression with more than four sections"
+          return
+        end
+      elsif b == 44
+        @pos += 1
+      else
+        if colons == 0
+          @failure = "#{@file}:#{line}: an asm operand before the first colon"
+          return
+        end
+        items << read_item
+        kinds << colons
+      end
+    end
+    outputs = [] of String
+    inputs = [] of String
+    clobbers = [] of String
+    options = [] of String
+    i = 0
+    while i < items.size
+      if kinds[i] == 1
+        outputs << items[i]
+      elsif kinds[i] == 2
+        inputs << items[i]
+      elsif kinds[i] == 3
+        clobbers << strip_quotes(items[i])
+      else
+        options << strip_quotes(items[i])
+      end
+      i += 1
+    end
+    if active?
+      @sites << AsmSite.new(@file, line, @target, @status, current_guard, template, outputs, inputs, clobbers, options)
+    end
+  end
+
+  def strip_quotes(item : String) : String
+    if item.bytesize >= 2 && item.byte_at(0).to_i32 == 34 && item.byte_at(item.bytesize - 1).to_i32 == 34
+      return item[1, item.bytesize - 2]
+    end
+    item
+  end
+end
+
+# The inventory's text helpers: the escaped template for one report line, the
+# instruction names a template uses, and whether it uses an operand modifier.
+pub class AsmInventory
+  # Escapes a template for one line of the report.
+  def self.escape(text : String) : String
+    sb = String::Builder.new
+    i = 0
+    n = text.bytesize
+    while i < n
+      b = text.byte_at(i).to_i32
+      if b == 10
+        sb << "\\n"
+      elsif b == 9
+        sb << "\\t"
+      elsif b == 92
+        sb << "\\\\"
+      else
+        sb << text[i, 1]
+      end
+      i += 1
+    end
+    sb.to_s
+  end
+
+  def self.digits?(word : String) : Bool
+    if word.bytesize == 0
+      return false
+    end
+    i = 0
+    while i < word.bytesize
+      b = word.byte_at(i).to_i32
+      return false unless b >= 48 && b <= 57
+      i += 1
+    end
+    true
+  end
+
+  # The instruction names a template uses, in order of first appearance. A
+  # label (`1:`) and an operand reference (`$0`) are not instructions.
+  def self.mnemonics(template : String) : Array(String)
+    names = [] of String
+    lines = template.split('\n')
+    i = 0
+    while i < lines.size
+      pieces = lines[i].split(';')
+      j = 0
+      while j < pieces.size
+        word = pieces[j].strip
+        colon = word.index(':')
+        if colon && digits?(word[0, colon])
+          word = word[colon + 1, word.bytesize - colon - 1].strip
+        end
+        space = word.index(' ')
+        if space
+          word = word[0, space]
+        end
+        if word.bytesize > 0 && word.byte_at(0).to_i32 >= 97 && word.byte_at(0).to_i32 <= 122 && !names.includes?(word)
+          names << word
+        end
+        j += 1
+      end
+      i += 1
+    end
+    names
+  end
+
+  # Whether a template uses an LLVM operand modifier: `${N:c}` or `$N:c`.
+  def self.modifier?(template : String) : Bool
+    i = 0
+    n = template.bytesize
+    while i + 1 < n
+      if template.byte_at(i).to_i32 == 36
+        if template.byte_at(i + 1).to_i32 == 123
+          return true
+        end
+        j = i + 1
+        while j < n && template.byte_at(j).to_i32 >= 48 && template.byte_at(j).to_i32 <= 57
+          j += 1
+        end
+        if j > i + 1 && j < n && template.byte_at(j).to_i32 == 58
+          return true
+        end
+      end
+      i += 1
+    end
+    false
+  end
+end

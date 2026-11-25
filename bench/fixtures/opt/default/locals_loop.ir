@@ -1,0 +1,28 @@
+; iyi-ir 1
+source_filename = "locals_loop"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i64 @locals_loop(i64 %n) {
+alloca:
+  %i = alloca i64, align 8
+  %acc = alloca i64, align 8
+  br label %entry
+entry:
+  store i64 0, ptr %i, align 8
+  store i64 0, ptr %acc, align 8
+  br label %head
+head:
+  %iv = load i64, ptr %i, align 8
+  %more = icmp slt i64 %iv, %n
+  br i1 %more, label %body, label %done
+body:
+  %a = load i64, ptr %acc, align 8
+  %a2 = add i64 %a, %iv
+  store i64 %a2, ptr %acc, align 8
+  %i2 = add i64 %iv, 1
+  store i64 %i2, ptr %i, align 8
+  br label %head
+done:
+  %r = load i64, ptr %acc, align 8
+  ret i64 %r
+}

@@ -1,0 +1,758 @@
+@[Unsafe("builds LLVM objects through raw handles this module owns until it returns them, which the compiler does not check")]
+module compiler/backend/llvm/translate
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, Block, Ordering, Attribute, CallAux, AsmAux, GepAux, MemAux, IntrinsicAux}
+import compiler/ir/function::{Function, Global, Linkage, TlsModel, Visibility}
+import compiler/ir/module::{Module}
+import compiler/ir/intrinsics::{intrinsic_name, intrinsic_signature}
+import compiler/llvm/lib_llvm::{to_c_str}
+import compiler/backend/llvm/import::{ir_int_predicate_to_llvm, ir_real_predicate_to_llvm, ir_ordering_to_llvm, atomic_rmw_operation_names, ir_module_flag_behavior}
+
+# LibLLVM's enum for an IR linkage, for LLVMSetLinkage.
+pub def llvm_linkage_enum(linkage : Linkage) : LibLLVM::Linkage
+  case linkage
+  when Linkage::External
+    LibLLVM::Linkage::External
+  when Linkage::Internal
+    LibLLVM::Linkage::Internal
+  when Linkage::Private
+    LibLLVM::Linkage::Private
+  when Linkage::LinkOnceOdr
+    LibLLVM::Linkage::LinkOnceODR
+  when Linkage::Weak
+    LibLLVM::Linkage::WeakAny
+  else
+    LibLLVM::Linkage::ExternalWeak
+  end
+end
+
+# LibLLVM's integer predicate for an IR IntPredicate ordinal (declaration order).
+pub def llvm_int_predicate_enum(ordinal : Int32) : LibLLVM::IntPredicate
+  table = [LibLLVM::IntPredicate::EQ, LibLLVM::IntPredicate::NE, LibLLVM::IntPredicate::UGT, LibLLVM::IntPredicate::UGE, LibLLVM::IntPredicate::ULT, LibLLVM::IntPredicate::ULE, LibLLVM::IntPredicate::SGT, LibLLVM::IntPredicate::SGE, LibLLVM::IntPredicate::SLT, LibLLVM::IntPredicate::SLE]
+  table[ordinal]
+end
+
+# LibLLVM's real predicate for an IR RealPredicate ordinal (declaration order: FALSE, OEQ, OGT, OGE,
+# OLT, OLE, ONE, ORD, UEQ, UGT, UGE, ULT, ULE, UNE, UNO, TRUE).
+pub def llvm_real_predicate_enum(ordinal : Int32) : LibLLVM::RealPredicate
+  table = [LibLLVM::RealPredicate::PredicateFalse, LibLLVM::RealPredicate::OEQ, LibLLVM::RealPredicate::OGT, LibLLVM::RealPredicate::OGE, LibLLVM::RealPredicate::OLT, LibLLVM::RealPredicate::OLE, LibLLVM::RealPredicate::ONE, LibLLVM::RealPredicate::ORD, LibLLVM::RealPredicate::UEQ, LibLLVM::RealPredicate::UGT, LibLLVM::RealPredicate::UGE, LibLLVM::RealPredicate::ULT, LibLLVM::RealPredicate::ULE, LibLLVM::RealPredicate::UNE, LibLLVM::RealPredicate::UNO, LibLLVM::RealPredicate::PredicateTrue]
+  table[ordinal]
+end
+
+# A translation refusal, by name: the IR uses something this translator has no LLVM form for.
+pub class TranslateError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+# Replays an IR module into an LLVM module, in a fresh LLVM context. The caller owns the result.
+pub def translate(m : Module) : LibLLVM::ModuleRef | TranslateError
+  ModuleTranslator.new(m).run
+end
+
+# The linked LLVM's C API has no setter for dso_local (checked in LLVM 20.1.2 and 22.1.8), so a module that carries it is
+# refused by name.
+pub def carries_dso_local?(m : Module) : Bool
+  m.globals.any? { |g| g.dso_local } || m.functions.any? { |f| f.dso_local }
+end
+
+# LLVM's C `bool` for an IR Bool.
+pub def llvm_bool(flag : Bool) : Int32
+  flag ? 1 : 0
+end
+
+# The bit pattern of a signed 64-bit value as an unsigned one (LLVM takes the bits, not the value).
+pub def u64_bits(value : Int64) : UInt64
+  pointerof(value).as(UInt64*).value
+end
+
+# LLVM's LLVMLinkage number for an IR linkage (llvm-c/Core.h).
+pub def llvm_linkage_number(linkage : Linkage) : Int32
+  case linkage
+  when Linkage::External
+    0
+  when Linkage::Internal
+    8
+  when Linkage::Private
+    9
+  when Linkage::LinkOnceOdr
+    3
+  when Linkage::Weak
+    5
+  else
+    12
+  end
+end
+
+# LLVM's LLVMVisibility number for an IR visibility (llvm-c/Core.h).
+pub def visibility_number(v : Visibility) : Int32
+  case v
+  when Visibility::Hidden
+    1
+  when Visibility::Protected
+    2
+  else
+    0
+  end
+end
+
+# LLVM's LLVMThreadLocalMode number for an IR TLS model.
+pub def llvm_tls_number(tls : TlsModel) : Int32
+  case tls
+  when TlsModel::None
+    0
+  when TlsModel::GeneralDynamic
+    1
+  when TlsModel::LocalDynamic
+    2
+  when TlsModel::InitialExec
+    3
+  else
+    4
+  end
+end
+
+# The arguments from `from` on, as a new array.
+pub def values_from(list : Array(Value), from : Int32) : Array(Value)
+  rest = [] of Value
+  i = from
+  while i < list.size
+    rest << list[i]
+    i = i + 1
+  end
+  rest
+end
+
+class ModuleTranslator
+  def initialize(@ir : Module)
+    @ctx = LibLLVM.create_context
+    @llvm = LibLLVM.module_create_with_name_in_context(to_c_str(@ir.name), @ctx)
+    @error = nil
+    @types = Hash(String, LibLLVM::TypeRef).new
+    @values = Hash(Value, LibLLVM::ValueRef).new
+    @blocks = Hash(Block, LibLLVM::BasicBlockRef).new
+    @pending_phis = [] of {Inst, LibLLVM::ValueRef}
+  end
+
+  def refuse(message : String) : Nil
+    @error = TranslateError.new(message) unless @error
+  end
+
+  def failed? : Bool
+    !@error.nil?
+  end
+
+  def run : LibLLVM::ModuleRef | TranslateError
+    if carries_dso_local?(@ir)
+      refuse("the linked LLVM's C API cannot set dso_local, so a module that carries it is refused by name")
+      return @error.as(TranslateError)
+    end
+    LibLLVM.set_module_identifier(@llvm, to_c_str(@ir.name), @ir.name.bytesize.to_u64)
+    LibLLVM.set_source_file_name(@llvm, to_c_str(@ir.name), @ir.name.bytesize.to_u64)
+    LibLLVM.set_target(@llvm, to_c_str(@ir.triple))
+    LibLLVM.set_data_layout_string(@llvm, to_c_str(@ir.layout.llvm_string))
+    write_flags
+    return @error.as(TranslateError) if failed?
+    @ir.globals.each { |g| declare_global(g) }
+    @ir.functions.each { |f| declare_function(f) }
+    return @error.as(TranslateError) if failed?
+    @ir.globals.each do |g|
+      init = g.initializer
+      LibLLVM.set_initializer(@values[g], value_ref(init)) if init
+      return @error.as(TranslateError) if failed?
+    end
+    @ir.functions.each do |f|
+      emit_function(f) unless f.declaration?
+      return @error.as(TranslateError) if failed?
+    end
+    @llvm
+  end
+
+  def write_flags : Nil
+    name = to_c_str("llvm.module.flags")
+    i32 = LibLLVM.int32_type_in_context(@ctx)
+    @ir.flags.keys.each do |key|
+      behavior = ir_module_flag_behavior(key)
+      if behavior < 0
+        refuse("module flag \"#{key}\" has no behavior in the IR")
+        return
+      end
+      ops = Pointer(LibLLVM::MetadataRef).malloc(3_u64)
+      ops[0] = LibLLVM.value_as_metadata(LibLLVM.const_int(i32, behavior.to_u64, 1))
+      ops[1] = LibLLVM.md_string_in_context2(@ctx, to_c_str(key), key.bytesize.to_u64)
+      ops[2] = LibLLVM.value_as_metadata(LibLLVM.const_int(i32, u64_bits(@ir.flags[key]), 1))
+      node = LibLLVM.md_node_in_context2(@ctx, ops, 3_u64)
+      LibLLVM.add_named_metadata_operand(@llvm, name, LibLLVM.metadata_as_value(@ctx, node))
+    end
+  end
+
+  # ---- types --------------------------------------------------------------------------------
+
+  def type_ref(t : IrType) : LibLLVM::TypeRef
+    if known = @types[t.key]?
+      return known
+    end
+    struct_label = t.struct_name
+    if t.struct? && struct_label
+      name = struct_label
+      named = LibLLVM.struct_create_named(@ctx, to_c_str(name))
+      @types[t.key] = named
+      unless t.opaque?
+        fields = field_refs(t.struct_element_types)
+        LibLLVM.struct_set_body(named, fields, fields.size.to_i32, llvm_bool(t.packed_struct?))
+      end
+      return named
+    end
+    result = LibLLVM.void_type_in_context(@ctx)
+    if t.void?
+      result = LibLLVM.void_type_in_context(@ctx)
+    elsif t.int?
+      result = LibLLVM.int_type_in_context(@ctx, t.bits)
+    elsif t.float32?
+      result = LibLLVM.float_type_in_context(@ctx)
+    elsif t.double?
+      result = LibLLVM.double_type_in_context(@ctx)
+    elsif t.pointer?
+      result = LibLLVM.pointer_type_in_context(@ctx, t.address_space)
+    elsif t.struct?
+      fields = field_refs(t.struct_element_types)
+      result = LibLLVM.struct_type_in_context(@ctx, fields, fields.size.to_i32, llvm_bool(t.packed_struct?))
+    elsif t.array?
+      result = LibLLVM.array_type(type_ref(t.element_type), t.array_length)
+    elsif t.function?
+      params = field_refs(t.param_types)
+      result = LibLLVM.function_type(type_ref(t.return_type), params, params.size.to_i32, llvm_bool(t.varargs?))
+    else
+      refuse("the IR type #{t.to_s} has no LLVM form")
+    end
+    @types[t.key] = result
+    result
+  end
+
+  def field_refs(types : Array(IrType)) : Array(LibLLVM::TypeRef)
+    refs = [] of LibLLVM::TypeRef
+    types.each { |t| refs << type_ref(t) }
+    refs
+  end
+
+  # ---- globals, functions and attributes ----------------------------------------------------
+
+  def declare_global(g : Global) : Nil
+    value = LibLLVM.add_global(@llvm, type_ref(g.value_type), to_c_str(g.name))
+    @values[g] = value
+    LibLLVM.set_linkage(value, llvm_linkage_enum(g.linkage))
+    LibLLVM.set_visibility(value, visibility_number(g.visibility))
+    LibLLVM.set_global_constant(value, llvm_bool(g.constant))
+    LibLLVM.set_thread_local_mode(value, llvm_tls_number(g.tls))
+    LibLLVM.set_alignment(value, g.alignment) if g.alignment != 0
+    if s = g.section
+      LibLLVM.set_section(value, to_c_str(s))
+    end
+    LibLLVM.set_unnamed_address(value, g.unnamed_addr ? 2 : 0)
+  end
+
+  def declare_function(f : Function) : Nil
+    fn = LibLLVM.add_function(@llvm, to_c_str(f.name), type_ref(f.fn_type))
+    @values[f] = fn
+    LibLLVM.set_linkage(fn, llvm_linkage_enum(f.linkage))
+    LibLLVM.set_visibility(fn, visibility_number(f.visibility))
+    f.attrs.each { |a| LibLLVM.add_attribute_at_index(fn, -1, create_attribute(a)) }
+    f.ret_attrs.each { |a| LibLLVM.add_attribute_at_index(fn, 0, create_attribute(a)) }
+    f.param_attrs.each_with_index do |list, i|
+      list.each { |a| LibLLVM.add_attribute_at_index(fn, i + 1, create_attribute(a)) }
+    end
+    LibLLVM.set_alignment(fn, f.alignment) if f.alignment != 0
+    if s = f.section
+      LibLLVM.set_section(fn, to_c_str(s))
+    end
+  end
+
+  def create_attribute(a : Attribute) : LibLLVM::AttributeRef
+    if sv = a.string_value
+      return LibLLVM.create_string_attribute(@ctx, to_c_str(a.name), a.name.bytesize.to_i32, to_c_str(sv), sv.bytesize.to_i32)
+    end
+    kind = LibLLVM.get_enum_attribute_kind_for_name(to_c_str(a.name), a.name.bytesize.to_u64)
+    if tv = a.type_value
+      return LibLLVM.create_type_attribute(@ctx, kind, type_ref(tv))
+    end
+    LibLLVM.create_enum_attribute(@ctx, kind, a.int_value)
+  end
+
+  # ---- values -------------------------------------------------------------------------------
+
+  def value_ref(v : Value) : LibLLVM::ValueRef
+    if known = @values[v]?
+      return known
+    end
+    if v.is_a?(Inst)
+      built = constant_ref(v.as(Inst))
+      @values[v] = built
+      return built
+    end
+    refuse("the value #{v.name} is used before it is defined")
+    LibLLVM.const_null(LibLLVM.int32_type_in_context(@ctx))
+  end
+
+  # A constant Inst, which the IR never places in a block.
+  def constant_ref(c : Inst) : LibLLVM::ValueRef
+    ty = type_ref(c.type)
+    if c.op == Op::ConstInt
+      if c.type.int? && c.type.bits > 64
+        ints = c.int_words(c.type.bits)
+        words = Pointer(UInt64).malloc(ints.size.to_u64)
+        ints.each_with_index { |w, i| words[i] = u64_bits(w) }
+        return LibLLVM.const_int_of_arbitrary_precision(ty, ints.size.to_i32, words)
+      end
+      return LibLLVM.const_int(ty, u64_bits(c.aux_int), 1)
+    end
+    if c.op == Op::ConstFloat
+      return LibLLVM.const_real(ty, bits_to_double(c.aux_int, c.type.float32?))
+    end
+    if c.op == Op::ConstNull || c.op == Op::ConstZero
+      return LibLLVM.const_null(ty)
+    end
+    if c.op == Op::ConstUndef
+      return LibLLVM.get_undef(ty)
+    end
+    if c.op == Op::ConstPoison
+      return LibLLVM.get_poison(ty)
+    end
+    if c.op == Op::ConstAggregate
+      elements = c.args.map { |e| value_ref(e) }
+      if c.type.struct?
+        return LibLLVM.const_struct_in_context(@ctx, elements, elements.size.to_i32, llvm_bool(c.type.packed_struct?))
+      end
+      return LibLLVM.const_array(type_ref(c.type.element_type), elements, elements.size.to_i32)
+    end
+    if c.op == Op::ConstBytes
+      count = c.args.size
+      buffer = Pointer(UInt8).malloc(count.to_u64 + 1_u64)
+      i = 0
+      while i < count
+        buffer[i] = c.args[i].as(Inst).aux_int.to_u8
+        i = i + 1
+      end
+      return LibLLVM.const_string_in_context2(@ctx, buffer, count.to_u64, 1)
+    end
+    if c.op == Op::GlobalAddr || c.op == Op::FunctionAddr
+      return value_ref(c.args[0])
+    end
+    if c.op == Op::ConstExpr
+      return constant_expression(c)
+    end
+    if c.op == Op::Call && c.aux.is_a?(AsmAux)
+      return inline_asm_ref(c)
+    end
+    refuse("a #{c.op} constant has no LLVM form in this translator")
+    LibLLVM.const_null(ty)
+  end
+
+  def constant_expression(c : Inst) : LibLLVM::ValueRef
+    ty = type_ref(c.type)
+    if c.aux_int == Op::Gep.value.to_i64
+      aux = c.aux.as(GepAux)
+      base = value_ref(c.args[0])
+      indices = values_from(c.args, 1).map { |i| value_ref(i) }
+      source = type_ref(aux.source_type)
+      if aux.inbounds
+        return LibLLVM.const_in_bounds_gep2(source, base, indices, indices.size.to_i32)
+      end
+      return LibLLVM.const_gep2(source, base, indices, indices.size.to_i32)
+    end
+    operand = value_ref(c.args[0])
+    op = c.aux_int.to_i32
+    if op == Op::PtrToInt.value
+      return LibLLVM.const_ptr_to_int(operand, ty)
+    elsif op == Op::IntToPtr.value
+      return LibLLVM.const_int_to_ptr(operand, ty)
+    elsif op == Op::BitCast.value
+      return LibLLVM.const_bit_cast(operand, ty)
+    elsif op == Op::AddrSpaceCast.value
+      return LibLLVM.const_addr_space_cast(operand, ty)
+    end
+    refuse("a constant expression of IR op #{op} has no LLVM form in this translator")
+    operand
+  end
+
+  def inline_asm_ref(c : Inst) : LibLLVM::ValueRef
+    aux = c.aux.as(AsmAux)
+    LibLLVM.get_inline_asm(type_ref(c.type), to_c_str(aux.template), aux.template.bytesize.to_u64, to_c_str(aux.constraints), aux.constraints.bytesize.to_u64, llvm_bool(aux.side_effects), llvm_bool(aux.align_stack), aux.dialect.value, llvm_bool(aux.unwind))
+  end
+
+  # ---- bodies -------------------------------------------------------------------------------
+
+  # Emits a function's blocks in reverse postorder, so every definition is emitted before any use it
+  # dominates. Phis are created where they sit and filled once every value exists.
+  def emit_function(f : Function) : Nil
+    fn = @values[f]
+    f.params.each_with_index do |p, i|
+      param = LibLLVM.get_param(fn, i)
+      LibLLVM.set_value_name(param, to_c_str(p.name)) unless p.name.empty?
+      @values[p] = param
+    end
+    f.blocks.each do |b|
+      @blocks[b] = LibLLVM.append_basic_block_in_context(@ctx, fn, to_c_str(b.name))
+    end
+    builder = LibLLVM.create_builder_in_context(@ctx)
+    @pending_phis = [] of {Inst, LibLLVM::ValueRef}
+    emit_order(f).each do |b|
+      LibLLVM.position_builder_at_end(builder, @blocks[b])
+      b.insts.each do |inst|
+        emit_instruction(builder, inst)
+        return if failed?
+      end
+    end
+    @pending_phis.each do |pair|
+      node = pair[0]
+      values = [] of LibLLVM::ValueRef
+      blocks = [] of LibLLVM::BasicBlockRef
+      node.args.each_with_index do |v, i|
+        values << value_ref(v)
+        blocks << @blocks[node.targets[i]]
+      end
+      LibLLVM.add_incoming(pair[1], values, blocks, values.size.to_i32)
+    end
+    LibLLVM.dispose_builder(builder)
+  end
+
+  # Layout order when every non-phi operand is defined before it is used in that order, so LLVM's
+  # use lists (and so its predecessor comments) match the original; reverse postorder otherwise.
+  def emit_order(f : Function) : Array(Block)
+    all = Hash(Value, Bool).new
+    f.blocks.each { |b| b.insts.each { |i| all[i] = true } }
+    seen = Hash(Value, Bool).new
+    f.blocks.each do |b|
+      b.insts.each do |inst|
+        if inst.op != Op::Phi
+          inst.args.each do |a|
+            return reverse_postorder(f) if all[a]? && !seen[a]?
+          end
+        end
+        seen[inst] = true
+      end
+    end
+    f.blocks
+  end
+
+  def reverse_postorder(f : Function) : Array(Block)
+    visited = Hash(Block, Bool).new
+    postorder = [] of Block
+    entry = f.entry_block
+    if entry
+      stack = [{entry, 0}] of {Block, Int32}
+      visited[entry] = true
+      while !stack.empty?
+        top = stack.last
+        block = top[0]
+        succ = block.terminated? ? block.terminator.targets : [] of Block
+        if top[1] < succ.size
+          stack[stack.size - 1] = {block, top[1] + 1}
+          nxt = succ[top[1]]
+          unless visited[nxt]?
+            visited[nxt] = true
+            stack << {nxt, 0}
+          end
+        else
+          postorder << block
+          stack.pop
+        end
+      end
+    end
+    order = [] of Block
+    i = postorder.size - 1
+    while i >= 0
+      order << postorder[i]
+      i = i - 1
+    end
+    f.blocks.each { |b| order << b unless visited[b]? }
+    order
+  end
+
+  def emit_instruction(builder : LibLLVM::BuilderRef, inst : Inst) : Nil
+    name = to_c_str(inst.name)
+    op = inst.op
+    if op == Op::Phi
+      node = LibLLVM.build_phi(builder, type_ref(inst.type), name)
+      @values[inst] = node
+      @pending_phis << {inst, node}
+      return
+    end
+    if binary_builder?(op) || cast_builder?(op)
+      emit_binary_or_cast(builder, inst)
+      return
+    end
+    result = LibLLVM.const_null(LibLLVM.int32_type_in_context(@ctx))
+    if op == Op::Ret
+      if inst.args.empty?
+        result = LibLLVM.build_ret_void(builder)
+      else
+        result = LibLLVM.build_ret(builder, value_ref(inst.args[0]))
+      end
+    elsif op == Op::Br
+      result = LibLLVM.build_br(builder, @blocks[inst.targets[0]])
+    elsif op == Op::CondBr
+      result = LibLLVM.build_cond_br(builder, value_ref(inst.args[0]), @blocks[inst.targets[0]], @blocks[inst.targets[1]])
+    elsif op == Op::Switch
+      condition = inst.args[0]
+      sw = LibLLVM.build_switch(builder, value_ref(condition), @blocks[inst.targets[0]], (inst.targets.size - 1).to_i32)
+      i = 1
+      while i < inst.targets.size
+        LibLLVM.add_case(sw, LibLLVM.const_int(type_ref(condition.type), u64_bits(inst.cases[i - 1]), 1), @blocks[inst.targets[i]])
+        i = i + 1
+      end
+      result = sw
+    elsif op == Op::Unreachable
+      result = LibLLVM.build_unreachable(builder)
+    elsif op == Op::Invoke
+      aux = inst.aux.as(CallAux)
+      callee = value_ref(inst.args[0])
+      args = values_from(inst.args, 1).map { |a| value_ref(a) }
+      result = LibLLVM.build_invoke2(builder, type_ref(aux.fn_type), callee, args, args.size.to_i32, @blocks[inst.targets[0]], @blocks[inst.targets[1]], name)
+      apply_call_attributes(result, aux)
+    elsif op == Op::Call
+      result = emit_call(builder, inst)
+    elsif op == Op::Intrinsic
+      result = emit_intrinsic(builder, inst)
+    elsif op == Op::Alloca
+      aux = inst.aux.as(GepAux)
+      result = LibLLVM.build_alloca(builder, type_ref(aux.source_type), name)
+      LibLLVM.set_alignment(result, inst.aux_int.to_i32) if inst.aux_int != 0
+    elsif op == Op::Load
+      aux = inst.aux.as(MemAux)
+      result = LibLLVM.build_load2(builder, type_ref(inst.type), value_ref(inst.args[0]), name)
+      apply_memory_attributes(result, aux)
+    elsif op == Op::Store
+      aux = inst.aux.as(MemAux)
+      result = LibLLVM.build_store(builder, value_ref(inst.args[0]), value_ref(inst.args[1]))
+      apply_memory_attributes(result, aux)
+    elsif op == Op::Gep
+      aux = inst.aux.as(GepAux)
+      indices = values_from(inst.args, 1).map { |i| value_ref(i) }
+      source = type_ref(aux.source_type)
+      if aux.inbounds
+        result = LibLLVM.build_inbounds_gep2(builder, source, value_ref(inst.args[0]), indices, indices.size.to_i32, name)
+      else
+        result = LibLLVM.build_gep2(builder, source, value_ref(inst.args[0]), indices, indices.size.to_i32, name)
+      end
+    elsif op == Op::Fence
+      aux = inst.aux.as(MemAux)
+      result = LibLLVM.build_fence(builder, ir_ordering_to_llvm(aux.ordering), llvm_bool(aux.single_thread), to_c_str(""))
+    elsif op == Op::CmpXchg
+      aux = inst.aux.as(MemAux)
+      args = inst.args
+      result = LibLLVM.build_atomic_cmpxchg(builder, value_ref(args[0]), value_ref(args[1]), value_ref(args[2]), ir_ordering_to_llvm(aux.ordering), ir_ordering_to_llvm(aux.failure_ordering), llvm_bool(aux.single_thread))
+      LibLLVM.set_weak(result, llvm_bool(aux.weak))
+      LibLLVM.set_volatile(result, llvm_bool(aux.volatile))
+      LibLLVM.set_alignment(result, aux.align) if aux.align != 0
+      LibLLVM.set_value_name(result, to_c_str(inst.name)) unless inst.name.empty?
+    elsif op == Op::AtomicRmw
+      aux = inst.aux.as(MemAux)
+      operation = atomic_rmw_operation_names.index(aux.rmw_op)
+      unless operation
+        refuse("the atomicrmw operation #{aux.rmw_op} has no LLVM form")
+        return
+      end
+      result = LibLLVM.build_atomic_rmw(builder, operation.as(Int32), value_ref(inst.args[0]), value_ref(inst.args[1]), ir_ordering_to_llvm(aux.ordering), llvm_bool(aux.single_thread))
+      LibLLVM.set_volatile(result, llvm_bool(aux.volatile))
+      LibLLVM.set_alignment(result, aux.align) if aux.align != 0
+      LibLLVM.set_value_name(result, to_c_str(inst.name)) unless inst.name.empty?
+    elsif op == Op::VaArg
+      result = LibLLVM.build_va_arg(builder, value_ref(inst.args[0]), type_ref(inst.type), name)
+    elsif op == Op::ICmp
+      result = LibLLVM.build_icmp(builder, llvm_int_predicate_enum(inst.aux_int.to_i32), value_ref(inst.args[0]), value_ref(inst.args[1]), name)
+    elsif op == Op::FCmp
+      result = LibLLVM.build_fcmp(builder, llvm_real_predicate_enum(inst.aux_int.to_i32), value_ref(inst.args[0]), value_ref(inst.args[1]), name)
+    elsif op == Op::Select
+      result = LibLLVM.build_select(builder, value_ref(inst.args[0]), value_ref(inst.args[1]), value_ref(inst.args[2]), name)
+    elsif op == Op::ExtractValue
+      result = LibLLVM.build_extract_value(builder, value_ref(inst.args[0]), inst.aux_int.to_i32, name)
+    elsif op == Op::InsertValue
+      result = LibLLVM.build_insert_value(builder, value_ref(inst.args[0]), value_ref(inst.args[1]), inst.aux_int.to_i32, name)
+    elsif op == Op::FNeg
+      result = LibLLVM.build_fneg(builder, value_ref(inst.args[0]), name)
+    elsif op == Op::Freeze
+      result = LibLLVM.build_freeze(builder, value_ref(inst.args[0]), name)
+    elsif op == Op::Resume
+      result = LibLLVM.build_resume(builder, value_ref(inst.args[0]))
+    elsif op == Op::LandingPad
+      result = emit_landing_pad(builder, inst)
+    else
+      refuse("the IR op #{op} has no LLVM form in this translator")
+      return
+    end
+    @values[inst] = result unless inst.type.void?
+  end
+
+  def binary_builder?(op : Op) : Bool
+    op == Op::Add || op == Op::Sub || op == Op::Mul || op == Op::SDiv || op == Op::UDiv || op == Op::SRem || op == Op::URem || op == Op::Shl || op == Op::LShr || op == Op::AShr || op == Op::And || op == Op::Or || op == Op::Xor || op == Op::FAdd || op == Op::FSub || op == Op::FMul || op == Op::FDiv || op == Op::FRem
+  end
+
+  def cast_builder?(op : Op) : Bool
+    op == Op::Trunc || op == Op::ZExt || op == Op::SExt || op == Op::FPToUI || op == Op::FPToSI || op == Op::UIToFP || op == Op::SIToFP || op == Op::FPTrunc || op == Op::FPExt || op == Op::PtrToInt || op == Op::IntToPtr || op == Op::BitCast || op == Op::AddrSpaceCast
+  end
+
+  # Binary operations and conversions, with the flags the IR carries in aux_int.
+  def emit_binary_or_cast(builder : LibLLVM::BuilderRef, inst : Inst) : Nil
+    name = to_c_str(inst.name)
+    op = inst.op
+    operand = value_ref(inst.args[0])
+    if binary_builder?(op)
+      result = build_binary(builder, op, operand, value_ref(inst.args[1]), name)
+      flags = inst.aux_int
+      LibLLVM.set_nuw(result, 1) if (flags & 1_i64) != 0
+      LibLLVM.set_nsw(result, 1) if (flags & 2_i64) != 0
+      LibLLVM.set_exact(result, 1) if (flags & 4_i64) != 0
+      @values[inst] = result
+      return
+    end
+    dest = type_ref(inst.type)
+    result = LibLLVM.const_null(dest)
+    if op == Op::Trunc
+      result = LibLLVM.build_trunc(builder, operand, dest, name)
+    elsif op == Op::ZExt
+      result = LibLLVM.build_zext(builder, operand, dest, name)
+    elsif op == Op::SExt
+      result = LibLLVM.build_sext(builder, operand, dest, name)
+    elsif op == Op::FPToUI
+      result = LibLLVM.build_fp2ui(builder, operand, dest, name)
+    elsif op == Op::FPToSI
+      result = LibLLVM.build_fp2si(builder, operand, dest, name)
+    elsif op == Op::UIToFP
+      result = LibLLVM.build_ui2fp(builder, operand, dest, name)
+    elsif op == Op::SIToFP
+      result = LibLLVM.build_si2fp(builder, operand, dest, name)
+    elsif op == Op::FPTrunc
+      result = LibLLVM.build_fptrunc(builder, operand, dest, name)
+    elsif op == Op::FPExt
+      result = LibLLVM.build_fpext(builder, operand, dest, name)
+    elsif op == Op::PtrToInt
+      result = LibLLVM.build_ptr2int(builder, operand, dest, name)
+    elsif op == Op::IntToPtr
+      result = LibLLVM.build_int2ptr(builder, operand, dest, name)
+    elsif op == Op::BitCast
+      result = LibLLVM.build_bit_cast(builder, operand, dest, name)
+    else
+      result = LibLLVM.build_addr_space_cast(builder, operand, dest, name)
+    end
+    @values[inst] = result
+  end
+
+  def build_binary(builder : LibLLVM::BuilderRef, op : Op, lhs : LibLLVM::ValueRef, rhs : LibLLVM::ValueRef, name : UInt8*) : LibLLVM::ValueRef
+    if op == Op::Add
+      LibLLVM.build_add(builder, lhs, rhs, name)
+    elsif op == Op::Sub
+      LibLLVM.build_sub(builder, lhs, rhs, name)
+    elsif op == Op::Mul
+      LibLLVM.build_mul(builder, lhs, rhs, name)
+    elsif op == Op::SDiv
+      LibLLVM.build_sdiv(builder, lhs, rhs, name)
+    elsif op == Op::UDiv
+      LibLLVM.build_udiv(builder, lhs, rhs, name)
+    elsif op == Op::SRem
+      LibLLVM.build_srem(builder, lhs, rhs, name)
+    elsif op == Op::URem
+      LibLLVM.build_urem(builder, lhs, rhs, name)
+    elsif op == Op::Shl
+      LibLLVM.build_shl(builder, lhs, rhs, name)
+    elsif op == Op::LShr
+      LibLLVM.build_lshr(builder, lhs, rhs, name)
+    elsif op == Op::AShr
+      LibLLVM.build_ashr(builder, lhs, rhs, name)
+    elsif op == Op::And
+      LibLLVM.build_and(builder, lhs, rhs, name)
+    elsif op == Op::Or
+      LibLLVM.build_or(builder, lhs, rhs, name)
+    elsif op == Op::Xor
+      LibLLVM.build_xor(builder, lhs, rhs, name)
+    elsif op == Op::FAdd
+      LibLLVM.build_fadd(builder, lhs, rhs, name)
+    elsif op == Op::FSub
+      LibLLVM.build_fsub(builder, lhs, rhs, name)
+    elsif op == Op::FMul
+      LibLLVM.build_fmul(builder, lhs, rhs, name)
+    elsif op == Op::FDiv
+      LibLLVM.build_fdiv(builder, lhs, rhs, name)
+    else
+      LibLLVM.build_frem(builder, lhs, rhs, name)
+    end
+  end
+
+  # Memory flags: alignment, volatility, ordering and scope.
+  def apply_memory_attributes(value : LibLLVM::ValueRef, aux : MemAux) : Nil
+    LibLLVM.set_alignment(value, aux.align) if aux.align != 0
+    LibLLVM.set_volatile(value, llvm_bool(aux.volatile))
+    ordering = ir_ordering_to_llvm(aux.ordering)
+    LibLLVM.set_ordering_raw(value, ordering) if ordering != 0
+    LibLLVM.set_atomic_single_thread(value, llvm_bool(aux.single_thread))
+  end
+
+  def apply_call_attributes(call : LibLLVM::ValueRef, aux : CallAux) : Nil
+    aux.fn_attrs.each { |a| LibLLVM.add_callsite_attribute(call, -1, create_attribute(a)) }
+    aux.ret_attrs.each { |a| LibLLVM.add_callsite_attribute(call, 0, create_attribute(a)) }
+    aux.param_attrs.each_with_index do |list, i|
+      list.each { |a| LibLLVM.add_callsite_attribute(call, i + 1, create_attribute(a)) }
+    end
+  end
+
+  def emit_call(builder : LibLLVM::BuilderRef, inst : Inst) : LibLLVM::ValueRef
+    aux = inst.aux.as(CallAux)
+    callee = value_ref(inst.args[0])
+    args = values_from(inst.args, 1).map { |a| value_ref(a) }
+    name = aux.fn_type.return_type.void? ? to_c_str("") : to_c_str(inst.name)
+    call = LibLLVM.build_call2(builder, type_ref(aux.fn_type), callee, args, args.size.to_i32, name)
+    LibLLVM.set_tail_call_kind(call, aux.tail ? 1 : 0)
+    apply_call_attributes(call, aux)
+    call
+  end
+
+  # An intrinsic call: the declaration is the module's, under the intrinsic's LLVM name.
+  def emit_intrinsic(builder : LibLLVM::BuilderRef, inst : Inst) : LibLLVM::ValueRef
+    aux = inst.aux.as(IntrinsicAux)
+    llvm_name = intrinsic_name(aux.id, aux.overload)
+    signature = intrinsic_signature(aux.id, aux.overload, @ir.types)
+    decl = LibLLVM.get_named_function_with_length(@llvm, to_c_str(llvm_name), llvm_name.bytesize.to_u64)
+    if decl.address == 0
+      params = signature[1].map { |t| type_ref(t) }
+      ret = type_ref(signature[0])
+      decl = LibLLVM.add_function(@llvm, to_c_str(llvm_name), LibLLVM.function_type(ret, params, params.size.to_i32, 0))
+    end
+    args = inst.args.map { |a| value_ref(a) }
+    name = signature[0].void? ? to_c_str("") : to_c_str(inst.name)
+    call = LibLLVM.build_call2(builder, LibLLVM.global_get_value_type(decl), decl, args, args.size.to_i32, name)
+    aux.param_attrs.each_with_index do |list, i|
+      list.each { |a| add_intrinsic_param_attribute(call, i + 1, a) }
+    end
+    call
+  end
+
+  # One attribute of an intrinsic operand, written on that operand of the call.
+  def add_intrinsic_param_attribute(call : LibLLVM::ValueRef, index : Int32, a : Attribute) : Nil
+    LibLLVM.add_callsite_attribute(call, index, create_attribute(a))
+  end
+
+  def emit_landing_pad(builder : LibLLVM::BuilderRef, inst : Inst) : LibLLVM::ValueRef
+    personality = value_ref(inst.args[0])
+    clauses = values_from(inst.args, 1)
+    pad = LibLLVM.build_landing_pad(builder, type_ref(inst.type), personality, clauses.size.to_i32, to_c_str(inst.name))
+    clauses.each { |c| LibLLVM.add_clause(pad, value_ref(c)) }
+    LibLLVM.set_cleanup(pad, llvm_bool((inst.aux_int & 1_i64) != 0))
+    pad
+  end
+end
+
+# The bits of a float constant as a Float64, for LLVMConstReal.
+pub def bits_to_double(bits : Int64, single : Bool) : Float64
+  if single
+    narrowed = (bits & 0xFFFFFFFF_i64).to_i32
+    return pointerof(narrowed).as(Float32*).value.to_f64
+  end
+  pointerof(bits).as(Float64*).value
+end

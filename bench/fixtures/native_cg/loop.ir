@@ -1,0 +1,60 @@
+; iyi-ir 1
+module "loop"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [12 x i8] c"%d %ld %g\0A\00"
+
+define internal i64 @sum10(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, i64 %h, i64 %i, i64 %j) {
+entry:
+  %s1 = add i64 %a, %b
+  %s2 = add i64 %s1, %c
+  %s3 = add i64 %s2, %d
+  %s4 = add i64 %s3, %e
+  %s5 = add i64 %s4, %f
+  %s6 = add i64 %s5, %g
+  %s7 = add i64 %s6, %h
+  %s8 = add i64 %s7, %i
+  %s9 = add i64 %s8, %j
+  ret i64 %s9
+}
+
+define internal double @fsum10(double %a, double %b, double %c, double %d, double %e, double %f, double %g, double %h, double %i, double %j) {
+entry:
+  %s1 = fadd double %a, %b
+  %s2 = fadd double %s1, %c
+  %s3 = fadd double %s2, %d
+  %s4 = fadd double %s3, %e
+  %s5 = fadd double %s4, %f
+  %s6 = fadd double %s5, %g
+  %s7 = fadd double %s6, %h
+  %s8 = fadd double %s7, %i
+  %s9 = fadd double %s8, %j
+  ret double %s9
+}
+
+define internal i32 @count(i32 %n) {
+entry:
+  br label %head
+head:
+  %i = phi i32 [ 0, label %entry ], [ %next, label %body ]
+  %acc = phi i32 [ 0, label %entry ], [ %acc2, label %body ]
+  %more = icmp slt i32 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %acc2 = add i32 %acc, %i
+  %next = add i32 %i, 1
+  br label %head
+done:
+  ret i32 %acc
+}
+
+define i32 @main() {
+entry:
+  %total = call i64 (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) @sum10(i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8, i64 9, i64 10)
+  %ft = call double (double, double, double, double, double, double, double, double, double, double) @fsum10(double 0x3ff0000000000000, double 0x4000000000000000, double 0x4008000000000000, double 0x4010000000000000, double 0x4014000000000000, double 0x4018000000000000, double 0x401c000000000000, double 0x4020000000000000, double 0x4022000000000000, double 0x4024000000000000)
+  %c = call i32 (i32) @count(i32 10)
+  %t32 = trunc i64 %total to i32
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i32 %c, i64 %total, double %ft)
+  ret i32 0
+}

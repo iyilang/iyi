@@ -1,0 +1,4 @@
+module narrow_asm
+
+v = 0_i32 - 128_i32
+puts "#{v < 0 ? 1 : 0}"

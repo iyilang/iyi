@@ -1,0 +1,4 @@
+module narrow_i1
+
+v = -1_i32
+puts "#{v < 0 ? 1 : 0} #{v.to_f64 < 0.0 ? 1 : 0}"

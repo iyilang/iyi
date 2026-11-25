@@ -1,0 +1,4 @@
+module constexpr
+
+arr = [10_i64, 20_i64, 30_i64, 40_i64]
+puts arr[2]

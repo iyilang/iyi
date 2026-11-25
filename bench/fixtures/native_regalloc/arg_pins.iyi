@@ -1,0 +1,42 @@
+module arg_pins
+
+def sum10(a : Int64, b : Int64, c : Int64, d : Int64, e : Int64, f : Int64, g : Int64, h : Int64, i : Int64, j : Int64) : Int64
+  s1 = a + b
+  s2 = s1 + c
+  s3 = s2 + d
+  s4 = s3 + e
+  s5 = s4 + f
+  s6 = s5 + g
+  s7 = s6 + h
+  s8 = s7 + i
+  s9 = s8 + j
+  s9
+end
+
+def spread(x : Int64) : Int64
+  a = x * 2_i64
+  b = x * 3_i64
+  c = x * 4_i64
+  d = x * 5_i64
+  e = x * 6_i64
+  f = x * 7_i64
+  g = x * 8_i64
+  h = x * 9_i64
+  i = x * 10_i64
+  j = x * 11_i64
+  t = sum10(a, b, c, d, e, f, g, h, i, j)
+  k_a = t + a
+  k_b = k_a + b
+  k_c = k_b + c
+  k_d = k_c + d
+  k_e = k_d + e
+  k_f = k_e + f
+  k_g = k_f + g
+  k_h = k_g + h
+  k_i = k_h + i
+  k_j = k_i + j
+  k_j
+end
+
+puts "#{spread(3_i64)}"
+puts "#{spread(10_i64)}"

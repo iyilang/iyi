@@ -1,0 +1,20 @@
+module call_header
+
+def tick : Int64
+  3_i64
+end
+
+def loopcall(n : Int64) : Int64
+  i = 0_i64
+  acc = 5_i64
+  while i < n
+    t = tick
+    acc = acc + t
+    i = i + 1_i64
+  end
+  r = acc + tick
+  r
+end
+
+puts "#{loopcall(0_i64)}"
+puts "#{loopcall(4_i64)}"

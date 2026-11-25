@@ -1,0 +1,25 @@
+; iyi-ir 1
+source_filename = "nested_loops"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i64 @nested_loops(i1 %outer_cond, i1 %inner_cond) {
+entry:
+  %slot = alloca i64, align 8
+  store i64 0, ptr %slot, align 8
+  br label %outer
+outer:
+  %current = load i64, ptr %slot, align 8
+  br i1 %outer_cond, label %inner, label %done
+inner:
+  %value = load i64, ptr %slot, align 8
+  br i1 %inner_cond, label %body, label %after_inner
+body:
+  %next = add i64 %value, 1
+  store i64 %next, ptr %slot, align 8
+  br label %inner
+after_inner:
+  br label %outer
+done:
+  %result = load i64, ptr %slot, align 8
+  ret i64 %result
+}

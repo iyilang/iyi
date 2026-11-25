@@ -1,0 +1,300 @@
+module compiler/native/mir
+
+import compiler/native/obj/object::{RelocKind}
+
+# Machine IR (SPEC 3.5). One MFunction per IR function. Operands name virtual
+# registers until regalloc rewrites them; after regalloc every register operand
+# is Physical and every frame reference is resolved by the encoder.
+#
+# Deviations from the spec's sketch, each deliberate:
+#   - MInst.opcode is the target's opcode enum value, an Int32. MOp below is the aarch64
+#     enum: aarch64/opcodes.iyi reads a value back as MOp, and the shared passes ask
+#     target.iyi for the role of an opcode (Role below), never for the enum itself.
+#   - size, fp, signed, cond, imm, sym, target and reloc live on MInst, not on
+#     each Operand: an instruction has at most one of each, and the operand
+#     then carries only what varies (its register or slot).
+#   - Physical register ids: x0..x30 are 0..30 and d0..d31 are 32..63.
+
+pub enum RegClass
+  Gpr
+  Fpr
+end
+
+pub enum OperandKind
+  Virtual   # reg is a virtual register id in MFunction#vreg_classes
+  Physical  # reg is a physical register id (see compiler/native/aarch64/regs)
+  FrameSlot # reg is an index into FrameInfo#slots; imm is a byte offset inside it
+end
+
+# What the target-independent passes need to know about an instruction: regalloc, the frame and the MIR dump.
+# Each target maps its own opcodes onto these roles (aarch64/opcodes.iyi), and target.iyi dispatches on the isa.
+pub enum Role
+  Other           # no role: an ordinary computation, load, store or call
+  Copy            # a register copy in one file: Mov and FMov on aarch64
+  GprToFpr        # a bit copy of a gpr into an fpr: FMovToFp on aarch64
+  Branch          # an unconditional branch to a block: B
+  CondBranch      # a conditional branch to a block: Bcond
+  IndirectBranch  # a branch through a register: Br
+  TableBranch     # a branch through a jump table: BrTable
+  Return          # Ret
+  Trap            # Brk
+  PushRecord      # the frame record push: StpFpLr
+  SetFramePointer # x29 <- sp: MovFp
+  Adjust          # sp <- sp + imm: SpAdjust
+  Probe           # a page touch: ZeroSp
+  SaveReg         # a callee-saved save: SpStore
+  RestoreReg      # a callee-saved restore: SpLoad
+  PopRecord       # the frame record pop: LdpFpLr
+  SlotLoad        # a frame slot load (spill reload): LdrFrame
+  SlotStore       # a frame slot store (spill store): StrFrame
+end
+
+# The aarch64 operations the selector produces. Integer operations are 64-bit on
+# canonical values (see isel.iyi). `size` is the width of a memory access or of a
+# floating-point operation; `fp` selects the floating-point register file.
+pub enum MOp
+  Label        # block start, never encoded
+  Mov          # gpr <- gpr
+  FMov         # fpr <- fpr
+  FMovToFp     # fpr <- gpr bit pattern
+  FMovToGp     # gpr <- fpr bit pattern
+  MovImm       # gpr <- imm
+  AddrFrame    # gpr <- sp + frame slot (uses[0] is the FrameSlot operand)
+  AddrOutgoing # gpr <- sp + imm (outgoing argument area)
+  AddrSym      # gpr <- address of sym (adrp, add)
+  LoadGot      # gpr <- contents of the GOT entry for sym (adrp, ldr)
+  Ldr          # dst <- [base + imm]; uses[0] is the base; size bits; signed extends into 64
+  Str          # [base + imm] <- value; uses[0] value, uses[1] base
+  LdrFrame     # dst <- frame slot (uses[0] is the FrameSlot operand)
+  StrFrame     # frame slot <- value (uses[0] value, uses[1] FrameSlot)
+  StrOutgoing  # outgoing argument at sp + imm <- value (uses[0])
+  SpLoad       # dst <- [sp + imm], an absolute frame offset (callee-saved reloads)
+  SpStore      # [sp + imm] <- value, an absolute frame offset (callee-saved saves)
+  StpFpLr      # stp x29, x30, [sp, #-16]!
+  LdpFpLr      # ldp x29, x30, [sp], #16
+  MovFp        # x29 <- sp
+  SpAdjust     # sp <- sp + imm (sub when negative); probes are SpAdjust by 4096
+  ZeroSp       # str xzr, [sp, #0]: the page probe
+  Ldar         # acquire load, size bits
+  Stlr         # release store, size bits
+  Ldaxr        # load-acquire exclusive
+  Stlxr        # store-release exclusive: defs[0] is the status register
+  Ldxr         # load-exclusive, no acquire: the monotonic read-modify-write load
+  Stxr         # store-exclusive, no release: defs[0] is the status register
+  Dmb          # imm: 0 ish, 1 ishld, 2 ishst
+  Add          # dst <- a + b
+  Sub
+  Mul
+  Sdiv
+  Udiv
+  Msub # dst <- a - b * c (uses[0] - uses[1] * uses[2])
+  And
+  Orr
+  Eor
+  Lsl
+  Lsr
+  Asr
+  AddImm # dst <- a + imm (imm 0..4095)
+  SubImm
+  Sbfm   # dst <- a sign-extended from its low imm bits (imm 1..63)
+  Ubfm   # dst <- a zero-extended from its low imm bits (imm 1..63)
+  Smulh  # high 64 bits of a * b, signed
+  Umulh  # high 64 bits of a * b, unsigned
+  Adds   # dst <- a + b, sets flags
+  Subs   # dst <- a - b, sets flags
+  Adc    # dst <- a + b + carry (the carry of the previous Adds or Adcs)
+  Sbc    # dst <- a - b - !carry (the borrow of the previous Subs or Sbcs)
+  Adcs   # as Adc, and sets flags
+  Sbcs   # as Sbc, and sets flags
+  Cmp    # flags <- a - b
+  CmpImm # flags <- a - imm
+  Cset   # dst <- cond ? 1 : 0
+  Csel   # dst <- cond ? a : b
+  FAdd   # fp: size 32 or 64
+  FSub
+  FMul
+  FDiv
+  FNeg
+  FAbs
+  FSqrt
+  FRint # imm: the rounding mode field (0 nearest-even, 1 up, 2 down, 3 toward zero, 4 away, 6 current mode exact)
+  FMinNm
+  FMaxNm
+  FCmp   # flags <- a ? b (fp); size 32 or 64
+  FCvt   # fpr <- fpr; size is the destination width
+  Scvtf  # fpr <- signed 64-bit gpr; size is the destination width
+  Ucvtf  # fpr <- unsigned 64-bit gpr; size is the destination width
+  Fcvtzs # gpr <- signed truncation of fpr; size is the source width, imm the destination width
+  Fcvtzu # gpr <- unsigned truncation of fpr; size is the source width, imm the destination width
+  B      # branch to block target
+  Bcond  # branch to block target when cond
+  Bl     # call sym
+  Blr    # call through uses[0]
+  Br     # branch through uses[0]
+  Ret
+  Brk        # trap with imm
+  AddrTable  # gpr <- address of jump table `table` (adrp, add); the symbol is the table's, set once the object has one
+  LdrIdx     # dst <- [base + index * 8]; uses[0] base, uses[1] index; 64-bit only
+  BrTable    # branch through uses[0] to one of the entries of jump table `table`; the successors are those entries
+  Mrs        # dst <- system register imm: 0 tpidr_el0 (Linux), 1 tpidrro_el0 (darwin)
+  LoadTlvp   # dst <- address of the TLV descriptor of sym (adrp, ldr through the TLVP relocs)
+  AndImm     # dst <- uses[0] & imm, imm a 64-bit logical immediate (the encoder raises on any other value)
+  AddTprelHi # dst <- uses[0] + the high 12 bits of sym's local-exec offset (add, lsl 12; ELF)
+  AddTprelLo # dst <- uses[0] + the low 12 bits of sym's local-exec offset (add; ELF)
+  InlineAsm  # the raw bytes of an inline asm template over its operands (see AsmBody)
+end
+
+pub class Operand
+  getter kind : OperandKind
+  getter reg : Int32
+  getter imm : Int64
+
+  def initialize(@kind : OperandKind, @reg : Int32, @imm : Int64 = 0_i64)
+  end
+end
+
+# An inline asm body (SPEC 2.2 step 3). `outputs` says how many of the MInst's defs are outputs (the first
+# defs, in order; any later defs are clobbers), and `inputs` how many of its uses are inputs, in order. The
+# encoder assembles the template once regalloc has named every operand's register, so the bytes and the
+# relocations are those of the registers the allocator chose. `syms` names the module's symbols.
+pub class AsmBody
+  getter template : String
+  getter outputs : Int32
+  getter inputs : Int32
+  getter syms : Hash(String, Int32)
+  getter macho : Bool
+
+  def initialize(@template : String, @outputs : Int32, @inputs : Int32, @syms : Hash(String, Int32), @macho : Bool)
+  end
+end
+
+pub class MInst
+  property opcode : Int32 # the target's opcode enum value; see target.iyi
+  property size : Int32   # bits: 8, 16, 32, 64
+  property fp : Bool      # operates on the floating-point register file
+  property signed : Bool  # loads: sign-extending
+  property cond : Int32   # aarch64 condition code 0..15
+  property imm : Int64
+  property defs : Array(Operand)
+  property uses : Array(Operand)
+  property clobbers : Array(Int32) # physical registers a call destroys
+  property sym : Int32             # symbol index, or -1
+  property reloc : RelocKind?      # relocation applied at the instruction
+  property target : Int32          # block index for branches, or -1
+  property table : Int32           # jump table index for AddrTable and BrTable, or -1
+  property call : Bool
+  property terminator : Bool
+  property asm : AsmBody?
+
+  def initialize(@opcode : Int32)
+    @size = 64
+    @fp = false
+    @signed = false
+    @cond = 0
+    @imm = 0_i64
+    @defs = [] of Operand
+    @uses = [] of Operand
+    @clobbers = [] of Int32
+    @sym = -1
+    @reloc = nil
+    @target = -1
+    @table = -1
+    @call = false
+    @terminator = false
+    @asm = nil
+  end
+end
+
+pub class MBlock
+  getter index : Int32
+  getter name : String
+  property insts : Array(MInst)
+
+  def initialize(@index : Int32, @name : String)
+    @insts = [] of MInst
+  end
+end
+
+# Frame slots (allocas and spills), the outgoing-argument area and the saved
+# callee-saved registers. Offsets from sp are assigned by compiler/native/frame.iyi.
+pub class FrameInfo
+  property slots : Array({Int64, Int32}) # size in bytes, alignment in bytes
+  property offsets : Array(Int64)        # byte offset of each slot from sp, once laid acc
+  property outgoing_bytes : Int64
+  property callee_saved : Array(Int32) # physical registers the function writes and must save
+  property has_calls : Bool
+  property frame_size : Int64   # bytes below the frame record, 16-aligned
+  property saves_offset : Int64 # sp offset of the first callee-saved save
+
+  def initialize
+    @slots = [] of {Int64, Int32}
+    @offsets = [] of Int64
+    @outgoing_bytes = 0_i64
+    @callee_saved = [] of Int32
+    @has_calls = false
+    @frame_size = 0_i64
+    @saves_offset = 0_i64
+  end
+
+  def add_slot(size : Int64, align : Int32) : Int32
+    @slots << {size, align}
+    @slots.size - 1
+  end
+end
+
+# A switch's jump table: the block each entry branches to, in value order from `low` (entry k is the case for
+# low + k, or the default). `sym` is the table's symbol in the object; the driver creates it before the function
+# is encoded, so it is -1 until then.
+pub class JumpTable
+  getter low : Int64
+  getter targets : Array(Int32)
+  property sym : Int32
+
+  def initialize(@low : Int64, @targets : Array(Int32))
+    @sym = -1
+  end
+end
+
+pub class MFunction
+  getter name : String
+  property blocks : Array(MBlock)
+  property frame : FrameInfo
+  property jump_tables : Array(JumpTable)
+  property vreg_classes : Array(RegClass)
+  property vreg_home : Array(Int32)   # regalloc: physical register, or -1 for a spill slot
+  property vreg_slot : Array(Int32)   # regalloc: spill slot index when vreg_home is -1
+  property vreg_pointer : Array(Bool) # the vreg holds a pointer or a copy of one's bits; see mark_pointer
+  property naked : Bool               # a naked body: no prologue, epilogue, probe or callee-saved save
+  property isa : Int32                # the target whose opcode enum MInst#opcode holds (target.iyi)
+
+  def initialize(@name : String)
+    @blocks = [] of MBlock
+    @frame = FrameInfo.new
+    @jump_tables = [] of JumpTable
+    @vreg_classes = [] of RegClass
+    @vreg_home = [] of Int32
+    @vreg_slot = [] of Int32
+    @vreg_pointer = [] of Bool
+    @naked = false
+    @isa = 0
+  end
+
+  def new_vreg(cls : RegClass) : Int32
+    @vreg_classes << cls
+    @vreg_pointer << false
+    @vreg_classes.size - 1
+  end
+
+  # Flags a vreg as holding a pointer, or a copy of one's bits. The collector's constraint is checked on the flag.
+  def mark_pointer(v : Int32) : Nil
+    @vreg_pointer[v] = true
+  end
+
+  def vreg_operand(cls : RegClass) : Operand
+    Operand.new(OperandKind::Virtual, new_vreg(cls))
+  end
+
+  def vreg_count : Int32
+    @vreg_classes.size
+  end
+end

@@ -1,0 +1,27 @@
+; iyi-ir 1
+source_filename = "tls_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+@tls = external thread_local(localexec) global i64
+define internal i64 @read_ptr(ptr %p) {
+entry:
+  %v = load i64, ptr %p, align 8
+  ret i64 %v
+}
+define internal ptr @get_tls() {
+entry:
+  %p = threadlocaladdr ptr @tls
+  ret ptr %p
+}
+define external i64 @actual_tls() {
+entry:
+  %p = threadlocaladdr ptr @tls
+  %v = call i64 (ptr) @read_ptr(ptr %p)
+  ret i64 %v
+}
+define external i64 @return_tls() {
+entry:
+  %p = call ptr () @get_tls()
+  %v = load i64, ptr %p, align 8
+  ret i64 %v
+}

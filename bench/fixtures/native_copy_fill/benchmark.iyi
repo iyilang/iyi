@@ -1,0 +1,14 @@
+@[Unsafe("exercises the prelude's memory routines on two allocated buffers")]
+module copy_fill_benchmark_reference
+
+src = Pointer(UInt8).malloc(65536_u64)
+dst = Pointer(UInt8).malloc(65536_u64)
+i = 0_i64
+sum = 0_i64
+while i < 2048_i64
+  memset(src.as(Void*), i.to_i32, 65536_u64)
+  memcpy(dst.as(Void*), src.as(Void*), 65536_u64)
+  sum = sum + dst[65535].to_i64
+  i = i + 1_i64
+end
+puts "#{sum}"

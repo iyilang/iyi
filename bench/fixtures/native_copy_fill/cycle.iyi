@@ -1,0 +1,21 @@
+module copy_fill_cycle_reference
+
+import std/static_array
+
+values = StaticArray(UInt8, 128).new
+i = 0
+while i < 128
+  values[i] = ((i * 17 + 3) % 256).to_u8
+  i = i + 1
+end
+i = 127
+while i > 0
+  values[i] = values[i - 1]
+  i = i - 1
+end
+i = 0
+while i < 128
+  puts "#{values[i]}"
+  puts "165"
+  i = i + 1
+end

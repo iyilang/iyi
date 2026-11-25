@@ -1,0 +1,92 @@
+; iyi-ir 1
+source_filename = "guards"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external void @side()
+declare external i64 @twice() [returns_twice]
+define internal i64 @recursive(i64 %x) {
+entry:
+  %r = call i64 (i64) @recursive(i64 %x)
+  ret i64 %r
+}
+define internal i64 @slow(i64 %x) [noinline] {
+entry:
+  ret i64 %x
+}
+define internal i64 @naked(i64 %x) [naked] {
+entry:
+  ret i64 %x
+}
+define internal i64 @__iyi_new(i64 %x) {
+entry:
+  ret i64 %x
+}
+define internal i64 @large(i64 %x) {
+entry:
+  call void () @side()
+  call void () @side()
+  call void () @side()
+  call void () @side()
+  call void () @side()
+  ret i64 %x
+}
+define internal i64 @simple(i64 %x) {
+entry:
+  ret i64 %x
+}
+define external i64 @__iyi_main(i64 %x) {
+entry:
+  %r = call i64 (i64) @simple(i64 %x)
+  ret i64 %r
+}
+define external i64 @calls(i64 %x) {
+entry:
+  %a = call i64 (i64) @recursive(i64 %x)
+  %b = call i64 (i64) @slow(i64 %a)
+  %c = call i64 (i64) @naked(i64 %b)
+  %d = call i64 (i64) @__iyi_new(i64 %c)
+  %e = call i64 (i64) @large(i64 %d)
+  %f = call i64 (i64) @large(i64 %e)
+  ret i64 %f
+}
+define external i64 @naked_caller(i64 %x) [naked] {
+entry:
+  %r = call i64 (i64) @simple(i64 %x)
+  ret i64 %r
+}
+define external i64 @twice_caller(i64 %x) {
+entry:
+  %n = call i64 () @twice()
+  %r = call i64 (i64) @simple(i64 %x)
+  ret i64 %r
+}
+define internal i64 @byval_target(byval(i64) ptr %p) {
+entry:
+  %v = load i64, ptr %p, align 8
+  ret i64 %v
+}
+define external i64 @byval_caller(ptr %p) {
+entry:
+  %v = call i64 (ptr) @byval_target(byval(i64) ptr %p)
+  ret i64 %v
+}
+define internal void @sret_target(sret(i64) ptr %p) {
+entry:
+  store i64 1, ptr %p, align 8
+  ret void
+}
+define external void @sret_caller(ptr %p) {
+entry:
+  call void (ptr) @sret_target(sret(i64) ptr %p)
+  ret void
+}
+define internal ptr @frame_target() {
+entry:
+  %p = intrinsic llvm.frameaddress.p0(i32 0)
+  ret ptr %p
+}
+define external ptr @frame_caller() {
+entry:
+  %p = call ptr () @frame_target()
+  ret ptr %p
+}

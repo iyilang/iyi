@@ -1,0 +1,11 @@
+; iyi-ir 1
+source_filename = "undef_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @undef_keep() {
+entry:
+  %a = add i32 undef, 1
+  %b = add i32 undef, 1
+  %sum = add i32 %a, %b
+  ret i32 %sum
+}

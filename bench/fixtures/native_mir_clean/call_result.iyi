@@ -1,0 +1,15 @@
+module call_result
+
+def twice(x : Int64) : Int64
+  x * 2_i64
+end
+
+def combine(x : Int64) : Int64
+  a = twice(x)
+  b = a + 9_i64
+  c = twice(b)
+  c - x
+end
+
+puts "#{combine(8_i64)}"
+puts "#{combine(-4_i64)}"

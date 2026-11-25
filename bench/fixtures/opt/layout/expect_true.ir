@@ -1,0 +1,16 @@
+; iyi-ir 1
+source_filename = "expect_true"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @expect_true(i1 %condition) {
+entry:
+  %likely = intrinsic llvm.expect.i1(i1 %condition, i1 true)
+  br i1 %likely, label %fast, label %slow
+slow:
+  br label %join
+fast:
+  br label %join
+join:
+  %result = phi i32 [ 1, label %fast ], [ 2, label %slow ]
+  ret i32 %result
+}

@@ -1,0 +1,32 @@
+; iyi-ir 1
+source_filename = "overflow_safe"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @signed_add(i8 %x) {
+entry:
+  %value = and i8 %x, 63
+  %pair = intrinsic llvm.sadd.with.overflow.i8(i8 %value, i8 64)
+  %flag = extractvalue { i8, i1 } %pair, 1
+  ret i1 %flag
+}
+define internal i1 @unsigned_add(i8 %x) {
+entry:
+  %value = and i8 %x, 63
+  %pair = intrinsic llvm.uadd.with.overflow.i8(i8 %value, i8 127)
+  %flag = extractvalue { i8, i1 } %pair, 1
+  ret i1 %flag
+}
+define internal i1 @signed_sub(i8 %x) {
+entry:
+  %value = and i8 %x, 63
+  %pair = intrinsic llvm.ssub.with.overflow.i8(i8 %value, i8 63)
+  %flag = extractvalue { i8, i1 } %pair, 1
+  ret i1 %flag
+}
+define internal i1 @signed_mul(i8 %x) {
+entry:
+  %value = and i8 %x, 7
+  %pair = intrinsic llvm.smul.with.overflow.i8(i8 %value, i8 15)
+  %flag = extractvalue { i8, i1 } %pair, 1
+  ret i1 %flag
+}

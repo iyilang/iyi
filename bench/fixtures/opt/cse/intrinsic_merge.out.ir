@@ -1,0 +1,11 @@
+; iyi-ir 1
+source_filename = "intrinsic_merge"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @intrinsic_merge(i32 %x, i32 %y) {
+entry:
+  %first = intrinsic llvm.sadd.with.overflow.i32(i32 %x, i32 %y)
+  %a = extractvalue { i32, i1 } %first, 0
+  %sum = add i32 %a, %a
+  ret i32 %sum
+}

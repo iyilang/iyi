@@ -165,8 +165,8 @@ class Verifier
     t.void? || t.int? || t.float? || t.pointer?
   end
 
-  # Dominance sets: dom[b][a] is true when block a dominates block b. Only reachable blocks matter.
-  def dominators(f : Function) : Array(Array(Bool))
+  # The dominance relation of f, computed from the predecessor list of each block, by block index.
+  def dominators(f : Function) : Dominance
     n = f.blocks.size
     index = block_index(f)
     preds = Array(Array(Int32)).new
@@ -176,32 +176,7 @@ class Verifier
         preds[index[b.name]] << index[p.name]
       end
     end
-    dom = Array(Array(Bool)).new
-    n.times do |b|
-      row = Array(Bool).new
-      n.times { |a| row << (b == 0 ? a == 0 : true) }
-      dom << row
-    end
-    changed = true
-    while changed
-      changed = false
-      (1...n).each do |b|
-        next if preds[b].empty?
-        row = Array(Bool).new
-        n.times do |a|
-          all = true
-          preds[b].each do |p|
-            all = false unless dom[p][a]
-          end
-          row << (all || a == b)
-        end
-        if row != dom[b]
-          dom[b] = row
-          changed = true
-        end
-      end
-    end
-    dom
+    Dominance.new(preds)
   end
 
   def block_index(f : Function) : Hash(String, Int32)
@@ -226,13 +201,16 @@ class Verifier
     seen
   end
 
-  def check_instructions(f : Function, dom : Array(Array(Bool)), reachable : Array(Bool)) : Nil
+  def check_instructions(f : Function, dom : Dominance, reachable : Array(Bool)) : Nil
     index = block_index(f)
     position = Hash(Value, Int32).new
     f.params.each { |p| position[p] = -1 }
+    # Where each value first appears in the function, void instructions included: the phi operand lookup.
+    first_position = Hash(Value, Int32).new
     f.blocks.each_with_index do |b, bi|
       b.insts.each_with_index do |i, k|
         position[i] = bi * 100000 + k unless i.type.void?
+        first_position[i] = bi * 100000 + k unless first_position[i]?
       end
     end
     f.blocks.each_with_index do |b, bi|
@@ -240,7 +218,7 @@ class Verifier
       b.insts.each_with_index do |i, k|
         check_instruction(f, i)
         if i.op == Op::Phi
-          check_phi(f, i, index, dom, bi, reachable)
+          check_phi(f, i, index, dom, bi, reachable, first_position)
         else
           i.args.each do |a|
             next unless defined_value?(a)
@@ -272,7 +250,7 @@ class Verifier
   end
 
   # A use must be dominated by its definition: earlier in the same block, or in a block that dominates this one.
-  def check_use(f : Function, v : Value, bi : Int32, k : Int32, position : Hash(Value, Int32), dom : Array(Array(Bool)), index : Hash(String, Int32), user : Inst) : Nil
+  def check_use(f : Function, v : Value, bi : Int32, k : Int32, position : Hash(Value, Int32), dom : Dominance, index : Hash(String, Int32), user : Inst) : Nil
     pos = position[v]?
     unless pos
       report("dominance", "an instruction uses a value that no instruction defines", f)
@@ -283,12 +261,12 @@ class Verifier
     dk = pos % 100000
     if db == bi
       report("dominance", "%#{v.name} is used before it is defined", f) if dk >= k
-    elsif !dom[bi][db]
+    elsif !dom.dominates?(db, bi)
       report("dominance", "%#{v.name} is used where its definition does not dominate", f)
     end
   end
 
-  def check_phi(f : Function, phi : Inst, index : Hash(String, Int32), dom : Array(Array(Bool)), bi : Int32, reachable : Array(Bool)) : Nil
+  def check_phi(f : Function, phi : Inst, index : Hash(String, Int32), dom : Dominance, bi : Int32, reachable : Array(Bool), first_position : Hash(Value, Int32)) : Nil
     block = f.blocks[bi]
     expected = block.preds.map { |p| p.name }.sorted
     got = phi.targets.map { |t| t.name }.sorted
@@ -302,22 +280,13 @@ class Verifier
       next unless defined_value?(v) && k < phi.targets.size
       next if v.is_a?(Param)
       source = index[phi.targets[k].name]
-      pos = find_position(f, v)
+      pos = first_position[v]?
       next unless pos
       db = pos // 100000
-      if db != source && !dom[source][db]
+      if db != source && !dom.dominates?(db, source)
         report("dominance", "a phi incoming from #{phi.targets[k].name} uses a value whose definition does not dominate it", f)
       end
     end
-  end
-
-  def find_position(f : Function, v : Value) : Int32?
-    f.blocks.each_with_index do |b, bi|
-      b.insts.each_with_index do |i, k|
-        return bi * 100000 + k if i == v
-      end
-    end
-    nil
   end
 
   # Per-instruction type rules.
@@ -434,7 +403,7 @@ class Verifier
 
   # `tls-fresh`: a ThreadLocalAddr or ThreadPointer result is never used after a call, or after a back-edge
   # that follows it. Those values are recomputed from the thread pointer, not carried across them.
-  def check_tls(f : Function, dom : Array(Array(Bool)), reachable : Array(Bool)) : Nil
+  def check_tls(f : Function, dom : Dominance, reachable : Array(Bool)) : Nil
     index = block_index(f)
     n = f.blocks.size
     outs = Array(Array(Inst)?).new
@@ -473,14 +442,14 @@ class Verifier
 
   # The fresh set on entry to block bi: the intersection over its forward predecessors. A back-edge
   # contributes nothing, so its values are stale; nil means "every value", before the first pass reaches it.
-  def entry_fresh(f : Function, bi : Int32, index : Hash(String, Int32), dom : Array(Array(Bool)), outs : Array(Array(Inst)?), reachable : Array(Bool)) : Array(Inst)?
+  def entry_fresh(f : Function, bi : Int32, index : Hash(String, Int32), dom : Dominance, outs : Array(Array(Inst)?), reachable : Array(Bool)) : Array(Inst)?
     return [] of Inst if bi == 0
     result = nil
     first = true
     f.blocks[bi].preds.each do |p|
       pi = index[p.name]
       next unless reachable[pi]
-      contribution = dom[pi][bi] ? [] of Inst : outs[pi]
+      contribution = dom.dominates?(bi, pi) ? [] of Inst : outs[pi]
       if first
         result = contribution
         first = false
@@ -524,5 +493,141 @@ class Verifier
     return false unless v.is_a?(Inst)
     i = v.as(Inst)
     i.op == Op::ThreadLocalAddr || i.op == Op::ThreadPointer
+  end
+end
+
+# The dominance relation of one function, built once from its blocks' predecessor lists. A walk from block 0
+# reaches the reachable blocks; their immediate dominators come from Cooper, Harvey and Kennedy's iteration
+# over the reverse post-order; and the pre- and post-order numbers of the dominator tree make `dominates?`
+# an interval test. Every walk is iterative, so the size of a function cannot overflow the call stack.
+class Dominance
+  def initialize(@preds : Array(Array(Int32)))
+    n = @preds.size
+    succs = Array(Array(Int32)).new
+    n.times { succs << [] of Int32 }
+    n.times do |b|
+      @preds[b].each { |p| succs[p] << b }
+    end
+    order = finish_order(succs)
+    m = order.size
+    @rpo_number = Array(Int32).new(n, -1)
+    m.times { |k| @rpo_number[order[m - 1 - k]] = k }
+    @idom = Array(Int32).new(n, -1)
+    @idom[0] = 0
+    @pre = Array(Int32).new(n, -1)
+    @post = Array(Int32).new(n, -1)
+    compute_idoms(order)
+    number_tree(n)
+  end
+
+  # Whether a walk from block 0 reaches block i.
+  def reachable?(i : Int32) : Bool
+    @rpo_number[i] >= 0
+  end
+
+  # Whether block a dominates block b. Every block dominates an unreachable b, and an unreachable a dominates
+  # no reachable block.
+  def dominates?(a : Int32, b : Int32) : Bool
+    return true unless reachable?(b)
+    return false unless reachable?(a)
+    @pre[a] <= @pre[b] && @post[b] <= @post[a]
+  end
+
+  # The blocks a depth-first walk from block 0 finishes, in finishing order, so block 0 comes last.
+  def finish_order(succs : Array(Array(Int32))) : Array(Int32)
+    seen = Array(Bool).new(succs.size, false)
+    seen[0] = true
+    order = [] of Int32
+    blocks = [0] of Int32
+    nexts = [0] of Int32
+    until blocks.empty?
+      top = blocks.size - 1
+      b = blocks[top]
+      k = nexts[top]
+      if k < succs[b].size
+        nexts[top] = k + 1
+        s = succs[b][k]
+        unless seen[s]
+          seen[s] = true
+          blocks << s
+          nexts << 0
+        end
+      else
+        order << b
+        blocks.pop
+        nexts.pop
+      end
+    end
+    order
+  end
+
+  # Immediate dominators by Cooper, Harvey and Kennedy: each block's dominator is the intersection of its
+  # processed predecessors, visited in reverse post-order until nothing changes.
+  def compute_idoms(order : Array(Int32)) : Nil
+    changed = true
+    while changed
+      changed = false
+      k = order.size - 2
+      while k >= 0
+        b = order[k]
+        new_idom = -1
+        @preds[b].each do |p|
+          next if @rpo_number[p] < 0 || @idom[p] < 0
+          new_idom = new_idom < 0 ? p : intersect(p, new_idom)
+        end
+        if @idom[b] != new_idom
+          @idom[b] = new_idom
+          changed = true
+        end
+        k -= 1
+      end
+    end
+  end
+
+  # The nearest common dominator of two processed blocks, climbing from whichever is later in reverse post-order.
+  def intersect(a : Int32, b : Int32) : Int32
+    x = a
+    y = b
+    until x == y
+      while @rpo_number[x] > @rpo_number[y]
+        x = @idom[x]
+      end
+      while @rpo_number[y] > @rpo_number[x]
+        y = @idom[y]
+      end
+    end
+    x
+  end
+
+  # Pre- and post-order numbers of the dominator tree, from an iterative walk from block 0.
+  def number_tree(n : Int32) : Nil
+    children = Array(Array(Int32)).new
+    n.times { children << [] of Int32 }
+    @rpo_number.each_with_index do |r, b|
+      children[@idom[b]] << b if r > 0
+    end
+    entered = 1
+    finished = 0
+    @pre[0] = 0
+    nodes = [0] of Int32
+    nexts = [0] of Int32
+    until nodes.empty?
+      top = nodes.size - 1
+      b = nodes[top]
+      k = nexts[top]
+      if k < children[b].size
+        nexts[top] = k + 1
+        c = children[b][k]
+        @pre[c] = entered
+        entered += 1
+        nodes << c
+        nexts << 0
+      else
+        @post[b] = finished
+        finished += 1
+        nodes.pop
+        nexts.pop
+      end
+    end
   end
 end

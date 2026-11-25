@@ -87,6 +87,20 @@ pub class Module
     @functions = kept
   end
 
+  # Remove a set in one traversal while keeping the name index and emission order in sync.
+  def remove_functions(dead : Hash(Function, Bool)) : Nil
+    kept = [] of Function
+    @functions.each do |fn|
+      if dead.has_key?(fn)
+        @function_index.delete(fn.name)
+      else
+        kept << fn
+      end
+    end
+    @functions = kept
+    nil
+  end
+
   # A function with a body: `add_function`, then one unnamed parameter per parameter type of `type`, the way
   # the parser gives a `define` its parameters. A declaration keeps `add_function`, with no parameters.
   def define_function(name : String, type : IrType, cc : CallConv = CallConv::Iyi) : Function

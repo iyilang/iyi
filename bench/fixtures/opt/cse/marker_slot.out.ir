@@ -1,0 +1,16 @@
+; iyi-ir 1
+source_filename = "marker_slot"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+@__iyi_marking = external global i8
+
+define internal i8 @marker_slot() {
+entry:
+  %slot = alloca ptr, align 8
+  store ptr @__iyi_marking, ptr %slot, align 8
+  %address = getelementptr i8, ptr @__iyi_marking, i64 0
+  %a = load i8, ptr %address, align 1
+  %b = load i8, ptr %address, align 1
+  %sum = add i8 %a, %b
+  ret i8 %sum
+}

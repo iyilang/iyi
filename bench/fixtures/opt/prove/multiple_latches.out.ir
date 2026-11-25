@@ -1,0 +1,23 @@
+; iyi-ir 1
+source_filename = "multiple_latches"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @multiple_latches(i32 %n, i1 %choose, ptr %out) {
+entry:
+  br label %head
+head:
+  %i = phi i32 [ 0, label %entry ], [ %next_left, label %left ], [ %next_right, label %right ]
+  %more = icmp slt i32 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  store i1 false, ptr %out, align 1
+  br i1 %choose, label %left, label %right
+left:
+  %next_left = add i32 %i, 1
+  br label %head
+right:
+  %next_right = add i32 %i, 1
+  br label %head
+done:
+  ret void
+}

@@ -1,0 +1,4 @@
+; Declarations are not module-owned implementations.
+declare external ptr @memcpy(ptr, ptr, i64)
+declare external ptr @memmove(ptr, ptr, i64)
+declare external ptr @memset(ptr, i32, i64)

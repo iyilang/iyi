@@ -647,6 +647,55 @@ else
   fail "unwind/ensure.ir without its unwind edges is not unwind/ensure.expected, or a reachable pad was accepted: $("$DRV" drop-unwind bench/fixtures/ir/unwind/ensure.ir 2>&1 | diff - bench/fixtures/ir/unwind/ensure.expected | head -n 12)"
 fi
 
+# ---- 5e. dominance across a 20,000-block function -----------------------------------------------
+echo "== 5e. a generated function of 20,000 blocks (6,666 chained diamonds) verifies"
+chain_file="$WORK/chain20000.ir"
+"$PY" - "$(native_path "$chain_file")" <<'PY' || fail "could not generate the 20,000-block chain of diamonds"
+import pathlib
+import sys
+
+# Diamonds chained through their joins. Head h(k) branches to arms a(k) and b(k), both of which branch to h(k+1);
+# that head's phi joins the arms, and its value uses the previous head's value, so the dominator tree is 6,666 deep.
+D = 6666
+lines = [
+    "; iyi-ir 1",
+    'source_filename = "chain20000"',
+    'target triple = "x86_64-unknown-linux-gnu"',
+    'target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"',
+    "define internal iyicc i32 @f(i1 %c, i32 %p) {",
+    "entry:",
+    "  %v0 = add i32 %p, 1",
+    "  br i1 %c, label %a0, label %b0",
+]
+for k in range(D):
+    join = f"h{k + 1}" if k + 1 < D else f"h{D}"
+    lines += [f"a{k}:", f"  %x{k} = add i32 %v{k}, 3", f"  br label %{join}"]
+    lines += [f"b{k}:", f"  %y{k} = add i32 %v{k}, 4", f"  br label %{join}"]
+    if k + 1 < D:
+        lines += [
+            f"h{k + 1}:",
+            f"  %p{k + 1} = phi i32 [ %x{k}, label %a{k} ], [ %y{k}, label %b{k} ]",
+            f"  %v{k + 1} = add i32 %p{k + 1}, %v{k}",
+            f"  br i1 %c, label %a{k + 1}, label %b{k + 1}",
+        ]
+    else:
+        lines += [
+            f"h{D}:",
+            f"  %p{D} = phi i32 [ %x{k}, label %a{k} ], [ %y{k}, label %b{k} ]",
+            "  br label %end",
+        ]
+lines += ["end:", f"  ret i32 %p{D}", "}", ""]
+blocks = sum(1 for line in lines if line.endswith(":") and not line.startswith((" ", ";")))
+if blocks != 20000:
+    sys.exit(f"the chain has {blocks} blocks, not 20000")
+pathlib.Path(sys.argv[1]).write_text("\n".join(lines))
+PY
+if [ -s "$chain_file" ] && "$DRV" verify "$(native_path "$chain_file")" >"$WORK/chain.out" 2>&1 && [ "$(cat "$WORK/chain.out")" = verified ]; then
+  echo "a function of 20,000 blocks verifies"
+else
+  fail "the 20,000-block chain of diamonds does not verify: $(cat "$WORK/chain.out" 2>/dev/null)"
+fi
+
 # ---- 6. DataLayout against the oracle ----------------------------------------------------------
 echo "== 6. DataLayout#llvm_string equals the oracle's target datalayout on all five targets"
 for pair in "${TARGETS[@]}"; do
@@ -802,6 +851,36 @@ prove_mutation "verifier: an unwinding asm is accepted in a nounwind function" \
   'if inline_asm.unwind && f.attrs.any? { |a| a.name == "nounwind" }' \
   'if inline_asm.unwind && f.attrs.any? { |a| a.name == "nounwind_never" }' \
   asm_unwind_check
+
+# The dominance rule: each check states the driver's answer on one fixture, so a mutant that gets it wrong is caught.
+dominance_check() {
+  local bin="$1" out
+  out=$("$bin" verify bench/fixtures/ir/bad/dominance_diamond.ir 2>&1) && return 1
+  echo "$out" | grep -q 'error\[dominance\]'
+}
+unreachable_check() {
+  "$1" verify bench/fixtures/ir/valid/unreachable_use.ir >/dev/null 2>&1
+}
+phi_dominance_check() {
+  local bin="$1" out
+  out=$("$bin" verify bench/fixtures/ir/bad/phi_not_dominated.ir 2>&1) && return 1
+  echo "$out" | grep -q 'error\[dominance\]'
+}
+prove_mutation "verifier: every block dominates every other, so a use that no definition dominates is accepted" \
+  src/compiler/ir/verifier.iyi \
+  '    @pre[a] <= @pre[b] && @post[b] <= @post[a]' \
+  '    true' \
+  dominance_check
+prove_mutation "verifier: an unreachable block is dominated by nothing, so a phi incoming from one is refused" \
+  src/compiler/ir/verifier.iyi \
+  '    return true unless reachable?(b)' \
+  '    return false unless reachable?(b)' \
+  unreachable_check
+prove_mutation "verifier: a phi incoming is not checked against the dominance of its value" \
+  src/compiler/ir/verifier.iyi \
+  '      if db != source && !dom.dominates?(db, source)' \
+  '      if db != source && false' \
+  phi_dominance_check
 prove_mutation "printer: the unwind word of inline asm is not written" \
   src/compiler/ir/printer.iyi \
   '    text += " unwind" if inline_asm.unwind' \

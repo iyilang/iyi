@@ -1,0 +1,25 @@
+; iyi-ir 1
+module "fp_chain"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal double @float_chain(double %x) {
+entry:
+  %a = fmul double %x, 0x4000000000000000
+  %b = fadd double %a, 0x4008000000000000
+  %c = fsub double %b, 0x3ff0000000000000
+  ret double %c
+}
+
+define i32 @main() {
+entry:
+  %a = call double (double) @float_chain(double 0x4010000000000000)
+  %b = call double (double) @float_chain(double 0xc008000000000000)
+  %x = fptosi double %a to i64
+  %y = fptosi double %b to i64
+  %p = call i32 (ptr, ...) @printf(ptr @fmt, i64 %x)
+  %q = call i32 (ptr, ...) @printf(ptr @fmt, i64 %y)
+  ret i32 0
+}

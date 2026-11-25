@@ -2324,7 +2324,18 @@ jobs:
     timeout-minutes: 30
     name: "What a Windows binary does, twenty times"
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      # The artifact can be finalized before it is visible to a consumer:
+      # retry the download once, and still fail the job if it is unavailable.
+      - name: Download cross-objects
+        id: download-cross-objects
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cross-objects
+          path: cross
+      - name: Retry cross-objects download
+        if: steps.download-cross-objects.outcome == 'failure'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: cross-objects
           path: cross
@@ -2913,6 +2924,7 @@ jobs:
       #   wasm32_exercise    a wasm32 program
       #   wasm_aead_speed   a freestanding browser benchmark whose hooks
       #                      exist only with -Diyi_aead_bench
+      #   wasm_tasks_exercise  its native comparison is run by the JSPI gate
       #   wasm_freestanding_exercise  a freestanding wasm host-contract program
       #   std_debug_cross    its pass is a panic, whose trace cross-run
       #                      reads on aarch64 and musl; Windows' own trace
@@ -2937,8 +2949,8 @@ jobs:
           # it - a line two seconds in - and an empty stdin is its failure.
           $skip = @(
             "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
-            "wasm_freestanding_exercise.iyi", "stdin_park.iyi",
-            "std_debug_cross.iyi", "wasm_aead_speed.iyi", "selfhost_llvm_exercise.iyi"
+            "wasm_freestanding_exercise.iyi", "wasm_tasks_exercise.iyi",
+            "stdin_park.iyi", "std_debug_cross.iyi", "wasm_aead_speed.iyi", "selfhost_llvm_exercise.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
           $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"
@@ -3902,6 +3914,18 @@ jobs:
           bash bench/uint64x2_exercise.sh
           bash bench/wasm_aead_exercise.sh
           IYI_AEAD_MIB=1 bash bench/wasm_aead_speed.sh
+      - name: Exercise freestanding tasks
+        run: |
+          export PATH="/opt/wasi-sdk/bin:$HOME/.wasmtime/bin:$PATH"
+          export IYI="$PWD/room/bin/iyi"
+          IYI_CHROME="$(command -v google-chrome)"
+          export IYI_CHROME
+          bash bench/wasm_tasks_exercise.sh
+      - name: Hold the shipped wasm size and debug contract
+        run: |
+          export PATH="/opt/wasi-sdk/bin:$PATH"
+          export IYI="$PWD/room/bin/iyi"
+          bash bench/wasm_size_exercise.sh
 
   # GC Stage 10: wasm32-wasi collector exercise under wasmtime.
   #

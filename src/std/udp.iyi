@@ -388,7 +388,7 @@ pub class UdpSocket
       fd = @fd
       @fd = -1
       @closed = true
-      {% if @top_level.has_constant?("IyiScheduler") %}
+      {% if @top_level.has_constant?("IyiScheduler") && !flag?(:wasm32) %}
         # A task parked on this socket is woken first, and finds `@fd`
         # already gone; then the descriptor goes.
         wake_closed(fd)

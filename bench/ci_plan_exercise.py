@@ -244,6 +244,9 @@ else:
     target = "wasm_" + "freestanding_" + "exercise.iyi"
     check("Windows native enumeration excludes the freestanding wasm fixture",
           bool(loop and gate) and target in skipped, f"skip list: {sorted(skipped)}")
+    task_target = "wasm_" + "tasks_" + "exercise.iyi"
+    check("Windows native enumeration excludes the JSPI task fixture",
+          bool(loop and gate) and task_target in skipped, f"skip list: {sorted(skipped)}")
     check("Windows native enumeration still includes a native exercise",
           bool(loop and gate) and "std_time_exercise.iyi" not in skipped)
     reason, jobs = planned("bench/" + target)
@@ -254,6 +257,9 @@ else:
           bool(loop and gate) and aead_speed in skipped, f"skip list: {sorted(skipped)}")
     reason, jobs = planned("bench/" + aead_speed)
     check("the browser AES benchmark still selects its own runner",
+          "wasm-freestanding" in jobs, f"{reason}: {sorted(jobs)}")
+    reason, jobs = planned("bench/" + task_target)
+    check("the JSPI task fixture still selects its own runner",
           "wasm-freestanding" in jobs, f"{reason}: {sorted(jobs)}")
 
 print()

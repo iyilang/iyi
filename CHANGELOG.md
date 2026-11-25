@@ -481,6 +481,42 @@
 
 - **Semantic backtrace equivalence for Darwin artifact verification.** Output comparison in standard library exercise gates (`bench/std_exercise.sh`, `bench/std_toml_exercise.sh`, `bench/std_websocket_exercise.sh`, `bench/std_big_exercise.sh`, and `bench/stale_equivalence.sh`) evaluates ordered semantic frames via `bench/frames_equivalent.py` when direct byte comparison fails on Darwin. Comparisons verify equal frame counts, positions, indices, images, and canonicalized function names while abstracting layout addresses, function size offsets, `~iyi` copy suffixes, a carried closure's `^unit:` suffix, and the number a build gave a closure that names its file and line, with plain-vs-optimized comparisons verifying non-frame text and frame sequence structure.
 
+- **The LSP gates read a Windows process's children by when it was
+  created, and `bench/lsp_orphan_negative.py` no longer hangs or dies on
+  its way out.** Windows CI job 139176708533 sat in "The language server
+  holds its session, on Windows" for 51 minutes, from the session gate's
+  last line to the job's limit: `lsp_orphan_negative.py`, run next,
+  printed nothing. Before its first line it walks the held worker's
+  processes (`descendants`), and that walk took kernel32's snapshot at its
+  word on each process's parent. The snapshot names a parent by pid, and
+  Windows hands a pid on once its process is gone, so a process whose
+  parent has exited lists as the child of whatever has that pid now. Once
+  the `cmd` a held compile starts is handed the pid that one of the gate's
+  own ancestors, its parent gone, still names as its parent, the walk goes
+  round for ever. On Windows 11 every gate process's chain of named
+  parents ended at the free pid 14104; in 604 runs of the negative control
+  (ten at once), one held compile's `cmd` was handed 14104, and that run
+  hung exactly as CI's did, silent, its one thread in `descendants` at
+  60 s and at 120 s, two hundred processes listed under it, `wininit.exe`
+  among them. A `ping` handed its parent's exited parent's pid made the
+  same cycle on purpose. The same reading put processes no step started
+  among a proxy's children (the owner's `firefox.exe`), where the gate's
+  kills land. A child now counts only if it was created no earlier than
+  its parent, and a killed worker's are asked after by when it was
+  created: the made cycle lists one child and ends. Step 60e kills the
+  proxy's workers only: it killed every child, a console-less CI step's
+  `conhost.exe` among them, and job 138159371238 stopped at that kill
+  with "Access is denied". The negative control runs under the session's
+  watchdog, which now prints the gate's own threads, every process under
+  each live server and the server's last stderr lines (a server that
+  never answers ends the negative control in 185 s with all three);
+  `lsp_artifacts.py`'s builds are under it too. And a reader the orphan
+  steps stopped waiting for no longer prints as the interpreter exits:
+  job 138828714339's negative control died at "could not acquire lock for
+  <_io.BufferedWriter name='<stdout>'> at interpreter shutdown" (exit
+  127). Such readers stay quiet, and the negative control joins them, and
+  each server's stderr reader, before it exits.
+
 - **`bench/packages_resolve.sh` loses every fetch's race to another build
   (#246).** A `git` that finishes the other build's checkout while this
   one clones makes every fetch find its target taken: the build must take

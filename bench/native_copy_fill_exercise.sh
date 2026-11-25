@@ -108,6 +108,7 @@ folder = Path(folder)
 errors = []
 defects = []
 checks = 0
+argument_checks = 0
 
 def symbols(fixture):
     text = (folder / (fixture + '.ir')).read_text()
@@ -119,20 +120,26 @@ def symbols(fixture):
             names.append(name)
     return {name: index for index, name in enumerate(names)}
 
-def expect(fixture, function, expected, clean):
-    global checks
+def mir(fixture, function, clean):
     env = dict(os.environ, IYI_NATIVE_MIR_CLEAN=str(clean))
     try:
         proc = subprocess.run([driver, 'mir', str(folder / (fixture + '.ir')), function],
                               env=env, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired) as exc:
         errors.append(f'{fixture}/{function}: MIR unavailable: {exc}')
-        return
+        return None
     if proc.returncode or not proc.stdout.startswith('function ' + function + '\n'):
         errors.append(f'{fixture}/{function}: invalid MIR: {proc.stderr.strip()}')
+        return None
+    return proc.stdout
+
+def expect(fixture, function, expected, clean):
+    global checks
+    text = mir(fixture, function, clean)
+    if text is None:
         return
     checks += 1
-    found = [int(x) for x in re.findall(r'^  Bl/\d+\s+sym=(\d+)', proc.stdout, re.M)]
+    found = [int(x) for x in re.findall(r'^  Bl/\d+\s+sym=(\d+)', text, re.M)]
     table = symbols(fixture)
     try:
         wanted = [table[name] for name in expected]
@@ -141,6 +148,58 @@ def expect(fixture, function, expected, clean):
         return
     if found != wanted:
         defects.append(f'{fixture}/{function} clean={clean}: calls {found}, expected {wanted} ({expected})')
+
+# What reaches x0, x1 and x2 at the call, followed through the MIR from the
+# entry, where x0..x7 hold the function's parameters: a copy (Mov), a constant
+# (MovImm) or a zero or sign extension from a width (Ubfm, Sbfm). Any other
+# write to a register makes it unknown, which matches no expected argument.
+def call_arguments(text):
+    values = {'x%d' % k: ('param', k) for k in range(8)}
+    for line in text.splitlines():
+        if not line.startswith('  ') or line.startswith('  frame '):
+            continue
+        op = line.split()[0].split('/')[0]
+        if op == 'Bl':
+            return [values.get('x%d' % k) for k in range(3)]
+        operands = re.split(r' #imm=| target=| table=| sym=| clobbers=', line.strip()[len(line.split()[0]):])[0]
+        regs = [r.strip() for r in operands.split(',') if r.strip()]
+        imm = re.search(r'#imm=(-?\d+)', line)
+        width = int(imm.group(1)) if imm else 0
+        if not regs:
+            continue
+        if op == 'Mov' and len(regs) == 2:
+            values[regs[0]] = values.get(regs[1], ('unknown', regs[1]))
+        elif op == 'MovImm' and len(regs) == 1:
+            values[regs[0]] = ('constant', width)
+        elif op in ('Ubfm', 'Sbfm') and len(regs) == 2:
+            values[regs[0]] = ('extend', width, values.get(regs[1], ('unknown', regs[1])))
+        else:
+            values[regs[0]] = ('unknown', op)
+    return None
+
+# memset reads only the low byte of its value argument: a constant counts as
+# its byte, and an extension from 8 bits or more keeps the byte it extends.
+def low_byte(value):
+    while value and value[0] == 'extend' and value[1] >= 8:
+        value = value[2]
+    if value and value[0] == 'constant':
+        return ('constant', value[1] & 0xff)
+    return value
+
+def expect_arguments(fixture, function, clean, destination, second, length):
+    global argument_checks
+    text = mir(fixture, function, clean)
+    if text is None:
+        return
+    found = call_arguments(text)
+    if found is None:
+        errors.append(f'{fixture}/{function}: no call in MIR')
+        return
+    argument_checks += 1
+    if function.startswith('set_'):
+        found[1] = low_byte(found[1])
+    if found != [destination, second, length]:
+        defects.append(f'{fixture}/{function} clean={clean}: passes {found}, expected {[destination, second, length]}')
 
 for fixture in ('defined', 'declared', 'absent'):
     for clean in (0, 1):
@@ -156,12 +215,22 @@ for clean in (0, 1):
     expect('cycle', 'memcpy', ['__iyi_native_memcpy', '__iyi_native_memset'], clean)
     expect('cycle', 'memmove', ['__iyi_native_memmove'], clean)
     expect('cycle', 'memset', ['__iyi_native_memset'], clean)
+# The routine and the helper take (destination, source, length) for a copy or
+# move and (destination, byte, length) for a fill, whichever one is called.
+for fixture in ('defined', 'declared', 'absent'):
+    for clean in (0, 1):
+        for operation, length in (('copy', 65), ('move', 100)):
+            expect_arguments(fixture, operation + '_large', clean, ('param', 0), ('param', 1), ('constant', length))
+            expect_arguments(fixture, operation + '_dynamic', clean, ('param', 0), ('param', 1), ('param', 2))
+        expect_arguments(fixture, 'set_large', clean, ('param', 0), ('constant', 0xc3), ('constant', 65))
+        expect_arguments(fixture, 'set_dynamic', clean, ('param', 0), ('param', 1), ('param', 2))
 for message in errors:
     print('INVALID:', message)
 for message in defects:
     print('decisive:', message)
 print(f'MIR target checks: {checks}')
-if errors or not checks:
+print(f'MIR argument checks: {argument_checks}')
+if errors or not checks or not argument_checks:
     sys.exit(2)
 if defects:
     sys.exit(1)

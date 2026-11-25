@@ -1,0 +1,119 @@
+; iyi-ir 1
+module "immediates"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @add_small(i64 %x) {
+entry:
+  %r = add i64 %x, 4095
+  ret i64 %r
+}
+
+define internal i64 @add_negative(i64 %x) {
+entry:
+  %r = add i64 %x, -37
+  ret i64 %r
+}
+
+define internal i64 @sub_negative(i64 %x) {
+entry:
+  %r = sub i64 %x, -42
+  ret i64 %r
+}
+
+define internal i64 @add_large(i64 %x) {
+entry:
+  %r = add i64 %x, 4096
+  ret i64 %r
+}
+
+define internal i64 @logic(i64 %x) {
+entry:
+  %a = and i64 %x, 255
+  %b = or i64 %a, 3840
+  %c = xor i64 %b, 61440
+  ret i64 %c
+}
+
+define internal i64 @repeat_mask(i64 %x) {
+entry:
+  %r = xor i64 %x, 6148914691236517205
+  ret i64 %r
+}
+
+define internal i64 @shifts(i64 %x) {
+entry:
+  %a = shl i64 %x, 3
+  %b = lshr i64 %a, 2
+  %c = ashr i64 %b, 1
+  ret i64 %c
+}
+
+define internal i64 @signed_shift(i64 %x) {
+entry:
+  %r = ashr i64 %x, 2
+  ret i64 %r
+}
+
+define internal i64 @negative_compare(i64 %x) {
+entry:
+  %c = icmp slt i64 %x, -42
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 0
+}
+
+define internal i64 @large_compare(i64 %x) {
+entry:
+  %c = icmp sgt i64 %x, 4096
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 0
+}
+
+; An unsigned compare of a narrow value: 200 is -56 as an i8, so the immediate
+; must be masked to the width (cmp #200), never taken as negative (cmn #56).
+define internal i64 @unsigned_narrow_compare(i8 %x) {
+entry:
+  %c = icmp ult i8 %x, 200
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 0
+}
+
+define i32 @main() {
+entry:
+  %a = call i64 (i64) @add_small(i64 11)
+  %b = call i64 (i64) @add_negative(i64 11)
+  %c = call i64 (i64) @sub_negative(i64 11)
+  %d = call i64 (i64) @add_large(i64 11)
+  %e = call i64 (i64) @logic(i64 171)
+  %f = call i64 (i64) @repeat_mask(i64 17)
+  %g = call i64 (i64) @shifts(i64 123)
+  %h = call i64 (i64) @signed_shift(i64 -16)
+  %i = call i64 (i64) @negative_compare(i64 -43)
+  %j = call i64 (i64) @negative_compare(i64 -41)
+  %k = call i64 (i64) @large_compare(i64 4097)
+  %l = call i64 (i64) @large_compare(i64 4095)
+  %p0 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %a)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %c)
+  %p3 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %d)
+  %p4 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %e)
+  %p5 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %f)
+  %p6 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %g)
+  %p7 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %h)
+  %p8 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %i)
+  %p9 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %j)
+  %p10 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %k)
+  %p11 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %l)
+  ret i32 0
+}

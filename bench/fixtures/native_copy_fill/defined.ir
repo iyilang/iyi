@@ -1,0 +1,103 @@
+; The module-owned routines use the C ABI and the same signatures as the prelude.
+define ptr @memcpy(ptr %dst, ptr %src, i64 %n) {
+entry:
+  br label %wide
+wide:
+  %i = phi i64 [ 0, label %entry ], [ %next, label %wide_body ]
+  %remaining = sub i64 %n, %i
+  %wide_more = icmp uge i64 %remaining, 32
+  br i1 %wide_more, label %wide_body, label %bytes
+wide_body:
+  %s0 = getelementptr i8, ptr %src, i64 %i
+  %d0 = getelementptr i8, ptr %dst, i64 %i
+  %s1 = getelementptr i8, ptr %s0, i64 8
+  %s2 = getelementptr i8, ptr %s0, i64 16
+  %s3 = getelementptr i8, ptr %s0, i64 24
+  %d1 = getelementptr i8, ptr %d0, i64 8
+  %d2 = getelementptr i8, ptr %d0, i64 16
+  %d3 = getelementptr i8, ptr %d0, i64 24
+  %v0 = load i64, ptr %s0, align 1
+  %v1 = load i64, ptr %s1, align 1
+  %v2 = load i64, ptr %s2, align 1
+  %v3 = load i64, ptr %s3, align 1
+  store i64 %v0, ptr %d0, align 1
+  store i64 %v1, ptr %d1, align 1
+  store i64 %v2, ptr %d2, align 1
+  store i64 %v3, ptr %d3, align 1
+  %next = add i64 %i, 32
+  br label %wide
+bytes:
+  %j = phi i64 [ %i, label %wide ], [ %jn, label %byte_body ]
+  %more = icmp ult i64 %j, %n
+  br i1 %more, label %byte_body, label %done
+byte_body:
+  %sp = getelementptr i8, ptr %src, i64 %j
+  %dp = getelementptr i8, ptr %dst, i64 %j
+  %v = load i8, ptr %sp, align 1
+  store i8 %v, ptr %dp, align 1
+  %jn = add i64 %j, 1
+  br label %bytes
+done:
+  ret ptr %dst
+}
+
+define ptr @memmove(ptr %dst, ptr %src, i64 %n) {
+entry:
+  %di = ptrtoint ptr %dst to i64
+  %si = ptrtoint ptr %src to i64
+  %forward = icmp ule i64 %di, %si
+  br i1 %forward, label %fhead, label %bhead
+fhead:
+  %f = phi i64 [ 0, label %entry ], [ %fn, label %fbody ]
+  %fm = icmp ult i64 %f, %n
+  br i1 %fm, label %fbody, label %done
+fbody:
+  %fs = getelementptr i8, ptr %src, i64 %f
+  %fd = getelementptr i8, ptr %dst, i64 %f
+  %fv = load i8, ptr %fs, align 1
+  store i8 %fv, ptr %fd, align 1
+  %fn = add i64 %f, 1
+  br label %fhead
+bhead:
+  %b = phi i64 [ %n, label %entry ], [ %bn, label %bbody ]
+  %bm = icmp ne i64 %b, 0
+  br i1 %bm, label %bbody, label %done
+bbody:
+  %bn = sub i64 %b, 1
+  %bs = getelementptr i8, ptr %src, i64 %bn
+  %bd = getelementptr i8, ptr %dst, i64 %bn
+  %bv = load i8, ptr %bs, align 1
+  store i8 %bv, ptr %bd, align 1
+  br label %bhead
+done:
+  ret ptr %dst
+}
+
+define ptr @memset(ptr %dst, i32 %value, i64 %n) {
+entry:
+  %byte = trunc i32 %value to i8
+  %b64 = zext i8 %byte to i64
+  %pattern = mul i64 %b64, 72340172838076673
+  br label %words
+words:
+  %i = phi i64 [ 0, label %entry ], [ %next, label %word_body ]
+  %remaining = sub i64 %n, %i
+  %more = icmp uge i64 %remaining, 8
+  br i1 %more, label %word_body, label %bytes
+word_body:
+  %wp = getelementptr i8, ptr %dst, i64 %i
+  store i64 %pattern, ptr %wp, align 1
+  %next = add i64 %i, 8
+  br label %words
+bytes:
+  %j = phi i64 [ %i, label %words ], [ %jn, label %byte_body ]
+  %bm = icmp ult i64 %j, %n
+  br i1 %bm, label %byte_body, label %done
+byte_body:
+  %bp = getelementptr i8, ptr %dst, i64 %j
+  store i8 %byte, ptr %bp, align 1
+  %jn = add i64 %j, 1
+  br label %bytes
+done:
+  ret ptr %dst
+}

@@ -1,0 +1,42 @@
+; iyi-ir 1
+source_filename = "runtime_marking"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+@__iyi_marking = external global i8
+define internal i64 @__iyi_new() {
+entry:
+  ret i64 1
+}
+define internal i8 @worker() {
+entry:
+  %r = call i64 () @__iyi_new()
+  %flag = load i8, ptr @__iyi_marking, align 1
+  ret i8 %flag
+}
+define external i8 @read_twice() {
+entry:
+  br label %entry1
+entry1:
+  %0 = call i64 () @__iyi_new()
+  %1 = load i8, ptr @__iyi_marking, align 1
+  br label %inline.cont
+inline.cont:
+  %2 = phi i8 [ %1, label %entry1 ]
+  br label %entry2
+entry2:
+  %3 = call i64 () @__iyi_new()
+  %4 = load i8, ptr @__iyi_marking, align 1
+  br label %inline.cont3
+inline.cont3:
+  %5 = phi i8 [ %4, label %entry2 ]
+  %sum = add i8 %2, %5
+  %v1 = add i8 %sum, 1
+  %v2 = add i8 %v1, 1
+  %v3 = add i8 %v2, 1
+  %v4 = add i8 %v3, 1
+  %v5 = add i8 %v4, 1
+  %v6 = add i8 %v5, 1
+  %v7 = add i8 %v6, 1
+  %v8 = add i8 %v7, 1
+  ret i8 %v8
+}

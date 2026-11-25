@@ -1,0 +1,22 @@
+; iyi-ir 1
+source_filename = "cold_last"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external void @raise_error()
+
+define internal i32 @cold_last(i1 %condition, i1 %bad, i32 %value) {
+entry:
+  %unlikely = intrinsic llvm.expect.i1(i1 %condition, i1 false)
+  br i1 %unlikely, label %slow, label %fast
+slow:
+  %slow_value = add i32 %value, 1
+  br label %join
+fast:
+  br i1 %bad, label %raise, label %join
+raise:
+  call void () @raise_error()
+  unreachable
+join:
+  %result = phi i32 [ %slow_value, label %slow ], [ %value, label %fast ]
+  ret i32 %result
+}

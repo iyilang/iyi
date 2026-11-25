@@ -142,6 +142,16 @@ pub enum MOp
   AddTprelHi # dst <- uses[0] + the high 12 bits of sym's local-exec offset (add, lsl 12; ELF)
   AddTprelLo # dst <- uses[0] + the low 12 bits of sym's local-exec offset (add; ELF)
   InlineAsm  # the raw bytes of an inline asm template over its operands (see AsmBody)
+  CmnImm     # flags <- a + imm
+  OrrImm     # dst <- a | logical immediate
+  EorImm     # dst <- a ^ logical immediate
+  LslImm     # dst <- a << imm
+  LsrImm     # dst <- a >> imm, unsigned
+  AsrImm     # dst <- a >> imm, signed
+  Cbz        # branch to target when uses[0] is zero
+  Cbnz       # branch to target when uses[0] is nonzero
+  Tbz        # branch when bit imm of uses[0] is zero
+  Tbnz       # branch when bit imm of uses[0] is one
 end
 
 pub class Operand

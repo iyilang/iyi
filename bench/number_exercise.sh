@@ -100,7 +100,7 @@ elif IYI_PATH="$WORK/software${PSEP}$REPO/src" "$IYI" build -o "$WORK/software/p
   echo "  software: every check held"
 else
   echo "  software: the conversion's answers are not the instruction's"
-  tail -3 "$WORK/software/out" "$WORK/software/build" 2>/dev/null
+  tail -n 3 "$WORK/software/out" "$WORK/software/build" 2>/dev/null
   status=1
 fi
 

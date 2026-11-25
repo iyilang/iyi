@@ -293,18 +293,36 @@ else
     mkdir -p "$WORK/pebble"
     # Six free ports, each held open until all six are drawn so none is
     # drawn twice; Pebble's config and the exercise's arguments from them.
+    # The DNS port is drawn free for UDP as well as TCP, as challtestsrv
+    # binds it for both and Windows' DNS Client service holds UDP ports of
+    # the ephemeral range (bench/std_autocert_exercise.sh).
     if ! "$PY" - "$WORK/pebble" "$certs" <<'PY'
 import json, socket, sys
 out, certs = sys.argv[1], sys.argv[2]
 held = []
-for _ in range(6):
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    held.append(s)
-ports = [s.getsockname()[1] for s in held]
+def draw(udp=False):
+    for _ in range(100):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        held.append(s)
+        port = s.getsockname()[1]
+        if not udp:
+            return port
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            u.bind(("127.0.0.1", port))
+        except OSError:
+            u.close()
+            continue
+        held.append(u)
+        return port
+    sys.exit("no port free for both TCP and UDP in 100 draws")
+acme, management, http01, tlsalpn = (draw() for _ in range(4))
+dns = draw(udp=True)
+chall = draw()
+ports = [acme, management, http01, tlsalpn, dns, chall]
 for s in held:
     s.close()
-acme, management, http01, tlsalpn, dns, chall = ports
 json.dump({"pebble": {"listenAddress": f"127.0.0.1:{acme}", "managementListenAddress": f"127.0.0.1:{management}",
     "certificate": f"{certs}/localhost/cert.pem", "privateKey": f"{certs}/localhost/key.pem",
     "httpPort": http01, "tlsPort": tlsalpn, "ocspResponderURL": "", "externalAccountBindingRequired": False,
@@ -339,7 +357,7 @@ sys.exit(1)
 PY
       then
         echo "  FAIL: Pebble or challtestsrv did not come up in 30 s:"
-        tail -3 "$WORK/pebble/pebble.log" "$WORK/pebble/challtestsrv.log" | sed 's/^/    /'
+        tail -n 3 "$WORK/pebble/pebble.log" "$WORK/pebble/challtestsrv.log" | sed 's/^/    /'
         status=1
       else
         # Two RSA keys: one an RS256 account's, one a certificate's.

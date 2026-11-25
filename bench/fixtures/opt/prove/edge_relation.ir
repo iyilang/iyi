@@ -1,0 +1,15 @@
+; iyi-ir 1
+source_filename = "edge_relation"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @edge_relation(i32 %x, i32 %y) {
+entry:
+  %guard = icmp slt i32 %x, %y
+  br i1 %guard, label %yes, label %no
+yes:
+  %not_less = icmp sge i32 %x, %y
+  ret i1 %not_less
+no:
+  %less = icmp slt i32 %x, %y
+  ret i1 %less
+}

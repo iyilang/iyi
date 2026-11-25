@@ -1,0 +1,12 @@
+; iyi-ir 1
+source_filename = "bitcast_merge"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @bitcast_merge(ptr %p, ptr %out) {
+entry:
+  %a = bitcast ptr %p to ptr
+  %b = bitcast ptr %p to ptr
+  store ptr %a, ptr %out, align 8
+  store ptr %b, ptr %out, align 8
+  ret void
+}

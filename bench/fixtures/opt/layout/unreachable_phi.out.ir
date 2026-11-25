@@ -1,0 +1,18 @@
+; iyi-ir 1
+source_filename = "unreachable_phi"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @unreachable_phi() {
+entry:
+  %slot = alloca i32, align 4
+  br label %first
+first:
+  br label %done
+done:
+  %value = phi i32 [ 1, label %first ], [ 2, label %dead_incoming ]
+  ret i32 %value
+dead_incoming:
+  br label %done
+dead_last:
+  unreachable
+}

@@ -81,11 +81,16 @@ class Iyi::Program
 
     flags.add "armhf" if target.armhf?
     {% unless flag?(:without_llvm) %}
-      if target.architecture == "wasm32" && target.to_s == codegen_target.to_s
-        features = LLVM.string_and_dispose(LibLLVM.get_target_machine_feature_string(target_machine))
-        feature = features.split(',').reverse_each.find { |entry| entry == "+simd128" || entry == "-simd128" }
-        flags.add "simd128" if feature == "+simd128"
-      end
+      # The target's CPU features exist only when this LLVM has a WebAssembly
+      # back end. Flag and linker queries still work without one; codegen
+      # reports the missing back end when a wasm binary is requested.
+      {% if LibLLVM::BUILT_TARGETS.includes?(:webassembly) %}
+        if target.architecture == "wasm32" && target.to_s == codegen_target.to_s
+          features = LLVM.string_and_dispose(LibLLVM.get_target_machine_feature_string(target_machine))
+          feature = features.split(',').reverse_each.find { |entry| entry == "+simd128" || entry == "-simd128" }
+          flags.add "simd128" if feature == "+simd128"
+        end
+      {% end %}
     {% end %}
 
     flags.add "unix" if target.unix?

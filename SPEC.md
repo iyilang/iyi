@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 36,982 lines, of which 4,785 are the library held to the 4,785 ceiling (7,548 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| hosted compiler | 155,388 lines of Crystal |
+| iyi's own prelude | 37,276 lines, of which 4,785 are the library held to the 4,785 ceiling (7,629 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| hosted compiler | 155,425 lines of Crystal |
 | artifact format | `.iyimod` v65, checksum per section |
 | samples | 28 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets on which Crystal's library is type-checked, eight whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 36,982 lines
+> "No standard library worth the name" is still true of iyi's own 37,276 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 36,982 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 37,276 lines,
 primitives included, of which the library is 4,785.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -304,9 +304,9 @@ the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
 **4,785 lines** of the 21,556, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 2,763 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 2,844 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 7,548 with the floor
+below settles and explains. Opening `src/iyi/` counts 7,629 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -427,7 +427,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason — the platform floor measures **2,763 lines**
+exists for the same reason — the platform floor measures **2,844 lines**
 today (1,871 of the 4,803 that day), and Windows is the largest arm of it
 by a wide margin, which is what a platform whose every path, console byte
 and integer division needs its own answer costs.
@@ -1084,8 +1084,8 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 155,388 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 36,982-line own prelude + 130,705 in std |
+| Compiler | 24,984 lines, **written in Crystal** | 155,425 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 37,276-line own prelude + 130,705 in std |
 | Specs | 21,146 lines | 18,030 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
@@ -4096,6 +4096,56 @@ stabilised and enabled by default in Cranelift/Wasmtime without extra flags, or
 WASI 0.2/0.3 component-model async execution supporting stackful fibers directly.
 Neither a sequential imitation nor a post-link bytecode transformation is
 acceptable.
+
+#### III.4.12a Tasks on freestanding wasm: **BUILT, on JSPI hosts**
+
+`wasm32-unknown-unknown` uses the same scheduler, channel queues, sleep heap,
+group joins and cancellation as the native runtime. JavaScript Promise
+Integration (JSPI) suspends a wasm call at a switch and resumes the selected
+fiber; no Asyncify rewrite or post-link optimizer is used. This is a
+single-threaded scheduler. `spawn(unit: :new)` and `-Diyi_chaos` are refused
+at compile time. WASI's refusal above is unchanged.
+
+The host contract is III.12.1. Each spawned fiber has a 256 KiB linear-memory
+shadow stack, with a canary at its low end checked at a switch. The main stack
+is the linker's default 64 KiB. The collector scans the running stack and
+each parked fiber's saved range, so an object held only by a parked fiber
+survives collection. A corrupted canary reports `iyi: fiber shadow stack
+overflow` and ends the program. A frame that writes beyond its stack can
+corrupt memory or trap before the next switch; the canary is not a guard page.
+
+Completed fibers return their atomic shadow stacks to a pool that grows with
+the number needed at once. It holds at most 13,107: wasm32 has at most 65,536
+pages, and each stack and its header take five. The next fiber takes a pooled
+stack before growing memory and resets its canary. Idle pooled stacks are not
+scanned for roots. For other large allocations, wasm32's collector marks dead
+objects free but does not return or reuse their linear-memory pages.
+
+The loader starts and calls task-capable exports through JSPI. A host without
+JSPI can still run code that never parks; the first park reports `iyi: JSPI is
+required to park a task on wasm32-unknown-unknown` and ends the program.
+`jspi: false` selects that path explicitly. User host imports remain
+synchronous; awaiting arbitrary host promises is not offered.
+
+Chrome 137 ships JSPI by default, as does Node 25.0.0; the Node 24 LTS line
+enabled it in 24.20.0. See the [Chrome 137 release notes](https://developer.chrome.com/release-notes/137),
+[Node 25.0.0 release notes](https://nodejs.org/en/blog/release/v25.0.0), and
+[Node 24.20.0 release notes](https://nodejs.org/en/blog/release/v24.20.0).
+On this Mac, Node 26.7.0 and HeadlessChrome 156.0.8078.4 both exposed
+`WebAssembly.Suspending` and `WebAssembly.promising`. The two-fiber iyi probe
+kept its objects across a forced collection in both hosts. Omitting the parked
+stack scan returned `-1,-1`; sharing one shadow stack returned `-2,1702`.
+
+`bench/wasm_tasks_exercise.sh` compares the portable task exercise with
+native output in plain and release builds. One run on this Mac measured
+100,000 channel round trips at 69.3 ms plain and 59.1 ms release in Node,
+and 100.9 ms plain and 85.2 ms release in headless Chrome. In the same
+cross-compile/link mode, `hello` was 69,578 bytes without a task path and
+119,705 bytes with `sleep(0)` added. With forced collections, 2,000 sequential
+fibers kept memory at 15 pages, and a repeated 32-fiber burst kept it at 171
+pages in both hosts. Disabling stack reuse grew memory by 241 pages over 48
+fibers. The measurements describe these builds, not a throughput guarantee.
+
 
 #### III.4.13 Tasks across cores: **BUILT — `spawn(unit: :new)`, a pool of workers that steal started tasks from each other; `Share` gates its block**
 
@@ -9730,6 +9780,15 @@ compiler-rt. Only referenced host functions are imported, all from module
 | `exit(code: i32)` | Stop execution without returning. |
 | `clock_ns(clock: i32) -> i64` | Clock 0 is nanoseconds since the Unix epoch; clock 1 is monotonic nanoseconds. |
 | `random(ptr: i32, len: i32) -> i32` | Fill bytes from a cryptographically secure source; return 0 or -1 on error. |
+| `swap(from: i32, to: i32, to_stack_top: i32)` | JSPI suspending import. Save the running shadow-stack pointer in `from`, then resume or start `to` with the given stack top. |
+| `idle(timeout_ms: i32)` | JSPI suspending import. Resume after the timeout; -1 means no deadline. |
+| `fiber_exit(next: i32, next_stack_top: i32)` | Plain import. End this fiber and schedule its successor. |
+
+On this target `--release` passes `--strip-debug` to `wasm-ld`, removing
+DWARF from the linked module while retaining its function name section for
+host stack traces. Add `-d` to keep full symbolic debug information instead.
+The same rule applies to `--release -O z`; the latter asks LLVM to optimize
+for size. Plain builds and `wasm32-wasi` keep their existing debug policy.
 
 The module exports `memory`, `iyi_start() -> i32`, `iyi_alloc(size: i32) ->
 i32`, and `iyi_free(ptr: i32)`. The host calls `iyi_start` before any other
@@ -9739,6 +9798,11 @@ Another call returns -1 and runs nothing. `iyi_alloc` returns an 8-aligned
 atomic byte buffer pinned across collections; `iyi_free` unpins it. Unknown
 and repeated pointers are ignored. Linear memory can grow on any call, so
 the host takes a fresh view after each call.
+Task-capable modules also export the mutable `__stack_pointer` and
+`iyi_fiber_entry(fiber: i32)`. A fiber identifier is the linear-memory
+address of its 64-bit saved-stack-pointer slot. The host saves that slot
+before switching and restores the selected pointer before resuming. These
+imports and exports are absent from a program with no task path.
 
 The prefixes `iyi_` and `__` are reserved. A module may declare additional
 host functions with `@[Link(wasm_import_module: "name")]`, and top-level
@@ -9750,18 +9814,21 @@ pointers as 32-bit offsets. A module that uses these raw operations carries
 The installed `src/iyi/wasm/iyi.mjs` exports `instantiate` and `IyiExit`.
 It accepts bytes, a `Response`, a promise of one, or a compiled module; user
 imports occupy modules other than the reserved `iyi`. Options provide byte
-callbacks for stdout and stderr, a stdin supplier, and whether to start
-immediately. Its returned object exposes the instance, module, exports,
-memory, `start`, `alloc`, `free`, `put`, `bytes`, `string`, and `call`.
+callbacks for stdout and stderr, a stdin supplier, whether to start
+immediately, and `jspi: false` to disable JSPI.
+The returned object exposes the instance, module, exports, memory, `start`,
+`alloc`, `free`, `put`, `bytes`, `string`, and `call`.
 `start` returns an exit status; a host `exit` raises `IyiExit` with `code`.
+`start` and `call` are asynchronous. The loader refuses overlapping calls
+and allocations while a call is active, since they share one shadow-stack
+pointer. After a host exit, subsequent calls and allocations are refused.
 The loader uses the host's cryptographic random source and never substitutes
 guessable bytes.
 
 File operations have no filesystem, environment reads are empty and there is
-no current directory. `group`, `sleep` and `-Diyi_chaos` are compile errors
-on this target until it has a scheduler. `bench/wasm_freestanding_exercise.sh`
-runs the contract in Node and isolated headless Chrome and compares the
-sample programs with native output.
+no current directory. `bench/wasm_freestanding_exercise.sh` runs the host
+contract in Node and isolated headless Chrome and compares sample programs
+with native output. `bench/wasm_tasks_exercise.sh` exercises the task path.
 
 ### III.13 Unsafe code: **BUILT — a module that handles raw memory says so with `@[Unsafe("why")]` above its header, and the typed check refuses every unchecked operation anywhere else; held by `bench/unsafe.sh`**
 
@@ -9890,7 +9957,7 @@ it in pieces, allocating nothing.
 point; four of them (box, deque, static_array, weak_ref) are marked by
 hand outright, since only a program that instantiates their generic
 bodies types them and `iyi fix src/std` cannot see them. bench has
-100 marked programs of 203, and none of `samples/iyi`'s 28 programs
+101 marked programs of 204, and none of `samples/iyi`'s 28 programs
 needs one. The specs' snippets whose stand-in for the prelude or std (a
 `@[Primitive]`, a `lib`, a `Pointer` field, a `@[Share]` type,
 `uninitialized` storage) sits in the compiled module are marked as the
@@ -9918,7 +9985,7 @@ module of its own, the way Rust crates isolate theirs. Counted at
 2f070a01e by reading the sources, blocks (`unsafe { }`) would have
 wrapped 2,338 runs of lines in src/std, 900 in src/iyi and 607 in bench,
 and a mark per declaration 1,535, 469 and 258 defs, against 86, 15 and
-100 module marks.
+101 module marks.
 
 ---
 
@@ -14214,7 +14281,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 36,982-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 37,276-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

@@ -1,0 +1,11 @@
+module straight
+
+def calculate(x : Int64, y : Int64) : Int64
+  a = x * y
+  b = a + x
+  c = b - 7_i64
+  c ^ y
+end
+
+puts "#{calculate(9_i64, 4_i64)}"
+puts "#{calculate(-5_i64, 3_i64)}"

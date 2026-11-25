@@ -1,0 +1,12 @@
+module fp_chain
+
+import std/float
+
+def float_chain(x : Float64) : Float64
+  a = x * 2.0
+  b = a + 3.0
+  b - 1.0
+end
+
+puts "#{float_chain(4.0).to_i64}"
+puts "#{float_chain(-3.0).to_i64}"

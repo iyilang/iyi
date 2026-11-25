@@ -179,7 +179,14 @@ run_rg1() {
   if [ "$WINDOWS" -eq 1 ]; then
     mkdir -p "$rg1_dir/.build"
     cp "$REPO/.build/crystal.exe" "$REPO/.build/LLVM-C.dll" "$rg1_dir/.build/"
-    make -C "$rg1_dir" -f Makefile.win iyi FLAGS="$extra_flags" IYI_CONFIG_BUILD_COMMIT="$commit" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"
+    # Without the two search paths this script exports for the programs it
+    # builds: the fork's compiler reads IYI_LIBRARY_PATH as THE place to find
+    # libraries, so with it set to the repository's lib the build of the
+    # compiler itself stopped at "Cannot locate the .lib files for the
+    # following libraries: llvm" (llvm-dynamic.lib is in CRYSTAL_LIBRARY_PATH;
+    # job 139233358204 failed with them, and the same make without them
+    # passed in that job's probe step).
+    env -u IYI_LIBRARY_PATH -u IYI_PATH make -C "$rg1_dir" -f Makefile.win iyi FLAGS="$extra_flags" IYI_CONFIG_BUILD_COMMIT="$commit" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"
     c2_iyi="$c2_iyi.exe"
   else
     make -C "$rg1_dir" -j8 iyi FLAGS="$extra_flags" IYI_CONFIG_BUILD_COMMIT="$commit" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"

@@ -26,9 +26,9 @@ build_driver() {
 
 # A missing .out.ir means the canonical input is expected unchanged.
 fixture_check() {
-  local pass="$1" name="$2" changed="$3" file expected
-  file="$FIXTURES/$pass/$name.ir"
-  expected="$FIXTURES/$pass/$name.out.ir"
+  local pass="$1" name="$2" changed="$3" folder="${4:-$1}" file expected
+  file="$FIXTURES/$folder/$name.ir"
+  expected="$FIXTURES/$folder/$name.out.ir"
   if [ ! -f "$file" ]; then fail "missing fixture $pass/$name.ir"; return; fi
   if [ "$changed" = changed ] && [ ! -f "$expected" ]; then
     fail "missing changed-output golden $pass/$name.out.ir"; return
@@ -79,23 +79,23 @@ fixture_stats() {
 # behavior is observed. Older mutation.sh counts every nonzero as caught, so
 # the caller separately requires status 1, never a build/runtime failure (2).
 mutation_check() {
-  local label="$1" pass="$2" name="$3" status="$WORK/$1.status" rc=0 expected
+  local label="$1" pass="$2" name="$3" folder="${4:-$2}" option="${5:-}" status="$WORK/$1.status" rc=0 expected
   printf '2\n' >"$status"
   if ! build_driver "$MUTANT"; then
     echo "mutant $label did not build" >&2; cat "$WORK/build.log" >&2; return 2
   fi
-  expected="$FIXTURES/$pass/$name.out.ir"
-  [ -f "$expected" ] || expected="$FIXTURES/$pass/$name.ir"
+  expected="$FIXTURES/$folder/$name.out.ir"
+  [ -f "$expected" ] || expected="$FIXTURES/$folder/$name.ir"
   if ! "$DRV" print "$(native_path "$expected")" >"$WORK/mut-expected.ir" 2>"$WORK/mut-expected.err"; then
     echo "cannot print golden for $label" >&2; return 2
   fi
-  "$PY" - "$(native_path "$MUTANT")" "$pass" "$(native_path "$FIXTURES/$pass/$name.ir")" \
-    "$(native_path "$WORK/mut-actual.ir")" "$(native_path "$WORK/mut-actual.err")" <<'PY' || rc=$?
+  "$PY" - "$(native_path "$MUTANT")" "$pass" "$(native_path "$FIXTURES/$folder/$name.ir")" \
+    "$(native_path "$WORK/mut-actual.ir")" "$(native_path "$WORK/mut-actual.err")" "$option" <<'PY' || rc=$?
 import subprocess, sys
-binary, name, source, output, error = sys.argv[1:]
+binary, name, source, output, error, option = sys.argv[1:]
 try:
     with open(output, 'wb') as out, open(error, 'wb') as err:
-        result = subprocess.run([binary, 'run', '--no-verify', name, source],
+        result = subprocess.run([binary, 'run', '--no-verify'] + ([option] if option else []) + [name, source],
                                 stdout=out, stderr=err, timeout=60)
 except (OSError, subprocess.TimeoutExpired) as exc:
     print('mutant execution unavailable:', exc, file=sys.stderr)
@@ -123,6 +123,47 @@ PY
 generated_mutation_check() {
   local FIXTURES="$WORK/s6p-fixtures"
   mutation_check "$@"
+}
+
+# A build or execution failure is not a caught graph-complexity mutation.
+call_graph_mutation_check() {
+  local label="$1" status="$WORK/$1.status" rc=0
+  printf '2\n' >"$status"
+  if ! build_driver "$MUTANT"; then
+    echo "mutant $label did not build" >&2; cat "$WORK/build.log" >&2; return 2
+  fi
+  "$PY" - "$(native_path "$MUTANT")" "$(native_path "$WORK/call-edges-mut-small.ir")" \
+    "$(native_path "$WORK/call-edges-mut-large.ir")" "$(native_path "$WORK/$label.ratio")" <<'PY' || rc=$?
+import subprocess, sys
+binary, small_path, large_path, result_path = sys.argv[1:]
+counts = []
+for path in (small_path, large_path):
+    try:
+        result = subprocess.run([binary, 'call-edges', path], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=180)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.decode('utf-8', 'replace'))
+        count = int(result.stdout.strip())
+        if count <= 0:
+            raise ValueError('edge count must be positive')
+        counts.append(count)
+    except (OSError, subprocess.TimeoutExpired, ValueError, RuntimeError) as exc:
+        print('graph mutation could not be measured:', exc, file=sys.stderr)
+        sys.exit(2)
+ratio = counts[1] / counts[0]
+with open(result_path, 'w', encoding='utf-8') as result:
+    result.write('  %s: %d -> %d edges, ratio %.3f (bound 3.0)\n' %
+                 (result_path.rsplit('/', 1)[-1].split('.')[0], counts[0], counts[1], ratio))
+sys.exit(1 if ratio > 3.0 else 0)
+PY
+  if [ "$rc" -eq 1 ]; then
+    printf '1\n' >"$status"; return 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    return 2
+  fi
+  printf '0\n' >"$status"
+  return 0
 }
 
 mutation_result() {
@@ -269,6 +310,7 @@ for name in guards tls_keep always_runtime_keep; do fixture_check inline "$name"
 fixture_check deadfn roots changed
 fixture_check deadfn global_keep keep
 fixture_check deadfn asm_keep keep
+fixture_check deadfn asm_names changed
 
 echo '== 2e. inliner chain decisions and callee cache invalidation'
 if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" <<'PY'
@@ -424,6 +466,27 @@ done
 fixture_stats simplify "$FIXTURES/simplify/constant_global.ir"
 fixture_stats simplify "$FIXTURES/simplify/constant_global_keep.ir"
 
+
+echo '== 2g. allocation escape'
+for file in "$FIXTURES/escape/"*.ir; do
+  case "$file" in *.out.ir) continue ;; esac
+  name=$(basename "$file" .ir)
+  if [ -f "$FIXTURES/escape/$name.out.ir" ]; then fixture_check escape "$name" changed; else fixture_check escape "$name" keep; fi
+  fixture_stats escape "$file"
+done
+
+echo '== 2h. write barriers'
+for file in "$FIXTURES/barrier/"*.ir; do
+  case "$file" in *.out.ir|*/stack_mode_heap_keep.ir) continue ;; esac
+  name=$(basename "$file" .ir)
+  if [ -f "$FIXTURES/barrier/$name.out.ir" ]; then fixture_check barrier "$name" changed; else fixture_check barrier "$name" keep; fi
+  fixture_stats barrier "$file"
+done
+fixture_check barrier-stack stack_mode_heap_keep keep barrier
+for pass in escape barrier barrier-stack; do
+  fixture_check "$pass" partition_asm_keep keep release
+done
+
 echo '== 3. default pipeline fixtures, determinism and idempotence'
 echo '== 3a. preserve entry frames across release rounds'
 if entry_chain_check "$DRV" "$FIXTURES/release/entry_chain.ir" "$WORK/entry-first.ir" && \
@@ -438,6 +501,9 @@ fi
 fixture_check default locals_loop changed
 fixture_check release full changed
 fixture_check release scalar_slot changed
+fixture_check release frame_cap changed
+fixture_check release returns_twice changed
+fixture_check release nested_objects changed
 if ! "$DRV" print "$(native_path "$FIXTURES/licm/invariant_arith.out.ir")" >"$WORK/licm-release-expected.ir" 2>"$WORK/licm-release.err" || \
    ! "$DRV" run --verify-each release "$(native_path "$FIXTURES/licm/invariant_arith.ir")" >"$WORK/licm-release-actual.ir" 2>"$WORK/licm-release.err" || \
    ! cmp -s "$WORK/licm-release-expected.ir" "$WORK/licm-release-actual.ir"; then
@@ -448,7 +514,7 @@ else
 fi
 
 echo '== 4. CLI contract'
-printf 'cfg-simplify\tdefault,release\nmem2reg\tdefault,release\nsimplify\tdefault,release\ndce\tdefault,release\nsroa\trelease\ninline\trelease\ndeadfn\trelease\ncse\trelease\nprove\trelease\nlicm\trelease\nlayout\trelease\n' >"$WORK/passes.expected"
+printf 'cfg-simplify\tdefault,release\nmem2reg\tdefault,release\nsimplify\tdefault,release\ndce\tdefault,release\nsroa\trelease\ninline\trelease\ndeadfn\trelease\ncse\trelease\nprove\trelease\nlicm\trelease\nlayout\trelease\nescape\trelease\nbarrier\trelease\nbarrier-stack\trelease\n' >"$WORK/passes.expected"
 if ! "$DRV" passes >"$WORK/passes.actual" 2>"$WORK/cli.err" || ! cmp -s "$WORK/passes.expected" "$WORK/passes.actual"; then
   fail 'passes did not list the expected names and tiers'
 fi
@@ -555,13 +621,13 @@ echo '== 5. diamond-chain scaling'
 # Each size is run three times and the least figure is kept: the child's CPU
 # time where the host reports it, so other jobs on the machine do not stretch
 # it, and elapsed time elsewhere.
-if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" "${NATIVE_OPT_SCALE_K:-2048}" "${NATIVE_OPT_RELEASE_SCALE_K:-4096}" "${NATIVE_OPT_LOOP_SCALE_K:-2048}" <<'PY'
+if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" "${NATIVE_OPT_SCALE_K:-2048}" "${NATIVE_OPT_RELEASE_SCALE_K:-4096}" "${NATIVE_OPT_LOOP_SCALE_K:-2048}" "${NATIVE_OPT_ALLOC_SCALE_K:-2048}" "${NATIVE_OPT_INDEGREE_SCALE_K:-2048}" "${NATIVE_OPT_CALLBACK_SCALE_K:-2048}" <<'PY'
 import os, subprocess, sys, time
 try:
     import resource
 except ImportError:
     resource = None
-binary, work, text_k, text_release_k, text_loop_k = sys.argv[1:]
+binary, work, text_k, text_release_k, text_loop_k, text_alloc_k, text_indegree_k, text_callback_k = sys.argv[1:]
 try:
     k = int(text_k)
 except ValueError:
@@ -580,6 +646,24 @@ except ValueError:
     sys.exit('NATIVE_OPT_LOOP_SCALE_K must be an integer')
 if loop_k < 64:
     sys.exit('NATIVE_OPT_LOOP_SCALE_K must be at least 64')
+try:
+    alloc_k = int(text_alloc_k)
+except ValueError:
+    sys.exit('NATIVE_OPT_ALLOC_SCALE_K must be an integer')
+if alloc_k < 64:
+    sys.exit('NATIVE_OPT_ALLOC_SCALE_K must be at least 64')
+try:
+    indegree_k = int(text_indegree_k)
+except ValueError:
+    sys.exit('NATIVE_OPT_INDEGREE_SCALE_K must be an integer')
+if indegree_k < 64:
+    sys.exit('NATIVE_OPT_INDEGREE_SCALE_K must be at least 64')
+try:
+    callback_k = int(text_callback_k)
+except ValueError:
+    sys.exit('NATIVE_OPT_CALLBACK_SCALE_K must be an integer')
+if callback_k < 64:
+    sys.exit('NATIVE_OPT_CALLBACK_SCALE_K must be at least 64')
 
 def generate(n, path):
     with open(path, 'w', encoding='utf-8', newline='\n') as f:
@@ -650,6 +734,70 @@ def generate_loops(n, path, nested):
         result = '%seed' if nested else '%%acc%d' % (n - 1)
         f.write('done:\n  ret i64 %s\n}\n' % result)
 
+def generate_allocations(n, path):
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('; iyi-ir 1\nsource_filename = "allocation-scale"\n')
+        f.write('target triple = "aarch64-apple-darwin"\n')
+        f.write('target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"\n')
+        f.write('declare external void @consume_allocation(ptr)\n')
+        f.write('define internal ptr @__iyi_new(i64 %size, i64 %type, i64 %flags) {\nentry:\n  ret ptr null\n}\n')
+        # Local sites sit in a helper that reaches no declaration; the escaping sites call the
+        # declared sink, which the rule treats as a possible callback into the external root.
+        f.write('define internal void @local_sites() {\nentry:\n')
+        for i in range(0, n, 2):
+            f.write('  %%p%d = call ptr (i64, i64, i64) @__iyi_new(i64 8, i64 1, i64 2)\n' % i)
+            f.write('  store i64 %d, ptr %%p%d, align 8\n' % (i, i))
+        f.write('  ret void\n}\n')
+        f.write('define internal void @escaping_sites() {\nentry:\n')
+        for i in range(1, n, 2):
+            f.write('  %%p%d = call ptr (i64, i64, i64) @__iyi_new(i64 8, i64 1, i64 2)\n' % i)
+            f.write('  call void (ptr) @consume_allocation(ptr %%p%d)\n' % i)
+        f.write('  ret void\n}\n')
+        f.write('define external void @allocations() {\nentry:\n  call void () @local_sites()\n  call void () @escaping_sites()\n  ret void\n}\n')
+
+def generate_indegree(n, path):
+    # Both N indirect callers and N declarations can reach N address-taken
+    # callbacks. The recursion hub must represent that relation in O(N) edges.
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('; iyi-ir 1\nsource_filename = "high-indegree"\n')
+        f.write('target triple = "aarch64-apple-darwin"\n')
+        f.write('target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"\n')
+        f.write('declare external void @register(ptr)\n')
+        for i in range(n):
+            f.write('declare external void @decl%d()\n' % i)
+        for i in range(n):
+            f.write('define internal void @cb%d() [noinline] {\nentry:\n  ret void\n}\n' % i)
+            f.write('define internal void @caller%d(ptr %%next) [noinline] {\nentry:\n' % i)
+            f.write('  call void () %%next()\n  call void () @decl%d()\n  ret void\n}\n' % i)
+        f.write('define external void @drive() {\nentry:\n')
+        for i in range(n):
+            f.write('  call void (ptr) @register(ptr @cb%d)\n' % i)
+            f.write('  call void (ptr) @caller%d(ptr @cb%d)\n' % (i, i))
+        f.write('  ret void\n}\n')
+
+def generate_callbacks(n, path):
+    with open(path, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('; iyi-ir 1\nsource_filename = "callback-scale"\n')
+        f.write('target triple = "aarch64-apple-darwin"\n')
+        f.write('target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"\n')
+        f.write('declare external void @register(ptr)\n')
+        f.write('define internal ptr @__iyi_new(i64 %size, i64 %type, i64 %flags) {\nentry:\n  ret ptr null\n}\n')
+        f.write('define internal void @consume(i64 %v) {\nentry:\n  ret void\n}\n')
+        for i in range(n):
+            f.write('define internal i64 @cb%d(ptr %%next, i64 %%d) [noinline] {\nentry:\n' % i)
+            f.write('  %p = call ptr (i64, i64, i64) @__iyi_new(i64 8, i64 1, i64 2)\n')
+            f.write('  %r = call i64 (ptr, i64) %next(ptr %next, i64 %d)\n')
+            f.write('  %v = load i64, ptr %p, align 8\n  %sum = add i64 %v, %r\n  ret i64 %sum\n}\n')
+            f.write('define internal i64 @leaf%d(i64 %%d) [noinline] {\nentry:\n' % i)
+            f.write('  %p = call ptr (i64, i64, i64) @__iyi_new(i64 8, i64 1, i64 2)\n')
+            f.write('  %v = load i64, ptr %p, align 8\n  call void (i64) @consume(i64 %v)\n  ret i64 %v\n}\n')
+        f.write('define external i64 @drive(i64 %d) {\nentry:\n')
+        for i in range(n):
+            f.write('  call void (ptr) @register(ptr @cb%d)\n' % i)
+            f.write('  %%v%d = call i64 (i64) @leaf%d(i64 %%d)\n' % (i, i))
+            f.write('  %%sum%d = add i64 %s, %%v%d\n' % (i, '%d' if i == 0 else '%%sum%d' % (i - 1), i))
+        f.write('  ret i64 %%sum%d\n}\n' % (n - 1))
+
 def child_cpu():
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     return usage.ru_utime + usage.ru_stime
@@ -659,6 +807,12 @@ def run(n, verified, repeats=1, tier='default', shape='calls'):
         path = os.path.join(work, '%s-%d.ir' % (shape, n))
         if shape == 'calls':
             generate_release(n, path)
+        elif shape == 'allocations':
+            generate_allocations(n, path)
+        elif shape == 'high-indegree':
+            generate_indegree(n, path)
+        elif shape == 'callbacks':
+            generate_callbacks(n, path)
         else:
             generate_loops(n, path, shape == 'nested-loops')
     else:
@@ -678,8 +832,22 @@ def run(n, verified, repeats=1, tier='default', shape='calls'):
         if completed.returncode != 0:
             raise RuntimeError('scale run failed (%d): %s' %
                                (completed.returncode, completed.stderr.decode('utf-8', 'replace')))
-        if verified and shape != 'calls' and tier == 'release' and completed.stdout.count(b' = phi ') < n:
-            raise RuntimeError('%s scale input lost loop headers' % shape)
+        if verified and tier == 'release' and shape in ('sequential-loops', 'nested-loops'):
+            if completed.stdout.count(b' = phi ') < n:
+                raise RuntimeError('%s scale input lost loop headers' % shape)
+        if verified and tier == 'release' and shape == 'allocations':
+            kept = sum(1 for line in completed.stdout.splitlines()
+                       if b'call ' in line and b'@__iyi_new(' in line)
+            if kept < n // 2 or kept >= n:
+                raise RuntimeError('allocation scale must retain escaping sites and promote local sites: %d/%d kept' % (kept, n))
+        if verified and tier == 'release' and shape == 'high-indegree':
+            if b'@caller0(' not in completed.stdout or b'@cb0(' not in completed.stdout:
+                raise RuntimeError('high-indegree scale lost caller or callback functions')
+        if verified and tier == 'release' and shape == 'callbacks':
+            kept = sum(1 for line in completed.stdout.splitlines()
+                       if b'call ' in line and b'@__iyi_new(' in line)
+            if kept != n:
+                raise RuntimeError('callback scale must keep callbacks and promote leaves: %d/%d kept' % (kept, n))
         spent = child_cpu() - before if resource else elapsed
         if least is None or spent < least:
             least = spent
@@ -731,6 +899,74 @@ for shape in ('sequential-loops', 'nested-loops'):
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         failed = True
+print('== 6. release allocation-site scaling')
+try:
+    run(max(8, alloc_k // 8), True, tier='release', shape='allocations')
+    small = run(alloc_k, False, 3, 'release', 'allocations')
+    large = run(2 * alloc_k, False, 3, 'release', 'allocations')
+    ratio = large / small if small > 0 else float('inf')
+    print('  allocations K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s, least of 3)' %
+          (alloc_k, small, 2 * alloc_k, large, ratio,
+           'cpu' if resource else 'elapsed'))
+    if large < 0.5:
+        raise RuntimeError('allocation 2K run is under 0.5s; increase NATIVE_OPT_ALLOC_SCALE_K')
+    if ratio > 3.0:
+        raise RuntimeError('allocation 2K/K exceeds 3.0')
+except RuntimeError as exc:
+    print(str(exc), file=sys.stderr)
+    failed = True
+print('== 6. release high-indegree scaling')
+try:
+    run(8, True, tier='release', shape='high-indegree')
+    small_path = os.path.join(work, 'call-edges-small.ir')
+    large_path = os.path.join(work, 'call-edges-large.ir')
+    generate_indegree(indegree_k, small_path)
+    generate_indegree(2 * indegree_k, large_path)
+    mutation_k = max(64, indegree_k // 16)
+    generate_indegree(mutation_k, os.path.join(work, 'call-edges-mut-small.ir'))
+    generate_indegree(2 * mutation_k, os.path.join(work, 'call-edges-mut-large.ir'))
+
+    def edge_count(path):
+        try:
+            result = subprocess.run([binary, 'call-edges', path], stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, timeout=180)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.decode('utf-8', 'replace'))
+            count = int(result.stdout.strip())
+            if count <= 0:
+                raise ValueError('edge count must be positive')
+            return count
+        except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            raise RuntimeError('call-graph edge count failed: %s' % exc)
+
+    for measurement in range(1, 4):
+        small = edge_count(small_path)
+        large = edge_count(large_path)
+        ratio = large / small
+        print('  high-indegree run %d: K=%d %d edges, 2K=%d %d edges, ratio %.6f' %
+              (measurement, indegree_k, small, 2 * indegree_k, large, ratio))
+        if ratio > 3.0:
+            raise RuntimeError('high-indegree 2K/K exceeds 3.0')
+        if small != 6 * indegree_k + 2 or large != 12 * indegree_k + 2:
+            raise RuntimeError('high-indegree graph has an unexpected edge count')
+except RuntimeError as exc:
+    print(str(exc), file=sys.stderr)
+    failed = True
+print('== 6. release callback scaling')
+try:
+    run(max(8, callback_k // 8), True, tier='release', shape='callbacks')
+    small = run(callback_k, False, 3, 'release', 'callbacks')
+    large = run(2 * callback_k, False, 3, 'release', 'callbacks')
+    ratio = large / small if small > 0 else float('inf')
+    print('  callbacks K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s, least of 3)' %
+          (callback_k, small, 2 * callback_k, large, ratio, 'cpu' if resource else 'elapsed'))
+    if large < 0.5:
+        raise RuntimeError('callback 2K run is under 0.5s; increase NATIVE_OPT_CALLBACK_SCALE_K')
+    if ratio > 3.0:
+        raise RuntimeError('callback 2K/K exceeds 3.0')
+except RuntimeError as exc:
+    print(str(exc), file=sys.stderr)
+    failed = True
 sys.exit(1 if failed else 0)
 PY
 then
@@ -845,8 +1081,8 @@ prove_mutation 'S6P1: forward five-arm dispatch limit' src/compiler/ir/opt/inlin
   -- generated_mutation_check S6P1 inline dispatch5 || fail 'S6P1 was not caught'
 mutation_result S6P1
 prove_mutation 'S6P2: invalidate callee after cleanup' src/compiler/ir/opt/pipeline.iyi \
-  '          inline_budget.invalidate(fn) # mutation S6P2: invalidate after function cleanup' \
-  '          nil # mutation S6P2: invalidate after function cleanup' \
+  '            inline_budget.invalidate(fn) # mutation S6P2: invalidate after function cleanup' \
+  '            nil # mutation S6P2: invalidate after function cleanup' \
   -- generated_mutation_check S6P2 release cache_cleanup || fail 'S6P2 was not caught'
 mutation_result S6P2
 prove_mutation 'S6P3: count earlier dispatch starts' src/compiler/ir/opt/inline.iyi \
@@ -854,7 +1090,392 @@ prove_mutation 'S6P3: count earlier dispatch starts' src/compiler/ir/opt/inline.
   '        return true if length + 1 > 5 # mutation S6P3: earlier chain starts also count' \
   -- generated_mutation_check S6P3 inline dispatch5 || fail 'S6P3 was not caught'
 mutation_result S6P3
+prove_mutation 'S9B2: early barrier never removes a heap destination' src/compiler/ir/opt/barrier.iyi \
+  '    return stack if stack_only # mutation S9B2: early pass must not remove a heap barrier' \
+  '    return true if stack_only # mutation S9B2: early pass must not remove a heap barrier' \
+  -- mutation_check S9B2 barrier-stack stack_mode_heap_keep barrier || fail 'S9B2 was not caught'
+mutation_result S9B2
+prove_mutation 'S9B1: heap pointer stores retain their barriers' src/compiler/ir/opt/barrier.iyi \
+  '        return false unless constant_nonpointer?(store.args[0]) # mutation S9B1: only pointer-free stored values' \
+  '        return false unless true # mutation S9B1: only pointer-free stored values' \
+  -- mutation_check S9B1 barrier heap_keep || fail 'S9B1 was not caught'
+mutation_result S9B1
+prove_mutation 'S9B3: merged stores preexist the bracket' src/compiler/ir/opt/barrier.iyi \
+  '      return false if forbidden.has_key?(store.args[0]) # mutation S9B3: values must be live at a stop before the bracket' \
+  '      return false if false # mutation S9B3: values must be live at a stop before the bracket' \
+  -- mutation_check S9B3 barrier merge_value_between_keep || fail 'S9B3 was not caught'
+mutation_result S9B3
+prove_mutation 'S9B4: partition publication keeps barriers' src/compiler/ir/opt/barrier.iyi \
+  '  return false if partitioned # mutation S9B4: partition publication needs the untouched barrier' \
+  '  return false if false # mutation S9B4: partition publication needs the untouched barrier' \
+  -- mutation_check S9B4 barrier partition_publish_call_keep || fail 'S9B4 was not caught'
+mutation_result S9B4
+prove_mutation 'S9B5: merged barriers shade the full range' src/compiler/ir/opt/barrier.iyi \
+  'union_words = (upper - lower) // 8_i64 # mutation S9B5: shade the union' \
+  'union_words = 1_i64 # mutation S9B5: shade the union' \
+  -- mutation_check S9B5 barrier merge_fields || fail 'S9B5 was not caught'
+mutation_result S9B5
+prove_mutation 'S9E1: stored object pointers escape' src/compiler/ir/opt/escape.iyi \
+  '            safe = false # mutation S9-store: change false to true' \
+  '            safe = true # mutation S9-store: change false to true' \
+  -- mutation_check S9E1 escape stored_global || fail 'S9E1 was not caught'
+mutation_result S9E1
+prove_mutation 'S9E2: ordinary call arguments escape' src/compiler/ir/opt/escape.iyi \
+  '            safe = barrier_use?(inst, index) && bounded_barrier?(inst, candidate, offsets) && argument_attributes_safe?(inst, index, candidate, offsets) # mutation S9-call: change to true' \
+  '            safe = true # mutation S9-call: change to true' \
+  -- mutation_check S9E2 escape passed_call || fail 'S9E2 was not caught'
+mutation_result S9E2
+prove_mutation 'S9E3: loop-carried objects escape' src/compiler/ir/opt/escape.iyi \
+  '              safe = false if cyclic_phi[inst] # mutation S9-loop: change false to true' \
+  '              safe = true if cyclic_phi[inst] # mutation S9-loop: change false to true' \
+  -- mutation_check S9E3 escape loop_carried || fail 'S9E3 was not caught'
+mutation_result S9E3
+prove_mutation 'S9E4: program-lifetime frames are excluded' src/compiler/ir/opt/escape.iyi \
+  '  return false if fn.declaration? || frames.protects?(fn) # mutation S9-top-call: remove top-level exclusion' \
+  '  return false if fn.declaration? # mutation S9-top-call: remove top-level exclusion' \
+  -- mutation_check S9E4 escape entry_chain || fail 'S9E4 was not caught'
+mutation_result S9E4
+prove_mutation 'S9E5: each loop iteration clears its object' src/compiler/ir/opt/escape.iyi \
+  '    zero_site = site # mutation S9-zero: change site to entry_anchor' \
+  '    zero_site = entry_anchor # mutation S9-zero: change site to entry_anchor' \
+  -- mutation_check S9E5 escape loop_local || fail 'S9E5 was not caught'
+mutation_result S9E5
+prove_mutation 'S9E6: headed objects receive a header store' src/compiler/ir/opt/escape.iyi \
+  '      add_before(insertions, site, header_store) # mutation S9-header: remove this line' \
+  '      nil # mutation S9-header: remove this line' \
+  -- mutation_check S9E6 escape headed || fail 'S9E6 was not caught'
+mutation_result S9E6
+prove_mutation 'S9E7: partition entry uses disable promotion' src/compiler/ir/opt/escape.iyi \
+  '      return true if value.name == "__iyi_new_shared" || value.name == "__iyi_publish" # mutation S9-partition: return false here' \
+  '      return false if value.name == "__iyi_new_shared" || value.name == "__iyi_publish" # mutation S9-partition: return false here' \
+  -- mutation_check S9E7 escape partition_shared_call || fail 'S9E7 was not caught'
+mutation_result S9E7
+prove_mutation 'S9E8: heap pointer slots remain aligned on stack' src/compiler/ir/opt/escape.iyi \
+  '          candidate.bad = true unless shape && shape.aligned # mutation S9-layout: ignore unaligned pointer slots' \
+  '          candidate.bad = true unless shape # mutation S9-layout: ignore unaligned pointer slots' \
+  -- mutation_check S9E8 escape packed_partial_store || fail 'S9E8 was not caught'
+mutation_result S9E8
+prove_mutation 'S9E9: direct entry frames are excluded' src/compiler/ir/opt/escape.iyi \
+  '  fn.name == "__iyi_main" || fn.name == "__crystal_main" || fn.name == "__iyi_program" || fn.name == "__iyi_enter" || fn.name == "main" # mutation S9-top: return false' \
+  '  false # mutation S9-top: return false' \
+  -- mutation_check S9E9 escape top_level || fail 'S9E9 was not caught'
+mutation_result S9E9
+prove_mutation 'S9E10: recursive functions are excluded' src/compiler/ir/opt/escape.iyi \
+  '  return false if cycles.recursive?(fn)' \
+  '  nil' \
+  -- mutation_check S9E10 escape recursive || fail 'S9E10 was not caught'
+mutation_result S9E10
+prove_mutation 'S9E11: typed pointer slots remain aligned' src/compiler/ir/opt/escape.iyi \
+  '  aligned_span?(span, 0_i64, 8_i64) # mutation S9-slot: accept an unaligned pointer word' \
+  '  true # mutation S9-slot: accept an unaligned pointer word' \
+  -- mutation_check S9E11 escape unaligned_pointer_hint || fail 'S9E11 was not caught'
+mutation_result S9E11
+prove_mutation 'S9E12: indirect calls may recurse' src/compiler/ir/opt/escape.iyi \
+  '      edges[k] << hub if indirect' \
+  '      nil if indirect' \
+  -- mutation_check S9E12 escape indirect_recursion || fail 'S9E12 was not caught'
+mutation_result S9E12
+prove_mutation 'S9E13: declarations may call back' src/compiler/ir/opt/escape.iyi \
+  '      edges[k] << hub if fn.declaration? # mutation S9-declaration: a declaration may call back' \
+  '      nil if fn.declaration? # mutation S9-declaration: a declaration may call back' \
+  -- mutation_check S9E13 escape declaration_callback || fail 'S9E13 was not caught'
+mutation_result S9E13
+prove_mutation 'S9E-scale-indirect: indirect callers must not expand the callback product' src/compiler/ir/opt/escape.iyi \
+  '      edges[k] << hub if indirect' \
+  '      if indirect
+        t = 0
+        while t < mod.functions.size
+          candidate = mod.functions[t]
+          if addresses.has_key?(candidate) || (!candidate.declaration? && candidate.linkage != Linkage::Internal && candidate.linkage != Linkage::Private)
+            edges[k] << t
+          end
+          t = t + 1
+        end
+      end' \
+  -- call_graph_mutation_check S9E-scale-indirect || fail 'S9E-scale-indirect was not caught'
+mutation_result S9E-scale-indirect
+test ! -f "$WORK/S9E-scale-indirect.ratio" || cat "$WORK/S9E-scale-indirect.ratio"
+prove_mutation 'S9E-scale-declaration: declarations must not expand the callback product' src/compiler/ir/opt/escape.iyi \
+  '      edges[k] << hub if fn.declaration? # mutation S9-declaration: a declaration may call back' \
+  '      if fn.declaration?
+        t = 0
+        while t < mod.functions.size
+          candidate = mod.functions[t]
+          if addresses.has_key?(candidate) || (!candidate.declaration? && candidate.linkage != Linkage::Internal && candidate.linkage != Linkage::Private)
+            edges[k] << t
+          end
+          t = t + 1
+        end
+      end' \
+  -- call_graph_mutation_check S9E-scale-declaration || fail 'S9E-scale-declaration was not caught'
+mutation_result S9E-scale-declaration
+test ! -f "$WORK/S9E-scale-declaration.ratio" || cat "$WORK/S9E-scale-declaration.ratio"
+prove_mutation 'S9E14: every function is a callback target' src/compiler/ir/opt/escape.iyi \
+  '      edges[hub] << k if addresses.has_key?(fn) ||' \
+  '      edges[hub] << k if true ||' \
+  -- mutation_check S9E14 escape indirect_nonrecursive || fail 'S9E14 was not caught'
+mutation_result S9E14
+prove_mutation 'S9E15: persist frame-cap rejection' src/compiler/ir/opt/escape.iyi \
+  '      mark_capped(insertions, replacements, candidate.call) # mutation S9-cap-mark: preserve a cap rejection' \
+  '      nil # mutation S9-cap-mark: preserve a cap rejection' \
+  -- mutation_check S9E15 escape frame_cap || fail 'S9E15 was not caught'
+mutation_result S9E15
+prove_mutation 'S9E16: do not promote a marked call' src/compiler/ir/opt/escape.iyi \
+  '  return nil if frame_capped?(inst) # mutation S9-capped: a marked call stays on the heap' \
+  '  nil # mutation S9-capped: a marked call stays on the heap' \
+  -- mutation_check S9E16 escape frame_cap_marked || fail 'S9E16 was not caught'
+mutation_result S9E16
+prove_mutation 'S9E17: preserve the object size cap' src/compiler/ir/opt/escape.iyi \
+  '  return nil unless size && flags && size > 0_i64 && size <= 512_i64 && flags >= 0_i64 && flags <= 3_i64 # mutation S9-size-cap: cap individual objects' \
+  '  return nil unless size && flags && size > 0_i64 && size <= 1024_i64 && flags >= 0_i64 && flags <= 3_i64 # mutation S9-size-cap: cap individual objects' \
+  -- mutation_check S9E17 escape oversize || fail 'S9E17 was not caught'
+mutation_result S9E17
+prove_mutation 'S9E18: preserve the function frame cap' src/compiler/ir/opt/escape.iyi \
+  '    if frame + bytes > 2048_i64' \
+  '    if frame + bytes > 4096_i64' \
+  -- mutation_check S9E18 escape frame_cap || fail 'S9E18 was not caught'
+mutation_result S9E18
+prove_mutation 'S9E19: pointerful promotion requires a layout hint' src/compiler/ir/opt/escape.iyi \
+  '          candidate.bad = true if (candidate.flags & 2_i64) == 0_i64 # mutation S9-hint: pointerful objects need a layout hint' \
+  '          nil # mutation S9-hint: pointerful objects need a layout hint' \
+  -- mutation_check S9E19 escape packed_partial_literal || fail 'S9E19 was not caught'
+mutation_result S9E19
+prove_mutation 'S9E20: alien aliases poison a candidate' src/compiler/ir/opt/escape.iyi \
+  '    candidate.bad = true unless alias_instruction?(value) # mutation S9-alias: alien pointers poison the candidate' \
+  '    nil # mutation S9-alias: alien pointers poison the candidate' \
+  -- mutation_check S9E20 escape mixed_unused_keep || fail 'S9E20 was not caught'
+mutation_result S9E20
+prove_mutation 'S9E21: address-taken entry excludes all frames' src/compiler/ir/opt/escape.iyi \
+  '      @uncertain = true if @addresses.has_key?(fn)' \
+  '      nil if @addresses.has_key?(fn)' \
+  -- mutation_check S9E21 escape entry_address_taken || fail 'S9E21 was not caught'
+mutation_result S9E21
+prove_mutation 'S9E22: atomic accesses stay on the heap' src/compiler/ir/opt/escape.iyi \
+  '  !mem.volatile && mem.ordering == Ordering::NotAtomic # mutation S9-atomic: only ordinary accesses may promote' \
+  '  true # mutation S9-atomic: only ordinary accesses may promote' \
+  -- mutation_check S9E22 escape atomic || fail 'S9E22 was not caught'
+mutation_result S9E22
+prove_mutation 'S9E23: low header bits stay on the heap' src/compiler/ir/opt/escape.iyi \
+  '    return false unless inst.op == Op::Load && candidate.headed? && span.low >= -4_i64 && span.high < 0_i64 && info.store <= -span.high # mutation S9-header-low: reject low header bits' \
+  '    return false unless inst.op == Op::Load && candidate.headed? && span.low >= -8_i64 && span.high < 0_i64 && info.store <= -span.high # mutation S9-header-low: reject low header bits' \
+  -- mutation_check S9E23 escape header_low_bits || fail 'S9E23 was not caught'
+mutation_result S9E23
+prove_mutation 'S9E24: barrier words stay within object' src/compiler/ir/opt/escape.iyi \
+  '  words <= (candidate.size - span.high) // 8_i64 # mutation S9-barrier-bound: shade stays within object' \
+  '  true # mutation S9-barrier-bound: shade stays within object' \
+  -- mutation_check S9E24 escape barrier_bounds_keep || fail 'S9E24 was not caught'
+mutation_result S9E24
+prove_mutation 'S9E25: bulk copy source must be stack or same object' src/compiler/ir/opt/escape.iyi \
+  '  return false unless origin.is_a?(Inst) && origin.as(Inst).op == Op::Alloca && origin.as(Inst).aux.is_a?(GepAux) # mutation S9-bulk-source: source must be stack or same object' \
+  '  return true unless origin.is_a?(Inst) && origin.as(Inst).op == Op::Alloca && origin.as(Inst).aux.is_a?(GepAux) # mutation S9-bulk-source: source must be stack or same object' \
+  -- mutation_check S9E25 escape bulk_source_keep || fail 'S9E25 was not caught'
+mutation_result S9E25
+prove_mutation 'S9E26: bulk copy preserves pointer alignment' src/compiler/ir/opt/escape.iyi \
+  '  return false unless aligned_span?(target, 0_i64, 8_i64) && aligned_span?(source_span, 0_i64, 8_i64) # mutation S9-bulk-align: do not shift pointer words' \
+  '  nil # mutation S9-bulk-align: do not shift pointer words' \
+  -- mutation_check S9E26 escape bulk_align_keep || fail 'S9E26 was not caught'
+mutation_result S9E26
+prove_mutation 'S9E30: bulk copy length covers whole words' src/compiler/ir/opt/escape.iyi \
+  '  return false unless source_span && length % 8_i64 == 0_i64' \
+  '  return false unless source_span' \
+  -- mutation_check S9E30 escape bulk_partial_word_keep || fail 'S9E30 was not caught'
+mutation_result S9E30
+prove_mutation 'S9E27: barrier call alignment is honored' src/compiler/ir/opt/escape.iyi \
+  '      return false unless aligned_pointer?(candidate, inst.args[index], attr.int_value.to_i64, offsets) # mutation S9-call-offset-align: honor actual pointer offset' \
+  '      nil # mutation S9-call-offset-align: honor actual pointer offset' \
+  -- mutation_check S9E27 escape barrier_align_keep || fail 'S9E27 was not caught'
+mutation_result S9E27
+prove_mutation 'S9E28: object pointer compares are permitted' src/compiler/ir/opt/escape.iyi \
+  '          elsif harmless_compare?(inst, index, sets) # mutation S9-compare: compare only null or same object' \
+  '          elsif false # mutation S9-compare: compare only null or same object' \
+  -- mutation_check S9E28 escape pointer_compare || fail 'S9E28 was not caught'
+mutation_result S9E28
+prove_mutation 'S9E29: zero each loop allocation before a read' src/compiler/ir/opt/escape.iyi \
+  '    zero_site = site # mutation S9-zero: change site to entry_anchor' \
+  '    zero_site = entry_anchor # mutation S9-zero: change site to entry_anchor' \
+  -- mutation_check S9E29 escape loop_read_zero || fail 'S9E29 was not caught'
+mutation_result S9E29
+for pass in escape barrier barrier-stack; do
+  label="S9ASM-$pass"
+  prove_mutation "$label: assembly partition use disables $pass" src/compiler/ir/opt/escape.iyi \
+    '        return true if template.includes?("__iyi_new_shared") || template.includes?("__iyi_publish")' \
+    '        nil if template.includes?("__iyi_new_shared") || template.includes?("__iyi_publish")' \
+    -- mutation_check "$label" "$pass" partition_asm_keep release || fail "$label was not caught"
+  mutation_result "$label"
+done
+prove_mutation 'S9B6: canonical narrow GEP index' src/compiler/ir/opt/barrier.iyi \
+  '    first = int_value(inst.args[1]) # mutation S9-canonical-gep: sign-extend narrow indices' \
+  '    first = inst.args[1].as(Inst).aux_int # mutation S9-canonical-gep: sign-extend narrow indices' \
+  -- mutation_check S9B6 barrier merge_narrow_gep_keep || fail 'S9B6 was not caught'
+mutation_result S9B6
+prove_mutation 'S9B7: canonical nested GEP index' src/compiler/ir/opt/barrier.iyi \
+  '      n = int_value(inst.args[index]) # mutation S9-canonical-gep-nested: sign-extend narrow indices' \
+  '      n = inst.args[index].as(Inst).aux_int # mutation S9-canonical-gep-nested: sign-extend narrow indices' \
+  -- mutation_check S9B7 barrier merge_narrow_nested_keep || fail 'S9B7 was not caught'
+mutation_result S9B7
+prove_mutation 'S9B8: sign extend i1 GEP index' src/compiler/ir/opt/barrier.iyi \
+  '    first = -1_i64 if inst.args[1].type.bits == 1 && first == 1_i64 # mutation S9-gep-i1-first: sign-extend i1' \
+  '    nil if inst.args[1].type.bits == 1 && first == 1_i64 # mutation S9-gep-i1-first: sign-extend i1' \
+  -- mutation_check S9B8 barrier merge_narrow_gep_keep || fail 'S9B8 was not caught'
+mutation_result S9B8
+prove_mutation 'S9B9: sign extend nested i1 GEP index' src/compiler/ir/opt/barrier.iyi \
+  '      n = -1_i64 if inst.args[index].type.bits == 1 && n == 1_i64 # mutation S9-gep-i1-nested: sign-extend i1' \
+  '      nil if inst.args[index].type.bits == 1 && n == 1_i64 # mutation S9-gep-i1-nested: sign-extend i1' \
+  -- mutation_check S9B9 barrier merge_narrow_gep_keep || fail 'S9B9 was not caught'
+mutation_result S9B9
+prove_mutation 'S9B10: all selected destinations must be stack' src/compiler/ir/opt/barrier.iyi \
+  '      return nil unless span # mutation S9-stack-all: every incoming operand must be stack-backed' \
+  '      next unless span # mutation S9-stack-all: every incoming operand must be stack-backed' \
+  -- mutation_check S9B10 barrier ambiguous_stack_keep || fail 'S9B10 was not caught'
+mutation_result S9B10
+prove_mutation 'S9B11: barrier begin call is direct' src/compiler/ir/opt/barrier.iyi \
+  '    return nil unless direct_call?(begin_block.insts[0], @begin_fn, 0) # mutation S9-sequence-shape: begin must be direct' \
+  '    return nil if false # mutation S9-sequence-shape: begin must be direct' \
+  -- mutation_check S9B11 barrier incomplete_indirect_keep || fail 'S9B11 was not caught'
+mutation_result S9B11
+prove_mutation 'S9B12: constant stores must be tight' src/compiler/ir/opt/barrier.iyi \
+  '        return false unless type && type.tight # mutation S9-constant-tight: padding is not a constant store' \
+  '        return false unless type # mutation S9-constant-tight: padding is not a constant store' \
+  -- mutation_check S9B12 barrier constant_padding_keep || fail 'S9B12 was not caught'
+mutation_result S9B12
+prove_mutation 'S9B13: memset removal only for zero bytes' src/compiler/ir/opt/barrier.iyi \
+  '        return false unless store.aux.as(IntrinsicAux).id == IntrinsicId::Memset && int_value(store.args[1]) == 0_i64 # mutation S9-memset-byte: only zero fill is pointer-free' \
+  '        return false unless store.aux.as(IntrinsicAux).id == IntrinsicId::Memset # mutation S9-memset-byte: only zero fill is pointer-free' \
+  -- mutation_check S9B13 barrier memset_nonzero_keep || fail 'S9B13 was not caught'
+mutation_result S9B13
+prove_mutation 'S9B14: constant coverage uses shade base' src/compiler/ir/opt/barrier.iyi \
+  '      return false unless length > 0_i64 && dest && dest.base == shade.base' \
+  '      return false unless length > 0_i64 && dest' \
+  -- mutation_check S9B14 barrier constant_outside_keep || fail 'S9B14 was not caught'
+mutation_result S9B14
+prove_mutation 'S9B15: constant stores stay in shade' src/compiler/ir/opt/barrier.iyi \
+  '      return false unless dest.offset >= shade.offset && dest.offset <= finish && length <= finish - dest.offset # mutation S9-constant-contained: stores stay within the shade' \
+  '      return false if false # mutation S9-constant-contained: stores stay within the shade' \
+  -- mutation_check S9B15 barrier constant_outside_keep || fail 'S9B15 was not caught'
+mutation_result S9B15
+prove_mutation 'S9B16: constant coverage cannot skip bytes' src/compiler/ir/opt/barrier.iyi \
+  '      return false if range.first > cursor # mutation S9-constant-gap: coverage cannot skip bytes' \
+  '      return false if false # mutation S9-constant-gap: coverage cannot skip bytes' \
+  -- mutation_check S9B16 barrier constant_gap_keep || fail 'S9B16 was not caught'
+mutation_result S9B16
+prove_mutation 'S9B17: constant coverage reaches shade end' src/compiler/ir/opt/barrier.iyi \
+  '    cursor == finish # mutation S9-constant-full: coverage must reach the end of the shade' \
+  '    true # mutation S9-constant-full: coverage must reach the end of the shade' \
+  -- mutation_check S9B17 barrier nonpointer_uncertain_keep || fail 'S9B17 was not caught'
+mutation_result S9B17
+prove_mutation 'S9B18: never merge across an observer call' src/compiler/ir/opt/barrier.iyi \
+  '      return false unless inst.op == Op::Gep || inst.op == Op::BitCast # mutation S9-merge-call: no calls between brackets' \
+  '      return false unless inst.op == Op::Gep || inst.op == Op::BitCast || inst.op == Op::Call # mutation S9-merge-call: no calls between brackets' \
+  -- mutation_check S9B18 barrier merge_call_keep || fail 'S9B18 was not caught'
+mutation_result S9B18
+prove_mutation 'S9B19: merged shades share a base' src/compiler/ir/opt/barrier.iyi \
+  '          break unless next_address && next_address.base == first_address.base && covered?(following, next_address) # mutation S9-merge-base: both shades share a base' \
+  '          break unless next_address && covered?(following, next_address) # mutation S9-merge-base: both shades share a base' \
+  -- mutation_check S9B19 barrier merge_other_object_keep || fail 'S9B19 was not caught'
+mutation_result S9B19
+prove_mutation 'S9B20: merged shades have no gap' src/compiler/ir/opt/barrier.iyi \
+  '          break if next_lower > upper || next_upper < lower' \
+  '          break if false' \
+  -- mutation_check S9B20 barrier merge_gap_keep || fail 'S9B20 was not caught'
+mutation_result S9B20
+prove_mutation 'S9B21: first merge address must be inbounds' src/compiler/ir/opt/barrier.iyi \
+  '          break if next_lower != lower && (!same_object || !next_address.inbounds) # mutation S9-merge-inbounds: differing addresses must stay in one object' \
+  '          break if next_lower != lower && !next_address.inbounds # mutation S9-merge-inbounds: differing addresses must stay in one object' \
+  -- mutation_check S9B21 barrier merge_non_inbounds_keep || fail 'S9B21 was not caught'
+mutation_result S9B21
+prove_mutation 'S9B22: second merge address must be inbounds' src/compiler/ir/opt/barrier.iyi \
+  '          break if next_lower != lower && (!same_object || !next_address.inbounds) # mutation S9-merge-inbounds: differing addresses must stay in one object' \
+  '          break if next_lower != lower && !same_object # mutation S9-merge-inbounds: differing addresses must stay in one object' \
+  -- mutation_check S9B22 barrier merge_non_inbounds_keep || fail 'S9B22 was not caught'
+mutation_result S9B22
 
+prove_mutation 'S9R1: promotion is refused in a function that can return twice' src/compiler/ir/opt/escape.iyi \
+  '  return false if function_returns_twice?(fn)' \
+  '  nil if function_returns_twice?(fn)' \
+  -- mutation_check S9R1 release returns_twice || fail 'S9R1 was not caught'
+mutation_result S9R1
+prove_mutation 'S9R2: the selective escape group repeats to a fixed point' src/compiler/ir/opt/pipeline.iyi \
+  '&& gate_changed # mutation S9-escape-fixed-point' \
+  '&& false # mutation S9-escape-fixed-point' \
+  -- mutation_check S9R2 release nested_objects || fail 'S9R2 was not caught'
+mutation_result S9R2
+prove_mutation 'S9R3a: externally visible definitions are callback targets' src/compiler/ir/opt/escape.iyi \
+  ' || (!fn.declaration? && fn.linkage != Linkage::Internal && fn.linkage != Linkage::Private) # mutation S9-hub' \
+  ' || false # mutation S9-hub' \
+  -- mutation_check S9R3a escape external_callback || fail 'S9R3a was not caught'
+mutation_result S9R3a
+prove_mutation 'S9R3b: assembly-named functions are address taken' src/compiler/ir/opt/escape.iyi \
+  '@addresses[fn] = true # mutation S9-asm-address: assembly can name a function' \
+  'nil # mutation S9-asm-address: assembly can name a function' \
+  -- mutation_check S9R3b escape asm_callback || fail 'S9R3b was not caught'
+mutation_result S9R3b
+prove_mutation 'S9R8: an asm template names a function only as a whole symbol' src/compiler/ir/opt/effects.iyi \
+  '      if whole_symbol_in?(templates[k], fn.name) || whole_symbol_in?(templates[k], "_" + fn.name)' \
+  '      if templates[k].includes?(fn.name)' \
+  -- mutation_check S9R8 escape asm_substring_promote || fail 'S9R8 was not caught'
+mutation_result S9R8
+prove_mutation 'S9R8d: deadfn keeps only whole-symbol asm names' src/compiler/ir/opt/effects.iyi \
+  '      if whole_symbol_in?(templates[k], fn.name) || whole_symbol_in?(templates[k], "_" + fn.name)' \
+  '      if templates[k].includes?(fn.name)' \
+  -- mutation_check S9R8d deadfn asm_names || fail 'S9R8d was not caught'
+mutation_result S9R8d
+prove_mutation 'S9R4a: a first GEP index of i1 true is sign-extended' src/compiler/ir/opt/escape.iyi \
+  '    first = gep_index(inst.args[1]) # mutation S9-escape-gep-i1-first: sign-extend i1' \
+  '    first = int_value(inst.args[1]) # mutation S9-escape-gep-i1-first: sign-extend i1' \
+  -- mutation_check S9R4a escape header_i1_keep || fail 'S9R4a was not caught'
+mutation_result S9R4a
+prove_mutation 'S9R4b: a nested GEP index of i1 true is sign-extended' src/compiler/ir/opt/escape.iyi \
+  '      index = gep_index(inst.args[k]) # mutation S9-escape-gep-i1-nested: sign-extend i1' \
+  '      index = int_value(inst.args[k]) # mutation S9-escape-gep-i1-nested: sign-extend i1' \
+  -- mutation_check S9R4b escape nested_i1_keep || fail 'S9R4b was not caught'
+mutation_result S9R4b
+prove_mutation 'S9R4c: a sizeof GEP index of i1 true is sign-extended' src/compiler/ir/opt/escape.iyi \
+  '  return nil unless gep_index(gep.args[1]) == 1_i64 # mutation S9-sizeof-i1: GEP indices are signed' \
+  '  return nil unless int_value(gep.args[1]) == 1_i64 # mutation S9-sizeof-i1: GEP indices are signed' \
+  -- mutation_check S9R4c escape sizeof_i1_keep || fail 'S9R4c was not caught'
+mutation_result S9R4c
+prove_mutation 'S9R5a: a memset stays within the object' src/compiler/ir/opt/escape.iyi \
+  '  return false unless target.low >= 0_i64 && target.high <= candidate.size && length >= 0_i64 && length <= candidate.size - target.high' \
+  '  return false unless target.low >= 0_i64 # mutation S9-bulk-bound: the extent check is dropped' \
+  -- mutation_check S9R5a escape memset_oversize_keep || fail 'S9R5a was not caught'
+mutation_result S9R5a
+prove_mutation 'S9R5b: a memcpy stays within the object' src/compiler/ir/opt/escape.iyi \
+  '  return false unless target.low >= 0_i64 && target.high <= candidate.size && length >= 0_i64 && length <= candidate.size - target.high' \
+  '  return false unless target.low >= 0_i64 # mutation S9-bulk-bound: the extent check is dropped' \
+  -- mutation_check S9R5b escape memcpy_oversize_keep || fail 'S9R5b was not caught'
+mutation_result S9R5b
+prove_mutation 'S9R5c: a dereferenceable parameter stays within the object' src/compiler/ir/opt/escape.iyi \
+  '      return false if attr.int_value > (candidate.size - span.high).to_u64' \
+  '      nil if attr.int_value > (candidate.size - span.high).to_u64' \
+  -- mutation_check S9R5c escape dereferenceable_oversize_keep || fail 'S9R5c was not caught'
+mutation_result S9R5c
+prove_mutation 'S9R5d: a store stays within the object' src/compiler/ir/opt/escape.iyi \
+  '    return false if span.high > candidate.size || info.store > candidate.size - span.high' \
+  '    nil if span.high > candidate.size || info.store > candidate.size - span.high' \
+  -- mutation_check S9R5d escape out_of_bounds_store || fail 'S9R5d was not caught'
+mutation_result S9R5d
+prove_mutation 'S9R5e: a load stays within the object' src/compiler/ir/opt/escape.iyi \
+  '    return false if span.high > candidate.size || info.store > candidate.size - span.high' \
+  '    nil if span.high > candidate.size || info.store > candidate.size - span.high' \
+  -- mutation_check S9R5e escape out_of_bounds_load || fail 'S9R5e was not caught'
+mutation_result S9R5e
+prove_mutation 'S9R5f: existing allocas count against the frame budget' src/compiler/ir/opt/escape.iyi \
+  '    next unless inst.op == Op::Alloca' \
+  '    next # mutation S9-frame-existing: existing allocas do not count' \
+  -- mutation_check S9R5f escape existing_frame || fail 'S9R5f was not caught'
+mutation_result S9R5f
+prove_mutation 'S9R5g: a second candidate in a shared set poisons the first' src/compiler/ir/opt/escape.iyi \
+  '      previous.bad = true' \
+  '      nil # mutation S9-poison-previous: the first candidate of a shared set stays promotable' \
+  -- mutation_check S9R5g escape mixed_candidates_unused_keep || fail 'S9R5g was not caught'
+mutation_result S9R5g
+prove_mutation 'S9R5h: a second candidate in a shared set is poisoned' src/compiler/ir/opt/escape.iyi \
+  '      previous.bad = true
+      candidate.bad = true' \
+  '      previous.bad = true
+      nil # mutation S9-poison-candidate: the second candidate of a shared set stays promotable' \
+  -- mutation_check S9R5h escape mixed_candidates || fail 'S9R5h was not caught'
+mutation_result S9R5h
 echo '== 8. verdict'
 if [ "$failed" -eq 0 ]; then
   echo 'ALL NATIVE OPT CHECKS PASSED!'

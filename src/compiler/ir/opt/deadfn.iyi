@@ -1,10 +1,10 @@
 module compiler/ir/opt/deadfn
 
 import compiler/ir/values::{Value}
-import compiler/ir/inst::{Op, Inst, AsmAux}
+import compiler/ir/inst::{Op, Inst}
 import compiler/ir/function::{Function, Linkage}
 import compiler/ir/module::{Module}
-import compiler/ir/opt/effects::{runtime_entry?}
+import compiler/ir/opt/effects::{runtime_entry?, asm_named_functions}
 
 # A function value in a constant expression is an address-taken root. Follow
 # constants only: walking a local instruction would turn its direct calls into
@@ -53,27 +53,17 @@ pub def run_deadfn(mod : Module) : Bool
   end
 
   # Address-taking is a root even when it appears in an otherwise dead body.
-  # The lowering keeps asm-named symbols external; conservatively retain any
-  # matching name in a hand-authored inline-asm template as well.
+  # The lowering keeps asm-named symbols external, so each function that an
+  # inline-asm template names as a whole symbol is a root too.
+  asm_named_functions(mod).each do |fn, flag|
+    unless live.has_key?(fn)
+      live[fn] = true
+      work << fn
+    end
+  end
   mod.functions.each do |fn|
     fn.blocks.each do |block|
       block.insts.each do |inst|
-        assembly = nil.as(AsmAux?)
-        if inst.aux.is_a?(AsmAux)
-          assembly = inst.aux.as(AsmAux)
-        elsif !inst.args.empty? && inst.args[0].is_a?(Inst)
-          target = inst.args[0].as(Inst)
-          assembly = target.aux.as(AsmAux) if target.aux.is_a?(AsmAux)
-        end
-        if inline_asm = assembly
-          template = inline_asm.template
-          mod.functions.each do |candidate|
-            if template.includes?(candidate.name) && !live.has_key?(candidate)
-              live[candidate] = true
-              work << candidate
-            end
-          end
-        end
         k = 0
         while k < inst.args.size
           value = inst.args[k]

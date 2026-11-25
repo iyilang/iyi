@@ -1,0 +1,16 @@
+; iyi-ir 1
+source_filename = "escape_entry_callee"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i64 @__iyi_main() {
+entry:
+  %v = call i64 () @worker()
+  ret i64 %v
+}
+define internal i64 @worker() {
+entry:
+  %p = call ptr (i64, i64, i64) @__iyi_new(i64 8, i64 1, i64 2)
+  %v = load i64, ptr %p, align 8
+  ret i64 %v
+}

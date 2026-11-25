@@ -1,0 +1,23 @@
+; iyi-ir 1
+source_filename = "release_nested_objects"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+%Inner = type { i64 }
+%Outer = type { ptr, i64 }
+define internal ptr @__iyi_new(i64 %size, i64 %tid, i64 %flags) {
+entry:
+  ret ptr null
+}
+define external i64 @nested_objects(i64 %x) {
+entry:
+  %inner = call ptr (i64, i64, i64) @__iyi_new(i64 ptrtoint (ptr getelementptr (%Inner, ptr null, i32 1) to i64), i64 2, i64 2)
+  %inner_field = getelementptr %Inner, ptr %inner, i32 0, i32 0
+  store i64 %x, ptr %inner_field, align 8
+  %outer = call ptr (i64, i64, i64) @__iyi_new(i64 ptrtoint (ptr getelementptr (%Outer, ptr null, i32 1) to i64), i64 3, i64 0)
+  %outer_field = getelementptr %Outer, ptr %outer, i32 0, i32 0
+  store ptr %inner, ptr %outer_field, align 8
+  %loaded = load ptr, ptr %outer_field, align 8
+  %loaded_field = getelementptr %Inner, ptr %loaded, i32 0, i32 0
+  %value = load i64, ptr %loaded_field, align 8
+  ret i64 %value
+}

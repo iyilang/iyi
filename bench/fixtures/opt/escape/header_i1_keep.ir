@@ -1,0 +1,12 @@
+; iyi-ir 1
+source_filename = "escape_header_i1_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i64 @header_i1() {
+entry:
+  %p = call ptr (i64, i64, i64) @__iyi_new(i64 16, i64 7, i64 3)
+  %header = getelementptr i64, ptr %p, i1 true
+  %v = load i64, ptr %header, align 8
+  ret i64 %v
+}

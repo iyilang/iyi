@@ -1,8 +1,25 @@
 module compiler/ir/opt/effects
 
-import compiler/ir/inst::{Op, Inst, MemAux, IntrinsicAux, Ordering, terminator_op?}
+import compiler/ir/inst::{Op, Inst, MemAux, CallAux, IntrinsicAux, AsmAux, Ordering, terminator_op?}
 import compiler/ir/function::{Function, Global}
 import compiler/ir/intrinsics::{IntrinsicId}
+import compiler/ir/module::{Module}
+
+pub def returns_twice_call?(inst : Inst) : Bool
+  return false unless inst.op == Op::Call || inst.op == Op::Invoke
+  if inst.aux.is_a?(CallAux)
+    return true if inst.aux.as(CallAux).fn_attrs.any? { |attr| attr.name == "returns_twice" }
+  end
+  return false if inst.args.empty? || !inst.args[0].is_a?(Function)
+  inst.args[0].as(Function).attrs.any? { |attr| attr.name == "returns_twice" }
+end
+
+pub def function_returns_twice?(fn : Function) : Bool
+  fn.blocks.each do |block|
+    block.insts.each { |inst| return true if returns_twice_call?(inst) }
+  end
+  false
+end
 
 def ordered_memory?(i : Inst) : Bool
   return false unless i.aux.is_a?(MemAux)
@@ -122,4 +139,60 @@ pub def runtime_entry?(f : Function) : Bool
   else
     false
   end
+end
+
+# Bytes that continue an identifier. A name next to one of them is part of a
+# longer symbol. A name next to `@`, `+`, `,`, `.` or a bracket is whole.
+pub def identifier_byte?(b : UInt8) : Bool
+  (b >= 48_u8 && b <= 57_u8) || (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || b == 95_u8
+end
+
+# Whether *form* occurs in an assembly template as a whole symbol.
+def whole_symbol_in?(text : String, form : String) : Bool
+  return false if form.bytesize == 0
+  start = 0
+  while true
+    at = text.byte_index(form, start)
+    break unless at
+    after = at + form.bytesize
+    before_ok = at == 0 || !identifier_byte?(text.byte_at(at - 1))
+    after_ok = after >= text.bytesize || !identifier_byte?(text.byte_at(after))
+    return true if before_ok && after_ok
+    start = at + 1
+  end
+  false
+end
+
+# The functions an inline-assembly template names as a whole symbol, either as
+# the name or with Mach-O's leading underscore. `___iyi_fiber_main@PAGE` names
+# `___iyi_fiber_main` and not `main`.
+pub def asm_named_functions(mod : Module) : Hash(Function, Bool)
+  templates = [] of String
+  mod.functions.each do |fn|
+    fn.blocks.each do |block|
+      block.insts.each do |inst|
+        assembly = nil.as(AsmAux?)
+        if inst.aux.is_a?(AsmAux)
+          assembly = inst.aux.as(AsmAux)
+        elsif !inst.args.empty? && inst.args[0].is_a?(Inst)
+          target = inst.args[0].as(Inst)
+          assembly = target.aux.as(AsmAux) if target.aux.is_a?(AsmAux)
+        end
+        if inline_asm = assembly
+          templates << inline_asm.template
+        end
+      end
+    end
+  end
+  named = Hash(Function, Bool).new
+  mod.functions.each do |fn|
+    k = 0
+    while k < templates.size && !named.has_key?(fn)
+      if whole_symbol_in?(templates[k], fn.name) || whole_symbol_in?(templates[k], "_" + fn.name)
+        named[fn] = true
+      end
+      k = k + 1
+    end
+  end
+  named
 end

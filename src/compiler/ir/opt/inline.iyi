@@ -7,7 +7,7 @@ import compiler/ir/module::{Module}
 import compiler/ir/intrinsics::{IntrinsicId}
 import compiler/ir/opt/analysis::{Cfg, DomTree, LoopInfo}
 import compiler/ir/opt/callgraph::{CallGraph}
-import compiler/ir/opt/effects::{runtime_entry?}
+import compiler/ir/opt/effects::{runtime_entry?, returns_twice_call?}
 import compiler/ir/opt/edit::{new_inst, new_phi}
 
 pub class InlineBudget
@@ -64,15 +64,6 @@ end
 
 def restricted_params?(attrs : Array(Array(Attribute))) : Bool
   attrs.any? { |row| has_attr?(row, "byval") || has_attr?(row, "sret") }
-end
-
-def returns_twice_call?(inst : Inst) : Bool
-  return false unless inst.op == Op::Call || inst.op == Op::Invoke
-  if inst.aux.is_a?(CallAux)
-    return true if has_attr?(inst.aux.as(CallAux).fn_attrs, "returns_twice")
-  end
-  return false if inst.args.empty? || !inst.args[0].is_a?(Function)
-  has_attr?(inst.args[0].as(Function).attrs, "returns_twice")
 end
 
 def caller_allowed?(fn : Function) : Bool

@@ -1,0 +1,20 @@
+; iyi-ir 1
+source_filename = "escape_loop_carried"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i64 @carried(i1 %again, i1 %restart) {
+entry:
+  br label %allocate
+allocate:
+  %p = call ptr (i64, i64, i64) @__iyi_new(i64 8, i64 1, i64 2)
+  br label %head
+head:
+  %old = phi ptr [ %p, label %allocate ], [ %old, label %repeat ]
+  %v = load i64, ptr %old, align 8
+  br i1 %again, label %repeat, label %done
+repeat:
+  br i1 %restart, label %allocate, label %head
+done:
+  ret i64 %v
+}

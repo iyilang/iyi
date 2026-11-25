@@ -59,6 +59,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A build over an image that is still there is not the build of a clean
+# directory on Windows: link.exe finds the debug database beside the image
+# and counts a rebuild of it (the CodeView entry's age, 1 and then 2), and
+# /Brepro derives the PE timestamp and the entry's signature from the bytes,
+# so the second build of one program at one -o differed from the first in
+# that one byte and the fields hashed from it (cmp -l: 1 byte, job
+# 139201230070; 69 bytes in bench/stale_callpath.sh's measurement). Both
+# gates here build to one -o twice, so each build starts from no image and no
+# database.
+fresh_image() {
+  rm -f "$1" "${1%.exe}.pdb"
+}
+
 run_rg7() {
   echo "== Running RG7: parallel codegen determinism (--threads 1 vs 8) =="
   local mismatches=0
@@ -72,10 +85,12 @@ run_rg7() {
     saved="$WORK/prog_t1"
 
     rm -rf "$CACHE"/*
+    fresh_image "$out"
     "$IYI" build --threads 1 -o "$out" "$prog"
     cp "$out" "$saved"
 
     rm -rf "$CACHE"/*
+    fresh_image "$out"
     "$IYI" build --threads 8 -o "$out" "$prog"
 
     if cmp "$saved" "$out" >/dev/null 2>&1; then
@@ -102,6 +117,11 @@ run_rg1() {
   echo "  copying source tree to $rg1_dir..."
   if command -v rsync >/dev/null 2>&1; then
     rsync -a --exclude='.git' --exclude='.build' "$REPO/" "$rg1_dir/"
+  elif [ "$WINDOWS" -eq 1 ]; then
+    # Git's tar cannot make the tree's symlinks here (`Cannot create symlink
+    # to 'x86_64-windows-msvc'`, exit 2): the lib_c aliases of other targets
+    # are not part of a native build, so the copy leaves every symlink out.
+    (cd "$REPO" && find . \( -name .git -o -name .build \) -prune -o ! -type l ! -type d -print0 | tar --null -T - -cf -) | (cd "$rg1_dir" && tar -xf -)
   else
     (cd "$REPO" && tar --exclude='.git' --exclude='.build' -cf - .) | (cd "$rg1_dir" && tar -xf -)
   fi
@@ -181,10 +201,12 @@ run_rg1() {
     saved="$WORK/prog_c1"
 
     rm -rf "$CACHE"/*
+    fresh_image "$out"
     "$IYI" build -o "$out" "$prog"
     cp "$out" "$saved"
 
     rm -rf "$CACHE"/*
+    fresh_image "$out"
     "$c2_iyi" build -o "$out" "$prog"
 
     if cmp "$saved" "$out" >/dev/null 2>&1; then

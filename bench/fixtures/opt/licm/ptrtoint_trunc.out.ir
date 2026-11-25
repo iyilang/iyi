@@ -1,0 +1,17 @@
+; iyi-ir 1
+source_filename = "ptrtoint_trunc"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @ptrtoint_trunc(i1 %run, ptr %base, ptr %out) {
+entry:
+  %bits = ptrtoint ptr %base to i64
+  %low_bit = trunc i64 %bits to i1
+  br label %head
+head:
+  br i1 %run, label %body, label %done
+body:
+  store i1 %low_bit, ptr %out, align 1
+  br label %head
+done:
+  ret void
+}

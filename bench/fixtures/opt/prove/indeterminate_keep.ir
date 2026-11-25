@@ -1,0 +1,26 @@
+; iyi-ir 1
+source_filename = "indeterminate_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @undef_compare() {
+entry:
+  %test = icmp eq i32 undef, undef
+  ret i1 %test
+}
+define internal i1 @poison_compare() {
+entry:
+  %test = icmp eq i32 poison, poison
+  ret i1 %test
+}
+define internal i1 @zero_divisor(i32 %x) {
+entry:
+  %value = urem i32 %x, 0
+  %test = icmp sge i32 %value, 0
+  ret i1 %test
+}
+define internal i1 @poison_flag() {
+entry:
+  %pair = intrinsic llvm.sadd.with.overflow.i32(i32 poison, i32 1)
+  %flag = extractvalue { i32, i1 } %pair, 1
+  ret i1 %flag
+}

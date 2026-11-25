@@ -1,0 +1,17 @@
+; iyi-ir 1
+source_filename = "overflow_intrinsic"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @overflow_intrinsic(i1 %run, i32 %a, i32 %b, ptr %out) {
+entry:
+  %pair = intrinsic llvm.sadd.with.overflow.i32(i32 %a, i32 %b)
+  %value = extractvalue { i32, i1 } %pair, 0
+  br label %head
+head:
+  br i1 %run, label %body, label %done
+body:
+  store i32 %value, ptr %out, align 4
+  br label %head
+done:
+  ret void
+}

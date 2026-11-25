@@ -3,7 +3,7 @@ module compiler/ir/opt/simplify
 import compiler/ir/types::{IrType}
 import compiler/ir/values::{Value}
 import compiler/ir/inst::{Op, Inst, Block, IntPredicate, IntrinsicAux}
-import compiler/ir/function::{Function}
+import compiler/ir/function::{Function, Global, Linkage, TlsModel}
 import compiler/ir/module::{Module}
 import compiler/ir/intrinsics::{IntrinsicId}
 import compiler/ir/builder::{Builder}
@@ -343,9 +343,43 @@ class Simplifier
     true
   end
 
+  def constant_global_load(inst : Inst) : Value?
+    return nil if inst.args.empty?
+    address = inst.args[0]
+    if address.is_a?(Inst)
+      addr = address.as(Inst)
+      return nil unless addr.op == Op::GlobalAddr && !addr.args.empty?
+      address = addr.args[0]
+    end
+    return nil unless address.is_a?(Global)
+    global = address.as(Global)
+    return nil unless global.constant # mutation S8-global: only immutable globals fold
+    return nil unless global.tls == TlsModel::None
+    return nil unless global.linkage == Linkage::Internal || global.linkage == Linkage::Private || global.linkage == Linkage::External
+    type = inst.type
+    return nil unless type.int? || type.float? || type.pointer?
+    return nil unless global.value_type == type
+    value = global.initializer
+    return nil unless value && value.type == type
+    if value.is_a?(Inst)
+      case value.as(Inst).op
+      when Op::ConstInt, Op::ConstFloat, Op::ConstNull, Op::ConstZero, Op::ConstUndef, Op::ConstPoison, Op::GlobalAddr, Op::FunctionAddr, Op::ConstExpr
+        return value
+      else
+        return nil
+      end
+    end
+    return value if value.is_a?(Global) || value.is_a?(Function)
+    nil
+  end
+
   def simplify(inst : Inst) : Nil
     return if @removed[inst]? || opaque?(inst)
     case inst.op
+    when Op::Load
+      if value = constant_global_load(inst)
+        replace(inst, value)
+      end
     when Op::Phi
       if value = trivial_phi(inst)
         replace(inst, value)

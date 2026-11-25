@@ -446,7 +446,7 @@ print(f"  python's cryptography (OpenSSL): AES-128-GCM {best(AESGCM(b'sixteen by
 PY
   fi
 else
-  echo "  the timing did not build or run: $(tail -1 "$WORK/speed.log" "$WORK/speed.out" 2>/dev/null | tail -1)"
+  echo "  the timing did not build or run: $(tail -q -n 1 "$WORK/speed.log" "$WORK/speed.out" 2>/dev/null | tail -1)"
   status=1
 fi
 

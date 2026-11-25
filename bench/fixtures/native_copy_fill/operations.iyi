@@ -1,0 +1,36 @@
+module copy_fill_reference
+
+import std/static_array
+
+src = StaticArray(UInt8, 256).new
+a = StaticArray(UInt8, 256).new
+b = StaticArray(UInt8, 256).new
+i = 0
+while i < 256
+  src[i] = ((i * 37 + 11) % 256).to_u8
+  a[i] = i < 64 ? 165_u8 : (i < 129 ? 195_u8 : 225_u8)
+  b[i] = src[i]
+  i = i + 1
+end
+# Each overlapping move reads the original source, in the appropriate direction.
+i = 64
+while i > 0
+  i = i - 1
+  b[i + 1] = b[i]
+end
+i = 100
+while i > 0
+  i = i - 1
+  b[i + 1] = b[i]
+end
+i = 0
+while i < 100
+  b[i + 110] = b[i + 111]
+  i = i + 1
+end
+i = 0
+while i < 256
+  puts "#{a[i]}"
+  puts "#{b[i]}"
+  i = i + 1
+end

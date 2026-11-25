@@ -1,0 +1,86 @@
+module compiler/native/aarch64/fold
+
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Inst, Op}
+
+# Match the selector's canonical representation of scalar integer and null constants.
+pub def integer_constant(v : Value) : Int64?
+  return nil unless v.is_a?(Inst)
+  c = v.as(Inst)
+  return 0_i64 if c.op == Op::ConstNull && c.type.pointer?
+  return 0_i64 if c.op == Op::ConstZero && (c.type.int? || c.type.pointer?)
+  return nil unless c.op == Op::ConstInt && c.type.int? && c.type.bits <= 64
+  value = c.aux_int
+  bits = c.type.bits
+  return value & 1_i64 if bits == 1
+  if bits < 64
+    span = 1_i64 << bits
+    value = value & (span - 1_i64)
+    value = value - span if value >= span // 2_i64
+  end
+  value
+end
+
+# A64 add/sub and compare immediates without a shift. Negative values use the
+# opposite operation, provided their magnitude fits the same field.
+pub def add_immediate?(value : Int64) : Bool
+  value >= -4095_i64 && value <= 4095_i64 # fold-immediate-range
+end
+
+# N:immr:imms for any A64 64-bit logical immediate, or nil for an unencodable mask.
+# A mask consists of a repeated power-of-two-sized element with one rotated run of ones.
+pub def logical_immediate(value : Int64) : Int64?
+  size = 2
+  while size <= 64
+    repeats = true
+    i = size
+    while i < 64
+      if ((value.unsafe_shr(i.to_i64)) & 1_i64) != ((value.unsafe_shr((i % size).to_i64)) & 1_i64)
+        repeats = false
+        break
+      end
+      i = i + 1
+    end
+    if repeats
+      ones = 0
+      starts = 0
+      start = 0
+      i = 0
+      while i < size
+        bit = (value.unsafe_shr(i.to_i64)) & 1_i64
+        if bit == 1_i64
+          ones = ones + 1
+          prev = (value.unsafe_shr(((i + size - 1) % size).to_i64)) & 1_i64
+          if prev == 0_i64
+            starts = starts + 1
+            start = i
+          end
+        end
+        i = i + 1
+      end
+      if starts == 1 && ones > 0 && ones < size
+        n = size == 64 ? 1_i64 : 0_i64
+        immr = ((size - start) % size).to_i64
+        imms = (((~(size - 1)) << 1) | (ones - 1)) & 63
+        return (n << 22) | (immr << 16) | (imms.to_i64 << 10)
+      end
+    end
+    size = size * 2
+  end
+  nil
+end
+
+# Return the sole set bit in the value's declared width, including bit 63.
+pub def single_bit(value : Int64, width : Int32) : Int32
+  return -1 if width < 1 || width > 64
+  found = -1
+  i = 0
+  while i < width
+    if ((value.unsafe_shr(i.to_i64)) & 1_i64) != 0_i64
+      return -1 if found >= 0
+      found = i
+    end
+    i = i + 1
+  end
+  found
+end

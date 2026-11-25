@@ -1,0 +1,157 @@
+; iyi-ir 1
+module "overflow"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @sadd64(i64 %a, i64 %b) {
+entry:
+  %pair = intrinsic llvm.sadd.with.overflow.i64(i64 %a, i64 %b)
+  %value = extractvalue { i64, i1 } %pair, 0
+  %flag = extractvalue { i64, i1 } %pair, 1
+  %hint = intrinsic llvm.expect.i1(i1 %flag, i1 false)
+  br i1 %hint, label %overflow, label %ok
+overflow:
+  ret i64 -111
+ok:
+  ret i64 %value
+}
+
+define internal i64 @ssub64(i64 %a, i64 %b) {
+entry:
+  %pair = intrinsic llvm.ssub.with.overflow.i64(i64 %a, i64 %b)
+  %value = extractvalue { i64, i1 } %pair, 0
+  %flag = extractvalue { i64, i1 } %pair, 1
+  br i1 %flag, label %overflow, label %ok
+overflow:
+  ret i64 -112
+ok:
+  ret i64 %value
+}
+
+define internal i64 @uadd64(i64 %a, i64 %b) {
+entry:
+  %pair = intrinsic llvm.uadd.with.overflow.i64(i64 %a, i64 %b)
+  %value = extractvalue { i64, i1 } %pair, 0
+  %flag = extractvalue { i64, i1 } %pair, 1
+  br i1 %flag, label %overflow, label %ok
+overflow:
+  ret i64 -113
+ok:
+  ret i64 %value
+}
+
+define internal i64 @usub64(i64 %a, i64 %b) {
+entry:
+  %pair = intrinsic llvm.usub.with.overflow.i64(i64 %a, i64 %b)
+  %value = extractvalue { i64, i1 } %pair, 0
+  %flag = extractvalue { i64, i1 } %pair, 1
+  br i1 %flag, label %overflow, label %ok
+overflow:
+  ret i64 -114
+ok:
+  ret i64 %value
+}
+
+define internal i64 @smul64(i64 %a, i64 %b) {
+entry:
+  %pair = intrinsic llvm.smul.with.overflow.i64(i64 %a, i64 %b)
+  %value = extractvalue { i64, i1 } %pair, 0
+  %flag = extractvalue { i64, i1 } %pair, 1
+  br i1 %flag, label %overflow, label %ok
+overflow:
+  ret i64 -115
+ok:
+  ret i64 %value
+}
+
+define internal i64 @umul64(i64 %a, i64 %b) {
+entry:
+  %pair = intrinsic llvm.umul.with.overflow.i64(i64 %a, i64 %b)
+  %value = extractvalue { i64, i1 } %pair, 0
+  %flag = extractvalue { i64, i1 } %pair, 1
+  br i1 %flag, label %overflow, label %ok
+overflow:
+  ret i64 -116
+ok:
+  ret i64 %value
+}
+
+define internal i64 @sadd8(i8 %a, i8 %b) {
+entry:
+  %pair = intrinsic llvm.sadd.with.overflow.i8(i8 %a, i8 %b)
+  %value = extractvalue { i8, i1 } %pair, 0
+  %flag = extractvalue { i8, i1 } %pair, 1
+  br i1 %flag, label %overflow, label %ok
+overflow:
+  ret i64 -117
+ok:
+  %wide = sext i8 %value to i64
+  ret i64 %wide
+}
+
+define internal i64 @uadd8(i8 %a, i8 %b) {
+entry:
+  %pair = intrinsic llvm.uadd.with.overflow.i8(i8 %a, i8 %b)
+  %value = extractvalue { i8, i1 } %pair, 0
+  %flag = extractvalue { i8, i1 } %pair, 1
+  br i1 %flag, label %overflow, label %ok
+overflow:
+  ret i64 -118
+ok:
+  %wide = zext i8 %value to i64
+  ret i64 %wide
+}
+
+define internal i64 @early_value(i64 %a, i64 %b) {
+entry:
+  %pair = intrinsic llvm.sadd.with.overflow.i64(i64 %a, i64 %b)
+  %value = extractvalue { i64, i1 } %pair, 0
+  %flag = extractvalue { i64, i1 } %pair, 1
+  %early = add i64 %value, 1
+  br i1 %flag, label %overflow, label %ok
+overflow:
+  ret i64 -119
+ok:
+  ret i64 %early
+}
+
+define i32 @main() {
+entry:
+  %a = call i64 (i64, i64) @sadd64(i64 2, i64 3)
+  %b = call i64 (i64, i64) @sadd64(i64 9223372036854775807, i64 1)
+  %c = call i64 (i64, i64) @ssub64(i64 -9223372036854775808, i64 1)
+  %d = call i64 (i64, i64) @ssub64(i64 9, i64 3)
+  %e = call i64 (i64, i64) @uadd64(i64 -1, i64 1)
+  %f = call i64 (i64, i64) @uadd64(i64 4, i64 5)
+  %g = call i64 (i64, i64) @usub64(i64 4, i64 5)
+  %h = call i64 (i64, i64) @usub64(i64 5, i64 4)
+  %i = call i64 (i64, i64) @smul64(i64 9223372036854775807, i64 2)
+  %j = call i64 (i64, i64) @smul64(i64 -5, i64 3)
+  %k = call i64 (i64, i64) @umul64(i64 4294967296, i64 4294967296)
+  %l = call i64 (i64, i64) @umul64(i64 4, i64 5)
+  %m = call i64 (i8, i8) @sadd8(i8 100, i8 100)
+  %n = call i64 (i8, i8) @sadd8(i8 100, i8 20)
+  %o = call i64 (i8, i8) @uadd8(i8 -56, i8 100)
+  %p = call i64 (i8, i8) @uadd8(i8 100, i8 20)
+  %q = call i64 (i64, i64) @early_value(i64 2, i64 3)
+  %p0 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %a)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %c)
+  %p3 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %d)
+  %p4 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %e)
+  %p5 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %f)
+  %p6 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %g)
+  %p7 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %h)
+  %p8 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %i)
+  %p9 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %j)
+  %p10 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %k)
+  %p11 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %l)
+  %p12 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %m)
+  %p13 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %n)
+  %p14 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %o)
+  %p15 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %p)
+  %p16 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %q)
+  ret i32 0
+}

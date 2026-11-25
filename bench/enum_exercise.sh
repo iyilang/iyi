@@ -174,7 +174,7 @@ if (
   fi
 else
   echo "  the artifact arm did not build or run"
-  tail -4 "$WORK/boundary/emit.log" "$WORK/boundary/use.log" 2>/dev/null
+  tail -n 4 "$WORK/boundary/emit.log" "$WORK/boundary/use.log" 2>/dev/null
   status=1
 fi
 

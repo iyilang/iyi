@@ -1,0 +1,34 @@
+; iyi-ir 1
+source_filename = "unsigned_wrap_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @unsigned_upper_by_one(ptr %out) {
+entry:
+  br label %head
+head:
+  %i = phi i8 [ 0, label %entry ], [ %next, label %body ]
+  %negative = icmp slt i8 %i, 0
+  store i1 %negative, ptr %out, align 1
+  %more = icmp ult i8 %i, 127
+  br i1 %more, label %body, label %done
+body:
+  %next = add i8 %i, 2
+  br label %head
+done:
+  ret void
+}
+define internal void @unsigned_full_width(ptr %out) {
+entry:
+  br label %head
+head:
+  %i = phi i8 [ 126, label %entry ], [ %next, label %body ]
+  %negative = icmp slt i8 %i, 0
+  store i1 %negative, ptr %out, align 1
+  %more = icmp ult i8 %i, -1
+  br i1 %more, label %body, label %done
+body:
+  %next = add i8 %i, 1
+  br label %head
+done:
+  ret void
+}

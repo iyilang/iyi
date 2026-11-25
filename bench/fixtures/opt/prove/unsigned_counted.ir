@@ -1,0 +1,71 @@
+; iyi-ir 1
+source_filename = "unsigned_counted"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @ascending(ptr %out) {
+entry:
+  br label %head
+head:
+  %i = phi i32 [ 0, label %entry ], [ %next, label %body ]
+  %more = icmp ult i32 %i, 10
+  br i1 %more, label %body, label %done
+body:
+  %negative = icmp slt i32 %i, 0
+  store i1 %negative, ptr %out, align 1
+  %next = add i32 %i, 1
+  br label %head
+done:
+  %too_high = icmp ugt i32 %i, 10
+  ret i1 %too_high
+}
+define internal i1 @descending(ptr %out) {
+entry:
+  br label %head
+head:
+  %i = phi i32 [ 10, label %entry ], [ %next, label %body ]
+  %more = icmp ugt i32 %i, 0
+  br i1 %more, label %body, label %done
+body:
+  %negative = icmp slt i32 %i, 0
+  store i1 %negative, ptr %out, align 1
+  %next = sub i32 %i, 1
+  br label %head
+done:
+  %negative_at_exit = icmp slt i32 %i, 0
+  ret i1 %negative_at_exit
+}
+define internal void @checked_add() {
+entry:
+  br label %head
+head:
+  %i = phi i32 [ 0, label %entry ], [ %next, label %latch ]
+  %more = icmp ult i32 %i, 10
+  br i1 %more, label %body, label %done
+body:
+  %pair = intrinsic llvm.uadd.with.overflow.i32(i32 %i, i32 1)
+  %next = extractvalue { i32, i1 } %pair, 0
+  %overflow = extractvalue { i32, i1 } %pair, 1
+  br i1 %overflow, label %failed, label %latch
+failed:
+  unreachable
+latch:
+  br label %head
+done:
+  ret void
+}
+define internal void @masked_limit(i32 %n, ptr %out) {
+entry:
+  %limit = and i32 %n, 15
+  br label %head
+head:
+  %i = phi i32 [ 0, label %entry ], [ %next, label %body ]
+  %more = icmp ult i32 %i, %limit
+  br i1 %more, label %body, label %done
+body:
+  %negative = icmp slt i32 %i, 0
+  store i1 %negative, ptr %out, align 1
+  %next = add i32 %i, 1
+  br label %head
+done:
+  ret void
+}

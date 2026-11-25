@@ -1,0 +1,18 @@
+; iyi-ir 1
+source_filename = "two_latches"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @two_latches(i1 %run, i1 %direct, i32 %a, i32 %b, ptr %out) {
+entry:
+  br label %head
+head:
+  br i1 %run, label %body, label %done
+body:
+  %value = mul i32 %a, %b
+  store i32 %value, ptr %out, align 4
+  br i1 %direct, label %head, label %other_latch
+other_latch:
+  br label %head
+done:
+  ret void
+}

@@ -1,0 +1,29 @@
+; iyi-ir 1
+source_filename = "nested_partial"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @nested_partial(i1 %outer_run, i1 %inner_run, i32 %a, ptr %out) {
+entry:
+  %base = mul i32 %a, 2
+  br label %outer
+outer:
+  %outer_iv = phi i32 [ 0, label %entry ], [ %outer_next, label %after_inner ]
+  br i1 %outer_run, label %inner_pre, label %done
+inner_pre:
+  %value = add i32 %base, %outer_iv
+  %bias = add i32 %value, 7
+  br label %inner
+inner:
+  %inner_iv = phi i32 [ 0, label %inner_pre ], [ %inner_next, label %body ]
+  br i1 %inner_run, label %body, label %after_inner
+body:
+  %mixed = add i32 %bias, %inner_iv
+  store i32 %mixed, ptr %out, align 4
+  %inner_next = add i32 %inner_iv, 1
+  br label %inner
+after_inner:
+  %outer_next = add i32 %outer_iv, 1
+  br label %outer
+done:
+  ret void
+}

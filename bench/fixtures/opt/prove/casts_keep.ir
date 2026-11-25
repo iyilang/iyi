@@ -1,0 +1,15 @@
+; iyi-ir 1
+source_filename = "casts_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @truncation_may_wrap(i16 %x) {
+entry:
+  %value = trunc i16 %x to i8
+  %test = icmp sge i8 %value, 0
+  ret i1 %test
+}
+define internal i1 @unsigned_may_be_negative(i32 %x) {
+entry:
+  %test = icmp ult i32 %x, 10
+  ret i1 %test
+}

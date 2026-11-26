@@ -1,0 +1,24 @@
+# Files the iyi port refuses in the declarations pass, with why: <repo-relative file> <reason>.
+# The gate fails a file the port refuses unless it is listed here, and fails a listed file the port no
+# longer refuses (remove its row then). A listed file counts the 0 its floor row holds.
+#
+# The LLVM bridge declares `lib ::LibLLVM` inside one `{% begin %}` block. The port's macro engine stops at
+# `StringLiteral#strip` ("macro method 'StringLiteral#strip' is not ported", bench/selfhost_macros_exercise
+# --sites src/compiler/llvm/lib_llvm.iyi), so the lib is never declared and every file that names a LibLLVM type
+# is refused with "undefined constant LibLLVM::<Type>".
+src/compiler/backend/llvm/emit.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/backend/llvm/import.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/backend/llvm/translate.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/llvm.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/llvm/builder.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/llvm/context.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/llvm/llvm.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/llvm/memory_buffer.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/llvm/module.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/llvm/pass_manager.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/llvm/target.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/llvm/values.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/tools/ir.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+# The two samples below are refused for a name the file itself brings in, which the bare analysis does not see.
+samples/iyi/derive.iyi undefined constant Name: a name the sample's derive and import bring in is not declared by the port
+samples/iyi/modules.iyi undefined constant Greet: a name the sample's module and import bring in is not declared by the port

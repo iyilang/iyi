@@ -436,12 +436,17 @@ fi
 echo
 echo "== 4. Checking each file against its committed floor"
 verdicts() {
-awk -F'\t' -v floorfile="$FLOOR_FILE" -v host="$HOST_OS" '
+awk -F'\t' -v floorfile="$FLOOR_FILE" -v refusalfile="$REPO/bench/selfhost_semantic_declarations.refusals" -v host="$HOST_OS" '
   BEGIN {
     while ((getline line < floorfile) > 0) {
       if (line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/) continue
       split(line, a, /[ \t]+/)
       floor[a[1]] = a[2] + 0
+    }
+    while ((getline line < refusalfile) > 0) {
+      if (line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/) continue
+      split(line, r, /[ \t]+/)
+      known[r[1]] = 1
     }
   }
   {
@@ -449,6 +454,8 @@ awk -F'\t' -v floorfile="$FLOOR_FILE" -v host="$HOST_OS" '
     key = rel
     if ((rel "@" host) in floor) key = rel "@" host
     if (note ~ /^ORACLE/) verdict = "ORACLE"
+    else if (note ~ /^PORT/ && !(rel in known)) verdict = "PORT"
+    else if (note !~ /^PORT/ && (rel in known)) verdict = "STALE REFUSAL"
     else if (!(key in floor)) verdict = "NO FLOOR"
     else if (matched < floor[key]) verdict = "BELOW FLOOR"
     else if (matched > floor[key]) verdict = "RAISE THE FLOOR"
@@ -476,7 +483,7 @@ raised = 0
 for line in open(verdicts, encoding="utf-8"):
     cols = line.rstrip("\n").split("\t")
     verdict, rel, matched = cols[0], cols[2], int(cols[4])
-    if verdict == "BELOW FLOOR" or verdict == "ORACLE":
+    if verdict in ("BELOW FLOOR", "ORACLE", "PORT", "STALE REFUSAL"):
         continue
     key = f"{rel}@{host}" if f"{rel}@{host}" in floor else rel
     old = floor.get(key, 0)
@@ -493,15 +500,17 @@ with open(floor_path, "w", encoding="utf-8", newline="\n") as out:
 print(f"  floor written: {len(floor)} entries, {raised} raised")
 PY
 verdicts
-  fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "ORACLE"' "$VERDICTS" | wc -l | tr -d ' ')
+  fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "ORACLE" || $1 == "PORT" || $1 == "STALE REFUSAL"' "$VERDICTS" | wc -l | tr -d ' ')
 else
-  fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "RAISE THE FLOOR" || $1 == "NO FLOOR" || $1 == "ORACLE"' "$VERDICTS" | wc -l | tr -d ' ')
+  fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "RAISE THE FLOOR" || $1 == "NO FLOOR" || $1 == "ORACLE" || $1 == "PORT" || $1 == "STALE REFUSAL"' "$VERDICTS" | wc -l | tr -d ' ')
 fi
 awk -F'\t' '
   $1 == "BELOW FLOOR"     { printf "  BELOW FLOOR: %s matched %s, floor %s. A regression: restore the declaration or lower nothing.\n", $3, $5, $7 }
   $1 == "RAISE THE FLOOR" { printf "  RAISE THE FLOOR: %s matched %s, floor %s. Raise the floor in bench/selfhost_semantic_declarations.floor (SEMDECL_RAISE=1).\n", $3, $5, $7 }
   $1 == "NO FLOOR"        { printf "  NO FLOOR: %s has no floor entry. Add it (SEMDECL_RAISE=1).\n", $3 }
   $1 == "ORACLE"          { printf "  ORACLE FAILED: %s: %s\n", $3, $8 }
+  $1 == "PORT"            { printf "  PORT FAILED: %s: %s (a file the port refuses is listed with its reason in bench/selfhost_semantic_declarations.refusals)\n", $3, $8 }
+  $1 == "STALE REFUSAL"   { printf "  STALE REFUSAL: %s is listed in bench/selfhost_semantic_declarations.refusals and the port no longer refuses it. Remove its row.\n", $3 }
 ' "$VERDICTS"
 while IFS= read -r rel; do
   echo "  Declaration differences for $rel (first 20 lines; < oracle, > port):"
@@ -634,6 +643,20 @@ check_enum_annotations_diverge() {
   "$probe" --enum-annotations "$REPO_NATIVE/bench/fixtures/semdecl_enum_annotations.iyi" > "$WORK/mut_enum_annotations" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle or driver failed"; return 0; }
   cmp -s "$WORK/mut_enum_annotations" "$WORK/enum_annotations_oracle"
 }
+# The define fixture dumped by a mutant driver, with and without the define, against the oracle's dump.
+check_define_flags_diverge() {
+  local probe="$WORK/mut_flags_port$EXE" rc defines
+  "$IYI" build -o "$(native_path "$probe")" "$REPO_NATIVE/bench/selfhost_semantic_declarations_exercise.iyi" > "$WORK/mut_build.log" 2>&1 || { echo "INVALID MUTANT: declaration driver did not build"; cat "$WORK/mut_build.log"; return 0; }
+  DECL_DIED=""
+  for defines in "" "semdecl_probe"; do
+    IYI_DECLARATION_FLAGS="$defines" "$ORACLE" "$flag_fixture" > "$WORK/mut_fo.txt" 2>/dev/null || { echo "INVALID MUTANT: declaration oracle failed on the define fixture"; return 0; }
+    IYI_DECLARATION_FLAGS="$defines" "$probe" "$flag_fixture" > "$WORK/mut_fp.txt" 2> "$WORK/mut_fp.err"
+    rc=$?
+    _decl_outcome "the define fixture with defines '$defines'" "$WORK/mut_fo.txt" "$rc" "$WORK/mut_fp.txt" "$WORK/mut_fp.err" || return 1
+  done
+  [ -z "$DECL_DIED" ] || echo "INVALID MUTANT: the mutant died on $DECL_DIED"
+  return 0
+}
 check_lib_starstar_diverge() {
   local probe="$WORK/mut_lib_starstar_port$EXE"
   "$IYI" build -o "$(native_path "$probe")" "$REPO_NATIVE/bench/selfhost_semantic_declarations_exercise.iyi" > "$WORK/mut_build.log" 2>&1 || { echo "INVALID MUTANT: declaration driver did not build"; cat "$WORK/mut_build.log"; return 0; }
@@ -745,6 +768,28 @@ check_reresolve_diverge() {
   cmp -s "$WORK/mut_rro.txt" "$WORK/mut_rrp.txt" || return 1
   return 0
 }
+
+echo "== 6b. A -D define reaches the port's enum body conditions"
+flag_fixture="$REPO_NATIVE/bench/fixtures/semdecl_define_flags.iyi"
+flag_bad=0
+for defines in "" "semdecl_probe"; do
+  tag="${defines:-none}"
+  if ! IYI_DECLARATION_FLAGS="$defines" "$ORACLE" "$flag_fixture" > "$WORK/flag_o_$tag.txt" 2> "$WORK/flag_oe.txt"; then
+    echo "  oracle refused the define fixture: $(head -n 1 "$WORK/flag_oe.txt")"; flag_bad=1; continue
+  fi
+  if ! IYI_DECLARATION_FLAGS="$defines" "$PORT" "$flag_fixture" > "$WORK/flag_p_$tag.txt" 2> "$WORK/flag_pe.txt"; then
+    echo "  port refused the define fixture with defines '$tag': $(head -n 1 "$WORK/flag_pe.txt")"; flag_bad=1; continue
+  fi
+  if cmp -s "$WORK/flag_o_$tag.txt" "$WORK/flag_p_$tag.txt"; then
+    echo "  defines '$tag': port and oracle dump identically"
+  else
+    echo "  defines '$tag': port and oracle DIVERGED"; diff "$WORK/flag_o_$tag.txt" "$WORK/flag_p_$tag.txt" | head -n 10; flag_bad=1
+  fi
+done
+if [ "$flag_bad" -eq 0 ] && cmp -s "$WORK/flag_o_none.txt" "$WORK/flag_o_semdecl_probe.txt"; then
+  echo "  the define changes nothing in the oracle's dump: the fixture proves nothing"; flag_bad=1
+fi
+[ "$flag_bad" -eq 0 ] || status=1
 
 echo
 echo "== 7. Mutation proofs: patches to the port's declaration pass the fixtures must catch"
@@ -1121,6 +1166,16 @@ prove_mutation "only the last annotation is read for a primitive" "$MUT_SEM" \
   "    if ann = @pending_annotations.last?" \
   -- check_primitive_annotations_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+if [ "$flag_bad" -eq 0 ]; then
+  prove_mutation "an enum body's macro condition ignores the build's defines" "$MUT_SEM" \
+    '      return flags.includes?(name)' \
+    '      return !flags.includes?(name)' \
+    -- check_define_flags_diverge || status=1
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+else
+  echo "  NOT RUN: the define fixture does not agree with the oracle"
+  status=1
+fi
 prove_mutation "enum host flags select the wrong platform branch" "$MUT_SEM" \
   '    MacroTargetFlags.for_triple(MacroTargetFlags.compile_time_triple, [] of String).includes?(name)' \
   '    !MacroTargetFlags.for_triple(MacroTargetFlags.compile_time_triple, [] of String).includes?(name)' \

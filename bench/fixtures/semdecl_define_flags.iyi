@@ -1,0 +1,12 @@
+# A -D define a build is given reaches an enum body's `{% if %}` in the declarations pass. The gate
+# dumps this file with and without -Dsemdecl_probe: the port must match the oracle each time, and the two
+# oracle dumps must differ, or the fixture proves nothing. Only this site is observable through the
+# hosted dump: the declarations a macro expansion writes are located in the expansion, so the oracle
+# does not print them, and the inline and macro-call sites cannot be told apart by it.
+enum DefineMode
+  {% if flag?(:semdecl_probe) %}
+    On = 1
+  {% else %}
+    Off = 0
+  {% end %}
+end

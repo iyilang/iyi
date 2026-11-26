@@ -156,6 +156,12 @@ class Isel
 
   # One fresh virtual register per leaf of `t`, in layout order.
   def fresh_leaves(t : IrType) : Array(Int32)
+    # The common scalar case has one leaf at offset zero; it needs no flattened tuple array.
+    if !t.void? && !t.struct? && !t.array? && (!t.int? || t.bits <= 64 || t.bits % 64 != 0)
+      v = @mf.new_vreg(leaf_class(t))
+      @mf.mark_pointer(v) if t.pointer?
+      return [v]
+    end
     acc = [] of Int32
     flatten_leaves(@layout, t).each do |l|
       v = @mf.new_vreg(leaf_class(l[1]))

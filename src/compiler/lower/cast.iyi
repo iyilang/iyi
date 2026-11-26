@@ -87,7 +87,11 @@ def clear_hole_range(low : Lowerer, pointer : Value, from : Int64, to : Int64, a
       at_alignment *= 2
     end
     offset = low.builder.const_int(low.module.types.int64, from)
-    at = low.builder.inbounds_gep(low.module.types.int8, pointer, [offset] of Value)
+    at = if pointer.is_a?(Global)
+           low.builder.const_gep(low.module.types.int8, pointer, [offset] of Value, true)
+         else
+           low.builder.inbounds_gep(low.module.types.int8, pointer, [offset] of Value)
+         end
     zero = low.builder.const_int(low.module.types.int8, 0_i64)
     count = low.builder.const_int(low.typer.size_t, to - from)
     volatile = low.builder.const_int(low.module.types.int1, 0_i64)
@@ -103,7 +107,11 @@ def clear_hole_range(low : Lowerer, pointer : Value, from : Int64, to : Int64, a
       size //= 2
     end
     offset = low.builder.const_int(low.module.types.int64, at)
-    dest = low.builder.inbounds_gep(low.module.types.int8, pointer, [offset] of Value)
+    dest = if pointer.is_a?(Global)
+             low.builder.const_gep(low.module.types.int8, pointer, [offset] of Value, true)
+           else
+             low.builder.inbounds_gep(low.module.types.int8, pointer, [offset] of Value)
+           end
     zero = low.builder.const_int(low.module.types.int((size * 8).to_i32), 0_i64)
     inst = store_aligned(low, zero, dest)
     inst.alignment = size.to_i32

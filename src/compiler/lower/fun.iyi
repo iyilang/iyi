@@ -28,7 +28,7 @@ import compiler/ir/inst::{Attribute, Block, CallConv}
 import compiler/ir/types::{IrType}
 import compiler/ir/values::{Value, Param}
 import compiler/ir/module::{Module}
-import compiler/lower/cast::{assign, to_rhs, upcast}
+import compiler/lower/cast::{assign, clear_value_holes, to_rhs, upcast}
 import compiler/lower/context::{BodyVisit, Lowerer, LowerContext, LowerSavedState, LowerVar}
 import compiler/lower/locals::{preallocate_locals}
 import compiler/lower/closure::{allocate_closure, closure_self_type, setup_closure_vars}
@@ -654,6 +654,7 @@ pub def create_local_copy_of_arg(low : Lowerer, name : String, arg_type : Type, 
       unless arg_type.is_a?(NilType)
         if passed_by_value?(arg_type)
           store_aligned(low, load_aligned(low, low.typer.llvm_type(arg_type), val), pointer)
+          clear_value_holes(low, pointer, arg_type)
         else
           store_aligned(low, val, pointer)
         end

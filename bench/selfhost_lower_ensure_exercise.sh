@@ -186,6 +186,7 @@ if [ "$passed" -eq 15 ] || { [ "$passed" -eq 14 ] && [ "$failed_names" = " invok
   prove_mutation 'by-value ensure joins use pointer phis' "$file" \
     'merge = by_value ? low.module.types.ptr : low.typer.llvm_type(t.as(Type))' \
     'merge = low.typer.llvm_type(t.as(Type))' -- mutation_check union || status=1
+  prove_mutation 'ensure aggregate copy clears holes' "$file" '  clear_value_holes(low, copy, t)' '  nil' -- mutation_check union || status=1
   prove_mutation 'body value survives cleanup' "$file" '    low.last = value' '    low.last = low.last' -- mutation_check value || status=1
   prove_mutation 'return cleanup' "$file" 'while low.ensure_nodes.size > stop' 'while low.ensure_nodes.size > low.ensure_nodes.size' -- mutation_check return || status=1
   prove_mutation 'break cleanup' "$file" 'while low.ensure_nodes.size > stop' 'while low.ensure_nodes.size > low.ensure_nodes.size' -- mutation_check break || status=1

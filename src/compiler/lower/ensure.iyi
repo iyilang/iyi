@@ -6,7 +6,7 @@ module compiler/lower/ensure
 
 import compiler/syntax/ast::{ASTNode, ExceptionHandler}
 import compiler/ir/values::{Value}
-import compiler/lower/cast::{union_temp}
+import compiler/lower/cast::{clear_value_holes, union_temp}
 import compiler/lower/context::{LowerContext, Lowerer}
 import compiler/lower/fun::{visit_node}
 import compiler/lower/helpers::{abi_name, at_terminator?, llvm_nil, load_aligned, store_aligned}
@@ -25,6 +25,7 @@ pub def preserve_across_ensure(low : Lowerer, value : Value?, type : Type?) : Va
   ir = low.typer.llvm_type(t)
   copy = low.alloca(ir, "")
   store_aligned(low, load_aligned(low, ir, v), copy)
+  clear_value_holes(low, copy, t)
   copy
 end
 

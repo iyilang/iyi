@@ -1112,8 +1112,8 @@ prove_mutation "floating arithmetic: flag numeric results as possible pointers" 
     return op == MOp::FAdd || op == MOp::FSub || op == MOp::FMul || op == MOp::FDiv ||'
 prove_mutation "collector: lose pointer provenance through integer selects" \
   src/compiler/native/regalloc_linear.iyi check_typed_fpr_provenance \
-  '                     (@fn.vreg_classes[v] == RegClass::Gpr && bitwise_gpr_value?(@fn.isa, inst))' \
-  '                     false' \
+  '          gpr_bits = @fn.vreg_classes[v] == RegClass::Gpr && bitwise_gpr_value?(@fn.isa, inst)' \
+  '          gpr_bits = false' \
   '          elsif !unknown && ((@fn.vreg_classes[v] == RegClass::Fpr && typed_fpr_value?(@fn.isa, inst)) || integer_literal?(@fn.isa, inst))' \
   '          elsif !unknown && ((@fn.vreg_classes[v] == RegClass::Fpr && typed_fpr_value?(@fn.isa, inst)) || @fn.vreg_classes[v] == RegClass::Gpr)'
 prove_mutation "floating load: flag typed memory values as possible pointers" \

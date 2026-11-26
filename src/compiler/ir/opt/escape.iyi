@@ -398,7 +398,8 @@ class CallCycles
           end
         end
       end
-      edges[k] << hub if indirect                                                                                                          # mutation S9-indirect: indirect calls may reach address-taken functions
+      # mutation S9-indirect: indirect calls may reach address-taken functions
+      edges[k] << hub if indirect
       edges[hub] << k if addresses.has_key?(fn) || (!fn.declaration? && fn.linkage != Linkage::Internal && fn.linkage != Linkage::Private) # mutation S9-hub: externally visible symbols can be called back
       k = k + 1
     end
@@ -899,7 +900,8 @@ def argument_attributes_safe?(inst : Inst, index : Int32, candidate : Candidate,
   return true if arg < 0 || arg >= attrs.size
   attrs[arg].each do |attr|
     if attr.name == "align"
-      return false if attr.int_value > 16_u64                                                           # mutation S9-call-align: preserve required alignment
+      # mutation S9-call-align: preserve required alignment
+      return false if attr.int_value > 16_u64
       return false unless aligned_pointer?(candidate, inst.args[index], attr.int_value.to_i64, offsets) # mutation S9-call-offset-align: honor actual pointer offset
     elsif attr.name == "dereferenceable" || attr.name == "dereferenceable_or_null"
       span = offsets.span(inst.args[index])
@@ -928,7 +930,8 @@ def bulk_use?(inst : Inst, index : Int32, candidate : Candidate, offsets : Offse
   return true if id == IntrinsicId::Memset
   return true if index == 1
   source_span = offsets.span(inst.args[1])
-  return false unless source_span && length % 8_i64 == 0_i64                                          # mutation S9-bulk-length: copy whole pointer words
+  # mutation S9-bulk-length: copy whole pointer words
+  return false unless source_span && length % 8_i64 == 0_i64
   return false unless aligned_span?(target, 0_i64, 8_i64) && aligned_span?(source_span, 0_i64, 8_i64) # mutation S9-bulk-align: do not shift pointer words
   origin = source_span.origin
   if origin == candidate.call
@@ -1081,8 +1084,10 @@ end
 def run_escape_with_facts(mod : Module, fn : Function, partitioned : Bool, frames : LongLivedFrames, cycles : CallCycles) : Bool
   return false if partitioned
   return false if fn.declaration? || frames.protects?(fn) # mutation S9-top-call: remove top-level exclusion
-  return false if cycles.recursive?(fn)                   # mutation S9-recursion: remove this guard
-  return false if function_returns_twice?(fn)             # mutation S9-returns-twice: promoted objects cannot cross a second return
+  # mutation S9-recursion: remove this guard
+  return false if cycles.recursive?(fn)
+  # mutation S9-returns-twice: promoted objects cannot cross a second return
+  return false if function_returns_twice?(fn)
   return false unless mod.layout.pointer_size(0) == 8
   sizes = SizeTable.new(mod)
   pointer_shapes = SlotShapes.new(sizes, false)

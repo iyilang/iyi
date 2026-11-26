@@ -259,6 +259,7 @@ fixture_check cfg-simplify forward_blocked_by_phi_conflict keep
 for name in straight_line diamond loop nested_loops uninitialized_read pointer_slot i1_slot null_uninitialized unreachable_predecessor; do fixture_check mem2reg "$name" changed; done
 for name in escaping_slot volatile_slot aggregate_slot atomic_slot tls_slot stored_address unreachable_slot_use; do fixture_check mem2reg "$name" keep; done
 for name in fold_int fold_icmp_signed identities trivial_phi condbr_const overflow_flag_unused fold_double power_of_two switch_const expect_const fold_cast fold_divrem fold_double_ops trivial_self_phi constant_global; do fixture_check simplify "$name" changed; done
+fixture_check simplify review_fold_unsigned_equal changed
 for name in float32_keep div_by_zero_keep fold_safety_keep ptrtoint_mul_keep constant_global_keep; do fixture_check simplify "$name" keep; done
 for name in dead_arith dead_phi_cycle dead_plain_load; do fixture_check dce "$name" changed; done
 for name in keep_store keep_call keep_volatile_load keep_marking_load_used keep_call_unreachable keep_atomic; do fixture_check dce "$name" keep; done
@@ -769,6 +770,11 @@ prove_mutation 'M5: signed integer comparison' src/compiler/ir/opt/fold.iyi \
   '    return lhs_value.unsafe_to_u64 < rhs_value.unsafe_to_u64 # mutation M5: signed comparison' \
   -- mutation_check M5 simplify fold_icmp_signed || fail 'M5 was not caught'
 mutation_result M5
+prove_mutation 'ESCULE: an unsigned less-or-equal of equal operands folds as less-than' src/compiler/ir/opt/fold.iyi \
+  'au <= cu' \
+  'au < cu' \
+  -- mutation_check ESCULE simplify review_fold_unsigned_equal || fail 'ESCULE was not caught'
+mutation_result ESCULE
 prove_mutation 'M6: argument mapping' src/compiler/ir/opt/inline.iyi \
   '    values[callee.params[k]] = call.args[k + 1] # mutation S6-arg: actual argument to parameter' \
   '    values[callee.params[k]] = call.args[callee.params.size - k] # mutation S6-arg: actual argument to parameter' \

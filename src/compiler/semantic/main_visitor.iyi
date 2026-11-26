@@ -1079,7 +1079,16 @@ pub class MainVisitor < TypeNodeHost
   def expand_literal(node : ASTNode) : Bool
     tree = @expansions[node]?
     if tree.nil?
-      tree = node.transform(@literal_expander)
+      # Hosted expands one logical node at a time, then visits its expansion.
+      # Eagerly transforming the whole tree erases nested And/Or nodes before
+      # their own visit can bind the type of the written expression.
+      if node.is_a?(Or)
+        tree = @literal_expander.expand_or(node.as(Or))
+      elsif node.is_a?(And)
+        tree = @literal_expander.expand_and(node.as(And))
+      else
+        tree = node.transform(@literal_expander)
+      end
       @expansions[node] = tree
     end
     tree.accept(self)

@@ -375,7 +375,7 @@ pub class TypeLookup
       return @instances.tuple_of(type_args)
     end
     if generic.full_name == "Union"
-      return TypeMerge.merge_all(program, type_args)
+      return TypeMerge.instantiate_union(program, type_args)
     end
     if generic.full_name == "Proc"
       ret = type_args[type_args.size - 1]

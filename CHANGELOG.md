@@ -205,9 +205,9 @@
   `bench/selfhost_formatter_exercise.sh` requires 32 files to format byte
   for byte as the hosted formatter does, through a path and through stdin,
   and a second pass to change nothing, and catches 18 broken copies. Of the
-  338 `.iyi` files that select the self-host jobs, the port formats 139 as
-  the hosted formatter does, formats 35 differently and refuses 164; each
-  of the 139 listed in `bench/selfhost_formatter_parity.floor` must keep
+  338 `.iyi` files that select the self-host jobs, the port formats 140 as
+  the hosted formatter does, formats 34 differently and refuses 164; each
+  of the 140 listed in `bench/selfhost_formatter_parity.floor` must keep
   matching, and `bench/selfhost_formatter_differs.ceiling` must list exactly
   the files it formats differently. Hosted commands are unchanged.
 - These nine gates run in the same three jobs through

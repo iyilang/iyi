@@ -59,6 +59,7 @@ IYI="$REPO/bin/iyi"
 HOSTED_COMPILER="$REPO/bin/crystal"
 INTERP="$REPO/src/compiler/macros/interpreter.iyi"
 PARSER="$REPO/src/compiler/macros/macro_parser.iyi"
+SYNTAX_PARSER="$REPO/src/compiler/syntax/parser.iyi"
 ENGINE="$REPO/src/compiler/macros/engine.iyi"
 CONFINEMENT="$REPO/src/compiler/macros/confinement.iyi"
 . "$REPO/bench/lib/mutation.sh"
@@ -1518,6 +1519,60 @@ else
   status=1
 fi
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+# Both sites are evaluated independently, so one refusal cannot hide the other.
+# Require the mutant to differ only in the two call-name locations.
+check_inline_index_locations() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "inline-index mutant failed to build"
+    return $?
+  fi
+  local fixture="$REPO/bench/fixtures/macro_inline_numeric_index.iyi" fixture_native
+  fixture_native="$(native_path "$fixture")" || { invalid_mutant "inline-index fixture path is unavailable"; return $?; }
+  if ! "$WORK/dump_hosted$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/index-hosted.dump" 2>"$WORK/index-hosted.err"; then
+    invalid_mutant "inline-index hosted oracle failed"
+    return $?
+  fi
+  if ! "$WORK/mut-exercise$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/index-mutant.dump" 2>"$WORK/index-mutant.err"; then
+    invalid_mutant "inline-index mutant failed to run"
+    return $?
+  fi
+  if ! awk '/^site 0 / && / error 2:13 message=/ { unicode = 1 }
+            /^site 1 / && / error 3:13 message=/ { ascii = 1 }
+            END { exit !(unicode && ascii) }' "$WORK/index-hosted.dump"; then
+    invalid_mutant "hosted inline-index errors did not have the expected locations"
+    return $?
+  fi
+  if cmp -s "$WORK/index-hosted.dump" "$WORK/index-mutant.dump"; then return 0; fi
+  if ! awk '/^site 0 / && / error 2:6 message=/ {
+              unicode = 1; sub(/ error 2:6 message=/, " error 2:13 message=")
+            }
+            /^site 1 / && / error 3:6 message=/ {
+              ascii = 1; sub(/ error 3:6 message=/, " error 3:13 message=")
+            }
+            { print }
+            END { exit !(unicode && ascii) }' "$WORK/index-mutant.dump" > "$WORK/index-normalized.dump"; then
+    invalid_mutant "inline-index mutant did not move both errors to the receiver"
+    return $?
+  fi
+  if ! cmp -s "$WORK/index-hosted.dump" "$WORK/index-normalized.dump"; then
+    invalid_mutant "inline-index mutant changed more than the call locations"
+    return $?
+  fi
+  return 1
+}
+if prove_mutation "inline indexing loses its call-name location" "$SYNTAX_PARSER" \
+  '        res = Call.new(res, method_name, args, nil, nil, named_args).at(location)
+        res.name_location = name_location
+        res.args_in_brackets = true' \
+  '        res = Call.new(res, method_name, args, nil, nil, named_args).at(location)
+        res.args_in_brackets = true' \
+  -- check_inline_index_locations; then
+  echo "    decisive: Unicode and ASCII inline indexing report the receiver, not the hosted call location"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
 
 # The plain exercise rebuilt on the patched engine: zero only when every unit check still passes.
 check_plain_exercise_passes() {

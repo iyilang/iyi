@@ -985,6 +985,7 @@ pub class Parser < Lexer
         res.name_location = name_location
         res.end_location = end_location
       when TokenKind::OP_LSQUARE
+        name_location = @token.location
         next_token_skip_space_or_newline
         call_args = preserve_stop_on_do { parse_call_args_space_consumed(true, true, true) }
         skip_space_or_newline
@@ -1005,6 +1006,7 @@ pub class Parser < Lexer
         end
 
         res = Call.new(res, method_name, args, nil, nil, named_args).at(location)
+        res.name_location = name_location
         res.args_in_brackets = true
         res.end_location = end_location
       when TokenKind::OP_LCURLY

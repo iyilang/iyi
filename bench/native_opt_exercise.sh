@@ -260,6 +260,7 @@ for name in straight_line diamond loop nested_loops uninitialized_read pointer_s
 for name in escaping_slot volatile_slot aggregate_slot atomic_slot tls_slot stored_address unreachable_slot_use; do fixture_check mem2reg "$name" keep; done
 for name in fold_int fold_icmp_signed identities trivial_phi condbr_const overflow_flag_unused fold_double power_of_two switch_const expect_const fold_cast fold_divrem fold_double_ops trivial_self_phi constant_global; do fixture_check simplify "$name" changed; done
 fixture_check simplify review_fold_unsigned_equal changed
+fixture_check simplify review_fold_xor_overlap changed
 for name in float32_keep div_by_zero_keep fold_safety_keep ptrtoint_mul_keep constant_global_keep; do fixture_check simplify "$name" keep; done
 for name in dead_arith dead_phi_cycle dead_plain_load; do fixture_check dce "$name" changed; done
 for name in keep_store keep_call keep_volatile_load keep_marking_load_used keep_call_unreachable keep_atomic; do fixture_check dce "$name" keep; done
@@ -775,6 +776,11 @@ prove_mutation 'ESCULE: an unsigned less-or-equal of equal operands folds as les
   'au < cu' \
   -- mutation_check ESCULE simplify review_fold_unsigned_equal || fail 'ESCULE was not caught'
 mutation_result ESCULE
+prove_mutation 'ESCXOR: an exclusive or folds as an inclusive or' src/compiler/ir/opt/fold.iyi \
+  'when Op::Xor then a ^ c' \
+  'when Op::Xor then a | c' \
+  -- mutation_check ESCXOR simplify review_fold_xor_overlap || fail 'ESCXOR was not caught'
+mutation_result ESCXOR
 prove_mutation 'M6: argument mapping' src/compiler/ir/opt/inline.iyi \
   '    values[callee.params[k]] = call.args[k + 1] # mutation S6-arg: actual argument to parameter' \
   '    values[callee.params[k]] = call.args[callee.params.size - k] # mutation S6-arg: actual argument to parameter' \

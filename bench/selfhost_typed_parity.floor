@@ -241,6 +241,8 @@ src/iyi/hash.iyi 78
 src/iyi/heap_partition.iyi 0
 src/iyi/heap_verify.iyi 0
 src/iyi/io.iyi 61
+# The Windows {% if flag?(:win32) %} arm in IyiIO#initialize introduces a local
+# `handle`: the port then types IyiIO#handle as Int64 where the oracle records Nil.
 src/iyi/io.iyi@windows 60
 src/iyi/macros.iyi 4
 src/iyi/number.iyi 39

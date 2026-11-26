@@ -365,8 +365,8 @@ PY
     crc=$?
     cp "$WORK/mutation.orig" "$file"
     MUTATED=""
-    if [ "$crc" -ne 0 ] && grep -qF "$expect" "$WORK/mutation.out"; then
-      echo "  $label: caught ($expect)"
+    if [ "$crc" -eq 1 ] && grep -qF "$expect" "$WORK/mutation.out"; then
+      echo "  $label: caught ($expect, exit 1)"
       return 0
     fi
     echo "  $label: NOT CAUGHT (exit $crc, expected $expect)"
@@ -379,6 +379,90 @@ PY
     env TYPED_PARITY_CHILD=1 TYPED_PARITY_BARE=1 TYPED_PARITY_RAISE=0 TYPED_PARITY_FILES="$PROOF_LIST" \
       TYPED_PARITY_FLOOR="$floor" "$@" bash "$REPO/bench/selfhost_typed_parity_exercise.sh"
   }
+
+  echo
+  echo "== 8a. Defines reach method, inline and top-level macro expansions"
+  flag_bad=0
+  for site in method inline top; do
+    fixture="$REPO_NATIVE/bench/fixtures/semtyped_${site}_flags.iyi"
+    for mode in none enabled; do
+      define=""
+      expected=Int32
+      if [ "$mode" = enabled ]; then
+        define=-Dsemtyped_probe
+        expected=String
+      fi
+      if ! "$ORACLE" --bare $define "$fixture" > "$WORK/flag_${site}_${mode}.oracle" 2> "$WORK/flag.err"; then
+        echo "  $site ($mode): oracle failed"; cat "$WORK/flag.err"; flag_bad=$((flag_bad + 1)); continue
+      fi
+      if ! "$TYPED" $IYI_TYPED_DEFINES $define "$fixture" "$REPO_NATIVE/src" > "$WORK/flag_${site}_${mode}.port" 2> "$WORK/flag.err"; then
+        echo "  $site ($mode): port failed"; cat "$WORK/flag.err"; flag_bad=$((flag_bad + 1)); continue
+      fi
+      if ! cmp -s "$WORK/flag_${site}_${mode}.oracle" "$WORK/flag_${site}_${mode}.port" ||
+         ! grep -Eq "^[0-9]+:[0-9]+ Call $expected$" "$WORK/flag_${site}_${mode}.oracle"; then
+        echo "  $site ($mode): typed dumps differ or lack the expected $expected call"
+        diff -u "$WORK/flag_${site}_${mode}.oracle" "$WORK/flag_${site}_${mode}.port"
+        flag_bad=$((flag_bad + 1))
+      else
+        echo "  $site ($mode): oracle and port agree on $expected"
+      fi
+    done
+    if cmp -s "$WORK/flag_${site}_none.oracle" "$WORK/flag_${site}_enabled.oracle"; then
+      echo "  $site: the define changes no oracle output"
+      flag_bad=$((flag_bad + 1))
+    fi
+  done
+  if [ "$flag_bad" -ne 0 ]; then
+    status=1
+  else
+    echo "  3/3 macro sites agree with the oracle with and without the define"
+  fi
+
+  # A valid mutant still matches without the define, but must emit the wrong
+  # Int32 call with it. A build error, crash or unrelated mismatch is not a catch.
+  check_flag_site_mutation() {
+    local site="$1" probe="$WORK/flag_mutant$EXE"
+    local fixture="$REPO_NATIVE/bench/fixtures/semtyped_${site}_flags.iyi"
+    if ! "$IYI" build -o "$(native_path "$probe")" "$REPO_NATIVE/src/compiler/tools/typed_dump.iyi" > "$WORK/flag_build.log" 2>&1; then
+      echo "INVALID MUTANT: typed dump did not build"; cat "$WORK/flag_build.log"; return 2
+    fi
+    if ! "$probe" $IYI_TYPED_DEFINES "$fixture" "$REPO_NATIVE/src" > "$WORK/flag_mutant_none" 2> "$WORK/flag_mutant.err" ||
+       ! cmp -s "$WORK/flag_${site}_none.oracle" "$WORK/flag_mutant_none"; then
+      echo "INVALID MUTANT: $site differs without the define"; return 2
+    fi
+    if ! "$probe" $IYI_TYPED_DEFINES -Dsemtyped_probe "$fixture" "$REPO_NATIVE/src" > "$WORK/flag_mutant_enabled" 2> "$WORK/flag_mutant.err"; then
+      echo "INVALID MUTANT: $site failed with the define"; return 2
+    fi
+    if cmp -s "$WORK/flag_${site}_enabled.oracle" "$WORK/flag_mutant_enabled"; then
+      return 0
+    fi
+    if grep -Eq '^[0-9]+:[0-9]+ Call Int32$' "$WORK/flag_mutant_enabled"; then
+      echo "DEFINE PARITY DIFFERENCE: $site returned Int32 instead of String"
+      return 1
+    fi
+    echo "INVALID MUTANT: $site differs for a reason other than the selected branch"
+    return 2
+  }
+
+  if [ "$flag_bad" -eq 0 ]; then
+    prove_mutation "method-body macro ignores build defines" \
+      "$REPO/src/compiler/semantic/main_visitor.iyi" \
+      '        engine = MacroEngine.new(@program.normalizer.macro_flags)' \
+      '        engine = MacroEngine.new' \
+      "DEFINE PARITY DIFFERENCE" -- check_flag_site_mutation method || status=1
+    prove_mutation "inline macro ignores build defines" \
+      "$REPO/src/compiler/semantic/inline_macros.iyi" \
+      'MacroEngine.new(normalizer.macro_flags).site_report' \
+      'MacroEngine.new.site_report' \
+      "DEFINE PARITY DIFFERENCE" -- check_flag_site_mutation inline || status=1
+    prove_mutation "top-level macro ignores build defines" \
+      "$REPO/src/compiler/semantic/top_level.iyi" \
+      '        engine = MacroEngine.new(@program.normalizer.macro_flags)' \
+      '        engine = MacroEngine.new' \
+      "DEFINE PARITY DIFFERENCE" -- check_flag_site_mutation top || status=1
+  else
+    echo "  flag mutation proofs not run: a baseline disagrees with the oracle"
+  fi
 
   echo
   echo "== 8. Guarded mutation proofs (the sem_expr fixtures, analysed bare)"

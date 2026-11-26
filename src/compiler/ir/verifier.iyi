@@ -179,7 +179,6 @@ class Verifier
     Dominance.new(preds)
   end
 
-
   def reachable_blocks(f : Function, index : BlockIndex) : Array(Bool)
     seen = Array(Bool).new
     f.blocks.each { |b| seen << false }

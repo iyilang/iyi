@@ -1,0 +1,54 @@
+; iyi-ir 1
+module "invert_bit"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+
+; Bit-test branches, far from the next block: Tbz and Tbnz keep their opcode, bit and target.
+define internal i64 @tbz_far(i64 %x) {
+entry:
+  %m = and i64 %x, 8
+  %c = icmp eq i64 %m, 0
+  br i1 %c, label %yes, label %no
+mid:
+  ret i64 0
+yes:
+  br label %mid
+no:
+  ret i64 2
+}
+
+; Bit-test branches whose taken target is the next block: Tbz becomes Tbnz, same bit, retargeted, no branch after it.
+define internal i64 @tbz_next(i64 %x) {
+entry:
+  %m = and i64 %x, 8
+  %c = icmp eq i64 %m, 0
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 2
+}
+
+define internal i64 @tbnz_far(i64 %x) {
+entry:
+  %m = and i64 %x, 8
+  %c = icmp ne i64 %m, 0
+  br i1 %c, label %yes, label %no
+mid:
+  ret i64 0
+yes:
+  br label %mid
+no:
+  ret i64 2
+}
+
+define internal i64 @tbnz_next(i64 %x) {
+entry:
+  %m = and i64 %x, 8
+  %c = icmp ne i64 %m, 0
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 2
+}

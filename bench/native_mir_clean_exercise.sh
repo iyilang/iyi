@@ -29,6 +29,7 @@ export NATIVE_SIGNATURE_FAILURE_FILE="$WORK/signature-failure"
 FIX_CG=bench/fixtures/native_cg
 FIX_RA=bench/fixtures/native_regalloc
 FIX_CLEAN=bench/fixtures/native_mir_clean
+FIX_BR=bench/fixtures/native_mir_clean/branches
 DRV="$WORK/native_cg$EXE"
 build_driver() {
   ./bin/iyi build -o "$(native_path "$1")" "$(native_path src/compiler/tools/native_cg.iyi)" \
@@ -577,10 +578,133 @@ check_prealloc() {
   "$PY" "$(native_path "$WORK/check_prealloc.py")" "$(native_path "$1")" "$(native_path "$FIX_CLEAN")"
 }
 
+# Each conditional branch the pass may invert is read from the driver's own MIR dump, with the pass off and on, for
+# every kind it inverts. A branch whose taken target is not the next block keeps its opcode, condition, target and the
+# unconditional branch after it. A branch whose taken target is the next block is inverted: the opposite opcode or
+# condition, retargeted to the other block, with no unconditional branch after it.
+cat >"$WORK/check_branches.py" <<'PY'
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+drv, directory = sys.argv[1:]
+ORIGINAL = {"bcond": "Bcond", "cbz": "Cbz", "cbnz": "Cbnz", "tbz": "Tbz", "tbnz": "Tbnz"}
+INVERTED = {"Bcond": "Bcond", "Cbz": "Cbnz", "Cbnz": "Cbz", "Tbz": "Tbnz", "Tbnz": "Tbz"}
+EXPECTED = 10
+errors = []
+defects = []
+checked = 0
+kept = 0
+flipped = 0
+
+
+def dump(path, name, enabled):
+    env = dict(os.environ, IYI_NATIVE_MIR_CLEAN=str(enabled))
+    try:
+        result = subprocess.run([drv, "mir", str(path), name], env=env, capture_output=True, text=True)
+    except OSError as exc:
+        errors.append(f"{path.name} {name}: cannot run driver: {exc}")
+        return None
+    if result.returncode or not result.stdout.startswith("function " + name + "\n"):
+        errors.append(f"{path.name} {name}: invalid MIR: {result.stderr.strip()}")
+        return None
+    blocks = {}
+    current = None
+    for line in result.stdout.splitlines():
+        match = re.match(r"^block (\d+) ", line)
+        if match:
+            current = int(match.group(1))
+            blocks[current] = []
+        elif line.startswith("  ") and current is not None:
+            blocks[current].append(line.strip())
+    return blocks
+
+
+def fields(line):
+    target = re.search(r"\btarget=(\d+)", line)
+    cond = re.search(r"\bcond=(\d+)", line)
+    imm = re.search(r"#imm=(-?\d+)", line)
+    return {
+        "op": line.split("/", 1)[0],
+        "target": int(target.group(1)) if target else None,
+        "cond": int(cond.group(1)) if cond else None,
+        "imm": imm.group(1) if imm else None,
+    }
+
+
+for path in sorted(Path(directory).glob("*.ir")):
+    names = re.findall(r"^define [^@\n]*@([^\s(]+)\(", path.read_text(encoding="utf-8"), re.M)
+    if not names:
+        errors.append(f"{path.name}: no function definitions")
+    for name in names:
+        kind, _, shape = name.partition("_")
+        if kind not in ORIGINAL or shape not in ("far", "next"):
+            errors.append(f"{path.name} {name}: unknown branch fixture")
+            continue
+        before = dump(path, name, 0)
+        after = dump(path, name, 1)
+        if before is None or after is None:
+            continue
+        checked += 1
+        taken, other = (1, 2) if shape == "next" else (2, 3)
+        original = ORIGINAL[kind]
+        b0 = before.get(0, [])
+        if len(b0) < 2:
+            errors.append(f"{path.name} {name}: block 0 has no branch pair before cleanup")
+            continue
+        conditional, uncond = fields(b0[-2]), fields(b0[-1])
+        if (conditional["op"] != original or conditional["target"] != taken
+                or uncond["op"] != "B" or uncond["target"] != other):
+            errors.append(f"{path.name} {name}: unexpected branch pair before cleanup: {b0[-2:]}")
+            continue
+        if before.keys() != after.keys() or any(before[k] != after[k] for k in before if k != 0):
+            defects.append(f"{path.name} {name}: a block other than the branch block changed")
+        a0 = after.get(0, [])
+        if shape == "far":
+            kept += 1
+            if a0 != b0:
+                defects.append(f"{path.name} {name}: a branch whose target is not the next block changed: {b0} -> {a0}")
+            continue
+        if len(a0) != len(b0) - 1 or a0[:-1] != b0[:-2]:
+            defects.append(f"{path.name} {name}: the branch before the fall-through was not inverted: {b0} -> {a0}")
+            continue
+        new = fields(a0[-1])
+        if original == "Bcond" and (conditional["cond"] is None or new["cond"] is None):
+            errors.append(f"{path.name} {name}: the dump does not print the branch condition")
+            continue
+        if new["op"] != INVERTED[original] or new["target"] != other:
+            defects.append(f"{path.name} {name}: expected {INVERTED[original]} target={other}, found {a0[-1]}")
+            continue
+        if original == "Bcond" and new["cond"] != conditional["cond"] ^ 1:
+            defects.append(f"{path.name} {name}: expected condition {conditional['cond'] ^ 1}, found {new['cond']}")
+            continue
+        if original in ("Tbz", "Tbnz") and new["imm"] != conditional["imm"]:
+            defects.append(f"{path.name} {name}: bit changed from {conditional['imm']} to {new['imm']}")
+            continue
+        flipped += 1
+if checked != EXPECTED:
+    errors.append(f"expected {EXPECTED} branch functions, checked {checked}")
+for problem in errors:
+    print("INVALID: " + problem)
+for problem in defects:
+    print("decisive: " + problem)
+print(f"branch inversion: {checked} functions; kept {kept} far branches; inverted {flipped} next-target branches")
+if errors:
+    sys.exit(2)
+if defects:
+    sys.exit(1)
+PY
+check_branches() {
+  "$PY" "$(native_path "$WORK/check_branches.py")" "$(native_path "$1")" "$(native_path "$FIX_BR")"
+}
+
 echo "== 4. compare MIR instruction counts and fallthrough edges"
 check_mir "$DRV" all || fail "the per-function MIR comparison failed"
 check_mir "$DRV" custom || fail "the custom MIR edge predicate failed"
 check_prealloc "$PRE_DRV" || fail "the pre-allocation MIR comparison failed"
+check_branches "$DRV" || fail "the branch inversion predicate failed"
 
 # A fixture result is a detected regression only after object emission, linking and signing succeeded.
 check_fixture_output() {
@@ -642,6 +766,12 @@ check_mutant() {
     cat "$WORK/build.$(basename "$mutant").log"
     mutation_invalid "mutant driver did not build"
     return 2
+  fi
+  if [ "$kind" = shape ]; then
+    check_branches "$mutant"
+    result=$?
+    [ "$result" -ne 2 ] || { mutation_invalid "branch inversion predicate could not run"; return 2; }
+    return "$result"
   fi
   if [ "$kind" = branch ]; then
     check_mir "$mutant" custom
@@ -714,6 +844,38 @@ prove_clean_mutation "branch: drop an unconditional branch regardless of its tar
   src/compiler/native/mir_clean.iyi \
   '        if tail.target == block.index + 1 # fallthrough-branch' \
   '        if true # fallthrough-branch' branch
+prove_clean_mutation "branch: invert a conditional regardless of its target" \
+  src/compiler/native/mir_clean.iyi \
+  '          if is_role?(fn.isa, cond, Role::CondBranch) && cond.target == block.index + 1 && invert_branch(fn.isa, cond)' \
+  '          if is_role?(fn.isa, cond, Role::CondBranch) && invert_branch(fn.isa, cond)' shape
+prove_clean_mutation "branch: never invert a conditional before its fall-through branch" \
+  src/compiler/native/mir_clean.iyi \
+  '          if is_role?(fn.isa, cond, Role::CondBranch) && cond.target == block.index + 1 && invert_branch(fn.isa, cond)' \
+  '          if false' shape
+prove_clean_mutation "condition: leave an inverted Bcond condition unchanged on every host" \
+  src/compiler/native/target.iyi \
+  '    inst.cond = cond_invert(inst.cond) # invert-branch' \
+  '    inst.cond = inst.cond # invert-branch' shape
+prove_clean_mutation "kind: Cbz and Cbnz inversions keep their opcode" \
+  src/compiler/native/target.iyi \
+  '      inst.opcode = MOp::Cbnz.value.to_i32 # invert-zero-branch
+      return true
+    elsif inst.opcode == MOp::Cbnz.value.to_i32
+      inst.opcode = MOp::Cbz.value.to_i32' \
+  '      inst.opcode = inst.opcode # invert-zero-branch
+      return true
+    elsif inst.opcode == MOp::Cbnz.value.to_i32
+      inst.opcode = inst.opcode' shape
+prove_clean_mutation "kind: Tbz and Tbnz inversions keep their opcode" \
+  src/compiler/native/target.iyi \
+  '      inst.opcode = MOp::Tbnz.value.to_i32
+      return true
+    elsif inst.opcode == MOp::Tbnz.value.to_i32
+      inst.opcode = MOp::Tbz.value.to_i32' \
+  '      inst.opcode = inst.opcode
+      return true
+    elsif inst.opcode == MOp::Tbnz.value.to_i32
+      inst.opcode = inst.opcode' shape
 
 [ ! -e "$NATIVE_SIGNATURE_FAILURE_FILE" ] || fail "a native executable failed signature verification"
 echo

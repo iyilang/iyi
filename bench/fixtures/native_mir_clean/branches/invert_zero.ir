@@ -1,0 +1,50 @@
+; iyi-ir 1
+module "invert_zero"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+
+; Compare-with-zero branches, far from the next block: Cbz and Cbnz keep their opcode and target.
+define internal i64 @cbz_far(i64 %x) {
+entry:
+  %c = icmp eq i64 %x, 0
+  br i1 %c, label %yes, label %no
+mid:
+  ret i64 0
+yes:
+  br label %mid
+no:
+  ret i64 2
+}
+
+; Compare-with-zero branches whose taken target is the next block: Cbz becomes Cbnz, retargeted, with no branch after it.
+define internal i64 @cbz_next(i64 %x) {
+entry:
+  %c = icmp eq i64 %x, 0
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 2
+}
+
+define internal i64 @cbnz_far(i64 %x) {
+entry:
+  %c = icmp ne i64 %x, 0
+  br i1 %c, label %yes, label %no
+mid:
+  ret i64 0
+yes:
+  br label %mid
+no:
+  ret i64 2
+}
+
+define internal i64 @cbnz_next(i64 %x) {
+entry:
+  %c = icmp ne i64 %x, 0
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 2
+}

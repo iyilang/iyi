@@ -298,6 +298,7 @@ def dump_inst(isa : Int32, inst : MInst) : String
   text = text + "f" if inst.fp
   text = text + " " + parts.join(", ") unless parts.empty?
   text = text + " #imm=#{inst.imm}" if inst.imm != 0_i64
+  text = text + " cond=#{inst.cond}" if inst.opcode == MOp::Bcond.value.to_i32 # dump-branch-condition
   text = text + " target=#{inst.target}" if inst.target >= 0
   text = text + " table=#{inst.table}" if inst.table >= 0
   text = text + " sym=#{inst.sym}" if inst.sym >= 0

@@ -243,11 +243,12 @@ pub def rewrite_spills(fn : MFunction) : Nil
 end
 
 def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil
-  acc = [] of MInst
+  acc = Array(MInst).new(block.insts.size)
   cache = int_row(64, -1)
   gprs = scratch_gprs
   fprs = scratch_fprs
   fixed = fixed_live_before(block)
+  stores = [] of MInst
   index = 0
   block.insts.each do |inst|
     blocked = fixed[index] # protect-staged-physical
@@ -264,8 +265,6 @@ def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil
         cache[op.reg] = -1 # physical-def-invalidates-reload
       end
     end
-    reloads = [] of MInst
-    stores = [] of MInst
     inst.uses.each_with_index do |op, k|
       next unless op.kind == OperandKind::Virtual
       v = op.reg
@@ -276,7 +275,7 @@ def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil
         pool = fp ? fprs : gprs
         reg = cached_scratch(pool, cache, blocked, used, v)
         if cache[reg] != v
-          reloads << slot_access(fn.isa, true, reg, fn.vreg_slot[v], fp)
+          acc << slot_access(fn.isa, true, reg, fn.vreg_slot[v], fp)
           cache[reg] = v
         end
         used = used | (1_u64 << reg)
@@ -301,9 +300,6 @@ def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil
         inst.defs[k] = Operand.new(OperandKind::Physical, reg)
       end
     end
-    reloads.each do |r|
-      acc << r
-    end
     single_copy = is_role?(fn.isa, inst, Role::Copy) && inst.size == 64 && inst.defs.size == 1 && inst.uses.size == 1
     physical_copy = single_copy && inst.defs[0].kind == OperandKind::Physical && inst.uses[0].kind == OperandKind::Physical
     identity = physical_copy && inst.defs[0].reg == inst.uses[0].reg
@@ -317,6 +313,9 @@ def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil
     end
     stores.each do |s|
       acc << s
+    end
+    while stores.size > 0
+      stores.pop
     end
   end
   block.insts = acc

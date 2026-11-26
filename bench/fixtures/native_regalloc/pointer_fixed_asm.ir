@@ -1,0 +1,33 @@
+; iyi-ir 1
+module "pointer_fixed_asm"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+declare external ptr @malloc(i64)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal void @collector_boundary() {
+entry:
+  ret void
+}
+
+define internal i64 @hold(ptr %p) {
+entry:
+  %bits = ptrtoint ptr %p to i64
+  %f = bitcast i64 %bits to double
+  %copy = call double (double) asm sideeffect "nop", "={d0},0"(double %f)
+  call void () @collector_boundary()
+  %back = bitcast double %copy to i64
+  %q = inttoptr i64 %back to ptr
+  %value = load i64, ptr %q, align 8
+  ret i64 %value
+}
+
+define i32 @main() {
+entry:
+  %p = call ptr (i64) @malloc(i64 8)
+  store i64 123, ptr %p, align 8
+  %value = call i64 (ptr) @hold(ptr %p)
+  %out = call i32 (ptr, ...) @printf(ptr @fmt, i64 %value)
+  ret i32 0
+}

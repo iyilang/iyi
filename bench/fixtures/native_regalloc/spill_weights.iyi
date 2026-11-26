@@ -1,0 +1,145 @@
+module spill_weights
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass}
+import compiler/native/regalloc_linear::{allocate_linear}
+
+fn = MFunction.new("weights")
+entry = MBlock.new(0, "entry")
+loop_body = MBlock.new(1, "loop")
+exit_block = MBlock.new(2, "exit")
+fn.blocks << entry
+fn.blocks << loop_body
+fn.blocks << exit_block
+cold = [] of Int32
+i = 0
+while i < 19
+  v = fn.new_vreg(RegClass::Gpr)
+  cold << v
+  inst = MInst.new(MOp::MovImm.value.to_i32)
+  inst.defs << Operand.new(OperandKind::Virtual, v)
+  entry.insts << inst
+  i = i + 1
+end
+hot = fn.new_vreg(RegClass::Gpr)
+inst = MInst.new(MOp::MovImm.value.to_i32)
+inst.defs << Operand.new(OperandKind::Virtual, hot)
+entry.insts << inst
+cold.each do |v|
+  use = MInst.new(MOp::CmpImm.value.to_i32)
+  use.uses << Operand.new(OperandKind::Virtual, v)
+  entry.insts << use
+end
+branch = MInst.new(MOp::B.value.to_i32)
+branch.target = 1
+entry.insts << branch
+i = 0
+while i < 3
+  use = MInst.new(MOp::CmpImm.value.to_i32)
+  use.uses << Operand.new(OperandKind::Virtual, hot)
+  loop_body.insts << use
+  i = i + 1
+end
+backedge = MInst.new(MOp::Bcond.value.to_i32)
+backedge.target = 1
+loop_body.insts << backedge
+exit_block.insts << MInst.new(MOp::Ret.value.to_i32)
+allocate_linear(fn)
+puts "#{fn.vreg_home[hot]} #{fn.vreg_home[cold[18]]}"
+
+# All warm values are used once in the outer loop. The last value is used
+# once in the inner loop, so depth rather than use count decides the spill.
+nested = MFunction.new("nested")
+en = MBlock.new(0, "entry")
+outer = MBlock.new(1, "outer")
+inner = MBlock.new(2, "inner")
+latch = MBlock.new(3, "latch")
+done = MBlock.new(4, "done")
+nested.blocks << en
+nested.blocks << outer
+nested.blocks << inner
+nested.blocks << latch
+nested.blocks << done
+warm = [] of Int32
+i = 0
+while i < 19
+  v = nested.new_vreg(RegClass::Gpr)
+  warm << v
+  m = MInst.new(MOp::MovImm.value.to_i32)
+  m.defs << Operand.new(OperandKind::Virtual, v)
+  en.insts << m
+  i = i + 1
+end
+inner_hot = nested.new_vreg(RegClass::Gpr)
+m = MInst.new(MOp::MovImm.value.to_i32)
+m.defs << Operand.new(OperandKind::Virtual, inner_hot)
+en.insts << m
+m = MInst.new(MOp::B.value.to_i32)
+m.target = 1
+en.insts << m
+warm.each do |v|
+  use = MInst.new(MOp::CmpImm.value.to_i32)
+  use.uses << Operand.new(OperandKind::Virtual, v)
+  outer.insts << use
+end
+m = MInst.new(MOp::B.value.to_i32)
+m.target = 2
+outer.insts << m
+use = MInst.new(MOp::CmpImm.value.to_i32)
+use.uses << Operand.new(OperandKind::Virtual, inner_hot)
+inner.insts << use
+m = MInst.new(MOp::Bcond.value.to_i32)
+m.target = 2
+inner.insts << m
+m = MInst.new(MOp::Bcond.value.to_i32)
+m.target = 1
+latch.insts << m
+done.insts << MInst.new(MOp::Ret.value.to_i32)
+allocate_linear(nested)
+puts "#{nested.vreg_home[inner_hot]} #{nested.vreg_home[warm[0]]}"
+
+# A natural self-loop still has weight inside an irreducible two-entry SCC.
+graph = MFunction.new("irreducible")
+en = MBlock.new(0, "entry")
+side = MBlock.new(1, "side")
+cycle = MBlock.new(2, "cycle")
+done = MBlock.new(3, "done")
+graph.blocks << en
+graph.blocks << side
+graph.blocks << cycle
+graph.blocks << done
+cool = [] of Int32
+i = 0
+while i < 19
+  v = graph.new_vreg(RegClass::Gpr)
+  cool << v
+  m = MInst.new(MOp::MovImm.value.to_i32)
+  m.defs << Operand.new(OperandKind::Virtual, v)
+  en.insts << m
+  i = i + 1
+end
+cycle_hot = graph.new_vreg(RegClass::Gpr)
+m = MInst.new(MOp::MovImm.value.to_i32)
+m.defs << Operand.new(OperandKind::Virtual, cycle_hot)
+en.insts << m
+m = MInst.new(MOp::Bcond.value.to_i32)
+m.target = 2
+en.insts << m
+cool.each do |v|
+  use = MInst.new(MOp::CmpImm.value.to_i32)
+  use.uses << Operand.new(OperandKind::Virtual, v)
+  side.insts << use
+end
+m = MInst.new(MOp::B.value.to_i32)
+m.target = 2
+side.insts << m
+use = MInst.new(MOp::CmpImm.value.to_i32)
+use.uses << Operand.new(OperandKind::Virtual, cycle_hot)
+cycle.insts << use
+m = MInst.new(MOp::Bcond.value.to_i32)
+m.target = 2
+cycle.insts << m
+m = MInst.new(MOp::Bcond.value.to_i32)
+m.target = 1
+cycle.insts << m
+done.insts << MInst.new(MOp::Ret.value.to_i32)
+allocate_linear(graph)
+puts "#{graph.vreg_home[cycle_hot]} #{graph.vreg_home[cool[0]]}"

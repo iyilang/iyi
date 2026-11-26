@@ -13,13 +13,19 @@
 # gives different output on two runs, or when it needs the network or a
 # server, and each exclusion is named below with its reason.
 #
+# The Mach-O record for the low 12 bits of an address (PAGEOFF12) does not say how wide the load or store it patches is:
+# only the instruction does, and the reader reads that into a relocation kind. The round trip, the writer and a relinked
+# program all behave the same whichever width the kind names, so check_pageoff.py decodes the width of every PAGEOFF12
+# record from the hosted compiler's own object and compares it with the kind the driver printed. The fixture
+# macho/narrow_access.iyi supplies the 8, 16 and 32-bit loads the hosted compiler does not write unoptimised.
+#
 # Mutation proofs break one line of the reader or writer in a copy of the
 # source, rebuild the driver, and require the check to fail. The helper
 # requires the patch to change something: a patch whose text is absent fails
 # the gate. The relinked-program proof needs cc and runs on macOS only.
 #
-# Needs a built compiler (`make`) and Python. Every host checks the corpus
-# and the two round-trip mutants; macOS also links and runs Mach-O programs.
+# Needs a built compiler (`make`) and Python. Every host checks the corpus, the width of every PAGEOFF12 record and
+# the round-trip mutants; macOS also links and runs Mach-O programs.
 
 set -u
 
@@ -38,6 +44,7 @@ iyi=./bin/iyi
 triple=aarch64-apple-darwin
 tool_src=src/compiler/tools/obj_macho.iyi
 macho_src=src/compiler/native/obj/macho.iyi
+pageoff_check=bench/fixtures/native_obj/check_pageoff.py
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/native_obj.XXXXXX")" || exit 1
 tool_bin="$work/bin/obj_macho$EXE"
@@ -121,6 +128,35 @@ check_relinked() {
   [ "$rt_status" = "$orig_status" ] && cmp -s "$work/corpus/$name.out" "$work/corpus/$name.rt.out"
 }
 
+# pageoff_widths REQUIRED NAME...: the driver reads every PAGEOFF12 record of each named corpus object as the width of
+# the instruction there, which check_pageoff.py decodes from the hosted compiler's own object. REQUIRED lists the kinds
+# that must occur among the objects, so that a width the corpus does not hold cannot pass for want of a record.
+# Status 1 is a difference. A driver that does not read an object, or a check that cannot compare, says nothing about
+# a width: it prints CHECK NOT RUN and returns 2, which a mutation proof does not take for a catch.
+pageoff_widths() {
+  required=$1
+  shift
+  mkdir -p "$work/pageoff"
+  pairs=()
+  for pname in "$@"; do
+    if ! "$tool_bin" "$(native_path "$work/corpus/$pname.o")" "$(native_path "$work/pageoff/$pname.rt.o")" >"$work/pageoff/$pname.log" 2>&1; then
+      echo "CHECK NOT RUN: the driver does not read $pname"
+      return 2
+    fi
+    pairs+=("$(native_path "$work/corpus/$pname.o")" "$(native_path "$work/pageoff/$pname.log")")
+  done
+  reqs=()
+  for rkind in $required; do
+    reqs+=(--require "$rkind")
+  done
+  "$PY" "$(native_path "$root/$pageoff_check")" ${reqs[@]+"${reqs[@]}"} "${pairs[@]}"
+  width_status=$?
+  if [ "$width_status" -ne 0 ] && [ "$width_status" -ne 1 ]; then
+    echo "CHECK NOT RUN: check_pageoff.py could not compare (status $width_status)"
+  fi
+  return "$width_status"
+}
+
 # prove_mutation LABEL FILE OLD NEW CHECK...: replaces the first OLD in FILE with
 # NEW, runs CHECK, and requires it to fail. Restores FILE on every exit path.
 prove_mutation() {
@@ -167,8 +203,12 @@ PY
     tail -n 20 "$work/build-tool.log"
   elif "$@" >"$work/mutation-check.log" 2>&1; then
     fail "NOT caught: $label"
+  elif grep -q '^CHECK NOT RUN' "$work/mutation-check.log"; then
+    fail "INVALID: '$label' could not be judged"
+    tail -n 5 "$work/mutation-check.log"
   else
     echo "   caught: $label"
+    awk '/^decisive: / { print "     " $0; exit }' "$work/mutation-check.log"
   fi
   if ! cp "$backup" "$file"; then
     fail "could not restore source after '$label'"
@@ -269,9 +309,10 @@ mkdir -p "$work/corpus"
 names=""
 sample_count=0
 fixture_found=0
+narrow_found=0
 corpus_count=0
 roundtrip_count=0
-for src in samples/iyi/*.iyi bench/fixtures/native_obj/*.iyi; do
+for src in samples/iyi/*.iyi bench/fixtures/native_obj/*.iyi bench/fixtures/native_obj/macho/*.iyi; do
   if [ ! -f "$src" ]; then
     fail "corpus source is missing: $src"
     continue
@@ -279,6 +320,7 @@ for src in samples/iyi/*.iyi bench/fixtures/native_obj/*.iyi; do
   case "$src" in
     samples/iyi/*) sample_count=$((sample_count + 1)) ;;
     bench/fixtures/native_obj/extern_globals.iyi) fixture_found=1 ;;
+    bench/fixtures/native_obj/macho/narrow_access.iyi) narrow_found=1 ;;
   esac
   corpus_count=$((corpus_count + 1))
   name="$(basename "$src" .iyi)"
@@ -300,13 +342,22 @@ for src in samples/iyi/*.iyi bench/fixtures/native_obj/*.iyi; do
 done
 [ "$sample_count" -ge 28 ] || fail "expected at least 28 sample sources, found $sample_count"
 [ "$fixture_found" -eq 1 ] || fail "the external-globals fixture is missing"
-echo "   $roundtrip_count/$corpus_count corpus round trips equal ($sample_count samples, external-globals fixture $fixture_found)"
+[ "$narrow_found" -eq 1 ] || fail "the narrow-access fixture is missing"
+echo "   $roundtrip_count/$corpus_count corpus round trips equal ($sample_count samples, external-globals fixture $fixture_found, narrow-access fixture $narrow_found)"
 
 echo "== 3. relocation coverage over the corpus (zero counts are listed)"
 awk '{ count[$2] += $3 } END { for (k in count) print k, count[k] }' "$work/coverage.txt" | sort |
   while read -r kind total; do
     echo "   $kind $total"
   done
+
+echo "== 3b. every PAGEOFF12 relocation is read as the width its instruction encodes"
+if pageoff_widths "A64AddLo12 A64Ldst8Lo12 A64Ldst16Lo12 A64Ldst32Lo12 A64Ldst64Lo12" $names >"$work/pageoff.out" 2>&1; then
+  sed 's/^/   /' "$work/pageoff.out"
+else
+  sed 's/^/   /' "$work/pageoff.out" | head -n 8
+  fail "a PAGEOFF12 record is not read as the width its instruction encodes"
+fi
 
 echo "== 4. each rewritten program matches the original (macOS only)"
 relink_names=""
@@ -354,6 +405,14 @@ check_fold_without_zeroing() {
 prove_mutation "fold the in-place addend but leave the site non-zero" "$macho_src" \
   "bytes[(address + k).to_i32] = 0_u8" "bytes[(address + k).to_i32] = bytes[(address + k).to_i32]" \
   check_fold_without_zeroing
+# Nothing downstream of the reader can tell one load or store width from another, so the width is judged where it is
+# stated: the instruction the hosted compiler wrote (check_pageoff.py).
+check_pageoff_halfword() {
+  pageoff_widths A64Ldst16Lo12 narrow_access
+}
+prove_mutation "read a halfword load's PAGEOFF12 as a word load's" "$macho_src" \
+  "kind = RelocKind::A64Ldst16Lo12" "kind = RelocKind::A64Ldst32Lo12" \
+  check_pageoff_halfword
 if [ "$HOST_OS" = darwin ]; then
   # The relinked program is the judge. The driver writes its output before it
   # reads that output back, so a writer or reader that drops an addend still

@@ -1,0 +1,36 @@
+; iyi-ir 1
+source_filename = "new_result_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+@__iyi_marking = external global i8
+@root = external global ptr
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal void @__iyi_write_barrier_begin() {
+entry:
+  ret void
+}
+define internal void @__iyi_write_barrier(ptr %address, i64 %words) {
+entry:
+  ret void
+}
+define external void @new_result_keep(ptr %value) {
+entry:
+  %object = call ptr (i64, i64, i64) @__iyi_new(i64 8, i64 3, i64 0)
+  store ptr %object, ptr @root, align 8
+  %mark = load i8, ptr @__iyi_marking, align 1
+  %active = icmp ne i8 %mark, 0
+  br i1 %active, label %begin, label %plain
+begin:
+  call void () @__iyi_write_barrier_begin()
+  br label %join
+plain:
+  br label %join
+join:
+  store ptr %value, ptr %object, align 8
+  br i1 %active, label %shade, label %done
+shade:
+  call void (ptr, i64) @__iyi_write_barrier(ptr %object, i64 1)
+  br label %done
+done:
+  ret void
+}

@@ -29,6 +29,7 @@ export NATIVE_SIGNATURE_FAILURE_FILE="$WORK/signature-failure"
 FIX_CG=bench/fixtures/native_cg
 FIX_RA=bench/fixtures/native_regalloc
 FIX_CLEAN=bench/fixtures/native_mir_clean
+FIX_BR=bench/fixtures/native_mir_clean/branches
 DRV="$WORK/native_cg$EXE"
 build_driver() {
   ./bin/iyi build -o "$(native_path "$1")" "$(native_path src/compiler/tools/native_cg.iyi)" \
@@ -38,6 +39,43 @@ build_driver() {
 echo "== 1. build the native codegen driver"
 if ! build_driver "$DRV"; then
   cat "$WORK/build.$(basename "$DRV").log"
+  echo "SOME NATIVE MIR CLEAN CHECKS FAILED"
+  exit 1
+fi
+
+# The copy-fold pass runs before allocation. Measure it there independently
+# of identity moves the allocator may later remove on its own.
+cat >"$WORK/prealloc_mir.iyi" <<'IYI'
+module prealloc_mir
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/module::{Module}
+import compiler/ir/function::{Function}
+import compiler/native/mir::{MFunction}
+import compiler/native/driver::{symbol_table, dump_mfunction}
+import compiler/native/mir_clean::{fold_result_copies}
+import compiler/native/aarch64/isel::{select_function, IselError}
+import compiler/native/obj/object::{ObjectFile, ObjFormat}
+
+parsed = parse(File.read(Program.args[0]))
+raise "invalid fixture" if parsed.is_a?(IrParseError)
+mod = parsed.as(Module)
+fn = mod.get_function?(Program.args[1])
+raise "missing function" unless fn
+syms = symbol_table(mod, ObjectFile.new(ObjFormat::MachO, mod.target, "iyi-native"))
+selected = select_function(mod, fn.as(Function), syms, mod.target.darwin?)
+raise "selection failed" if selected.is_a?(IselError)
+mf = selected.as(MFunction)
+fold_result_copies(mf)
+STDOUT.print(dump_mfunction(mf))
+IYI
+PRE_DRV="$WORK/prealloc_mir$EXE"
+build_prealloc() {
+  ./bin/iyi build -o "$(native_path "$1")" "$(native_path "$WORK/prealloc_mir.iyi")" \
+    >"$WORK/build.$(basename "$1").log" 2>&1
+}
+if ! build_prealloc "$PRE_DRV"; then
+  cat "$WORK/build.$(basename "$PRE_DRV").log"
+  fail "the pre-allocation MIR driver does not build"
   echo "SOME NATIVE MIR CLEAN CHECKS FAILED"
   exit 1
 fi
@@ -369,6 +407,8 @@ defects = []
 functions = 0
 backedges = 0
 inversions = 0
+post_all = [0, 0, 0]
+post_codegen = [0, 0, 0]
 
 def dump(path, name, enabled):
     env = dict(os.environ, IYI_NATIVE_MIR_CLEAN=str(enabled))
@@ -429,7 +469,11 @@ for dirname in dirs:
                 continue
             old_count = sum(map(len, before.values()))
             new_count = sum(map(len, after.values()))
-            if new_count > old_count or (custom and new_count == old_count):
+            result = 0 if new_count < old_count else (1 if new_count == old_count else 2)
+            post_all[result] += 1
+            if directory.name == "native_cg":
+                post_codegen[result] += 1
+            if new_count > old_count:
                 defects.append(f"{path.name} {name}: instruction count {old_count} -> {new_count}")
             if not custom:
                 continue
@@ -464,6 +508,9 @@ for problem in errors:
 for problem in defects:
     print("decisive: " + problem)
 print(f"MIR functions: {functions}; backedges: {backedges}; inversions: {inversions}")
+print(f"post-allocation {mode}: smaller={post_all[0]} equal={post_all[1]} larger={post_all[2]}")
+if mode == "all":
+    print(f"post-allocation native_cg: smaller={post_codegen[0]} equal={post_codegen[1]} larger={post_codegen[2]}")
 if errors:
     sys.exit(2)
 if defects:
@@ -480,9 +527,184 @@ check_mir() {
   fi
 }
 
+# The former strict check applies to every custom function, but at the point
+# where result-copy folding runs rather than after register coalescing.
+cat >"$WORK/check_prealloc.py" <<'PY'
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+drv, directory = sys.argv[1:]
+errors = []
+defects = []
+checked = 0
+for path in sorted(Path(directory).glob("*.ir")):
+    names = re.findall(r"^define [^@\n]*@([^\s(]+)\(", path.read_text(encoding="utf-8"), re.M)
+    if not names:
+        errors.append(f"{path.name}: no functions")
+    for name in names:
+        counts = []
+        for enabled in (0, 1):
+            env = dict(os.environ, IYI_NATIVE_MIR_CLEAN=str(enabled))
+            try:
+                result = subprocess.run([drv, str(path), name], env=env, capture_output=True, text=True)
+            except OSError as exc:
+                errors.append(f"{path.name} {name}: {exc}")
+                break
+            if result.returncode or not result.stdout.startswith("function " + name + "\n"):
+                errors.append(f"{path.name} {name}: invalid pre-allocation MIR: {result.stderr.strip()}")
+                break
+            counts.append(len(re.findall(r"^  [A-Za-z0-9_]+/\d+f?(?: |$)", result.stdout, re.M)))
+        if len(counts) != 2:
+            continue
+        checked += 1
+        print(f"pre-allocation: {path.name} {name}: {counts[0]} -> {counts[1]}")
+        if counts[1] >= counts[0]:
+            defects.append(f"{path.name} {name}: pre-allocation instruction count {counts[0]} -> {counts[1]}")
+if not checked:
+    errors.append("no pre-allocation functions could be checked")
+for problem in errors:
+    print("INVALID: " + problem)
+for problem in defects:
+    print("decisive: " + problem)
+if errors:
+    sys.exit(2)
+if defects:
+    sys.exit(1)
+PY
+check_prealloc() {
+  "$PY" "$(native_path "$WORK/check_prealloc.py")" "$(native_path "$1")" "$(native_path "$FIX_CLEAN")"
+}
+
+# Each conditional branch the pass may invert is read from the driver's own MIR dump, with the pass off and on, for
+# every kind it inverts. A branch whose taken target is not the next block keeps its opcode, condition, target and the
+# unconditional branch after it. A branch whose taken target is the next block is inverted: the opposite opcode or
+# condition, retargeted to the other block, with no unconditional branch after it.
+cat >"$WORK/check_branches.py" <<'PY'
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+drv, directory = sys.argv[1:]
+ORIGINAL = {"bcond": "Bcond", "cbz": "Cbz", "cbnz": "Cbnz", "tbz": "Tbz", "tbnz": "Tbnz"}
+INVERTED = {"Bcond": "Bcond", "Cbz": "Cbnz", "Cbnz": "Cbz", "Tbz": "Tbnz", "Tbnz": "Tbz"}
+EXPECTED = 10
+errors = []
+defects = []
+checked = 0
+kept = 0
+flipped = 0
+
+
+def dump(path, name, enabled):
+    env = dict(os.environ, IYI_NATIVE_MIR_CLEAN=str(enabled))
+    try:
+        result = subprocess.run([drv, "mir", str(path), name], env=env, capture_output=True, text=True)
+    except OSError as exc:
+        errors.append(f"{path.name} {name}: cannot run driver: {exc}")
+        return None
+    if result.returncode or not result.stdout.startswith("function " + name + "\n"):
+        errors.append(f"{path.name} {name}: invalid MIR: {result.stderr.strip()}")
+        return None
+    blocks = {}
+    current = None
+    for line in result.stdout.splitlines():
+        match = re.match(r"^block (\d+) ", line)
+        if match:
+            current = int(match.group(1))
+            blocks[current] = []
+        elif line.startswith("  ") and current is not None:
+            blocks[current].append(line.strip())
+    return blocks
+
+
+def fields(line):
+    target = re.search(r"\btarget=(\d+)", line)
+    cond = re.search(r"\bcond=(\d+)", line)
+    imm = re.search(r"#imm=(-?\d+)", line)
+    return {
+        "op": line.split("/", 1)[0],
+        "target": int(target.group(1)) if target else None,
+        "cond": int(cond.group(1)) if cond else None,
+        "imm": imm.group(1) if imm else None,
+    }
+
+
+for path in sorted(Path(directory).glob("*.ir")):
+    names = re.findall(r"^define [^@\n]*@([^\s(]+)\(", path.read_text(encoding="utf-8"), re.M)
+    if not names:
+        errors.append(f"{path.name}: no function definitions")
+    for name in names:
+        kind, _, shape = name.partition("_")
+        if kind not in ORIGINAL or shape not in ("far", "next"):
+            errors.append(f"{path.name} {name}: unknown branch fixture")
+            continue
+        before = dump(path, name, 0)
+        after = dump(path, name, 1)
+        if before is None or after is None:
+            continue
+        checked += 1
+        taken, other = (1, 2) if shape == "next" else (2, 3)
+        original = ORIGINAL[kind]
+        b0 = before.get(0, [])
+        if len(b0) < 2:
+            errors.append(f"{path.name} {name}: block 0 has no branch pair before cleanup")
+            continue
+        conditional, uncond = fields(b0[-2]), fields(b0[-1])
+        if (conditional["op"] != original or conditional["target"] != taken
+                or uncond["op"] != "B" or uncond["target"] != other):
+            errors.append(f"{path.name} {name}: unexpected branch pair before cleanup: {b0[-2:]}")
+            continue
+        if before.keys() != after.keys() or any(before[k] != after[k] for k in before if k != 0):
+            defects.append(f"{path.name} {name}: a block other than the branch block changed")
+        a0 = after.get(0, [])
+        if shape == "far":
+            kept += 1
+            if a0 != b0:
+                defects.append(f"{path.name} {name}: a branch whose target is not the next block changed: {b0} -> {a0}")
+            continue
+        if len(a0) != len(b0) - 1 or a0[:-1] != b0[:-2]:
+            defects.append(f"{path.name} {name}: the branch before the fall-through was not inverted: {b0} -> {a0}")
+            continue
+        new = fields(a0[-1])
+        if original == "Bcond" and (conditional["cond"] is None or new["cond"] is None):
+            errors.append(f"{path.name} {name}: the dump does not print the branch condition")
+            continue
+        if new["op"] != INVERTED[original] or new["target"] != other:
+            defects.append(f"{path.name} {name}: expected {INVERTED[original]} target={other}, found {a0[-1]}")
+            continue
+        if original == "Bcond" and new["cond"] != conditional["cond"] ^ 1:
+            defects.append(f"{path.name} {name}: expected condition {conditional['cond'] ^ 1}, found {new['cond']}")
+            continue
+        if original in ("Tbz", "Tbnz") and new["imm"] != conditional["imm"]:
+            defects.append(f"{path.name} {name}: bit changed from {conditional['imm']} to {new['imm']}")
+            continue
+        flipped += 1
+if checked != EXPECTED:
+    errors.append(f"expected {EXPECTED} branch functions, checked {checked}")
+for problem in errors:
+    print("INVALID: " + problem)
+for problem in defects:
+    print("decisive: " + problem)
+print(f"branch inversion: {checked} functions; kept {kept} far branches; inverted {flipped} next-target branches")
+if errors:
+    sys.exit(2)
+if defects:
+    sys.exit(1)
+PY
+check_branches() {
+  "$PY" "$(native_path "$WORK/check_branches.py")" "$(native_path "$1")" "$(native_path "$FIX_BR")"
+}
+
 echo "== 4. compare MIR instruction counts and fallthrough edges"
+check_branches "$DRV" || fail "the branch inversion predicate failed"
 check_mir "$DRV" all || fail "the per-function MIR comparison failed"
 check_mir "$DRV" custom || fail "the custom MIR edge predicate failed"
+check_prealloc "$PRE_DRV" || fail "the pre-allocation MIR comparison failed"
 
 # A fixture result is a detected regression only after object emission, linking and signing succeeded.
 check_fixture_output() {
@@ -524,10 +746,32 @@ mutation_invalid() {
 # because the older helper on this stack counts every nonzero exit as a catch.
 check_mutant() {
   local kind=$1 mutant="$WORK/mutant$EXE" result structure runtime ir
+  if [ "$kind" = prealloc ]; then
+    mutant="$WORK/mutant-prealloc$EXE"
+    if ! build_prealloc "$mutant"; then
+      cat "$WORK/build.$(basename "$mutant").log"
+      mutation_invalid "mutant pre-allocation driver did not build"
+      return 2
+    fi
+    check_prealloc "$mutant" >"$WORK/prealloc-mutant.log" 2>&1
+    result=$?
+    [ "$result" -ne 2 ] || { mutation_invalid "pre-allocation predicate could not run"; return 2; }
+    if [ "$result" -eq 1 ] && ! grep -Fq 'decisive:' "$WORK/prealloc-mutant.log"; then
+      mutation_invalid "pre-allocation mutation had no decisive finding"
+      return 2
+    fi
+    return "$result"
+  fi
   if ! build_driver "$mutant"; then
     cat "$WORK/build.$(basename "$mutant").log"
     mutation_invalid "mutant driver did not build"
     return 2
+  fi
+  if [ "$kind" = shape ]; then
+    check_branches "$mutant"
+    result=$?
+    [ "$result" -ne 2 ] || { mutation_invalid "branch inversion predicate could not run"; return 2; }
+    return "$result"
   fi
   if [ "$kind" = branch ]; then
     check_mir "$mutant" custom
@@ -568,6 +812,17 @@ prove_clean_mutation() {
 }
 
 echo "== 5. mutation proofs"
+prove_clean_mutation "copy: disable pre-allocation result folding" \
+  src/compiler/native/mir_clean.iyi \
+  'pub def fold_result_copies(fn : MFunction) : Int32
+  return 0 unless mir_clean_enabled?' \
+  'pub def fold_result_copies(fn : MFunction) : Int32
+  return 0' prealloc
+if [ -f "$WORK/prealloc-mutant.log" ]; then
+  grep -F 'decisive:' "$WORK/prealloc-mutant.log" || fail "pre-allocation mutation had no decisive finding"
+else
+  fail "pre-allocation mutation did not produce a predicate log"
+fi
 if [ "$HOST_ID" = darwin-arm64 ]; then
   for ir in "$FIX_CLEAN"/*.ir; do
     [ -f "$ir" ] || continue
@@ -585,6 +840,38 @@ else
   host_limited "runtime mutation: remove a result copy without renaming its producer (macOS arm64)"
   host_limited "runtime mutation: leave an inverted condition unchanged (macOS arm64)"
 fi
+prove_clean_mutation "branch: invert a conditional regardless of its target" \
+  src/compiler/native/mir_clean.iyi \
+  '          if is_role?(fn.isa, cond, Role::CondBranch) && cond.target == block.index + 1 && invert_branch(fn.isa, cond)' \
+  '          if is_role?(fn.isa, cond, Role::CondBranch) && invert_branch(fn.isa, cond)' shape
+prove_clean_mutation "branch: never invert a conditional before its fall-through branch" \
+  src/compiler/native/mir_clean.iyi \
+  '          if is_role?(fn.isa, cond, Role::CondBranch) && cond.target == block.index + 1 && invert_branch(fn.isa, cond)' \
+  '          if false' shape
+prove_clean_mutation "condition: leave an inverted Bcond condition unchanged on every host" \
+  src/compiler/native/target.iyi \
+  '    inst.cond = cond_invert(inst.cond) # invert-branch' \
+  '    inst.cond = inst.cond # invert-branch' shape
+prove_clean_mutation "kind: Cbz and Cbnz inversions keep their opcode" \
+  src/compiler/native/target.iyi \
+  '      inst.opcode = MOp::Cbnz.value.to_i32 # invert-zero-branch
+      return true
+    elsif inst.opcode == MOp::Cbnz.value.to_i32
+      inst.opcode = MOp::Cbz.value.to_i32' \
+  '      inst.opcode = inst.opcode # invert-zero-branch
+      return true
+    elsif inst.opcode == MOp::Cbnz.value.to_i32
+      inst.opcode = inst.opcode' shape
+prove_clean_mutation "kind: Tbz and Tbnz inversions keep their opcode" \
+  src/compiler/native/target.iyi \
+  '      inst.opcode = MOp::Tbnz.value.to_i32
+      return true
+    elsif inst.opcode == MOp::Tbnz.value.to_i32
+      inst.opcode = MOp::Tbz.value.to_i32' \
+  '      inst.opcode = inst.opcode
+      return true
+    elsif inst.opcode == MOp::Tbnz.value.to_i32
+      inst.opcode = inst.opcode' shape
 prove_clean_mutation "branch: drop an unconditional branch regardless of its target" \
   src/compiler/native/mir_clean.iyi \
   '        if tail.target == block.index + 1 # fallthrough-branch' \

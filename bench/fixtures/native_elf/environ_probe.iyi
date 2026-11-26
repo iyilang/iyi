@@ -1,0 +1,10 @@
+# Reads the process environment through ENV, which walks the `environ` table the start code installs. The native ELF gate
+# (bench/native_elf_exercise.sh) starts each executable and its hosted twin with IYI_ELF_ENV_PROBE set, and compares what
+# they print. No other program of the corpus reads the environment, so a start code that left `environ` empty, or pointed
+# it at the terminator of argv, passed every comparison.
+module fixtures/native_elf/environ_probe
+
+import std/env::{ENV}
+
+puts "probe: #{ENV["IYI_ELF_ENV_PROBE"]?.inspect}"
+puts "entries: #{ENV.size > 0}"

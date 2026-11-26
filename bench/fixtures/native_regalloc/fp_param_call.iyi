@@ -1,0 +1,2 @@
+module fp_param_call
+puts "10"

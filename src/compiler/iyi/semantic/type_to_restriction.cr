@@ -27,6 +27,10 @@ module Iyi
       Path.global("Symbol")
     end
 
+    def convert(type : UInt64x2Type)
+      Path.global("UInt64x2")
+    end
+
     def convert(type : IntegerType | FloatType)
       case type.kind
       in NumberKind::I8   then Path.global("Int8")

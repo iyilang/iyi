@@ -1,0 +1,95 @@
+module fpr_typed_provenance
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass}
+import compiler/native/regalloc_linear::{allocate_linear}
+import compiler/native/aarch64/regs::{caller_saved_gprs, caller_saved_fprs}
+
+def vr(v : Int32) : Operand
+  Operand.new(OperandKind::Virtual, v)
+end
+
+fn = MFunction.new("typed_provenance")
+b = MBlock.new(0, "entry")
+fn.blocks << b
+pointer = fn.new_vreg(RegClass::Gpr)
+fn.mark_pointer(pointer)
+ptr_fp = fn.new_vreg(RegClass::Fpr)
+loaded = fn.new_vreg(RegClass::Fpr)
+ptr_bits = fn.new_vreg(RegClass::Gpr)
+float_bits = fn.new_vreg(RegClass::Gpr)
+choice = fn.new_vreg(RegClass::Gpr)
+selected = fn.new_vreg(RegClass::Fpr)
+phi = fn.new_vreg(RegClass::Fpr)
+arith = fn.new_vreg(RegClass::Fpr)
+literal_bits = fn.new_vreg(RegClass::Gpr)
+literal_fp = fn.new_vreg(RegClass::Fpr)
+converted = fn.new_vreg(RegClass::Fpr)
+m = MInst.new(MOp::MovImm.value.to_i32)
+m.defs << vr(pointer)
+b.insts << m
+m = MInst.new(MOp::FMovToFp.value.to_i32)
+m.defs << vr(ptr_fp)
+m.uses << vr(pointer)
+b.insts << m
+m = MInst.new(MOp::Ldr.value.to_i32)
+m.fp = true
+m.defs << vr(loaded)
+m.uses << Operand.new(OperandKind::Physical, 0)
+b.insts << m
+m = MInst.new(MOp::FMovToGp.value.to_i32)
+m.defs << vr(ptr_bits)
+m.uses << vr(ptr_fp)
+b.insts << m
+m = MInst.new(MOp::FMovToGp.value.to_i32)
+m.defs << vr(float_bits)
+m.uses << vr(loaded)
+b.insts << m
+m = MInst.new(MOp::Csel.value.to_i32)
+m.defs << vr(choice)
+m.uses << vr(ptr_bits)
+m.uses << vr(float_bits)
+b.insts << m
+m = MInst.new(MOp::FMovToFp.value.to_i32)
+m.defs << vr(selected)
+m.uses << vr(choice)
+b.insts << m
+m = MInst.new(MOp::FMov.value.to_i32)
+m.fp = true
+m.defs << vr(phi)
+m.uses << vr(ptr_fp)
+b.insts << m
+m = MInst.new(MOp::FMov.value.to_i32)
+m.fp = true
+m.defs << vr(phi)
+m.uses << vr(loaded)
+b.insts << m
+m = MInst.new(MOp::FAdd.value.to_i32)
+m.fp = true
+m.defs << vr(arith)
+m.uses << vr(ptr_fp)
+m.uses << vr(loaded)
+b.insts << m
+m = MInst.new(MOp::MovImm.value.to_i32)
+m.imm = 4607182418800017408_i64
+m.defs << vr(literal_bits)
+b.insts << m
+m = MInst.new(MOp::FMovToFp.value.to_i32)
+m.defs << vr(literal_fp)
+m.uses << vr(literal_bits)
+b.insts << m
+m = MInst.new(MOp::Scvtf.value.to_i32)
+m.fp = true
+m.defs << vr(converted)
+m.uses << vr(pointer)
+b.insts << m
+call = MInst.new(MOp::Bl.value.to_i32)
+call.call = true
+call.clobbers = caller_saved_gprs + caller_saved_fprs
+b.insts << call
+[ptr_fp, selected, phi, arith, loaded, literal_fp, converted].each do |v|
+  use = MInst.new(MOp::FCmp.value.to_i32)
+  use.fp = true
+  use.uses << vr(v)
+  b.insts << use
+end
+allocate_linear(fn)
+puts "#{fn.vreg_home[ptr_fp]} #{fn.vreg_home[selected]} #{fn.vreg_home[phi]} #{fn.vreg_home[arith]} #{fn.vreg_home[loaded]} #{fn.vreg_home[literal_fp]} #{fn.vreg_home[converted]}"

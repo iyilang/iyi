@@ -6,6 +6,43 @@
 import compiler/command/driver::{CommandDriver, CommandResult, Exit}
 
 module BenchSelfhostCommandExercise
+  # Probe real parsed options without compiling the input program.
+  def self.optimization_probe : Nil
+    args = ["build"]
+    index = 1
+    while index < Program.args.size
+      args << Program.args[index]
+      index = index + 1
+    end
+    args << "-o"
+    args << "samples/iyi/hello.option-probe"
+    args << "samples/iyi/hello.iyi"
+    result = CommandDriver.new(args).run
+    if result.exit_code.nil? && (opts = result.compiler_options)
+      puts "optimization_mode=O#{opts.optimization_mode}"
+    else
+      puts "refused"
+    end
+  end
+
+  def self.threads_probe : Nil
+    args = ["build"]
+    index = 1
+    while index < Program.args.size
+      args << Program.args[index]
+      index = index + 1
+    end
+    args << "-o"
+    args << "samples/iyi/hello.option-probe"
+    args << "samples/iyi/hello.iyi"
+    result = CommandDriver.new(args).run
+    if result.exit_code.nil? && (opts = result.compiler_options)
+      puts "n_threads=#{opts.n_threads}"
+    else
+      puts "refused"
+    end
+  end
+
   def self.corpus : Array(Array(String))
     vectors = [] of Array(String)
 
@@ -429,4 +466,10 @@ module BenchSelfhostCommandExercise
   end
 end
 
-BenchSelfhostCommandExercise.run
+if Program.args.size > 0 && Program.args[0] == "--optimization-probe"
+  BenchSelfhostCommandExercise.optimization_probe
+elsif Program.args.size > 0 && Program.args[0] == "--threads-probe"
+  BenchSelfhostCommandExercise.threads_probe
+else
+  BenchSelfhostCommandExercise.run
+end

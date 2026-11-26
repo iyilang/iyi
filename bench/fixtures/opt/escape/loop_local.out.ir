@@ -1,0 +1,22 @@
+; iyi-ir 1
+source_filename = "escape_loop_local"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+%Point = type { i64, i64 }
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i64 @local(i64 %n) {
+entry:
+  %0 = alloca %Point, align 16
+  br label %loop
+loop:
+  %i = phi i64 [ 0, label %entry ], [ %next, label %loop ]
+  intrinsic llvm.memset.p0.i64(ptr %0, i8 0, i64 16, i1 false)
+  %field = getelementptr %Point, ptr %0, i64 0, i32 1
+  store i64 %i, ptr %field, align 8
+  %value = load i64, ptr %field, align 8
+  %next = add i64 %i, 1
+  %more = icmp slt i64 %next, %n
+  br i1 %more, label %loop, label %done
+done:
+  ret i64 %value
+}

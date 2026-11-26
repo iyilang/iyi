@@ -1,0 +1,50 @@
+module unsigned_conditions
+
+def set_ult(a : UInt64, b : UInt64) : Int64
+  a < b ? 1_i64 : 0_i64
+end
+
+def set_ule(a : UInt64, b : UInt64) : Int64
+  a <= b ? 1_i64 : 0_i64
+end
+
+def set_ugt(a : UInt64, b : UInt64) : Int64
+  a > b ? 1_i64 : 0_i64
+end
+
+def set_uge(a : UInt64, b : UInt64) : Int64
+  a >= b ? 1_i64 : 0_i64
+end
+
+def branch_ult(a : UInt64, b : UInt64) : Int64
+  a < b ? 1_i64 : 0_i64
+end
+
+def branch_ule(a : UInt64, b : UInt64) : Int64
+  a <= b ? 1_i64 : 0_i64
+end
+
+def branch_ugt(a : UInt64, b : UInt64) : Int64
+  a > b ? 1_i64 : 0_i64
+end
+
+def branch_uge(a : UInt64, b : UInt64) : Int64
+  a >= b ? 1_i64 : 0_i64
+end
+
+puts "#{set_ult(1_u64, 1_u64)}"
+puts "#{set_ule(1_u64, 1_u64)}"
+puts "#{set_ugt(1_u64, 1_u64)}"
+puts "#{set_uge(1_u64, 1_u64)}"
+puts "#{set_ult(1_u64, 2_u64)}"
+puts "#{set_ule(1_u64, 2_u64)}"
+puts "#{set_ugt(2_u64, 1_u64)}"
+puts "#{set_uge(2_u64, 1_u64)}"
+puts "#{branch_ult(1_u64, 1_u64)}"
+puts "#{branch_ule(1_u64, 1_u64)}"
+puts "#{branch_ugt(1_u64, 1_u64)}"
+puts "#{branch_uge(1_u64, 1_u64)}"
+puts "#{branch_ult(1_u64, 2_u64)}"
+puts "#{branch_ule(1_u64, 2_u64)}"
+puts "#{branch_ugt(2_u64, 1_u64)}"
+puts "#{branch_uge(2_u64, 1_u64)}"

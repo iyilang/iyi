@@ -1,0 +1,18 @@
+; iyi-ir 1
+source_filename = "deadfn_asm_names"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i64 @helper(i64 %n) {
+entry:
+  ret i64 %n
+}
+define internal i64 @worker(i64 %n) {
+entry:
+  ret i64 %n
+}
+define external i32 @main() {
+entry:
+  call void () asm sideeffect "adrp x0, ___iyi_fiber_helper@PAGE", ""()
+  call void () asm sideeffect "bl _worker", ""()
+  ret i32 0
+}

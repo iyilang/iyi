@@ -3,20 +3,18 @@ module compiler/native/regalloc_linear
 # Linear-scan register allocation (SPEC 2.2 step 4, SPEC 3.5). The second allocator behind
 # compiler/native/regalloc: linear is the default; IYI_NATIVE_REGALLOC=pin selects the reference.
 #
-# Positions. Each instruction has one position: its index in the blocks taken in order. A virtual
-# register's interval is the inclusive hull of the positions where it is defined, used, or live across a
-# block edge. Liveness is solved over the control-flow graph, so a value live around a loop back-edge
-# covers the whole loop. A definition and the uses of the same instruction share its position, so an
-# instruction's sources never share a register with its destination.
+# Positions. Each instruction has a use position 2i and a definition position
+# 2i+1. A dying input can share a register with an output unless the target
+# requires distinct operands. Liveness extends interval hulls across block edges.
 #
 # Fixed registers. A physical operand reserves its register from the last point that clobbered it up to
 # the point that reads it. An argument move reserves its register up to the call that reads it, a call
 # result up to the move that takes it, an incoming argument from function entry, and a return value up to
 # the return or branch. These reservations are the pre-coloured intervals: no virtual interval overlaps one.
 #
-# Calls. A call clobbers every caller-saved register. An interval that crosses a call takes a callee-saved
-# general register (x19..x28) or lives in a frame slot. No floating-point register is callee-saved, so a
-# floating-point interval that crosses a call always lives in a slot.
+# Calls. A call-crossing interval takes a callee-saved GPR or an 8-byte
+# callee-saved FPR, or lives in a frame slot. Pointer-carrying FPR intervals
+# must spill even when a callee-saved floating register is available.
 #
 # Spills. A spilled interval has one 8-byte frame slot for the whole function. Each instruction reloads the
 # spilled operands it reads into scratch registers and stores the spilled value it writes from one.
@@ -34,8 +32,8 @@ module compiler/native/regalloc_linear
 # No hash table decides anything.
 
 import compiler/native/mir::{MFunction, MBlock, MInst, Operand, OperandKind, RegClass, Role}
-import compiler/native/target::{new_inst, is_role?, terminator?, leaves_block?, block_branch?, table_branch?}
-import compiler/native/aarch64/regs::{callee_saved_gprs, caller_saved_gprs, caller_saved_fprs, scratch_gprs, scratch_fprs, probe_reg, fp_reg, lr_reg, integer_arg_regs, fp_arg_regs}
+import compiler/native/target::{new_inst, is_role?, terminator?, leaves_block?, block_branch?, table_branch?, distinct_inputs_and_defs?, bitwise_gpr_value?, integer_literal?, typed_fpr_value?}
+import compiler/native/aarch64/regs::{callee_saved_gprs, callee_saved_fprs, caller_saved_gprs, caller_saved_fprs, scratch_gprs, scratch_fprs, probe_reg, fp_reg, lr_reg, integer_arg_regs, fp_arg_regs}
 
 # x17: the encoder's veneer scratch. regs.iyi names it in a comment and has no accessor for it.
 def veneer_reg : Int32
@@ -135,7 +133,7 @@ pub def caller_gpr_pool : Array(Int32)
   acc
 end
 
-# The floating-point pool. Every fp register is caller-saved, so only values that do not cross a call use it.
+# The caller-saved floating-point registers available to the allocator.
 pub def fp_allocatable_pool : Array(Int32)
   acc = [] of Int32
   caller_saved_fprs.each do |r|
@@ -159,13 +157,22 @@ def assert_pools(gprs : Array(Int32), fprs : Array(Int32)) : Nil
   end
 end
 
-# The scratch register for the spilled operand number `index` of one instruction.
-def scratch_reg(fp : Bool, index : Int32) : Int32
-  pool = fp ? scratch_fprs : scratch_gprs
-  if index >= pool.size
-    raise "regalloc: an instruction has more spilled operands than scratch registers"
+# A scratch register may retain one spilled value until it is overwritten.
+# Reuse that copy first, then a vacant register, then any unused register.
+def cached_scratch(pool : Array(Int32), cache : Array(Int32), blocked : UInt64, used : UInt64, v : Int32) : Int32
+  pool.each do |r|
+    mask = 1_u64 << r
+    return r if cache[r] == v && (blocked & mask) == 0_u64
   end
-  pool[index]
+  pool.each do |r|
+    mask = 1_u64 << r
+    return r if cache[r] < 0 && ((blocked | used) & mask) == 0_u64
+  end
+  pool.each do |r|
+    mask = 1_u64 << r
+    return r if ((blocked | used) & mask) == 0_u64
+  end
+  raise "regalloc: an instruction has more spilled operands than scratch registers"
 end
 
 # The MIR of one spill slot access: an 8-byte load or store through the frame, with its width kept whole.
@@ -183,20 +190,80 @@ def slot_access(isa : Int32, load : Bool, reg : Int32, slot : Int32, fp : Bool) 
   m
 end
 
-# Rewrites every instruction so that it names only physical registers and frame slots. A spilled operand is
-# reloaded into a scratch register before the instruction and a spilled definition is stored after it. Shared
-# by both allocators: each one decides the homes, and this writes the code.
+# Physical inputs may be staged several instructions before their use.
+# Keep their entire local live range unavailable to spill scratch allocation.
+def fixed_live_before(block : MBlock) : Array(UInt64)
+  live = 0_u64
+  before = [] of UInt64
+  i = 0
+  while i < block.insts.size
+    before << 0_u64
+    i = i + 1
+  end
+  i = block.insts.size - 1
+  while i >= 0
+    inst = block.insts[i]
+    inst.defs.each do |op|
+      if op.kind == OperandKind::Physical && op.reg >= 0 && op.reg < 64
+        live = live & ((1_u64 << op.reg) ^ 18446744073709551615_u64)
+      end
+    end
+    inst.clobbers.each do |r|
+      live = live & ((1_u64 << r) ^ 18446744073709551615_u64) if r >= 0 && r < 64
+    end
+    if inst.call
+      integer_arg_regs.each { |r| live = live | (1_u64 << r) }
+      fp_arg_regs.each { |r| live = live | (1_u64 << r) }
+    end
+    inst.uses.each do |op|
+      if op.kind == OperandKind::Physical && op.reg >= 0 && op.reg < 64
+        live = live | (1_u64 << op.reg)
+      end
+    end
+    before[i] = live
+    i = i - 1
+  end
+  before
+end
+
+# Rewrite virtual operands, retaining spilled values in scratch registers
+# within a block. Stack slots remain current after every definition.
 pub def rewrite_spills(fn : MFunction) : Nil
+  has_use = bool_row(fn.vreg_count)
   fn.blocks.each do |block|
-    rewrite_block(fn, block)
+    block.insts.each do |inst|
+      inst.uses.each do |op|
+        has_use[op.reg] = true if op.kind == OperandKind::Virtual
+      end
+    end
+  end
+  fn.blocks.each do |block|
+    rewrite_block(fn, block, has_use)
   end
 end
 
-def rewrite_block(fn : MFunction, block : MBlock) : Nil
+def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil
   acc = [] of MInst
+  cache = int_row(64, -1)
+  gprs = scratch_gprs
+  fprs = scratch_fprs
+  fixed = fixed_live_before(block)
+  index = 0
   block.insts.each do |inst|
-    next_gpr = 0
-    next_fpr = 0
+    blocked = fixed[index] # protect-staged-physical
+    index = index + 1
+    used = 0_u64
+    inst.uses.each do |op|
+      if op.kind == OperandKind::Physical && op.reg >= 0 && op.reg < 64
+        blocked = blocked | (1_u64 << op.reg)
+      end
+    end
+    inst.defs.each do |op|
+      if op.kind == OperandKind::Physical && op.reg >= 0 && op.reg < 64
+        blocked = blocked | (1_u64 << op.reg)
+        cache[op.reg] = -1 # physical-def-invalidates-reload
+      end
+    end
     reloads = [] of MInst
     stores = [] of MInst
     inst.uses.each_with_index do |op, k|
@@ -206,13 +273,13 @@ def rewrite_block(fn : MFunction, block : MBlock) : Nil
         inst.uses[k] = Operand.new(OperandKind::Physical, fn.vreg_home[v])
       else
         fp = fn.vreg_classes[v] == RegClass::Fpr
-        reg = scratch_reg(fp, fp ? next_fpr : next_gpr)
-        if fp
-          next_fpr = next_fpr + 1
-        else
-          next_gpr = next_gpr + 1
+        pool = fp ? fprs : gprs
+        reg = cached_scratch(pool, cache, blocked, used, v)
+        if cache[reg] != v
+          reloads << slot_access(fn.isa, true, reg, fn.vreg_slot[v], fp)
+          cache[reg] = v
         end
-        reloads << slot_access(fn.isa, true, reg, fn.vreg_slot[v], fp)
+        used = used | (1_u64 << reg)
         inst.uses[k] = Operand.new(OperandKind::Physical, reg)
       end
     end
@@ -223,20 +290,31 @@ def rewrite_block(fn : MFunction, block : MBlock) : Nil
         inst.defs[k] = Operand.new(OperandKind::Physical, fn.vreg_home[v])
       else
         fp = fn.vreg_classes[v] == RegClass::Fpr
-        reg = scratch_reg(fp, fp ? next_fpr : next_gpr)
-        if fp
-          next_fpr = next_fpr + 1
-        else
-          next_gpr = next_gpr + 1
+        pool = fp ? fprs : gprs
+        reg = cached_scratch(pool, cache, blocked, used, v)
+        pool.each do |r|
+          cache[r] = -1 if r != reg && cache[r] == v
         end
-        stores << slot_access(fn.isa, false, reg, fn.vreg_slot[v], fp)
+        cache[reg] = v
+        used = used | (1_u64 << reg)
+        stores << slot_access(fn.isa, false, reg, fn.vreg_slot[v], fp) if has_use[v] # skip-unused-spill-store
         inst.defs[k] = Operand.new(OperandKind::Physical, reg)
       end
     end
     reloads.each do |r|
       acc << r
     end
-    acc << inst
+    single_copy = is_role?(fn.isa, inst, Role::Copy) && inst.size == 64 && inst.defs.size == 1 && inst.uses.size == 1
+    physical_copy = single_copy && inst.defs[0].kind == OperandKind::Physical && inst.uses[0].kind == OperandKind::Physical
+    identity = physical_copy && inst.defs[0].reg == inst.uses[0].reg
+    acc << inst unless identity
+    inst.clobbers.each do |reg|
+      cache[reg] = -1 if reg >= 0 && reg < 64 # call-clobber-invalidates-reload
+    end
+    unless inst.asm.nil?
+      gprs.each { |r| cache[r] = -1 } # asm-clears-scratch-cache
+      fprs.each { |r| cache[r] = -1 }
+    end
     stores.each do |s|
       acc << s
     end
@@ -282,6 +360,239 @@ def sort_by_start(list : Array(Int32), starts : Array(Int32)) : Array(Int32)
   acc
 end
 
+# A path-compressed representative of a collapsed inner loop.
+def loop_root(parent : Array(Int32), v : Int32) : Int32
+  root = v
+  while parent[root] != root
+    root = parent[root]
+  end
+  while parent[v] != v
+    next_v = parent[v]
+    parent[v] = root
+    v = next_v
+  end
+  root
+end
+
+def dfs_ancestor?(number : Array(Int32), last : Array(Int32), a : Int32, b : Int32) : Bool
+  number[a] <= number[b] && number[b] <= last[a]
+end
+
+# Lengauer-Tarjan eval with path compression. `scratch` is reused for every
+# edge so a large function does not allocate a traversal stack per query.
+def dom_eval(v : Int32, ancestor : Array(Int32), semi : Array(Int32), label : Array(Int32), scratch : Array(Int32)) : Int32
+  x = v
+  while ancestor[x] >= 0 && ancestor[ancestor[x]] >= 0
+    scratch << x
+    x = ancestor[x]
+  end
+  while scratch.size > 0
+    x = scratch.pop
+    a = ancestor[x]
+    label[x] = label[a] if semi[label[a]] < semi[label[x]]
+    ancestor[x] = ancestor[a]
+  end
+  label[v]
+end
+
+# Dominator-tree intervals for each DFS component. Unreachable components
+# cannot affect the entry component's dominators.
+def dominator_intervals(succs : Array(Array(Int32)), order : Array(Int32), number : Array(Int32), tree_parent : Array(Int32), component : Array(Int32)) : {Array(Int32), Array(Int32)}
+  n = succs.size
+  preds = [] of Array(Int32)
+  bucket = [] of Array(Int32)
+  children = [] of Array(Int32)
+  label = [] of Int32
+  semi = int_row(n, 0)
+  ancestor = int_row(n, -1)
+  idom = int_row(n, -1)
+  b = 0
+  while b < n
+    preds << ([] of Int32)
+    bucket << ([] of Int32)
+    children << ([] of Int32)
+    label << b
+    semi[b] = number[b]
+    b = b + 1
+  end
+  b = 0
+  while b < n
+    succs[b].each do |s|
+      next if s < 0 || s >= n || component[s] != component[b]
+      preds[s] << b
+    end
+    b = b + 1
+  end
+  scratch = [] of Int32
+  i = order.size - 1
+  while i >= 0
+    w = order[i]
+    p = tree_parent[w]
+    if p >= 0
+      preds[w].each do |v|
+        u = dom_eval(v, ancestor, semi, label, scratch)
+        semi[w] = semi[u] if semi[u] < semi[w]
+      end
+      bucket[order[semi[w]]] << w
+      ancestor[w] = p
+      bucket[p].each do |v|
+        u = dom_eval(v, ancestor, semi, label, scratch)
+        idom[v] = semi[u] < semi[v] ? u : p
+      end
+      bucket[p].clear
+    end
+    i = i - 1
+  end
+  order.each do |w|
+    next if tree_parent[w] < 0
+    idom[w] = idom[idom[w]] if idom[w] != order[semi[w]]
+    children[idom[w]] << w
+  end
+  first = int_row(n, -1)
+  last = int_row(n, -1)
+  cursor = int_row(n, 0)
+  stack = [] of Int32
+  count = 0
+  order.each do |root|
+    next unless tree_parent[root] < 0
+    first[root] = count
+    count = count + 1
+    stack << root
+    while stack.size > 0
+      v = stack[stack.size - 1]
+      if cursor[v] < children[v].size
+        child = children[v][cursor[v]]
+        cursor[v] = cursor[v] + 1
+        first[child] = count
+        count = count + 1
+        stack << child
+      else
+        last[v] = count - 1
+        stack.pop
+      end
+    end
+  end
+  {first, last}
+end
+
+# Collapse natural loops from inner to outer. Dominator filtering excludes
+# irreducible retreating edges; union-find compresses the collapsed paths.
+def block_loop_depths(succs : Array(Array(Int32))) : Array(Int32)
+  n = succs.size
+  depth = int_row(n, 0)
+  number = int_row(n, -1)
+  last = int_row(n, -1)
+  tree_parent = int_row(n, -1)
+  component = int_row(n, -1)
+  cursor = int_row(n, 0)
+  order = [] of Int32
+  stack = [] of Int32
+  cyclic = false
+  start = 0
+  while start < n
+    if number[start] < 0
+      number[start] = order.size
+      component[start] = start
+      order << start
+      stack << start
+      while stack.size > 0
+        b = stack[stack.size - 1]
+        if cursor[b] < succs[b].size
+          s = succs[b][cursor[b]]
+          cursor[b] = cursor[b] + 1
+          if s >= 0 && s < n
+            if number[s] < 0
+              number[s] = order.size
+              tree_parent[s] = b
+              component[s] = start
+              order << s
+              stack << s
+            elsif last[s] < 0
+              cyclic = true
+            end
+          end
+        else
+          last[b] = order.size - 1
+          stack.pop
+        end
+      end
+    end
+    start = start + 1
+  end
+  return depth unless cyclic
+  dom = dominator_intervals(succs, order, number, tree_parent, component)
+  back = [] of Array(Int32)
+  forward = [] of Array(Int32)
+  parent = [] of Int32
+  b = 0
+  while b < n
+    back << ([] of Int32)
+    forward << ([] of Int32)
+    parent << b
+    b = b + 1
+  end
+  b = 0
+  while b < n
+    succs[b].each do |s|
+      next if s < 0 || s >= n
+      next if component[s] != component[b]
+      if dfs_ancestor?(number, last, s, b) && dfs_ancestor?(dom[0], dom[1], s, b)
+        back[s] << b
+      else
+        forward[s] << b
+      end
+    end
+    b = b + 1
+  end
+  owner = int_row(n, -1)
+  seen = int_row(n, -1)
+  header = bool_row(n)
+  i = order.size - 1
+  while i >= 0
+    h = order[i]
+    pending = [] of Int32
+    self_loop = false
+    back[h].each do |p|
+      r = loop_root(parent, p)
+      if r == h
+        self_loop = true
+      elsif seen[r] != h
+        seen[r] = h
+        pending << r
+      end
+    end
+    j = 0
+    while j < pending.size
+      x = pending[j]
+      forward[x].each do |p|
+        r = loop_root(parent, p)
+        return int_row(n, 0) unless dfs_ancestor?(number, last, h, r)
+        if r != h && seen[r] != h
+          seen[r] = h
+          pending << r
+        end
+      end
+      j = j + 1
+    end
+    if self_loop || pending.size > 0
+      header[h] = true
+      pending.each do |x|
+        owner[x] = h
+        parent[x] = h
+      end
+    end
+    i = i - 1
+  end
+  order.each do |v|
+    depth[v] = (owner[v] >= 0 ? depth[owner[v]] : 0) + (header[v] ? 1 : 0)
+  end
+  depth
+end
+
+def spill_weight_limit : Int64
+  1152921504606846976_i64
+end
+
 class LinearScan
   property fn : MFunction
   property vcount : Int32
@@ -297,14 +608,17 @@ class LinearScan
   property has_interval : Array(Bool)
   property crossing : Array(Bool)
   property pointer : Array(Bool)
-  property res_reg : Array(Int32)
-  property res_start : Array(Int32)
-  property res_end : Array(Int32)
+  property weights : Array(Int64)
+  property res_start : Array(Array(Int32))
+  property res_end : Array(Array(Int32))
   property homes : Array(Int32)
   property active : Array(Int32)
   property caller_pool : Array(Int32)
   property callee_pool : Array(Int32)
+  property hint_vreg : Array(Int32)
+  property hint_reg : Array(Int32)
   property fpr_pool : Array(Int32)
+  property callee_fpr_pool : Array(Int32)
 
   def initialize(@fn : MFunction)
     @vcount = fn.vreg_count
@@ -320,14 +634,23 @@ class LinearScan
     @has_interval = [] of Bool
     @crossing = [] of Bool
     @pointer = [] of Bool
-    @res_reg = [] of Int32
-    @res_start = [] of Int32
-    @res_end = [] of Int32
+    @weights = [] of Int64
+    @res_start = [] of Array(Int32)
+    @res_end = [] of Array(Int32)
+    r = 0
+    while r < 64
+      @res_start << ([] of Int32)
+      @res_end << ([] of Int32)
+      r = r + 1
+    end
     @homes = [] of Int32
     @active = [] of Int32
     @caller_pool = caller_gpr_pool
     @callee_pool = callee_saved_gprs
-    @fpr_pool = fp_allocatable_pool
+    @hint_vreg = [] of Int32
+    @hint_reg = [] of Int32
+    @callee_fpr_pool = callee_saved_fprs
+    @fpr_pool = fp_allocatable_pool + @callee_fpr_pool
   end
 
   # Runs every stage and leaves the homes and the frame slots on the function.
@@ -335,19 +658,50 @@ class LinearScan
     assert_pools(@caller_pool + @callee_pool, @fpr_pool)
     number_positions
     build_successors
+    measure_weights
     solve_liveness
     build_intervals
+    collect_hints
     record_reservations
     assign
     assert_assignment
     finish_frame
   end
 
+  # The cost of spilling is the sum of 8^loop-depth for every use. Saturation
+  # makes both deeply nested loops and very large functions overflow-safe.
+  def measure_weights : Nil
+    v = 0
+    while v < @vcount
+      @weights << 0_i64
+      v = v + 1
+    end
+    depths = block_loop_depths(@succs)
+    limit = spill_weight_limit
+    b = 0
+    while b < @fn.blocks.size
+      factor = 1_i64
+      d = depths[b]
+      while d > 0 && factor < limit
+        factor = factor * 8_i64
+        d = d - 1
+      end
+      @fn.blocks[b].insts.each do |inst|
+        inst.uses.each do |op|
+          next unless op.kind == OperandKind::Virtual
+          old = @weights[op.reg]
+          @weights[op.reg] = old > limit - factor ? limit : old + factor
+        end
+      end
+      b = b + 1
+    end
+  end
+
   def number_positions : Nil
     pos = 0
     @fn.blocks.each do |block|
       @block_first << pos
-      pos = pos + block.insts.size
+      pos = pos + 2 * block.insts.size
       @block_last << (pos - 1)
     end
     @npos = pos
@@ -355,8 +709,9 @@ class LinearScan
     p = 0
     @fn.blocks.each do |block|
       block.insts.each do |inst|
-        @call_prefix[p + 1] = @call_prefix[p] + (inst.call ? 1 : 0)
-        p = p + 1
+        @call_prefix[p + 1] = @call_prefix[p] + (inst.call || !inst.asm.nil? ? 1 : 0) # collector-boundary
+        @call_prefix[p + 2] = @call_prefix[p + 1]
+        p = p + 2
       end
     end
   end
@@ -445,13 +800,14 @@ class LinearScan
     pos = 0
     @fn.blocks.each do |block|
       block.insts.each do |inst|
+        use_end = distinct_inputs_and_defs?(@fn.isa, inst) ? pos + 1 : pos
         inst.uses.each do |op|
-          extend_at(op.reg, pos) if op.kind == OperandKind::Virtual
+          extend_at(op.reg, use_end) if op.kind == OperandKind::Virtual
         end
         inst.defs.each do |op|
-          extend_at(op.reg, pos) if op.kind == OperandKind::Virtual
+          extend_at(op.reg, pos + 1) if op.kind == OperandKind::Virtual
         end
-        pos = pos + 1
+        pos = pos + 2
       end
     end
     b = 0
@@ -482,44 +838,177 @@ class LinearScan
     end
   end
 
-  # The floating-point vregs that are bit copies of a general-purpose value. A copy is `fmov` or `mov` into an
-  # fp vreg: the source's flag passes to the destination until nothing changes.
-  def pointer_fprs : Array(Bool)
-    n = @vcount
-    flags = bool_row(n)
+  # A copy prefers the other operand's existing home. The earlier interval is
+  # allocated first; both ordinary and predecessor phi copies use this rule.
+  def collect_hints : Nil
+    @hint_vreg = int_row(@vcount, -1)
+    @hint_reg = int_row(@vcount, -1)
     @fn.blocks.each do |block|
       block.insts.each do |inst|
-        if is_role?(@fn.isa, inst, Role::GprToFpr) && inst.defs.size > 0 && inst.defs[0].kind == OperandKind::Virtual
-          flags[inst.defs[0].reg] = true
+        next unless is_role?(@fn.isa, inst, Role::Copy)
+        next unless inst.defs.size == 1 && inst.uses.size == 1
+        dst = inst.defs[0]
+        src = inst.uses[0]
+        if dst.kind == OperandKind::Virtual && src.kind == OperandKind::Virtual
+          if @starts[src.reg] < @starts[dst.reg] || (@starts[src.reg] == @starts[dst.reg] && src.reg < dst.reg)
+            @hint_vreg[dst.reg] = src.reg if @hint_vreg[dst.reg] < 0
+          else
+            @hint_vreg[src.reg] = dst.reg if @hint_vreg[src.reg] < 0
+          end
+        elsif dst.kind == OperandKind::Virtual && src.kind == OperandKind::Physical
+          @hint_reg[dst.reg] = src.reg if @hint_reg[dst.reg] < 0
+        elsif dst.kind == OperandKind::Physical && src.kind == OperandKind::Virtual
+          @hint_reg[src.reg] = dst.reg if @hint_reg[src.reg] < 0
         end
       end
     end
-    changed = true
-    while changed
-      changed = false
-      @fn.blocks.each do |block|
-        block.insts.each do |inst|
-          next unless is_role?(@fn.isa, inst, Role::Copy)
-          next unless inst.defs.size > 0 && inst.uses.size > 0
-          dst = inst.defs[0]
-          src = inst.uses[0]
-          next unless dst.kind == OperandKind::Virtual && src.kind == OperandKind::Virtual
-          next unless @fn.vreg_classes[dst.reg] == RegClass::Fpr
-          if flags[src.reg] && !flags[dst.reg]
-            flags[dst.reg] = true
-            changed = true
+  end
+
+  # Propagate possible pointer bits through bit-preserving copies and selects.
+  # Typed FPR parameters, call results, loads, literals and numeric operations
+  # are safe; asm-written and otherwise untyped physical sources are not.
+  def pointer_fprs : Array(Bool)
+    n = @vcount
+    flags = bool_row(n)
+    has_def = bool_row(n)
+    dep_head = int_row(n, -1)
+    dep_next = [] of Int32
+    dep_dst = [] of Int32
+    queue = [] of Int32
+    safe_roots = [] of Int32
+    safe_root_seen = bool_row(n)
+    fp_args = 0_u64
+    fp_arg_regs.each { |r| fp_args = fp_args | (1_u64 << r) }
+    block_index = 0
+    @fn.blocks.each do |block|
+      typed_fixed = block_index == 0 ? fp_args : 0_u64
+      block_index = block_index + 1
+      block.insts.each do |inst|
+        inst.defs.each do |dst|
+          next unless dst.kind == OperandKind::Virtual
+          v = dst.reg
+          has_def[v] = true
+          unknown = @fn.vreg_pointer[v] || !inst.asm.nil?
+          gpr_bits = @fn.vreg_classes[v] == RegClass::Gpr && bitwise_gpr_value?(@fn.isa, inst)
+          transfer = is_role?(@fn.isa, inst, Role::Copy) || is_role?(@fn.isa, inst, Role::GprToFpr) || gpr_bits
+          if !unknown && transfer
+            unknown = true if inst.uses.empty?
+            inst.uses.each do |src|
+              if src.kind == OperandKind::Virtual
+                dep_dst << v
+                dep_next << dep_head[src.reg]
+                dep_head[src.reg] = dep_dst.size - 1
+              elsif src.kind == OperandKind::Physical
+                if @fn.vreg_classes[v] == RegClass::Fpr && is_role?(@fn.isa, inst, Role::Copy) && src.reg >= 32 && src.reg < 64 && (typed_fixed & (1_u64 << src.reg)) != 0_u64 # typed-fixed-fpr
+                  unless safe_root_seen[v]
+                    safe_root_seen[v] = true
+                    safe_roots << v
+                  end
+                else
+                  unknown = true # fixed-fpr-provenance-unknown
+                end
+              else
+                unknown = true
+              end
+            end
+          elsif !unknown && ((@fn.vreg_classes[v] == RegClass::Fpr && typed_fpr_value?(@fn.isa, inst)) || integer_literal?(@fn.isa, inst))
+            unless safe_root_seen[v]
+              safe_root_seen[v] = true
+              safe_roots << v
+            end
+          else
+            unknown = true
+          end
+          if unknown && !flags[v]
+            flags[v] = true
+            queue << v
+          end
+        end
+        inst.clobbers.each do |r|
+          typed_fixed = typed_fixed & ((1_u64 << r) ^ 18446744073709551615_u64) if r >= 32 && r < 64
+        end
+        if !inst.asm.nil?
+          typed_fixed = typed_fixed & (fp_args ^ 18446744073709551615_u64)
+        elsif inst.call
+          typed_fixed = typed_fixed | fp_args
+        end
+        inst.defs.each do |op|
+          if op.kind == OperandKind::Physical && op.reg >= 32 && op.reg < 64
+            typed_fixed = typed_fixed & ((1_u64 << op.reg) ^ 18446744073709551615_u64)
           end
         end
       end
+    end
+    v = 0
+    while v < n
+      if !has_def[v] && !flags[v]
+        flags[v] = true
+        queue << v
+      end
+      v = v + 1
+    end
+    i = 0
+    while i < queue.size
+      edge = dep_head[queue[i]]
+      while edge >= 0
+        dst = dep_dst[edge]
+        unless flags[dst]
+          flags[dst] = true
+          queue << dst
+        end
+        edge = dep_next[edge]
+      end
+      i = i + 1
+    end
+    # Cyclic copies with no proven origin are unknown, not evidence of safety.
+    reachable = bool_row(n)
+    i = 0
+    while i < safe_roots.size
+      root = safe_roots[i]
+      reachable[root] = true
+      i = i + 1
+    end
+    i = 0
+    while i < safe_roots.size
+      edge = dep_head[safe_roots[i]]
+      while edge >= 0
+        dst = dep_dst[edge]
+        unless reachable[dst]
+          reachable[dst] = true
+          safe_roots << dst
+        end
+        edge = dep_next[edge]
+      end
+      i = i + 1
+    end
+    v = 0
+    while v < n
+      if !reachable[v] && !flags[v]
+        flags[v] = true
+        queue << v
+      end
+      v = v + 1
+    end
+    i = 0
+    while i < queue.size
+      edge = dep_head[queue[i]]
+      while edge >= 0
+        dst = dep_dst[edge]
+        unless flags[dst]
+          flags[dst] = true
+          queue << dst
+        end
+        edge = dep_next[edge]
+      end
+      i = i + 1
     end
     flags
   end
 
   # Physical occurrences. Each reservation is an inclusive span of positions over which the register is fixed.
   def reserve(r : Int32, s : Int32, e : Int32) : Nil
-    @res_reg << r
-    @res_start << s
-    @res_end << e
+    @res_start[r] << s
+    @res_end[r] << e
   end
 
   def terminator_reads(opened : Array(Bool), clob : Array(Int32), pos : Int32) : Nil
@@ -539,9 +1028,10 @@ class LinearScan
     pos = 0
     @fn.blocks.each do |block|
       block.insts.each do |inst|
+        distinct = distinct_inputs_and_defs?(@fn.isa, inst)
         inst.uses.each do |op|
           next unless op.kind == OperandKind::Physical
-          reserve(op.reg, clob[op.reg], pos)
+          reserve(op.reg, clob[op.reg], distinct ? pos + 1 : pos)
           opened[op.reg] = false
         end
         terminator_reads(opened, clob, pos) if terminator?(@fn.isa, inst)
@@ -559,18 +1049,18 @@ class LinearScan
             end
           end
           inst.clobbers.each do |r|
-            clob[r] = pos
+            clob[r] = pos + 1
             opened[r] = false
           end
         end
         inst.defs.each do |op|
           next unless op.kind == OperandKind::Physical
-          reserve(op.reg, clob[op.reg], pos) if opened[op.reg]
-          clob[op.reg] = pos
+          reserve(op.reg, clob[op.reg], pos + 1) if opened[op.reg]
+          clob[op.reg] = pos + 1
           opened[op.reg] = true
-          reserve(op.reg, pos, pos)
+          reserve(op.reg, distinct ? pos : pos + 1, pos + 1)
         end
-        pos = pos + 1
+        pos = pos + 2
       end
     end
     r = 0
@@ -582,14 +1072,19 @@ class LinearScan
 
   # Whether register `reg` has a reservation overlapping the span [s, e].
   def reserved?(reg : Int32, s : Int32, e : Int32) : Bool
-    i = 0
-    while i < @res_reg.size
-      if @res_reg[i] == reg && @res_start[i] <= e && @res_end[i] >= s
-        return true
+    starts = @res_start[reg]
+    ends = @res_end[reg]
+    lo = 0
+    hi = ends.size
+    while lo < hi
+      mid = lo + (hi - lo) // 2
+      if ends[mid] < s
+        lo = mid + 1
+      else
+        hi = mid
       end
-      i = i + 1
     end
-    false
+    lo < ends.size && starts[lo] <= e
   end
 
   def held?(reg : Int32) : Bool
@@ -616,13 +1111,14 @@ class LinearScan
   end
 
   # The candidate registers for one interval, in the order they are tried.
-  #   - A floating-point interval that crosses a call gets no register: every fp register is caller-saved.
+  #   - A non-pointer floating-point interval crossing a call may use d8..d15.
   #   - A general-purpose interval that crosses a call gets a callee-saved register.
   #   - Any other general-purpose interval tries the caller-saved registers, then the callee-saved ones.
   def pool_for(iv : Int32) : Array(Int32)
     if @fn.vreg_classes[iv] == RegClass::Fpr
       if @crossing[iv]
-        return [] of Int32
+        return [] of Int32 if @pointer[iv]
+        return @callee_fpr_pool
       end
       return @fpr_pool
     end
@@ -633,22 +1129,29 @@ class LinearScan
   end
 
   def find_free(iv : Int32, pool : Array(Int32)) : Int32
+    preferred = @hint_reg[iv]
+    other = @hint_vreg[iv]
+    preferred = @homes[other] if other >= 0 && @homes[other] >= 0
+    if preferred >= 0 && member?(pool, preferred) && !held?(preferred) && !reserved?(preferred, @starts[iv], @ends[iv])
+      return preferred
+    end
     pool.each do |reg|
       return reg unless held?(reg) || reserved?(reg, @starts[iv], @ends[iv])
     end
     -1
   end
 
-  # The active interval to evict for `iv`: one in a usable register that ends after `iv`, the furthest end
-  # wins, the earliest in the active list breaks ties. Its register must be free of reservations over iv.
+  # Evict the lowest-weight active interval only if it is cheaper to spill
+  # than the new interval. Longer intervals break equal-weight ties.
   def find_victim(iv : Int32, pool : Array(Int32)) : Int32
     best = -1
     k = 0
     while k < @active.size
       a = @active[k]
       reg = @homes[a]
-      if member?(pool, reg) && @ends[a] > @ends[iv] && !reserved?(reg, @starts[iv], @ends[iv])
-        if best < 0 || @ends[a] > @ends[best]
+      cheaper = @weights[a] < @weights[iv] || (@weights[a] == @weights[iv] && @ends[a] > @ends[iv])
+      if member?(pool, reg) && cheaper && !reserved?(reg, @starts[iv], @ends[iv])
+        if best < 0 || @weights[a] < @weights[best] || (@weights[a] == @weights[best] && @ends[a] > @ends[best])
           best = a
         end
       end

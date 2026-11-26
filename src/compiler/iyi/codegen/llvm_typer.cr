@@ -173,6 +173,10 @@ module Iyi
       @llvm_context.int(8 * type.bytes)
     end
 
+    private def create_llvm_type(type : UInt64x2Type, wants_size)
+      @llvm_context.int64.vector(2)
+    end
+
     private def create_llvm_type(type : FloatType, wants_size)
       type.bytes == 4 ? @llvm_context.float : @llvm_context.double
     end
@@ -712,6 +716,31 @@ module Iyi
         1_u32
       else
         @layout.abi_alignment(type)
+      end
+    end
+
+    # Arena objects can start at an eight-byte boundary even when LLVM's
+    # vector ABI alignment is sixteen. Include inline aggregates and wide
+    # integers: mixed unions represent their payload as an integer array,
+    # losing the vector member's type, and real wide integer fields have
+    # the same heap alignment constraint.
+    def needs_heap_align8?(type : LLVM::Type) : Bool
+      case type.kind
+      when .vector?
+        type.vector_size == 2 && type.element_type.kind.integer? && type.element_type.int_width == 64
+      when .integer?
+        type.int_width > 64
+      when .array?, .struct?
+        cache = @heap_align8_storage ||= {} of LLVM::Type => Bool
+        return cache[type] if cache.has_key?(type)
+        found = if type.kind.array?
+                  needs_heap_align8?(type.element_type)
+                else
+                  type.struct_element_types.any? { |element| needs_heap_align8?(element) }
+                end
+        cache[type] = found
+      else
+        false
       end
     end
 

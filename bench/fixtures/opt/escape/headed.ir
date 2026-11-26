@@ -1,0 +1,17 @@
+; iyi-ir 1
+source_filename = "escape_headed"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+%Point = type { i64, ptr }
+@"__iyi_gc_layouts:table" = internal constant [7 x i64] [ i64 1, i64 7, i64 16, i64 16, i64 1, i64 0, i64 8 ]
+@__iyi_gc_layouts = internal constant ptr @"__iyi_gc_layouts:table"
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i32 @headed(i64 %tid, ptr %heap) {
+entry:
+  %p = call ptr (i64, i64, i64) @__iyi_new(i64 ptrtoint (ptr getelementptr (%Point, ptr null, i32 1) to i64), i64 7, i64 1)
+  %field = getelementptr %Point, ptr %p, i64 0, i32 1
+  store ptr %heap, ptr %field, align 8
+  %type_address = getelementptr i8, ptr %p, i64 -4
+  %type_id = load i32, ptr %type_address, align 4
+  ret i32 %type_id
+}

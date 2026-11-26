@@ -1,2 +1,6 @@
 70
-1
+0
+# Named exceptions: category|file|site|kind|context|case|reason
+# Site is the zero-based ordinal among sites of that kind in the same context.
+differing|src/compiler/llvm/lib_llvm.iyi|#0|MacroIf|class|error location differs|The LLVM bridge raise's message agrees, but the port reports the next column.
+differing|src/iyi/concurrency.iyi|#0|MacroIf|def:words|error location differs|The undefined U in the words macro has the same message, but the port reports the next column.

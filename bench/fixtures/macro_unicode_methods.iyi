@@ -1,0 +1,31 @@
+macro unicode_methods
+  {{ "hé日😀z".size }}
+  {{ "hé日😀z".bytesize }}
+  {{ "hé日😀z"[1..3] }}
+  {{ "hé日😀z"[-3..-1] }}
+  {{ "hé日😀z"[1...3] }}
+  {{ "hé日😀z".tr("é日😀", "abc") }}
+  {{ "hé日😀z".tr("é日😀", "à語💡") }}
+  {{ "é日😀é".tr("é日😀", "x") }}
+  {{ "é日😀".tr("日", "") }}
+  {{ "abé日😀z".tr("a-z", "") }}
+  {{ "abé日😀z".tr("^a-z", "") }}
+  {{ "é日😀z".upcase }}
+  {{ "É日😀Z".downcase }}
+  {{ "é日😀Z".capitalize }}
+  {{ "é日😀_z".camelcase }}
+  {{ "É日😀_z".camelcase(lower: true) }}
+  {{ "é日😀Z".underscore }}
+  {{ "HTTPÉcole日😀".underscore }}
+  {{ "é日😀".id.size }}
+  {{ :"é日😀".size }}
+  {{ "é日😀".id.bytesize }}
+  {{ :"é日😀".bytesize }}
+  {{ "é日😀".id.tr("é", "a").stringify }}
+  {{ :"é日😀".tr("é", "a").stringify }}
+  {{ "é日😀".starts_with?("é日") }}
+  {{ "é日😀".ends_with?("日😀") }}
+  {{ "é日😀".includes?("日") }}
+end
+
+unicode_methods

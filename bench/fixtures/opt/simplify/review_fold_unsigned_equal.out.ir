@@ -1,0 +1,40 @@
+; iyi-ir 1
+source_filename = "review_fold_unsigned_equal"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @ule_i1() {
+entry:
+  ret i1 true
+}
+define internal i1 @ule_i7() {
+entry:
+  ret i1 true
+}
+define internal i1 @ule_i8() {
+entry:
+  ret i1 true
+}
+define internal i1 @ule_i8_zero() {
+entry:
+  ret i1 true
+}
+define internal i1 @ule_i16() {
+entry:
+  ret i1 true
+}
+define internal i1 @ule_i32() {
+entry:
+  ret i1 true
+}
+define internal i1 @ule_i33() {
+entry:
+  ret i1 true
+}
+define internal i1 @ule_i64() {
+entry:
+  ret i1 true
+}
+define internal i1 @ule_i8_unsigned_order() {
+entry:
+  ret i1 false
+}

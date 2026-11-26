@@ -136,8 +136,8 @@ with open(f"{work}/forms.s", "w", encoding="utf-8", newline="\n") as f:
     for text, _, _ in rows:
         f.write(text + "\n")
 
-if len(rows) != 113 or sum(len(relocs) for _, _, relocs in rows) != 11:
-    print(f"expected 113 forms with 11 relocations, got {len(rows)} forms with "
+if len(rows) != 317 or sum(len(relocs) for _, _, relocs in rows) != 11:
+    print(f"expected 317 forms with 11 relocations, got {len(rows)} forms with "
           f"{sum(len(relocs) for _, _, relocs in rows)} relocations")
     sys.exit(1)
 
@@ -244,6 +244,9 @@ rows = [
     ("table", "win64_sse", "32,33,34,35"),             # xmm0..xmm3
     ("table", "sysv_callee_saved", "3,5,12,13,14,15"), # rbx rbp r12..r15
     ("table", "win64_callee_saved", "3,5,7,6,12,13,14,15,38,39,40,41,42,43,44,45,46,47"),
+    # SysV psABI 3.2.1 and Microsoft x64 software conventions: volatile registers.
+    ("table", "sysv_caller_saved", "0,1,2,6,7,8,9,10,11,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47"),
+    ("table", "win64_caller_saved", "0,1,2,8,9,10,11,32,33,34,35,36,37"),
     # the Win64 by-value rule: 1, 2, 4 or 8 bytes by value, any other size by reference
     ("win64_value", "1", "yes"),
     ("win64_value", "2", "yes"),
@@ -306,6 +309,7 @@ check_abi() {
   local result
   : >"$work/abi.diff"
   : >"$work/abi.err"
+  : >"$work/abi.partition"
   : >"$work/abi.expected.err"
   "$work/native_amd64$EXE" abi >"$work/abi.tsv" 2>"$work/abi.err" || return 2
   "$PY" "$(native_path "$work/abi_expected.py")" >"$work/abi.expected" 2>"$work/abi.expected.err" || return 2
@@ -315,7 +319,32 @@ check_abi() {
   diff -u "$work/abi.expected.sorted" "$work/abi.tsv.sorted" >"$work/abi.diff"
   result=$?
   case "$result" in
-    0) return 0 ;;
+    0)
+      "$PY" - "$(native_path "$work/abi.tsv")" >"$work/abi.partition" 2>&1 <<'PY'
+import sys
+
+tables = {}
+with open(sys.argv[1], encoding="utf-8") as source:
+    for line in source:
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) == 3 and parts[0] == "table":
+            tables[parts[1]] = [int(reg) for reg in parts[2].split(",")]
+for abi in ("sysv", "win64"):
+    caller = tables[abi + "_caller_saved"]
+    callee = tables[abi + "_callee_saved"]
+    if len(caller) != len(set(caller)) or len(callee) != len(set(callee)):
+        print(f"{abi}: duplicate register in ABI table")
+        sys.exit(1)
+    caller = {reg for reg in caller if reg < 16}
+    callee = {reg for reg in callee if reg < 16}
+    reserved = {4}  # rsp
+    if caller & callee or (caller | callee) & reserved or caller | callee | reserved != set(range(16)):
+        print(f"{abi}: caller, callee and rsp do not partition the general registers")
+        sys.exit(1)
+print("ABI general-register partitions: 2 checked")
+PY
+      return $?
+      ;;
     1) return 1 ;;
     *) return 2 ;;
   esac
@@ -325,7 +354,7 @@ show_check_failure() {
   if [ "$1" = check_encoder ]; then
     cat "$work/check.log" "$work/forms.err" "$work/mc.log" "$work/dis.err"
   else
-    cat "$work/abi.diff" "$work/abi.err" "$work/abi.expected.err"
+    cat "$work/abi.diff" "$work/abi.err" "$work/abi.expected.err" "$work/abi.partition"
   fi
 }
 
@@ -345,6 +374,7 @@ fi
 echo "== 2. ABI: the register tables, the eightbyte classes and the Win64 slots against the psABI"
 if check_abi; then
   echo "   $(wc -l <"$work/abi.expected" | tr -d ' ') rows match the psABI's stated classes, registers and rules"
+  cat "$work/abi.partition"
 else
   result=$?
   show_check_failure check_abi
@@ -429,6 +459,41 @@ PY
   fi
   return 0
 }
+# New proofs use the shared helper and count only a completed comparison mismatch.
+check_shared_x86_mutant() {
+  local check=$1 rc=0
+  if ! build_table_tool "$work/native_amd64$EXE" >"$work/shared-mutant.log" 2>&1; then
+    cat "$work/shared-mutant.log"
+    touch "$work/shared-invalid"
+    return 0
+  fi
+  "$check" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    show_check_failure "$check"
+    touch "$work/shared-invalid"
+    return 0
+  fi
+  return "$rc"
+}
+
+prove_shared_x86_mutation() {
+  local name=$1 file=$2 old=$3 new=$4 check=$5
+  rm -f "$work/shared-invalid"
+  if ! (
+    trap - EXIT INT TERM
+    . "$REPO/bench/lib/mutation.sh"
+    prove_mutation "$name" "$file" "$old" "$new" -- check_shared_x86_mutant "$check"
+  ); then
+    fail "mutation $name was not caught"
+  fi
+  [ ! -e "$work/shared-invalid" ] || fail "mutation $name: INVALID mutant or comparison"
+  if ! build_table_tool "$work/native_amd64$EXE" >"$work/build.log" 2>&1; then
+    cat "$work/build.log"
+    fail "the original tool does not rebuild after '$name'"
+    exit 1
+  fi
+}
+
 
 echo "== 6. mutations are each caught"
 prove_mutation "cvtt: cvttsd2si given the cvtsd2si opcode (2D, not 2C)" src/compiler/native/amd64/encode.iyi \
@@ -448,6 +513,19 @@ prove_mutation "win64: a floating-point argument takes the integer slot" src/com
     return win64_sse_args[index]" \
   "  if is_float
     return win64_integer_args[index]" check_abi
+prove_shared_x86_mutation "ALU: +127 does not use the signed-byte immediate form" src/compiler/native/amd64/encode.iyi \
+  "  if imm >= -128 && imm <= 127
+    return with_imm(op_digit(0x83, size, sub, rm), imm, 1)" \
+  "  if imm >= -128 && imm < 127
+    return with_imm(op_digit(0x83, size, sub, rm), imm, 1)" check_encoder
+prove_shared_x86_mutation "imul: +127 does not use the signed-byte immediate form" src/compiler/native/amd64/encode.iyi \
+  "  if imm >= -128 && imm <= 127
+    return with_imm(op_rr(0x6B, size, reg, rm), imm, 1)" \
+  "  if imm >= -128 && imm < 127
+    return with_imm(op_rr(0x6B, size, reg, rm), imm, 1)" check_encoder
+prove_shared_x86_mutation "Win64: r11 is missing from caller-saved registers" src/compiler/native/amd64/abi.iyi \
+  "  return [rax, rcx, rdx, r8, r9, r10, r11, xmm(0), xmm(1), xmm(2), xmm(3), xmm(4), xmm(5)]" \
+  "  return [rax, rcx, rdx, r8, r9, r10, xmm(0), xmm(1), xmm(2), xmm(3), xmm(4), xmm(5)]" check_abi
 
 if [ "$failed" -eq 0 ]; then
   echo "== ALL X86_64 CHECKS PASSED"

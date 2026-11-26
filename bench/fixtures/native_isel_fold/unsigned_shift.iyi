@@ -1,0 +1,21 @@
+module unsigned_shift
+
+# Masking reproduces the unsigned bit pattern of each signed narrow input.
+def shift8(x : Int64) : Int64
+  (x & 255_i64) >> 1
+end
+
+def shift16(x : Int64) : Int64
+  (x & 65535_i64) >> 1
+end
+
+def shift32(x : Int64) : Int64
+  (x & 4294967295_i64) >> 1
+end
+
+puts "#{shift8(-1_i64)}"
+puts "#{shift8(-128_i64)}"
+puts "#{shift16(-1_i64)}"
+puts "#{shift16(-32768_i64)}"
+puts "#{shift32(-1_i64)}"
+puts "#{shift32(-2147483648_i64)}"

@@ -6,6 +6,7 @@
 #   ir_core drop-unwind FILE parse FILE, drop every unwind edge (Module#drop_unwind_edges), verify and print it
 #   ir_core layout TRIPLE    print the target's DataLayout string
 #   ir_core structs FILE     parse FILE and print each named struct's size, alignment and field offsets
+#   ir_core predicates FILE  parse FILE and print the name of each icmp and fcmp predicate, in order
 #   ir_core emit NAME        build the NAME fixture module with the Builder and print it
 
 @[Unsafe("declares the C library exit to set the process status; the tool handles no raw memory")]
@@ -32,7 +33,7 @@ module IrCore
   def self.run : Nil
     args = Program.args
     if args.empty?
-      STDERR.puts "usage: ir_core print|roundtrip|verify|drop-unwind|layout|structs FILE | emit NAME | intrinsics"
+      STDERR.puts "usage: ir_core print|roundtrip|verify|drop-unwind|layout|structs|predicates FILE | emit NAME | intrinsics"
       LibC.exit(2)
     end
     command = args[0]
@@ -41,7 +42,7 @@ module IrCore
       return
     end
     if args.size < 2
-      STDERR.puts "usage: ir_core print|roundtrip|verify|drop-unwind|layout|structs FILE | emit NAME | intrinsics"
+      STDERR.puts "usage: ir_core print|roundtrip|verify|drop-unwind|layout|structs|predicates FILE | emit NAME | intrinsics"
       LibC.exit(2)
     end
     argument = args[1]
@@ -49,7 +50,7 @@ module IrCore
       emit(argument)
     elsif command == "layout"
       layout(argument)
-    elsif command == "print" || command == "roundtrip" || command == "verify" || command == "drop-unwind" || command == "structs"
+    elsif command == "print" || command == "roundtrip" || command == "verify" || command == "drop-unwind" || command == "structs" || command == "predicates"
       unless File.exists?(argument)
         STDERR.puts "ir_core: no such file: #{argument}"
         LibC.exit(2)
@@ -85,6 +86,8 @@ module IrCore
         errors.each { |e| STDOUT.puts e.to_s }
         LibC.exit(1) unless errors.empty?
         STDOUT.print(print(mod))
+      elsif command == "predicates"
+        predicates(mod)
       else
         structs(mod)
       end
@@ -162,6 +165,60 @@ module IrCore
         STDOUT.puts "field #{i} offset=#{layout.offset_of(t, i)} size=#{layout.store_size(f)}"
       end
     end
+  end
+
+  # One line per icmp and fcmp, in order: `icmp NAME` or `fcmp NAME`, where NAME is the predicate that the port's own enum
+  # gives the ordinal the parser stored. bench/native_ir_exercise.sh compares these names with the ones LLVM reads. The
+  # comparison is by name because the port numbers its floating predicates differently from LLVM (UNO is last here, and
+  # LLVM numbers it 8).
+  def self.predicates(mod : Module) : Nil
+    mod.functions.each do |f|
+      f.blocks.each do |b|
+        b.insts.each do |i|
+          if i.op == Op::ICmp
+            STDOUT.puts "icmp #{int_name(i.aux_int)}"
+          elsif i.op == Op::FCmp
+            STDOUT.puts "fcmp #{real_name(i.aux_int)}"
+          end
+        end
+      end
+    end
+  end
+
+  # The name in IR text of the integer predicate with this ordinal: the IntPredicate member whose value it is.
+  def self.int_name(ordinal : Int64) : String
+    return "eq" if ordinal == IntPredicate::EQ.value.to_i64
+    return "ne" if ordinal == IntPredicate::NE.value.to_i64
+    return "ugt" if ordinal == IntPredicate::UGT.value.to_i64
+    return "uge" if ordinal == IntPredicate::UGE.value.to_i64
+    return "ult" if ordinal == IntPredicate::ULT.value.to_i64
+    return "ule" if ordinal == IntPredicate::ULE.value.to_i64
+    return "sgt" if ordinal == IntPredicate::SGT.value.to_i64
+    return "sge" if ordinal == IntPredicate::SGE.value.to_i64
+    return "slt" if ordinal == IntPredicate::SLT.value.to_i64
+    return "sle" if ordinal == IntPredicate::SLE.value.to_i64
+    "?"
+  end
+
+  # The name in IR text of the floating predicate with this ordinal: the RealPredicate member whose value it is.
+  def self.real_name(ordinal : Int64) : String
+    return "false" if ordinal == RealPredicate::FALSE.value.to_i64
+    return "oeq" if ordinal == RealPredicate::OEQ.value.to_i64
+    return "ogt" if ordinal == RealPredicate::OGT.value.to_i64
+    return "oge" if ordinal == RealPredicate::OGE.value.to_i64
+    return "olt" if ordinal == RealPredicate::OLT.value.to_i64
+    return "ole" if ordinal == RealPredicate::OLE.value.to_i64
+    return "one" if ordinal == RealPredicate::ONE.value.to_i64
+    return "ord" if ordinal == RealPredicate::ORD.value.to_i64
+    return "ueq" if ordinal == RealPredicate::UEQ.value.to_i64
+    return "ugt" if ordinal == RealPredicate::UGT.value.to_i64
+    return "uge" if ordinal == RealPredicate::UGE.value.to_i64
+    return "ult" if ordinal == RealPredicate::ULT.value.to_i64
+    return "ule" if ordinal == RealPredicate::ULE.value.to_i64
+    return "une" if ordinal == RealPredicate::UNE.value.to_i64
+    return "uno" if ordinal == RealPredicate::UNO.value.to_i64
+    return "true" if ordinal == RealPredicate::TRUE.value.to_i64
+    "?"
   end
 
   def self.new_module(name : String, triple : String) : Module

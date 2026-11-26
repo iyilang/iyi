@@ -283,6 +283,8 @@ class Iyi::Type
     case self
     when NilType
       false
+    when UInt64x2Type
+      false
     when PrimitiveType, NoReturnType, VoidType, TypeDefType, EnumType
       true
     when PointerInstanceType

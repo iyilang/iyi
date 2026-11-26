@@ -1,0 +1,17 @@
+# Loads of 8, 16 and 32 bits through a page-offset operand, so the object holds a PAGEOFF12 record of each width that is
+# not an ADD's. LLVM's assembler writes them here as they are written below. The compiler's own code generation does not:
+# unoptimised it reaches a global with adrp, an add and a load through the register, and optimised it writes a linker
+# optimisation hint the native object reader does not read. The target is main, which every program defines, and whose
+# address a function of 4-byte alignment leaves valid for a load of any of these widths. The loads read code and drop it.
+@[Unsafe("inline assembly loads bytes of main through page-offset operands")]
+module fixtures/native_obj/macho/narrow_access
+
+def read_main_code : Nil
+  asm("adrp x8, _main@PAGE
+       ldrb w9, [x8, _main@PAGEOFF]
+       ldrh w9, [x8, _main@PAGEOFF]
+       ldr w9, [x8, _main@PAGEOFF]" ::: "x8", "x9" : "volatile")
+end
+
+read_main_code
+puts "loads of 8, 16 and 32 bits read main and dropped it"

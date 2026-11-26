@@ -1,0 +1,10 @@
+macro unicode_case_tr
+  {{ "ǆemal".capitalize }}
+  {{ "ǆemal_ǆa".camelcase }}
+  {{ "ßa".capitalize }}
+  {{ "ß_straße".camelcase }}
+  {{ "é日😀é".tr("é日😀", "xy") }}
+  {{ "hé日😀z".tr("é日😀z", "ab") }}
+end
+
+unicode_case_tr

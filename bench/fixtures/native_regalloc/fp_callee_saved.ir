@@ -1,0 +1,61 @@
+; iyi-ir 1
+module "fp_callee_saved"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal double @leaf(double %x) {
+entry:
+  %a = fadd double %x, 0x4024000000000000
+  %r = fmul double %a, 0x4000000000000000
+  ret double %r
+}
+
+define internal double @inner(double %x) {
+entry:
+  %hold = fadd double %x, 0x3ff0000000000000
+  %other = call double (double) @leaf(double %x)
+  %r = fadd double %hold, %other
+  ret double %r
+}
+
+define internal i64 @probe(i64 %n) {
+entry:
+  %base = sitofp i64 %n to double
+  %live = fadd double 0x0000000000000000, 0x0000000000000000
+  call void () asm sideeffect "nop", "~{d9}"()
+  %early = icmp slt i64 %n, 0
+  br i1 %early, label %negative, label %head
+negative:
+  %e = call double (double) @inner(double %base)
+  %neg = fadd double %live, %e
+  %nr = fptosi double %neg to i64
+  ret i64 %nr
+head:
+  %i = phi i64 [ 0, label %entry ], [ %next, label %body ]
+  %sum = phi double [ 0x0000000000000000, label %entry ], [ %sum2, label %body ]
+  %more = icmp slt i64 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %fi = sitofp i64 %i to double
+  %c = call double (double) @inner(double %fi)
+  %sum2 = fadd double %sum, %c
+  %next = add i64 %i, 1
+  br label %head
+done:
+  %final = fadd double %live, %sum
+  %r = fptosi double %final to i64
+  ret i64 %r
+}
+
+define i32 @main() {
+entry:
+  %a = call i64 (i64) @probe(i64 -2)
+  %b = call i64 (i64) @probe(i64 0)
+  %c = call i64 (i64) @probe(i64 4)
+  %p = call i32 (ptr, ...) @printf(ptr @fmt, i64 %a)
+  %q = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b)
+  %s = call i32 (ptr, ...) @printf(ptr @fmt, i64 %c)
+  ret i32 0
+}

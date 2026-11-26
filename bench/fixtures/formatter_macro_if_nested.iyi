@@ -1,0 +1,9 @@
+{% if flag?(:outer) %}
+  {% if flag?(:inner) %}
+    value_{{name.id}} = {{ value }}
+  {% else %}
+    value = 0
+  {% end %}
+{% else %}
+  value = 1
+{% end %}

@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Wasm SIMD128 speeds up AES-GCM.** `UInt64x2` processes two independent
+  64-bit lanes, and `--mattr +simd128` uses them for eight AES counter
+  blocks at a time. On Apple M5 Max, opening 16 and 64 MiB in headless
+  Chrome went from 204 and 203 MB/s scalar to 257 and 266 MB/s SIMD;
+  WebCrypto measured 3,290 and 3,424 MB/s. SPEC.md III.12.1 has the
+  spreads and the slower GHASH experiment. The predefined `UInt64x2`
+  primitive is available on wasm32; an external ABI cannot accept it.
+
 - **iyi is a self-hosting project.** The owner accepted Jason Waldrip's
   proposal (#172) on 2026-11-24, reversing Appendix B #10: the compiler is
   ported to iyi and gets its own back end and linker, so that iyi is built
@@ -191,7 +199,18 @@
   `bench/selfhost_normalizer_exercise.sh` requires 11 fixtures (620 nodes)
   to normalise as the front end does and catches 8. Hosted commands are
   unchanged.
-- These eight gates run in the same three jobs through
+- **The formatter in iyi: `src/compiler/tools/formatter.iyi` (#195).**
+  2,783 lines of iyi format source as `iyi tool format` does;
+  `src/compiler/tools/format.iyi` is the standalone `iyi-format` driver.
+  `bench/selfhost_formatter_exercise.sh` requires 32 files to format byte
+  for byte as the hosted formatter does, through a path and through stdin,
+  and a second pass to change nothing, and catches 18 broken copies. Of the
+  338 `.iyi` files that select the self-host jobs, the port formats 140 as
+  the hosted formatter does, formats 34 differently and refuses 164; each
+  of the 140 listed in `bench/selfhost_formatter_parity.floor` must keep
+  matching, and `bench/selfhost_formatter_differs.ceiling` must list exactly
+  the files it formats differently. Hosted commands are unchanged.
+- These nine gates run in the same three jobs through
   `bench/selfhost_gates.sh`; `bench/native_elf_run.sh` runs in
   `selfhost-linux-arm64`.
 - **AArch64 code generation and register allocation in iyi:
@@ -303,6 +322,22 @@
   the `wasm-freestanding` job runs it. `bench/thread_exercise.sh` and
   `bench/parallel_exercise.sh` re-anchor their mutations to the native
   switch and poll paths.
+- **Allocation escape analysis and write-barrier elision in the IR
+  optimizer (#259).** `src/compiler/ir/opt/escape.iyi` moves an
+  `__iyi_new` whose object never leaves its function to a 16-aligned stack
+  slot, zeroed at the allocation site each time it runs: a constant size of
+  1 to 512 bytes, at most 2,048 bytes of slots per function, and never in a
+  call cycle, a `returns_twice` caller, an entry frame or a module that uses
+  the partitioned heap. `src/compiler/ir/opt/barrier.iyi` removes the
+  `__iyi_marking` test and barrier around stores that all land in stack
+  slots (`barrier-stack`) or that cover the shaded words with constants
+  holding no pointer (`barrier`), and merges adjacent barriers on one
+  object into one. The release tier repeats `escape, barrier-stack, sroa,
+  simplify, dce` while `escape` changes something and runs `barrier` after
+  `licm`. Nothing on master lowers a program to these shapes yet, so only
+  `iyi-opt` and the fixtures run them; the LLVM backend stays the default.
+  `bench/native_opt_exercise.sh` gains sections 2g and 2h and goes from 25
+  to 101 broken copies caught.
 
 ### Changed
 
@@ -571,6 +606,47 @@
   broken copies. It runs in the self-host jobs through
   `bench/selfhost_gates.sh`.
 
+- **The AArch64 linear-scan allocator coalesces copies, spills by loop
+  weight, reuses reloads and keeps floats in callee-saved registers
+  (#260).** A copy's destination takes its source's register when the
+  source dies there, and identity moves are dropped; the interval evicted is
+  the one with the least loop-weighted use count; a spilled value stays in
+  a scratch register for the rest of its block until a write to that
+  register, a call, an inline assembly body or a redefinition; and a
+  floating-point value that crosses a call may live in d8 to d15, which the
+  frame saves and restores on every return. No value that may carry a
+  pointer lives in a floating-point register across a call or an inline
+  assembly body, asserted on the final homes. The MIR dump prints a
+  conditional branch's condition. `bench/native_regalloc_exercise.sh` goes
+  from 56 to 63 fixtures emitted and from 7 to 38 broken copies caught, and
+  pins each allocator fixture function's spill slots
+  (`native_regalloc/linear_slots.ceiling`, exact in both directions). On
+  every host it also reads each exclusive store in the atomic fixtures'
+  MIR and refuses a status register that is also the value or the address
+  register: a copy that let one share passed the gate everywhere, the
+  hosted twins on Apple silicon included.
+  `bench/native_mir_clean_exercise.sh` goes from 3 to 9.
+- **The macro engine's string methods count characters, Win32 file errors
+  use the system's message, and the macro-site census is exact (#261).**
+  In `src/compiler/macros/`, `StringLiteral#size` answered the byte count
+  where the hosted compiler counts characters; `size`, range `[]`, `tr`
+  (deletion sets included) and `upcase`, `downcase`, `capitalize`,
+  `camelcase` and `underscore` now work by character, and `MacroId` and
+  `SymbolLiteral` forward the string methods as the hosted compiler does.
+  `bench/fixtures/macro_unicode_methods.iyi` (27 sites) must expand byte
+  for byte as the hosted compiler expands it. A `read_file` error on Windows
+  formats the open or read error code with `FormatMessageW`, as
+  `WinError#message` does, and an open error escapes its file name as
+  `File::Error` does on every host, so the two confinement cases excluded on
+  Windows run there. `bench/macro_sites.py`'s census reads every file (316
+  sites, 0 unpaired, 0 unreadable) and lists its 2 differing sites by file,
+  kind, context and ordinal in `bench/macro_sites.floor`; an unlisted
+  difference and a listed one that no longer occurs both fail. The port's
+  parser records the `[` of an index call as its name location, as hosted
+  does. `bench/selfhost_macros_exercise.sh` requires 66 fixtures (313
+  sites; `macro_unicode_case_tr.iyi` adds titlecase and a short `tr`
+  replacement list) and catches 60 broken copies.
+
 ### Gates
 
 - **Darwin's thread-yield control measures CPU held under load.** The
@@ -757,6 +833,24 @@
   expected verdict now follows the oracle's `zstd_version_info`. iyi still
   has to refuse the frame with its sentence.
 
+- **The self-host gates catch the broken copies their merge reviews found
+  (#262).** Twelve gates gain 23 checks, each with a mutation proof, for
+  the copies of #184, #185, #186, #191, #194, #207, #208, #209, #225 and
+  #254 that passed them: a Mach-O `ldst16` `PAGEOFF12` site read as
+  `ldst32`, a two-digit octal escape, an `Or`'s end, `RangeLiteral`'s
+  `exclusive`, the asm census's branch shapes, x86-64 start code's
+  `environ`, `trunc` to the same width, swapped `icmp`/`fcmp` predicates,
+  `icmp ule` of equal operands and `xor` folds, AArch64 unsigned condition
+  codes, frame rounding and narrow `lsr`, the x86-64 imm8 boundaries and
+  caller-saved tables, and the command driver's `-Oz` and `--threads`.
+  `native_elf` already caught an executable `PT_GNU_STACK`.
+- **The formatter parity floor holds the files #259, #260 and #262 added.**
+  `src/compiler/ir/opt/escape.iyi` and 20 of the new fixtures format as the
+  hosted formatter does, so `bench/selfhost_formatter_parity.floor` lists
+  them: 142 files become 163. `escape.iyi` and `regalloc_linear.iyi` keep
+  each trailing comment on its own line and each condition on one line,
+  which both formatters leave as written.
+
 ### Fixed
 
 - **A layout fold taken during typing is settled to the final layout once the compiler has typed everything, including the code its cleanup types.** `sizeof`, `alignof`, `instance_sizeof`, `instance_alignof` and `offsetof` could fold to a size the typer saw before a module held by value gained implementors, or before a container it was cached in had its element grow. In a `--crystal` build, `arr.dup` of an array of `{Int32, M}` could then return a zeroed element and trap when printed. Settling runs at the end of semantic analysis, after the cleanup has typed its own raises, tuple and proc literals, and splats, so a module that only that code grows is part of the final layout. A stale expression fold is corrected in place. A fold inside a generic type argument keeps its value, because the type is already built, and so does every expression that shares that layout with it, so the program's types and numbers agree. A literal that later code used as a type variable or a cast is kept as it was. A native program refuses a stale type argument, or such a literal, with a compile error at that expression, and refuses codegen that types code which grows a layout a settled fold reaches. A native program also gets a fresh shared layout typer after settling, and the write barrier sizes with its module's typer. `--crystal` output changes only where Crystal 1.21.0 folded two different sizes for one type. `IYI_LAYOUT_FOLD_REPORT=1` prints each stale fold and each open layout to stderr. Not covered: a macro that reads a stale constant but never uses its value, and an autocast whose fit is the same at both values, are refused under the native gate. Neither takes a wrong native type.
@@ -783,6 +877,18 @@
 - **Fix (runtime): correct frame boundary symbol lookup in Darwin panics.** When a panic or NoReturn call is the last instruction of a function, the return address on the stack sits at offset 0 of the next function. The Darwin runtime backtrace resolves boundary frames with offset 0 by inspecting the caller symbol at `addr - 1` while preserving fiber entry start markers and raw address formats.
 
 - **Fix (compiler): observed artifact emission supports operator effect defs.** An observed build of a module with an operator-named `@[Effect]` def (such as `[]=` or `[]?`) renames the wrapped implementation with hex-encoded operator bytes rather than raw punctuation, so that serializing declarations into `.iyimod` artifacts preserves valid source text that consumer builds parse and adopt without syntax errors.
+
+- **Vector unions use the heap's eight-byte alignment (#202).** A mixed
+  union represents its payload as wide integers, so treating only visible
+  LLVM vectors as eight-aligned left nil stores, closure captures and copies
+  promising sixteen-byte alignment on eight-aligned heap addresses.
+  Integers wider than 64 bits take the same cap, so an `Int128` field,
+  union member or closure capture is loaded and stored at `align 8` where
+  it was `align 16`. Measured on x86-64 Linux, AArch64 macOS and x86-64
+  Windows, the machine code of such a program is unchanged, and
+  `bench/uint64x2_exercise.sh` holds the `align 8`. `UInt64x2` is also
+  shareable across threads, including in immutable records and `@[Share]`
+  generic values.
 
 - **wasm32 large objects keep their arena header (#198).** A large
   object's three header words were written over its arena's link, size and
@@ -30320,7 +30426,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 37,276-line library and nothing else. Every other
+  written against iyi's own 37,341-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

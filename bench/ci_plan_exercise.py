@@ -333,6 +333,18 @@ else:
     reason, jobs = planned("bench/" + target)
     check("the freestanding wasm fixture still selects its own runner",
           "wasm-freestanding" in jobs, f"{reason}: {sorted(jobs)}")
+    aead_speed = "wasm_" + "aead_" + "speed.iyi"
+    check("Windows native enumeration excludes the browser AES benchmark",
+          bool(loop and gate) and aead_speed in skipped, f"skip list: {sorted(skipped)}")
+    reason, jobs = planned("bench/" + aead_speed)
+    check("the browser AES benchmark still selects its own runner",
+          "wasm-freestanding" in jobs, f"{reason}: {sorted(jobs)}")
+    vector_target = "uint64x2_" + "exercise.iyi"
+    check("Windows native enumeration excludes the wasm-only SIMD vector fixture",
+          bool(loop and gate) and vector_target in skipped, f"skip list: {sorted(skipped)}")
+    reason, jobs = planned("bench/" + vector_target)
+    check("the wasm-only SIMD vector fixture still selects its own runner",
+          "wasm-freestanding" in jobs, f"{reason}: {sorted(jobs)}")
     reason, jobs = planned("bench/" + task_target)
     check("the JSPI task fixture still selects its own runner",
           "wasm-freestanding" in jobs, f"{reason}: {sorted(jobs)}")

@@ -1,0 +1,16 @@
+; iyi-ir 1
+source_filename = "join_agree"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i64 @join_agree(ptr %p, i1 %c) {
+entry:
+  %first = load i64, ptr %p, align 8
+  br i1 %c, label %left, label %right
+left:
+  br label %join
+right:
+  br label %join
+join:
+  %sum = add i64 %first, %first
+  ret i64 %sum
+}

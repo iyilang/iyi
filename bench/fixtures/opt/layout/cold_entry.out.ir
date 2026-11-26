@@ -1,0 +1,18 @@
+; iyi-ir 1
+source_filename = "cold_entry"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external void @raise_error()
+
+define internal void @cold_entry() {
+entry:
+  %slot = alloca i32, align 4
+  br label %chain
+chain:
+  br label %fatal
+fatal:
+  call void () @raise_error()
+  unreachable
+dead:
+  ret void
+}

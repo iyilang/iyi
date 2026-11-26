@@ -70,6 +70,22 @@ if ! "$DRV" forms >"$WORK/forms.tsv" || [ ! -s "$WORK/forms.tsv" ]; then
   exit 1
 fi
 echo "forms: $(wc -l <"$WORK/forms.tsv" | tr -d ' ')"
+while IFS= read -r form; do
+  if ! awk -F '\t' -v form="$form" '$1 == form { found = 1 } END { exit !found }' "$WORK/forms.tsv"; then
+    fail "missing encoder form: $form"
+  fi
+done <<'FORMS'
+cmn x1, #42
+orr x0, x1, #0xf0
+eor x0, x1, #0x5555555555555555
+lsl x0, x1, #7
+lsr x0, x1, #17
+asr x0, x1, #63
+cbz x1, .
+cbnz x1, .
+tbz x1, #5, .
+tbnz x1, #63, .
+FORMS
 
 echo "== 3. the oracle: every form in one naked function, built by the hosted compiler"
 if ! "$PY" - "$(native_path "$WORK")" <<'PY'

@@ -1,0 +1,18 @@
+; iyi-ir 1
+source_filename = "pure_dom"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i32 @pure_dom(i32 %x, i32 %y, i1 %c) {
+entry:
+  %first = add i32 %x, %y
+  br i1 %c, label %left, label %right
+left:
+  %a = add i32 %x, %y
+  br label %join
+right:
+  %b = add i32 %x, %y
+  br label %join
+join:
+  %value = phi i32 [ %a, label %left ], [ %b, label %right ]
+  ret i32 %value
+}

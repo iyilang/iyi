@@ -1,0 +1,114 @@
+module compiler/ir/opt/deadfn
+
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, AsmAux}
+import compiler/ir/function::{Function, Linkage}
+import compiler/ir/module::{Module}
+import compiler/ir/opt/effects::{runtime_entry?}
+
+# A function value in a constant expression is an address-taken root. Follow
+# constants only: walking a local instruction would turn its direct calls into
+# spurious address-taken roots.
+def note_address(value : Value, live : Hash(Function, Bool), work : Array(Function), seen : Hash(Value, Bool)) : Nil
+  values = [value] of Value
+  while !values.empty?
+    current = values.pop
+    if current.is_a?(Function)
+      fn = current.as(Function)
+      unless live.has_key?(fn)
+        live[fn] = true
+        work << fn
+      end
+    elsif current.is_a?(Inst)
+      inst = current.as(Inst)
+      case inst.op
+      when Op::FunctionAddr, Op::GlobalAddr, Op::ConstExpr, Op::ConstAggregate, Op::ConstBytes
+        unless seen.has_key?(current)
+          seen[current] = true
+          inst.args.each { |arg| values << arg }
+        end
+      end
+    end
+  end
+  nil
+end
+
+pub def run_deadfn(mod : Module) : Bool
+  live = Hash(Function, Bool).new
+  work = [] of Function
+  seen = Hash(Value, Bool).new
+  mod.functions.each do |fn|
+    if (fn.linkage != Linkage::Internal && fn.linkage != Linkage::Private) || runtime_entry?(fn)
+      live[fn] = true
+      work << fn
+    end
+    if personality = fn.personality
+      note_address(personality, live, work, seen)
+    end
+  end
+  mod.globals.each do |global|
+    if initializer = global.initializer
+      note_address(initializer, live, work, seen)
+    end
+  end
+
+  # Address-taking is a root even when it appears in an otherwise dead body.
+  # The lowering keeps asm-named symbols external; conservatively retain any
+  # matching name in a hand-authored inline-asm template as well.
+  mod.functions.each do |fn|
+    fn.blocks.each do |block|
+      block.insts.each do |inst|
+        assembly = nil.as(AsmAux?)
+        if inst.aux.is_a?(AsmAux)
+          assembly = inst.aux.as(AsmAux)
+        elsif !inst.args.empty? && inst.args[0].is_a?(Inst)
+          target = inst.args[0].as(Inst)
+          assembly = target.aux.as(AsmAux) if target.aux.is_a?(AsmAux)
+        end
+        if inline_asm = assembly
+          template = inline_asm.template
+          mod.functions.each do |candidate|
+            if template.includes?(candidate.name) && !live.has_key?(candidate)
+              live[candidate] = true
+              work << candidate
+            end
+          end
+        end
+        k = 0
+        while k < inst.args.size
+          value = inst.args[k]
+          unless k == 0 && inst.op == Op::Call && value.is_a?(Function)
+            note_address(value, live, work, seen) # mutation S6-address: keep address-taken functions
+          end
+          k = k + 1
+        end
+      end
+    end
+  end
+
+  head = 0
+  while head < work.size
+    fn = work[head]
+    head = head + 1
+    fn.blocks.each do |block|
+      block.insts.each do |inst|
+        if inst.op == Op::Call && !inst.args.empty? && inst.args[0].is_a?(Function)
+          target = inst.args[0].as(Function)
+          unless live.has_key?(target)
+            live[target] = true
+            work << target
+          end
+        end
+      end
+    end
+  end
+  dead = Hash(Function, Bool).new
+  mod.functions.each do |fn|
+    if (fn.linkage == Linkage::Internal || fn.linkage == Linkage::Private) && !live.has_key?(fn)
+      dead[fn] = true
+    end
+  end
+  return false if dead.empty?
+  mod.remove_functions(dead)
+  true
+end

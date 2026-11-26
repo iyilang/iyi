@@ -1,0 +1,19 @@
+; iyi-ir 1
+source_filename = "self_loop_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i64 @self_loop_keep(ptr %p, ptr %q, i64 %x, i32 %n) {
+entry:
+  %before = load i64, ptr %p, align 8
+  br label %loop
+loop:
+  %i = phi i32 [ 0, label %entry ], [ %next, label %loop ]
+  %inside = load i64, ptr %p, align 8
+  store i64 %x, ptr %q, align 8
+  %next = add i32 %i, 1
+  %more = icmp slt i32 %next, %n
+  br i1 %more, label %loop, label %done
+done:
+  %sum = add i64 %before, %inside
+  ret i64 %sum
+}

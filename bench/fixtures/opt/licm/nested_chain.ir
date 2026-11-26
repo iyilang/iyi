@@ -1,0 +1,26 @@
+; iyi-ir 1
+source_filename = "nested_chain"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @nested_chain(i1 %outer_run, i1 %inner_run, i32 %a, i32 %b, ptr %out) {
+entry:
+  br label %outer
+outer:
+  br i1 %outer_run, label %inner_pre, label %done
+inner_pre:
+  br label %inner
+inner:
+  %iv = phi i32 [ 0, label %inner_pre ], [ %next, label %body ]
+  br i1 %inner_run, label %body, label %after_inner
+body:
+  %scale = mul i32 %a, %b
+  %bias = add i32 %scale, 7
+  %mixed = add i32 %iv, %bias
+  store i32 %mixed, ptr %out, align 4
+  %next = add i32 %iv, 1
+  br label %inner
+after_inner:
+  br label %outer
+done:
+  ret void
+}

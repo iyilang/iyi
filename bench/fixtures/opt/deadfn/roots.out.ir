@@ -1,0 +1,17 @@
+; iyi-ir 1
+source_filename = "roots"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i64 @addressed() {
+entry:
+  ret i64 12
+}
+define internal i64 @__iyi_new() {
+entry:
+  ret i64 13
+}
+define external i64 @exported() {
+entry:
+  %addr = ptrtoint ptr @addressed to i64
+  ret i64 %addr
+}

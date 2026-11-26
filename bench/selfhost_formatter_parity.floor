@@ -108,7 +108,6 @@ src/compiler/llvm.iyi
 src/compiler/llvm/context.iyi
 src/compiler/macros/ast.iyi
 src/compiler/macros/confinement.iyi
-src/compiler/macros/interpreter.iyi
 src/compiler/macros/site_scan.iyi
 src/compiler/macros/type_facts.iyi
 src/compiler/native/aarch64/abi.iyi

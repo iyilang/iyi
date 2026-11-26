@@ -133,14 +133,15 @@ pub class Builder
   # `[N x i8]` data: one i8 constant per byte, with a trailing zero byte when `null_terminated`.
   def const_string(str : String, null_terminated : Bool = true) : Inst
     count = str.bytesize + (null_terminated ? 1 : 0)
-    bytes = [] of Value
+    bytes = Array(Value).new(count)
+    byte_type = types.int8
     i = 0
     while i < count
       byte = i < str.bytesize ? str.byte_at(i).to_i64 : 0_i64
-      bytes << const_int(types.int8, byte)
+      bytes << const_int(byte_type, byte)
       i = i + 1
     end
-    Inst.new(Op::ConstBytes, types.array_of(types.int8, count.to_i64), bytes, 0_i64, nil, [] of Block, [] of Int64)
+    Inst.new(Op::ConstBytes, types.array_of(byte_type, count.to_i64), bytes, 0_i64, nil, [] of Block, [] of Int64)
   end
 
   def const_struct(values : Array(Value), packed : Bool = false) : Inst

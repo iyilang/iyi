@@ -288,6 +288,10 @@ src/std/enumerable.iyi 77
 src/std/env.iyi 41
 src/std/errno.iyi 38
 src/std/file.iyi 159
+# Linux takes the `{% else %}` arm of the platform block at the top of the file (its syscall
+# layer, with its own architecture arms), which declares more than the Darwin arm. CI's Linux
+# host (x86-64) measures 167 of 167.
+src/std/file.iyi@linux 167
 src/std/file_utils.iyi 20
 src/std/fileserver.iyi 7
 src/std/float.iyi 15

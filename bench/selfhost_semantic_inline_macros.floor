@@ -36,7 +36,7 @@ src/compiler/backend/llvm/llvm_backend.iyi 0
 src/compiler/backend/llvm/translate.iyi 0
 src/compiler/backend/native.iyi 6
 src/compiler/codegen/codegen.iyi 307
-src/compiler/command/daemon.iyi 141
+src/compiler/command/daemon.iyi 133
 src/compiler/command/driver.iyi 247
 src/compiler/command/execute.iyi 11
 src/compiler/compiler.iyi 65
@@ -77,7 +77,7 @@ src/compiler/llvm/values.iyi 0
 src/compiler/loader.iyi 64
 src/compiler/lower/abi/aarch64.iyi 4
 src/compiler/lower/asm.iyi 10
-src/compiler/lower/block.iyi 12
+src/compiler/lower/block.iyi 11
 src/compiler/lower/call.iyi 42
 src/compiler/lower/cast.iyi 39
 src/compiler/lower/class_var.iyi 36
@@ -112,7 +112,7 @@ src/compiler/macros/interpreter.iyi 85
 src/compiler/macros/macro_parser.iyi 26
 src/compiler/macros/methods.iyi 24
 src/compiler/macros/site_scan.iyi 49
-src/compiler/macros/target_flags.iyi 31
+src/compiler/macros/target_flags.iyi 28
 src/compiler/macros/type_facts.iyi 31
 src/compiler/native/aarch64/abi.iyi 2
 src/compiler/native/aarch64/asm.iyi 68
@@ -223,7 +223,7 @@ src/iyi/array.iyi 99
 src/iyi/atomic.iyi 9
 src/iyi/chaos.iyi 53
 src/iyi/chaos_points.iyi 7
-src/iyi/concurrency.iyi 706
+src/iyi/concurrency.iyi 704
 src/iyi/enum.iyi 16
 src/iyi/file.iyi 10
 src/iyi/float.iyi 68
@@ -234,7 +234,7 @@ src/iyi/io.iyi 46
 src/iyi/macros.iyi 1
 src/iyi/number.iyi 41
 src/iyi/object.iyi 26
-src/iyi/prelude.iyi 770
+src/iyi/prelude.iyi 757
 src/iyi/primitives.iyi 575
 src/iyi/range.iyi 16
 src/iyi/set.iyi 13
@@ -263,7 +263,7 @@ src/std/cookie.iyi 33
 src/std/crypto.iyi 33
 src/std/csv.iyi 72
 src/std/curve25519.iyi 122
-src/std/debug.iyi 26
+src/std/debug.iyi 21
 src/std/deque.iyi 40
 src/std/derives.iyi 8
 src/std/digest.iyi 178
@@ -276,7 +276,7 @@ src/std/enum.iyi 19
 src/std/enumerable.iyi 76
 src/std/env.iyi 43
 src/std/errno.iyi 38
-src/std/file.iyi 217
+src/std/file.iyi 215
 src/std/file_utils.iyi 22
 src/std/fileserver.iyi 9
 src/std/float.iyi 323
@@ -302,7 +302,7 @@ src/std/levenshtein.iyi 21
 src/std/list.iyi 21
 src/std/log.iyi 151
 src/std/mail.iyi 208
-src/std/math.iyi 650
+src/std/math.iyi 648
 src/std/mime.iyi 21
 src/std/mlkem.iyi 62
 src/std/mutex.iyi 33
@@ -312,7 +312,7 @@ src/std/number.iyi 24
 src/std/number_format.iyi 35
 src/std/oauth.iyi 114
 src/std/oauth2.iyi 108
-src/std/observe.iyi 149
+src/std/observe.iyi 140
 src/std/ocsp.iyi 106
 src/std/option_parser.iyi 33
 src/std/otp.iyi 52
@@ -346,11 +346,11 @@ src/std/string_pool.iyi 18
 src/std/string_scanner.iyi 36
 src/std/symbol.iyi 17
 src/std/system.iyi 14
-src/std/system_roots.iyi 57
+src/std/system_roots.iyi 28
 src/std/tar.iyi 115
-src/std/term.iyi 65
+src/std/term.iyi 63
 src/std/text.iyi 102
-src/std/time.iyi 362
+src/std/time.iyi 360
 src/std/tls.iyi 660
 src/std/toml.iyi 211
 src/std/traits.iyi 115
@@ -359,7 +359,7 @@ src/std/udp.iyi 95
 src/std/unicode.iyi 180
 src/std/unit.iyi 6
 src/std/uri.iyi 85
-src/std/user.iyi 50
+src/std/user.iyi 41
 src/std/uuid.iyi 18
 src/std/weak_ref.iyi 8
 src/std/websocket.iyi 87

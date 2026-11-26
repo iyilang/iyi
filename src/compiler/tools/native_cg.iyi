@@ -480,7 +480,7 @@ module NativeCg
   def self.run : Nil
     args = Program.args
     if args.size < 1
-      fail("usage: native_cg obj|mir|forms|bytes ...")
+      fail("usage: native_cg obj|mir|conditions|forms|bytes ...")
     end
     command = args[0]
     if command == "obj"
@@ -496,7 +496,7 @@ module NativeCg
       else
         STDOUT.puts "linux: #{obj.sections.size} sections, #{obj.symbols.size} symbols, not written: the ELF writer is a later slice"
       end
-    elsif command == "mir"
+    elsif command == "mir" || command == "conditions"
       mod = load(args[1])
       fn = mod.get_function?(args[2])
       unless fn
@@ -507,7 +507,20 @@ module NativeCg
       if mf.is_a?(String)
         fail(mf.as(String))
       end
-      STDOUT.print(dump_mfunction(mf.as(MFunction)))
+      if command == "mir"
+        STDOUT.print(dump_mfunction(mf.as(MFunction)))
+      else
+        mf.as(MFunction).blocks.each do |block|
+          STDOUT.puts "block\t#{block.index}\t#{block.name}"
+          block.insts.each do |inst|
+            if inst.opcode == MOp::Bcond.value.to_i32
+              STDOUT.puts "branch\t#{inst.cond}\t#{inst.target}"
+            elsif inst.opcode == MOp::Cset.value.to_i32
+              STDOUT.puts "set\t#{inst.cond}"
+            end
+          end
+        end
+      end
     elsif command == "forms"
       forms.each do |f|
         enc = Encoder.new(FrameInfo.new)

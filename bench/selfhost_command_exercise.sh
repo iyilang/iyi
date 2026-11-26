@@ -68,6 +68,11 @@ require "json"
 
 class Iyi::Command
   class_property current_command : String = ""
+  def optimization_probe
+    config = create_compiler("build", defer_move_aside: true)
+    puts "optimization_mode=#{config.compiler.optimization_mode}"
+  end
+
 
 
   def init
@@ -269,7 +274,10 @@ def classify(argv : Array(String)) : Nil
 
 end
 
-if ARGV.first? == "--one"
+if ARGV.first? == "--optimization-probe"
+  arguments = ARGV[1..] + ["-o", "samples/iyi/hello.option-probe", "samples/iyi/hello.iyi"]
+  Iyi::Command.new(arguments).optimization_probe
+elsif ARGV.first? == "--one"
   vectors = Array(Array(String)).from_json(File.read(ARGV[1]))
   argv = vectors[ARGV[2].to_i]
   command_file = ARGV[3]
@@ -360,6 +368,38 @@ if [ -s "$WORK/hosted_run.err" ]; then
   exit 1
 fi
 
+# Exercise the hosted parser and the port directly; neither compiles or writes the source.
+check_optimization() {
+  local exe=$1 level spelling count=0
+  for level in 0 1 2 3 s z; do
+    for spelling in joined separated; do
+      set -- "-O$level"
+      [ "$spelling" != separated ] || set -- -O "$level"
+      if ! "$WORK/hosted-oracle$EXE" --optimization-probe "$@" >"$WORK/opt.hosted" 2>"$WORK/opt.hosted.err"; then
+        echo "  INVALID: hosted option probe failed for $*"
+        cat "$WORK/opt.hosted.err"
+        return 2
+      fi
+      if ! "$exe" --optimization-probe "$@" >"$WORK/opt.port" 2>"$WORK/opt.port.err"; then
+        echo "  optimization probe failed for $*"
+        cat "$WORK/opt.port.err"
+        return 1
+      fi
+      if ! cmp -s "$WORK/opt.hosted" "$WORK/opt.port"; then
+        echo "  optimization mismatch for $*"
+        diff -u "$WORK/opt.hosted" "$WORK/opt.port"
+        return 1
+      fi
+      count=$((count + 1))
+    done
+  done
+  echo "  Optimization parser: $count/12 joined and separated forms match the hosted parser"
+}
+
+if ! check_optimization "$WORK/exercise$EXE"; then
+  status=1
+fi
+
 # Compare combined output with symmetric help-column normalization, then compare
 # each captured stream without option-column normalization.
 normalize_command() {
@@ -446,6 +486,27 @@ check_command_mutant() {
 }
 
 MUTATIONS_RUN=0
+check_optimization_mutant() {
+  if ! "$IYI" build -o "$WORK_NATIVE/mut-opt$EXE" "$REPO_NATIVE/bench/selfhost_command_exercise.iyi" >"$WORK/mut-opt-build.log" 2>&1; then
+    cat "$WORK/mut-opt-build.log"
+    touch "$WORK/invalid-mutant"
+    return 0
+  fi
+  local rc=0
+  check_optimization "$WORK/mut-opt$EXE" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    touch "$WORK/invalid-mutant"
+    return 0
+  fi
+  return "$rc"
+}
+
+prove_mutation "optimization: -Oz is refused" "$DRIVER" \
+  'level == "3" || level == "s" || level == "z"' \
+  'level == "3" || level == "s"' \
+  -- check_optimization_mutant || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
 
 prove_mutation "build prefix matching stops accepting prefixes" "$DRIVER" \
   'when "build".starts_with?(command)' \

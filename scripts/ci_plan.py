@@ -326,15 +326,6 @@ def changed_ci_jobs(jobs, base_text):
             if name not in NOT_PLANNED and (name not in base or code(base[name]["text"]) != code(job["text"]))}
 
 
-# The self-host parity floors (bench/selfhost_typed_parity.floor and
-# bench/selfhost_semantic_declarations.floor) hold a row for every file of the
-# prelude, std and the samples, and the gates measure each of them. A change to
-# one of those files moves a measured count, so it selects the self-host jobs
-# as a change to the compiler does. `is_selfhost` stays the compiler's own set.
-def is_parity_input(path):
-    return path.startswith(("src/iyi/", "src/std/", "samples/"))
-
-
 def plan(jobs, event, ref, files, bench, ci_jobs=None):
     """The selected job ids and the reason, in one sentence."""
     every = {name for name in jobs if name not in NOT_PLANNED}
@@ -364,7 +355,7 @@ def plan(jobs, event, ref, files, bench, ci_jobs=None):
     running = {f: reach.running_jobs(f) for f in changed_bench}
     for found in running.values():
         selected |= found
-    selfhost = any(is_selfhost(f) or is_parity_input(f) for f in code_files)
+    selfhost = any(is_selfhost(f) for f in code_files)
     if selfhost:
         selected |= {name for name in SELFHOST if name in jobs}
     if len(changed_bench) == len(code_files) and all(running.values()):

@@ -512,6 +512,43 @@ pub class Formatter < Visitor
       write_token(TokenKind::OP_BANG)
       return false
     end
+    name = node.name
+    if name.is_a?(Path) && name.global && name.names.size == 1 && @token.type == TokenKind::OP_LCURLY
+      if name.names[0] == "Tuple"
+        write_token(TokenKind::OP_LCURLY)
+        found_comment = skip_space_or_newline
+        write_space_at_end = false
+        node.type_vars.each_with_index do |type_var, i|
+          if i == 0 && !found_comment && (@token.type == TokenKind::OP_LCURLY || @token.type == TokenKind::OP_LCURLY_LCURLY || @token.type == TokenKind::OP_LCURLY_PERCENT || @token.type == TokenKind::OP_PERCENT || @token.raw.starts_with?("%"))
+            write(" ")
+            write_space_at_end = true
+          end
+          accept(type_var)
+          skip_space_or_newline
+          if @token.type == TokenKind::OP_COMMA
+            write(", ") unless i == node.type_vars.size - 1
+            next_token_skip_space_or_newline
+          end
+          write(" ") if i == node.type_vars.size - 1 && write_space_at_end
+        end
+        write_token(TokenKind::OP_RCURLY)
+        return false
+      elsif name.names[0] == "NamedTuple"
+        write_token(TokenKind::OP_LCURLY)
+        skip_space_or_newline
+        named_args = node.named_args.as(Array(NamedArgument))
+        named_args.each_with_index do |named_arg, i|
+          accept(named_arg)
+          skip_space_or_newline
+          if @token.type == TokenKind::OP_COMMA
+            write(", ") unless i == named_args.size - 1
+            next_token_skip_space_or_newline
+          end
+        end
+        write_token(TokenKind::OP_RCURLY)
+        return false
+      end
+    end
     accept(node.name)
     if @token.type == TokenKind::OP_LPAREN
       write_token(TokenKind::OP_LPAREN)
@@ -710,15 +747,15 @@ pub class Formatter < Visitor
 
     accept(cond)
 
-    skip_space
+    skip_space(@indent + 2)
     format_nested(a_then)
 
-    skip_space_or_newline
+    skip_space_or_newline(@indent + 2, last: true)
     if @token.keyword?(Keyword::ELSE)
       write_indent(@indent)
       write("else")
       next_token
-      skip_space
+      skip_space(@indent + 2)
       format_nested(a_else)
     elsif a_else.is_a?(If) && @token.keyword?(Keyword::ELSIF)
       format_elsif(a_else, keyword)
@@ -774,7 +811,7 @@ pub class Formatter < Visitor
           write_token(TokenKind::OP_COMMA, " ")
         end
       end
-      skip_space
+      skip_space(@indent + 2)
       if @token.keyword?(Keyword::THEN)
         write_keyword(" ", Keyword::THEN, " ")
         accept(w.body)
@@ -784,6 +821,7 @@ pub class Formatter < Visitor
         accept(w.body)
         @indent = @indent - 2
       end
+      skip_space_or_newline(@indent + 2)
     end
 
     if a_else = node.else
@@ -795,6 +833,7 @@ pub class Formatter < Visitor
       @indent = @indent + 2
       accept(a_else)
       @indent = @indent - 2
+      skip_space_or_newline(@indent + 2)
     end
 
     skip_space_or_newline
@@ -2408,6 +2447,14 @@ pub class Formatter < Visitor
     end
   end
 
+  def skip_space(indent : Int32) : Bool
+    old_indent = @indent
+    @indent = indent
+    found_comment = skip_space
+    @indent = old_indent
+    found_comment
+  end
+
   def skip_space_or_newline(last : Bool = false, at_least_one : Bool = false, next_comes_end : Bool = false) : Bool
     just_wrote_line = @wrote_newline
     base_column = @column
@@ -2446,6 +2493,14 @@ pub class Formatter < Visitor
     else
       false
     end
+  end
+
+  def skip_space_or_newline(indent : Int32, last : Bool = false, at_least_one : Bool = false, next_comes_end : Bool = false) : Bool
+    old_indent = @indent
+    @indent = indent
+    found_comment = skip_space_or_newline(last, at_least_one, next_comes_end)
+    @indent = old_indent
+    found_comment
   end
 
   def consume_newlines(next_comes_end : Bool = false) : Nil
@@ -2650,7 +2705,7 @@ pub class Formatter < Visitor
   end
 
   def format_end(column : Int32 = @indent) : Nil
-    skip_space_or_newline
+    skip_space_or_newline(column + 2, last: true)
     write_line unless @wrote_newline
     write_indent(column)
     check_keyword(Keyword::END)

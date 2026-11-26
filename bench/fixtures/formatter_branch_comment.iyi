@@ -1,0 +1,22 @@
+def empty_branches(value)
+  if value == 1
+    # if body
+  elsif value == 2
+    # elsif body
+  else
+    # else body
+  end
+
+  unless value == 3
+    # unless body
+  end
+
+  case value
+  when 1
+    # first when body
+  when 2
+    # second when body
+  else
+    # case else body
+  end
+end

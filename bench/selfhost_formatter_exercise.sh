@@ -32,6 +32,8 @@ exec 3>&1
 # This short corpus carries the existing idempotency, standalone-driver, and
 # mutation checks. The planner-selected comparison below is measured separately.
 CORPUS=(
+  "bench/fixtures/formatter_branch_comment.iyi"
+  "bench/fixtures/formatter_tuple_type.iyi"
   "bench/fixtures/formatter_macro_if.iyi"
   "bench/fixtures/formatter_macro_if_def.iyi"
   "bench/fixtures/formatter_macro_if_branches.fixture"
@@ -545,6 +547,21 @@ run_proof "method def receiver formatting bypassed in Def visitor" \
 run_proof "proc notation arrow omitted in ProcNotation visitor" \
   "write_token(TokenKind::OP_MINUS_GT)" \
   "# write_token(TokenKind::OP_MINUS_GT)"
+
+run_fixture_proof "tuple type syntax branch bypassed" \
+  'if name.names[0] == "Tuple"' \
+  'if false && name.names[0] == "Tuple"' \
+  "bench/fixtures/formatter_tuple_type.iyi"
+
+run_fixture_proof "named tuple type syntax branch bypassed" \
+  'elsif name.names[0] == "NamedTuple"' \
+  'elsif false && name.names[0] == "NamedTuple"' \
+  "bench/fixtures/formatter_tuple_type.iyi"
+
+run_fixture_proof "empty branch comment indentation bypassed" \
+  'skip_space_or_newline(@indent + 2, last: true)' \
+  'skip_space_or_newline(last: true)' \
+  "bench/fixtures/formatter_branch_comment.iyi"
 
 run_fixture_proof "macro-if visitor bypassed" \
   "def visit(node : MacroIf) : Bool" \

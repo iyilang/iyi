@@ -152,15 +152,26 @@ for ir in "$FIX"/*.ir "$FL"/*.ir; do
     printf '%-18s EXCLUDED  %s\n' "$n" "$reason" >>"$table"
     continue
   fi
-  if ! "$iyi" build -o "$work_native/hosted/$n$EXE" "$REPO_NATIVE/$dir/$n.iyi" >"$work/hosted-$n.log" 2>&1; then
+  hosted_args=()
+  if [ "$HOST_ID" != darwin-arm64 ]; then
+    case "$n" in
+      asm_*) hosted_args=(--cross-compile --target aarch64-apple-darwin) ;;
+    esac
+  fi
+  if ! "$iyi" build "${hosted_args[@]}" -o "$work_native/hosted/$n$EXE" "$REPO_NATIVE/$dir/$n.iyi" >"$work/hosted-$n.log" 2>&1; then
     printf '%-18s FAIL      the hosted compiler does not build the twin\n' "$n" >>"$table"
+    cat "$work/hosted-$n.log"
     failures=$((failures + 1))
     continue
   fi
-  hs=$(run_bounded "$work/hosted/$n$EXE" "$work/$n.h.out" "$work/$n.h.err")
-  case "$hs" in
-    ''|*[!0-9]*) printf '%-18s FAIL      hosted termination %s\n' "$n" "$hs" >>"$table"; failures=$((failures + 1)); continue ;;
-  esac
+  if [ "${#hosted_args[@]}" -eq 0 ]; then
+    hs=$(run_bounded "$work/hosted/$n$EXE" "$work/$n.h.out" "$work/$n.h.err")
+    case "$hs" in
+      ''|*[!0-9]*) printf '%-18s FAIL      hosted termination %s\n' "$n" "$hs" >>"$table"; failures=$((failures + 1)); continue ;;
+    esac
+  else
+    host_limited "first-light: $n hosted AArch64 twin cross-compiled but not executed on $HOST_ID"
+  fi
   if [ "$HOST_ID" != darwin-arm64 ]; then
     if "$cg" obj "$REPO_NATIVE/$ir" "$work_native/native/$n.o" >"$work/$n.obj.log" 2>&1 \
         && [ -s "$work/native/$n.o" ] \

@@ -66,6 +66,9 @@ status=0
 : > "$RESULTS"
 
 . "$REPO/bench/lib/mutation.sh"
+# The gate's own environment decides what the driver and the oracle see: a define set by the caller would make
+# every fixture run below carry it, and a proof that depends on its absence would pass or fail by accident.
+unset IYI_DECLARATION_FLAGS IYI_DECLARATION_MODE
 llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED to discover LLVM bridge build arguments"; exit 1; }
 IYI_DECLARATION_FLAGS=$(printf '%s\n' "$llvm_bridge_text" | awk '/^-D/ { sub(/^-D/, ""); printf "%s ", $0 }')
 
@@ -745,6 +748,7 @@ check_reresolve_diverge() {
 
 echo
 echo "== 7. Mutation proofs: patches to the port's declaration pass the fixtures must catch"
+echo
 MUT_SEM="$REPO/src/compiler/semantic/top_level.iyi"
 MUT_IVARS="$REPO/src/compiler/semantic/instance_vars.iyi"
 MUTATIONS_RUN=0
@@ -929,7 +933,7 @@ prove_mutation "a generic class's guessed instance variables are not declared on
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "a call on an instance variable does not infer the variable's type" "$MUT_IVARS" \
   '    if obj && !obj.is_a?(Path) && !obj.is_a?(Generic) && !node.global' \
-  '    if false' \
+  '    if obj && !obj.is_a?(Path) && !obj.is_a?(Generic) && node.global' \
   -- check_decl_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "a call that takes a block is guessed anyway" "$MUT_IVARS" \

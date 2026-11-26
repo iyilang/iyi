@@ -172,7 +172,7 @@ src/compiler/semantic/cover.iyi 15
 src/compiler/semantic/default_arguments.iyi 24
 src/compiler/semantic/definition_typing.iyi 50
 src/compiler/semantic/inline_macros.iyi 57
-src/compiler/semantic/instance_vars.iyi 76
+src/compiler/semantic/instance_vars.iyi 87
 src/compiler/semantic/lib_call.iyi 54
 src/compiler/semantic/literal_expander.iyi 75
 src/compiler/semantic/macro_bindings.iyi 22
@@ -181,7 +181,7 @@ src/compiler/semantic/match.iyi 73
 src/compiler/semantic/math_interpreter.iyi 65
 src/compiler/semantic/method_lookup.iyi 44
 src/compiler/semantic/new.iyi 23
-src/compiler/semantic/normalizer.iyi 72
+src/compiler/semantic/normalizer.iyi 73
 src/compiler/semantic/recursive_struct_checker.iyi 14
 src/compiler/semantic/restrictions.iyi 53
 src/compiler/semantic/share.iyi 45
@@ -214,7 +214,7 @@ src/compiler/tools/native_cg.iyi 49
 src/compiler/tools/obj_elf.iyi 21
 src/compiler/tools/obj_macho.iyi 21
 src/compiler/tools/parse.iyi 10
-src/compiler/tools/typed_dump.iyi 37
+src/compiler/tools/typed_dump.iyi 39
 src/compiler/types.iyi 8
 src/compiler/types/filtering.iyi 18
 src/compiler/types/filters.iyi 30

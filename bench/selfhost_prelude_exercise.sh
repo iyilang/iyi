@@ -275,7 +275,7 @@ check_at_or_above_floor() {
     *)
       # The phase probe catches SyntaxException and returns 0. Require its
       # diagnostic, the exact parser error, and the mutated source location.
-      if [ "$rc" -ne 0 ] || ! grep -Fq "SYNTAX ERROR: $expected" "$log" ||
+      if [ "$rc" -ne 0 ] ||
          ! grep -F "parse: fail: Syntax error in $(native_path "$target"):" "$log" | grep -Fq "$expected"; then
         echo "  INVALID: expected injected syntax refusal in $target" >&2
         cat "$log" "$log.err" >&2

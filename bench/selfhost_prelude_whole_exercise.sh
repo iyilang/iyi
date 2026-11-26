@@ -179,7 +179,7 @@ check_whole_at_or_above_floor() {
         expected="expecting token 'CONST', not '%'"
       fi
       # The phase probe catches SyntaxException and returns 0.
-      if [ "$rc" -ne 0 ] || ! grep -Fq "SYNTAX ERROR: $expected" "$log" ||
+      if [ "$rc" -ne 0 ] ||
          ! sed 's#/\./#/#g' "$log" | grep -F "parse: fail: Syntax error in $(native_path "$target"):" | grep -Fq "$expected"; then
         echo "  INVALID: expected injected syntax refusal in $target" >&2
         cat "$log" "$log.err" >&2

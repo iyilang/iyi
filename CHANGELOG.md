@@ -559,9 +559,13 @@
   pointer lives in a floating-point register across a call or an inline
   assembly body, asserted on the final homes. The MIR dump prints a
   conditional branch's condition. `bench/native_regalloc_exercise.sh` goes
-  from 56 to 63 fixtures emitted and from 7 to 37 broken copies caught, and
+  from 56 to 63 fixtures emitted and from 7 to 38 broken copies caught, and
   pins each allocator fixture function's spill slots
-  (`native_regalloc/linear_slots.ceiling`, exact in both directions);
+  (`native_regalloc/linear_slots.ceiling`, exact in both directions). On
+  every host it also reads each exclusive store in the atomic fixtures'
+  MIR and refuses a status register that is also the value or the address
+  register: a copy that let one share passed the gate everywhere, the
+  hosted twins on Apple silicon included.
   `bench/native_mir_clean_exercise.sh` goes from 3 to 9.
 
 ### Gates

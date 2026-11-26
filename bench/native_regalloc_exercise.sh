@@ -1035,6 +1035,71 @@ print("reload reuse: GPR and FPR caches respect redefinitions and clobbers")
 PY
 }
 
+# An exclusive store's status register must be neither its value nor its address register (Arm ARM: a status
+# register that is also a source is CONSTRAINED UNPREDICTABLE, and LLVM's assembler refuses it). The allocator keeps
+# the inputs of Stxr and Stlxr live through their definition; this reads every exclusive store the selector emits for
+# the atomic fixtures, after the reference and the linear allocator, from the driver's own MIR dump. Apple silicon ran
+# the shared-register copy without a wrong answer, so the hosted twins cannot see it on any host.
+check_exclusive_status() {
+  local drv=$1
+  [ -x "$drv" ] || return 2
+  "$PY" - "$(native_path "$drv")" "$(native_path "$FIX_CG")" <<'PY'
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+drv, directory = sys.argv[1:]
+errors = []
+defects = []
+stores = 0
+for name in ("atomics.ir", "rmw.ir", "narrow_cmpxchg.ir"):
+    path = Path(directory) / name
+    try:
+        functions = re.findall(r"^define [^@\n]*@([^\s(]+)\(", path.read_text(encoding="utf-8"), re.M)
+    except OSError as exc:
+        errors.append(f"{name}: {exc}")
+        continue
+    for function in functions:
+        for alloc in ("pin", "linear"):
+            env = dict(os.environ, IYI_NATIVE_REGALLOC=alloc)
+            try:
+                result = subprocess.run([drv, "mir", str(path), function], env=env, capture_output=True, text=True)
+            except OSError as exc:
+                errors.append(f"{name} {function} {alloc}: {exc}")
+                continue
+            if result.returncode or not result.stdout.startswith("function " + function + "\n"):
+                errors.append(f"{name} {function} {alloc}: invalid MIR: {result.stderr.strip()}")
+                continue
+            for line in result.stdout.splitlines():
+                match = re.match(r"^  (Stl?xr)/\d+ ([xw]\d+), (.*)$", line)
+                if not match:
+                    continue
+                stores += 1
+                status = int(match.group(2)[1:])
+                sources = [int(reg[1:]) for reg in re.findall(r"\b[xw]\d+\b", match.group(3))]
+                if len(sources) != 2:
+                    errors.append(f"{name} {function} {alloc}: unexpected operands: {line.strip()}")
+                elif status in sources:
+                    defects.append(f"{name} {function} {alloc}: {line.strip()}")
+if stores < 20:
+    errors.append(f"only {stores} exclusive stores were read")
+for problem in errors:
+    print("INVALID: " + problem)
+for problem in defects:
+    print("decisive: the status register is also a source: " + problem)
+if errors:
+    sys.exit(2)
+if defects:
+    sys.exit(1)
+print(f"exclusive stores: {stores} read, each status register apart from its value and address")
+PY
+}
+
+echo "== 5c. an exclusive store's status register is neither its value nor its address"
+check_exclusive_status "$DRV" || fail "an exclusive store shares its status register with a source"
+
 echo "== 6. mutation proofs"
 prove_mutation "floating ABI: flag typed parameters and call results" \
   src/compiler/native/regalloc_linear.iyi check_typed_abi_fprs \
@@ -1179,6 +1244,10 @@ prove_mutation "coalescing: retain identity copies" \
   src/compiler/native/regalloc_linear.iyi check_coalescing \
   '    acc << inst unless identity' \
   '    acc << inst'
+prove_mutation "exclusive store: the status register may be the value's or the address's register" \
+  src/compiler/native/regalloc_linear.iyi check_exclusive_status \
+  '        use_end = distinct_inputs_and_defs?(@fn.isa, inst) ? pos + 1 : pos' \
+  '        use_end = pos'
 if [ "$HOST_ID" = darwin-arm64 ]; then
   prove_mutation "linear: a register is given to an interval that overlaps an active one" \
     src/compiler/native/regalloc_linear.iyi check_linear_outputs \

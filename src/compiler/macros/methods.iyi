@@ -7,6 +7,7 @@ import compiler/platform/flags::{PlatformFlags}
 import compiler/macros/ast::{MacroId, MetaMacroVar, TypeNode}
 import compiler/macros/answers::{MacroAnswers}
 import compiler/macros/type_facts::{MacroTypeFacts}
+import std/unicode::{Unicode}
 
 pub class MacroMethods
   # A hosted method refusal (`undefined method 'size' ...`), read once by the
@@ -61,6 +62,8 @@ pub class MacroMethods
   def self.node_stringify(node : ASTNode) : String
     if node.is_a?(MacroId)
       node.as(MacroId).value
+    elsif node.is_a?(SymbolLiteral)
+      symbol_text(node.as(SymbolLiteral).value)
     else
       sb = StringBuilder.new
       node.to_s(sb)
@@ -85,19 +88,7 @@ pub class MacroMethods
     if plain
       ":" + value
     else
-      sb = StringBuilder.new
-      sb << ":\""
-      j = 0
-      while j < value.bytesize
-        c = value.byte_at(j).unsafe_chr
-        if c == '"' || c == '\\'
-          sb << "\\"
-        end
-        sb << c
-        j = j + 1
-      end
-      sb << "\""
-      sb.to_s
+      ":" + string_text(value)
     end
   end
 
@@ -135,59 +126,85 @@ pub class MacroMethods
   end
 
   def self.capitalize(s : String) : String
-    if s.empty?
-      ""
-    else
-      sb = StringBuilder.new
-      i = 0
-      while i < s.bytesize
-        c = s.byte_at(i).unsafe_chr
-        if i == 0
-          sb << c.upcase
-        else
-          sb << c.downcase
-        end
-        i = i + 1
+    result = ::String::Builder.new(s.bytesize)
+    first = true
+    s.each_char do |char|
+      if first
+        Unicode.titlecase(char) { |part| result << part }
+        first = false
+      else
+        Unicode.downcase(char) { |part| result << part }
       end
-      sb.to_s
     end
+    result.to_s
   end
 
-  def self.camelcase(s : String) : String
-    sb = StringBuilder.new
-    up = true
-    i = 0
-    while i < s.bytesize
-      c = s.byte_at(i).unsafe_chr
-      if c == '_'
-        up = true
-      elsif up
-        sb << c.upcase
-        up = false
+  def self.camelcase(s : String, lower : Bool = false) : String
+    result = ::String::Builder.new(s.bytesize)
+    first = true
+    after_underscore = false
+    s.each_char do |char|
+      if first
+        if lower
+          Unicode.downcase(char) { |part| result << part }
+        else
+          Unicode.titlecase(char) { |part| result << part }
+        end
+        first = false
+      elsif char == '_'
+        after_underscore = true
+      elsif after_underscore
+        Unicode.titlecase(char) { |part| result << part }
+        after_underscore = false
       else
-        sb << c
+        result << char
       end
-      i = i + 1
     end
-    sb.to_s
+    result.to_s
   end
 
   def self.underscore(s : String) : String
-    sb = StringBuilder.new
-    i = 0
-    while i < s.bytesize
-      c = s.byte_at(i).unsafe_chr
-      if c >= 'A' && c <= 'Z'
-        if i > 0
-          sb << "_"
+    result = ::String::Builder.new(s.bytesize)
+    first = true
+    last_down = false
+    last_up = false
+    last_digit = false
+    pending : Char? = nil
+    s.each_char do |char|
+      digit = Unicode.number?(char)
+      down = digit || Unicode.lowercase?(char)
+      up = Unicode.uppercase?(char)
+      if first
+        Unicode.downcase(char) { |part| result << part }
+      elsif last_down && up
+        if previous = pending
+          result << previous
+          pending = nil
         end
-        sb << c.downcase
+        result << '_'
+        Unicode.downcase(char) { |part| result << part }
+      elsif (last_up || last_digit) && (up || digit)
+        if previous = pending
+          Unicode.downcase(previous) { |part| result << part }
+        end
+        pending = char
       else
-        sb << c
+        if previous = pending
+          result << '_' if char != '_' && last_up && down
+          Unicode.downcase(previous) { |part| result << part }
+          pending = nil
+        end
+        Unicode.downcase(char) { |part| result << part }
       end
-      i = i + 1
+      first = false
+      last_down = down
+      last_up = up
+      last_digit = digit
     end
-    sb.to_s
+    if previous = pending
+      Unicode.downcase(previous) { |part| result << part }
+    end
+    result.to_s
   end
 
   def self.eval_int(node : ASTNode) : Int64
@@ -217,27 +234,27 @@ pub class MacroMethods
     end
   end
 
-  # `text` with each byte of `from` replaced by the byte at its place in `to`, as
-  # the hosted `String#tr` does for two lists of the same length without ranges.
+  # Hosted String#tr pairs codepoints, repeating the final replacement.
   def self.translate_chars(text : String, from : String, to : String) : String
-    sb = StringBuilder.new
-    i = 0
-    while i < text.bytesize
-      c = text.byte_at(i).unsafe_chr
-      mapped = c
-      j = 0
-      found = false
-      while j < from.bytesize
-        if !found && from.byte_at(j).unsafe_chr == c
-          mapped = to.byte_at(j).unsafe_chr
-          found = true
-        end
-        j = j + 1
-      end
-      sb << mapped
-      i = i + 1
+    targets = [] of Char
+    to.each_char { |char| targets << char }
+    positions = {} of Char => Int32
+    index = 0
+    from.each_char do |char|
+      positions[char] = index
+      index = index + 1
     end
-    sb.to_s
+    result = ::String::Builder.new(text.bytesize)
+    text.each_char do |char|
+      if at = positions[char]?
+        unless targets.empty?
+          result << targets[at < targets.size ? at : targets.size - 1]
+        end
+      else
+        result << char
+      end
+    end
+    result.to_s
   end
 
   # Whether one of `elements` is `value`, as the hosted `Array#includes?` finds it.
@@ -377,6 +394,17 @@ pub class MacroMethods
         return BoolLiteral.new(true)
       end
     end
+    # Hosted identifiers and symbols forward string methods, preserving their
+    # receiver kind when the answer is a string.
+    if rec.is_a?(MacroId) || rec.is_a?(SymbolLiteral)
+      result = interpret_method(flags, StringLiteral.new(to_macro_id(rec)), method, args, named_args, block)
+      if result.is_a?(StringLiteral)
+        return MacroId.new(result.value) if rec.is_a?(MacroId)
+        return SymbolLiteral.new(result.value)
+      end
+      return result
+    end
+
     # Hosted MetaMacroVar#interpret, methods.cr:1640-1655.
     if rec.is_a?(MetaMacroVar) && args.empty?
       variable = rec.as(MetaMacroVar)
@@ -493,12 +521,16 @@ pub class MacroMethods
         else
           return nil
         end
-      when "size", "bytesize"
+      when "size"
+        return NumberLiteral.new(str.value.size.to_s, NumberKind::I32)
+      when "bytesize"
         return NumberLiteral.new(str.value.bytesize.to_s, NumberKind::I32)
       when "empty?"
         return BoolLiteral.new(str.value.empty?)
       when "upcase"
-        return StringLiteral.new(str.value.upcase)
+        result = ::String::Builder.new(str.value.bytesize)
+        str.value.each_char { |char| Unicode.upcase(char) { |part| result << part } }
+        return StringLiteral.new(result.to_s)
       when "chomp"
         if block
           return refuse("macro 'StringLiteral#chomp' is not expected to be invoked with a block, but a block was given")
@@ -513,11 +545,20 @@ pub class MacroMethods
         end
         return StringLiteral.new(str.value.chomp('\n'))
       when "downcase"
-        return StringLiteral.new(str.value.downcase)
+        result = ::String::Builder.new(str.value.bytesize)
+        str.value.each_char { |char| Unicode.downcase(char) { |part| result << part } }
+        return StringLiteral.new(result.to_s)
       when "capitalize"
         return StringLiteral.new(capitalize(str.value))
       when "camelcase"
-        return StringLiteral.new(camelcase(str.value))
+        lower = false
+        if named = named_args
+          if value = named["lower"]?
+            return refuse("named argument 'lower' to StringLiteral#camelcase must be a bool, not #{node_class_name(value)}") unless value.is_a?(BoolLiteral)
+            lower = value.value
+          end
+        end
+        return StringLiteral.new(camelcase(str.value, lower))
       when "underscore"
         return StringLiteral.new(underscore(str.value))
       when "starts_with?"
@@ -531,20 +572,28 @@ pub class MacroMethods
         return BoolLiteral.new(str.value.includes?(sub))
       when "tr"
         if args.size == 2 && args[0].is_a?(StringLiteral) && args[1].is_a?(StringLiteral)
-          from = args[0].as(StringLiteral).value
-          to = args[1].as(StringLiteral).value
-          if from.bytesize == to.bytesize && !from.includes?("-") && !to.includes?("-")
-            return StringLiteral.new(translate_chars(str.value, from, to))
-          end
+          return StringLiteral.new(translate_chars(str.value, args[0].as(StringLiteral).value, args[1].as(StringLiteral).value))
         end
       when "[]"
         if args.size == 1
-          idx = eval_int(args[0]).to_i32
-          if idx >= 0 && idx < str.value.bytesize
-            return StringLiteral.new(str.value.byte_at(idx).unsafe_chr.to_s)
-          else
-            return StringLiteral.new("")
+          unless args[0].is_a?(RangeLiteral)
+            return refuse("wrong argument for StringLiteral#[] (#{node_class_name(args[0])}): #{to_macro_id(args[0])}")
           end
+          range = args[0].as(RangeLiteral)
+          length = str.value.size
+          first = range.from.is_a?(NilLiteral) ? 0 : eval_int(range.from).to_i32
+          last = range.to.is_a?(NilLiteral) ? length - 1 : eval_int(range.to).to_i32
+          first = length + first if first < 0
+          last = length + last if last < 0
+          return refuse("Index out of bounds") if first < 0 || first > length
+          last = last - 1 if range.exclusive && !range.to.is_a?(NilLiteral)
+          result = ::String::Builder.new(str.value.bytesize)
+          index = 0
+          str.value.each_char do |char|
+            result << char if index >= first && index <= last
+            index = index + 1
+          end
+          return StringLiteral.new(result.to_s)
         end
       end
       return nil

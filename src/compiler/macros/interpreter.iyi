@@ -733,7 +733,8 @@ pub class MacroInterpreter
       receiver = evaluate(obj)
       return Nop.new if halted?
       class_name = MacroMethods.node_class_name(receiver)
-      unless MacroAnswers.receiver?(class_name, cl.name)
+      inherited_string_method = (receiver.is_a?(MacroId) || receiver.is_a?(SymbolLiteral)) && MacroAnswers.receiver?("StringLiteral", cl.name)
+      unless MacroAnswers.receiver?(class_name, cl.name) || inherited_string_method
         fail_at(cl, "undefined macro method '#{class_name}##{cl.name}'")
         return Nop.new
       end

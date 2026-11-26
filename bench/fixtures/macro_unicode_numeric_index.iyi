@@ -1,0 +1,6 @@
+macro unicode_numeric_index
+  {% text = "hé日😀z" %}
+  {{ text.[](1) }}
+end
+
+unicode_numeric_index

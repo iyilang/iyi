@@ -1399,6 +1399,34 @@ prove_mutation "symbols print bare whatever their text" "$METHODS" \
   -- check_macros_still_match || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
+# The hosted expansion of the Unicode fixture is the oracle for codepoint size.
+check_unicode_size_matches() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "Unicode-size mutant failed to build"
+    return $?
+  fi
+  local fixture="$REPO/bench/fixtures/macro_unicode_methods.iyi" fixture_native
+  fixture_native="$(native_path "$fixture")" || { invalid_mutant "Unicode fixture path is unavailable"; return $?; }
+  if ! "$WORK/dump_hosted$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/unicode-hosted.dump" 2>"$WORK/unicode-hosted.err"; then
+    invalid_mutant "Unicode hosted oracle failed"
+    return $?
+  fi
+  if ! "$WORK/mut-exercise$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/unicode-mutant.dump" 2>"$WORK/unicode-mutant.err"; then
+    invalid_mutant "Unicode mutant failed to run"
+    return $?
+  fi
+  cmp -s "$WORK/unicode-hosted.dump" "$WORK/unicode-mutant.dump"
+}
+if prove_mutation "StringLiteral#size counts bytes instead of characters" "$METHODS" \
+  'return NumberLiteral.new(str.value.size.to_s, NumberKind::I32)' \
+  'return NumberLiteral.new(str.value.bytesize.to_s, NumberKind::I32)' \
+  -- check_unicode_size_matches; then
+  echo "    decisive: Unicode fixture differs from the hosted expansion when size counts bytes"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
 # The plain exercise rebuilt on the patched engine: zero only when every unit check still passes.
 check_plain_exercise_passes() {
   if ! build_mutant_exercise; then

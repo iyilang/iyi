@@ -205,8 +205,8 @@
   `bench/selfhost_formatter_exercise.sh` requires 32 files to format byte
   for byte as the hosted formatter does, through a path and through stdin,
   and a second pass to change nothing, and catches 18 broken copies. Of the
-  337 `.iyi` files that select the self-host jobs, the port formats 139 as
-  the hosted formatter does, formats 35 differently and refuses 163; each
+  338 `.iyi` files that select the self-host jobs, the port formats 139 as
+  the hosted formatter does, formats 35 differently and refuses 164; each
   of the 139 listed in `bench/selfhost_formatter_parity.floor` must keep
   matching, and `bench/selfhost_formatter_differs.ceiling` must list exactly
   the files it formats differently. Hosted commands are unchanged.
@@ -567,8 +567,9 @@
   kind, context and ordinal in `bench/macro_sites.floor`; an unlisted
   difference and a listed one that no longer occurs both fail. The port's
   parser records the `[` of an index call as its name location, as hosted
-  does. `bench/selfhost_macros_exercise.sh` requires 65 fixtures (307
-  sites) and catches 60 broken copies.
+  does. `bench/selfhost_macros_exercise.sh` requires 66 fixtures (313
+  sites; `macro_unicode_case_tr.iyi` adds titlecase and a short `tr`
+  replacement list) and catches 60 broken copies.
 
 ### Gates
 

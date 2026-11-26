@@ -144,6 +144,8 @@ if ! compare_corpus "$WORK/exercise$EXE"; then
 fi
 
 echo
+# Newly identical files are notices, and become protected once added to the
+# floor. The divergent-output ceiling must continue to list every difference.
 echo "== 3. Planner-selected parity floor and divergent-output ceiling"
 if [ -z "$PY" ]; then
   echo "  FAILED: Python is required for the planner-selected comparison"
@@ -176,10 +178,11 @@ def check_pins(results_path, floor_path, ceiling_path):
     ceiling = read_pins(ceiling_path)
     issues = [
         ("BELOW FLOOR", floor - actual_identical),
-        ("RAISE THE FLOOR", actual_identical - floor),
         ("NOW DIFFERS", actual_differs - ceiling),
         ("LOWER THE CEILING", ceiling - actual_differs),
     ]
+    for path in sorted(actual_identical - floor):
+        print(f"  could raise the floor: {path}")
     failed = False
     for label, paths in issues:
         for path in sorted(paths):
@@ -330,9 +333,12 @@ if not identical or not differs:
     print("  FAILED: need a matching file and a differing file for the pin proofs")
     sys.exit(1)
 
+proofs_run = 0
+
 
 def proof(name, mutant_floor, mutant_ceiling, expected, target):
-    global failed
+    global failed, proofs_run
+    proofs_run += 1
     floor_copy = work / "proof.floor"
     ceiling_copy = work / "proof.ceiling"
     floor_copy.write_text("".join(path + "\n" for path in sorted(mutant_floor)), encoding="utf-8")
@@ -346,10 +352,23 @@ def proof(name, mutant_floor, mutant_ceiling, expected, target):
         failed = True
 
 
-proof("floor row removed", floor - {identical[0]}, ceiling, "RAISE THE FLOOR", identical[0])
+pinned_matches = sorted(floor.intersection(identical))
+if pinned_matches:
+    target = pinned_matches[0]
+    result = run_check(floor - {target}, ceiling)
+    if result.returncode == 0 and f"could raise the floor: {target}" in result.stdout:
+        print(f"  unlisted match notice: reported without failure ({target}, exit 0)")
+    else:
+        print(f"  unlisted match notice: NOT CAUGHT (exit {result.returncode})")
+        print(result.stdout, end="")
+        failed = True
+else:
+    print("  FAILED: need a pinned matching file for the notice proof")
+    failed = True
 proof("differing file added to floor", floor | {differs[0]}, ceiling, "BELOW FLOOR", differs[0])
 proof("ceiling row removed", floor, ceiling - {differs[0]}, "NOW DIFFERS", differs[0])
 proof("matching file added to ceiling", floor, ceiling | {identical[0]}, "LOWER THE CEILING", identical[0])
+print(f"  {proofs_run} blocking pin proofs run")
 sys.exit(1 if failed else 0)
 PY
   if ! "$PY" "$(native_path "$WORK/whole_tree.py")" measure "$REPO_NATIVE" \

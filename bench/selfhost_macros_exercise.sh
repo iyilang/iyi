@@ -24,7 +24,6 @@
 # proofs at the end rebuild the port on each condition and require a difference.
 # Every path a native program reads is spelled the way native_path spells it, and a run that gives no
 # verdict (a crash, a non-zero exit, empty output) stops the gate with exit 76: it is never identical.
-# On Windows the missing-file and directory read errors are host-limited: hosted forwards Win32 text while the port uses POSIX wording.
 #
 #   bash bench/selfhost_macros_exercise.sh
 set -eu
@@ -963,14 +962,6 @@ confine_normal() {
   sed -e "s#$CONF_L#<LAYOUT>#g" -e "s#$REPO_NATIVE#<REPO>#g"
 }
 
-# Windows forwards operating-system error text which the port does not yet reproduce.
-confine_os_error_case() {
-  [ "$HOST_OS" = windows ] || return 1
-  case "$1" in
-    app-missing-required-inside|app-read-directory) return 0 ;;
-    *) return 1 ;;
-  esac
-}
 
 # An empty file or a crashed runner is not a verdict, even if both sides do it.
 confine_run() {
@@ -1029,10 +1020,6 @@ conf_diverged=0
 echo "  case, then the hosted oracle's verdict and the port's"
 for cf in "$CONF"/cases/*.case; do
   name="$(basename "$cf" .case)"
-  if confine_os_error_case "$name"; then
-    host_limited "$name: the hosted compiler forwards the Win32 error text, the port's wording is the POSIX one"
-    continue
-  fi
   case_native="$(native_path "$cf")"
   conf_cases=$((conf_cases + 1))
   confine_run hosted "$WORK/dump_hosted$EXE" "$case_native" "$name" || exit $?
@@ -1142,7 +1129,6 @@ check_confinement_still_matches() {
   fi
   for cf in "$CONF"/cases/*.case; do
     name="$(basename "$cf" .case)"
-    confine_os_error_case "$name" && continue
     case_native="$(native_path "$cf")"
     "$WORK/mut-exercise$EXE" --confine "$case_native" > "$CONF/mut.raw" 2>/dev/null || return 1
     confine_normal < "$CONF/mut.raw" > "$CONF/mut.out"
@@ -1544,11 +1530,33 @@ prove_mutation "file_exists? does not check the path" "$INTERP" \
   -- check_confinement_still_matches || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "a directory is not refused by read_file" "$INTERP" \
-  'if File.directory?(resolved)' \
-  'if false' \
-  -- check_confinement_still_matches || status=1
-MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+if [ "$HOST_OS" = windows ]; then
+  prove_mutation "a directory is not refused by read_file" "$INTERP" \
+    'if name == "read_file?"
+            return NilLiteral.new
+          end' \
+    'if name == "read_file?" || File.directory?(resolved)
+            return NilLiteral.new
+          end' \
+    -- check_confinement_still_matches || status=1
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+  if prove_mutation "Win32 file errors discard the system message" "$INTERP" \
+    'win32_error_text(opened.code)' \
+    '"wrong system error"' \
+    -- check_confinement_still_matches; then
+    echo "    decisive: Windows confinement errors differ without the operating system's message"
+  else
+    status=1
+  fi
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+else
+  prove_mutation "a directory is not refused by read_file" "$INTERP" \
+    'if File.directory?(resolved)' \
+    'if false' \
+    -- check_confinement_still_matches || status=1
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+  host_limited "Win32 system-message mutation runs on Windows"
+fi
 
 prove_mutation "a macro's file is not taken from its definition" "$ENGINE" \
   'loc.filename' \

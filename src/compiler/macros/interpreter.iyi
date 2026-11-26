@@ -1,3 +1,4 @@
+@[Unsafe("Win32 file errors use a bounded UTF-16 buffer passed to FormatMessageW")]
 module compiler/macros/interpreter
 
 import compiler/syntax/ast::{ASTNode, And, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, DoubleSplat, Expressions, Generic, Global, HashLiteral, If, ImplicitObj, InstanceVar, IsA, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, RangeLiteral, Return, Self, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, Underscore, Unless, Until, Var, While, Yield, StringBuilder}
@@ -260,6 +261,21 @@ pub class MacroInterpreter
     @last = Nop.new
   end
 
+  {% if flag?(:win32) %}
+    # WinError#message uses FORMAT_MESSAGE_FROM_SYSTEM and strips whitespace,
+    # retaining the system's punctuation and locale.
+    def win32_error_text(code : Int32) : String
+      wide = Pointer(UInt16).malloc(257_u64)
+      written = Std::File::LibKernel32.FormatMessageW(0x1000, Pointer(Void).new(0_u64), code, 0,
+        wide, 256, Pointer(Void).new(0_u64))
+      return "" if written <= 0
+      wide[written] = 0_u16
+      size = __iyi_utf8_size_from_wide(wide)
+      return "" if size <= 0
+      String.new(size - 1) { |buffer| __iyi_utf8_bytes_from_wide(wide, buffer, size) }.strip
+    end
+  {% end %}
+
   def new_temp_var_name(prefix : String = "__temp_") : String
     @temp_id = @temp_id + 1
     "#{prefix}#{@temp_id}"
@@ -511,17 +527,38 @@ pub class MacroInterpreter
       if name == "file_exists?"
         return BoolLiteral.new(File.exists?(resolved))
       end
-      if !File.exists?(resolved)
-        return NilLiteral.new if name == "read_file?"
-        fail_at(node, "Error opening file with mode 'r': '#{resolved}': No such file or directory")
-        return Nop.new
-      end
-      if File.directory?(resolved)
-        return NilLiteral.new if name == "read_file?"
-        fail_at(node, "read (#{resolved}): Is a directory")
-        return Nop.new
-      end
-      return StringLiteral.new(File.read(resolved))
+      {% if flag?(:win32) %}
+        opened = File.open?(resolved)
+        if opened.is_a?(Std::File::IOError)
+          if name == "read_file?"
+            return NilLiteral.new
+          end
+          fail_at(node, "Error opening file with mode 'r': '#{resolved}': #{win32_error_text(opened.code)}")
+          return Nop.new
+        end
+        stream = opened.as(Std::File::FileIO)
+        contents = stream.read_all
+        read_failure = stream.read_error
+        stream.close
+        if failure = read_failure
+          return NilLiteral.new if name == "read_file?"
+          fail_at(node, "read (#{resolved}): #{win32_error_text(failure.code)}")
+          return Nop.new
+        end
+        return StringLiteral.new(contents)
+      {% else %}
+        if !File.exists?(resolved)
+          return NilLiteral.new if name == "read_file?"
+          fail_at(node, "Error opening file with mode 'r': '#{resolved}': No such file or directory")
+          return Nop.new
+        end
+        if File.directory?(resolved)
+          return NilLiteral.new if name == "read_file?"
+          fail_at(node, "read (#{resolved}): Is a directory")
+          return Nop.new
+        end
+        return StringLiteral.new(File.read(resolved))
+      {% end %}
     end
 
     if name == "env"

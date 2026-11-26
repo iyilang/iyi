@@ -4060,7 +4060,7 @@ jobs:
             "wasm_freestanding_exercise.iyi", "wasm_tasks_exercise.iyi",
             "stdin_park.iyi", "std_debug_cross.iyi", "selfhost_llvm_exercise.iyi",
             "selfhost_abstract_requirement_probe.iyi", "selfhost_arg_arms_probe.iyi",
-            "selfhost_proc_scope_probe.iyi", "selfhost_program_owner_probe.iyi",
+            "selfhost_bodies_atomic_probe.iyi", "selfhost_proc_scope_probe.iyi", "selfhost_program_owner_probe.iyi",
             "selfhost_recursion_target_probe.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"

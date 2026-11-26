@@ -1519,45 +1519,43 @@ else
   status=1
 fi
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
-# Both sites are evaluated independently, so one refusal cannot hide the other.
-# Require the mutant to differ only in the two call-name locations.
+# Each fixture expands separately, so one refusal cannot hide the other.
+# Require each mutant to differ only in its call-name location.
 check_inline_index_locations() {
   if ! build_mutant_exercise; then
     invalid_mutant "inline-index mutant failed to build"
     return $?
   fi
-  local fixture="$REPO/bench/fixtures/macro_inline_numeric_index.iyi" fixture_native
-  fixture_native="$(native_path "$fixture")" || { invalid_mutant "inline-index fixture path is unavailable"; return $?; }
-  if ! "$WORK/dump_hosted$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/index-hosted.dump" 2>"$WORK/index-hosted.err"; then
-    invalid_mutant "inline-index hosted oracle failed"
-    return $?
-  fi
-  if ! "$WORK/mut-exercise$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/index-mutant.dump" 2>"$WORK/index-mutant.err"; then
-    invalid_mutant "inline-index mutant failed to run"
-    return $?
-  fi
-  if ! awk '/^site 0 / && / error 2:13 message=/ { unicode = 1 }
-            /^site 1 / && / error 3:13 message=/ { ascii = 1 }
-            END { exit !(unicode && ascii) }' "$WORK/index-hosted.dump"; then
-    invalid_mutant "hosted inline-index errors did not have the expected locations"
-    return $?
-  fi
-  if cmp -s "$WORK/index-hosted.dump" "$WORK/index-mutant.dump"; then return 0; fi
-  if ! awk '/^site 0 / && / error 2:6 message=/ {
-              unicode = 1; sub(/ error 2:6 message=/, " error 2:13 message=")
-            }
-            /^site 1 / && / error 3:6 message=/ {
-              ascii = 1; sub(/ error 3:6 message=/, " error 3:13 message=")
-            }
-            { print }
-            END { exit !(unicode && ascii) }' "$WORK/index-mutant.dump" > "$WORK/index-normalized.dump"; then
-    invalid_mutant "inline-index mutant did not move both errors to the receiver"
-    return $?
-  fi
-  if ! cmp -s "$WORK/index-hosted.dump" "$WORK/index-normalized.dump"; then
-    invalid_mutant "inline-index mutant changed more than the call locations"
-    return $?
-  fi
+  local fixture fixture_native label
+  for fixture in "$REPO/bench/fixtures/macro_inline_numeric_index.iyi" "$REPO/bench/fixtures/macro_ascii_inline_numeric_index.iyi"; do
+    label="$(basename "$fixture" .iyi)"
+    fixture_native="$(native_path "$fixture")" || { invalid_mutant "inline-index fixture path is unavailable"; return $?; }
+    if ! "$WORK/dump_hosted$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/$label-hosted.dump" 2>"$WORK/$label-hosted.err"; then
+      invalid_mutant "inline-index hosted oracle failed"
+      return $?
+    fi
+    if ! "$WORK/mut-exercise$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/$label-mutant.dump" 2>"$WORK/$label-mutant.err"; then
+      invalid_mutant "inline-index mutant failed to run"
+      return $?
+    fi
+    if ! awk '/^error 2:13 message=/ { found = 1 } END { exit !found }' "$WORK/$label-hosted.dump"; then
+      invalid_mutant "hosted inline-index error did not have the expected location"
+      return $?
+    fi
+    if cmp -s "$WORK/$label-hosted.dump" "$WORK/$label-mutant.dump"; then return 0; fi
+    if ! awk '/^error 2:6 message=/ {
+                found = 1; sub(/^error 2:6 message=/, "error 2:13 message=")
+              }
+              { print }
+              END { exit !found }' "$WORK/$label-mutant.dump" > "$WORK/$label-normalized.dump"; then
+      invalid_mutant "inline-index mutant did not move the error to the receiver"
+      return $?
+    fi
+    if ! cmp -s "$WORK/$label-hosted.dump" "$WORK/$label-normalized.dump"; then
+      invalid_mutant "inline-index mutant changed more than the call location"
+      return $?
+    fi
+  done
   return 1
 }
 if prove_mutation "inline indexing loses its call-name location" "$SYNTAX_PARSER" \

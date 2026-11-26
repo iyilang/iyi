@@ -141,53 +141,54 @@ pub class Builder
       bytes << const_int(byte_type, byte)
       i = i + 1
     end
-    Inst.new(Op::ConstBytes, types.array_of(byte_type, count.to_i64), bytes, 0_i64, nil, [] of Block, [] of Int64)
+    Inst.new(Op::ConstBytes, types.array_of(byte_type, count.to_i64), bytes, 0_i64, nil, nil, nil)
   end
 
   def const_struct(values : Array(Value), packed : Bool = false) : Inst
     fields = values.map { |v| v.type }
-    Inst.new(Op::ConstAggregate, types.struct_of(fields, packed), values, 0_i64, nil, [] of Block, [] of Int64)
+    Inst.new(Op::ConstAggregate, types.struct_of(fields, packed), values, 0_i64, nil, nil, nil)
   end
 
   def const_array(element : IrType, values : Array(Value)) : Inst
-    Inst.new(Op::ConstAggregate, types.array_of(element, values.size.to_i64), values, 0_i64, nil, [] of Block, [] of Int64)
+    Inst.new(Op::ConstAggregate, types.array_of(element, values.size.to_i64), values, 0_i64, nil, nil, nil)
   end
 
   # The address of a global, as a constant (for initialisers that point at other globals).
   def const_global_addr(global : Global) : Inst
-    Inst.new(Op::GlobalAddr, types.ptr(0), [global] of Value, 0_i64, nil, [] of Block, [] of Int64)
+    Inst.new(Op::GlobalAddr, types.ptr(0), [global] of Value, 0_i64, nil, nil, nil)
   end
 
   def const_function_addr(fn : Function) : Inst
-    Inst.new(Op::FunctionAddr, types.ptr(0), [fn] of Value, 0_i64, nil, [] of Block, [] of Int64)
+    Inst.new(Op::FunctionAddr, types.ptr(0), [fn] of Value, 0_i64, nil, nil, nil)
   end
 
   def const_gep(source_type : IrType, base : Value, indices : Array(Value), inbounds : Bool = false) : Inst
-    args = [base] of Value
+    args = Array(Value).new(indices.size + 1)
+    args << base
     indices.each { |i| args << i }
-    Inst.new(Op::ConstExpr, base.type, args, Op::Gep.value.to_i64, GepAux.new(source_type, inbounds), [] of Block, [] of Int64)
+    Inst.new(Op::ConstExpr, base.type, args, Op::Gep.value.to_i64, GepAux.new(source_type, inbounds), nil, nil)
   end
 
   def const_cast(op : Op, value : Value, dest : IrType) : Inst
-    Inst.new(Op::ConstExpr, dest, [value] of Value, op.value.to_i64, nil, [] of Block, [] of Int64)
+    Inst.new(Op::ConstExpr, dest, [value] of Value, op.value.to_i64, nil, nil, nil)
   end
 
   # ---- terminators --------------------------------------------------------------------
 
   def ret(value : Value) : Inst
-    emit(Op::Ret, types.void, [value] of Value, 0_i64, nil, [] of Block, [] of Int64, "")
+    emit(Op::Ret, types.void, [value] of Value, 0_i64, nil, nil, nil, "")
   end
 
   def ret_void : Inst
-    emit(Op::Ret, types.void, [] of Value, 0_i64, nil, [] of Block, [] of Int64, "")
+    emit(Op::Ret, types.void, nil, 0_i64, nil, nil, nil, "")
   end
 
   def br(dest : Block) : Inst
-    emit(Op::Br, types.void, [] of Value, 0_i64, nil, [dest], [] of Int64, "")
+    emit(Op::Br, types.void, nil, 0_i64, nil, [dest], nil, "")
   end
 
   def cond_br(cond : Value, then_block : Block, else_block : Block) : Inst
-    emit(Op::CondBr, types.void, [cond] of Value, 0_i64, nil, [then_block, else_block], [] of Int64, "")
+    emit(Op::CondBr, types.void, [cond] of Value, 0_i64, nil, [then_block, else_block], nil, "")
   end
 
   def switch(value : Value, else_block : Block, cases : Array({Value, Block})) : Inst
@@ -202,24 +203,25 @@ pub class Builder
   end
 
   def unreachable : Inst
-    emit(Op::Unreachable, types.void, [] of Value, 0_i64, nil, [] of Block, [] of Int64, "")
+    emit(Op::Unreachable, types.void, nil, 0_i64, nil, nil, nil, "")
   end
 
   def invoke(fn_type : IrType, callee : Value, args : Array(Value), normal : Block, unwind : Block, name : String = "") : Inst
-    call_args = [callee] of Value
+    call_args = Array(Value).new(args.size + 1)
+    call_args << callee
     args.each { |a| call_args << a }
-    emit(Op::Invoke, fn_type.return_type, call_args, 0_i64, CallAux.new(fn_type), [normal, unwind], [] of Int64, name)
+    emit(Op::Invoke, fn_type.return_type, call_args, 0_i64, CallAux.new(fn_type), [normal, unwind], nil, name)
   end
 
   def resume(value : Value) : Inst
-    emit(Op::Resume, types.void, [value] of Value, 0_i64, nil, [] of Block, [] of Int64, "")
+    emit(Op::Resume, types.void, [value] of Value, 0_i64, nil, nil, nil, "")
   end
 
   # A landing pad. `personality` is the function's personality routine; `clauses` are typed values.
   def landing_pad(type : IrType, personality : Value, clauses : Array(Value) = [] of Value, name : String = "", cleanup : Bool = false) : Inst
     args = [personality] of Value
     clauses.each { |c| args << c }
-    emit(Op::LandingPad, type, args, cleanup ? 1_i64 : 0_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::LandingPad, type, args, cleanup ? 1_i64 : 0_i64, nil, nil, nil, name)
   end
 
   # Windows exception handling. `parent` is a pad, or a null ptr for `none`.
@@ -231,23 +233,23 @@ pub class Builder
       targets << u
       flag = 1_i64
     end
-    emit(Op::CatchSwitch, types.ptr(0), [parent] of Value, flag, nil, targets, [] of Int64, name)
+    emit(Op::CatchSwitch, types.ptr(0), [parent] of Value, flag, nil, targets, nil, name)
   end
 
   def catch_pad(parent : Value, args : Array(Value), name : String = "") : Inst
     operands = [parent] of Value
     args.each { |a| operands << a }
-    emit(Op::CatchPad, types.ptr(0), operands, 0_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::CatchPad, types.ptr(0), operands, 0_i64, nil, nil, nil, name)
   end
 
   def catch_ret(pad : Value, dest : Block) : Inst
-    emit(Op::CatchRet, types.void, [pad] of Value, 0_i64, nil, [dest], [] of Int64, "")
+    emit(Op::CatchRet, types.void, [pad] of Value, 0_i64, nil, [dest], nil, "")
   end
 
   def cleanup_pad(parent : Value, args : Array(Value), name : String = "") : Inst
     operands = [parent] of Value
     args.each { |a| operands << a }
-    emit(Op::CleanupPad, types.ptr(0), operands, 0_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::CleanupPad, types.ptr(0), operands, 0_i64, nil, nil, nil, name)
   end
 
   def cleanup_ret(pad : Value, unwind : Block?) : Inst
@@ -257,33 +259,33 @@ pub class Builder
       targets << u
       flag = 1_i64
     end
-    emit(Op::CleanupRet, types.void, [pad] of Value, flag, nil, targets, [] of Int64, "")
+    emit(Op::CleanupRet, types.void, [pad] of Value, flag, nil, targets, nil, "")
   end
 
   # ---- memory -------------------------------------------------------------------------
 
   def alloca(type : IrType, name : String = "") : Inst
-    emit(Op::Alloca, types.ptr(0), [] of Value, 0_i64, GepAux.new(type, false), [] of Block, [] of Int64, name)
+    emit(Op::Alloca, types.ptr(0), nil, 0_i64, GepAux.new(type, false), nil, nil, name)
   end
 
   def load(type : IrType, pointer : Value, name : String = "") : Inst
-    emit(Op::Load, type, [pointer] of Value, 0_i64, MemAux.new, [] of Block, [] of Int64, name)
+    emit(Op::Load, type, [pointer] of Value, 0_i64, MemAux.new, nil, nil, name)
   end
 
   def store(value : Value, pointer : Value) : Inst
-    emit(Op::Store, types.void, [value, pointer] of Value, 0_i64, MemAux.new, [] of Block, [] of Int64, "")
+    emit(Op::Store, types.void, [value, pointer] of Value, 0_i64, MemAux.new, nil, nil, "")
   end
 
   # A load with an atomic ordering (`load atomic seq_cst`), volatile when asked. The alignment is the
   # caller's to set, as for a plain load.
   def atomic_load(type : IrType, pointer : Value, ordering : Ordering, volatile : Bool = false, name : String = "") : Inst
     aux = MemAux.new(0, volatile, ordering, Ordering::NotAtomic, false, "", false)
-    emit(Op::Load, type, [pointer] of Value, 0_i64, aux, [] of Block, [] of Int64, name)
+    emit(Op::Load, type, [pointer] of Value, 0_i64, aux, nil, nil, name)
   end
 
   def atomic_store(value : Value, pointer : Value, ordering : Ordering, volatile : Bool = false) : Inst
     aux = MemAux.new(0, volatile, ordering, Ordering::NotAtomic, false, "", false)
-    emit(Op::Store, types.void, [value, pointer] of Value, 0_i64, aux, [] of Block, [] of Int64, "")
+    emit(Op::Store, types.void, [value, pointer] of Value, 0_i64, aux, nil, nil, "")
   end
 
   def gep(type : IrType, pointer : Value, indices : Array(Value), name : String = "") : Inst
@@ -295,23 +297,23 @@ pub class Builder
   end
 
   def fence(ordering : Ordering, single_thread : Bool = false) : Inst
-    emit(Op::Fence, types.void, [] of Value, 0_i64, MemAux.new(0, false, ordering, Ordering::NotAtomic, single_thread), [] of Block, [] of Int64, "")
+    emit(Op::Fence, types.void, nil, 0_i64, MemAux.new(0, false, ordering, Ordering::NotAtomic, single_thread), nil, nil, "")
   end
 
   def cmpxchg(pointer : Value, compare : Value, replacement : Value, success : Ordering, failure : Ordering, name : String = "") : Inst
     result = types.struct_of([compare.type, types.int1])
     aux = MemAux.new(0, false, success, failure, false, "", false)
-    emit(Op::CmpXchg, result, [pointer, compare, replacement] of Value, 0_i64, aux, [] of Block, [] of Int64, name)
+    emit(Op::CmpXchg, result, [pointer, compare, replacement] of Value, 0_i64, aux, nil, nil, name)
   end
 
   # `operation` is LLVM's name for the read-modify-write: "xchg", "add", "sub", "and", "max" ...
   def atomicrmw(operation : String, pointer : Value, value : Value, ordering : Ordering, single_thread : Bool = false, name : String = "") : Inst
     aux = MemAux.new(0, false, ordering, Ordering::NotAtomic, single_thread, operation, false)
-    emit(Op::AtomicRmw, value.type, [pointer, value] of Value, 0_i64, aux, [] of Block, [] of Int64, name)
+    emit(Op::AtomicRmw, value.type, [pointer, value] of Value, 0_i64, aux, nil, nil, name)
   end
 
   def va_arg(pointer : Value, type : IrType, name : String = "") : Inst
-    emit(Op::VaArg, type, [pointer] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::VaArg, type, [pointer] of Value, 0_i64, nil, nil, nil, name)
   end
 
   # ---- arithmetic and comparisons -----------------------------------------------------
@@ -321,7 +323,7 @@ pub class Builder
     if folded = fold_binop(op, lhs, rhs, flags)
       return folded
     end
-    emit(op, lhs.type, [lhs, rhs] of Value, flags, nil, [] of Block, [] of Int64, name)
+    emit(op, lhs.type, [lhs, rhs] of Value, flags, nil, nil, nil, name)
   end
 
   # Match the hosted IRBuilder's folding of unflagged integer arithmetic.
@@ -472,15 +474,15 @@ pub class Builder
   end
 
   def fneg(value : Value, name : String = "") : Inst
-    emit(Op::FNeg, value.type, [value] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::FNeg, value.type, [value] of Value, 0_i64, nil, nil, nil, name)
   end
 
   def icmp(predicate : IntPredicate, lhs : Value, rhs : Value, name : String = "") : Inst
-    emit(Op::ICmp, types.int1, [lhs, rhs] of Value, predicate.value.to_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::ICmp, types.int1, [lhs, rhs] of Value, predicate.value.to_i64, nil, nil, nil, name)
   end
 
   def fcmp(predicate : RealPredicate, lhs : Value, rhs : Value, name : String = "") : Inst
-    emit(Op::FCmp, types.int1, [lhs, rhs] of Value, predicate.value.to_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::FCmp, types.int1, [lhs, rhs] of Value, predicate.value.to_i64, nil, nil, nil, name)
   end
 
   # ---- conversions --------------------------------------------------------------------
@@ -540,12 +542,12 @@ pub class Builder
   # ---- values -------------------------------------------------------------------------
 
   def select(cond : Value, then_value : Value, else_value : Value, name : String = "") : Inst
-    emit(Op::Select, then_value.type, [cond, then_value, else_value] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::Select, then_value.type, [cond, then_value, else_value] of Value, 0_i64, nil, nil, nil, name)
   end
 
   # An empty phi: add its incoming pairs with add_incoming.
   def phi(type : IrType, name : String = "") : Inst
-    emit(Op::Phi, type, [] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::Phi, type, nil, 0_i64, nil, nil, nil, name)
   end
 
   def phi(type : IrType, incoming : Array({Value, Block}), name : String = "") : Inst
@@ -569,15 +571,15 @@ pub class Builder
 
   def extract_value(agg : Value, index : Int32, name : String = "") : Inst
     field = aggregate_element(agg.type, index)
-    emit(Op::ExtractValue, field, [agg] of Value, index.to_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::ExtractValue, field, [agg] of Value, index.to_i64, nil, nil, nil, name)
   end
 
   def insert_value(agg : Value, value : Value, index : Int32, name : String = "") : Inst
-    emit(Op::InsertValue, agg.type, [agg, value] of Value, index.to_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::InsertValue, agg.type, [agg, value] of Value, index.to_i64, nil, nil, nil, name)
   end
 
   def freeze(value : Value, name : String = "") : Inst
-    emit(Op::Freeze, value.type, [value] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::Freeze, value.type, [value] of Value, 0_i64, nil, nil, nil, name)
   end
 
   # ---- calls --------------------------------------------------------------------------
@@ -597,9 +599,10 @@ pub class Builder
 
   # A call with explicit attributes and calling convention.
   def call_aux(aux : CallAux, callee : Value, args : Array(Value), name : String = "") : Inst
-    operands = [callee] of Value
+    operands = Array(Value).new(args.size + 1)
+    operands << callee
     args.each { |a| operands << a }
-    emit(Op::Call, aux.fn_type.return_type, operands, 0_i64, aux, [] of Block, [] of Int64, name)
+    emit(Op::Call, aux.fn_type.return_type, operands, 0_i64, aux, nil, nil, name)
   end
 
   # An intrinsic call. `overload` is the set of types the LLVM name spells, and the result type follows
@@ -617,28 +620,28 @@ pub class Builder
       raise "#{intrinsic_name(id, overload)} has #{param_attrs.size} attribute lists for #{args.size} operands"
     end
     signature = intrinsic_signature(id, overload, types)
-    emit(Op::Intrinsic, signature[0], args, 0_i64, IntrinsicAux.new(id, overload, param_attrs), [] of Block, [] of Int64, name)
+    emit(Op::Intrinsic, signature[0], args, 0_i64, IntrinsicAux.new(id, overload, param_attrs), nil, nil, name)
   end
 
   # An inline asm callee. Call it with `call`; the printer writes the template where the callee goes.
   def inline_asm(fn_type : IrType, template : String, constraints : String, side_effects : Bool, align_stack : Bool, dialect : AsmDialect, unwind : Bool = false) : Value
     aux = AsmAux.new(template, constraints, side_effects, align_stack, dialect, unwind)
-    Inst.new(Op::Call, fn_type, [] of Value, 0_i64, aux, [] of Block, [] of Int64)
+    Inst.new(Op::Call, fn_type, nil, 0_i64, aux, nil, nil)
   end
 
   # ---- runtime contract ---------------------------------------------------------------
 
   def thread_local_addr(global : Global, name : String = "") : Inst
-    emit(Op::ThreadLocalAddr, types.ptr(0), [global] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::ThreadLocalAddr, types.ptr(0), [global] of Value, 0_i64, nil, nil, nil, name)
   end
 
   def thread_pointer(kind : ThreadPointerKind, name : String = "") : Inst
-    emit(Op::ThreadPointer, types.ptr(0), [] of Value, kind.value.to_i64, nil, [] of Block, [] of Int64, name)
+    emit(Op::ThreadPointer, types.ptr(0), nil, kind.value.to_i64, nil, nil, nil, name)
   end
 
   # ---- internals ----------------------------------------------------------------------
 
-  private def emit(op : Op, type : IrType, args : Array(Value), aux_int : Int64, aux : InstAux, targets : Array(Block), cases : Array(Int64), name : String) : Inst
+  private def emit(op : Op, type : IrType, args : Array(Value)?, aux_int : Int64, aux : InstAux, targets : Array(Block)?, cases : Array(Int64)?, name : String) : Inst
     inst = Inst.new(op, type, args, aux_int, aux, targets, cases, name)
     inst.loc = @loc
     place(inst)
@@ -659,18 +662,19 @@ pub class Builder
       block.insts << inst
     end
     if terminator_op?(inst.op)
-      inst.targets.each { |t| t.add_pred(block) }
+      inst.add_target_predecessors(block)
     end
   end
 
   private def cast(op : Op, value : Value, dest : IrType, name : String) : Inst
-    emit(op, dest, [value] of Value, 0_i64, nil, [] of Block, [] of Int64, name)
+    emit(op, dest, [value] of Value, 0_i64, nil, nil, nil, name)
   end
 
   private def gep_with(type : IrType, pointer : Value, indices : Array(Value), inbounds : Bool, name : String) : Inst
-    args = [pointer] of Value
+    args = Array(Value).new(indices.size + 1)
+    args << pointer
     indices.each { |i| args << i }
-    emit(Op::Gep, pointer.type, args, 0_i64, GepAux.new(type, inbounds), [] of Block, [] of Int64, name)
+    emit(Op::Gep, pointer.type, args, 0_i64, GepAux.new(type, inbounds), nil, nil, name)
   end
 
   private def aggregate_element(agg : IrType, index : Int32) : IrType

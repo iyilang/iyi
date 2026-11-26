@@ -375,6 +375,13 @@ pub class Inst < Value
     targets << block
   end
 
+  # Link only stored targets, without allocating an empty list for terminators with none.
+  def add_target_predecessors(block : Block) : Nil
+    if stored = @targets
+      stored.each { |target| target.add_pred(block) }
+    end
+  end
+
   # An invoke whose unwind edge is dropped is the call it makes: the same callee, operands, convention and
   # attributes, and no successors. The instruction keeps its identity, so every use of its result stands.
   def demote_invoke : Nil

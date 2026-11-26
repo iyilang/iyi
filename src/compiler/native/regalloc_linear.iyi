@@ -248,6 +248,7 @@ def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil
   gprs = scratch_gprs
   fprs = scratch_fprs
   fixed = fixed_live_before(block)
+  reloads = [] of MInst
   stores = [] of MInst
   index = 0
   block.insts.each do |inst|
@@ -275,7 +276,7 @@ def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil
         pool = fp ? fprs : gprs
         reg = cached_scratch(pool, cache, blocked, used, v)
         if cache[reg] != v
-          acc << slot_access(fn.isa, true, reg, fn.vreg_slot[v], fp)
+          reloads << slot_access(fn.isa, true, reg, fn.vreg_slot[v], fp)
           cache[reg] = v
         end
         used = used | (1_u64 << reg)
@@ -299,6 +300,12 @@ def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil
         stores << slot_access(fn.isa, false, reg, fn.vreg_slot[v], fp) if has_use[v] # skip-unused-spill-store
         inst.defs[k] = Operand.new(OperandKind::Physical, reg)
       end
+    end
+    reloads.each do |r|
+      acc << r
+    end
+    while reloads.size > 0
+      reloads.pop
     end
     single_copy = is_role?(fn.isa, inst, Role::Copy) && inst.size == 64 && inst.defs.size == 1 && inst.uses.size == 1
     physical_copy = single_copy && inst.defs[0].kind == OperandKind::Physical && inst.uses[0].kind == OperandKind::Physical
@@ -625,7 +632,7 @@ class LinearScan
   property caller_pool : Array(Int32)
   property callee_pool : Array(Int32)
   property gpr_pool : Array(Int32)
-  property empty_pool : Array(Int32)
+  property occupied : UInt64
   property hint_vreg : Array(Int32)
   property hint_reg : Array(Int32)
   property fpr_pool : Array(Int32)
@@ -659,7 +666,7 @@ class LinearScan
     @caller_pool = caller_gpr_pool
     @callee_pool = callee_saved_gprs
     @gpr_pool = @caller_pool + @callee_pool
-    @empty_pool = [] of Int32
+    @occupied = 0_u64
     @hint_vreg = [] of Int32
     @hint_reg = [] of Int32
     @callee_fpr_pool = callee_saved_fprs
@@ -1100,6 +1107,10 @@ class LinearScan
     lo < ends.size && starts[lo] <= e
   end
 
+  def held?(reg : Int32) : Bool
+    (@occupied & (1_u64 << reg)) != 0_u64
+  end
+
   # Keep the active order for victim tie-breaking, and collect occupied physical registers in the same pass.
   def expire(s : Int32) : UInt64
     occupied = 0_u64
@@ -1142,7 +1153,7 @@ class LinearScan
   def pool_for(iv : Int32) : Array(Int32)
     if @fn.vreg_classes[iv] == RegClass::Fpr
       if @crossing[iv]
-        return @empty_pool if @pointer[iv]
+        return [] of Int32 if @pointer[iv]
         return @callee_fpr_pool
       end
       return @fpr_pool
@@ -1153,15 +1164,15 @@ class LinearScan
     @gpr_pool
   end
 
-  def find_free(iv : Int32, pool : Array(Int32), occupied : UInt64) : Int32
+  def find_free(iv : Int32, pool : Array(Int32)) : Int32
     preferred = @hint_reg[iv]
     other = @hint_vreg[iv]
     preferred = @homes[other] if other >= 0 && @homes[other] >= 0
-    if preferred >= 0 && member?(pool, preferred) && (occupied & (1_u64 << preferred)) == 0_u64 && !reserved?(preferred, @starts[iv], @ends[iv])
+    if preferred >= 0 && member?(pool, preferred) && !held?(preferred) && !reserved?(preferred, @starts[iv], @ends[iv])
       return preferred
     end
     pool.each do |reg|
-      return reg if (occupied & (1_u64 << reg)) == 0_u64 && !reserved?(reg, @starts[iv], @ends[iv])
+      return reg unless held?(reg) || reserved?(reg, @starts[iv], @ends[iv])
     end
     -1
   end
@@ -1194,9 +1205,9 @@ class LinearScan
     end
     order = sort_by_start(order, @starts)
     order.each do |iv|
-      occupied = expire(@starts[iv])
+      @occupied = expire(@starts[iv])
       pool = pool_for(iv)
-      reg = find_free(iv, pool, occupied)
+      reg = find_free(iv, pool)
       if reg >= 0
         @homes[iv] = reg
         @active << iv

@@ -961,6 +961,42 @@ dep=
 dir=@L@
 body={{ `echo hi` }}
 CONFINE_CASES
+if [ "$HOST_OS" != windows ]; then
+  # A backslash and a quote are filename characters on POSIX, not separators.
+  mkdir "$CONF/layout/app/"'quoted\"dir'
+  cat <<'CONFINE_POSIX_CASES' >> "$CONF/cases.manifest"
+case app-missing-escaped-name
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/quoted\\\"dir/missing") }}
+case app-read-escaped-directory
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/quoted\\\"dir") }}
+case app-missing-escaped-controls
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/missing-\a\b\e\f\n\r\t\v\u007F\u0080\u00A0\u0378\uE000\u{10FFFF}-\#{x}") }}
+case app-missing-escaped-bytes
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/missing-\xFF\xC3\xA9\uFFFD") }}
+CONFINE_POSIX_CASES
+else
+  host_limited "POSIX filenames containing backslash, quote and controls are not valid Windows names"
+fi
 sed -e "s#@L@#$CONF_L#g" -e "s#@REPO@#$REPO_NATIVE#g" "$CONF/cases.manifest" |
   awk -v dir="$CONF/cases" '/^case /{f=dir "/" $2 ".case"; next} {print > f}'
 if [ "$CONF_LINKS" != yes ]; then
@@ -1145,6 +1181,35 @@ check_confinement_still_matches() {
     cmp -s "$CONF/mut.out" "$CONF/expected/$name.out" || return 1
   done
   return 0
+}
+
+# A raw filename must differ in every selected open-error case, without a
+# failed build, missing verdict or a different error masquerading as proof.
+check_open_error_paths() {
+  local name case_native cases
+  if ! build_mutant_exercise; then
+    invalid_mutant "raw open-error path mutant failed to build"
+    return $?
+  fi
+  if [ "$HOST_OS" = windows ]; then
+    cases="app-missing-required-inside"
+  else
+    cases="app-missing-escaped-name app-missing-escaped-controls app-missing-escaped-bytes"
+  fi
+  for name in $cases; do
+    case_native="$(native_path "$CONF/cases/$name.case")" || { invalid_mutant "open-error case path is unavailable"; return $?; }
+    if ! "$WORK/mut-exercise$EXE" --confine "$case_native" > "$CONF/$name-mut.raw" 2>"$CONF/$name-mut.err"; then
+      invalid_mutant "raw open-error path mutant failed to run"
+      return $?
+    fi
+    if ! grep -q "^error 2:4 message=\"Error opening file with mode 'r':" "$CONF/$name-mut.raw"; then
+      invalid_mutant "raw open-error path mutant did not report an open error"
+      return $?
+    fi
+    confine_normal < "$CONF/$name-mut.raw" > "$CONF/$name-mut.out"
+    if cmp -s "$CONF/expected/$name.out" "$CONF/$name-mut.out"; then return 0; fi
+  done
+  return 1
 }
 
 MUTATIONS_RUN=0
@@ -1687,6 +1752,16 @@ prove_mutation "file_exists? does not check the path" "$INTERP" \
   'resolved = confined_path(node, name, path, true)' \
   'resolved = path' \
   -- check_confinement_still_matches || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+if prove_mutation_all "open errors print raw file paths" "$INTERP" \
+  'file_error_path(resolved)' \
+  'resolved' \
+  -- check_open_error_paths; then
+  echo "    decisive: raw open-error paths differ from hosted filename escaping"
+else
+  status=1
+fi
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 if [ "$HOST_OS" = windows ]; then

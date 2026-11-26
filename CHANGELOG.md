@@ -741,12 +741,17 @@
 
 ### Fixed
 
-- **Vector unions use the heap's eight-byte alignment.** A mixed union
-  represents its payload as wide integers, so treating only visible LLVM
-  vectors as eight-aligned left nil stores, closure captures and copies
+- **Vector unions use the heap's eight-byte alignment (#202).** A mixed
+  union represents its payload as wide integers, so treating only visible
+  LLVM vectors as eight-aligned left nil stores, closure captures and copies
   promising sixteen-byte alignment on eight-aligned heap addresses.
-  `UInt64x2` is also shareable across threads, including in immutable
-  records and `@[Share]` generic values.
+  Integers wider than 64 bits take the same cap, so an `Int128` field,
+  union member or closure capture is loaded and stored at `align 8` where
+  it was `align 16`. Measured on x86-64 Linux, AArch64 macOS and x86-64
+  Windows, the machine code of such a program is unchanged, and
+  `bench/uint64x2_exercise.sh` holds the `align 8`. `UInt64x2` is also
+  shareable across threads, including in immutable records and `@[Share]`
+  generic values.
 
 - **wasm32 large objects keep their arena header (#198).** A large
   object's three header words were written over its arena's link, size and

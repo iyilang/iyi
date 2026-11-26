@@ -22,3 +22,29 @@ class Decliner
     @blocked = @cell.pick(1) { 2 }
   end
 end
+
+# A union has no defs of its own and one parent, Value, so the hosted lookup of a call on a union asks
+# Value and never the members: both members define `label`, and nothing is guessed.
+class Tag
+  def initialize
+  end
+
+  def label : String
+    "tag"
+  end
+end
+
+class Mark
+  def initialize
+  end
+
+  def label : String
+    "mark"
+  end
+end
+
+class UnionReceiver
+  def initialize(source : Tag | Mark)
+    @text = source.label
+  end
+end

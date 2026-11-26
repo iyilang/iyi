@@ -5,11 +5,11 @@ import compiler/syntax/ast::{ASTNode, Arg, ArrayLiteral, Assign, BoolLiteral, Ch
 import compiler/syntax/token::{NumberKind}
 import compiler/syntax/visitor::{Visitor}
 import compiler/semantic/top_level::{ClassType, DeclaredIvar, GenericClassType, MetaTypeVar, ModuleType, NonGenericClassType, SemanticProgram, Type, TypeBody}
-import compiler/semantic/top_level::{InstanceVarInitializer, MetaclassType}
+import compiler/semantic/top_level::{InstanceVarInitializer, MetaclassType, UnionType}
 import compiler/syntax/ast::{VisibilityModifier}
 import compiler/semantic/type_nodes::{type_node_system}
 import compiler/semantic/method_lookup::{MethodLookup}
-import compiler/semantic/match::{CallSignature}
+import compiler/semantic/match::{CallSignature, Match}
 import compiler/semantic/restrictions::{ArgRestriction}
 import compiler/types/lookup::{LookupError}
 import compiler/types/types::{NamedArgumentType, TypeQueries}

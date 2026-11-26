@@ -944,6 +944,11 @@ prove_mutation "an argument whose type is not guessed is taken as Int32" "$MUT_I
       arg_types << found.as(Type)' \
   -- check_decl_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+prove_mutation "a call on a union is looked up on its members, not on Value" "$MUT_IVARS" \
+  '    if receiver.is_a?(UnionType)' \
+  '    if false' \
+  -- check_decl_fixtures_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "an explicit generic instance variable keeps the unbound generic" "$MUT_IVARS" \
   "  type_node_system(program)" \
   "  nil" \

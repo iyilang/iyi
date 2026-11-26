@@ -77,9 +77,6 @@ module BenchSelfhostSemanticDeclarationsExercise
     prog.search_path = search_path
     prog.project_root = project_root(node, entry)
     if mode == "entry"
-      # As the hosted prelude-first pass does (`top_level_semantic`): the type system is installed before
-      # the prelude, so an explicit instance variable keeps the type its declaration names.
-      type_node_system(prog)
       node = prog.normalizer.normalize(node)
       prelude = TopLevelVisitor.new(prog)
       prelude_file = prelude.import_file("iyi/prelude")

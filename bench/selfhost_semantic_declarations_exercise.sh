@@ -2,9 +2,9 @@
 # Burn-down gate for declaration parity between the iyi semantic port and the
 # hosted front end's top-level pass (specification S1b).
 #
-# Fixtures are analysed bare. Corpus files are analysed as a build analyses
-# them: the prelude first (entry mode). A file the entry analysis refuses is
-# analysed bare, and the table says so; a file both refuse is an ORACLE failure.
+# Fixtures are analysed bare. Corpus files are analysed bare, as their floors
+# were measured, and a file the bare analysis refuses (one that imports the
+# prelude's names) is analysed the way a build loads it, the prelude first.
 # The hosted pass (bench/selfhost_semantic_declarations_oracle.cr) and the iyi port
 # (bench/selfhost_semantic_declarations_exercise.iyi) both search IYI_PATH, set
 # below to this checkout's src/. Both print one text dump of the declarations the
@@ -346,12 +346,12 @@ measure() {
   corpus="$1"
   rel="$2"
   abs="$REPO_NATIVE/$2"
-  mode=entry
+  mode=bare
   note="-"
-  if ! IYI_DECLARATION_MODE=entry IYI_DECLARATION_FLAGS="$IYI_DECLARATION_FLAGS" "$ORACLE" "$abs" > "$WORK/o.txt" 2> "$WORK/o.err"; then
-    # The entry analysis refuses a file the prelude itself loads (macros, atomic): analysed bare instead.
-    note="bare: entry refused it: $(head -n 1 "$WORK/o.err" | tr '\t' ' ')"
-    mode=bare
+  if ! IYI_DECLARATION_MODE=bare IYI_DECLARATION_FLAGS="$IYI_DECLARATION_FLAGS" "$ORACLE" "$abs" > "$WORK/o.txt" 2> "$WORK/o.err"; then
+    # Bare refuses a file that uses the prelude's names: it is analysed with the prelude loaded first.
+    note="entry: bare refused it: $(head -n 1 "$WORK/o.err" | tr '\t' ' ')"
+    mode=entry
   fi
   if IYI_DECLARATION_MODE="$mode" IYI_DECLARATION_FLAGS="$IYI_DECLARATION_FLAGS" "$ORACLE" "$abs" > "$WORK/o.txt" 2> "$WORK/o.err"; then
     nodes=$(records "$WORK/o.txt" | wc -l | tr -d ' ')

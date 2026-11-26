@@ -701,10 +701,10 @@ check_branches() {
 }
 
 echo "== 4. compare MIR instruction counts and fallthrough edges"
+check_branches "$DRV" || fail "the branch inversion predicate failed"
 check_mir "$DRV" all || fail "the per-function MIR comparison failed"
 check_mir "$DRV" custom || fail "the custom MIR edge predicate failed"
 check_prealloc "$PRE_DRV" || fail "the pre-allocation MIR comparison failed"
-check_branches "$DRV" || fail "the branch inversion predicate failed"
 
 # A fixture result is a detected regression only after object emission, linking and signing succeeded.
 check_fixture_output() {
@@ -840,10 +840,6 @@ else
   host_limited "runtime mutation: remove a result copy without renaming its producer (macOS arm64)"
   host_limited "runtime mutation: leave an inverted condition unchanged (macOS arm64)"
 fi
-prove_clean_mutation "branch: drop an unconditional branch regardless of its target" \
-  src/compiler/native/mir_clean.iyi \
-  '        if tail.target == block.index + 1 # fallthrough-branch' \
-  '        if true # fallthrough-branch' branch
 prove_clean_mutation "branch: invert a conditional regardless of its target" \
   src/compiler/native/mir_clean.iyi \
   '          if is_role?(fn.isa, cond, Role::CondBranch) && cond.target == block.index + 1 && invert_branch(fn.isa, cond)' \
@@ -876,6 +872,10 @@ prove_clean_mutation "kind: Tbz and Tbnz inversions keep their opcode" \
       return true
     elsif inst.opcode == MOp::Tbnz.value.to_i32
       inst.opcode = inst.opcode' shape
+prove_clean_mutation "branch: drop an unconditional branch regardless of its target" \
+  src/compiler/native/mir_clean.iyi \
+  '        if tail.target == block.index + 1 # fallthrough-branch' \
+  '        if true # fallthrough-branch' branch
 
 [ ! -e "$NATIVE_SIGNATURE_FAILURE_FILE" ] || fail "a native executable failed signature verification"
 echo

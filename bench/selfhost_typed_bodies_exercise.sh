@@ -253,7 +253,7 @@ mutations=$((mutations + 1))
 prove_mutation 'a negated condition does not invert its filter' \
   "$REPO/src/compiler/semantic/main_visitor.iyi" \
   '      @type_filters = TypeFilters.invert(@type_filters)' \
-  '      @type_filters = @type_filters' \
+  '      @type_filters = TypeFilters.invert(TypeFilters.invert(@type_filters))' \
   -- check_body_mutation 'check_negation(' 'Var Nil' && caught=$((caught + 1)) || status=1
 mutations=$((mutations + 1))
 prove_mutation 'merging a non-nil union with Nil drops Nil' \

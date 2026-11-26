@@ -50,15 +50,16 @@ class BodyDiscovery < Iyi::Visitor
 
   def visit(node : Iyi::Call)
     node.target_defs.try &.each do |definition|
-      loc = definition.location
-      next unless loc && (name = loc.filename).is_a?(String) && File.expand_path(name) == @file
       next unless @seen.add?(definition)
-      args = definition.args.map { |arg| arg.type?.try { |type| body_type_label(type) } || "?" }.join(",")
-      signature = "#{loc.line_number}:#{loc.column_number} #{definition.name}(#{args})"
-      walk = BodyNodeWalk.new(@file, signature)
-      definition.body.accept(walk)
-      @instances += 1
-      @lines.concat(walk.lines)
+      loc = definition.location
+      if loc && (name = loc.filename).is_a?(String) && File.expand_path(name) == @file
+        args = definition.args.map { |arg| arg.type?.try { |type| body_type_label(type) } || "?" }.join(",")
+        signature = "#{loc.line_number}:#{loc.column_number} #{definition.name}(#{args})"
+        walk = BodyNodeWalk.new(@file, signature)
+        definition.body.accept(walk)
+        @instances += 1
+        @lines.concat(walk.lines)
+      end
       definition.body.accept(self)
     end
     true

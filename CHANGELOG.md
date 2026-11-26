@@ -840,7 +840,6 @@ entry "What the fixes below change in a program's source" has the details.
 
 ### Added
 
-
 - **Checksum database verification primitives.** The compiler source has
   Ed25519 signed-note verification, checkpoint and record parsing,
   height-8 Merkle tile proofs, and a persistent consistency-checked
@@ -848,7 +847,6 @@ entry "What the fixes below change in a program's source" has the details.
   settings, and cache writes replace an existing checkpoint through an
   exclusive same-directory file. Package downloads do not use them yet.
   Independent cryptographic review is required before anything depends on them.
-
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.
@@ -1580,7 +1578,6 @@ entry "What the fixes below change in a program's source" has the details.
   cannot be read runs everything.
 
 ### Fixed
-
 
 - **A regex literal a macro writes is `std/regex`'s, as it is outside
   one (#215).** Inside `{% if %}`, `{% for %}`, a `macro`'s body or a

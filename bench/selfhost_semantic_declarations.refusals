@@ -23,3 +23,7 @@ src/compiler/tools/ir.iyi the LibLLVM lib is not declared: the macro engine does
 # UsingDecl resolves the imported unit's public names and rejects ambiguity at use.
 samples/iyi/derive.iyi undefined constant Name: import std/derives::* does not bind Std::Derives::Name for Tag#@label
 samples/iyi/modules.iyi undefined constant Greet: import app/greeter::* does not bind App::Greeter::Greet for impl Greet for User
+# A file analysed bare has no prelude. The port follows this file's import of compiler/tools/formatter and resolves
+# that unit's `Set`, a prelude type, while it declares the file; the hosted pass declares the file bare. With the
+# prelude loaded (entry mode) both sides print the same 3 declarations.
+src/compiler/tools/format.iyi undefined constant Set: analysed bare, the port resolves a prelude type named by the imported compiler/tools/formatter

@@ -1,5 +1,5 @@
 # typed parity floors: <repo-relative file> <matched nodes>, and <repo-relative file>@<host> <matched nodes>
-# for a file a host measures differently (its platform arms are other code). A count may only rise. Raise with: TYPED_PARITY_RAISE=1 bash bench/selfhost_typed_parity_exercise.sh
+# for a file a host measures differently (its platform arms are other code). A count may only rise; a row above what its file now holds, every node matched, is written down to the file and noted (file shrank). Raise with: TYPED_PARITY_RAISE=1 bash bench/selfhost_typed_parity_exercise.sh
 samples/iyi/basics.iyi 327
 samples/iyi/calc.iyi 30
 samples/iyi/collections.iyi 511
@@ -51,19 +51,22 @@ src/compiler/ir/intrinsics.iyi 27
 src/compiler/ir/layout.iyi 28
 src/compiler/ir/module.iyi 45
 src/compiler/ir/opt/analysis.iyi 85
+src/compiler/ir/opt/barrier.iyi 103
 src/compiler/ir/opt/callgraph.iyi 24
 src/compiler/ir/opt/cfg_simplify.iyi 34
 src/compiler/ir/opt/cse.iyi 48
 src/compiler/ir/opt/dce.iyi 14
 src/compiler/ir/opt/deadfn.iyi 15
 src/compiler/ir/opt/edit.iyi 42
-src/compiler/ir/opt/effects.iyi 18
+src/compiler/ir/opt/effects.iyi 25
+src/compiler/ir/opt/escape.iyi 133
 src/compiler/ir/opt/fold.iyi 22
-src/compiler/ir/opt/inline.iyi 45
+# file shrank: the file holds 44 nodes and every one matches; this row was 45 while the file held more
+src/compiler/ir/opt/inline.iyi 44
 src/compiler/ir/opt/layout.iyi 30
 src/compiler/ir/opt/licm.iyi 28
 src/compiler/ir/opt/mem2reg.iyi 46
-src/compiler/ir/opt/pipeline.iyi 53
+src/compiler/ir/opt/pipeline.iyi 58
 src/compiler/ir/opt/prove.iyi 75
 src/compiler/ir/opt/simplify.iyi 54
 src/compiler/ir/opt/sroa.iyi 64
@@ -116,9 +119,9 @@ src/compiler/macros/answers.iyi 16
 src/compiler/macros/ast.iyi 37
 src/compiler/macros/confinement.iyi 31
 src/compiler/macros/engine.iyi 51
-src/compiler/macros/interpreter.iyi 81
+src/compiler/macros/interpreter.iyi 84
 src/compiler/macros/macro_parser.iyi 34
-src/compiler/macros/methods.iyi 42
+src/compiler/macros/methods.iyi 45
 src/compiler/macros/site_scan.iyi 46
 src/compiler/macros/target_flags.iyi 14
 src/compiler/macros/type_facts.iyi 29
@@ -128,7 +131,7 @@ src/compiler/native/aarch64/encode.iyi 65
 src/compiler/native/aarch64/fold.iyi 11
 src/compiler/native/aarch64/isel.iyi 199
 src/compiler/native/aarch64/opcodes.iyi 8
-src/compiler/native/aarch64/regs.iyi 34
+src/compiler/native/aarch64/regs.iyi 35
 src/compiler/native/amd64/abi.iyi 35
 src/compiler/native/amd64/encode.iyi 128
 src/compiler/native/amd64/regs.iyi 39
@@ -152,10 +155,10 @@ src/compiler/native/obj/elf.iyi 144
 src/compiler/native/obj/macho.iyi 179
 src/compiler/native/obj/object.iyi 106
 src/compiler/native/regalloc.iyi 14
-src/compiler/native/regalloc_linear.iyi 73
+src/compiler/native/regalloc_linear.iyi 85
 src/compiler/native/rt/builtins_text.iyi 4
 src/compiler/native/rt/start_wasm32_text.iyi 4
-src/compiler/native/target.iyi 43
+src/compiler/native/target.iyi 47
 src/compiler/native/thread_locals.iyi 12
 src/compiler/native/wasm/codegen.iyi 86
 src/compiler/native/wasm/leb.iyi 10
@@ -193,7 +196,7 @@ src/compiler/semantic/typed.iyi 4
 src/compiler/stage1.iyi 8
 src/compiler/syntax/ast.iyi 1268
 src/compiler/syntax/lexer.iyi 174
-src/compiler/syntax/parser.iyi 332
+src/compiler/syntax/parser.iyi 333
 src/compiler/syntax/token.iyi 77
 src/compiler/syntax/transformer.iyi 116
 src/compiler/syntax/visitor.iyi 337
@@ -201,18 +204,18 @@ src/compiler/tools/bind.iyi 76
 src/compiler/tools/compile.iyi 15
 src/compiler/tools/compile_native.iyi 44
 src/compiler/tools/format.iyi 8
-src/compiler/tools/formatter.iyi 192
+src/compiler/tools/formatter.iyi 229
 src/compiler/tools/ir.iyi 66
-src/compiler/tools/ir_core.iyi 44
-src/compiler/tools/ir_opt.iyi 27
+src/compiler/tools/ir_core.iyi 47
+src/compiler/tools/ir_opt.iyi 29
 src/compiler/tools/link_elf.iyi 32
 src/compiler/tools/link_macho.iyi 37
 src/compiler/tools/mod.iyi 8
-src/compiler/tools/native_amd64.iyi 37
+src/compiler/tools/native_amd64.iyi 39
 src/compiler/tools/native_asm.iyi 60
 src/compiler/tools/native_cg.iyi 49
 src/compiler/tools/obj_elf.iyi 21
-src/compiler/tools/obj_macho.iyi 21
+src/compiler/tools/obj_macho.iyi 23
 src/compiler/tools/parse.iyi 10
 src/compiler/tools/typed_dump.iyi 39
 src/compiler/types.iyi 8

@@ -1,5 +1,5 @@
 # semantic declaration floors: <repo-relative file> <agreeing declarations>, and <repo-relative file>@<host>
-# <agreeing declarations> for a file a host measures differently (its platform arms are other code). A count may only rise. Raise with: SEMDECL_RAISE=1 bash bench/selfhost_semantic_declarations_exercise.sh
+# <agreeing declarations> for a file a host measures differently (its platform arms are other code). A count may only rise; a row above what its file now holds, every declaration agreeing, is written down to the file and noted (file shrank). Raise with: SEMDECL_RAISE=1 bash bench/selfhost_semantic_declarations_exercise.sh
 <initial> 75
 samples/iyi/basics.iyi 2
 samples/iyi/calc.iyi 4
@@ -52,19 +52,22 @@ src/compiler/ir/intrinsics.iyi 76
 src/compiler/ir/layout.iyi 24
 src/compiler/ir/module.iyi 33
 src/compiler/ir/opt/analysis.iyi 111
+src/compiler/ir/opt/barrier.iyi 96
 src/compiler/ir/opt/callgraph.iyi 20
 src/compiler/ir/opt/cfg_simplify.iyi 33
 src/compiler/ir/opt/cse.iyi 48
 src/compiler/ir/opt/dce.iyi 2
 src/compiler/ir/opt/deadfn.iyi 3
 src/compiler/ir/opt/edit.iyi 36
-src/compiler/ir/opt/effects.iyi 11
+src/compiler/ir/opt/effects.iyi 16
+src/compiler/ir/opt/escape.iyi 141
 src/compiler/ir/opt/fold.iyi 11
-src/compiler/ir/opt/inline.iyi 26
+# file shrank: the file holds 25 declarations and every one agrees; this row was 26 while the file held more
+src/compiler/ir/opt/inline.iyi 25
 src/compiler/ir/opt/layout.iyi 27
 src/compiler/ir/opt/licm.iyi 27
 src/compiler/ir/opt/mem2reg.iyi 30
-src/compiler/ir/opt/pipeline.iyi 37
+src/compiler/ir/opt/pipeline.iyi 41
 src/compiler/ir/opt/prove.iyi 74
 src/compiler/ir/opt/simplify.iyi 43
 src/compiler/ir/opt/sroa.iyi 45
@@ -117,7 +120,7 @@ src/compiler/macros/answers.iyi 9
 src/compiler/macros/ast.iyi 33
 src/compiler/macros/confinement.iyi 27
 src/compiler/macros/engine.iyi 31
-src/compiler/macros/interpreter.iyi 64
+src/compiler/macros/interpreter.iyi 65
 src/compiler/macros/macro_parser.iyi 23
 src/compiler/macros/methods.iyi 24
 src/compiler/macros/site_scan.iyi 44
@@ -129,7 +132,7 @@ src/compiler/native/aarch64/encode.iyi 55
 src/compiler/native/aarch64/fold.iyi 7
 src/compiler/native/aarch64/isel.iyi 179
 src/compiler/native/aarch64/opcodes.iyi 5
-src/compiler/native/aarch64/regs.iyi 35
+src/compiler/native/aarch64/regs.iyi 36
 src/compiler/native/amd64/abi.iyi 28
 src/compiler/native/amd64/encode.iyi 126
 src/compiler/native/amd64/regs.iyi 40
@@ -153,10 +156,10 @@ src/compiler/native/obj/elf.iyi 138
 src/compiler/native/obj/macho.iyi 174
 src/compiler/native/obj/object.iyi 180
 src/compiler/native/regalloc.iyi 4
-src/compiler/native/regalloc_linear.iyi 66
+src/compiler/native/regalloc_linear.iyi 78
 src/compiler/native/rt/builtins_text.iyi 5
 src/compiler/native/rt/start_wasm32_text.iyi 5
-src/compiler/native/target.iyi 37
+src/compiler/native/target.iyi 41
 src/compiler/native/thread_locals.iyi 2
 src/compiler/native/wasm/codegen.iyi 0
 src/compiler/native/wasm/leb.iyi 15
@@ -194,7 +197,7 @@ src/compiler/semantic/typed.iyi 197
 src/compiler/stage1.iyi 4
 src/compiler/syntax/ast.iyi 1293
 src/compiler/syntax/lexer.iyi 130
-src/compiler/syntax/parser.iyi 322
+src/compiler/syntax/parser.iyi 323
 src/compiler/syntax/token.iyi 262
 src/compiler/syntax/transformer.iyi 111
 src/compiler/syntax/visitor.iyi 334
@@ -202,9 +205,9 @@ src/compiler/tools/bind.iyi 102
 src/compiler/tools/compile.iyi 0
 src/compiler/tools/compile_native.iyi 0
 src/compiler/tools/format.iyi 0
-src/compiler/tools/formatter.iyi 0
+src/compiler/tools/formatter.iyi 229
 src/compiler/tools/ir.iyi 0
-src/compiler/tools/ir_core.iyi 18
+src/compiler/tools/ir_core.iyi 21
 src/compiler/tools/ir_opt.iyi 13
 src/compiler/tools/link_elf.iyi 11
 src/compiler/tools/link_macho.iyi 16
@@ -213,7 +216,7 @@ src/compiler/tools/native_amd64.iyi 28
 src/compiler/tools/native_asm.iyi 44
 src/compiler/tools/native_cg.iyi 26
 src/compiler/tools/obj_elf.iyi 10
-src/compiler/tools/obj_macho.iyi 10
+src/compiler/tools/obj_macho.iyi 12
 src/compiler/tools/parse.iyi 5
 src/compiler/tools/typed_dump.iyi 25
 src/compiler/types.iyi 1

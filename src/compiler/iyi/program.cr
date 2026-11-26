@@ -562,7 +562,16 @@ module Iyi
     # `.iyi` file in it may reach a shard the way a `.cr` file does. The rules
     # that make a module a module are unaffected: they are the language's, and
     # the prelude is a library.
-    property? iyi_prelude = true
+    getter? iyi_prelude = true
+
+    def iyi_prelude=(enabled : Bool)
+      @iyi_prelude = enabled
+      if enabled
+        types["UInt64x2"] ||= UInt64x2Type.new self, self, "UInt64x2", @value.not_nil!, 16
+      elsif vector = types.delete("UInt64x2")
+        @value.not_nil!.subclasses.delete(vector)
+      end
+    end
 
     # iyi: true when building with `--crystal`, targeting Crystal's standard library and ABI.
     property? crystal_library = false

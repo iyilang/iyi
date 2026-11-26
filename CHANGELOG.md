@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Wasm SIMD128 speeds up AES-GCM.** `UInt64x2` processes two independent
+  64-bit lanes, and `--mattr +simd128` uses them for eight AES counter
+  blocks at a time. On Apple M5 Max, opening 16 and 64 MiB in headless
+  Chrome went from 204 and 203 MB/s scalar to 257 and 266 MB/s SIMD;
+  WebCrypto measured 3,290 and 3,424 MB/s. SPEC.md III.12.1 has the
+  spreads and the slower GHASH experiment. The predefined `UInt64x2`
+  primitive is available on wasm32; an external ABI cannot accept it.
+
 - **iyi is a self-hosting project.** The owner accepted Jason Waldrip's
   proposal (#172) on 2026-11-24, reversing Appendix B #10: the compiler is
   ported to iyi and gets its own back end and linker, so that iyi is built
@@ -702,6 +710,13 @@
 
 ### Fixed
 
+- **Vector unions use the heap's eight-byte alignment.** A mixed union
+  represents its payload as wide integers, so treating only visible LLVM
+  vectors as eight-aligned left nil stores, closure captures and copies
+  promising sixteen-byte alignment on eight-aligned heap addresses.
+  `UInt64x2` is also shareable across threads, including in immutable
+  records and `@[Share]` generic values.
+
 - **wasm32 large objects keep their arena header (#198).** A large
   object's three header words were written over its arena's link, size and
   page count, so a sweep could follow a payload size as a pointer, and a
@@ -814,6 +829,7 @@ entry "What the fixes below change in a program's source" has the details.
 
 ### Added
 
+
 - **Checksum database verification primitives.** The compiler source has
   Ed25519 signed-note verification, checkpoint and record parsing,
   height-8 Merkle tile proofs, and a persistent consistency-checked
@@ -821,6 +837,7 @@ entry "What the fixes below change in a program's source" has the details.
   settings, and cache writes replace an existing checkpoint through an
   exclusive same-directory file. Package downloads do not use them yet.
   Independent cryptographic review is required before anything depends on them.
+
 - **`iyi doc --json [DIR]` prints a package's exported APIs as data.**
   The package path and compiler identity accompany its modules, ordered by
   path, each carrying the same API and doc comments as `iyi mod dump --json`.
@@ -1552,6 +1569,7 @@ entry "What the fixes below change in a program's source" has the details.
   cannot be read runs everything.
 
 ### Fixed
+
 
 - **A regex literal a macro writes is `std/regex`'s, as it is outside
   one (#215).** Inside `{% if %}`, `{% for %}`, a `macro`'s body or a
@@ -30238,7 +30256,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 37,056-line library and nothing else. Every other
+  written against iyi's own 37,121-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

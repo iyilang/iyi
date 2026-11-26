@@ -169,8 +169,21 @@ module Iyi
     end
 
     delegate ptr2int, int2ptr, and, or, not, bit_cast,
-      trunc, load, store, load_volatile, store_volatile, br, insert_block, position_at_end,
+      trunc, load, load_volatile, store_volatile, br, insert_block, position_at_end,
       cond, phi, extract_value, switch, to: builder
+
+    def load(type : LLVM::Type, pointer : LLVM::Value, name = "")
+      instruction = builder.load(type, pointer, name)
+      instruction.alignment = 8 if llvm_typer.needs_heap_align8?(type) && llvm_typer.align_of(type) > 8
+      instruction
+    end
+
+    def store(value, pointer)
+      instruction = builder.store(value, pointer)
+      type = value.type
+      instruction.alignment = 8 if llvm_typer.needs_heap_align8?(type) && llvm_typer.align_of(type) > 8
+      instruction
+    end
 
     def ret
       builder.ret

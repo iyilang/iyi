@@ -1,6 +1,6 @@
 import compiler/syntax/parser::{Parser}
 import compiler/syntax/ast::{ASTNode, Def, Expressions, ModuleHeader, Path, Primitive}
-import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type, ModuleType, ClassType, LibFun, LibType, GenericClassType, EnumType, AnnotationType, dump_program_declarations, dump_type, dir_of, normalize_path, declared_in?}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type, ModuleType, ClassType, LibFun, LibType, GenericClassType, EnumType, AnnotationType, DeclaredIvar, UnresolvedType, dump_program_declarations, dump_type, dir_of, normalize_path, declared_in?}
 import compiler/semantic/instance_vars::{declare_guessed_instance_vars}
 import compiler/semantic/type_nodes::{type_node_system}
 import compiler/types/types::{GenericClassInstanceType, VirtualType}
@@ -329,6 +329,19 @@ elsif Program.args[0] == "--classvar-generic"
   raise "pointer lost its argument: #{pointer}" unless pointer == "Pointer(Int32)"
   raise "nilable pointer lost its argument: #{maybe}" unless maybe.includes?("Pointer(Int32)") && maybe.includes?("Nil")
   print "class variable generic arguments retained\n"
+elsif Program.args[0] == "--imported-classvar"
+  prog, _ = BenchSelfhostSemanticDeclarationsExercise.load_program(Program.args[1])
+  record = prog.declared_cvars.find { |dc| dc.owner.name == "Builds" && dc.name == "@@count" }
+  raise "imported class variable was not recorded" if record.nil?
+  cv = record.as(DeclaredIvar)
+  raise "missing type was not deferred" unless cv.owner.class_vars[cv.name].type.is_a?(UnresolvedType)
+  late = TopLevelVisitor.new(prog)
+  Parser.new("struct Atomic(T)\nend\n", "<late-type>").parse.accept(late)
+  late.finish
+  type_node_system(prog)
+  resolved = cv.owner.class_vars[cv.name].type.full_name
+  raise "imported class variable did not resolve: #{resolved}" unless resolved == "Atomic(UInt64)"
+  print "imported class variable resolved after its type was declared\n"
 elsif Program.args[0] == "--primitive-annotations"
   prog = BenchSelfhostSemanticDeclarationsExercise.load_whole(Program.args[1])
   arithmetic = prog.types["Arithmetic"].as(ModuleType)

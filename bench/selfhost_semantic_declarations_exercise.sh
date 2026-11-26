@@ -128,6 +128,32 @@ for fixture in "$REPO"/bench/fixtures/semdecl_*.iyi "$REPO"/bench/fixtures/semde
 done
 echo "  Parity summary: $((fixture_count - fixture_bad))/$fixture_count fixtures identical ($total_matched declarations compared)"
 
+echo "== 2a. An unresolved class-variable type in the entry still refuses"
+if "$ORACLE" "$REPO_NATIVE/src/std/lazy.iyi" > "$WORK/lazy_o.txt" 2> "$WORK/lazy_oe.txt"; then
+  echo "  FAIL: the oracle accepted bare std/lazy.iyi"; status=1
+elif ! grep -Fq 'undefined constant Atomic' "$WORK/lazy_oe.txt"; then
+  echo "  FAIL: the oracle refused bare std/lazy.iyi for another reason"; status=1
+elif "$PORT" "$REPO_NATIVE/src/std/lazy.iyi" > "$WORK/lazy_p.txt" 2> "$WORK/lazy_pe.txt"; then
+  echo "  FAIL: the port accepted bare std/lazy.iyi"; status=1
+elif ! grep -Fq 'undefined constant Atomic' "$WORK/lazy_pe.txt"; then
+  echo "  FAIL: the port refused bare std/lazy.iyi for another reason"; status=1
+else
+  echo "  bare std/lazy.iyi: both refuse undefined constant Atomic"
+fi
+imported_cv_ok=0
+if ! "$PORT" --imported-classvar "$REPO_NATIVE/bench/fixtures/semdecl_imported_class_var.iyi" > "$WORK/imported_cv.txt" 2>&1; then
+  echo "  FAIL: deferred imported class-variable type did not resolve"
+  cat "$WORK/imported_cv.txt"
+  status=1
+elif grep -qx 'imported class variable resolved after its type was declared' "$WORK/imported_cv.txt"; then
+  imported_cv_ok=1
+  echo "  imported class variable resolves once its type is declared"
+else
+  echo "  FAIL: imported class-variable probe gave unexpected output"
+  cat "$WORK/imported_cv.txt"
+  status=1
+fi
+
 echo "== 2b. Lib fun records once the type system is installed: generic argument types resolved"
 echo "  (a port-side pin: the oracle has no dump of lib fun types, so the expected lines are the types the fixture declares, written by hand)"
 lib_types_expected="$REPO/bench/selfhost_semantic_declarations_lib_types.expected"
@@ -686,6 +712,20 @@ check_reresolve_diverge() {
   return 0
 }
 
+check_imported_classvar_diverge() {
+  local probe="$WORK/mut_imported_cv$EXE" rc
+  "$IYI" build -o "$(native_path "$probe")" "$REPO_NATIVE/bench/selfhost_semantic_declarations_exercise.iyi" > "$WORK/mut_build.log" 2>&1 || { echo "INVALID: declaration driver did not build"; cat "$WORK/mut_build.log"; return 2; }
+  "$probe" --imported-classvar "$REPO_NATIVE/bench/fixtures/semdecl_imported_class_var.iyi" > "$WORK/mut_imported_cv.out" 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -eq 1 ] && grep -Fq 'imported class variable did not resolve:' "$WORK/mut_imported_cv.out"; then
+    return 1
+  fi
+  echo "INVALID: imported class-variable probe failed for another reason"
+  cat "$WORK/mut_imported_cv.out"
+  return 2
+}
+
 echo
 echo "== 7. Mutation proofs: patches to the port's declaration pass the fixtures must catch"
 MUT_SEM="$REPO/src/compiler/semantic/top_level.iyi"
@@ -780,6 +820,18 @@ prove_mutation_all "a file's imports are never consulted when a name is looked u
   "      t = nil" \
   -- check_decl_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+prove_mutation "an imported class-variable type is resolved before its importer is declared" "$MUT_SEM" \
+  "      decl_type = if @imported" \
+  "      decl_type = if false" \
+  -- check_decl_fixtures_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+if [ "$imported_cv_ok" -eq 1 ]; then
+  prove_mutation "a deferred imported class-variable type is never re-resolved" "$MUT_SEM" \
+    '    @program.resolve_deferred_class_vars' \
+    '    nil' \
+    -- check_imported_classvar_diverge || status=1
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+fi
 prove_mutation "a location-less builtin keeps its name over an import of that name" "$MUT_SEM" \
   "if found.locations.nil?" \
   "if false" \

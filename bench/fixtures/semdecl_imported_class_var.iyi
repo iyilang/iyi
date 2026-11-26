@@ -1,0 +1,9 @@
+module semdecl_imported_class_var
+
+import std/lazy::{Lazy}
+
+pub struct Reader
+  def self.value(value : Lazy(Int32)) : Nil
+    nil
+  end
+end

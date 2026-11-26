@@ -1625,6 +1625,7 @@ pub class SemanticProgram < NonGenericModuleType
   getter declared_ivars : Array(DeclaredIvar)
   getter pending_ivars : Array(PendingIvar) = [] of PendingIvar
   getter declared_cvars : Array(DeclaredIvar)
+  property deferred_class_vars : Bool = false
   getter instance_var_initializers : Array(InstanceVarInitializer)
   getter pending_generic_superclasses : Array(PendingGenericSuperclass)
   getter pending_generic_includes : Array(PendingGenericInclude)
@@ -2007,6 +2008,27 @@ pub class SemanticProgram < NonGenericModuleType
       end
     end
     @current_imports = saved
+    nil
+  end
+  # A type system can already exist when an imported restriction is recorded.
+  # Retry those restrictions when the declaring visitor finishes a later file.
+  def resolve_deferred_class_vars : Nil
+    return if !@deferred_class_vars || @merge_hook.nil?
+    saved = @current_imports
+    remaining = false
+    @declared_cvars.each do |dc|
+      if mv = dc.owner.class_vars[dc.name]?
+        next unless mv.var_type.is_a?(UnresolvedType)
+        @current_imports = dc.imports
+        if t = declared_ivar_type?(dc.restriction, dc.owner, true)
+          mv.var_type = t
+        else
+          remaining = true
+        end
+      end
+    end
+    @current_imports = saved
+    @deferred_class_vars = remaining
     nil
   end
 
@@ -2850,6 +2872,7 @@ pub class TopLevelVisitor < Visitor
     end
     @program.current_imports = saved
     @pending_ivars.clear
+    @program.resolve_deferred_class_vars
   end
 
   # A file that `load_file` reads hands its pending instance variables to the file that
@@ -2865,7 +2888,7 @@ pub class TopLevelVisitor < Visitor
     taken
   end
 
-  def initialize(@program : SemanticProgram, @file : String? = nil)
+  def initialize(@program : SemanticProgram, @file : String? = nil, @imported : Bool = false)
     @current_type = @program
     @exp_nest = 0
     @pending_ivars = [] of PendingIvar
@@ -3017,7 +3040,7 @@ pub class TopLevelVisitor < Visitor
     @program.loaded_files.add(file)
     # The pipeline holds the file's normalised tree when it declared the units. Reading that tree keeps one tree per file.
     nodes = @program.unit_tree_or_parse(file)
-    inner = TopLevelVisitor.new(@program, file)
+    inner = TopLevelVisitor.new(@program, file, true)
     saved = @program.current_imports
     saved_defs = @program.current_import_defs
     @program.current_imports = Hash(String, Type).new
@@ -4063,7 +4086,14 @@ pub class TopLevelVisitor < Visitor
       if @current_type.is_a?(SemanticProgram)
         raise("can't use class variables at the top level")
       end
-      decl_type = @program.lookup_type_node(node.declared_type, @current_type)
+      # The hosted declaration pass does not resolve an imported file's class-variable
+      # restriction until it is needed. Keep the written type for re-resolution rather
+      # than refusing a bare entry that only imports the file.
+      decl_type = if @imported
+                    @program.lookup_type_node?(node.declared_type, @current_type) || UnresolvedType.new(@program, node.declared_type.to_s)
+                  else
+                    @program.lookup_type_node(node.declared_type, @current_type)
+                  end
       cvar_name = node.var.as(ClassVar).name
       mv = MetaTypeVar.new(cvar_name, decl_type, node.value)
       mv.owner = @current_type
@@ -4072,6 +4102,7 @@ pub class TopLevelVisitor < Visitor
       end
       @current_type.class_vars[cvar_name] = mv
       @program.declared_cvars << DeclaredIvar.new(@current_type, cvar_name, node.declared_type, node.value, true, @program.current_imports)
+      @program.deferred_class_vars = true if decl_type.is_a?(UnresolvedType)
     end
     false
   end

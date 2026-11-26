@@ -878,7 +878,7 @@ pub class Parser < Lexer
     old_pos = @pos
     old_line = @line_number
     old_column = @column_number
-    old_token = Token.new
+    old_token = @temp_token
     old_token.copy_from(@token)
     next_token_skip_space_or_newline
     is_period = @token.type == TokenKind::OP_PERIOD

@@ -14,14 +14,14 @@ pub class CommandExecutor
   PHASE_STACK_BYTES = 1073741824_u64
   TARGET            = "aarch64-apple-darwin"
 
-  def self.execute(result : CommandResult) : Int32
+  def self.execute(result : CommandResult, config_path : String? = nil) : Int32
     command = result.selected_command
     if command == "run" && result.subcommand_options.has_key?("sandbox")
       return fail("the self-hosted compiler does not run `run --sandbox` yet")
     end
     if opts = result.compiler_options
-      return build(opts) if command == "build"
-      return run(opts) if command == "run"
+      return build(opts, config_path) if command == "build"
+      return run(opts, config_path) if command == "run"
     end
     fail("the self-hosted compiler does not run `#{command}` yet")
   end
@@ -97,30 +97,30 @@ pub class CommandExecutor
     nil
   end
 
-  def self.build(opts : CompilerOptions) : Int32
+  def self.build(opts : CompilerOptions, config_path : String? = nil) : Int32
     if reason = unsupported(opts)
       return fail(reason)
     end
-    compile(opts, opts.output_filename.as(String))
+    compile(opts, opts.output_filename.as(String), config_path)
   end
 
   def self.remove_temporary(path : String) : Nil
     File.delete(path) if File.exists?(path)
   end
 
-  def self.run(opts : CompilerOptions) : Int32
+  def self.run(opts : CompilerOptions, config_path : String? = nil) : Int32
     if reason = unsupported(opts)
       return fail(reason)
     end
     if opts.specified_output
-      return compile(opts, opts.output_filename.as(String))
+      return compile(opts, opts.output_filename.as(String), config_path)
     end
     temp = File.join(Dir.tempdir, "iyi-run-#{File.basename(opts.output_filename.as(String))}-#{Process.pid}")
     if File.exists?(temp) || File.symlink?(temp)
       return fail("temporary output already exists: #{temp}")
     end
     defer remove_temporary(temp)
-    status = compile(opts, temp)
+    status = compile(opts, temp, config_path)
     unless status == 0
       remove_temporary(temp)
       return status
@@ -141,12 +141,12 @@ pub class CommandExecutor
     fail("the program was cancelled")
   end
 
-  def self.compile(opts : CompilerOptions, output : String) : Int32
+  def self.compile(opts : CompilerOptions, output : String, config_path : String? = nil) : Int32
     IyiWorkers.count = opts.n_threads
     executable = Process.executable
     return fail("cannot resolve the compiler executable's path for the prelude") unless executable
     origin = File.dirname(File.real_path(executable))
-    loader = Loader.new(IyiPath.new(nil, origin))
+    loader = Loader.new(IyiPath.new(nil, origin, config_path))
     loader.load_prelude = opts.prelude == "iyi/prelude"
     config = CompilerConfig.new(output, false, nil, false, TARGET, false, false, false, true)
     compiler = Compiler.new(config, loader, NativeBackend.new)

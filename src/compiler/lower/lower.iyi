@@ -58,7 +58,7 @@ import compiler/lower/proc::{lower_proc_literal}
 import compiler/lower/closure::{allocate_closure}
 import compiler/semantic/closures::{ClosureFacts}
 import compiler/semantic/spawn_placement::{SpawnAnalysis, SpawnTarget, spawn_call?}
-import compiler/lower/cast::{assign, downcast, match_type_id, mixed_union_type?, pointer_of_value, to_lhs, to_rhs, type_id_of_value, type_id_value, union_temp, upcast}
+import compiler/lower/cast::{assign, clear_value_holes, downcast, match_type_id, mixed_union_type?, pointer_of_value, to_lhs, to_rhs, type_id_of_value, type_id_value, union_temp, upcast}
 import compiler/semantic/main_visitor::{MainVisitor, node_class_name}
 import compiler/semantic/top_level::{Type, NilType, MetaclassType, UnionType, TopLevelVisitor}
 import compiler/semantic/top_level::{LibType}
@@ -1168,6 +1168,7 @@ pub def codegen_assign(low : Lowerer, node : Assign) : Nil
       stored = load_aligned(low, low.typer.llvm_type(vt), v)
     end
     store_aligned(low, stored, v_var.pointer)
+    clear_value_holes(low, v_var.pointer, vt)
   end
   low.last = v
 end

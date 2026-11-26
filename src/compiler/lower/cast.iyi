@@ -76,6 +76,97 @@ pub def union_value_ptr(low : Lowerer, struct_type : IrType, union_pointer : Val
   low.builder.inbounds_gep(struct_type, union_pointer, [zero, index] of Value)
 end
 
+# Hosted `iyi_clear_holes`: clear naturally aligned chunks, using memset for
+# a range larger than four words. Run this after the value has been stored:
+# the source may itself point into the destination.
+def clear_hole_range(low : Lowerer, pointer : Value, from : Int64, to : Int64, alignment : Int32) : Nil
+  return if from >= to
+  if to - from > 32_i64
+    at_alignment = 1_i32
+    while at_alignment < alignment && from % (at_alignment * 2) == 0
+      at_alignment *= 2
+    end
+    offset = low.builder.const_int(low.module.types.int64, from)
+    at = low.builder.inbounds_gep(low.module.types.int8, pointer, [offset] of Value)
+    zero = low.builder.const_int(low.module.types.int8, 0_i64)
+    count = low.builder.const_int(low.typer.size_t, to - from)
+    volatile = low.builder.const_int(low.module.types.int1, 0_i64)
+    attr = Attribute.new("align", at_alignment.to_u64, nil, nil)
+    attrs = [[attr] of Attribute, [] of Attribute, [] of Attribute, [] of Attribute] of Array(Attribute)
+    low.builder.intrinsic_with(IntrinsicId::Memset, [low.module.types.ptr(0), low.typer.size_t] of IrType, [at, zero, count, volatile] of Value, attrs)
+    return
+  end
+  at = from
+  while at < to
+    size = 8_i64
+    while size > alignment || at % size != 0 || at + size > to
+      size //= 2
+    end
+    offset = low.builder.const_int(low.module.types.int64, at)
+    dest = low.builder.inbounds_gep(low.module.types.int8, pointer, [offset] of Value)
+    zero = low.builder.const_int(low.module.types.int((size * 8).to_i32), 0_i64)
+    inst = store_aligned(low, zero, dest)
+    inst.alignment = size.to_i32
+    at += size
+  end
+end
+
+# The type id occupies the first four bytes; the payload begins at the
+# target's actual field offset. The unused bytes must not retain a pointer.
+def clear_union_holes(low : Lowerer, struct_type : IrType, pointer : Value, payload : Int64) : Nil
+  value_offset = low.typer.offset_of(struct_type, 1)
+  size = low.typer.size_of(struct_type)
+  alignment = low.typer.align_of(struct_type)
+  if payload == 0
+    clear_hole_range(low, pointer, 4_i64, size, alignment)
+  else
+    clear_hole_range(low, pointer, 4_i64, value_offset, alignment)
+    clear_hole_range(low, pointer, value_offset + payload, size, alignment)
+  end
+end
+
+# Visit written ranges in address order, clearing gaps as they are found.
+# Scalar arrays with no stride padding form one range.
+def clear_aggregate_holes(low : Lowerer, pointer : Value, ir : IrType, base : Int64, next_byte : Int64, alignment : Int32) : Int64
+  if ir.struct?
+    ir.struct_element_types.each_with_index do |field, index|
+      next_byte = clear_aggregate_holes(low, pointer, field, base + low.typer.offset_of(ir, index), next_byte, alignment)
+    end
+    return next_byte
+  end
+  if ir.array?
+    element = ir.element_type
+    stride = low.module.layout.alloc_size(element)
+    if !element.struct? && !element.array? && stride == low.typer.size_of(element)
+      finish = base + stride * ir.count
+      return next_byte if finish <= base
+      clear_hole_range(low, pointer, next_byte, base, alignment) if base > next_byte
+      return finish > next_byte ? finish : next_byte
+    end
+    i = 0_i64
+    while i < ir.count
+      next_byte = clear_aggregate_holes(low, pointer, element, base + i * stride, next_byte, alignment)
+      i += 1
+    end
+    return next_byte
+  end
+  finish = base + low.typer.size_of(ir)
+  return next_byte if finish <= base
+  clear_hole_range(low, pointer, next_byte, base, alignment) if base > next_byte
+  finish > next_byte ? finish : next_byte
+end
+
+# The hosted `store_value` clears holes in a passed-by-value aggregate after
+# its store. C aggregates are excluded because their padding can overlap fields.
+pub def clear_value_holes(low : Lowerer, pointer : Value, type : Type) : Nil
+  return unless passed_by_value?(type)
+  return if TypeQueries.extern?(type) || TypeQueries.extern_union?(type)
+  ir = low.typer.llvm_type(type)
+  alignment = low.typer.align_of(ir)
+  next_byte = clear_aggregate_holes(low, pointer, ir, 0_i64, 0_i64, alignment)
+  clear_hole_range(low, pointer, next_byte, low.typer.size_of(ir), alignment)
+end
+
 # The hosted `to_lhs`: a value of a type that is not passed by value is read from its pointer;
 # a type passed by value (a tuple, a mixed union) is already its aggregate.
 pub def to_lhs(low : Lowerer, value : Value, t : Type) : Value
@@ -185,6 +276,7 @@ def assign_unbarriered(low : Lowerer, pointer : Value, target : Type, value_type
     return if target.nil_type?
     stored = value.type.pointer? ? to_rhs(low, value, target) : value
     store_aligned(low, stored, pointer)
+    clear_value_holes(low, pointer, target)
     return
   end
   if value_type.is_a?(VoidType)
@@ -299,6 +391,7 @@ def assign_tuple(low : Lowerer, pointer : Value, target : TupleInstanceType, sou
     assign(low, target_ptr, target.tuple_types[i], source_type, to_lhs(low, source_ptr, source_type))
     i += 1
   end
+  clear_value_holes(low, pointer, target)
 end
 
 def assign_named_tuple(low : Lowerer, pointer : Value, target : NamedTupleInstanceType, source : NamedTupleInstanceType, value : Value) : Nil
@@ -317,6 +410,7 @@ def assign_named_tuple(low : Lowerer, pointer : Value, target : NamedTupleInstan
     assign(low, target_ptr, target.entries[j].type, entry.type, loaded_value)
     i += 1
   end
+  clear_value_holes(low, pointer, target)
 end
 
 # Hosted make_nilable_fun (codegen.cr:2386-2388): a proc struct of two null pointers.
@@ -365,6 +459,8 @@ pub def assign_union_in_union(low : Lowerer, pointer : Value, target : MixedUnio
   else
     store_aligned(low, value, pointer)
   end
+  clear_value_holes(low, pointer, value_type)
+  clear_union_holes(low, to_ir, pointer, low.typer.size_of(mixed_union_value_area(from_ir)))
 end
 
 # The hosted `assign_distinct(MixedUnionType, Type)` for a value that is one of the union's
@@ -411,6 +507,7 @@ pub def store_in_union(low : Lowerer, union_type : Type, union_pointer : Value, 
   if value_type.is_a?(NilType)
     field = union_value_ptr(low, struct_ir, union_pointer)
     store_aligned(low, low.builder.const_zero(area), field)
+    clear_union_holes(low, struct_ir, union_pointer, low.typer.size_of(area))
     return
   end
   if kind == "bool"
@@ -419,15 +516,18 @@ pub def store_in_union(low : Lowerer, union_type : Type, union_pointer : Value, 
     field = union_value_ptr(low, struct_ir, union_pointer)
     stored = store_aligned(low, widened, field)
     stored.alignment = low.typer.pointer_size.to_i32
+    clear_union_holes(low, struct_ir, union_pointer, low.typer.size_of(area))
     return
   end
   field = union_value_ptr(low, struct_ir, union_pointer)
   if kind == "int" || kind == "char" || kind == "symbol" || kind == "float" || value_type.is_a?(EnumType)
     store_aligned(low, value, field)
+    clear_union_holes(low, struct_ir, union_pointer, low.typer.size_of(low.typer.llvm_type(value_type)))
     return
   end
   if value_type.is_a?(PointerInstanceType) || TypeQueries.reference_like?(value_type) || value_type.is_a?(NilableType) || value_type.is_a?(ReferenceUnionType) || value_type.is_a?(NilableReferenceUnionType)
     store_aligned(low, value, field)
+    clear_union_holes(low, struct_ir, union_pointer, low.typer.size_of(low.typer.llvm_type(value_type)))
     return
   end
   if value_type.struct? && passed_by_value?(value_type)
@@ -440,6 +540,8 @@ pub def store_in_union(low : Lowerer, union_type : Type, union_pointer : Value, 
       stored = load_aligned(low, low.typer.llvm_embedded_type(value_type), value)
     end
     store_aligned(low, stored, field)
+    clear_value_holes(low, field, value_type)
+    clear_union_holes(low, struct_ir, union_pointer, low.typer.size_of(low.typer.llvm_type(value_type)))
     return
   end
   pending_visit_node("store of #{value_type.full_name} in #{union_type.full_name} (hosted store_value, not ported)")
@@ -658,6 +760,7 @@ def downcast_mixed_union(low : Lowerer, value : Value, target : MixedUnionType, 
   count = low.builder.const_int(low.typer.size_t, size)
   volatile = low.builder.const_int(low.module.types.int1, 0_i64)
   low.builder.intrinsic_with(IntrinsicId::Memcpy, [ptr, ptr, low.typer.size_t] of IrType, [dest, src, count, volatile] of Value, attrs)
+  clear_union_holes(low, to_ir, result, size)
   result
 end
 

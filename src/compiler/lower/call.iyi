@@ -54,7 +54,7 @@ import compiler/lower/block::{NoReturnPhi, alloca_local, join_pointer}
 import compiler/lower/locals::{LocalOrder, reset_nil_slot, reset_nilable_locals}
 import compiler/lower/closure::{allocate_closure}
 import compiler/lower/context::{Lowerer, LowerContext, LowerVar}
-import compiler/lower/cast::{assign, to_rhs, type_id_value, upcast, downcast, pointer_of_value, type_id_of_value, mixed_type_id_of_pointer, match_type_id}
+import compiler/lower/cast::{assign, clear_value_holes, to_rhs, type_id_value, upcast, downcast, pointer_of_value, type_id_of_value, mixed_type_id_of_pointer, match_type_id}
 import compiler/lower/ensure::{set_ensure_exception_handler}
 import compiler/semantic/closures::{ClosureFacts}
 import compiler/lower/fun::{block_ended?, def_context_type, target_def_fun, visit_node}
@@ -1109,6 +1109,7 @@ pub def copy_args(low : Lowerer, def_node : Def, arg_types : Array(Type), values
       else
         loaded = load_aligned(low, ir, temp, "")
         store_aligned(low, loaded, v.pointer)
+        clear_value_holes(low, v.pointer, t)
       end
     else
       if v.closure_slot || v.type.full_name != t.full_name

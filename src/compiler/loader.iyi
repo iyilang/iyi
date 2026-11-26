@@ -21,15 +21,15 @@ end
 pub class IyiPath
   {% if flag?(:win32) %}
     PATH_DELIMITER = ';'
-    CONFIG_PATH = {{ env("IYI_CONFIG_PATH") || "$ORIGIN/../share/iyi/src;$ORIGIN/../src" }}
+    CONFIG_PATH    = "$ORIGIN/../share/iyi/src;$ORIGIN/../src"
   {% else %}
     PATH_DELIMITER = ':'
-    CONFIG_PATH = {{ env("IYI_CONFIG_PATH") || "$ORIGIN/../share/iyi/src:$ORIGIN/../src" }}
+    CONFIG_PATH    = "$ORIGIN/../share/iyi/src:$ORIGIN/../src"
   {% end %}
 
   property entries : Array(String)
 
-  def initialize(entries : Array(String)? = nil, origin : String? = nil)
+  def initialize(entries : Array(String)? = nil, origin : String? = nil, config_path : String? = nil)
     @entries = [] of String
     if supplied = entries
       @entries = supplied
@@ -38,7 +38,7 @@ pub class IyiPath
         @entries << part unless part.empty?
       end
     elsif origin
-      @entries = CONFIG_PATH.split(PATH_DELIMITER)
+      @entries = (config_path || CONFIG_PATH).split(PATH_DELIMITER)
       @entries.unshift("lib") unless @entries.includes?("lib")
     else
       @entries << "lib"

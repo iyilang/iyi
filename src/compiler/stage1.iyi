@@ -35,7 +35,9 @@ def run_driver : Nil
   end
   STDOUT.flush
   STDERR.flush
-  LibC.exit(CommandExecutor.execute(result))
+  # Only the entry package may read the build environment. Pass the baked
+  # value into the loader instead of reading it in the compiler dependency.
+  LibC.exit(CommandExecutor.execute(result, {{ env("IYI_CONFIG_PATH") }}))
 end
 
 run_driver

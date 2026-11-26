@@ -10,7 +10,7 @@
 # inferring the prelude's body: `def +(other : Int32) : self` answers the
 # receiver, and `def bytesize : Int32` answers an `Int32`.
 
-require "../../../src/iyi/prelude"
+require "../../../../src/iyi/prelude"
 
 def sum
   1 + 1

@@ -89,6 +89,24 @@ trap cleanup EXIT
 if [ "$HOST_OS" = darwin ] && command -v brew >/dev/null 2>&1; then LIBRARY_PATH="$(brew --prefix bdw-gc)/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"; export LIBRARY_PATH; fi
 export IYI_CACHE_DIR="${IYI_CACHE_DIR:-$WORK_NATIVE/cache}"
 
+echo "== 0. The entry package bakes the configured search path"
+if ! IYI_CONFIG_PATH="baked-search-root-219" "$BOOTSTRAP" build \
+  -o "$WORK_NATIVE/config-path$EXE" "$REPO_NATIVE/bench/selfhost_loader_if_exercise.iyi" > "$WORK/config-path-build.log" 2>&1; then
+  cat "$WORK/config-path-build.log"
+  exit 1
+fi
+if ! env -u IYI_CONFIG_PATH -u IYI_PATH -u CRYSTAL_PATH "$WORK/config-path$EXE" --show-build-path > "$WORK/config-path.out"; then
+  echo "  FAIL: configured path probe did not run"
+  exit 1
+fi
+printf 'lib|baked-search-root-219\n' > "$WORK/config-path.expected"
+if ! cmp -s "$WORK/config-path.expected" "$WORK/config-path.out"; then
+  echo "  FAIL: configured path was not baked into the entry"
+  cat "$WORK/config-path.out"
+  exit 1
+fi
+echo "  build-time path survived with the runtime environment unset"
+
 echo "== 1. Building the stage-one executable from src/compiler/stage1.iyi"
 cd "$REPO"
 rm -f "$STAGE1"

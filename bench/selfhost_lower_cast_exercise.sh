@@ -354,6 +354,14 @@ cast_check() {
   awk '/^SUMMARY/ { split($2, a, "="); split($3, b, "="); exit !(a[2] == b[2] && a[2] > 0) }' "$WORK/mut.out" && return 0
   return 1
 }
+cast_check || { echo "  baseline: mixed union differs"; status=1; }
+prove_mutation "mixed union tag padding is not cleared" "$REPO/src/compiler/lower/cast.iyi" \
+  '    clear_hole_range(low, pointer, 4_i64, value_offset, alignment)' \
+  '    clear_hole_range(low, pointer, value_offset, value_offset, alignment)' -- cast_check || status=1
+prove_mutation "mixed union payload padding is not cleared" "$REPO/src/compiler/lower/cast.iyi" \
+  '    clear_hole_range(low, pointer, value_offset + payload, size, alignment)' \
+  '    clear_hole_range(low, pointer, size, size, alignment)' -- cast_check || status=1
+
 
 new_cast_check() {
   cast_build -o "$WORK_NATIVE/mut$EXE" "$REPO_NATIVE/bench/selfhost_lower_cast_exercise.iyi" > "$WORK/mut.build.log" 2>&1 || return 2

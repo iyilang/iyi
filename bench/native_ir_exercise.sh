@@ -790,6 +790,24 @@ else
   fi
 fi
 
+# ---- 7c. predicate names against LLVM's reading -------------------------------------------------
+# The round trip cannot see a swap made in both the parser and the printer, since the text then reads and writes back
+# as before. So the names the port's own enum gives each predicate are compared with the names LLVM reads from the same
+# file, for every icmp and fcmp in review_predicates.ir.
+predicate_check() {
+  local bin="$1" fixture
+  fixture=$(native_path "$REPO/bench/fixtures/ir/valid/review_predicates.ir")
+  "$bin" predicates "$fixture" >"$WORK/pred-port.txt" 2>&1 || return 1
+  "$LLVM_DRV" --predicates "$fixture" >"$WORK/pred-llvm.txt" 2>&1 || return 1
+  [ -s "$WORK/pred-llvm.txt" ] && cmp -s "$WORK/pred-port.txt" "$WORK/pred-llvm.txt"
+}
+echo "== 7c. every icmp and fcmp predicate reads as LLVM reads it"
+if predicate_check "$DRV"; then
+  echo "predicates ok: $(wc -l <"$WORK/pred-llvm.txt" | tr -d ' ') predicates, named as LLVM names them"
+else
+  fail "a predicate reads differently from LLVM: $(diff "$WORK/pred-port.txt" "$WORK/pred-llvm.txt" 2>&1 | tr '\n' ' ')"
+fi
+
 # ---- 8. mutation proofs ------------------------------------------------------------------------
 echo "== 8. mutations are each caught"
 prove_mutation "layout: offset_of drops its alignment rounding" \
@@ -921,6 +939,21 @@ prove_mutation "values: the float read from a double loses its sign" \
   'return (sign << 31) | ((power + 127_i64) << 23) | top' \
   'return ((power + 127_i64) << 23) | top' \
   llvm_float_check
+prove_mutation "parser: an icmp ult and ule swap their predicate names" \
+  src/compiler/ir/parser.iyi \
+  '"ult", "ule", "sgt"' \
+  '"ule", "ult", "sgt"' \
+  predicate_check
+prove_mutation "parser: an fcmp ogt and oge swap their predicate names" \
+  src/compiler/ir/parser.iyi \
+  '"ogt", "oge"' \
+  '"oge", "ogt"' \
+  predicate_check
+prove_mutation "printer: an fcmp ogt and oge swap their predicate names" \
+  src/compiler/ir/printer.iyi \
+  '"ogt", "oge"' \
+  '"oge", "ogt"' \
+  roundtrip_check
 prove_mutation "unwind: an invoke is left an invoke" \
   src/compiler/ir/inst.iyi \
   '    @op = Op::Call' \

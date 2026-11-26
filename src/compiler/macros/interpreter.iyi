@@ -267,8 +267,8 @@ pub class MacroInterpreter
     # retaining the system's punctuation and locale.
     def win32_error_text(code : Int32) : String
       wide = Pointer(UInt16).malloc(257_u64)
-      written = Std::File::LibKernel32.FormatMessageW(0x1000, Pointer(Void).new(0_u64), code, 0,
-        wide, 256, Pointer(Void).new(0_u64))
+      null = Pointer(Void).new(0_u64)
+      written = Std::File::LibKernel32.FormatMessageW(0x1000, null, code, 0, wide, 256, null)
       return "" if written <= 0
       wide[written] = 0_u16
       size = __iyi_utf8_size_from_wide(wide)
@@ -284,8 +284,10 @@ pub class MacroInterpreter
     builder = String::Builder.new
     index = 0
     path.each_char do |char|
-      if char.ord == 0xFFFD && (index + 2 >= path.bytesize || path.byte_at(index) != 0xEF_u8 ||
-         path.byte_at(index + 1) != 0xBF_u8 || path.byte_at(index + 2) != 0xBD_u8)
+      # A U+FFFD the bytes EF BF BD spell is printed; one that stands for an invalid byte is escaped.
+      room = index + 2 < path.bytesize
+      encoded = room && path.byte_at(index) == 0xEF_u8 && path.byte_at(index + 1) == 0xBF_u8 && path.byte_at(index + 2) == 0xBD_u8
+      if char.ord == 0xFFFD && !encoded
         builder << "\\x" << path.byte_at(index).to_i32.to_s(16).upcase.rjust(2, '0')
         index = index + 1
       else

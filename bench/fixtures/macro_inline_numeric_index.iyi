@@ -1,0 +1,5 @@
+macro unicode_inline_numeric_index
+  {{ "hé日😀z"[1] }}
+end
+
+unicode_inline_numeric_index

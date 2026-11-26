@@ -1,0 +1,5 @@
+macro ascii_inline_numeric_index
+  {{ "abcde"[1] }}
+end
+
+ascii_inline_numeric_index

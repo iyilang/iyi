@@ -97,7 +97,7 @@ bench/fixtures/sem_bodies_trait_dispatch.iyi 21
 bench/fixtures/sem_bodies_trait_requirement.iyi 7
 bench/fixtures/sem_bodies_tuple_scalar.iyi 31
 bench/fixtures/sem_bodies_union.iyi 15
-bench/fixtures/sem_bodies_union_generic.iyi 15
+bench/fixtures/sem_bodies_union_generic.iyi 16
 bench/fixtures/sem_bodies_union_overload_order.iyi 6
 bench/fixtures/sem_bodies_union_restriction.iyi 8
 bench/fixtures/sem_bodies_unit_scope.iyi 14

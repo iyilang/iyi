@@ -1,0 +1,2 @@
+module fixed_staging
+puts "#{11_i64 + 23_i64}"

@@ -1,0 +1,22 @@
+module fpr_odd_frame
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, Role}
+import compiler/native/target::{is_role?}
+import compiler/native/frame::{lay_out}
+
+fn = MFunction.new("odd_fpr")
+b = MBlock.new(0, "entry")
+fn.blocks << b
+m = MInst.new(MOp::FMov.value.to_i32)
+m.fp = true
+m.defs << Operand.new(OperandKind::Physical, 40)
+m.uses << Operand.new(OperandKind::Physical, 32)
+b.insts << m
+b.insts << MInst.new(MOp::Ret.value.to_i32)
+lay_out(fn, 16_i64)
+saves = 0
+restores = 0
+b.insts.each do |inst|
+  saves = saves + 1 if is_role?(fn.isa, inst, Role::SaveReg) && inst.fp
+  restores = restores + 1 if is_role?(fn.isa, inst, Role::RestoreReg) && inst.fp
+end
+puts "#{fn.frame.frame_size} #{saves} #{restores}"

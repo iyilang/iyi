@@ -1,0 +1,29 @@
+; iyi-ir 1
+module "fp_load_call"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+@number = internal global double 0x401c000000000000, align 8
+
+define internal double @twice(double %x) {
+entry:
+  %r = fmul double %x, 0x4000000000000000
+  ret double %r
+}
+
+define internal i64 @loaded(ptr %p) {
+entry:
+  %value = load double, ptr %p, align 8
+  %call = call double (double) @twice(double 0x4000000000000000)
+  %sum = fadd double %value, %call
+  %r = fptosi double %sum to i64
+  ret i64 %r
+}
+
+define i32 @main() {
+entry:
+  %r = call i64 (ptr) @loaded(ptr @number)
+  %p = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r)
+  ret i32 0
+}

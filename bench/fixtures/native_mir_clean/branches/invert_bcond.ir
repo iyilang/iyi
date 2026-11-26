@@ -1,0 +1,28 @@
+; iyi-ir 1
+module "invert_bcond"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+
+; Far: neither target of the conditional branch is the next block, so the branch keeps its condition and target.
+define internal i64 @bcond_far(i64 %x) {
+entry:
+  %c = icmp sgt i64 %x, 0
+  br i1 %c, label %yes, label %no
+mid:
+  ret i64 0
+yes:
+  br label %mid
+no:
+  ret i64 2
+}
+
+; Next: the conditional target is the next block, so the condition is inverted, retargeted to the other block, and the unconditional branch is dropped.
+define internal i64 @bcond_next(i64 %x) {
+entry:
+  %c = icmp sgt i64 %x, 0
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 2
+}

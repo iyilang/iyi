@@ -1,0 +1,2 @@
+module fp_load_call
+puts "11"

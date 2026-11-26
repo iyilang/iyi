@@ -7,6 +7,7 @@ declare external i32 @printf(ptr, ...)
 
 define internal i64 @tick() {
 entry:
+  call void () asm sideeffect "mov x0, #99; mov x1, #99; mov x2, #99; mov x3, #99; mov x4, #99; mov x5, #99; mov x6, #99; mov x7, #99; mov x8, #99", "~{x0},~{x1},~{x2},~{x3},~{x4},~{x5},~{x6},~{x7},~{x8}"()
   ret i64 3
 }
 

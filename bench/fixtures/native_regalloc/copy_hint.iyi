@@ -1,0 +1,32 @@
+module copy_hint
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass}
+import compiler/native/regalloc_linear::{allocate_linear}
+
+fn = MFunction.new("hint")
+b = MBlock.new(0, "entry")
+fn.blocks << b
+cold = fn.new_vreg(RegClass::Gpr)
+source = fn.new_vreg(RegClass::Gpr)
+dead = fn.new_vreg(RegClass::Gpr)
+copy = fn.new_vreg(RegClass::Gpr)
+result = fn.new_vreg(RegClass::Gpr)
+first = MInst.new(MOp::MovImm.value.to_i32)
+first.defs << Operand.new(OperandKind::Virtual, cold)
+b.insts << first
+second = MInst.new(MOp::MovImm.value.to_i32)
+second.defs << Operand.new(OperandKind::Virtual, source)
+b.insts << second
+use_cold = MInst.new(MOp::AddImm.value.to_i32)
+use_cold.defs << Operand.new(OperandKind::Virtual, dead)
+use_cold.uses << Operand.new(OperandKind::Virtual, cold)
+b.insts << use_cold
+move = MInst.new(MOp::Mov.value.to_i32)
+move.defs << Operand.new(OperandKind::Virtual, copy)
+move.uses << Operand.new(OperandKind::Virtual, source)
+b.insts << move
+use_copy = MInst.new(MOp::AddImm.value.to_i32)
+use_copy.defs << Operand.new(OperandKind::Virtual, result)
+use_copy.uses << Operand.new(OperandKind::Virtual, copy)
+b.insts << use_copy
+allocate_linear(fn)
+puts "#{fn.vreg_home[source]} #{fn.vreg_home[copy]} #{b.insts.size}"

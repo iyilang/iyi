@@ -22,6 +22,23 @@ src/compiler/ir/inst.iyi parse
 src/compiler/ir/intrinsics.iyi semantic
 src/compiler/ir/layout.iyi semantic
 src/compiler/ir/module.iyi parse
+src/compiler/ir/opt/analysis.iyi parse
+src/compiler/ir/opt/callgraph.iyi parse
+src/compiler/ir/opt/cfg_simplify.iyi parse
+src/compiler/ir/opt/cse.iyi parse
+src/compiler/ir/opt/dce.iyi parse
+src/compiler/ir/opt/deadfn.iyi parse
+src/compiler/ir/opt/edit.iyi parse
+src/compiler/ir/opt/effects.iyi parse
+src/compiler/ir/opt/fold.iyi parse
+src/compiler/ir/opt/inline.iyi parse
+src/compiler/ir/opt/layout.iyi parse
+src/compiler/ir/opt/licm.iyi parse
+src/compiler/ir/opt/mem2reg.iyi parse
+src/compiler/ir/opt/pipeline.iyi parse
+src/compiler/ir/opt/prove.iyi parse
+src/compiler/ir/opt/simplify.iyi parse
+src/compiler/ir/opt/sroa.iyi parse
 src/compiler/ir/parser.iyi parse
 src/compiler/ir/printer.iyi parse
 src/compiler/ir/types.iyi semantic
@@ -69,6 +86,7 @@ src/compiler/lower/typer.iyi parse
 src/compiler/lower/unions.iyi semantic
 src/compiler/macros/answers.iyi parse
 src/compiler/macros/ast.iyi parse
+src/compiler/macros/confinement.iyi parse
 src/compiler/macros/engine.iyi parse
 src/compiler/macros/interpreter.iyi parse
 src/compiler/macros/macro_parser.iyi parse
@@ -79,6 +97,7 @@ src/compiler/macros/type_facts.iyi parse
 src/compiler/native/aarch64/abi.iyi parse
 src/compiler/native/aarch64/asm.iyi parse
 src/compiler/native/aarch64/encode.iyi parse
+src/compiler/native/aarch64/fold.iyi parse
 src/compiler/native/aarch64/isel.iyi parse
 src/compiler/native/aarch64/opcodes.iyi parse
 src/compiler/native/aarch64/regs.iyi semantic
@@ -100,6 +119,7 @@ src/compiler/native/link/link.iyi parse
 src/compiler/native/link/macho_exe.iyi parse
 src/compiler/native/lower.iyi parse
 src/compiler/native/mir.iyi parse
+src/compiler/native/mir_clean.iyi parse
 src/compiler/native/obj/elf.iyi parse
 src/compiler/native/obj/macho.iyi parse
 src/compiler/native/obj/object.iyi parse
@@ -156,6 +176,7 @@ src/compiler/tools/format.iyi parse
 src/compiler/tools/formatter.iyi parse
 src/compiler/tools/ir.iyi parse
 src/compiler/tools/ir_core.iyi parse
+src/compiler/tools/ir_opt.iyi parse
 src/compiler/tools/link_elf.iyi parse
 src/compiler/tools/link_macho.iyi parse
 src/compiler/tools/mod.iyi parse
@@ -189,6 +210,8 @@ src/iyi/enum.iyi semantic
 src/iyi/file.iyi semantic
 src/iyi/float.iyi parse
 src/iyi/hash.iyi semantic
+src/iyi/heap_partition.iyi semantic
+src/iyi/heap_verify.iyi semantic
 src/iyi/io.iyi semantic
 src/iyi/macros.iyi semantic
 src/iyi/number.iyi semantic

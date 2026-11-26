@@ -355,7 +355,9 @@ def proof(name, mutant_floor, mutant_ceiling, expected, target):
 pinned_matches = sorted(floor.intersection(identical))
 if pinned_matches:
     target = pinned_matches[0]
-    result = run_check(floor - {target}, ceiling)
+    notice_floor = work / "notice.floor"
+    notice_floor.write_text("".join(path + "\n" for path in sorted(floor - {target})), encoding="utf-8")
+    result = run_check(notice_floor, ceiling_path)
     if result.returncode == 0 and f"could raise the floor: {target}" in result.stdout:
         print(f"  unlisted match notice: reported without failure ({target}, exit 0)")
     else:

@@ -5,7 +5,7 @@
 # Program-changing: macro text loses end (1 / 1).
 # Assignment and enum alignment (10 / 17).
 # Multiline collections collapsed (8 / 18).
-# Multiline calls or declarations collapsed (4 / 7).
+# Multiline calls or declarations collapsed (3 / 6).
 # Multiline boolean expressions collapsed (1 / 2).
 # Missing space after a proc literal opening brace (2 / 3).
 # Extra space in empty blocks (0 / 2).
@@ -28,7 +28,6 @@ src/compiler/ir/module.iyi
 src/compiler/llvm/llvm.iyi
 src/compiler/llvm/module.iyi
 src/compiler/llvm/pass_manager.iyi
-src/compiler/macros/interpreter.iyi
 src/compiler/native/aarch64/encode.iyi
 src/compiler/native/amd64/encode.iyi
 src/compiler/native/asm/constraints.iyi

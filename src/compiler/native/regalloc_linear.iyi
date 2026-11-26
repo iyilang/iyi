@@ -322,42 +322,52 @@ def rewrite_block(fn : MFunction, block : MBlock, has_use : Array(Bool)) : Nil
   block.insts = acc
 end
 
-# Sorts vregs by (start, id). A merge sort: stable, and each comparison is a total order.
+# Sorts vregs by (start, id), with one scratch array instead of allocating at every merge.
 def sort_by_start(list : Array(Int32), starts : Array(Int32)) : Array(Int32)
-  return list if list.size <= 1
-  mid = list.size // 2
-  left = [] of Int32
-  right = [] of Int32
-  i = 0
-  while i < list.size
-    if i < mid
-      left << list[i]
-    else
-      right << list[i]
+  n = list.size
+  return list if n <= 1
+  src = list
+  dst = Array(Int32).new(n, 0)
+  width = 1
+  while width < n
+    lo = 0
+    while lo < n
+      mid = width < n - lo ? lo + width : n
+      hi = width < n - mid ? mid + width : n
+      i = lo
+      j = mid
+      k = lo
+      while i < mid && j < hi
+        a = src[i]
+        b = src[j]
+        if starts[a] < starts[b] || (starts[a] == starts[b] && a < b)
+          dst[k] = a
+          i = i + 1
+        else
+          dst[k] = b
+          j = j + 1
+        end
+        k = k + 1
+      end
+      while i < mid
+        dst[k] = src[i]
+        i = i + 1
+        k = k + 1
+      end
+      while j < hi
+        dst[k] = src[j]
+        j = j + 1
+        k = k + 1
+      end
+      lo = hi
     end
-    i = i + 1
+    temp = src
+    src = dst
+    dst = temp
+    return src if width >= n - width
+    width = width + width
   end
-  a = sort_by_start(left, starts)
-  b = sort_by_start(right, starts)
-  acc = [] of Int32
-  i = 0
-  j = 0
-  while i < a.size || j < b.size
-    take_a = false
-    if j >= b.size
-      take_a = true
-    elsif i < a.size
-      take_a = starts[a[i]] < starts[b[j]] || (starts[a[i]] == starts[b[j]] && a[i] < b[j])
-    end
-    if take_a
-      acc << a[i]
-      i = i + 1
-    else
-      acc << b[j]
-      j = j + 1
-    end
-  end
-  acc
+  src
 end
 
 # A path-compressed representative of a collapsed inner loop.

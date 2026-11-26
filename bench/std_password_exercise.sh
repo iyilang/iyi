@@ -271,7 +271,7 @@ print(f", python bcrypt {int(best * 1000)} ms")')"
   fi
   echo "  $(cat "$WORK/cost.out")$python_ms"
 else
-  echo "  the cost-10 timing did not build or run: $(tail -1 "$WORK/cost.build.log" "$WORK/cost.out" 2>/dev/null | tail -1)"
+  echo "  the cost-10 timing did not build or run: $(tail -q -n 1 "$WORK/cost.build.log" "$WORK/cost.out" 2>/dev/null | tail -1)"
   status=1
 fi
 

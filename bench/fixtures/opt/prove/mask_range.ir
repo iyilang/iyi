@@ -1,0 +1,41 @@
+; iyi-ir 1
+source_filename = "mask_range"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @mask(i32 %x) {
+entry:
+  %value = and i32 %x, 7
+  %test = icmp slt i32 %value, 8
+  ret i1 %test
+}
+define internal i1 @remainder(i32 %x) {
+entry:
+  %value = urem i32 %x, 10
+  %test = icmp ult i32 %value, 10
+  ret i1 %test
+}
+define internal i1 @zero_extend(i8 %x) {
+entry:
+  %value = zext i8 %x to i32
+  %test = icmp sle i32 %value, 255
+  ret i1 %test
+}
+define internal i1 @sign_extend(i8 %x) {
+entry:
+  %value = sext i8 %x to i32
+  %test = icmp sge i32 %value, -128
+  ret i1 %test
+}
+define internal i1 @narrow_preserving(i8 %x) {
+entry:
+  %wide = zext i8 %x to i32
+  %value = trunc i32 %wide to i16
+  %test = icmp sle i16 %value, 255
+  ret i1 %test
+}
+define internal i1 @sign_extend_bit(i1 %x) {
+entry:
+  %value = sext i1 %x to i8
+  %test = icmp sge i8 %value, -1
+  ret i1 %test
+}

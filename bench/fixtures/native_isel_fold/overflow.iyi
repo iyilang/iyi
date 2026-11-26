@@ -1,0 +1,60 @@
+module overflow
+
+import std/int
+
+def sadd64(a : Int64, b : Int64) : Int64
+  value = a.to_i128 + b.to_i128
+  value > 9223372036854775807_i128 || value < -9223372036854775808_i128 ? -111_i64 : value.to_i64
+end
+
+def ssub64(a : Int64, b : Int64) : Int64
+  value = a.to_i128 - b.to_i128
+  value > 9223372036854775807_i128 || value < -9223372036854775808_i128 ? -112_i64 : value.to_i64
+end
+
+def uadd64(a : UInt64, b : UInt64) : Int64
+  value = a.to_u128 + b.to_u128
+  value > 18446744073709551615_u128 ? -113_i64 : value.to_i64
+end
+
+def usub64(a : UInt64, b : UInt64) : Int64
+  a < b ? -114_i64 : (a - b).to_i64
+end
+
+def smul64(a : Int64, b : Int64) : Int64
+  value = a.to_i128 * b.to_i128
+  value > 9223372036854775807_i128 || value < -9223372036854775808_i128 ? -115_i64 : value.to_i64
+end
+
+def umul64(a : UInt64, b : UInt64) : Int64
+  value = a.to_u128 * b.to_u128
+  value > 18446744073709551615_u128 ? -116_i64 : value.to_i64
+end
+
+def sadd8(a : Int8, b : Int8) : Int64
+  value = a.to_i64 + b.to_i64
+  value > 127_i64 || value < -128_i64 ? -117_i64 : value
+end
+
+def uadd8(a : UInt8, b : UInt8) : Int64
+  value = a.to_i64 + b.to_i64
+  value > 255_i64 ? -118_i64 : value
+end
+
+puts "#{sadd64(2_i64, 3_i64)}"
+puts "#{sadd64(9223372036854775807_i64, 1_i64)}"
+puts "#{ssub64(-9223372036854775808_i64, 1_i64)}"
+puts "#{ssub64(9_i64, 3_i64)}"
+puts "#{uadd64(18446744073709551615_u64, 1_u64)}"
+puts "#{uadd64(4_u64, 5_u64)}"
+puts "#{usub64(4_u64, 5_u64)}"
+puts "#{usub64(5_u64, 4_u64)}"
+puts "#{smul64(9223372036854775807_i64, 2_i64)}"
+puts "#{smul64(-5_i64, 3_i64)}"
+puts "#{umul64(4294967296_u64, 4294967296_u64)}"
+puts "#{umul64(4_u64, 5_u64)}"
+puts "#{sadd8(100_i8, 100_i8)}"
+puts "#{sadd8(100_i8, 20_i8)}"
+puts "#{uadd8(200_u8, 100_u8)}"
+puts "#{uadd8(100_u8, 20_u8)}"
+puts "#{2_i64 + 3_i64 + 1_i64}"

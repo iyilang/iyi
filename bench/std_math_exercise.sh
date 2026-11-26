@@ -559,7 +559,7 @@ PY
     grep -A1 "== fma against" "$WORK/software/out" | sed -n '2p'
   else
     echo "  software: musl's arm did not answer as the instruction does"
-    tail -3 "$WORK/software/out" "$WORK/software/build" 2>/dev/null
+    tail -n 3 "$WORK/software/out" "$WORK/software/build" 2>/dev/null
     status=1
   fi
 fi

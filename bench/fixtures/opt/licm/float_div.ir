@@ -1,0 +1,18 @@
+; iyi-ir 1
+source_filename = "float_div"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal void @float_div(i1 %run, double %a, double %b, ptr %out) {
+entry:
+  br label %head
+head:
+  br i1 %run, label %body, label %done
+body:
+  %quotient = fdiv double %a, %b
+  %remainder = frem double %a, %b
+  store double %quotient, ptr %out, align 8
+  store double %remainder, ptr %out, align 8
+  br label %head
+done:
+  ret void
+}

@@ -3,10 +3,10 @@
 # hosted front end's top-level pass (specification S1b).
 #
 # Fixtures are analysed bare. Corpus files are analysed as a build analyses
-# them, the prelude first, except the prelude's own files, which are analysed
-# bare because they cannot be loaded beside the prelude that contains them. By
-# the hosted pass (bench/selfhost_semantic_declarations_oracle.cr) and by the iyi port
-# (bench/selfhost_semantic_declarations_exercise.iyi). Both search IYI_PATH, set
+# them: the prelude first (entry mode). A file the entry analysis refuses is
+# analysed bare, and the table says so; a file both refuse is an ORACLE failure.
+# The hosted pass (bench/selfhost_semantic_declarations_oracle.cr) and the iyi port
+# (bench/selfhost_semantic_declarations_exercise.iyi) both search IYI_PATH, set
 # below to this checkout's src/. Both print one text dump of the declarations the
 # file itself makes: defs, types, nested types, their visibility, superclasses,
 # type variables, enum members, aliases and constants. A declaration belongs to
@@ -346,12 +346,17 @@ measure() {
   corpus="$1"
   rel="$2"
   abs="$REPO_NATIVE/$2"
-  case "$rel" in src/iyi/*) mode=bare ;; *) mode=entry ;; esac
+  mode=entry
+  note="-"
+  if ! IYI_DECLARATION_MODE=entry IYI_DECLARATION_FLAGS="$IYI_DECLARATION_FLAGS" "$ORACLE" "$abs" > "$WORK/o.txt" 2> "$WORK/o.err"; then
+    # The entry analysis refuses a file the prelude itself loads (macros, atomic): analysed bare instead.
+    note="bare: entry refused it: $(head -n 1 "$WORK/o.err" | tr '\t' ' ')"
+    mode=bare
+  fi
   if IYI_DECLARATION_MODE="$mode" IYI_DECLARATION_FLAGS="$IYI_DECLARATION_FLAGS" "$ORACLE" "$abs" > "$WORK/o.txt" 2> "$WORK/o.err"; then
     nodes=$(records "$WORK/o.txt" | wc -l | tr -d ' ')
     if IYI_DECLARATION_MODE="$mode" IYI_DECLARATION_FLAGS="$IYI_DECLARATION_FLAGS" "$PORT" "$abs" > "$WORK/p.txt" 2> "$WORK/p.err"; then
       matched=$(agreeing "$WORK/o.txt" "$WORK/p.txt")
-      note="-"
     else
       matched=0
       note="PORT: $(head -n 1 "$WORK/p.err" | tr '\t' ' ')"

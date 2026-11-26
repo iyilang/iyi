@@ -155,7 +155,7 @@ module TypedDumpTool
     with_prelude = false
     defines = [] of String
     while first < args.size && args[first].starts_with?("-D")
-      define = args[first][2..]
+      define = args[first][2, args[first].size - 2]
       raise "empty -D flag" if define.empty?
       defines << define
       first = first + 1

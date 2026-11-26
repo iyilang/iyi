@@ -419,7 +419,14 @@ class GuessVisitor < Visitor
       named_types = listed
     end
     ts = type_node_system(@program)
-    matches = MethodLookup.lookup_receiver(receiver, ts, CallSignature.new(node.name, arg_types, named_types, false))
+    signature = CallSignature.new(node.name, arg_types, named_types, false)
+    if receiver.is_a?(UnionType)
+      # Hosted UnionType has no defs of its own and one parent, Value (types.cr 3553-3555), and
+      # Type#lookup_matches walks the parents with the union as owner: the members are not asked.
+      matches = MethodLookup.lookup_matches(@program.value_type, ts, signature, receiver, @program.value_type, [] of Match)
+    else
+      matches = MethodLookup.lookup_receiver(receiver, ts, signature)
+    end
     return nil if matches.error
     returned = [] of Type
     matches.matches.each do |match|

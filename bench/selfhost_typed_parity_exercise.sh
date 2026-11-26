@@ -8,7 +8,10 @@
 # port (src/compiler/tools/typed_dump.iyi). For each file the gate counts the
 # expression nodes the oracle typed and how many the port typed to the same
 # "line:col Kind type". The committed floor (bench/selfhost_typed_parity.floor)
-# holds each file's matched count; a count may only rise.
+# holds each file's matched count; a count may only rise. One case is not a
+# fall: a file that itself lost nodes, so that the oracle reports fewer than
+# the floor and the port matches every one of them. That is FILE SHRANK, and
+# the raise command writes the row down to the file's own count with a note.
 #
 #   bash bench/selfhost_typed_parity_exercise.sh
 #
@@ -18,12 +21,14 @@
 #   3-5. Every file's matched count against its floor, a per-file table, the
 #        corpus totals and the ten largest gaps. A file below its floor fails
 #        with BELOW FLOOR; a file above it fails with RAISE THE FLOOR, so a
-#        gain is locked in by raising the floor, never left silent. A file the
-#        oracle cannot analyse is reported as ORACLE and is not measured.
+#        gain is locked in by raising the floor, never left silent. A row above
+#        what its file now holds, every node matched, fails with FILE SHRANK
+#        until the row is rewritten. A file the oracle cannot analyse is
+#        reported as ORACLE and is not measured.
 #   6. Guarded mutation proofs on the sem_expr fixtures, analysed bare.
 #
 # Environment:
-#   TYPED_PARITY_RAISE=1    write the floor up to the measured counts (never lower)
+#   TYPED_PARITY_RAISE=1    write the floor up to the measured counts (a row falls only for FILE SHRANK)
 #   TYPED_PARITY_FILES=<f>  measure only the repo-relative paths listed in <f>
 #   TYPED_PARITY_FLOOR=<f>  read and write this floor file instead of the default
 #   TYPED_PARITY_BARE=1     analyse each file alone, without the prelude
@@ -185,7 +190,9 @@ echo "  $(wc -l < "$RESULTS" | tr -d ' ') files measured"
 
 echo
 echo "== 4. Checking each file against its committed floor"
-awk -F'\t' -v floorfile="$FLOOR_FILE" -v host="$HOST_OS" '
+# verdicts [results] [verdicts] [floor file]: one verdict row per measured file.
+verdicts() {
+awk -F'\t' -v floorfile="${3:-$FLOOR_FILE}" -v host="$HOST_OS" '
   BEGIN {
     while ((getline line < floorfile) > 0) {
       if (line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/) continue
@@ -200,16 +207,21 @@ awk -F'\t' -v floorfile="$FLOOR_FILE" -v host="$HOST_OS" '
     if (note ~ /^ORACLE/) verdict = "ORACLE"
     else if (note ~ /^PORT/) verdict = "PORT"
     else if (!(key in floor)) verdict = "NO FLOOR"
+    else if (matched < floor[key] && nodes > 0 && matched == nodes) verdict = "FILE SHRANK"
     else if (matched < floor[key]) verdict = "BELOW FLOOR"
     else if (matched > floor[key]) verdict = "RAISE THE FLOOR"
     else verdict = "ok"
     fl = (key in floor) ? floor[key] : "-"
     printf "%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n", verdict, corpus, rel, nodes, matched, \
       (nodes > 0 ? sprintf("%.1f%%", 100 * matched / nodes) : "n/a"), fl, note
-  }' "$RESULTS" > "$VERDICTS"
+  }' "${1:-$RESULTS}" > "${2:-$VERDICTS}"
+}
+verdicts
 
-if [ "$RAISE" = 1 ]; then
-  "$PY" - "$(native_path "$VERDICTS")" "$(native_path "$FLOOR_FILE")" "$HOST_OS" <<'PY'
+# write_floor <verdicts> <floor file>: the floor written up to the measured counts. A FILE SHRANK row is written down to
+# its file's own count, with a note.
+write_floor() {
+  "$PY" - "$1" "$2" "$HOST_OS" <<'PY'
 import sys
 verdicts, floor_path, host = sys.argv[1], sys.argv[2], sys.argv[3]
 floor = {}
@@ -231,6 +243,8 @@ try:
 except FileNotFoundError:
     pass
 raised = 0
+shrunk = 0
+SHRANK = "# file shrank: "
 for line in open(verdicts, encoding="utf-8"):
     cols = line.rstrip("\n").split("\t")
     verdict, rel, matched = cols[0], cols[2], int(cols[4])
@@ -238,28 +252,46 @@ for line in open(verdicts, encoding="utf-8"):
         continue
     key = f"{rel}@{host}" if f"{rel}@{host}" in floor else rel
     old = floor.get(key, 0)
-    if matched > old:
+    if verdict == "FILE SHRANK":
+        # The file holds fewer nodes than the row says and the port matches every one: the row follows the file.
+        floor[key] = matched
+        kept = [note for note in notes.get(key, []) if not note.startswith(SHRANK)]
+        notes[key] = kept + [f"{SHRANK}the file holds {matched} nodes and every one matches; this row was {old} while the file held more\n"]
+        shrunk += 1
+    elif matched > old:
         floor[key] = matched
         raised += 1
     elif key not in floor:
         floor[key] = old
 with open(floor_path, "w", encoding="utf-8", newline="\n") as out:
     out.write("# typed parity floors: <repo-relative file> <matched nodes>, and <repo-relative file>@<host> <matched nodes>\n")
-    out.write("# for a file a host measures differently (its platform arms are other code). A count may only rise. Raise with: TYPED_PARITY_RAISE=1 bash bench/selfhost_typed_parity_exercise.sh\n")
+    out.write("# for a file a host measures differently (its platform arms are other code). A count may only rise; a row above what its file now holds, every node matched, is written down to the file and noted (file shrank). Raise with: TYPED_PARITY_RAISE=1 bash bench/selfhost_typed_parity_exercise.sh\n")
     for rel in sorted(floor):
         for note in notes.get(rel, []):
             out.write(note)
         out.write(f"{rel} {floor[rel]}\n")
     for note in pending:
         out.write(note)
-print(f"  floor written: {len(floor)} entries, {raised} raised")
+print(f"  floor written: {len(floor)} entries, {raised} raised" + (f", {shrunk} written down to a file that shrank" if shrunk else ""))
 PY
-  fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "ORACLE" || $1 == "PORT"' "$VERDICTS" | wc -l | tr -d ' ')
-else
-  fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "RAISE THE FLOOR" || $1 == "NO FLOOR" || $1 == "ORACLE" || $1 == "PORT"' "$VERDICTS" | wc -l | tr -d ' ')
+}
+
+# gate_fails <verdicts> <raise 0|1>: how many rows fail the gate. After the raise command only what it cannot settle fails.
+gate_fails() {
+  if [ "$2" = 1 ]; then
+    awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "ORACLE" || $1 == "PORT"' "$1" | wc -l | tr -d ' '
+  else
+    awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "FILE SHRANK" || $1 == "RAISE THE FLOOR" || $1 == "NO FLOOR" || $1 == "ORACLE" || $1 == "PORT"' "$1" | wc -l | tr -d ' '
+  fi
+}
+
+if [ "$RAISE" = 1 ]; then
+  write_floor "$(native_path "$VERDICTS")" "$(native_path "$FLOOR_FILE")"
 fi
+fails=$(gate_fails "$VERDICTS" "$RAISE")
 awk -F'\t' '
   $1 == "BELOW FLOOR"    { printf "  BELOW FLOOR: %s matched %s, floor %s. A regression: restore the typing or lower nothing.\n", $3, $5, $7 }
+  $1 == "FILE SHRANK"    { printf "  FILE SHRANK: %s holds %s nodes and the port matches every one; its floor says %s. The file lost nodes: write the row down to the file (TYPED_PARITY_RAISE=1).\n", $3, $4, $7 }
   $1 == "RAISE THE FLOOR" { printf "  RAISE THE FLOOR: %s matched %s, floor %s. Raise the floor in bench/selfhost_typed_parity.floor (TYPED_PARITY_RAISE=1).\n", $3, $5, $7 }
   $1 == "NO FLOOR"       { printf "  NO FLOOR: %s has no floor entry. Add it (TYPED_PARITY_RAISE=1).\n", $3 }
   $1 == "ORACLE" || $1 == "PORT" { printf "  %s FAILED: %s: %s\n", $1, $3, $8 }
@@ -267,6 +299,40 @@ awk -F'\t' '
 echo "  $fails file(s) below or missing their floor"
 if [ "$fails" -gt 0 ]; then
   status=1
+fi
+
+if [ "$CHILD" = 0 ]; then
+  echo
+  echo "== 4b. A row above what its file holds: FILE SHRANK when every node matches, BELOW FLOOR otherwise"
+  SHR_RESULTS="$WORK/shrank_results.tsv"
+  SHR_VERDICTS="$WORK/shrank_verdicts.tsv"
+  SHR_FLOOR="$WORK/shrank.floor"
+  # Four invented files: one that lost a node and matches all it holds, one the port lost a node of, one with nothing
+  # left (settled by hand, never automatically), and one at its floor.
+  printf 'compiler\tshrank/all_match.iyi\t44\t44\t-\ncompiler\tshrank/one_lost.iyi\t45\t44\t-\ncompiler\tshrank/emptied.iyi\t0\t0\t-\ncompiler\tshrank/steady.iyi\t44\t44\t-\n' > "$SHR_RESULTS"
+  printf '# header\n# header\nshrank/all_match.iyi 45\nshrank/emptied.iyi 3\nshrank/one_lost.iyi 45\nshrank/steady.iyi 44\n' > "$SHR_FLOOR"
+  verdicts "$SHR_RESULTS" "$SHR_VERDICTS" "$SHR_FLOOR"
+  shr_got=$(awk -F'\t' '{ printf "%s=%s; ", $3, $1 }' "$SHR_VERDICTS")
+  shr_want="shrank/all_match.iyi=FILE SHRANK; shrank/one_lost.iyi=BELOW FLOOR; shrank/emptied.iyi=BELOW FLOOR; shrank/steady.iyi=ok; "
+  shr_plain=$(gate_fails "$SHR_VERDICTS" 0)
+  if [ "$shr_got" = "$shr_want" ] && [ "$shr_plain" = 3 ]; then
+    echo "  verdicts: a file holding 44, all matched, under a floor of 45 is FILE SHRANK; 44 of 45 matched is BELOW FLOOR; a file with nothing left is BELOW FLOOR; all three fail a plain run"
+  else
+    echo "  FAILED: verdicts were [$shr_got], expected [$shr_want]; rows failing a plain run $shr_plain, expected 3"
+    status=1
+  fi
+  write_floor "$(native_path "$SHR_VERDICTS")" "$(native_path "$SHR_FLOOR")" > "$WORK/shrank_write.log" 2>&1
+  shr_rows=$(awk '!/^#/ { printf "%s=%s; ", $1, $2 }' "$SHR_FLOOR")
+  shr_rows_want="shrank/all_match.iyi=44; shrank/emptied.iyi=3; shrank/one_lost.iyi=45; shrank/steady.iyi=44; "
+  shr_noted=$(awk '{ if ($1 == "shrank/all_match.iyi") print (note ? 1 : 0); note = ($0 ~ /^# file shrank: /) }' "$SHR_FLOOR")
+  shr_notes=$(awk '/^# file shrank: / { n++ } END { print n + 0 }' "$SHR_FLOOR")
+  if [ "$shr_rows" = "$shr_rows_want" ] && [ "$shr_noted" = 1 ] && [ "$shr_notes" = 1 ]; then
+    echo "  the raise command writes only the shrunken file's row down (45 -> 44) and notes it; the row the port fell below stays 45"
+  else
+    echo "  FAILED: rows after the raise command were [$shr_rows], expected [$shr_rows_want]; shrink notes $shr_notes, on the row $shr_noted"
+    cat "$WORK/shrank_write.log"
+    status=1
+  fi
 fi
 
 echo

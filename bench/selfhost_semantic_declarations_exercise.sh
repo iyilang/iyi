@@ -26,10 +26,14 @@
 #        (bench/selfhost_semantic_declarations.floor), which may only rise. A
 #        file the oracle cannot analyse fails the gate with its reason.
 #        A file the port rejects counts zero and is reported PORT.
+#        One case is not a fall: a file that itself lost declarations, so that
+#        the oracle reports fewer than the floor and the port agrees with every
+#        one. That is FILE SHRANK, and the raise command writes the row down to
+#        the file's own count with a note (section 4b proves both sides).
 #   6. Guarded mutation proofs on the fixtures (bench/lib/mutation.sh).
 #
 # Environment:
-#   SEMDECL_RAISE=1         write the floor up to the measured counts (never lower)
+#   SEMDECL_RAISE=1         write the floor up to the measured counts (a row falls only for FILE SHRANK)
 #   SEMDECL_FILES=<f>       measure only the repo-relative paths listed in <f>
 #   SEMDECL_FLOOR=<f>       read and write this floor file instead of the default
 #
@@ -435,8 +439,9 @@ fi
 
 echo
 echo "== 4. Checking each file against its committed floor"
+# verdicts [results] [verdicts] [floor file]: one verdict row per measured file.
 verdicts() {
-awk -F'\t' -v floorfile="$FLOOR_FILE" -v refusalfile="$REPO/bench/selfhost_semantic_declarations.refusals" -v host="$HOST_OS" '
+awk -F'\t' -v floorfile="${3:-$FLOOR_FILE}" -v refusalfile="$REPO/bench/selfhost_semantic_declarations.refusals" -v host="$HOST_OS" '
   BEGIN {
     while ((getline line < floorfile) > 0) {
       if (line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/) continue
@@ -457,18 +462,21 @@ awk -F'\t' -v floorfile="$FLOOR_FILE" -v refusalfile="$REPO/bench/selfhost_seman
     else if (note ~ /^PORT/ && !(rel in known)) verdict = "PORT"
     else if (note !~ /^PORT/ && (rel in known)) verdict = "STALE REFUSAL"
     else if (!(key in floor)) verdict = "NO FLOOR"
+    else if (matched < floor[key] && nodes > 0 && matched == nodes) verdict = "FILE SHRANK"
     else if (matched < floor[key]) verdict = "BELOW FLOOR"
     else if (matched > floor[key]) verdict = "RAISE THE FLOOR"
     else verdict = "ok"
     fl = (key in floor) ? floor[key] : "-"
     printf "%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n", verdict, corpus, rel, nodes, matched, \
       (nodes > 0 ? sprintf("%.1f%%", 100 * matched / nodes) : "n/a"), fl, note
-  }' "$RESULTS" > "$VERDICTS"
+  }' "${1:-$RESULTS}" > "${2:-$VERDICTS}"
 }
 verdicts
 
-if [ "$RAISE" = 1 ]; then
-  "$PY" - "$(native_path "$VERDICTS")" "$(native_path "$FLOOR_FILE")" "$HOST_OS" <<'PY'
+# write_floor <verdicts> <floor file>: the floor written up to the measured counts. A FILE SHRANK row is written down to
+# its file's own count, with a note.
+write_floor() {
+  "$PY" - "$1" "$2" "$HOST_OS" <<'PY'
 import sys
 verdicts, floor_path, host = sys.argv[1], sys.argv[2], sys.argv[3]
 floor = {}
@@ -490,6 +498,8 @@ try:
 except FileNotFoundError:
     pass
 raised = 0
+shrunk = 0
+SHRANK = "# file shrank: "
 for line in open(verdicts, encoding="utf-8"):
     cols = line.rstrip("\n").split("\t")
     verdict, rel, matched = cols[0], cols[2], int(cols[4])
@@ -497,29 +507,48 @@ for line in open(verdicts, encoding="utf-8"):
         continue
     key = f"{rel}@{host}" if f"{rel}@{host}" in floor else rel
     old = floor.get(key, 0)
-    if matched > old:
+    if verdict == "FILE SHRANK":
+        # The file holds fewer declarations than the row says and the port agrees with every one: the row follows the file.
+        floor[key] = matched
+        kept = [note for note in notes.get(key, []) if not note.startswith(SHRANK)]
+        notes[key] = kept + [f"{SHRANK}the file holds {matched} declarations and every one agrees; this row was {old} while the file held more\n"]
+        shrunk += 1
+    elif matched > old:
         floor[key] = matched
         raised += 1
     elif key not in floor:
         floor[key] = old
 with open(floor_path, "w", encoding="utf-8", newline="\n") as out:
     out.write("# semantic declaration floors: <repo-relative file> <agreeing declarations>, and <repo-relative file>@<host>\n")
-    out.write("# <agreeing declarations> for a file a host measures differently (its platform arms are other code). A count may only rise. Raise with: SEMDECL_RAISE=1 bash bench/selfhost_semantic_declarations_exercise.sh\n")
+    out.write("# <agreeing declarations> for a file a host measures differently (its platform arms are other code). A count may only rise; a row above what its file now holds, every declaration agreeing, is written down to the file and noted (file shrank). Raise with: SEMDECL_RAISE=1 bash bench/selfhost_semantic_declarations_exercise.sh\n")
     for rel in sorted(floor):
         for note in notes.get(rel, []):
             out.write(note)
         out.write(f"{rel} {floor[rel]}\n")
     for note in pending:
         out.write(note)
-print(f"  floor written: {len(floor)} entries, {raised} raised")
+print(f"  floor written: {len(floor)} entries, {raised} raised" + (f", {shrunk} written down to a file that shrank" if shrunk else ""))
 PY
-verdicts
-  fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "ORACLE" || $1 == "PORT" || $1 == "STALE REFUSAL"' "$VERDICTS" | wc -l | tr -d ' ')
-else
-  fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "RAISE THE FLOOR" || $1 == "NO FLOOR" || $1 == "ORACLE" || $1 == "PORT" || $1 == "STALE REFUSAL"' "$VERDICTS" | wc -l | tr -d ' ')
+}
+
+# gate_fails <verdicts> <raise 0|1>: how many rows fail the gate. The raise command rewrites the verdicts from the floor
+# it wrote, so after it only what it cannot settle is left.
+gate_fails() {
+  if [ "$2" = 1 ]; then
+    awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "FILE SHRANK" || $1 == "ORACLE" || $1 == "PORT" || $1 == "STALE REFUSAL"' "$1" | wc -l | tr -d ' '
+  else
+    awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "FILE SHRANK" || $1 == "RAISE THE FLOOR" || $1 == "NO FLOOR" || $1 == "ORACLE" || $1 == "PORT" || $1 == "STALE REFUSAL"' "$1" | wc -l | tr -d ' '
+  fi
+}
+
+if [ "$RAISE" = 1 ]; then
+  write_floor "$(native_path "$VERDICTS")" "$(native_path "$FLOOR_FILE")"
+  verdicts
 fi
+fails=$(gate_fails "$VERDICTS" "$RAISE")
 awk -F'\t' '
   $1 == "BELOW FLOOR"     { printf "  BELOW FLOOR: %s matched %s, floor %s. A regression: restore the declaration or lower nothing.\n", $3, $5, $7 }
+  $1 == "FILE SHRANK"     { printf "  FILE SHRANK: %s holds %s declarations and the port agrees with every one; its floor says %s. The file lost declarations: write the row down to the file (SEMDECL_RAISE=1).\n", $3, $4, $7 }
   $1 == "RAISE THE FLOOR" { printf "  RAISE THE FLOOR: %s matched %s, floor %s. Raise the floor in bench/selfhost_semantic_declarations.floor (SEMDECL_RAISE=1).\n", $3, $5, $7 }
   $1 == "NO FLOOR"        { printf "  NO FLOOR: %s has no floor entry. Add it (SEMDECL_RAISE=1).\n", $3 }
   $1 == "ORACLE"          { printf "  ORACLE FAILED: %s: %s\n", $3, $8 }
@@ -539,6 +568,38 @@ while IFS= read -r rel; do
 done < <(awk -F'\t' '$1 == "BELOW FLOOR" { print $3 }' "$VERDICTS")
 echo "  $fails file(s) below or missing their floor"
 if [ "$fails" -gt 0 ]; then
+  status=1
+fi
+
+echo
+echo "== 4b. A row above what its file holds: FILE SHRANK when every declaration agrees, BELOW FLOOR otherwise"
+SHR_RESULTS="$WORK/shrank_results.tsv"
+SHR_VERDICTS="$WORK/shrank_verdicts.tsv"
+SHR_FLOOR="$WORK/shrank.floor"
+# Four invented files: one that lost a declaration and agrees on all it holds, one the port lost a declaration of, one
+# with nothing left (settled by hand, never automatically), and one at its floor.
+printf 'compiler\tshrank/all_agree.iyi\t25\t25\t\ncompiler\tshrank/one_lost.iyi\t26\t25\t\ncompiler\tshrank/emptied.iyi\t0\t0\t\ncompiler\tshrank/steady.iyi\t25\t25\t\n' > "$SHR_RESULTS"
+printf '# header\n# header\nshrank/all_agree.iyi 26\nshrank/emptied.iyi 3\nshrank/one_lost.iyi 26\nshrank/steady.iyi 25\n' > "$SHR_FLOOR"
+verdicts "$SHR_RESULTS" "$SHR_VERDICTS" "$SHR_FLOOR"
+shr_got=$(awk -F'\t' '{ printf "%s=%s; ", $3, $1 }' "$SHR_VERDICTS")
+shr_want="shrank/all_agree.iyi=FILE SHRANK; shrank/one_lost.iyi=BELOW FLOOR; shrank/emptied.iyi=BELOW FLOOR; shrank/steady.iyi=ok; "
+shr_plain=$(gate_fails "$SHR_VERDICTS" 0)
+if [ "$shr_got" = "$shr_want" ] && [ "$shr_plain" = 3 ]; then
+  echo "  verdicts: a file holding 25, all agreeing, under a floor of 26 is FILE SHRANK; 25 of 26 agreeing is BELOW FLOOR; a file with nothing left is BELOW FLOOR; all three fail a plain run"
+else
+  echo "  FAILED: verdicts were [$shr_got], expected [$shr_want]; rows failing a plain run $shr_plain, expected 3"
+  status=1
+fi
+write_floor "$(native_path "$SHR_VERDICTS")" "$(native_path "$SHR_FLOOR")" > "$WORK/shrank_write.log" 2>&1
+shr_rows=$(awk '!/^#/ { printf "%s=%s; ", $1, $2 }' "$SHR_FLOOR")
+shr_rows_want="shrank/all_agree.iyi=25; shrank/emptied.iyi=3; shrank/one_lost.iyi=26; shrank/steady.iyi=25; "
+shr_noted=$(awk '{ if ($1 == "shrank/all_agree.iyi") print (note ? 1 : 0); note = ($0 ~ /^# file shrank: /) }' "$SHR_FLOOR")
+shr_notes=$(awk '/^# file shrank: / { n++ } END { print n + 0 }' "$SHR_FLOOR")
+if [ "$shr_rows" = "$shr_rows_want" ] && [ "$shr_noted" = 1 ] && [ "$shr_notes" = 1 ]; then
+  echo "  the raise command writes only the shrunken file's row down (26 -> 25) and notes it; the row the port fell below stays 26"
+else
+  echo "  FAILED: rows after the raise command were [$shr_rows], expected [$shr_rows_want]; shrink notes $shr_notes, on the row $shr_noted"
+  cat "$WORK/shrank_write.log"
   status=1
 fi
 

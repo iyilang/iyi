@@ -235,6 +235,10 @@ src/iyi/atomic.iyi 11
 src/iyi/chaos.iyi 79
 src/iyi/chaos_points.iyi 7
 src/iyi/concurrency.iyi 603
+# Windows takes the `{% if flag?(:win32) %}` arm of IyiSchedulerState that declares
+# `@deadline_timer` and `stdin_waiter`: two more instance variables, both agreeing.
+# CI's Windows host (x86-64) measures 605 of 605.
+src/iyi/concurrency.iyi@windows 605
 src/iyi/enum.iyi 16
 src/iyi/file.iyi 9
 src/iyi/float.iyi 74
@@ -242,6 +246,9 @@ src/iyi/hash.iyi 82
 src/iyi/heap_partition.iyi 295
 src/iyi/heap_verify.iyi 87
 src/iyi/io.iyi 56
+# On Windows IyiIO declares `@console` and `@console_carry` in its `{% if flag?(:win32) %}`
+# arm: two more instance variables, both agreeing. The same two records are in the dump of
+# every file that lists IyiIO's instance variables (src/std/io.iyi and src/std/slice.iyi below).
 src/iyi/io.iyi@windows 58
 src/iyi/macros.iyi 1
 src/iyi/number.iyi 35
@@ -309,6 +316,9 @@ src/std/indexable.iyi 64
 src/std/ini.iyi 12
 src/std/int.iyi 10
 src/std/io.iyi 178
+# IyiIO's two Windows-only instance variables (see src/iyi/io.iyi@windows above).
+# CI's Windows host (x86-64) measures 180 of 188.
+src/std/io.iyi@windows 180
 src/std/iterator.iyi 229
 src/std/json.iyi 308
 src/std/kernel.iyi 10
@@ -352,6 +362,9 @@ src/std/shared_proc.iyi 8
 src/std/shlex.iyi 19
 src/std/signal.iyi 20
 src/std/slice.iyi 81
+# IyiIO's two Windows-only instance variables (see src/iyi/io.iyi@windows above).
+# CI's Windows host (x86-64) measures 83 of 83.
+src/std/slice.iyi@windows 83
 src/std/smtp.iyi 70
 src/std/socket.iyi 186
 src/std/sse.iyi 54

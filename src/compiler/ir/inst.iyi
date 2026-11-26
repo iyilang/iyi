@@ -361,6 +361,7 @@ pub class Inst < Value
     count = (bits + 63) // 64
     stored_words = @aux_words
     return stored_words if stored_words && stored_words.size == count
+    return aux_words if count == 0 && stored_words.nil?
     words = [@aux_int, aux_hi] of Int64
     while words.size < count
       words << (words[words.size - 1] < 0_i64 ? -1_i64 : 0_i64)

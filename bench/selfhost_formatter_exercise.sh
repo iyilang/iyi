@@ -584,6 +584,20 @@ run_fixture_proof "empty branch comment indentation bypassed" \
   'skip_space_or_newline(last: true)' \
   "bench/fixtures/formatter_branch_comment.iyi"
 
+run_fixture_proof "if condition comment indentation bypassed" \
+  '    skip_space(@indent + 2)
+    format_nested(a_then)' \
+  '    skip_space
+    format_nested(a_then)' \
+  "bench/fixtures/formatter_branch_comment.iyi"
+
+run_fixture_proof "else header comment indentation bypassed" \
+  '      skip_space(@indent + 2)
+      format_nested(a_else)' \
+  '      skip_space
+      format_nested(a_else)' \
+  "bench/fixtures/formatter_branch_comment.iyi"
+
 run_fixture_proof "macro-if visitor bypassed" \
   "def visit(node : MacroIf) : Bool" \
   "def visit(node : MacroIf) : Bool

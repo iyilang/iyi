@@ -811,7 +811,7 @@ pub class Formatter < Visitor
           write_token(TokenKind::OP_COMMA, " ")
         end
       end
-      skip_space(@indent + 2)
+      skip_space
       if @token.keyword?(Keyword::THEN)
         write_keyword(" ", Keyword::THEN, " ")
         accept(w.body)

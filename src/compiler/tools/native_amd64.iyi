@@ -77,6 +77,26 @@ def forms : Array(Form)
   put(acc, "cmpb $5, %al", alu_imm(7, 8, rax, 5_i64))
   put(acc, "cmpw $300, (%rax)", alu_imm_mem(7, 16, mem_base(rax, 0_i64), 300_i64))
   put(acc, "andq $255, %rdx", alu_imm(4, 64, rdx, 255_i64))
+  # The signed-byte immediate boundary applies to all ALU digits and imul.
+  names = ["add", "or", "adc", "sbb", "and", "sub", "xor", "cmp"]
+  sizes = [16, 32, 64]
+  suffixes = ["w", "l", "q"]
+  destinations = ["%dx", "%edx", "%rdx"]
+  sources = ["%cx", "%ecx", "%rcx"]
+  names.each_with_index do |name, digit|
+    sizes.each_with_index do |size, k|
+      [127_i64, 128_i64, -128_i64, -129_i64].each do |imm|
+        mnemonic = "#{name}#{suffixes[k]}"
+        put(acc, "#{mnemonic} $#{imm}, #{destinations[k]}", alu_imm(digit, size, rdx, imm))
+        put(acc, "#{mnemonic} $#{imm}, (%rax)", alu_imm_mem(digit, size, mem_base(rax, 0_i64), imm))
+      end
+    end
+  end
+  sizes.each_with_index do |size, k|
+    [127_i64, 128_i64, -128_i64, -129_i64].each do |imm|
+      put(acc, "imul#{suffixes[k]} $#{imm}, #{sources[k]}, #{destinations[k]}", imul_imm(size, rdx, rcx, imm))
+    end
+  end
   put(acc, "addq %rbx, 8(%rsp)", with_mem(alu(0, 64, rbx, 0), mem_base(rsp, 8_i64)))
   put(acc, "addq 8(%rsp), %rbx", with_mem(alu_load(0, 64, rbx, 0), mem_base(rsp, 8_i64)))
   put(acc, "testq %rax, %rax", test_rr(64, rax, rax))

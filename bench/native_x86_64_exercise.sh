@@ -136,8 +136,8 @@ with open(f"{work}/forms.s", "w", encoding="utf-8", newline="\n") as f:
     for text, _, _ in rows:
         f.write(text + "\n")
 
-if len(rows) != 113 or sum(len(relocs) for _, _, relocs in rows) != 11:
-    print(f"expected 113 forms with 11 relocations, got {len(rows)} forms with "
+if len(rows) != 317 or sum(len(relocs) for _, _, relocs in rows) != 11:
+    print(f"expected 317 forms with 11 relocations, got {len(rows)} forms with "
           f"{sum(len(relocs) for _, _, relocs in rows)} relocations")
     sys.exit(1)
 
@@ -448,6 +448,16 @@ prove_mutation "win64: a floating-point argument takes the integer slot" src/com
     return win64_sse_args[index]" \
   "  if is_float
     return win64_integer_args[index]" check_abi
+prove_mutation "ALU: +127 does not use the signed-byte immediate form" src/compiler/native/amd64/encode.iyi \
+  "  if imm >= -128 && imm <= 127
+    return with_imm(op_digit(0x83, size, sub, rm), imm, 1)" \
+  "  if imm >= -128 && imm < 127
+    return with_imm(op_digit(0x83, size, sub, rm), imm, 1)" check_encoder
+prove_mutation "imul: +127 does not use the signed-byte immediate form" src/compiler/native/amd64/encode.iyi \
+  "  if imm >= -128 && imm <= 127
+    return with_imm(op_rr(0x6B, size, reg, rm), imm, 1)" \
+  "  if imm >= -128 && imm < 127
+    return with_imm(op_rr(0x6B, size, reg, rm), imm, 1)" check_encoder
 
 if [ "$failed" -eq 0 ]; then
   echo "== ALL X86_64 CHECKS PASSED"

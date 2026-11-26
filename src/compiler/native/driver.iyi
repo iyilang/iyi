@@ -52,8 +52,8 @@ def drop_unreferenced_helpers(mod : Module, obj : ObjectFile) : Nil
   i = 0
   while i < obj.symbols.size
     sym = obj.symbols[i]
-    declared = mod.functions.any? { |fn| fn.name == sym.name }
-    if sym.kind == SymbolKind::Undefined && runtime_helper?(sym.name) && !used[i] && !declared
+    if sym.kind == SymbolKind::Undefined && runtime_helper?(sym.name) && !used[i] &&
+       !mod.functions.any? { |fn| fn.name == sym.name }
       remap << -1
     else
       remap << kept.size

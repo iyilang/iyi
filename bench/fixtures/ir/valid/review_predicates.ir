@@ -1,0 +1,35 @@
+; iyi-ir 1
+source_filename = "review_predicates"
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
+define external i1 @predicates(double %a, double %b, i32 %x, i32 %y) {
+entry:
+  %f0 = fcmp false double %a, %b
+  %f1 = fcmp oeq double %a, %b
+  %f2 = fcmp ogt double %a, %b
+  %f3 = fcmp oge double %a, %b
+  %f4 = fcmp olt double %a, %b
+  %f5 = fcmp ole double %a, %b
+  %f6 = fcmp one double %a, %b
+  %f7 = fcmp ord double %a, %b
+  %f8 = fcmp ueq double %a, %b
+  %f9 = fcmp ugt double %a, %b
+  %f10 = fcmp uge double %a, %b
+  %f11 = fcmp ult double %a, %b
+  %f12 = fcmp ule double %a, %b
+  %f13 = fcmp une double %a, %b
+  %f14 = fcmp uno double %a, %b
+  %f15 = fcmp true double %a, %b
+  %i0 = icmp eq i32 %x, %y
+  %i1 = icmp ne i32 %x, %y
+  %i2 = icmp ugt i32 %x, %y
+  %i3 = icmp uge i32 %x, %y
+  %i4 = icmp ult i32 %x, %y
+  %i5 = icmp ule i32 %x, %y
+  %i6 = icmp sgt i32 %x, %y
+  %i7 = icmp sge i32 %x, %y
+  %i8 = icmp slt i32 %x, %y
+  %i9 = icmp sle i32 %x, %y
+  ret i1 %f2
+}
+

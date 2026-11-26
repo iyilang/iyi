@@ -1,0 +1,704 @@
+module compiler/ir/opt/barrier
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, Block, GepAux, MemAux, CallAux, IntrinsicAux, Ordering, IntPredicate}
+import compiler/ir/function::{Function}
+import compiler/ir/module::{Module}
+import compiler/ir/intrinsics::{IntrinsicId}
+import compiler/ir/opt/analysis::{DefUse}
+import compiler/ir/opt/edit::{new_inst}
+import compiler/ir/opt/effects::{marking_flag_load?}
+import compiler/ir/opt/escape::{partitioned_heap?}
+import compiler/ir/opt/fold::{int_value}
+
+# Bounds keep arithmetic on hostile or malformed type/offset descriptions from
+# overflowing. Refusing such a shape leaves its original barrier intact.
+BARRIER_LIMIT = 1073741824_i64
+
+class BarrierType
+  getter size : Int64
+  getter store : Int64
+  getter align : Int64
+  getter tight : Bool
+  getter offsets : Array(Int64)
+
+  def initialize(@size : Int64, @store : Int64, @align : Int64, @tight : Bool, @offsets : Array(Int64))
+  end
+end
+
+class BarrierAddress
+  getter base : Value
+  getter offset : Int64
+  getter inbounds : Bool
+
+  def initialize(@base : Value, @offset : Int64, @inbounds : Bool)
+  end
+end
+
+# Every possible address has at least `before` bytes to its allocation start
+# and `after` bytes to its end. Phi/select joins take the smaller bounds.
+class BarrierStackSpan
+  getter before : Int64
+  getter after : Int64
+
+  def initialize(@before : Int64, @after : Int64)
+  end
+end
+
+class BarrierRange
+  getter first : Int64
+  getter last : Int64
+
+  def initialize(@first : Int64, @last : Int64)
+  end
+end
+
+class BarrierSequence
+  getter head : Block
+  getter load : Inst
+  getter condition : Inst
+  getter begin_block : Block
+  getter plain_block : Block?
+  getter join : Block
+  getter region : Array(Block)
+  getter tail : Block
+  getter shade_block : Block
+  getter shade : Inst
+  getter done : Block
+  getter words : Int64
+  getter stores : Array(Inst)
+
+  def initialize(@head : Block, @load : Inst, @condition : Inst, @begin_block : Block, @plain_block : Block?, @join : Block, @region : Array(Block), @tail : Block, @shade_block : Block, @shade : Inst, @done : Block, @words : Int64, @stores : Array(Inst))
+  end
+end
+
+class BarrierPass
+  def initialize(@mod : Module, @fn : Function, @begin_fn : Function, @shade_fn : Function)
+    @types = Hash(IrType, BarrierType).new
+    @type_state = Hash(IrType, Int32).new
+    @addresses = Hash(Value, BarrierAddress).new
+    @address_state = Hash(Value, Int32).new
+    @stacks = Hash(Value, BarrierStackSpan).new
+    @stack_state = Hash(Value, Int32).new
+    @constant_state = Hash(Value, Int32).new
+  end
+
+  def ordinary?(inst : Inst) : Bool
+    return false unless inst.aux.is_a?(MemAux)
+    mem = inst.aux.as(MemAux)
+    !mem.volatile && mem.ordering == Ordering::NotAtomic
+  end
+
+  def memory_length(inst : Inst) : Int64?
+    return nil unless inst.op == Op::Intrinsic && inst.aux.is_a?(IntrinsicAux) && inst.args.size == 4
+    id = inst.aux.as(IntrinsicAux).id
+    return nil unless id == IntrinsicId::Memset || id == IntrinsicId::Memcpy || id == IntrinsicId::Memmove
+    return nil unless int_value(inst.args[3]) == 0_i64
+    length = int_value(inst.args[2])
+    return nil if length.nil?
+    length = length.as(Int64)
+    return nil if length <= 0_i64 || length > BARRIER_LIMIT
+    length
+  end
+
+  # Memoized layouts and field offsets make repeated GEPs on a large struct
+  # linear in the type's fields, rather than a field scan per access.
+  def type_info(type : IrType) : BarrierType?
+    if state = @type_state[type]?
+      return @types[type]? if state == 2
+      return nil
+    end
+    @type_state[type] = 1
+    info = build_type(type)
+    if info
+      @types[type] = info
+      @type_state[type] = 2
+    else
+      @type_state[type] = 3
+    end
+    info
+  end
+
+  def build_type(type : IrType) : BarrierType?
+    if type.int?
+      size = ((type.bits + 7) // 8).to_i64
+      align = @mod.layout.int_align(type.bits).to_i64
+      rounded = ((size + align - 1_i64) // align) * align
+      return BarrierType.new(rounded, size, align, size == rounded && type.bits % 8 == 0, [] of Int64)
+    end
+    if type.float?
+      size = (type.bits // 8).to_i64
+      return nil if size <= 0_i64 || size > 16_i64
+      return BarrierType.new(size, size, size, true, [] of Int64)
+    end
+    if type.pointer?
+      size = @mod.layout.pointer_size(type.address_space).to_i64
+      return BarrierType.new(size, size, size, true, [] of Int64)
+    end
+    if type.array?
+      element = type_info(type.element_type)
+      return nil unless element
+      return nil if type.count < 0_i64
+      return nil if element.size > 0_i64 && type.count > BARRIER_LIMIT // element.size
+      size = type.count * element.size
+      return BarrierType.new(size, size, element.align, element.tight && element.size == element.store, [] of Int64)
+    end
+    return nil unless type.struct? && !type.opaque?
+    offset = 0_i64
+    align = 1_i64
+    last_store = 0_i64
+    tight = true
+    offsets = [] of Int64
+    type.fields.each do |field|
+      item = type_info(field)
+      return nil unless item
+      field_align = type.packed_struct? ? 1_i64 : item.align
+      align = field_align if field_align > align
+      next_offset = ((offset + field_align - 1_i64) // field_align) * field_align
+      return nil if next_offset > BARRIER_LIMIT || item.size > BARRIER_LIMIT - next_offset
+      tight = false if next_offset != offset || !item.tight || item.size != item.store
+      offsets << next_offset
+      last_store = next_offset + item.store
+      offset = next_offset + item.size
+    end
+    size = ((offset + align - 1_i64) // align) * align
+    return nil if size > BARRIER_LIMIT
+    tight = false if size != last_store
+    BarrierType.new(size, last_store, align, tight, offsets)
+  end
+
+  # A GEP with constant indices can be checked against the actual ABI layout.
+  def gep_offset(inst : Inst) : Int64?
+    return nil unless inst.aux.is_a?(GepAux) && inst.args.size >= 2
+    type = inst.aux.as(GepAux).source_type
+    info = type_info(type)
+    return nil unless info
+    first = int_value(inst.args[1]) # mutation S9-canonical-gep: sign-extend narrow indices
+    return nil if first.nil?
+    first = first.as(Int64)
+    # fold keeps i1 true as 1, but a GEP sign-extends it to -1.
+    first = -1_i64 if inst.args[1].type.bits == 1 && first == 1_i64 # mutation S9-gep-i1-first: sign-extend i1
+    if info.size > 0_i64
+      return nil if first > BARRIER_LIMIT // info.size || first < -(BARRIER_LIMIT // info.size)
+    end
+    offset = first * info.size
+    index = 2
+    while index < inst.args.size
+      n = int_value(inst.args[index]) # mutation S9-canonical-gep-nested: sign-extend narrow indices
+      return nil if n.nil?
+      n = n.as(Int64)
+      n = -1_i64 if inst.args[index].type.bits == 1 && n == 1_i64 # mutation S9-gep-i1-nested: sign-extend i1
+      if type.struct?
+        return nil if n < 0_i64 || n >= type.fields.size.to_i64
+        info = type_info(type)
+        return nil unless info
+        delta = info.offsets[n.to_i32]
+        type = type.fields[n.to_i32]
+      elsif type.array?
+        return nil if n < 0_i64 || n >= type.count
+        type = type.element_type
+        info = type_info(type)
+        return nil unless info
+        return nil if info.size > 0_i64 && n > BARRIER_LIMIT // info.size
+        delta = n * info.size
+      else
+        return nil
+      end
+      return nil if delta > BARRIER_LIMIT - offset
+      offset = offset + delta
+      return nil if offset < -BARRIER_LIMIT || offset > BARRIER_LIMIT
+      index = index + 1
+    end
+    offset
+  end
+
+  # Same SSA base and a constant offset is enough to compare shade ranges.
+  # A non-inbounds GEP is not proof that different addresses are one object.
+  def address(value : Value) : BarrierAddress?
+    if state = @address_state[value]?
+      return @addresses[value]? if state == 2
+      return nil
+    end
+    @address_state[value] = 1
+    result = address_impl(value)
+    if result
+      @addresses[value] = result
+      @address_state[value] = 2
+    else
+      @address_state[value] = 3
+    end
+    result
+  end
+
+  def address_impl(value : Value) : BarrierAddress?
+    return nil unless value.type.pointer? && value.type.address_space == 0
+    if value.is_a?(Inst)
+      inst = value.as(Inst)
+      if inst.op == Op::BitCast && inst.args.size == 1 && inst.args[0].type.pointer?
+        return address(inst.args[0])
+      end
+      if inst.op == Op::Gep && !inst.args.empty?
+        delta = gep_offset(inst)
+        return nil if delta.nil?
+        base = address(inst.args[0])
+        return nil unless base
+        delta = delta.as(Int64)
+        sum = base.offset + delta
+        return nil if sum < -BARRIER_LIMIT || sum > BARRIER_LIMIT
+        inbounds = inst.aux.is_a?(GepAux) && inst.aux.as(GepAux).inbounds
+        return BarrierAddress.new(base.base, sum, base.inbounds && inbounds)
+      end
+    end
+    BarrierAddress.new(value, 0_i64, true)
+  end
+
+  def stack_span(value : Value) : BarrierStackSpan?
+    if state = @stack_state[value]?
+      return @stacks[value]? if state == 2
+      return nil # cycles and unknown provenance never establish stack ownership
+    end
+    @stack_state[value] = 1
+    result = stack_span_impl(value)
+    if result
+      @stacks[value] = result
+      @stack_state[value] = 2
+    else
+      @stack_state[value] = 3
+    end
+    result
+  end
+
+  def stack_span_impl(value : Value) : BarrierStackSpan?
+    return nil unless value.is_a?(Inst) && value.type.pointer? && value.type.address_space == 0
+    inst = value.as(Inst)
+    if inst.op == Op::Alloca && inst.args.empty? && inst.aux.is_a?(GepAux)
+      info = type_info(inst.aux.as(GepAux).source_type)
+      return nil unless info && info.size > 0_i64
+      return BarrierStackSpan.new(0_i64, info.size)
+    end
+    if inst.op == Op::BitCast && inst.args.size == 1
+      return stack_span(inst.args[0])
+    end
+    if inst.op == Op::Gep && !inst.args.empty?
+      delta = gep_offset(inst)
+      return nil if delta.nil?
+      parent = stack_span(inst.args[0])
+      return nil unless parent
+      delta = delta.as(Int64)
+      return nil if delta < -parent.before || delta > parent.after
+      return BarrierStackSpan.new(parent.before + delta, parent.after - delta)
+    end
+    values = [] of Value
+    if inst.op == Op::Phi
+      values = inst.args
+    elsif inst.op == Op::Select && inst.args.size == 3
+      values = [inst.args[1], inst.args[2]] of Value
+    end
+    return nil if values.empty?
+    before = BARRIER_LIMIT
+    after = BARRIER_LIMIT
+    values.each do |operand|
+      span = stack_span(operand)
+      return nil unless span # mutation S9-stack-all: every incoming operand must be stack-backed
+      before = span.before if span.before < before
+      after = span.after if span.after < after
+    end
+    BarrierStackSpan.new(before, after)
+  end
+
+  def constant_nonpointer?(value : Value) : Bool
+    if state = @constant_state[value]?
+      return state == 2
+    end
+    @constant_state[value] = 1
+    result = constant_nonpointer_impl?(value)
+    @constant_state[value] = result ? 2 : 3
+    result
+  end
+
+  def constant_nonpointer_impl?(value : Value) : Bool
+    return false unless value.is_a?(Inst)
+    inst = value.as(Inst)
+    case inst.op
+    when Op::ConstInt, Op::ConstFloat, Op::ConstNull, Op::ConstZero
+      true
+    when Op::ConstAggregate, Op::ConstBytes
+      inst.args.each { |item| return false unless constant_nonpointer?(item) }
+      true
+    when Op::IntToPtr
+      inst.args.size == 1 && int_value(inst.args[0]) == 0_i64
+    when Op::ConstExpr
+      inst.aux_int == Op::IntToPtr.value.to_i64 && inst.args.size == 1 && int_value(inst.args[0]) == 0_i64
+    else
+      false
+    end
+  end
+
+  def one_pred?(block : Block, pred : Block) : Bool
+    block.preds.size == 1 && block.preds[0] == pred
+  end
+
+  def two_preds?(block : Block, a : Block, b : Block) : Bool
+    return false if a == b || block.preds.size != 2
+    (block.preds[0] == a && block.preds[1] == b) || (block.preds[0] == b && block.preds[1] == a)
+  end
+
+  def has_phi?(block : Block) : Bool
+    !block.insts.empty? && block.insts[0].op == Op::Phi
+  end
+
+  def direct_call?(inst : Inst, function : Function, args : Int32) : Bool
+    return false unless inst.op == Op::Call && inst.args.size == args + 1 && inst.args[0] == function
+    return false unless inst.aux.is_a?(CallAux)
+    call = inst.aux.as(CallAux)
+    call.fn_type == function.fn_type && inst.type.void?
+  end
+
+  def single_branch?(block : Block, target : Block) : Bool
+    block.terminated? && block.terminator.op == Op::Br && block.terminator.targets.size == 1 && block.terminator.targets[0] == target
+  end
+
+  # The two tests must use the same load and cover precisely one begin and one
+  # shade call. No phis or outside edges may depend on a removed block.
+  def match_sequence(head : Block, du : DefUse) : BarrierSequence?
+    return nil if head.insts.size < 3
+    n = head.insts.size
+    load = head.insts[n - 3]
+    condition = head.insts[n - 2]
+    branch = head.insts[n - 1]
+    return nil unless marking_flag_load?(load) && ordinary?(load) && load.type.int? && load.type.bits == 8
+    return nil unless condition.op == Op::ICmp && condition.aux_int == IntPredicate::NE.value.to_i64 && condition.args.size == 2
+    a = condition.args[0]
+    b = condition.args[1]
+    return nil unless (a == load && int_value(b) == 0_i64) || (b == load && int_value(a) == 0_i64)
+    return nil unless du.use_count(load) == 1 && du.use_count(condition) == 2
+    return nil unless branch.op == Op::CondBr && branch.args.size == 1 && branch.args[0] == condition && branch.targets.size == 2
+    begin_block = branch.targets[0]
+    plain = branch.targets[1]
+    return nil if begin_block == head || plain == head || begin_block == plain
+    return nil unless one_pred?(begin_block, head) && begin_block.insts.size == 2
+    return nil unless direct_call?(begin_block.insts[0], @begin_fn, 0) # mutation S9-sequence-shape: begin must be direct
+    return nil unless begin_block.terminated? && begin_block.terminator.op == Op::Br && begin_block.terminator.targets.size == 1
+    join = begin_block.terminator.targets[0]
+    return nil if join == head || join == begin_block || has_phi?(join)
+    plain_block = nil.as(Block?)
+    if plain == join
+      return nil unless two_preds?(join, begin_block, head)
+    else
+      return nil unless one_pred?(plain, head) && plain.insts.size == 1 && single_branch?(plain, join)
+      return nil unless two_preds?(join, begin_block, plain)
+      plain_block = plain
+    end
+    region = [] of Block
+    stores = [] of Inst
+    seen = Hash(Block, Bool).new
+    block = join
+    loop do
+      return nil if seen.has_key?(block)
+      seen[block] = true
+      region << block
+      return nil unless block.terminated? && !has_phi?(block)
+      k = 0
+      while k < block.insts.size - 1
+        inst = block.insts[k]
+        if inst.op == Op::Store
+          return nil unless inst.args.size == 2 && ordinary?(inst)
+          stores << inst
+        elsif inst.op == Op::Intrinsic
+          return nil if memory_length(inst).nil?
+          stores << inst
+        elsif inst.op != Op::Gep && inst.op != Op::BitCast
+          return nil
+        end
+        k = k + 1
+      end
+      term = block.terminator
+      if term.op == Op::Br && term.targets.size == 1
+        next_block = term.targets[0]
+        return nil unless one_pred?(next_block, block)
+        block = next_block
+        next
+      end
+      return nil unless term.op == Op::CondBr && term.args.size == 1 && term.args[0] == condition && term.targets.size == 2
+      shade_block = term.targets[0]
+      done = term.targets[1]
+      return nil if stores.empty? || shade_block == done || shade_block == head || done == head
+      return nil if seen.has_key?(shade_block) || seen.has_key?(done) || shade_block == begin_block || done == begin_block
+      return nil if plain_block && (shade_block == plain_block || done == plain_block)
+      return nil unless one_pred?(shade_block, block) && shade_block.insts.size == 2 && single_branch?(shade_block, done)
+      shade = shade_block.insts[0]
+      return nil unless direct_call?(shade, @shade_fn, 2)
+      words = int_value(shade.args[2])
+      return nil if words.nil?
+      words = words.as(Int64)
+      return nil if words < 1_i64 || words > BARRIER_LIMIT // 8_i64
+      return nil unless two_preds?(done, block, shade_block) && !has_phi?(done)
+      return BarrierSequence.new(head, load, condition, begin_block, plain_block, join, region, block, shade_block, shade, done, words, stores)
+    end
+  end
+
+  def stack_sequence?(seq : BarrierSequence) : Bool
+    span = stack_span(seq.shade.args[1])
+    return false unless span && span.after >= seq.words * 8_i64
+    seq.stores.each do |store|
+      if store.op == Op::Store
+        info = type_info(store.args[0].type)
+        address = stack_span(store.args[1])
+        return false unless info && info.store > 0_i64 && address && address.after >= info.store
+      else
+        length = memory_length(store)
+        address = stack_span(store.args[0])
+        return false if length.nil?
+        return false unless address
+        return false if address.after < length.as(Int64)
+      end
+    end
+    true
+  end
+
+  # A partial-word store cannot establish what the barrier would read from the
+  # rest of that word. Demand complete constant coverage, without padding.
+  def constant_sequence?(seq : BarrierSequence) : Bool
+    shade = address(seq.shade.args[1])
+    return false unless shade
+    finish = shade.offset + seq.words * 8_i64
+    return false if finish > BARRIER_LIMIT
+    ranges = [] of BarrierRange
+    seq.stores.each do |store|
+      if store.op == Op::Store
+        return false unless constant_nonpointer?(store.args[0]) # mutation S9B1: only pointer-free stored values
+        type = type_info(store.args[0].type)
+        return false unless type && type.tight # mutation S9-constant-tight: padding is not a constant store
+        length = type.store
+        destination = store.args[1]
+      else
+        return false unless store.aux.as(IntrinsicAux).id == IntrinsicId::Memset && int_value(store.args[1]) == 0_i64 # mutation S9-memset-byte: only zero fill is pointer-free
+        length = memory_length(store)
+        return false if length.nil?
+        length = length.as(Int64)
+        destination = store.args[0]
+      end
+      dest = address(destination)
+      return false unless length > 0_i64 && dest && dest.base == shade.base                                      # mutation S9-constant-base: stored bytes must belong to the shaded base
+      return false unless dest.offset >= shade.offset && dest.offset <= finish && length <= finish - dest.offset # mutation S9-constant-contained: stores stay within the shade
+      ranges << BarrierRange.new(dest.offset, dest.offset + length)
+    end
+    ranges.sort_in_place do |a, b|
+      if a.first < b.first
+        -1
+      elsif a.first > b.first
+        1
+      else
+        0
+      end
+    end
+    cursor = shade.offset
+    ranges.each do |range|
+      return false if range.first > cursor # mutation S9-constant-gap: coverage cannot skip bytes
+      cursor = range.last if range.last > cursor
+    end
+    cursor == finish # mutation S9-constant-full: coverage must reach the end of the shade
+  end
+
+  def removable?(seq : BarrierSequence, stack_only : Bool) : Bool
+    stack = stack_sequence?(seq)
+    return stack if stack_only # mutation S9B2: early pass must not remove a heap barrier
+    stack || constant_sequence?(seq)
+  end
+
+  # Each original store must lie within the original shade range. The union
+  # then reads only words that one of the two original barriers would read.
+  def covered?(seq : BarrierSequence, shade : BarrierAddress) : Bool
+    finish = shade.offset + seq.words * 8_i64
+    return false if finish > BARRIER_LIMIT
+    seq.stores.each do |store|
+      return false unless store.op == Op::Store
+      info = type_info(store.args[0].type)
+      dest = address(store.args[1])
+      return false unless info && info.store > 0_i64 && dest && dest.base == shade.base
+      return false unless dest.offset >= shade.offset && dest.offset <= finish && info.store <= finish - dest.offset
+    end
+    true
+  end
+
+  def add_region_defs(seq : BarrierSequence, forbidden : Hash(Value, Bool)) : Nil
+    seq.region.each { |block| block.insts.each { |inst| forbidden[inst] = true } }
+  end
+
+  def stores_preexist?(seq : BarrierSequence, forbidden : Hash(Value, Bool)) : Bool
+    seq.stores.each do |store|
+      return false if forbidden.has_key?(store.args[0]) # mutation S9B3: values must be live at a stop before the bracket
+    end
+    true
+  end
+
+  def add_head_arithmetic?(seq : BarrierSequence, forbidden : Hash(Value, Bool)) : Bool
+    k = 0
+    while k < seq.head.insts.size - 3
+      inst = seq.head.insts[k]
+      return false unless inst.op == Op::Gep || inst.op == Op::BitCast # mutation S9-merge-call: no calls between brackets
+      forbidden[inst] = true
+      k = k + 1
+    end
+    true
+  end
+
+  def branch(target : Block) : Inst
+    new_inst(Op::Br, @mod.types.void, [] of Value, 0_i64, nil, [target] of Block)
+  end
+
+  def conditional(condition : Inst, yes : Block, no : Block) : Inst
+    new_inst(Op::CondBr, @mod.types.void, [condition] of Value, 0_i64, nil, [yes, no] of Block)
+  end
+
+  def discard_sequence(seq : BarrierSequence, replacements : Hash(Inst, Inst), erased : Hash(Inst, Bool), removed : Hash(Block, Bool)) : Nil
+    replacements[seq.head.terminator] = branch(seq.join)
+    replacements[seq.tail.terminator] = branch(seq.done)
+    erased[seq.load] = true
+    erased[seq.condition] = true
+    removed[seq.begin_block] = true
+    if plain = seq.plain_block
+      removed[plain] = true
+    end
+    removed[seq.shade_block] = true
+  end
+
+  def run(stack_only : Bool) : Bool
+    du = DefUse.new(@fn)
+    sequences = [] of BarrierSequence
+    by_head = Hash(Block, BarrierSequence).new
+    @fn.blocks.each do |block|
+      if seq = match_sequence(block, du)
+        sequences << seq
+        by_head[block] = seq
+      end
+    end
+    return false if sequences.empty?
+    replacements = Hash(Inst, Inst).new
+    erased = Hash(Inst, Bool).new
+    removed = Hash(Block, Bool).new
+    discarded = Hash(BarrierSequence, Bool).new
+    sequences.each do |seq|
+      if removable?(seq, stack_only)
+        discard_sequence(seq, replacements, erased, removed)
+        discarded[seq] = true
+      end
+    end
+    unless stack_only
+      claimed = Hash(BarrierSequence, Bool).new
+      sequences.each do |first|
+        next if discarded.has_key?(first) || claimed.has_key?(first)
+        first_address = address(first.shade.args[1])
+        next unless first_address && covered?(first, first_address)
+        forbidden = Hash(Value, Bool).new
+        add_region_defs(first, forbidden)
+        next unless stores_preexist?(first, forbidden)
+        claimed[first] = true
+        current = first
+        lower = first_address.offset
+        upper = lower + first.words * 8_i64
+        low_address = first.shade.args[1]
+        same_object = first_address.inbounds
+        loop do
+          following = by_head[current.done]?
+          break unless following && !discarded.has_key?(following) && !claimed.has_key?(following)
+          break unless add_head_arithmetic?(following, forbidden)
+          add_region_defs(following, forbidden)
+          break unless stores_preexist?(following, forbidden)
+          next_address = address(following.shade.args[1])
+          break unless next_address && next_address.base == first_address.base && covered?(following, next_address) # mutation S9-merge-base: both shades share a base
+          next_lower = next_address.offset
+          next_upper = next_lower + following.words * 8_i64
+          break if next_upper > BARRIER_LIMIT || (next_lower - lower) % 8_i64 != 0_i64
+          break if next_lower > upper || next_upper < lower                        # mutation S9-merge-gap: the union cannot shade untouched words
+          break if next_lower != lower && (!same_object || !next_address.inbounds) # mutation S9-merge-inbounds: differing addresses must stay in one object
+          if next_lower < lower
+            lower = next_lower
+            low_address = following.shade.args[1]
+          end
+          upper = next_upper if next_upper > upper
+          same_object = same_object && next_address.inbounds
+          replacements[current.tail.terminator] = branch(current.done)
+          removed[current.shade_block] = true
+          replacements[following.head.terminator] = branch(following.join)
+          erased[following.load] = true
+          erased[following.condition] = true
+          removed[following.begin_block] = true
+          if plain = following.plain_block
+            removed[plain] = true
+          end
+          replacements[following.tail.terminator] = conditional(first.condition, following.shade_block, following.done)
+          following.shade.args[1] = low_address
+          union_words = (upper - lower) // 8_i64 # mutation S9B5: shade the union
+          following.shade.args[2] = new_inst(Op::ConstInt, @mod.types.int64, [] of Value, union_words)
+          claimed[following] = true
+          current = following
+        end
+      end
+    end
+    return false if replacements.empty?
+    blocks = [] of Block
+    @fn.blocks.each do |block|
+      next if removed.has_key?(block)
+      insts = [] of Inst
+      block.insts.each do |inst|
+        next if erased.has_key?(inst)
+        if replacement = replacements[inst]?
+          insts << replacement
+        else
+          insts << inst
+        end
+      end
+      block.insts[0, block.insts.size] = insts
+      blocks << block
+    end
+    @fn.blocks[0, @fn.blocks.size] = blocks
+    @fn.relink
+    true
+  end
+end
+
+# Avoid allocating def-use and layout tables for functions with no candidate.
+def barrier_head?(fn : Function) : Bool
+  fn.blocks.each do |block|
+    count = block.insts.size
+    next if count < 3
+    return true if block.insts[count - 1].op == Op::CondBr && marking_flag_load?(block.insts[count - 3])
+  end
+  false
+end
+
+# Both entry points share the same module guard and shape matcher. The early
+# pass is deliberately narrower: it never removes or merges a heap barrier.
+def run_barrier_mode(mod : Module, fn : Function, stack_only : Bool, partitioned : Bool) : Bool
+  return false if partitioned # mutation S9B4: partition publication needs the untouched barrier
+  return false if fn.declaration? || mod.layout.pointer_bytes != 8
+  begin_fn = mod.get_function?("__iyi_write_barrier_begin")
+  shade_fn = mod.get_function?("__iyi_write_barrier")
+  return false unless begin_fn && shade_fn && !begin_fn.declaration? && !shade_fn.declaration?
+  begin_type = begin_fn.fn_type
+  shade_type = shade_fn.fn_type
+  return false unless begin_type.return_type.void? && begin_type.param_types.empty? && !begin_type.varargs?
+  return false unless shade_type.return_type.void? && shade_type.param_types.size == 2 && !shade_type.varargs?
+  return false unless shade_type.param_types[0].pointer? && shade_type.param_types[0].address_space == 0
+  return false unless shade_type.param_types[1].int? && shade_type.param_types[1].bits == 64
+  return false unless barrier_head?(fn)
+  BarrierPass.new(mod, fn, begin_fn, shade_fn).run(stack_only)
+end
+
+pub def run_stack_barrier_checked(mod : Module, fn : Function, partitioned : Bool) : Bool
+  run_barrier_mode(mod, fn, true, partitioned)
+end
+
+pub def run_barrier_checked(mod : Module, fn : Function, partitioned : Bool) : Bool
+  run_barrier_mode(mod, fn, false, partitioned)
+end
+
+pub def run_stack_barrier(mod : Module, fn : Function) : Bool
+  run_stack_barrier_checked(mod, fn, partitioned_heap?(mod))
+end
+
+pub def run_barrier(mod : Module, fn : Function) : Bool
+  run_barrier_checked(mod, fn, partitioned_heap?(mod))
+end

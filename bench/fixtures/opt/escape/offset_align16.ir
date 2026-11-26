@@ -1,0 +1,12 @@
+; iyi-ir 1
+source_filename = "escape_offset_align16"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i128 @aligned_offset() {
+entry:
+  %p = call ptr (i64, i64, i64) @__iyi_new(i64 32, i64 3, i64 2)
+  %offset = getelementptr i8, ptr %p, i64 8
+  %value = load i128, ptr %offset, align 16
+  ret i128 %value
+}

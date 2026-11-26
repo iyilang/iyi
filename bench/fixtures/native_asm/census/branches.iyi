@@ -1,0 +1,46 @@
+# Inline assembly in every shape of macro branch the census reads, one site to a line, each with a template of its own:
+# `movz w0, #N`, N the site's number. Which sites a target compiles is not for the scanner to say. The asm gate
+# (bench/native_asm_exercise.sh) asks the hosted compiler: it builds this program for each target with --emit llvm-ir and
+# requires the scanner to keep exactly the templates found in that IR. It also requires the scanner's count of expressions
+# to be the count of lines that name the call, whatever branch they are in. Nothing else in this file names it, so the two
+# counts differ only if the scanner misses a site or counts one that is not there.
+#
+# For aarch64-apple-darwin sites 2, 6, 7 and 8 are live, and for aarch64-linux-gnu 1, 3 and 5. For every other target the
+# outer branch is dead, and no site is. Site 10 is live for none.
+@[Unsafe("inline assembly marks which macro branches the compiler took")]
+module fixtures/native_asm/census/branches
+
+def sites : Nil
+  {% if flag?(:aarch64) %}
+    {% unless flag?(:darwin) %}
+      asm("movz w0, #1" ::: "x0" : "volatile")
+    {% end %}
+    {% if flag?(:darwin) %}
+      asm("movz w0, #2" ::: "x0" : "volatile")
+    {% elsif flag?(:linux) %}
+      asm("movz w0, #3" ::: "x0" : "volatile")
+    {% else %}
+      asm("movz w0, #4" ::: "x0" : "volatile")
+    {% end %}
+    {% unless flag?(:darwin) && flag?(:aarch64) %}
+      asm("movz w0, #5" ::: "x0" : "volatile")
+    {% else %}
+      asm("movz w0, #6" ::: "x0" : "volatile")
+    {% end %}
+    {% if !flag?(:linux) || flag?(:wasm32) %}
+      asm("movz w0, #7" ::: "x0" : "volatile")
+    {% end %}
+    {% unless flag?(:linux) %}
+      {% if flag?(:darwin) %}
+        asm("movz w0, #8" ::: "x0" : "volatile")
+      {% else %}
+        asm("movz w0, #9" ::: "x0" : "volatile")
+      {% end %}
+    {% end %}
+    {% if false %}
+      asm("movz w0, #10" ::: "x0" : "volatile")
+    {% end %}
+  {% end %}
+end
+
+sites

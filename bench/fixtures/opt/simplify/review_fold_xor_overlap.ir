@@ -1,0 +1,49 @@
+; iyi-ir 1
+source_filename = "review_fold_xor_overlap"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal i1 @xor_i1() {
+entry:
+  %r = xor i1 true, true
+  ret i1 %r
+}
+define internal i7 @xor_i7() {
+entry:
+  %r = xor i7 3, 5
+  ret i7 %r
+}
+define internal i8 @xor_i8() {
+entry:
+  %r = xor i8 3, 5
+  ret i8 %r
+}
+define internal i8 @xor_i8_negative() {
+entry:
+  %r = xor i8 -1, 1
+  ret i8 %r
+}
+define internal i16 @xor_i16() {
+entry:
+  %r = xor i16 3, 5
+  ret i16 %r
+}
+define internal i32 @xor_i32() {
+entry:
+  %r = xor i32 3, 5
+  ret i32 %r
+}
+define internal i33 @xor_i33() {
+entry:
+  %r = xor i33 3, 5
+  ret i33 %r
+}
+define internal i64 @xor_i64() {
+entry:
+  %r = xor i64 3, 5
+  ret i64 %r
+}
+define internal i64 @xor_i64_negative() {
+entry:
+  %r = xor i64 -1, 1
+  ret i64 %r
+}

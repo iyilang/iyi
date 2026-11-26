@@ -1,0 +1,41 @@
+; iyi-ir 1
+module "unsigned_shift"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @shift8(i8 %x) {
+entry:
+  %r = lshr i8 %x, 1
+  %v = zext i8 %r to i64
+  ret i64 %v
+}
+define internal i64 @shift16(i16 %x) {
+entry:
+  %r = lshr i16 %x, 1
+  %v = zext i16 %r to i64
+  ret i64 %v
+}
+define internal i64 @shift32(i32 %x) {
+entry:
+  %r = lshr i32 %x, 1
+  %v = zext i32 %r to i64
+  ret i64 %v
+}
+define i32 @main() {
+entry:
+  %a = call i64 (i8) @shift8(i8 -1)
+  %b = call i64 (i8) @shift8(i8 -128)
+  %c = call i64 (i16) @shift16(i16 -1)
+  %d = call i64 (i16) @shift16(i16 -32768)
+  %e = call i64 (i32) @shift32(i32 -1)
+  %f = call i64 (i32) @shift32(i32 -2147483648)
+  %p0 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %a)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %c)
+  %p3 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %d)
+  %p4 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %e)
+  %p5 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %f)
+  ret i32 0
+}

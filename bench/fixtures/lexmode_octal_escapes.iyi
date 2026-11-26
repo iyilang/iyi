@@ -1,0 +1,3 @@
+# Octal escapes take up to three digits, as the hosted lexer reads them.
+puts "\101\102\103"
+puts "\60\7\77"

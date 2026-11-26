@@ -1,0 +1,2 @@
+module fp_result_call
+puts "11"

@@ -1,0 +1,37 @@
+module dead_spills
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass, Role}
+import compiler/native/target::{is_role?}
+import compiler/native/regalloc_linear::{allocate_linear}
+
+fn = MFunction.new("dead_spills")
+b = MBlock.new(0, "entry")
+fn.blocks << b
+live = [] of Int32
+i = 0
+while i < 19
+  v = fn.new_vreg(RegClass::Gpr)
+  live << v
+  m = MInst.new(MOp::MovImm.value.to_i32)
+  m.defs << Operand.new(OperandKind::Virtual, v)
+  b.insts << m
+  i = i + 1
+end
+i = 0
+while i < 7
+  v = fn.new_vreg(RegClass::Gpr)
+  m = MInst.new(MOp::MovImm.value.to_i32)
+  m.defs << Operand.new(OperandKind::Virtual, v)
+  b.insts << m
+  i = i + 1
+end
+live.each do |v|
+  m = MInst.new(MOp::CmpImm.value.to_i32)
+  m.uses << Operand.new(OperandKind::Virtual, v)
+  b.insts << m
+end
+allocate_linear(fn)
+stores = 0
+b.insts.each do |m|
+  stores = stores + 1 if is_role?(fn.isa, m, Role::SlotStore)
+end
+puts stores

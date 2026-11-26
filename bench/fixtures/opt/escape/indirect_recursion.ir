@@ -1,0 +1,29 @@
+; iyi-ir 1
+source_filename = "escape_indirect_recursion"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal ptr @__iyi_new(i64 %size, i64 %type_id, i64 %flags) {
+entry:
+  ret ptr null
+}
+define internal i64 @visit(ptr %self, i64 %depth) {
+entry:
+  %obj = call ptr (i64, i64, i64) @__iyi_new(i64 512, i64 7, i64 2)
+  %f = getelementptr i8, ptr %obj, i64 8
+  store i64 %depth, ptr %f, align 8
+  %stop = icmp eq i64 %depth, 0
+  br i1 %stop, label %leaf, label %down
+down:
+  %d = sub i64 %depth, 1
+  %r = call i64 (ptr, i64) %self(ptr %self, i64 %d)
+  %v = load i64, ptr %f, align 8
+  %s = add i64 %r, %v
+  ret i64 %s
+leaf:
+  ret i64 0
+}
+define external i64 @start(i64 %depth) {
+entry:
+  %r = call i64 (ptr, i64) @visit(ptr @visit, i64 %depth)
+  ret i64 %r
+}

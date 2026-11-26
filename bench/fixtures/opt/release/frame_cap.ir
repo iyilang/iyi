@@ -1,0 +1,19 @@
+; iyi-ir 1
+source_filename = "release_frame_cap"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+define internal ptr @__iyi_new(i64 %size, i64 %tid, i64 %flags) {
+entry:
+  ret ptr null
+}
+define external void @frame_cap() {
+entry:
+  br label %body
+body:
+  %p0 = call ptr (i64, i64, i64) @__iyi_new(i64 512, i64 1, i64 2)
+  %p1 = call ptr (i64, i64, i64) @__iyi_new(i64 512, i64 1, i64 2)
+  %p2 = call ptr (i64, i64, i64) @__iyi_new(i64 512, i64 1, i64 2)
+  %p3 = call ptr (i64, i64, i64) @__iyi_new(i64 512, i64 1, i64 2)
+  %p4 = call ptr (i64, i64, i64) @__iyi_new(i64 512, i64 1, i64 2)
+  ret void
+}

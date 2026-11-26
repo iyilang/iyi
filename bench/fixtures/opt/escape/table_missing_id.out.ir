@@ -1,0 +1,16 @@
+; iyi-ir 1
+source_filename = "escape_table_missing_id"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+%Record = type { ptr, i64 }
+@"__iyi_gc_layouts:table" = internal constant [7 x i64] [ i64 1, i64 2, i64 16, i64 16, i64 1, i64 0, i64 1 ]
+@__iyi_gc_layouts = internal constant ptr @"__iyi_gc_layouts:table"
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i64 @missing_id(ptr %heap) {
+entry:
+  %0 = alloca %Record, align 16
+  intrinsic llvm.memset.p0.i64(ptr %0, i8 0, i64 16, i1 false)
+  store ptr %heap, ptr %0, align 8
+  %v = load i64, ptr %0, align 8
+  ret i64 %v
+}

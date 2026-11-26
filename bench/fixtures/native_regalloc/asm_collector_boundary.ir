@@ -1,0 +1,30 @@
+; iyi-ir 1
+module "asm_collector_boundary"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+declare external ptr @malloc(i64)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal void @collector_boundary() {
+entry:
+  ret void
+}
+
+define internal i64 @hold(ptr %p) {
+entry:
+  %bits = ptrtoint ptr %p to i64
+  %f = bitcast i64 %bits to double
+  call void () asm sideeffect "bl collector_boundary", "~{x30},~{d0},~{d1},~{d2},~{d3},~{d4},~{d5},~{d6},~{d7},~{d9},~{d10},~{d11},~{d12},~{d13},~{d14},~{d15},~{d16},~{d17},~{d18},~{d19},~{d20},~{d21},~{d22},~{d23},~{d24},~{d25},~{d26},~{d27},~{d28},~{d29},~{d30},~{d31}"()
+  call void (double) asm sideeffect "nop", "{d8}"(double %f)
+  ret i64 123
+}
+
+define i32 @main() {
+entry:
+  %p = call ptr (i64) @malloc(i64 8)
+  store i64 123, ptr %p, align 8
+  %value = call i64 (ptr) @hold(ptr %p)
+  %out = call i32 (ptr, ...) @printf(ptr @fmt, i64 %value)
+  ret i32 0
+}

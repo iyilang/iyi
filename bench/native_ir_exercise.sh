@@ -449,6 +449,12 @@ ptrtoint_check() {
   out=$("$bin" verify bench/fixtures/ir/bad/ptrtoint_aggregate.ir 2>&1) && return 1
   echo "$out" | grep -q 'error\[types\].*ptrtoint needs a pointer operand and integer result'
 }
+# The same-width trunc fixture must be refused under types. Non-zero when it is accepted or refused another way.
+trunc_same_width_check() {
+  local bin="$1" out
+  out=$("$bin" verify bench/fixtures/ir/bad/review_trunc_same_width.ir 2>&1) && return 1
+  echo "$out" | grep -q 'error\[types\].*trunc must narrow an integer'
+}
 
 
 # The named-struct C-convention fixture must be refused under cc-lowered. Non-zero when it is accepted or refused another way.
@@ -836,6 +842,11 @@ prove_mutation "verifier: ptrtoint accepts an aggregate operand" \
   'unless operand_type(i.args[0]).pointer? && i.type.int?' \
   'unless true' \
   ptrtoint_check
+prove_mutation "verifier: a trunc to the width it has is accepted" \
+  src/compiler/ir/verifier.iyi \
+  'i.type.bits < operand_type(i.args[0]).bits' \
+  'i.type.bits <= operand_type(i.args[0]).bits' \
+  trunc_same_width_check
 prove_mutation "verifier: a call no longer kills thread-local values" \
   src/compiler/ir/verifier.iyi \
   '    if i.op == Op::Call || i.op == Op::Invoke' \

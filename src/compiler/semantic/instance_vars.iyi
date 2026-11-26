@@ -8,6 +8,11 @@ import compiler/semantic/top_level::{ClassType, DeclaredIvar, GenericClassType, 
 import compiler/semantic/top_level::{InstanceVarInitializer, MetaclassType}
 import compiler/syntax/ast::{VisibilityModifier}
 import compiler/semantic/type_nodes::{type_node_system}
+import compiler/semantic/method_lookup::{MethodLookup}
+import compiler/semantic/match::{CallSignature}
+import compiler/semantic/restrictions::{ArgRestriction}
+import compiler/types/lookup::{LookupError}
+import compiler/types/types::{NamedArgumentType, TypeQueries}
 
 # Instance variables typed only by assignment, as the hosted front end declares
 # them in its type declaration processor (`type_guess_visitor.cr` guesses each
@@ -21,9 +26,9 @@ import compiler/semantic/type_nodes::{type_node_system}
 # root of the class hierarchy down, so a superclass's variables are known first.
 #
 # Skipped, and so not declared here: guesses whose value needs a type this pass
-# cannot compute (a call with arguments, a named array literal, a hash literal,
-# a block), module variables and the `macro def` and `.iyimod`
-# exemptions.
+# cannot compute (a call whose receiver or argument has no guessed type, a call
+# that takes a block, a named array literal, a hash literal), module variables
+# and the `macro def` and `.iyimod` exemptions.
 
 pub class GuessedIvar
   property type : Type
@@ -381,7 +386,58 @@ class GuessVisitor < Visitor
         end
       end
     end
+    # Hosted type_guess_visitor.cr:741-760 (guess_type_call_with_type_annotation): a call on a receiver
+    # that is an expression is answered with the types its matching defs declare for their return.
+    # A global call takes the class-method path, which this pass does not port.
+    if obj && !obj.is_a?(Path) && !obj.is_a?(Generic) && !node.global
+      if receiver = guess_type(obj)
+        return guess_from_method(receiver, node)
+      end
+    end
     nil
+  end
+
+  # Hosted type_guess_visitor.cr:835-881 (guess_type_from_method). A block, or an argument whose type is not
+  # guessed, declines. Every match that declares its return type answers; a return type that does not
+  # resolve is dropped, as hosted compact_map drops it, and no declared return type declines.
+  def guess_from_method(receiver : Type, node : Call) : Type?
+    return nil if node.block || node.block_arg
+    arg_types = [] of Type
+    node.args.each do |arg|
+      found = guess_type(arg)
+      return nil if found.nil?
+      arg_types << found.as(Type)
+    end
+    named_types : Array(NamedArgumentType)? = nil
+    if named_args = node.named_args
+      listed = [] of NamedArgumentType
+      named_args.each do |named|
+        found = guess_type(named.value)
+        return nil if found.nil?
+        listed << NamedArgumentType.new(named.name, found.as(Type))
+      end
+      named_types = listed
+    end
+    ts = type_node_system(@program)
+    matches = MethodLookup.lookup_receiver(receiver, ts, CallSignature.new(node.name, arg_types, named_types, false))
+    return nil if matches.error
+    returned = [] of Type
+    matches.matches.each do |match|
+      declared = match.definition.return_type
+      next if declared.nil?
+      resolved = ArgRestriction.lookup_free(ts, match.defining, declared.as(ASTNode), match.owner, match.bound)
+      next if resolved.is_a?(LookupError)
+      returned << resolved.as(Type)
+    end
+    return nil if returned.empty?
+    merged = returned[0]
+    i = 1
+    while i < returned.size
+      merged = @program.type_merge(merged, returned[i])
+      i = i + 1
+    end
+    return nil if TypeQueries.unbound?(merged)
+    merged
   end
 
   def merge_guesses(first : Type?, second : Type?) : Type?

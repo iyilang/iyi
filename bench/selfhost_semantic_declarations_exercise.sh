@@ -927,6 +927,23 @@ prove_mutation "a generic class's guessed instance variables are not declared on
   "if og.owner.is_a?(NonGenericClassType)" \
   -- check_decl_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+prove_mutation "a call on an instance variable does not infer the variable's type" "$MUT_IVARS" \
+  '    if obj && !obj.is_a?(Path) && !obj.is_a?(Generic) && !node.global' \
+  '    if false' \
+  -- check_decl_fixtures_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+prove_mutation "a call that takes a block is guessed anyway" "$MUT_IVARS" \
+  '    return nil if node.block || node.block_arg' \
+  '    nil' \
+  -- check_decl_fixtures_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+prove_mutation "an argument whose type is not guessed is taken as Int32" "$MUT_IVARS" \
+  '      return nil if found.nil?
+      arg_types << found.as(Type)' \
+  '      found = @program.int32_type if found.nil?
+      arg_types << found.as(Type)' \
+  -- check_decl_fixtures_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "an explicit generic instance variable keeps the unbound generic" "$MUT_IVARS" \
   "  type_node_system(program)" \
   "  nil" \

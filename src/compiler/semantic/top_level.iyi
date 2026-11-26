@@ -2010,6 +2010,7 @@ pub class SemanticProgram < NonGenericModuleType
     @current_imports = saved
     nil
   end
+
   # A type system can already exist when an imported restriction is recorded.
   # Retry those restrictions when the declaring visitor finishes a later file.
   def resolve_deferred_class_vars : Nil

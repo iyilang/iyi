@@ -15,7 +15,7 @@ import compiler/native/obj/macho::{write_object}
 import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass}
 import compiler/native/mir_clean::{fold_result_copies, elide_fallthrough}
 import compiler/native/aarch64/regs::{reg_name}
-import compiler/native/target::{op_name}
+import compiler/native/target::{op_name, TargetDesc}
 import compiler/native/jump_table::{declare_jump_tables, place_jump_tables, jump_table_section_name}
 import compiler/native/aarch64/isel::{select_function, IselError}
 import compiler/native/aarch64/encode::{encode_function, EncodedFunction, EncodeError}
@@ -118,8 +118,9 @@ pub def symbol_table(mod : Module, obj : ObjectFile) : Hash(String, Int32)
 end
 
 # The MIR of one function after allocation and frame layout: what the encoder receives.
-pub def function_mir(mod : Module, fn : Function, syms : Hash(String, Int32), darwin : Bool) : MFunction | String
-  selected = select_function(mod, fn, syms, darwin)
+pub def function_mir(mod : Module, fn : Function, syms : Hash(String, Int32), darwin : Bool, target : TargetDesc? = nil) : MFunction | String
+  desc = target || aarch64_target(darwin)
+  selected = select_function(mod, fn, syms, darwin, desc)
   if selected.is_a?(IselError)
     return selected.as(IselError).message
   end
@@ -132,7 +133,7 @@ pub def function_mir(mod : Module, fn : Function, syms : Hash(String, Int32), da
     end
     return mf
   end
-  lay_out(mf, aarch64_target(darwin).stack_align)
+  lay_out(mf, desc.stack_align)
   elide_fallthrough(mf)
   mf
 end
@@ -153,7 +154,7 @@ pub def compile_module(mod : Module, darwin : Bool) : ObjectFile | String
   bss_size = 0_i64
   mod.functions.each do |fn|
     next if fn.declaration?
-    mf = function_mir(mod, fn, syms, darwin)
+    mf = function_mir(mod, fn, syms, darwin, desc)
     return mf if mf.is_a?(String)
     declare_jump_tables(obj, mf.as(MFunction))
     encoded = encode_function(mf.as(MFunction))

@@ -114,7 +114,7 @@ class Isel
   property cur_ir_name : String
   property sret_vreg : Int32
 
-  def initialize(module_ref : Module, @fn : Function, @syms : Hash(String, Int32), @darwin : Bool)
+  def initialize(module_ref : Module, @fn : Function, @syms : Hash(String, Int32), @darwin : Bool, desc : TargetDesc?)
     @module_ref = module_ref
     @layout = module_ref.layout
     @mf = MFunction.new(@fn.name)
@@ -135,7 +135,7 @@ class Isel
     @cur_ir_name = ""
     @sret_vreg = -1
     @iyi_result_vreg = -1
-    @desc = aarch64_target(@darwin)
+    @desc = desc || aarch64_target(@darwin)
   end
 
   # ---- failure and register bookkeeping ----------------------------------------------------------
@@ -3062,8 +3062,8 @@ class Isel
 end
 
 # Selects the MIR of one function. Returns the reason when a construct is not lowered.
-pub def select_function(mod : Module, fn : Function, syms : Hash(String, Int32), darwin : Bool) : MFunction | IselError
-  isel = Isel.new(mod, fn, syms, darwin)
+pub def select_function(mod : Module, fn : Function, syms : Hash(String, Int32), darwin : Bool, desc : TargetDesc? = nil) : MFunction | IselError
+  isel = Isel.new(mod, fn, syms, darwin, desc)
   mf = isel.run
   if msg = isel.failure
     return IselError.new(msg)

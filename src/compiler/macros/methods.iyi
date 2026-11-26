@@ -7,6 +7,7 @@ import compiler/platform/flags::{PlatformFlags}
 import compiler/macros/ast::{MacroId, MetaMacroVar, TypeNode}
 import compiler/macros/answers::{MacroAnswers}
 import compiler/macros/type_facts::{MacroTypeFacts}
+import std/text
 import std/unicode::{Unicode}
 
 pub class MacroMethods
@@ -236,6 +237,7 @@ pub class MacroMethods
 
   # Hosted String#tr pairs codepoints, repeating the final replacement.
   def self.translate_chars(text : String, from : String, to : String) : String
+    return text.delete(from) if to.empty?
     targets = [] of Char
     to.each_char { |char| targets << char }
     positions = {} of Char => Int32
@@ -247,9 +249,7 @@ pub class MacroMethods
     result = ::String::Builder.new(text.bytesize)
     text.each_char do |char|
       if at = positions[char]?
-        unless targets.empty?
-          result << targets[at < targets.size ? at : targets.size - 1]
-        end
+        result << targets[at < targets.size ? at : targets.size - 1]
       else
         result << char
       end

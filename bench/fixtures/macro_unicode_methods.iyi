@@ -8,6 +8,8 @@ macro unicode_methods
   {{ "hé日😀z".tr("é日😀", "à語💡") }}
   {{ "é日😀é".tr("é日😀", "x") }}
   {{ "é日😀".tr("日", "") }}
+  {{ "abé日😀z".tr("a-z", "") }}
+  {{ "abé日😀z".tr("^a-z", "") }}
   {{ "é日😀z".upcase }}
   {{ "É日😀Z".downcase }}
   {{ "é日😀Z".capitalize }}

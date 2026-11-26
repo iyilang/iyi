@@ -34,6 +34,12 @@ describe "Code gen: primitives" do
       CODE
   end
 
+  it "lays out UInt64x2 as a sixteen-byte value" do
+    program = Iyi::Program.new
+    program.iyi_prelude = true
+    program.run("sizeof(UInt64x2)").to_i.should eq(16)
+  end
+
   it "codegens char" do
     run("'a'").to_i.should eq('a'.ord)
   end

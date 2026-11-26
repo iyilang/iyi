@@ -24,7 +24,6 @@
 # proofs at the end rebuild the port on each condition and require a difference.
 # Every path a native program reads is spelled the way native_path spells it, and a run that gives no
 # verdict (a crash, a non-zero exit, empty output) stops the gate with exit 76: it is never identical.
-# On Windows the missing-file and directory read errors are host-limited: hosted forwards Win32 text while the port uses POSIX wording.
 #
 #   bash bench/selfhost_macros_exercise.sh
 set -eu
@@ -60,6 +59,7 @@ IYI="$REPO/bin/iyi"
 HOSTED_COMPILER="$REPO/bin/crystal"
 INTERP="$REPO/src/compiler/macros/interpreter.iyi"
 PARSER="$REPO/src/compiler/macros/macro_parser.iyi"
+SYNTAX_PARSER="$REPO/src/compiler/syntax/parser.iyi"
 ENGINE="$REPO/src/compiler/macros/engine.iyi"
 CONFINEMENT="$REPO/src/compiler/macros/confinement.iyi"
 . "$REPO/bench/lib/mutation.sh"
@@ -160,7 +160,15 @@ end
 # annotations above the header are blanked, which keeps every line where it was.
 def strip_header_annotations(src : String) : String
   lines = src.split("\n")
-  module_at = lines.index { |l| l.starts_with?("module ") }
+  module_at = nil
+  lines.each_with_index do |line, index|
+    stripped = line.strip
+    if stripped.starts_with?("module ")
+      module_at = index
+      break
+    end
+    break unless stripped.empty? || stripped.starts_with?("#") || stripped.starts_with?("@[")
+  end
   return src unless module_at
   i = 0
   while i < module_at
@@ -361,6 +369,7 @@ end
 
 src = File.read(filename)
 parser = Iyi::Parser.new(sites ? strip_header_annotations(src) : src)
+parser.filename = filename if sites
 node = parser.parse
 if sites
   program = Iyi::Program.new
@@ -952,6 +961,42 @@ dep=
 dir=@L@
 body={{ `echo hi` }}
 CONFINE_CASES
+if [ "$HOST_OS" != windows ]; then
+  # A backslash and a quote are filename characters on POSIX, not separators.
+  mkdir "$CONF/layout/app/"'quoted\"dir'
+  cat <<'CONFINE_POSIX_CASES' >> "$CONF/cases.manifest"
+case app-missing-escaped-name
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/quoted\\\"dir/missing") }}
+case app-read-escaped-directory
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/quoted\\\"dir") }}
+case app-missing-escaped-controls
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/missing-\a\b\e\f\n\r\t\v\u007F\u0080\u00A0\u0378\uE000\u{10FFFF}-\#{x}") }}
+case app-missing-escaped-bytes
+definition=@L@/app/main.iyi
+caller=@L@/app/main.iyi
+root=@L@/app
+dep=
+dir=@L@
+body={{ read_file("@L@/app/missing-\xFF\xC3\xA9\uFFFD") }}
+CONFINE_POSIX_CASES
+else
+  host_limited "POSIX filenames containing backslash, quote and controls are not valid Windows names"
+fi
 sed -e "s#@L@#$CONF_L#g" -e "s#@REPO@#$REPO_NATIVE#g" "$CONF/cases.manifest" |
   awk -v dir="$CONF/cases" '/^case /{f=dir "/" $2 ".case"; next} {print > f}'
 if [ "$CONF_LINKS" != yes ]; then
@@ -963,14 +1008,6 @@ confine_normal() {
   sed -e "s#$CONF_L#<LAYOUT>#g" -e "s#$REPO_NATIVE#<REPO>#g"
 }
 
-# Windows forwards operating-system error text which the port does not yet reproduce.
-confine_os_error_case() {
-  [ "$HOST_OS" = windows ] || return 1
-  case "$1" in
-    app-missing-required-inside|app-read-directory) return 0 ;;
-    *) return 1 ;;
-  esac
-}
 
 # An empty file or a crashed runner is not a verdict, even if both sides do it.
 confine_run() {
@@ -1029,10 +1066,6 @@ conf_diverged=0
 echo "  case, then the hosted oracle's verdict and the port's"
 for cf in "$CONF"/cases/*.case; do
   name="$(basename "$cf" .case)"
-  if confine_os_error_case "$name"; then
-    host_limited "$name: the hosted compiler forwards the Win32 error text, the port's wording is the POSIX one"
-    continue
-  fi
   case_native="$(native_path "$cf")"
   conf_cases=$((conf_cases + 1))
   confine_run hosted "$WORK/dump_hosted$EXE" "$case_native" "$name" || exit $?
@@ -1142,7 +1175,6 @@ check_confinement_still_matches() {
   fi
   for cf in "$CONF"/cases/*.case; do
     name="$(basename "$cf" .case)"
-    confine_os_error_case "$name" && continue
     case_native="$(native_path "$cf")"
     "$WORK/mut-exercise$EXE" --confine "$case_native" > "$CONF/mut.raw" 2>/dev/null || return 1
     confine_normal < "$CONF/mut.raw" > "$CONF/mut.out"
@@ -1151,7 +1183,133 @@ check_confinement_still_matches() {
   return 0
 }
 
+# A raw filename must differ in every selected open-error case, without a
+# failed build, missing verdict or a different error masquerading as proof.
+check_open_error_paths() {
+  local name case_native cases
+  if ! build_mutant_exercise; then
+    invalid_mutant "raw open-error path mutant failed to build"
+    return $?
+  fi
+  if [ "$HOST_OS" = windows ]; then
+    cases="app-missing-required-inside"
+  else
+    cases="app-missing-escaped-name app-missing-escaped-controls app-missing-escaped-bytes"
+  fi
+  for name in $cases; do
+    case_native="$(native_path "$CONF/cases/$name.case")" || { invalid_mutant "open-error case path is unavailable"; return $?; }
+    if ! "$WORK/mut-exercise$EXE" --confine "$case_native" > "$CONF/$name-mut.raw" 2>"$CONF/$name-mut.err"; then
+      invalid_mutant "raw open-error path mutant failed to run"
+      return $?
+    fi
+    if ! grep -q "^error 2:4 message=\"Error opening file with mode 'r':" "$CONF/$name-mut.raw"; then
+      invalid_mutant "raw open-error path mutant did not report an open error"
+      return $?
+    fi
+    confine_normal < "$CONF/$name-mut.raw" > "$CONF/$name-mut.out"
+    if cmp -s "$CONF/expected/$name.out" "$CONF/$name-mut.out"; then return 0; fi
+  done
+  return 1
+}
+
 MUTATIONS_RUN=0
+
+# Mutate only a scratch copy of the named list. An unrelated failure is not
+# evidence that either direction of the exact-list check worked.
+CENSUS_PROOF_FLOOR="$WORK/macro-sites-proof.floor"
+cp "$REPO/bench/macro_sites.floor" "$CENSUS_PROOF_FLOOR"
+CENSUS_PROOF_NATIVE="$(native_path "$CENSUS_PROOF_FLOOR")"
+check_census_list_rejects() {
+  local wanted="$1" rc=0
+  "$PY" "$REPO_NATIVE/bench/macro_sites.py" "$SITES_NATIVE" --check --floor "$CENSUS_PROOF_NATIVE" > "$WORK/census-list-proof.log" 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then return 0; fi
+  if [ "$rc" -eq 1 ] && grep -Fq "$wanted" "$WORK/census-list-proof.log"; then return 1; fi
+  invalid_mutant "the census failed for another reason"
+}
+if prove_mutation "census rejects an unlisted differing site" "$CENSUS_PROOF_FLOOR" \
+  "differing|src/compiler/llvm/lib_llvm.iyi|#0|MacroIf|class|error location differs|The LLVM bridge raise's message agrees, but the port reports the next column." \
+  "# omitted exception" \
+  -- check_census_list_rejects "unexpected differing src/compiler/llvm/lib_llvm.iyi:#0"; then
+  echo "    decisive: an unlisted differing site is rejected"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+if prove_mutation "census rejects a stale named exception" "$CENSUS_PROOF_FLOOR" \
+  '# Named exceptions: category|file|site|kind|context|case|reason' \
+  '# Named exceptions: category|file|site|kind|context|case|reason
+differing|bench/fixtures/nonexistent.iyi|#0|MacroIf|class|text differs|A deliberately stale exception.' \
+  -- check_census_list_rejects "missing listed differing bench/fixtures/nonexistent.iyi:#0"; then
+  echo "    decisive: a listed exception that no longer occurs is rejected"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+# With no filename the hosted parser treats .iyi syntax as Crystal and cannot
+# read the concurrency runtime. Require the census to reject that failure.
+check_census_filename() {
+  local rc=0 dir="$WORK/mut-census-sites" dir_native
+  rm -f "$WORK/mut-hosted$EXE"
+  if ! LLVM_CONFIG="$HOST_LLVM_CONFIG" CRYSTAL_PATH="$REPO_NATIVE/src" "$HOSTED_COMPILER" build -Di_know_what_im_doing \
+    -o "$WORK_NATIVE/mut-hosted$EXE" "$WORK_NATIVE/dump_hosted_macro.cr" > "$WORK/mut-hosted-build.log" 2>&1; then
+    invalid_mutant "the filename mutant oracle did not build"
+    return $?
+  fi
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  cp "$SITES_DIR"/* "$dir/"
+  if "$WORK/mut-hosted$EXE" --sites "$REPO_NATIVE/src/iyi/concurrency.iyi" \
+    > "$dir/src__iyi__concurrency.iyi.oracle" 2> "$dir/src__iyi__concurrency.iyi.oracle.err"; then
+    return 0
+  else
+    rc=$?
+    printf 'file-error oracle exit=%s\n' "$rc" > "$dir/src__iyi__concurrency.iyi.oracle"
+  fi
+  dir_native="$(native_path "$dir")" || { invalid_mutant "mutant census path is unavailable"; return $?; }
+  rc=0
+  "$PY" "$REPO_NATIVE/bench/macro_sites.py" "$dir_native" --check > "$WORK/census-filename-proof.log" 2>&1 || rc=$?
+  if [ "$rc" -eq 1 ] &&
+     grep -Fq "unexpected unreadable src/iyi/concurrency.iyi:-" "$WORK/census-filename-proof.log" &&
+     grep -Fq "unexpected unpaired src/iyi/concurrency.iyi:-" "$WORK/census-filename-proof.log"; then
+    return 1
+  fi
+  invalid_mutant "the census did not reject the unreadable concurrency file"
+}
+if prove_mutation "hosted census parser ignores the .iyi filename" "$WORK/dump_hosted_macro.cr" \
+  'parser.filename = filename if sites' \
+  'parser.filename = "" if sites' \
+  -- check_census_filename; then
+  echo "    decisive: the census rejects the unreadable and unpaired concurrency file"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+# The first concurrency site includes body annotations; they are not header
+# annotations and must survive both scanners.
+check_census_body_annotations() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "the header-scanner mutant did not build"
+    return $?
+  fi
+  if ! "$WORK/mut-exercise$EXE" --sites "$REPO_NATIVE/src/iyi/concurrency.iyi" > "$WORK/body-annotations.port" 2>"$WORK/body-annotations.err"; then
+    invalid_mutant "the header-scanner mutant did not run"
+    return $?
+  fi
+  awk 'NR == 1 { print; exit }' "$SITES_DIR/src__iyi__concurrency.iyi.oracle" > "$WORK/body-annotations.oracle.first"
+  awk 'NR == 1 { print; exit }' "$WORK/body-annotations.port" > "$WORK/body-annotations.port.first"
+  cmp -s "$WORK/body-annotations.oracle.first" "$WORK/body-annotations.port.first"
+}
+if prove_mutation "census strips body annotations as headers" "$REPO/bench/selfhost_macros_exercise.iyi" \
+  'elsif !line.empty? && !line.starts_with?("#") && !line.starts_with?("@[")' \
+  'elsif false' \
+  -- check_census_body_annotations; then
+  echo "    decisive: the first concurrency macro loses its body annotations"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "whole-program typeof fixture bypasses site scanning" "$REPO/bench/selfhost_macros_exercise.iyi" \
   "  if sites
@@ -1399,6 +1557,86 @@ prove_mutation "symbols print bare whatever their text" "$METHODS" \
   -- check_macros_still_match || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
+# The hosted expansion of the Unicode fixture is the oracle for codepoint size.
+check_unicode_size_matches() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "Unicode-size mutant failed to build"
+    return $?
+  fi
+  local fixture="$REPO/bench/fixtures/macro_unicode_methods.iyi" fixture_native
+  fixture_native="$(native_path "$fixture")" || { invalid_mutant "Unicode fixture path is unavailable"; return $?; }
+  if ! "$WORK/dump_hosted$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/unicode-hosted.dump" 2>"$WORK/unicode-hosted.err"; then
+    invalid_mutant "Unicode hosted oracle failed"
+    return $?
+  fi
+  if ! "$WORK/mut-exercise$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/unicode-mutant.dump" 2>"$WORK/unicode-mutant.err"; then
+    invalid_mutant "Unicode mutant failed to run"
+    return $?
+  fi
+  cmp -s "$WORK/unicode-hosted.dump" "$WORK/unicode-mutant.dump"
+}
+if prove_mutation "StringLiteral#size counts bytes instead of characters" "$METHODS" \
+  'return NumberLiteral.new(str.value.size.to_s, NumberKind::I32)' \
+  'return NumberLiteral.new(str.value.bytesize.to_s, NumberKind::I32)' \
+  -- check_unicode_size_matches; then
+  echo "    decisive: Unicode fixture differs from the hosted expansion when size counts bytes"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+# Each fixture expands separately, so one refusal cannot hide the other.
+# Require each mutant to differ only in its call-name location.
+check_inline_index_locations() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "inline-index mutant failed to build"
+    return $?
+  fi
+  local fixture fixture_native label
+  for fixture in "$REPO/bench/fixtures/macro_inline_numeric_index.iyi" "$REPO/bench/fixtures/macro_ascii_inline_numeric_index.iyi"; do
+    label="$(basename "$fixture" .iyi)"
+    fixture_native="$(native_path "$fixture")" || { invalid_mutant "inline-index fixture path is unavailable"; return $?; }
+    if ! "$WORK/dump_hosted$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/$label-hosted.dump" 2>"$WORK/$label-hosted.err"; then
+      invalid_mutant "inline-index hosted oracle failed"
+      return $?
+    fi
+    if ! "$WORK/mut-exercise$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/$label-mutant.dump" 2>"$WORK/$label-mutant.err"; then
+      invalid_mutant "inline-index mutant failed to run"
+      return $?
+    fi
+    if ! awk '/^error 2:13 message=/ { found = 1 } END { exit !found }' "$WORK/$label-hosted.dump"; then
+      invalid_mutant "hosted inline-index error did not have the expected location"
+      return $?
+    fi
+    if cmp -s "$WORK/$label-hosted.dump" "$WORK/$label-mutant.dump"; then return 0; fi
+    if ! awk '/^error 2:6 message=/ {
+                found = 1; sub(/^error 2:6 message=/, "error 2:13 message=")
+              }
+              { print }
+              END { exit !found }' "$WORK/$label-mutant.dump" > "$WORK/$label-normalized.dump"; then
+      invalid_mutant "inline-index mutant did not move the error to the receiver"
+      return $?
+    fi
+    if ! cmp -s "$WORK/$label-hosted.dump" "$WORK/$label-normalized.dump"; then
+      invalid_mutant "inline-index mutant changed more than the call location"
+      return $?
+    fi
+  done
+  return 1
+}
+if prove_mutation "inline indexing loses its call-name location" "$SYNTAX_PARSER" \
+  '        res = Call.new(res, method_name, args, nil, nil, named_args).at(location)
+        res.name_location = name_location
+        res.args_in_brackets = true' \
+  '        res = Call.new(res, method_name, args, nil, nil, named_args).at(location)
+        res.args_in_brackets = true' \
+  -- check_inline_index_locations; then
+  echo "    decisive: Unicode and ASCII inline indexing report the receiver, not the hosted call location"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+
 # The plain exercise rebuilt on the patched engine: zero only when every unit check still passes.
 check_plain_exercise_passes() {
   if ! build_mutant_exercise; then
@@ -1516,11 +1754,43 @@ prove_mutation "file_exists? does not check the path" "$INTERP" \
   -- check_confinement_still_matches || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-prove_mutation "a directory is not refused by read_file" "$INTERP" \
-  'if File.directory?(resolved)' \
-  'if false' \
-  -- check_confinement_still_matches || status=1
+if prove_mutation_all "open errors print raw file paths" "$INTERP" \
+  'file_error_path(resolved)' \
+  'resolved' \
+  -- check_open_error_paths; then
+  echo "    decisive: raw open-error paths differ from hosted filename escaping"
+else
+  status=1
+fi
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+if [ "$HOST_OS" = windows ]; then
+  prove_mutation "a directory is not refused by read_file" "$INTERP" \
+    'if name == "read_file?"
+            return NilLiteral.new
+          end' \
+    'if name == "read_file?" || File.directory?(resolved)
+            return NilLiteral.new
+          end' \
+    -- check_confinement_still_matches || status=1
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+  if prove_mutation "Win32 file errors discard the system message" "$INTERP" \
+    'win32_error_text(opened.code)' \
+    '"wrong system error"' \
+    -- check_confinement_still_matches; then
+    echo "    decisive: Windows confinement errors differ without the operating system's message"
+  else
+    status=1
+  fi
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+else
+  prove_mutation "a directory is not refused by read_file" "$INTERP" \
+    'if File.directory?(resolved)' \
+    'if false' \
+    -- check_confinement_still_matches || status=1
+  MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+  host_limited "Win32 system-message mutation runs on Windows"
+fi
 
 prove_mutation "a macro's file is not taken from its definition" "$ENGINE" \
   'loc.filename' \

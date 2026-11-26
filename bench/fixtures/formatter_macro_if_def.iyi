@@ -1,0 +1,6 @@
+def initialize(items)
+  @items = IyiCross.shared { items.dup }
+  {% if flag?(:heap_partitions) && T.has_inner_pointers? %}
+    @items.each { |item| IyiCross.publish(item) }
+  {% end %}
+end

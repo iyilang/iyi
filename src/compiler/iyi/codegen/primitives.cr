@@ -1,5 +1,10 @@
 require "./codegen"
 
+lib LibLLVM
+  fun build_insert_element = LLVMBuildInsertElement(BuilderRef, vector : ValueRef, value : ValueRef, index : ValueRef, name : Char*) : ValueRef
+  fun build_extract_element = LLVMBuildExtractElement(BuilderRef, vector : ValueRef, index : ValueRef, name : Char*) : ValueRef
+end
+
 class Iyi::CodeGenVisitor
   # Can only happen in a Const or as an argument cast.
   def visit(node : Primitive)
@@ -21,6 +26,36 @@ class Iyi::CodeGenVisitor
     @last = case node.name
             when "binary"
               codegen_primitive_binary node, target_def, call_args
+            when "uint64x2_new"
+              uint64x2_insert(uint64x2_insert(llvm_context.int64.vector(2).undef, call_args[0], 0), call_args[1], 1)
+            when "uint64x2_splat"
+              uint64x2_splat(call_args[0])
+            when "uint64x2_load"
+              builder.load(llvm_context.int64.vector(2), call_args[0]).tap { |load| load.alignment = 8 }
+            when "uint64x2_store"
+              builder.store(call_args[0], call_args[1]).alignment = 8
+              llvm_nil
+            when "uint64x2_low", "uint64x2_high"
+              index = node.name == "uint64x2_low" ? 0 : 1
+              LLVM::Value.new(LibLLVM.build_extract_element(builder, call_args[0], int32(index), ""))
+            when "uint64x2_xor"
+              builder.xor(call_args[0], call_args[1])
+            when "uint64x2_and"
+              builder.and(call_args[0], call_args[1])
+            when "uint64x2_or"
+              builder.or(call_args[0], call_args[1])
+            when "uint64x2_not"
+              LLVM::Value.new(LibLLVM.build_not(builder, call_args[0], ""))
+            when "uint64x2_shl", "uint64x2_shr"
+              amount = builder.zext(builder.and(call_args[1], int32(63)), llvm_context.int64)
+              counts = uint64x2_splat(amount)
+              node.name == "uint64x2_shl" ? builder.shl(call_args[0], counts) : builder.lshr(call_args[0], counts)
+            when "uint64x2_add"
+              builder.add(call_args[0], call_args[1])
+            when "uint64x2_sub"
+              builder.sub(call_args[0], call_args[1])
+            when "uint64x2_mul"
+              builder.mul(call_args[0], call_args[1])
             when "convert"
               codegen_primitive_convert node, target_def, call_args, checked: true
             when "unchecked_convert"
@@ -89,6 +124,14 @@ class Iyi::CodeGenVisitor
             end
 
     @call_location = nil
+  end
+
+  private def uint64x2_insert(vector : LLVM::Value, value : LLVM::Value, index : Int32) : LLVM::Value
+    LLVM::Value.new(LibLLVM.build_insert_element(builder, vector, value, int32(index), ""))
+  end
+
+  private def uint64x2_splat(value : LLVM::Value) : LLVM::Value
+    uint64x2_insert(uint64x2_insert(llvm_context.int64.vector(2).undef, value, 0), value, 1)
   end
 
   def codegen_primitive_binary(node, target_def, call_args)

@@ -21,9 +21,8 @@ script pairs the two dumps site by site and classifies each pair:
     python3 bench/macro_sites.py DUMPDIR --table PATH    # also write the table
     python3 bench/macro_sites.py DUMPDIR --check         # exit 1 on a floor breach
 
-bench/macro_sites.floor has two lines. The first is the least `identical` count
-allowed; the second is the most files the hosted compiler may fail to read.
-Both may only move in the good direction.
+bench/macro_sites.floor keeps the identical-site floor and unreadable-file
+ceiling, followed by named exceptions. A new or stale exception fails --check.
 """
 import collections
 import os
@@ -34,6 +33,7 @@ REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 FLOOR = os.path.join(REPO, "bench/macro_sites.floor")
 SITE_LINE = re.compile(r"^site (\d+) (\S+) (\d+:\d+) (\S+) (.*)$")
 MESSAGE = re.compile(r" message=(.*)$")
+ERROR_POSITION = re.compile(r"^error (\d+):(\d+) message=")
 CATEGORIES = ["identical", "refused", "differing", "needs-context", "macro-body", "unpaired"]
 
 
@@ -101,6 +101,11 @@ def classify(o, p):
     pt = outcome(p["status"])
     if ot == "text" and pt == "error":
         return "refused", message_of(p["status"])[:110]
+    if ot == "error" and pt == "error" and message_of(o["status"]) == message_of(p["status"]):
+        ol = ERROR_POSITION.match(o["status"])
+        pl = ERROR_POSITION.match(p["status"])
+        if ol and pl and ol.group(1) == pl.group(1) and int(pl.group(2)) == int(ol.group(2)) + 1:
+            return "differing", "error location differs"
     if ot == "text" and pt == "text":
         return "differing", "text differs"
     if ot == "error":
@@ -118,10 +123,12 @@ def pair_file(rel, dump_dir):
         return [{"file": rel, "where": "-", "kind": "-", "context": "-",
                  "category": "unpaired", "reason": f"oracle: no dump"}], "oracle: no dump"
     if o_err:
-        detail = open(os.path.join(dump_dir, name + ".oracle.err"), encoding="utf-8",
-                      errors="replace").readline().strip()[:110]
+        with open(os.path.join(dump_dir, name + ".oracle.err"), encoding="utf-8",
+                  errors="replace") as f:
+            detail = f.readline().strip()[:110]
+        reason = f"oracle: {o_err}: {detail}"
         return [{"file": rel, "where": "-", "kind": "-", "context": "-",
-                 "category": "unpaired", "reason": f"oracle: {o_err}: {detail}"}], "oracle: " + o_err
+                 "category": "unpaired", "reason": reason}], reason
     try:
         p_err, p_sites = read_dump(os.path.join(dump_dir, name + ".port"))
     except FileNotFoundError:
@@ -130,11 +137,22 @@ def pair_file(rel, dump_dir):
         for o in o_sites:
             rows.append({"file": rel, "where": o["where"], "kind": o["kind"], "context": o["context"],
                          "category": "unpaired", "reason": f"port: {p_err}"})
-        return rows, None
+        if not o_sites:
+            rows.append({"file": rel, "where": "-", "kind": "-", "context": "-",
+                         "category": "unpaired", "reason": f"port: {p_err}"})
+        return rows, f"port: {p_err}"
     for i, o in enumerate(o_sites):
         if i >= len(p_sites):
             rows.append({"file": rel, "where": o["where"], "kind": o["kind"], "context": o["context"],
                          "category": "unpaired", "reason": f"port lists {len(p_sites)} sites, oracle {len(o_sites)}"})
+            continue
+        p = p_sites[i]
+        if (o["kind"], o["where"], o["context"]) != (p["kind"], p["where"], p["context"]) and \
+                (o["status"], p["status"]) not in (("macro-body", "macro-body"), ("needs-context", "needs-context")):
+            for side, site in (("oracle", o), ("port", p)):
+                rows.append({"file": rel, "where": site["where"], "kind": site["kind"],
+                             "context": site["context"], "category": "unpaired",
+                             "reason": f"{side}: site identity differs"})
             continue
         category, reason = classify(o, p_sites[i])
         rows.append({"file": rel, "where": o["where"], "kind": o["kind"], "context": o["context"],
@@ -145,15 +163,48 @@ def pair_file(rel, dump_dir):
     return rows, None
 
 
-def floors():
-    """(least identical, most unreadable files) from the floor file."""
-    try:
-        with open(FLOOR, encoding="utf-8") as f:
-            values = [int(x) for x in f.read().split()]
-    except FileNotFoundError:
-        values = []
-    values += [0, 10 ** 9][len(values):]
-    return values[0], values[1]
+def floors(path):
+    """Read the floors and exact exception identities with their reasons."""
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    if len(lines) < 2:
+        raise ValueError("expected an identical floor and unreadable ceiling")
+    least_identical, most_unreadable = int(lines[0]), int(lines[1])
+    if least_identical < 0 or most_unreadable < 0:
+        raise ValueError("floors and ceilings must be non-negative")
+    expected = collections.Counter()
+    for number, line in enumerate(lines[2:], 3):
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split("|", 6)
+        if len(fields) != 7 or any(not field for field in fields):
+            raise ValueError(f"line {number}: expected category|file|site|kind|context|case|reason")
+        category, rel, where, kind, context, case, reason = fields
+        if category not in ("differing", "unpaired", "unreadable"):
+            raise ValueError(f"line {number}: invalid category {category}")
+        key = (category, rel, where, kind, context, case)
+        expected[key] += 1
+        if expected[key] != 1:
+            raise ValueError(f"line {number}: duplicate exception {key}")
+    return least_identical, most_unreadable, expected
+
+
+def exception_reason(reason):
+    # A parser syntax error is the named limitation. A missing dump or an
+    # unrelated crash of that file is not the same tolerated case.
+    if reason.startswith("oracle: file-error") and "Iyi::SyntaxException" in reason:
+        return "hosted syntax error"
+    return reason
+
+
+def exception_key(row):
+    return (row["category"], row["file"], row["site"], row["kind"], row["context"],
+            exception_reason(row["reason"]))
+
+
+def show_exception(key):
+    category, rel, where, kind, context, reason = key
+    return f"{category} {rel}:{where} {kind} {context}: {reason}"
 
 
 def table_markdown(files, rows):
@@ -238,7 +289,10 @@ def main(argv):
     table = None
     if "--table" in argv:
         table = argv[argv.index("--table") + 1]
-    args = [a for a in argv if not a.startswith("--") and a != table]
+    floor = FLOOR
+    if "--floor" in argv:
+        floor = argv[argv.index("--floor") + 1]
+    args = [a for a in argv if not a.startswith("--") and a != table and a != floor]
     if not args:
         print(__doc__)
         return 2
@@ -249,6 +303,16 @@ def main(argv):
     unreadable = []
     for rel in files:
         file_rows, err = pair_file(rel, dump_dir)
+        # The ordinal among the same kind and enclosing context identifies a
+        # site even when unrelated edits move its source line.
+        ordinals = collections.Counter()
+        for row in file_rows:
+            if row["where"] == "-":
+                row["site"] = "-"
+            else:
+                group = (row["kind"], row["context"])
+                row["site"] = f"#{ordinals[group]}"
+                ordinals[group] += 1
         rows.extend(file_rows)
         if err:
             unreadable.append((rel, err))
@@ -257,7 +321,9 @@ def main(argv):
     print(f"files {len(files)}, sites {len(rows)}")
     for c in CATEGORIES:
         print(f"  {c}: {counts[c]}")
-    print(f"  files the hosted compiler could not read: {len(unreadable)}")
+    hosted_unreadable = [(rel, err) for rel, err in unreadable if err.startswith("oracle: ")]
+    print(f"  files the hosted compiler could not read: {len(hosted_unreadable)}")
+    print(f"  files the port could not read: {len(unreadable) - len(hosted_unreadable)}")
 
     if table:
         with open(table, "w", encoding="utf-8") as f:
@@ -265,18 +331,33 @@ def main(argv):
         print(f"wrote {os.path.relpath(table, REPO) if table.startswith(REPO) else table}")
 
     if "--check" in argv:
-        least_identical, most_unreadable = floors()
+        try:
+            least_identical, most_unreadable, expected = floors(floor)
+        except (OSError, ValueError) as e:
+            print(f"  invalid census floor: {e}")
+            return 1
         status = 0
         if counts["identical"] < least_identical:
             print(f"  identical {counts['identical']} is below the floor {least_identical}")
             status = 1
         else:
             print(f"  identical {counts['identical']} meets the floor {least_identical}")
-        if len(unreadable) > most_unreadable:
-            print(f"  {len(unreadable)} files unreadable by the hosted compiler, above the allowed {most_unreadable}")
+        if len(hosted_unreadable) > most_unreadable:
+            print(f"  {len(hosted_unreadable)} files unreadable by the hosted compiler, above the allowed {most_unreadable}")
             status = 1
         else:
-            print(f"  unreadable files {len(unreadable)} within the allowed {most_unreadable}")
+            print(f"  unreadable files {len(hosted_unreadable)} within the allowed {most_unreadable}")
+        actual = collections.Counter(exception_key(r) for r in rows if r["category"] in ("differing", "unpaired"))
+        for rel, reason in unreadable:
+            actual[("unreadable", rel, "-", "-", "-", exception_reason(reason))] += 1
+        for key, count in sorted((actual - expected).items()):
+            print(f"  unexpected {show_exception(key)} (count {count})")
+            status = 1
+        for key, count in sorted((expected - actual).items()):
+            print(f"  missing listed {show_exception(key)} (count {count})")
+            status = 1
+        if actual == expected:
+            print(f"  named exceptions match: {sum(actual.values())}")
         return status
     return 0
 

@@ -1,0 +1,40 @@
+def empty_branches(value)
+  if value == 1
+    # if body
+  elsif value == 2
+    # elsif body
+  else
+    # else body
+  end
+
+  unless value == 3
+    # unless body
+  end
+
+  case value
+  when 1
+    # first when body
+  when 2
+    # second when body
+  else
+    # case else body
+  end
+end
+
+def f(x)
+  if x # after cond
+    # first body comment
+    1
+  else # after else
+    # else body comment
+    2
+  end
+end
+
+def case_with_trailing_comment(value)
+  case value
+  when 1 then :a # trailing
+  when 2
+    # empty when body
+  end
+end

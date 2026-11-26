@@ -787,6 +787,12 @@
   codes, frame rounding and narrow `lsr`, the x86-64 imm8 boundaries and
   caller-saved tables, and the command driver's `-Oz` and `--threads`.
   `native_elf` already caught an executable `PT_GNU_STACK`.
+- **The formatter parity floor holds the files #259, #260 and #262 added.**
+  `src/compiler/ir/opt/escape.iyi` and 20 of the new fixtures format as the
+  hosted formatter does, so `bench/selfhost_formatter_parity.floor` lists
+  them: 142 files become 163. `escape.iyi` and `regalloc_linear.iyi` keep
+  each trailing comment on its own line and each condition on one line,
+  which both formatters leave as written.
 
 ### Fixed
 

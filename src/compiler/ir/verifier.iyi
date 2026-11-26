@@ -84,12 +84,12 @@ class Verifier
   end
 
   def check_function(f : Function) : Nil
-    names = Hash(String, Bool).new
-    f.blocks.each do |b|
+    names = Hash(String, Int32).new
+    f.blocks.each_with_index do |b, bi|
       if names[b.name]?
         report("duplicate-name", "two blocks are named #{b.name}", f)
       end
-      names[b.name] = true
+      names[b.name] = bi
       unless b.terminated?
         report("terminator", "block #{b.name} does not end with a terminator", f)
       end
@@ -111,10 +111,11 @@ class Verifier
 
     check_value_names(f)
     check_signature(f)
-    dom = dominators(f)
-    reachable = reachable_blocks(f)
-    check_instructions(f, dom, reachable)
-    check_tls(f, dom, reachable)
+    index = BlockIndex.new(f, names)
+    dom = dominators(f, index)
+    reachable = reachable_blocks(f, index)
+    check_instructions(f, dom, reachable, index)
+    check_tls(f, dom, reachable, index)
   end
 
   def check_value_names(f : Function) : Nil
@@ -166,27 +167,20 @@ class Verifier
   end
 
   # The dominance relation of f, computed from the predecessor list of each block, by block index.
-  def dominators(f : Function) : Dominance
+  def dominators(f : Function, index : BlockIndex) : Dominance
     n = f.blocks.size
-    index = block_index(f)
     preds = Array(Array(Int32)).new
     n.times { preds << [] of Int32 }
     f.blocks.each do |b|
       b.preds.each do |p|
-        preds[index[b.name]] << index[p.name]
+        preds[index[b]] << index[p]
       end
     end
     Dominance.new(preds)
   end
 
-  def block_index(f : Function) : Hash(String, Int32)
-    index = Hash(String, Int32).new
-    f.blocks.each_with_index { |b, i| index[b.name] = i }
-    index
-  end
 
-  def reachable_blocks(f : Function) : Array(Bool)
-    index = block_index(f)
+  def reachable_blocks(f : Function, index : BlockIndex) : Array(Bool)
     seen = Array(Bool).new
     f.blocks.each { |b| seen << false }
     stack = [0] of Int32
@@ -195,22 +189,23 @@ class Verifier
       next if seen[b]
       seen[b] = true
       if f.blocks[b].terminated?
-        f.blocks[b].terminator.targets.each { |t| stack << index[t.name] }
+        f.blocks[b].terminator.targets.each { |t| stack << index[t] }
       end
     end
     seen
   end
 
-  def check_instructions(f : Function, dom : Dominance, reachable : Array(Bool)) : Nil
-    index = block_index(f)
-    position = Hash(Value, Int32).new
-    f.params.each { |p| position[p] = -1 }
-    # Where each value first appears in the function, void instructions included: the phi operand lookup.
-    first_position = Hash(Value, Int32).new
+  def check_instructions(f : Function, dom : Dominance, reachable : Array(Bool), index : BlockIndex) : Nil
+    # A single identity table keeps both the first and last placement of an instruction.
+    # The first is used for phi edges, including void instructions; ordinary uses need the last.
+    positions = Hash(Value, Tuple(Int32, Int32)).new
+    f.params.each { |p| positions[p] = {-1, -1} }
     f.blocks.each_with_index do |b, bi|
       b.insts.each_with_index do |i, k|
-        position[i] = bi * 100000 + k unless i.type.void?
-        first_position[i] = bi * 100000 + k unless first_position[i]?
+        previous = positions[i]?
+        next if previous && i.type.void?
+        at = bi * 100000 + k
+        positions[i] = {previous ? previous[0] : at, at}
       end
     end
     f.blocks.each_with_index do |b, bi|
@@ -218,11 +213,11 @@ class Verifier
       b.insts.each_with_index do |i, k|
         check_instruction(f, i)
         if i.op == Op::Phi
-          check_phi(f, i, index, dom, bi, reachable, first_position)
+          check_phi(f, i, index, dom, bi, reachable, positions)
         else
           i.args.each do |a|
             next unless defined_value?(a)
-            check_use(f, a, bi, k, position, dom, index, i)
+            check_use(f, a, bi, k, positions, dom)
           end
         end
       end
@@ -250,15 +245,15 @@ class Verifier
   end
 
   # A use must be dominated by its definition: earlier in the same block, or in a block that dominates this one.
-  def check_use(f : Function, v : Value, bi : Int32, k : Int32, position : Hash(Value, Int32), dom : Dominance, index : Hash(String, Int32), user : Inst) : Nil
-    pos = position[v]?
-    unless pos
+  def check_use(f : Function, v : Value, bi : Int32, k : Int32, positions : Hash(Value, Tuple(Int32, Int32)), dom : Dominance) : Nil
+    placement = positions[v]?
+    if placement.nil? || (v.is_a?(Inst) && v.type.void?)
       report("dominance", "an instruction uses a value that no instruction defines", f)
       return
     end
     return if v.is_a?(Param)
-    db = pos // 100000
-    dk = pos % 100000
+    db = placement[1] // 100000
+    dk = placement[1] % 100000
     if db == bi
       report("dominance", "%#{v.name} is used before it is defined", f) if dk >= k
     elsif !dom.dominates?(db, bi)
@@ -266,7 +261,7 @@ class Verifier
     end
   end
 
-  def check_phi(f : Function, phi : Inst, index : Hash(String, Int32), dom : Dominance, bi : Int32, reachable : Array(Bool), first_position : Hash(Value, Int32)) : Nil
+  def check_phi(f : Function, phi : Inst, index : BlockIndex, dom : Dominance, bi : Int32, reachable : Array(Bool), positions : Hash(Value, Tuple(Int32, Int32))) : Nil
     block = f.blocks[bi]
     expected = block.preds.map { |p| p.name }.sorted
     got = phi.targets.map { |t| t.name }.sorted
@@ -279,10 +274,10 @@ class Verifier
       end
       next unless defined_value?(v) && k < phi.targets.size
       next if v.is_a?(Param)
-      source = index[phi.targets[k].name]
-      pos = first_position[v]?
-      next unless pos
-      db = pos // 100000
+      source = index[phi.targets[k]]
+      placement = positions[v]?
+      next unless placement
+      db = placement[0] // 100000
       if db != source && !dom.dominates?(db, source)
         report("dominance", "a phi incoming from #{phi.targets[k].name} uses a value whose definition does not dominate it", f)
       end
@@ -403,8 +398,7 @@ class Verifier
 
   # `tls-fresh`: a ThreadLocalAddr or ThreadPointer result is never used after a call, or after a back-edge
   # that follows it. Those values are recomputed from the thread pointer, not carried across them.
-  def check_tls(f : Function, dom : Dominance, reachable : Array(Bool)) : Nil
-    index = block_index(f)
+  def check_tls(f : Function, dom : Dominance, reachable : Array(Bool), index : BlockIndex) : Nil
     n = f.blocks.size
     outs = Array(Array(Inst)?).new
     n.times { outs << nil }
@@ -442,12 +436,12 @@ class Verifier
 
   # The fresh set on entry to block bi: the intersection over its forward predecessors. A back-edge
   # contributes nothing, so its values are stale; nil means "every value", before the first pass reaches it.
-  def entry_fresh(f : Function, bi : Int32, index : Hash(String, Int32), dom : Dominance, outs : Array(Array(Inst)?), reachable : Array(Bool)) : Array(Inst)?
+  def entry_fresh(f : Function, bi : Int32, index : BlockIndex, dom : Dominance, outs : Array(Array(Inst)?), reachable : Array(Bool)) : Array(Inst)?
     return [] of Inst if bi == 0
     result = nil
     first = true
     f.blocks[bi].preds.each do |p|
-      pi = index[p.name]
+      pi = index[p]
       next unless reachable[pi]
       contribution = dom.dominates?(bi, pi) ? [] of Inst : outs[pi]
       if first
@@ -493,6 +487,22 @@ class Verifier
     return false unless v.is_a?(Inst)
     i = v.as(Inst)
     i.op == Op::ThreadLocalAddr || i.op == Op::ThreadPointer
+  end
+end
+
+# A block's identity is enough for normal edges. The name fallback and canonical indices preserve the
+# verifier's behavior for malformed modules with duplicate names or references to another block object.
+class BlockIndex
+  def initialize(f : Function, @names : Hash(String, Int32))
+    @blocks = Hash(Block, Int32).new
+    f.blocks.each { |b| @blocks[b] = @names[b.name] }
+  end
+
+  def [](block : Block) : Int32
+    if index = @blocks[block]?
+      return index
+    end
+    @names[block.name]
   end
 end
 

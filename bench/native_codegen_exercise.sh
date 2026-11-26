@@ -213,6 +213,61 @@ done
 [ "$fixture_total" -gt 0 ] || fail "no codegen fixtures found"
 [ "$emitted" -eq "$fixture_total" ] || fail "not every fixture produced a Darwin object"
 echo "emitted $emitted of $fixture_total Darwin-target fixture objects"
+# ARM's condition-code table gives CC=3 (unsigned <), LS=9 (<=),
+# HI=8 (>) and CS=2 (>=). A branch to the false block uses the inverse.
+check_unsigned_conditions() {
+  "$PY" - "$(native_path "$1")" "$(native_path "$FIX/unsigned_conditions.ir")" <<'PY'
+import os
+import subprocess
+import sys
+
+driver, fixture = sys.argv[1:]
+expected = {"ult": 3, "ule": 9, "ugt": 8, "uge": 2}
+checks = 0
+for clean in ("0", "1"):
+    for predicate, cond in expected.items():
+        for kind in ("set", "branch"):
+            name = f"{kind}_{predicate}"
+            env = dict(os.environ, IYI_NATIVE_MIR_CLEAN=clean)
+            try:
+                proc = subprocess.run([driver, "conditions", fixture, name], env=env,
+                                      capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                print(f"INVALID {name}: {exc}")
+                sys.exit(124)
+            if proc.returncode:
+                print(f"INVALID {name}: {proc.stderr}")
+                sys.exit(124)
+            blocks, instructions = {}, []
+            for line in proc.stdout.splitlines():
+                parts = line.split("\t")
+                if len(parts) == 3 and parts[0] == "block":
+                    blocks[int(parts[1])] = parts[2]
+                elif parts[0] in ("set", "branch"):
+                    instructions.append(parts)
+            if len(instructions) != 1 or instructions[0][0] != kind:
+                print(f"{name} clean={clean}: expected one {kind}, got {instructions}")
+                sys.exit(1)
+            inst = instructions[0]
+            want = cond
+            if kind == "branch":
+                target = blocks.get(int(inst[2]))
+                if target == "no":
+                    want ^= 1
+                elif target != "yes":
+                    print(f"{name} clean={clean}: unexpected target {target!r}")
+                    sys.exit(1)
+            if int(inst[1]) != want:
+                print(f"{name} clean={clean}: condition {inst[1]}, expected {want}")
+                sys.exit(1)
+            checks += 1
+print(f"unsigned conditions: {checks} materialized/branch and layout checks")
+PY
+}
+if ! check_unsigned_conditions "$DRV"; then
+  fail "unsigned condition selection"
+fi
+
 
 RTF="$REPO/bench/fixtures/native_first_light"
 if ! "$DRV" obj "$(native_path "$REPO/bench/fixtures/native_tp/threadpointer.ir")" "$(native_path "$WORK/tp.o")" >"$WORK/tp.obj.log" 2>&1 \
@@ -597,7 +652,7 @@ prove_mutation() {
   fi
   mutation_total=$((mutation_total + 1))
   case "$check" in
-    check_probe|check_mono_pair|check_tlvp_kind|check_tls_clobbers|check_tbss_placed|check_tp_mask) ;;
+    check_probe|check_mono_pair|check_tlvp_kind|check_tls_clobbers|check_tbss_placed|check_tp_mask|check_unsigned_conditions) ;;
     *)
       if [ "$HOST_ID" != darwin-arm64 ]; then
         host_limited "mutation $name: its original runtime detector requires macOS arm64"
@@ -772,6 +827,17 @@ check_narrow_argext() { check_fixture "$1" narrow_argext; }
 check_narrow_signext() { check_fixture "$1" narrow_signext; }
 
 echo "== 6. mutations are each caught"
+prove_mutation "unsigned comparisons: swap ult and ule condition codes" \
+  src/compiler/native/aarch64/isel.iyi \
+  '  elsif ordinal == 4_i64
+    return cond_cc
+  elsif ordinal == 5_i64
+    return cond_ls' \
+  '  elsif ordinal == 4_i64
+    return cond_ls
+  elsif ordinal == 5_i64
+    return cond_cc' \
+  check_unsigned_conditions
 prove_mutation "call: do not sign-extend an attributed i1 argument" \
   src/compiler/native/aarch64/isel.iyi \
   '            vals[j] = signed_value(vals[j], loc.leaf_type)' \
@@ -958,15 +1024,15 @@ else
   fail "the proof helper accepted a mutation that changes nothing"
 fi
 if [ "$HOST_ID" = darwin-arm64 ]; then
-  expected_checked=32
+  expected_checked=33
   expected_limited=0
 else
-  expected_checked=6
+  expected_checked=7
   expected_limited=26
 fi
 printf 'mutations: %s total, %s checked, %s caught, %s host-limited\n' \
   "$mutation_total" "$mutation_checked" "$mutation_caught" "$mutation_limited"
-[ "$mutation_total" -eq 32 ] || fail "the mutation inventory is not 32"
+[ "$mutation_total" -eq 33 ] || fail "the mutation inventory is not 33"
 [ "$mutation_checked" -eq "$expected_checked" ] || fail "the expected mutations were not all checked"
 [ "$mutation_caught" -eq "$expected_checked" ] || fail "not every checked mutation was caught"
 [ "$mutation_limited" -eq "$expected_limited" ] || fail "the host-limited mutation inventory is incomplete"

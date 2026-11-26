@@ -1,0 +1,103 @@
+; iyi-ir 1
+module "unsigned_conditions"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+define internal i64 @set_ult(i64 %a, i64 %b) {
+entry:
+  %c = icmp ult i64 %a, %b
+  %r = zext i1 %c to i64
+  ret i64 %r
+}
+define internal i64 @set_ule(i64 %a, i64 %b) {
+entry:
+  %c = icmp ule i64 %a, %b
+  %r = zext i1 %c to i64
+  ret i64 %r
+}
+define internal i64 @set_ugt(i64 %a, i64 %b) {
+entry:
+  %c = icmp ugt i64 %a, %b
+  %r = zext i1 %c to i64
+  ret i64 %r
+}
+define internal i64 @set_uge(i64 %a, i64 %b) {
+entry:
+  %c = icmp uge i64 %a, %b
+  %r = zext i1 %c to i64
+  ret i64 %r
+}
+define internal i64 @branch_ult(i64 %a, i64 %b) {
+entry:
+  %c = icmp ult i64 %a, %b
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 0
+}
+define internal i64 @branch_ule(i64 %a, i64 %b) {
+entry:
+  %c = icmp ule i64 %a, %b
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 0
+}
+define internal i64 @branch_ugt(i64 %a, i64 %b) {
+entry:
+  %c = icmp ugt i64 %a, %b
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 0
+}
+define internal i64 @branch_uge(i64 %a, i64 %b) {
+entry:
+  %c = icmp uge i64 %a, %b
+  br i1 %c, label %yes, label %no
+yes:
+  ret i64 1
+no:
+  ret i64 0
+}
+define i32 @main() {
+entry:
+  %s0 = call i64 (i64, i64) @set_ult(i64 1, i64 1)
+  %s1 = call i64 (i64, i64) @set_ule(i64 1, i64 1)
+  %s2 = call i64 (i64, i64) @set_ugt(i64 1, i64 1)
+  %s3 = call i64 (i64, i64) @set_uge(i64 1, i64 1)
+  %s4 = call i64 (i64, i64) @set_ult(i64 1, i64 2)
+  %s5 = call i64 (i64, i64) @set_ule(i64 1, i64 2)
+  %s6 = call i64 (i64, i64) @set_ugt(i64 2, i64 1)
+  %s7 = call i64 (i64, i64) @set_uge(i64 2, i64 1)
+  %b0 = call i64 (i64, i64) @branch_ult(i64 1, i64 1)
+  %b1 = call i64 (i64, i64) @branch_ule(i64 1, i64 1)
+  %b2 = call i64 (i64, i64) @branch_ugt(i64 1, i64 1)
+  %b3 = call i64 (i64, i64) @branch_uge(i64 1, i64 1)
+  %b4 = call i64 (i64, i64) @branch_ult(i64 1, i64 2)
+  %b5 = call i64 (i64, i64) @branch_ule(i64 1, i64 2)
+  %b6 = call i64 (i64, i64) @branch_ugt(i64 2, i64 1)
+  %b7 = call i64 (i64, i64) @branch_uge(i64 2, i64 1)
+  %p0 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %s0)
+  %p1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %s1)
+  %p2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %s2)
+  %p3 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %s3)
+  %p4 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %s4)
+  %p5 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %s5)
+  %p6 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %s6)
+  %p7 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %s7)
+  %p8 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b0)
+  %p9 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b1)
+  %p10 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b2)
+  %p11 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b3)
+  %p12 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b4)
+  %p13 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b5)
+  %p14 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b6)
+  %p15 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %b7)
+  ret i32 0
+}

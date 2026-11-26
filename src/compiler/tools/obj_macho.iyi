@@ -4,8 +4,10 @@
 # the object it read with the native writer to OUT, reads that back, and
 # requires the two reads to be equal. It prints one line per arm64 relocation
 # kind with the count seen in IN, zero included, so a kind with no coverage is
-# visible. It exits non-zero when IN does not read, when the round trip changes
-# the object, or when OUT cannot be written.
+# visible, and one `site SECTION OFFSET KIND` line for each PAGEOFF12 record,
+# which the gate compares with the instruction the hosted compiler wrote there.
+# It exits non-zero when IN does not read, when the round trip changes the
+# object, or when OUT cannot be written.
 
 module compiler/tools/obj_macho
 
@@ -165,6 +167,27 @@ module ObjMachoTool
     print "sections #{obj.sections.size} symbols #{obj.symbols.size}\n"
   end
 
+  # The kinds a PAGEOFF12 record reads as. The object file does not say which one a record is: an ADD takes the offset
+  # as it is, a load or store takes it scaled by the width of the access, and only the instruction at the site tells.
+  def self.pageoff_kind?(kind : RelocKind) : Bool
+    kind == RelocKind::A64AddLo12 || kind == RelocKind::A64Ldst8Lo12 || kind == RelocKind::A64Ldst16Lo12 ||
+      kind == RelocKind::A64Ldst32Lo12 || kind == RelocKind::A64Ldst64Lo12 || kind == RelocKind::A64Ldst128Lo12
+  end
+
+  # Prints "site SECTION OFFSET KIND" for every PAGEOFF12 relocation, in section order, so the gate can compare each
+  # kind with the instruction the hosted compiler wrote there (bench/fixtures/native_obj/check_pageoff.py).
+  def self.report_sites(obj : ObjectFile) : Nil
+    s = 0
+    while s < obj.sections.size
+      obj.sections[s].relocs.each do |reloc|
+        if pageoff_kind?(reloc.kind)
+          print "site #{s} #{reloc.offset} #{reloc.kind}\n"
+        end
+      end
+      s = s + 1
+    end
+  end
+
   def self.run : Nil
     args = Program.args
     unless args.size == 2
@@ -185,6 +208,7 @@ module ObjMachoTool
       raise "round trip of #{args[0]} changed the object at #{message}"
     end
     report(first)
+    report_sites(first)
     print "ROUNDTRIP EQUAL #{args[0]}\n"
   end
 end

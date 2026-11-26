@@ -957,6 +957,120 @@ prove_mutation "require loses its source location" "$PARSER" \
 prove_mutation "empty array loses its source location" "$PARSER" \
   'ArrayLiteral.new([] of ASTNode, of_type).at(location)' \
   'ArrayLiteral.new([] of ASTNode, of_type)' -- check_require_locations || status=1
+echo
+echo "== Or end locations against the hosted parser"
+# The golden dump prints a location for a call and for nothing else, and no other check reads where an `||` ends. `a || b`
+# ends where `b` does, so a port that gave an Or the end of its left side, or none, passed everything above. The probe
+# prints the start and the end of every Or, nested ones included, in the order the visitor meets them, and the hosted
+# parser's output is the oracle.
+cat > "$WORK/or_locations.iyi" <<'IYI_OR_LOCATIONS'
+import compiler/syntax/ast::{ASTNode, Or}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/visitor::{Visitor}
+class OrLocations < Visitor
+  def visit(node : Or) : Bool
+    if loc = node.location
+      first = "#{loc.line_number}:#{loc.column_number}"
+    else
+      first = "missing"
+    end
+    if loc = node.end_location
+      last = "#{loc.line_number}:#{loc.column_number}"
+    else
+      last = "missing"
+    end
+    puts "#{first} #{last}"
+    true
+  end
+end
+node = Parser.new(File.read(Program.args[0]), Program.args[0]).parse
+node.accept(OrLocations.new)
+IYI_OR_LOCATIONS
+cat > "$WORK/or_locations.cr" <<'HOSTED_OR_LOCATIONS'
+require "compiler/iyi/syntax"
+class OrLocations < Iyi::Visitor
+  def visit(node)
+    true
+  end
+  def visit(node : Iyi::Or)
+    if loc = node.location
+      first = "#{loc.line_number}:#{loc.column_number}"
+    else
+      first = "missing"
+    end
+    if loc = node.end_location
+      last = "#{loc.line_number}:#{loc.column_number}"
+    else
+      last = "missing"
+    end
+    puts "#{first} #{last}"
+    true
+  end
+end
+parser = Iyi::Parser.new(File.read(ARGV[0]))
+parser.filename = ARGV[0]
+parser.parse.accept(OrLocations.new)
+HOSTED_OR_LOCATIONS
+# An `||` in every place the parser reaches one from: bare, chained, after an assignment, in call arguments, across a line
+# break, after a parenthesised left side, before an `&&`, and before a call with arguments. It is written here, not kept as
+# a fixture, as the require input is. There is no parenthesised right side: for `a || (b)` the port ends the parenthesised
+# expression at `b` and the hosted parser at the closing parenthesis, which is a difference of that expression, not of the Or.
+cat > "$WORK/or_input.iyi" <<'OR_INPUT'
+a || b
+x = c || d || e
+f(g || h)
+i ||
+  j
+(k || l) || m
+n || o && p
+q || r.s(1, 2)
+OR_INPUT
+CRYSTAL_PATH="$REPO_NATIVE/src" "$HOSTED_COMPILER" build -o "$WORK_NATIVE/or_hosted$EXE" "$WORK_NATIVE/or_locations.cr"
+"$WORK/or_hosted$EXE" "$WORK_NATIVE/or_input.iyi" > "$WORK/or_hosted.out"
+# Each operator is one Or. A hosted dump with another count would leave the comparison below with nothing to compare.
+or_operators="$(grep -o '||' "$WORK/or_input.iyi" | wc -l | tr -d ' ')"
+or_hosted_nodes="$(wc -l < "$WORK/or_hosted.out" | tr -d ' ')"
+if [ "$or_hosted_nodes" != "$or_operators" ]; then
+  echo "  the hosted parser reports $or_hosted_nodes Or nodes for $or_operators operators"
+  status=1
+fi
+# check_or_locations: the port's start and end of every Or are the hosted parser's. Its first difference is the decisive line.
+check_or_locations() {
+  if ! "$IYI" build -o "$WORK_NATIVE/or_port$EXE" "$WORK_NATIVE/or_locations.iyi" > "$WORK/or_build.log" 2>&1; then
+    invalid_mutant "Or location probe did not build"
+    return $?
+  fi
+  if ! "$WORK/or_port$EXE" "$WORK_NATIVE/or_input.iyi" > "$WORK/or_port.out" 2> "$WORK/or_port.err"; then
+    invalid_mutant "Or location probe did not run"
+    return $?
+  fi
+  if cmp -s "$WORK/or_hosted.out" "$WORK/or_port.out"; then
+    return 0
+  fi
+  awk 'NR == FNR { want[FNR] = $0; wanted = FNR; next } { got[FNR] = $0; gotn = FNR }
+       END { for (i = 1; i <= wanted || i <= gotn; i++) if (want[i] != got[i]) {
+               printf "decisive: Or %d starts and ends at %s in the port and %s in the hosted parser\n", i, (i in got) ? got[i] : "nothing", (i in want) ? want[i] : "nothing"
+               exit } }' "$WORK/or_hosted.out" "$WORK/or_port.out" | tee "$WORK/or_decisive.txt"
+  return 1
+}
+if check_or_locations; then
+  echo "  every Or starts and ends where the hosted parser puts it ($or_operators operators)"
+else
+  echo "  the port's Or locations differ from the hosted parser"
+  status=1
+fi
+# or_end_proof LABEL OLD NEW: a mutation proof that also prints the first difference its check found.
+or_end_proof() {
+  : > "$WORK/or_decisive.txt"
+  prove_mutation "$1" "$PARSER" "$2" "$3" -- check_or_locations || status=1
+  awk '/^decisive: / { print "      " $0; exit }' "$WORK/or_decisive.txt"
+}
+or_end_proof "an Or ends where its left side does" \
+  'left = Or.new(left, right).at(location).at_end(right)' \
+  'left = Or.new(left, right).at(location).at_end(left)'
+or_end_proof "an Or has no end location" \
+  'left = Or.new(left, right).at(location).at_end(right)' \
+  'left = Or.new(left, right).at(location)'
 
 echo
 echo "== 4. Malformed-input and boundary rejection checks"

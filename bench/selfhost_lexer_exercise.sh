@@ -255,7 +255,8 @@ for fixture in \
   "$REPO"/samples/iyi/boot/config.iyi \
   "$REPO"/samples/iyi/boot/registry.iyi \
   "$REPO"/bench/fixtures/lexmode_macro_tokens.iyi \
-  "$REPO"/bench/fixtures/lexmode_string_concat_and_magic.iyi; do
+  "$REPO"/bench/fixtures/lexmode_string_concat_and_magic.iyi \
+  "$REPO"/bench/fixtures/lexmode_octal_escapes.iyi; do
   name="$(basename "$fixture")"
   rel="${fixture#$REPO/}"
   fixture_native="$(native_path "$fixture")"
@@ -367,6 +368,29 @@ prove_mutation "altering macro control start recognition in next_macro_token" \
   "next_char(TokenKind::MACRO_CONTROL_START)" \
   "next_char(TokenKind::MACRO_EXPRESSION_START)" \
   -- check_exercise_must_fail || status=1
+
+# check_octal_fixture: the mutant's tokens for the octal fixture differ from the hosted tokens (the golden). The mutant is
+# built in plain mode, which runs the same tokenizer as release mode when given a file.
+check_octal_fixture() {
+  rm -f "$WORK/mut-exercise$EXE"
+  if ! "$IYI" build -o "$WORK_NATIVE/mut-exercise$EXE" "$REPO_NATIVE/bench/selfhost_lexer_exercise.iyi" > "$WORK/mut-build.log" 2>&1 ||
+     [ ! -x "$WORK/mut-exercise$EXE" ]; then
+    echo "INVALID MUTANT: lexer exercise failed to build"
+    cat "$WORK/mut-build.log"
+    return 0
+  fi
+  "$WORK/mut-exercise$EXE" "$(native_path "$REPO/bench/fixtures/lexmode_octal_escapes.iyi")" > "$WORK/mut-octal.out" 2>&1 || true
+  if cmp -s "$WORK/golden_lexmode_octal_escapes.iyi.txt" "$WORK/mut-octal.out"; then
+    return 0
+  fi
+  return 1
+}
+
+prove_mutation "altering the octal escape to read two digits" \
+  "$REPO/src/compiler/syntax/lexer.iyi" \
+  "while count < 3 && peek_next_char >= '0' && peek_next_char <= '7'" \
+  "while count < 2 && peek_next_char >= '0' && peek_next_char <= '7'" \
+  -- check_octal_fixture || status=1
 echo
 echo "== Rebuilding and running restored lexer exercise"
 "$IYI" build --release -o "$WORK_NATIVE/exercise-restored$EXE" "$REPO_NATIVE/bench/selfhost_lexer_exercise.iyi"

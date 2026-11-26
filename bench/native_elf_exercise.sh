@@ -4,7 +4,10 @@
 # llvm-readelf is available, builds the start code, and structurally checks
 # and byte-compares each executable. Source mutations must build before their
 # checks can catch them. A matching Linux kernel runs the corpus against
-# hosted-linked references with bounded execution.
+# hosted-linked references with bounded execution, and one program of the
+# corpus (fixtures/native_elf/environ_probe) reads the environment the start
+# code hands it. Where nothing runs, check_start.py reads the start code's
+# translation: `environ` must be the environment block of the initial stack.
 
 set -uo pipefail
 
@@ -29,6 +32,7 @@ elf_src=src/compiler/native/obj/elf.iyi
 exe_src=src/compiler/native/link/elf_exe.iyi
 isel_src=src/compiler/native/aarch64/isel.iyi
 check=bench/fixtures/native_elf/check_exe.py
+start_check=bench/fixtures/native_elf/check_start.py
 start_a64_ir=src/compiler/native/rt/start_linux_aarch64.ir
 start_x86_ir=src/compiler/native/rt/start_linux_x86_64.ir
 arches="x86_64-linux-gnu aarch64-linux-gnu"
@@ -209,8 +213,12 @@ PY
     tail -n 20 "$work/build-obj.log" "$work/build-link.log" 2>/dev/null
   elif "$@" >"$work/mutation-check.log" 2>&1; then
     fail "NOT caught: $label"
+  elif grep -q '^CHECK NOT RUN' "$work/mutation-check.log"; then
+    fail "INVALID MUTANT: '$label' could not be judged"
+    tail -n 5 "$work/mutation-check.log"
   else
     echo "   caught: $label"
+    awk '/^decisive: / { print "     " $0; exit }' "$work/mutation-check.log"
   fi
   if ! cp "$backup" "$file" || ! cmp -s "$backup" "$file"; then
     fail "cannot restore $file; backup retained at $backup"
@@ -428,6 +436,39 @@ if [ -x "$iyi_ir" ] && [ -n "$llc_tool" ]; then
   bridge_check x86_64 "$start_x86_ir" "$work/start_x86_64_bridge.o" || rm -f "$work/start_x86_64_bridge.o"
   bridge_check aarch64 "$start_a64_ir" "$work/start_aarch64_bridge.o" || rm -f "$work/start_aarch64_bridge.o"
 fi
+# check_start_environ IR: the LLVM bridge's translation of a start code stores the environment block of the initial
+# stack in `environ` (check_start.py). Status 1 is a difference. A translation that fails, or a check that cannot
+# judge, prints CHECK NOT RUN and returns 2, which a mutation proof does not take for a catch.
+check_start_environ() {
+  if ! "$iyi_ir" translate "$(native_path "$root/$1")" >"$work/start-environ.ll" 2>"$work/start-environ.err"; then
+    echo "CHECK NOT RUN: iyi-ir could not translate $1: $(head -n 1 "$work/start-environ.err")"
+    return 2
+  fi
+  "$PY" "$(native_path "$root/$start_check")" "$(native_path "$work/start-environ.ll")"
+  environ_status=$?
+  if [ "$environ_status" -gt 1 ]; then
+    echo "CHECK NOT RUN: check_start.py could not judge $1 (status $environ_status)"
+  fi
+  return "$environ_status"
+}
+check_start_environ_x86() {
+  check_start_environ "$start_x86_ir"
+}
+if [ -x "$iyi_ir" ]; then
+  for ir in "$start_a64_ir" "$start_x86_ir"; do
+    if check_start_environ "$ir" >"$work/start-environ.out" 2>&1; then
+      echo "   $(basename "$ir" .ir): environ is the environment block of the initial stack"
+    else
+      fail "$ir does not install the environment block of the initial stack in environ:"
+      sed 's/^/     /' "$work/start-environ.out" | head -n 3
+    fi
+  done
+  prove_mutation "point x86_64 environ at the terminator of argv" "$start_x86_ir" \
+    "%n1 = add i64 %argc, 1" "%n1 = add i64 %argc, 0" \
+    check_start_environ_x86
+else
+  echo "   start code environ check not run: iyi-ir did not build"
+fi
 
 echo "== 5. link and inspect the executable corpus"
 exes=0
@@ -495,6 +536,8 @@ run_one() {
 }
 
 echo "== 6. native Linux runtime comparisons"
+# environ_probe prints this variable, so an executable whose environ does not reach the program prints what its twin does not.
+export IYI_ELF_ENV_PROBE="the-start-code-hands-over-the-environment"
 for triple in $arches; do
   short="$(arch_short "$triple")"
   case "$HOST_ID:$short" in

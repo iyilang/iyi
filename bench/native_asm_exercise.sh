@@ -12,6 +12,11 @@
 #    the count with git grep: each line that names asm( is an expression or a
 #    named non-expression (a comment, a string, or an identifier such as
 #    inline_asm(). No row may come from a file that fails to scan.
+# 3b. Reads a fixture with a site in every shape of macro branch, which the census
+#    of step 3 cannot judge: it balances whatever the scanner does with a line.
+#    The hosted compiler's own macros decide which sites a target compiles, so
+#    the scanner must keep exactly the templates its LLVM IR holds for that
+#    target, and count as many expressions as grep finds lines that name one.
 # 4. For every aarch64 template, on darwin and on Linux, the assembler's bytes
 #    and relocations equal the oracle's. The oracle is the same template in a
 #    naked function, built by ./bin/iyi build --cross-compile for that triple.
@@ -60,6 +65,8 @@ src_driver="$REPO_NATIVE/src/compiler/tools/native_asm.iyi"
 src_asm="$root/src/compiler/native/aarch64/asm.iyi"
 parse_src="$REPO_NATIVE/src/compiler/tools/parse.iyi"
 fixtures="$root/bench/fixtures/native_asm"
+census_fixture=bench/fixtures/native_asm/census/branches.iyi
+src_inventory="$root/src/compiler/native/asm/inventory.iyi"
 tool="$work/bin/native_asm$EXE"
 good_tool="$work/bin/native_asm.good$EXE"
 parse_tool="$work/bin/parse-tool$EXE"
@@ -193,6 +200,70 @@ if [ "$substring_lines" != "$gg_lines" ]; then
 fi
 if [ $((expressions + not_expressions)) != "$gg_lines" ]; then
   fail "expressions and non-expressions do not account for every line"
+fi
+# An expression counts wherever it sits, in a branch the target compiles or not, so what is counted depends on no target.
+distinct_counts="$(awk -F '\t' '$1 == "SUMMARY" { for (i = 2; i <= NF; i++) if ($i ~ /^expressions=/) print $i }' "$work/inventory.txt" | sort -u | wc -l | tr -d ' ')"
+if [ "$distinct_counts" = 1 ]; then
+  echo "   every target counts the same $expressions expressions"
+else
+  fail "the targets count different numbers of asm expressions, which a count of every expression in any branch cannot"
+fi
+
+# check_census: in the branch fixture the scanner keeps, for each target, the templates the hosted compiler compiled (the
+# marker templates in its LLVM IR), keeps no site for a target the outer branch excludes, and counts as many expressions
+# as the fixture has lines that name one, live or not. Status 1 is a difference. A check that could not compare prints
+# CHECK NOT RUN and returns 2.
+check_census() {
+  if ! "$tool" inventory "$WORK_NATIVE/census-report.tsv" >"$work/census.inventory" 2>"$work/census.inventory.err"; then
+    echo "CHECK NOT RUN: the inventory failed on the branch fixture: $(head -n 1 "$work/census.inventory.err")"
+    return 2
+  fi
+  census_lines="$(grep -c 'asm(' "$root/$census_fixture")"
+  for pair in "macho aarch64-apple-darwin" "elf aarch64-linux-gnu" "x86 x86_64-linux-gnu"; do
+    set -- $pair
+    if [ ! -f "$work/census-$1.ll" ]; then
+      echo "CHECK NOT RUN: there is no LLVM IR for $2"
+      return 2
+    fi
+    hosted="$(awk 'match($0, /asm sideeffect "movz w0, #[0-9]+"/) { site = substr($0, RSTART, RLENGTH); sub(/^asm sideeffect "movz w0, #/, "", site); sub(/"$/, "", site); print site }' "$work/census-$1.ll" | sort -n | tr '\n' ' ')"
+    kept="$(awk -F '\t' -v t="$2" '$1 == "ROW" && $2 == t { site = $NF; sub(/^movz w0, #/, "", site); print site }' "$work/census.inventory" | sort -n | tr '\n' ' ')"
+    if [ "$hosted" != "$kept" ]; then
+      echo "decisive: $2: the scanner keeps the sites [${kept}] and the hosted compiler compiled [${hosted}]"
+      return 1
+    fi
+    echo "$2: the scanner keeps the sites [${kept}], as the hosted compiler compiled"
+  done
+  other_rows="$(awk -F '\t' '$1 == "ROW" && $2 != "aarch64-apple-darwin" && $2 != "aarch64-linux-gnu" { n++ } END { print n + 0 }' "$work/census.inventory")"
+  if [ "$other_rows" != 0 ]; then
+    echo "decisive: the scanner keeps $other_rows sites for the targets the outer branch excludes"
+    return 1
+  fi
+  miscounted="$(awk -F '\t' -v n="$census_lines" '$1 == "SUMMARY" { for (i = 2; i <= NF; i++) if ($i ~ /^expressions=/) { sub(/^expressions=/, "", $i); if ($i != n) { print $2 " counts " $i; exit } } }' "$work/census.inventory")"
+  if [ -n "$miscounted" ]; then
+    echo "decisive: $census_lines lines of the fixture name the call, and the scanner for $miscounted"
+    return 1
+  fi
+  echo "the scanner counts $census_lines expressions for every target, as many as lines name the call"
+}
+
+echo "== 3b. a site in every shape of branch: the scanner keeps what the hosted compiler compiles"
+printf '%s\tscanned\n' "$census_fixture" >"$work/census-report.tsv"
+census_built=1
+for pair in "macho aarch64-apple-darwin" "elf aarch64-linux-gnu" "x86 x86_64-linux-gnu"; do
+  set -- $pair
+  if ! "$iyi" build --cross-compile --target "$2" --emit llvm-ir -o "$WORK_NATIVE/census-$1" "$REPO_NATIVE/$census_fixture" >"$work/census-$1.build.log" 2>&1; then
+    grep -v 'ld: warning' "$work/census-$1.build.log" | tail -n 8
+    fail "the hosted compiler does not build the branch fixture for $2"
+    census_built=0
+  fi
+done
+if [ "$census_built" -eq 1 ]; then
+  if check_census >"$work/census.out" 2>&1; then
+    sed 's/^/   /' "$work/census.out"
+  else
+    sed 's/^/   /' "$work/census.out" | head -n 6
+    fail "the scanner and the hosted compiler disagree about the branch fixture"
+  fi
 fi
 
 echo "== 4. aarch64 templates: bytes and relocations equal the oracle's"
@@ -411,7 +482,10 @@ prove_mutation() {
     "$@" >"$work/mutation-check.log" 2>&1 || proof_rc=$?
     case "$proof_rc" in
       0) fail "NOT caught: $label" ;;
-      1) echo "   caught: $label" ;;
+      1)
+        echo "   caught: $label"
+        awk '/^decisive: / { print "     " $0; exit }' "$work/mutation-check.log"
+        ;;
       *)
         fail "INVALID MUTANT: '$label' could not be compared"
         tail -n 20 "$work/mutation-check.log"
@@ -487,6 +561,11 @@ prove_mutation "the @PAGEOFF relocation given the @PAGE kind" "$src_asm" \
   "RelocKind::A64AddLo12" "RelocKind::A64AdrpPage21" check_bytes
 prove_mutation "the Rn field shifted one place too far in the encoder" "$src_asm" \
   "reg.to_i64 * 32_i64" "reg.to_i64 * 64_i64" check_bytes
+prove_mutation "read {% unless %} as {% if %} in the scanner" "$src_inventory" \
+  'if word == "unless"' 'if word == "never"' check_census
+prove_mutation "count only the asm expressions that sit in a live branch" "$src_inventory" \
+  $'    @expressions += 1\n    @expression_lines << line\n' \
+  $'    if active?\n      @expressions += 1\n      @expression_lines << line\n    end\n' check_census
 expect_refused_patch "a patch whose text is absent" "$src_asm" \
   "NO_SUCH_TEXT_IN_THE_ASSEMBLER" "x"
 expect_refused_patch "a patch that leaves the text unchanged" "$src_asm" \

@@ -550,6 +550,26 @@
   broken copies. It runs in the self-host jobs through
   `bench/selfhost_gates.sh`.
 
+- **The macro engine's string methods count characters, Win32 file errors
+  use the system's message, and the macro-site census is exact (#261).**
+  In `src/compiler/macros/`, `StringLiteral#size` answered the byte count
+  where the hosted compiler counts characters; `size`, range `[]`, `tr`
+  (deletion sets included) and `upcase`, `downcase`, `capitalize`,
+  `camelcase` and `underscore` now work by character, and `MacroId` and
+  `SymbolLiteral` forward the string methods as the hosted compiler does.
+  `bench/fixtures/macro_unicode_methods.iyi` (27 sites) must expand byte
+  for byte as the hosted compiler expands it. A `read_file` error on Windows
+  formats the open or read error code with `FormatMessageW`, as
+  `WinError#message` does, and an open error escapes its file name as
+  `File::Error` does on every host, so the two confinement cases excluded on
+  Windows run there. `bench/macro_sites.py`'s census reads every file (315
+  sites, 0 unpaired, 0 unreadable) and lists its 2 differing sites by file,
+  kind, context and ordinal in `bench/macro_sites.floor`; an unlisted
+  difference and a listed one that no longer occurs both fail. The port's
+  parser records the `[` of an index call as its name location, as hosted
+  does. `bench/selfhost_macros_exercise.sh` requires 65 fixtures (307
+  sites) and catches 60 broken copies.
+
 ### Gates
 
 - **std/autocert's and std/acme's gates draw challtestsrv's DNS port free

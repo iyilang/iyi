@@ -120,7 +120,12 @@ pub class TypeSystem < TypeHook
     @instances.pointer_of(@instances.pointer_of(uint8))
   end
 
-  def instantiate_generic(generic_type : GenericClassType, type_args : Array(Type)) : GenericClassInstanceType
+  def instantiate_generic(generic_type : GenericClassType, type_args : Array(Type)) : Type
+    # GenericUnionType#instantiate devirtualizes its members and merges them;
+    # it never constructs a generic class instance (hosted types.cr 3515-3535).
+    if generic_type == @program.types["Union"]?
+      return TypeMerge.instantiate_union(@program, type_args)
+    end
     @instances.instantiate_generic(generic_type, type_args)
   end
 

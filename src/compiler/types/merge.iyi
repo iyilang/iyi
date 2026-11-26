@@ -44,6 +44,13 @@ pub class TypeMerge
     combined_union_of(program, compact_types(program, types))
   end
 
+  # GenericUnionType#instantiate devirtualizes each argument before merging,
+  # so Union(T) is T itself and nested unions are flattened (types.cr 3515).
+  def self.instantiate_union(program : SemanticProgram, types : Array(Type)) : Type
+    members = types.map { |type| devirtualize(type) }
+    merge_all(program, members)
+  end
+
   # Program#compact_types: the distinct members of the merge, in the order
   # they came, with NoReturn dropped when another member remains.
   def self.compact_types(program : SemanticProgram, types : Array(Type)) : Array(Type)

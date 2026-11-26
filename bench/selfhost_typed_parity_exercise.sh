@@ -213,11 +213,21 @@ if [ "$RAISE" = 1 ]; then
 import sys
 verdicts, floor_path, host = sys.argv[1], sys.argv[2], sys.argv[3]
 floor = {}
+# A comment line below the two-line header is a note on the row that follows it
+# (which platform arm a host-specific row is for), and is written back with it.
+notes = {}
+pending = []
 try:
-    for line in open(floor_path, encoding="utf-8"):
-        if line.strip() and not line.startswith("#"):
+    for number, line in enumerate(open(floor_path, encoding="utf-8")):
+        if line.startswith("#"):
+            if number >= 2:
+                pending.append(line)
+        elif line.strip():
             path, count = line.split()
             floor[path] = int(count)
+            if pending:
+                notes[path] = pending
+                pending = []
 except FileNotFoundError:
     pass
 raised = 0
@@ -237,7 +247,11 @@ with open(floor_path, "w", encoding="utf-8", newline="\n") as out:
     out.write("# typed parity floors: <repo-relative file> <matched nodes>, and <repo-relative file>@<host> <matched nodes>\n")
     out.write("# for a file a host measures differently (its platform arms are other code). A count may only rise. Raise with: TYPED_PARITY_RAISE=1 bash bench/selfhost_typed_parity_exercise.sh\n")
     for rel in sorted(floor):
+        for note in notes.get(rel, []):
+            out.write(note)
         out.write(f"{rel} {floor[rel]}\n")
+    for note in pending:
+        out.write(note)
 print(f"  floor written: {len(floor)} entries, {raised} raised")
 PY
   fails=$(awk -F'\t' '$1 == "BELOW FLOOR" || $1 == "ORACLE" || $1 == "PORT"' "$VERDICTS" | wc -l | tr -d ' ')

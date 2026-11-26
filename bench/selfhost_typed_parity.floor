@@ -222,7 +222,7 @@ src/compiler/types/indirection.iyi 13
 src/compiler/types/instances.iyi 21
 src/compiler/types/intersect.iyi 30
 src/compiler/types/lookup.iyi 47
-src/compiler/types/merge.iyi 37
+src/compiler/types/merge.iyi 38
 src/compiler/types/rendering.iyi 21
 src/compiler/types/restrictions.iyi 21
 src/compiler/types/to_restriction.iyi 27

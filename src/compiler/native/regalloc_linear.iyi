@@ -624,6 +624,8 @@ class LinearScan
   property active : Array(Int32)
   property caller_pool : Array(Int32)
   property callee_pool : Array(Int32)
+  property gpr_pool : Array(Int32)
+  property empty_pool : Array(Int32)
   property hint_vreg : Array(Int32)
   property hint_reg : Array(Int32)
   property fpr_pool : Array(Int32)
@@ -656,6 +658,8 @@ class LinearScan
     @active = [] of Int32
     @caller_pool = caller_gpr_pool
     @callee_pool = callee_saved_gprs
+    @gpr_pool = @caller_pool + @callee_pool
+    @empty_pool = [] of Int32
     @hint_vreg = [] of Int32
     @hint_reg = [] of Int32
     @callee_fpr_pool = callee_saved_fprs
@@ -664,7 +668,7 @@ class LinearScan
 
   # Runs every stage and leaves the homes and the frame slots on the function.
   def run : Nil
-    assert_pools(@caller_pool + @callee_pool, @fpr_pool)
+    assert_pools(@gpr_pool, @fpr_pool)
     number_positions
     build_successors
     measure_weights
@@ -1096,27 +1100,39 @@ class LinearScan
     lo < ends.size && starts[lo] <= e
   end
 
-  def held?(reg : Int32) : Bool
-    @active.each do |a|
-      return true if @homes[a] == reg
+  # Keep the active order for victim tie-breaking, and collect occupied physical registers in the same pass.
+  def expire(s : Int32) : UInt64
+    occupied = 0_u64
+    read = 0
+    write = 0
+    while read < @active.size
+      a = @active[read]
+      if @ends[a] >= s
+        @active[write] = a if write != read
+        occupied = occupied | (1_u64 << @homes[a])
+        write = write + 1
+      end
+      read = read + 1
     end
-    false
-  end
-
-  def expire(s : Int32) : Nil
-    kept = [] of Int32
-    @active.each do |a|
-      kept << a if @ends[a] >= s
+    while @active.size > write
+      @active.pop
     end
-    @active = kept
+    occupied
   end
 
   def remove_active(v : Int32) : Nil
-    kept = [] of Int32
-    @active.each do |a|
-      kept << a unless a == v
+    i = 0
+    while i < @active.size
+      if @active[i] == v
+        while i + 1 < @active.size
+          @active[i] = @active[i + 1]
+          i = i + 1
+        end
+        @active.pop
+        return
+      end
+      i = i + 1
     end
-    @active = kept
   end
 
   # The candidate registers for one interval, in the order they are tried.
@@ -1126,7 +1142,7 @@ class LinearScan
   def pool_for(iv : Int32) : Array(Int32)
     if @fn.vreg_classes[iv] == RegClass::Fpr
       if @crossing[iv]
-        return [] of Int32 if @pointer[iv]
+        return @empty_pool if @pointer[iv]
         return @callee_fpr_pool
       end
       return @fpr_pool
@@ -1134,18 +1150,18 @@ class LinearScan
     if @crossing[iv]
       return @callee_pool
     end
-    @caller_pool + @callee_pool
+    @gpr_pool
   end
 
-  def find_free(iv : Int32, pool : Array(Int32)) : Int32
+  def find_free(iv : Int32, pool : Array(Int32), occupied : UInt64) : Int32
     preferred = @hint_reg[iv]
     other = @hint_vreg[iv]
     preferred = @homes[other] if other >= 0 && @homes[other] >= 0
-    if preferred >= 0 && member?(pool, preferred) && !held?(preferred) && !reserved?(preferred, @starts[iv], @ends[iv])
+    if preferred >= 0 && member?(pool, preferred) && (occupied & (1_u64 << preferred)) == 0_u64 && !reserved?(preferred, @starts[iv], @ends[iv])
       return preferred
     end
     pool.each do |reg|
-      return reg unless held?(reg) || reserved?(reg, @starts[iv], @ends[iv])
+      return reg if (occupied & (1_u64 << reg)) == 0_u64 && !reserved?(reg, @starts[iv], @ends[iv])
     end
     -1
   end
@@ -1178,9 +1194,9 @@ class LinearScan
     end
     order = sort_by_start(order, @starts)
     order.each do |iv|
-      expire(@starts[iv])
+      occupied = expire(@starts[iv])
       pool = pool_for(iv)
-      reg = find_free(iv, pool)
+      reg = find_free(iv, pool, occupied)
       if reg >= 0
         @homes[iv] = reg
         @active << iv

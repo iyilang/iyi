@@ -51,10 +51,8 @@ src/compiler/ir/inst.iyi 0
 src/compiler/ir/intrinsics.iyi 76
 src/compiler/ir/layout.iyi 24
 src/compiler/ir/module.iyi 0
-src/compiler/ir/opt/analysis.iyi 0
 src/compiler/ir/opt/callgraph.iyi 20
 src/compiler/ir/opt/cfg_simplify.iyi 33
-src/compiler/ir/opt/cse.iyi 0
 src/compiler/ir/opt/dce.iyi 2
 src/compiler/ir/opt/deadfn.iyi 3
 src/compiler/ir/opt/edit.iyi 36
@@ -64,10 +62,6 @@ src/compiler/ir/opt/inline.iyi 26
 src/compiler/ir/opt/layout.iyi 27
 src/compiler/ir/opt/licm.iyi 27
 src/compiler/ir/opt/mem2reg.iyi 30
-src/compiler/ir/opt/pipeline.iyi 0
-src/compiler/ir/opt/prove.iyi 0
-src/compiler/ir/opt/simplify.iyi 0
-src/compiler/ir/opt/sroa.iyi 0
 src/compiler/ir/parser.iyi 0
 src/compiler/ir/printer.iyi 48
 src/compiler/ir/types.iyi 88
@@ -148,7 +142,6 @@ src/compiler/native/link/link.iyi 0
 src/compiler/native/link/macho_exe.iyi 0
 src/compiler/native/lower.iyi 0
 src/compiler/native/mir.iyi 0
-src/compiler/native/mir_clean.iyi 0
 src/compiler/native/obj/elf.iyi 0
 src/compiler/native/obj/macho.iyi 0
 src/compiler/native/obj/object.iyi 0
@@ -205,7 +198,6 @@ src/compiler/tools/format.iyi 0
 src/compiler/tools/formatter.iyi 0
 src/compiler/tools/ir.iyi 0
 src/compiler/tools/ir_core.iyi 18
-src/compiler/tools/ir_opt.iyi 0
 src/compiler/tools/link_elf.iyi 0
 src/compiler/tools/link_macho.iyi 0
 src/compiler/tools/mod.iyi 0

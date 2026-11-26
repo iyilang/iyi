@@ -159,7 +159,15 @@ end
 # annotations above the header are blanked, which keeps every line where it was.
 def strip_header_annotations(src : String) : String
   lines = src.split("\n")
-  module_at = lines.index { |l| l.starts_with?("module ") }
+  module_at = nil
+  lines.each_with_index do |line, index|
+    stripped = line.strip
+    if stripped.starts_with?("module ")
+      module_at = index
+      break
+    end
+    break unless stripped.empty? || stripped.starts_with?("#") || stripped.starts_with?("@[")
+  end
   return src unless module_at
   i = 0
   while i < module_at
@@ -360,6 +368,7 @@ end
 
 src = File.read(filename)
 parser = Iyi::Parser.new(sites ? strip_header_annotations(src) : src)
+parser.filename = filename if sites
 node = parser.parse
 if sites
   program = Iyi::Program.new
@@ -1138,6 +1147,103 @@ check_confinement_still_matches() {
 }
 
 MUTATIONS_RUN=0
+
+# Mutate only a scratch copy of the named list. An unrelated failure is not
+# evidence that either direction of the exact-list check worked.
+CENSUS_PROOF_FLOOR="$WORK/macro-sites-proof.floor"
+cp "$REPO/bench/macro_sites.floor" "$CENSUS_PROOF_FLOOR"
+CENSUS_PROOF_NATIVE="$(native_path "$CENSUS_PROOF_FLOOR")"
+check_census_list_rejects() {
+  local wanted="$1" rc=0
+  "$PY" "$REPO_NATIVE/bench/macro_sites.py" "$SITES_NATIVE" --check --floor "$CENSUS_PROOF_NATIVE" > "$WORK/census-list-proof.log" 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then return 0; fi
+  if [ "$rc" -eq 1 ] && grep -Fq "$wanted" "$WORK/census-list-proof.log"; then return 1; fi
+  invalid_mutant "the census failed for another reason"
+}
+if prove_mutation "census rejects an unlisted differing site" "$CENSUS_PROOF_FLOOR" \
+  "differing|src/compiler/llvm/lib_llvm.iyi|#0|MacroIf|class|error location differs|The LLVM bridge raise's message agrees, but the port reports the next column." \
+  "# omitted exception" \
+  -- check_census_list_rejects "unexpected differing src/compiler/llvm/lib_llvm.iyi:#0"; then
+  echo "    decisive: an unlisted differing site is rejected"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+if prove_mutation "census rejects a stale named exception" "$CENSUS_PROOF_FLOOR" \
+  '# Named exceptions: category|file|site|kind|context|case|reason' \
+  '# Named exceptions: category|file|site|kind|context|case|reason
+differing|bench/fixtures/nonexistent.iyi|#0|MacroIf|class|text differs|A deliberately stale exception.' \
+  -- check_census_list_rejects "missing listed differing bench/fixtures/nonexistent.iyi:#0"; then
+  echo "    decisive: a listed exception that no longer occurs is rejected"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+# With no filename the hosted parser treats .iyi syntax as Crystal and cannot
+# read the concurrency runtime. Require the census to reject that failure.
+check_census_filename() {
+  local rc=0 dir="$WORK/mut-census-sites" dir_native
+  rm -f "$WORK/mut-hosted$EXE"
+  if ! LLVM_CONFIG="$HOST_LLVM_CONFIG" CRYSTAL_PATH="$REPO_NATIVE/src" "$HOSTED_COMPILER" build -Di_know_what_im_doing \
+    -o "$WORK_NATIVE/mut-hosted$EXE" "$WORK_NATIVE/dump_hosted_macro.cr" > "$WORK/mut-hosted-build.log" 2>&1; then
+    invalid_mutant "the filename mutant oracle did not build"
+    return $?
+  fi
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  cp "$SITES_DIR"/* "$dir/"
+  if "$WORK/mut-hosted$EXE" --sites "$REPO_NATIVE/src/iyi/concurrency.iyi" \
+    > "$dir/src__iyi__concurrency.iyi.oracle" 2> "$dir/src__iyi__concurrency.iyi.oracle.err"; then
+    return 0
+  else
+    rc=$?
+    printf 'file-error oracle exit=%s\n' "$rc" > "$dir/src__iyi__concurrency.iyi.oracle"
+  fi
+  dir_native="$(native_path "$dir")" || { invalid_mutant "mutant census path is unavailable"; return $?; }
+  rc=0
+  "$PY" "$REPO_NATIVE/bench/macro_sites.py" "$dir_native" --check > "$WORK/census-filename-proof.log" 2>&1 || rc=$?
+  if [ "$rc" -eq 1 ] &&
+     grep -Fq "unexpected unreadable src/iyi/concurrency.iyi:-" "$WORK/census-filename-proof.log" &&
+     grep -Fq "unexpected unpaired src/iyi/concurrency.iyi:-" "$WORK/census-filename-proof.log"; then
+    return 1
+  fi
+  invalid_mutant "the census did not reject the unreadable concurrency file"
+}
+if prove_mutation "hosted census parser ignores the .iyi filename" "$WORK/dump_hosted_macro.cr" \
+  'parser.filename = filename if sites' \
+  'parser.filename = "" if sites' \
+  -- check_census_filename; then
+  echo "    decisive: the census rejects the unreadable and unpaired concurrency file"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+# The first concurrency site includes body annotations; they are not header
+# annotations and must survive both scanners.
+check_census_body_annotations() {
+  if ! build_mutant_exercise; then
+    invalid_mutant "the header-scanner mutant did not build"
+    return $?
+  fi
+  if ! "$WORK/mut-exercise$EXE" --sites "$REPO_NATIVE/src/iyi/concurrency.iyi" > "$WORK/body-annotations.port" 2>"$WORK/body-annotations.err"; then
+    invalid_mutant "the header-scanner mutant did not run"
+    return $?
+  fi
+  awk 'NR == 1 { print; exit }' "$SITES_DIR/src__iyi__concurrency.iyi.oracle" > "$WORK/body-annotations.oracle.first"
+  awk 'NR == 1 { print; exit }' "$WORK/body-annotations.port" > "$WORK/body-annotations.port.first"
+  cmp -s "$WORK/body-annotations.oracle.first" "$WORK/body-annotations.port.first"
+}
+if prove_mutation "census strips body annotations as headers" "$REPO/bench/selfhost_macros_exercise.iyi" \
+  'elsif !line.empty? && !line.starts_with?("#") && !line.starts_with?("@[")' \
+  'elsif false' \
+  -- check_census_body_annotations; then
+  echo "    decisive: the first concurrency macro loses its body annotations"
+else
+  status=1
+fi
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "whole-program typeof fixture bypasses site scanning" "$REPO/bench/selfhost_macros_exercise.iyi" \
   "  if sites

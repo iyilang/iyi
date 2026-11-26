@@ -12,7 +12,7 @@ import std/dir::{Dir}
 # Executes parsed commands separately from the parity-tested command driver.
 pub class CommandExecutor
   PHASE_STACK_BYTES = 1073741824_u64
-  TARGET = "aarch64-apple-darwin"
+  TARGET            = "aarch64-apple-darwin"
 
   def self.execute(result : CommandResult) : Int32
     command = result.selected_command

@@ -2161,7 +2161,6 @@ pub class MainVisitor < TypeNodeHost
     ""
   end
 
-
   def def_inline_file : String
     if cd = @current_def
       if loc = cd.location
@@ -2176,9 +2175,12 @@ pub class MainVisitor < TypeNodeHost
     !@current_def.nil? || !@fun_inline_file.nil?
   end
 
-  # The names a def's arguments declare: the locals its body sees before the first statement (inline_macros.iyi).
+  # The names a macro site in the def being typed sees as locals: the def's arguments, and each variable its body has
+  # declared by the time the site is visited (`@vars`). A site in a nested body (an `until`, `if` or `while` body) reads
+  # these, as the hosted parser reads a site's scope (macros.cr 170). A name the body declares after the site is not yet
+  # in `@vars`, and the site does not see it.
   def def_inline_locals : Array(String)
-    names = [] of String
+    names = @vars.keys
     if cd = @current_def
       cd.args.each { |arg| names << arg.name }
       if ba = cd.block_arg

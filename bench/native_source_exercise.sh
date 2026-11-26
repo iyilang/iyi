@@ -22,6 +22,11 @@ set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO/bench/lib/host.sh" || exit 1
 require_test_host || exit 1
+# The LLVM bridge takes its version, targets and link flags as build arguments (src/compiler/llvm/lib_llvm.iyi): read
+# them for this host once, and pass them to every build of a program that imports the bridge.
+LLVM_BRIDGE_ARGS=()
+llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED: no LLVM build arguments for this host, see the sentence above"; exit 1; }
+while IFS= read -r llvm_arg; do LLVM_BRIDGE_ARGS+=("$llvm_arg"); done <<< "$llvm_bridge_text"
 if [ -z "$PY" ]; then echo "a working Python interpreter is required" >&2; exit 1; fi
 REPO_NATIVE="$(native_path "$REPO")" || exit 1
 export IYI_PATH="$REPO_NATIVE/src"
@@ -54,7 +59,7 @@ if ! "$IYI" build -o "$WORK_NATIVE/bin/iyi-compile-native$EXE" "$REPO_NATIVE/src
 fi
 echo "   built iyi-compile-native (native backend) from $TOOL_SRC"
 port="$WORK/bin/iyi-compile-port-llvm$EXE"
-if ! "$IYI" build -o "$WORK_NATIVE/bin/iyi-compile-port-llvm$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$WORK/build.port.log" 2>&1; then
+if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/bin/iyi-compile-port-llvm$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$WORK/build.port.log" 2>&1; then
   build_failed "the port+LLVM build" "$WORK/build.port.log"
 fi
 echo "   built iyi-compile-port-llvm (port pipeline, LLVM backend) from $PORT_SRC"
@@ -370,7 +375,7 @@ check_subtraction_output() {
   local src="$REPO_NATIVE/src/compiler/tools/compile.iyi" rc
   local result="$WORK/mut-b-exe$EXE"
   [ -f "$WORK/ref-arith.ok" ] || { echo "INVALID: subtraction baseline did not pass"; return 2; }
-  if ! "$IYI" build -o "$WORK_NATIVE/mut-b-tool$EXE" "$src" >"$WORK/mut-b.build.log" 2>&1; then
+  if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/mut-b-tool$EXE" "$src" >"$WORK/mut-b.build.log" 2>&1; then
     cat "$WORK/mut-b.build.log"; return 2
   fi
   if ! "$WORK/mut-b-tool$EXE" "$REPO_NATIVE/bench/fixtures/compile_arith.iyi" -o "$(native_path "$result")" >"$WORK/mut-b.run.log" 2>&1; then

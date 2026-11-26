@@ -6,6 +6,7 @@ end
 
 class SeminlOwner
   @animal : SeminlAnimal
+
   def initialize(@animal : SeminlAnimal)
   end
 end

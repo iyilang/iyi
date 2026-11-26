@@ -57,7 +57,6 @@ class Assigned
   end
 end
 
-
 struct Point
   @x : Int32 = 11
 
@@ -78,8 +77,6 @@ class Box(T)
     @item
   end
 end
-
-
 
 class Order
   @@sequence : Int32 = 0

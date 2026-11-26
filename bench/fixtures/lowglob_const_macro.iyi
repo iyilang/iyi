@@ -3,7 +3,7 @@ lib LibC
 end
 
 CONFIG_PATH = {{ "$ORIGIN/../src" }}
-VALUE = 2
+VALUE       = 2
 
 class Left
   VALUE = {{ 5 }}

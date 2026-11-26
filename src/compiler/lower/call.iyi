@@ -128,7 +128,7 @@ pub def codegen_call_node(low : Lowerer, node : Compiler::Syntax::Ast::Call) : N
   ret_type = low.analysed.type_of?(node)
   if ret_type.nil?
     refuse_untyped_call_probe(low, node)
-  raise "BUG: the analysed program has no type for the call to #{node.name} (hosted call.cr: visit(Call))" if ret_type.nil?
+    raise "BUG: the analysed program has no type for the call to #{node.name} (hosted call.cr: visit(Call))" if ret_type.nil?
   end
   ret = ret_type.as(Type)
 

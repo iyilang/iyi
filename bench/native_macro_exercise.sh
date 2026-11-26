@@ -14,6 +14,11 @@ set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO/bench/lib/host.sh" || exit 1
 require_test_host || exit 1
+# The LLVM bridge takes its version, targets and link flags as build arguments (src/compiler/llvm/lib_llvm.iyi): read
+# them for this host once, and pass them to every build of a program that imports the bridge.
+LLVM_BRIDGE_ARGS=()
+llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED: no LLVM build arguments for this host, see the sentence above"; exit 1; }
+while IFS= read -r llvm_arg; do LLVM_BRIDGE_ARGS+=("$llvm_arg"); done <<< "$llvm_bridge_text"
 REPO_NATIVE="$(native_path "$REPO")" || exit 1
 export IYI_PATH="$REPO_NATIVE/src"
 IYI="$REPO/bin/iyi"
@@ -33,7 +38,7 @@ status=0
 
 # build_port EXE: the port's own pipeline with the LLVM backend, built by ./bin/iyi from the source as it stands.
 build_port() {
-  "$IYI" build -o "$(native_path "$1")" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$1.build.log" 2>&1
+  "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$(native_path "$1")" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$1.build.log" 2>&1
 }
 
 # site_exit EXE: retain normal exits 0..255 and distinguish signals and timeouts.

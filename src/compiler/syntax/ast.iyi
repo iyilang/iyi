@@ -3044,6 +3044,7 @@ pub class Block < ASTNode
 end"
   end
 end
+
 def print_expression_operand(node : ASTNode, sb : StringBuilder) : Nil
   parens = if node.is_a?(Call)
              call = node.as(Call)
@@ -3055,7 +3056,6 @@ def print_expression_operand(node : ASTNode, sb : StringBuilder) : Nil
   node.to_s(sb)
   sb << ")" if parens
 end
-
 
 def print_expression_operand(node : ASTNode, sb : StringBuilder) : Nil
   parens = if node.is_a?(Call)

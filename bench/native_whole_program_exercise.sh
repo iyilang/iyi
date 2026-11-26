@@ -34,6 +34,11 @@ cd "$root" || exit 1
 REPO="$root"
 . "$REPO/bench/lib/host.sh" || exit 1
 require_test_host || exit 1
+# The LLVM bridge takes its version, targets and link flags as build arguments (src/compiler/llvm/lib_llvm.iyi): read
+# them for this host once, and pass them to every build of a program that imports the bridge.
+LLVM_BRIDGE_ARGS=()
+llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED: no LLVM build arguments for this host, see the sentence above"; exit 1; }
+while IFS= read -r llvm_arg; do LLVM_BRIDGE_ARGS+=("$llvm_arg"); done <<< "$llvm_bridge_text"
 if [ -z "$PY" ]; then echo "a working Python interpreter is required" >&2; exit 1; fi
 REPO_NATIVE="$(native_path "$REPO")" || exit 1
 export IYI_PATH="$REPO_NATIVE/src"
@@ -104,7 +109,7 @@ rank_of() {
 build_tools() {
   mkdir -p "$1"
   "$iyi" build -o "$(native_path "$1/compile_native$EXE")" "$REPO_NATIVE/$TOOL_SRC" >"$1/build.tool.log" 2>&1 || return 1
-  "$iyi" build -o "$(native_path "$1/iyi-ir$EXE")" "$REPO_NATIVE/$BRIDGE_SRC" >"$1/build.bridge.log" 2>&1 || return 1
+  "$iyi" build "${LLVM_BRIDGE_ARGS[@]}" -o "$(native_path "$1/iyi-ir$EXE")" "$REPO_NATIVE/$BRIDGE_SRC" >"$1/build.bridge.log" 2>&1 || return 1
   if [ "$HOST_ID" != darwin-arm64 ]; then
     "$iyi" build -o "$(native_path "$1/native_cg$EXE")" "$REPO_NATIVE/src/compiler/tools/native_cg.iyi" >"$1/build.cg.log" 2>&1 || return 1
     "$iyi" build -o "$(native_path "$1/ir_core$EXE")" "$REPO_NATIVE/src/compiler/tools/ir_core.iyi" >"$1/build.ir_core.log" 2>&1 || return 1
@@ -496,7 +501,7 @@ still_runs() {
   mkdir -p "$t"
   if [ "$which" = bridge ]; then
     cp "$tools/compile_native$EXE" "$t/compile_native$EXE"
-    "$iyi" build -o "$(native_path "$t/iyi-ir$EXE")" "$REPO_NATIVE/$BRIDGE_SRC" >"$t/build.bridge.log" 2>&1 || { cat "$t/build.bridge.log"; return 2; }
+    "$iyi" build "${LLVM_BRIDGE_ARGS[@]}" -o "$(native_path "$t/iyi-ir$EXE")" "$REPO_NATIVE/$BRIDGE_SRC" >"$t/build.bridge.log" 2>&1 || { cat "$t/build.bridge.log"; return 2; }
   else
     cp "$tools/iyi-ir$EXE" "$t/iyi-ir$EXE"
     "$iyi" build -o "$(native_path "$t/compile_native$EXE")" "$REPO_NATIVE/$TOOL_SRC" >"$t/build.tool.log" 2>&1 || { cat "$t/build.tool.log"; return 2; }

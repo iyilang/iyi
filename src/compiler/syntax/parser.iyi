@@ -6637,7 +6637,6 @@ pub class Parser < Lexer
 
   def syntax_error(msg : String, loc : Location? = nil) : NoReturn
     l = loc || @token.location
-    puts "SYNTAX ERROR: " + msg + " at " + l.line_number.to_s + ":" + l.column_number.to_s
     ex = SyntaxException.new(msg, l.line_number, l.column_number, l.filename)
     raise ex.to_s
   end

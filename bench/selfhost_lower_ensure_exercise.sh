@@ -8,6 +8,11 @@ set -uo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/lib/host.sh" || exit 1
 require_test_host || exit 1
+# The LLVM bridge takes its version, targets and link flags as build arguments (src/compiler/llvm/lib_llvm.iyi): read
+# them for this host once, and pass them to every build of a program that imports the bridge.
+LLVM_BRIDGE_ARGS=()
+llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED: no LLVM build arguments for this host, see the sentence above"; exit 1; }
+while IFS= read -r llvm_arg; do LLVM_BRIDGE_ARGS+=("$llvm_arg"); done <<< "$llvm_bridge_text"
 if [ -z "$PY" ]; then
   echo 'FAIL: a functional Python interpreter is required' >&2
   exit 1
@@ -110,7 +115,7 @@ mutation_check() {
 }
 
 echo '== 1. Building comparison and native tools'
-if ! build_port || ! "$IYI" build -o "$WORK_NATIVE/bridge$EXE" "$REPO_NATIVE/src/compiler/tools/ir.iyi" > "$WORK/bridge.log" 2>&1 || ! "$IYI" build -o "$WORK_NATIVE/native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/native.log" 2>&1; then
+if ! build_port || ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/bridge$EXE" "$REPO_NATIVE/src/compiler/tools/ir.iyi" > "$WORK/bridge.log" 2>&1 || ! "$IYI" build -o "$WORK_NATIVE/native$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" > "$WORK/native.log" 2>&1; then
   echo '  FAIL: tool build failed'
   for log in "$WORK/port.log" "$WORK/bridge.log" "$WORK/native.log"; do
     [ ! -f "$log" ] || awk 'NR <= 12 { print }' "$log"

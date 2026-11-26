@@ -1411,13 +1411,16 @@ end
 
 # The hosted `codegen_addsub_same_signedness_with_overflow`. A wider second operand of an
 # unsigned type is truncated to the first's width, and a range check catches a value that
-# does not fit (hosted, after the overflow check). A wider signed operand needs the checked
-# conversion back, which is refused by name.
+# does not fit (hosted, after the overflow check). A wider signed operand is sign-extended
+# to the second's width and converted back with a range check.
 pub def same_signedness_addsub(low : Lowerer, op : String, t1 : IntShape, t2 : IntShape, p1 : Value, p2 : Value) : Value
   if t2.bytes > t1.bytes
     if t2.signed
-      pending_visit_node("checked #{op} with a wider signed operand (hosted codegen_convert, range check)")
-      return p1
+      # hosted codegen_addsub_same_signedness_with_overflow: the first operand is sign-extended to the second's width,
+      # the operation is unchecked at that width, and the result is converted back under a range check.
+      wide = extend_int(low, t1, t2, p1)
+      result = op == "+" ? low.builder.add(wide, p2) : low.builder.sub(wide, p2)
+      return checked_narrow_int(low, t2, t1, result)
     end
     p2_trunc = trunc_to(low, p2, t1.ir)
     pair = call_binary_overflow(low, op, t1, p1, p2_trunc)
@@ -1551,13 +1554,24 @@ end
 # Hosted codegen_out_of_range (primitives.cr 320-326): compare against both
 # bounds using the same mixed-sign comparison as ordinary integer operators.
 pub def codegen_int_out_of_range(low : Lowerer, from : Type, to : Type, value : Value) : Value
-  source = int_shape(low, from)
-  target = int_shape(low, to)
+  int_out_of_range_of(low, int_shape(low, from), int_shape(low, to), value)
+end
+
+# The same check on the shapes of the operands, for a conversion whose operands are not Types: the checked add of a
+# wider signed operand (`same_signedness_addsub`).
+pub def int_out_of_range_of(low : Lowerer, source : IntShape, target : IntShape, value : Value) : Value
   minimum = integer_bound(low, target, false)
   maximum = integer_bound(low, target, true)
   below = codegen_binary_op_lt(low, source, target, value, minimum)
   above = codegen_binary_op_gt(low, source, target, value, maximum)
   low.builder.build_or(below, above)
+end
+
+# The narrowing of hosted codegen_convert under `checked`: a value outside the target's range raises, and the value
+# is truncated to the target's width.
+pub def checked_narrow_int(low : Lowerer, source : IntShape, target : IntShape, value : Value) : Value
+  raise_overflow_cond(low, int_out_of_range_of(low, source, target, value))
+  low.builder.trunc(value, target.ir)
 end
 
 pub def integer_bound(low : Lowerer, shape : IntShape, maximum : Bool) : Value

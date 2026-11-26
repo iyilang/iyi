@@ -633,9 +633,9 @@ $(O)/$(IYI_DAEMON_BIN): $(DEPS) $(SOURCES)
 
 # The self-hosted tool depends on its compiler and library sources, including
 # the runtime IR embedded by the backend.
-$(O)/iyi-compile$(EXE): $(O)/iyi$(EXE) $(shell find src -name '*.iyi' -o -name '*.ir')
+$(O)/iyi-compile$(EXE): $(O)/iyi$(EXE) $(shell find src -name '*.iyi' -o -name '*.ir') scripts/build-llvm-tool.sh bench/lib/host.sh
 	@mkdir -p $(O)
-	$(O)/iyi$(EXE) build -o $@ src/compiler/tools/compile.iyi
+	LLVM_CONFIG="$(LLVM_CONFIG)" bash scripts/build-llvm-tool.sh "$(O)/iyi$(EXE)" "$@" src/compiler/tools/compile.iyi
 	@echo "built $@"
 
 # iyi: the front end on its own. Linking libLLVM costs 26 ms of load-time

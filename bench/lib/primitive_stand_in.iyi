@@ -45,7 +45,7 @@ pub def stand_in_primitive_types(root : ASTNode, prog : SemanticProgram, mv : Ma
     # A same-type call still matches the def added above: a different width is not a subtype.
     int_names.each do |other|
       next if other == tn
-      ["&+", "&-", "&*", "|", "&", "^", "unsafe_shl", "unsafe_shr", "unsafe_div", "unsafe_mod"].each do |op|
+      ["&+", "&-", "&*", "+", "-", "|", "&", "^", "unsafe_shl", "unsafe_shr", "unsafe_div", "unsafe_mod"].each do |op|
         owner.add_def(binary_def(op, other, tn))
       end
       ["==", "!=", "<", "<=", ">", ">="].each do |op|

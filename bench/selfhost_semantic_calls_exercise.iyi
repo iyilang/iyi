@@ -276,10 +276,34 @@ module BenchSelfhostSemanticCallsExercise
     "ok"
   end
 
+  # The hosted oracle parses an `# error` line under `rescue` and answers the first line of the refusal. iyi has
+  # no rescue, so the parse runs in a task: a refused parse panics the task, and the panic comes back as its value.
+  def self.parse_error_line(expr : String) : ASTNode | String
+    result = group do |g|
+      task = g.spawn { Parser.new(expr, "call").parse }
+      task.value
+    end
+    if result.is_a?(Panicked)
+      message = result.message.split('\n')[0]
+      # The hosted SyntaxException's message omits the location that its display form includes.
+      if message.starts_with?("Syntax error in call:")
+        if separator = message.index(": ")
+          return message[separator + 2, message.bytesize - separator - 2]
+        end
+      end
+      return message
+    end
+    result.as(ASTNode)
+  end
+
   # `ok` when the call has a target, otherwise the first line of its error, as the
   # hosted call pass raises it. A message not ported is marked as such.
   def self.evaluate_error(prog : SemanticProgram, ts : TypeSystem, expr : String) : String
-    node = Parser.new(expr, "call").parse
+    parsed = parse_error_line(expr)
+    if parsed.is_a?(String)
+      return "error: #{parsed}"
+    end
+    node = parsed.as(ASTNode)
     if !node.is_a?(Call)
       return "error: not a call"
     end

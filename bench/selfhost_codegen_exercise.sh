@@ -23,6 +23,10 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 . "$REPO/bench/lib/mutation.sh"
+# The LLVM bridge reads its version, targets and link flags from build arguments this host supplies: read them once.
+LLVM_BRIDGE_ARGS=()
+llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED: no LLVM build arguments for this host, see the sentence above"; exit 1; }
+while IFS= read -r llvm_arg; do LLVM_BRIDGE_ARGS+=("$llvm_arg"); done <<< "$llvm_bridge_text"
 IYI="${IYI_COMPILER:-$REPO/bin/iyi}"
 CRYSTAL="${CRYSTAL:-crystal}"
 CG_SRC="$REPO/src/compiler/codegen/codegen.iyi"
@@ -88,7 +92,7 @@ export CRYSTAL_CACHE_DIR="$WORK_NATIVE/cache"
 export CRYSTAL_PATH="$REPO_NATIVE/src"
 
 echo "== 1. Building and running pure iyi codegen standalone check"
-if ! "$IYI" build -o "$WORK_NATIVE/exercise$EXE" "$REPO_NATIVE/bench/selfhost_codegen_exercise.iyi" > "$WORK/exercise.build.log" 2>&1; then
+if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/exercise$EXE" "$REPO_NATIVE/bench/selfhost_codegen_exercise.iyi" > "$WORK/exercise.build.log" 2>&1; then
   cat "$WORK/exercise.build.log"
   exit 1
 fi
@@ -354,7 +358,7 @@ echo
 echo "== 3e. Program fixtures: whole programs compared by exit status"
 echo "    No IR or C-runner comparison: the oracle refuses their @[Unsafe] header, and each defines fun main."
 port_built=1
-if ! "$IYI" build -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" > "$WORK/port.build.log" 2>&1; then
+if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" > "$WORK/port.build.log" 2>&1; then
   echo "  FAIL: the port did not build"
   cat "$WORK/port.build.log"
   status=1
@@ -432,7 +436,7 @@ echo
 echo "== 5. Guarded mutation proofs"
 
 build_codegen_mutant() {
-  if ! "$IYI" build -o "$WORK_NATIVE/mut_exercise$EXE" "$REPO_NATIVE/bench/selfhost_codegen_exercise.iyi" > "$WORK/mut_build.log" 2>&1; then
+  if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/mut_exercise$EXE" "$REPO_NATIVE/bench/selfhost_codegen_exercise.iyi" > "$WORK/mut_build.log" 2>&1; then
     echo "INVALID MUTANT: codegen driver did not build" >&2
     cat "$WORK/mut_build.log" >&9
     return 2
@@ -541,7 +545,7 @@ if s.count(call) != 1:
     sys.exit(1)
 open(p, "w").write(s.replace(call, "nil", 1))
 PY
-  "$IYI" build -o "$WORK_NATIVE/mut_limit$EXE" "$REPO_NATIVE/bench/selfhost_codegen_exercise.iyi" > "$WORK/mut_limit.build.log" 2>&1
+  "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/mut_limit$EXE" "$REPO_NATIVE/bench/selfhost_codegen_exercise.iyi" > "$WORK/mut_limit.build.log" 2>&1
   built=$?
   cp "$keep" "$CG_SRC" || return 2
   if [ "$built" -ne 0 ]; then
@@ -758,7 +762,7 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 check_call_result_mutant() {
   local rc=0
   [ -f "$WORK/call_result.baseline.ok" ] || { echo "INVALID PROOF: call-result baseline did not exit 10" >&2; return 2; }
-  if ! "$IYI" build -o "$WORK_NATIVE/mut_port$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" > "$WORK/mut_port.log" 2>&1; then
+  if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/mut_port$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" > "$WORK/mut_port.log" 2>&1; then
     echo "INVALID MUTANT: compiler did not build" >&2
     cat "$WORK/mut_port.log" >&9
     return 2

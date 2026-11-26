@@ -189,8 +189,8 @@ class MacroSDKSettings
     space
     case peek
     when 123_u8 then object(depth + 1, false)
-    when 91_u8  then array(depth + 1)
-    when 34_u8  then !string_bounds.nil?
+    when  91_u8 then array(depth + 1)
+    when  34_u8 then !string_bounds.nil?
     when 116_u8 then literal("true")
     when 102_u8 then literal("false")
     when 110_u8 then literal("null")

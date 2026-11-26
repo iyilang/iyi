@@ -12,6 +12,10 @@ WORK="$(mktemp -d)"
 WORK_NATIVE="$(native_path "$WORK")" || exit 1
 trap 'if [ "$status" -ne 0 ]; then echo "GC barrier logs: $WORK"; else rm -rf "$WORK"; fi' EXIT
 . "$REPO/bench/lib/mutation.sh"
+# The LLVM bridge reads its version, targets and link flags from build arguments this host supplies: read them once.
+LLVM_BRIDGE_ARGS=()
+llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED: no LLVM build arguments for this host, see the sentence above"; exit 1; }
+while IFS= read -r llvm_arg; do LLVM_BRIDGE_ARGS+=("$llvm_arg"); done <<< "$llvm_bridge_text"
 fixture="$REPO_NATIVE/bench/fixtures/low_gc_barrier.iyi"
 
 # The port's typed pipeline targets Darwin AArch64. The hosted IR must use that
@@ -25,7 +29,7 @@ else
   hosted_ir="$WORK/hosted-arm64.ll"
   host_limited "GC barrier: AArch64 Mach-O link, codesign, and runtime comparisons require macOS arm64 ($HOST_ID runs IR parity and object emission)"
 fi
-"$IYI" build -o "$WORK_NATIVE/ir$EXE" "$REPO_NATIVE/src/compiler/tools/ir.iyi" >"$WORK/ir.log" 2>&1 || { cat "$WORK/ir.log"; exit 1; }
+"$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/ir$EXE" "$REPO_NATIVE/src/compiler/tools/ir.iyi" >"$WORK/ir.log" 2>&1 || { cat "$WORK/ir.log"; exit 1; }
 if [ "$HOST_OS" = darwin ]; then
   codesign -v --strict "$WORK/hosted$EXE" || exit 1
 fi

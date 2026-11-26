@@ -2,6 +2,7 @@ class SeminlGenericFields
   @names : Array(String)
   @pairs : Hash(String, String)
   @optional : Array(UInt8) | Nil
+
   def initialize(@names : Array(String), @pairs : Hash(String, String), @optional : Array(UInt8) | Nil)
   end
 end

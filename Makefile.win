@@ -403,9 +403,9 @@ $(O)\iyi.exe: $(DEPS) $(SOURCES)
 	@echo built $@
 
 # Match the POSIX tool's source dependencies and native executable name.
-$(O)\iyi-compile.exe: $(O)\iyi.exe $(call GLOB,src\\*.iyi) $(call GLOB,src\\*.ir)
+$(O)\iyi-compile.exe: $(O)\iyi.exe $(call GLOB,src\\*.iyi) $(call GLOB,src\\*.ir) scripts\build-llvm-tool.sh bench\lib\host.sh
 	@$(call MKDIR,"$(O)")
-	$(O)\iyi.exe build -o "$@" src\compiler\tools\compile.iyi
+	bash scripts/build-llvm-tool.sh "$(O)/iyi.exe" "$@" src/compiler/tools/compile.iyi
 	@echo built $@
 
 $(O)\iyi-daemon.exe: $(DEPS) $(SOURCES)

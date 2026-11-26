@@ -16,6 +16,11 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/bench/lib/host.sh" || exit 1
 require_test_host || exit 1
+# The LLVM bridge takes its version, targets and link flags as build arguments (src/compiler/llvm/lib_llvm.iyi): read
+# them for this host once, and pass them to every build of a program that imports the bridge.
+LLVM_BRIDGE_ARGS=()
+llvm_bridge_text=$(llvm_bridge_build_args) || { echo "FAILED: no LLVM build arguments for this host, see the sentence above"; exit 1; }
+while IFS= read -r llvm_arg; do LLVM_BRIDGE_ARGS+=("$llvm_arg"); done <<< "$llvm_bridge_text"
 REPO_NATIVE="$(native_path "$REPO")" || exit 1
 export IYI_PATH="$REPO_NATIVE/src"
 TOOL="$REPO/.build/iyi-compile$EXE"
@@ -58,7 +63,7 @@ expected_verify() {
 }
 
 echo "== 1. Building self-host compile tool"
-if ! "$IYI" build -o "$REPO_NATIVE/.build/iyi-compile$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$WORK/build.log" 2>&1; then
+if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$REPO_NATIVE/.build/iyi-compile$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$WORK/build.log" 2>&1; then
   echo "  FAILED: could not build the compile tool" >&2
   cat "$WORK/build.log" >&2
   exit 1
@@ -185,7 +190,7 @@ mut_caught=0
 # this mutation. A build error, crash, or refusal is an invalid proof.
 check_ir_still_verifies() {
   local rc=0
-  if ! "$IYI" build -o "$WORK_NATIVE/mut-compile$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$WORK/mut-build.log" 2>&1; then
+  if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/mut-compile$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$WORK/mut-build.log" 2>&1; then
     echo "  INVALID: mutated compile tool did not build" >&2
     cat "$WORK/mut-build.log" >&2
     return 2

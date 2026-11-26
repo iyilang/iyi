@@ -4068,6 +4068,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path $env:TEST_SANDBOX | Out-Null
           New-Item -ItemType Directory -Force -Path $env:IYI_FILE_SANDBOX | Out-Null
           $iyi = "$pwd\.build\iyi.exe"
+          # The codegen exercise imports the LLVM bridge, which needs build flags even in the runtime sweep.
+          $llvmBridgeArgs = @(& bash -c '. bench/lib/host.sh && llvm_bridge_build_args')
+          if ($LASTEXITCODE -ne 0) { throw "cannot read LLVM bridge build arguments" }
           $failed = @()
           $ran = 0
           foreach ($program in Get-ChildItem bench\*.iyi | Sort-Object Name) {
@@ -4077,7 +4080,9 @@ jobs:
             if ($program.Name -eq "std_path_exercise.iyi") {
               $env:HOME = "/home/gate"; $env:PWD = "/pwd/gate"
             }
-            "" | & $iyi run $program.FullName > "$env:RUNNER_TEMP\$($program.BaseName).out" 2>&1
+            $runArgs = @()
+            if ($program.Name -eq "selfhost_codegen_exercise.iyi") { $runArgs = $llvmBridgeArgs }
+            "" | & $iyi run @runArgs $program.FullName > "$env:RUNNER_TEMP\$($program.BaseName).out" 2>&1
             if ($LASTEXITCODE -ne 0) {
               $failed += $program.Name
               Write-Host "== $($program.Name) failed with $LASTEXITCODE"

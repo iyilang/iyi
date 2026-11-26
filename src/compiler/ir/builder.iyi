@@ -64,7 +64,7 @@ pub class Builder
   # An integer constant. An integer wider than 64 bits gets every word: the sign extension of `value`.
   def const_int(type : IrType, value : Int64) : Inst
     raise "a ConstInt needs an integer type, not #{type}" unless type.int?
-    inst = Inst.new(Op::ConstInt, type, [] of Value, value, nil, [] of Block, [] of Int64)
+    inst = Inst.new(Op::ConstInt, type, nil, value, nil, nil, nil)
     if type.bits > 64
       sign = value < 0_i64 ? -1_i64 : 0_i64
       words = [value] of Int64
@@ -79,7 +79,7 @@ pub class Builder
   # A 128-bit integer constant from its two halves in two's complement.
   def const_wide(type : IrType, hi : Int64, lo : Int64) : Inst
     raise "a wide constant needs an i128, not #{type}" unless type.int? && type.bits == 128
-    inst = Inst.new(Op::ConstInt, type, [] of Value, lo, nil, [] of Block, [] of Int64)
+    inst = Inst.new(Op::ConstInt, type, nil, lo, nil, nil, nil)
     inst.wide_words = [lo, hi]
     inst
   end
@@ -90,7 +90,7 @@ pub class Builder
     raise "a wide constant needs an integer wider than 64 bits, not #{type}" unless type.int? && type.bits > 64
     count = (type.bits + 63) // 64
     raise "#{type} takes #{count} words, not #{words.size}" unless words.size == count
-    inst = Inst.new(Op::ConstInt, type, [] of Value, words[0], nil, [] of Block, [] of Int64)
+    inst = Inst.new(Op::ConstInt, type, nil, words[0], nil, nil, nil)
     inst.wide_words = canonical_words(words, type.bits)
     inst
   end
@@ -107,11 +107,11 @@ pub class Builder
   def const_float(type : IrType, value : Float64) : Inst
     raise "a ConstFloat needs a floating-point type, not #{type}" unless type.float?
     bits = type.float32? ? single_bits(value) : double_bits(value)
-    Inst.new(Op::ConstFloat, type, [] of Value, bits, nil, [] of Block, [] of Int64)
+    Inst.new(Op::ConstFloat, type, nil, bits, nil, nil, nil)
   end
 
   def const_null(type : IrType) : Inst
-    Inst.new(Op::ConstNull, type, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+    Inst.new(Op::ConstNull, type, nil, 0_i64, nil, nil, nil)
   end
 
   def const_null_pointer(address_space : Int32 = 0) : Inst
@@ -119,15 +119,15 @@ pub class Builder
   end
 
   def const_undef(type : IrType) : Inst
-    Inst.new(Op::ConstUndef, type, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+    Inst.new(Op::ConstUndef, type, nil, 0_i64, nil, nil, nil)
   end
 
   def const_poison(type : IrType) : Inst
-    Inst.new(Op::ConstPoison, type, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+    Inst.new(Op::ConstPoison, type, nil, 0_i64, nil, nil, nil)
   end
 
   def const_zero(type : IrType) : Inst
-    Inst.new(Op::ConstZero, type, [] of Value, 0_i64, nil, [] of Block, [] of Int64)
+    Inst.new(Op::ConstZero, type, nil, 0_i64, nil, nil, nil)
   end
 
   # `[N x i8]` data: one i8 constant per byte, with a trailing zero byte when `null_terminated`.

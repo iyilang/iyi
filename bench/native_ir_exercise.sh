@@ -799,6 +799,7 @@ predicate_check() {
   fixture=$(native_path "$REPO/bench/fixtures/ir/valid/review_predicates.ir")
   "$bin" predicates "$fixture" >"$WORK/pred-port.txt" 2>&1 || return 1
   "$LLVM_DRV" --predicates "$fixture" >"$WORK/pred-llvm.txt" 2>&1 || return 1
+  normalize_oracle "$WORK/pred-llvm.txt" || return 1
   [ -s "$WORK/pred-llvm.txt" ] && cmp -s "$WORK/pred-port.txt" "$WORK/pred-llvm.txt"
 }
 echo "== 7c. every icmp and fcmp predicate reads as LLVM reads it"

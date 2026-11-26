@@ -290,35 +290,46 @@ done
 echo "determinism totals: $det_equal/$det_fixtures register fixtures"
 
 echo "== 5. spill slots per fixture: the linear allocator uses no more than the reference"
-native_drv=$(native_path "$DRV") || exit 1
-native_fixtures=$(native_path "$FIX_RA") || exit 1
-slot_report=$("$PY" - "$native_drv" "$native_fixtures" <<'PY'
+# Prints the reference comparison and writes one "<fixture> <function> <slots>" row per linear function to $2.
+# Returns 1 when linear spills more than the reference, 2 when a fixture cannot be measured.
+spill_report() {
+  local drv=$1 counts=$2 native_drv native_fixtures native_counts
+  native_drv=$(native_path "$drv") || return 2
+  native_fixtures=$(native_path "$FIX_RA") || return 2
+  native_counts=$(native_path "$counts") || return 2
+  "$PY" - "$native_drv" "$native_fixtures" "$native_counts" <<'PY'
 import os
 import re
 import subprocess
 import sys
 
-drv, fixdir = sys.argv[1], sys.argv[2]
+drv, fixdir, counts_path = sys.argv[1], sys.argv[2], sys.argv[3]
 names = sorted(name for name in os.listdir(fixdir)
                if name.endswith(".ir") and os.path.isfile(os.path.join(fixdir, name)))
 bad = []
 errors = []
 strictly_fewer = 0
 reported = 0
+reference_total = 0
+linear_total = 0
+rows = []
 if not names:
     errors.append(f"no register fixtures in {fixdir}")
 for name in names:
     path = os.path.join(fixdir, name)
+    base = name[:-3]
     with open(path, encoding="utf-8") as source:
         funcs = re.findall(r"^define [^@\n]*@([^\s(]+)\(", source.read(), re.M)
     if not funcs:
         errors.append(f"{name}: no functions found")
-        print(f"{name[:-3]}: spill slots INVALID")
+        print(f"{base}: spill slots INVALID")
         continue
     totals = {}
+    per_function = {}
     for alloc in ("pin", "linear"):
         total = 0
         valid = True
+        per_function[alloc] = []
         for fn in funcs:
             env = dict(os.environ, IYI_NATIVE_REGALLOC=alloc)
             try:
@@ -338,14 +349,17 @@ for name in names:
                 valid = False
                 continue
             total += int(matches[0])
+            per_function[alloc].append((fn, int(matches[0])))
         if valid:
             totals[alloc] = total
-    base = name[:-3]
     if len(totals) != 2:
         print(f"{base}: spill slots INVALID")
         continue
     pin, lin = totals["pin"], totals["linear"]
     reported += 1
+    reference_total += pin
+    linear_total += lin
+    rows.extend(f"{base} {fn} {count}" for fn, count in per_function["linear"])
     if lin < pin:
         strictly_fewer += 1
         verdict = "fewer"
@@ -356,17 +370,124 @@ for name in names:
         bad.append(base)
     print(f"{base}: spill slots reference={pin} linear={lin} ({verdict})")
 print(f"spill totals: {reported}/{len(names)} fixtures; strictly fewer on {strictly_fewer}")
+print(f"spill slot totals: reference={reference_total} linear={linear_total}")
+with open(counts_path, "w", encoding="utf-8") as counts:
+    for row in rows:
+        counts.write(row + "\n")
 for error in errors:
     print("INVALID: " + error)
+if errors:
+    sys.exit(2)
 if bad:
     print("MORE SPILLS: " + " ".join(bad))
-if errors or bad:
     sys.exit(1)
 PY
-)
+}
+
+# The table is exact: every measured function has one row with its count, and every row names a measured function.
+check_slot_table() {
+  "$PY" - "$(native_path "$1")" "$(native_path "$2")" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+
+def rows(path, label):
+    result = {}
+    for number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        fields = line.split()
+        if len(fields) != 3 or not re.fullmatch(r"[0-9]+", fields[2]):
+            raise ValueError(f"{label} line {number} is not '<fixture> <function> <slots>'")
+        key = (fields[0], fields[1])
+        if key in result:
+            raise ValueError(f"{label} line {number} repeats {fields[0]} {fields[1]}")
+        result[key] = int(fields[2])
+    return result
+
+
+try:
+    measured = rows(sys.argv[1], "measured")
+    table = rows(sys.argv[2], "table")
+except (OSError, UnicodeError, ValueError) as exc:
+    print(f"INVALID SLOT TABLE: {exc}")
+    sys.exit(2)
+bad = False
+for fixture, fn in sorted(measured.keys() - table.keys()):
+    print(f"MISSING ROW: {fixture} {fn} has no row in the table")
+    bad = True
+for fixture, fn in sorted(table.keys() - measured.keys()):
+    print(f"STALE ROW: {fixture} {fn} names no measured function")
+    bad = True
+for fixture, fn in sorted(measured.keys() & table.keys()):
+    spills, allowed = measured[(fixture, fn)], table[(fixture, fn)]
+    if spills > allowed:
+        print(f"MORE SLOTS: {fixture} {fn} spills {spills}, the table allows {allowed}")
+        bad = True
+    elif spills < allowed:
+        print(f"LOWER THE CEILING: {fixture} {fn} spills {spills}, the table has {allowed}")
+        bad = True
+if bad:
+    sys.exit(1)
+print(f"slot table: {len(measured)} functions match the table exactly")
+PY
+}
+
+slot_counts="$WORK/linear-slots.txt"
+slot_report=$(spill_report "$DRV" "$slot_counts")
 slot_status=$?
 echo "$slot_report"
 [ "$slot_status" -eq 0 ] || fail "spill report is invalid or linear spills more than pin"
+echo "== 5b. the linear spill table is exact: every function, at its measured count"
+check_slot_table "$slot_counts" "$FIX_RA/linear_slots.ceiling" || fail "the linear spill table does not match the measured spills"
+
+# Each direction of the table is proven on a temporary copy, so no compiler change is needed to see it reject.
+prove_table_case() {
+  local name=$1 table=$2 expected=$3 log status
+  log="$WORK/table-proof.$RANDOM.log"
+  check_slot_table "$slot_counts" "$table" >"$log" 2>&1
+  status=$?
+  if [ "$status" -ne 1 ]; then
+    cat "$log"
+    fail "table proof '$name' was not rejected"
+    return
+  fi
+  if grep -Fq "$expected" "$log"; then
+    grep -F "$expected" "$log"
+    echo "decisive: table proof '$name'"
+  else
+    cat "$log"
+    fail "table proof '$name' was rejected for another reason"
+  fi
+}
+awk 'BEGIN { done = 0 } !done && $3 > 0 { $3 = $3 - 1; done = 1 } { print }' "$FIX_RA/linear_slots.ceiling" >"$WORK/table-lowered.txt" || fail "could not write a table copy"
+prove_table_case "lowered row" "$WORK/table-lowered.txt" "MORE SLOTS:"
+awk 'NR == 1 { $3 = $3 + 1 } { print }' "$FIX_RA/linear_slots.ceiling" >"$WORK/table-raised.txt" || fail "could not write a table copy"
+prove_table_case "raised row" "$WORK/table-raised.txt" "LOWER THE CEILING:"
+awk 'NR > 1 { print }' "$FIX_RA/linear_slots.ceiling" >"$WORK/table-missing.txt" || fail "could not write a table copy"
+prove_table_case "missing row" "$WORK/table-missing.txt" "MISSING ROW:"
+{ cat "$FIX_RA/linear_slots.ceiling"; echo "stale_fixture stale_function 0"; } >"$WORK/table-stale.txt" || fail "could not write a table copy"
+prove_table_case "stale row" "$WORK/table-stale.txt" "STALE ROW:"
+
+# A mutant that still spills fewer than the reference passes the reference comparison, so the table alone judges it.
+check_slot_mutant() {
+  local drv=$1 counts="$WORK/mutant-slots.txt" report status
+  report=$(spill_report "$drv" "$counts")
+  status=$?
+  echo "$report"
+  case "$status" in
+    0) ;;
+    1) echo "decisive: the reference comparison already rejects this mutant"; return 1 ;;
+    *) return 2 ;;
+  esac
+  echo "decisive: the reference comparison passes this mutant"
+  check_slot_table "$counts" "$FIX_RA/linear_slots.ceiling"
+  status=$?
+  case "$status" in
+    0) return 0 ;;
+    1) echo "decisive: the exact table rejects this mutant"; return 1 ;;
+    *) return 2 ;;
+  esac
+}
 
 # A check returns 0 for a passing driver, 1 for a detected mutation, and 2 for
 # invalid setup. Each pristine predicate must pass before its mutant is built.
@@ -1030,6 +1151,10 @@ prove_mutation "linear: liveness drops the fall-through successor" \
   src/compiler/native/regalloc_linear.iyi check_fallthrough_liveness \
   '  if falls && b + 1 < fn.blocks.size' \
   '  if false && falls && b + 1 < fn.blocks.size'
+prove_mutation "linear slots: keep uses live through every definition (more spills than the table allows)" \
+  src/compiler/native/regalloc_linear.iyi check_slot_mutant \
+  '        use_end = distinct_inputs_and_defs?(@fn.isa, inst) ? pos + 1 : pos' \
+  '        use_end = pos + 1'
 prove_mutation "floating-point frame: omit callee-saved FPR stores" \
   src/compiler/native/frame.iyi check_fpr_frame \
   '    acc << m

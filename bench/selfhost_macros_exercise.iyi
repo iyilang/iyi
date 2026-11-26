@@ -99,8 +99,11 @@ module BenchSelfhostMacrosExercise
     module_at = -1
     i = 0
     while i < lines.size && module_at < 0
-      if lines[i].starts_with?("module ")
+      line = lines[i].strip
+      if line.starts_with?("module ")
         module_at = i
+      elsif !line.empty? && !line.starts_with?("#") && !line.starts_with?("@[")
+        break
       end
       i = i + 1
     end

@@ -684,6 +684,14 @@ module BenchSelfhostParserExercise
     assert(dotted.name_location.as(Location).line_number == 2 && dotted.name_location.as(Location).column_number == 4, "chained call retains method token location")
     inner = dotted.obj.as(Call)
     assert(inner.name_location.as(Location).line_number == 1 && inner.name_location.as(Location).column_number == 10, "escaped receiver does not shift method token location")
+    # `&.name` is a block on the yielded value, and a chain after the name belongs to that block's body (the
+    # bind exercise's `count(&.verdict.ready?)`, which the hosted parser accepts and this one refused).
+    shorthand = Parser.new("xs.count(&.verdict.ready?)").parse.as(Call)
+    shorthand_block = shorthand.block.as(Block)
+    chain = shorthand_block.body.as(Call)
+    assert(chain.name == "ready?", "&.verdict.ready? ends in ready?")
+    assert(chain.obj.as(Call).name == "verdict", "&.verdict.ready? reads verdict before ready?")
+    assert(chain.obj.as(Call).obj.as(Var).name == shorthand_block.args[0].name, "the chain starts from the block argument")
     puts "ok (calls and blocks verified)"
   end
 

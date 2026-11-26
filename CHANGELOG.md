@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Wasm SIMD128 speeds up AES-GCM.** `UInt64x2` processes two independent
+  64-bit lanes, and `--mattr +simd128` uses them for eight AES counter
+  blocks at a time. On Apple M5 Max, opening 16 and 64 MiB in headless
+  Chrome went from 204 and 203 MB/s scalar to 257 and 266 MB/s SIMD;
+  WebCrypto measured 3,290 and 3,424 MB/s. SPEC.md III.12.1 has the
+  spreads and the slower GHASH experiment. The predefined `UInt64x2`
+  primitive is available on wasm32; an external ABI cannot accept it.
+
 - **iyi is a self-hosting project.** The owner accepted Jason Waldrip's
   proposal (#172) on 2026-11-24, reversing Appendix B #10: the compiler is
   ported to iyi and gets its own back end and linker, so that iyi is built
@@ -191,7 +199,18 @@
   `bench/selfhost_normalizer_exercise.sh` requires 11 fixtures (620 nodes)
   to normalise as the front end does and catches 8. Hosted commands are
   unchanged.
-- These eight gates run in the same three jobs through
+- **The formatter in iyi: `src/compiler/tools/formatter.iyi` (#195).**
+  2,783 lines of iyi format source as `iyi tool format` does;
+  `src/compiler/tools/format.iyi` is the standalone `iyi-format` driver.
+  `bench/selfhost_formatter_exercise.sh` requires 32 files to format byte
+  for byte as the hosted formatter does, through a path and through stdin,
+  and a second pass to change nothing, and catches 18 broken copies. Of the
+  338 `.iyi` files that select the self-host jobs, the port formats 140 as
+  the hosted formatter does, formats 34 differently and refuses 164; each
+  of the 140 listed in `bench/selfhost_formatter_parity.floor` must keep
+  matching, and `bench/selfhost_formatter_differs.ceiling` must list exactly
+  the files it formats differently. Hosted commands are unchanged.
+- These nine gates run in the same three jobs through
   `bench/selfhost_gates.sh`; `bench/native_elf_run.sh` runs in
   `selfhost-linux-arm64`.
 - **AArch64 code generation and register allocation in iyi:
@@ -567,6 +586,26 @@
   register: a copy that let one share passed the gate everywhere, the
   hosted twins on Apple silicon included.
   `bench/native_mir_clean_exercise.sh` goes from 3 to 9.
+- **The macro engine's string methods count characters, Win32 file errors
+  use the system's message, and the macro-site census is exact (#261).**
+  In `src/compiler/macros/`, `StringLiteral#size` answered the byte count
+  where the hosted compiler counts characters; `size`, range `[]`, `tr`
+  (deletion sets included) and `upcase`, `downcase`, `capitalize`,
+  `camelcase` and `underscore` now work by character, and `MacroId` and
+  `SymbolLiteral` forward the string methods as the hosted compiler does.
+  `bench/fixtures/macro_unicode_methods.iyi` (27 sites) must expand byte
+  for byte as the hosted compiler expands it. A `read_file` error on Windows
+  formats the open or read error code with `FormatMessageW`, as
+  `WinError#message` does, and an open error escapes its file name as
+  `File::Error` does on every host, so the two confinement cases excluded on
+  Windows run there. `bench/macro_sites.py`'s census reads every file (316
+  sites, 0 unpaired, 0 unreadable) and lists its 2 differing sites by file,
+  kind, context and ordinal in `bench/macro_sites.floor`; an unlisted
+  difference and a listed one that no longer occurs both fail. The port's
+  parser records the `[` of an index call as its name location, as hosted
+  does. `bench/selfhost_macros_exercise.sh` requires 66 fixtures (313
+  sites; `macro_unicode_case_tr.iyi` adds titlecase and a short `tr`
+  replacement list) and catches 60 broken copies.
 
 ### Gates
 
@@ -750,6 +789,18 @@
   `native_elf` already caught an executable `PT_GNU_STACK`.
 
 ### Fixed
+
+- **Vector unions use the heap's eight-byte alignment (#202).** A mixed
+  union represents its payload as wide integers, so treating only visible
+  LLVM vectors as eight-aligned left nil stores, closure captures and copies
+  promising sixteen-byte alignment on eight-aligned heap addresses.
+  Integers wider than 64 bits take the same cap, so an `Int128` field,
+  union member or closure capture is loaded and stored at `align 8` where
+  it was `align 16`. Measured on x86-64 Linux, AArch64 macOS and x86-64
+  Windows, the machine code of such a program is unchanged, and
+  `bench/uint64x2_exercise.sh` holds the `align 8`. `UInt64x2` is also
+  shareable across threads, including in immutable records and `@[Share]`
+  generic values.
 
 - **wasm32 large objects keep their arena header (#198).** A large
   object's three header words were written over its arena's link, size and
@@ -30287,7 +30338,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 37,056-line library and nothing else. Every other
+  written against iyi's own 37,121-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

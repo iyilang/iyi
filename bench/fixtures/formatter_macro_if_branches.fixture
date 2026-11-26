@@ -1,0 +1,17 @@
+{% if flag?(:a) %}
+  x=1
+{% elsif flag?(:b) %}
+  x=2
+{% else %}
+  x=3
+{% end %}
+
+{% unless flag?(:c) %}
+  y=4
+{% else %}
+  y=5
+{% end %}
+
+{% begin %}
+  z=6
+{% end %}

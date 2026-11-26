@@ -2922,6 +2922,10 @@ jobs:
       #                      bench/arena_exercise.sh asserts and a tally
       #                      cannot
       #   wasm32_exercise    a wasm32 program
+      #   wasm_aead_speed   a freestanding browser benchmark whose hooks
+      #                      exist only with -Diyi_aead_bench
+      #   uint64x2_exercise a wasm32-only SIMD vector program: UInt64x2 is
+      #                      declared for wasm32 alone
       #   wasm_tasks_exercise  its native comparison is run by the JSPI gate
       #   wasm_freestanding_exercise  a freestanding wasm host-contract program
       #   std_debug_cross    its pass is a panic, whose trace cross-run
@@ -2947,8 +2951,8 @@ jobs:
           # it - a line two seconds in - and an empty stdin is its failure.
           $skip = @(
             "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
-            "wasm_freestanding_exercise.iyi", "wasm_tasks_exercise.iyi",
-            "stdin_park.iyi", "std_debug_cross.iyi", "selfhost_llvm_exercise.iyi"
+            "wasm_freestanding_exercise.iyi", "wasm_tasks_exercise.iyi", "uint64x2_exercise.iyi",
+            "stdin_park.iyi", "std_debug_cross.iyi", "wasm_aead_speed.iyi", "selfhost_llvm_exercise.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
           $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"
@@ -3895,6 +3899,23 @@ jobs:
           IYI_CHROME="$(command -v google-chrome)"
           export IYI_CHROME
           bash bench/wasm_freestanding_exercise.sh
+      - name: Install compatibility collector
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgc-dev
+      - name: SIMD128 and browser AES-GCM
+        run: |
+          python3 -m pip install --user --break-system-packages -q cryptography
+          # Keep the SDK's linker off PATH for native builds. Its LLVM 18
+          # objdump can loop on the wasm output; the runner's LLVM 17 can read it.
+          LLVM_OBJDUMP="$(command -v llvm-objdump-17)" || { echo "LLVM 17 objdump is unavailable" >&2; exit 1; }
+          export LLVM_OBJDUMP
+          export IYI="$PWD/room/bin/iyi"
+          IYI_CHROME="$(command -v google-chrome)" || { echo "Google Chrome is unavailable" >&2; exit 1; }
+          export IYI_CHROME
+          bash bench/uint64x2_exercise.sh
+          bash bench/wasm_aead_exercise.sh
+          IYI_AEAD_MIB=1 bash bench/wasm_aead_speed.sh
       - name: Exercise freestanding tasks
         run: |
           export PATH="/opt/wasi-sdk/bin:$HOME/.wasmtime/bin:$PATH"

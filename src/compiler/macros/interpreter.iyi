@@ -1,3 +1,4 @@
+@[Unsafe("Win32 file errors use a bounded UTF-16 buffer passed to FormatMessageW")]
 module compiler/macros/interpreter
 
 import compiler/syntax/ast::{ASTNode, And, Arg, ArrayLiteral, Assign, Block, BoolLiteral, Call, CharLiteral, ClassDef, ClassVar, Def, DoubleSplat, Expressions, Generic, Global, HashLiteral, If, ImplicitObj, InstanceVar, IsA, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, MultiAssign, NamedArgument, NamedTupleLiteral, Next, NilLiteral, Nop, Not, NumberLiteral, OpAssign, Or, Path, RangeLiteral, Return, Self, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, Underscore, Unless, Until, Var, While, Yield, StringBuilder}
@@ -9,6 +10,7 @@ import compiler/macros/methods::{MacroMethods}
 import compiler/macros/answers::{MacroAnswers}
 import compiler/macros/confinement::{MacroConfinement}
 import std/file::{File}
+import std/unicode::{Unicode}
 
 # Why an expansion stopped: a `raise`, an undefined name, or a refused macro
 # method. The line and column are the node that failed, as the hosted compiler
@@ -258,6 +260,54 @@ pub class MacroInterpreter
       @failure = MacroFailure.new(message, line, column)
     end
     @last = Nop.new
+  end
+
+  {% if flag?(:win32) %}
+    # WinError#message uses FORMAT_MESSAGE_FROM_SYSTEM and strips whitespace,
+    # retaining the system's punctuation and locale.
+    def win32_error_text(code : Int32) : String
+      wide = Pointer(UInt16).malloc(257_u64)
+      null = Pointer(Void).new(0_u64)
+      written = Std::File::LibKernel32.FormatMessageW(0x1000, null, code, 0, wide, 256, null)
+      return "" if written <= 0
+      wide[written] = 0_u16
+      size = __iyi_utf8_size_from_wide(wide)
+      return "" if size <= 0
+      String.new(size - 1) { |buffer| __iyi_utf8_bytes_from_wide(wide, buffer, size) }.strip
+    end
+  {% end %}
+
+  # File::Error renders its filename with String#inspect_unquoted. Reuse the
+  # prelude's ASCII escapes and the Unicode categories hosted Char#printable?
+  # checks. Its generated Cn table is empty, so unassigned points stay raw.
+  def file_error_path(path : String) : String
+    builder = String::Builder.new
+    index = 0
+    path.each_char do |char|
+      # A U+FFFD the bytes EF BF BD spell is printed; one that stands for an invalid byte is escaped.
+      room = index + 2 < path.bytesize
+      encoded = room && path.byte_at(index) == 0xEF_u8 && path.byte_at(index + 1) == 0xBF_u8 && path.byte_at(index + 2) == 0xBD_u8
+      if char.ord == 0xFFFD && !encoded
+        builder << "\\x" << path.byte_at(index).to_i32.to_s(16).upcase.rjust(2, '0')
+        index = index + 1
+      else
+        point = char.ord
+        if point < 0x80
+          builder << '\\' if point == 35 && index + 1 < path.bytesize && path.byte_at(index + 1) == 123_u8
+          char.inspect_into(builder, '"')
+        else
+          category = Unicode.general_category(char)
+          if category == "Cc" || category == "Cf" || category == "Cs" || category == "Co" || category.starts_with?("Z")
+            hex = point.to_s(16).upcase
+            builder << (point > 0xFFFF ? "\\u{" + hex + "}" : "\\u" + hex.rjust(4, '0'))
+          else
+            builder << char
+          end
+        end
+        index = index + char.bytesize
+      end
+    end
+    builder.to_s
   end
 
   def new_temp_var_name(prefix : String = "__temp_") : String
@@ -511,17 +561,38 @@ pub class MacroInterpreter
       if name == "file_exists?"
         return BoolLiteral.new(File.exists?(resolved))
       end
-      if !File.exists?(resolved)
-        return NilLiteral.new if name == "read_file?"
-        fail_at(node, "Error opening file with mode 'r': '#{resolved}': No such file or directory")
-        return Nop.new
-      end
-      if File.directory?(resolved)
-        return NilLiteral.new if name == "read_file?"
-        fail_at(node, "read (#{resolved}): Is a directory")
-        return Nop.new
-      end
-      return StringLiteral.new(File.read(resolved))
+      {% if flag?(:win32) %}
+        opened = File.open?(resolved)
+        if opened.is_a?(Std::File::IOError)
+          if name == "read_file?"
+            return NilLiteral.new
+          end
+          fail_at(node, "Error opening file with mode 'r': '#{file_error_path(resolved)}': #{win32_error_text(opened.code)}")
+          return Nop.new
+        end
+        stream = opened.as(Std::File::FileIO)
+        contents = stream.read_all
+        read_failure = stream.read_error
+        stream.close
+        if failure = read_failure
+          return NilLiteral.new if name == "read_file?"
+          fail_at(node, "read (#{resolved}): #{win32_error_text(failure.code)}")
+          return Nop.new
+        end
+        return StringLiteral.new(contents)
+      {% else %}
+        if !File.exists?(resolved)
+          return NilLiteral.new if name == "read_file?"
+          fail_at(node, "Error opening file with mode 'r': '#{file_error_path(resolved)}': No such file or directory")
+          return Nop.new
+        end
+        if File.directory?(resolved)
+          return NilLiteral.new if name == "read_file?"
+          fail_at(node, "read (#{resolved}): Is a directory")
+          return Nop.new
+        end
+        return StringLiteral.new(File.read(resolved))
+      {% end %}
     end
 
     if name == "env"
@@ -733,7 +804,8 @@ pub class MacroInterpreter
       receiver = evaluate(obj)
       return Nop.new if halted?
       class_name = MacroMethods.node_class_name(receiver)
-      unless MacroAnswers.receiver?(class_name, cl.name)
+      inherited_string_method = (receiver.is_a?(MacroId) || receiver.is_a?(SymbolLiteral)) && MacroAnswers.receiver?("StringLiteral", cl.name)
+      unless MacroAnswers.receiver?(class_name, cl.name) || inherited_string_method
         fail_at(cl, "undefined macro method '#{class_name}##{cl.name}'")
         return Nop.new
       end

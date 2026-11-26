@@ -1,0 +1,21 @@
+# Formats one file with the ported formatter and prints the result.
+#
+# The gate beside this file runs the same input through the formatter this one
+# would replace and requires the two outputs identical. Nothing here checks
+# anything on its own: it is one half of a comparison.
+
+import compiler/tools/formatter::{Formatter}
+
+module BenchSelfhostFormatterExercise
+  def self.run : Nil
+    args = Program.args
+    if args.empty?
+      puts "usage: exercise FILE"
+      return
+    end
+    source = File.read(args[0])
+    print Formatter.format(source, args[0])
+  end
+end
+
+BenchSelfhostFormatterExercise.run

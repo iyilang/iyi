@@ -1,0 +1,454 @@
+@[Unsafe("checks compiler primitives and collector pointer maps against numeric addresses")]
+
+class VectorDecoy
+  def initialize(@number : Int32)
+  end
+
+  def number : Int32
+    @number
+  end
+end
+
+class VectorHolder
+  property child : VectorDecoy?
+  property next : VectorHolder?
+
+  def initialize(@lanes : UInt64x2)
+    @child = nil
+    @next = nil
+  end
+
+  def lanes : UInt64x2
+    @lanes
+  end
+end
+
+class AlignedBase
+end
+
+class AlignedVector < AlignedBase
+  @[NoInline]
+  def initialize(@lanes : UInt64x2)
+  end
+
+  @[NoInline]
+  def lanes : UInt64x2
+    @lanes
+  end
+end
+
+struct VectorBlock
+  def initialize(@a : UInt64x2, @b : UInt64x2, @c : UInt64x2,
+                 @d : UInt64x2, @e : UInt64x2, @f : UInt64x2,
+                 @g : UInt64x2, @h : UInt64x2, @i : UInt64x2)
+  end
+
+  def ends : UInt64
+    @a.low &+ @i.high
+  end
+end
+
+class AlignedBlock < AlignedBase
+  @[NoInline]
+  def initialize(@block : VectorBlock)
+  end
+
+  @[NoInline]
+  def block : VectorBlock
+    @block
+  end
+end
+
+@[NoInline]
+def raw_vector_address(value : AlignedBase) : UInt64
+  value.as(Pointer(Void)).address
+end
+
+@[NoInline]
+def vector_address_modulo(value : AlignedBase) : UInt64
+  if value.is_a?(AlignedVector)
+    raise "field: wrong vector lanes" unless value.lanes.low == 42_u64 && value.lanes.high == 17_u64
+    value.as(Pointer(Void)).address & 15_u64
+  else
+    99_u64
+  end
+end
+
+@[NoInline]
+def check_field_alignment : Nil
+  saw_aligned = false
+  saw_eight = false
+  i = 0
+  while i < 64
+    value = AlignedVector.new(UInt64x2.new(42_u64, 17_u64))
+    actual = raw_vector_address(value) & 15_u64
+    reported = vector_address_modulo(value)
+    raise "field alignment: LLVM assumed 16-byte alignment" unless reported == actual
+    saw_aligned = true if actual == 0_u64
+    saw_eight = true if actual == 8_u64
+    i = i + 1
+  end
+  raise "field alignment: allocator did not exercise both alignments" unless saw_aligned && saw_eight
+  lane = UInt64x2.new(42_u64, 17_u64)
+  block = VectorBlock.new(lane, lane, lane, lane, lane, lane, lane, lane, lane)
+  misaligned = false
+  i = 0
+  while i < 8
+    aggregate = AlignedBlock.new(block)
+    misaligned = true if raw_vector_address(aggregate) & 15_u64 == 8_u64
+    raise "field alignment: aggregate copy changed lanes" unless aggregate.block.ends == 59_u64
+    i = i + 1
+  end
+  raise "field alignment: aggregate did not reach an 8-aligned object" unless misaligned
+  puts "fields: aggregate with nine vectors copied intact"
+  puts "fields: headed vector objects at both 0 and 8 modulo 16 work"
+end
+
+class AlignedMaybeVector < AlignedBase
+  @[NoInline]
+  def initialize(@value : UInt64x2?)
+  end
+
+  @[NoInline]
+  def value : UInt64x2?
+    @value
+  end
+
+  @[NoInline]
+  def value=(value : UInt64x2?) : Nil
+    @value = value
+  end
+
+  @[NoInline]
+  def slot_address : UInt64
+    pointerof(@value).address
+  end
+end
+
+class AlignedMixedVector < AlignedBase
+  @[NoInline]
+  def initialize(@value : UInt64x2 | Int32)
+  end
+
+  @[NoInline]
+  def value : UInt64x2 | Int32
+    @value
+  end
+
+  @[NoInline]
+  def slot_address : UInt64
+    pointerof(@value).address
+  end
+end
+
+class AlignedLargeUnion < AlignedBase
+  @[NoInline]
+  def initialize(@value : VectorBlock | Nil)
+  end
+
+  @[NoInline]
+  def value : VectorBlock | Nil
+    @value
+  end
+end
+
+class WidenedVectorUnion < AlignedBase
+  @[NoInline]
+  def initialize(@value : UInt64x2 | Int32 | Nil)
+  end
+
+  @[NoInline]
+  def replace(value : Int32 | Nil) : Nil
+    @value = value
+  end
+
+  @[NoInline]
+  def value : UInt64x2 | Int32 | Nil
+    @value
+  end
+end
+
+@[NoInline]
+def union_slot_address(value : AlignedBase) : UInt64
+  if value.is_a?(AlignedMaybeVector)
+    value.slot_address
+  elsif value.is_a?(AlignedMixedVector)
+    value.slot_address
+  else
+    99_u64
+  end
+end
+
+@[NoInline]
+def vector_union_closure(value : UInt64x2?) : Proc(UInt64)
+  -> {
+    actual = value
+    if actual.is_a?(UInt64x2)
+      raise "union closure: lane changed" unless actual.low == 42_u64 && actual.high == 17_u64
+    else
+      raise "union closure: expected nil" unless actual.nil?
+    end
+    pointerof(value).address
+  }
+end
+
+@[NoInline]
+def place_union_closure(original : Proc(UInt64), residue : UInt64) : Proc(UInt64)
+  # Proc is a function pointer and a context pointer. Copy its captured
+  # union into heap storage at each permitted alignment, then call the
+  # compiler-generated closure through the copied context.
+  result = original
+  words = pointerof(result).as(Pointer(Pointer(UInt8)))
+  source = words[1]
+  size = sizeof(UInt64x2 | Nil)
+  destination = IyiHeap.alloc_atomic((size + 16).to_u64).as(Pointer(UInt8))
+  destination = destination + 8_i64 unless destination.address & 15_u64 == residue
+  destination.copy_from(source, size)
+  words[1] = destination
+  result
+end
+
+@[NoInline]
+def check_union_alignment : Nil
+  maybe_zero = false
+  maybe_eight = false
+  mixed_zero = false
+  mixed_eight = false
+  closure_zero = false
+  closure_eight = false
+  i = 0
+  while i < 128
+    lane = UInt64x2.new(42_u64, 17_u64)
+    block = VectorBlock.new(lane, lane, lane, lane, lane, lane, lane, lane, lane)
+    big_input = i & 1 == 0 ? block : nil
+    big_result = AlignedLargeUnion.new(big_input).value
+    if i & 1 == 0
+      raise "union field: indirect copy changed" unless big_result.is_a?(VectorBlock) && big_result.ends == 59_u64
+    else
+      raise "union field: indirect nil changed" unless big_result.nil?
+    end
+    maybe = AlignedMaybeVector.new(lane)
+    at = union_slot_address(maybe) & 15_u64
+    maybe_zero = true if at == 0_u64
+    maybe_eight = true if at == 8_u64
+    another = AlignedMaybeVector.new(lane)
+    at = union_slot_address(another) & 15_u64
+    maybe_zero = true if at == 0_u64
+    maybe_eight = true if at == 8_u64
+    another.value = nil
+    raise "union field: second nil changed" unless another.value.nil?
+    value = maybe.value
+    raise "union field: vector changed" unless value.is_a?(UInt64x2) && value.low == 42_u64 && value.high == 17_u64
+    maybe.value = nil
+    raise "union field: nil changed" unless maybe.value.nil?
+    maybe.value = lane
+    mixed = AlignedMixedVector.new(lane)
+    at = union_slot_address(mixed) & 15_u64
+    mixed_zero = true if at == 0_u64
+    mixed_eight = true if at == 8_u64
+    mixed_again = AlignedMixedVector.new(lane)
+    at = union_slot_address(mixed_again) & 15_u64
+    mixed_zero = true if at == 0_u64
+    mixed_eight = true if at == 8_u64
+    other = mixed.value
+    raise "union field: mixed vector changed" unless other.is_a?(UInt64x2) && other.low == 42_u64 && other.high == 17_u64
+    small = i & 1 == 0 ? 123 : nil
+    widened = WidenedVectorUnion.new(lane)
+    widened.replace(small)
+    wide_value = widened.value
+    if i & 1 == 0
+      raise "union field: widening changed integer" unless wide_value.is_a?(Int32) && wide_value == 123
+    else
+      raise "union field: widening changed nil" unless wide_value.nil?
+    end
+    captured = i & 1 == 0 ? lane : nil
+    closure = vector_union_closure(captured)
+    at_zero = place_union_closure(closure, 0_u64).call & 15_u64
+    at_eight = place_union_closure(closure, 8_u64).call & 15_u64
+    closure_zero = true if at_zero == 0_u64
+    closure_eight = true if at_eight == 8_u64
+    i = i + 1
+  end
+  raise "union field: nilable needs both alignments" unless maybe_zero && maybe_eight
+  raise "union field: mixed needs both alignments" unless mixed_zero && mixed_eight
+  raise "union closure: needs both alignments" unless closure_zero && closure_eight
+  puts "union fields and closures: vector and nil preserved at 0 and 8 modulo 16"
+end
+
+class VectorRoots
+  MASK  = 0x5555555555555555_u64
+  COUNT =                     64
+  @@holder : VectorHolder? = nil
+  @@first : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
+  @@second : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
+
+  def self.holder : VectorHolder?
+    @@holder
+  end
+
+  def self.holder=(holder : VectorHolder?) : Nil
+    @@holder = holder
+  end
+
+  def self.init : Nil
+    @@first = IyiHeap.alloc_atomic((COUNT * 8).to_u64).as(Pointer(UInt64))
+    @@second = IyiHeap.alloc_atomic((COUNT * 8).to_u64).as(Pointer(UInt64))
+  end
+
+  def self.addresses(index : Int32, a : UInt64, b : UInt64) : Nil
+    (@@first + index.to_i64).value = a ^ MASK
+    (@@second + index.to_i64).value = b ^ MASK
+  end
+
+  def self.first(index : Int32) : UInt64
+    (@@first + index.to_i64).value ^ MASK
+  end
+
+  def self.second(index : Int32) : UInt64
+    (@@second + index.to_i64).value ^ MASK
+  end
+end
+
+@[NoInline]
+def make_vector_graph : Nil
+  VectorRoots.init
+  i = 0
+  while i < VectorRoots::COUNT
+    a = VectorDecoy.new(i)
+    b = VectorDecoy.new(i)
+    VectorRoots.addresses(i, a.as(Pointer(Void)).address, b.as(Pointer(Void)).address)
+    holder = VectorHolder.new(UInt64x2.new(VectorRoots.first(i), VectorRoots.second(i)))
+    holder.child = VectorDecoy.new(i)
+    holder.next = VectorRoots.holder
+    VectorRoots.holder = holder
+    i = i + 1
+  end
+end
+
+@[NoInline]
+def clear_vector_frame(depth : Int32) : Nil
+  a = 0_u64; b = 0_u64; c = 0_u64; d = 0_u64
+  asm("" :: "r"(pointerof(a)) : "memory")
+  clear_vector_frame(depth - 1) if depth > 0
+end
+
+@[NoInline]
+def check_vector_gc : Nil
+  make_vector_graph
+  clear_vector_frame(64)
+  IyiMark.mark
+  holder = VectorRoots.holder
+  children = 0
+  while holder.is_a?(VectorHolder)
+    child = holder.child
+    raise "vector GC: child not rooted" unless child.is_a?(VectorDecoy)
+    raise "vector GC: child not marked" unless IyiMark.colour(child.as(Pointer(Void)).address) == IyiMark::BLACK
+    children = children + 1
+    holder = holder.next
+  end
+  raise "vector GC: holder chain lost" unless children == VectorRoots::COUNT
+  first_white = 0
+  second_white = 0
+  i = 0
+  while i < VectorRoots::COUNT
+    first_white = first_white + 1 if IyiMark.colour(VectorRoots.first(i)) == IyiMark::WHITE
+    second_white = second_white + 1 if IyiMark.colour(VectorRoots.second(i)) == IyiMark::WHITE
+    i = i + 1
+  end
+  # Roots are conservative: stale registers can keep isolated addresses, but
+  # following either lane in the layout retains the whole batch.
+  raise "vector GC: low lanes were followed" unless first_white > VectorRoots::COUNT / 2
+  raise "vector GC: high lanes were followed" unless second_white > VectorRoots::COUNT / 2
+  {% if flag?(:wasm32) %}
+    IyiMark.sweep
+  {% else %}
+    # Native collection starts a sweep epoch in collect, not in mark.
+    IyiMark.unmark
+    IyiMark.collect
+  {% end %}
+  first_freed = 0
+  second_freed = 0
+  i = 0
+  while i < VectorRoots::COUNT
+    first_freed = first_freed + 1 if IyiRoots.base_of(VectorRoots.first(i)) == 0_u64
+    second_freed = second_freed + 1 if IyiRoots.base_of(VectorRoots.second(i)) == 0_u64
+    i = i + 1
+  end
+  raise "vector GC: low-lane objects were not reclaimed" unless first_freed > VectorRoots::COUNT / 2
+  raise "vector GC: high-lane objects were not reclaimed" unless second_freed > VectorRoots::COUNT / 2
+  puts "GC: both vector lanes ignored, real children survived, lane objects reclaimed"
+end
+
+@[NoInline]
+def check_lanes(label : String, value : UInt64x2, low : UInt64, high : UInt64) : Nil
+  raise "#{label}: wrong low lane" unless value.low == low
+  raise "#{label}: wrong high lane" unless value.high == high
+end
+
+@[NoInline]
+def check_pair(a : UInt64, b : UInt64, c : UInt64, d : UInt64, amount : Int32, memory : Pointer(UInt64)) : Nil
+  x = UInt64x2.new(a, b)
+  y = UInt64x2.new(c, d)
+  check_lanes("new", x, a, b)
+  check_lanes("splat", UInt64x2.splat(a), a, a)
+  memory.value = a
+  (memory + 1_i64).value = b
+  check_lanes("load", UInt64x2.load(memory), a, b)
+  y.store(memory)
+  raise "store: wrong low lane" unless memory.value == c
+  raise "store: wrong high lane" unless (memory + 1_i64).value == d
+  check_lanes("xor", x ^ y, a ^ c, b ^ d)
+  check_lanes("and", x & y, a & c, b & d)
+  check_lanes("or", x | y, a | c, b | d)
+  check_lanes("not", ~x, a ^ 0xffffffffffffffff_u64, b ^ 0xffffffffffffffff_u64)
+  check_lanes("add", x &+ y, a &+ c, b &+ d)
+  check_lanes("sub", x &- y, a &- c, b &- d)
+  check_lanes("mul", x &* y, a &* c, b &* d)
+  shift = (amount & 63).to_u64
+  check_lanes("shl", x.unsafe_shl(amount), a.unsafe_shl(shift), b.unsafe_shl(shift))
+  check_lanes("shr", x.unsafe_shr(amount), a.unsafe_shr(shift), b.unsafe_shr(shift))
+end
+
+IyiMark.auto = false
+check_field_alignment
+check_union_alignment
+buffer = Pointer(UInt64).malloc(5_u64)
+memory = buffer + 1_i64
+memory = memory + 1_i64 if memory.address & 15_u64 == 0_u64
+raise "load/store: test pointer was not 8 aligned but 16 unaligned" unless memory.address & 7_u64 == 0_u64 && memory.address & 15_u64 == 8_u64
+(memory + -1_i64).value = 123_u64
+(memory + 2_i64).value = 456_u64
+
+edges = [0_u64, 1_u64, 0x8000000000000000_u64, 0xffffffffffffffff_u64]
+i = 0
+while i < edges.size
+  j = 0
+  while j < edges.size
+    check_pair(edges[i], edges[j], edges[j], edges[i], 0, memory)
+    check_pair(edges[i], edges[j], edges[j], edges[i], 63, memory)
+    check_pair(edges[i], edges[j], edges[j], edges[i], 64, memory)
+    check_pair(edges[i], edges[j], edges[j], edges[i], -1, memory)
+    check_pair(edges[i], edges[j], edges[j], edges[i], -64, memory)
+    j = j + 1
+  end
+  i = i + 1
+end
+seed = 0x9e3779b97f4a7c15_u64
+i = 0
+while i < 10000
+  seed = seed &* 6364136223846793005_u64 &+ 1442695040888963407_u64
+  a = seed
+  seed = seed &* 6364136223846793005_u64 &+ 1442695040888963407_u64
+  b = seed
+  seed = seed &* 6364136223846793005_u64 &+ 1442695040888963407_u64
+  c = seed
+  seed = seed &* 6364136223846793005_u64 &+ 1442695040888963407_u64
+  d = seed
+  check_pair(a, b, c, d, i & 127, memory)
+  i = i + 1
+end
+raise "store: wrote outside two lanes" unless (memory + -1_i64).value == 123_u64 && (memory + 2_i64).value == 456_u64
+puts "arithmetic: 10000 pseudo-random cases and edge values passed on both lanes"
+puts "memory: unaligned-to-16 loads and stores preserved surrounding words"
+check_vector_gc
+puts "ALL UINT64X2 CHECKS PASSED"

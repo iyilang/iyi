@@ -1,0 +1,49 @@
+# Files where the port differs on inputs that select the self-host CI jobs.
+# First mismatches in the measured baseline: scoped count / whole-tree count.
+# Program-changing: semicolon-separated statements concatenated (0 / 2).
+# Program-changing: case branches joined (0 / 3).
+# Program-changing: macro text loses end (1 / 1).
+# Assignment and enum alignment (10 / 17).
+# Multiline collections collapsed (8 / 18).
+# Multiline calls or declarations collapsed (3 / 6).
+# Multiline boolean expressions collapsed (1 / 2).
+# Missing space after a proc literal opening brace (2 / 3).
+# Extra space in empty blocks (0 / 2).
+# Inline comment alignment lost (3 / 7).
+# Inline comments moved to a new line (3 / 3).
+# Indentation changed (1 / 3).
+# Newly accepted: macro branch indentation, inline comment alignment and moved enum comments.
+bench/fixtures/decl_enums.iyi
+bench/fixtures/expr_collections.iyi
+bench/fixtures/expr_hashes_and_arrays.iyi
+bench/fixtures/expr_variables_and_paths.iyi
+bench/fixtures/syntax_macro_text_splits.iyi
+bench/fixtures/syntax_proc_literals.iyi
+bench/fixtures/syntax_scope_locals.iyi
+bench/selfhost_ast_exercise.iyi
+bench/selfhost_ir_fold_exercise.iyi
+bench/selfhost_lexer_exercise.iyi
+bench/selfhost_platform_exercise.iyi
+src/compiler/ir/module.iyi
+src/compiler/llvm/llvm.iyi
+src/compiler/llvm/module.iyi
+src/compiler/llvm/pass_manager.iyi
+src/compiler/native/aarch64/encode.iyi
+src/compiler/native/amd64/encode.iyi
+src/compiler/native/asm/constraints.iyi
+src/compiler/native/driver.iyi
+src/compiler/native/link/codesign.iyi
+src/compiler/native/link/elf_exe.iyi
+src/compiler/native/link/imports.iyi
+src/compiler/native/link/link.iyi
+src/compiler/native/link/macho_exe.iyi
+src/compiler/native/lower.iyi
+src/compiler/native/mir.iyi
+src/compiler/native/obj/elf.iyi
+src/compiler/native/obj/macho.iyi
+src/compiler/native/obj/object.iyi
+src/compiler/native/target.iyi
+src/compiler/platform/linker.iyi
+src/compiler/tools/link_macho.iyi
+src/compiler/tools/obj_elf.iyi
+src/compiler/tools/obj_macho.iyi

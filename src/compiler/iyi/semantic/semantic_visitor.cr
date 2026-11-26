@@ -2377,6 +2377,10 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   end
 
   def check_allowed_in_lib(node, type = node.type.instance_type)
+    if type.remove_typedef.is_a?(UInt64x2Type)
+      node.raise "UInt64x2 has no C ABI and cannot be used in a fun or lib declaration."
+    end
+
     unless type.allowed_in_lib?
       msg = String.build do |msg|
         msg << "only primitive types, pointers, structs, unions, enums and tuples are allowed in lib declarations, not #{type}"

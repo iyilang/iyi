@@ -267,6 +267,50 @@ PY
 if ! check_unsigned_conditions "$DRV"; then
   fail "unsigned condition selection"
 fi
+check_frame_alignment() {
+  local driver=$1
+  sed -e 's/^target triple = .*/target triple = "aarch64-unknown-linux-gnu"/' \
+      -e 's/^target datalayout = .*/target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32"/' \
+      "$FIX/unsigned_conditions.ir" >"$WORK/frame-alignment.linux.ir" || return 124
+  "$PY" - "$(native_path "$driver")" "$(native_path "$FIX/unsigned_conditions.ir")" \
+    "$(native_path "$WORK/frame-alignment.linux.ir")" <<'PY'
+import os
+import re
+import subprocess
+import sys
+
+driver, *fixtures = sys.argv[1:]
+checks = 0
+for fixture in fixtures:
+    for size, expected in ((8, 16), (24, 32)):
+        name = f"frame_align_{size}"
+        try:
+            proc = subprocess.run([driver, "mir", fixture, name],
+                                  env=dict(os.environ, IYI_NATIVE_REGALLOC="linear"),
+                                  capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"INVALID {name}: {exc}")
+            sys.exit(124)
+        match = re.search(r"^  frame size=(\d+) outgoing=(\d+) saves=(\d+) slots=(\d+)$",
+                          proc.stdout, re.MULTILINE)
+        if proc.returncode or not match:
+            print(f"INVALID {name}: {proc.stderr or proc.stdout}")
+            sys.exit(124)
+        actual, outgoing, saves, slots = map(int, match.groups())
+        if (outgoing, saves, slots) != (0, 0, 1):
+            print(f"INVALID {name}: unexpected frame shape {match.group(0)}")
+            sys.exit(124)
+        if actual != expected:
+            print(f"{name}: frame size {actual}, expected {expected}")
+            sys.exit(1)
+        checks += 1
+print(f"frame alignment: {checks} Darwin/Linux 8- and 24-byte slot checks")
+PY
+}
+if ! check_frame_alignment "$DRV"; then
+  fail "AArch64 frame alignment"
+fi
+
 
 
 RTF="$REPO/bench/fixtures/native_first_light"
@@ -652,7 +696,7 @@ prove_mutation() {
   fi
   mutation_total=$((mutation_total + 1))
   case "$check" in
-    check_probe|check_mono_pair|check_tlvp_kind|check_tls_clobbers|check_tbss_placed|check_tp_mask|check_unsigned_conditions) ;;
+    check_probe|check_mono_pair|check_tlvp_kind|check_tls_clobbers|check_tbss_placed|check_tp_mask|check_unsigned_conditions|check_frame_alignment) ;;
     *)
       if [ "$HOST_ID" != darwin-arm64 ]; then
         host_limited "mutation $name: its original runtime detector requires macOS arm64"
@@ -838,6 +882,11 @@ prove_mutation "unsigned comparisons: swap ult and ule condition codes" \
   elsif ordinal == 5_i64
     return cond_cc' \
   check_unsigned_conditions
+prove_mutation "frame: round stack size to 8 instead of 16 bytes" \
+  src/compiler/native/frame.iyi \
+  '  f.frame_size = round_up(offset, stack_align)' \
+  '  f.frame_size = round_up(offset, 8_i64)' \
+  check_frame_alignment
 prove_mutation "call: do not sign-extend an attributed i1 argument" \
   src/compiler/native/aarch64/isel.iyi \
   '            vals[j] = signed_value(vals[j], loc.leaf_type)' \
@@ -1024,15 +1073,15 @@ else
   fail "the proof helper accepted a mutation that changes nothing"
 fi
 if [ "$HOST_ID" = darwin-arm64 ]; then
-  expected_checked=33
+  expected_checked=34
   expected_limited=0
 else
-  expected_checked=7
+  expected_checked=8
   expected_limited=26
 fi
 printf 'mutations: %s total, %s checked, %s caught, %s host-limited\n' \
   "$mutation_total" "$mutation_checked" "$mutation_caught" "$mutation_limited"
-[ "$mutation_total" -eq 33 ] || fail "the mutation inventory is not 33"
+[ "$mutation_total" -eq 34 ] || fail "the mutation inventory is not 34"
 [ "$mutation_checked" -eq "$expected_checked" ] || fail "the expected mutations were not all checked"
 [ "$mutation_caught" -eq "$expected_checked" ] || fail "not every checked mutation was caught"
 [ "$mutation_limited" -eq "$expected_limited" ] || fail "the host-limited mutation inventory is incomplete"

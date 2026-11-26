@@ -65,6 +65,17 @@ yes:
 no:
   ret i64 0
 }
+; Neither slot size is already a multiple of the AArch64 stack alignment.
+define internal void @frame_align_8() {
+entry:
+  %slot = alloca [8 x i8], align 8
+  ret void
+}
+define internal void @frame_align_24() {
+entry:
+  %slot = alloca [24 x i8], align 8
+  ret void
+}
 define i32 @main() {
 entry:
   %s0 = call i64 (i64, i64) @set_ult(i64 1, i64 1)

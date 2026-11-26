@@ -1,0 +1,1280 @@
+module compiler/ir/opt/escape
+
+import compiler/ir/types::{IrType}
+import compiler/ir/values::{Value}
+import compiler/ir/inst::{Op, Inst, Block, GepAux, MemAux, CallAux, Attribute, IntrinsicAux, AsmAux, IntPredicate, Ordering}
+import compiler/ir/function::{Function, Global, Linkage}
+import compiler/ir/module::{Module}
+import compiler/ir/builder::{Builder}
+import compiler/ir/intrinsics::{IntrinsicId}
+import compiler/ir/opt/analysis::{DefUse}
+import compiler/ir/opt/edit::{new_inst}
+import compiler/ir/opt/fold::{int_value}
+import compiler/ir/opt/effects::{function_returns_twice?, asm_named_functions}
+
+# Publication is not a GC barrier. Look for uses rather than definitions:
+# non-partitioned runtimes also define these helpers without calling them.
+# A single module-wide traversal handles direct calls, constant expressions,
+# globals, personalities and inline assembly without recursion.
+pub def partitioned_heap?(mod : Module) : Bool
+  seen = Hash(Value, Bool).new
+  work = [] of Value
+  mod.globals.each do |global|
+    if init = global.initializer
+      work << init
+    end
+  end
+  mod.functions.each do |fn|
+    if personality = fn.personality
+      work << personality
+    end
+    fn.blocks.each do |block|
+      block.insts.each { |inst| work << inst }
+    end
+  end
+  while !work.empty?
+    value = work.pop
+    next if seen.has_key?(value)
+    seen[value] = true
+    if value.is_a?(Function) || value.is_a?(Global)
+      return true if value.name == "__iyi_new_shared" || value.name == "__iyi_publish" # mutation S9-partition: return false here
+    elsif value.is_a?(Inst)
+      inst = value.as(Inst)
+      if inst.aux.is_a?(AsmAux)
+        template = inst.aux.as(AsmAux).template
+        return true if template.includes?("__iyi_new_shared") || template.includes?("__iyi_publish")
+      end
+      inst.args.each { |arg| work << arg }
+    end
+  end
+  false
+end
+
+class TypeSize
+  getter store : Int64
+  getter alloc : Int64
+  getter align : Int64
+  getter offsets : Array(Int64)
+
+  def initialize(@store : Int64, @alloc : Int64, @align : Int64, @offsets : Array(Int64))
+  end
+end
+
+# DataLayout's rules, with overflow, opaque and recursive types refused before
+# asking for their size. Cache each type, including its field offsets, so a
+# wide struct or a repeated GEP is not repeatedly walked.
+class SizeTable
+  def initialize(@mod : Module)
+    @sizes = Hash(IrType, TypeSize).new
+    @bad = Hash(IrType, Bool).new
+    @active = Hash(IrType, Bool).new
+  end
+
+  def get(type : IrType, depth : Int32 = 0) : TypeSize?
+    if result = @sizes[type]?
+      return result
+    end
+    return nil if @bad.has_key?(type) || @active.has_key?(type) || depth > 128
+    @active[type] = true
+    result = calculate(type, depth)
+    @active.delete(type)
+    if result
+      @sizes[type] = result
+    else
+      @bad[type] = true
+    end
+    result
+  end
+
+  private def rounded(size : Int64, align : Int64) : Int64?
+    return nil if size < 0_i64 || align <= 0_i64
+    extra = (align - (size % align)) % align
+    return nil if size > 9223372036854775807_i64 - extra
+    size + extra
+  end
+
+  private def calculate(type : IrType, depth : Int32) : TypeSize?
+    empty = [] of Int64
+    if type.int?
+      size = ((type.bits + 7) // 8).to_i64
+      align = @mod.layout.int_align(type.bits).to_i64
+      alloc = rounded(size, align)
+      return nil unless alloc
+      return TypeSize.new(size, alloc, align, empty)
+    elsif type.float?
+      size = (type.bits // 8).to_i64
+      return TypeSize.new(size, size, size, empty)
+    elsif type.pointer?
+      size = @mod.layout.pointer_size(type.address_space).to_i64
+      return TypeSize.new(size, size, size, empty)
+    elsif type.array?
+      child = get(type.element_type, depth + 1)
+      return nil unless child
+      return nil if type.count < 0_i64
+      return nil if child.alloc > 0_i64 && type.count > 9223372036854775807_i64 // child.alloc
+      size = type.count * child.alloc
+      return TypeSize.new(size, size, child.align, empty)
+    elsif type.struct? && !type.opaque?
+      offset = 0_i64
+      align = 1_i64
+      offsets = [] of Int64
+      k = 0
+      while k < type.fields.size
+        child = get(type.fields[k], depth + 1)
+        return nil unless child
+        field_align = type.packed_struct? ? 1_i64 : child.align
+        align = field_align if field_align > align
+        next_offset = rounded(offset, field_align)
+        return nil unless next_offset
+        offset = next_offset
+        offsets << offset
+        amount = k == type.fields.size - 1 ? child.store : child.alloc
+        return nil if offset > 9223372036854775807_i64 - amount
+        offset = offset + amount
+        k = k + 1
+      end
+      alloc = rounded(offset, align)
+      return nil unless alloc
+      return TypeSize.new(offset, alloc, align, offsets)
+    end
+    nil
+  end
+end
+
+# Record pointer-bearing words in the IR type, including integer storage that
+# can carry a pointer through a mixed-union representation. The collector scans
+# stack words at 8-byte alignment; a packed slot is not an eligible object.
+class SlotShape
+  getter has_word : Bool
+  getter aligned : Bool
+
+  def initialize(@has_word : Bool, @aligned : Bool)
+  end
+end
+
+class SlotShapes
+  def initialize(@sizes : SizeTable, @integer_words : Bool)
+    @known = Hash(IrType, SlotShape).new
+    @bad = Hash(IrType, Bool).new
+    @active = Hash(IrType, Bool).new
+  end
+
+  def get(type : IrType, depth : Int32 = 0) : SlotShape?
+    if result = @known[type]?
+      return result
+    end
+    return nil if depth > 128 || @bad.has_key?(type) || @active.has_key?(type)
+    @active[type] = true
+    result = calculate(type, depth)
+    @active.delete(type)
+    if result
+      @known[type] = result
+    else
+      @bad[type] = true
+    end
+    result
+  end
+
+  private def calculate(type : IrType, depth : Int32) : SlotShape?
+    info = @sizes.get(type)
+    return nil unless info
+    return SlotShape.new(true, info.store == 8_i64) if type.pointer?
+    return SlotShape.new(@integer_words && info.store >= 8_i64, true) if type.int?
+    return SlotShape.new(false, true) if type.float?
+    if type.array?
+      return SlotShape.new(false, true) if type.count == 0_i64
+      if @integer_words && type.element_type.int? && type.element_type.bits == 8 && info.store >= 8_i64
+        return SlotShape.new(true, true)
+      end
+      child = get(type.element_type, depth + 1)
+      child_size = @sizes.get(type.element_type)
+      return nil unless child && child_size
+      aligned = child.aligned && (!child.has_word || type.count == 1_i64 || child_size.alloc % 8_i64 == 0_i64)
+      return SlotShape.new(child.has_word, aligned)
+    end
+    if type.struct? && !type.opaque?
+      has_word = false
+      aligned = true
+      k = 0
+      while k < type.fields.size
+        child = get(type.fields[k], depth + 1)
+        return nil unless child
+        if child.has_word
+          has_word = true
+          aligned = false unless child.aligned && info.offsets[k] % 8_i64 == 0_i64
+        end
+        k = k + 1
+      end
+      return SlotShape.new(has_word, aligned)
+    end
+    nil
+  end
+end
+
+# GEP indices are signed, including i1 true, which fold represents as 1.
+def gep_index(value : Value) : Int64?
+  index = int_value(value)
+  return nil unless index
+  return -1_i64 if value.type.bits == 1 && index == 1_i64
+  index
+end
+
+# The generated size is commonly `ptrtoint (gep %T, null, 1)`, not a literal.
+def sizeof_type(value : Value) : IrType?
+  return nil unless value.is_a?(Inst) && value.type.int? && value.type.bits == 64
+  cast = value.as(Inst)
+  cast_ok = cast.op == Op::PtrToInt || (cast.op == Op::ConstExpr && cast.aux_int == Op::PtrToInt.value.to_i64)
+  return nil unless cast_ok && cast.args.size == 1 && cast.args[0].is_a?(Inst)
+  gep = cast.args[0].as(Inst)
+  gep_ok = gep.op == Op::Gep || (gep.op == Op::ConstExpr && gep.aux_int == Op::Gep.value.to_i64)
+  return nil unless gep_ok && gep.aux.is_a?(GepAux) && gep.args.size == 2
+  base = gep.args[0]
+  return nil unless base.is_a?(Inst) && base.as(Inst).op == Op::ConstNull && base.type.pointer? && base.type.address_space == 0
+  return nil unless gep_index(gep.args[1]) == 1_i64 # mutation S9-sizeof-i1: GEP indices are signed
+  gep.aux.as(GepAux).source_type
+end
+
+def size_value(sizes : SizeTable, value : Value) : Int64?
+  if n = int_value(value)
+    return n
+  end
+  type = sizeof_type(value)
+  return nil unless type
+  layout = sizes.get(type)
+  layout ? layout.alloc : nil
+end
+
+pub def sizeof_value(mod : Module, v : Value) : Int64?
+  size_value(SizeTable.new(mod), v)
+end
+
+class Candidate
+  getter call : Inst
+  getter size : Int64
+  getter flags : Int64
+  getter block : Int32
+  getter hint : IrType?
+  property bad : Bool
+
+  def initialize(@call : Inst, @size : Int64, @flags : Int64, @block : Int32, @hint : IrType?)
+    @bad = false
+  end
+
+  def headed? : Bool
+    (@flags & 1_i64) != 0_i64
+  end
+end
+
+# Every caller still on the stack above the program entry also lives for the
+# program's duration. Build the reverse call graph once, in source order.
+# If one of those functions is address-taken, its indirect callers cannot be
+# identified from this IR, so no function gets a stack promotion.
+class LongLivedFrames
+  getter addresses : Hash(Function, Bool)
+
+  def initialize(mod : Module)
+    @protected = Hash(Function, Bool).new
+    @uncertain = false
+    callers = Hash(Function, Array(Function)).new
+    @addresses = Hash(Function, Bool).new
+    seen = Hash(Value, Bool).new
+    work = [] of Value
+    mod.globals.each do |global|
+      if init = global.initializer
+        work << init
+      end
+    end
+    asm_named_functions(mod).each do |fn, flag|
+      @addresses[fn] = true # mutation S9-asm-address: assembly can name a function
+    end
+    mod.functions.each do |fn|
+      if personality = fn.personality
+        work << personality
+      end
+      fn.blocks.each do |block|
+        block.insts.each do |inst|
+          k = 0
+          while k < inst.args.size
+            operand = inst.args[k]
+            if (inst.op == Op::Call || inst.op == Op::Invoke) && k == 0 && operand.is_a?(Function)
+              callee = operand.as(Function)
+              list = callers[callee]?
+              unless list
+                list = [] of Function
+                callers[callee] = list
+              end
+              list << fn
+            else
+              work << operand
+            end
+            k = k + 1
+          end
+        end
+      end
+    end
+    while !work.empty?
+      value = work.pop
+      next if seen.has_key?(value)
+      seen[value] = true
+      if value.is_a?(Function)
+        @addresses[value.as(Function)] = true
+      elsif value.is_a?(Inst)
+        inst = value.as(Inst)
+        op = inst.op
+        if op == Op::ConstExpr || op == Op::ConstAggregate || op == Op::ConstBytes || op == Op::FunctionAddr || op == Op::GlobalAddr
+          inst.args.each { |arg| work << arg }
+        end
+      end
+    end
+    pending = [] of Function
+    mod.functions.each do |fn|
+      if top_level?(fn)
+        @protected[fn] = true
+        pending << fn
+      end
+    end
+    k = 0
+    while k < pending.size
+      fn = pending[k]
+      @uncertain = true if @addresses.has_key?(fn)
+      if incoming = callers[fn]?
+        incoming.each do |caller|
+          unless @protected.has_key?(caller)
+            @protected[caller] = true
+            pending << caller
+          end
+        end
+      end
+      k = k + 1
+    end
+  end
+
+  def protects?(fn : Function) : Bool
+    @uncertain || @protected.has_key?(fn)
+  end
+end
+
+# One synthetic hub represents the edges from indirect calls and declarations
+# to address-taken and externally visible definitions, without their Cartesian product.
+class CallCycles
+  getter edge_count : Int64
+
+  def initialize(mod : Module, addresses : Hash(Function, Bool), count_edges : Bool = false)
+    @edge_count = 0_i64
+    @recursive = Hash(Function, Bool).new
+    ids = Hash(Function, Int32).new
+    edges = [] of Array(Int32)
+    index = [] of Int32
+    low = [] of Int32
+    active = [] of Bool
+    hub = mod.functions.size
+    k = 0
+    while k <= hub
+      edges << [] of Int32
+      index << -1
+      low << -1
+      active << false
+      k = k + 1
+    end
+    k = 0
+    mod.functions.each do |fn|
+      ids[fn] = k
+      k = k + 1
+    end
+    k = 0
+    mod.functions.each do |fn|
+      edges[k] << hub if fn.declaration? # mutation S9-declaration: a declaration may call back
+      indirect = false
+      fn.blocks.each do |block|
+        block.insts.each do |inst|
+          if (inst.op == Op::Call || inst.op == Op::Invoke) && !inst.args.empty?
+            if inst.args[0].is_a?(Function)
+              if target = ids[inst.args[0].as(Function)]?
+                edges[k] << target
+              end
+            else
+              indirect = true
+            end
+          end
+        end
+      end
+      edges[k] << hub if indirect                                                                                                          # mutation S9-indirect: indirect calls may reach address-taken functions
+      edges[hub] << k if addresses.has_key?(fn) || (!fn.declaration? && fn.linkage != Linkage::Internal && fn.linkage != Linkage::Private) # mutation S9-hub: externally visible symbols can be called back
+      k = k + 1
+    end
+    if count_edges
+      edges.each { |targets| @edge_count = @edge_count + targets.size.to_i64 }
+    end
+    stack = [] of Int32
+    nodes = [] of Int32
+    next_edge = [] of Int32
+    serial = 0
+    root = 0
+    while root < edges.size
+      if index[root] < 0
+        index[root] = serial
+        low[root] = serial
+        serial = serial + 1
+        active[root] = true
+        stack << root
+        nodes << root
+        next_edge << 0
+        while !nodes.empty?
+          top = nodes.size - 1
+          node = nodes[top]
+          at = next_edge[top]
+          if at < edges[node].size
+            target = edges[node][at]
+            next_edge[top] = at + 1
+            if index[target] < 0
+              index[target] = serial
+              low[target] = serial
+              serial = serial + 1
+              active[target] = true
+              stack << target
+              nodes << target
+              next_edge << 0
+            elsif active[target] && index[target] < low[node]
+              low[node] = index[target]
+            end
+          else
+            nodes.pop
+            next_edge.pop
+            if !nodes.empty? && low[node] < low[nodes.last]
+              low[nodes.last] = low[node]
+            end
+            if low[node] == index[node]
+              members = [] of Int32
+              while true
+                member = stack.pop
+                active[member] = false
+                members << member
+                break if member == node
+              end
+              cyclic = members.size > 1
+              edges[node].each { |target| cyclic = true if target == node } unless cyclic
+              members.each { |member| @recursive[mod.functions[member]] = true if member < hub } if cyclic
+            end
+          end
+        end
+      end
+      root = root + 1
+    end
+  end
+
+  def recursive?(fn : Function) : Bool
+    @recursive.has_key?(fn)
+  end
+end
+
+# Union-find groups the complete alias graph once, rather than walking it once
+# per allocation. A join to an alien pointer or another allocation poisons the
+# entire group. Hashes are used only for lookup, never for ordering decisions.
+class AliasSets
+  getter values : Array(Value)
+
+  def initialize
+    @ids = Hash(Value, Int32).new
+    @values = [] of Value
+    @parent = [] of Int32
+    @rank = [] of Int32
+  end
+
+  def add(value : Value) : Int32
+    if id = @ids[value]?
+      return id
+    end
+    id = @values.size
+    @ids[value] = id
+    @values << value
+    @parent << id
+    @rank << 0
+    id
+  end
+
+  def id?(value : Value) : Int32?
+    @ids[value]?
+  end
+
+  def root(id : Int32) : Int32
+    n = id
+    while @parent[n] != n
+      n = @parent[n]
+    end
+    while @parent[id] != id
+      next_id = @parent[id]
+      @parent[id] = n
+      id = next_id
+    end
+    n
+  end
+
+  def join(a : Value, b : Value) : Nil
+    x = root(add(a))
+    y = root(add(b))
+    return if x == y
+    if @rank[x] < @rank[y]
+      @parent[x] = y
+    elsif @rank[x] > @rank[y]
+      @parent[y] = x
+    else
+      @parent[y] = x
+      @rank[x] = @rank[x] + 1
+    end
+  end
+end
+
+# Iterative Tarjan over all blocks, including unreachable blocks. SCC membership
+# conservatively identifies a phi in the allocation's cycle without LoopInfo's
+# per-loop scans. Nested loops in one SCC can cause a safe candidate to stay.
+class BlockComponents
+  getter component : Array(Int32)
+  getter ids : Hash(Block, Int32)
+
+  def initialize(fn : Function)
+    @ids = Hash(Block, Int32).new
+    @component = [] of Int32
+    index = [] of Int32
+    low = [] of Int32
+    active = [] of Bool
+    k = 0
+    fn.blocks.each do |block|
+      @ids[block] = k
+      @component << -1
+      index << -1
+      low << -1
+      active << false
+      k = k + 1
+    end
+    stack = [] of Int32
+    nodes = [] of Int32
+    edges = [] of Int32
+    serial = 0
+    component_id = 0
+    start = 0
+    while start < fn.blocks.size
+      if index[start] < 0
+        nodes << start
+        edges << 0
+        index[start] = serial
+        low[start] = serial
+        serial = serial + 1
+        stack << start
+        active[start] = true
+        while !nodes.empty?
+          top = nodes.size - 1
+          node = nodes[top]
+          block = fn.blocks[node]
+          at = edges[top]
+          targets = block.terminated? ? block.terminator.targets : [] of Block
+          if at < targets.size
+            next_node = @ids[targets[at]]
+            edges[top] = at + 1
+            if index[next_node] < 0
+              index[next_node] = serial
+              low[next_node] = serial
+              serial = serial + 1
+              stack << next_node
+              active[next_node] = true
+              nodes << next_node
+              edges << 0
+            elsif active[next_node] && index[next_node] < low[node]
+              low[node] = index[next_node]
+            end
+          else
+            nodes.pop
+            edges.pop
+            if !nodes.empty? && low[node] < low[nodes.last]
+              low[nodes.last] = low[node]
+            end
+            if low[node] == index[node]
+              while true
+                member = stack.pop
+                active[member] = false
+                @component[member] = component_id
+                break if member == node
+              end
+              component_id = component_id + 1
+            end
+          end
+        end
+      end
+      start = start + 1
+    end
+  end
+end
+
+# A range and modulo-16 mask conservatively cover every address reaching a
+# same-origin phi or select. Dynamic indices and cyclic changing offsets stay
+# unknown; each shared alias is analyzed once.
+class OffsetSpan
+  getter low : Int64
+  getter high : Int64
+  getter mask : Int64
+  getter origin : Value
+
+  def initialize(@low : Int64, @high : Int64, @mask : Int64, @origin : Value)
+  end
+end
+
+# Straight GEP/bitcast chains are memoized iteratively. Branching SSA values
+# use a depth-bounded memoized range analysis, never a per-use graph walk.
+class Offsets
+  def initialize(@sizes : SizeTable, candidates : Array(Candidate), fn : Function)
+    @known = Hash(Value, Int64).new
+    @origin = Hash(Value, Value).new
+    @bad = Hash(Value, Bool).new
+    @spans = Hash(Value, OffsetSpan).new
+    @span_bad = Hash(Value, Bool).new
+    @span_active = Hash(Value, Bool).new
+    candidates.each do |candidate|
+      @known[candidate.call] = 0_i64
+      @origin[candidate.call] = candidate.call
+    end
+    fn.blocks[0].insts.each do |inst|
+      if inst.op == Op::Alloca
+        @known[inst] = 0_i64
+        @origin[inst] = inst
+      end
+    end
+  end
+
+  def get(value : Value) : Int64?
+    path = [] of Inst
+    current = value
+    visiting = Hash(Value, Bool).new
+    while true
+      if @known.has_key?(current)
+        break
+      end
+      if @bad.has_key?(current) || !current.is_a?(Inst)
+        path.each { |remaining| @bad[remaining] = true }
+        return nil
+      end
+      inst = current.as(Inst)
+      parent = offset_source(inst)
+      unless parent
+        @bad[current] = true
+        path.each { |remaining| @bad[remaining] = true }
+        return nil
+      end
+      if visiting.has_key?(inst)
+        path.each { |remaining| @bad[remaining] = true }
+        return nil
+      end
+      visiting[inst] = true
+      path << inst
+      current = parent
+    end
+    offset = @known[current]
+    origin = @origin[current]
+    while !path.empty?
+      inst = path.pop
+      step = inst.op == Op::Gep ? gep_offset(inst) : 0_i64
+      unless step
+        @bad[inst] = true
+        path.each { |remaining| @bad[remaining] = true }
+        return nil
+      end
+      # A promoted object is at most 512 bytes; reject very large offsets
+      # before arithmetic rather than risk signed wraparound.
+      if step < -1024_i64 || step > 1024_i64 || offset < -1024_i64 || offset > 1024_i64
+        @bad[inst] = true
+        path.each { |remaining| @bad[remaining] = true }
+        return nil
+      end
+      offset = offset + step
+      @known[inst] = offset
+      @origin[inst] = origin
+    end
+    offset
+  end
+
+  def span(value : Value, depth : Int32 = 0) : OffsetSpan?
+    if cached = @spans[value]?
+      return cached
+    end
+    if offset = get(value)
+      origin = @origin[value]?
+      return nil unless origin
+      residue = ((offset % 16_i64) + 16_i64) % 16_i64
+      result = OffsetSpan.new(offset, offset, 1_i64 << residue.to_i32, origin)
+      @spans[value] = result
+      return result
+    end
+    return nil if depth > 128 || @span_bad.has_key?(value) || @span_active.has_key?(value)
+    @span_active[value] = true
+    result = calculate_span(value, depth)
+    @span_active.delete(value)
+    if result
+      @spans[value] = result
+    else
+      @span_bad[value] = true
+    end
+    result
+  end
+
+  private def calculate_span(value : Value, depth : Int32) : OffsetSpan?
+    return nil unless value.is_a?(Inst)
+    inst = value.as(Inst)
+    if (inst.op == Op::Gep || inst.op == Op::BitCast) && !inst.args.empty?
+      parent = span(inst.args[0], depth + 1)
+      step = inst.op == Op::Gep ? gep_offset(inst) : 0_i64
+      return nil unless parent && step && step >= -1024_i64 && step <= 1024_i64
+      low = parent.low + step
+      high = parent.high + step
+      return nil if low < -1024_i64 || high > 1024_i64
+      mask = 0_i64
+      k = 0
+      while k < 16
+        if (parent.mask & (1_i64 << k)) != 0_i64
+          shifted = ((k.to_i64 + step) % 16_i64 + 16_i64) % 16_i64
+          mask = mask | (1_i64 << shifted.to_i32)
+        end
+        k = k + 1
+      end
+      return OffsetSpan.new(low, high, mask, parent.origin)
+    end
+    if inst.op == Op::Phi || (inst.op == Op::Select && inst.args.size == 3)
+      first = inst.op == Op::Select ? 1 : 0
+      limit = inst.op == Op::Select ? 3 : inst.args.size
+      origin = nil.as(Value?)
+      low = 0_i64
+      high = 0_i64
+      mask = 0_i64
+      k = first
+      while k < limit
+        arg = inst.args[k]
+        k = k + 1
+        next if arg == inst
+        part = span(arg, depth + 1)
+        return nil unless part
+        return nil if origin && origin != part.origin
+        if origin
+          low = part.low if part.low < low
+          high = part.high if part.high > high
+        else
+          origin = part.origin
+          low = part.low
+          high = part.high
+        end
+        mask = mask | part.mask
+      end
+      return nil unless origin
+      return OffsetSpan.new(low, high, mask, origin)
+    end
+    nil
+  end
+
+  private def offset_source(inst : Inst) : Value?
+    return inst.args[0] if (inst.op == Op::Gep || inst.op == Op::BitCast) && !inst.args.empty?
+    if inst.op == Op::Select && inst.args.size == 3 && inst.args[1] == inst.args[2]
+      return inst.args[1]
+    end
+    if inst.op == Op::Phi
+      source = nil.as(Value?)
+      inst.args.each do |arg|
+        next if arg == inst
+        return nil if source && source != arg
+        source = arg
+      end
+      return source
+    end
+    nil
+  end
+
+  private def gep_offset(inst : Inst) : Int64?
+    return nil unless inst.aux.is_a?(GepAux) && inst.args.size >= 2
+    type = inst.aux.as(GepAux).source_type
+    first = gep_index(inst.args[1]) # mutation S9-escape-gep-i1-first: sign-extend i1
+    layout = @sizes.get(type)
+    return nil unless first && layout && first >= -1024_i64 && first <= 1024_i64 && layout.alloc <= 1024_i64
+    offset = first * layout.alloc
+    k = 2
+    while k < inst.args.size
+      index = gep_index(inst.args[k]) # mutation S9-escape-gep-i1-nested: sign-extend i1
+      return nil unless index && index >= 0_i64 && index <= 1024_i64
+      if type.struct?
+        info = @sizes.get(type)
+        return nil unless info && index < info.offsets.size
+        field_offset = info.offsets[index.to_i32]
+        return nil if field_offset > 1024_i64 || offset + field_offset > 1024_i64
+        offset = offset + field_offset
+        type = type.fields[index.to_i32]
+      elsif type.array?
+        return nil if index >= type.count
+        type = type.element_type
+        child = @sizes.get(type)
+        return nil unless child && child.alloc <= 1024_i64
+        offset = offset + index * child.alloc
+      else
+        return nil
+      end
+      return nil if offset < -1024_i64 || offset > 1024_i64
+      k = k + 1
+    end
+    offset
+  end
+end
+
+def normal_memory?(inst : Inst) : Bool
+  return false unless inst.aux.is_a?(MemAux)
+  mem = inst.aux.as(MemAux)
+  !mem.volatile && mem.ordering == Ordering::NotAtomic # mutation S9-atomic: only ordinary accesses may promote
+end
+
+def barrier_use?(inst : Inst, index : Int32) : Bool
+  return false unless inst.op == Op::Call && index == 1 && inst.args.size == 3
+  callee = inst.args[0]
+  callee.is_a?(Function) && callee.as(Function).name == "__iyi_write_barrier"
+end
+
+def bounded_barrier?(inst : Inst, candidate : Candidate, offsets : Offsets) : Bool
+  words = int_value(inst.args[2])
+  span = offsets.span(inst.args[1])
+  return false unless words && span && words >= 0_i64 && span.low >= 0_i64 && span.high <= candidate.size
+  words <= (candidate.size - span.high) // 8_i64 # mutation S9-barrier-bound: shade stays within object
+end
+
+# The slot is 16-aligned, but a headed object's user pointer is eight bytes
+# into it. A larger alignment on a surviving use must hold at its actual offset.
+def aligned_span?(span : OffsetSpan, base : Int64, alignment : Int64) : Bool
+  k = 0
+  while k < 16
+    if (span.mask & (1_i64 << k)) != 0_i64 && (base + k.to_i64) % alignment != 0_i64
+      return false
+    end
+    k = k + 1
+  end
+  true
+end
+
+def aligned_pointer?(candidate : Candidate, value : Value, alignment : Int64, offsets : Offsets) : Bool
+  return true if alignment <= 8_i64
+  return false if alignment > 16_i64
+  span = offsets.span(value)
+  return false unless span
+  base = candidate.headed? ? 8_i64 : 0_i64
+  aligned_span?(span, base, alignment)
+end
+
+def aligned_memory?(inst : Inst, index : Int32, candidate : Candidate, offsets : Offsets, sizes : SizeTable) : Bool
+  mem = inst.aux.as(MemAux)
+  type = inst.op == Op::Load ? inst.type : inst.args[0].type
+  info = sizes.get(type)
+  span = offsets.span(inst.args[index])
+  return false unless info && span
+  if span.low < 0_i64
+    # Only the high half of a headed header is stable object data. Its low
+    # half belongs to the collector and must not be observed from the stack.
+    return false unless inst.op == Op::Load && candidate.headed? && span.low >= -4_i64 && span.high < 0_i64 && info.store <= -span.high # mutation S9-header-low: reject low header bits
+  else
+    return false if span.high > candidate.size || info.store > candidate.size - span.high
+  end
+  alignment = mem.align == 0 ? info.align : mem.align.to_i64
+  aligned_pointer?(candidate, inst.args[index], alignment, offsets)
+end
+
+def aligned_slot_access?(inst : Inst, index : Int32, candidate : Candidate, offsets : Offsets, pointer_shapes : SlotShapes, word_shapes : SlotShapes) : Bool
+  type = inst.op == Op::Load ? inst.type : inst.args[0].type
+  shapes = (candidate.flags & 2_i64) == 0_i64 ? word_shapes : pointer_shapes
+  shape = shapes.get(type)
+  return false unless shape && shape.aligned
+  return true unless shape.has_word
+  span = offsets.span(inst.args[index])
+  return false unless span
+  aligned_span?(span, 0_i64, 8_i64) # mutation S9-slot: accept an unaligned pointer word
+end
+
+def argument_attributes_safe?(inst : Inst, index : Int32, candidate : Candidate, offsets : Offsets) : Bool
+  if inst.aux.is_a?(CallAux)
+    attrs = inst.aux.as(CallAux).param_attrs
+    arg = index - 1
+  elsif inst.aux.is_a?(IntrinsicAux)
+    attrs = inst.aux.as(IntrinsicAux).param_attrs
+    arg = index
+  else
+    return false
+  end
+  return true if arg < 0 || arg >= attrs.size
+  attrs[arg].each do |attr|
+    if attr.name == "align"
+      return false if attr.int_value > 16_u64                                                           # mutation S9-call-align: preserve required alignment
+      return false unless aligned_pointer?(candidate, inst.args[index], attr.int_value.to_i64, offsets) # mutation S9-call-offset-align: honor actual pointer offset
+    elsif attr.name == "dereferenceable" || attr.name == "dereferenceable_or_null"
+      span = offsets.span(inst.args[index])
+      return false unless span && span.low >= 0_i64 && span.high <= candidate.size
+      return false if attr.int_value > (candidate.size - span.high).to_u64
+    end
+  end
+  true
+end
+
+# All candidate layouts were proved against the collector before their uses
+# are scanned. Stores still have to stay within the allocated object.
+
+# Copies into a stack object may not shift or split a pointer word. The source
+# must be this same object or an existing stack slot, whose roots the collector
+# already scans conservatively. Reads from the object to another destination
+# remain safe. Unknown/partial copies are left on the heap.
+def bulk_use?(inst : Inst, index : Int32, candidate : Candidate, offsets : Offsets, sizes : SizeTable) : Bool
+  return false unless inst.op == Op::Intrinsic && inst.aux.is_a?(IntrinsicAux) && inst.args.size == 4
+  id = inst.aux.as(IntrinsicAux).id
+  return false unless (id == IntrinsicId::Memset && index == 0) || ((id == IntrinsicId::Memcpy || id == IntrinsicId::Memmove) && (index == 0 || index == 1))
+  target = offsets.span(inst.args[index])
+  length = size_value(sizes, inst.args[2])
+  return false unless target && length
+  return false unless target.low >= 0_i64 && target.high <= candidate.size && length >= 0_i64 && length <= candidate.size - target.high
+  return true if id == IntrinsicId::Memset
+  return true if index == 1
+  source_span = offsets.span(inst.args[1])
+  return false unless source_span && length % 8_i64 == 0_i64                                          # mutation S9-bulk-length: copy whole pointer words
+  return false unless aligned_span?(target, 0_i64, 8_i64) && aligned_span?(source_span, 0_i64, 8_i64) # mutation S9-bulk-align: do not shift pointer words
+  origin = source_span.origin
+  if origin == candidate.call
+    return source_span.low >= 0_i64 && source_span.high <= candidate.size && length <= candidate.size - source_span.high
+  end
+  return false unless origin.is_a?(Inst) && origin.as(Inst).op == Op::Alloca && origin.as(Inst).aux.is_a?(GepAux) # mutation S9-bulk-source: source must be stack or same object
+  source = origin.as(Inst)
+  info = sizes.get(source.aux.as(GepAux).source_type)
+  return false unless info
+  alignment = source.aux_int == 0_i64 ? info.align : source.aux_int
+  return false if alignment < 8_i64 || source_span.low < 0_i64 || source_span.high > info.alloc || length > info.alloc - source_span.high
+  true
+end
+
+# Include existing allocas, so another invocation cannot exceed the per-frame
+# budget by promoting the candidates left behind by the previous invocation.
+def reserved_frame(fn : Function, sizes : SizeTable) : Int64?
+  total = 0_i64
+  fn.blocks[0].insts.each do |inst|
+    next unless inst.op == Op::Alloca
+    return nil unless inst.aux.is_a?(GepAux)
+    info = sizes.get(inst.aux.as(GepAux).source_type)
+    return nil unless info && info.alloc <= 2048_i64
+    align = inst.aux_int > 16_i64 ? inst.aux_int : 16_i64
+    align = info.align if info.align > align
+    return nil if align > 2048_i64
+    bytes = ((info.alloc + align - 1_i64) // align) * align
+    return nil if bytes > 2048_i64 - total
+    total = total + bytes
+  end
+  total
+end
+
+def harmless_compare?(inst : Inst, index : Int32, sets : AliasSets) : Bool
+  return false unless inst.op == Op::ICmp && inst.args.size == 2
+  return false unless inst.aux_int == IntPredicate::EQ.value.to_i64 || inst.aux_int == IntPredicate::NE.value.to_i64
+  other = inst.args[index == 0 ? 1 : 0]
+  return true if other.is_a?(Inst) && other.as(Inst).op == Op::ConstNull
+  a = sets.id?(inst.args[index])
+  b = sets.id?(other)
+  return false unless a && b
+  sets.root(a) == sets.root(b)
+end
+
+# An input not produced by this same candidate's alias graph is alien. In
+# particular a phi/select with null, an argument, or another allocation escapes.
+def alias_instruction?(value : Value) : Bool
+  return false unless value.is_a?(Inst)
+  op = value.as(Inst).op
+  op == Op::Gep || op == Op::BitCast || op == Op::Phi || op == Op::Select
+end
+
+def top_level?(fn : Function) : Bool
+  fn.name == "__iyi_main" || fn.name == "__crystal_main" || fn.name == "__iyi_program" || fn.name == "__iyi_enter" || fn.name == "main" # mutation S9-top: return false
+end
+
+def frame_capped?(inst : Inst) : Bool
+  return false unless inst.aux.is_a?(CallAux)
+  inst.aux.as(CallAux).fn_attrs.any? { |attr| attr.name == "iyi-escape" && attr.string_value == "frame-cap" }
+end
+
+def mark_capped(insertions : Hash(Inst, Array(Inst)), replacements : Hash(Value, Value), call : Inst) : Nil
+  aux = call.aux.as(CallAux)
+  marker = Attribute.new("iyi-escape", 0_u64, "frame-cap")
+  marked_aux = CallAux.new(aux.fn_type, aux.cc, aux.tail, aux.fn_attrs + [marker], aux.param_attrs, aux.ret_attrs)
+  marked = Inst.new(Op::Call, call.type, call.args.dup, call.aux_int, marked_aux, [] of Block, [] of Int64, call.name)
+  marked.loc = call.loc
+  add_before(insertions, call, marked)
+  replacements[call] = marked
+  nil
+end
+
+def candidate_for(inst : Inst, block : Int32, sizes : SizeTable) : Candidate?
+  return nil unless inst.op == Op::Call && inst.args.size == 4 && inst.type.pointer? && inst.type.address_space == 0
+  callee = inst.args[0]
+  return nil unless callee.is_a?(Function) && callee.as(Function).name == "__iyi_new"
+  return nil if frame_capped?(inst) # mutation S9-capped: a marked call stays on the heap
+  return nil unless inst.args[1].type.int? && inst.args[1].type.bits == 64 && inst.args[2].type.int? && inst.args[2].type.bits == 64 && inst.args[3].type.int? && inst.args[3].type.bits == 64
+  size = size_value(sizes, inst.args[1])
+  flags = int_value(inst.args[3])
+  return nil unless size && flags && size > 0_i64 && size <= 512_i64 && flags >= 0_i64 && flags <= 3_i64 # mutation S9-size-cap: cap individual objects
+  Candidate.new(inst, size, flags, block, sizeof_type(inst.args[1]))
+end
+
+# Prefer the actual object type when it describes exactly the requested bytes.
+# This preserves the typed GEP path and lets SROA split Point-like objects.
+def slot_type(mod : Module, candidate : Candidate, sizes : SizeTable, du : DefUse) : IrType
+  type = candidate.hint
+  unless type
+    du.uses(candidate.call).each do |use|
+      if use.index == 0 && use.user.op == Op::Gep && use.user.aux.is_a?(GepAux)
+        possible = use.user.aux.as(GepAux).source_type
+        info = sizes.get(possible)
+        if info && info.alloc == candidate.size && (possible.struct? || possible.array?)
+          type = possible
+          break
+        end
+      end
+    end
+  end
+  padded = ((candidate.size + 7_i64) // 8_i64) * 8_i64
+  if type && (type.struct? || type.array?) && padded == candidate.size
+    info = sizes.get(type)
+    if info && info.alloc == candidate.size && info.align <= 16_i64
+      return type unless candidate.headed?
+      wrapper = mod.types.struct_of([mod.types.int64, type])
+      full = sizes.get(wrapper)
+      if full && full.offsets.size == 2 && full.offsets[1] == 8_i64 && full.alloc == candidate.size + 8_i64
+        return wrapper
+      end
+    end
+  end
+  mod.types.array_of(mod.types.int8, padded + (candidate.headed? ? 8_i64 : 0_i64))
+end
+
+def add_before(insertions : Hash(Inst, Array(Inst)), anchor : Inst, inst : Inst) : Nil
+  list = insertions[anchor]?
+  unless list
+    list = [] of Inst
+    insertions[anchor] = list
+  end
+  list << inst
+end
+
+pub class EscapeInfo
+  def initialize(@mod : Module, @partitioned : Bool)
+    @frames = LongLivedFrames.new(@mod)
+    @cycles = CallCycles.new(@mod, @frames.addresses)
+  end
+
+  def run(fn : Function) : Bool
+    run_escape_with_facts(@mod, fn, @partitioned, @frames, @cycles)
+  end
+end
+
+# Count the actual recursion graph, not the equivalent uncompressed call relation.
+pub def call_cycle_edge_count(mod : Module) : Int64
+  frames = LongLivedFrames.new(mod)
+  CallCycles.new(mod, frames.addresses, true).edge_count
+end
+
+pub def run_escape(mod : Module, fn : Function) : Bool
+  EscapeInfo.new(mod, partitioned_heap?(mod)).run(fn)
+end
+
+pub def run_escape_checked(mod : Module, fn : Function, partitioned : Bool) : Bool
+  EscapeInfo.new(mod, partitioned).run(fn)
+end
+
+def run_escape_with_facts(mod : Module, fn : Function, partitioned : Bool, frames : LongLivedFrames, cycles : CallCycles) : Bool
+  return false if partitioned
+  return false if fn.declaration? || frames.protects?(fn) # mutation S9-top-call: remove top-level exclusion
+  return false if cycles.recursive?(fn)                   # mutation S9-recursion: remove this guard
+  return false if function_returns_twice?(fn)             # mutation S9-returns-twice: promoted objects cannot cross a second return
+  return false unless mod.layout.pointer_size(0) == 8
+  sizes = SizeTable.new(mod)
+  pointer_shapes = SlotShapes.new(sizes, false)
+  word_shapes = SlotShapes.new(sizes, true)
+  frame = reserved_frame(fn, sizes)
+  return false unless frame
+  candidates = [] of Candidate
+  by_call = Hash(Inst, Candidate).new
+  block = 0
+  fn.blocks.each do |bb|
+    bb.insts.each do |inst|
+      if candidate = candidate_for(inst, block, sizes)
+        if hint = candidate.hint
+          shapes = (candidate.flags & 2_i64) == 0_i64 ? word_shapes : pointer_shapes
+          shape = shapes.get(hint)
+          candidate.bad = true unless shape && shape.aligned # mutation S9-layout: ignore unaligned pointer slots
+        else
+          candidate.bad = true if (candidate.flags & 2_i64) == 0_i64 # mutation S9-hint: pointerful objects need a layout hint
+        end
+        candidates << candidate
+        by_call[inst] = candidate
+      end
+    end
+    block = block + 1
+  end
+  return false if candidates.empty?
+
+  sets = AliasSets.new
+  candidates.each { |candidate| sets.add(candidate.call) }
+  fn.blocks.each do |bb|
+    bb.insts.each do |inst|
+      next unless inst.type.pointer?
+      if (inst.op == Op::Gep || inst.op == Op::BitCast) && !inst.args.empty? && inst.args[0].type.pointer?
+        sets.join(inst, inst.args[0])
+      elsif inst.op == Op::Phi
+        inst.args.each { |arg| sets.join(inst, arg) if arg.type.pointer? }
+      elsif inst.op == Op::Select && inst.args.size == 3
+        sets.join(inst, inst.args[1]) if inst.args[1].type.pointer?
+        sets.join(inst, inst.args[2]) if inst.args[2].type.pointer?
+      end
+    end
+  end
+  owners = Hash(Int32, Candidate).new
+  candidates.each do |candidate|
+    id = sets.root(sets.add(candidate.call))
+    if previous = owners[id]?
+      previous.bad = true
+      candidate.bad = true
+    else
+      owners[id] = candidate
+    end
+  end
+  sets.values.each do |value|
+    id = sets.id?(value)
+    next unless id
+    candidate = owners[sets.root(id)]?
+    next unless candidate
+    if value.is_a?(Inst) && by_call.has_key?(value.as(Inst))
+      next
+    end
+    candidate.bad = true unless alias_instruction?(value) # mutation S9-alias: alien pointers poison the candidate
+  end
+
+  components = BlockComponents.new(fn)
+  offsets = Offsets.new(sizes, candidates, fn)
+  cyclic_phi = Hash(Inst, Bool).new
+  bi = 0
+  fn.blocks.each do |bb|
+    bb.insts.each do |inst|
+      index = 0
+      while index < inst.args.size
+        value = inst.args[index]
+        id = sets.id?(value)
+        candidate = id ? owners[sets.root(id)]? : nil
+        if candidate && !candidate.bad
+          safe = false
+          if inst.op == Op::Gep && index == 0
+            safe = true
+          elsif inst.op == Op::BitCast && index == 0 && inst.type.pointer?
+            safe = true
+          elsif inst.op == Op::Phi
+            safe = true
+            if components.component[bi] == components.component[candidate.block]
+              unless cyclic_phi.has_key?(inst)
+                carried = false
+                inst.targets.each do |pred|
+                  carried = true if components.component[components.ids[pred]] == components.component[bi]
+                end
+                cyclic_phi[inst] = carried
+              end
+              safe = false if cyclic_phi[inst] # mutation S9-loop: change false to true
+            end
+          elsif inst.op == Op::Select && index > 0
+            safe = true
+          elsif inst.op == Op::Load && index == 0 && normal_memory?(inst)
+            safe = aligned_memory?(inst, index, candidate, offsets, sizes) && aligned_slot_access?(inst, index, candidate, offsets, pointer_shapes, word_shapes)
+          elsif inst.op == Op::Store && index == 0
+            safe = false # mutation S9-store: change false to true
+          elsif inst.op == Op::Store && index == 1 && normal_memory?(inst)
+            safe = aligned_memory?(inst, index, candidate, offsets, sizes) && aligned_slot_access?(inst, index, candidate, offsets, pointer_shapes, word_shapes)
+          elsif inst.op == Op::Call
+            safe = barrier_use?(inst, index) && bounded_barrier?(inst, candidate, offsets) && argument_attributes_safe?(inst, index, candidate, offsets) # mutation S9-call: change to true
+          elsif bulk_use?(inst, index, candidate, offsets, sizes)
+            safe = argument_attributes_safe?(inst, index, candidate, offsets)
+          elsif harmless_compare?(inst, index, sets) # mutation S9-compare: compare only null or same object
+            safe = true
+          end
+          candidate.bad = true unless safe
+        end
+        index = index + 1
+      end
+    end
+    bi = bi + 1
+  end
+
+  du = DefUse.new(fn)
+  builder = Builder.new(mod)
+  allocations = [] of Inst
+  insertions = Hash(Inst, Array(Inst)).new
+  replacements = Hash(Value, Value).new
+  entry_pos = 0
+  while fn.blocks[0].insts[entry_pos].op == Op::Phi
+    entry_pos = entry_pos + 1
+  end
+  entry_anchor = fn.blocks[0].insts[entry_pos]
+  candidates.each do |candidate|
+    next if candidate.bad
+    type = slot_type(mod, candidate, sizes, du)
+    layout = sizes.get(type)
+    next unless layout
+    bytes = ((layout.alloc + 15_i64) // 16_i64) * 16_i64
+    if frame + bytes > 2048_i64
+      mark_capped(insertions, replacements, candidate.call) # mutation S9-cap-mark: preserve a cap rejection
+      next
+    end
+    frame = frame + bytes
+    slot = new_inst(Op::Alloca, mod.types.ptr, [] of Value, 16_i64, GepAux.new(type))
+    allocations << slot
+    site = candidate.call
+    zero = builder.const_int(mod.types.int8, 0_i64)
+    length = builder.const_int(mod.types.int64, layout.alloc)
+    not_volatile = builder.const_int(mod.types.int1, 0_i64)
+    clear = new_inst(Op::Intrinsic, mod.types.void, [slot, zero, length, not_volatile] of Value, 0_i64, IntrinsicAux.new(IntrinsicId::Memset, [mod.types.ptr, mod.types.int64]))
+    zero_site = site # mutation S9-zero: change site to entry_anchor
+    add_before(insertions, zero_site, clear)
+    pointer = slot
+    if candidate.headed?
+      zero_index = builder.const_int(mod.types.int64, 0_i64)
+      if type.struct?
+        header_index = builder.const_int(mod.types.int32, 0_i64)
+        object_index = builder.const_int(mod.types.int32, 1_i64)
+        header = new_inst(Op::Gep, mod.types.ptr, [slot, zero_index, header_index] of Value, 0_i64, GepAux.new(type))
+        pointer = new_inst(Op::Gep, mod.types.ptr, [slot, zero_index, object_index] of Value, 0_i64, GepAux.new(type))
+      else
+        header = slot
+        eight = builder.const_int(mod.types.int64, 8_i64)
+        pointer = new_inst(Op::Gep, mod.types.ptr, [slot, eight] of Value, 0_i64, GepAux.new(mod.types.int8))
+      end
+      add_before(insertions, site, header) unless header == slot
+      add_before(insertions, site, pointer)
+      shift = builder.const_int(mod.types.int64, 32_i64)
+      word = new_inst(Op::Shl, mod.types.int64, [candidate.call.args[2], shift] of Value)
+      add_before(insertions, site, word)
+      header_store = new_inst(Op::Store, mod.types.void, [word, header] of Value, 0_i64, MemAux.new(8))
+      add_before(insertions, site, header_store) # mutation S9-header: remove this line
+    end
+    replacements[site] = pointer
+  end
+  return false if replacements.empty?
+  # Only instructions and operands change. Edges, predecessor lists and phi
+  # incoming blocks remain exactly as they were, so no CFG relinking is needed.
+  bi = 0
+  fn.blocks.each do |block|
+    output = [] of Inst
+    block.insts.each do |inst|
+      allocations.each { |slot| output << slot } if bi == 0 && inst == entry_anchor
+      if before = insertions[inst]?
+        before.each { |added| output << added }
+      end
+      output << inst unless replacements.has_key?(inst)
+    end
+    output.each do |inst|
+      k = 0
+      while k < inst.args.size
+        if replacement = replacements[inst.args[k]]?
+          inst.args[k] = replacement
+        end
+        k = k + 1
+      end
+    end
+    block.insts[0, block.insts.size] = output
+    bi = bi + 1
+  end
+  true
+end

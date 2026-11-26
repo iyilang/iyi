@@ -1,0 +1,15 @@
+; iyi-ir 1
+source_filename = "escape_table_masked_id"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+@"__iyi_gc_layouts:table" = internal constant [7 x i64] [ i64 1, i64 1, i64 16, i64 16, i64 1, i64 0, i64 1 ]
+@__iyi_gc_layouts = internal constant ptr @"__iyi_gc_layouts:table"
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i64 @masked_id(ptr %heap) {
+entry:
+  %p = call ptr (i64, i64, i64) @__iyi_new(i64 16, i64 65537, i64 0)
+  %field = getelementptr i8, ptr %p, i64 1
+  store ptr %heap, ptr %field, align 1
+  %v = load i64, ptr %p, align 8
+  ret i64 %v
+}

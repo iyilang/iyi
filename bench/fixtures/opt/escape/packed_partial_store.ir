@@ -1,0 +1,22 @@
+; iyi-ir 1
+source_filename = "escape_packed_partial_store"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+%Packed = type <{ i8, ptr }>
+@"__iyi_gc_layouts:table" = internal constant [7 x i64] [ i64 1, i64 10, i64 9, i64 9, i64 1, i64 0, i64 1 ]
+@__iyi_gc_layouts = internal constant ptr @"__iyi_gc_layouts:table"
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i8 @packed_partial(ptr %heap) {
+entry:
+  %p = call ptr (i64, i64, i64) @__iyi_new(i64 ptrtoint (ptr getelementptr (%Packed, ptr null, i32 1) to i64), i64 10, i64 0)
+  %field = getelementptr %Packed, ptr %p, i64 0, i32 1
+  %tail = getelementptr i8, ptr %field, i64 4
+  %bits = ptrtoint ptr %heap to i64
+  %low = trunc i64 %bits to i32
+  %shift = lshr i64 %bits, 32
+  %high = trunc i64 %shift to i32
+  store i32 %low, ptr %field, align 1
+  store i32 %high, ptr %tail, align 1
+  %first = load i8, ptr %p, align 1
+  ret i8 %first
+}

@@ -1,0 +1,13 @@
+; iyi-ir 1
+source_filename = "escape_sizeof_i1_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+%Cell = type { i64 }
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i64 @sizeof_i1() {
+entry:
+  %p = call ptr (i64, i64, i64) @__iyi_new(i64 ptrtoint (ptr getelementptr (%Cell, ptr null, i1 true) to i64), i64 1, i64 2)
+  %field = getelementptr %Cell, ptr %p, i32 0, i32 0
+  %v = load i64, ptr %field, align 8
+  ret i64 %v
+}

@@ -1,0 +1,49 @@
+; iyi-ir 1
+source_filename = "merge_gap_keep"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+@__iyi_marking = external global i8
+define internal void @__iyi_write_barrier_begin() {
+entry:
+  ret void
+}
+define internal void @__iyi_write_barrier(ptr %address, i64 %words) {
+entry:
+  ret void
+}
+define external void @merge_gap_keep(ptr %object, ptr %a, ptr %b) {
+entry:
+  %f0 = getelementptr inbounds { ptr, ptr, ptr }, ptr %object, i32 0, i32 0
+  %m0 = load i8, ptr @__iyi_marking, align 1
+  %p0 = icmp ne i8 %m0, 0
+  br i1 %p0, label %begin0, label %plain0
+begin0:
+  call void () @__iyi_write_barrier_begin()
+  br label %join0
+plain0:
+  br label %join0
+join0:
+  store ptr %a, ptr %f0, align 8
+  br i1 %p0, label %shade0, label %after0
+shade0:
+  call void (ptr, i64) @__iyi_write_barrier(ptr %f0, i64 1)
+  br label %after0
+after0:
+  %f2 = getelementptr inbounds { ptr, ptr, ptr }, ptr %object, i32 0, i32 2
+  %m2 = load i8, ptr @__iyi_marking, align 1
+  %p2 = icmp ne i8 %m2, 0
+  br i1 %p2, label %begin2, label %plain2
+begin2:
+  call void () @__iyi_write_barrier_begin()
+  br label %join2
+plain2:
+  br label %join2
+join2:
+  store ptr %b, ptr %f2, align 8
+  br i1 %p2, label %shade2, label %done
+shade2:
+  call void (ptr, i64) @__iyi_write_barrier(ptr %f2, i64 1)
+  br label %done
+done:
+  ret void
+}

@@ -1,0 +1,34 @@
+; iyi-ir 1
+source_filename = "constant_halves_removed"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+@__iyi_marking = external global i8
+define internal void @__iyi_write_barrier_begin() {
+entry:
+  ret void
+}
+define internal void @__iyi_write_barrier(ptr %address, i64 %words) {
+entry:
+  ret void
+}
+define external void @constant_halves_removed(ptr %object) {
+entry:
+  %mark = load i8, ptr @__iyi_marking, align 1
+  %active = icmp ne i8 %mark, 0
+  br i1 %active, label %begin, label %plain
+begin:
+  call void () @__iyi_write_barrier_begin()
+  br label %join
+plain:
+  br label %join
+join:
+  %right = getelementptr inbounds i8, ptr %object, i64 4
+  store i32 0, ptr %right, align 4
+  store i32 0, ptr %object, align 4
+  br i1 %active, label %shade, label %done
+shade:
+  call void (ptr, i64) @__iyi_write_barrier(ptr %object, i64 1)
+  br label %done
+done:
+  ret void
+}

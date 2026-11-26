@@ -1,0 +1,15 @@
+; iyi-ir 1
+source_filename = "escape_fallback_padding"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i8 @fallback_padding(ptr %heap, i8 %byte) {
+entry:
+  %0 = alloca [16 x i8], align 16
+  intrinsic llvm.memset.p0.i64(ptr %0, i8 0, i64 16, i1 false)
+  store ptr %heap, ptr %0, align 8
+  %tail = getelementptr i8, ptr %0, i64 8
+  store i8 %byte, ptr %tail, align 1
+  %v = load i8, ptr %tail, align 1
+  ret i8 %v
+}

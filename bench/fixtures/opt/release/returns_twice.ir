@@ -1,0 +1,33 @@
+; iyi-ir 1
+source_filename = "release_returns_twice"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+%Cell = type { i64 }
+define internal ptr @__iyi_new(i64 %size, i64 %tid, i64 %flags) {
+entry:
+  ret ptr null
+}
+define internal i32 @setjmp(ptr %buf) [returns_twice] {
+entry:
+  ret i32 0
+}
+define internal void @longjmp(ptr %buf, i32 %value) [noinline, noreturn] {
+entry:
+  unreachable
+}
+define external i64 @returns_twice(ptr %buf) {
+entry:
+  %p = call ptr (i64, i64, i64) @__iyi_new(i64 ptrtoint (ptr getelementptr (%Cell, ptr null, i32 1) to i64), i64 1, i64 2)
+  %field = getelementptr %Cell, ptr %p, i32 0, i32 0
+  store i64 0, ptr %field, align 8
+  %r = call i32 (ptr) @setjmp(ptr %buf)
+  %first = icmp eq i32 %r, 0
+  br i1 %first, label %jump, label %second
+jump:
+  store i64 1, ptr %field, align 8
+  call void (ptr, i32) @longjmp(ptr %buf, i32 1)
+  unreachable
+second:
+  %v = load i64, ptr %field, align 8
+  ret i64 %v
+}

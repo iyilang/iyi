@@ -1,0 +1,14 @@
+; iyi-ir 1
+source_filename = "escape_unknown_integer_store"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external ptr @__iyi_new(i64, i64, i64)
+define internal i8 @unknown_integer(ptr %heap) {
+entry:
+  %p = call ptr (i64, i64, i64) @__iyi_new(i64 16, i64 10, i64 0)
+  %field = getelementptr i8, ptr %p, i64 1
+  %bits = ptrtoint ptr %heap to i64
+  store i64 %bits, ptr %field, align 1
+  %first = load i8, ptr %p, align 1
+  ret i8 %first
+}

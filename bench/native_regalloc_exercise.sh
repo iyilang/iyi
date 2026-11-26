@@ -610,6 +610,62 @@ print("copy preference: source and destination share a register")
 PY
 }
 
+# The fall-through edge keeps v live through carry. The selector ends every block it emits for a reachable IR block
+# with a terminator, so no IR fixture reaches the edge. This hand-built MIR does: carry falls into use, which reads v.
+# Without the edge, w takes v's register inside carry.
+check_fallthrough_liveness() {
+  local ignored=$1 exe="$WORK/fallthrough-liveness-$RANDOM$EXE"
+  if ! ./bin/iyi build -o "$(native_path "$exe")" "$(native_path "$FIX_RA/fallthrough_liveness.iyi")" \
+       >"$WORK/fallthrough-liveness.log" 2>&1; then
+    cat "$WORK/fallthrough-liveness.log"
+    return 2
+  fi
+  if ! "$exe" >"$WORK/fallthrough-liveness.mir" 2>&1; then
+    cat "$WORK/fallthrough-liveness.mir"
+    echo "the fall-through liveness fixture could not run"
+    return 2
+  fi
+  "$PY" - "$(native_path "$WORK/fallthrough-liveness.mir")" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+if not text.startswith("function fallthrough\n"):
+    print("INVALID: not the fall-through fixture's MIR")
+    sys.exit(2)
+blocks = {}
+number = None
+for line in text.splitlines():
+    match = re.match(r"^block (\d+) (\S+)$", line)
+    if match:
+        number = int(match.group(1))
+        blocks[number] = (match.group(2), [])
+    elif number is not None and line.startswith("  "):
+        blocks[number][1].append(line.strip())
+if [blocks.get(i, ("", []))[0] for i in range(4)] != ["entry", "carry", "use", "definer"]:
+    print("INVALID: the fall-through fixture's blocks changed")
+    sys.exit(2)
+carry, reader, definer = blocks[1][1], blocks[2][1], blocks[3][1]
+terminators = ("B/", "Bcond/", "Cbz/", "Cbnz/", "Tbz/", "Tbnz/", "Ret/", "BrTable/", "Brk/")
+made = re.match(r"^MovImm/64 (x\d+) #imm=9$", carry[0]) if carry else None
+written = re.match(r"^MovImm/64 (x\d+) #imm=7$", definer[0]) if definer else None
+read = re.match(r"^AddImm/64 x\d+, (x\d+) #imm=1$", reader[0]) if reader else None
+if (not (made and written and read) or carry[-1].startswith(terminators)
+        or not reader[-1].startswith("Ret/") or definer[-1] != "B/64 target=1"):
+    print("INVALID: the fall-through fixture lost its shape")
+    sys.exit(2)
+w, v = made.group(1), read.group(1)
+if written.group(1) != v:
+    print(f"decisive: v has two homes, {written.group(1)} in definer and {v} in use")
+    sys.exit(1)
+if w == v:
+    print(f"decisive: w and v share {v}; v is live through carry only by the fall-through edge")
+    sys.exit(1)
+print(f"fall-through liveness: v is {v} in definer and use; w is {w} in carry")
+PY
+}
+
 check_fpr_frame() {
   local ignored=$1 exe="$WORK/fpr-frame-$RANDOM$EXE" values
   if ! ./bin/iyi build -o "$(native_path "$exe")" "$(native_path "$FIX_RA/fpr_frame_probe.iyi")" >"$WORK/fpr-frame.log" 2>&1; then
@@ -970,6 +1026,10 @@ prove_mutation "spill weights: mistake irreducible edges for natural backedges" 
   src/compiler/native/regalloc_linear.iyi check_spill_weights \
   '      if dfs_ancestor?(number, last, s, b) && dfs_ancestor?(dom[0], dom[1], s, b)' \
   '      if dfs_ancestor?(number, last, s, b)'
+prove_mutation "linear: liveness drops the fall-through successor" \
+  src/compiler/native/regalloc_linear.iyi check_fallthrough_liveness \
+  '  if falls && b + 1 < fn.blocks.size' \
+  '  if false && falls && b + 1 < fn.blocks.size'
 prove_mutation "floating-point frame: omit callee-saved FPR stores" \
   src/compiler/native/frame.iyi check_fpr_frame \
   '    acc << m

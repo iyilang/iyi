@@ -1,0 +1,60 @@
+module fallthrough_liveness
+
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass}
+import compiler/native/regalloc_linear::{allocate_linear}
+import compiler/native/driver::{dump_mfunction}
+
+# Layout order: entry, carry, use, definer. The entry branches to definer, which defines v and branches back to
+# carry. carry defines w, uses it, and has no terminator, so control falls through into use, which reads v.
+# v is live through carry only by the fall-through edge. Without that edge v's interval starts at use, and w, which
+# lives inside carry, takes the register v needs.
+# No selector output has a block without a terminator (IR fixtures never reach this edge), so this MIR is built by hand.
+fn = MFunction.new("fallthrough")
+entry = MBlock.new(0, "entry")
+carry = MBlock.new(1, "carry")
+reader = MBlock.new(2, "use")
+definer = MBlock.new(3, "definer")
+fn.blocks << entry
+fn.blocks << carry
+fn.blocks << reader
+fn.blocks << definer
+v = fn.new_vreg(RegClass::Gpr)
+w = fn.new_vreg(RegClass::Gpr)
+sink = fn.new_vreg(RegClass::Gpr)
+result = fn.new_vreg(RegClass::Gpr)
+
+to_definer = MInst.new(MOp::B.value.to_i32)
+to_definer.target = 3
+entry.insts << to_definer
+
+make_w = MInst.new(MOp::MovImm.value.to_i32)
+make_w.defs << Operand.new(OperandKind::Virtual, w)
+make_w.imm = 9_i64
+carry.insts << make_w
+
+consume_w = MInst.new(MOp::AddImm.value.to_i32)
+consume_w.defs << Operand.new(OperandKind::Virtual, sink)
+consume_w.uses << Operand.new(OperandKind::Virtual, w)
+consume_w.imm = 1_i64
+carry.insts << consume_w
+
+read_v = MInst.new(MOp::AddImm.value.to_i32)
+read_v.defs << Operand.new(OperandKind::Virtual, result)
+read_v.uses << Operand.new(OperandKind::Virtual, v)
+read_v.imm = 1_i64
+reader.insts << read_v
+
+ret = MInst.new(MOp::Ret.value.to_i32)
+reader.insts << ret
+
+make_v = MInst.new(MOp::MovImm.value.to_i32)
+make_v.defs << Operand.new(OperandKind::Virtual, v)
+make_v.imm = 7_i64
+definer.insts << make_v
+
+back_to_carry = MInst.new(MOp::B.value.to_i32)
+back_to_carry.target = 1
+definer.insts << back_to_carry
+
+allocate_linear(fn)
+STDOUT.print(dump_mfunction(fn))

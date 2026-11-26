@@ -622,8 +622,10 @@ echo '== 5. diamond-chain scaling'
 # diamonds. A verified smaller copy checks the generator outside the timing.
 # Each size is run three times and the least figure is kept: the child's CPU
 # time where the host reports it, so other jobs on the machine do not stretch
-# it, and elapsed time elsewhere.
-if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" "${NATIVE_OPT_SCALE_K:-2048}" "${NATIVE_OPT_RELEASE_SCALE_K:-4096}" "${NATIVE_OPT_LOOP_SCALE_K:-2048}" "${NATIVE_OPT_ALLOC_SCALE_K:-2048}" "${NATIVE_OPT_INDEGREE_SCALE_K:-2048}" "${NATIVE_OPT_CALLBACK_SCALE_K:-2048}" <<'PY'
+# it, and elapsed time elsewhere. The allocation shape starts at 4096: at 2048
+# its 2K run took 0.493 s of CPU on a CI Linux runner, under the 0.5 s a ratio
+# needs to mean anything.
+if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" "${NATIVE_OPT_SCALE_K:-2048}" "${NATIVE_OPT_RELEASE_SCALE_K:-4096}" "${NATIVE_OPT_LOOP_SCALE_K:-2048}" "${NATIVE_OPT_ALLOC_SCALE_K:-4096}" "${NATIVE_OPT_INDEGREE_SCALE_K:-2048}" "${NATIVE_OPT_CALLBACK_SCALE_K:-2048}" <<'PY'
 import os, subprocess, sys, time
 try:
     import resource

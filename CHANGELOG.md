@@ -303,6 +303,22 @@
   the `wasm-freestanding` job runs it. `bench/thread_exercise.sh` and
   `bench/parallel_exercise.sh` re-anchor their mutations to the native
   switch and poll paths.
+- **Allocation escape analysis and write-barrier elision in the IR
+  optimizer (#259).** `src/compiler/ir/opt/escape.iyi` moves an
+  `__iyi_new` whose object never leaves its function to a 16-aligned stack
+  slot, zeroed at the allocation site each time it runs: a constant size of
+  1 to 512 bytes, at most 2,048 bytes of slots per function, and never in a
+  call cycle, a `returns_twice` caller, an entry frame or a module that uses
+  the partitioned heap. `src/compiler/ir/opt/barrier.iyi` removes the
+  `__iyi_marking` test and barrier around stores that all land in stack
+  slots (`barrier-stack`) or that cover the shaded words with constants
+  holding no pointer (`barrier`), and merges adjacent barriers on one
+  object into one. The release tier repeats `escape, barrier-stack, sroa,
+  simplify, dce` while `escape` changes something and runs `barrier` after
+  `licm`. Nothing on master lowers a program to these shapes yet, so only
+  `iyi-opt` and the fixtures run them; the LLVM backend stays the default.
+  `bench/native_opt_exercise.sh` gains sections 2g and 2h and goes from 25
+  to 101 broken copies caught.
 
 ### Changed
 
@@ -531,6 +547,23 @@
   broken copies. It runs in the self-host jobs through
   `bench/selfhost_gates.sh`.
 
+- **The AArch64 linear-scan allocator coalesces copies, spills by loop
+  weight, reuses reloads and keeps floats in callee-saved registers
+  (#260).** A copy's destination takes its source's register when the
+  source dies there, and identity moves are dropped; the interval evicted is
+  the one with the least loop-weighted use count; a spilled value stays in
+  a scratch register for the rest of its block until a write to that
+  register, a call, an inline assembly body or a redefinition; and a
+  floating-point value that crosses a call may live in d8 to d15, which the
+  frame saves and restores on every return. No value that may carry a
+  pointer lives in a floating-point register across a call or an inline
+  assembly body, asserted on the final homes. The MIR dump prints a
+  conditional branch's condition. `bench/native_regalloc_exercise.sh` goes
+  from 56 to 63 fixtures emitted and from 7 to 37 broken copies caught, and
+  pins each allocator fixture function's spill slots
+  (`native_regalloc/linear_slots.ceiling`, exact in both directions);
+  `bench/native_mir_clean_exercise.sh` goes from 3 to 9.
+
 ### Gates
 
 - **std/autocert's and std/acme's gates draw challtestsrv's DNS port free
@@ -699,6 +732,18 @@
   refuses the frame, so the oracle stopped before measuring anything. The
   expected verdict now follows the oracle's `zstd_version_info`. iyi still
   has to refuse the frame with its sentence.
+
+- **The self-host gates catch the broken copies their merge reviews found
+  (#262).** Twelve gates gain 23 checks, each with a mutation proof, for
+  the copies of #184, #185, #186, #191, #194, #207, #208, #209, #225 and
+  #254 that passed them: a Mach-O `ldst16` `PAGEOFF12` site read as
+  `ldst32`, a two-digit octal escape, an `Or`'s end, `RangeLiteral`'s
+  `exclusive`, the asm census's branch shapes, x86-64 start code's
+  `environ`, `trunc` to the same width, swapped `icmp`/`fcmp` predicates,
+  `icmp ule` of equal operands and `xor` folds, AArch64 unsigned condition
+  codes, frame rounding and narrow `lsr`, the x86-64 imm8 boundaries and
+  caller-saved tables, and the command driver's `-Oz` and `--threads`.
+  `native_elf` already caught an executable `PT_GNU_STACK`.
 
 ### Fixed
 

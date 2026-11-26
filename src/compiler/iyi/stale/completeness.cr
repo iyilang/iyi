@@ -232,6 +232,7 @@ module Iyi::Stale
     TypeDefType
     TypeParameter
     TypeSplat
+    UInt64x2Type
     UnionType
     VirtualMetaclassType
     VirtualType

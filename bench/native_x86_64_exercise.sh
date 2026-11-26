@@ -459,6 +459,41 @@ PY
   fi
   return 0
 }
+# New proofs use the shared helper and count only a completed comparison mismatch.
+check_shared_x86_mutant() {
+  local check=$1 rc=0
+  if ! build_table_tool "$work/native_amd64$EXE" >"$work/shared-mutant.log" 2>&1; then
+    cat "$work/shared-mutant.log"
+    touch "$work/shared-invalid"
+    return 0
+  fi
+  "$check" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    show_check_failure "$check"
+    touch "$work/shared-invalid"
+    return 0
+  fi
+  return "$rc"
+}
+
+prove_shared_x86_mutation() {
+  local name=$1 file=$2 old=$3 new=$4 check=$5
+  rm -f "$work/shared-invalid"
+  if ! (
+    trap - EXIT INT TERM
+    . "$REPO/bench/lib/mutation.sh"
+    prove_mutation "$name" "$file" "$old" "$new" -- check_shared_x86_mutant "$check"
+  ); then
+    fail "mutation $name was not caught"
+  fi
+  [ ! -e "$work/shared-invalid" ] || fail "mutation $name: INVALID mutant or comparison"
+  if ! build_table_tool "$work/native_amd64$EXE" >"$work/build.log" 2>&1; then
+    cat "$work/build.log"
+    fail "the original tool does not rebuild after '$name'"
+    exit 1
+  fi
+}
+
 
 echo "== 6. mutations are each caught"
 prove_mutation "cvtt: cvttsd2si given the cvtsd2si opcode (2D, not 2C)" src/compiler/native/amd64/encode.iyi \
@@ -478,17 +513,17 @@ prove_mutation "win64: a floating-point argument takes the integer slot" src/com
     return win64_sse_args[index]" \
   "  if is_float
     return win64_integer_args[index]" check_abi
-prove_mutation "ALU: +127 does not use the signed-byte immediate form" src/compiler/native/amd64/encode.iyi \
+prove_shared_x86_mutation "ALU: +127 does not use the signed-byte immediate form" src/compiler/native/amd64/encode.iyi \
   "  if imm >= -128 && imm <= 127
     return with_imm(op_digit(0x83, size, sub, rm), imm, 1)" \
   "  if imm >= -128 && imm < 127
     return with_imm(op_digit(0x83, size, sub, rm), imm, 1)" check_encoder
-prove_mutation "imul: +127 does not use the signed-byte immediate form" src/compiler/native/amd64/encode.iyi \
+prove_shared_x86_mutation "imul: +127 does not use the signed-byte immediate form" src/compiler/native/amd64/encode.iyi \
   "  if imm >= -128 && imm <= 127
     return with_imm(op_rr(0x6B, size, reg, rm), imm, 1)" \
   "  if imm >= -128 && imm < 127
     return with_imm(op_rr(0x6B, size, reg, rm), imm, 1)" check_encoder
-prove_mutation "Win64: r11 is missing from caller-saved registers" src/compiler/native/amd64/abi.iyi \
+prove_shared_x86_mutation "Win64: r11 is missing from caller-saved registers" src/compiler/native/amd64/abi.iyi \
   "  return [rax, rcx, rdx, r8, r9, r10, r11, xmm(0), xmm(1), xmm(2), xmm(3), xmm(4), xmm(5)]" \
   "  return [rax, rcx, rdx, r8, r9, r10, xmm(0), xmm(1), xmm(2), xmm(3), xmm(4), xmm(5)]" check_abi
 

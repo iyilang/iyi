@@ -696,7 +696,7 @@ prove_mutation() {
   fi
   mutation_total=$((mutation_total + 1))
   case "$check" in
-    check_probe|check_mono_pair|check_tlvp_kind|check_tls_clobbers|check_tbss_placed|check_tp_mask|check_unsigned_conditions|check_frame_alignment) ;;
+    check_probe|check_mono_pair|check_tlvp_kind|check_tls_clobbers|check_tbss_placed|check_tp_mask) ;;
     *)
       if [ "$HOST_ID" != darwin-arm64 ]; then
         host_limited "mutation $name: its original runtime detector requires macOS arm64"
@@ -869,9 +869,48 @@ check_narrow_param() { check_fixture "$1" narrow_param; }
 check_narrow_asm() { check_fixture "$1" narrow_asm; }
 check_narrow_argext() { check_fixture "$1" narrow_argext; }
 check_narrow_signext() { check_fixture "$1" narrow_signext; }
+# Use the shared mutation helper while refusing compiler or detector setup failures.
+check_shared_codegen_mutant() {
+  local check=$1 mutant="$WORK/shared-mutant.$mutation_total$EXE" rc=0
+  if ! build_driver "$mutant"; then
+    cat "$WORK/build.$(basename "$mutant").log"
+    touch "$WORK/shared-codegen-invalid"
+    return 0
+  fi
+  "$check" "$mutant" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    touch "$WORK/shared-codegen-invalid"
+    return 0
+  fi
+  return "$rc"
+}
+
+prove_shared_codegen_mutation() {
+  local name=$1 file=$2 old=$3 new=$4 check=$5 rc=0
+  mutation_total=$((mutation_total + 1))
+  mutation_checked=$((mutation_checked + 1))
+  "$check" "$DRV" >"$WORK/shared-codegen-baseline.log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cat "$WORK/shared-codegen-baseline.log"
+    fail "mutation $name: INVALID pristine detector (status $rc)"
+    return 1
+  fi
+  rm -f "$WORK/shared-codegen-invalid"
+  if (
+    trap - EXIT INT TERM
+    . "$REPO/bench/lib/mutation.sh"
+    prove_mutation "$name" "$file" "$old" "$new" -- check_shared_codegen_mutant "$check"
+  ); then
+    mutation_caught=$((mutation_caught + 1))
+  else
+    fail "mutation $name was not caught"
+  fi
+  [ ! -e "$WORK/shared-codegen-invalid" ] || fail "mutation $name: INVALID mutant or detector"
+}
+
 
 echo "== 6. mutations are each caught"
-prove_mutation "unsigned comparisons: swap ult and ule condition codes" \
+prove_shared_codegen_mutation "unsigned comparisons: swap ult and ule condition codes" \
   src/compiler/native/aarch64/isel.iyi \
   '  elsif ordinal == 4_i64
     return cond_cc
@@ -882,7 +921,7 @@ prove_mutation "unsigned comparisons: swap ult and ule condition codes" \
   elsif ordinal == 5_i64
     return cond_cc' \
   check_unsigned_conditions
-prove_mutation "frame: round stack size to 8 instead of 16 bytes" \
+prove_shared_codegen_mutation "frame: round stack size to 8 instead of 16 bytes" \
   src/compiler/native/frame.iyi \
   '  f.frame_size = round_up(offset, stack_align)' \
   '  f.frame_size = round_up(offset, 8_i64)' \

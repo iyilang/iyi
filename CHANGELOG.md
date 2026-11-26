@@ -562,7 +562,7 @@
   formats the open or read error code with `FormatMessageW`, as
   `WinError#message` does, and an open error escapes its file name as
   `File::Error` does on every host, so the two confinement cases excluded on
-  Windows run there. `bench/macro_sites.py`'s census reads every file (315
+  Windows run there. `bench/macro_sites.py`'s census reads every file (316
   sites, 0 unpaired, 0 unreadable) and lists its 2 differing sites by file,
   kind, context and ordinal in `bench/macro_sites.floor`; an unlisted
   difference and a listed one that no longer occurs both fail. The port's

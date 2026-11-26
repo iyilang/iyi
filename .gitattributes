@@ -40,6 +40,11 @@
 bench/fixtures/**/*.in text eol=lf
 bench/fixtures/**/*.expected text eol=lf
 bench/fixtures/**/*.txt text eol=lf
+# A formatter fixture whose text is deliberately not in the formatter's own
+# style carries `.fixture`, so the format check does not read it as source.
+# Unpinned, a Windows checkout gave it CRLF; the hosted formatter keeps a
+# file's line endings and the port does not yet, so the two diverged there.
+bench/fixtures/**/*.fixture text eol=lf
 
 # A module artifact is binary. Without this GitHub tries to render one and git
 # tries to diff it.

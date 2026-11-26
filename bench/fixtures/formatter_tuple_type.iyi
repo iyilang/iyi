@@ -1,0 +1,43 @@
+def tuple_return : {Int32, String}
+  nil
+end
+
+def tuple_parameter(value : {Int32, String}) : Array({Int32, String})
+  nil
+end
+
+def tuple_nested(value : { {Int32, String}, Bool }) : { {Int32, String}, Bool }
+  nil
+end
+
+def tuple_multiline(value : { # pair items
+Int32, String}) : Array({Int32, String})
+  nil
+end
+
+def tuple_generic_multiline(value : Int32) : Array({Int32,  # text item
+String})
+  nil
+end
+
+def named_tuple_return : {count: Int32, name: String}
+  nil
+end
+
+def named_tuple_parameter(value : {count: Int32, name: String}) : Array({count: Int32, name: String})
+  nil
+end
+
+def named_tuple_multiline(value : {count: Int32,  # count item
+name: String}) : {count: Int32, name: String}
+  nil
+end
+
+def named_tuple_result : {count: Int32,  # label item
+name: String}
+  nil
+end
+
+def explicit_tuple(value : Tuple(Int32, String)) : Tuple(Int32, String)
+  nil
+end

@@ -199,7 +199,18 @@
   `bench/selfhost_normalizer_exercise.sh` requires 11 fixtures (620 nodes)
   to normalise as the front end does and catches 8. Hosted commands are
   unchanged.
-- These eight gates run in the same three jobs through
+- **The formatter in iyi: `src/compiler/tools/formatter.iyi` (#195).**
+  2,783 lines of iyi format source as `iyi tool format` does;
+  `src/compiler/tools/format.iyi` is the standalone `iyi-format` driver.
+  `bench/selfhost_formatter_exercise.sh` requires 32 files to format byte
+  for byte as the hosted formatter does, through a path and through stdin,
+  and a second pass to change nothing, and catches 18 broken copies. Of the
+  333 `.iyi` files that select the self-host jobs, the port formats 140 as
+  the hosted formatter does, formats 34 differently and refuses 159; each
+  of the 140 listed in `bench/selfhost_formatter_parity.floor` must keep
+  matching, and `bench/selfhost_formatter_differs.ceiling` must list exactly
+  the files it formats differently. Hosted commands are unchanged.
+- These nine gates run in the same three jobs through
   `bench/selfhost_gates.sh`; `bench/native_elf_run.sh` runs in
   `selfhost-linux-arm64`.
 - **AArch64 code generation and register allocation in iyi:

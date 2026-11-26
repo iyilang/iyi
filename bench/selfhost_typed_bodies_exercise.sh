@@ -44,6 +44,35 @@ build_port() {
   }
 }
 
+# A host-specific measurement, when present, replaces the common row. Both
+# production comparisons and the floor mutation proofs use this same check.
+floor_row() {
+  awk -F '\t' -v name="$2" -v host="$HOST_OS" '
+    $1 == name {base=$0}
+    $1 == name "@" host {specific=$0}
+    END {if (specific != "") print specific; else print base}
+  ' "$1"
+}
+check_floor() {
+  local floor_file="$1" name="$2" rn="$3" rm="$4" bn="$5" bm="$6"
+  local row key mode rf rmf bf bmf failed=0
+  row=$(floor_row "$floor_file" "$name")
+  if [ -z "$row" ]; then
+    echo "  NO FLOOR: $name"
+    return 2
+  fi
+  IFS=$'\t' read -r key mode rf rmf bf bmf <<< "$row"
+  if [ "$rn" -lt "$rf" ] || [ "$rm" -lt "$rmf" ] || [ "$bn" -lt "$bf" ] || [ "$bm" -lt "$bmf" ]; then
+    echo "  BELOW FLOOR: $name entry $rm/$rn (floor $rmf/$rf), body $bm/$bn (floor $bmf/$bf)"
+    failed=1
+  fi
+  if [ "$rn" -gt "$rf" ] || [ "$rm" -gt "$rmf" ] || [ "$bn" -gt "$bf" ] || [ "$bm" -gt "$bmf" ]; then
+    echo "  RAISE THE FLOOR: $name entry $rm/$rn (floor $rmf/$rf), body $bm/$bn (floor $bmf/$bf)"
+    failed=1
+  fi
+  return "$failed"
+}
+
 echo '== 1. Building hosted and port entry, body and type-query drivers'
 build_host selfhost_typed_oracle.cr entry-oracle || exit 1
 build_host selfhost_typed_bodies_oracle.cr body-oracle || exit 1
@@ -60,12 +89,20 @@ for fixture in "$REPO"/bench/fixtures/sem_bodies_*.iyi "$REPO"/bench/fixtures/se
   basename "$fixture"
 done | sort > "$WORK/inventory"
 awk -F '\t' '!/^#/ && NF {
+  parts = split($1, keys, "@")
   if (NF != 6 || ($2 != "bare" && $2 != "prelude" && $2 != "cr") ||
-      $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/) {
-    print "invalid floor row: " $0 > "/dev/stderr"; bad=1
+      $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ || $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ ||
+      parts > 2 || (parts == 2 && keys[2] != "darwin" && keys[2] != "linux" && keys[2] != "windows") || seen[$1]++) {
+    print "invalid or duplicate floor row: " $0 > "/dev/stderr"; bad=1
   }
-  print $1
-} END {exit bad}' "$FLOOR" > "$WORK/floor-names" || exit 1
+  if (parts == 1) {base[keys[1]]=1; print keys[1]}
+  else overrides[$1]=keys[1]
+} END {
+  for (override in overrides) if (!(overrides[override] in base)) {
+    print "host floor without common row: " override > "/dev/stderr"; bad=1
+  }
+  exit bad
+}' "$FLOOR" > "$WORK/floor-names" || exit 1
 awk -F '\t' '!/^#/ && NF {
   if (NF != 3 || $2 == "" || $3 == "") {
     print "invalid exception row: " $0 > "/dev/stderr"; bad=1
@@ -91,10 +128,12 @@ body_nodes=0
 body_matched=0
 no_body=0
 zero_body_matches=0
+proof_name=""
+proof_key=""
 while IFS= read -r name; do
   case "$name" in sem_bodies_*) bodies=$((bodies + 1)) ;; sem_arms_*) arms=$((arms + 1)) ;; esac
   fixture="$REPO/bench/fixtures/$name"
-  row=$(awk -F '\t' -v n="$name" '$1 == n {print; exit}' "$FLOOR")
+  row=$(floor_row "$FLOOR" "$name")
   if [ -z "$row" ]; then
     expected=$(awk -F '\t' -v n="$name" '$1 == n {print $2; exit}' "$EXCEPTIONS")
     reason=$(awk -F '\t' -v n="$name" '$1 == n {print $3; exit}' "$EXCEPTIONS")
@@ -110,7 +149,7 @@ while IFS= read -r name; do
     fi
     continue
   fi
-  IFS=$'\t' read -r _ mode root_floor root_match_floor body_floor body_match_floor <<< "$row"
+  IFS=$'\t' read -r floor_key mode root_floor root_match_floor body_floor body_match_floor <<< "$row"
   oracle_flag=""
   port_flag=""
   case "$mode" in
@@ -150,10 +189,10 @@ while IFS= read -r name; do
   bm=$(comm -12 "$WORK/host.sorted" "$WORK/port.sorted" | wc -l | tr -d ' ')
   printf '  %-48s %-7s entry %s/%s (floor %s/%s) body %s/%s (floor %s/%s)\n' \
     "$name" "$mode" "$rm" "$rn" "$root_match_floor" "$root_floor" "$bm" "$bn" "$body_match_floor" "$body_floor"
-  if [ "$rn" -lt "$root_floor" ] || [ "$rm" -lt "$root_match_floor" ] || \
-     [ "$bn" -lt "$body_floor" ] || [ "$bm" -lt "$body_match_floor" ]; then
-    echo "  BELOW FLOOR: $name"
-    status=1
+  check_floor "$FLOOR" "$name" "$rn" "$rm" "$bn" "$bm" || status=1
+  if [ -z "$proof_name" ] && [ "$rn" -gt 0 ] && [ "$rm" -gt 0 ] && [ "$bn" -gt 0 ] && [ "$bm" -gt 0 ]; then
+    proof_name="$name"; proof_key="$floor_key"
+    proof_rn="$rn"; proof_rm="$rm"; proof_bn="$bn"; proof_bm="$bm"
   fi
   compared=$((compared + 1))
   entry_nodes=$((entry_nodes + rn)); entry_matched=$((entry_matched + rm))
@@ -240,6 +279,38 @@ check_type_mutation() {
   return 0
 }
 
+# Change exactly one measured field in a temporary copy and run the same
+# comparison as the corpus. Exit 1 and its directional label are both required.
+prove_floor_mutation() {
+  local column="$1" delta="$2" expected="$3" label="$4" rc=0
+  if [ -z "$proof_name" ]; then
+    echo "    FAIL: no fixture has four positive counts for $label"
+    return 1
+  fi
+  if ! check_floor "$FLOOR" "$proof_name" "$proof_rn" "$proof_rm" "$proof_bn" "$proof_bm" > "$WORK/floor-base"; then
+    echo "    FAIL: baseline floor does not match for $label"
+    return 1
+  fi
+  if ! awk -F '\t' -v key="$proof_key" -v col="$column" -v delta="$delta" '
+      BEGIN {OFS="\t"}
+      $1 == key {$col += delta; changed++}
+      {print}
+      END {if (changed != 1) exit 2}
+    ' "$FLOOR" > "$WORK/mutated.floor"; then
+    echo "    FAIL: floor mutation did not change exactly one row for $label"
+    return 1
+  fi
+  check_floor "$WORK/mutated.floor" "$proof_name" "$proof_rn" "$proof_rm" "$proof_bn" "$proof_bm" > "$WORK/floor-proof" || rc=$?
+  if [ "$rc" -eq 1 ] && awk -v expected="$expected: $proof_name" 'index($0, expected) {found=1} END {exit !found}' "$WORK/floor-proof"; then
+    echo "    caught: $label"
+    awk 'NR == 1 {sub(/^  /, ""); print "      decisive: " $0}' "$WORK/floor-proof"
+    return 0
+  fi
+  echo "    FAIL: $label returned $rc without $expected"
+  awk '{print "      " $0}' "$WORK/floor-proof"
+  return 1
+}
+
 echo
 echo '== 4. Mutation proofs on every supported host'
 mutations=0
@@ -280,8 +351,20 @@ prove_mutation 'revert Union generic instantiation to an ordinary class instance
   '    if false && generic_type == @program.types["Union"]?' \
   -- check_type_mutation && caught=$((caught + 1)) || status=1
 mutations=$((mutations + 1))
+for field in entry-oracle entry-matched body-oracle body-matched; do
+  case "$field" in
+    entry-oracle) column=3 ;;
+    entry-matched) column=4 ;;
+    body-oracle) column=5 ;;
+    body-matched) column=6 ;;
+  esac
+  prove_floor_mutation "$column" -1 'RAISE THE FLOOR' "$field floor lowered" && caught=$((caught + 1)) || status=1
+  mutations=$((mutations + 1))
+  prove_floor_mutation "$column" 1 'BELOW FLOOR' "$field floor raised" && caught=$((caught + 1)) || status=1
+  mutations=$((mutations + 1))
+done
 echo "  mutations: $caught/$mutations caught"
-[ "$mutations" -eq 5 ] && [ "$caught" -eq 5 ] || status=1
+[ "$mutations" -eq 13 ] && [ "$caught" -eq 13 ] || status=1
 
 echo
 if [ "$status" -eq 0 ]; then

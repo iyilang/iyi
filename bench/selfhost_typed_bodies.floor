@@ -1,5 +1,5 @@
-# fixture mode entry-oracle entry-matched body-oracle body-matched
-# Measured against the hosted compiler; all four counts are minimums.
+# fixture[@host] mode entry-oracle entry-matched body-oracle body-matched
+# All four counts equal the hosted measurement; a host-specific row overrides the common row.
 sem_bodies_alias_members.iyi	bare	25	25	17	10
 sem_bodies_array_literal_restriction.iyi	bare	8	8	10	10
 sem_bodies_array_new.iyi	bare	8	8	19	12

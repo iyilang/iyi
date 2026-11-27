@@ -620,11 +620,11 @@ fi
 echo '== 5. diamond-chain scaling'
 # One local belongs to one diamond: its stores and load do not span other
 # diamonds. A verified smaller copy checks the generator outside the timing.
-# Each size is run three times and the least figure is kept: the child's CPU
-# time where the host reports it, so other jobs on the machine do not stretch
-# it, and elapsed time elsewhere. The allocation shape starts at 4096: at 2048
-# its 2K run took 0.493 s of CPU on a CI Linux runner, under the 0.5 s a ratio
-# needs to mean anything.
+# Each size is run five times, K and 2K interleaved, and the least figure is
+# kept: the child's CPU time where the host reports it, so other jobs on the
+# machine do not stretch it, and elapsed time elsewhere. The allocation shape
+# starts at 4096: at 2048 its 2K run took 0.493 s of CPU on a CI Linux runner,
+# under the 0.5 s a ratio needs to mean anything.
 if ! "$PY" - "$(native_path "$DRV")" "$(native_path "$WORK")" "${NATIVE_OPT_SCALE_K:-2048}" "${NATIVE_OPT_RELEASE_SCALE_K:-4096}" "${NATIVE_OPT_LOOP_SCALE_K:-2048}" "${NATIVE_OPT_ALLOC_SCALE_K:-4096}" "${NATIVE_OPT_INDEGREE_SCALE_K:-2048}" "${NATIVE_OPT_CALLBACK_SCALE_K:-2048}" <<'PY'
 import os, subprocess, sys, time
 try:
@@ -806,7 +806,7 @@ def child_cpu():
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     return usage.ru_utime + usage.ru_stime
 
-def run(n, verified, repeats=1, tier='default', shape='calls'):
+def prepare(n, tier='default', shape='calls'):
     if tier == 'release':
         path = os.path.join(work, '%s-%d.ir' % (shape, n))
         if shape == 'calls':
@@ -822,6 +822,11 @@ def run(n, verified, repeats=1, tier='default', shape='calls'):
     else:
         path = os.path.join(work, 'scale-%d.ir' % n)
         generate(n, path)
+    return path
+
+def run(n, verified, repeats=1, tier='default', shape='calls', path=None):
+    if path is None:
+        path = prepare(n, tier, shape)
     cmd = [binary, 'run', '--verify-each' if verified else '--no-verify', tier, path]
     least = None
     for _ in range(repeats):
@@ -856,14 +861,37 @@ def run(n, verified, repeats=1, tier='default', shape='calls'):
         if least is None or spent < least:
             least = spent
     return least
+
+ROUNDS = 5
+
+def scaling(k, tier='default', shape='calls'):
+    # K and 2K alternate, the order flipping each round, and each keeps its
+    # least figure. Timed in two blocks, a slow spell on a shared runner fell
+    # on one size alone: a Linux diamond 2K block once read 1.079 s against a
+    # 0.355 s K block, a 3.035 ratio from a pass 30 Linux runs put at 1.97-2.63.
+    small_path = prepare(k, tier, shape)
+    large_path = prepare(2 * k, tier, shape)
+    small = large = None
+    for i in range(ROUNDS):
+        order = ((k, small_path), (2 * k, large_path))
+        for n, path in (order if i % 2 == 0 else order[::-1]):
+            spent = run(n, False, 1, tier, shape, path)
+            if n == k:
+                small = spent if small is None else min(small, spent)
+            else:
+                large = spent if large is None else min(large, spent)
+    return small, large
+
+def method():
+    return '%s, least of %d, interleaved' % ('cpu' if resource else 'elapsed', ROUNDS)
+
 failed = False
 try:
     run(max(8, k // 8), True)
-    small = run(k, False, 3)
-    large = run(2 * k, False, 3)
+    small, large = scaling(k)
     ratio = large / small if small > 0 else float('inf')
-    print('  K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s, least of 3)' %
-          (k, small, 2 * k, large, ratio, 'cpu' if resource else 'elapsed'))
+    print('  K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s)' %
+          (k, small, 2 * k, large, ratio, method()))
     if large < 0.5:
         raise RuntimeError('2K run is under 0.5s; increase NATIVE_OPT_SCALE_K')
     if ratio > 3.0:
@@ -874,11 +902,10 @@ except RuntimeError as exc:
 print('== 6. release call-chain scaling')
 try:
     run(max(8, release_k // 8), True, tier='release')
-    small = run(release_k, False, 3, 'release')
-    large = run(2 * release_k, False, 3, 'release')
+    small, large = scaling(release_k, 'release')
     ratio = large / small if small > 0 else float('inf')
-    print('  release K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s, least of 3)' %
-          (release_k, small, 2 * release_k, large, ratio, 'cpu' if resource else 'elapsed'))
+    print('  release K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s)' %
+          (release_k, small, 2 * release_k, large, ratio, method()))
     if large < 0.5:
         raise RuntimeError('release 2K run is under 0.5s; increase NATIVE_OPT_RELEASE_SCALE_K')
     if ratio > 3.0:
@@ -890,12 +917,10 @@ for shape in ('sequential-loops', 'nested-loops'):
     print('== 6. release %s scaling' % shape)
     try:
         run(max(8, loop_k // 8), True, tier='release', shape=shape)
-        small = run(loop_k, False, 3, 'release', shape)
-        large = run(2 * loop_k, False, 3, 'release', shape)
+        small, large = scaling(loop_k, 'release', shape)
         ratio = large / small if small > 0 else float('inf')
-        print('  %s K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s, least of 3)' %
-              (shape, loop_k, small, 2 * loop_k, large, ratio,
-               'cpu' if resource else 'elapsed'))
+        print('  %s K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s)' %
+              (shape, loop_k, small, 2 * loop_k, large, ratio, method()))
         if large < 0.5:
             raise RuntimeError('%s 2K run is under 0.5s; increase NATIVE_OPT_LOOP_SCALE_K' % shape)
         if ratio > 3.0:
@@ -906,12 +931,10 @@ for shape in ('sequential-loops', 'nested-loops'):
 print('== 6. release allocation-site scaling')
 try:
     run(max(8, alloc_k // 8), True, tier='release', shape='allocations')
-    small = run(alloc_k, False, 3, 'release', 'allocations')
-    large = run(2 * alloc_k, False, 3, 'release', 'allocations')
+    small, large = scaling(alloc_k, 'release', 'allocations')
     ratio = large / small if small > 0 else float('inf')
-    print('  allocations K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s, least of 3)' %
-          (alloc_k, small, 2 * alloc_k, large, ratio,
-           'cpu' if resource else 'elapsed'))
+    print('  allocations K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s)' %
+          (alloc_k, small, 2 * alloc_k, large, ratio, method()))
     if large < 0.5:
         raise RuntimeError('allocation 2K run is under 0.5s; increase NATIVE_OPT_ALLOC_SCALE_K')
     if ratio > 3.0:
@@ -959,11 +982,10 @@ except RuntimeError as exc:
 print('== 6. release callback scaling')
 try:
     run(max(8, callback_k // 8), True, tier='release', shape='callbacks')
-    small = run(callback_k, False, 3, 'release', 'callbacks')
-    large = run(2 * callback_k, False, 3, 'release', 'callbacks')
+    small, large = scaling(callback_k, 'release', 'callbacks')
     ratio = large / small if small > 0 else float('inf')
-    print('  callbacks K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s, least of 3)' %
-          (callback_k, small, 2 * callback_k, large, ratio, 'cpu' if resource else 'elapsed'))
+    print('  callbacks K=%d %.3fs, 2K=%d %.3fs, ratio %.3f (%s)' %
+          (callback_k, small, 2 * callback_k, large, ratio, method()))
     if large < 0.5:
         raise RuntimeError('callback 2K run is under 0.5s; increase NATIVE_OPT_CALLBACK_SCALE_K')
     if ratio > 3.0:

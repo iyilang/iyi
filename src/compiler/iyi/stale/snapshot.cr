@@ -454,9 +454,27 @@ module Iyi::Stale
             )
           end
         end
+
+        if error = record_error(rec, snapshot.target)
+          return ImportResult.new(
+            success: false,
+            error: "record refused for test #{rec.test}: #{error}",
+            snapshot: nil,
+            imported_path: nil
+          )
+        end
       end
 
-      # 7. Namespace-specific validation
+      # 7. Namespace-specific validation (D9: master and run:<id>, no other)
+      unless importable_namespace?(namespace)
+        return ImportResult.new(
+          success: false,
+          error: "namespace '#{namespace}' is neither master nor run:<id>; only those two are imported",
+          snapshot: nil,
+          imported_path: nil
+        )
+      end
+
       # Case A: master namespace requires FILE.provenance.json sidecar and master provenance
       if namespace == "master"
         prov_path = ctx.provenance_file || "#{file}.provenance.json"

@@ -13,6 +13,8 @@
 #     rg9                         Run RG9 deterministic CallPathFp check
 #     master-self-check           Import master snapshot and verify against git diff
 #     test-master-path            Verify master snapshot export, API fetch, and self-check
+#     stale-path [LIST]           The PATH a Windows step gives iyi where receipts cross runners
+#     pinned-iyi ARGS...          Run $IYI ARGS under that PATH
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,6 +51,47 @@ else
   IYI="${IYI:-$REPO/bin/iyi}"
   [ -x "$IYI" ] || IYI="$REPO/.build/iyi"
 fi
+
+# The PATH a Windows step gives iyi where receipts cross runners. LinkFp keys
+# every CHILD_ENV value, PATH among them (STALE_TESTS_DESIGN.md §4), and two
+# windows-2025 runners of one run can boot image versions whose PATH differs
+# in tools no build or test uses: in run 46018941138 the producer's had Ruby
+# 3.3.13 and Temurin 17.0.21-9 where the fresh runner's had 3.3.14 and
+# 17.0.21-100000002, and all 17 exported receipts missed under equal profiles.
+# Only the system's, Visual Studio's, the Windows SDK's and Git's directories
+# are kept, in PATH's order. Elsewhere the job's PATH is its container's or
+# its machine's own, and passes unchanged.
+stale_path() {
+  local list="${1-$PATH}"
+  if [ "$WINDOWS" -eq 0 ]; then
+    printf '%s\n' "$list"
+    return 0
+  fi
+  local -
+  local kept="" entry IFS=:
+  set -f
+  shopt -s nocasematch
+  for entry in $list; do
+    case "$entry" in
+      /[a-z]/Windows|/[a-z]/Windows/*) ;;
+      "/"[a-z]"/Program Files/Microsoft Visual Studio/"*|"/"[a-z]"/Program Files (x86)/Microsoft Visual Studio/"*) ;;
+      "/"[a-z]"/Program Files (x86)/Windows Kits/"*|"/"[a-z]"/Program Files (x86)/Microsoft SDKs/"*) ;;
+      "/"[a-z]"/Program Files/Git/"*|/usr/bin|/mingw64/bin|/bin) ;;
+      *) continue ;;
+    esac
+    kept="${kept:+$kept:}$entry"
+  done
+  shopt -u nocasematch
+  printf '%s\n' "$kept"
+}
+
+# The compiler, run under stale_path's PATH by this shell, so every run that
+# records or reads receipts across runners hands iyi the same PATH string.
+pinned_iyi() {
+  local pinned
+  pinned="$(stale_path)"
+  PATH="$pinned" "$IYI" "$@"
+}
 
 # 1. assert-export-env: verifies the export step environment holds no secrets or token
 assert_export_env() {
@@ -283,7 +326,8 @@ for t in tests:
         hit_ids.add(tid)
         continue
 
-    if differs and allow_profile_refusal:
+    # A refusal is its profile's alone: one whose build differs too names that instead.
+    if differs and allow_profile_refusal and t.get('reason') == 'profile changed':
         refused[tid] = (r_fp, t_fp)
         continue
 
@@ -294,8 +338,8 @@ for t in tests:
     reason = t.get('reason', '')
     if differs:
         reason = f'{reason} profile differs (receipt {r_fp}, runner {t_fp})'.strip()
-    # An empty reason says nothing: a build that failed and a clean miss both leave it empty.
-    # Say what the runner saw, so the next failure can be read without a rerun.
+    # The reason names what differed from the receipt, not how the run went:
+    # say what the runner saw, so the next failure can be read without a rerun.
     detail = ' '.join([
         f'status={t.get(\"status\", \"\")!r}',
         f'cached={cached}',
@@ -478,8 +522,15 @@ for tid, c_test in cached_tests.items():
         refused_checked += 1
         if c_test.get('reuse') != 'miss' or c_test.get('cached') is not False:
             disagreements.append(f'{tid_str}: profile refusal was not an uncached miss')
-        if c_test.get('reason') or c_test.get('blocked') is True:
-            disagreements.append(f\"{tid_str}: profile refusal has an execution reason or blocker ({c_test.get('reason')}, blocked={c_test.get('blocked')})\")
+        # Every miss names its reason; a refusal's is its profile alone, so a
+        # build that differs as well is not hidden behind the refusal.
+        refusal_reason = c_test.get('reason')
+        if not refusal_reason:
+            disagreements.append(f'{tid_str}: profile refusal names no reason')
+        elif refusal_reason != 'profile changed':
+            disagreements.append(f'{tid_str}: profile refusal names a reason other than its profile ({refusal_reason})')
+        if c_test.get('blocked') is True:
+            disagreements.append(f'{tid_str}: profile refusal has a blocker')
 
     f_test = fresh_tests.get(tid)
     if not f_test:
@@ -1460,7 +1511,7 @@ producer_record = {'test': identity, 'profile': profile_a, 'build': {'build': 'h
                    'trace': {'observations': observations}}
 audit_record = changed(producer_record, profile=profile_b)
 refusal_test = {'test': identity, 'status': 'pass', 'cached': False, 'reuse': 'miss',
-                'profile': 'pB', 'portable_build': 'hash1'}
+                'reason': 'profile changed', 'profile': 'pB', 'portable_build': 'hash1'}
 fresh_test = changed(refusal_test)
 profile_snapshot = write_fixture('profile_producer', {'namespace': 'run:100', 'records': [producer_record]})
 refusal_json = write_fixture('profile_refusal', {'tests': [refusal_test]})
@@ -1481,6 +1532,8 @@ assert_negative('assert-hits', ['--json', equal_miss, '--snapshot', profile_snap
                               '--allow-profile-refusal'], 'did not hit')
 assert_negative('assert-hits', ['--json', missing_profile_miss, '--snapshot', missing_profile_snap,
                               '--allow-profile-refusal'], 'did not hit')
+assert_negative('assert-hits', ['--json', write_fixture('profile_refusal_link', {'tests': [changed(refusal_test, reason='link changed')]}),
+                              '--snapshot', profile_snapshot, '--allow-profile-refusal'], 'reason=link changed profile differs')
 
 # One run can contain both a valid hit and a profile refusal.
 other_identity = {'root': 'src', 'path': 'b.iyi'}
@@ -1555,9 +1608,13 @@ shadow_negative('refused_tainted', [changed(refusal_test, reuse='not reusable')]
 shadow_negative('refused_cached_miss', [changed(refusal_test, cached=True)], [fresh_test],
                 [producer_record], [audit_record], 'profile refusal was not an uncached miss')
 shadow_negative('refused_incomplete', [changed(refusal_test, reason='trace incomplete')], [fresh_test],
-                [producer_record], [audit_record], 'profile refusal has an execution reason or blocker')
+                [producer_record], [audit_record], 'profile refusal names a reason other than its profile')
+shadow_negative('refused_link', [changed(refusal_test, reason='link changed')], [fresh_test],
+                [producer_record], [audit_record], 'profile refusal names a reason other than its profile')
+shadow_negative('refused_unnamed', [{k: v for k, v in refusal_test.items() if k != 'reason'}], [fresh_test],
+                [producer_record], [audit_record], 'profile refusal names no reason')
 shadow_negative('refused_blocked', [changed(refusal_test, blocked=True)], [fresh_test],
-                [producer_record], [audit_record], 'profile refusal has an execution reason or blocker')
+                [producer_record], [audit_record], 'profile refusal has a blocker')
 same_parts = changed(audit_record, profile=changed(profile_a, fp='pB'))
 shadow_negative('refused_same_parts', [refusal_test], [fresh_test], [producer_record], [same_parts],
                 'profile fp differs but no recorded component does')
@@ -1588,6 +1645,29 @@ shadow_negative('refused_missing_build', [refusal_test], [fresh_test], [producer
                 [changed(audit_record, build={})], 'portable Build mismatch in snapshots')
 shadow_negative('refused_missing_observations', [refusal_test], [fresh_test], [producer_record],
                 [changed(audit_record, trace={})], 'ordered trace observation mismatch')
+
+# The PATH a Windows step gives iyi where receipts cross runners: what a runner
+# image brings drops out, and the system's, Visual Studio's, the SDK's and
+# Git's directories stay in their order. Elsewhere PATH passes unchanged.
+kept_dirs = ['/mingw64/bin', '/usr/bin',
+             '/c/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.52.37025/bin/HostX64/x64',
+             '/c/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64',
+             '/c/Windows/system32', '/c/WINDOWS', '/c/Program Files/Git/cmd']
+def image_path(ruby, jdk):
+    return ':'.join(kept_dirs[:3] + [f'/c/hostedtoolcache/windows/Ruby/{ruby}/x64/bin', '/c/Users/runneradmin/bin',
+                                     f'/c/hostedtoolcache/windows/Java_Temurin-Hotspot_jdk/{jdk}/x64/bin',
+                                     '/d/a/_temp/crystal-1.21.0-true-undefined/bin', '/c/Program Files/R/R-4.6.2/bin/x64',
+                                     '', '/c/hostedtoolcache/windows/Python/3.14.10/x64']
+                    + kept_dirs[3:])
+producer_path = image_path('3.3.13', '17.0.21-9')
+pinned = run_cmd('stale-path', [producer_path])
+assert pinned.returncode == 0, pinned.stdout + pinned.stderr
+if sys.platform == 'win32':
+    assert pinned.stdout == ':'.join(kept_dirs) + '\n', pinned.stdout
+    fresh_pinned = run_cmd('stale-path', [image_path('3.3.14', '17.0.21-100000002')])
+    assert fresh_pinned.stdout == pinned.stdout, fresh_pinned.stdout
+else:
+    assert pinned.stdout == producer_path + '\n', pinned.stdout
 
 # --- 3. git-diff-check cases ---
 # ALWAYS pass --changed-files FILE (empty okay) + --repo empty dir
@@ -1866,7 +1946,7 @@ master_self_check() {
     mkdir -p "$out_dir"
   fi
 
-  "$IYI" test --cached --json \
+  pinned_iyi test --cached --json \
     --import-index "master=$snapshot" \
     "${tests[@]}" > "$out_json"
 
@@ -1940,7 +2020,12 @@ if not os.path.exists(sample_file):
     samples = sorted(glob.glob(os.path.join(repo, 'samples/iyi/*.iyi')))
     sample_file = samples[0]
 
-res_exp = subprocess.run([iyi, 'test', '--fresh', '--export-index', f'master={cand_export_path}', sample_file],
+# The producer's export, and every run below that must hit or refuse what it
+# exported, go through this script's own PATH pin, as CI's do: a run under
+# another PATH misses with "link changed" and proves nothing.
+pinned_iyi = [os.environ.get('STALE_BASH', 'bash'), stale_ci, 'pinned-iyi']
+export_env['IYI'] = iyi
+res_exp = subprocess.run(pinned_iyi + ['test', '--fresh', '--export-index', f'master={cand_export_path}', sample_file],
                          cwd=CWD, env=export_env, capture_output=True, text=True)
 if res_exp.returncode != 0 or not os.path.exists(cand_export_path):
     print(f'test-master-path FAILED: producer export failed (code {res_exp.returncode}):\n{res_exp.stderr}', file=sys.stderr)
@@ -2371,6 +2456,7 @@ try:
 
     test_env = os.environ.copy()
     test_env['IYI_CACHE_DIR'] = CACHE
+    test_env['IYI'] = iyi
 
     # 6.1 Pollute cache with fresh run
     res_fresh = subprocess.run([iyi, 'test', '--fresh', sample_file],
@@ -2508,7 +2594,7 @@ try:
     if os.path.exists(cache_tests_v1):
         shutil.rmtree(cache_tests_v1)
 
-    res_p7_pop = subprocess.run([iyi, 'test', '--cached', '--json',
+    res_p7_pop = subprocess.run(pinned_iyi + ['test', '--cached', '--json',
                                  '--import-index', f'master={phase6_master}',
                                  sample_file],
                                 cwd=CWD, env=test_env, capture_output=True, text=True)
@@ -2528,7 +2614,7 @@ try:
         sys.exit(1)
 
     # 7.2: import the fetched empty snapshot into the SAME cache, require exit 0, cached 0 and no test with source master
-    res_empty_test = subprocess.run([iyi, 'test', '--cached', '--json',
+    res_empty_test = subprocess.run(pinned_iyi + ['test', '--cached', '--json',
                                      '--import-index', f'master={phase7_fetched}',
                                      sample_file],
                                     cwd=CWD, env=test_env, capture_output=True, text=True)
@@ -2613,7 +2699,7 @@ try:
     with open(forged_sidecar, 'w', encoding='utf-8') as f:
         json.dump(sidecar_copy, f, indent=2)
 
-    res_forged = subprocess.run([iyi, 'test', '--cached', '--json',
+    res_forged = subprocess.run(pinned_iyi + ['test', '--cached', '--json',
                                  '--import-index', f'master={forged_file}',
                                  sample_file],
                                 cwd=CWD, env=test_env, capture_output=True, text=True)
@@ -2681,6 +2767,12 @@ case "$COMMAND" in
   test-offline-vectors)
     bash "$REPO/bench/test_offline_vectors.sh" "$@"
     ;;
+  stale-path)
+    stale_path "$@"
+    ;;
+  pinned-iyi)
+    pinned_iyi "$@"
+    ;;
   help|--help|-h)
     echo "Usage: $0 <command> [options]"
     echo "Commands:"
@@ -2694,6 +2786,8 @@ case "$COMMAND" in
     echo "  rg9                         Run RG9 deterministic CallPathFp check"
     echo "  master-self-check           Import master snapshot and verify against git diff"
     echo "  test-master-path            Verify master snapshot export, API fetch, and self-check"
+    echo "  stale-path [LIST]           The PATH a Windows step gives iyi where receipts cross runners"
+    echo "  pinned-iyi ARGS...          Run \$IYI ARGS under that PATH"
     echo "  test-offline-pebble         Verify offline Pebble dependency acquisition gate"
     echo "  test-offline-vectors        Verify offline vector intake gate and controls"
     ;;

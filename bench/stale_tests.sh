@@ -1966,10 +1966,276 @@ expect_eq "$(printf '%s' "$row59_contradicted" | json_cached)" 0 "a contradicted
 expect_eq "$(printf '%s' "$row59_contradicted" | json_test read_test.iyi check)" compiler "a contradicted receipt is checked by the compiler"
 expect_contains "$(printf '%s' "$row59_contradicted" | json_test read_test.iyi check_reason)" "a contradicted receipt validates" "the check names the contradiction"
 
+# Mutation: drop `Snapshot.record_error` from `validate_file`, or the namespace
+# check from the runner: the forged snapshot or the `dev` namespace imports and
+# this row fails.
+step 60 "only a master or run:<id> snapshot whose records check out is imported; imports are listed and cleared"
+r60="$WORK/r60"
+mkdir -p "$r60"
+cat > "$r60/a_test.iyi" <<'IYI'
+assert 1 + 1 == 2
+IYI
+r60_id=606060
+rm -rf "$CACHE/tests-v1"
+(cd "$r60" && IYI_CI_PRODUCER=1 GITHUB_RUN_ID="$r60_id" "$IYI" test --fresh --json --export-index "run:$r60_id=$r60/good.json" .) >/dev/null
+python3 - "$r60/good.json" "$r60/forged.json" "$r60/escape.json" <<'PY'
+import json, sys
+good, forged, escape = sys.argv[1:4]
+doc = json.load(open(good))
+if len(doc["records"]) != 1:
+    sys.exit("stale_tests: row 60 expected one exported record, got %d" % len(doc["records"]))
+doc["records"][0]["signature"] = "../../../../.bash_aliases"
+json.dump(doc, open(forged, "w"))
+doc = json.load(open(good))
+doc["records"][0]["trace"]["observations"].append(
+    {"task": 0, "kind": "file_read", "root": "src", "path": "../../../../dev/zero", "answer": "0" * 64})
+json.dump(doc, open(escape, "w"))
+PY
+rm -rf "$CACHE/tests-v1"
+set +e
+row60_ns="$(cd "$r60" && "$IYI" test --cached --json --import-index "dev=$r60/good.json" . 2>&1)"
+row60_ns_status=$?
+row60_forged="$(cd "$r60" && GITHUB_RUN_ID="$r60_id" "$IYI" test --cached --json --import-index "run:$r60_id=$r60/forged.json" . 2>&1)"
+row60_forged_status=$?
+row60_escape="$(cd "$r60" && GITHUB_RUN_ID="$r60_id" "$IYI" test --cached --json --import-index "run:$r60_id=$r60/escape.json" . 2>&1)"
+row60_escape_status=$?
+set -e
+expect_eq "$row60_ns_status" 1 "a namespace other than master or run:<id> is refused"
+expect_contains "$row60_ns" "'dev' is not a namespace a snapshot is imported into"
+expect_eq "$row60_forged_status" 1 "a record whose signature names a path is refused"
+expect_contains "$row60_forged" "signature is not 64 lowercase hex characters"
+expect_eq "$row60_escape_status" 1 "a record whose observation leaves its root is refused"
+expect_contains "$row60_escape" "record refused for test"
+[ ! -e "$(dirname "$WORK")/.bash_aliases" ] || fail "a forged signature wrote outside the store"
+expect_eq "$(cd "$r60" && "$IYI" test --list-imports)" "no imported receipts" "a refused import stores nothing"
+row60_hit="$(cd "$r60" && GITHUB_RUN_ID="$r60_id" "$IYI" test --cached --json --import-index "run:$r60_id=$r60/good.json" .)"
+expect_eq "$(printf '%s' "$row60_hit" | json_cached)" 1 "the snapshot whose records check out is imported and hit"
+expect_contains "$(cd "$r60" && "$IYI" test --list-imports)" "run:$r60_id: 1 receipts for " "the import is listed"
+(cd "$r60" && "$IYI" test --cached --list-imports --json) | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+imports = doc["imports"]
+if len(imports) != 1 or imports[0]["namespace"] != sys.argv[1] or imports[0]["records"] != 1 or not imports[0]["used"]:
+    sys.exit("stale_tests: row 60 --list-imports --json: %r" % doc)
+' "run:$r60_id" || fail "--list-imports --json does not describe the one import"
+set +e
+row60_mixed="$(cd "$r60" && "$IYI" test --list-imports --fresh 2>&1)"
+set -e
+expect_contains "$row60_mixed" "cannot pass both --list-imports and --fresh"
+expect_eq "$(cd "$r60" && "$IYI" test --clear-imports)" "cleared 1 imported snapshot" "--clear-imports drops the import"
+expect_eq "$(cd "$r60" && "$IYI" test --list-imports)" "no imported receipts" "nothing is imported after --clear-imports"
+
+# Mutation: let `Store#revoke` swallow a write error, or drop its fast-record
+# delete and the runner's `forget_fast` on a non-pass: the failing test keeps
+# its fast record, or is served from a receipt that should have been revoked.
+step 61 "a failing test is never served next run, even when its receipt cannot be marked"
+r61="$WORK/r61"
+mkdir -p "$r61"
+cat > "$r61/read_test.iyi" <<'IYI'
+import std/file::{File}
+import std/env::{ENV}
+value = File.read(ENV["R61_INPUT"])
+assert value == "before"
+IYI
+# Row 59's runtime, whose file_read observer is dropped: the input change is
+# hidden, so the receipt still validates when the test fails.
+r61_run() { (cd "$r61" && R61_INPUT="$r61/input.txt" IYI_PATH="$r59/runtime/src" "$IYI" test "$@"); }
+r61_count() { find "$CACHE/tests-v1/$1" -type f -name "${2:-*}" 2>/dev/null | wc -l | tr -d ' '; }
+printf 'before' > "$r61/input.txt"
+rm -rf "$CACHE/tests-v1"
+r61_run --cached --json read_test.iyi >/dev/null
+expect_eq "$(r61_count fast '*.json')" 1 "the recording run leaves a fast record"
+printf 'after' > "$r61/input.txt"
+set +e
+r61_run --fresh --json read_test.iyi >/dev/null
+row61_fail_status=$?
+set -e
+expect_eq "$row61_fail_status" 1 "the test fails"
+expect_eq "$(r61_count fast '*.json')" 0 "a test that did not pass leaves no fast record"
+if [ "$WINDOWS" -eq 1 ]; then
+  platform_skips="${platform_skips:+$platform_skips; }row 61: an unwritable receipt directory is not made on Windows"
+elif [ "$(id -u)" = 0 ]; then
+  platform_skips="${platform_skips:+$platform_skips; }row 61: root writes into a directory without write permission"
+else
+  printf 'before' > "$r61/input.txt"
+  rm -rf "$CACHE/tests-v1"
+  r61_run --cached --json read_test.iyi >/dev/null
+  r61_dir="$(find "$CACHE/tests-v1/records" -mindepth 1 -maxdepth 1 -type d)"
+  printf 'after' > "$r61/input.txt"
+  chmod 500 "$r61_dir"
+  set +e
+  r61_run --fresh --json read_test.iyi >/dev/null 2>&1
+  row61_ro_status=$?
+  set -e
+  chmod 700 "$r61_dir"
+  expect_eq "$row61_ro_status" 1 "the test fails while its receipt cannot be marked"
+  expect_eq "$(r61_count markers)" 1 "a receipt the store cannot mark leaves the test's contradiction marker"
+  expect_eq "$(r61_count fast '*.json')" 0 "and no fast record"
+  set +e
+  row61_after="$(r61_run --cached --json read_test.iyi)"
+  set -e
+  expect_eq "$(printf '%s' "$row61_after" | json_cached)" 0 "the receipt the store could not mark is not served"
+
+  printf 'before' > "$r61/input.txt"
+  rm -rf "$CACHE/tests-v1"
+  r61_run --cached --json read_test.iyi >/dev/null
+  r61_dir="$(find "$CACHE/tests-v1/records" -mindepth 1 -maxdepth 1 -type d)"
+  printf 'after' > "$r61/input.txt"
+  chmod 500 "$r61_dir" "$CACHE/tests-v1/markers"
+  set +e
+  row61_stop="$(r61_run --fresh --json read_test.iyi 2>&1)"
+  row61_stop_status=$?
+  set -e
+  chmod 700 "$r61_dir" "$CACHE/tests-v1/markers"
+  expect_eq "$row61_stop_status" 1 "a run that can neither mark the receipt nor write the marker stops"
+  expect_contains "$row61_stop" "nor write its contradiction marker" "and says why"
+fi
+
+# Mutation: write the portable twin whatever the producer flag, or open the
+# trace channel with O_CREAT alone: the local record holds plain digests, or
+# the link's target receives the trace.
+step 62 "the store is its user's, a local record keeps no plain twin, and the trace channel follows no link"
+r62="$WORK/r62"
+mkdir -p "$r62"
+cat > "$r62/env_test.iyi" <<'IYI'
+import std/env::{ENV}
+assert ENV["R62_VALUE"] == "kept-under-the-key"
+IYI
+r62_twins() {
+  python3 - "$CACHE/tests-v1/records" <<'PY'
+import json, os, sys
+count = 0
+for directory, _, names in os.walk(sys.argv[1]):
+    for name in names:
+        if name.endswith(".json"):
+            count += 1 if json.load(open(os.path.join(directory, name))).get("portable_twin") else 0
+print(count)
+PY
+}
+rm -rf "$CACHE/tests-v1"
+(cd "$r62" && R62_VALUE=kept-under-the-key "$IYI" test --fresh --json env_test.iyi) >/dev/null
+expect_eq "$(r62_twins)" 0 "a local record written outside a CI producer has no portable twin"
+(cd "$r62" && IYI_CI_PRODUCER=1 R62_VALUE=kept-under-the-key "$IYI" test --fresh --json env_test.iyi) >/dev/null
+expect_eq "$(r62_twins)" 1 "a CI producer's record has the twin export needs"
+cat > "$r62/channel.iyi" <<'IYI'
+puts "ran"
+IYI
+"$IYI" build -Diyi_observe -o "$r62/channel" "$r62/channel.iyi"
+if [ "$WINDOWS" -eq 1 ]; then
+  platform_skips="${platform_skips:+$platform_skips; }row 62: modes and symbolic links are not checked on Windows"
+else
+  python3 - "$CACHE/tests-v1" <<'PY' || fail "the store is not its user's alone"
+import os, stat, sys
+root = sys.argv[1]
+bad = []
+if stat.S_IMODE(os.stat(root).st_mode) != 0o700:
+    bad.append("%s %o" % (root, stat.S_IMODE(os.stat(root).st_mode)))
+for directory, _, names in os.walk(os.path.join(root, "records")):
+    for name in names:
+        mode = stat.S_IMODE(os.stat(os.path.join(directory, name)).st_mode)
+        if mode != 0o600:
+            bad.append("%s %o" % (name, mode))
+if bad:
+    sys.exit("stale_tests: row 62: " + ", ".join(bad))
+PY
+  : > "$r62/target"
+  ln -s "$r62/target" "$r62/link"
+  expect_eq "$(IYI_OBSERVE="$r62/link" "$r62/channel")" ran "the program runs when its channel is a link"
+  [ ! -s "$r62/target" ] || fail "the trace channel followed a symbolic link"
+  [ -L "$r62/link" ] || fail "the trace channel replaced the symbolic link"
+  expect_eq "$(IYI_OBSERVE="$r62/made.bin" "$r62/channel")" ran "the program runs with a channel no runner made"
+  python3 -c 'import os, stat, sys; st = os.stat(sys.argv[1]); sys.exit(0 if stat.S_IMODE(st.st_mode) == 0o600 and st.st_size > 0 else "stale_tests: row 62: %o, %d bytes" % (stat.S_IMODE(st.st_mode), st.st_size))' "$r62/made.bin" \
+    || fail "a channel the program creates is not mode 0600 with its trace"
+fi
+
+# Mutation: pass no `run_started` to `Trace.parse`: the racy input records a
+# receipt and this row fails.
+step 63 "a run input modified within the clock's resolution of the run is not reusable"
+r63="$WORK/r63"
+mkdir -p "$r63"
+printf 'fixed' > "$r63/input.txt"
+cat > "$r63/racy_test.iyi" <<'IYI'
+import std/file::{File}
+import std/env::{ENV}
+assert File.read(ENV["R63_INPUT"]) == "fixed"
+IYI
+r63_run() { (cd "$r63" && R63_INPUT="$r63/input.txt" "$IYI" test "$@"); }
+r63_touch() { python3 -c 'import os, sys, time; t = time.time() + float(sys.argv[2]); os.utime(sys.argv[1], (t, t))' "$r63/input.txt" "$1"; }
+rm -rf "$CACHE/tests-v1"
+r63_touch 3600
+row63_racy="$(r63_run --cached --json racy_test.iyi)"
+expect_eq "$(printf '%s' "$row63_racy" | json_test racy_test.iyi reuse)" "not reusable" "a fixture stamped within the run's tick is not reusable"
+expect_contains "$(printf '%s' "$row63_racy" | json_test racy_test.iyi reason)" "racy run input" "and the reason says so"
+r63_touch -3600
+row63_old="$(r63_run --cached --json racy_test.iyi)"
+expect_eq "$(printf '%s' "$row63_old" | json_test racy_test.iyi reuse)" miss "a fixture an hour old records a receipt"
+row63_hit="$(r63_run --cached --json racy_test.iyi)"
+expect_eq "$(printf '%s' "$row63_hit" | json_cached)" 1 "and the next run hits"
+
+# Mutation: drop the name filter from `Store#blockers`: the temp file is parsed
+# and the run fails.
+step 64 "a temp file an interrupted write left among masks is passed over; a corrupt mask stops the run and names itself"
+r64_hex="$(python3 -c 'print("c" * 64)')"
+printf '{"te' > "$CACHE/tests-v1/masks/$r64_hex.tmp.1.abcd"
+row64_tmp="$(r63_run --cached --json racy_test.iyi)"
+expect_eq "$(printf '%s' "$row64_tmp" | json_cached)" 1 "a partial mask write does not stop the run"
+printf '{"te' > "$CACHE/tests-v1/masks/$r64_hex"
+set +e
+row64_corrupt="$(r63_run --cached --json racy_test.iyi 2>&1)"
+row64_corrupt_status=$?
+set -e
+rm -f "$CACHE/tests-v1/masks/$r64_hex" "$CACHE/tests-v1/masks/$r64_hex.tmp.1.abcd"
+expect_eq "$row64_corrupt_status" 1 "a mask that does not parse stops the run"
+expect_contains "$row64_corrupt" "cannot read the mask " "the message names the mask"
+expect_contains "$row64_corrupt" "$r64_hex" "the message names the file"
+expect_contains "$row64_corrupt" "delete this file to go on" "the message says how to recover"
+
+# Run 46018941138's Windows fresh-runner audit printed `reason=` for each of
+# its 17 misses: a miss named its cause only under `--explain`. A fresh runner
+# here is the store emptied under the same cache path, as on CI, where argv
+# (the scratch path under the store) is the same on both runners.
+# Mutation: leave a recorded miss's `reason` nil (runner.cr, the pass that
+# records a receipt): the unnamed check fails. Mutation: drop PATH from
+# `BuildInputs::CHILD_ENV`: the import under another PATH hits.
+step 65 "every test a run does not serve names why; an import under another PATH misses as a link change"
+r65="$WORK/r65"
+mkdir -p "$r65"
+cat > "$r65/pass_test.iyi" <<'IYI'
+assert 1 + 1 == 2
+IYI
+cat > "$r65/fail_test.iyi" <<'IYI'
+assert 1 + 1 == 3
+IYI
+cat > "$r65/build_test.iyi" <<'IYI'
+assert no_such_def(1) == 2
+IYI
+r65_id=656565
+r65_import=(--cached --json --import-index "run:$r65_id=$r65/run.json" .)
+rm -rf "$CACHE/tests-v1"
+set +e
+row65_fresh="$(cd "$r65" && IYI_CI_PRODUCER=1 GITHUB_RUN_ID="$r65_id" "$IYI" test --fresh --json --export-index "run:$r65_id=$r65/run.json" .)"
+rm -rf "$CACHE/tests-v1"
+row65_other="$(cd "$r65" && PATH="/stale-row65-elsewhere:$PATH" GITHUB_RUN_ID="$r65_id" "$IYI" test "${r65_import[@]}")"
+rm -rf "$CACHE/tests-v1"
+row65_same="$(cd "$r65" && GITHUB_RUN_ID="$r65_id" "$IYI" test "${r65_import[@]}")"
+set -e
+for row65_doc in "$row65_fresh" "$row65_other" "$row65_same"; do
+  printf '%s' "$row65_doc" | python3 -c '
+import json, os, sys
+unnamed = [os.path.basename(t["file"]) for t in json.load(sys.stdin)["tests"] if not t["cached"] and not t.get("reason")]
+sys.exit("unnamed: " + ", ".join(unnamed) if unnamed else 0)
+' || fail "a test the run did not serve names no reason"
+done
+expect_eq "$(printf '%s' "$row65_fresh" | json_test pass_test.iyi reason)" "fresh run" "a --fresh run says so"
+expect_eq "$(printf '%s' "$row65_fresh" | json_test fail_test.iyi reason)" "fresh run" "and says so of a failing test"
+expect_eq "$(printf '%s' "$row65_fresh" | json_test build_test.iyi reason)" "does not build" "a test that does not build says so"
+expect_eq "$(printf '%s' "$row65_other" | json_test pass_test.iyi reason)" "link changed" "an exported receipt read under another PATH misses as a link change"
+expect_eq "$(printf '%s' "$row65_same" | json_test pass_test.iyi reuse)" hit "and read under the producer's PATH it hits"
+
 if [ "$FAILURES" -ne 0 ]; then
   echo "stale_tests: $FAILURES failing check(s), collected because STALE_TESTS_KEEP_GOING=1:" >&2
   printf '%s\n' "${FAILED_CHECKS[@]}" >&2
   exit 1
 fi
-echo "stale_tests PASSED: $rows_run/59 rows executed here; separate specs or gates: $rows_external"
+echo "stale_tests PASSED: $rows_run/65 rows executed here; separate specs or gates: $rows_external"
 echo "Platform skips: ${platform_skips:-none}"

@@ -343,5 +343,65 @@ module Iyi::Stale
       @version : Int32 = FORMAT_VERSION,
     )
     end
+
+    # D9: the two namespaces a snapshot is imported into. `master` holds the
+    # receipts of master pushes and `run:<id>` those of one workflow run. Any
+    # other name is refused, so an import cannot add a namespace of its own
+    # that every later `--cached` run reads.
+    def self.importable_namespace?(namespace : String) : Bool
+      return true if namespace == "master"
+      return false unless namespace.starts_with?("run:")
+      id = namespace.lchop("run:")
+      !id.empty? && id.each_char.all?(&.ascii_number?)
+    end
+
+    # Why an imported record may not be used, or nil. A record reaches store
+    # files through its signature (a mask is named by it) and the files replay
+    # reads through its observation paths, so neither is used until it is
+    # checked: the record is a portable, uncontradicted pass's; every digest is
+    # one `Stale.hex` writes; the trace fingerprint and the signature are the
+    # ones its fields give; and no path leaves its root.
+    def self.record_error(rec : Receipt, target : String) : String?
+      return "mode is '#{rec.mode}', not 'portable'" unless rec.portable?
+      return "the record is contradicted" if rec.contradicted
+      build = rec.build
+      {
+        "signature" => rec.signature, "build.build" => build.build, "build.toolchain" => build.toolchain,
+        "build.behavior" => build.behavior, "build.callpath" => build.callpath, "build.link" => build.link,
+        "build.cenv" => build.cenv, "profile.fp" => rec.profile.fp, "trace.fp" => rec.trace.fp,
+      }.each do |field, value|
+        return "#{field} is not 64 lowercase hex characters" unless Stale.hex64?(value)
+      end
+      unless rec.trace.fp == Stale.hex(Trace.compute_trace_fp(rec.trace.observations))
+        return "trace.fp is not the fingerprint of its observations"
+      end
+      unless rec.signature == Stale.hex(Receipt.compute_signature(rec.test, build.build, rec.profile.fp, rec.trace.fp))
+        return "signature is not the one its test, build, profile and trace give"
+      end
+      windows = target.includes?("windows")
+      rec.trace.observations.each do |obs|
+        if error = observation_path_error(obs, windows)
+          return "#{obs.kind} observation #{obs.root}:#{obs.path.inspect} #{error}"
+        end
+      end
+      nil
+    end
+
+    # Why replay could leave the observation's root with its path, or nil. An
+    # environment observation's path is a variable's name, not a file's. A
+    # Windows target's runner writes a relative path with its own separator,
+    # so there a backslash separates components; elsewhere it is refused.
+    def self.observation_path_error(obs : Observation, windows : Bool) : String?
+      path = obs.path
+      return "holds a NUL byte" if path.includes?('\0')
+      return nil if obs.root == "env"
+      return "holds a backslash" if path.includes?('\\') && !windows
+      path = path.tr("\\", "/") if windows
+      if path.starts_with?('/') || (path.bytesize >= 2 && path[0].ascii_letter? && path[1] == ':')
+        return "is absolute"
+      end
+      return "holds a '..' component" if path.split('/').includes?("..")
+      nil
+    end
   end
 end

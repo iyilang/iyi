@@ -271,19 +271,19 @@ describe "Iyi::Stale S6a: Store and Receipts" do
       contra_rec = make_receipt(test, callpath: "4" * 64, target: target, contradicted: true)
       store.record(contra_rec)
 
-      # Imported snapshot from namespace "alpha"
+      # Imported snapshot from namespace "master"
       rec_alpha = make_receipt(test, callpath: "a" * 64, target: target, mode: "portable")
       snap_alpha = Iyi::Stale::Snapshot.new(
-        namespace: "alpha",
+        namespace: "master",
         target: target,
         records: [rec_alpha]
       )
       store.import_snapshot(snap_alpha)
 
-      # Imported snapshot from namespace "beta"
+      # Imported snapshot from namespace "run:7"
       rec_beta = make_receipt(test, callpath: "b" * 64, target: target, mode: "portable")
       snap_beta = Iyi::Stale::Snapshot.new(
-        namespace: "beta",
+        namespace: "run:7",
         target: target,
         records: [rec_beta]
       )
@@ -292,7 +292,7 @@ describe "Iyi::Stale S6a: Store and Receipts" do
       # Imported snapshot for DIFFERENT target (must NOT be a candidate)
       rec_darwin = make_receipt(test, callpath: "d" * 64, target: "aarch64-darwin", mode: "portable")
       snap_darwin = Iyi::Stale::Snapshot.new(
-        namespace: "darwin",
+        namespace: "run:8",
         target: "aarch64-darwin",
         records: [rec_darwin]
       )
@@ -310,11 +310,11 @@ describe "Iyi::Stale S6a: Store and Receipts" do
       candidates[1].signature.should eq(rec1.signature)
       candidates[1].local?.should be_true
 
-      # 3. Imported alpha
+      # 3. Imported master
       candidates[2].signature.should eq(rec_alpha.signature)
       candidates[2].portable?.should be_true
 
-      # 4. Imported beta
+      # 4. Imported run:7
       candidates[3].signature.should eq(rec_beta.signature)
       candidates[3].portable?.should be_true
     end
@@ -690,7 +690,7 @@ describe "Iyi::Stale S6a: Store and Receipts" do
       local = make_receipt(test, callpath: "1" * 64, target: target)
       store.record(local)
       imported = make_receipt(test, callpath: "a" * 64, target: target, mode: "portable")
-      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "alpha", target: target, records: [imported]))
+      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "master", target: target, records: [imported]))
 
       store.candidates(test, target, imported: false).map(&.signature).should eq([local.signature])
       store.imported_parses.should eq(0)
@@ -709,7 +709,7 @@ describe "Iyi::Stale S6a: Store and Receipts" do
       other = make_test_id("indexed_other.iyi")
 
       first = make_receipt(test, callpath: "a" * 64, target: target, mode: "portable")
-      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "alpha", target: target, records: [first]))
+      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "master", target: target, records: [first]))
 
       3.times { store.candidates(other, target).size.should eq(0) }
       3.times { store.candidates(test, target).map(&.signature).should eq([first.signature]) }
@@ -719,8 +719,8 @@ describe "Iyi::Stale S6a: Store and Receipts" do
       # lookup parses the new content once and serves it from the index after that.
       second = make_receipt(test, callpath: "b" * 64, target: target, mode: "portable")
       extra = make_receipt(other, callpath: "c" * 64, target: target, mode: "portable")
-      replaced = Iyi::Stale::Snapshot.new(namespace: "alpha", target: target, records: [second, extra])
-      Iyi::Stale::Store.atomic_write(store.imported_path("alpha"), replaced.to_json)
+      replaced = Iyi::Stale::Snapshot.new(namespace: "master", target: target, records: [second, extra])
+      Iyi::Stale::Store.atomic_write(store.imported_path("master"), replaced.to_json)
 
       store.candidates(test, target).map(&.signature).should eq([second.signature])
       store.candidates(test, target).map(&.signature).should eq([second.signature])
@@ -736,12 +736,12 @@ describe "Iyi::Stale S6a: Store and Receipts" do
       test = make_test_id("invalidation_test.iyi")
       first = make_receipt(test, callpath: "a" * 64, target: target, mode: "portable")
       second = make_receipt(test, callpath: "b" * 64, target: target, mode: "portable")
-      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "alpha", target: target, records: [first]))
+      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "master", target: target, records: [first]))
       store.candidates(test, target).map(&.signature).should eq([first.signature])
 
-      path = store.imported_path("alpha")
+      path = store.imported_path("master")
       stamp = File.info(path)
-      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "alpha", target: target, records: [second]))
+      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "master", target: target, records: [second]))
       File.utime(stamp.modification_time, stamp.modification_time, path)
       File.info(path).size.should eq(stamp.size)
       File.info(path).modification_time.should eq(stamp.modification_time)
@@ -765,7 +765,7 @@ describe "Iyi::Stale S6a: Store and Receipts" do
       target = "x86_64-linux-gnu"
       test = make_test_id("concurrent_test.iyi")
       receipt = make_receipt(test, callpath: "a" * 64, target: target, mode: "portable")
-      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "alpha", target: target, records: [receipt]))
+      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "master", target: target, records: [receipt]))
 
       ready = Channel(Nil).new
       start = Channel(Nil).new
@@ -785,6 +785,188 @@ describe "Iyi::Stale S6a: Store and Receipts" do
       16.times { start.send(nil) }
       16.times { results.receive.should eq([receipt.signature]) }
       store.imported_parses.should eq(1)
+    end
+  end
+
+  it "F1: names no mask or record by anything but a signature" do
+    with_tempfile("store_f1_names") do |cache_root|
+      store = Iyi::Stale::Store.new(cache_root)
+      test = make_test_id("f1_names_test.iyi")
+      ["../../../../.bash_aliases", "a" * 63, "A" * 64, ""].each do |bad|
+        expect_raises(ArgumentError, "not a receipt signature") { store.mask_path(bad) }
+        expect_raises(ArgumentError, "not a receipt signature") { store.record_path(test, bad) }
+      end
+      store.mask_path("a" * 64).should eq(File.join(store.masks_dir, "a" * 64))
+    end
+  end
+
+  it "F1: never reads a stored snapshot whose records fail the import checks" do
+    with_tempfile("store_f1_stored") do |cache_root|
+      store = Iyi::Stale::Store.new(cache_root)
+      store.ensure_directories!
+      target = "x86_64-linux-gnu"
+      test = make_test_id("f1_stored_test.iyi")
+      good = make_receipt(test, callpath: "a" * 64, target: target, mode: "portable")
+      forged = make_receipt(test, callpath: "b" * 64, target: target, mode: "portable")
+      forged.signature = "../../../../.bash_aliases"
+      # As an import from before the checks would have left it.
+      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "master", target: target, records: [good, forged]))
+
+      store.candidates(test, target).should be_empty
+      store.revoke(test) { |_| true }.should eq({0, 1})
+      Dir.children(store.masks_dir).should eq([good.signature])
+      File.exists?(File.expand_path(File.join(store.masks_dir, "..", "..", "..", "..", ".bash_aliases"))).should be_false
+    end
+  end
+
+  it "F2: a revocation that cannot rewrite a receipt leaves the test's marker" do
+    with_tempfile("store_f2_marker") do |cache_root|
+      store = Iyi::Stale::Store.new(cache_root)
+      store.ensure_directories!
+      target = "x86_64-linux-gnu"
+      test = make_test_id("f2_marker_test.iyi")
+      rec = make_receipt(test, target: target)
+      store.record(rec)
+      store.write_fast(test, "{}")
+
+      store.revoke(test) { |_| raise "the check failed" }
+      store.has_marker?(test).should be_true
+      File.read(store.marker_path(test)).should contain("revocation failed")
+      File.exists?(store.fast_path(test)).should be_false
+      store.candidates(test, target).should be_empty
+    end
+  end
+
+  {% unless flag?(:win32) %}
+    it "F2: a receipt the store cannot rewrite is not served, and a marker it cannot write stops the run" do
+      with_tempfile("store_f2_write") do |cache_root|
+        store = Iyi::Stale::Store.new(cache_root)
+        store.ensure_directories!
+        target = "x86_64-linux-gnu"
+        test = make_test_id("f2_write_test.iyi")
+        rec = make_receipt(test, target: target)
+        store.record(rec)
+        if LibC.getuid == 0
+          pending! "root writes into a directory without write permission"
+        end
+        File.chmod(store.test_dir(test), 0o500)
+        begin
+          store.revoke(test) { |_| true }.should eq({0, 0})
+          store.has_marker?(test).should be_true
+          store.candidates(test, target).should be_empty
+        ensure
+          File.chmod(store.test_dir(test), 0o700)
+        end
+
+        other = make_test_id("f2_nomarker_test.iyi")
+        store.record(make_receipt(other, target: target))
+        FileUtils.rm_r(store.markers_dir)
+        File.write(store.markers_dir, "a file where the markers directory was")
+        File.chmod(store.test_dir(other), 0o500)
+        begin
+          expect_raises(Iyi::Stale::StoreError, "nor write its contradiction marker") do
+            store.revoke(other) { |_| true }
+          end
+        ensure
+          File.chmod(store.test_dir(other), 0o700)
+        end
+      end
+    end
+  {% end %}
+
+  it "F2: a marker that cannot be written stops the run" do
+    with_tempfile("store_f2_abort") do |cache_root|
+      store = Iyi::Stale::Store.new(cache_root)
+      store.ensure_directories!
+      test = make_test_id("f2_abort_test.iyi")
+      store.record(make_receipt(test))
+      FileUtils.rm_r(store.markers_dir)
+      File.write(store.markers_dir, "a file where the markers directory was")
+      expect_raises(Iyi::Stale::StoreError, "nor write its contradiction marker") do
+        store.revoke(test) { |_| raise "the check failed" }
+      end
+    end
+  end
+
+  it "F3: lists and clears imports, and never reads one under another namespace" do
+    with_tempfile("store_f3_imports") do |cache_root|
+      store = Iyi::Stale::Store.new(cache_root)
+      store.ensure_directories!
+      target = "x86_64-linux-gnu"
+      test = make_test_id("f3_imports_test.iyi")
+      master = make_receipt(test, callpath: "a" * 64, target: target, mode: "portable")
+      other = make_receipt(test, callpath: "b" * 64, target: target, mode: "portable")
+      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "master", target: target, records: [master]))
+      # As an import from before namespaces were checked would have left it.
+      store.import_snapshot(Iyi::Stale::Snapshot.new(namespace: "any", target: target, records: [other]))
+
+      store.candidates(test, target).map(&.signature).should eq([master.signature])
+      listed = store.imports.map { |_, file| {file.namespace, file.records, file.usable?} }.sort_by(&.[0])
+      listed.should eq([{"any", 1, false}, {"master", 1, true}])
+
+      store.clear_imports.should eq(2)
+      store.imports.should be_empty
+      store.candidates(test, target).should be_empty
+    end
+  end
+
+  {% unless flag?(:win32) %}
+    it "F4: keeps the store to its user: directories 0700, files 0600" do
+      with_tempfile("store_f4_modes") do |cache_root|
+        Dir.mkdir_p(File.join(cache_root, "tests-v1"), 0o755)
+        File.chmod(File.join(cache_root, "tests-v1"), 0o755)
+        store = Iyi::Stale::Store.new(cache_root)
+        store.ensure_directories!
+        test = make_test_id("f4_modes_test.iyi")
+        rec = make_receipt(test)
+        store.record(rec)
+        store.write_fast(test, "{}")
+        (File.info(store.root_dir).permissions.value & 0o777).should eq(0o700)
+        [store.records_dir, store.masks_dir, store.markers_dir, store.imported_dir, store.fast_dir, store.test_dir(test)].each do |dir|
+          (File.info(dir).permissions.value & 0o077).should eq(0)
+        end
+        [store.record_path(test, rec.signature), store.fast_path(test), store.seq_path, store.lock_path].each do |file|
+          (File.info(file).permissions.value & 0o777).should eq(0o600)
+        end
+      end
+    end
+  {% end %}
+
+  it "F6: blockers pass over names the store never writes and name a mask that does not parse" do
+    with_tempfile("store_f6_blockers") do |cache_root|
+      store = Iyi::Stale::Store.new(cache_root)
+      store.ensure_directories!
+      test = make_test_id("f6_blockers_test.iyi")
+      contradicted = make_receipt(test, callpath: "1" * 64, contradicted: true)
+      store.record(contradicted)
+      # What an interrupted atomic write leaves beside a mask and a record.
+      File.write(File.join(store.masks_dir, "#{"a" * 64}.tmp.123.abcd"), "{\"te")
+      File.write(store.record_path(test, contradicted.signature) + ".tmp.123.abcd", "{\"te")
+      File.write(File.join(store.test_dir(test), "notes.json"), "{\"te")
+
+      store.blockers(test).map(&.signature).should eq([contradicted.signature])
+      store.has_marker?(test).should be_false
+
+      corrupt = File.join(store.masks_dir, "c" * 64)
+      File.write(corrupt, "{\"te")
+      ex = expect_raises(Iyi::Stale::StoreError) { store.blockers(test) }
+      ex.message.not_nil!.should contain(corrupt)
+      ex.message.not_nil!.should contain("delete this file to go on")
+      File.exists?(corrupt).should be_true
+    end
+  end
+
+  it "F6: a corrupt receipt among blockers gives way to the test's marker" do
+    with_tempfile("store_f6_record") do |cache_root|
+      store = Iyi::Stale::Store.new(cache_root)
+      store.ensure_directories!
+      test = make_test_id("f6_record_test.iyi")
+      rec = make_receipt(test)
+      store.record(rec)
+      File.write(store.record_path(test, rec.signature), "{\"te")
+      store.blockers(test).should be_empty
+      store.has_marker?(test).should be_true
+      File.exists?(store.record_path(test, rec.signature)).should be_false
     end
   end
 

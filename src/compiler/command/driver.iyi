@@ -355,6 +355,7 @@ pub class CommandDriver
     Usage: #{CommandDriver.program_name} test [--json] [-v] [--timeout SECONDS] [-p N] [--run TEXT] [--release] [-D FLAG]...
                                         [--affected FILE]... [--cached | --fresh] [--explain] [--shard K/N]
                                         [--import-index NS=FILE]... [--export-index NS=FILE]...
+                                        [--list-imports | --clear-imports]
                                         [--chaos[=SEED]] [--chaos-runs N] [paths]
 
     Runs every `*_test.iyi` under the given paths (default: `.`), but not
@@ -387,10 +388,13 @@ pub class CommandDriver
     `--fresh` forces execution and records new receipts.
     `--explain` prints decision lines explaining hits and misses.
     `--shard K/N` runs shard K of N shards dealt round-robin.
-    `--import-index NS=FILE` imports verified test receipts for namespace NS.
+    `--import-index NS=FILE` imports verified test receipts for namespace NS,
+    `master` or `run:<id>`; an import lasts until it is replaced or cleared.
     `--export-index NS=FILE` exports test receipts for namespace NS (requires --fresh).
     These take the runner's own build of each test, every named case, so they
     are not taken with `--run`, `-v`, `--release` or `-D`.
+    `--list-imports` lists the imported receipts every `--cached` run reads, and
+    `--clear-imports` drops them; neither runs a test.
 
     `--chaos` builds each test for the chaos scheduler and runs it once per
     seed, `--chaos-runs N` seeds (100 unless given) from one drawn at

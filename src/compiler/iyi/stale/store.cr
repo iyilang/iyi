@@ -7,6 +7,12 @@ require "./toolchain"
 require "./machine_key"
 
 module Iyi::Stale
+  # The store cannot keep a revocation, or cannot read a file a decision rests
+  # on. The run stops with the message: going on could serve a test as
+  # passing that a failure should have revoked.
+  class StoreError < Exception
+  end
+
   class Store
     getter root_dir : String
     getter cache_root : String
@@ -42,22 +48,31 @@ module Iyi::Stale
       @key_path = File.join(@root_dir, "key")
     end
 
+    # Every directory is the user's alone (0700 on POSIX) and every file 0600
+    # (`atomic_write`): local receipts hold digests keyed under the machine
+    # key, and a fast record holds environment values in clear (D8). A store
+    # made before that has its root narrowed here, which closes what is under it.
     def ensure_directories! : Nil
-      Dir.mkdir_p(@records_dir) unless Dir.exists?(@records_dir)
-      Dir.mkdir_p(@masks_dir) unless Dir.exists?(@masks_dir)
-      Dir.mkdir_p(@markers_dir) unless Dir.exists?(@markers_dir)
-      Dir.mkdir_p(@imported_dir) unless Dir.exists?(@imported_dir)
-      Dir.mkdir_p(@fast_dir) unless Dir.exists?(@fast_dir)
+      Dir.mkdir_p(@records_dir, 0o700) unless Dir.exists?(@records_dir)
+      Dir.mkdir_p(@masks_dir, 0o700) unless Dir.exists?(@masks_dir)
+      Dir.mkdir_p(@markers_dir, 0o700) unless Dir.exists?(@markers_dir)
+      Dir.mkdir_p(@imported_dir, 0o700) unless Dir.exists?(@imported_dir)
+      Dir.mkdir_p(@fast_dir, 0o700) unless Dir.exists?(@fast_dir)
+      {% unless flag?(:win32) %}
+        if (info = File.info?(@root_dir, follow_symlinks: false)) && info.directory? && info.permissions.value & 0o077 != 0
+          File.chmod(@root_dir, 0o700)
+        end
+      {% end %}
     end
 
     # Atomic write: temp file, fsync, rename. On win32, MoveFileExW with
     # MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH.
     def self.atomic_write(path : String, content : String) : Nil
       dir = File.dirname(path)
-      Dir.mkdir_p(dir) unless dir.empty? || Dir.exists?(dir)
+      Dir.mkdir_p(dir, 0o700) unless dir.empty? || Dir.exists?(dir)
       tmp_path = "#{path}.tmp.#{Process.pid}.#{Random::Secure.hex(4)}"
 
-      File.open(tmp_path, "w") do |f|
+      File.open(tmp_path, "w", perm: 0o600) do |f|
         f.write(content.to_slice)
         f.flush
         f.fsync
@@ -91,8 +106,8 @@ module Iyi::Stale
     # thread ask for the lock, and that request blocks the thread itself: the
     # holder can never resume and the process deadlocks.
     def lock(&block)
-      Dir.mkdir_p(@root_dir) unless Dir.exists?(@root_dir)
-      File.open(@lock_path, "a") do |f|
+      Dir.mkdir_p(@root_dir, 0o700) unless Dir.exists?(@root_dir)
+      File.open(@lock_path, "a", perm: 0o600) do |f|
         f.flock_exclusive do
           yield
         end
@@ -141,11 +156,18 @@ module Iyi::Stale
     end
 
     def record_path(test : TestId, signature : String) : String
-      File.join(test_dir(test), "#{signature}.json")
+      File.join(test_dir(test), "#{Store.checked_signature(signature)}.json")
     end
 
+    # A mask is named by the signature it revokes, which an imported record
+    # supplies: anything but a digest is refused, so no record can name a path.
     def mask_path(signature : String) : String
-      File.join(@masks_dir, signature)
+      File.join(@masks_dir, Store.checked_signature(signature))
+    end
+
+    def self.checked_signature(signature : String) : String
+      raise ArgumentError.new("not a receipt signature: #{signature.inspect}") unless Stale.hex64?(signature)
+      signature
     end
 
     def marker_path(test : TestId) : String
@@ -164,9 +186,13 @@ module Iyi::Stale
 
     def forget_fast(test : TestId) : Nil
       lock do
-        path = fast_path(test)
-        File.delete(path) if File.file?(path)
+        forget_fast_under_lock(test)
       end
+    end
+
+    private def forget_fast_under_lock(test : TestId) : Nil
+      path = fast_path(test)
+      File.delete(path) if File.file?(path)
     end
 
     # Writes the fast-path record of a test, atomically. The runner calls this
@@ -187,21 +213,25 @@ module Iyi::Stale
 
     def write_marker(test : TestId, reason : String = "contradiction") : Nil
       lock do
-        path = marker_path(test)
-        content = JSON.build do |j|
-          j.object do
-            j.field "test" do
-              j.object do
-                j.field "root", test.root
-                j.field "path", test.path
-              end
-            end
-            j.field "reason", reason
-            j.field "time", Time.utc.to_unix_ms
-          end
-        end
-        Store.atomic_write(path, content)
+        write_marker_under_lock(test, reason)
       end
+    end
+
+    private def write_marker_under_lock(test : TestId, reason : String, detail : String? = nil) : Nil
+      content = JSON.build do |j|
+        j.object do
+          j.field "test" do
+            j.object do
+              j.field "root", test.root
+              j.field "path", test.path
+            end
+          end
+          j.field "reason", reason
+          j.field "detail", detail if detail
+          j.field "time", Time.utc.to_unix_ms
+        end
+      end
+      Store.atomic_write(marker_path(test), content)
     end
 
     def clear_marker(test : TestId) : Bool
@@ -249,11 +279,15 @@ module Iyi::Stale
       getter stamp : {Int64, Time}
       getter namespace : String
       getter target : String
-      # Whether candidates may draw on this file: the same format and version
-      # gate an import applies. Revocation reads every file, usable or not.
+      # Whether candidates may draw on this file: the format, version,
+      # namespace and record checks an import applies (`Snapshot.record_error`),
+      # made again because the file may have been imported before they
+      # existed. Revocation reads every file, usable or not.
       getter? usable : Bool
-      # Every record of the file, whatever its mode, by test, in file order.
+      # Every record of the file that passes the record checks, whatever its
+      # format, by test, in file order. A record that fails them is never read.
       getter by_test : Hash(TestId, Array(Receipt))
+      getter producer : Hash(String, JSON::Any)?
 
       def initialize(
         @stamp : {Int64, Time},
@@ -261,6 +295,7 @@ module Iyi::Stale
         @target : String,
         @usable : Bool,
         @by_test : Hash(TestId, Array(Receipt)),
+        @producer : Hash(String, JSON::Any)? = nil,
       )
       end
 
@@ -268,16 +303,24 @@ module Iyi::Stale
         by_test = Hash(TestId, Array(Receipt)).new
         begin
           snap = Snapshot.from_json(File.read(path))
+          usable = snap.format == "iyi-test-index" && snap.version == FORMAT_VERSION &&
+                   Snapshot.importable_namespace?(snap.namespace)
           snap.records.each do |rec|
             rec.namespace = snap.namespace
-            rec.ensure_signature!
+            if Snapshot.record_error(rec, snap.target)
+              usable = false
+              next
+            end
             (by_test[rec.test] ||= [] of Receipt) << rec
           end
-          usable = snap.format == "iyi-test-index" && snap.version == FORMAT_VERSION
-          new(stamp, snap.namespace, snap.target, usable, by_test)
+          new(stamp, snap.namespace, snap.target, usable, by_test, snap.producer)
         rescue
           new(stamp, "", "", false, Hash(TestId, Array(Receipt)).new)
         end
+      end
+
+      def records : Int32
+        @by_test.each_value.sum(&.size)
       end
     end
 
@@ -397,7 +440,10 @@ module Iyi::Stale
       local_passes + imported_candidates
     end
 
-    # Blockers: builds of contradicted receipts and masks of test
+    # Blockers: builds of contradicted receipts and masks of test. Only names
+    # the store writes are read: `<signature>.json` for a receipt and
+    # `<signature>` for a mask, so a temp file an interrupted `atomic_write`
+    # left (`*.tmp.*`) is passed over rather than parsed.
     def blockers(test : TestId) : Array(Receipt)
       result = [] of Receipt
 
@@ -405,46 +451,59 @@ module Iyi::Stale
       dir = test_dir(test)
       if Dir.exists?(dir)
         Dir.each_child(dir) do |fname|
-          next unless fname.ends_with?(".json")
+          next unless fname.ends_with?(".json") && Stale.hex64?(fname.rchop(".json"))
           fpath = File.join(dir, fname)
           begin
-            content = File.read(fpath)
-            receipt = Receipt.from_json(content)
-            if receipt.test == test && receipt.contradicted
-              result << receipt
-            end
-          rescue ex
-            raise "cannot inspect receipt blocker #{fpath}: #{ex.message}"
+            receipt = Receipt.from_json(File.read(fpath))
+          rescue
+            # As a lookup does with it (§7): the record gives way to the
+            # test's contradiction marker, so the test misses until a fresh pass.
+            lock { replace_corrupt_record_under_lock(fpath, test) }
+            next
           end
+          result << receipt if receipt.test == test && receipt.contradicted
         end
       end
 
-      # 2. Masks of test
+      # 2. Masks of test. A mask is never deleted as corrupt (§7): one that
+      # does not parse stops the run until it is dealt with by hand.
       if Dir.exists?(@masks_dir)
         Dir.each_child(@masks_dir) do |fname|
+          next unless Stale.hex64?(fname)
           fpath = File.join(@masks_dir, fname)
           begin
-            content = File.read(fpath)
-            mask = Mask.from_json(content)
-            mask.signature = fname
-            if mask.test == test
-              result << mask.to_receipt
-            end
+            mask = Mask.from_json(File.read(fpath))
           rescue ex
-            raise "cannot inspect mask #{fpath}: #{ex.message}"
+            raise StoreError.new(
+              "cannot read the mask #{fpath}: #{ex.message}. A mask revokes an imported receipt and is " \
+              "never deleted as corrupt; delete this file to go on, and the receipt it revoked may be " \
+              "served again (`iyi test --clear-imports` drops every imported receipt)")
           end
+          mask.signature = fname
+          result << mask.to_receipt if mask.test == test
         end
       end
 
       result
     end
 
-    # Revoke: marks local receipts contradicted and masks imported ones
+    # Revoke: marks local receipts contradicted and masks imported ones.
+    #
+    # The test's fast record goes first, so no later run serves the test from
+    # it, whatever happens below. A receipt that cannot be read, marked or
+    # masked is not passed over: the test gets its persistent contradiction
+    # marker, which makes every lookup of it miss until a `--fresh` pass with a
+    # complete trace. When even the marker cannot be written, `StoreError`
+    # stops the run, since the next run could serve the receipt this failure
+    # should have revoked (§12 row 13).
     def revoke(test : TestId, &validates_now : Receipt -> Bool) : Tuple(Int32, Int32)
       local_count = 0
       imported_count = 0
+      failures = [] of String
 
       lock do
+        forget_fast_under_lock(test)
+
         # 1. Local receipts of this test
         dir = test_dir(test)
         if Dir.exists?(dir)
@@ -452,16 +511,13 @@ module Iyi::Stale
             next unless fname.ends_with?(".json")
             fpath = File.join(dir, fname)
             begin
-              content = File.read(fpath)
-              receipt = Receipt.from_json(content)
-              if receipt.test == test
-                if validates_now.call(receipt)
-                  receipt.contradicted = true
-                  Store.atomic_write(fpath, receipt.to_json)
-                  local_count += 1
-                end
-              end
-            rescue
+              receipt = Receipt.from_json(File.read(fpath))
+              next unless receipt.test == test && validates_now.call(receipt)
+              receipt.contradicted = true
+              Store.atomic_write(fpath, receipt.to_json)
+              local_count += 1
+            rescue ex
+              failures << "#{fpath}: #{ex.message}"
             end
           end
         end
@@ -470,8 +526,8 @@ module Iyi::Stale
         imported_files.each do |file|
           recs = file.by_test[test]?
           next unless recs
-          begin
-            recs.each do |rec|
+          recs.each do |rec|
+            begin
               mpath = mask_path(rec.signature)
               next if File.file?(mpath)
               next unless validates_now.call(rec)
@@ -484,13 +540,58 @@ module Iyi::Stale
               )
               Store.atomic_write(mpath, mask.to_json)
               imported_count += 1
+            rescue ex
+              failures << "the mask of #{rec.signature}: #{ex.message}"
             end
-          rescue
+          end
+        end
+
+        unless failures.empty?
+          begin
+            write_marker_under_lock(test, "revocation failed", failures.first)
+          rescue ex
+            raise StoreError.new(
+              "cannot revoke the receipts of #{test} (#{failures.first}), nor write its contradiction " \
+              "marker (#{ex.message}); delete #{dir} before the next --cached run, or it may be served from them")
           end
         end
       end
 
       {local_count, imported_count}
+    end
+
+    # The imported snapshot files and what lookups make of each, for
+    # `iyi test --list-imports`, by file name.
+    def imports : Array({String, ImportedFile})
+      return [] of {String, ImportedFile} unless Dir.exists?(@imported_dir)
+      Dir.children(@imported_dir).select(&.ends_with?(".json")).sort!.compact_map do |fname|
+        path = File.join(@imported_dir, fname)
+        info = File.info?(path) || next
+        {path, ImportedFile.read({info.size, info.modification_time}, path)}
+      end
+    end
+
+    # Drops every imported snapshot (`iyi test --clear-imports`) and returns
+    # how many there were. Masks stay: they are this machine's revocations.
+    def clear_imports : Int32
+      lock do
+        cleared = 0
+        if Dir.exists?(@imported_dir)
+          Dir.each_child(@imported_dir) do |fname|
+            path = File.join(@imported_dir, fname)
+            next unless File.info?(path, follow_symlinks: false).try(&.file?)
+            File.delete(path)
+            cleared += 1 if fname.ends_with?(".json")
+          end
+        end
+        @imported_lock.synchronize do
+          @imported.each_value do |entry|
+            entry.file = nil
+            entry.generation &+= 1
+          end
+        end
+        cleared
+      end
     end
 
     # Import snapshot into imported/<hex D(namespace)>.json

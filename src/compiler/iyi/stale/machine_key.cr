@@ -16,7 +16,7 @@ module Iyi::Stale
           return bytes if bytes.size == KEY_SIZE
         end
 
-        Dir.mkdir_p(key_dir)
+        Dir.mkdir_p(key_dir, 0o700)
 
         # The key is written whole to a file of its own and then linked to
         # its name, which fails when the name exists: of two runs that start

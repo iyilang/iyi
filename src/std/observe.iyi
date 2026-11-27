@@ -329,9 +329,34 @@ end
   end
 {% end %}
 
+# The runner makes the channel file itself, new and mode 0600, in a directory
+# only its user can enter, and the program appends to it. The open never
+# follows a symbolic link at the name (O_NOFOLLOW, or the link itself on
+# Windows), and creates the file, mode 0600, only where no runner made one.
 @[Effect(:observation_channel)]
 pub def channel_open(path : String) : Int64
-  __iyi_open_file(path.to_unsafe, false, true, true, false, true, 0o644)
+  {% if flag?(:linux) %}
+    # O_WRONLY 1 | O_CREAT 0o100 | O_APPEND 0o2000 | O_NOFOLLOW, which is
+    # 0o100000 on aarch64 and 0o400000 elsewhere.
+    {% if flag?(:aarch64) %}
+      __iyi_openat(path.to_unsafe, 0o102101, 0o600)
+    {% else %}
+      __iyi_openat(path.to_unsafe, 0o402101, 0o600)
+    {% end %}
+  {% elsif flag?(:darwin) %}
+    # O_WRONLY 0x1 | O_APPEND 0x8 | O_NOFOLLOW 0x100 | O_CREAT 0x200
+    LibC.open(path.to_unsafe, 0x309, 0o600).to_i64
+  {% elsif flag?(:win32) %}
+    # Append access as `__iyi_open_file` asks it (0x120114), OPEN_ALWAYS (4),
+    # FILE_FLAG_OPEN_REPARSE_POINT (0x200000): a link is opened, not followed.
+    wide = __iyi_wide_path(path.to_unsafe)
+    return -1_i64 if wide.address == 0_u64
+    handle = LibC.CreateFileW(wide, 0x120114, 7, Pointer(Void).new(0_u64), 4, 0x200000, Pointer(Void).new(0_u64))
+    return -1_i64 if handle.address &+ 1_u64 == 0_u64
+    handle.address.to_i64
+  {% else %}
+    __iyi_open_file(path.to_unsafe, false, true, true, false, true, 0o600)
+  {% end %}
 end
 
 @[Effect(:observation_channel)]

@@ -65,12 +65,14 @@ module Iyi::Stale
   record FastVerdict, served : Bool, reason : String? = nil, held : FastRecord? = nil
 
   class Runner
-    # A key and input record belong to exactly one compiler invocation.
+    # A key and input record belong to exactly one compiler invocation. Both
+    # files are the runner's (`private_file`), so they are emptied, not
+    # deleted, before it: an empty one is no record.
     def self.build_attempt(out_key_path : String, inputs_path : String, & : -> Process::Status)
-      File.delete?(out_key_path)
-      File.delete?(inputs_path)
+      File.write(out_key_path, "")
+      File.write(inputs_path, "")
       status = yield
-      key = File.file?(out_key_path) ? (KeyFile.parse(File.read(out_key_path)) rescue nil) : nil
+      key = KeyFile.parse(File.read(out_key_path)) rescue nil
       {status, key}
     end
 
@@ -104,9 +106,70 @@ module Iyi::Stale
 
     def run : Nil
       run_internal
-    rescue ex : RunnerError
+    rescue ex : RunnerError | StoreError
       STDERR.puts ex.message
       exit 1
+    end
+
+    # The imported snapshots every `--cached` run reads (`--list-imports`).
+    def self.list_imports(store : Store, as_json : Bool) : Nil
+      imports = store.imports
+      if as_json
+        JSON.build(STDOUT) do |json|
+          json.object do
+            json.field "imports" do
+              json.array do
+                imports.each do |path, file|
+                  json.object do
+                    json.field "file", path
+                    json.field "namespace", file.namespace
+                    json.field "target", file.target
+                    json.field "records", file.records
+                    json.field "used", file.usable?
+                    json.field "run_id", producer_field(file, "run_id")
+                    json.field "sha", producer_field(file, "sha")
+                  end
+                end
+              end
+            end
+          end
+        end
+        STDOUT.puts
+      elsif imports.empty?
+        puts "no imported receipts"
+      else
+        imports.each do |path, file|
+          if file.namespace.empty?
+            puts "#{path}: unreadable, not used"
+            next
+          end
+          line = "#{file.namespace}: #{file.records} receipts for #{file.target}"
+          if run_id = producer_field(file, "run_id")
+            line += ", producer run #{run_id}"
+          end
+          if sha = producer_field(file, "sha").try(&.presence)
+            line += " at #{sha}"
+          end
+          line += " (#{path})"
+          line += ", not used: its format, namespace or a record fails the import checks" unless file.usable?
+          puts line
+        end
+      end
+    end
+
+    # Drops every imported snapshot (`--clear-imports`).
+    def self.clear_imports(store : Store, as_json : Bool) : Nil
+      cleared = store.clear_imports
+      if as_json
+        puts %({"cleared": #{cleared}})
+      else
+        puts cleared == 1 ? "cleared 1 imported snapshot" : "cleared #{cleared} imported snapshots"
+      end
+    end
+
+    private def self.producer_field(file : Store::ImportedFile, name : String) : String?
+      value = file.producer.try(&.[name]?) || return nil
+      value.as_s? || value.as_i64?.try(&.to_s)
     end
 
     def run_internal : Nil
@@ -147,6 +210,9 @@ module Iyi::Stale
           abort! "--import-index takes NS=FILE", :USAGE_ERROR
         end
         ns, file = parts[0], parts[1]
+        unless Snapshot.importable_namespace?(ns)
+          abort! "--import-index takes master=FILE or run:<id>=FILE; '#{ns}' is not a namespace a snapshot is imported into", :USAGE_ERROR
+        end
         (import_groups[ns] ||= [] of String) << file
       end
 
@@ -450,7 +516,7 @@ module Iyi::Stale
                                    inputs_path : String, key : KeyFile::KeyFileData?) : Nil
       return unless key && (local = key.local)
       portable_build = key.portable.try(&.build) || ""
-      record = if File.file?(inputs_path)
+      record = if (File.info?(inputs_path).try(&.size) || 0) > 0
                  FastRecord.from_inputs(inputs_path, test_id, file, facts, local.build, portable_build)
                elsif reason = key.inputs_refusal
                  FastRecord.refused(test_id, file, facts, local.build, portable_build, reason)
@@ -475,6 +541,24 @@ module Iyi::Stale
 
     private def scratch_path(test_id : TestId) : String
       File.expand_path(File.join(@store.root_dir, "scratch", Stale.hex(Store.d_test_id(test_id))))
+    end
+
+    # The directory one check's channel files live in: new for the check (an
+    # existing name is an error, not reused), under the store, and the user's
+    # alone (0700 on POSIX), so no other user can read what a test's run
+    # records or plant the files that decide a hit. Beside the scratch
+    # directories, not inside one: a test's scratch is its own to write.
+    def self.private_dir(store : Store) : String
+      parent = File.join(store.root_dir, "scratch")
+      Dir.mkdir_p(parent, 0o700) unless Dir.exists?(parent)
+      path = File.expand_path(File.join(parent, "run-#{Random::Secure.hex(16)}"))
+      Dir.mkdir(path, 0o700)
+      path
+    end
+
+    # A channel file, made new (O_EXCL) and mode 0600 in *dir*.
+    def self.private_file(dir : String, prefix : String, suffix : String? = nil) : String
+      File.tempfile(prefix, suffix, dir: dir, &.itself).path
     end
 
     # One test, built and run or answered by its receipt, as one slot of the
@@ -527,6 +611,9 @@ module Iyi::Stale
       accept_rules = [] of KeyFile::StaleRule
       block_rules = [] of KeyFile::StaleRule
       newest_receipt : Receipt? = nil
+      # The newest receipt's replay, when choosing the candidates made it: a
+      # miss names its reason from it rather than replaying the trace again.
+      newest_replay : Tuple(String?)? = nil
       candidates = [] of Receipt
 
       unless @fresh || is_ambiguous || image_refusal
@@ -534,7 +621,13 @@ module Iyi::Stale
         blockers = @store.blockers(test_id)
         newest_receipt = candidates.first?
 
-        valid = candidates.select { |rec| valid_candidate?(rec, current_profile, roots, keyer_local) }
+        valid = [] of Receipt
+        candidates.each_with_index do |rec, index|
+          next unless rec.pass? && !rec.contradicted && rec.profile.fp == current_profile.fp
+          mismatch = Trace.replay(rec.trace.observations, keyer_for(rec, keyer_local), roots)
+          newest_replay = {mismatch} if index == 0
+          valid << rec unless mismatch
+        end
 
         matching_blockers = blockers.select { |rec| block_rule?(rec, current_profile, roots, keyer_local) }
         if blockers.any? { |rec| rec.version != FORMAT_VERSION || !Trace.supported?(rec.trace.observations) }
@@ -550,32 +643,37 @@ module Iyi::Stale
       end
       # Run test
       lock_path = s + ".lock"
-      Dir.mkdir_p(File.dirname(lock_path))
+      Dir.mkdir_p(File.dirname(lock_path), 0o700)
 
       outcome : Outcome? = nil
       compiled_key : KeyFile::KeyFileData? = nil
       scratch_locks[s].synchronize do
-        File.open(lock_path, "a") do |lock_file|
+        File.open(lock_path, "a", perm: 0o600) do |lock_file|
           lock_file.flock_exclusive do
             begin
               FileUtils.rm_r(s) if File.info?(s, follow_symlinks: false)
-              Dir.mkdir(s)
+              Dir.mkdir(s, 0o700)
             rescue ex : File::Error
               abort! "#{file}: cannot empty scratch directory #{s}: #{ex.message}"
             end
 
             started = Time.instant
-            out_key_path = File.tempname("iyi-stale-key", ".json")
-            accept_path = File.tempname("iyi-stale-accept", ".json")
-            block_path = File.tempname("iyi-stale-block", ".json")
             binary = File.tempname("iyi-test", {{ flag?(:win32) ? ".exe" : nil }})
-            trace_file = File.tempname("iyi-trace")
-            inputs_path = File.tempname("iyi-stale-inputs", ".json")
+            channel : String? = nil
             null_io : File? = nil
             tree : Command::TestTree? = nil
             builds = 0
 
             begin
+              # What the runner, the test's build and its run pass each other:
+              # files made new and 0600 in a directory of this check's own,
+              # not names in the shared TMPDIR (F4, §5 Channel).
+              channel = dir = Runner.private_dir(@store)
+              out_key_path = Runner.private_file(dir, "key", ".json")
+              accept_path = Runner.private_file(dir, "accept", ".json")
+              block_path = Runner.private_file(dir, "block", ".json")
+              trace_file = Runner.private_file(dir, "trace")
+              inputs_path = Runner.private_file(dir, "inputs", ".json")
               if image_refusal ||= Toolchain.running_image_refusal
                 accept_rules.clear
               end
@@ -595,7 +693,7 @@ module Iyi::Stale
               build_env = Profile.build_env
               build_env["IYI_STALE_PARENT_IMAGE_CHANGED"] = "1" if image_refusal
               run_build = -> do
-                process, build_tree = Command::TestTree.start do |before_resume|
+                process, build_tree = Command::TestTree.start(strict: true) do |before_resume|
                   Process.new(Process.executable_path.not_nil!, build_args,
                     env: build_env, clear_env: true, input: Process::Redirect::Close,
                     output: build_out, error: build_out, process_group: true, before_resume: before_resume)
@@ -676,7 +774,7 @@ module Iyi::Stale
                   cached: false,
                   source: "local",
                   reuse: "miss",
-                  reason: nil,
+                  reason: "does not build",
                   portable_build: p_build,
                   profile: current_profile.fp,
                   roots: roots_map,
@@ -691,8 +789,11 @@ module Iyi::Stale
               child_env = Profile.clean_child_env(s, trace_file, ENV)
               run_out = IO::Memory.new
               null_io = File.open(File::NULL, "r")
+              # A file this run reads that was modified at or after this moment,
+              # within the clock's resolution, makes the run not reusable (A3).
+              run_started = BuildInputs.now
 
-              process, tree = Command::TestTree.start do |before_resume|
+              process, tree = Command::TestTree.start(strict: true) do |before_resume|
                 Process.new(
                   binary,
                   args: test_argv,
@@ -741,6 +842,8 @@ module Iyi::Stale
                 end
                 p_build = key_data.try(&.portable.try(&.build))
                 is_blocked = key_data.try(&.blocked) == true
+                # Every miss names its reason, asked for or not (§2.9).
+                miss_reason = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, nil, newest_replay)
                 res = TestResult.new(
                   file: file,
                   test: test_id,
@@ -750,24 +853,20 @@ module Iyi::Stale
                   cached: false,
                   source: "local",
                   reuse: "miss",
-                  reason: nil,
+                  reason: miss_reason,
                   portable_build: p_build,
                   profile: current_profile.fp,
                   roots: roots_map,
                   blocked: is_blocked
                 )
-                explain = nil
-                if @explain
-                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, nil)
-                  explain = "#{file}: miss: #{explain_msg}"
-                end
+                explain = @explain ? "#{file}: miss: #{miss_reason}" : nil
                 outcome = Outcome.new(result: res, explain: explain, builds: builds)
                 next
               end
 
               # Pass! Parse trace
               trace_res = if File.file?(trace_file)
-                            File.open(trace_file) { |io| Trace.parse(io, roots, keyer_local, check_disk_after_exit: true) }
+                            File.open(trace_file) { |io| Trace.parse(io, roots, keyer_local, check_disk_after_exit: true, run_started: run_started) }
                           else
                             TraceResult.new(complete: false, incomplete_reason: "no trace file")
                           end
@@ -793,7 +892,7 @@ module Iyi::Stale
                 )
                 explain = nil
                 if @explain
-                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, "trace incomplete")
+                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, "trace incomplete", newest_replay)
                   explain = "#{file}: miss: #{explain_msg}"
                 end
                 outcome = Outcome.new(result: res, explain: explain, builds: builds)
@@ -849,7 +948,7 @@ module Iyi::Stale
                 )
                 explain = nil
                 if @explain
-                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, taint_reason)
+                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, taint_reason, newest_replay)
                   explain = "#{file}: miss: #{explain_msg}"
                 end
                 outcome = Outcome.new(result: res, explain: explain, builds: builds)
@@ -880,7 +979,10 @@ module Iyi::Stale
                     newest: "pass"
                   )
                   # The twin a CI producer exports: the same run, keyed plainly.
-                  if (portable_build = key_data.portable) && File.file?(trace_file)
+                  # Only a producer (`IYI_CI_PRODUCER=1`, which export requires)
+                  # writes it: its environment answers are plain digests, which
+                  # a local record otherwise keeps under the machine key (D8).
+                  if ENV["IYI_CI_PRODUCER"]? == "1" && (portable_build = key_data.portable) && File.file?(trace_file)
                     portable_trace = File.open(trace_file) { |io| Trace.parse(io, roots, Keyer.portable, check_disk_after_exit: false) }
                     if portable_trace.complete
                       receipt.portable_twin = PortableRecord.new(
@@ -906,6 +1008,7 @@ module Iyi::Stale
 
                 p_build = key_data.try(&.portable.try(&.build))
                 is_blocked = key_data.try(&.blocked) == true
+                miss_reason = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, nil, newest_replay)
                 res = TestResult.new(
                   file: file,
                   test: test_id,
@@ -915,17 +1018,13 @@ module Iyi::Stale
                   cached: false,
                   source: "local",
                   reuse: "miss",
-                  reason: nil,
+                  reason: miss_reason,
                   portable_build: p_build,
                   profile: current_profile.fp,
                   roots: roots_map,
                   blocked: is_blocked
                 )
-                explain = nil
-                if @explain
-                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, nil)
-                  explain = "#{file}: miss: #{explain_msg}"
-                end
+                explain = @explain ? "#{file}: miss: #{miss_reason}" : nil
                 outcome = Outcome.new(result: res, explain: explain, receipt: recorded, builds: builds)
               end
             ensure
@@ -936,11 +1035,13 @@ module Iyi::Stale
               rescue ex : File::Error
                 STDERR.puts "#{file}: scratch directory #{s} was not removed: #{ex.message}"
               end
-              File.delete(trace_file) if File.file?(trace_file) rescue nil
-              File.delete(out_key_path) if File.file?(out_key_path) rescue nil
-              File.delete(accept_path) if File.file?(accept_path) rescue nil
-              File.delete(block_path) if File.file?(block_path) rescue nil
-              File.delete(inputs_path) if File.file?(inputs_path) rescue nil
+              if dir = channel
+                begin
+                  FileUtils.rm_r(dir)
+                rescue ex : File::Error
+                  STDERR.puts "#{file}: channel directory #{dir} was not removed: #{ex.message}"
+                end
+              end
               File.delete(binary) if File.file?(binary) rescue nil
               {% if flag?(:win32) %}
                 File.delete(binary.rchop(".exe") + ".pdb") rescue nil
@@ -969,7 +1070,7 @@ module Iyi::Stale
                    elsif compiled_key.try(&.hit)
                      "the check built #{compiled_key.try(&.local.try(&.build)) || "nothing"}, and the record has #{held.local_build}"
                    else
-                     compute_explain_reason(file, compiled_key, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, final.result.reason)
+                     compute_explain_reason(file, compiled_key, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, final.result.reason, newest_replay)
                    end
           final = Outcome.new(
             result: retag(final.result, "compiler", check_reason, status: "fast path served what the check would not: #{reason}", cached: false, reuse: "miss", reason: reason),
@@ -979,9 +1080,16 @@ module Iyi::Stale
             audit: Audit.new(file, false, reason))
         end
       end
+      # A test that did not pass is never served from its fast record next
+      # run, whatever revocation managed (§12 row 13): `revoke` drops it too,
+      # and this covers the audit's disagreement and a build that failed
+      # before its Build existed.
+      @store.forget_fast(test_id) unless final.result.pass?
       final
     end
 
+    # Why a test was not served: the first component that differs from its
+    # newest receipt (§2.9). Every miss names it, with `--explain` or not.
     private def compute_explain_reason(
       file : String,
       key_data : KeyFile::KeyFileData?,
@@ -991,6 +1099,7 @@ module Iyi::Stale
       keyer : Keyer,
       is_ambiguous : Bool,
       taint_reason : String?,
+      newest_replay : Tuple(String?)?,
     ) : String
       return "ambiguous test id" if is_ambiguous
       return taint_reason if taint_reason
@@ -1044,7 +1153,8 @@ module Iyi::Stale
         return "profile changed"
       end
 
-      if run_mismatch = Trace.replay(newest.trace.observations, keyer_for(newest, keyer), roots)
+      run_mismatch = newest_replay ? newest_replay[0] : Trace.replay(newest.trace.observations, keyer_for(newest, keyer), roots)
+      if run_mismatch
         return run_mismatch
       end
 

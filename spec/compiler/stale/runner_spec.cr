@@ -21,9 +21,26 @@ describe Iyi::Stale::Runner do
       end
       status.success?.should be_false
       key.should be_nil
-      File.exists?(key_path).should be_false
-      File.exists?(inputs_path).should be_false
+      File.read(key_path).should be_empty
+      File.read(inputs_path).should be_empty
       Iyi::Stale::Runner.build_hit(status, key).should be_nil
+    end
+  end
+
+  it "F4: makes each check's channel files new and private, under the store" do
+    with_tempfile("runner_channel") do |cache_root|
+      store = Iyi::Stale::Store.new(cache_root)
+      dir = Iyi::Stale::Runner.private_dir(store)
+      other = Iyi::Stale::Runner.private_dir(store)
+      dir.should_not eq(other)
+      File.dirname(dir).should eq(File.expand_path(File.join(store.root_dir, "scratch")))
+      files = {"key", "accept", "block", "trace", "inputs"}.map { |name| Iyi::Stale::Runner.private_file(dir, name) }
+      files.to_a.uniq.size.should eq(5)
+      files.each { |path| File.read(path).should be_empty }
+      {% unless flag?(:win32) %}
+        (File.info(dir).permissions.value & 0o777).should eq(0o700)
+        files.each { |path| (File.info(path).permissions.value & 0o777).should eq(0o600) }
+      {% end %}
     end
   end
 

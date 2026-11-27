@@ -79,8 +79,7 @@ module Iyi::Stale
     end
 
     def initialize(
-      @files : Array(String)? = nil,
-      @paths : Array(String) = ["."],
+      @files : Array(String),
       @as_json : Bool = false,
       @timeout : Float64 = 60.0,
       @affected : Array(String) = [] of String,
@@ -168,23 +167,7 @@ module Iyi::Stale
         @store.import_snapshot(snap)
       end
 
-      files = if initial_files = @files
-                initial_files
-              else
-                discovered = [] of String
-                @paths.each do |path|
-                  abort! "test takes paths, and '' is not one (no path at all runs the working directory)", :USAGE_ERROR if path.empty?
-                  if File.directory?(path)
-                    Dir.glob(Iyi.glob_root(path).join("**", "*_test.[iI][yY][iI]")) { |f| discovered << f }
-                  elsif File.file?(path)
-                    discovered << path
-                  else
-                    abort! "no such file or directory: #{path}", :USAGE_ERROR
-                  end
-                end
-                discovered.uniq! { |f| Iyi.file_key(File.expand_path(f)) }.sort!
-                discovered
-              end
+      files = @files
 
       if files.empty?
         abort! "no *_test.iyi found. A test is a plain iyi program that exits non-zero to fail", :USAGE_ERROR
@@ -194,15 +177,6 @@ module Iyi::Stale
       discount_off = @discount_off
       manifest_changed = @manifest_changed
       unimported = @unimported
-
-      if files.empty?
-        if @as_json
-          puts %({"tests": [], "passed": 0, "failed": 0, "skipped": #{skipped}, "cached": 0, "builds": 0, "audit": []})
-        else
-          puts "0 to run, #{skipped} skipped: no test's imports reach the change"
-        end
-        return
-      end
 
       # C6: Ambiguous test id detection across ALL discovered tests before sharding
       file_test_ids = Hash(String, TestId).new

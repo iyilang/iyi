@@ -341,7 +341,6 @@ class Iyi::Command
     if receipts
       runner = Iyi::Stale::Runner.new(
         files: files,
-        paths: paths,
         as_json: as_json,
         timeout: timeout,
         affected: affected,

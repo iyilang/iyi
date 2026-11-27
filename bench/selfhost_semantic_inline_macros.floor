@@ -151,6 +151,7 @@ src/compiler/native/link/link.iyi 164
 src/compiler/native/link/macho_exe.iyi 192
 src/compiler/native/lower.iyi 44
 src/compiler/native/mir.iyi 234
+src/compiler/native/mir.iyi@darwin 243
 src/compiler/native/mir.iyi@linux 243
 src/compiler/native/mir_clean.iyi 4
 src/compiler/native/obj/elf.iyi 179

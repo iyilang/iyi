@@ -582,7 +582,7 @@ jobs:
           bash bench/stale_ci.sh assert-export-env
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           bash bench/stale_ci.sh pinned-iyi test --fresh --json \
-            --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --export-index "run:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/fresh.json
           bash bench/stale_ci.sh shadow-audit \
             --cached-json stale-index/cached.json \
@@ -602,7 +602,7 @@ jobs:
           rm -rf "$cache_dir/tests-v1"
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           bash bench/stale_ci.sh pinned-iyi test --cached --json \
-            --import-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --import-index "run:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/audit-cached.json
           bash bench/stale_ci.sh assert-hits --json stale-index/audit-cached.json \
             --snapshot "stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json"
@@ -949,7 +949,7 @@ jobs:
           bash bench/stale_ci.sh assert-export-env
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           bash bench/stale_ci.sh pinned-iyi test --fresh --json \
-            --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --export-index "run:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/fresh.json
           bash bench/stale_ci.sh shadow-audit \
             --cached-json stale-index/cached.json \
@@ -967,7 +967,7 @@ jobs:
           rm -rf "$cache_dir/tests-v1"
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           bash bench/stale_ci.sh pinned-iyi test --cached --json \
-            --import-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --import-index "run:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/audit-cached.json
           bash bench/stale_ci.sh assert-hits --json stale-index/audit-cached.json \
             --snapshot "stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json"
@@ -1356,7 +1356,7 @@ jobs:
           bash bench/stale_ci.sh assert-export-env
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           bash bench/stale_ci.sh pinned-iyi test --fresh --json \
-            --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --export-index "run:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/fresh.json
           bash bench/stale_ci.sh shadow-audit \
             --cached-json stale-index/cached.json \
@@ -1374,7 +1374,7 @@ jobs:
           rm -rf "$cache_dir/tests-v1"
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           bash bench/stale_ci.sh pinned-iyi test --cached --json \
-            --import-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
+            --import-index "run:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/audit-cached.json
           bash bench/stale_ci.sh assert-hits --json stale-index/audit-cached.json \
             --snapshot "stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json"

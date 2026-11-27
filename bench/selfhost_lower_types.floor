@@ -120,7 +120,7 @@ src/compiler/native/link/imports.iyi 5
 src/compiler/native/link/link.iyi 6
 src/compiler/native/link/macho_exe.iyi 9
 src/compiler/native/lower.iyi 5
-src/compiler/native/mir.iyi 12
+src/compiler/native/mir.iyi 13
 src/compiler/native/mir_clean.iyi 1
 src/compiler/native/obj/elf.iyi 5
 src/compiler/native/obj/macho.iyi 6

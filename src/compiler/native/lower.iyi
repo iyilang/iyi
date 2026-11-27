@@ -372,6 +372,29 @@ pub def assign_iyi_call(layout : DataLayout, desc : TargetDesc, params : Array(I
       i = i + 1
       next
     end
+    # A scalar is already its only leaf; avoid constructing the temporary flattened tuple array.
+    if !t.void? && !t.struct? && !t.array? && (!t.int? || t.bits <= 64 || t.bits % 64 != 0)
+      if t.float?
+        if fpr_next < desc.fp_args.size
+          args << [LeafLoc.new(1, desc.fp_args[fpr_next], -1_i64, t.bits, true, t)]
+          fpr_next = fpr_next + 1
+        else
+          args << [LeafLoc.new(2, -1, stack, t.bits, true, t)]
+          stack = stack + 8_i64
+        end
+      else
+        bits = t.int? ? t.bits : 64
+        if gpr_next < desc.integer_args.size
+          args << [LeafLoc.new(0, desc.integer_args[gpr_next], -1_i64, bits, false, t)]
+          gpr_next = gpr_next + 1
+        else
+          args << [LeafLoc.new(2, -1, stack, bits, false, t)]
+          stack = stack + 8_i64
+        end
+      end
+      i = i + 1
+      next
+    end
     leaves = flatten_leaves(layout, t)
     locs = [] of LeafLoc
     k = 0

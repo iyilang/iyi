@@ -607,6 +607,29 @@
   sites; `macro_unicode_case_tr.iyi` adds titlecase and a short `tr`
   replacement list) and catches 60 broken copies.
 
+- **The AArch64 back end allocates less per function; the objects are the
+  same bytes (#263).** `drop_unreferenced_helpers` scans the module's
+  declarations only for an undefined runtime helper it would drop, not for
+  every object symbol; the linear-scan allocator orders intervals with a
+  bottom-up merge over one scratch array, compacts its active set in place
+  (in order, so victim tie-breaking is unchanged), reads occupied registers
+  from a bitmask built in the same pass and reuses its general-register
+  pool; `rewrite_spills` reuses its per-instruction reload and store
+  buffers; the AArch64 target description is built once per module and
+  shared by selection and frame layout; and a scalar's selector leaves and
+  a scalar call argument no longer go through a one-entry flattened array.
+  On macOS arm64 the collector-free `native_cg obj` retires 10 to 12 % fewer
+  instructions in the back end on six self-hosted modules, and its objects
+  are byte-identical to the previous ones. `native_regalloc/active_order`
+  (spill table row: 6) lets two values die ahead of live ones in the active
+  set under register pressure, so an in-place compaction that keeps a dead
+  interval in place of a live one now fails the spill table on every host,
+  not only the hosted twins on macOS arm64. `native_cg/iyiwide` passes i128
+  arguments under the internal convention, one with its high half on the
+  stack; no fixture did, so a scalar call-argument path that gave an i128 one
+  register passed every gate, and the hosted twins on macOS arm64 now catch
+  it.
+
 ### Gates
 
 - **std/autocert's and std/acme's gates draw challtestsrv's DNS port free

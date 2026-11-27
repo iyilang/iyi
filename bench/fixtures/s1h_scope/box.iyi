@@ -1,0 +1,9 @@
+module s1h_scope/box
+
+pub class Box(T)
+  def initialize
+  end
+end
+
+pub class Item
+end

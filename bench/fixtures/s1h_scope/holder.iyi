@@ -1,0 +1,11 @@
+module s1h_scope/holder
+
+import s1h_scope/types::{TypeTable}
+
+pub class Holder
+  getter table : TypeTable
+
+  def initialize
+    @table = TypeTable.new
+  end
+end

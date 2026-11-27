@@ -1,0 +1,20 @@
+# An inherited instance method: the call is on Child, the def is Parent's.
+# The dump must name both. Read by bench/selfhost_semantic_calls_exercise.sh.
+
+class Parent
+  def inherited_m(x : Int32) : Int32
+    x
+  end
+
+  def self.make(x : Int32) : Parent
+    Parent.new
+  end
+end
+
+class Child < Parent
+  def self.make(x : Int32) : Child
+    Child.new
+  end
+end
+
+# defining Child.make(1).inherited_m(1)

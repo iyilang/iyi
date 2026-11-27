@@ -1,0 +1,52 @@
+module compiler/types/indirection
+
+import compiler/semantic/top_level::{AliasType, GenericClassType, GenericTraitType, NonGenericModuleType, TraitType, Type, UnionType}
+import compiler/types/types::{GenericModuleInstanceType, VirtualType}
+import compiler/types/intersect::{TypeIntersect}
+
+# Port of the hosted remove_indirection (src/compiler/iyi/types.cr). Each class
+# that reopens the hosted Type declares it in its own file; iyi cannot reopen a
+# class, so the port carries the method as a module function taking the
+# receiver first, here, because the rule needs the includers that
+# compiler/types/intersect already computes.
+#
+# The rule. A module, generic class or generic module instance that is included
+# somewhere stands for the union of its includers, which is what the hosted
+# `including_types.remove_indirection` returns: a union's own
+# remove_indirection is the union itself. An alias stands for its aliased type.
+# A typedef stands for itself. A virtual type over a struct union stands for
+# that union; the hosted method returns the member array there, which the port
+# returns as the union those members form. Everything else stands for itself.
+#
+# Skipped: the hosted AliasType branch that clears `simple` when an alias has no
+# aliased type. Every alias the port models names one (`process_value` resolves
+# it), so the flag never clears here.
+pub class TypeIndirection
+  def self.remove_indirection(type : Type) : Type
+    if type.is_a?(AliasType)
+      return remove_indirection(type.as(AliasType).process_value)
+    end
+    if type.is_a?(NonGenericModuleType) || type.is_a?(GenericClassType) || type.is_a?(GenericModuleInstanceType) || (type.is_a?(TraitType) && !type.is_a?(GenericTraitType))
+      if including = TypeIntersect.including_union(type.program, type)
+        return including
+      end
+      return type
+    end
+    if type.is_a?(VirtualType) && type.struct?
+      base = type.as(VirtualType).base_type
+      if base.is_a?(UnionType)
+        if merged = TypeIntersect.union_or_nil(type.program, base.as(UnionType).union_types)
+          return merged
+        end
+      end
+    end
+    type
+  end
+
+  def self.trait_value_type(type : Type) : Type
+    if type.is_a?(TraitType) && !type.is_a?(GenericTraitType)
+      return remove_indirection(type)
+    end
+    type
+  end
+end

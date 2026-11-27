@@ -1,0 +1,460 @@
+module compiler/semantic/math_interpreter
+
+# Folds constant integer expressions: `1 + 2` for an enum value, a constant
+# or a StaticArray size. Port of src/compiler/iyi/semantic/math_interpreter.cr
+# (the hosted compiler), for iyi source only, so the hosted `iyi_rules?` branch
+# is the only one ported: `//` truncates, `%` takes the dividend's sign, and
+# shifts past the width answer zero (or the sign). Values are kind-tagged
+# 128-bit patterns, sign-extended for signed kinds and zero-extended otherwise.
+#
+# The port refuses paths that need the program's types, calls that may expand
+# as macros, and unary negation of an unsigned kind.
+#
+# Checked + - * must fit the left kind ("Arithmetic overflow"); wrapping
+# arithmetic and bitwise operators wrap to that kind. Mixed-signed division
+# reinterprets the divisor at the larger operand width with the left sign.
+# Signed MIN divided by a raw -1 reports "Overflow: Int8::MIN / -1". When
+# an unsigned divisor reinterprets as -1, hosted signed MIN division is
+# platform-dependent; this port retains its magnitude-based result.
+# A negative shift count reverses direction; negating a count below
+# -2147483647 overflows the Int32 used by the hosted shift helper.
+#
+# iyi has no catchable exceptions: a value out of range panics, so every
+# range is checked before the operation runs.
+
+import std/int
+import compiler/syntax/ast::{ASTNode, Call, Expressions, NumberLiteral, Path}
+import compiler/syntax/token::{NumberKind}
+
+# A 128-bit value is kept in these classes as two 64-bit words, never as one Int128 or UInt128 field. The
+# hosted compiler reads a 128-bit field with a load aligned to 16 bytes, and its allocator hands out an object
+# with a header at 8 bytes past a 16-byte boundary about half the time: on x86-64 hardware that load is a
+# `movaps` and it faults (the Linux runner killed the math fold on `//` and `%` with a segmentation fault;
+# arm64 does not check the alignment, and neither does an x86-64 emulator). Two words need 8 bytes.
+def math_low_word(bits : UInt128) : UInt64
+  (bits & 18446744073709551615_u128).to_u64
+end
+
+def math_high_word(bits : UInt128) : UInt64
+  (bits >> 64).to_u64
+end
+
+def math_join_words(high : UInt64, low : UInt64) : UInt128
+  (high.to_u128 << 64) | low.to_u128
+end
+
+pub class MathValue
+  getter kind : NumberKind
+  @high : UInt64
+  @low : UInt64
+
+  def initialize(bits : UInt128, @kind : NumberKind)
+    @high = math_high_word(bits)
+    @low = math_low_word(bits)
+  end
+
+  def bits : UInt128
+    math_join_words(@high, @low)
+  end
+
+  def negative? : Bool
+    @kind.signed? && @high >= 9223372036854775808_u64
+  end
+
+  def zero? : Bool
+    @high == 0_u64 && @low == 0_u64
+  end
+
+  def magnitude : UInt128
+    negative? ? 0_u128 &- bits : bits
+  end
+
+  def decimal : String
+    negative? ? "-" + magnitude.to_s : bits.to_s
+  end
+end
+
+pub class MathError
+  getter message : String
+  getter refused : Bool
+
+  def initialize(@message : String, @refused : Bool = false)
+  end
+end
+
+pub alias MathResult = MathValue | MathError
+
+# An exact result before it is checked against a kind: a sign, a magnitude,
+# and `beyond` when the magnitude does not fit in UInt128.
+class MathExact
+  getter negative : Bool
+  getter beyond : Bool
+  @high : UInt64
+  @low : UInt64
+
+  def initialize(@negative : Bool, magnitude : UInt128, @beyond : Bool = false)
+    @high = math_high_word(magnitude)
+    @low = math_low_word(magnitude)
+  end
+
+  def magnitude : UInt128
+    math_join_words(@high, @low)
+  end
+end
+
+pub class MathInterpreter
+  getter target : NumberKind?
+
+  def initialize(@target : NumberKind? = nil)
+  end
+
+  def interpret(node : ASTNode) : MathResult
+    if node.is_a?(NumberLiteral)
+      return interpret_number(node.as(NumberLiteral))
+    end
+    if node.is_a?(Call)
+      return interpret_call(node.as(Call))
+    end
+    if node.is_a?(Path)
+      return MathError.new("a constant path needs the program's types, which the port does not carry", true)
+    end
+    if node.is_a?(Expressions)
+      expressions = node.as(Expressions).expressions
+      if expressions.size == 1
+        return interpret(expressions[0])
+      end
+      return MathError.new("invalid constant value")
+    end
+    MathError.new("invalid constant value")
+  end
+
+  def interpret_number(node : NumberLiteral) : MathResult
+    kind = node.kind
+    unless kind.signed? || kind.unsigned?
+      return MathError.new("constant value must be an integer, not #{kind.to_s}")
+    end
+    target_kind = @target || kind
+    MathInterpreter.parse_literal(node.value, target_kind)
+  end
+
+  def interpret_call(node : Call) : MathResult
+    obj = node.obj
+    return MathInterpreter.macro_refusal(node.name) unless obj
+    if node.args.size == 0
+      left = interpret(obj)
+      return left if left.is_a?(MathError)
+      return MathInterpreter.unary(left.as(MathValue), node.name)
+    end
+    if node.args.size == 1
+      left = interpret(obj)
+      return left if left.is_a?(MathError)
+      right = interpret(node.args[0])
+      return right if right.is_a?(MathError)
+      return MathInterpreter.binary(left.as(MathValue), right.as(MathValue), node.name)
+    end
+    MathError.new("invalid constant value")
+  end
+
+  # The hosted `interpret_call_macro` with no visitor answers "invalid
+  # constant value"; with a visitor it expands a macro. The port has no
+  # visitor, so it refuses instead of answering either way.
+  def self.macro_refusal(name : String) : MathError
+    MathError.new("call #{name} may expand as a macro, which the port cannot run", true)
+  end
+
+  def self.unary(value : MathValue, name : String) : MathResult
+    case name
+    when "+"
+      value
+    when "-"
+      return macro_refusal(name) unless value.kind.signed?
+      classify(value.kind, negate(exact_of(value)))
+    when "~"
+      wrap(~value.bits, value.kind)
+    else
+      macro_refusal(name)
+    end
+  end
+
+  def self.binary(left : MathValue, right : MathValue, name : String) : MathResult
+    kind = left.kind
+    case name
+    when "+"
+      classify(kind, exact_add(exact_of(left), exact_of(right)))
+    when "-"
+      classify(kind, exact_add(exact_of(left), negate(exact_of(right))))
+    when "*"
+      classify(kind, exact_mul(exact_of(left), exact_of(right)))
+    when "&+"
+      wrap(left.bits &+ right.bits, kind)
+    when "&-"
+      wrap(left.bits &- right.bits, kind)
+    when "&*"
+      wrap(left.bits &* right.bits, kind)
+    when "&"
+      wrap(left.bits & right.bits, kind)
+    when "|"
+      wrap(left.bits | right.bits, kind)
+    when "^"
+      wrap(left.bits ^ right.bits, kind)
+    when "//"
+      quotient(left, right)
+    when "%"
+      remainder(left, right)
+    when "<<"
+      shift_left(left, right)
+    when ">>"
+      shift_right(left, right)
+    else
+      macro_refusal(name)
+    end
+  end
+
+  # Literals first: the target kind (when there is one) decides the kind and
+  # the range, as the hosted `to_i8?` family does. A literal that does not fit
+  # is "invalid Int8: 300" with the text as written.
+  def self.parse_literal(text : String, kind : NumberKind) : MathResult
+    negative = false
+    start = 0
+    if text.bytesize > 0 && text.byte_at(0) == 45_u8
+      negative = true
+      start = 1
+    elsif text.bytesize > 0 && text.byte_at(0) == 43_u8
+      start = 1
+    end
+    invalid = MathError.new("invalid #{kind_name(kind)}: #{text}")
+    if start >= text.bytesize
+      return invalid
+    end
+    magnitude = 0_u128
+    beyond = false
+    i = start
+    while i < text.bytesize
+      b = text.byte_at(i)
+      return invalid if b < 48_u8 || b > 57_u8
+      digit = (b - 48_u8).to_u128
+      unless beyond
+        if magnitude > (umax - digit) // 10_u128
+          beyond = true
+        else
+          magnitude = magnitude * 10_u128 + digit
+        end
+      end
+      i += 1
+    end
+    return invalid if beyond
+    return invalid unless literal_fits(kind, negative, magnitude)
+    from_sign(negative, magnitude, kind)
+  end
+
+  def self.quotient(left : MathValue, right : MathValue) : MathResult
+    kind = left.kind
+    return MathError.new("Division by 0") if right.zero?
+    if kind.signed? && left.negative? && left.magnitude == lower_magnitude(kind) && right.negative? && right.magnitude == 1_u128
+      return MathError.new("Overflow: #{kind_name(kind)}::MIN / -1")
+    end
+    divisor = division_divisor(left, right)
+    negative = left.negative? != divisor.negative?
+    magnitude = left.magnitude // divisor.magnitude
+    bits = negative ? 0_u128 &- magnitude : magnitude
+    wrap(bits, kind)
+  end
+
+  def self.remainder(left : MathValue, right : MathValue) : MathResult
+    kind = left.kind
+    return MathError.new("Division by 0") if right.zero?
+    if kind.signed? && left.negative? && left.magnitude == lower_magnitude(kind) && right.negative? && right.magnitude == 1_u128
+      return MathValue.new(0_u128, kind)
+    end
+    divisor = division_divisor(left, right)
+    magnitude = left.magnitude % divisor.magnitude
+    bits = left.negative? ? 0_u128 &- magnitude : magnitude
+    wrap(bits, kind)
+  end
+
+  # Mixed signs use the larger operand width and the dividend's signedness.
+  def self.division_divisor(left : MathValue, right : MathValue) : MathValue
+    return right if left.kind.signed? == right.kind.signed?
+    wrap(right.bits, division_kind(left.kind, right.kind))
+  end
+
+  def self.division_kind(left : NumberKind, right : NumberKind) : NumberKind
+    width = left.bit_width
+    width = right.bit_width if right.bit_width > width
+    if left.signed?
+      case width
+      when  8 then NumberKind::I8
+      when 16 then NumberKind::I16
+      when 32 then NumberKind::I32
+      when 64 then NumberKind::I64
+      else         NumberKind::I128
+      end
+    else
+      case width
+      when  8 then NumberKind::U8
+      when 16 then NumberKind::U16
+      when 32 then NumberKind::U32
+      when 64 then NumberKind::U64
+      else         NumberKind::U128
+      end
+    end
+  end
+
+  # A negative count reverses direction and is negated in Int32 by the host.
+  def self.shift_left(value : MathValue, count : MathValue) : MathResult
+    if count.negative?
+      return MathError.new("Arithmetic overflow") if count.magnitude > 2147483647_u128
+      return shift_right_by(value, count.magnitude)
+    end
+    shift_left_by(value, count.magnitude)
+  end
+
+  def self.shift_right(value : MathValue, count : MathValue) : MathResult
+    if count.negative?
+      return MathError.new("Arithmetic overflow") if count.magnitude > 2147483647_u128
+      return shift_left_by(value, count.magnitude)
+    end
+    shift_right_by(value, count.magnitude)
+  end
+
+  def self.shift_left_by(value : MathValue, count : UInt128) : MathValue
+    return MathValue.new(0_u128, value.kind) if count >= value.kind.bit_width.to_u128
+    wrap(value.bits << count.to_i32, value.kind)
+  end
+
+  def self.shift_right_by(value : MathValue, count : UInt128) : MathValue
+    if count >= value.kind.bit_width.to_u128
+      return MathValue.new(value.negative? ? umax : 0_u128, value.kind)
+    end
+    bits = value.negative? ? ~((~value.bits) >> count.to_i32) : value.bits >> count.to_i32
+    wrap(bits, value.kind)
+  end
+
+  # Keep the low bits and sign-extend only signed kinds.
+  def self.wrap(value : UInt128, kind : NumberKind) : MathValue
+    low = value & mask_of(kind)
+    if kind.signed? && low > upper_magnitude(kind)
+      low = low | ~mask_of(kind)
+    end
+    MathValue.new(low, kind)
+  end
+
+  def self.from_sign(negative : Bool, magnitude : UInt128, kind : NumberKind) : MathValue
+    bits = negative ? 0_u128 &- magnitude : magnitude
+    MathValue.new(bits, kind)
+  end
+
+  # Exact arithmetic on sign and magnitude, so no step can overflow the iyi
+  # integer it runs in.
+  def self.exact_of(value : MathValue) : MathExact
+    MathExact.new(value.negative?, value.magnitude)
+  end
+
+  def self.negate(value : MathExact) : MathExact
+    MathExact.new(!value.negative, value.magnitude, value.beyond)
+  end
+
+  def self.exact_add(a : MathExact, b : MathExact) : MathExact
+    if a.negative == b.negative
+      return MathExact.new(a.negative, umax, true) if b.magnitude > umax - a.magnitude
+      return MathExact.new(a.negative, a.magnitude + b.magnitude)
+    end
+    if a.magnitude >= b.magnitude
+      MathExact.new(a.negative, a.magnitude - b.magnitude)
+    else
+      MathExact.new(b.negative, b.magnitude - a.magnitude)
+    end
+  end
+
+  def self.exact_mul(a : MathExact, b : MathExact) : MathExact
+    return MathExact.new(false, 0_u128) if a.magnitude == 0_u128 || b.magnitude == 0_u128
+    return MathExact.new(a.negative != b.negative, umax, true) if b.magnitude > umax // a.magnitude
+    MathExact.new(a.negative != b.negative, a.magnitude * b.magnitude)
+  end
+
+  # The exact result must fit the kind: the magnitude against the kind's
+  # limit on its side of zero.
+  def self.classify(kind : NumberKind, exact : MathExact) : MathResult
+    return MathError.new("Arithmetic overflow") if exact.beyond
+    magnitude = exact.magnitude
+    return MathValue.new(0_u128, kind) if magnitude == 0_u128
+    if exact.negative
+      return MathError.new("Arithmetic overflow") unless kind.signed? && magnitude <= lower_magnitude(kind)
+      return from_sign(true, magnitude, kind)
+    end
+    return MathError.new("Arithmetic overflow") if magnitude > upper_magnitude(kind)
+    from_sign(false, magnitude, kind)
+  end
+
+  def self.literal_fits(kind : NumberKind, negative : Bool, magnitude : UInt128) : Bool
+    if negative
+      kind.signed? && magnitude <= lower_magnitude(kind)
+    else
+      magnitude <= upper_magnitude(kind)
+    end
+  end
+
+  # The largest magnitude a kind holds on its positive side, and the largest
+  # on its negative side (signed kinds only; zero otherwise).
+  def self.upper_magnitude(kind : NumberKind) : UInt128
+    case kind
+    when NumberKind::I8   then 127_u128
+    when NumberKind::I16  then 32767_u128
+    when NumberKind::I32  then 2147483647_u128
+    when NumberKind::I64  then 9223372036854775807_u128
+    when NumberKind::I128 then 170141183460469231731687303715884105727_u128
+    when NumberKind::U8   then 255_u128
+    when NumberKind::U16  then 65535_u128
+    when NumberKind::U32  then 4294967295_u128
+    when NumberKind::U64  then 18446744073709551615_u128
+    when NumberKind::U128 then umax
+    else                       0_u128
+    end
+  end
+
+  def self.lower_magnitude(kind : NumberKind) : UInt128
+    case kind
+    when NumberKind::I8   then 128_u128
+    when NumberKind::I16  then 32768_u128
+    when NumberKind::I32  then 2147483648_u128
+    when NumberKind::I64  then 9223372036854775808_u128
+    when NumberKind::I128 then two127
+    else                       0_u128
+    end
+  end
+
+  def self.mask_of(kind : NumberKind) : UInt128
+    case kind
+    when NumberKind::I8, NumberKind::U8     then 255_u128
+    when NumberKind::I16, NumberKind::U16   then 65535_u128
+    when NumberKind::I32, NumberKind::U32   then 4294967295_u128
+    when NumberKind::I64, NumberKind::U64   then 18446744073709551615_u128
+    when NumberKind::I128, NumberKind::U128 then umax
+    else                                         0_u128
+    end
+  end
+
+  def self.kind_name(kind : NumberKind) : String
+    case kind
+    when NumberKind::I8   then "Int8"
+    when NumberKind::I16  then "Int16"
+    when NumberKind::I32  then "Int32"
+    when NumberKind::I64  then "Int64"
+    when NumberKind::I128 then "Int128"
+    when NumberKind::U8   then "UInt8"
+    when NumberKind::U16  then "UInt16"
+    when NumberKind::U32  then "UInt32"
+    when NumberKind::U64  then "UInt64"
+    when NumberKind::U128 then "UInt128"
+    else                       kind.to_s
+    end
+  end
+
+  def self.two127 : UInt128
+    170141183460469231731687303715884105728_u128
+  end
+
+  def self.umax : UInt128
+    340282366920938463463374607431768211455_u128
+  end
+end

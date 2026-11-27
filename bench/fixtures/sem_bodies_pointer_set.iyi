@@ -1,0 +1,22 @@
+@[Unsafe("the fixture assigns through a raw pointer")]
+struct Pointer(T)
+  @[Primitive(:pointer_set)]
+  def value=(value : T)
+  end
+end
+
+x = 1
+p = pointerof(x)
+p.value = 2
+
+def set_raw(q : Pointer(Int32))
+  q.value = 1
+end
+
+def set_void(q : Pointer(Void)) : Nil
+  q.value = nil
+end
+
+y = set_raw(p)
+z = uninitialized Pointer(Void)
+set_void(z)

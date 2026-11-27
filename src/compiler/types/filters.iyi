@@ -1,0 +1,167 @@
+module compiler/types/filters
+
+import compiler/semantic/top_level::{SemanticProgram, Type, UnionType}
+import compiler/types/filtering::{TypeFiltering}
+import compiler/types/intersect::{TypeIntersect}
+import compiler/types/merge::{TypeMerge}
+import compiler/types/types::{TypeQueries}
+import compiler/types/unification::{TypeUnification}
+
+# A type filter, as the hosted code builds it: the narrowing that a condition
+# (`x.is_a?(T)`, `x.nil?`, `x`, `x.responds_to?(name)`, and the `!`, `&&` and
+# `||` of those) makes to the type of `x`. The hosted code has one class per
+# filter with an `apply` method; the port has one record per filter and the
+# function TypeFilter.apply, which dispatches on the kind.
+#
+# Kinds: "is_a" (type_arg), "truthy", "responds_to" (name), "not" (left),
+# "and" and "or" (left and right). The hosted `nil?` is "is_a" with Nil.
+pub class TypeFilterSpec
+  getter kind : String
+  getter type_arg : Type?
+  getter name : String
+  getter left : TypeFilterSpec?
+  getter right : TypeFilterSpec?
+
+  def initialize(@kind : String, @type_arg : Type? = nil, @name : String = "", @left : TypeFilterSpec? = nil, @right : TypeFilterSpec? = nil)
+  end
+end
+
+# Port of src/compiler/iyi/semantic/filters.cr: TypeFilter#apply, and the
+# negation and combination builders TypeFilter.and, TypeFilter.or and #not.
+pub class TypeFilter
+  # Applies the filter to the type of the tested value (nil when there is none).
+  def self.apply(program : SemanticProgram, spec : TypeFilterSpec, other : Type?) : Type?
+    kind = spec.kind
+
+    if kind == "is_a"
+      if target = spec.type_arg
+        return nil if other.nil?
+        return TypeIntersect.common_descendent(program, other, target)
+      end
+      return nil
+    end
+
+    if kind == "responds_to"
+      return nil if other.nil?
+      return TypeFiltering.filter_by_responds_to(program, other, spec.name)
+    end
+
+    if kind == "truthy"
+      return nil if other.nil?
+      return nil if other.nil_type?
+      if other.is_a?(UnionType)
+        members = [] of Type
+        other.as(UnionType).union_types.each do |member|
+          members << member unless member.nil_type?
+        end
+        return nil if members.empty?
+        return TypeUnification.union_of(program, members)
+      end
+      return other
+    end
+
+    if kind == "not"
+      if inner = spec.left
+        return apply_not(program, inner, other)
+      end
+      return nil
+    end
+
+    if kind == "and"
+      if left = spec.left
+        if right = spec.right
+          first = apply(program, left, other)
+          return apply(program, right, first)
+        end
+      end
+      return nil
+    end
+
+    if kind == "or"
+      if left = spec.left
+        if right = spec.right
+          type1 = apply(program, left, other)
+          type2 = apply(program, right, other)
+          if a = type1
+            if b = type2
+              return TypeUnification.union_of(program, TypeMerge.compact_types(program, [a, b] of Type))
+            end
+          end
+          return type1 unless type1.nil?
+          return type2
+        end
+      end
+      return nil
+    end
+
+    nil
+  end
+
+  # NotFilter#apply: the members of the tested type that the inner filter does
+  # not keep. A falsy filter also keeps the Bool and pointer members it removes.
+  private def self.apply_not(program : SemanticProgram, inner : TypeFilterSpec, other : Type?) : Type?
+    kept_by_inner = apply(program, inner, other)
+    removed = [] of Type
+    if found = kept_by_inner
+      if found.is_a?(UnionType)
+        found.as(UnionType).union_types.each do |member|
+          removed << member
+        end
+      else
+        removed << found
+      end
+    end
+
+    tested = [] of Type
+    if value = other
+      if value.is_a?(UnionType)
+        value.as(UnionType).union_types.each do |member|
+          tested << member
+        end
+      else
+        tested << value
+      end
+    end
+
+    resulting = [] of Type
+    tested.each do |member|
+      resulting << member unless includes_type?(removed, member)
+    end
+
+    if inner.kind == "truthy"
+      removed.each do |member|
+        if member == program.bool_type || TypeQueries.pointer?(member)
+          resulting << member
+        end
+      end
+    end
+
+    if resulting.size == 0
+      return other if inner.kind == "truthy"
+      return nil
+    end
+    return resulting.first if resulting.size == 1
+    TypeMerge.merge_all(program, resulting)
+  end
+
+  # TypeFilter#not: the filter that keeps what this one removes.
+  def self.negate(spec : TypeFilterSpec) : TypeFilterSpec
+    if spec.kind == "not"
+      return spec.left.as(TypeFilterSpec)
+    end
+    if spec.kind == "and"
+      return TypeFilterSpec.new("or", nil, "", negate(spec.left.as(TypeFilterSpec)), negate(spec.right.as(TypeFilterSpec)))
+    end
+    if spec.kind == "or"
+      return TypeFilterSpec.new("and", nil, "", negate(spec.left.as(TypeFilterSpec)), negate(spec.right.as(TypeFilterSpec)))
+    end
+    TypeFilterSpec.new("not", nil, "", spec)
+  end
+
+  def self.includes_type?(types : Array(Type), t : Type) : Bool
+    types.each do |u|
+      return true if u == t
+    end
+    false
+  end
+end

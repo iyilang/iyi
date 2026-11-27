@@ -1,0 +1,32 @@
+class S
+  @@state : Int32 | Nil = nil
+
+  def self.state : Int32
+    state = @@state
+    return state if state.is_a?(Int32)
+    first
+  end
+
+  def self.first : Int32
+    lock
+    @@state = 7
+    7
+  end
+
+  def self.lock : Nil
+    return unless shared?
+    state
+    nil
+  end
+
+  def self.shared? : Bool
+    false
+  end
+end
+
+def top : Int32
+  S.lock
+  S.state
+end
+
+x = top

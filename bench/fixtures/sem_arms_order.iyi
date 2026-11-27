@@ -1,0 +1,22 @@
+abstract class Node
+end
+
+class A < Node
+end
+
+class B < Node
+end
+
+def show(node : Node) : String
+  "node"
+end
+
+def show(node : A) : String
+  "A"
+end
+
+def make(flag : Bool) : Node
+  flag ? A.new.as(Node) : B.new.as(Node)
+end
+
+puts show(make(true))

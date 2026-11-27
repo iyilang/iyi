@@ -1,0 +1,117 @@
+class FlowItem
+  def ready? : Bool
+    true
+  end
+
+  def score : Int32
+    9
+  end
+end
+
+class FlowHolder
+  @item : FlowItem | Nil
+
+  def initialize(item : FlowItem | Nil)
+    @item = item
+  end
+
+  def item : FlowItem | Nil
+    @item
+  end
+
+  def read_ivar : Int32
+    if found = @item
+      found.score
+    else
+      0
+    end
+  end
+end
+
+def flow_take(item : FlowItem) : Int32
+  item.score
+end
+
+def flow_take_nil(item : Nil) : Int32
+  0
+end
+
+def flow_step(item : FlowItem | Nil) : FlowItem | Nil
+  item
+end
+
+def flow_source(flag : Bool) : FlowItem | Nil
+  if flag
+    FlowItem.new
+  else
+    nil
+  end
+end
+
+def flow_assign(item : FlowItem | Nil, holder : FlowHolder) : Int32
+  if found = item
+    copied = found
+    if copied.ready?
+      flow_take(copied)
+    else
+      found.score
+    end
+  elsif other = holder.item
+    other.score
+  else
+    flow_take_nil(other)
+  end
+end
+
+def flow_while(item : FlowItem | Nil) : Int32
+  while found = flow_step(item)
+    return found.score
+  end
+  0
+end
+
+def flow_and(item : FlowItem | Nil) : Int32
+  if (found = item) && found.ready?
+    found.score
+  else
+    0
+  end
+end
+
+def flow_unless(item : FlowItem | Nil) : Int32
+  unless found = item
+    flow_take_nil(found)
+  else
+    found.score
+  end
+end
+
+holder = FlowHolder.new(nil)
+a = flow_assign(nil, holder)
+b = flow_while(nil)
+c = flow_and(nil)
+d = flow_unless(nil)
+e = holder.read_ivar
+input = flow_source(true)
+result = if found = input
+           copied = found
+           if copied.ready?
+             flow_take(copied)
+           else
+             found.score
+           end
+         elsif other = holder.item
+           other.score
+         else
+           flow_take_nil(other)
+         end
+result2 = if (found = input) && found.ready?
+            found.score
+          else
+            0
+          end
+result3 = unless found = input
+  flow_take_nil(found)
+else
+  found.score
+end

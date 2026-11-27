@@ -1,0 +1,5 @@
+def produce(& : -> U) : V forall U, V
+  yield
+end
+
+puts produce { 7 }

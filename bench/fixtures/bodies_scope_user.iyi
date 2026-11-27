@@ -1,0 +1,13 @@
+module bodies_scope_user
+
+import bodies_scope_helper::{ScopeBox, scope_value}
+
+pub class Reader
+  def read
+    ScopeBox.new.value
+  end
+
+  def again
+    scope_value
+  end
+end

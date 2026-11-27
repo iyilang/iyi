@@ -1,0 +1,11 @@
+struct MatchOwner(T)
+  def append(pointer : Pointer(T)) : Nil
+  end
+end
+
+def match_u64_owner : MatchOwner(UInt64)
+  MatchOwner(UInt64).new
+end
+
+# call match_u64_owner.append(instance(Pointer(UInt64)))
+# call match_u64_owner.append(instance(Pointer(Int32)))

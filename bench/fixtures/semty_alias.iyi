@@ -1,0 +1,41 @@
+class Animal
+end
+
+class Dog < Animal
+end
+
+class Cat < Animal
+end
+
+alias Id = Int32
+alias Chain = Id
+alias Pets = Dog | Cat
+alias Named = Animal
+
+lib LibC
+  type Handle = Int32
+end
+
+# op Id.remove_alias
+# op Chain.remove_alias
+# op Pets.remove_alias
+# op Named.remove_alias
+# op Int32.remove_alias
+# op merge(Id, String)
+# op merge(Id, Int32)
+# op merge(Chain, Id)
+# op merge(Named, Dog)
+# op merge(Pets, Animal)
+# op intersect(Id, Int32)
+# op intersect(Int32, Id)
+# op intersect(Id, String)
+# op intersect(Animal, Id)
+# op intersect(Named, Dog)
+# op intersect(Dog, Named)
+# op intersect(Dog, Pets)
+# op intersect(Pets, Dog)
+# op filter(Id, is_a, Int32)
+# op filter(Named, is_a, Dog)
+# op LibC::Handle.remove_typedef
+# op merge(LibC::Handle, Int32)
+# op intersect(LibC::Handle, Int32)

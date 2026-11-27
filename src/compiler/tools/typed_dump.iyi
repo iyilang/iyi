@@ -1,0 +1,194 @@
+# The typed-node dump the typed parity gate compares with
+# `bench/selfhost_typed_oracle.cr` (bench/selfhost_typed_parity_exercise.sh).
+#
+#   typed_dump [-Dname ...] [--instances] <file.iyi> [root ...]
+#
+# Prints one line per expression node of the file that the iyi semantic port
+# typed, as "<line>:<col> <Kind> <type>", in tree order. A node the port cannot
+# type prints "untyped: <reason>" in its place and never counts as matched; the
+# gate totals those reasons, which is the work list for the semantic port. The
+# program is the file alone: the port has no prelude yet. The root block of the
+# program is not counted, and neither is a prelude require (the oracle's dump
+# skips the same nodes). A file the port cannot analyse at all raises, which
+# exits non-zero with the message on stderr; the gate records that file as zero
+# matched.
+#
+# With --instances the dump is followed by one line, "typed instances: N": the
+# number of instantiations the body typer recorded (one per def instance, see
+# MainVisitor#def_instances). The oracle has no such count, so the gate reads it
+# on its own and the node dump stays comparable.
+#
+# The dump runs the port in total mode (SemanticProgram#total_mode and
+# MainVisitor#total): a name it cannot resolve or a construct it does not type
+# costs those nodes, not the file.
+
+module compiler/tools/typed_dump
+
+import compiler/syntax/ast::{ASTNode, Expressions}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/top_level::{NamedType, SemanticProgram, TopLevelVisitor, Type}
+import compiler/semantic/instance_vars::{declare_guessed_instance_vars}
+import compiler/semantic/main_visitor::{MainVisitor, node_class_name}
+import compiler/macros/target_flags::{MacroTargetFlags}
+import compiler/semantic/recursive_struct_checker::{RecursiveStructChecker}
+
+# The type label one typed node is printed with. The gate's mutation proof
+# replaces this body to print a wrong type for one node kind.
+def typed_label(node : ASTNode, t : Type) : String
+  if t.is_a?(NamedType)
+    t.full_name
+  else
+    t.to_s
+  end
+end
+
+# The first line of a reason, so one reason is always one output line.
+def first_line(reason : String) : String
+  reason.split("\n").first
+end
+
+pub class TypedNodeWalk < Visitor
+  getter lines : Array(String)
+
+  def initialize(@visitor : MainVisitor, @file : String, @root : ASTNode)
+    @lines = Array(String).new
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    return true if node.node_id == @root.node_id
+    # Hosted Expressions#location (ast.cr 236-238) is the node's own location,
+    # or the first child's when the list itself was not located. A class body
+    # is that list: typed Nil, printed at the first def.
+    loc = node.location
+    if loc.nil? && node.is_a?(Expressions)
+      exps = node.as(Expressions).expressions
+      if !exps.empty?
+        loc = exps[0].location
+      end
+    end
+    if loc
+      if loc.filename == @file
+        if t = @visitor.type_of?(node)
+          @lines << "#{loc.line_number}:#{loc.column_number} #{node_class_name(node)} #{typed_label(node, t)}"
+        elsif reason = @visitor.untyped_reason?(node)
+          @lines << "untyped: #{first_line(reason)}"
+        end
+      end
+    end
+    true
+  end
+end
+
+# One analysis of a file: its node dump lines and the number of typed instances.
+pub class TypedDumpResult
+  getter lines : Array(String)
+  getter instances : Int32
+
+  def initialize(@lines : Array(String), @instances : Int32)
+  end
+end
+
+module TypedDump
+  # The directory a file's path names: where its imports are looked for first (the entry
+  # directory of Program#iyi_import_root).
+  def self.directory_of(filename : String) : String
+    parts = filename.split('/')
+    dir = ""
+    i = 0
+    while i < parts.size - 1
+      dir = "#{dir}#{parts[i]}/"
+      i = i + 1
+    end
+    dir
+  end
+
+  def self.analyse(source : String, filename : String, roots : Array(String), iyi_defer : Bool = false, with_prelude : Bool = false, macro_flags : Array(String)? = nil) : TypedDumpResult
+    parser = Parser.new(source, filename)
+    prog = SemanticProgram.new
+    prog.normalizer.macro_flags = macro_flags
+    prog.iyi_prelude = iyi_defer
+    node = prog.normalizer.normalize(parser.parse)
+    prog.total_mode = true
+    prog.search_path = roots
+    prog.entry_dir = TypedDump.directory_of(filename)
+    prog.file_imports[filename] = prog.current_imports
+    prog.file_import_defs[filename] = prog.current_import_defs
+    if with_prelude
+      prelude = TopLevelVisitor.new(prog)
+      prelude_file = prelude.import_file("iyi/prelude")
+      raise "cannot find iyi/prelude" if prelude_file.nil?
+      prelude.load_file(prelude_file.as(String))
+      prelude.finish
+    end
+    tl = TopLevelVisitor.new(prog, filename)
+    if iyi_defer
+      registry_source = "def __iyi_defer_push(cleanup : Proc(Nil)) : Nil\n  nil\nend\ndef __iyi_defer_pop_run : Nil\n  nil\nend\n"
+      registry = Parser.new(registry_source, "<iyi-defer-registry>").parse
+      prog.file_imports["<iyi-defer-registry>"] = prog.current_imports
+      prog.file_import_defs["<iyi-defer-registry>"] = prog.current_import_defs
+      registry.accept(tl)
+    end
+    node.accept(tl)
+    tl.finish
+    declare_guessed_instance_vars(prog)
+    mv = MainVisitor.new(prog)
+    mv.total = true
+    node.accept(mv)
+    RecursiveStructChecker.new(prog).run
+    walk = TypedNodeWalk.new(mv, filename, node)
+    node.accept(walk)
+    TypedDumpResult.new(walk.lines, mv.typed_instances.size)
+  end
+
+  def self.dump(source : String, filename : String, roots : Array(String)) : Array(String)
+    analyse(source, filename, roots).lines
+  end
+end
+
+module TypedDumpTool
+  def self.run : Nil
+    args = Program.args
+    first = 0
+    instances = false
+    iyi_defer = false
+    with_prelude = false
+    defines = [] of String
+    while first < args.size && args[first].starts_with?("-D")
+      define = args[first][2, args[first].size - 2]
+      raise "empty -D flag" if define.empty?
+      defines << define
+      first = first + 1
+    end
+    if args.size > first && args[first] == "--with-prelude"
+      with_prelude = true
+      first = first + 1
+    end
+    if args.size > first && args[first] == "--iyi-defer"
+      iyi_defer = true
+      first = first + 1
+    end
+    if args.size > first && args[first] == "--instances"
+      instances = true
+      first = first + 1
+    end
+    if args.size <= first
+      raise "usage: typed_dump [-Dname ...] [--iyi-defer] [--instances] <file.iyi> [root ...]"
+    end
+    path = args[first]
+    roots = [] of String
+    i = first + 1
+    while i < args.size
+      roots << args[i]
+      i = i + 1
+    end
+    source = File.read(path)
+    result = TypedDump.analyse(source, path, roots, iyi_defer, with_prelude, MacroTargetFlags.host(defines))
+    result.lines.each { |line| puts line }
+    if instances
+      puts "typed instances: #{result.instances}"
+    end
+  end
+end
+
+TypedDumpTool.run

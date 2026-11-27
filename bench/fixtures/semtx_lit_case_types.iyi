@@ -1,0 +1,16 @@
+case x
+when Foo, Bar
+  a
+when String
+  b
+else
+  c
+end
+case y
+when nil
+  d
+when Foo::Baz, Qux.class
+  e
+else
+  f
+end

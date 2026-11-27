@@ -1,0 +1,8 @@
+case x
+when 1, 2
+  a
+when "s"
+  b
+else
+  c
+end

@@ -1,0 +1,12 @@
+struct SelfResult
+  def self.value : self
+    new
+  end
+
+  def self.explicit : self
+    return new
+  end
+end
+
+SelfResult.value
+SelfResult.explicit

@@ -1,0 +1,11 @@
+macro make_reader
+  -> { value }
+end
+
+def read_value
+  value = 42
+  reader = make_reader
+  reader.call
+end
+
+read_value

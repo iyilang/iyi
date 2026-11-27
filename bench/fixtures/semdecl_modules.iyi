@@ -1,0 +1,13 @@
+module semdecl/nested/tools
+
+module Helpers
+  def scale(x : Int32) : Int32
+    x
+  end
+end
+
+pub class Tool
+  def run : Int32
+    1
+  end
+end

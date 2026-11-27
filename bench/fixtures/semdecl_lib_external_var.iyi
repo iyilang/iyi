@@ -1,0 +1,4 @@
+# A lib external variable is a getter and a setter on the lib type.
+lib L
+  $v : UInt8
+end

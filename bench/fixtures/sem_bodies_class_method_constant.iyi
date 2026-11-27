@@ -1,0 +1,19 @@
+class Hdr
+  SIZE = 4_i32
+
+  def self.size
+    SIZE
+  end
+
+  def self.label
+    "size #{SIZE}"
+  end
+
+  def inst
+    SIZE
+  end
+end
+
+Hdr.size
+Hdr.label
+Hdr.new.inst

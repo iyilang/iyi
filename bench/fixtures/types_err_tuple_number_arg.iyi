@@ -1,0 +1,1 @@
+alias BadTuple = Tuple(1)

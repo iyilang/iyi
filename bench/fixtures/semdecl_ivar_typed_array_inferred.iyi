@@ -1,0 +1,5 @@
+class InferredArrayHolder
+  def initialize
+    @items = [1, 2]
+  end
+end

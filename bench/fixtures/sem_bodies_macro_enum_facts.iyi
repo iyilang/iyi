@@ -1,0 +1,14 @@
+enum MacroFactsColour
+  Red
+  Blue
+
+  def self.count_kind
+    {% if @type.constants.size == 2 %}
+      1
+    {% else %}
+      "wrong"
+    {% end %}
+  end
+end
+
+value = MacroFactsColour.count_kind

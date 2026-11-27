@@ -1,0 +1,10 @@
+class Box(T)
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+end
+
+puts Box(UInt64).new(42_u64).value

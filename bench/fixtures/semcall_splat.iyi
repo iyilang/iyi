@@ -1,0 +1,35 @@
+# Calls against defs with a splat parameter (`*args`), a double splat (`**opts`)
+# and a block argument (`&block`). Read by bench/selfhost_semantic_calls_exercise.sh;
+# `# call` lines only.
+
+def spl(*xs) : Nil
+  nil
+end
+
+def spl2(x : Int32, *ys) : Nil
+  nil
+end
+
+def dbl(x : Int32, **opts) : Nil
+  nil
+end
+
+def dbl2(**opts) : Nil
+  nil
+end
+
+def bk(x : Int32, &block) : Nil
+  nil
+end
+
+# call spl()
+# call spl(1, 2)
+# call spl2(1)
+# call spl2(1, "a", true)
+# call spl2()
+# call dbl(1, a: 2)
+# call dbl(1, a: 2, b: "x")
+# call dbl(1, x: 2)
+# call dbl2(a: 1)
+# call bk(1) { 1 }
+# call bk(1)

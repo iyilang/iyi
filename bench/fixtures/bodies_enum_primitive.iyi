@@ -1,0 +1,7 @@
+enum FiberState : UInt8
+  Running
+  Parked
+end
+
+state = FiberState::Running
+value = state.value

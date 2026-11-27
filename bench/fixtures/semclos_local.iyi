@@ -1,0 +1,15 @@
+@[Unsafe("declares the exit function for the fixture")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run(p : Proc(Int32)) : Int32
+  0
+end
+
+def outer(n : Int32) : Int32
+  k = n
+  run(-> { k })
+end
+
+LibC.exit(outer(7))

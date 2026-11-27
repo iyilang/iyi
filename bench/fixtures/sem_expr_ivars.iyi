@@ -1,0 +1,30 @@
+class Point
+  @x = 10
+  @y : Int32 = 20
+
+  def initialize(@z : Int32)
+    @w = 30
+  end
+
+  def get_x : Int32
+    @x
+  end
+
+  def get_y : Int32
+    @y
+  end
+
+  def get_z : Int32
+    @z
+  end
+
+  def get_w : Int32
+    @w
+  end
+end
+
+p = Point.new(42)
+x = p.get_x
+y = p.get_y
+z = p.get_z
+w = p.get_w

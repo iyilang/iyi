@@ -1,0 +1,38 @@
+# A trait receiver whose implementer is generic: `impl Show for Box(T)` stands for
+# each instance of Box the program has created (here Box(Int32) and Box(String), from
+# the return types below). Read by bench/selfhost_semantic_calls_exercise.sh: each
+# `# call` line is one call site, printed by the hosted oracle and by the port.
+
+trait Show
+  abstract def show : String
+end
+
+class Box(T)
+  getter value : T
+
+  def initialize(@value : T)
+  end
+end
+
+impl Show for Box(T) forall T
+  def show : String
+    "box"
+  end
+end
+
+def make_int : Box(Int32)
+  Box(Int32).new(1)
+end
+
+def make_str : Box(String)
+  Box(String).new("a")
+end
+
+class Holder
+  def self.one : Show
+    make_int
+  end
+end
+
+# call Holder.one().show()
+# call make_int().show()

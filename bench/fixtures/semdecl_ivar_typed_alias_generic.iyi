@@ -1,0 +1,15 @@
+struct AliasBuffer(T)
+  @data : Pointer(T)
+
+  def initialize(@data : Pointer(T))
+  end
+end
+
+alias AliasBytes = AliasBuffer(UInt8)
+
+class AliasHolder
+  @bytes : AliasBytes
+
+  def initialize(@bytes : AliasBytes)
+  end
+end

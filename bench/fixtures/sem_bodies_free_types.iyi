@@ -1,0 +1,8 @@
+# A callee's free variable is bound separately for each instantiation, including
+# the annotation and a type name written in the body.
+def identity_free(value : T) : T forall T
+  value.as(T)
+end
+
+a = identity_free(1)
+b = identity_free("text")

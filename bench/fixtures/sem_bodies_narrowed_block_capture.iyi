@@ -1,0 +1,34 @@
+class BlockShape
+end
+
+class BlockKindA < BlockShape
+end
+
+class BlockKindB < BlockShape
+end
+
+class BlockKindC < BlockShape
+end
+
+def run_block(&)
+  while true
+    yield
+    break
+  end
+end
+
+def check_shape(other : BlockShape) : Bool
+  if other.is_a?(BlockKindA)
+    return true
+  elsif other.is_a?(BlockKindB)
+    return true
+  end
+  run_block do
+    return true if other.is_a?(BlockKindC)
+  end
+  false
+end
+
+check_shape(BlockKindA.new)
+check_shape(BlockKindB.new)
+check_shape(BlockKindC.new)

@@ -1,0 +1,21 @@
+class Animal
+end
+
+class Dog < Animal
+end
+
+# op intersect(Proc(Int32, Int32), Proc(Int32, Int32))
+# op intersect(Proc(Int32, Int32), Proc(Int32, String))
+# op intersect(Proc(Dog, Int32), Proc(Animal, Int32))
+# op intersect(Proc(Animal, Int32), Proc(Dog, Int32))
+# op intersect(Proc(Int32, Void), Proc(Int32, Nil))
+# op intersect(Proc(Int32, Nil), Proc(Int32, Void))
+# op intersect(Proc(Int32), Proc(Int32, Int32))
+# op merge(Proc(Int32, Int32), Proc(Int32, Int32))
+# op merge(Proc(Int32, Int32), Proc(Int32, String))
+# op merge(Proc(Dog, Int32), Proc(Animal, Int32))
+# op Proc(Int32, Int32).proc?
+# op Proc(Int32, Int32).struct?
+# op Proc(Dog, Int32).virtual_type
+# op filter(Proc(Int32, Int32), is_a, Proc(Int32, Int32))
+# op filter(Proc(Int32, Int32), is_a, Proc(Int32, String))

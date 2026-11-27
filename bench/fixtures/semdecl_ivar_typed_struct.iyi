@@ -1,0 +1,15 @@
+abstract struct Base
+end
+
+struct Sub < Base
+end
+
+class Holder
+  @b : Base
+  @c : Base?
+
+  def initialize
+    @b = Sub.new
+    @c = nil
+  end
+end

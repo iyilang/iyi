@@ -1,0 +1,3 @@
+import bodies_digest_reach_helper::{ConcreteDigest}
+
+ConcreteDigest.new

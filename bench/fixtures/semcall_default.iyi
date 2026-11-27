@@ -1,0 +1,39 @@
+# Calls that give fewer arguments than the def has parameters, or name some of
+# them, read by bench/selfhost_semantic_calls_exercise.sh. Each `# expand` line
+# prints the argument list the expanded def is called with (the given arguments,
+# then each further parameter's named argument or a copy of its default), from the
+# hosted expansion (expand_default_arguments) and from the port's DefaultArguments.
+# `# call` lines check that the lookup finds the def.
+
+def dflt(a : Int32, b : Int32 = 2, c : Bool = true) : Nil
+  nil
+end
+
+def dflt3(a : Int32, b : Int32 = 2, c : Bool = true, d : Int32 = 4) : Nil
+  nil
+end
+
+def nodefault(a : Int32, b : Int32) : Nil
+  nil
+end
+
+class Holder
+  def self.make(x : Int32, y : Int32 = 9) : Holder
+    Holder.new
+  end
+end
+
+# call dflt(1)
+# call dflt(1, c: false)
+# call dflt3(1, 2, c: false, d: 4)
+# call nodefault(1)
+# call Holder.make(1)
+# expand dflt(1)
+# expand dflt(1, 3)
+# expand dflt(1, 3, false)
+# expand dflt(1, c: false)
+# expand dflt(1, c: false, b: 5)
+# expand dflt3(1, 2, c: false, d: 4)
+# expand dflt3(1, d: 7)
+# expand Holder.make(1)
+# expand Holder.make(x: 3)

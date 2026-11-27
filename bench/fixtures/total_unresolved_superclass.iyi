@@ -1,0 +1,5 @@
+class Mine < Nowhere
+  def value : Int32
+    1
+  end
+end

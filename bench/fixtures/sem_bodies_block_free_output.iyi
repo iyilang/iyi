@@ -1,0 +1,7 @@
+# The output of the block binds the callee's free return type.
+def block_free_output(& : -> U) : U forall U
+  yield
+end
+
+a = block_free_output { 1 }
+b = block_free_output { "text" }

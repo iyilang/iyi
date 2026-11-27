@@ -1,0 +1,26 @@
+module OuterModule
+  class InnerClass
+    def inner_method(x : Int32) : Int32
+      x + 1
+    end
+  end
+
+  struct InnerStruct
+    def value : String
+      "inner"
+    end
+  end
+end
+
+class Container
+  module InnerModule
+    class DeepClass
+      def deep : Bool
+        true
+      end
+    end
+  end
+
+  def container_method : Nil
+  end
+end

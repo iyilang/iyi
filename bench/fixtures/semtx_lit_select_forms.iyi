@@ -1,0 +1,17 @@
+# A select over sends, timeouts and receives, the forms the std sources write.
+def wait_for(asks, reply, limit)
+  sent = false
+  select
+  when asks.send(limit)
+    sent = true
+  when timeout(limit)
+    nil
+  end
+  select
+  when got = reply.receive
+    sent = got.is_a?(Int32)
+  when timeout(limit)
+    nil
+  end
+  sent
+end

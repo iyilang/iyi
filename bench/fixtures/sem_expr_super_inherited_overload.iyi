@@ -1,0 +1,25 @@
+class InheritedValue
+end
+
+class InheritedSpecific < InheritedValue
+end
+
+class InheritedRoot
+  def choose(value : InheritedSpecific)
+    42
+  end
+end
+
+class InheritedParent < InheritedRoot
+  def choose(value : InheritedValue)
+    "broad"
+  end
+end
+
+class InheritedChild < InheritedParent
+  def choose(value : InheritedSpecific)
+    super(value)
+  end
+end
+
+InheritedChild.new.choose(InheritedSpecific.new)

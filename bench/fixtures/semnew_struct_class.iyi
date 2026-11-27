@@ -1,0 +1,12 @@
+struct Point
+  def initialize(x : Int32, y : Int32)
+  end
+end
+
+class Box
+  def initialize(v : Int32)
+  end
+end
+
+p = Point.new(1, 2)
+b = Box.new(3)

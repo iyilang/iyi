@@ -1,0 +1,5 @@
+class Box(T)
+end
+
+x = Box(Box(Int32))
+y = Box(Int32 | String)

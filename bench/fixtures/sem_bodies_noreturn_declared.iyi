@@ -1,0 +1,24 @@
+@[Unsafe("calls C exit to type declared non-returning functions")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Bad
+end
+
+impl Error for Bad
+  def message : String
+    "bad"
+  end
+end
+
+def contract(code : Int32) : Int32 | Bad
+  LibC.exit(code)
+end
+
+def plain(code : Int32) : Int32
+  LibC.exit(code)
+end
+
+kept = contract(2)
+plain(1)

@@ -1,0 +1,8 @@
+module lib
+
+pub class Box(T)
+  @value : T
+
+  def initialize(@value : T)
+  end
+end

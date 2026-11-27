@@ -1,0 +1,10 @@
+trait Sized
+  abstract def size : Int32
+
+  def doubled : Int32
+    2
+  end
+end
+
+sized = 3
+sized

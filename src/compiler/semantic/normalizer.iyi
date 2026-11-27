@@ -7,6 +7,9 @@ import std/digest
 
 pub class NormalizerProgram
   property iyi_prelude : Bool
+  # The target and defines of the program being analysed, shared by every
+  # semantic macro expansion. Nil retains the macro engine's host default.
+  property macro_flags : Array(String)? = nil
   @temp_vars : Hash(String, Int32)
   @flags : Array(String)
 

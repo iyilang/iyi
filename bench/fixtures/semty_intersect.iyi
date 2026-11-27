@@ -1,0 +1,38 @@
+module Walkable
+end
+
+class Animal
+end
+
+class Dog < Animal
+  include Walkable
+end
+
+class Cat < Animal
+end
+
+class Puppy < Dog
+end
+
+class Holder
+end
+
+struct Point
+  @x : Int32
+end
+
+# op intersect(Animal, Dog)
+# op intersect(Dog, Animal)
+# op intersect(Puppy, Animal)
+# op intersect(Dog, Cat)
+# op intersect(Dog, Holder)
+# op intersect(Dog, Walkable)
+# op intersect(Walkable, Dog)
+# op intersect(Animal, Animal)
+# op intersect(Point, Int32)
+# op intersect(Int32, Int32)
+# op intersect(Int32, Int64)
+# op intersect(Nil, Void)
+# op intersect(Dog.class, Animal.class)
+# op intersect(Animal.class, Dog.class)
+# op intersect(Dog, Animal.class)

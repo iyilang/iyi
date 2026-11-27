@@ -1,0 +1,7 @@
+class ArityReceiver
+  def take(a : Int32, b : Int32 = 2) : Int32
+    a + b
+  end
+end
+
+ArityReceiver.new.take

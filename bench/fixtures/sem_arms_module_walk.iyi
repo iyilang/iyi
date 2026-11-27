@@ -1,0 +1,28 @@
+module Label
+  def select(value : String) : String
+    value
+  end
+end
+
+module Other
+  def select(value : Int32) : String
+    "other"
+  end
+end
+
+class Parent
+  def select(value : Int32) : String
+    "parent"
+  end
+end
+
+class Child < Parent
+  include Other
+  include Label
+end
+
+def pick(flag : Bool) : Int32 | String
+  flag ? 1 : "module"
+end
+
+puts Child.new.select(pick(false))

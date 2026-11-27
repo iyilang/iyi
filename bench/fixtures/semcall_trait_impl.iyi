@@ -1,0 +1,64 @@
+trait Greet
+  abstract def greet : String
+end
+
+trait Loud
+  abstract def shout : String
+end
+
+struct User
+  getter name : String
+
+  def initialize(@name : String)
+  end
+
+  def self.make(name : String) : User
+    User.new(name)
+  end
+end
+
+struct Robot
+  getter id : Int32
+
+  def initialize(@id : Int32)
+  end
+
+  def self.make(id : Int32) : Robot
+    Robot.new(id)
+  end
+end
+
+impl Greet for User
+  def greet : String
+    "hi"
+  end
+end
+
+impl Loud for User
+  def shout : String
+    greet.upcase
+  end
+end
+
+impl Greet for Robot
+  def greet : String
+    "beep"
+  end
+end
+
+class Holder
+  def self.all : Array(Greet)
+    Array(Greet).new
+  end
+
+  def self.one : Greet
+    User.make("x")
+  end
+end
+
+# call User.make("iyi").greet()
+# call User.make("iyi").shout()
+# call Robot.make(42).greet()
+# call Holder.all().size()
+# call Holder.one().greet()
+# not yet ported: Holder.all().push(1) (a restricted splat)

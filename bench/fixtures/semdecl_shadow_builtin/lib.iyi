@@ -1,0 +1,7 @@
+module lib
+
+pub class Array(T)
+end
+
+pub class Hash(K, V)
+end

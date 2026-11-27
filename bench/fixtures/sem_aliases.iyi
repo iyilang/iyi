@@ -1,0 +1,14 @@
+alias NumberType = Int32
+alias StringList = Array(String)
+
+class MyClass
+  def ping : String
+    "pong"
+  end
+end
+
+alias MyClassAlias = MyClass
+
+module MyNamespace
+  alias LocalInt = Int64
+end

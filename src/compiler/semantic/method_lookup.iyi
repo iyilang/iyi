@@ -1,0 +1,444 @@
+module compiler/semantic/method_lookup
+
+import compiler/syntax/ast::{ASTNode, Def, Nop, NumberLiteral}
+import compiler/semantic/top_level::{ClassType, GenericClassType, MetaclassType, ModuleType, TraitType, Type, UnionType}
+import compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType, VirtualType}
+import compiler/types/type_system::{TypeSystem}
+import compiler/semantic/match::{CallMatch, CallSignature, Match, NumericAutocast}
+import compiler/semantic/cover::{CallCover}
+
+pub enum ArmWalk
+  Parents
+  Modules
+end
+
+# The matches of a lookup, in the hosted order. *cover_all* says the first match
+# accepts every argument combination (an exact match, which ends the lookup
+# unless every overload is analysed). *error* is set when a restriction does not
+# resolve, and then the matches are not meaningful.
+pub class Matches
+  getter matches : Array(Match)
+  getter cover_all : Bool
+  getter error : String?
+
+  def initialize(@matches : Array(Match), @cover_all : Bool, @error : String? = nil)
+  end
+
+  def cover_all? : Bool
+    @cover_all
+  end
+
+  def empty? : Bool
+    @matches.empty?
+  end
+end
+
+# The port of Type#lookup_matches, lookup_matches_without_parents and the parent
+# walk, for a module receiver; the virtual receiver (VirtualTypeLookup) and the
+# union receiver (call.cr's lookup_matches_in over a union) are below.
+#
+# `new` on a metaclass: the hosted pass gives a class a `self.new` for every
+# instance `initialize` (the same arguments, no body), added before any explicit
+# `def self.new`, so the explicit one chains onto them. The declarations slice
+# records those on the metaclass, so when the metaclass has a `new` list it is
+# used as it is. When it has none, `own_defs` synthesises the list from the
+# instance's own initialize defs, which is what the hosted lookup would find. A
+# class with its own initialize does not search its ancestors for `new`, as
+# hosted lookup_new_in_ancestors? says.
+pub class MethodLookup
+  # The types the walk visits after *type*. The metaclass of a class is walked to
+  # the metaclass of its superclass, which is what the hosted metaclass has. The
+  # declarations slice's MetaclassType may record its parents now; when it does
+  # not, this is the stand-in. Extended modules are not walked yet.
+  def self.parents_of(type : ModuleType) : Array(Type)
+    type.parents
+  end
+
+  # The instance module type a metaclass describes, or nil when *type* is not a
+  # metaclass of a module type.
+  def self.instance_module(type : ModuleType) : ModuleType?
+    return nil if !type.is_a?(MetaclassType)
+    instance = type.as(MetaclassType).instance_type
+    return nil if !instance.is_a?(ModuleType)
+    instance.as(ModuleType)
+  end
+
+  # True when a lookup of *name* on *type* searches its parents: a `new` on a
+  # metaclass whose instance declares its own initialize does not, and every
+  # other lookup does.
+  def self.walks_parents?(type : ModuleType, name : String) : Bool
+    return true if name != "new"
+    instance = instance_module(type)
+    return true if instance.nil?
+    init = instance.as(ModuleType).defs["initialize"]?
+    init.nil?
+  end
+
+  # The defs of *name* declared on *type* itself, in the hosted order. For `new`
+  # on a metaclass: the list the declarations slice recorded (the synthesised
+  # initialize-new defs, then the explicit ones) when there is one, else the
+  # defs synthesised here from the instance's own initialize.
+  def self.own_defs(type : ModuleType, name : String) : Array(Def)?
+    if name != "new"
+      defs = type.defs[name]?
+      return defs.as(Array(Def)) if defs
+      return nil
+    end
+    recorded = type.defs["new"]?
+    return recorded.as(Array(Def)) if recorded
+    instance = instance_module(type)
+    return nil if instance.nil?
+    inits = instance.as(ModuleType).defs["initialize"]?
+    return nil if inits.nil?
+    out = [] of Def
+    inits.as(Array(Def)).each do |init|
+      made = Def.new("new", init.args, Nop.new)
+      made.splat_index = init.splat_index
+      made.block_arg = init.block_arg
+      made.double_splat = init.double_splat
+      made.free_vars = init.free_vars
+      out << made
+    end
+    return nil if out.empty?
+    out
+  end
+
+  # True when *type* or one of its parents has a def named *name*, whether or not
+  # its parameters accept the call. The hosted call pass reports "undefined
+  # method" only when this is false.
+  def self.defines?(type : ModuleType, name : String) : Bool
+    return true if own_defs(type, name)
+    return false if !walks_parents?(type, name)
+    parents_of(type).each do |parent|
+      next unless parent.is_a?(ModuleType)
+      return true if defines?(parent.as(ModuleType), name)
+    end
+    false
+  end
+
+  # Every def named *name* on *type* and then on its parents, in the order the
+  # walk meets them: the hosted lookup_defs, which the call pass reads to report
+  # why nothing matched.
+  def self.all_defs(type : ModuleType, name : String, into : Array(Def)) : Array(Def)
+    defs = own_defs(type, name)
+    if defs
+      defs.as(Array(Def)).each do |d|
+        into << d
+      end
+    end
+    return into if !walks_parents?(type, name)
+    parents_of(type).each do |parent|
+      next unless parent.is_a?(ModuleType)
+      all_defs(parent.as(ModuleType), name, into)
+    end
+    into
+  end
+
+  # The matches of *signature* on *type*, its own defs first and then each
+  # parent, as hosted: an exact match stops the walk.
+  def self.lookup_matches(type : ModuleType, ts : TypeSystem, signature : CallSignature, owner : Type, path_lookup : ModuleType, matches_array : Array(Match)) : Matches
+    own = lookup_without_parents(type, ts, signature, owner, path_lookup, matches_array)
+    return own if own.cover_all? || own.error
+    all = own.matches
+    cover = own.cover_all?
+    return Matches.new(all, cover) if !walks_parents?(type, signature.name)
+
+    parents_of(type).each do |parent|
+      next unless parent.is_a?(ModuleType)
+      found = lookup_matches(parent.as(ModuleType), ts, signature, owner, parent.as(ModuleType), all)
+      return found if found.cover_all? || found.error
+      all = found.matches
+    end
+
+    Matches.new(all, cover)
+  end
+
+  # The matches among *type*'s own defs in hosted declaration order. The
+  # first exact match ends the ordinary scan; autocast still considers every
+  # candidate so that ambiguity can be reported.
+  def self.lookup_without_parents(type : ModuleType, ts : TypeSystem, signature : CallSignature, owner : Type, path_lookup : ModuleType, matches_array : Array(Match)) : Matches
+    defs = own_defs(type, signature.name)
+    return Matches.new(matches_array, false) if defs.nil?
+
+    found = [] of Match
+    first_error : String? = nil
+    defs.as(Array(Def)).each do |item|
+      next if item.abstract
+      attempt = CallMatch.attempt(ts, signature, item, owner, path_lookup)
+      if err = attempt.error
+        first_error = err if first_error.nil?
+        next
+      end
+      match = attempt.match
+      next if match.nil?
+      found << match.as(Match)
+      if signature.autocast_nodes.nil? && match.as(Match).exact
+        found.each { |candidate| matches_array << candidate }
+        return Matches.new(matches_array, true)
+      end
+    end
+    if found.empty? && first_error && matches_array.empty?
+      return Matches.new(matches_array, false, first_error)
+    end
+    if signature.autocast_nodes
+      best = MethodLookup.most_specific(found)
+      if best
+        matches_array << best
+        return Matches.new(matches_array, best.exact)
+      end
+    end
+    found.each do |m|
+      matches_array << m
+    end
+    Matches.new(matches_array, CallCover.all?(signature, matches_array))
+  end
+
+  # During autocast, find a candidate whose declared restrictions are each a
+  # subtype of every other match's. Nil leaves the candidates for ambiguity
+  # reporting.
+  def self.most_specific(found : Array(Match)) : Match?
+    i = 0
+    while i < found.size
+      candidate = found[i]
+      all = true
+      j = 0
+      while j < found.size
+        all = false if !MethodLookup.at_least_as_specific(candidate, found[j])
+        j += 1
+      end
+      return candidate if all
+      i += 1
+    end
+    nil
+  end
+
+  # True when *a*'s declared restrictions are each a subtype of *b*'s, position by
+  # position over the parameters they both have.
+  def self.at_least_as_specific(a : Match, b : Match) : Bool
+    return false if a.definition.splat_index && !b.definition.splat_index
+    return true if !a.definition.splat_index && b.definition.splat_index
+    k = 0
+    while k < a.declared.size && k < b.declared.size
+      return false if !a.declared[k].subtype_of?(b.declared[k])
+      k += 1
+    end
+    true
+  end
+
+  # The virtual form of a module type, as hosted virtual_type: a class that has
+  # subclasses is seen through its VirtualType (`Base+`), so a call on it reaches
+  # the subclasses' overrides. A type nothing subclasses is its own form.
+  def self.virtual_of(type : ModuleType) : Type
+    if type.is_a?(ClassType)
+      return VirtualType.new(type.program, type) if !type.as(ClassType).subclasses.empty?
+    end
+    type
+  end
+
+  # True when a subtype is skipped by the virtual walk: an abstract type nothing
+  # subclasses has no instance to dispatch to.
+  def self.abstract_leaf?(type : ModuleType) : Bool
+    return false if !type.abstract?
+    if type.is_a?(ClassType)
+      return type.as(ClassType).subclasses.empty?
+    end
+    true
+  end
+
+  # The matches of *signature* on a virtual receiver, as hosted VirtualTypeLookup:
+  # the base's matches first; a non-abstract base that does not cover every
+  # argument combination returns those uncovered. Otherwise each subtype's own
+  # defs are looked up with the subtype's virtual form as owner, and a subtype's
+  # matches go ahead of the matches collected so far. The result covers when any
+  # match exists. Subtypes' parents are not walked (the hosted walk is over their
+  # included modules, which the port does not record yet).
+  def self.lookup_virtual(receiver : VirtualType, ts : TypeSystem, signature : CallSignature) : Matches
+    base = receiver.base_type
+    return Matches.new([] of Match, false) if !base.is_a?(ModuleType)
+    base_module = base.as(ModuleType)
+    base_found = lookup_matches(base_module, ts, signature, receiver, base_module, [] of Match)
+    return base_found if base_found.error
+    covers = base_found.cover_all?
+    return Matches.new(base_found.matches, false) if !base_module.abstract? && !covers
+
+    matches = [] of Match
+    base_found.matches.each do |m|
+      matches << m
+    end
+    receiver.subtypes.each do |sub|
+      next if sub == base
+      next unless sub.is_a?(ModuleType)
+      sub_module = sub.as(ModuleType)
+      sub_owner = virtual_of(sub_module)
+      sub_found = lookup_without_parents(sub_module, ts, signature, sub_owner, sub_module, [] of Match)
+      return sub_found if sub_found.error
+      if !sub_module.abstract? && !covers && !sub_found.cover_all?
+        return Matches.new(sub_found.matches, false)
+      end
+      if !sub_found.empty? && !abstract_leaf?(sub_module)
+        joined = [] of Match
+        sub_found.matches.each do |m|
+          joined << m
+        end
+        matches.each do |m|
+          joined << m
+        end
+        matches = joined
+      end
+    end
+    Matches.new(matches, !matches.empty?)
+  end
+
+  # The matches of *signature* on a receiver of any form. A union receiver is one
+  # lookup per member, the members' matches joined in member order; it covers
+  # when every member covers. A virtual receiver is looked up as above, and a
+  # module receiver as its own lookup. Other types are not ported.
+
+  # The matches of *signature* on a trait receiver, as the hosted call pass dispatches
+  # it (NonGenericModuleType#including_types): one lookup per type that implements the
+  # trait, its implementers (the program's impl records) sorted by name, joined
+  # in that order. Covers when every implementer covers. A generic implementer is not
+  # ported.
+  def self.lookup_trait(trait_type : TraitType, ts : TypeSystem, signature : CallSignature) : Matches
+    all = [] of Match
+    cover = true
+    targets = [] of Type
+    ts.program.impls.each do |rec|
+      targets << rec.target_type if rec.trait_type == trait_type
+    end
+    # The hosted union of the implementers sorts its members by name (make_union_type),
+    # so the lookup walks them in that order, not in declaration order.
+    targets = expanded_targets(targets)
+    sorted = sorted_by_name(targets)
+    sorted.each do |target|
+      if (!target.is_a?(ModuleType) && !target.is_a?(GenericInstanceType)) || target.is_a?(GenericClassType)
+        return Matches.new(all, false, "not ported: generic implementer of #{trait_type.to_s}")
+      end
+      found = lookup_receiver(target, ts, signature)
+      return Matches.new(all, false, found.error) if found.error
+      found.matches.each do |m|
+        all << m
+      end
+      cover = false if !found.cover_all?
+    end
+    Matches.new(all, cover && !all.empty?)
+  end
+
+  # The types a trait's implementers are looked up over: a generic implementer stands
+  # for its instances the program has created so far, in creation order (the hosted
+  # GenericClassType#including_types answers its instances the same way). Other
+  # implementers are kept as they are.
+  def self.expanded_targets(targets : Array(Type)) : Array(Type)
+    out = [] of Type
+    targets.each do |target|
+      if target.is_a?(GenericClassType)
+        target.as(GenericClassType).instantiated_types.each do |inst|
+          out << inst.as(Type)
+        end
+      else
+        out << target
+      end
+    end
+    out
+  end
+
+  # The types sorted by their names, as the hosted union sorts its members.
+  def self.sorted_by_name(types : Array(Type)) : Array(Type)
+    out = [] of Type
+    types.each do |t|
+      placed = false
+      i = 0
+      while i < out.size
+        if !placed && t.to_s < out[i].to_s
+          out.insert(i, t)
+          placed = true
+        end
+        i += 1
+      end
+      out << t if !placed
+    end
+    out
+  end
+
+  def self.lookup_receiver(receiver : Type, ts : TypeSystem, signature : CallSignature) : Matches
+    if receiver.is_a?(UnionType)
+      all = [] of Match
+      cover = true
+      receiver.as(UnionType).union_types.each do |member|
+        found = lookup_receiver(member, ts, signature)
+        return Matches.new(all, false, found.error) if found.error
+        found.matches.each do |m|
+          all << m
+        end
+        cover = false if !found.cover_all?
+      end
+      return Matches.new(all, cover)
+    end
+    if receiver.is_a?(VirtualType)
+      return lookup_virtual(receiver.as(VirtualType), ts, signature)
+    end
+    # The metaclass of a generic instance (`Pointer(Int32).malloc`): its class methods are the
+    # defs of the generic type's own metaclass, looked up with the instance metaclass as owner,
+    # as the hosted pass does. Its own defs are empty, so this comes before the module branch.
+    if receiver.is_a?(GenericClassInstanceMetaclassType)
+      instance = receiver.as(GenericClassInstanceMetaclassType).instance_type
+      if instance.is_a?(GenericClassInstanceType)
+        generic = instance.as(GenericClassInstanceType).generic_type
+        if generic.is_a?(GenericClassType)
+          generic_meta = generic.as(GenericClassType).metaclass
+          return lookup_matches(generic_meta, ts, signature, receiver, generic_meta, [] of Match)
+        end
+      end
+    end
+    if receiver.is_a?(GenericInstanceType)
+      generic = receiver.as(GenericInstanceType).generic_type
+      if generic.is_a?(ModuleType)
+        generic_module = generic.as(ModuleType)
+        return lookup_matches(generic_module, ts, signature, receiver, generic_module, [] of Match)
+      end
+    end
+    if receiver.is_a?(TraitType)
+      return lookup_trait(receiver.as(TraitType), ts, signature)
+    end
+    if receiver.is_a?(ModuleType)
+      module_type = receiver.as(ModuleType)
+      return lookup_matches(module_type, ts, signature, module_type, module_type, [] of Match)
+    end
+    Matches.new([] of Match, false)
+  end
+
+  # The hosted Call#lookup_matches: the receiver's lookup, then, when nothing
+  # matched and an argument supports numeric autocast, the same lookup with the
+  # argument nodes so a literal can match a wider integer and a typed integer
+  # can match when its range fits. Two partial matches are the hosted ambiguity.
+  # A refusal is an empty Matches (no def matched) or Matches#error (a restriction
+  # did not resolve, or the autocast is ambiguous).
+  def self.lookup_with_autocast(receiver : Type, ts : TypeSystem, signature : CallSignature, arg_nodes : Array(ASTNode)?) : Matches
+    first = lookup_receiver(receiver, ts, signature)
+    return first if first.error || !first.empty?
+    return first if arg_nodes.nil?
+    nodes = arg_nodes.as(Array(ASTNode))
+    return first if !NumericAutocast.any?(nodes, signature.arg_types)
+    signature.autocast_nodes = nodes
+    second = lookup_receiver(receiver, ts, signature)
+    signature.autocast_nodes = nil
+    return second if second.error || second.matches.size <= 1
+    value = "0"
+    i = 0
+    while i < nodes.size
+      if nodes[i].is_a?(NumberLiteral)
+        value = nodes[i].as(NumberLiteral).value
+        break
+      end
+      i += 1
+    end
+    names = [] of String
+    second.matches.each do |m|
+      if m.declared.size > 0
+        text = m.declared[0].to_s
+        names << text if !names.includes?(text)
+      end
+    end
+    Matches.new([] of Match, false, NumericAutocast.ambiguity(value, names))
+  end
+end

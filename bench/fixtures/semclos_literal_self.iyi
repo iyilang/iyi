@@ -1,0 +1,14 @@
+class Box
+  def consume(p : Proc(Int32)) : Int32
+    0
+  end
+
+  def initialize(@v : Int32)
+  end
+
+  def get(n : Int32) : Int32
+    consume(-> { n; @v })
+  end
+end
+
+Box.new(7).get(3)

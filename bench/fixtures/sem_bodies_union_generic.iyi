@@ -1,0 +1,12 @@
+class Item
+end
+
+class Taker
+  def take(items : Array(Item) | Item) : Int32
+    1
+  end
+end
+
+taker = Taker.new
+items = [] of Item
+result = taker.take(items)

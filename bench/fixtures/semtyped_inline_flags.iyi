@@ -1,0 +1,9 @@
+def inline_value
+  {% if flag?(:semtyped_probe) %}
+    "enabled"
+  {% else %}
+    123
+  {% end %}
+end
+
+value = inline_value

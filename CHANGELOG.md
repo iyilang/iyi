@@ -843,6 +843,26 @@
 
 ### Fixed
 
+- **The formatter port no longer changes `b.@v` or `{ a; b }`.** The
+  formatter in iyi (`src/compiler/tools/formatter.iyi`, #195) had no
+  visitor for an instance variable read through a receiver, so `c = b.@v`
+  came back as `c = b`, and it dropped the `;` between statements on one
+  line, so `run { d; n }` came back as `run { dn }`. Both changed the
+  program. Four layout differences from `iyi tool format` are fixed with
+  them: `-> { x }` lost the space after `{`; the body of an `if` assigned
+  to a variable was indented from the line start instead of aligned under
+  the `if`; an enum body lost its blank lines and the blank line before a
+  `def`; and the `=` of consecutive constants and valued enum members was
+  not aligned, nor their numbers right-aligned. Four regression fixtures
+  (`bench/fixtures/formatter_ivar_and_semicolons.iyi`,
+  `formatter_proc_literal.iyi`, `formatter_assign_if.iyi` and
+  `formatter_enum_body.fixture`) join the short corpus and the parity
+  floor, and `bench/selfhost_formatter_exercise.sh` holds 7 more broken
+  copies to failing, 25 in all. The port now formats 176 of the 365 files
+  that select the self-host jobs as the hosted formatter does, up from 161:
+  the floor lists all 176, and the 11 files that stopped differing leave
+  the ceiling, which lists 23.
+
 - **Vector unions use the heap's eight-byte alignment (#202).** A mixed
   union represents its payload as wide integers, so treating only visible
   LLVM vectors as eight-aligned left nil stores, closure captures and copies

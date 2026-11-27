@@ -1,0 +1,73 @@
+# The port dropped every blank line inside an enum body, put no blank line
+# before a `def` there, and aligned no `=` of valued members. Not formatted
+# as written: `Flag` has no blank line before its `def`, which the hosted
+# formatter inserts, so this is a .fixture rather than an .iyi file.
+enum Color
+  Red   = 1
+  Green = 2
+
+  Blue           = 30
+  Yellow
+  Reallylongname = 4
+
+  def self.first
+    Red
+  end
+
+  def self.last
+    Blue
+  end
+end
+
+enum Width
+  A   =   1
+  Bb  =  10
+  Ccc = 100
+end
+
+enum Priority : UInt8
+  Low      = 1
+  Medium
+  High     = 10
+  Critical
+end
+
+enum Direction
+  North
+  East
+
+  South
+  West
+end
+
+enum Flag
+  On  = 1
+  Off = 2
+  def self.default
+    On
+  end
+end
+
+enum Short
+  A; B
+  C; D
+end
+
+MAX_SIZE = 42
+LIMIT    =  7
+NEGATIVE = -1
+SUM      = 1 + 2
+
+@[Flags]
+enum Marked
+  First
+  Second
+
+  def self.marker
+    {% if @type.annotation(Flags) %}
+      1
+    {% else %}
+      "wrong"
+    {% end %}
+  end
+end

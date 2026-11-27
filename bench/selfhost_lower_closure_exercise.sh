@@ -215,8 +215,8 @@ check_self_ir() {
   "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$WORK_NATIVE/$fixture$EXE" "$REPO_NATIVE/bench/fixtures/$fixture.iyi" > "$WORK/$fixture.ir.log" 2>&1 || return 1
   awk "$CALL_TYPES" "$WORK/$fixture.ll" > "$WORK/$fixture.normalized.ll"
   "$WORK/core$EXE" lower "$REPO_NATIVE/bench/fixtures/$fixture.iyi" "$WORK_NATIVE/$fixture.normalized.ll" > "$WORK/$fixture.ir.out" 2>&1 || return 1
-  grep -qx "SUMMARY identical=$expected total=$expected module=1" "$WORK/$fixture.ir.out" || return 1
-  echo "$fixture: SUMMARY identical=$expected total=$expected module=1"
+  ir_agrees "$WORK/$fixture.ir.out" "$fixture" "$expected" || return 1
+  echo "$fixture: SUMMARY total=$expected module=1, every unlisted function identical"
 }
 
 check_self_ir_mutant() {
@@ -250,29 +250,29 @@ check_self_ir_mutant() {
     echo 'INVALID: IR mutant did not report a comparison'
     return 2
   fi
-  grep -qx "SUMMARY identical=$expected total=$expected module=1" "$WORK/$fixture.mutant.out"
+  ir_agrees "$WORK/$fixture.mutant.out" "$fixture" "$expected" 1
 }
 
-# The functions of lower_macro_proc_locations known to differ from the hosted module on a host, with the gap that
-# makes them differ: an exact list. macro_ir_agrees <summary> [quiet] passes when the module agrees, all 6 functions
-# compare, each unlisted one is identical and each one listed for $HOST_ID still differs (a fixed row fails until it
-# is removed).
-MACRO_IR_KNOWN="$REPO/bench/selfhost_lower_closure_macro_ir.known"
-macro_ir_agrees() {
-  awk -v host="$HOST_ID" -v quiet="${2:-0}" '
+# The functions of a fixture known to differ from the hosted module on a host, with the gap that makes them differ:
+# an exact list. ir_agrees <summary> <fixture> <functions> [quiet] passes when the module agrees, all the fixture's
+# functions compare, each unlisted one is identical and each one listed for $HOST_ID and the fixture still differs (a
+# fixed row fails until it is removed).
+IR_KNOWN="$REPO/bench/selfhost_lower_closure_ir.known"
+ir_agrees() {
+  awk -v host="$HOST_ID" -v fixture="$2" -v total="$3" -v quiet="${4:-0}" '
     function say(text) { if (quiet != 1) print "  " text }
-    FNR == NR { if ($0 !~ /^#/ && NF >= 3 && $1 == host) known[$2] = 1; next }
+    FNR == NR { if ($0 !~ /^#/ && NF >= 4 && $1 == host && $2 == fixture) known[$3] = 1; next }
     /^  @/ && match($0, /: differs at line [0-9]+$/) { differs[substr($0, 3, RSTART - 3)] = 1; ndiff++ }
     /^SUMMARY / { summary = $0 }
     END {
       ok = 1
       if (summary == "") { say("no SUMMARY line"); exit 1 }
       split(summary, field, /[ =]/)
-      if (field[3] + ndiff != 6 || field[5] != 6 || field[7] != 1) { say("expected 6 functions and the module to compare: " summary); ok = 0 }
-      for (name in differs) if (!(name in known)) { say("NOT KNOWN: " name " differs and is not listed for " host " in bench/selfhost_lower_closure_macro_ir.known"); ok = 0 }
-      for (name in known) if (!(name in differs)) { say("REMOVE THE ROW: " name " is listed for " host " in bench/selfhost_lower_closure_macro_ir.known and is now identical"); ok = 0 }
+      if (field[3] + ndiff != total || field[5] != total || field[7] != 1) { say("expected " total " functions and the module to compare: " summary); ok = 0 }
+      for (name in differs) if (!(name in known)) { say("NOT KNOWN: " fixture " " name " differs and is not listed for " host " in bench/selfhost_lower_closure_ir.known"); ok = 0 }
+      for (name in known) if (!(name in differs)) { say("REMOVE THE ROW: " fixture " " name " is listed for " host " in bench/selfhost_lower_closure_ir.known and is now identical"); ok = 0 }
       exit ok ? 0 : 1
-    }' "$MACRO_IR_KNOWN" "$1"
+    }' "$IR_KNOWN" "$1"
 }
 
 check_macro_ir() {
@@ -281,7 +281,7 @@ check_macro_ir() {
   "$IYI" build --prelude empty --emit llvm-ir --no-debug -o "$WORK_NATIVE/macro$EXE" "$REPO_NATIVE/bench/fixtures/$fixture.iyi" > "$WORK/macro.log" 2>&1 || return 1
   awk "$CALL_TYPES" "$WORK/macro.ll" > "$WORK/macro.normalized.ll"
   "$WORK/core$EXE" lower "$REPO_NATIVE/bench/fixtures/$fixture.iyi" "$WORK_NATIVE/macro.normalized.ll" > "$WORK/macro.out" 2>&1 || return 1
-  macro_ir_agrees "$WORK/macro.out"
+  ir_agrees "$WORK/macro.out" "$fixture" 6
 }
 
 check_macro_mutant() {
@@ -296,7 +296,7 @@ check_macro_mutant() {
     return 2
   fi
   grep -Eq '^SUMMARY identical=[0-9]+ total=[0-9]+ module=[01]$' "$WORK/macro-mutant.out" || { echo 'INVALID: macro mutant produced no summary'; return 2; }
-  macro_ir_agrees "$WORK/macro-mutant.out" 1
+  ir_agrees "$WORK/macro-mutant.out" lower_macro_proc_locations 6 1
 }
 
 check_defer_mutant() {

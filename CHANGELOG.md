@@ -624,7 +624,11 @@
   (spill table row: 6) lets two values die ahead of live ones in the active
   set under register pressure, so an in-place compaction that keeps a dead
   interval in place of a live one now fails the spill table on every host,
-  not only the hosted twins on macOS arm64.
+  not only the hosted twins on macOS arm64. `native_cg/iyiwide` passes i128
+  arguments under the internal convention, one with its high half on the
+  stack; no fixture did, so a scalar call-argument path that gave an i128 one
+  register passed every gate, and the hosted twins on macOS arm64 now catch
+  it.
 
 ### Gates
 

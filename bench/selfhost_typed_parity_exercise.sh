@@ -552,8 +552,8 @@ PY
       "DEFINE PARITY DIFFERENCE" -- check_flag_site_mutation method || status=1
     prove_mutation "inline macro ignores build defines" \
       "$REPO/src/compiler/semantic/inline_macros.iyi" \
-      'MacroEngine.new(normalizer.macro_flags).site_report' \
-      'MacroEngine.new.site_report' \
+      'MacroEngine.new(normalizer.macro_flags, normalizer.host_flags).site_report' \
+      'MacroEngine.new(nil, normalizer.host_flags).site_report' \
       "DEFINE PARITY DIFFERENCE" -- check_flag_site_mutation inline || status=1
     prove_mutation "top-level macro ignores build defines" \
       "$REPO/src/compiler/semantic/top_level.iyi" \

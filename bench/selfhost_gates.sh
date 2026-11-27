@@ -6,7 +6,7 @@
 #
 #   bash bench/selfhost_gates.sh               # every gate, in one run
 #   bash bench/selfhost_gates.sh --shard 2/4   # the second of four shards
-#   bash bench/selfhost_gates.sh --list        # the deal into four shards; runs none
+#   bash bench/selfhost_gates.sh --list        # the deal into eight shards; runs none
 #   bash bench/selfhost_gates.sh --list 3      # the deal into three
 #
 # CI runs one job per shard on each host, so no job holds every gate. The deal is
@@ -24,7 +24,7 @@ set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 WEIGHTS="$REPO/bench/selfhost_gates.weights"
-DEFAULT_SHARDS=4
+DEFAULT_SHARDS=8
 DEFAULT_WEIGHT=300
 
 mode=all

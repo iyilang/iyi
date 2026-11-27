@@ -5572,17 +5572,19 @@ jobs:
             dist/*.tar.gz dist/*.zip dist/SHA256SUMS
 
 
-  # The self-host gates, four shards on each host (bench/selfhost_gates.sh
-  # --shard K/4): one job per shard, so no job holds all 22 gates. PR #217's
-  # Linux job ran 17 of them in 86 minutes and was cancelled at its 90-minute
-  # limit. semantic_calls alone took 2,151.5 s of that: its mutation proofs each
-  # rebuild the port driver. The shards are dealt by weight, heaviest first into
-  # the lightest shard, so semantic_calls runs alone in its shard. The weights
-  # are the seconds each gate took on the slowest host, where a run finished, and
-  # an estimate where none did (bench/selfhost_gates.weights says which). Four is
-  # the fewest shards that keep the heaviest at semantic_calls' own time: with
-  # three, the other two would hold 8,533 s between them, more than its 4,162 s.
-  # The limits stay until a run dealt this way has been measured.
+  # The self-host gates, eight shards on each host (bench/selfhost_gates.sh
+  # --shard K/8): one job per shard, so no job holds every gate. PR #217's
+  # Linux job ran 17 of its 22 gates in 86 minutes and was cancelled at its
+  # 90-minute limit. semantic_calls alone took 2,151.5 s of that: its mutation
+  # proofs each rebuild the port driver. The shards are dealt by weight,
+  # heaviest first into the lightest shard, so semantic_calls runs alone in
+  # its shard. The weights are the seconds each gate took on the slowest host,
+  # where a run finished, and an estimate where none did
+  # (bench/selfhost_gates.weights says which). #219's pipeline gates more than
+  # tripled the set, and its own CI dealt them eight ways on Linux and Windows,
+  # so every host takes eight: ci_plan_exercise holds each host to the
+  # driver's one count. The limits stay until a run dealt this way has been
+  # measured.
   selfhost:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'selfhost') }}
@@ -5640,7 +5642,7 @@ jobs:
       - name: Locate the artifact shards
         id: oracle_shard
         run: |
-          deal=$(bash bench/selfhost_gates.sh --list 8)
+          deal=$(bash bench/selfhost_gates.sh --list)
           oracle=$(printf '%s\n' "$deal" | awk '$3 == "native_ir_exercise" { print $1 }')
           elf=$(printf '%s\n' "$deal" | awk '$3 == "native_link_exercise" { print $1 }')
           test -n "$oracle" && test -n "$elf"
@@ -5687,8 +5689,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
-    name: "The self-host gates, on darwin arm64, shard ${{ matrix.shard }} of 5"
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    name: "The self-host gates, on darwin arm64, shard ${{ matrix.shard }} of 8"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5730,7 +5732,7 @@ jobs:
         env:
           SELFHOST_GATE_LOGS: ${{ runner.temp }}/selfhost-gate-logs
           SELFHOST_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" LLVM_MC="$HOME/llvm-static/bin/llvm-mc" LLVM_OBJDUMP="$HOME/llvm-static/bin/llvm-objdump" bash bench/selfhost_gates.sh --shard ${{ matrix.shard }}/5
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" LLVM_MC="$HOME/llvm-static/bin/llvm-mc" LLVM_OBJDUMP="$HOME/llvm-static/bin/llvm-objdump" bash bench/selfhost_gates.sh --shard ${{ matrix.shard }}/8
 
       - name: Preserve complete compiler component logs
         if: always()

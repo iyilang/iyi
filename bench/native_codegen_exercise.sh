@@ -1060,8 +1060,8 @@ prove_mutation "thread-local: the TLV page is reached through the GOT's relocati
   check_tlvp_kind
 prove_mutation "thread-local: the thunk's clobbers lose x16 and x17" \
   src/compiler/native/aarch64/isel.iyi \
-  '    [0, 16, 17, 30]' \
-  '    [0, 30]' \
+  '    RegList.new([0, 16, 17, 30])' \
+  '    RegList.new([0, 30])' \
   check_tls_clobbers
 prove_mutation "thread-local: a zero initialiser is placed in __thread_data, not __thread_bss" \
   src/compiler/native/thread_locals.iyi \

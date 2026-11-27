@@ -5,7 +5,7 @@ module compiler/native/target
 # Each target fills one in: aarch64 darwin and aarch64 linux today, in compiler/native/aarch64/abi.iyi.
 
 import compiler/native/obj/object::{ObjFormat}
-import compiler/native/mir::{MInst, MOp, Role}
+import compiler/native/mir::{MInst, MOp, Role, RegList}
 import compiler/native/aarch64/opcodes::{aarch64_op, aarch64_role, aarch64_new}
 import compiler/native/aarch64/regs::{cond_invert}
 
@@ -17,27 +17,35 @@ pub enum TlsForm
   WindowsTlsIndex # Windows: the TEB's thread-local index slot (gs:[0x58]), the x86_64-windows-msvc form
 end
 
+# One TargetDesc is built per module and shared by every function's selection and frame layout, so its register
+# sets are RegLists: no pass can change what the next function reads.
 pub class TargetDesc
   getter name : String
   getter darwin : Bool
   getter object_format : ObjFormat
   getter pointer_bits : Int32
   getter stack_align : Int64         # bytes; the stack pointer is kept aligned to this at every call
-  getter integer_args : Array(Int32) # physical registers that carry integer and pointer arguments, in order
-  getter fp_args : Array(Int32)      # physical registers that carry floating-point arguments, in order
+  getter integer_args : RegList      # physical registers that carry integer and pointer arguments, in order
+  getter fp_args : RegList           # physical registers that carry floating-point arguments, in order
   getter indirect_result : Int32     # the register that carries an sret pointer
   getter aggregate_reg_bytes : Int64 # an aggregate up to this many bytes may be passed in registers
   getter fp_aggregate_max : Int32    # a homogeneous floating-point aggregate up to this many elements is in fp registers
   getter variadic_on_stack : Bool    # every variadic argument goes on the stack (darwin)
-  getter callee_saved : Array(Int32)
-  getter caller_saved : Array(Int32)
-  getter scratch_gprs : Array(Int32)
-  getter scratch_fprs : Array(Int32)
+  getter callee_saved : RegList
+  getter caller_saved : RegList
+  getter scratch_gprs : RegList
+  getter scratch_fprs : RegList
   getter frame_pointer : Int32
   getter link_register : Int32
   getter tls : TlsForm
 
-  def initialize(@name : String, @darwin : Bool, @object_format : ObjFormat, @pointer_bits : Int32, @stack_align : Int64, @integer_args : Array(Int32), @fp_args : Array(Int32), @indirect_result : Int32, @aggregate_reg_bytes : Int64, @fp_aggregate_max : Int32, @variadic_on_stack : Bool, @callee_saved : Array(Int32), @caller_saved : Array(Int32), @scratch_gprs : Array(Int32), @scratch_fprs : Array(Int32), @frame_pointer : Int32, @link_register : Int32, @tls : TlsForm)
+  def initialize(@name : String, @darwin : Bool, @object_format : ObjFormat, @pointer_bits : Int32, @stack_align : Int64, integer_args : Array(Int32), fp_args : Array(Int32), @indirect_result : Int32, @aggregate_reg_bytes : Int64, @fp_aggregate_max : Int32, @variadic_on_stack : Bool, callee_saved : Array(Int32), caller_saved : Array(Int32), scratch_gprs : Array(Int32), scratch_fprs : Array(Int32), @frame_pointer : Int32, @link_register : Int32, @tls : TlsForm)
+    @integer_args = RegList.new(integer_args)
+    @fp_args = RegList.new(fp_args)
+    @callee_saved = RegList.new(callee_saved)
+    @caller_saved = RegList.new(caller_saved)
+    @scratch_gprs = RegList.new(scratch_gprs)
+    @scratch_fprs = RegList.new(scratch_fprs)
   end
 end
 

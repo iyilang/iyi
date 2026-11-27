@@ -1,5 +1,5 @@
 module reload_reuse
-import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass, Role, AsmBody}
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass, Role, AsmBody, RegList}
 import compiler/native/target::{is_role?}
 import compiler/native/regalloc_linear::{rewrite_spills}
 
@@ -36,8 +36,7 @@ use_after_def.uses << Operand.new(OperandKind::Virtual, v)
 body.insts << use_after_def
 call = MInst.new(MOp::Bl.value.to_i32)
 call.call = true
-call.clobbers << 9
-call.clobbers << 10
+call.clobbers = RegList.new([9, 10])
 body.insts << call
 last = MInst.new(MOp::CmpImm.value.to_i32)
 last.uses << Operand.new(OperandKind::Virtual, v)
@@ -76,7 +75,7 @@ use.uses << Operand.new(OperandKind::Virtual, f)
 float_body.insts << use
 call = MInst.new(MOp::Bl.value.to_i32)
 call.call = true
-call.clobbers << 48
+call.clobbers = RegList.new([48])
 float_body.insts << call
 use = MInst.new(MOp::FCmp.value.to_i32)
 use.uses << Operand.new(OperandKind::Virtual, f)

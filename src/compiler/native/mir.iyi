@@ -1,6 +1,7 @@
 module compiler/native/mir
 
 import compiler/native/obj/object::{RelocKind}
+import std/slice::{Slice}
 
 # Machine IR (SPEC 3.5). One MFunction per IR function. Operands name virtual
 # registers until regalloc rewrites them; after regalloc every register operand
@@ -178,6 +179,38 @@ pub class AsmBody
   end
 end
 
+# A fixed list of physical registers: a target's argument and saved sets, and a call's clobbers. One TargetDesc
+# serves every function of a module, and every call it selects shares the desc's caller-saved list as its clobbers,
+# so a RegList has no method that changes it; a pass that tried would not compile. It keeps its own copy of the
+# array it is made from, and the empty list, every other instruction's clobbers, allocates nothing.
+pub struct RegList
+  @regs : Slice(Int32)
+
+  def initialize
+    @regs = Slice(Int32).empty
+  end
+
+  def initialize(regs : Array(Int32))
+    @regs = Slice(Int32).new(regs.size) { |i| regs[i] }
+  end
+
+  def size : Int32
+    @regs.size
+  end
+
+  def [](index : Int32) : Int32
+    @regs[index]
+  end
+
+  def empty? : Bool
+    @regs.empty?
+  end
+
+  def each(& : Int32 -> Nil) : Nil
+    @regs.each { |reg| yield reg }
+  end
+end
+
 pub class MInst
   property opcode : Int32 # the target's opcode enum value; see target.iyi
   property size : Int32   # bits: 8, 16, 32, 64
@@ -187,11 +220,11 @@ pub class MInst
   property imm : Int64
   property defs : Array(Operand)
   property uses : Array(Operand)
-  property clobbers : Array(Int32) # physical registers a call destroys
-  property sym : Int32             # symbol index, or -1
-  property reloc : RelocKind?      # relocation applied at the instruction
-  property target : Int32          # block index for branches, or -1
-  property table : Int32           # jump table index for AddrTable and BrTable, or -1
+  property clobbers : RegList # physical registers a call destroys
+  property sym : Int32        # symbol index, or -1
+  property reloc : RelocKind? # relocation applied at the instruction
+  property target : Int32     # block index for branches, or -1
+  property table : Int32      # jump table index for AddrTable and BrTable, or -1
   property call : Bool
   property terminator : Bool
   property asm : AsmBody?
@@ -204,7 +237,7 @@ pub class MInst
     @imm = 0_i64
     @defs = [] of Operand
     @uses = [] of Operand
-    @clobbers = [] of Int32
+    @clobbers = RegList.new
     @sym = -1
     @reloc = nil
     @target = -1

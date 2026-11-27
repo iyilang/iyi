@@ -1653,10 +1653,16 @@ kept_dirs = ['/mingw64/bin', '/usr/bin',
              '/c/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.52.37025/bin/HostX64/x64',
              '/c/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64',
              '/c/Windows/system32', '/c/WINDOWS', '/c/Program Files/Git/cmd']
+# A directory a step put on PATH for this job alone, as a setup action puts its
+# tool under the runner's temp: this run's own scratch directory, in bash's
+# spelling, so no runner's path is written here.
+job_tool_dir = os.path.join(work, 'tool', 'bin').replace('\\', '/')
+if len(job_tool_dir) > 1 and job_tool_dir[1] == ':':
+    job_tool_dir = '/' + job_tool_dir[0].lower() + job_tool_dir[2:]
 def image_path(ruby, jdk):
     return ':'.join(kept_dirs[:3] + [f'/c/hostedtoolcache/windows/Ruby/{ruby}/x64/bin', '/c/Users/runneradmin/bin',
                                      f'/c/hostedtoolcache/windows/Java_Temurin-Hotspot_jdk/{jdk}/x64/bin',
-                                     '/d/a/_temp/crystal-1.21.0-true-undefined/bin', '/c/Program Files/R/R-4.6.2/bin/x64',
+                                     job_tool_dir, '/c/Program Files/R/R-4.6.2/bin/x64',
                                      '', '/c/hostedtoolcache/windows/Python/3.14.10/x64']
                     + kept_dirs[3:])
 producer_path = image_path('3.3.13', '17.0.21-9')

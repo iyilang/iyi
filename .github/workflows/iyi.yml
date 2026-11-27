@@ -329,6 +329,10 @@ jobs:
           # environment on every platform rather than teach the assertion an
           # exception.
           unset PGPASSWORD
+          # The self-hosted Mac's runner inherits its owner's shell, which sets
+          # NSC_TOKEN_FILE (run 46037312707). No step here uses it, and the
+          # assertion refuses its name: take it out as PGPASSWORD is.
+          unset NSC_TOKEN_FILE
           bash bench/stale_ci.sh assert-export-env
           mkdir -p stale-index
           args=(
@@ -339,7 +343,14 @@ jobs:
             args+=(--export-index "master=stale-index/master-candidate-${STALE_TARGET}.json")
           fi
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          "$IYI" test "${args[@]}" "${tests[@]}"
+          # PATH is part of every receipt's link key, and on Windows the fresh
+          # runner may boot another image version whose PATH differs in tools
+          # no test uses (run 46018941138: all 17 receipts missed under equal
+          # profiles). Every step that records or reads receipts runs iyi
+          # through bench/stale_ci.sh pinned-iyi: on Windows under the
+          # system's, Visual Studio's, the SDK's and Git's directories,
+          # elsewhere under the job's own PATH.
+          bash bench/stale_ci.sh pinned-iyi test "${args[@]}" "${tests[@]}"
 
       # archive: false leaves the uploaded JSON unhashed by an outer zip. The
       # filename and artifact name must remain identical (upload-artifact#785).
@@ -543,7 +554,7 @@ jobs:
         shell: bash
         run: |
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          "$IYI" test --cached --json \
+          bash bench/stale_ci.sh pinned-iyi test --cached --json \
             --import-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/cached.json
           bash bench/stale_ci.sh assert-hits --json stale-index/cached.json \
@@ -566,9 +577,11 @@ jobs:
           # environment on every platform rather than teach the assertion an
           # exception.
           unset PGPASSWORD
+          # The self-hosted Mac's owner's NSC_TOKEN_FILE, as in the export step.
+          unset NSC_TOKEN_FILE
           bash bench/stale_ci.sh assert-export-env
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          "$IYI" test --fresh --json \
+          bash bench/stale_ci.sh pinned-iyi test --fresh --json \
             --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/fresh.json
           bash bench/stale_ci.sh shadow-audit \
@@ -588,7 +601,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then cache_dir="$(cygpath -u "$cache_dir")"; fi
           rm -rf "$cache_dir/tests-v1"
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          "$IYI" test --cached --json \
+          bash bench/stale_ci.sh pinned-iyi test --cached --json \
             --import-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/audit-cached.json
           bash bench/stale_ci.sh assert-hits --json stale-index/audit-cached.json \
@@ -750,7 +763,14 @@ jobs:
             args+=(--export-index "master=stale-index/master-candidate-${STALE_TARGET}.json")
           fi
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          "$IYI" test "${args[@]}" "${tests[@]}"
+          # PATH is part of every receipt's link key, and on Windows the fresh
+          # runner may boot another image version whose PATH differs in tools
+          # no test uses (run 46018941138: all 17 receipts missed under equal
+          # profiles). Every step that records or reads receipts runs iyi
+          # through bench/stale_ci.sh pinned-iyi: on Windows under the
+          # system's, Visual Studio's, the SDK's and Git's directories,
+          # elsewhere under the job's own PATH.
+          bash bench/stale_ci.sh pinned-iyi test "${args[@]}" "${tests[@]}"
       - name: Upload producer compiler
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -906,7 +926,7 @@ jobs:
       - name: "Producer receipts on a fresh runner: hit on an equal profile, refused on another"
         run: |
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          "$IYI" test --cached --json \
+          bash bench/stale_ci.sh pinned-iyi test --cached --json \
             --import-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/cached.json
           bash bench/stale_ci.sh assert-hits --json stale-index/cached.json \
@@ -924,11 +944,11 @@ jobs:
           # environment on every platform rather than teach the assertion an
           # exception.
           unset PGPASSWORD
-          # The owner's shell's NSC_TOKEN_FILE, as in stale-darwin's export.
+          # The self-hosted Mac's owner's NSC_TOKEN_FILE, as in the export step.
           unset NSC_TOKEN_FILE
           bash bench/stale_ci.sh assert-export-env
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          "$IYI" test --fresh --json \
+          bash bench/stale_ci.sh pinned-iyi test --fresh --json \
             --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/fresh.json
           bash bench/stale_ci.sh shadow-audit \
@@ -946,7 +966,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then cache_dir="$(cygpath -u "$cache_dir")"; fi
           rm -rf "$cache_dir/tests-v1"
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          "$IYI" test --cached --json \
+          bash bench/stale_ci.sh pinned-iyi test --cached --json \
             --import-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/audit-cached.json
           bash bench/stale_ci.sh assert-hits --json stale-index/audit-cached.json \
@@ -1137,6 +1157,10 @@ jobs:
           # environment on every platform rather than teach the assertion an
           # exception.
           unset PGPASSWORD
+          # The self-hosted Mac's runner inherits its owner's shell, which sets
+          # NSC_TOKEN_FILE (run 46037312707). No step here uses it, and the
+          # assertion refuses its name: take it out as PGPASSWORD is.
+          unset NSC_TOKEN_FILE
           bash bench/stale_ci.sh assert-export-env
           mkdir -p stale-index
           args=(
@@ -1147,13 +1171,13 @@ jobs:
             args+=(--export-index "master=stale-index/master-candidate-${STALE_TARGET}.json")
           fi
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          # PATH is part of every receipt's link key, and the fresh runner may
-          # boot another image version whose PATH differs in tools no test uses
-          # (run 46018941138: all 17 receipts missed under equal profiles).
-          # Every step here and on the fresh runner that records or reads
-          # receipts runs iyi under the same PATH: the system's, Visual
-          # Studio's, the SDK's and Git's directories (bench/stale_ci.sh
-          # stale-path, pinned-iyi).
+          # PATH is part of every receipt's link key, and on Windows the fresh
+          # runner may boot another image version whose PATH differs in tools
+          # no test uses (run 46018941138: all 17 receipts missed under equal
+          # profiles). Every step that records or reads receipts runs iyi
+          # through bench/stale_ci.sh pinned-iyi: on Windows under the
+          # system's, Visual Studio's, the SDK's and Git's directories,
+          # elsewhere under the job's own PATH.
           bash bench/stale_ci.sh pinned-iyi test "${args[@]}" "${tests[@]}"
       - name: Check the producer compiler and LLVM DLL
         run: |
@@ -1327,6 +1351,8 @@ jobs:
           # environment on every platform rather than teach the assertion an
           # exception.
           unset PGPASSWORD
+          # The self-hosted Mac's owner's NSC_TOKEN_FILE, as in the export step.
+          unset NSC_TOKEN_FILE
           bash bench/stale_ci.sh assert-export-env
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           bash bench/stale_ci.sh pinned-iyi test --fresh --json \

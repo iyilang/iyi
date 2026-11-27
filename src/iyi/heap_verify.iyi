@@ -1167,7 +1167,7 @@ class IyiHeapVerify
     # A fiber's own mapping above its guard page; a thread's stack a few
     # pages only, written downwards so a growing stack's guard is met in
     # order.
-    floor = top != 0 ? top - IyiFiber::STACK_BYTES + 2_u64 * IyiFiber::PAGE : sp - 8192_u64
+    floor = top != 0 ? top - fiber.stack_span + 2_u64 * IyiFiber::PAGE : sp - 8192_u64
     count = partition_arenas
     fill(sp, floor, own, count)
     {% if flag?(:iyi_chaos) %}
@@ -1193,7 +1193,7 @@ class IyiHeapVerify
           home = other.home
           if other.object_id != fiber.object_id && !other.parallel && home.is_a?(IyiSchedulerState) && home.object_id == here &&
              other.state != IyiFiberState::Done && other.state != IyiFiberState::Running && other.stack_top != 0 && other.saved_sp != 0
-            low = other.stack_top - IyiFiber::STACK_BYTES + 2_u64 * IyiFiber::PAGE
+            low = other.stack_top - other.stack_span + 2_u64 * IyiFiber::PAGE
             {% if flag?(:win32) && flag?(:x86_64) %}
               # Windows commits a fiber's stack as it grows (`map_stack`):
               # under the lowest committed byte, the StackLimit its last

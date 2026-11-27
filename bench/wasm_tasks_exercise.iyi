@@ -186,7 +186,7 @@ end
   def task_overflow_frame : Nil
     frame = uninitialized UInt8[262144]
     bytes = pointerof(frame).as(Pointer(UInt8))
-    boundary = IyiScheduler.current.stack_top - IyiFiber::STACK_BYTES
+    boundary = IyiScheduler.current.stack_top - IyiScheduler.current.stack_span
     bottom = bytes.address
     task_check(bottom < boundary && boundary < bottom + 262144_u64, "oversized frame did not cross the stack boundary")
     bytes[(boundary - bottom).to_i32] = 0_u8
@@ -249,7 +249,7 @@ end
     box = TaskExerciseBox.new(719)
     address = box.as(Pointer(Void)).address
     TaskPoolProbe.remember(address)
-    base = IyiScheduler.current.stack_top - IyiFiber::STACK_BYTES
+    base = IyiScheduler.current.stack_top - IyiScheduler.current.stack_span
     Pointer(Int32).new(base + 16_u64).value = address.unsafe_to_i32
   end
 

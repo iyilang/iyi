@@ -1392,7 +1392,7 @@ end
 
 # The deepest document read: deep enough for any data a person wrote, and
 # shallow enough for a task's stack. It was 512, Crystal's, whose fibers
-# have megabytes; a task here has 256 KB (`IyiFiber::STACK_BYTES`), and a
+# have megabytes; a task here has 256 KiB by default (`IyiFiber.stack_bytes`), and a
 # task that parsed 480 nested arrays - a request body, in a server whose
 # handlers are tasks - died of a stack overflow that took the whole
 # process, and `==` on two such values died at 334. At 256 a plain build

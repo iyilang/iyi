@@ -409,6 +409,16 @@
   fixture must be refused as `dominance`, and `bench/native_ir_exercise.sh`
   proves both, and an operand list not kept on first use, to failing.
 
+- **The self-hosted front end's instance-variable pass is linear in the
+  classes.** `declare_guessed_instance_vars` scanned every pending instance
+  variable per owner and searched the owner list linearly at every
+  superclass level, so it grew as size^1.9 and took 3.3 s of a 4.6 s front
+  end on a 113k-line generated program. An owner table indexed by full name
+  and a set of owner-and-name keys make it 22 ms there; `TopLevelVisitor#finish`
+  keeps its explicit names in a `Set`. On tmac the front end over 57k lines
+  goes from 1,358 to 607 ms (2.74× the hosted front end, from 6.14×); the
+  typed dump is unchanged on 1,068 inputs.
+
 - **A freestanding wasm `--release` drops DWARF and keeps function names
   (#221).** The link adds `wasm-ld --strip-debug` when `--release` was given
   without `-d`, including `--release -O z`; the name section host stack

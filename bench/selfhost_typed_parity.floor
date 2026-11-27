@@ -175,7 +175,7 @@ src/compiler/semantic/cover.iyi 15
 src/compiler/semantic/default_arguments.iyi 24
 src/compiler/semantic/definition_typing.iyi 50
 src/compiler/semantic/inline_macros.iyi 57
-src/compiler/semantic/instance_vars.iyi 87
+src/compiler/semantic/instance_vars.iyi 93
 src/compiler/semantic/lib_call.iyi 54
 src/compiler/semantic/literal_expander.iyi 75
 src/compiler/semantic/macro_bindings.iyi 22

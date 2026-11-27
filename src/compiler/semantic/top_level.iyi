@@ -2858,9 +2858,9 @@ pub class TopLevelVisitor < Visitor
     # An explicit `@x : T` decides the type of `@x`. An inferred record for the same name (an
     # initialize argument's restriction) does not replace it, as the hosted pass skips a guess for a
     # variable that exists.
-    explicit = [] of String
+    explicit = Set(String).new
     @pending_ivars.each do |found|
-      explicit << "#{found.owner.full_name} #{found.name}" if found.explicit
+      explicit.add("#{found.owner.full_name} #{found.name}") if found.explicit
     end
     # The hosted processor declares explicit variables before guessed ones for each owner.
     [true, false].each do |explicit_pass|

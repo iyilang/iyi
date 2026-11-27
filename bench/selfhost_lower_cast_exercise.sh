@@ -157,7 +157,7 @@ for fixture in "$REPO"/bench/fixtures/lowcast_*.iyi "$REPO"/bench/fixtures/lowdo
     oracle_target=(--cross-compile --target aarch64-apple-darwin)
     oracle_output="$WORK_NATIVE/$name.o"
   fi
-  if ! "$IYI" build "${oracle_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
+  if ! "$IYI" build ${oracle_target[@]+"${oracle_target[@]}"} --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
     echo "  $name: the hosted compiler did not emit its module (see $WORK/$name.oracle.log)"
     diverged=$((diverged + 1))
     continue

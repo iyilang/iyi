@@ -94,9 +94,9 @@ hosted_module() {
     lowglob_cvar_lazy*)
       built_in=$("$IYI" env | awk -F= '/^IYI_PATH=/ { print substr($0, index($0, "=") + 1); exit }')
       if [ "$HOST_OS" = windows ]; then path_sep=';'; else path_sep=':'; fi
-      IYI_PATH="$REPO_NATIVE/bench/fixtures/lowglob_abi${path_sep}${built_in}" "$IYI" build "${target[@]}" --prelude iyi/prelude --emit llvm-ir --no-debug -o "$(native_path "$output")" "$(native_path "$fixture")" > "$log" 2>&1
+      IYI_PATH="$REPO_NATIVE/bench/fixtures/lowglob_abi${path_sep}${built_in}" "$IYI" build ${target[@]+"${target[@]}"} --prelude iyi/prelude --emit llvm-ir --no-debug -o "$(native_path "$output")" "$(native_path "$fixture")" > "$log" 2>&1
       ;;
-    *) "$IYI" build "${target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$(native_path "$output")" "$(native_path "$fixture")" > "$log" 2>&1 ;;
+    *) "$IYI" build ${target[@]+"${target[@]}"} --prelude empty --emit llvm-ir --no-debug -o "$(native_path "$output")" "$(native_path "$fixture")" > "$log" 2>&1 ;;
   esac
 }
 
@@ -448,7 +448,7 @@ startup_string_check() {
   echo 'INVALID: the clean startup-string global is absent'
   return 2
 }
-if "$IYI" build "${startup_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$startup_output" "$WORK_NATIVE/startup-only.iyi" > "$WORK/startup-host.log" 2>&1 &&
+if "$IYI" build ${startup_target[@]+"${startup_target[@]}"} --prelude empty --emit llvm-ir --no-debug -o "$startup_output" "$WORK_NATIVE/startup-only.iyi" > "$WORK/startup-host.log" 2>&1 &&
    [ -s "$WORK/startup-host.ll" ] &&
    awk "$CALL_TYPES" "$WORK/startup-host.ll" > "$WORK/startup.oracle.ll" &&
    "$WORK/port$EXE" lower "$WORK_NATIVE/startup-only.iyi" "$WORK_NATIVE/startup.oracle.ll" > "$WORK/startup-baseline.out" 2>"$WORK/startup-baseline.err" &&

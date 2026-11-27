@@ -170,7 +170,7 @@ for fixture in "$REPO"/bench/fixtures/lower_*.iyi "$REPO"/bench/fixtures/lowdecl
     oracle_output="$WORK_NATIVE/$name.o"
   fi
   oracle_status=0
-  "$IYI" build "${oracle_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || oracle_status=$?
+  "$IYI" build ${oracle_target[@]+"${oracle_target[@]}"} --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || oracle_status=$?
   if ! record_bare_oracle_failure "$oracle_status" "$WORK/$name.ll"; then
     echo "  $name: the hosted compiler did not emit its module (see $WORK/$name.oracle.log)"
     awk 'NR<=3' "$WORK/$name.oracle.log"
@@ -340,7 +340,7 @@ if [ "$HOST_ID" != darwin-arm64 ]; then
   pointer_target=(--cross-compile --target aarch64-apple-darwin)
   pointer_output="$WORK_NATIVE/pointer-lib-host.o"
 fi
-if "$IYI" build "${pointer_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$pointer_output" "$pointer_fixture" > "$WORK/pointer-lib-host.log" 2>&1 &&
+if "$IYI" build ${pointer_target[@]+"${pointer_target[@]}"} --prelude empty --emit llvm-ir --no-debug -o "$pointer_output" "$pointer_fixture" > "$WORK/pointer-lib-host.log" 2>&1 &&
    awk "$CALL_TYPES" "$WORK/pointer-lib-host.ll" > "$WORK/pointer-lib-oracle.ll" &&
    "$WORK/port$EXE" lower "$pointer_fixture" "$WORK_NATIVE/pointer-lib-oracle.ll" > "$WORK/pointer-lib.compare" 2> "$WORK/pointer-lib.err" &&
    awk '/^SUMMARY/ { split($2,a,"="); split($3,b,"="); split($4,c,"="); exit !(a[2] == b[2] && a[2] > 0 && c[2] == 1) }' "$WORK/pointer-lib.compare" &&
@@ -1074,7 +1074,7 @@ headed_late_ir() {
   local fix="$REPO/bench/fixtures/lower_headed_late.iyi"
   local target=() output="$WORK_NATIVE/headed$EXE"
   if [ "$HOST_ID" != darwin-arm64 ]; then target=(--cross-compile --target aarch64-apple-darwin); output="$WORK_NATIVE/headed.o"; fi
-  IYI_PATH="$(native_path "$pre")" "$IYI" build "${target[@]}" --emit llvm-ir --no-debug -o "$output" "$(native_path "$fix")" > "$WORK/headed.hosted.log" 2>&1 || { cat "$WORK/headed.hosted.log"; return 2; }
+  IYI_PATH="$(native_path "$pre")" "$IYI" build ${target[@]+"${target[@]}"} --emit llvm-ir --no-debug -o "$output" "$(native_path "$fix")" > "$WORK/headed.hosted.log" 2>&1 || { cat "$WORK/headed.hosted.log"; return 2; }
   [ -s "$WORK/headed.ll" ] || return 1
   awk "$CALL_TYPES" "$WORK/headed.ll" > "$WORK/headed.rewritten.ll" || return 1
   "$portbin" oracle "$WORK_NATIVE/headed.rewritten.ll" > "$WORK/headed.hostnorm" 2> "$WORK/headed.oracle.err" || { cat "$WORK/headed.oracle.err"; return 2; }
@@ -1148,7 +1148,7 @@ string_fields_ir() {
   local fix="$REPO/bench/fixtures/lower_string_fields.iyi"
   local target=() output="$WORK_NATIVE/sfields$EXE"
   if [ "$HOST_ID" != darwin-arm64 ]; then target=(--cross-compile --target aarch64-apple-darwin); output="$WORK_NATIVE/sfields.o"; fi
-  IYI_PATH="$(native_path "$pre")" "$IYI" build "${target[@]}" --emit llvm-ir --no-debug -o "$output" "$(native_path "$fix")" > "$WORK/sfields.hosted.log" 2>&1 || { cat "$WORK/sfields.hosted.log"; return 2; }
+  IYI_PATH="$(native_path "$pre")" "$IYI" build ${target[@]+"${target[@]}"} --emit llvm-ir --no-debug -o "$output" "$(native_path "$fix")" > "$WORK/sfields.hosted.log" 2>&1 || { cat "$WORK/sfields.hosted.log"; return 2; }
   [ -s "$WORK/sfields.ll" ] || return 1
   awk '1' "$pre/iyi/prelude.iyi" "$fix" > "$WORK/sfields.combined.iyi"
   "$portbin" emit "$WORK_NATIVE/sfields.combined.iyi" "$WORK_NATIVE/sfields.ll" > "$WORK/sfields.port.ll" 2> "$WORK/sfields.port.err" || { cat "$WORK/sfields.port.err"; return 2; }
@@ -1603,7 +1603,7 @@ if [ "$HOST_ID" != darwin-arm64 ]; then
   aggregate_output="$WORK_NATIVE/aggregate-store.o"
   host_limited 'aggregate store: AArch64 Mach-O signature and runtime result require macOS arm64'
 fi
-if "$IYI" build "${aggregate_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$aggregate_output" "$REPO_NATIVE/bench/fixtures/lowcast_struct_union.iyi" > "$WORK/aggregate-store.hosted.log" 2>&1 &&
+if "$IYI" build ${aggregate_target[@]+"${aggregate_target[@]}"} --prelude empty --emit llvm-ir --no-debug -o "$aggregate_output" "$REPO_NATIVE/bench/fixtures/lowcast_struct_union.iyi" > "$WORK/aggregate-store.hosted.log" 2>&1 &&
    [ -s "$WORK/aggregate-store.ll" ] && aggregate_store_check; then
   prove_mutation "aggregate store preserves the loaded value" "$REPO/src/compiler/lower/lower.iyi" \
     '      stored = load_aligned(low, low.typer.llvm_type(vt), v)' \
@@ -1832,7 +1832,7 @@ prove_mutation "a pointer union gains extra parentheses" "$REPO/src/compiler/low
 name_block_check() {
   local target=() output="$WORK_NATIVE/name-block-oracle$EXE"
   if [ "$HOST_ID" != darwin-arm64 ]; then target=(--cross-compile --target aarch64-apple-darwin); output="$WORK_NATIVE/name-block-oracle.o"; fi
-  "$IYI" build "${target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$output" "$REPO_NATIVE/bench/fixtures/nameblock_capture.iyi" > "$WORK/name-block.oracle.log" 2>&1 || { cat "$WORK/name-block.oracle.log"; return 2; }
+  "$IYI" build ${target[@]+"${target[@]}"} --prelude empty --emit llvm-ir --no-debug -o "$output" "$REPO_NATIVE/bench/fixtures/nameblock_capture.iyi" > "$WORK/name-block.oracle.log" 2>&1 || { cat "$WORK/name-block.oracle.log"; return 2; }
   "$IYI" build -o "$WORK_NATIVE/name-block-port$EXE" "$REPO_NATIVE/bench/selfhost_lower_name_owner.iyi" > "$WORK/name-block.build.log" 2>&1 || { cat "$WORK/name-block.build.log"; return 2; }
   local result=0
   "$WORK/name-block-port$EXE" "$REPO_NATIVE/bench/fixtures/nameblock_capture.iyi" "$WORK_NATIVE/name-block-oracle.ll" block > "$WORK/name-block.out" 2> "$WORK/name-block.err" || result=$?

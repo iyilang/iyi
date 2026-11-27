@@ -1,0 +1,13 @@
+def f(x : Int32 | String) : String
+  "broad"
+end
+
+def f(x : Int32) : Int32
+  x
+end
+
+def choose(flag : Bool) : Int32 | String
+  flag ? 42 : "value"
+end
+
+f(choose(true))

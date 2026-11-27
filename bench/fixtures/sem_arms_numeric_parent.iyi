@@ -1,0 +1,13 @@
+class Parent
+  def widen(value : UInt64) : Int32
+    2
+  end
+end
+
+class Child < Parent
+  def widen(value : Int64) : Int32
+    1
+  end
+end
+
+puts Child.new.widen(1)

@@ -1,0 +1,7 @@
+module lexer
+
+pub class Lexer
+  def scan : Int32
+    1
+  end
+end

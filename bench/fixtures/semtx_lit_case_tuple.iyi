@@ -1,0 +1,39 @@
+def pair_kind(left : ASTNode, right : ASTNode) : Int32
+  case {left, right}
+  when {Var, Var}
+    1
+  when {NilLiteral, _}
+    2
+  when {Path, Generic}
+    3
+  when Call
+    4
+  else
+    5
+  end
+end
+
+def single(node : ASTNode) : Int32
+  case {node}
+  when {Var}
+    1
+  else
+    2
+  end
+end
+
+def temp_pair(node : ASTNode) : Int32
+  case {node.clone, node.size}
+  when {Var, 0}
+    0
+  when {_, 1}
+    1
+  end
+end
+
+def wild(node : ASTNode, other : ASTNode) : Int32
+  case {node.size, other.size}
+  when {_, _}
+    7
+  end
+end

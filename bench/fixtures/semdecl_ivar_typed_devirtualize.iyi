@@ -1,0 +1,15 @@
+abstract class Animal
+end
+
+class Cat < Animal
+end
+
+class Holder
+  @items : Array(Animal)
+  @pair : Tuple(Animal, Int32)
+  @fn : Proc(Animal, Bool)
+  @either : Animal | Cat
+
+  def initialize(@items : Array(Animal), @pair : Tuple(Animal, Int32), @fn : Proc(Animal, Bool), @either : Animal | Cat)
+  end
+end

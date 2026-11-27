@@ -1,0 +1,89 @@
+# The port's side of the math gate: folds every constant expression of a
+# fixture with the port's MathInterpreter and prints one line per expression,
+# in the layout the hosted oracle uses (bench/selfhost_semantic_math_oracle.cr).
+# A `# target: <kind>` comment line sets the target type for the lines after
+# it. A refused expression prints `refused=` with the reason, and is not
+# compared with the oracle (the gate checks the refused fixture is refused).
+import std/file
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/token::{NumberKind}
+import compiler/semantic/math_interpreter::{MathInterpreter, MathValue, MathError}
+
+module BenchSemanticMathExercise
+  def self.target_of(name : String) : NumberKind?
+    case name
+    when "i8"   then NumberKind::I8
+    when "i16"  then NumberKind::I16
+    when "i32"  then NumberKind::I32
+    when "i64"  then NumberKind::I64
+    when "i128" then NumberKind::I128
+    when "u8"   then NumberKind::U8
+    when "u16"  then NumberKind::U16
+    when "u32"  then NumberKind::U32
+    when "u64"  then NumberKind::U64
+    when "u128" then NumberKind::U128
+    else             nil
+    end
+  end
+
+  def self.expect_literal(text : String, kind : NumberKind, expected : String) : Nil
+    result = MathInterpreter.parse_literal(text, kind)
+    unless result.is_a?(MathValue) && result.as(MathValue).kind == kind && result.as(MathValue).decimal == expected
+      raise "literal #{text} did not produce #{expected} as #{kind.to_s}"
+    end
+  end
+
+  def self.expect_invalid(text : String, kind : NumberKind, message : String) : Nil
+    result = MathInterpreter.parse_literal(text, kind)
+    unless result.is_a?(MathError) && !result.as(MathError).refused && result.as(MathError).message == message
+      raise "literal #{text} did not produce #{message}"
+    end
+  end
+
+  def self.check_limits : Nil
+    expect_literal("340282366920938463463374607431768211455", NumberKind::U128, "340282366920938463463374607431768211455")
+    expect_literal("-170141183460469231731687303715884105728", NumberKind::I128, "-170141183460469231731687303715884105728")
+    expect_invalid("340282366920938463463374607431768211456", NumberKind::U128, "invalid UInt128: 340282366920938463463374607431768211456")
+    expect_invalid("170141183460469231731687303715884105728", NumberKind::I128, "invalid Int128: 170141183460469231731687303715884105728")
+    expect_invalid("-170141183460469231731687303715884105729", NumberKind::I128, "invalid Int128: -170141183460469231731687303715884105729")
+  end
+end
+
+# A bare run, with no fixture, folds one expression and checks it: the runner that executes every
+# program under bench/ with no arguments (the Windows job) then exercises the interpreter, where it
+# used to stop at the missing argument.
+if Program.args.size == 0
+  bare_result = MathInterpreter.new(nil).interpret(Parser.new("1 + 2", "bare").parse)
+  unless bare_result.is_a?(MathValue) && bare_result.as(MathValue).decimal == "3"
+    raise "bare run: 1 + 2 did not fold to 3"
+  end
+  BenchSemanticMathExercise.check_limits
+  puts "ok (bare run: 1 + 2 folds to 3)"
+else
+  filename = Program.args[0]
+  lines = File.read_lines(filename)
+  target : NumberKind? = nil
+  i = 0
+  while i < lines.size
+    line = lines[i]
+    if line.starts_with?("# target: ")
+      target = BenchSemanticMathExercise.target_of(line[10, line.bytesize - 10])
+    elsif line.bytesize > 0 && !line.starts_with?("#")
+      parser = Parser.new(line, filename)
+      node = parser.parse
+      result = MathInterpreter.new(target).interpret(node)
+      if result.is_a?(MathValue)
+        value = result.as(MathValue)
+        puts "#{i + 1}: value=#{value.decimal} kind=#{value.kind.to_s}"
+      else
+        error = result.as(MathError)
+        if error.refused
+          puts "#{i + 1}: refused=#{error.message}"
+        else
+          puts "#{i + 1}: error=#{error.message}"
+        end
+      end
+    end
+    i = i + 1
+  end
+end

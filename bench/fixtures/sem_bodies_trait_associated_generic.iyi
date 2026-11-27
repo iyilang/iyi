@@ -1,0 +1,22 @@
+trait ItemSource
+  type Item
+
+  def item : Item
+    self.get_item
+  end
+end
+
+struct Holder(T)
+  def initialize(@value : T)
+  end
+
+  def get_item : T
+    @value
+  end
+end
+
+impl ItemSource for Holder(T) forall T
+  type Item = T
+end
+
+Holder(Int32).new(42).item

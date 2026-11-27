@@ -1,0 +1,12 @@
+# One def at five call sites: three with an Int32 argument (one instance, the cache answers the
+# last two), then one with a String and one with a Float64 (one instance each). The typed dump
+# reports three typed instances of `pick`; without the cache it reports five.
+def pick(x)
+  x
+end
+
+a = pick(1)
+b = pick(2)
+c = pick(3)
+d = pick("s")
+e = pick(2.5)

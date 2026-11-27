@@ -1,0 +1,17 @@
+class Repeater
+  def initialize
+    @step = 2
+  end
+
+  def each_twice(&)
+    yield 1
+    yield 2
+  end
+
+  def run(&)
+    each_twice { |x| yield @step }
+  end
+end
+
+r = Repeater.new
+r.run { |v| v }

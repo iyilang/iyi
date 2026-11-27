@@ -1,0 +1,3 @@
+@[Unsafe("an uninitialized local is raw memory until it is written")]
+x = uninitialized Int32
+y = x

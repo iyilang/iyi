@@ -1,0 +1,34 @@
+require "../../src/iyi/prelude"
+
+class Animal
+  def self.make : Animal
+    Animal.new
+  end
+end
+
+class Dog < Animal
+  def self.make : Dog
+    Dog.new
+  end
+end
+
+def identify(a : Animal) : String
+  "animal"
+end
+
+def identify(d : Dog) : String
+  "dog"
+end
+
+def pick(x : Int32 | String) : String
+  "union"
+end
+
+def pick(x : Int32) : String
+  "int"
+end
+
+# call identify(instance(Dog))
+# call identify(instance(Animal))
+# call pick(1)
+# call pick("a")

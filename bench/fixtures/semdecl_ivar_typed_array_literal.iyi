@@ -1,0 +1,5 @@
+class ArrayLiteralHolder
+  def initialize
+    @items = [] of Array(UInt8)
+  end
+end

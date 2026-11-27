@@ -1,0 +1,15 @@
+module s1h_scope/types
+
+pub class TypeTable
+  def value : Int32
+    4
+  end
+end
+
+pub def make_table : TypeTable
+  TypeTable.new
+end
+
+pub def read_table(table : TypeTable) : Int32
+  table.value
+end

@@ -1,0 +1,995 @@
+module compiler/semantic/literal_expander
+
+# Lowers literal forms into the calls they stand for, as the hosted
+# LiteralExpander does (src/compiler/iyi/semantic/literal_expander.cr, the
+# hosted compiler). Phase S slice S1e ports it one literal kind per increment.
+#
+# Ported so far: range literals, string interpolation, array literals, hash
+# literals, and `case` with a single subject or none.
+#
+# `1 .. 3` is `Range.new(1, 3, false)` and `1 ... 3` is `Range.new(1, 3, true)`,
+# the `from` and `to` expressions left as written. `"a#{b}c"` is
+# `String.interpolation("a", b, "c")`, after the literal pieces that touch each
+# other are merged.
+#
+# Array literals: `[] of T` is `Array(T).new`; `[a, b]` is an `unsafe_build` of
+# the capacity, then each element stored by index; a splat switches to `new`
+# and `<<`/`concat`. Hash literals: `{} of K => V` is `Hash(K, V).new`;
+# `{a => b}` is `Hash(typeof(keys), typeof(values)).new`, filled with `[]=`.
+# An element or key or value that is not a plain variable or a simple literal
+# is bound to a `__temp_N` first, in element order; for a hash all keys are
+# bound before any value. The expander is one step: the walk (`transform`)
+# continues into the expansion, so a literal inside an element is expanded when
+# the walk reaches it, which is the order the hosted visitor uses.
+#
+# `case subject` becomes an `if` chain over `===`: a subject that is not a
+# variable is kept in a `__temp_N`; a `when` with several conditions is their
+# `||`; a `when` of types is one `is_a?` per type, each with its own copy of the
+# body. `when nil` is `is_a?(Nil)`, and `when X.class` is `is_a?(X.class)`.
+# With a subject, every branch and the `else` binds `it` to the subject, as the
+# hosted pass does for every iyi `case` with a subject: a `__temp_N` takes the
+# subject, `it` takes the temporary, and the branch's own `it`s are renamed to
+# the temporary in a copy. A `case` with no subject keeps each condition as
+# written. A missing `else` stays `Nop` here, which is what the hosted pass
+# leaves too.
+#
+# Not ported, named here rather than left out silently:
+# - `case` with a tuple subject (`case a, b`): the walk leaves that `case` as
+#   written, because the hosted pass zips its tuple against each `when` tuple.
+# - an exhaustive `case` with no `else`, which the hosted pass fills with an
+#   `Unreachable` node; the port has no such node.
+# - a `when` condition that is an implicit receiver (`when .foo`), which the
+#   hosted pass refuses.
+# - multiple assignment, op-assign, `select`, regex and proc literals, none yet
+#   ported; a literal of these kinds is left as written.
+#
+# The named forms `Type{...}` take their generic type from the program's types
+# in the hosted compiler. The walk here has no types, so it passes the name as
+# written, which is the non-generic branch. The generic branch is not ported.
+# Named tuples have no expansion in the hosted expander either, so none here.
+
+import compiler/semantic/normalizer::{NormalizerProgram}
+import compiler/syntax/ast::{ASTNode, Arg, And, ArrayLiteral, Assign, BoolLiteral, Block, Call, Case, Cast, CharLiteral, ClassVar, Def, EnumDef, Expressions, Generic, HashLiteral, If, InstanceVar, IsA, MacroExpression, MacroFor, MacroIf, Metaclass, MultiAssign, NilLiteral, Nop, Not, NumberLiteral, Or, Path, RangeLiteral, Select, Splat, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, TypeOf, Underscore, Var, When}
+import compiler/syntax/ast::{ProcLiteral, ProcPointer}
+import compiler/syntax/transformer::{Transformer}
+
+pub class LiteralExpander < Transformer
+  def initialize(@program : NormalizerProgram)
+  end
+
+  def transform(node : ArrayLiteral) : ASTNode
+    if name = node.name
+      expanded = expand_named_array(node, name, nil)
+    else
+      expanded = expand_array(node)
+    end
+    expanded.transform(self)
+  end
+
+  def transform(node : HashLiteral) : ASTNode
+    expanded = expand_hash(node, node.name)
+    expanded.transform(self)
+  end
+
+  def transform(node : Case) : ASTNode
+    expanded = expand_case(node)
+    expanded.transform(self)
+  end
+
+  # Multiple assignment: the hosted expansion, then the walk continues into it.
+  def transform(node : MultiAssign) : ASTNode
+    expanded = expand_multi_assign(node)
+    expanded.transform(self)
+  end
+
+  # `select`: one channel `select` over every arm's operation, then a `case`
+  # on the index it answers with.
+  def transform(node : Select) : ASTNode
+    expanded = expand_select(node)
+    expanded.transform(self)
+  end
+
+  # `a && b` and `a || b`: the hosted expansion, then the walk continues into it.
+  def transform(node : And) : ASTNode
+    expanded = expand_and(node)
+    expanded.transform(self)
+  end
+
+  def transform(node : Or) : ASTNode
+    expanded = expand_or(node)
+    expanded.transform(self)
+  end
+
+  # Macros are expanded before literal lowering, and the hosted walk never
+  # enters their bodies, so a macro's condition or body stays as written.
+  def transform(node : MacroIf) : ASTNode
+    node
+  end
+
+  def transform(node : MacroFor) : ASTNode
+    node
+  end
+
+  def transform(node : MacroExpression) : ASTNode
+    node
+  end
+
+  # The shared transformer returns an argument as written. The hosted walk
+  # reaches an argument's default value and restriction, so this one does too.
+  def transform(node : Arg) : ASTNode
+    if d = node.default_value
+      node.default_value = d.transform(self)
+    end
+    if r = node.restriction
+      node.restriction = r.transform(self)
+    end
+    node
+  end
+
+  # The shared transformer does not enter a definition's arguments. The hosted
+  # walk visits them, so their default values are lowered, before the body.
+  def transform(node : Def) : ASTNode
+    if r = node.receiver
+      node.receiver = r.transform(self)
+    end
+    transform_many(node.args)
+    node.body = node.body.transform(self)
+    node
+  end
+
+  # The shared transformer returns an enum as written. The hosted walk enters
+  # its members, so a case in an enum's method is lowered too.
+  def transform(node : EnumDef) : ASTNode
+    transform_many(node.members)
+    node
+  end
+
+  def transform(node : RangeLiteral) : ASTNode
+    path = Path.global(["Range"] of String)
+    bool = BoolLiteral.new(node.exclusive)
+    call = Call.new(path, "new", [node.from, node.to, bool] of ASTNode)
+    call.transform(self)
+  end
+
+  def transform(node : StringInterpolation) : ASTNode
+    pieces = combine_contiguous_string_literals(node.expressions)
+    call = Call.new(Path.global(["String"] of String), "interpolation", pieces)
+    call.transform(self)
+  end
+
+  # The hosted expander merges each literal piece into the piece after it when
+  # both are literals, and drops the first. Its `reject!` reads the buffer in
+  # place, so a run of literals collapses into its last piece. The same walk
+  # here: `pieces` is updated as it goes, and a merged piece is not kept.
+  def combine_contiguous_string_literals(pieces : Array(ASTNode)) : Array(ASTNode)
+    kept = [] of ASTNode
+    n = pieces.size
+    i = 0
+    while i < n
+      piece = pieces[i]
+      merged = false
+      if i < n - 1
+        next_piece = pieces[i + 1]
+        if piece.is_a?(StringLiteral) && next_piece.is_a?(StringLiteral)
+          joined = piece.as(StringLiteral).value + next_piece.as(StringLiteral).value
+          pieces[i + 1] = StringLiteral.new(joined)
+          merged = true
+        end
+      end
+      if !merged
+        kept << piece
+      end
+      i = i + 1
+    end
+    kept
+  end
+
+  # `[] of T` is `Array(T).new`. `[a, b]` is an `unsafe_build` of the capacity,
+  # then each element stored by index. A splat makes it `new` and then `<<`
+  # for each element and `concat` for each splat.
+  def expand_array(node : ArrayLiteral) : ASTNode
+    temps = complex_elem_temp_vars(node.elements)
+    if of = node.of
+      type_var = of
+    else
+      type_var = typeof_exp(node.elements, temps)
+    end
+    capacity = count_non_splat(node.elements)
+    generic = Generic.new(Path.global(["Array"] of String), [type_var] of ASTNode)
+
+    if any_splat?(node.elements)
+      ary_var = temp_var
+      ary_instance = Call.new(generic, "new", [NumberLiteral.new(capacity.to_s)] of ASTNode)
+      exps = [] of ASTNode
+      bind_elem_temps(node.elements, temps, exps)
+      exps << Assign.new(ary_var.clone, ary_instance)
+      i = 0
+      while i < node.elements.size
+        elem = node.elements[i]
+        if elem.is_a?(Splat)
+          exps << Call.new(ary_var.clone, "concat", [splat_value(elem, temps[i])] of ASTNode)
+        else
+          exps << Call.new(ary_var.clone, "<<", [value_or_temp(elem, temps[i])] of ASTNode)
+        end
+        i += 1
+      end
+      exps << ary_var
+      return Expressions.new(exps)
+    end
+
+    if node.elements.empty?
+      return Call.new(generic, "new")
+    end
+
+    ary_var = temp_var
+    ary_instance = Call.new(generic, "unsafe_build", [NumberLiteral.new(capacity.to_s)] of ASTNode)
+    buffer = Call.new(ary_var.clone, "to_unsafe")
+    buffer_var = temp_var
+    exps = [] of ASTNode
+    bind_elem_temps(node.elements, temps, exps)
+    exps << Assign.new(ary_var.clone, ary_instance)
+    exps << Assign.new(buffer_var.clone, buffer)
+    i = 0
+    while i < node.elements.size
+      exps << Call.new(buffer_var.clone, "[]=", [NumberLiteral.new(i.to_s), value_or_temp(node.elements[i], temps[i])] of ASTNode)
+      i += 1
+    end
+    exps << ary_var.clone
+    Expressions.new(exps)
+  end
+
+  # `Type{a, *b}` with no generic type: a `new`, then `<<` for each element and
+  # `each` with a block for each splat. The block variable's name is taken
+  # from the splat's location, as the hosted `new_temp_var(elem)` does.
+  def expand_named_array(node : ArrayLiteral, name : ASTNode, generic_type : ASTNode?) : ASTNode
+    temps = complex_elem_temp_vars(node.elements)
+    if g = generic_type
+      type_of = typeof_exp(node.elements, temps)
+      node_name = Generic.new(g, [type_of] of ASTNode)
+    else
+      node_name = name
+    end
+    constructor = Call.new(node_name, "new")
+    if node.elements.empty?
+      return constructor
+    end
+
+    ary_var = temp_var
+    exps = [] of ASTNode
+    bind_elem_temps(node.elements, temps, exps)
+    exps << Assign.new(ary_var.clone, constructor)
+    i = 0
+    while i < node.elements.size
+      elem = node.elements[i]
+      if elem.is_a?(Splat)
+        yield_var = temp_var_for(elem)
+        each_body = Call.new(ary_var.clone, "<<", [yield_var.clone] of ASTNode)
+        each_block = Block.new([yield_var] of Var, each_body)
+        exps << Call.new(splat_value(elem, temps[i]), "each", [] of ASTNode, each_block)
+      else
+        exps << Call.new(ary_var.clone, "<<", [value_or_temp(elem, temps[i])] of ASTNode)
+      end
+      i += 1
+    end
+    exps << ary_var
+    Expressions.new(exps)
+  end
+
+  # `{} of K => V` is `Hash(K, V).new`. `{a => b}` with no name is
+  # `Hash(typeof(keys), typeof(values)).new`. `T{a => b}` builds with `T.new`.
+  # Every key is bound to a temporary before any value, as the hosted pass does.
+  def expand_hash(node : HashLiteral, name : ASTNode?) : ASTNode
+    keys = [] of ASTNode
+    values = [] of ASTNode
+    i = 0
+    while i < node.entries.size
+      entry = node.entries[i]
+      keys << entry.key
+      values << entry.value
+      i += 1
+    end
+    key_temps = complex_elem_temp_vars(keys)
+    value_temps = complex_elem_temp_vars(values)
+
+    if of = node.of
+      generic = Generic.new(Path.global(["Hash"] of String), [of.key, of.value] of ASTNode)
+    elsif n = name
+      generic = n
+    else
+      typeof_key = TypeOf.new(temp_values(keys, key_temps))
+      typeof_value = TypeOf.new(temp_values(values, value_temps))
+      generic = Generic.new(Path.global(["Hash"] of String), [typeof_key, typeof_value] of ASTNode)
+    end
+    constructor = Call.new(generic, "new")
+    if node.entries.empty?
+      return constructor
+    end
+
+    count = node.entries.size
+    hash_var = temp_var
+    exps = [] of ASTNode
+    i = 0
+    while i < count
+      if t = key_temps[i]
+        exps << Assign.new(t, keys[i].clone)
+      end
+      if t = value_temps[i]
+        exps << Assign.new(t, values[i].clone)
+      end
+      i += 1
+    end
+    exps << Assign.new(hash_var.clone, constructor)
+    i = 0
+    while i < count
+      key_exp = value_or_temp(keys[i], key_temps[i])
+      value_exp = value_or_temp(values[i], value_temps[i])
+      exps << Call.new(hash_var.clone, "[]=", [key_exp, value_exp] of ASTNode)
+      i += 1
+    end
+    exps << hash_var
+    Expressions.new(exps)
+  end
+
+  # `case subject` as an `if` chain. The subject is bound first, then every
+  # branch body in source order, then the `else`: the order the hosted pass
+  # allocates its temporaries in. The chain is built from the last branch back,
+  # so each branch's `else` is the branch after it. `binds_it` is true for a
+  # user's `case`, whose branches bind `it` to the subject as the parser marks
+  # them (binds_it?). A case the expander builds itself (a select's) passes
+  # false: the hosted pass leaves its branches unbound.
+  def expand_case(node : Case, binds_it : Bool = true) : ASTNode
+    cond = node.cond
+    if node.whens.empty?
+      exps = [] of ASTNode
+      else_node = node.else
+      if c = cond
+        exps << c
+        if else_node.nil?
+          exps << NilLiteral.new
+        end
+      end
+      if e = else_node
+        exps << e
+      end
+      return Expressions.new(exps)
+    end
+
+    assigns = [] of ASTNode
+    subject : ASTNode? = nil
+    tuple_temps : Array(ASTNode)? = nil
+    if cond.is_a?(TupleLiteral)
+      temps = [] of ASTNode
+      elems = cond.as(TupleLiteral).elements
+      i = 0
+      while i < elems.size
+        if t = bind_subject(elems[i], assigns)
+          temps << t
+        end
+        i += 1
+      end
+      tuple_temps = temps
+      # The parser sets binds_it? only for a case whose subject is not a tuple,
+      # so a tuple subject leaves `it` unbound, even with one element.
+    else
+      subject = bind_subject(cond, assigns)
+    end
+    it_subject = subject
+    if !binds_it
+      it_subject = nil
+    end
+    bodies = [] of ASTNode
+    i = 0
+    while i < node.whens.size
+      bodies << bind_it(node.whens[i].body, it_subject)
+      i += 1
+    end
+    chain = else_or_nop(node.else, it_subject)
+    i = node.whens.size - 1
+    while i >= 0
+      chain = when_chain(node.whens[i], bodies[i], subject, chain, tuple_temps)
+      i -= 1
+    end
+    if assigns.empty?
+      return chain
+    end
+    assigns << chain
+    Expressions.new(assigns)
+  end
+
+  # The subject as a condition's left side: a variable as it is, an assignment
+  # as its target (the assignment itself is kept ahead of the chain), and any
+  # other expression bound to a temporary.
+  def bind_subject(cond : ASTNode?, assigns : Array(ASTNode)) : ASTNode?
+    if c = cond
+      value = single_expression(c)
+      if value.is_a?(Var) || value.is_a?(InstanceVar)
+        return value
+      end
+      if value.is_a?(Assign)
+        assigns << value
+        return value.as(Assign).target
+      end
+      tv = temp_var
+      assigns << Assign.new(tv.clone, value)
+      return tv
+    end
+    nil
+  end
+
+  # The hosted `bind_it`: a branch of a case with a subject binds `it` to the
+  # subject. The temporary is taken first; the body is copied, its `it`s are
+  # renamed to the temporary, and the copy follows the two assignments.
+  def bind_it(body : ASTNode, subject : ASTNode?) : ASTNode
+    if s = subject
+      hidden = temp_var
+      renamed = body.clone.transform(ItRenamer.new(hidden.name))
+      bind = Assign.new(hidden.clone, s.clone)
+      keep = Assign.new(Var.new("it"), hidden.clone)
+      return Expressions.new([bind, keep, renamed] of ASTNode)
+    end
+    body
+  end
+
+  def else_or_nop(else_node : ASTNode?, subject : ASTNode?) : ASTNode
+    if e = else_node
+      return bind_it(e, subject)
+    end
+    Nop.new
+  end
+
+  # One `when`: an `if` over its conditions, with `tail` as its `else`. When every
+  # condition is a type, one `if` per type, each with its own copy of the body.
+  # `tuple_temps` holds the subject's temporaries when the subject is a tuple.
+  def when_chain(wh : When, body : ASTNode, subject : ASTNode?, tail : ASTNode, tuple_temps : Array(ASTNode)? = nil) : ASTNode
+    comps = [] of ASTNode
+    j = 0
+    while j < wh.conds.size
+      wh_cond = wh.conds[j]
+      if !wh_cond.is_a?(Underscore)
+        if temps = tuple_temps
+          if tuple_comp = tuple_when_comparison(temps, wh_cond)
+            comps << tuple_comp
+          end
+        else
+          comps << case_when_comparison(subject, wh_cond)
+        end
+      end
+      j += 1
+    end
+
+    if !comps.empty? && all_is_a?(comps)
+      cur = tail
+      k = comps.size - 1
+      while k >= 0
+        cur = If.new(comps[k], body.clone, cur)
+        k -= 1
+      end
+      return cur
+    end
+    If.new(or_all(comps), body, tail)
+  end
+
+  # A `when` against a tuple subject, as the hosted expansion: a tuple condition
+  # is the `and` of its elements against the subject's temporaries, skipping `_`
+  # elements; any other condition is tested against the whole tuple. Nil when
+  # every element is `_`, which the hosted pass drops.
+  def tuple_when_comparison(temps : Array(ASTNode), cond : ASTNode) : ASTNode?
+    if cond.is_a?(TupleLiteral)
+      comp : ASTNode? = nil
+      elems = cond.as(TupleLiteral).elements
+      i = 0
+      while i < elems.size && i < temps.size
+        lh = elems[i]
+        if !lh.is_a?(Underscore)
+          sub_comp = case_when_comparison(temps[i], lh)
+          if prev = comp
+            comp = And.new(prev, sub_comp)
+          else
+            comp = sub_comp
+          end
+        end
+        i += 1
+      end
+      return comp
+    end
+    whole = [] of ASTNode
+    i = 0
+    while i < temps.size
+      whole << temps[i].clone
+      i += 1
+    end
+    case_when_comparison(TupleLiteral.new(whole), cond)
+  end
+
+  # The hosted `case_when_comparison`: a `nil` or a type is an `is_a?`, `X.class`
+  # is an `is_a?` of the metaclass, and anything else is `===`. With no subject
+  # the condition stands as written.
+  def case_when_comparison(subject : ASTNode?, cond : ASTNode) : ASTNode
+    if s = subject
+      case_when_test(s.clone, cond)
+    else
+      cond
+    end
+  end
+
+  def case_when_test(right_side : ASTNode, cond : ASTNode) : ASTNode
+    if cond.is_a?(NilLiteral)
+      return IsA.new(right_side, Path.global(["Nil"] of String))
+    end
+    if cond.is_a?(Path) || cond.is_a?(Generic)
+      return IsA.new(right_side, cond)
+    end
+    if cond.is_a?(Call)
+      call = cond.as(Call)
+      if call.name == "class"
+        if o = call.obj
+          if o.is_a?(Path) || o.is_a?(Generic)
+            return IsA.new(right_side, Metaclass.new(o))
+          end
+        end
+      end
+    end
+    Call.new(cond, "===", right_side)
+  end
+
+  # `comps.all?(IsA)`: every condition is a type test.
+  def all_is_a?(comps : Array(ASTNode)) : Bool
+    comps.all? { |comp| comp.is_a?(IsA) }
+  end
+
+  # The `||` of the conditions, left to right; `true` when there are none.
+  def or_all(comps : Array(ASTNode)) : ASTNode
+    if comps.empty?
+      return BoolLiteral.new(true)
+    end
+    final = comps[0]
+    i = 1
+    while i < comps.size
+      final = Or.new(final, comps[i])
+      i += 1
+    end
+    final
+  end
+
+  # The one expression of a list of one, else the node itself.
+  def single_expression(node : ASTNode) : ASTNode
+    if node.is_a?(Expressions)
+      exps = node.as(Expressions).expressions
+      if exps.size == 1
+        return exps[0]
+      end
+    end
+    node
+  end
+
+  # Each element that is not a plain variable or a simple literal gets a
+  # temporary, nil where it needs none. A splat is judged by what it splats.
+  def complex_elem_temp_vars(elements : Array(ASTNode)) : Array(Var?)
+    temps = [] of Var?
+    i = 0
+    while i < elements.size
+      elem = elements[i]
+      if elem.is_a?(Splat)
+        elem = elem.as(Splat).exp
+      end
+      if plain_operand?(elem)
+        temps << nil
+      else
+        temps << temp_var
+      end
+      i += 1
+    end
+    temps
+  end
+
+  # `typeof(...)` over the elements, with each temporary in place of its
+  # element, and each splat as the element type of what it splats.
+  def typeof_exp(elements : Array(ASTNode), temps : Array(Var?)) : TypeOf
+    type_exps = [] of ASTNode
+    i = 0
+    while i < elements.size
+      elem = elements[i]
+      if elem.is_a?(Splat)
+        source = splat_value(elem, temps[i])
+        type_exps << Call.new(Path.global(["Enumerable"] of String), "element_type", [source] of ASTNode)
+      else
+        type_exps << value_or_temp(elem, temps[i])
+      end
+      i += 1
+    end
+    TypeOf.new(type_exps)
+  end
+
+  # The element or temporary of each node, in order: what a `typeof` names.
+  def temp_values(elements : Array(ASTNode), temps : Array(Var?)) : Array(ASTNode)
+    values = [] of ASTNode
+    i = 0
+    while i < elements.size
+      values << value_or_temp(elements[i], temps[i])
+      i += 1
+    end
+    values
+  end
+
+  # Binds each complex element to its temporary, in element order. A splat
+  # binds what it splats.
+  def bind_elem_temps(elements : Array(ASTNode), temps : Array(Var?), exps : Array(ASTNode)) : Nil
+    i = 0
+    while i < elements.size
+      if t = temps[i]
+        elem = elements[i]
+        if elem.is_a?(Splat)
+          elem = elem.as(Splat).exp
+        end
+        exps << Assign.new(t, elem.clone)
+      end
+      i += 1
+    end
+  end
+
+  def value_or_temp(elem : ASTNode, temp : Var?) : ASTNode
+    if t = temp
+      t.clone
+    else
+      elem.clone
+    end
+  end
+
+  def splat_value(elem : ASTNode, temp : Var?) : ASTNode
+    if t = temp
+      t.clone
+    else
+      elem.as(Splat).exp.clone
+    end
+  end
+
+  def plain_operand?(node : ASTNode) : Bool
+    node.is_a?(Var) || node.is_a?(InstanceVar) || node.is_a?(ClassVar) || simple_literal?(node)
+  end
+
+  def simple_literal?(node : ASTNode) : Bool
+    node.is_a?(Nop) || node.is_a?(NilLiteral) || node.is_a?(BoolLiteral) || node.is_a?(NumberLiteral) || node.is_a?(CharLiteral) || node.is_a?(StringLiteral) || node.is_a?(SymbolLiteral)
+  end
+
+  def any_splat?(elements : Array(ASTNode)) : Bool
+    elements.any? { |elem| elem.is_a?(Splat) }
+  end
+
+  def count_non_splat(elements : Array(ASTNode)) : Int32
+    elements.count { |elem| !elem.is_a?(Splat) }
+  end
+
+  # The `__temp_N` of the hosted program: one counter for the prefix.
+  def temp_var : Var
+    Var.new(@program.new_temp_var_name)
+  end
+
+  # A temporary named from the node's file, as the hosted `new_temp_var(node)`.
+  def temp_var_for(node : ASTNode) : Var
+    Var.new(@program.new_temp_var_name(node))
+  end
+
+  # Multiple assignment, as the hosted expand(MultiAssign). Several values are
+  # each bound to a temporary, then assigned to the targets in order. A single
+  # value is bound once and each target takes an index of it; with a count
+  # check when the program asks for one (strict_multi_assign) or the splat sits
+  # in the middle, which the hosted code always checks.
+  def expand_multi_assign(node : MultiAssign) : ASTNode
+    splat_at = -1
+    splat_underscore = false
+    i = 0
+    while i < node.targets.size
+      target = node.targets[i]
+      if target.is_a?(Splat)
+        raise "BUG: splat assignment already specified" if splat_at >= 0
+        splat_at = i
+        splat_underscore = true if target.as(Splat).exp.is_a?(Underscore)
+      end
+      i += 1
+    end
+    if node.values.size == 1
+      return expand_single_multi_assign(node, splat_at, splat_underscore)
+    end
+    expand_values_multi_assign(node, splat_at, splat_underscore)
+  end
+
+  # `a, b = value`: the value goes to `__temp_N`, then each target is assigned
+  # `__temp_N[index]`. The index counts from the end after a splat.
+  def expand_single_multi_assign(node : MultiAssign, splat_at : Int32, splat_underscore : Bool) : ASTNode
+    value = node.values[0]
+    count = node.targets.size
+    middle_splat = splat_at > 0 && splat_at < count - 1
+    checked = @program.has_flag?("strict_multi_assign") || middle_splat
+    tv = temp_var
+    assigns = [] of ASTNode
+    assigns << Assign.new(tv.clone, value)
+    if checked
+      size_call = Call.new(tv.clone, "size")
+      if middle_splat
+        size_comp = Call.new(size_call, "<", [NumberLiteral.new((count - 1).to_s)] of ASTNode)
+      else
+        size_comp = Call.new(size_call, "!=", [NumberLiteral.new(count.to_s)] of ASTNode)
+      end
+      index_error = Call.new(Path.global(["IndexError"] of String), "new", [StringLiteral.new("Multiple assignment count mismatch")] of ASTNode)
+      assigns << If.new(size_comp, Call.global("raise", index_error))
+    end
+    i = 0
+    while i < count
+      target = node.targets[i]
+      if i == splat_at
+        if !splat_underscore
+          range = RangeLiteral.new(NumberLiteral.new(i.to_s), NumberLiteral.new((i - count).to_s), false)
+          assigns << transform_multi_assign_target(target, Call.new(tv.clone, "[]", [range] of ASTNode))
+        end
+      else
+        index = i
+        if splat_at >= 0 && i > splat_at
+          index = i - count
+        end
+        indexer = NumberLiteral.new(index.to_s)
+        assigns << transform_multi_assign_target(target, Call.new(tv.clone, "[]", [indexer] of ASTNode))
+      end
+      i += 1
+    end
+    Expressions.new(assigns)
+  end
+
+  # `a, b = x, y`: each value goes to its own temporary in order, then each
+  # temporary goes to its target. A splat target takes the values it covers as
+  # a tuple; `*_` leaves them in place, with no assignment for the splat.
+  def expand_values_multi_assign(node : MultiAssign, splat_at : Int32, splat_underscore : Bool) : ASTNode
+    count = node.targets.size
+    if splat_at >= 0
+      raise "BUG: multiple assignment count mismatch" if count - 1 > node.values.size
+    else
+      raise "BUG: multiple assignment count mismatch" if count != node.values.size
+    end
+    to_temps = [] of ASTNode
+    from_temps = [] of ASTNode
+    i = 0
+    while i < count
+      target = node.targets[i]
+      if i == splat_at && splat_underscore
+        to_temps.concat(values_within(node.values, i, i - count))
+      else
+        value = multi_value_for(node.values, i, count, splat_at)
+        tv = temp_var
+        to_temps << Assign.new(tv.clone, value)
+        from_temps << transform_multi_assign_target(target, tv.clone)
+      end
+      i += 1
+    end
+    to_temps.concat(from_temps)
+    Expressions.new(to_temps)
+  end
+
+  # The value a target at index `i` takes in a list of several values.
+  def multi_value_for(values : Array(ASTNode), i : Int32, count : Int32, splat_at : Int32) : ASTNode
+    if i == splat_at
+      return TupleLiteral.new(values_within(values, i, i - count))
+    end
+    if splat_at >= 0 && i > splat_at
+      return values[i - count]
+    end
+    values[i]
+  end
+
+  # The values from `from` through `to_offset`, where a negative offset counts
+  # from the end: `values[from..to_offset]`, as the hosted `each(within:)` and
+  # range index give it. Empty when the end is before the start.
+  def values_within(values : Array(ASTNode), from : Int32, to_offset : Int32) : Array(ASTNode)
+    last = to_offset
+    if last < 0
+      last = last + values.size
+    end
+    picked = [] of ASTNode
+    j = from
+    while j <= last
+      picked << values[j]
+      j += 1
+    end
+    picked
+  end
+
+  # The assignment for one target. A call target takes the value as its last
+  # argument with `=` added to its name (`a.b = v`, `c[0] = v`); a splat target
+  # is assigned through its inner expression.
+  def transform_multi_assign_target(target : ASTNode, value : ASTNode) : ASTNode
+    inner = target
+    if target.is_a?(Splat)
+      inner = target.as(Splat).exp
+    end
+    if inner.is_a?(Call)
+      call = inner.as(Call)
+      call.name = call.name + "="
+      call.args << value
+      return call
+    end
+    Assign.new(inner, value)
+  end
+
+  # The hosted expand(Select). A call arm's operation is the channel's action of
+  # the same name (`send` is `send_select_action`), and its body runs only when
+  # that operation happened, which the iyi prelude names with a flag. An assign
+  # arm binds its target to the value, cast to the operation's type. The
+  # temporaries are taken in the hosted order: index, value, then happened.
+  def expand_select(node : Select) : ASTNode
+    index_name = @program.new_temp_var_name
+    value_name = @program.new_temp_var_name
+    has_happened = @program.iyi_prelude
+    happened_name = ""
+    if has_happened
+      happened_name = @program.new_temp_var_name
+    end
+    targets = [Var.new(index_name), Var.new(value_name)] of ASTNode
+    if has_happened
+      targets << Var.new(happened_name)
+    end
+    channel = Path.global(["Channel"] of String)
+    tuple_values = [] of ASTNode
+    case_whens = [] of When
+    first_bound = -1
+    i = 0
+    while i < node.whens.size
+      a_when = node.whens[i]
+      condition = a_when.conds[0]
+      if condition.is_a?(Call)
+        cloned_call = condition.clone.as(Call)
+        cloned_call.name = select_action_name(cloned_call.name)
+        tuple_values << cloned_call
+        body = a_when.body.clone
+        if has_happened
+          body = If.new(Var.new(happened_name), body)
+        end
+        case_whens << When.new([NumberLiteral.new(i.to_s)] of ASTNode, body)
+      elsif condition.is_a?(Assign)
+        assign = condition.as(Assign)
+        if first_bound < 0
+          first_bound = i
+        end
+        cloned_call = assign.value.clone.as(Call)
+        cloned_call.name = select_action_name(cloned_call.name)
+        tuple_values << cloned_call
+        typeof_node = TypeOf.new([assign.value.clone] of ASTNode)
+        cast = Cast.new(Var.new(value_name), typeof_node)
+        new_assign = Assign.new(assign.target.clone, cast)
+        new_body = Expressions.new([new_assign, a_when.body.clone] of ASTNode)
+        case_whens << When.new([NumberLiteral.new(i.to_s)] of ASTNode, new_body)
+      else
+        raise "BUG: expected select when expression to be Assign or Call"
+      end
+      i += 1
+    end
+    args = [TupleLiteral.new(tuple_values)] of ASTNode
+    if has_happened
+      args << NumberLiteral.new(first_bound.to_s)
+    end
+    call_name = "select"
+    if select_has_else?(node)
+      call_name = "non_blocking_select"
+    end
+    call = Call.new(channel, call_name, args)
+    multi = MultiAssign.new(targets, [call] of ASTNode)
+    a_case = Case.new(Var.new(index_name), case_whens, select_else(node), false)
+    chain = expand_case(a_case, false)
+    Expressions.new([multi, chain] of ASTNode)
+  end
+
+  # `a && b`, as the hosted expand(And): a variable, an assignment to one, or a
+  # test of one is tested in place; any other left side is bound to a temporary
+  # first. The right side runs only when the left side is truthy.
+  def and_if(node : And) : If
+    left = single_expression(node.left)
+    if left.is_a?(Var) || (left.is_a?(IsA) && left.as(IsA).obj.is_a?(Var))
+      If.new(left, node.right, left.clone)
+    elsif left.is_a?(Assign) && left.as(Assign).target.is_a?(Var)
+      If.new(left, node.right, left.as(Assign).target.clone)
+    elsif left.is_a?(Not) && left.as(Not).exp.is_a?(Var)
+      If.new(left, node.right, left.clone)
+    elsif left.is_a?(Not) && left.as(Not).exp.is_a?(IsA) && left.as(Not).exp.as(IsA).obj.is_a?(Var)
+      If.new(left, node.right, left.clone)
+    else
+      temp = temp_var
+      If.new(Assign.new(temp.clone, left), node.right, temp.clone)
+    end
+  end
+
+  # `a && b` as the hosted expansion marks it: an `If` flagged `from_and`.
+  def expand_and(node : And) : ASTNode
+    a_if = and_if(node)
+    a_if.from_and = true
+    a_if
+  end
+
+  # `a || b`, as the hosted expand(Or): the same forms as `&&`, with the left
+  # side as the value when it is truthy and the right side otherwise.
+  def or_if(node : Or) : If
+    left = single_expression(node.left)
+    if left.is_a?(Var) || (left.is_a?(IsA) && left.as(IsA).obj.is_a?(Var))
+      If.new(left, left.clone, node.right)
+    elsif left.is_a?(Assign) && left.as(Assign).target.is_a?(Var)
+      If.new(left, left.as(Assign).target.clone, node.right)
+    elsif left.is_a?(Not) && left.as(Not).exp.is_a?(Var)
+      If.new(left, left.clone, node.right)
+    elsif left.is_a?(Not) && left.as(Not).exp.is_a?(IsA) && left.as(Not).exp.as(IsA).obj.is_a?(Var)
+      If.new(left, left.clone, node.right)
+    else
+      temp = temp_var
+      If.new(Assign.new(temp.clone, left), temp.clone, node.right)
+    end
+  end
+
+  # `a || b` as the hosted expansion marks it: an `If` flagged `from_or`.
+  def expand_or(node : Or) : ASTNode
+    a_if = or_if(node)
+    a_if.from_or = true
+    a_if
+  end
+
+  # `->obj.name(A, B)`, expanded as the hosted LiteralExpander does (literal_expander.cr 1225-1251): a receiver
+  # that is not a path is bound to a temporary first, each pointer argument becomes a typed parameter of the
+  # proc literal, and the literal's body calls `name` on the receiver with those parameters. A nil receiver
+  # calls the top-level def. The hosted back-link from the literal to its pointer is not kept: only the closure
+  # refusals read it, and those are not ported.
+  def expand_proc_pointer(node : ProcPointer) : ASTNode
+    obj = node.obj
+    assign : Assign? = nil
+    if obj && !obj.is_a?(Path)
+      temp = temp_var
+      assign = Assign.new(temp.clone, obj)
+      obj = temp.clone
+    end
+    def_args = [] of Arg
+    call_args = [] of ASTNode
+    node.args.each do |restriction|
+      name = @program.new_temp_var_name
+      def_args << Arg.new(name, nil, restriction)
+      call_args << Var.new(name)
+    end
+    body = Call.new(obj, node.name, call_args, nil, nil, nil, false, nil, node.global)
+    literal = ProcLiteral.new(Def.new("->", def_args, body))
+    if a = assign
+      return Expressions.new([a, literal] of ASTNode)
+    end
+    literal
+  end
+
+  def select_has_else?(node : Select) : Bool
+    else_node = node.else
+    !else_node.nil?
+  end
+
+  # The `else` of the select, cloned; without one, the hosted raise that a
+  # select index outside the arms can never reach.
+  def select_else(node : Select) : ASTNode
+    if e = node.else
+      return e.clone
+    end
+    Call.global("raise", StringLiteral.new("BUG: invalid select index"))
+  end
+
+  # `send` is `send_select_action`; a name ending in `?` or `!` keeps the mark
+  # at its end, after `_select_action`, as the hosted select_action_name does.
+  def select_action_name(name : String) : String
+    if name.ends_with?("!")
+      return name[0, name.size - 1] + "_select_action!"
+    end
+    if name.ends_with?("?")
+      return name[0, name.size - 1] + "_select_action?"
+    end
+    name + "_select_action"
+  end
+end
+
+# Points every `it` in a copied branch at the temporary the branch binds it to.
+class ItRenamer < Transformer
+  def initialize(@name : String)
+  end
+
+  def transform(node : Var) : ASTNode
+    if node.name == "it"
+      node.name = @name
+    end
+    node
+  end
+end

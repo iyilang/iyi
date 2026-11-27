@@ -1,0 +1,63 @@
+class Elem
+  def score : Int32
+    11
+  end
+end
+
+def maybe_elem(flag : Bool) : Elem | Nil
+  if flag
+    Elem.new
+  else
+    nil
+  end
+end
+
+def fail_now : NoReturn
+  fail_now
+end
+
+def with_return_unless(x : Elem | Nil)
+  return 0 unless x.is_a?(Elem)
+  x.score
+end
+
+def with_return_if_nil(x : Elem | Nil)
+  return 0 if x.nil?
+  x.score
+end
+
+def with_raise_if_nil(x : Elem | Nil)
+  if x.nil?
+    fail_now
+  end
+  x.score
+end
+
+def with_yield(&)
+  yield maybe_elem(true)
+end
+
+def with_loop_break(head : Elem | Nil)
+  acc = 0
+  while true
+    cur = head
+    break unless cur.is_a?(Elem)
+    acc = cur.score
+    break
+  end
+  acc
+end
+
+a = with_return_unless(maybe_elem(true))
+b = with_return_if_nil(maybe_elem(true))
+c = with_raise_if_nil(maybe_elem(true))
+d = with_yield do |x|
+  next 0 if x.nil?
+  x.score
+end
+e = with_loop_break(maybe_elem(true))
+y = maybe_elem(true)
+if y.nil?
+  fail_now
+end
+f = y.score

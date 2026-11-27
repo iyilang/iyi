@@ -1,0 +1,10 @@
+# A generic alias is resolved by SemanticProgram#lookup_type_node once the type
+# system is installed: AliasType#process_value reaches the Generic arm, which
+# instantiates Box(Int32) through the type hook. TypeLookup resolves an alias
+# itself, so the lookup operation does not reach that arm.
+class Box(T)
+end
+
+alias IntBoxAlias = Box(Int32)
+
+# op IntBoxAlias.remove_alias

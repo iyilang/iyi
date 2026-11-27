@@ -1,0 +1,8 @@
+# Pointer allocation and null calls assign their instantiated pointer types.
+class Buffer
+  def initialize
+    @data = Pointer(UInt8).malloc(16)
+    @none = Pointer(Int32).null
+    @count = 0
+  end
+end

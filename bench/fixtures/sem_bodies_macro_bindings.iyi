@@ -1,0 +1,42 @@
+# A macro site in a def body names the receiver's type parameter and the def's own free variable
+# (hosted interpreter.cr resolve?(Path) 555-610: the free variables first, then the owner's
+# parameters). Box(Int32) keeps the first branch and Box(String) the second, in an instance method
+# and in a class method (whose receiver is the metaclass), so each pair of instances returns two
+# different types. `arity` reads the size of its splat free variable, a tuple of the call's
+# argument types.
+class Box(T)
+  def initialize(first : T)
+    first
+  end
+
+  def kind
+    {% if T == Int32 %}
+      1
+    {% else %}
+      "other"
+    {% end %}
+  end
+
+  def self.kind
+    {% if T == Int32 %}
+      2_i64
+    {% else %}
+      'c'
+    {% end %}
+  end
+end
+
+def arity(*values : *T) forall T
+  {% if T.size == 3 %}
+    3
+  {% else %}
+    "not three"
+  {% end %}
+end
+
+a = Box(Int32).new(1).kind
+b = Box(String).new("s").kind
+c = Box(Int32).kind
+d = Box(String).kind
+e = arity(1, "two", 3_u8)
+f = arity(1)

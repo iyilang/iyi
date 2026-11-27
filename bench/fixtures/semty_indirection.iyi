@@ -1,0 +1,57 @@
+class Animal
+end
+
+class Dog < Animal
+end
+
+class Cat < Animal
+end
+
+module Walk
+end
+
+module Tagged
+end
+
+class Crate
+  include Walk
+end
+
+class Bin
+  include Walk
+end
+
+class Box(T)
+end
+
+alias Id = Int32
+alias Chain = Id
+alias Pets = Dog | Cat
+alias Named = Animal
+
+lib LibC
+  type Handle = Int32
+end
+
+# op Animal.unbound?
+# op Walk.unbound?
+# op Id.unbound?
+# op Pets.unbound?
+# unions are not operands here: the port driver resolves no nilable shorthand, so the union branch is covered only by mutation review
+# op Box(Int32).unbound?
+# op Box.unbound?
+# op Animal.remove_indirection
+# op Dog.remove_indirection
+# op Walk.remove_indirection
+# op Tagged.remove_indirection
+# op Id.remove_indirection
+# op Chain.remove_indirection
+# op Named.remove_indirection
+# op Pets.remove_indirection
+# Animal? (a nilable union) is not an operand here, for the same reason
+# waiting generic class instance registry (src/compiler/semantic/top_level.iyi GenericClassType): Box.remove_indirection (the hosted generic class reports its instances)
+# op Box(Int32).remove_indirection
+# op LibC::Handle.remove_indirection
+# op Animal.extern?
+# op Animal.extern_union?
+# op Animal.packed?

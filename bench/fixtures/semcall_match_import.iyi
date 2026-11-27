@@ -1,0 +1,6 @@
+import match_import_enum::{MatchKind}
+
+def match_imported_kind(value : MatchKind) : Nil
+end
+
+# bound match_imported_kind(instance(MatchKind))

@@ -1,0 +1,19 @@
+class MatchAnimal
+end
+
+class MatchPuppy < MatchAnimal
+end
+
+class MatchHolder(T)
+  @value : T
+
+  def initialize(@value : T)
+  end
+end
+
+class MatchOwner
+  @holder : MatchHolder(MatchAnimal)
+
+  def initialize(@holder : MatchHolder(MatchAnimal))
+  end
+end

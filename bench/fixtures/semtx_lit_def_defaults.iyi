@@ -1,0 +1,7 @@
+def with_default(node : ASTNode, items : Array(ASTNode) = [] of ASTNode, pair = {} of String => Int32) : ASTNode
+  node
+end
+
+def with_named(node : ASTNode, extra = [1, 2] of Int32, flag = node.size > 0 && node.name == "x") : ASTNode
+  node
+end

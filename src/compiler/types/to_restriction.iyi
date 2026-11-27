@@ -1,0 +1,217 @@
+module compiler/types/to_restriction
+
+import compiler/syntax/ast::{ASTNode, Generic, Metaclass, NamedArgument, NumberLiteral, Path, ProcNotation, Splat, Underscore, Union}
+import compiler/semantic/top_level::{AliasType, EnumType, MetaclassType, NilType, NoReturnType, NonGenericClassType, NonGenericModuleType, SemanticProgram, Type, TypeParameterType, UnionType, VoidType}
+import compiler/types/types::{BoolType, CharType, FloatType, GenericInstanceType, IntegerType, NamedTupleInstanceType, PointerInstanceType, ProcInstanceType, StaticArrayInstanceType, SymbolType, TupleInstanceType, TypeParameter, TypeSplat, VirtualMetaclassType, VirtualType}
+
+# Turns a type into the restriction AST that names it, from the context of
+# *from_type*: the port of type_to_restriction.cr. A fully public type is written
+# by its full path. A private one is written from the namespace it shares with
+# *from_type*, as hosted does. A conversion with no restriction returns nil; the
+# caller writes `_` for it, as hosted does.
+#
+# Not ported: the Crystal-only and interpreter kinds (LibType, AnnotationType,
+# Const) and the autocast kinds (NumberAutocastType, SymbolAutocastType), which
+# cannot be instance variable types. TypeDefType waits on the typedef increment.
+# Unbound generics (GenericClassType, GenericModuleType) return nil, as they do in
+# the hosted converter.
+pub class TypeToRestriction
+  getter from_type : Type
+
+  def initialize(@from_type : Type)
+  end
+
+  def convert(type : Type) : ASTNode?
+    if type.is_a?(NilType)
+      return Path.global("Nil")
+    end
+    if type.is_a?(VoidType)
+      return Path.global("Void")
+    end
+    if type.is_a?(NoReturnType)
+      return Path.global("NoReturn")
+    end
+    # The built-in scalars are written by their own names, as hosted writes them.
+    if type.is_a?(BoolType) || type.is_a?(CharType) || type.is_a?(SymbolType) || type.is_a?(IntegerType) || type.is_a?(FloatType)
+      return Path.global(type.name)
+    end
+    if type.is_a?(NonGenericClassType) || type.is_a?(NonGenericModuleType) || type.is_a?(EnumType) || type.is_a?(AliasType)
+      return type_to_path(type)
+    end
+    if type.is_a?(TypeParameterType)
+      return Path.new(type.name)
+    end
+    if type.is_a?(TypeParameter)
+      return Path.new(type.as(TypeParameter).param_name)
+    end
+    if type.is_a?(TupleInstanceType)
+      return convert_tuple(type.as(TupleInstanceType))
+    end
+    if type.is_a?(NamedTupleInstanceType)
+      return convert_named_tuple(type.as(NamedTupleInstanceType))
+    end
+    if type.is_a?(ProcInstanceType)
+      return convert_proc(type.as(ProcInstanceType))
+    end
+    if type.is_a?(PointerInstanceType)
+      return convert_pointer(type.as(PointerInstanceType))
+    end
+    if type.is_a?(StaticArrayInstanceType)
+      return convert_static_array(type.as(StaticArrayInstanceType))
+    end
+    if type.is_a?(GenericInstanceType)
+      return convert_generic_instance(type.as(GenericInstanceType))
+    end
+    if type.is_a?(UnionType)
+      return convert_union(type.as(UnionType))
+    end
+    # Generic class and module metaclasses are MetaclassType subclasses too.
+    if type.is_a?(MetaclassType)
+      return convert_metaclass(type.as(MetaclassType).instance_type)
+    end
+    if type.is_a?(VirtualMetaclassType)
+      return convert_metaclass(type.as(VirtualMetaclassType).instance_type)
+    end
+    if type.is_a?(VirtualType)
+      return convert(type.as(VirtualType).base_type)
+    end
+    if type.is_a?(TypeSplat)
+      converted = convert(type.as(TypeSplat).splatted_type)
+      return nil if converted.nil?
+      return Splat.new(converted.as(ASTNode))
+    end
+    nil
+  end
+
+  # A type argument: its restriction, or `_` when it has none.
+  def argument(type : Type) : ASTNode
+    converted = convert(type)
+    if converted.nil?
+      return Underscore.new
+    end
+    converted.as(ASTNode)
+  end
+
+  def convert_tuple(type : TupleInstanceType) : ASTNode
+    args = [] of ASTNode
+    type.tuple_types.each do |element|
+      args << argument(element)
+    end
+    Generic.new(Path.global("Tuple"), args)
+  end
+
+  def convert_named_tuple(type : NamedTupleInstanceType) : ASTNode
+    named = [] of NamedArgument
+    type.entries.each do |entry|
+      named << NamedArgument.new(entry.name, argument(entry.type))
+    end
+    Generic.new(Path.global("NamedTuple"), [] of ASTNode, named)
+  end
+
+  # A proc: its output is `_` when it returns Nil, as hosted does (the autocast
+  # of procs that return Nil is not written out).
+  def convert_proc(type : ProcInstanceType) : ASTNode
+    inputs = [] of ASTNode
+    type.arg_types.each do |arg_type|
+      inputs << argument(arg_type)
+    end
+    output : ASTNode = Underscore.new
+    if !type.return_type.is_a?(NilType)
+      output = argument(type.return_type)
+    end
+    ProcNotation.new(inputs, output)
+  end
+
+  def convert_pointer(type : PointerInstanceType) : ASTNode
+    Generic.new(Path.global("Pointer"), [argument(type.element_type)] of ASTNode)
+  end
+
+  def convert_static_array(type : StaticArrayInstanceType) : ASTNode
+    Generic.new(Path.global("StaticArray"), [argument(type.element_type), NumberLiteral.new(type.size_int.to_s).as(ASTNode)] of ASTNode)
+  end
+
+  # A generic instance, class or module: its generic type's path, with each type
+  # argument.
+  def convert_generic_instance(type : GenericInstanceType) : ASTNode
+    args = [] of ASTNode
+    type.type_args.each do |arg|
+      args << argument(arg)
+    end
+    Generic.new(type_to_path(type.generic_type), args)
+  end
+
+  # A union: a Union node of its members, or the generic `Union(...)` when a
+  # member is a splat. A member with no restriction makes the union have none.
+  def convert_union(type : UnionType) : ASTNode?
+    members = [] of ASTNode
+    splat = false
+    type.union_types.each do |member|
+      restriction = convert(member)
+      return nil if restriction.nil?
+      splat = true if member.is_a?(TypeSplat)
+      members << restriction.as(ASTNode)
+    end
+    if splat
+      return Generic.new(Path.global("Union"), members)
+    end
+    Union.new(members)
+  end
+
+  def convert_metaclass(instance : Type) : ASTNode?
+    converted = convert(instance)
+    return nil if converted.nil?
+    Metaclass.new(converted.as(ASTNode))
+  end
+
+  # The path a type is named by. A fully public type is named from the program,
+  # so the path is global. Otherwise it is named from the namespace it shares with
+  # `from_type`, when there is one, and is relative to it.
+  def type_to_path(type : Type) : Path
+    common = nil
+    if !fully_public?(type)
+      common = common_namespace(type, @from_type)
+    end
+    names = [] of String
+    append_namespace(type, names, common)
+    names << type.name
+    if common.nil?
+      return Path.global(names)
+    end
+    Path.new(names, false)
+  end
+
+  # The nearest namespace of *type* that is also a namespace of *from*, or nil
+  # when only the program is shared.
+  def common_namespace(type : Type, from : Type) : Type?
+    current : Type? = type
+    while true
+      return nil if current.nil?
+      return nil if current.is_a?(SemanticProgram)
+      return current if current == from
+      from_namespace = from.namespace
+      return current if !from_namespace.nil? && current == from_namespace
+      current = current.namespace
+    end
+    nil
+  end
+
+  # Prepends the names of the namespaces of *type*, outermost first, stopping at
+  # the program and at *upto*.
+  def append_namespace(type : Type, names : Array(String), upto : Type?) : Nil
+    namespace = type.namespace
+    return nil if namespace.nil?
+    return nil if namespace.is_a?(SemanticProgram)
+    return nil if !upto.nil? && namespace == upto
+    append_namespace(namespace.as(Type), names, upto)
+    names << namespace.as(Type).name
+    nil
+  end
+
+  # True when every namespace of *type* is public, down to the program.
+  def fully_public?(type : Type?) : Bool
+    return true if type.nil?
+    return true if type.is_a?(SemanticProgram)
+    return false if type.private?
+    fully_public?(type.namespace)
+  end
+end

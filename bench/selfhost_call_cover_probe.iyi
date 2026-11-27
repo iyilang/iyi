@@ -1,0 +1,31 @@
+import compiler/semantic/top_level::{AliasType, NonGenericClassType, NonGenericModuleType, SemanticProgram, TraitType, Type, UnionType}
+import compiler/semantic/cover::{CallCover}
+import compiler/syntax/ast::{Path}
+import compiler/types/types::{TypeQueries}
+
+program = SemanticProgram.new
+base = NonGenericClassType.new(program, program, "Base")
+base.abstract = true
+a = NonGenericClassType.new(program, program, "A", base)
+b = NonGenericClassType.new(program, program, "B", base)
+mod = NonGenericModuleType.new(program, program, "Marker")
+trait_type = TraitType.new(program, program, "Tag")
+a.include(mod)
+b.include(mod)
+a.include(trait_type)
+b.include(trait_type)
+aliased = AliasType.new(program, program, "AliasA", Path.new("A"))
+aliased.aliased_type = a
+
+result = [] of Type
+CallCover.append(mod, result)
+puts "module=#{result.map(&.full_name).join(",")}"
+result.clear
+CallCover.append(trait_type, result)
+puts "trait=#{result.map(&.full_name).join(",")}"
+result.clear
+CallCover.append(TypeQueries.virtual_type(base), result)
+puts "virtual=#{result.map(&.full_name).join(",")}"
+result.clear
+CallCover.append(UnionType.new(program, [aliased, b] of Type), result)
+puts "alias-union=#{result.map(&.full_name).join(",")}"

@@ -1,0 +1,15 @@
+module main
+
+import enumerable::{Enumerable}
+
+class Bag
+  def each : Int32
+    1
+  end
+end
+
+impl Enumerable for Bag
+  def each : Int32
+    1
+  end
+end

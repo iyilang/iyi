@@ -1,0 +1,4 @@
+import cvar_import/helper::{Holder}
+
+class ImportedClassVarEntry
+end

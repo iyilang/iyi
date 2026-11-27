@@ -1,0 +1,10 @@
+class Box
+  def initialize(@v : Int32)
+  end
+
+  def copy : self
+    Box.new(@v)
+  end
+end
+
+b = Box.new(1).copy

@@ -1,0 +1,22 @@
+module main
+
+pub def pick(n : Int32) : Int32
+  if n > 2
+    1
+  else
+    2
+  end
+end
+
+pub def loopy(n : Int32) : Int32
+  total = 0
+  while total < n
+    total = total + 1
+  end
+  total
+end
+
+pub def guard(n : Int32) : Int32
+  return 0 if n < 0
+  n
+end

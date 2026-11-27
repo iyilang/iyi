@@ -1,0 +1,15 @@
+def recursive_inferred_once(&)
+  yield
+end
+
+def recursive_inferred_block(flag : Bool)
+  if flag
+    value = nil
+    recursive_inferred_once { value = recursive_inferred_block(false) }
+    value
+  else
+    true
+  end
+end
+
+recursive_inferred_block(true)

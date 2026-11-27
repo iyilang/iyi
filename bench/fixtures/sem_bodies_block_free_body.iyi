@@ -1,0 +1,17 @@
+# A yielded block's type binds the callee's free variable before the callee's return
+# annotation and body are typed, and the block's parameter is the receiver's type
+# argument (hosted call.cr match_block_arg, then check_return_type and the body).
+# `map` names U in its first statement, as Array#map does in src/iyi/array.iyi.
+class Holder(T)
+  def initialize(@value : T)
+  end
+
+  def map(& : T -> U) : Array(U) forall U
+    result = Array(U).new(1)
+    result << yield @value
+    result
+  end
+end
+
+flags = Holder(Int32).new(40).map { |v| v == 40 }
+sums = Holder(Int32).new(40).map { |v| v &+ 2 }

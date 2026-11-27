@@ -1,0 +1,8 @@
+case
+when x > 1
+  a
+when y
+  b
+else
+  c
+end

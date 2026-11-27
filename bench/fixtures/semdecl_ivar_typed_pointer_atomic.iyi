@@ -1,0 +1,16 @@
+# A pointer to a generic struct instance keeps that instance's variables.
+# IyiChanLock holds Pointer(Atomic(UInt64)); this uniquely named stand-in
+# exercises that shape without colliding with the port driver's loaded prelude.
+struct ProbeAtomic(T)
+  @value : T
+
+  def initialize(@value : T)
+  end
+end
+
+class Lock
+  @word : Pointer(ProbeAtomic(UInt64))
+
+  def initialize(@word : Pointer(ProbeAtomic(UInt64)))
+  end
+end

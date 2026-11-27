@@ -1,0 +1,41 @@
+trait Greet
+  abstract def greet : String
+end
+
+struct User
+  getter name : String
+
+  def initialize(@name : String)
+  end
+
+  def self.make(name : String) : User
+    User.new(name)
+  end
+end
+
+impl Greet for User
+  def greet : String
+    "hi"
+  end
+end
+
+class Box
+  def self.make : Box
+    Box.new
+  end
+end
+
+def take(g : Greet) : Int32
+  1
+end
+
+def take(s : String) : Int32
+  2
+end
+
+# call take(1)
+# call take("a")
+# call take(1, 2)
+# call Box.make().size(3)
+# error take(1)
+# error take(true)

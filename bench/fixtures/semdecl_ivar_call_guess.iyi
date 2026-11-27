@@ -1,0 +1,29 @@
+# An instance variable assigned from a call on another instance variable takes the return type the
+# receiver's method declares (hosted type_guess_visitor.cr guess_type_from_method). The twin,
+# semdecl_ivar_call_declined.iyi, holds the calls the hosted pass declines to guess.
+class Cell
+  def initialize
+  end
+
+  def label : String
+    "cell"
+  end
+
+  def size_in(unit : Int32) : Int32
+    unit
+  end
+
+  def named_size(unit : Int32, scale : Int32 = 1) : Int32
+    unit * scale
+  end
+end
+
+class Holder
+  def initialize(@cell : Cell)
+    @text = @cell.label
+    @sized = @cell.size_in(3)
+    @scaled = @cell.named_size(3, scale: 2)
+    @both = @cell.label
+    @both = @cell.size_in(3)
+  end
+end

@@ -1,0 +1,62 @@
+module compiler/types/filtering
+
+import compiler/foundation/location::{Location}
+import compiler/syntax/ast::{ASTNode}
+import compiler/syntax/token
+import compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, MetaclassType, ModuleType, NamedType, NilType, NonGenericClassType, NoReturnType, SemanticProgram, Type, UnionType, VoidType}
+import compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilableProcType, NilableReferenceUnionType, NilableType, PointerInstanceType, ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType, VirtualMetaclassType, VirtualType}
+import compiler/types/merge::{TypeMerge}
+import compiler/types/unification::{TypeUnification}
+
+pub class TypeFiltering
+  def self.filter_by_responds_to(program : SemanticProgram, type : Type, name : String) : Type?
+    if type.is_a?(UnionType)
+      u = type.as(UnionType)
+      filtered = [] of Type
+      i = 0
+      while i < u.union_types.size
+        f = filter_by_responds_to(program, u.union_types[i], name)
+        if f
+          filtered << f
+        end
+        i = i + 1
+      end
+      return nil if filtered.empty?
+      return TypeMerge.merge_all(program, filtered)
+    end
+
+    if type.is_a?(ModuleType)
+      mt = type.as(ModuleType)
+      if mt.defs[name]?
+        return type
+      end
+      i = 0
+      while i < mt.parents.size
+        p = mt.parents[i]
+        if p.is_a?(ModuleType) && p.as(ModuleType).defs[name]?
+          return type
+        end
+        i = i + 1
+      end
+      return nil
+    end
+
+    if type.is_a?(VirtualType)
+      vt = type.as(VirtualType)
+      base = vt.base_type
+      if base.is_a?(ModuleType) && base.as(ModuleType).defs[name]?
+        return type
+      end
+      sub_res = [] of Type
+      vt.subtypes.each do |st|
+        if filter_by_responds_to(program, st, name)
+          sub_res << st
+        end
+      end
+      return nil if sub_res.empty?
+      return TypeMerge.merge_all(program, sub_res)
+    end
+
+    nil
+  end
+end

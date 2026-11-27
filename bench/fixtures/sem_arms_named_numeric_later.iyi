@@ -1,0 +1,9 @@
+def widen(fixed : Int32, value : Int64) : Int64
+  value
+end
+
+def widen(fixed : Int32, value : UInt64) : UInt64
+  value
+end
+
+puts widen(fixed: 0, value: 1)

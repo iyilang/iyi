@@ -1,0 +1,4 @@
+enum E : Int32
+  A
+  B
+end

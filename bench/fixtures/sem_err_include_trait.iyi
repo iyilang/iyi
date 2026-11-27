@@ -1,0 +1,6 @@
+trait Tr
+end
+
+class C
+  include Tr
+end

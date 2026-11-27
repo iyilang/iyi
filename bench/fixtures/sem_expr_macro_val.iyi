@@ -1,0 +1,5 @@
+macro add_ten(x)
+  {{x}}
+end
+
+x = add_ten(42)

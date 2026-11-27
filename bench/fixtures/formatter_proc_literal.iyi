@@ -1,0 +1,16 @@
+# The port wrote no space after a proc literal's `{`: `-> { x }` came back as
+# `-> {x }`.
+noarg = -> { 1 }
+empty = -> { }
+inc = ->(x : Int32) { x }
+pair = ->(x : Int32, y : Int32) { x + y }
+typed = ->(x : Int32) : Int32 { x }
+multi = ->(y : Int32) { y; y }
+nested = -> { -> { 1 } }
+call_arg = run(-> { 2 })
+block = -> do
+  3
+end
+spread = ->(y : Int32) {
+  y
+}

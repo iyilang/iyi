@@ -1,0 +1,31 @@
+pub class PublicThing
+  pub def public_method : String
+    "pub"
+  end
+
+  private def private_method : String
+    "priv"
+  end
+
+  def self.class_method : Nil
+  end
+end
+
+class InternalThing
+  private def hidden : Bool
+    true
+  end
+end
+
+pub struct PublicStruct
+  def struct_val : Int32
+    42
+  end
+end
+
+pub enum PublicEnum
+  One
+  Two
+end
+
+pub CONST_VAL = 42

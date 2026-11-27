@@ -1,0 +1,7 @@
+module valueunit
+
+pub class Value
+  def weight : Int32
+    1
+  end
+end

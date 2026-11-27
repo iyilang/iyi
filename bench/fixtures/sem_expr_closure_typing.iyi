@@ -1,0 +1,21 @@
+def yield_two(&)
+  yield 1
+  yield "second"
+end
+
+def repeat(count : Int32, &)
+  yield count
+end
+
+acc = 0
+repeat(5) do |c|
+  acc = c
+end
+
+val = "initial"
+yield_two do |item|
+  val = item
+end
+
+final_acc = acc
+final_val = val

@@ -1,0 +1,13 @@
+macro choose_method_value
+  {% if flag?(:semtyped_probe) %}
+    "enabled"
+  {% else %}
+    123
+  {% end %}
+end
+
+def method_value
+  choose_method_value
+end
+
+value = method_value

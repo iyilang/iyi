@@ -1,0 +1,14 @@
+macro choose_top_value
+  {% if flag?(:semtyped_probe) %}
+    def generated_value
+      "enabled"
+    end
+  {% else %}
+    def generated_value
+      123
+    end
+  {% end %}
+end
+
+choose_top_value
+value = generated_value

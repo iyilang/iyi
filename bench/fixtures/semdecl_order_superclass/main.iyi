@@ -1,0 +1,6 @@
+module main
+
+import valueunit::{Value}
+
+pub class Inst < Value
+end

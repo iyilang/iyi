@@ -1,0 +1,12 @@
+def expression_wide(value : Int64) : Nil
+end
+
+def expression_narrow(value : Int16) : Nil
+end
+
+def expression_unsigned(value : UInt64) : Nil
+end
+
+# call expression_wide(instance(Int32).abs)
+# call expression_narrow(instance(Int32).abs)
+# call expression_unsigned(instance(Int32).abs)

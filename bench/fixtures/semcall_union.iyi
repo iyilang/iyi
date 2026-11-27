@@ -1,0 +1,28 @@
+# Calls on a union receiver (a declared return of two classes): one lookup per
+# member, the matches joined in member order. Read by
+# bench/selfhost_semantic_calls_exercise.sh; `# call` lines only.
+
+class Solo
+  def run(x : Int32) : Int32
+    x
+  end
+
+  def only(x : Bool) : Bool
+    x
+  end
+end
+
+class Other
+  def run(x : Int32) : String
+    "o"
+  end
+end
+
+def pick(x : Int32) : Solo | Other
+  nil
+end
+
+# call pick(1).run(1)
+# call pick(1).only(true)
+# call pick(1).nope(1)
+# call pick(1).run("a")

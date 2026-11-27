@@ -1,0 +1,11 @@
+# A select with an else is a non-blocking select: the else runs when no arm is ready.
+def poll(done)
+  answer = 0
+  select
+  when got = done.receive
+    answer = got
+  else
+    answer = 2
+  end
+  answer
+end

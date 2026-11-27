@@ -1,0 +1,26 @@
+# Proc pointers the port types as the hosted pass does (main_visitor.cr 1462-1499): a
+# receiver-less pointer, and a pointer on a path that is not a lib, are expanded into a
+# proc literal that calls the target. Each pointer is a top-level assignment, so its node
+# is typed in place and can be compared with the hosted typed oracle, analysed bare.
+def proc_add_one(x : Int32) : Int32
+  x
+end
+
+def proc_no_args : Int32
+  7
+end
+
+def proc_pair(a : Int32, b : Int32) : Int32
+  a
+end
+
+class ProcBox
+  def self.twice(x : Int32) : Int32
+    x
+  end
+end
+
+add_one = ->proc_add_one(Int32)
+no_args = ->proc_no_args
+pair = ->proc_pair(Int32, Int32)
+twice = ->ProcBox.twice(Int32)

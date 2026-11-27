@@ -1,0 +1,9 @@
+@[Unsafe("the fixture calls C funs to type the calls on a lib")]
+lib LibC
+  fun abs(x : Int32) : Int32
+  fun fill(v : Pointer(Int32)) : Int32
+end
+
+n = LibC.abs(3)
+m = LibC.fill(out v)
+w = v

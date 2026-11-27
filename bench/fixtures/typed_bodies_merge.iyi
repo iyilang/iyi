@@ -1,0 +1,13 @@
+class Animal
+end
+
+class Dog < Animal
+end
+
+# op merge(Union(Int32, String), Nil)
+# op merge(Nil, Union(Int32, String))
+# op merge(Union(Int32, String), Int32)
+# op merge(Union(Int32, Union(String, Bool)), Nil)
+# op merge(Union(Int32, Nil), Nil)
+# op lookup(program, Union(Animal))
+# op lookup(program, Union(Animal, Dog))

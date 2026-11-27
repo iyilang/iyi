@@ -1,0 +1,4 @@
+require "../../src/iyi/prelude"
+
+class Mine
+end

@@ -1,0 +1,29 @@
+class ClassVariableInitializer
+  @@value : Int32 = make
+  @@optional : Int32 | Nil = 4
+
+  def self.make : Int32
+    7
+  end
+
+  def self.value : Int32
+    @@value
+  end
+
+  def self.optional : Int32 | Nil
+    @@optional = 5
+  end
+end
+
+ClassVariableLiteral.installed
+
+module ClassVariableLiteral
+  @@installed = false
+
+  def self.installed
+    @@installed
+  end
+end
+
+ClassVariableInitializer.value
+ClassVariableInitializer.optional

@@ -1,0 +1,4 @@
+@[Unsafe("a C function is not checked by the compiler")]
+fun id(x : Int32) : Int32
+  x
+end

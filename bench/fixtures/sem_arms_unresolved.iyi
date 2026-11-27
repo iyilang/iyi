@@ -1,0 +1,9 @@
+def consume(value : MissingType) : Int32
+  1
+end
+
+def consume(value : Int32) : Int32
+  value
+end
+
+puts consume(42)

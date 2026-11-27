@@ -1,0 +1,247 @@
+module compiler/types/type_system
+
+import compiler/foundation/location::{Location}
+import compiler/syntax/ast::{ASTNode, Call, Generic, Metaclass, NamedArgument, NumberLiteral, Path, ProcNotation, Union}
+import compiler/syntax/token
+import compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, GenericTraitType, MetaclassType, ModuleType, NamedType, NilType, NonGenericClassType, NoReturnType, SemanticProgram, TraitType, Type, TypeException, TypeHook, UnionType, UnresolvedType, VoidType}
+import compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, GenericTraitInstanceType, MixedUnionType, NamedArgumentType, NamedTupleInstanceType, NilableProcType, NilableReferenceUnionType, NilableType, PointerInstanceType, ProcInstanceType, ReferenceUnionType, StaticArrayInstanceType, TupleInstanceType, TypeParameter, TypeQueries, TypeSplat, VirtualMetaclassType, VirtualType}
+import compiler/types/merge::{TypeMerge}
+import compiler/types/unification::{TypeUnification}
+import compiler/types/filtering::{TypeFiltering}
+import compiler/types/intersect::{TypeIntersect}
+import compiler/types/restrictions::{TypeRestrictions}
+import compiler/types/rendering::{TypeRenderer}
+import compiler/types/instances::{TypeInstances}
+import compiler/types/lookup::{LookupError, TypeLookup}
+
+pub class TypeSystem < TypeHook
+  property program : SemanticProgram
+  getter instances : TypeInstances
+  @instances : TypeInstances
+
+  def initialize(@program : SemanticProgram = SemanticProgram.new)
+    @instances = TypeInstances.new(@program)
+    register_builtin_types
+    @program.merge_hook = self
+    # Generic superclass templates must bind before field declarations create
+    # early instances of their subclass.
+    @program.resolve_pending_generic_superclasses
+    @program.resolve_pending_generic_includes
+    @program.resolve_declared_types
+  end
+
+  def merge_members(types : Array(Type)) : Type
+    TypeMerge.merge_all(@program, types)
+  end
+
+  def virtual_of(type : Type) : Type
+    TypeQueries.virtual_type(type)
+  end
+
+  # iyi: an unresolvable written type is refused in strict mode, as before. Total mode answers
+  # an UnresolvedType, as `refuse_constant` does, so the caller records the node untyped and the
+  # pass goes on: one name the program cannot resolve no longer loses the whole file.
+  def resolve_node(node : ASTNode, current_type : ModuleType) : Type
+    found = TypeLookup.new(@instances).lookup(current_type, node)
+    if found.is_a?(LookupError)
+      message = found.as(LookupError).message
+      raise(message) unless @program.total_mode
+      return UnresolvedType.new(@program, node.to_s)
+    end
+    found.as(Type)
+  end
+
+  def resolve_node?(node : ASTNode, current_type : ModuleType) : Type?
+    found = TypeLookup.new(@instances).lookup(current_type, node)
+    return nil if found.is_a?(LookupError)
+    found.as(Type)
+  end
+
+  private def register_builtin_types : Nil
+    unless @program.types["Tuple"]?
+      tup = GenericClassType.new(@program, @program, "Tuple", ["*T"], 0, @program.struct_type)
+      tup.struct = true
+      @program.types["Tuple"] = tup
+    end
+    @program.initial_type_names.add("Tuple")
+
+    unless @program.types["NamedTuple"]?
+      nt = GenericClassType.new(@program, @program, "NamedTuple", ["*T"], 0, @program.struct_type)
+      nt.struct = true
+      @program.types["NamedTuple"] = nt
+    end
+    @program.initial_type_names.add("NamedTuple")
+
+    unless @program.types["Proc"]?
+      pr = GenericClassType.new(@program, @program, "Proc", ["*T", "R"], 0, @program.struct_type)
+      pr.struct = true
+      @program.types["Proc"] = pr
+    end
+    @program.initial_type_names.add("Proc")
+
+    unless @program.types["Pointer"]?
+      ptr = GenericClassType.new(@program, @program, "Pointer", ["T"], nil, @program.struct_type)
+      ptr.struct = true
+      @program.types["Pointer"] = ptr
+    end
+    @program.initial_type_names.add("Pointer")
+
+    unless @program.types["StaticArray"]?
+      sa = GenericClassType.new(@program, @program, "StaticArray", ["T", "N"], nil, @program.struct_type)
+      sa.struct = true
+      @program.types["StaticArray"] = sa
+    end
+    @program.initial_type_names.add("StaticArray")
+
+    unless @program.types["Union"]?
+      un = GenericClassType.new(@program, @program, "Union", ["*T"], 0, @program.struct_type)
+      un.struct = true
+      @program.types["Union"] = un
+    end
+    @program.initial_type_names.add("Union")
+
+    unless @program.types["Void"]?
+      vd = NonGenericClassType.new(@program, @program, "Void", @program.value_type)
+      vd.struct = true
+      @program.types["Void"] = vd
+    end
+    @program.initial_type_names.add("Void")
+
+    # Ensure primitives are marked struct = true
+    ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128", "Float32", "Float64", "Char", "Bool", "Nil", "Symbol"].each do |pname|
+      if pt = @program.types[pname]?
+        pt.struct = true
+      end
+    end
+    # iyi: the hosted program makes ARGV_UNSAFE's type, Pointer(Pointer(UInt8)), and with it Pointer(UInt8),
+    # when the program is made, before any file is read (program.cr 1462). They are made through the type
+    # system's own instances, so a later lookup of either finds the same instance and the id walk numbers them.
+    uint8 : Type = @program.types["UInt8"]
+    @instances.pointer_of(@instances.pointer_of(uint8))
+  end
+
+  def instantiate_generic(generic_type : GenericClassType, type_args : Array(Type)) : Type
+    # GenericUnionType#instantiate devirtualizes its members and merges them;
+    # it never constructs a generic class instance (hosted types.cr 3515-3535).
+    if generic_type == @program.types["Union"]?
+      return TypeMerge.instantiate_union(@program, type_args)
+    end
+    @instances.instantiate_generic(generic_type, type_args)
+  end
+
+  # The instance of a generic whose type arguments are resolved: each argument is made virtual, as
+  # lookup_type_args makes it, and the lookup instantiates the base.
+  def instantiate_type(base : Type, type_args : Array(Type)) : Type
+    stored = [] of Type
+    type_args.each do |t|
+      stored << TypeQueries.virtual_type(t)
+    end
+    TypeLookup.new(@instances).instantiate(base, stored)
+  end
+
+  def instantiate_generic_module(generic_type : GenericModuleType, type_args : Array(Type)) : GenericModuleInstanceType
+    @instances.instantiate_generic_module(generic_type, type_args)
+  end
+
+  def tuple_of(elements : Array(Type)) : TupleInstanceType
+    @instances.tuple_of(elements)
+  end
+
+  def named_tuple_of(entries : Array(NamedArgumentType)) : NamedTupleInstanceType
+    @instances.named_tuple_of(entries)
+  end
+
+  def proc_of(arg_types : Array(Type), return_type : Type) : ProcInstanceType
+    @instances.proc_of(arg_types, return_type)
+  end
+
+  def pointer_of(element_type : Type) : PointerInstanceType
+    @instances.pointer_of(element_type)
+  end
+
+  def static_array_of(element_type : Type, size : Int64) : StaticArrayInstanceType
+    @instances.static_array_of(element_type, size)
+  end
+
+  def metaclass_of(type : Type) : Type
+    if m = TypeUnification.metaclass_of(type)
+      m
+    else
+      @program.types["Class"].as(ClassType)
+    end
+  end
+
+  def virtual_type_of(base_type : Type) : Type
+    TypeUnification.virtual_type_of(@program, base_type)
+  end
+
+  def type_merge(types : Array(Type)) : Type
+    TypeMerge.merge_all(@program, types)
+  end
+
+  def type_merge(t1 : Type, t2 : Type) : Type
+    TypeMerge.merge(@program, t1, t2)
+  end
+
+  def filter_by(type : Type, target : Type) : Type?
+    TypeIntersect.common_descendent(@program, type, target)
+  end
+
+  def filter_by_responds_to(type : Type, name : String) : Type?
+    TypeFiltering.filter_by_responds_to(@program, type, name)
+  end
+
+  def matches_restriction?(type : Type, restriction : Type) : Bool
+    TypeRestrictions.matches_restriction?(@program, type, restriction)
+  end
+
+  def restrict(type : Type, restriction : Type) : Type?
+    TypeRestrictions.restrict(@program, type, restriction)
+  end
+
+  def nilable?(type : Type) : Bool
+    if type.is_a?(NilableType) || type.is_a?(NilableReferenceUnionType) || type.is_a?(NilableProcType)
+      return true
+    end
+    if type.is_a?(UnionType)
+      u = type.as(UnionType)
+      i = 0
+      while i < u.union_types.size
+        t = u.union_types[i]
+        if t.full_name == "Nil" || t.is_a?(NilType)
+          return true
+        end
+        i = i + 1
+      end
+      return false
+    end
+    if type.full_name == "Nil" || type.is_a?(NilType)
+      return true
+    end
+    false
+  end
+
+  def not_nil_type(type : Type) : Type
+    if type.is_a?(NilableType)
+      return type.as(NilableType).not_nil_type
+    end
+    if type.is_a?(UnionType)
+      non_nil = [] of Type
+      u = type.as(UnionType)
+      i = 0
+      while i < u.union_types.size
+        t = u.union_types[i]
+        unless t.full_name == "Nil" || t.is_a?(NilType)
+          non_nil << t
+        end
+        i = i + 1
+      end
+      return type_merge(non_nil)
+    end
+    type
+  end
+
+  def render(type : Type, skip_union_parens : Bool = false, generic_args : Bool = true, codegen : Bool = false) : String
+    TypeRenderer.render(type, skip_union_parens, generic_args, codegen)
+  end
+end

@@ -1,0 +1,25 @@
+module iyiwide
+
+import std/int
+
+# The hosted compiler's program with the same output as iyiwide.ir. Each show prints the high half of a 128-bit
+# value as a signed 64-bit number and its low half as unsigned, matching the IR's show.
+
+def show(x : Int128) : Nil
+  puts "#{(x >> 64).unsafe_to_i64} #{x.unsafe_to_u64}"
+end
+
+def between(a : Int64, b : Int128, c : Int64, d : Int128) : Nil
+  show(b)
+  show(d)
+  show(a.unsafe_to_i128 + b - d + c.unsafe_to_i128)
+end
+
+def split(a1 : Int64, a2 : Int64, a3 : Int64, a4 : Int64, a5 : Int64, a6 : Int64, a7 : Int64, b : Int128, c : Int64) : Nil
+  s = a1 + a2 + a3 + a4 + a5 + a6 + a7 + c
+  show(b)
+  show(b ^ s.unsafe_to_u64.unsafe_to_i128)
+end
+
+between(5_i64, 1512366075204170947332355369683137040_i128, 7_i64, -18446744073709551621_i128)
+split(1_i64, 2_i64, 3_i64, 4_i64, 5_i64, 6_i64, 7_i64, -1512366075204170947332355369683137040_i128, 8_i64)

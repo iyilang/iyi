@@ -1,0 +1,18 @@
+struct MatchBox(T)
+  def take(range : Range(B, E)) : Int32 forall B, E
+    1
+  end
+
+  def take_nested(ranges : Array(Range(B, E))) : Int32 forall B, E
+    1
+  end
+end
+
+def make_match_box : MatchBox(Int32)
+  nil
+end
+
+# bound make_match_box.take(instance(Range(Int32, Nil)))
+# bound make_match_box.take(instance(Int32))
+# bound make_match_box.take_nested(instance(Array(Range(Int32, Nil))))
+# bound make_match_box.take_nested(instance(Array(Int32)))

@@ -1,0 +1,22 @@
+class Box
+  def initialize(n : Int32)
+    n
+  end
+
+  # One positional argument, and it yields. initialize's generated new has the
+  # same positional arguments and does not yield. A block call must select this.
+  def self.new(n : Int32, & : Int32 -> String) : String
+    yield n
+  end
+end
+
+def blocked : String
+  Box.new(1) { |index| "v" }
+end
+
+def plain : Box
+  Box.new(1)
+end
+
+blocked
+plain

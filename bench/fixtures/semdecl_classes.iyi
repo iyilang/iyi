@@ -1,0 +1,27 @@
+class Base
+  def area : Int32
+    0
+  end
+end
+
+class Square < Base
+  def area : Int32
+    4
+  end
+end
+
+struct Point
+  def x : Int32
+    1
+  end
+end
+
+class Box(T) < Base
+  def get : Int32
+    1
+  end
+end
+
+abstract class Shape
+  abstract def sides : Int32
+end

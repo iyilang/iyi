@@ -1,0 +1,47 @@
+module Outer
+  class Inner
+  end
+
+  class Sibling
+  end
+
+  private class Hidden
+  end
+end
+
+class Box(T)
+end
+
+class Pair(A, B)
+end
+
+class Animal
+end
+
+class Dog < Animal
+end
+
+alias Alias = Outer::Inner
+
+# op restriction(program, Int32)
+# op restriction(program, Nil)
+# op restriction(program, Outer::Inner)
+# op restriction(program, Animal)
+# op restriction(program, Box)
+# op restriction(program, Box(Int32))
+# op restriction(program, Pair(Int32, String))
+# op restriction(program, Int32?)
+# op restriction(program, Tuple(Int32, String))
+# op restriction(program, NamedTuple(a: Int32, b: String))
+# op restriction(program, Proc(Int32, String))
+# op restriction(program, Proc(Int32, Nil))
+# op restriction(program, Animal.class)
+# op restriction(program, Alias)
+# op restriction(program, Pointer(Int32))
+# op restriction(program, Outer::Hidden)
+# op restriction(Outer::Inner, Hidden)
+# op restriction(Outer::Inner, Sibling)
+# op restriction(Outer::Inner, Inner)
+# op restriction(Outer, Hidden)
+# op restriction(Outer, Sibling)
+# op restriction(Outer::Inner, Outer::Hidden)

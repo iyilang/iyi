@@ -1,0 +1,3 @@
+a = 1
+b = typeof(a, 2)
+c = typeof(a)

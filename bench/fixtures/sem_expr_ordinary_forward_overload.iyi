@@ -1,0 +1,15 @@
+class OrdinaryValue
+end
+
+def ordinary_choose(value : OrdinaryValue)
+  "broad"
+end
+
+def ordinary_choose(value : OrdinarySpecific)
+  42
+end
+
+class OrdinarySpecific < OrdinaryValue
+end
+
+ordinary_choose(OrdinarySpecific.new)

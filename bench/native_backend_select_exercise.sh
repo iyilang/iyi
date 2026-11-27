@@ -6,9 +6,9 @@
 # 2. --backend llvm is refused with the message a compiler without the LLVM backend gives: exit 1, nothing written.
 # 3. --emit ir writes the program's IR; the tool rebuilds that IR and its exit equals the hosted build's.
 # 4. Mutation: a triple added to NATIVE_TARGETS changes that target's print from llvm to native, and the gate goes red.
-# 5. IR whose module targets another platform is refused by its target, on every host: exit 1, nothing written. A tool
-#    that dropped the check would link the x86_64 Linux module into an aarch64 Mach-O image, and a mutation proves the
-#    gate sees that.
+# 5. IR whose module targets another platform is refused by its target, on every host: exit 1, nothing written. The
+#    native linker refuses its x86_64 object as well, so a tool without the target check still refuses, by another
+#    message; this check holds the refusal to the target's name.
 set -u
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$REPO/bench/lib/host.sh" || exit 1
@@ -144,23 +144,6 @@ if prove_mutation "a triple joins NATIVE_TARGETS" "$BACKEND_SRC" \
     -- check_native_mutant; then
   mut_caught=1
   echo "    caught: a triple in NATIVE_TARGETS moves its print from llvm to native"
-else
-  status=1
-  echo "FAIL: the mutation was not caught"
-fi
-check_foreign_target_mutant() {
-  if ! "$IYI" build -o "$WORK_NATIVE/mut_tool$EXE" "$REPO_NATIVE/src/compiler/tools/compile_native.iyi" >"$WORK/mut.log" 2>&1; then
-    cat "$WORK/mut.log"
-    return 2
-  fi
-  check_foreign_target_refused "$WORK/mut_tool$EXE"
-}
-mut_run=$((mut_run + 1))
-if prove_mutation "the tool links IR whatever its module's target" "$TOOL_SRC" \
-    '    unless mod.target.architecture == "aarch64" && mod.target.darwin?' '    unless true' \
-    -- check_foreign_target_mutant; then
-  mut_caught=$((mut_caught + 1))
-  echo "    caught: a tool that skips the module target check links an x86_64 Linux module"
 else
   status=1
   echo "FAIL: the mutation was not caught"

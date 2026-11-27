@@ -1,0 +1,40 @@
+# The port indented the body of an `if` assigned to a variable two spaces
+# from the line start; the hosted formatter aligns it under the `if`. An
+# assigned `unless` keeps the plain indentation in both.
+result = if found = input
+           copied = found
+           if copied.ready?
+             flow_take(copied)
+           else
+             found.score
+           end
+         elsif other = holder.item
+           other.score
+         else
+           flow_take_nil(other)
+         end
+short = if a
+          1
+        else
+          2
+        end
+
+def inside(a : Bool) : Int32
+  n = if a
+        x = if a
+              1
+            else
+              2
+            end
+        x
+      else
+        3
+      end
+  n
+end
+
+kept = unless found = input
+  flow_take_nil(found)
+else
+  found.score
+end

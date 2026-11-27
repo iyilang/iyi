@@ -1,6 +1,7 @@
 # Newly matching files are reported as notices, not failures.
 # Once listed here, a file's continued parity is required.
 bench/fixtures/decl_def.iyi
+bench/fixtures/decl_enums.iyi
 bench/fixtures/decl_getter_type_leak.iyi
 bench/fixtures/decl_traits_and_impls.iyi
 bench/fixtures/decl_visibility_and_annotations.iyi
@@ -10,12 +11,17 @@ bench/fixtures/expr_literals.iyi
 bench/fixtures/expr_modifiers.iyi
 bench/fixtures/expr_precedence.iyi
 bench/fixtures/expr_ranges_and_tuples.iyi
+bench/fixtures/expr_variables_and_paths.iyi
+bench/fixtures/formatter_assign_if.iyi
 bench/fixtures/formatter_branch_comment.iyi
+bench/fixtures/formatter_enum_body.fixture
+bench/fixtures/formatter_ivar_and_semicolons.iyi
 bench/fixtures/formatter_macro_expression.iyi
 bench/fixtures/formatter_macro_if.iyi
 bench/fixtures/formatter_macro_if_branches.fixture
 bench/fixtures/formatter_macro_if_def.iyi
 bench/fixtures/formatter_macro_if_nested.iyi
+bench/fixtures/formatter_proc_literal.iyi
 bench/fixtures/formatter_tuple_type.iyi
 bench/fixtures/ir/layout/shapes.iyi
 bench/fixtures/lexmode_octal_escapes.iyi
@@ -105,6 +111,7 @@ bench/fixtures/norm_until.iyi
 bench/fixtures/syntax_call_arg_starts.iyi
 bench/fixtures/syntax_control_keyword_names.iyi
 bench/fixtures/syntax_index_tuples_and_keyword_names.iyi
+bench/fixtures/syntax_proc_literals.iyi
 bench/fixtures/syntax_type_list_then_call.iyi
 bench/selfhost_command_exercise.iyi
 bench/selfhost_daemon_exercise.iyi
@@ -127,6 +134,7 @@ src/compiler/ir/opt/prove.iyi
 src/compiler/ir/opt/sroa.iyi
 src/compiler/llvm.iyi
 src/compiler/llvm/context.iyi
+src/compiler/llvm/module.iyi
 src/compiler/macros/ast.iyi
 src/compiler/macros/confinement.iyi
 src/compiler/macros/interpreter.iyi
@@ -145,7 +153,13 @@ src/compiler/native/const_expr.iyi
 src/compiler/native/emit.iyi
 src/compiler/native/frame.iyi
 src/compiler/native/jump_table.iyi
+src/compiler/native/link/codesign.iyi
+src/compiler/native/link/imports.iyi
+src/compiler/native/link/link.iyi
+src/compiler/native/link/macho_exe.iyi
 src/compiler/native/mir_clean.iyi
+src/compiler/native/obj/elf.iyi
+src/compiler/native/obj/macho.iyi
 src/compiler/native/regalloc.iyi
 src/compiler/native/regalloc_linear.iyi
 src/compiler/native/thread_locals.iyi
@@ -157,6 +171,7 @@ src/compiler/tools/ir.iyi
 src/compiler/tools/ir_core.iyi
 src/compiler/tools/ir_opt.iyi
 src/compiler/tools/link_elf.iyi
+src/compiler/tools/link_macho.iyi
 src/compiler/tools/native_amd64.iyi
 src/compiler/tools/native_asm.iyi
 src/compiler/tools/native_cg.iyi

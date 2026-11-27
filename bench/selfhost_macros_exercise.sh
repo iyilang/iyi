@@ -1286,26 +1286,48 @@ else
 fi
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-# The first concurrency site includes body annotations; they are not header
-# annotations and must survive both scanners.
+# A macro site above the file's first `module` line has body annotations; they
+# are not header annotations and must survive both scanners. The first site of
+# src/iyi/concurrency.iyi is such a site, but that file also carries
+# `@[Effect(...)]; def ...` lines at column 0, which the header-scanner mutant
+# blanks whole: it then dies in the parser, and a mutant that dies proves
+# nothing. The input is written here instead, so the proof does not depend on
+# the shape of any one source file.
 check_census_body_annotations() {
+  local fixture fixture_native
   if ! build_mutant_exercise; then
     invalid_mutant "the header-scanner mutant did not build"
     return $?
   fi
-  if ! "$WORK/mut-exercise$EXE" --sites "$REPO_NATIVE/src/iyi/concurrency.iyi" > "$WORK/body-annotations.port" 2>"$WORK/body-annotations.err"; then
+  fixture="$WORK/body_annotations.iyi"
+  printf '%s\n' \
+    '# macro-sites' \
+    '{% if true %}' \
+    '@[NoInline]' \
+    '@[Naked]' \
+    'fun body_annotations_fixture : Nil' \
+    'end' \
+    '{% end %}' \
+    '' \
+    'module BodyAnnotations' \
+    'end' > "$fixture"
+  fixture_native="$(native_path "$fixture")" || { invalid_mutant "the body-annotation fixture path is unavailable"; return $?; }
+  if ! "$WORK/dump_hosted$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/body-annotations.oracle" 2>"$WORK/oracle.err"; then
+    cat "$WORK/oracle.err"
+    invalid_mutant "the hosted body-annotation oracle could not run"
+    return $?
+  fi
+  if ! "$WORK/mut-exercise$EXE" $(fixture_args "$fixture") "$fixture_native" > "$WORK/body-annotations.port" 2>"$WORK/body-annotations.err"; then
     invalid_mutant "the header-scanner mutant did not run"
     return $?
   fi
-  awk 'NR == 1 { print; exit }' "$SITES_DIR/src__iyi__concurrency.iyi.oracle" > "$WORK/body-annotations.oracle.first"
-  awk 'NR == 1 { print; exit }' "$WORK/body-annotations.port" > "$WORK/body-annotations.port.first"
-  cmp -s "$WORK/body-annotations.oracle.first" "$WORK/body-annotations.port.first"
+  cmp -s "$WORK/body-annotations.oracle" "$WORK/body-annotations.port"
 }
 if prove_mutation "census strips body annotations as headers" "$REPO/bench/selfhost_macros_exercise.iyi" \
   'elsif !line.empty? && !line.starts_with?("#") && !line.starts_with?("@[")' \
   'elsif false' \
   -- check_census_body_annotations; then
-  echo "    decisive: the first concurrency macro loses its body annotations"
+  echo "    decisive: a macro site above the first module loses its body annotations"
 else
   status=1
 fi

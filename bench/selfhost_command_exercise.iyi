@@ -420,13 +420,18 @@ module BenchSelfhostCommandExercise
   end
 
   def self.check_stale_options : Nil
-    result = CommandDriver.new([
-      "build", "--no-codegen",
-      "--stale-key=first", "--stale-key", "key path",
-      "--stale-accept", "accept path", "--stale-block=block path",
-      "--stale-dump-elements", "elements path", "--stale-inputs=inputs path",
-      "samples/iyi/hello.iyi",
-    ]).run
+    argv = ["build", "--no-codegen"]
+    argv << "--stale-key=first"
+    argv << "--stale-key"
+    argv << "key path"
+    argv << "--stale-accept"
+    argv << "accept path"
+    argv << "--stale-block=block path"
+    argv << "--stale-dump-elements"
+    argv << "elements path"
+    argv << "--stale-inputs=inputs path"
+    argv << "samples/iyi/hello.iyi"
+    result = CommandDriver.new(argv).run
     opts = result.compiler_options
     raise "stale options were refused" unless result.exit_code.nil? && opts
     raise "stale key was not retained" unless opts.stale_key == "key path"

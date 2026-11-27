@@ -161,3 +161,15 @@ Each row is held at its measured verdict in the gate's exact known list: a row t
 | `heap_partition.iyi` | refused: `__iyi_mmap.address` in `IyiHeap#pcentre` | a call on a lib function's struct result is not typed |
 | `heap_verify.iyi` | refused: `an expression.set` in `IyiHeapVerify#start` | a call on an untyped receiver expression |
 | `prelude.iyi` | refused: `an expression.size` in `Object#in?` | `size` on `Object#in?`'s untyped collection argument |
+
+### Pipeline rows held below run-equal
+
+`bench/selfhost_pipeline.known` holds four files at the phase they measure, not run-equal: `src/compiler/tools/parse.iyi` stops in declarations because the bodies pass does not narrow a `(String | Nil)` value the hosted compiler narrows (`undefined method 'empty?' for Nil`). The three `bench/fixtures/lowprim_checked_wide_*.iyi` fixtures stop there because the bodies pass refuses a wide operand the hosted compiler accepts (`expected argument #1 to 'Int32#+'` or `'Int32#-'` `to be Int32, not Int64`).
+
+### lower_calls' call_expansion provenance on Linux
+
+`bench/selfhost_lower_calls_provenance.known` holds `linux-x86_64 MainVisitor#call_expansion`. A panic on linux-x86_64 prints its message and `at <file>:<line>` with no stack frames, and the refusal is raised in `MainVisitor#refuse`, so the proof cannot show that the refusal came from `call_expansion`. darwin prints the frames and checks it.
+
+### inline_macros: `src/std/signal.iyi` on Linux
+
+`bench/selfhost_semantic_inline_macros.floor` holds `src/std/signal.iyi@linux 27` under the plain row's 31, which darwin holds. Linux's platform arms declare 30 records in the file against darwin's 34. On both hosts 3 records disagree, and one of the 5 macro sites is not reached. No Linux CI run of this #219 gate ever met 31.

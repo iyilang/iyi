@@ -1535,7 +1535,7 @@ prove_mutation "a def loses its darwin frame pointers" "$REPO/src/compiler/lower
 prove_mutation "a macOS triple loses its frame pointers" "$REPO/src/compiler/lower/fun.iyi" \
   '  triple.includes?("darwin") || triple.includes?("macosx")' '  triple.includes?("darwin")' -- triple_check || status=1
 prove_mutation "the printer writes uwtable as an attribute, not uwtable(sync)" "$REPO/src/compiler/ir/printer.iyi" \
-  'return "uwtable(" + s + ")" if a.name == "uwtable"' 'return "uwtable=" + ir_quote(s) if a.name == "uwtable"' -- lower_calls_check || status=1
+  '        return s == "async" ? "uwtable" : "uwtable(" + s + ")"' '        return "uwtable=" + ir_quote(s)' -- lower_calls_check || status=1
 prove_mutation "a NoReturn def carries no noreturn attribute" "$REPO/src/compiler/lower/fun.iyi" \
   'Attribute.new("noreturn", 0_u64, nil, nil)' 'Attribute.new("nounwind", 0_u64, nil, nil)' -- lower_calls_check || status=1
 prove_mutation "a call to a def passes no arguments" "$REPO/src/compiler/lower/call.iyi" \

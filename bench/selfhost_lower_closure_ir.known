@@ -1,14 +1,3 @@
 # The functions of a fixture whose lowering is known to differ from the hosted module, by host:
 # <host> <fixture> <function> <the gap>. An exact list (bench/selfhost_lower_closure_exercise.sh, ir_agrees): an
 # unlisted function that differs fails the gate, and so does a listed one that no longer differs - remove its row then.
-# Gap U: LLVM prints the async unwind-table kind of a non-aarch64 target as `uwtable` and the port's printer as
-# `uwtable(async)` (src/compiler/lower/NEEDS.md, non-aarch64 target).
-linux-x86_64 lower_macro_proc_locations @*read_both:Int32 gap U
-linux-x86_64 closure_self_class_ir @*Counter::new<Int32>:Counter gap U
-linux-x86_64 closure_self_class_ir @*Counter#initialize<Int32>:Int32 gap U
-linux-x86_64 closure_self_class_ir @*Counter#total:Int32 gap U
-linux-x86_64 closure_self_unit_ir @*Fixtures::ClosureSelfUnitIr::Job::new<Int32>:Fixtures::ClosureSelfUnitIr::Job gap U
-linux-x86_64 closure_self_unit_ir @*Fixtures::ClosureSelfUnitIr::Job#initialize<Int32>:Int32 gap U
-linux-x86_64 closure_self_unit_ir @*Fixtures::ClosureSelfUnitIr::Job#independent:Proc(Int32) gap U
-linux-x86_64 closure_self_unit_ir @*Fixtures::ClosureSelfUnitIr::Job#bound:Proc(Int32) gap U
-linux-x86_64 closure_self_unit_ir @*Fixtures::ClosureSelfUnitIr^Fixtures::ClosureSelfUnitIr::scale<Int32>:Int32 gap U

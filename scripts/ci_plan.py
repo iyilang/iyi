@@ -80,8 +80,11 @@ FAST = ["build", "iyi", "compiler-specs", "stdlib-specs", "targets",
 
 
 # The self-host gates compile and check the compiler written in iyi
-# (`src/compiler/`), and the bench files and fixtures they read. A change to
-# any of those selects all three hosts, whatever else it touches.
+# (`src/compiler/`), and the bench files and fixtures they read. They also
+# read the prelude, std and the iyi samples: the compiler is built on the
+# prelude, the iyimod gate writes artifacts of std and the samples, and the
+# typed parity and declaration gates pin a count for each of those files. A
+# change to any of those selects all three hosts, whatever else it touches.
 SELFHOST = ["selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"]
 # Not selected by this script: `plan` is the script, `result` reads every
 # selected job's outcome, and `release` gates itself on a `v*` tag.
@@ -206,9 +209,17 @@ def is_doc(path):
 
 
 def is_selfhost(path):
+    """The compiler written in iyi and the bench files and fixtures its gates
+    read. bench/selfhost_formatter_exercise.sh takes its corpus from this."""
     return ((path.startswith("src/compiler/") and path.endswith((".iyi", ".ir")))
             or path.startswith(("bench/selfhost_", "bench/native_", "bench/macro_", "bench/fixtures/"))
             or path == "bench/lib/host.sh")
+
+
+def is_parity_input(path):
+    """A prelude, std or iyi sample file: the self-host gates read it, but it
+    is not the compiler's own source, so it stays out of is_selfhost."""
+    return path.startswith(("src/iyi/", "src/std/", "samples/iyi/")) and path.endswith(".iyi")
 
 def code(text):
     """*text* without its whole-line comments, in YAML, shell and Python alike."""
@@ -355,7 +366,7 @@ def plan(jobs, event, ref, files, bench, ci_jobs=None):
     running = {f: reach.running_jobs(f) for f in changed_bench}
     for found in running.values():
         selected |= found
-    selfhost = any(is_selfhost(f) for f in code_files)
+    selfhost = any(is_selfhost(f) or is_parity_input(f) for f in code_files)
     if selfhost:
         selected |= {name for name in SELFHOST if name in jobs}
     if len(changed_bench) == len(code_files) and all(running.values()):

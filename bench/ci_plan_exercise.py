@@ -152,10 +152,28 @@ for files, what in [
           {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} <= jobs,
           f"{reason}: {sorted(jobs)}")
 
-reason, jobs = planned("src/iyi/string.iyi")
-check("an ordinary prelude change does not select component-only jobs",
-      not {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} & jobs,
-      f"{reason}: {sorted(jobs)}")
+# The typed parity and declaration floors pin a count for each prelude, std
+# and iyi sample file, and the compiler is built on the prelude: a change to
+# one of them runs the gates that would see it fall below or rise above its
+# floor. The planner before this rule selected none of the self-host jobs here.
+for files, what in [
+    (["src/iyi/string.iyi"], "a prelude file"),
+    (["src/std/json.iyi"], "a std module"),
+    (["samples/iyi/hello.iyi"], "an iyi sample"),
+]:
+    reason, jobs = planned(*files)
+    check(f"{what} the self-host floors pin selects all three hosts",
+          {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} <= jobs,
+          f"{reason}: {sorted(jobs)}")
+
+for files, what in [
+    (["samples/crystal/notes.iyi"], "a sample outside samples/iyi"),
+    (["src/iyi/wasm/iyi.mjs"], "the prelude's JavaScript runtime"),
+]:
+    reason, jobs = planned(*files)
+    check(f"{what}, which no self-host gate reads, selects no self-host job",
+          not {"selfhost", "selfhost-darwin", "selfhost-windows", "selfhost-linux-arm64"} & jobs,
+          f"{reason}: {sorted(jobs)}")
 
 print()
 print("== a workflow and a bench directory of this exercise's own")
@@ -163,6 +181,12 @@ print("== a workflow and a bench directory of this exercise's own")
 spec = importlib.util.spec_from_file_location("ci_plan_under_test", PLANNER)
 planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
+
+# The formatter gate takes its corpus from is_selfhost: the parity inputs that
+# select the jobs above must not join it.
+for path in ["src/iyi/string.iyi", "src/std/json.iyi", "samples/iyi/hello.iyi"]:
+    check(f"{path} selects the self-host jobs but stays out of the formatter gate's corpus",
+          not planner.is_selfhost(path), "is_selfhost takes it")
 
 # Execute the workflow's result command: selected jobs must have actually run.
 actual_jobs = planner.parse_jobs((ROOT / ".github" / "workflows" / "iyi.yml").read_text(encoding="utf-8"))

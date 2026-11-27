@@ -14,17 +14,34 @@
 # Indentation changed (1 / 3).
 # Newly accepted: macro branch indentation, inline comment alignment and moved enum comments.
 # Fixed since: semicolons between statements, proc literal brace spacing, and constant and enum alignment.
+# New files of #219 (the self-hosted pipeline), differing when it landed: multiline collections, calls and
+# comment alignment collapsed (15).
+bench/fixtures/bodies_forward_block_key_probe.iyi
 bench/fixtures/expr_collections.iyi
 bench/fixtures/expr_hashes_and_arrays.iyi
+bench/fixtures/loader_if_entry.iyi
+bench/fixtures/lowhead_builtins.iyi
+bench/fixtures/lowhead_string.iyi
+bench/fixtures/lowty_class_assigned.iyi
+bench/fixtures/lowty_class_layout.iyi
+bench/fixtures/lowty_enums.iyi
+bench/fixtures/lowty_unions.iyi
+bench/fixtures/lowtyid_generic.iyi
+bench/fixtures/seminl_reach/root.iyi
+bench/fixtures/seminl_reach/type_const_raise_escaped.iyi
 bench/fixtures/syntax_macro_text_splits.iyi
 bench/fixtures/syntax_scope_locals.iyi
 bench/selfhost_ast_exercise.iyi
 bench/selfhost_ir_fold_exercise.iyi
 bench/selfhost_lexer_exercise.iyi
+bench/selfhost_lower_name_owner.iyi
 bench/selfhost_platform_exercise.iyi
+src/compiler/backend/backend.iyi
+src/compiler/compiler.iyi
 src/compiler/ir/module.iyi
 src/compiler/llvm/llvm.iyi
 src/compiler/llvm/pass_manager.iyi
+src/compiler/lower/helpers.iyi
 src/compiler/native/aarch64/encode.iyi
 src/compiler/native/amd64/encode.iyi
 src/compiler/native/asm/constraints.iyi

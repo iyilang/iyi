@@ -680,7 +680,7 @@ refusal_sentence() {
 # These are full semantic programs, not a macro definition followed by a call.
 is_semantic_fixture() {
   case "$(basename "$1")" in
-    macro_def_shadows_macro.iyi|macro_typenode_ancestors.iyi|macro_lookup_arity.iyi) return 0 ;;
+    macro_def_shadows_macro.iyi|macro_def_shadows_toplevel.iyi|macro_typenode_ancestors.iyi|macro_lookup_arity.iyi) return 0 ;;
   esac
   return 1
 }

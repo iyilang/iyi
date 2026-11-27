@@ -148,7 +148,7 @@ fi
 
 typed_fixtures_ok=1
 echo "== Native typed macro fixtures"
-for name in macro_def_shadows_macro macro_typenode_ancestors macro_array_any macro_array_map macro_tuple_map_splat macro_range_map macro_lookup_arity macro_typeof_prelude; do
+for name in macro_def_shadows_macro macro_def_shadows_toplevel macro_typenode_ancestors macro_array_any macro_array_map macro_tuple_map_splat macro_range_map macro_lookup_arity macro_typeof_prelude; do
   fixture="$REPO/bench/fixtures/$name.iyi"
   if ! "$IYI" run "$(native_path "$fixture")" >"$WORK/$name.hosted" 2>"$WORK/$name.hosted.err"; then
     echo "FAIL: hosted $name"
@@ -231,7 +231,7 @@ elif [ "$HOST_ID" = darwin-arm64 ]; then
 mut_run=$((mut_run + 1))
 prove_mutation "a local def fails to stop macro lookup" "$REPO/src/compiler/semantic/top_level.iyi" \
   'return true if @defs.has_key?(call.name)' 'return true if false' \
-  -- check_typed_macro_fixture macro_def_shadows_macro && mut_caught=$((mut_caught + 1)) || status=1
+  -- check_typed_macro_fixture macro_def_shadows_toplevel && mut_caught=$((mut_caught + 1)) || status=1
 
 mut_run=$((mut_run + 1))
 prove_mutation "macro overload ignores required argument count" "$REPO/src/compiler/semantic/top_level.iyi" \

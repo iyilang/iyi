@@ -176,9 +176,8 @@ pub def builtin_for_new?(program : SemanticProgram, type : Type) : Bool
   return true if type == program.enum_type
   return true if type == program.tuple_type
   return true if type == program.proc_type
-  names = ["Number", "Int", "Float", "NamedTuple", "Bool", "Char", "Symbol",
-           "Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128",
-           "Float32", "Float64"]
+  names = ["Number", "Int", "Float", "NamedTuple", "Bool", "Char", "Symbol", "Float32", "Float64"]
+  names += ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128"]
   names.any? do |name|
     other = program.types[name]?
     other.nil? ? false : type == other.as(Type)

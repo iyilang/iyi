@@ -1,14 +1,10 @@
-macro shadow_record(value)
-  puts "macro"
-end
-
 class MacroDefShadow
-  def shadow_record(value : Int32)
+  def record(value : Int32)
     puts "method"
   end
 
   def run
-    shadow_record(1)
+    record(1)
   end
 end
 

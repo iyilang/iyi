@@ -1143,11 +1143,12 @@ jobs:
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           # PATH is part of every receipt's link key, and the fresh runner may
           # boot another image version whose PATH differs in tools no test uses
-          # (run 46018941138: all 17 receipts missed with "link changed"). Every
-          # step here and on the fresh runner that records or reads receipts
-          # gives iyi the same PATH: the system's, Visual Studio's, the SDK's
-          # and Git's directories (bench/stale_ci.sh stale-path).
-          PATH="$(bash bench/stale_ci.sh stale-path)" "$IYI" test "${args[@]}" "${tests[@]}"
+          # (run 46018941138: all 17 receipts missed under equal profiles).
+          # Every step here and on the fresh runner that records or reads
+          # receipts runs iyi under the same PATH: the system's, Visual
+          # Studio's, the SDK's and Git's directories (bench/stale_ci.sh
+          # stale-path, pinned-iyi).
+          bash bench/stale_ci.sh pinned-iyi test "${args[@]}" "${tests[@]}"
       - name: Check the producer compiler and LLVM DLL
         run: |
           test -f .build/iyi.exe
@@ -1302,7 +1303,7 @@ jobs:
       - name: "Producer receipts on a fresh runner: hit on an equal profile, refused on another"
         run: |
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          PATH="$(bash bench/stale_ci.sh stale-path)" "$IYI" test --cached --json \
+          bash bench/stale_ci.sh pinned-iyi test --cached --json \
             --import-index "run:${GITHUB_RUN_ID}=stale-index/run-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/cached.json
           bash bench/stale_ci.sh assert-hits --json stale-index/cached.json \
@@ -1322,7 +1323,7 @@ jobs:
           unset PGPASSWORD
           bash bench/stale_ci.sh assert-export-env
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          PATH="$(bash bench/stale_ci.sh stale-path)" "$IYI" test --fresh --json \
+          bash bench/stale_ci.sh pinned-iyi test --fresh --json \
             --export-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/fresh.json
           bash bench/stale_ci.sh shadow-audit \
@@ -1340,7 +1341,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then cache_dir="$(cygpath -u "$cache_dir")"; fi
           rm -rf "$cache_dir/tests-v1"
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
-          PATH="$(bash bench/stale_ci.sh stale-path)" "$IYI" test --cached --json \
+          bash bench/stale_ci.sh pinned-iyi test --cached --json \
             --import-index "audit:${GITHUB_RUN_ID}=stale-index/audit-${GITHUB_RUN_ID}-${STALE_TARGET}.json" \
             "${tests[@]}" > stale-index/audit-cached.json
           bash bench/stale_ci.sh assert-hits --json stale-index/audit-cached.json \

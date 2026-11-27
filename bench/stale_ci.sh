@@ -14,6 +14,7 @@
 #     master-self-check           Import master snapshot and verify against git diff
 #     test-master-path            Verify master snapshot export, API fetch, and self-check
 #     stale-path [LIST]           The PATH a Windows step gives iyi where receipts cross runners
+#     pinned-iyi ARGS...          Run $IYI ARGS under that PATH
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -56,7 +57,7 @@ fi
 # windows-2025 runners of one run can boot image versions whose PATH differs
 # in tools no build or test uses: in run 46018941138 the producer's had Ruby
 # 3.3.13 and Temurin 17.0.21-9 where the fresh runner's had 3.3.14 and
-# 17.0.21-100000002, and all 17 exported receipts missed with "link changed".
+# 17.0.21-100000002, and all 17 exported receipts missed under equal profiles.
 # Only the system's, Visual Studio's, the Windows SDK's and Git's directories
 # are kept, in PATH's order. Elsewhere the job's PATH is its container's or
 # its machine's own, and passes unchanged.
@@ -82,6 +83,14 @@ stale_path() {
   done
   shopt -u nocasematch
   printf '%s\n' "$kept"
+}
+
+# The compiler, run under stale_path's PATH by this shell, so every run that
+# records or reads receipts across runners hands iyi the same PATH string.
+pinned_iyi() {
+  local pinned
+  pinned="$(stale_path)"
+  PATH="$pinned" "$IYI" "$@"
 }
 
 # 1. assert-export-env: verifies the export step environment holds no secrets or token
@@ -1937,7 +1946,7 @@ master_self_check() {
     mkdir -p "$out_dir"
   fi
 
-  PATH="$(stale_path)" "$IYI" test --cached --json \
+  pinned_iyi test --cached --json \
     --import-index "master=$snapshot" \
     "${tests[@]}" > "$out_json"
 
@@ -2011,7 +2020,11 @@ if not os.path.exists(sample_file):
     samples = sorted(glob.glob(os.path.join(repo, 'samples/iyi/*.iyi')))
     sample_file = samples[0]
 
-res_exp = subprocess.run([iyi, 'test', '--fresh', '--export-index', f'master={cand_export_path}', sample_file],
+# The producer's export goes through this script's own PATH pin, as the CI
+# producer's does, so master-self-check's pinned import can hit it.
+export_env['IYI'] = iyi
+res_exp = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'pinned-iyi',
+                          'test', '--fresh', '--export-index', f'master={cand_export_path}', sample_file],
                          cwd=CWD, env=export_env, capture_output=True, text=True)
 if res_exp.returncode != 0 or not os.path.exists(cand_export_path):
     print(f'test-master-path FAILED: producer export failed (code {res_exp.returncode}):\n{res_exp.stderr}', file=sys.stderr)
@@ -2755,6 +2768,9 @@ case "$COMMAND" in
   stale-path)
     stale_path "$@"
     ;;
+  pinned-iyi)
+    pinned_iyi "$@"
+    ;;
   help|--help|-h)
     echo "Usage: $0 <command> [options]"
     echo "Commands:"
@@ -2769,6 +2785,7 @@ case "$COMMAND" in
     echo "  master-self-check           Import master snapshot and verify against git diff"
     echo "  test-master-path            Verify master snapshot export, API fetch, and self-check"
     echo "  stale-path [LIST]           The PATH a Windows step gives iyi where receipts cross runners"
+    echo "  pinned-iyi ARGS...          Run \$IYI ARGS under that PATH"
     echo "  test-offline-pebble         Verify offline Pebble dependency acquisition gate"
     echo "  test-offline-vectors        Verify offline vector intake gate and controls"
     ;;

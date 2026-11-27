@@ -11,6 +11,10 @@
 # A file listed as "pass" MUST verify. A file listed as "known-fail" is
 # recorded with its verifier message in STAGE_TWO.md and is allowed to fail;
 # if it starts passing, this gate says so and the floor should be raised.
+#
+# A file in known_verdict is held at its measured verdict exactly (NEEDS.md, "The ir_valid gate's four
+# prelude rows"): it has never met its floor above in any CI run, so the floor is the goal and the known
+# verdict is the truth. Any other verdict, a pass included, fails until the entry is removed.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -62,6 +66,20 @@ expected_verify() {
   esac
 }
 
+# Rule-B rows, exact: each verdict as measured on 2a913d33a and in CI run 46018941138, with its gap.
+known_verdict() {
+  case "$1" in
+    # The single-file probe does not see std's Atomic, which concurrency.iyi names.
+    "concurrency.iyi") echo "absent (exit 1): Error: undefined constant Atomic" ;;
+    # The port cannot type a call on a lib function's struct result (`__iyi_mmap(...).address`).
+    "heap_partition.iyi") echo "refused: port limitation: the port cannot resolve the call '__iyi_mmap.address' in 'IyiHeap#pcentre', so it refuses instead of leaving the call out of the IR (no IR is written)" ;;
+    # The port cannot type a call on an untyped receiver expression in IyiHeapVerify#start.
+    "heap_verify.iyi") echo "refused: port limitation: the port cannot resolve the call 'an expression.set' in 'IyiHeapVerify#start', so it refuses instead of leaving the call out of the IR (no IR is written)" ;;
+    # The port cannot type `size` on Object#in?'s untyped collection argument.
+    "prelude.iyi") echo "refused: port limitation: the port cannot resolve the call 'an expression.size' in 'Object#in?', so it refuses instead of leaving the call out of the IR (no IR is written)" ;;
+  esac
+}
+
 echo "== 1. Building self-host compile tool"
 if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$REPO_NATIVE/.build/iyi-compile$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" >"$WORK/build.log" 2>&1; then
   echo "  FAILED: could not build the compile tool" >&2
@@ -110,6 +128,16 @@ for src in "$REPO"/src/iyi/*.iyi; do
   got="$(verify_one "$src")"
   checked=$((checked + 1))
   note=""
+  known="$(known_verdict "$name")"
+  if [ -n "$known" ]; then
+    if [ "$got" = "$known" ]; then
+      held=$((held + 1)); note="KNOWN (NEEDS.md)"
+    else
+      note="KNOWN ENTRY NO LONGER HOLDS: remove it from known_verdict"; status=1
+    fi
+    printf '  %-20s %-10s %s %s\n' "$name" "known" "$got" "$note"
+    continue
+  fi
   case "$floor" in
     pass)
       if [ "$got" = "pass" ]; then

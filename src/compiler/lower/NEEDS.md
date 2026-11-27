@@ -129,7 +129,7 @@ Ported and measured: `visit(Return)` in a def (`codegen_return_node`, a value of
 
 Note on the gate: `lower_out` names a libc function (`time`), because the hosted build must link; a lib fun with no body in the libc does not link under `--prelude empty` (measured on `take`).
 
-Non-aarch64 target: LLVM prints the async unwind-table kind as `uwtable`, while the port prints `uwtable(async)`; the hosted and port target choices are both sync for aarch64 and async otherwise. Reconcile the text when enabling another target (hosted fun.cr:437-440; lower/fun.iyi `uwtable_kind`).
+Non-aarch64 target: CLOSED. The port's printer writes the async unwind-table kind as a bare `uwtable`, as LLVM does (`ir/printer.iyi` `attr_text`); the hosted and port target choices are both sync for aarch64 and async otherwise (hosted fun.cr:437-440; lower/fun.iyi `uwtable_kind`).
 
 The hosted emitter retains frame pointers for Solaris as well as Darwin (fun.cr:445-448); `lower/fun.iyi` currently recognizes Darwin only.
 
@@ -146,4 +146,18 @@ The gate (bench/selfhost_lower_globals_exercise.sh) compares each constant fixtu
 | 5 | Status of rows 1 to 4 on origin (declarations commit 18ee00d13, body typer c59190bff, head c1eeb3afb): `Const#used` and `Const#pointer_read` are set by the body typer (visit(Path) and visit(PointerOf)), and `program.const_initializers` and `predefined_const` exist. The lowering reads `used?` for a non-literal constant's assignment. `pointer_read` is not read yet (the lowering's `pointerof`, a later increment). | the body typer (S1d4Bodies) and the declarations slice | none: rows 1, 2 and 4 are met for the non-literal constant increment |
 | 6 | The `once` entry for a read before the assignment: an iyi program's `once_name` is `__iyi_once`, defined by the prelude (`fun __iyi_once(flag : Bool*, initializer : Void*) : Nil` in src/iyi/prelude.iyi); `run_once` is the two-parameter form (once.cr 21-28), and the legacy three-parameter form is refused. The gate's oracle builds with `--prelude empty`, which does not define `__iyi_once`, so a read-before-assignment fixture cannot be measured in this gate; the port refuses it by name (const.iyi `initialize_const`). | the core (S2a4Core) for the run_once port; a prelude-backed fixture for the measurement | the read-before-assignment fixture |
 | 7 | Thread-local class variables: `MetaTypeVar` has no thread-local flag on trunk. The hosted `declare_thread_local` (`class_var.cr` 27-34) sets a local-exec model on every thread-local global except on Windows. Until the declarations slice sends the flag, a thread-local class variable is refused by name. | the declarations slice (S1b8Declarations) | the class-variable increment, thread-local case |
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
+
+## Gate rows #219 claimed and no CI run ever met (recorded when the chain #147, #211, #219 landed)
+
+Each row is held at its measured verdict in the gate's exact known list: a row that starts to pass, or changes, fails its gate until the entry is removed. The gate keeps the claimed floor, so removing the entry restores it.
+
+### The ir_valid gate's four prelude rows
+
+`bench/selfhost_ir_valid_exercise.sh` (`known_verdict`) claims `heap_partition.iyi` and `heap_verify.iyi` verify and `concurrency.iyi` and `prelude.iyi` fail only in the verifier. In every #219 run and in run 46018941138 the probe never reached the verifier for them:
+
+| File | Measured verdict | Gap |
+|---|---|---|
+| `concurrency.iyi` | absent: `undefined constant Atomic` | the single-file probe does not see std's `Atomic` |
+| `heap_partition.iyi` | refused: `__iyi_mmap.address` in `IyiHeap#pcentre` | a call on a lib function's struct result is not typed |
+| `heap_verify.iyi` | refused: `an expression.set` in `IyiHeapVerify#start` | a call on an untyped receiver expression |
+| `prelude.iyi` | refused: `an expression.size` in `Object#in?` | `size` on `Object#in?`'s untyped collection argument |

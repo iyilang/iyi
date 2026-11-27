@@ -1,6 +1,6 @@
 # lowering own-source floors: <repo-relative file> <identical types>.
 # A count may only rise. Raise with: LOWER_TYPES_RAISE=1 bash bench/selfhost_lower_types_exercise.sh
-src/compiler/artifact/iyimod.iyi 28
+src/compiler/artifact/iyimod.iyi 30
 src/compiler/backend/backend.iyi 4
 src/compiler/backend/llvm/emit.iyi 4
 src/compiler/backend/llvm/import.iyi 0
@@ -22,20 +22,30 @@ src/compiler/ir/inst.iyi 18
 src/compiler/ir/intrinsics.iyi 3
 src/compiler/ir/layout.iyi 3
 src/compiler/ir/module.iyi 2
-src/compiler/ir/opt/analysis.iyi 9
+src/compiler/ir/opt/analysis.iyi 10
+src/compiler/ir/opt/barrier.iyi 7
+src/compiler/ir/opt/callgraph.iyi 3
 src/compiler/ir/opt/cfg_simplify.iyi 3
+src/compiler/ir/opt/cse.iyi 3
 src/compiler/ir/opt/dce.iyi 1
+src/compiler/ir/opt/deadfn.iyi 1
 src/compiler/ir/opt/edit.iyi 2
 src/compiler/ir/opt/effects.iyi 2
+src/compiler/ir/opt/escape.iyi 13
 src/compiler/ir/opt/fold.iyi 2
+src/compiler/ir/opt/inline.iyi 2
+src/compiler/ir/opt/layout.iyi 2
+src/compiler/ir/opt/licm.iyi 2
 src/compiler/ir/opt/mem2reg.iyi 3
 src/compiler/ir/opt/pipeline.iyi 5
+src/compiler/ir/opt/prove.iyi 5
 src/compiler/ir/opt/simplify.iyi 2
-src/compiler/ir/parser.iyi 7
+src/compiler/ir/opt/sroa.iyi 4
+src/compiler/ir/parser.iyi 8
 src/compiler/ir/printer.iyi 2
 src/compiler/ir/types.iyi 6
 src/compiler/ir/values.iyi 5
-src/compiler/ir/verifier.iyi 2
+src/compiler/ir/verifier.iyi 4
 src/compiler/llvm.iyi 1
 src/compiler/llvm/builder.iyi 0
 src/compiler/llvm/context.iyi 0
@@ -89,7 +99,8 @@ src/compiler/macros/type_facts.iyi 5
 src/compiler/native/aarch64/abi.iyi 1
 src/compiler/native/aarch64/asm.iyi 6
 src/compiler/native/aarch64/encode.iyi 5
-src/compiler/native/aarch64/isel.iyi 3
+src/compiler/native/aarch64/fold.iyi 3
+src/compiler/native/aarch64/isel.iyi 4
 src/compiler/native/aarch64/opcodes.iyi 2
 src/compiler/native/aarch64/regs.iyi 4
 src/compiler/native/amd64/abi.iyi 2
@@ -110,6 +121,7 @@ src/compiler/native/link/link.iyi 6
 src/compiler/native/link/macho_exe.iyi 9
 src/compiler/native/lower.iyi 5
 src/compiler/native/mir.iyi 12
+src/compiler/native/mir_clean.iyi 1
 src/compiler/native/obj/elf.iyi 5
 src/compiler/native/obj/macho.iyi 6
 src/compiler/native/obj/object.iyi 21
@@ -148,7 +160,7 @@ src/compiler/semantic/recursive_struct_checker.iyi 2
 src/compiler/semantic/restrictions.iyi 4
 src/compiler/semantic/share.iyi 4
 src/compiler/semantic/spawn_placement.iyi 8
-src/compiler/semantic/top_level.iyi 42
+src/compiler/semantic/top_level.iyi 43
 src/compiler/semantic/type_node_host.iyi 2
 src/compiler/semantic/type_nodes.iyi 1
 src/compiler/semantic/typed.iyi 4

@@ -425,8 +425,14 @@ prove_mutation 'address-taken parameter points to a temporary copy' "$REPO/src/c
       end' -- check_pointerof_mutant || status=1
 prove_mutation 'defer drops its personality' "$REPO/src/compiler/lower/ensure.iyi" \
   'low.current_context.fun.personality = personality' 'nil' -- check_defer_mutant || status=1
-prove_mutation 'Darwin personality is internal' "$REPO/src/compiler/lower/lower.iyi" \
-  '(low.module.target.darwin? && name == abi_name(low, "personality"))' 'false' -- check_defer_mutant || status=1
+# The external personality is the darwin rule (hosted fun.cr:781): the defer oracle is built for this host,
+# so only a darwin host's module can show it.
+if [ "$HOST_ID" = darwin-arm64 ]; then
+  prove_mutation 'Darwin personality is internal' "$REPO/src/compiler/lower/lower.iyi" \
+    '(low.module.target.darwin? && name == abi_name(low, "personality"))' 'false' -- check_defer_mutant || status=1
+else
+  host_limited "Darwin personality is internal: the defer oracle is built for $HOST_ID, where the personality is internal"
+fi
 prove_mutation 'captured reference store lacks marking barrier' "$REPO/src/compiler/lower/cast.iyi" \
   'if low.analysed.program.types["IyiHeap"]?.nil? || !has_inner_pointers?(target) || stack_pointer?(pointer) || begin_fn.nil? || shade_fn.nil?' \
   'if true || low.analysed.program.types["IyiHeap"]?.nil? || !has_inner_pointers?(target) || stack_pointer?(pointer) || begin_fn.nil? || shade_fn.nil?' -- check_barrier_mutant || status=1

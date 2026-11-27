@@ -2,8 +2,9 @@
 # text the port's IR parser reads. Sourced, not run.
 #
 # CALL_TYPES is an awk program. It writes the forms LLVM 22 leaves out and the port's
-# text form requires: call signatures, phi labels, and atomic memory operation
-# ordering. Indirect calls with multiword argument types remain unchanged.
+# text form requires: call signatures, phi labels, atomic memory operation ordering,
+# and a landingpad's personality and clauses on its own line. Indirect calls with
+# multiword argument types remain unchanged.
 CALL_TYPES='
 function call_types(line,   p, rest, ret, after, op, cl, args, tail, n, parts, w, types, i, head, name, at, indirect, len) {
   p = index(line, " call ")
@@ -171,12 +172,93 @@ function atomic_memory(line,   p, suffix, prefix, words) {
   }
   return prefix ", align " words[3] " atomic " words[1]
 }
+# A call operand that LLVM 20 folds into a `mul` constant expression,
+# `%K = call ptr @f(i64 mul (i64 A, i64 B))`, is written the way LLVM 21 and later write it, and
+# the way the port does: `%K = mul i64 A, B` and the call on `i64 %K`. Every later numbered value of
+# the function moves up one, so the whole function is read before any of it is written
+# (a phi may name a value defined below it).
+function folded_mul(line,   p, q, depth, c, inner, n, parts) {
+  if (line !~ /^  %[0-9]+ = call /) return ""
+  p = index(line, "(i64 mul (i64 ")
+  if (p == 0) return ""
+  q = p + 9
+  depth = 0
+  for (; q <= length(line); q++) {
+    c = substr(line, q, 1)
+    if (c == "(") depth++
+    else if (c == ")") { depth--; if (depth == 0) break }
+  }
+  if (depth != 0 || substr(line, q + 1, 1) != ")") return ""
+  inner = substr(line, p + 10, q - p - 10)
+  n = split_top(inner, parts)
+  if (n != 2 || parts[1] !~ /^i64 / || parts[2] !~ /^i64 /) return ""
+  fold_head = substr(line, 1, p)
+  fold_tail = substr(line, q + 1)
+  return substr(parts[1], 5) ", " substr(parts[2], 5)
+}
+function renumber(line, thresholds, count,   out, m, j, shift) {
+  if (count == 0) return line
+  out = ""
+  while (match(line, /%[0-9]+/)) {
+    m = substr(line, RSTART + 1, RLENGTH - 1) + 0
+    shift = 0
+    for (j = 1; j <= count; j++) if (thresholds[j] <= m) shift++
+    out = out substr(line, 1, RSTART) (m + shift)
+    line = substr(line, RSTART + RLENGTH)
+  }
+  return out line
+}
+function flush_function(   i, count, thresholds, operands, k, lt, j, temp) {
+  count = 0
+  for (i = 1; i <= nbuf; i++) {
+    if (folded_mul(buf[i]) != "") {
+      match(buf[i], /%[0-9]+/)
+      thresholds[++count] = substr(buf[i], RSTART + 1, RLENGTH - 1) + 0
+    }
+  }
+  for (i = 1; i <= nbuf; i++) {
+    operands = folded_mul(buf[i])
+    if (operands == "") { emit(renumber(buf[i], thresholds, count)); continue }
+    match(buf[i], /%[0-9]+/)
+    k = substr(buf[i], RSTART + 1, RLENGTH - 1) + 0
+    lt = 0
+    for (j = 1; j <= count; j++) if (thresholds[j] < k) lt++
+    temp = k + lt
+    emit("  %" temp " = mul i64 " operands)
+    sub(/^  %[0-9]+ = /, "  %" (temp + 1) " = ", fold_head)
+    emit(fold_head "i64 %" temp fold_tail)
+  }
+  nbuf = 0
+}
+# LLVM writes the personality on the function (`define ... personality ptr @p {`) and each
+# landingpad clause on a line of its own; the IR text writes one line,
+# `landingpad T personality ptr @p cleanup catch ptr @c`.
+function emit(line,   clause) {
+  if (pad != "") {
+    if (line ~ /^[ \t]+(cleanup|catch |filter )/) { clause = line; sub(/^[ \t]+/, "", clause); pad = pad " " clause; return }
+    print pad
+    pad = ""
+  }
+  line = atomic_memory(line)
+  if (line ~ /^define /) {
+    personality = ""
+    if (index(line, " personality ") > 0) { personality = line; sub(/^.* personality /, "", personality); sub(/ *\{$/, "", personality) }
+  }
+  if (personality != "" && line ~ /= landingpad / && index(line, " personality ") == 0) { pad = line " personality " personality; return }
+  if (line ~ /^define .* @"[*~]/ || line ~ /^define .* @(__crystal_main|__iyi_main)\(/) line = cc_define(line)
+  if (line ~ /^declare .*@llvm\./) return
+  if (index(line, " phi ") > 0) gsub(/, %/, ", label %", line)
+  if (index(line, "@llvm.") > 0 && index(line, " call ") > 0) { print intrinsic_line(line); return }
+  if (index(line, " call ") > 0 || index(line, " invoke ") > 0) print call_types(line); else print line
+}
 {
-  $0 = atomic_memory($0)
-  if ($0 ~ /^define .* @"[*~]/ || $0 ~ /^define .* @(__crystal_main|__iyi_main)\(/) $0 = cc_define($0)
-  if ($0 ~ /^declare .*@llvm\./) next
-  if (index($0, " phi ") > 0) gsub(/, %/, ", label %")
-  if (index($0, "@llvm.") > 0 && index($0, " call ") > 0) { print intrinsic_line($0); next }
-  if (index($0, " call ") > 0 || index($0, " invoke ") > 0) print call_types($0); else print
+  if ($0 ~ /^define .*\{$/) buffering = 1
+  if (!buffering) { emit($0); next }
+  buf[++nbuf] = $0
+  if ($0 == "}") { flush_function(); buffering = 0 }
+}
+END {
+  for (i = 1; i <= nbuf; i++) emit(buf[i])
+  if (pad != "") print pad
 }
 '

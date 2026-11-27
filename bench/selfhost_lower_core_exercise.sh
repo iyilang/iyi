@@ -983,7 +983,7 @@ prove_mutation "the alloca block is named after the entry block" "$REPO/src/comp
 prove_mutation "a bool literal is false" "$REPO/src/compiler/lower/lower.iyi" \
   "return 1_i64" "return 0_i64" -- lower_core_check || status=1
 prove_mutation "a store is aligned to one byte" "$REPO/src/compiler/lower/helpers.iyi" \
-  "set_align(st, low.typer.align_of(value.type))" "set_align(st, 1)" -- lower_core_check || status=1
+  "set_align(st, low.typer.access_align(value.type))" "set_align(st, 1)" -- lower_core_check || status=1
 prove_mutation "the then and else branches are swapped" "$REPO/src/compiler/lower/lower.iyi" \
   "low.builder.cond_br(cond_value, then_block, else_block)" "low.builder.cond_br(cond_value, else_block, then_block)" -- lower_core_check || status=1
 prove_mutation "the while body is the condition" "$REPO/src/compiler/lower/lower.iyi" \
@@ -1674,8 +1674,9 @@ tuple_entry_check() {
   fi
   if [ "$HOST_ID" != darwin-arm64 ]; then
     host_limited 'tuple entry: AArch64 Mach-O runtime calling convention requires macOS arm64; inspecting IR convention'
-    grep -Eq '^define .*@__iyi_main\(' "$WORK/tuple-entry.ir" || { echo 'INVALID: no program entry in tuple IR'; return 2; }
-    grep -Eq '^define .*iyicc .*@__iyi_main\(' "$WORK/tuple-entry.ir"
+    # The fixture is built against --prelude empty, whose program entry is __crystal_main.
+    grep -Eq '^define .*@__crystal_main\(' "$WORK/tuple-entry.ir" || { echo 'INVALID: no program entry in tuple IR'; return 2; }
+    grep -Eq '^define .*iyicc .*@__crystal_main\(' "$WORK/tuple-entry.ir"
     return $?
   fi
   codesign -v --strict "$WORK/tuple-entry.native" > /dev/null 2>&1 || { echo "  lower_tuple: FAIL, native signature invalid"; return 2; }
@@ -1714,7 +1715,7 @@ EOF' _ "$lib")" || return 1
 }
 if entry_oracle_check; then
   prove_mutation "the oracle leaves the entry definition in the C convention" "$REPO/bench/lib/lower_oracle.sh" \
-    ' || $0 ~ /^define .* @(__crystal_main|__iyi_main)\(/' '' -- entry_oracle_check || status=1
+    ' || line ~ /^define .* @(__crystal_main|__iyi_main)\(/' '' -- entry_oracle_check || status=1
 else
   echo "FAIL: entry oracle normalization differs on lower_tuple or its call forms"
   status=1

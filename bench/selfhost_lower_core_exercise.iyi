@@ -32,6 +32,7 @@ import compiler/platform/target::{Target}
 import compiler/lower/typer::{LowerTyper}
 import compiler/lower/lower::{codegen_program, jump_target, lower_def_probe, static_condition}
 import compiler/ir/function::{Function, Global}
+import compiler/ir/inst::{Op}
 import compiler/ir/values::{Value}
 import compiler/lower/context::{Lowerer}
 import bench/lib/lower_gate::{attach_attrs, oracle_attr_map, printed_attr_map}
@@ -96,6 +97,7 @@ def normalised_lines(text : String, builds : Array(String)) : Array(String)
     stripped = line.strip
     next if stripped.empty?
     next if stripped.starts_with?(";")
+    next if stripped == "%landing_pad = type { ptr, i32 }"
     next if stripped.starts_with?("source_filename")
     next if stripped.starts_with?("attributes #")
     next if stripped.starts_with?("declare") && stripped.includes?("@printf(")
@@ -203,21 +205,35 @@ def compare(oracle : Array(String), port : Array(String)) : Int32
   identical
 end
 
+# The oracle's module, parsed. A hosted handler writes a `rescue:` block nothing branches to (its landing
+# pad, the ensure again and the re-raise); iyi unwinds nowhere (SPEC 2.2) and the lowering writes only the
+# normal exit (lower/ensure.iyi), so a module holding a landing pad is compared after its unwind edges are
+# dropped (Module#drop_unwind_edges), as the ensure gate compares it. Each function keeps its personality:
+# the lowering attaches it as the hosted handler does. The landing pad's type is left out of both sides.
+def oracle_module(text : String) : Module
+  parsed = parse(text)
+  raise parsed.as(IrParseError).to_s if parsed.is_a?(IrParseError)
+  m = parsed.as(Module)
+  pads = m.functions.any? { |f| f.blocks.any? { |b| b.insts.any? { |i| i.op == Op::LandingPad } } }
+  return m unless pads
+  kept = Hash(String, Value?).new
+  m.functions.each { |f| kept[f.name] = f.personality }
+  if reason = m.drop_unwind_edges
+    raise reason
+  end
+  m.functions.each { |f| f.personality = kept[f.name]? }
+  m
+end
+
 def run_oracle(path : String) : Nil
   text = File.read(path)
-  parsed = parse(text)
-  if parsed.is_a?(IrParseError)
-    raise parsed.as(IrParseError).to_s
-  end
-  normalised_lines(print(parsed.as(Module)), build_names(text)).each { |line| puts line }
+  normalised_lines(print(oracle_module(text)), build_names(text)).each { |line| puts line }
 end
 
 def run_lower(fixture : String, oracle_path : String) : Nil
   oracle_text = File.read(oracle_path)
-  parsed = parse(oracle_text)
-  raise parsed.as(IrParseError).to_s if parsed.is_a?(IrParseError)
   builds = build_names(oracle_text)
-  oracle_lines = normalised_lines(print(parsed.as(Module)), builds)
+  oracle_lines = normalised_lines(print(oracle_module(oracle_text)), builds)
   oracle = attach_attrs(normalise_hidden_uniques(oracle_lines, builds), oracle_attr_map(oracle_text))
   triple = triple_of(oracle_text)
 

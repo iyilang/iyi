@@ -206,7 +206,7 @@ src/compiler/tools/compile_native.iyi 44
 src/compiler/tools/format.iyi 8
 src/compiler/tools/formatter.iyi 240
 src/compiler/tools/ir.iyi 66
-src/compiler/tools/ir_core.iyi 47
+src/compiler/tools/ir_core.iyi 48
 src/compiler/tools/ir_opt.iyi 29
 src/compiler/tools/link_elf.iyi 32
 src/compiler/tools/link_macho.iyi 37

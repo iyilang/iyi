@@ -1640,8 +1640,20 @@ pub class SemanticProgram < NonGenericModuleType
     @normalizer.iyi_prelude
   end
 
+  # The hosted `iyi_prelude=` (program.cr): iyi's prelude has the UInt64x2 primitive, a struct under
+  # Value made when the prelude is chosen, after every built-in type, so the type-id walk numbers it
+  # after them; any other prelude has none.
   def iyi_prelude=(value : Bool) : Nil
     @normalizer.iyi_prelude = value
+    if value
+      unless @types.has_key?("UInt64x2")
+        vector = NonGenericClassType.new(self, self, "UInt64x2", value_type)
+        vector.struct = true
+        @types["UInt64x2"] = vector
+      end
+    elsif vector = @types.delete("UInt64x2")
+      value_type.subclasses.delete(vector)
+    end
   end
 
   def iyi_prelude? : Bool

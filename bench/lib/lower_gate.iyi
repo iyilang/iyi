@@ -11,7 +11,7 @@ module bench/lib/lower_gate
 # `stand_in_libs` is the one place a gate reads the primitive declarations the bare analysis does not
 # declare (bench/lib/primitive_stand_in.iyi). The semantic pass types the libs; no gate stands them in.
 
-import compiler/syntax/ast::{ASTNode, Def, Expressions, FunDef, LibDef, ImportDecl}
+import compiler/syntax/ast::{ASTNode, ClassDef, Def, Expressions, FunDef, LibDef, ImportDecl}
 import compiler/syntax/parser::{Parser}
 import compiler/semantic/top_level::{LibType, SemanticProgram, TopLevelVisitor}
 import compiler/semantic/main_visitor::{MainVisitor}
@@ -42,6 +42,12 @@ pub class Analysis
   end
 end
 
+# Whether the fixture's top level declares the class IyiRuntimeLock (iyi's prelude's marker).
+def declares_runtime_lock?(root : ASTNode) : Bool
+  nodes = root.is_a?(Expressions) ? root.as(Expressions).expressions : [root]
+  nodes.any? { |node| node.is_a?(ClassDef) && node.as(ClassDef).name.names == ["IyiRuntimeLock"] }
+end
+
 # The analysis of a fixture alone, with no prelude, in the order the typed-dump tool runs
 # the passes. `stand_in_libs` runs the primitive stand-in between the declarations and the
 # main visitor.
@@ -52,6 +58,10 @@ pub def analyse(source : String, filename : String, stand_in_libs : Bool) : Anal
   normalizer.iyi_prelude = false
   root = normalizer.normalize(root)
   prog = SemanticProgram.new
+  # A fixture declaring IyiRuntimeLock is the one whose oracle is built against a prelude named iyi/prelude
+  # (bench/fixtures/lowglob_abi), and the hosted driver sets iyi_prelude= by that name: the program then has
+  # the UInt64x2 primitive before any declaration, so the type ids number it as the oracle does.
+  prog.iyi_prelude = true if declares_runtime_lock?(root)
   # Resolve each fixture's imports beside the fixture, not from the gate's cwd.
   prog.search_path = [dir_of(filename)]
   # The type system is installed before the top-level pass, as the semantic driver does: it makes the merged

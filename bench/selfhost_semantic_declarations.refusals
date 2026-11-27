@@ -2,27 +2,23 @@
 # The gate fails a file the port refuses unless it is listed here, and fails a listed file the port no
 # longer refuses (remove its row then). A listed file counts the 0 its floor row holds.
 #
-# The LLVM bridge declares `lib ::LibLLVM` inside one `{% begin %}` block. The port's macro engine stops at
-# `StringLiteral#strip` ("macro method 'StringLiteral#strip' is not ported", bench/selfhost_macros_exercise
-# --sites src/compiler/llvm/lib_llvm.iyi), so the lib is never declared and every file that names a LibLLVM type
+# The LLVM bridge declares `lib ::LibLLVM` inside one `{% begin %}` block. Its VERSION constant is
+# `llvm_version.strip.gsub(/git/, "").gsub(/-?rc.*/, "")`. The port's macro engine has `StringLiteral#strip` but no
+# regex, so no `StringLiteral#gsub`, and the block does not declare the lib. Every file that names a LibLLVM type
 # is refused with "undefined constant LibLLVM::<Type>".
-src/compiler/backend/llvm/emit.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/backend/llvm/import.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/backend/llvm/translate.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/llvm.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/llvm/builder.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/llvm/context.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/llvm/llvm.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/llvm/memory_buffer.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/llvm/module.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/llvm/pass_manager.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/llvm/target.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/llvm/values.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-src/compiler/tools/ir.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
-# The port binds explicit import names but does not bind `::*` names. Hosted
-# UsingDecl resolves the imported unit's public names and rejects ambiguity at use.
-samples/iyi/derive.iyi undefined constant Name: import std/derives::* does not bind Std::Derives::Name for Tag#@label
-samples/iyi/modules.iyi undefined constant Greet: import app/greeter::* does not bind App::Greeter::Greet for impl Greet for User
+src/compiler/backend/llvm/emit.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/backend/llvm/import.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/backend/llvm/translate.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/llvm.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/llvm/builder.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/llvm/context.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/llvm/llvm.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/llvm/memory_buffer.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/llvm/module.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/llvm/pass_manager.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/llvm/target.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/llvm/values.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
+src/compiler/tools/ir.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#gsub (regex)
 # A file analysed bare has no prelude. The port follows this file's import of compiler/tools/formatter and resolves
 # that unit's `Set`, a prelude type, while it declares the file; the hosted pass declares the file bare. With the
 # prelude loaded (entry mode) both sides print the same 3 declarations.

@@ -2020,11 +2020,12 @@ if not os.path.exists(sample_file):
     samples = sorted(glob.glob(os.path.join(repo, 'samples/iyi/*.iyi')))
     sample_file = samples[0]
 
-# The producer's export goes through this script's own PATH pin, as the CI
-# producer's does, so master-self-check's pinned import can hit it.
+# The producer's export, and every run below that must hit or refuse what it
+# exported, go through this script's own PATH pin, as CI's do: a run under
+# another PATH misses with "link changed" and proves nothing.
+pinned_iyi = [os.environ.get('STALE_BASH', 'bash'), stale_ci, 'pinned-iyi']
 export_env['IYI'] = iyi
-res_exp = subprocess.run([os.environ.get('STALE_BASH', 'bash'), stale_ci, 'pinned-iyi',
-                          'test', '--fresh', '--export-index', f'master={cand_export_path}', sample_file],
+res_exp = subprocess.run(pinned_iyi + ['test', '--fresh', '--export-index', f'master={cand_export_path}', sample_file],
                          cwd=CWD, env=export_env, capture_output=True, text=True)
 if res_exp.returncode != 0 or not os.path.exists(cand_export_path):
     print(f'test-master-path FAILED: producer export failed (code {res_exp.returncode}):\n{res_exp.stderr}', file=sys.stderr)
@@ -2455,6 +2456,7 @@ try:
 
     test_env = os.environ.copy()
     test_env['IYI_CACHE_DIR'] = CACHE
+    test_env['IYI'] = iyi
 
     # 6.1 Pollute cache with fresh run
     res_fresh = subprocess.run([iyi, 'test', '--fresh', sample_file],
@@ -2592,7 +2594,7 @@ try:
     if os.path.exists(cache_tests_v1):
         shutil.rmtree(cache_tests_v1)
 
-    res_p7_pop = subprocess.run([iyi, 'test', '--cached', '--json',
+    res_p7_pop = subprocess.run(pinned_iyi + ['test', '--cached', '--json',
                                  '--import-index', f'master={phase6_master}',
                                  sample_file],
                                 cwd=CWD, env=test_env, capture_output=True, text=True)
@@ -2612,7 +2614,7 @@ try:
         sys.exit(1)
 
     # 7.2: import the fetched empty snapshot into the SAME cache, require exit 0, cached 0 and no test with source master
-    res_empty_test = subprocess.run([iyi, 'test', '--cached', '--json',
+    res_empty_test = subprocess.run(pinned_iyi + ['test', '--cached', '--json',
                                      '--import-index', f'master={phase7_fetched}',
                                      sample_file],
                                     cwd=CWD, env=test_env, capture_output=True, text=True)
@@ -2697,7 +2699,7 @@ try:
     with open(forged_sidecar, 'w', encoding='utf-8') as f:
         json.dump(sidecar_copy, f, indent=2)
 
-    res_forged = subprocess.run([iyi, 'test', '--cached', '--json',
+    res_forged = subprocess.run(pinned_iyi + ['test', '--cached', '--json',
                                  '--import-index', f'master={forged_file}',
                                  sample_file],
                                 cwd=CWD, env=test_env, capture_output=True, text=True)

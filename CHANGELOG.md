@@ -620,7 +620,11 @@
   a scalar call argument no longer go through a one-entry flattened array.
   On macOS arm64 the collector-free `native_cg obj` retires 10 to 12 % fewer
   instructions in the back end on six self-hosted modules, and its objects
-  are byte-identical to the previous ones.
+  are byte-identical to the previous ones. `native_regalloc/active_order`
+  (spill table row: 6) lets two values die ahead of live ones in the active
+  set under register pressure, so an in-place compaction that keeps a dead
+  interval in place of a live one now fails the spill table on every host,
+  not only the hosted twins on macOS arm64.
 
 ### Gates
 

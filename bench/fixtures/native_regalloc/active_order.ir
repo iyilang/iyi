@@ -1,0 +1,72 @@
+; iyi-ir 1
+module "active_order"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [5 x i8] c"%ld\0A\00"
+
+; t1 and t2 die while values defined after them are still live, so the allocator's active set loses an entry from
+; its middle, and the values defined afterwards need more registers than there are: an active set that keeps a dead
+; interval in place of a live one hands out a live value's register and spills fewer than the table's 6.
+define internal i64 @work(i64 %x) {
+entry:
+  %t1 = add i64 %x, 101
+  %t2 = mul i64 %x, 103
+  %l1 = add i64 %x, 3
+  %l2 = mul i64 %x, 5
+  %l3 = add i64 %x, 7
+  %l4 = mul i64 %x, 11
+  %l5 = add i64 %x, 13
+  %l6 = mul i64 %x, 17
+  %l7 = add i64 %x, 19
+  %l8 = mul i64 %x, 23
+  %l9 = add i64 %x, 29
+  %l10 = mul i64 %x, 31
+  %u1 = mul i64 %t1, 5
+  %l11 = add i64 %x, 37
+  %l12 = mul i64 %x, 41
+  %l13 = add i64 %x, 43
+  %l14 = mul i64 %x, 47
+  %u2 = add i64 %t2, 9
+  %l15 = add i64 %x, 53
+  %l16 = mul i64 %x, 59
+  %l17 = add i64 %x, 61
+  %l18 = mul i64 %x, 67
+  %l19 = add i64 %x, 71
+  %l20 = mul i64 %x, 73
+  %l21 = add i64 %x, 79
+  %l22 = mul i64 %x, 83
+  %s2 = add i64 %u1, %u2
+  %s3 = add i64 %s2, %l1
+  %s4 = add i64 %s3, %l2
+  %s5 = add i64 %s4, %l3
+  %s6 = add i64 %s5, %l4
+  %s7 = add i64 %s6, %l5
+  %s8 = add i64 %s7, %l6
+  %s9 = add i64 %s8, %l7
+  %s10 = add i64 %s9, %l8
+  %s11 = add i64 %s10, %l9
+  %s12 = add i64 %s11, %l10
+  %s13 = add i64 %s12, %l11
+  %s14 = add i64 %s13, %l12
+  %s15 = add i64 %s14, %l13
+  %s16 = add i64 %s15, %l14
+  %s17 = add i64 %s16, %l15
+  %s18 = add i64 %s17, %l16
+  %s19 = add i64 %s18, %l17
+  %s20 = add i64 %s19, %l18
+  %s21 = add i64 %s20, %l19
+  %s22 = add i64 %s21, %l20
+  %s23 = add i64 %s22, %l21
+  %s24 = add i64 %s23, %l22
+  ret i64 %s24
+}
+
+define i32 @main() {
+entry:
+  %r1 = call i64 (i64) @work(i64 7)
+  %r2 = call i64 (i64) @work(i64 -3)
+  %p_r1 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r1)
+  %p_r2 = call i32 (ptr, ...) @printf(ptr @fmt, i64 %r2)
+  ret i32 0
+}

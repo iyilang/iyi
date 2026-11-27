@@ -24,7 +24,7 @@ import compiler/ir/module::{Module}
 import compiler/ir/layout::{DataLayout}
 import compiler/native/const_expr::{ConstAddress, reduce_const}
 import compiler/ir/intrinsics::{IntrinsicId, intrinsic_stem}
-import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass, JumpTable, AsmBody}
+import compiler/native/mir::{MFunction, MBlock, MInst, MOp, Operand, OperandKind, RegClass, JumpTable, AsmBody, RegList}
 import compiler/native/obj/object::{RelocKind}
 import compiler/native/jump_table::{SwitchTable, switch_table_plan}
 import compiler/native/aarch64/regs::{cond_eq, cond_ne, cond_cs, cond_cc, cond_mi, cond_vs, cond_vc, cond_hi, cond_ls, cond_ge, cond_lt, cond_gt, cond_le, reg_name, callee_saved_gprs}
@@ -397,8 +397,8 @@ class Isel
   # and writes the link register. The oracle's accessor keeps its out-pointer in x8 across the call, and LLVM keeps
   # arguments in x1..x8 across it: those are observed. That x9..x15 and x19..x28 survive it as well is LLVM's TLS
   # call mask, which this slice takes from the thunk's contract and did not read from the thunk's own code.
-  def tlv_clobbers : Array(Int32)
-    [0, 16, 17, 30]
+  def tlv_clobbers : RegList
+    RegList.new([0, 16, 17, 30])
   end
 
   # threadlocaladdr. Darwin: the address of the TLV descriptor (adrp and ldr through the TLVP relocations), the

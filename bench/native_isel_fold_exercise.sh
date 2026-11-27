@@ -23,6 +23,7 @@ trap 'exit 143' TERM
 failed=0
 fail() { echo "FAIL: $*"; failed=1; }
 . bench/lib/native_signature.sh
+. bench/lib/bounded_run.sh
 . bench/lib/mutation.sh
 export NATIVE_SIGNATURE_FAILURE_FILE="$WORK/signature-failure"
 FIX=bench/fixtures/native_isel_fold
@@ -30,40 +31,6 @@ DRV="$WORK/native_cg$EXE"
 
 build_driver() {
   ./bin/iyi build -o "$(native_path "$1")" "$(native_path src/compiler/tools/native_cg.iyi)" >"$WORK/build.$(basename "$1").log" 2>&1
-}
-
-# Exit 1 denotes a timeout, 2 an unobservable execution.
-bounded_run() {
-  local exe=$1 prefix=$2 status
-  rm -f "$prefix.timeout" "$prefix.exec-error" "$prefix.done" || return 2
-  perl -e '
-    my ($timeout, $error, $done, $exe) = @ARGV;
-    my $pid = fork();
-    defined($pid) or die "fork: $!";
-    if ($pid == 0) {
-      alarm 20;
-      exec { $exe } $exe;
-      open my $fh, ">", $error or die "exec and error marker failed: $!";
-      print $fh "exec failed: $!\n";
-      close $fh or die "error marker: $!";
-      exit 127;
-    }
-    my $waited = waitpid($pid, 0);
-    my $status = $?;
-    $waited == $pid or die "waitpid: $!";
-    if (($status & 127) == 14) {
-      open my $fh, ">", $timeout or die "timeout marker: $!";
-      close $fh or die "timeout marker: $!";
-    }
-    open my $fh, ">", $done or die "completion marker: $!";
-    close $fh or die "completion marker: $!";
-    exit (($status & 127) ? 128 + ($status & 127) : $status >> 8);
-  ' "$prefix.timeout" "$prefix.exec-error" "$prefix.done" "$exe" </dev/null >"$prefix.out" 2>/dev/null
-  status=$?
-  echo "$status" >"$prefix.status" || return 2
-  [ -e "$prefix.done" ] && [ ! -e "$prefix.exec-error" ] || return 2
-  [ ! -e "$prefix.timeout" ] || return 1
-  return 0
 }
 
 emit_obj() {
@@ -78,7 +45,7 @@ run_obj() {
   local prefix=$1
   cc "$prefix.o" bench/fixtures/native_cg/rt_stub.c -o "$prefix.bin" >"$prefix.link.log" 2>&1 || return 2
   native_signature_ok "$prefix.bin" || return 2
-  bounded_run "$prefix.bin" "$prefix"
+  bounded_run 20 "$prefix.bin" "$prefix"
 }
 
 # A mismatch or a timeout is a detected behavioral defect; setup failures are invalid.
@@ -328,7 +295,7 @@ if [ "$HOST_ID" = darwin-arm64 ]; then
       "$(native_path "$FIX/unsigned_shift.iyi")" >"$WORK/unsigned_shift.hosted.log" 2>&1; then
     cat "$WORK/unsigned_shift.hosted.log"
     fail "unsigned_shift: hosted twin did not build"
-  elif ! bounded_run "$WORK/unsigned_shift.hosted$EXE" "$WORK/expected.unsigned_shift" ||
+  elif ! bounded_run 20 "$WORK/unsigned_shift.hosted$EXE" "$WORK/expected.unsigned_shift" ||
        [ "$(cat "$WORK/expected.unsigned_shift.status")" != 0 ]; then
     fail "unsigned_shift: hosted twin could not be observed"
   else
@@ -358,7 +325,7 @@ if [ "$HOST_ID" = darwin-arm64 ]; then
       fail "$key: hosted twin did not build"
       continue
     fi
-    if ! bounded_run "$WORK/$key.hosted$EXE" "$WORK/expected.$key"; then
+    if ! bounded_run 20 "$WORK/$key.hosted$EXE" "$WORK/expected.$key"; then
       fail "$key: hosted twin could not be observed"
       continue
     fi

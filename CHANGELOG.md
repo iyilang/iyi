@@ -699,6 +699,21 @@
   register passed every gate, and the hosted twins on macOS arm64 now catch
   it.
 
+- **The AArch64 target description and a call's clobbers cannot be
+  changed.** Since #263 one `TargetDesc` serves every function of a module,
+  and every call it selects shares the description's caller-saved list as
+  its clobbers, but the register sets were plain arrays: a broken copy that
+  popped `caller_saved` once per function compiled, passed every gate on
+  Linux and macOS arm64, and went wrong only after about 24 functions. The
+  sets and `MInst#clobbers` are now a `RegList` (`compiler/native/mir.iyi`),
+  a copy with `size`, `[]`, `empty?` and `each` and nothing that writes, so
+  `pop`, `[]=`, `<<` or `reverse_in_place` on one does not compile. An
+  instruction that is not a call no longer allocates an empty clobber
+  array: on macOS arm64 the collector-free `native_cg obj` retires 1.2 to
+  1.7 % fewer back-end instructions on five self-hosted modules (median of
+  5 interleaved runs, wall time unchanged), and its objects are
+  byte-identical to #263's.
+
 ### Gates
 
 - **Darwin's thread-yield control measures CPU held under load.** The
@@ -717,6 +732,15 @@
 - **Darwin panic dependency floor records `dladdr` and `dprintf` replacing `backtrace_symbols_fd` (SPEC.md III.9).** Commit 68c53c352 resolved boundary return addresses at `addr - 1` using `dladdr` and formatted panic frames to stderr with `dprintf` instead of `backtrace_symbols_fd`. The Darwin dependency floor (`bench/floor_base.sh`, `bench/dependency_floor.sh`, and exercise gates) updates its permitted symbol lists accordingly to match libSystem's interface without linking additional libraries. (Note: `dprintf` is not documented by Darwin as async-signal-safe).
 
 - **Semantic backtrace equivalence for Darwin artifact verification.** Output comparison in standard library exercise gates (`bench/std_exercise.sh`, `bench/std_toml_exercise.sh`, `bench/std_websocket_exercise.sh`, `bench/std_big_exercise.sh`, and `bench/stale_equivalence.sh`) evaluates ordered semantic frames via `bench/frames_equivalent.py` when direct byte comparison fails on Darwin. Comparisons verify equal frame counts, positions, indices, images, and canonicalized function names while abstracting layout addresses, function size offsets, `~iyi` copy suffixes, a carried closure's `^unit:` suffix, and the number a build gave a closure that names its file and line, with plain-vs-optimized comparisons verifying non-frame text and frame sequence structure.
+
+- **The AArch64 codegen gate bounds every program it runs.**
+  `bench/native_codegen_exercise.sh` ran its native fixtures, their hosted
+  twins, the runtime-helper and thread-pointer programs and each broken
+  copy's fixture with no time bound, so one that never ended (a broken
+  copy's `wide.native` did) held the macOS job to its timeout. Each now runs
+  under 20 s and fails by name when the bound ends it. The bound is the
+  Perl alarm the regalloc, MIR-clean and isel-fold gates already used, now
+  one `bench/lib/bounded_run.sh` that all four source.
 
 - **std/autocert's and std/acme's gates draw challtestsrv's DNS port free
   for UDP as well as TCP, std/autocert's says what did not come up when

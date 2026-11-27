@@ -1,0 +1,5 @@
+module sem_bodies_imported_generic
+
+import s1h_scope/box_user::{BoxUser}
+
+value = BoxUser.new.make

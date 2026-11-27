@@ -1,0 +1,24 @@
+module Marker
+end
+
+class A
+  include Marker
+end
+
+class B
+  include Marker
+end
+
+def show(value : Marker) : String
+  "marker"
+end
+
+def show(value : A) : String
+  "A"
+end
+
+def pick(flag : Bool) : Marker
+  flag ? A.new : B.new
+end
+
+puts show(pick(true))

@@ -1,0 +1,23 @@
+# Instance variables of a generic class that are never declared, only assigned in initialize
+# (hosted type_guess_visitor and type_declaration_processor, GenericClassType branch). The generic
+# declares them once, and each instance takes the copy with its type arguments substituted: @size
+# is Int32 on the generic and on both instances, @value is T on the generic and the argument type
+# on each instance.
+class Box(T)
+  def initialize(value : T)
+    @value = value
+    @size = 0
+  end
+
+  def size : Int32
+    @size
+  end
+end
+
+class Holder
+  @ints : Box(Int32)
+  @strs : Box(String)
+
+  def initialize(@ints : Box(Int32), @strs : Box(String))
+  end
+end

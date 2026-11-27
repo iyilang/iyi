@@ -1,0 +1,34 @@
+# Only syntax shared by both parsers: the hosted compiler refuses written
+# ensure in .iyi files (main_visitor.cr 3371-3380), so the oracle reads a
+# temporary .cr copy to exercise handler typing instead of that refusal.
+before = 1
+result = begin
+  introduced = 2
+  before = "body"
+  begin
+    nested = 3
+    4
+  ensure
+    nested_cleanup = 5
+  end
+ensure
+  cleanup = 6
+  before = true
+end
+before
+introduced
+cleanup
+nested_cleanup
+result
+
+def ensure_scope_probe
+  isolated = "callee"
+  isolated
+end
+
+isolated = 7
+begin
+  ensure_scope_probe
+ensure
+  isolated
+end

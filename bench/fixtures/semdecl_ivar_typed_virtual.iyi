@@ -1,0 +1,17 @@
+class Base
+end
+
+class Sub < Base
+end
+
+class Holder
+  @b : Base
+  @c : Base?
+  @d : Sub
+
+  def initialize
+    @b = Sub.new
+    @c = nil
+    @d = Sub.new
+  end
+end

@@ -1,0 +1,18 @@
+case f(1)
+when 2
+  a
+else
+  b
+end
+case y = z
+when 3
+  c
+else
+  d
+end
+case [1, 2]
+when [1, 2]
+  e
+else
+  f
+end

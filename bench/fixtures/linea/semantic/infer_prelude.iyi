@@ -1,0 +1,40 @@
+# The fourth inference slice: a method the prelude owns.
+#
+# The first three fixtures ran on one file with nothing under it, so
+# `1 + 1` had no `+` to reach and none of them wrote one. This fixture
+# requires the prelude, which is what the bootstrap does, and every method
+# here is typed by something the prelude declares.
+#
+# R-2 makes this tractable. An exported method carries its return type, so
+# a call on a value is typed by reading the declaration rather than by
+# inferring the prelude's body: `def +(other : Int32) : self` answers the
+# receiver, and `def bytesize : Int32` answers an `Int32`.
+
+require "../../../src/iyi/prelude"
+
+def sum
+  1 + 1
+end
+
+def wider
+  1.to_i64
+end
+
+def length
+  "hello".bytesize
+end
+
+def fraction
+  1.5 + 1.5
+end
+
+def through_local
+  text = "hello"
+  text.bytesize
+end
+
+sum
+wider
+length
+fraction
+through_local

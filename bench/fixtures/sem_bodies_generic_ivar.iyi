@@ -1,0 +1,16 @@
+# A generic class whose initialize takes an instance variable parameter (`@value : T`, as hosted
+# Atomic(UInt64) does). The instance records the variable with its own argument, so `value`
+# reads it as the argument's type: Int32 for Box(Int32), String for Box(String).
+class Box(T)
+  def initialize(@value : T)
+  end
+
+  def value
+    @value
+  end
+end
+
+a = Box(Int32).new(1)
+b = a.value
+c = Box(String).new("s")
+d = c.value

@@ -1,0 +1,347 @@
+module compiler/semantic/call
+
+import compiler/semantic/restrictions::{ArgRestriction}
+import compiler/syntax/ast::{ASTNode, Arg, BoolLiteral, Def, NamedArgument, NilLiteral, Nop, NumberLiteral, Path, Primitive, RangeLiteral, StringLiteral, SymbolLiteral, Visibility}
+import compiler/syntax/token::{NumberKind}
+import compiler/semantic/call_nodes::{CallNodes}
+import compiler/semantic/call_error::{CallFailure}
+import compiler/semantic/top_level::{Const, ModuleType, SemanticProgram, Type}
+import compiler/types/type_system::{TypeSystem}
+import compiler/types/lookup::{LookupError, TypeLookup}
+import compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, NamedArgumentType, NamedTupleInstanceType, TupleInstanceType}
+import compiler/semantic/method_lookup::{Matches, MethodLookup}
+import compiler/semantic/match::{CallSignature, Match}
+
+# The receiver and the argument types of a call: the seed of the port of
+# semantic/call.cr. The hosted call pass types an argument from its body, and the
+# bodies slice provides that later. Until then an argument is typed only when it
+# is a literal, and a receiver only when it is a type path or a call with a
+# single match that declares its return type. A union return is a union receiver.
+#
+# A value typed as a class with subclasses is a virtual type in the hosted pass
+# only once a body has typed it (`self`, an expression's merged type); a declared
+# return keeps the class. The port writes that value as `virtual(T)` in a fixture,
+# which is `T+`, the form the bodies slice will produce. Anything else is nil, and
+# the caller says why. A call node is read through CallNodes, because this
+# module's name is `call`.
+pub class CallReceiver
+  # The type a call's receiver is: the program for a call without one (*obj* is
+  # nil), else the receiver's type, or nil when the receiver cannot be typed.
+  def self.scope(prog : SemanticProgram, ts : TypeSystem, obj : ASTNode?) : Type?
+    return prog if obj.nil?
+    receiver_type(prog, ts, obj.as(ASTNode))
+  end
+
+  # The type a receiver node names: `virtual(T)` is T's virtual form; a call names
+  # the type of its single match's declared return; a type path names its
+  # metaclass, where its class methods are.
+  def self.receiver_type(prog : SemanticProgram, ts : TypeSystem, node : ASTNode) : Type?
+    if call = CallNodes.as_call(node)
+      if call.obj.nil? && call.name == "virtual" && call.args.size == 1
+        named = TypeLookup.new(ts.instances).lookup(prog, call.args[0])
+        return nil if named.is_a?(LookupError)
+        base = named.as(Type)
+        return nil if !base.is_a?(ModuleType)
+        return MethodLookup.virtual_of(base.as(ModuleType))
+      end
+      return return_type_of(prog, ts, call.obj, call.name, call.args, call.named_args, call.block != nil)
+    end
+    found = TypeLookup.new(ts.instances).lookup(prog, node)
+    return nil if found.is_a?(LookupError)
+    scoped = found.as(Type)
+    if scoped.is_a?(GenericClassInstanceType)
+      return scoped.as(GenericClassInstanceType).metaclass
+    end
+    return nil if !scoped.is_a?(ModuleType)
+    scoped.as(ModuleType).metaclass
+  end
+
+  # The type of the single match of a call with receiver *obj*, method *name*,
+  # positional arguments *args*, named arguments *named_args* and a block when
+  # *block* is true, or nil unless the match is unique and declares its return
+  # type. A receiver that is a union or a virtual type dispatches to every member.
+  # The lookup is the hosted one with analyze_all off.
+  def self.return_type_of(prog : SemanticProgram, ts : TypeSystem, obj : ASTNode?, name : String, args : Array(ASTNode), named_args : Array(NamedArgument)?, block : Bool) : Type?
+    arg_types = [] of Type
+    args.each do |arg|
+      typed = argument_type(prog, arg)
+      return nil if typed.nil?
+      arg_types << typed.as(Type)
+    end
+    typed_named = named_argument_types(prog, named_args)
+    return nil if typed_named.nil?
+    owner = scope(prog, ts, obj)
+    return nil if owner.nil?
+    signature = CallSignature.new(name, arg_types, typed_named, block)
+    matches = MethodLookup.lookup_receiver(owner.as(Type), ts, signature)
+    return nil if matches.error
+    return nil if matches.matches.size != 1
+    single = matches.matches[0]
+    ret = single.definition.return_type
+    return nil if ret.nil?
+    found = ArgRestriction.lookup_free(ts, single.defining, ret.as(ASTNode), owner, single.bound)
+    return nil if found.is_a?(LookupError)
+    found.as(Type)
+  end
+
+  # The named arguments of a call with their types: an empty list when the call
+  # has none, and nil when one of them is not typeable.
+  def self.named_argument_types(prog : SemanticProgram, named_args : Array(NamedArgument)?) : Array(NamedArgumentType)?
+    typed_list = [] of NamedArgumentType
+    return typed_list if named_args.nil?
+    named_args.each do |na|
+      typed = argument_type(prog, na.value)
+      return nil if typed.nil?
+      typed_list << NamedArgumentType.new(na.name, typed.as(Type))
+    end
+    typed_list
+  end
+
+  # The type of a literal argument: an integer is Int32, a string String, true
+  # or false Bool, and nil Nil. Nil for any other argument.
+  def self.argument_type(prog : SemanticProgram, node : ASTNode) : Type?
+    if node.is_a?(NumberLiteral)
+      return prog.types["Int32"]
+    end
+    if node.is_a?(StringLiteral)
+      return prog.types["String"]
+    end
+    if node.is_a?(BoolLiteral)
+      return prog.types["Bool"]
+    end
+    if node.is_a?(NilLiteral)
+      return prog.types["Nil"]
+    end
+    if call = CallNodes.as_call(node)
+      if call.obj.nil? && call.name == "instance" && call.args.size == 1 && call.args[0].is_a?(Path)
+        names = call.args[0].as(Path).names
+        if names.size == 1
+          t = prog.types[names[0]]?
+          return t.as(Type) if t
+        end
+      end
+    end
+    nil
+  end
+end
+
+# The target of a call on a receiver type: the hosted Call#recalculate's result.
+# *definition* is the one def the call resolves to, *declared_return* its declared
+# return type, and *untyped* says the def declares none, so its type waits on the
+# body (the bodies slice). *owner* is the receiver it was found on. *defining* is
+# the type the def was found on, which is not the receiver when the method is
+# inherited. *arg_types* are the instantiated argument types (the type each
+# argument was matched as, after a free variable is bound and a number is cast),
+# not the written restriction. *return_type* is the body-inferred type of the
+# instantiated def, populated by body typing; *declared_return* is the annotation.
+# *error* is the first line of the message the hosted call pass raises, or a
+# marked refusal for a shape this port does not answer.
+pub class CallTarget
+  getter definition : Def?
+  getter owner : Type?
+  getter defining : ModuleType?
+  getter arg_types : Array(Type)
+  property return_type : Type?
+  getter declared_return : Type?
+  getter untyped : Bool
+  getter error : String?
+
+  def initialize(@definition : Def?, @owner : Type?, @declared_return : Type?, @untyped : Bool, @error : String?, @defining : ModuleType? = nil, @arg_types : Array(Type) = [] of Type, @return_type : Type? = nil)
+  end
+
+  def self.failed(message : String) : CallTarget
+    CallTarget.new(nil, nil, nil, false, message)
+  end
+end
+
+# The port of Call#recalculate for the bodies slice: the call's target on the
+# receiver type rec_type, found by the lookup of the call's name, arguments and
+# block, as the hosted call pass finds it before it instantiates the body. It is
+# the entry the bodies slice's visit(Call) calls where the hosted pass calls
+# recalculate, with the receiver first and the hosted names kept. The receiver
+# may be a module type, a virtual type or a union; a receiver with several matches
+# is a dispatch, answered as not ported until the bodies slice instantiates
+# several targets. Arguments are typed as CallReceiver types them.
+pub class CallRecalculation
+  # Hosted call.cr:303-307, 881-1010 and types.cr:2841-2860, 2969-2985.
+  # Nil means an ordinary lookup, a String is the hosted error, and a Def is
+  # the cached synthetic indexer. Resolve a constant in the supplied lexical scope.
+  def self.check_tuple_indexer(owner : Type, name : String, args : Array(ASTNode), ts : TypeSystem, scope : ModuleType) : Def | String | Nil
+    return nil if args.size != 1 || (name != "[]" && name != "[]?")
+    instance = owner
+    meta = false
+    if owner.is_a?(GenericClassInstanceMetaclassType)
+      instance = owner.as(GenericClassInstanceMetaclassType).instance_type
+      meta = true
+    end
+    return nil unless instance.is_a?(TupleInstanceType) || instance.is_a?(NamedTupleInstanceType)
+    arg = args[0]
+    while arg.is_a?(Path)
+      found = TypeLookup.new(ts.instances).find_path(scope, arg.as(Path), false)
+      break unless found.is_a?(Const)
+      next_arg = found.as(Const).value
+      break if next_arg == arg
+      arg = next_arg
+    end
+    first = 0
+    last = 0
+    is_range = false
+    if instance.is_a?(TupleInstanceType)
+      size = instance.as(TupleInstanceType).size
+      if arg.is_a?(NumberLiteral) && arg.as(NumberLiteral).kind == NumberKind::I32
+        first = arg.as(NumberLiteral).value.to_i
+        first += size if first < 0
+        if first < 0 || first >= size
+          if name == "[]"
+            return "index '#{arg}' out of bounds for empty tuple" if size == 0
+            return "index out of bounds for #{owner} (#{arg} not in #{-size}..#{size - 1})"
+          end
+          first = -1
+        end
+        last = first
+      elsif arg.is_a?(RangeLiteral)
+        is_range = true
+        range = arg.as(RangeLiteral)
+        from = range.from
+        if from.is_a?(NumberLiteral) && from.as(NumberLiteral).kind == NumberKind::I32
+          first = from.as(NumberLiteral).value.to_i
+          first += size if first < 0
+          if first < 0 || first > size
+            return "begin index out of bounds for #{owner} (#{from} not in #{-size}..#{size})" if name == "[]"
+            first = -1
+          end
+        elsif from.is_a?(Nop)
+          first = 0
+        else
+          return nil
+        end
+        to = range.to
+        if to.is_a?(NumberLiteral) && to.as(NumberLiteral).kind == NumberKind::I32
+          last = to.as(NumberLiteral).value.to_i
+          last += size if last < 0
+          last -= 1 if range.exclusive
+          last = -1 if last < -1
+          last = size - 1 if last >= size
+        elsif to.is_a?(Nop)
+          last = size - 1
+        else
+          return nil
+        end
+        if first >= 0 && first > last
+          first = 0
+          last = -1
+        elsif first == -1
+          last = -1
+        end
+      else
+        return nil
+      end
+    else
+      tuple = instance.as(NamedTupleInstanceType)
+      return nil unless arg.is_a?(StringLiteral) || arg.is_a?(SymbolLiteral)
+      key = arg.is_a?(StringLiteral) ? arg.as(StringLiteral).value : arg.as(SymbolLiteral).value
+      first = -1
+      tuple.entries.each_with_index do |entry, index|
+        first = index if entry.name == key
+      end
+      return "missing key '#{key}' for named tuple #{owner}" if first == -1 && name == "[]"
+      last = first
+    end
+    cache_key = "#{meta}:#{first}:#{last}:#{is_range}"
+    cache = instance.is_a?(TupleInstanceType) ? instance.as(TupleInstanceType).tuple_indexers : instance.as(NamedTupleInstanceType).tuple_indexers
+    if existing = cache[cache_key]?
+      return existing
+    end
+    body : ASTNode = first == -1 ? NilLiteral.new : Primitive.tuple_indexer(first, last, is_range)
+    definition = Def.new("[]", [Arg.new("index")], body)
+    cache[cache_key] = definition
+    definition
+  end
+
+  # Convert every match of a dispatch into its own target. The body visitor
+  # instantiates each definition and fills return_type with its inferred type.
+  def self.targets_for_matches(matches : Matches, ts : TypeSystem, explicit : Bool, synthetic : Bool = false) : Array(CallTarget)
+    targets = [] of CallTarget
+    matches.matches.each do |match|
+      if explicit && !synthetic && match.definition.visibility == Visibility::Private
+        targets << CallTarget.failed("private method '#{match.definition.name}' called for #{match.owner.to_s}")
+        next
+      end
+      ret = match.definition.return_type
+      if ret.nil?
+        targets << CallTarget.new(match.definition, match.owner, nil, true, nil, match.defining, match.arg_types, nil)
+        next
+      end
+      found = ArgRestriction.lookup_free(ts, match.defining, ret.as(ASTNode), match.owner, match.bound)
+      if found.is_a?(LookupError)
+        targets << CallTarget.failed(found.as(LookupError).message)
+      else
+        targets << CallTarget.new(match.definition, match.owner, found.as(Type), false, nil, match.defining, match.arg_types, nil)
+      end
+    end
+    targets
+  end
+
+  def self.recalculate(rec_type : Type, ts : TypeSystem, prog : SemanticProgram, name : String, args : Array(ASTNode), named_args : Array(NamedArgument)?, block : Bool, explicit : Bool = false) : CallTarget
+    arg_types = [] of Type
+    args.each do |arg|
+      typed = CallReceiver.argument_type(prog, arg)
+      return CallTarget.failed("argument is not a literal") if typed.nil?
+      arg_types << typed.as(Type)
+    end
+    typed_named = CallReceiver.named_argument_types(prog, named_args)
+    return CallTarget.failed("argument is not a literal") if typed_named.nil?
+    signature = CallSignature.new(name, arg_types, typed_named, block)
+    CallRecalculation.recalculate_signature(rec_type, ts, signature, explicit, args)
+  end
+
+  # The port of the hosted Call#recalculate for a call whose arguments are already
+  # typed: the receiver's lookup_matches of *signature* (the hosted lookup with
+  # analyze_all off), then the numeric autocast retry when *arg_nodes* are given,
+  # the one target's declared return type, and the first line of the error the
+  # hosted pass raises when it finds no target. `recalculate` types literal
+  # arguments and calls this; the bodies slice calls this directly with the
+  # argument types its own pass has typed, and passes the argument nodes so a
+  # number literal can match a wider integer.
+  def self.recalculate_signature(rec_type : Type, ts : TypeSystem, signature : CallSignature, explicit : Bool, arg_nodes : Array(ASTNode)? = nil, synthetic : Bool = false) : CallTarget
+    name = signature.name
+    arg_types = signature.arg_types
+    if nodes = arg_nodes
+      indexed = check_tuple_indexer(rec_type, name, nodes, ts, ts.program)
+      return CallTarget.failed(indexed) if indexed.is_a?(String)
+      if indexed.is_a?(Def)
+        return CallTarget.new(indexed.as(Def), rec_type, nil, true, nil, nil, arg_types, nil)
+      end
+    end
+    matches = MethodLookup.lookup_with_autocast(rec_type, ts, signature, arg_nodes)
+    return CallTarget.failed(matches.error.to_s) if matches.error
+    if matches.matches.size > 1
+      return CallTarget.failed("not ported: several matches")
+    end
+    if matches.matches.size == 1
+      single = matches.matches[0]
+      if explicit && !synthetic && single.definition.visibility == Visibility::Private
+        return CallTarget.failed("private method '#{name}' called for #{rec_type.to_s}")
+      end
+      ret = single.definition.return_type
+      if ret.nil?
+        return CallTarget.new(single.definition, rec_type, nil, true, nil, single.defining, single.arg_types, nil)
+      end
+      found = ArgRestriction.lookup_free(ts, single.defining, ret.as(ASTNode), rec_type, single.bound)
+      return CallTarget.failed(found.as(LookupError).message) if found.is_a?(LookupError)
+      instantiated = found.as(Type)
+      return CallTarget.new(single.definition, rec_type, instantiated, false, nil, single.defining, single.arg_types, nil)
+    end
+    named = signature.named_args
+    if named
+      return CallTarget.failed("not ported: named argument message") if !named.empty?
+    end
+    if !rec_type.is_a?(ModuleType)
+      return CallTarget.failed("not ported: virtual or union receiver message")
+    end
+    module_type = rec_type.as(ModuleType)
+    defined = MethodLookup.defines?(module_type, name)
+    defs = MethodLookup.all_defs(module_type, name, [] of Def)
+    CallTarget.failed(CallFailure.first_line(module_type, ts, name, arg_types, defs, defined))
+  end
+end

@@ -1,0 +1,24 @@
+class Box(T)
+  def pair(x : T) : Tuple(T, Bool)
+    {x, true}
+  end
+
+  def either(x : Union(T, Bool)) : Int32
+    1
+  end
+end
+
+def make_int_box : Box(Int32)
+  nil
+end
+
+def make_str_box : Box(String)
+  nil
+end
+
+# call make_int_box.pair(1)
+# call make_str_box.pair("a")
+# call make_int_box.pair(1).size
+# call make_int_box.either(1)
+# call make_int_box.either(true)
+# call make_str_box.either("a")

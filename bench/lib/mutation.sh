@@ -6,13 +6,13 @@
 #   prove_mutation_all <label> <file> <old> <new> -- <check command...>
 #
 # Copies <file> aside, replaces <old> with <new> (literal text, not a pattern),
-# then runs the check and requires it to FAIL.
+# then runs the check and requires a controlled failure.
 #   prove_mutation     replaces the FIRST occurrence of <old>.
 #   prove_mutation_all replaces EVERY occurrence, as sed's s/// does on each
 #                      matching line. Use it where the mutation is meant to
 #                      change every site the label names.
-#   - check fails  -> prints "    caught: <label>", returns 0
-#   - check passes -> prints "    FAIL: mutation was not caught: <label>", returns 1
+#   - check exits 1 -> prints "    caught: <label>", returns 0
+#   - any other status -> prints "    FAIL: ...", returns 1
 #   - <old> absent, or the patch changes nothing -> prints
 #     "PATCH CHANGED NOTHING: this proves nothing", exits 3
 #   - MUTATION_SKIP=1 in the environment -> no file is touched, prints
@@ -24,9 +24,9 @@
 # so an interrupt never leaves a mutated source behind. The traps that were
 # set before the call (for example a WORK cleanup) are put back afterwards.
 #
-# The check is a command or a shell function. It must return non-zero when
-# the mutated file is detected. A check that cannot run also counts as caught,
-# which is why each check should exit 0 only on the unmutated behaviour.
+# The check is a command or a shell function. It must return 1 only when
+# the mutated behavior is detected. Build failures and crashes are invalid;
+# checks handle those explicitly, and other check-process statuses fail here.
 
 _PM_ARMED=0
 _PM_FILE=""
@@ -158,12 +158,17 @@ _prove_mutation_run() {
   [ "$monitor_was_on" -eq 1 ] || set +m
   _PM_MONITOR=0
 
-  if [ "$rc" -ne 0 ]; then
-    rm -f "$log"
+  if [ "$rc" -eq 1 ]; then
     echo "    caught: $label"
+    awk '/^decisive: / { print "      " $0; exit }' "$log"
+    rm -f "$log"
     return 0
   fi
-  echo "    FAIL: mutation was not caught: $label"
+  if [ "$rc" -eq 0 ]; then
+    echo "    FAIL: mutation was not caught: $label"
+  else
+    echo "    FAIL: mutation check exited $rc instead of 0 or 1: $label"
+  fi
   echo "    check output (last lines):"
   tail -n 20 "$log" | sed 's/^/      /'
   rm -f "$log"
@@ -176,4 +181,58 @@ prove_mutation() {
 
 prove_mutation_all() {
   _prove_mutation_run all "$@"
+}
+
+# A panic identifies a compiler refusal only when its source site is known.
+# Library panics omit that site; signals and other raises never count.
+refusal_site() {
+  awk '/^  at .*:[0-9]+$/ {
+    site = substr($0, 6); gsub(/\\/, "/", site)
+    i = index(site, "src/compiler/")
+    if (i == 1 || (i > 1 && substr(site, i - 1, 1) == "/")) print substr(site, i)
+    exit
+  }' "$1"
+}
+
+refusal_note() {
+  local site
+  site="$(refusal_site "$2")"
+  printf 'exit %s: %s%s' "$1" "$(awk 'NR == 1 { print; exit }' "$2")" "${site:+ (at $site)}"
+}
+
+# port_refusal <status> <stderr-file>
+# Match refuse_port or MainVisitor's refusal raises in the source used to
+# build this mutant. An index, cast, BUG or driver panic is not a refusal.
+port_refusal() {
+  local first site text
+  [ "$1" -eq 1 ] || return 1
+  first="$(awk 'NR == 1 { print; exit }' "$2")"
+  case "$first" in
+    "Error: "*) return 0 ;;
+    "iyi: panic: "*) ;;
+    *) return 1 ;;
+  esac
+  site="$(refusal_site "$2")"
+  case "$site" in
+    src/compiler/semantic/main_visitor.iyi:*) ;;
+    *) return 1 ;;
+  esac
+  text="$(awk -v n="${site##*:}" 'NR == n { sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print; exit }' "$REPO/${site%:*}")"
+  [ "$text" = 'raise(message) unless @total || @speculation.depth > 0' ] || [ "$text" = 'raise(reason)' ]
+}
+
+# expected_refusal <status> <stderr-file> <source-file|refuse_port> <message-ERE>
+# A proof may name another refusal path and its expected diagnostic.
+expected_refusal() {
+  local first message site
+  [ "$1" -eq 1 ] || return 1
+  first="$(awk 'NR == 1 { print; exit }' "$2")"
+  if [ "$3" = refuse_port ]; then
+    case "$first" in "Error: "*) message="${first#Error: }" ;; *) return 1 ;; esac
+  else
+    case "$first" in "iyi: panic: "*) message="${first#iyi: panic: }" ;; *) return 1 ;; esac
+    site="$(refusal_site "$2")"
+    [ "${site%:*}" = "$3" ] || return 1
+  fi
+  printf '%s\n' "$message" | grep -Eq -- "$4"
 }

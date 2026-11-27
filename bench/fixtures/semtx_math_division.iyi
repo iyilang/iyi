@@ -1,0 +1,38 @@
+# Division and remainder, including mixed signedness at the wider operand
+# width and truncation of the result to the dividend's kind.
+7 // 2
+-7 // 2
+7 // -2
+-7 // -2
+7 % -3
+-7 % 3
+-7 % -3
+7 // 0
+7 % 0
+7_i8 // 0_u8
+7 % 0_i64
+100_i8 // 200_u8
+200_u8 // -1_i8
+7_i8 % 255_u8
+-7_i8 % 250_u8
+# Not here: `-128_i8 // 255_u8` and `-128_i8 % 255_u8`. The hosted fold wraps the divisor to -1 after its
+# overflow check has passed on 255, and then divides MIN by -1 in the machine: arm64 answers MIN and 0,
+# x86-64 traps and the hosted compiler dies with SIGFPE. There is no hosted answer to compare with.
+-128_i8 // 128_u8
+-128_i8 // 255_i16
+255_u8 // -1_i8
+7 // 4294967298_i64
+7_u8 // 256_u16
+-128_i8 // -1_i8
+-128_i8 % -1_i8
+-128_i8 // -1_i16
+-32768_i16 // -1_i16
+-2147483648_i32 // -1_i32
+-9223372036854775808_i64 // -1_i64
+-170141183460469231731687303715884105728_i128 // -1_i128
+-170141183460469231731687303715884105728_i128 % -1_i128
+-170141183460469231731687303715884105728_i128 // 2_i128
+170141183460469231731687303715884105727_i128 // -1_i128
+1_i8 // 256_u16
+1_i8 % 256_u16
+7_u8 % -1_i128

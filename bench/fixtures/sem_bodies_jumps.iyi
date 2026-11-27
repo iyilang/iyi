@@ -1,0 +1,13 @@
+def twice(&)
+  yield 2
+end
+
+a = twice { |v| next v }
+b = twice { |v| break "stop" }
+
+def early(x)
+  return 1 if x
+  "a"
+end
+
+c = early(true)

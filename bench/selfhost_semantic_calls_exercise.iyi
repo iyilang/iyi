@@ -1,0 +1,442 @@
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/ast::{ASTNode, Call, Def, Expressions, NamedArgument, NamedTupleLiteral, NilLiteral, Out, Path, Primitive, TupleLiteral, Underscore, Var}
+import compiler/semantic/top_level::{LibType, ModuleType, SemanticProgram, TopLevelVisitor, Type, dir_of}
+import compiler/types/type_system::{TypeSystem}
+import compiler/types/lookup::{LookupError, TypeLookup}
+import compiler/semantic/method_lookup::{MethodLookup, Matches}
+import compiler/semantic/match::{CallSignature, Match}
+import compiler/types/types::{NamedArgumentType, NamedTupleInstanceType, TupleInstanceType}
+import compiler/semantic/restrictions::{ArgRestriction}
+import compiler/semantic/call::{CallReceiver, CallRecalculation, CallTarget}
+import compiler/semantic/lib_call::{LibCall, LibCallArgument}
+import compiler/semantic/default_arguments::{DefaultArguments}
+import compiler/semantic/new::{define_new_methods}
+
+# Call-lookup driver for bench/selfhost_semantic_calls_exercise.sh.
+#
+#   selfhost_semantic_calls_exercise <fixture.iyi>
+#
+# Loads the fixture with the prelude, through the port's top-level pass and the
+# closure of what it requires (IYI_PATH is the search path, as the declarations gate
+# reads it), then answers each `# call <expr>` line and each `# error <expr>` line
+# and prints the same lines the hosted oracle
+# (bench/selfhost_semantic_calls_oracle.cr) prints. The receiver rule and the result
+# formats are the oracle's header. `# call` lines print the lookup's matches;
+# `# error` lines run CallRecalculation.recalculate and print `ok` when the call has
+# a target, or its error line. `# defining` lines print the found-on type and the
+# receiver, which differ when the method is inherited.
+module BenchSelfhostSemanticCallsExercise
+  def self.search_path : Array(String)
+    text = ENV["IYI_PATH"]? || ""
+    {% if flag?(:win32) %}
+      text.split(";").select { |entry| !entry.empty? }
+    {% else %}
+      text.split(":").select { |entry| !entry.empty? }
+    {% end %}
+  end
+
+  # One match as the oracle writes it: owner, name, restrictions, return.
+  def self.match_text(ts : TypeSystem, m : Match) : String
+    defining = m.defining
+    restrictions = [] of String
+    m.definition.args.each do |arg|
+      r = ArgRestriction.of(ts, defining, arg, m.owner)
+      if err = r.error
+        return "error: #{err}"
+      end
+      if r.type.nil?
+        restrictions << "_"
+      else
+        restrictions << r.type.as(Type).to_s
+      end
+    end
+    ret_text = "needs body typing"
+    ret = m.definition.return_type
+    if ret
+      found = ArgRestriction.lookup_bound(ts, defining, ret.as(ASTNode), m.owner)
+      if found.is_a?(LookupError)
+        ret_text = "error: #{found.as(LookupError).message}"
+      else
+        ret_text = found.as(Type).to_s
+      end
+    end
+    "#{m.owner.to_s}::#{m.definition.name}(#{restrictions.join(", ")}) -> #{ret_text}"
+  end
+
+  # The matches of the call with its receiver, literal arguments, named arguments
+  # and block, or the message of why they cannot be found.
+  def self.lookup(prog : SemanticProgram, ts : TypeSystem, call : Call) : Matches | String
+    scope = CallReceiver.scope(prog, ts, call.obj)
+    if scope.nil?
+      return "receiver is not resolvable"
+    end
+    arg_types = [] of Type
+    call.args.each do |arg|
+      typed = typed_argument(prog, ts, arg)
+      if typed.nil?
+        return "argument is not a literal"
+      end
+      arg_types << typed.as(Type)
+    end
+    named_types = CallReceiver.named_argument_types(prog, call.named_args)
+    if named_types.nil?
+      return "argument is not a literal"
+    end
+    signature = CallSignature.new(call.name, arg_types, named_types, call.block != nil)
+    MethodLookup.lookup_with_autocast(scope.as(Type), ts, signature, call.args)
+  end
+
+  # A literal, or `instance(T)` where T is any written type (a path or a generic).
+  # CallReceiver types only a path. A generic instance is resolved here so a
+  # restriction written with free variables can be given Range(Int32, Nil).
+  def self.typed_argument(prog : SemanticProgram, ts : TypeSystem, node : ASTNode) : Type?
+    typed = CallReceiver.argument_type(prog, node)
+    return typed if typed
+    return nil unless node.is_a?(Call)
+    call = node.as(Call)
+    # The integer abs expression preserves its receiver's type.
+    if call.name == "abs" && call.args.empty? && call.obj
+      return typed_argument(prog, ts, call.obj.as(ASTNode))
+    end
+    return nil unless call.obj.nil? && call.name == "instance" && call.args.size == 1
+    found = TypeLookup.new(ts.instances).lookup(prog, call.args[0])
+    return nil if found.is_a?(LookupError)
+    found.as(Type)
+  end
+
+  # `# bound` line: the free variables the one match bound, or `matched` / `none`.
+  def self.evaluate_bound(prog : SemanticProgram, ts : TypeSystem, expr : String) : String
+    node = Parser.new(expr, "call").parse
+    return "error: not a call" unless node.is_a?(Call)
+    found = lookup(prog, ts, node.as(Call))
+    return "error: #{found.as(String)}" if found.is_a?(String)
+    matches = found.as(Matches)
+    return "error: #{matches.error.to_s}" if matches.error
+    return "none" if matches.empty?
+    bound = matches.matches[0].bound
+    return "matched" if bound.size == 0
+    names = bound.keys.sorted
+    parts = [] of String
+    names.each do |name|
+      parts << "#{name}=#{bound[name].to_s}"
+    end
+    parts.join(",")
+  end
+
+  # `# expand` line: the argument list of the one def the call matches, with its
+  # default arguments expanded (DefaultArguments.expand), or why it is not
+  # supported. Prints the text the hosted oracle prints for the same line.
+  def self.evaluate_expand(prog : SemanticProgram, ts : TypeSystem, expr : String) : String
+    node = Parser.new(expr, "call").parse
+    if !node.is_a?(Call)
+      return "error: not a call"
+    end
+    call = node.as(Call)
+    found = lookup(prog, ts, call)
+    if found.is_a?(String)
+      return "error: #{found.as(String)}"
+    end
+    matches = found.as(Matches)
+    if matches.error
+      return "error: #{matches.error.to_s}"
+    end
+    if matches.matches.size != 1
+      return "error: expected one match"
+    end
+    definition = matches.matches[0].definition
+    if !DefaultArguments.supported?(definition, call.args, call.named_args)
+      return "error: default arguments not supported"
+    end
+    texts = [] of String
+    DefaultArguments.expand(definition, call.args, call.named_args).each do |arg|
+      texts << arg.to_s
+    end
+    texts.join(", ")
+  end
+
+  # `# wrapper` line: the wrapper def the call goes to (DefaultArguments.wrapper_def), as
+  # its name, its parameter names and its body's statements, or `self` when the call
+  # needs no wrapper. Prints the text the hosted oracle prints for the same line.
+  def self.evaluate_wrapper(prog : SemanticProgram, ts : TypeSystem, expr : String) : String
+    node = Parser.new(expr, "call").parse
+    if !node.is_a?(Call)
+      return "error: not a call"
+    end
+    call = node.as(Call)
+    found = lookup(prog, ts, call)
+    if found.is_a?(String)
+      return "error: #{found.as(String)}"
+    end
+    matches = found.as(Matches)
+    if matches.error
+      return "error: #{matches.error.to_s}"
+    end
+    if matches.matches.size != 1
+      return "error: expected one match"
+    end
+    definition = matches.matches[0].definition
+    if !DefaultArguments.supported?(definition, call.args, call.named_args)
+      return "error: default arguments not supported"
+    end
+    wrapper = DefaultArguments.expand_for_call(definition, call.args.size, call.named_args)
+    return "error: #{wrapper}" if wrapper.is_a?(String)
+    return "self" if wrapper.as(Def) == definition
+    names = [] of String
+    wrapper.as(Def).args.each do |arg|
+      names << arg.name
+    end
+    statements = [] of String
+    body = wrapper.as(Def).body
+    if body.is_a?(Expressions)
+      body.as(Expressions).expressions.each do |item|
+        statements << (item.is_a?(Expressions) ? "generated body" : item.to_s)
+      end
+    else
+      statements << body.to_s
+    end
+    "#{wrapper.as(Def).name}(#{names.join(", ")}) { #{statements.join("; ")} }"
+  end
+
+  def self.evaluate(prog : SemanticProgram, ts : TypeSystem, expr : String) : String
+    node = Parser.new(expr, "call").parse
+    if !node.is_a?(Call)
+      return "error: not a call"
+    end
+    found = lookup(prog, ts, node.as(Call))
+    if found.is_a?(String)
+      return "error: #{found.as(String)}"
+    end
+    matches = found.as(Matches)
+    if matches.error
+      return "error: #{matches.error.to_s}"
+    end
+    if expr.starts_with?("virtual(")
+      targets = CallRecalculation.targets_for_matches(matches, ts, false)
+      return "error: target count differs from matches" if targets.size != matches.matches.size
+      targets.each_with_index do |target, index|
+        match = matches.matches[index]
+        return "error: dispatch target differs from match" if target.error || target.definition != match.definition || target.owner != match.owner || target.defining != match.defining || target.arg_types != match.arg_types
+      end
+    end
+    if matches.empty?
+      return "none"
+    end
+    parts = [] of String
+    matches.matches.each do |m|
+      mt = match_text(ts, m)
+      return mt if mt.starts_with?("error: ")
+      parts << mt
+    end
+    text = parts.join("; ")
+    text = text + " [cover all]" if matches.cover_all?
+    text
+  end
+
+  # The lib a call's receiver names: a path that names a lib is the lib itself (`LibC`
+  # in `LibC.exit(1)`), not its metaclass. Nil for any other receiver.
+  def self.lib_receiver(prog : SemanticProgram, ts : TypeSystem, obj : ASTNode?) : LibType?
+    return nil if obj.nil?
+    receiver = obj.as(ASTNode)
+    return nil if !receiver.is_a?(Path)
+    found = TypeLookup.new(ts.instances).lookup(prog, receiver)
+    return nil if found.is_a?(LookupError)
+    named = found.as(Type)
+    return nil if !named.is_a?(LibType)
+    named.as(LibType)
+  end
+
+  # One argument of a lib call as the call writes it: an `out _` has no type, and any
+  # other argument is typed as CallReceiver types literals. Nil when it is not typeable.
+  def self.lib_argument(prog : SemanticProgram, node : ASTNode, name : String?) : LibCallArgument?
+    if node.is_a?(Out)
+      out_exp = node.as(Out).exp
+      return LibCallArgument.new(node, nil, name) if out_exp.is_a?(Underscore) || (out_exp.is_a?(Var) && out_exp.as(Var).name == "_")
+      return nil
+    end
+    typed = CallReceiver.argument_type(prog, node)
+    return nil if typed.nil?
+    LibCallArgument.new(node, typed.as(Type), name)
+  end
+
+  # The `# error` line of a call on a lib: `ok` when LibCall answers it with a target,
+  # else the first line of its error.
+  def self.lib_error(prog : SemanticProgram, ts : TypeSystem, target_lib : LibType, call : Call) : String
+    list = [] of LibCallArgument
+    call.args.each do |arg|
+      typed = lib_argument(prog, arg, nil)
+      return "error: argument is not a literal" if typed.nil?
+      list << typed.as(LibCallArgument)
+    end
+    named_list = call.named_args
+    if !named_list.nil?
+      named_list.as(Array(NamedArgument)).each do |na|
+        typed = lib_argument(prog, na.value, na.name)
+        return "error: argument is not a literal" if typed.nil?
+        list << typed.as(LibCallArgument)
+      end
+    end
+    target = LibCall.recalculate(target_lib, prog, ts, call.name, list)
+    return "error: #{target.error.to_s}" if target.error
+    "ok"
+  end
+
+  # `ok` when the call has a target, otherwise the first line of its error, as the
+  # hosted call pass raises it. A message not ported is marked as such.
+  def self.evaluate_error(prog : SemanticProgram, ts : TypeSystem, expr : String) : String
+    node = Parser.new(expr, "call").parse
+    if !node.is_a?(Call)
+      return "error: not a call"
+    end
+    call = node.as(Call)
+    lib_target = lib_receiver(prog, ts, call.obj)
+    if lib_target
+      return lib_error(prog, ts, lib_target.as(LibType), call)
+    end
+    scope = CallReceiver.scope(prog, ts, call.obj)
+    if scope.nil?
+      return "error: receiver is not resolvable"
+    end
+    target = CallRecalculation.recalculate(scope.as(Type), ts, prog, call.name, call.args, call.named_args, call.block != nil, call.obj != nil)
+    if target.error
+      return "error: #{target.error.to_s}"
+    end
+    arg_types = [] of Type
+    call.args.each do |arg|
+      arg_types << CallReceiver.argument_type(prog, arg).as(Type)
+    end
+    named = CallReceiver.named_argument_types(prog, call.named_args)
+    signature = CallSignature.new(call.name, arg_types, named, call.block != nil)
+    by_signature = CallRecalculation.recalculate_signature(scope.as(Type), ts, signature, call.obj != nil, call.args)
+    if by_signature.error.to_s != target.error.to_s
+      return "error: signature entry diverges from recalculate"
+    end
+    "ok"
+  end
+
+  # `defining=<found-on> owner=<receiver>` for the one target, or the error line.
+  # The found-on type is CallTarget.defining, which is not the receiver when the
+  # method is inherited.
+  def self.evaluate_defining(prog : SemanticProgram, ts : TypeSystem, expr : String) : String
+    node = Parser.new(expr, "call").parse
+    if !node.is_a?(Call)
+      return "error: not a call"
+    end
+    call = node.as(Call)
+    scope = CallReceiver.scope(prog, ts, call.obj)
+    if scope.nil?
+      return "error: receiver is not resolvable"
+    end
+    target = CallRecalculation.recalculate(scope.as(Type), ts, prog, call.name, call.args, call.named_args, call.block != nil, call.obj != nil)
+    if target.error
+      return "error: #{target.error.to_s}"
+    end
+    "defining=#{defining_text(target)} owner=#{owner_text(target)}"
+  end
+
+  def self.defining_text(target : CallTarget) : String
+    defining = target.defining
+    return "nil" if defining.nil?
+    defining.as(ModuleType).to_s
+  end
+
+  def self.owner_text(target : CallTarget) : String
+    owner = target.owner
+    return "nil" if owner.nil?
+    owner.as(Type).to_s
+  end
+
+  # The instantiated argument types, after free-variable binding and autocast.
+  # Return inference is exercised by the body typing gate, not lookup alone.
+  def self.evaluate_instance(prog : SemanticProgram, ts : TypeSystem, expr : String) : String
+    node = Parser.new(expr, "call").parse
+    if !node.is_a?(Call)
+      return "error: not a call"
+    end
+    call = node.as(Call)
+    scope = CallReceiver.scope(prog, ts, call.obj)
+    if scope.nil?
+      return "error: receiver is not resolvable"
+    end
+    target = CallRecalculation.recalculate(scope.as(Type), ts, prog, call.name, call.args, call.named_args, call.block != nil, call.obj != nil)
+    if target.error
+      return "error: #{target.error.to_s}"
+    end
+    state = target.return_type.nil? ? "pending" : "premature"
+    "args=#{args_text(target)} body=#{state}"
+  end
+
+  def self.args_text(target : CallTarget) : String
+    parts = [] of String
+    target.arg_types.each do |t|
+      parts << t.to_s
+    end
+    parts.join(",")
+  end
+
+  def self.evaluate_tuple(prog : SemanticProgram, ts : TypeSystem, expr : String) : String
+    node = Parser.new(expr, "call").parse
+    return "error: not a call" unless node.is_a?(Call)
+    call = node.as(Call)
+    owner : Type = if call.obj.is_a?(NamedTupleLiteral)
+      NamedTupleInstanceType.new(prog, [NamedArgumentType.new("a", prog.types["Int32"]), NamedArgumentType.new("b", prog.types["String"])])
+    else
+      TupleInstanceType.new(prog, [prog.types["Int32"], prog.types["String"]])
+    end
+    indexed = CallRecalculation.check_tuple_indexer(owner, call.name, call.args, ts, prog)
+    return "normal" if indexed.nil?
+    return "error: #{indexed}" if indexed.is_a?(String)
+    body = indexed.as(Def).body
+    return "nil" if body.is_a?(NilLiteral)
+    primitive = body.as(Primitive)
+    "index=#{primitive.tuple_index},#{primitive.tuple_last},range=#{primitive.tuple_range}"
+  end
+
+  def self.run(src : String, filename : String) : String
+    prog = SemanticProgram.new
+    prog.search_path = search_path
+    prog.project_root = dir_of(filename)
+    # The prelude is the first statement of every fixture, as a compile prepends it.
+    # Fixtures live in bench/fixtures, so the prelude is two levels up, in src.
+    node = Parser.new("require \"../../src/iyi/prelude\"\n" + src, filename).parse
+    visitor = TopLevelVisitor.new(prog, filename)
+    node.accept(visitor)
+    visitor.finish
+    define_new_methods(prog)
+    # The type system is installed after the declarations, as the declarations gate does.
+    ts = TypeSystem.new(prog)
+    out = [] of String
+    src.split("\n").each do |line|
+      if line.starts_with?("# call ")
+        expr = line[7, line.bytesize - 7].strip
+        out << "#{expr} => #{evaluate(prog, ts, expr)}"
+      elsif line.starts_with?("# bound ")
+        expr = line[8, line.bytesize - 8].strip
+        out << "#{expr} => #{evaluate_bound(prog, ts, expr)}"
+      elsif line.starts_with?("# error ")
+        expr = line[8, line.bytesize - 8].strip
+        out << "#{expr} => #{evaluate_error(prog, ts, expr)}"
+      elsif line.starts_with?("# defining ")
+        expr = line[11, line.bytesize - 11].strip
+        out << "#{expr} => #{evaluate_defining(prog, ts, expr)}"
+      elsif line.starts_with?("# instance ")
+        expr = line[11, line.bytesize - 11].strip
+        out << "#{expr} => #{evaluate_instance(prog, ts, expr)}"
+      elsif line.starts_with?("# tuple ")
+        expr = line[8, line.bytesize - 8].strip
+        out << "#{expr} => #{evaluate_tuple(prog, ts, expr)}"
+      elsif line.starts_with?("# expand ")
+        expr = line[9, line.bytesize - 9].strip
+        out << "#{expr} => #{evaluate_expand(prog, ts, expr)}"
+      elsif line.starts_with?("# wrapper ")
+        expr = line[10, line.bytesize - 10].strip
+        out << "#{expr} => #{evaluate_wrapper(prog, ts, expr)}"
+      end
+    end
+    out.join("\n") + "\n"
+  end
+end
+
+if Program.args.size > 0
+  filename = Program.args[0]
+  print BenchSelfhostSemanticCallsExercise.run(File.read(filename), filename)
+end

@@ -1,0 +1,5 @@
+x = Pointer(Int32)
+y = Box(Int32)
+
+class Box(T)
+end

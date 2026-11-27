@@ -1,0 +1,12 @@
+class Box
+  macro sized
+    @size : Int32
+  end
+
+  sized
+
+  def initialize
+    @size = 1
+    @count = 0
+  end
+end

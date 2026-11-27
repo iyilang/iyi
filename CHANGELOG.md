@@ -213,6 +213,35 @@
 - These nine gates run in the same three jobs through
   `bench/selfhost_gates.sh`; `bench/native_elf_run.sh` runs in
   `selfhost-linux-arm64`.
+- **Semantic analysis and type operations in iyi: `src/compiler/semantic/`
+  and `src/compiler/types/` (#217).** 24,389 lines of iyi port the hosted
+  front end's top-level and declaration passes, method lookup and overload
+  order, call, block and body typing, closures, literal expansion, `new` and
+  default arguments, and the type system's merge, filters, restrictions,
+  intersection and unification; a build's `-D` defines reach every macro
+  expansion site. `src/compiler/tools/typed_dump.iyi` prints each typed node,
+  and `src/compiler/semantic/typed.iyi` with `src/compiler/lower/CONTRACT.md`
+  is the typed tree's contract with lowering. Seventeen gates compare it with
+  the hosted compiler. `bench/selfhost_typed_parity_exercise.sh` types every
+  file of the prelude, std, `samples/iyi` and `src/compiler` with both and
+  holds each file's count of identically typed nodes to
+  `bench/selfhost_typed_parity.floor`, a drop and an unrecorded gain alike
+  (29,616 of 31,576 nodes in 329 files on Linux; a host whose platform arms
+  type differently has its own row).
+  `bench/selfhost_semantic_declarations_exercise.sh` does the same for
+  declarations (24,561 of 25,550 in 330 files; a file the hosted oracle
+  cannot analyse fails the gate, and a file the port refuses must be listed
+  with its reason in `bench/selfhost_semantic_declarations.refusals`) and
+  requires the port's declaration pass to complete all 180 compiler and
+  prelude files. `bench/selfhost_typed_bodies_exercise.sh` compares the
+  typed nodes of each fixture's entry and of every method body it
+  instantiates, each count held exactly (1,309 of 1,657 body nodes in 128
+  fixtures). The others compare declaration and typed-expression fixtures,
+  refusals, call resolution, `new`, closures, type operations and the
+  transforms, and hold broken copies of the port to failing. The self-host
+  jobs now run as four shards on each host, dealt by measured weight
+  (`bench/selfhost_gates.weights`). Hosted commands are unchanged; nothing
+  uses the port yet.
 - **AArch64 code generation and register allocation in iyi:
   `src/compiler/native/` (#194).** 6,582 lines of iyi select AArch64
   instructions from `compiler/ir`, lower calls, frames, switches, atomics,
@@ -818,6 +847,26 @@
   which both formatters leave as written.
 
 ### Fixed
+
+- **The formatter port no longer changes `b.@v` or `{ a; b }`.** The
+  formatter in iyi (`src/compiler/tools/formatter.iyi`, #195) had no
+  visitor for an instance variable read through a receiver, so `c = b.@v`
+  came back as `c = b`, and it dropped the `;` between statements on one
+  line, so `run { d; n }` came back as `run { dn }`. Both changed the
+  program. Four layout differences from `iyi tool format` are fixed with
+  them: `-> { x }` lost the space after `{`; the body of an `if` assigned
+  to a variable was indented from the line start instead of aligned under
+  the `if`; an enum body lost its blank lines and the blank line before a
+  `def`; and the `=` of consecutive constants and valued enum members was
+  not aligned, nor their numbers right-aligned. Four regression fixtures
+  (`bench/fixtures/formatter_ivar_and_semicolons.iyi`,
+  `formatter_proc_literal.iyi`, `formatter_assign_if.iyi` and
+  `formatter_enum_body.fixture`) join the short corpus and the parity
+  floor, and `bench/selfhost_formatter_exercise.sh` holds 7 more broken
+  copies to failing, 25 in all. The port now formats 176 of the 365 files
+  that select the self-host jobs as the hosted formatter does, up from 161:
+  the floor lists all 176, and the 11 files that stopped differing leave
+  the ceiling, which lists 23.
 
 - **Vector unions use the heap's eight-byte alignment (#202).** A mixed
   union represents its payload as wide integers, so treating only visible

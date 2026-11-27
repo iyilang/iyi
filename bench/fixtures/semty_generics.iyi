@@ -1,0 +1,51 @@
+class Box(T)
+end
+
+class IntBox < Box(Int32)
+end
+
+class Pair(A, B)
+  @left : A
+  @right : B
+end
+
+class Animal
+end
+
+class Dog < Animal
+end
+
+# op merge(Box(Int32), Box(String))
+# op merge(Box(Int32), Box(Int32))
+# op merge(Box(Int32), Box)
+# op merge(Pair(Int32, String), Pair(Int32, Int64))
+# op merge(Pair(Int32, String), Pair(Int32, String))
+# op merge(IntBox, Box(Int32))
+# op merge(IntBox, Box(String))
+# op merge(Box(Dog), Box(Animal))
+# op intersect(Box(Int32), Box(String))
+# op intersect(Box(Int32), Box(Int32))
+# op intersect(IntBox, Box(Int32))
+# op intersect(Box(Int32), IntBox)
+# op intersect(Box(Int32), Box)
+# op intersect(Box, Box(Int32))
+# op intersect(Pair(Int32, String), Pair(Int32, Int64))
+# op intersect(Pair(Int32, String), Pair(Int32, String))
+# op intersect(Box(Dog), Box(Animal))
+# op Box(Int32).virtual_type
+# op Box(Int32).struct?
+# op Box(Int32).subclasses
+# op Box(Int32).all_subclasses
+# op Box(Int32).reference_like?
+# op Pair(Int32, String).reference_like?
+# op Pair(Int32, String).struct?
+# op Pair(Int32, String).virtual_type
+# op IntBox.virtual_type
+# op filter(Box(Int32), is_a, IntBox)
+# op filter(IntBox, is_a, Box(Int32))
+# op filter(Box(Int32), is_a, Box(String))
+# op Box.subclasses
+# op Box.all_subclasses
+# op Box.leaf?
+# op Box.virtual_type
+# op IntBox.leaf?

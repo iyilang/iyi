@@ -1,0 +1,7 @@
+enum SmallEnum
+  A
+end
+
+enum WideEnum : Int64
+  A
+end

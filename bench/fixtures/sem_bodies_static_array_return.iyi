@@ -1,0 +1,53 @@
+@[Unsafe("types uninitialized static arrays without executing or dereferencing their contents")]
+
+# Written static arrays retain their element type and size in return annotations.
+# Class elements are virtualized like the body's uninitialized value. Ordinary
+# generics, free type variables and Nil-forced results keep their existing types.
+class SaAnimal
+end
+
+class SaDog < SaAnimal
+end
+
+def sa_words : UInt64[4]
+  words = uninitialized UInt64[4]
+  words
+end
+
+def sa_bytes : StaticArray(UInt8, 2)
+  bytes = uninitialized StaticArray(UInt8, 2)
+  bytes
+end
+
+def sa_maybe(present : Bool) : StaticArray(UInt64, 4) | Nil
+  if present
+    words = uninitialized UInt64[4]
+    words
+  end
+end
+
+def sa_herd : SaAnimal[2]
+  pets = uninitialized SaAnimal[2]
+  pets
+end
+
+def sa_pair : Tuple(UInt64, Bool)
+  {1_u64, true}
+end
+
+def sa_twice(value : T) : Tuple(T, T) forall T
+  {value, value}
+end
+
+def sa_discard : Nil
+  words = uninitialized UInt64[4]
+  words
+end
+
+words = sa_words
+bytes = sa_bytes
+maybe = sa_maybe(true)
+herd = sa_herd
+pair = sa_pair
+twice = sa_twice(7_u8)
+gone = sa_discard

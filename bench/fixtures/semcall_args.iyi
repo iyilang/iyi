@@ -1,0 +1,49 @@
+# Calls with named arguments and block literals, against defs that take them or
+# do not. Read by bench/selfhost_semantic_calls_exercise.sh: each `# call` line is
+# one call site, printed by the hosted oracle and by the port.
+
+def named(a : Int32, b : String = "x") : Nil
+  nil
+end
+
+def named2(a : Int32, b : String) : Nil
+  nil
+end
+
+def blk(x : Int32, &) : Int32
+  yield x
+end
+
+def noblk(x : Int32) : Int32
+  x
+end
+
+def blk2(x : Int32, &) : String
+  yield
+  "a"
+end
+
+class Foo
+  def self.kw(a : Int32, b : Bool = true) : Foo
+    Foo.new
+  end
+end
+
+# call named(1, b: "y")
+# call named(a: 1)
+# call named(b: "y")
+# call named(1, a: 2)
+# call named(1, c: 2)
+# call named2(a: 1, b: "y")
+# call named2(b: "y", a: 1)
+# call named2(1, b: "y")
+# call named2(1, b: 2)
+# call named2(1)
+# call blk(1) { 1 }
+# call blk(1)
+# call noblk(1) { 1 }
+# call noblk(1)
+# call blk2(1) { 1 }
+# call Foo.kw(1, b: false)
+# call Foo.kw(a: 1)
+# call Foo.kw(1, true)

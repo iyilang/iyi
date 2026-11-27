@@ -1,0 +1,7 @@
+# Splat targets: a tuple of the values they cover, from a list or from values.
+values = [1, 2, 3]
+first, *middle, last = [1, 2, 3, 4]
+head, *_, tail = values
+*rest, final = 1, 2, 3
+a, *b, c = 1, 2, 3, 4
+x, *_, y = 1, 2, 3

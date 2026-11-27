@@ -1,0 +1,12 @@
+class Foo
+end
+
+class Bar < Foo
+end
+
+a = 1.as(Int32 | String)
+b = a.as(Int32)
+c = a.as?(Int32)
+d = 2.as?(Int32 | String)
+e = Bar.new.as(Foo)
+f = Foo.new.as(Bar)

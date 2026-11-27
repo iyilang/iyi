@@ -1,0 +1,9 @@
+def recursive_named_default(flag : Bool, value : Bool = false) : {Bool, Bool}
+  if flag
+    recursive_named_default(false, value: true)
+  else
+    {flag, value}
+  end
+end
+
+recursive_named_default(true)

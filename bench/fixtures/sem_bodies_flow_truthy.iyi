@@ -1,0 +1,30 @@
+class Boxed
+  def val : Int32
+    7
+  end
+end
+
+def maybe(flag : Bool) : Boxed | Nil
+  if flag
+    Boxed.new
+  else
+    nil
+  end
+end
+
+def read_val(r : Boxed | Nil)
+  if r
+    r.val
+  else
+    0
+  end
+end
+
+x = maybe(true)
+a = if x
+      x.val
+    else
+      0
+    end
+b = x
+c = read_val(maybe(false))

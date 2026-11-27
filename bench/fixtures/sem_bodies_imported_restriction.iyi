@@ -1,0 +1,18 @@
+module sem_bodies_imported_restriction
+
+import s1h_scope/types::{make_table, read_table}
+import s1h_scope/holder::{Holder}
+
+class Consumer
+  def run
+    read_table(make_table)
+  end
+
+  def getter_value
+    Holder.new.table.value
+  end
+end
+
+consumer = Consumer.new
+consumer.run
+consumer.getter_value

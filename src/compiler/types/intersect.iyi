@@ -1,0 +1,364 @@
+module compiler/types/intersect
+
+import compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, GenericModuleType, GenericTraitType, MetaclassType, ModuleType, NilType, NonGenericModuleType, SemanticProgram, TraitType, Type, TypeDefType, UnionType, VoidType}
+import compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType, GenericModuleInstanceMetaclassType, GenericModuleInstanceType, GenericInstanceType, NamedTupleInstanceType, ProcInstanceType, TupleInstanceType, TypeQueries, VirtualMetaclassType, VirtualType}
+import compiler/types/merge::{TypeMerge}
+import compiler/types/unification::{TypeUnification}
+
+# Port of src/compiler/iyi/semantic/type_intersect.cr: Type.common_descendent,
+# the type V such that V <= T and V <= U, which is what `x.is_a?(U)` narrows
+# `x` of type T to, or nil when no value is both.
+#
+# The hosted code has one overload per pair of type kinds, and the hosted compiler
+# picks the most specific. The dispatch below tests the same pairs in the same order of
+# specificity. One hosted path needs state the port does not carry, and it
+# answers nil here: generic instances of a generic type (instantiated_types, which
+# the port keeps in no list). Typedefs are ported as `typedef_descendent`.
+# Including types, aliases and procs are ported; each is named at its branch.
+pub class TypeIntersect
+  def self.common_descendent(program : SemanticProgram, t1 : Type, t2 : Type) : Type?
+    # Aliases stand for the type they name. The hosted overloads for an alias
+    # remove it first, and two aliases meet only when they are the same one.
+    if t1.is_a?(AliasType) && t2.is_a?(AliasType)
+      return t1 if t1 == t2
+      return common_descendent(program, TypeMerge.remove_alias(t1), TypeMerge.remove_alias(t2))
+    end
+    if t1.is_a?(AliasType)
+      return common_descendent(program, TypeMerge.remove_alias(t1), t2)
+    end
+    if t2.is_a?(AliasType)
+      return t1 if t1 == t2
+      return common_descendent(program, t1, TypeMerge.remove_alias(t2))
+    end
+    if t1.is_a?(TypeDefType) && !t2.is_a?(UnionType)
+      return typedef_descendent(program, t1.as(TypeDefType), t2)
+    end
+
+    if t1.is_a?(TupleInstanceType) && t2.is_a?(TupleInstanceType)
+      return t1 if t1.implements?(t2)
+      return nil
+    end
+    if t1.is_a?(NamedTupleInstanceType) && t2.is_a?(NamedTupleInstanceType)
+      return t1 if t1.implements?(t2)
+      return nil
+    end
+    if t1.is_a?(ProcInstanceType) && t2.is_a?(ProcInstanceType)
+      return t2 if compatible_proc?(t1.as(ProcInstanceType), t2.as(ProcInstanceType))
+      return nil
+    end
+
+    if module_like?(t1) && t2.is_a?(UnionType)
+      types = [] of Type
+      t2.as(UnionType).union_types.each do |member|
+        cd = common_descendent(program, t1, member)
+        types << cd unless cd.nil?
+      end
+      return t1 if includes_type?(types, t1)
+      return union_or_nil(program, types)
+    end
+    if module_like?(t1) && t2.is_a?(VirtualType)
+      return including_descendent(program, t1, t2)
+    end
+    if module_like?(t1) && t2.is_a?(GenericClassType)
+      found = instance_and_generic(program, t1, t2)
+      return found unless found.nil?
+      return including_descendent(program, t1, t2)
+    end
+    if module_like?(t1)
+      found = base_descendent(t1, t2)
+      return found unless found.nil?
+      return including_descendent(program, t1, t2)
+    end
+
+    if t1.is_a?(GenericClassInstanceType) && t2.is_a?(GenericClassType)
+      return t1 if TypeQueries.instance_type(t1) == t2 || t1.as(GenericClassInstanceType).generic_type == t2
+      return instance_and_generic(program, t1, t2)
+    end
+    if t1.is_a?(GenericClassType) && t2.is_a?(GenericClassInstanceType)
+      return common_descendent(program, t2, t1)
+    end
+    if t1.is_a?(GenericInstanceType) && t2.is_a?(GenericInstanceType)
+      # generic_instances: two instances of one generic type. The base rule is
+      # the one the fixtures exercise.
+      return base_descendent(t1, t2)
+    end
+
+    if t1.is_a?(MetaclassType) && t2.is_a?(VirtualMetaclassType)
+      inst1 = TypeQueries.instance_type(t1)
+      return nil if inst1.is_a?(NonGenericModuleType) || inst1.is_a?(GenericModuleInstanceType)
+      return t2 if t1 == program.types["Class"]
+      restricted = common_descendent(program, inst1, t2.as(VirtualMetaclassType).instance_type.base_type)
+      return metaclass_or_nil(restricted)
+    end
+    if t1.is_a?(VirtualMetaclassType) && t2.is_a?(MetaclassType)
+      return common_descendent(program, t2, t1)
+    end
+    if t1.is_a?(VirtualMetaclassType) && t2.is_a?(VirtualMetaclassType)
+      restricted = common_descendent(program, TypeQueries.instance_type(t1), TypeQueries.instance_type(t2))
+      return metaclass_or_nil(restricted)
+    end
+    if generic_metaclass?(t1) && (t2.is_a?(MetaclassType) || t2.is_a?(VirtualMetaclassType))
+      gm = generic_metaclass_of_type(t1)
+      if gm.nil? == false
+        return t1 if gm == t2
+      end
+      # A union's metaclass meets only another union's metaclass.
+      inst1 = TypeQueries.instance_type(t1)
+      return nil if inst1.is_a?(UnionType)
+      restricted = common_descendent(program, inst1, TypeQueries.instance_type(t2))
+      return t1 unless restricted.nil?
+      return nil
+    end
+    if (t1.is_a?(MetaclassType) || t1.is_a?(VirtualMetaclassType)) && generic_metaclass?(t2)
+      return common_descendent(program, t2, t1)
+    end
+
+    if t1.is_a?(UnionType)
+      types = [] of Type
+      t1.as(UnionType).union_types.each do |member|
+        cd = common_descendent(program, member, t2)
+        types << cd unless cd.nil?
+      end
+      return union_or_nil(program, types)
+    end
+
+    if t1.is_a?(VirtualType) && t2.is_a?(VirtualType)
+      return t1 if t1 == t2
+      base1 = t1.as(VirtualType).base_type
+      base2 = t2.as(VirtualType).base_type
+      found = common_descendent(program, base1, base2)
+      found = common_descendent(program, base2, base1) if found.nil?
+      return nil if found.nil?
+      return TypeQueries.virtual_type(found)
+    end
+    if t1.is_a?(VirtualType) && t2.is_a?(UnionType)
+      types = [] of Type
+      t2.as(UnionType).union_types.each do |member|
+        cd = common_descendent(program, t1, member)
+        types << cd unless cd.nil?
+      end
+      return union_or_nil(program, types)
+    end
+    if t1.is_a?(VirtualType)
+      return virtual_descendent(program, t1.as(VirtualType), t2)
+    end
+
+    if t1.is_a?(NilType) && t2.is_a?(VoidType)
+      # Nil matches Void (useful for `Pointer(Void)#value=`).
+      return t1
+    end
+
+    if t1.is_a?(GenericClassType) && t2.is_a?(GenericClassType)
+      return t1 if t1 == t2
+      found = instance_and_generic(program, t1, t2)
+      return found unless found.nil?
+      return instance_and_generic(program, t2, t1)
+    end
+
+    if t2.is_a?(UnionType)
+      return common_descendent_union(program, t1, t2.as(UnionType))
+    end
+    if t2.is_a?(VirtualType)
+      return t1 if t1.implements?(t2.as(VirtualType).base_type)
+      return nil
+    end
+    if t2.is_a?(GenericClassType)
+      return instance_and_generic(program, t1, t2)
+    end
+
+    base_descendent(t1, t2)
+  end
+
+  # TypeDefType common_descendent (type_intersect.cr): the typedef itself when its
+  # target meets *t2*. A union the target lies in is rebuilt with the typedef in
+  # the target's place, so a typedef names the same member it was written as.
+  def self.typedef_descendent(program : SemanticProgram, t1 : TypeDefType, t2 : Type) : Type?
+    return t1 if t1 == t2
+    restricted = common_descendent(program, t1.typedef, t2)
+    return nil if restricted.nil?
+    return t1 if restricted == t1.typedef
+    if restricted.is_a?(UnionType)
+      members = [] of Type
+      restricted.as(UnionType).union_types.each do |member|
+        if member == t1.typedef
+          members << t1
+        else
+          members << member
+        end
+      end
+      return TypeMerge.merge_all(program, members)
+    end
+    restricted
+  end
+
+  # ProcInstanceType#compatible_with?: a procedure is compatible when its
+  # return type is the other's, or the other returns Nil (any value may be
+  # discarded), or it returns NoReturn; and its arguments are the other's, in
+  # number and in type. Arguments are invariant.
+  def self.compatible_proc?(t1 : ProcInstanceType, t2 : ProcInstanceType) : Bool
+    rt1 = t1.return_type
+    rt2 = t2.return_type
+    unless rt1 == rt2 || rt2.nil_type? || TypeQueries.no_return?(rt1)
+      return false
+    end
+    return false if t1.arg_types.size != t2.arg_types.size
+    i = 0
+    while i < t1.arg_types.size
+      return false unless t1.arg_types[i] == t2.arg_types[i]
+      i = i + 1
+    end
+    true
+  end
+
+  # common_descendent_base: t1 when it is t2 or inherits or includes it.
+  def self.base_descendent(t1 : Type, t2 : Type) : Type?
+    return t1 if t1 == t2
+    parents_of(t1).each do |parent|
+      return t1 if parent.implements?(t2)
+    end
+    nil
+  end
+
+  # common_descendent_including_types: the module's including types, as a union
+  # of virtual types, narrowed to t2. A module narrows to the types that
+  # include it, which base_descendent cannot see.
+  def self.including_descendent(program : SemanticProgram, mod : Type, t2 : Type) : Type?
+    inc = including_union(program, mod)
+    return nil if inc.nil?
+    common_descendent(program, inc, t2)
+  end
+
+  # The union of the virtual types of the types that include a module, the
+  # including types of a module that is itself included counted in turn.
+  def self.including_union(program : SemanticProgram, mod : Type) : Type?
+    all = [] of Type
+    add_including_types(mod, all)
+    union_or_nil(program, all)
+  end
+
+  # add_to_including_types: a module's includers, each as its virtual type, and
+  # the includers of a module that includes this one, in place of the module.
+  def self.add_including_types(mod : Type, all : Array(Type)) : Nil
+    return nil unless mod.is_a?(ModuleType)
+    mod.as(ModuleType).including_types.each do |inc|
+      if module_like?(inc)
+        add_including_types(inc, all)
+      else
+        vt = TypeQueries.virtual_type(inc)
+        all << vt unless includes_type?(all, vt)
+      end
+    end
+    nil
+  end
+
+  # common_descendent_union: t when it meets at least one member of the union.
+  def self.common_descendent_union(program : SemanticProgram, t : Type, union : UnionType) : Type?
+    matched = false
+    union.union_types.each do |member|
+      matched = true unless common_descendent(program, t, member).nil?
+    end
+    return t if matched
+    nil
+  end
+
+  # common_descendent_instance_and_generic: the instance when one of its
+  # parents meets the generic type.
+  def self.instance_and_generic(program : SemanticProgram, instance : Type, generic : Type) : Type?
+    parents_of(instance).each do |parent|
+      if module_like?(parent)
+        return instance if parent.implements?(generic)
+      else
+        restricted = common_descendent(program, parent, generic)
+        return instance unless restricted.nil?
+      end
+    end
+    nil
+  end
+
+  # The VirtualType case: the virtual type's base meets t2, or t2 is a module
+  # that some subclass of the base includes.
+  def self.virtual_descendent(program : SemanticProgram, t1 : VirtualType, t2 : Type) : Type?
+    base = t1.base_type
+    if t2.implements?(base)
+      return TypeQueries.virtual_type(t2)
+    end
+    return t1 if base.implements?(t2)
+    if t2.is_a?(NonGenericModuleType) || t2.is_a?(GenericModuleInstanceType)
+      types = [] of Type
+      TypeQueries.subclasses(base).each do |sub|
+        cd = common_descendent(program, TypeQueries.virtual_type(sub), t2)
+        types << cd unless cd.nil?
+      end
+      return union_or_nil(program, types)
+    end
+    nil
+  end
+
+  # The parents a type inherits or includes. A module's parents are its
+  # supertraits and included modules; a generic class instance's parent is its
+  # superclass.
+  def self.parents_of(t : Type) : Array(Type)
+    if t.is_a?(MetaclassType)
+      # The hosted superclass of a metaclass is the metaclass of the superclass,
+      # and Class for a class without one.
+      inst = TypeQueries.instance_type(t)
+      if inst.is_a?(ClassType)
+        sc = inst.as(ClassType).superclass
+        if sc.nil?
+          return [t.program.types["Class"]] of Type
+        end
+        meta = TypeUnification.metaclass_of(sc.as(Type))
+        return [meta] of Type unless meta.nil?
+      end
+      return [] of Type
+    end
+    if t.is_a?(ModuleType)
+      return t.as(ModuleType).parents
+    end
+    result = [] of Type
+    if t.is_a?(GenericClassInstanceType)
+      inst = t.as(GenericClassInstanceType)
+      if sc = inst.superclass
+        result << sc
+      end
+      inst.included_modules.each do |inc|
+        result << inc
+      end
+    end
+    result
+  end
+
+  def self.module_like?(t : Type) : Bool
+    t.is_a?(NonGenericModuleType) || t.is_a?(GenericModuleInstanceType) || (t.is_a?(TraitType) && !t.is_a?(GenericTraitType))
+  end
+
+  def self.generic_metaclass?(t : Type) : Bool
+    t.is_a?(GenericClassInstanceMetaclassType) || t.is_a?(GenericModuleInstanceMetaclassType)
+  end
+
+  # The metaclass of the generic type an instance metaclass describes, or nil.
+  def self.generic_metaclass_of_type(t : Type) : Type?
+    inst = TypeQueries.instance_type(t)
+    if inst.is_a?(GenericClassInstanceType)
+      return TypeUnification.metaclass_of(inst.as(GenericClassInstanceType).generic_type)
+    end
+    nil
+  end
+
+  def self.metaclass_or_nil(restricted : Type?) : Type?
+    return nil if restricted.nil?
+    TypeUnification.metaclass_of(restricted)
+  end
+
+  def self.union_or_nil(program : SemanticProgram, types : Array(Type)) : Type?
+    return nil if types.empty?
+    TypeUnification.union_of(program, TypeMerge.compact_types(program, types))
+  end
+
+  def self.includes_type?(types : Array(Type), t : Type) : Bool
+    types.each do |u|
+      return true if u == t
+    end
+    false
+  end
+end

@@ -1,0 +1,31 @@
+struct Point
+  @x : Int32
+  @y : Int32
+end
+
+class Holder
+  @point : Point
+end
+
+struct Pair(A, B)
+  @left : A
+  @right : B
+end
+
+# op Point.struct?
+# op Point.reference_like?
+# op Point.virtual_type
+# op Holder.struct?
+# op Holder.reference_like?
+# op Holder.virtual_type
+# op Pair.splat_index
+# op Pair.reference_like?
+# op Pair.virtual_type
+# op Int32.struct?
+# op Int32.reference_like?
+# op Int32.virtual_type
+# op Int32.subclasses
+# op Int32.all_subclasses
+# op Int32.instance_type
+# op String.reference_like?
+# op String.struct?

@@ -1,0 +1,7 @@
+module helper
+
+pub class Other
+  def weight : Int32
+    2
+  end
+end

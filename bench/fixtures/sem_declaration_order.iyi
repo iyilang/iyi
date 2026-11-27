@@ -1,0 +1,102 @@
+class OrderBase
+end
+
+class OrderLeaf < OrderBase
+end
+
+def order_class(x : OrderBase) : String
+  "base"
+end
+
+def order_class(x : OrderLeaf) : String
+  "leaf"
+end
+
+def order_unrelated(x : String) : String
+  "string"
+end
+
+def order_unrelated(x : Int32) : String
+  "integer"
+end
+
+def order_forward(x : Object) : String
+  "object"
+end
+
+def order_generic(x : Int32) : Int32
+  x
+end
+
+def order_generic(x : Array(UInt8)) : Int32
+  1
+end
+
+def order_generic(x : Array(T)) : Int32 forall T
+  2
+end
+
+def order_arity(x : Int32) : Int32
+  x
+end
+
+def order_arity(x : Int32, y : Int32) : Int32
+  x
+end
+
+def order_meta(x : Class) : String
+  "class"
+end
+
+def order_meta(x : OrderLeaf.class) : String
+  "leaf class"
+end
+
+def order_forward(x : OrderFuture) : String
+  "future"
+end
+
+class OrderFuture
+end
+
+def order_named(*, item : Object) : String
+  "object"
+end
+
+def order_named(*, item : String) : String
+  "string"
+end
+
+def order_splat(*items) : String
+  "splat"
+end
+
+def order_splat(item : Int32) : String
+  "single"
+end
+
+def order_block(x : Object) : String
+  "object"
+end
+
+def order_block(x : String, &) : String
+  yield x
+end
+
+class OrderMethods
+  def pick(x : OrderBase) : String
+    "base"
+  end
+
+  def pick(x : OrderLeaf) : String
+    "leaf"
+  end
+
+  def self.pick(x : OrderBase) : String
+    "base"
+  end
+
+  def self.pick(x : OrderLeaf) : String
+    "leaf"
+  end
+end

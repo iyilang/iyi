@@ -1,0 +1,9 @@
+def recursive_inferred_bare(flag : Bool)
+  if flag
+    recursive_inferred_bare(false)
+  else
+    7
+  end
+end
+
+recursive_inferred_bare(true)

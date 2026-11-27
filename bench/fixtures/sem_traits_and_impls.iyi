@@ -1,0 +1,31 @@
+trait Describable
+  abstract def describe : String
+end
+
+trait Inspectable : Describable
+  abstract def inspect_item : String
+end
+
+class User
+  def name : String
+    "alice"
+  end
+end
+
+impl Describable for User
+  def describe : String
+    "user alice"
+  end
+end
+
+struct Point
+  def x : Int32
+    0
+  end
+end
+
+impl Describable for Point
+  def describe : String
+    "point"
+  end
+end

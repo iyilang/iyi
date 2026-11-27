@@ -1,0 +1,7 @@
+# The type of a value constructed from a generic retains its arguments.
+class SymbolTable
+  def initialize
+    @taken = Hash(String, Bool).new
+    @last_unique = 0
+  end
+end

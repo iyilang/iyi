@@ -1,0 +1,22 @@
+class ProcScope
+  def self.helper(x : Int32) : Int32
+    x + 1
+  end
+
+  def self.run
+    f = ->(x : Int32) { helper(x) }
+    f.call(1)
+  end
+
+  def twice(x : Int32) : Int32
+    x * 2
+  end
+
+  def run
+    f = ->(x : Int32) { twice(x) }
+    f.call(2)
+  end
+end
+
+class_result = ProcScope.run
+instance_result = ProcScope.new.run

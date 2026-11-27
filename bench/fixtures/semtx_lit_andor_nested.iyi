@@ -1,0 +1,10 @@
+def check_nested(node : ASTNode, other : ASTNode) : ASTNode
+  node.size > 0 || (other.size > 0 && node.name == other.name)
+  combined = node.size > 0 && other.size > 0 || node.name == other.name
+  run(node.size > 0 && other.is_a?(Var), other.size > 0 || node.is_a?(Var))
+  node.each do |item|
+    item.is_a?(Var) && item.name.size > 0 || item.size > 0
+  end
+  x = node.name.size > 0 && (other.name.size > 0 || node.is_a?(Var))
+  x
+end

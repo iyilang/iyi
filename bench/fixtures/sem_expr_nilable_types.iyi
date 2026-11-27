@@ -1,0 +1,16 @@
+class Item
+  @@state : String? = nil
+  @count : Int32? = nil
+
+  def self.state : String?
+    @@state
+  end
+
+  def count : Int32?
+    @count
+  end
+end
+
+item = Item.new
+s1 = Item.state
+s2 = item.count

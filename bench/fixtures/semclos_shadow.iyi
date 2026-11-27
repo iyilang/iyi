@@ -1,0 +1,10 @@
+def use(p : Proc(Int32, Int32)) : Int32
+  0
+end
+
+def outer(x : Int32) : Int32
+  use(->(y : Int32) { x })
+  use(->(x : Int32) { x })
+end
+
+outer(7)

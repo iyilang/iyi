@@ -1,0 +1,380 @@
+module compiler/semantic/lib_call
+
+import compiler/syntax/ast::{ASTNode, NumberLiteral, Out}
+import compiler/semantic/top_level::{EnumType, LibFun, LibType, ModuleType, NilType, NonGenericClassType, SemanticProgram, Type, TypeDefType, VoidType}
+import compiler/types/types::{PointerInstanceType, ProcInstanceType}
+import compiler/types/type_system::{TypeSystem}
+import compiler/semantic/method_lookup::{MethodLookup}
+import compiler/semantic/match::{CallSignature}
+import compiler/semantic/call::{CallRecalculation, CallTarget}
+
+# One argument of a call on a lib, as the call writes it: the node (an `out` argument
+# is the Out node), its type when it has one, and the parameter name when it is a
+# named argument. `out _` has no type: it takes the parameter's pointee and binds no
+# variable. The bodies slice types the value of any other `out` argument.
+pub class LibCallArgument
+  getter node : ASTNode
+  getter arg_type : Type?
+  getter name : String?
+
+  def initialize(@node : ASTNode, @arg_type : Type?, @name : String?)
+  end
+end
+
+# The outcome of a call on a lib: the C declaration it resolves to (`lib_fun`), the
+# call's type, or the first line of the hosted error (`error`, with the empty result
+# fields). `arg_nodes` are the arguments in the order the C function takes them:
+# positional ones, then named ones by parameter position (the hosted rewrite of named
+# arguments). `literal_index` and `literal_type` say which number literal arguments
+# take which numeric type (the hosted rewrite of the literal's value). `out_index` and
+# `out_type` say which `out` arguments are pointers and the pointee type each takes.
+# `to_unsafe_index` and `to_unsafe_target` say which arguments the hosted pass
+# replaces with a call to their `to_unsafe` method: the target is that call's lookup,
+# and the caller builds the call on the argument node.
+pub class LibCallTarget
+  getter lib_fun : LibFun?
+  getter result_type : Type?
+  getter error : String?
+  getter arg_nodes : Array(ASTNode)
+  getter literal_index : Array(Int32)
+  getter literal_type : Array(Type)
+  getter out_index : Array(Int32)
+  getter out_type : Array(Type)
+  getter to_unsafe_index : Array(Int32)
+  getter to_unsafe_target : Array(CallTarget)
+
+  def initialize(@lib_fun : LibFun?, @result_type : Type?, @error : String?, @arg_nodes : Array(ASTNode), @literal_index : Array(Int32), @literal_type : Array(Type), @out_index : Array(Int32), @out_type : Array(Type), @to_unsafe_index : Array(Int32), @to_unsafe_target : Array(CallTarget))
+  end
+
+  def self.failed(message : String) : LibCallTarget
+    LibCallTarget.new(nil, nil, message, [] of ASTNode, [] of Int32, [] of Type, [] of Int32, [] of Type, [] of Int32, [] of CallTarget)
+  end
+end
+
+# The port of semantic/lib.cr (Call#recalculate_lib_call): a call `LibC.name(args)`
+# on a lib. It finds the lib's fun, checks named arguments, arity, `out` arguments,
+# the argument types against the fun's parameter types (with the C conversions nil to
+# a pointer or a proc, a pointer to void*, a proc returning nil, a number literal to a
+# numeric parameter, and an argument whose type has a `to_unsafe` method), and the
+# variadic arguments. It marks the lib and the fun used only when the call checks.
+#
+# The primitive types are the prelude's classes, matched by name against the program's
+# types (the port models Int32 and the others as classes, not as IntegerType).
+#
+# Not ported, and refused with a `not ported:` message: a numeric argument that is not
+# a literal (the hosted Conversions.numeric_argument), a proc argument that is not equal
+# to its parameter's proc type (the hosted compatible_with? for procs), a to_unsafe
+# method with no declared return type, and a variadic argument whose type is a proc or
+# a C struct. Not ported: the program's C-call flag (iyi_calls_c), which the threads
+# runtime reads.
+pub class LibCall
+  INTEGER_NAMES = ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128"]
+
+  FLOAT_NAMES = ["Float32", "Float64"]
+
+  SCALAR_NAMES = ["Char", "Bool"]
+
+  def self.recalculate(target_lib : LibType, prog : SemanticProgram, ts : TypeSystem, name : String, args : Array(LibCallArgument)) : LibCallTarget
+    found = target_lib.lookup_fun(name)
+    if found.nil?
+      return LibCallTarget.failed("undefined fun '#{name}' for #{target_lib.to_s}")
+    end
+    target = LibCall.recalculate_fun(found.as(LibFun), "#{target_lib.full_name}##{name}", prog, ts, args)
+    if target.error.nil?
+      target_lib.used = true
+      found.as(LibFun).used = true
+    end
+    target
+  end
+
+  # The checks of a call to one fun, whoever owns it: a lib's fun (recalculate), or a `fun` the
+  # program declares at its top level, which a call names with no receiver.
+  def self.recalculate_fun(lib_fun : LibFun, owner : String, prog : SemanticProgram, ts : TypeSystem, args : Array(LibCallArgument)) : LibCallTarget
+    positional = [] of LibCallArgument
+    named = [] of LibCallArgument
+    args.each do |arg|
+      if arg.name.nil?
+        positional << arg
+      else
+        named << arg
+      end
+    end
+
+    # check_lib_call_named_args: named arguments fill the parameters they name, and
+    # every parameter must be covered.
+    if named.size > 0
+      return LibCallTarget.failed("can't use named args with variadic function") if lib_fun.varargs?
+      return LibCallTarget.failed("not ported: named arguments after too many positional arguments") if positional.size > lib_fun.args.size
+    end
+    covered = [] of Bool
+    i = 0
+    while i < lib_fun.args.size
+      covered << (i < positional.size)
+      i += 1
+    end
+    named_index = [] of Int32
+    named.each do |na|
+      named_name = na.name.as(String)
+      at = LibCall.param_index(lib_fun, named_name)
+      return LibCallTarget.failed("no parameter named '#{named_name}'") if at < 0
+      return LibCallTarget.failed("argument for parameter '#{named_name}' already specified") if covered[at]
+      covered[at] = true
+      named_index << at
+    end
+    missing = [] of String
+    j = 0
+    while j < covered.size
+      missing << lib_fun.args[j] if !covered[j]
+      j += 1
+    end
+    if named.size > 0
+      return LibCallTarget.failed("missing argument: #{missing[0]}") if missing.size == 1
+      return LibCallTarget.failed("missing arguments: #{missing.join(", ")}") if missing.size > 1
+    end
+
+    # The named arguments follow the positional ones, in parameter order.
+    ordered = [] of LibCallArgument
+    positional.each do |arg|
+      ordered << arg
+    end
+    p = positional.size
+    while p < lib_fun.args.size
+      k = 0
+      while k < named_index.size
+        ordered << named[k] if named_index[k] == p
+        k += 1
+      end
+      p += 1
+    end
+
+    # check_fun_args_size_match: a variadic fun takes at least its fixed arguments;
+    # otherwise the count is exact (no parameter has a default).
+    count = ordered.size
+    if count < lib_fun.args.size || (!lib_fun.varargs? && count > lib_fun.args.size)
+      return LibCallTarget.failed("wrong number of arguments for '#{owner}' (given #{count}, expected #{lib_fun.args.size})")
+    end
+
+    # check_fun_out_args: an `out` argument needs a pointer parameter that is not Void*.
+    out_index = [] of Int32
+    out_type = [] of Type
+    i = 0
+    while i < lib_fun.args.size
+      node = ordered[i].node
+      if node.is_a?(Out)
+        param = lib_fun.arg_types[i]
+        if param.is_a?(PointerInstanceType)
+          pointee = param.as(PointerInstanceType).element_type
+          if LibCall.unalias(pointee).is_a?(VoidType)
+            return LibCallTarget.failed("can't use out with Void* (parameter #{LibCall.lib_arg_name(lib_fun, i)} of #{owner} is Void*)")
+          end
+          out_index << i
+          out_type << pointee
+        else
+          return LibCallTarget.failed("parameter #{LibCall.lib_arg_name(lib_fun, i)} of #{owner} cannot be passed as 'out' because it is not a pointer")
+        end
+      end
+      i += 1
+    end
+    if lib_fun.varargs?
+      k = lib_fun.args.size
+      while k < ordered.size
+        if ordered[k].node.is_a?(Out)
+          exp_text = ordered[k].node.as(Out).exp.to_s
+          return LibCallTarget.failed("can't use out at varargs position: declare the variable with `#{exp_text} = uninitialized ...` and pass it with `pointerof(#{exp_text})`")
+        end
+        k += 1
+      end
+    end
+
+    # check_fun_args_types_match: the fixed parameters, then the variadic arguments.
+    # An `out` argument is skipped: its type is the parameter's pointee by construction.
+    literal_index = [] of Int32
+    literal_type = [] of Type
+    to_unsafe_index = [] of Int32
+    to_unsafe_target = [] of CallTarget
+    check_error : String? = nil
+    i = 0
+    while i < ordered.size
+      arg = ordered[i]
+      if !arg.node.is_a?(Out)
+        actual = arg.arg_type
+        return LibCallTarget.failed("can't deduce argument type") if actual.nil?
+        if i < lib_fun.args.size
+          check_error = LibCall.check_fixed(prog, owner, lib_fun, i, arg.node, actual.as(Type), ts, literal_index, literal_type, to_unsafe_index, to_unsafe_target)
+        else
+          check_error = LibCall.check_variadic(prog, owner, i, actual.as(Type), ts, to_unsafe_index, to_unsafe_target)
+        end
+        return LibCallTarget.failed(check_error.as(String)) if check_error
+      end
+      i += 1
+    end
+
+    declared = lib_fun.resolved_return
+    result_type = prog.types["Nil"].as(Type)
+    if declared && !LibCall.unalias(declared.as(Type)).is_a?(VoidType)
+      result_type = declared.as(Type)
+    end
+
+    nodes = [] of ASTNode
+    ordered.each do |arg|
+      nodes << arg.node
+    end
+    LibCallTarget.new(lib_fun, result_type, nil, nodes, literal_index, literal_type, out_index, out_type, to_unsafe_index, to_unsafe_target)
+  end
+
+  # The position of the parameter named *name*, or -1.
+  def self.param_index(lib_fun : LibFun, name : String) : Int32
+    i = 0
+    while i < lib_fun.args.size
+      return i if lib_fun.args[i] == name
+      i += 1
+    end
+    -1
+  end
+
+  # The hosted lib_arg_name: a parameter's name quoted, or its position when unnamed.
+  def self.lib_arg_name(lib_fun : LibFun, index : Int32) : String
+    name = lib_fun.args[index]
+    return "#" + (index + 1).to_s if name.empty?
+    "'" + name + "'"
+  end
+
+  # Whether *given* is the prelude's primitive named by one of *names*.
+  def self.primitive_in?(prog : SemanticProgram, given : Type, names : Array(String)) : Bool
+    names.each do |n|
+      found = prog.types[n]?
+      return true if found && found.as(Type) == given
+    end
+    false
+  end
+
+  # A typedef's type: the type it names, through any chain of typedefs.
+  def self.unalias(given : Type) : Type
+    cur = given
+    while cur.is_a?(TypeDefType)
+      cur = cur.as(TypeDefType).typedef
+    end
+    cur
+  end
+
+  def self.same_types(a : Array(Type), b : Array(Type)) : Bool
+    return false if a.size != b.size
+    i = 0
+    while i < a.size
+      return false if a[i] != b[i]
+      i += 1
+    end
+    true
+  end
+
+  # The hosted Type#implicitly_converted_in_c_to?: nil to a pointer or a proc, any
+  # pointer to a void pointer, and a proc to a proc that returns nil over the same
+  # argument types.
+  def self.implicitly_converted(actual : Type, expected : Type) : Bool
+    if actual.is_a?(NilType)
+      return expected.is_a?(PointerInstanceType) || expected.is_a?(ProcInstanceType)
+    end
+    if actual.is_a?(ProcInstanceType) && expected.is_a?(ProcInstanceType)
+      wanted = expected.as(ProcInstanceType)
+      return wanted.return_type.is_a?(NilType) && LibCall.same_types(wanted.arg_types, actual.as(ProcInstanceType).arg_types)
+    end
+    if actual.is_a?(PointerInstanceType) && expected.is_a?(PointerInstanceType)
+      return expected.as(PointerInstanceType).element_type.is_a?(VoidType)
+    end
+    false
+  end
+
+  # The to_unsafe call of an argument's type, as the hosted pass looks it up: nil when
+  # the type has no to_unsafe method, else the lookup of `to_unsafe()` on the type.
+  def self.to_unsafe_target(actual : Type, ts : TypeSystem) : CallTarget?
+    return nil if !(actual.is_a?(ModuleType) && MethodLookup.defines?(actual.as(ModuleType), "to_unsafe"))
+    CallRecalculation.recalculate_signature(actual, ts, CallSignature.new("to_unsafe", [] of Type, nil, false), false)
+  end
+
+  # The argument of a fixed parameter: the error line, or nil when it checks. A number
+  # literal to a numeric parameter is recorded in *literal_index* and *literal_type*; an
+  # argument converted by its to_unsafe method is recorded in *to_unsafe_index* and
+  # *to_unsafe_target*.
+  def self.check_fixed(prog : SemanticProgram, owner : String, lib_fun : LibFun, index : Int32, node : ASTNode, actual : Type, ts : TypeSystem, literal_index : Array(Int32), literal_type : Array(Type), to_unsafe_index : Array(Int32), to_unsafe_target : Array(CallTarget)) : String?
+    expected = lib_fun.arg_types[index]
+    if actual == expected || LibCall.implicitly_converted(actual, expected)
+      return nil
+    end
+    if actual.is_a?(ProcInstanceType) && expected.is_a?(ProcInstanceType)
+      return "not ported: proc argument compatibility"
+    end
+    unaliased = LibCall.unalias(expected)
+    numeric = LibCall.primitive_in?(prog, unaliased, INTEGER_NAMES) || LibCall.primitive_in?(prog, unaliased, FLOAT_NAMES)
+    if numeric
+      if node.is_a?(NumberLiteral)
+        literal_index << index
+        literal_type << unaliased
+        return nil
+      end
+      actual_unaliased = LibCall.unalias(actual)
+      if LibCall.primitive_in?(prog, actual_unaliased, INTEGER_NAMES) || LibCall.primitive_in?(prog, actual_unaliased, FLOAT_NAMES)
+        return "not ported: numeric argument conversion"
+      end
+    end
+    arg_name = LibCall.lib_arg_name(lib_fun, index)
+    target = LibCall.to_unsafe_target(actual, ts)
+    if target.nil?
+      if expected.is_a?(ProcInstanceType) && actual.is_a?(ProcInstanceType) && LibCall.same_types(expected.as(ProcInstanceType).arg_types, actual.as(ProcInstanceType).arg_types)
+        return "argument #{arg_name} of '#{owner}' must be a Proc returning #{expected.as(ProcInstanceType).return_type.to_s}, not #{actual.as(ProcInstanceType).return_type.to_s}"
+      end
+      return "argument #{arg_name} of '#{owner}' must be #{expected.to_s}, not #{actual.to_s}"
+    end
+    converted = target.as(CallTarget)
+    return "not ported: to_unsafe lookup: #{converted.error.to_s}" if converted.error
+    implicit = converted.declared_return
+    return "not ported: to_unsafe without a declared return type" if implicit.nil?
+    returned = implicit.as(Type)
+    if returned == expected || LibCall.implicitly_converted(returned, expected)
+      to_unsafe_index << index
+      to_unsafe_target << converted
+      return nil
+    end
+    "argument #{arg_name} of '#{owner}' must be #{expected.to_s}, not #{actual.to_s} (nor #{returned.to_s} returned by '#{actual.to_s}#to_unsafe')"
+  end
+
+  # The hosted allowed_in_lib?: true for a type a C function takes as it is, false for
+  # nil and for a class that is not a primitive, and nil when this port does not decide
+  # it (a proc or a C struct).
+  def self.allowed_in_lib(prog : SemanticProgram, given : Type) : Bool?
+    return false if given.is_a?(NilType)
+    return true if LibCall.primitive_in?(prog, given, INTEGER_NAMES) || LibCall.primitive_in?(prog, given, FLOAT_NAMES) || LibCall.primitive_in?(prog, given, SCALAR_NAMES)
+    return true if given.is_a?(VoidType) || given.is_a?(TypeDefType) || given.is_a?(EnumType)
+    if given.is_a?(PointerInstanceType)
+      return LibCall.allowed_in_lib(prog, given.as(PointerInstanceType).element_type)
+    end
+    return nil if given.is_a?(ProcInstanceType)
+    return nil if given.is_a?(NonGenericClassType) && given.as(NonGenericClassType).struct?
+    false
+  end
+
+  # A variadic argument: the error line, or nil when it passes unconverted or is
+  # converted by its to_unsafe method, which is recorded as for a fixed parameter.
+  def self.check_variadic(prog : SemanticProgram, owner : String, index : Int32, actual : Type, ts : TypeSystem, to_unsafe_index : Array(Int32), to_unsafe_target : Array(CallTarget)) : String?
+    return nil if actual.is_a?(NilType)
+    allowed = LibCall.allowed_in_lib(prog, actual)
+    return nil if allowed == true
+    return "not ported: variadic argument of this type" if allowed.nil?
+    target = LibCall.to_unsafe_target(actual, ts)
+    if target.nil?
+      return "argument #" + (index + 1).to_s + " of '" + owner + "' is not a primitive type and no " + actual.to_s + "#to_unsafe method found"
+    end
+    converted = target.as(CallTarget)
+    return "not ported: to_unsafe lookup: #{converted.error.to_s}" if converted.error
+    implicit = converted.declared_return
+    return "not ported: to_unsafe without a declared return type" if implicit.nil?
+    returned = implicit.as(Type)
+    returned_allowed = LibCall.allowed_in_lib(prog, returned)
+    return "not ported: variadic to_unsafe result of this type" if returned_allowed.nil?
+    if returned_allowed == false
+      return "converted #{actual.to_s} invoking to_unsafe, but #{returned.to_s} is not a primitive type"
+    end
+    to_unsafe_index << index
+    to_unsafe_target << converted
+    nil
+  end
+end

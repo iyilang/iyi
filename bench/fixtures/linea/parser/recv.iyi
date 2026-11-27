@@ -1,0 +1,7 @@
+module main
+
+pub def show(n : Int32) : String
+  n.to_s
+end
+
+puts show(7)

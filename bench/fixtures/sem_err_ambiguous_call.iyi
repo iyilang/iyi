@@ -1,0 +1,13 @@
+def foo(x : Int8)
+  x
+end
+
+def foo(x : UInt8)
+  x
+end
+
+def foo(x : Int16)
+  x
+end
+
+foo(1)

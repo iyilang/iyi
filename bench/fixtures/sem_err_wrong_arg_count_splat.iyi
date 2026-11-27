@@ -1,0 +1,5 @@
+def arity_splat(first : Int32, *rest) : Int32
+  first
+end
+
+arity_splat()

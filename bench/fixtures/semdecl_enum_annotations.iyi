@@ -1,0 +1,9 @@
+@[Flags]
+enum MarkedEnum
+  First
+  Second
+end
+
+enum PlainEnum
+  First
+end

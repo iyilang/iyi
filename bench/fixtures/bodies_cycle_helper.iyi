@@ -1,0 +1,22 @@
+module bodies_cycle_helper
+
+pub class Pair
+  def initialize(@left : Pair?)
+  end
+
+  def hash : Int32
+    if @left
+      31 &* hv(@left)
+    else
+      31
+    end
+  end
+end
+
+pub def hv(value : Pair?) : Int32
+  if v = value
+    v.hash
+  else
+    0
+  end
+end

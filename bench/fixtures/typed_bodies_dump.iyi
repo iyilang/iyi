@@ -1,0 +1,100 @@
+# Typed nodes in the method instances recorded by the semantic visitor.
+module bench/selfhost_typed_bodies_dump
+
+import compiler/syntax/ast::{ASTNode, Expressions}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/top_level::{NamedType, SemanticProgram, TopLevelVisitor, Type}
+import compiler/semantic/instance_vars::{declare_guessed_instance_vars}
+import compiler/semantic/main_visitor::{MainVisitor, node_class_name}
+import compiler/semantic/recursive_struct_checker::{RecursiveStructChecker}
+import compiler/macros/target_flags::{MacroTargetFlags}
+
+def body_type_label(type : Type) : String
+  if type.is_a?(NamedType)
+    type.full_name
+  else
+    type.to_s
+  end
+end
+
+class BodyNodeWalk < Visitor
+  def initialize(@visitor : MainVisitor, @file : String, @signature : String)
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    loc = node.location
+    if loc.nil? && node.is_a?(Expressions)
+      exps = node.as(Expressions).expressions
+      loc = exps[0].location unless exps.empty?
+    end
+    if loc && loc.filename == @file
+      if type = @visitor.type_of?(node)
+        puts "#{@signature}|#{loc.line_number}:#{loc.column_number} #{node_class_name(node)} #{body_type_label(type)}"
+      end
+    end
+    true
+  end
+end
+
+args = Program.args
+index = 0
+defines = [] of String
+while index < args.size && args[index].starts_with?("-D")
+  defines << args[index][2, args[index].size - 2]
+  index += 1
+end
+with_prelude = false
+if index < args.size && args[index] == "--with-prelude"
+  with_prelude = true
+  index += 1
+end
+raise "usage: selfhost_typed_bodies_dump [-Dname ...] [--with-prelude] file.iyi root" if args.size <= index + 1
+path = args[index]
+root = args[index + 1]
+parts = path.split('/')
+directory = ""
+i = 0
+while i < parts.size - 1
+  directory = "#{directory}#{parts[i]}/"
+  i += 1
+end
+parser = Parser.new(File.read(path), path)
+program = SemanticProgram.new
+program.normalizer.macro_flags = MacroTargetFlags.host(defines)
+node = program.normalizer.normalize(parser.parse)
+program.total_mode = true
+program.search_path = [root]
+program.entry_dir = directory
+program.file_imports[path] = program.current_imports
+program.file_import_defs[path] = program.current_import_defs
+if with_prelude
+  prelude = TopLevelVisitor.new(program)
+  prelude_file = prelude.import_file("iyi/prelude")
+  raise "cannot find iyi/prelude" if prelude_file.nil?
+  prelude.load_file(prelude_file.as(String))
+  prelude.finish
+end
+top = TopLevelVisitor.new(program, path)
+node.accept(top)
+top.finish
+declare_guessed_instance_vars(program)
+visitor = MainVisitor.new(program)
+visitor.total = true
+node.accept(visitor)
+RecursiveStructChecker.new(program).run
+count = 0
+visitor.typed_instances.each do |instance|
+  definition = instance.definition
+  if loc = definition.location
+    if loc.filename == path
+      if body = definition.body
+        arg_types = instance.arg_types.map { |type| body_type_label(type) }.join(",")
+        signature = "#{loc.line_number}:#{loc.column_number} #{definition.name}(#{arg_types})"
+        body.accept(BodyNodeWalk.new(visitor, path, signature))
+        count += 1
+      end
+    end
+  end
+end
+STDERR.puts "instances: #{count}"

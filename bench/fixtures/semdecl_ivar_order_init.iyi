@@ -1,0 +1,17 @@
+class Gadget
+  @tag : Foo? = nil
+
+  def initialize(@kind : Visibility, @count : Int32, other : Bar)
+    @other = other
+  end
+end
+
+class Foo
+end
+
+class Bar
+end
+
+enum Visibility
+  Public
+end

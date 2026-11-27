@@ -1,0 +1,34 @@
+trait DumpMarker
+end
+
+trait DumpSource(T) : DumpMarker
+  type Item
+end
+
+struct DumpBox(T)
+end
+
+alias DumpIntBox = DumpBox(Int32)
+alias DumpBoxAlias = DumpIntBox
+
+module DumpNamespace
+  alias NestedBox = ::DumpBoxAlias
+end
+
+def describe(value : Object) : String
+  "object"
+end
+
+def describe(value : String) : String
+  "string"
+end
+
+class DumpMethods
+  def describe(value : Object) : String
+    "object"
+  end
+
+  def describe(value : String) : String
+    "string"
+  end
+end

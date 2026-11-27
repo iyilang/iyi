@@ -1,0 +1,5 @@
+def widen(value : Int64) : Int64
+  value
+end
+
+puts widen(42_i32)

@@ -1,0 +1,10 @@
+def fanout(value, flag : Bool = false) : Bool
+  fanout(1, flag: flag)
+  fanout("s", flag: flag)
+  fanout(2.5, flag: flag)
+  fanout(nil, flag: flag)
+  fanout(true, flag: flag)
+  flag
+end
+
+fanout(1, flag: true)

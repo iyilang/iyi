@@ -1,0 +1,4 @@
+class ProcHolder(T)
+  def initialize(@callback : Proc(T, String), @empty : -> Nil)
+  end
+end

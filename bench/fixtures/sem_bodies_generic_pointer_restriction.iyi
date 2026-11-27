@@ -1,0 +1,13 @@
+class Ptr(T)
+  def copy_from(source : Ptr(T), count : Int32) : Int32
+    count
+  end
+end
+
+def boot
+  p = Ptr(Int32).new
+  p.copy_from(p, 2)
+end
+
+x = boot
+y = 4

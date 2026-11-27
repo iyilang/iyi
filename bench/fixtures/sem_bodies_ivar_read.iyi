@@ -1,0 +1,7 @@
+class Box
+  def initialize(@v : Int32)
+  end
+end
+
+b = Box.new(3)
+c = b.@v

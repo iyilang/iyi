@@ -1,0 +1,17 @@
+def discard : Nil
+  123
+end
+
+def number : Int32
+  123
+end
+
+class Writer
+  def self.write : Nil
+    42_u64
+  end
+end
+
+x = discard
+y = number
+z = Writer.write

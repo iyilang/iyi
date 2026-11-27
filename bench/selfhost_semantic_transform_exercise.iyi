@@ -1,0 +1,676 @@
+import compiler/foundation/location::{Location}
+import compiler/foundation/errors::{SyntaxException}
+import compiler/foundation/enums
+import compiler/foundation/string_pool::{StringPool}
+import compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState}
+import compiler/syntax/lexer::{Lexer}
+import compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, Metaclass, ExceptionHandler, Rescue, ProcLiteral, Propagate, Defer, Recover}
+import compiler/syntax/ast::{Select, Macro, ProcPointer, Union}
+import compiler/syntax/ast::{Select, Macro, ProcPointer, Union, PointerOf}
+import compiler/syntax/ast::{ImportDecl, UsingDecl, ModuleHeader, MacroIf, MacroFor, MagicConstant, Require, MacroExpression, SizeOf, ReadInstanceVar}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/visitor::{Visitor, NodeCounterVisitor}
+import compiler/semantic/normalizer::{NormalizerProgram, Normalizer}
+import compiler/semantic/literal_expander::{LiteralExpander}
+import compiler/semantic/cleanup::{CleanupTransformer}
+
+module BenchSemanticTransformExercise
+  def self.assert(cond : Bool, msg : String)
+    unless cond
+      puts "Assertion failed: " + msg
+      raise "Assertion failed: " + msg
+    end
+  end
+
+  def self.escape_s(s : String) : String
+    res = "\""
+    i = 0
+    while i < s.bytesize
+      b = s.byte_at(i)
+      if b == 10_u8
+        res = res + "\\n"
+      elsif b == 13_u8
+        res = res + "\\r"
+      elsif b == 9_u8
+        res = res + "\\t"
+      elsif b == 92_u8
+        res = res + "\\\\"
+      elsif b == 34_u8
+        res = res + "\\\""
+      else
+        res = res + b.unsafe_chr.to_s
+      end
+      i = i + 1
+    end
+    res + "\""
+  end
+
+  def self.names_text(names : Array(String)?) : String
+    if n = names
+      "[" + n.join(", ") + "]"
+    else
+      "none"
+    end
+  end
+
+  def self.dump_ast(node : ASTNode?, indent : Int32 = 0) : String
+    return ("  " * indent) + "nil\n" if node.nil?
+    p = "  " * indent
+    case node
+    when Expressions
+      kw = case node.keyword
+           when Expressions::Keyword::Paren then "paren"
+           when Expressions::Keyword::Begin then "begin"
+           else                                  "none"
+           end
+      s = "#{p}Expressions keyword=#{kw}\n"
+      node.expressions.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when Nop
+      "#{p}Nop\n"
+    when NilLiteral
+      "#{p}NilLiteral\n"
+    when BoolLiteral
+      "#{p}BoolLiteral value=#{node.value}\n"
+    when NumberLiteral
+      "#{p}NumberLiteral value=\"#{node.value}\" kind=#{node.kind.to_s}\n"
+    when CharLiteral
+      "#{p}CharLiteral value=#{node.value.ord}\n"
+    when StringLiteral
+      "#{p}StringLiteral value=#{escape_s(node.value)}\n"
+    when StringInterpolation
+      s = "#{p}StringInterpolation\n"
+      node.expressions.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when SymbolLiteral
+      "#{p}SymbolLiteral value=#{escape_s(node.value)}\n"
+    when Var
+      "#{p}Var name=#{escape_s(node.name)}\n"
+    when InstanceVar
+      "#{p}InstanceVar name=#{escape_s(node.name)}\n"
+    when ClassVar
+      "#{p}ClassVar name=#{escape_s(node.name)}\n"
+    when Global
+      "#{p}Global name=#{escape_s(node.name)}\n"
+    when Path
+      "#{p}Path names=#{node.names.join("::")} global=#{node.global}\n"
+    when Generic
+      s = "#{p}Generic\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s += "#{p}  type_vars:\n"
+      node.type_vars.each { |tv| s += dump_ast(tv, indent + 2) }
+      s
+    when Self
+      "#{p}Self\n"
+    when Underscore
+      "#{p}Underscore\n"
+    when ImplicitObj
+      "#{p}ImplicitObj\n"
+    when ArrayLiteral
+      s = "#{p}ArrayLiteral\n"
+      node.elements.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when HashLiteral
+      s = "#{p}HashLiteral\n"
+      node.entries.each do |entry|
+        s += "#{p}  entry:\n"
+        s += "#{p}    key:\n" + dump_ast(entry.key, indent + 3)
+        s += "#{p}    value:\n" + dump_ast(entry.value, indent + 3)
+      end
+      s
+    when TupleLiteral
+      s = "#{p}TupleLiteral\n"
+      node.elements.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when NamedTupleLiteral
+      s = "#{p}NamedTupleLiteral\n"
+      node.entries.each do |entry|
+        s += "#{p}  entry key=#{escape_s(entry.key)}:\n" + dump_ast(entry.value, indent + 2)
+      end
+      s
+    when RangeLiteral
+      s = "#{p}RangeLiteral exclusive=#{node.exclusive}\n"
+      s += "#{p}  from:\n" + dump_ast(node.from, indent + 2)
+      s += "#{p}  to:\n" + dump_ast(node.to, indent + 2)
+      s
+    when RegexLiteral
+      s = "#{p}RegexLiteral\n"
+      s += dump_ast(node.value, indent + 1)
+      s
+    when Call
+      s = "#{p}Call name=#{escape_s(node.name)}\n"
+      if obj = node.obj
+        s += "#{p}  obj:\n" + dump_ast(obj, indent + 2)
+      end
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      if named_args = node.named_args
+        s += "#{p}  named_args:\n"
+        named_args.each { |na| s += dump_ast(na, indent + 2) }
+      end
+      if block_arg = node.block_arg
+        s += "#{p}  block_arg:\n" + dump_ast(block_arg, indent + 2)
+      end
+      if block = node.block
+        s += "#{p}  block:\n" + dump_ast(block, indent + 2)
+      end
+      s
+    when NamedArgument
+      s = "#{p}NamedArgument name=#{escape_s(node.name)}:\n"
+      s += dump_ast(node.value, indent + 1)
+      s
+    when Block
+      arg_names = node.args.map(&.name).join(", ")
+      splat = node.splat_index ? node.splat_index.to_s : "none"
+      s = "#{p}Block args=[#{arg_names}] splat=#{splat}:\n"
+      s += dump_ast(node.body, indent + 1)
+      s
+    when Assign
+      s = "#{p}Assign\n"
+      s += "#{p}  target:\n" + dump_ast(node.target, indent + 2)
+      s += "#{p}  value:\n" + dump_ast(node.value, indent + 2)
+      s
+    when OpAssign
+      s = "#{p}OpAssign op=#{escape_s(node.op)}\n"
+      s += "#{p}  target:\n" + dump_ast(node.target, indent + 2)
+      s += "#{p}  value:\n" + dump_ast(node.value, indent + 2)
+      s
+    when MultiAssign
+      s = "#{p}MultiAssign\n"
+      s += "#{p}  targets:\n"
+      node.targets.each { |t| s += dump_ast(t, indent + 2) }
+      s += "#{p}  values:\n"
+      node.values.each { |v| s += dump_ast(v, indent + 2) }
+      s
+    when PointerOf
+      s = "#{p}PointerOf\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when If
+      s = "#{p}If ternary=#{node.ternary} and=#{node.from_and} or=#{node.from_or} truthy=#{node.truthy} falsey=#{node.falsey}\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  then:\n" + dump_ast(node.then, indent + 2)
+      s += "#{p}  else:\n" + dump_ast(node.else, indent + 2)
+      s
+    when Unless
+      s = "#{p}Unless\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  then:\n" + dump_ast(node.then, indent + 2)
+      s += "#{p}  else:\n" + dump_ast(node.else, indent + 2)
+      s
+    when While
+      s = "#{p}While\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when Until
+      s = "#{p}Until\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when Case
+      s = "#{p}Case exhaustive=#{node.exhaustive}\n"
+      if cond = node.cond
+        s += "#{p}  cond:\n" + dump_ast(cond, indent + 2)
+      end
+      s += "#{p}  whens:\n"
+      node.whens.each { |w| s += dump_ast(w, indent + 2) }
+      if el = node.else
+        s += "#{p}  else:\n" + dump_ast(el, indent + 2)
+      end
+      s
+    when When
+      s = "#{p}When\n"
+      s += "#{p}  conds:\n"
+      node.conds.each { |c| s += dump_ast(c, indent + 2) }
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when And
+      s = "#{p}And\n"
+      s += "#{p}  left:\n" + dump_ast(node.left, indent + 2)
+      s += "#{p}  right:\n" + dump_ast(node.right, indent + 2)
+      s
+    when Or
+      s = "#{p}Or\n"
+      s += "#{p}  left:\n" + dump_ast(node.left, indent + 2)
+      s += "#{p}  right:\n" + dump_ast(node.right, indent + 2)
+      s
+    when Not
+      s = "#{p}Not\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Splat
+      s = "#{p}Splat\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when DoubleSplat
+      s = "#{p}DoubleSplat\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Return
+      s = "#{p}Return\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Break
+      s = "#{p}Break\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Next
+      s = "#{p}Next\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Yield
+      s = "#{p}Yield\n"
+      node.exps.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when Cast
+      s = "#{p}Cast\n"
+      s += "#{p}  obj:\n" + dump_ast(node.obj, indent + 2)
+      s += "#{p}  to:\n" + dump_ast(node.to, indent + 2)
+      s
+    when NilableCast
+      s = "#{p}NilableCast\n"
+      s += "#{p}  obj:\n" + dump_ast(node.obj, indent + 2)
+      s += "#{p}  to:\n" + dump_ast(node.to, indent + 2)
+      s
+    when IsA
+      s = "#{p}IsA\n"
+      s += "#{p}  obj:\n" + dump_ast(node.obj, indent + 2)
+      s += "#{p}  const:\n" + dump_ast(node.const, indent + 2)
+      s
+    when RespondsTo
+      s = "#{p}RespondsTo name=#{escape_s(node.name)}\n"
+      s += "#{p}  obj:\n" + dump_ast(node.obj, indent + 2)
+      s
+    when Def
+      receiver_s = node.receiver ? " receiver" : ""
+      abstract_s = node.abstract ? " abstract=true" : ""
+      splat_s = node.splat_index ? " splat=#{node.splat_index}" : ""
+      s = "#{p}Def name=#{escape_s(node.name)}#{receiver_s}#{abstract_s}#{splat_s}\n"
+      if r = node.receiver
+        s += "#{p}  receiver:\n" + dump_ast(r, indent + 2)
+      end
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      if ds = node.double_splat
+        s += "#{p}  double_splat:\n" + dump_ast(ds, indent + 2)
+      end
+      if ba = node.block_arg
+        s += "#{p}  block_arg:\n" + dump_ast(ba, indent + 2)
+      end
+      if rt = node.return_type
+        s += "#{p}  return_type:\n" + dump_ast(rt, indent + 2)
+      end
+      if fv = node.free_vars
+        s += "#{p}  free_vars=[#{fv.join(", ")}]\n"
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when Arg
+      ext_s = (ext = node.external_name) && ext != node.name ? " external_name=#{escape_s(ext)}" : ""
+      s = "#{p}Arg name=#{escape_s(node.name)}#{ext_s}\n"
+      if rest = node.restriction
+        s += "#{p}  restriction:\n" + dump_ast(rest, indent + 2)
+      end
+      if def_val = node.default_value
+        s += "#{p}  default_value:\n" + dump_ast(def_val, indent + 2)
+      end
+      s
+    when ClassDef
+      splat_s = node.splat_index ? " splat=#{node.splat_index}" : ""
+      s = "#{p}ClassDef struct=#{node.struct} abstract=#{node.abstract}#{splat_s}\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      if tv = node.type_vars
+        s += "#{p}  type_vars=[#{tv.join(", ")}]\n"
+      end
+      if sc = node.superclass
+        s += "#{p}  superclass:\n" + dump_ast(sc, indent + 2)
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when ModuleDef
+      splat_s = node.splat_index ? " splat=#{node.splat_index}" : ""
+      s = "#{p}ModuleDef#{splat_s}\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      if tv = node.type_vars
+        s += "#{p}  type_vars=[#{tv.join(", ")}]\n"
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when EnumDef
+      s = "#{p}EnumDef\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      if bt = node.base_type
+        s += "#{p}  base_type:\n" + dump_ast(bt, indent + 2)
+      end
+      if !node.members.empty?
+        s += "#{p}  members:\n"
+        node.members.each { |m| s += dump_ast(m, indent + 2) }
+      end
+      s
+    when Alias
+      s = "#{p}Alias\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s += "#{p}  value:\n" + dump_ast(node.value, indent + 2)
+      s
+    when Include
+      s = "#{p}Include\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s
+    when Extend
+      s = "#{p}Extend\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s
+    when TraitDef
+      s = "#{p}TraitDef\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      if tv = node.type_vars
+        s += "#{p}  type_vars=[#{tv.join(", ")}]\n"
+      end
+      if at = node.assoc_types
+        s += "#{p}  assoc_types=[#{at.join(", ")}]\n"
+      end
+      if st = node.supertraits
+        s += "#{p}  supertraits:\n"
+        st.each { |st_node| s += dump_ast(st_node, indent + 2) }
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when ImplDef
+      s = "#{p}ImplDef\n"
+      s += "#{p}  trait:\n" + dump_ast(node.trait, indent + 2)
+      if ta = node.trait_args
+        s += "#{p}  trait_args:\n"
+        ta.each { |arg| s += dump_ast(arg, indent + 2) }
+      end
+      s += "#{p}  target:\n" + dump_ast(node.target, indent + 2)
+      if tv = node.type_vars
+        s += "#{p}  type_vars=[#{tv.join(", ")}]\n"
+      end
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when AssocTypeDecl
+      s = "#{p}AssocTypeDecl name=#{escape_s(node.name)}\n"
+      if val = node.value
+        s += "#{p}  value:\n" + dump_ast(val, indent + 2)
+      end
+      s
+    when AnnotationDef
+      s = "#{p}AnnotationDef\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s
+    when Annotation
+      s = "#{p}Annotation\n"
+      s += "#{p}  path:\n" + dump_ast(node.path, indent + 2)
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      if na = node.named_args
+        s += "#{p}  named_args:\n"
+        na.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      s
+    when TypeDeclaration
+      s = "#{p}TypeDeclaration\n"
+      s += "#{p}  var:\n" + dump_ast(node.var, indent + 2)
+      s += "#{p}  declared_type:\n" + dump_ast(node.declared_type, indent + 2)
+      if val = node.value
+        s += "#{p}  value:\n" + dump_ast(val, indent + 2)
+      end
+      s
+    when UninitializedVar
+      s = "#{p}UninitializedVar\n"
+      s += "#{p}  var:\n" + dump_ast(node.var, indent + 2)
+      s += "#{p}  declared_type:\n" + dump_ast(node.declared_type, indent + 2)
+      s
+    when VisibilityModifier
+      s = "#{p}VisibilityModifier modifier=#{node.modifier.to_s.downcase}\n"
+      s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
+      s
+    when LibDef
+      s = "#{p}LibDef\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when FunDef
+      real_s = (r = node.real_name) ? " real_name=#{escape_s(r)}" : ""
+      s = "#{p}FunDef name=#{escape_s(node.name)}#{real_s}\n"
+      if !node.args.empty?
+        s += "#{p}  args:\n"
+        node.args.each { |a| s += dump_ast(a, indent + 2) }
+      end
+      if rt = node.return_type
+        s += "#{p}  return_type:\n" + dump_ast(rt, indent + 2)
+      end
+      if b = node.body
+        s += "#{p}  body:\n" + dump_ast(b, indent + 2)
+      end
+      s
+    when TypeDef
+      s = "#{p}TypeDef name=#{escape_s(node.name)}\n"
+      s += "#{p}  type_spec:\n" + dump_ast(node.type_spec, indent + 2)
+      s
+    when CStructOrUnionDef
+      s = "#{p}CStructOrUnionDef name=#{escape_s(node.name)} union=#{node.union}\n"
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when ExternalVar
+      real_s = (r = node.real_name) ? " real_name=#{escape_s(r)}" : ""
+      s = "#{p}ExternalVar name=#{escape_s(node.name)}#{real_s}\n"
+      s += "#{p}  type_spec:\n" + dump_ast(node.type_spec, indent + 2)
+      s
+    when ProcNotation
+      s = "#{p}ProcNotation\n"
+      if inputs = node.inputs
+        s += "#{p}  inputs:\n"
+        inputs.each { |inp| s += dump_ast(inp, indent + 2) }
+      end
+      if o = node.output
+        s += "#{p}  output:\n" + dump_ast(o, indent + 2)
+      end
+      s
+    when Compiler::Syntax::Ast::Union
+      s = "#{p}Union\n"
+      s += "#{p}  types:\n"
+      node.types.each { |t| s += dump_ast(t, indent + 2) }
+      s
+    when Metaclass
+      s = "#{p}Metaclass\n"
+      s += "#{p}  name:\n" + dump_ast(node.name, indent + 2)
+      s
+    when ExceptionHandler
+      s = "#{p}ExceptionHandler\n"
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      if rescues = node.rescues
+        rescues.each do |r|
+          s += "#{p}  rescue:\n"
+          s += "#{p}    name=#{escape_s(r.name || "")}\n"
+          if types = r.types
+            s += "#{p}    types:\n"
+            types.each { |t| s += dump_ast(t, indent + 3) }
+          end
+          s += "#{p}    body:\n" + dump_ast(r.body, indent + 3)
+        end
+      end
+      if else_body = node.else
+        s += "#{p}  else:\n" + dump_ast(else_body, indent + 2)
+      end
+      if ensure_body = node.ensure
+        s += "#{p}  ensure:\n" + dump_ast(ensure_body, indent + 2)
+      end
+      s
+    when ProcLiteral
+      s = "#{p}ProcLiteral\n"
+      s += dump_ast(node.def, indent + 1)
+      s
+    when Propagate
+      s = "#{p}Propagate\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Defer
+      s = "#{p}Defer\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Recover
+      s = "#{p}Recover\n"
+      s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
+      if d = node.default
+        s += "#{p}  default:\n" + dump_ast(d, indent + 2)
+      end
+      s
+    when Select
+      s = "#{p}Select\n"
+      node.whens.each { |w| s += dump_ast(w, indent + 1) }
+      if el = node.else
+        s += "#{p}  else:\n" + dump_ast(el, indent + 2)
+      end
+      s
+    when TypeOf
+      s = "#{p}TypeOf\n"
+      node.expressions.each { |e| s += dump_ast(e, indent + 1) }
+      s
+    when ImportDecl
+      "#{p}ImportDecl path=#{node.path.join("/")} exported=#{node.exported} glob=#{node.glob} names=#{names_text(node.names)}\n"
+    when UsingDecl
+      "#{p}UsingDecl path=#{node.path.join("/")} names=#{names_text(node.names)}\n"
+    when ModuleHeader
+      "#{p}ModuleHeader path=#{node.path.join("/")}\n"
+    when MacroIf
+      s = "#{p}MacroIf\n"
+      s += "#{p}  cond:\n" + dump_ast(node.cond, indent + 2)
+      s += "#{p}  then:\n" + dump_ast(node.then, indent + 2)
+      s += "#{p}  else:\n" + dump_ast(node.else, indent + 2)
+      s
+    when MacroFor
+      s = "#{p}MacroFor\n"
+      s += "#{p}  vars:\n"
+      node.vars.each { |v| s += dump_ast(v, indent + 2) }
+      s += "#{p}  exp:\n" + dump_ast(node.exp, indent + 2)
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when MagicConstant
+      "#{p}MagicConstant name=#{node.name.to_s}\n"
+    when Require
+      "#{p}Require string=#{escape_s(node.string)}\n"
+    when MacroExpression
+      s = "#{p}MacroExpression output=#{node.output}\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when Macro
+      s = "#{p}Macro name=#{escape_s(node.name)}\n"
+      s += "#{p}  args:\n"
+      node.args.each { |a| s += dump_ast(a, indent + 2) }
+      s += "#{p}  body:\n" + dump_ast(node.body, indent + 2)
+      s
+    when SizeOf
+      s = "#{p}SizeOf\n"
+      s += dump_ast(node.exp, indent + 1)
+      s
+    when ReadInstanceVar
+      s = "#{p}ReadInstanceVar name=#{escape_s(node.name)}\n"
+      s += "#{p}  obj:\n" + dump_ast(node.obj, indent + 2)
+      s
+    else
+      "#{p}Node\n"
+    end
+  end
+end
+
+# The constructs one file holds, counted by the port's parser before anything
+# is transformed: the scoreboard's occurrence counts.
+class TransformKinds < Visitor
+  getter counts : Hash(String, Int32)
+
+  def initialize
+    @counts = Hash(String, Int32).new
+  end
+
+  def bump(kind : String) : Nil
+    @counts[kind] = (@counts[kind]? || 0) + 1
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    bump("MultiAssign") if node.is_a?(MultiAssign)
+    bump("Select") if node.is_a?(Select)
+    bump("RegexLiteral") if node.is_a?(RegexLiteral)
+    bump("ProcLiteral") if node.is_a?(ProcLiteral)
+    bump("ProcPointer") if node.is_a?(ProcPointer)
+    bump("And") if node.is_a?(And)
+    bump("Or") if node.is_a?(Or)
+    bump("Propagate") if node.is_a?(Propagate)
+    bump("Recover") if node.is_a?(Recover)
+    bump("Defer") if node.is_a?(Defer)
+    bump("Unless") if node.is_a?(Unless)
+    bump("Until") if node.is_a?(Until)
+    bump("OpAssign") if node.is_a?(OpAssign)
+    bump("StringInterpolation") if node.is_a?(StringInterpolation)
+    bump("RangeLiteral") if node.is_a?(RangeLiteral)
+    bump("ArrayLiteral") if node.is_a?(ArrayLiteral)
+    bump("HashLiteral") if node.is_a?(HashLiteral)
+    bump("NamedTupleLiteral") if node.is_a?(NamedTupleLiteral)
+    bump("TupleLiteral") if node.is_a?(TupleLiteral)
+    bump("Case") if node.is_a?(Case)
+    bump("Macro") if node.is_a?(Macro)
+    bump("Union") if node.is_a?(Union)
+    bump("Block") if node.is_a?(Block)
+    bump("Def") if node.is_a?(Def)
+    bump("Assign") if node.is_a?(Assign)
+    bump("If") if node.is_a?(If)
+    bump("While") if node.is_a?(While)
+    bump("Call") if node.is_a?(Call)
+    true
+  end
+end
+
+# A bare run, with no fixture, parses, normalises and dumps one small program: the runner that
+# executes every program under bench/ with no arguments (the Windows job) then exercises the
+# normaliser, where it used to stop at the missing argument.
+if Program.args.size == 0
+  bare_norm = NormalizerProgram.new.normalize(Parser.new("x = 1\ny = x\n", "bare").parse)
+  bare_dump = BenchSemanticTransformExercise.dump_ast(bare_norm)
+  raise "bare run: the normalised dump is empty" if bare_dump.bytesize == 0
+  puts "ok (bare run: a program is parsed, normalised and dumped)"
+elsif Program.args.size > 1 && Program.args[1] == "kinds"
+  kinds_filename = Program.args[0]
+  kinds_parser = Parser.new(File.read(kinds_filename), kinds_filename)
+  kinds_visitor = TransformKinds.new
+  kinds_parser.parse.accept(kinds_visitor)
+  kinds_visitor.counts.keys.each { |kind| puts "#{kind} #{kinds_visitor.counts[kind]}" }
+elsif Program.args.size > 1 && Program.args[1] == "--count"
+  filename = Program.args[0]
+  source = File.read(filename)
+  parser = Parser.new(source, filename)
+  node = parser.parse
+  prog = NormalizerProgram.new
+  norm = prog.normalize(node)
+  counter = NodeCounterVisitor.new
+  norm.accept(counter)
+  puts counter.count
+else
+  filename = Program.args[0]
+  source = File.read(filename)
+  parser = Parser.new(source, filename)
+  node = parser.parse
+  prog = NormalizerProgram.new
+  norm = prog.normalize(node)
+  mode = ""
+  if Program.args.size > 1
+    mode = Program.args[1]
+  end
+  if mode == "literals" || mode == "literals-strict"
+    lit_program = NormalizerProgram.new
+    if mode == "literals-strict"
+      lit_program.set_flag("strict_multi_assign")
+    end
+    norm = norm.transform(LiteralExpander.new(lit_program))
+  end
+  if mode == "cleanup"
+    norm = norm.transform(CleanupTransformer.new)
+  end
+  print BenchSemanticTransformExercise.dump_ast(norm)
+end

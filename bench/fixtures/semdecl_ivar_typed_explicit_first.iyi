@@ -1,0 +1,7 @@
+class OrderedHolder
+  def initialize(@inferred : Int32)
+    @explicit = "ready"
+  end
+
+  @explicit : String
+end

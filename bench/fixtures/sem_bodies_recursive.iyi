@@ -1,0 +1,9 @@
+def count(flag : Bool)
+  if flag
+    count(false)
+  else
+    1
+  end
+end
+
+count(true)

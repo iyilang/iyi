@@ -1,0 +1,15 @@
+def read_port(path : String) : Int32
+  8080
+end
+
+def gather_ports(path : String) : Tuple(Int32, Int32)
+  !group do |g|
+    t1 = g.spawn { read_port(path) }
+    t2 = g.spawn { read_port(path) }
+  end!
+end
+
+def first_port(path : String) : Int32
+  ports = gather_ports(path)!
+  ports
+end

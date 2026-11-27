@@ -1,0 +1,142 @@
+module compiler/semantic/cover
+
+import compiler/semantic/top_level::{AliasType, ClassType, NonGenericModuleType, TraitType, Type, UnionType}
+import compiler/types/types::{GenericClassInstanceType, TypeQueries, VirtualMetaclassType, VirtualType}
+import compiler/semantic/match::{CallSignature, Match}
+
+# Hosted semantic/cover.cr:52-89, 116-159 and 180-278. Only restricted
+# positions participate in the cartesian product; unrestricted positions are
+# covered by every arm.
+pub class CallCover
+  def self.append(type : Type, result : Array(Type)) : Nil
+    if type.is_a?(AliasType)
+      append(type.as(AliasType).process_value, result)
+    elsif type.is_a?(VirtualMetaclassType)
+      append(type.as(VirtualMetaclassType).instance_type, result)
+    elsif type.is_a?(UnionType)
+      type.as(UnionType).union_types.each { |member| append(member, result) }
+    elsif type.is_a?(VirtualType)
+      base = type.as(VirtualType).base_type
+      if base.abstract?
+        if base.is_a?(ClassType)
+          base.as(ClassType).subclasses.each { |sub| append(TypeQueries.virtual_type(sub), result) }
+        elsif base.is_a?(GenericClassInstanceType)
+          base.as(GenericClassInstanceType).subclasses.each { |sub| append(TypeQueries.virtual_type(sub), result) }
+        end
+      else
+        result << base
+      end
+    elsif type.is_a?(NonGenericModuleType) && !type.as(NonGenericModuleType).including_types.empty?
+      type.as(NonGenericModuleType).including_types.each { |member| append(member, result) }
+    elsif type.is_a?(TraitType) && !type.as(TraitType).including_types.empty?
+      type.as(TraitType).including_types.each { |member| append(member, result) }
+    else
+      result << type
+    end
+    nil
+  end
+
+  # each_cover on a virtual restriction visits every subtype; ordinary cover
+  # of a concrete-base virtual type contains only that base.
+  def self.append_match(type : Type, result : Array(Type)) : Nil
+    if type.is_a?(VirtualType)
+      type.as(VirtualType).subtypes.each { |member| append(member, result) }
+    elsif type.is_a?(UnionType)
+      type.as(UnionType).union_types.each { |member| append_match(member, result) }
+    else
+      append(type, result)
+    end
+    nil
+  end
+
+  def self.all?(signature : CallSignature, matches : Array(Match)) : Bool
+    return false if matches.empty?
+    choices = [] of Array(Type)
+    indices = [] of Bool
+    i = 0
+    while i < signature.arg_types.size
+      restricted = false
+      matches.each do |match|
+        if i < match.definition.args.size && match.definition.args[i].restriction
+          restricted = true
+        end
+      end
+      types = [] of Type
+      if restricted
+        append(signature.arg_types[i], types)
+      else
+        types << signature.arg_types[i]
+      end
+      indices << restricted
+      choices << types
+      i += 1
+    end
+    if named = signature.named_args
+      named.each do |arg|
+        restricted = false
+        matches.each do |match|
+          match.definition.args.each do |param|
+            if param.external_name == arg.name && param.restriction
+              restricted = true
+            end
+          end
+        end
+        types = [] of Type
+        if restricted
+          append(arg.type, types)
+        else
+          types << arg.type
+        end
+        indices << restricted
+        choices << types
+      end
+    end
+    arms = [] of Array(Array(Type))
+    matches.each do |match|
+      covers = [] of Array(Type)
+      i = 0
+      while i < choices.size
+        covered = [] of Type
+        if indices[i]
+          if i < signature.arg_types.size
+            append_match(match.arg_types[i], covered) if i < match.arg_types.size
+          else
+            named_index = i - signature.arg_types.size
+            if named_index < match.named_arg_types.size
+              append_match(match.named_arg_types[named_index].type, covered)
+            end
+          end
+        end
+        covers << covered
+        i += 1
+      end
+      arms << covers
+    end
+    covered?(choices, indices, arms, [] of Type, 0)
+  end
+
+  def self.covered?(choices : Array(Array(Type)), indices : Array(Bool), arms : Array(Array(Array(Type))), combination : Array(Type), index : Int32) : Bool
+    if index == choices.size
+      arms.each do |covers|
+        accepted = true
+        i = 0
+        while i < combination.size
+          if indices[i] && !covers[i].includes?(combination[i])
+            accepted = false
+            break
+          end
+          i += 1
+        end
+        return true if accepted
+      end
+      return false
+    end
+    choices[index].each do |choice|
+      combination << choice
+      covered = covered?(choices, indices, arms, combination, index + 1)
+      combination.pop
+      return false unless covered
+    end
+    true
+  end
+end

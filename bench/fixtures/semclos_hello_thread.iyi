@@ -1,0 +1,9 @@
+def start(proc : Proc(Nil)) : Nil
+  nil
+end
+
+def start(&block : -> Nil) : Nil
+  start(block)
+end
+
+start { nil }

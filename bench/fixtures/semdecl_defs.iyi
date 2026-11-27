@@ -1,0 +1,15 @@
+def greet
+  "hi"
+end
+
+def add(x : Int32, y : Int32 = 2) : Int32
+  x + y
+end
+
+def run_block(&)
+  yield
+end
+
+def gather(*items : String) : Array(String)
+  items
+end

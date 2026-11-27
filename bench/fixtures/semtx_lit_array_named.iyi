@@ -1,0 +1,4 @@
+a = Foo{1, 2}
+c = Foo{*x, 3}
+d = Foo{y + 1, [2]}
+e = Bar::Baz{*w}

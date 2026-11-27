@@ -1,0 +1,13 @@
+module match_import_user
+
+import match_import_enum::{MatchKind}
+
+pub class Matcher
+  def self.value : MatchKind
+    MatchKind::First
+  end
+
+  def self.accept(value : MatchKind) : Int32
+    1
+  end
+end

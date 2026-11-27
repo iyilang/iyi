@@ -1,0 +1,6 @@
+@[Unsafe("This fixture declares an external function for refusal typing")]
+lib LibAddressFixture
+  fun value : Int32
+end
+
+pointerof(LibAddressFixture.value)

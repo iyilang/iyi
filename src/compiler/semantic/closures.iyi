@@ -1,0 +1,467 @@
+module compiler/semantic/closures
+
+import compiler/syntax/ast::{ASTNode, Assign, Block, Break, Call, Def, InstanceVar, Next, NodeMap, ProcLiteral, Return, Self, Var, While, Yield}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/top_level::{MetaclassType, ModuleType, SemanticProgram, Type}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/types/unification::{TypeUnification}
+
+pub enum FrameKind
+  Program
+  Def
+  Proc
+  Block
+end
+
+pub class ClosureVar
+  getter name : String
+  property type : Type
+  property mutably : Bool
+
+  def initialize(@name : String, @type : Type, @mutably : Bool = false)
+  end
+end
+
+# The declaration list also retains non-captured locals while the walk runs.
+pub class ClosureBinding
+  getter variable : ClosureVar
+  property captured : Bool = false
+  getter assigned_types : Array(Type)
+
+  def initialize(@variable : ClosureVar)
+    @assigned_types = [@variable.type] of Type
+  end
+
+  def record_type(type : Type, program : SemanticProgram) : Nil
+    unless @assigned_types.any? { |item| item.full_name == type.full_name }
+      @assigned_types << type
+      @variable.type = TypeUnification.union_of(program, @assigned_types)
+    end
+  end
+end
+
+pub class ClosureFrame
+  getter kind : FrameKind
+  getter node : ASTNode
+  getter parent : ClosureFrame?
+  getter closured : Array(ClosureVar)
+  property closure : Bool = false
+  property self_closured : Bool = false
+  getter bindings : Array(ClosureBinding)
+  getter errors : Array(String)
+  property generated : Bool = false
+  property self_type : Type? = nil
+
+  def initialize(@kind : FrameKind, @node : ASTNode, @parent : ClosureFrame?)
+    @closured = [] of ClosureVar
+    @bindings = [] of ClosureBinding
+    @errors = [] of String
+  end
+
+  def closured?(name : String) : Bool
+    @closured.any? { |v| v.name == name }
+  end
+
+  def local?(name : String) : ClosureBinding?
+    @bindings.find { |v| v.variable.name == name }
+  end
+
+  def resolve?(name : String) : ClosureBinding?
+    if found = local?(name)
+      return found
+    end
+    if parent = @parent
+      return parent.resolve?(name)
+    end
+    nil
+  end
+
+  # Hosted duplicates the visible hash, so a shadowing parameter retains its
+  # outer name's position rather than its position in the parameter list.
+  def visible_names : Array(String)
+    names = if parent = @parent
+              parent.visible_names
+            else
+              [] of String
+            end
+    @bindings.each do |binding|
+      names << binding.variable.name unless names.includes?(binding.variable.name)
+    end
+    names
+  end
+
+  def finish : Nil
+    @closured.clear
+    visible_names.each do |name|
+      binding = local?(name)
+      next unless binding
+      if binding.captured
+        @closured << binding.variable
+        if binding.assigned_types.size > 1
+          @errors << "closured variable #{binding.variable.name} assigned values of more than one type"
+        end
+      end
+    end
+  end
+end
+
+# Lexical capture corresponds to the hosted check_closured and mark_as_closured
+# (main_visitor.cr:3811-3864). A Block shares its enclosing closure context.
+pub class ClosureWalk < Visitor
+  getter frame : ClosureFrame
+
+  def initialize(@facts : ClosureFacts, @visitor : MainVisitor, @frame : ClosureFrame, @inside_while : Bool = false)
+  end
+
+  # Walk the same typed expansion lowering visits, instead of the unexpanded
+  # macro call whose children do not contain its captured variables.
+  def visit_any(node : ASTNode) : Bool
+    if expanded = @visitor.expansions[node]?
+      @facts.enter_expansion
+      expanded.accept(self)
+      @facts.leave_expansion
+      return false
+    end
+    if node.is_a?(Call)
+      if expanded = node.as(Call).expanded
+        @facts.enter_expansion
+        expanded.accept(self)
+        @facts.leave_expansion
+        return false
+      end
+    end
+    capture_self if node.is_a?(Call) && node.as(Call).obj.nil? && implicit_self_call?(node.as(Call))
+    true
+  end
+
+  # Hosted call.cr:445-449 and 1139-1141 capture self for receiverless
+  # instance calls, but program and iyi unit functions have no receiver.
+  def implicit_self_target?(definition : Def) : Bool
+    owner = @visitor.program.def_owner(definition)
+    return false if owner.nil? || owner.is_a?(SemanticProgram)
+    return false if owner.is_a?(ModuleType) && owner.as(ModuleType).iyi_unit
+    true
+  end
+
+  def implicit_self_call?(call : Call) : Bool
+    if target = @visitor.target_def?(call)
+      return implicit_self_target?(target)
+    end
+    if targets = @visitor.dispatch_targets?(call)
+      i = 0
+      while i < targets.size
+        return true if implicit_self_target?(targets[i].definition)
+        i += 1
+      end
+    end
+    false
+  end
+
+  def visit(node : Def) : Bool
+    false
+  end
+
+  def visit(node : Assign) : Bool
+    node.value.accept(self)
+    target = node.target
+    if target.is_a?(Var)
+      variable = target.as(Var)
+      binding = @frame.resolve?(variable.name)
+      if binding
+        if type = @visitor.type_of?(node.value)
+          binding.record_type(type, @visitor.program)
+        end
+        binding.variable.mutably = true if @inside_while
+        capture(variable.name, true)
+      elsif type = @visitor.type_of?(variable) || @visitor.type_of?(node.value)
+        @frame.bindings << ClosureBinding.new(ClosureVar.new(variable.name, type))
+        @frame.bindings.last.variable.mutably = true if @inside_while
+      end
+    else
+      target.accept(self)
+    end
+    false
+  end
+
+  def visit(node : While) : Bool
+    previous = @inside_while
+    @inside_while = true
+    node.accept_children(self)
+    @inside_while = previous
+    false
+  end
+
+  def refuse_inside_proc(reason : String, captured_only : Bool) : Nil
+    current : ClosureFrame? = @frame
+    while frame = current
+      if frame.kind == FrameKind::Proc
+        def_node = frame.node.as(Def)
+        if !captured_only || def_node.captured_block?
+          frame.errors << reason
+        end
+        return
+      end
+      current = frame.parent
+    end
+  end
+
+  def visit(node : Yield) : Bool
+    refuse_inside_proc("yield inside a proc literal or captured block", false)
+    true
+  end
+
+  def visit(node : Break) : Bool
+    refuse_inside_proc("break inside a captured block", true)
+    true
+  end
+
+  def visit(node : Return) : Bool
+    refuse_inside_proc("return inside a captured block", true)
+    true
+  end
+
+  def visit(node : Var) : Bool
+    if node.name == "self"
+      capture_self
+    else
+      capture(node.name, false)
+    end
+    false
+  end
+
+  def visit(node : Self) : Bool
+    capture_self
+    false
+  end
+
+  def visit(node : InstanceVar) : Bool
+    capture_self
+    false
+  end
+
+  def capture_self : Nil
+    current : ClosureFrame? = @frame
+    seen_proc = false
+    while frame = current
+      seen_proc = true if frame.kind == FrameKind::Proc
+      if frame.kind == FrameKind::Def
+        if seen_proc && (self_type = frame.self_type)
+          unless self_type.is_a?(MetaclassType)
+            frame.self_closured = true
+            frame.closure = true
+            inside : ClosureFrame? = @frame
+            while part = inside
+              break if part.node.node_id == frame.node.node_id
+              part.closure = true if part.kind == FrameKind::Proc
+              inside = part.parent
+            end
+          end
+        end
+        return
+      end
+      current = frame.parent
+    end
+  end
+
+  def capture(name : String, assignment : Bool) : Nil
+    return if name == "self"
+    owner : ClosureFrame? = @frame
+    while current = owner
+      if binding = current.local?(name)
+        reader_context = closure_context(@frame)
+        owner_context = closure_context(current)
+        binding.variable.mutably = true if assignment && @frame.kind == FrameKind::Block && @frame.node.node_id != current.node.node_id
+        if reader_context.node.node_id != owner_context.node.node_id
+          binding.captured = true
+          binding.variable.mutably = true if assignment
+          context : ClosureFrame? = @frame
+          while part = context
+            break if part.node.node_id == owner_context.node.node_id
+            part.closure = true if part.kind == FrameKind::Proc
+            context = part.parent
+          end
+        elsif assignment && binding.captured
+          binding.variable.mutably = true
+        end
+        return
+      end
+      owner = current.parent
+    end
+  end
+
+  def closure_context(frame : ClosureFrame) : ClosureFrame
+    current = frame
+    while current.kind == FrameKind::Block
+      parent = current.parent
+      break unless parent
+      current = parent
+    end
+    current
+  end
+
+  def visit(node : Block) : Bool
+    if literal = node.fun_literal
+      if @visitor.type_of?(node) || @visitor.type_of?(node.body)
+        @facts.add_frame(FrameKind::Block, node, @frame).finish
+      end
+      literal.accept(self)
+      return false
+    end
+    return false unless @visitor.type_of?(node) || @visitor.type_of?(node.body)
+    frame = @facts.add_frame(FrameKind::Block, node, @frame)
+    node.args.each do |arg|
+      if type = @visitor.type_of?(arg)
+        frame.bindings << ClosureBinding.new(ClosureVar.new(arg.name, type))
+      end
+    end
+    node.body.accept(ClosureWalk.new(@facts, @visitor, frame, @inside_while))
+    frame.finish
+    false
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    proc_def = node.def
+    frame = @facts.add_frame(FrameKind::Proc, proc_def, @frame)
+    refuse_inside_proc("nested proc literal", false)
+    proc_def.args.each do |arg|
+      if type = @visitor.type_of?(arg)
+        frame.bindings << ClosureBinding.new(ClosureVar.new(arg.name, type))
+      end
+    end
+    proc_def.body.accept(ClosureWalk.new(@facts, @visitor, frame, @inside_while))
+    frame.finish
+    false
+  end
+end
+
+pub class ClosureFacts
+  @frames : NodeMap(ClosureFrame)
+  @ordered : Array(ClosureFrame)
+  @expansion_depth : Int32
+
+  def initialize(@visitor : MainVisitor)
+    @frames = NodeMap(ClosureFrame).new
+    @ordered = [] of ClosureFrame
+    @expansion_depth = 0
+  end
+
+  def add_frame(kind : FrameKind, node : ASTNode, parent : ClosureFrame?) : ClosureFrame
+    frame = ClosureFrame.new(kind, node, parent)
+    frame.generated = @expansion_depth > 0
+    @frames[node] = frame
+    @ordered << frame
+    frame
+  end
+
+  def enter_expansion : Nil
+    @expansion_depth += 1
+  end
+
+  def leave_expansion : Nil
+    @expansion_depth -= 1
+  end
+
+  def analyse_def(def_node : Def, self_type : Type?) : ClosureFrame
+    if frame = @frames[def_node]?
+      return frame
+    end
+    frame = add_frame(FrameKind::Def, def_node, nil)
+    unless @visitor.program.def_owner(def_node).is_a?(SemanticProgram)
+      frame.self_type = self_type
+    end
+    def_node.args.each do |arg|
+      if type = @visitor.type_of?(arg)
+        frame.bindings << ClosureBinding.new(ClosureVar.new(arg.name, type))
+      end
+    end
+    if block_arg = def_node.block_arg
+      if type = @visitor.type_of?(block_arg)
+        frame.bindings << ClosureBinding.new(ClosureVar.new(block_arg.name, type))
+      end
+    end
+    def_node.body.accept(ClosureWalk.new(self, @visitor, frame))
+    frame.finish
+    frame
+  end
+
+  def analyse_program(root : ASTNode) : ClosureFrame
+    if frame = @frames[root]?
+      return frame
+    end
+    frame = add_frame(FrameKind::Program, root, nil)
+    root.accept(ClosureWalk.new(self, @visitor, frame))
+    frame.finish
+    frame
+  end
+
+  def frame?(node : ASTNode) : ClosureFrame?
+    @frames[node]?
+  end
+
+  def visible_closured?(proc_def : Def, name : String) : Bool
+    if frame = @frames[proc_def]?
+      if binding = frame.resolve?(name)
+        return binding.captured
+      end
+    end
+    false
+  end
+
+  def refusals(node : ASTNode) : Array(String)
+    if frame = @frames[node]?
+      frame.errors
+    else
+      [] of String
+    end
+  end
+
+  def dump_lines(file : String) : Array(String)
+    lines = [] of String
+    roots = [] of Tuple(ClosureFrame, String)
+    @ordered.each do |frame|
+      roots << {frame, "top"} if frame.kind == FrameKind::Program
+    end
+    @visitor.typed_instances.each do |instance|
+      root = analyse_def(instance.definition, instance.self_type)
+      owner = if @visitor.program.def_owner(instance.definition).is_a?(SemanticProgram)
+                "top"
+              elsif type = instance.self_type
+                type.full_name
+              else
+                "top"
+              end
+      types = instance.arg_types.map { |type| type.full_name }.join(",")
+      label = "#{owner}##{instance.definition.name}(#{types})"
+      roots << {root, label}
+    end
+    roots.each do |entry|
+      root, label = entry
+      @ordered.each do |frame|
+        enclosing = frame
+        while parent = enclosing.parent
+          enclosing = parent
+        end
+        next unless enclosing.node.node_id == root.node.node_id
+        next if frame.generated
+        next if frame.kind == FrameKind::Program
+        loc = frame.node.location
+        next unless loc && loc.filename == file
+        kind = if frame.kind == FrameKind::Def
+                 "Def"
+               elsif frame.kind == FrameKind::Proc
+                 "Proc"
+               elsif frame.kind == FrameKind::Block
+                 "Block"
+               else
+                 "Program"
+               end
+        closure = frame.kind == FrameKind::Def || frame.kind == FrameKind::Proc ? (frame.closure ? "1" : "0") : "-"
+        captured_self = frame.kind == FrameKind::Def ? (frame.self_closured ? "1" : "0") : "-"
+        vars = frame.closured.map { |var| "#{var.name}:#{var.type.full_name}" }.join(",")
+        mutable = frame.closured.select { |var| var.mutably }.map { |var| var.name }.join(",")
+        lines << "#{loc.line_number}:#{loc.column_number} #{kind} in #{label} closure=#{closure} self=#{captured_self} vars=#{vars} mut=#{mutable}"
+      end
+    end
+    lines.sorted.uniq
+  end
+end

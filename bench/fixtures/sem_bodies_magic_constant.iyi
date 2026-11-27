@@ -1,0 +1,10 @@
+def trace(file = __FILE__, line = __LINE__)
+  line
+end
+
+def where(file = __FILE__)
+  file
+end
+
+trace
+where

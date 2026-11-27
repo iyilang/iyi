@@ -1,0 +1,5 @@
+def pair(first : T, second : T) : T forall T
+  first
+end
+
+puts pair(first: 42_i32, second: 7000000000_i64)

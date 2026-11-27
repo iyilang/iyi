@@ -1,0 +1,7 @@
+const A used=false pointer_read=false
+const B used=false pointer_read=false
+const C used=false pointer_read=false
+predef ARGC_UNSAFE present
+predef ARGV_UNSAFE present
+cvar @@count owner Holder thread_local=false
+cvar @@seen owner Holder thread_local=true

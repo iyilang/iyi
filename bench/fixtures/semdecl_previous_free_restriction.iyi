@@ -1,0 +1,9 @@
+struct OverrideOwner(T)
+  def select(value : T, other : U) : T forall U
+    value
+  end
+
+  def select(value : T, other : U) : T forall T, U
+    value
+  end
+end

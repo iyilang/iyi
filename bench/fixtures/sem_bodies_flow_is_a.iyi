@@ -1,0 +1,76 @@
+class Dog
+  def bark : Int32
+    1
+  end
+end
+
+class Cat
+  def meow : Int32
+    2
+  end
+end
+
+class ChainNode
+  def val : Int32
+    3
+  end
+
+  def nxt(more : Bool) : ChainNode | Nil
+    if more
+      ChainNode.new
+    else
+      nil
+    end
+  end
+end
+
+def pet_sound(pet : Dog | Cat | Nil)
+  if pet.is_a?(Dog)
+    pet.bark
+  elsif pet.is_a?(Cat)
+    pet.meow
+  else
+    0
+  end
+end
+
+def walk_chain(head : ChainNode | Nil)
+  sum = 0
+  cur = head
+  more = true
+  while cur.is_a?(ChainNode)
+    sum = cur.val
+    cur = cur.nxt(more)
+    more = false
+  end
+  sum
+end
+
+def make_pet(dog : Bool, cat : Bool) : Dog | Cat | Nil
+  if dog
+    Dog.new
+  elsif cat
+    Cat.new
+  else
+    nil
+  end
+end
+
+p = make_pet(true, false)
+a = if p.is_a?(Dog)
+      p.bark
+    elsif p.is_a?(Cat)
+      p.meow
+    else
+      0
+    end
+b = pet_sound(make_pet(false, true))
+c = walk_chain(ChainNode.new)
+cur = ChainNode.new.nxt(true)
+more = true
+while cur.is_a?(ChainNode)
+  d = cur.val
+  cur = cur.nxt(more)
+  more = false
+end
+e = cur

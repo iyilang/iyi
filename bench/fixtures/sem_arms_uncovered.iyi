@@ -1,0 +1,17 @@
+def first(flag : Bool) : Int32 | String
+  flag ? 1 : "x"
+end
+
+def second(flag : Bool) : Bool | String
+  flag ? true : "y"
+end
+
+def consume(a : Int32, b : Bool) : Int32
+  a
+end
+
+def consume(a : String, b : String) : Int32
+  a.size + b.size
+end
+
+puts consume(first(true), second(true))

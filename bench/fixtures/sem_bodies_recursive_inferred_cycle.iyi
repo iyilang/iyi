@@ -1,0 +1,26 @@
+def recursive_inferred_even(flag : Bool)
+  if flag
+    recursive_inferred_odd(false)
+  else
+    nil
+  end
+end
+
+def recursive_inferred_odd(flag : Bool)
+  if flag
+    true
+  else
+    recursive_inferred_even(false)
+  end
+end
+
+def recursive_inferred_loop(flag : Bool)
+  while flag
+    recursive_inferred_loop(false)
+    break
+  end
+  true
+end
+
+recursive_inferred_even(true)
+recursive_inferred_loop(true)

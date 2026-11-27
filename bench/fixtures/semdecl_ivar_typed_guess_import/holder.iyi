@@ -1,0 +1,7 @@
+import inventory::{Item}
+
+pub class Holder
+  def initialize
+    @items = [] of Item
+  end
+end

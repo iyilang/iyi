@@ -1,0 +1,15 @@
+module bodies_unit_scope_helper
+
+class PrivateValue
+  def value : Int32
+    4
+  end
+end
+
+def sibling(value : Int32)
+  value + PrivateValue.new.value
+end
+
+pub def imported_value(value : Int32) : Int32
+  sibling(value)
+end

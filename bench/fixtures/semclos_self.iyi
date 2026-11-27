@@ -1,0 +1,19 @@
+@[Unsafe("declares the external process exit")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run(&block : -> Int32) : Int32
+  block.call
+end
+
+class Box
+  def initialize(@v : Int32)
+  end
+
+  def get(n : Int32) : Int32
+    run { n; @v }
+  end
+end
+
+LibC.exit(Box.new(7).get(3))

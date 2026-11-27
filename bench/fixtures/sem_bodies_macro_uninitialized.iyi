@@ -1,0 +1,15 @@
+@[Unsafe("the fixture takes a pointer to uninitialized local storage")]
+
+class MacroUninitializedLocal
+  def value : Int32
+    {% if true %}
+      callstack = uninitialized Int32[2]
+    {% end %}
+    {% if true %}
+      pointerof(callstack).address
+    {% end %}
+    1
+  end
+end
+
+MacroUninitializedLocal.new.value

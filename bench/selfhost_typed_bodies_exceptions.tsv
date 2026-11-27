@@ -1,0 +1,17 @@
+# fixture<TAB>hosted diagnostic fragment<TAB>reason no typed body exists
+sem_arms_bare_splat_excess.iyi	no overload matches 'Bare.pick'	extra positional argument after a bare splat
+sem_arms_bare_splat_missing.iyi	missing argument: flag	required named argument omitted
+sem_arms_block_unbound.iyi	instantiating 'produce()'	the return type variable V is never bound
+sem_arms_generic_new_mismatch.iyi	expected argument #1 to 'Box(UInt64).new'	String does not satisfy UInt64 constructor argument
+sem_arms_mixed_free_conflict.iyi	expected argument 'second' to 'pair'	positional and named arguments bind T to incompatible types
+sem_arms_named_free_conflict.iyi	expected argument 'second' to 'pair'	named arguments bind T to incompatible types
+sem_arms_named_free_out_of_range.iyi	expected argument 'second' to 'pair'	Int64 argument cannot satisfy T bound to Int32
+sem_arms_named_new_mismatch.iyi	expected argument 'buffer_size' to 'Stream.new'	String does not satisfy Int32 constructor argument
+sem_arms_named_numeric_ambiguous.iyi	ambiguous call	integer literal fits both signed and unsigned overloads
+sem_arms_named_numeric_later.iyi	ambiguous call	later named integer fits both signed and unsigned overloads
+sem_arms_named_numeric_partial.iyi	expected argument 'value' to 'pick'	a Bool union arm does not satisfy Int32
+sem_arms_numeric_ambiguous.iyi	ambiguous call	integer literal fits both signed and unsigned overloads
+sem_arms_partial.iyi	expected argument #1 to 'consume'	a Bool union arm has no matching overload
+sem_arms_uncovered.iyi	expected argument #1 to 'consume'	some combinations of union arguments have no matching overload
+sem_arms_unresolved_only.iyi	instantiating 'consume(Int32)'	the only overload names the undefined MissingType
+sem_arms_unresolved_partial.iyi	instantiating 'consume((Bool | Int32))'	a candidate overload names the undefined MissingType

@@ -1,0 +1,11 @@
+def with_value(&)
+  yield
+end
+
+result = with_value do
+  value : Int32 | Nil = nil
+  if true
+    value = 17
+  end
+  value
+end

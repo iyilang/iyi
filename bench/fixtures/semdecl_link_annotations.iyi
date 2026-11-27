@@ -1,0 +1,15 @@
+@[Link("m")]
+lib LibA
+  fun a : Int32
+end
+
+@[Link(framework: "Security")]
+@[Link(lib: "z", ldflags: "-L/x", static: true)]
+lib LibA
+  fun b : Int32
+end
+
+@[Link("q", "-L/y")]
+lib LibA
+  fun c : Int32
+end

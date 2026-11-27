@@ -1,0 +1,14 @@
+class Fiber
+  def initialize(@next_run : Fiber?)
+  end
+
+  def next_run=(value : Fiber?)
+    @next_run = value
+  end
+end
+
+f = Fiber.new(nil)
+g = Fiber.new(f)
+f.next_run = nil
+f.next_run = g
+f.next_run = g.as(Fiber?)

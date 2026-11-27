@@ -1,0 +1,16 @@
+class R
+  def self.a(n : Int32) : Int32
+    return 7 if n == 0
+    b(n - 1)
+  end
+
+  def self.b(n : Int32) : Int32
+    a(n)
+  end
+end
+
+def top : Int32
+  R.a(2)
+end
+
+x = top

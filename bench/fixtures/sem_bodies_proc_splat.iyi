@@ -1,0 +1,4 @@
+empty = -> { nil }
+one = ->(value : Int32) { value }
+empty.call
+one.call(1)

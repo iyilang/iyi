@@ -1,0 +1,14 @@
+module glob_import/unit
+
+pub class Base
+end
+
+pub class Shape
+end
+
+class Hidden
+end
+
+pub def make_shape : Shape
+  Shape.new
+end

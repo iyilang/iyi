@@ -6,7 +6,7 @@ samples/iyi/calc.iyi 4
 samples/iyi/collections.iyi 15
 samples/iyi/config.iyi 10
 samples/iyi/cores.iyi 5
-samples/iyi/derive.iyi 0
+samples/iyi/derive.iyi 21
 samples/iyi/enums.iyi 12
 samples/iyi/errors.iyi 18
 samples/iyi/files.iyi 2
@@ -19,7 +19,7 @@ samples/iyi/immutable.iyi 2
 samples/iyi/init_order.iyi 2
 samples/iyi/inventory.iyi 10
 samples/iyi/io.iyi 2
-samples/iyi/modules.iyi 0
+samples/iyi/modules.iyi 9
 samples/iyi/sessions.iyi 17
 samples/iyi/shapes.iyi 20
 samples/iyi/socket.iyi 2

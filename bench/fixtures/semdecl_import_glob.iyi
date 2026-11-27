@@ -1,0 +1,8 @@
+import glob_import/unit::*
+
+class GlobEntry < Base
+  @shape : Shape
+
+  def initialize(@shape : Shape)
+  end
+end

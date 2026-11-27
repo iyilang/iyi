@@ -1804,16 +1804,6 @@ prove_mutation "a parsed fixture macro carries no definition file" "$PARSER" \
   -- check_confinement_still_matches || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
-# bench/fixtures/macro_percent_escaped_close.iyi: an escaped closing delimiter keeps a percent literal open in a
-# macro body, so an `end` inside it does not close the macro.
-prove_mutation "an escaped closing delimiter in a macro body is matched against the opening one" "$REPO/src/compiler/syntax/lexer.iyi" \
-  "          if delimiter_matches_char?(ds.the_end, char)
-            char = next_char" \
-  "          if delimiter_matches_char?(ds.nest, char)
-            char = next_char" \
-  -- check_macros_still_match || status=1
-MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
-
 echo "  $MUTATIONS_RUN mutation proofs run"
 
 echo

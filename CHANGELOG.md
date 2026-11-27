@@ -370,6 +370,45 @@
 
 ### Changed
 
+- **The iyi parser builds a literal's text once (#264).** A string literal
+  made of several pieces is joined in one `String.build` instead of one
+  concatenation per piece, and a single piece is used as it is; the newline
+  lookahead for a `.` call reuses the lexer's spare token instead of
+  allocating one; and the macro lexer matches a one-byte delimiter without
+  building a string from the character. On macOS arm64 the release-built
+  `compiler/tools/parse` takes 3.4 % less time on the 158 files of
+  `src/compiler` and 5.9 % less on a generated 56,646-line, 121-file
+  project (median of 5 interleaved runs). The parser and lexer drivers' AST
+  and token dumps of the 28 samples and six large compiler and std files are
+  byte-identical to master's. A broken copy whose macro lexer matched an
+  escaped closing delimiter against the opening one passed every syntax and
+  macro gate; `bench/fixtures/syntax_macro_escaped_close.iyi`, compared
+  with the hosted parser, and a proof in `bench/selfhost_parser_exercise.sh`
+  now hold it to failing.
+
+- **IR instructions allocate their operand lists on first use, and the
+  verifier indexes a function once (#265).** `Inst` keeps `args`,
+  `targets`, `cases` and the wide-constant words nilable; the getters create
+  an array the instruction owns the first time one is asked for, so a
+  constant or a terminator with no successors allocates nothing. The
+  verifier builds one block index (by identity, falling back to the name for
+  malformed modules) and one table of each value's first and last placement
+  per function, instead of rebuilding a name index in each check, and
+  `TypeTable#int` caches its integer types. On macOS arm64, on a generated
+  132,005-line IR module, `ir_core verify` takes 31 % less time,
+  `ir_core print` 5.3 % less and `native_cg obj` 5.4 % less (median of 5
+  interleaved runs). The printed IR, verifier verdicts, `drop-unwind`
+  output and `ir_opt run release` output of all 106 IR fixtures and the
+  generated module, the native objects of the 48 codegen fixtures and the
+  generated module, and the six Builder fixture modules are byte-identical
+  to master's. Two broken copies passed every IR and native gate, because
+  the gates verified a Builder module only after printing and parsing it
+  again: a targets getter that handed every instruction one shared list, and
+  a verifier that accepted a void instruction's result as an operand.
+  `ir_core emit` now verifies the module as built, a new `void_use` Builder
+  fixture must be refused as `dominance`, and `bench/native_ir_exercise.sh`
+  proves both, and an operand list not kept on first use, to failing.
+
 - **A freestanding wasm `--release` drops DWARF and keeps function names
   (#221).** The link adds `wasm-ld --strip-debug` when `--release` was given
   without `-d`, including `--release -O z`; the name section host stack

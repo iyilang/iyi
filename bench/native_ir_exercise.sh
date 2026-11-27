@@ -917,11 +917,14 @@ prove_mutation "verifier: a phi incoming is not checked against the dominance of
   '      if db != source && !dom.dominates?(db, source)' \
   '      if db != source && false' \
   phi_dominance_check
-# Builder-made modules: the in-memory operand lists the text form does not show.
+# Builder-made modules, as section 4 checks them: verified as built, then printed text that round-trips and verifies.
 builder_check() {
-  local bin="$1" name
+  local bin="$1" name out
   for name in arith memory control calls runtime intrinsics; do
-    "$bin" emit "$name" >/dev/null 2>&1 || return 1
+    "$bin" emit "$name" >"$WORK/proof-$name.ir" 2>/dev/null || return 1
+    out=$("$bin" roundtrip "$(native_path "$WORK/proof-$name.ir")" 2>&1) || return 1
+    [ "$out" = "identical" ] || return 1
+    "$bin" verify "$(native_path "$WORK/proof-$name.ir")" >/dev/null 2>&1 || return 1
   done
 }
 void_use_check() {

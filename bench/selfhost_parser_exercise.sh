@@ -813,6 +813,7 @@ for fixture in \
   "$REPO"/bench/fixtures/syntax_op_assign_targets.iyi \
   "$REPO"/bench/fixtures/syntax_call_arg_starts.iyi \
   "$REPO"/bench/fixtures/syntax_string_keys.iyi \
+  "$REPO"/bench/fixtures/syntax_macro_escaped_close.iyi \
   "$REPO"/bench/fixtures/syntax_implicit_rescue.iyi; do
   fixture_name="${fixture#"$REPO/"}"
   fixture_native="$(native_path "$fixture")"
@@ -1827,6 +1828,41 @@ prove_mutation "unparenthesized named arguments cannot precede a forwarded block
         next if @token.type == TokenKind::OP_AMP' \
   '        # The unparenthesized form permits the same trailing &block.
         nil' -- named_forward_syntax_matches || status=1
+
+# bench/fixtures/syntax_macro_escaped_close.iyi: an escaped closing delimiter keeps a percent literal open in a macro
+# body, so the `end` inside it does not close the macro. The port's AST must stay the hosted parser's.
+escaped_close_syntax_matches() {
+  local rc
+  if ! build_mutant_exercise; then
+    invalid_mutant "parser exercise failed to build"
+    return $?
+  fi
+  if ! "$WORK/dump_hosted$EXE" "$REPO_NATIVE/bench/fixtures/syntax_macro_escaped_close.iyi" > "$WORK/escaped_close.hosted"; then
+    invalid_mutant "hosted parser failed on the escaped-close fixture"
+    return $?
+  fi
+  if ! "$WORK/mut-exercise$EXE" "$REPO_NATIVE/bench/fixtures/syntax_macro_escaped_close.iyi" > "$WORK/escaped_close.port" 2> "$WORK/escaped_close.err"; then
+    if grep -qF "Syntax error" "$WORK/escaped_close.err"; then return 1; fi
+    cat "$WORK/escaped_close.err"
+    invalid_mutant "parser exercise failed without a syntax error"
+    return $?
+  fi
+  if diff -u "$WORK/escaped_close.hosted" "$WORK/escaped_close.port"; then
+    return 0
+  else
+    rc=$?
+    if [ "$rc" -eq 1 ]; then return 1; fi
+    invalid_mutant "could not compare escaped-close ASTs"
+    return $?
+  fi
+}
+escaped_close_syntax_matches || status=1
+prove_mutation "an escaped closing delimiter in a macro body is matched against the opening one" \
+  "$REPO/src/compiler/syntax/lexer.iyi" \
+  '          if delimiter_matches_char?(ds.the_end, char)
+            char = next_char' \
+  '          if delimiter_matches_char?(ds.nest, char)
+            char = next_char' -- escaped_close_syntax_matches || status=1
 
 # Mutation 1: break operator precedence in parse_add_or_sub
 run_proof "mutation 1: altering operator precedence in parse_add_or_sub" \

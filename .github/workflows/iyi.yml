@@ -344,7 +344,7 @@ jobs:
       # archive: false leaves the uploaded JSON unhashed by an outer zip. The
       # filename and artifact name must remain identical (upload-artifact#785).
       - name: Upload producer compiler
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: iyi
           path: .build/iyi
@@ -352,7 +352,7 @@ jobs:
           retention-days: 1
 
       - name: Upload run receipt snapshot
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: run-${{ github.run_id }}-x86_64-linux-gnu.json
           path: stale-index/run-${{ github.run_id }}-x86_64-linux-gnu.json
@@ -361,7 +361,7 @@ jobs:
 
       - name: Upload master candidate receipt snapshot
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: master-candidate-x86_64-linux-gnu.json
           path: stale-index/master-candidate-x86_64-linux-gnu.json
@@ -373,7 +373,7 @@ jobs:
   stale-rg3:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-rg3') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
@@ -384,10 +384,10 @@ jobs:
         observe: ["0", "1"]
     name: "RG3 ${{ matrix.target }}, observe ${{ matrix.observe }}"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -412,16 +412,16 @@ jobs:
   stale-callpath:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-callpath') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 120
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The stale key: link, reach, RG4, RG8 and RG9"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -459,16 +459,16 @@ jobs:
   stale-equivalence:
     needs: [plan, build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-equivalence') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
     name: "What observing a program changes: RG2, RG2a, RG2r and RG5"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: crystal
           path: .build
@@ -499,7 +499,7 @@ jobs:
   stale-fresh:
     needs: [plan, iyi]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-fresh') }}
-    runs-on: ubuntu-24.04
+    runs-on: namespace-profile-default
     timeout-minutes: 60
     permissions:
       actions: read
@@ -509,7 +509,7 @@ jobs:
       STALE_TARGET: x86_64-linux-gnu
     name: "Fresh runner receipt audit"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -517,7 +517,7 @@ jobs:
       # v8: these two were uploaded with `archive: false`, which v5 cannot
       # download (it reads every artifact as a zip and failed after 5 retries).
       - name: Download producer compiler
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iyi
           path: .build
@@ -527,14 +527,14 @@ jobs:
           echo "IYI=$PWD/.build/iyi" >> "$GITHUB_ENV"
 
       - name: Download producer receipt snapshot
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: run-${{ github.run_id }}-x86_64-linux-gnu.json
           path: stale-index
 
       - name: Download master candidate receipt snapshot
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: master-candidate-x86_64-linux-gnu.json
           path: stale-index
@@ -633,7 +633,7 @@ jobs:
 
       - name: Publish audited master receipt snapshot
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: master-x86_64-linux-gnu.json
           path: stale-index/master-x86_64-linux-gnu.json
@@ -653,7 +653,7 @@ jobs:
 
       - name: Publish empty master snapshot after disagreement
         if: always() && !cancelled() && steps.empty_snapshot.outcome == 'success'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: master-x86_64-linux-gnu.json
           path: stale-index/master-x86_64-linux-gnu.json
@@ -663,7 +663,7 @@ jobs:
   stale-darwin:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-darwin') }}
-    runs-on: macos-15
+    runs-on: namespace-profile-macos-15
     timeout-minutes: 120
     name: "Stale acceptance and receipt producer, on macOS"
     defaults:
@@ -673,17 +673,28 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
       STALE_TARGET: aarch64-darwin
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
         run: |
-          brew install crystal coreutils pkgconf bash
+          sw_vers
+          xcodebuild -version
+          python3 --version
+          # The same setup as the other darwin jobs (the darwin job's comments
+          # say why): only what is missing, the job's own temporary and cache
+          # directories, and no compiler or linker flags of the machine's.
+          # brew's bash is first on PATH for the gates' bash 4 builtins.
+          for f in crystal coreutils pkgconf bash; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
@@ -740,14 +751,14 @@ jobs:
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           "$IYI" test "${args[@]}" "${tests[@]}"
       - name: Upload producer compiler
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: iyi-aarch64-darwin
           path: .build/iyi
           if-no-files-found: error
           retention-days: 1
       - name: Upload run receipt snapshot
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: run-${{ github.run_id }}-aarch64-darwin.json
           path: stale-index/run-${{ github.run_id }}-aarch64-darwin.json
@@ -756,7 +767,7 @@ jobs:
           retention-days: 1
       - name: Upload master candidate receipt snapshot
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: master-candidate-aarch64-darwin.json
           path: stale-index/master-candidate-aarch64-darwin.json
@@ -767,7 +778,7 @@ jobs:
   stale-darwin-gates:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-darwin-gates') }}
-    runs-on: macos-15
+    runs-on: namespace-profile-macos-15
     timeout-minutes: 180
     name: "Stale key and equivalence gates, on macOS"
     defaults:
@@ -776,17 +787,28 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install the bootstrap toolchain
         run: |
-          brew install crystal coreutils pkgconf bash
+          sw_vers
+          xcodebuild -version
+          python3 --version
+          # The same setup as the other darwin jobs (the darwin job's comments
+          # say why): only what is missing, the job's own temporary and cache
+          # directories, and no compiler or linker flags of the machine's.
+          # brew's bash is first on PATH for the gates' bash 4 builtins.
+          for f in crystal coreutils pkgconf bash; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
@@ -818,7 +840,7 @@ jobs:
   stale-darwin-fresh:
     needs: [plan, stale-darwin]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'stale-darwin-fresh') }}
-    runs-on: macos-15
+    runs-on: namespace-profile-macos-15
     timeout-minutes: 180
     name: "Fresh runner receipt audit, on macOS"
     permissions:
@@ -830,18 +852,29 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "14.4"
       STALE_TARGET: aarch64-darwin
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Install the bootstrap toolchain
         run: |
-          brew install crystal coreutils pkgconf bash
+          sw_vers
+          xcodebuild -version
+          python3 --version
+          # The same setup as the other darwin jobs (the darwin job's comments
+          # say why): only what is missing, the job's own temporary and cache
+          # directories, and no compiler or linker flags of the machine's.
+          # brew's bash is first on PATH for the gates' bash 4 builtins.
+          for f in crystal coreutils pkgconf bash; do brew list --versions "$f" >/dev/null || brew install "$f"; done
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "IYI_CACHE_DIR=$RUNNER_TEMP/iyi-cache" >> "$GITHUB_ENV"
+          echo "CRYSTAL_CACHE_DIR=$RUNNER_TEMP/crystal-cache" >> "$GITHUB_ENV"
+          for v in LDFLAGS CPPFLAGS CFLAGS CXXFLAGS LIBRARY_PATH CPATH; do echo "$v=" >> "$GITHUB_ENV"; done
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
       - name: Restore the static LLVM
         id: llvm-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/llvm-static
           key: llvm-static-${{ runner.os }}-${{ runner.arch }}-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
@@ -856,7 +889,7 @@ jobs:
           echo "LLVM_CONFIG=$HOME/llvm-static/bin/llvm-config" >> "$GITHUB_ENV"
           make crystal LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
       - name: Download producer compiler
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iyi-aarch64-darwin
           path: .build
@@ -865,13 +898,13 @@ jobs:
           chmod +x .build/iyi
           echo "IYI=$PWD/.build/iyi" >> "$GITHUB_ENV"
       - name: Download producer receipt snapshot
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: run-${{ github.run_id }}-aarch64-darwin.json
           path: stale-index
       - name: Download master candidate receipt snapshot
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: master-candidate-aarch64-darwin.json
           path: stale-index
@@ -948,7 +981,7 @@ jobs:
         run: cp -f "stale-index/master-candidate-${STALE_TARGET}.json" "stale-index/master-${STALE_TARGET}.json"
       - name: Publish audited master receipt snapshot
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: master-aarch64-darwin.json
           path: stale-index/master-aarch64-darwin.json
@@ -963,7 +996,7 @@ jobs:
             --out "stale-index/master-${STALE_TARGET}.json"
       - name: Publish empty master snapshot after disagreement
         if: always() && !cancelled() && steps.empty_snapshot.outcome == 'success'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: master-aarch64-darwin.json
           path: stale-index/master-aarch64-darwin.json
@@ -982,11 +1015,11 @@ jobs:
     env:
       STALE_TARGET: x86_64-windows-msvc
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
       - name: What this machine has
@@ -1123,7 +1156,7 @@ jobs:
           test -f .build/iyi.exe
           test -f .build/LLVM-C.dll
       - name: Upload producer compiler
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: iyi-x86_64-windows-msvc
           path: |
@@ -1133,7 +1166,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Upload run receipt snapshot
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: run-${{ github.run_id }}-x86_64-windows-msvc.json
           path: stale-index/run-${{ github.run_id }}-x86_64-windows-msvc.json
@@ -1142,7 +1175,7 @@ jobs:
           retention-days: 1
       - name: Upload master candidate receipt snapshot
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: master-candidate-x86_64-windows-msvc.json
           path: stale-index/master-candidate-x86_64-windows-msvc.json
@@ -1160,11 +1193,11 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
       - name: What this machine has
@@ -1221,12 +1254,12 @@ jobs:
     env:
       STALE_TARGET: x86_64-windows-msvc
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-      - uses: crystal-lang/install-crystal@36a22e9145188eec527c96e5a789ce4b832af587 # v1.9.5
+      - uses: crystal-lang/install-crystal@47f17b5ecff0cc09e96fa95f5220311329bf4bc8 # v1.10.0
         with:
           crystal: 1.21.0
       - name: What this machine has
@@ -1252,20 +1285,20 @@ jobs:
         shell: cmd
         run: make -f Makefile.win crystal
       - name: Download producer compiler
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: iyi-x86_64-windows-msvc
           path: .build
       - name: Set producer compiler path
         run: echo "IYI=$(cygpath -m "$PWD/.build/iyi.exe")" >> "$GITHUB_ENV"
       - name: Download producer receipt snapshot
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: run-${{ github.run_id }}-x86_64-windows-msvc.json
           path: stale-index
       - name: Download master candidate receipt snapshot
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: master-candidate-x86_64-windows-msvc.json
           path: stale-index
@@ -1342,7 +1375,7 @@ jobs:
         run: cp -f "stale-index/master-candidate-${STALE_TARGET}.json" "stale-index/master-${STALE_TARGET}.json"
       - name: Publish audited master receipt snapshot
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: master-x86_64-windows-msvc.json
           path: stale-index/master-x86_64-windows-msvc.json
@@ -1357,7 +1390,7 @@ jobs:
             --out "stale-index/master-${STALE_TARGET}.json"
       - name: Publish empty master snapshot after disagreement
         if: always() && !cancelled() && steps.empty_snapshot.outcome == 'success'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: master-x86_64-windows-msvc.json
           path: stale-index/master-x86_64-windows-msvc.json

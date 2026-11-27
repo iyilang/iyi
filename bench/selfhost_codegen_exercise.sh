@@ -357,6 +357,9 @@ fi
 echo
 echo "== 3e. Program fixtures: whole programs compared by exit status"
 echo "    No IR or C-runner comparison: the oracle refuses their @[Unsafe] header, and each defines fun main."
+# A program that defines fun main replaces the runtime's start, so the owned collector's heap and its
+# statistics page are never set up and the first allocation faults. The hosted build of each takes
+# -Dgc_none, whose bump allocator needs no start; the port's build allocates without one too.
 port_built=1
 if ! "$IYI" build "${LLVM_BRIDGE_ARGS[@]}" -o "$WORK_NATIVE/port$EXE" "$REPO_NATIVE/src/compiler/tools/compile.iyi" > "$WORK/port.build.log" 2>&1; then
   echo "  FAIL: the port did not build"
@@ -369,7 +372,7 @@ for base in $PROGRAM_FIXTURES; do
   stem="${base%.iyi}"
   hosted_rc="missing"
   port_rc="missing"
-  if "$IYI" build -o "$WORK_NATIVE/prog_hosted_$stem$EXE" "$(native_path "$fixture")" > "$WORK/prog_hosted_$stem.log" 2>&1; then
+  if "$IYI" build -Dgc_none -o "$WORK_NATIVE/prog_hosted_$stem$EXE" "$(native_path "$fixture")" > "$WORK/prog_hosted_$stem.log" 2>&1; then
     hosted_rc="$(run_fixture "$WORK/prog_hosted_$stem$EXE" "$WORK/prog_hosted_$stem.out" "$WORK/prog_hosted_$stem.err")"
   fi
   if [ "$port_built" = 1 ] && "$WORK/port$EXE" "$(native_path "$fixture")" -o "$WORK_NATIVE/prog_port_$stem$EXE" > "$WORK/prog_port_$stem.log" 2>&1; then

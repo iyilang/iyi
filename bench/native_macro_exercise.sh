@@ -70,8 +70,10 @@ echo "   built the native tool from $NATIVE_SRC"
 
 echo "== 2. A: {{ @type.name.stringify }} in a def body: hosted build, port with LLVM, native back end"
 # The fixture carries its own @[Unsafe] header (the hosted checker requires it for a C fun), so the reference is built as written.
+# Its fun main replaces the runtime's start, so the owned collector's heap is never set up and the first
+# allocation faults; the reference takes -Dgc_none, whose bump allocator needs no start.
 hosted_rc="missing"
-if "$IYI" build -o "$WORK_NATIVE/site_hosted$EXE" "$REPO_NATIVE/bench/fixtures/cg_macro_site.iyi" >"$WORK/site_hosted.log" 2>&1; then
+if "$IYI" build -Dgc_none -o "$WORK_NATIVE/site_hosted$EXE" "$REPO_NATIVE/bench/fixtures/cg_macro_site.iyi" >"$WORK/site_hosted.log" 2>&1; then
   hosted_rc=$(site_exit "$WORK/site_hosted$EXE")
 else
   echo "FAIL: the hosted compiler could not build the fixture: $(awk '/^Error/ { print; exit }' "$WORK/site_hosted.log")"

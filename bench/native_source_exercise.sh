@@ -220,9 +220,14 @@ for f in "$FIX"/compile_*.iyi "$FIX"/cg_*.iyi; do
   pexe="$WORK/port/$n$EXE"
   nexe="$WORK/nat/$n"
   ref_how="as written"
-  if "$IYI" build -o "$(native_path "$ref")" "$(native_path "$f")" >"$WORK/ref/$n.log" 2>&1; then
+  # A fixture that defines fun main replaces the runtime's start, so the owned collector's heap and its
+  # statistics page are never set up and its first allocation faults. Its hosted reference takes
+  # -Dgc_none, whose bump allocator needs no start.
+  ref_gc=
+  grep -q '^fun main' "$f" && ref_gc=-Dgc_none
+  if "$IYI" build $ref_gc -o "$(native_path "$ref")" "$(native_path "$f")" >"$WORK/ref/$n.log" 2>&1; then
     ref_ok=1
-  elif IYI_PATH="$REPO_NATIVE/src$path_sep$(native_path "$FIX")" "$IYI" build -o "$(native_path "$ref")" "$WORK_NATIVE/marked/$n.iyi" >"$WORK/ref/$n.marked.log" 2>&1; then
+  elif IYI_PATH="$REPO_NATIVE/src$path_sep$(native_path "$FIX")" "$IYI" build $ref_gc -o "$(native_path "$ref")" "$WORK_NATIVE/marked/$n.iyi" >"$WORK/ref/$n.marked.log" 2>&1; then
     ref_ok=1
     ref_how="copy with @[Unsafe] header"
     marked_refs=$((marked_refs + 1))

@@ -623,7 +623,7 @@ fi
 if [ "$STAGE1_FLOOR" = run ]; then
   mutations_run=$((mutations_run + 1))
   if prove_mutation "build returns without compiling" "$REPO/src/compiler/command/execute.iyi" \
-    '    compile(opts, opts.output_filename.as(String))' '    0' \
+    '    compile(opts, opts.output_filename.as(String), config_path)' '    0' \
     -- check_build_regresses; then
     mutations_caught=$((mutations_caught + 1))
   else

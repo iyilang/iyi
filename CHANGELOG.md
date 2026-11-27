@@ -647,6 +647,15 @@
 
 ### Gates
 
+- **The AArch64 codegen gate bounds every program it runs.**
+  `bench/native_codegen_exercise.sh` ran its native fixtures, their hosted
+  twins, the runtime-helper and thread-pointer programs and each broken
+  copy's fixture with no time bound, so one that never ended (a broken
+  copy's `wide.native` did) held the macOS job to its timeout. Each now runs
+  under 20 s and fails by name when the bound ends it. The bound is the
+  Perl alarm the regalloc, MIR-clean and isel-fold gates already used, now
+  one `bench/lib/bounded_run.sh` that all four source.
+
 - **std/autocert's and std/acme's gates draw challtestsrv's DNS port free
   for UDP as well as TCP, std/autocert's says what did not come up when
   Pebble does not start, and eleven gates' failure output no longer dies

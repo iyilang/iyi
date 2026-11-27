@@ -12,6 +12,7 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 source "$REPO/bench/floor_base.sh" || exit 1
+source "$REPO/bench/lib/bounded_run.sh" || exit 1
 if [ "$HOST_OS" = darwin ]; then
   export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:"$PATH"
   export LIBRARY_PATH=${LIBRARY_PATH:-/opt/homebrew/opt/bdw-gc/lib}
@@ -72,6 +73,18 @@ trap 'exit 143' TERM
 
 failed=0
 fail() { echo "FAIL: $*"; failed=1; }
+# Every program this gate runs, native or hosted, runs under one bound, so a program that never ends (a broken
+# copy's wide.native once looped and held the job to its timeout) fails here, by name, within RUN_SECONDS.
+RUN_SECONDS=20
+# run_program EXE PREFIX: bounded_run under RUN_SECONDS, saying which program the bound ended.
+run_program() {
+  local rc
+  bounded_run "$RUN_SECONDS" "$1" "$2"
+  rc=$?
+  [ "$rc" -ne 1 ] || echo "TIMEOUT: $(basename "$1") did not finish within $RUN_SECONDS s"
+  [ "$rc" -ne 2 ] || echo "NOT RUN: $(basename "$1") could not be started or observed"
+  return "$rc"
+}
 FIX="$REPO/bench/fixtures/native_cg"
 IYI="$REPO/bin/iyi"
 if [ -x "$REPO/.build/iyi.exe" ]; then
@@ -349,15 +362,19 @@ if [ "$HOST_ID" = darwin-arm64 ]; then
       fail "$base: native signature or executable identity failed"
       continue
     fi
-    "$WORK/$base.native" >"$WORK/$base.native.out" 2>"$WORK/$base.native.err"
-    echo $? >"$WORK/$base.native.status"
+    if ! run_program "$WORK/$base.native" "$WORK/$base.native"; then
+      fail "$base: $base.native did not run to its end"
+      continue
+    fi
     if ! "$IYI" build -o "$(native_path "$WORK/$base.hosted$EXE")" "$(native_path "$iy")" >"$WORK/$base.hosted.log" 2>&1; then
       tail -20 "$WORK/$base.hosted.log"
       fail "$base: the hosted compiler does not build $base.iyi"
       continue
     fi
-    "$WORK/$base.hosted$EXE" >"$WORK/$base.hosted.out" 2>"$WORK/$base.hosted.err"
-    echo $? >"$WORK/$base.hosted.status"
+    if ! run_program "$WORK/$base.hosted$EXE" "$WORK/$base.hosted"; then
+      fail "$base: the hosted twin did not run to its end"
+      continue
+    fi
     printf '%s native stdout:\n' "$base"; cat "$WORK/$base.native.out"
     printf '%s native stderr:\n' "$base"; cat "$WORK/$base.native.err"
     printf '%s hosted stderr:\n' "$base"; cat "$WORK/$base.hosted.err"
@@ -378,7 +395,9 @@ if [ "$HOST_ID" = darwin-arm64 ]; then
     fail "threadpointer: cc did not link the native object"
   elif ! record_executable "$WORK/tp.bin"; then
     fail "threadpointer: native signature or executable identity failed"
-  elif ! "$WORK/tp.bin" >"$WORK/tp.out" 2>"$WORK/tp.err"; then
+  elif ! run_program "$WORK/tp.bin" "$WORK/tp"; then
+    fail "threadpointer: tp.bin did not run to its end"
+  elif [ "$(cat "$WORK/tp.status")" != 0 ]; then
     cat "$WORK/tp.out" "$WORK/tp.err"
     fail "threadpointer: the masked thread pointer is zero, unaligned, or differs between reads"
   else
@@ -472,15 +491,18 @@ if [ "$HOST_ID" = darwin-arm64 ]; then
      && cc "$WORK/rth.o" "$WORK/rt_stub.o" -o "$WORK/rth_stub" >"$WORK/rth_stub.link.log" 2>&1 \
      && "$IYI" build -o "$(native_path "$WORK/rth_hosted$EXE")" "$(native_path "$RTF/rt_helpers.iyi")" >"$WORK/rth_hosted.log" 2>&1 \
      && record_executable "$WORK/rth_native" && record_executable "$WORK/rth_stub"; then
-    "$WORK/rth_native" >"$WORK/rth_native.out" 2>"$WORK/rth_native.err"; s1=$?
-    "$WORK/rth_stub" >"$WORK/rth_stub.out" 2>"$WORK/rth_stub.err"; s2=$?
-    "$WORK/rth_hosted$EXE" >"$WORK/rth_hosted.out" 2>"$WORK/rth_hosted.err"; s3=$?
+    run_program "$WORK/rth_native" "$WORK/rth_native"; r1=$?
+    run_program "$WORK/rth_stub" "$WORK/rth_stub"; r2=$?
+    run_program "$WORK/rth_hosted$EXE" "$WORK/rth_hosted"; r3=$?
+    s1=$(cat "$WORK/rth_native.status"); s2=$(cat "$WORK/rth_stub.status"); s3=$(cat "$WORK/rth_hosted.status")
     printf 'rt_helpers native stdout:\n'; cat "$WORK/rth_native.out"
     for variant in native stub hosted; do
       printf 'rt_helpers %s stderr:\n' "$variant"
       cat "$WORK/rth_$variant.err"
     done
-    if [ "$s1" -ne 0 ] || [ "$s2" -ne 0 ] || [ "$s3" -ne 0 ]; then
+    if [ "$r1$r2$r3" != 000 ]; then
+      fail "rt_helpers: a program did not run to its end (native, stub, hosted: $r1 $r2 $r3)"
+    elif [ "$s1" -ne 0 ] || [ "$s2" -ne 0 ] || [ "$s3" -ne 0 ]; then
       fail "rt_helpers: exit statuses $s1 $s2 $s3 (native, stub, hosted)"
     elif ! cmp -s "$WORK/rth_native.out" "$WORK/rth_stub.out"; then
       cat "$WORK/rth_stub.out"
@@ -789,8 +811,9 @@ check_fixture() {
   record_executable "$WORK/m.$base.bin"
   identity_status=$?
   [ "$identity_status" -eq 0 ] || return "$identity_status"
-  "$WORK/m.$base.bin" >"$WORK/m.$base.out" 2>"$WORK/m.$base.err"
-  status=$?
+  run_program "$WORK/m.$base.bin" "$WORK/m.$base"
+  [ "$?" -ne 2 ] || return 124
+  status=$(cat "$WORK/m.$base.status") || return 124
   expected=$(cat "$WORK/$base.hosted.status") || return 124
   printf '%s detector status %s, hosted status %s; stdout:\n' "$base" "$status" "$expected"
   cat "$WORK/m.$base.out"

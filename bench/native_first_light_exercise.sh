@@ -158,7 +158,7 @@ for ir in "$FIX"/*.ir "$FL"/*.ir; do
       asm_*) hosted_args=(--cross-compile --target aarch64-apple-darwin) ;;
     esac
   fi
-  if ! "$iyi" build "${hosted_args[@]}" -o "$work_native/hosted/$n$EXE" "$REPO_NATIVE/$dir/$n.iyi" >"$work/hosted-$n.log" 2>&1; then
+  if ! "$iyi" build ${hosted_args[@]+"${hosted_args[@]}"} -o "$work_native/hosted/$n$EXE" "$REPO_NATIVE/$dir/$n.iyi" >"$work/hosted-$n.log" 2>&1; then
     printf '%-18s FAIL      the hosted compiler does not build the twin\n' "$n" >>"$table"
     cat "$work/hosted-$n.log"
     failures=$((failures + 1))

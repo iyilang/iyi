@@ -603,7 +603,19 @@ fi
 for bad in pipeline_import_cycle pipeline_import_missing; do
   rm -f "$WORK/$bad$EXE"
   "$IYI" run "$REPO_NATIVE/bench/fixtures/$bad.iyi" > "$WORK/$bad.hosted" 2>&1; hs=$?
-  "$WORK/tool$EXE" "$REPO_NATIVE/bench/fixtures/$bad.iyi" -o "$WORK_NATIVE/$bad$EXE" --pipeline typed --prelude --probe-phase > "$WORK/$bad.native" 2>&1; ns=$?
+  # Bounded, as every fixture run is: a loader that misses the cycle re-parses the import chain without end.
+  if ! RUN_FIXTURE_TIMEOUT=300 run_fixture "$WORK/tool$EXE" "$bad.native-run" "$REPO_NATIVE/bench/fixtures/$bad.iyi" \
+       -o "$WORK_NATIVE/$bad$EXE" --pipeline typed --prelude --probe-phase; then
+    echo "  FAIL: $bad: the native tool could not be run"
+    status=1; continue
+  fi
+  cat "$WORK/$bad.native-run.out" "$WORK/$bad.native-run.err" > "$WORK/$bad.native"
+  if [ "$RUN_KIND" = timeout ]; then
+    echo "  FAIL: $bad: the native tool did not finish within 300 s"
+    status=1; continue
+  fi
+  ns=$RUN_STATUS
+  [ "$RUN_KIND" = exit ] || ns=$((128 + RUN_STATUS))
   if [ "$bad" = pipeline_import_cycle ]; then expected="import cycle"; else expected="can't find module 'pipeline_nonexistent_dependency'"; fi
   if [ "$hs" -eq 0 ] || [ "$hs" -ge 126 ] || [ "$ns" -ne 1 ] || [ -e "$WORK/$bad$EXE" ] || ! grep -Fq "$expected" "$WORK/$bad.hosted" || ! grep -Fq "$expected" "$WORK/$bad.native"; then
     echo "  FAIL: $bad did not reject on both compilers"

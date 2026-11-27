@@ -185,7 +185,7 @@ for fixture in "$REPO"/bench/fixtures/lowcall_*.iyi "$REPO"/bench/fixtures/lowde
     oracle_target=(--cross-compile --target aarch64-apple-darwin)
     oracle_output="$WORK_NATIVE/$name.o"
   fi
-  if ! "$IYI" build "${oracle_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
+  if ! "$IYI" build ${oracle_target[@]+"${oracle_target[@]}"} --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
     echo "  $name: the hosted compiler did not emit its module (see $WORK/$name.oracle.log)"
     diverged=$((diverged + 1))
     continue
@@ -498,7 +498,7 @@ if [ "$HOST_ID" != darwin-arm64 ]; then
   meta_target=(--cross-compile --target aarch64-apple-darwin)
   meta_output="$WORK_NATIVE/meta_name_ir.o"
 fi
-if ! "$IYI" build "${meta_target[@]}" --single-module --emit llvm-ir --no-debug -o "$meta_output" "$meta_name_fixture" > "$WORK/meta_name.ir-hosted.log" 2>&1 ||
+if ! "$IYI" build ${meta_target[@]+"${meta_target[@]}"} --single-module --emit llvm-ir --no-debug -o "$meta_output" "$meta_name_fixture" > "$WORK/meta_name.ir-hosted.log" 2>&1 ||
    ! "$WORK/compile_native$EXE" "$meta_name_fixture" -o "$WORK_NATIVE/meta_name.ir-port" --pipeline typed --prelude --emit ir > "$WORK/meta_name.ir-port.log" 2>&1 ||
    ! meta_name_body "$WORK/meta_name_ir.ll" > "$WORK/meta_name.hosted.body" ||
    ! meta_name_body "$WORK/meta_name.ir-port" > "$WORK/meta_name.port.body" ||

@@ -715,7 +715,31 @@
   register passed every gate, and the hosted twins on macOS arm64 now catch
   it.
 
+- **The AArch64 target description and a call's clobbers cannot be
+  changed.** Since #263 one `TargetDesc` serves every function of a module,
+  and every call it selects shares the description's caller-saved list as
+  its clobbers, but the register sets were plain arrays: a broken copy that
+  popped `caller_saved` once per function compiled, passed every gate on
+  Linux and macOS arm64, and went wrong only after about 24 functions. The
+  sets and `MInst#clobbers` are now a `RegList` (`compiler/native/mir.iyi`),
+  a copy with `size`, `[]`, `empty?` and `each` and nothing that writes, so
+  `pop`, `[]=`, `<<` or `reverse_in_place` on one does not compile. An
+  instruction that is not a call no longer allocates an empty clobber
+  array: on macOS arm64 the collector-free `native_cg obj` retires 1.2 to
+  1.7 % fewer back-end instructions on five self-hosted modules (median of
+  5 interleaved runs, wall time unchanged), and its objects are
+  byte-identical to #263's.
+
 ### Gates
+
+- **The AArch64 codegen gate bounds every program it runs.**
+  `bench/native_codegen_exercise.sh` ran its native fixtures, their hosted
+  twins, the runtime-helper and thread-pointer programs and each broken
+  copy's fixture with no time bound, so one that never ended (a broken
+  copy's `wide.native` did) held the macOS job to its timeout. Each now runs
+  under 20 s and fails by name when the bound ends it. The bound is the
+  Perl alarm the regalloc, MIR-clean and isel-fold gates already used, now
+  one `bench/lib/bounded_run.sh` that all four source.
 
 - **Darwin's thread-yield control measures CPU held under load.** The
   hint's throughput ratio failed to distinguish it from the runtime on an

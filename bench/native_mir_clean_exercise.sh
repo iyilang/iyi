@@ -23,6 +23,7 @@ trap 'exit 143' TERM
 failed=0
 fail() { echo "FAIL: $*"; failed=1; }
 . bench/lib/native_signature.sh
+. bench/lib/bounded_run.sh
 . bench/lib/mutation.sh
 export NATIVE_SIGNATURE_FAILURE_FILE="$WORK/signature-failure"
 
@@ -267,41 +268,6 @@ fixture_key() {
   printf '%s.%s\n' "$(basename "$(dirname "$1")")" "$(basename "$1" .ir)"
 }
 
-# Keep the Perl alarm while distinguishing a killed process from one that
-# legitimately exits 142. Return 1 for an alarm and 2 for a launch/wait error.
-bounded_run() {
-  local exe=$1 prefix=$2 status
-  rm -f "$prefix.timeout" "$prefix.exec-error" "$prefix.done" || return 2
-  perl -e '
-    my ($timeout, $error, $done, $exe) = @ARGV;
-    my $pid = fork();
-    defined($pid) or die "fork: $!";
-    if ($pid == 0) {
-      alarm 20;
-      exec { $exe } $exe;
-      open my $fh, ">", $error or die "exec and error marker failed: $!";
-      print $fh "exec failed: $!\n";
-      close $fh or die "error marker: $!";
-      exit 127;
-    }
-    my $waited = waitpid($pid, 0);
-    my $status = $?;
-    $waited == $pid or die "waitpid: $!";
-    if (($status & 127) == 14) {
-      open my $fh, ">", $timeout or die "timeout marker: $!";
-      close $fh or die "timeout marker: $!";
-    }
-    open my $fh, ">", $done or die "completion marker: $!";
-    close $fh or die "completion marker: $!";
-    exit (($status & 127) ? 128 + ($status & 127) : $status >> 8);
-  ' "$prefix.timeout" "$prefix.exec-error" "$prefix.done" "$exe" </dev/null >"$prefix.out" 2>/dev/null
-  status=$?
-  echo "$status" >"$prefix.status" || return 2
-  [ -e "$prefix.done" ] && [ ! -e "$prefix.exec-error" ] || return 2
-  [ ! -e "$prefix.timeout" ] || return 1
-  return 0
-}
-
 # Link and run an emitted object on macOS arm64. Link and signature errors
 # have distinct statuses so they cannot be credited as mutation detections.
 run_obj() {
@@ -309,7 +275,7 @@ run_obj() {
   [ -s "$obj" ] || return 2
   cc "$obj" bench/fixtures/native_cg/rt_stub.c -o "$prefix.bin" >"$prefix.link.log" 2>&1 || return 3
   native_signature_ok "$prefix.bin" || return 4
-  bounded_run "$prefix.bin" "$prefix"
+  bounded_run 20 "$prefix.bin" "$prefix"
   result=$?
   case "$result" in
     0) return 0 ;;
@@ -370,7 +336,7 @@ if [ "$HOST_ID" = darwin-arm64 ]; then
         fail "$key: the hosted twin does not build"
         continue
       fi
-      if ! bounded_run "$hosted" "$WORK/expect.$key"; then
+      if ! bounded_run 20 "$hosted" "$WORK/expect.$key"; then
         fail "$key: hosted execution timed out or could not be observed"
         continue
       fi

@@ -307,7 +307,7 @@ module Iyi::Stale
                    Snapshot.importable_namespace?(snap.namespace)
           snap.records.each do |rec|
             rec.namespace = snap.namespace
-            if Snapshot.record_error(rec)
+            if Snapshot.record_error(rec, snap.target)
               usable = false
               next
             end

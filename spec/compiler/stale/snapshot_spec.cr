@@ -1151,6 +1151,18 @@ describe "Iyi::Stale S8: Portable Snapshots" do
         import_one(cache_root, env).success?.should be_true
       end
     end
+
+    it "takes a backslash as a Windows target's separator and still refuses '..' and roots there" do
+      windows = ->(path : String) do
+        Iyi::Stale::Snapshot.observation_path_error(make_obs("file_read", "src", path), true)
+      end
+      windows.call("fixtures\\a.txt").should be_nil
+      windows.call("fixtures\\..\\..\\x").not_nil!.should contain("'..' component")
+      windows.call("\\\\server\\share\\x").not_nil!.should contain("is absolute")
+      windows.call("\\x").not_nil!.should contain("is absolute")
+      windows.call("C:\\x").not_nil!.should contain("is absolute")
+      Iyi::Stale::Snapshot.observation_path_error(make_obs("file_read", "src", "fixtures\\a.txt"), false).not_nil!.should contain("backslash")
+    end
   end
 
   describe "F3: only the master and run:<id> namespaces are imported" do

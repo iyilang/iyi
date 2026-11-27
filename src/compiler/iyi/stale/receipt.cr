@@ -361,7 +361,7 @@ module Iyi::Stale
     # checked: the record is a portable, uncontradicted pass's; every digest is
     # one `Stale.hex` writes; the trace fingerprint and the signature are the
     # ones its fields give; and no path leaves its root.
-    def self.record_error(rec : Receipt) : String?
+    def self.record_error(rec : Receipt, target : String) : String?
       return "mode is '#{rec.mode}', not 'portable'" unless rec.portable?
       return "the record is contradicted" if rec.contradicted
       build = rec.build
@@ -378,8 +378,9 @@ module Iyi::Stale
       unless rec.signature == Stale.hex(Receipt.compute_signature(rec.test, build.build, rec.profile.fp, rec.trace.fp))
         return "signature is not the one its test, build, profile and trace give"
       end
+      windows = target.includes?("windows")
       rec.trace.observations.each do |obs|
-        if error = observation_path_error(obs)
+        if error = observation_path_error(obs, windows)
           return "#{obs.kind} observation #{obs.root}:#{obs.path.inspect} #{error}"
         end
       end
@@ -387,12 +388,15 @@ module Iyi::Stale
     end
 
     # Why replay could leave the observation's root with its path, or nil. An
-    # environment observation's path is a variable's name, not a file's.
-    def self.observation_path_error(obs : Observation) : String?
+    # environment observation's path is a variable's name, not a file's. A
+    # Windows target's runner writes a relative path with its own separator,
+    # so there a backslash separates components; elsewhere it is refused.
+    def self.observation_path_error(obs : Observation, windows : Bool) : String?
       path = obs.path
       return "holds a NUL byte" if path.includes?('\0')
       return nil if obs.root == "env"
-      return "holds a backslash" if path.includes?('\\')
+      return "holds a backslash" if path.includes?('\\') && !windows
+      path = path.tr("\\", "/") if windows
       if path.starts_with?('/') || (path.bytesize >= 2 && path[0].ascii_letter? && path[1] == ':')
         return "is absolute"
       end

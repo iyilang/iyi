@@ -815,7 +815,7 @@ describe "Iyi::Stale S6a: Store and Receipts" do
       store.candidates(test, target).should be_empty
       store.revoke(test) { |_| true }.should eq({0, 1})
       Dir.children(store.masks_dir).should eq([good.signature])
-      File.exists?(File.join(cache_root, ".bash_aliases")).should be_false
+      File.exists?(File.expand_path(File.join(store.masks_dir, "..", "..", "..", "..", ".bash_aliases"))).should be_false
     end
   end
 

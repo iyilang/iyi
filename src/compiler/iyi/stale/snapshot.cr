@@ -455,7 +455,7 @@ module Iyi::Stale
           end
         end
 
-        if error = record_error(rec)
+        if error = record_error(rec, snapshot.target)
           return ImportResult.new(
             success: false,
             error: "record refused for test #{rec.test}: #{error}",

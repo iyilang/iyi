@@ -2006,7 +2006,7 @@ expect_eq "$row60_forged_status" 1 "a record whose signature names a path is ref
 expect_contains "$row60_forged" "signature is not 64 lowercase hex characters"
 expect_eq "$row60_escape_status" 1 "a record whose observation leaves its root is refused"
 expect_contains "$row60_escape" "record refused for test"
-[ ! -e "$WORK/.bash_aliases" ] && [ ! -e "$CACHE/.bash_aliases" ] || fail "a forged signature wrote outside the store"
+[ ! -e "$(dirname "$WORK")/.bash_aliases" ] || fail "a forged signature wrote outside the store"
 expect_eq "$(cd "$r60" && "$IYI" test --list-imports)" "no imported receipts" "a refused import stores nothing"
 row60_hit="$(cd "$r60" && GITHUB_RUN_ID="$r60_id" "$IYI" test --cached --json --import-index "run:$r60_id=$r60/good.json" .)"
 expect_eq "$(printf '%s' "$row60_hit" | json_cached)" 1 "the snapshot whose records check out is imported and hit"

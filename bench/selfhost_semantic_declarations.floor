@@ -38,7 +38,7 @@ src/compiler/backend/llvm/translate.iyi 0
 src/compiler/backend/native.iyi 0
 src/compiler/codegen/codegen.iyi 0
 src/compiler/command/daemon.iyi 77
-src/compiler/command/driver.iyi 197
+src/compiler/command/driver.iyi 202
 src/compiler/command/execute.iyi 0
 src/compiler/compiler.iyi 0
 src/compiler/foundation/enums.iyi 12
@@ -165,7 +165,7 @@ src/compiler/native/wasm/codegen.iyi 0
 src/compiler/native/wasm/leb.iyi 15
 src/compiler/native/wasm/module.iyi 0
 src/compiler/platform/flags.iyi 5
-src/compiler/platform/linker.iyi 28
+src/compiler/platform/linker.iyi 29
 src/compiler/platform/target.iyi 47
 src/compiler/semantic/call.iyi 25
 src/compiler/semantic/call_error.iyi 18
@@ -237,7 +237,7 @@ src/iyi/array.iyi 108
 src/iyi/atomic.iyi 11
 src/iyi/chaos.iyi 79
 src/iyi/chaos_points.iyi 7
-src/iyi/concurrency.iyi 603
+src/iyi/concurrency.iyi 609
 # Windows takes the `{% if flag?(:win32) %}` arm of IyiSchedulerState that declares
 # `@deadline_timer` and `stdin_waiter`: two more instance variables, both agreeing.
 # CI's Windows host (x86-64) measures 605 of 605.
@@ -295,13 +295,13 @@ src/std/ecdsa.iyi 129
 src/std/eiy.iyi 68
 src/std/enum.iyi 19
 src/std/enumerable.iyi 77
-src/std/env.iyi 41
+src/std/env.iyi 42
 src/std/errno.iyi 38
-src/std/file.iyi 159
+src/std/file.iyi 162
 # Linux takes the `{% else %}` arm of the platform block at the top of the file (its syscall
 # layer, with its own architecture arms), which declares more than the Darwin arm. CI's Linux
-# host (x86-64) measures 167 of 167.
-src/std/file.iyi@linux 167
+# host (x86-64) measures 170 of 170.
+src/std/file.iyi@linux 170
 src/std/file_utils.iyi 20
 src/std/fileserver.iyi 7
 src/std/float.iyi 15
@@ -340,6 +340,7 @@ src/std/number.iyi 24
 src/std/number_format.iyi 35
 src/std/oauth.iyi 0
 src/std/oauth2.iyi 0
+src/std/observe.iyi 93
 src/std/ocsp.iyi 105
 src/std/option_parser.iyi 44
 src/std/otp.iyi 47

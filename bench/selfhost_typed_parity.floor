@@ -8,7 +8,7 @@ samples/iyi/cores.iyi 285
 samples/iyi/derive.iyi 26
 samples/iyi/enums.iyi 142
 samples/iyi/errors.iyi 98
-samples/iyi/files.iyi 29
+samples/iyi/files.iyi 46
 samples/iyi/format.iyi 115
 samples/iyi/formatting.iyi 85
 samples/iyi/generics.iyi 110
@@ -21,7 +21,7 @@ samples/iyi/io.iyi 31
 samples/iyi/modules.iyi 21
 samples/iyi/sessions.iyi 74
 samples/iyi/shapes.iyi 106
-samples/iyi/socket.iyi 84
+samples/iyi/socket.iyi 85
 samples/iyi/std_iterator.iyi 109
 samples/iyi/std_text.iyi 89
 samples/iyi/std_time.iyi 138
@@ -37,7 +37,7 @@ src/compiler/backend/llvm/translate.iyi 66
 src/compiler/backend/native.iyi 24
 src/compiler/codegen/codegen.iyi 199
 src/compiler/command/daemon.iyi 84
-src/compiler/command/driver.iyi 256
+src/compiler/command/driver.iyi 261
 src/compiler/command/execute.iyi 29
 src/compiler/compiler.iyi 69
 src/compiler/foundation/enums.iyi 9
@@ -164,7 +164,7 @@ src/compiler/native/wasm/codegen.iyi 86
 src/compiler/native/wasm/leb.iyi 10
 src/compiler/native/wasm/module.iyi 50
 src/compiler/platform/flags.iyi 10
-src/compiler/platform/linker.iyi 31
+src/compiler/platform/linker.iyi 33
 src/compiler/platform/target.iyi 49
 src/compiler/semantic/call.iyi 50
 src/compiler/semantic/call_error.iyi 29
@@ -250,7 +250,7 @@ src/iyi/io.iyi@windows 60
 src/iyi/macros.iyi 4
 src/iyi/number.iyi 39
 src/iyi/object.iyi 29
-src/iyi/prelude.iyi 140
+src/iyi/prelude.iyi 142
 src/iyi/primitives.iyi 44
 src/iyi/range.iyi 13
 src/iyi/set.iyi 12
@@ -289,9 +289,9 @@ src/std/ecdsa.iyi 152
 src/std/eiy.iyi 74
 src/std/enum.iyi 23
 src/std/enumerable.iyi 89
-src/std/env.iyi 47
+src/std/env.iyi 49
 src/std/errno.iyi 5
-src/std/file.iyi 170
+src/std/file.iyi 174
 src/std/file_utils.iyi 40
 src/std/fileserver.iyi 23
 src/std/float.iyi 22
@@ -327,6 +327,7 @@ src/std/number.iyi 22
 src/std/number_format.iyi 55
 src/std/oauth.iyi 105
 src/std/oauth2.iyi 103
+src/std/observe.iyi 138
 src/std/ocsp.iyi 112
 src/std/option_parser.iyi 40
 src/std/otp.iyi 59

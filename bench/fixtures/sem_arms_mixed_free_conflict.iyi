@@ -1,0 +1,5 @@
+def pair(first : T, second : T) : T forall T
+  first
+end
+
+puts pair(42, second: "wrong")

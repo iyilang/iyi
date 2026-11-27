@@ -1,0 +1,9 @@
+module s1h_scope/box_user
+
+import s1h_scope/box::{Box, Item}
+
+pub class BoxUser
+  def make
+    Box(Item).new
+  end
+end

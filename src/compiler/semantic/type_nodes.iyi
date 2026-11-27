@@ -1,0 +1,644 @@
+module compiler/semantic/type_nodes
+
+# The typing of the nodes a body can write as types, and of the casts that name
+# them: `Pointer(Int32)`, `Int32 | String`, `Int32 -> Int32`, `Int32.class`,
+# `self`, `x.as(T)`, `x.as?(T)`, and a `fun` with a body. The hosted pass does
+# these in its main visitor (src/compiler/iyi/semantic/main_visitor.cr:
+# `visit(node : Generic)` 259-335, `ProcNotation` 337-363, `Union` 365-374,
+# `Metaclass` 376-380, `Self` 382-385, `Cast | NilableCast` 2310-2331,
+# `FunDef` 2333-2365). Each function takes the visitor (a TypeNodeHost, the
+# abstract base of MainVisitor) as its first argument and is called from a
+# one-line `visit` in MainVisitor.
+#
+# Inside a type argument a node is typed as the instance type, not its metaclass,
+# so each visit here brackets its children with bracket_type_args(1) and (-1)
+# (hosted `@in_type_args`). A generic written there is `Box(Int32)`, not
+# `Box(Int32).class`.
+#
+# Not ported here: named type arguments (`Foo(x: Int32)`), which only NamedTuple
+# accepts, so the port refuses them by name; and the `raises` mark a cast leaves
+# on its method, which the port does not track yet.
+
+import compiler/syntax/ast::{ASTNode, AlignOf, Cast, EnumDef, FunDef, Generic, InstanceAlignOf, InstanceSizeOf, Metaclass, NilableCast, NumberLiteral, PointerOf, ProcNotation, Self, SizeOf, Splat, TypeOf, Union, UninitializedVar, Var}
+import compiler/semantic/type_node_host::{TypeNodeHost}
+import compiler/semantic/top_level::{GenericClassType, GenericModuleType, LibFun, ModuleType, SemanticProgram, Type, TypeHook, TypeParameterType}
+import compiler/types/type_system::{TypeSystem}
+import compiler/types/types::{GenericClassInstanceType, GenericModuleInstanceType, NamedArgumentType, TupleInstanceType, TypeQueries, TypeSplat}
+import compiler/types/unification::{TypeUnification}
+import compiler/types/lookup::{LookupError, TypeLookup}
+
+# The program's type system. The type system owns the generic instance cache,
+# so a `Pointer(Int32)` written in a body is the object the rest of the program
+# holds. A program with no type system yet gets one now; it becomes the
+# program's merge hook, as `TypeSystem.new` does.
+pub def type_node_system(program : SemanticProgram) : TypeSystem
+  hook : TypeHook? = program.merge_hook
+  if hook.is_a?(TypeSystem)
+    return hook.as(TypeSystem)
+  end
+  TypeSystem.new(program)
+end
+
+# The lookup every type node is resolved with.
+pub def type_node_lookup(visitor : TypeNodeHost) : TypeLookup
+  TypeLookup.new(type_node_system(visitor.program).instances)
+end
+
+# The metaclass of a resolved type, as the hosted `Type#metaclass` gives it. A
+# generic instance has its own metaclass type; any other type goes through the
+# unification helper. nil when the type has none.
+pub def type_node_metaclass(type : Type) : Type?
+  if type.is_a?(GenericClassInstanceType)
+    return type.as(GenericClassInstanceType).metaclass
+  end
+  if type.is_a?(GenericModuleInstanceType)
+    return type.as(GenericModuleInstanceType).metaclass
+  end
+  TypeUnification.metaclass_of(type)
+end
+
+# The instance type of `Tuple(T, ...)` for these element types, as the hosted
+# `program.tuple_of` gives it. A tuple literal in a body is typed by it.
+pub def tuple_type_of(program : SemanticProgram, elements : Array(Type)) : Type
+  type_node_system(program).tuple_of(elements)
+end
+
+# The instance type of `NamedTuple(a: T, ...)` for these entries, as the hosted
+# `program.named_tuple_of` gives it.
+pub def named_tuple_type_of(program : SemanticProgram, entries : Array(NamedArgumentType)) : Type
+  type_node_system(program).named_tuple_of(entries)
+end
+
+# `Pointer(Int32)`: in an expression the node is the metaclass of the instantiated
+# type, so a call on it (`Pointer(Int32).malloc(1)`) resolves against that
+# metaclass. In a type argument it is the instance type itself.
+#
+# Hosted `visit(node : Generic)` (src/compiler/iyi/semantic/main_visitor.cr
+# 259-335) visits the name, visits the type arguments, then `Generic#update`
+# (bindings.cr 649-765) instantiates from those already-typed children. It does
+# not look the whole Generic node up again. A second lookup against
+# `current_type` is the wrong form: when `current_type` is the unbound generic
+# class, `T` is that class's type parameter and the instance is `Pointer(T)` or
+# `Array(T)`, which the hosted compiler never has. The name's visit (hosted
+# Path, main_visitor.cr 187-203, `lookup_scope = @path_lookup || @scope ||
+# @current_type`) is what binds an owner type variable and what sees a name the
+# file imported.
+pub def visit_generic(visitor : TypeNodeHost, node : Generic) : Bool
+  if node.named_args
+    return visitor.refuse(node, "named type arguments are not typed yet")
+  end
+
+  node.name.accept(visitor)
+  visitor.bracket_type_args(1)
+  i = 0
+  while i < node.type_vars.size
+    node.type_vars[i].accept(visitor)
+    i = i + 1
+  end
+  visitor.bracket_type_args(-1)
+
+  resolved = generic_of_typed_args(visitor, node)
+  return false if resolved.nil?
+  instance = resolved.as(Type)
+  if visitor.in_type_args?
+    visitor.set_type(node, instance)
+    return false
+  end
+  meta = type_node_metaclass(instance)
+  if meta.nil?
+    return visitor.refuse(node, "#{instance.full_name} doesn't have a metaclass")
+  end
+  visitor.set_type(node, meta.as(Type))
+  false
+end
+
+# Instantiates a generic node from its base name and the arguments the visitor
+# has already typed, as hosted `Generic#update` (bindings.cr 649-765) does after
+# `visit(node : Generic)` (main_visitor.cr 259-335). `T` bound in a generic
+# instance's method or metaclass is the visited argument, not a fresh lookup of
+# the AST node against `current_type` (that lookup yields the unbound parameter
+# when `current_type` is the generic class itself).
+pub def generic_of_typed_args(visitor : TypeNodeHost, node : Generic) : Type?
+  ts = type_node_system(visitor.program)
+  lookup = TypeLookup.new(ts.instances)
+  # Prefer the name resolved in its file's lexical scope, including imports.
+  base_type : Type
+  if typed_base = visitor.child_type(node.name)
+    base_type = visitor.program.remove_alias(TypeQueries.instance_type(typed_base))
+  else
+    base = lookup.lookup(visitor.current_type, node.name)
+    if base.is_a?(LookupError)
+      visitor.refuse(node, base.as(LookupError).message)
+      return nil
+    end
+    base_type = base.as(Type)
+  end
+  unless base_type.is_a?(GenericClassType) || base_type.is_a?(GenericModuleType)
+    visitor.refuse(node, "#{base_type.full_name} is not a generic type, it's a #{base_type.type_desc}")
+    return nil
+  end
+  if base_type.is_a?(GenericClassType) && base_type.full_name == "NamedTuple"
+    visitor.refuse(node, "can only instantiate NamedTuple with named arguments")
+    return nil
+  end
+
+  if base_type.is_a?(GenericClassType) && base_type.full_name == "StaticArray"
+    if node.type_vars.size != 2
+      visitor.refuse(node, "wrong number of type vars for #{lookup.generic_text(base_type)} (given #{node.type_vars.size}, expected 2)")
+      return nil
+    end
+    elem_node = node.type_vars[0]
+    elem_t = visitor.child_type(elem_node)
+    if elem_t.nil?
+      err = lookup.lookup(visitor.current_type, elem_node)
+      visitor.refuse(node, err.as(LookupError).message) if err.is_a?(LookupError)
+      return nil
+    end
+    size_node = node.type_vars[1]
+    unless size_node.is_a?(NumberLiteral)
+      visitor.refuse(node, "a constant size of StaticArray is not ported yet")
+      return nil
+    end
+    elem_type = elem_t.as(Type)
+    unless lookup.can_be_stored?(elem_type)
+      visitor.refuse(node, "can't use #{lookup.shown(elem_type)} as a generic type argument yet, use a more specific type")
+      return nil
+    end
+    return ts.static_array_of(TypeQueries.virtual_type(elem_type), size_node.as(NumberLiteral).value.to_i64)
+  end
+
+  args = [] of Type
+  i = 0
+  while i < node.type_vars.size
+    arg = node.type_vars[i]
+    if arg.is_a?(NumberLiteral)
+      visitor.refuse(node, "argument to #{node.name.to_s} must be a type, not #{arg.to_s}")
+      return nil
+    end
+    if arg.is_a?(Splat)
+      exp = arg.as(Splat).exp
+      spliced = visitor.child_type(exp)
+      if spliced.nil?
+        err = lookup.lookup(visitor.current_type, exp)
+        visitor.refuse(node, err.as(LookupError).message) if err.is_a?(LookupError)
+        return nil
+      end
+      spliced_type = spliced.as(Type)
+      if spliced_type.is_a?(TupleInstanceType)
+        spliced_type.as(TupleInstanceType).tuple_types.each do |tt|
+          args << tt
+        end
+      elsif spliced_type.is_a?(TypeParameterType)
+        args << TypeSplat.new(visitor.program, spliced_type)
+      else
+        visitor.refuse(node, "can only splat tuple type, not #{spliced_type.full_name}")
+        return nil
+      end
+    else
+      t = visitor.child_type(arg)
+      if t.nil?
+        err = lookup.lookup(visitor.current_type, arg)
+        visitor.refuse(node, err.as(LookupError).message) if err.is_a?(LookupError)
+        return nil
+      end
+      arg_type = t.as(Type)
+      unless lookup.can_be_stored?(arg_type)
+        visitor.refuse(node, "can't use #{lookup.shown(arg_type)} as a generic type argument yet, use a more specific type")
+        return nil
+      end
+      args << TypeQueries.virtual_type(arg_type)
+    end
+    i = i + 1
+  end
+
+  type_vars = lookup.generic_type_vars(base_type)
+  given = args.size
+  if lookup.splat_index?(base_type)
+    min_needed = type_vars.size - 1
+    if given < min_needed
+      visitor.refuse(node, "wrong number of type vars for #{lookup.generic_text(base_type)} (given #{given}, expected #{min_needed}+)")
+      return nil
+    end
+  elsif given != type_vars.size
+    visitor.refuse(node, "wrong number of type vars for #{lookup.generic_text(base_type)} (given #{given}, expected #{type_vars.size})")
+    return nil
+  end
+
+  lookup.instantiate(base_type, args)
+end
+
+# `Int32 | String`: typed as the merged union of its visited members (hosted
+# `visit(node : Union)` 365-374 and `Union#update`), so owner type parameters
+# resolve to the instance's arguments. Kept: hosted does not look the Union
+# node up again.
+pub def visit_union(visitor : TypeNodeHost, node : Union) : Bool
+  visitor.bracket_type_args(1)
+  i = 0
+  while i < node.types.size
+    node.types[i].accept(visitor)
+    i = i + 1
+  end
+  visitor.bracket_type_args(-1)
+
+  lookup = type_node_lookup(visitor)
+  types = [] of Type
+  i = 0
+  while i < node.types.size
+    member_node = node.types[i]
+    t = visitor.child_type(member_node)
+    if t.nil?
+      err = lookup.lookup(visitor.current_type, member_node)
+      return visitor.refuse(node, err.as(LookupError).message) if err.is_a?(LookupError)
+      return false
+    end
+    stored = t.as(Type)
+    unless lookup.can_be_stored?(stored)
+      return visitor.refuse(node, "can't use #{lookup.shown(stored)} in unions yet, use a more specific type")
+    end
+    types << TypeQueries.virtual_type(stored)
+    i = i + 1
+  end
+  visitor.set_type(node, visitor.program.type_merge(types))
+  false
+end
+
+# `Int32 -> String`: the proc type of its visited inputs and output (hosted
+# `visit(node : ProcNotation)` 337-363). A missing output is Nil, matching
+# `TypeInstances#proc_of` for Void. Kept: hosted `proc_of` is those visited
+# types, not a second lookup of the node.
+pub def visit_proc_notation(visitor : TypeNodeHost, node : ProcNotation) : Bool
+  visitor.bracket_type_args(1)
+  if ins = node.inputs
+    i = 0
+    while i < ins.size
+      ins[i].accept(visitor)
+      i = i + 1
+    end
+  end
+  if out = node.output
+    out.accept(visitor)
+  end
+  visitor.bracket_type_args(-1)
+
+  ts = type_node_system(visitor.program)
+  lookup = TypeLookup.new(ts.instances)
+  inputs = [] of Type
+  if ins = node.inputs
+    i = 0
+    while i < ins.size
+      input = ins[i]
+      if input.is_a?(Splat)
+        exp = input.as(Splat).exp
+        spliced = visitor.child_type(exp)
+        if spliced.nil?
+          err = lookup.lookup(visitor.current_type, exp)
+          return visitor.refuse(node, err.as(LookupError).message) if err.is_a?(LookupError)
+          return false
+        end
+        spliced_type = spliced.as(Type)
+        unless spliced_type.is_a?(TupleInstanceType)
+          return visitor.refuse(node, "can only splat tuple type, not #{spliced_type.full_name}")
+        end
+        spliced_type.as(TupleInstanceType).tuple_types.each do |tt|
+          inputs << tt
+        end
+      else
+        arg = visitor.child_type(input)
+        if arg.nil?
+          err = lookup.lookup(visitor.current_type, input)
+          return visitor.refuse(node, err.as(LookupError).message) if err.is_a?(LookupError)
+          return false
+        end
+        arg_type = arg.as(Type)
+        unless lookup.can_be_stored?(arg_type)
+          return visitor.refuse(node, "can't use #{lookup.shown(arg_type)} as proc argument yet, use a more specific type")
+        end
+        inputs << TypeQueries.virtual_type(arg_type)
+      end
+      i = i + 1
+    end
+  end
+
+  ret : Type = visitor.program.nil_type
+  if output_node = node.output
+    result = visitor.child_type(output_node)
+    if result.nil?
+      err = lookup.lookup(visitor.current_type, output_node)
+      return visitor.refuse(node, err.as(LookupError).message) if err.is_a?(LookupError)
+      return false
+    end
+    ret_type = result.as(Type)
+    unless lookup.can_be_stored?(ret_type)
+      return visitor.refuse(node, "can't use #{lookup.shown(ret_type)} as proc return type yet, use a more specific type")
+    end
+    ret = TypeQueries.virtual_type(ret_type)
+  end
+  visitor.set_type(node, ts.proc_of(inputs, ret))
+  false
+end
+
+# `Int32.class` written as a type argument: the metaclass of the instance type
+# its name denotes (hosted `visit(node : Metaclass)` 376-380). Written in an
+# expression, the name is already a metaclass and has none, which the hosted
+# pass reports as an undefined method.
+pub def visit_metaclass(visitor : TypeNodeHost, node : Metaclass) : Bool
+  node.name.accept(visitor)
+  base = visitor.child_type(node.name)
+  if base.nil?
+    return false
+  end
+  base_type = base.as(Type)
+  meta = type_node_metaclass(TypeQueries.virtual_type(base_type))
+  if meta.nil?
+    return visitor.refuse(node, "undefined method 'class' for #{base_type.full_name}")
+  end
+  visitor.set_type(node, meta.as(Type))
+  false
+end
+
+# `self` written as a type (`Pointer(self)`): the scope's instance type, as the
+# hosted `the_self(node).instance_type` gives it (main_visitor.cr 382-385, 4088-4092).
+pub def visit_self(visitor : TypeNodeHost, node : Self) : Bool
+  the_self : Type = visitor.scope_type || visitor.current_type
+  if the_self.is_a?(SemanticProgram)
+    return visitor.refuse(node, "there's no self in this scope")
+  end
+  inst = TypeQueries.instance_type(the_self)
+  if inst.is_a?(GenericClassType)
+    resolved = type_node_lookup(visitor).lookup(inst.as(ModuleType), node)
+    if resolved.is_a?(LookupError)
+      return visitor.refuse(node, resolved.as(LookupError).message)
+    end
+    visitor.set_type(node, resolved.as(Type))
+    return false
+  end
+  visitor.set_type(node, inst)
+  false
+end
+
+# `x.as(T)`: the target's instance type. The object and the target are visited
+# first, as the hosted pass does; the target is a type argument. The node is typed
+# as the virtual type of the filtered type, and records whether it is an upcast
+# (hosted `Cast#update`, bindings.cr 478-531).
+pub def visit_cast(visitor : TypeNodeHost, node : Cast) : Bool
+  node.obj.accept(visitor)
+  visitor.bracket_type_args(1)
+  node.to.accept(visitor)
+  visitor.bracket_type_args(-1)
+
+  target = visitor.child_type(node.to)
+  if target.nil?
+    return false
+  end
+  to_type = target.as(Type)
+  object_type = visitor.child_type(node.obj)
+  filtered = cast_filtered(visitor, object_type, to_type, true)
+  upcast = cast_is_upcast(visitor, object_type, filtered, to_type)
+  node.upcast = upcast
+  result = to_type
+  if !upcast
+    if f = filtered
+      result = f.as(Type)
+    end
+  end
+  visitor.set_type(node, TypeQueries.virtual_type(result))
+  false
+end
+
+# `x.as?(T)`: the target's instance type with Nil, the union the hosted
+# `NilableCast#update` gives it (bindings.cr 534-597), with the same upcast flag.
+# A nilable cast does not leave pointers out of its filter.
+pub def visit_nilable_cast(visitor : TypeNodeHost, node : NilableCast) : Bool
+  node.obj.accept(visitor)
+  visitor.bracket_type_args(1)
+  node.to.accept(visitor)
+  visitor.bracket_type_args(-1)
+
+  target = visitor.child_type(node.to)
+  if target.nil?
+    return false
+  end
+  to_type = target.as(Type)
+  object_type = visitor.child_type(node.obj)
+  filtered = cast_filtered(visitor, object_type, to_type, false)
+  upcast = cast_is_upcast(visitor, object_type, filtered, to_type)
+  node.upcast = upcast
+  result = to_type
+  if !upcast
+    if f = filtered
+      result = f.as(Type)
+    end
+  end
+  visitor.set_type(node, visitor.program.type_merge(TypeQueries.virtual_type(result), visitor.program.nil_type))
+  false
+end
+
+# The object's type filtered by a cast's target (hosted `obj_type.filter_by(to_type)`),
+# or nil when the object has no type. A plain cast (`pointers_excluded`) does not filter
+# a pointer, as hosted `Cast#update` skips pointer objects and targets.
+def cast_filtered(visitor : TypeNodeHost, object_type : Type?, target : Type, pointers_excluded : Bool) : Type?
+  if object_type.nil?
+    return nil
+  end
+  object = object_type.as(Type)
+  if pointers_excluded && (TypeQueries.pointer?(object) || TypeQueries.pointer?(target))
+    return nil
+  end
+  type_node_system(visitor.program).filter_by(object, target)
+end
+
+# The upcast flag of a cast, as hosted `Cast#update` and `NilableCast#update` set it: the
+# object's type filtered by the target is still the object's type (an upcast, `1 as Int32 | Float64`,
+# `Bar.new as Foo`), and the target can be stored.
+def cast_is_upcast(visitor : TypeNodeHost, object_type : Type?, filtered : Type?, target : Type) : Bool
+  if object_type.nil?
+    return false
+  end
+  if filtered.nil?
+    return false
+  end
+  if filtered.as(Type) != object_type.as(Type)
+    return false
+  end
+  if target.is_a?(GenericClassType)
+    return false
+  end
+  TypeLookup.new(type_node_system(visitor.program).instances).can_be_stored?(target)
+end
+
+# `fun name(a : Int32) : Int32 ... end` with a body: the body is typed in its own
+# visitor, with the arguments as its locals and the program as its scope, and
+# its type must fit the declared return type (hosted `visit(node : FunDef)`
+# 2333-2365). The fun node itself is typed Nil, as the hosted pass types it.
+pub def visit_fun_def(visitor : TypeNodeHost, node : FunDef) : Bool
+  # The declaration pass resolves a fun's types to their bases until a type system is installed
+  # (top_level.iyi resolve_declared_types). Installing it here, before the record is read, gives the
+  # generic argument types (`UInt8**`) the oracle's instances.
+  type_node_system(visitor.program)
+  fun_record = visitor.program.lib_fun_of(node)
+  if fun_record.nil?
+    return visitor.refuse(node, "fun has no record from the declarations pass")
+  end
+  record = fun_record.as(LibFun)
+  arg_types = record.arg_types
+  declared = record.resolved_return
+  visitor.record_fun_signature(node, arg_types, declared)
+
+  body = node.body
+  if body.nil?
+    return false
+  end
+
+  vars = Hash(String, Type).new
+  i = 0
+  while i < node.args.size
+    vars[node.args[i].name] = arg_types[i]
+    i = i + 1
+  end
+
+  inner = visitor.sub_visitor(vars)
+  body.accept(inner)
+  body_type = inner.child_type(body)
+  if rt_type = declared
+    if bt = body_type
+      merged = visitor.program.type_merge(bt, rt_type)
+      # Hosted main_visitor.cr:2358 skips this check when the declared return is Nil.
+      if !rt_type.nil_type? && merged != rt_type
+        return visitor.refuse(node, "expected fun to return #{rt_type.full_name} but it returned #{merged.full_name}")
+      end
+    end
+  end
+  visitor.set_type(node, visitor.program.nil_type)
+  false
+end
+
+# `typeof(e1, e2)`: the merged type of its expressions (hosted `visit(node : TypeOf)`
+# 3144-3170). The expressions are typed outside any type argument, and the locals
+# they bind are put back afterwards, so a typeof never changes a variable's type.
+# Type filters do not apply: the port has none yet.
+pub def visit_type_of(visitor : TypeNodeHost, node : TypeOf) : Bool
+  saved = visitor.vars.dup
+  depth = visitor.type_args_depth
+  visitor.bracket_type_args(-depth)
+  types = [] of Type
+  complete = true
+  i = 0
+  while i < node.expressions.size
+    expression = node.expressions[i]
+    expression.accept(visitor)
+    if t = visitor.child_type(expression)
+      types << t.as(Type)
+    else
+      complete = false
+    end
+    i = i + 1
+  end
+  visitor.bracket_type_args(depth)
+  visitor.vars.clear
+  saved.each do |name, t|
+    visitor.vars[name] = t
+  end
+  return false unless complete
+  merged = visitor.program.type_merge(types)
+  # Inside type arguments typeof denotes the merged type, not its metaclass
+  # (hosted TypeOf#map_type in semantic/bindings.cr).
+  if depth > 0
+    visitor.set_type(node, merged)
+    return false
+  end
+  meta = type_node_metaclass(merged)
+  if meta.nil?
+    return visitor.refuse(node, "#{merged.full_name} doesn't have a metaclass")
+  end
+  visitor.set_type(node, meta.as(Type))
+  false
+end
+
+# `sizeof(T)`, `alignof(T)`, `instance_sizeof(T)` and `instance_alignof(T)` are
+# Int32 (hosted `visit_size_or_align_of` and `visit_instance_size_or_align_of`,
+# 3172-3245). The hosted pass also replaces the node with a literal of the size.
+# That needs layouts, which the port does not build yet (types.iyi sizeof_type
+# refuses), so the expansion is not made here; the typed node is.
+pub def visit_size_of_node(visitor : TypeNodeHost, node : ASTNode, exp : ASTNode, what : String) : Bool
+  visitor.bracket_type_args(1)
+  exp.accept(visitor)
+  visitor.bracket_type_args(-1)
+  t = visitor.child_type(exp)
+  return false if t.nil?
+  type = t.as(Type)
+  if type.is_a?(GenericClassType) || type.is_a?(GenericModuleType)
+    return visitor.refuse(node, "can't take #{what} of uninstantiated generic type #{type.full_name}")
+  end
+  visitor.set_type(node, visitor.program.int32_type)
+  false
+end
+
+pub def visit_size_of(visitor : TypeNodeHost, node : SizeOf) : Bool
+  visit_size_of_node(visitor, node, node.exp, "size")
+end
+
+pub def visit_align_of(visitor : TypeNodeHost, node : AlignOf) : Bool
+  visit_size_of_node(visitor, node, node.exp, "alignment")
+end
+
+pub def visit_instance_size_of(visitor : TypeNodeHost, node : InstanceSizeOf) : Bool
+  visit_size_of_node(visitor, node, node.exp, "instance size")
+end
+
+pub def visit_instance_align_of(visitor : TypeNodeHost, node : InstanceAlignOf) : Bool
+  visit_size_of_node(visitor, node, node.exp, "instance alignment")
+end
+
+# `enum Color ... end` in a body: each member is visited, then the enum is typed
+# Nil (hosted visit(EnumDef), semantic_visitor.cr 1871-1878). The members'
+# definitions are typed as the oracle types them. The hosted check "declare enum"
+# (outside an expression) is not ported here.
+pub def visit_enum_def(visitor : TypeNodeHost, node : EnumDef) : Bool
+  node.members.each do |member|
+    member.accept(visitor)
+  end
+  visitor.set_type(node, visitor.program.nil_type)
+  false
+end
+
+# `pointerof(x)` for a local variable: a pointer to the variable's type (hosted
+# `visit(node : PointerOf)` 3087-3100 and `pointerof_var` 3102-3142). The operand
+# is visited first. Only a local is ported; the other forms refuse by name. The
+# hosted pass also marks the variable assigned, which is flow work, not done here.
+pub def visit_pointer_of(visitor : TypeNodeHost, node : PointerOf) : Bool
+  exp = node.exp
+  if exp.is_a?(Var)
+    exp.accept(visitor)
+    t = visitor.child_type(exp)
+    if t.nil?
+      return visitor.refuse(node, "pointerof operand has no type")
+    end
+    visitor.set_type(node, type_node_system(visitor.program).pointer_of(t.as(Type)))
+    return false
+  end
+  visitor.refuse(node, "pointerof of #{exp.to_s} is not ported yet: only a local variable is")
+end
+
+# `x = uninitialized Int32`: the declared type is a type argument, the local is
+# recorded in the scope under its name, and the variable and the node are typed
+# as that type (hosted `visit(node : UninitializedVar)` main_visitor.cr 490-520).
+# A name already declared refuses as the hosted pass does. Only a local variable
+# is ported; the hosted meta-variable binding is the port's `vars` entry.
+pub def visit_uninitialized_var(visitor : TypeNodeHost, node : UninitializedVar) : Bool
+  var = node.var
+  return visitor.refuse(node, "uninitialized of this target is not ported yet") unless var.is_a?(Var)
+  name = var.as(Var).name
+  if visitor.vars[name]?
+    return visitor.refuse(node, "variable '#{name}' already declared")
+  end
+  visitor.bracket_type_args(1)
+  node.declared_type.accept(visitor)
+  visitor.bracket_type_args(-1)
+  t = visitor.child_type(node.declared_type)
+  return false if t.nil?
+  declared = TypeQueries.virtual_type(t.as(Type))
+  visitor.vars[name] = declared
+  visitor.set_type(var, declared)
+  visitor.set_type(node, declared)
+  false
+end

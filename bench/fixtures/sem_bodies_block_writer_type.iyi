@@ -1,0 +1,20 @@
+module WriterScope
+  class Cursor
+  end
+
+  class Writer
+    def run
+      Yielder.new.each do
+        Cursor.new
+      end
+    end
+  end
+end
+
+class Yielder
+  def each(&)
+    yield
+  end
+end
+
+value = WriterScope::Writer.new.run

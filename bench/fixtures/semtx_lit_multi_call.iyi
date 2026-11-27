@@ -1,0 +1,10 @@
+# Multiple assignment from a call and from a tuple, the forms the iyi sources use.
+def parse_pair(x : Int32) : Tuple(Int32, String)
+  {x, "a"}
+end
+
+pair = parse_pair(1)
+number, text = parse_pair(2)
+number, _ = pair
+_first, second, third = {1, 2, 3}
+_, text_again = parse_pair(3)

@@ -1,0 +1,6 @@
+lib LibTypes.get: Pointer(Int32) -> Int32
+lib LibTypes.name: Pointer(UInt8) -> Pointer(UInt8)
+lib LibTypes.width: UInt64 -> UInt64
+lib LibTypes.nothing: Int32 -> Nil
+lib LibTypes.layouts:  -> Pointer(Void)
+lib LibTypes.layouts=: Pointer(Void) -> Pointer(Void)

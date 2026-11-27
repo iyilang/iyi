@@ -1,0 +1,6 @@
+module match_import_enum
+
+pub enum MatchKind
+  First
+  Second
+end

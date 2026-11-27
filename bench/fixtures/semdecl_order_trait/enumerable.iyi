@@ -1,0 +1,5 @@
+module enumerable
+
+pub trait Enumerable
+  abstract def each : Int32
+end

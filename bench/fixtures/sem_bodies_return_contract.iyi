@@ -1,0 +1,62 @@
+@[Unsafe("calls C exit to type a Nil-declared def whose body never returns")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+# The annotation checks the body. Nil, error and compatible Proc contracts
+# select the declared result; other definitions retain their body's type.
+alias ContractInt = Int32 | Nil
+
+struct ContractBad
+end
+
+impl Error for ContractBad
+  def message : String
+    "bad"
+  end
+end
+
+def rc_narrow : Int32 | Nil
+  7
+end
+
+def rc_aliased(flag : Bool) : ContractInt
+  return nil if flag
+  3
+end
+
+def rc_widened : ContractInt | Bool
+  true
+end
+
+def rc_discard(flag : Bool) : Nil
+  return 5 if flag
+  6
+end
+
+def rc_checked : Int32 | ContractBad
+  1
+end
+
+def rc_restricted : Proc(Int32, Nil)
+  ->(x : Int32) { x }
+end
+
+# The recursive call sees the annotation before the body's type is known.
+def rc_walk(n : Int32) : Int32 | Nil
+  rc_walk(n - 1) unless n == 0
+  7
+end
+
+def rc_halt(code : Int32) : Nil
+  LibC.exit(code)
+end
+
+a = rc_narrow
+b = rc_aliased(true)
+c = rc_widened
+d = rc_discard(true)
+e = rc_checked
+f = rc_restricted
+rc_walk(2)
+rc_halt(3)

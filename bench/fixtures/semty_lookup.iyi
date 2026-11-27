@@ -1,0 +1,43 @@
+module Outer
+  class Inner
+  end
+end
+
+class Box(T)
+end
+
+class Pair(A, B)
+end
+
+class Animal
+end
+
+class Dog < Animal
+end
+
+alias Alias = Outer::Inner
+
+# op lookup(program, Int32)
+# op lookup(program, Outer::Inner)
+# op lookup(program, ::Outer::Inner)
+# op lookup(program, Missing)
+# op lookup(program, Outer::Missing)
+# op lookup(Outer, Inner)
+# op lookup(Outer::Inner, Outer)
+# op lookup(Dog, Animal)
+# op lookup(program, Box)
+# op lookup(program, Box(Int32))
+# op lookup(program, Box(Int32, Int32))
+# op lookup(program, Box(Missing))
+# op lookup(program, Pair(Int32, String))
+# op lookup(program, Int32?)
+# op lookup(program, Union(Int32, String))
+# op lookup(program, Union(Box, Int32))
+# op lookup(program, Proc(Int32, String))
+# op lookup(program, Tuple(Int32, String))
+# op lookup(program, NamedTuple(a: Int32, b: String))
+# op lookup(program, Pointer(Int32))
+# op lookup(program, StaticArray(Int32, 3))
+# op lookup(program, Int32(Int32))
+# op lookup(program, Alias)
+# waiting op lookup(program, typeof(1))

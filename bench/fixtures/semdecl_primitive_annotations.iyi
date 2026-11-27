@@ -1,0 +1,18 @@
+class Arithmetic
+  @[::Primitive(:binary)]
+  @[Raises]
+  def first(x : Int32) : Int32
+  end
+
+  @[Raises]
+  @[NoInline]
+  @[::Primitive(:binary)]
+  def second(x : Int32) : Int32
+  end
+
+  @[::Primitive(:binary)]
+  @[NoInline]
+  @[Raises]
+  def third(x : Int32) : Int32
+  end
+end

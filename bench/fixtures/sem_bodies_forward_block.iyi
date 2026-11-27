@@ -1,0 +1,18 @@
+def forwarded_inner(&block : -> Int32) : Int32
+  block.call
+end
+
+def forwarded_outer(&block : -> Int32)
+  forwarded_inner(&block)
+end
+
+def forwarded_input(&block : Int32 -> Int32) : Int32
+  block.call(2)
+end
+
+def forwarded_input_outer(&block : Int32 -> Int32)
+  forwarded_input(&block)
+end
+
+forwarded_outer { 42 }
+forwarded_input_outer { |n| n }

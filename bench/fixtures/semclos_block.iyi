@@ -1,0 +1,23 @@
+@[Unsafe("declares the external process exit")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def run(&block : -> Int32) : Int32
+  block.call
+end
+
+def each_one(&)
+  yield 5
+end
+
+def outer(n : Int32) : Int32
+  total = 0
+  each_one do |x|
+    d = x
+    total = run { d; n }
+  end
+  total
+end
+
+LibC.exit(outer(7))

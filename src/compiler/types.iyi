@@ -1,0 +1,8 @@
+module compiler/types
+
+pub import compiler/types/types
+pub import compiler/types/unification
+pub import compiler/types/filtering
+pub import compiler/types/restrictions
+pub import compiler/types/rendering
+pub import compiler/types/type_system

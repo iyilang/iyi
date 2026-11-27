@@ -1,0 +1,8 @@
+module t6_scope/call
+
+import t6_scope/types::{make_call}
+import t6_scope/visitor::{Visitor}
+
+pub def invoke : Int32
+  Visitor.new.check(make_call)
+end

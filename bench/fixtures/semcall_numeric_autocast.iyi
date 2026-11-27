@@ -1,0 +1,9 @@
+def wide(x : Int64) : Int64
+  x
+end
+
+def wide(x : UInt64) : UInt64
+  x
+end
+
+# error wide(1)

@@ -1,0 +1,6 @@
+module sem_bodies_restriction_scope
+
+import t6_scope/call::{invoke}
+import t6_scope/no_imports::{Empty}
+
+puts Empty.new.value(invoke)

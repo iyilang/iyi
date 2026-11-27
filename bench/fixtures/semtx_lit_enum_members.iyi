@@ -1,0 +1,17 @@
+enum Kind
+  Plain
+  Named
+
+  def label : String
+    case self
+    when Plain
+      "plain"
+    else
+      "named"
+    end
+  end
+
+  def wild? : Bool
+    self == Plain && Kind::Named == Kind::Named
+  end
+end

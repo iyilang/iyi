@@ -1,0 +1,12 @@
+def match_zero_proc : Proc(Nil)
+  nil
+end
+
+def match_one_proc : Proc(Int32, Nil)
+  nil
+end
+
+# bound match_zero_proc.call
+# bound match_one_proc.call(instance(Int32))
+# bound match_one_proc.call
+# bound match_zero_proc.call(instance(Int32))

@@ -1,0 +1,10 @@
+def join(*args : *T) : Int32 forall T
+  1
+end
+
+def plain : Int32
+  4
+end
+
+x = join(1, 2)
+y = plain

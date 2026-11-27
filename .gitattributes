@@ -40,6 +40,8 @@
 bench/fixtures/**/*.in text eol=lf
 bench/fixtures/**/*.expected text eol=lf
 bench/fixtures/**/*.txt text eol=lf
+bench/*.floor text eol=lf
+bench/*.expected text eol=lf
 # A formatter fixture whose text is deliberately not in the formatter's own
 # style carries `.fixture`, so the format check does not read it as source.
 # Unpinned, a Windows checkout gave it CRLF; the hosted formatter keeps a

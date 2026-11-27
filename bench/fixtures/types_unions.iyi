@@ -1,0 +1,10 @@
+alias U1 = Int32 | String
+alias U2 = Int32 | String | Nil
+alias U3 = Float64 | Int32
+alias U4 = String | Nil
+alias U5 = Int32 | NoReturn
+alias U6 = Int32 | Void
+alias U7 = (Int32 | String) | (Bool | Nil)
+alias U8 = String | Symbol
+alias U9 = String | Symbol | Nil
+alias U10 = Int32 | Int64 | Float64

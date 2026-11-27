@@ -1,0 +1,15 @@
+class Bag(T)
+  def self.build : Bag(T)
+    Bag(T).new
+  end
+end
+
+def values(items = [1, 2])
+  items
+end
+
+bag = Bag(String).build
+numbers = [1, 2]
+bags = [bag]
+defaulted = values
+explicit = Array(typeof(1)).new

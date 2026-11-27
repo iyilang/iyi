@@ -1,0 +1,13 @@
+class Plain
+end
+
+class Base
+  def initialize(v : Int32)
+  end
+end
+
+class Child < Base
+end
+
+a = Plain.new
+c = Child.new(4)

@@ -1,0 +1,5 @@
+# A lib fun's UInt8** and a written Pointer(Pointer(UInt8)) are the same type.
+lib LibBytes
+  fun raw(p : UInt8**) : UInt8**
+  fun wrapped(p : Pointer(Pointer(UInt8))) : Pointer(Pointer(UInt8))
+end

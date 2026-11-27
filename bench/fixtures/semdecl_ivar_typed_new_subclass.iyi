@@ -1,0 +1,11 @@
+class InferredBase
+end
+
+class InferredChild < InferredBase
+end
+
+class BaseConstructorHolder
+  def initialize
+    @item = InferredBase.new
+  end
+end

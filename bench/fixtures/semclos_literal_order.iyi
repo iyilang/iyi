@@ -1,0 +1,16 @@
+def consume(p : Proc(Int32)) : Int32
+  0
+end
+
+def each_pair(&)
+  yield 1, 2
+end
+
+def outer(a : Int32, b : Int32) : Int32
+  each_pair do |b, a|
+    consume(-> { b; a })
+  end
+  0
+end
+
+outer(3, 4)

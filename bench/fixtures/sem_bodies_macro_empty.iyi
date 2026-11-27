@@ -1,0 +1,17 @@
+class MacroEmptyCell(T)
+  def value
+    stored = 1
+    {% unless T == Int32 %}
+      {% raise "refused" %}
+    {% end %}
+  end
+end
+
+class MacroEmptyPlain(T)
+  def value
+    stored = 1
+  end
+end
+
+kept = MacroEmptyCell(Int32).new.value
+plain = MacroEmptyPlain(Int32).new.value

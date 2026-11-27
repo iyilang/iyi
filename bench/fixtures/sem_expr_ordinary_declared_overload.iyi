@@ -1,0 +1,15 @@
+class DeclaredValue
+end
+
+class DeclaredSpecific < DeclaredValue
+end
+
+def declared_choose(value : DeclaredValue)
+  "broad"
+end
+
+def declared_choose(value : DeclaredSpecific)
+  42
+end
+
+declared_choose(DeclaredSpecific.new)

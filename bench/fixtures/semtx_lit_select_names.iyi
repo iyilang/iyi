@@ -1,0 +1,11 @@
+# Operations whose names end in ?: the mark stays at the end of the action name.
+# (The port's parser rejects a `!` name as a select arm, `when queue.flush!`, so
+# the `!` branch of the action name has no fixture.)
+def drain(queue, sink)
+  select
+  when sink.send(queue.receive?)
+    nil
+  when queue.empty?
+    nil
+  end
+end

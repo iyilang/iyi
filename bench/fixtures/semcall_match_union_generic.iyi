@@ -1,0 +1,13 @@
+abstract class MatchUnionNode
+end
+
+class MatchUnionLeaf < MatchUnionNode
+end
+
+def match_union_take(items : Array(MatchUnionNode) | MatchUnionNode) : Int32
+  1
+end
+
+# call match_union_take(instance(Array(MatchUnionNode)))
+# call match_union_take(instance(MatchUnionLeaf))
+# call match_union_take(instance(Array(Int32)))

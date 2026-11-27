@@ -1,0 +1,77 @@
+module compiler/semantic/cleanup
+
+# The untyped part of the hosted cleanup transform
+# (src/compiler/iyi/semantic/cleanup_transformer.cr, the hosted compiler).
+# Phase S slice S1e ports it in increments.
+#
+# Ported: an `if` whose condition is a literal is marked, as the hosted pass
+# marks it (`transform(If)`, cleanup_transformer.cr 2175-2217). A condition is
+# truthy when it is `true`, or a `!` of a falsey one; falsey when it is `false`,
+# `nil`, a `nop` or a `!` of a truthy one. A truthy condition sets `truthy` and
+# the else branch is not walked; a falsey one sets `falsey` and the then branch
+# is not walked. The hosted pass reads the same literal forms from its
+# `after_transform` status, which for these forms is the same answer.
+#
+# Not here, and why:
+# - The `Expressions` flattening and the cut after `return`, `break` and `next`
+#   (cleanup_transformer.cr 288-321). The normalizer already performs both on
+#   the tree the cleanup receives, in the hosted pipeline and in the port
+#   (`bench/fixtures/semtx_cleanup_return.iyi` shows the cut before cleanup), so
+#   on an untyped tree they change nothing. Once a type replaces a node (a case
+#   expanded by its exhaustiveness, a NoReturn call), the list needs them again,
+#   and they are ported with those replacements, in the bodies slice.
+# - `flatten_collect` also stops at a NoReturn expression (`no_returns?`, which
+#   reads the expression's type).
+# - A condition that is not a literal but whose status the hosted pass carries
+#   (an `and`, `or`, `if` or `is_a?` condition, or an assignment) depends on the
+#   status of its last child, and is not ported.
+# - A condition whose type is nil (`cond_type.nil_type?`, reads the typed table).
+# - `transform(While)` and `transform(Yield)` cut at a NoReturn expression.
+# - `after_transform`'s nil-type rule for every other node (reads the typed table).
+# - `transform(Call)` refuses a call with no type (`untyped_expression`), so an
+#   untyped tree with a call cannot pass the hosted walk.
+# - `transform(Case)`, `transform(Assign)`, `transform(MultiAssign)`,
+#   `transform(Def)`, `transform(ClassDef)` and `transform(Path)` are
+#   type-driven (exhaustiveness, constant types, deprecation, void lib calls).
+
+import compiler/syntax/ast::{ASTNode, BoolLiteral, If, Nop, NilLiteral, Not}
+import compiler/syntax/transformer::{Transformer}
+
+pub class CleanupTransformer < Transformer
+  def initialize
+  end
+
+  # 1 when the condition is a literal truthy form, -1 a falsey one, else 0. A
+  # `!` inverts its operand, as the hosted status does.
+  def literal_truthiness(node : ASTNode) : Int32
+    if node.is_a?(BoolLiteral)
+      return node.as(BoolLiteral).value ? 1 : -1
+    end
+    if node.is_a?(NilLiteral) || node.is_a?(Nop)
+      return -1
+    end
+    if node.is_a?(Not)
+      return 0 - literal_truthiness(node.as(Not).exp)
+    end
+    0
+  end
+
+  # The condition is transformed first, then marked. A marked branch that
+  # cannot run is left as written, not walked (the hosted pass does the same).
+  def transform(node : If) : ASTNode
+    node.cond = node.cond.transform(self)
+    truth = literal_truthiness(node.cond)
+    if truth == 1
+      node.truthy = true
+    elsif truth == -1
+      node.falsey = true
+    end
+    if !node.falsey
+      node.then = node.then.transform(self)
+    end
+    if !node.truthy
+      node.else = node.else.transform(self)
+    end
+    node
+  end
+end

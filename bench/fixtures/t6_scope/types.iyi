@@ -1,0 +1,8 @@
+module t6_scope/types
+
+pub class Call
+end
+
+pub def make_call : Call
+  Call.new
+end

@@ -1,0 +1,19 @@
+class Parent
+end
+
+class Child < Parent
+end
+
+class Box(T)
+end
+
+def receive(x : Box(Parent)) : Int32
+  1
+end
+
+def boot
+  value = Box(Child).new
+  receive(value)
+end
+
+x = boot

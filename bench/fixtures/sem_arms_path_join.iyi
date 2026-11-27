@@ -1,0 +1,7 @@
+import std/path::{Path}
+
+def choose(flag : Bool) : String | Path
+  flag ? "one" : Path.new("two")
+end
+
+puts Path.new("root").join(choose(true), "tail").to_s

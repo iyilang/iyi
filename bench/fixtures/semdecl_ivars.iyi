@@ -1,0 +1,43 @@
+class Leaf
+  def initialize
+    @size = 1_i64
+  end
+end
+
+class Counter
+  @class_default = 1
+
+  def initialize
+    @count = 0
+    @flag = false
+  end
+
+  def label
+    @label = "x"
+  end
+
+  def mark(on : Bool)
+    @seen = on
+  end
+end
+
+class Named < Counter
+  @extra : Float64
+
+  def initialize(name : String)
+    super()
+    @name = name
+    @extra = 2.5
+  end
+end
+
+class Holder
+  def initialize
+    @ratio = 1.5
+    @kind = :plain
+  end
+
+  def swap
+    @kind = :other
+  end
+end

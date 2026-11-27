@@ -1,0 +1,34 @@
+class TupleScalarProbe
+  def scalar : Int32
+    values = {1, "s", 3_u8}
+    x = values[0]
+    x + 1
+  end
+
+  def text_size : Int32
+    values = {1, "s"}
+    values[1].bytesize
+  end
+
+  def negative : UInt8
+    values = {1, "s", 3_u8}
+    values[-1]
+  end
+
+  def absent : Nil
+    values = {1, "s", 3_u8}
+    values[4]?
+  end
+
+  def named : Int32
+    values = {a: 1, b: "s"}
+    values[:a]
+  end
+end
+
+probe = TupleScalarProbe.new
+scalar = probe.scalar
+text_size = probe.text_size
+negative = probe.negative
+absent = probe.absent
+named = probe.named

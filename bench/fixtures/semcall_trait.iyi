@@ -1,0 +1,35 @@
+trait Greet
+  abstract def greet : String
+end
+
+class User
+  def self.make : User
+    User.new
+  end
+
+  def greet : String
+    "user"
+  end
+end
+
+class Robot
+  def self.make : Robot
+    Robot.new
+  end
+
+  def greet : String
+    "robot"
+  end
+end
+
+impl Greet for User
+end
+
+impl Greet for Robot
+end
+
+# call User.make().greet()
+# call Robot.make().greet()
+# call User.make().greet(1)
+# error User.make().greet()
+# error Robot.make().greet()

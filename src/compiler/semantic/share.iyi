@@ -1,0 +1,305 @@
+module compiler/semantic/share
+
+import compiler/syntax/ast::{ASTNode, Assign, Call, ClassDef, Def, InstanceVar, Macro, MacroExpression, MacroFor, MacroIf, MacroLiteral, MacroVar, MacroVerbatim, ModuleDef, MultiAssign, OpAssign, PointerOf}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/top_level::{AliasType, ClassType, GenericClassType, MetaTypeVar, MetaclassType, ModuleType, NilType, NonGenericClassType, Type, TypeDefType, UnionType}
+import compiler/types/types::{GenericClassInstanceType, GenericInstanceType, NamedTupleInstanceType, PointerInstanceType, PrimitiveType, ProcInstanceType, StaticArrayInstanceType, TupleInstanceType, TypeQueries, VirtualMetaclassType, VirtualType}
+
+# A nil answer means no witness was found, not that the type is Share. This
+# subset does not expand macros per type, scan typed-instance fallbacks, track
+# artifact provenance, or add the declaring-module suffix to a reason.
+pub class ShareFacts
+  @mutations : Hash(UInt64, Hash(String, String))
+
+  def initialize
+    @mutations = Hash(UInt64, Hash(String, String)).new
+  end
+
+  def witness(type : Type) : String?
+    ShareWitness.new(self).witness(type)
+  end
+
+  # Typing an inherited def can give self the owner's virtual type. A witness
+  # on its base is safe only if no possible dynamic subclass is trusted.
+  def witness_for_self(type : Type) : String?
+    if type.is_a?(VirtualType)
+      base = type.as(VirtualType).base_type
+      return nil if share_trusted_type?(base)
+      TypeQueries.all_subclasses(base).each do |subclass|
+        return nil if share_trusted_type?(subclass)
+      end
+      return ShareWitness.new(self).structural(base)
+    end
+    witness(type)
+  end
+
+  def mutations(type : Type) : Hash(String, String)
+    id = type.object_id
+    if cached = @mutations[id]?
+      return cached
+    end
+
+    owners = [] of Type
+    collect_owners(type, owners, Set(UInt64).new)
+    macro_names = Set(String).new
+    type.program.macros.each { |name, _| macro_names.add(name) }
+    owners.each do |owner|
+      if module_owner = definition_owner(owner)
+        module_owner.macros.each { |name, _| macro_names.add(name) }
+      end
+    end
+
+    found = Hash(String, String).new
+    owners.each do |owner|
+      if module_owner = definition_owner(owner)
+        module_owner.defs.each do |name, list|
+          list.each do |definition|
+            if name.ends_with?("=") && name != "==" && name != "!=" && name != "[]=" && name != "<=" && name != ">="
+              field = "@#{name.rchop('=')}"
+              found[field] = "given a setter `#{name}`" unless found.has_key?(field)
+            end
+            next if name == "initialize"
+            scanner = MutationScanner.new(type, macro_names)
+            definition.body.accept(scanner)
+            scanner.fields.each do |field|
+              found[field] = "assigned in `#{name}`" unless found.has_key?(field)
+            end
+            scanner.addressed.each do |field|
+              found[field] = "given out by `pointerof` in `#{name}`" unless found.has_key?(field)
+            end
+          end
+        end
+      end
+    end
+    @mutations[id] = found
+    found
+  end
+
+  def definition_owner(type : Type) : ModuleType?
+    if type.is_a?(GenericInstanceType)
+      generic = type.as(GenericInstanceType).generic_type
+      return generic.as(ModuleType) if generic.is_a?(ModuleType)
+    elsif type.is_a?(ModuleType)
+      return type.as(ModuleType)
+    end
+    nil
+  end
+
+  def collect_owners(type : Type, owners : Array(Type), visited : Set(UInt64)) : Nil
+    id = type.object_id
+    return if visited.includes?(id)
+    visited.add(id)
+    owners << type
+    if type.is_a?(GenericInstanceType)
+      instance = type.as(GenericInstanceType)
+      instance.parents.each { |parent| collect_owners(parent, owners, visited) }
+      if instance.is_a?(GenericClassInstanceType)
+        class_instance = instance.as(GenericClassInstanceType)
+        if superclass = class_instance.superclass
+          collect_owners(superclass, owners, visited)
+        end
+        class_instance.included_modules.each { |parent| collect_owners(parent, owners, visited) }
+      end
+    elsif type.is_a?(ModuleType)
+      owner = type.as(ModuleType)
+      owner.parents.each { |parent| collect_owners(parent, owners, visited) }
+      if owner.is_a?(ClassType)
+        if superclass = owner.as(ClassType).superclass
+          collect_owners(superclass, owners, visited)
+        end
+      end
+    end
+    nil
+  end
+end
+
+# Read original def bodies only. A macro argument is not necessarily executed,
+# and a typed clone may have been expanded for a different instantiation.
+class MutationScanner < Visitor
+  getter fields : Set(String)
+  getter addressed : Set(String)
+
+  def initialize(@scope : Type, @macro_names : Set(String))
+    @fields = Set(String).new
+    @addressed = Set(String).new
+  end
+
+  def note(target : ASTNode) : Nil
+    @fields.add(target.as(InstanceVar).name) if target.is_a?(InstanceVar)
+    nil
+  end
+
+  def visit(node : Assign) : Bool
+    note(node.target)
+    true
+  end
+
+  def visit(node : OpAssign) : Bool
+    note(node.target)
+    true
+  end
+
+  def visit(node : MultiAssign) : Bool
+    node.targets.each { |target| note(target) }
+    true
+  end
+
+  def visit(node : PointerOf) : Bool
+    exp = node.exp
+    @addressed.add(exp.as(InstanceVar).name) if exp.is_a?(InstanceVar)
+    true
+  end
+
+  def visit(node : Call) : Bool
+    return false if node.expanded
+    if node.obj.nil? && !node.super? && !node.previous_def?
+      return false if @macro_names.includes?(node.name)
+      scope = @scope
+      scope = scope.as(GenericInstanceType).generic_type if scope.is_a?(GenericInstanceType)
+      return false if scope.is_a?(ModuleType) && scope.as(ModuleType).lookup_call_macro?(node)
+    end
+    true
+  end
+
+  def visit(node : ClassDef) : Bool
+    false
+  end
+
+  def visit(node : ModuleDef) : Bool
+    false
+  end
+
+  def visit(node : Macro) : Bool
+    false
+  end
+
+  def visit(node : MacroExpression) : Bool
+    false
+  end
+
+  def visit(node : MacroFor) : Bool
+    false
+  end
+
+  def visit(node : MacroIf) : Bool
+    false
+  end
+
+  def visit(node : MacroLiteral) : Bool
+    false
+  end
+
+  def visit(node : MacroVar) : Bool
+    false
+  end
+
+  def visit(node : MacroVerbatim) : Bool
+    false
+  end
+end
+
+def share_trusted_type?(type : Type) : Bool
+  if type.is_a?(GenericClassInstanceType)
+    return type.as(GenericClassInstanceType).generic_type.share_trusted
+  end
+  type.share_trusted
+end
+
+class ShareWitness
+  @visited : Set(UInt64)
+
+  def initialize(@facts : ShareFacts)
+    @visited = Set(UInt64).new
+  end
+
+  def witness(type : Type) : String?
+    id = type.object_id
+    return nil if @visited.includes?(id)
+    @visited.add(id)
+
+    if type.is_a?(NilType) || type.is_a?(PrimitiveType) || type.is_a?(MetaclassType) || type.is_a?(VirtualMetaclassType)
+      return nil
+    elsif type.is_a?(AliasType)
+      return witness(type.as(AliasType).process_value)
+    elsif type.is_a?(TypeDefType)
+      return witness(type.as(TypeDefType).typedef)
+    elsif type.is_a?(PointerInstanceType)
+      return "#{type} is raw memory, which no marker can vouch for"
+    elsif type.is_a?(StaticArrayInstanceType)
+      return "#{type} is a fixed buffer whose elements are written in place"
+    elsif type.is_a?(ProcInstanceType)
+      return "#{type} is a closure, and what it captured is not written in its type"
+    elsif type.is_a?(TupleInstanceType)
+      type.as(TupleInstanceType).tuple_types.each do |member|
+        if why = witness(member)
+          return "#{type} holds #{member}: #{why}"
+        end
+      end
+    elsif type.is_a?(NamedTupleInstanceType)
+      type.as(NamedTupleInstanceType).entries.each do |entry|
+        if why = witness(entry.type)
+          return "#{type} holds #{entry.name} : #{entry.type}: #{why}"
+        end
+      end
+    elsif type.is_a?(UnionType)
+      type.as(UnionType).union_types.each do |member|
+        if why = witness(member)
+          return "#{type} may be #{member}: #{why}"
+        end
+      end
+    elsif type.is_a?(VirtualType)
+      base = type.as(VirtualType).base_type
+      if why = witness(base)
+        return why
+      end
+      TypeQueries.all_subclasses(base).each do |subclass|
+        if why = witness(subclass)
+          return "#{type} may be #{subclass}: #{why}"
+        end
+      end
+    elsif type.is_a?(GenericClassInstanceType)
+      instance = type.as(GenericClassInstanceType)
+      generic = instance.generic_type
+      if generic.share_trusted
+        return nil if generic.share_owns
+        instance.type_vars.each do |name, argument|
+          if why = witness(argument)
+            return "#{type}'s #{name} is #{argument}: #{why}"
+          end
+        end
+      else
+        return structural(type)
+      end
+    elsif type.is_a?(GenericClassType)
+      return nil
+    elsif type.is_a?(NonGenericClassType)
+      return nil if type.share_trusted || type.object_id == type.program.string_type.object_id
+      return structural(type)
+    end
+    nil
+  end
+
+  def structural(type : Type) : String?
+    fields : Hash(String, MetaTypeVar)
+    if type.is_a?(GenericClassInstanceType)
+      fields = type.as(GenericClassInstanceType).all_instance_vars
+    elsif type.is_a?(NonGenericClassType)
+      fields = type.as(NonGenericClassType).all_instance_vars
+    else
+      return nil
+    end
+
+    mutations = @facts.mutations(type)
+    fields.each do |name, var|
+      if how = mutations[name]?
+        return "#{type}'s field #{name} is #{how}"
+      end
+      if var_type = var.type?
+        if why = witness(var_type)
+          return "#{type}'s field #{name} : #{var_type} is not shareable: #{why}"
+        end
+      end
+    end
+    nil
+  end
+end

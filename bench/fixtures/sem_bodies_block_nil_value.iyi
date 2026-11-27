@@ -1,0 +1,6 @@
+def each_nil(&block : Int32 -> Nil)
+  yield 4
+end
+
+total = each_nil { |x| x }
+total

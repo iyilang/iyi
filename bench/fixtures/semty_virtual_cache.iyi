@@ -1,0 +1,19 @@
+class Animal
+end
+
+class Dog < Animal
+end
+
+class Cat < Animal
+end
+
+# op Dog.virtual_type_made?
+# op Animal.virtual_type_made?
+# op Animal.virtual_identical
+# op Animal.virtual_type
+# op Animal.virtual_type_made?
+# op Dog.virtual_identical
+# op Dog.virtual_type_made?
+# op same_merge(Int32, String, String, Int32)
+# op same_merge(Dog, Cat, Cat, Dog)
+# op same_merge(Animal, Dog, Dog, Animal)

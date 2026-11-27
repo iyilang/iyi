@@ -1,0 +1,5 @@
+module cvar_import/helper
+
+pub class Holder
+  @@value : MissingClassVarType
+end

@@ -1,0 +1,7 @@
+module t6_scope/no_imports
+
+pub class Empty
+  def value(number : Int32) : Int32
+    number
+  end
+end

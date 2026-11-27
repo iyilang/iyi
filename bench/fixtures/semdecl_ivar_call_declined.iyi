@@ -1,0 +1,50 @@
+# The calls on an instance variable that the hosted pass declines to guess, so no instance variable is
+# declared for them and the port must decline too: a method that declares no return type, an argument
+# whose type is not guessed, a call that takes a block. The twin semdecl_ivar_call_guess.iyi holds the
+# calls it does guess.
+class Cell
+  def initialize
+  end
+
+  def plain
+    1
+  end
+
+  def pick(value : Int32) : String
+    "picked"
+  end
+end
+
+class Decliner
+  def initialize(@cell : Cell, number)
+    @undeclared = @cell.plain
+    @unknown_argument = @cell.pick(number)
+    @blocked = @cell.pick(1) { 2 }
+  end
+end
+
+# A union has no defs of its own and one parent, Value, so the hosted lookup of a call on a union asks
+# Value and never the members: both members define `label`, and nothing is guessed.
+class Tag
+  def initialize
+  end
+
+  def label : String
+    "tag"
+  end
+end
+
+class Mark
+  def initialize
+  end
+
+  def label : String
+    "mark"
+  end
+end
+
+class UnionReceiver
+  def initialize(source : Tag | Mark)
+    @text = source.label
+  end
+end

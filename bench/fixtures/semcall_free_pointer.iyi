@@ -1,0 +1,12 @@
+struct Cell
+  def self.load(pointer : Pointer(T), flag : Bool) : T forall T
+    pointer.value
+  end
+end
+
+def byte_ptr : Pointer(UInt8)
+  nil
+end
+
+# call Cell.load(byte_ptr, false)
+# call Cell.load(byte_ptr, true)

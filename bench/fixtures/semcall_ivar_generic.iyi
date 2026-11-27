@@ -1,0 +1,34 @@
+struct Box(T)
+  def set(v : T)
+    nil
+  end
+
+  def get : T
+    nil
+  end
+end
+
+class Holder
+  @w : Box(UInt64)
+
+  def initialize
+    @w = nil
+  end
+
+  def w : Box(UInt64)
+    @w
+  end
+end
+
+def make_holder : Holder
+  nil
+end
+
+def make_box : Box(UInt64)
+  nil
+end
+
+# call make_box.set(instance(UInt64))
+# call make_box.get
+# call make_holder.w.set(instance(UInt64))
+# call make_holder.w.get

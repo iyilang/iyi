@@ -1,0 +1,82 @@
+class Item
+end
+
+def check_choice(choice : Item?, other : Bool)
+  if choice || other
+    choice
+  else
+    nil
+  end
+end
+
+def check_nested(choice : Item?, other : Bool, fallback : Bool)
+  if choice || other || fallback
+    choice
+  else
+    nil
+  end
+end
+
+def check_grouped(choice : Item?, other : Bool, fallback : Bool)
+  if other && (choice || fallback)
+    choice
+  else
+    nil
+  end
+end
+
+def check_negation(choice : Item?)
+  if !choice
+    choice
+  else
+    choice
+  end
+end
+
+def check_merge(flag : Bool, other : Bool)
+  if flag
+    if other
+      1
+    else
+      "text"
+    end
+  else
+    nil
+  end
+end
+
+item = Item.new
+choice = if true
+           item
+         else
+           nil
+         end
+other = false
+
+if choice || other
+  choice
+else
+  choice
+end
+
+if !choice
+  choice
+else
+  choice
+end
+
+mixed = if other
+          if true
+            1
+          else
+            "text"
+          end
+        else
+          nil
+        end
+mixed
+check_choice(choice, other)
+check_nested(choice, other, true)
+check_grouped(choice, other, true)
+check_negation(choice)
+check_merge(other, true)

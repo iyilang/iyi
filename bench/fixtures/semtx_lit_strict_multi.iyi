@@ -1,0 +1,5 @@
+# Run in the strict_multi_assign mode: a single value is count-checked.
+pair = {1, 2}
+a, b = pair
+c, d, e = pair
+f, g = 1, 2

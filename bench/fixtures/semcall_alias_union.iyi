@@ -1,0 +1,13 @@
+alias Bytes = Array(UInt8)
+
+struct Maker
+  def self.make(value : Int32 | Array(UInt8) | Pointer(UInt8)) : Int32
+    1
+  end
+end
+
+def bytes : Bytes
+  nil
+end
+
+# call Maker.make(bytes)

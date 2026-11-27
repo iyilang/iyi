@@ -1,0 +1,45 @@
+module bench/selfhost_closures_exercise
+
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/semantic/closures::{ClosureFacts}
+
+def analyse(source : String, filename : String, prelude : String? = nil, show_refusals : Bool = false) : Array(String)
+  root = Normalizer.new(NormalizerProgram.new(false)).normalize(Parser.new(source, filename).parse)
+  program = SemanticProgram.new
+  declarations = TopLevelVisitor.new(program, filename)
+  if text = prelude
+    prelude_node = Normalizer.new(NormalizerProgram.new(false)).normalize(Parser.new(text, "prelude.iyi").parse)
+    prelude_node.accept(declarations)
+  end
+  root.accept(declarations)
+  declarations.finish
+  visitor = MainVisitor.new(program)
+  root.accept(visitor)
+  facts = ClosureFacts.new(visitor)
+  facts.analyse_program(root)
+  lines = facts.dump_lines(filename)
+  if show_refusals
+    visitor.typed_instances.each do |instance|
+      facts.refusals(instance.definition).each { |reason| lines << "refusal: #{reason}" }
+    end
+  end
+  lines
+end
+
+def run : Nil
+  if Program.args.empty?
+    lines = analyse("def probe(x : Int32) : Int32\n  x\nend\nprobe(1)\n", "probe.iyi")
+    expected = "1:1 Def in top#probe(Int32) closure=0 self=0 vars= mut="
+    raise "closure self-check failed" unless lines.includes?(expected)
+  else
+    show_refusals = Program.args[0] == "--refusals"
+    filename = Program.args[show_refusals ? 1 : 0]
+    prelude = File.read("bench/fixtures/semclos_prelude/iyi/prelude.iyi")
+    analyse(File.read(filename), filename, prelude, show_refusals).each { |line| puts line }
+  end
+end
+
+run

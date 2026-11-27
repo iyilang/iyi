@@ -1,0 +1,7 @@
+@[Unsafe("fixture: a top-level fun is a C function the compiler does not check")]
+
+fun scope_enter(argc : Int32) : Int32
+  argc
+end
+
+scope_enter(3)

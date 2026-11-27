@@ -1,0 +1,40 @@
+class BoundTypeBox(T)
+  def tuple_value(value : Tuple(T, Bool)) : Int32
+    1
+  end
+
+  def pointer_value(value : Pointer(T)) : Int32
+    2
+  end
+
+  def proc_value(value : Proc(T, Bool)) : Int32
+    3
+  end
+
+  def tuple_result(value : T) : Tuple(T, Bool)
+    {value, true}
+  end
+
+  def pointer_result(value : T) : Pointer(T)
+    nil
+  end
+
+  def proc_result(value : T) : Proc(T, Bool)
+    nil
+  end
+end
+
+def bound_type_box : BoundTypeBox(Int32)
+  nil
+end
+
+# call bound_type_box.tuple_value(instance(Tuple(Int32, Bool)))
+# call bound_type_box.tuple_value(instance(Tuple(String, Bool)))
+# call bound_type_box.pointer_value(instance(Pointer(Int32)))
+# call bound_type_box.pointer_value(instance(Pointer(String)))
+# call bound_type_box.proc_value(instance(Proc(Int32, Bool)))
+# call bound_type_box.proc_value(instance(Proc(String, Bool)))
+# call bound_type_box.tuple_result(1).size
+# call bound_type_box.tuple_result(1).[](0)
+# call bound_type_box.pointer_result(1).address
+# bound bound_type_box.proc_result(1).call(instance(Int32))

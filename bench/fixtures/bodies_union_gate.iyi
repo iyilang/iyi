@@ -1,0 +1,9 @@
+module bodies_union_gate
+
+import bodies_union_mark::{Mark}
+
+pub class Gate
+  def self.pass(value : String | Mark, n : Int32) : Int32
+    n
+  end
+end

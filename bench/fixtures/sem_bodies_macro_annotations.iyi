@@ -1,0 +1,28 @@
+@[Flags]
+enum MacroFactsMarked
+  First
+  Second
+
+  def self.marker
+    {% if @type.annotation(Flags) %}
+      1
+    {% else %}
+      "wrong"
+    {% end %}
+  end
+end
+
+enum MacroFactsPlain
+  First
+
+  def self.marker
+    {% if @type.annotation(Flags) %}
+      "wrong"
+    {% else %}
+      2
+    {% end %}
+  end
+end
+
+marked = MacroFactsMarked.marker
+plain = MacroFactsPlain.marker

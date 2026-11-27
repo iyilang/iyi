@@ -4257,15 +4257,18 @@ pub class MainVisitor < TypeNodeHost
   end
 
   # Non-generic bodies resolve names from their defining type, separately from dynamic self
-  # (hosted call.cr: path_lookup). Parameterized owners still need the receiver's bindings;
-  # resolving their instantiated ancestor or trait scope is not implemented here.
+  # (hosted call.cr: path_lookup = match.context.defining_type). A trait's default method
+  # does too, so a name its unit declares (TakeIterator in std/iterator) resolves for an
+  # implementer in another unit; its parameters and associated types still bind from the
+  # receiver (lookup_under: current_trait_instance). Other parameterized owners still need
+  # the receiver's bindings; resolving their instantiated ancestor is not implemented here.
   def body_lookup_owner(owner : ModuleType, rec_type : Type) : Type
     declared : Type = owner
     if declared.is_a?(MetaclassType)
       declared = declared.as(MetaclassType).instance_type
     end
     return rec_type if declared.is_a?(SemanticProgram) || declared.is_a?(LibType)
-    return owner if declared.is_a?(NonGenericClassType) || declared.is_a?(NonGenericModuleType)
+    return owner if declared.is_a?(NonGenericClassType) || declared.is_a?(NonGenericModuleType) || declared.is_a?(TraitType)
     rec_type
   end
 

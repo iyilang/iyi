@@ -1,0 +1,59 @@
+module active_order
+
+# The hosted compiler's program with the same output as active_order.ir.
+
+def work(x : Int64) : Int64
+  t1 = x + 101_i64
+  t2 = x * 103_i64
+  l1 = x + 3_i64
+  l2 = x * 5_i64
+  l3 = x + 7_i64
+  l4 = x * 11_i64
+  l5 = x + 13_i64
+  l6 = x * 17_i64
+  l7 = x + 19_i64
+  l8 = x * 23_i64
+  l9 = x + 29_i64
+  l10 = x * 31_i64
+  u1 = t1 * 5_i64
+  l11 = x + 37_i64
+  l12 = x * 41_i64
+  l13 = x + 43_i64
+  l14 = x * 47_i64
+  u2 = t2 + 9_i64
+  l15 = x + 53_i64
+  l16 = x * 59_i64
+  l17 = x + 61_i64
+  l18 = x * 67_i64
+  l19 = x + 71_i64
+  l20 = x * 73_i64
+  l21 = x + 79_i64
+  l22 = x * 83_i64
+  s2 = u1 + u2
+  s3 = s2 + l1
+  s4 = s3 + l2
+  s5 = s4 + l3
+  s6 = s5 + l4
+  s7 = s6 + l5
+  s8 = s7 + l6
+  s9 = s8 + l7
+  s10 = s9 + l8
+  s11 = s10 + l9
+  s12 = s11 + l10
+  s13 = s12 + l11
+  s14 = s13 + l12
+  s15 = s14 + l13
+  s16 = s15 + l14
+  s17 = s16 + l15
+  s18 = s17 + l16
+  s19 = s18 + l17
+  s20 = s19 + l18
+  s21 = s20 + l19
+  s22 = s21 + l20
+  s23 = s22 + l21
+  s24 = s23 + l22
+  s24
+end
+
+puts "#{work(7_i64)}"
+puts "#{work(-3_i64)}"

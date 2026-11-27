@@ -1,0 +1,56 @@
+; iyi-ir 1
+module "iyiwide"
+target triple = "aarch64-apple-darwin"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+declare external i32 @printf(ptr, ...)
+@fmt = private constant [11 x i8] c"%lld %llu\0A\00"
+
+; i128 arguments under the internal convention: each 64-bit half is a leaf and takes the next register, low half
+; first, and a half that finds no register goes to the stack (SPEC 2.2). Each line of output is a value's high half,
+; signed, and its low half, unsigned.
+define internal void @show(i128 %x) {
+entry:
+  %h = lshr i128 %x, 64
+  %hi = trunc i128 %h to i64
+  %lo = trunc i128 %x to i64
+  %r = call i32 (ptr, ...) @printf(ptr @fmt, i64 %hi, i64 %lo)
+  ret void
+}
+
+; Two i128 arguments between i64 ones: the halves take x1, x2 and x4, x5.
+define internal iyicc void @between(i64 %a, i128 %b, i64 %c, i128 %d) {
+entry:
+  %a128 = zext i64 %a to i128
+  %c128 = zext i64 %c to i128
+  %s = add i128 %a128, %b
+  %t = sub i128 %s, %d
+  %u = add i128 %t, %c128
+  call void (i128) @show(i128 %b)
+  call void (i128) @show(i128 %d)
+  call void (i128) @show(i128 %u)
+  ret void
+}
+
+; Seven i64 arguments first: the i128's low half takes x7 and its high half the first stack slot.
+define internal iyicc void @split(i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6, i64 %a7, i128 %b, i64 %c) {
+entry:
+  %s1 = add i64 %a1, %a2
+  %s2 = add i64 %s1, %a3
+  %s3 = add i64 %s2, %a4
+  %s4 = add i64 %s3, %a5
+  %s5 = add i64 %s4, %a6
+  %s6 = add i64 %s5, %a7
+  %s7 = add i64 %s6, %c
+  %w = zext i64 %s7 to i128
+  %v = xor i128 %b, %w
+  call void (i128) @show(i128 %b)
+  call void (i128) @show(i128 %v)
+  ret void
+}
+
+define i32 @main() {
+entry:
+  call iyicc void (i64, i128, i64, i128) @between(i64 5, i128 1512366075204170947332355369683137040, i64 7, i128 -18446744073709551621)
+  call iyicc void (i64, i64, i64, i64, i64, i64, i64, i128, i64) @split(i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i128 -1512366075204170947332355369683137040, i64 8)
+  ret i32 0
+}

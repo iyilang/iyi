@@ -1051,7 +1051,7 @@ puts "the same size, asked again, is kept"
 IyiFiber.stack_bytes = 16777216_u64
 puts "a different size was taken after a task"
 EOF
-fixed="iyi: panic: IyiFiber.stack_bytes: the fiber stack size is fixed once a task is spawned, a stack is pooled or a second thread is started"
+fixed="iyi: panic: IyiFiber.stack_bytes: the fiber stack size is fixed once a task is spawned, a stack is mapped or pooled, or a second thread is started"
 run "$work/stack_late.iyi"
 [ "$code" = 1 ] || fail "late fiber size exited $code: $out"
 printf '%s\n' "$out" | grep -Fq "the same size, asked again, is kept" || fail "same size was refused: $out"
@@ -1084,6 +1084,31 @@ if printf '%s\n' "$out" | grep -Fq "a different size was taken after a stack was
   fail "fiber size after pooling was taken: $out"
 fi
 step "the same size remains allowed after pooling, a different size is refused"
+
+# A mapped stack that has not reached the pool yet. The pool links and
+# unmaps stacks at the process size, so a size taken here would put this
+# stack's pool link 768 KiB past its 256 KiB mapping when it is released.
+cat > "$work/stack_mapped.iyi" <<'EOF'
+module stack_mapped
+
+fiber = IyiFiber.new
+fiber.prepare_stack
+raise "the mapped-stack probe pooled its stack" if IyiScheduler.state.stack_pool != 0_u64
+raise "the mapped-stack probe started a task or thread" if IyiScheduler.makes_stacks? || IyiScheduler.shared?
+IyiFiber.stack_bytes = IyiFiber::STACK_BYTES
+puts "the mapped stack kept the same size"
+IyiFiber.stack_bytes = 1048576_u64
+puts "a different size was taken while a stack was mapped"
+fiber.release_stack
+EOF
+run "$work/stack_mapped.iyi"
+[ "$code" = 1 ] || fail "fiber size while a stack is mapped exited $code: $out"
+printf '%s\n' "$out" | grep -Fq "the mapped stack kept the same size" || fail "same size with a mapped stack was refused: $out"
+printf '%s\n' "$out" | grep -Fq "$fixed" || fail "fiber size while a stack is mapped was not refused: $out"
+if printf '%s\n' "$out" | grep -Fq "a different size was taken while a stack was mapped"; then
+  fail "fiber size while a stack is mapped was taken: $out"
+fi
+step "the same size remains allowed with a mapped stack, a different size is refused"
 
 cat > "$work/stack_thread.iyi" <<'EOF'
 module stack_thread

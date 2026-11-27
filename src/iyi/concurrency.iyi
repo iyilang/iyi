@@ -728,10 +728,19 @@ class IyiFiber
   {% end %}
 
   # One size per process because stacks migrate between thread pools. Set
-  # it before the first task, pooled stack or second thread. Each live task
-  # holds this much address space and a pooled stack keeps its touched
-  # pages; thread and main stacks are unaffected.
+  # it before the first task, mapped or pooled stack, or second thread.
+  # Each live task holds this much address space and a pooled stack keeps
+  # its touched pages; thread and main stacks are unaffected.
   @@stack_bytes : UInt64 = 262144_u64
+  # Set by the first stack settled at @@stack_bytes. The pool links and
+  # unmaps every stack at the process size, so a mapped stack that is not
+  # pooled yet fixes the size too: a later size would put its pool link
+  # past the end of the mapping and unmap the wrong length.
+  @@stack_settled : Bool = false
+
+  def self.stack_settled? : Bool
+    @@stack_settled
+  end
 
   def self.stack_bytes : UInt64
     @@stack_bytes
@@ -745,7 +754,7 @@ class IyiFiber
         raise "IyiFiber.stack_bytes: a fiber stack is a whole number of 64 KiB and no smaller than 256 KiB"
       end
       if IyiScheduler.stack_size_fixed?
-        raise "IyiFiber.stack_bytes: the fiber stack size is fixed once a task is spawned, a stack is pooled or a second thread is started"
+        raise "IyiFiber.stack_bytes: the fiber stack size is fixed once a task is spawned, a stack is mapped or pooled, or a second thread is started"
       end
       @@stack_bytes = bytes
       bytes
@@ -904,6 +913,7 @@ class IyiFiber
       base = @wasm_stack.address
       Pointer(UInt64).new(base).value = WASM_STACK_CANARY
       @stack_span = @@stack_bytes
+      @@stack_settled = true
       @stack_top = base + @stack_span
     {% else %}
       base = IyiScheduler.take_stack
@@ -977,6 +987,7 @@ class IyiFiber
     top = base + bytes
     @stack_top = top
     @stack_span = bytes
+    @@stack_settled = true
     {% if flag?(:win32) && flag?(:x86_64) %}
       entry_sp = top - 40_u64
       ret_slot = entry_sp - 8_u64
@@ -2199,10 +2210,11 @@ class IyiScheduler
   end
 
   # Do not create a state just to decide whether the process size is fixed.
+  # A settled stack fixes it whether or not it has reached the pool.
   def self.stack_size_fixed? : Bool
     state = @@state
     pooled = state.is_a?(IyiSchedulerState) ? state.stack_pool != 0_u64 : false
-    pooled || shared? || makes_stacks?
+    pooled || IyiFiber.stack_settled? || shared? || makes_stacks?
   end
 
   # What a context does first once a switch has put it back on its own

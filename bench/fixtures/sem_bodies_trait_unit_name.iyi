@@ -1,0 +1,9 @@
+import trait_unit/maker::{Maker}
+
+class Thing
+end
+
+impl Maker for Thing
+end
+
+made = Thing.new.make

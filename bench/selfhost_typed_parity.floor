@@ -5,7 +5,7 @@ samples/iyi/calc.iyi 30
 samples/iyi/collections.iyi 511
 samples/iyi/config.iyi 48
 samples/iyi/cores.iyi 285
-samples/iyi/derive.iyi 26
+samples/iyi/derive.iyi 32
 samples/iyi/enums.iyi 142
 samples/iyi/errors.iyi 98
 samples/iyi/files.iyi 29
@@ -18,15 +18,15 @@ samples/iyi/immutable.iyi 365
 samples/iyi/init_order.iyi 10
 samples/iyi/inventory.iyi 162
 samples/iyi/io.iyi 31
-samples/iyi/modules.iyi 21
+samples/iyi/modules.iyi 23
 samples/iyi/sessions.iyi 74
 samples/iyi/shapes.iyi 106
 samples/iyi/socket.iyi 84
-samples/iyi/std_iterator.iyi 109
+samples/iyi/std_iterator.iyi 116
 samples/iyi/std_text.iyi 89
 samples/iyi/std_time.iyi 138
 samples/iyi/visited.iyi 77
-samples/iyi/webapp.iyi 37
+samples/iyi/webapp.iyi 75
 samples/iyi/workers.iyi 92
 src/compiler/artifact/iyimod.iyi 424
 src/compiler/backend/backend.iyi 15

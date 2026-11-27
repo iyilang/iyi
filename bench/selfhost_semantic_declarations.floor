@@ -156,7 +156,7 @@ src/compiler/native/obj/elf.iyi 138
 src/compiler/native/obj/macho.iyi 174
 src/compiler/native/obj/object.iyi 180
 src/compiler/native/regalloc.iyi 4
-src/compiler/native/regalloc_linear.iyi 78
+src/compiler/native/regalloc_linear.iyi 80
 src/compiler/native/rt/builtins_text.iyi 5
 src/compiler/native/rt/start_wasm32_text.iyi 5
 src/compiler/native/target.iyi 41

@@ -66,6 +66,7 @@ bench/fixtures/native_cg/control.iyi
 bench/fixtures/native_cg/fp.iyi
 bench/fixtures/native_cg/globals.iyi
 bench/fixtures/native_cg/iyiagg.iyi
+bench/fixtures/native_cg/iyiwide.iyi
 bench/fixtures/native_cg/loop.iyi
 bench/fixtures/native_cg/mem.iyi
 bench/fixtures/native_cg/narrow_argext.iyi
@@ -101,6 +102,7 @@ bench/fixtures/native_mir_clean/diamond.iyi
 bench/fixtures/native_mir_clean/fp_chain.iyi
 bench/fixtures/native_mir_clean/loop.iyi
 bench/fixtures/native_mir_clean/straight.iyi
+bench/fixtures/native_regalloc/active_order.iyi
 bench/fixtures/native_regalloc/arg_pins.iyi
 bench/fixtures/native_regalloc/asm_collector_boundary.iyi
 bench/fixtures/native_regalloc/call_header.iyi

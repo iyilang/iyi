@@ -280,31 +280,73 @@ pub alias InstAux = GepAux | MemAux | CallAux | AsmAux | IntrinsicAux | Nil
 #   Intrinsic:         aux is IntrinsicAux; args are the call's arguments.
 pub class Inst < Value
   getter op : Op
-  getter args : Array(Value)
+  @args : Array(Value)?
   getter aux_int : Int64
   getter aux : InstAux
-  getter targets : Array(Block)
-  getter cases : Array(Int64)
+  @targets : Array(Block)?
+  @cases : Array(Int64)?
   property loc : DebugLoc?
   # The 64-bit words of an integer constant wider than 64 bits, least significant first and sign-extended to whole
   # words; aux_int is word 0. Empty for every other constant.
-  getter aux_words : Array(Int64)
+  @aux_words : Array(Int64)?
 
-  def initialize(@op : Op, type : IrType, @args : Array(Value), @aux_int : Int64, @aux : InstAux, @targets : Array(Block), @cases : Array(Int64), name : String = "")
+  def initialize(@op : Op, type : IrType, @args : Array(Value)?, @aux_int : Int64, @aux : InstAux, @targets : Array(Block)?, @cases : Array(Int64)?, name : String = "")
     super(type, name)
     @loc = nil
-    @aux_words = [] of Int64
+    @aux_words = nil
+  end
+
+  # Each lazily created array belongs to this instruction, including when a caller mutates it.
+  def args : Array(Value)
+    if words = @args
+      return words
+    end
+    words = [] of Value
+    @args = words
+    words
+  end
+
+  def targets : Array(Block)
+    if blocks = @targets
+      return blocks
+    end
+    blocks = [] of Block
+    @targets = blocks
+    blocks
+  end
+
+  def cases : Array(Int64)
+    if values = @cases
+      return values
+    end
+    values = [] of Int64
+    @cases = values
+    values
+  end
+
+  def aux_words : Array(Int64)
+    if words = @aux_words
+      return words
+    end
+    words = [] of Int64
+    @aux_words = words
+    words
   end
 
   # Word 1 of a wide ConstInt: the high 64 bits of an i128. Zero for every other constant.
   def aux_hi : Int64
-    @aux_words.size > 1 ? @aux_words[1] : 0_i64
+    words = @aux_words
+    words && words.size > 1 ? words[1] : 0_i64
   end
 
   # Sets word 1 of a wide ConstInt. On a constant with no words yet, the words become [aux_int, hi].
   def aux_hi=(hi : Int64) : Nil
-    @aux_words = [@aux_int, hi] of Int64 if @aux_words.size < 2
-    @aux_words[1] = hi
+    words = @aux_words
+    if words.nil? || words.size < 2
+      words = [@aux_int, hi] of Int64
+      @aux_words = words
+    end
+    words[1] = hi
   end
 
   # Sets every word of a wide ConstInt. Word 0 becomes aux_int.
@@ -317,7 +359,9 @@ pub class Inst < Value
   # sign-extended to whole words.
   def int_words(bits : Int32) : Array(Int64)
     count = (bits + 63) // 64
-    return @aux_words if @aux_words.size == count
+    stored_words = @aux_words
+    return stored_words if stored_words && stored_words.size == count
+    return aux_words if count == 0 && stored_words.nil?
     words = [@aux_int, aux_hi] of Int64
     while words.size < count
       words << (words[words.size - 1] < 0_i64 ? -1_i64 : 0_i64)
@@ -327,8 +371,15 @@ pub class Inst < Value
 
   # Adds one incoming (value, block) pair to a phi.
   def add_incoming(value : Value, block : Block) : Nil
-    @args << value
-    @targets << block
+    args << value
+    targets << block
+  end
+
+  # Link only stored targets, without allocating an empty list for terminators with none.
+  def add_target_predecessors(block : Block) : Nil
+    if stored = @targets
+      stored.each { |target| target.add_pred(block) }
+    end
   end
 
   # An invoke whose unwind edge is dropped is the call it makes: the same callee, operands, convention and
@@ -344,11 +395,13 @@ pub class Inst < Value
     raise "#{@op} is not a phi" unless @op == Op::Phi
     values = [] of Value
     blocks = [] of Block
+    current_targets = targets
+    current_args = args
     k = 0
-    while k < @targets.size
-      from = @targets[k]
+    while k < current_targets.size
+      from = current_targets[k]
       if preds.any? { |p| p == from }
-        values << @args[k]
+        values << current_args[k]
         blocks << from
       end
       k = k + 1
@@ -360,9 +413,10 @@ pub class Inst < Value
   # A phi's pairs that came from `old` come from `block` instead: `old` was merged into it.
   def move_incoming(old : Block, block : Block) : Nil
     raise "#{@op} is not a phi" unless @op == Op::Phi
+    current_targets = targets
     k = 0
-    while k < @targets.size
-      @targets[k] = block if @targets[k] == old
+    while k < current_targets.size
+      current_targets[k] = block if current_targets[k] == old
       k = k + 1
     end
   end

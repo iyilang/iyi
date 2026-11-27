@@ -984,8 +984,8 @@ prove_mutation "a file's own directory is never searched for an import" "$MUT_SE
   -- check_decl_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "explicit instance variables are recorded in reverse declaration order" "$MUT_IVARS" \
-  "        program.pending_ivars.each do |pi|" \
-  "        program.pending_ivars.reversed.each do |pi|" \
+  "        owned.each do |pi|" \
+  "        owned.reversed.each do |pi|" \
   -- check_decl_fixtures_diverge || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 prove_mutation "guessed variables are recorded before explicit variables" "$MUT_IVARS" \

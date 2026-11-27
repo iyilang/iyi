@@ -664,6 +664,23 @@ pub class LowerTyper
     @layout.abi_align(t)
   end
 
+  # The hosted `needs_heap_align8?` (llvm_typer.cr): an arena object may start at an eight-byte
+  # boundary, so an integer wider than 64 bits, or an aggregate holding one, is accessed at most
+  # eight-aligned. (The hosted rule also names a two-lane UInt64 vector; this IR has no vectors.)
+  def needs_heap_align8?(t : IrType) : Bool
+    return t.int_width > 64 if t.int?
+    return needs_heap_align8?(t.element_type) if t.array?
+    t.struct_element_types.any? { |element| needs_heap_align8?(element) }
+  end
+
+  # The alignment the hosted `load`/`store` (llvm_builder_helper.cr), `copy_value` (codegen.cr) and
+  # `store_union_in_union` (unions.cr) give an access: the ABI alignment, capped at eight for a
+  # type `needs_heap_align8?` names.
+  def access_align(t : IrType) : Int32
+    align = align_of(t)
+    align > 8 && needs_heap_align8?(t) ? 8 : align
+  end
+
   # The hosted `offset_of(type, index)`: the byte offset of element *index* of a struct.
   def offset_of(t : IrType, index : Int32) : Int64
     @layout.offset_of(t, index)

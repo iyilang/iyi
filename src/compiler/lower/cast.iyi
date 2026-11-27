@@ -761,8 +761,8 @@ def downcast_mixed_union(low : Lowerer, value : Value, target : MixedUnionType, 
   size = to_size if to_size < size
   dest = union_value_ptr(low, to_ir, result)
   src = union_value_ptr(low, from_ir, value)
-  dest_align = Attribute.new("align", low.typer.align_of(to_area).to_u64, nil, nil)
-  src_align = Attribute.new("align", low.typer.align_of(from_area).to_u64, nil, nil)
+  dest_align = Attribute.new("align", low.typer.access_align(to_area).to_u64, nil, nil)
+  src_align = Attribute.new("align", low.typer.access_align(from_area).to_u64, nil, nil)
   attrs = [[dest_align] of Attribute, [src_align] of Attribute, [] of Attribute, [] of Attribute] of Array(Attribute)
   ptr = low.module.types.ptr(0)
   count = low.builder.const_int(low.typer.size_t, size)

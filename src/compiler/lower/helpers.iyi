@@ -48,17 +48,17 @@ pub def set_align(inst : Inst, bytes : Int32) : Nil
   inst.alignment = bytes
 end
 
-# The hosted `store(value, ptr)`: a store aligned to the stored value's type.
+# The hosted `store(value, ptr)`: a store aligned to the stored value's type (at most eight for wide storage).
 pub def store_aligned(low : Lowerer, value : Value, pointer : Value) : Inst
   st = low.builder.store(value, pointer)
-  set_align(st, low.typer.align_of(value.type))
+  set_align(st, low.typer.access_align(value.type))
   st
 end
 
-# The hosted `load(type, ptr)`: a load aligned to the type it reads.
+# The hosted `load(type, ptr)`: a load aligned to the type it reads (at most eight for wide storage).
 pub def load_aligned(low : Lowerer, type : IrType, pointer : Value, name : String = "") : Inst
   ld = low.builder.load(type, pointer, name)
-  set_align(ld, low.typer.align_of(type))
+  set_align(ld, low.typer.access_align(type))
   ld
 end
 

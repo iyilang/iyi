@@ -695,7 +695,7 @@ end
 
 pub def copy_pointer_value(low : Lowerer, dest : Value, src : Value, ir : IrType, fresh : Bool) : Nil
   size = low.builder.const_int(low.typer.size_t, low.typer.size_of(ir))
-  align = Attribute.new("align", low.typer.align_of(ir).to_u64, nil, nil)
+  align = Attribute.new("align", low.typer.access_align(ir).to_u64, nil, nil)
   attrs = [[align] of Attribute, [align] of Attribute, [] of Attribute, [] of Attribute] of Array(Attribute)
   id = fresh ? IntrinsicId::Memcpy : IntrinsicId::Memmove
   ptr = low.module.types.ptr(0)

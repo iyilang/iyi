@@ -4007,7 +4007,10 @@ jobs:
     needs: plan
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'windows-native-gates') }}
     runs-on: windows-2025
-    timeout-minutes: 75
+    # This job takes 57 to 73 minutes on windows-2025 (57, 72 and 73 in the runs of #147 that passed
+    # it). Run 46039989961 took three minutes longer in one step, reached the old 75-minute cap
+    # inside the last gates step and was cancelled with every gate before it passing.
+    timeout-minutes: 120
     name: "The runtime's exercises and the gates that carry Windows code, on Windows"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

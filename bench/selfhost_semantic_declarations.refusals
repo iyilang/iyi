@@ -8,6 +8,7 @@
 # is refused with "undefined constant LibLLVM::<Type>".
 src/compiler/backend/llvm/emit.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
 src/compiler/backend/llvm/import.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/backend/llvm/llvm_backend.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
 src/compiler/backend/llvm/translate.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
 src/compiler/llvm.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
 src/compiler/llvm/builder.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
@@ -18,6 +19,7 @@ src/compiler/llvm/module.iyi the LibLLVM lib is not declared: the macro engine d
 src/compiler/llvm/pass_manager.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
 src/compiler/llvm/target.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
 src/compiler/llvm/values.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
+src/compiler/tools/compile.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
 src/compiler/tools/ir.iyi the LibLLVM lib is not declared: the macro engine does not port StringLiteral#strip
 # The port binds explicit import names but does not bind `::*` names. Hosted
 # UsingDecl resolves the imported unit's public names and rejects ambiguity at use.

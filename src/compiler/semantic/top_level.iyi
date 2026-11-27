@@ -3002,6 +3002,25 @@ pub class TopLevelVisitor < Visitor
         end
       end
     end
+    # `import a/b::*` brings every name the unit exports (hosted UsingDecl with no name
+    # list: UsingModule#exports? answers each `pub` name). An unexported declaration is
+    # private here (iyi_unexported?), so it stays the unit's own.
+    if node.glob
+      if unit.nil?
+        refuse_port("import '#{written}::*' names types of a file that is still being read")
+      end
+      unit.as(ModuleType).types.each do |name, found|
+        unless found.private? || @program.current_imports.has_key?(name)
+          @program.current_imports[name] = found
+        end
+      end
+      unit.as(ModuleType).defs.each do |name, defs|
+        public_defs = defs.reject { |d| d.visibility == Visibility::Private }
+        unless public_defs.empty? || @program.current_import_defs.has_key?(name)
+          @program.current_import_defs[name] = public_defs
+        end
+      end
+    end
     false
   end
 

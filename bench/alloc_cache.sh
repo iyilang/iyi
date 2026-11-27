@@ -159,7 +159,7 @@ prove_fails() {
 # The slice's walk ends answering no batch: the dead chunks are freed and
 # go on no list, and the second wave of `reused` carves all of itself.
 prove_fails "a sweep that hands nothing back" nothing "reused" prelude.iyi \
-  '/^      def self\.sweep_slice\(/ { inside = 1 } /^      def self\./ && !/sweep_slice/ { inside = 0 } { if (inside && $0 ~ /^        batch_head$/) { print "        0_u64"; found = 1; next } print } END { if (!found) exit 3 }' named
+  '/^      (@\[Effect\([^)]*\)\]; )?def self\.sweep_slice\(/ { inside = 1 } /^      (@\[Effect\([^)]*\)\]; )?def self\./ && !/sweep_slice/ { inside = 0 } { if (inside && $0 ~ /^        batch_head$/) { print "        0_u64"; found = 1; next } print } END { if (!found) exit 3 }' named
 
 # The allocating thread sweeps its slice and keeps nothing of it: with no
 # helper running, nobody else's batch hands the chunks back instead.

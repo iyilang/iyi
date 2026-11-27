@@ -406,7 +406,7 @@ awk '/teardown: .* changed by|payloads were still live/{print "  measured: " $0}
 step "failure proof: a finished thread's scheduler state left on the roots' list is named"
 mkdir -p retired/iyi && cp "$REPO"/src/iyi/*.iyi retired/iyi/ || { echo "SETUP: ${current_step}: the retired copy could not be made"; exit 76; }
 awk '
-  /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
+  /^  (@\[Effect\([a-z_:]+\)\]; )?def self\.retire_thread : Nil$/ { inside = 1; starts++ }
   inside && /^          previous\.next_state = state\.next_state$/ { print "          nil"; unlink_tail++; next }
   inside && /^          @@states_head = state\.next_state$/ { print "          nil"; unlink_head++; next }
   inside && /^  end$/ { inside = 0; ends++ }
@@ -436,7 +436,7 @@ unclosed_copy() {
   case "$(uname -s)" in
     Linux)
       awk '
-        /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
+        /^  (@\[Effect\([a-z_:]+\)\]; )?def self\.retire_thread : Nil$/ { inside = 1; starts++ }
         inside && $0 == "    __iyi_close(state.pollfd) if state.pollfd > 0_i64" { pollfds++; next }
         inside && $0 == "    {% if flag?(:linux) %}" { linux = 1; print; next }
         inside && linux && $0 == "      __iyi_close(state.wake_fd) if state.wake_fd > 0_i64" { wakes++; next }
@@ -447,7 +447,7 @@ unclosed_copy() {
       ' "$REPO/src/iyi/concurrency.iyi" ;;
     Darwin)
       awk '
-        /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
+        /^  (@\[Effect\([a-z_:]+\)\]; )?def self\.retire_thread : Nil$/ { inside = 1; starts++ }
         inside && $0 == "    __iyi_close(state.pollfd) if state.pollfd > 0_i64" { pollfds++; next }
         inside && /^  end$/ { inside = 0; ends++ }
         { print }
@@ -455,7 +455,7 @@ unclosed_copy() {
       ' "$REPO/src/iyi/concurrency.iyi" ;;
     *)
       awk '
-        /^  def self\.retire_thread : Nil$/ { inside = 1; starts++ }
+        /^  (@\[Effect\([a-z_:]+\)\]; )?def self\.retire_thread : Nil$/ { inside = 1; starts++ }
         inside && $0 == "    {% if flag?(:win32) %}" { win = 1; print; next }
         inside && win && $0 == "    {% end %}" { win = 0; print; next }
         inside && win && $0 == "      __iyi_close(state.wake_fd) if state.wake_fd > 0_i64" { wake++; next }
@@ -485,7 +485,7 @@ printf '  exits 1 at "%s"\n' "$unclosed_fail"
 step "failure proof: a joined thread's payloads kept by its thread's list are named"
 mkdir -p listed/iyi && cp "$REPO"/src/iyi/*.iyi listed/iyi/ || { echo "SETUP: ${current_step}: the listed copy could not be made"; exit 76; }
 awk '
-  /^    def self\.run\(line : UInt64\) : Nil$/ { inside = 1; starts++ }
+  /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.run\(line : UInt64\) : Nil$/ { inside = 1; starts++ }
   inside && $0 == "      if thread.is_a?(IyiThread)" { print "      if false && thread.is_a?(IyiThread)"; hits++; next }
   inside && /^    end$/ { inside = 0; ends++ }
   { print }
@@ -508,7 +508,7 @@ printf '  exits 1 at "%s"\n' "$listed_fail"
 step "failure proof: a joined thread's line left mapped is named"
 mkdir -p mapped/iyi && cp "$REPO"/src/iyi/*.iyi mapped/iyi/ || { echo "SETUP: ${current_step}: the mapped copy could not be made"; exit 76; }
 awk '
-  /^    def join : Nil$/ { inside = 1; starts++ }
+  /^    (@\[Effect\([a-z_:]+\)\]; )?def join : Nil$/ { inside = 1; starts++ }
   inside && $0 == "      __iyi_munmap(line, IYI_THREAD_LINE)" { hits++; next }
   inside && /^    end$/ { inside = 0; ends++ }
   { print }
@@ -533,7 +533,7 @@ printf '  exits 1 at "%s"\n' "$mapped_fail"
 # joined thread's line clear, without changing the zero guard or unmap.
 rejoin_copy() {
   awk -v mode="$1" '
-    /^    def join : Nil$/ { inside = 1; starts++ }
+    /^    (@\[Effect\([a-z_:]+\)\]; )?def join : Nil$/ { inside = 1; starts++ }
     inside && /^      line = @line$/ { reads++ }
     inside && /^      return if line == 0$/ { guards++ }
     inside && /^      @line = 0_u64$/ {
@@ -566,7 +566,7 @@ done
 # Reinserting the one removed line must reconstruct the control byte for
 # byte. Every other copied runtime file must also match the source.
 if ! awk '
-    /^    def join : Nil$/ { inside = 1; starts++ }
+    /^    (@\[Effect\([a-z_:]+\)\]; )?def join : Nil$/ { inside = 1; starts++ }
     inside && /^      __iyi_munmap\(line, IYI_THREAD_LINE\)$/ {
       print "      @line = 0_u64"
       restored++
@@ -676,7 +676,7 @@ case "$(uname -s)" in
     floor_note="  the runtime's names and the thread floor's, and nothing else"
     floor_verdict() {
       local bin="$1" label="$2" undefined libraries allowed found extra runtime thread
-      runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _thread_switch _write'
+      runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _dladdr _dprintf _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _thread_switch _write'
       thread='_close _pthread_create _pthread_join _pthread_kill'
       if ! undefined="$(nm -u "$bin" 2>&1)"; then
         echo "SETUP: dependency floor: nm could not read $label"
@@ -772,7 +772,7 @@ if ! awk '
     windows++
     next
   }
-  /^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ {
+  /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ {
     print
     print "      {% if flag?(:win32) %}"
     print "        @@count = LibFloorExtra.RtlGenRandom(Pointer(Void).new(0_u64), 0_u32).to_i64 if @@count < 0_i64"
@@ -1261,7 +1261,7 @@ IYI
       awk -v part=stop-order.part -v mode="$1" '
         /^    # ── Roots/ { while ((getline s < part) > 0) print s; roots++ }
         mode == "noraise" && /^        @@stopper_raised = LibC\.SetThreadPriority\(me, THREAD_PRIORITY_HIGHEST\) != 0$/ { print "        @@stopper_raised = false"; raise_removed++; next }
-        /^      private def self\.suspend_others\(line : UInt64\) : Int64$/ { print; print "        stop_asked = 0_i64"; entry++; next }
+        /^      (@\[Effect\([a-z_:]+\)\]; )?private def self\.suspend_others\(line : UInt64\) : Int64$/ { print; print "        stop_asked = 0_i64"; entry++; next }
         /^          LibC\.SuspendThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\) if cursor != line$/ {
           if (mode != "forced") {
             print "          if cursor != line"
@@ -1780,13 +1780,13 @@ IYI
           if (mode == "uncounted") { print "        if false"; removed++; next }
         }
         in_turn && /^        yield_cpu if turn >= YIELD_AFTER$/ { print "        fair_turn128(turn, counted)"; print; turn128++; next }
-        /^      private def self\.suspend_others\(line : UInt64\) : Int64$/ { in_suspend = 1; suspends++ }
+        /^      (@\[Effect\([a-z_:]+\)\]; )?private def self\.suspend_others\(line : UInt64\) : Int64$/ { in_suspend = 1; suspends++ }
         in_suspend && /^      end$/ { in_suspend = 0 }
         in_suspend && /^          LibC\.SuspendThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\) if cursor != line$/ {
           print "          fair_suspend(cursor, LibC.SuspendThread(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE)))) if cursor != line"
           suspend_call++; next
         }
-        /^      private def self\.resume_suspended\(line : UInt64\) : Nil$/ { in_resume = 1; resumes++ }
+        /^      (@\[Effect\([a-z_:]+\)\]; )?private def self\.resume_suspended\(line : UInt64\) : Nil$/ { in_resume = 1; resumes++ }
         in_resume && /^      end$/ { in_resume = 0 }
         in_resume && /^            LibC\.ResumeThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\)$/ {
           print "            fair_resume(cursor, LibC.ResumeThread(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))))"
@@ -1817,7 +1817,7 @@ IYI
       awk -v mode="$1" '
         /^class IyiRuntimeLock$/ { in_runtime = 1; runtime++ }
         in_runtime && /^end$/ { in_runtime = 0 }
-        in_runtime && /^  def self\.lock : Nil$/ { in_lock = 1; locks++ }
+        in_runtime && /^  (@\[Effect\([a-z_:]+\)\]; )?def self\.lock : Nil$/ { in_lock = 1; locks++ }
         in_lock && /^  end$/ { in_lock = 0 }
         in_lock && /^    \{% if !flag\?\(:gc_none\).*IyiThread\.lock_taken/ { print "    IyiThread.fair_taken(spins)"; print; taken++; next }
         /^      def self\.collect_locked\(eager : Bool\) : Nil$/ { in_collect = 1; collections++ }
@@ -2237,7 +2237,7 @@ IYI
     }
     burst_prelude() {
       awk -v mode="$1" '
-        /^  def self\.lock : Nil$/ { in_lock = 1; lock_methods++ }
+        /^  (@\[Effect\([a-z_:]+\)\]; )?def self\.lock : Nil$/ { in_lock = 1; lock_methods++ }
         in_lock && /^  end$/ { in_lock = 0 }
         in_lock && /^    \{% if !flag\?\(:gc_none\).*IyiThread\.lock_taken/ { print; print "    IyiThread.burst_probe_lock"; locked++; next }
         /^  def self\.unlock : Nil$/ { in_runtime_unlock = 1; runtime_unlocks++ }
@@ -3653,7 +3653,7 @@ IYI
     # The copy of prelude.iyi: `take`'s fast path calls the hook after its stamp.
     early_prelude() {
       awk '
-        /^      def self\.take\(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64\) : UInt64$/ { declarations++; intake = 1; print; next }
+        /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.take\(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64\) : UInt64$/ { declarations++; intake = 1; print; next }
         intake && /^      end$/ { intake = 0; closures++; print; next }
         intake && /^ *stamp\(table, index, head, bits, type_id\)$/ { ind = substr($0, 1, match($0, /[^ ]/) - 1); print; print ind "IyiThread.early_take_hook"; stamps++; next }
         { print }
@@ -4653,7 +4653,7 @@ if ! cp "$WORK/registry-ctl/iyi/thread.iyi" "$WORK/registry-cut/iyi/thread.iyi";
   echo "SETUP: registry: the common thread hooks could not be copied"; exit 76
 fi
 if ! awk '
-  /^  def self\.lock : Nil$/ { inside = 1; methods++ }
+  /^  (@\[Effect\([a-z_:]+\)\]; )?def self\.lock : Nil$/ { inside = 1; methods++ }
   inside && /^  end$/ { inside = 0; ends++ }
   inside && /^        spins, since = IyiThread\.lock_turn\(word, seen, spins, since\)$/ {
     print "        IyiThread.registry_lock_wait(seen)"; waits++
@@ -5579,7 +5579,7 @@ IYI
       awk -v gate=gate.part -v mode="$1" '
         /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ { print; print "      fun thread_gate_exit = _exit(status : Int32) : NoReturn"; darwin_exit++; next }
         /^    # ── Roots/ { while ((getline line < gate) > 0) print line; roots++ }
-        /^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { starts++; in_start = 1 }
+        /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { starts++; in_start = 1 }
         in_start && /^      \{% elsif flag\?\(:win32\) %\}$/ { win_branches++; in_win = 1 }
         in_start && /^    end$/ { closes++; in_start = 0; in_win = 0 }
         in_win && /^        h = LibC\.CreateThread\(nil, 0_u64, Pointer\(Void\)\.new\(thread_entry\), Pointer\(Void\)\.new\(line\), 4_i32, nil\)$/ {
@@ -5604,7 +5604,7 @@ IYI
           if (mode == "forced") print "        IyiHeap.write64(line + IYI_TL_HANDLE, h.address) if late"
           next
         }
-        /^      private def self\.suspend_others\(line : UInt64\) : Int64$/ { print; print "        IyiThread.release_gate_clear_skip"; clears++; next }
+        /^      (@\[Effect\([a-z_:]+\)\]; )?private def self\.suspend_others\(line : UInt64\) : Int64$/ { print; print "        IyiThread.release_gate_clear_skip"; clears++; next }
         /^          LibC\.SuspendThread\(Pointer\(Void\)\.new\(IyiHeap\.read64\(cursor \+ IYI_TL_HANDLE\)\)\) if cursor != line$/ { print "          LibC.SuspendThread(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))) if cursor != line && !IyiThread.release_gate_unnamed?(cursor, line)"; one++; next }
         /^        deferred = 0_i64$/ { armed_scan = 1 }
         armed_scan && /^          if cursor != line$/ { print "          if cursor != line && !IyiThread.release_gate_skipped?(cursor)"; two++; armed_scan = 0; next }
@@ -5962,7 +5962,7 @@ IYI
     mkdir -p identity/iyi
     cp kept/iyi/*.iyi identity/iyi/
     awk '
-      /^      def self\.first_written\(sp : UInt64, top : UInt64\) : UInt64$/ {
+      /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.first_written\(sp : UInt64, top : UInt64\) : UInt64$/ {
         print; print "        return sp"; found++; next
       }
       { print }
@@ -6121,7 +6121,7 @@ IYI
       awk -v part=pretls.part -v mode="$1" '
         /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ { print; print "      fun pretls_exit = _exit(status : Int32) : NoReturn"; alias_count++; next }
         /^    # ── Roots/ { while ((getline s < part) > 0) print s; roots++ }
-        /^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { in_start = 1; starts++ }
+        /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { in_start = 1; starts++ }
         in_start && /^      \{% elsif flag\?\(:darwin\) %\}$/ { in_darwin = 1; darwin++ }
         in_start && /^      \{% elsif flag\?\(:win32\) %\}$/ { in_darwin = 0 }
         in_start && /^    end$/ { in_start = 0; in_darwin = 0; start_ends++ }
@@ -6129,7 +6129,7 @@ IYI
           if (mode == "forced") { print "        IyiHeap.write64(line + IYI_TL_NEXT, @@lines)"; print "        @@lines = line"; print "        @@count = @@count + 1_i64" }
           created++
         }
-        /^    def self\.run\(line : UInt64\) : Nil$/ { print; print "      IyiThread.pretls_hold(line)"; runs++; in_run = 1; next }
+        /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.run\(line : UInt64\) : Nil$/ { print; print "      IyiThread.pretls_hold(line)"; runs++; in_run = 1; next }
         in_run && /^    end$/ { in_run = 0; run_ends++ }
         in_run && /^        link\(line\)$/ { links++; if (mode == "forced") next }
         /^      return 0_i64 if @@count == 0_i64 \|\| \(line != 0 && @@count <= 1_i64\)$/ { print "      IyiThread.pretls_stop"; stops++ }
@@ -6444,7 +6444,7 @@ IYI
   while ((getline line < part) > 0) print line
   modules++
 }
-/^    def self\.install : Nil$/ { inside = 1; installs++ }
+/^    (@\[Effect\([a-z_:]+\)\]; )?def self\.install : Nil$/ { inside = 1; installs++ }
 inside && /^      \{% if flag\?\(:darwin\) %\}$/ { in_darwin = 1; darwins++ }
 inside && /^      \{% else %\}$/ { in_darwin = 0 }
 inside && /^    end$/ { inside = 0 }
@@ -6470,7 +6470,7 @@ AWK
   while ((getline line < part) > 0) print line
   roots++
 }
-/^    def self\.run\(line : UInt64\) : Nil$/ { in_run = 1; runs++ }
+/^    (@\[Effect\([a-z_:]+\)\]; )?def self\.run\(line : UInt64\) : Nil$/ { in_run = 1; runs++ }
 in_run && /^      \{% if flag\?\(:darwin\) %\}$/ && !seen_darwin { in_darwin = 1; seen_darwin = 1; darwins++ }
 in_run && in_darwin && /^      \{% elsif flag\?\(:linux\) %\}$/ { in_darwin = 0 }
 in_run && in_darwin && /^        IyiHeap\.write64\(line \+ IYI_TL_TOP, IyiRoots\.discover_stack_base\)$/ {
@@ -6669,8 +6669,8 @@ IYI
     step "failure proof: a fiber's top read as no fiber's, as it was"
     mkdir -p topless/iyi
     cp "$REPO"/src/iyi/*.iyi topless/iyi/
-    awk '/^      return top if top != 0 && address <= top && address > top - IyiFiber::STACK_BYTES$/ {
-        print "      return top if top != 0 && address < top && address >= top - IyiFiber::STACK_BYTES"; found++; next }
+    awk '/^      return top if top != 0 && address <= top && address > top - fiber\.stack_span$/ {
+        print "      return top if top != 0 && address < top && address >= top - fiber.stack_span"; found++; next }
       { print } END { if (found != 1) exit 3 }' \
       "$REPO/src/iyi/concurrency.iyi" > topless/iyi/concurrency.iyi || { echo "SETUP: ${current_step:-topless}: the fiber stack bound anchor changed"; exit 76; }
     if ! IYI_PATH="$WORK/topless${PSEP}$REPO/src" "$IYI" build -Dfresh_witness fresh.iyi -o topless-run > build-topless.log 2>&1; then
@@ -6909,8 +6909,8 @@ IYI
     mkdir -p stoptop-topless/iyi
     cp "$REPO"/src/iyi/*.iyi stoptop-topless/iyi/
     stoptop_copy stoptop-topless/iyi/thread.iyi || { echo "SETUP: ${current_step:-stoptop}: the thread anchors changed"; exit 76; }
-    awk '/^      return top if top != 0 && address <= top && address > top - IyiFiber::STACK_BYTES$/ {
-        print "      return top if top != 0 && address < top && address >= top - IyiFiber::STACK_BYTES"; found++; next }
+    awk '/^      return top if top != 0 && address <= top && address > top - fiber\.stack_span$/ {
+        print "      return top if top != 0 && address < top && address >= top - fiber.stack_span"; found++; next }
       { print } END { if (found != 1) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > stoptop-topless/iyi/concurrency.iyi || { echo "SETUP: ${current_step:-stoptop}: the fiber stack bound anchor changed"; exit 76; }
     cmp -s stoptop-topless/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi" && { echo "SETUP: ${current_step:-stoptop}: the topless copy was unchanged"; exit 76; }
     if ! IYI_PATH="$WORK/stoptop-topless${PSEP}$REPO/src" "$IYI" build stoptop.iyi -o stoptop-topless-run > stoptop-topless-build.log 2>&1; then
@@ -7073,7 +7073,7 @@ IYI
     }
     wild_prelude_copy() {
       awk '
-        /^      def self\.first_touch : UInt64$/ { scope = 1; defs++ }
+        /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.first_touch : UInt64$/ { scope = 1; defs++ }
         scope && /^        lock$/ { print "        IyiThread.wild_prelock"; print; locks++; next }
         scope && /^      end$/ { scope = 0 }
         { print }
@@ -7636,13 +7636,13 @@ IYI
     # The call must be inside the unique yield_cpu definition. The next
     # method definition ends that scope; matching a call elsewhere is not proof.
     awk '
-      $0 == "    def self.yield_cpu : Nil" {
+      $0 ~ /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.yield_cpu : Nil$/ {
         defs++; inside = 1
         while ((getline line < "yield_observer.part") > 0) { print line; parts++ }
         close("yield_observer.part")
         print; next
       }
-      inside && /^    def self\./ { inside = 0 }
+      inside && /^    (@\[Effect\([^)]*\)\]; )?def self\./ { inside = 0 }
       $0 == "        LibC.thread_switch(0_u32, IYI_SWITCH_OPTION_DEPRESS, 1_u32)" {
         calls++
         if (!inside) bad = 1
@@ -7668,8 +7668,8 @@ IYI
     mkdir -p yield-mutant/iyi || { echo 'SETUP: yield: could not make the mutant copy'; exit 76; }
     cp yield-control/iyi/*.iyi yield-mutant/iyi/ || { echo 'SETUP: yield: could not populate the mutant copy'; exit 76; }
     awk '
-      $0 == "    def self.yield_cpu : Nil" { defs++; inside = 1; print; next }
-      inside && /^    def self\./ { inside = 0 }
+      $0 ~ /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.yield_cpu : Nil$/ { defs++; inside = 1; print; next }
+      inside && /^    (@\[Effect\([^)]*\)\]; )?def self\./ { inside = 0 }
       $0 == "        yield_observe_switch" {
         calls++; if (!inside) bad = 1
         print "        asm(\"yield\" :::: \"volatile\")"; next
@@ -7680,8 +7680,8 @@ IYI
     # Reverse the one intended substitution and compare all bytes, including
     # the identical observer and every other hook, to the control copy.
     awk '
-      $0 == "    def self.yield_cpu : Nil" { inside = 1; print; next }
-      inside && /^    def self\./ { inside = 0 }
+      $0 ~ /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.yield_cpu : Nil$/ { inside = 1; print; next }
+      inside && /^    (@\[Effect\([^)]*\)\]; )?def self\./ { inside = 0 }
       inside && $0 == "        asm(\"yield\" :::: \"volatile\")" {
         print "        yield_observe_switch"; restored++; next
       }
@@ -7887,7 +7887,7 @@ IYI
       awk -v part=count-roster.part -v mode="$1" '
         /^      fun thread_switch\(thread : UInt32, option : Int32, time : UInt32\) : Int32$/ { print; print "      fun roster_exit = _exit(status : Int32) : NoReturn"; alias_count++; next }
         /^    # ── Roots/ { while ((getline s < part) > 0) print s; roots++ }
-        /^    def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { in_start = 1; starts++ }
+        /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.start\(proc : Proc\(Nil\)\) : IyiThread$/ { in_start = 1; starts++ }
         in_start && /^      \{% elsif flag\?\(:darwin\) %\}$/ { in_darwin = 1; darwin++ }
         in_start && /^      \{% elsif flag\?\(:win32\) %\}$/ { in_darwin = 0 }
         in_start && /^    end$/ { in_start = 0; in_darwin = 0; start_ends++ }
@@ -7896,7 +7896,7 @@ IYI
           if (mode == "forced") print "        @@count = @@count + 1_i64 if result == 0"
           created++; next
         }
-        /^    def self\.run\(line : UInt64\) : Nil$/ { in_run = 1; runs++ }
+        /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.run\(line : UInt64\) : Nil$/ { in_run = 1; runs++ }
         in_run && /^    end$/ { in_run = 0; run_ends++ }
         in_run && /^        link\(line\)$/ {
           print "        IyiThread.roster_pre_link"
@@ -8260,7 +8260,7 @@ IYI
           close(part)
           roots++
         }
-        /^    def self\.start_helper\(entry : UInt64, argument : UInt64\) : Nil$/ { in_helper = 1; helpers++ }
+        /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.start_helper\(entry : UInt64, argument : UInt64\) : Nil$/ { in_helper = 1; helpers++ }
         in_helper && /^        stack = __iyi_mmap\(IYI_THREAD_STACK\)\.address$/ {
           print; print "        IyiThread.helper_launch_counted"; launches++; next
         }

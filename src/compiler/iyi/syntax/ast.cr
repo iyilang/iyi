@@ -1,3 +1,5 @@
+require "./effect"
+
 # Helper for `#pretty_print` implementation. It describes the type.
 private def pp_type(pp, left, right, &) : Nil
   pp.text left
@@ -1677,6 +1679,13 @@ module Iyi
     # annotation because an instance is a clone, and a clone carries no
     # annotations.
     property? iyi_share_block = false
+    property? iyi_observer_wrapped = false
+    setter effect : ::Iyi::Effect? = nil
+
+    def effect : ::Iyi::Effect?
+      @effect || iyi_origin.try(&.effect)
+    end
+
     # iyi: `@[Share(serial: workers)]`: the parameter whose literal `1` at a
     # call runs the def on the caller's thread alone, so that call's block
     # and crossing arguments are not checked (SPEC.md III.4.13). Nil when
@@ -1727,6 +1736,8 @@ module Iyi
       a_def.iyi_defer = iyi_defer?
       a_def.iyi_from_derive = iyi_from_derive?
       a_def.iyi_share_block = iyi_share_block?
+      a_def.effect = @effect
+      a_def.iyi_observer_wrapped = iyi_observer_wrapped?
       a_def.iyi_share_serial = iyi_share_serial
       a_def.iyi_share_crossing = iyi_share_crossing
       a_def.iyi_share_elements = iyi_share_elements
@@ -2199,11 +2210,10 @@ module Iyi
     # who did not already have it in their object code.
     property? iyi_from_artifact = false
 
-    # iyi: written by the definition-site typing probe (R-2c) rather than by
-    # an author. The probe is a def's own site asking about itself, so it
-    # names a type the def's module keeps to itself the way the module's
-    # own code can: `Call#check_visibility` lets its call through for the
-    # same reason.
+    # iyi: written by the compiler rather than by an author: the R-2c probe,
+    # the observer's `Std::Observe`, and the printed type names an artifact's
+    # object code numbers or matches (IV.1g). Neither R-1's import wall nor
+    # R-2's export rule applies to them.
     property? iyi_synthetic = false
 
     def initialize(@names : Array, @global = false)

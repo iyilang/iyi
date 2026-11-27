@@ -1,0 +1,475 @@
+# iyi Stale Test Design
+
+Status: Approved for implementation by Jason Waldrip; implementation in progress on this branch. D3 is amended and D20 and D21 are added on Jason Waldrip's decision of 2026-11-12. Grounded at iyilang/iyi `9045a508` (master, 2026-10-24); every `path:line` is at that commit.
+
+## 1. Review
+
+`iyi test --cached` reports a test as passing without generating code for it or running it, when the code the compiler would emit is the code a passing receipt was built from and everything its run was observed reading still gives the same answer. Every check that starts a compiler parses and type-checks the test; a check whose recorded inputs are unchanged starts none (D20). The compiler then hashes the typed call path: every function, initializer and type layout codegen reaches from the program's entry, after macros have expanded, with program-wide numbering left out. An observation build watches the run. Master CI publishes receipts that other runs import.
+
+### Requirements set by Jason Waldrip before planning
+
+* A test identity for reuse is a SHA signature over the contents of everything it transitively depends on. A portable index records what has actually passed.
+* The compiler and runtime discover dependencies automatically. Nobody declares file or environment lists.
+* Inputs include the environment (12-factor), effective compiler flags and defaults, toolchain and target, and process behavior.
+* Local and CI runs use the same validity rules.
+* Crystal mode keeps working.
+* Nothing is implemented before this plan is approved.
+
+### Requirements set by Jason Waldrip in review
+
+* The source-side identity is the SHA of a distinct call path: the function bodies and code actually used, not files.
+* It is derived from what the compiler already instantiates and emits, not from a separate dependency analysis.
+* The call-path signature is the only source-side key. Every check type-checks first.
+* 2026-11-12, Jason Waldrip: a check that finds nothing a test was built from changed starts no compiler; checks run at once; RG10 proves the fast path never less safe.
+
+### Decisions this plan makes
+
+* **D1:** The unit of reuse is one `*_test.iyi` program: one build, one process (§2, §3).
+* **D2:** A receipt is valid when its build key equals the current one and every recorded run observation answers the same now. The source side of the build key is the call-path signature. Never file contents, `.iyimod` module hashes, interface hashes or run-time coverage (§3, §4, §6).
+* **D3:** The compiler computes the build key itself, after semantic analysis and before codegen. Every `--cached` check that starts a compiler type-checks; a hit stops there, before codegen, LLVM, linking and running, and a fast serve (D20) starts none. Compiler file reads are not replayed or keyed; a stale build records them only for the fast path (D20), and stale builds do not use `UpToDate` (§4).
+* **D4:** The run side is an observation build with compiler-injected observers and a static closure check over the reached set of §4. Anything outside the closure is opaque (§5).
+* **D5:** Clock, entropy, timers, network, subprocesses, signal handlers, runtime timing values and writes outside the run scratch directory make a run not reusable. The test still runs and reports (§5).
+* **D6:** Values the runtime makes up for uniqueness or layout, and the numbering the compiler assigns, are unspecified, not inputs. Accessors that hand machine or timing values to programs are annotated not reusable (§3, §5).
+* **D7:** Only passes become receipts. A non-pass under a state that validates a receipt revokes it in the local store; cross-machine revocation occurs through the master audit (§6, §8).
+* **D8:** Local state lives in `<cache root>/tests-v1/`, written atomically. Digests that can carry environment values are stored keyed (§6, §7).
+* **D9:** There are two namespaces. `master` holds receipts from iyilang/iyi master pushes, fetched through the Actions API. `run:<id>` holds receipts within a single workflow run. Pull requests never write a namespace another ref reads (§8).
+* **D10:** No secret or token reaches the export step environment; portable records hold plain digests of environment values. A gate checks this (§8).
+* **D11 (amended):** Every CI run produces receipts, then a fresh runner requires hits for matching profiles and refusals for differing profiles, and re-executes both for audit. The runner must also hit its own freshly exported receipts from an emptied store. Hits across runs and commits wait on RG1 (§8, §10).
+* **D12:** `--cached` is opt-in. Default `iyi test` behavior and output do not change. Changing the default is a separate proposal backed by §13 (§9).
+* **D13:** `--affected` keeps its selection; reuse applies inside it (§9).
+* **D14:** Crystal mode (reached via `IYI_OPTS`) always runs and states why. The Crystal spec aggregate is the unit if it is ever covered (§9).
+* **D15:** A claim that rests on an unproven property is blocked by a named proof gate. There is no declaration mode as a fallback (§10).
+* **D16:** The reached set is what codegen would emit: a walk starts where `CodeGenVisitor` starts, follows what it follows and skips what it skips. A recording build also generates code and refuses its receipt if codegen emitted a function the walk did not reach. RG8 proves coverage (§4, §10).
+* **D17:** Program-wide numbering is never hashed. Elements are named canonically, sets are sorted by name, compiler-made names are numbered by first occurrence inside their element, and literals are hashed by value. A key shared by two elements with different content abstains (§4, §6).
+* **D18:** Source positions enter the signature through three sources: literals from location macros, expanded call-site location arguments codegen emits for magic-constant defaults (`src/compiler/iyi/codegen/call.cr:173-191`), and failable cast locations (`src/compiler/iyi/codegen/codegen.cr:1954-1980`). Debug line information is left out; a runtime def that returns code locations or debug information to program code is `code_location`, not reusable (§4, §5).
+* **D19:** What reaches the executable from outside the typed program is keyed beside the signature: object units linked from `.iyimod` artifacts by content, the linker flags the compiler would pass with `CHILD_ENV`, and the compiler's own environment reads (§4).
+* **D20:** A check whose recorded inputs are unchanged starts no compiler. The stale build child records what it read: each file with a stat taken before the read, directory listings, environment values and `pkg-config` answers. Under `--cached`, a test whose local receipt is valid is served with no compiler when every recorded input still answers the same, and reports `check: "inputs"`. Any other cause runs the compiler check, and `check_reason` names the first. Imported receipts still take the compiler path. The argument that a fast serve gives the compiler check's answer, and its limits, are in §6 and §14. RG10 proves that no fast serve is one the compiler check would refuse (§10).
+* **D21:** `-p N` runs tests at once under `--cached`, `--fresh`, `--explain`, `--shard`, `--import-index` and `--export-index`, by default half the cores as plain `iyi test`. Each test's decision reads the store and disk as its fiber finds them, so a parallel run's verdicts are those of some order of the tests. Output is in file order. The store is per test, so a check reads its own test's receipts and not every receipt in the store (§7), and an interrupt ends every running build and test (§9).
+
+### Approval gate
+
+Implementation starts only after Jason Waldrip approves this pull request. Approval covers D1 through D19 and the phase order in §11. A decision that changes during implementation changes this file in the same PR as the code. No phase is ticketed until this document merges.
+
+## 2. What exists at 9045a508
+
+* **`iyi test`:** One build and one process per file (`src/compiler/iyi/command/test.cr:176`, `317-375`). The header rejects interface hashes for re-running (`test.cr:18-30`). Options are `--json`, `--timeout` and `--affected`; unknown flags are refused (`test.cr:46-85`). Files are discovered and deduplicated by `Iyi.file_key` (`test.cr:87-118`). `--affected` parses the import closure and falls back to a full run when a manifest changed (`test.cr:129-131`), when a changed file cannot be in any closure, meaning it has an extension other than `.iyi` or is a prelude file (`test.cr:138-140`, `243-257`), or when a named file is missing (`test.cr:153`). A test whose own source does not parse is selected on its own (`test.cr:158`, `261-262`), and an import that does not parse stays in the closure by path (`test.cr:263-266`). Syntax changes in existing imported files do not cause a full run. JSON output (`test.cr:179-217`). Stdin is `/dev/null` via `Redirect::Close` opening `File::NULL` (`test.cr:336`; `src/process.cr:550-551`, `607-612`). No result is persisted.
+* Named cases and the exit-status verdict: `src/iyi/testing.iyi:151-205`. `assert` and `raise` default `file = __FILE__` (`src/iyi/prelude.iyi:9545`, `9619`).
+* The Crystal spec runner builds one generated program requiring every selected spec, then runs it once (`src/compiler/iyi/command/spec.cr:55-115`, `98-115`).
+* **Compiler pipeline:** Semantic passes run, then codegen, in both compile paths (`src/compiler/iyi/semantic.cr:6-15`, `39-77`; `src/compiler/iyi/compiler.cr:437-449`, `623-632`). A def is typed when a call instantiates it and is cached per owner by `DefInstanceKey`, whose first field is the def's object id (`src/compiler/iyi/semantic/call.cr:573-630`; `src/compiler/iyi/types.cr:1028-1047`). Definition-site probes type every fully declared user def under `if false` (`src/compiler/iyi/semantic/definition_typing.cr:1-29`). Codegen emits on demand from the main node, one function per mangled name per module (`src/compiler/iyi/codegen/codegen.cr:153-162`; `src/compiler/iyi/codegen/fun.cr:20-84`). `tool unreachable` walks `target_defs` and skips probes, but does not follow constants or class variables (`src/compiler/iyi/tools/unreachable.cr:163-247`).
+* **Numbering:** Type ids, the symbol table and proc literal names are assigned at codegen (`codegen/llvm_id.cr:4-37`; `codegen.cr:339-352`, `1071-1098`). Union members are ordered by object id (`src/compiler/iyi/program.cr:1601-1604`). Temporary names and constant slices are program-wide counters (`program.cr:1190-1204`). Programs see type ids through the primitive (`src/iyi/primitives.iyi:39-44`) and the default `hash` (`src/iyi/primitives.iyi:67-74`; `src/iyi/object.iyi:20-22`).
+* **`.iyimod` artifacts:** A consumer never opens the module's source (`src/compiler/iyi/iyimod.cr:4-9`). A def read from an artifact has a `Nop` body (`semantic/call.cr:636-695`). Its code comes as object units (`iyimod.cr:91`, `1061-1063`) held in `program.iyi_artifact_objects` and linked whole (`program.cr:414-424`; `compiler.cr:3870-3880`). Module hashes are MD5 cache keys at module granularity (`iyimod.cr:401-406`, `487-500`, `533-538`). `iyi test` reads an artifact only for a module whose source is absent (`src/compiler/iyi/command.cr:1253-1275`) or under `--use-iyimod` (`compiler.cr:169-178`).
+* **Build recorder:** `BuildInputs` watches `File`, `Dir` and `ENV` while a build holds it (`src/compiler/iyi/build_inputs.cr:4-23`, `519-591`). The `ENV` hooks cover only `fetch` and `has_key?` (`build_inputs.cr:579-591`). `CHILD_ENV` names what the linker, its driver and `pkg-config` read (`build_inputs.cr:41-47`). `paused` runs a block unrecorded (`build_inputs.cr:61-63`). `UpToDate` keys one record per output path (`up_to_date.cr:40`), with compiler identity from version, path, size and mtime (`up_to_date.cr:47-55`), arguments minus `DISPLAY_ONLY` (`up_to_date.cr:26`, `37`), and environment values in clear (`up_to_date.cr:156-159`). Link flags come from `Program#lib_flags`, which asks `pkg-config` (`src/compiler/iyi/codegen/link.cr:123-181`, `325-343`).
+* **Effective options:** `IYI_OPTS` is parsed before explicit arguments (`src/compiler/iyi/command.cr:1553`, `1565`). The prelude key classifies compiler properties with a compile-time completeness check (`src/compiler/iyi/compiler.cr:523-560`); the behavior key copies that model.
+* **Environment access:** On POSIX, `Program.env` scans `__iyi_environ` (`src/iyi/prelude.iyi:9844`, `9990`), and `std/env` reads, writes and enumerates the same table (`src/std/env.iyi:61`, `121`, `206`, `283`). On Windows, `Program.env` reads the process block via `__iyi_win_env_get` (`src/iyi/prelude.iyi:9993-9997`), and `std/env` Windows branches do the same (`src/std/env.iyi:59`). Child processes inherit the environment table (`src/std/process.iyi:799`, `1696`).
+* **Time, randomness and temp names:** `src/std/time.iyi:1252-1349`, `src/std/random.iyi:440-475`, temp names from getrandom, arc4random or clock (`src/std/file.iyi:1963-1985`), `TMPDIR` read by `Dir.tempdir` (`src/std/dir.iyi:425-431`) and `File.tempfile` (`src/std/file.iyi:1921-1931`), GC pause clock and accessor (`src/iyi/prelude.iyi:4781`, `7529`).
+* SHA-256 exists in iyi (`src/std/digest.iyi:429`). The host side has only `src/crystal/digest/md5.cr` and `sha1.cr`.
+* The cache cleaner keeps ten most recently used directories (`src/compiler/iyi/codegen/cache_dir.cr:109-117`, `212-233`). The MCP `test` tool is at `src/compiler/iyi/command/mcp.cr:179`, `221`.
+* **Corpus and CI:** Four committed tests, `bench/std_{bool,box,heap,string_pool}_test.iyi`, which were std exercises and are run by `bench/module_test.sh`; they are not in the corpus below. The test verb is otherwise exercised by generated fixtures: `bench/test_verb.sh` and `bench/agent_loop.py:72-76`, `674-695`, at `.github/workflows/iyi.yml:604`, `644`, `1519`, `1531`, `2106`, `2134`. The std exercises run as four weighted shards per platform (`.github/workflows/iyi.yml:934-985`, `1663`, `2450`). `on: [push, pull_request]` (`iyi.yml:41`), `permissions: {}` (`iyi.yml:65`). The only `secrets.` references are in the VS Code job (`iyi.yml:3174-3175`). `github.token` is exported in step environments (`iyi.yml:2708`, `2795`, `3139`), and PR jobs use `actions/cache` (`iyi.yml:1362`, `1647`, `2700`, `2787`, `2880`). Linux executables dynamically link libc (`SPEC.md:6425-6432`).
+
+## 3. The claim and what it assumes
+
+**Claim:** Under `--cached`, a test reported as passing from a receipt would, if rebuilt and rerun now, read the same bytes, names and values at every point it reads anything, and so reach the same verdict.
+
+* **A1 (Determinism):** Given an equal build key, the compiler emits the same reached code, and given identical answers to observed reads, the program reaches the same verdict. Guards: RG1, RG2, RG7, RG8 and RG9 for the compiler; contradiction detection and the shadow audit for tests.
+* **A2 (Unspecified values):** Memory addresses, temp names, scheduling order, descriptor numbers, uninitialized memory, and the numbering the compiler assigns (type ids, symbol indices) are not inputs. A verdict depending on them is a flaky test. Reuse can hide a flake that a rerun might expose, identical to the exposure of a plain rerun. Numbering is stable across reruns of one build and can move with an unrelated edit, so a verdict depending on it is exposed by a `--fresh` run or the audit, not by reuse. Process limits not captured in the profile are unspecified values. Guards: a contradiction revokes in the local store, and any shadow-audit disagreement fails CI.
+* **A3 (Inputs hold still during a run):** Guard: compare the stat taken when the test opened a file with a stat after exit. A file whose mtime falls within the recorder resolution of the open (SPEC.md V.9 (e)) taints the run.
+* **A4 (Cooperative tests):** Accidental bypass is detected and marks the run not reusable: program `asm`, `lib` bindings, integer-to-pointer conversions, or a closed trace channel. Only trusted refs produce cross-run receipts.
+
+## 4. The build: the call-path signature
+
+The compiler computes the build key once `semantic_after_top_level` returns, in both compile paths (`src/compiler/iyi/compiler.cr:437-444`, `623-627`), before `prepare_iyimods` (`compiler.cr:446`, `629`). The program is typed and cleaned (`src/compiler/iyi/semantic.cr:59-74`) and nothing is numbered yet (`src/compiler/iyi/codegen/codegen.cr:164-166`, `339-352`, `1071-1098`). Hashing after codegen would put IR construction on every hit and would have to undo numbering rather than skip it; codegen output is RG8's oracle instead. Every check that starts a compiler type-checks, so a macro `read_file`, `env`, `run` and `system` reach the signature through their expansion, and no compile-time read is replayed. A fast serve (D20) reaches none of this: it compares the stamps and observed environment values its child recorded instead (§6).
+
+**Reach.** A walk visits the cleaned typed program the way `CodeGenVisitor` does:
+* Roots: well-known funs, predefined constants a program reads, ARGC_UNSAFE and ARGV_UNSAFE always, and artifact class variables (`codegen.cr:373-383`, `679-713`),
+* Edges: a call's `target_defs`, through a dispatch when there are several and inline where a block is inlined (`src/compiler/iyi/codegen/call.cr:4-39`); proc literal bodies; a used constant where assigned and any constant where read (`codegen.cr:1484-1488`; `codegen/const.cr:229-256`); a class variable initializer where declared and where read (`codegen.cr:1498-1502`, `1688-1705`; `codegen/class_var.cr:210-244`); instance variable initializers of a type and its superclasses where it is allocated (`codegen.cr:2640-2720`).
+* Branches: only those `truthy?` and `falsey?` leave to codegen (`codegen.cr:1297-1314`), so definition-site probes (`src/compiler/iyi/semantic/definition_typing.cr:21-29`) are never reached and `def_instances` (`src/compiler/iyi/types.cr:1028-1047`) cannot stand in for the reached set.
+* Class-variable traversal and emitted-variable bookkeeping use semantic object identity, so two owners with the same variable name do not suppress each other's initializers. Persisted element keys remain owner-qualified; object identity is never written into a fingerprint.
+* Failable casts and closure-to-C attempts call `__iyi_raise_cast_failed` and `__iyi_raise_closure_to_c` in `src/iyi/prelude.iyi`, planned for S3 (`src/compiler/iyi/program.cr:495-497`; `src/compiler/iyi/codegen/codegen.cr:1856-1866`, `1945-1952`, `1954-1980`), avoiding codegen-time typing and normalization. Both prelude functions print their fallback messages byte for byte (`codegen.cr:1877-1897`, `1945-1952`), preserving default output per D12. The walk encodes each failable cast's expanded location.
+* A macro refuses to compile the compiler while a `CodeGenVisitor#visit` overload, an `ASTNode` subclass, or a `Type` subclass (with layout attributes codegen reads: enum base type, tuple and named-tuple fields, static array sizes, typedef targets) lacks a counterpart in the walk or encoder (`compiler.cr:544-556`). The completeness macro also flags any codegen read of `location`/`end_location` outside allowed debug-metadata sites (`src/compiler/iyi/codegen/debug.cr:407`, `527`, `562`; `codegen/fun.cr:196`, `934`; `codegen/codegen.cr:1072`, `2467-2469`), and flags any `visit_main`/`normalize` calls inside codegen. Where codegen stops after a `NoReturn` (`codegen/call.cr:23-25`) the walk does not; that costs reruns, never a hit.
+
+**Elements.** The walk yields elements, each a kind, a key and a digest of its typed content (§6):
+* `def`, one per function codegen would emit, keyed by its canonical name with union members sorted by canonical name recursively (`src/compiler/iyi/codegen/ast.cr:46-48`; mangled names map codegen functions for the cross-check): owner and self type, arguments with types and defaults, block argument, return type, free variable bindings, variables with types and closure flags, `raises?`, every annotation, origin flags, body, and for each call leaving magic-constant defaults to codegen, the expanded values codegen emits (`src/compiler/iyi/codegen/call.cr:173-191`).
+* `fun` and `lib_fun` by symbol, a `lib_fun` with its C signature and its `lib` annotations; `const` by path, with value, `simple?`, `compile_time_value` and whether it is initialized where assigned; `class_var` as `Owner::@@name`, with initializer, `simple_initializer?` and thread-local flag; `ivar_init` by type; `main`; `object_unit` (below).
+* `type` by canonical name (sorting union members by canonical name recursively, `codegen/types.cr:107-108`, `types.cr:3619-3632`): kind, every annotation, superclass and included modules, instance variables in layout order, enum members and generic arguments; the type set is closed over these references. Planned for S3, member order is made canonical where unions are created (`src/compiler/iyi/program.cr:1601-1604`), sorting members by canonical name rather than object id. This canonicalizes keys, macro literals (`macros/methods.cr:499-500`, `types.cr:3619-3632`), and runtime names together. A virtual type lists every concrete subtype, since codegen range checks and dispatch cover the whole hierarchy (`src/compiler/iyi/codegen/llvm_id.cr:4-27`, `116-135`). Probe witness types (`definition_typing.cr:31-38`) are keyed by the trait they witness.
+
+**Numbering (D17).** No element encodes an object id, type id, symbol index, proc counter, temporary name or slice name (`src/compiler/iyi/program.cr:1190-1192`, `1202-1204`). Keys are canonical names (line 87); mangled names only map codegen functions for the cross-check. Compiler-made variable names and probe serials are numbered by first occurrence inside their element. Two elements with one key and different digests abstain with `ambiguous key`. Numbering that reaches program values (`src/iyi/primitives.iyi:39-44`, `67-74`) is unspecified under A2.
+
+**Positions (D18).** Source positions enter the signature through three sources: literals from location macros, the expanded call-site arguments codegen emits when a call leaves magic-constant defaults to its target def (`src/compiler/iyi/codegen/call.cr:173-191`), and each failable cast's expanded location (`src/compiler/iyi/codegen/codegen.cr:1954-1980`). Nothing else about where code was written is hashed. Backtraces reach only the error stream (`prelude.iyi:9547-9588`), and `std/debug` resolves frames without exporting anything (`src/std/debug.iyi:1-16`).
+
+**Artifacts.** A def read from a `.iyimod` has a `Nop` body (`src/compiler/iyi/semantic/call.cr:636-695`); its code is one of the object units the build links whole (`program.cr:414-424`; `compiler.cr:3802-3803`, `3870-3880`). Each linked unit is an `object_unit` element keyed by module and unit and digested by its bytes. Travelling bodies are typed by the consumer and reached like source. Module hashes (`src/compiler/iyi/iyimod.cr:401-406`, `487-500`, `533-538`) are not used.
+
+**Link and environment.** `LinkFp` covers the flags `Program#lib_flags` returns, `pkg-config` answers included (`src/compiler/iyi/codegen/link.cr:123-181`, `325-343`), `link_flags` (`compiler.cr:3517-3526`, `3709-3765`), the static flag and the `CHILD_ENV` values (`src/compiler/iyi/build_inputs.cr:41-47`). Stale builds always link through the compiler's linker driver (`@iyi_link_driver_only = true`), avoiding direct-`ld` templates (`compiler.cr:3563-3583`). Stale reuse links without a shell (passing an argument vector directly to the linker driver rather than invoking `sh -c`, `src/compiler/iyi/compiler.cr:3533`, `4115`), preventing glob, tilde, and subcommand expansion. Stale reuse is refused when any ldflags or link flag contains a backtick, `$`, `*`, `?`, `[` or `~` (`compiler.cr:3775-3799`). The compiler evaluates `lib_flags` and `link_flags` once during the check and passes that exact vector to the linker. `CompilerEnvFp` covers the compiler's own environment reads during the check, recorded by the `ENV` hooks (`build_inputs.cr:579-591`). Reads inside macro methods run under `BuildInputs.paused` (`build_inputs.cr:61-63`), because their values reach the signature as expanded code. Reads are classified `value`, `locator` (left out: what it located is in the signature) or `display` (left out); unlisted variables are `value`. Stale builds neither read nor write `UpToDate` records. The child takes file stamps only when `--stale-inputs` is set, for the fast path (D20); they are not part of the Build.
+
+**Cross-check (D16).** A recording build continues to codegen and checks that every def, proc literal, constant and class variable that `codegen_fun` (`fun.cr:265`) and the initializer functions receive was reached. One that was not refuses the receipt with `reach mismatch`.
+
+**No build-side race.** The signature and codegen read one parsed tree, and `lib_flags` is evaluated once, so edits or environment changes after check start cannot reach the executable; the receipt is keyed by what was compiled.
+
+Toolchain identity embeds a build-input digest covering compiler sources, LLVM version, bootstrap compiler version and build flags, plus compiler executable SHA-256 until RG1 is green, LLVM shared library digest, and linker driver path, version and digest.
+The behavior key classifies compiler properties after defaults apply (`IN_BEHAVIOR_KEY`, `LOCATION_ONLY` or `DISPLAY_ONLY`), using the check model in `src/compiler/iyi/compiler.cr:523-560`. Stale builds refuse `--no-cleanup`, `--emit`, `--emit-iyimod`, `--emit-bind`, `--iyi-keep`, `--cross-compile` and `IYI_FORK_PROBE` with a not-reusable reason. `--stale-key`, `--stale-accept`, `--stale-block` and `--stale-dump-elements` (which carries RG8's element spans) are all `DISPLAY_ONLY`, keeping per-run file paths out of the behavior key. Stale builds never go through a build daemon: the runner unsets `IYI_DAEMON_SOCKET` for its build children (`src/compiler/iyi/command.cr:137-141`).
+
+### Gap table
+
+| Gap | Change | Slice |
+|---|---|---|
+| G1: nothing records what codegen will emit | Reach walk mirroring `CodeGenVisitor` | S3 |
+| G2: typed defs include probes never emitted (`definition_typing.cr:256-261`) | Walk keeps only branches codegen keeps | S3 |
+| G3: identities are addresses or counters (`types.cr:1028-1032`, `program.cr:1601-1604`) | Canonical keys, sorted sets, first-occurrence ordinals; duplicate key abstains | S1/S3 |
+| G4: a def read from a `.iyimod` has no body | Linked object units keyed by content | S3 |
+| G5: link inputs live outside the typed program | `LinkFp` | S3 |
+| G6: `ENV` hooks cover only `fetch` and `has_key?` | Hook enumeration: record whole table, or abstain; macro methods paused | S3 |
+| G7: environment values in clear | Keyed digests locally; plain digests only for CI producer jobs | S3/S8 |
+| G8: compiler identity is path, size, mtime | Toolchain identity digest, linker driver identity included | S2 |
+| G9: raw argument list | Resolved behavior key; refused stale modes | S2 |
+| G10: nothing observes program at run time | Observation build | S4/S5 |
+| G11: one record per output, deleted before build | Per-signature receipts with verdict history | S6 |
+| G12: nothing checks the walk against codegen | Recording-build cross-check; RG8 | S3 |
+
+## 5. The run: the observation build
+
+The runner builds each test with `-Diyi_observe`, which belongs to the behavior key. Observer runtime is the std module `std/observe` at `src/std/observe.iyi`. SPEC.md I.4 holds `src/iyi/` to 4,650 lines; `prelude_library_lines()` is budgeted at most 4,644 at PR close. The prelude gains only the two raise funs and, under `{% if flag?(:iyi_observe) %}`, the load of `std/observe` plus start and END hooks. `std/observe` has `bench/std_observe_exercise.{iyi,sh}` (`bench/std_exercise.sh:419-440`, `bench/tarball_std.sh:109`).
+`@[Effect(kind)]` is permitted only on defs in `src/iyi` and `src/std`; anywhere else is a compile error.
+
+| Class | Kinds | Effect on the run |
+|---|---|---|
+| observed | `file_read`, `file_stat`, `file_exists`, `dir_list`, `env_get`, `env_all`, `cwd`, `host` | Recorded in trace |
+| output | `stdio`, `exit`, `file_write` (create, delete, rename, mkdir, link, symlink, touch, chmod) | Nothing; write outside scratch taints `shared-write` |
+| not reusable | `clock`, `entropy`, `timer` (sleep, timeout, deadline), `network`, `process`, `signal`, `runtime_timing`, `code_location`, `dir_stream` (40, reason: directory read as a stream), `host_state` (41, reason: machine state the program cannot see as a value) | Taints run, naming def |
+| internal | `memory`, `collector`, `threads`, `scheduler`, `self_image`, `console`, `panic_backtrace`, `temp_name`, `observation_channel`, `primitive` | Nothing; internal to runtime. `primitive` marks a leaf the platform arm is built from, a raw system call or a bare CPU instruction (`sys`, `__sys3`, `ldexp`-style asm), whose caller carries the real classification; the def is not wrapped |
+
+Examples: `src/std/file.iyi:1963` (`temp_name`, internal) vs `src/std/random.iyi:440-475` (`entropy`); `src/iyi/prelude.iyi:4781` (internal clock) vs `7529` (`runtime_timing`). `self_image` and `panic_backtrace` are internal because their results reach only the error stream; a runtime def returning code locations or debug information to program code is `code_location` (D18).
+
+* **Injection:** Observer wrappers and `__iyi_observe_<kind>` calls are generated during semantic analysis, before the §4 hook, so they are typed, reached and encoded. The compiler renames each annotated def and generates a wrapper calling the renamed def followed by `__iyi_observe_<kind>` from `src/std/observe.iyi`. Renamed implementation defs keep `__iyi_effect_<name>` for identifier names, while non-identifier operator names (such as `[]=` and `[]?`) are hex-encoded as `__iyi_effect_<hex>` so the declaration and wrapper call remain valid source text when serialized into observed `.iyimod` artifacts. Wrappers forward positional and named arguments with their defaults. The renamed implementation def is emitted inside its wrapper in every build that has its body (source, producer, and consumer of a travelled body), and the reach walk and call path match this inlined emission so no synthetic frames appear in backtraces. A def that yields or takes splats cannot carry an observed, output or not-reusable kind; that is a compile error naming the def; annotate the non-yielding helper it calls instead. The wrapper for kind `exit` calls its observer before the renamed def, since exit does not return. Every other kind observes after it. Panics call `__iyi_exit(1)` and write END(1). Outermost frame records: an observation (or taint) fires only at the outermost annotated def on the current task's call stack. Every annotated def opens a frame, including internal-kind defs (`memory`, `collector`, `threads`, `scheduler`, `self_image`, `console`, `panic_backtrace`, `temp_name`, `observation_channel`) and `stdio`, which get a frame-only wrapper that records nothing. Nested annotated calls inside an open frame record nothing. The depth counter is per fiber for code a fiber runs, and per thread for code outside any fiber, so a switch inside a frame does not leak suppression to another task or thread, kept in `std/observe` with zero cost in non-observe builds. Boundary transitions preserve outermost program effects: raw thread execution suspends surrounding runtime frames before invoking the user callback and resumes them afterward (`suspend_frames` / `resume_frames`); the scheduler transfers open thread frame depth to the newly created main fiber upon initial touch (`thread_became_fiber`) and returns it upon thread retirement (`fiber_became_thread`); and panic/stop unwinding and defer drains abandon open frames (`abandon_frames`) so deferred program cleanup records at depth 0 and exit observers write `END(1)`. Long-lived runtime entrypoints (`IyiWorkers.work`, `IyiWorkers.monitor`, `IyiMark.helper_main`) carry internal lifetime annotations (`@[Effect(:scheduler)]` and `@[Effect(:collector)]`) to remain framed across raw thread execution. Soundness: the outermost observed def's observation fully describes what flows out of it to program code (its arguments and result), so nested effects inside it are covered; internal frames return nothing program-visible beyond what A2 already treats as unspecified.
+* **Closure:** Checked statically on the reached set of §4. Reachable `asm`, `lib` `fun` calls, and `lib` globals must sit inside an `@[Effect]` def in runtime library files. `llvm.*` intrinsics are compiler operations and not lib calls. Internal defs are defs in runtime library files (`src/iyi` or `src/std`) annotated with an `internal`-class kind (`memory`, `collector`, `threads`, `scheduler`, `self_image`, `console`, `panic_backtrace`, `temp_name`, `observation_channel`). In program files, `asm`, `lib` calls and globals, integer-to-pointer conversions, and calls to internal defs that return a value mark the run opaque with `FILE:LINE`. A call to an internal def that returns Nil or never returns (`raise`, the collector's `enable`, `disable` and `collect`) hands the program nothing a verdict can read beyond the values A2 already calls unspecified, so it is not opaque; the census showed that treating `raise` as opaque made nearly every standard library exercise unreusable. Unclassified reachable runtime sites mark the run opaque and trigger gate RG3. Runtime accessors that hand machine or timing values to programs are annotated `not reusable` (for example, `IyiWorkers.resolved` in `src/iyi/concurrency.iyi:3116-3134` returning `IyiThread.core_count` in `src/iyi/thread.iyi:954`, or collector and scheduler statistics). Uniqueness and layout values (such as `Reference#object_id` in `src/iyi/primitives.iyi:59-60` or temp names in `src/std/file.iyi:1911-1957`) remain unspecified values under A2. Classification rests on review, checked by RG6.
+* **Channel:** `IYI_OBSERVE=<path>` names a runner-owned file outside scratch and outside roots. At startup the runtime opens it, unsets the variable before program code runs, and allocates one reusable `RecordWriter` for the run. Trace writes, deduplication sets, and taints are serialized under a single leaf CAS lock (`Std::Observe`). A thread-local recording flag guards against reentrant recording during panic defers and keeps worker threads from preemption while holding the leaf lock. The channel write loop retries short writes until complete; any write failure suppresses `END` so a truncated trace is marked `trace incomplete`. Non-taint observations drop once the run is tainted, while each distinct taint kind is recorded once at its first site. At completion, `finish` writes `END(status)` under lock and disables the channel, dropping any trailing records from surviving threads. Top-level assertion failures and panics call `__iyi_exit(1)` (`src/iyi/prelude.iyi:9608-9613`, `src/iyi/concurrency.iyi:2966-2971`, `3007-3010`), and signal deaths or timeout kills terminate the process without writing END. Missing or malformed END, trailing records, or reserved exit codes mark `trace incomplete`.
+
+Run observations, test ids and `explain` entries map paths to logical roots:
+* `src`: `Compiler.entry_root_of` (`src/compiler/iyi/compiler.cr:352`).
+* `toolchain`: library entry holding `iyi/prelude.iyi` (`src/compiler/iyi/command/test.cr:251-255`).
+* `pkg`: cache `mod/` (`src/compiler/iyi/build_inputs.cr:100`).
+* `scratch`: runner per-test directory.
+* `abs`: machine-bound files.
+
+* **Trace content:**
+  * File operations and links: Every observed kind (existence, size, `dir_list`, content) is classified by the real path after resolving symlinks (`src/std/file.iyi:1288`), while link, symlink and rename writes are classified by endpoint entries (`safe_real_path_entry`, resolving the parent directory while keeping the link entry itself unresolved) to preserve scratch containment when creating symlinks pointing into scratch. Creating a hard link (`src/std/file.iyi:1269`) or a symlink whose target is outside scratch taints `shared-write`. File operations record path as given, open flags, open-time stat, and absolute real path as resolved at open (`Dir.cd` changes process directory, `src/std/dir.iyi:387-395`). `Dir.cd` is recorded as an observed `cwd` event in the trace. Absolute paths map to roots using cwd active at open. Content is hashed after exit. Each trace record is tagged with its task id to preserve observation order per task.
+  * Directory listings record names in the order returned.
+  * Environment reads record name and whether program wrote it first (`env_get`: unwritten reads observe initial environment; reads after writes are internal). `env_all` digests every initial value in the whole initial environment table (except `IYI_OBSERVE`), recording `TMPDIR`, `TEMP` and `TMP` as the `scratch` locator.
+  * Scratch, timestamps and writes: `TMPDIR`, `TEMP` and `TMP` map to the `scratch` locator, set on every platform (`src/std/dir.iyi:425-431`, `src/std/file.iyi:1921-1931`). Scratch directory starts empty for each run and is removed afterward. Existence, size, `dir_list` and content under scratch stay internal, as do reads of paths the run already wrote (not hashed after exit, not validated at lookup). Returning a timestamp of a scratch or self-written file taints the run with `clock`. Descriptors inherited from the runner (stdin, stdout, stderr) count as `stdio` by provenance rather than descriptor number, and the trace channel descriptor counts as `observation_channel`. Writes outside scratch or through descriptors outside runner-inherited `stdio` or a recorded open taint `shared-write`.
+* **Process profile:** argv = [S] (where S = File.expand_path(<store.root_dir>/scratch/<Stale.hex(Store.d_test_id(test))>)), stdin as `/dev/null` via `Redirect::Close` opening `File::NULL` (`src/process.cr:550-551`, `607-612`), piped stdout/stderr, cwd as mapped by roots (`roots.map(Dir.current)`), isolated `TMPDIR`/`TEMP`/`TMP` scratch directory S created empty under S + ".lock", timeout, umask, all `getrlimit` values (stack, open files, address space, data, CPU time, file size) and cgroup memory limit, cleared loader variables (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `GLIBC_TUNABLES` on Linux per `SPEC.md:6425-6432`; `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH` on Darwin acting on libSystem, `src/iyi/prelude.iyi:303-308`), target triple, OS and kernel release.
+
+## 6. Signatures, lookup and revocation
+
+Encoding uses canonical, type-tagged, length-prefixed binary (FIPS 180-4, RFC 2104):
+
+```
+D(tag, x)     = SHA-256("iyi.stale.v1." || tag || 0x00 || enc(x))
+K(x)          = HMAC-SHA256(machine key, x) in local records, x in portable records
+TestId        = (root "src", path)
+Element       = (kind, key, D(kind, typed content))
+CallPathFp    = D("callpath", elements sorted by (kind, key))
+LinkFp        = D("link", lib_flags, link_flags, static, CHILD_ENV values)
+CompilerEnvFp = D("cenv", sort((name, value | absent) of value-class reads))
+Build         = D("build", toolchain, behavior, K(CallPathFp), K(LinkFp), K(CompilerEnvFp))
+ProfileFp     = D("profile", argv, stdin, stdio, cwd, timeout, umask, rlimits, cgroup_mem, loader_vars, target, os, kernel)
+TraceFp       = h_n,  h_0 = D("trace0", ""),  h_i = D("trace", h_(i-1), obs_i)
+Signature     = D("record", TestId, Build, ProfileFp, TraceFp)
+Receipt       = {version, test, build, explain, profile, trace, signature,
+                 mode: local|portable, newest: pass|fail|hung|build-failed, seq, contradicted}
+```
+
+Typed content is encoded node by node: class tag, fields in order, and the type of a typed node. A call encodes its arguments, block, `target_defs` as element keys, and expanded magic-constant default arguments, or a block-inlined target's body in place; a path its constant or type key; a variable its name and type; a literal its kind and bytes; an `If` its `truthy?` and `falsey?` flags and the branches codegen keeps. A declaration codegen emits nothing for contributes nothing to the `main` element (not even a tag or position): a `Def` encodes its hook expansions, a `Macro` nothing, a type body its initializers. Unused constant assignments contribute nothing to `main`. `explain` holds, per file under `src`, `toolchain` or `pkg`, K of a digest over the sorted digests of the elements written there, and one entry for all others; it names files in `--explain` and is never compared for validity.
+
+Local mode keys the build components, `explain`, environment observations and `abs`-root observations with HMAC-SHA256 under the machine key. Portable mode uses plain `D`. A version change is always a miss.
+
+TestId is (root `src`, path from `Compiler.entry_root_of`, `src/compiler/iyi/compiler.cr:352`). Every test whose TestId is shared within the selection runs fresh, with reason `ambiguous test id`, and records nothing.
+
+Lookup and execution:
+
+```
+for test in selected tests, each on its own fiber (D21):
+  fast = the fast record of test (absent when missing, corrupt or another version)
+  if --cached, fast names a build B, a valid local pass has build B (not
+     contradicted, profile equal, replay clean), no contradicted receipt or
+     mask of test validates, and fast.unchanged_reason(env) is nil:
+    serve: cached, source local, check "inputs"; no compiler starts; next test
+  accept = {}
+  block  = {}
+  unless --fresh:
+    valid  = builds of local passes, then imported passes (unmasked, same target),
+             not contradicted, whose profile equals the current profile and whose
+             trace observations, replayed in order, answer the same now
+    block  = builds of contradicted receipts and masks of test passing the same checks
+    accept = valid minus block
+  run(test, accept, block)
+
+run(test, accept, block):
+  build with -Diyi_observe --stale-key OUT --stale-accept accept --stale-block block:
+    parse and type-check
+    semantic error: report build failure; write nothing, revoke nothing
+    compute Build in both modes (machine key read under BuildInputs.paused)
+    refuse accept if Build in either mode matches a block entry in that entry's mode
+    Build matches an accept entry in that entry's mode: stop; report pass (cached, source); next test
+    generate code and link; reach mismatch taints
+  build failure after Build: revoke every receipt of test that validates now
+  execute under profile; collect trace
+  interrupted sent to iyi test itself: write nothing, revoke nothing
+  non-pass exit (fail, signal, timeout kill, reserved status):
+    revoke every receipt of test that validates now (whatever trace state)
+  pass with trace incomplete: write nothing
+  pass, complete, untainted, run inputs unchanged during run: write receipt
+```
+
+Why sound: An equal build key means the compiler emits the same reached code (A1, RG8), so a rebuild runs the code the receipt ran. A deterministic program whose recorded answers all still hold makes the same reads and reaches the same verdict. Replay in order stops at the first mismatch (`run: fixtures/a.txt changed`). A changed condition reruns the test and records a second receipt, while the first stays valid for its own inputs. A fast serve (D20) is the compiler check's answer when every input the Build reads still has the stamp its record holds. A content change writes the file, which sets mtime and ctime from the clock; user space cannot set ctime (`cp -p`, `touch -r` and `rsync -t` set mtime only); a replacement by rename changes the inode; and a write inside the record's clock tick is caught by the racy digest. The check would then compute `local_build`, the Build of a valid local receipt, unblocked, and hit (`check.cr:211-214`). Each test's decision reads the store and disk as its fiber finds them, so a parallel run's verdicts are those of some order of the tests, as plain `-p` already is.
+Revocation: Local receipts mark `contradicted` (sticky). Imported receipts receive a local mask storing the masked receipt's build components, profile and trace. Before serving any receipt, the runner checks whether any contradicted receipt or mask of that test validates under current state (matching by state, not signature, because build components and environment observations use HMAC locally and plain SHA-256 in portable records). A new pass matching a contradicted signature keeps the contradicted flag (read-modify-write under the lock). Under the lock, a corrupt or unreadable record is replaced with a persistent contradiction marker for its test; a later `--fresh` executed pass with a complete trace clears it. Local masks and contradictions persist in the local store; cross-machine revocation occurs through the master shadow audit.
+
+## 7. Local state
+
+```
+<cache root>/tests-v1/
+  key                                machine key, created once, mode 0600
+  seq                                attempt counter, advanced under lock
+  lock                               held while writing receipts, masks, snapshots
+  toolchain/<digest>.json            compiler and linker driver metadata memo
+  records/<hex D(test)>/<signature>.json   per test; older records/<ab> directories are ignored
+  fast/<hex D(test)>.json                  fast-path record of the inputs the newest check read (D20)
+  masks/<signature>                  local revocations storing build, profile, trace
+  imported/<namespace digest>.json   one snapshot per namespace
+```
+
+Masks store the masked receipt's build components, profile and trace (`masks/<signature>`). `toolchain/` caches a digest memo of the compiler executable, LLVM shared library and linker driver, keyed by (path, device, inode, size, mtime, ctime); ctime cannot be set by `cp -p`, `touch` or `rsync -t`. Atomic writes write to a temp file, fsync, then rename (`MoveFileEx` with write-through on Windows). Readers take no lock. Masks are never deleted as corrupt; readers never delete masks. Under the lock, a corrupt or unreadable record file is replaced with a persistent contradiction marker for its test; a later `--fresh` executed pass with a complete trace clears it. S2 adds `tests-v1` to `NOT_BUILDS` (`src/compiler/iyi/codegen/cache_dir.cr:261`) because its toolchain memo is the first write under the cache root, preventing `cleanup_dirs` (`cache_dir.cr:212-219`) from rotating the machine key away. Outdated toolchain receipts are pruned during recording runs. Interrupts sent to `iyi test` leave existing receipts intact.
+
+## 8. Portable index, trust and secrets
+
+Snapshot format:
+
+```json
+{"format": "iyi-test-index", "version": 1, "namespace": "master",
+ "repository": "github.com/iyilang/iyi", "workflow": ".github/workflows/iyi.yml",
+ "ref": "refs/heads/master", "target": "x86_64-linux-gnu",
+ "producer": {"run_id": 0, "run_attempt": 1, "sha": "...", "job": "iyi", "shard": "1/1"},
+ "records": []}
+```
+
+* **Export:** Allowed only with `--fresh` within the CI producer context, guarded by an environment flag (such as `IYI_CI_PRODUCER=1`) set by the workflow and checked by the CI gate to prevent accidental export from developer workstations. Contains reusable passes and drops receipts with `abs` or `host` observations.
+* **Import checks:** Validates format, version, matching namespace, matching target, sorted unique tests, and filesystem roots restricted to `src`, `toolchain` and `pkg`. Environment observations (`env_get`, `env_all`) use root `env`; tests and `explain` entries still require filesystem roots. Snapshots are uploaded uncompressed with `archive: false` so the API artifact digest directly covers the JSON file. The stale jobs use `actions/upload-artifact` v7 or later. `bench/stale_ci.sh fetch-master` is the only step holding `github.token` (the compiler links no TLS; `bench/dependency_floor.sh` forbids openssl). It downloads through the Actions API, checks the file SHA-256 against the API artifact digest, and writes `FILE.provenance.json`. `--import-index master=FILE` requires positive run_id, repository, workflow and ref on both provenance sidecar and master snapshot, matching pairs, trusted repository and ref, and workflow matching the trusted workflow path (`.github/workflows/iyi.yml`). It refuses a file if it lacks a sidecar, if its SHA-256 differs from the recorded digest, if either sidecar or snapshot is missing a required field, or if workflow, repository or ref are untrusted or forged. A forged sidecar counts as adversarial (§3 A4). Newer snapshots replace older ones wholesale.
+* **Precedence:** Local masks and contradictions, then local passes, then imported passes. At most one receipt per test per snapshot.
+* **Namespace `master`:** Produced on iyilang/iyi workflow runs on master pushes (`--export-index master=...`). Consumers trust only artifacts from `push` runs on `refs/heads/master` of that repository. Consumers fetch the newest completed master `push` run and import nothing for `master` if that run has no snapshot for the target (e.g. build failed before export, artifact expired). A run whose shadow audit disagreed publishes an empty snapshot taking the run's own candidate identity (disabling consumption per RG6).
+* **Namespace `run:<id>`:** Consumed only within the same workflow run. Snapshot union across shards is allowed only for shards from the same producer run; a snapshot union containing duplicate tests across shards is refused.
+* **Trust and secrets:** No cross-run cache persistence in stale jobs (`actions/cache`). No secret or token reaches the export step environment; the token goes only to the artifact download step. The export gate verifies that the export step environment contains neither `secrets.` nor `github.token` (`.github/workflows/iyi.yml:2708`, `2795`, `3139`). Portable receipts use plain digests of public variables; local receipts use the machine key. Pull requests cannot write a namespace another ref reads.
+* **CI flow (the same stages on Linux x86_64, macOS arm64 and Windows x86_64):** the Linux jobs are described first; `stale-darwin`, `stale-darwin-gates`, `stale-darwin-fresh`, `stale-windows`, `stale-windows-gates` and `stale-windows-fresh` run the corresponding stages natively on `macos-15` and `windows-2025`, with the receipt snapshots named by target (`...-aarch64-darwin.json`, `...-x86_64-windows-msvc.json`). `stale-rg3` checks RG3 for all four of x86_64-linux-gnu, aarch64-linux-gnu, aarch64-darwin and x86_64-windows-msvc.
+  * Job `iyi` runs `bench/stale_tests.sh`. The job grants `actions: read`, and only the download step receives `github.token` to download the master snapshot for audit. Runs `iyi test --fresh --export-index run:<id>=...` over `samples/iyi/*.iyi`, auditing against master, and uploads the run snapshot with `archive: false`. On master pushes it also exports namespace `master` to `master-candidate-x86_64-linux-gnu.json`, uploaded only for transfer to the audit job.
+  * Job `stale-fresh` receives job `iyi`'s compiler binary and run snapshot. For each exported identity, a matching profile must hit from the expected namespace; a different profile must refuse the receipt. Non-reusable tests absent from the snapshot execute normally. The producer in run 43830236826 recorded kernel `7.0.0-1014-aws`; the producer in run 43811561723 recorded `7.0.0-1017-azure`. The kernel is part of the profile, so a fresh runner can legitimately refuse the producer's receipts.
+  * The runner re-executes with `--fresh` and exports its receipts. Shadow audit compares the verdict, build key and ordered observations for both hits and profile refusals. Refusals must differ only in runner-parity components; mismatched profiles must never hit. The runner then empties its local store, imports its own export and requires every exported identity to hit. For an identity with differing profiles, the run does not exercise one machine hitting the other's receipt; matching profiles do exercise that path. The planted hidden-read test (row 24) runs on a fixture outside the published corpus. Only after required audits succeed does `stale-fresh` publish the candidate under the canonical `master-x86_64-linux-gnu.json` basename. On shadow disagreement it publishes a valid empty snapshot instead. Each run publishes at most one canonical master artifact; if auditing cannot execute, none is published.
+  * Imports `master` and runs `--cached` with a git-diff self-check of run observations against `git diff --name-only <producer sha> HEAD`: hits whose trace observed a changed path fail the step; misses with an equal build key whose trace observed only unchanged checkout paths fail. Build keys are not checked against the diff, since a changed file that leaves reached code alone is expected to hit; RG8 and RG9 cover the build side. Miss check is limited to `File` observations of tracked checkout files mapped from roots (`src` mapped via `Compiler.entry_root_of`, `src/compiler/iyi/compiler.cr:352`; `toolchain` mapped to checkout `src/`).
+  * Job `stale-callpath` builds `iyi` beside the compiler that built it and runs `bench/stale_callpath.sh all` (link once and `LinkFp`, RG4, the reach walk against what codegen recorded, the key's accept and block phases, RG8 over the mutations, RG9 over the 140-program corpus in two processes and with a preanalysed prelude), then `bench/stale_store_concurrency.sh` (row 21). It exports and imports nothing.
+  * Job `stale-equivalence` builds `iyi` the same way and runs `bench/stale_equivalence.sh all` (RG2 and RG2a over the 140 programs, RG2r, RG5), where a program RG2 or RG2a excludes fails the step. It exports and imports nothing.
+
+## 9. `iyi test` behavior
+
+```
+iyi test [--json] [--timeout S] [--affected FILE]... [--cached | --fresh] [--explain] [-p N]
+         [--shard K/N] [--import-index NS=FILE]... [--export-index NS=FILE]...
+         [--chaos[=SEED]] [--chaos-runs N] [paths]
+```
+
+* **Default mode:** Unchanged. Normal builds, no recording, no new JSON fields.
+* **JSON fields under `--cached`/`--fresh`:** Per-test `cached` (bool), `source` (`local` or namespace), `reuse` (`hit`, `miss`, `not reusable`), `reason` (mismatch or taint with `FILE:LINE`), canonical `test` (`root`, `path`), current `portable_build` and `profile` fingerprints, filesystem `roots`, and `blocked` state for the audit. Top-level `cached` count and `audit` list. Per-test `check` (`inputs` when no compiler started, else `compiler`) and `check_reason` (the first cause, when `compiler`); top-level `builds` (compiler processes started). Audit consumers join by canonical test identity rather than invocation filename.
+* **Text summary:** `7 passed (5 from receipts), 0 failed`. Exit status unchanged.
+* **`--explain`:** Prints one decision line per test. A miss names the first component that differs from the test's newest receipt, in the order toolchain, behavior, compiler environment, link, call path (with the files whose `explain` entries differ), profile, run. A fast serve prints `FILE: hit from local (inputs unchanged)`. Under `-p` the lines print after the run, in file order.
+* **`--affected`:** Selects candidates as today (`src/compiler/iyi/command/test.cr:120-163`): falls back to a full run when a manifest changed (`test.cr:129-131`), when a changed file cannot be in any closure (`test.cr:138-140`, `243-257`), or when a named file is missing (`test.cr:153`). A test whose own source does not parse is selected on its own (`test.cr:158`, `261-262`), and an import that does not parse stays in the closure by path (`test.cr:263-266`). Reuse evaluates inside selection. Unselected tests are never reported as passed and never touched in store.
+* **Failures/timeouts/signals:** Every non-pass exit (fail, signal death, timeout kill, reserved status) revokes every receipt of that test that validates now, regardless of trace state. A build that fails before its signature exists revokes nothing: no receipt validates without one.
+* **Interrupt:** Sent to `iyi test` itself: child tree killed (via a new process group on POSIX, job object on Windows, `src/compiler/iyi/command/test.cr:377-380`, `416`), no receipt written for active test, existing receipts left intact, nothing revoked, exits 130. Under `-p N` every running build and test is killed the same way, and SIGTERM and SIGHUP do too, exiting 128 plus the signal.
+* **`-p N`:** Runs N tests at once under the stale-runner options (`--cached`, `--fresh`, `--explain`, `--shard`, `--import-index`, `--export-index`). The default is half the cores, as plain `iyi test`. Verdicts are those of some order of the tests (D21); output is in file order.
+* **`--shard K/N`:** Deals tests round-robin; snapshots unioned only across shards of the same producer run; duplicate test across shards refused.
+* **`--export-index NS=FILE`:** May be specified multiple times to export to multiple namespaces in a single run.
+* **MCP:** `test` tool gains optional `cached` parameter (`src/compiler/iyi/command/mcp.cr:179`, `221`).
+* **Crystal mode:** `iyi test` rejects `--crystal` as a direct CLI option (`src/compiler/iyi/command/test.cr:76-80`), so Crystal mode reaches `iyi test` only through `IYI_OPTS="--crystal"` (`src/compiler/iyi/command.cr:992`, `1565`). Tests always run fresh with reason `Crystal library effects are not classified` (SPEC.md V.9 (e)).
+* **Chaos mode:** Chaos options (`--chaos`, `--chaos=SEED`, and `--chaos-runs`) cannot be combined with stale-runner options (`--cached`, `--fresh`, `--explain`, `--shard`, `--import-index`, or `--export-index`). The command rejects those combinations before execution (SPEC.md III.4.17). Chaos testing exercises scheduling permutations and runs without receipt reuse.
+* **Crystal spec aggregate:** `./bin/crystal spec` is unchanged. If ever covered, unit is whole generated program (`src/compiler/iyi/command/spec.cr:98-115`).
+
+## 10. Proof gates
+
+| Gate | Proves | Blocks | Until green |
+|---|---|---|---|
+| RG1 | Compilers with equal build-input digests produce byte-identical test executables for corpus (integrated 140-program corpus) | Hits across commits | Executable SHA-256 stays in identity |
+| RG2 | Normal and `-Diyi_observe` builds give equal exit status, stdout and stderr outside calibrated masks, non-reusable output, and normalized backtraces across all 140 programs (28 samples + 112 std exercises), 0 excluded, zero failures | Shipping `--cached` | Shipping waits |
+| RG3 | Zero unclassified runtime sites reachable from corpus on target (140-program integrated corpus); report lists candidate runtime defs flagged by the §4 walk, with completeness resting on review and RG6 as the check | Enabling platform CI | Platform runs fresh |
+| RG4 | Links byte-identical under randomized variables outside `CHILD_ENV` | Treating `CHILD_ENV` as whole link environment | Full link environment digested |
+| RG5 | Runtime patched via `IYI_PATH` dropping each observer allows changed input to pass; gate catches it | Claiming kind is covered | Kind is not claimed |
+| RG6 | Standing shadow audit catches unannotated leaks or disagreements | Keeping consumption enabled after disagreement | Consumption disabled until fix (publishes empty snapshot) |
+| RG7 | Different `--threads` produce identical executables | Leaving `n_threads` out of behavior key | `n_threads` stays in key |
+| RG8 | Over C2, C3 and single-site mutations generated from the walk's own elements (body, callee, overload capture, instance variable and its initializer, constant, class variable initializer, annotation, macro input, position change above a reached call or failable cast): every mutation changing normalized reached IR changes `CallPathFp`; link annotation mutations change the link command line and `LinkFp`; artifact object unit mutations change linked bytes and `Build`; mutations outside the reached set (unreached def body, unrelated type, unused constant, comment above code holding no location literal) change neither; codegen emits no function the walk did not reach | Shipping `--cached` | Shipping waits |
+| RG9 | Every C2 and C3 program (integrated 140-program corpus) checked in two processes with address randomization, with and without a preanalysed prelude (`compiler.cr:605-617`), and on the `stale-fresh` runner gets one `CallPathFp` | Shipping `--cached` | Shipping waits |
+| RG10 | A fast serve is one the compiler check agrees with: under `IYI_STALE_FAST_AUDIT=1` every test the fast-path rule serves also runs the compiler path and must hit with the record's `local.build`; the audit runs in `bench/stale_tests.sh`, `bench/stale_census.sh` and `bench/stale_suite_speed.py --audit` | Shipping the fast path | Shipping waits |
+
+Normalized reached IR is the unoptimized IR printed under `DUMP=1` (`codegen.cr:755-779`), with debug metadata stripped, type-id constants replaced by the names they denote and range checks by the sorted names in range, symbol indices by symbol strings, proc and temporary names by first-occurrence ordinals, union cases sorted by type name, and module-level tables (simple constants, type-id globals, GC layouts, symbol table) restricted to entries the emitted functions reference.
+
+RG2 equivalence under observation compares exit status, stdout and stderr. The renamed implementation body is emitted directly inside its wrapper in every build that has the body, and the reach walk and call path treat it the same way. To compare backtraces without image-column divergence, normal and observed binaries share an identical basename across distinct directories. Stderr comparison strictly enforces that every non-frame byte must match, and frames match by count, position, index, image and canonical function, never by address or offset. An observed build linking observed artifacts prints the source build's exact frames (verified by `rg2r`). Stdout compares equal outside calibrated masks and documented non-reusable accessor output (A2: timing resolution `wall clock steps: ... ns`, collector statistics `mapped=...`, and allocation benchmarks `... KiB allocated` from `runtime_timing` and `clock` kinds).
+
+## 11. Phases and slices
+
+| Slice | Files | Change | Out of scope | Done when |
+|---|---|---|---|---|
+| S1 (P1) | `src/crystal/digest/sha256.cr`, `src/compiler/iyi/stale/encoding.cr`, specs | FIPS 180-4 SHA-256, canonical encoding | Replacing MD5 in `UpToDate`, OpenSSL | Matches FIPS vectors, agrees with `std/digest` across blocks |
+| S2 (P1) | `Makefile`, `Makefile.win`, `src/compiler/iyi/config.cr`, `compiler.cr`, `stale/toolchain.cr`, `bench/stale_reproducible.sh` | S2 adds `tests-v1` to `NOT_BUILDS` (`cache_dir.cr:261`); toolchain digest memo; behavior key with refused stale modes, toolchain digest with linker driver identity, RG1 and RG7 gates | Changing `UpToDate.compiler_identity` | RG1 and RG7 pass |
+| S3 (P1) | `src/compiler/iyi/stale/call_path.cr`, `compiler.cr`, `command.cr`, `codegen/fun.cr`, `codegen/const.cr`, `codegen/class_var.cr`, `build_inputs.cr`, `macros/methods.cr`, `src/iyi/prelude.iyi`, `bench/stale_callpath.sh` | Reach walk and typed encoder with completeness macros; `__iyi_raise_cast_failed` and `__iyi_raise_closure_to_c` in prelude; canonical union creation (`program.cr:1601-1604`); `CallPathFp`, `LinkFp`, `CompilerEnvFp`; `--stale-key`, `--stale-accept`, `--stale-block`, `--stale-dump-elements` (all `DISPLAY_ONLY`); emitted-function cross-check; environment-only recorder with macro methods paused and enumeration hooked; direct linker invocation without shell; RG4 (in link section of bench/stale_callpath.sh), RG8 and RG9 gates | Reuse across tests, skipping the type check, changing `UpToDate` | G1 through G6 and G12 are closed, and RG4, RG8 and RG9 pass |
+| S4 (P2) | `src/compiler/iyi/semantic/effects.cr`, annotations in `src/iyi` and `src/std`, `bench/stale_effects.sh` | `@[Effect]` typing, static closure check over the S3 reached set, RG3 gate | Program-level effect inference | RG3 clean on target |
+| S5 (P2) | `src/std/observe.iyi`, `src/compiler/iyi/stale/trace.cr`, `bench/std_observe_exercise.iyi`, `bench/std_observe_exercise.sh`, `bench/stale_equivalence.sh` | `std/observe` module, observer injection during semantic, runtime trace channel, logical roots, RG2 gate | User-space tracing | RG2 passes and RG5 trace half passes (a dropped observer leaves the changed input out of the trace) |
+| S6 (P3) | `command/test.cr`, `stale/store.cr`, `cache_dir.cr`, `mcp.cr`, `bench/stale_tests.sh`, workflows | Receipt storage keyed by build, atomic files, accept and block lists, lookup, revocation, `explain`, CLI flags | Remote cache | §12 local rows green and RG5 end-to-end half passes (a cached hit despite the change is caught by a fresh audit) |
+| S8 (P3) | `src/compiler/iyi/stale/snapshot.cr` | Portable snapshot export and import, repeatable export flags, CI attestation check | Cross-repo sharing | Snapshot validation passes |
+| S9 (P4) | `.github/workflows/iyi.yml`, `bench/stale_ci.sh`, `bench/stale_census.sh` | Master index publishing, `stale-fresh` job, shadow audit, git-diff self-check of run observations | Third-party CI | CI steps green |
+| S10 (P5) | `SPEC.md`, `CHANGELOG.md`, `README.md` | SPEC test row, census and overhead documentation | Unmeasured claims | `bench/doc_numbers.py` passes |
+| S11-A (fast path, child) | `src/compiler/iyi/build_inputs.cr`, `command.cr`, `compiler.cr`, `stale/check.cr`, new `stale/inputs_file.cr`, `macros/macros.cr` if needed, `spec/compiler/stale/compiler_env_spec.cr`, `check_spec.cr`, `bench/stale_callpath.sh` (rg9) | Stale mode records files, listings, environment values, pkg-config answers and reasons; `--stale-inputs FILE`; `Stale::FileStamp` | Serving from the record | An inputs file lists the test's source and `src/iyi/prelude.iyi` with nonzero ctime and ino; a test with `{{ run }}` writes none; rg9 gives equal `local.build` for 140 of 140 programs with and without the flag |
+| S11-F (fast path, store) | `stale/store.cr`, `spec/compiler/stale/store_spec.cr`, `snapshot_spec.cr` if it calls `record_path` | Per-test `records/<hex D(test)>/` layout; `Store#candidates(test, target, imported:)`; old `records/<ab>` directories ignored and pruned | Changing receipt bytes or `FORMAT_VERSION` | Specs green; `bench/stale_store_concurrency.sh` prints its PASSED line for 2000 records |
+| S11-C (parallel runner) | `stale/runner.cr`, `command/test.cr`, `stale/profile.cr` | `TestPool.run` shared with plain runs; per-test `check_one`; ordered output; `-p` for the stale-runner options; build children in process groups; interrupt ends them | Runner-owned threads or worker processes | Rows 57 and 58 pass; rows 1-50 green at the default `-p` |
+| S11-B (fast path) | new `stale/fast_record.cr`, `stale/runner.cr`, `stale/store.cr`, `stale/toolchain.cr`, `spec/compiler/stale/fast_record_spec.cr` | Fast-path record in `fast/`; serve rule; `check` and `check_reason`; explain suffix; `IYI_STALE_FAST_AUDIT` and `IYI_STALE_FAST_DROP` | Serving imported receipts; memoized hashes | Rows 51-56 and 59 pass; on the basic fixture a second `--cached --json` prints `"builds": 0` |
+| S11-D (gates) | `bench/stale_tests.sh`, `bench/stale_suite_speed.py`, `bench/stale_census.sh`, `.github/workflows/iyi.yml` | Rows 51-59; `--audit` and `--expect-faster`; census audit of the cached pass; CI audit step in `stale-callpath` | Timing claims beyond `--expect-faster` | Written from the contracts; run after S11-B |
+| S11-E (documents) | `STALE_TESTS_DESIGN.md`, `SPEC.md`, `README.md`, `CHANGELOG.md` | This revision: D3 amended, D20 and D21 added, the fast path and parallel runner in §§6-14 | New numbers not measured | Each MEASUREMENT PENDING line filled by the integrator; no other number added |
+
+S7 is removed: a macro `run` program output reaches the signature as expanded code.
+
+Out of scope overall: per-case (`test "name"`) reuse, classifying Crystal library, caching failures, non-host targets, remote cache service, migrating bench drivers to `iyi test`, changing up-to-date check behavior, default-on reuse, adversarial tests, LSP, skipping the type check when a recorded input changed, reuse of one test's receipts by another, hashing libraries the linker finds by search path.
+
+## 12. Acceptance and falsification
+
+Automated in `bench/stale_tests.sh` unless marked CI:
+1. Nothing changed, fresh state, snapshot imported: every receipt hits; each test is parsed and type-checked and nothing past semantic analysis runs: no codegen, object file, link or test process.
+2. Body edit in a reached def of an imported module reruns the tests that reach it, with `--explain` naming its file; tests that do not reach it hit.
+3. New file at an import candidate path that the compiler now loads instead: reruns when reached code differs, with the explanation naming the new file.
+4. New file matched by a `require` glob reruns only when it changes reached code; otherwise hits. New entry in a run-listed directory reruns; unrelated directory hits. Run-time listings preserve returned order.
+5. Env branch: `MODE=a` reads `a.txt`. Changing `b.txt` hits; changing `a.txt` reruns; setting `MODE=b` reruns and records second receipt; restoring `MODE=a` hits from first receipt.
+6. Unset variable set to `""` reruns. Changing outer variable written by test before read hits. Enumeration (`env_all`) plus added variable reruns. Enumeration plus changed variable value reruns.
+7. `IYI_OPTS=--release` reruns; adding `--json` or `--explain` hits.
+8. Edit to a reached prelude or std def reruns every test reaching it; an edit to an unreached def in the same file hits.
+9. Compiler rebuilt from changed sources misses everywhere. Compiler rebuilt from identical sources hits once RG1 is green.
+10. Clock, entropy, sleep, socket, subprocess, signal handler and GC pause accessor each cause test to run, naming def. Accessor returning core count (`IyiWorkers.resolved`) runs with `not reusable`.
+11. Temp file under scratch directory (`TMPDIR`/`TEMP`/`TMP`) stays reusable; existence, size, `dir_list` and content under scratch stay internal. Reads of self-written files stay internal. Writes outside scratch, or through descriptors outside runner-inherited `stdio` or a recorded open, run with `shared-write`.
+12. Program `asm`, `lib` binding, integer-to-pointer conversion, or internal def call runs with `FILE:LINE`.
+13. Failing test never served from receipt. Fixed test reruns, passes and records.
+14. Revocation: `--fresh` run forced to fail through input hidden by patched runtime contradicts receipt; next `--cached` run reruns (matching by state). Local contradiction blocks a same-state pass imported later.
+15. Non-pass exit (failure, signal, timeout kill, build failure after the signature exists) writes no receipt and revokes every receipt of that test that validates now, regardless of trace state. A type error writes nothing and revokes nothing.
+16. Interrupt sent to `iyi test` itself: finished tests keep receipts; nothing revoked; active test writes nothing.
+17. Closed trace channel or missing END: trace incomplete, no receipt written.
+18. Filtered runs and `--affected` touch only selected tests; excluded tests reported skipped, never passed.
+19. Union of `--shard k/3` snapshots from same producer run equals unsharded snapshot. Mixing shards across producer runs or duplicate tests across shards is rejected.
+20. Snapshot with wrong namespace, target, version, duplicate test, or path outside roots is refused. Accidental export outside CI producer attestation flag is refused.
+21. Corrupt or unreadable receipt becomes a miss and is replaced under lock with a persistent contradiction marker for its test; a later `--fresh` executed pass with complete trace clears it. Masks store observations and are never deleted as corrupt. Concurrent runs leave no torn receipts.
+22. Crystal mode via `IYI_OPTS="--crystal"` always runs with reason. `./bin/crystal spec` output unchanged.
+23. Workflow check: pull request stale jobs upload nothing across runs and persist no state; export step environment contains no secrets or `github.token`.
+24. (CI, amended) `stale-fresh` requires producer receipts with matching profiles to hit and those with differing profiles to be refused. Shadow audit checks verdict, build key and ordered observations for hits and refusals, with refusals attributable only to runner-parity components. Its own receipts must hit after the local store is emptied. Cross-machine hits are exercised only for matching profiles. Git-diff self-check catches validation bugs on tracked files read at run time. A planted hidden read outside the published corpus, with a changed file between producer and audit, fails shadow audit.
+25. `Dir.cd` into subdirectory followed by relative file read resolves and records absolute path at open; modifying target file reruns test.
+26. A source edited while its test builds: the receipt carries the signature of what the compiler parsed; the next check hits only if the current content gives that signature.
+27. Newest master push run without target snapshot imports nothing; disagreeing audit run publishes empty snapshot turning consumption off.
+28. Runner clears dynamic loader variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`), so changed launcher loader variable hits; changed `getrlimit` value or cgroup memory limit misses.
+29. Reading, checking existence or size, or writing through a symlink in scratch pointing outside scratch resolves to target file outside scratch (reads and stat checks observed, writes taint `shared-write`). Creating a symlink in scratch targeting outside scratch taints `shared-write`.
+30. Creating a hard link to a file outside scratch taints the run with `shared-write`.
+31. Returning a timestamp of a scratch or self-written file taints the run with `clock`.
+32. Local `master=` file lacking a valid `.provenance.json` sidecar, with a mismatched SHA-256, or with forged run metadata is refused.
+33. Edit to an unreached def of an imported module hits, including one that moves reached defs below it to other lines.
+34. New overload in any loaded file that captures a reached call reruns.
+35. Macro `read_file` or `env` input change reruns when the expansion is reached and hits when unreached. A macro `run` printing the clock misses on every check.
+36. Added instance variable, changed instance variable type, or edited instance variable initializer of a reached type reruns.
+37. Unrelated new type in a loaded file hits. New subclass of a reached virtual type reruns.
+38. Comment added above a call leaving magic-constant defaults (`__LINE__`) to codegen reruns (call-site location argument changed); comment below file's last location-dependent construct hits.
+39. Type error in an unreached def fails the check as `does not build` and is never served from a receipt.
+40. Rebuilt `.iyimod` whose object code changed reruns tests linking it; one rebuilt to identical bytes hits.
+41. Changed `pkg-config` answer or `CHILD_ENV` value reruns; `ldflags` containing a backtick or `$` is refused; changed `locator` or `display` compiler variable hits.
+42. A walk constructed with one edge kind disabled (internal constructor argument; no CLI or environment surface) makes the recording build refuse with `reach mismatch` for a program using that edge; one in-process spec per edge kind.
+43. Two checks of one tree in separate processes, and on the `stale-fresh` runner, give one signature.
+44. A stale build under a refused mode (`IYI_OPTS="--emit llvm-ir"`) runs with a not-reusable reason. `--no-cleanup` is refused too, but only tooling verbs accept it, since an uncleaned program cannot be generated; its refusal is proven in-process.
+45. Def returning `__LINE__` default (`def here(line = __LINE__) = line`): moving a call to `here()` to another line reruns.
+46. Failable downcast: moving the cast to another line reruns; `__iyi_raise_cast_failed` in prelude prevents codegen-time typing.
+47. Two processes checking a def taking `Int32 | String` compute identical signatures under canonical union sorting.
+48. Linked library or link flag using a backtick, `$`, `*`, `?`, `[` or `~` is refused with a not-reusable reason; link command uses exact flags vector computed during check.
+49. A test that writes and reads back a file in its own scratch directory (`TMPDIR`) hits on its second run; editing the input it copied there reruns. (Added in the build: the runtime had lost the scratch path before the program ran.)
+50. A reached macro `run` helper built with cold and warm compiler caches gives the same build key; unchanged input hits after either build.
+51. Unchanged after a recording run, audit off: `builds` is 0 and both tests report `check: "inputs"`, with the top-level `cached` count at 2. Mutation: delete `tests-v1/fast`: `builds` is 2 and `check_reason` is "no record of the inputs"; the next run's `builds` is 0 again.
+52. A reached `used()` edited to the same length with its mtime restored (`os.utime(ns=...)`): `reached_test` reports `check: "compiler"` with `check_reason` naming `lib/util.iyi`, and reruns; `other_test` hits. Mutation: `IYI_STALE_FAST_DROP=ctime` exits 1 and stdout holds "fast path served".
+53. A reached def holds `{{ env("STALE_FAST_X") }}`: changing the value gives `check: "compiler"` and a rerun. Mutation: `IYI_STALE_FAST_DROP=env` exits 1.
+54. Compiler swap: `cp -p` the native compiler, as row 28 does, and run the copy: `check: "compiler"`, with the reason naming the compiler; the copy's next run is `inputs`. Mutation: `IYI_STALE_FAST_DROP=compiler`: the copy's first run is `inputs`, which shows the assertion is load-bearing; the audit agrees because the bytes are equal. A byte-different compiler is covered by `prune_outdated_toolchains`, which drops its receipts.
+55. Row 50's fixture on its second run, with a macro `run` in the reached set: `check: "compiler"` and `check_reason` "a macro ran a program". Rows 26 and 35 pass unchanged.
+56. Refresh with audit off: after a leaf edit's rerun, the next unchanged run has `builds` 0.
+57. Parallel equivalence: `--cached --json` with `-p 1` and `-p 4` over the basic, row 4 and row 5 fixtures give equal JSON after dropping `seconds`; `--fresh --export-index` with `IYI_CI_PRODUCER=1` at `-p 1` and `-p 4` gives equal snapshots after sorting `records`.
+58. Parallel interrupt: four tests that sleep, `--fresh -p 4`, then `kill -INT` the runner: exit 130, no process of the fixture survives (`pgrep -f` on a marker path), and finished tests keep their receipts.
+59. A contradicted receipt that validates (row 14's fixture): `check: "compiler"`, `check_reason` "a contradicted receipt validates".
+
+Rows 51 to 59 use the basic fixture unless named.
+
+## 13. Measurements and completion
+
+Census (`bench/stale_census.sh`) per platform over C2 (`samples/iyi/*.iyi`, 28 programs) and C3 (`bench/std_*_exercise.iyi` standalone, 112 programs): full integrated 140-program corpus.
+* Records verdict, reusable or not, reason category and site.
+* Categories: requested effect, opaque program construct, refused build mode, runner (trace incomplete, racy run input), internal (unclassified runtime site, internal effect reported as reason, `ambiguous key`, `ambiguous test id`, `reach mismatch`, signature unstable between two checks).
+
+Overhead reported as measured with no thresholds and no promised speedup:
+* Wall time of `--fresh` against default mode.
+* Per-hit validation time.
+* Trace and receipt bytes per program.
+* Per-hit check time against a default-mode build and run of the same test, split as the progress tracker reports it: parse, top level, main semantic (macro `run` programs included), walk and hashing. Measured with and without a preanalysed prelude (`compiler.cr:605-617`; `iyimod.cr:7-9` reports the top-level pass at 0.99 s cold and 0.004 s preanalysed).
+* Reached elements and encoded bytes per program, and the reruns RG8 attributes to over-approximation.
+* Fast-path serves: `builds` (compiler processes started) and wall time of an unchanged suite, against plain `iyi test` and `--fresh` on the same suite.
+
+Measured by hand on darwin arm64 with an unoptimized compiler, over 1,000 generated tests (`python3 bench/stale_suite_speed.py --tests 1000`), on a machine other work was loading: the load average ran between 120 and 700 across these runs, so the seconds are weather and the ratios are the finding.
+
+| Case | Plain `iyi test` | `iyi test --cached` | Served | Compilers started |
+|---|---|---|---|---|
+| first run (`--fresh`) | 243.0 s | 639.8 s | 0 | 1,000 |
+| nothing changed | 234.0 s | 3.0 s | 1,000 | 0 |
+| one test edited | 242.0 s | 8.9 s | 999 | 1 |
+| one module edited (20 tests import it) | 276.4 s | 20.6 s | 980 | 20 |
+| a shared def no test reaches, edited | 242.2 s | 437.5 s | 1,000 | 1,000 |
+| a shared def every test reaches, edited | 153.5 s | 381.8 s | 0 | 1,000 |
+
+The cached run served exactly the tests it should in every case. Before the fast path and the parallel runner, the same suite took 117.0 s plain and 1,254.8 s under `--fresh` (load average 36 to 180), and on a second run 176.7 s and 3,526.7 s (load 70 to 400). Its cached run with nothing changed never finished: one attempt was still running after 90 minutes, and another was killed after 42 minutes, when the runner process had grown to 64 GB. A lookup then parsed every receipt of every test; what grew was not profiled. With the store per test, a runner taking all 1,000 tests through the compiler check ended in 270 s and no process of the run passed 0.9 GB.
+
+Every number above is from an unoptimized compiler (`make iyi`), which is what CI builds and not what an installed `iyi` is. On a release compiler (`make iyi release=1`), the same machine, the same 1,000 generated tests that end at once (load average 16 when it started, 360 during the run):
+
+| Case | Plain `iyi test` | `iyi test --cached` | Served | Compilers started |
+|---|---|---|---|---|
+| first run (`--fresh`) | 118.3 s | 178.1 s | 0 | 1,000 |
+| nothing changed | 87.5 s | 1.6 s | 1,000 | 0 |
+| one test edited | 85.3 s | 2.4 s | 999 | 1 |
+| one module edited (20 tests import it) | 88.5 s | 4.8 s | 980 | 20 |
+| a shared def no test reaches, edited | 81.8 s | 77.6 s | 1,000 | 1,000 |
+| a shared def every test reaches, edited | 83.4 s | 136.5 s | 0 | 1,000 |
+
+Every test passed in all twelve runs.
+
+One small test alone, warm, on a quiet machine (medians of five): a plain build and run takes 0.42 s unoptimized and 0.23 s release; a compiler check that hits takes about 0.97 s and 0.31 s. Of the release check, analysing the observed program is 0.13 s (0.06 s in a plain build), walking what the test reaches 0.006 s, and hashing it 0.09 s (0.48 s unoptimized, more than half of it the SHA-256 arithmetic itself).
+
+A cached run is faster than plain when most tests are untouched. It is slower when a file every test reads changed and the change reaches the tests, because no record can vouch for any test, each takes the compiler check, and a check costs more than building and running a small test; and on the first run. When the change reaches no test the tests are served, at 1.8 times a plain run unoptimized and level with it on a release compiler (77.6 s against 81.8 s). When it reaches every test: 2.5 times unoptimized, 1.6 times release. The first run: 2.6 and 1.5 times.
+
+Completion requires all of:
+1. Every §12 row automated and green on every enabled platform.
+2. RG1 through RG10 each green on the integrated 140-program corpus, or claim withdrawn in SPEC.md.
+3. Census with zero runner or internal reasons, and reusable programs on every enabled platform.
+4. Consumption and audit run on master with zero disagreements since enablement.
+5. SPEC.md recording census and overhead as measured.
+
+If the census shows almost all real tests always running, work is not marked complete even if condition 3 holds. The distribution goes to Jason Waldrip and the default stays off. Check cost goes to Jason Waldrip beside the census; a hit is not described as cheaper than a build until §13 measures it.
+
+## 14. Limits
+
+* Flaky tests: bounded by contradiction detection and shadow audit.
+* Deliberately adversarial test code.
+* A fast serve starts no compiler and type-checks nothing. Any other check parses, runs semantic analysis and runs macros, `run` programs included, as before, so a test whose recorded input changed takes that path.
+* Imported receipts take the compiler path: a fast serve uses only local receipts, so a CI runner that imports master's snapshot still starts a compiler for each test.
+* A verdict that depends on compiler numbering can change after an unrelated edit and stays hidden until a `--fresh` run or the audit (A2).
+* Modules read from `.iyimod` artifacts are keyed per linked object unit, not per function.
+* Libraries the linker finds by search path are identified by flags, `CHILD_ENV` and the toolchain, not by content.
+* Where codegen stops after a `NoReturn`, edits behind it rerun.
+* Build side: a fast serve also compares ctime, dev and inode. On POSIX user-space tools cannot set ctime, so writers that preserve size and mtime (`cp -p`, `tar`, `rsync -t`) cannot hide a content change from it. On Windows the change time comes from the file's `ChangeTime`, which user-mode code can set (`SetFileInformationByHandle`, MS-FSCC FileBasicInformation), so a writer that deliberately restores it can hide a same-size edit from a fast serve; tools that only set the write time (`SetFileTime`, `utimens`) still move it. Receipts are not affected. Deliberately adversarial code is out of scope (above).
+* Run side: A3's stat comparison still cannot observe content modifications when size and mtime are preserved.
+* Stamp argument: it assumes the clock moves forward and that the file system keeps ctime. A file system that reports no change time at all gets no fast-path record, so its tests take the compiler path. A clock set backwards, or a file system that reports a change time it does not keep, can leave a changed file with the stamp its record holds, so a fast serve can miss a change the compiler check would see.
+* Process limits or loader settings outside recorded profile properties.
+* Per-case reuse within a test file.
+* Non-host targets.
+* Cached failures.
+* Snapshot export is limited to CI producer context via workflow attestation flag to prevent accidental export.
+* Cross-machine hits also need identical checkout and toolchain paths, since reached code holds absolute location literals (every `assert`).
+* Cross-machine hits are expected only between runners configured alike (matching kernel release, rlimits, cgroup memory limit, and loader variables).
+* Hits across commits wait on RG1.
+* Environment mutations (`ENV.[]=`, `ENV.delete`, `__iyi_set_environ`) over-approximate by recording `env_all`, so any change to the runner's environment reruns a test that sets a variable. `ENV.[]=` and `ENV.delete` also name the variable (`__iyi_observe_env_write`), and a later read of it is the test's own value, not an input (row 6).
+* No speedup is promised for every change. A cached run is faster than plain when most tests are untouched, and slower when a file every test reads changed or on the first run (§13).
+* Chaos mode: chaos options cannot be combined with stale-runner options; chaos runs execute without receipt reuse.
+* Windows: the fast serve trusts a file stamp only on a local NTFS volume on Windows 10 build 17763 or later, where a change time is updated while a writer still has the file open; the volume is probed for every handle. On any other volume (ReFS including Dev Drive, FAT, exFAT, SMB), on an older build, or when the file id does not fit in 64 bits, the stamp carries no change time, the recorder refuses, and the test takes the compiler path with a named reason. Windows file ids and volume serials are written as decimal strings in record format version 2, which POSIX uses too. RG3 reports zero unclassified runtime sites for x86_64-windows-msvc on the same 140-program corpus. Windows reaches console interrupts through a console control handler and job objects that kill their tree when the runner dies; it has no signals, `getrlimit`, `umask` or cgroups, so the receipt profile records the kernel as major.minor.build and the job object's memory, process and time limits instead. Windows toolchain identity includes `LLVM-C.dll`. `/Brepro` is passed to MSVC `link.exe` and `lld-link`; whether it makes Windows links byte-identical is settled by RG1 and RG7 on the Windows runner, not claimed here.
+* Windows paths: the runtime resolves only a drive-absolute path (`C:\...` or `C:/...`) as a recorded file observation. Any other spelling, a relative path included, is resolved by `__iyi_wide_full_unproven`, which is classified `host_state`, so a test that reads a relative path on Windows is not reusable until that resolution is proven for every spelling (a per-drive current directory, UNC, reserved device names). A device path that cannot be bound, `NUL` among them, is refused the same way: on the Windows runner the binding of `NUL` was refused with "cannot resolve path binding", and `spec/compiler/stale/trace_spec.cr` accepts either outcome for it, so it does not prove `NUL` is recorded. `Dir.tempdir` and `File.tempfile` read `TMPDIR`, `TEMP` and `TMP` as observed environment reads and fall back to Windows' own answer (`GetTempPathW`) as a `host_state` read only when all three are unset.

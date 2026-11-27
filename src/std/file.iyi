@@ -269,6 +269,7 @@ import std/path::{Path}
     AT_FDCWD           =  -100_i64
     AT_SYMLINK_NOFOLLOW = 0x100_i64
 
+    @[Effect(:primitive)]
     def self.sys(number : Int64, a : Int64, b : Int64, c : Int64, d : Int64 = 0_i64, e : Int64 = 0_i64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -509,13 +510,13 @@ class ::File
     # than printing the placeholder. Windows ends these sentences with CRLF
     # and sometimes a trailing space, which is a line break in the middle of
     # a panic, so the tail comes off. `std/dir`'s refusals say it too.
-    def self.win_error : String
+    @[Effect(:host_state)]; def self.win_error : String
       win_error(Std::File::LibKernel32.GetLastError)
     end
 
     # The sentence for *code*, which `IOError#reason` keeps beside the
     # number it was answered.
-    def self.win_error(code : Int32) : String
+    @[Effect(:host_state)]; def self.win_error(code : Int32) : String
       room = 1024
       wide = Pointer(UInt16).malloc(room.to_u64)
       written = Std::File::LibKernel32.FormatMessageW(0x1200, Pointer(Void).new(0_u64), code, 0,
@@ -711,7 +712,11 @@ class ::File
     getter permissions : Permissions
     getter type : Type
     getter flags : Flags
-    getter modification_time : Int64
+    @[Effect(:clock)]
+    def modification_time : Int64
+      @modification_time
+    end
+
     getter owner_id : String
     getter group_id : String
     getter dev : Int64
@@ -764,6 +769,7 @@ class ::File
     end
   end
 
+  @[Effect(:file_stat)]
   def self.info?(path : String | Path, follow_symlinks : Bool = true) : Info?
     p = path.to_s
     {% if flag?(:darwin) %}
@@ -991,6 +997,7 @@ class ::File
     # panicked. A path another process holds without sharing refuses every
     # open (ERROR_SHARING_VIOLATION, 32), which says nothing about the
     # permission, and is answered from the attributes as before.
+    @[Effect(:file_stat)]
     private def self.win_opens?(path : String, access : Int32) : Bool?
       wide = __iyi_wide_path(sys_path(path))
       return false if wide.address == 0_u64
@@ -1020,6 +1027,7 @@ class ::File
     end
   {% end %}
 
+  @[Effect(:file_stat)]
   def self.readable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 4) == 0
@@ -1034,6 +1042,7 @@ class ::File
     {% end %}
   end
 
+  @[Effect(:file_stat)]
   def self.writable?(path : String | Path) : Bool
     {% if flag?(:darwin) || flag?(:linux) %}
       Std::File::LibC.access(sys_path(path.to_s), 2) == 0
@@ -1102,6 +1111,7 @@ class ::File
   # `Int64` second and an `Int32` microsecond padded to eight, so four
   # `Int64` slots are the two structures and the odd slots are the
   # microseconds, zero.
+  @[Effect(:file_write, :touch)]
   def self.touch(path : String | Path, time : Int64 = 0_i64) : Nil
     p = path.to_s
     {% if flag?(:win32) %}
@@ -1181,7 +1191,7 @@ class ::File
     # refusal stands. The name is the full path, `\\?\` form past MAX_PATH:
     # FILE_RENAME_INFO is { UInt32 flags, 4 bytes padding, HANDLE root,
     # UInt32 length in bytes, UInt16 name[] } on x64.
-    private def self.rename_posix(old_wide : UInt16*, new_path : String) : Bool
+    @[Effect(:file_write, :rename)]; private def self.rename_posix(old_path : String, new_path : String, old_wide : UInt16*) : Bool
       target = __iyi_wide_path(sys_path(expand_path(new_path)))
       return false if target.address == 0_u64
       chars = 0
@@ -1214,6 +1224,7 @@ class ::File
     end
   {% end %}
 
+  @[Effect(:file_write, :rename)]
   def self.rename(old_path : String | Path, new_path : String | Path) : Nil
     o = old_path.to_s
     n = new_path.to_s
@@ -1264,7 +1275,7 @@ class ::File
             replaced = Std::File::LibKernel32.MoveFileExW(old_wide, new_wide, 0x3_u32) != 0
             Std::File::LibKernel32.SetFileAttributesW(new_wide, attributes) unless replaced
           end
-          replaced = replaced || rename_posix(old_wide, n)
+          replaced = replaced || rename_posix(o, n, old_wide)
         end
         raise "Cannot rename #{o} to #{n}: #{refusal}" unless replaced
       end
@@ -1278,6 +1289,7 @@ class ::File
     # index; and a handle's final path is the name it was opened by, in
     # the case the directory keeps, so two links answer two paths where a
     # name and its spelling in another case answer one.
+    @[Effect(:memory)]
     private def self.two_links?(old_wide : UInt16*, new_wide : UInt16*) : Bool
       nothing = Pointer(Void).new(0_u64)
       one = Std::File::LibKernel32.CreateFileW(old_wide, 0, 0x7, nothing, 3, 0x2200000, nothing)
@@ -1312,6 +1324,7 @@ class ::File
     end
   {% end %}
 
+  @[Effect(:file_write, :link)]
   def self.link(old_path : String | Path, new_path : String | Path) : Nil
     o = old_path.to_s
     n = new_path.to_s
@@ -1331,6 +1344,7 @@ class ::File
     {% end %}
   end
 
+  @[Effect(:file_write, :symlink)]
   def self.symlink(old_path : String | Path, new_path : String | Path) : Nil
     o = old_path.to_s
     n = new_path.to_s
@@ -1378,6 +1392,7 @@ class ::File
     {% end %}
   end
 
+  @[Effect(:file_read)]
   def self.readlink(path : String | Path) : String
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -1452,6 +1467,7 @@ class ::File
     {% end %}
   end
 
+  @[Effect(:file_stat)]
   def self.real_path(path : String | Path) : String
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -1516,6 +1532,16 @@ class ::File
   end
 
   def self.chmod(path : String | Path, mode : Int32) : Nil
+    record_chmod_attempt(path)
+    chmod_after_attempt(path, mode)
+  end
+
+  # Effect wrappers record on return. The attempt must be recorded before
+  # chmod can fail and its caller can catch the panic.
+  @[Effect(:file_write, :chmod)]; private def self.record_chmod_attempt(path : String | Path) : Nil
+  end
+
+  @[Effect(:file_write, :chmod)]; private def self.chmod_after_attempt(path : String | Path, mode : Int32) : Nil
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
       if Std::File::LibC.chmod(sys_path(p), mode) != 0
@@ -1552,6 +1578,7 @@ class ::File
     {% end %}
   end
 
+  @[Effect(:file_write, :chmod)]
   def self.chown(path : String | Path, uid : Int32, gid : Int32) : Nil
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -1567,6 +1594,7 @@ class ::File
     # looks portable and is not.
   end
 
+  @[Effect(:file_write, :create)]
   def self.truncate(path : String | Path, size : Int64 = 0_i64) : Nil
     p = path.to_s
     {% if flag?(:darwin) || flag?(:linux) %}
@@ -1941,6 +1969,19 @@ class ::File
 
   @@temp_counter = 0_u64
 
+  {% if flag?(:win32) %}
+    # Windows' own answer, asked as `Dir.tempdir` asks it, and only when the
+    # environment names none: TMPDIR, TEMP and TMP are observed reads, this is
+    # a host-state one. Without it the file was made in `C:\Windows\Temp`
+    # while `Dir.tempdir` answered the user's own directory.
+    @[Effect(:host_state)]; private def self.windows_temp_path : String
+      wide = Pointer(UInt16).malloc(4096_u64)
+      chars = Std::File::LibKernel32.GetTempPathW(4096, wide)
+      size = chars > 0 && chars <= 4096 ? __iyi_utf8_size_from_wide(wide) : 0
+      size > 1 ? String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) } : "C:\\Windows\\Temp"
+    end
+  {% end %}
+
   # A new, empty file in the temporary directory, and its path.
   #
   # Made with an exclusive create - `O_CREAT | O_EXCL`, `CREATE_NEW` on
@@ -1955,15 +1996,7 @@ class ::File
   # user, and there the create's refusal is the guarantee and the name
   # needs only to be new. The file is the owner's alone, mode 0600.
   def self.tempfile(prefix : String = "tmp", suffix : String = "") : String
-    # Where the environment says, and the platform's own default only when
-    # it says nothing — the same order `Dir.tempdir` reads, because the two
-    # answering different directories is how a program writes a temporary
-    # file somewhere it cannot later find it. On Windows the hardcoded
-    # fallback was `C:\Windows\Temp`, which is a system directory an
-    # ordinary account cannot write to: measured, this answered
-    # `C:\Windows\Temp/wperm_0_1001` — a mixed separator and a path that
-    # only worked because the session was elevated — while `TEMP` named the
-    # per-user directory all along.
+    # The same observed environment reads and precedence as Dir.tempdir.
     tmpdir = ""
     named = Program.env("TMPDIR")
     tmpdir = named if named && !named.empty?
@@ -1977,13 +2010,7 @@ class ::File
     end
     if tmpdir.empty?
       {% if flag?(:win32) %}
-        # Windows' own answer, as `Dir.tempdir` asks it. This alone kept the
-        # literal: with TMPDIR, TEMP and TMP unset, the file was made in
-        # `C:\Windows\Temp` while `Dir.tempdir` answered `C:\Users\dogru`.
-        wide = Pointer(UInt16).malloc(4096_u64)
-        chars = Std::File::LibKernel32.GetTempPathW(4096, wide)
-        size = chars > 0 && chars <= 4096 ? __iyi_utf8_size_from_wide(wide) : 0
-        tmpdir = size > 1 ? String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) } : "C:\\Windows\\Temp"
+        tmpdir = windows_temp_path
       {% else %}
         tmpdir = "/tmp"
       {% end %}
@@ -2006,6 +2033,7 @@ class ::File
   # Sixteen hex digits nobody could have guessed: the kernel's randomness
   # where a call reaches it without another library, the clock and a
   # counter where the create alone is the guarantee.
+  @[Effect(:temp_name)]
   private def self.temp_token : String
     word = 0_u64
     {% if flag?(:linux) %}
@@ -2035,6 +2063,7 @@ class ::File
 
   # True when the file was made here and now; false when something was
   # already at the path, whatever it is; a panic for any other refusal.
+  @[Effect(:file_write, :create)]
   private def self.create_new(path : String) : Bool
     {% if flag?(:linux) %}
       # O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode 0600. EEXIST is 17.
@@ -2186,6 +2215,7 @@ class ::IyiIO
   end
 
   # Gives the lock back; one this file does not hold is no error.
+  @[Effect(:process)]
   def flock_unlock : Nil
     raise "cannot unlock a closed IO" if closed?
     {% if flag?(:win32) %}
@@ -2215,6 +2245,7 @@ class ::IyiIO
 
   # Whether the lock was taken; contention is false, any other failure a
   # panic naming it.
+  @[Effect(:process)]
   private def flock_try(exclusive : Bool) : Bool
     raise "cannot lock a closed IO" if closed?
     {% if flag?(:win32) %}
@@ -2255,6 +2286,7 @@ class ::IyiIO
   # no descriptor - a `Memory` - is -1, which Windows' `to_u64` of it
   # panicked "arithmetic overflow" on; it is EBADF everywhere, as Linux's
   # kernel answers it.
+  @[Effect(:stdio)]
   protected def self.lseek(fd : Int64, offset : Int64, whence : Int32) : Int64
     return -9_i64 if fd < 0_i64
     {% if flag?(:win32) %}
@@ -2300,7 +2332,7 @@ pub struct IOError
     IOError.new(operation, path, code_of(result))
   end
 
-  private def self.code_of(result : Int64) : Int32
+  @[Effect(:host_state)]; private def self.code_of(result : Int64) : Int32
     return 0 if result >= 0_i64
     {% if flag?(:win32) %}
       Std::File::LibKernel32.GetLastError

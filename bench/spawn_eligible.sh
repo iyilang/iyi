@@ -1009,10 +1009,8 @@ echo "  owed-start control: the second spawn owed two starts, the spawner paid t
 # window, so the push starts one, and the run reports 2 of the pool's 4
 # workers on its one run.
 step "a spawn landing between a worker's empty look and its idle count starts no second worker"
-mkdir -p widened/iyi
-cp "$REPO"/src/iyi/*.iyi widened/iyi/
-awk '/^  def self\.work : Nil$/ { inwork = 1; workdefs++ }
-  /^  def self\.start : Nil$/ { instart = 1; startdefs++ }
+awk_widen='/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inwork = 1; workdefs++ }
+  /^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]start : Nil$/ { instart = 1; startdefs++ }
   /^    private def pooled\(/ { inpooled = 1; pooleddefs++ }
   inwork && /^      while true$/ { print "      widened = slot != 0_i64"; a++ }
   inwork && /^          IyiScheduler\.idle_worker\(st\)$/ {
@@ -1027,8 +1025,32 @@ awk '/^  def self\.work : Nil$/ { inwork = 1; workdefs++ }
   inwork && /^  end$/ { inwork = 0 }
   instart && /^  end$/ { instart = 0 }
   inpooled && /^    end$/ { inpooled = 0 }
-  { print } END { if (workdefs != 1 || startdefs != 1 || pooleddefs != 1 || a != 1 || b != 1 || c != 1 || d != 1) exit 3 }' "$REPO/src/iyi/concurrency.iyi" > widened/iyi/concurrency.iyi ||
+  { print } END { if (workdefs != 1 || startdefs != 1 || pooleddefs != 1 || a != 1 || b != 1 || c != 1 || d != 1) exit 3 }'
+
+for check in missing_start dup_start missing_while dup_while missing_idle dup_idle; do
+  case "$check" in
+    missing_start) awk '!/^[[:space:]]*start_monitor$/' "$REPO/src/iyi/concurrency.iyi" > "disposable-$check.iyi" ;;
+    dup_start)     awk '/^[[:space:]]*start_monitor$/ { print; print; next } 1' "$REPO/src/iyi/concurrency.iyi" > "disposable-$check.iyi" ;;
+    missing_while) awk '/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inw=1 } inw && /^      while true$/ { inw=0; next } 1' "$REPO/src/iyi/concurrency.iyi" > "disposable-$check.iyi" ;;
+    dup_while)     awk '/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inw=1 } inw && /^      while true$/ { inw=0; print; print; next } 1' "$REPO/src/iyi/concurrency.iyi" > "disposable-$check.iyi" ;;
+    missing_idle)  awk '/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inw=1 } inw && /IyiScheduler\.idle_worker\(st\)/ { inw=0; next } 1' "$REPO/src/iyi/concurrency.iyi" > "disposable-$check.iyi" ;;
+    dup_idle)      awk '/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inw=1 } inw && /IyiScheduler\.idle_worker\(st\)/ { inw=0; print; print; next } 1' "$REPO/src/iyi/concurrency.iyi" > "disposable-$check.iyi" ;;
+  esac
+  code=0
+  awk "$awk_widen" "disposable-$check.iyi" > /dev/null 2>&1 || code=$?
+  rm -f "disposable-$check.iyi"
+  if [ "$code" -ne 3 ]; then
+    echo "disposable check $check failed: expected exit 3, got $code"; exit 1
+  fi
+done
+
+mkdir -p widened/iyi
+cp "$REPO"/src/iyi/*.iyi widened/iyi/
+awk "$awk_widen" "$REPO/src/iyi/concurrency.iyi" > widened/iyi/concurrency.iyi ||
   { echo "the worker's look, the pool's start and the spawn's push this step holds are not in the runtime any more"; exit 1; }
+if cmp -s widened/iyi/concurrency.iyi "$REPO/src/iyi/concurrency.iyi"; then
+  echo "the worker's look, the pool's start and the spawn's push this step holds are not in the runtime any more"; exit 1
+fi
 forced_words widened/iyi/concurrency.iyi
 if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_eligible.iyi" -o widened-run > build-widened.log 2>&1; then
   echo "the widened copy failed to build:"; tail -20 build-widened.log; exit 1
@@ -1041,13 +1063,35 @@ fi
 echo "  the window held open, and the push after it: $(grep -m1 '^grows: one' widened.txt | sed 's/,.*//')"
 
 step "failure proof: the token given back before the idle count"
+awk_early='/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inwork = 1; defs++ }
+  inwork && /^        else$/ { inempty = 1 }
+  inwork && inempty && /^          IyiScheduler\.release_unit\(st\)$/ {
+    print "          stop_spinning(st, false)"
+    found++ }
+  inwork && inempty && /^        end$/ { inempty = 0 }
+  inwork && /^  end$/ { inwork = 0; inempty = 0 }
+  { print } END { if (defs != 1 || found != 1) exit 3 }'
+
+for check in missing_release dup_release; do
+  case "$check" in
+    missing_release) awk '/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inw=1 } inw && /^        else$/ { ine=1 } ine && /IyiScheduler\.release_unit\(st\)/ { ine=0; next } 1' widened/iyi/concurrency.iyi > "disposable-$check.iyi" ;;
+    dup_release)     awk '/^  (@\[Effect\(:scheduler\)\];[[:space:]]*)?def self[.]work : Nil$/ { inw=1 } inw && /^        else$/ { ine=1 } ine && /IyiScheduler\.release_unit\(st\)/ { ine=0; print; print; next } 1' widened/iyi/concurrency.iyi > "disposable-$check.iyi" ;;
+  esac
+  code=0
+  awk "$awk_early" "disposable-$check.iyi" > /dev/null 2>&1 || code=$?
+  rm -f "disposable-$check.iyi"
+  if [ "$code" -ne 3 ]; then
+    echo "disposable check $check failed: expected exit 3, got $code"; exit 1
+  fi
+done
+
 mkdir -p early/iyi
 cp "$REPO"/src/iyi/*.iyi early/iyi/
-awk '/^  def self\.work : Nil$/ { inside = 1; defs++ }
-  inside && /^          IyiScheduler\.release_unit\(st\)$/ { print "          stop_spinning(st, false)"; found++ }
-  inside && /^  end$/ { inside = 0 }
-  { print } END { if (defs != 1 || found != 1) exit 3 }' widened/iyi/concurrency.iyi > early/iyi/concurrency.iyi ||
+awk "$awk_early" widened/iyi/concurrency.iyi > early/iyi/concurrency.iyi ||
   { echo "the worker's way to idle this proof reorders is not in the runtime any more"; exit 1; }
+if cmp -s early/iyi/concurrency.iyi widened/iyi/concurrency.iyi; then
+  echo "the worker's way to idle this proof reorders is not in the runtime any more"; exit 1
+fi
 if ! IYI_PATH="$WORK/early${PSEP}$REPO/src" "$IYI" build "$REPO/bench/spawn_eligible.iyi" -o early-run > build-early.log 2>&1; then
   echo "the broken copy early failed to build:"; tail -20 build-early.log; exit 1
 fi

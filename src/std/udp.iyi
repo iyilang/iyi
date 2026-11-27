@@ -524,39 +524,48 @@ pub class UdpSocket
       fun __error : Int32*
     end
 
+    @[Effect(:network)]
     def self.__sys_socket(domain : Int32 = 2) : Int32
       LibC.socket(domain, 2, 0)
     end
 
+    @[Effect(:network)]
     def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), len : UInt32) : Int32
       LibC.bind(fd, addr.as(Void*), len)
     end
 
+    @[Effect(:network)]
     def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), len : UInt32) : Int32
       LibC.connect(fd, addr.as(Void*), len)
     end
 
+    @[Effect(:network)]
     def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
       LibC.send(fd, buf.as(Void*), len, 0)
     end
 
+    @[Effect(:network)]
     def self.__sys_sendto(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32, addr : Pointer(UInt8), addrlen : UInt32) : Int64
       LibC.sendto(fd, buf.as(Void*), len, flags, addr.as(Void*), addrlen)
     end
 
+    @[Effect(:network)]
     def self.__sys_recvfrom(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int64
       LibC.recvfrom(fd, buf.as(Void*), len, flags, addr.as(Void*), addrlen)
     end
 
+    @[Effect(:network)]
     def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
       LibC.getsockname(fd, addr.as(Void*), addrlen)
     end
 
+    @[Effect(:network)]
     def self.__sys_set_buffer_size(fd : Int32, level : Int32, optname : Int32, size : Int32) : Int32
       val = size
       LibC.setsockopt(fd, level, optname, pointerof(val).as(Void*), 4_u32)
     end
 
+    @[Effect(:network)]
     def self.__sys_get_buffer_size(fd : Int32, level : Int32, optname : Int32) : Int32
       val = 0_i32
       len = 4_u32
@@ -565,6 +574,7 @@ pub class UdpSocket
       val
     end
 
+    @[Effect(:network)]
     def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : ::Bool
       kq = LibC.kqueue
       return false if kq < 0
@@ -603,10 +613,12 @@ pub class UdpSocket
       nev > 0
     end
 
+    @[Effect(:network)]
     def self.__is_eagain(res : Int64) : ::Bool
       res < 0_i64 && LibC.__error.value == 35
     end
 
+    @[Effect(:network)]
     def self.__is_eintr(res : Int64) : ::Bool
       res < 0_i64 && LibC.__error.value == 4
     end
@@ -626,6 +638,7 @@ pub class UdpSocket
     end
 
     # ECONNREFUSED (61): see the Linux arm.
+    @[Effect(:network)]
     def self.__is_refused(res : Int64) : ::Bool
       res < 0_i64 && LibC.__error.value == 61
     end
@@ -667,6 +680,7 @@ pub class UdpSocket
       EPOLL_DATA_OFFSET =   8_u64
     {% end %}
 
+    @[Effect(:primitive)]
     def self.__sys3(number : Int64, a : Int64, b : Int64, c : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -683,6 +697,7 @@ pub class UdpSocket
       result
     end
 
+    @[Effect(:primitive)]
     def self.__sys5(number : Int64, a : Int64, b : Int64, c : Int64, d : Int64, e : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -699,6 +714,7 @@ pub class UdpSocket
       result
     end
 
+    @[Effect(:primitive)]
     def self.__sys6(number : Int64, a : Int64, b : Int64, c : Int64, d : Int64, e : Int64, f : Int64) : Int64
       result = uninitialized Int64
       {% if flag?(:x86_64) %}
@@ -897,11 +913,11 @@ pub class UdpSocket
     # Winsock's error number, negated, which is the shape the POSIX arms
     # answer the kernel's errno in; the two predicates at the bottom are the
     # only things that read which number it was.
-    def self.__sys_error : Int64
+    @[Effect(:network)]; def self.__sys_error : Int64
       -(LibWs2_32.WSAGetLastError.to_i64)
     end
 
-    def self.__sys_socket(domain : Int32 = 2) : Int32
+    @[Effect(:network)]; def self.__sys_socket(domain : Int32 = 2) : Int32
       IyiSocket.__sys_winsock
       s = LibWs2_32.socket(domain, SOCK_DGRAM, IPPROTO_UDP)
       return -1 if s == INVALID_SOCKET
@@ -925,26 +941,26 @@ pub class UdpSocket
       IyiSocket.__sys_made(s)
     end
 
-    def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), len : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_bind(fd : Int32, addr : Pointer(UInt8), len : Int32) : Int32
       return __sys_error.to_i32 if LibWs2_32.bind(__sys_handle(fd), addr.as(Void*), len) != 0
       0
     end
 
     # A datagram socket's `connect` only records the peer, so there is no
     # handshake to wait for and nothing to post.
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), len : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), len : Int32) : Int32
       return __sys_error.to_i32 if LibWs2_32.connect(__sys_handle(fd), addr.as(Void*), len) != 0
       0
     end
 
-    def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
+    @[Effect(:network)]; def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
       n = LibWs2_32.send(__sys_handle(fd), buf.as(Void*), len.to_i32, 0)
       return n.to_i64 if n >= 0
       __sys_error
     end
 
-    def self.__sys_sendto(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32,
-                          addr : Pointer(UInt8), addrlen : Int32) : Int64
+    @[Effect(:network)]; def self.__sys_sendto(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32,
+                                               addr : Pointer(UInt8), addrlen : Int32) : Int64
       n = LibWs2_32.sendto(__sys_handle(fd), buf.as(Void*), len.to_i32, flags, addr.as(Void*), addrlen)
       return n.to_i64 if n >= 0
       __sys_error
@@ -952,8 +968,8 @@ pub class UdpSocket
 
     # Winsock's address length is an `int*` where POSIX has a `socklen_t*`:
     # the same width and the same bytes, so the callers keep one signature.
-    def self.__sys_recvfrom(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32,
-                            addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int64
+    @[Effect(:network)]; def self.__sys_recvfrom(fd : Int32, buf : Pointer(UInt8), len : UInt64, flags : Int32,
+                                                 addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int64
       n = LibWs2_32.recvfrom(__sys_handle(fd), buf.as(Void*), len.to_i32, flags, addr.as(Void*),
         addrlen.as(Pointer(Int32)))
       return n.to_i64 if n >= 0
@@ -965,8 +981,8 @@ pub class UdpSocket
     # buffer descriptor and the flags stay on this frame for the whole
     # operation, and the address and its length are the caller's, which
     # `receive_from` reads after this returns.
-    def self.__sys_recvfrom_posted(fd : Int32, buf : Pointer(UInt8), capacity : Int32,
-                                   addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32 | Cancelled
+    @[Effect(:network)]; def self.__sys_recvfrom_posted(fd : Int32, buf : Pointer(UInt8), capacity : Int32,
+                                                        addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32 | Cancelled
       # A cancelled task must not post: nothing would wake it but the
       # completion, and a datagram nobody sends never produces one.
       return Cancelled.new if IyiScheduler.current.cancelled
@@ -1016,7 +1032,7 @@ pub class UdpSocket
     # the completion port's byte count cannot tell a failure from a datagram
     # of no bytes, which is a legal datagram. Nothing waits here, which is
     # what the 0 says.
-    def self.__sys_overlapped_result(s : UInt64, ov : Pointer(UInt8)) : Int64
+    @[Effect(:network)]; def self.__sys_overlapped_result(s : UInt64, ov : Pointer(UInt8)) : Int64
       transferred = 0_i32
       flags = 0_i32
       answered = LibWs2_32.WSAGetOverlappedResult(s, ov.as(Void*), pointerof(transferred), 0,
@@ -1047,16 +1063,16 @@ pub class UdpSocket
       __sys_overlapped_result(s, ov)
     end
 
-    def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+    @[Effect(:network)]; def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
       LibWs2_32.getsockname(__sys_handle(fd), addr.as(Void*), addrlen.as(Pointer(Int32)))
     end
 
-    def self.__sys_set_buffer_size(fd : Int32, level : Int32, optname : Int32, size : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_set_buffer_size(fd : Int32, level : Int32, optname : Int32, size : Int32) : Int32
       val = size
       LibWs2_32.setsockopt(__sys_handle(fd), level, optname, pointerof(val).as(Void*), 4)
     end
 
-    def self.__sys_get_buffer_size(fd : Int32, level : Int32, optname : Int32) : Int32
+    @[Effect(:network)]; def self.__sys_get_buffer_size(fd : Int32, level : Int32, optname : Int32) : Int32
       val = 0_i32
       len = 4
       res = LibWs2_32.getsockopt(__sys_handle(fd), level, optname, pointerof(val).as(Void*),
@@ -1067,7 +1083,7 @@ pub class UdpSocket
 
     # One descriptor, one event, and a bound on the wait, which is what the
     # epoll and kqueue arms do with theirs.
-    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : ::Bool
+    @[Effect(:network)]; def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : ::Bool
       entry = LibWs2_32::PollFd.new(fd: __sys_handle(fd), events: POLLRDNORM, revents: 0_i16)
       LibWs2_32.WSAPoll(pointerof(entry).as(Void*), 1, timeout_ms) > 0
     end
@@ -1089,7 +1105,7 @@ pub class UdpSocket
       res == -10022_i64
     end
 
-    def self.__unbound_now? : ::Bool
+    @[Effect(:network)]; def self.__unbound_now? : ::Bool
       LibWs2_32.WSAGetLastError == 10022
     end
 

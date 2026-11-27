@@ -93,7 +93,7 @@ IYI_CONFIG_BUILD_COMMIT     := $(shell git rev-parse --short HEAD)
 IYI_CONFIG_PATH             := $$ORIGIN\..\share\iyi\src;$$ORIGIN\..\share\iyi\crystal;$$ORIGIN\..\src
 IYI_CONFIG_LIBRARY_PATH     := $$ORIGIN\..\lib\iyi
 IYI_COMPILER_FLAGS          := -Dwithout_iconv$(if $(collector),,  -Dgc_none)
-export_iyi_vars   = $(eval export IYI_CONFIG_BUILD_COMMIT IYI_CONFIG_PATH IYI_CONFIG_LIBRARY_PATH)
+export_iyi_vars   = $(eval export IYI_CONFIG_BUILD_COMMIT IYI_CONFIG_BUILD_INPUTS IYI_CONFIG_PATH IYI_CONFIG_LIBRARY_PATH)
 
 # iyi: what a downloadable build of iyi is called. The Linux Makefile asks
 # `uname` for the two last words; here the platform is the makefile, so they
@@ -121,6 +121,12 @@ LLVM_CONFIG  ?=
 LLVM_VERSION := $(if $(LLVM_CONFIG),$(shell "$(LLVM_CONFIG)" --version))
 endif
 LLVM_HOST_TARGET ?= $(if $(LLVM_CONFIG),$(shell $(LLVM_CONFIG) --host-target))
+ifndef BASE_CRYSTAL_VERSION
+	BASE_CRYSTAL_VERSION := $(shell $(CRYSTAL) env CRYSTAL_VERSION 2>NUL)
+endif
+ifndef IYI_CONFIG_BUILD_INPUTS
+	IYI_CONFIG_BUILD_INPUTS := $(shell python scripts\build_inputs.py --llvm-version "$(LLVM_VERSION)" --crystal-version "$(BASE_CRYSTAL_VERSION)" --flags "$(FLAGS) $(COMPILER_FLAGS) $(IYI_COMPILER_FLAGS)" 2>NUL)
+endif
 
 LLVM_EXT_DIR = src\llvm\ext
 LLVM_EXT_OBJ = $(LLVM_EXT_DIR)\llvm_ext.obj

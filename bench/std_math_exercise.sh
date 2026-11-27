@@ -56,7 +56,7 @@ build_and_run() {
     status=1
     return 1
   fi
-  "$WORK/$name" $ORACLE >"$WORK/$name.out" 2>&1
+  "$WORK/$name" ${ORACLE:+data $ORACLE} >"$WORK/$name.out" 2>&1
   local exit_code=$?
   sed 's/^/  /' "$WORK/$name.out"
   if [ "$exit_code" -ne 0 ]; then
@@ -595,7 +595,7 @@ PY
   # read "caught" without a check having seen the break - as did four
   # whose patch did not compile. So the failure has to be the program's:
   # a check's, or a panic the broken module ran into.
-  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_math_exercise.iyi" -- $ORACLE >"$WORK/mut.out" 2>&1; then
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_math_exercise.iyi" -- ${ORACLE:+data $ORACLE} >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   elif grep -q "ASSERTION FAILED\|iyi: panic:" "$WORK/mut.out"; then

@@ -742,8 +742,8 @@ awk 'function forced() {
     print "      end"
     print ""
   }
-  /^      def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared++ }
-  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ {
+  /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared++ }
+  /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.helper_main\(seen : UInt64\) : Nil$/ {
     print "      def self.freed_collecting? : Bool"
     print "        @@collecting"
     print "      end"
@@ -818,7 +818,7 @@ printf '  exits 76 at "%s"\n' "FAIL: freed: the sweep looked at a chunk the last
 step "failure proof: a chunk the sweep has not reached, freed with no lock, is freed inside the sweep's look"
 mkdir -p unlocked/iyi
 cp "$REPO"/src/iyi/*.iyi unlocked/iyi/
-awk '/^      def self\.free\(pointer : Void\*\) : Nil$/ { in_free = 1; methods++ }
+awk '/^      (@\[Effect\([a-z_:]+\)\]; )?def self\.free\(pointer : Void\*\) : Nil$/ { in_free = 1; methods++ }
   in_free && /^            free_unswept\(arena, head, slot, table, index\)$/ { print "            list_freed(arena, head, slot, table, index)"; found++; next }
   in_free && /^      end$/ { in_free = 0 }
   { print } END { if (methods != 1 || found != 1 || in_free) exit 3 }' \
@@ -856,7 +856,7 @@ hold_moves() {
       print "      end"
       print ""
     }
-    /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++; in_helper = 1 }
+    /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++; in_helper = 1 }
     in_helper && /^            IyiHeap\.write64\(w \+ W_BLACK, drain\(w\)\)$/ {
       print "            move_limit = IyiMark.now_ns &+ 10000000000_u64"
       print "            while forced_move_hold?"
@@ -909,7 +909,7 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 'the barrier lost it' nobarrier.txt)"
 mkdir -p stray/iyi
 cp "$REPO"/src/iyi/*.iyi stray/iyi/
 make_stray_copy() {
-  awk '$0 == "      def self.barrier(address : UInt64, words : UInt64) : Nil" { in_barrier = 1; methods++ }
+  awk '$0 ~ /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.barrier\(address : UInt64, words : UInt64\) : Nil$/ { in_barrier = 1; methods++ }
     in_barrier && $0 == "        return if LibIyiGCTable.__iyi_marking == 0_u8" { guards++; next }
     in_barrier && $0 == "      end" { in_barrier = 0 }
     { print } END { if (methods != 1 || guards != 1 || in_barrier) exit 3 }' "$1" > "$2" || {
@@ -971,7 +971,7 @@ awk 'function forced() {
     print "      end"
     print ""
   }
-  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++; in_helper = 1 }
+  /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++; in_helper = 1 }
   in_helper && /^              seen = finish_concurrent$/ {
     print "              hold_limit = IyiMark.now_ns &+ 10000000000_u64"
     print "              while IyiMark.forced_hold?"
@@ -1106,7 +1106,7 @@ step "failure proof: a large block outgrown under a mark, the mark held open by 
 mkdir -p unmapped/iyi
 cp held/iyi/*.iyi unmapped/iyi/
 awk '
-  /^      def self\.free\(pointer : Void\*\) : Nil$/ { in_free = 1; methods++ }
+  /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.free\(pointer : Void\*\) : Nil$/ { in_free = 1; methods++ }
   in_free && /^            free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8 && partition_free_large\(pointer\.address - HEADER - LARGE_HEAD\)$/ { print "            free_large(pointer.address - HEADER) if partition_free_large(pointer.address - HEADER - LARGE_HEAD)"; partitioned++; next }
   in_free && /^            free_large\(pointer\.address - HEADER\) if LibIyiGCTable\.__iyi_marking == 0_u8$/ { print "            free_large(pointer.address - HEADER)"; shared++; next }
   in_free && /^      end$/ { in_free = 0 }
@@ -1145,7 +1145,7 @@ echo "  partial retention is conservative and is not judged: healthy held runs k
 step "failure proof: a small live set given the thousand-object bound goes beside the program"
 mkdir -p thousand/iyi
 cp "$REPO"/src/iyi/*.iyi thousand/iyi/
-awk '/^        def self\.start_concurrent : Bool$/ { in_start = 1; methods++ }
+awk '/^        (@\[Effect\([a-z_:]+\)\]; )?def self\.start_concurrent : Bool$/ { in_start = 1; methods++ }
   in_start && /drain_bounded\(w, IyiStat\.get\(IyiStat::KEPT\) < STW_MARK_SMALL \? STW_MARK_SMALL : STW_MARK_BOUND\)/ { found += gsub(/drain_bounded\(w, IyiStat\.get\(IyiStat::KEPT\) < STW_MARK_SMALL \? STW_MARK_SMALL : STW_MARK_BOUND\)/, "drain_bounded(w, STW_MARK_BOUND)") }
   in_start && /^        end$/ { in_start = 0 }
   { print } END { if (methods != 1 || found != 1 || in_start) exit 3 }' \
@@ -1340,7 +1340,7 @@ puts "forced: #{name} acknowledged"
 IYI
 add_forced_ack() {
   awk '/^    class IyiMark$/ { in_mark = 1; mark_classes++ }
-    in_mark && /^      def self\.helper_main\(seen : UInt64\) : Nil$/ {
+    in_mark && /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.helper_main\(seen : UInt64\) : Nil$/ {
       print "      @[UnsafeReach(\"copy-only: forced fixture acknowledgement\")]"
       print "      @@forced_ack : UInt64 = 0_u64"
       print "      def self.forced_ack : Nil"
@@ -1618,7 +1618,7 @@ add_forced_ack() {
     }
     /^    fun exit\(status : Int32\) : NoReturn$/ { print; print "    fun _exit(status : Int32) : NoReturn"; darwin++; next }
     in_mark && /^      def self\.collect_locked\(eager : Bool\) : Nil$/ { in_locked = 1; locked_methods++ }
-    in_mark && /^        def self\.start_concurrent : Bool$/ { in_start = 1; start_methods++ }
+    in_mark && /^        (@\[Effect\([a-z_:]+\)\]; )?def self\.start_concurrent : Bool$/ { in_start = 1; start_methods++ }
     in_mark && (in_locked || in_start) && /^          others = IyiThread\.stop_others$/ {
       print
       print "          {% if flag?(:stopped_force) %}"
@@ -1642,7 +1642,7 @@ add_forced_ack() {
   # routines. Every original fatal allocation or launch is replaced and
   # counted; a new fatal step makes this splice fail rather than drift.
   awk 'function twin(line) {
-      if (line == "    def self.start_helper(entry : UInt64, argument : UInt64) : Nil") { head++; return "    def self.forced_start_helper(entry : UInt64, argument : UInt64) : Nil" }
+      if (line ~ /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.start_helper\(entry : UInt64, argument : UInt64\) : Nil$/) { head++; return "    def self.forced_start_helper(entry : UInt64, argument : UInt64) : Nil" }
       if (line == "        stack = __iyi_mmap(IYI_THREAD_STACK).address") { stack++; return "        stack = IyiMark.forced_map(IYI_THREAD_STACK, 2_u64)" }
       if (line == "          result = start_by_libc(stack, entry, argument, pointerof(handle).address)") { libc++; return "          result = IyiMark.forced_injected?(6_u64) ? 11_i32 : start_by_libc(stack, entry, argument, pointerof(handle).address)" }
       if (line == "          raise \"pthread_create failed: #{result}\" if result != 0") { libc_failed++; return "          IyiMark.forced_setup_failed(6_u64) if result != 0" }
@@ -1653,10 +1653,10 @@ add_forced_ack() {
       if (line == "        raise \"pthread_create failed: #{result}\" if result != 0") { pthread_failed++; return "        IyiMark.forced_setup_failed(7_u64) if result != 0" }
       if (line == "        h = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(entry), Pointer(Void).new(argument), 0_i32, nil)") { created++; return "        h = IyiMark.forced_injected?(7_u64) ? Pointer(Void).new(0_u64) : LibC.CreateThread(nil, 0_u64, Pointer(Void).new(entry), Pointer(Void).new(argument), 0_i32, nil)" }
       if (line == "        raise \"CreateThread failed\" if h.address == 0_u64") { created_failed++; return "        IyiMark.forced_setup_failed(7_u64) if h.address == 0_u64" }
-      if (line == "      def self.make : UInt64") { make_head++; return "      def self.forced_make : UInt64" }
+      if (line ~ /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.make : UInt64$/) { make_head++; return "      def self.forced_make : UInt64" }
       if (line == "        read_segment") { read_call++; return "        forced_read_segment" }
       if (line == "        mapping = __iyi_mmap(round_up(size + 64_u64, 4096_u64)).address") { tls++; return "        mapping = IyiMark.forced_map(round_up(size + 64_u64, 4096_u64), 4_u64)" }
-      if (line == "      def self.read_segment : Nil") { read_head++; return "      def self.forced_read_segment : Nil" }
+      if (line ~ /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.read_segment : Nil$/) { read_head++; return "      def self.forced_read_segment : Nil" }
       if (line == "        return if @@align != 0_u64") { read_inject++; return "        IyiMark.forced_setup_failed(8_u64) if IyiMark.forced_injected?(8_u64)\n        return if @@align != 0_u64" }
       if (line == "        raise \"no PT_TLS in the executable\" if @@align == 0_u64") { read_failed++; return "        IyiMark.forced_setup_failed(8_u64) if @@align == 0_u64" }
       if (line ~ /raise |__iyi_mmap\(|IyiTlsImage\.make/) fatal++
@@ -1664,9 +1664,9 @@ add_forced_ack() {
     }
     $0 == "    class IyiTlsImage" { tls_class = 1; tls_classes++ }
     $0 == "  class IyiThread" { thread_class = 1; thread_classes++ }
-    tls_class && $0 == "      def self.read_segment : Nil" { kind = 1; n = 0; reads++ }
-    tls_class && $0 == "      def self.make : UInt64" { kind = 2; n = 0; makes++ }
-    thread_class && $0 == "    def self.start_helper(entry : UInt64, argument : UInt64) : Nil" { kind = 3; n = 0; helpers++ }
+    tls_class && $0 ~ /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.read_segment : Nil$/ { kind = 1; n = 0; reads++ }
+    tls_class && $0 ~ /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.make : UInt64$/ { kind = 2; n = 0; makes++ }
+    thread_class && $0 ~ /^    (@\[Effect\([a-z_:]+\)\]; )?def self\.start_helper\(entry : UInt64, argument : UInt64\) : Nil$/ { kind = 3; n = 0; helpers++ }
     kind != 0 { body[++n] = $0 }
     { print }
     ((kind == 1 || kind == 2) && $0 == "      end") || (kind == 3 && $0 == "    end") {
@@ -1736,8 +1736,8 @@ awk 'function declarations() {
     print "        forced_ack"
     print "      end"
   }
-  /^      def self\.assist : Nil$/ { declarations(); declared++; in_assist = 1 }
-  /^        def self\.finish_concurrent : UInt64$/ { in_finish = 1; finish_methods++ }
+  /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.assist : Nil$/ { declarations(); declared++; in_assist = 1 }
+  /^        (@\[Effect\([a-z_:]+\)\]; )?def self\.finish_concurrent : UInt64$/ { in_finish = 1; finish_methods++ }
   /^        def self\.remainder_round\(w : UInt64\) : UInt64$/ { in_remainder = 1; remainder_methods++ }
   in_assist && /^        active\.value\.add\(1_u64\)$/ { print; print "        stored_hold_assist"; assist++; next }
   in_finish && /^            if attempts < FINISH_RETRIES && unfinished$/ {
@@ -1934,8 +1934,8 @@ awk 'function forced() {
     print "        forced_ack"
     print "      end"
   }
-  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
-  /^        def self\.finish_concurrent : UInt64$/ { in_finish = 1; methods++ }
+  /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++ }
+  /^        (@\[Effect\([a-z_:]+\)\]; )?def self\.finish_concurrent : UInt64$/ { in_finish = 1; methods++ }
   in_finish && /^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ {
     print "            late_baseline = pool_word(POOL_GENERATION).value.get"
     baseline++
@@ -1961,7 +1961,7 @@ fi
 echo "  held late control exits 0 after the next mark"
 step "failure proof: helper 0 reads the next mark generation too late"
 cp late-held/iyi/*.iyi late/iyi/
-awk '/^        def self\.finish_concurrent : UInt64$/ { in_finish = 1; methods++ }
+awk '/^        (@\[Effect\([a-z_:]+\)\]; )?def self\.finish_concurrent : UInt64$/ { in_finish = 1; methods++ }
   in_finish && /^            generation = pool_word\(POOL_GENERATION\)\.value\.get$/ { early++; next }
   in_finish && /^            late_check\(generation\) if late_forced$/ {
     print "            generation = pool_word(POOL_GENERATION).value.get"
@@ -2032,7 +2032,7 @@ awk 'function declarations() {
   /^      def self\.pressure\(size : UInt64\) : Nil$/ { declarations(); print; declared++; in_pressure = 1; next }
   in_pressure && /^        total = IyiHeap\.allocated_word\.value\.add\(size\) \+ size$/ { print; print "        release_probe(total)"; probed++; next }
   in_pressure && /^      end$/ { in_pressure = 0 }
-  /^        def self\.finish_concurrent : UInt64$/ { in_finish = 1; finish_methods++ }
+  /^        (@\[Effect\([a-z_:]+\)\]; )?def self\.finish_concurrent : UInt64$/ { in_finish = 1; finish_methods++ }
   in_finish && prev_lg && $0 == "            IyiThread.resume_others(others)" { print "            released_forced = arm_release_probe"; print; prev_lg = 0; armed++; next }
   in_finish && $0 == "            return generation" { print "            hold_release_probe if released_forced"; print; returned++; prev_lg = 0; next }
   in_finish && /^        end$/ { in_finish = 0 }
@@ -2041,7 +2041,7 @@ awk 'function declarations() {
   "$REPO/src/iyi/prelude.iyi" > released-held/iyi/prelude.iyi || { echo "the release order or pressure is missing or ambiguous"; exit 76; }
 add_forced_ack released-held
 cp released-held/iyi/*.iyi released/iyi/
-awk '/^        def self\.finish_concurrent : UInt64$/ { in_finish = 1; methods++ }
+awk '/^        (@\[Effect\([a-z_:]+\)\]; )?def self\.finish_concurrent : UInt64$/ { in_finish = 1; methods++ }
   in_finish && pend {
     if ($0 == "            let_go_holders") { print; pend = 0; dropped++; next }
     print "            @@collecting = false"; pend = 0
@@ -2532,7 +2532,7 @@ awk 'function forced() {
     print "        end"
     print "      end"
   }
-  /^      def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared++ }
+  /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.free\(pointer : Void\*\) : Nil$/ { forced(); declared++ }
   /^      def self\.list_freed\(arena : UInt64, head : UInt64, slot : UInt64, table : Pointer\(UInt64\), index : Int32\) : Nil$/ { in_list = 1; list_methods++ }
   in_list && /^        write64\(head \+ OFF_LINK, table\[index\]\)$/ {
     print "        stale = table[index]"
@@ -2604,7 +2604,7 @@ done
 step "failure proof: a free outside the allocator's bracket puts a dropped list back"
 mkdir -p unbracketed/iyi
 cp bracketed/iyi/*.iyi unbracketed/iyi/
-awk '/^      def self\.free\(pointer : Void\*\) : Nil$/ { in_free = 1; methods++ }
+awk '/^      (@\[Effect\([a-z_:]+\)\]; )?def self\.free\(pointer : Void\*\) : Nil$/ { in_free = 1; methods++ }
   in_free && /^          write64\(table\.address &\+ CACHE_INSIDE, read64\(table\.address &\+ CACHE_INSIDE\) &\+ 1_u64\)$/ { entered++; next }
   in_free && prev ~ /^          end$/ && /^          leave\(table\)$/ { left++; prev = $0; next }
   in_free && /^      end$/ { in_free = 0 }
@@ -2635,7 +2635,7 @@ require_idle_pool answers.txt || exit "$?"
 step "the idle pool fills when workers wait for task arrival"
 mkdir -p latestart/iyi
 cp "$REPO"/src/iyi/*.iyi latestart/iyi/
-awk '/^  def self\.work : Nil$/ {
+awk '/^  (@\[Effect\([^)]*\)\]; )?def self\.work : Nil$/ {
     print "  @[UnsafeReach(\"copy-only: idle start rendezvous\")]"
     print "  @@idle_starts : Int64 = 0_i64"
     print "  @[UnsafeReach(\"copy-only: idle start rendezvous\")]"
@@ -2759,7 +2759,7 @@ awk -v called="$turn_called" -v lost="$turn_lost" 'function held() {
   /^  def self\.stop_spinning\(st : IyiSchedulerState, found : Bool\) : Nil$/ { in_stop = 1; stop_methods++ }
   /^  private def self\.turn_wanted\?\(st : IyiSchedulerState, fiber : IyiFiber\) : Bool$/ { in_turn = 1; turn_methods++ }
   in_stop && $0 == "    wake_one if found && work_waiting?" { uncalled++; prev = $0; next }
-  /^  def self\.work : Nil$/ {
+  /^  (@\[Effect\([a-z_:]+\)\]; )?def self\.work : Nil$/ {
     held(); declared++; print
     if (getline <= 0 || $0 != "    {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}") exit 3
     print; print "      hold_first"; inserted++; prev = $0; next
@@ -2826,10 +2826,10 @@ make_crowded_copy() {
     print ""
     print ""
   }
-  /^      def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++; in_helper = 1; previous = $0; print; next }
+  /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.helper_main\(seen : UInt64\) : Nil$/ { forced(); declared++; in_helper = 1; previous = $0; print; next }
   in_helper && /^        w = worker$/ {
     candidates++
-    if (previous == "      def self.helper_main(seen : UInt64) : Nil") adjacent++
+    if (previous ~ /^      (@\[Effect\([a-z_:]+\)\]; )?def self\.helper_main\(seen : UInt64\) : Nil$/) adjacent++
     print
     print "        ready_limit = IyiMark.now_ns &+ 10000000000_u64"
     print "        while !IyiMark.forced_ready?"
@@ -2938,7 +2938,7 @@ fi
 step "failure proof: helpers created with Windows priority boost enabled are detected"
 mkdir -p boosted/iyi
 cp "$REPO"/src/iyi/*.iyi boosted/iyi/
-awk '/^    def self\.start_helper\(entry : UInt64, argument : UInt64\) : Nil$/ { inside = 1; methods++ }
+awk '/^    (@\[Effect\([a-z_:]+\)\]; )?def self\.start_helper\(entry : UInt64, argument : UInt64\) : Nil$/ { inside = 1; methods++ }
   inside && /^        LibC\.SetThreadPriorityBoost\(h, 1_i32\)$/ { print "        # the helpers keep the boost"; found++; next }
   inside && /^    end$/ { inside = 0 }
   { print } END { if (methods != 1 || found != 1 || inside) exit 3 }' \
@@ -3021,7 +3021,7 @@ printf '  exits 76 at "%s"\n' "FAIL: wake boost setup: cannot query a process th
 step "failure proof: a mark beside a busy program that asks for every helper is caught"
 mkdir -p greedy/iyi
 cp "$REPO"/src/iyi/*.iyi greedy/iyi/
-awk '/^        def self\.start_concurrent : Bool$/ { inside = 1; methods++ }
+awk '/^        (@\[Effect\([a-z_:]+\)\]; )?def self\.start_concurrent : Bool$/ { inside = 1; methods++ }
   inside && /^            helpers = free if helpers > free$/ { found++; next }
   inside && /^        end$/ { inside = 0 }
   { print } END { if (methods != 1 || found != 1 || inside) exit 3 }' \
@@ -3042,7 +3042,7 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: share:' greedy.txt)"
 step "failure proof: a mark beside an idle pool that counts its waiting workers is caught"
 mkdir -p counted/iyi
 cp "$REPO"/src/iyi/*.iyi counted/iyi/
-awk '/^        def self\.start_concurrent : Bool$/ { inside = 1; methods++ }
+awk '/^        (@\[Effect\([a-z_:]+\)\]; )?def self\.start_concurrent : Bool$/ { inside = 1; methods++ }
   inside && /^            threads = threads > waiting \? threads - waiting : 1_u64$/ { found++; next }
   inside && /^        end$/ { inside = 0 }
   { print } END { if (methods != 1 || found != 1 || inside) exit 3 }' \
@@ -3062,7 +3062,7 @@ printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: idle pool:' counted.txt)"
 step "failure proof: a mark beside a busy pool that counts its running workers free is caught"
 mkdir -p pooled/iyi
 cp "$REPO"/src/iyi/*.iyi pooled/iyi/
-awk '/^        def self\.start_concurrent : Bool$/ { inside = 1; methods++ }
+awk '/^        (@\[Effect\([a-z_:]+\)\]; )?def self\.start_concurrent : Bool$/ { inside = 1; methods++ }
   inside && /^            waiting = IyiScheduler\.waiting_threads$/ { found += gsub(/IyiScheduler\.waiting_threads/, "IyiWorkers.started? ? IyiWorkers.count.to_u64 : IyiScheduler.waiting_threads") }
   inside && /^        end$/ { inside = 0 }
   { print } END { if (methods != 1 || found != 1 || inside) exit 3 }' \

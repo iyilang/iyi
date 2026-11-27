@@ -434,13 +434,34 @@ class Iyi::Command
   # being told.
   private def build
     arguments = options.dup
-    inputs = BuildInputs.new(nil)
+    stale_build = options.includes?("--stale-key") ||
+                  options.any?(&.starts_with?("--stale-key=")) ||
+                  ENV["IYI_OPTS"]?.try(&.includes?("--stale-key"))
+    # Read from the first option on: a file the build reads before its recorder
+    # starts would be missing from the inputs record.
+    stale_inputs = (options.includes?("--stale-inputs") ||
+                    options.any?(&.starts_with?("--stale-inputs=")) ||
+                    ENV["IYI_OPTS"]?.try(&.includes?("--stale-inputs"))) ? true : false
+    inputs = BuildInputs.new(nil, env_only: stale_build || stale_inputs, stale: stale_inputs)
     BuildInputs.current = inputs
     begin
       config = create_compiler "build", defer_move_aside: true
       compiler = config.compiler
+      if compiler.stale_inputs && !inputs.stale?
+        # The flag arrived some other way, so what the build read before this
+        # recorder existed is not in it.
+        inputs = BuildInputs.new(nil, env_only: true, stale: true)
+        inputs.cannot("some of the build's options were read before its inputs were recorded")
+        BuildInputs.current = inputs
+      elsif compiler.stale_key && !inputs.env_only?
+        inputs = BuildInputs.new(nil, env_only: true)
+        BuildInputs.current = inputs
+      end
+      # A record from an earlier build is gone before this one starts, so a
+      # record on disk always describes the build that wrote it.
+      compiler.stale_inputs.try { |path| BuildInputs.paused { File.delete?(path) } }
       inputs.cache_root = CacheDir.instance.dir
-      check = up_to_date_check(config, arguments)
+      check = up_to_date_check(config, arguments) unless compiler.stale_key || compiler.stale_inputs
 
       if check && !@force_build
         reason = @progress_tracker.stage("Up-to-date check") { check.stale_reason }
@@ -460,6 +481,12 @@ class Iyi::Command
       move_output_aside(compiler, config.output_filename)
       config.compile
       BuildInputs.current = nil
+
+      # A reason found after the check wrote its record (a link, say) means the
+      # record does not describe this build, so it is removed.
+      if (path = compiler.stale_inputs) && !inputs.reasons.empty?
+        BuildInputs.paused { File.delete?(path) }
+      end
 
       if check
         unless (warnings = compiler.warnings.reports.size).zero?
@@ -1115,6 +1142,21 @@ class Iyi::Command
         if command == "build"
           opts.on("--force", "Build even when nothing the output was built from has changed") do
             @force_build = true
+          end
+          opts.on("--stale-key FILE", "iyi: write stale key output to FILE") do |file|
+            compiler.stale_key = file
+          end
+          opts.on("--stale-accept FILE", "iyi: stale accept file") do |file|
+            compiler.stale_accept = file
+          end
+          opts.on("--stale-block FILE", "iyi: stale block file") do |file|
+            compiler.stale_block = file
+          end
+          opts.on("--stale-dump-elements FILE", "iyi: stale dump elements file") do |file|
+            compiler.stale_dump_elements = file
+          end
+          opts.on("--stale-inputs FILE", "iyi: write the inputs this build read to FILE") do |file|
+            compiler.stale_inputs = file
           end
         end
       end

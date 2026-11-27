@@ -370,6 +370,46 @@
 
 ### Changed
 
+- **Observed runs no longer record the startup read of the `String#hash` key as
+  the program's entropy.** `__iyi_hash_key` is `@[Effect(:primitive)]`, a
+  runtime-internal effect that observers do not wrap: every process reads the
+  key once, at startup, before the program's own code runs (#212). The key and
+  its once-per-process read are unchanged. `String#hash` is now
+  `@[Effect(:entropy)]`, so a program that hashes a string records an entropy
+  read at that use, and a program that never hashes records none. A program
+  that reads entropy itself, through `std/random` or the OS, is recorded as
+  before. The observer keeps its written-path and environment sets in arrays,
+  so observing a run does not hash strings itself.
+
+### Added
+
+- **Programs can request larger fiber stacks before starting work.**
+  `IyiFiber.stack_bytes=` accepts whole 64 KiB multiples of at least 256 KiB,
+  retaining 256 KiB as the default. A different size is refused after a task,
+  pooled stack or second thread; setting the same size remains permitted.
+  Fibers record their spans for pooling, guard checks and stack-window lookup.
+  Thread stacks and the 4,785-line library ceiling are unchanged.
+
+- **`iyi test --cached` starts no compiler for a test whose recorded inputs
+  are unchanged.** A stale build records the files, directory listings,
+  environment values and `pkg-config` answers it read. When the test's local
+  receipt is valid and each one still answers the same, the test passes from
+  its receipt with no compiler. `--json` marks that as `check: "inputs"` and
+  counts the compiler processes a run started (`builds`); `--explain` says
+  `hit from local (inputs unchanged)`. Any other cause runs the check as
+  before and names its first cause in `check_reason`. `-p N` now applies to
+  `--cached`, `--fresh`, `--explain`, `--shard`, `--import-index` and
+  `--export-index` too, with the report in file order.
+
+- **Native stale testing for `iyi test`: opt-in `--cached` reuses passing receipts on equal build keys and replayed observations.** An observation build records run-time reads and effects, and the compiler hashes the reached call path (`CallPathFp`), linked object units, link environment, and compiler environment before codegen. A test that touches clock, entropy, timers, network, processes, signals, runtime timing, directory streams, host state, raw pointers, or shared writes outside its scratch directory runs fresh. In a census of 141 programs (27 sample programs and 114 standard library exercises), 87 of 141 (61.7%) were reusable on a second run, and static build keys were reusable for 138 of 141 (97.9%).
+
+  Repairs cover lost scratch paths, reads of self-written environment variables, cold/warm compiler-environment keys, frame-depth isolation and transfer across threads and fibers, program callbacks during runtime frames, and concurrent observation writes. The recorder serializes records and deduplication state through a leaf CAS lock and reuses its encoding buffer.
+
+  Four exercise fixes, each found by the equivalence and census runs on one macOS machine: `std_dns_exercise` skips its Happy Eyeballs races when a full listener resets SYNs instead of dropping them; `std_digest_exercise` times the best of seven, and `std_big_exercise` judges the pass whose division-to-product ratio is smallest, timed back to back, since both timing checks failed under load; and `std_tar_exercise` writes absolute names past 100 bytes through pax records, which a long `TMPDIR` needs.
+
+### Changed
+
+- **Compiler: omit unread predefined constants from codegen and stale build keys.** Predefined constants (`Crystal::*`) are initialized at startup and included in reach signatures only when referenced by typed code. `ARGC_UNSAFE` and `ARGV_UNSAFE` remain initialized unconditionally. Reading an uninitialized predefined constant in codegen raises an internal compiler bug.
 - **A freestanding wasm `--release` drops DWARF and keeps function names
   (#221).** The link adds `wasm-ld --strip-debug` when `--release` was given
   without `-d`, including `--release -O z`; the name section host stack
@@ -661,6 +701,23 @@
 
 ### Gates
 
+- **Darwin's thread-yield control measures CPU held under load.** The
+  hint's throughput ratio failed to distinguish it from the runtime on an
+  18-core host, including before the stack-size change. The gate keeps its
+  throughput bound and compares CPU per thread born against the hint, with
+  alternating runs and a hint-against-hint negative control. It reuses the
+  existing core count rather than relying on `sysctl` being on PATH.
+
+- **Bench: std/autocert's exercise runs its own builds by the path it built them to.** `bench/std_autocert_exercise.sh` runs its plain and release binaries as `"$WORK/$name"` from a new `run_own <name>`, rather than passing their paths to `local_run`, so each run can be matched to its build in the driver's own text. Arguments, environment, output files, exit status and verdicts are unchanged; `local_run` still runs the artifact consumer and broken copies.
+
+- **Fix (bench): separate search roots for import candidate shadowing in stale testing.** In `bench/stale_tests.sh` row 3, place candidate modules under dedicated `earlier` and `later` `IYI_PATH` entries with no project-root copy so the entry directory does not preempt resolver order. Verifies that an earlier search path without a candidate hits as a locator-only change, while a shadowed definition with an altered body misses and is named in the explanation.
+
+- **Fix (bench): recognize BSD and GNU `stty -g` formats in std/term exercise.** On Darwin, BSD `/bin/stty -g` outputs `gfmt1:cflag=hex:...:lflag=hex:...` rather than GNU coreutils colon-separated hex fields. The pseudo-terminal driver now parses both formats when masking the kernel-managed `PENDIN` flag on Darwin, leaving unknown text unchanged.
+
+- **Darwin panic dependency floor records `dladdr` and `dprintf` replacing `backtrace_symbols_fd` (SPEC.md III.9).** Commit 68c53c352 resolved boundary return addresses at `addr - 1` using `dladdr` and formatted panic frames to stderr with `dprintf` instead of `backtrace_symbols_fd`. The Darwin dependency floor (`bench/floor_base.sh`, `bench/dependency_floor.sh`, and exercise gates) updates its permitted symbol lists accordingly to match libSystem's interface without linking additional libraries. (Note: `dprintf` is not documented by Darwin as async-signal-safe).
+
+- **Semantic backtrace equivalence for Darwin artifact verification.** Output comparison in standard library exercise gates (`bench/std_exercise.sh`, `bench/std_toml_exercise.sh`, `bench/std_websocket_exercise.sh`, `bench/std_big_exercise.sh`, and `bench/stale_equivalence.sh`) evaluates ordered semantic frames via `bench/frames_equivalent.py` when direct byte comparison fails on Darwin. Comparisons verify equal frame counts, positions, indices, images, and canonicalized function names while abstracting layout addresses, function size offsets, `~iyi` copy suffixes, a carried closure's `^unit:` suffix, and the number a build gave a closure that names its file and line, with plain-vs-optimized comparisons verifying non-frame text and frame sequence structure.
+
 - **std/autocert's and std/acme's gates draw challtestsrv's DNS port free
   for UDP as well as TCP, std/autocert's says what did not come up when
   Pebble does not start, and eleven gates' failure output no longer dies
@@ -867,6 +924,31 @@
   that select the self-host jobs as the hosted formatter does, up from 161:
   the floor lists all 176, and the 11 files that stopped differing leave
   the ceiling, which lists 23.
+
+- **A layout fold taken during typing is settled to the final layout once the compiler has typed everything, including the code its cleanup types.** `sizeof`, `alignof`, `instance_sizeof`, `instance_alignof` and `offsetof` could fold to a size the typer saw before a module held by value gained implementors, or before a container it was cached in had its element grow. In a `--crystal` build, `arr.dup` of an array of `{Int32, M}` could then return a zeroed element and trap when printed. Settling runs at the end of semantic analysis, after the cleanup has typed its own raises, tuple and proc literals, and splats, so a module that only that code grows is part of the final layout. A stale expression fold is corrected in place. A fold inside a generic type argument keeps its value, because the type is already built, and so does every expression that shares that layout with it, so the program's types and numbers agree. A literal that later code used as a type variable or a cast is kept as it was. A native program refuses a stale type argument, or such a literal, with a compile error at that expression, and refuses codegen that types code which grows a layout a settled fold reaches. A native program also gets a fresh shared layout typer after settling, and the write barrier sizes with its module's typer. `--crystal` output changes only where Crystal 1.21.0 folded two different sizes for one type. `IYI_LAYOUT_FOLD_REPORT=1` prints each stale fold and each open layout to stderr. Not covered: a macro that reads a stale constant but never uses its value, and an autocast whose fit is the same at both values, are refused under the native gate. Neither takes a wrong native type.
+- A value taken from a layout fold before it settles is judged by what took it. A type argument, an enum value or a typing decision that the final layout would change, and any macro that read the value, is refused under the native gate and kept under `--crystal`, with the expressions sharing its layout. A type argument or enum value computed from several folds is judged against the values the program ends with, so one kept input keeps the others. A use the final layout leaves unchanged, and any value only an expression uses, takes the final layout.
+
+- **Private closures hosted in carried artifact units have an owning-unit linkage suffix.** The suffix is `^unit:` and the lowercase hex of the unit's UTF-8 name, so a carried closure cannot collide with a closure the consumer generates. It applies to artifact production and bind filling, `--crystal` included, and can change private symbols and object bytes relative to older compilers. The public method ABI and closure calling convention are unchanged.
+
+- **`tool bind` rewrites a name only where the parser reads a path.** It used to search the text it had printed, so a bound name inside a string, a regex, a comment or a heredoc was rewritten too: `"Kemal::Config"` in a log message came out `"Config"`. The printed text is now parsed, a body where its signature's parameters are variables and a parameter among its siblings. The code of a macro literal (`{% if flag?(:linux) %} ... {% end %}`) is read the same way where it stands as source by itself, and searched as before where it does not. Text the parser cannot read at all is refused.
+
+- **A `.iyimod` whose section table or sections run past the end of the file is refused before anything is allocated for it.**
+
+- **A program that requires only `compiler/iyi/syntax` compiles again.** A def's effect was declared in the syntax tree with a type the semantic pass owned, and the lexer and parser specs run alone ended in `BUG: called create_llvm_type for Effect`.
+
+- **Stale reach tracks class variables by identity.** Two types' class variables of one name were counted once.
+
+- **Fix (spec): select TCP fixture ports across both address families.** Keep each IPv4 candidate bound while checking an IPv6-only wildcard bind, advancing only when that port is already in use. The dual-stack and refused-connect fixtures use the shared allocator without changing their assertions or timeouts.
+
+- **Fix (runtime): classify `IyiHeap.release_run` as collector work under stale testing observation.** Calling `__iyi_release_pages` inside `release_run` without an `@[Effect(:collector)]` annotation recorded an unclassified external runtime call, marking every observed test run not reusable under RG3. Classifying `release_run` matches its callers (`close_run`, `age_idle`) and preserves receipt reuse on second runs.
+
+- **Fix (compiler): Darwin host target matches the linker's deployment target.** LLVM derives the default target from the Darwin kernel version, which can run ahead of the OS release (e.g. Darwin 27.0.0 maps to macOS 28.0 on macOS 27.0.1 with SDK 27.0). On Darwin, the compiler checks `MACOSX_DEPLOYMENT_TARGET` first, then resolves the component-wise minimum of the macOS SDK version (`SDKSettings.json`) and the OS product version (`sysctlbyname("kern.osproductversion")`), keeping LLVM's default only if neither is available. This aligns object file deployment targets with Clang's linker rules and prevents `ld: warning: object file ... was built for newer 'macOS' version` linker warnings on Darwin.
+
+- **Fix (compiler): inlined observed effect bodies eliminate synthetic backtrace frames.** Under `-Diyi_observe`, each renamed `__iyi_effect_*` body is emitted directly inside its wrapper in every build that has the body (source, producer, and consumer of a travelled body), with matching reach-walk and call-path encoding. Panics under observation match normal-build backtraces without synthetic wrapper or implementation frames. An observed `--use-iyimod` build under `IYI_WARM=1` now reads the prelude's std artifacts without import-wall refusals resolving internal type ID references (resolving `"std/time" numbers \`Array(Std::Time::Location::Zone)\`, and this build cannot name it`).
+
+- **Fix (runtime): correct frame boundary symbol lookup in Darwin panics.** When a panic or NoReturn call is the last instruction of a function, the return address on the stack sits at offset 0 of the next function. The Darwin runtime backtrace resolves boundary frames with offset 0 by inspecting the caller symbol at `addr - 1` while preserving fiber entry start markers and raw address formats.
+
+- **Fix (compiler): observed artifact emission supports operator effect defs.** An observed build of a module with an operator-named `@[Effect]` def (such as `[]=` or `[]?`) renames the wrapped implementation with hex-encoded operator bytes rather than raw punctuation, so that serializing declarations into `.iyimod` artifacts preserves valid source text that consumer builds parse and adopt without syntax errors.
 
 - **Vector unions use the heap's eight-byte alignment (#202).** A mixed
   union represents its payload as wide integers, so treating only visible
@@ -30416,7 +30498,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 37,121-line library and nothing else. Every other
+  written against iyi's own 37,341-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

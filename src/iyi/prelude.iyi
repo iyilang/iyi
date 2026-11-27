@@ -181,7 +181,7 @@ class IyiRuntimeLock
     {% end %}
   end
 
-  def self.lock : Nil
+  @[Effect(:scheduler)]; def self.lock : Nil
     word = self.word
     # Read first: a failed take still takes the line for writing, and
     # fifteen helpers spinning on one slowed the holder.
@@ -253,12 +253,14 @@ end
     # The vDSO's function: 0 not looked up yet, 1 none, else its address.
     @@vdso : UInt64 = 0_u64
 
+    @[Effect(:clock)]
     def self.monotonic_ns : UInt64
       read(1)
     end
 
     # Clock *clock* (CLOCK_REALTIME 0, CLOCK_MONOTONIC 1, ...) in
     # nanoseconds.
+    @[Effect(:clock)]
     def self.read(clock : Int32) : UInt64
       stamp = uninitialized LibIyiClock::Timespec
       call = @@vdso
@@ -438,7 +440,7 @@ end
   # `exit_group` retires the process. 0.1.0 has one thread, so the difference
   # is unobservable, and exit_group is what a program that grows threads
   # wants its panic path to mean.
-  def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
     result = uninitialized Int64
     {% if flag?(:x86_64) %}
       asm("syscall" : "={rax}"(result)
@@ -456,7 +458,7 @@ end
 
   # `read`, for `read_input` below: 0 on x86_64, 63 on aarch64. Binding
   # libc's for one call would put the whole library back on the link line.
-  def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
     result = uninitialized Int64
     {% if flag?(:x86_64) %}
       asm("syscall" : "={rax}"(result)
@@ -475,11 +477,11 @@ end
   # `openat`/`close` for `File`. Syscall 257/3 on x86_64, 56/57 on aarch64.
   # `AT_FDCWD` (-100) so a relative path does not need a directory fd.
   # The fourth syscall argument on x86_64 is `r10`, not `rcx`.
-  def __iyi_open_read(path : UInt8*) : Int64
+  @[Effect(:file_read)]; def __iyi_open_read(path : UInt8*) : Int64
     __iyi_openat(path, 0, 0)
   end
 
-  def __iyi_open_write(path : UInt8*) : Int64
+  @[Effect(:file_write, :create)]; def __iyi_open_write(path : UInt8*) : Int64
     # O_WRONLY|O_CREAT|O_TRUNC = 1|64|512, mode 0644.
     __iyi_openat(path, 577, 420)
   end
@@ -488,7 +490,7 @@ end
   # O_TRUNC 512, O_APPEND 1024, the same numbers on x86_64 and aarch64.
   # *perm* reaches only a file the call creates; the umask is applied by
   # the kernel.
-  def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
+  @[Effect(:file_read)]; def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
     flags = read && write ? 2 : (write ? 1 : 0)
     flags = flags | 64 if create
     flags = flags | 512 if truncate
@@ -496,7 +498,7 @@ end
     __iyi_openat(path, flags, perm)
   end
 
-  def __iyi_openat(path : UInt8*, flags : Int32, mode : Int32) : Int64
+  @[Effect(:file_write, :create)]; def __iyi_openat(path : UInt8*, flags : Int32, mode : Int32) : Int64
     result = uninitialized Int64
     {% if flag?(:x86_64) %}
       asm("syscall" : "={rax}"(result)
@@ -516,7 +518,7 @@ end
 
   # The kernel writes its answer into the number register; an asm with no
   # output let LLVM keep "3" there, and a second close in a row became `read`.
-  def __iyi_close(fd : Int64) : Nil
+  @[Effect(:stdio)]; def __iyi_close(fd : Int64) : Nil
     result = uninitialized Int64
     {% if flag?(:x86_64) %}
       asm("syscall" : "={rax}"(result) : "{rax}"(3_i64), "{rdi}"(fd) : "rcx", "r11", "memory" : "volatile")
@@ -526,7 +528,7 @@ end
   end
 
   # `unlinkat`, with AT_FDCWD and no flags: 263 on x86_64, 35 on aarch64.
-  def __iyi_unlink(path : UInt8*) : Int64
+  @[Effect(:file_write, :delete)]; def __iyi_unlink(path : UInt8*) : Int64
     result = uninitialized Int64
     {% if flag?(:x86_64) %}
       asm("syscall" : "={rax}"(result)
@@ -551,7 +553,7 @@ end
   # signal cut short (-EINTR) is asked again; one older than 3.17, or a
   # sandbox that hides the call (-ENOSYS), is read from /dev/urandom, as
   # `Random::Secure` reads it. Sixteen bytes are never a short answer.
-  def __iyi_hash_key : {UInt64, UInt64}
+  @[Effect(:primitive)]; def __iyi_hash_key : {UInt64, UInt64}
     key = {0_u64, 0_u64}
     buffer = pointerof(key).as(UInt8*)
     flags = 4_i64
@@ -585,18 +587,18 @@ end
     key
   end
 
-  def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     __iyi_read(fd.to_i32, buffer, count)
   end
 
-  def __iyi_file_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_file_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
     __iyi_write(fd.to_i32, buffer, count)
   end
-  def __iyi_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
     __iyi_write(fd.to_i32, buffer, count)
   end
 
-  def __iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     __iyi_read(fd.to_i32, buffer, count)
   end
 
@@ -606,7 +608,7 @@ end
   # 0x5401; `ioctl` is 16 on x86_64 and 29 on aarch64). The buffer is a
   # `termios` the answer is written into and nothing reads: 60 bytes is
   # larger than the struct on both architectures.
-  def __iyi_isatty(fd : Int32) : Bool
+  @[Effect(:console)]; def __iyi_isatty(fd : Int32) : Bool
     termios = uninitialized UInt8[60]
     result = uninitialized Int64
     {% if flag?(:x86_64) %}
@@ -629,7 +631,7 @@ end
   # 79 on x86_64 and 17 on aarch64, and answers the length it wrote with
   # the terminator in it, or a negative errno. The length this returns
   # does not count the terminator, which is what a String wants.
-  def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
+  @[Effect(:cwd)]; def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
     result = uninitialized Int64
     {% if flag?(:x86_64) %}
       asm("syscall" : "={rax}"(result)
@@ -645,7 +647,7 @@ end
     result <= 0_i64 ? -1_i64 : result - 1_i64
   end
 
-  def __iyi_exit(status : Int32) : NoReturn
+  @[Effect(:exit)]; def __iyi_exit(status : Int32) : NoReturn
     {% if flag?(:x86_64) %}
       asm("syscall" :: "{rax}"(231_i64), "{rdi}"(status.to_i64) : "rcx", "r11", "memory" : "volatile")
     {% else %}
@@ -660,6 +662,15 @@ end
   # Binding write, exit, backtrace and backtrace_symbols_fd here is Apple's platform rule rather than a compromise settled for.
   # libSystem ships with macOS, it is not something a person installs, and Go links it on darwin for the exact same reason.
   lib LibC
+    struct DlInfo
+      dli_fname : UInt8*
+      dli_fbase : Void*
+      dli_sname : UInt8*
+      dli_saddr : Void*
+    end
+
+    fun dladdr(addr : Void*, info : DlInfo*) : Int32
+    fun dprintf(fd : Int32, format : UInt8*, ...) : Int32
     fun write(fd : Int32, buf : Void*, count : UInt64) : Int64
     fun read(fd : Int32, buf : Void*, count : UInt64) : Int64
     fun open(path : UInt8*, oflag : Int32, ...) : Int32
@@ -685,27 +696,27 @@ end
     fun arc4random_buf(buffer : Void*, count : UInt64) : Void
   end
 
-  def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
     LibC.write(fd, buffer, count)
   end
 
-  def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
     LibC.read(fd, buffer, count)
   end
 
-  def __iyi_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
     LibC.write(fd.to_i32, buffer, count)
   end
 
-  def __iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     LibC.read(fd.to_i32, buffer, count)
   end
 
-  def __iyi_isatty(fd : Int32) : Bool
+  @[Effect(:console)]; def __iyi_isatty(fd : Int32) : Bool
     LibC.isatty(fd) != 0
   end
 
-  def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
+  @[Effect(:cwd)]; def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
     return -1_i64 if LibC.getcwd(buffer, size).address == 0_u64
     length = 0
     while buffer[length] != 0_u8
@@ -716,17 +727,17 @@ end
 
   # The sixteen bytes `String#hash` is keyed with, read once per process
   # (#212).
-  def __iyi_hash_key : {UInt64, UInt64}
+  @[Effect(:primitive)]; def __iyi_hash_key : {UInt64, UInt64}
     key = {0_u64, 0_u64}
     LibC.arc4random_buf(pointerof(key).as(Void*), 16_u64)
     key
   end
 
-  def __iyi_open_read(path : UInt8*) : Int64
+  @[Effect(:file_read)]; def __iyi_open_read(path : UInt8*) : Int64
     LibC.open(path, 0).to_i64
   end
 
-  def __iyi_open_write(path : UInt8*) : Int64
+  @[Effect(:file_write, :create)]; def __iyi_open_write(path : UInt8*) : Int64
     # O_WRONLY|O_CREAT|O_TRUNC = 1|0x0200|0x0400, and 0644 for a file the
     # call creates. `open` is declared variadic above, so the mode reaches
     # it on arm64's stack where darwin reads it. A `chmod` to 0644 after it
@@ -740,7 +751,7 @@ end
   # `File.open`'s every mode in darwin's numbers: O_WRONLY 1, O_RDWR 2,
   # O_APPEND 0x8, O_CREAT 0x200, O_TRUNC 0x400. The mode goes through the
   # variadic `open` as `__iyi_open_write`'s does.
-  def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
+  @[Effect(:file_read)]; def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
     flags = read && write ? 2 : (write ? 1 : 0)
     flags = flags | 0x200 if create
     flags = flags | 0x400 if truncate
@@ -748,23 +759,23 @@ end
     LibC.open(path, flags, perm).to_i64
   end
 
-  def __iyi_close(fd : Int64) : Nil
+  @[Effect(:stdio)]; def __iyi_close(fd : Int64) : Nil
     LibC.close(fd.to_i32)
   end
 
-  def __iyi_unlink(path : UInt8*) : Int64
+  @[Effect(:file_write, :delete)]; def __iyi_unlink(path : UInt8*) : Int64
     LibC.unlink(path).to_i64
   end
 
-  def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     LibC.read(fd.to_i32, buffer, count)
   end
 
-  def __iyi_file_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_file_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
     LibC.write(fd.to_i32, buffer, count)
   end
 
-  def __iyi_exit(status : Int32) : NoReturn
+  @[Effect(:exit)]; def __iyi_exit(status : Int32) : NoReturn
     LibC.exit(status)
   end
 {% elsif flag?(:win32) %}
@@ -959,7 +970,7 @@ end
   # GetStdHandle's constants, by their Win32 names: STD_INPUT_HANDLE (-10),
   # STD_OUTPUT_HANDLE (-11), STD_ERROR_HANDLE (-12). They are negative
   # identifiers reinterpreted as DWORD; as Int32 they spell themselves.
-  def __iyi_std_handle(fd : Int64) : Void*
+  @[Effect(:console)]; def __iyi_std_handle(fd : Int64) : Void*
     return LibC.GetStdHandle(-11) if fd == 1_i64
     return LibC.GetStdHandle(-12) if fd == 2_i64
     return LibC.GetStdHandle(-10) if fd == 0_i64
@@ -1010,7 +1021,7 @@ end
     @@restore_err : UInt64 = 0_u64
     @@restore_err_mode : Int32 = 0
 
-    def self.console?(fd : Int64, handle : Void*) : Bool
+    @[Effect(:console)]; def self.console?(fd : Int64, handle : Void*) : Bool
       return false if fd < 0_i64 || fd > 2_i64
       bit = 1_u64.unsafe_shl(fd.to_u64)
       if @@probed & bit == 0_u64
@@ -1021,7 +1032,7 @@ end
       @@console & bit != 0_u64
     end
 
-    def self.enable_vt(fd : Int64, handle : Void*) : Nil
+    @[Effect(:console)]; def self.enable_vt(fd : Int64, handle : Void*) : Nil
       bit = 1_u64.unsafe_shl(fd.to_u64)
       return if @@vt & bit != 0_u64
       @@vt = @@vt | bit
@@ -1043,7 +1054,7 @@ end
     # console outlives the program, and it was left with VT processing on
     # for whatever ran in it next, where the C runtime's own teardown, and
     # Crystal's, put the mode back.
-    def self.restore_vt : Nil
+    @[Effect(:primitive)]; def self.restore_vt : Nil
       LibC.SetConsoleMode(Pointer(Void).new(@@restore_err), @@restore_err_mode) if @@restore_err != 0_u64
       LibC.SetConsoleMode(Pointer(Void).new(@@restore_out), @@restore_out_mode) if @@restore_out != 0_u64
       nil
@@ -1083,7 +1094,7 @@ end
     # stack instead; a piece of PIECE bytes is at most PIECE UTF-16 units.
     PIECE = 1024
 
-    def self.write_handle(handle : Void*, buffer : Void*, count : UInt64, carry : UInt64*) : Int64
+    @[Effect(:stdio)]; def self.write_handle(handle : Void*, buffer : Void*, count : UInt64, carry : UInt64*) : Int64
       staged = uninitialized UInt8[PIECE]
       wide = uninitialized UInt16[PIECE]
       bytes = pointerof(staged).as(UInt8*)
@@ -1168,7 +1179,7 @@ end
     # between the two halves of a surrogate pair. Each piece was converted
     # alone, and the character past the 1,364th of a line came out as two
     # U+FFFD. The high half is carried to the front of the next read.
-    def self.read_into(handle : Void*, buffer : Void*, count : UInt64, wide : UInt16*, capacity : UInt64) : Int64
+    @[Effect(:host_state)]; def self.read_into(handle : Void*, buffer : Void*, count : UInt64, wide : UInt16*, capacity : UInt64) : Int64
       room = count // 3_u64
       room = 1_u64 if room == 0_u64
       room = capacity if room > capacity
@@ -1200,7 +1211,7 @@ end
     end
   end
 
-  def __iyi_win_write_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_win_write_file(handle : Void*, buffer : Void*, count : UInt64) : Int64
     written = uninitialized Int32
     if LibC.WriteFile(handle, buffer, count.to_i32, pointerof(written), nil) == 0
       return -1_i64
@@ -1209,15 +1220,15 @@ end
   end
 
   # Whether a descriptor is a terminal, which only the console answers yes to.
-  def __iyi_isatty(fd : Int32) : Bool
+  @[Effect(:console)]; def __iyi_isatty(fd : Int32) : Bool
     IyiConsole.console?(fd.to_i64, __iyi_std_handle(fd.to_i64))
   end
 
-  def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
     __iyi_write(fd.to_i64, buffer, count)
   end
 
-  def __iyi_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
     handle = __iyi_std_handle(fd)
     # A standard stream the process was never given - started detached, as
     # a service, or by a GUI program - has no handle, and what is written
@@ -1234,11 +1245,11 @@ end
     handle.address == 0_u64 || handle.address == 0xFFFFFFFFFFFFFFFF_u64
   end
 
-  def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
     __iyi_read(fd.to_i64, buffer, count)
   end
 
-  def __iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     if fd == 0_i64
       handle = LibC.GetStdHandle(-10)
       # No standard input at all is an input with nothing in it.
@@ -1280,7 +1291,7 @@ end
   # which is the number `CreateDirectoryW` documents.
   IYI_WIN_PATH_LIMIT = 248
 
-  def __iyi_wide_path(path : UInt8*) : UInt16*
+  @[Effect(:primitive)]; private def __iyi_wide_utf16(path : UInt8*, count : Int32*) : UInt16*
     # MB_ERR_INVALID_CHARS (8) refuses text that is not UTF-8 (null): with
     # 0, each bad byte became U+FFFD, `x\xFF.txt` and `x\xFE.txt` were one
     # file, and the second write replaced the first.
@@ -1288,6 +1299,16 @@ end
     return Pointer(UInt16).new(0_u64) if needed <= 0
     wide = Pointer(UInt16).malloc(needed.to_u64)
     return Pointer(UInt16).new(0_u64) if LibC.MultiByteToWideChar(65001, 8, path, -1, wide, needed) <= 0
+    count.value = needed
+    wide
+  end
+
+  # This dispatcher stays unwrapped: an internal observation frame here
+  # would hide the host-state observation for a relative path below.
+  @[Effect(:primitive)]; def __iyi_wide_path(path : UInt8*) : UInt16*
+    needed = 0_i32
+    wide = __iyi_wide_utf16(path, pointerof(needed))
+    return wide if wide.address == 0_u64
     # `needed` counts the terminator; the length does not.
     # The limit is on the path Windows resolves, not on the text handed in:
     # `needed` measures a relative name without the current directory in
@@ -1311,11 +1332,29 @@ end
     wide[2] == 92_u16 || wide[2] == 47_u16
   end
 
-  private def __iyi_wide_long_path(wide : UInt16*) : UInt16*
-    full_needed = LibC.GetFullPathNameW(wide, 0, Pointer(UInt16).new(0_u64), Pointer(Pointer(UInt16)).new(0_u64))
+  # A drive-absolute path cannot depend on the current directory. Leave
+  # other forms, including UNC paths, conservative until their resolution
+  # is proven for every spelling. This dispatcher stays unwrapped so the
+  # non-absolute observation is not hidden.
+  @[Effect(:primitive)]; private def __iyi_wide_full_path(wide : UInt16*, size : Int32, buffer : UInt16*) : Int32
+    first = wide[0]
+    drive = (first >= 65_u16 && first <= 90_u16) || (first >= 97_u16 && first <= 122_u16)
+    unless drive && wide[1] == 58_u16 && (wide[2] == 92_u16 || wide[2] == 47_u16)
+      return __iyi_wide_full_unproven(wide, size, buffer)
+    end
+    LibC.GetFullPathNameW(wide, size, buffer, Pointer(Pointer(UInt16)).new(0_u64))
+  end
+
+  @[Effect(:host_state)]; private def __iyi_wide_full_unproven(wide : UInt16*, size : Int32, buffer : UInt16*) : Int32
+    LibC.GetFullPathNameW(wide, size, buffer, Pointer(Pointer(UInt16)).new(0_u64))
+  end
+
+  # As with __iyi_wide_path, do not hide the conditional observation.
+  @[Effect(:primitive)]; private def __iyi_wide_long_path(wide : UInt16*) : UInt16*
+    full_needed = __iyi_wide_full_path(wide, 0, Pointer(UInt16).new(0_u64))
     return wide if full_needed <= 0
     full = Pointer(UInt16).malloc(full_needed.to_u64)
-    written = LibC.GetFullPathNameW(wide, full_needed, full, Pointer(Pointer(UInt16)).new(0_u64))
+    written = __iyi_wide_full_path(wide, full_needed, full)
     return wide if written <= 0
     # Resolved short: the path was relative and shallow, so the plain
     # relative form is the one to keep — a `\\?\` prefix may only sit on a
@@ -1364,7 +1403,7 @@ end
   # `String` is the right answer rather than a byte buffer because every
   # caller wants one. The bytes are UTF-8 (CP_UTF8, 65001), which is what an
   # iyi string is.
-  def __iyi_utf8_bytes_from_wide(wide : UInt16*, buffer : UInt8*, limit : Int32) : Int32
+  @[Effect(:primitive)]; def __iyi_utf8_bytes_from_wide(wide : UInt16*, buffer : UInt8*, limit : Int32) : Int32
     LibC.WideCharToMultiByte(65001, 0, wide, -1, buffer, limit,
       Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
   end
@@ -1375,7 +1414,7 @@ end
   # named `x\uFFFDy.txt`, which does not exist, for a file named with one.
   # Text a program is handed once - its arguments, a console's input -
   # passes 0, where a refusal would lose the rest of it.
-  def __iyi_utf8_size_from_wide(wide : UInt16*, flags : Int32 = 128) : Int32
+  @[Effect(:primitive)]; def __iyi_utf8_size_from_wide(wide : UInt16*, flags : Int32 = 128) : Int32
     needed = LibC.WideCharToMultiByte(65001, flags, wide, -1, Pointer(UInt8).new(0_u64), 0,
       Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
     needed > 0 ? needed : 0
@@ -1388,7 +1427,7 @@ end
   # database's lock file - refuses `GetFileAttributesW` with
   # ERROR_SHARING_VIOLATION (32), and `File.exists?` said false about a
   # file `dir` lists. Its directory entry answers without opening it.
-  def __iyi_path_attributes(path : UInt8*) : Int32
+  @[Effect(:host_state)]; def __iyi_path_attributes(path : UInt8*) : Int32
     wide = __iyi_wide_path(path)
     return -1 if wide.address == 0_u64
     attributes = LibC.GetFileAttributesW(wide)
@@ -1422,7 +1461,7 @@ end
   # Whether Windows reads *wide* as a DOS device: it resolves `NUL` or
   # `COM9` to `\\.\NUL` or `\\.\COM9`, and nothing else spelled without
   # that prefix resolves there. The longest such name is `\\.\CONOUT$`.
-  private def __iyi_dos_device?(wide : UInt16*) : Bool
+  @[Effect(:host_state)]; private def __iyi_dos_device?(wide : UInt16*) : Bool
     return false if wide[0] == 92_u16 && wide[1] == 92_u16
     full = Pointer(UInt16).malloc(16_u64)
     written = LibC.GetFullPathNameW(wide, 16, full, Pointer(Pointer(UInt16)).new(0_u64))
@@ -1439,7 +1478,7 @@ end
   # and a write handle asked for nothing, so reading a file while it was
   # still open came back as ERROR_SHARING_VIOLATION: that is what
   # `bench/io_exercise.iyi`'s flush check read as "cannot read".
-  def __iyi_open_read(path : UInt8*) : Int64
+  @[Effect(:file_read)]; def __iyi_open_read(path : UInt8*) : Int64
     wide = __iyi_wide_path(path)
     return -1_i64 if wide.address == 0_u64
     # GENERIC_READ, every share right, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL.
@@ -1454,7 +1493,7 @@ end
   # `File.write` panicked "cannot write" where POSIX writes a dotfile like
   # any other. Such a file is opened as it is and emptied, which keeps
   # its attributes.
-  def __iyi_open_write(path : UInt8*) : Int64
+  @[Effect(:file_write, :create)]; def __iyi_open_write(path : UInt8*) : Int64
     wide = __iyi_wide_path(path)
     return -1_i64 if wide.address == 0_u64
     # GENERIC_WRITE, every share right, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL.
@@ -1481,7 +1520,7 @@ end
   # on the file the call creates, the one bit of a POSIX mode Windows has;
   # the handle itself still writes, as POSIX's does. A hidden or system file
   # a truncating create refuses is emptied in place, as `__iyi_open_write` does.
-  def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
+  @[Effect(:file_read)]; def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
     wide = __iyi_wide_path(path)
     return -1_i64 if wide.address == 0_u64
     access = read ? -2147483648 : 0
@@ -1499,7 +1538,7 @@ end
     handle.address.to_i64
   end
 
-  def __iyi_close(fd : Int64) : Nil
+  @[Effect(:stdio)]; def __iyi_close(fd : Int64) : Nil
     LibC.CloseHandle(Pointer(Void).new(fd.to_u64))
   end
 
@@ -1517,7 +1556,7 @@ end
   # said it was a link and `File.delete` could not remove it, where POSIX
   # `unlink` removes a link whatever it points at. `RemoveDirectoryW` on
   # the link takes the link and leaves the directory it named.
-  def __iyi_unlink(path : UInt8*) : Int64
+  @[Effect(:file_write, :delete)]; def __iyi_unlink(path : UInt8*) : Int64
     wide = __iyi_wide_path(path)
     return -1_i64 if wide.address == 0_u64
     return 0_i64 if LibC.DeleteFileW(wide) != 0
@@ -1543,7 +1582,7 @@ end
   # locked, ERROR_LOCK_VIOLATION - came back from `File.read` as "", an
   # empty file with no word. A pipe whose writer has gone
   # (ERROR_BROKEN_PIPE, 109) and ERROR_HANDLE_EOF (38) are the end.
-  def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     read = uninitialized Int32
     if LibC.ReadFile(Pointer(Void).new(fd.to_u64), buffer,
          count.to_i32, pointerof(read), nil) == 0
@@ -1554,7 +1593,7 @@ end
     read.to_i64
   end
 
-  def __iyi_file_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_file_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
     written = uninitialized Int32
     if LibC.WriteFile(Pointer(Void).new(fd.to_u64), buffer,
          count.to_i32, pointerof(written), nil) == 0
@@ -1576,7 +1615,7 @@ end
 
   # The sixteen bytes `String#hash` is keyed with, read once per process
   # (#212).
-  def __iyi_hash_key : {UInt64, UInt64}
+  @[Effect(:primitive)]; def __iyi_hash_key : {UInt64, UInt64}
     key = {0_u64, 0_u64}
     raise "String#hash: RtlGenRandom answered no bytes" if LibIyiAdvapi32.RtlGenRandom(pointerof(key).as(Void*), 16_u32) == 0_u8
     key
@@ -1587,7 +1626,7 @@ end
   # buffer is too small, the count it needs with the terminator in it:
   # anything over what was offered is a refusal here and the caller
   # comes back with room.
-  def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
+  @[Effect(:cwd)]; def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
     wide = Pointer(UInt16).malloc(4096_u64)
     chars = LibC.GetCurrentDirectoryW(4096, wide)
     if chars > 4096
@@ -1613,7 +1652,7 @@ end
   # (two of them dumped), nothing outside could end them, and on a runner
   # the gate that runs it hung until the job was cancelled at 81 minutes.
   # With `TerminateProcess`, 0 in 1,150.
-  def __iyi_exit(status : Int32) : NoReturn
+  @[Effect(:exit)]; def __iyi_exit(status : Int32) : NoReturn
     IyiConsole.restore_vt
     __iyi_hold_runtime_for_exit
     LibC.TerminateProcess(LibC.GetCurrentProcess, status)
@@ -1653,7 +1692,7 @@ end
     fun random_get = __wasi_random_get(buffer : UInt8*, length : UInt32) : UInt16
   end
 
-  def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_write(fd : Int32, buffer : Void*, count : UInt64) : Int64
     iov = LibWasi::Ciovec.new(buf: buffer.as(UInt8*), buf_len: count.to_i32)
     written = uninitialized Int32
     if LibWasi.fd_write(fd, pointerof(iov), 1, pointerof(written)) != 0
@@ -1662,7 +1701,7 @@ end
     written.to_i64
   end
 
-  def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_read(fd : Int32, buffer : Void*, count : UInt64) : Int64
     iov = LibWasi::Ciovec.new(buf: buffer.as(UInt8*), buf_len: count.to_i32)
     read = uninitialized Int32
     if LibWasi.fd_read(fd, pointerof(iov), 1, pointerof(read)) != 0
@@ -1672,58 +1711,58 @@ end
   end
 
   # path_open needs a preopened directory fd this prelude does not have.
-  def __iyi_open_read(path : UInt8*) : Int64
+  @[Effect(:file_read)]; def __iyi_open_read(path : UInt8*) : Int64
     raise "File is not available on wasm32-wasi: path_open needs a preopened directory fd"
   end
 
-  def __iyi_open_write(path : UInt8*) : Int64
+  @[Effect(:file_write, :create)]; def __iyi_open_write(path : UInt8*) : Int64
     raise "File is not available on wasm32-wasi: path_open needs a preopened directory fd"
   end
 
-  def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
+  @[Effect(:file_read)]; def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
     raise "File is not available on wasm32-wasi: path_open needs a preopened directory fd"
   end
 
-  def __iyi_close(fd : Int64) : Nil
+  @[Effect(:stdio)]; def __iyi_close(fd : Int64) : Nil
   end
 
   # Like path_open, path_unlink_file needs a preopened directory fd and a path
   # relative to it. This prelude has no directory capability to pass.
-  def __iyi_unlink(path : UInt8*) : Int64
+  @[Effect(:file_write, :delete)]; def __iyi_unlink(path : UInt8*) : Int64
     raise "File.delete is not available on wasm32-wasi: path_unlink_file needs a preopened directory fd"
   end
 
-  def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_file_read(fd : Int64, buffer : Void*, count : UInt64) : Int64
     0_i64
   end
 
-  def __iyi_file_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
+  @[Effect(:stdio)]; def __iyi_file_write(fd : Int64, buffer : Void*, count : UInt64) : Int64
     -1_i64
   end
 
   # The sixteen bytes `String#hash` is keyed with, read once per process
   # (#212).
-  def __iyi_hash_key : {UInt64, UInt64}
+  @[Effect(:primitive)]; def __iyi_hash_key : {UInt64, UInt64}
     key = {0_u64, 0_u64}
     raise "String#hash: random_get answered an errno" if LibWasi.random_get(pointerof(key).as(UInt8*), 16_u32) != 0_u16
     key
   end
 
-  def __iyi_exit(status : Int32) : NoReturn
+  @[Effect(:exit)]; def __iyi_exit(status : Int32) : NoReturn
     LibWasi.proc_exit(status)
   end
 
   # WASI has `fd_fdstat_get` and a character-device filetype, which is as
   # close to a terminal as the sandbox gets. Nothing here asks yet, and a
   # guess would be the wrong kind of answer: no terminal, so no escapes.
-  def __iyi_isatty(fd : Int32) : Bool
+  @[Effect(:console)]; def __iyi_isatty(fd : Int32) : Bool
     false
   end
 
   # WASI has no working directory: a path is resolved against a
   # preopened directory capability, and the sandbox never names one to
   # the program. `Program.cwd` answers nil here.
-  def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
+  @[Effect(:cwd)]; def __iyi_getcwd(buffer : UInt8*, size : UInt64) : Int64
     -1_i64
   end
 {% elsif flag?(:wasm32) %}
@@ -2637,7 +2676,7 @@ require "./file"
       end
 
       @[NoInline]
-      def self.first_touch : UInt64
+      @[Effect(:collector)]; def self.first_touch : UInt64
         page = __iyi_mmap(DIR_LEN).address
         lock
         # The shared pages, made under the same lock the first time any
@@ -2668,7 +2707,7 @@ require "./file"
       # warm cushion), the page leaves the caches list, and the thread
       # allocates nothing after. A cache left behind pinned an arena per
       # class forever and cost every later sweep a walk of it.
-      def self.retire_cache : Nil
+      @[Effect(:collector)]; def self.retire_cache : Nil
         # A thread ends on its own fiber, outside every bracket: a
         # partition's record still installed here would be retired as if
         # it were the thread's.
@@ -2970,7 +3009,7 @@ require "./file"
         write64(@@cache + CACHE_REQUEST, 0_u64)
       end
 
-      def self.central : Pointer(UInt64)
+      @[Effect(:collector)]; def self.central : Pointer(UInt64)
         if @@central == 0
           @@central = __iyi_mmap(DIR_LEN).address
         end
@@ -2980,7 +3019,7 @@ require "./file"
       # A class's line (`CLASS_LINE`), mapped with the centre by the first
       # thread to reach the heap; mapped here only for a collection that
       # runs before any allocation did.
-      def self.class_line(index : Int32) : UInt64
+      @[Effect(:collector)]; def self.class_line(index : Int32) : UInt64
         @@classes = __iyi_mmap(CLASS_MAP).address if @@classes == 0
         @@classes &+ index.to_u64 &* CLASS_LINE
       end
@@ -3139,7 +3178,7 @@ require "./file"
         Pointer(Atomic(UInt64)).new(central.address + CENTRAL_ALLOCATED)
       end
 
-      def self.lock : Nil
+      @[Effect(:scheduler)]; def self.lock : Nil
         IyiRuntimeLock.lock
       end
 
@@ -3228,7 +3267,7 @@ require "./file"
       # instance, which codegen zeroes, and an atomic block `realloc`
       # copies into; atomicity is the `bits`' to say, `alloc_atomic`
       # clearing too.
-      def self.take(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
+      @[Effect(:collector)]; def self.take(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
         table = cache
         # The arithmetic on the way in and out is wrapping, addresses
         # included: a counter on a page cannot overflow, nor can an offset
@@ -3273,7 +3312,7 @@ require "./file"
       end
 
       @[NoInline]
-      def self.take_slow(table : Pointer(UInt64), size : UInt64, bytes : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
+      @[Effect(:collector)]; def self.take_slow(table : Pointer(UInt64), size : UInt64, bytes : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
         base = take_inside(table, bytes, clear, bits, type_id)
         # Born while a mark runs beside the program: black, and counted
         # alive in its arena, by the bytes asked for - the chunk's waste
@@ -3294,6 +3333,7 @@ require "./file"
       # and the trigger's paths - syscalls and all - were code every
       # allocation carried in its body.
       @[NoInline]
+      @[Effect(:collector)]
       def self.slice_full(slice : UInt64) : Nil
         # A partition's slice is its own debt, and its trigger its own
         # budget: the global trigger counts the shared heap's allocation
@@ -4223,7 +4263,9 @@ require "./file"
       # with `-Dgc_release_timing`, the time spent in them too, which is
       # two clock reads a call and a syscall each on Linux, so not by
       # default. `bench/release_pages.iyi` reads all four (issue #150).
-      def self.release_run(address : UInt64, length : UInt64) : Nil
+      # Classified as collector work like its callers; leaving the `fun`
+      # call unclassified makes every observed build not reusable (RG3).
+      @[Effect(:collector)]; def self.release_run(address : UInt64, length : UInt64) : Nil
         page = @@cache
         inside = page != 0 && read64(page + CACHE_INSIDE) != 0
         {% if flag?(:gc_release_timing) %}
@@ -4299,7 +4341,7 @@ require "./file"
 
       @@arena_dir : UInt64 = 0_u64
 
-      def self.arena_dir : UInt64
+      @[Effect(:collector)]; def self.arena_dir : UInt64
         if @@arena_dir == 0
           @@arena_dir = __iyi_mmap(DIR_SLOTS).address
           {% if flag?(:linux) %}
@@ -4331,7 +4373,7 @@ require "./file"
       # retried whatever the error was, a program filling arenas under a
       # 300 MB job limit spun at 100% CPU here and never ended. The middle
       # is reserved, not committed; `commit` charges it as it is carved.
-      def self.map_aligned : UInt64
+      @[Effect(:collector)]; def self.map_aligned : UInt64
         {% if flag?(:win32) %}
           races = 0
           loop do
@@ -4364,7 +4406,7 @@ require "./file"
       # short strings 995 MiB, out of memory under a 200 MB job limit with
       # a few kilobytes live. Elsewhere an untouched page is charged
       # nothing, and this is no call.
-      def self.commit(low : UInt64, high : UInt64) : Nil
+      @[Effect(:collector)]; def self.commit(low : UInt64, high : UInt64) : Nil
         {% if flag?(:win32) %}
           IyiRoots.fatal("iyi: out of memory\n") if LibC.VirtualAlloc(Pointer(Void).new(low), high - low, 0x1000_i32, 4_i32).address == 0_u64
         {% end %}
@@ -4395,7 +4437,7 @@ require "./file"
         IyiStat.get(IyiStat::ARENAS_MAPPED)
       end
 
-      def self.map_arena(index : Int32, owner : UInt64) : UInt64
+      @[Effect(:collector)]; def self.map_arena(index : Int32, owner : UInt64) : UInt64
         base = map_aligned
         {% if flag?(:linux) %}
           __iyi_madvise_nohuge(base, HUGE_AT)
@@ -4453,7 +4495,7 @@ require "./file"
 
       # A mapping of its own, never cleared: the kernel zeroed it, and the
       # first touch of each page is the caller's, inside its own loops.
-      def self.take_large(size : UInt64, bits : UInt64) : UInt64
+      @[Effect(:collector)]; def self.take_large(size : UInt64, bits : UInt64) : UInt64
         mapped = size + LARGE_USER
         base = __iyi_mmap(mapped).address
         write64(base + OFF_MAP, mapped)
@@ -4474,7 +4516,7 @@ require "./file"
       # and its arena's sweep has not reached yet is the exception, and
       # takes the lock (`free_unswept`). The sweep does not come through
       # here; it has `free_batch`, to the centre.
-      def self.free(pointer : Void*) : Nil
+      @[Effect(:collector)]; def self.free(pointer : Void*) : Nil
         return if pointer.address == 0
         arena = arena_of(pointer.address)
         if arena != 0
@@ -4658,7 +4700,7 @@ require "./file"
 
       # Under the lock, whoever holds it: `free` takes it for a mutator's
       # large chunk, the sweep already has it.
-      def self.free_large(head : UInt64) : Nil
+      @[Effect(:collector)]; def self.free_large(head : UInt64) : Nil
         base = head - LARGE_HEAD
         previous = 0_u64
         node = @@large
@@ -4778,7 +4820,7 @@ require "./file"
 
       # The mappings the last scavenge let go, handed back: the collector's
       # own time after it resumed the program.
-      def self.unmap_released : Nil
+      @[Effect(:collector)]; def self.unmap_released : Nil
         arena = @@to_unmap
         @@to_unmap = 0_u64
         while arena != 0
@@ -4806,7 +4848,7 @@ require "./file"
       # travel: the caller's "no pointers in here" is about the data, and
       # the data is what the copy carries — dropping the flag on growth is
       # how an `Array(Int32)` buffer got word-scanned at every doubling.
-      def self.realloc(pointer : Void*, size : UInt64) : Void*
+      @[Effect(:collector)]; def self.realloc(pointer : Void*, size : UInt64) : Void*
         return alloc(size) if pointer.address == 0
         old_size = size_of(pointer.address)
         byte = meta_of(pointer.address)
@@ -5170,7 +5212,7 @@ require "./file"
       # a spill buffer taken from `IyiHeap` would be a chunk the scan then
       # reports as a live object, and a chunk holding a raw pointer to
       # everything every register held.
-      def self.spill : UInt64
+      @[Effect(:collector)]; def self.spill : UInt64
         @@spill = __iyi_mmap(PAGE).address if @@spill == 0
         @@spill
       end
@@ -5190,7 +5232,7 @@ require "./file"
       # that the register holding it can never be one of the registers being
       # captured. Slots left over from an earlier spill stay as they were,
       # which retains a little more than it must and never less.
-      def self.spill_registers : Nil
+      @[Effect(:collector)]; def self.spill_registers : Nil
         buffer = spill
         {% if flag?(:win32) && flag?(:x86_64) %}
           asm("movq %rbx, 0($0)
@@ -5222,7 +5264,7 @@ require "./file"
       # Taken here rather than from the address of a local because a local's
       # address is above whatever the current frame has already pushed, and
       # the difference is exactly the words a compiler spills a pointer into.
-      def self.stack_pointer : UInt64
+      @[Effect(:collector)]; def self.stack_pointer : UInt64
         value = uninitialized UInt64
         {% if flag?(:x86_64) %}
           asm("movq %rsp, $0" : "=r"(value) :: : "volatile")
@@ -5299,13 +5341,13 @@ require "./file"
         # What this number is: the address one past the highest byte of the
         # main thread's stack, which is what `pthread_get_stackaddr_np`
         # returns and is the true base rather than an approximation of it.
-        def self.discover_stack_base : UInt64
+        @[Effect(:collector)]; def self.discover_stack_base : UInt64
           base = LibC.pthread_get_stackaddr_np(LibC.pthread_self).address
           fatal("iyi: stack base unavailable\n") if base == 0
           base
         end
       {% elsif flag?(:win32) %}
-        def self.discover_stack_base : UInt64
+        @[Effect(:collector)]; def self.discover_stack_base : UInt64
           base = uninitialized UInt64
           {% if flag?(:x86_64) %}
             asm("movq %gs:0x08, $0" : "=r"(base) :: : "volatile")
@@ -5316,7 +5358,7 @@ require "./file"
           base
         end
 
-        def self.stack_limit : UInt64
+        @[Effect(:collector)]; def self.stack_limit : UInt64
           limit = uninitialized UInt64
           {% if flag?(:x86_64) %}
             asm("movq %gs:0x10, $0" : "=r"(limit) :: : "volatile")
@@ -5326,7 +5368,7 @@ require "./file"
           limit
         end
 
-        def self.current_teb : UInt64
+        @[Effect(:collector)]; def self.current_teb : UInt64
           teb = uninitialized UInt64
           {% if flag?(:x86_64) %}
             asm("movq %gs:0x30, $0" : "=r"(teb) :: : "volatile")
@@ -5367,7 +5409,7 @@ require "./file"
         # integer registers from Rax at 120 through Rip at 248. Rsp is not
         # spilled — it is the answer, and the range above it is the stack
         # the collector walks.
-        def self.capture_thread_registers(thread_handle : Void*, out_spill : UInt64) : UInt64
+        @[Effect(:collector)]; def self.capture_thread_registers(thread_handle : Void*, out_spill : UInt64) : UInt64
           ctx_buf = uninitialized UInt8[1280]
           addr = pointerof(ctx_buf).address + 15_u64
           ctx_addr = addr - (addr & 15_u64)
@@ -5426,7 +5468,7 @@ require "./file"
         # a program whose first collection came after it had spawned
         # thousands of tasks - two mappings each, a stack and its guard -
         # died at that collection with "no [stack] line".
-        def self.discover_stack_base : UInt64
+        @[Effect(:collector)]; def self.discover_stack_base : UInt64
           buffer = __iyi_mmap(MAPS).address
           handle = __iyi_open_read("/proc/self/maps".to_unsafe)
           fatal("iyi: /proc/self/maps unreadable\n") if handle < 0
@@ -5558,7 +5600,7 @@ require "./file"
         # `__DATA_CONST` is optional because a binary may genuinely have none;
         # `__DATA` is not, because every binary has one and its absence means
         # the walk is wrong rather than the binary unusual.
-        def self.discover_globals : Nil
+        @[Effect(:collector)]; def self.discover_globals : Nil
           header = LibC._dyld_get_image_header(0).address
           fatal("iyi: no Mach header for the main image\n") if header == 0
           fatal("iyi: main image is not 64-bit Mach-O\n") if IyiHeap.read64(header) & 0xFFFFFFFF_u64 != 0xFEEDFACF_u64
@@ -5591,7 +5633,7 @@ require "./file"
           @@found_globals = 1_u64
         end
       {% elsif flag?(:win32) %}
-        def self.discover_globals : Nil
+        @[Effect(:collector)]; def self.discover_globals : Nil
           dos_header = LibC.GetModuleHandleA(nil).address
           fatal("iyi: no module handle for main image\n") if dos_header == 0
           fatal("iyi: main image is not PE\n") if (IyiHeap.read64(dos_header) & 0xFFFF_u64) != 0x5A4D_u64
@@ -5628,7 +5670,7 @@ require "./file"
         # than two. There is no second range on this target, which is why
         # `@@const_low` and `@@const_high` stay zero here and the scan skips
         # an empty range rather than needing a flag to tell it to.
-        def self.discover_globals : Nil
+        @[Effect(:collector)]; def self.discover_globals : Nil
           {% if flag?(:musl) %}
             low = pointerof(LibIyiImage.__bss_start).address
           {% else %}
@@ -6087,6 +6129,7 @@ require "./file"
       # libSystem's clock_gettime_nsec_np for CLOCK_MONOTONIC_RAW, the
       # scheduler's own clock and for its reason: a pause is microseconds,
       # and 6 would report it in whole ones.
+      @[Effect(:collector)]
       def self.now_ns : UInt64
         {% if flag?(:linux) %}
           IyiClock.monotonic_ns
@@ -6177,7 +6220,7 @@ require "./file"
       # here at once would each map a page and count on different ones -
       # the first concurrent collection hung that way, its helpers ready
       # on a page the collector never read.
-      def self.pool : UInt64
+      @[Effect(:collector)]; def self.pool : UInt64
         @@pool = __iyi_mmap(4096_u64).address if @@pool == 0
         @@pool
       end
@@ -6200,7 +6243,7 @@ require "./file"
       # from a fresh piece. Under the pool lock, the only popper; the
       # pushers are lock-free (`free_batch`), so the pop is a
       # compare-and-set too.
-      def self.new_batch : UInt64
+      @[Effect(:collector)]; def self.new_batch : UInt64
         free = pool_word(POOL_FREE)
         while true
           head = free.value.get
@@ -6264,7 +6307,7 @@ require "./file"
       W_LINE = 2048_u64
       @@worker_pages : UInt64 = 0_u64
 
-      def self.worker : UInt64
+      @[Effect(:collector)]; def self.worker : UInt64
         w = @@worker
         if w == 0
           w = __iyi_mmap(4096_u64).address
@@ -6285,7 +6328,7 @@ require "./file"
       # any depth spills past SPILL_AT with helpers - so a copy is what
       # it costs, once per doubling. Answers the mapping.
       @[NoInline]
-      def self.grow_stack(w : UInt64, need : UInt64) : UInt64
+      @[Effect(:collector)]; def self.grow_stack(w : UInt64, need : UInt64) : UInt64
         cap = IyiHeap.read64(w + W_CAP)
         return IyiHeap.read64(w + W_STACK) if need <= cap
         grown = cap
@@ -6337,7 +6380,7 @@ require "./file"
       # it, and swept what hung off it. gc_race's live churn lost its
       # list's tail that way on Windows in one run in forty; every run
       # that faulted had started a mark with a chunk gray.
-      def self.barrier(address : UInt64, words : UInt64) : Nil
+      @[Effect(:collector)]; def self.barrier(address : UInt64, words : UInt64) : Nil
         return if LibIyiGCTable.__iyi_marking == 0_u8
         index = 0_u64
         while index < words
@@ -6390,7 +6433,7 @@ require "./file"
       # mark waits for it, and what it has not scanned it publishes back.
       ASSIST_OBJECTS = 1024_u64
 
-      def self.assist : Nil
+      @[Effect(:collector)]; def self.assist : Nil
         return if LibIyiGCTable.__iyi_marking == 0_u8
         w = worker
         active = pool_word(POOL_ACTIVE)
@@ -6514,7 +6557,7 @@ require "./file"
       DONATE_EVERY = 256_u64
 
       # BATCH entries off the top of this stack into the pool.
-      def self.spill(w : UInt64) : Nil
+      @[Effect(:collector)]; def self.spill(w : UInt64) : Nil
         stack = IyiHeap.read64(w + W_STACK)
         len = IyiHeap.read64(w + W_LEN) - BATCH
         publish(stack + len * 8_u64, BATCH)
@@ -6654,7 +6697,7 @@ require "./file"
       # rather than trusted.
       @@layouts : UInt64 = 0_u64
 
-      def self.layouts_table : UInt64
+      @[Effect(:collector)]; def self.layouts_table : UInt64
         @@layouts = IyiHeap.read64(pointerof(LibIyiGCTable.__iyi_gc_layouts).address) if @@layouts == 0
         @@layouts
       end
@@ -7106,7 +7149,7 @@ require "./file"
       end
 
       # A spin's breath: the CPU's pause hint, no syscall.
-      def self.spin_pause : Nil
+      @[Effect(:collector)]; def self.spin_pause : Nil
         {% if flag?(:x86_64) %}
           asm("pause" :::: "volatile")
         {% else %}
@@ -7148,7 +7191,7 @@ require "./file"
 
       # A helper's whole life: park on the generation, drain, fold its
       # accounts, count itself done, park again.
-      def self.helper_main(seen : UInt64) : Nil
+      @[Effect(:collector)]; def self.helper_main(seen : UInt64) : Nil
         w = worker
         while true
           seen = wait_generation(seen)
@@ -7284,7 +7327,7 @@ require "./file"
         # futex wake of fifteen threads is microseconds, and a per-helper
         # park that woke only the helpers a mark asked let a helper miss a
         # generation and the mark wait forever (`helper_main` says how).
-        def self.wait_generation(seen : UInt64) : UInt64
+        @[Effect(:collector)]; def self.wait_generation(seen : UInt64) : UInt64
           word = pool_word(POOL_GENERATION)
           spun = spin_for_generation(word, seen)
           return spun if spun != seen
@@ -7294,7 +7337,7 @@ require "./file"
           now
         end
 
-        def self.wake_helpers : Nil
+        @[Effect(:collector)]; def self.wake_helpers : Nil
           __iyi_conc_syscall6(IYI_SYS_FUTEX, (pool + POOL_GENERATION).to_i64, IYI_FUTEX_WAKE, 1000000_i64, 0_i64, 0_i64, 0_i64)
         end
 
@@ -7314,7 +7357,7 @@ require "./file"
         # and the next wait takes it, reads the word, and sleeps again.
         @@doorbell : UInt64 = 0_u64
 
-        def self.doorbell : Void*
+        @[Effect(:collector)]; def self.doorbell : Void*
           # Made by `start_helpers`, under the runtime lock, before any
           # helper exists to wait on it.
           if @@doorbell == 0_u64
@@ -7324,7 +7367,7 @@ require "./file"
           Pointer(Void).new(@@doorbell)
         end
 
-        def self.wait_generation(seen : UInt64) : UInt64
+        @[Effect(:collector)]; def self.wait_generation(seen : UInt64) : UInt64
           word = pool_word(POOL_GENERATION)
           spun = spin_for_generation(word, seen)
           return spun if spun != seen
@@ -7337,7 +7380,7 @@ require "./file"
           now
         end
 
-        def self.wake_helpers : Nil
+        @[Effect(:collector)]; def self.wake_helpers : Nil
           asleep = pool_word(POOL_SLEEPERS).value.get
           LibC.ReleaseSemaphore(doorbell, asleep.unsafe_to_i32, nil) if asleep > 0_u64
         end
@@ -7392,7 +7435,7 @@ require "./file"
         # collector's next wake. The futex's wake checks its arguments and
         # calls `__ulock_wake`, read off its disassembly: one system call,
         # holding nothing.
-        def self.wait_generation(seen : UInt64) : UInt64
+        @[Effect(:collector)]; def self.wait_generation(seen : UInt64) : UInt64
           word = pool_word(POOL_GENERATION)
           spun = spin_for_generation(word, seen)
           return spun if spun != seen
@@ -7405,7 +7448,7 @@ require "./file"
           now
         end
 
-        def self.wake_helpers : Nil
+        @[Effect(:collector)]; def self.wake_helpers : Nil
           return if pool_word(POOL_SLEEPERS).value.get == 0_u64
           LibC.os_sync_wake_by_address_all(pool_word(POOL_GENERATION).as(Void*), 8_u64, 0_u32)
         end
@@ -8201,7 +8244,7 @@ require "./file"
       # after otherwise, the straddler being live or a list's. Cut at
       # every slice's end, the page a slice ended in was neither run's:
       # one page in sixteen lost, and every warm run a slice long.
-      def self.close_run(arena : UInt64, chunk : UInt64, low : UInt64, high : UInt64, batch_head : UInt64, batch_before : UInt64) : UInt64
+      @[Effect(:collector)]; def self.close_run(arena : UInt64, chunk : UInt64, low : UInt64, high : UInt64, batch_head : UInt64, batch_before : UInt64) : UInt64
         first = IyiHeap.arena_first(arena)
         page_low = (low + IyiHeap::PAGE - 1_u64) & (0_u64 &- IyiHeap::PAGE)
         continuing = low > first && (IyiHeap.page_idle?(arena, low - chunk) || IyiHeap.page_listed?(arena, low - chunk))
@@ -8338,6 +8381,7 @@ require "./file"
       IDLE_NS = 1000000000_u64
 
       # When this epoch began, read by the refill for its stamp.
+      @[Effect(:runtime_timing)]
       def self.epoch_ns : UInt64
         IyiStat.get(IyiStat::EPOCH_NS)
       end
@@ -8373,7 +8417,7 @@ require "./file"
       # handed out and its own straddlers are below every carve's reach
       # (`close_run`, `IyiHeap.reopen_in`); a page aged later has no such
       # order to lean on, so it leans on nothing.
-      def self.age_idle(arena : UInt64, low : UInt64, high : UInt64) : Nil
+      @[Effect(:collector)]; def self.age_idle(arena : UInt64, low : UInt64, high : UInt64) : Nil
         return if IyiHeap.read64(arena + IyiHeap::OFF_WARM) == 0
         chunk = IyiHeap.arena_chunk(arena)
         idle = class_idle?(chunk)
@@ -8884,6 +8928,7 @@ require "./file"
       # that watches for such a mark still gets to say so.
       HOLD_NS = 100000000_u64
 
+      @[Effect(:collector)]
       def self.hold : Nil
         IyiStat.add(IyiStat::HOLDS, 1_u64)
         until_ns = now_ns + HOLD_NS
@@ -8936,6 +8981,7 @@ require "./file"
       # nothing. A stop already asked of it in the bracket is paid first,
       # as `leave` pays it. Inside a nested bracket it gives its core away
       # instead.
+      @[Effect(:collector)]
       def self.hold_wait : Nil
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           page = IyiHeap.cache_page
@@ -8984,6 +9030,7 @@ require "./file"
 
       # Under the runtime lock, as a collection begins: Windows' doorbell
       # and darwin's kqueue, made once, before any thread can hold.
+      @[Effect(:collector)]
       def self.make_holder_bell : Nil
         return if @@holder_bell != 0_u64
         {% if flag?(:win32) && flag?(:x86_64) %}
@@ -8999,6 +9046,7 @@ require "./file"
       # woken - darwin's sleepers wake on their own a tenth of a
       # millisecond in. The world is still stopped, and a sleeper woken
       # runs when it is released.
+      @[Effect(:collector)]
       def self.let_go_holders : Nil
         IyiStat.add(IyiStat::LET_GO, 1_u64)
         asleep = Pointer(Atomic(UInt64)).new(pointerof(@@holders_asleep).address).value.get
@@ -9026,9 +9074,9 @@ require "./file"
       # the budget sweeps slices of it too, each handed to its class's
       # centre (`sweep_one`), until the mark has begun, a stop is asked
       # for, or every arena left is swept or inside another walker's
-      # slice - Go's gcStart has every goroutine that crosses the trigger
-      # sweep the spans left before the cycle begins. Inside the
-      # allocator's bracket, as every allocating thread's sweep is.
+      # slice. Like Go's gcStart, each allocating thread helps sweep,
+      # inside the allocator's bracket.
+      @[Effect(:collector)]
       def self.sweep_assist : Nil
         while @@collecting && LibIyiGCTable.__iyi_marking == 0_u8
           break if IyiHeap.stop_requested?
@@ -9114,6 +9162,7 @@ require "./file"
       # was spent after the last `ResumeThread`, at the drop, the
       # collecting thread's cycle count moving about 0.001 a nanosecond
       # there against 4.25 while it marks.
+      @[Effect(:collector)]
       def self.unlock_released : Nil
         IyiRuntimeLock.unlock
         {% if flag?(:win32) && flag?(:x86_64) %}
@@ -9154,6 +9203,7 @@ require "./file"
       end
 
       @[NoInline]
+      @[Effect(:collector)]
       def self.collect_cleared : Nil
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           IyiThread.await_turns
@@ -9392,7 +9442,7 @@ require "./file"
         # millisecond, which is no part of a stop. Answers whether the
         # mark went beside the program; false means it finished inside
         # this stop and the caller owns the rest of the collection.
-        def self.start_concurrent : Bool
+        @[Effect(:collector)]; def self.start_concurrent : Bool
           # The last epoch's debt — an unswept arena wears the last mark's
           # colours, which this mark cannot read — is paid here, under the
           # lock the allocator's own sweep takes, before the world stops:
@@ -9580,7 +9630,7 @@ require "./file"
         FINISH_RETRIES = 8_u64
         FINISH_SCAN = 256_u64
 
-        def self.finish_concurrent : UInt64
+        @[Effect(:collector)]; def self.finish_concurrent : UInt64
           attempts = 0_u64
           retries_ns = 0_u64
           longest_retry = 0_u64
@@ -9816,15 +9866,15 @@ require "./file"
         IyiStat.get(IyiStat::ARENAS_RELEASED)
       end
 
-      def self.pause_last_ns : UInt64
+      @[Effect(:runtime_timing)]; def self.pause_last_ns : UInt64
         IyiStat.get(IyiStat::PAUSE_LAST_NS)
       end
 
-      def self.pause_max_ns : UInt64
+      @[Effect(:runtime_timing)]; def self.pause_max_ns : UInt64
         IyiStat.get(IyiStat::PAUSE_MAX_NS)
       end
 
-      def self.pause_total_ns : UInt64
+      @[Effect(:runtime_timing)]; def self.pause_total_ns : UInt64
         IyiStat.get(IyiStat::PAUSE_TOTAL_NS)
       end
     end
@@ -9887,7 +9937,7 @@ require "./file"
       # Allocate-and-copy rather than growth in place, because nothing frees
       # and the old size rides in the sixteen bytes under the pointer, which
       # is the only place that knows it.
-      def self.realloc(pointer : Void*, size : UInt64) : Void*
+      @[Effect(:collector)]; def self.realloc(pointer : Void*, size : UInt64) : Void*
         return alloc(size) if pointer.address == 0
         old_size = Pointer(UInt64).new(pointer.address - 16).value
         new_pointer = alloc(size)
@@ -10279,7 +10329,7 @@ require "./file"
           end
         end
 
-        def self.take(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
+        @[Effect(:collector)]; def self.take(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
           init_if_needed
           size = 8_u64 if size == 0_u64
           remainder = size.to_i64 % 8_i64
@@ -10346,7 +10396,7 @@ require "./file"
           p_obj
         end
 
-        def self.take_large(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
+        @[Effect(:collector)]; def self.take_large(size : UInt64, clear : Bool, bits : UInt64, type_id : UInt64) : UInt64
           total = size + LARGE_OVERHEAD
           pages = (total + PAGE - 1_u64).unsafe_div(PAGE)
           prev = LibWasmMem.memory_grow(0, pages.to_i32)
@@ -10393,7 +10443,7 @@ require "./file"
           Pointer(Void).new(take(size, !atomic, flags, type_id))
         end
 
-        def self.realloc(pointer : Void*, size : UInt64) : Void*
+        @[Effect(:collector)]; def self.realloc(pointer : Void*, size : UInt64) : Void*
           return alloc(size) if pointer.address == 0_u64
           old_size = read64(pointer.address - 24_u64)
           new_ptr = alloc(size)
@@ -10640,7 +10690,7 @@ require "./file"
           self.push_queue(base)
         end
 
-        def self.layouts_table : UInt64
+        @[Effect(:collector)]; def self.layouts_table : UInt64
           pointerof(LibIyiGCTable.__iyi_gc_layouts).address == 0_u64 ? 0_u64 : LibIyiGCTable.__iyi_gc_layouts.address
         end
 
@@ -10803,7 +10853,7 @@ require "./file"
         def self.born_during_mark(base : UInt64, size : UInt64) : Nil
         end
 
-        def self.assist : Nil
+        @[Effect(:collector)]; def self.assist : Nil
         end
 
         def self.collect_if_due : Nil
@@ -10846,7 +10896,7 @@ require "./file"
           alloc(size)
         end
 
-        def self.realloc(pointer : Void*, size : UInt64) : Void*
+        @[Effect(:collector)]; def self.realloc(pointer : Void*, size : UInt64) : Void*
           return alloc(size) if pointer.address == 0
           old_size = Pointer(UInt64).new(pointer.address - 16).value
           new_pointer = alloc(size)
@@ -11175,7 +11225,7 @@ require "./file"
     # A zeroed page from the kernel: the allocator's own mapping where
     # there is one, else the call the fiber stacks are mapped with
     # (`IyiFiber#map_stack`), which every scheduler build has.
-    private def self.map : UInt64
+    @[Effect(:memory)]; private def self.map : UInt64
       {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
         __iyi_mmap(PAGE).address
       {% elsif flag?(:win32) %}
@@ -11324,7 +11374,7 @@ end
 # out - a literal's - is never cleared, because nothing frees it.
 {% if flag?(:gc_boehm) %}
   class IyiWeak
-    def self.cell(address : UInt64) : Pointer(UInt64)
+    @[Effect(:collector)]; def self.cell(address : UInt64) : Pointer(UInt64)
       cell = __iyi_malloc_atomic64(8_u64).as(Pointer(UInt64))
       cell.value = address
       # libgc wants the block's own start, eight bytes under the address
@@ -11354,7 +11404,7 @@ end
     # its unit alone holds, and a cell is read by the pause's clear; and a
     # cell whose target is a partition's `LOCAL` chunk is listed on that
     # partition too, whose local sweep clears it when it frees the target.
-    def self.cell(address : UInt64) : Pointer(UInt64)
+    @[Effect(:collector)]; def self.cell(address : UInt64) : Pointer(UInt64)
       {% if flag?(:heap_partitions) && !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
         cell = IyiHeap.alloc_shared(8_u64, true).as(Pointer(UInt64))
       {% else %}
@@ -11373,7 +11423,7 @@ end
     # allocated with the lock released - an allocation may collect, and
     # the collection takes the lock - and installed only if nobody grew the
     # table meanwhile.
-    def self.register(cell : UInt64) : Nil
+    @[Effect(:collector)]; def self.register(cell : UInt64) : Nil
       while true
         lock
         if @@count < @@capacity
@@ -11431,7 +11481,7 @@ end
 
     {% if flag?(:wasm32) %}
       # One thread, and a collection only where an allocation is made.
-      def self.lock : Nil
+      @[Effect(:scheduler)]; def self.lock : Nil
       end
 
       def self.unlock : Nil
@@ -11444,7 +11494,7 @@ end
         base == 0_u64 || IyiMark.colour(base) != IyiMark::WHITE
       end
     {% else %}
-      def self.lock : Nil
+      @[Effect(:scheduler)]; def self.lock : Nil
         IyiRuntimeLock.lock
       end
 
@@ -11467,7 +11517,7 @@ end
 {% else %}
   class IyiWeak
     # Nothing here collects, so nothing is ever cleared.
-    def self.cell(address : UInt64) : Pointer(UInt64)
+    @[Effect(:collector)]; def self.cell(address : UInt64) : Pointer(UInt64)
       cell = __iyi_malloc_atomic64(8_u64).as(Pointer(UInt64))
       cell.value = address
       cell
@@ -11642,7 +11692,7 @@ end
   # a dividend wider than a word printed 1554060939272 and exited 0, while
   # the same program at -O0 faulted. The word travels through an empty asm
   # here, so the divide that follows is a real one.
-  def __iyi_win_opaque_word(word : UInt64) : UInt64
+  @[Effect(:primitive)]; def __iyi_win_opaque_word(word : UInt64) : UInt64
     answer = uninitialized UInt64
     asm("" : "=r"(answer) : "r"(word) :: "volatile")
     answer
@@ -11827,7 +11877,7 @@ end
   # the stack — `movsd qword ptr [rsp + 8], xmm0` and back — and the high
   # lane went with it. These functions therefore return nothing, and the
   # register is the answer.
-  def __iyi_win_answer128(value : Void*) : Nil
+  @[Effect(:primitive)]; def __iyi_win_answer128(value : Void*) : Nil
     asm("movups ($0), %xmm0" :: "r"(value) : "xmm0" : "volatile")
     nil
   end
@@ -11958,7 +12008,7 @@ end
   # in 200 runs of `thread_exercise`'s end-under-collections step on a
   # runner, until its threads were resumed from outside. Bounded, so a
   # panic raised by the lock's own holder still ends the program.
-  def __iyi_hold_runtime_for_exit : Nil
+  @[Effect(:threads)]; def __iyi_hold_runtime_for_exit : Nil
     tries = 0
     while tries < 10_000_000 && !IyiRuntimeLock.try_lock
       {% if flag?(:x86_64) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
@@ -12347,7 +12397,7 @@ end
   end
 {% end %}
 
-def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) : NoReturn
+@[Effect(:panic_backtrace)]; def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) : NoReturn
   {% if flag?(:darwin) %}
     callstack = uninitialized Void*[64]
     count = LibC.backtrace(pointerof(callstack).as(Void**), 64)
@@ -12390,10 +12440,51 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
   {% if flag?(:darwin) %}
     if r = IyiPanic.resolver
       r.call(count > 1 ? pointerof(callstack).as(Void**) + 1 : pointerof(callstack).as(Void**), count > 1 ? count - 1 : count)
-    elsif count > 1
-      LibC.backtrace_symbols_fd(pointerof(callstack).as(Void**) + 1, count - 1, 2)
-    elsif count == 1
-      LibC.backtrace_symbols_fd(pointerof(callstack).as(Void**), 1, 2)
+    elsif count > 0
+      frames = count > 1 ? pointerof(callstack).as(Void**) + 1 : pointerof(callstack).as(Void**)
+      total_frames = count > 1 ? count - 1 : count
+      {% if flag?(:aarch64) %}
+        fiber_marker = __iyi_fiber_entry_address
+      {% else %}
+        fiber_marker = 0_u64
+      {% end %}
+      frame_idx = 0
+      while frame_idx < total_frames
+        addr = frames[frame_idx]
+        info = uninitialized LibC::DlInfo
+        if LibC.dladdr(addr, pointerof(info)) != 0
+          fname = info.dli_fname
+          if fname.address != 0_u64 && fname.value != 0_u8
+            slash = fname
+            p = fname
+            while p.value != 0_u8
+              slash = p + 1_i64 if p.value == 47_u8
+              p = p + 1_i64
+            end
+            fname = slash
+          else
+            fname = "???".to_unsafe
+          end
+
+          if info.dli_sname.address != 0_u64 && info.dli_sname.value != 0_u8
+            sname = info.dli_sname
+            offset = addr.address - info.dli_saddr.address
+            if offset == 0_u64 && addr.address != fiber_marker && addr.address > 0_u64
+              info2 = uninitialized LibC::DlInfo
+              if LibC.dladdr(Pointer(Void).new(addr.address - 1_u64), pointerof(info2)) != 0 && info2.dli_sname.address != 0_u64 && info2.dli_sname.value != 0_u8
+                sname = info2.dli_sname
+                offset = addr.address - info2.dli_saddr.address
+              end
+            end
+            LibC.dprintf(2, "%-4d%-35s 0x%016lx %s + %lu\n".to_unsafe, frame_idx, fname, addr.address, sname, offset)
+          else
+            LibC.dprintf(2, "%-4d%-35s 0x%016lx %s + %lu\n".to_unsafe, frame_idx, fname, addr.address, fname, addr.address - info.dli_fbase.address)
+          end
+        else
+          LibC.dprintf(2, "%-4d%-35s 0x%016lx 0x0 + %lu\n".to_unsafe, frame_idx, "???".to_unsafe, addr.address, addr.address)
+        end
+        frame_idx += 1
+      end
     end
   {% end %}
   {% if flag?(:win32) && flag?(:x86_64) %}
@@ -12425,6 +12516,9 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
     __iyi_flush_std
     __iyi_exit(1)
   {% else %}
+    {% if flag?(:iyi_observe) %}
+      Std::Observe.abandon_frames
+    {% end %}
     IyiDefers.drain
     __iyi_flush_std
     __iyi_exit(1)
@@ -12441,7 +12535,7 @@ end
 # The assertions that name their values - `assert_eq`, `assert_error`,
 # `assert_panics`, named `test` cases and the rest - with no import, as
 # `assert` has none.
-require "./testing"
+require "./testing"; {% if flag?(:iyi_observe) %} require "../std/observe" {% end %}
 
 # What a wait answers when its task was cancelled (III.4.2): an error
 # member. Here, not in the runtime: `IyiSocket` answers it on every target.
@@ -12550,7 +12644,7 @@ end
   # Windows documents a zero count as a failed call, so the empty string is
   # answered here rather than asked about — a variable whose value is `""`
   # exists, and `ENV["X"] = ""` is a write the platform keeps.
-  def __iyi_win_env_wide(text : UInt8*, bytes : Int32) : UInt16*
+  @[Effect(:primitive)]; def __iyi_win_env_wide(text : UInt8*, bytes : Int32) : UInt16*
     if bytes == 0
       empty = Pointer(UInt16).malloc(1_u64)
       empty[0] = 0_u16
@@ -12568,7 +12662,7 @@ end
     wide
   end
 
-  def __iyi_win_env_text(wide : UInt16*, count : Int32) : String | Nil
+  @[Effect(:primitive)]; def __iyi_win_env_text(wide : UInt16*, count : Int32) : String | Nil
     return "" if count == 0
     needed = LibC.WideCharToMultiByte(65001, 128, wide, count, Pointer(UInt8).new(0_u64), 0,
       Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
@@ -12577,6 +12671,10 @@ end
       LibC.WideCharToMultiByte(65001, 128, wide, count, target, needed,
         Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
     end
+  end
+
+  @[Effect(:primitive)]; def __iyi_win_command_line : UInt16*
+    LibC.GetCommandLineW
   end
 
   # ERROR_ENVVAR_NOT_FOUND, which is the one thing a zero answer from
@@ -12595,7 +12693,7 @@ end
   # 256 characters is one call for every ordinary variable and two for
   # `PATH`; the retry asks for exactly what the first call said it needed,
   # so it repeats only if something grew the value in between.
-  def __iyi_win_env_get(name : UInt8*, name_bytes : Int32) : String | Nil
+  @[Effect(:env_get)]; def __iyi_win_env_get(name : UInt8*, name_bytes : Int32) : String | Nil
     wide = __iyi_win_env_wide(name, name_bytes)
     return nil if wide.address == 0_u64
     room = 256
@@ -12620,7 +12718,7 @@ end
   # false rather than raising when the name or the value is not UTF-8,
   # because the caller in `src/std/env.iyi` is the one that knows whether
   # that is a refusal or a nil.
-  def __iyi_win_env_set(name : UInt8*, name_bytes : Int32, value : UInt8*, value_bytes : Int32) : Bool
+  @[Effect(:env_all)]; def __iyi_win_env_set(name : UInt8*, name_bytes : Int32, value : UInt8*, value_bytes : Int32) : Bool
     wide_name = __iyi_win_env_wide(name, name_bytes)
     return false if wide_name.address == 0_u64
     wide_value = __iyi_win_env_wide(value, value_bytes)
@@ -12628,7 +12726,7 @@ end
     LibIyiEnv.SetEnvironmentVariableW(wide_name, wide_value) != 0
   end
 
-  def __iyi_win_env_unset(name : UInt8*, name_bytes : Int32) : Bool
+  @[Effect(:env_all)]; def __iyi_win_env_unset(name : UInt8*, name_bytes : Int32) : Bool
     wide_name = __iyi_win_env_wide(name, name_bytes)
     return false if wide_name.address == 0_u64
     LibIyiEnv.SetEnvironmentVariableW(wide_name, Pointer(UInt16).new(0_u64)) != 0
@@ -12677,11 +12775,11 @@ end
   # it finds, with no lock (std/env). With a plain store arm64 may make the
   # install visible to another core before the entries written into the
   # table: the architecture allows it, no run has shown it.
-  def __iyi_environ : UInt8**
+  @[Effect(:env_all)]; def __iyi_environ : UInt8**
     Pointer(UInt8*).new(Pointer(Atomic(UInt64)).new(pointerof(LibIyiEnv.environ).address).value.get)
   end
 
-  def __iyi_set_environ(entries : UInt8**) : Nil
+  @[Effect(:env_all)]; def __iyi_set_environ(entries : UInt8**) : Nil
     IyiEnvironTable.hold(entries)
     Pointer(Atomic(UInt64)).new(pointerof(LibIyiEnv.environ).address).value.set(entries.address)
     nil
@@ -12748,7 +12846,7 @@ class Program
       # backslash with no quote after it is a backslash. Inside quotes,
       # `""` is a literal quote — the rule that lets a quoted argument
       # carry one.
-      line = LibC.GetCommandLineW
+      line = __iyi_win_command_line
       return [] of String if line.address == 0_u64
       result = [] of String
       # One buffer for the argument being built: an argument is never
@@ -12860,7 +12958,7 @@ class Program
   # One variable, or nil. No map of everything: the asking program names
   # what it wants, and a tool that dumps its whole environment into a
   # structure was one `puts` away from leaking it.
-  def self.env(name : String) : String | Nil
+  @[Effect(:env_get)]; def self.env(name : String) : String | Nil
     {% if flag?(:wasm32) %}
       nil
     {% elsif flag?(:win32) %}
@@ -12970,7 +13068,7 @@ end
   # landed, so `bench/panics.sh` saw it once in three runs. `TerminateProcess`
   # ends the process without unwinding anything on this stack, and the
   # exit code is the same 1.
-  def __iyi_win_fault_exit : NoReturn
+  @[Effect(:primitive)]; def __iyi_win_fault_exit : NoReturn
     IyiConsole.restore_vt
     LibC.TerminateProcess(LibC.GetCurrentProcess, 1_i32)
     # Unreachable: the process is gone. Spelled out because the type says
@@ -13072,7 +13170,7 @@ end
     0
   end
 
-  def __iyi_win_install_fault_handler : Nil
+  @[Effect(:signal)]; def __iyi_win_install_fault_handler : Nil
     LibC.SetErrorMode(3)
     guarantee = 16384_i32
     LibC.SetThreadStackGuarantee(pointerof(guarantee))
@@ -13111,11 +13209,12 @@ fun main(argc : Int32, argv : UInt8**) : Int32
   {% if flag?(:win32) %}
     __iyi_win_install_fault_handler
   {% end %}
+  {% if flag?(:iyi_observe) %} Std::Observe.start {% end %}
   __iyi_enter(argc, argv)
   # Named `test` cases keep going past a failure, so the program's own code
   # ends normally and the exit status is theirs to give (testing.iyi).
   status = IyiTestCases.verdict
-  __iyi_flush_std
+  __iyi_flush_std; {% if flag?(:iyi_observe) %} Std::Observe.finish(status) {% end %}
   {% if flag?(:win32) %}
     # Not back into the C runtime, whose `exit` is `ExitProcess`, for the
     # reason `__iyi_exit` is not: a mark helper stopping this thread as it
@@ -13144,9 +13243,9 @@ end
   # platform's contract already lives, and because `main` above stays exactly as
   # it is for every other target.
   fun __main_argc_argv(argc : Int32, argv : UInt8**) : Int32
-    LibIyiMain.__iyi_main(argc, argv)
+    {% if flag?(:iyi_observe) %} Std::Observe.start {% end %}; LibIyiMain.__iyi_main(argc, argv)
     status = IyiTestCases.verdict
-    __iyi_flush_std
+    __iyi_flush_std; {% if flag?(:iyi_observe) %} Std::Observe.finish(status) {% end %}
     status
   end
 {% elsif flag?(:wasm32) %}

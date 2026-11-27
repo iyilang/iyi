@@ -109,6 +109,14 @@ export default async function ({ load, log }) {
   if (rounds !== 100000) throw new Error(`channel round trips returned ${rounds}`);
   log(`100000 channel round trips: ${elapsed.toFixed(1)} ms`);
 
+  const larger = await program(bytes, { gate: true });
+  if (larger.status !== 0) throw new Error("configured-stack fixture did not start");
+  for (let i = 0; i < 2; i++) {
+    const span = await larger.iyi.call("task_configured_stack");
+    if (span !== 524288) throw new Error(`configured fiber stack span was ${span}, expected 524288`);
+  }
+  log("configured fiber stack size held across reuse");
+
   const pooled = await boundedStacks(bytes, 2000);
   log(`2000 sequential fibers with collections: ${pooled.before} -> ${pooled.after} pages`);
   const cached = await pooled.run.iyi.call("task_fill_stack_pool", 32);

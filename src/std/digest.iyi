@@ -1585,6 +1585,7 @@ end
 pub struct ValueBarrier
   # *x*, unchanged.
   @[AlwaysInline]
+  @[Effect(:primitive)]
   def self.u64(x : UInt64) : UInt64
     {% if flag?(:x86_64) || flag?(:aarch64) %}
       asm("" : "=r"(x) : "0"(x))
@@ -1596,6 +1597,7 @@ pub struct ValueBarrier
 
   # *x*, unchanged.
   @[AlwaysInline]
+  @[Effect(:primitive)]
   def self.u8(x : UInt8) : UInt8
     {% if flag?(:x86_64) || flag?(:aarch64) %}
       asm("" : "=r"(x) : "0"(x))

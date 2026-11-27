@@ -718,7 +718,7 @@ build_and_run() {
     return 1
   fi
   stage "$CLIENT_SECONDS" "$name.out" "$label: client"
-  "$WORK/$name" "$SRV" >"$WORK/$name.out" 2>&1 </dev/null 3<&- 4>&-
+  "$WORK/$name" "data" "$SRV" >"$WORK/$name.out" 2>&1 </dev/null 3<&- 4>&-
   local exit_code=$?
   stage "$STAGE_SECONDS" "$name.out" "$label: the checks after its client"
   if [ "$exit_code" -ne 0 ]; then
@@ -972,7 +972,7 @@ PY
     return
   fi
   stage "$BROKEN_SECONDS" "$dir/out" "$label: broken copy"
-  "$WORK/$dir/program" "$SRV" >"$WORK/$dir/out" 2>&1 </dev/null 3<&- 4>&-
+  "$WORK/$dir/program" "data" "$SRV" >"$WORK/$dir/out" 2>&1 </dev/null 3<&- 4>&-
   local code=$?
   if [ "$code" -eq 0 ]; then
     echo "  $label: the exercise PASSED on a broken module"

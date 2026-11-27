@@ -8,6 +8,11 @@ lib LibC
   fun GetLongPathNameW(lpszShortPath : LPWSTR, lpszLongPath : LPWSTR, cchBuffer : DWORD) : DWORD
   fun GetFinalPathNameByHandleW(hFile : HANDLE, lpszFilePath : LPWSTR, cchFilePath : DWORD, dwFlags : DWORD) : DWORD
   fun GetTempPathW(nBufferLength : DWORD, lpBuffer : LPWSTR) : DWORD
+  fun GetFinalPathNameByHandleW(hFile : HANDLE, lpszFilePath : LPWSTR, cchFilePath : DWORD, dwFlags : DWORD) : DWORD
+  fun GetVolumePathNameW(lpszFileName : LPWSTR, lpszVolumePathName : LPWSTR, cchBufferLength : DWORD) : BOOL
+  fun GetDriveTypeW(lpRootPathName : LPWSTR) : UInt32
+
+  DRIVE_FIXED = 3_u32
 
   FILE_TYPE_CHAR    = DWORD.new(0x2)
   FILE_TYPE_DISK    = DWORD.new(0x1)

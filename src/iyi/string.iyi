@@ -433,7 +433,7 @@ class String
   # SipHash-1-3, as Rust's and Python's tables hash, keyed with sixteen bytes
   # of the system's entropy read once per process: FNV-1a from a fixed start
   # let anyone build keys offline that all shared one hash (#212).
-  def hash : Int32
+  @[Effect(:entropy)]; def hash : Int32
     k0, k1 = HASH_KEY
     v0, v1 = k0 ^ 0x736f6d6570736575_u64, k1 ^ 0x646f72616e646f6d_u64
     v2, v3 = k0 ^ 0x6c7967656e657261_u64, k1 ^ 0x7465646279746573_u64

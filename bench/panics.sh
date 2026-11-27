@@ -14,6 +14,9 @@
 set -euo pipefail
 
 IYI=${IYI:-./bin/iyi}
+if [ "$(uname -s)" = Darwin ]; then
+  export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-$(xcrun --show-sdk-version 2>/dev/null || echo 27.0)}
+fi
 work=$(mktemp -d /tmp/iyi-panics.XXXXXX)
 trap 'rm -rf "$work"' EXIT
 
@@ -936,6 +939,195 @@ esac
 grep -q "stack overflow" "$work/wild.out" && fail "a wild pointer was called a stack overflow"
 step "the stack running out is a panic on every stack, and a wild pointer is not"
 
+# ── 10b. a program may ask for larger fiber stacks before its first task ──
+cat > "$work/stack_default.iyi" <<'EOF'
+module stack_default
+
+puts IyiFiber.stack_bytes
+EOF
+run "$work/stack_default.iyi"
+[ "$code" = 0 ] && [ "$out" = "262144" ] || fail "default fiber stack size: exit $code, $out"
+step "the default fiber stack is 256 KiB"
+
+cat > "$work/stack_deep.iyi" <<'EOF'
+module stack_deep
+
+def down(n : Int32) : Int32
+  return 0 if n == 0
+  down(n - 1) + 1
+end
+
+IyiFiber.stack_bytes = 67108864_u64
+group do |g|
+  task = g.spawn { down(200000) }
+  puts "a task 200000 calls deep came back: #{task.value}"
+end
+EOF
+run "$work/stack_deep.iyi"
+[ "$code" = 0 ] && [ "$out" = "a task 200000 calls deep came back: 200000" ] ||
+  fail "larger fiber stack: exit $code, $out"
+step "a larger fiber stack reaches 200000 calls"
+
+cat > "$work/stack_shallow.iyi" <<'EOF'
+module stack_shallow
+
+def down(n : Int32) : Int32
+  return 0 if n == 0
+  down(n - 1) + 1
+end
+
+group do |g|
+  task = g.spawn { down(200000) }
+  puts "a task 200000 calls deep came back: #{task.value}"
+end
+EOF
+overflow="iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion"
+run "$work/stack_shallow.iyi"
+[ "$code" = 1 ] && [ "$out" = "$overflow" ] || fail "default fiber stack depth: exit $code, $out"
+step "the same depth exceeds the default stack"
+
+cat > "$work/stack_big_overflow.iyi" <<'EOF'
+module stack_big_overflow
+
+def down(n : Int32) : Int32
+  down(n + 1) + 1
+end
+
+IyiFiber.stack_bytes = 1048576_u64
+group do |g|
+  g.spawn { down(0) }
+end
+EOF
+run "$work/stack_big_overflow.iyi"
+[ "$code" = 1 ] && [ "$out" = "$overflow" ] || fail "larger fiber stack overflow: exit $code, $out"
+step "a larger fiber stack still has a guard"
+
+cat > "$work/stack_windows.iyi" <<'EOF'
+module stack_windows
+
+def held(a : UInt64) : UInt64
+  IyiRuntimeLock.lock
+  top = IyiScheduler.fiber_top_holding(a)
+  IyiRuntimeLock.unlock
+  top
+end
+
+IyiFiber.stack_bytes = 16777216_u64
+group do |g|
+  g.spawn do
+    top = IyiScheduler.current_stack_top
+    if held(top - 4194304_u64) == top
+      puts "a task's stack is its own 4 MiB down"
+    else
+      puts "a task's stack 4 MiB down is no task's"
+    end
+  end
+end
+t = IyiThread.start do
+  IyiScheduler.current
+  top = IyiScheduler.current_stack_top
+  if top != 0 && held(top - 1048576_u64) != top
+    puts "a thread's own stack kept the default window"
+  else
+    puts "a thread's window grew with the task size"
+  end
+  nil
+end
+t.join
+EOF
+run "$work/stack_windows.iyi"
+[ "$code" = 0 ] && [ "$out" = "a task's stack is its own 4 MiB down
+a thread's own stack kept the default window" ] || fail "fiber and thread stack windows: exit $code, $out"
+step "stack walks use each fiber's own span"
+
+cat > "$work/stack_late.iyi" <<'EOF'
+module stack_late
+
+group do |g|
+  g.spawn(unit: :same) { 1 }
+end
+IyiFiber.stack_bytes = IyiFiber::STACK_BYTES
+puts "the same size, asked again, is kept"
+IyiFiber.stack_bytes = 16777216_u64
+puts "a different size was taken after a task"
+EOF
+fixed="iyi: panic: IyiFiber.stack_bytes: the fiber stack size is fixed once a task is spawned, a stack is pooled or a second thread is started"
+run "$work/stack_late.iyi"
+[ "$code" = 1 ] || fail "late fiber size exited $code: $out"
+printf '%s\n' "$out" | grep -Fq "the same size, asked again, is kept" || fail "same size was refused: $out"
+printf '%s\n' "$out" | grep -Fq "$fixed" || fail "late fiber size was not refused: $out"
+if printf '%s\n' "$out" | grep -Fq "a different size was taken after a task"; then
+  fail "late fiber size was taken: $out"
+fi
+step "the same size remains allowed after a task, a different size is refused"
+
+# Exercise the pool alone: no task installs a stack maker and no second
+# thread marks the scheduler shared.
+cat > "$work/stack_pool.iyi" <<'EOF'
+module stack_pool
+
+fiber = IyiFiber.new
+fiber.prepare_stack
+fiber.release_stack
+raise "the pool-only probe has no pooled stack" if IyiScheduler.state.stack_pool == 0_u64
+raise "the pool-only probe started a task or thread" if IyiScheduler.makes_stacks? || IyiScheduler.shared?
+IyiFiber.stack_bytes = IyiFiber::STACK_BYTES
+puts "the pooled stack kept the same size"
+IyiFiber.stack_bytes = 16777216_u64
+puts "a different size was taken after a stack was pooled"
+EOF
+run "$work/stack_pool.iyi"
+[ "$code" = 1 ] || fail "fiber size after pooling exited $code: $out"
+printf '%s\n' "$out" | grep -Fq "the pooled stack kept the same size" || fail "same pooled size was refused: $out"
+printf '%s\n' "$out" | grep -Fq "$fixed" || fail "fiber size after pooling was not refused: $out"
+if printf '%s\n' "$out" | grep -Fq "a different size was taken after a stack was pooled"; then
+  fail "fiber size after pooling was taken: $out"
+fi
+step "the same size remains allowed after pooling, a different size is refused"
+
+cat > "$work/stack_thread.iyi" <<'EOF'
+module stack_thread
+
+t = IyiThread.start { nil }
+t.join
+IyiFiber.stack_bytes = 16777216_u64
+puts "a different size was taken after a thread"
+EOF
+run "$work/stack_thread.iyi"
+[ "$code" = 1 ] || fail "fiber size after thread exited $code: $out"
+printf '%s\n' "$out" | grep -Fq "$fixed" || fail "fiber size after thread was not refused: $out"
+if printf '%s\n' "$out" | grep -Fq "a different size was taken after a thread"; then
+  fail "fiber size after thread was taken: $out"
+fi
+step "a different fiber size is refused after a thread starts"
+
+for size in 300000 131072; do
+  printf 'module stack_shape\n\nIyiFiber.stack_bytes = %s_u64\n' "$size" > "$work/stack_shape_$size.iyi"
+  run "$work/stack_shape_$size.iyi"
+  [ "$code" = 1 ] || fail "fiber size $size exited $code: $out"
+  printf '%s\n' "$out" | grep -Fq "iyi: panic: IyiFiber.stack_bytes: a fiber stack is a whole number of 64 KiB and no smaller than 256 KiB" ||
+    fail "invalid fiber size $size was not refused: $out"
+done
+step "fiber sizes must be whole 64 KiB multiples of at least 256 KiB"
+
+case "$(uname -s)" in
+  Linux | Darwin)
+    mkdir -p "$work/spanless/iyi"
+    cp src/iyi/*.iyi "$work/spanless/iyi/"
+    awk '/^      return top if top != 0 && address <= top && address > top - fiber\.stack_span$/ {
+        print "      return top if top != 0 && address <= top && address > top - IyiFiber::STACK_BYTES"; found = 1; next }
+      { print } END { if (!found) exit 3 }' \
+      src/iyi/concurrency.iyi > "$work/spanless/iyi/concurrency.iyi" ||
+      fail "the fiber stack's window is not in concurrency.iyi any more"
+    IYI_PATH="$work/spanless:$PWD/src" "$IYI" build -o "$work/spanless-run" "$work/stack_windows.iyi" > "$work/spanless.log" 2>&1 ||
+      fail "the spanless probe did not build: $(cat "$work/spanless.log")"
+    out=$("$work/spanless-run" 2>&1) || fail "the spanless probe failed: $out"
+    [ "${out%%$'\n'*}" = "a task's stack 4 MiB down is no task's" ] ||
+      fail "the stack window check passed without the fiber span: $out"
+    step "the stack window check detects a default-sized task window"
+    ;;
+esac
+
 # ── 11. a panic prints backtrace frames locating the call site ─────────────
 if [ "$(uname -s)" = Darwin ]; then
   cat > "$work/trace.iyi" <<'EOF'
@@ -991,6 +1183,162 @@ EOF
   echo "$out" | grep -q "custom resolver:.*frames" || fail "custom resolver hook was not called: $out"
   step "a panic resolver hook formats frames when installed"
 fi
+
+# ── 12. cast failure and closure-to-C panics call runtime raise funs ───────
+cat > "$work/cast_generic.iyi" <<'EOF'
+class Box(T)
+  def initialize(@val : T)
+  end
+end
+
+def get_box(cond : Bool) : Box(Int32) | Box(String)
+  cond ? Box(Int32).new(1) : Box(String).new("a")
+end
+
+b = get_box(true)
+b.as(Box(String))
+EOF
+run "$work/cast_generic.iyi"
+[ "$code" = 1 ] || fail "cast_generic exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Box(Int32) to Box(String) failed, at .*/cast_generic\.iyi:11:1:11" ||
+  fail "cast_generic panic missing or mismatched: $out"
+step "generic instance cast failure panics with exact message and site"
+
+cat > "$work/cast_nested_generic.iyi" <<'EOF'
+class Box(T)
+  def initialize(@val : T)
+  end
+end
+
+def get_box(cond : Bool) : Box(Box(Int32)) | Box(Box(String))
+  cond ? Box(Box(Int32)).new(Box(Int32).new(1)) : Box(Box(String)).new(Box(String).new("a"))
+end
+
+b = get_box(true)
+b.as(Box(Box(String)))
+EOF
+run "$work/cast_nested_generic.iyi"
+[ "$code" = 1 ] || fail "cast_nested_generic exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Box(Box(Int32)) to Box(Box(String)) failed, at .*/cast_nested_generic\.iyi:11:1:11" ||
+  fail "cast_nested_generic panic missing or mismatched: $out"
+step "nested generic cast failure panics with exact message and site"
+
+cat > "$work/cast_union.iyi" <<'EOF'
+def get_val(cond : Bool) : Int32 | String
+  cond ? "hello" : 42
+end
+
+x = get_val(true)
+x.as(Int32)
+EOF
+run "$work/cast_union.iyi"
+[ "$code" = 1 ] || fail "cast_union exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from String to Int32 failed, at .*/cast_union\.iyi:6:1:6" ||
+  fail "cast_union panic missing or mismatched: $out"
+step "union member cast failure panics with exact message and site"
+
+cat > "$work/cast_subclass.iyi" <<'EOF'
+class Base; end
+class Sub1 < Base; end
+class Sub2 < Base; end
+
+def get_obj(cond : Bool) : Base
+  cond ? Sub1.new : Sub2.new
+end
+
+x = get_obj(true)
+x.as(Sub2)
+EOF
+run "$work/cast_subclass.iyi"
+[ "$code" = 1 ] || fail "cast_subclass exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Sub1 to Sub2 failed, at .*/cast_subclass\.iyi:10:1:10" ||
+  fail "cast_subclass panic missing or mismatched: $out"
+step "virtual subclass cast failure panics with exact message and site"
+
+cat > "$work/cast_nilable.iyi" <<'EOF'
+def get_nilable(cond : Bool) : String?
+  cond ? nil : "hello"
+end
+
+x = get_nilable(true)
+x.as(String)
+EOF
+run "$work/cast_nilable.iyi"
+[ "$code" = 1 ] || fail "cast_nilable exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Nil to String failed, at .*/cast_nilable\.iyi:6:1:6" ||
+  fail "cast_nilable panic missing or mismatched: $out"
+step "nilable cast failure panics with exact message and site"
+
+cat > "$work/cast_struct.iyi" <<'EOF'
+struct Pt1
+  def initialize(@x : Int32)
+  end
+end
+
+struct Pt2
+  def initialize(@y : Int32)
+  end
+end
+
+def get_struct(cond : Bool) : Pt1 | Pt2
+  cond ? Pt1.new(1) : Pt2.new(2)
+end
+
+x = get_struct(true)
+x.as(Pt2)
+EOF
+run "$work/cast_struct.iyi"
+[ "$code" = 1 ] || fail "cast_struct exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Pt1 to Pt2 failed, at .*/cast_struct\.iyi:16:1:16" ||
+  fail "cast_struct panic missing or mismatched: $out"
+step "struct cast failure panics with exact message and site"
+
+cat > "$work/cast_module.iyi" <<'EOF'
+module Mod; end
+
+class Foo
+  include Mod
+end
+
+class Bar
+  include Mod
+end
+
+def get_mod(cond : Bool) : Mod
+  cond ? Foo.new : Bar.new
+end
+
+x = get_mod(true)
+x.as(Bar)
+EOF
+run "$work/cast_module.iyi"
+[ "$code" = 1 ] || fail "cast_module exit was $code, wanted 1"
+echo "$out" | tr '\\' '/' | grep -q "^iyi: panic: Cast from Foo to Bar failed, at .*/cast_module\.iyi:16:1:16" ||
+  fail "cast_module panic missing or mismatched: $out"
+step "module-typed value cast failure panics with exact message and site"
+
+cat > "$work/closure_to_c.iyi" <<'EOF'
+@[Unsafe("declares a C callback API to exercise the runtime rejection of captured closures")]
+lib LibC
+  fun atexit(cb : -> Void) : Int32
+end
+
+c = 10
+cb = ->{ c }
+LibC.atexit(cb)
+EOF
+run "$work/closure_to_c.iyi"
+[ "$code" = 1 ] || fail "closure_to_c exit was $code, wanted 1"
+echo "$out" | grep -q "^iyi: panic: passing a closure to C is not allowed" ||
+  fail "closure_to_c panic missing message: $out"
+echo "$out" | grep -q "at ??:0" ||
+  fail "closure_to_c panic missing site: $out"
+step "passing a closure to C is refused with exact message and unknown location site"
+
+DUMP=1 "$IYI" build -o "$work/cast_dump_bin" "$work/cast_union.iyi" > "$work/dump.out" 2>&1
+grep -q "__iyi_raise_cast_failed" "$work/dump.out" ||
+  fail "DUMP=1 did not show call to __iyi_raise_cast_failed: $(cat "$work/dump.out")"
+step "DUMP=1 shows a call to __iyi_raise_cast_failed"
 
 # ── 13. two threads panic at once and each trace is resolved whole ─────────
 # std/debug's Windows reader kept the PDB, its directory, the DBI and

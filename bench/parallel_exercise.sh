@@ -738,7 +738,7 @@ case "$(uname -s)" in
     ;;
   Darwin)
     [ -n "$NM" ] || { echo "FAIL: dependency floor: setup: nm is unavailable"; exit 76; }
-    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _thread_switch _write'
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _dladdr _dprintf _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _os_sync_wait_on_address _os_sync_wake_by_address_all _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _thread_switch _write'
     thread='_close _pthread_kill'
     pool='_environ'
     allowed="$(printf '%s\n' $runtime $thread $pool | sort -u)"
@@ -1593,7 +1593,7 @@ inover && /^    fiber.list_on\(st.object_id\) if @@shared && fiber.unit.is_a\?\(
 /^  def self.wait_posix\(/ { inposix = 1; n_posix++ }
 inposix && /^  end$/ { inposix = 0 }
 inposix && /^    fiber.list_on\(st.object_id\) if moving$/ { print; print "    force_io_registered(fiber)"; n_reg_posix++; next }
-/^  def self.cancel_wait\(fiber : IyiFiber\) : Nil$/ { incancel = 1; n_cancel++ }
+/^  (@\[Effect\([a-z_:]+\)\]; )?def self.cancel_wait\(fiber : IyiFiber\) : Nil$/ { incancel = 1; n_cancel++ }
 incancel && /^    (elsif|else)( |$)/ && waitingio && !/^    elsif fiber.state == IyiFiberState::WaitingCh$/ { n_intervening++ }
 incancel && /^    elsif fiber.state == IyiFiberState::WaitingCh$/ { print "      force_io_decision(fiber, true)"; print; n_taken++; at_taken = NR; waitingio = 0; next }
 incancel && /^  end$/ { print "    force_io_decision(fiber, false)"; print; incancel = 0; n_end++; next }'
@@ -1971,13 +1971,21 @@ END { if (n_defs != 1 || n_seen != 1 || n_scan != 1 || n_guard != 1 || n_skip !=
       UNLIST_ANCHOR='/^  def self.wait_posix\(fd : Int32, direction : Int32, ms : Int32\) : Nil \| Cancelled$/'
       UNLIST_LIST='/^    fiber\.list_on\(st\.object_id\) if moving$/' ;;
   esac
+  # The block goes after the anchor's own `end`, not before its def. On Linux
+  # and darwin the def carries `@[Effect(:scheduler)]` on the line above it, and
+  # a block between the two hands that annotation to the block's first class
+  # variable, which the compiler refuses.
   UNLIST_DEFS="$UNLIST_ANCHOR {
-$UNLIST_PRINTS
   print
   n_defs++; inowner = 1
   next
 }"
-  UNLIST_SCOPE='inowner && /^  end$/ { inowner = 0 }
+  UNLIST_SCOPE='inowner && /^  end$/ {
+  print
+'"$UNLIST_PRINTS"'
+  inowner = 0
+  next
+}
 /^  def self.cancel_moving\(fiber : IyiFiber\) : Nil$/ { incancel = 1; n_cancel++ }
 incancel && /^  end$/ { incancel = 0 }'
   UNLIST_HOOK_RULE="inowner && $UNLIST_LIST { print; print \"    force_armed\"; n_list++; next }"
@@ -2073,7 +2081,7 @@ $CLOSE_END" concurrency.iyi parallel_migrate -Dnoclose_force -Dnoclose_withhold_
   verdict_caught closeshome 'closes: the main thread closed a socket on the thread its reader parked on' closes
 
   step "failure proof: a join held in the kernel holds its worker, and the sleepers on it"
-  JOIN_COMMON='/^    def join : Nil$/ {
+  JOIN_COMMON='/^    (@\[Effect\([a-z_:]+\)\]; )?def join : Nil$/ {
   print "    @[UnsafeReach(\"copy-only keyed join decision, accessed atomically\")]"
   print "    @@forced_join_thread : UInt64 = 0_u64"
   print "    @[UnsafeReach(\"copy-only keyed join decision, accessed atomically\")]"
@@ -2899,9 +2907,9 @@ verdict_held noflag_hook "slice: the monitor's preemption decision for a held wo
 step "failure proof: a Windows monitor using the semaphore fallback for an active tick"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    COARSE_COMMON='/^  def self.start_monitor : Nil$/ { instart = 1; n_start++ }
+    COARSE_COMMON='/^  (@\[Effect\([a-z_:]+\)\]; )?def self.start_monitor : Nil$/ { instart = 1; n_start++ }
 instart && /^  end$/ { instart = 0 }
-/^  private def self.monitor_wait\(parked : Bool\) : Nil$/ { inwait = 1; n_wait++ }
+/^  (@\[Effect\([a-z_:]+\)\]; )?private def self.monitor_wait\(parked : Bool\) : Nil$/ { inwait = 1; n_wait++ }
 inwait && /^  end$/ { inwait = 0 }
 inwait && /^        if set != 0_i32$/ { print "        force_tick_fail(4_u64) if set == 0_i32"; print; n_set++; at_set = NR; next }
 inwait && /^          LibC.WaitForSingleObject\(timer, -1_i32\)$/ { print "          waited = LibC.WaitForSingleObject(timer, -1_i32)"; print "          force_tick_fail(3_u64) if waited != 0_i32"; print "          force_tick_record(1_u64) if waited == 0_i32"; n_timer_wait++; at_timer = NR; next }
@@ -3094,7 +3102,7 @@ NOPOLL_DEFS='/^  def self.preempts : UInt64$/ {
   n_defs++
   next
 }'
-NOPOLL_COMMON='/^  def self.wait_for_events\(blocking : Bool\) : Nil$/ {
+NOPOLL_COMMON='/^  (@\[Effect\([a-z_:]+\)\]; )?def self.wait_for_events\(blocking : Bool\) : Nil$/ {
   in_poll_wait = 1; n_wait++; at_wait = NR
   print; print "    IyiWorkers.force_poll_entered(blocking)"; next
 }
@@ -3140,7 +3148,7 @@ step "failure proof: a preempted worker that does not wake its expired sleeper"
 # omits that path's wake call; the enqueue hook runs after enqueue returns.
 TICKER_COMMON='/^class IyiWorkers$/ { in_ticker_workers = 1; n_ticker_workers++ }
 in_ticker_workers && /^end$/ { in_ticker_workers = 0 }
-/^  def self.sleep_current\(ms : Int32\) : Nil \| Cancelled$/ { in_ticker_sleep = 1; n_ticker_sleep++ }
+/^  (@\[Effect\([a-z_:]+\)\]; )?def self.sleep_current\(ms : Int32\) : Nil \| Cancelled$/ { in_ticker_sleep = 1; n_ticker_sleep++ }
 in_ticker_sleep && /^  end$/ { in_ticker_sleep = 0 }
 in_ticker_sleep && /^    fiber.deadline = __iyi_monotonic_ns \+ ms.to_i64 \* 1000000_i64$/ {
   n_ticker_deadline++; at_ticker_deadline = NR
@@ -3148,7 +3156,7 @@ in_ticker_sleep && /^    fiber.deadline = __iyi_monotonic_ns \+ ms.to_i64 \* 100
 }
 in_ticker_sleep && /^    fiber.state = IyiFiberState::Sleeping$/ { n_ticker_state++; at_ticker_state = NR }
 in_ticker_sleep && /^    sleep_insert\(fiber\)$/ { n_ticker_insert++; at_ticker_insert = NR }
-/^  def self.wake_expired_sleepers : Nil$/ { in_ticker_wake = 1; n_ticker_wake++ }
+/^  (@\[Effect\([a-z_:]+\)\]; )?def self.wake_expired_sleepers : Nil$/ { in_ticker_wake = 1; n_ticker_wake++ }
 in_ticker_wake && /^  end$/ { in_ticker_wake = 0 }
 in_ticker_wake && /^      if head.state == IyiFiberState::Sleeping \|\| head.state == IyiFiberState::WaitingIo$/ {
   n_ticker_branch++; at_ticker_branch = NR
@@ -3459,7 +3467,7 @@ STALE_DEFS='/^  def self.preempts : UInt64$/ {
   n_defs++
   next
 }'
-STALE_COMMON='/^  def self.switch_to\(fiber : IyiFiber\) : Nil$/ { in_stale_switch = 1; n_switch++ }
+STALE_COMMON='/^  (@\[Effect\([a-z_:]+\)\]; )?def self.switch_to\(fiber : IyiFiber\) : Nil$/ { in_stale_switch = 1; n_switch++ }
 in_stale_switch && /^  end$/ { in_stale_switch = 0 }
 in_stale_switch && /^        st\.switches = st\.switches &\+ 1_u64$/ { n_switch_count++; at_switch_count = NR }
 in_stale_switch && /^        raised = Pointer\(Atomic\(UInt64\)\).new\(st\.preempt_word\)$/ {

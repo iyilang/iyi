@@ -146,6 +146,17 @@ def task_early_return(result : Array(Int32)) : Int32
   0
 end
 
+fun task_configured_stack : Int32
+  IyiFiber.stack_bytes = 524288_u64
+  span = 0_i32
+  group do |g|
+    g.spawn(unit: :same) do
+      span = IyiScheduler.current.stack_span.to_i32
+    end
+  end
+  span
+end
+
 fun task_round_trips(rounds : Int32) : Int32
   ping = Channel(Int32).new
   pong = Channel(Int32).new

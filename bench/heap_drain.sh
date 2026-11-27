@@ -282,7 +282,7 @@ copy() {
 # VirtualAlloc with an address. Occupied slots are skipped, up to 64; failure
 # to place an object fails the copy by name.
 PASS='{ print }'
-PLACE_TAKE='/^      def self\.take_large\(size : UInt64, bits : UInt64\)/ { armed = 1; declarations++ } armed && /base = __iyi_mmap\(mapped\)\.address/ { sites++; sub(/base = __iyi_mmap\(mapped\)\.address/, "base = placed_pick(size, mapped)") } armed && /^      end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
+PLACE_TAKE='/^      (@\[Effect\([^)]*\)\]; )?def self\.take_large\(size : UInt64, bits : UInt64\)/ { armed = 1; declarations++ } armed && /base = __iyi_mmap\(mapped\)\.address/ { sites++; sub(/base = __iyi_mmap\(mapped\)\.address/, "base = placed_pick(size, mapped)") } armed && /^      end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
 PLACE_AFTER='/^  def self\.dir_outside\?\(slot : UInt64\) : Bool/ { armed = 1; declarations++ } { print } armed && /^  end$/ { armed = 0; sites++; while ((getline line < ins) > 0) print line } END { if (declarations != 1 || sites != 1) exit 3 }'
 C9_DELETE='/^      def self\.count_large\(base : UInt64, mapped : UInt64, on : Bool\)/ { armed = 1; declarations++ } armed && /dir_widen\(/ { sites++; next } armed && /^      end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
 
@@ -399,8 +399,8 @@ IYI
 # the copy's helper_main waits at its finish on a word (`IyiMark.forced_wait`)
 # until the program releases it, so a mark stays open while one unit allocates.
 # The methods go in before helper_main and the wait before its finish call.
-PLACE_MARK_METHODS='/^      def self\.helper_main\(seen : UInt64\) : Nil/ { declarations++; while ((getline line < ins) > 0) print line; print "" } { print } END { if (declarations != 1) exit 3 }'
-PLACE_MARK_HOLD='/^      def self\.helper_main\(seen : UInt64\) : Nil/ { armed = 1; declarations++ } armed && /seen = finish_concurrent/ { sites++; sub(/seen = finish_concurrent/, "IyiMark.forced_wait\n              seen = finish_concurrent") } armed && /^      end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
+PLACE_MARK_METHODS='/^      (@\[Effect\([^)]*\)\]; )?def self\.helper_main\(seen : UInt64\) : Nil/ { declarations++; while ((getline line < ins) > 0) print line; print "" } { print } END { if (declarations != 1) exit 3 }'
+PLACE_MARK_HOLD='/^      (@\[Effect\([^)]*\)\]; )?def self\.helper_main\(seen : UInt64\) : Nil/ { armed = 1; declarations++ } armed && /seen = finish_concurrent/ { sites++; sub(/seen = finish_concurrent/, "IyiMark.forced_wait\n              seen = finish_concurrent") } armed && /^      end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
 PLACE_MARK_SLICE='/^  def self\.partition_slice\(record : UInt64, slice : UInt64\) : Nil/ { armed = 1; declarations++ } armed && /if LibIyiGCTable\.__iyi_marking != 0_u8/ { sites++; print; print "      IyiMark.forced_record_slice(record)"; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
 C6_DELETE='/^  def self\.partition_slice\(record : UInt64, slice : UInt64\) : Nil/ { armed = 1; declarations++ } armed && /hold_partition\(record, debt\)/ { sites++; next } armed && /^  end$/ { armed = 0 } { print } END { if (declarations != 1 || sites != 1) exit 3 }'
 
@@ -878,7 +878,7 @@ IYI
   # requires exactly one site of each rule it uses (its END), so a missing or a
   # duplicate site in scope exits 3 and the copy is not built. A site outside a scope
   # is not counted, which the awk control below checks.
-  CLAIM_METHODS='/^      def self\.helper_main\(seen : UInt64\) : Nil$/ { declarations++; methods = 0; while ((getline line < ENVIRON["CLAIM_INS"]) > 0) { print line; methods++ }; if (methods == 0) exit 3; print "" }'
+  CLAIM_METHODS='/^      (@\[Effect\([^)]*\)\]; )?def self\.helper_main\(seen : UInt64\) : Nil$/ { declarations++; methods = 0; while ((getline line < ENVIRON["CLAIM_INS"]) > 0) { print line; methods++ }; if (methods == 0) exit 3; print "" }'
   CLAIM_CLASS='/^      def self\.claim_class\(index : Int32, who : Int32\) : UInt64$/ { in_class = 1; classes++ } in_class && /^          if sweep_left\?\(arena, epoch\)$/ { reserved++; print "          if sweep_left?(arena, epoch) && !forced_reserved?(arena)"; next } in_class && /^      end$/ { in_class = 0 }'
   CLAIM_TAKEN='/^        def self\.sweep_one_helper : Bool$/ { in_helper = 1; helpers++ } in_helper && /^            pool_word\(POOL_SWEEPERS\)\.value\.add\(1_u64\) if arena > 2_u64$/ { taken++; print; print "            forced_claim_taken(arena) if arena > 2_u64"; next } in_helper && /^        end$/ { in_helper = 0 }'
   CLAIM_ARM='in_helper && /^          [{]% if flag\?\(:heap_partitions\) %[}]$/ { in_arm = 1; arms++ } in_helper && in_arm && /^          [{]% else %[}]$/ { in_arm = 0; closes++ }'

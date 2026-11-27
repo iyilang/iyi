@@ -276,6 +276,18 @@ struct AutocertFiles
   # not written beside one that lets others read it.
   def self.keep(dir : String) : Nil
     {% if flag?(:win32) %}
+      record_acl_attempt(dir)
+      keep_windows(dir)
+    {% end %}
+  end
+
+  {% if flag?(:win32) %}
+    # Effect wrappers record on return. Record the attempt first so a
+    # caught ACL failure cannot make the test reusable.
+    @[Effect(:file_write, :chmod)]; private def self.record_acl_attempt(dir : String) : Nil
+    end
+
+    @[Effect(:file_write, :chmod)]; private def self.keep_windows(dir : String) : Nil
       # D:P a protected DACL; each entry allows (A) full access (FA), to
       # this object and what is made in it (OICI), to OW the owner's
       # rights, SY SYSTEM, BA the Administrators and the account this
@@ -304,8 +316,8 @@ struct AutocertFiles
       failed = held == 0 || present == 0 ? 1_u32 : LibAdvapi32.SetNamedSecurityInfoW(name, 1, 0x80000004_u32, Pointer(Void).new(0_u64), Pointer(Void).new(0_u64), dacl, Pointer(Void).new(0_u64))
       LibKernel32.LocalFree(descriptor)
       raise "#{dir} could not be kept to its owner (Windows error #{failed}), and a private key is not written where others may read it" unless failed == 0_u32
-    {% end %}
-  end
+    end
+  {% end %}
 end
 
 # A certificate a manager holds for a name: the identity handshakes are

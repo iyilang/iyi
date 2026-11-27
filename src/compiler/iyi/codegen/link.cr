@@ -114,13 +114,43 @@ module Iyi
       default_paths.join(Process::PATH_DELIMITER)
     end
 
-    class_getter paths : Array(String) do
+    # Read the path for each link. A process-wide memo both hides these
+    # environment reads from later stale recorders and keeps an old path after
+    # the environment changes in a long-lived compiler process.
+    def self.paths : Array(String)
       default_paths
     end
   end
 
   class Program
+    @stale_lib_flags : Hash(Bool, String)?
+    @stale_build : Bool?
+
+    def stale_build? : Bool
+      if sb = @stale_build
+        sb
+      else
+        compiler.try(&.stale_key) != nil
+      end
+    end
+
+    def stale_build=(val : Bool)
+      @stale_build = val
+    end
+
     def lib_flags(cross_compiling : Bool = false)
+      if stale_build?
+        cache = (@stale_lib_flags ||= Hash(Bool, String).new)
+        return cache[cross_compiling] if cache.has_key?(cross_compiling)
+        res = compute_lib_flags(cross_compiling)
+        cache[cross_compiling] = res
+        res
+      else
+        compute_lib_flags(cross_compiling)
+      end
+    end
+
+    private def compute_lib_flags(cross_compiling : Bool = false)
       has_flag?("msvc") ? lib_flags_windows(cross_compiling) : lib_flags_posix(cross_compiling)
     end
 
@@ -316,6 +346,10 @@ module Iyi
 
     PKG_CONFIG_PATH = Process.find_executable("pkg-config")
 
+    def self.pkg_config_path : String?
+      Process.find_executable("pkg-config") || PKG_CONFIG_PATH
+    end
+
     # Returns the result of running `pkg-config mod` but returns nil if
     # pkg-config is not installed, or the module does not exist.
     #
@@ -329,7 +363,7 @@ module Iyi
     end
 
     def self.pkg_config_query(mod : String, static : Bool) : String?
-      return unless pkg_config_path = PKG_CONFIG_PATH
+      return unless pkg_config_path = self.pkg_config_path
       return unless (Process.run(pkg_config_path, {mod}).success? rescue nil)
 
       args = ["--libs"]

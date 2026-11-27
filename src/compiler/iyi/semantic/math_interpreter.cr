@@ -3,24 +3,30 @@ require "./semantic_visitor"
 # Interprets math expressions like 1 + 2 for enum values and
 # constant values that are being used for the N of a StaticArray.
 struct Iyi::MathInterpreter
-  def initialize(@path_lookup : Type, @visitor : SemanticVisitor? = nil, @target_type : IntegerType? = nil)
+  def initialize(@path_lookup : Type, @visitor : SemanticVisitor? = nil, @target_type : IntegerType? = nil, @layout_values : Hash(NumberLiteral, String)? = nil)
   end
 
+  # A layout fold literal reads as the value it holds, and that read is recorded
+  # so settling can judge a value taken before the layout was final. A rerun
+  # (`@layout_values`) reads the final value of each literal it was given.
   def interpret(node : NumberLiteral)
+    value = @layout_values.try { |values| values[node]? } || node.value
+    @path_lookup.program.layout_fold_read(node) unless @layout_values
+
     case node.kind
     when .signed_int?, .unsigned_int?
       target_kind = @target_type.try(&.kind) || node.kind
       case target_kind
-      when .i8?   then node.value.to_i8? || node.raise "invalid Int8: #{node.value}"
-      when .u8?   then node.value.to_u8? || node.raise "invalid UInt8: #{node.value}"
-      when .i16?  then node.value.to_i16? || node.raise "invalid Int16: #{node.value}"
-      when .u16?  then node.value.to_u16? || node.raise "invalid UInt16: #{node.value}"
-      when .i32?  then node.value.to_i32? || node.raise "invalid Int32: #{node.value}"
-      when .u32?  then node.value.to_u32? || node.raise "invalid UInt32: #{node.value}"
-      when .i64?  then node.value.to_i64? || node.raise "invalid Int64: #{node.value}"
-      when .u64?  then node.value.to_u64? || node.raise "invalid UInt64: #{node.value}"
-      when .i128? then node.value.to_i128? || node.raise "invalid Int128: #{node.value}"
-      when .u128? then node.value.to_u128? || node.raise "invalid UInt128: #{node.value}"
+      when .i8?   then value.to_i8? || node.raise "invalid Int8: #{value}"
+      when .u8?   then value.to_u8? || node.raise "invalid UInt8: #{value}"
+      when .i16?  then value.to_i16? || node.raise "invalid Int16: #{value}"
+      when .u16?  then value.to_u16? || node.raise "invalid UInt16: #{value}"
+      when .i32?  then value.to_i32? || node.raise "invalid Int32: #{value}"
+      when .u32?  then value.to_u32? || node.raise "invalid UInt32: #{value}"
+      when .i64?  then value.to_i64? || node.raise "invalid Int64: #{value}"
+      when .u64?  then value.to_u64? || node.raise "invalid UInt64: #{value}"
+      when .i128? then value.to_i128? || node.raise "invalid Int128: #{value}"
+      when .u128? then value.to_u128? || node.raise "invalid UInt128: #{value}"
       else
         node.raise "enum type must be an integer, not #{target_kind}"
       end

@@ -1,0 +1,37 @@
+# The port printed `b.@v` as `b`, and dropped the `;` between statements on
+# one line, so `{ a; b }` came back as `{ ab }`: both changed the program.
+class Cell
+  def initialize(@v : Int32)
+  end
+
+  def peek(other : Cell) : Int32
+    other.@v
+  end
+end
+
+class Pair
+  def initialize(@left : Cell, @right : Cell)
+  end
+end
+
+def run(&block : -> Int32) : Int32
+  block.call
+end
+
+def each_one(&)
+  yield 5
+end
+
+b = Cell.new(3)
+pair = Pair.new(b, Cell.new(4))
+c = b.@v
+d = pair.@left.@v + pair.@right.@v
+e = b.peek(b) + b.@v
+total = run { c; d }
+total = run { c; d; e }
+each_one { |x| c = x; d }
+each_one do |x|
+  c = x; d = c
+end
+c = 1; d = 2
+x = 1; y = 2; z = 3

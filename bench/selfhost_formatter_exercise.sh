@@ -3,7 +3,7 @@
 #
 # A short corpus also checks idempotency and the standalone path and stdin
 # driver. The wider comparison pins matches and divergent output for .iyi
-# files and the .fixture input selected by the self-host CI path rule.
+# files and the .fixture inputs selected by the self-host CI path rule.
 # Mutation proofs verify that the existing parity checks are load-bearing.
 #
 #   bash bench/selfhost_formatter_exercise.sh
@@ -39,6 +39,10 @@ CORPUS=(
   "bench/fixtures/formatter_macro_if_branches.fixture"
   "bench/fixtures/formatter_macro_if_nested.iyi"
   "bench/fixtures/formatter_macro_expression.iyi"
+  "bench/fixtures/formatter_ivar_and_semicolons.iyi"
+  "bench/fixtures/formatter_proc_literal.iyi"
+  "bench/fixtures/formatter_assign_if.iyi"
+  "bench/fixtures/formatter_enum_body.fixture"
   "samples/iyi/calc.iyi"
   "samples/iyi/collections.iyi"
   "samples/iyi/derive.iyi"
@@ -271,6 +275,7 @@ for directory, dirs, names in os.walk(root):
         names = [name for name in names if name != "app_artifact.iyi"]
     sources.extend((relative / name).as_posix() for name in names if name.endswith(".iyi"))
 sources.append("bench/fixtures/formatter_macro_if_branches.fixture")
+sources.append("bench/fixtures/formatter_enum_body.fixture")
 sources = sorted(rel for rel in sources if planner.is_selfhost(rel))
 
 
@@ -623,6 +628,46 @@ run_fixture_proof "macro expression opening spacing forced" \
   'write(" ") if has_space || !node.output' \
   'write(" ")' \
   "bench/fixtures/formatter_macro_expression.iyi"
+
+run_fixture_proof "instance variable read through a receiver bypassed" \
+  "def visit(node : ReadInstanceVar) : Bool" \
+  "def visit(node : ReadInstanceVar) : Bool
+    return true" \
+  "bench/fixtures/formatter_ivar_and_semicolons.iyi"
+
+run_fixture_proof "semicolon between statements on one line dropped" \
+  'write("; ") unless last || found_comment' \
+  'write(" ") unless last || found_comment' \
+  "bench/fixtures/formatter_ivar_and_semicolons.iyi"
+
+run_fixture_proof "space after a proc literal opening brace omitted" \
+  'write(" ")
+        accept(a_def.body)' \
+  'accept(a_def.body)' \
+  "bench/fixtures/formatter_proc_literal.iyi"
+
+run_fixture_proof "assigned if body indented from the line start" \
+  '      @indent = @column
+      accept(node.value)' \
+  '      accept(node.value)' \
+  "bench/fixtures/formatter_assign_if.iyi"
+
+run_fixture_proof "enum member equals alignment disabled" \
+  'when Arg
+      true' \
+  'when Arg
+      false' \
+  "bench/fixtures/formatter_enum_body.fixture"
+
+run_fixture_proof "blank line before a def in an enum omitted" \
+  'return false if node.is_a?(Annotation) || node.is_a?(MacroIf)' \
+  'return false if node.is_a?(Annotation) || node.is_a?(MacroIf) || @inside_enum > 0' \
+  "bench/fixtures/formatter_enum_body.fixture"
+
+run_fixture_proof "aligned assigned numbers not right-aligned" \
+  'align_infos(lines, @assign_infos)' \
+  'lines.size' \
+  "bench/fixtures/formatter_enum_body.fixture"
 echo "  $MUTATIONS_RUN mutation proofs run"
 
 echo

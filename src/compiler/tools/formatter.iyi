@@ -5,7 +5,7 @@ import compiler/foundation/location::{Location}
 import compiler/syntax/token::{Token, TokenKind, Keyword, NumberKind, DelimiterKind, DelimiterState, MacroState}
 import compiler/syntax/lexer::{Lexer}
 import compiler/syntax/ast::{ASTNode, Expressions, Nop, NilLiteral, BoolLiteral, NumberLiteral, CharLiteral, StringLiteral, StringInterpolation, SymbolLiteral, ArrayLiteral, HashLiteral, TupleLiteral, NamedTupleLiteral, RangeLiteral, RegexLiteral, Var, InstanceVar, ClassVar, Global, Path, Generic, Self, Underscore, ImplicitObj, Return, Break, Next, Yield, If, Unless, While, Until, Case, When, Assign, OpAssign, MultiAssign, And, Or, Not, Splat, DoubleSplat, Cast, NilableCast, IsA, RespondsTo, TypeOf, NamedArgument, Block, Call, Def, Arg, ClassDef, ModuleDef, EnumDef, Alias, Include, Extend, TraitDef, ImplDef, AssocTypeDecl, AnnotationDef, Annotation, TypeDeclaration, UninitializedVar, VisibilityModifier, LibDef, FunDef, TypeDef, CStructOrUnionDef, ExternalVar, ProcNotation, ProcPointer, ProcLiteral, Union, Metaclass, ModuleHeader, SizeOf, InstanceSizeOf, AlignOf, InstanceAlignOf, OffsetOf, PointerOf, Defer, Recover, ImportDecl, UsingDecl, Propagate, ExceptionHandler, Rescue, Visibility, MacroExpression, MacroIf, MacroLiteral}
-import compiler/syntax/ast::{StringBuilder}
+import compiler/syntax/ast::{StringBuilder, ReadInstanceVar}
 import compiler/syntax/visitor::{Visitor}
 import compiler/syntax/parser::{Parser}
 
@@ -125,6 +125,7 @@ pub class Formatter < Visitor
   @when_infos : Array(AlignInfo)
   @hash_infos : Array(AlignInfo)
   @assign_infos : Array(AlignInfo)
+  @assign_length : Int32?
   @doc_comments : Array(CommentInfo)
   @current_doc_comment : CommentInfo?
   @shebang : Bool
@@ -182,6 +183,7 @@ pub class Formatter < Visitor
     @when_infos = [] of AlignInfo
     @hash_infos = [] of AlignInfo
     @assign_infos = [] of AlignInfo
+    @assign_length = nil
     @doc_comments = [] of CommentInfo
     @current_doc_comment = nil
     @shebang = @token.type == TokenKind::COMMENT && @token.value.starts_with?("#!")
@@ -465,6 +467,16 @@ pub class Formatter < Visitor
     false
   end
 
+  def visit(node : ReadInstanceVar) : Bool
+    accept(node.obj)
+    skip_space_or_newline
+    write_token(TokenKind::OP_PERIOD)
+    skip_space_or_newline
+    write(node.name)
+    next_token
+    false
+  end
+
   def visit(node : Self) : Bool
     write_keyword(Keyword::SELF)
     false
@@ -617,38 +629,56 @@ pub class Formatter < Visitor
       skip_space_or_newline
     end
 
+    last_aligned : Int32? = nil
+    max_length : Int32? = nil
     skip_space
     node.expressions.each_with_index do |exp, i|
+      is_assign = assign?(exp)
+      if is_assign && last_aligned.nil?
+        last_aligned, max_length = find_assign_chunk(node.expressions, exp, i + 1)
+      elsif !is_assign
+        max_length = nil
+      end
+      last = i == node.expressions.size - 1
+      needs_two = !last && needs_two_lines?(exp, node.expressions[i + 1])
+
       skip_space_or_newline
       if @token.type == TokenKind::EOF
         break
       end
+      @assign_length = max_length
       write_indent(@indent) if @line_output.empty?
       accept(exp)
       skip_space(consume_newline: false)
       if @token.type == TokenKind::OP_SEMICOLON
-        next_token
-        skip_space(consume_newline: false)
-      end
-      if i == node.expressions.size - 1
-        skip_space_or_newline(last: true, at_least_one: false, next_comes_end: has_paren || has_begin)
-      else
-        next_exp = node.expressions[i + 1]
-        needs_two = needs_two_lines?(exp, next_exp)
         if needs_two
-          if @wrote_newline
-            write_line unless @wrote_double_newlines
-          elsif !@wrote_double_newlines
-            write_line
-            write_line
-          end
-          @wrote_double_newlines = true
-          found_comment = skip_space_or_newline
-          write_line unless found_comment || @wrote_double_newlines
+          skip_semicolon_or_space_or_newline
         else
-          consume_newlines
+          found_comment = skip_semicolon_or_space
+          if @token.type == TokenKind::NEWLINE
+            consume_newlines
+          else
+            write("; ") unless last || found_comment
+            skip_space_or_newline
+          end
         end
       end
+      if last
+        skip_space_or_newline(last: true, at_least_one: false, next_comes_end: has_paren || has_begin)
+      elsif needs_two
+        if @wrote_newline
+          write_line unless @wrote_double_newlines
+        elsif !@wrote_double_newlines
+          write_line
+          write_line
+        end
+        @wrote_double_newlines = true
+        found_comment = skip_space_or_newline
+        write_line unless found_comment || @wrote_double_newlines
+      else
+        consume_newlines
+      end
+      last_aligned = nil if last_aligned == i
     end
 
     if has_paren
@@ -670,7 +700,7 @@ pub class Formatter < Visitor
   end
 
   def needs_two_lines?(node : ASTNode, next_node : ASTNode) : Bool
-    return false if node.is_a?(Annotation)
+    return false if node.is_a?(Annotation) || node.is_a?(MacroIf)
     return false if abstract_def?(node) && abstract_def?(next_node)
     needs_two_lines?(node) || needs_two_lines?(next_node)
   end
@@ -683,6 +713,77 @@ pub class Formatter < Visitor
       abstract_def?(node.exp)
     else
       false
+    end
+  end
+
+  # An assignment to a constant, or an enum member: a run of these on
+  # consecutive lines has its `=` aligned.
+  def assign?(exp : ASTNode) : Bool
+    case exp
+    when Assign
+      exp.target.is_a?(Path)
+    when VisibilityModifier
+      assign?(exp.exp)
+    when Arg
+      true
+    else
+      false
+    end
+  end
+
+  def assign_length(exp : ASTNode) : Int32
+    case exp
+    when Assign
+      assign_length(exp.target)
+    when Arg
+      exp.name.bytesize
+    when VisibilityModifier
+      assign_length(exp.exp)
+    when Path
+      exp.names[0].bytesize
+    else
+      0
+    end
+  end
+
+  # The index of the last expression on the run of consecutive lines that
+  # starts at *last*, and the widest target on it.
+  def find_assign_chunk(expressions : Array(ASTNode), last : ASTNode, i : Int32) : Tuple(Int32, Int32)
+    max_length = assign_length(last)
+    last_index = i - 1
+    while i < expressions.size
+      exp = expressions[i]
+      exp_location = exp.location
+      break unless exp_location
+      last_location = last.location
+      break unless last_location
+      break unless last_location.line_number + 1 == exp_location.line_number
+
+      last = exp
+      last_index = i
+      exp_length = assign_length(exp)
+      max_length = exp_length if exp_length > max_length
+      i = i + 1
+    end
+    {last_index, max_length}
+  end
+
+  # Pads a target to the run's widest one, when the run asked for it.
+  def check_assign_length(exp : ASTNode) : Bool
+    if wanted = @assign_length
+      gap = wanted - assign_length(exp)
+      write_indent(gap)
+      @assign_length = nil
+      true
+    else
+      false
+    end
+  end
+
+  # Records a number assigned in an aligned run, which `finish` right-aligns.
+  def check_assign_align(before_column : Int32, exp : ASTNode) : Nil
+    if exp.is_a?(NumberLiteral)
+      @assign_infos << AlignInfo.new(0_u64, @line, before_column, @column, @column, true)
     end
   end
 
@@ -898,9 +999,20 @@ pub class Formatter < Visitor
     end
     accept(node.target)
     skip_space
+    check_align = check_assign_length(node.target)
     write_token(" ", TokenKind::OP_EQ, " ")
     skip_space_or_newline
-    accept(node.value)
+    before_column = @column
+    if @token.keyword?(Keyword::IF) || @token.keyword?(Keyword::CASE) || node.value.is_a?(MacroIf)
+      # An `if` or `case` value has its body aligned under the keyword.
+      old_indent = @indent
+      @indent = @column
+      accept(node.value)
+      @indent = old_indent
+    else
+      accept(node.value)
+    end
+    check_assign_align(before_column, node.value) if check_align
     false
   end
 
@@ -1239,6 +1351,7 @@ pub class Formatter < Visitor
         write(" ")
       end
       skip_space
+      next_token_skip_space_or_newline if @token.type == TokenKind::OP_SEMICOLON
       accept(block.body)
       skip_space_or_newline
       write_token(" ", TokenKind::OP_RCURLY)
@@ -1474,9 +1587,24 @@ pub class Formatter < Visitor
     end
     if default_val = node.default_value
       skip_space_or_newline
+      check_align = check_assign_length(node)
       write_token(" ", TokenKind::OP_EQ, " ")
+      before_column = @column
       skip_space_or_newline
       accept(default_val)
+      check_assign_align(before_column, default_val) if check_align
+    end
+
+    # An enum member ended by `;`
+    if @token.type == TokenKind::OP_SEMICOLON
+      next_token
+      @token = @lexer.skip_space
+      if @token.type == TokenKind::COMMENT
+        write_comment
+      else
+        write(";") if @token.type == TokenKind::CONST
+        write(" ")
+      end
     end
     false
   end
@@ -1626,20 +1754,39 @@ pub class Formatter < Visitor
       skip_space_or_newline
     end
     write(" ")
+    is_do = false
     if @token.keyword?(Keyword::DO)
       write_keyword(Keyword::DO)
+      is_do = true
     else
       write_token(TokenKind::OP_LCURLY)
       write(" ") if a_def.body.is_a?(Nop)
     end
-    skip_space
-    if @token.type == TokenKind::NEWLINE
+    skip_space(@indent + 2)
+    if @token.type == TokenKind::NEWLINE || @wrote_newline
       format_nested(a_def.body)
     else
       skip_space_or_newline
-      accept(a_def.body)
-      skip_space
-      write(" ") unless a_def.body.is_a?(Nop)
+      unless a_def.body.is_a?(Nop)
+        write(" ")
+        accept(a_def.body)
+        write(" ")
+      end
+    end
+    skip_space_or_newline(@indent + 2)
+    # A body ending its last line in a comment leaves the closer a line of
+    # its own.
+    write_line if @wrote_comment
+    if is_do
+      if @token.type == TokenKind::OP_SEMICOLON
+        next_token_skip_space_or_newline
+      end
+      check_keyword(Keyword::END)
+      write_indent(@indent)
+      write("end")
+      next_token
+    else
+      write_indent(@indent) if @wrote_newline
       write_token(TokenKind::OP_RCURLY)
     end
     false
@@ -2120,22 +2267,14 @@ pub class Formatter < Visitor
     write_keyword(Keyword::ENUM, " ")
     accept(node.name)
     if base = node.base_type
+      skip_space
       write_token(" ", TokenKind::OP_COLON, " ")
+      skip_space_or_newline
       accept(base)
     end
-    write_line
-    @indent = @indent + 2
-    node.members.each do |m|
-      skip_space_or_newline
-      write_indent(@indent)
-      accept(m)
-      write_line
-    end
-    @indent = @indent - 2
-    skip_space_or_newline
-    write_indent(@indent)
-    check_keyword(Keyword::END)
-    write_keyword(Keyword::END)
+    @inside_enum = @inside_enum + 1
+    format_nested_with_end(Expressions.from(node.members))
+    @inside_enum = @inside_enum - 1
     false
   end
 
@@ -2524,6 +2663,32 @@ pub class Formatter < Visitor
     end
   end
 
+  def skip_semicolon_or_space : Bool
+    found_comment = false
+    while true
+      if @token.type == TokenKind::OP_SEMICOLON
+        next_token
+      elsif @token.type == TokenKind::SPACE
+        found_comment = skip_space || found_comment
+      else
+        break
+      end
+    end
+    found_comment
+  end
+
+  def skip_semicolon_or_space_or_newline : Nil
+    while true
+      if @token.type == TokenKind::OP_SEMICOLON
+        next_token
+      elsif @token.type == TokenKind::SPACE || @token.type == TokenKind::NEWLINE
+        skip_space_or_newline
+      else
+        break
+      end
+    end
+  end
+
   def skip_space_write_line : Bool
     found_comment = skip_space
     write_line unless found_comment || @wrote_newline
@@ -2615,6 +2780,7 @@ pub class Formatter < Visitor
   end
 
   def write_line : Nil
+    @wrote_comment = false
     @output.puts
     @line_output.clear
     @column = 0
@@ -2634,10 +2800,67 @@ pub class Formatter < Visitor
     write_line unless @wrote_newline
     skip_space_or_newline
     result = rstrip(@output.to_s)
+    unless @assign_infos.empty?
+      lines = result.split('\n')
+      align_infos(lines, @assign_infos)
+      result = lines.join("\n")
+    end
     if @shebang && result.starts_with?("# !")
       result = "#!" + result[3, result.bytesize - 3]
     end
     result + "\n"
+  end
+
+  # Right-aligns the numbers of each run of aligned assignments on
+  # consecutive lines.
+  def align_infos(lines : Array(String), align_infos : Array(AlignInfo)) : Nil
+    max_size : Int32? = nil
+    last_line : Int32? = nil
+    align_infos.each_with_index do |info, i|
+      size = max_size
+      unless size
+        last_line, size = find_last_info(align_infos, info, i + 1)
+        max_size = size
+      end
+      align_info(lines, info, size)
+      if last_line == info.line
+        last_line = nil
+        max_size = nil
+      end
+    end
+  end
+
+  # The line of the last info in the run starting at *base*, and the run's
+  # widest value.
+  def find_last_info(align_infos : Array(AlignInfo), base : AlignInfo, i : Int32) : Tuple(Int32, Int32)
+    max_size = base.size
+    while i < align_infos.size
+      current = align_infos[i]
+      break unless current.id == base.id
+      break unless base.line + 1 == current.line
+
+      base = current
+      max_size = base.size if base.size > 0 && base.size > max_size
+      i = i + 1
+    end
+    {base.line, max_size}
+  end
+
+  def align_info(lines : Array(String), info : AlignInfo, max_size : Int32) : Nil
+    gap = max_size - info.size
+    return if gap == 0
+
+    line = lines[info.line]
+    middle = info.number ? info.start_column : info.middle_column
+    padding = FormatterBuffer.new(line.bytesize + gap)
+    padding << line[0, middle]
+    i = 0
+    while i < gap
+      padding << " "
+      i = i + 1
+    end
+    padding << line[middle, line.bytesize - middle]
+    lines[info.line] = padding.to_s
   end
 
   def write_keyword(kw : Keyword) : Nil

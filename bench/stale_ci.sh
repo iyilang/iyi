@@ -294,12 +294,25 @@ for t in tests:
     reason = t.get('reason', '')
     if differs:
         reason = f'{reason} profile differs (receipt {r_fp}, runner {t_fp})'.strip()
-    non_hits.append((tid, reuse, reason))
+    # An empty reason says nothing: a build that failed and a clean miss both leave it empty.
+    # Say what the runner saw, so the next failure can be read without a rerun.
+    detail = ' '.join([
+        f'status={t.get(\"status\", \"\")!r}',
+        f'cached={cached}',
+        f'check={t.get(\"check\", \"\")!r}',
+        f'check_reason={t.get(\"check_reason\", \"\")!r}',
+        f'blocked={t.get(\"blocked\", \"\")}',
+        f'runner_profile={t_fp}',
+        f'receipt_profile={r_fp}',
+        f'portable_build={t.get(\"portable_build\", \"\")}',
+    ])
+    non_hits.append((tid, reuse, reason, detail))
 
 if non_hits:
     print(f'assert-hits FAILED: {len(non_hits)} tests did not hit from cache:', file=sys.stderr)
-    for tid, r, reason in non_hits:
+    for tid, r, reason, detail in non_hits:
         print(f'  {tid[0]}:{tid[1]}: reuse={r} reason={reason}', file=sys.stderr)
+        print(f'      {detail}', file=sys.stderr)
     sys.exit(1)
 
 if exported_ids is not None:

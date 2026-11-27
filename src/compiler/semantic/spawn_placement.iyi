@@ -890,11 +890,8 @@ class PoolReachWalk < Visitor
   def follow(definition : Def, receiver : Type?, call : Call, cause : Call?) : Nil
     if definition.name == "start" && (worker_metaclass?(receiver) || worker_metaclass?(@visitor.program.def_owner(definition)))
       if origin = cause
-        placement = if verdict = @analysis.verdicts[origin]?
-                      verdict.placement
-                    else
-                      "spawn"
-                    end
+        verdict = @analysis.verdicts[origin]?
+        placement = verdict ? verdict.placement : "spawn"
         @analysis.proven("#{spawn_site(origin)} in #{placement}")
       elsif loc = call.name_location || call.location
         @analysis.proven("#{loc.filename}:#{loc.line_number} in IyiWorkers.start")

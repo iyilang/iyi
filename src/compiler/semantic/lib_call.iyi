@@ -69,8 +69,10 @@ end
 # runtime reads.
 pub class LibCall
   INTEGER_NAMES = ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128"]
-  FLOAT_NAMES   = ["Float32", "Float64"]
-  SCALAR_NAMES  = ["Char", "Bool"]
+
+  FLOAT_NAMES = ["Float32", "Float64"]
+
+  SCALAR_NAMES = ["Char", "Bool"]
 
   def self.recalculate(target_lib : LibType, prog : SemanticProgram, ts : TypeSystem, name : String, args : Array(LibCallArgument)) : LibCallTarget
     found = target_lib.lookup_fun(name)

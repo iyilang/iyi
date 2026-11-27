@@ -12,7 +12,8 @@ import compiler/types/lookup::{TypeLookup}
 import compiler/semantic/type_nodes::{type_node_system}
 import std/unicode::{Unicode}
 
-VAR_PREFIX     = "__iyi_dt_"
+VAR_PREFIX = "__iyi_dt_"
+
 WITNESS_PREFIX = "IyiDefTypeWitness_"
 
 pub def append_definition_probes(prog : SemanticProgram, root : ASTNode, user_files : Set(String)) : Nil

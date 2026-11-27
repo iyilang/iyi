@@ -238,13 +238,8 @@ pub class CallRecalculation
       end
     else
       tuple = instance.as(NamedTupleInstanceType)
-      key = if arg.is_a?(StringLiteral)
-              arg.as(StringLiteral).value
-            elsif arg.is_a?(SymbolLiteral)
-              arg.as(SymbolLiteral).value
-            else
-              return nil
-            end
+      return nil unless arg.is_a?(StringLiteral) || arg.is_a?(SymbolLiteral)
+      key = arg.is_a?(StringLiteral) ? arg.as(StringLiteral).value : arg.as(SymbolLiteral).value
       first = -1
       tuple.entries.each_with_index do |entry, index|
         first = index if entry.name == key
@@ -253,11 +248,7 @@ pub class CallRecalculation
       last = first
     end
     cache_key = "#{meta}:#{first}:#{last}:#{is_range}"
-    cache = if instance.is_a?(TupleInstanceType)
-              instance.as(TupleInstanceType).tuple_indexers
-            else
-              instance.as(NamedTupleInstanceType).tuple_indexers
-            end
+    cache = instance.is_a?(TupleInstanceType) ? instance.as(TupleInstanceType).tuple_indexers : instance.as(NamedTupleInstanceType).tuple_indexers
     if existing = cache[cache_key]?
       return existing
     end

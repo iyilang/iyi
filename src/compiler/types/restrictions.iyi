@@ -116,8 +116,8 @@ pub class TypeRestrictions
     i = 0
     while i < program.impls.size
       rec = program.impls[i]
-      if (rec.target_type == type || rec.target_type.full_name == type.full_name) &&
-         (rec.trait_type == trait_type || rec.trait_type.full_name == trait_type.full_name)
+      target_match = rec.target_type == type || rec.target_type.full_name == type.full_name
+      if target_match && (rec.trait_type == trait_type || rec.trait_type.full_name == trait_type.full_name)
         return true
       end
       i = i + 1

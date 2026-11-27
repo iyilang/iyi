@@ -176,7 +176,8 @@ function atomic_memory(line,   p, suffix, prefix, words) {
 # `%K = call ptr @f(i64 mul (i64 A, i64 B))`, is written the way LLVM 21 and later write it, and
 # the way the port does: `%K = mul i64 A, B` and the call on `i64 %K`. Every later numbered value of
 # the function moves up one, so the whole function is read before any of it is written
-# (a phi may name a value defined below it).
+# (a phi may name a value defined below it). LLVM 20 folds every later use of the same product too
+# (the size a malloc is called on, then memset over): that use reads the value the first fold became.
 function folded_mul(line,   p, q, depth, c, inner, n, parts) {
   if (line !~ /^  %[0-9]+ = call /) return ""
   p = index(line, "(i64 mul (i64 ")
@@ -193,6 +194,7 @@ function folded_mul(line,   p, q, depth, c, inner, n, parts) {
   n = split_top(inner, parts)
   if (n != 2 || parts[1] !~ /^i64 / || parts[2] !~ /^i64 /) return ""
   fold_head = substr(line, 1, p)
+  fold_expr = substr(line, p + 1, q - p)
   fold_tail = substr(line, q + 1)
   return substr(parts[1], 5) ", " substr(parts[2], 5)
 }
@@ -208,8 +210,16 @@ function renumber(line, thresholds, count,   out, m, j, shift) {
   }
   return out line
 }
-function flush_function(   i, count, thresholds, operands, k, lt, j, temp) {
+function reuse_folds(line, folds, nfold,   j, at) {
+  for (j = 1; j <= nfold; j++) {
+    while ((at = index(line, folds[j, "expr"])) > 0)
+      line = substr(line, 1, at - 1) "i64 %" folds[j, "temp"] substr(line, at + length(folds[j, "expr"]))
+  }
+  return line
+}
+function flush_function(   i, count, thresholds, operands, k, lt, j, temp, folds, nfold) {
   count = 0
+  nfold = 0
   for (i = 1; i <= nbuf; i++) {
     if (folded_mul(buf[i]) != "") {
       match(buf[i], /%[0-9]+/)
@@ -218,7 +228,7 @@ function flush_function(   i, count, thresholds, operands, k, lt, j, temp) {
   }
   for (i = 1; i <= nbuf; i++) {
     operands = folded_mul(buf[i])
-    if (operands == "") { emit(renumber(buf[i], thresholds, count)); continue }
+    if (operands == "") { emit(reuse_folds(renumber(buf[i], thresholds, count), folds, nfold)); continue }
     match(buf[i], /%[0-9]+/)
     k = substr(buf[i], RSTART + 1, RLENGTH - 1) + 0
     lt = 0
@@ -227,6 +237,8 @@ function flush_function(   i, count, thresholds, operands, k, lt, j, temp) {
     emit("  %" temp " = mul i64 " operands)
     sub(/^  %[0-9]+ = /, "  %" (temp + 1) " = ", fold_head)
     emit(fold_head "i64 %" temp fold_tail)
+    folds[++nfold, "expr"] = fold_expr
+    folds[nfold, "temp"] = temp
   }
   nbuf = 0
 }

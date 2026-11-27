@@ -7,5 +7,7 @@ class Box(T)
   end
 end
 
-h = uninitialized Box(Int32)
+# A real instance: the native run reads @value through it (an uninitialized reference read
+# whatever the stack held, and segfaulted on macOS arm64).
+h = Box(Int32).new(7)
 h.value

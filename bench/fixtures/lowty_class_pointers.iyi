@@ -1,0 +1,22 @@
+# A class whose fields hold references: the pointer map marks each reference word, and the
+# scan cap is the end of the last field. Under iyi's object layout.
+class IyiRuntimeLock
+end
+
+class Node
+end
+
+class Holder
+  @count : Int32
+  @next : Node
+  @other : Node
+
+  def initialize
+    @count = 0
+    @next = Node.new
+    @other = Node.new
+  end
+end
+
+# type: Holder
+# type: Node

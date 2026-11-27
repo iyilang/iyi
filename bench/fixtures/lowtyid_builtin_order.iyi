@@ -1,0 +1,11 @@
+# Builtin type ids that depend on creation order: Nil, Bool and Char are made in the hosted order
+# (program.cr 1378-1380), and the two Pointer instances ARGV_UNSAFE makes (program.cr 1462) come
+# before any instance a file names. Each id is the one the hosted LLVMId walk gives.
+# type: Nil
+# type: Bool
+# type: Char
+# type: Pointer(UInt8)
+# type: Pointer(Pointer(UInt8))
+
+class Animal
+end

@@ -1,0 +1,12 @@
+def twice(&)
+  yield 1
+  yield 2
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+total = 0
+twice { |x| twice { |y| total = y } }
+LibC.exit(total)

@@ -1,0 +1,9 @@
+lib LibC
+  fun malloc(size : UInt64) : Pointer(Int32)
+  fun free(ptr : Pointer(Int32)) : Void
+  fun exit(status : Int32) : NoReturn
+end
+
+p = LibC.malloc(8_u64)
+LibC.free(p)
+LibC.exit(3)

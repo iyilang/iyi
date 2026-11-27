@@ -1,0 +1,22 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Box
+  def initialize
+  end
+end
+
+def identify(box : Box) : UInt64
+  box.object_id
+end
+
+def go : Int32
+  if identify(Box.new) == 0_u64
+    1
+  else
+    0
+  end
+end
+
+LibC.exit(go)

@@ -677,9 +677,10 @@ pub class StringInterpolation < ASTNode
     sb << '"'
     @expressions.each do |e|
       if e.is_a?(StringLiteral)
-        sb << e.value
+        quoted = e.value.inspect
+        sb << quoted[1, quoted.bytesize - 2]
       else
-        sb << "#{"
+        sb << '#' << '{'
         e.to_s(sb)
         sb << "}"
       end

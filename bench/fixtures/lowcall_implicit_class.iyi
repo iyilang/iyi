@@ -1,0 +1,15 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Schedule
+  def self.inner(value : Int32) : Int32
+    value
+  end
+
+  def self.outer(value : Int32) : Int32
+    inner(value)
+  end
+end
+
+LibC.exit(Schedule.outer(42))

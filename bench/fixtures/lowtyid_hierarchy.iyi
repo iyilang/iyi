@@ -1,0 +1,18 @@
+# User classes in a hierarchy: Animal, with Dog, Cat and Bird below it. The ids are the
+# hosted LLVMId walk from Object, so they follow the builtins numbered before them.
+class Animal
+end
+
+class Dog < Animal
+end
+
+class Cat < Animal
+end
+
+class Bird < Animal
+end
+
+# type: Animal
+# type: Dog
+# type: Cat
+# type: Bird

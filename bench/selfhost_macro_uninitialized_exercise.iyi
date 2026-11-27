@@ -1,0 +1,34 @@
+import compiler/syntax/ast::{ASTNode, ClassDef, Def, Expressions, PointerOf, Var}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/inline_macros::{splice_inline_sites}
+import compiler/semantic/normalizer::{NormalizerProgram}
+
+class MacroUninitializedPointerProbe < Visitor
+  property found : Bool = false
+
+  def visit(node : PointerOf) : Bool
+    @found = node.exp.is_a?(Var) && node.exp.as(Var).name == "callstack"
+    false
+  end
+end
+
+source = if Program.args.empty?
+           "class Box\n  def value\n    {% if true %}callstack = uninitialized Int32[2]{% end %}\n    {% if true %}pointerof(callstack){% end %}\n  end\nend\n"
+         else
+           File.read(Program.args[0])
+         end
+root = Parser.new(source).parse
+klass = root.is_a?(Expressions) ? root.as(Expressions).expressions.find { |node| node.is_a?(ClassDef) }.as(ClassDef) : root.as(ClassDef)
+body = klass.body
+method = body.is_a?(Expressions) ? body.as(Expressions).expressions.first.as(Def) : body.as(Def)
+statements = method.body.as(Expressions).expressions
+expanded = splice_inline_sites(statements, "Box", "", false, NormalizerProgram.new)
+probe = MacroUninitializedPointerProbe.new
+expanded.each { |node| node.accept(probe) }
+if probe.found
+  puts "uninitialized local is a variable in the later expansion"
+else
+  STDERR.puts "later expansion did not parse the uninitialized local as a variable"
+  exit 1
+end

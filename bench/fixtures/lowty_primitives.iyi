@@ -1,0 +1,19 @@
+# Primitive types of the lowering: IR type, embedded type, size, alignment, by-value flag.
+# type: Nil
+# type: Bool
+# type: Char
+# type: Int8
+# type: Int16
+# type: Int32
+# type: Int64
+# type: Int128
+# type: UInt8
+# type: UInt16
+# type: UInt32
+# type: UInt64
+# type: UInt128
+# type: Float32
+# type: Float64
+# type: Symbol
+# type: Void
+# type: NoReturn

@@ -1,0 +1,38 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun strchr(text : UInt8*, character : Int32) : UInt8*
+  fun exit(status : Int32) : NoReturn
+end
+
+class String
+  def to_unsafe : UInt8*
+    pointerof(@c)
+  end
+end
+
+class Marker
+  def initialize
+  end
+end
+
+class OtherMarker
+  def initialize
+  end
+end
+
+def optional_object(present : Bool)
+  present ? Marker.new : nil
+end
+
+def optional_reference_union(first : Bool, second : Bool)
+  first ? Marker.new : (second ? OtherMarker.new : nil)
+end
+
+LibC.putchar(LibC.strchr("AB".to_unsafe, 65) ? 65 : 88)
+LibC.putchar(LibC.strchr("AB".to_unsafe, 90) ? 88 : 66)
+LibC.putchar(optional_object(true) ? 67 : 88)
+LibC.putchar(optional_object(false) ? 88 : 68)
+LibC.putchar(optional_reference_union(true, false) ? 69 : 88)
+LibC.putchar(optional_reference_union(false, true) ? 70 : 88)
+LibC.putchar(optional_reference_union(false, false) ? 88 : 71)
+LibC.exit(7)

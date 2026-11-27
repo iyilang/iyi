@@ -1,0 +1,11 @@
+def echo(n : Int32, &)
+  yield n
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+total = 0
+echo(21) { |v| total = v }
+LibC.exit(total)

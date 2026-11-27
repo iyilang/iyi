@@ -39,7 +39,7 @@ src/compiler/codegen/codegen.iyi 199
 src/compiler/command/daemon.iyi 84
 src/compiler/command/driver.iyi 256
 src/compiler/command/execute.iyi 29
-src/compiler/compiler.iyi 69
+src/compiler/compiler.iyi 71
 src/compiler/foundation/enums.iyi 9
 src/compiler/foundation/errors.iyi 16
 src/compiler/foundation/location.iyi 18
@@ -89,7 +89,7 @@ src/compiler/loader.iyi 39
 src/compiler/lower/abi/aarch64.iyi 11
 src/compiler/lower/asm.iyi 28
 src/compiler/lower/block.iyi 44
-src/compiler/lower/call.iyi 103
+src/compiler/lower/call.iyi 104
 src/compiler/lower/cast.iyi 76
 src/compiler/lower/class_var.iyi 70
 src/compiler/lower/closure.iyi 31
@@ -109,8 +109,8 @@ src/compiler/lower/lower.iyi 185
 src/compiler/lower/pending.iyi 5
 src/compiler/lower/phi.iyi 25
 src/compiler/lower/primitives.iyi 143
-src/compiler/lower/proc.iyi 40
-src/compiler/lower/program.iyi 96
+src/compiler/lower/proc.iyi 42
+src/compiler/lower/program.iyi 97
 src/compiler/lower/symbols.iyi 24
 src/compiler/lower/type_id.iyi 31
 src/compiler/lower/typer.iyi 56
@@ -123,7 +123,7 @@ src/compiler/macros/interpreter.iyi 84
 src/compiler/macros/macro_parser.iyi 34
 src/compiler/macros/methods.iyi 45
 src/compiler/macros/site_scan.iyi 46
-src/compiler/macros/target_flags.iyi 14
+src/compiler/macros/target_flags.iyi 37
 src/compiler/macros/type_facts.iyi 29
 src/compiler/native/aarch64/abi.iyi 10
 src/compiler/native/aarch64/asm.iyi 73
@@ -184,7 +184,7 @@ src/compiler/semantic/match.iyi 73
 src/compiler/semantic/math_interpreter.iyi 65
 src/compiler/semantic/method_lookup.iyi 44
 src/compiler/semantic/new.iyi 23
-src/compiler/semantic/normalizer.iyi 73
+src/compiler/semantic/normalizer.iyi 74
 src/compiler/semantic/recursive_struct_checker.iyi 14
 src/compiler/semantic/restrictions.iyi 53
 src/compiler/semantic/share.iyi 45
@@ -287,6 +287,7 @@ src/std/dir.iyi 71
 src/std/dns.iyi 155
 src/std/ecdsa.iyi 152
 src/std/eiy.iyi 74
+src/std/eiy/process.iyi 18
 src/std/enum.iyi 23
 src/std/enumerable.iyi 89
 src/std/env.iyi 47
@@ -327,6 +328,7 @@ src/std/number.iyi 22
 src/std/number_format.iyi 55
 src/std/oauth.iyi 105
 src/std/oauth2.iyi 103
+src/std/observe.iyi 128
 src/std/ocsp.iyi 112
 src/std/option_parser.iyi 40
 src/std/otp.iyi 59

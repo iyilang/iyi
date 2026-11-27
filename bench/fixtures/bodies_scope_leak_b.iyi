@@ -1,0 +1,9 @@
+module bodies_scope_leak_b
+
+pub class LeakB
+  def read
+    scope_value_nowhere
+  end
+end
+
+LeakB.new.read

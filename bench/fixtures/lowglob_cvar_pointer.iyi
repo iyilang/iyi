@@ -1,0 +1,17 @@
+class K
+  @@value : Int32 = 3
+  @@ptr : Pointer(Int32) = pointerof(@@value)
+
+  def self.touch : Nil
+    @@ptr
+    nil
+  end
+end
+
+K.touch
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(0)

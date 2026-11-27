@@ -1,0 +1,13 @@
+class Big
+  @@big : UInt64 = 13787848793156543929_u64
+
+  def self.big : UInt64
+    @@big
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Big.big > 9223372036854775807_u64 ? 7 : 3)

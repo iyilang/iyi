@@ -1,0 +1,15 @@
+REC_HEAP        = 1376_u64
+CLASSES         =       67
+PARTITION_BYTES = 2048_u64
+TAKEN           =      176
+
+class DirectRaise
+  REC_HEAP        = 1376_u64
+  CLASSES         =       67
+  PARTITION_BYTES = 2048_u64
+  TAKEN           =       10
+
+  {% if TAKEN * 8 < REC_HEAP || (TAKEN + CLASSES) * 8 > PARTITION_BYTES %}
+    {% raise "direct type guard caught invalid layout" %}
+  {% end %}
+end

@@ -1,0 +1,37 @@
+class First
+  @number : Int32 = 7
+
+  def number : Int32
+    @number
+  end
+end
+
+class Second
+  @number : Int32 = 13
+
+  def number : Int32
+    @number
+  end
+end
+
+class Container(T)
+  @item : T = T.new
+
+  def item : T
+    @item
+  end
+end
+
+class Child(T) < Container(T)
+end
+
+# This specialization exists during declaration resolution; the second is
+# first requested by an allocation later in the file.
+class Early
+  @child : Child(First)? = nil
+end
+
+first = Child(First).new.item.number
+second = Child(Second).new.item.number
+puts "first=#{first},second=#{second}"
+raise "generic ancestor defaults used the wrong specialization" unless first == 7 && second == 13

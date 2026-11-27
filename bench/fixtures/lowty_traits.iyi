@@ -1,0 +1,16 @@
+# A trait without implementors lowers to i1 (hosted TraitType < NonGenericModuleType),
+# and an alias over a struct union passes by value.
+trait EmptyTrait
+end
+
+struct PairItem
+  @x : Int32
+
+  def initialize(@x : Int32)
+  end
+end
+
+alias ItemOrNil = PairItem | Nil
+
+# type: EmptyTrait
+# type: ItemOrNil

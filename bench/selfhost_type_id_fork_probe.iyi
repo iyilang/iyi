@@ -1,0 +1,24 @@
+import compiler/lower/type_id::{LowerTypeIds}
+import compiler/semantic/top_level::{SemanticProgram, NonGenericModuleType}
+
+program = SemanticProgram.new
+base = LowerTypeIds.new
+base.assign_all(program.object_type)
+first = base.fork
+second = base.fork
+original = base.min_max(program.object_type).as(Tuple(Int32, Int32))
+first.put(program.object_type, original[0] + 1, original[1])
+raise "fork mutated baseline range" unless base.min_max(program.object_type) == original
+raise "fork mutated sibling range" unless second.min_max(program.object_type) == original
+raise "fork did not retain its own range" unless first.min_max(program.object_type) == {original[0] + 1, original[1]}
+one = NonGenericModuleType.new(program, nil, "ProbeOne")
+two = NonGenericModuleType.new(program, nil, "ProbeTwo")
+id_one = first.type_id(one)
+id_two = second.type_id(two)
+raise "fork numbering differs" unless id_one == id_two
+raise "fork mutated baseline" unless base.min_max(one).nil?
+raise "fork mutated sibling" unless second.min_max(one).nil?
+raise "fork name changed" unless first.name_of_id(id_one) == "ProbeOne"
+raise "sibling name changed" unless second.name_of_id(id_two) == "ProbeTwo"
+raise "baseline type list changed" unless base.numbered_types.size + 1 == first.numbered_types.size
+puts "type-id forks stay independent"

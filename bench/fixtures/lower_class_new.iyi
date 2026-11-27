@@ -1,0 +1,11 @@
+# Class allocation and method call (Tool.new): the bare oracle uses malloc + memset + type_id store.
+class Tool
+  def initialize(@val : Int32)
+  end
+
+  def val : Int32
+    @val
+  end
+end
+
+Tool.new(7).val

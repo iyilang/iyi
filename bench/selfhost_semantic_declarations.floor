@@ -124,7 +124,7 @@ src/compiler/macros/interpreter.iyi 65
 src/compiler/macros/macro_parser.iyi 23
 src/compiler/macros/methods.iyi 24
 src/compiler/macros/site_scan.iyi 44
-src/compiler/macros/target_flags.iyi 8
+src/compiler/macros/target_flags.iyi 32
 src/compiler/macros/type_facts.iyi 24
 src/compiler/native/aarch64/abi.iyi 2
 src/compiler/native/aarch64/asm.iyi 78
@@ -165,7 +165,7 @@ src/compiler/native/wasm/codegen.iyi 0
 src/compiler/native/wasm/leb.iyi 15
 src/compiler/native/wasm/module.iyi 0
 src/compiler/platform/flags.iyi 5
-src/compiler/platform/linker.iyi 28
+src/compiler/platform/linker.iyi 29
 src/compiler/platform/target.iyi 47
 src/compiler/semantic/call.iyi 25
 src/compiler/semantic/call_error.iyi 18
@@ -293,11 +293,12 @@ src/std/dir.iyi 52
 src/std/dns.iyi 151
 src/std/ecdsa.iyi 129
 src/std/eiy.iyi 68
+src/std/eiy/process.iyi 1
 src/std/enum.iyi 19
 src/std/enumerable.iyi 77
-src/std/env.iyi 41
+src/std/env.iyi 42
 src/std/errno.iyi 38
-src/std/file.iyi 159
+src/std/file.iyi 162
 # Linux takes the `{% else %}` arm of the platform block at the top of the file (its syscall
 # layer, with its own architecture arms), which declares more than the Darwin arm. CI's Linux
 # host (x86-64) measures 167 of 167.
@@ -340,6 +341,7 @@ src/std/number.iyi 24
 src/std/number_format.iyi 35
 src/std/oauth.iyi 0
 src/std/oauth2.iyi 0
+src/std/observe.iyi 0
 src/std/ocsp.iyi 105
 src/std/option_parser.iyi 44
 src/std/otp.iyi 47

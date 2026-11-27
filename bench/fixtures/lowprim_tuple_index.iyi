@@ -1,0 +1,14 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+  fun getpid : Int32
+end
+
+def pick_tuple_member(tuple : Tuple(Int32, Int32)) : Int32
+  tuple[1]
+end
+
+if LibC.getpid == -1
+  tuple = uninitialized Tuple(Int32, Int32)
+  LibC.exit(pick_tuple_member(tuple))
+end
+LibC.exit(0)

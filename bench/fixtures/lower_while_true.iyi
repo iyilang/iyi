@@ -1,0 +1,8 @@
+def while_true_result : Int32
+  while true
+    break
+  end
+  7
+end
+
+while_true_result

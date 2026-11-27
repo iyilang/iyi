@@ -1,0 +1,13 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def compare(a : Float64, b : Float64) : Int32
+  if a == a && a != b && a < b && a <= b && b > a && b >= a
+    101
+  else
+    0
+  end
+end
+
+LibC.exit(compare(1.0, 2.0))

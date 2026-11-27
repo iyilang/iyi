@@ -10,6 +10,8 @@
 *.o
 *.ll
 !/bench/fixtures/llvm_roundtrip/*.ll
+!/bench/fixtures/lowglob_indirect.ll
+!/bench/fixtures/lowglob_indirect_aggregate.ll
 *.s
 *.obj
 *.dwo

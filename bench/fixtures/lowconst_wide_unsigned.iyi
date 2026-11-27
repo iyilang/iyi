@@ -1,0 +1,9 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+BIG = 340282366920938463463374607431768211455_u128
+fun get_value : UInt128
+  BIG
+end
+LibC.exit(get_value == BIG ? 7 : 1)

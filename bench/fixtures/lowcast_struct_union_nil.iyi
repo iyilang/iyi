@@ -1,0 +1,47 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct One
+  def value : Int32
+    7
+  end
+end
+
+struct Two
+  def value : Int32
+    3
+  end
+end
+
+alias Choice = One | Two | Nil
+
+class Holder
+  @item : Choice
+
+  def initialize(@item : Choice)
+  end
+
+  def item : Choice
+    @item
+  end
+end
+
+def check(flag : Bool) : Int32
+  holder = Holder.new(nil)
+  item = holder.item
+  if flag
+    item = One.new
+  else
+    item = Two.new
+  end
+  if item.is_a?(One)
+    item.value
+  elsif item.is_a?(Two)
+    item.value
+  else
+    1
+  end
+end
+
+LibC.exit(check(true) &+ check(false))

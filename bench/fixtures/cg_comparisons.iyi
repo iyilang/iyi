@@ -1,0 +1,31 @@
+fun int_lt(a : Int32, b : Int32) : Bool
+  a < b
+end
+
+fun int_lte(a : Int32, b : Int32) : Bool
+  a <= b
+end
+
+fun int_gt(a : Int32, b : Int32) : Bool
+  a > b
+end
+
+fun int_gte(a : Int32, b : Int32) : Bool
+  a >= b
+end
+
+fun int_eq(a : Int32, b : Int32) : Bool
+  a == b
+end
+
+fun int_ne(a : Int32, b : Int32) : Bool
+  a != b
+end
+
+fun float_lt(a : Float64, b : Float64) : Bool
+  a < b
+end
+
+fun float_eq(a : Float64, b : Float64) : Bool
+  a == b
+end

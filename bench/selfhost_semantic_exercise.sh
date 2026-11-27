@@ -38,6 +38,21 @@ if ! grep -qF "ALL SELFHOST SEMANTIC CHECKS PASSED SUCCESSFULLY!" "$WORK/plain.o
   status=1
 fi
 
+echo "== Search paths for declaration imports"
+if ! IYI_PATH="$REPO_NATIVE/bench/fixtures/semdecl_order_superclass" "$WORK/exercise$EXE" \
+  -e 'import valueunit::{Value}' > "$WORK/import.out" 2>&1 ||
+  ! grep -Fq 'Def: weight' "$WORK/import.out"; then
+  echo "  FAILED: the declaration driver did not search IYI_PATH"
+  cat "$WORK/import.out"
+  exit 1
+fi
+if env -u CRYSTAL_PATH IYI_PATH="" "$WORK/exercise$EXE" \
+  -e 'import valueunit::{Value}' > "$WORK/import-missing.out" 2>&1; then
+  echo "  FAILED: an unavailable import was accepted"
+  exit 1
+fi
+echo "  IYI_PATH import resolved and the missing-path control refused"
+
 echo
 echo "== 2. Semantic declaration comparison against the front end being replaced"
 cat <<'HOSTED_GOLDEN_SCRIPT' > "$WORK/dump_hosted_sem.cr"

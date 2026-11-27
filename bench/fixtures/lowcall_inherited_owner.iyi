@@ -1,0 +1,21 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Base
+  def identity(n : Int32) : Int32
+    value = n
+    value
+  end
+end
+
+class Child < Base
+  def initialize
+  end
+
+  def run : Int32
+    identity(7)
+  end
+end
+
+LibC.exit(Child.new.run)

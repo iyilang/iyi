@@ -1,0 +1,35 @@
+# Lists a wasm module's sections, imports and exports, using the reader in compiler/native/wasm/module.
+# Usage: inspect <module.wasm>. Prints one line per section, import and export, or ERROR with the reason.
+
+module wasm_inspect
+
+import compiler/native/wasm/module::{read_wasm}
+
+module Inspect
+  def self.run : Nil
+    args = Program.args
+    text = File.read(args[0])
+    bytes = [] of UInt8
+    i = 0
+    while i < text.bytesize
+      bytes << text.byte_at(i)
+      i = i + 1
+    end
+    info = read_wasm(bytes)
+    unless info.ok?
+      print "ERROR #{info.error.as(String)}\n"
+      return nil
+    end
+    info.sections.each do |s|
+      print "section #{s.id} #{s.name} #{s.size}\n"
+    end
+    info.imports.each do |m|
+      print "import #{m.module_name} #{m.name} kind=#{m.kind}\n"
+    end
+    info.exports.each do |e|
+      print "export #{e.name} kind=#{e.kind} index=#{e.index}\n"
+    end
+  end
+end
+
+Inspect.run

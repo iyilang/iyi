@@ -1,0 +1,9 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def apply(f : Proc(Int32, Int32), x : Int32) : Int32
+  f.call(x)
+end
+
+LibC.exit(apply(->(v : Int32) { v }, 7))

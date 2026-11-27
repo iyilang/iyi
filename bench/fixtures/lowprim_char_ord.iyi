@@ -1,0 +1,9 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def ordinal(c : Char) : Int32
+  c.ord
+end
+
+LibC.exit(ordinal('a'))

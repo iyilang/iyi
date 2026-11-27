@@ -1,0 +1,30 @@
+# Instantiating Child in a declaration before initializer collection makes the
+# hosted compiler execute the ancestor default once for each allocation.
+class Count
+  @@n : Int32 = 0
+
+  def self.tick : Int32
+    @@n = @@n + 1
+  end
+
+  def self.value : Int32
+    @@n
+  end
+end
+
+class Base
+  @value : Int32 = Count.tick
+  getter value
+end
+
+class Child(T) < Base
+  @marker : T? = nil
+end
+
+class Early
+  @child : Child(Int32)? = nil
+end
+
+child = Child(Int32).new
+puts "value=#{child.value},count=#{Count.value}"
+raise "initializer did not run once per allocation" unless child.value == 1 && Count.value == 1

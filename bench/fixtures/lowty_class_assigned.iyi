@@ -1,0 +1,10 @@
+# Instance variables typed only by assignment in initialize, with no declaration.
+# Typed from the assignments on both sides (the declarations pass's instance variable typing).
+class Counter
+  def initialize
+    @count = 0
+    @flag = true
+  end
+end
+
+# type: Counter

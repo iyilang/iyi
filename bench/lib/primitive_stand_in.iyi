@@ -1,0 +1,134 @@
+module bench/lib/primitive_stand_in
+
+# Stand-in for the library's builtin primitive declarations (NEEDS.md, S2d rows 19-24). The
+# hosted library declares them in src/primitives.cr, loaded under `--prelude empty`; the
+# port's bare analysis declares none, so `a &+ b` on Int32 has no method to type. The gates
+# call this from `analyse` (bench/lib/lower_gate.iyi) when they stand in the libs.
+#
+# Each builtin integer, Bool and Char gets the binary operators the lowering covers, with
+# the operand's type as parameter and the result type as the return type, as the library
+# declares them: `def &+(other : Int32) : Int32`. Each def has a `Primitive("binary")`
+# body, as the declarations pass gives a `@[Primitive(:binary)]` def. The analysis
+# types it from the declared return type, and the lowering reads its primitive name.
+# Checked `+`, `-` and `*`, bitwise and unchecked operators are declared too.
+# Delete this file when a bare build declares the library's primitives itself.
+
+import compiler/syntax/ast::{ASTNode, Arg, Def, Expressions, Metaclass, Path, Primitive, Self, Splat}
+import compiler/semantic/top_level::{GenericClassType, NonGenericClassType, SemanticProgram}
+import compiler/semantic/main_visitor::{MainVisitor}
+pub def stand_in_primitive_types(root : ASTNode, prog : SemanticProgram, mv : MainVisitor) : Nil
+  int_names = ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128"]
+  int_names.each do |tn|
+    owner = prog.lookup_type_node(Path.new(tn), prog).as(NonGenericClassType)
+    ["&+", "&-", "&*", "+", "-", "*", "|", "&", "^", "unsafe_shl", "unsafe_shr", "unsafe_div", "unsafe_mod"].each do |op|
+      owner.add_def(binary_def(op, tn, tn))
+    end
+    # Checked integer conversion declarations used by the primitive lowering gate.
+    owner.add_def(primitive_def("to_i32", [] of Arg, Path.new("Int32"), "convert"))
+    owner.add_def(primitive_def("to_u32", [] of Arg, Path.new("UInt32"), "convert"))
+    owner.add_def(primitive_def("to_u64", [] of Arg, Path.new("UInt64"), "convert"))
+    owner.add_def(primitive_def("unsafe_chr", [] of Arg, Path.new("Char"), "unchecked_convert"))
+    owner.add_def(primitive_def("to_f32", [] of Arg, Path.new("Float32"), "convert"))
+    owner.add_def(primitive_def("to_f64", [] of Arg, Path.new("Float64"), "convert"))
+    ["Float32", "Float64"].each do |other|
+      ["+", "-", "*"].each do |op|
+        owner.add_def(binary_def(op, other, other))
+      end
+      ["==", "!=", "<", "<=", ">", ">="].each do |op|
+        owner.add_def(binary_def(op, other, "Bool"))
+      end
+    end
+    ["==", "!=", "<", "<=", ">", ">="].each do |op|
+      owner.add_def(binary_def(op, tn, "Bool"))
+    end
+    # The hosted primitives.cr declares every integer pair, not only matching widths.
+    # A same-type call still matches the def added above: a different width is not a subtype.
+    int_names.each do |other|
+      next if other == tn
+      ["&+", "&-", "&*", "+", "-", "|", "&", "^", "unsafe_shl", "unsafe_shr", "unsafe_div", "unsafe_mod"].each do |op|
+        owner.add_def(binary_def(op, other, tn))
+      end
+      ["==", "!=", "<", "<=", ">", ">="].each do |op|
+        owner.add_def(binary_def(op, other, "Bool"))
+      end
+    end
+  end
+  bool = prog.lookup_type_node(Path.new("Bool"), prog).as(NonGenericClassType)
+  ["==", "!="].each do |op|
+    bool.add_def(binary_def(op, "Bool", "Bool"))
+  end
+  char = prog.lookup_type_node(Path.new("Char"), prog).as(NonGenericClassType)
+  ["==", "!=", "<", "<=", ">", ">="].each do |op|
+    char.add_def(binary_def(op, "Char", "Bool"))
+  end
+  char.add_def(primitive_def("ord", [] of Arg, Path.new("Int32"), "unchecked_convert"))
+  ["Float32", "Float64"].each do |tn|
+    owner = prog.lookup_type_node(Path.new(tn), prog).as(NonGenericClassType)
+    owner.add_def(primitive_def("to_f64", [] of Arg, Path.new("Float64"), "convert"))
+    int_names.each do |other|
+      ["+", "-", "*", "/", "fdiv"].each do |op|
+        owner.add_def(binary_def(op, other, tn))
+      end
+      ["==", "!=", "<", "<=", ">", ">="].each do |op|
+        owner.add_def(binary_def(op, other, "Bool"))
+      end
+    end
+    ["Float32", "Float64"].each do |other|
+      ["+", "-", "*", "/", "fdiv"].each do |op|
+        owner.add_def(binary_def(op, other, tn))
+      end
+      ["==", "!=", "<", "<=", ">", ">="].each do |op|
+        owner.add_def(binary_def(op, other, "Bool"))
+      end
+    end
+  end
+  reference = prog.lookup_type_node(Path.new("Reference"), prog).as(NonGenericClassType)
+  reference.add_def(primitive_def("object_id", [] of Arg, Path.new("UInt64"), "object_id"))
+  object = prog.lookup_type_node(Path.new("Object"), prog).as(NonGenericClassType)
+  object.add_def(primitive_def("class", [] of Arg, nil, "class"))
+  object.add_def(primitive_def("crystal_type_id", [] of Arg, Path.new("Int32"), "object_crystal_type_id"))
+  declare_pointer_primitives(prog)
+  # Match the prelude's Proc#call(*args : *T) : R. ProcInstanceType binds
+  # T to its argument tuple and R to the actual result type.
+  proc_owner = prog.lookup_type_node(Path.new("Proc"), prog).as(GenericClassType)
+  proc_call = primitive_def("call", [Arg.new("args", nil, Splat.new(Path.new("T")))] of Arg, Path.new("R"), "proc_call")
+  proc_call.splat_index = 0
+  proc_owner.add_def(proc_call)
+  # The literal-index fixture alone installs its concrete tuple primitive.
+  if root.is_a?(Expressions)
+    root.as(Expressions).expressions.each do |item|
+      next unless item.is_a?(Def) && item.as(Def).name == "pick_tuple_member"
+      tuple = prog.lookup_type_node(Path.new("Tuple"), prog).as(GenericClassType)
+      tuple.add_def(Def.new("[]", [Arg.new("index", nil, Path.new("Int32"))] of Arg, Primitive.tuple_indexer(1, 1, false), nil, nil, Path.new("Int32")))
+    end
+    root.as(Expressions).expressions.each do |item|
+      next unless item.is_a?(Def) && item.as(Def).name == "pick_tuple_type"
+      tuple = prog.lookup_type_node(Path.new("Tuple"), prog).as(GenericClassType)
+      tuple.metaclass.add_def(Def.new("[]", [Arg.new("index", nil, Path.new("Int32"))] of Arg, Primitive.tuple_indexer(1, 1, false), nil, nil, Metaclass.new(Path.new("Int32"))))
+    end
+  end
+end
+
+# A builtin's binary operator: one operand, the result type, and a Primitive body.
+pub def binary_def(op : String, operand : String, result : String) : Def
+  primitive_def(op, [Arg.new("other", nil, Path.new(operand))] of Arg, Path.new(result), "binary")
+end
+
+def primitive_def(op : String, args : Array(Arg), result : ASTNode?, prim : String) : Def
+  Def.new(op, args, Primitive.new(prim), nil, nil, result)
+end
+
+# Hosted src/primitives.cr 259-379 (and src/iyi/primitives.iyi 149-187): Pointer(T) primitives
+# declared for bare fixtures so Pointer(T).malloc, new, value, value=, address, realloc, +, - type.
+def declare_pointer_primitives(prog : SemanticProgram) : Nil
+  ptr = prog.lookup_type_node(Path.new("Pointer"), prog).as(GenericClassType)
+  meta = ptr.metaclass
+  meta.add_def(primitive_def("malloc", [Arg.new("size", nil, Path.new("UInt64"))] of Arg, nil, "pointer_malloc"))
+  meta.add_def(primitive_def("new", [Arg.new("address", nil, Path.new("UInt64"))] of Arg, nil, "pointer_new"))
+  ptr.add_def(primitive_def("value", [] of Arg, Path.new("T"), "pointer_get"))
+  ptr.add_def(primitive_def("value=", [Arg.new("value", nil, Path.new("T"))] of Arg, nil, "pointer_set"))
+  ptr.add_def(primitive_def("address", [] of Arg, Path.new("UInt64"), "pointer_address"))
+  ptr.add_def(primitive_def("realloc", [Arg.new("size", nil, Path.new("UInt64"))] of Arg, Self.new, "pointer_realloc"))
+  ptr.add_def(primitive_def("+", [Arg.new("offset", nil, Path.new("Int64"))] of Arg, Self.new, "pointer_add"))
+  ptr.add_def(primitive_def("-", [Arg.new("other", nil, Self.new)] of Arg, Path.new("Int64"), "pointer_diff"))
+end

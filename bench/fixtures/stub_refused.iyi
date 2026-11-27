@@ -1,0 +1,25 @@
+@[Unsafe("exits with the selected result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Proc
+  @[Primitive(:proc_call)]
+  def probe_call(*args : *T) : R
+  end
+end
+
+class StubExercise
+  def refused : Proc(Int32, Int32)
+    ->(value : Int32) {
+      nested = ->(inner : Int32) { inner &* 2 }
+      nested.probe_call(value)
+    }
+  end
+end
+
+if ARGC_UNSAFE > 1
+  LibC.exit(StubExercise.new.refused.probe_call(3))
+else
+  LibC.exit(23)
+end

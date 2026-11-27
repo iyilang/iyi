@@ -1,0 +1,135 @@
+module bench/selfhost_lower_calls_exercise
+
+# The port's side of the calls gate (bench/selfhost_lower_calls_exercise.sh): the same
+# modes as the lowering-core driver, for the fixtures that call a def or a lib fun. The
+# analysis is run with the lib stand-in (bench/lib/lower_gate.iyi, stand_in_lib_types): a
+# lib's funs are not typed by the semantic pass yet.
+#
+#   port oracle <oracle.ll>                 the oracle module, normalised, one line each
+#   port lower <fixture.iyi> <oracle.ll>    lowers the fixture and compares it with the oracle
+#   port emit <fixture.iyi> <oracle.ll>     the port's module as text, for the native tool
+
+import bench/lib/lower_gate::{analyse, ir_module, run_emit, run_lower, run_oracle}
+import compiler/lower/fun::{darwin_triple?, def_context_type, target_def_fun}
+import compiler/types/types::{GenericClassInstanceMetaclassType, GenericClassInstanceType}
+import compiler/ir/types::{IrType}
+import compiler/ir/inst::{Block}
+import compiler/lower/call::{finish_block_call_body}
+import compiler/lower/context::{Lowerer}
+import compiler/lower/phi::{LowerPhi}
+import compiler/lower/typer::{LowerTyper}
+import compiler/lower/lower::{CoreBody}
+import compiler/lower/type_id::{LowerTypeIds}
+
+def run : Nil
+  args = Program.args
+  if args.empty?
+    # With no arguments the driver checks that the analysis with the lib stand-in runs, and exits 0.
+    analyse("nil\n", "usage_check.iyi", true)
+    puts "usage: port oracle <oracle.ll> | port lower <fixture.iyi> <oracle.ll> | port emit <fixture.iyi> <oracle.ll>"
+    return
+  end
+  mode = args[0]
+  if mode == "triple"
+    raise "darwin target lacks frame pointers" unless darwin_triple?("aarch64-apple-darwin")
+    raise "macOS target lacks frame pointers" unless darwin_triple?("aarch64-apple-macosx28.0")
+    raise "Linux target has Darwin frame pointers" if darwin_triple?("aarch64-unknown-linux-gnu")
+    puts "TRIPLE OK"
+  elsif mode == "nil-phi"
+    analysis = analyse("nil\n", "nil_phi_check.iyi", true)
+    m = ir_module("aarch64-apple-darwin27.0.0")
+    typer = LowerTyper.new(m.types, m.layout, analysis.iyi)
+    low = Lowerer.new(m, typer, analysis.visitor)
+    low.begin_main_function("nil_phi_probe", m.types.func([] of IrType, m.types.void), false)
+    value = low.builder.const_int(m.types.int32, 12)
+    nil_phi = LowerPhi.new(true, m.types.int32, analysis.visitor.program.nil_type)
+    nil_phi.add(low, value, true)
+    raise "nil phi collected a value" unless nil_phi.values.empty?
+    int_phi = LowerPhi.new(true, m.types.int32, analysis.visitor.program.int32_type)
+    int_phi.add(low, value, true)
+    raise "integer phi dropped its value" unless int_phi.values.size == 1
+    puts "NIL PHI OK"
+  elsif mode == "noreturn-phi"
+    analysis = analyse("nil\n", "noreturn_phi_check.iyi", true)
+    m = ir_module("aarch64-apple-darwin27.0.0")
+    typer = LowerTyper.new(m.types, m.layout, analysis.iyi)
+    low = Lowerer.new(m, typer, analysis.visitor)
+    fun_type = m.types.func([] of IrType, m.types.void)
+    no_return = analysis.visitor.program.no_return_type
+    int_type = analysis.visitor.program.int32_type
+    low.begin_main_function("open_noreturn", fun_type, false)
+    open_phi = LowerPhi.new(true, m.types.int32, int_type)
+    finish_block_call_body(low, open_phi, no_return, int_type)
+    open_block = low.builder.insert_block.as(Block)
+    raise "NoReturn body left an open block" unless open_block.terminated?
+    raise "NoReturn body contributed a phi value" unless open_phi.count == 0
+    low.begin_main_function("closed_noreturn", fun_type, false)
+    low.builder.unreachable
+    closed_block = low.builder.insert_block.as(Block)
+    before = closed_block.insts.size
+    closed_phi = LowerPhi.new(true, m.types.int32, int_type)
+    finish_block_call_body(low, closed_phi, no_return, int_type)
+    raise "NoReturn body added a second terminator" unless closed_block.insts.size == before
+    low.begin_main_function("ordinary_body", fun_type, false)
+    low.last = low.builder.const_int(m.types.int32, 12)
+    ordinary_phi = LowerPhi.new(true, m.types.int32, int_type)
+    finish_block_call_body(low, ordinary_phi, int_type, int_type)
+    raise "ordinary block body lost its phi value" unless ordinary_phi.count == 1 && ordinary_phi.values.size == 1
+    puts "NORETURN PHI OK"
+  elsif mode == "generic-frame"
+    fixture = args[1]
+    analysis = analyse(File.read(fixture), fixture, true)
+    found = false
+    analysis.visitor.typed_instances.each do |instance|
+      self_type = instance.self_type
+      if self_type.is_a?(GenericClassInstanceMetaclassType)
+        owner = self_type.as(GenericClassInstanceMetaclassType).instance_type
+        if owner.is_a?(GenericClassInstanceType)
+          context = def_context_type(nil, owner)
+          raise "generic owner lost its metaclass context" unless context.is_a?(GenericClassInstanceMetaclassType)
+          raise "generic owner context changed its instance" unless context.as(GenericClassInstanceMetaclassType).instance_type.object_id == owner.object_id
+          found = true
+          break
+        end
+      end
+    end
+    raise "fixture has no generic metaclass self" unless found
+    puts "GENERIC FRAME OK"
+  elsif mode == "generic-frame-lower"
+    fixture = args[1]
+    analysis = analyse(File.read(fixture), fixture, true)
+    m = ir_module("aarch64-apple-darwin27.0.0")
+    typer = LowerTyper.new(m.types, m.layout, analysis.iyi)
+    low = Lowerer.new(m, typer, analysis.visitor)
+    low.body_visitor = CoreBody.new
+    ids = LowerTypeIds.new
+    ids.assign_all(analysis.visitor.program.object_type)
+    low.type_ids = ids
+    low.string_type_id = ids.type_id(analysis.visitor.program.string_type)
+    found = false
+    analysis.visitor.typed_instances.each do |instance|
+      self_type = instance.self_type
+      if instance.definition.name == "make" && self_type.is_a?(GenericClassInstanceMetaclassType)
+        body_type = analysis.visitor.type_of?(instance.definition.body)
+        raise "generic make has no body type" if body_type.nil?
+        result_type = analysis.visitor.type_of?(instance.definition) || body_type
+        owner = self_type.as(GenericClassInstanceMetaclassType).instance_type
+        target_def_fun(low, instance.definition, nil, instance.arg_types, result_type, owner)
+        found = true
+        break
+      end
+    end
+    raise "fixture has no generic make instance" unless found
+    puts "GENERIC FRAME LOWER OK"
+  elsif mode == "oracle"
+    run_oracle(args[1], "::")
+  elsif mode == "lower"
+    run_lower(args[1], args[2], "::", true)
+  elsif mode == "emit"
+    run_emit(args[1], args[2], true)
+  else
+    raise "unknown mode #{mode}"
+  end
+end
+
+run

@@ -1,0 +1,9 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def code(a : Int32, b : UInt8, c : Int64) : Int32
+  a.unsafe_chr.ord &+ b.unsafe_chr.ord &+ c.unsafe_chr.ord
+end
+
+LibC.exit(code(65, 66_u8, 4294967363_i64))

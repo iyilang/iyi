@@ -1,0 +1,32 @@
+module compiler/lower/abi/aarch64
+
+# The aarch64 C ABI for a call to a `lib` fun (the port of src/compiler/iyi/codegen/abi/aarch64.cr, for the
+# argument and result classes a lib call meets). A scalar (an integer, a float, a bool, a char), a pointer
+# and a proc are passed and returned as they are: the callee takes the LLVM value of the parameter's type,
+# and the call stands as the hosted `prepare_call_args_external` leaves it (no cast, no byval, no sret).
+# A nil argument to a pointer parameter is the null pointer (hosted `llvm_c_type(def_arg.type).null`, the
+# conversion the lowering refuses by name in call.iyi while the restriction is not converted).
+#
+# Not ported, and refused by name here: an aggregate passed or returned by value (a struct, a tuple, a mixed
+# union, the C struct of a lib). The hosted classification (`abi_info`: direct with a cast, indirect with a
+# copy, sret for a result above 16 bytes) needs the lib struct's layout, which NEEDS.md row 4 does not give
+# yet, so it waits on the declarations slice and on the layout owner.
+
+import compiler/lower/typer::{passed_by_value?}
+import compiler/lower/pending::{pending_visit_node}
+import compiler/semantic/top_level::{Type}
+
+# Whether an argument of a lib call travels as its own LLVM value on aarch64: true for the scalars and pointers
+# the port lowers today, false for an aggregate (which the caller refuses).
+pub def lib_scalar_argument?(t : Type) : Bool
+  !passed_by_value?(t)
+end
+
+# Refuses a lib call whose argument or result is an aggregate passed by value (hosted abi_info, aarch64.cr).
+# The call site names the argument or result it stops at; the refusal is the one the core raises for any
+# hosted function the port has not reached.
+pub def check_lib_aggregate(t : Type, where : String) : Nil
+  if passed_by_value?(t)
+    pending_visit_node("a #{t.full_name} #{where} of a lib call passed by value (hosted abi/aarch64.cr, abi_info; NEEDS.md row 4)")
+  end
+end

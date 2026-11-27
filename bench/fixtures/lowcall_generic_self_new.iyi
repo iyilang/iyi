@@ -1,0 +1,18 @@
+class Box(T)
+  def initialize(@n : Int32)
+  end
+
+  def n : Int32
+    @n
+  end
+
+  def self.make(n : Int32) : Box(T)
+    new(n)
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Box(Int32).make(7).n)

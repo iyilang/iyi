@@ -1,0 +1,19 @@
+fun square(x : Int32) : Int32
+  x &* x
+end
+
+fun sum_of_squares(a : Int32, b : Int32) : Int32
+  square(a) &+ square(b)
+end
+
+fun gcd(a : Int32, b : Int32) : Int32
+  x = a
+  y = b
+  while y != 0
+    q = x.unsafe_div(y)
+    rem = x &- (q &* y)
+    x = y
+    y = rem
+  end
+  x
+end

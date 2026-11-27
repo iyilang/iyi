@@ -1,0 +1,14 @@
+class SeminlDefWhile
+  # A `while` body that is one macro node: the body is spliced in place.
+  def spin : Int32
+    n = 0
+    while n < 3
+      {% if true %}
+        n = n + 1
+      {% end %}
+    end
+    n
+  end
+end
+
+puts SeminlDefWhile.new.spin

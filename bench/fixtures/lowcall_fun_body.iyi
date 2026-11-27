@@ -1,0 +1,17 @@
+fun bump_twice(n : Int32) : Int32
+  bump(bump(n))
+end
+
+fun bump(n : Int32) : Int32
+  n &+ 1
+end
+
+def add_bumps(x : Int32) : Int32
+  bump(x) &+ bump_twice(x)
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(add_bumps(3))

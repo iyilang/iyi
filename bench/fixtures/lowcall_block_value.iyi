@@ -1,0 +1,9 @@
+def value_of(&)
+  yield 40
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(value_of { |v| v })

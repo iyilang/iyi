@@ -1,0 +1,11 @@
+struct Range(B, E)
+  def self.probe(value : Int32) : Int32
+    value
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Range.probe(7))

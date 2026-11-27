@@ -1,0 +1,246 @@
+module compiler/lower/proc
+
+# A proc literal carries a context for captured locals or self; capture-free
+# literals use null. Yielded blocks share that context. A defer's generated
+# cleanup has its own closure; written nested proc literals remain refused.
+
+import compiler/foundation/location::{Location}
+import compiler/ir/types::{IrType}
+import compiler/ir/inst::{Attribute}
+import compiler/ir/values::{Value}
+import compiler/lower/context::{Lowerer}
+import compiler/lower/closure::{closure_self_type}
+import compiler/lower/fun::{codegen_fun}
+import compiler/lower/helpers::{load_aligned, store_aligned}
+import compiler/lower/pending::{refuse_port}
+import compiler/syntax/ast::{ASTNode, Assign, Call, ClassDef, Def, InstanceVar, ModuleDef, ProcLiteral, Self, Var}
+import compiler/syntax/visitor::{Visitor}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/semantic/top_level::{ModuleType, NilType, NoReturnType, NonGenericClassType, NonGenericModuleType, SemanticProgram, Type}
+import compiler/types/types::{ProcInstanceType}
+
+# The hosted `Iyi.symbol_text` (util.cr:59): a text someone else chose, written into a symbol with `%`, `@` and
+# `^` escaped, so that the join `^` is never the text's.
+pub def symbol_text(text : String) : String
+  String.build do |str|
+    text.each_char do |char|
+      if char == '%'
+        str << "%25"
+      elsif char == '@'
+        str << "%40"
+      elsif char == '^'
+        str << "%5E"
+      else
+        str << char.to_s
+      end
+    end
+  end
+end
+
+# The hosted `Iyi.relative_filename` (util.cr:4): the file with the working directory and its separator taken
+# off the front. A file outside the directory, or one that only starts with its text, keeps its full path.
+pub def relative_filename(filename : String) : String
+  cwd = Program.cwd
+  return filename unless cwd.is_a?(String)
+  base = cwd.as(String)
+  return filename unless filename.starts_with?(base)
+  rest = filename[base.size, filename.size - base.size]
+  return rest[1, rest.size - 1] if rest.starts_with?("/")
+  filename
+end
+
+# The hosted `fun_literal_name` (codegen.cr:1094-1130) for a literal of this proc type, at its place. The name
+# is `~proc` and the type's text, `^`, the place's file and `:` and its line. The second literal of one name in
+# the module is `~proc2...`, the third `~proc3...`, as the hosted proc counts give them.
+#
+# The count is the lowerer's, and the pipeline table lowers one module with a lowerer per probed def
+# (program.iyi lowering_table). A name the module already defines is therefore skipped, so a literal two probes
+# both reach is not defined twice. With one lowerer per module no name is ever taken, and the counts are the hosted ones.
+pub def proc_literal_name(low : Lowerer, node : ProcLiteral, proc_type : Type) : String
+  place = low.current_context.macro_origin || node.location
+  if place.nil?
+    refuse_port("a proc literal with no location (hosted fun_literal_name, the name ~fun_literal)")
+  end
+  loc = place.as(Location)
+  rest = symbol_text(proc_type.full_name) + "^" + symbol_text(relative_filename(loc.filename)) + ":" + loc.line_number.to_s
+  count = 1
+  previous = low.proc_counts[rest]?
+  if p = previous
+    count = p + 1
+  end
+  name = proc_literal_symbol(count, rest)
+  while !low.module.get_function?(name).nil?
+    count = count + 1
+    name = proc_literal_symbol(count, rest)
+  end
+  low.proc_counts[rest] = count
+  name
+end
+
+private def proc_literal_symbol(count : Int32, rest : String) : String
+  if count > 1
+    return "~proc" + count.to_s + rest
+  end
+  "~proc" + rest
+end
+
+# Collect the literal's references, receiverless calls and unsupported forms.
+# Self and instance variables are permitted when its context carries self.
+pub class ProcScan < Visitor
+  getter referenced : Array(String)
+  getter assigned : Array(String)
+  getter receiverless_calls : Array(Call)
+  getter refused : String?
+  getter self_use : String?
+
+  def initialize(@analysed : MainVisitor)
+    @referenced = [] of String
+    @assigned = [] of String
+    @receiverless_calls = [] of Call
+    @refused = nil
+    @self_use = nil
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    if expanded = @analysed.expansions[node]?
+      expanded.accept(self)
+      return false
+    end
+    if node.is_a?(Call)
+      if expanded = node.as(Call).expanded
+        expanded.accept(self)
+        return false
+      end
+    end
+    if node.is_a?(ProcLiteral) && node.as(ProcLiteral).def.iyi_defer?
+      # The normalizer also leaves the deferred expression inline in the
+      # handler's ensure, so this scan still sees any unsupported written form.
+      return false
+    end
+    if node.is_a?(ProcLiteral) || node.is_a?(Def) || node.is_a?(ClassDef) || node.is_a?(ModuleDef)
+      @refused = "a nested proc, def or class inside a proc literal (hosted closure)" if @refused.nil?
+      return false
+    end
+    if node.is_a?(Self)
+      @refused = "self read by a proc literal (hosted closure over self)" if @refused.nil?
+      return false
+    end
+    if node.is_a?(InstanceVar)
+      @self_use = "an instance variable read by a proc literal (hosted closure over self)" if @self_use.nil?
+      return false
+    end
+    if node.is_a?(Call) && node.obj.nil?
+      if node.as(Call).super? || node.as(Call).name == "previous_def"
+        @refused = "super or previous_def inside a proc literal (hosted closure over self)" if @refused.nil?
+        return false
+      end
+      @receiverless_calls << node
+    end
+    if node.is_a?(Var)
+      if node.as(Var).name == "self"
+        @self_use = "self read by a proc literal (hosted closure over self)" if @self_use.nil?
+        return false
+      end
+      @referenced << node.as(Var).name
+    end
+    if node.is_a?(Assign)
+      target = node.as(Assign).target
+      if target.is_a?(Var)
+        @assigned << target.as(Var).name
+      end
+    end
+    true
+  end
+end
+
+# The hosted `make_fun` (codegen.cr:2378): the proc value of a function and its context, built in an alloca whose
+# two fields are stored, then loaded as one struct. Field 0 is the function, field 1 the context.
+pub def make_fun(low : Lowerer, proc_type : Type, fun_ptr : Value, ctx_ptr : Value) : Value
+  struct_type = low.typer.llvm_type(proc_type)
+  closure_ptr = low.alloca(struct_type)
+  i32 = low.module.types.int32
+  zero = low.builder.const_int(i32, 0).as(Value)
+  fun_field = low.builder.inbounds_gep(struct_type, closure_ptr, [zero, low.builder.const_int(i32, 0).as(Value)] of Value)
+  store_aligned(low, fun_ptr, fun_field)
+  ctx_field = low.builder.inbounds_gep(struct_type, closure_ptr, [zero, low.builder.const_int(i32, 1).as(Value)] of Value)
+  store_aligned(low, ctx_ptr, ctx_field)
+  load_aligned(low, struct_type, closure_ptr).as(Value)
+end
+
+# A closure function takes its heap context before its ordinary parameters.
+pub def lower_proc_literal(low : Lowerer, node : ProcLiteral) : Nil
+  t = low.analysed.type_of?(node.as(ASTNode))
+  raise "BUG: the analysed program has no type for a proc literal (hosted codegen.cr: visit(ProcLiteral))" if t.nil?
+  proc_type = t.as(Type)
+  unless proc_type.is_a?(ProcInstanceType)
+    refuse_port("a proc literal typed #{proc_type.full_name} (hosted visit(ProcLiteral), not a Proc)")
+  end
+  proc = proc_type.as(ProcInstanceType)
+
+  # Keep nested-scope and type-position self forms explicitly refused.
+  scan = ProcScan.new(low.analysed)
+  node.def.body.accept(scan)
+  refused = scan.refused
+  if refused
+    refuse_port("proc literal: #{refused}")
+  end
+  source = low.current_context
+  facts = source.closure_facts
+  frame = facts.nil? ? nil : facts.frame?(node.def)
+  closure = !frame.nil? && frame.closure
+  if frame.nil?
+    declared = [] of String
+    node.def.args.each { |arg| declared << arg.name }
+    scan.assigned.each { |name| declared << name }
+    scan.referenced.each do |name|
+      unless declared.includes?(name)
+        refuse_port("proc literal reads #{name}, a local of the enclosing code without closure facts")
+      end
+    end
+  end
+  if closure && source.closure_ptr.nil?
+    refuse_port("proc literal captures locals but its enclosing closure context is missing")
+  end
+  carried = closure ? closure_self_type(source) : nil
+  if self_use = scan.self_use
+    refuse_port("proc literal: #{self_use}") if carried.nil?
+  end
+
+  class_owner : Type? = nil
+  frame = low.current_context.type
+  if (frame.is_a?(NonGenericClassType) || frame.is_a?(NonGenericModuleType)) && !frame.is_a?(NilType) && low.current_context.vars["self"]?.nil?
+    class_owner = frame
+  end
+  scan.receiverless_calls.each do |call|
+    if target = low.analysed.target_def?(call)
+      owner = low.analysed.program.def_owner(target)
+      next if owner.nil? || owner.is_a?(SemanticProgram)
+      # Unit functions are independent of the current instance (call.iyi:225-230).
+      next if owner.is_a?(ModuleType) && owner.as(ModuleType).iyi_unit
+      if class_owner.nil? && carried.nil?
+        refuse_port("proc literal calls #{call.name} with an implicit self or class context that is not carried by the capture-free proc (hosted closure)")
+      end
+    end
+  end
+
+  body_t = low.analysed.type_of?(node.def.body)
+  raise "BUG: the analysed program has no type for a proc literal's body (hosted codegen.cr: visit(ProcLiteral))" if body_t.nil?
+  if body_t.as(Type).full_name != proc.return_type.full_name && !proc.return_type.nil_type? && !body_t.as(Type).is_a?(NoReturnType)
+    refuse_port("a proc literal whose body is #{body_t.as(Type).full_name} and returns #{proc.return_type.full_name} (hosted upcast of the return, not ported)")
+  end
+
+  name = proc_literal_name(low, node, proc_type)
+  params = [] of IrType
+  params << low.module.types.ptr(0) if closure
+  proc.arg_types.each do |at|
+    params << low.typer.llvm_type(at)
+  end
+  ret_ir = low.typer.llvm_return_type(proc.return_type)
+  fn_type = low.module.types.func(params, ret_ir)
+  fn = codegen_fun(low, name, node.def, nil, proc.arg_types, fn_type, ret_ir, proc.return_type, class_owner, closure ? source : nil)
+  if proc.return_type.is_a?(NoReturnType)
+    fn.attrs << Attribute.new("noreturn", 0_u64, nil, nil)
+  end
+  ctx = closure ? source.closure_ptr.as(Value) : low.builder.const_null(low.module.types.ptr(0)).as(Value)
+  low.last = make_fun(low, proc_type, fn.as(Value), ctx)
+end

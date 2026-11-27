@@ -1,0 +1,6 @@
+class Box
+  def initialize
+  end
+end
+
+instance_sizeof(Box)

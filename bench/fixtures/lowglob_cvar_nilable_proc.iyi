@@ -1,0 +1,29 @@
+class K
+  @@resolver : Proc(Pointer(Void*), Int32, Nil)? = nil
+
+  def self.touch : Nil
+    @@resolver
+    nil
+  end
+
+  def self.enabled? : Bool
+    @@resolver ? true : false
+  end
+
+  def self.enable : Nil
+    @@resolver = ->(args : Pointer(Void*), argc : Int32) { nil }
+    nil
+  end
+end
+
+K.touch
+
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.putchar(K.enabled? ? 88 : 65)
+K.enable
+LibC.putchar(K.enabled? ? 66 : 88)
+LibC.exit(0)

@@ -1,0 +1,22 @@
+@[Unsafe("reports the loop declaration")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def evaluate : Int32
+  i = 0
+  result = 0
+  while i < 2
+    if i == 0
+      item : Int32 | Nil = nil
+      item = 13
+      result = item
+    else
+      result = result &+ 2
+    end
+    i = i &+ 1
+  end
+  result
+end
+
+LibC.exit(evaluate)

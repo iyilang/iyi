@@ -1,0 +1,51 @@
+import std/process::{Process, ProcessError, ProcessResult}
+
+def fail(message : String) : NoReturn
+  puts "FAIL: #{message}"
+  __iyi_exit(1)
+end
+
+flood = Process.run("/bin/sh", ["-c", "/usr/bin/yes o | /usr/bin/head -c 262144; /usr/bin/yes e | /usr/bin/head -c 262144 1>&2; exit 7"])
+fail("streams did not return a result") unless flood.is_a?(ProcessResult)
+streams = flood.as(ProcessResult)
+unless streams.stdout.bytesize == 262144 && streams.stderr.bytesize == 262144 && streams.exit_code == 7
+  fail("streams stdout=#{streams.stdout.bytesize} stderr=#{streams.stderr.bytesize} exit=#{streams.exit_code}")
+end
+puts "streams stdout=262144 stderr=262144 exit=7"
+
+input = "x" * 262144
+echoed = Process.run("/bin/cat", [] of String, input: input)
+fail("cat did not return a result") unless echoed.is_a?(ProcessResult)
+cat = echoed.as(ProcessResult)
+fail("input was not echoed") unless cat.stdout == input && cat.stderr.empty? && cat.exit_code == 0
+puts "input echoed=262144"
+
+missing = Process.run("/nonexistent/iyi-native-process", [] of String)
+fail("missing executable did not return ProcessError") unless missing.is_a?(ProcessError)
+fail("missing executable was not reported missing") unless missing.as(ProcessError).not_found?
+puts "missing not_found=true"
+
+inherited = Process.run("/bin/sh", ["-c", "exit 3"], capture: false)
+fail("inherited process did not return a result") unless inherited.is_a?(ProcessResult)
+shared = inherited.as(ProcessResult)
+unless shared.exit_code == 3 && shared.stdout.empty? && shared.stderr.empty?
+  fail("inherited exit or captured output was wrong")
+end
+puts "inherited exit=3 captured=0"
+
+outcome = "not started"
+started = __iyi_monotonic_ns
+group do |h|
+  h.spawn(unit: :same) do
+    answer = Process.run("/bin/sleep", ["30"])
+    outcome = answer.is_a?(Cancelled) ? "cancelled" : "not cancelled"
+    0
+  end
+  sleep(200)
+  h.cancel_children
+end
+waited = (__iyi_monotonic_ns - started) // 1000000_i64
+fail("cancellation answered #{outcome}") unless outcome == "cancelled"
+fail("cancellation did not end the child") unless waited < 10000
+puts "cancel ended=true"
+puts "native-process-ok"

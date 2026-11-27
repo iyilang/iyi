@@ -1,0 +1,9 @@
+class Box(T)
+  @value : T = "wrong"
+
+  def value : T
+    @value
+  end
+end
+
+Box(Int32).new

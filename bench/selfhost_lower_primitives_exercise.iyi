@@ -1,0 +1,135 @@
+module bench/selfhost_lower_primitives_exercise
+
+# The port's side of the primitives gate (bench/selfhost_lower_primitives_exercise.sh): the
+# fixtures that call a builtin primitive (lowprim_*). The analysis runs with the lib stand-in
+# (bench/lib/lower_gate.iyi), as the calls gate's does: a lib's funs are not typed by the semantic
+# pass yet.
+#
+# The fixtures are bare programs (the hosted build is `--prelude empty`), so the program's own layout
+# (`Analysis.iyi`, the rule every lowering gate uses) is the hosted bare one: a class's type id is its
+# first field. The typer takes the layout from the analysed program, as the hosted driver does.
+#
+#   port oracle <oracle.ll>                 the oracle module, normalised, one line each
+#   port lower <fixture.iyi> <oracle.ll>    lowers the fixture and compares it with the oracle
+#   port emit <fixture.iyi> <oracle.ll>     the port's module as text, for the native tool
+
+import bench/lib/lower_gate::{analyse, ir_module, triple_of, normalised_lines, build_names, attach_attrs, oracle_attr_map, printed_attr_map, compare, split_module, run_oracle}
+import compiler/ir/module::{Module}
+import compiler/ir/parser::{parse, IrParseError}
+import compiler/ir/printer::{print}
+import compiler/lower/typer::{LowerTyper}
+import compiler/lower/lower::{codegen_program}
+import compiler/lower/primitives::{class_pointerful?, codegen_primitive_binary, codegen_primitive_convert}
+import compiler/lower/context::{Lowerer}
+import compiler/ir/values::{Value}
+import compiler/ir/types::{IrType}
+import compiler/semantic/top_level::{GenericClassType, Type}
+import compiler/types/types::{GenericClassInstanceType}
+
+# The typer's layout is the analysed program's (hosted `Program#iyi_object_layout?`).
+def typer_for(m : Module, iyi : Bool) : LowerTyper
+  LowerTyper.new(m.types, m.layout, iyi)
+end
+
+def lower_bare(fixture : String, oracle_path : String) : Nil
+  oracle_text = File.read(oracle_path)
+  parsed = parse(oracle_text)
+  raise parsed.as(IrParseError).to_s if parsed.is_a?(IrParseError)
+  builds = build_names(oracle_text, "::")
+  oracle = attach_attrs(normalised_lines(print(parsed.as(Module)), builds), oracle_attr_map(oracle_text))
+  triple = triple_of(oracle_text)
+
+  analysis = analyse(File.read(fixture), fixture, true)
+  m = ir_module(triple)
+  codegen_program(analysis.root, analysis.visitor, typer_for(m, analysis.iyi), m)
+  port_text = print(m)
+  port = attach_attrs(normalised_lines(port_text, builds), printed_attr_map(port_text))
+  identical = compare(oracle, port)
+  total = split_module(oracle)[2].size
+  module_ok = split_module(oracle)[0] == split_module(port)[0]
+  puts "SUMMARY identical=#{identical} total=#{total} module=#{module_ok ? 1 : 0}"
+end
+
+def emit_bare(fixture : String, oracle_path : String) : Nil
+  triple = triple_of(File.read(oracle_path))
+  analysis = analyse(File.read(fixture), fixture, true)
+  m = ir_module(triple)
+  codegen_program(analysis.root, analysis.visitor, typer_for(m, analysis.iyi), m)
+  puts print(m)
+end
+
+# A generic class instance is not a ClassType. class_pointerful? used to cast it and the
+# port tool raised (census root row 17). This check analyses a generic class whose instance
+# variable is a pointer, finds the instantiation, and requires the pointerful answer without
+# that cast. A mutation that drops the generic class's variables answers false.
+def check_generic_pointerful : Nil
+  source = "class Hold(T)\n  @buf : Pointer(Int32)\nend\n"
+  analysis = analyse(source, "generic_pointerful.iyi", false)
+  prog = analysis.visitor.program
+  found = prog.lookup_type("Hold")
+  raise "generic class Hold was not declared" if found.nil?
+  generic = found.as(GenericClassType)
+  int32 = prog.lookup_type("Int32")
+  raise "Int32 was not declared" if int32.nil?
+  tv = Hash(String, Type).new
+  tv["T"] = int32.as(Type)
+  args = [int32.as(Type)] of Type
+  inst = GenericClassInstanceType.new(prog, generic, tv, args, generic.superclass)
+  answer = class_pointerful?(inst)
+  puts "generic_pointerful=#{answer ? 1 : 0}"
+end
+
+# Reproduce the typed-flow mismatch at the primitive seam, before the verifier.
+# Both semantic operands are Int64, while one emitted value is the union local.
+def check_binary_union(fixture : String, side : String) : Nil
+  analysis = analyse(File.read(fixture), fixture, true)
+  m = ir_module("arm64-apple-macosx")
+  low = Lowerer.new(m, typer_for(m, analysis.iyi), analysis.visitor)
+  typ = analysis.visitor.program.lookup_type("Int64")
+  raise "Int64 was not declared" if typ.nil?
+  int = Value.new(m.types.int64)
+  union = Value.new(m.types.struct([m.types.int64, m.types.int64] of IrType))
+  left = side == "left" ? union : int
+  right = side == "right" ? union : int
+  codegen_primitive_binary(low, "<=", typ.as(Type), typ.as(Type), left, right)
+  raise "binary union operand was not refused"
+end
+
+def check_refused_convert(from_name : String, to_name : String, checked : Bool) : Nil
+  analysis = analyse("nil\n", "convert_refusal.iyi", true)
+  m = ir_module("arm64-apple-macosx")
+  low = Lowerer.new(m, typer_for(m, analysis.iyi), analysis.visitor)
+  from = analysis.visitor.program.lookup_type(from_name)
+  to = analysis.visitor.program.lookup_type(to_name)
+  raise "conversion types not declared" if from.nil? || to.nil?
+  value = Value.new(low.typer.llvm_type(from.as(Type)))
+  codegen_primitive_convert(low, from.as(Type), to.as(Type), value, checked)
+end
+
+def run : Nil
+  args = Program.args
+  if args.empty?
+    # With no arguments the driver checks that the analysis with the lib stand-in runs, and exits 0.
+    analyse("nil\n", "usage_check.iyi", true)
+    puts "usage: port oracle <oracle.ll> | port lower <fixture.iyi> <oracle.ll> | port emit <fixture.iyi> <oracle.ll>"
+    return
+  end
+  mode = args[0]
+  if mode == "oracle"
+    run_oracle(args[1], "::")
+  elsif mode == "lower"
+    lower_bare(args[1], args[2])
+  elsif mode == "emit"
+    emit_bare(args[1], args[2])
+  elsif mode == "generic_pointerful"
+    check_generic_pointerful
+  elsif mode == "binary_union"
+    check_binary_union(args[1], args[2])
+  elsif mode == "convert_refusal"
+    check_refused_convert(args[1], args[2], args[3] == "checked")
+  else
+    raise "unknown mode #{mode}"
+  end
+end
+
+run

@@ -1,0 +1,11 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def assign_proc : Nil
+  p : Proc(Nil) = -> { 7 }
+  nil
+end
+
+assign_proc
+LibC.exit(7)

@@ -1,0 +1,74 @@
+module compiler/native/wasm/leb
+
+# LEB128 integers as the wasm binary format writes them (spec 5.2.2): unsigned and signed, with the bytes
+# appended to a caller's array. The decoder reads one integer at a position and reports where it ends.
+
+pub class Decoded
+  getter value : Int64
+  getter next : Int32
+  getter ok : Bool
+
+  def initialize(@value : Int64, @next : Int32, @ok : Bool)
+  end
+end
+
+# An unsigned LEB128 integer.
+pub def uleb(dst : Array(UInt8), value : UInt64) : Nil
+  v = value
+  more = true
+  while more
+    b = (v & 127_u64).to_u8
+    v = v >> 7
+    if v == 0_u64
+      dst << b
+      more = false
+    else
+      dst << (b | 128_u8)
+    end
+  end
+end
+
+# A signed LEB128 integer.
+pub def sleb(dst : Array(UInt8), value : Int64) : Nil
+  v = value
+  more = true
+  while more
+    b = (v & 127_i64).to_u8
+    v = v >> 7
+    sign = (b & 64_u8) != 0_u8
+    if (v == 0_i64 && !sign) || (v == -1_i64 && sign)
+      dst << b
+      more = false
+    else
+      dst << (b | 128_u8)
+    end
+  end
+end
+
+# A non-negative Int32 as an unsigned LEB128 integer (indices, sizes, counts).
+pub def uleb_i(dst : Array(UInt8), value : Int32) : Nil
+  uleb(dst, value.to_i64.unsafe_to_u64)
+end
+
+# Reads one LEB128 integer at `pos`. Signed reads sign-extend from the last byte. A truncated or over-long
+# encoding returns ok false, never a guessed value.
+pub def read_leb(bytes : Array(UInt8), pos : Int32, signed : Bool) : Decoded
+  result = 0_i64
+  shift = 0
+  i = pos
+  more = true
+  while more
+    if i >= bytes.size || shift >= 64
+      return Decoded.new(0_i64, i, false)
+    end
+    b = bytes[i]
+    result = result | ((b & 127_u8).to_i64 << shift)
+    shift = shift + 7
+    i = i + 1
+    more = (b & 128_u8) != 0_u8
+  end
+  if signed && shift < 64 && (bytes[i - 1] & 64_u8) != 0_u8
+    result = result | (-1_i64 << shift)
+  end
+  Decoded.new(result, i, true)
+end

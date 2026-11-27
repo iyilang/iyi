@@ -1,0 +1,7 @@
+# A generic class and one instance of it. The hosted walk numbers the metaclass of Box(Int32) right
+# after the metaclass of its generic class, Box, which is reached from Object like any class.
+class Box(T)
+end
+
+# type: Box(Int32)
+# type: Box

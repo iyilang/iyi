@@ -1,0 +1,41 @@
+@[Unsafe("reports numeric argument conversion through the exit status")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def integer_value(value : Int64) : Int64
+  value
+end
+
+def float_value(value : Float64) : Float64
+  value
+end
+
+def doubled_unsigned(value : UInt32) : UInt32
+  value &+ value
+end
+
+def either(flag : Bool) : Int32 | Bool
+  flag ? 3 : false
+end
+
+def choose(kind : Int32, amount : Int64) : Int64
+  amount
+end
+
+def choose(kind : Bool, amount : Int64) : Int64
+  amount &+ 1_i64
+end
+
+signed = -7_i32
+unsigned = doubled_unsigned(2000000000_u32)
+single = 1.25_f32
+LibC.exit(1) unless integer_value(signed) == -7_i64
+LibC.exit(2) unless integer_value(unsigned) == 4000000000_i64
+LibC.exit(3) unless integer_value(value: signed) == -7_i64
+LibC.exit(4) unless float_value(single) == 1.25_f64
+LibC.exit(5) unless choose(either(true), signed) == -7_i64
+LibC.exit(6) unless choose(either(false), signed) == -6_i64
+LibC.exit(7) unless choose(kind: either(true), amount: unsigned) == 4000000000_i64
+LibC.exit(8) unless choose(kind: either(false), amount: unsigned) == 4000000001_i64
+LibC.exit(0)

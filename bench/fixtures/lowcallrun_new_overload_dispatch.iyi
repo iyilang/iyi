@@ -1,0 +1,22 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def choose(flag : Bool) : Int32 | String
+  flag ? 1 : "s"
+end
+
+class Pick
+  def initialize(a : Int32, @n : Int32 = 1)
+    @n = @n &+ Pick.new(choose(false)).n
+  end
+
+  def initialize(s : String, @n : Int32 = 2)
+  end
+
+  def n : Int32
+    @n
+  end
+end
+
+LibC.exit(Pick.new(choose(true)).n)

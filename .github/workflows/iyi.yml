@@ -4091,16 +4091,24 @@ jobs:
         run: |
           # stdin_park.iyi reads the pipe bench/concurrency_exercise.sh feeds
           # it - a line two seconds in - and an empty stdin is its failure.
+          # These CLI probes need the fixtures and search paths supplied by
+          # selfhost_arg_arms_exercise.sh and selfhost_bodies_exercise.sh.
           $skip = @(
             "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
             "wasm_freestanding_exercise.iyi", "wasm_tasks_exercise.iyi", "uint64x2_exercise.iyi",
-            "stdin_park.iyi", "std_debug_cross.iyi", "wasm_aead_speed.iyi", "selfhost_llvm_exercise.iyi"
+            "stdin_park.iyi", "std_debug_cross.iyi", "wasm_aead_speed.iyi", "selfhost_llvm_exercise.iyi",
+            "selfhost_abstract_requirement_probe.iyi", "selfhost_arg_arms_probe.iyi",
+            "selfhost_bodies_atomic_probe.iyi", "selfhost_proc_scope_probe.iyi", "selfhost_program_owner_probe.iyi",
+            "selfhost_recursion_target_probe.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
           $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"
           New-Item -ItemType Directory -Force -Path $env:TEST_SANDBOX | Out-Null
           New-Item -ItemType Directory -Force -Path $env:IYI_FILE_SANDBOX | Out-Null
           $iyi = "$pwd\.build\iyi.exe"
+          # The codegen exercise imports the LLVM bridge, which needs build flags even in the runtime sweep.
+          $llvmBridgeArgs = @(& bash -c '. bench/lib/host.sh && llvm_bridge_build_args')
+          if ($LASTEXITCODE -ne 0) { throw "cannot read LLVM bridge build arguments" }
           $failed = @()
           $ran = 0
           foreach ($program in Get-ChildItem bench\*.iyi | Sort-Object Name) {
@@ -4110,7 +4118,9 @@ jobs:
             if ($program.Name -eq "std_path_exercise.iyi") {
               $env:HOME = "/home/gate"; $env:PWD = "/pwd/gate"
             }
-            "" | & $iyi run $program.FullName > "$env:RUNNER_TEMP\$($program.BaseName).out" 2>&1
+            $runArgs = @()
+            if ($program.Name -eq "selfhost_codegen_exercise.iyi") { $runArgs = $llvmBridgeArgs }
+            "" | & $iyi run @runArgs $program.FullName > "$env:RUNNER_TEMP\$($program.BaseName).out" 2>&1
             if ($LASTEXITCODE -ne 0) {
               $failed += $program.Name
               Write-Host "== $($program.Name) failed with $LASTEXITCODE"
@@ -5581,12 +5591,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       SELFHOST_HOST: linux-x86_64
     container:
       image: crystallang/crystal:1.21.0-build
-    name: "The self-host gates, on Linux, shard ${{ matrix.shard }} of 4"
+    name: "The self-host gates, on Linux, shard ${{ matrix.shard }} of 8"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5625,12 +5635,12 @@ jobs:
           SELFHOST_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           bindir="$("$LLVM_CONFIG" --bindir)"
-          LLVM_MC="$bindir/llvm-mc" LLVM_OBJDUMP="$bindir/llvm-objdump" bash bench/selfhost_gates.sh --shard ${{ matrix.shard }}/4
+          LLVM_MC="$bindir/llvm-mc" LLVM_OBJDUMP="$bindir/llvm-objdump" bash bench/selfhost_gates.sh --shard ${{ matrix.shard }}/8
 
       - name: Locate the artifact shards
         id: oracle_shard
         run: |
-          deal=$(bash bench/selfhost_gates.sh --list)
+          deal=$(bash bench/selfhost_gates.sh --list 8)
           oracle=$(printf '%s\n' "$deal" | awk '$3 == "native_ir_exercise" { print $1 }')
           elf=$(printf '%s\n' "$deal" | awk '$3 == "native_link_exercise" { print $1 }')
           test -n "$oracle" && test -n "$elf"
@@ -5677,8 +5687,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
-    name: "The self-host gates, on darwin arm64, shard ${{ matrix.shard }} of 4"
+        shard: [1, 2, 3, 4, 5]
+    name: "The self-host gates, on darwin arm64, shard ${{ matrix.shard }} of 5"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5720,7 +5730,7 @@ jobs:
         env:
           SELFHOST_GATE_LOGS: ${{ runner.temp }}/selfhost-gate-logs
           SELFHOST_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" LLVM_MC="$HOME/llvm-static/bin/llvm-mc" LLVM_OBJDUMP="$HOME/llvm-static/bin/llvm-objdump" bash bench/selfhost_gates.sh --shard ${{ matrix.shard }}/4
+        run: LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config" LLVM_MC="$HOME/llvm-static/bin/llvm-mc" LLVM_OBJDUMP="$HOME/llvm-static/bin/llvm-objdump" bash bench/selfhost_gates.sh --shard ${{ matrix.shard }}/5
 
       - name: Preserve complete compiler component logs
         if: always()
@@ -5739,10 +5749,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       SELFHOST_HOST: windows-x86_64
-    name: "The self-host gates, on Windows x86_64, shard ${{ matrix.shard }} of 4"
+    name: "The self-host gates, on Windows x86_64, shard ${{ matrix.shard }} of 8"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -5795,7 +5805,7 @@ jobs:
           IR_ORACLE_DIR: ${{ runner.temp }}/selfhost-ir-oracle
           SELFHOST_GATE_LOGS: ${{ runner.temp }}/selfhost-gate-logs
           SELFHOST_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: bash bench/selfhost_gates.sh --shard ${{ matrix.shard }}/4
+        run: bash bench/selfhost_gates.sh --shard ${{ matrix.shard }}/8
 
       - name: Preserve complete compiler component logs
         if: always()

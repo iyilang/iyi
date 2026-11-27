@@ -1,0 +1,29 @@
+# Checked arithmetic as an argument, a return value, and a primitive receiver.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __crystal_raise_overflow : NoReturn
+  LibC.exit(99)
+end
+
+def consume(a : UInt64) : UInt64
+  a
+end
+
+def argument(a : UInt64) : UInt64
+  consume(a + 8_u64)
+end
+
+def returned(a : UInt64) : UInt64
+  a + 8_u64
+end
+
+def operand(a : UInt64, b : UInt64, s : UInt64) : Bool
+  ((a - b).unsafe_shr(s) & 1_u64) != 0_u64
+end
+
+argument(3_u64)
+returned(3_u64)
+operand(18_u64, 8_u64, 1_u64)
+LibC.exit(7)

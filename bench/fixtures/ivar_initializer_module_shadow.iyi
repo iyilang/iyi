@@ -1,0 +1,35 @@
+class First
+  @number : Int32 = 7
+
+  def number : Int32
+    @number
+  end
+end
+
+class Second
+  @number : Int32 = 13
+
+  def number : Int32
+    @number
+  end
+end
+
+module Mark(T)
+  @marked : T = T.new
+
+  def marked : T
+    @marked
+  end
+end
+
+# The hosted compiler currently binds T.new to Holder's Second and rejects
+# this field as First, rather than using Mark(First)'s T. The port must use
+# the module's binding and produce First.
+class Holder(T)
+  include Mark(First)
+  @other : T? = nil
+end
+
+value = Holder(Second).new.marked.number
+puts "value=#{value}"
+raise "module type parameter was shadowed by the class" unless value == 7

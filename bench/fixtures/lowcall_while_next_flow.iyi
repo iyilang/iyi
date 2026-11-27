@@ -1,0 +1,36 @@
+@[Unsafe("reports flow carried by a while loop's next through the exit status")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Section
+  def initialize(@id : Int32)
+  end
+
+  def id : Int32
+    @id
+  end
+end
+
+# The IR parser's shape: a label line sets current and goes to the next line,
+# and an instruction line reads it. current is Section? at the read.
+def parse(lines : Int32) : Int32
+  current = nil
+  opened = 0
+  total = 0
+  i = 0
+  while i < lines
+    i = i &+ 1
+    if i == 1 || i == 3
+      opened = opened &+ 10
+      current = Section.new(opened)
+      next
+    end
+    section = current
+    return 99 unless section
+    total = total &+ section.id
+  end
+  total
+end
+
+LibC.exit(parse(4))

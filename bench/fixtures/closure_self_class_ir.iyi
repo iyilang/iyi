@@ -1,0 +1,31 @@
+lib LibC
+  fun malloc(size : UInt64) : Void*
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __crystal_malloc64(size : UInt64) : Void*
+  LibC.malloc(size)
+end
+
+fun __crystal_malloc_atomic64(size : UInt64) : Void*
+  LibC.malloc(size)
+end
+
+struct Proc
+  @[Primitive(:proc_call)]
+  def probe_call(*args : *T) : R
+  end
+end
+
+class Counter
+  def initialize(@count : Int32)
+  end
+
+  def total : Int32
+    bound = -> { @count }
+    plain = -> { 3 }
+    bound.probe_call &+ plain.probe_call
+  end
+end
+
+LibC.exit(Counter.new(7).total &- 10)

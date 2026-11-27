@@ -1,0 +1,31 @@
+# These calls produce separate typed instances, not a runtime guess about Nil.
+def nil_input(input : String?)
+  group do |g|
+    if text = input
+      g.spawn { 1 } # hosted: none; site: dead_then
+    else
+      g.spawn { 1 } # hosted: parallel; site: live_else
+    end
+  end
+end
+
+def nilable_input(input : String?)
+  group do |g|
+    if text = input
+      g.spawn { text.size } # hosted: parallel; site: nilable_then
+    end
+  end
+end
+
+def runtime_bool(flag : Bool)
+  group do |g|
+    if flag
+      g.spawn { 1 } # hosted: parallel; site: runtime_bool
+    end
+  end
+end
+
+nil_input(nil)
+input = Program.args.empty? ? nil : Program.args[0]
+nilable_input(input)
+runtime_bool(Program.args.empty?)

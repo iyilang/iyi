@@ -1,0 +1,4 @@
+@[Unsafe("declares the C function main for the runtime test")]
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  17 + 9
+end

@@ -1,0 +1,11 @@
+@[Unsafe("reports the destructured value")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def pair
+  {7, 9}
+end
+
+value, _ = pair
+LibC.exit(value)

@@ -1,0 +1,15 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def mark(value : Int32) : Int32
+  LibC.putchar(value)
+  value
+end
+
+def pair(a : Int32 = mark(97), b : Int32 = mark(98), c : Int32 = mark(99)) : Int32
+  a &- b &+ c
+end
+
+LibC.exit(pair(c: mark(67), a: mark(65)) &- 60)

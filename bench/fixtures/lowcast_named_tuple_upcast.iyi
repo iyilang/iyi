@@ -1,0 +1,18 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def pair(flag : Bool) : NamedTuple(count: Int32, text: String?)
+  if flag
+    return {count: 7, text: "hello"}
+  end
+  {count: 3, text: nil}
+end
+
+value = pair(true)
+text = value[:text]
+if text.nil?
+  LibC.exit(1)
+else
+  LibC.exit(value[:count] &+ 5)
+end

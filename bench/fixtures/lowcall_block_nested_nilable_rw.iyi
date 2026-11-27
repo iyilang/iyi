@@ -1,0 +1,51 @@
+@[Unsafe("reports nested yielded local state")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Counter
+  @value : Int32
+
+  def initialize
+    @value = 0
+  end
+
+  def increment
+    @value = @value &+ 1
+  end
+
+  def value : Int32
+    @value
+  end
+end
+
+def each_it(n : Int32, &)
+  i = 0
+  while i < n
+    yield i
+    i = i &+ 1
+  end
+end
+
+def once(&)
+  yield
+end
+
+def collect : Int32
+  counter : Counter? = nil
+  each_it(3) do |i|
+    once do
+      current = counter
+      if current
+        current.increment
+      else
+        current = Counter.new
+        current.increment
+      end
+      counter = current
+    end
+  end
+  counter.nil? ? 0 : counter.value
+end
+
+LibC.exit(collect)

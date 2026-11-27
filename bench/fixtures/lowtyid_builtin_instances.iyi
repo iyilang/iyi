@@ -1,0 +1,8 @@
+# Builtin generic instances: Tuple, Proc, Range, Slice and Pointer instances named by a type
+# expression. Their ids follow the hosted LLVMId walk, which numbers each instance a generic
+# registers (Tuple, Proc and Pointer) and orders Range before Slice under Struct.
+# type: Tuple(Int32, String)
+# type: Proc(Int32, Int32)
+# type: Range(Int32, Int32)
+# type: Slice(Int32)
+# type: Pointer(Int32)

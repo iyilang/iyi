@@ -1,0 +1,35 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Box
+  @proc : Proc(Nil)?
+
+  def initialize
+    @proc = nil
+  end
+end
+
+def maybe_proc(enabled : Bool, callback : Proc(Int32)) : Proc(Int32)?
+  if enabled
+    callback
+  else
+    nil
+  end
+end
+
+def absent_proc : Proc(Int32)?
+  nil
+end
+
+callback = -> { 37 }
+LibC.exit(1) if maybe_proc(false, callback)
+LibC.exit(2) if absent_proc
+if present = maybe_proc(true, callback)
+  LibC.exit(3) unless present.call == 37
+else
+  LibC.exit(4)
+end
+
+Box.new
+LibC.exit(7)

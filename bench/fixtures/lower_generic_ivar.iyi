@@ -1,0 +1,11 @@
+class Box(T)
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+end
+
+h = uninitialized Box(Int32)
+h.value

@@ -1,0 +1,5 @@
+lib LibIntrinsic
+  fun vzeroall = "llvm.x86.avx.vzeroall"
+end
+
+LibIntrinsic.vzeroall

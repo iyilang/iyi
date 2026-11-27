@@ -1,0 +1,28 @@
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/normalizer::{Normalizer, NormalizerProgram}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/lower/fun::{mangled_name}
+
+path = Program.args[0]
+parser = Parser.new(File.read(path), path)
+node = Normalizer.new(NormalizerProgram.new(false)).normalize(parser.parse)
+program = SemanticProgram.new
+program.total_mode = true
+program.search_path = [Program.args[1]]
+top = TopLevelVisitor.new(program, path)
+node.accept(top)
+top.finish
+visitor = MainVisitor.new(program)
+visitor.total = true
+node.accept(visitor)
+visitor.typed_instances.each do |instance|
+  definition = instance.definition
+  if definition.name == "owner_probe"
+    if body = definition.body
+      if result = visitor.type_of?(body)
+        puts mangled_name(definition.name, instance.self_type, instance.arg_types, result)
+      end
+    end
+  end
+end

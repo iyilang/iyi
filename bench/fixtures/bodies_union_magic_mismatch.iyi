@@ -1,0 +1,15 @@
+class UnionMagicLine
+  def read(value = __LINE__)
+    value
+  end
+end
+
+class UnionMagicFile
+  def read(value = __FILE__)
+    value
+  end
+end
+
+flag = true
+receiver = flag ? UnionMagicLine.new : UnionMagicFile.new
+receiver.read

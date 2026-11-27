@@ -1,0 +1,43 @@
+@[Unsafe("calls C exit to report the dispatch result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+trait Named
+  abstract def code : Int32
+end
+
+class Admin
+  def initialize(@level : Int32)
+  end
+end
+
+impl Named for Admin
+  def code : Int32
+    @level &+ 10
+  end
+end
+
+class Guest
+end
+
+impl Named for Guest
+  def code : Int32
+    3
+  end
+end
+
+class Slot
+  def initialize(@who : Named)
+  end
+
+  def who : Named
+    @who
+  end
+end
+
+def code_of(who : Named) : Int32
+  who.code
+end
+
+LibC.exit(code_of(Admin.new(4).as(Named)) &+ code_of(Guest.new.as(Named)) &+ code_of(Slot.new(Admin.new(20)).who))

@@ -1,0 +1,18 @@
+@[Unsafe("reports the union declaration")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def evaluate(flag : Bool) : Int32
+  item : Int32 | Bool = 17
+  if flag
+    item = false
+  end
+  if item.is_a?(Int32)
+    item
+  else
+    3
+  end
+end
+
+LibC.exit(evaluate(false) &+ evaluate(true))

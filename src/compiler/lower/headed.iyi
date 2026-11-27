@@ -1,0 +1,72 @@
+module compiler/lower/headed
+
+# The port of the `:headed` census: `iyi_headed?`, `iyi_headed_types` and `iyi_headed_candidate?`
+# in src/compiler/iyi/codegen/gc_layouts.cr (lines 166-227). A class is headed when its object
+# carries its type id under its fields, which the arena's `__iyi_new` reads from the class's
+# `:headed` byte (`iyi_headed_flag`, type_id.cr 153). Hosted rule, in its order:
+#   1. `String` is headed by rule (the prelude stores the id under it itself).
+#   2. A type whose id does not fit the arena's sixteen-bit slot is headed (`UInt16::MAX`).
+#   3. A candidate (a non-generic class or a generic instance) is headed when a virtual type over it
+#      was made (`virtual_type_made?`), or a reference union holds it, or it is a subclass of one.
+# Rule 3 is the whole-program census (NEEDS.md rows 26 and 27, closed by the declarations trunk):
+# `headed_types` builds the set from `TypeQueries.virtual_type_made?` and `program.unions`.
+#
+# The ids are the port's (`LowerTypeIds`), matching the hosted ids (NEEDS.md row 16 closed).
+
+import compiler/semantic/top_level::{Type, NonGenericClassType, SemanticProgram, UnionType}
+import compiler/types/types::{GenericClassInstanceType, ReferenceUnionType, NilableReferenceUnionType, TypeQueries}
+import compiler/lower/type_id::{LowerTypeIds}
+import compiler/lower/typer::{primitive_kind}
+# The hosted `UInt16::MAX`, the largest id the arena's layout slot holds.
+pub def headed_id_limit : Int32
+  65535
+end
+
+# The hosted `iyi_headed_candidate?`. A builtin primitive is a NonGenericClassType in the port and a
+# PrimitiveType in the hosted program, so it is excluded here by `primitive_kind`.
+pub def headed_candidate?(type : Type) : Bool
+  return false unless primitive_kind(type) == ""
+  type.is_a?(NonGenericClassType) || type.is_a?(GenericClassInstanceType)
+end
+
+# The whole-program census (hosted `iyi_headed_types`, gc_layouts.cr 204-223): candidate classes
+# with a virtual type made (`virtual_type_made?`, types.cr 364, 1598, 2546), members of reference
+# unions in `program.unions` (after `remove_alias`), and all subclasses of either.
+pub def headed_types(program : SemanticProgram, ids : LowerTypeIds) : Hash(UInt64, Bool)
+  headed = Hash(UInt64, Bool).new
+  ids.numbered_types.each do |type|
+    next unless headed_candidate?(type) && TypeQueries.virtual_type_made?(type)
+    headed[type.object_id] = true
+    TypeQueries.all_subclasses(type).each do |sub|
+      headed[sub.object_id] = true
+    end
+  end
+  program.unions.each_value do |union|
+    next unless union.is_a?(ReferenceUnionType) || union.is_a?(NilableReferenceUnionType)
+    union.as(UnionType).union_types.each do |member|
+      resolved = program.remove_alias(member)
+      next unless headed_candidate?(resolved)
+      headed[resolved.object_id] = true
+      TypeQueries.all_subclasses(resolved).each do |sub|
+        headed[sub.object_id] = true
+      end
+    end
+  end
+  headed
+end
+
+# Rule 3 via a precomputed census table.
+pub def headed_with_census?(type : Type, ids : LowerTypeIds, census : Hash(UInt64, Bool)) : Bool
+  return true if type.full_name == "String"
+  return false unless headed_candidate?(type)
+  return true if ids.type_id(type) > headed_id_limit
+  census.has_key?(type.object_id)
+end
+
+# The `:headed` answer for *type* (hosted `iyi_headed?`, gc_layouts.cr 173-177).
+pub def headed?(type : Type, program : SemanticProgram, ids : LowerTypeIds) : Bool
+  return true if type.full_name == "String"
+  return false unless headed_candidate?(type)
+  return true if ids.type_id(type) > headed_id_limit
+  headed_types(program, ids).has_key?(type.object_id)
+end

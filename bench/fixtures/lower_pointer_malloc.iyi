@@ -1,0 +1,7 @@
+# Pointer(UInt8).malloc with a UInt64 count (size_t on 64-bit).
+def alloc_buf(n : UInt64) : Pointer(UInt8)
+  Pointer(UInt8).malloc(n)
+end
+
+p = alloc_buf(3_u64)
+p.address

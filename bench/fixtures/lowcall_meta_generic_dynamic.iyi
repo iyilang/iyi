@@ -1,0 +1,14 @@
+class Box(T)
+  def self.value(n : Int32) : Int32
+    copy = n
+    copy
+  end
+end
+
+klass = Box(Int32)
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(klass.value(7))

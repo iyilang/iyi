@@ -1,0 +1,35 @@
+# whole programs through the native back end: <program> <phase reached>. A phase may only rise.
+# Raise with NATIVE_WHOLE_PROGRAM_RAISE=1 bash bench/native_whole_program_exercise.sh (keeps the higher phase).
+samples/iyi/basics.iyi run-equal
+samples/iyi/calc.iyi run-equal
+samples/iyi/collections.iyi run-equal
+samples/iyi/config.iyi run-equal
+samples/iyi/cores.iyi run-equal
+samples/iyi/derive.iyi run-equal
+samples/iyi/enums.iyi run-equal
+samples/iyi/errors.iyi run-equal
+samples/iyi/files.iyi run-equal
+samples/iyi/format.iyi run-equal
+samples/iyi/formatting.iyi run-equal
+samples/iyi/generics.iyi run-equal
+samples/iyi/grid.iyi run-equal
+samples/iyi/hello.iyi run-equal
+samples/iyi/immutable.iyi run-equal
+samples/iyi/init_order.iyi run-equal
+samples/iyi/inventory.iyi run-equal
+samples/iyi/io.iyi run-equal
+samples/iyi/modules.iyi run-equal
+samples/iyi/sessions.iyi run-equal
+samples/iyi/shapes.iyi run-equal
+samples/iyi/socket.iyi run-equal
+samples/iyi/std_iterator.iyi run-equal
+samples/iyi/std_text.iyi run-equal
+samples/iyi/std_time.iyi run-equal
+samples/iyi/visited.iyi run-equal
+samples/iyi/webapp.iyi run-equal
+samples/iyi/workers.iyi run-equal
+bench/fixtures/native_whole/float_to_int.iyi run-equal
+bench/fixtures/native_whole/quoted_name.iyi run-equal
+bench/fixtures/native_whole/wide_division.iyi run-equal
+bench/fixtures/native_whole/wide_result.iyi run-equal
+src/compiler/tools/parse.iyi run-equal

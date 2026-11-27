@@ -1,0 +1,68 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Counter
+  def initialize(@count : Int32)
+  end
+
+  def count : Int32
+    @count
+  end
+
+  def reset(value : Int32) : Int32
+    @count = value
+  end
+
+  def twice(value : Int32) : Int32
+    value &* 2
+  end
+
+  def bumper(step : Int32) : Proc(Int32)
+    -> { @count = @count &+ step; @count }
+  end
+
+  def reader : Proc(Int32)
+    -> { @count }
+  end
+
+  def me : Proc(Counter)
+    -> { self }
+  end
+
+  def calls : Proc(Int32)
+    -> { self.count &+ twice(@count) }
+  end
+
+  def implicit_only : Proc(Int32)
+    -> { twice(5) }
+  end
+
+  def plain_and_bound : Int32
+    plain = -> { 3 }
+    bound = -> { @count }
+    plain.call &+ bound.call
+  end
+end
+
+def escaped_reader : Proc(Int32)
+  Counter.new(31).reader
+end
+
+c = Counter.new(10)
+bumper = c.bumper(5)
+LibC.exit(1) unless bumper.call == 15
+LibC.exit(2) unless bumper.call == 20
+LibC.exit(3) unless c.count == 20
+reader = c.reader
+c.reset(100)
+LibC.exit(4) unless reader.call == 100
+me = c.me
+LibC.exit(5) unless me.call.count == 100
+me.call.reset(7)
+LibC.exit(6) unless c.count == 7
+LibC.exit(7) unless c.calls.call == 21
+LibC.exit(8) unless c.implicit_only.call == 10
+LibC.exit(9) unless c.plain_and_bound == 10
+LibC.exit(10) unless escaped_reader.call == 31
+LibC.exit(0)

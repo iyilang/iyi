@@ -1,0 +1,100 @@
+# The read precedes the declaration. The initializer belongs to Counters,
+# not to the function that first reads it, and its side effect must run once.
+@[Unsafe("declares the once runtime entry and C entry")]
+class IyiRuntimeLock
+end
+
+struct Pointer(T)
+  @[Primitive(:pointer_get)]
+  def value : T
+  end
+
+  @[Primitive(:pointer_set)]
+  def value=(value : T)
+  end
+
+  @[Primitive(:pointer_address)]
+  def address : UInt64
+  end
+end
+
+struct Proc
+  @[Primitive(:proc_call)]
+  def call(*args : *T) : R
+  end
+end
+
+fun __iyi_once(flag : Bool*, initializer : Void*) : Nil
+  if !flag.value
+    cell = {initializer.address, 0_u64}
+    pointerof(cell).as(Pointer(Proc(Nil))).value.call
+    flag.value = true
+  end
+end
+
+lib LibIyiMain
+  fun __iyi_main(argc : Int32, argv : UInt8**)
+end
+
+fun main(argc : Int32, argv : UInt8**) : Int32
+  LibIyiMain.__iyi_main(argc, argv)
+  0
+end
+
+struct Cell(T)
+  @value : T
+
+  def initialize(@value : T)
+  end
+
+  def value : T
+    @value
+  end
+end
+
+class Counters
+  @@count : Int32 = 0
+  @@ran : Bool = false
+
+  def self.make_value : Bool
+    if @@ran
+      @@count = 2
+    else
+      @@ran = true
+      @@count = 1
+    end
+    true
+  end
+
+  def self.value : Bool
+    @@cell.value
+  end
+
+  def self.count : Int32
+    @@count
+  end
+end
+
+def read_value : Bool
+  Counters.value
+end
+
+def consume(n : Bool) : Bool
+  n
+end
+
+consume(read_value)
+
+class Counters
+  @@cell : Cell(Bool) = Cell(Bool).new(make_value)
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+if consume(read_value)
+  LibC.exit(Counters.count)
+else
+  LibC.exit(3)
+end

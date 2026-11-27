@@ -1,0 +1,55 @@
+# Later assignments preallocate each local before its declaration is lowered.
+# Keep that slot: scalar, nilable-reference and initially uninitialized locals
+# must preserve their initial value and subsequent writes. Both branches total 40.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class DeclaredBox
+  def initialize(@value : Int32)
+  end
+
+  def value : Int32
+    @value
+  end
+end
+
+def scalar_local(replace : Bool) : Int32
+  value : Int32 = 3
+  if replace
+    value = 7
+  end
+  value
+end
+
+def reference_local(present : Bool) : Int32
+  value : DeclaredBox? = nil
+  if present
+    value = DeclaredBox.new(7)
+  end
+  if value
+    value.value
+  else
+    3
+  end
+end
+
+def deferred_local(replace : Bool) : Int32
+  value : Int32
+  if replace
+    value = 7
+  else
+    value = 3
+  end
+  value
+end
+
+def union_local(flip : Bool) : Int32
+  value : (Int32 | Bool) = 4
+  if flip
+    value = true
+  end
+  value.is_a?(Bool) ? 6 : 4
+end
+
+LibC.exit(scalar_local(true) &+ scalar_local(false) &+ reference_local(true) &+ reference_local(false) &+ deferred_local(true) &+ deferred_local(false) &+ union_local(true) &+ union_local(false))

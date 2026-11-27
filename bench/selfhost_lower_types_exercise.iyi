@@ -1,0 +1,389 @@
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type, NonGenericClassType, NilType}
+import compiler/types/types::{TupleInstanceType, NamedTupleInstanceType, StaticArrayInstanceType, ProcInstanceType, GenericClassInstanceType, PointerInstanceType}
+import compiler/types/type_system::{TypeSystem}
+import compiler/types/unification::{TypeUnification}
+import compiler/types/merge::{TypeMerge}
+import compiler/types/lookup::{LookupError, TypeLookup}
+import compiler/ir/types::{IrType, TypeTable}
+import compiler/ir/layout::{DataLayout, LayoutError}
+import compiler/platform/target::{Target}
+import compiler/lower/typer::{LowerTyper, passed_by_value?, primitive_kind}
+import compiler/lower/type_id::{LowerTypeIds}
+import compiler/lower/headed::{headed?}
+import compiler/lower/layouts::{GcLayouts}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/semantic/instance_vars::{declare_guessed_instance_vars}
+import compiler/syntax/ast::{ASTNode, ClassDef, Expressions, ModuleHeader}
+import compiler/semantic/top_level::{ModuleType}
+import compiler/semantic/top_level::{dir_of, normalize_path, declared_in?, NamedType, EnumType, Const}
+import compiler/types/rendering::{TypeRenderer}
+import compiler/semantic/type_nodes::{type_node_system}
+
+# Lowering-types driver for bench/selfhost_lower_types_exercise.sh.
+#
+#   selfhost_lower_types_exercise <fixture.iyi> <target triple>
+#
+# Declares the fixture into a SemanticProgram, then prints one block per
+# `# type: <expr>` line, the same blocks the hosted oracle
+# (bench/selfhost_lower_types_oracle.cr) prints. The block form and its
+# normalisation are described in the oracle's header.
+module BenchSelfhostLowerTypesExercise
+  # Splits operands at the commas outside every parenthesis, trimmed.
+  def self.split_top(text : String) : Array(String)
+    parts = [] of String
+    depth = 0
+    start = 0
+    i = 0
+    while i < text.bytesize
+      c = text[i, 1]
+      if c == "("
+        depth = depth + 1
+      elsif c == ")"
+        depth = depth - 1
+      elsif c == "," && depth == 0
+        parts << text[start, i - start].strip
+        start = i + 1
+      end
+      i = i + 1
+    end
+    last = text[start, text.bytesize - start].strip
+    parts << last unless last.bytesize == 0
+    parts
+  end
+
+  # The analysed type a written type names: `Int32`, `Color`, `Pointer(Int32)`, `Color.class`.
+  # Splits at a separator outside every parenthesis, trimmed, keeping empty parts.
+  def self.split_outside(text : String, sep : String) : Array(String)
+    parts = [] of String
+    depth = 0
+    start = 0
+    i = 0
+    while i < text.bytesize
+      c = text[i, 1]
+      if c == "("
+        depth = depth + 1
+      elsif c == ")"
+        depth = depth - 1
+      elsif c == sep && depth == 0
+        parts << text[start, i - start].strip
+        start = i + 1
+      end
+      i = i + 1
+    end
+    parts << text[start, text.bytesize - start].strip
+    parts
+  end
+
+  def self.resolve(prog : SemanticProgram, ts : TypeSystem, name : String) : Type
+    t = name.strip
+    # A union is its members merged, `A | B`, and a nilable type is the type merged with Nil, `A?`.
+    bars = split_outside(t, "|")
+    if bars.size > 1
+      members = [] of Type
+      bars.each do |b|
+        members << resolve(prog, ts, b)
+      end
+      return TypeMerge.merge_all(prog, members)
+    end
+    if t.ends_with?("?") && t.bytesize > 1
+      inner = resolve(prog, ts, t[0, t.bytesize - 1])
+      return TypeMerge.merge(prog, inner, resolve(prog, ts, "Nil"))
+    end
+    if t.ends_with?(".class")
+      inner = resolve(prog, ts, t[0, t.bytesize - 6])
+      m = TypeUnification.metaclass_of(inner)
+      raise "no metaclass for #{t}" if m.nil?
+      return m
+    end
+    if t.starts_with?("Proc(") && t.ends_with?(")")
+      parts = split_outside(t[5, t.bytesize - 6], ",")
+      members = [] of Type
+      parts.each do |p|
+        members << resolve(prog, ts, p)
+      end
+      arg_types = [] of Type
+      i = 0
+      while i < members.size - 1
+        arg_types << members[i]
+        i = i + 1
+      end
+      return ts.proc_of(arg_types, members[members.size - 1])
+    end
+    found = TypeLookup.new(ts.instances).lookup(prog, Parser.new(t, "lower").parse)
+    raise "unknown type #{t}" if found.is_a?(LookupError)
+    found.as(Type)
+  end
+
+  # Where the hosted typer lays a type out as a struct (the oracle's struct_applies?).
+  def self.struct_applies?(t : Type) : Bool
+    return true if t.is_a?(TupleInstanceType) || t.is_a?(NamedTupleInstanceType)
+    return true if t.is_a?(StaticArrayInstanceType)
+    return true if t.is_a?(GenericClassInstanceType) && !t.is_a?(PointerInstanceType) && !t.is_a?(ProcInstanceType)
+    t.is_a?(NonGenericClassType) && !t.is_a?(NilType) && primitive_kind(t) == ""
+  end
+
+  def self.offsets_text(st : IrType, typer : LowerTyper) : String
+    parts = [] of String
+    i = 0
+    while i < st.struct_element_types.size
+      parts << typer.offset_of(st, i).to_s
+      i = i + 1
+    end
+    return "-" if parts.size == 0
+    parts.join(" ")
+  end
+
+  def self.block_text(expr : String, typer : LowerTyper, t : Type) : String
+    out = "== #{expr}\n"
+    out = out + "llvm_type: #{typer.llvm_type(t).to_s}\n"
+    out = out + "llvm_type(wants_size): #{typer.llvm_type(t, true).to_s}\n"
+    if struct_applies?(t)
+      st = typer.llvm_struct_type(t)
+      out = out + "llvm_struct_type: #{st.to_s}\n"
+      if st.struct?
+        out = out + "offsets: #{offsets_text(st, typer)}\n"
+      else
+        out = out + "offsets: -\n"
+      end
+    else
+      out = out + "llvm_struct_type: -\n"
+      out = out + "offsets: -\n"
+    end
+    out = out + "llvm_embedded_type: #{typer.llvm_embedded_type(t).to_s}\n"
+    out = out + "size: #{typer.size_of(typer.llvm_type(t))}\n"
+    out = out + "align: #{typer.align_of(typer.llvm_type(t))}\n"
+    out = out + "passed_by_value: #{bool_text(passed_by_value?(t))}\n"
+    out = out + "ivars: #{ivars_text(t)}\n"
+    out = out + "layout: #{layout_text(t, typer)}\n"
+    out = out + "c_type: #{typer.llvm_c_type(t).to_s}\n"
+    out = out + "c_return_type: #{typer.llvm_c_return_type(t).to_s}\n"
+    out = out + "embedded_c_type: #{typer.llvm_embedded_c_type(t).to_s}\n"
+    out = out + "intrinsic_return_type: #{typer.llvm_intrinsic_return_type(t).to_s}\n"
+    out = out + "passed_indirectly: #{bool_text(typer.passed_indirectly?(t))}\n"
+    if t.is_a?(ProcInstanceType)
+      out = out + "proc_function: #{typer.proc_function(t).to_s}\n"
+      out = out + "closure_function: #{typer.closure_function(t).to_s}\n"
+    end
+    out
+  end
+
+  # The instance variables of a user class, in declaration order: `name:Type` (the name keeps its @), or `-`.
+  def self.ivars_text(t : Type) : String
+    generic = t.is_a?(GenericClassInstanceType) && !t.is_a?(PointerInstanceType) && !t.is_a?(ProcInstanceType)
+    return "-" unless generic || (t.is_a?(NonGenericClassType) && !t.is_a?(NilType))
+    parts = [] of String
+    ivars = generic ? t.as(GenericClassInstanceType).all_instance_vars : t.as(ModuleType).all_instance_vars
+    ivars.each do |name, ivar|
+      vt = ivar.var_type
+      parts << "#{name}:#{vt.nil? ? "untyped" : TypeRenderer.render(vt.as(Type))}"
+    end
+    return "-" if parts.size == 0
+    parts.join(" ")
+  end
+
+  # The pointer map of a user class under iyi's object layout, as `alloc`, `cap` and the scan
+  # offsets; the hosted type id is not printed (NEEDS.md row 16).
+  def self.layout_text(t : Type, typer : LowerTyper) : String
+    return "-" unless typer.iyi_layout && t.is_a?(NonGenericClassType) && !t.is_a?(NilType)
+    row = GcLayouts.new(typer).gc_type_layout(t)
+    parts = [] of String
+    row.scan_offsets.each do |o|
+      parts << o.to_s
+    end
+    scan = parts.size == 0 ? "-" : parts.join(" ")
+    "alloc=#{row.alloc_size} cap=#{row.scan_cap} scan=#{scan}"
+  end
+
+  def self.bool_text(b : Bool) : String
+    b ? "true" : "false"
+  end
+
+  # The `ids` mode's block: the type id and the id range the hosted LLVMId gives the type, or `-`.
+  def self.ids_block(expr : String, ids : LowerTypeIds, t : Type) : String
+    ids.type_id(t)
+    mm = ids.min_max(t)
+    out = "== #{expr}\n"
+    if mm.nil?
+      out = out + "type_id: -\ntype_range: -\nmetaclass_id: -\n"
+    else
+      pair = mm.as(Tuple(Int32, Int32))
+      out = out + "type_id: #{pair[1]}\ntype_range: #{pair[0]} #{pair[1]}\n"
+      meta = ids.metaclass_id(t)
+      out = out + "metaclass_id: #{meta.nil? ? "-" : meta.to_s}\n"
+    end
+    out
+  end
+
+  # The `headed` mode's block: the `:headed` byte of headed.iyi.
+  def self.headed_block(expr : String, prog : SemanticProgram, ids : LowerTypeIds, t : Type) : String
+    word = headed?(t, prog, ids) ? "1" : "0"
+    "== #{expr}\nheaded: #{word}\n"
+  end
+
+  # The `table` mode: every numbered type in id order as `id name meta=<id|->`, the rows the hosted
+  # oracle's table mode prints, so the two numberings diff line by line.
+  def self.table_text(ids : LowerTypeIds) : String
+    out = ""
+    num = 0
+    while num <= ids.last_id
+      if name = ids.name_of_id(num)
+        meta = ids.metaclass_of_id(num)
+        out = out + "#{num} #{name} meta=#{meta.nil? ? "-" : meta.to_s}\n"
+      end
+      num = num + 1
+    end
+    out
+  end
+
+  def self.run(src : String, filename : String, triple : String, mode : String) : String
+    parser = Parser.new(src, filename)
+    node = parser.parse
+    prog = SemanticProgram.new
+    # The type system is installed before the visitor runs, as the semantic driver does.
+    ts = TypeSystem.new(prog)
+    visitor = TopLevelVisitor.new(prog)
+    node.accept(visitor)
+    # The explicit instance variable declarations are recorded by the top-level pass and finished
+    # here, as the declarations driver and the own-source mode do (NEEDS.md row 12).
+    visitor.finish
+    # The instance variables typed by assignment in initialize (semantic/instance_vars.iyi).
+    declare_guessed_instance_vars(prog)
+    layout_result = DataLayout.for(Target.new(triple))
+    raise "no DataLayout for #{triple}" if layout_result.is_a?(LayoutError)
+    layout = layout_result.as(DataLayout)
+    # The hosted Program#iyi_object_layout? is decided by the program declaring IyiRuntimeLock.
+    iyi = !prog.types["IyiRuntimeLock"]?.nil?
+    typer = LowerTyper.new(TypeTable.new, layout, iyi)
+    # The hosted LLVMId numbers every class reachable from Object, and the hosted driver resolves
+    # every `# type:` line first (a generic instance named in a line is then reachable from its
+    # generic class). The types are resolved before the walk so both drivers number the same program.
+    exprs = [] of String
+    types = [] of Type
+    src.split("\n").each do |line|
+      if line.starts_with?("# type: ")
+        expr = line[8, line.bytesize - 8].strip
+        exprs << expr
+        types << resolve(prog, ts, expr)
+      end
+    end
+    ids = LowerTypeIds.new
+    if root = prog.types["Object"]?
+      ids.assign_all(root)
+    end
+    if mode == "table"
+      return BenchSelfhostLowerTypesExercise.table_text(ids)
+    end
+    out = ""
+    i = 0
+    while i < exprs.size
+      if mode == "ids"
+        out = out + ids_block(exprs[i], ids, types[i])
+      elsif mode == "headed"
+        out = out + headed_block(exprs[i], prog, ids, types[i])
+      else
+        out = out + block_text(exprs[i], typer, types[i])
+      end
+      i = i + 1
+    end
+    out
+  end
+
+  # The search path the import closure is read from (IYI_PATH, as the declarations gate sets it).
+  def self.search_path : Array(String)
+    text = ENV["IYI_PATH"]? || ""
+    text.split(":").select { |entry| !entry.empty? }
+  end
+
+  # The project root an import is resolved from first: the entry's directory, moved up one
+  # level for each segment of its module header's path but the last (the declarations driver's rule).
+  def self.project_root(node : ASTNode, entry : String) : String
+    root = dir_of(entry)
+    if node.is_a?(Expressions)
+      first = node.as(Expressions).expressions.first?
+      if first.is_a?(ModuleHeader)
+        depth = first.as(ModuleHeader).path.size - 1
+        i = 0
+        while i < depth
+          root = dir_of(root)
+          i = i + 1
+        end
+      end
+    end
+    root
+  end
+
+  # The entry file and its import closure, declared into one program by the top-level pass
+  # (`load_file` for each import), as the declarations driver loads them. Returns the program and the entry.
+  def self.load_program(path : String) : {SemanticProgram, String}
+    cwd = ENV["PWD"]? || "."
+    absolute = path.starts_with?("/") ? path : "#{cwd}/#{path}"
+    entry = normalize_path(absolute)
+    src = File.read(entry)
+    node = Parser.new(src, entry).parse
+    prog = SemanticProgram.new
+    # Total mode: an impl of a generic with a free type variable (`impl Enumerable(T)`) is carried past,
+    # as the hosted pass allows it. Strict mode raises on the variable, and the own-source run stops.
+    prog.total_mode = true
+    prog.loaded_files.add(entry)
+    prog.search_path = search_path
+    prog.project_root = project_root(node, entry)
+    visitor = TopLevelVisitor.new(prog, entry)
+    # The prelude, loaded first, as the hosted build loads it (`self.prelude = "iyi/prelude"`).
+    if search_path.size > 0
+      visitor.load_file(normalize_path("#{search_path[0]}/iyi/prelude.iyi"))
+    end
+    node.accept(visitor)
+    visitor.finish
+    # S2B_TYPE_SYSTEM=1 installs the program's type system (type_node_system), so generic instance
+    # type arguments are looked up with the full lookup. Off by default: the gate measures the
+    # simplified path (NEEDS.md row 3, the Generic drop in lookup_type_node).
+    if ENV["S2B_TYPE_SYSTEM"]? == "1"
+      type_node_system(prog)
+    end
+    # This pass installs the type system after declarations and re-resolves
+    # explicit instance variables before guessing the remaining variables.
+    declare_guessed_instance_vars(prog)
+    {prog, entry}
+  end
+
+  # Every type the entry declares, nested types included: the hosted dump's rule (`dump_tree_declared`).
+  def self.collect_declared(t : Type, entry : String, found : Array(Type)) : Nil
+    found << t if declared_in?(t.locations, entry) && !t.is_a?(Const)
+    if t.is_a?(NamedType) && !t.is_a?(EnumType)
+      nt = t.as(NamedType)
+      nt.types.keys.sorted.each do |sname|
+        collect_declared(nt.types[sname], entry, found)
+      end
+    end
+    nil
+  end
+
+  # The whole-program mode the gate measures src/compiler with: one block per type the file
+  # declares, lowered by one typer for the target. A block is keyed `== <full name>`.
+  def self.own_text(path : String, triple : String) : String
+    prog, entry = load_program(path)
+    layout_result = DataLayout.for(Target.new(triple))
+    raise "no DataLayout for #{triple}" if layout_result.is_a?(LayoutError)
+    layout = layout_result.as(DataLayout)
+    iyi = !prog.types["IyiRuntimeLock"]?.nil?
+    typer = LowerTyper.new(TypeTable.new, layout, iyi)
+    types = [] of Type
+    prog.types.keys.sorted.each do |name|
+      collect_declared(prog.types[name], entry, types)
+    end
+    out = ""
+    types.each do |t|
+      out = out + block_text(t.full_name, typer, t)
+    end
+    out
+  end
+end
+
+if Program.args.size == 3 && Program.args[0] == "--own"
+  print BenchSelfhostLowerTypesExercise.own_text(Program.args[1], Program.args[2])
+elsif Program.args.size > 1
+  filename = Program.args[0]
+  mode = Program.args.size > 2 ? Program.args[2] : "blocks"
+  print BenchSelfhostLowerTypesExercise.run(File.read(filename), filename, Program.args[1], mode)
+end

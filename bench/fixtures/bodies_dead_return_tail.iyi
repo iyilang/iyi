@@ -1,0 +1,8 @@
+def dead_tail(location : String)
+  if location.is_a?(String)
+    return 7
+  end
+  location.size
+end
+
+answer = dead_tail("hello")

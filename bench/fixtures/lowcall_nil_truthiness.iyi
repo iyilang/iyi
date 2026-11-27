@@ -1,0 +1,38 @@
+@[Unsafe("reports nil truthiness and condition side effects through the exit status")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Counter
+  def initialize
+    @count = 0
+  end
+
+  def step : Nil
+    @count = @count &+ 1
+    nil
+  end
+
+  def count : Int32
+    @count
+  end
+end
+
+def negated(value : Nil) : Bool
+  !value
+end
+
+counter = Counter.new
+value = nil
+LibC.exit(1) unless !value
+LibC.exit(2) if !!value
+LibC.exit(3) unless negated(nil)
+LibC.exit(4) unless !counter.step
+LibC.exit(5) unless counter.count == 1
+LibC.exit(6) if !!counter.step
+LibC.exit(7) unless counter.count == 2
+if counter.step
+  LibC.exit(8)
+end
+LibC.exit(9) unless counter.count == 3
+LibC.exit(0)

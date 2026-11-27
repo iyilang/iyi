@@ -37,27 +37,66 @@ pub class MacroReport
 end
 
 pub class MacroEngine
-  property interpreter : MacroInterpreter
-  property flags : Array(String)
+  @interpreter : MacroInterpreter
+  @flags : Array(String)
+  @host_flags : Array(String)?
+  @target_from_host : Bool
   property confinement : MacroConfinement? = nil
 
-  # `flags` is the flag set `flag?` answers from, built by `MacroTargetFlags` for
-  # the target being compiled for. Left out, it is the host's.
-  def initialize(flags : Array(String)? = nil, confinement : MacroConfinement? = nil)
-    if f = flags
-      @flags = f
-    else
-      @flags = MacroTargetFlags.host([] of String)
+  # Resolve the default target only when a report needs it. A normalizer can
+  # supply its per-program host flags before the first expansion.
+  def initialize(flags : Array(String)? = nil, host_flags : Array(String)? = nil, @confinement : MacroConfinement? = nil)
+    @target_from_host = flags.nil?
+    @host_flags = host_flags
+    @flags = flags || host_flags || [] of String
+    @interpreter = MacroInterpreter.new(nil, @flags, "<Program>", host_flags)
+    @interpreter.confinement = @confinement
+  end
+
+  def use_host_flags(flags : Array(String)) : Nil
+    @host_flags = flags
+    @flags = flags if @target_from_host
+    @interpreter.flags = @flags
+    @interpreter.host_flags = flags
+  end
+
+  def host_flags_now : Array(String)
+    if flags = @host_flags
+      return flags
     end
-    @interpreter = MacroInterpreter.new(nil, @flags)
-    @confinement = confinement
+    flags = MacroTargetFlags.host([] of String)
+    use_host_flags(flags)
+    flags
+  end
+
+  def flags : Array(String)
+    host_flags_now if @target_from_host
+    @flags
+  end
+
+  def flags=(flags : Array(String))
+    @target_from_host = false
+    @flags = flags
+    @interpreter.flags = flags
+  end
+
+  def interpreter : MacroInterpreter
+    host_flags_now
+    @interpreter
+  end
+
+  def interpreter=(interpreter : MacroInterpreter)
+    @interpreter = interpreter
+    @interpreter.flags = flags
+    @interpreter.host_flags = @host_flags
+    @interpreter.confinement = @confinement
   end
 
   # Expands one call of a macro and reports each top-level site with the text
   # it expanded to. The sites share one interpreter, so variables and fresh
   # names carry from one site to the next, as they do within one expansion.
   def report(a_macro : Macro, call : Call) : MacroReport
-    interp = MacroInterpreter.new(call.block, @flags)
+    interp = MacroInterpreter.new(call.block, flags, "<Program>", host_flags_now)
     interp.confinement = @confinement
     interp.macro_file = MacroEngine.file_of(a_macro.location)
     interp.bind_args(a_macro, call)
@@ -111,7 +150,7 @@ pub class MacroEngine
   # expand_macro(node, scope, path_lookup, free_vars, a_def)). None at the top
   # level and in a type body.
   def site_report(site : ASTNode, scope_name : String = "<Program>", bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, path_lookup : Proc(Path, ASTNode?)? = nil) : MacroReport
-    interp = MacroInterpreter.new(nil, @flags, scope_name, path_lookup)
+    interp = MacroInterpreter.new(nil, flags, scope_name, host_flags_now, path_lookup)
     interp.confinement = @confinement
     interp.macro_file = MacroEngine.file_of(site.location)
     interp.type_facts = facts
@@ -154,6 +193,7 @@ pub class MacroEngine
   # The expansion, or the failure that stopped it: a macro that raises, or one that calls a macro method this
   # engine does not port. A caller that can refuse the call where it is written answers with this.
   def expand_or_failure(a_macro : Macro, call : Call, normalizer : NormalizerProgram) : ASTNode | MacroFailure
+    use_host_flags(normalizer.host_flags)
     rep = report(a_macro, call)
     if f = rep.failure
       return f

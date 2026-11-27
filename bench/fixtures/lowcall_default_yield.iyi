@@ -1,0 +1,9 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def each_pair(first = 1, second = 2, &)
+  yield first &+ second
+end
+
+each_pair(40) { |v| LibC.exit(v) }

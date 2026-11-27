@@ -1,0 +1,21 @@
+# Generic instances laid out as structs: a struct Box(T) with a field of its parameter, and a
+# class Buf(T) with the shape of Array's storage (a size, a capacity and a pointer to T). Each
+# instance's fields are its generic's, with the parameter replaced by its argument.
+struct Box(T)
+  @value : T
+
+  def initialize(@value : T)
+  end
+end
+
+class Buf(T)
+  @size : Int32
+  @capacity : Int32
+  @buffer : Pointer(T)
+
+  def initialize(@size : Int32, @capacity : Int32, @buffer : Pointer(T))
+  end
+end
+
+# type: Box(Int32)
+# type: Buf(Int32)

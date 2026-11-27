@@ -1,0 +1,43 @@
+# The `headed` mode for the whole-program census (NEEDS.md rows 26 and 27):
+#   - Rule 3a (virtual_type_made?): a candidate class whose virtual type was made, and its subclasses.
+#   - Rule 3b (program.unions): members of reference unions (through aliases too) and their subclasses.
+#   - Negative controls: an unrelated class, and a leaf class in a NilableType (Leaf?).
+class VirtBase
+end
+
+class VirtSub < VirtBase
+end
+
+class Holder
+  @v : VirtBase
+
+  def initialize(@v : VirtBase)
+  end
+end
+
+class UnionBase
+end
+
+class UnionSub < UnionBase
+end
+
+class Other
+end
+
+alias OtherAlias = Other
+
+class Leaf
+end
+
+class Plain
+end
+
+# type: UnionBase | OtherAlias
+# type: Leaf?
+# type: VirtBase
+# type: VirtSub
+# type: UnionBase
+# type: UnionSub
+# type: Other
+# type: Leaf
+# type: Plain

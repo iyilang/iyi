@@ -1,0 +1,55 @@
+@[Unsafe("calls C exit to report the dispatch result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+trait Loud
+  abstract def shout : Int32
+  abstract def twice : Int32
+  abstract def one : Int32
+end
+
+struct User
+  def initialize(@n : Int32)
+  end
+end
+
+impl Loud for User
+  def shout : Int32
+    @n
+  end
+
+  def twice : Int32
+    @n &* 2
+  end
+
+  def one : Int32
+    1
+  end
+end
+
+def yell(item : Loud) : Int32
+  item.shout &+ item.twice &+ item.one
+end
+
+trait Badge
+  abstract def code : Int32
+end
+
+class Owner
+  def initialize(@id : Int32)
+  end
+end
+
+impl Badge for Owner
+  def code : Int32
+    @id &+ 1
+  end
+end
+
+def badge_of(b : Badge) : Int32
+  b.code
+end
+
+held = User.new(5).as(Loud)
+LibC.exit(yell(User.new(7).as(Loud)) &+ held.shout &+ held.twice &+ held.one &+ badge_of(Owner.new(3).as(Badge)))

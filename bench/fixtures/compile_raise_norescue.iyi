@@ -1,0 +1,10 @@
+class Exception
+end
+
+class E < Exception
+end
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  raise E.new
+  0
+end

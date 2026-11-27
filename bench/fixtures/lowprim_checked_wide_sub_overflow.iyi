@@ -1,0 +1,14 @@
+# A wider signed subtraction whose result is below Int32 must raise before narrowing.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __crystal_raise_overflow : NoReturn
+  LibC.exit(99)
+end
+
+def subtract(a : Int32, b : Int64) : Int32
+  a - b
+end
+
+LibC.exit(subtract(-2147483647 - 1, 1_i64))

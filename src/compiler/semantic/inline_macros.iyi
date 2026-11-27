@@ -74,7 +74,7 @@ end
 # `bindings` are the type parameters a site in a def body sees (macro_bindings.iyi): the receiver's
 # and the def's free variables. A site at the top level or in a type body has none.
 pub def expand_inline_macro(site : ASTNode, scope_name : String, filename : String, in_lib : Bool, normalizer : NormalizerProgram, locals : Array(String) = [] of String, bindings : Array(MacroFreeBinding)? = nil, facts : MacroTypeFacts? = nil, path_lookup : Proc(Path, ASTNode?)? = nil) : ASTNode?
-  report = MacroEngine.new(normalizer.macro_flags).site_report(site, scope_name, bindings, facts, path_lookup)
+  report = MacroEngine.new(normalizer.macro_flags, normalizer.host_flags).site_report(site, scope_name, bindings, facts, path_lookup)
   first = report.sites.first
   kind = first.kind
   line = first.line

@@ -1,0 +1,30 @@
+class Holder
+  @cell : Cell(UInt64)
+  @n : Int32
+
+  def initialize(n : Int32)
+    @n = n
+    @cell = Cell(UInt64).new(7_u64)
+  end
+
+  def n : Int32
+    @n
+  end
+end
+
+struct Cell(T)
+  @value : T
+
+  def initialize(value : T)
+    @value = value
+  end
+
+  def value : T
+    @value
+  end
+end
+
+fun test_forward_generic(n : Int32) : Int32
+  h = Holder.new(n)
+  h.n
+end

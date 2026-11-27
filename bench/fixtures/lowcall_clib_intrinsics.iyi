@@ -1,0 +1,24 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+# Each fun binds an LLVM intrinsic by its `llvm.` name (hosted llvm_intrinsic?). ceil, floor and copysign are the
+# prelude's aarch64 rounding bindings (src/iyi/float.iyi LibIyiRounding); ceil_f32 is the same family at the float
+# overload; donothing returns nothing and trap never returns. None is a symbol the linker looks for.
+lib LibIntrinsic
+  fun ceil = "llvm.ceil.f64"(x : Float64) : Float64
+  fun floor = "llvm.floor.f64"(x : Float64) : Float64
+  fun copysign = "llvm.copysign.f64"(x : Float64, sign : Float64) : Float64
+  fun ceil_f32 = "llvm.ceil.f32"(x : Float32) : Float32
+  fun donothing = "llvm.donothing"
+  fun trap = "llvm.trap" : NoReturn
+end
+
+LibIntrinsic.donothing
+LibC.exit(1) unless LibIntrinsic.ceil(2.25) == 3.0
+LibC.exit(2) unless LibIntrinsic.floor(-2.25) == -3.0
+LibC.exit(3) unless LibIntrinsic.copysign(2.5, -1.0) == -2.5
+LibC.exit(4) unless LibIntrinsic.ceil_f32(1.25_f32) == 2.0_f32
+LibC.exit(5) unless LibIntrinsic.ceil(2) == 2.0
+LibIntrinsic.trap unless LibIntrinsic.floor(0.5) == 0.0
+LibC.exit(0)

@@ -1,0 +1,16 @@
+# Hosted runs the hook and exits 5. The port must refuse, not silently exit 7.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+module Hooked
+  macro included
+    LibC.exit(5)
+  end
+end
+
+struct Host
+  include Hooked
+end
+
+LibC.exit(7)

@@ -1,0 +1,19 @@
+class Node
+end
+
+class K
+  @@head : Node? = nil
+
+  def self.head : Nil
+    @@head
+    nil
+  end
+end
+
+K.head
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(0)

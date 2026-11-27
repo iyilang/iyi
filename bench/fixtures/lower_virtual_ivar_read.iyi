@@ -1,0 +1,24 @@
+class Holder
+  @value : Int32
+
+  def initialize(@value : Int32)
+  end
+
+  def read(other : Holder) : Int32
+    other.@value
+  end
+end
+
+class Child < Holder
+end
+
+def choose(flag : Bool) : Int32
+  other = if flag
+            Holder.new(7)
+          else
+            Child.new(42)
+          end
+  Holder.new(4).read(other)
+end
+
+choose(false)

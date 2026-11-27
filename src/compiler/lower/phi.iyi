@@ -1,0 +1,107 @@
+module compiler/lower/phi
+
+# The port of `src/compiler/iyi/codegen/phi.cr` (the hosted `Phi`): the value an `if` leaves,
+# merged from its branches. A branch that already ends in a terminator adds nothing (the hosted
+# `@builder.end`). Any other branch counts, adds its value when a value is wanted, and branches to
+# the exit block. The exit block is made at the first branch that branches to it (the hosted
+# `exit_block` getter is lazy), so a block the hosted code never makes is not in the module. The
+# last branch is the one exception: when it is the only branch that reached the merge (hosted
+# `last && @count == 1`), it does not branch and the exit block is not made; the code goes on in
+# that branch, and the value of the if is that branch's value.
+#
+# Closing the phi (hosted `close`): with an exit block the builder is in it; a value is wanted
+# and some branch gave one, the phi merges them; without an exit block the value is the one
+# branch's value. A phi is made only when a value is wanted (the hosted `needs_value`), so a
+# statement emits no phi. Not ported: `force_exit_block` (used by the while loop in the hosted
+# code, which the core ports with its own blocks).
+# Block-call and yield phis over passed-by-value types merge pointers supplied by join_pointer.
+
+import compiler/ir/inst::{Block}
+import compiler/ir/values::{Value}
+import compiler/ir/types::{IrType}
+import compiler/semantic/top_level::{NilType, Type, VoidType}
+import compiler/lower/context::{BranchPhi, Lowerer}
+import compiler/lower/helpers::{at_terminator?, llvm_nil}
+
+pub class LowerPhi
+  getter needs_value : Bool
+  getter type : IrType?
+  getter values : Array(Value)
+  getter blocks : Array(Block)
+  getter count : Int32
+  getter exit_block : Block?
+
+  def initialize(@needs_value : Bool, @type : IrType?, @node_type : Type? = nil)
+    @values = [] of Value
+    @blocks = [] of Block
+    @count = 0
+    @exit_block = nil
+  end
+
+  # The hosted `add(value, type, last)`: a branch that ends in a terminator is skipped. A branch
+  # with a value adds a pair when a value is wanted. A branch that is not the last one, or that is
+  # not the only one to reach the merge, branches to the exit block.
+  def add(low : Lowerer, value : Value?, last : Bool) : Nil
+    return if at_terminator?(low)
+    @count += 1
+    if @needs_value && !@node_type.is_a?(NilType) && !@node_type.is_a?(VoidType)
+      if v = value
+        if here = low.builder.insert_block
+          @values << v.as(Value)
+          @blocks << here.as(Block)
+        end
+      end
+    end
+    return if last && @count == 1
+    low.builder.br(exit_for(low))
+  end
+
+  # The hosted `exit_block` getter: the exit block, made the first time a branch needs it.
+  def exit_for(low : Lowerer) : Block
+    if e = @exit_block
+      return e.as(Block)
+    end
+    made = low.new_block("exit")
+    @exit_block = made
+    made
+  end
+
+  # The hosted `close`: the exit block is current when there is one. With no branch reaching the
+  # merge the builder stays where it is (a terminated block) and the value is left as it is, as the
+  # hosted `unreachable` leaves it. A branch with no value gives nil; one value and no exit block is
+  # the value; otherwise the phi merges the values.
+  def close(low : Lowerer) : Nil
+    if e = @exit_block
+      low.builder.position_at_end(e.as(Block))
+    end
+    return if @count == 0
+    if !@needs_value || @values.empty?
+      low.last = llvm_nil(low)
+      return
+    end
+    if @exit_block.nil?
+      low.last = @values[0]
+      return
+    end
+    t = @type
+    raise "BUG: a phi with a value wanted has no type (hosted phi.cr: close)" if t.nil?
+    merged = low.builder.phi(t.as(IrType), "")
+    low.builder.add_incoming(merged, @values, @blocks)
+    low.last = merged
+  end
+end
+
+# The phi as the block frames see it (hosted `Phi#add` with the branch's value): a `break`, `next` or
+# `return` written in an inlined block call adds its value through the trait.
+impl BranchPhi for LowerPhi
+  def add_branch(low : Lowerer, value : Value?, last : Bool) : Nil
+    add(low, value, last)
+  end
+
+  def semantic_join_type : Type?
+    return nil unless @needs_value
+    t = @node_type
+    raise "BUG: a block phi that merges a value has no analysed type (hosted phi.cr: node_type)" if t.nil?
+    t
+  end
+end

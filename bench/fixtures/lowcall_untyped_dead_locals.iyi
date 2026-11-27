@@ -1,0 +1,29 @@
+@[Unsafe("reports unreachable local allocation through the exit status")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def once(value : Int32, &)
+  yield value
+end
+
+def block_local(site : Nil) : Int32
+  once(3) do |value|
+    if site
+      matched = site.missing_value
+    end
+    value
+  end
+end
+
+def inlined_local(site : Nil, &)
+  if site
+    matched = site.missing_value
+  end
+  yield 7
+end
+
+LibC.exit(1) unless block_local(nil) == 3
+answer = inlined_local(nil) { |value| value &+ 1 }
+LibC.exit(2) unless answer == 8
+LibC.exit(0)

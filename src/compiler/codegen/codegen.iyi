@@ -1,0 +1,5118 @@
+# Code Generation - Stage 2 Self-hosting Slice: Typed AST to IR
+#
+# Slice boundary:
+# Emits IR for top-level `fun` declarations and custom type declarations:
+# - Integer and float arithmetic (+, -, *, /, //, %, &+, &-, &*, unsafe_div, unsafe_mod,
+#   &, |, ^, <<, >>, unsafe_shl, unsafe_shr)
+# - Integer and float comparisons (<, <=, >, >=, ==, !=)
+# - Local variable allocation (stack alloca), store, and load
+# - Control flow: `if`/`else` branching and phi value merges, and `while` loops
+# - Calls between `fun` functions
+# - Struct definitions, initialization (Point.new), field access (p.x, p.x = val)
+# - Struct methods (p.distance_sq, v1.dot(v2), v1.add(v2))
+# - Pointers and Pointer(T) operations (pointerof, ptr.value, ptr.value=, ptr + off, ptr - other, ptr.address, Pointer(T).new)
+# - Classes with instance variables and method dispatch (Counter.new, c.count, c.increment, Multiplier.new, m.scaled)
+#
+# Explicitly excluded from this slice:
+# - Closures and proc literals
+# - Exception handling: `rescue` and `ensure` are refused with the oracle's message, not lowered
+# - Generics instantiation beyond Pointer(T)
+# - Garbage collection interface (classes use malloc directly)
+# - Dynamic virtual hierarchy dispatch tables (~match<Base+>)
+
+@[Unsafe("reads a UInt64's bits back as an Int64 through a pointer cast, which the compiler does not check")]
+module compiler/codegen/codegen
+
+import compiler/foundation/location::{Location}
+import compiler/foundation/errors::{refuse_port}
+import compiler/syntax/ast::{ASTNode, Annotation, Arg, ArrayLiteral, Assign, BoolLiteral, Break, Call, Cast, CharLiteral, ClassDef, ClassVar, Def, ExceptionHandler, Expressions, FunDef, Generic, If, InstanceVar, IsA, LibDef, Next, NilLiteral, Nop, NumberLiteral, Path, PointerOf, ProcLiteral, Return, StringInterpolation, StringLiteral, SymbolLiteral, TupleLiteral, TypeDeclaration, Unless, Var, While, Yield, MacroIf, MacroLiteral, VisibilityModifier}
+import compiler/syntax/parser::{Parser}
+import compiler/syntax/visitor::{Visitor}
+import compiler/syntax/token::{NumberKind}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor, Type, ClassType, NonGenericClassType}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/macros/interpreter::{MacroInterpreter}
+import compiler/macros/methods::{MacroMethods}
+import compiler/macros/engine::{MacroEngine}
+import compiler/macros/target_flags::{MacroTargetFlags}
+import compiler/semantic/normalizer::{Normalizer}
+import compiler/syntax/ast::{MacroExpression}
+
+import compiler/ir/types::{IrType, TypeTable}
+import compiler/ir/values::{Value}
+import compiler/ir/function::{Function, Linkage}
+import compiler/ir/inst::{Block, Inst, IntPredicate, RealPredicate}
+import compiler/ir/module::{Module}
+import compiler/ir/builder::{Builder}
+import compiler/ir/intrinsics::{IntrinsicId}
+
+pub def register_primitive_operators(prog : SemanticProgram) : Nil
+  int_names = ["Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128"]
+  int_names.each do |tname|
+    t = prog.types[tname].as(NonGenericClassType)
+    ["+", "-", "*", "/", "//", "%", "&+", "&-", "&*", "unsafe_div", "unsafe_mod", "&", "|", "^", "<<", ">>", "unsafe_shl", "unsafe_shr"].each do |op|
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(tname))], nil, nil, nil, Path.new(tname))
+      t.add_def(d)
+    end
+    ["<", "<=", ">", ">=", "==", "!="].each do |op|
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(tname))], nil, nil, nil, Path.new("Bool"))
+      t.add_def(d)
+    end
+    ["-", "~"].each do |op|
+      d = Def.new(op, [] of Arg, nil, nil, nil, Path.new(tname))
+      t.add_def(d)
+    end
+  end
+
+  float_names = ["Float32", "Float64"]
+  float_names.each do |fname|
+    ft = prog.types[fname].as(NonGenericClassType)
+    ["+", "-", "*", "/"].each do |op|
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(fname))], nil, nil, nil, Path.new(fname))
+      ft.add_def(d)
+    end
+    ["<", "<=", ">", ">=", "==", "!="].each do |op|
+      d = Def.new(op, [Arg.new("other", restriction: Path.new(fname))], nil, nil, nil, Path.new("Bool"))
+      ft.add_def(d)
+    end
+    d_neg = Def.new("-", [] of Arg, nil, nil, nil, Path.new(fname))
+    ft.add_def(d_neg)
+  end
+
+  bool_t = prog.types["Bool"].as(NonGenericClassType)
+  ["==", "!=", "&", "|", "^"].each do |op|
+    d = Def.new(op, [Arg.new("other", restriction: Path.new("Bool"))], nil, nil, nil, Path.new("Bool"))
+    bool_t.add_def(d)
+  end
+  d_not = Def.new("!", [] of Arg, nil, nil, nil, Path.new("Bool"))
+  bool_t.add_def(d_not)
+end
+
+# The oracle's `Iyi.symbol_text`: text somebody else chose (a file's path, a proc
+# literal's type) is written into a symbol with `%`, `@` and `^` escaped, so the
+# joiner `^` is never the person's and two texts that differ give two names.
+pub def symbol_text(text : String) : String
+  out = String::Builder.new
+  text.each_char do |char|
+    if char == '%'
+      out << "%25"
+    elsif char == '@'
+      out << "%40"
+    elsif char == '^'
+      out << "%5E"
+    else
+      out << char
+    end
+  end
+  out.to_s
+end
+
+pub class CustomTypeInfo
+  property name : String
+  property is_struct : Bool
+  property fields : Hash(String, Int32)
+  property field_types : Hash(String, String)
+  property field_order : Array(String)
+  property methods : Hash(String, Def)
+  property superclass_name : String?
+  property subclasses : Array(String)
+  property type_id : Int32
+  property min_type_id : Int32
+  property max_type_id : Int32
+  property generic_name : String?
+  property constants : Hash(String, ASTNode)
+  property class_vars : Hash(String, String)
+
+  def initialize(@name : String, @is_struct : Bool)
+    if CodeGenVisitor.primitive_type_name?(@name) || @name.starts_with?("Pointer(")
+      @is_struct = false
+    end
+    @fields = Hash(String, Int32).new
+    @field_types = Hash(String, String).new
+    @field_order = [] of String
+    @methods = Hash(String, Def).new
+    @superclass_name = nil
+    @subclasses = [] of String
+    @type_id = 0
+    @min_type_id = 0
+    @max_type_id = 0
+    @generic_name = nil
+    @constants = Hash(String, ASTNode).new
+    @class_vars = Hash(String, String).new
+  end
+
+  def add_field(fname : String, ftype : String) : Nil
+    unless @fields.has_key?(fname)
+      idx = @field_order.size
+      @fields[fname] = idx
+      @field_types[fname] = ftype
+      @field_order << fname
+    end
+  end
+end
+
+pub class InlinedBlockContext
+  property method_param_allocas : Hash(String, Value)
+  property method_local_allocas : Hash(String, Value)
+  property block_arg_allocas : Hash(String, Value)
+  property block_args : Array(Var)
+  property block_body : ASTNode
+  property in_block : Bool
+
+  def initialize(@block_args : Array(Var), @block_body : ASTNode)
+    @method_param_allocas = Hash(String, Value).new
+    @method_local_allocas = Hash(String, Value).new
+    @block_arg_allocas = Hash(String, Value).new
+    @in_block = false
+  end
+
+  def resolve_var(vname : String) : Value?
+    if @in_block
+      if ptr = @block_arg_allocas[vname]?
+        return ptr
+      end
+    else
+      if ptr = @method_param_allocas[vname]?
+        return ptr
+      end
+      if ptr = @method_local_allocas[vname]?
+        return ptr
+      end
+    end
+    nil
+  end
+end
+
+class InlinedBlockCallCollector < Visitor
+  getter calls : Array(Call)
+  property block_methods : Hash(String, Def)
+
+  def initialize(@block_methods : Hash(String, Def))
+    @calls = [] of Call
+  end
+
+  def visit(node : Call) : Bool
+    if node.obj.nil? && @block_methods.has_key?(node.name) && node.block
+      @calls << node
+    end
+    true
+  end
+end
+
+class LocalVarCollector < Visitor
+  getter vars : Hash(String, ASTNode)
+  getter assigns : Hash(String, Array(ASTNode))
+  getter excluded : Set(String)
+
+  def initialize(@excluded : Set(String))
+    @vars = Hash(String, ASTNode).new
+    @assigns = Hash(String, Array(ASTNode)).new
+  end
+
+  def visit(node : Assign) : Bool
+    if node.target.is_a?(Var)
+      v = node.target.as(Var)
+      unless @excluded.includes?(v.name)
+        @vars[v.name] ||= node.value
+        list = @assigns[v.name]? || [] of ASTNode
+        list << node.value
+        @assigns[v.name] = list
+      end
+    end
+    true
+  end
+
+  def visit(node : TypeDeclaration) : Bool
+    if node.var.is_a?(Var)
+      v = node.var.as(Var)
+      unless @excluded.includes?(v.name)
+        @vars[v.name] ||= node
+      end
+    end
+    true
+  end
+end
+
+# Collects the assignments to instance variables in one method body. A nested def or
+# class has its own self and its own parameters, so the walk stops at it.
+class IvarAssignCollector < Visitor
+  getter assigns : Array(Assign)
+
+  def initialize
+    @assigns = [] of Assign
+  end
+
+  def visit(node : Def) : Bool
+    false
+  end
+
+  def visit(node : ClassDef) : Bool
+    false
+  end
+
+  def visit(node : Assign) : Bool
+    @assigns << node if node.target.is_a?(InstanceVar)
+    true
+  end
+end
+
+# The type an assignment's value gives an instance variable that no declaration names,
+# for the three forms the port can name without inference: a number literal of a kind
+# listed here, a parameter with a type restriction, and `Type.new(...)`. Anything else
+# is nil, and the variable stays undeclared.
+def ivar_guess_type(value : ASTNode, params : Array(Arg), subst : Hash(String, String)) : String?
+  if value.is_a?(NumberLiteral)
+    kind = value.as(NumberLiteral).kind
+    if kind == NumberKind::I32
+      return "Int32"
+    elsif kind == NumberKind::I64
+      return "Int64"
+    elsif kind == NumberKind::U32
+      return "UInt32"
+    elsif kind == NumberKind::U64
+      return "UInt64"
+    elsif kind == NumberKind::F32
+      return "Float32"
+    elsif kind == NumberKind::F64
+      return "Float64"
+    end
+    return nil
+  end
+  if value.is_a?(Var)
+    vname = value.as(Var).name
+    i = 0
+    while i < params.size
+      if params[i].name == vname
+        if r = params[i].restriction
+          s = r.to_s
+          return subst[s]? || s
+        end
+        return nil
+      end
+      i += 1
+    end
+    return nil
+  end
+  if value.is_a?(Call)
+    call = value.as(Call)
+    if call.name == "new"
+      if o = call.obj
+        if o.is_a?(Path)
+          s = o.as(Path).to_s
+          return subst[s]? || s
+        end
+      end
+    end
+  end
+  nil
+end
+
+# Declares each instance variable that no declaration names, when every assignment to
+# it in the class's own methods gives the same type by ivar_guess_type. Any other
+# variable stays undeclared, and its store is refused by name where it is lowered.
+def infer_undeclared_ivars(info : CustomTypeInfo, exps : Array(ASTNode), subst : Hash(String, String)) : Nil
+  guesses = Hash(String, String).new
+  unresolved = Set(String).new
+  exps.each do |exp|
+    next unless exp.is_a?(Def)
+    d = exp.as(Def)
+    collector = IvarAssignCollector.new
+    d.body.accept(collector)
+    collector.assigns.each do |asg|
+      name = asg.target.as(InstanceVar).name.lstrip('@')
+      next if info.fields.has_key?(name)
+      if t = ivar_guess_type(asg.value, d.args, subst)
+        if prev = guesses[name]?
+          unresolved.add(name) if prev != t
+        else
+          guesses[name] = t
+        end
+      else
+        unresolved.add(name)
+      end
+    end
+  end
+  guesses.each_key do |name|
+    info.add_field(name, guesses[name]) unless unresolved.includes?(name)
+  end
+end
+
+# A store to an instance variable the port cannot type is refused by name, where the
+# store is lowered. Dropping the store would run the program without its assignment.
+def refuse_undeclared_ivar(node : InstanceVar) : NoReturn
+  message = "instance variable #{node.name} has no type the port can read: declare it in the class body (`#{node.name} : Type`)"
+  if loc = node.location
+    refuse_at(loc, node.name.size, message)
+  end
+  refuse_port(message)
+end
+
+# The location of a clause keyword (`rescue`, `ensure`) at or after `from`. The AST
+# records the `begin` block but not its clause keywords, and the oracle points at them.
+def keyword_location(from : Location, keyword : String) : Location?
+  lines = File.read(from.filename).split('\n')
+  idx = from.line_number - 1
+  while idx >= 0 && idx < lines.size
+    text = lines[idx]
+    indent = 0
+    while indent < text.bytesize && (text[indent] == ' ' || text[indent] == '\t')
+      indent += 1
+    end
+    rest = text[indent, text.bytesize - indent]
+    if rest == keyword || rest.starts_with?(keyword + " ")
+      return Location.new(from.filename, idx + 1, indent + 1)
+    end
+    idx += 1
+  end
+  nil
+end
+
+# The oracle's refusal form: its location, the source line with its indentation
+# removed, a caret under the offending text, then the message. Exit status 1.
+def refuse_at(location : Location, caret_len : Int32, message : String) : NoReturn
+  lines = File.read(location.filename).split('\n')
+  if location.line_number < 1 || location.line_number > lines.size
+    refuse_port(message)
+  end
+  text = lines[location.line_number - 1]
+  indent = 0
+  while indent < text.bytesize && (text[indent] == ' ' || text[indent] == '\t')
+    indent += 1
+  end
+  gutter = " #{location.line_number} | "
+  caret_col = gutter.bytesize + location.column_number - 1 - indent
+  caret_col = 0 if caret_col < 0
+  pad = " " * caret_col
+  carets = "^" + ("-" * (caret_len - 1))
+  STDERR.puts "Showing last frame. Use --error-trace for full trace."
+  STDERR.puts ""
+  STDERR.puts "In #{location.filename}:#{location.line_number}:#{location.column_number}"
+  STDERR.puts ""
+  STDERR.puts "#{gutter}#{text[indent, text.bytesize - indent]}"
+  STDERR.puts "#{pad}#{carets}"
+  STDERR.puts "Error: #{message}"
+  exit(1)
+end
+
+# The source form of an operand or call, for a refusal message.
+def operand_text(node : ASTNode) : String
+  if node.is_a?(Var)
+    node.as(Var).name
+  elsif node.is_a?(Call)
+    call = node.as(Call)
+    if recv = call.obj
+      "#{operand_text(recv)}.#{call.name}"
+    else
+      call.name
+    end
+  else
+    "an expression"
+  end
+end
+
+# iyi has no `rescue` or `ensure` (SPEC.md III.1): an error is a value the caller
+# handles, and a panic is caught at a task boundary, never by a handler in the
+# body. The oracle refuses both in an iyi file with these sentences, and so does
+# the port, before it emits any IR.
+class ExceptionHandlerRefuser < Visitor
+  getter refusal : String?
+  getter location : Location?
+  getter caret : Int32
+  getter keyword : String
+
+  def initialize
+    @refusal = nil
+    @location = nil
+    @caret = 1
+    @keyword = ""
+  end
+
+  def visit(node : ExceptionHandler) : Bool
+    if @refusal.nil?
+      @location = node.location
+      rescues = node.rescues
+      else_part = node.else
+      ensure_part = node.ensure
+      if rescues || else_part
+        @refusal = "iyi has no exceptions to rescue: an error is a value the caller handles (SPEC.md III.1), and a panic is caught at a task boundary (III.1.4), never here - this `rescue` would not run. Return the error, or read the task's `value`"
+        @keyword = "rescue"
+      elsif ensure_part
+        @caret = 6
+        @keyword = "ensure"
+        @refusal = "iyi has no `ensure`: a panic unwinds by registry and skips it (SPEC.md III.1.4). Write `defer`, which runs on return, on `!` and on a panic"
+      end
+    end
+    true
+  end
+end
+
+# The refusal of `rescue` and `ensure` in a program, before any lowering. The driver
+# calls it on every resolved module; the refusal is by name, never a silent lowering.
+pub def refuse_exception_handlers(node : ASTNode) : Nil
+  refuser = ExceptionHandlerRefuser.new
+  node.accept(refuser)
+  if message = refuser.refusal
+    if loc = refuser.location
+      if kw = keyword_location(loc, refuser.keyword)
+        refuse_at(kw, refuser.caret, message)
+      end
+      refuse_at(loc, refuser.caret, message)
+    end
+    refuse_port(message)
+  end
+end
+
+class StructCallCollector < Visitor
+  getter struct_calls : Array(String)
+  property custom_types : Hash(String, CustomTypeInfo)
+  property var_type_names : Hash(String, String)
+
+  def initialize(@custom_types : Hash(String, CustomTypeInfo), @var_type_names : Hash(String, String))
+    @struct_calls = [] of String
+  end
+
+  def visit(node : Call) : Bool
+    if obj = node.obj
+      if obj.is_a?(Path)
+        tname = obj.to_s
+        if (info = @custom_types[tname]?) && info.is_struct && !tname.starts_with?("Pointer(") && tname != "Nil" && tname != "Void" && node.name == "new"
+          @struct_calls << tname
+        end
+      elsif obj.is_a?(Var)
+        vname = obj.as(Var).name
+        if vtype = @var_type_names[vname]?
+          if info = @custom_types[vtype]?
+            if m = info.methods[node.name]?
+              if rt = m.return_type
+                rt_name = rt.to_s
+                if (r_info = @custom_types[rt_name]?) && r_info.is_struct && !rt_name.starts_with?("Pointer(") && rt_name != "Nil" && rt_name != "Void"
+                  @struct_calls << rt_name
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    true
+  end
+end
+
+class ProcLiteralCollector < Visitor
+  getter proc_literals : Array(ProcLiteral)
+
+  def initialize
+    @proc_literals = [] of ProcLiteral
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    @proc_literals << node
+    false
+  end
+
+  def visit(node : ASTNode) : Bool
+    true
+  end
+end
+
+# The classes a program constructs with Type.new, anywhere in its code.
+class NewCallCollector < Visitor
+  getter classes : Set(String)
+
+  def initialize
+    @classes = Set(String).new
+  end
+
+  def visit(node : Call) : Bool
+    if node.name == "new" && (recv = node.obj) && recv.is_a?(Path)
+      @classes.add(recv.to_s)
+    end
+    true
+  end
+
+  def visit(node : ASTNode) : Bool
+    true
+  end
+end
+
+class GenericUsageCollector < Visitor
+  getter generic_nodes : Array(Generic)
+  getter saw_string : Bool
+
+  def initialize
+    @generic_nodes = [] of Generic
+    @saw_string = false
+  end
+
+  def visit(node : Generic) : Bool
+    @generic_nodes << node
+    true
+  end
+
+  def visit(node : StringLiteral) : Bool
+    @saw_string = true
+    true
+  end
+
+  def visit(node : ASTNode) : Bool
+    true
+  end
+end
+
+class YieldFinder < Visitor
+  property has_yield : Bool
+
+  def initialize
+    @has_yield = false
+  end
+
+  def visit(node : Yield) : Bool
+    @has_yield = true
+    false
+  end
+
+  def visit(node : ASTNode) : Bool
+    !@has_yield
+  end
+end
+
+class CapturedVarCollector < Visitor
+  getter captured_vars : Array(String)
+  property outer_vars : Set(String)
+  property local_vars : Set(String)
+
+  def initialize(@outer_vars : Set(String), proc_params : Set(String))
+    @captured_vars = [] of String
+    @local_vars = Set(String).new
+    proc_params.each { |p| @local_vars.add(p) }
+  end
+
+  def visit(node : Assign) : Bool
+    if node.target.is_a?(Var)
+      vname = node.target.as(Var).name
+      unless @outer_vars.includes?(vname)
+        @local_vars.add(vname)
+      end
+    end
+    true
+  end
+
+  def visit(node : Var) : Bool
+    vname = node.name
+    if @outer_vars.includes?(vname) && !@local_vars.includes?(vname)
+      unless @captured_vars.includes?(vname)
+        @captured_vars << vname
+      end
+    end
+    true
+  end
+
+  def visit(node : ASTNode) : Bool
+    true
+  end
+end
+
+# Sets the alignment of an instruction that carries one (a load, store or alloca). Other values carry
+# none, and the IR gives them no alignment to set.
+def set_align(value : Value, bytes : Int32) : Nil
+  if value.is_a?(Inst)
+    value.as(Inst).alignment = bytes
+  end
+end
+
+pub class CodeGenVisitor < Visitor
+  property types : TypeTable
+  property mod : Module
+  property builder : Builder
+  property program : SemanticProgram
+  getter macro_flags : Array(String)
+  getter host_flags : Array(String)
+  property main_visitor : MainVisitor
+  property fn_types : Hash(String, IrType)
+  property current_fn : Function?
+  property current_fn_return_type : IrType?
+  property current_fun_def : FunDef?
+  property vars : Hash(String, Value)
+  property var_types : Hash(String, Type)
+  property var_type_names : Hash(String, String)
+  property param_values : Hash(String, Value)
+  property last : Value?
+  property terminated : Bool
+  property custom_types : Hash(String, CustomTypeInfo)
+  property llvm_struct_types : Hash(String, IrType)
+  property current_self : Value?
+  property current_self_type : String?
+  property current_method_name : String?
+  property struct_call_temps : Array(Value)
+  property struct_temp_index : Int32
+  property block_methods : Hash(String, Def)
+  property constructed_classes : Set(String)
+  property current_inlined_block : InlinedBlockContext?
+  property inlined_block_contexts : Array(InlinedBlockContext)
+  property inlined_block_index : Int32
+  property lib_funs : Hash(Tuple(String, String), Tuple(String, IrType, Bool))
+  property lib_fun_return_types : Hash(Tuple(String, String), String)
+  property needs_value : Bool
+  property proc_type : IrType?
+  property proc_literal_allocas : Hash(String, Value)
+  property closure_env_slots : Hash(String, Value)
+  property closure_types : Hash(String, IrType)
+  property closure_counter : Int32
+  property proc_counts : Hash(String, Int32)
+  property filename : String
+  property strings : Hash(String, Value)
+  property constants : Hash(String, ASTNode)
+  property class_var_globals : Hash(String, Value)
+  property class_var_types : Hash(String, String)
+
+  def initialize(@mod : Module, @program : SemanticProgram, @main_visitor : MainVisitor)
+    @types = @mod.types
+    @macro_flags = MacroTargetFlags.for_triple(@mod.triple, [] of String)
+    @host_flags = @program.normalizer.host_flags
+    @builder = Builder.new(@mod)
+    @fn_types = Hash(String, IrType).new
+    @current_fn = nil
+    @current_fn_return_type = nil
+    @current_fun_def = nil
+    @vars = Hash(String, Value).new
+    @var_types = Hash(String, Type).new
+    @var_type_names = Hash(String, String).new
+    @param_values = Hash(String, Value).new
+    @last = nil
+    @terminated = false
+    @custom_types = Hash(String, CustomTypeInfo).new
+    @llvm_struct_types = Hash(String, IrType).new
+    @current_self = nil
+    @current_self_type = nil
+    @current_method_name = nil
+    @struct_call_temps = [] of Value
+    @struct_temp_index = 0
+    @block_methods = Hash(String, Def).new
+    @constructed_classes = Set(String).new
+    @current_inlined_block = nil
+    @inlined_block_contexts = [] of InlinedBlockContext
+    @inlined_block_index = 0
+    @lib_funs = Hash(Tuple(String, String), Tuple(String, IrType, Bool)).new
+    @lib_fun_return_types = Hash(Tuple(String, String), String).new
+    @needs_value = true
+    @proc_type = nil
+    @proc_literal_allocas = Hash(String, Value).new
+    @closure_env_slots = Hash(String, Value).new
+    @closure_types = Hash(String, IrType).new
+    @closure_counter = 0
+    @proc_counts = Hash(String, Int32).new
+    @filename = ""
+    @strings = Hash(String, Value).new
+    @constants = Hash(String, ASTNode).new
+    @class_var_globals = Hash(String, Value).new
+    @class_var_types = Hash(String, String).new
+    @loop_exit_blocks = [] of Block
+    @loop_continue_blocks = [] of Block
+  end
+
+  def proc_type : IrType
+    if pt = @proc_type
+      pt
+    else
+      t = @types.struct_named("->")
+      t.struct_set_body([@types.pointer, @types.pointer])
+      @proc_type = t
+      t
+    end
+  end
+
+  def llvm_string_type(bytesize : Int32) : IrType
+    @types.struct([
+      @types.int32,
+      @types.int32,
+      @types.int32,
+      @types.array(@types.int8, bytesize + 1),
+    ])
+  end
+
+  def build_string_constant(str : String) : Value
+    if existing = @strings[str]?
+      return existing
+    end
+
+    name = if str.bytesize > 18
+             str[0, 19] + "..."
+           else
+             str
+           end
+    io = String::Builder.new
+    io << "'"
+    name.each_char do |ch|
+      if ch == '@'
+        io << '.'
+      else
+        io << ch
+      end
+    end
+    io << "'"
+    glob_name = io.to_s
+
+    str_ty = llvm_string_type(str.bytesize)
+    global = @mod.add_global(glob_name, str_ty)
+    global.linkage = Linkage::Private
+    global.global_constant = true
+
+    init_val = @builder.const_struct([
+      @builder.const_int(@types.int32, 1),
+      @builder.const_int(@types.int32, str.bytesize),
+      @builder.const_int(@types.int32, str.size),
+      @builder.const_string(str, true),
+    ] of Value)
+    global.initializer = init_val
+    @strings[str] = global
+    global
+  end
+
+  def relative_filename : String
+    fn = @filename
+    if idx = fn.index("bench/fixtures/")
+      fn[idx, fn.bytesize - idx]
+    elsif fn.starts_with?("./")
+      fn[2, fn.bytesize - 2]
+    else
+      fn
+    end
+  end
+
+  def parse_proc_type_signature(tname : String) : Tuple(Array(String), String)
+    if tname.starts_with?("Proc(") && tname.ends_with?(")")
+      inner = tname[5, tname.bytesize - 6]
+      parts = inner.split(",").map(&.strip)
+      if parts.size == 1
+        {[] of String, parts[0]}
+      else
+        ret = parts.pop
+        {parts, ret}
+      end
+    else
+      {[] of String, "Int32"}
+    end
+  end
+
+  def infer_proc_return_type(d : Def) : String
+    if rt = d.return_type
+      return rt.to_s
+    end
+    if b = d.body
+      last_exp = if b.is_a?(Expressions)
+                   b.as(Expressions).expressions.last?
+                 else
+                   b
+                 end
+      if last_exp
+        if last_exp.is_a?(NumberLiteral)
+          k = last_exp.as(NumberLiteral).kind
+          return k == NumberKind::F64 ? "Float64" : (k == NumberKind::I64 ? "Int64" : "Int32")
+        elsif last_exp.is_a?(BoolLiteral)
+          return "Bool"
+        elsif last_exp.is_a?(Var)
+          return @var_type_names[last_exp.as(Var).name]? || "Int32"
+        elsif last_exp.is_a?(Call)
+          c = last_exp.as(Call)
+          if c.name == "==" || c.name == "!=" || c.name == "<" || c.name == "<=" || c.name == ">" || c.name == ">="
+            return "Bool"
+          end
+        end
+      end
+    end
+    "Int32"
+  end
+
+  def self.primitive_type_name?(name : String) : Bool
+    case name
+    when "Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64", "Int128", "UInt128", "Float32", "Float64", "Bool", "Char"
+      true
+    else
+      false
+    end
+  end
+
+  def self.has_yield?(node : ASTNode?) : Bool
+    return false if node.nil?
+    yf = YieldFinder.new
+    node.accept(yf)
+    yf.has_yield
+  end
+
+  def self.parse_u64(s : String) : UInt64
+    base = 10_u64
+    i = 0
+    if s.starts_with?("0x") || s.starts_with?("0X")
+      base = 16_u64
+      i = 2
+    elsif s.starts_with?("0b") || s.starts_with?("0B")
+      base = 2_u64
+      i = 2
+    elsif s.starts_with?("0o") || s.starts_with?("0O")
+      base = 8_u64
+      i = 2
+    end
+    val = 0_u64
+    while i < s.bytesize
+      c = s.byte_at(i)
+      digit = if c >= 48_u8 && c <= 57_u8
+                (c - 48_u8).to_u64
+              elsif c >= 97_u8 && c <= 102_u8
+                (c - 97_u8 + 10_u8).to_u64
+              elsif c >= 65_u8 && c <= 70_u8
+                (c - 65_u8 + 10_u8).to_u64
+              else
+                i = i + 1
+                next
+              end
+      val = val * base + digit
+      i = i + 1
+    end
+    val
+  end
+
+  def ensure_i1_condition(cond_raw : Value) : Value
+    if cond_raw.type == @types.int1
+      cond_raw
+    elsif cond_raw.type.pointer?
+      @builder.icmp(IntPredicate::NE, cond_raw, @builder.const_null_pointer)
+    elsif cond_raw.type.int?
+      @builder.icmp(IntPredicate::NE, cond_raw, @builder.const_int(cond_raw.type, 0))
+    elsif cond_raw.type.void?
+      @builder.const_int(@types.int1, 0)
+    else
+      @builder.const_int(@types.int1, 1)
+    end
+  end
+
+  def infer_def_return_type(d : Def, info : CustomTypeInfo) : String
+    if rt = d.return_type
+      return rt.to_s.lstrip(':')
+    end
+    if b = d.body
+      last_exp = if b.is_a?(Expressions)
+                   b.as(Expressions).expressions.last?
+                 else
+                   b
+                 end
+      if last_exp
+        if last_exp.is_a?(Assign)
+          if last_exp.target.is_a?(InstanceVar)
+            iv = last_exp.target.as(InstanceVar).name.lstrip('@')
+            # The assigned value wins over the declared field type: on a generic
+            # template the field's type is a type variable, and guessing from it
+            # lands on the fallback rather than the instantiated type.
+            val_node = last_exp.value
+            if val_node.is_a?(Var)
+              vname = val_node.as(Var).name
+              # The def's own argument is authoritative and, unlike the var-type
+              # map, is already populated when an instantiation is being emitted.
+              d.args.each do |a|
+                if a.name == vname && (r = a.restriction)
+                  return r.to_s.lstrip(':')
+                end
+              end
+              if vt = @var_type_names[vname]?
+                return vt
+              end
+            end
+            if ft = info.field_types[iv]?
+              return ft
+            end
+          elsif last_exp.target.is_a?(Var)
+            vn = last_exp.target.as(Var).name
+            if vt = @var_type_names[vn]?
+              return vt
+            end
+          end
+        elsif last_exp.is_a?(InstanceVar)
+          iv = last_exp.as(InstanceVar).name.lstrip('@')
+          if ft = info.field_types[iv]?
+            return ft
+          end
+        elsif last_exp.is_a?(Var)
+          if vt = @var_type_names[last_exp.as(Var).name]?
+            return vt
+          end
+        elsif last_exp.is_a?(NumberLiteral)
+          k = last_exp.as(NumberLiteral).kind
+          return k == NumberKind::F64 ? "Float64" : (k == NumberKind::I64 ? "Int64" : "Int32")
+        elsif last_exp.is_a?(BoolLiteral)
+          return "Bool"
+        elsif last_exp.is_a?(Call)
+          c = last_exp.as(Call)
+          if c.name == "==" || c.name == "!=" || c.name == "<" || c.name == "<=" || c.name == ">" || c.name == ">="
+            return "Bool"
+          end
+        end
+      end
+    end
+    if d.args.empty?
+      "Nil"
+    else
+      "Int32"
+    end
+  end
+
+  def ensure_malloc : Function
+    if f = @mod.get_function?("malloc")
+      f
+    else
+      mal_ty = @types.func([@types.int64], @types.pointer, false)
+      @mod.add_function("malloc", mal_ty)
+    end
+  end
+
+  def nil_type : IrType
+    @llvm_struct_types["Nil"]? || @types.struct([] of IrType)
+  end
+
+  def llvm_return_type_from_name(name : String) : IrType
+    clean_name = name.starts_with?("::") ? name[2, name.size - 2] : name
+    if clean_name == "Void" || clean_name == "Nil" || clean_name == "NoReturn"
+      @types.void
+    else
+      llvm_type_from_name(name)
+    end
+  end
+
+  # The IR named struct for a custom type, created on first reference. Its body
+  # is set where the type is defined (define_struct_body), so a field may name a
+  # type defined later in the file.
+  def named_struct_type(name : String) : IrType
+    if st = @llvm_struct_types[name]?
+      return st
+    end
+    st = @types.struct_named(name)
+    @llvm_struct_types[name] = st
+    st
+  end
+
+  def llvm_type_from_name(name : String) : IrType
+    clean_name = name.starts_with?("::") ? name[2, name.size - 2] : name
+    case clean_name
+    when "Int8", "UInt8"
+      @types.int8
+    when "Int16", "UInt16"
+      @types.int16
+    when "Int32", "UInt32"
+      @types.int32
+    when "Int64", "UInt64"
+      @types.int64
+    when "Int128", "UInt128"
+      @types.int128
+    when "Float32"
+      @types.float
+    when "Float64"
+      @types.double
+    when "Bool"
+      @types.int1
+    when "Char"
+      @types.int32
+    when "Void", "Nil", "NoReturn"
+      @types.void
+    else
+      if clean_name.starts_with?("Proc(") || clean_name == "->"
+        proc_type
+      elsif ct = @closure_types[clean_name]?
+        ct
+      elsif clean_name.includes?("Pointer(") || clean_name.ends_with?("*") || clean_name.ends_with?('+') || clean_name.ends_with?('?') || clean_name.includes?("::Nil") || clean_name.includes?("|") || clean_name.starts_with?("Tuple(") || clean_name == "T" || clean_name == "U" || clean_name == "K" || clean_name == "V" || clean_name == "E"
+        @types.pointer
+      elsif info = @custom_types[clean_name]?
+        if info.is_struct
+          named_struct_type(clean_name)
+        else
+          @types.pointer
+        end
+      else
+        @types.int32
+      end
+    end
+  end
+
+  def llvm_type(t : Type) : IrType
+    llvm_type_from_name(t.full_name)
+  end
+
+  def element_type_of_pointer(ptr_type_name : String) : String
+    if (idx = ptr_type_name.index("Pointer(")) && ptr_type_name.ends_with?(")")
+      ptr_type_name[idx + 8, ptr_type_name.bytesize - idx - 9]
+    elsif ptr_type_name.ends_with?("*")
+      ptr_type_name[0, ptr_type_name.bytesize - 1]
+    else
+      "Int32"
+    end
+  end
+
+  def sizeof_type(type_name : String) : Value
+    elem_ty = llvm_type_from_name(type_name)
+    null_ptr = @builder.const_null_pointer
+    gep = @builder.gep(elem_ty, null_ptr, [@builder.const_int(@types.int32, 1)])
+    @builder.ptr_to_int(gep, @types.int64)
+  end
+
+  def align_of_type(type_name : String) : Int32
+    case type_name
+    when "Int64", "UInt64", "Float64"
+      8
+    when "Int32", "UInt32", "Float32", "Char"
+      4
+    when "Int16", "UInt16"
+      2
+    when "Int8", "UInt8", "Bool"
+      1
+    else
+      if type_name.starts_with?("Proc(") || type_name == "->"
+        8
+      elsif type_name.starts_with?("Pointer(") || type_name.ends_with?("*") || type_name.ends_with?('+') || type_name.ends_with?('?')
+        8
+      elsif info = @custom_types[type_name]?
+        if info.is_struct
+          4
+        else
+          8
+        end
+      else
+        4
+      end
+    end
+  end
+
+  def get_ptr_val(vname : String) : Value
+    if p = @param_values[vname]?
+      p
+    elsif vname == "self" && (cur_self = @current_self)
+      cur_self
+    elsif var_ptr = @vars[vname]?
+      vt = @var_type_names[vname]?
+      if vt && CodeGenVisitor.primitive_type_name?(vt)
+        @builder.load(llvm_type_from_name(vt), var_ptr)
+      else
+        @builder.load(@types.pointer, var_ptr)
+      end
+    else
+      @builder.const_null_pointer
+    end
+  end
+
+  def to_i64_index(val : Value) : Value
+    if val.type.pointer?
+      @builder.ptr_to_int(val, @types.int64)
+    elsif val.type == @types.int64
+      val
+    elsif val.type.int?
+      val.type.int_width < 64 ? @builder.sext(val, @types.int64) : @builder.trunc(val, @types.int64)
+    else
+      @builder.ptr_to_int(val, @types.int64)
+    end
+  end
+
+  def class_ancestors(cname : String) : Array(String)
+    res = [cname] of String
+    curr = cname
+    while (info = @custom_types[curr]?) && (sc = info.superclass_name)
+      res << sc
+      curr = sc
+    end
+    res
+  end
+
+  def unify_types(t1 : String, t2 : String) : String
+    return t1 if t1 == t2
+    if t2 == "Nil" || t2 == "Void"
+      return (info = @custom_types[t1]?) && !info.is_struct ? "#{t1}?" : t1
+    end
+    if t1 == "Nil" || t1 == "Void"
+      return (info = @custom_types[t2]?) && !info.is_struct ? "#{t2}?" : t2
+    end
+
+    base1 = t1.ends_with?('+') ? t1.rchop('+') : t1
+    base2 = t2.ends_with?('+') ? t2.rchop('+') : t2
+
+    if (info1 = @custom_types[base1]?) && (info2 = @custom_types[base2]?) && !info1.is_struct && !info2.is_struct
+      anc1 = class_ancestors(base1)
+      anc2 = class_ancestors(base2)
+      anc1.each do |a|
+        if anc2.includes?(a)
+          return "#{a}+"
+        end
+      end
+    end
+
+    t1
+  end
+
+  # The class an expression's value is an instance of, when the expression says it: a constructor call
+  # Type.new(...), or a field or method of a receiver whose class is known, so g.label and h.label.text
+  # are typed. Nil for everything else.
+  def expression_class_type(node : ASTNode) : String?
+    if node.is_a?(Call)
+      call = node.as(Call)
+      if call.name == "new" && (recv = call.obj) && recv.is_a?(Path)
+        return recv.to_s
+      end
+      if (recv = call.obj) && (rec_class = receiver_class_name(recv)) && (info = @custom_types[rec_class]?)
+        if call.args.empty? && info.fields.has_key?(call.name)
+          ft = info.field_types[call.name]
+          if @custom_types.has_key?(ft)
+            return ft
+          end
+        elsif (m = info.methods[call.name]?) && m.return_type
+          rt = m.return_type.to_s.lstrip(':')
+          if @custom_types.has_key?(rt)
+            return rt
+          end
+        end
+      end
+    end
+    nil
+  end
+
+  # The custom class a receiver is an instance of: a local whose type is a custom class, or an expression
+  # expression_class_type can type. Nil for everything else.
+  def receiver_class_name(node : ASTNode) : String?
+    if node.is_a?(Var)
+      tname = @var_type_names[node.as(Var).name]?
+      if tname && @custom_types.has_key?(tname)
+        return tname
+      end
+      return nil
+    end
+    expression_class_type(node)
+  end
+
+  def infer_var_type(vname : String, node : ASTNode) : String
+    if node.is_a?(TypeDeclaration)
+      return node.as(TypeDeclaration).declared_type.to_s
+    end
+
+    if node.is_a?(Expressions)
+      if last_exp = node.as(Expressions).expressions.last?
+        return infer_var_type(vname, last_exp)
+      end
+    end
+
+    if node.is_a?(If)
+      if_n = node.as(If)
+      then_t = infer_var_type(vname, if_n.then)
+      else_t = if els = if_n.else
+                 infer_var_type(vname, els)
+               else
+                 "Nil"
+               end
+      return unify_types(then_t, else_t)
+    end
+
+    if node.is_a?(NilLiteral)
+      return "Nil"
+    end
+    if node.is_a?(StringLiteral)
+      return "String"
+    end
+    if node.is_a?(Cast)
+      return node.as(Cast).to.to_s
+    end
+
+    if node.is_a?(Call)
+      c = node.as(Call)
+      if c.obj.nil? && c.name == "pointerof" && c.args.size == 1
+        inner_name = c.args[0].is_a?(Var) ? c.args[0].as(Var).name : (c.args[0].is_a?(Call) ? c.args[0].as(Call).name : "")
+        inner_t = @var_type_names[inner_name]? || "Int32"
+        return "Pointer(#{inner_t})"
+      end
+      if c.obj.is_a?(Path) || c.obj.is_a?(Generic)
+        obj_name = c.obj.to_s
+        if rt = @lib_fun_return_types[{obj_name, c.name}]?
+          return rt
+        end
+        if c.name == "new" || c.name == "malloc"
+          if obj_name.includes?("Pointer")
+            elem = element_type_of_pointer(obj_name)
+            return "Pointer(#{elem})"
+          else
+            return obj_name
+          end
+        end
+      elsif c.name == "as" && c.args.size == 1
+        return c.args[0].to_s
+      elsif c.name == "address"
+        return "Int64"
+      elsif c.obj.is_a?(StringLiteral)
+        if c.name == "to_unsafe"
+          return "Pointer(UInt8)"
+        elsif c.name == "bytesize" || c.name == "length" || c.name == "size"
+          return "Int32"
+        end
+      elsif c.obj.is_a?(Var)
+        rec_vname = c.obj.as(Var).name
+        if rec_tname = @var_type_names[rec_vname]?
+          if info = @custom_types[rec_tname]?
+            if info.fields.has_key?(c.name)
+              return info.field_types[c.name]
+            elsif m = info.methods[c.name]?
+              return m.return_type ? m.return_type.to_s : "Int32"
+            end
+          elsif rec_tname.includes?("Pointer(") || rec_tname.ends_with?("*")
+            if c.name == "value" || c.name == "[]"
+              return element_type_of_pointer(rec_tname)
+            elsif c.name == "+"
+              return rec_tname
+            elsif c.name == "-"
+              return "Int64"
+            end
+          end
+        end
+      elsif c.obj.is_a?(InstanceVar)
+        iv_name = c.obj.as(InstanceVar).name.lstrip('@')
+        if (ctype = @current_self_type) && (c_info = @custom_types[ctype]?)
+          if ftype = c_info.field_types[iv_name]?
+            if ftype.includes?("Pointer(") || ftype.ends_with?('*')
+              if c.name == "value" || c.name == "[]"
+                return element_type_of_pointer(ftype)
+              elsif c.name == "+"
+                return ftype
+              elsif c.name == "-"
+                return "Int64"
+              end
+            end
+          end
+        end
+      end
+      # A call with no receiver, inside a method of a type, answers that type's
+      # declared method: `from_bits(bits)` in `def self.product` is `Float64`, not
+      # the `Int32` the fallback below gave it.
+      if c.obj.nil? && (ctype = @current_self_type) && (c_info = @custom_types[ctype]?) && (m = c_info.methods[c.name]?) && (decl = m.return_type)
+        return decl.to_s
+      end
+      if (c.name == "+" || c.name == "-" || c.name == "*" || c.name == "/" || c.name == "//" || c.name == "%" || c.name == "**" || c.name == "&+" || c.name == "&-" || c.name == "&*" || c.name == "|" || c.name == "&" || c.name == "^" || c.name == "<<" || c.name == ">>" || c.name == "unsafe_shl" || c.name == "unsafe_shr") && c.args.size == 1 && (co = c.obj)
+        lt = infer_var_type(vname, co)
+        rt = infer_var_type(vname, c.args[0])
+        if lt == "Float64" || rt == "Float64"
+          return "Float64"
+        elsif lt == "Float32" || rt == "Float32"
+          return "Float32"
+        elsif lt == "UInt64" || rt == "UInt64"
+          return "UInt64"
+        elsif lt == "Int64" || rt == "Int64"
+          return "Int64"
+        elsif lt == "UInt32" || rt == "UInt32"
+          return "UInt32"
+        end
+      end
+      if c.args.empty?
+        if c.name == "to_f" || c.name == "to_f64"
+          return "Float64"
+        elsif c.name == "to_f32"
+          return "Float32"
+        elsif c.name == "to_u64"
+          return "UInt64"
+        elsif c.name == "to_i64"
+          return "Int64"
+        elsif c.name == "to_u32"
+          return "UInt32"
+        elsif c.name == "to_i" || c.name == "to_i32"
+          return "Int32"
+        elsif c.name == "to_u8"
+          return "UInt8"
+        elsif c.name == "to_i8"
+          return "Int8"
+        end
+      end
+    elsif node.is_a?(PointerOf)
+      inner = node.as(PointerOf).exp
+      inner_name = if inner.is_a?(Var)
+                     inner.as(Var).name
+                   elsif inner.is_a?(Call)
+                     inner.as(Call).name
+                   else
+                     ""
+                   end
+      inner_t = @var_type_names[inner_name]? || "Int32"
+      return "Pointer(#{inner_t})"
+    elsif node.is_a?(Var)
+      return @var_type_names[node.as(Var).name]? || "Int32"
+    elsif node.is_a?(NumberLiteral)
+      kind = node.as(NumberLiteral).kind
+      return kind == NumberKind::F64 ? "Float64" : (kind == NumberKind::I64 ? "Int64" : (kind == NumberKind::U64 ? "UInt64" : (kind == NumberKind::U32 ? "UInt32" : (kind == NumberKind::F32 ? "Float32" : "Int32"))))
+    elsif node.is_a?(Path)
+      pname = node.as(Path).to_s
+      if (ctype = @current_self_type) && (c_info = @custom_types[ctype]?)
+        if const_node = c_info.constants[pname]?
+          return infer_var_type(vname, const_node)
+        end
+      end
+      @custom_types.each_value do |c_info|
+        if cn = c_info.constants[pname]?
+          return infer_var_type(vname, cn)
+        end
+      end
+      return "Int32"
+    elsif node.is_a?(ProcLiteral)
+      pl = node.as(ProcLiteral)
+      arg_types = pl.def.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+      ret_type = if rt = pl.def.return_type
+                   rt.to_s
+                 else
+                   infer_proc_return_type(pl.def)
+                 end
+      all_types = [] of String
+      arg_types.each { |at| all_types << at }
+      all_types << ret_type
+      return "Proc(#{all_types.join(", ")})"
+    end
+    "Int32"
+  end
+
+  def assign_class_type_ids : Nil
+    next_id = 1
+    assigned = Set(String).new
+
+    @custom_types.each_value do |info|
+      next if info.is_struct || info.name == "String"
+      sc_name = info.superclass_name
+      if sc_name.nil? || !@custom_types.has_key?(sc_name)
+        next_id = assign_type_id_node(info.name, next_id, assigned)
+      end
+    end
+  end
+
+  def assign_type_id_node(cname : String, next_id : Int32, assigned : Set(String)) : Int32
+    return next_id if assigned.includes?(cname) || cname == "String"
+    info = @custom_types[cname]
+
+    if info.subclasses.empty?
+      id = next_id
+      info.type_id = id
+      info.min_type_id = id
+      info.max_type_id = id
+      assigned.add(cname)
+      id + 1
+    else
+      curr_id = next_id
+      min_id = 0
+      first = true
+      info.subclasses.each do |sub_name|
+        if first
+          min_id = curr_id
+          first = false
+        end
+        curr_id = assign_type_id_node(sub_name, curr_id, assigned)
+      end
+      id = curr_id
+      info.type_id = id
+      info.min_type_id = min_id
+      info.max_type_id = id
+      assigned.add(cname)
+      id + 1
+    end
+  end
+
+  def collect_local_vars(body : ASTNode?, excluded : Set(String)) : Hash(String, ASTNode)
+    collector = LocalVarCollector.new(excluded)
+    if b = body
+      b.accept(collector)
+    end
+    collector.vars
+  end
+
+  def collect_local_assigns(body : ASTNode?, excluded : Set(String)) : Hash(String, Array(ASTNode))
+    collector = LocalVarCollector.new(excluded)
+    if b = body
+      b.accept(collector)
+    end
+    collector.assigns
+  end
+
+  # A local's slot type comes from its assignments. The first value that is
+  # not `nil` fixes the type, so `found = nil` then `found = element` is the
+  # element's type: `Nil` has no slot of its own, and a slot of it was
+  # `alloca void`. A `nil` among the assignments makes the slot nilable, as
+  # `unify_types` does for an `if` whose branches disagree. A local that is only
+  # ever `nil` keeps `Nil`.
+  def local_slot_type(vname : String, assigns : Array(ASTNode)) : String
+    base = ""
+    have_base = false
+    nil_seen = false
+    assigns.each do |node|
+      t = infer_var_type(vname, node)
+      if t == "Nil"
+        nil_seen = true
+      elsif !have_base
+        base = t
+        have_base = true
+      end
+    end
+    return "Nil" unless have_base
+    nil_seen ? nilable_slot_type(base) : base
+  end
+
+  def nilable_slot_type(t : String) : String
+    return t if t.ends_with?('?')
+    if info = @custom_types[t]?
+      return t if info.is_struct
+    end
+    "#{t}?"
+  end
+
+  def collect_struct_calls(body : ASTNode?) : Array(String)
+    collector = StructCallCollector.new(@custom_types, @var_type_names)
+    if b = body
+      b.accept(collector)
+    end
+    collector.struct_calls
+  end
+
+  def visit(node : Expressions) : Bool
+    old_needs = @needs_value
+    @needs_value = false
+    last_idx = node.expressions.size - 1
+    node.expressions.each_with_index do |exp, idx|
+      @needs_value = true if old_needs && idx == last_idx
+      exp.accept(self)
+    end
+    @needs_value = old_needs
+    false
+  end
+
+  def visit(node : FunDef) : Bool
+    arg_types = [] of IrType
+    node.args.each do |arg|
+      sem_type_name = if r = arg.restriction
+                        r.to_s
+                      else
+                        "Int32"
+                      end
+      arg_types << llvm_type_from_name(sem_type_name)
+    end
+
+    ret_sem_type_name = if rt = node.return_type
+                          rt.to_s
+                        else
+                          "Int32"
+                        end
+    @needs_value = (ret_sem_type_name != "Void" && ret_sem_type_name != "Nil" && ret_sem_type_name != "NoReturn")
+    ret_type = llvm_type_from_name(ret_sem_type_name)
+
+    fn_ty = @types.func(arg_types, ret_type, false)
+    @fn_types[node.name] = fn_ty
+    fn = if existing = @mod.get_function?(node.name)
+           existing
+         else
+           @mod.define_function(node.name, fn_ty)
+         end
+    is_darwin_personality = (@mod.triple.includes?("darwin") || @mod.triple.includes?("apple")) && node.name == "__crystal_personality"
+    if node.body && node.name.starts_with?("__crystal_") && !is_darwin_personality
+      fn.linkage = Linkage::Internal
+    end
+    @current_fn = fn
+    @current_fn_return_type = ret_type
+    @current_fun_def = node
+    @current_method_name = nil
+    # A free function has no self. The last method emitted left its class behind, and a
+    # receiver-less call in this function would then be taken for a method call on it.
+    @current_self = nil
+    @current_self_type = nil
+
+    @vars.clear
+    @last = nil
+    @terminated = false
+    excluded_names = Set(String).new
+    @param_values.clear
+    @var_type_names.clear
+    i = 0
+    while i < node.args.size
+      arg = node.args[i]
+      p = fn.param(i)
+      fn.name_param(p, arg.name)
+      @param_values[arg.name] = p
+      excluded_names.add(arg.name)
+      arg_tname = if r = arg.restriction
+                    r.to_s
+                  else
+                    "Int32"
+                  end
+      @var_type_names[arg.name] = arg_tname
+      i = i + 1
+    end
+
+    local_vars = collect_local_vars(node.body, excluded_names)
+    local_assigns = collect_local_assigns(node.body, excluded_names)
+
+    # First pass: infer all variable type names
+    local_vars.each do |vname, vnode|
+      tname = local_slot_type(vname, local_assigns[vname]? || [vnode] of ASTNode)
+      @var_type_names[vname] = tname
+    end
+
+    proc_collector = ProcLiteralCollector.new
+    if b = node.body
+      b.accept(proc_collector)
+    end
+    @proc_literal_allocas.clear
+
+    struct_calls = collect_struct_calls(node.body)
+
+    @struct_call_temps.clear
+    @struct_temp_index = 0
+    block_collector = InlinedBlockCallCollector.new(@block_methods)
+    if b = node.body
+      b.accept(block_collector)
+    end
+
+    @inlined_block_contexts.clear
+    @inlined_block_index = 0
+
+    if local_vars.empty? && struct_calls.empty? && block_collector.calls.empty? && proc_collector.proc_literals.empty?
+      entry_bb = fn.append_basic_block("entry")
+      @builder.position_at_end(entry_bb)
+    else
+      alloca_bb = fn.append_basic_block("alloca")
+      entry_bb = fn.append_basic_block("entry")
+
+      @builder.position_at_end(alloca_bb)
+      @vars.clear
+
+      # 1. Named local variable allocas
+      local_vars.each do |vname, vnode|
+        tname = @var_type_names[vname]
+        llvm_t = llvm_type_from_name(tname)
+        ptr = @builder.alloca(llvm_t, vname)
+        if (info = @custom_types[tname]?) && info.is_struct
+          set_align(ptr, 8)
+        elsif tname.includes?("Pointer") || tname.ends_with?("*") || tname.ends_with?('+') || tname.ends_with?('?') || tname == "Int64" || tname == "UInt64" || tname == "Int128" || tname == "UInt128" || tname == "Float64" || tname.starts_with?("Proc(") || tname == "->" || @custom_types.has_key?(tname)
+          set_align(ptr, 8)
+        else
+          set_align(ptr, 4)
+        end
+        @vars[vname] = ptr
+      end
+
+      # 1b. Proc literal temporary allocas
+      proc_collector.proc_literals.each do |pl|
+        temp_ptr = @builder.alloca(proc_type, "")
+        set_align(temp_ptr, 8)
+        @proc_literal_allocas[pl.object_id.to_s] = temp_ptr
+      end
+
+      # 2. Inlined block call allocas
+      block_collector.calls.each do |b_call|
+        if blk = b_call.block
+          ctx = InlinedBlockContext.new(blk.args, blk.body)
+          b_def = @block_methods[b_call.name]
+
+          # 2a. Block arguments
+          blk.args.each do |b_arg|
+            b_arg_tname = @var_type_names[b_arg.name]? || "Int32"
+            llvm_t = llvm_type_from_name(b_arg_tname)
+            ptr = @builder.alloca(llvm_t, b_arg.name)
+            set_align(ptr, 4)
+            ctx.block_arg_allocas[b_arg.name] = ptr
+          end
+
+          # 2b. Inlined method parameters
+          actual_arg_idx = 0
+          b_def.args.each do |param|
+            next if param.name == "block" || param.name.starts_with?('&')
+            p_tname = if r = param.restriction
+                        r.to_s
+                      else
+                        "Int32"
+                      end
+            llvm_t = llvm_type_from_name(p_tname)
+            ptr = @builder.alloca(llvm_t, param.name)
+            set_align(ptr, 4)
+            ctx.method_param_allocas[param.name] = ptr
+            actual_arg_idx += 1
+          end
+
+          # 2c. Inlined method local variables
+          m_locals = collect_local_vars(b_def.body, Set(String).new)
+          m_assigns = collect_local_assigns(b_def.body, Set(String).new)
+          m_locals.each do |mvname, mvnode|
+            next if ctx.method_param_allocas.has_key?(mvname)
+            mv_tname = local_slot_type(mvname, m_assigns[mvname]? || [mvnode] of ASTNode)
+            llvm_t = llvm_type_from_name(mv_tname)
+            ptr = @builder.alloca(llvm_t, mvname)
+            set_align(ptr, 4)
+            ctx.method_local_allocas[mvname] = ptr
+          end
+
+          @inlined_block_contexts << ctx
+        end
+      end
+
+      # 2. Unnamed temporaries for struct-by-value call returns
+      struct_calls.each do |sname|
+        st = @llvm_struct_types[sname]
+        temp_ptr = @builder.alloca(st, "")
+        set_align(temp_ptr, 8)
+        @struct_call_temps << temp_ptr
+      end
+
+      @builder.br(entry_bb)
+      @builder.position_at_end(entry_bb)
+    end
+
+    @terminated = false
+    if b = node.body
+      b.accept(self)
+    end
+
+    unless @terminated
+      if ret_sem_type_name == "Void" || ret_sem_type_name == "Nil"
+        @builder.ret_void
+      elsif ret_sem_type_name == "NoReturn"
+        @builder.unreachable
+      elsif l = @last
+        @builder.ret(l)
+      else
+        @builder.ret(@builder.const_int(ret_type, 0))
+      end
+      @terminated = true
+    end
+
+    false
+  end
+
+  def visit(node : Assign) : Bool
+    old_needs = @needs_value
+    @needs_value = true
+    if node.target.is_a?(Var)
+      var_name = node.target.as(Var).name
+      @last = nil
+      node.value.accept(self)
+      if val = @last
+        ptr = if inlined = @current_inlined_block
+                inlined.resolve_var(var_name) || @vars[var_name]?
+              else
+                @vars[var_name]?
+              end
+        if slot = @closure_env_slots[var_name]?
+          s_inst = @builder.store(val, slot)
+          set_align(s_inst, 4)
+        elsif ptr
+          vtype = @var_type_names[var_name]?
+          expected_llvm_ty = vtype ? llvm_type_from_name(vtype) : nil
+          val_to_store = if expected_llvm_ty && expected_llvm_ty != val.type
+                           if expected_llvm_ty.pointer? && val.type.int?
+                             @builder.const_null_pointer
+                           elsif expected_llvm_ty.int? && val.type.int?
+                             if val.type.int_width > expected_llvm_ty.int_width
+                               @builder.trunc(val, expected_llvm_ty)
+                             elsif val.type.int_width < expected_llvm_ty.int_width
+                               @builder.zext(val, expected_llvm_ty)
+                             else
+                               val
+                             end
+                           elsif expected_llvm_ty.int? && val.type.pointer?
+                             @builder.const_int(expected_llvm_ty, 0)
+                           else
+                             val
+                           end
+                         else
+                           val
+                         end
+          unless val_to_store.type.void?
+            s_inst = @builder.store(val_to_store, ptr)
+            if vtype && (info = @custom_types[vtype]?) && info.is_struct
+              set_align(s_inst, 4)
+            elsif vtype && (vtype.starts_with?("Proc(") || vtype == "->")
+              set_align(s_inst, 8)
+            end
+          end
+        end
+        @last = val
+        @terminated = false
+      end
+    elsif node.target.is_a?(InstanceVar)
+      ivar_name = node.target.as(InstanceVar).name.lstrip('@')
+      if ctype = @current_self_type
+        if info = @custom_types[ctype]?
+          if fidx = info.fields[ivar_name]?
+            node.value.accept(self)
+            if val = @last
+              idx = info.is_struct ? fidx : fidx + 1
+              st = @llvm_struct_types[info.name]
+              if cur_self = @current_self
+                gep = @builder.inbounds_gep(st, cur_self, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, idx)])
+                s_inst = @builder.store(val, gep)
+                ftype = info.field_types[ivar_name]? || "Int32"
+                set_align(s_inst, align_of_type(ftype))
+                @last = val
+                @terminated = false
+              end
+            end
+          else
+            refuse_undeclared_ivar(node.target.as(InstanceVar))
+          end
+        end
+      end
+    elsif node.target.is_a?(Call)
+      call = node.target.as(Call)
+      if call.name == "value" && (c_obj = call.obj)
+        c_obj.accept(self)
+        if ptr_val = @last
+          node.value.accept(self)
+          if val = @last
+            s_inst = @builder.store(val, ptr_val)
+            set_align(s_inst, 8)
+            @last = val
+            @terminated = false
+          end
+        end
+      elsif c_obj = call.obj
+        setter_call = Call.new(c_obj, "#{call.name}=", [node.value] of ASTNode)
+        setter_call.accept(self)
+      end
+    elsif node.target.is_a?(ClassVar)
+      cvar_name = node.target.as(ClassVar).name
+      node.value.accept(self)
+      if val = @last
+        g = if ctype = @current_self_type
+              @class_var_globals["#{ctype}:#{cvar_name}"]? || @class_var_globals[cvar_name]?
+            else
+              @class_var_globals[cvar_name]?
+            end
+        unless g
+          cg_name = if ctype = @current_self_type
+                      "#{ctype}:#{cvar_name}"
+                    else
+                      cvar_name
+                    end
+          lt = val.type
+          g = @mod.add_global(cg_name, lt)
+          g.initializer = @builder.const_null(lt)
+          g.linkage = Linkage::Internal
+          @class_var_globals[cvar_name] = g
+          @class_var_globals[cg_name] = g
+        end
+        lt = g.type
+        val_to_store = if lt.int? && val.type.int?
+                         if val.type.int_width > lt.int_width
+                           @builder.trunc(val, lt)
+                         elsif val.type.int_width < lt.int_width
+                           @builder.zext(val, lt)
+                         else
+                           val
+                         end
+                       elsif lt.pointer? && val.type.int?
+                         @builder.int_to_ptr(val, lt)
+                       elsif lt.int? && val.type.pointer?
+                         @builder.ptr_to_int(val, lt)
+                       else
+                         val
+                       end
+        s_inst = @builder.store(val_to_store, g)
+        set_align(s_inst, 8)
+        @last = val
+      end
+      @terminated = false
+    end
+    @needs_value = old_needs
+    false
+  end
+
+  def visit(node : InstanceVar) : Bool
+    ivar_name = node.name.lstrip('@')
+    if ctype = @current_self_type
+      if info = @custom_types[ctype]?
+        if fidx = info.fields[ivar_name]?
+          idx = info.is_struct ? fidx : fidx + 1
+          st = @llvm_struct_types[info.name]
+          ftype = info.field_types[ivar_name]
+          if cur_self = @current_self
+            gep = @builder.inbounds_gep(st, cur_self, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, idx)])
+            l_inst = @builder.load(llvm_type_from_name(ftype), gep)
+            set_align(l_inst, align_of_type(ftype))
+            @last = l_inst
+            @terminated = false
+          end
+        end
+      end
+    end
+    false
+  end
+
+  # The address of an instance variable of self: the field GEP that visit(InstanceVar) loads through.
+  # nil when self has no such field, so the caller decides what that means.
+  def ivar_field_ptr(node : InstanceVar) : Value?
+    ivar_name = node.name.lstrip('@')
+    if ctype = @current_self_type
+      if info = @custom_types[ctype]?
+        if fidx = info.fields[ivar_name]?
+          idx = info.is_struct ? fidx : fidx + 1
+          st = @llvm_struct_types[info.name]
+          if cur_self = @current_self
+            return @builder.inbounds_gep(st, cur_self, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, idx)])
+          end
+        end
+      end
+    end
+    nil
+  end
+
+  def visit(node : ClassVar) : Bool
+    cvar_name = node.name
+    g = if ctype = @current_self_type
+          @class_var_globals["#{ctype}:#{cvar_name}"]? || @class_var_globals[cvar_name]?
+        else
+          @class_var_globals[cvar_name]?
+        end
+    if g
+      tname = if ctype = @current_self_type
+                @class_var_types["#{ctype}:#{cvar_name}"]? || @class_var_types[cvar_name]? || "Int32"
+              else
+                @class_var_types[cvar_name]? || "Int32"
+              end
+      lt = llvm_type_from_name(tname)
+      l_inst = @builder.load(lt, g, "")
+      set_align(l_inst, 8)
+      @last = l_inst
+    else
+      @last = @builder.const_null_pointer
+    end
+    @terminated = false
+    false
+  end
+
+  def visit(node : PointerOf) : Bool
+    exp = node.exp
+    if exp.is_a?(ClassVar)
+      cvar_name = exp.as(ClassVar).name
+      g = if ctype = @current_self_type
+            @class_var_globals["#{ctype}:#{cvar_name}"]? || @class_var_globals[cvar_name]?
+          else
+            @class_var_globals[cvar_name]?
+          end
+      if g
+        @last = g
+        @terminated = false
+        return false
+      end
+    end
+    if exp.is_a?(InstanceVar)
+      if fptr = ivar_field_ptr(exp.as(InstanceVar))
+        @last = fptr
+        @terminated = false
+        return false
+      end
+    end
+    vname = if exp.is_a?(Var)
+              exp.as(Var).name
+            elsif exp.is_a?(Call)
+              exp.as(Call).name
+            else
+              ""
+            end
+    if ptr = @vars[vname]?
+      @last = ptr
+    end
+    @terminated = false
+    false
+  end
+
+  def visit(node : Var) : Bool
+    if slot = @closure_env_slots[node.name]?
+      v_type_name = @var_type_names[node.name]? || "Int32"
+      llvm_t = llvm_type_from_name(v_type_name)
+      l_inst = @builder.load(llvm_t, slot, "")
+      set_align(l_inst, 4)
+      @last = l_inst
+      @terminated = false
+      return false
+    end
+    if inlined = @current_inlined_block
+      if ptr = inlined.resolve_var(node.name)
+        v_type_name = @var_type_names[node.name]? || "Int32"
+        llvm_t = llvm_type_from_name(v_type_name)
+        l_inst = @builder.load(llvm_t, ptr, "")
+        @last = l_inst
+        @terminated = false
+        return false
+      end
+    end
+
+    if ptr = @vars[node.name]?
+      v_type_name = @var_type_names[node.name]? || "Int32"
+      llvm_t = llvm_type_from_name(v_type_name)
+      l_inst = @builder.load(llvm_t, ptr, "")
+      if (info = @custom_types[v_type_name]?) && info.is_struct
+        set_align(l_inst, 4)
+      end
+      @last = l_inst
+    elsif param = @param_values[node.name]?
+      @last = param
+    end
+    @terminated = false
+    false
+  end
+
+  def visit(node : Path) : Bool
+    pname = node.to_s
+    if (ctype = @current_self_type) && (info = @custom_types[ctype]?)
+      if const_node = info.constants[pname]?
+        const_node.accept(self)
+        return false
+      end
+    end
+    if pname.includes?("::")
+      parts = pname.split("::")
+      if parts.size == 2
+        if (ci = @custom_types[parts[0]]?) && (cn = ci.constants[parts[1]]?)
+          cn.accept(self)
+          return false
+        end
+      end
+    end
+    if const_node = @constants[pname]?
+      const_node.accept(self)
+      return false
+    end
+    @custom_types.each_value do |info|
+      if const_node = info.constants[pname]?
+        const_node.accept(self)
+        return false
+      end
+    end
+    @last = @builder.const_null_pointer
+    @terminated = false
+    false
+  end
+
+  def visit(node : Yield) : Bool
+    if inlined = @current_inlined_block
+      # 1. First accept all yield expressions and store values
+      exp_values = [] of Value
+      node.exps.each do |exp|
+        exp.accept(self)
+        if val = @last
+          exp_values << val
+        end
+      end
+
+      # 2. Now assign exp values to block arguments
+      exp_values.each_with_index do |val, i|
+        if block_arg = inlined.block_args[i]?
+          if ptr = inlined.block_arg_allocas[block_arg.name]?
+            s_inst = @builder.store(val, ptr)
+            set_align(s_inst, 4)
+          end
+        end
+      end
+
+      # 3. Now execute block body with in_block = true
+      prev_in_block = inlined.in_block
+      inlined.in_block = true
+      inlined.block_body.accept(self)
+      inlined.in_block = prev_in_block
+      @terminated = false
+    end
+    false
+  end
+
+  def visit(node : ProcLiteral) : Bool
+    # 1. Determine captured variables
+    outer_vars = Set(String).new
+    @param_values.each_key { |k| outer_vars.add(k) }
+    @vars.each_key { |k| outer_vars.add(k) }
+
+    proc_params = Set(String).new
+    node.def.args.each { |a| proc_params.add(a.name) }
+
+    c_collector = CapturedVarCollector.new(outer_vars, proc_params)
+    if b = node.def.body
+      b.accept(c_collector)
+    end
+    captured = c_collector.captured_vars
+    is_closure = !captured.empty?
+
+    env_ptr : Value? = nil
+    closure_ty : IrType? = nil
+
+    if is_closure
+      @closure_counter += 1
+      closure_cname = "closure_#{@closure_counter}"
+      field_llvm_tys = captured.map { |cv| llvm_type_from_name(@var_type_names[cv]? || "Int32") }
+      c_struct = @types.struct_named(closure_cname)
+      c_struct.struct_set_body(field_llvm_tys)
+      closure_ty = c_struct
+      @closure_types[closure_cname] = c_struct
+
+      mal_fn = ensure_malloc
+      mal_fn_ty = @types.func([@types.int64], @types.pointer, false)
+      size_val = sizeof_type(closure_cname)
+      allocated_ptr = @builder.call(mal_fn_ty, mal_fn.to_value, [size_val])
+      allocated_ptr.name = ""
+      env_ptr = allocated_ptr
+
+      slots = [] of Value
+      captured.each_with_index do |cv, idx|
+        slot = @builder.inbounds_gep(c_struct, allocated_ptr, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, idx)])
+        @builder.name_inst(slot, "#{cv}#{idx + 1}")
+        slots << slot
+      end
+
+      captured.each_with_index do |cv, idx|
+        slot = slots[idx]
+        cval = if p = @param_values[cv]?
+                 p
+               elsif var_ptr = @vars[cv]?
+                 vt = @var_type_names[cv]? || "Int32"
+                 lt = llvm_type_from_name(vt)
+                 l_inst = @builder.load(lt, var_ptr)
+                 set_align(l_inst, 4)
+                 l_inst
+               else
+                 @builder.const_int(@types.int32, 0)
+               end
+        st = @builder.store(cval, slot)
+        set_align(st, 4)
+      end
+    end
+
+    # 2. Build proc function
+    arg_type_names = node.def.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+    ret_type_name = if rt = node.def.return_type
+                      rt.to_s
+                    else
+                      infer_proc_return_type(node.def)
+                    end
+    all_type_names = [] of String
+    arg_type_names.each { |at| all_type_names << at }
+    all_type_names << ret_type_name
+    proc_type_str = "Proc(#{all_type_names.join(", ")})"
+
+    loc = node.location
+    line_no = loc ? loc.line_number : 1
+    rel_file = relative_filename
+    proc_fn_name = "~proc#{symbol_text(proc_type_str)}^#{symbol_text(rel_file)}:#{line_no}"
+    count = (@proc_counts[proc_fn_name]? || 0) + 1
+    @proc_counts[proc_fn_name] = count
+    if count > 1
+      proc_fn_name = "#{proc_fn_name[0, 5]}#{count}#{proc_fn_name[5, proc_fn_name.bytesize - 5]}"
+    end
+
+    fn_param_tys = [] of IrType
+    if is_closure
+      fn_param_tys << @types.pointer
+    end
+    arg_type_names.each do |atname|
+      fn_param_tys << llvm_type_from_name(atname)
+    end
+    ret_llvm_ty = llvm_type_from_name(ret_type_name)
+    fn_ty = @types.func(fn_param_tys, ret_llvm_ty, false)
+    proc_fn = @mod.define_function(proc_fn_name, fn_ty)
+    proc_fn.linkage = Linkage::Internal
+
+    # 3. Emit proc function body
+    saved_bb = @builder.insert_block
+    saved_fn = @current_fn
+    saved_vars = @vars.dup
+    saved_param_values = @param_values.dup
+    saved_var_type_names = @var_type_names.dup
+
+    saved_fn_ret_ty = @current_fn_return_type
+    @current_fn = proc_fn
+    @current_fn_return_type = ret_llvm_ty
+    @param_values = Hash(String, Value).new
+    @var_type_names = Hash(String, String).new
+    @vars = Hash(String, Value).new
+
+    proc_entry_bb = proc_fn.append_basic_block("entry")
+    @builder.position_at_end(proc_entry_bb)
+
+    if is_closure && closure_ty
+      ctx_p = proc_fn.param(0)
+      captured.each_with_index do |cv, cidx|
+        cslot = @builder.inbounds_gep(closure_ty, ctx_p, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, cidx)])
+        @builder.name_inst(cslot, cv)
+        @closure_env_slots[cv] = cslot
+        @var_type_names[cv] = saved_var_type_names[cv]? || "Int32"
+      end
+    end
+
+    node.def.args.each_with_index do |a, aidx|
+      p_val = proc_fn.param(is_closure ? aidx + 1 : aidx)
+      proc_fn.name_param(p_val, a.name)
+      @param_values[a.name] = p_val
+      @var_type_names[a.name] = a.restriction ? a.restriction.to_s : "Int32"
+    end
+
+    if b = node.def.body
+      b.accept(self)
+      if ret_llvm_ty.void?
+        @builder.ret_void
+      elsif (l = @last) && l.type == ret_llvm_ty
+        @builder.ret(l)
+      elsif (l = @last) && ret_llvm_ty.int? && l.type.int?
+        if l.type.int_width > ret_llvm_ty.int_width
+          @builder.ret(@builder.trunc(l, ret_llvm_ty))
+        elsif l.type.int_width < ret_llvm_ty.int_width
+          @builder.ret(@builder.zext(l, ret_llvm_ty))
+        else
+          @builder.ret(l)
+        end
+      elsif (l = @last) && ret_llvm_ty.int? && l.type.pointer?
+        @builder.ret(@builder.ptr_to_int(l, ret_llvm_ty))
+      elsif (l = @last) && ret_llvm_ty.pointer? && l.type.int?
+        @builder.ret(@builder.int_to_ptr(l, ret_llvm_ty))
+      elsif ret_llvm_ty.pointer?
+        @builder.ret(@builder.const_null_pointer)
+      elsif ret_llvm_ty.float? || ret_llvm_ty.double?
+        @builder.ret(@builder.const_float(ret_llvm_ty, 0.0))
+      elsif ret_llvm_ty.int?
+        @builder.ret(@builder.const_int(ret_llvm_ty, 0))
+      else
+        @builder.ret(@builder.const_null(ret_llvm_ty))
+      end
+    else
+      if ret_llvm_ty.void?
+        @builder.ret_void
+      else
+        @builder.ret(@builder.const_null(ret_llvm_ty))
+      end
+    end
+
+    # Restore outer function state
+    @closure_env_slots.clear
+    @vars = saved_vars
+    @param_values = saved_param_values
+    @var_type_names = saved_var_type_names
+    @current_fn = saved_fn
+    @current_fn_return_type = saved_fn_ret_ty
+    if sbb = saved_bb
+      @builder.position_at_end(sbb)
+    end
+
+    # 4. Store into proc struct temp alloca and load
+    temp_ptr = if a = @proc_literal_allocas[node.object_id.to_s]?
+                 a
+               else
+                 p = @builder.alloca(proc_type, "")
+                 set_align(p, 8)
+                 p
+               end
+
+    fn_slot = @builder.inbounds_gep(proc_type, temp_ptr, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, 0)])
+    @builder.store(proc_fn.to_value, fn_slot).alignment = 8
+
+    ctx_slot = @builder.inbounds_gep(proc_type, temp_ptr, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, 1)])
+    ctx_val = is_closure && env_ptr ? env_ptr : @builder.const_null_pointer
+    @builder.store(ctx_val, ctx_slot).alignment = 8
+
+    l_proc = @builder.load(proc_type, temp_ptr, "")
+    set_align(l_proc, 8)
+    @last = l_proc
+    @terminated = false
+    false
+  end
+
+  def visit(node : NumberLiteral) : Bool
+    kind = node.kind
+    if kind == NumberKind::F64
+      @last = @builder.const_float(@types.double, node.value.to_f)
+    elsif kind == NumberKind::F32
+      @last = @builder.const_float(@types.float, node.value.to_f)
+    elsif kind == NumberKind::U64
+      @last = @builder.const_uint(@types.int64, CodeGenVisitor.parse_u64(node.value))
+    elsif kind == NumberKind::I64
+      u_val = CodeGenVisitor.parse_u64(node.value)
+      i_val = node.value.to_i64? || pointerof(u_val).as(Int64*).value
+      @last = @builder.const_int(@types.int64, i_val)
+    else
+      @last = @builder.const_int(@types.int32, node.value.to_i? || (CodeGenVisitor.parse_u64(node.value).to_i))
+    end
+    @terminated = false
+    false
+  end
+
+  def visit(node : CharLiteral) : Bool
+    @last = @builder.const_int(@types.int32, node.value.ord)
+    @terminated = false
+    false
+  end
+
+  def visit(node : BoolLiteral) : Bool
+    @last = @builder.const_int(@types.int1, node.value ? 1 : 0)
+    @terminated = false
+    false
+  end
+
+  def visit(node : NilLiteral) : Bool
+    @last = @builder.const_null_pointer
+    @terminated = false
+    false
+  end
+
+  def visit(node : StringLiteral) : Bool
+    @last = build_string_constant(node.value)
+    @terminated = false
+    false
+  end
+
+  def visit(node : StringInterpolation) : Bool
+    first_str = ""
+    node.expressions.each do |e|
+      if e.is_a?(StringLiteral)
+        first_str = e.as(StringLiteral).value
+        break
+      end
+    end
+    @last = build_string_constant(first_str)
+    @terminated = false
+    false
+  end
+
+  def visit(node : ArrayLiteral) : Bool
+    type_name = if of = node.of
+                  "Array(#{of.to_s})"
+                elsif ctype = @current_self_type
+                  ctype
+                else
+                  "Array(Int32)"
+                end
+    info = @custom_types[type_name]? || @custom_types["Array"]?
+    if info
+      ctor_name = if gname = info.generic_name
+                    "*#{info.name}^#{gname}::new:#{info.name}"
+                  else
+                    "*#{info.name}::new:#{info.name}"
+                  end
+      if ctor_fn = @mod.get_function?(ctor_name)
+        call_args = [] of Value
+        if info.generic_name
+          tid_class_global_name = "#{info.name}.class:type_id"
+          tid_class_global = if g = @mod.get_global?(tid_class_global_name)
+                               g
+                             else
+                               cg_g = @mod.add_global(tid_class_global_name, @types.int32)
+                               cg_g.initializer = @builder.const_int(@types.int32, info.type_id + 44)
+                               cg_g.global_constant = true
+                               cg_g.linkage = Linkage::Internal
+                               cg_g
+                             end
+          l_tid = @builder.load(@types.int32, tid_class_global)
+          set_align(l_tid, 4)
+          call_args << l_tid
+        end
+        ctor_fn_ty = @types.func(call_args.map(&.type), @types.pointer, false)
+        @last = @builder.call(ctor_fn_ty, ctor_fn.to_value, call_args)
+        @terminated = false
+        return false
+      end
+    end
+    @last = @builder.const_null_pointer
+    @terminated = false
+    false
+  end
+
+  def visit(node : TupleLiteral) : Bool
+    elems = [] of Value
+    node.elements.each do |e|
+      e.accept(self)
+      if l = @last
+        elems << l
+      end
+    end
+    if elems.empty?
+      @last = @builder.const_null_pointer
+    else
+      tys = elems.map(&.type)
+      st = @types.struct(tys)
+      ptr = @builder.alloca(st, "tuple")
+      elems.each_with_index do |el, i|
+        gep = @builder.inbounds_gep(st, ptr, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, i)])
+        @builder.store(el, gep)
+      end
+      @last = ptr
+    end
+    @terminated = false
+    false
+  end
+
+  def visit(node : SymbolLiteral) : Bool
+    @last = @builder.const_int(@types.int32, 0)
+    @terminated = false
+    false
+  end
+
+  # `body unless cond` (statement or suffix form) is `if cond` with the body in
+  # the else branch. The oracle normalises `Unless` to an `If` before codegen;
+  # without this the body was emitted unconditionally, and a `return` in it
+  # left the rest of the function after a terminator.
+  def visit(node : Unless) : Bool
+    lowered = If.new(node.cond, node.else, node.then)
+    lowered.accept(self)
+    false
+  end
+
+  def visit(node : If) : Bool
+    return false unless fn = @current_fn
+    then_bb = fn.append_basic_block("then")
+    else_bb = fn.append_basic_block("else")
+
+    cond_val = ensure_i1_condition(operand_value(node.cond, "condition of 'if'"))
+    @builder.cond_br(cond_val, then_bb, else_bb)
+
+    if node.else.nil? || node.else.is_a?(Nop)
+      # then branch
+      @builder.position_at_end(then_bb)
+      @terminated = false
+      node.then.accept(self)
+      exit_bb = nil
+      unless @terminated
+        exit_bb = fn.append_basic_block("exit")
+        @builder.br(exit_bb)
+      end
+
+      # The false edge is an empty else that joins the exit, as the oracle lowers
+      # a statement `if` with no `else`.
+      @builder.position_at_end(else_bb)
+      @terminated = false
+      if eb = exit_bb
+        @builder.br(eb)
+        @builder.position_at_end(eb)
+      end
+      return false
+    end
+
+    # then branch
+    @builder.position_at_end(then_bb)
+    @terminated = false
+    node.then.accept(self)
+    then_terminated = @terminated
+    then_val = @last
+    then_end = @builder.insert_block || then_bb
+
+    if then_terminated
+      @builder.position_at_end(else_bb)
+      @terminated = false
+      if els = node.else
+        els.accept(self)
+      end
+      return false
+    end
+
+    exit_bb = fn.append_basic_block("exit")
+    then_br = @builder.br(exit_bb)
+
+    # else branch
+    @builder.position_at_end(else_bb)
+    @terminated = false
+    @last = nil
+    if els = node.else
+      els.accept(self)
+    end
+    else_terminated = @terminated
+    else_val = @last
+    else_end = @builder.insert_block || else_bb
+
+    if @needs_value && !then_terminated && !else_terminated && then_val && else_val
+      if then_val.type.to_s == else_val.type.to_s && !then_val.type.void?
+        @builder.br(exit_bb)
+        @builder.position_at_end(exit_bb)
+        phi = @builder.phi(then_val.type)
+        @builder.add_incoming(phi, [then_val, else_val], [then_end, else_end])
+        @last = phi
+      elsif then_val.type.int? && else_val.type.int?
+        target_t = then_val.type.int_width >= else_val.type.int_width ? then_val.type : else_val.type
+        tv = then_val
+        if then_val.type.int_width < target_t.int_width
+          @builder.position_before(then_br)
+          tv = @builder.zext(then_val, target_t)
+          @builder.position_at_end(else_end)
+        end
+        ev = else_val.type.int_width < target_t.int_width ? @builder.zext(else_val, target_t) : else_val
+        @builder.br(exit_bb)
+        else_end = @builder.insert_block || else_end
+        @builder.position_at_end(exit_bb)
+        phi = @builder.phi(target_t)
+        @builder.add_incoming(phi, [tv, ev], [then_end, else_end])
+        @last = phi
+      else
+        @builder.br(exit_bb)
+        @builder.position_at_end(exit_bb)
+        @last = nil
+      end
+    else
+      unless else_terminated
+        @builder.br(exit_bb)
+      end
+      @builder.position_at_end(exit_bb)
+      @last = nil
+    end
+    @terminated = false
+    false
+  end
+
+  class BreakCollector < Visitor
+    property has_break : Bool
+
+    def initialize(@has_break : Bool = false)
+    end
+
+    def visit(node : Break) : Bool
+      @has_break = true
+      false
+    end
+
+    def visit(node : ASTNode) : Bool
+      !@has_break
+    end
+  end
+
+  def visit(node : While) : Bool
+    return false unless fn = @current_fn
+    while_bb = fn.append_basic_block("while")
+    body_bb = fn.append_basic_block("body")
+    fail_bb = fn.append_basic_block("fail")
+
+    bc = BreakCollector.new
+    node.body.accept(bc)
+    exit_bb = bc.has_break ? fn.append_basic_block("exit") : nil
+
+    @builder.br(while_bb)
+
+    @builder.position_at_end(while_bb)
+    @terminated = false
+    cond_val = ensure_i1_condition(operand_value(node.cond, "loop condition"))
+    @builder.cond_br(cond_val, body_bb, fail_bb)
+
+    @builder.position_at_end(body_bb)
+    @terminated = false
+    if eb = exit_bb
+      @loop_exit_blocks << eb
+    else
+      @loop_exit_blocks << fail_bb
+    end
+    @loop_continue_blocks << while_bb
+    node.body.accept(self)
+    @loop_exit_blocks.pop
+    @loop_continue_blocks.pop
+    unless @terminated
+      @builder.br(while_bb)
+    end
+
+    @builder.position_at_end(fail_bb)
+    if eb = exit_bb
+      @builder.br(eb)
+      @builder.position_at_end(eb)
+    end
+    @terminated = false
+    @last = @builder.const_undef(@types.void)
+    false
+  end
+
+  def visit(node : Break) : Bool
+    if exit_bb = @loop_exit_blocks.last?
+      @builder.br(exit_bb)
+    end
+    @terminated = true
+    false
+  end
+
+  def visit(node : Next) : Bool
+    if cont_bb = @loop_continue_blocks.last?
+      @builder.br(cont_bb)
+    end
+    @terminated = true
+    false
+  end
+
+  def ensure_match_function(cname : String) : Function
+    fn_name = "~match<#{cname}+>"
+    if fn = @mod.get_function?(fn_name)
+      return fn
+    end
+    info = @custom_types[cname]
+    fn_ty = @types.func([@types.int32], @types.int1, false)
+    m_match = @mod.define_function(fn_name, fn_ty)
+    m_match.linkage = Linkage::Internal
+    m_ent = m_match.append_basic_block("entry")
+    m_b = Builder.new(@mod)
+    m_b.position_at_end(m_ent)
+    m_arg = m_match.param(0)
+    m_low = @builder.const_int(@types.int32, info.min_type_id)
+    m_high = @builder.const_int(@types.int32, info.max_type_id)
+    m_sge = m_b.icmp(IntPredicate::SGE, m_arg, m_low)
+    m_sle = m_b.icmp(IntPredicate::SLE, m_arg, m_high)
+    m_and = m_b.build_and(m_sge, m_sle)
+    m_b.ret(m_and)
+    m_match
+  end
+
+  def visit(node : Cast) : Bool
+    node.obj.accept(self)
+    false
+  end
+
+  # The parser reads `x.nil?` as `x.is_a?(::Nil)` with nil_check set, as the oracle does. The port
+  # lowers that question as the nil? call it always lowered; other type queries keep the walk they had.
+  def visit(node : IsA) : Bool
+    if node.nil_check
+      Call.new(node.obj, "nil?").at(node).accept(self)
+      return false
+    end
+    true
+  end
+
+  def visit(node : Return) : Bool
+    if exp = node.exp
+      exp.accept(self)
+      if l = @last
+        if fn_ret_ty = @current_fn_return_type
+          if fn_ret_ty.void?
+            @builder.ret_void
+          elsif l.type == fn_ret_ty
+            @builder.ret(l)
+          elsif fn_ret_ty.int? && l.type.int?
+            if l.type.int_width > fn_ret_ty.int_width
+              @builder.ret(@builder.trunc(l, fn_ret_ty))
+            elsif l.type.int_width < fn_ret_ty.int_width
+              @builder.ret(@builder.zext(l, fn_ret_ty))
+            else
+              @builder.ret(l)
+            end
+          elsif fn_ret_ty.pointer? && l.type.int?
+            @builder.ret(@builder.int_to_ptr(l, fn_ret_ty))
+          elsif fn_ret_ty.int? && l.type.pointer?
+            @builder.ret(@builder.ptr_to_int(l, fn_ret_ty))
+          elsif (fn_ret_ty.float? || fn_ret_ty.double?) && l.type.int?
+            @builder.ret(@builder.si_to_fp(l, fn_ret_ty))
+          elsif fn_ret_ty.float? || fn_ret_ty.double?
+            @builder.ret(@builder.const_float(fn_ret_ty, 0.0))
+          elsif fn_ret_ty.pointer?
+            @builder.ret(@builder.const_null_pointer)
+          else
+            @builder.ret(l)
+          end
+        else
+          @builder.ret(l)
+        end
+      else
+        if fn_ret_ty = @current_fn_return_type
+          if fn_ret_ty.void?
+            @builder.ret_void
+          elsif fn_ret_ty.int?
+            @builder.ret(@builder.const_int(fn_ret_ty, 0))
+          elsif fn_ret_ty.float? || fn_ret_ty.double?
+            @builder.ret(@builder.const_float(fn_ret_ty, 0.0))
+          elsif fn_ret_ty.pointer?
+            @builder.ret(@builder.const_null_pointer)
+          else
+            @builder.ret_void
+          end
+        else
+          @builder.ret_void
+        end
+      end
+    else
+      if fn_ret_ty = @current_fn_return_type
+        if fn_ret_ty.void?
+          @builder.ret_void
+        elsif fn_ret_ty.int?
+          @builder.ret(@builder.const_int(fn_ret_ty, 0))
+        elsif fn_ret_ty.float? || fn_ret_ty.double?
+          @builder.ret(@builder.const_float(fn_ret_ty, 0.0))
+        elsif fn_ret_ty.pointer?
+          @builder.ret(@builder.const_null_pointer)
+        else
+          @builder.ret_void
+        end
+      else
+        @builder.ret_void
+      end
+    end
+    @terminated = true
+    false
+  end
+
+  # The value of one operand of a binary operator. An operand that emits no
+  # value is refused by name: the port cannot type it, so it stops here rather
+  # than leave the operator's block open.
+  def binary_operand(operand : ASTNode, op_node : Call, side : String) : Value
+    @last = nil
+    operand.accept(self)
+    if val = @last
+      return val
+    end
+    refuse_port("port limitation: the port cannot type the #{side} operand '#{operand_text(operand)}' of '#{op_node.name}' in #{scope_name}, so it refuses instead of leaving the block unterminated (no IR is written)")
+  end
+
+  # The value of an operand the emitter needs a value for: a condition, or the
+  # operand of a unary operator. An operand that emits none is refused by name.
+  def operand_value(operand : ASTNode, role : String) : Value
+    @last = nil
+    operand.accept(self)
+    if val = @last
+      return val
+    end
+    refuse_port("port limitation: the port cannot type the #{role} '#{operand_text(operand)}' in #{scope_name}, so it refuses instead of leaving the block unterminated (no IR is written)")
+  end
+
+  # A call with no definition the port can lower. A receiver-less call at top level
+  # gets the oracle's own wording. A call on a receiver, or inside a type's method,
+  # is a port limitation: the port does not resolve methods of generic instances, so
+  # it cannot say the method is undefined.
+  def refuse_undefined_call(node : Call) : NoReturn
+    if node.obj || @current_self_type
+      refuse_port("port limitation: the port cannot resolve the call '#{operand_text(node)}' in #{scope_name}, so it refuses instead of leaving the call out of the IR (no IR is written)")
+    end
+    message = "undefined method '#{node.name}' for top-level"
+    if loc = node.location
+      refuse_at(loc, node.name.bytesize, message)
+    end
+    refuse_port(message)
+  end
+
+  # The function or method whose IR is being emitted, for a refusal message.
+  def scope_name : String
+    if name = @current_method_name
+      "'#{name}'"
+    elsif fd = @current_fun_def
+      "'#{fd.name}'"
+    else
+      "the top level"
+    end
+  end
+
+  # The enclosing type's name, as the hosted compiler names the scope a macro expands in.
+  def macro_scope_name : String
+    (@current_self_type || "<Program>").split("(")[0]
+  end
+
+  # `{% if %}` in a body: the condition is a macro expression the macro engine
+  # evaluates against the target's flags, and only the chosen branch is emitted,
+  # as the oracle expands it. Walking both branches would refuse a flag the
+  # target does not set.
+  def visit(node : MacroIf) : Bool
+    scope = macro_scope_name
+    cond_val = MacroInterpreter.new(nil, @macro_flags, scope, @host_flags).evaluate(node.cond)
+    branch = MacroMethods.truthy?(cond_val) ? node.then : node.else
+    if chosen = branch
+      # Raw macro text in the branch is rendered, then parsed and emitted in place, as a site is.
+      renderer = MacroInterpreter.new(nil, @macro_flags, scope, @host_flags)
+      renderer.interpret(chosen)
+      text = renderer.to_s
+      unless text.strip.empty?
+        expanded = Normalizer.new.normalize(Parser.new(text).parse)
+        expanded.accept(self)
+      end
+    end
+    false
+  end
+
+  # `{{ ... }}` in a body: the macro engine expands the site with the enclosing type as `@type`, as the hosted compiler
+  # does. The expansion is parsed, normalised and emitted in place of the site. A site that fails to expand is refused.
+  def visit(node : MacroExpression) : Bool
+    scope = macro_scope_name
+    report = MacroEngine.new(@macro_flags, @host_flags).site_report(node, scope)
+    if failure = report.failure
+      refuse_port("port limitation: the macro site in #{scope_name} fails to expand: #{failure.message} (no IR is written)")
+    end
+    expanded = Normalizer.new.normalize(Parser.new(report.output).parse)
+    expanded.accept(self)
+    false
+  end
+
+  def visit(node : Call) : Bool
+    if node.name == "as" && node.args.size == 1 && (as_obj = node.obj)
+      as_obj.accept(self)
+      @terminated = false
+      return false
+    end
+    if node.obj.nil? && node.name == "pointerof" && node.args.size == 1
+      exp = node.args[0]
+      if exp.is_a?(InstanceVar)
+        ivar_name = exp.as(InstanceVar).name.lstrip('@')
+        if ctype = @current_self_type
+          if info = @custom_types[ctype]?
+            if fidx = info.fields[ivar_name]?
+              idx = info.is_struct ? fidx : fidx + 1
+              st = @llvm_struct_types[info.name]
+              if cur_self = @current_self
+                gep = @builder.inbounds_gep(st, cur_self, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, idx)])
+                @last = gep
+                @terminated = false
+                return false
+              end
+            end
+          end
+        end
+      else
+        vname = exp.is_a?(Var) ? exp.as(Var).name : (exp.is_a?(Call) ? exp.as(Call).name : "")
+        if ptr = @vars[vname]?
+          @last = ptr
+        end
+        @terminated = false
+        return false
+      end
+    end
+    if node.obj.nil? && (b_def = @block_methods[node.name]?) && node.block
+      if @inlined_block_index < @inlined_block_contexts.size
+        ctx = @inlined_block_contexts[@inlined_block_index]
+        @inlined_block_index += 1
+        # 1. Evaluate call arguments BEFORE entering inlined context
+        arg_vals = [] of Value
+        node.args.each do |a|
+          a.accept(self)
+          if l = @last
+            arg_vals << l
+          end
+        end
+
+        prev_inlined = @current_inlined_block
+        @current_inlined_block = ctx
+
+        # 2. Store into method parameter allocas
+        actual_arg_idx = 0
+        b_def.args.each do |param|
+          next if param.name == "block" || param.name.starts_with?('&')
+          if actual_arg_idx < arg_vals.size
+            val = arg_vals[actual_arg_idx]
+            if ptr = ctx.method_param_allocas[param.name]?
+              s_inst = @builder.store(val, ptr)
+              set_align(s_inst, 4)
+            end
+          end
+          actual_arg_idx += 1
+        end
+
+        # 3. Execute method body
+        b_def.body.accept(self)
+        @current_inlined_block = prev_inlined
+        @terminated = false
+        return false
+      end
+    end
+
+    if node.obj.nil? && (ctype = @current_self_type) && (info = @custom_types[ctype]?)
+      if info.fields.has_key?(node.name) && node.args.empty?
+        fidx = info.fields[node.name]
+        idx = info.is_struct ? fidx : fidx + 1
+        st = @llvm_struct_types[info.name]? || @types.int32
+        ftype = info.field_types[node.name]
+        if cur_self = @current_self
+          gep = @builder.inbounds_gep(st, cur_self, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, idx)])
+          l_inst = @builder.load(llvm_type_from_name(ftype), gep)
+          set_align(l_inst, align_of_type(ftype))
+          @last = l_inst
+          @terminated = false
+          return false
+        end
+      elsif m = info.methods[node.name]?
+        arg_vals = [] of Value
+        arg_type_names = [] of String
+        node.args.each do |a|
+          if a.is_a?(Var) && (a_tname = @var_type_names[a.as(Var).name]?) && (a_info = @custom_types[a_tname]?) && a_info.is_struct
+            st = @llvm_struct_types[a_info.name]
+            l_inst = if vptr = @vars[a.as(Var).name]?
+                       @builder.load(st, vptr)
+                     else
+                       get_ptr_val(a.as(Var).name)
+                     end
+            if l_inst.is_a?(Inst)
+              l_inst.as(Inst).alignment = 4
+            end
+            arg_vals << l_inst
+            arg_type_names << a_info.name
+          else
+            a.accept(self)
+            if l = @last
+              arg_vals << l
+            end
+            arg_type_names << (a.is_a?(NumberLiteral) ? (a.as(NumberLiteral).kind == NumberKind::F64 ? "Float64" : (a.as(NumberLiteral).kind == NumberKind::I64 ? "Int64" : "Int32")) : "Int32")
+          end
+        end
+
+        ret_tname = m.return_type ? m.return_type.to_s.lstrip(':') : "Int32"
+        expected_arg_types = m.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+        method_fn_name = if gname = info.generic_name
+                           if expected_arg_types.empty?
+                             "*#{info.name}^#{gname}##{node.name}:#{ret_tname}"
+                           else
+                             "*#{info.name}^#{gname}##{node.name}<#{expected_arg_types.join(", ")}>:#{ret_tname}"
+                           end
+                         else
+                           if expected_arg_types.empty?
+                             "*#{info.name}##{node.name}:#{ret_tname}"
+                           else
+                             "*#{info.name}##{node.name}<#{expected_arg_types.join(", ")}>:#{ret_tname}"
+                           end
+                         end
+
+        if method_fn = @mod.get_function?(method_fn_name)
+          if cur_self = @current_self
+            call_args = [cur_self] of Value
+            arg_vals.each { |av| call_args << av }
+            call_ret_ty = llvm_type_from_name(ret_tname)
+            m_param_tys = call_args.map(&.type)
+            method_fn_ty = @types.func(m_param_tys, call_ret_ty, false)
+            call_val = @builder.call(method_fn_ty, method_fn.to_value, call_args)
+
+            if !call_ret_ty.void? && (r_info = @custom_types[ret_tname]?) && r_info.is_struct && !ret_tname.starts_with?("Pointer(") && ret_tname != "Nil" && ret_tname != "Void"
+              if @struct_temp_index < @struct_call_temps.size
+                temp_ptr = @struct_call_temps[@struct_temp_index]
+                @struct_temp_index += 1
+                st = @llvm_struct_types[ret_tname]
+                s_inst = @builder.store(call_val, temp_ptr)
+                set_align(s_inst, 4)
+                l_inst = @builder.load(st, temp_ptr)
+                set_align(l_inst, 4)
+                @last = l_inst
+              else
+                @last = call_val
+              end
+            else
+              @last = call_val
+            end
+
+            @terminated = false
+            return false
+          end
+        end
+      end
+    end
+    if obj = node.obj
+      # 1. Constructor call: Point.new(x, y) or Counter.new(initial) or Pointer(Int32).new(addr)
+      if obj.is_a?(Path) || obj.is_a?(Generic)
+        type_name = obj.to_s
+        if entry = @lib_funs[{type_name, node.name}]?
+          c_name, c_fn_ty, is_noreturn = entry
+          fn_val = @mod.get_function(c_name)
+          arg_vals = [] of Value
+          node.args.each do |a|
+            a.accept(self)
+            if l = @last
+              arg_vals << l
+            end
+          end
+          if c_fn_ty.return_type.void?
+            @builder.call(c_fn_ty, fn_val.to_value, arg_vals)
+            if is_noreturn
+              @builder.unreachable
+            end
+            @terminated = true
+          else
+            @last = @builder.call(c_fn_ty, fn_val.to_value, arg_vals)
+            @terminated = false
+          end
+          return false
+        end
+        if obj.is_a?(Path) && node.name != "new" && node.name != "malloc"
+          pname = obj.to_s
+          const_node : ASTNode? = nil
+          if (ctype = @current_self_type) && (c_info = @custom_types[ctype]?)
+            const_node = c_info.constants[pname]?
+          end
+          if const_node.nil?
+            @custom_types.each_value do |c_info|
+              if cn = c_info.constants[pname]?
+                const_node = cn
+                break
+              end
+            end
+          end
+          if cn = const_node
+            cn.accept(self)
+            if val = @last
+              if node.name == "to_u64" || node.name == "to_i64"
+                @last = val.type == @types.int64 ? val : @builder.zext(val, @types.int64)
+              elsif node.name == "to_i" || node.name == "to_i32"
+                @last = val.type == @types.int32 ? val : @builder.trunc(val, @types.int32)
+              else
+                @last = val
+              end
+              @terminated = false
+              return false
+            end
+          end
+          if (tinfo = @custom_types[pname]?) && (m = tinfo.methods[node.name]?)
+            arg_vals = [] of Value
+            node.args.each do |a|
+              a.accept(self)
+              if l = @last
+                arg_vals << l
+              end
+            end
+            arg_type_names = m.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+            ret_tname = m.return_type ? m.return_type.to_s.lstrip(':') : "Int32"
+            method_fn_name = if arg_type_names.empty?
+                               "*#{tinfo.name}##{node.name}:#{ret_tname}"
+                             else
+                               "*#{tinfo.name}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                             end
+            if method_fn = @mod.get_function?(method_fn_name)
+              call_args = [@builder.const_null_pointer] of Value
+              arg_vals.each { |av| call_args << av }
+              call_ret_ty = llvm_type_from_name(ret_tname)
+              m_param_tys = call_args.map(&.type)
+              method_fn_ty = @types.func(m_param_tys, call_ret_ty, false)
+              @last = @builder.call(method_fn_ty, method_fn.to_value, call_args)
+              @terminated = false
+              return false
+            end
+          end
+        end
+        if type_name.includes?("Pointer") && node.name == "malloc" && !node.args.empty?
+          node.args[0].accept(self)
+          if count_val = @last
+            elem_tname = element_type_of_pointer(type_name)
+            elem_llvm_t = llvm_type_from_name(elem_tname)
+            elem_size_gep = @builder.gep(elem_llvm_t, @builder.const_null_pointer, [@builder.const_int(@types.int32, 1)])
+            elem_size = @builder.ptr_to_int(elem_size_gep, @types.int64)
+            c_val = count_val.type == @types.int64 ? count_val : @builder.zext(count_val, @types.int64)
+            total_bytes = @builder.mul(c_val, elem_size)
+            mal_fn = ensure_malloc
+            mal_fn_ty = @types.func([@types.int64], @types.pointer, false)
+            @last = @builder.call(mal_fn_ty, mal_fn.to_value, [total_bytes])
+            @terminated = false
+            return false
+          end
+        end
+        if node.name == "new"
+          if type_name.includes?("Pointer")
+            # Pointer(T).new(addr)
+            tid_global_name = "Pointer(Int32).class:type_id"
+            unless @mod.get_global?(tid_global_name)
+              g = @mod.add_global(tid_global_name, @types.int32)
+              g.initializer = @builder.const_int(@types.int32, 0)
+              g.global_constant = true
+              g.linkage = Linkage::Internal
+            end
+            if g = @mod.get_global?(tid_global_name)
+              l_tid = @builder.load(@types.int32, g)
+              set_align(l_tid, 4)
+            end
+            node.args[0].accept(self)
+            if addr_val = @last
+              @last = @builder.int_to_ptr(addr_val, @types.pointer)
+              @terminated = false
+              return false
+            end
+          elsif info = @custom_types[type_name]?
+            arg_vals = [] of Value
+            arg_type_names = [] of String
+            node.args.each do |a|
+              a.accept(self)
+              if l = @last
+                arg_vals << l
+              end
+              arg_type_names << (a.is_a?(NumberLiteral) ? (a.as(NumberLiteral).kind == NumberKind::F64 ? "Float64" : (a.as(NumberLiteral).kind == NumberKind::I64 ? "Int64" : "Int32")) : "Int32")
+            end
+
+            ctor_name = if gname = info.generic_name
+                          if arg_type_names.empty?
+                            "*#{info.name}^#{gname}::new:#{info.name}"
+                          else
+                            "*#{info.name}^#{gname}::new<#{arg_type_names.join(", ")}>:#{info.name}"
+                          end
+                        else
+                          if arg_type_names.empty?
+                            "*#{info.name}::new:#{info.name}"
+                          else
+                            "*#{info.name}::new<#{arg_type_names.join(", ")}>:#{info.name}"
+                          end
+                        end
+
+            if ctor_fn = @mod.get_function?(ctor_name)
+              call_ret_ty = info.is_struct ? @llvm_struct_types[info.name] : @types.pointer
+              call_args = if info.generic_name
+                            tid_class_global_name = "#{info.name}.class:type_id"
+                            tid_class_global = if g = @mod.get_global?(tid_class_global_name)
+                                                 g
+                                               else
+                                                 cg_g = @mod.add_global(tid_class_global_name, @types.int32)
+                                                 cg_g.initializer = @builder.const_int(@types.int32, info.type_id + 44)
+                                                 cg_g.global_constant = true
+                                                 cg_g.linkage = Linkage::Internal
+                                                 cg_g
+                                               end
+                            l_tid = @builder.load(@types.int32, tid_class_global)
+                            set_align(l_tid, 4)
+                            c_args = [l_tid] of Value
+                            arg_vals.each { |av| c_args << av }
+                            c_args
+                          else
+                            arg_vals
+                          end
+              ctor_arg_tys = call_args.map(&.type)
+              ctor_fn_ty = @types.func(ctor_arg_tys, call_ret_ty, false)
+              call_val = @builder.call(ctor_fn_ty, ctor_fn.to_value, call_args)
+
+              if info.is_struct
+                # Struct by value: store to temporary alloca, load from temporary alloca
+                if @struct_temp_index < @struct_call_temps.size
+                  temp_ptr = @struct_call_temps[@struct_temp_index]
+                  @struct_temp_index += 1
+                  st = @llvm_struct_types[info.name]
+                  s_inst = @builder.store(call_val, temp_ptr)
+                  set_align(s_inst, 4)
+                  l_inst = @builder.load(st, temp_ptr)
+                  set_align(l_inst, 4)
+                  @last = l_inst
+                else
+                  @last = call_val
+                end
+              else
+                @last = call_val
+              end
+
+              @terminated = false
+              return false
+            end
+          end
+        end
+      end
+      # Conversion operations on expressions: exp.to_f, exp.to_f64, exp.to_f32, exp.to_i, exp.to_i32, exp.to_i64, exp.to_u64, exp.to_u32, exp.to_u8, exp.to_i8
+      if node.args.empty? && (node.name == "to_f" || node.name == "to_f64" || node.name == "to_f32" || node.name == "to_i" || node.name == "to_i32" || node.name == "to_i64" || node.name == "to_u64" || node.name == "to_u32" || node.name == "to_u8" || node.name == "to_i8")
+        obj.accept(self)
+        if val = @last
+          if node.name == "to_f" || node.name == "to_f64"
+            @last = if val.type.int?
+                      @builder.si_to_fp(val, @types.double)
+                    elsif val.type == @types.float
+                      @builder.fp_ext(val, @types.double)
+                    else
+                      val
+                    end
+            @terminated = false
+            return false
+          elsif node.name == "to_f32"
+            @last = if val.type.int?
+                      @builder.si_to_fp(val, @types.float)
+                    elsif val.type == @types.double
+                      @builder.fp_trunc(val, @types.float)
+                    else
+                      val
+                    end
+            @terminated = false
+            return false
+          elsif node.name == "to_i64" || node.name == "to_u64"
+            @last = if val.type == @types.double || val.type == @types.float
+                      @builder.fp_to_si(val, @types.int64)
+                    elsif val.type.int?
+                      val.type.int_width < 64 ? @builder.zext(val, @types.int64) : (val.type.int_width > 64 ? @builder.trunc(val, @types.int64) : val)
+                    else
+                      val
+                    end
+            @terminated = false
+            return false
+          elsif node.name == "to_i" || node.name == "to_i32" || node.name == "to_u32"
+            @last = if val.type == @types.double || val.type == @types.float
+                      @builder.fp_to_si(val, @types.int32)
+                    elsif val.type.int?
+                      val.type.int_width < 32 ? @builder.zext(val, @types.int32) : (val.type.int_width > 32 ? @builder.trunc(val, @types.int32) : val)
+                    else
+                      val
+                    end
+            @terminated = false
+            return false
+          elsif node.name == "to_u8" || node.name == "to_i8"
+            @last = if val.type.int?
+                      val.type.int_width > 8 ? @builder.trunc(val, @types.int8) : val
+                    else
+                      val
+                    end
+            @terminated = false
+            return false
+          end
+        end
+      end
+
+      # 2. Pointer operations: ptr.value, ptr.value=, ptr + offset, ptr - other, ptr.address
+      if obj.is_a?(Var)
+        vname = obj.as(Var).name
+        vtname = @var_type_names[vname]?
+        if vtname && (vtname.starts_with?("Proc(") || vtname == "->") && node.name == "call"
+          proc_ptr = @vars[vname]?
+          if proc_ptr
+            proc_val = @builder.load(proc_type, proc_ptr, "")
+            set_align(proc_val, 8)
+            fun_ptr = @builder.extract_value(proc_val, 0)
+            ctx_ptr = @builder.extract_value(proc_val, 1)
+
+            is_null = @builder.icmp(IntPredicate::EQ, ctx_ptr, @builder.const_null_pointer)
+            cur_f = @current_fn
+            if cur_f.nil?
+              return false
+            end
+            cf = cur_f
+            ctx_is_null_bb = cf.append_basic_block("ctx_is_null")
+            ctx_is_not_null_bb = cf.append_basic_block("ctx_is_not_null")
+            exit_bb = cf.append_basic_block("exit")
+            @builder.cond_br(is_null, ctx_is_null_bb, ctx_is_not_null_bb)
+
+            arg_vals = [] of Value
+            node.args.each do |a|
+              a.accept(self)
+              if l = @last
+                arg_vals << l
+              end
+            end
+
+            sig = parse_proc_type_signature(vtname)
+            arg_llvm_tys = sig[0].map { |an| llvm_type_from_name(an) }
+            ret_llvm_ty = llvm_type_from_name(sig[1])
+
+            # ctx_is_null
+            @builder.position_at_end(ctx_is_null_bb)
+            fn_ty_null = @types.func(arg_llvm_tys, ret_llvm_ty, false)
+            call_null = @builder.call(fn_ty_null, fun_ptr, arg_vals)
+            @builder.br(exit_bb)
+
+            # ctx_is_not_null
+            @builder.position_at_end(ctx_is_not_null_bb)
+            not_null_param_tys = [@types.pointer] of IrType
+            arg_llvm_tys.each { |t| not_null_param_tys << t }
+            fn_ty_not_null = @types.func(not_null_param_tys, ret_llvm_ty, false)
+            not_null_args = [ctx_ptr] of Value
+            arg_vals.each { |v| not_null_args << v }
+            call_not_null = @builder.call(fn_ty_not_null, fun_ptr, not_null_args)
+            @builder.br(exit_bb)
+
+            # exit
+            @builder.position_at_end(exit_bb)
+            if ret_llvm_ty.void?
+              @last = nil
+            else
+              phi = @builder.phi(ret_llvm_ty)
+              @builder.add_incoming(phi, [call_null, call_not_null], [ctx_is_null_bb, ctx_is_not_null_bb])
+              @last = phi
+            end
+            @terminated = false
+            return false
+          end
+        end
+        if vtname && (vtname.includes?("Pointer") || vtname.ends_with?("*"))
+          elem_tname = element_type_of_pointer(vtname)
+          elem_llvm_t = llvm_type_from_name(elem_tname)
+
+          if node.name == "value" && node.args.empty?
+            ptr_val = get_ptr_val(vname)
+            l_inst = @builder.load(elem_llvm_t, ptr_val)
+            set_align(l_inst, 4)
+            @last = l_inst
+            @terminated = false
+            return false
+          elsif node.name == "value=" && node.args.size == 1
+            ptr_val = get_ptr_val(vname)
+            node.args[0].accept(self)
+            if val = @last
+              s_inst = @builder.store(val, ptr_val)
+              set_align(s_inst, 4)
+              @last = val
+              @terminated = false
+              return false
+            end
+          elsif node.name == "+" && node.args.size == 1
+            ptr_val = get_ptr_val(vname)
+            node.args[0].accept(self)
+            if offset_val = @last
+              sext = to_i64_index(offset_val)
+              @last = @builder.inbounds_gep(elem_llvm_t, ptr_val, [sext])
+              @terminated = false
+              return false
+            end
+          elsif node.name == "-" && node.args.size == 1
+            ptr_val1 = get_ptr_val(vname)
+            arg0 = node.args[0]
+            ptr_val2 = if arg0.is_a?(Var)
+                         get_ptr_val(arg0.as(Var).name)
+                       else
+                         arg0.accept(self)
+                         @last || @builder.const_null_pointer
+                       end
+            i1 = @builder.ptr_to_int(ptr_val1, @types.int64)
+            i2 = @builder.ptr_to_int(ptr_val2, @types.int64)
+            diff = @builder.sub(i1, i2)
+            elem_st = llvm_type_from_name(elem_tname)
+            size_gep = @builder.inbounds_gep(elem_st, @builder.const_null_pointer, [@builder.const_int(@types.int32, 1)])
+            size_val = @builder.ptr_to_int(size_gep, @types.int64)
+            @last = @builder.exact_sdiv(diff, size_val)
+            @terminated = false
+            return false
+          elsif node.name == "address" && node.args.empty?
+            ptr_val = get_ptr_val(vname)
+            @last = @builder.ptr_to_int(ptr_val, @types.int64)
+            @terminated = false
+            return false
+          elsif node.name == "[]" && node.args.size == 1
+            ptr_val = get_ptr_val(vname)
+            node.args[0].accept(self)
+            if idx_val = @last
+              idx64 = to_i64_index(idx_val)
+              gep = @builder.inbounds_gep(elem_llvm_t, ptr_val, [idx64])
+              l_inst = @builder.load(elem_llvm_t, gep)
+              set_align(l_inst, 4)
+              @last = l_inst
+              @terminated = false
+              return false
+            end
+          elsif node.name == "[]=" && node.args.size == 2
+            ptr_val = get_ptr_val(vname)
+            node.args[0].accept(self)
+            if idx_val = @last
+              node.args[1].accept(self)
+              if val = @last
+                idx64 = to_i64_index(idx_val)
+                gep = @builder.inbounds_gep(elem_llvm_t, ptr_val, [idx64])
+                store_val = if elem_llvm_t.int? && val.type.int?
+                              if val.type.int_width < elem_llvm_t.int_width
+                                @builder.zext(val, elem_llvm_t)
+                              elsif val.type.int_width > elem_llvm_t.int_width
+                                @builder.trunc(val, elem_llvm_t)
+                              else
+                                val
+                              end
+                            elsif elem_llvm_t.pointer? && val.type.int?
+                              @builder.const_null_pointer
+                            else
+                              val
+                            end
+                s_inst = @builder.store(store_val, gep)
+                set_align(s_inst, 4)
+                @last = val
+                @terminated = false
+                return false
+              end
+            end
+          end
+        end
+      end
+
+      # Chained pointer operations: (ptr + i).value
+      if node.name == "value" && node.args.empty? && (obj.is_a?(Call) || obj.is_a?(Expressions))
+        obj.accept(self)
+        if ptr_val = @last
+          elem_llvm_t = @types.int32
+          l_inst = @builder.load(elem_llvm_t, ptr_val)
+          set_align(l_inst, 4)
+          @last = l_inst
+          @terminated = false
+          return false
+        end
+      end
+      if obj.is_a?(InstanceVar)
+        ivar_name = obj.as(InstanceVar).name.lstrip('@')
+        if (ctype = @current_self_type) && (c_info = @custom_types[ctype]?)
+          if ftype = c_info.field_types[ivar_name]?
+            if ftype.includes?("Pointer(") || ftype.ends_with?('*')
+              elem_tname = element_type_of_pointer(ftype)
+              elem_llvm_t = llvm_type_from_name(elem_tname)
+              if node.name == "[]" && node.args.size == 1
+                obj.accept(self)
+                if ptr_val = @last
+                  node.args[0].accept(self)
+                  if idx_val = @last
+                    idx64 = to_i64_index(idx_val)
+                    gep = @builder.inbounds_gep(elem_llvm_t, ptr_val, [idx64])
+                    l_inst = @builder.load(elem_llvm_t, gep)
+                    set_align(l_inst, 4)
+                    @last = l_inst
+                    @terminated = false
+                    return false
+                  end
+                end
+              elsif node.name == "[]=" && node.args.size == 2
+                obj.accept(self)
+                if ptr_val = @last
+                  node.args[0].accept(self)
+                  if idx_val = @last
+                    node.args[1].accept(self)
+                    if val = @last
+                      idx64 = to_i64_index(idx_val)
+                      gep = @builder.inbounds_gep(elem_llvm_t, ptr_val, [idx64])
+                      store_val = if elem_llvm_t.int? && val.type.int?
+                                    if val.type.int_width < elem_llvm_t.int_width
+                                      @builder.zext(val, elem_llvm_t)
+                                    elsif val.type.int_width > elem_llvm_t.int_width
+                                      @builder.trunc(val, elem_llvm_t)
+                                    else
+                                      val
+                                    end
+                                  elsif elem_llvm_t.pointer? && val.type.int?
+                                    @builder.const_null_pointer
+                                  else
+                                    val
+                                  end
+                      s_inst = @builder.store(store_val, gep)
+                      set_align(s_inst, 4)
+                      @last = val
+                      @terminated = false
+                      return false
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+
+      # 3a. An instance method on an expression of known class type, as in Svc.new.part1.
+      # The method is found before the receiver is evaluated, so a miss emits nothing.
+      if !obj.is_a?(Var) && (rt_name = expression_class_type(obj)) && @custom_types.has_key?(rt_name)
+        r_info = @custom_types[rt_name]
+        if !r_info.is_struct && r_info.generic_name.nil? && node.args.empty? && r_info.fields.has_key?(node.name)
+          obj.accept(self)
+          if recv_val = @last
+            f_st = @llvm_struct_types[r_info.name]
+            f_gep = @builder.inbounds_gep(f_st, recv_val, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, r_info.fields[node.name] + 1)])
+            f_inst = @builder.load(llvm_type_from_name(r_info.field_types[node.name]), f_gep)
+            set_align(f_inst, 4)
+            @last = f_inst
+            @terminated = false
+            return false
+          end
+        end
+        if !r_info.is_struct && r_info.generic_name.nil? && (r_m = r_info.methods[node.name]?)
+          r_expected = r_m.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+          r_ret = r_m.return_type ? r_m.return_type.to_s.lstrip(':') : "Int32"
+          r_fn_name = if r_expected.empty?
+                        "*#{r_info.name}##{node.name}:#{r_ret}"
+                      else
+                        "*#{r_info.name}##{node.name}<#{r_expected.join(", ")}>:#{r_ret}"
+                      end
+          if r_fn = @mod.get_function?(r_fn_name)
+            obj.accept(self)
+            if recv_val = @last
+              r_args = [recv_val] of Value
+              node.args.each do |a|
+                a.accept(self)
+                if l = @last
+                  r_args << l
+                end
+              end
+              r_fn_ty = @types.func(r_args.map(&.type), llvm_type_from_name(r_ret), false)
+              @last = @builder.call(r_fn_ty, r_fn.to_value, r_args)
+              @terminated = false
+              return false
+            end
+          end
+        end
+      end
+
+      # 3. Struct & Class instance operations: p.x, p.x = val, p.method(args...)
+      if obj.is_a?(Var)
+        vname = obj.as(Var).name
+        vtname = @var_type_names[vname]?
+        if vtname && vtname.ends_with?('+')
+          base_cname = vtname.rchop('+')
+          if base_info = @custom_types[base_cname]?
+            has_sub_override = base_info.subclasses.any? do |sub_name|
+              if stinfo = @custom_types[sub_name]?
+                stinfo.methods.has_key?(node.name)
+              else
+                false
+              end
+            end
+            if base_info.fields.has_key?(node.name) && node.args.empty? && !has_sub_override
+              fidx = base_info.fields[node.name]
+              idx = fidx + 1
+              st = @llvm_struct_types[base_info.name]
+              ftype = base_info.field_types[node.name]
+              ptr = get_ptr_val(vname)
+              gep = @builder.inbounds_gep(st, ptr, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, idx)])
+              l_inst = @builder.load(llvm_type_from_name(ftype), gep)
+              set_align(l_inst, 4)
+              @last = l_inst
+              @terminated = false
+              return false
+            end
+
+            sub_targets = base_info.subclasses.select do |sub_name|
+              if stinfo = @custom_types[sub_name]?
+                stinfo.methods.has_key?(node.name)
+              else
+                false
+              end
+            end
+
+            if sub_targets.empty?
+              if m = base_info.methods[node.name]?
+                arg_vals = [] of Value
+                arg_type_names = [] of String
+                node.args.each do |a|
+                  a.accept(self)
+                  if l = @last
+                    arg_vals << l
+                  end
+                  arg_type_names << (a.is_a?(NumberLiteral) ? "Int32" : "Int32")
+                end
+                ret_tname = m.return_type ? m.return_type.to_s.lstrip(':') : "Int32"
+                method_fn_name = if arg_type_names.empty?
+                                   "*#{base_info.name}##{node.name}:#{ret_tname}"
+                                 else
+                                   "*#{base_info.name}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                                 end
+                if method_fn = @mod.get_function?(method_fn_name)
+                  ptr = get_ptr_val(vname)
+                  call_args = [ptr] of Value
+                  arg_vals.each { |av| call_args << av }
+                  call_ret_ty = llvm_type_from_name(ret_tname)
+                  m_param_tys = call_args.map(&.type)
+                  method_fn_ty = @types.func(m_param_tys, call_ret_ty, false)
+                  call_val = @builder.call(method_fn_ty, method_fn.to_value, call_args)
+                  @last = call_val
+                  @terminated = false
+                  return false
+                end
+              end
+            else
+              if fn = @current_fn
+                arg_vals = [] of Value
+                arg_type_names = [] of String
+                node.args.each do |a|
+                  a.accept(self)
+                  if l = @last
+                    arg_vals << l
+                  end
+                  arg_type_names << (a.is_a?(NumberLiteral) ? (a.as(NumberLiteral).kind == NumberKind::F64 ? "Float64" : (a.as(NumberLiteral).kind == NumberKind::I64 ? "Int64" : "Int32")) : "Int32")
+                end
+
+                ptr = get_ptr_val(vname)
+                tid_val = @builder.load(@types.int32, ptr)
+                set_align(tid_val, 4)
+
+                rev_sub_targets = sub_targets.reversed
+                phi_vals = [] of Value
+                phi_bbs = [] of Block
+
+                exit_dispatch_bb = uninitialized Block
+                exit_created = false
+
+                m_base = base_info.methods[node.name]?
+                ret_tname = if m_base && m_base.return_type
+                              m_base.return_type.to_s.lstrip(':')
+                            elsif first_sub = sub_targets.first?
+                              sub_m = @custom_types[first_sub].methods[node.name]
+                              sub_m.return_type ? sub_m.return_type.to_s : "Int32"
+                            else
+                              "Int32"
+                            end
+                ret_llvm_type = llvm_type_from_name(ret_tname)
+
+                rev_sub_targets.each do |sub_name|
+                  sub_info = @custom_types[sub_name]
+                  cur_def_bb = fn.append_basic_block("current_def")
+                  next_def_bb = fn.append_basic_block("next_def")
+
+                  # Create on demand rather than requiring it: the eager loop
+                  # skips a class with no fields and no methods, and such a
+                  # class can still be a dispatch target.
+                  sub_tid_global = if g = @mod.get_global?("#{sub_name}:type_id")
+                                     g
+                                   else
+                                     g2 = @mod.add_global("#{sub_name}:type_id", @types.int32)
+                                     g2.initializer = @builder.const_int(@types.int32, sub_info.type_id)
+                                     g2.global_constant = true
+                                     g2.linkage = Linkage::Internal
+                                     g2
+                                   end
+                  sub_tid_val = @builder.load(@types.int32, sub_tid_global)
+                  set_align(sub_tid_val, 4)
+
+                  cmp = @builder.icmp(IntPredicate::EQ, sub_tid_val, tid_val)
+                  @builder.cond_br(cmp, cur_def_bb, next_def_bb)
+
+                  if !exit_created
+                    exit_dispatch_bb = fn.append_basic_block("exit")
+                    exit_created = true
+                  end
+
+                  @builder.position_at_end(cur_def_bb)
+                  m = sub_info.methods[node.name]
+                  m_fn_name = if arg_type_names.empty?
+                                "*#{sub_name}##{node.name}:#{ret_tname}"
+                              else
+                                "*#{sub_name}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                              end
+                  if m_fn = @mod.get_function?(m_fn_name)
+                    call_args = [ptr] of Value
+                    arg_vals.each { |av| call_args << av }
+                    m_param_tys = call_args.map(&.type)
+                    m_fn_ty = @types.func(m_param_tys, ret_llvm_type, false)
+                    call_val = @builder.call(m_fn_ty, m_fn.to_value, call_args)
+                    phi_vals << call_val
+                    phi_bbs << (@builder.insert_block || cur_def_bb)
+                    @builder.br(exit_dispatch_bb)
+                  end
+
+                  @builder.position_at_end(next_def_bb)
+                end
+
+                cur_def_base_bb = fn.append_basic_block("current_def")
+                unreach_bb = fn.append_basic_block("next_def")
+
+                match_fn_name = "~match<#{base_info.name}+>"
+                if match_fn = @mod.get_function?(match_fn_name)
+                  match_fn_ty = @types.func([@types.int32], @types.int1, false)
+                  matched = @builder.call(match_fn_ty, match_fn.to_value, [tid_val])
+                  @builder.cond_br(matched, cur_def_base_bb, unreach_bb)
+
+                  @builder.position_at_end(cur_def_base_bb)
+                  base_fn_name = if arg_type_names.empty?
+                                   "*#{base_info.name}+^#{base_info.name}##{node.name}:#{ret_tname}"
+                                 else
+                                   "*#{base_info.name}+^#{base_info.name}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                                 end
+                  if b_fn = @mod.get_function?(base_fn_name)
+                    call_args = [ptr] of Value
+                    arg_vals.each { |av| call_args << av }
+                    b_param_tys = call_args.map(&.type)
+                    b_fn_ty = @types.func(b_param_tys, ret_llvm_type, false)
+                    base_call_val = @builder.call(b_fn_ty, b_fn.to_value, call_args)
+                    phi_vals << base_call_val
+                    phi_bbs << (@builder.insert_block || cur_def_base_bb)
+                    @builder.br(exit_dispatch_bb)
+                  end
+
+                  @builder.position_at_end(unreach_bb)
+                  @builder.unreachable
+
+                  @builder.position_at_end(exit_dispatch_bb)
+                  phi = @builder.phi(ret_llvm_type)
+                  @builder.add_incoming(phi, phi_vals, phi_bbs)
+                  @last = phi
+                  @terminated = false
+                  return false
+                end
+              end
+            end
+          end
+        end
+
+        if vtname && vtname.ends_with?('?')
+          base_cname = vtname.rchop('?')
+          if node.name == "nil?" && node.args.empty?
+            unless @mod.get_global?("Nil:type_id")
+              g = @mod.add_global("Nil:type_id", @types.int32)
+              g.initializer = @builder.const_int(@types.int32, 0)
+              g.global_constant = true
+              g.linkage = Linkage::Internal
+            end
+            ptr_val = get_ptr_val(vname)
+            l_null = @builder.icmp(IntPredicate::EQ, ptr_val, @builder.const_null_pointer)
+            l_nil_tid = @builder.load(@types.int32, @mod.get_global("Nil:type_id"))
+            set_align(l_nil_tid, 4)
+            box_tid_g = if g = @mod.get_global?("#{base_cname}:type_id")
+                          g
+                        else
+                          g2 = @mod.add_global("#{base_cname}:type_id", @types.int32)
+                          tid_val = (c_info = @custom_types[base_cname]?) ? c_info.type_id : 0
+                          g2.initializer = @builder.const_int(@types.int32, tid_val)
+                          g2.global_constant = true
+                          g2.linkage = Linkage::Internal
+                          g2
+                        end
+            l_box_tid = @builder.load(@types.int32, box_tid_g)
+            set_align(l_box_tid, 4)
+            sel = @builder.select(l_null, l_nil_tid, l_box_tid)
+            l_nil_tid2 = @builder.load(@types.int32, @mod.get_global("Nil:type_id"))
+            set_align(l_nil_tid2, 4)
+            res = @builder.icmp(IntPredicate::EQ, l_nil_tid2, sel)
+            @last = res
+            @terminated = false
+            return false
+          elsif base_info = @custom_types[base_cname]?
+            if base_info.fields.has_key?(node.name) && node.args.empty?
+              fidx = base_info.fields[node.name]
+              idx = fidx + 1
+              st = @llvm_struct_types[base_info.name]
+              ftype = base_info.field_types[node.name]
+              ptr = get_ptr_val(vname)
+              gep = @builder.inbounds_gep(st, ptr, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, idx)])
+              l_inst = @builder.load(llvm_type_from_name(ftype), gep)
+              set_align(l_inst, 4)
+              @last = l_inst
+              @terminated = false
+              return false
+            end
+          end
+        end
+        if vtname && (info = @custom_types[vtname]?)
+          # Field getter: p.x
+          if info.fields.has_key?(node.name) && node.args.empty?
+            fidx = info.fields[node.name]
+            idx = info.is_struct ? fidx : fidx + 1
+            st = @llvm_struct_types[info.name]
+            ftype = info.field_types[node.name]
+            ptr = if info.is_struct
+                    @vars[vname]? || get_ptr_val(vname)
+                  else
+                    get_ptr_val(vname)
+                  end
+            gep = @builder.inbounds_gep(st, ptr, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, idx)])
+            l_inst = @builder.load(llvm_type_from_name(ftype), gep)
+            set_align(l_inst, align_of_type(ftype))
+            @last = l_inst
+            @terminated = false
+            return false
+          end
+
+          # Field setter: p.x = new_x
+          if node.name.ends_with?("=") && node.args.size == 1
+            fname = node.name.rchop('=')
+            if info.fields.has_key?(fname)
+              node.args[0].accept(self)
+              if arg_val = @last
+                ftype = info.field_types[fname]
+                setter_name = "*#{info.name}##{fname}=<#{ftype}>:#{ftype}"
+                if setter_fn = @mod.get_function?(setter_name)
+                  setter_fn_ty = @types.func([@types.pointer, llvm_type_from_name(ftype)], llvm_type_from_name(ftype), false)
+                  ptr = info.is_struct ? (@vars[vname]? || get_ptr_val(vname)) : get_ptr_val(vname)
+                  @last = @builder.call(setter_fn_ty, setter_fn.to_value, [ptr, arg_val])
+                  @terminated = false
+                  return false
+                end
+              end
+            end
+          end
+
+          # Instance method call: p.distance_sq, v1.dot(v2), c.increment(by)
+          if m = info.methods[node.name]?
+            arg_vals = [] of Value
+            arg_type_names = [] of String
+            node.args.each do |a|
+              if a.is_a?(Var) && (a_tname = @var_type_names[a.as(Var).name]?) && (a_info = @custom_types[a_tname]?) && a_info.is_struct
+                # Pass struct argument by value
+                st = @llvm_struct_types[a_info.name]
+                l_inst = if vptr = @vars[a.as(Var).name]?
+                           @builder.load(st, vptr)
+                         else
+                           get_ptr_val(a.as(Var).name)
+                         end
+                arg_vals << l_inst
+                arg_type_names << a_info.name
+              else
+                a.accept(self)
+                if l = @last
+                  arg_vals << l
+                end
+                arg_type_names << (a.is_a?(NumberLiteral) ? "Int32" : "Int32")
+              end
+            end
+
+            ret_tname = m.return_type ? m.return_type.to_s.lstrip(':') : "Int32"
+            expected_arg_types = m.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+            method_fn_name = if gname = info.generic_name
+                               if expected_arg_types.empty?
+                                 "*#{info.name}^#{gname}##{node.name}:#{ret_tname}"
+                               else
+                                 "*#{info.name}^#{gname}##{node.name}<#{expected_arg_types.join(", ")}>:#{ret_tname}"
+                               end
+                             else
+                               if expected_arg_types.empty?
+                                 "*#{info.name}##{node.name}:#{ret_tname}"
+                               else
+                                 "*#{info.name}##{node.name}<#{expected_arg_types.join(", ")}>:#{ret_tname}"
+                               end
+                             end
+
+            method_fn = @mod.get_function?(method_fn_name)
+            if method_fn.nil?
+              alt_name = if gname = info.generic_name
+                           if arg_type_names.empty?
+                             "*#{info.name}^#{gname}##{node.name}:#{ret_tname}"
+                           else
+                             "*#{info.name}^#{gname}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                           end
+                         else
+                           if arg_type_names.empty?
+                             "*#{info.name}##{node.name}:#{ret_tname}"
+                           else
+                             "*#{info.name}##{node.name}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                           end
+                         end
+              method_fn = @mod.get_function?(alt_name)
+            end
+            if method_fn.nil?
+              call_args_tys = [@types.pointer] of IrType
+              expected_arg_types.each { |eat| call_args_tys << llvm_type_from_name(eat) }
+              method_fn_ty = @types.func(call_args_tys, llvm_type_from_name(ret_tname), false)
+              method_fn = @mod.add_function(method_fn_name, method_fn_ty)
+              method_fn.linkage = Linkage::External
+            end
+
+            if method_fn
+              ptr = if info.is_struct
+                      @vars[vname]? || get_ptr_val(vname)
+                    else
+                      get_ptr_val(vname)
+                    end
+              call_args = [ptr] of Value
+              arg_vals.each { |av| call_args << av }
+              call_ret_ty = llvm_type_from_name(ret_tname)
+              m_param_tys = call_args.map(&.type)
+              method_fn_ty = @types.func(m_param_tys, call_ret_ty, false)
+              call_val = @builder.call(method_fn_ty, method_fn.to_value, call_args)
+
+              if !call_ret_ty.void? && (r_info = @custom_types[ret_tname]?) && r_info.is_struct && !ret_tname.starts_with?("Pointer(") && ret_tname != "Nil" && ret_tname != "Void"
+                if @struct_temp_index < @struct_call_temps.size
+                  temp_ptr = @struct_call_temps[@struct_temp_index]
+                  @struct_temp_index += 1
+                  st = @llvm_struct_types[ret_tname]
+                  s_inst = @builder.store(call_val, temp_ptr)
+                  set_align(s_inst, 4)
+                  l_inst = @builder.load(st, temp_ptr)
+                  set_align(l_inst, 4)
+                  @last = l_inst
+                else
+                  @last = call_val
+                end
+              else
+                @last = call_val
+              end
+
+              @terminated = false
+              return false
+            end
+          end
+        end
+      elsif obj.is_a?(InstanceVar)
+        ivar_name = obj.as(InstanceVar).name.lstrip('@')
+        if (ctype = @current_self_type) && (c_info = @custom_types[ctype]?) && (cur_self = @current_self)
+          if (vtname = c_info.field_types[ivar_name]?) && (info = @custom_types[vtname]?)
+            fidx = c_info.fields[ivar_name]
+            idx = c_info.is_struct ? fidx : fidx + 1
+            st = @llvm_struct_types[c_info.name]
+            gep = @builder.inbounds_gep(st, cur_self, [@builder.const_int(@types.int32, 0), @builder.const_int(@types.int32, idx)])
+            ptr = info.is_struct ? gep : @builder.load(@types.pointer, gep)
+
+            if m = info.methods[node.name]?
+              arg_vals = [] of Value
+              arg_type_names = [] of String
+              node.args.each do |a|
+                if a.is_a?(Var) && (a_tname = @var_type_names[a.as(Var).name]?) && (a_info = @custom_types[a_tname]?) && a_info.is_struct
+                  st_arg = @llvm_struct_types[a_info.name]
+                  l_inst = if vptr = @vars[a.as(Var).name]?
+                             @builder.load(st_arg, vptr)
+                           else
+                             get_ptr_val(a.as(Var).name)
+                           end
+                  set_align(l_inst, 4)
+                  arg_vals << l_inst
+                  arg_type_names << a_tname
+                else
+                  a.accept(self)
+                  if val = @last
+                    arg_vals << val
+                    arg_type_names << (a.is_a?(NumberLiteral) ? "Int32" : "Int32")
+                  end
+                end
+              end
+
+              expected_arg_types = m.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+              ret_tname = m.return_type ? m.return_type.to_s.lstrip(':') : "Int32"
+
+              method_fn_name = if gname = info.generic_name
+                                 if expected_arg_types.empty?
+                                   "*#{info.name}^#{gname}##{node.name}:#{ret_tname}"
+                                 else
+                                   "*#{info.name}^#{gname}##{node.name}<#{expected_arg_types.join(", ")}>:#{ret_tname}"
+                                 end
+                               else
+                                 if expected_arg_types.empty?
+                                   "*#{info.name}##{node.name}:#{ret_tname}"
+                                 else
+                                   "*#{info.name}##{node.name}<#{expected_arg_types.join(", ")}>:#{ret_tname}"
+                                 end
+                               end
+
+              method_fn = @mod.get_function?(method_fn_name)
+              if method_fn.nil? && info.generic_name
+                alt_name = if expected_arg_types.empty?
+                             "*#{info.name}##{node.name}:#{ret_tname}"
+                           else
+                             "*#{info.name}##{node.name}<#{expected_arg_types.join(", ")}>:#{ret_tname}"
+                           end
+                method_fn = @mod.get_function?(alt_name)
+              end
+              if method_fn
+                call_args = [ptr] of Value
+                arg_vals.each { |av| call_args << av }
+                call_ret_ty = llvm_type_from_name(ret_tname)
+                m_param_tys = call_args.map(&.type)
+                method_fn_ty = @types.func(m_param_tys, call_ret_ty, false)
+                call_val = @builder.call(method_fn_ty, method_fn.to_value, call_args)
+
+                if !call_ret_ty.void? && (r_info = @custom_types[ret_tname]?) && r_info.is_struct && !ret_tname.starts_with?("Pointer(") && ret_tname != "Nil" && ret_tname != "Void"
+                  if @struct_temp_index < @struct_call_temps.size
+                    temp_ptr = @struct_call_temps[@struct_temp_index]
+                    @struct_temp_index += 1
+                    st_ret = @llvm_struct_types[ret_tname]
+                    s_inst = @builder.store(call_val, temp_ptr)
+                    set_align(s_inst, 4)
+                    l_inst = @builder.load(st_ret, temp_ptr)
+                    set_align(l_inst, 4)
+                    @last = l_inst
+                  else
+                    @last = call_val
+                  end
+                else
+                  @last = call_val
+                end
+
+                @terminated = false
+                return false
+              end
+            end
+          end
+        end
+      end
+
+      # Unary negation
+      if node.args.empty? && node.name == "-"
+        val = operand_value(obj, "operand of '-'")
+        is_float = (val.type.to_s == "double" || val.type.to_s == "float")
+        if is_float
+          @last = @builder.fneg(val)
+        else
+          @last = @builder.neg(val)
+        end
+        @terminated = false
+        return false
+      end
+
+      # Binary primitive operation
+      if node.args.size == 1
+        lhs = binary_operand(obj, node, "left")
+        rhs = binary_operand(node.args[0], node, "right")
+
+        # Determine if float or signed
+        is_float = (lhs.type.to_s == "double" || lhs.type.to_s == "float")
+        is_signed = true
+        if lhs.type.int? && rhs.type.int?
+          if lhs.type.int_width < rhs.type.int_width
+            lhs = @builder.zext(lhs, rhs.type)
+          elsif rhs.type.int_width < lhs.type.int_width
+            rhs = @builder.zext(rhs, lhs.type)
+          end
+        elsif lhs.type.pointer? && rhs.type.int?
+          if node.name == "<" || node.name == "<=" || node.name == ">" || node.name == ">=" || node.name == "==" || node.name == "!="
+            rhs = @builder.const_null_pointer
+          end
+        elsif lhs.type.int? && rhs.type.pointer?
+          if node.name == "<" || node.name == "<=" || node.name == ">" || node.name == ">=" || node.name == "==" || node.name == "!="
+            lhs = @builder.const_null_pointer
+          end
+        end
+        case node.name
+        when "+", "&+"
+          if lhs.type.pointer? && rhs.type.pointer?
+            str_add_name = "*String#+<String>:String"
+            if str_add_fn = @mod.get_function?(str_add_name)
+              str_add_ty = @types.func([@types.pointer, @types.pointer], @types.pointer, false)
+              @last = @builder.call(str_add_ty, str_add_fn.to_value, [lhs, rhs])
+            else
+              @last = lhs
+            end
+          elsif lhs.type.pointer?
+            idx = rhs.type == @types.int64 ? rhs : @builder.sext(rhs, @types.int64)
+            @last = @builder.inbounds_gep(@types.int8, lhs, [idx])
+          elsif rhs.type.pointer?
+            idx = lhs.type == @types.int64 ? lhs : @builder.sext(lhs, @types.int64)
+            @last = @builder.inbounds_gep(@types.int8, rhs, [idx])
+          else
+            @last = is_float ? @builder.fadd(lhs, rhs) : @builder.add(lhs, rhs)
+          end
+        when "-", "&-"
+          if lhs.type.pointer? && rhs.type.pointer?
+            i1 = @builder.ptr_to_int(lhs, @types.int64)
+            i2 = @builder.ptr_to_int(rhs, @types.int64)
+            @last = @builder.sub(i1, i2)
+          elsif lhs.type.pointer?
+            neg_idx = @builder.neg(rhs.type == @types.int64 ? rhs : @builder.sext(rhs, @types.int64))
+            @last = @builder.inbounds_gep(@types.int8, lhs, [neg_idx])
+          else
+            @last = is_float ? @builder.fsub(lhs, rhs) : @builder.sub(lhs, rhs)
+          end
+        when "*", "&*"
+          @last = is_float ? @builder.fmul(lhs, rhs) : @builder.mul(lhs, rhs)
+        when "/", "unsafe_div"
+          @last = is_float ? @builder.fdiv(lhs, rhs) : (is_signed ? @builder.sdiv(lhs, rhs) : @builder.udiv(lhs, rhs))
+        when "%", "unsafe_mod", "//"
+          @last = is_signed ? @builder.srem(lhs, rhs) : @builder.urem(lhs, rhs)
+        when "&"
+          @last = @builder.build_and(lhs, rhs)
+        when "|"
+          @last = @builder.build_or(lhs, rhs)
+        when "^"
+          @last = @builder.build_xor(lhs, rhs)
+        when "<<", "unsafe_shl"
+          r_val = if rhs.type.pointer?
+                    @builder.ptr_to_int(rhs, lhs.type)
+                  elsif rhs.type.int? && rhs.type.int_width != lhs.type.int_width
+                    rhs.type.int_width < lhs.type.int_width ? @builder.zext(rhs, lhs.type) : @builder.trunc(rhs, lhs.type)
+                  else
+                    rhs
+                  end
+          @last = @builder.shl(lhs, r_val)
+        when ">>", "unsafe_shr"
+          r_val = if rhs.type.pointer?
+                    @builder.ptr_to_int(rhs, lhs.type)
+                  elsif rhs.type.int? && rhs.type.int_width != lhs.type.int_width
+                    rhs.type.int_width < lhs.type.int_width ? @builder.zext(rhs, lhs.type) : @builder.trunc(rhs, lhs.type)
+                  else
+                    rhs
+                  end
+          @last = is_signed ? @builder.ashr(lhs, r_val) : @builder.lshr(lhs, r_val)
+        when "<"
+          @last = is_float ? @builder.fcmp(RealPredicate::OLT, lhs, rhs) : (is_signed ? @builder.icmp(IntPredicate::SLT, lhs, rhs) : @builder.icmp(IntPredicate::ULT, lhs, rhs))
+        when "<="
+          @last = is_float ? @builder.fcmp(RealPredicate::OLE, lhs, rhs) : (is_signed ? @builder.icmp(IntPredicate::SLE, lhs, rhs) : @builder.icmp(IntPredicate::ULE, lhs, rhs))
+        when ">"
+          @last = is_float ? @builder.fcmp(RealPredicate::OGT, lhs, rhs) : (is_signed ? @builder.icmp(IntPredicate::SGT, lhs, rhs) : @builder.icmp(IntPredicate::UGT, lhs, rhs))
+        when ">="
+          @last = is_float ? @builder.fcmp(RealPredicate::OGE, lhs, rhs) : (is_signed ? @builder.icmp(IntPredicate::SGE, lhs, rhs) : @builder.icmp(IntPredicate::UGE, lhs, rhs))
+        when "=="
+          @last = is_float ? @builder.fcmp(RealPredicate::OEQ, lhs, rhs) : @builder.icmp(IntPredicate::EQ, lhs, rhs)
+        when "!="
+          @last = is_float ? @builder.fcmp(RealPredicate::ONE, lhs, rhs) : @builder.icmp(IntPredicate::NE, lhs, rhs)
+        when "[]"
+          if lhs.type.pointer?
+            idx = if rhs.type.pointer?
+                    @builder.ptr_to_int(rhs, @types.int64)
+                  elsif rhs.type == @types.int64
+                    rhs
+                  elsif rhs.type.int?
+                    rhs.type.int_width < 64 ? @builder.sext(rhs, @types.int64) : @builder.trunc(rhs, @types.int64)
+                  else
+                    @builder.ptr_to_int(rhs, @types.int64)
+                  end
+            elem_t = @types.int32
+            gep = @builder.inbounds_gep(elem_t, lhs, [idx])
+            l_inst = @builder.load(elem_t, gep)
+            set_align(l_inst, 4)
+            @last = l_inst
+          end
+        end
+
+        @terminated = false
+        return false
+      end
+    end
+
+    # Function call
+    arg_vals = [] of Value
+    node.args.each do |a|
+      a.accept(self)
+      if l = @last
+        arg_vals << l
+      end
+    end
+
+    fn = @mod.get_function?(node.name)
+    if fn.nil?
+      if list = @program.defs[node.name]?
+        td = list.first
+        c_args = td.args.map { |a| llvm_type_from_name(a.restriction ? a.restriction.to_s : "Int32") }
+        c_ret = llvm_type_from_name(td.return_type ? td.return_type.to_s : "Int32")
+        fn_ty = @types.func(c_args, c_ret, false)
+        @fn_types[node.name] = fn_ty
+        fn = @mod.define_function(node.name, fn_ty)
+      end
+    end
+
+    if fn_val = fn
+      callee_type = @fn_types[node.name]
+      @last = @builder.call(callee_type, fn_val.to_value, arg_vals)
+    else
+      refuse_undefined_call(node)
+    end
+
+    @terminated = false
+    false
+  end
+end
+
+# Sets the body of a custom type's IR struct once, after the bodies of the struct
+# types it embeds by value, so a field of a type defined later is laid out
+# correctly. A struct body is set on definition, never before.
+def define_struct_body(cg : CodeGenVisitor, info : CustomTypeInfo, done : Array(String)) : Nil
+  return if done.includes?(info.name)
+  done << info.name
+  elem_types = [] of IrType
+  unless info.is_struct
+    elem_types << cg.types.int32
+  end
+  info.field_order.each do |fn|
+    ftype = info.field_types[fn]
+    if (dep = cg.custom_types[ftype]?) && dep.is_struct && !CodeGenVisitor.primitive_type_name?(dep.name)
+      define_struct_body(cg, dep, done)
+    end
+    elem_types << cg.llvm_type_from_name(ftype)
+  end
+  cg.named_struct_type(info.name).struct_set_body(elem_types)
+end
+
+def emit_custom_types_code(cg : CodeGenVisitor) : Nil
+  return if cg.custom_types.empty?
+
+  mod = cg.mod
+  builder = cg.builder
+
+  # Pre-declare all custom methods so forward/mutual calls resolve
+  cg.custom_types.each_value do |info|
+    info.methods.each do |mname, mdef|
+      next if mname == "initialize" || info.fields.has_key?(mname) || (mname.ends_with?("=") && info.fields.has_key?(mname.rchop('=')))
+      next if !mdef.block_arg.nil? || mdef.uses_block_arg? || CodeGenVisitor.has_yield?(mdef.body)
+
+      m_self_ty = if CodeGenVisitor.primitive_type_name?(info.name)
+                    cg.llvm_type_from_name(info.name)
+                  else
+                    mod.types.pointer
+                  end
+      m_arg_tys = [m_self_ty] of IrType
+      mdef.args.each do |a|
+        r_name = a.restriction ? a.restriction.to_s : "Int32"
+        if (a_info = cg.custom_types[r_name]?) && a_info.is_struct
+          m_arg_tys << cg.llvm_struct_types[r_name]
+        else
+          m_arg_tys << cg.llvm_type_from_name(r_name)
+        end
+      end
+      ret_tname = mdef.return_type ? mdef.return_type.to_s.lstrip(':') : "Int32"
+      m_ret_ty = cg.llvm_return_type_from_name(ret_tname)
+      m_fn_ty = mod.types.func(m_arg_tys, m_ret_ty, false)
+
+      arg_type_names = mdef.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+      has_sub_override = !info.subclasses.empty? && info.subclasses.any? do |sub_name|
+        if stinfo = cg.custom_types[sub_name]?
+          stinfo.methods.has_key?(mname)
+        else
+          false
+        end
+      end
+
+      fn_mangled = if gname = info.generic_name
+                     if arg_type_names.empty?
+                       "*#{info.name}^#{gname}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}^#{gname}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   elsif has_sub_override
+                     if arg_type_names.empty?
+                       "*#{info.name}+^#{info.name}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}+^#{info.name}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   else
+                     if arg_type_names.empty?
+                       "*#{info.name}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   end
+      unless mod.get_function?(fn_mangled)
+        decl = mod.define_function(fn_mangled, m_fn_ty)
+        decl.linkage = Linkage::Internal
+      end
+    end
+  end
+
+  # 2. For each custom type, emit initializer, setters, constructor, and methods
+  cg.custom_types.each_value do |info|
+    st = cg.llvm_struct_types[info.name]? || mod.types.int32
+
+    # Emit initializer if defined. A class with no initialize gets the default one (no
+    # arguments, no body) when some code constructs it; its constructor is then emitted
+    # the same way as one with an initialize.
+    default_init = if cg.constructed_classes.includes?(info.name)
+                     Def.new("initialize", [] of Arg, nil, nil, nil, Path.new("Void"))
+                   else
+                     nil
+                   end
+    if init_def = info.methods["initialize"]? || default_init
+      init_arg_tys = [mod.types.pointer] of IrType
+      init_def.args.each { |a| init_arg_tys << cg.llvm_type_from_name(a.restriction ? a.restriction.to_s : "Int32") }
+      init_ret_tname = cg.infer_def_return_type(init_def, info)
+      init_ret_ty = cg.llvm_type_from_name(init_ret_tname)
+      init_fn_ty = mod.types.func(init_arg_tys, init_ret_ty, false)
+      arg_type_names = init_def.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+      init_fn_name = if gname = info.generic_name
+                       "*#{info.name}^#{gname}#initialize<#{arg_type_names.join(", ")}>:#{init_ret_tname}"
+                     else
+                       "*#{info.name}#initialize<#{arg_type_names.join(", ")}>:#{init_ret_tname}"
+                     end
+
+      init_fn = mod.define_function(init_fn_name, init_fn_ty)
+      init_fn.linkage = Linkage::Internal
+
+      self_param = init_fn.param(0)
+      init_fn.name_param(self_param, "self")
+      init_def.args.each_with_index do |a, aidx|
+        init_fn.name_param(init_fn.param(aidx + 1), a.name)
+      end
+      cg.current_fn = init_fn
+      cg.current_fn_return_type = init_ret_ty
+      cg.current_self = self_param
+      cg.current_self_type = info.name
+      cg.current_method_name = "#{info.name}#initialize"
+
+      cg.param_values.clear
+      cg.var_type_names.clear
+      cg.vars.clear
+      cg.last = nil
+      cg.terminated = false
+      excluded_names = Set(String).new
+      cg.param_values["self"] = self_param
+      cg.var_type_names["self"] = info.name
+      excluded_names.add("self")
+
+      byval_args = [] of {Int32, Arg, CustomTypeInfo}
+      init_def.args.each_with_index do |a, aidx|
+        r_name = a.restriction ? a.restriction.to_s : "Int32"
+        cg.var_type_names[a.name] = r_name
+        if (a_info = cg.custom_types[r_name]?) && a_info.is_struct
+          byval_args << {aidx, a, a_info}
+        else
+          cg.param_values[a.name] = init_fn.param(aidx + 1)
+          excluded_names.add(a.name)
+        end
+      end
+
+      m_locals = cg.collect_local_vars(init_def.body, excluded_names)
+      m_assigns = cg.collect_local_assigns(init_def.body, excluded_names)
+      m_locals.each do |vname, vnode|
+        cg.var_type_names[vname] = cg.local_slot_type(vname, m_assigns[vname]? || [vnode] of ASTNode)
+      end
+
+      m_struct_calls = cg.collect_struct_calls(init_def.body)
+      cg.struct_call_temps.clear
+      cg.struct_temp_index = 0
+
+      needs_alloca = !m_locals.empty? || !m_struct_calls.empty? || !byval_args.empty?
+      if needs_alloca
+        alloca_bb = init_fn.append_basic_block("alloca")
+        entry_bb = init_fn.append_basic_block("entry")
+        builder.position_at_end(alloca_bb)
+
+        byval_args.each do |tup|
+          _aidx, a, a_info = tup
+          a_st = cg.llvm_struct_types[a_info.name]
+          a_ptr = builder.alloca(a_st, a.name)
+          set_align(a_ptr, 8)
+          cg.vars[a.name] = a_ptr
+        end
+
+        m_locals.each do |vname, _|
+          vt = cg.var_type_names[vname]
+          lt = cg.llvm_type_from_name(vt)
+          ptr = builder.alloca(lt, vname)
+          set_align(ptr, cg.align_of_type(vt))
+          cg.vars[vname] = ptr
+        end
+
+        m_struct_calls.each do |sname|
+          s_st = cg.llvm_struct_types[sname]
+          temp_ptr = builder.alloca(s_st, "")
+          set_align(temp_ptr, 8)
+          cg.struct_call_temps << temp_ptr
+        end
+
+        builder.br(entry_bb)
+        builder.position_at_end(entry_bb)
+
+        byval_args.each do |tup|
+          aidx, a, _a_info = tup
+          param_val = init_fn.param(aidx + 1)
+          st_inst = builder.store(param_val, cg.vars[a.name])
+          set_align(st_inst, 4)
+        end
+      else
+        entry_bb = init_fn.append_basic_block("entry")
+        builder.position_at_end(entry_bb)
+      end
+
+      cg.terminated = false
+      if b = init_def.body
+        b.accept(cg)
+      end
+
+      if init_def.body.nil?
+        init_def.args.each_with_index do |arg, aidx|
+          param_val = init_fn.param(aidx + 1)
+          fname = arg.name.lstrip('@')
+          if fidx = info.fields[fname]?
+            idx = info.is_struct ? fidx : fidx + 1
+            gep = builder.inbounds_gep(st, self_param, [cg.builder.const_int(mod.types.int32, 0), cg.builder.const_int(mod.types.int32, idx)])
+            s_inst = builder.store(param_val, gep)
+            ftype = info.field_types[fname]? || "Int32"
+            set_align(s_inst, cg.align_of_type(ftype))
+          end
+        end
+      end
+
+      unless cg.terminated
+        if init_ret_ty.void?
+          builder.ret_void
+        elsif (l = cg.last) && l.type == init_ret_ty
+          builder.ret(l)
+        elsif (l = cg.last) && init_ret_ty.int? && l.type.int?
+          if l.type.int_width > init_ret_ty.int_width
+            builder.ret(builder.trunc(l, init_ret_ty))
+          elsif l.type.int_width < init_ret_ty.int_width
+            builder.ret(builder.zext(l, init_ret_ty))
+          else
+            builder.ret(l)
+          end
+        elsif (l = cg.last) && init_ret_ty.pointer? && l.type.int?
+          builder.ret(builder.int_to_ptr(l, init_ret_ty))
+        elsif (l = cg.last) && init_ret_ty.int? && l.type.pointer?
+          builder.ret(builder.ptr_to_int(l, init_ret_ty))
+        elsif init_ret_ty.pointer?
+          builder.ret(builder.const_null(mod.types.pointer))
+        elsif init_ret_ty.float? || init_ret_ty.double?
+          builder.ret(cg.builder.const_float(init_ret_ty, 0.0))
+        elsif init_ret_ty.int?
+          builder.ret(cg.builder.const_int(init_ret_ty, 0))
+        else
+          builder.ret(cg.builder.const_null(init_ret_ty))
+        end
+        cg.terminated = true
+      end
+
+      # Emit constructor *Type::new
+      ctor_arg_tys = [] of IrType
+      if info.generic_name
+        ctor_arg_tys << mod.types.int32
+      end
+      init_def.args.each { |a| ctor_arg_tys << cg.llvm_type_from_name(a.restriction ? a.restriction.to_s : "Int32") }
+      ctor_ret_ty = info.is_struct ? st : mod.types.pointer
+      ctor_fn_ty = mod.types.func(ctor_arg_tys, ctor_ret_ty, false)
+      ctor_name = if gname = info.generic_name
+                    if arg_type_names.empty?
+                      "*#{info.name}^#{gname}::new:#{info.name}"
+                    else
+                      "*#{info.name}^#{gname}::new<#{arg_type_names.join(", ")}>:#{info.name}"
+                    end
+                  else
+                    if arg_type_names.empty?
+                      "*#{info.name}::new:#{info.name}"
+                    else
+                      "*#{info.name}::new<#{arg_type_names.join(", ")}>:#{info.name}"
+                    end
+                  end
+
+      ctor_fn = mod.define_function(ctor_name, ctor_fn_ty)
+      ctor_fn.linkage = Linkage::Internal
+      if info.generic_name
+        ctor_fn.name_param(ctor_fn.param(0), "self")
+        init_def.args.each_with_index do |a, aidx|
+          ctor_fn.name_param(ctor_fn.param(aidx + 1), a.name)
+        end
+      else
+        init_def.args.each_with_index do |a, aidx|
+          ctor_fn.name_param(ctor_fn.param(aidx), a.name)
+        end
+      end
+
+      ctor_alloca_bb = ctor_fn.append_basic_block("alloca")
+      ctor_entry_bb = ctor_fn.append_basic_block("entry")
+
+      builder.position_at_end(ctor_alloca_bb)
+      if info.is_struct
+        ret_slot = builder.alloca(st, "_")
+        set_align(ret_slot, 8)
+        zero_slot = builder.alloca(st, "")
+        set_align(zero_slot, 8)
+        builder.br(ctor_entry_bb)
+
+        builder.position_at_end(ctor_entry_bb)
+        # Compute size = ptrtoint (ptr getelementptr (%Type, ptr null, i32 1) to i64)
+        null_ptr = builder.const_null(mod.types.pointer)
+        size_gep = builder.gep(st, null_ptr, [cg.builder.const_int(mod.types.int32, 1)])
+        size_val = builder.ptr_to_int(size_gep, mod.types.int64)
+
+        # Call memset
+        builder.intrinsic(IntrinsicId::Memset, [mod.types.pointer, mod.types.int64], [zero_slot, cg.builder.const_int(mod.types.int8, 0), size_val, cg.builder.const_int(mod.types.int1, 0)] of Value)
+
+        l_zero = builder.load(st, zero_slot)
+        set_align(l_zero, 4)
+        s_ret = builder.store(l_zero, ret_slot)
+        set_align(s_ret, 4)
+
+        # Call initialize(ptr %_, args...)
+        init_args = [ret_slot] of Value
+        init_def.args.each_with_index do |_, aidx|
+          init_args << ctor_fn.param(info.generic_name ? aidx + 1 : aidx)
+        end
+        builder.call(init_fn_ty, init_fn.to_value, init_args)
+
+        final_val = builder.load(st, ret_slot)
+        set_align(final_val, 4)
+        builder.ret(final_val)
+      else
+        # Class constructor: malloc heap object
+        ret_slot = builder.alloca(mod.types.pointer, "_")
+        set_align(ret_slot, 8)
+        builder.br(ctor_entry_bb)
+
+        builder.position_at_end(ctor_entry_bb)
+        if info.generic_name
+          tid_class_global_name = "#{info.name}.class:type_id"
+          tid_class_global = if g = mod.get_global?(tid_class_global_name)
+                               g
+                             else
+                               cg_g = mod.add_global(tid_class_global_name, mod.types.int32)
+                               cg_g.initializer = cg.builder.const_int(mod.types.int32, info.type_id + 44)
+                               cg_g.global_constant = true
+                               cg_g.linkage = Linkage::Internal
+                               cg_g
+                             end
+          l_cid = builder.load(mod.types.int32, tid_class_global)
+          set_align(l_cid, 4)
+        end
+        null_ptr = builder.const_null(mod.types.pointer)
+        size_gep = builder.gep(st, null_ptr, [cg.builder.const_int(mod.types.int32, 1)])
+        size_val = builder.ptr_to_int(size_gep, mod.types.int64)
+
+        mal_fn_ty = mod.types.func([mod.types.int64], mod.types.pointer, false)
+        obj_ptr = builder.call(mal_fn_ty, cg.ensure_malloc.to_value, [size_val])
+
+        builder.intrinsic(IntrinsicId::Memset, [mod.types.pointer, mod.types.int64], [obj_ptr, cg.builder.const_int(mod.types.int8, 0), size_val, cg.builder.const_int(mod.types.int1, 0)] of Value)
+
+        # Store type_id at index 0
+        tid_gep = builder.inbounds_gep(st, obj_ptr, [cg.builder.const_int(mod.types.int32, 0), cg.builder.const_int(mod.types.int32, 0)])
+        tid_global = if g = mod.get_global?("#{info.name}:type_id")
+                       g
+                     else
+                       g2 = mod.add_global("#{info.name}:type_id", mod.types.int32)
+                       g2.initializer = cg.builder.const_int(mod.types.int32, info.type_id)
+                       g2.global_constant = true
+                       g2.linkage = Linkage::Internal
+                       g2
+                     end
+        tid_val = builder.load(mod.types.int32, tid_global)
+        set_align(tid_val, 4)
+        s_tid = builder.store(tid_val, tid_gep)
+        set_align(s_tid, 4)
+
+        builder.store(obj_ptr, ret_slot)
+        loaded_ptr = builder.load(mod.types.pointer, ret_slot)
+
+        # Call initialize(loaded_ptr, args...)
+        init_args = [loaded_ptr] of Value
+        init_def.args.each_with_index do |_, aidx|
+          init_args << ctor_fn.param(info.generic_name ? aidx + 1 : aidx)
+        end
+        builder.call(init_fn_ty, init_fn.to_value, init_args)
+
+        final_obj = builder.load(mod.types.pointer, ret_slot)
+        builder.ret(final_obj)
+      end
+    end
+
+    # Emit setters for fields
+    info.fields.each do |fname, fidx|
+      next unless info.methods.has_key?("#{fname}=")
+      ftype = info.field_types[fname]
+      setter_name = "*#{info.name}##{fname}=<#{ftype}>:#{ftype}"
+      setter_fn_ty = mod.types.func([mod.types.pointer, cg.llvm_type_from_name(ftype)], cg.llvm_type_from_name(ftype), false)
+      s_fn = mod.define_function(setter_name, setter_fn_ty)
+      s_fn.linkage = Linkage::Internal
+
+      s_entry = s_fn.append_basic_block("entry")
+      builder.position_at_end(s_entry)
+      self_ptr = s_fn.param(0)
+      s_fn.name_param(self_ptr, "self")
+      val_param = s_fn.param(1)
+      s_fn.name_param(val_param, "val")
+      idx = info.is_struct ? fidx : fidx + 1
+      gep = builder.inbounds_gep(st, self_ptr, [cg.builder.const_int(mod.types.int32, 0), cg.builder.const_int(mod.types.int32, idx)])
+      st_inst = builder.store(val_param, gep)
+      set_align(st_inst, 4)
+      builder.ret(val_param)
+    end
+
+    # Emit virtual match function if class has subclasses and has an overridden method
+    has_any_override = info.subclasses.any? do |sub_name|
+      if sub_info = cg.custom_types[sub_name]?
+        info.methods.keys.any? { |mname| mname != "initialize" && sub_info.methods.has_key?(mname) }
+      else
+        false
+      end
+    end
+    if !info.is_struct && has_any_override
+      fn_name = "~match<#{info.name}+>"
+      unless mod.get_function?(fn_name)
+        fn_ty = mod.types.func([mod.types.int32], mod.types.int1, false)
+        m_match_fn = mod.define_function(fn_name, fn_ty)
+        m_match_fn.linkage = Linkage::Internal
+        entry_bb = m_match_fn.append_basic_block("entry")
+        builder.position_at_end(entry_bb)
+        arg0 = m_match_fn.param(0)
+        min_val = cg.builder.const_int(mod.types.int32, info.min_type_id)
+        max_val = cg.builder.const_int(mod.types.int32, info.max_type_id)
+        sge = builder.icmp(IntPredicate::SGE, arg0, min_val)
+        sle = builder.icmp(IntPredicate::SLE, arg0, max_val)
+        res = builder.build_and(sge, sle)
+        builder.ret(res)
+      end
+    end
+
+    # Emit custom methods
+    info.methods.each do |mname, mdef|
+      next if mname == "initialize" || info.fields.has_key?(mname) || (mname.ends_with?("=") && info.fields.has_key?(mname.rchop('=')))
+      next if !mdef.block_arg.nil? || mdef.uses_block_arg? || CodeGenVisitor.has_yield?(mdef.body)
+
+      m_self_ty = if CodeGenVisitor.primitive_type_name?(info.name)
+                    cg.llvm_type_from_name(info.name)
+                  else
+                    mod.types.pointer
+                  end
+      m_arg_tys = [m_self_ty] of IrType
+      mdef.args.each do |a|
+        r_name = a.restriction ? a.restriction.to_s : "Int32"
+        if (a_info = cg.custom_types[r_name]?) && a_info.is_struct
+          m_arg_tys << cg.llvm_struct_types[r_name]
+        else
+          m_arg_tys << cg.llvm_type_from_name(r_name)
+        end
+      end
+      ret_tname = mdef.return_type ? mdef.return_type.to_s.lstrip(':') : "Int32"
+      m_ret_ty = cg.llvm_return_type_from_name(ret_tname)
+      m_fn_ty = mod.types.func(m_arg_tys, m_ret_ty, false)
+
+      arg_type_names = mdef.args.map { |a| a.restriction ? a.restriction.to_s : "Int32" }
+      has_sub_override = !info.subclasses.empty? && info.subclasses.any? do |sub_name|
+        if stinfo = cg.custom_types[sub_name]?
+          stinfo.methods.has_key?(mname)
+        else
+          false
+        end
+      end
+
+      fn_mangled = if gname = info.generic_name
+                     if arg_type_names.empty?
+                       "*#{info.name}^#{gname}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}^#{gname}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   elsif has_sub_override
+                     if arg_type_names.empty?
+                       "*#{info.name}+^#{info.name}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}+^#{info.name}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   else
+                     if arg_type_names.empty?
+                       "*#{info.name}##{mname}:#{ret_tname}"
+                     else
+                       "*#{info.name}##{mname}<#{arg_type_names.join(", ")}>:#{ret_tname}"
+                     end
+                   end
+      m_fn = if existing = mod.get_function?(fn_mangled)
+               existing
+             else
+               mod.define_function(fn_mangled, m_fn_ty)
+             end
+      m_fn.linkage = Linkage::Internal
+
+      cg.current_fn = m_fn
+      cg.current_fn_return_type = m_ret_ty
+      self_param = m_fn.param(0)
+      m_fn.name_param(self_param, "self")
+      cg.current_self = self_param
+      cg.current_self_type = info.name
+      cg.current_method_name = "#{info.name}##{mname}"
+      mdef.args.each_with_index do |a, aidx|
+        m_fn.name_param(m_fn.param(aidx + 1), a.name)
+      end
+
+      # Prepare parameters and local variables
+      cg.param_values.clear
+      cg.var_type_names.clear
+      cg.vars.clear
+      cg.last = nil
+      cg.terminated = false
+      excluded_names = Set(String).new
+      cg.param_values["self"] = self_param
+      cg.var_type_names["self"] = info.name
+      excluded_names.add("self")
+
+      # First: check if any argument is passed by value (struct)
+      byval_args = [] of {Int32, Arg, CustomTypeInfo}
+      mdef.args.each_with_index do |a, aidx|
+        r_name = a.restriction ? a.restriction.to_s : "Int32"
+        cg.var_type_names[a.name] = r_name
+        if (a_info = cg.custom_types[r_name]?) && a_info.is_struct
+          byval_args << {aidx, a, a_info}
+        else
+          cg.param_values[a.name] = m_fn.param(aidx + 1)
+          excluded_names.add(a.name)
+        end
+      end
+
+      # Local variables
+      m_locals = cg.collect_local_vars(mdef.body, excluded_names)
+      m_assigns = cg.collect_local_assigns(mdef.body, excluded_names)
+      m_locals.each do |vname, vnode|
+        cg.var_type_names[vname] = cg.local_slot_type(vname, m_assigns[vname]? || [vnode] of ASTNode)
+      end
+
+      m_struct_calls = cg.collect_struct_calls(mdef.body)
+      cg.struct_call_temps.clear
+      cg.struct_temp_index = 0
+
+      needs_alloca = !m_locals.empty? || !m_struct_calls.empty? || !byval_args.empty?
+      if needs_alloca
+        alloca_bb = m_fn.append_basic_block("alloca")
+        entry_bb = m_fn.append_basic_block("entry")
+        builder.position_at_end(alloca_bb)
+
+        # Byval argument allocas
+        byval_args.each do |tup|
+          _aidx, a, a_info = tup
+          a_st = cg.llvm_struct_types[a_info.name]
+          a_ptr = builder.alloca(a_st, a.name)
+          set_align(a_ptr, 8)
+          cg.vars[a.name] = a_ptr
+        end
+
+        # Local variable allocas
+        m_locals.each do |vname, _|
+          vt = cg.var_type_names[vname]
+          lt = cg.llvm_type_from_name(vt)
+          ptr = builder.alloca(lt, vname)
+          set_align(ptr, cg.align_of_type(vt))
+          cg.vars[vname] = ptr
+        end
+
+        # Struct call temporaries
+        m_struct_calls.each do |sname|
+          s_st = cg.llvm_struct_types[sname]
+          temp_ptr = builder.alloca(s_st, "")
+          set_align(temp_ptr, 8)
+          cg.struct_call_temps << temp_ptr
+        end
+
+        builder.br(entry_bb)
+        builder.position_at_end(entry_bb)
+
+        # Store byval arguments
+        byval_args.each do |tup|
+          aidx, a, _a_info = tup
+          param_val = m_fn.param(aidx + 1)
+          st_inst = builder.store(param_val, cg.vars[a.name])
+          set_align(st_inst, 4)
+        end
+      else
+        entry_bb = m_fn.append_basic_block("entry")
+        builder.position_at_end(entry_bb)
+      end
+
+      cg.terminated = false
+      if b = mdef.body
+        b.accept(cg)
+      end
+
+      unless cg.terminated
+        if m_ret_ty.void?
+          builder.ret_void
+        elsif (l = cg.last) && l.type == m_ret_ty
+          builder.ret(l)
+        elsif (l = cg.last) && m_ret_ty.int? && l.type.int?
+          if l.type.int_width > m_ret_ty.int_width
+            builder.ret(builder.trunc(l, m_ret_ty))
+          elsif l.type.int_width < m_ret_ty.int_width
+            builder.ret(builder.zext(l, m_ret_ty))
+          else
+            builder.ret(l)
+          end
+        elsif (l = cg.last) && m_ret_ty.pointer? && l.type.int?
+          builder.ret(builder.int_to_ptr(l, m_ret_ty))
+        elsif (l = cg.last) && m_ret_ty.int? && l.type.pointer?
+          builder.ret(builder.ptr_to_int(l, m_ret_ty))
+        elsif (l = cg.last) && (m_ret_ty.float? || m_ret_ty.double?) && l.type.int?
+          builder.ret(builder.si_to_fp(l, m_ret_ty))
+        elsif m_ret_ty.pointer?
+          builder.ret(builder.const_null(mod.types.pointer))
+        elsif m_ret_ty.float? || m_ret_ty.double?
+          builder.ret(cg.builder.const_float(m_ret_ty, 0.0))
+        elsif m_ret_ty.int?
+          builder.ret(cg.builder.const_int(m_ret_ty, 0))
+        else
+          builder.ret(cg.builder.const_null(m_ret_ty))
+        end
+        cg.terminated = true
+      end
+    end
+  end
+end
+
+# Wraps top-level statements into __crystal_main and main, the way the shipped
+# backend does. Both the single-file path and the multi-file pipeline call this,
+# so a program's behaviour does not depend on which one compiled it.
+pub def append_entry_point(funs : Array(FunDef), top_level_stmts : Array(ASTNode)) : Nil
+  argv_type = Generic.new(Path.global("Pointer"), [Generic.new(Path.global("Pointer"), [Path.global("UInt8")] of ASTNode)] of ASTNode)
+  unless funs.any? { |f| f.name == "__crystal_main" && !f.body.nil? }
+    init_stmts = top_level_stmts.empty? ? [Nop.new] of ASTNode : top_level_stmts
+    init_fun = FunDef.new(
+      "__crystal_main",
+      [
+        Arg.new("argc", restriction: Path.global("Int32")),
+        Arg.new("argv", restriction: argv_type),
+      ],
+      Path.new("Void"),
+      Expressions.new(init_stmts)
+    )
+    funs << init_fun
+  end
+  unless funs.any? { |f| f.name == "main" }
+    return if top_level_stmts.empty?
+    main_fun = FunDef.new(
+      "main",
+      [
+        Arg.new("argc", restriction: Path.global("Int32")),
+        Arg.new("argv", restriction: argv_type.clone.as(ASTNode)),
+      ],
+      Path.global("Int32"),
+      Expressions.new([
+        Call.new(nil, "__crystal_main", [Var.new("argc"), Var.new("argv")] of ASTNode),
+        NumberLiteral.new("0", NumberKind::I32),
+      ] of ASTNode)
+    )
+    funs << main_fun
+  end
+end
+
+pub def compile_source_to_module(src : String, filename : String, mod : Module) : CodeGenVisitor
+  parser = Parser.new(src, filename)
+  node = parser.parse
+  refuse_exception_handlers(node)
+
+  prog = SemanticProgram.new
+  prog.normalizer.macro_flags = MacroTargetFlags.for_triple(mod.triple, [] of String)
+  register_primitive_operators(prog)
+
+  classes = [] of ClassDef
+  funs = [] of FunDef
+  defs = Hash(String, Def).new
+  libs = [] of LibDef
+  top_level_stmts = [] of ASTNode
+  if node.is_a?(Expressions)
+    node.as(Expressions).expressions.each do |e|
+      if e.is_a?(ClassDef)
+        classes << e.as(ClassDef)
+      elsif e.is_a?(FunDef)
+        funs << e.as(FunDef)
+      elsif e.is_a?(Def)
+        defs[e.as(Def).name] = e.as(Def)
+      elsif e.is_a?(LibDef)
+        libs << e.as(LibDef)
+      elsif e.is_a?(Annotation) || e.is_a?(Nop)
+        # ignore annotations and nops
+      else
+        top_level_stmts << e
+      end
+    end
+  elsif node.is_a?(ClassDef)
+    classes << node.as(ClassDef)
+  elsif node.is_a?(FunDef)
+    funs << node.as(FunDef)
+  elsif node.is_a?(Def)
+    defs[node.as(Def).name] = node.as(Def)
+  elsif node.is_a?(LibDef)
+    libs << node.as(LibDef)
+  elsif !node.is_a?(Annotation) && !node.is_a?(Nop)
+    top_level_stmts << node
+  end
+
+  append_entry_point(funs, top_level_stmts)
+  # Register funs in program
+  funs.each do |fd|
+    cloned_args = fd.args.map { |a| a.clone.as(Arg) }
+    d = Def.new(fd.name, cloned_args, fd.body, nil, nil, fd.return_type)
+    prog.add_def(d)
+  end
+  tl = TopLevelVisitor.new(prog)
+  plain_classes = [] of ASTNode
+  classes.each do |cd|
+    next if (tvars = cd.type_vars) && !tvars.empty?
+    plain_classes << cd
+  end
+  # One pass over the classes: the top level resolves each field's type when the
+  # pass finishes, so every class must be registered before that point.
+  Expressions.new(plain_classes).accept(tl)
+
+  mv = MainVisitor.new(prog)
+  funs.each do |fd|
+    ret_type = if rt = fd.return_type
+                 prog.lookup_type_node(rt, prog)
+               else
+                 prog.int32_type
+               end
+    mv.set_type(fd, ret_type)
+  end
+
+  compile_declarations_to_module(classes, funs, defs, libs, filename, mod, prog, mv, [node] of ASTNode)
+end
+
+def collect_constants_from(node : ASTNode, into : Hash(String, ASTNode), flags : Array(String), host_flags : Array(String)) : Nil
+  if node.is_a?(Expressions)
+    node.as(Expressions).expressions.each do |e|
+      collect_constants_from(e, into, flags, host_flags)
+    end
+  elsif node.is_a?(Assign)
+    assign = node.as(Assign)
+    t = assign.target
+    tname = t.is_a?(Path) ? t.as(Path).to_s : (t.is_a?(Var) ? t.as(Var).name : "")
+    if !tname.empty? && tname[0].ascii_uppercase?
+      into[tname] = assign.value
+    end
+  elsif node.is_a?(MacroIf)
+    mif = node.as(MacroIf)
+    interp = MacroInterpreter.new(nil, flags, "<Program>", host_flags)
+    cond_val = interp.evaluate(mif.cond)
+    is_t = MacroMethods.truthy?(cond_val)
+    branch = is_t ? mif.then : mif.else
+    collect_constants_from(branch, into, flags, host_flags)
+  elsif node.is_a?(MacroLiteral)
+    ml = node.as(MacroLiteral)
+    ml.value.split('\n').each do |line|
+      trimmed = line.strip
+      if trimmed.includes?(" = ")
+        parts = trimmed.split(" = ")
+        cname = parts[0].strip
+        cval_str = parts[1].strip
+        if !cname.empty? && cname[0].ascii_uppercase?
+          num_str = cval_str.split('_')[0]
+          if num_val = num_str.to_i64?
+            into[cname] = NumberLiteral.new(num_val.to_s, NumberKind::I64)
+          end
+        end
+      end
+    end
+  end
+end
+
+def expand_body_nodes(node : ASTNode, flags : Array(String), host_flags : Array(String)) : Array(ASTNode)
+  res = [] of ASTNode
+  if node.is_a?(Expressions)
+    node.as(Expressions).expressions.each do |e|
+      res.concat(expand_body_nodes(e, flags, host_flags))
+    end
+  elsif node.is_a?(MacroIf)
+    mif = node.as(MacroIf)
+    interp = MacroInterpreter.new(nil, flags, "<Program>", host_flags)
+    cond_val = interp.evaluate(mif.cond)
+    branch = MacroMethods.truthy?(cond_val) ? mif.then : mif.else
+    res.concat(expand_body_nodes(branch, flags, host_flags))
+  elsif node.is_a?(VisibilityModifier)
+    # `private def f` is a def under a visibility modifier; the method table
+    # registers the def, as the oracle's does.
+    res.concat(expand_body_nodes(node.as(VisibilityModifier).exp, flags, host_flags))
+  else
+    res << node
+  end
+  res
+end
+
+pub def compile_declarations_to_module(
+  classes : Array(ClassDef),
+  funs : Array(FunDef),
+  defs : Hash(String, Def),
+  libs : Array(LibDef),
+  filename : String,
+  mod : Module,
+  prog : SemanticProgram,
+  mv : MainVisitor,
+  roots : Array(ASTNode) = [] of ASTNode,
+) : CodeGenVisitor
+  cg = CodeGenVisitor.new(mod, prog, mv)
+  target_flags = cg.macro_flags
+  host_flags = cg.host_flags
+  cg.filename = filename
+  cg.block_methods = defs
+  # Only the classes some code constructs with Type.new get a default constructor, as the
+  # oracle emits no code for a class nothing constructs.
+  constructed = NewCallCollector.new
+  classes.each { |cd| cd.accept(constructed) }
+  funs.each { |fd| fd.accept(constructed) }
+  defs.each_value { |d| d.accept(constructed) }
+  cg.constructed_classes = constructed.classes
+
+  # Process lib definitions
+  libs.each do |ld|
+    lname = ld.name.to_s
+    if b = ld.body
+      exps = b.is_a?(Expressions) ? b.as(Expressions).expressions : [b] of ASTNode
+      exps.each do |exp|
+        if exp.is_a?(FunDef)
+          fd = exp.as(FunDef)
+          c_name = fd.real_name || fd.name
+          c_args = fd.args.map { |a| cg.llvm_type_from_name(a.restriction ? a.restriction.to_s : "Int32") }
+          c_ret = cg.llvm_type_from_name(fd.return_type ? fd.return_type.to_s : "Void")
+          fn_ty = mod.types.func(c_args, c_ret, false)
+          is_noreturn = (fd.return_type && fd.return_type.to_s == "NoReturn") || false
+          ret_type_str = fd.return_type ? fd.return_type.to_s : "Void"
+          cg.lib_funs[{lname, fd.name}] = {c_name, fn_ty, is_noreturn}
+          cg.lib_fun_return_types[{lname, fd.name}] = ret_type_str
+          mod.add_function(c_name, fn_ty) unless mod.get_function?(c_name)
+        end
+      end
+    end
+  end
+
+  # Collect top-level constants
+  roots.each do |r|
+    collect_constants_from(r, cg.constants, target_flags, host_flags)
+  end
+
+  # Process custom types (structs and classes)
+  generic_templates = Hash(String, ClassDef).new
+  classes.each do |cd|
+    cname = cd.name.to_s
+    if (tvars = cd.type_vars) && !tvars.empty?
+      generic_templates[cname] = cd
+      next
+    end
+    info = if existing = cg.custom_types[cname]?
+             existing
+           else
+             c_info = CustomTypeInfo.new(cname, cd.struct)
+             cg.custom_types[cname] = c_info
+             c_info
+           end
+    if sc = cd.superclass
+      info.superclass_name ||= sc.to_s
+    end
+
+    # Process body
+    if b = cd.body
+      exps = expand_body_nodes(b, target_flags, host_flags)
+      exps.each do |exp|
+        if exp.is_a?(TypeDeclaration)
+          td = exp.as(TypeDeclaration)
+          fname = if td.var.is_a?(InstanceVar)
+                    td.var.as(InstanceVar).name.lstrip('@')
+                  elsif td.var.is_a?(Var)
+                    td.var.as(Var).name
+                  else
+                    ""
+                  end
+          unless fname.empty?
+            ftype = td.declared_type.to_s
+            info.add_field(fname, ftype)
+          end
+        elsif exp.is_a?(Call) && (exp.as(Call).name == "property" || exp.as(Call).name == "getter")
+          call = exp.as(Call)
+          is_prop = call.name == "property"
+          call.args.each do |arg|
+            fname = ""
+            ftype = "Int32"
+            if arg.is_a?(TypeDeclaration)
+              td = arg.as(TypeDeclaration)
+              fname = td.var.is_a?(InstanceVar) ? td.var.as(InstanceVar).name.lstrip('@') : td.var.to_s
+              ftype = td.declared_type.to_s
+            elsif arg.is_a?(Var)
+              fname = arg.as(Var).name
+            end
+            unless fname.empty?
+              info.add_field(fname, ftype)
+              info.methods[fname] = Def.new(fname, [] of Arg, InstanceVar.new("@#{fname}"), nil, nil, Path.new(ftype))
+              if is_prop
+                info.methods["#{fname}="] = Def.new("#{fname}=", [Arg.new("value", restriction: Path.new(ftype))] of Arg, Assign.new(InstanceVar.new("@#{fname}"), Var.new("value")), nil, nil, Path.new(ftype))
+              end
+            end
+          end
+        elsif exp.is_a?(Def)
+          d = exp.as(Def)
+          info.methods[d.name] = d
+        elsif exp.is_a?(Assign)
+          assign = exp.as(Assign)
+          if assign.target.is_a?(Path)
+            const_name = assign.target.as(Path).to_s
+            info.constants[const_name] = assign.value
+            info.constants["#{cname}::#{const_name}"] = assign.value
+            cg.constants[const_name] = assign.value
+            cg.constants["#{cname}::#{const_name}"] = assign.value
+          end
+        end
+      end
+      infer_undeclared_ivars(info, exps, Hash(String, String).new)
+    end
+  end
+
+  # Instantiate generic types used in the module
+  usage_collector = GenericUsageCollector.new
+  roots.each { |r| r.accept(usage_collector) }
+  usage_collector.generic_nodes.each do |g|
+    base_name = g.name.to_s
+    next if base_name == "Pointer"
+    if template = generic_templates[base_name]?
+      type_args = g.type_vars.map(&.to_s)
+      inst_name = "#{base_name}(#{type_args.join(", ")})"
+      unless cg.custom_types.has_key?(inst_name)
+        info = CustomTypeInfo.new(inst_name, template.struct)
+        if tvars = template.type_vars
+          info.generic_name = "#{base_name}(#{tvars.join(", ")})"
+          subst = Hash(String, String).new
+          tvars.each_with_index { |tv, idx| subst[tv] = type_args[idx] }
+        else
+          subst = Hash(String, String).new
+        end
+
+        if b = template.body
+          exps = expand_body_nodes(b, target_flags, host_flags)
+          exps.each do |exp|
+            if exp.is_a?(TypeDeclaration)
+              td = exp.as(TypeDeclaration)
+              fname = if td.var.is_a?(InstanceVar)
+                        td.var.as(InstanceVar).name.lstrip('@')
+                      elsif td.var.is_a?(Var)
+                        td.var.as(Var).name
+                      else
+                        ""
+                      end
+              unless fname.empty?
+                raw_type = td.declared_type.to_s
+                ftype = subst[raw_type]? || raw_type
+                info.add_field(fname, ftype)
+              end
+            elsif exp.is_a?(Call) && (exp.as(Call).name == "property" || exp.as(Call).name == "getter")
+              call = exp.as(Call)
+              is_prop = call.name == "property"
+              call.args.each do |arg|
+                fname = ""
+                raw_type = "Int32"
+                if arg.is_a?(TypeDeclaration)
+                  td = arg.as(TypeDeclaration)
+                  fname = td.var.is_a?(InstanceVar) ? td.var.as(InstanceVar).name.lstrip('@') : td.var.to_s
+                  raw_type = td.declared_type.to_s
+                elsif arg.is_a?(Var)
+                  fname = arg.as(Var).name
+                end
+                unless fname.empty?
+                  ftype = subst[raw_type]? || raw_type
+                  info.add_field(fname, ftype)
+                  info.methods[fname] = Def.new(fname, [] of Arg, InstanceVar.new("@#{fname}"), nil, nil, Path.new(ftype))
+                  if is_prop
+                    info.methods["#{fname}="] = Def.new("#{fname}=", [Arg.new("value", restriction: Path.new(ftype))] of Arg, Assign.new(InstanceVar.new("@#{fname}"), Var.new("value")), nil, nil, Path.new(ftype))
+                  end
+                end
+              end
+            elsif exp.is_a?(Def)
+              d = exp.as(Def)
+              spec_args = d.args.map do |a|
+                fname = a.name.lstrip('@')
+                raw_r = a.restriction ? a.restriction.to_s : "Int32"
+                spec_r = subst[raw_r]? || raw_r
+                if a.name.starts_with?('@')
+                  info.add_field(fname, spec_r)
+                end
+                Arg.new(a.name, nil, Path.new(spec_r))
+              end
+              # A method with no declared return type keeps none: stamping a guess
+              # here overrides the inference that reads the body, and on an
+              # initialize whose parameter is the type variable the guess is wrong.
+              spec_ret_node = if rt = d.return_type
+                                raw_ret = rt.to_s
+                                Path.new(subst[raw_ret]? || raw_ret)
+                              else
+                                nil
+                              end
+              spec_def = Def.new(d.name, spec_args, d.body, nil, nil, spec_ret_node)
+              info.methods[d.name] = spec_def
+            elsif exp.is_a?(Assign)
+              assign = exp.as(Assign)
+              if assign.target.is_a?(Path)
+                const_name = assign.target.as(Path).to_s
+                info.constants[const_name] = assign.value
+              end
+            end
+          end
+          infer_undeclared_ivars(info, exps, subst)
+        end
+        cg.custom_types[inst_name] = info
+      end
+    end
+  end
+  # Predefine String class layout if strings are used
+  has_strings = classes.any? { |cd| cd.name.to_s == "String" } || usage_collector.saw_string
+  if has_strings
+    str_info = if existing_str = cg.custom_types["String"]?
+                 existing_str
+               else
+                 si = CustomTypeInfo.new("String", false)
+                 cg.custom_types["String"] = si
+                 si
+               end
+    str_info.type_id = 1
+    str_info.add_field("bytesize", "Int32")
+    str_info.add_field("length", "Int32")
+    str_info.add_field("c", "UInt8")
+  end
+  # Populate subclasses
+  cg.custom_types.each_value do |info|
+    if sc_name = info.superclass_name
+      if sc_info = cg.custom_types[sc_name]?
+        sc_info.subclasses << info.name
+      end
+    end
+  end
+
+  # Assign hierarchical class type IDs
+  cg.assign_class_type_ids
+
+  # Inherit superclass fields for classes
+  cg.custom_types.each_value do |info|
+    if sc_name = info.superclass_name
+      if sc_info = cg.custom_types[sc_name]?
+        new_order = [] of String
+        sc_info.field_order.each do |sc_fname|
+          new_order << sc_fname
+          info.field_types[sc_fname] = sc_info.field_types[sc_fname]
+        end
+        info.field_order.each do |fn|
+          unless sc_info.fields.has_key?(fn)
+            new_order << fn
+          end
+        end
+        info.field_order = new_order
+        info.fields.clear
+        info.field_order.each_with_index do |fn, idx|
+          info.fields[fn] = idx
+        end
+      end
+    end
+  end
+
+  # Create the IR struct types first, so a field may name a type defined later in
+  # the file. Each body is set below, after the bodies of the types it embeds.
+  cg.custom_types.each_value do |info|
+    next if CodeGenVisitor.primitive_type_name?(info.name) || info.name.starts_with?("Pointer(")
+    cg.named_struct_type(info.name)
+  end
+  done_structs = [] of String
+  cg.custom_types.each_value do |info|
+    next if CodeGenVisitor.primitive_type_name?(info.name) || info.name.starts_with?("Pointer(")
+    define_struct_body(cg, info, done_structs)
+
+    # An empty class with no fields and no methods is never allocated and
+    # never dispatched on, and the shipped backend emits no type_id global
+    # for it. The lazy sites below still create one on demand if some
+    # construct turns out to need it.
+    is_empty_shell = info.field_order.empty? && info.methods.empty?
+    unless info.is_struct || info.name == "String" || is_empty_shell
+      # Add type_id constant global
+      tid_global = mod.add_global("#{info.name}:type_id", mod.types.int32)
+      tid_global.initializer = cg.builder.const_int(mod.types.int32, info.type_id)
+      tid_global.global_constant = true
+      tid_global.linkage = Linkage::Internal
+    end
+  end
+
+  # Emit custom types code (methods, constructors, initializers)
+  emit_custom_types_code(cg)
+
+  # Emit funs
+  funs.each do |fd|
+    fd.accept(cg)
+  end
+
+  cg
+end

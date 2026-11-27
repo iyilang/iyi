@@ -1,0 +1,35 @@
+# Store both struct alternatives through a mixed-union pointer and read their payloads.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct User
+  def initialize(@id : Int32)
+  end
+
+  def id : Int32
+    @id
+  end
+end
+
+struct Robot
+  def initialize(@id : Int32)
+  end
+
+  def id : Int32
+    @id
+  end
+end
+
+def run : Int32
+  slot = Pointer(User | Robot).malloc(1_u64)
+  slot.value = User.new(3)
+  first = slot.value
+  a = first.is_a?(User) ? first.id : 100
+  slot.value = Robot.new(4)
+  second = slot.value
+  b = second.is_a?(Robot) ? second.id : 100
+  a &+ b
+end
+
+LibC.exit(run)

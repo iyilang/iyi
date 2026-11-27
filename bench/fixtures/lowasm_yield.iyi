@@ -1,0 +1,3 @@
+# No operands, volatile. The template is the one the prelude's spin pause uses.
+asm("yield" :::: "volatile")
+nil

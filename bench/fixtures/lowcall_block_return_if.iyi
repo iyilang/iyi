@@ -1,0 +1,13 @@
+def pick(c : Bool, &)
+  yield 1
+  if c
+    return 3
+  end
+  4
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(pick(true) { |v| v })

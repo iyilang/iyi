@@ -1,0 +1,22 @@
+# The condition narrows the then-read to no type. The else type survives, including in a settled loop.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def pick(fallback : Int32) : Int32
+  pool = nil
+  pool || fallback
+end
+
+def pick_twice(fallback : Int32) : Int32
+  pool = nil
+  total = 0
+  i = 0
+  while i < 2
+    total = total &+ (pool || fallback)
+    i = i &+ 1
+  end
+  total
+end
+
+LibC.exit(pick(7) &+ pick_twice(4))

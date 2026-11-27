@@ -1,0 +1,120 @@
+# The end-to-end self-host compiler tool.
+#
+# Thin CLI wrapper around the Compiler pipeline orchestrator (compiler/compiler).
+# Produces an executable binary linking only the platform libc.
+
+@[Unsafe("declares the C calls the tool makes in its lib, LibC's process and file functions, which the compiler does not check")]
+module compiler/tools/compile
+
+import compiler/compiler::{Compiler, CompilerConfig}
+import compiler/loader::{Loader}
+import compiler/backend/llvm/llvm_backend::{LlvmBackend}
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+module CompileTool
+  def self.print_usage : Nil
+    puts "Usage: iyi-compile [options] <source-file.iyi>"
+    puts ""
+    puts "Options:"
+    puts "    -o <filename>       Output executable filename (default: a.out)"
+    puts "    --emit-obj <file>   Emit object file only without linking"
+    puts "    --probe-phase       Probe and print compilation phases reached"
+    puts "    -v, --verbose       Print linker command"
+    puts "    -h, --help          Show this help message"
+  end
+
+  def self.run : Nil
+    args = Program.args
+    if args.empty?
+      print_usage
+      LibC.exit(1)
+      return
+    end
+
+    input_file : String? = nil
+    output_file = "a.out"
+    emit_obj_only = false
+    obj_output_file : String? = nil
+    target_arg : String? = nil
+    verbose = false
+    probe_phase = false
+    single_file = false
+    probe_verify = false
+    i = 0
+    while i < args.size
+      arg = args[i]
+      case arg
+      when "-h", "--help"
+        print_usage
+        LibC.exit(0)
+        return
+      when "-v", "--verbose"
+        verbose = true
+      when "--probe-phase"
+        probe_phase = true
+      when "--single-file"
+        single_file = true
+      when "--probe-verify"
+        probe_verify = true
+      when "--target"
+        i = i + 1
+        if i < args.size
+          target_arg = args[i]
+        else
+          STDERR.puts "Error: --target requires a triple"
+          LibC.exit(1)
+          return
+        end
+      when "--emit-obj"
+        emit_obj_only = true
+        i = i + 1
+        if i < args.size
+          obj_output_file = args[i]
+        else
+          STDERR.puts "Error: --emit-obj requires a filename"
+          LibC.exit(1)
+          return
+        end
+      when "-o"
+        i = i + 1
+        if i < args.size
+          output_file = args[i]
+        else
+          STDERR.puts "Error: -o requires a filename"
+          LibC.exit(1)
+          return
+        end
+      else
+        if arg.starts_with?("-")
+          STDERR.puts "Error: unknown option: #{arg}"
+          LibC.exit(1)
+          return
+        else
+          input_file = arg
+        end
+      end
+      i = i + 1
+    end
+
+    unless in_file = input_file
+      STDERR.puts "Error: no input file specified"
+      LibC.exit(1)
+      return
+    end
+
+    unless File.exists?(in_file)
+      STDERR.puts "Error: input file does not exist: #{in_file}"
+      LibC.exit(1)
+      return
+    end
+
+    config = CompilerConfig.new(output_file, emit_obj_only, obj_output_file, verbose, target_arg, probe_phase, single_file, probe_verify)
+    compiler = Compiler.new(config, Loader.new, LlvmBackend.new)
+    compiler.compile(in_file)
+  end
+end
+
+CompileTool.run

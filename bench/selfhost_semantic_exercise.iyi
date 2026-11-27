@@ -6,11 +6,25 @@ import compiler/semantic/main_visitor::{MainVisitor, dump_program_expressions}
 import compiler/semantic/recursive_struct_checker::{RecursiveStructChecker}
 
 module BenchSelfhostSemanticExercise
+  def self.program_for(filename : String) : SemanticProgram
+    prog = SemanticProgram.new
+    prog.entry_dir = dir_of(filename)
+    delimiter = ':'
+    {% if flag?(:win32) %}
+      delimiter = ';'
+    {% end %}
+    if path = Program.env("IYI_PATH") || Program.env("CRYSTAL_PATH")
+      path.split(delimiter).each do |entry|
+        prog.search_path << entry unless entry.empty?
+      end
+    end
+    prog
+  end
+
   def self.run_source(src : String, filename : String = "eval.iyi") : String
     parser = Parser.new(src, filename)
     node = parser.parse
-    prog = SemanticProgram.new
-    prog.entry_dir = dir_of(filename)
+    prog = program_for(filename)
     visitor = TopLevelVisitor.new(prog, filename)
     visitor.defer_class_vars = true
     visitor.defer_instance_vars = true
@@ -22,7 +36,7 @@ module BenchSelfhostSemanticExercise
   def self.run_expr_source(src : String, filename : String = "eval.iyi") : String
     parser = Parser.new(src, filename)
     node = parser.parse
-    prog = SemanticProgram.new
+    prog = program_for(filename)
     tl = TopLevelVisitor.new(prog, filename)
     node.accept(tl)
     tl.finish
@@ -36,8 +50,8 @@ module BenchSelfhostSemanticExercise
   def self.count_declarations(src : String, filename : String) : Int32
     parser = Parser.new(src, filename)
     node = parser.parse
-    prog = SemanticProgram.new
-    visitor = TopLevelVisitor.new(prog)
+    prog = program_for(filename)
+    visitor = TopLevelVisitor.new(prog, filename)
     node.accept(visitor)
     visitor.finish
     count = 0
@@ -55,7 +69,7 @@ module BenchSelfhostSemanticExercise
   def self.count_expressions(src : String, filename : String) : Int32
     parser = Parser.new(src, filename)
     node = parser.parse
-    prog = SemanticProgram.new
+    prog = program_for(filename)
     tl = TopLevelVisitor.new(prog, filename)
     node.accept(tl)
     tl.finish

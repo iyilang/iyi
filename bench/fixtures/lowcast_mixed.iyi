@@ -1,0 +1,13 @@
+# A variable assigned two non-nil types: `x = 1` then `x = true` gives x the mixed union Int32 | Bool.
+# The status is the constant 7; the union is stored into, not read.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def store(flag : Bool) : Int32
+  x = 1
+  x = true
+  7
+end
+
+LibC.exit(store(false))

@@ -1,0 +1,11 @@
+struct Int32
+  def me : Int32
+    self
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(7.me)

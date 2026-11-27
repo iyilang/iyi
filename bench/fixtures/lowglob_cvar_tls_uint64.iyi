@@ -1,0 +1,19 @@
+class Tl
+  @[ThreadLocal]
+  @@line : UInt64 = 0_u64
+
+  def self.line : UInt64
+    @@line
+  end
+
+  def self.set(value : UInt64)
+    @@line = value
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+Tl.set(9_u64)
+LibC.exit(Tl.line == 9_u64 ? 7 : 3)

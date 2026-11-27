@@ -1,0 +1,9 @@
+module unit_cvar_array_module
+
+pub class Inventory
+  @@items = [] of Int32
+
+  def self.items : Array(Int32)
+    @@items
+  end
+end

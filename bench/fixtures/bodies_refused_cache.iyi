@@ -1,0 +1,7 @@
+def add(a : Int32, b : Int32) : Int32
+  a &+ b
+end
+
+a = add(2, 3)
+b = add(3, 4)
+c = add(4, 5)

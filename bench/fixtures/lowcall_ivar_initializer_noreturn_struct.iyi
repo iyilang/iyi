@@ -1,0 +1,10 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct ExitDuringAllocation
+  @value : Int32 = LibC.exit(8)
+end
+
+ExitDuringAllocation.new
+LibC.exit(9)

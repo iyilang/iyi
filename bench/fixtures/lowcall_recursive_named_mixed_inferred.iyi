@@ -1,0 +1,28 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+# Named and positional calls share the same recursive instance without a declared return type.
+def mixed_value(flag : Bool, value : Bool = false)
+  if flag
+    mixed_value(false, value: true)
+  elsif value
+    7
+  else
+    1
+  end
+end
+
+def mixed_receiver(flag : Bool, value : Bool = false)
+  if flag
+    mixed_receiver(false, value: true) &+ 1
+  elsif value
+    6
+  else
+    1
+  end
+end
+
+LibC.exit(1) unless mixed_value(true, false) == 7
+LibC.exit(2) unless mixed_receiver(true, false) == 7
+LibC.exit(0)

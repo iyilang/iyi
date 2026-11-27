@@ -1,0 +1,14 @@
+class Base
+  def self.flag : Int32
+    7
+  end
+end
+
+class Child < Base
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Child.flag)

@@ -1,0 +1,12 @@
+@[Unsafe("declares the C function main for the runtime test")]
+class Branch
+  def tag : String
+    {% if flag?(:linux) %} "linux-branch" {% else %} "other-branch" {% end %}
+  end
+end
+
+# The branch a target takes is the one its flags select, not the host's: the object for x86_64-linux-gnu holds
+# "linux-branch" and the object for aarch64-apple-darwin holds "other-branch".
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  Branch.new.tag.bytesize
+end

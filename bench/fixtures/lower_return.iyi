@@ -1,0 +1,8 @@
+def pick(x : Int32) : Int32
+  if x
+    return 1
+  end
+  2
+end
+
+pick(3)

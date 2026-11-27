@@ -1,0 +1,5 @@
+def run : Int32
+  x = uninitialized Int32
+end
+
+run

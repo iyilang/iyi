@@ -1,0 +1,12 @@
+# A generic instance method is named with its generic defining owner.
+class Box(T)
+  def initialize
+  end
+
+  def get(value : T) : T
+    copy = value
+    copy
+  end
+end
+
+Box(Int32).new.get(1)

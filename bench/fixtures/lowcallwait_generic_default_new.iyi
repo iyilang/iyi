@@ -1,0 +1,11 @@
+class Opt(T)
+  def initialize(v : T, n : Int32 = 1)
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+Opt.new(7)
+LibC.exit(7)

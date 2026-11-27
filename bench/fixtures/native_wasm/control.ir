@@ -1,0 +1,139 @@
+; iyi-ir 1
+module "control"
+target triple = "wasm32-wasi"
+target datalayout = "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20"
+declare external void @__iyi_print_i64(i64)
+define internal void @showb(i1 %v) {
+entry:
+  %z = zext i1 %v to i64
+  call void (i64) @__iyi_print_i64(i64 %z)
+  ret void
+}
+
+
+define internal i64 @collatz(i64 %n) {
+entry:
+  br label %head
+head:
+  %x = phi i64 [ %n, label %entry ], [ %next, label %latch ]
+  %steps = phi i64 [ 0, label %entry ], [ %steps2, label %latch ]
+  %done = icmp eq i64 %x, 1
+  br i1 %done, label %exit, label %body
+body:
+  %odd = and i64 %x, 1
+  %isodd = icmp ne i64 %odd, 0
+  br i1 %isodd, label %oddcase, label %evencase
+oddcase:
+  %t = mul i64 %x, 3
+  %t1 = add i64 %t, 1
+  br label %latch
+evencase:
+  %h = udiv i64 %x, 2
+  br label %latch
+latch:
+  %next = phi i64 [ %t1, label %oddcase ], [ %h, label %evencase ]
+  %steps2 = add i64 %steps, 1
+  br label %head
+exit:
+  ret i64 %steps
+}
+
+define internal i32 @sw(i32 %n) {
+entry:
+  switch i32 %n, label %dflt [ i32 0, label %c0, i32 1, label %c1, i32 5, label %c5, i32 -3, label %cneg ]
+c0:
+  ret i32 100
+c1:
+  ret i32 101
+c5:
+  ret i32 105
+cneg:
+  ret i32 77
+dflt:
+  %r = mul i32 %n, 2
+  ret i32 %r
+}
+
+; Two entries into the cycle a <-> b: an irreducible graph. The dispatch loop runs it without a refusal.
+define internal i32 @irr(i32 %n) {
+entry:
+  %c = icmp slt i32 %n, 10
+  br i1 %c, label %a, label %b
+a:
+  %ka = phi i32 [ %n, label %entry ], [ %kb2, label %b ]
+  %x1 = add i32 %ka, 1
+  %ca = icmp sgt i32 %x1, 20
+  br i1 %ca, label %out, label %b
+b:
+  %kb = phi i32 [ %n, label %entry ], [ %x1, label %a ]
+  %kb2 = add i32 %kb, 2
+  %cb = icmp sgt i32 %kb2, 40
+  br i1 %cb, label %out, label %a
+out:
+  %p = phi i32 [ %x1, label %a ], [ %kb2, label %b ]
+  ret i32 %p
+}
+
+; A loop with a conditional inside, summing the odd indices of 0..n-1 and counting the even ones.
+define internal i64 @parity(i32 %n) {
+entry:
+  br label %head
+head:
+  %i = phi i32 [ 0, label %entry ], [ %inext, label %latch ]
+  %odd = phi i64 [ 0, label %entry ], [ %odd2, label %latch ]
+  %even = phi i64 [ 0, label %entry ], [ %even2, label %latch ]
+  %more = icmp slt i32 %i, %n
+  br i1 %more, label %body, label %done
+body:
+  %bit = and i32 %i, 1
+  %isodd = icmp ne i32 %bit, 0
+  br i1 %isodd, label %addodd, label %addeven
+addodd:
+  %ia = sext i32 %i to i64
+  %oa = add i64 %odd, %ia
+  br label %latch
+addeven:
+  %ea = add i64 %even, 1
+  br label %latch
+latch:
+  %odd2 = phi i64 [ %oa, label %addodd ], [ %odd, label %addeven ]
+  %even2 = phi i64 [ %even, label %addodd ], [ %ea, label %addeven ]
+  %inext = add i32 %i, 1
+  br label %head
+done:
+  %sh = shl i64 %odd, 8
+  %res = or i64 %sh, %even
+  ret i64 %res
+}
+
+define external i32 @main() {
+entry:
+  %c27 = call i64 (i64) @collatz(i64 27)
+  call void (i64) @__iyi_print_i64(i64 %c27)
+  %c1 = call i64 (i64) @collatz(i64 1)
+  call void (i64) @__iyi_print_i64(i64 %c1)
+  %s0 = call i32 (i32) @sw(i32 0)
+  %s0x = sext i32 %s0 to i64
+  call void (i64) @__iyi_print_i64(i64 %s0x)
+  %s1 = call i32 (i32) @sw(i32 1)
+  %s1x = sext i32 %s1 to i64
+  call void (i64) @__iyi_print_i64(i64 %s1x)
+  %s5 = call i32 (i32) @sw(i32 5)
+  %s5x = sext i32 %s5 to i64
+  call void (i64) @__iyi_print_i64(i64 %s5x)
+  %sn = call i32 (i32) @sw(i32 -3)
+  %snx = sext i32 %sn to i64
+  call void (i64) @__iyi_print_i64(i64 %snx)
+  %sd = call i32 (i32) @sw(i32 9)
+  %sdx = sext i32 %sd to i64
+  call void (i64) @__iyi_print_i64(i64 %sdx)
+  %i3 = call i32 (i32) @irr(i32 3)
+  %i3x = sext i32 %i3 to i64
+  call void (i64) @__iyi_print_i64(i64 %i3x)
+  %i12 = call i32 (i32) @irr(i32 12)
+  %i12x = sext i32 %i12 to i64
+  call void (i64) @__iyi_print_i64(i64 %i12x)
+  %p = call i64 (i32) @parity(i32 11)
+  call void (i64) @__iyi_print_i64(i64 %p)
+  ret i32 0
+}

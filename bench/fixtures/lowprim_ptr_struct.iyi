@@ -1,0 +1,22 @@
+# pointer_get of a by-value struct (hosted to_lhs): the value is the pointer, and no load
+# is emitted. Pair#flag does not read self, so the status is 1.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Pair
+  def flag : Int32
+    1
+  end
+end
+
+def peek(p : Pointer(Pair)) : Int32
+  p.value.flag
+end
+
+def go : Int32
+  x = Pair.new
+  peek(pointerof(x))
+end
+
+LibC.exit(go)

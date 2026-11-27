@@ -1,0 +1,16 @@
+A = 5
+B = 7
+
+def second(x : Int32, y : Int32)
+  y
+end
+
+def f
+  second(A, B)
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(f)

@@ -1,0 +1,134 @@
+; iyi-ir 1
+module "floats"
+target triple = "wasm32-wasi"
+target datalayout = "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20"
+declare external void @__iyi_print_i64(i64)
+define internal void @showb(i1 %v) {
+entry:
+  %z = zext i1 %v to i64
+  call void (i64) @__iyi_print_i64(i64 %z)
+  ret void
+}
+
+
+define internal void @showd(double %v) {
+entry:
+  %m = fmul double %v, 0x408F400000000000
+  %i = fptosi double %m to i64
+  call void (i64) @__iyi_print_i64(i64 %i)
+  ret void
+}
+
+define internal void @showf(float %v) {
+entry:
+  %d = fpext float %v to double
+  call void (double) @showd(double %d)
+  ret void
+}
+
+define internal void @cmp(double %a, double %b) {
+entry:
+  %p0 = fcmp false double %a, %b
+  call void (i1) @showb(i1 %p0)
+  %p1 = fcmp oeq double %a, %b
+  call void (i1) @showb(i1 %p1)
+  %p2 = fcmp ogt double %a, %b
+  call void (i1) @showb(i1 %p2)
+  %p3 = fcmp oge double %a, %b
+  call void (i1) @showb(i1 %p3)
+  %p4 = fcmp olt double %a, %b
+  call void (i1) @showb(i1 %p4)
+  %p5 = fcmp ole double %a, %b
+  call void (i1) @showb(i1 %p5)
+  %p6 = fcmp one double %a, %b
+  call void (i1) @showb(i1 %p6)
+  %p7 = fcmp ord double %a, %b
+  call void (i1) @showb(i1 %p7)
+  %p8 = fcmp ueq double %a, %b
+  call void (i1) @showb(i1 %p8)
+  %p9 = fcmp ugt double %a, %b
+  call void (i1) @showb(i1 %p9)
+  %p10 = fcmp uge double %a, %b
+  call void (i1) @showb(i1 %p10)
+  %p11 = fcmp ult double %a, %b
+  call void (i1) @showb(i1 %p11)
+  %p12 = fcmp ule double %a, %b
+  call void (i1) @showb(i1 %p12)
+  %p13 = fcmp une double %a, %b
+  call void (i1) @showb(i1 %p13)
+  %p14 = fcmp uno double %a, %b
+  call void (i1) @showb(i1 %p14)
+  %p15 = fcmp true double %a, %b
+  call void (i1) @showb(i1 %p15)
+  ret void
+}
+
+define internal void @cmpf(float %a, float %b) {
+entry:
+  %p1 = fcmp oeq float %a, %b
+  call void (i1) @showb(i1 %p1)
+  %p2 = fcmp ogt float %a, %b
+  call void (i1) @showb(i1 %p2)
+  %p6 = fcmp one float %a, %b
+  call void (i1) @showb(i1 %p6)
+  %p8 = fcmp ueq float %a, %b
+  call void (i1) @showb(i1 %p8)
+  %p9 = fcmp ugt float %a, %b
+  call void (i1) @showb(i1 %p9)
+  %p11 = fcmp ult float %a, %b
+  call void (i1) @showb(i1 %p11)
+  %p13 = fcmp une float %a, %b
+  call void (i1) @showb(i1 %p13)
+  %p14 = fcmp uno float %a, %b
+  call void (i1) @showb(i1 %p14)
+  ret void
+}
+
+define internal void @ops(double %a, double %b) {
+entry:
+  %s = fadd double %a, %b
+  call void (double) @showd(double %s)
+  %d = fsub double %a, %b
+  call void (double) @showd(double %d)
+  %m = fmul double %a, %b
+  call void (double) @showd(double %m)
+  %q = fdiv double %a, %b
+  call void (double) @showd(double %q)
+  %n = fneg double %a
+  call void (double) @showd(double %n)
+  ret void
+}
+
+define external i32 @main() {
+entry:
+  call void (double, double) @cmp(double 0x3FF8000000000000, double 0x4004000000000000)
+  call void (double, double) @cmp(double 0x7FF8000000000000, double 0x3FF0000000000000)
+  call void (double, double) @cmp(double 0x4000000000000000, double 0x4000000000000000)
+  call void (float, float) @cmpf(float 0x3FF8000000000000, float 0x4004000000000000)
+  call void (float, float) @cmpf(float 0x7FF8000000000000, float 0x3FF0000000000000)
+  call void (float, float) @cmpf(float 0x4000000000000000, float 0x4000000000000000)
+  call void (double, double) @ops(double 0x4004000000000000, double 0x3FE0000000000000)
+  call void (double, double) @ops(double 0xC000000000000000, double 0x4010000000000000)
+  %si = sitofp i64 -17 to double
+  call void (double) @showd(double %si)
+  %ui = uitofp i32 -294967296 to double
+  call void (double) @showd(double %ui)
+  %fi = fptosi double 0xC000000000000000 to i32
+  %fix = sext i32 %fi to i64
+  call void (i64) @__iyi_print_i64(i64 %fix)
+  %fu = fptoui double 0x4059000000000000 to i32
+  %fux = zext i32 %fu to i64
+  call void (i64) @__iyi_print_i64(i64 %fux)
+  %ft = fptrunc double 0x3FF8000000000000 to float
+  call void (float) @showf(float %ft)
+  %sf = sitofp i64 -17 to float
+  call void (float) @showf(float %sf)
+  %bc = bitcast float 0x3FF8000000000000 to i32
+  %bcx = sext i32 %bc to i64
+  call void (i64) @__iyi_print_i64(i64 %bcx)
+  %bd = bitcast double 0x3FF8000000000000 to i64
+  call void (i64) @__iyi_print_i64(i64 %bd)
+  %fb = bitcast i64 4609434218613702656 to double
+  call void (double) @showd(double %fb)
+  ret i32 0
+}

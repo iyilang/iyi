@@ -1,0 +1,40 @@
+# Same sign, narrower right: Int64 against Int32. The right operand is sign-extended and
+# the compare and the wrapping add run at i64 (hosted codegen_binary_extend_int). The
+# status is 1 + 2 + 4 + 8 = 15.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def eq_nr(a : Int64, b : Int32) : Int32
+  if a == b
+    1
+  else
+    0
+  end
+end
+
+def ne_nr(a : Int64, b : Int32) : Int32
+  if a != b
+    2
+  else
+    0
+  end
+end
+
+def lt_nr(a : Int64, b : Int32) : Int32
+  if a < b
+    4
+  else
+    0
+  end
+end
+
+def add_nr(a : Int64, b : Int32) : Int32
+  if (a &+ b) == 7_i64
+    8
+  else
+    0
+  end
+end
+
+LibC.exit(eq_nr(4_i64, 4) &+ ne_nr(5_i64, 4) &+ lt_nr(2_i64, 9) &+ add_nr(3_i64, 4))

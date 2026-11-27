@@ -1,0 +1,20 @@
+class Alpha
+  def tag : String
+    "alpha"
+  end
+end
+
+class Beta
+  def tag : String
+    "beta"
+  end
+end
+
+# A top-level loop declaring a type on each element, as the prelude's number table does.
+{% for t in [{"Gamma", "1"}, {"Delta", "2"}] %}
+  class {{ t[0].id }}
+    def self.one : Int32
+      {{ t[1].id }}
+    end
+  end
+{% end %}

@@ -1,0 +1,52 @@
+# type: Leaf
+# type: Base
+# type: Container
+# type: ScalarOnly
+# type: Box(Leaf)
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class IyiRuntimeLock
+end
+
+class IyiHeap
+end
+
+class Leaf
+end
+
+class Base
+  @inherited : Leaf
+
+  def initialize(@inherited : Leaf)
+  end
+end
+
+class Container < Base
+  @number : Int32
+  @child : Leaf
+
+  def initialize(@number : Int32, @child : Leaf, inherited : Leaf)
+    super(inherited)
+  end
+end
+
+class ScalarOnly
+  @number : Int32
+
+  def initialize(@number : Int32)
+  end
+end
+
+class Box(T)
+  @value : T
+
+  def initialize(@value : T)
+  end
+end
+
+slot : Box(Leaf)
+
+LibC.exit(7)

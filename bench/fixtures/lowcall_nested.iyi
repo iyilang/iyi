@@ -1,0 +1,17 @@
+def first(a : Int32, b : Int32) : Int32
+  a
+end
+
+def pick(flag : Bool, a : Int32, b : Int32) : Int32
+  if flag
+    first(a, b)
+  else
+    b
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(pick(true, 7, 2))

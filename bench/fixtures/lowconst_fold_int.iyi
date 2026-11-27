@@ -1,0 +1,8 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+SUM     = 4 &+ 5
+DIFF    = 9 &- 2
+PRODUCT = 3 &* 5
+LibC.exit(SUM &+ DIFF &+ PRODUCT)

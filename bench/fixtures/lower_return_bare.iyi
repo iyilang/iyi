@@ -1,0 +1,9 @@
+def pick_bare(flag : Bool) : Int32 | Nil
+  if flag
+    return
+  end
+  7
+end
+
+pick_bare(true)
+nil

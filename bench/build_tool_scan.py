@@ -117,6 +117,10 @@ def scan_build(repo):
             except Exception:
                 tokens = cmd_str.split()
             for tok in tokens:
+                # Invoking a compiler built by this Makefile adds no external
+                # tool. Its following verb, such as `build`, is an argument.
+                if tok in COMPILER_TARGETS:
+                    break
                 if tok.startswith("$(call"):
                     if "check_llvm_config" in tok:
                         found_build.setdefault("llvm-config", []).append(f"Makefile:{idx}")

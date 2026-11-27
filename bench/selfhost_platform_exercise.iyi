@@ -185,6 +185,17 @@ def run_self_checks : Nil
     "cl.exe uses /Fe and /link with SDK arguments")
   assert_true(driver.objects.nil?, "driver returns no separate objects")
   assert_true(!Linker.direct_msvc_linker?("C:/tools/blink.exe"), "direct linker requires the full basename")
+  ["link", "link.exe", "lld-link", "lld-link.exe", "C:\\LLVM\\LLD-LINK.EXE"].each do |linker|
+    assert_true(Linker.direct_msvc_linker?(linker), "#{linker} is a direct linker")
+    cmd = Linker.linker_command(t3, ["a.obj"], "a.exe", msvc_linker: linker).cmd
+    assert_true(cmd.includes?("/OUT:a.exe") && cmd.includes?("/Brepro") && !cmd.includes?("/link "), "#{linker} uses direct reproducible flags")
+  end
+  ["cl", "CL.EXE", "clang-cl", "C:/LLVM/Clang-Cl.Exe"].each do |linker|
+    cmd = Linker.linker_command(t3, ["a.obj"], "a.exe", msvc_linker: linker).cmd
+    assert_true(cmd.includes?("/Fea.exe") && cmd.includes?("/link /Brepro "), "#{linker} uses reproducible driver flags")
+  end
+  other = Linker.linker_command(t3, ["a.obj"], "a.exe", msvc_linker: "custom-cl").cmd
+  assert_true(other.includes?("/link ") && !other.includes?("/Brepro"), "unrecognized driver does not get /Brepro")
   ["link", "link.exe", "lld-link", "lld-link.exe"].each do |name|
     result = Linker.linker_command(t3, ["foo.obj"], "out.exe", msvc_linker: "C:/tools/#{name}")
     assert_true(result.cmd.includes?("/OUT:out.exe /Brepro /INCREMENTAL:NO"), "#{name} is a reproducible direct linker")

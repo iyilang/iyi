@@ -1,0 +1,15 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def mark(value : Int32) : Int32
+  LibC.putchar(value)
+  value
+end
+
+def each_pair(first = 1, second = 2, &)
+  yield first &+ second
+end
+
+each_pair(second: mark(50)) { |v| LibC.exit(v) }

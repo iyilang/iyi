@@ -1,0 +1,124 @@
+module compiler/lower/ensure
+
+# The normal exits of hosted codegen/exception.cr:75-101, 308-317, 346-394.
+# iyi does not unwind through handlers: rescue clauses, landing pads, re-raises,
+# and the platform-specific exception machinery are outside this lowering.
+
+import compiler/syntax/ast::{ASTNode, ExceptionHandler}
+import compiler/ir/values::{Value}
+import compiler/lower/cast::{clear_value_holes, union_temp}
+import compiler/lower/context::{LowerContext, Lowerer}
+import compiler/lower/fun::{visit_node}
+import compiler/lower/helpers::{abi_name, at_terminator?, llvm_nil, load_aligned, store_aligned}
+import compiler/lower/pending::{refuse_port}
+import compiler/lower/phi::{LowerPhi}
+import compiler/lower/typer::{passed_by_value?}
+import compiler/semantic/top_level::{NilType, NoReturnType, Type, VoidType}
+
+# Hosted preserve_across_ensure: copy an address-valued aggregate before cleanup
+# can overwrite the storage from which its already evaluated value is read.
+pub def preserve_across_ensure(low : Lowerer, value : Value?, type : Type?) : Value?
+  return value if value.nil? || type.nil? || at_terminator?(low)
+  v = value.as(Value)
+  t = type.as(Type)
+  return value unless passed_by_value?(t) && v.type.pointer?
+  ir = low.typer.llvm_type(t)
+  copy = low.alloca(ir, "")
+  store_aligned(low, load_aligned(low, ir, v), copy)
+  clear_value_holes(low, copy, t)
+  copy
+end
+
+# Record the stack depth at a loop or block, by node identity rather than AST
+# structural equality. A jump runs only handlers entered inside that boundary.
+pub def set_ensure_exception_handler(low : Lowerer, target : ASTNode) : Nil
+  low.ensure_boundaries[target.object_id] = low.ensure_nodes.size
+end
+
+# Hosted execute_ensures_until: inner handlers first, stopping at the target's
+# boundary. Temporarily remove each handler while its cleanup is emitted so a
+# return in that cleanup cannot run it recursively.
+pub def execute_ensures_until(low : Lowerer, target : ASTNode?, value_type : Type?) : Nil
+  stop = 0
+  if target
+    stop = low.ensure_boundaries[target.object_id]? || 0
+  end
+  saved_nodes = [] of ExceptionHandler
+  saved_contexts = [] of LowerContext
+  saved_context = low.context
+  value = low.last
+  preserved = false
+  while low.ensure_nodes.size > stop
+    handler = low.ensure_nodes.pop
+    context = low.ensure_contexts.pop
+    saved_nodes << handler
+    saved_contexts << context
+    if cleanup = handler.ensure
+      unless preserved
+        value = preserve_across_ensure(low, value, value_type)
+        preserved = true
+      end
+      low.context = context
+      visit_node(low, cleanup)
+    end
+  end
+  low.context = saved_context
+  while !saved_nodes.empty?
+    low.ensure_nodes << saved_nodes.pop
+    low.ensure_contexts << saved_contexts.pop
+  end
+  low.last = value
+end
+
+# Hosted visit(ExceptionHandler), with only its normal edge. The handler forces
+# an exit block even for one value, and cleanup cannot change the body's value.
+pub def lower_exception_handler(low : Lowerer, node : ExceptionHandler) : Nil
+  unless node.rescues.nil? && node.else.nil?
+    refuse_port("rescue or else on an exception handler (iyi has no exceptions)")
+  end
+  cleanup = node.ensure
+  if cleanup.nil?
+    refuse_port("exception handler without defer cleanup")
+  end
+  # Hosted exception handlers attach the runtime personality even when this
+  # lowering only emits their normal exit.
+  if personality = low.module.get_function?(abi_name(low, "personality"))
+    low.current_context.fun.personality = personality
+  end
+  t = low.analysed.type_of?(node.as(ASTNode))
+  wants = low.needs_value
+  merge = nil
+  by_value = false
+  if wants && !t.nil? && !t.as(Type).is_a?(NilType) && !t.as(Type).is_a?(VoidType) && !t.as(Type).is_a?(NoReturnType)
+    by_value = passed_by_value?(t.as(Type))
+    merge = by_value ? low.module.types.ptr : low.typer.llvm_type(t.as(Type))
+  end
+  phi = LowerPhi.new(!merge.nil?, merge)
+  low.ensure_nodes << node
+  low.ensure_contexts << low.current_context
+  visit_node(low, node.body)
+  value = low.last
+  if by_value && !at_terminator?(low) && !value.nil?
+    body_type = low.analysed.type_of?(node.body)
+    raise "BUG: the ensured body has no type" if body_type.nil?
+    if body_type.as(Type).full_name != t.as(Type).full_name
+      low.last = union_temp(low, t.as(Type), body_type.as(Type), value.as(Value))
+    elsif !value.as(Value).type.pointer?
+      pointer = low.alloca(low.typer.llvm_type(t.as(Type)), "")
+      store_aligned(low, value.as(Value), pointer)
+      low.last = pointer
+    end
+  end
+  phi.add(low, low.last, false)
+  low.ensure_nodes.pop
+  low.ensure_contexts.pop
+  phi.close(low)
+  unless at_terminator?(low)
+    value = low.last
+    value = preserve_across_ensure(low, value, t) if wants
+    low.needs_value = false
+    visit_node(low, cleanup.as(ASTNode))
+    low.last = value
+  end
+  low.needs_value = wants
+end

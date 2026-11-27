@@ -1,0 +1,20 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def two(a : Bool, b : Bool) : Bool
+  a && b
+end
+
+def three(a : Bool, b : Bool, c : Bool) : Bool
+  a && b && c
+end
+
+def either(a : Bool, b : Bool, c : Bool) : Bool
+  a && (!b || c)
+end
+
+x = two(true, false)
+y = three(true, true, false)
+z = either(true, false, false)
+LibC.exit(z ? 1 : 7)

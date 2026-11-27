@@ -1,0 +1,33 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Trace
+  @@digits : Int32 = 0
+
+  def self.mark(step : Int32) : Nil
+    @@digits = @@digits &* 4 &+ step
+    nil
+  end
+
+  def self.digits : Int32
+    @@digits
+  end
+end
+
+Trace.mark(1)
+
+module Middle
+  Trace.mark(2)
+
+  module Inner
+    class Leaf
+      def self.value : Int32
+        0
+      end
+    end
+  end
+end
+
+Trace.mark(3)
+LibC.exit(Trace.digits &+ Middle::Inner::Leaf.value)

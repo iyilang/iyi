@@ -1,0 +1,6 @@
+lib LibC
+  fun time(x : Int64*) : Int64
+end
+
+LibC.time(out t)
+t

@@ -1,0 +1,92 @@
+# A class variable read before its assignment. The gate builds this file with
+# --prelude iyi/prelude (bench/fixtures/lowglob_abi) because a prelude named empty
+# leaves Program#iyi_prelude? false, and declaring IyiRuntimeLock alone does not
+# make the hosted compiler look up __iyi_once. That path also names the entry
+# __iyi_main; this file declares fun main so the link has an entry. The fixture
+# does not allocate, so it does not declare the malloc or raise names.
+# `use(f)` reads the variable before the assignment is visited, and it is not a
+# noreturn, so the assignment is still lowered.
+@[Unsafe("declares __iyi_once, the runtime the compiler calls by name, and the C entry")]
+class IyiRuntimeLock
+end
+
+struct Pointer(T)
+  @[Primitive(:pointer_get)]
+  def value : T
+  end
+
+  @[Primitive(:pointer_set)]
+  def value=(value : T)
+  end
+
+  @[Primitive(:pointer_address)]
+  def address : UInt64
+  end
+end
+
+struct Proc
+  @[Primitive(:proc_call)]
+  def call(*args : *T) : R
+  end
+end
+
+fun __iyi_once(flag : Bool*, initializer : Void*) : Nil
+  if !flag.value
+    cell = {initializer.address, 0_u64}
+    pointerof(cell).as(Pointer(Proc(Nil))).value.call
+    flag.value = true
+  end
+end
+
+lib LibIyiMain
+  fun __iyi_main(argc : Int32, argv : UInt8**)
+end
+
+fun main(argc : Int32, argv : UInt8**) : Int32
+  LibIyiMain.__iyi_main(argc, argv)
+  0
+end
+
+class K
+  @@count : Int32 = 0
+  @@ran : Bool = false
+
+  def self.mk : Int32
+    if @@ran
+      @@count = 2
+    else
+      @@ran = true
+      @@count = 1
+    end
+    @@count
+  end
+
+  def self.v : Int32
+    @@n
+  end
+
+  def self.count : Int32
+    @@count
+  end
+end
+
+def f : Int32
+  K.v
+end
+
+def use(n : Int32) : Int32
+  n
+end
+
+use(f)
+
+class K
+  @@n : Int32 = K.mk
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+use(f)
+LibC.exit(K.count)

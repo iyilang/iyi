@@ -1,0 +1,11 @@
+{% if true %}
+  lib LibC
+    fun exit(status : Int32) : NoReturn
+  end
+
+  fun macro_value : Int32
+    7
+  end
+{% end %}
+
+LibC.exit(macro_value)

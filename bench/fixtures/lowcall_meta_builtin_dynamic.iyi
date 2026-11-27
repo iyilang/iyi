@@ -1,0 +1,16 @@
+struct Int32
+  def self.value(n : Int32) : Int32
+    copy = n
+    copy
+  end
+end
+
+def take(klass : Int32.class) : Int32
+  klass.value(7)
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(take(Int32))

@@ -1,0 +1,40 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+enum Color
+  Red
+  Green
+
+  def ==(other : Color) : Bool
+    value == other.value
+  end
+end
+
+@[Flags]
+enum Access
+  Read
+  Write
+
+  def includes?(other : Access) : Bool
+    (value & other.value) == other.value
+  end
+
+  def |(other : Access) : Access
+    Access.new(value | other.value)
+  end
+end
+
+def enum_value(color : Color) : Int32
+  color.value
+end
+
+def enum_new(value : Int32) : Color
+  Color.new(value)
+end
+
+def flags_value(a : Access, b : Access) : Int32
+  (a | b).value
+end
+
+LibC.exit(enum_value(Color::Green) &+ enum_value(enum_new(1)) &+ flags_value(Access::Read, Access::Write))

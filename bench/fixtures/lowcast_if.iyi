@@ -1,0 +1,17 @@
+# An `if` expression whose branches give Int32 and Nil: its value is the union Int32?, so each
+# branch value is stored into the union (hosted upcast in the branch). The union is not read;
+# the status is the constant 7.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def pick(flag : Bool) : Int32
+  v = if flag
+        1
+      else
+        nil
+      end
+  7
+end
+
+LibC.exit(pick(true))

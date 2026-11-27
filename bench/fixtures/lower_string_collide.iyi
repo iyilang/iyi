@@ -1,0 +1,6 @@
+def keep(s : String) : Nil
+  nil
+end
+
+keep("a string constant longer than eighteen bytes")
+keep("a string constant longer than eighteen apples")

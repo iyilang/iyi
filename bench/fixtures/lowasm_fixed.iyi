@@ -1,0 +1,15 @@
+# Fixed registers and clobbers, the shape the prelude's `svc` uses
+# (`"={x0}"(result) : "{x8}"(n), "{x0}"(a)` plus `"memory"` and a register).
+# The template is `mov`, which copies the x8 input into the x0 output, so the
+# program does not make a supervisor call.
+def copy_fixed(n : Int32, a : Int32) : Int32
+  result = 0
+  asm("mov $0, $1" : "={x0}"(result) : "{x8}"(n), "{x0}"(a) : "memory", "x1" : "volatile")
+  result
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(copy_fixed(7, 0))

@@ -1,0 +1,22 @@
+def magic_line(value = __LINE__)
+  value
+end
+
+def magic_end(value = __END_LINE__)
+  value
+end
+
+def magic_file(value = __FILE__)
+  value
+end
+
+def magic_dir(value = __DIR__)
+  value
+end
+
+line = magic_line(
+)
+ending = magic_end(
+)
+file = magic_file
+folder = magic_dir

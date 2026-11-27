@@ -1,0 +1,73 @@
+@[Unsafe("calls C exit to report the dispatch result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+trait Shape
+  abstract def plus(extra : Int32) : Int32
+  abstract def touch : Nil
+end
+
+class Trail
+  @@steps : Int32 = 0
+
+  def self.mark(step : Int32) : Int32
+    @@steps = @@steps &* 10 &+ step
+    step
+  end
+
+  def self.steps : Int32
+    @@steps
+  end
+end
+
+struct Square
+  def initialize(@side : Int32)
+  end
+end
+
+impl Shape for Square
+  def plus(extra : Int32) : Int32
+    @side &+ extra
+  end
+
+  def touch : Nil
+    Trail.mark(3)
+    nil
+  end
+end
+
+struct Dot
+end
+
+impl Shape for Dot
+  def plus(extra : Int32) : Int32
+    extra
+  end
+
+  def touch : Nil
+    nil
+  end
+end
+
+struct Stop
+end
+
+impl Shape for Stop
+  def plus(extra : Int32) : Int32
+    LibC.exit(extra)
+  end
+
+  def touch : Nil
+    nil
+  end
+end
+
+def square : Shape
+  Trail.mark(1)
+  Square.new(5).as(Shape)
+end
+
+total = square.plus(Trail.mark(2))
+square.touch
+Stop.new.as(Shape).plus((Trail.steps == 1213 ? 30 : 1) &+ total)

@@ -1,0 +1,23 @@
+@[Unsafe("the fixture reads a string literal through the object fields")]
+class String
+  def bytesize : Int32
+    value = @bytesize
+    value
+  end
+
+  def to_unsafe : UInt8*
+    pointerof(@c)
+  end
+end
+
+lib LibC
+  fun puts(s : UInt8*) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+GREETING = "hi"
+:hi
+LibC.puts(GREETING.to_unsafe)
+
+LibC.puts("hi".to_unsafe)
+LibC.exit("hi".bytesize)

@@ -1,0 +1,11 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def pick(values : Tuple(Int32, Int32)) : Int32
+  {% for ignored in [0] %}
+    values[1]
+  {% end %}
+end
+
+LibC.exit(pick({3, 7}))

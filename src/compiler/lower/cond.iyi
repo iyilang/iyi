@@ -1,0 +1,97 @@
+module compiler/lower/cond
+
+# The port of `src/compiler/iyi/codegen/cond.cr` (`codegen_cond` of a type), for the cases a
+# fixture reaches so far:
+#   Bool          the value itself (an i1)
+#   Nil           false (hosted `llvm_false`)
+#   pointers and nilable references: whether the pointer is non-null
+#   nilable procs: whether the function pointer (not the context) is non-null
+#   mixed unions: exclude Nil, false Bool values, and null pointers by their tags
+#   other intrinsically truthy types, including numbers: true
+#
+# The caller lowers the condition expression itself and passes the value in, so this file does
+# not import the visitor (`lower.iyi` imports this file, not the reverse).
+
+import compiler/syntax/ast::{ASTNode}
+import compiler/ir/inst::{IntPredicate}
+import compiler/ir/values::{Value}
+import compiler/lower/context::{Lowerer}
+import compiler/lower/helpers::{int1, load_aligned}
+import compiler/semantic/top_level::{Type, NilType, TypeDefType}
+import compiler/types/indirection::{TypeIndirection}
+import compiler/types/types::{MixedUnionType, NilableType, NilableReferenceUnionType, NilableProcType, PointerInstanceType}
+import compiler/lower/typer::{expand_union_types}
+import compiler/lower/cast::{pointer_of_value, mixed_type_id_of_pointer, union_value_ptr, type_id_value}
+
+# The hosted `codegen_cond(type)` for the value of `node`, which the caller already lowered.
+pub def cond_bool(low : Lowerer, node : ASTNode, value : Value) : Value
+  t = low.analysed.type_of?(node)
+  raise "BUG: the analysed program has no type for a condition (hosted cond.cr: codegen_cond)" if t.nil?
+  ty = TypeIndirection.remove_indirection(t.as(Type))
+  while ty.is_a?(TypeDefType)
+    ty = TypeIndirection.remove_indirection(ty.as(TypeDefType).typedef)
+  end
+  if ty.full_name == "Bool"
+    return value
+  end
+  if ty.is_a?(NilType)
+    return int1(low, 0_i64)
+  end
+  if ty.is_a?(NilableType) || ty.is_a?(NilableReferenceUnionType) || ty.is_a?(PointerInstanceType)
+    return low.builder.icmp(IntPredicate::NE, value, low.builder.const_null_pointer)
+  end
+  if ty.is_a?(NilableProcType)
+    function_pointer = low.builder.extract_value(value, 0)
+    return low.builder.icmp(IntPredicate::NE, function_pointer, low.builder.const_null_pointer)
+  end
+  if ty.is_a?(MixedUnionType)
+    union = ty.as(MixedUnionType)
+    members = expand_union_types(union)
+    has_nil = members.any? { |member| member.is_a?(NilType) }
+    has_bool = members.any? { |member| member.full_name == "Bool" }
+    has_pointer = members.any? { |member| member.is_a?(PointerInstanceType) }
+    return int1(low, 1_i64) unless has_nil || has_bool || has_pointer
+
+    pointer = pointer_of_value(low, node, value, union)
+    type_id = mixed_type_id_of_pointer(low, pointer, union)
+    value_pointer = union_value_ptr(low, low.typer.llvm_type(union), pointer)
+    condition = int1(low, 1_i64)
+    if has_nil
+      is_nil = low.builder.icmp(IntPredicate::EQ, type_id, type_id_value(low, low.analysed.program.nil_type))
+      condition = low.builder.bitwise_and(condition, low.builder.bitwise_xor(is_nil, int1(low, 1_i64)))
+    end
+    if has_bool
+      boolean = load_aligned(low, low.module.types.int1, value_pointer)
+      is_bool = low.builder.icmp(IntPredicate::EQ, type_id, type_id_value(low, low.analysed.program.bool_type))
+      not_boolean = low.builder.bitwise_xor(boolean, int1(low, 1_i64))
+      is_false = low.builder.bitwise_and(is_bool, not_boolean)
+      test = low.builder.bitwise_xor(is_false, int1(low, 1_i64))
+      condition = low.builder.bitwise_and(condition, test)
+    end
+    if has_pointer
+      members.each do |member|
+        next unless member.is_a?(PointerInstanceType)
+        is_pointer = low.builder.icmp(IntPredicate::EQ, type_id, type_id_value(low, member))
+        pointer_value = load_aligned(low, low.typer.llvm_type(member), value_pointer)
+        is_null = low.builder.icmp(IntPredicate::EQ, pointer_value, low.builder.const_null_pointer)
+        is_false = low.builder.bitwise_and(is_pointer, is_null)
+        test = low.builder.bitwise_xor(is_false, int1(low, 1_i64))
+        condition = low.builder.bitwise_and(condition, test)
+      end
+    end
+    return condition
+  end
+  int1(low, 1_i64)
+end
+
+# Whether the condition's analysed type is Nil. The hosted `cond` folds a constant false
+# condition: the condition is evaluated for its effects, and the else branch is the only one lowered.
+pub def nil_condition?(low : Lowerer, node : ASTNode) : Bool
+  t = low.analysed.type_of?(node)
+  return false if t.nil?
+  ty = TypeIndirection.remove_indirection(t.as(Type))
+  while ty.is_a?(TypeDefType)
+    ty = TypeIndirection.remove_indirection(ty.as(TypeDefType).typedef)
+  end
+  ty.is_a?(NilType)
+end

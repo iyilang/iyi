@@ -1,0 +1,8 @@
+class Array(T)
+  def self.new
+    7
+  end
+end
+
+[] of Int32
+nil

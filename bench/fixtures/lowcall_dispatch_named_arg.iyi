@@ -1,0 +1,30 @@
+lib LibC
+  fun putchar(value : Int32) : Int32
+  fun exit(status : Int32) : NoReturn
+end
+
+def mark(value : Int32) : Int32
+  LibC.putchar(value)
+  value
+end
+
+def either(flag : Bool) : Int32 | Bool
+  LibC.putchar(97)
+  if flag
+    7
+  else
+    false
+  end
+end
+
+def pick(a : Int32, b : Int32) : Int32
+  a &+ b
+end
+
+def pick(a : Bool, b : Int32) : Int32
+  b &- 90
+end
+
+first = pick(b: mark(98), a: either(true))
+second = pick(b: mark(98), a: either(false))
+LibC.exit(first &+ second)

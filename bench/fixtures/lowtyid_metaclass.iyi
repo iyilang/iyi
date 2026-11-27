@@ -1,0 +1,18 @@
+# Type ids and metaclass ids of a class chain: each class takes its pair and its metaclass takes
+# the next id in the hosted walk order (a class, then its subclasses depth first).
+class Base
+end
+
+class Derived < Base
+end
+
+class Leaf < Derived
+end
+
+class Other < Base
+end
+
+# type: Base
+# type: Derived
+# type: Leaf
+# type: Other

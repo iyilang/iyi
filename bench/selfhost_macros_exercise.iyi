@@ -548,6 +548,35 @@ emit_defer_and_chain
     puts "ok"
   end
 
+  def self.test_host_flag_context
+    print "testing host flags remain separate from target flags across programs... "
+    src = %(
+macro host_context_probe
+  {% if flag?(:s3_target) %}
+    {% if host_flag?(:s3_host) %} 41 {% else %} 42 {% end %}
+  {% else %}
+    43
+  {% end %}
+end
+host_context_probe
+)
+    first = NormalizerProgram.new
+    first.macro_flags = ["s3_target"]
+    first.host_flags = ["s3_host"]
+    engine = MacroEngine.new(first.macro_flags)
+    macro_one, call_one = MacroParser.parse_fixture(src)
+    result_one = engine.expand(macro_one, call_one, first)
+    assert(result_one.is_a?(NumberLiteral) && result_one.as(NumberLiteral).value == "41", "target and first host flags select their own branches")
+
+    second = NormalizerProgram.new
+    second.macro_flags = ["s3_target"]
+    second.host_flags = ["s3_other"]
+    macro_two, call_two = MacroParser.parse_fixture(src)
+    result_two = engine.expand(macro_two, call_two, second)
+    assert(result_two.is_a?(NumberLiteral) && result_two.as(NumberLiteral).value == "42", "a second program supplies its own host flags")
+    puts "ok"
+  end
+
   # IYI_PATH is split as the hosted compiler splits it (iyi_path.cr): on `;` on
   # Windows, where a drive's colon belongs to the path.
   def self.split_search_path(raw : String, windows : Bool) : Array(String)
@@ -609,7 +638,7 @@ emit_defer_and_chain
     end
     a_macro, a_call = MacroParser.parse_fixture("macro check\n#{body}\nend\ncheck\n", definition)
     a_call.location = Location.new(caller_file, 1, 1)
-    rep = MacroEngine.new(MacroTargetFlags.host([] of String), conf).report(a_macro, a_call)
+    rep = MacroEngine.new(MacroTargetFlags.host([] of String), confinement: conf).report(a_macro, a_call)
     if f = rep.failure
       "error #{f.line}:#{f.column} message=#{escape_s(f.message)}\n"
     else
@@ -633,6 +662,7 @@ emit_defer_and_chain
     test_expansion_file
     test_search_path
     test_shared_normalizer
+    test_host_flag_context
     puts "============================================================="
     puts "ALL SELFHOST MACRO CHECKS PASSED SUCCESSFULLY!"
     puts "============================================================="
@@ -683,7 +713,7 @@ elsif Program.args.size > 0
     if bindings.size > 0 || !facts.nil?
       rep = BenchSelfhostMacrosExercise.report_bound(the_macro, the_call, flags, bindings, facts, conf)
     else
-      engine = MacroEngine.new(flags, conf)
+      engine = MacroEngine.new(flags, confinement: conf)
       rep = engine.report(the_macro, the_call)
     end
     if count

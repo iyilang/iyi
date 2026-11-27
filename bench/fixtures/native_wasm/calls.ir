@@ -1,0 +1,82 @@
+; iyi-ir 1
+module "calls"
+target triple = "wasm32-wasi"
+target datalayout = "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20"
+declare external void @__iyi_print_i64(i64)
+
+@ops = global [3 x ptr] [ptr @addf, ptr @subf, ptr @mulf]
+
+define internal i32 @addf(i32 %a, i32 %b) {
+entry:
+  %r = add i32 %a, %b
+  ret i32 %r
+}
+
+define internal i32 @subf(i32 %a, i32 %b) {
+entry:
+  %r = sub i32 %a, %b
+  ret i32 %r
+}
+
+define internal i32 @mulf(i32 %a, i32 %b) {
+entry:
+  %r = mul i32 %a, %b
+  ret i32 %r
+}
+
+define internal i32 @fib(i32 %n) {
+entry:
+  %small = icmp slt i32 %n, 2
+  br i1 %small, label %base, label %rec
+base:
+  ret i32 %n
+rec:
+  %n1 = sub i32 %n, 1
+  %n2 = sub i32 %n, 2
+  %a = call i32 (i32) @fib(i32 %n1)
+  %b = call i32 (i32) @fib(i32 %n2)
+  %r = add i32 %a, %b
+  ret i32 %r
+}
+
+define internal i32 @depth(i32 %n) {
+entry:
+  %slot = alloca i32, align 4
+  store i32 %n, ptr %slot, align 4
+  %z = icmp eq i32 %n, 0
+  br i1 %z, label %done, label %rec
+done:
+  ret i32 0
+rec:
+  %m = sub i32 %n, 1
+  %r = call i32 (i32) @depth(i32 %m)
+  %v = load i32, ptr %slot, align 4
+  %s = add i32 %v, %r
+  ret i32 %s
+}
+
+define external i32 @main() {
+entry:
+  %f = call i32 (i32) @fib(i32 15)
+  %fx = sext i32 %f to i64
+  call void (i64) @__iyi_print_i64(i64 %fx)
+  %p0 = getelementptr [3 x ptr], ptr @ops, i32 0, i32 0
+  %fp0 = load ptr, ptr %p0, align 4
+  %r0 = call i32 (i32, i32) %fp0(i32 7, i32 3)
+  %r0x = sext i32 %r0 to i64
+  call void (i64) @__iyi_print_i64(i64 %r0x)
+  %p1 = getelementptr [3 x ptr], ptr @ops, i32 0, i32 1
+  %fp1 = load ptr, ptr %p1, align 4
+  %r1 = call i32 (i32, i32) %fp1(i32 7, i32 3)
+  %r1x = sext i32 %r1 to i64
+  call void (i64) @__iyi_print_i64(i64 %r1x)
+  %p2 = getelementptr [3 x ptr], ptr @ops, i32 0, i32 2
+  %fp2 = load ptr, ptr %p2, align 4
+  %r2 = call i32 (i32, i32) %fp2(i32 7, i32 3)
+  %r2x = sext i32 %r2 to i64
+  call void (i64) @__iyi_print_i64(i64 %r2x)
+  %d = call i32 (i32) @depth(i32 10)
+  %dx = sext i32 %d to i64
+  call void (i64) @__iyi_print_i64(i64 %dx)
+  ret i32 0
+}

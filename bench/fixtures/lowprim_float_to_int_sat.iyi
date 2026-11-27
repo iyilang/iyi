@@ -1,0 +1,189 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Float32
+  @[Primitive(:unchecked_convert)]
+  def sat_i8 : Int8
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_i16 : Int16
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_i32 : Int32
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_i64 : Int64
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_i128 : Int128
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_u8 : UInt8
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_u16 : UInt16
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_u32 : UInt32
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_u64 : UInt64
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_u128 : UInt128
+  end
+end
+
+struct Float64
+  @[Primitive(:unchecked_convert)]
+  def sat_i8 : Int8
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_i16 : Int16
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_i32 : Int32
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_i64 : Int64
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_i128 : Int128
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_u8 : UInt8
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_u16 : UInt16
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_u32 : UInt32
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_u64 : UInt64
+  end
+
+  @[Primitive(:unchecked_convert)]
+  def sat_u128 : UInt128
+  end
+end
+
+def f32_sat_i8(x : Float32) : Int8
+  x.sat_i8
+end
+
+def f32_sat_i16(x : Float32) : Int16
+  x.sat_i16
+end
+
+def f32_sat_i32(x : Float32) : Int32
+  x.sat_i32
+end
+
+def f32_sat_i64(x : Float32) : Int64
+  x.sat_i64
+end
+
+def f32_sat_i128(x : Float32) : Int128
+  x.sat_i128
+end
+
+def f32_sat_u8(x : Float32) : UInt8
+  x.sat_u8
+end
+
+def f32_sat_u16(x : Float32) : UInt16
+  x.sat_u16
+end
+
+def f32_sat_u32(x : Float32) : UInt32
+  x.sat_u32
+end
+
+def f32_sat_u64(x : Float32) : UInt64
+  x.sat_u64
+end
+
+def f32_sat_u128(x : Float32) : UInt128
+  x.sat_u128
+end
+
+def f64_sat_i8(x : Float64) : Int8
+  x.sat_i8
+end
+
+def f64_sat_i16(x : Float64) : Int16
+  x.sat_i16
+end
+
+def f64_sat_i32(x : Float64) : Int32
+  x.sat_i32
+end
+
+def f64_sat_i64(x : Float64) : Int64
+  x.sat_i64
+end
+
+def f64_sat_i128(x : Float64) : Int128
+  x.sat_i128
+end
+
+def f64_sat_u8(x : Float64) : UInt8
+  x.sat_u8
+end
+
+def f64_sat_u16(x : Float64) : UInt16
+  x.sat_u16
+end
+
+def f64_sat_u32(x : Float64) : UInt32
+  x.sat_u32
+end
+
+def f64_sat_u64(x : Float64) : UInt64
+  x.sat_u64
+end
+
+def f64_sat_u128(x : Float64) : UInt128
+  x.sat_u128
+end
+
+f32_sat_i8(1.5_f32)
+f32_sat_i16(1.5_f32)
+f32_sat_i32(1.5_f32)
+f32_sat_i64(1.5_f32)
+f32_sat_i128(1.5_f32)
+f32_sat_u8(1.5_f32)
+f32_sat_u16(1.5_f32)
+f32_sat_u32(1.5_f32)
+f32_sat_u64(1.5_f32)
+f32_sat_u128(1.5_f32)
+f64_sat_i8(1.5)
+f64_sat_i16(1.5)
+f64_sat_i32(1.5)
+f64_sat_i64(1.5)
+f64_sat_i128(1.5)
+f64_sat_u8(1.5)
+f64_sat_u16(1.5)
+f64_sat_u32(1.5)
+f64_sat_u64(1.5)
+f64_sat_u128(1.5)
+LibC.exit(f64_sat_u8(300.0).to_i32)

@@ -1,0 +1,9 @@
+struct Int32
+  def self.plain_zero : self
+    0
+  end
+
+  def plain_one : Int32
+    1
+  end
+end

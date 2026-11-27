@@ -1,0 +1,18 @@
+VALUE = :ready
+
+def first : Symbol
+  VALUE
+end
+
+def second : Symbol
+  VALUE
+end
+
+first
+second
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(0)

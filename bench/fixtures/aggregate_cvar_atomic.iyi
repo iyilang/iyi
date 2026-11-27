@@ -1,0 +1,16 @@
+class AtomicClassVariable
+  @@word = ::Atomic(UInt64).new(0_u64)
+
+  def self.test : Bool
+    return false unless @@word.get == 0_u64
+    @@word.set(9_u64)
+    @@word.get == 9_u64
+  end
+end
+
+if AtomicClassVariable.test
+  puts "atomic class variable: zero then nine"
+else
+  puts "atomic class variable: incorrect value"
+  exit(1)
+end

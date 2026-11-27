@@ -1,0 +1,10 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def mutate(value : Int32) : Int32
+  pointerof(value).value = 42
+  value
+end
+
+LibC.exit(mutate(7) &- 42)

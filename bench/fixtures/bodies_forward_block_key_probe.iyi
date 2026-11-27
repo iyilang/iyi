@@ -1,0 +1,72 @@
+import compiler/syntax/ast::{ASTNode, Arg, Block, Call, Def, ProcLiteral, Var}
+import compiler/semantic/main_visitor::{MainVisitor}
+import compiler/semantic/top_level::{SemanticProgram, Type}
+import compiler/types/types::{ProcInstanceType, VirtualType}
+
+def forwarded(visitor : MainVisitor, proc_type : Type) : Call
+  arg = Var.new("block")
+  visitor.set_type(arg, proc_type)
+  block = Block.new
+  block.fun_literal = arg
+  Call.new(nil, "capture", [] of ASTNode, block, arg)
+end
+
+def keys(visitor : MainVisitor, program : SemanticProgram, callee : Def, call : Call) : Array(String)
+  [visitor.instance_key(program, callee, [] of ASTNode, call.block, call),
+   visitor.def_instance_key(callee, program, call).as(String)]
+end
+
+def distinct_keys(a : Array(String), b : Array(String)) : Bool
+  a[0] != b[0] && a[1] != b[1]
+end
+
+program = SemanticProgram.new
+visitor = MainVisitor.new(program)
+visitor.total = true
+callee = Def.new("capture")
+callee.block_arg = Arg.new("block")
+callee.uses_block_arg = true
+int32 = program.int32_type
+bool = program.bool_type
+nil_type = program.nil_type
+virtual = VirtualType.new(program, int32)
+base = ProcInstanceType.new(program, [int32] of Type, nil_type)
+same = ProcInstanceType.new(program, [int32] of Type, nil_type)
+different_arg = ProcInstanceType.new(program, [bool] of Type, nil_type)
+different_return = ProcInstanceType.new(program, [int32] of Type, bool)
+virtual_arg = ProcInstanceType.new(program, [virtual] of Type, nil_type)
+virtual_return = ProcInstanceType.new(program, [int32] of Type, virtual)
+concrete_return = ProcInstanceType.new(program, [int32] of Type, int32)
+
+first = forwarded(visitor, base)
+second = forwarded(visitor, same)
+a = keys(visitor, program, callee, first)
+b = keys(visitor, program, callee, second)
+raise "same forwarded proc type did not share both keys" unless a == b
+raise "argument type was omitted from a key" unless distinct_keys(a, keys(visitor, program, callee, forwarded(visitor, different_arg)))
+raise "return type was omitted from a key" unless distinct_keys(a, keys(visitor, program, callee, forwarded(visitor, different_return)))
+raise "virtual argument type was erased" unless distinct_keys(a, keys(visitor, program, callee, forwarded(visitor, virtual_arg)))
+raise "virtual return type was erased" unless distinct_keys(keys(visitor, program, callee, forwarded(visitor, concrete_return)), keys(visitor, program, callee, forwarded(visitor, virtual_return)))
+
+written_a = Call.new(nil, "capture", [] of ASTNode, Block.new)
+written_b = Call.new(nil, "capture", [] of ASTNode, Block.new)
+raise "written blocks were merged" unless distinct_keys(keys(visitor, program, callee, written_a), keys(visitor, program, callee, written_b))
+callee.uses_block_arg = false
+raise "yielding blocks were merged" unless distinct_keys(keys(visitor, program, callee, first), keys(visitor, program, callee, second))
+
+# A proc-only capture must invalidate the enclosing yielded block's cache entry.
+flow_visitor = MainVisitor.new(program)
+flow_visitor.vars["seen"] = nil_type
+literal = ProcLiteral.new(Def.new("->", [] of Arg, Var.new("seen")))
+written = Block.new([] of Var, literal)
+flow_def = Def.new("once")
+flow_def.block_arg = Arg.new("block")
+flow_call = Call.new(nil, "once", [] of ASTNode, written)
+flow_key = flow_visitor.def_instance_key(flow_def, program, flow_call).as(String)
+flow = flow_visitor.capture_block_flow(written, flow_visitor.vars, flow_visitor.var_unions, flow_visitor.vars.dup)
+flow_visitor.remember_def_instance(flow_key, flow_def, nil_type, flow)
+raise "same-entry proc-only cache missed" if flow_visitor.cached_instance(flow_key).nil?
+flow_visitor.vars["seen"] = int32
+raise "proc-only cache accepted changed entry flow" unless flow_visitor.cached_instance(flow_key).nil?
+
+puts "forwarded block key components and identity controls: passed"

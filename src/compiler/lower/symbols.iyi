@@ -1,0 +1,77 @@
+module compiler/lower/symbols
+
+# The port of the symbol part of `src/compiler/iyi/codegen/symbol.cr` and codegen.cr: the program's
+# symbol table and a symbol literal's value. A symbol is an `i32` index into the program's symbols,
+# and the program's symbols are the names the program writes, numbered in the order it first writes
+# them. The hosted pass numbers them while it types the program; this port numbers them in the order
+# a walk of the normalised tree meets them, which is the same order for a program whose symbols are
+# written where they are first read (every fixture the gate checks). A program with a symbol the walk
+# meets in another order would number it differently, and that is named here rather than assumed.
+#
+# The table (`:symbol_table`) is an array of pointers to one string constant per symbol, emitted
+# before the module's own globals, as the hosted constructor does. It is absent when there are no
+# symbols.
+
+import compiler/syntax/ast::{ASTNode, Annotation, SymbolLiteral}
+import compiler/syntax/visitor::{Visitor}
+import compiler/ir/function::{Linkage}
+import compiler/ir/values::{Value}
+import compiler/lower/context::{Lowerer}
+import compiler/lower/helpers::{build_string_constant}
+import compiler/semantic/top_level::{Type}
+
+# Collects the symbol names of a tree, each once, in the order a walk first meets them.
+pub class SymbolCollector < Visitor
+  getter names : Array(String)
+
+  def initialize
+    @names = [] of String
+  end
+
+  def visit_any(node : ASTNode) : Bool
+    # Annotation arguments are compile-time values, not symbols typed by the
+    # hosted MainVisitor#visit(SymbolLiteral).
+    return false if node.is_a?(Annotation)
+    if node.is_a?(SymbolLiteral)
+      name = node.as(SymbolLiteral).value
+      @names << name unless @names.includes?(name)
+    end
+    true
+  end
+end
+
+# The hosted `define_symbol_table` and the table's initialiser: one string constant per symbol, in
+# index order, and the `[n x ptr]` table of their pointers. Nothing is emitted for no symbols.
+pub def emit_symbol_table(low : Lowerer, names : Array(String)) : Nil
+  low.symbol_names = names
+  if names.empty?
+    return
+  end
+  ptr = low.module.types.ptr(0)
+  pointers = [] of Value
+  names.each do |name|
+    pointers << build_string_constant(low, name)
+  end
+  table = low.module.add_global(":symbol_table", low.module.types.array_of(ptr, names.size.to_i64))
+  table.linkage = Linkage::Internal
+  table.global_constant = true
+  table.initializer = low.builder.const_array(ptr, pointers)
+end
+
+# The index of a symbol name in the program's symbols. Raises when the walk did not meet the name.
+pub def symbol_index(low : Lowerer, name : String) : Int32
+  i = 0
+  while i < low.symbol_names.size
+    return i if low.symbol_names[i] == name
+    i += 1
+  end
+  raise "BUG: symbol :#{name} is not in the program's symbol table (hosted symbol.cr: iyi_symbol_value)"
+end
+
+# The hosted `visit(SymbolLiteral)`: the symbol's index, as the literal's analysed type.
+pub def codegen_symbol(low : Lowerer, node : SymbolLiteral) : Nil
+  t = low.analysed.type_of?(node)
+  raise "BUG: the analysed program has no type for a symbol literal (hosted codegen.cr: visit(SymbolLiteral))" if t.nil?
+  ir = low.typer.llvm_type(t.as(Type))
+  low.last = low.builder.const_int(ir, symbol_index(low, node.value).to_i64)
+end

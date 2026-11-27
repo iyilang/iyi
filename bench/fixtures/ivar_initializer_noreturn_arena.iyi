@@ -1,0 +1,11 @@
+@[Unsafe("declares process exit to exercise a terminating initializer")]
+lib ExitLib
+  fun exit(status : Int32) : NoReturn
+end
+
+class ExitDuringAllocation
+  @value : Int32 = ExitLib.exit(7)
+end
+
+ExitDuringAllocation.new
+ExitLib.exit(9)

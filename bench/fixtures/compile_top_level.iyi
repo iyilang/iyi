@@ -1,0 +1,10 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun compute(a : Int32, b : Int32) : Int32
+  (a &+ b) &* 2
+end
+
+res = compute(10, 11)
+LibC.exit(res)

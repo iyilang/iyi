@@ -1,0 +1,20 @@
+# Composite types without instance variables: tuples, nilable and reference unions,
+# aliases. A class here has no instance variables, so its struct is empty and its
+# value is one pointer.
+class Node
+end
+
+class Leaf
+end
+
+alias Count = Int32
+
+# type: Tuple(Int32, Bool)
+# type: Tuple(Node, Int32)
+# type: Node?
+# type: Node | Leaf
+# type: Node | Leaf | Nil
+# type: Count
+# waiting: StaticArray(Int32, 4): the oracle's type resolver takes no number argument yet (NEEDS.md row 11)
+# waiting: Int32?: a mixed union, lowered in increment 3
+# waiting: NamedTuple(x: Int32, y: Bool) and Proc(Int32, Int32): the drivers' type resolvers take neither yet (increments 2 and 5)

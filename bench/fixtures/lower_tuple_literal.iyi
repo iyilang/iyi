@@ -1,0 +1,10 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+  fun getpid : Int32
+end
+
+if LibC.getpid != -1
+  tuple = {1_i64, 2}
+  nil
+end
+LibC.exit(0)

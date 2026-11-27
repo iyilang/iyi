@@ -1,0 +1,17 @@
+class Base
+  def initialize
+  end
+
+  def value : Int32
+    7
+  end
+end
+
+class Child < Base
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(Child.new.value)

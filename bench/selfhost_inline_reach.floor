@@ -1,0 +1,31 @@
+# Floor for bench/selfhost_semantic_inline_macros_exercise.sh, section 8: the defs each root reaches through the
+# pipeline tool (--prelude). The row also requires no "no record from the declarations pass" refusal.
+# Only raise these (SEMINL_RAISE=1); never lower one.
+#
+# The unit is the one the pipeline table prints as defs-reached: distinct instances by label (receiver, name,
+# argument types; src/compiler/lower/program.iyi refusal_table). Lanes that still carry the older table count
+# distinct def nodes, so their numbers (990, then 902 on the def-scope lane) are not this unit: the same lane
+# head that prints 902 def nodes on hello has 895 labels.
+#
+# Rows measured on the integrated tree (d746f4c13: def-scope 2acc2fcbf, macro facts 8c3a560ac, ensure typing
+# cbd65ded8, bodies 5c5075083, GC table d38f93747), with this accounting on hello:
+#   - Instance sharing (def-scope): 982 labels became 890. In the table's reached rows 96 went, every one a
+#     caller-owned copy of a receiverless program-level def (`Array(...)#raise`, `IyiIO#__iyi_say`, ...), and
+#     4 program-owned ones came.
+#   - Against the def-scope lane's own 895 labels: 22 are only there, 17 only here. The 22: three instances on
+#     an unbound generic (`Array(T).class#new`, `Pointer(T).class#malloc`, `Pointer(T).class#new`), which are
+#     concrete here, and 19 defs of the chaos scheduler (IyiChaos, IyiChaosUnit, IyiWorkers.give_up ...), which
+#     the hosted compiler does not compile for a program built without the iyi_chaos flag (none of its 654
+#     hello functions is one). The 17: the concrete Array / Pointer instances and IyiAtomic verbs at their
+#     actual argument types.
+# No instance the hosted program has was lost. The label lists are kept with the PR that lands this file.
+# The existing reach mutations remain.
+samples/iyi/hello.iyi 999
+bench/fixtures/seminl_reach/root.iyi 960
+bench/fixtures/seminl_reach/def_body_if.iyi 964
+bench/fixtures/seminl_reach/def_body_seq.iyi 964
+bench/fixtures/seminl_reach/def_if_branch.iyi 964
+bench/fixtures/seminl_reach/def_while_body.iyi 964
+bench/fixtures/seminl_reach/top_if_class.iyi 959
+bench/fixtures/seminl_reach/const_value_if.iyi 959
+bench/fixtures/seminl_reach/fun_body_local_across.iyi 958

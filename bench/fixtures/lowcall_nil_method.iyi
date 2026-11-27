@@ -1,0 +1,13 @@
+@[Unsafe("reports the call result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Nil
+  def answer : Int32
+    value = 42
+    value
+  end
+end
+
+LibC.exit(nil.answer)

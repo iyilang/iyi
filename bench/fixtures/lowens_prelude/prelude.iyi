@@ -1,0 +1,28 @@
+lib LibRuntime
+  fun exit(status : Int32) : NoReturn
+end
+
+# The hosted empty-prelude ABI uses the compatibility runtime's symbol prefix.
+macro runtime_personality
+  fun {{ ("__cry" + "stal_personality").id }}(version : Int32, actions : Int32, exception_class : UInt64, exception_object : Void*, context : Void*) : Int32
+  0
+  end
+end
+
+runtime_personality
+
+macro runtime_exception
+  fun {{ ("__cry" + "stal_get_exception").id }}(exception : Void*) : UInt64
+  0_u64
+  end
+end
+
+runtime_exception
+
+macro runtime_raise
+  fun {{ ("__cry" + "stal_raise").id }}(exception : Void*) : NoReturn
+  LibRuntime.exit(99)
+  end
+end
+
+runtime_raise

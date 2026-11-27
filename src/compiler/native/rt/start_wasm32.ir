@@ -1,0 +1,405 @@
+; iyi-ir 1
+module "start_wasm32"
+target triple = "wasm32-wasi"
+target datalayout = "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20"
+
+; The wasm32-wasi runtime (SPEC 2.2 row wasm32-wasi; slice D5). It is compiled into every wasm program, beside the
+; program's module. `_start` is the WASI command entry: it calls the program's main and exits with its result.
+; The only imports are wasi_snapshot_preview1 functions, named by their __wasi_ declarations.
+
+declare external i32 @main()
+declare external void @__wasi_proc_exit(i32)
+declare external i32 @__wasi_fd_write(i32, ptr, i32, ptr)
+
+define external void @_start() {
+entry:
+  %r = call i32 () @main()
+  call void (i32) @__wasi_proc_exit(i32 %r)
+  unreachable
+}
+
+; Writes a signed 64-bit integer and a newline to standard output, in decimal, as the hosted program's puts does.
+define external void @__iyi_print_i64(i64 %v) {
+entry:
+  %buf = alloca [33 x i8], align 8
+  %iov = alloca [2 x i32], align 8
+  %nw = alloca i32, align 4
+  %neg = icmp slt i64 %v, 0
+  %nv = sub i64 0, %v
+  %mag = select i1 %neg, i64 %nv, i64 %v
+  %nl = getelementptr [33 x i8], ptr %buf, i32 0, i32 32
+  store i8 10, ptr %nl, align 1
+  br label %loop
+loop:
+  %pos = phi i32 [ 31, label %entry ], [ %pos2, label %loop ]
+  %cur = phi i64 [ %mag, label %entry ], [ %q, label %loop ]
+  %q = udiv i64 %cur, 10
+  %rem = urem i64 %cur, 10
+  %d = trunc i64 %rem to i8
+  %c = add i8 %d, 48
+  %p = getelementptr [33 x i8], ptr %buf, i32 0, i32 %pos
+  store i8 %c, ptr %p, align 1
+  %pos2 = sub i32 %pos, 1
+  %more = icmp ne i64 %q, 0
+  br i1 %more, label %loop, label %done
+done:
+  %st1 = add i32 %pos2, 1
+  br i1 %neg, label %sign, label %out
+sign:
+  %sp = getelementptr [33 x i8], ptr %buf, i32 0, i32 %pos2
+  store i8 45, ptr %sp, align 1
+  br label %out
+out:
+  %start = phi i32 [ %st1, label %done ], [ %pos2, label %sign ]
+  %ps = getelementptr [33 x i8], ptr %buf, i32 0, i32 %start
+  store ptr %ps, ptr %iov, align 4
+  %lenp = getelementptr i8, ptr %iov, i32 4
+  %len0 = sub i32 33, %start
+  store i32 %len0, ptr %lenp, align 4
+  %w = call i32 (i32, ptr, i32, ptr) @__wasi_fd_write(i32 1, ptr %iov, i32 1, ptr %nw)
+  ret void
+}
+
+; Writes n bytes at p to standard output with one fd_write. Unbuffered, so the bytes arrive in printf's order.
+define internal void @__printf_write(ptr %p, i32 %n) {
+entry:
+  %iov = alloca [2 x i32], align 8
+  %nw = alloca i32, align 4
+  store ptr %p, ptr %iov, align 4
+  %lenp = getelementptr i8, ptr %iov, i32 4
+  store i32 %n, ptr %lenp, align 4
+  %w = call i32 (i32, ptr, i32, ptr) @__wasi_fd_write(i32 1, ptr %iov, i32 1, ptr %nw)
+  ret void
+}
+
+; The digits of v in base 10 or 16, written into buf[0..32) from the end. Returns the index of the first digit.
+define internal i32 @__printf_digits(i64 %v, i32 %base, ptr %buf) {
+entry:
+  %b64 = zext i32 %base to i64
+  br label %loop
+loop:
+  %pos = phi i32 [ 31, label %entry ], [ %pos2, label %loop ]
+  %cur = phi i64 [ %v, label %entry ], [ %q, label %loop ]
+  %q = udiv i64 %cur, %b64
+  %r = urem i64 %cur, %b64
+  %ri = trunc i64 %r to i32
+  %lt = icmp ult i32 %ri, 10
+  %adj = select i1 %lt, i32 48, i32 87
+  %ch = add i32 %ri, %adj
+  %c8 = trunc i32 %ch to i8
+  %p = getelementptr i8, ptr %buf, i32 %pos
+  store i8 %c8, ptr %p, align 1
+  %pos2 = sub i32 %pos, 1
+  %more = icmp ne i64 %q, 0
+  br i1 %more, label %loop, label %done
+done:
+  %start = add i32 %pos2, 1
+  ret i32 %start
+}
+
+; The length of the NUL-terminated string at s.
+define internal i32 @__printf_strlen(ptr %s) {
+entry:
+  br label %loop
+loop:
+  %n = phi i32 [ 0, label %entry ], [ %n2, label %loop ]
+  %sp = getelementptr i8, ptr %s, i32 %n
+  %c = load i8, ptr %sp, align 1
+  %n2 = add i32 %n, 1
+  %more = icmp ne i8 %c, 0
+  br i1 %more, label %loop, label %done
+done:
+  ret i32 %n
+}
+
+; One integer conversion. Reads the 8-byte slot at *apos and advances *apos by 8. kind 0 is signed decimal, 1 is
+; unsigned decimal, 2 is unsigned hexadecimal. lng 0 reads the low 32 bits of the slot, otherwise all 64.
+define internal void @__printf_int(ptr %va, ptr %apos, i32 %lng, i32 %kind) {
+entry:
+  %ibuf = alloca [32 x i8], align 8
+  %o = load i32, ptr %apos, align 4
+  %slot = getelementptr i8, ptr %va, i32 %o
+  %raw = load i64, ptr %slot, align 8
+  %o2 = add i32 %o, 8
+  store i32 %o2, ptr %apos, align 4
+  %t32 = trunc i64 %raw to i32
+  %sx = sext i32 %t32 to i64
+  %zx = zext i32 %t32 to i64
+  %is32 = icmp eq i32 %lng, 0
+  %vs = select i1 %is32, i64 %sx, i64 %raw
+  %vu = select i1 %is32, i64 %zx, i64 %raw
+  %issg = icmp eq i32 %kind, 0
+  %v = select i1 %issg, i64 %vs, i64 %vu
+  %isneg0 = icmp slt i64 %v, 0
+  %neg = and i1 %issg, %isneg0
+  %nv = sub i64 0, %v
+  %mag = select i1 %neg, i64 %nv, i64 %v
+  %ishex = icmp eq i32 %kind, 2
+  %base = select i1 %ishex, i32 16, i32 10
+  %start = call i32 (i64, i32, ptr) @__printf_digits(i64 %mag, i32 %base, ptr %ibuf)
+  br i1 %neg, label %sign, label %nosign
+sign:
+  %sm1 = sub i32 %start, 1
+  %sp = getelementptr i8, ptr %ibuf, i32 %sm1
+  store i8 45, ptr %sp, align 1
+  br label %emit
+nosign:
+  br label %emit
+emit:
+  %from = phi i32 [ %sm1, label %sign ], [ %start, label %nosign ]
+  %fp = getelementptr i8, ptr %ibuf, i32 %from
+  %len = sub i32 32, %from
+  call void (ptr, i32) @__printf_write(ptr %fp, i32 %len)
+  ret void
+}
+
+; %g of v, exact or a trap. v must be a dyadic rational (|v| * 2^j is an integer for some j <= 40) whose exact decimal
+; has at most six significant digits and a decimal exponent in [-4, 5]. It then prints in fixed notation with trailing
+; zeros removed, as C's %g does. Any other value traps rather than print a rounded or exponent-form result.
+define internal void @__printf_g(double %v) {
+entry:
+  %ibuf = alloca [32 x i8], align 8
+  %lit = alloca [1 x i8], align 1
+  %neg = fcmp olt double %v, 0x0000000000000000
+  %nv = fsub double 0x0000000000000000, %v
+  %av = select i1 %neg, double %nv, double %v
+  %iszero = fcmp oeq double %av, 0x0000000000000000
+  br i1 %iszero, label %zero, label %findj
+zero:
+  %vbits = bitcast double %v to i64
+  %zneg = icmp slt i64 %vbits, 0
+  br i1 %zneg, label %zminus, label %zplus
+zminus:
+  store i8 45, ptr %lit, align 1
+  call void (ptr, i32) @__printf_write(ptr %lit, i32 1)
+  br label %zplus
+zplus:
+  store i8 48, ptr %lit, align 1
+  call void (ptr, i32) @__printf_write(ptr %lit, i32 1)
+  ret void
+findj:
+  %j = phi i32 [ 0, label %entry ], [ %j2, label %nextj ]
+  %w = phi double [ %av, label %entry ], [ %w2, label %nextj ]
+  %lim = fcmp olt double %w, 0x4340000000000000
+  br i1 %lim, label %chk, label %trap
+chk:
+  %wi = fptosi double %w to i64
+  %wf = sitofp i64 %wi to double
+  %integral = fcmp oeq double %wf, %w
+  br i1 %integral, label %found, label %nextj
+nextj:
+  %j2 = add i32 %j, 1
+  %w2 = fmul double %w, 0x4000000000000000
+  %more = icmp slt i32 %j2, 41
+  br i1 %more, label %findj, label %trap
+found:
+  %isj0 = icmp eq i32 %j, 0
+  br i1 %isj0, label %scale, label %p5loop
+p5loop:
+  %k = phi i32 [ 0, label %found ], [ %k2, label %p5loop ]
+  %p5 = phi i64 [ 1, label %found ], [ %p52, label %p5loop ]
+  %p52 = mul i64 %p5, 5
+  %k2 = add i32 %k, 1
+  %p5more = icmp slt i32 %k2, %j
+  br i1 %p5more, label %p5loop, label %scale
+scale:
+  %pf = phi i64 [ 1, label %found ], [ %p52, label %p5loop ]
+  %maxn = udiv i64 9223372036854775807, %pf
+  %fits = icmp ule i64 %wi, %maxn
+  br i1 %fits, label %scale2, label %trap
+scale2:
+  %nn = mul i64 %wi, %pf
+  br label %strip
+strip:
+  %sn = phi i64 [ %nn, label %scale2 ], [ %sn2, label %stripdo ]
+  %sj = phi i32 [ %j, label %scale2 ], [ %sj2, label %stripdo ]
+  %r10 = urem i64 %sn, 10
+  %trail = icmp eq i64 %r10, 0
+  %hasfrac = icmp sgt i32 %sj, 0
+  %dostrip = and i1 %trail, %hasfrac
+  br i1 %dostrip, label %stripdo, label %stripped
+stripdo:
+  %sn2 = udiv i64 %sn, 10
+  %sj2 = sub i32 %sj, 1
+  br label %strip
+stripped:
+  %dig = call i32 (i64, i32, ptr) @__printf_digits(i64 %sn, i32 10, ptr %ibuf)
+  %len = sub i32 32, %dig
+  %lenok = icmp ule i32 %len, 6
+  br i1 %lenok, label %expcheck, label %trap
+expcheck:
+  %x = sub i32 %len, 1
+  %xv = sub i32 %x, %sj
+  %xhi = icmp sle i32 %xv, 5
+  %xlo = icmp sge i32 %xv, -4
+  %xok = and i1 %xhi, %xlo
+  br i1 %xok, label %emit, label %trap
+emit:
+  br i1 %neg, label %minus, label %noneg
+minus:
+  store i8 45, ptr %lit, align 1
+  call void (ptr, i32) @__printf_write(ptr %lit, i32 1)
+  br label %noneg
+noneg:
+  %dp = getelementptr i8, ptr %ibuf, i32 %dig
+  %wholeq = icmp eq i32 %sj, 0
+  br i1 %wholeq, label %whole, label %frac
+whole:
+  call void (ptr, i32) @__printf_write(ptr %dp, i32 %len)
+  ret void
+frac:
+  %intlen = sub i32 %len, %sj
+  %hasint = icmp sgt i32 %intlen, 0
+  br i1 %hasint, label %splitint, label %leadzero
+splitint:
+  call void (ptr, i32) @__printf_write(ptr %dp, i32 %intlen)
+  store i8 46, ptr %lit, align 1
+  call void (ptr, i32) @__printf_write(ptr %lit, i32 1)
+  %fp = getelementptr i8, ptr %dp, i32 %intlen
+  call void (ptr, i32) @__printf_write(ptr %fp, i32 %sj)
+  ret void
+leadzero:
+  store i8 48, ptr %lit, align 1
+  call void (ptr, i32) @__printf_write(ptr %lit, i32 1)
+  store i8 46, ptr %lit, align 1
+  call void (ptr, i32) @__printf_write(ptr %lit, i32 1)
+  %zeros = sub i32 %sj, %len
+  br label %zloop
+zloop:
+  %zi = phi i32 [ 0, label %leadzero ], [ %zi2, label %zloop ]
+  store i8 48, ptr %lit, align 1
+  call void (ptr, i32) @__printf_write(ptr %lit, i32 1)
+  %zi2 = add i32 %zi, 1
+  %zmore = icmp slt i32 %zi2, %zeros
+  br i1 %zmore, label %zloop, label %zdone
+zdone:
+  call void (ptr, i32) @__printf_write(ptr %dp, i32 %len)
+  ret void
+trap:
+  unreachable
+}
+
+; printf(fmt, va): the C printf the test corpus calls. A variadic call stores its arguments in 8-byte slots at va
+; (integers sign-extended to 64 bits, pointers zero-extended, floats promoted to double) and passes va last.
+; Conversions: d i u x s c g %, with the l and ll length modifiers (g is __printf_g: exact, or a trap).
+define external i32 @printf(ptr %fmt, ptr %va) {
+entry:
+  %pp = alloca ptr, align 4
+  %apos = alloca i32, align 4
+  %off = alloca i32, align 4
+  %lng = alloca i32, align 4
+  %lit = alloca [1 x i8], align 1
+  store ptr %fmt, ptr %pp, align 4
+  store i32 0, ptr %apos, align 4
+  br label %scan
+scan:
+  %cp = load ptr, ptr %pp, align 4
+  %c0 = load i8, ptr %cp, align 1
+  %atend = icmp eq i8 %c0, 0
+  br i1 %atend, label %done, label %notend
+notend:
+  %ispct = icmp eq i8 %c0, 37
+  br i1 %ispct, label %spec, label %literal
+literal:
+  store i8 %c0, ptr %lit, align 1
+  call void (ptr, i32) @__printf_write(ptr %lit, i32 1)
+  %nlit = getelementptr i8, ptr %cp, i32 1
+  store ptr %nlit, ptr %pp, align 4
+  br label %scan
+spec:
+  %a1 = getelementptr i8, ptr %cp, i32 1
+  %c1 = load i8, ptr %a1, align 1
+  %pct2 = icmp eq i8 %c1, 37
+  br i1 %pct2, label %percent, label %lenmod
+percent:
+  store i8 37, ptr %lit, align 1
+  call void (ptr, i32) @__printf_write(ptr %lit, i32 1)
+  %npct = getelementptr i8, ptr %cp, i32 2
+  store ptr %npct, ptr %pp, align 4
+  br label %scan
+lenmod:
+  store i32 0, ptr %lng, align 4
+  store i32 1, ptr %off, align 4
+  %isl1 = icmp eq i8 %c1, 108
+  br i1 %isl1, label %long1, label %conv
+long1:
+  store i32 1, ptr %lng, align 4
+  store i32 2, ptr %off, align 4
+  %a2 = getelementptr i8, ptr %cp, i32 2
+  %c2 = load i8, ptr %a2, align 1
+  %isl2 = icmp eq i8 %c2, 108
+  br i1 %isl2, label %long2, label %conv
+long2:
+  store i32 2, ptr %lng, align 4
+  store i32 3, ptr %off, align 4
+  br label %conv
+conv:
+  %o = load i32, ptr %off, align 4
+  %ca = getelementptr i8, ptr %cp, i32 %o
+  %cv = load i8, ptr %ca, align 1
+  %nexto = add i32 %o, 1
+  %nxt = getelementptr i8, ptr %cp, i32 %nexto
+  store ptr %nxt, ptr %pp, align 4
+  %lv = load i32, ptr %lng, align 4
+  %isd = icmp eq i8 %cv, 100
+  %isi = icmp eq i8 %cv, 105
+  %issd = or i1 %isd, %isi
+  br i1 %issd, label %sdec, label %nsd
+sdec:
+  call void (ptr, ptr, i32, i32) @__printf_int(ptr %va, ptr %apos, i32 %lv, i32 0)
+  br label %scan
+nsd:
+  %isu = icmp eq i8 %cv, 117
+  br i1 %isu, label %udec, label %nu
+udec:
+  call void (ptr, ptr, i32, i32) @__printf_int(ptr %va, ptr %apos, i32 %lv, i32 1)
+  br label %scan
+nu:
+  %isx = icmp eq i8 %cv, 120
+  br i1 %isx, label %hex, label %nx
+hex:
+  call void (ptr, ptr, i32, i32) @__printf_int(ptr %va, ptr %apos, i32 %lv, i32 2)
+  br label %scan
+nx:
+  %iss = icmp eq i8 %cv, 115
+  br i1 %iss, label %str, label %ns
+str:
+  %sa = load i32, ptr %apos, align 4
+  %sslot = getelementptr i8, ptr %va, i32 %sa
+  %sval = load ptr, ptr %sslot, align 4
+  %sa2 = add i32 %sa, 8
+  store i32 %sa2, ptr %apos, align 4
+  %slen = call i32 (ptr) @__printf_strlen(ptr %sval)
+  call void (ptr, i32) @__printf_write(ptr %sval, i32 %slen)
+  br label %scan
+ns:
+  %isc = icmp eq i8 %cv, 99
+  br i1 %isc, label %chr, label %ng
+chr:
+  %ca3 = load i32, ptr %apos, align 4
+  %cslot = getelementptr i8, ptr %va, i32 %ca3
+  %craw = load i32, ptr %cslot, align 4
+  %cbyte = trunc i32 %craw to i8
+  store i8 %cbyte, ptr %lit, align 1
+  call void (ptr, i32) @__printf_write(ptr %lit, i32 1)
+  %ca4 = add i32 %ca3, 8
+  store i32 %ca4, ptr %apos, align 4
+  br label %scan
+ng:
+  %isg = icmp eq i8 %cv, 103
+  br i1 %isg, label %dbl, label %other
+dbl:
+  %da = load i32, ptr %apos, align 4
+  %dslot = getelementptr i8, ptr %va, i32 %da
+  %dval = load double, ptr %dslot, align 8
+  %da2 = add i32 %da, 8
+  store i32 %da2, ptr %apos, align 4
+  call void (double) @__printf_g(double %dval)
+  br label %scan
+other:
+  store i8 %cv, ptr %lit, align 1
+  call void (ptr, i32) @__printf_write(ptr %lit, i32 1)
+  br label %scan
+done:
+  ret i32 0
+}

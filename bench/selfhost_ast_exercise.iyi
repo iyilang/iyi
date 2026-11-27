@@ -287,6 +287,9 @@ module BenchSelfhostAstExercise
     nodes << n_Splat
     n_StringInterpolation = StringInterpolation.new(([StringLiteral.new("val="), Var.new("x")] of ASTNode))
     assert(n_StringInterpolation.is_a?(StringInterpolation), "construction of StringInterpolation")
+    assert(n_StringInterpolation.to_s == "\"val=" + "#" + "{x}\"", "string interpolation renders its expression")
+    escaped = StringInterpolation.new(([StringLiteral.new("quote=\"\n"), Var.new("x")] of ASTNode))
+    assert(escaped.to_s == "\"quote=\\\"\\n" + "#" + "{x}\"", "string interpolation escapes its literal")
     nodes << n_StringInterpolation
     n_StringLiteral = StringLiteral.new("hello")
     assert(n_StringLiteral.is_a?(StringLiteral), "construction of StringLiteral")

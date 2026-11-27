@@ -1,0 +1,18 @@
+# Proves that a program with only declarations (no main, no top-level statements)
+# compiles into a valid executable binary with an auto-generated entry point
+# that exits 0, matching the shipped compiler behavior.
+
+struct EmptyEntryTest
+  @x : Int32
+
+  def initialize(@x : Int32)
+  end
+
+  def value : Int32
+    @x
+  end
+end
+
+fun helper(val : Int32) : Int32
+  val &+ 1
+end

@@ -1,0 +1,21 @@
+class K
+  def self.mk : Int32
+    9
+  end
+
+  @@v : Int32 = K.mk
+
+  def self.v
+    @@v
+  end
+end
+
+def f
+  K.v
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(f)

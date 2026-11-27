@@ -569,11 +569,92 @@ if [ -z "$HOST_TRIPLE" ]; then
   echo "  THE ORACLE REPORTED NO HOST TRIPLE: this gate cannot conclude anything"
   exit 1
 fi
-# The port's host triple is the hosted compiler's own, at run time.
+# The explicit environment cases must agree. When both inputs are absent, the
+# native linker intentionally uses the OS version rather than clang's SDK cap.
 PORT_HOST="$("$WORK/exercise$EXE" --host-target)"
-if [ "$PORT_HOST" != "$HOST_TRIPLE" ]; then
-  echo "  THE PORT'S HOST TRIPLE DIFFERS: port $PORT_HOST, hosted compiler $HOST_TRIPLE"
-  status=1
+if [ "$HOST_OS" != darwin ] || [ "${MACOSX_DEPLOYMENT_TARGET+x}" = x ] || [ -n "${SDKROOT:-}" ]; then
+  if [ "$PORT_HOST" != "$HOST_TRIPLE" ]; then
+    echo "  THE PORT'S HOST TRIPLE DIFFERS: port $PORT_HOST, hosted compiler $HOST_TRIPLE"
+    status=1
+  fi
+fi
+
+if [ "$HOST_OS" = darwin ]; then
+  host_deploy="$(env -u SDKROOT MACOSX_DEPLOYMENT_TARGET=10.15 "$WORK/dump_hosted$EXE" --host-target)"
+  port_deploy="$(env -u SDKROOT MACOSX_DEPLOYMENT_TARGET=10.15 "$WORK/exercise$EXE" --host-target)"
+  if [ -z "$host_deploy" ] || [ "$host_deploy" != "$port_deploy" ]; then
+    echo "  DEPLOYMENT TARGET DIFFERS: port $port_deploy, hosted compiler $host_deploy"
+    status=1
+  else
+    echo "  explicit deployment target: port and hosted host triple $host_deploy"
+  fi
+
+  mkdir -p "$WORK/older_sdk"
+  printf '{"nested":{"Version":"0.1"},"Version":"1.2"}\n' > "$WORK/older_sdk/SDKSettings.json"
+  host_explicit="$(env -u MACOSX_DEPLOYMENT_TARGET SDKROOT="$WORK_NATIVE/older_sdk" "$WORK/dump_hosted$EXE" --host-target)"
+  port_explicit="$(env -u MACOSX_DEPLOYMENT_TARGET SDKROOT="$WORK_NATIVE/older_sdk" "$WORK/exercise$EXE" --host-target)"
+  case "$host_explicit" in
+    *-macosx1.2)
+      if [ "$host_explicit" = "$port_explicit" ]; then
+        echo "  explicit SDKROOT 1.2: port and hosted host triple $host_explicit"
+      else
+        echo "  EXPLICIT SDKROOT DIFFERS: port $port_explicit, hosted compiler $host_explicit"
+        status=1
+      fi
+      ;;
+    *)
+      echo "  THE ORACLE DID NOT SELECT THE EXPLICIT SDK VERSION: $host_explicit"
+      status=1
+      ;;
+  esac
+
+  host_unset="$(env -u SDKROOT -u MACOSX_DEPLOYMENT_TARGET "$WORK/dump_hosted$EXE" --host-target)"
+  port_unset="$(env -u SDKROOT -u MACOSX_DEPLOYMENT_TARGET "$WORK/exercise$EXE" --host-target)"
+  os_version="$(sw_vers -productVersion | awk -F. 'NF >= 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ { print $1 "." $2; exit }')"
+  case "$port_unset" in
+    *-macosx"$os_version")
+      if [ -z "$os_version" ]; then status=1; fi
+      ;;
+    *)
+      echo "  UNSET SDKROOT: port $port_unset, expected OS version $os_version"
+      status=1
+      ;;
+  esac
+  selected_sdk="$(env -u SDKROOT -u MACOSX_DEPLOYMENT_TARGET xcrun --show-sdk-path 2>/dev/null)" || selected_sdk=""
+  selected_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["Version"])' "$selected_sdk/SDKSettings.json" 2>/dev/null)" || selected_version=""
+  relation="$(awk -v sdk="$selected_version" -v os="$os_version" 'BEGIN {
+    ns = split(sdk, s, "."); no = split(os, o, ".")
+    if (ns < 1 || no < 2 || s[1] !~ /^[0-9]+$/ || o[1] !~ /^[0-9]+$/ ||
+        (ns > 1 && s[2] !~ /^[0-9]+$/) || o[2] !~ /^[0-9]+$/) { print "unknown"; exit }
+    if (s[1] + 0 < o[1] + 0 || (s[1] + 0 == o[1] + 0 && s[2] + 0 < o[2] + 0)) print "older"
+    else print "at-least-os"
+  }')"
+  case "$relation" in
+    older)
+      echo "  documented difference: hosted follows clang's SDK cap; the native compiler has no clang linker driver: port $port_unset, hosted $host_unset"
+      ;;
+    at-least-os)
+      if [ "$host_unset" != "$port_unset" ]; then
+        echo "  UNSET SDKROOT DIFFERS: port $port_unset, hosted compiler $host_unset (SDK $selected_version, OS $os_version)"
+        status=1
+      else
+        echo "  unset SDKROOT: port and hosted host triple $port_unset (SDK $selected_version, OS $os_version)"
+      fi
+      ;;
+    *)
+      echo "  INVALID: cannot compare selected SDK version '$selected_version' with OS '$os_version'"
+      status=1
+      ;;
+  esac
+
+  printf '{"Version":"1.2",}\n' > "$WORK/older_sdk/SDKSettings.json"
+  port_bad_sdk="$(env -u MACOSX_DEPLOYMENT_TARGET SDKROOT="$WORK_NATIVE/older_sdk" "$WORK/exercise$EXE" --host-target)"
+  if [ "$port_bad_sdk" != "$port_unset" ]; then
+    echo "  MALFORMED SDK SETTINGS did not fall back to the OS: port $port_bad_sdk, OS $port_unset"
+    status=1
+  else
+    echo "  malformed SDK settings: port uses OS version $port_unset"
+  fi
 fi
 fixture_args() {
   awk -v host="$HOST_TRIPLE" '
@@ -1424,7 +1505,7 @@ prove_mutation "-D defines dropped from the flag set" "$TARGET_FLAGS" \
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "host_flag? answers from the target's set, not the host's" "$INTERP" \
-  "MacroMethods.has_flag?(MacroTargetFlags.host([] of String), flag_name_of(node))" \
+  "MacroMethods.has_flag?(host_flags_now, flag_name_of(node))" \
   "MacroMethods.has_flag?(@flags, flag_name_of(node))" \
   -- check_macros_still_match || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))

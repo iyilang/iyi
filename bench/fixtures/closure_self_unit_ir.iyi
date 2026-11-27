@@ -1,0 +1,26 @@
+@[Unsafe("declares the external process exit")]
+module fixtures/closure_self_unit_ir
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def scale(value : Int32) : Int32
+  value &* 3
+end
+
+class Job
+  def initialize(@base : Int32)
+  end
+
+  def independent : Proc(Int32)
+    -> { scale(5) }
+  end
+
+  def bound : Proc(Int32)
+    -> { scale(@base) }
+  end
+end
+
+job = Job.new(4)
+LibC.exit((job.independent.call &+ job.bound.call) &- 27)

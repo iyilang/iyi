@@ -1,0 +1,11 @@
+NAME = "ab"
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+# A string constant is a simple literal: the hosted program emits its global at the start of the program
+# (initialize_simple_constants), and a read of it is a load of that global. The read is a bare statement, so no
+# local of type String is declared (its struct would be printed by the port and not by the hosted module).
+NAME
+LibC.exit(3)

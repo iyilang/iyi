@@ -1,0 +1,13 @@
+def consume(value : Int32) : Int32
+  value
+end
+
+def consume(value : String) : Int32
+  7
+end
+
+def choose(flag : Bool) : Int32 | Bool
+  flag ? 42 : false
+end
+
+consume(choose(true))

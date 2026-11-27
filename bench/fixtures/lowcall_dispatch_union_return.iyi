@@ -1,0 +1,36 @@
+@[Unsafe("reports the call result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Loc
+  def initialize(@n : Int32)
+  end
+
+  def n : Int32
+    @n
+  end
+end
+
+class A
+  def get : Loc
+    Loc.new(42)
+  end
+end
+
+class B
+  def get : Nil
+    nil
+  end
+end
+
+def run(flag : Bool) : Int32
+  result = (flag ? A.new : B.new).get
+  if result.is_a?(Loc)
+    result.n
+  else
+    0
+  end
+end
+
+LibC.exit(run(true))

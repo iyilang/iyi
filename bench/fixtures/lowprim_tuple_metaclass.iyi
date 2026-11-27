@@ -1,0 +1,13 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+  fun getpid : Int32
+end
+
+def pick_tuple_type : Int32.class
+  Tuple(Int64, Int32)[1]
+end
+
+if LibC.getpid == -1
+  pick_tuple_type
+end
+LibC.exit(0)

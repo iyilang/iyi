@@ -1,0 +1,26 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct Problem
+  def initialize(@code : Int32)
+  end
+end
+
+def tuple_result(ok : Bool) : Tuple(Int32, Int32) | Problem
+  ok ? {123456789, 17} : Problem.new(1)
+end
+
+def named_result(ok : Bool) : NamedTuple(left: Int32, right: Int32) | Problem
+  ok ? {left: 987654321, right: 23} : Problem.new(2)
+end
+
+pair = tuple_result(true)
+LibC.exit(1) if pair.is_a?(Problem)
+LibC.exit(2) unless pair[0] == 123456789 && pair[1] == 17
+named = named_result(true)
+LibC.exit(4) if named.is_a?(Problem)
+LibC.exit(5) unless named[:left] == 987654321 && named[:right] == 23
+plain = {31, 37}
+LibC.exit(6) unless plain[0] == 31 && plain[1] == 37
+LibC.exit(7)

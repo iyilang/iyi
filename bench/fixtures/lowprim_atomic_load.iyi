@@ -1,0 +1,23 @@
+# Atomic loads through a class method use the pointee type and literal ordering.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+struct IyiAtomic
+  @[Primitive(:load_atomic)]
+  def self.load(pointer : Pointer(UInt64), ordering : Symbol, volatile : Bool) : UInt64
+  end
+end
+
+def acquire(p : Pointer(UInt64)) : UInt64
+  IyiAtomic.load(p, :acquire, false)
+end
+
+def sequential(p : Pointer(UInt64)) : UInt64
+  IyiAtomic.load(p, :sequentially_consistent, false)
+end
+
+x = 7_u64
+acquire(pointerof(x))
+sequential(pointerof(x))
+LibC.exit(7)

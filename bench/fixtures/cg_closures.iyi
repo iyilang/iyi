@@ -1,0 +1,14 @@
+fun test_closure_single(x : Int32) : Int32
+  p = ->(y : Int32) { x &+ y }
+  p.call(10)
+end
+
+fun test_closure_multi(a : Int32, b : Int32) : Int32
+  p = ->(x : Int32) { (a &* x) &+ b }
+  p.call(5)
+end
+
+fun test_closure_call_indirect(x : Int32, factor : Int32) : Int32
+  p = ->(v : Int32) { v &* factor }
+  p.call(x)
+end

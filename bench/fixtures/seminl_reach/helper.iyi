@@ -1,0 +1,4 @@
+# The required file: one top-level fun with a body, which the root calls.
+fun seminl_reach_value : Int32
+  41 + 1
+end

@@ -1,0 +1,15 @@
+FLAG = true
+
+def f
+  if FLAG
+    9
+  else
+    4
+  end
+end
+
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+LibC.exit(f)

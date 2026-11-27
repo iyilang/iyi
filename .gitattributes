@@ -47,6 +47,7 @@ bench/*.expected text eol=lf
 # Unpinned, a Windows checkout gave it CRLF; the hosted formatter keeps a
 # file's line endings and the port does not yet, so the two diverged there.
 bench/fixtures/**/*.fixture text eol=lf
+bench/*.ceiling text eol=lf
 
 # A module artifact is binary. Without this GitHub tries to render one and git
 # tries to diff it.

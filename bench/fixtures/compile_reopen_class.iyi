@@ -1,0 +1,7 @@
+import reopen_mod_a
+import reopen_mod_b
+
+fun main(argc : Int32, argv : Pointer(Pointer(UInt8))) : Int32
+  s = ReopenedService.new
+  s.part1 &+ s.part2
+end

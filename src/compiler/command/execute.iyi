@@ -1,0 +1,165 @@
+module compiler/command/execute
+
+import compiler/command/driver::{CommandDriver, CommandResult, CompilerOptions}
+import compiler/compiler::{Compiler, CompilerConfig}
+import compiler/loader::{Loader, IyiPath}
+import compiler/backend/native::{NativeBackend}
+import compiler/platform/target::{Target}
+import std/process::{Process, ProcessResult, ProcessError}
+import std/file
+import std/dir::{Dir}
+
+# Executes parsed commands separately from the parity-tested command driver.
+pub class CommandExecutor
+  PHASE_STACK_BYTES = 1073741824_u64
+  TARGET            = "aarch64-apple-darwin"
+
+  def self.execute(result : CommandResult, config_path : String? = nil) : Int32
+    command = result.selected_command
+    if command == "run" && result.subcommand_options.has_key?("sandbox")
+      return fail("the self-hosted compiler does not run `run --sandbox` yet")
+    end
+    if opts = result.compiler_options
+      return build(opts, config_path) if command == "build"
+      return run(opts, config_path) if command == "run"
+    end
+    fail("the self-hosted compiler does not run `#{command}` yet")
+  end
+
+  def self.fail(message : String) : Int32
+    STDERR.puts "Error: #{message}"
+    1
+  end
+
+  def self.unsupported(opts : CompilerOptions) : String?
+    {% unless flag?(:darwin) && flag?(:aarch64) %}
+      return "the native backend builds and runs aarch64-apple-darwin programs, and this host is not one"
+    {% end %}
+    if options = Program.env("IYI_OPTS")
+      return "IYI_OPTS is not in the self-hosted compiler yet" unless options.empty?
+    end
+    return "multiple source files are not in the self-hosted compiler yet" if opts.filenames.size > 1
+    return "--stdin-filename is not in the self-hosted compiler yet" if opts.stdin_filename
+    return "--crystal needs the hosted compiler's standard library" if opts.compatibility_prelude
+    source = opts.filenames[0]
+    return "#{source} needs the hosted compiler's standard library; the native compiler accepts .iyi files" unless source.ends_with?(".iyi")
+    return "--prelude prelude needs the hosted compiler's standard library" if opts.prelude == "prelude"
+    unless opts.prelude == "iyi/prelude" || opts.prelude == "empty"
+      return "--prelude #{opts.prelude} is not in the self-hosted compiler yet"
+    end
+    triple = opts.target_triple || CommandDriver.default_target
+    target = Target.parse?(triple)
+    unless target && target.architecture == "aarch64" && target.darwin?
+      label = opts.target_triple ? "--target" : "configured default target"
+      return "#{label}: the native backend builds aarch64-apple-darwin only, and #{triple} was asked for"
+    end
+    return "--cross-compile is not in the self-hosted compiler yet" if opts.cross_compile
+    opts.emit_targets.each do |target|
+      if target == "llvm-ir" || target == "llvm-bc"
+        return "--emit #{target} requires LLVM output, which the native compiler does not produce"
+      end
+      return "--emit #{target} is not in the self-hosted compiler yet"
+    end
+    return "--ll requires LLVM output, which the native compiler does not produce" if opts.dump_ll
+    return "--x86-asm-syntax intel requires x86 assembly, which the native compiler does not produce" if opts.x86_asm_syntax == "intel"
+    return "--debug is not in the self-hosted compiler yet" if opts.debug == "all"
+    return "--release is not in the self-hosted compiler yet" if opts.release
+    return "-O #{opts.optimization_mode} is not in the self-hosted compiler yet" if opts.optimization_mode != "0"
+    return "-D is not in the self-hosted compiler yet" unless opts.flags.empty?
+    return "--mcpu has no native backend setting" if opts.mcpu
+    return "--mattr has no native backend setting" if opts.mattr
+    if model = opts.mcmodel
+      return "--mcmodel #{model} has no native backend setting" unless model == "default"
+    end
+    return "--link-flags is not in the self-hosted compiler yet" unless opts.link_flags.empty?
+    return "--static is unavailable on darwin: libSystem cannot be linked statically" if opts.static_link
+    return "--no-codegen is not in the self-hosted compiler yet" if opts.no_codegen
+    return "-f json is not in the self-hosted compiler yet" if opts.output_format == "json"
+    return "--error-on-warnings is not in the self-hosted compiler yet" if opts.error_on_warnings
+    return "--exclude-warnings is not in the self-hosted compiler yet" unless opts.exclude_warnings.empty?
+    return "--stats is not in the self-hosted compiler yet" if opts.stats
+    return "--progress is not in the self-hosted compiler yet" if opts.progress
+    return "--time is not in the self-hosted compiler yet" if opts.time
+    return "--iyi-keep is not in the self-hosted compiler yet" if opts.iyi_keep
+    return "--emit-bind belongs to tool bind, not build or run" if opts.emit_bind
+    return "--emit-iyimod is not in the self-hosted compiler yet" if opts.emit_iyimod
+    return "--use-iyimod is not in the self-hosted compiler yet" if opts.use_iyimod
+    return "--stale-key is not in the self-hosted compiler yet" if opts.stale_key
+    return "--stale-accept is not in the self-hosted compiler yet" if opts.stale_accept
+    return "--stale-block is not in the self-hosted compiler yet" if opts.stale_block
+    return "--stale-dump-elements is not in the self-hosted compiler yet" if opts.stale_dump_elements
+    return "--stale-inputs is not in the self-hosted compiler yet" if opts.stale_inputs
+    absolute_source = File.expand_path(source)
+    root = IyiPath.header_root_of(absolute_source, File.read(source)) || File.dirname(absolute_source)
+    if Dir.exists?(File.join(root, "mods"))
+      return "workspace mods are not in the self-hosted compiler yet"
+    end
+    nil
+  end
+
+  def self.build(opts : CompilerOptions, config_path : String? = nil) : Int32
+    if reason = unsupported(opts)
+      return fail(reason)
+    end
+    compile(opts, opts.output_filename.as(String), config_path)
+  end
+
+  def self.remove_temporary(path : String) : Nil
+    File.delete(path) if File.exists?(path)
+  end
+
+  def self.run(opts : CompilerOptions, config_path : String? = nil) : Int32
+    if reason = unsupported(opts)
+      return fail(reason)
+    end
+    if opts.specified_output
+      return compile(opts, opts.output_filename.as(String), config_path)
+    end
+    temp = File.join(Dir.tempdir, "iyi-run-#{File.basename(opts.output_filename.as(String))}-#{Process.pid}")
+    if File.exists?(temp) || File.symlink?(temp)
+      return fail("temporary output already exists: #{temp}")
+    end
+    defer remove_temporary(temp)
+    status = compile(opts, temp, config_path)
+    unless status == 0
+      remove_temporary(temp)
+      return status
+    end
+    STDOUT.flush
+    STDERR.flush
+    child = Process.run(temp, opts.arguments, capture: false)
+    remove_temporary(temp)
+    if child.is_a?(ProcessResult)
+      if child.signal != 0
+        STDERR.puts "iyi: the program was killed by signal #{child.signal}"
+        return 1
+      end
+      return child.exit_code
+    elsif child.is_a?(ProcessError)
+      return fail(child.message)
+    end
+    fail("the program was cancelled")
+  end
+
+  def self.compile(opts : CompilerOptions, output : String, config_path : String? = nil) : Int32
+    IyiWorkers.count = opts.n_threads
+    executable = Process.executable
+    return fail("cannot resolve the compiler executable's path for the prelude") unless executable
+    origin = File.dirname(File.real_path(executable))
+    loader = Loader.new(IyiPath.new(nil, origin, config_path))
+    loader.load_prelude = opts.prelude == "iyi/prelude"
+    config = CompilerConfig.new(output, false, nil, false, TARGET, false, false, false, true)
+    compiler = Compiler.new(config, loader, NativeBackend.new)
+    previous = File.info?(output)
+    compiler.compile(opts.filenames[0])
+    if refusal = compiler.refusal
+      return fail(refusal)
+    end
+    made = File.info?(output)
+    return fail("the build ended without writing #{output}") unless made && made.file?
+    if previous && previous.same_file?(made)
+      return fail("the build did not replace #{output} with a new executable")
+    end
+    0
+  end
+end

@@ -1,0 +1,262 @@
+; iyi-ir 1
+module "arith"
+target triple = "wasm32-wasi"
+target datalayout = "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20"
+declare external void @__iyi_print_i64(i64)
+
+define internal void @show8(i8 %v) {
+entry:
+  %s = sext i8 %v to i64
+  call void (i64) @__iyi_print_i64(i64 %s)
+  %z = zext i8 %v to i64
+  call void (i64) @__iyi_print_i64(i64 %z)
+  ret void
+}
+
+define internal void @show16(i16 %v) {
+entry:
+  %s = sext i16 %v to i64
+  call void (i64) @__iyi_print_i64(i64 %s)
+  %z = zext i16 %v to i64
+  call void (i64) @__iyi_print_i64(i64 %z)
+  ret void
+}
+
+define internal void @show32(i32 %v) {
+entry:
+  %s = sext i32 %v to i64
+  call void (i64) @__iyi_print_i64(i64 %s)
+  %z = zext i32 %v to i64
+  call void (i64) @__iyi_print_i64(i64 %z)
+  ret void
+}
+
+define internal void @show64(i64 %v) {
+entry:
+  call void (i64) @__iyi_print_i64(i64 %v)
+  ret void
+}
+
+define internal void @showb(i1 %v) {
+entry:
+  %z = zext i1 %v to i64
+  call void (i64) @__iyi_print_i64(i64 %z)
+  ret void
+}
+
+define internal void @calc8(i8 %a, i8 %b) {
+entry:
+  %add = add i8 %a, %b
+  %sub = sub i8 %a, %b
+  %mul = mul i8 %a, %b
+  %sdv = sdiv i8 %a, %b
+  %srm = srem i8 %a, %b
+  %udv = udiv i8 %a, %b
+  %urm = urem i8 %a, %b
+  %shl = shl i8 %a, 3
+  %lsr = lshr i8 %a, 1
+  %asr = ashr i8 %a, 1
+  %bm = and i8 %b, 7
+  %vsh = shl i8 %a, %bm
+  %vasr = ashr i8 %a, %bm
+  %vlsr = lshr i8 %a, %bm
+  %and = and i8 %a, %b
+  %or = or i8 %a, %b
+  %xor = xor i8 %a, %b
+  %lt = icmp slt i8 %a, %b
+  %ult = icmp ult i8 %a, %b
+  %eq = icmp eq i8 %a, %b
+  %ge = icmp sge i8 %a, %b
+  %uge = icmp uge i8 %a, %b
+  %sel = select i1 %lt, i8 %a, i8 %b
+  call void (i8) @show8(i8 %add)
+  call void (i8) @show8(i8 %sub)
+  call void (i8) @show8(i8 %mul)
+  call void (i8) @show8(i8 %sdv)
+  call void (i8) @show8(i8 %srm)
+  call void (i8) @show8(i8 %udv)
+  call void (i8) @show8(i8 %urm)
+  call void (i8) @show8(i8 %shl)
+  call void (i8) @show8(i8 %lsr)
+  call void (i8) @show8(i8 %asr)
+  call void (i8) @show8(i8 %vsh)
+  call void (i8) @show8(i8 %vasr)
+  call void (i8) @show8(i8 %vlsr)
+  call void (i8) @show8(i8 %and)
+  call void (i8) @show8(i8 %or)
+  call void (i8) @show8(i8 %xor)
+  call void (i8) @show8(i8 %sel)
+  call void (i1) @showb(i1 %lt)
+  call void (i1) @showb(i1 %ult)
+  call void (i1) @showb(i1 %eq)
+  call void (i1) @showb(i1 %ge)
+  call void (i1) @showb(i1 %uge)
+  ret void
+}
+
+define internal void @calc16(i16 %a, i16 %b) {
+entry:
+  %add = add i16 %a, %b
+  %sub = sub i16 %a, %b
+  %mul = mul i16 %a, %b
+  %sdv = sdiv i16 %a, %b
+  %srm = srem i16 %a, %b
+  %udv = udiv i16 %a, %b
+  %urm = urem i16 %a, %b
+  %shl = shl i16 %a, 3
+  %lsr = lshr i16 %a, 1
+  %asr = ashr i16 %a, 1
+  %bm = and i16 %b, 15
+  %vsh = shl i16 %a, %bm
+  %vasr = ashr i16 %a, %bm
+  %vlsr = lshr i16 %a, %bm
+  %and = and i16 %a, %b
+  %or = or i16 %a, %b
+  %xor = xor i16 %a, %b
+  %lt = icmp slt i16 %a, %b
+  %ult = icmp ult i16 %a, %b
+  %eq = icmp eq i16 %a, %b
+  %ge = icmp sge i16 %a, %b
+  %uge = icmp uge i16 %a, %b
+  %sel = select i1 %lt, i16 %a, i16 %b
+  call void (i16) @show16(i16 %add)
+  call void (i16) @show16(i16 %sub)
+  call void (i16) @show16(i16 %mul)
+  call void (i16) @show16(i16 %sdv)
+  call void (i16) @show16(i16 %srm)
+  call void (i16) @show16(i16 %udv)
+  call void (i16) @show16(i16 %urm)
+  call void (i16) @show16(i16 %shl)
+  call void (i16) @show16(i16 %lsr)
+  call void (i16) @show16(i16 %asr)
+  call void (i16) @show16(i16 %vsh)
+  call void (i16) @show16(i16 %vasr)
+  call void (i16) @show16(i16 %vlsr)
+  call void (i16) @show16(i16 %and)
+  call void (i16) @show16(i16 %or)
+  call void (i16) @show16(i16 %xor)
+  call void (i16) @show16(i16 %sel)
+  call void (i1) @showb(i1 %lt)
+  call void (i1) @showb(i1 %ult)
+  call void (i1) @showb(i1 %eq)
+  call void (i1) @showb(i1 %ge)
+  call void (i1) @showb(i1 %uge)
+  ret void
+}
+
+define internal void @calc32(i32 %a, i32 %b) {
+entry:
+  %add = add i32 %a, %b
+  %sub = sub i32 %a, %b
+  %mul = mul i32 %a, %b
+  %sdv = sdiv i32 %a, %b
+  %srm = srem i32 %a, %b
+  %udv = udiv i32 %a, %b
+  %urm = urem i32 %a, %b
+  %shl = shl i32 %a, 3
+  %lsr = lshr i32 %a, 1
+  %asr = ashr i32 %a, 1
+  %bm = and i32 %b, 31
+  %vsh = shl i32 %a, %bm
+  %vasr = ashr i32 %a, %bm
+  %vlsr = lshr i32 %a, %bm
+  %and = and i32 %a, %b
+  %or = or i32 %a, %b
+  %xor = xor i32 %a, %b
+  %lt = icmp slt i32 %a, %b
+  %ult = icmp ult i32 %a, %b
+  %eq = icmp eq i32 %a, %b
+  %ge = icmp sge i32 %a, %b
+  %uge = icmp uge i32 %a, %b
+  %sel = select i1 %lt, i32 %a, i32 %b
+  call void (i32) @show32(i32 %add)
+  call void (i32) @show32(i32 %sub)
+  call void (i32) @show32(i32 %mul)
+  call void (i32) @show32(i32 %sdv)
+  call void (i32) @show32(i32 %srm)
+  call void (i32) @show32(i32 %udv)
+  call void (i32) @show32(i32 %urm)
+  call void (i32) @show32(i32 %shl)
+  call void (i32) @show32(i32 %lsr)
+  call void (i32) @show32(i32 %asr)
+  call void (i32) @show32(i32 %vsh)
+  call void (i32) @show32(i32 %vasr)
+  call void (i32) @show32(i32 %vlsr)
+  call void (i32) @show32(i32 %and)
+  call void (i32) @show32(i32 %or)
+  call void (i32) @show32(i32 %xor)
+  call void (i32) @show32(i32 %sel)
+  call void (i1) @showb(i1 %lt)
+  call void (i1) @showb(i1 %ult)
+  call void (i1) @showb(i1 %eq)
+  call void (i1) @showb(i1 %ge)
+  call void (i1) @showb(i1 %uge)
+  ret void
+}
+
+define internal void @calc64(i64 %a, i64 %b) {
+entry:
+  %add = add i64 %a, %b
+  %sub = sub i64 %a, %b
+  %mul = mul i64 %a, %b
+  %sdv = sdiv i64 %a, %b
+  %srm = srem i64 %a, %b
+  %udv = udiv i64 %a, %b
+  %urm = urem i64 %a, %b
+  %shl = shl i64 %a, 3
+  %lsr = lshr i64 %a, 1
+  %asr = ashr i64 %a, 1
+  %bm = and i64 %b, 63
+  %vsh = shl i64 %a, %bm
+  %vasr = ashr i64 %a, %bm
+  %vlsr = lshr i64 %a, %bm
+  %and = and i64 %a, %b
+  %or = or i64 %a, %b
+  %xor = xor i64 %a, %b
+  %lt = icmp slt i64 %a, %b
+  %ult = icmp ult i64 %a, %b
+  %eq = icmp eq i64 %a, %b
+  %ge = icmp sge i64 %a, %b
+  %uge = icmp uge i64 %a, %b
+  %sel = select i1 %lt, i64 %a, i64 %b
+  call void (i64) @__iyi_print_i64(i64 %add)
+  call void (i64) @__iyi_print_i64(i64 %sub)
+  call void (i64) @__iyi_print_i64(i64 %mul)
+  call void (i64) @__iyi_print_i64(i64 %sdv)
+  call void (i64) @__iyi_print_i64(i64 %srm)
+  call void (i64) @__iyi_print_i64(i64 %udv)
+  call void (i64) @__iyi_print_i64(i64 %urm)
+  call void (i64) @__iyi_print_i64(i64 %shl)
+  call void (i64) @__iyi_print_i64(i64 %lsr)
+  call void (i64) @__iyi_print_i64(i64 %asr)
+  call void (i64) @__iyi_print_i64(i64 %vsh)
+  call void (i64) @__iyi_print_i64(i64 %vasr)
+  call void (i64) @__iyi_print_i64(i64 %vlsr)
+  call void (i64) @__iyi_print_i64(i64 %and)
+  call void (i64) @__iyi_print_i64(i64 %or)
+  call void (i64) @__iyi_print_i64(i64 %xor)
+  call void (i64) @__iyi_print_i64(i64 %sel)
+  call void (i1) @showb(i1 %lt)
+  call void (i1) @showb(i1 %ult)
+  call void (i1) @showb(i1 %eq)
+  call void (i1) @showb(i1 %ge)
+  call void (i1) @showb(i1 %uge)
+  ret void
+}
+
+define external i32 @main() {
+entry:
+  call void (i8, i8) @calc8(i8 -7, i8 3)
+  call void (i8, i8) @calc8(i8 -7, i8 100)
+  call void (i8, i8) @calc8(i8 120, i8 9)
+  call void (i16, i16) @calc16(i16 -300, i16 7)
+  call void (i16, i16) @calc16(i16 30000, i16 3)
+  call void (i16, i16) @calc16(i16 -1, i16 2)
+  call void (i32, i32) @calc32(i32 -70000, i32 9)
+  call void (i32, i32) @calc32(i32 2000000000, i32 7)
+  call void (i32, i32) @calc32(i32 -2147483647, i32 -1)
+  call void (i64, i64) @calc64(i64 -5000000000, i64 3)
+  call void (i64, i64) @calc64(i64 9000000000000, i64 77)
+  call void (i64, i64) @calc64(i64 -9223372036854775807, i64 -2)
+  ret i32 0
+}

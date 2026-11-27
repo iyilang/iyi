@@ -1,0 +1,31 @@
+module bench/selfhost_proc_scope_probe
+
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/top_level::{SemanticProgram, TopLevelVisitor}
+import compiler/semantic/instance_vars::{declare_guessed_instance_vars}
+import compiler/semantic/main_visitor::{MainVisitor}
+
+path = Program.args[0]
+program = SemanticProgram.new
+node = program.normalizer.normalize(Parser.new(File.read(path), path).parse)
+program.total_mode = true
+program.search_path = [Program.args[1]]
+top = TopLevelVisitor.new(program, path)
+node.accept(top)
+top.finish
+declare_guessed_instance_vars(program)
+visitor = MainVisitor.new(program)
+visitor.total = true
+node.accept(visitor)
+class_helper = false
+instance_helper = false
+visitor.typed_instances.each do |instance|
+  if owner = instance.self_type
+    name = instance.definition.name
+    class_helper = true if owner.full_name == "ProcScope.class" && name == "helper"
+    instance_helper = true if owner.full_name == "ProcScope" && name == "twice"
+  end
+end
+raise "missing class helper instance" unless class_helper
+raise "missing instance helper instance" unless instance_helper
+puts "both proc helper instances typed"

@@ -1,0 +1,15 @@
+# Pointers: `Pointer(Int32).malloc` allocates, `value=` stores and `value` loads through the
+# address, `+` offsets it and `address` reads it back. The status is 23 + 7 = 30: the first
+# element is written with 23, the second with 7, and their sum is read through the offset.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+def pair(a : Int32, b : Int32) : Int32
+  p = Pointer(Int32).malloc(2_u64)
+  p.value = a
+  (p + 1_i64).value = b
+  p.value &+ (p + 1_i64).value
+end
+
+LibC.exit(pair(23, 7))

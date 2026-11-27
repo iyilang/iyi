@@ -1,0 +1,10 @@
+# The prelude's aarch64 supervisor call, constraints and clobbers included.
+# The gate does not run this fixture: `svc #0` is a real kernel call, and the
+# registers this shape sets are not a Darwin syscall number.
+def syscall(n : Int64, a : Int64) : Int64
+  result = 0_i64
+  asm("svc #0" : "={x0}"(result) : "{x8}"(n), "{x0}"(a) : "memory", "x1" : "volatile")
+  result
+end
+
+syscall(1_i64, 2_i64)

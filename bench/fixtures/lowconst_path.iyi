@@ -1,0 +1,13 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+module First
+  VALUE = 12
+end
+
+module Second
+  ALIAS = First::VALUE
+end
+
+LibC.exit(Second::ALIAS)

@@ -1,0 +1,25 @@
+class Box
+  @val : Int32
+
+  def initialize(val : Int32)
+    @val = val
+  end
+
+  def val : Int32
+    @val
+  end
+end
+
+# `found` is first assigned `nil`: its slot is the nilable Box, not a slot of
+# type Nil, which has no LLVM type of its own.
+fun test_nil_first_local(flag : Int32, v : Int32) : Int32
+  found = nil
+  if flag == 1
+    found = Box.new(v)
+  end
+  if found
+    found.val
+  else
+    0
+  end
+end

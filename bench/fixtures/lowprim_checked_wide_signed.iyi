@@ -1,0 +1,18 @@
+# Checked operations with a narrower signed left operand extend it before the operation, then range-check the result.
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+fun __crystal_raise_overflow : NoReturn
+  LibC.exit(99)
+end
+
+def add(a : Int32, b : Int64) : Int32
+  a + b
+end
+
+def subtract(a : Int32, b : Int64) : Int32
+  a - b
+end
+
+LibC.exit(add(-3, 5_i64) &+ subtract(7, 4_i64))

@@ -1,0 +1,15 @@
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+class Fiber
+end
+
+struct Int32
+  def take=(fiber : Fiber | Nil)
+    LibC.exit(42)
+  end
+end
+
+seven = 7
+seven.take = nil

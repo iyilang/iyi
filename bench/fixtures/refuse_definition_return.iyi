@@ -1,0 +1,5 @@
+def bad(x : Int32) : String
+  x
+end
+
+0

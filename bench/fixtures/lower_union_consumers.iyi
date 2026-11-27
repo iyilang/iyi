@@ -1,0 +1,65 @@
+# Address-valued union joins reach each aggregate consumer: ABCDEFG, status 0.
+lib LibC
+  fun putchar(value : Int32) : Int32
+end
+
+def show(value : (Int32 | Bool)) : Nil
+  local = value
+  LibC.putchar(local.is_a?(Int32) ? local : 0)
+  nil
+end
+
+def show_slot(value : (Int32 | Nil), bump : Int32) : Nil
+  local = value
+  LibC.putchar(local.is_a?(Int32) ? local &+ bump : 0)
+  nil
+end
+
+class UnionSlot
+  @@value : (Int32 | Nil) = nil
+
+  def self.put(flag : Bool) : Nil
+    @@value = flag ? 66 : nil
+    nil
+  end
+
+  def self.get : (Int32 | Nil)
+    @@value
+  end
+end
+
+def send_union(flag : Bool, &)
+  yield(flag ? 67 : false)
+end
+
+def yield_union(&)
+  yield
+end
+
+def break_union(&)
+  yield
+end
+
+def finish_union(flag : Bool, &)
+  yield
+  flag ? 70 : false
+end
+
+flag = true
+typed : (Int32 | Bool) = flag ? 65 : false
+show(typed)
+
+UnionSlot.put(flag)
+show_slot(UnionSlot.get, 0)
+send_union(flag) { |value| show(value) }
+
+from_block = yield_union { flag ? 68 : false }
+show(from_block)
+from_break = break_union { break(flag ? 69 : false) }
+show(from_break)
+from_def = finish_union(flag) { nil }
+show(from_def)
+
+narrowed = typed.as?(Int32)
+show_slot(narrowed, 6)
+flag ? 73 : false

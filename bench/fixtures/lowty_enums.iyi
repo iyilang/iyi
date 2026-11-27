@@ -1,0 +1,12 @@
+# Enums lower to their base type; metaclasses are one i32 type id.
+enum Color
+  Red
+  Green
+  Blue
+end
+
+# type: Color
+# type: Color.class
+# type: Int32.class
+# type: Nil.class
+# waiting: Pointer(Int32).class is a generic instance's metaclass; TypeUnification.metaclass_of has no answer for it (NEEDS.md)

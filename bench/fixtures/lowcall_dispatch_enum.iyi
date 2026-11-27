@@ -1,0 +1,29 @@
+@[Unsafe("reports the call result")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+enum Kind
+  One
+  Two
+
+  def ==(other : Kind) : Bool
+    value == other.value
+  end
+
+  def result : Int32
+    44
+  end
+end
+
+class Other
+  def result : Int32
+    3
+  end
+end
+
+def run(flag : Bool) : Int32
+  (flag ? Kind::One : Other.new).result
+end
+
+LibC.exit(run(true))

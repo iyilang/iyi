@@ -1,0 +1,217 @@
+@[Unsafe("reports proc control-flow failures through the process exit status")]
+lib LibC
+  fun exit(status : Int32) : NoReturn
+end
+
+macro exception_runtime
+  fun {{ ("__cry" + "stal_personality").id }}(version : Int32, actions : Int32, exception_class : UInt64, exception_object : Void*, context : Void*) : Int32
+    0
+  end
+  fun {{ ("__cry" + "stal_get_exception").id }}(exception : Void*) : UInt64
+    0_u64
+  end
+  fun {{ ("__cry" + "stal_raise").id }}(exception : Void*) : NoReturn
+    LibC.exit(99)
+  end
+end
+
+exception_runtime
+
+def once(value : Int32, &)
+  yield value
+end
+
+def twice(value : Int32, &)
+  first = yield value
+  second = yield(value &+ 1)
+  first &+ second
+end
+
+def keep_int(&block : Int32 -> Int32) : Proc(Int32, Int32)
+  block
+end
+
+def keep_nil(&block : Bool -> Nil) : Proc(Bool, Nil)
+  block
+end
+
+def keep_any(&block : Int32 -> U) : Proc(Int32, U) forall U
+  block
+end
+
+def captured_reader : Proc(Int32)
+  value = 40
+  -> {
+    first = once(2) { |value| value &+ 5 }
+    second = once(3) { |value| value &+ 6 }
+    value &+ first &+ second
+  }
+end
+
+def captured_counter : Proc(Int32)
+  count = 10
+  -> {
+    twice(1) { |delta| count = count &+ delta }
+    count
+  }
+end
+
+class Counter
+  def initialize(@value : Int32)
+  end
+
+  def reader : Proc(Int32)
+    -> { once(3) { |delta| @value &+ delta } }
+  end
+end
+
+class Gate
+  def initialize(@closed : Int32)
+  end
+
+  def closed : Int32
+    @closed
+  end
+
+  def close(by : Int32) : Int32
+    @closed = @closed &+ by
+  end
+
+  def closer : Proc(Int32, Int32)
+    keep_int do |value|
+      defer @closed = @closed &+ value
+      next @closed
+    end
+  end
+end
+
+def keep_gate(&block : Gate -> Int32) : Proc(Gate, Int32)
+  block
+end
+
+plain = ->(value : Int32) {
+  result = once(5) do |value|
+    local = value &+ 3
+    once(local) { |inner| inner &+ 1 }
+  end
+  result &+ value
+}
+LibC.exit(1) unless plain.call(7) == 16
+LibC.exit(2) unless captured_reader.call == 56
+counter = captured_counter
+LibC.exit(3) unless counter.call == 13
+LibC.exit(4) unless counter.call == 16
+LibC.exit(5) unless Counter.new(20).reader.call == 23
+
+next_value = -> { twice(1) { |value| next value &+ 4 } }
+LibC.exit(6) unless next_value.call == 11
+break_value = -> { twice(1) { |value| break value &+ 5 } }
+LibC.exit(7) unless break_value.call == 6
+return_value = -> {
+  once(4) { |value| return value &+ 3 }
+  99
+}
+LibC.exit(8) unless return_value.call == 7
+only_return = -> { once(4) { |value| return value &+ 3 } }
+LibC.exit(9) unless only_return.call == 7
+
+flag = 0
+nil_writer = -> { once(1) { |value| flag = flag &+ value }; nil }
+result = nil_writer.call
+LibC.exit(10) unless flag == 1
+LibC.exit(11) if result
+
+calls = 0
+saved_next = keep_int do |value|
+  calls = calls &+ 1
+  next value &+ 10 if value == 1
+  value &+ 20
+end
+LibC.exit(12) unless saved_next.call(1) == 11
+LibC.exit(13) unless saved_next.call(2) == 22 && calls == 2
+
+saved_only_next = keep_int { |value| next value &+ 30 }
+LibC.exit(14) unless saved_only_next.call(1) == 31
+
+saved_nil = keep_nil do |stop|
+  next if stop
+  calls = calls &+ 1
+  nil
+end
+saved_nil.call(true)
+LibC.exit(15) unless calls == 2
+saved_nil.call(false)
+LibC.exit(16) unless calls == 3
+
+saved_loop = keep_int do |limit|
+  value = 0
+  while value < limit
+    value = value &+ 1
+    next
+  end
+  next value
+end
+LibC.exit(17) unless saved_loop.call(3) == 3
+
+cleanups = 0
+saved_defer = keep_int do |value|
+  defer cleanups = cleanups &+ 1
+  next value &+ 1
+end
+LibC.exit(18) unless saved_defer.call(4) == 5 && cleanups == 1
+
+loop_f = keep_int { |value| value }
+i = 0
+while i < 2
+  loop_f = keep_int { |value| next value &+ 1 if value > 0; value }
+  i = i &+ 1
+end
+LibC.exit(19) unless loop_f.call(1) == 2 && i == 2
+
+nested_f = once(2) { |outer| keep_int { |value| next value &+ 7 } }
+LibC.exit(20) unless nested_f.call(1) == 8
+
+any_f = keep_any { |value| next value &+ 1 }
+LibC.exit(21) unless any_f.call(1) == 2
+
+free_defer = keep_gate do |gate|
+  defer gate.close(1)
+  next gate.closed &+ 10
+end
+shared_gate = Gate.new(0)
+LibC.exit(22) unless free_defer.call(shared_gate) == 10 && shared_gate.closed == 1
+LibC.exit(23) unless free_defer.call(shared_gate) == 11 && shared_gate.closed == 2
+
+seen = 0
+step = 100
+step_reader = -> { step }
+shadowed = keep_int do |step|
+  defer seen = seen &+ step
+  step &* 2
+end
+LibC.exit(24) unless shadowed.call(3) == 6 && seen == 3
+LibC.exit(25) unless shadowed.call(4) == 8 && seen == 7 && step_reader.call == 100
+
+tally = Gate.new(0)
+yielded_defer = keep_int do |value|
+  once(value) do |item|
+    defer tally.close(item)
+    next item &+ 1
+  end
+end
+LibC.exit(26) unless yielded_defer.call(5) == 6 && tally.closed == 5
+
+held = Gate.new(5)
+closer = held.closer
+LibC.exit(27) unless closer.call(3) == 5 && held.closed == 8
+
+offset = 50
+maker = ->(base : Int32) {
+  local = base &+ 1
+  keep_int { |value| value &+ local &+ offset }
+}
+made = maker.call(1)
+LibC.exit(28) unless made.call(10) == 62
+
+halt = -> { once(3) { |value| code = LibC.exit(value &- 3) } }
+halt.call

@@ -638,19 +638,6 @@
 
 ### Gates
 
-- **A pull request that changes a prelude, std or `samples/iyi` file runs
-  the self-host gates on every host.** #217's typed parity and declaration
-  floors pin a count for each of those files, the compiler the gates build
-  is built on the prelude, and the iyimod gate writes artifacts of std and
-  the samples; `scripts/ci_plan.py` selected none of the self-host jobs for
-  them, so such a change could move a pinned count that only master's push
-  run would see. `bench/ci_plan_exercise.py` checks that a prelude file, a
-  std module and an iyi sample select all four jobs (the planner before
-  this fails those three checks), and that a sample outside `samples/iyi`
-  and the prelude's JavaScript runtime select none. On #217's head the
-  self-host jobs took 25-34 minutes a shard on Linux, 14-20 on darwin and
-  40-62 on Windows, 390 job-minutes in all.
-
 - **std/autocert's and std/acme's gates draw challtestsrv's DNS port free
   for UDP as well as TCP, std/autocert's says what did not come up when
   Pebble does not start, and eleven gates' failure output no longer dies

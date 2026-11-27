@@ -1,6 +1,5 @@
 class Holder
 end
-
 # op Nil.nil_type?
 # op Int32.nil_type?
 # op Nil.reference_like?

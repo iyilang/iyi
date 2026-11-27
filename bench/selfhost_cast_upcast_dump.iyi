@@ -28,11 +28,7 @@ pub class CastUpcastWalk < Visitor
       if loc = node.location
         if loc.filename == @file
           if t = @visitor.type_of?(node)
-            label = if t.is_a?(NamedType)
-                      t.full_name
-                    else
-                      t.to_s
-                    end
+            label = t.is_a?(NamedType) ? t.full_name : t.to_s
             kind = node.is_a?(NilableCast) ? "NilableCast" : "Cast"
             upcast = node.is_a?(NilableCast) ? node.as(NilableCast).upcast : node.as(Cast).upcast
             @lines << "#{loc.line_number}:#{loc.column_number} #{kind} #{label} upcast=#{upcast}"

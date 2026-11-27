@@ -14,9 +14,12 @@ enum HostErrno
     # The last content of this branch is a comment.
     # Keep it before the alternate branch.
   {% else %}
-    AGAIN          = 35
-    WOULD_BLOCK    = 35
-    DEADLOCK       = 11
+    AGAIN = 35
+
+    WOULD_BLOCK = 35
+
+    DEADLOCK = 11
+
     DEADLOCK_ALIAS = 11
   {% end %}
 end

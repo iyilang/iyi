@@ -23,6 +23,7 @@ src/compiler/ir/intrinsics.iyi semantic
 src/compiler/ir/layout.iyi semantic
 src/compiler/ir/module.iyi parse
 src/compiler/ir/opt/analysis.iyi parse
+src/compiler/ir/opt/barrier.iyi parse
 src/compiler/ir/opt/callgraph.iyi parse
 src/compiler/ir/opt/cfg_simplify.iyi parse
 src/compiler/ir/opt/cse.iyi parse
@@ -30,6 +31,7 @@ src/compiler/ir/opt/dce.iyi parse
 src/compiler/ir/opt/deadfn.iyi parse
 src/compiler/ir/opt/edit.iyi parse
 src/compiler/ir/opt/effects.iyi parse
+src/compiler/ir/opt/escape.iyi parse
 src/compiler/ir/opt/fold.iyi parse
 src/compiler/ir/opt/inline.iyi parse
 src/compiler/ir/opt/layout.iyi parse

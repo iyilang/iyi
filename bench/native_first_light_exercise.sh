@@ -352,12 +352,20 @@ check_drop_helpers() {
   return 0
 }
 
+# dyld_imports <binary> <out>: the binary's imports as dyld_info prints them, without its malformedness checks where
+# the tool can skip them. The dyld_info of Xcode 16 (CI's macOS 15 image) has no -no_validate and refuses the option.
+dyld_imports() {
+  if dyld_info -no_validate -imports "$1" >"$2" 2>&1; then return 0; fi
+  grep -Fq 'unknown option: -no_validate' "$2" || return 1
+  dyld_info -imports "$1" >"$2" 2>&1
+}
+
 check_no_library() {
   local b="$work/mut-tool$EXE" baseline="$work/native/arith" baseline_bind mutant_bind
   if ! grep -Eq '^arith[[:space:]]+PASS[[:space:]]' "$table"; then
     echo "INVALID: arith did not pass the unmutated native run"; return 2
   fi
-  if ! dyld_info -no_validate -imports "$baseline" >"$work/arith.bind" 2>&1; then
+  if ! dyld_imports "$baseline" "$work/arith.bind"; then
     cat "$work/arith.bind"; return 2
   fi
   baseline_bind="$(awk '{ for (i = 1; i <= NF; i++) if ($i == "_printf") { line = $0; n++; break } } END { if (n == 1) print line; else exit 1 }' "$work/arith.bind")" || {
@@ -372,7 +380,7 @@ check_no_library() {
     cat "$work/mut-link.log"; return 2
   fi
   native_signature_ok "$work/mut-arith" || return 2
-  if ! dyld_info -no_validate -imports "$work/mut-arith" >"$work/mut-arith.bind" 2>&1; then
+  if ! dyld_imports "$work/mut-arith" "$work/mut-arith.bind"; then
     cat "$work/mut-arith.bind"; return 2
   fi
   mutant_bind="$(awk '{ for (i = 1; i <= NF; i++) if ($i == "_printf") { line = $0; n++; break } } END { if (n == 1) print line; else exit 1 }' "$work/mut-arith.bind")" || {

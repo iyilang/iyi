@@ -213,6 +213,13 @@ for fixture in $fixtures; do
   ts=$?
   reached="$(probe_phase "$WORK/$name.probe")"
   if [ "$ts" -eq 0 ] && [ "$reached" = "link" ] && [ -f "$out" ]; then
+    # A framework is a darwin link: another host's linker refuses `-framework`, so the hosted reference is built
+    # where the typed executable runs. The typed pipeline's link above still counts on every host.
+    if [ "$CAN_RUN_MACHO" -eq 0 ] && grep -q '^@\[Link(framework: ' "$fixture"; then
+      host_limited "selfhost_pipeline: $name links a darwin framework; the hosted reference links on macOS arm64 only"
+      echo "  $name: link (arm64 Mach-O execution not available on $HOST_ID)"
+      record_phase "$rel" link; continue
+    fi
     prelude=empty
     hosted_path="$REPO_NATIVE/src"
     if [ "$name" = lowglob_cvar_lazy ] || [ "$name" = lowglob_cvar_lazy_aggregate ]; then
@@ -359,6 +366,18 @@ while read -r k measured_value; do
     status=1
   fi
 done <"$WORK/measured"
+# The rows the floor holds below what the program needs, each with the gap that stops it: an exact list. A listed
+# file must measure exactly its listed phase, so one that rises fails until its row is removed here and its floor row
+# raised (SELFHOST_PIPELINE_RAISE=1).
+KNOWN="$REPO/bench/selfhost_pipeline.known"
+while read -r key phase reason; do
+  case "$key" in ""|\#*) continue ;; esac
+  got_phase="$(measured_phase "$key")"
+  if [ "$got_phase" != "$phase" ]; then
+    echo "  $key: KNOWN AT $phase ($reason), now $got_phase: remove its row from bench/selfhost_pipeline.known and raise the floor"
+    status=1
+  fi
+done < "$KNOWN"
 if [ "$failed" -gt 0 ] || { [ "$CAN_RUN_MACHO" -eq 1 ] && [ "$run_equal" -eq 0 ]; }; then
   echo "  FAIL: $failed fixture(s) failed, $run_equal run-equal"
   status=1

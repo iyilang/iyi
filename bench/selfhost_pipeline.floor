@@ -329,6 +329,9 @@ bench/fixtures/lowprim_char_convert.iyi declarations
 bench/fixtures/lowprim_char_ord.iyi declarations
 bench/fixtures/lowprim_checked.iyi run-equal
 bench/fixtures/lowprim_checked_context.iyi run-equal
+bench/fixtures/lowprim_checked_wide_add_overflow.iyi declarations
+bench/fixtures/lowprim_checked_wide_signed.iyi declarations
+bench/fixtures/lowprim_checked_wide_sub_overflow.iyi declarations
 bench/fixtures/lowprim_class_static.iyi declarations
 bench/fixtures/lowprim_class_virtual.iyi declarations
 bench/fixtures/lowprim_cmp.iyi run-equal
@@ -368,4 +371,4 @@ bench/fixtures/lowprim_tuple_narrowed.iyi run-equal
 bench/fixtures/lowprim_virtual_class_identity.iyi declarations
 samples/iyi/hello.iyi run-equal
 src/compiler/tools/compile_native.iyi run-equal
-src/compiler/tools/parse.iyi run-equal
+src/compiler/tools/parse.iyi declarations

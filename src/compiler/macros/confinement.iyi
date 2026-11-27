@@ -49,9 +49,12 @@ pub class MacroConfinement
   getter library_roots : Array(String)
   getter base_dir : String
 
-  # `compiling_root` is the package being compiled. `library_roots` come from
-  # `library_roots_of`. `base_dir` is the directory relative paths resolve
-  # against: hosted resolves them against the process's current directory.
+  # `compiling_root` is the package being compiled, "" for a program that has
+  # none (hosted: no root package and no filename, so only the library roots
+  # can hold a macro and no macro may read the environment). `library_roots`
+  # come from `library_roots_of`. `base_dir` is the directory relative paths
+  # resolve against: hosted resolves them against the process's current
+  # directory.
   def initialize(@compiling_root : String, @library_roots : Array(String), @base_dir : String)
   end
 
@@ -149,11 +152,11 @@ pub class MacroConfinement
   def macro_root(source : String) : PathCheck
     real_source = resolve(source)
     return PathCheck.new("", "unresolved", real_source.reason) unless real_source.resolved?
-    compiling = resolve(@compiling_root)
-    return PathCheck.new("", "unresolved", compiling.reason) unless compiling.resolved?
     best = ""
-    if MacroConfinement.under?(real_source.path, compiling.path)
-      best = compiling.path
+    unless @compiling_root.empty?
+      compiling = resolve(@compiling_root)
+      return PathCheck.new("", "unresolved", compiling.reason) unless compiling.resolved?
+      best = compiling.path if MacroConfinement.under?(real_source.path, compiling.path)
     end
     i = 0
     while i < @library_roots.size
@@ -187,6 +190,6 @@ pub class MacroConfinement
   # hosted iyi_refuse_dependency_env (methods.cr 232-243): only the compiling
   # package may read the build environment, so the macro's package must be it.
   def env_allowed?(root : String) : Bool
-    MacroConfinement.same_file?(root, @compiling_root)
+    !@compiling_root.empty? && MacroConfinement.same_file?(root, @compiling_root)
   end
 end

@@ -1,3 +1,6 @@
+# A generic class instance's instance variable: Box(Int32)#@value is read through the instance's own layout.
+# The box is allocated, not `uninitialized`: the pipeline gate runs this program, and reading through an
+# uninitialized reference reads whatever the stack held (a crash on darwin arm64).
 class Box(T)
   def initialize(@value : T)
   end
@@ -7,5 +10,5 @@ class Box(T)
   end
 end
 
-h = uninitialized Box(Int32)
+h = Box(Int32).new(7)
 h.value

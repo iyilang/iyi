@@ -960,10 +960,23 @@ lower_calls_check() {
             return 2
           fi
         fi
-        if [ -n "$expected_stack" ] && ! grep -Fq "$expected_stack" "$WORK/mut.err"; then
-          echo "INVALID: $name lacks the expected diagnostic provenance"
-          cat "$WORK/mut.err"
-          return 2
+        if [ -n "$expected_stack" ]; then
+          # A host listed for this frame prints a panic with no stack frames at all, so the frame cannot be named
+          # there (bench/selfhost_lower_calls_provenance.known, an exact list: the frame appearing, or any frame,
+          # fails until the row is removed).
+          stack_known="$(awk -v host="$HOST_ID" -v frame="$expected_stack" '$1 == host && $2 == frame { print; exit }' "$REPO/bench/selfhost_lower_calls_provenance.known")"
+          if [ -n "$stack_known" ]; then
+            if grep -Eq '0x[0-9a-fA-F]{6,}' "$WORK/mut.err" || grep -Fq "$expected_stack" "$WORK/mut.err"; then
+              echo "INVALID: $name now prints stack frames on $HOST_ID: remove its row from bench/selfhost_lower_calls_provenance.known"
+              cat "$WORK/mut.err"
+              return 2
+            fi
+            host_limited "lower_calls: the panic on $HOST_ID prints no stack frames, so $expected_stack is not checked as its provenance"
+          elif ! grep -Fq "$expected_stack" "$WORK/mut.err"; then
+            echo "INVALID: $name lacks the expected diagnostic provenance"
+            cat "$WORK/mut.err"
+            return 2
+          fi
         fi
         echo "decisive: $name: $(refusal_note "$result" "$WORK/mut.err")"
         return 1

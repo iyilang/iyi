@@ -2190,10 +2190,52 @@ expect_contains "$row64_corrupt" "cannot read the mask " "the message names the 
 expect_contains "$row64_corrupt" "$r64_hex" "the message names the file"
 expect_contains "$row64_corrupt" "delete this file to go on" "the message says how to recover"
 
+# Run 46018941138's Windows fresh-runner audit printed `reason=` for each of
+# its 17 misses: a miss named its cause only under `--explain`. A fresh runner
+# here is the store emptied under the same cache path, as on CI, where argv
+# (the scratch path under the store) is the same on both runners.
+# Mutation: leave a recorded miss's `reason` nil (runner.cr, the pass that
+# records a receipt): the unnamed check fails. Mutation: drop PATH from
+# `BuildInputs::CHILD_ENV`: the import under another PATH hits.
+step 65 "every test a run does not serve names why; an import under another PATH misses as a link change"
+r65="$WORK/r65"
+mkdir -p "$r65"
+cat > "$r65/pass_test.iyi" <<'IYI'
+assert 1 + 1 == 2
+IYI
+cat > "$r65/fail_test.iyi" <<'IYI'
+assert 1 + 1 == 3
+IYI
+cat > "$r65/build_test.iyi" <<'IYI'
+assert no_such_def(1) == 2
+IYI
+r65_id=656565
+r65_import=(--cached --json --import-index "run:$r65_id=$r65/run.json" .)
+rm -rf "$CACHE/tests-v1"
+set +e
+row65_fresh="$(cd "$r65" && IYI_CI_PRODUCER=1 GITHUB_RUN_ID="$r65_id" "$IYI" test --fresh --json --export-index "run:$r65_id=$r65/run.json" .)"
+rm -rf "$CACHE/tests-v1"
+row65_other="$(cd "$r65" && PATH="/stale-row65-elsewhere:$PATH" GITHUB_RUN_ID="$r65_id" "$IYI" test "${r65_import[@]}")"
+rm -rf "$CACHE/tests-v1"
+row65_same="$(cd "$r65" && GITHUB_RUN_ID="$r65_id" "$IYI" test "${r65_import[@]}")"
+set -e
+for row65_doc in "$row65_fresh" "$row65_other" "$row65_same"; do
+  printf '%s' "$row65_doc" | python3 -c '
+import json, os, sys
+unnamed = [os.path.basename(t["file"]) for t in json.load(sys.stdin)["tests"] if not t["cached"] and not t.get("reason")]
+sys.exit("unnamed: " + ", ".join(unnamed) if unnamed else 0)
+' || fail "a test the run did not serve names no reason"
+done
+expect_eq "$(printf '%s' "$row65_fresh" | json_test pass_test.iyi reason)" "fresh run" "a --fresh run says so"
+expect_eq "$(printf '%s' "$row65_fresh" | json_test fail_test.iyi reason)" "fresh run" "and says so of a failing test"
+expect_eq "$(printf '%s' "$row65_fresh" | json_test build_test.iyi reason)" "does not build" "a test that does not build says so"
+expect_eq "$(printf '%s' "$row65_other" | json_test pass_test.iyi reason)" "link changed" "an exported receipt read under another PATH misses as a link change"
+expect_eq "$(printf '%s' "$row65_same" | json_test pass_test.iyi reuse)" hit "and read under the producer's PATH it hits"
+
 if [ "$FAILURES" -ne 0 ]; then
   echo "stale_tests: $FAILURES failing check(s), collected because STALE_TESTS_KEEP_GOING=1:" >&2
   printf '%s\n' "${FAILED_CHECKS[@]}" >&2
   exit 1
 fi
-echo "stale_tests PASSED: $rows_run/64 rows executed here; separate specs or gates: $rows_external"
+echo "stale_tests PASSED: $rows_run/65 rows executed here; separate specs or gates: $rows_external"
 echo "Platform skips: ${platform_skips:-none}"

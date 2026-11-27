@@ -423,6 +423,19 @@
   which file to delete. On Windows, a test the receipt runner cannot put in a
   job object is refused, while plain `iyi test` runs it outside one as before.
 
+- **Every test `iyi test --cached --json` does not serve names why.** A miss
+  used to carry its reason only under `--explain`, so the Windows fresh-runner
+  audit printed `reason=` for each of its 17 misses. The reason is now the
+  first part of the key that differs from the test's newest receipt (the
+  `--explain` line), `fresh run`, or `does not build`. Those 17 receipts
+  missed under equal profiles because the two runners had booted image
+  versions with different Ruby and JDK directories on PATH, and PATH is part
+  of the link key: an import under another PATH misses with `link changed`.
+  The Windows receipt steps now give `iyi` a PATH of only the system's,
+  Visual Studio's, the Windows SDK's and Git's directories
+  (`bench/stale_ci.sh stale-path`), and a profile refusal must name
+  `profile changed`.
+
 ### Added
 
 - **Programs can request larger fiber stacks before starting work.**

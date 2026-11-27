@@ -611,6 +611,9 @@ module Iyi::Stale
       accept_rules = [] of KeyFile::StaleRule
       block_rules = [] of KeyFile::StaleRule
       newest_receipt : Receipt? = nil
+      # The newest receipt's replay, when choosing the candidates made it: a
+      # miss names its reason from it rather than replaying the trace again.
+      newest_replay : Tuple(String?)? = nil
       candidates = [] of Receipt
 
       unless @fresh || is_ambiguous || image_refusal
@@ -618,7 +621,13 @@ module Iyi::Stale
         blockers = @store.blockers(test_id)
         newest_receipt = candidates.first?
 
-        valid = candidates.select { |rec| valid_candidate?(rec, current_profile, roots, keyer_local) }
+        valid = [] of Receipt
+        candidates.each_with_index do |rec, index|
+          next unless rec.pass? && !rec.contradicted && rec.profile.fp == current_profile.fp
+          mismatch = Trace.replay(rec.trace.observations, keyer_for(rec, keyer_local), roots)
+          newest_replay = {mismatch} if index == 0
+          valid << rec unless mismatch
+        end
 
         matching_blockers = blockers.select { |rec| block_rule?(rec, current_profile, roots, keyer_local) }
         if blockers.any? { |rec| rec.version != FORMAT_VERSION || !Trace.supported?(rec.trace.observations) }
@@ -765,7 +774,7 @@ module Iyi::Stale
                   cached: false,
                   source: "local",
                   reuse: "miss",
-                  reason: nil,
+                  reason: "does not build",
                   portable_build: p_build,
                   profile: current_profile.fp,
                   roots: roots_map,
@@ -833,6 +842,8 @@ module Iyi::Stale
                 end
                 p_build = key_data.try(&.portable.try(&.build))
                 is_blocked = key_data.try(&.blocked) == true
+                # Every miss names its reason, asked for or not (§2.9).
+                miss_reason = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, nil, newest_replay)
                 res = TestResult.new(
                   file: file,
                   test: test_id,
@@ -842,17 +853,13 @@ module Iyi::Stale
                   cached: false,
                   source: "local",
                   reuse: "miss",
-                  reason: nil,
+                  reason: miss_reason,
                   portable_build: p_build,
                   profile: current_profile.fp,
                   roots: roots_map,
                   blocked: is_blocked
                 )
-                explain = nil
-                if @explain
-                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, nil)
-                  explain = "#{file}: miss: #{explain_msg}"
-                end
+                explain = @explain ? "#{file}: miss: #{miss_reason}" : nil
                 outcome = Outcome.new(result: res, explain: explain, builds: builds)
                 next
               end
@@ -885,7 +892,7 @@ module Iyi::Stale
                 )
                 explain = nil
                 if @explain
-                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, "trace incomplete")
+                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, "trace incomplete", newest_replay)
                   explain = "#{file}: miss: #{explain_msg}"
                 end
                 outcome = Outcome.new(result: res, explain: explain, builds: builds)
@@ -941,7 +948,7 @@ module Iyi::Stale
                 )
                 explain = nil
                 if @explain
-                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, taint_reason)
+                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, taint_reason, newest_replay)
                   explain = "#{file}: miss: #{explain_msg}"
                 end
                 outcome = Outcome.new(result: res, explain: explain, builds: builds)
@@ -1001,6 +1008,7 @@ module Iyi::Stale
 
                 p_build = key_data.try(&.portable.try(&.build))
                 is_blocked = key_data.try(&.blocked) == true
+                miss_reason = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, nil, newest_replay)
                 res = TestResult.new(
                   file: file,
                   test: test_id,
@@ -1010,17 +1018,13 @@ module Iyi::Stale
                   cached: false,
                   source: "local",
                   reuse: "miss",
-                  reason: nil,
+                  reason: miss_reason,
                   portable_build: p_build,
                   profile: current_profile.fp,
                   roots: roots_map,
                   blocked: is_blocked
                 )
-                explain = nil
-                if @explain
-                  explain_msg = compute_explain_reason(file, key_data, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, nil)
-                  explain = "#{file}: miss: #{explain_msg}"
-                end
+                explain = @explain ? "#{file}: miss: #{miss_reason}" : nil
                 outcome = Outcome.new(result: res, explain: explain, receipt: recorded, builds: builds)
               end
             ensure
@@ -1066,7 +1070,7 @@ module Iyi::Stale
                    elsif compiled_key.try(&.hit)
                      "the check built #{compiled_key.try(&.local.try(&.build)) || "nothing"}, and the record has #{held.local_build}"
                    else
-                     compute_explain_reason(file, compiled_key, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, final.result.reason)
+                     compute_explain_reason(file, compiled_key, newest_receipt, current_profile, roots, keyer_local, is_ambiguous, final.result.reason, newest_replay)
                    end
           final = Outcome.new(
             result: retag(final.result, "compiler", check_reason, status: "fast path served what the check would not: #{reason}", cached: false, reuse: "miss", reason: reason),
@@ -1084,6 +1088,8 @@ module Iyi::Stale
       final
     end
 
+    # Why a test was not served: the first component that differs from its
+    # newest receipt (§2.9). Every miss names it, with `--explain` or not.
     private def compute_explain_reason(
       file : String,
       key_data : KeyFile::KeyFileData?,
@@ -1093,6 +1099,7 @@ module Iyi::Stale
       keyer : Keyer,
       is_ambiguous : Bool,
       taint_reason : String?,
+      newest_replay : Tuple(String?)?,
     ) : String
       return "ambiguous test id" if is_ambiguous
       return taint_reason if taint_reason
@@ -1146,7 +1153,8 @@ module Iyi::Stale
         return "profile changed"
       end
 
-      if run_mismatch = Trace.replay(newest.trace.observations, keyer_for(newest, keyer), roots)
+      run_mismatch = newest_replay ? newest_replay[0] : Trace.replay(newest.trace.observations, keyer_for(newest, keyer), roots)
+      if run_mismatch
         return run_mismatch
       end
 

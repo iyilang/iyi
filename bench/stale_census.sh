@@ -112,6 +112,14 @@ def resolve_site_effect(site):
                         return "internal", eff
     return "internal", "unknown"
 
+# Every miss names the first key part that differs from the test's newest
+# receipt (`runner.cr` compute_explain_reason). That says why this run missed,
+# not why the program cannot be reused, which is what the classes below count:
+# such a miss is classified by the build's own reasons, as before it had one.
+KEY_MISS_REASONS = ("fresh run", "does not build", "toolchain changed", "behavior changed",
+                    "compiler environment changed", "link changed", "call path (", "profile changed",
+                    "run: ", "unclassified miss")
+
 def category_for_reason(r):
     # The names the compiler and the trace give (`effects.cr`, `trace.cr`),
     # with `_` and `-` read alike.
@@ -271,6 +279,8 @@ def run_single_program(item):
         verdict = cached_entry.get('status', 'unknown')
         reuse = cached_entry.get('reuse', 'miss')
         raw_reason = cached_entry.get('reason')
+        if reuse == 'miss' and raw_reason and raw_reason.startswith(KEY_MISS_REASONS):
+            raw_reason = None
         is_cached = cached_entry.get('cached', False)
     elif fresh_entry and fresh_status != 'pass':
         verdict = fresh_status

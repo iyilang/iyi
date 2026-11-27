@@ -586,13 +586,19 @@ done
 echo "checked $count valid fixtures"
 
 # ---- 4. builder-constructed modules ------------------------------------------------------------
-echo "== 4. modules built with the Builder print identically after a parse"
+echo "== 4. modules built with the Builder verify as built and print identically after a parse"
 for name in arith memory control calls runtime intrinsics; do
   "$DRV" emit "$name" >"$WORK/$name.ir" || { fail "emit $name"; continue; }
   out=$("$DRV" roundtrip "$(native_path "$WORK/$name.ir")" 2>&1) || { fail "$name: $out"; continue; }
   [ "$out" = "identical" ] || fail "built module $name does not round-trip: $out"
   "$DRV" verify "$(native_path "$WORK/$name.ir")" >"$WORK/verify.out" 2>&1 || fail "built module $name does not verify: $(cat "$WORK/verify.out")"
 done
+# A store's result used as an operand: only the Builder can write it, and the verifier refuses it as built.
+if out=$("$DRV" emit void_use 2>&1); then
+  fail "the built module void_use, which uses a store's result, was accepted"
+elif ! echo "$out" | grep -q 'error\[dominance\]'; then
+  fail "the built module void_use was not refused as dominance: $out"
+fi
 
 echo "== 4b. integer arithmetic folds at its IR width and retains poison-sensitive operations"
 if ./bin/iyi run bench/selfhost_ir_fold_exercise.iyi >"$WORK/folds.out" 2>&1; then
@@ -911,6 +917,33 @@ prove_mutation "verifier: a phi incoming is not checked against the dominance of
   '      if db != source && !dom.dominates?(db, source)' \
   '      if db != source && false' \
   phi_dominance_check
+# Builder-made modules: the in-memory operand lists the text form does not show.
+builder_check() {
+  local bin="$1" name
+  for name in arith memory control calls runtime intrinsics; do
+    "$bin" emit "$name" >/dev/null 2>&1 || return 1
+  done
+}
+void_use_check() {
+  local bin="$1" out
+  out=$("$bin" emit void_use 2>&1) && return 1
+  echo "$out" | grep -q 'error\[dominance\]'
+}
+prove_mutation "verifier: a use of a void instruction's result is accepted" \
+  src/compiler/ir/verifier.iyi \
+  '    if placement.nil? || (v.is_a?(Inst) && v.type.void?)' \
+  '    if placement.nil?' \
+  void_use_check
+prove_mutation "inst: an instruction with no targets hands out one list that every such instruction shares" \
+  src/compiler/ir/inst.iyi \
+  $'  def targets : Array(Block)\n    if blocks = @targets\n      return blocks\n    end\n    blocks = [] of Block\n    @targets = blocks\n    blocks\n  end' \
+  $'  @@no_targets = [] of Block\n\n  def targets : Array(Block)\n    if blocks = @targets\n      return blocks\n    end\n    @@no_targets\n  end' \
+  builder_check
+prove_mutation "inst: an operand list made on first use is not kept, so a phi's incoming values are lost" \
+  src/compiler/ir/inst.iyi \
+  $'    words = [] of Value\n    @args = words\n    words' \
+  $'    words = [] of Value\n    words' \
+  builder_check
 prove_mutation "printer: the unwind word of inline asm is not written" \
   src/compiler/ir/printer.iyi \
   '    text += " unwind" if inline_asm.unwind' \

@@ -1,0 +1,7 @@
+# A percent literal in a macro body whose closing delimiter is escaped. The body lexer skips the `\)`, so the
+# literal stays open and the `end` written inside it does not close the macro.
+macro escaped_close(word)
+  %(a\) end {{word}})
+end
+
+puts escaped_close(b)

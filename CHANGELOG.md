@@ -921,26 +921,6 @@
 
 ### Fixed
 
-- **The formatter port no longer changes `b.@v` or `{ a; b }`.** The
-  formatter in iyi (`src/compiler/tools/formatter.iyi`, #195) had no
-  visitor for an instance variable read through a receiver, so `c = b.@v`
-  came back as `c = b`, and it dropped the `;` between statements on one
-  line, so `run { d; n }` came back as `run { dn }`. Both changed the
-  program. Four layout differences from `iyi tool format` are fixed with
-  them: `-> { x }` lost the space after `{`; the body of an `if` assigned
-  to a variable was indented from the line start instead of aligned under
-  the `if`; an enum body lost its blank lines and the blank line before a
-  `def`; and the `=` of consecutive constants and valued enum members was
-  not aligned, nor their numbers right-aligned. Four regression fixtures
-  (`bench/fixtures/formatter_ivar_and_semicolons.iyi`,
-  `formatter_proc_literal.iyi`, `formatter_assign_if.iyi` and
-  `formatter_enum_body.fixture`) join the short corpus and the parity
-  floor, and `bench/selfhost_formatter_exercise.sh` holds 7 more broken
-  copies to failing, 25 in all. The port now formats 176 of the 365 files
-  that select the self-host jobs as the hosted formatter does, up from 161:
-  the floor lists all 176, and the 11 files that stopped differing leave
-  the ceiling, which lists 23.
-
 - **A layout fold taken during typing is settled to the final layout once the compiler has typed everything, including the code its cleanup types.** `sizeof`, `alignof`, `instance_sizeof`, `instance_alignof` and `offsetof` could fold to a size the typer saw before a module held by value gained implementors, or before a container it was cached in had its element grow. In a `--crystal` build, `arr.dup` of an array of `{Int32, M}` could then return a zeroed element and trap when printed. Settling runs at the end of semantic analysis, after the cleanup has typed its own raises, tuple and proc literals, and splats, so a module that only that code grows is part of the final layout. A stale expression fold is corrected in place. A fold inside a generic type argument keeps its value, because the type is already built, and so does every expression that shares that layout with it, so the program's types and numbers agree. A literal that later code used as a type variable or a cast is kept as it was. A native program refuses a stale type argument, or such a literal, with a compile error at that expression, and refuses codegen that types code which grows a layout a settled fold reaches. A native program also gets a fresh shared layout typer after settling, and the write barrier sizes with its module's typer. `--crystal` output changes only where Crystal 1.21.0 folded two different sizes for one type. `IYI_LAYOUT_FOLD_REPORT=1` prints each stale fold and each open layout to stderr. Not covered: a macro that reads a stale constant but never uses its value, and an autocast whose fit is the same at both values, are refused under the native gate. Neither takes a wrong native type.
 - A value taken from a layout fold before it settles is judged by what took it. A type argument, an enum value or a typing decision that the final layout would change, and any macro that read the value, is refused under the native gate and kept under `--crystal`, with the expressions sharing its layout. A type argument or enum value computed from several folds is judged against the values the program ends with, so one kept input keeps the others. A use the final layout leaves unchanged, and any value only an expression uses, takes the final layout.
 
@@ -965,6 +945,26 @@
 - **Fix (runtime): correct frame boundary symbol lookup in Darwin panics.** When a panic or NoReturn call is the last instruction of a function, the return address on the stack sits at offset 0 of the next function. The Darwin runtime backtrace resolves boundary frames with offset 0 by inspecting the caller symbol at `addr - 1` while preserving fiber entry start markers and raw address formats.
 
 - **Fix (compiler): observed artifact emission supports operator effect defs.** An observed build of a module with an operator-named `@[Effect]` def (such as `[]=` or `[]?`) renames the wrapped implementation with hex-encoded operator bytes rather than raw punctuation, so that serializing declarations into `.iyimod` artifacts preserves valid source text that consumer builds parse and adopt without syntax errors.
+
+- **The formatter port no longer changes `b.@v` or `{ a; b }`.** The
+  formatter in iyi (`src/compiler/tools/formatter.iyi`, #195) had no
+  visitor for an instance variable read through a receiver, so `c = b.@v`
+  came back as `c = b`, and it dropped the `;` between statements on one
+  line, so `run { d; n }` came back as `run { dn }`. Both changed the
+  program. Four layout differences from `iyi tool format` are fixed with
+  them: `-> { x }` lost the space after `{`; the body of an `if` assigned
+  to a variable was indented from the line start instead of aligned under
+  the `if`; an enum body lost its blank lines and the blank line before a
+  `def`; and the `=` of consecutive constants and valued enum members was
+  not aligned, nor their numbers right-aligned. Four regression fixtures
+  (`bench/fixtures/formatter_ivar_and_semicolons.iyi`,
+  `formatter_proc_literal.iyi`, `formatter_assign_if.iyi` and
+  `formatter_enum_body.fixture`) join the short corpus and the parity
+  floor, and `bench/selfhost_formatter_exercise.sh` holds 7 more broken
+  copies to failing, 25 in all. The port now formats 176 of the 365 files
+  that select the self-host jobs as the hosted formatter does, up from 161:
+  the floor lists all 176, and the 11 files that stopped differing leave
+  the ceiling, which lists 23.
 
 - **Vector unions use the heap's eight-byte alignment (#202).** A mixed
   union represents its payload as wide integers, so treating only visible

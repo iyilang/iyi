@@ -213,8 +213,11 @@ echo "  $(wc -l < "$RESULTS" | tr -d ' ') files measured"
 
 echo
 echo "== 4. Checking each file against its committed floor"
+# A row `<file>@<host>` (host as bench/lib/host.sh names it: linux, darwin, windows) holds a file's count on
+# that host alone, for a file whose platform arms make each host measure it differently; it wins over the
+# plain `<file>` row there. The plain row holds every other host.
 verdicts() {
-awk -F'\t' -v floorfile="$FLOOR_FILE" '
+awk -F'\t' -v floorfile="$FLOOR_FILE" -v host="$HOST_OS" '
   BEGIN {
     while ((getline line < floorfile) > 0) {
       if (line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/) continue
@@ -224,12 +227,14 @@ awk -F'\t' -v floorfile="$FLOOR_FILE" '
   }
   {
     corpus = $1; rel = $2; nodes = $3 + 0; matched = $4 + 0; note = $9
+    key = rel
+    if ((rel "@" host) in floor) key = rel "@" host
     if (note ~ /^ORACLE/) verdict = "ORACLE"
-    else if (!(rel in floor)) verdict = "NO FLOOR"
-    else if (matched < floor[rel]) verdict = "BELOW FLOOR"
-    else if (matched > floor[rel]) verdict = "RAISE THE FLOOR"
+    else if (!(key in floor)) verdict = "NO FLOOR"
+    else if (matched < floor[key]) verdict = "BELOW FLOOR"
+    else if (matched > floor[key]) verdict = "RAISE THE FLOOR"
     else verdict = "ok"
-    fl = (rel in floor) ? floor[rel] : "-"
+    fl = (key in floor) ? floor[key] : "-"
     printf "%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\n", verdict, corpus, rel, nodes, matched, \
       (nodes > 0 ? sprintf("%.1f%%", 100 * matched / nodes) : "n/a"), fl, note
   }' "$RESULTS" > "$VERDICTS"
@@ -239,8 +244,9 @@ verdicts
 fails=0
 if [ "$RAISE" = 1 ]; then
   # Write each measured file's floor up to its count, never down; a file that is
-  # not oracle-analysable keeps its old floor.
-  awk -F'\t' -v floorfile="$FLOOR_FILE" '
+  # not oracle-analysable keeps its old floor. A file with a row for this host
+  # raises that row.
+  awk -F'\t' -v floorfile="$FLOOR_FILE" -v host="$HOST_OS" '
     BEGIN {
       while ((getline line < floorfile) > 0) {
         if (line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/) continue
@@ -248,14 +254,18 @@ if [ "$RAISE" = 1 ]; then
         floor[a[1]] = a[2] + 0
       }
     }
-    $9 !~ /^ORACLE/ { if (!($2 in floor) || $4 + 0 > floor[$2]) floor[$2] = $4 + 0 }
+    $9 !~ /^ORACLE/ {
+      key = (($2 "@" host) in floor) ? $2 "@" host : $2
+      if (!(key in floor) || $4 + 0 > floor[key]) floor[key] = $4 + 0
+    }
     END {
       for (k in floor) print k "\t" floor[k]
     }' "$RESULTS" | sort > "$WORK/floor.new"
   if [ -s "$WORK/floor.new" ]; then
     {
       echo "# Floor for bench/selfhost_semantic_inline_macros_exercise.sh: the agreeing declaration"
-      echo "# records each file must keep. Only raise these (SEMINL_RAISE=1); never lower one."
+      echo "# records each file must keep, and <file>@<host> rows for a file a host measures differently"
+      echo "# (its platform arms are other code). Only raise these (SEMINL_RAISE=1); never lower one."
       awk -F'\t' '{ printf "%s %s\n", $1, $2 }' "$WORK/floor.new"
     } > "$FLOOR_FILE"
     echo "  floor written to ${FLOOR_FILE#$REPO/}"

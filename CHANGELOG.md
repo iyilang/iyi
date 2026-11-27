@@ -4,6 +4,22 @@
 
 ### Added
 
+- **The self-hosted compiler builds and runs a program natively (#219).**
+  The iyi frontend, semantic pipeline, typed lowering and the AArch64
+  back end are connected to the self-hosted `build` and `run` commands
+  (`src/compiler/loader.iyi`, `src/compiler/compiler.iyi`,
+  `src/compiler/lower/`, `src/compiler/codegen/`,
+  `src/compiler/backend/native.iyi`, `src/compiler/stage1.iyi`). On
+  macOS arm64 it links a signed executable without LLVM, the stage-one
+  compiler requesting a 1 GiB fiber stack through `IyiFiber.stack_bytes=`
+  before it starts. Macro `flag?` answers from the requested target in both
+  pipelines while `host_flag?` keeps the host's, and the loader splits a
+  Windows search path on `;`. The hosted compiler stays the default; the
+  native executor refuses `--release`, nonzero `-O` and every other target.
+  The pipeline's gates compare with the hosted compiler on Linux, Windows
+  and macOS and report what needs a Darwin kernel as host-limited; CI deals
+  the self-host gates eight ways on each host.
+
 - **Wasm SIMD128 speeds up AES-GCM.** `UInt64x2` processes two independent
   64-bit lanes, and `--mattr +simd128` uses them for eight AES counter
   blocks at a time. On Apple M5 Max, opening 16 and 64 MiB in headless
@@ -30498,7 +30514,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 37,341-line library and nothing else. Every other
+  written against iyi's own 37,353-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

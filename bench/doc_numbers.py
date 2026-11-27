@@ -457,11 +457,11 @@ CLAIMS: list[tuple[str, str, str, int]] = [
     ("files_bench", r"marked programs of ([\d,]+),", "SPEC.md", 1),
     ("unsafe_samples", r"and (none) of `samples/iyi`'s", "SPEC.md", 1),
     ("samples", r"of `samples/iyi`'s ([\d,]+) programs", "SPEC.md", 1),
-    # Current marks, in the order src/std, src/iyi, bench. The paragraph also
-    # preserves the historical counts at its named revision.
-    ("unsafe_std", r"current tree has\s+([\d,]+), [\d,]+ and\s+[\d,]+ module marks", "SPEC.md", 1),
-    ("unsafe_iyi", r"current tree has\s+[\d,]+, ([\d,]+) and\s+[\d,]+ module marks", "SPEC.md", 1),
-    ("unsafe_bench", r"current tree has\s+[\d,]+, [\d,]+ and\s+([\d,]+) module marks", "SPEC.md", 1),
+    # The blocks-and-declarations comparison, against the marks it names in
+    # the same order: src/std, src/iyi, bench.
+    ("unsafe_std", r"against ([\d,]+), [\d,]+ and\s+[\d,]+ module marks", "SPEC.md", 1),
+    ("unsafe_iyi", r"against [\d,]+, ([\d,]+) and\s+[\d,]+ module marks", "SPEC.md", 1),
+    ("unsafe_bench", r"against [\d,]+, [\d,]+ and\s+([\d,]+) module marks", "SPEC.md", 1),
 ]
 
 # The prose spells small numbers as words and should keep doing so, so the

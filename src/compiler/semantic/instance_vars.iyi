@@ -5,7 +5,7 @@ import compiler/syntax/ast::{ASTNode, Arg, ArrayLiteral, Assign, BoolLiteral, Ch
 import compiler/syntax/token::{NumberKind}
 import compiler/syntax/visitor::{Visitor}
 import compiler/semantic/top_level::{ClassType, DeclaredIvar, GenericClassType, MetaTypeVar, ModuleType, NonGenericClassType, SemanticProgram, Type, TypeBody}
-import compiler/semantic/top_level::{InstanceVarInitializer, MetaclassType, UnionType}
+import compiler/semantic/top_level::{InstanceVarInitializer, MetaclassType, PendingIvar, UnionType}
 import compiler/syntax/ast::{VisibilityModifier}
 import compiler/semantic/type_nodes::{type_node_system}
 import compiler/semantic/method_lookup::{MethodLookup}
@@ -476,25 +476,48 @@ class GuessVisitor < Visitor
   end
 end
 
+# Every owner's record, in the order the owners were first seen, with an index
+# by the owner's full name. Owners are compared by `Type#==`, which for a
+# module type is identity or an equal full name, so the index finds the record
+# a scan of the list would. The pass asks it for every owner and for each of
+# its superclasses: a scan of the list made the pass quadratic in the classes
+# of the program.
+pub class OwnerTable
+  @list : Array(OwnerGuesses)
+  @by_name : Hash(String, OwnerGuesses)
+
+  def initialize
+    @list = [] of OwnerGuesses
+    @by_name = Hash(String, OwnerGuesses).new
+  end
+
+  def find(owner : Type) : OwnerGuesses?
+    @by_name[owner.full_name]?
+  end
+
+  def add(og : OwnerGuesses) : Nil
+    @list << og
+    @by_name[og.owner.full_name] = og
+    nil
+  end
+
+  def each(& : OwnerGuesses -> Nil) : Nil
+    @list.each { |og| yield og }
+  end
+end
+
 # The record for `owner`, created on first sight, in `owners`.
-def owner_guesses_for(owners : Array(OwnerGuesses), owner : ModuleType) : OwnerGuesses
+def owner_guesses_for(owners : OwnerTable, owner : ModuleType) : OwnerGuesses
   if found = owner_for(owners, owner)
     return found
   end
   created = OwnerGuesses.new(owner)
-  owners << created
+  owners.add(created)
   created
 end
 
-def owner_for(owners : Array(OwnerGuesses), owner : Type) : OwnerGuesses?
-  i = 0
-  while i < owners.size
-    if owners[i].owner.full_name == owner.full_name
-      return owners[i]
-    end
-    i = i + 1
-  end
-  nil
+def owner_for(owners : OwnerTable, owner : Type) : OwnerGuesses?
+  owners.find(owner)
 end
 
 # Superclasses between `t` and the root, not counting `t`.
@@ -508,7 +531,7 @@ def class_depth(t : Type) : Int32
 end
 
 # The initialize infos `t` uses: its own, or the nearest superclass's.
-def initialize_infos_for(owners : Array(OwnerGuesses), t : Type) : Array(InitializeInfo)?
+def initialize_infos_for(owners : OwnerTable, t : Type) : Array(InitializeInfo)?
   if found = owner_for(owners, t)
     return found.init_infos unless found.init_infos.empty?
   end
@@ -521,7 +544,7 @@ def initialize_infos_for(owners : Array(OwnerGuesses), t : Type) : Array(Initial
 end
 
 # The names assigned outside any def in `t` and in every superclass.
-def outside_names(owners : Array(OwnerGuesses), t : Type) : Array(String)
+def outside_names(owners : OwnerTable, t : Type) : Array(String)
   names = [] of String
   if found = owner_for(owners, t)
     found.outside.each do |name|
@@ -540,7 +563,7 @@ end
 
 # The non-nilable variables of an owner: those its initializers assign (and any
 # its superclass has), and those assigned in the class body.
-def compute_nonnil(owners : Array(OwnerGuesses), og : OwnerGuesses) : Nil
+def compute_nonnil(owners : OwnerTable, og : OwnerGuesses) : Nil
   names = [] of String
   outside = outside_names(owners, og.owner)
   infos = initialize_infos_for(owners, og.owner)
@@ -619,7 +642,7 @@ class InstanceInitializerCollector < Visitor
 end
 
 # Declares the guessed variables of one class, after its superclasses.
-def declare_guessed(program : SemanticProgram, owners : Array(OwnerGuesses), og : OwnerGuesses) : Nil
+def declare_guessed(program : SemanticProgram, owners : OwnerTable, og : OwnerGuesses) : Nil
   og.order.each do |name|
     guess = og.guesses[name]
     next if og.owner.instance_vars[name]?
@@ -693,14 +716,26 @@ pub def declare_guessed_instance_vars(program : SemanticProgram) : Nil
     end
     pi.owner.instance_vars.delete(pi.name)
   end
+  # Owners compare as `Type#==` does for module types: the same full name.
+  pending_keys = Set(String).new
+  program.pending_ivars.each { |pi| pending_keys.add("#{pi.owner.full_name} #{pi.name}") }
   retained = program.declared_ivars.reject do |di|
-    program.pending_ivars.any? { |pi| pi.owner == di.owner && pi.name == di.name }
+    pending_keys.includes?("#{di.owner.full_name} #{di.name}")
   end
   program.declared_ivars.clear
   retained.each { |di| program.declared_ivars << di }
-  owners = [] of OwnerGuesses
+  owners = OwnerTable.new
+  # Each owner's pending variables, in declaration order, by the owner's full name.
+  pending_by_owner = Hash(String, Array(PendingIvar)).new
   program.pending_ivars.each do |pi|
     owner_guesses_for(owners, pi.owner)
+    key = pi.owner.full_name
+    owned = pending_by_owner[key]?
+    if owned.nil?
+      owned = [] of PendingIvar
+      pending_by_owner[key] = owned
+    end
+    owned << pi
   end
   program.type_bodies.each do |body|
     program.current_imports = body.imports
@@ -725,9 +760,10 @@ pub def declare_guessed_instance_vars(program : SemanticProgram) : Nil
   while depth <= max_depth
     owners.each do |og|
       next unless class_depth(og.owner) == depth
+      owned = pending_by_owner[og.owner.full_name]? || [] of PendingIvar
       [true, false].each do |explicit_pass|
-        program.pending_ivars.each do |pi|
-          next unless pi.owner == og.owner && pi.explicit == explicit_pass
+        owned.each do |pi|
+          next unless pi.explicit == explicit_pass
           next if og.owner.lookup_instance_var?(pi.name)
           if imports = pi.imports
             program.current_imports = imports

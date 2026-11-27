@@ -321,9 +321,9 @@ module Iyi::Stale
     private def self.write_memo_atomic(memo_dir : String, memo_file : String, toolchain_digest : Digest,
                                        compiler_sha : Digest, llvm_path : String, llvm_sha : Digest?,
                                        linker_path : String, linker_ver : String, linker_sha : Digest)
-      Dir.mkdir_p(memo_dir)
+      Dir.mkdir_p(memo_dir, 0o700)
       tmp_file = "#{memo_file}.tmp.#{Process.pid}.#{Random.rand(100000)}"
-      File.open(tmp_file, "w") do |f|
+      File.open(tmp_file, "w", perm: 0o600) do |f|
         JSON.build(f) do |json|
           json.object do
             json.field "toolchain", Stale.hex(toolchain_digest)

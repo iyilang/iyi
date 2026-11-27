@@ -148,6 +148,12 @@ module Iyi::Stale
     x.to_slice.hexstring
   end
 
+  # Whether *s* is a digest as `hex` writes one: 64 lowercase hex characters.
+  # A name or field read from a file that is not one is refused, never used.
+  def self.hex64?(s : String) : Bool
+    s.bytesize == 64 && s.each_byte.all? { |b| (48_u8..57_u8).includes?(b) || (97_u8..102_u8).includes?(b) }
+  end
+
   def self.parse_hex(s : String) : Digest
     raise ArgumentError.new("Expected 64 hex characters, got #{s.size}") unless s.size == 64
     res = uninitialized StaticArray(UInt8, 32)

@@ -89,6 +89,8 @@ class Iyi::Command
     shard = nil : String?
     import_indices = [] of String
     export_indices = [] of String
+    list_imports = false
+    clear_imports = false
     chaos = false
     chaos_seed : UInt64? = nil
     chaos_runs : Int32? = nil
@@ -148,6 +150,10 @@ class Iyi::Command
         value = options.shift?
         abort! "--export-index takes NS=FILE", :USAGE_ERROR unless value
         export_indices << value
+      when "--list-imports"
+        list_imports = true
+      when "--clear-imports"
+        clear_imports = true
       when "--chaos"
         chaos = true
       when .starts_with?("--chaos=")
@@ -206,6 +212,43 @@ class Iyi::Command
     end
     if cached && fresh
       abort! "cannot pass both --cached and --fresh", :USAGE_ERROR
+    end
+    # Imports persist: every later `--cached` run reads them. These two show
+    # and drop them, and run no test, so an option about running one is refused.
+    if store_action = (list_imports ? "--list-imports" : (clear_imports ? "--clear-imports" : nil))
+      other = if list_imports && clear_imports
+                "--clear-imports"
+              elsif fresh
+                "--fresh"
+              elsif explain
+                "--explain"
+              elsif shard
+                "--shard"
+              elsif !import_indices.empty?
+                "--import-index"
+              elsif !export_indices.empty?
+                "--export-index"
+              elsif !affected.empty?
+                "--affected"
+              elsif only
+                "--run"
+              elsif verbose
+                "-v"
+              elsif !build_flags.empty?
+                build_flags.first
+              elsif chaos
+                "--chaos"
+              elsif !paths.empty?
+                paths.first
+              end
+      abort! "cannot pass both #{store_action} and #{other}: it runs no test", :USAGE_ERROR if other
+      store = Iyi::Stale::Store.new
+      if list_imports
+        Iyi::Stale::Runner.list_imports(store, as_json)
+      else
+        Iyi::Stale::Runner.clear_imports(store, as_json)
+      end
+      return
     end
     # The receipt runner (`--cached` and what goes with it) builds and runs each
     # test one way: every named case, under the runner's own build, because a
@@ -737,7 +780,7 @@ class Iyi::Command
   private def run_built_test(binary : String, deadline : Float64, output : IO::Memory, environment : Hash(String, String)) : {String, String}
     reader, writer = IO.pipe(write_blocking: true)
     begin
-      process, tree = TestTree.start do |before_resume|
+      process, tree = TestTree.start(strict: false) do |before_resume|
         Process.new(binary, env: environment, output: writer, error: writer,
           process_group: true, before_resume: before_resume)
       end
@@ -801,6 +844,7 @@ class Iyi::Command
   # hangs would outlive the run that started it (`TestTree.trap_endings`).
   class TestTree
     @process : Process? = nil
+    @strict : Bool
     {% if flag?(:win32) %}
       struct JobNode
         property job : LibC::HANDLE
@@ -823,18 +867,29 @@ class Iyi::Command
       @@trapped = false
     {% end %}
 
-    def initialize
+    # *strict* is the receipt runner's (`--cached`, `--fresh`, `--explain` and
+    # the rest): there a test that no job holds is refused, since a test the
+    # run cannot end could outlive the check that records it. A plain
+    # `iyi test` runs it outside a job, as it always has (the owner's
+    # decision of 2026-11-27). *refuse* is for specs alone: the job call that
+    # fails as if Windows had refused it.
+    def initialize(@strict : Bool, refuse : String? = nil)
       {% if flag?(:win32) %}
         TestTree.trap_endings
-        job = LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
-        raise RuntimeError.from_winerror("CreateJobObjectW") if job.null?
+        job = refuse == "CreateJobObjectW" ? LibC::HANDLE.null : LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
+        if job.null?
+          raise RuntimeError.from_winerror("CreateJobObjectW") if @strict
+          return
+        end
         limits = LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION.new
         limits.basicLimitInformation.limitFlags = LibC::JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if LibC.SetInformationJobObject(job, LibC::JOBOBJECTINFOCLASS::ExtendedLimitInformation,
+        if refuse == "SetInformationJobObject" ||
+           LibC.SetInformationJobObject(job, LibC::JOBOBJECTINFOCLASS::ExtendedLimitInformation,
              pointerof(limits).as(Void*), sizeof(LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION)) == 0
           error = RuntimeError.from_winerror("SetInformationJobObject")
           LibC.CloseHandle(job)
-          raise error
+          raise error if @strict
+          return
         end
         node = Pointer(JobNode).malloc(1)
         LibC.AcquireSRWLockExclusive(pointerof(@@jobs_lock))
@@ -847,9 +902,10 @@ class Iyi::Command
     end
 
     # Assign the suspended child before Process resumes it. A failed
-    # assignment ends the child and is an error.
-    def self.start(&)
-      tree = new
+    # assignment ends the child and is an error under the receipt runner; a
+    # plain run's test runs outside the job instead.
+    def self.start(strict : Bool, &)
+      tree = new(strict)
       process : Process? = nil
       begin
         process = yield tree.before_resume
@@ -864,9 +920,11 @@ class Iyi::Command
 
     def before_resume
       {% if flag?(:win32) %}
+        return nil if @job.null?
         ->(handle : Void*) do
           if LibC.AssignProcessToJobObject(@job, handle) == 0
-            raise RuntimeError.from_winerror("AssignProcessToJobObject")
+            raise RuntimeError.from_winerror("AssignProcessToJobObject") if @strict
+            close
           end
           nil
         end
@@ -980,6 +1038,7 @@ class Iyi::Command
     Usage: #{Command.program_name} test [--json] [-v] [--timeout SECONDS] [-p N] [--run TEXT] [--release] [-D FLAG]...
                                         [--affected FILE]... [--cached | --fresh] [--explain] [--shard K/N]
                                         [--import-index NS=FILE]... [--export-index NS=FILE]...
+                                        [--list-imports | --clear-imports]
                                         [--chaos[=SEED]] [--chaos-runs N] [paths]
 
     Runs every `*_test.iyi` under the given paths (default: `.`), but not
@@ -1012,10 +1071,13 @@ class Iyi::Command
     `--fresh` forces execution and records new receipts.
     `--explain` prints decision lines explaining hits and misses.
     `--shard K/N` runs shard K of N shards dealt round-robin.
-    `--import-index NS=FILE` imports verified test receipts for namespace NS.
+    `--import-index NS=FILE` imports verified test receipts for namespace NS,
+    `master` or `run:<id>`; an import lasts until it is replaced or cleared.
     `--export-index NS=FILE` exports test receipts for namespace NS (requires --fresh).
     These take the runner's own build of each test, every named case, so they
     are not taken with `--run`, `-v`, `--release` or `-D`.
+    `--list-imports` lists the imported receipts every `--cached` run reads, and
+    `--clear-imports` drops them; neither runs a test.
 
     `--chaos` builds each test for the chaos scheduler and runs it once per
     seed, `--chaos-runs N` seeds (100 unless given) from one drawn at

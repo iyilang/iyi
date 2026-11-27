@@ -2,6 +2,7 @@ require "crystal/digest/sha256"
 require "./encoding"
 require "./roots"
 require "./profile"
+require "../build_inputs"
 {% if flag?(:win32) %}
   require "c/fileapi"
   require "c/handleapi"
@@ -181,7 +182,13 @@ module Iyi::Stale
       end
     end
 
-    def self.parse(io : IO, roots : Roots, keyer : Keyer = Keyer.portable, check_disk_after_exit : Bool = true) : TraceResult
+    # *run_started* is when the test process was started (`BuildInputs.now`).
+    # With it, a file whose modification time the observer saw within the
+    # clock's resolution of that start, or after it, makes the run not
+    # reusable ("racy run input", §3 A3): the file changed while the test ran,
+    # or could have changed in the same tick without its size or time saying
+    # so, and the content hashed after exit need not be what the test read.
+    def self.parse(io : IO, roots : Roots, keyer : Keyer = Keyer.portable, check_disk_after_exit : Bool = true, run_started : Int64? = nil) : TraceResult
       observations = [] of Observation
       taints = [] of Taint
       a3_mismatches = [] of String
@@ -328,14 +335,24 @@ module Iyi::Stale
             end
           end
 
+          if check_disk_after_exit && run_started && present != 0 && ftype == 1_u8 && BuildInputs.racy?(mtime_ns, run_started)
+            a3_mismatches << "racy run input: #{real}"
+          end
+
           # Post-exit check and answer computation
           if kind_str == "file_read"
             content_hash = StaticArray(UInt8, 32).new(0_u8)
             if present != 0
-              begin
-                content_hash = hash_bytes(File.read(real).to_slice)
-              rescue ex
-                return TraceResult.new(complete: false, incomplete_reason: "cannot read file #{real}: #{ex.message}")
+              # Only a regular file's content is a recorded answer: replay
+              # refuses anything else, and a device would be read without end.
+              if check_disk_after_exit && !File.info?(real).try(&.file?)
+                a3_mismatches << "read of what is not a regular file: #{real}"
+              else
+                begin
+                  content_hash = hash_bytes(File.read(real).to_slice)
+                rescue ex
+                  return TraceResult.new(complete: false, incomplete_reason: "cannot read file #{real}: #{ex.message}")
+                end
               end
             end
 
@@ -546,11 +563,12 @@ module Iyi::Stale
           size = 0_u64
           open_flags = 0_u32
 
-          if exists
-            if info
-              size = info.size.to_u64
-              ftype = metadata_type(info)
-            end
+          if info
+            # A recorded read is a regular file's: a device, a pipe or a
+            # directory under that name is not the input, and is never read.
+            return "run: #{obs.path} is not a regular file" unless info.file?
+            size = info.size.to_u64
+            ftype = metadata_type(info)
             content_hash = hash_bytes(File.read(target).to_slice)
           end
 

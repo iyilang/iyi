@@ -397,6 +397,32 @@
   before. The observer keeps its written-path and environment sets in arrays,
   so observing a run does not hash strings itself.
 
+- **darwin panic backtraces now print symbol, address and offset via
+  `dladdr`.** A program without `std/debug` used to hand its frames to
+  `backtrace_symbols_fd`; each frame now prints as its index, image, address,
+  and the symbol `dladdr` finds with the offset into it (the image and the
+  offset into the image when no symbol covers the address). A panicking
+  test's failure output under `iyi test` has this form on darwin.
+
+- **`iyi test --cached` checks what it imports and keeps what it revokes.**
+  These are the fixes to #147's security review. An imported record must be a
+  portable, uncontradicted pass whose digests are 64 lowercase hex
+  characters, whose signature and trace fingerprint are recomputed and match,
+  and whose observation paths stay inside their roots; replay reads only a
+  regular file, and a mask is named only by a signature. `--import-index`
+  takes only the `master` and `run:<id>` namespaces, and the new
+  `--list-imports` and `--clear-imports` show and drop what every later run
+  reads. A failing test never keeps its fast record, and a revocation the
+  store cannot write leaves the test's contradiction marker or stops the run.
+  The store is created 0700 with files 0600; a local record carries a
+  plain-digest twin only under `IYI_CI_PRODUCER=1`; the trace and key files
+  live in a private directory per check and the runtime opens its channel
+  without following a link. A run input modified within the clock's
+  resolution of the run makes it not reusable (`racy run input`), and a
+  partial or corrupt mask no longer breaks every later run without saying
+  which file to delete. On Windows, a test the receipt runner cannot put in a
+  job object is refused, while plain `iyi test` runs it outside one as before.
+
 ### Added
 
 - **Programs can request larger fiber stacks before starting work.**

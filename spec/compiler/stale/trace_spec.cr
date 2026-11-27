@@ -462,6 +462,22 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
 
       Dir.delete(tmp_dir)
     end
+
+    it "F1: refuses to replay a recorded read of what is not a regular file" do
+      dir = File.join(Dir.tempdir, "iyi_replay_regular_#{Process.pid}")
+      Dir.mkdir_p(File.join(dir, "fixture"))
+      roots_local = Iyi::Stale::Roots.new(src: dir, toolchain: "", pkg: "", scratch: "")
+      keyer = Iyi::Stale::Keyer.portable
+      answer = Iyi::Stale.d("test") { |enc| enc.str("x") }
+      obs = [Iyi::Stale::Observation.new(0_u64, "file_read", "src", "fixture", answer)]
+      Iyi::Stale::Trace.replay(obs, keyer, roots_local).should eq("run: fixture is not a regular file")
+      {% if flag?(:unix) %}
+        device = [Iyi::Stale::Observation.new(0_u64, "file_read", "abs", "/dev/zero", answer)]
+        Iyi::Stale::Trace.replay(device, keyer, roots_local).should eq("run: /dev/zero is not a regular file")
+      {% end %}
+    ensure
+      FileUtils.rm_r(dir) if dir && Dir.exists?(dir)
+    end
   end
 
   describe "lookup binding" do
@@ -553,6 +569,71 @@ describe "Iyi::Stale S5a: Trace reader and wire format" do
       Iyi::Stale::Trace.replay([unknown], keyer).not_nil!.should contain("unsupported observation")
       missing = Iyi::Stale::Observation.new(0_u64, "dir_list", "abs", File.join(Dir.tempdir, "iyi-no-such-dir-#{Process.pid}"), answer)
       Iyi::Stale::Trace.replay([missing], keyer).not_nil!.should contain("replay failed")
+    end
+  end
+
+  describe "F5: a file modified within the clock's resolution of the run" do
+    it "makes the run not reusable, and an older one does not" do
+      dir = File.join(Dir.tempdir, "iyi_racy_#{Process.pid}")
+      Dir.mkdir_p(dir)
+      path = File.join(dir, "input.txt")
+      File.write(path, "same")
+      racy_roots = Iyi::Stale::Roots.new(src: dir, toolchain: "", pkg: "", scratch: "")
+      keyer = Iyi::Stale::Keyer.portable
+      parse = ->(run_started : Int64?) do
+        info = File.info(path)
+        trace = IO::Memory.new
+        trace.write(TraceSpecHelpers.encode_record(Iyi::Stale::Trace::TYPE_FILE, 0_u64) do |p|
+          p.write_byte(1_u8)
+          TraceSpecHelpers.write_str(p, path)
+          TraceSpecHelpers.write_str(p, Iyi::Stale::Trace.binding_target(path))
+          TraceSpecHelpers.write_str(p, dir)
+          p.write_bytes(0_u32, IO::ByteFormat::LittleEndian)
+          p.write_byte(1_u8)
+          p.write_byte(1_u8)
+          p.write_bytes(info.size.to_u64, IO::ByteFormat::LittleEndian)
+          p.write_bytes(info.modification_time.to_unix_ns.to_i64, IO::ByteFormat::LittleEndian)
+        end)
+        trace.write(TraceSpecHelpers.encode_end(0))
+        Iyi::Stale::Trace.parse(trace.rewind, racy_roots, keyer, run_started: run_started)
+      end
+
+      # Written just before the run started: a write in the same tick would
+      # leave its size and time as they are.
+      just_written = parse.call(Iyi::BuildInputs.now)
+      just_written.complete.should be_true
+      just_written.a3_mismatches.should eq(["racy run input: #{Iyi::Stale::Trace.binding_target(path)}"])
+      # Without a start time nothing is racy (the portable twin's parse).
+      parse.call(nil).a3_mismatches.should be_empty
+
+      # Modified an hour before the run: any write during it moves the time.
+      hour_ago = Time.utc - 1.hour
+      File.utime(hour_ago, hour_ago, path)
+      parse.call(Iyi::BuildInputs.now).a3_mismatches.should be_empty
+    ensure
+      FileUtils.rm_r(dir) if dir && Dir.exists?(dir)
+    end
+
+    it "does not record the content of a read of what is not a regular file" do
+      {% if flag?(:unix) %}
+        info = File.info("/dev/zero")
+        trace = IO::Memory.new
+        trace.write(TraceSpecHelpers.encode_record(Iyi::Stale::Trace::TYPE_FILE, 0_u64) do |p|
+          p.write_byte(1_u8)
+          TraceSpecHelpers.write_str(p, "/dev/zero")
+          TraceSpecHelpers.write_str(p, "/dev/zero")
+          TraceSpecHelpers.write_str(p, "/")
+          p.write_bytes(0_u32, IO::ByteFormat::LittleEndian)
+          p.write_byte(1_u8)
+          p.write_byte(4_u8)
+          p.write_bytes(info.size.to_u64, IO::ByteFormat::LittleEndian)
+          p.write_bytes(info.modification_time.to_unix_ns.to_i64, IO::ByteFormat::LittleEndian)
+        end)
+        trace.write(TraceSpecHelpers.encode_end(0))
+        result = Iyi::Stale::Trace.parse(trace.rewind, roots, Iyi::Stale::Keyer.portable)
+        result.complete.should be_true
+        result.a3_mismatches.should eq(["read of what is not a regular file: /dev/zero"])
+      {% end %}
     end
   end
 

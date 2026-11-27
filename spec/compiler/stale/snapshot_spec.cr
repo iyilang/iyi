@@ -124,6 +124,14 @@ private def make_obs(kind : String, root : String, path : String, task : UInt64 
   )
 end
 
+# One record in a `run:42` snapshot, validated as `--import-index` would.
+private def import_one(cache_root : String, rec : Iyi::Stale::Receipt) : Iyi::Stale::ImportResult
+  path = File.join(cache_root, "one-#{Random::Secure.hex(4)}.json")
+  producer = {"run_id" => JSON::Any.new(42_i64)}
+  File.write(path, Iyi::Stale::Snapshot.new(namespace: "run:42", target: "x86_64-linux-gnu", producer: producer, records: [rec]).to_json)
+  Iyi::Stale::Snapshot.validate_file(path, "run:42", Iyi::Stale::ImportContext.new(target: "x86_64-linux-gnu", current_run_id: 42_i64))
+end
+
 describe "Iyi::Stale S8: Portable Snapshots" do
   describe "Row 20: Export validation and filtering" do
     it "refuses export when fresh is false" do
@@ -414,26 +422,26 @@ describe "Iyi::Stale S8: Portable Snapshots" do
         Dir.mkdir_p(cache_root)
         store = Iyi::Stale::Store.new(cache_root)
         store.ensure_directories!
-        ctx = Iyi::Stale::ImportContext.new(target: "x86_64-linux-gnu")
+        ctx = Iyi::Stale::ImportContext.new(target: "x86_64-linux-gnu", current_run_id: 11_i64)
 
         t1 = make_test_id("demo_test.iyi")
 
         # 1. First import a populated snapshot
         r1 = make_receipt(t1, mode: "portable")
-        p_ctx = Iyi::Stale::ProducerContext.new(target: "x86_64-linux-gnu", fresh: true, ci_producer: true)
+        p_ctx = Iyi::Stale::ProducerContext.new(target: "x86_64-linux-gnu", fresh: true, ci_producer: true, run_id: 11_i64)
         f_pop = File.join(cache_root, "pop.json")
-        Iyi::Stale::Snapshot.export_to_file(f_pop, store, [r1], "audit_ns", p_ctx)
+        Iyi::Stale::Snapshot.export_to_file(f_pop, store, [r1], "run:11", p_ctx)
 
-        res1 = Iyi::Stale::Snapshot.import(store, "audit_ns", f_pop, ctx)
+        res1 = Iyi::Stale::Snapshot.import(store, "run:11", f_pop, ctx)
         res1.success?.should be_true
         store.candidates(t1, "x86_64-linux-gnu").size.should eq(1)
 
         # 2. Disagreeing audit run publishes empty snapshot
         f_empty = File.join(cache_root, "empty.json")
-        Iyi::Stale::Snapshot.export_to_file(f_empty, store, [] of Iyi::Stale::Receipt, "audit_ns", p_ctx)
+        Iyi::Stale::Snapshot.export_to_file(f_empty, store, [] of Iyi::Stale::Receipt, "run:11", p_ctx)
 
         # 3. Importing empty snapshot replaces older wholesale
-        res2 = Iyi::Stale::Snapshot.import(store, "audit_ns", f_empty, ctx)
+        res2 = Iyi::Stale::Snapshot.import(store, "run:11", f_empty, ctx)
         res2.success?.should be_true
         res2.records_count.should eq(0)
 
@@ -468,16 +476,16 @@ describe "Iyi::Stale S8: Portable Snapshots" do
         Dir.mkdir_p(cache_root)
         store = Iyi::Stale::Store.new(cache_root)
         store.ensure_directories!
-        ctx = Iyi::Stale::ImportContext.new(target: "x86_64-linux-gnu")
+        ctx = Iyi::Stale::ImportContext.new(target: "x86_64-linux-gnu", current_run_id: 12_i64)
 
         t = make_test_id("precedence_test.iyi")
 
         # 1. Imported pass (valid 64-char hex for callpath)
         r_imported = make_receipt(t, callpath: "aa" * 32, mode: "portable")
-        p_ctx = Iyi::Stale::ProducerContext.new(target: "x86_64-linux-gnu", fresh: true, ci_producer: true)
+        p_ctx = Iyi::Stale::ProducerContext.new(target: "x86_64-linux-gnu", fresh: true, ci_producer: true, run_id: 12_i64)
         f_imp = File.join(cache_root, "imp.json")
-        Iyi::Stale::Snapshot.export_to_file(f_imp, store, [r_imported], "prec_ns", p_ctx)
-        Iyi::Stale::Snapshot.import(store, "prec_ns", f_imp, ctx).success?.should be_true
+        Iyi::Stale::Snapshot.export_to_file(f_imp, store, [r_imported], "run:12", p_ctx)
+        Iyi::Stale::Snapshot.import(store, "run:12", f_imp, ctx).success?.should be_true
 
         # With only imported pass:
         cand = Iyi::Stale::Snapshot.select_candidate(store, t, "x86_64-linux-gnu")
@@ -900,20 +908,20 @@ describe "Iyi::Stale S8: Portable Snapshots" do
           )
         )
 
-        p_ctx = Iyi::Stale::ProducerContext.new(target: "x86_64-linux-gnu", fresh: true, ci_producer: true)
+        p_ctx = Iyi::Stale::ProducerContext.new(target: "x86_64-linux-gnu", fresh: true, ci_producer: true, run_id: 5_i64)
         f_export = File.join(cache_root, "env_export.json")
-        res_exp = Iyi::Stale::Snapshot.export_to_file(f_export, store, [r1], "dev", p_ctx)
+        res_exp = Iyi::Stale::Snapshot.export_to_file(f_export, store, [r1], "run:5", p_ctx)
         res_exp.success?.should be_true
         res_exp.records_count.should eq(1)
 
-        ctx = Iyi::Stale::ImportContext.new(target: "x86_64-linux-gnu")
-        res_imp = Iyi::Stale::Snapshot.import(store, "dev", f_export, ctx)
+        ctx = Iyi::Stale::ImportContext.new(target: "x86_64-linux-gnu", current_run_id: 5_i64)
+        res_imp = Iyi::Stale::Snapshot.import(store, "run:5", f_export, ctx)
         res_imp.success?.should be_true
         res_imp.records_count.should eq(1)
 
         cands = store.candidates(t1, "x86_64-linux-gnu")
         cands.size.should eq(1)
-        cands.first.namespace.should eq("dev")
+        cands.first.namespace.should eq("run:5")
         cands.first.trace.observations.size.should eq(2)
         cands.first.trace.observations[0].kind.should eq("env_get")
         cands.first.trace.observations[0].root.should eq("env")
@@ -1057,6 +1065,115 @@ describe "Iyi::Stale S8: Portable Snapshots" do
       r.namespace = "other_namespace"
       sig_other = Iyi::Stale::Receipt.compute_signature(r.test, r.build.build, r.profile.fp, r.trace.fp)
       Iyi::Stale.hex(sig_other).should eq(sig_with)
+    end
+  end
+
+  describe "F1: an imported record is checked before its signature or paths are used" do
+    it "imports a portable pass whose fields are its own" do
+      with_tempfile("snap_f1_valid") do |cache_root|
+        Dir.mkdir_p(cache_root)
+        rec = make_receipt(make_test_id("f1_test.iyi"), mode: "portable", observations: [make_obs("file_read", "src", "fixtures/a.txt")])
+        res = import_one(cache_root, rec)
+        res.error.should be_nil
+        res.success?.should be_true
+      end
+    end
+
+    it "refuses a signature that is not the record's own digest" do
+      with_tempfile("snap_f1_signature") do |cache_root|
+        Dir.mkdir_p(cache_root)
+        traversal = make_receipt(make_test_id("f1_test.iyi"), mode: "portable")
+        traversal.signature = "../../../../.bash_aliases"
+        import_one(cache_root, traversal).error.not_nil!.should contain("signature is not 64 lowercase hex characters")
+
+        upper = make_receipt(make_test_id("f1_test.iyi"), mode: "portable")
+        upper.signature = upper.signature.upcase
+        import_one(cache_root, upper).error.not_nil!.should contain("signature is not 64 lowercase hex characters")
+
+        other = make_receipt(make_test_id("f1_test.iyi"), mode: "portable")
+        other.signature = "0" * 64
+        import_one(cache_root, other).error.not_nil!.should contain("signature is not the one its test, build, profile and trace give")
+      end
+    end
+
+    it "refuses a build field or trace fingerprint that is not a digest of its own" do
+      with_tempfile("snap_f1_fields") do |cache_root|
+        Dir.mkdir_p(cache_root)
+        injected = make_receipt(make_test_id("f1_test.iyi"), mode: "portable")
+        build = injected.build
+        injected.build = Iyi::Stale::ReceiptBuild.new(build: "$(touch /tmp/pwned)", toolchain: build.toolchain,
+          behavior: build.behavior, callpath: build.callpath, link: build.link, cenv: build.cenv)
+        import_one(cache_root, injected).error.not_nil!.should contain("build.build is not 64 lowercase hex characters")
+
+        cenv = make_receipt(make_test_id("f1_test.iyi"), mode: "portable")
+        build = cenv.build
+        cenv.build = Iyi::Stale::ReceiptBuild.new(build: build.build, toolchain: build.toolchain,
+          behavior: build.behavior, callpath: build.callpath, link: build.link, cenv: "x")
+        import_one(cache_root, cenv).error.not_nil!.should contain("build.cenv is not 64 lowercase hex characters")
+
+        forged = make_receipt(make_test_id("f1_test.iyi"), mode: "portable", observations: [make_obs("file_read", "src", "a.txt")])
+        forged.trace = Iyi::Stale::ReceiptTrace.new(fp: Iyi::Stale.hex(Iyi::Stale::ReceiptTrace.compute_fp([] of Iyi::Stale::Observation)),
+          observations: forged.trace.observations)
+        import_one(cache_root, forged).error.not_nil!.should contain("trace.fp is not the fingerprint of its observations")
+      end
+    end
+
+    it "refuses a local or contradicted record" do
+      with_tempfile("snap_f1_mode") do |cache_root|
+        Dir.mkdir_p(cache_root)
+        local = make_receipt(make_test_id("f1_test.iyi"), mode: "local")
+        import_one(cache_root, local).error.not_nil!.should contain("mode is 'local', not 'portable'")
+
+        contradicted = make_receipt(make_test_id("f1_test.iyi"), mode: "portable", contradicted: true)
+        import_one(cache_root, contradicted).error.not_nil!.should contain("the record is contradicted")
+      end
+    end
+
+    it "refuses an observation path that leaves its root" do
+      with_tempfile("snap_f1_paths") do |cache_root|
+        Dir.mkdir_p(cache_root)
+        {
+          "../../../../dev/zero" => "holds a '..' component",
+          "fixtures/../../x"     => "holds a '..' component",
+          "/etc/passwd"          => "is absolute",
+          "C:x"                  => "is absolute",
+          "fixtures\\a.txt"      => "holds a backslash",
+          "a\0b"                 => "holds a NUL byte",
+        }.each do |path, error|
+          rec = make_receipt(make_test_id("f1_test.iyi"), mode: "portable", observations: [make_obs("file_read", "src", path)])
+          import_one(cache_root, rec).error.not_nil!.should contain(error)
+        end
+        # A file name holding two dots is not a parent directory, and an
+        # environment observation's path is a variable's name.
+        dots = make_receipt(make_test_id("f1_test.iyi"), mode: "portable", observations: [make_obs("file_read", "src", "a..b/c..txt")])
+        import_one(cache_root, dots).success?.should be_true
+        env = make_receipt(make_test_id("f1_test.iyi"), mode: "portable", observations: [make_obs("env_get", "env", "../X")])
+        import_one(cache_root, env).success?.should be_true
+      end
+    end
+  end
+
+  describe "F3: only the master and run:<id> namespaces are imported" do
+    it "names the two namespaces and no other" do
+      Iyi::Stale::Snapshot.importable_namespace?("master").should be_true
+      Iyi::Stale::Snapshot.importable_namespace?("run:42").should be_true
+      ["", "dev", "any", "master2", "run:", "run:4a", "run:-1", "RUN:42"].each do |ns|
+        Iyi::Stale::Snapshot.importable_namespace?(ns).should be_false
+      end
+    end
+
+    it "refuses a valid snapshot under any other namespace" do
+      with_tempfile("snap_f3_namespace") do |cache_root|
+        Dir.mkdir_p(cache_root)
+        store = Iyi::Stale::Store.new(cache_root)
+        t = make_test_id("f3_test.iyi")
+        f = File.join(cache_root, "any.json")
+        File.write(f, Iyi::Stale::Snapshot.new(namespace: "any", target: "x86_64-linux-gnu", records: [make_receipt(t, mode: "portable")]).to_json)
+        res = Iyi::Stale::Snapshot.import(store, "any", f, Iyi::Stale::ImportContext.new(target: "x86_64-linux-gnu"))
+        res.success?.should be_false
+        res.error.not_nil!.should contain("namespace 'any' is neither master nor run:<id>")
+        store.candidates(t, "x86_64-linux-gnu").should be_empty
+      end
     end
   end
 end

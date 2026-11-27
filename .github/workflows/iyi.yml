@@ -736,6 +736,10 @@ jobs:
           # environment on every platform rather than teach the assertion an
           # exception.
           unset PGPASSWORD
+          # The self-hosted Mac's runner inherits its owner's shell, which sets
+          # NSC_TOKEN_FILE (run 46037312707). No step here uses it, and the
+          # assertion refuses its name: take it out as PGPASSWORD is.
+          unset NSC_TOKEN_FILE
           bash bench/stale_ci.sh assert-export-env
           mkdir -p stale-index
           args=(
@@ -920,6 +924,8 @@ jobs:
           # environment on every platform rather than teach the assertion an
           # exception.
           unset PGPASSWORD
+          # The owner's shell's NSC_TOKEN_FILE, as in stale-darwin's export.
+          unset NSC_TOKEN_FILE
           bash bench/stale_ci.sh assert-export-env
           mapfile -t tests < <(find samples/iyi -maxdepth 1 -type f -name '*.iyi' -print | sort)
           "$IYI" test --fresh --json \

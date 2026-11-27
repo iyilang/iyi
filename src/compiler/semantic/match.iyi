@@ -466,14 +466,19 @@ pub class NumericAutocast
     name.starts_with?("Int") && !name.starts_with?("UInt")
   end
 
-  # IntegerType#subset_of? for a typed number: every value of *from* fits in *target*.
-  # A signed type is never a subset of an unsigned type. An unsigned type fits in a
-  # signed type only when the signed type is strictly wider.
+  # IntegerType#subset_of? and FloatType#subset_of? for a typed number: every value of
+  # *from* fits in *target*. A signed type is never a subset of an unsigned type. An
+  # unsigned type fits in a signed type only when the signed type is strictly wider. An
+  # integer of at most 16 bits fits either float, a 32-bit one only Float64 (the
+  # mantissa holds it), a wider one neither.
   def self.range_subset?(from : Type, target : Type) : Bool
     if from.full_name == "Float32" && target.full_name == "Float64"
       return true
     end
     fb = NumericAutocast.integer_bits(from)
+    if fb != 0 && (target.full_name == "Float32" || target.full_name == "Float64")
+      return fb <= 16 || (fb == 32 && target.full_name == "Float64")
+    end
     tb = NumericAutocast.integer_bits(target)
     return false if fb == 0 || tb == 0
     from_signed = NumericAutocast.signed?(from)

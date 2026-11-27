@@ -65,7 +65,7 @@ probe_one() {
   local target="$1" name="$2" log="$WORK/probe/$2.log" rc fail_line
   local args=()
   if [ "$HOST_ID" != darwin-arm64 ]; then args=(--emit ir); fi
-  (cd "$WORK" && "$tool" "$(native_path "$target")" -o "$WORK_NATIVE/exe/$name$EXE" --probe-phase --prelude "${args[@]}" >"$log.out" 2>"$log.err")
+  (cd "$WORK" && "$tool" "$(native_path "$target")" -o "$WORK_NATIVE/exe/$name$EXE" --probe-phase --prelude ${args[@]+"${args[@]}"} >"$log.out" 2>"$log.err")
   rc=$?
   cat "$log.out" "$log.err" >"$log"
   PROBE_RC=$rc
@@ -127,7 +127,7 @@ for rel in src/compiler/tools/compile_native.iyi src/compiler/stage1.iyi; do
   base=$(basename "$rel" .iyi)
   args=()
   if [ "$HOST_ID" != darwin-arm64 ]; then args=(--emit ir); fi
-  if (cd "$WORK" && "$tool" "$REPO_NATIVE/$rel" -o "$WORK_NATIVE/exe/whole_$base$EXE" --prelude "${args[@]}" >"$WORK/whole_$base.log" 2>&1); then
+  if (cd "$WORK" && "$tool" "$REPO_NATIVE/$rel" -o "$WORK_NATIVE/exe/whole_$base$EXE" --prelude ${args[@]+"${args[@]}"} >"$WORK/whole_$base.log" 2>&1); then
     if [ "$HOST_ID" = darwin-arm64 ]; then outcome="built"; else outcome="verified IR emitted"; fi
   else
     outcome="refused: $(awk '/^((parse|semantic|codegen|link): fail: |Error:|iyi-compile-native:|iyi: panic:)/ { print; exit }' "$WORK/whole_$base.log" | normalise)"

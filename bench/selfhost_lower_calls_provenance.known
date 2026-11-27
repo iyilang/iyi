@@ -1,0 +1,4 @@
+# Hosts where a mutation's panic names no stack frame, so the frame a refusal must come from cannot be checked:
+# <host> <frame> <the gap>. An exact list (bench/selfhost_lower_calls_exercise.sh, lower_calls_check): on a listed
+# host the panic must print no frame at all, so a row fails once the host prints frames - remove it then.
+linux-x86_64 MainVisitor#call_expansion a panic on linux-x86_64 prints its message and `at <file>:<line>` with no stack frames, and the refusal is raised in MainVisitor#refuse, so its caller is not named

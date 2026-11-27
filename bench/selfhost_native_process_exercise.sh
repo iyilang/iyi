@@ -231,7 +231,10 @@ if ! run_timed 120 "$WORK/native" > "$WORK/native.out" 2> "$WORK/native.err" ||
    ! cmp -s "$WORK/hosted.err" "$WORK/native.err"; then
   echo 'FAIL: native process output differs'; cat "$WORK/native.out" "$WORK/native.err"; exit 1
 fi
-if ! run_monitored "$WORK/stage1$EXE" run "$fixture" > "$WORK/run.out" 2> "$WORK/run.err" ||
+# Under run_timed, as the hosted and native runs above: Python gives the child SIGPIPE's default action back. The
+# CI runner starts each step with SIGPIPE ignored, `run` passes that on to the program it starts, and the fixture's
+# `yes | head` children then print "yes: stdout: Broken pipe" into the stderr the fixture counts.
+if ! run_timed 600 "$WORK/stage1$EXE" run "$(native_path "$fixture")" > "$WORK/run.out" 2> "$WORK/run.err" ||
    ! cmp -s "$WORK/hosted.out" "$WORK/run.out"; then
   echo 'FAIL: stage1 run differs'; cat "$WORK/run.out" "$WORK/run.err"; exit 1
 fi

@@ -1416,9 +1416,9 @@ MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 prove_mutation "whole-program typeof fixture bypasses site scanning" "$REPO/bench/selfhost_macros_exercise.iyi" \
   "  if sites
-    print BenchSelfhostMacrosExercise.site_dump(source, flags)" \
+    print BenchSelfhostMacrosExercise.site_dump(source, flags, filename)" \
   "  if false
-    print BenchSelfhostMacrosExercise.site_dump(source, flags)" \
+    print BenchSelfhostMacrosExercise.site_dump(source, flags, filename)" \
   -- check_typeof_sites || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 

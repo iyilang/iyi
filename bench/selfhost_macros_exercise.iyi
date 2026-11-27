@@ -125,10 +125,15 @@ module BenchSelfhostMacrosExercise
   # kind, where it is written, then what it did. `macro-body` sites are inside
   # a macro definition and expand when it is called; `needs-context` sites read
   # the type or def they are written in. The oracle's driver prints the same
-  # lines for the same file.
-  def self.site_dump(source : String, flags : Array(String)) : String
-    engine = MacroEngine.new(flags)
-    root = Parser.new(strip_header_annotations(source)).parse
+  # lines for the same file. As the oracle's, each site knows its file, and no
+  # package is being compiled: the oracle's program has no root package and no
+  # filename, so a macro's package is a library root or its own, and `env` is
+  # a dependency's.
+  def self.site_dump(source : String, flags : Array(String), filename : String) : String
+    base = Dir.current
+    conf = MacroConfinement.new("", MacroConfinement.library_roots_of(search_path_from_env, base), base)
+    engine = MacroEngine.new(flags, confinement: conf)
+    root = Parser.new(strip_header_annotations(source), filename).parse
     refs = MacroSiteScan.scan(root)
     s = ""
     i = 0
@@ -704,7 +709,7 @@ elsif Program.args.size > 0
   end
   source = File.read(filename)
   if sites
-    print BenchSelfhostMacrosExercise.site_dump(source, flags)
+    print BenchSelfhostMacrosExercise.site_dump(source, flags, filename)
   else
     conf = BenchSelfhostMacrosExercise.fixture_confinement(filename)
     the_macro, the_call = MacroParser.parse_fixture(source, filename)

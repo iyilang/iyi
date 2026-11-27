@@ -1,0 +1,8 @@
+# Rows bench/selfhost_pipeline.floor holds below what the program needs: <repo file> <phase> <the gap that stops it>.
+# An exact list (bench/selfhost_pipeline_exercise.sh, section 4): a listed file must measure exactly its phase, so a
+# row the port fixes fails the gate until it is removed here and its floor row raised. src/compiler/lower/NEEDS.md,
+# "Pipeline rows held below run-equal", names each gap.
+bench/fixtures/lowprim_checked_wide_add_overflow.iyi declarations the bodies pass refuses a wide operand the hosted compiler accepts: expected argument #1 to 'Int32#+' to be Int32, not Int64
+bench/fixtures/lowprim_checked_wide_signed.iyi declarations the bodies pass refuses a wide operand the hosted compiler accepts: expected argument #1 to 'Int32#+' to be Int32, not Int64
+bench/fixtures/lowprim_checked_wide_sub_overflow.iyi declarations the bodies pass refuses a wide operand the hosted compiler accepts: expected argument #1 to 'Int32#-' to be Int32, not Int64
+src/compiler/tools/parse.iyi declarations the bodies pass does not narrow a (String | Nil) value the hosted compiler narrows: undefined method 'empty?' for Nil

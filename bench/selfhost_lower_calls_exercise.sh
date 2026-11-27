@@ -185,7 +185,7 @@ for fixture in "$REPO"/bench/fixtures/lowcall_*.iyi "$REPO"/bench/fixtures/lowde
     oracle_target=(--cross-compile --target aarch64-apple-darwin)
     oracle_output="$WORK_NATIVE/$name.o"
   fi
-  if ! "$IYI" build "${oracle_target[@]}" --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
+  if ! "$IYI" build ${oracle_target[@]+"${oracle_target[@]}"} --prelude empty --emit llvm-ir --no-debug -o "$oracle_output" "$(native_path "$fixture")" > "$WORK/$name.oracle.log" 2>&1 || [ ! -s "$WORK/$name.ll" ]; then
     echo "  $name: the hosted compiler did not emit its module (see $WORK/$name.oracle.log)"
     diverged=$((diverged + 1))
     continue
@@ -498,7 +498,7 @@ if [ "$HOST_ID" != darwin-arm64 ]; then
   meta_target=(--cross-compile --target aarch64-apple-darwin)
   meta_output="$WORK_NATIVE/meta_name_ir.o"
 fi
-if ! "$IYI" build "${meta_target[@]}" --single-module --emit llvm-ir --no-debug -o "$meta_output" "$meta_name_fixture" > "$WORK/meta_name.ir-hosted.log" 2>&1 ||
+if ! "$IYI" build ${meta_target[@]+"${meta_target[@]}"} --single-module --emit llvm-ir --no-debug -o "$meta_output" "$meta_name_fixture" > "$WORK/meta_name.ir-hosted.log" 2>&1 ||
    ! "$WORK/compile_native$EXE" "$meta_name_fixture" -o "$WORK_NATIVE/meta_name.ir-port" --pipeline typed --prelude --emit ir > "$WORK/meta_name.ir-port.log" 2>&1 ||
    ! meta_name_body "$WORK/meta_name_ir.ll" > "$WORK/meta_name.hosted.body" ||
    ! meta_name_body "$WORK/meta_name.ir-port" > "$WORK/meta_name.port.body" ||
@@ -960,10 +960,23 @@ lower_calls_check() {
             return 2
           fi
         fi
-        if [ -n "$expected_stack" ] && ! grep -Fq "$expected_stack" "$WORK/mut.err"; then
-          echo "INVALID: $name lacks the expected diagnostic provenance"
-          cat "$WORK/mut.err"
-          return 2
+        if [ -n "$expected_stack" ]; then
+          # A host listed for this frame prints a panic with no stack frames at all, so the frame cannot be named
+          # there (bench/selfhost_lower_calls_provenance.known, an exact list: the frame appearing, or any frame,
+          # fails until the row is removed).
+          stack_known="$(awk -v host="$HOST_ID" -v frame="$expected_stack" '$1 == host && $2 == frame { print; exit }' "$REPO/bench/selfhost_lower_calls_provenance.known")"
+          if [ -n "$stack_known" ]; then
+            if grep -Eq '0x[0-9a-fA-F]{6,}' "$WORK/mut.err" || grep -Fq "$expected_stack" "$WORK/mut.err"; then
+              echo "INVALID: $name now prints stack frames on $HOST_ID: remove its row from bench/selfhost_lower_calls_provenance.known"
+              cat "$WORK/mut.err"
+              return 2
+            fi
+            host_limited "lower_calls: the panic on $HOST_ID prints no stack frames, so $expected_stack is not checked as its provenance"
+          elif ! grep -Fq "$expected_stack" "$WORK/mut.err"; then
+            echo "INVALID: $name lacks the expected diagnostic provenance"
+            cat "$WORK/mut.err"
+            return 2
+          fi
         fi
         echo "decisive: $name: $(refusal_note "$result" "$WORK/mut.err")"
         return 1

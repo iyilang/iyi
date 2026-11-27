@@ -7,3 +7,8 @@ linux-x86_64 lower_macro_proc_locations @*read_both:Int32 gap U
 linux-x86_64 closure_self_class_ir @*Counter::new<Int32>:Counter gap U
 linux-x86_64 closure_self_class_ir @*Counter#initialize<Int32>:Int32 gap U
 linux-x86_64 closure_self_class_ir @*Counter#total:Int32 gap U
+linux-x86_64 closure_self_unit_ir @*Fixtures::ClosureSelfUnitIr::Job::new<Int32>:Fixtures::ClosureSelfUnitIr::Job gap U
+linux-x86_64 closure_self_unit_ir @*Fixtures::ClosureSelfUnitIr::Job#initialize<Int32>:Int32 gap U
+linux-x86_64 closure_self_unit_ir @*Fixtures::ClosureSelfUnitIr::Job#independent:Proc(Int32) gap U
+linux-x86_64 closure_self_unit_ir @*Fixtures::ClosureSelfUnitIr::Job#bound:Proc(Int32) gap U
+linux-x86_64 closure_self_unit_ir @*Fixtures::ClosureSelfUnitIr^Fixtures::ClosureSelfUnitIr::scale<Int32>:Int32 gap U

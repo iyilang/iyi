@@ -26,6 +26,7 @@ bench/fixtures/sem_bodies_defer.iyi 92
 bench/fixtures/sem_bodies_digest_reach.iyi 4
 bench/fixtures/sem_bodies_ensure.iyi 41
 bench/fixtures/sem_bodies_enum_member.iyi 6
+bench/fixtures/sem_bodies_float_autocast.iyi 16
 bench/fixtures/sem_bodies_flow.iyi 36
 bench/fixtures/sem_bodies_flow_assign.iyi 95
 bench/fixtures/sem_bodies_flow_early_exit.iyi 54
@@ -95,6 +96,7 @@ bench/fixtures/sem_bodies_trait_associated_union.iyi 17
 bench/fixtures/sem_bodies_trait_def.iyi 6
 bench/fixtures/sem_bodies_trait_dispatch.iyi 21
 bench/fixtures/sem_bodies_trait_requirement.iyi 7
+bench/fixtures/sem_bodies_trait_unit_name.iyi 9
 bench/fixtures/sem_bodies_tuple_scalar.iyi 31
 bench/fixtures/sem_bodies_union.iyi 15
 bench/fixtures/sem_bodies_union_generic.iyi 16

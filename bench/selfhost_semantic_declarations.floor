@@ -240,8 +240,8 @@ src/iyi/chaos_points.iyi 7
 src/iyi/concurrency.iyi 610
 # Windows takes the `{% if flag?(:win32) %}` arm of IyiSchedulerState that declares
 # `@deadline_timer` and `stdin_waiter`: two more instance variables, both agreeing.
-# CI's Windows host (x86-64) measures 605 of 605.
-src/iyi/concurrency.iyi@windows 605
+# CI's Windows host (x86-64) measures 612 of 612 (run 46081444018).
+src/iyi/concurrency.iyi@windows 612
 src/iyi/enum.iyi 16
 src/iyi/file.iyi 9
 src/iyi/float.iyi 74

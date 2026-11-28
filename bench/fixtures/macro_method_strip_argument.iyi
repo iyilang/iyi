@@ -1,0 +1,5 @@
+macro wrong_strip_argument
+  {{ " line ".strip(1) }}
+end
+
+wrong_strip_argument

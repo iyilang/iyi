@@ -2479,6 +2479,14 @@ pub class Lexer
     nil
   end
 
+  private def delimiter_matches_char?(delimiter : String, char : Char) : Bool
+    if delimiter.bytesize == 1 && char.ord <= 0x10FFFF
+      delimiter.byte_at(0) == char.ord
+    else
+      delimiter == char.to_s
+    end
+  end
+
   # Leaves a `#{...}` interpolation: the `}` that matches it restores the string
   # state the `#` pushed. Other braces inside the interpolation only count down.
   private def pop_macro_interpolation(current : DelimiterState?) : DelimiterState?
@@ -2676,7 +2684,7 @@ pub class Lexer
       when '\\'
         char = next_char
         if ds = delimiter_state
-          if (ds.the_end.bytesize == 1 && ds.the_end.byte_at(0) == char.ord) || ds.the_end == char.to_s
+          if delimiter_matches_char?(ds.the_end, char)
             char = next_char
           elsif char == '\\'
             char = next_char
@@ -2688,7 +2696,7 @@ pub class Lexer
         next
       when '\'', '"'
         if ds = delimiter_state
-          if (ds.the_end.bytesize == 1 && ds.the_end.byte_at(0) == char.ord) || ds.the_end == char.to_s
+          if delimiter_matches_char?(ds.the_end, char)
             delimiter_state = nil
           end
         else
@@ -2733,13 +2741,13 @@ pub class Lexer
         end
       else
         if ds = delimiter_state
-          if (ds.the_end.bytesize == 1 && ds.the_end.byte_at(0) == char.ord) || ds.the_end == char.to_s
+          if delimiter_matches_char?(ds.the_end, char)
             if ds.open_count == 0
               delimiter_state = nil
             else
               delimiter_state = ds.with_open_count_delta(-1)
             end
-          elsif (ds.nest.bytesize == 1 && ds.nest.byte_at(0) == char.ord) || ds.nest == char.to_s
+          elsif delimiter_matches_char?(ds.nest, char)
             delimiter_state = ds.with_open_count_delta(1)
           end
         elsif whitespace

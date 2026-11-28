@@ -1,0 +1,12 @@
+def half(x : Float64) : Float64
+  x
+end
+
+def narrow(x : Float32) : Float32
+  x
+end
+
+n : Int32 = 3
+s = 2_i16
+a = half(n)
+b = narrow(s)

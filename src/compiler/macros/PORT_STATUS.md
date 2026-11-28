@@ -65,7 +65,7 @@ way hosted's `Iyi.unverbatim` does.
 | 10 | `constant` | TypeNode | not yet |
 | 9 | `empty?` | HashLiteral, NamedTupleLiteral, StringLiteral | named |
 | 8 | `annotation` | Arg, Def, MetaMacroVar, TypeNode | not yet |
-| 8 | `strip` | StringLiteral | not yet |
+| 8 | `strip` | StringLiteral | named |
 | 7 | `constants` | TypeNode | not yet |
 | 7 | `has_constant?` | TypeNode | not yet |
 | 7 | `instance_vars` | TypeNode | not yet |
@@ -267,10 +267,13 @@ Every entry is an exact match with the hosted compiler, on the fixture named.
 - `includes?`, `starts_with?`, `ends_with?`, `upcase`, `downcase`, `capitalize`:
   StringLiteral (`macro_method_string_search.iyi`).
 - `nil?`: NilLiteral and a node that is not nil (`macro_env_lookup.iyi`).
+- `strip`: StringLiteral, and its refusals of an argument and a block
+  (`macro_method_strip.iyi`, `macro_method_strip_argument.iyi`,
+  `macro_method_strip_block.iyi`).
 
 Not checked by any fixture, so not claimed: every TypeNode method, the Def, Arg,
 Annotation and Macro accessors (`args`, `name`, `type`, `var`, `exp`,
-`named_args`), and the rest of the StringLiteral methods (`strip`, `chomp`, `split`,
+`named_args`), and the rest of the StringLiteral methods (`chomp`, `split`,
 `gsub`, `tr`).
 
 ## Divergences the port keeps

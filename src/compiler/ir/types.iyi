@@ -241,6 +241,7 @@ pub class TypeTable
 
   def initialize
     @interned = Hash(String, IrType).new
+    @integers = Hash(Int32, IrType).new
     @by_name = Hash(String, IrType).new
     @named = [] of IrType
   end
@@ -251,7 +252,12 @@ pub class TypeTable
 
   def int(bits : Int32) : IrType
     raise "no integer type of #{bits} bits in the IR" unless valid_int_bits?(bits)
-    canonical("i#{bits}", TypeKind::Int, bits, 0, [] of IrType, false, nil, 0_i64, [] of IrType, nil, false)
+    if existing = @integers[bits]?
+      return existing
+    end
+    type = canonical("i#{bits}", TypeKind::Int, bits, 0, [] of IrType, false, nil, 0_i64, [] of IrType, nil, false)
+    @integers[bits] = type
+    type
   end
 
   def int1 : IrType

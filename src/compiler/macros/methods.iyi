@@ -544,6 +544,19 @@ pub class MacroMethods
           return refuse("wrong number of arguments for macro 'StringLiteral#chomp' (given #{args.size}, expected 0)")
         end
         return StringLiteral.new(str.value.chomp('\n'))
+      when "strip"
+        if block
+          return refuse("macro 'StringLiteral#strip' is not expected to be invoked with a block, but a block was given")
+        end
+        if named = named_args
+          named.each_key do |name|
+            return refuse("no parameter named '#{name}'")
+          end
+        end
+        unless args.empty?
+          return refuse("wrong number of arguments for macro 'StringLiteral#strip' (given #{args.size}, expected 0)")
+        end
+        return StringLiteral.new(str.value.strip)
       when "downcase"
         result = ::String::Builder.new(str.value.bytesize)
         str.value.each_char { |char| Unicode.downcase(char) { |part| result << part } }

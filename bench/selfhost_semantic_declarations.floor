@@ -6,7 +6,7 @@ samples/iyi/calc.iyi 4
 samples/iyi/collections.iyi 15
 samples/iyi/config.iyi 10
 samples/iyi/cores.iyi 5
-samples/iyi/derive.iyi 0
+samples/iyi/derive.iyi 21
 samples/iyi/enums.iyi 12
 samples/iyi/errors.iyi 18
 samples/iyi/files.iyi 2
@@ -19,7 +19,7 @@ samples/iyi/immutable.iyi 2
 samples/iyi/init_order.iyi 2
 samples/iyi/inventory.iyi 10
 samples/iyi/io.iyi 2
-samples/iyi/modules.iyi 0
+samples/iyi/modules.iyi 9
 samples/iyi/sessions.iyi 17
 samples/iyi/shapes.iyi 20
 samples/iyi/socket.iyi 2
@@ -47,7 +47,7 @@ src/compiler/foundation/location.iyi 19
 src/compiler/foundation/string_pool.iyi 10
 src/compiler/ir/builder.iyi 124
 src/compiler/ir/function.iyi 80
-src/compiler/ir/inst.iyi 223
+src/compiler/ir/inst.iyi 228
 src/compiler/ir/intrinsics.iyi 76
 src/compiler/ir/layout.iyi 24
 src/compiler/ir/module.iyi 33
@@ -73,9 +73,9 @@ src/compiler/ir/opt/simplify.iyi 43
 src/compiler/ir/opt/sroa.iyi 45
 src/compiler/ir/parser.iyi 141
 src/compiler/ir/printer.iyi 48
-src/compiler/ir/types.iyi 88
+src/compiler/ir/types.iyi 89
 src/compiler/ir/values.iyi 39
-src/compiler/ir/verifier.iyi 61
+src/compiler/ir/verifier.iyi 67
 src/compiler/llvm.iyi 0
 src/compiler/llvm/builder.iyi 0
 src/compiler/llvm/context.iyi 0
@@ -176,7 +176,7 @@ src/compiler/semantic/cover.iyi 6
 src/compiler/semantic/default_arguments.iyi 17
 src/compiler/semantic/definition_typing.iyi 35
 src/compiler/semantic/inline_macros.iyi 35
-src/compiler/semantic/instance_vars.iyi 71
+src/compiler/semantic/instance_vars.iyi 80
 src/compiler/semantic/lib_call.iyi 39
 src/compiler/semantic/literal_expander.iyi 69
 src/compiler/semantic/macro_bindings.iyi 9
@@ -196,7 +196,7 @@ src/compiler/semantic/type_nodes.iyi 26
 src/compiler/semantic/typed.iyi 197
 src/compiler/stage1.iyi 4
 src/compiler/syntax/ast.iyi 1293
-src/compiler/syntax/lexer.iyi 130
+src/compiler/syntax/lexer.iyi 131
 src/compiler/syntax/parser.iyi 323
 src/compiler/syntax/token.iyi 262
 src/compiler/syntax/transformer.iyi 111
@@ -207,7 +207,7 @@ src/compiler/tools/compile_native.iyi 11
 src/compiler/tools/format.iyi 0
 src/compiler/tools/formatter.iyi 241
 src/compiler/tools/ir.iyi 0
-src/compiler/tools/ir_core.iyi 21
+src/compiler/tools/ir_core.iyi 22
 src/compiler/tools/ir_opt.iyi 13
 src/compiler/tools/link_elf.iyi 11
 src/compiler/tools/link_macho.iyi 16

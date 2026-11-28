@@ -878,7 +878,7 @@ pub class Parser < Lexer
     old_pos = @pos
     old_line = @line_number
     old_column = @column_number
-    old_token = Token.new
+    old_token = @temp_token
     old_token.copy_from(@token)
     next_token_skip_space_or_newline
     is_period = @token.type == TokenKind::OP_PERIOD
@@ -6378,10 +6378,15 @@ pub class Parser < Lexer
       wrap_command(StringInterpolation.new(nodes).at(location), delimiter_state.kind, location)
     else
       str = ""
-      pieces.each do |p|
-        val = p.value
-        if val.is_a?(String)
-          str = str + val
+      if pieces.size == 1
+        val = pieces[0].value
+        str = val if val.is_a?(String)
+      elsif pieces.size > 1
+        str = String.build do |builder|
+          pieces.each do |p|
+            val = p.value
+            builder << val if val.is_a?(String)
+          end
         end
       end
       if delimiter_state.kind == DelimiterKind::REGEX

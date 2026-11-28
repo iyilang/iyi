@@ -465,6 +465,56 @@
 ### Changed
 
 - **Compiler: omit unread predefined constants from codegen and stale build keys.** Predefined constants (`Crystal::*`) are initialized at startup and included in reach signatures only when referenced by typed code. `ARGC_UNSAFE` and `ARGV_UNSAFE` remain initialized unconditionally. Reading an uninitialized predefined constant in codegen raises an internal compiler bug.
+
+- **The iyi parser builds a literal's text once (#264).** A string literal
+  made of several pieces is joined in one `String.build` instead of one
+  concatenation per piece, and a single piece is used as it is; the newline
+  lookahead for a `.` call reuses the lexer's spare token instead of
+  allocating one; and the macro lexer matches a one-byte delimiter without
+  building a string from the character. On macOS arm64 the release-built
+  `compiler/tools/parse` takes 3.4 % less time on the 158 files of
+  `src/compiler` and 5.9 % less on a generated 56,646-line, 121-file
+  project (median of 5 interleaved runs). The parser and lexer drivers' AST
+  and token dumps of the 28 samples and six large compiler and std files are
+  byte-identical to master's. A broken copy whose macro lexer matched an
+  escaped closing delimiter against the opening one passed every syntax and
+  macro gate; `bench/fixtures/syntax_macro_escaped_close.iyi`, compared
+  with the hosted parser, and a proof in `bench/selfhost_parser_exercise.sh`
+  now hold it to failing.
+
+- **IR instructions allocate their operand lists on first use, and the
+  verifier indexes a function once (#265).** `Inst` keeps `args`,
+  `targets`, `cases` and the wide-constant words nilable; the getters create
+  an array the instruction owns the first time one is asked for, so a
+  constant or a terminator with no successors allocates nothing. The
+  verifier builds one block index (by identity, falling back to the name for
+  malformed modules) and one table of each value's first and last placement
+  per function, instead of rebuilding a name index in each check, and
+  `TypeTable#int` caches its integer types. On macOS arm64, on a generated
+  132,005-line IR module, `ir_core verify` takes 31 % less time,
+  `ir_core print` 5.3 % less and `native_cg obj` 5.4 % less (median of 5
+  interleaved runs). The printed IR, verifier verdicts, `drop-unwind`
+  output and `ir_opt run release` output of all 106 IR fixtures and the
+  generated module, the native objects of the 48 codegen fixtures and the
+  generated module, and the six Builder fixture modules are byte-identical
+  to master's. Two broken copies passed every IR and native gate, because
+  the gates verified a Builder module only after printing and parsing it
+  again: a targets getter that handed every instruction one shared list, and
+  a verifier that accepted a void instruction's result as an operand.
+  `ir_core emit` now verifies the module as built, a new `void_use` Builder
+  fixture must be refused as `dominance`, and `bench/native_ir_exercise.sh`
+  proves both, and an operand list not kept on first use, to failing.
+
+- **The self-hosted front end's instance-variable pass is linear in the
+  classes.** `declare_guessed_instance_vars` scanned every pending instance
+  variable per owner and searched the owner list linearly at every
+  superclass level, so it grew as size^1.9 and took 3.3 s of a 4.6 s front
+  end on a 113k-line generated program. An owner table indexed by full name
+  and a set of owner-and-name keys make it 22 ms there; `TopLevelVisitor#finish`
+  keeps its explicit names in a `Set`. On tmac the front end over 57k lines
+  goes from 1,358 to 607 ms (2.74× the hosted front end, from 6.14×); the
+  typed dump is unchanged on 1,068 inputs.
+
 - **A freestanding wasm `--release` drops DWARF and keeps function names
   (#221).** The link adds `wasm-ld --strip-debug` when `--release` was given
   without `-d`, including `--release -O z`; the name section host stack

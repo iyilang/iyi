@@ -7,7 +7,8 @@
 #   ir_core layout TRIPLE    print the target's DataLayout string
 #   ir_core structs FILE     parse FILE and print each named struct's size, alignment and field offsets
 #   ir_core predicates FILE  parse FILE and print the name of each icmp and fcmp predicate, in order
-#   ir_core emit NAME        build the NAME fixture module with the Builder and print it
+#   ir_core emit NAME        build the NAME fixture module with the Builder, verify it as built and print it; a module
+#                            the verifier refuses prints its errors on stderr and exits 1
 
 @[Unsafe("declares the C library exit to set the process status; the tool handles no raw memory")]
 module compiler/tools/ir_core
@@ -248,9 +249,18 @@ module IrCore
       mod = runtime_module
     elsif name == "intrinsics"
       mod = intrinsics_module
+    elsif name == "void_use"
+      mod = void_use_module
     else
       STDERR.puts "ir_core: no fixture named #{name}"
       LibC.exit(2)
+    end
+    # The module is verified as the Builder left it: an operand list no text form shows (a target every
+    # instruction shares, a void result used as a value) is caught here, not hidden by printing.
+    errors = verify(mod)
+    unless errors.empty?
+      errors.each { |e| STDERR.puts e.to_s }
+      LibC.exit(1)
     end
     STDOUT.print(print(mod))
   end
@@ -346,6 +356,23 @@ module IrCore
     b.fence(Ordering::SeqCst, false)
     b.fence(Ordering::Acquire, true)
     b.ret(b.add(bumped, b.const_int(i64, 0_i64), "result"))
+    mod
+  end
+
+  # An add whose operand is a store: a void instruction defines no value, so the verifier refuses the use as dominance.
+  # The text form cannot name a void result, so only the Builder can make this module.
+  def self.void_use_module : Module
+    mod = new_module("void_use", "x86_64-unknown-linux-gnu")
+    b = Builder.new(mod)
+    t = mod.types
+    i32 = t.int32
+    fn = mod.add_function("f", t.func([i32], i32), CallConv::Iyi)
+    fn.add_param(Param.new(i32, "n", 0))
+    entry = fn.append_basic_block("entry")
+    b.position_at_end(entry)
+    slot = b.alloca(i32, "slot")
+    stored = b.store(fn.param(0), slot)
+    b.ret(b.add(stored, fn.param(0), "sum"))
     mod
   end
 

@@ -1,0 +1,10 @@
+macro strips
+  {{ "".strip }}
+  {{ "alpha".strip }}
+  {{ "  alpha  ".strip }}
+  {{ "\t\nalpha beta\r\n".strip }}
+  {{ "20.1.2 ".strip }}
+  {{ " é ".strip }}
+end
+
+strips

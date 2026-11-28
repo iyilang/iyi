@@ -26,6 +26,7 @@ sem_bodies_defer.iyi	prelude	92	40	5	5
 sem_bodies_digest_reach.iyi	bare	4	4	0	0
 sem_bodies_ensure.iyi	cr	41	41	5	5
 sem_bodies_enum_member.iyi	prelude	9	9	1	1
+sem_bodies_float_autocast.iyi	bare	17	16	2	2
 sem_bodies_flow.iyi	bare	36	36	0	0
 sem_bodies_flow_assign.iyi	bare	96	95	62	54
 sem_bodies_flow_early_exit.iyi	bare	54	54	55	55
@@ -95,6 +96,7 @@ sem_bodies_trait_associated_union.iyi	prelude	17	17	26	17
 sem_bodies_trait_def.iyi	bare	8	6	0	0
 sem_bodies_trait_dispatch.iyi	bare	22	21	28	10
 sem_bodies_trait_requirement.iyi	bare	8	7	12	3
+sem_bodies_trait_unit_name.iyi	bare	9	9	0	0
 sem_bodies_tuple_scalar.iyi	prelude	31	31	54	54
 sem_bodies_union.iyi	bare	15	15	0	0
 sem_bodies_union_generic.iyi	bare	16	16	1	1

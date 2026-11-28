@@ -1,0 +1,10 @@
+module trait_unit/maker
+
+pub trait Maker
+  def make : Box
+    Box.new
+  end
+end
+
+pub class Box
+end

@@ -55,7 +55,11 @@ fi
 if [ -z "$LLC" ] && [ "$HOST_OS" = darwin ] && [ -x /opt/homebrew/opt/llvm/bin/llc ]; then
   LLC=/opt/homebrew/opt/llvm/bin/llc
 fi
-if [ -z "$LLC" ]; then
+if [ -z "$LLC" ] && [ "$HOST_OS" = windows ]; then
+  # The Windows runner's LLVM is the Crystal package's libraries and the official installer's clang, neither with an
+  # llc; the barrier counts and the native Mach-O link below still run.
+  host_limited "GC barrier: the Darwin AArch64 object from the port's IR needs llc, which no LLVM on the Windows runner ships"
+elif [ -z "$LLC" ]; then
   echo 'FAIL: llc is required to emit the Darwin AArch64 object' >&2
   exit 1
 fi
@@ -87,7 +91,7 @@ check_barriers() {
   port_count="$(sed -n '2p' "$WORK/barrier-counts")"
   [ "$hosted_count" -gt 0 ] || { echo 'INVALID: hosted IR has no selected write-barrier sites'; return 2; }
   [ "$hosted_count" = "$port_count" ] || return 1
-  if ! "$LLC" -O0 -filetype=obj -mtriple=arm64-apple-macosx "$WORK_NATIVE/port.ll" -o "$WORK_NATIVE/port.o" >"$WORK/llc.log" 2>&1; then
+  if [ -n "$LLC" ] && ! "$LLC" -O0 -filetype=obj -mtriple=arm64-apple-macosx "$WORK_NATIVE/port.ll" -o "$WORK_NATIVE/port.o" >"$WORK/llc.log" 2>&1; then
     echo 'INVALID: LLVM failed to emit the port object'
     cat "$WORK/llc.log"
     return 2

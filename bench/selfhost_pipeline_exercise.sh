@@ -128,7 +128,8 @@ with open(stem + ".out", "wb") as out, open(stem + ".err", "wb") as err:
             result = "timeout"
     except OSError as exc:
         result = f"error {exc}"
-with open(stem + ".status", "w", encoding="utf-8") as status_file:
+# newline="\n": Windows' text mode would end the line "\r\n", and `read` keeps the "\r" in the status.
+with open(stem + ".status", "w", encoding="utf-8", newline="\n") as status_file:
     print(result, file=status_file)
 PY
   then

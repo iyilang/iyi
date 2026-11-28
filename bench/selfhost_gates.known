@@ -11,6 +11,7 @@ windows-x86_64 selfhost_lower_core_exercise proc-literal names carry the hosted 
 windows-x86_64 selfhost_lower_ensure_exercise an empty-prelude hosted program links with no C runtime under MSVC (LNK2019 exit, putchar; LNK2001 mainCRTStartup)
 windows-x86_64 selfhost_lower_globals_exercise an empty-prelude hosted program links with no C runtime under MSVC (LNK2019 exit; LNK2001 mainCRTStartup)
 windows-x86_64 selfhost_pipeline_exercise nine fixtures' empty-prelude hosted builds do not link under MSVC (LNK2019 getpid, exit, __fixsfti; LNK2001 mainCRTStartup)
+windows-x86_64 selfhost_semantic_inline_macros_exercise Windows' platform arms measure other counts in about 20 files (tssh: daemon 96, thread 88, std/signal 26, std/system 13 under the plain rows; socket 298, prelude 862 above them) and no file has a measured @windows row yet
 windows-x86_64 selfhost_lower_primitives_exercise the required-unit oracle links with unresolved externals under MSVC (LNK1120), and type-id constants differ in the module
 windows-x86_64 selfhost_prelude_exercise five single-file rows stop at the platform linker (exit 2) under MSVC, below their link floor
 windows-x86_64 native_macro_exercise the port built with LLVM (tools/compile.iyi) writes no cg_macro_site executable on Windows, so its exit cannot be compared with the hosted build's

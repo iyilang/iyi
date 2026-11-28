@@ -50,9 +50,19 @@ module BenchSelfhostInlineMacrosExercise
     root
   end
 
+  # Whether a path is absolute as the gate gives it: a POSIX `/...` path, or a Windows path with a drive letter, a colon
+  # and a separator (`D:/...` from `cygpath -m`, or `D:\...`). Only a path that is not absolute is read from the working
+  # directory, so an absolute drive path is never prefixed a second time.
+  def self.absolute_path?(path : String) : Bool
+    return true if path.starts_with?("/")
+    return false if path.bytesize < 3
+    letter = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".includes?(path[0, 1])
+    letter && path[1, 1] == ":" && (path[2, 1] == "/" || path[2, 1] == "\\")
+  end
+
   def self.entry_of(path : String) : String
     cwd = ENV["PWD"]? || "."
-    absolute = path.starts_with?("/") ? path : "#{cwd}/#{path}"
+    absolute = absolute_path?(path) ? path : "#{cwd}/#{path}"
     normalize_path(absolute)
   end
 

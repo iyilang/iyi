@@ -235,6 +235,9 @@ pub abstract class Transformer
   end
 
   def transform(node : FunDef) : ASTNode
+    if body = node.body
+      node.body = body.transform(self)
+    end
     node
   end
 

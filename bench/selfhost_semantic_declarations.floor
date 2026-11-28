@@ -301,7 +301,7 @@ src/std/errno.iyi 38
 src/std/file.iyi 162
 # Linux takes the `{% else %}` arm of the platform block at the top of the file (its syscall
 # layer, with its own architecture arms), which declares more than the Darwin arm. CI's Linux
-# host (x86-64) measures 167 of 167.
+# host (x86-64) measures 170 of 170.
 src/std/file.iyi@linux 170
 src/std/file_utils.iyi 20
 src/std/fileserver.iyi 7

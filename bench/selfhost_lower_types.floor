@@ -45,7 +45,7 @@ src/compiler/ir/parser.iyi 8
 src/compiler/ir/printer.iyi 2
 src/compiler/ir/types.iyi 6
 src/compiler/ir/values.iyi 5
-src/compiler/ir/verifier.iyi 4
+src/compiler/ir/verifier.iyi 5
 src/compiler/llvm.iyi 1
 src/compiler/llvm/builder.iyi 0
 src/compiler/llvm/context.iyi 0
@@ -146,7 +146,7 @@ src/compiler/semantic/cover.iyi 2
 src/compiler/semantic/default_arguments.iyi 2
 src/compiler/semantic/definition_typing.iyi 3
 src/compiler/semantic/inline_macros.iyi 4
-src/compiler/semantic/instance_vars.iyi 6
+src/compiler/semantic/instance_vars.iyi 7
 src/compiler/semantic/lib_call.iyi 4
 src/compiler/semantic/literal_expander.iyi 3
 src/compiler/semantic/macro_bindings.iyi 2

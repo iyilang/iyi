@@ -1,11 +1,12 @@
 # Floor for bench/selfhost_semantic_inline_macros_exercise.sh: the agreeing declaration
-# records each file must keep. Only raise these (SEMINL_RAISE=1); never lower one.
+# records each file must keep, and <file>@<host> rows for a file a host measures differently
+# (its platform arms are other code). Only raise these (SEMINL_RAISE=1); never lower one.
 samples/iyi/basics.iyi 2
 samples/iyi/calc.iyi 0
 samples/iyi/collections.iyi 11
 samples/iyi/config.iyi 10
 samples/iyi/cores.iyi 5
-samples/iyi/derive.iyi 0
+samples/iyi/derive.iyi 12
 samples/iyi/enums.iyi 12
 samples/iyi/errors.iyi 16
 samples/iyi/files.iyi 2
@@ -47,7 +48,7 @@ src/compiler/foundation/location.iyi 18
 src/compiler/foundation/string_pool.iyi 8
 src/compiler/ir/builder.iyi 119
 src/compiler/ir/function.iyi 97
-src/compiler/ir/inst.iyi 217
+src/compiler/ir/inst.iyi 218
 src/compiler/ir/intrinsics.iyi 75
 src/compiler/ir/layout.iyi 22
 src/compiler/ir/module.iyi 29
@@ -74,7 +75,7 @@ src/compiler/ir/parser.iyi 130
 src/compiler/ir/printer.iyi 46
 src/compiler/ir/types.iyi 82
 src/compiler/ir/values.iyi 33
-src/compiler/ir/verifier.iyi 49
+src/compiler/ir/verifier.iyi 51
 src/compiler/llvm.iyi 0
 src/compiler/llvm/builder.iyi 0
 src/compiler/llvm/context.iyi 0
@@ -178,7 +179,7 @@ src/compiler/semantic/cover.iyi 6
 src/compiler/semantic/default_arguments.iyi 17
 src/compiler/semantic/definition_typing.iyi 25
 src/compiler/semantic/inline_macros.iyi 37
-src/compiler/semantic/instance_vars.iyi 62
+src/compiler/semantic/instance_vars.iyi 68
 src/compiler/semantic/lib_call.iyi 37
 src/compiler/semantic/literal_expander.iyi 65
 src/compiler/semantic/macro_bindings.iyi 9
@@ -198,7 +199,7 @@ src/compiler/semantic/type_nodes.iyi 26
 src/compiler/semantic/typed.iyi 197
 src/compiler/stage1.iyi 4
 src/compiler/syntax/ast.iyi 1553
-src/compiler/syntax/lexer.iyi 133
+src/compiler/syntax/lexer.iyi 134
 src/compiler/syntax/parser.iyi 360
 src/compiler/syntax/token.iyi 281
 src/compiler/syntax/transformer.iyi 111
@@ -209,7 +210,7 @@ src/compiler/tools/compile_native.iyi 11
 src/compiler/tools/format.iyi 3
 src/compiler/tools/formatter.iyi 214
 src/compiler/tools/ir.iyi 0
-src/compiler/tools/ir_core.iyi 21
+src/compiler/tools/ir_core.iyi 22
 src/compiler/tools/ir_opt.iyi 13
 src/compiler/tools/link_elf.iyi 11
 src/compiler/tools/link_macho.iyi 16

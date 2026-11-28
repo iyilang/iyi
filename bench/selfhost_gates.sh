@@ -19,7 +19,9 @@
 #
 # Each gate's full output goes to a log under $SELFHOST_GATE_LOGS (default: a fresh
 # temporary directory), is printed after the gate ends, and is retained by CI.
-# Exit status is 0 only when every gate it runs exits 0.
+# Exit status is 0 only when every gate it runs exits 0, or fails on a host that
+# bench/selfhost_gates.known lists it for (an exact list: a listed gate that passes
+# fails the run until its row is removed).
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -157,9 +159,26 @@ else
   printf 'gate: %s\n' "${gates[@]##*/}"
 fi
 
+# Gates known to fail on a host: "<host> <gate> <the gap>" rows, an exact list. A listed gate that fails on its host is
+# reported with its gap and does not fail the run; a listed gate that exits 0 does (remove its row then).
+KNOWN="$REPO/bench/selfhost_gates.known"
+known_gap() { # known_gap <gate> -> prints the gap listed for this host, or nothing
+  [ -f "$KNOWN" ] || return 0
+  awk -v host="$HOST_ID" -v gate="$1" '$0 !~ /^#/ && $1 == host && $2 == gate { $1 = ""; $2 = ""; sub(/^  /, ""); print; exit }' "$KNOWN"
+}
+
 status=0
 failed=()
+known=()
 ran=0
+if [ -f "$KNOWN" ]; then
+  for name in $(awk -v host="$HOST_ID" '$0 !~ /^#/ && $1 == host { print $2 }' "$KNOWN"); do
+    if [ ! -f "$REPO/bench/$name.sh" ]; then
+      echo "STALE ROW: bench/selfhost_gates.known lists $name for $HOST_ID, and there is no bench/$name.sh"
+      status=1
+    fi
+  done
+fi
 for gate in "${gates[@]}"; do
   name="$(basename "$gate" .sh)"
   if [ "$mode" = shard ]; then
@@ -174,7 +193,14 @@ for gate in "${gates[@]}"; do
   [ -n "${CI:-}" ] && printf '::group::%s (%s)\n' "$name" "$HOST_ID"
   cat "$log"
   [ -n "${CI:-}" ] && echo '::endgroup::'
-  if [ "$rc" -ne 0 ]; then
+  gap="$(known_gap "$name")"
+  if [ -n "$gap" ] && [ "$rc" -ne 0 ]; then
+    known+=("$name: $gap")
+  elif [ -n "$gap" ]; then
+    echo "REMOVE THE ROW: $name is listed for $HOST_ID in bench/selfhost_gates.known and now exits 0"
+    status=1
+    failed+=("$name (listed as known, now passes)")
+  elif [ "$rc" -ne 0 ]; then
     status=1
     failed+=("$name")
   fi
@@ -191,8 +217,13 @@ fi
 
 echo
 echo "== 2. Verdicts"
-passed_count=$(( ran - ${#failed[@]} ))
-echo "  $passed_count/$ran gates exited 0"
+passed_count=$(( ran - ${#failed[@]} - ${#known[@]} ))
+echo "  $passed_count/$ran gates passed"
+if [ "${#known[@]}" -gt 0 ]; then
+  for line in "${known[@]}"; do
+    echo "  known on $HOST_ID (bench/selfhost_gates.known): $line"
+  done
+fi
 if [ "${#failed[@]}" -gt 0 ]; then
   for name in "${failed[@]}"; do
     echo "  failed: $name"

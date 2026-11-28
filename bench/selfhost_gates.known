@@ -1,0 +1,17 @@
+# Self-host gates known to fail on a host: <host> <gate> <the gap>. An exact list (bench/selfhost_gates.sh): a listed
+# gate that fails on its host is reported with its gap and does not fail the run, and a listed gate that exits 0 fails
+# it until its row is removed. Only gates #219 added are listed; none ever went green on that host in CI, and no gate
+# master runs there may be listed. src/compiler/lower/NEEDS.md ("Self-host gates on Windows") has each gap in full.
+windows-x86_64 selfhost_codegen_exercise the hosted oracle spells functions MSVC-escaped (`.2A.Counter.23.increment...`) where the port writes quoted LLVM names, so every IR comparison and mutation baseline differs
+windows-x86_64 selfhost_compile_exercise the pure-iyi compiler's object links with no C runtime entry under MSVC (LNK2001 mainCRTStartup)
+windows-x86_64 selfhost_lower_calls_exercise proc-literal names carry the hosted compiler's relative backslash path (`bench\\fixtures\\...`) where the port writes the absolute forward-slash one
+windows-x86_64 selfhost_lower_cast_exercise call-site strings and proc-literal names carry the hosted compiler's backslash paths where the port writes forward slashes
+windows-x86_64 selfhost_lower_closure_exercise the hosted module adds the MSVC personality (`__CxxFrameHandler3`) and MSVC-escaped function names, which the per-function known rows cannot express
+windows-x86_64 selfhost_lower_core_exercise proc-literal names carry the hosted compiler's relative backslash path where the port writes the absolute forward-slash one
+windows-x86_64 selfhost_lower_ensure_exercise an empty-prelude hosted program links with no C runtime under MSVC (LNK2019 exit, putchar; LNK2001 mainCRTStartup)
+windows-x86_64 selfhost_lower_globals_exercise an empty-prelude hosted program links with no C runtime under MSVC (LNK2019 exit; LNK2001 mainCRTStartup)
+windows-x86_64 selfhost_pipeline_exercise nine fixtures' empty-prelude hosted builds do not link under MSVC (LNK2019 getpid, exit, __fixsfti; LNK2001 mainCRTStartup)
+windows-x86_64 selfhost_lower_primitives_exercise the required-unit oracle links with unresolved externals under MSVC (LNK1120), and type-id constants differ in the module
+windows-x86_64 selfhost_prelude_exercise five single-file rows stop at the platform linker (exit 2) under MSVC, below their link floor
+windows-x86_64 native_macro_exercise the port built with LLVM (tools/compile.iyi) writes no cg_macro_site executable on Windows, so its exit cannot be compared with the hosted build's
+windows-x86_64 native_source_exercise the port-with-LLVM compile_arith baseline and the compare_run self-check do not run equal on Windows, so the mutation proofs have no baseline

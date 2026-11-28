@@ -167,13 +167,16 @@ case "$HOST_OS" in
     DUMPBIN=dumpbin_lf
     libs="$(pe_dlls "$(native_path "$STAGE1")")"
     DUMPBIN="$real_dumpbin"
-    bad="$(extra_dlls "$FLOOR_DLLS_RUNTIME" "$libs")"
+    # The stage-one binary is built with the prelude, which keys String#hash with
+    # RtlGenRandom (advapi32.dll, #212): the one program DLL it may carry, as the
+    # Windows driver may in native_codegen_exercise.sh (FLOOR_DLLS_PROGRAM in bench/floor_base.sh).
+    bad="$(extra_dlls "$FLOOR_DLLS_RUNTIME advapi32.dll" "$libs")"
     printf '    %s\n' "$libs"
     if [ -z "$libs" ] || [ -n "$bad" ]; then
       echo "  FLOOR BROKEN: the stage-one binary has unexpected DLL dependencies: $bad"
       status=1
     else
-      echo "  stage-one binary links only the platform runtime"
+      echo "  stage-one binary links only the platform runtime and advapi32"
     fi
     ;;
 esac
@@ -283,11 +286,13 @@ check_hello_paths() {
     { show_failure "directory output exited $RC"; return 1; }
   execute_native "$WORK/dir/hello" && [ "$NATIVE_RC" -eq 0 ] &&
     cmp -s "$WORK/hello.expected" "$WORK/native.stdout" || return 1
-  before="$(stat -f %i "$WORK/out/hello")"
+  # `ls -i`, not stat: BSD stat spells it `-f %i` and GNU stat (first on PATH on a
+  # GitHub-hosted mac) `-c %i`; ls prints the inode first on both.
+  before="$(ls -i "$WORK/out/hello" | awk '{ print $1 }')"
   invoke_stage1 build "$REPO/samples/iyi/hello.iyi" -o "$WORK/out/hello"
   [ "$RC" -eq 0 ] && [ ! -s "$WORK/stdout" ] && [ ! -s "$WORK/stderr" ] ||
     { show_failure "rebuild exited $RC"; return 1; }
-  after="$(stat -f %i "$WORK/out/hello")"
+  after="$(ls -i "$WORK/out/hello" | awk '{ print $1 }')"
   [ "$before" != "$after" ] || { echo "  FAIL: rebuild reused executable inode $before"; return 1; }
   execute_native "$WORK/out/hello" && [ "$NATIVE_RC" -eq 0 ] &&
     cmp -s "$WORK/hello.expected" "$WORK/native.stdout"
